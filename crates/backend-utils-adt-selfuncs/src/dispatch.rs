@@ -35,6 +35,16 @@ const F_SCALARLESEL: Oid = 336;
 const F_SCALARGESEL: Oid = 337;
 const F_EQJOINSEL: Oid = 105;
 const F_NEQJOINSEL: Oid = 106;
+const F_SCALARLTJOINSEL: Oid = 107;
+const F_SCALARGTJOINSEL: Oid = 108;
+const F_SCALARLEJOINSEL: Oid = 386;
+const F_SCALARGEJOINSEL: Oid = 398;
+const F_MATCHINGSEL: Oid = 5040;
+const F_MATCHINGJOINSEL: Oid = 5041;
+
+/// `DEFAULT_MATCHING_SEL` (selfuncs.h) — default selectivity for "match"-style
+/// operators (text search, jsonb containment) without a dedicated estimator.
+const DEFAULT_MATCHING_SEL: f64 = 0.010;
 const F_RANGESEL: Oid = 3169;
 const F_MULTIRANGESEL: Oid = 4243;
 const F_NETWORKSEL: Oid = 3560;
@@ -88,6 +98,19 @@ pub fn call_oprrest<'mcx>(
         F_AREASEL => Ok(backend_utils_adt_geo_selfuncs::areasel()),
         F_POSITIONSEL => Ok(backend_utils_adt_geo_selfuncs::positionsel()),
         F_CONTSEL => Ok(backend_utils_adt_geo_selfuncs::contsel()),
+        // matchingsel (selfuncs.c) — generic restriction selectivity logic with
+        // the DEFAULT_MATCHING_SEL fallback (used by `@@`/text-search and the
+        // jsonb containment operators that have no dedicated estimator).
+        F_MATCHINGSEL => crate::misc::generic_restriction_selectivity(
+            mcx,
+            run,
+            root,
+            operatorid,
+            inputcollid,
+            args,
+            var_relid,
+            DEFAULT_MATCHING_SEL,
+        ),
         other => panic!(
             "selfuncs: call_oprrest dispatch has no ported estimator for oprrest OID {other} \
              (operator {operatorid}) — the operator's restriction-selectivity PGFunction is \
@@ -126,6 +149,14 @@ pub fn call_oprjoin<'mcx>(
         F_AREAJOINSEL => Ok(backend_utils_adt_geo_selfuncs::areajoinsel()),
         F_POSITIONJOINSEL => Ok(backend_utils_adt_geo_selfuncs::positionjoinsel()),
         F_CONTJOINSEL => Ok(backend_utils_adt_geo_selfuncs::contjoinsel()),
+        // scalar{lt,gt,le,ge}joinsel (selfuncs.c) — all just punt to
+        // DEFAULT_INEQ_SEL (no inequality join-selectivity estimation).
+        F_SCALARLTJOINSEL | F_SCALARGTJOINSEL | F_SCALARLEJOINSEL | F_SCALARGEJOINSEL => {
+            Ok(types_selfuncs::DEFAULT_INEQ_SEL)
+        }
+        // matchingjoinsel (selfuncs.c) — "just punt, for the moment" to
+        // DEFAULT_MATCHING_SEL.
+        F_MATCHINGJOINSEL => Ok(DEFAULT_MATCHING_SEL),
         other => panic!(
             "selfuncs: call_oprjoin dispatch has no ported estimator for oprjoin OID {other} \
              (operator {operatorid}) — the operator's join-selectivity PGFunction is unported"

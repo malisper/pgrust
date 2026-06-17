@@ -26,17 +26,16 @@
 //! with the C.
 //!
 //! A few leaves remain seam-and-panic into genuinely-unported owners (see
-//! [`examine`]): `SearchSysCache3(STATRELATTINH, ...)` (the `pg_statistic`
-//! catcache probe — declared by the ported syscache unit but not yet installed,
-//! so a relation-column stats lookup raises the owner's panic),
-//! `statext_expressions_load` (extended-statistics tuple load), the CTE-subroot
-//! recursion (unported CTE planner), and the `Form_pg_statistic` `GETSTRUCT`
-//! field reads ([`scalar`], reached only after a live `statsTuple` exists). With
-//! `search_statrelattinh` uninstalled, `examine_simple_variable` cannot yet pin
-//! a `statsTuple` for a relation column, so the stats-absent / default-estimate
-//! paths (the common case for an un-analyzed planner) are the live behaviour and
-//! the `convert_to_scalar` / `get_actual_variable_range` ineq leaves stay
-//! seam-and-panic until that catcache wiring + per-type scalar conversion land.
+//! [`examine`]): `statext_expressions_load` (extended-statistics tuple load) and
+//! the CTE-subroot recursion (unported CTE planner). The `pg_statistic` catcache
+//! probe `SearchSysCache3(STATRELATTINH, ...)` is now installed by the syscache
+//! unit, so `examine_simple_variable` can pin a `statsTuple` for an analyzed
+//! relation column and the `Form_pg_statistic` field reads ([`scalar`]) are
+//! live. The two remaining ineq leaves `convert_to_scalar` /
+//! `get_actual_variable_range` stay seam-and-panic until the per-type scalar
+//! conversion (numeric/string/bytea/timestamp/network) and the index-endpoint
+//! min/max probe land — they are reached only for an inequality against a
+//! histogram on an analyzed column.
 
 #![allow(non_upper_case_globals)]
 #![allow(clippy::too_many_arguments)]

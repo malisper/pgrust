@@ -649,6 +649,31 @@ pub(crate) fn btcostestimate<'mcx, 'run>(
     })
 }
 
+/// `hashcostestimate(root, path, loop_count, ...)` (selfuncs.c) — the hash index
+/// AM's cost estimator. A hash index has no descent costs (the AM goes directly
+/// to the target bucket after computing the hash value), and the C body
+/// deliberately adds no other hash-specific costs, so it simply runs
+/// [`genericcostestimate`] and returns its results unmodified. 1:1 with the C
+/// body.
+pub(crate) fn hashcostestimate<'mcx, 'run>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'run>,
+    root: &mut PlannerInfo,
+    path_id: PathId,
+    loop_count: f64,
+) -> PgResult<AmCostEstimate> {
+    let mut costs = GenericCosts::default();
+    genericcostestimate(mcx, run, root, path_id, loop_count, &mut costs)?;
+
+    Ok(AmCostEstimate {
+        index_startup_cost: costs.index_startup_cost,
+        index_total_cost: costs.index_total_cost,
+        index_selectivity: costs.index_selectivity,
+        index_correlation: costs.index_correlation,
+        index_pages: costs.num_index_pages,
+    })
+}
+
 /// `&mut`-borrow the `IndexPath` for a `PathId`, panicking if it is not one.
 fn expect_index_path(root: &PlannerInfo, path_id: PathId) -> &types_pathnodes::IndexPath {
     match root.path(path_id) {
@@ -678,6 +703,9 @@ pub fn seam_amcostestimate<'mcx>(
         // BTREE_AM_OID (pg_am.h) — the btree access method.
         403 => btcostestimate(mcx, run, root, path_id, loop_count)
             .expect("btcostestimate"),
+        // HASH_AM_OID (pg_am.h) — the hash access method.
+        405 => hashcostestimate(mcx, run, root, path_id, loop_count)
+            .expect("hashcostestimate"),
         other => panic!(
             "amcostestimate: no cost estimator ported for index AM oid {}",
             other
