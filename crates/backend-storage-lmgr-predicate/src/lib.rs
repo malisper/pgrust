@@ -238,6 +238,19 @@ pub fn init_seams() {
             get: globals::max_predicate_locks_per_xact,
             set: globals::set_max_predicate_locks_per_xact,
         });
+        // `max_predicate_locks_per_relation` (PGC_SIGHUP) and
+        // `max_predicate_locks_per_page` (PGC_SIGHUP) — both read from the GUC
+        // slot (guc_tables.c `variable: &vars::...`) in CoarseLockGranularity /
+        // CheckTargetForConflictsIn; predicate.c owns the C globals
+        // (`int max_predicate_locks_per_relation; /* in guc_tables.c */`).
+        vars::max_predicate_locks_per_relation.install(GucVarAccessors {
+            get: globals::max_predicate_locks_per_relation,
+            set: globals::set_max_predicate_locks_per_relation,
+        });
+        vars::max_predicate_locks_per_page.install(GucVarAccessors {
+            get: globals::max_predicate_locks_per_page,
+            set: globals::set_max_predicate_locks_per_page,
+        });
     }
 }
 
