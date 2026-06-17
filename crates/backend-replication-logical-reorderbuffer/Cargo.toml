@@ -51,3 +51,8 @@ backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 
 # own inward seams
 backend-replication-logical-reorderbuffer-seams = { path = "../backend-replication-logical-reorderbuffer-seams" }
+
+# output-plugin dispatch: ReorderBufferProcessTXN re-enters logical decoding
+# through this inward seam (the `rb->private_data == ctx` bridge) to drive the
+# begin/commit/message/prepare/stream/update_progress output-plugin callbacks.
+backend-replication-logical-logical-seams = { path = "../backend-replication-logical-logical-seams" }

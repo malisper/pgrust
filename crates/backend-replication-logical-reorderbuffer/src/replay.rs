@@ -286,7 +286,10 @@ impl ReorderBuffer {
 
     /// `ReorderBufferIterTXNNext(rb, state)` — yield the next change in LSN
     /// order across all (sub)txns, or `None` when exhausted.
-    fn iter_txn_next(&mut self, state: &mut IterTxnState) -> Option<ReorderBufferChange> {
+    fn iter_txn_next(
+        &mut self,
+        state: &mut IterTxnState,
+    ) -> Option<(ReorderBufferChange, TransactionId)> {
         if state.heap.is_empty() {
             return None;
         }
@@ -314,7 +317,7 @@ impl ReorderBuffer {
             state.entries[off as usize].lsn = next_lsn;
             state.entries[off as usize].next_idx = next_idx + 1;
             state.heap.replace_first((next_lsn, off));
-            return Some(change);
+            return Some((change, entry_xid));
         }
 
         // try to load changes from disk (spill family).
@@ -338,13 +341,13 @@ impl ReorderBuffer {
                 state.entries[off as usize].lsn = next_lsn;
                 state.entries[off as usize].next_idx = 1;
                 state.heap.replace_first((next_lsn, off));
-                return Some(change);
+                return Some((change, entry_xid));
             }
         }
 
         // no changes left for this txn; remove it from the heap.
         state.heap.remove_first();
-        Some(change)
+        Some((change, entry_xid))
     }
 
     /// `ReorderBufferIterTXNFinish(rb, state)` — free the iterator: close any
@@ -363,7 +366,7 @@ impl ReorderBuffer {
     pub(crate) fn iter_lsns_collect(&mut self, txn_xid: TransactionId) -> Vec<XLogRecPtr> {
         let mut state = self.iter_txn_init(txn_xid);
         let mut out = Vec::new();
-        while let Some(change) = self.iter_txn_next(&mut state) {
+        while let Some((change, _xid)) = self.iter_txn_next(&mut state) {
             out.push(change.lsn);
         }
         self.iter_txn_finish(state);
@@ -396,126 +399,483 @@ impl ReorderBuffer {
         command_id: CommandId,
         streaming: bool,
     ) {
-        // `snapshot_now` and `command_id` are the locals the C threads through
-        // the change loop: the INTERNAL_SNAPSHOT / INTERNAL_COMMAND_ID branches
-        // reassign them (ReorderBufferFreeSnap / ReorderBufferCopySnap), so they
-        // are mutable here.
-        let mut snapshot_now = snapshot_now;
-        let mut command_id = command_id;
-
         // build data to be able to lookup the CommandIds of catalog tuples.
         self.build_tuple_cid_hash(txn_xid);
 
         // setup the initial snapshot: hand the decoded snapshot and the built
         // tuplecid hash to snapmgr's SetupHistoricSnapshot so the historic-MVCC
         // resolver can see them (snapmgr owns the active `tuplecid_data`).
-        let _ = commit_lsn;
         self.setup_historic_snapshot(&snapshot_now, txn_xid);
 
-        // The begin/begin_prepare output callback and the per-change apply
-        // callbacks reach the unported output-plugin dispatch; drive the merge
-        // so the spine is exercised, then panic at the first boundary the body
-        // actually reaches.
-        let mut iterstate = self.iter_txn_init(txn_xid);
+        // Decoding needs access to syscaches et al., which use heavyweight locks;
+        // run inside an internal (sub)transaction. When called via the SQL SRF a
+        // transaction is already started, so use an explicit subtransaction.
+        let using_subtxn =
+            backend_access_transam_xact_seams::is_transaction_or_transaction_block::call();
+
+        // C `volatile` locals shared between the PG_TRY body and the PG_CATCH
+        // handler. We thread them by `&mut` into the body and read the mutated
+        // values back in the handler.
+        let mut snapshot_now = snapshot_now;
+        let mut command_id = command_id;
         let mut prev_lsn = InvalidXLogRecPtr;
-        let mut changes_count = 0;
+        let mut specinsert: Option<ReorderBufferChange> = None;
+        let mut stream_started = false;
+        let mut curtxn: Option<TransactionId> = None;
 
-        self.begin_output(txn_xid, streaming);
+        let result = self.process_txn_body(
+            txn_xid,
+            commit_lsn,
+            streaming,
+            using_subtxn,
+            &mut snapshot_now,
+            &mut command_id,
+            &mut prev_lsn,
+            &mut specinsert,
+            &mut stream_started,
+            &mut curtxn,
+        );
 
-        while let Some(change) = self.iter_txn_next(&mut iterstate) {
-            // CHECK_FOR_INTERRUPTS();
-
-            if prev_lsn == InvalidXLogRecPtr && streaming {
-                self.stream_start_output(txn_xid, change.lsn);
-            }
-
-            debug_assert!(prev_lsn == InvalidXLogRecPtr || prev_lsn <= change.lsn);
-            prev_lsn = change.lsn;
-
-            match change.action {
-                ReorderBufferChangeType::Insert
-                | ReorderBufferChangeType::Update
-                | ReorderBufferChangeType::Delete
-                | ReorderBufferChangeType::InternalSpecInsert
-                | ReorderBufferChangeType::InternalSpecConfirm
-                | ReorderBufferChangeType::InternalSpecAbort
-                | ReorderBufferChangeType::Truncate => {
-                    // The decoded-tuple apply path (RelidByRelfilenumber,
-                    // RelationIdGetRelation, IsToastRelation, TOAST
-                    // reassembly, apply_change/apply_truncate) is gated on the
-                    // decoded-tuple carrier keystone.
-                    self.apply_decoded_change(txn_xid, &change, streaming);
-                }
-                ReorderBufferChangeType::Message => {
-                    self.apply_message(txn_xid, &change, streaming);
-                }
-                ReorderBufferChangeType::Invalidation => {
-                    if let ReorderBufferChangeData::Inval(msgs) = &change.data {
-                        self.execute_invalidations(msgs);
-                    }
-                }
-                ReorderBufferChangeType::InternalSnapshot => {
-                    // get rid of the old, switch to the change's snapshot.
-                    let new_snap = match &change.data {
-                        ReorderBufferChangeData::Snapshot(s) => s.clone(),
-                        _ => unreachable!("INTERNAL_SNAPSHOT change carries a snapshot"),
-                    };
-                    backend_utils_time_snapmgr_seams::teardown_historic_snapshot::call(false);
-
-                    if snapshot_now.copied {
-                        self.free_snap(snapshot_now);
-                        snapshot_now = self.copy_snap(&new_snap, txn_xid, command_id);
-                    } else if new_snap.copied {
-                        // Restored from disk: copy to avoid double-free.
-                        snapshot_now = self.copy_snap(&new_snap, txn_xid, command_id);
-                    } else {
-                        snapshot_now = new_snap;
-                    }
-
-                    // and continue with the new one.
-                    self.setup_historic_snapshot(&snapshot_now, txn_xid);
-                }
-                ReorderBufferChangeType::InternalCommandId => {
-                    let cid = match &change.data {
-                        ReorderBufferChangeData::CommandId(c) => *c,
-                        _ => unreachable!("INTERNAL_COMMAND_ID change carries a command id"),
-                    };
-                    debug_assert!(cid != types_core::xact::InvalidCommandId);
-
-                    if command_id < cid {
-                        command_id = cid;
-
-                        if !snapshot_now.copied {
-                            // we don't use the global one anymore.
-                            snapshot_now = self.copy_snap(&snapshot_now, txn_xid, command_id);
-                        }
-
-                        snapshot_now.curcid = command_id;
-
-                        backend_utils_time_snapmgr_seams::teardown_historic_snapshot::call(false);
-                        self.setup_historic_snapshot(&snapshot_now, txn_xid);
-                    }
-                }
-                ReorderBufferChangeType::InternalTupleCid => {
-                    panic!("tuplecid value in changequeue");
-                }
-            }
-
-            changes_count += 1;
-            if changes_count >= CHANGES_THRESHOLD {
-                self.update_progress_txn(txn_xid, prev_lsn);
-                changes_count = 0;
+        match result {
+            Ok(()) => {}
+            Err(errdata) => {
+                self.process_txn_catch(
+                    txn_xid,
+                    streaming,
+                    using_subtxn,
+                    snapshot_now,
+                    command_id,
+                    prev_lsn,
+                    specinsert,
+                    stream_started,
+                    curtxn,
+                    errdata,
+                );
             }
         }
+    }
 
+    /// The PG_TRY body of `ReorderBufferProcessTXN` (reorderbuffer.c:2242-2722).
+    /// Returns `Err` on the first `ereport` (the C `PG_CATCH` boundary); the
+    /// `&mut` volatile locals carry the partial state the handler needs.
+    ///
+    /// `iterstate` is held locally — on the error path the C
+    /// `ReorderBufferIterTXNFinish(iterstate)` runs in the handler; here the
+    /// iterator owns open spill vfds, so we move it back through `self` is not
+    /// possible (it borrows nothing of self). Instead we finish it on the error
+    /// path inside this function before returning `Err` for the cases that own
+    /// it, mirroring the C cleanup (`if (iterstate) ReorderBufferIterTXNFinish`).
+    #[allow(clippy::too_many_arguments)]
+    fn process_txn_body(
+        &mut self,
+        txn_xid: TransactionId,
+        commit_lsn: XLogRecPtr,
+        streaming: bool,
+        using_subtxn: bool,
+        snapshot_now: &mut crate::SnapshotData,
+        command_id: &mut CommandId,
+        prev_lsn: &mut XLogRecPtr,
+        specinsert: &mut Option<ReorderBufferChange>,
+        stream_started: &mut bool,
+        curtxn: &mut Option<TransactionId>,
+    ) -> Result<(), types_error::PgError> {
+        let mut changes_count = 0;
+
+        if using_subtxn {
+            backend_access_transam_xact_seams::begin_internal_sub_transaction::call(Some(
+                if streaming { "stream" } else { "replay" },
+            ))?;
+        } else {
+            backend_access_transam_xact_seams::start_transaction_command::call()?;
+        }
+
+        // We only need to send begin/begin-prepare for non-streamed txns.
+        if !streaming {
+            self.begin_output(txn_xid, streaming);
+        }
+
+        let mut iterstate = self.iter_txn_init(txn_xid);
+
+        let prepared = self.with_txn_pub(txn_xid, |t| t.is_prepared());
+
+        // Run the per-change loop. On error we finish the iterator (the C
+        // PG_CATCH cleanup) before propagating.
+        let loop_result = self.process_txn_loop(
+            txn_xid,
+            streaming,
+            &mut iterstate,
+            snapshot_now,
+            command_id,
+            prev_lsn,
+            specinsert,
+            stream_started,
+            curtxn,
+            &mut changes_count,
+        );
+
+        if let Err(e) = loop_result {
+            self.iter_txn_finish(iterstate);
+            return Err(e);
+        }
+
+        // speculative insertion record must be freed by now.
+        debug_assert!(specinsert.is_none());
+
+        // clean up the iterator.
         self.iter_txn_finish(iterstate);
 
-        // Commit-time tail (totals, commit/prepare callback, teardown, abort
-        // current txn, execute invalidations, cleanup/truncate) is unported
-        // beyond this point. The body has already reached an apply callback /
-        // historic-snapshot boundary above for any non-empty transaction.
-        let _ = prev_lsn;
-        self.process_txn_commit_tail(txn_xid, streaming);
+        // Update total txn count + bytes (after IterTXNFinish, which released the
+        // serialized change already accounted in IterTXNNext).
+        if !self.with_txn_pub(txn_xid, |t| t.is_streamed()) {
+            self.total_txns_add(1);
+        }
+        let total_size = self.with_txn_pub(txn_xid, |t| t.total_size);
+        self.totalbytes_add(total_size as i64);
+
+        // Send the last message for this set of changes.
+        if streaming {
+            if *stream_started {
+                self.stream_stop_output(txn_xid, *prev_lsn);
+                *stream_started = false;
+            }
+        } else if prepared {
+            debug_assert!(!self.with_txn_pub(txn_xid, |t| t.sent_prepare()));
+            self.prepare_output(txn_xid, commit_lsn)?;
+            self.with_txn_pub(txn_xid, |t| t.txn_flags |= crate::RBTXN_SENT_PREPARE);
+        } else {
+            self.commit_output(txn_xid, commit_lsn)?;
+        }
+
+        // sanity check against bad output plugin behaviour.
+        if backend_access_transam_xact_seams::get_current_transaction_id_if_any::call()
+            != InvalidTransactionId
+        {
+            return Err(types_error::PgError::error(
+                "output plugin used XID during logical decoding",
+            ));
+        }
+
+        // Remember command id + snapshot for the next set of changes (streaming),
+        // else free the per-run copy.
+        if streaming {
+            self.save_txn_snapshot(txn_xid, snapshot_now.clone(), *command_id);
+        } else if snapshot_now.copied {
+            self.free_snap(snapshot_now.clone());
+        }
+
+        // cleanup.
+        backend_utils_time_snapmgr_seams::teardown_historic_snapshot::call(false);
+
+        // Abort the (sub)transaction as a whole: release locks, no persistent
+        // effects.
+        backend_access_transam_xact_seams::abort_current_transaction::call()?;
+
+        // make sure there's no cache pollution.
+        self.process_txn_apply_inval(txn_xid)?;
+
+        if using_subtxn {
+            backend_access_transam_xact_seams::rollback_and_release_current_sub_transaction::call()?;
+        }
+
+        // Truncate (streamed/prepared) or fully clean up (committed).
+        if streaming || prepared {
+            if streaming {
+                self.maybe_mark_txn_streamed(txn_xid);
+            }
+            self.truncate_txn(txn_xid, prepared);
+            // Reset CheckXidAlive.
+            backend_access_transam_xact_seams::set_check_xid_alive::call(InvalidTransactionId);
+        } else {
+            self.cleanup_txn(txn_xid);
+        }
+
+        Ok(())
+    }
+
+    /// The per-change `while` loop body of `ReorderBufferProcessTXN`
+    /// (reorderbuffer.c:2266-2605). Split out so the body can `?`-propagate the
+    /// first `ereport` cleanly.
+    #[allow(clippy::too_many_arguments)]
+    fn process_txn_loop(
+        &mut self,
+        txn_xid: TransactionId,
+        streaming: bool,
+        iterstate: &mut IterTxnState,
+        snapshot_now: &mut crate::SnapshotData,
+        command_id: &mut CommandId,
+        prev_lsn: &mut XLogRecPtr,
+        specinsert: &mut Option<ReorderBufferChange>,
+        stream_started: &mut bool,
+        curtxn: &mut Option<TransactionId>,
+        changes_count: &mut i32,
+    ) -> Result<(), types_error::PgError> {
+        while let Some((change, change_txn)) = self.iter_txn_next(iterstate) {
+            // CHECK_FOR_INTERRUPTS();
+
+            // We can't call start stream callback before the first change.
+            if *prev_lsn == InvalidXLogRecPtr && streaming {
+                self.with_txn_pub(txn_xid, |t| t.origin_id = change.origin_id);
+                self.stream_start_output(txn_xid, change.lsn);
+                *stream_started = true;
+            }
+
+            debug_assert!(*prev_lsn == InvalidXLogRecPtr || *prev_lsn <= change.lsn);
+            *prev_lsn = change.lsn;
+
+            // Set the current xid to detect concurrent aborts (we decode before
+            // the COMMIT record is processed for streaming / prepared txns).
+            // `change->txn` is the (sub)txn that owns the change — returned by the
+            // iterator alongside the change.
+            let change_prepared = self.with_txn_pub(change_txn, |t| t.is_prepared());
+            if streaming || change_prepared {
+                *curtxn = Some(change_txn);
+                let cxid = self.with_txn_pub(change_txn, |t| t.xid);
+                backend_access_transam_xact_seams::set_check_xid_alive::call(cxid);
+            }
+
+            self.process_txn_change(
+                txn_xid,
+                streaming,
+                change,
+                snapshot_now,
+                command_id,
+                specinsert,
+            )?;
+
+            *changes_count += 1;
+            if *changes_count >= CHANGES_THRESHOLD {
+                self.update_progress_txn(txn_xid, *prev_lsn);
+                *changes_count = 0;
+            }
+        }
+        Ok(())
+    }
+
+    /// The change-action `switch` of `ReorderBufferProcessTXN`
+    /// (reorderbuffer.c:2307-2586) for one change.
+    ///
+    /// The decoded-tuple INSERT/UPDATE/DELETE/SPEC/TRUNCATE apply path and the
+    /// MESSAGE callback bottom out on the output-plugin Relation/Change/Prefix/
+    /// Message handle-producer facade (a registry the reorder buffer owner must
+    /// publish so the output plugin can resolve the opaque handles in the
+    /// `ApplyChange`/`ApplyTruncate`/`Message` callback variants). That facade is
+    /// not modeled yet; those arms mirror-PG-and-panic in
+    /// [`ReorderBuffer::apply_decoded_change`] / [`ReorderBuffer::apply_message`].
+    #[allow(clippy::too_many_arguments)]
+    fn process_txn_change(
+        &mut self,
+        txn_xid: TransactionId,
+        streaming: bool,
+        change: ReorderBufferChange,
+        snapshot_now: &mut crate::SnapshotData,
+        command_id: &mut CommandId,
+        specinsert: &mut Option<ReorderBufferChange>,
+    ) -> Result<(), types_error::PgError> {
+        match change.action {
+            ReorderBufferChangeType::InternalSpecConfirm
+            | ReorderBufferChangeType::Insert
+            | ReorderBufferChangeType::Update
+            | ReorderBufferChangeType::Delete => {
+                // SPEC_CONFIRM falls through to INSERT in C, reusing the stashed
+                // specinsert; both reach the decoded-tuple apply path below.
+                self.apply_decoded_change(txn_xid, &change, streaming);
+                // (unreachable past the panic until the apply facade lands;
+                // the specinsert free / RelationClose tail lives there too.)
+                let _ = (specinsert, &change);
+                Ok(())
+            }
+            ReorderBufferChangeType::InternalSpecInsert => {
+                // Delay the insert until the confirm arrives: stash the change
+                // (the C unlinks it from the chain so it isn't freed/reused).
+                if let Some(prev) = specinsert.take() {
+                    self.free_change(prev, true);
+                }
+                *specinsert = Some(change);
+                Ok(())
+            }
+            ReorderBufferChangeType::InternalSpecAbort => {
+                // Spec abort: clean the specinsert + toast hash (only the first
+                // time, for the main table).
+                if let Some(prev) = specinsert.take() {
+                    self.toast_reset(txn_xid);
+                    self.free_change(prev, true);
+                }
+                Ok(())
+            }
+            ReorderBufferChangeType::Truncate => {
+                self.apply_decoded_change(txn_xid, &change, streaming);
+                Ok(())
+            }
+            ReorderBufferChangeType::Message => {
+                self.apply_message(txn_xid, &change, streaming);
+                Ok(())
+            }
+            ReorderBufferChangeType::Invalidation => {
+                if let ReorderBufferChangeData::Inval(msgs) = &change.data {
+                    self.execute_invalidations(msgs);
+                }
+                Ok(())
+            }
+            ReorderBufferChangeType::InternalSnapshot => {
+                let new_snap = match &change.data {
+                    ReorderBufferChangeData::Snapshot(s) => s.clone(),
+                    _ => unreachable!("INTERNAL_SNAPSHOT change carries a snapshot"),
+                };
+                backend_utils_time_snapmgr_seams::teardown_historic_snapshot::call(false);
+
+                if snapshot_now.copied {
+                    self.free_snap(snapshot_now.clone());
+                    *snapshot_now = self.copy_snap(&new_snap, txn_xid, *command_id);
+                } else if new_snap.copied {
+                    *snapshot_now = self.copy_snap(&new_snap, txn_xid, *command_id);
+                } else {
+                    *snapshot_now = new_snap;
+                }
+
+                self.setup_historic_snapshot(snapshot_now, txn_xid);
+                Ok(())
+            }
+            ReorderBufferChangeType::InternalCommandId => {
+                let cid = match &change.data {
+                    ReorderBufferChangeData::CommandId(c) => *c,
+                    _ => unreachable!("INTERNAL_COMMAND_ID change carries a command id"),
+                };
+                debug_assert!(cid != types_core::xact::InvalidCommandId);
+
+                if *command_id < cid {
+                    *command_id = cid;
+
+                    if !snapshot_now.copied {
+                        *snapshot_now = self.copy_snap(snapshot_now, txn_xid, *command_id);
+                    }
+                    snapshot_now.curcid = *command_id;
+
+                    backend_utils_time_snapmgr_seams::teardown_historic_snapshot::call(false);
+                    self.setup_historic_snapshot(snapshot_now, txn_xid);
+                }
+                Ok(())
+            }
+            ReorderBufferChangeType::InternalTupleCid => {
+                Err(types_error::PgError::error("tuplecid value in changequeue"))
+            }
+        }
+    }
+
+    /// The PG_CATCH handler of `ReorderBufferProcessTXN`
+    /// (reorderbuffer.c:2723-2798). On the concurrent-abort error
+    /// (`ERRCODE_TRANSACTION_ROLLBACK`) for a streamed/prepared txn the txn is
+    /// reset so the remaining data can still stream; otherwise the error is
+    /// re-thrown after cleanup (a panic here, since `process_txn` has no
+    /// `PgResult` return — the C `PG_RE_THROW` unwinds the walsender).
+    #[allow(clippy::too_many_arguments)]
+    fn process_txn_catch(
+        &mut self,
+        txn_xid: TransactionId,
+        _streaming: bool,
+        using_subtxn: bool,
+        snapshot_now: crate::SnapshotData,
+        command_id: CommandId,
+        prev_lsn: XLogRecPtr,
+        specinsert: Option<ReorderBufferChange>,
+        stream_started: bool,
+        curtxn: Option<TransactionId>,
+        errdata: types_error::PgError,
+    ) {
+        // iterstate already finished in the body's error path.
+
+        backend_utils_time_snapmgr_seams::teardown_historic_snapshot::call(true);
+
+        // Force cache invalidation outside a valid transaction.
+        backend_access_transam_xact_seams::abort_current_transaction::call()
+            .expect("AbortCurrentTransaction in PG_CATCH");
+
+        self.process_txn_apply_inval(txn_xid)
+            .expect("ReorderBufferExecuteInvalidations in PG_CATCH");
+
+        if using_subtxn {
+            backend_access_transam_xact_seams::rollback_and_release_current_sub_transaction::call()
+                .expect("RollbackAndReleaseCurrentSubTransaction in PG_CATCH");
+        }
+
+        let prepared = self.with_txn_pub(txn_xid, |t| t.is_prepared());
+
+        // Concurrent abort of the (sub)txn we are streaming/preparing: cleanup
+        // and return gracefully.
+        if errdata.sqlstate == types_error::error::ERRCODE_TRANSACTION_ROLLBACK
+            && (stream_started || prepared)
+        {
+            let curtxn = curtxn.expect("curtxn set for streaming/prepared txns");
+            debug_assert!(!self.with_txn_pub(curtxn, |t| t.is_committed()));
+            self.with_txn_pub(curtxn, |t| t.txn_flags |= crate::RBTXN_IS_ABORTED);
+
+            if stream_started {
+                self.maybe_mark_txn_streamed(txn_xid);
+            }
+
+            self.reset_txn(txn_xid, snapshot_now, command_id, prev_lsn, specinsert);
+        } else {
+            self.cleanup_txn(txn_xid);
+            // C PG_RE_THROW: the error propagates up the walsender. There is no
+            // PgResult to carry it here, so we re-raise it as a panic (the
+            // faithful "unwind" boundary for this value-typed entry point).
+            panic!(
+                "ReorderBufferProcessTXN: {} (SQLSTATE {:?})",
+                errdata.message, errdata.sqlstate
+            );
+        }
+    }
+
+    /// `if (rbtxn_distr_inval_overflowed(txn)) InvalidateSystemCaches(); else {
+    /// ReorderBufferExecuteInvalidations(txn->ninvalidations, ...);
+    /// ReorderBufferExecuteInvalidations(txn->ninvalidations_distributed, ...); }`
+    /// — the cache-pollution guard shared by the TRY tail and the CATCH handler.
+    fn process_txn_apply_inval(&mut self, txn_xid: TransactionId) -> Result<(), types_error::PgError> {
+        if self.with_txn_pub(txn_xid, |t| t.distr_inval_overflowed()) {
+            debug_assert!(self.with_txn_pub(txn_xid, |t| t.invalidations_distributed.is_empty()));
+            backend_utils_cache_inval_seams::invalidate_system_caches::call()?;
+        } else {
+            let invals = self.with_txn_pub(txn_xid, |t| t.invalidations.clone());
+            self.execute_invalidations(&invals);
+            let dist = self.with_txn_pub(txn_xid, |t| t.invalidations_distributed.clone());
+            self.execute_invalidations(&dist);
+        }
+        Ok(())
+    }
+
+    /// `rb->commit(rb, txn, commit_lsn)`.
+    fn commit_output(
+        &mut self,
+        xid: TransactionId,
+        commit_lsn: XLogRecPtr,
+    ) -> Result<(), types_error::PgError> {
+        let (txn_final_lsn, txn_end_lsn) =
+            self.with_txn_pub(xid, |t| (t.final_lsn, t.end_lsn));
+        let cb = types_logical::ReorderBufferCallback::Commit {
+            txn: crate::registry::txn_handle_for_xid(xid),
+            txn_xid: xid,
+            txn_final_lsn,
+            txn_end_lsn,
+            commit_lsn,
+        };
+        backend_replication_logical_logical_seams::dispatch_reorderbuffer_callback::call(cb)
+    }
+
+    /// `rb->prepare(rb, txn, commit_lsn)`.
+    fn prepare_output(
+        &mut self,
+        xid: TransactionId,
+        prepare_lsn: XLogRecPtr,
+    ) -> Result<(), types_error::PgError> {
+        let (txn_final_lsn, txn_end_lsn) =
+            self.with_txn_pub(xid, |t| (t.final_lsn, t.end_lsn));
+        let cb = types_logical::ReorderBufferCallback::Prepare {
+            txn: crate::registry::txn_handle_for_xid(xid),
+            txn_xid: xid,
+            txn_final_lsn,
+            txn_end_lsn,
+            prepare_lsn,
+        };
+        backend_replication_logical_logical_seams::dispatch_reorderbuffer_callback::call(cb)
     }
 
     // -----------------------------------------------------------------------

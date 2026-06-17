@@ -94,6 +94,14 @@ fn xid_to_txn_handle(xid: TransactionId) -> TxnHandle {
     TxnHandle(xid as usize + 1)
 }
 
+/// `TxnHandle` for `xid`, for the change-replay callbacks that re-enter logical
+/// decoding (the `ReorderBufferCallback` variants carry a `TxnHandle` the
+/// output-plugin wrappers resolve back to the txn). Same encoding as the
+/// registry's seam adapters use.
+pub(crate) fn txn_handle_for_xid(xid: TransactionId) -> TxnHandle {
+    xid_to_txn_handle(xid)
+}
+
 // ---------------------------------------------------------------------------
 // Inward seam adapters
 // ---------------------------------------------------------------------------

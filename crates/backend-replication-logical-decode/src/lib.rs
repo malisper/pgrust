@@ -853,30 +853,41 @@ fn DecodeCommit(
      * Send the final commit record if the transaction data is already decoded,
      * otherwise, process the entire transaction.
      */
+    // `rb->private_data == ctx`: park the live ctx so the reorder buffer's
+    // output-plugin callbacks (driven inside ReorderBufferCommit /
+    // FinishPrepared) resolve it through the dispatch seam. The closure does not
+    // touch `ctx` itself — all reorder-buffer args are read into locals first —
+    // so no `&mut ctx` is live while the seam dereferences the parked pointer.
+    let reorder = ctx.reorder;
     if two_phase {
         let two_phase_at = snapbuild::SnapBuildGetTwoPhaseAt::call(ctx.snapshot_builder);
-        reorder::ReorderBufferFinishPrepared::call(
-            ctx.reorder,
-            xid,
-            buf.origptr,
-            buf.endptr,
-            two_phase_at,
-            commit_time,
-            origin_id,
-            origin_lsn,
-            parsed_commit_gid(data, parsed).to_vec(),
-            true,
-        );
+        let gid = parsed_commit_gid(data, parsed).to_vec();
+        logical_seam::with_parked_decoding_ctx(ctx, || {
+            reorder::ReorderBufferFinishPrepared::call(
+                reorder,
+                xid,
+                buf.origptr,
+                buf.endptr,
+                two_phase_at,
+                commit_time,
+                origin_id,
+                origin_lsn,
+                gid,
+                true,
+            );
+        });
     } else {
-        reorder::ReorderBufferCommit::call(
-            ctx.reorder,
-            xid,
-            buf.origptr,
-            buf.endptr,
-            commit_time,
-            origin_id,
-            origin_lsn,
-        );
+        logical_seam::with_parked_decoding_ctx(ctx, || {
+            reorder::ReorderBufferCommit::call(
+                reorder,
+                xid,
+                buf.origptr,
+                buf.endptr,
+                commit_time,
+                origin_id,
+                origin_lsn,
+            );
+        });
     }
 
     /*
@@ -943,7 +954,13 @@ fn DecodePrepare(
     }
 
     /* replay actions of all transaction + subtransactions in order */
-    reorder::ReorderBufferPrepare::call(ctx.reorder, xid, parsed.twophase_gid().as_bytes().to_vec());
+    // `rb->private_data == ctx`: park the live ctx for the replay (drives the
+    // begin_prepare/prepare output-plugin callbacks).
+    let reorder = ctx.reorder;
+    let gid = parsed.twophase_gid().as_bytes().to_vec();
+    logical_seam::with_parked_decoding_ctx(ctx, || {
+        reorder::ReorderBufferPrepare::call(reorder, xid, gid);
+    });
 
     logical_seam::UpdateDecodingStats::call(ctx)?;
 
@@ -978,27 +995,35 @@ fn DecodeAbort(
      * Send the final rollback record for a prepared transaction unless we need
      * to skip it. For non-two-phase xacts, simply forget the xact.
      */
+    // `rb->private_data == ctx`: park the live ctx — ReorderBufferFinishPrepared
+    // drives the rollback_prepared output-plugin callback, and
+    // ReorderBufferAbort drives stream_abort for already-streamed txns.
+    let reorder = ctx.reorder;
     if two_phase && !skip_xact {
-        reorder::ReorderBufferFinishPrepared::call(
-            ctx.reorder,
-            xid,
-            buf.origptr,
-            buf.endptr,
-            InvalidXLogRecPtr,
-            abort_time,
-            origin_id,
-            origin_lsn,
-            parsed_commit_gid(data, parsed).to_vec(),
-            false,
-        );
+        let gid = parsed_commit_gid(data, parsed).to_vec();
+        logical_seam::with_parked_decoding_ctx(ctx, || {
+            reorder::ReorderBufferFinishPrepared::call(
+                reorder,
+                xid,
+                buf.origptr,
+                buf.endptr,
+                InvalidXLogRecPtr,
+                abort_time,
+                origin_id,
+                origin_lsn,
+                gid,
+                false,
+            );
+        });
     } else {
         let end_rec_ptr = rt::reader_EndRecPtr::call(buf.record);
         let subxacts = commit_subxacts(data, parsed)?;
-        for &sub in &subxacts {
-            reorder::ReorderBufferAbort::call(ctx.reorder, sub, end_rec_ptr, abort_time);
-        }
-
-        reorder::ReorderBufferAbort::call(ctx.reorder, xid, end_rec_ptr, abort_time);
+        logical_seam::with_parked_decoding_ctx(ctx, || {
+            for &sub in &subxacts {
+                reorder::ReorderBufferAbort::call(reorder, sub, end_rec_ptr, abort_time);
+            }
+            reorder::ReorderBufferAbort::call(reorder, xid, end_rec_ptr, abort_time);
+        });
     }
 
     /* update the decoding stats */

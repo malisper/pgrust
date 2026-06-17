@@ -88,6 +88,12 @@ pub use types_logical::{
     OUTPUT_PLUGIN_BINARY_OUTPUT, OUTPUT_PLUGIN_TEXTUAL_OUTPUT,
 };
 
+// The `rb->private_data` bridge (the per-backend parked-ctx thread-local and
+// `with_parked_decoding_ctx`) lives in the seams crate so that both decode.c
+// (which parks the ctx around the reorder buffer entry points) and this owner
+// (whose dispatch seam reads it) can reach it without a dependency cycle.
+pub use backend_replication_logical_logical_seams::with_parked_decoding_ctx;
+
 /// `LogicalErrorCallbackState` (logical.c:50) — data for the errcontext
 /// callback.
 #[derive(Clone, Copy, Debug)]
@@ -2193,12 +2199,12 @@ pub fn init_seams() {
     backend_replication_logical_logical_seams::reset_logical_streaming_state::set(
         ResetLogicalStreamingState,
     );
-    // The reorderbuffer trampolines pass the live `&mut ctx` (rb->private_data)
-    // in; the inward seam's signature carries only the callback variant, so the
-    // installer adapts once the reorderbuffer owner lands. Until then this seam
-    // is declared but not exercised; install a thunk that the owner replaces by
-    // threading the ctx. NOTE: the seam takes no ctx (resolved by the owner) —
-    // the real adapter is installed when reorderbuffer is ported.
+    // The inward seam carries only the callback variant; the live ctx
+    // (rb->private_data) is resolved from the per-backend thread-local parked by
+    // `with_parked_decoding_ctx` around the reorder buffer entry point that is
+    // driving us (decode.c's ReorderBufferCommit / Prepare / FinishPrepared / …
+    // call sites). This is the faithful single-threaded analog of C's
+    // `rb->private_data` back-pointer.
     backend_replication_logical_logical_seams::dispatch_reorderbuffer_callback::set(
         dispatch_reorderbuffer_callback_seam,
     );
@@ -2230,14 +2236,20 @@ pub fn init_seams() {
     });
 }
 
-/// Seam thunk: the inward seam carries only the callback; the reorderbuffer
-/// owner resolves `rb->private_data` to the live ctx. That resolution lives in
-/// the reorderbuffer crate (it owns the pointer), so until it lands this thunk
-/// panics loudly — the same REAL-OR-LOUD posture as an uninstalled callee seam.
-fn dispatch_reorderbuffer_callback_seam(_cb: ReorderBufferCallback) -> PgResult<()> {
-    panic!(
-        "dispatch_reorderbuffer_callback: the reorderbuffer owner must resolve \
-         rb->private_data to the live LogicalDecodingContext before re-entering \
-         logical decoding (reorderbuffer not yet ported)"
-    )
+/// Seam thunk: the inward seam carries only the callback; we resolve
+/// `rb->private_data` to the live ctx parked by [`with_parked_decoding_ctx`]
+/// around the reorder buffer entry point that is driving us, then run the
+/// selected `*_cb_wrapper`. A null parked pointer means the reorder buffer was
+/// driven outside a decode-context scope, which is a programming error (the C
+/// `rb->private_data` would be NULL).
+fn dispatch_reorderbuffer_callback_seam(cb: ReorderBufferCallback) -> PgResult<()> {
+    // SAFETY: the parked pointer comes from a live `&mut LogicalDecodingContext`
+    // whose borrow outlives this call (the parking guard sits on the same stack
+    // frame that drives the reorder buffer; decoding is single-threaded
+    // per-backend). No other `&mut` to the ctx is live across the seam: the
+    // reorder buffer entry point borrows `ctx.reorder` (the handle) by value to
+    // call the seam and does not retain a `&mut ctx`.
+    backend_replication_logical_logical_seams::with_current_decoding_ctx(|ctx| {
+        dispatch_reorderbuffer_callback(ctx, cb)
+    })
 }

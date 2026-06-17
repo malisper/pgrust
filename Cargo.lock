@@ -13926,6 +13926,7 @@ dependencies = [
  "backend-access-transam-xact-seams",
  "backend-access-transam-xlog-seams",
  "backend-lib-binaryheap",
+ "backend-replication-logical-logical-seams",
  "backend-replication-logical-reorderbuffer-seams",
  "backend-replication-slot-seams",
  "backend-storage-buffer-bufmgr-seams",

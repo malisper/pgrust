@@ -417,6 +417,14 @@ impl ReorderBufferTXN {
     pub fn is_prepared(&self) -> bool {
         self.txn_flags & RBTXN_IS_PREPARED != 0
     }
+    /// `rbtxn_sent_prepare(txn)`.
+    pub fn sent_prepare(&self) -> bool {
+        self.txn_flags & RBTXN_SENT_PREPARE != 0
+    }
+    /// `rbtxn_is_committed(txn)`.
+    pub fn is_committed(&self) -> bool {
+        self.txn_flags & RBTXN_IS_COMMITTED != 0
+    }
     /// `rbtxn_distr_inval_overflowed(txn)`.
     pub fn distr_inval_overflowed(&self) -> bool {
         self.txn_flags & RBTXN_DISTR_INVAL_OVERFLOWED != 0
@@ -1562,6 +1570,11 @@ impl ReorderBuffer {
         self.total_bytes += n;
     }
 
+    /// `rb->totalTxns += n`.
+    pub(crate) fn total_txns_add(&mut self, n: i64) {
+        self.total_txns += n;
+    }
+
     // ----- spill statistics (UpdateDecodingStats reads these via the
     //       reorderbuffer_stats seam; the spill codec increments them) --------
 
@@ -1596,12 +1609,28 @@ impl ReorderBuffer {
     // so each callback panics loudly until that keystone lands.
 
     /// `rb->begin(rb, txn)` / `rb->begin_prepare(rb, txn)` (non-streaming).
-    pub(crate) fn begin_output(&mut self, _xid: TransactionId, _streaming: bool) {
-        panic!(
-            "ReorderBuffer begin/begin_prepare callback: logical.c output-plugin \
-             dispatch (rb->private_data ctx + Change/Relation handle producers) \
-             not yet modeled"
-        );
+    /// The C `ReorderBufferProcessTXN` only sends begin/begin-prepare for
+    /// non-streamed transactions; the caller has already checked `!streaming`.
+    pub(crate) fn begin_output(&mut self, xid: TransactionId, streaming: bool) {
+        debug_assert!(!streaming);
+        let (txn_first_lsn, is_prepared) =
+            self.with_txn_pub(xid, |t| (t.first_lsn, t.is_prepared()));
+        let txn = crate::registry::txn_handle_for_xid(xid);
+        let cb = if is_prepared {
+            types_logical::ReorderBufferCallback::BeginPrepare {
+                txn,
+                txn_first_lsn,
+                txn_xid: xid,
+            }
+        } else {
+            types_logical::ReorderBufferCallback::Begin {
+                txn,
+                txn_first_lsn,
+                txn_xid: xid,
+            }
+        };
+        backend_replication_logical_logical_seams::dispatch_reorderbuffer_callback::call(cb)
+            .expect("begin/begin_prepare output-plugin callback");
     }
 
     /// `rb->stream_start(rb, txn, first_lsn)`.
@@ -1647,8 +1676,10 @@ impl ReorderBuffer {
     }
 
     /// `rb->update_progress_txn(rb, txn, lsn)` keepalive.
-    pub(crate) fn update_progress_txn(&mut self, _xid: TransactionId, _lsn: XLogRecPtr) {
-        panic!("ReorderBuffer update_progress_txn callback: logical.c dispatch not yet modeled");
+    pub(crate) fn update_progress_txn(&mut self, xid: TransactionId, lsn: XLogRecPtr) {
+        let cb = types_logical::ReorderBufferCallback::UpdateProgressTxn { txn_xid: xid, lsn };
+        backend_replication_logical_logical_seams::dispatch_reorderbuffer_callback::call(cb)
+            .expect("update_progress_txn output-plugin callback");
     }
 
     /// `SetupHistoricSnapshot(snapshot_now, txn->tuplecid_hash)` — install the
@@ -1662,17 +1693,6 @@ impl ReorderBuffer {
         backend_utils_time_snapmgr_seams::setup_historic_snapshot::call(snapshot.clone(), tuplecids);
     }
 
-    /// The commit-time tail of `ReorderBufferProcessTXN` (totals, commit/prepare
-    /// callback, teardown, AbortCurrentTransaction, execute invalidations,
-    /// cleanup/truncate). Reached only after the change loop, which already hits
-    /// an output-callback boundary above for any non-empty transaction.
-    pub(crate) fn process_txn_commit_tail(&mut self, _xid: TransactionId, _streaming: bool) {
-        panic!(
-            "ReorderBufferProcessTXN commit tail: output-plugin commit/prepare \
-             dispatch + transaction teardown (AbortCurrentTransaction) not yet \
-             modeled"
-        );
-    }
 }
 
 // ---------------------------------------------------------------------------
