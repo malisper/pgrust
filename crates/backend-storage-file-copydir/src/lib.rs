@@ -85,11 +85,27 @@ pub fn set_file_copy_method(method: FileCopyMethod) -> PgResult<()> {
     }
 }
 
+/// Install this crate's GUC variable accessors. `file_copy_method` is a plain
+/// enum GUC whose `conf->variable` points at `int file_copy_method`
+/// (copydir.c:34, guc_tables.c:5267-5273); the GUC machinery reads and writes
+/// it directly (e.g. copydir.c:86 `if (file_copy_method == FILE_COPY_METHOD_CLONE)`),
+/// so we install `get`/`set` accessors over this crate's backing store, exactly
+/// as C dereferences `*conf->variable`.
+///
 /// This crate owns no inward seams: nothing in the repo reaches
 /// `copydir`/`copy_file`/`clone_file` through a seam (the sibling `reinit`
-/// owner calls `copy_file` directly). The empty `init_seams` keeps the
-/// every-crate-installs-its-seams contract uniform.
-pub fn init_seams() {}
+/// owner calls `copy_file` directly).
+pub fn init_seams() {
+    use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+
+    // The GUC enum machinery only ever assigns one of the canonicalized enum
+    // values (it checks against `file_copy_method_options[]` before assigning),
+    // so the assign half is the bare `*conf->variable = newval` store.
+    vars::file_copy_method.install(GucVarAccessors {
+        get: file_copy_method,
+        set: |newval| FILE_COPY_METHOD.store(newval, Ordering::Relaxed),
+    });
+}
 
 /// Build the `ereport(elevel, (errcode_for_file_access(), errmsg("..%m")))`
 /// `PgError` from a `std::io::Error`: the SQLSTATE and the `%m` rendering both

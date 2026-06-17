@@ -14,6 +14,7 @@ types-error = { path = "../types-error" }
 types-storage = { path = "../types-storage" }
 backend-utils-error = { path = "../backend-utils-error" }
 
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-storage-file-fd = { path = "../backend-storage-file-fd" }
 backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
 backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }

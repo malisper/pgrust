@@ -14812,6 +14812,7 @@ dependencies = [
  "backend-storage-file-fd-seams",
  "backend-tcop-postgres-seams",
  "backend-utils-error",
+ "backend-utils-misc-guc-tables",
  "libc",
  "types-core",
  "types-error",
