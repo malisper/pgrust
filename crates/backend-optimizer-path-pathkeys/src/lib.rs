@@ -81,6 +81,39 @@ mod tests;
 
 pub use install::init_seams;
 
+// ===========================================================================
+// GUC variable backing store: `enable_group_by_reordering`
+// ===========================================================================
+//
+// pathkeys.c defines the GUC's storage globally:
+//
+//     bool enable_group_by_reordering = true;
+//
+// (`src/backend/optimizer/path/pathkeys.c`). guc_tables.c references this
+// `&enable_group_by_reordering` slot with `boot_val = true`. It is a plain
+// USERSET bool read directly from the GUC slot at planning time — not from the
+// ControlFile. We back it with this crate's own per-backend store (mirroring
+// the C global), install the read/write accessor over it in `init_seams()`,
+// and seed it to the C boot value. The planner driver reads the value through
+// the slot and passes it by value into [`get_useful_group_keys_orderings`].
+
+thread_local! {
+    /// Per-backend storage for the `enable_group_by_reordering` GUC, the
+    /// faithful analogue of the C global `bool enable_group_by_reordering`.
+    /// Seeded to the guc_tables.c boot value (`true`).
+    static ENABLE_GROUP_BY_REORDERING: core::cell::Cell<bool> = const { core::cell::Cell::new(true) };
+}
+
+/// Read `enable_group_by_reordering` (`*conf->variable`).
+fn enable_group_by_reordering_get() -> bool {
+    ENABLE_GROUP_BY_REORDERING.with(|c| c.get())
+}
+
+/// Write `enable_group_by_reordering` (the GUC assign path).
+fn enable_group_by_reordering_set(v: bool) {
+    ENABLE_GROUP_BY_REORDERING.with(|c| c.set(v));
+}
+
 // `CompareType` constants (access/cmptype.h). pathkeys.c uses COMPARE_LT /
 // COMPARE_GT / COMPARE_EQ; `CompareType` is the `i32` alias in `types_pathnodes`.
 const COMPARE_LT: CompareType = 1;

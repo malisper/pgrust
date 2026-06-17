@@ -11313,6 +11313,7 @@ dependencies = [
  "backend-optimizer-util-pathnode-seams",
  "backend-optimizer-util-relnode-seams",
  "backend-utils-cache-lsyscache-seams",
+ "backend-utils-misc-guc-tables",
  "mcx",
  "types-core",
  "types-error",

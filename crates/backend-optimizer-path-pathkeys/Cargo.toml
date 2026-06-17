@@ -28,3 +28,9 @@ backend-optimizer-path-equivclass = { path = "../backend-optimizer-path-equivcla
 backend-optimizer-path-indxpath-seams = { path = "../backend-optimizer-path-indxpath-seams" }
 backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+
+# The GUC slot this crate owns: `enable_group_by_reordering` (the
+# `bool enable_group_by_reordering` global defined in pathkeys.c). guc_tables.c
+# references the slot by C symbol; this crate installs the accessor over its own
+# backing store from `init_seams()`.
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }

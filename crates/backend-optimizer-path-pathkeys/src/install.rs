@@ -25,6 +25,17 @@ use backend_optimizer_util_pathnode_seams as pn;
 /// Install all pathkeys.c seam bodies. Called once at single-threaded startup
 /// (wired by the parent into `seams-init`).
 pub fn init_seams() {
+    // --- GUC slot owned by pathkeys.c -----------------------------------
+    // `bool enable_group_by_reordering = true;` (pathkeys.c). guc_tables.c
+    // references this slot by C symbol; install the read/write accessor over
+    // this crate's per-backend backing store.
+    backend_utils_misc_guc_tables::vars::enable_group_by_reordering.install(
+        backend_utils_misc_guc_tables::GucVarAccessors {
+            get: crate::enable_group_by_reordering_get,
+            set: crate::enable_group_by_reordering_set,
+        },
+    );
+
     // --- pathnode-seams (pathkeys.c comparison helpers) -----------------
     pn::compare_pathkeys::set(|keys1, keys2| crate::compare_pathkeys(keys1, keys2));
     pn::pathkeys_contained_in::set(|keys1, keys2| crate::pathkeys_contained_in(keys1, keys2));
