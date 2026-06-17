@@ -1,4 +1,7 @@
-#![no_std]
+// NB: not `#![no_std]` — the `fmgr_builtins` registration layer raises a
+// builtin's `ereport(ERROR)` through `std::panic::panic_any` (the one dispatch
+// point every builtin crosses, `invoke_pgfunction`'s `catch_unwind`), which
+// needs `std`. The rest of the crate remains `alloc`-only in spirit.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 // The shared `PgResult` carries an un-boxed `PgError`; the un-boxed return is
@@ -85,6 +88,11 @@ use types_tuple::heaptuple::{TupleDesc, TEXTOID};
 use types_parsenodes::{Node, VariableSetKind, VariableSetStmt};
 
 use backend_utils_misc_guc_funcs_seams as seam;
+
+/// The fmgr builtin layer (`Datum fn(PG_FUNCTION_ARGS)`) for the `text`-boundary
+/// `guc_funcs.c` SQL functions (`current_setting` / `set_config`), registered
+/// into the fmgr-core builtin table so `fmgr_isbuiltin` resolves them.
+pub mod fmgr_builtins;
 
 #[cfg(test)]
 mod tests;
@@ -830,4 +838,9 @@ pub fn init_seams() {
     // seam is declared in `backend-tcop-postgres-seams` (the boot driver's seam
     // crate), installed here by its true owner.
     backend_tcop_postgres_seams::initialize_shmem_gucs::set(InitializeShmemGUCs);
+
+    // Register guc_funcs.c's `text`-boundary SQL functions into the fmgr-core
+    // builtin table (C: their `fmgr_builtins[]` rows), so `fmgr_isbuiltin` and
+    // by-OID dispatch resolve `current_setting` / `set_config`.
+    fmgr_builtins::register_guc_funcs_builtins();
 }
