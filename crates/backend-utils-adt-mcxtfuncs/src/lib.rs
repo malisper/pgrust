@@ -47,6 +47,8 @@ use backend_utils_adt_mcxtfuncs_seams::{McxtRow, MemoryContextRef, MemoryContext
 use backend_utils_mb_mbutils_seams::pg_mbcliplen;
 use types_storage::ProcSignalReason;
 
+pub mod fmgr_builtins;
+
 /// `MEMORY_CONTEXT_IDENT_DISPLAY_SIZE` — the max bytes for showing identifiers of
 /// `MemoryContext`.
 const MEMORY_CONTEXT_IDENT_DISPLAY_SIZE: i32 = 1024;
@@ -350,9 +352,12 @@ pub fn pg_log_backend_memory_contexts(pid: i32) -> PgResult<bool> {
 /// This crate owns no inward seams: every seam it touches is **outward** — the
 /// live-context tree / stats / SRF sink (`backend-utils-adt-mcxtfuncs-seams`,
 /// installed by the unported `mcxt.c` / `funcapi.c` / `procarray.c` owners) and
-/// `send_proc_signal` (installed by procsignal). So `init_seams()` installs
-/// nothing.
-pub fn init_seams() {}
+/// `send_proc_signal` (installed by procsignal). So `init_seams()` installs no
+/// inward seams; it only registers this crate's fmgr builtins into the
+/// fmgr-core builtin table.
+pub fn init_seams() {
+    fmgr_builtins::register_mcxtfuncs_builtins();
+}
 
 #[cfg(test)]
 mod tests;
