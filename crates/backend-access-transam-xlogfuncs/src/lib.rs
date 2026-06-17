@@ -710,5 +710,18 @@ fn my_latch() -> types_storage::latch::LatchHandle {
     backend_storage_ipc_latch::my_latch().expect("MyLatch is NULL in pg_promote")
 }
 
+// ---------------------------------------------------------------------------
+// fmgr builtin registration.
+// ---------------------------------------------------------------------------
+
+mod fmgr_builtins;
+
+/// Register the `xlogfuncs.c` fmgr builtins (so `fmgr_isbuiltin` /by-OID
+/// dispatch resolves them). This crate owns no inward seam crate, so this is the
+/// only initialization it performs; `seams-init::init_all` calls it.
+pub fn init_seams() {
+    fmgr_builtins::register_xlogfuncs_builtins();
+}
+
 #[cfg(test)]
 mod tests;
