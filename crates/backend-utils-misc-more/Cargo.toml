@@ -43,5 +43,9 @@ types-datum = { path = "../types-datum" }
 types-acl = { path = "../types-acl" }
 mcx = { path = "../mcx" }
 
+# fmgr builtin registration (the SQL-callable `Datum fn(PG_FUNCTION_ARGS)` layer).
+types-fmgr = { path = "../types-fmgr" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
+
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 libc = "0.2"
