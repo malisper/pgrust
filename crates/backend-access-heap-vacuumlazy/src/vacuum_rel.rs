@@ -104,7 +104,7 @@ pub fn heap_vacuum_eager_scan_setup(vacrel: &mut LVRelState, params: &VacuumPara
      * Calculate the bounds of the first eager scan region: a random spot in the
      * first EAGER_SCAN_REGION_SIZE blocks.
      */
-    let randseed = vl::pg_global_prng_uint32::call()?;
+    let randseed = pg_prng_seams::pg_global_prng_uint32::call();
 
     vacrel.next_eager_scan_region_start = randseed % EAGER_SCAN_REGION_SIZE;
 
@@ -147,14 +147,14 @@ pub fn heap_vacuum_rel(
     let startwalusage = vl::pg_wal_usage::call()?;
     let startbufferusage = vl::pg_buffer_usage::call()?;
     let mut indnames: Vec<String> = Vec::new();
+    /* PGRUsage ru0; — captured under `instrument`, formatted at the end. */
+    let mut ru0: Option<types_rusage::PgRUsage> = None;
 
     let verbose = (params.options & VACOPT_VERBOSE) != 0;
     let instrument =
         verbose || (vl::am_autovacuum_worker_process::call()? && params.log_min_duration >= 0);
     if instrument {
-        /* pg_rusage_init(&ru0): the start snapshot is owned by the seam
-         * runtime; pg_rusage_show formats the delta at the end. */
-        vl::pg_rusage_init::call()?;
+        ru0 = Some(pg_rusage_seams::pg_rusage_init::call());
     }
     if instrument && vl::track_io_timing::call()? {
         startreadtime = vl::pgstat_block_read_time::call()?;
@@ -395,6 +395,9 @@ pub fn heap_vacuum_rel(
                 startwalusage,
                 startbufferusage,
                 &indnames,
+                // ru0 is always Some here: it is captured under the same
+                // `if instrument` guard that reaches this emit path.
+                ru0.expect("ru0 captured when instrument"),
                 &mut frozenxid_updated,
                 &mut minmulti_updated,
             )?;
@@ -420,6 +423,7 @@ fn emit_verbose_log(
     startwalusage: (i64, i64, u64, i64),
     startbufferusage: (i64, i64, i64, i64, i64, i64),
     indnames: &[String],
+    ru0: types_rusage::PgRUsage,
     frozenxid_updated: &mut bool,
     minmulti_updated: &mut bool,
 ) -> PgResult<()> {
@@ -613,7 +617,10 @@ fn emit_verbose_log(
         "WAL usage: {} records, {} full page images, {} bytes, {} buffers full\n",
         wal_records, wal_fpi, wal_bytes, wal_buffers_full
     ));
-    buf.push_str(&format!("system usage: {}", vl::pg_rusage_show::call()?));
+    buf.push_str(&format!(
+        "system usage: {}",
+        pg_rusage_seams::pg_rusage_show::call(ru0)
+    ));
 
     ereport(if verbose { INFO } else { LOG })
         .errmsg_internal(buf)

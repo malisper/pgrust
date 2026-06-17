@@ -152,10 +152,12 @@ fn elapsed_pair(start: Timeval, mut end: Timeval) -> (i32, i32) {
     )
 }
 
-/// No cross-crate seams to install: this leaf crate's only external calls are
-/// the OS itself (`gettimeofday`/`getrusage`, made directly), and no other
-/// crate calls into it across a cycle.
-pub fn init_seams() {}
+/// Install this crate's seams. The start snapshot is the caller's own value:
+/// `pg_rusage_init` returns it and `pg_rusage_show` formats the delta.
+pub fn init_seams() {
+    pg_rusage_seams::pg_rusage_init::set(pg_rusage_new);
+    pg_rusage_seams::pg_rusage_show::set(|ru0| pg_rusage_show(&ru0));
+}
 
 #[cfg(test)]
 mod tests;

@@ -1800,8 +1800,11 @@ dependencies = [
  "backend-access-heap-vacuumlazy-seams",
  "backend-commands-vacuum-seams",
  "backend-utils-error",
+ "pg-prng-seams",
+ "pg-rusage-seams",
  "types-core",
  "types-error",
+ "types-rusage",
  "types-storage",
  "types-vacuum",
 ]
@@ -20752,6 +20755,7 @@ name = "backend-utils-misc-pg-rusage"
 version = "0.0.0"
 dependencies = [
  "libc",
+ "pg-rusage-seams",
  "types-rusage",
 ]
 
@@ -21778,6 +21782,24 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 [[package]]
 name = "pg-prng"
 version = "0.0.0"
+dependencies = [
+ "pg-prng-seams",
+]
+
+[[package]]
+name = "pg-prng-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
+name = "pg-rusage-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-rusage",
+]
 
 [[package]]
 name = "pgrust-gram-c2rust-fgram"
@@ -22518,6 +22540,7 @@ dependencies = [
  "interfaces-libpq-fe",
  "interfaces-libpq-legacy-pqsignal",
  "mcx",
+ "pg-prng",
  "port-crc32c",
  "port-noblock",
  "port-pg-strong-random",

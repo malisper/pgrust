@@ -1,14 +1,13 @@
 [package]
-name = "backend-utils-misc-pg-rusage"
+name = "pg-rusage-seams"
 version = "0.0.0"
 edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "backend_utils_misc_pg_rusage"
+name = "pg_rusage_seams"
 path = "src/lib.rs"
 
 [dependencies]
-libc = "0.2"
+seam-core = { path = "../seam-core" }
 types-rusage = { path = "../types-rusage" }
-pg-rusage-seams = { path = "../pg-rusage-seams" }

@@ -533,6 +533,7 @@ pub fn init_all() {
     backend_utils_misc_more::init_seams();
     backend_utils_misc_pg_rusage::init_seams();
     backend_utils_misc_queryenvironment::init_seams();
+    pg_prng::init_seams();
     backend_utils_misc_sampling::init_seams();
     backend_utils_misc_stack_depth::init_seams();
     backend_utils_misc_timeout::init_seams();

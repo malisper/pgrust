@@ -545,10 +545,9 @@ seam_core::seam!(
     /// `GlobalVisTestFor(rel)`.
     pub fn global_vis_test_for(rel: Oid) -> PgResult<GlobalVisStateHandle>
 );
-seam_core::seam!(
-    /// `pg_prng_uint32(&pg_global_prng_state)`.
-    pub fn pg_global_prng_uint32() -> PgResult<u32>
-);
+// `pg_global_prng_uint32` is re-homed to `pg-prng-seams` (owner
+// `pg-prng`), whose stem matches its true owner `src/common/pg_prng.c`.
+
 seam_core::seam!(
     /// `get_database_name(MyDatabaseId)`.
     pub fn get_database_name(dboid: Oid) -> PgResult<String>
@@ -646,17 +645,10 @@ seam_core::seam!(
     /// local_hit, local_read, local_dirtied)`.
     pub fn pg_buffer_usage() -> PgResult<(i64, i64, i64, i64, i64, i64)>
 );
-seam_core::seam!(
-    /// `pg_rusage_init(&ru0)` — capture the start-of-vacuum resource-usage
-    /// snapshot (owned by the seam runtime; [`pg_rusage_show`] formats the
-    /// delta).
-    pub fn pg_rusage_init() -> PgResult<()>
-);
-seam_core::seam!(
-    /// `pg_rusage_show` — the formatted "system usage" string for the
-    /// completion log.
-    pub fn pg_rusage_show() -> PgResult<String>
-);
+// `pg_rusage_init` / `pg_rusage_show` are re-homed to `pg-rusage-seams`
+// (owner `backend-utils-misc-pg-rusage`), whose stem matches their true owner
+// `src/backend/utils/misc/pg_rusage.c`. The start snapshot is now the caller's
+// own `PgRUsage` value rather than seam-runtime state.
 
 // ---- error-context stack (errcontext callback) ----------------------
 

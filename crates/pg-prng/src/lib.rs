@@ -144,6 +144,12 @@ pub fn global_prng<R>(f: impl FnOnce(&mut PgPrng) -> R) -> R {
     GLOBAL_PRNG.with_borrow_mut(f)
 }
 
+/// Install this crate's seams. `pg_global_prng_uint32` draws from the
+/// backend-private global PRNG (`pg_prng_uint32(&pg_global_prng_state)`).
+pub fn init_seams() {
+    pg_prng_seams::pg_global_prng_uint32::set(|| global_prng(PgPrng::next_u32));
+}
+
 fn leftmost_one_pos64(word: u64) -> u32 {
     63 - word.leading_zeros()
 }

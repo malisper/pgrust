@@ -13,6 +13,9 @@ types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-storage = { path = "../types-storage" }
 types-vacuum = { path = "../types-vacuum" }
+types-rusage = { path = "../types-rusage" }
+pg-prng-seams = { path = "../pg-prng-seams" }
+pg-rusage-seams = { path = "../pg-rusage-seams" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
 backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }
