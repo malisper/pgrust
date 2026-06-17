@@ -106,13 +106,14 @@ fn builtin(
 /// all strict, none retset).
 pub fn register_cryptohashfuncs_builtins() {
     backend_utils_fmgr_core::register_builtins([
-        // md5(text) / md5(bytea) — prosrc md5_text / md5_bytea.
-        builtin(2311, "md5", 1, true, false, fc_md5_text),
-        builtin(2321, "md5", 1, true, false, fc_md5_bytea),
+        // md5(text) / md5(bytea) — the builtin `name` is the `prosrc` C symbol
+        // (canonical fmgr_builtins[] keys on prosrc, not the SQL proname).
+        builtin(2311, "md5_text", 1, true, false, fc_md5_text),
+        builtin(2321, "md5_bytea", 1, true, false, fc_md5_bytea),
         // sha224/256/384/512(bytea) — prosrc sha224_bytea … sha512_bytea.
-        builtin(3419, "sha224", 1, true, false, fc_sha224_bytea),
-        builtin(3420, "sha256", 1, true, false, fc_sha256_bytea),
-        builtin(3421, "sha384", 1, true, false, fc_sha384_bytea),
-        builtin(3422, "sha512", 1, true, false, fc_sha512_bytea),
+        builtin(3419, "sha224_bytea", 1, true, false, fc_sha224_bytea),
+        builtin(3420, "sha256_bytea", 1, true, false, fc_sha256_bytea),
+        builtin(3421, "sha384_bytea", 1, true, false, fc_sha384_bytea),
+        builtin(3422, "sha512_bytea", 1, true, false, fc_sha512_bytea),
     ]);
 }

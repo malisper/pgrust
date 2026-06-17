@@ -861,16 +861,18 @@ pub fn register_varlena_more_builtins() {
 pub fn register_varlena_text_bytea_byref_builtins() {
     backend_utils_fmgr_core::register_builtins([
         // ---- bytea get/set byte/bit (bytea.rs) ----
-        builtin(721, "get_byte", 2, fc_byteaGetByte),
-        builtin(723, "get_bit", 2, fc_byteaGetBit),
-        builtin(722, "set_byte", 3, fc_byteaSetByte),
-        builtin(724, "set_bit", 3, fc_byteaSetBit),
+        // builtin `name` is the `prosrc` C symbol (canonical fmgr_builtins[]
+        // keys on prosrc, not the SQL proname).
+        builtin(721, "byteaGetByte", 2, fc_byteaGetByte),
+        builtin(723, "byteaGetBit", 2, fc_byteaGetBit),
+        builtin(722, "byteaSetByte", 3, fc_byteaSetByte),
+        builtin(724, "byteaSetBit", 3, fc_byteaSetBit),
         // ---- text substring (position_ops.rs) ----
-        builtin(936, "substring", 3, fc_text_substr),
-        builtin(937, "substring", 2, fc_text_substr_no_len),
+        builtin(936, "text_substr", 3, fc_text_substr),
+        builtin(937, "text_substr_no_len", 2, fc_text_substr_no_len),
         // ---- text overlay (position_ops.rs) ----
-        builtin(1404, "overlay", 4, fc_textoverlay),
-        builtin(1405, "overlay", 3, fc_textoverlay_no_len),
+        builtin(1404, "textoverlay", 4, fc_textoverlay),
+        builtin(1405, "textoverlay_no_len", 3, fc_textoverlay_no_len),
         // ---- unknown I/O (wire_io.rs) ----
         builtin(109, "unknownin", 1, fc_unknownin),
         builtin(110, "unknownout", 1, fc_unknownout),
