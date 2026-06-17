@@ -17,6 +17,8 @@ types-fmgr = { path = "../types-fmgr" }
 types-tuple = { path = "../types-tuple" }
 types-error = { path = "../types-error" }
 types-storage = { path = "../types-storage" }
+# Parallel-worker bring-up: Set{Authenticated,Session,CurrentRole,UserIdAndSec}*
+# identity restore (parallel.c ParallelWorkerMain).
 backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }
 
 # The fmgr builtin registry (this crate registers its SQL-callable builtins).

@@ -355,6 +355,27 @@ pub(crate) fn hba_authname_of_entry<'mcx>(
     PgString::from_str_in(hba_authname(method), mcx)
 }
 
+/// Parallel-worker bring-up: initialize `SystemUser` once `MyClientConnectionInfo`
+/// is restored (parallel.c:1550-1555):
+/// ```c
+/// if (MyClientConnectionInfo.authn_id)
+///     InitializeSystemUser(MyClientConnectionInfo.authn_id,
+///                          hba_authname(MyClientConnectionInfo.auth_method));
+/// ```
+/// Owned by hba (the home of `hba_authname`), which already deps miscinit (the
+/// home of `MyClientConnectionInfo` + `InitializeSystemUser`); miscinit cannot
+/// dep hba (hba→miscinit), so this conditional lives here.
+pub(crate) fn maybe_initialize_system_user() -> PgResult<()> {
+    let info = backend_utils_init_miscinit::client_connection_info();
+    if let Some(authn_id) = info.authn_id.as_deref() {
+        backend_utils_init_miscinit::InitializeSystemUser(
+            authn_id,
+            hba_authname(info.auth_method),
+        );
+    }
+    Ok(())
+}
+
 // Keep DEBUG3 referenced (the C view-fill / include tokenizer uses it; the
 // loaders use LOG, but DEBUG3 is the documented sibling level).
 const _: types_error::ErrorLevel = DEBUG3;

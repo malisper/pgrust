@@ -30,6 +30,8 @@ backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-s
 backend-utils-adt-network = { path = "../backend-utils-adt-network" }
 backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }
 backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
+# Parallel-worker bring-up: maybe_initialize_system_user (parallel.c).
+backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-libpq-ifaddr = { path = "../backend-libpq-ifaddr" }
 backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }

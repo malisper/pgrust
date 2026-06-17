@@ -12,6 +12,8 @@ path = "src/lib.rs"
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-libpq-be-secure-seams = { path = "../backend-libpq-be-secure-seams" }
 backend-libpq-pqcomm-seams = { path = "../backend-libpq-pqcomm-seams" }
+# Parallel-worker success report: pq_put_terminate (parallel.c).
+backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }
 backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
 backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
 backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }

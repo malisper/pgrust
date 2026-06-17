@@ -200,6 +200,15 @@ pub fn init_seams() {
             set: |v| crate::set_namespace_search_path(v.as_deref().unwrap_or("")),
         },
     );
+
+    // Parallel-worker bring-up: restore the leader's temp-namespace OIDs
+    // (parallel.c ParallelWorkerMain `SetTempNamespaceState`). The body is
+    // namespace.c's `SetTempNamespaceState` (void); install the parallel-rt seam
+    // slot from the real owner. The parallel-rt seam crate is a leaf (no cycle).
+    backend_access_transam_parallel_rt_seams::set_temp_namespace_state::set(|ns, toast_ns| {
+        crate::SetTempNamespaceState(ns, toast_ns);
+        Ok(())
+    });
 }
 
 /// Adapt a seam-borne `&[&str]` qualified name into the owned `NameList`

@@ -996,6 +996,24 @@ pub fn init_seams() {
     s::set_database_path_once::set(SetDatabasePath);
     s::process_session_preload_libraries::set(process_session_preload_libraries);
 
+    // ---- parallel-worker bring-up: session/role/security-context restore -----
+    //
+    // ParallelWorkerMain (parallel.c) restores the leader's user/role/security
+    // identity from the serialized FixedParallelState. The bodies are miscinit.c
+    // functions; install the parallel-rt seam slots from the real owner. The
+    // parallel-rt seam crate is a leaf (no cycle). `SetUserIdAndSecContext` is
+    // `void` in C — wrap in `Ok`.
+    {
+        use backend_access_transam_parallel_rt_seams as rt;
+        rt::set_authenticated_user_id::set(SetAuthenticatedUserId);
+        rt::set_session_authorization::set(SetSessionAuthorization);
+        rt::set_current_role_id::set(SetCurrentRoleId);
+        rt::set_user_id_and_sec_context::set(|id, sec_context| {
+            SetUserIdAndSecContext(id, sec_context);
+            Ok(())
+        });
+    }
+
     // ---- mis-homed slot-sync worker bootstrap group -----------------------
     //
     // These seams were declared on miscinit's seam crate by the slot-sync

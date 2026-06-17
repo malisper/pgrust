@@ -1440,5 +1440,15 @@ pub fn init_seams() {
     backend_utils_adt_pg_locale_env_seams::set_message_encoding::set(|encoding| {
         SetMessageEncoding(encoding).expect("SetMessageEncoding on an invalid encoding")
     });
+
+    // Parallel-worker bring-up reads the database encoding and sets the worker's
+    // client encoding to match (parallel.c:1424 `GetDatabaseEncoding()` /
+    // `SetClientEncoding(...)`). These are mbutils.c routines; `pg_enc` is `i32`,
+    // so both contracts match identity. The parallel-rt seam crate is a leaf
+    // (no cycle); install from the real owner here.
+    backend_access_transam_parallel_rt_seams::get_database_encoding::set(|| {
+        Ok(GetDatabaseEncoding())
+    });
+    backend_access_transam_parallel_rt_seams::set_client_encoding::set(SetClientEncoding);
 }
 

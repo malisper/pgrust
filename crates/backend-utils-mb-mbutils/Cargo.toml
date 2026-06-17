@@ -39,6 +39,8 @@ backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
 # SetMessageEncoding/pg_any_to_server are mbutils.c routines, but pg_locale.c's
 # seam crate homes their declarations; this crate (their real owner) installs them.
 backend-utils-adt-pg-locale-env-seams = { path = "../backend-utils-adt-pg-locale-env-seams" }
+# Parallel-worker bring-up: GetDatabaseEncoding/SetClientEncoding (parallel.c).
+backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }
 
 # outward seam crates (callees; panic until owners land)
 common-encnames-seams = { path = "../common-encnames-seams" }

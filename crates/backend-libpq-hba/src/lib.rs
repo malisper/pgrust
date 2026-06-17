@@ -398,6 +398,14 @@ pub fn init_seams() {
     psm::load_ident::set(|| loaders::load_ident().unwrap_or(false));
     psm::hba_file_name::set(loaders::hba_file_name);
     psm::ident_file_name::set(loaders::ident_file_name);
+
+    // Parallel-worker bring-up: InitializeSystemUser(authn_id, hba_authname(...))
+    // once MyClientConnectionInfo is restored (parallel.c:1550). hba owns
+    // hba_authname and already deps miscinit (InitializeSystemUser /
+    // MyClientConnectionInfo); the parallel-rt seam crate is a leaf (no cycle).
+    backend_access_transam_parallel_rt_seams::maybe_initialize_system_user::set(
+        loaders::maybe_initialize_system_user,
+    );
 }
 
 // A short-lived `MemoryContext`, the idiomatic stand-in for the implicit

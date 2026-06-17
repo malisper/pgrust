@@ -19,6 +19,8 @@ types-pgstat = { path = "../types-pgstat" }
 
 # Owner -seams crates this unit calls across dependency cycles.
 backend-postmaster-bgworker-seams = { path = "../backend-postmaster-bgworker-seams" }
+# Parallel-worker bring-up: BackgroundWorkerInitializeConnectionByOid (parallel.c).
+backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
 backend-utils-init-postinit-seams = { path = "../backend-utils-init-postinit-seams" }

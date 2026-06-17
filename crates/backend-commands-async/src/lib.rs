@@ -2045,6 +2045,13 @@ pub fn init_seams() {
             set: set_max_notify_queue_pages,
         });
     }
+
+    // Parallel-worker message handling forwards a NotificationResponse from a
+    // worker back to the leader's frontend (parallel.c HandleParallelMessage
+    // `NotifyMyFrontEnd(channel, payload, pid)`). The body is async.c's
+    // `NotifyMyFrontEnd`; install the parallel-rt slot from the real owner.
+    // The parallel-rt seam crate is a leaf (no cycle).
+    backend_access_transam_parallel_rt_seams::notify_my_front_end::set(NotifyMyFrontEnd);
 }
 
 /// `case T_NotifyStmt: Async_Notify(stmt->conditionname, stmt->payload)`

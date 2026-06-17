@@ -50,6 +50,17 @@ pub fn init_seams() {
         backend_progress::pgstat_progress_end_command();
         Ok(())
     });
+
+    // Parallel-worker message handling forwards an incremental progress update
+    // from a worker to the leader's backend status entry (parallel.c
+    // HandleParallelMessage `pgstat_progress_incr_param(index, incr)`). The body
+    // is backend_progress.c's `pgstat_progress_incr_param` (void); install the
+    // parallel-rt slot from the real owner. The parallel-rt seam crate is a leaf
+    // (no cycle).
+    backend_access_transam_parallel_rt_seams::pgstat_progress_incr_param::set(|index, incr| {
+        backend_progress::pgstat_progress_incr_param(index, incr);
+        Ok(())
+    });
 }
 
 #[cfg(test)]

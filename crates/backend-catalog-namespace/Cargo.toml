@@ -14,6 +14,8 @@ backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-utils-error = { path = "../backend-utils-error" }
 
 backend-access-transam-parallel = { path = "../backend-access-transam-parallel" }
+# Parallel-worker bring-up: SetTempNamespaceState (parallel.c).
+backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
 backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }

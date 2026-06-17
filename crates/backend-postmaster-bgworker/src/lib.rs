@@ -1023,6 +1023,15 @@ fn my_bgworker_entry() -> BackgroundWorker {
     MY_BGWORKER_ENTRY.with(|e| e.borrow().expect("MyBgworkerEntry not set"))
 }
 
+/// `memcpy(&ParallelWorkerNumber, MyBgworkerEntry->bgw_extra, sizeof(int))`
+/// (parallel.c:1334) — a parallel worker stores its worker number in the first
+/// `sizeof(int)` bytes of `bgw_extra`. bgworker owns `MyBgworkerEntry`; return
+/// the host-order `int` the leader wrote.
+pub fn worker_number_from_bgw_extra() -> i32 {
+    let extra = my_bgworker_entry().bgw_extra;
+    i32::from_ne_bytes(extra[..core::mem::size_of::<i32>()].try_into().unwrap())
+}
+
 // ---------------------------------------------------------------------------
 // BackgroundWorkerBlockSignals / BackgroundWorkerUnblockSignals
 // ---------------------------------------------------------------------------
@@ -1620,6 +1629,19 @@ pub fn init_seams() {
     // Contract-reconciled install (assemble/seam-contract-reconciles): the seam
     // is now the infallible `-> Size` shape, matching the C `Size` return.
     backend_postmaster_bgworker_seams::background_worker_shmem_size::set(BackgroundWorkerShmemSize);
+
+    // Parallel-worker bring-up restores the database connection by OID
+    // (parallel.c ParallelWorkerMain `BackgroundWorkerInitializeConnectionByOid`).
+    // The body is bgworker.c's; install the parallel-rt seam slot from the real
+    // owner. The parallel-rt seam crate is a leaf (no cycle).
+    backend_access_transam_parallel_rt_seams::background_worker_initialize_connection_by_oid::set(
+        BackgroundWorkerInitializeConnectionByOid,
+    );
+    // Parallel-worker number from MyBgworkerEntry->bgw_extra (parallel.c:1334).
+    // bgworker owns MyBgworkerEntry; the body is infallible.
+    backend_access_transam_parallel_rt_seams::worker_number_from_bgw_extra::set(|| {
+        Ok(worker_number_from_bgw_extra())
+    });
 
     pm_registry_init_seams();
 }

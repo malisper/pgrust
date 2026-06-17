@@ -33,6 +33,8 @@ backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 
 # ProcessUtility dispatch arms (installs the NOTIFY/LISTEN/UNLISTEN seams).
 backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
+# Parallel-worker NotifyMyFrontEnd forwarding (parallel.c HandleParallelMessage).
+backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }
 
 # Outward seams (cycle partners / unported owners).
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }

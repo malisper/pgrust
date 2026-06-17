@@ -1600,6 +1600,16 @@ pub fn pq_putmessage_noblock(msgtype: u8, s: &[u8]) -> PgResult<()> {
     (PQ_COMM_METHODS.with(Cell::get).putmessage_noblock)(msgtype, s)
 }
 
+/// `pq_putmessage(PqMsg_Terminate, NULL, 0)` — a parallel worker reports success
+/// by sending an empty Terminate message back to the leader (parallel.c:1585).
+/// C ignores the `int` return; the active `PqCommMethods` here is the redirected
+/// shm_mq queue (pqmq).
+pub fn pq_put_terminate() -> PgResult<()> {
+    const PQ_MSG_TERMINATE: u8 = b'X';
+    pq_putmessage(PQ_MSG_TERMINATE, &[])?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // TCP keepalive support.
 // ---------------------------------------------------------------------------
@@ -2140,6 +2150,11 @@ pub fn init_seams() {
     });
     backend_libpq_pqcomm_seams::modify_fe_be_wait_set_socket::set(pq_modify_fe_be_wait_set_socket);
     backend_libpq_pqcomm_seams::wait_event_set_wait_fe_be::set(pq_wait_event_set_wait_fe_be);
+
+    // Parallel-worker success report: pq_putmessage(PqMsg_Terminate, NULL, 0)
+    // (parallel.c ParallelWorkerMain tail). The parallel-rt seam crate is a leaf
+    // (no cycle); install from the real owner of pq_putmessage.
+    backend_access_transam_parallel_rt_seams::pq_put_terminate::set(pq_put_terminate);
 
     vars::Unix_socket_permissions.install(GucVarAccessors {
         get: config::unix_socket_permissions,
