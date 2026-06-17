@@ -281,6 +281,14 @@ pub fn init_seams() {
         get: globals::IntervalStyle,
         set: globals::SetIntervalStyle,
     });
+    // `bool enableFsync` (globals.c) — the `fsync` GUC's `conf->variable`.
+    // Read on the WAL-write/fsync path (xlog.c `get_sync_bit`/`issue_xlog_fsync`,
+    // also fd.c/bufmgr.c/sync.c); the bgwriter/walwriter/checkpointer children
+    // reach it via `XLogFileInit` -> `get_sync_bit` -> `enable_fsync`.
+    vars::enableFsync.install(GucVarAccessors {
+        get: globals::enableFsync,
+        set: globals::set_enableFsync,
+    });
 }
 
 #[cfg(test)]
