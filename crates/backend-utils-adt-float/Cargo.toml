@@ -13,6 +13,8 @@ mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
+types-fmgr = { path = "../types-fmgr" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 common-ryu = { path = "../common-ryu" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }

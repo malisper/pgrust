@@ -17391,12 +17391,14 @@ dependencies = [
  "backend-utils-adt-arrayfuncs",
  "backend-utils-adt-float-seams",
  "backend-utils-error",
+ "backend-utils-fmgr-core",
  "backend-utils-misc-guc-tables",
  "common-ryu",
  "mcx",
  "types-core",
  "types-datum",
  "types-error",
+ "types-fmgr",
 ]
 
 [[package]]
