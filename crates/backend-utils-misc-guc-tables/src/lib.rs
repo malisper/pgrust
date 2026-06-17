@@ -353,6 +353,64 @@ fn install_guc_tables_owned_vars() {
         get: backing::ReservedConnections,
         set: backing::set_ReservedConnections,
     });
+
+    // postmaster.c-owned GUCs (backed here until postmaster lands as a GUC
+    // owner). Read by PostmasterMain / ServerLoop: the listen-socket loop
+    // (port/listen_addresses/unix_socket_directories/max_connections), the SSL
+    // and syslogger launch decisions, and the crash-restart/abort policy.
+    // NOTE: Logging_collector (syslogger), EnableHotStandby (xlog),
+    // sync_replication_slots (slotsync), MaxConnections (init-small) and
+    // io_workers (aio-methods) own their `conf->variable` in C and install
+    // their own accessors; the postmaster only *reads* them through the slot.
+    vars::EnableSSL.install(GucVarAccessors {
+        get: backing::EnableSSL,
+        set: backing::set_EnableSSL,
+    });
+    vars::restart_after_crash.install(GucVarAccessors {
+        get: backing::restart_after_crash,
+        set: backing::set_restart_after_crash,
+    });
+    vars::remove_temp_files_after_crash.install(GucVarAccessors {
+        get: backing::remove_temp_files_after_crash,
+        set: backing::set_remove_temp_files_after_crash,
+    });
+    vars::send_abort_for_crash.install(GucVarAccessors {
+        get: backing::send_abort_for_crash,
+        set: backing::set_send_abort_for_crash,
+    });
+    vars::send_abort_for_kill.install(GucVarAccessors {
+        get: backing::send_abort_for_kill,
+        set: backing::set_send_abort_for_kill,
+    });
+    vars::log_hostname.install(GucVarAccessors {
+        get: backing::log_hostname,
+        set: backing::set_log_hostname,
+    });
+    vars::summarize_wal.install(GucVarAccessors {
+        get: backing::summarize_wal,
+        set: backing::set_summarize_wal,
+    });
+    vars::PostPortNumber.install(GucVarAccessors {
+        get: backing::PostPortNumber,
+        set: backing::set_PostPortNumber,
+    });
+    vars::AuthenticationTimeout.install(GucVarAccessors {
+        get: backing::AuthenticationTimeout,
+        set: backing::set_AuthenticationTimeout,
+    });
+    vars::PreAuthDelay.install(GucVarAccessors {
+        get: backing::PreAuthDelay,
+        set: backing::set_PreAuthDelay,
+    });
+    vars::ListenAddresses.install(GucVarAccessors {
+        get: backing::ListenAddresses,
+        set: backing::set_ListenAddresses,
+    });
+    vars::Unix_socket_directories.install(GucVarAccessors {
+        get: backing::Unix_socket_directories,
+        set: backing::set_Unix_socket_directories,
+    });
+
     // postgres.c-owned `post_auth_delay` GUC (backed here until that unit lands
     // as a GUC owner). Read by InitPostgres's post-auth delay apply.
     vars::PostAuthDelay.install(GucVarAccessors {

@@ -543,6 +543,7 @@ pub fn init_all() {
     common_string::init_seams();
     interfaces_libpq_legacy_pqsignal::init_seams();
     port_crc32c::init_seams();
+    port_pg_strong_random::init_seams();
     port_pgsleep::init_seams();
     port_pqsignal::init_seams();
     probe_adt_scalar_bool::init_seams();

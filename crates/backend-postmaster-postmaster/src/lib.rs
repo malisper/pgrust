@@ -70,6 +70,8 @@
 pub mod core;
 pub mod bgworkers;
 pub mod childmgmt;
+pub mod fileops;
+pub mod gucreads;
 pub mod helpers;
 pub mod ioworkers;
 pub mod latchutil;
@@ -121,6 +123,13 @@ pub fn init_seams() {
     sp::read_postmaster_death_watch::set(main_entry::read_postmaster_death_watch);
     sp::postmaster_death_watch_fd::set(main_entry::postmaster_death_watch_fd);
 
+    // `fcntl(postmaster_alive_fds[POSTMASTER_FD_WATCH], F_SETFD, FD_CLOEXEC)`
+    // (miscinit InitPostmasterChild). The death-watch fd is postmaster-owned, so
+    // the cloexec set runs here.
+    backend_storage_ipc_pmsignal_seams::set_postmaster_death_watch_cloexec::set(
+        main_entry::set_postmaster_death_watch_cloexec,
+    );
+
     // Request a signal on parent (postmaster) death.
     sp::request_parent_death_signal::set(request_parent_death_signal);
 
@@ -134,6 +143,32 @@ pub fn init_seams() {
             backend_storage_ipc_pmsignal::PMSignalReason::PMSIGNAL_ADVANCE_STATE_MACHINE,
         );
     });
+
+    // Postmaster-owned GUC value reads (`*conf->variable` of the GUC globals
+    // declared in postmaster.c, read straight from the guc_tables variable
+    // slots). The listen-socket loop + the SSL / syslogger / crash-restart
+    // launch decisions read these.
+    sp::enable_ssl::set(gucreads::enable_ssl);
+    sp::logging_collector::set(gucreads::logging_collector);
+    sp::restart_after_crash::set(gucreads::restart_after_crash);
+    sp::remove_temp_files_after_crash::set(gucreads::remove_temp_files_after_crash);
+    sp::send_abort_for_crash::set(gucreads::send_abort_for_crash);
+    sp::send_abort_for_kill::set(gucreads::send_abort_for_kill);
+    sp::log_hostname::set(gucreads::log_hostname);
+    sp::summarize_wal::set(gucreads::summarize_wal);
+    sp::enable_hot_standby::set(gucreads::enable_hot_standby);
+    sp::sync_replication_slots::set(gucreads::sync_replication_slots);
+    sp::post_port_number::set(gucreads::post_port_number);
+    sp::max_connections::set(gucreads::max_connections);
+    sp::authentication_timeout::set(gucreads::authentication_timeout);
+    sp::pre_auth_delay::set(gucreads::pre_auth_delay);
+    sp::io_workers::set(gucreads::io_workers);
+    sp::listen_addresses::set(gucreads::listen_addresses);
+    sp::unix_socket_directories::set(gucreads::unix_socket_directories);
+
+    // Postmaster-owned file writes from PostmasterMain (postmaster.c bodies).
+    sp::create_opts_file::set(fileops::create_opts_file);
+    sp::maybe_write_external_pid_file::set(fileops::maybe_write_external_pid_file);
 }
 
 /// C: `PostmasterDeathSignalInit` core — `prctl(PR_SET_PDEATHSIG, signum)`

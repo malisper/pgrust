@@ -125,6 +125,13 @@ pub fn init_seams() {
     backend_utils_error_seams::sqlstate_for_file_access::set(errno::sqlstate_for_file_access);
     backend_utils_error_elog_seams::ereport_msg::set(stack::ereport_msg);
 
+    // C (PostmasterMain): `whereToSendOutput = DestNone` — stop sending log to
+    // stderr once the postmaster is fully launched. `whereToSendOutput` is
+    // elog.c's own global, so the postmaster's poke runs through this owner.
+    backend_postmaster_postmaster_seams::finalize_where_to_send_output::set(|| {
+        config::set_where_to_send_output(types_dest::CommandDest::None);
+    });
+
     vars::log_min_messages.install(GucVarAccessors {
         get: || config::log_min_messages().0,
         set: |v| config::set_log_min_messages(ErrorLevel(v)),

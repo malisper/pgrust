@@ -36,6 +36,7 @@ backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-sea
 backend-access-transam-timeline-seams = { path = "../backend-access-transam-timeline-seams" }
 backend-access-transam-xlogarchive-seams = { path = "../backend-access-transam-xlogarchive-seams" }
 backend-postmaster-startup-seams = { path = "../backend-postmaster-startup-seams" }
+backend-postmaster-postmaster-seams = { path = "../backend-postmaster-postmaster-seams" }
 backend-postmaster-checkpointer-seams = { path = "../backend-postmaster-checkpointer-seams" }
 backend-replication-walreceiver-seams = { path = "../backend-replication-walreceiver-seams" }
 backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" }

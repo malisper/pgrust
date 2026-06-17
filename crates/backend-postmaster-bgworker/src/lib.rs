@@ -1506,6 +1506,75 @@ pub fn init_seams() {
     // Contract-reconciled install (assemble/seam-contract-reconciles): the seam
     // is now the infallible `-> Size` shape, matching the C `Size` return.
     backend_postmaster_bgworker_seams::background_worker_shmem_size::set(BackgroundWorkerShmemSize);
+
+    pm_registry_init_seams();
+}
+
+/// Install the postmaster-facing `BackgroundWorkerList` access + control seams.
+///
+/// postmaster.c iterates `BackgroundWorkerList` and reads/writes per-entry
+/// `RegisteredBgWorker` fields while scheduling workers (`maybe_start_bgworkers`,
+/// `DetermineSleepTime`, `CleanupBackend`). The list is bgworker.c's own
+/// process-local `Vec<RegisteredBgWorker>` here (the C `dlist_head`); the
+/// postmaster reaches it through these seams. `rw_index` is the position in the
+/// list (the same index the index-keyed mutators already use).
+fn pm_registry_init_seams() {
+    use backend_postmaster_postmaster_seams as psm;
+
+    // dlist_foreach order = the Vec's index order.
+    psm::background_worker_list::set(|| {
+        BACKGROUND_WORKER_LIST.with(|l| (0..l.borrow().len() as u32).collect())
+    });
+
+    // Per-entry reads (`rw->...`).
+    psm::rw_pid::set(|i| BACKGROUND_WORKER_LIST.with(|l| l.borrow()[i as usize].rw_pid));
+    psm::rw_crashed_at::set(|i| BACKGROUND_WORKER_LIST.with(|l| l.borrow()[i as usize].rw_crashed_at));
+    psm::rw_terminate::set(|i| BACKGROUND_WORKER_LIST.with(|l| l.borrow()[i as usize].rw_terminate));
+    psm::rw_bgw_restart_time::set(|i| {
+        BACKGROUND_WORKER_LIST.with(|l| l.borrow()[i as usize].rw_worker.bgw_restart_time)
+    });
+    psm::rw_bgw_start_time::set(|i| {
+        BACKGROUND_WORKER_LIST.with(|l| l.borrow()[i as usize].rw_worker.bgw_start_time as i32)
+    });
+    psm::rw_bgw_notify_pid::set(|i| {
+        BACKGROUND_WORKER_LIST.with(|l| l.borrow()[i as usize].rw_worker.bgw_notify_pid)
+    });
+    psm::rw_bgw_name::set(|i| {
+        BACKGROUND_WORKER_LIST.with(|l| cstr_lossy(&l.borrow()[i as usize].rw_worker.bgw_name))
+    });
+    psm::rw_bgw_type::set(|i| {
+        BACKGROUND_WORKER_LIST.with(|l| cstr_lossy(&l.borrow()[i as usize].rw_worker.bgw_type))
+    });
+
+    // Per-entry writes (`rw->... = v`).
+    psm::rw_set_pid::set(|i, pid| {
+        BACKGROUND_WORKER_LIST.with(|l| l.borrow_mut()[i as usize].rw_pid = pid)
+    });
+    psm::rw_set_crashed_at::set(|i, ts| {
+        BACKGROUND_WORKER_LIST.with(|l| l.borrow_mut()[i as usize].rw_crashed_at = ts)
+    });
+    psm::rw_set_terminate::set(|i, v| {
+        BACKGROUND_WORKER_LIST.with(|l| l.borrow_mut()[i as usize].rw_terminate = v)
+    });
+
+    // Control operations the postmaster scheduler / reaper drive.
+    psm::background_worker_state_change::set(|allow| {
+        let _ = BackgroundWorkerStateChange(allow);
+    });
+    psm::forget_unstarted_background_workers::set(|| {
+        let _ = ForgetUnstartedBackgroundWorkers();
+    });
+    psm::forget_background_worker::set(|i| {
+        let _ = ForgetBackgroundWorker(i as usize);
+    });
+    psm::reset_background_worker_crash_times::set(|| {
+        let _ = ResetBackgroundWorkerCrashTimes();
+    });
+    psm::background_worker_stop_notifications::set(BackgroundWorkerStopNotifications);
+    psm::report_background_worker_pid::set(|i| ReportBackgroundWorkerPID(i as usize));
+    psm::report_background_worker_exit::set(|i| {
+        let _ = ReportBackgroundWorkerExit(i as usize);
+    });
 }
 
 /// Marshal for the `background_worker_main` inward seam.

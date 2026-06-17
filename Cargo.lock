@@ -3683,6 +3683,7 @@ dependencies = [
  "backend-commands-tablespace-globals-seams",
  "backend-commands-variable-seams",
  "backend-postmaster-checkpointer-seams",
+ "backend-postmaster-postmaster-seams",
  "backend-postmaster-startup-seams",
  "backend-replication-logical-slotsync-seams",
  "backend-replication-slot-seams",
@@ -10776,6 +10777,7 @@ dependencies = [
  "backend-libpq-hba-seams",
  "backend-libpq-ifaddr",
  "backend-libpq-oauth-seams",
+ "backend-postmaster-postmaster-seams",
  "backend-regex-core-seams",
  "backend-replication-walsender-seams",
  "backend-storage-file-fd-seams",
@@ -13065,6 +13067,7 @@ version = "0.0.0"
 dependencies = [
  "backend-postmaster-autovacuum-ext-seams",
  "backend-postmaster-autovacuum-seams",
+ "backend-postmaster-postmaster-seams",
  "backend-utils-error",
  "backend-utils-init-small-seams",
  "backend-utils-misc-guc-tables",
@@ -13466,6 +13469,7 @@ dependencies = [
  "backend-storage-ipc-ipci-seams",
  "backend-storage-ipc-latch",
  "backend-storage-ipc-pmsignal",
+ "backend-storage-ipc-pmsignal-seams",
  "backend-storage-ipc-waiteventset",
  "backend-storage-ipc-waiteventset-seams",
  "backend-tcop-postgres-seams",
@@ -13478,6 +13482,7 @@ dependencies = [
  "backend-utils-init-small",
  "backend-utils-init-small-seams",
  "backend-utils-misc-guc-seams",
+ "backend-utils-misc-guc-tables",
  "libc",
  "mcx",
  "port-pqsignal",
@@ -13549,6 +13554,7 @@ dependencies = [
  "backend-libpq-pqsignal",
  "backend-postmaster-interrupt",
  "backend-postmaster-launch-backend-seams",
+ "backend-postmaster-postmaster-seams",
  "backend-postmaster-syslogger-seams",
  "backend-storage-file-fd-seams",
  "backend-storage-ipc-dsm-core-seams",
@@ -14908,6 +14914,7 @@ dependencies = [
 name = "backend-storage-aio-methods"
 version = "0.0.0"
 dependencies = [
+ "backend-postmaster-postmaster-seams",
  "backend-storage-aio-aio-seams",
  "backend-storage-aio-completion-seams",
  "backend-storage-aio-core-seams",
@@ -15101,6 +15108,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-transam-xact-seams",
  "backend-access-transam-xlog-seams",
+ "backend-postmaster-postmaster-seams",
  "backend-postmaster-startup-seams",
  "backend-storage-aio-aio-seams",
  "backend-storage-aio-core-seams",
@@ -19915,6 +19923,7 @@ name = "backend-utils-error"
 version = "0.0.0"
 dependencies = [
  "backend-libpq-pqcomm-seams",
+ "backend-postmaster-postmaster-seams",
  "backend-postmaster-syslogger-seams",
  "backend-storage-ipc-dsm-core-seams",
  "backend-utils-activity-stat-seams",
@@ -21684,6 +21693,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "port-pg-strong-random"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "port-pg-strong-random-seams",
+]
+
+[[package]]
 name = "port-pg-strong-random-seams"
 version = "0.0.0"
 dependencies = [
@@ -22316,6 +22333,7 @@ dependencies = [
  "interfaces-libpq-legacy-pqsignal",
  "mcx",
  "port-crc32c",
+ "port-pg-strong-random",
  "port-pgsleep",
  "port-pqsignal",
  "probe-adt-scalar-bool",

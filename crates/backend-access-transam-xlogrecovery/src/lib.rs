@@ -115,6 +115,15 @@ use backend_access_transam_xlogrecovery_seams as seams;
 /// xlogrecovery.c but depend on the not-yet-ported recovery driver and its
 /// backend-local caches; they stay loud panics until their family lands.
 pub fn init_seams() {
+    // `RemovePromoteSignalFiles()` / `CheckPromoteSignal()` (xlogrecovery.c) —
+    // the postmaster's PostmasterMain + ServerLoop read/remove the promote
+    // signal file. The state-free shmem entries match the C `void` signatures
+    // (the file unlink/stat needs no recovery state).
+    backend_postmaster_postmaster_seams::remove_promote_signal_files::set(
+        shmem::remove_promote_signal_files,
+    );
+    backend_postmaster_postmaster_seams::check_promote_signal::set(shmem::check_promote_signal);
+
     seams::xlog_recovery_shmem_size::set(|| shmem::XLogRecoveryShmemSize());
     seams::xlog_recovery_shmem_init::set(|| shmem::XLogRecoveryShmemInit());
 

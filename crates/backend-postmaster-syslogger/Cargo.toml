@@ -19,6 +19,7 @@ types-storage = { path = "../types-storage" }
 types-pgstat = { path = "../types-pgstat" }
 types-pgtime = { path = "../types-pgtime" }
 backend-postmaster-syslogger-seams = { path = "../backend-postmaster-syslogger-seams" }
+backend-postmaster-postmaster-seams = { path = "../backend-postmaster-postmaster-seams" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-postmaster-interrupt = { path = "../backend-postmaster-interrupt" }
 backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }

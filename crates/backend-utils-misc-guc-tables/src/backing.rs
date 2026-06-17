@@ -235,6 +235,63 @@ int_var!(
     set_ReservedConnections,
     0
 );
+// ---- GUCs whose C `conf->variable` lives in postmaster.c ----------------
+// The postmaster's own GUC globals (`bool EnableSSL`, `char *ListenAddresses`,
+// `int PostPortNumber`, `int MaxConnections`, `char *Unix_socket_directories`,
+// `bool Logging_collector`, plus the crash-restart/abort policy bools) are
+// declared in postmaster.c. postmaster.c is not yet a GUC owner, so the
+// process-global backing lives here (the same shape as the guc_tables.c-owned
+// globals above); the GUC machinery reads/writes through the accessors and the
+// postmaster unit reads the live value through the `vars::*` slots. Boot vals
+// from guc_tables.c (matching the `boot_val` in `tables.rs`).
+bool_var!(B_EnableSSL, EnableSSL, set_EnableSSL, false);
+bool_var!(
+    B_restart_after_crash,
+    restart_after_crash,
+    set_restart_after_crash,
+    true
+);
+bool_var!(
+    B_remove_temp_files_after_crash,
+    remove_temp_files_after_crash,
+    set_remove_temp_files_after_crash,
+    true
+);
+bool_var!(
+    B_send_abort_for_crash,
+    send_abort_for_crash,
+    set_send_abort_for_crash,
+    false
+);
+bool_var!(
+    B_send_abort_for_kill,
+    send_abort_for_kill,
+    set_send_abort_for_kill,
+    false
+);
+bool_var!(B_log_hostname, log_hostname, set_log_hostname, false);
+bool_var!(B_summarize_wal, summarize_wal, set_summarize_wal, false);
+int_var!(I_PostPortNumber, PostPortNumber, set_PostPortNumber, 5432); // DEF_PGPORT
+int_var!(
+    I_AuthenticationTimeout,
+    AuthenticationTimeout,
+    set_AuthenticationTimeout,
+    60
+);
+int_var!(I_PreAuthDelay, PreAuthDelay, set_PreAuthDelay, 0);
+string_var!(
+    CELL_ListenAddresses,
+    ListenAddresses,
+    set_ListenAddresses,
+    Some("localhost")
+);
+string_var!(
+    CELL_Unix_socket_directories,
+    Unix_socket_directories,
+    set_Unix_socket_directories,
+    Some("/tmp")
+);
+
 // `int PostAuthDelay = 0;` — the `post_auth_delay` GUC's C `conf->variable`
 // lives in postgres.c (globals.c declares it; postgres.c registers the GUC).
 // That unit is not yet a GUC owner, so the process-global backing lives here

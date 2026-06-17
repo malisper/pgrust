@@ -34,6 +34,9 @@ backend-storage-ipc-latch = { path = "../backend-storage-ipc-latch" }
 
 # pmsignal: CheckPostmasterSignal / SetQuitSignalReason / IsPostmasterChildWalSender.
 backend-storage-ipc-pmsignal = { path = "../backend-storage-ipc-pmsignal" }
+# pmsignal-seams: install set_postmaster_death_watch_cloexec (postmaster owns the
+# death-watch fd; the cloexec set is consumed by miscinit's InitPostmasterChild).
+backend-storage-ipc-pmsignal-seams = { path = "../backend-storage-ipc-pmsignal-seams" }
 
 # ereport surface.
 backend-utils-error = { path = "../backend-utils-error" }
@@ -49,6 +52,10 @@ types-guc = { path = "../types-guc" }
 
 # Real installed init seams (the same surface single_user.rs drives).
 backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
+# guc_tables.c GUC variable slots — postmaster.c reads its own GUC globals
+# (EnableSSL/ListenAddresses/PostPortNumber/...) through these `conf->variable`
+# slots, exactly as the C postmaster reads the globals declared in postmaster.c.
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-utils-init-postinit-seams = { path = "../backend-utils-init-postinit-seams" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }

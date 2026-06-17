@@ -19,6 +19,7 @@ types-guc = { path = "../types-guc" }
 backend-utils-error = { path = "../backend-utils-error" }
 # Inward seams this crate installs (aio_shmem_size/aio_shmem_init/pgaio_init_backend).
 backend-storage-aio-seams = { path = "../backend-storage-aio-seams" }
+backend-postmaster-postmaster-seams = { path = "../backend-postmaster-postmaster-seams" }
 # Size arithmetic (add_size/mul_size), faithfully overflow-checked.
 backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" }
 # MaxBackends / NBuffers / MyProcNumber / MyBackendType / MyProc presence.

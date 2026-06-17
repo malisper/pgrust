@@ -64,6 +64,13 @@ pub fn init_seams() {
     use backend_storage_file_fd_seams as fd_seams;
     use backend_storage_file_seams as file_seams;
 
+    // `RemovePgTempFiles()` (fd.c) — the postmaster removes old temporary files
+    // at startup. C returns void and logs (does not propagate) errors, so the
+    // PgResult is discarded here, matching the C call site in PostmasterMain.
+    backend_postmaster_postmaster_seams::remove_pg_temp_files::set(|| {
+        let _ = crate::sync_cleanup::RemovePgTempFiles();
+    });
+
     // -- backend-storage-file-fd-seams --------------------------------------
 
     // file_perm.c: SetDataDirectoryCreatePerm (owns the create-mode globals).

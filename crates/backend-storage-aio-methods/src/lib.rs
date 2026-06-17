@@ -1113,6 +1113,14 @@ pub fn init_seams() {
     backend_storage_aio_seams::aio_shmem_init::set(AioShmemInit);
     backend_storage_aio_seams::pgaio_init_backend::set(pgaio_init_backend);
 
+    // The postmaster's IO-worker scheduler (maybe_adjust_io_workers) reads
+    // `pgaio_workers_enabled()` (`io_method == IOMETHOD_WORKER`), an aio.c
+    // predicate owned here. (`io_workers` itself is read through the GUC slot by
+    // the postmaster's own read seam.)
+    backend_postmaster_postmaster_seams::pgaio_workers_enabled::set(|| {
+        current_io_method() == IOMETHOD_WORKER
+    });
+
     // The aio.c engine entry points the VFD / xact / resowner call sites reach.
     // The three per-consumer seam crates (`-seams` via vfd_core.rs, `-aio-seams`
     // via vfd_io.rs, `-core-seams` via allocated_desc.rs) each declare their own

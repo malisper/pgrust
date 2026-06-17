@@ -104,6 +104,16 @@ pub fn init_seams() {
     backend_postmaster_autovacuum_seams::auto_vacuum_shmem_size::set(shmem::AutoVacuumShmemSize);
     backend_postmaster_autovacuum_seams::auto_vacuuming_active::set(shmem::AutoVacuumingActive);
 
+    // The postmaster (PostmasterMain + the maybe_start_autovac_launcher
+    // scheduler) calls `autovac_init()` once at startup and reads
+    // `AutoVacuumingActive()`. C returns void from autovac_init (the
+    // misconfiguration WARNING is logged, not propagated), so the PgResult is
+    // discarded, matching the C call site.
+    backend_postmaster_postmaster_seams::autovac_init::set(|| {
+        let _ = shmem::autovac_init();
+    });
+    backend_postmaster_postmaster_seams::autovacuuming_active::set(shmem::AutoVacuumingActive);
+
     // Install the GUC var accessors for the autovacuum knobs whose
     // `conf->variable` backing (the per-backend `core::*` thread-locals) is
     // owned here, exactly as `guc_tables.c` binds each entry's variable

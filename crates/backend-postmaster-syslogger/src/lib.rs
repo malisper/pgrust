@@ -1358,6 +1358,24 @@ pub fn RemoveLogrotateSignalFiles() {
     }
 }
 
+/// C (PostmasterMain): `if (unlink(LOG_METAINFO_DATAFILE) < 0 && errno != ENOENT)
+/// ereport(LOG, ...)` — remove the outdated current-log-filenames metafile at
+/// startup. The `LOG_METAINFO_DATAFILE` (`current_logfiles`) is syslogger.c's
+/// own, so the postmaster's unlink runs through this owner.
+pub fn remove_log_metainfo_datafile() {
+    let c_path = cstring(LOG_METAINFO_DATAFILE);
+    let rc = unsafe { libc::unlink(c_path.as_ptr()) };
+    if rc < 0 {
+        let e = errno::current_errno();
+        if e != libc::ENOENT {
+            let _ = ereport(LOG)
+                .with_saved_errno(e)
+                .errmsg("could not remove file \"current_logfiles\": %m")
+                .finish(here!());
+        }
+    }
+}
+
 /// `static void sigUsr1Handler(SIGNAL_ARGS)` — SIGUSR1: set flag to rotate
 /// logfile and wake the main loop.
 fn sigUsr1Handler(_postgres_signal_arg: i32) {
@@ -1432,6 +1450,13 @@ pub fn init_seams() {
 
     backend_postmaster_syslogger_seams::write_syslogger_file::set(crate::write_syslogger_file);
     backend_postmaster_syslogger_seams::sys_logger_main::set(sys_logger_main_entry);
+
+    // syslogger.c file ops read/removed by the postmaster (PostmasterMain +
+    // ServerLoop): the logrotate signal file and the current-log-filenames
+    // metafile.
+    backend_postmaster_postmaster_seams::remove_logrotate_signal_files::set(RemoveLogrotateSignalFiles);
+    backend_postmaster_postmaster_seams::remove_log_metainfo_datafile::set(remove_log_metainfo_datafile);
+    backend_postmaster_postmaster_seams::check_logrotate_signal::set(CheckLogrotateSignal);
     // The plain `logging_collector` seam (read by signalfuncs.c's
     // pg_rotate_logfile) mirrors the `Logging_collector` GUC; install it to the
     // same accessor backing the GUC get/set pair below.

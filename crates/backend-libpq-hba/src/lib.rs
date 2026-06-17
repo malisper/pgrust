@@ -387,6 +387,17 @@ pub fn init_seams() {
     hba_seams::fill_hba_view::set(views::fill_hba_view_entry);
     hba_seams::fill_ident_view::set(views::fill_ident_view_entry);
     hba_seams::hba_authname::set(views::hba_authname_entry);
+
+    // The postmaster (PostmasterMain) loads pg_hba.conf / pg_ident.conf at
+    // startup. The C `load_hba()` / `load_ident()` return `bool` and log (do not
+    // throw) parse failures; map an internal `Err` to the C `false` ("could not
+    // load"). `HbaFileName` / `IdentFileName` are the configured paths used in
+    // the postmaster's FATAL message.
+    use backend_postmaster_postmaster_seams as psm;
+    psm::load_hba::set(|| loaders::load_hba().unwrap_or(false));
+    psm::load_ident::set(|| loaders::load_ident().unwrap_or(false));
+    psm::hba_file_name::set(loaders::hba_file_name);
+    psm::ident_file_name::set(loaders::ident_file_name);
 }
 
 // A short-lived `MemoryContext`, the idiomatic stand-in for the implicit

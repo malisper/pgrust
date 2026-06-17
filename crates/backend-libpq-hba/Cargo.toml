@@ -13,6 +13,7 @@ crate-type = ["rlib"]
 # Inward seam crates (this crate installs their seams).
 backend-libpq-auth-seams = { path = "../backend-libpq-auth-seams" }
 backend-libpq-hba-seams = { path = "../backend-libpq-hba-seams" }
+backend-postmaster-postmaster-seams = { path = "../backend-postmaster-postmaster-seams" }
 backend-libpq-oauth-seams = { path = "../backend-libpq-oauth-seams" }
 
 # Outward seam crates / owner crates.

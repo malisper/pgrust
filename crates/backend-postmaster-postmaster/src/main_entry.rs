@@ -110,6 +110,25 @@ pub fn postmaster_death_watch_fd() -> i32 {
     unsafe { POSTMASTER_ALIVE_FDS[POSTMASTER_FD_WATCH] }
 }
 
+/// C (`InitPostmasterChild`, miscinit.c:162):
+/// `fcntl(postmaster_alive_fds[POSTMASTER_FD_WATCH], F_SETFD, FD_CLOEXEC)` —
+/// keep the postmaster-death-watch pipe out of exec'd subprograms. The fd is
+/// postmaster.c's own (`postmaster_alive_fds`), so this seam (consumed by
+/// miscinit's InitPostmasterChild) is installed here. `Err` mirrors the C
+/// `ereport(FATAL, ... could not set ... FD_CLOEXEC ...)`.
+pub fn set_postmaster_death_watch_cloexec() -> types_error::PgResult<()> {
+    let fd = unsafe { POSTMASTER_ALIVE_FDS[POSTMASTER_FD_WATCH] };
+    let rc = unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    if rc < 0 {
+        return Err(ereport(FATAL)
+            .errmsg_internal(
+                "could not set postmaster death monitoring pipe to FD_CLOEXEC mode",
+            )
+            .into_error());
+    }
+    Ok(())
+}
+
 /// `read(postmaster_alive_fds[POSTMASTER_FD_WATCH], &c, 1)` — the raw
 /// non-blocking read behind pmsignal's `read_postmaster_death_watch` seam.
 /// Returns `(rc, errno)`.
