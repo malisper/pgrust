@@ -64,6 +64,39 @@ fn use_physical_tlist_accepts_plain_base_relation() {
 }
 
 #[test]
+fn is_outer_join_classifies_join_types() {
+    use crate::is_outer_join;
+    // Inner / semi / right-semi / unique are NOT outer joins.
+    assert!(!is_outer_join(0)); // JOIN_INNER
+    assert!(!is_outer_join(4)); // JOIN_SEMI
+    assert!(!is_outer_join(6)); // JOIN_RIGHT_SEMI
+    assert!(!is_outer_join(8)); // JOIN_UNIQUE_OUTER
+    assert!(!is_outer_join(9)); // JOIN_UNIQUE_INNER
+    // LEFT / FULL / RIGHT / ANTI / RIGHT_ANTI ARE outer joins.
+    assert!(is_outer_join(1)); // JOIN_LEFT
+    assert!(is_outer_join(2)); // JOIN_FULL
+    assert!(is_outer_join(3)); // JOIN_RIGHT
+    assert!(is_outer_join(5)); // JOIN_ANTI
+    assert!(is_outer_join(7)); // JOIN_RIGHT_ANTI
+}
+
+#[test]
+fn jointype_path_to_node_maps_enum_discriminants() {
+    use crate::jointype_path_to_node;
+    use types_nodes::jointype::JoinType as N;
+    assert_eq!(jointype_path_to_node(0), N::JOIN_INNER);
+    assert_eq!(jointype_path_to_node(1), N::JOIN_LEFT);
+    assert_eq!(jointype_path_to_node(2), N::JOIN_FULL);
+    assert_eq!(jointype_path_to_node(3), N::JOIN_RIGHT);
+    assert_eq!(jointype_path_to_node(4), N::JOIN_SEMI);
+    assert_eq!(jointype_path_to_node(5), N::JOIN_ANTI);
+    assert_eq!(jointype_path_to_node(6), N::JOIN_RIGHT_SEMI);
+    assert_eq!(jointype_path_to_node(7), N::JOIN_RIGHT_ANTI);
+    assert_eq!(jointype_path_to_node(8), N::JOIN_UNIQUE_OUTER);
+    assert_eq!(jointype_path_to_node(9), N::JOIN_UNIQUE_INNER);
+}
+
+#[test]
 fn get_gating_quals_empty_without_pseudoconstants() {
     let (mut root, _path_id) = base_rel_planner();
     // hasPseudoConstantQuals defaults to false, so get_gating_quals short-circuits

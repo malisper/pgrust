@@ -79,7 +79,17 @@ use types_nodes::nodeseqscan::SeqScan;
 use types_nodes::nodetidrangescan::TidRangeScan;
 use types_nodes::nodevaluesscan::ValuesScan;
 use types_nodes::nodeworktablescan::WorkTableScan;
-use types_nodes::primnodes::{Expr, TargetEntry};
+use types_nodes::primnodes::{Expr, OpExpr, TargetEntry};
+use types_nodes::jointype::{Join as JoinBase, JoinType as NodeJoinType};
+use types_nodes::nodenestloop::{NestLoop, NestLoopParam};
+use types_nodes::nodehashjoin::{Hash as HashNode, HashJoin};
+use types_nodes::nodegroup::Group as GroupNode;
+use types_nodes::nodeunique::Unique as UniqueNode;
+use types_nodes::nodesetop::SetOp as SetOpNode;
+use types_nodes::noderecursiveunion::RecursiveUnion as RecursiveUnionNode;
+use types_nodes::nodegather::Gather as GatherNode;
+use types_nodes::nodegathermerge::GatherMerge as GatherMergeNode;
+use types_nodes::nodeincrementalsort::IncrementalSort as IncrementalSortNode;
 use types_nodes::rawnodes::RangeTblFunction;
 use mcx::PgString;
 use types_pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
@@ -94,7 +104,10 @@ use backend_nodes_core::nodefuncs::expression_tree_mutator;
 use backend_nodes_equalfuncs_seams::equal_expr as equal_expr_seam;
 use backend_optimizer_path_equivclass_seams as equivclass;
 use backend_optimizer_plan_createplan_seams as cp_seam;
-use backend_optimizer_util_joininfo::restrictinfo::extract_actual_clauses;
+use backend_optimizer_util_joininfo::restrictinfo::{
+    extract_actual_clauses, extract_actual_join_clauses, get_actual_clauses,
+};
+use backend_optimizer_util_clauses::grounded::CommuteOpExpr;
 use backend_optimizer_util_paramassign_seams as paramassign;
 use backend_optimizer_util_pathnode_seams as pathnode;
 use backend_optimizer_util_placeholder_seams as placeholder;
@@ -177,6 +190,9 @@ const T_NamedTuplestoreScan: NodeTag = NodeTag(352);
 const T_WorkTableScan: NodeTag = NodeTag(353);
 const T_ForeignScan: NodeTag = NodeTag(354);
 const T_CustomScan: NodeTag = NodeTag(355);
+/// `COMPARE_EQ` (`access/cmptype.h`) — the equality compare type (= 3).
+const COMPARE_EQ: types_pathnodes::CompareType = 3;
+
 const T_NestLoop: NodeTag = NodeTag(356);
 const T_MergeJoin: NodeTag = NodeTag(358);
 const T_HashJoin: NodeTag = NodeTag(359);
@@ -3133,6 +3149,1390 @@ pub fn is_projection_capable_path(root: &PlannerInfo, path: PathId) -> bool {
     true
 }
 
+// ===========================================================================
+// Join family: create_join_plan dispatch + create_nestloop_plan /
+// create_hashjoin_plan + make_nestloop / make_hashjoin / make_hash +
+// get_switched_clauses + change_plan_targetlist + create_gating_plan
+// (createplan.c). create_mergejoin_plan stays seam-panicked — see the STOP
+// note at the join dispatch.
+// ===========================================================================
+
+/// `IS_OUTER_JOIN(jointype)` (nodes/nodes.h) — LEFT/FULL/RIGHT/ANTI/RIGHT_ANTI.
+#[inline]
+fn is_outer_join(jointype: types_pathnodes::JoinType) -> bool {
+    // (1 << JOIN_LEFT) | (1 << JOIN_FULL) | (1 << JOIN_RIGHT) |
+    // (1 << JOIN_ANTI) | (1 << JOIN_RIGHT_ANTI)
+    const MASK: u32 = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 5) | (1 << 7);
+    (1u32 << jointype) & MASK != 0
+}
+
+/// Map the path-layer `JoinType` (types-pathnodes `u32`, the raw C enum) to the
+/// plan-node `JoinType` (types-nodes). Same C enum, distinct Rust types.
+fn jointype_path_to_node(j: types_pathnodes::JoinType) -> NodeJoinType {
+    use NodeJoinType as N;
+    match j {
+        0 => N::JOIN_INNER,
+        1 => N::JOIN_LEFT,
+        2 => N::JOIN_FULL,
+        3 => N::JOIN_RIGHT,
+        4 => N::JOIN_SEMI,
+        5 => N::JOIN_ANTI,
+        6 => N::JOIN_RIGHT_SEMI,
+        7 => N::JOIN_RIGHT_ANTI,
+        8 => N::JOIN_UNIQUE_OUTER,
+        9 => N::JOIN_UNIQUE_INNER,
+        _ => N::JOIN_INNER,
+    }
+}
+
+/// `change_plan_targetlist(subplan, tlist, tlist_parallel_safe)`
+/// (createplan.c ~2080) — if the top plan node can't project and its existing
+/// tlist isn't already what we need, inject a `Result` node; otherwise just
+/// replace the plan node's tlist.
+fn change_plan_targetlist<'mcx>(
+    mcx: Mcx<'mcx>,
+    subplan: Node<'mcx>,
+    tlist: PgVec<'mcx, TargetEntry<'mcx>>,
+    tlist_parallel_safe: bool,
+) -> PgResult<Node<'mcx>> {
+    let existing: &[TargetEntry<'mcx>] = subplan.plan_head().targetlist.as_deref().unwrap_or(&[]);
+    if !is_projection_capable_plan(&subplan) && !tlist_same_exprs(&tlist, existing) {
+        let child_safe = subplan.plan_head().parallel_safe;
+        inject_projection_plan(mcx, subplan, Some(tlist), child_safe && tlist_parallel_safe)
+    } else {
+        let mut subplan = subplan;
+        {
+            let plan = subplan.plan_head_mut();
+            plan.targetlist = Some(tlist);
+            plan.parallel_safe &= tlist_parallel_safe;
+        }
+        Ok(subplan)
+    }
+}
+
+/// `get_switched_clauses(clauses, outerrelids)` (createplan.c) — return the
+/// per-`RestrictInfo` join-clause `OpExpr` expressions, rearranged so the outer
+/// variable is always on the left, and mark each `RestrictInfo`'s
+/// `outer_is_left` status. `clauses` is the C `List *` of `RestrictInfo *`
+/// (here [`RinfoId`]s into `rinfo_arena`).
+fn get_switched_clauses(
+    root: &mut PlannerInfo,
+    clauses: &[RinfoId],
+    outerrelids: &Relids,
+) -> PgResult<Vec<Expr>> {
+    let mut t_list: Vec<Expr> = Vec::with_capacity(clauses.len());
+    for &rid in clauses {
+        let right_relids = root.rinfo(rid).right_relids.clone();
+        let clause_id = root.rinfo(rid).clause;
+        // (OpExpr *) restrictinfo->clause; Assert(is_opclause(clause));
+        let op: OpExpr = match root.node(clause_id) {
+            Expr::OpExpr(op) => op.clone(),
+            other => {
+                return Err(PgError::error(alloc::format!(
+                    "get_switched_clauses: mergeclause/hashclause is not an OpExpr (got {:?})",
+                    core::mem::discriminant(other)
+                )))
+            }
+        };
+        if bms_is_subset_relids(&right_relids, outerrelids) {
+            // Duplicate just enough of the structure to allow commuting the
+            // clause without changing the original list, then commute it.
+            let mut temp = OpExpr {
+                opno: op.opno,
+                opfuncid: InvalidOid,
+                opresulttype: op.opresulttype,
+                opretset: op.opretset,
+                opcollid: op.opcollid,
+                inputcollid: op.inputcollid,
+                args: op.args.clone(),
+                location: op.location,
+            };
+            CommuteOpExpr(&mut temp)?;
+            t_list.push(Expr::OpExpr(temp));
+            root.rinfo_mut(rid).outer_is_left = false;
+        } else {
+            debug_assert!(bms_is_subset_relids(&root.rinfo(rid).left_relids, outerrelids));
+            t_list.push(Expr::OpExpr(op));
+            root.rinfo_mut(rid).outer_is_left = true;
+        }
+    }
+    Ok(t_list)
+}
+
+/// `bms_is_subset(a, b)` over the `Relids` carrier (relnode seam).
+#[inline]
+fn bms_is_subset_relids(a: &Relids, b: &Relids) -> bool {
+    relnode::relids_is_subset::call(a, b)
+}
+
+/// Resolve a list of clause expression arena handles into an owned qual
+/// `Vec<Expr>` (the C qpqual / joinqual lists, post-`extract_actual_*`). Empty
+/// list is the C `NIL` (`None`).
+fn node_ids_to_expr_list<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &PlannerInfo,
+    ids: &[NodeId],
+) -> PgResult<Option<PgVec<'mcx, Expr>>> {
+    if ids.is_empty() {
+        return Ok(None);
+    }
+    let mut out = vec_with_capacity_in(mcx, ids.len())?;
+    for &id in ids {
+        out.push(root.node(id).clone());
+    }
+    Ok(Some(out))
+}
+
+/// `list_difference(joinclauses, switched)` over plain expression lists — drop
+/// from `joinclauses` (arena [`NodeId`]s) any element `equal()` to a switched
+/// clause expr; used by the merge/hash converters to remove the merge/hash
+/// clauses from the qpqual list. Returns the surviving arena `NodeId`s.
+fn list_difference_exprs(root: &PlannerInfo, joinclauses: &[NodeId], remove: &[Expr]) -> Vec<NodeId> {
+    let mut result = Vec::new();
+    for &cid in joinclauses {
+        let cexpr = root.node(cid);
+        let mut found = false;
+        for r in remove {
+            if equal_expr_seam::call(cexpr, r) {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            result.push(cid);
+        }
+    }
+    result
+}
+
+/// `make_nestloop(tlist, joinclauses, otherclauses, nestParams, lefttree,
+/// righttree, jointype, inner_unique)` (createplan.c:6083).
+#[allow(clippy::too_many_arguments)]
+fn make_nestloop<'mcx>(
+    mcx: Mcx<'mcx>,
+    tlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
+    joinclauses: Option<PgVec<'mcx, Expr>>,
+    otherclauses: Option<PgVec<'mcx, Expr>>,
+    nest_params: Vec<NestLoopParam>,
+    lefttree: Node<'mcx>,
+    righttree: Node<'mcx>,
+    jointype: NodeJoinType,
+    inner_unique: bool,
+) -> PgResult<NestLoop<'mcx>> {
+    let mut node = NestLoop::default();
+    {
+        let plan: &mut Plan = &mut node.join.plan;
+        plan.targetlist = tlist;
+        plan.qual = otherclauses;
+        plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
+        plan.righttree = Some(mcx::alloc_in(mcx, righttree)?);
+    }
+    node.join.jointype = jointype;
+    node.join.inner_unique = inner_unique;
+    node.join.joinqual = joinclauses;
+    node.nestParams = nest_params;
+    Ok(node)
+}
+
+/// `make_hash(lefttree, hashkeys, skewTable, skewColumn, skewInherit)`
+/// (createplan.c:6139).
+fn make_hash<'mcx>(
+    mcx: Mcx<'mcx>,
+    lefttree: Node<'mcx>,
+    hashkeys: Option<PgVec<'mcx, Node<'mcx>>>,
+    skew_table: Oid,
+    skew_column: AttrNumber,
+    skew_inherit: bool,
+) -> PgResult<HashNode<'mcx>> {
+    // plan->targetlist = lefttree->targetlist;
+    let tlist = clone_plan_tlist(mcx, &lefttree)?;
+    let mut node = HashNode::default();
+    {
+        let plan: &mut Plan = &mut node.plan;
+        plan.targetlist = tlist;
+        plan.qual = None;
+        plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
+        plan.righttree = None;
+    }
+    node.hashkeys = hashkeys;
+    node.skewTable = skew_table;
+    node.skewColumn = skew_column;
+    node.skewInherit = skew_inherit;
+    Ok(node)
+}
+
+/// `make_hashjoin(tlist, joinclauses, otherclauses, hashclauses, hashoperators,
+/// hashcollations, hashkeys, lefttree, righttree, jointype, inner_unique)`
+/// (createplan.c:6108).
+#[allow(clippy::too_many_arguments)]
+fn make_hashjoin<'mcx>(
+    mcx: Mcx<'mcx>,
+    tlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
+    joinclauses: Option<PgVec<'mcx, Expr>>,
+    otherclauses: Option<PgVec<'mcx, Expr>>,
+    hashclauses: Option<PgVec<'mcx, Node<'mcx>>>,
+    hashoperators: PgVec<'mcx, Oid>,
+    hashcollations: PgVec<'mcx, Oid>,
+    hashkeys: Option<PgVec<'mcx, Node<'mcx>>>,
+    lefttree: Node<'mcx>,
+    righttree: Node<'mcx>,
+    jointype: NodeJoinType,
+    inner_unique: bool,
+) -> PgResult<HashJoin<'mcx>> {
+    let plan = {
+        let mut plan = Plan::default();
+        plan.targetlist = tlist;
+        plan.qual = otherclauses;
+        plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
+        plan.righttree = Some(mcx::alloc_in(mcx, righttree)?);
+        plan
+    };
+    let join = JoinBase {
+        plan,
+        jointype,
+        inner_unique,
+        joinqual: joinclauses,
+    };
+    Ok(HashJoin {
+        join,
+        hashclauses,
+        hashoperators,
+        hashcollations,
+        hashkeys,
+    })
+}
+
+/// `create_nestloop_plan(root, (NestPath *) best_path)` (createplan.c:4341).
+fn create_nestloop_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+) -> PgResult<Node<'mcx>> {
+    let (mut innerjoinpath, outerjoinpath, jointype, inner_unique, joinrestrictinfo, has_param_info) =
+        match root.path(best_path) {
+            PathNode::NestPath(p) => (
+                p.jpath.innerjoinpath,
+                p.jpath.outerjoinpath,
+                p.jpath.jointype,
+                p.jpath.inner_unique,
+                p.jpath.joinrestrictinfo.clone(),
+                p.jpath.path.param_info.is_some(),
+            ),
+            _ => unreachable!("create_nestloop_plan on non-NestPath"),
+        };
+    let outerjoinpath = outerjoinpath.expect("create_nestloop_plan: NestPath has no outerjoinpath");
+    let innerjoinpath0 = innerjoinpath.expect("create_nestloop_plan: NestPath has no innerjoinpath");
+
+    let tlist = build_path_tlist(mcx, root, best_path)?;
+
+    let save_outer_rels = root.curOuterRels.clone();
+
+    // If the inner path is parameterized by the topmost parent of the outer rel
+    // rather than the outer rel itself, fix that.
+    let outer_parent = root.path(outerjoinpath).base().parent;
+    innerjoinpath =
+        pathnode::reparameterize_path_by_child::call(root, innerjoinpath0, outer_parent)?;
+    let innerjoinpath = innerjoinpath
+        .expect("create_nestloop_plan: reparameterize_path_by_child returned NULL");
+
+    // NestLoop can project, so no need to be picky about child tlists.
+    let outer_plan = create_plan_recurse(mcx, root, run, outerjoinpath, 0)?;
+
+    // For a nestloop, include outer relids in curOuterRels for inner side.
+    let outerrelids = root.rel(outer_parent).relids.clone();
+    root.curOuterRels = relnode::relids_union::call(&root.curOuterRels, &outerrelids);
+
+    let inner_plan = create_plan_recurse(mcx, root, run, innerjoinpath, 0)?;
+
+    // Restore curOuterRels.
+    root.curOuterRels = save_outer_rels;
+
+    // Sort join qual clauses into best execution order.
+    let joinrestrictclauses = order_qual_clauses_rinfo(root, &joinrestrictinfo);
+
+    // Get the join qual clauses (in plain expression form). Pseudoconstant
+    // clauses are ignored here.
+    let parent_relids = root.path(best_path).base().parent;
+    let (mut joinclauses, mut otherclauses): (Vec<NodeId>, Vec<NodeId>) =
+        if is_outer_join(jointype) {
+            let relids = root.rel(parent_relids).relids.clone();
+            extract_actual_join_clauses(root, &joinrestrictclauses, &relids)
+        } else {
+            (extract_actual_clauses(root, &joinrestrictclauses, false), Vec::new())
+        };
+
+    // Replace any outer-relation variables with nestloop params.
+    if has_param_info {
+        joinclauses = replace_nestloop_params_list(mcx, root, &joinclauses)?;
+        otherclauses = replace_nestloop_params_list(mcx, root, &otherclauses)?;
+    }
+
+    // Identify nestloop params supplied by this join node.
+    let path_req_outer = path_req_outer(root, best_path);
+    let nest_param_ids =
+        paramassign::identify_current_nestloop_params::call(mcx, root, run, &outerrelids, &path_req_outer)?;
+
+    // PHV-tlist fixup loop (createplan.c:4435). For simple Vars there is nothing
+    // to do; PHV params may need to be added to the outer plan's tlist. Build the
+    // executor-side NestLoopParam list as we go.
+    let mut outer_plan = outer_plan;
+    let mut nest_params: Vec<NestLoopParam> = Vec::with_capacity(nest_param_ids.len());
+    let mut outer_tlist_extra: Vec<TargetEntry<'mcx>> = Vec::new();
+    let mut outer_tlist_changed = false;
+    let mut outer_parallel_safe = outer_plan.plan_head().parallel_safe;
+    for &nlp_id in &nest_param_ids {
+        let paramno = root.nestloop_param(nlp_id).paramno;
+        let paramval = root.nestloop_param(nlp_id).paramval.clone();
+        match paramval {
+            Expr::Var(var) => {
+                // Nothing to do for simple Vars — already available from outer.
+                nest_params.push(NestLoopParam { paramno, paramval: var });
+            }
+            Expr::PlaceHolderVar(_) => {
+                // A PHV nestloop param. The executor-side NestLoopParam carrier
+                // keeps a strict `Var` paramval, so this faithful path cannot be
+                // expressed without widening that carrier (the planner-working
+                // NestLoopParamNode widens paramval to Expr, but the plan node
+                // does not). This only arises for lateral-PHV nestloops; the
+                // common equijoin case never reaches here.
+                let _ = (&mut outer_tlist_extra, &mut outer_tlist_changed, &mut outer_parallel_safe);
+                return Err(PgError::error(
+                    "create_nestloop_plan: PlaceHolderVar nestloop parameter is not supported \
+                     — types_nodes NestLoopParam.paramval is a strict Var; widening the \
+                     executor-side carrier is out of this lane (lateral-PHV nestloop)",
+                ));
+            }
+            _ => {
+                return Err(PgError::error(
+                    "create_nestloop_plan: nestloop param is neither Var nor PlaceHolderVar",
+                ));
+            }
+        }
+    }
+    // (No outer-tlist change for the supported Var-only subset.)
+    let _ = outer_tlist_extra;
+    if outer_tlist_changed {
+        // Unreachable for the Var-only subset; left as the faithful shape.
+        let new_tlist = clone_plan_tlist(mcx, &outer_plan)?.expect("outer tlist");
+        outer_plan = change_plan_targetlist(mcx, outer_plan, new_tlist, outer_parallel_safe)?;
+    }
+
+    let tlist = tlist_to_plan_field(mcx, tlist)?;
+    let joinclauses_e = node_ids_to_expr_list(mcx, root, &joinclauses)?;
+    let otherclauses_e = node_ids_to_expr_list(mcx, root, &otherclauses)?;
+
+    let mut join_plan = make_nestloop(
+        mcx,
+        tlist,
+        joinclauses_e,
+        otherclauses_e,
+        nest_params,
+        outer_plan,
+        inner_plan,
+        jointype_path_to_node(jointype),
+        inner_unique,
+    )?;
+
+    copy_generic_path_info(&mut join_plan.join.plan, root.path(best_path).base());
+
+    Ok(Node::NestLoop(join_plan))
+}
+
+/// `create_hashjoin_plan(root, (HashPath *) best_path)` (createplan.c:4847).
+fn create_hashjoin_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+) -> PgResult<Node<'mcx>> {
+    let (
+        outerjoinpath,
+        innerjoinpath,
+        jointype,
+        inner_unique,
+        joinrestrictinfo,
+        path_hashclauses,
+        num_batches,
+        inner_rows_total,
+        has_param_info,
+        parallel_aware,
+    ) = match root.path(best_path) {
+        PathNode::HashPath(p) => (
+            p.jpath.outerjoinpath,
+            p.jpath.innerjoinpath,
+            p.jpath.jointype,
+            p.jpath.inner_unique,
+            p.jpath.joinrestrictinfo.clone(),
+            p.path_hashclauses.clone(),
+            p.num_batches,
+            p.inner_rows_total,
+            p.jpath.path.param_info.is_some(),
+            p.jpath.path.parallel_aware,
+        ),
+        _ => unreachable!("create_hashjoin_plan on non-HashPath"),
+    };
+    let outerjoinpath = outerjoinpath.expect("create_hashjoin_plan: HashPath has no outerjoinpath");
+    let innerjoinpath = innerjoinpath.expect("create_hashjoin_plan: HashPath has no innerjoinpath");
+
+    let tlist = build_path_tlist(mcx, root, best_path)?;
+
+    // HashJoin can project; request small tlists where it helps.
+    let outer_flags = if num_batches > 1 { CP_SMALL_TLIST } else { 0 };
+    let outer_plan = create_plan_recurse(mcx, root, run, outerjoinpath, outer_flags)?;
+    let inner_plan = create_plan_recurse(mcx, root, run, innerjoinpath, CP_SMALL_TLIST)?;
+
+    // Sort join qual clauses into best execution order (not the hash clauses).
+    let joinrestrictclauses = order_qual_clauses_rinfo(root, &joinrestrictinfo);
+
+    let parent_relids = root.path(best_path).base().parent;
+    let (mut joinclauses, mut otherclauses): (Vec<NodeId>, Vec<NodeId>) =
+        if is_outer_join(jointype) {
+            let relids = root.rel(parent_relids).relids.clone();
+            extract_actual_join_clauses(root, &joinrestrictclauses, &relids)
+        } else {
+            (extract_actual_clauses(root, &joinrestrictclauses, false), Vec::new())
+        };
+
+    // Remove the hashclauses from the join qual clauses (qpqual remainder).
+    let hashclauses_actual = get_actual_clauses(root, &path_hashclauses);
+    let hashclauses_actual_exprs: Vec<Expr> =
+        hashclauses_actual.iter().map(|&id| root.node(id).clone()).collect();
+    joinclauses = list_difference_exprs(root, &joinclauses, &hashclauses_actual_exprs);
+
+    if has_param_info {
+        joinclauses = replace_nestloop_params_list(mcx, root, &joinclauses)?;
+        otherclauses = replace_nestloop_params_list(mcx, root, &otherclauses)?;
+    }
+
+    // Rearrange hashclauses so the outer variable is always on the left.
+    let outer_relids = root.rel(root.path(outerjoinpath).base().parent).relids.clone();
+    let hashclauses = get_switched_clauses(root, &path_hashclauses, &outer_relids)?;
+
+    // Skew optimization: a single join clause whose outer side is a simple Var.
+    let mut skew_table = InvalidOid;
+    let mut skew_column: AttrNumber = 0;
+    let mut skew_inherit = false;
+    if hashclauses.len() == 1 {
+        if let Expr::OpExpr(clause) = &hashclauses[0] {
+            // node = (Node *) linitial(clause->args);
+            if let Some(arg0) = clause.args.first() {
+                let node = match arg0 {
+                    Expr::RelabelType(rt) => rt.arg.as_deref().unwrap_or(arg0),
+                    other => other,
+                };
+                if let Expr::Var(var) = node {
+                    let rte = planner_rt_fetch(run, root, var.varno as u32);
+                    if rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_RELATION {
+                        skew_table = rte.relid;
+                        skew_column = var.varattno;
+                        skew_inherit = rte.inh;
+                    }
+                }
+            }
+        }
+    }
+
+    // Deconstruct hashclauses into outer/inner hashkeys + operator info.
+    let mut hashoperators: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, hashclauses.len())?;
+    let mut hashcollations: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, hashclauses.len())?;
+    let mut outer_hashkeys: PgVec<'mcx, Node<'mcx>> = vec_with_capacity_in(mcx, hashclauses.len())?;
+    let mut inner_hashkeys: PgVec<'mcx, Node<'mcx>> = vec_with_capacity_in(mcx, hashclauses.len())?;
+    for hc in &hashclauses {
+        let op = match hc {
+            Expr::OpExpr(op) => op,
+            _ => return Err(PgError::error("create_hashjoin_plan: hashclause is not an OpExpr")),
+        };
+        hashoperators.push(op.opno);
+        hashcollations.push(op.inputcollid);
+        let outer_arg = op
+            .args
+            .first()
+            .ok_or_else(|| PgError::error("create_hashjoin_plan: hashclause OpExpr has no args"))?;
+        let inner_arg = op
+            .args
+            .get(1)
+            .ok_or_else(|| PgError::error("create_hashjoin_plan: hashclause OpExpr has one arg"))?;
+        outer_hashkeys.push(expr_to_node(outer_arg.clone()));
+        inner_hashkeys.push(expr_to_node(inner_arg.clone()));
+    }
+
+    // Build the Hash node over the inner plan.
+    let mut hash_plan = make_hash(
+        mcx,
+        inner_plan,
+        Some(inner_hashkeys),
+        skew_table,
+        skew_column,
+        skew_inherit,
+    )?;
+    // Set Hash node's startup & total cost equal to inner plan's total cost.
+    {
+        let inner_cost = {
+            let inner_ref = hash_plan
+                .plan
+                .lefttree
+                .as_deref()
+                .expect("hash plan has lefttree");
+            plan_cost_snapshot(inner_ref.plan_head())
+        };
+        apply_cost_snapshot(&mut hash_plan.plan, &inner_cost);
+        hash_plan.plan.startup_cost = hash_plan.plan.total_cost;
+    }
+    if parallel_aware {
+        hash_plan.plan.parallel_aware = true;
+        hash_plan.rows_total = inner_rows_total;
+    }
+    let tlist = tlist_to_plan_field(mcx, tlist)?;
+    let joinclauses_e = node_ids_to_expr_list(mcx, root, &joinclauses)?;
+    let otherclauses_e = node_ids_to_expr_list(mcx, root, &otherclauses)?;
+    let hashclauses_e = exprs_to_node_list(mcx, hashclauses)?;
+    let outer_hashkeys_opt = if outer_hashkeys.is_empty() { None } else { Some(outer_hashkeys) };
+
+    let mut join_plan = make_hashjoin(
+        mcx,
+        tlist,
+        joinclauses_e,
+        otherclauses_e,
+        hashclauses_e,
+        hashoperators,
+        hashcollations,
+        outer_hashkeys_opt,
+        // lefttree = outer_plan, righttree = the Hash node (over inner_plan).
+        outer_plan,
+        Node::Hash(hash_plan),
+        jointype_path_to_node(jointype),
+        inner_unique,
+    )?;
+
+    copy_generic_path_info(&mut join_plan.join.plan, root.path(best_path).base());
+
+    Ok(Node::HashJoin(join_plan))
+}
+
+/// `create_join_plan(root, (JoinPath *) best_path)` (createplan.c:1081) — the
+/// join dispatch. `create_mergejoin_plan` is not yet portable (it inserts inline
+/// `Sort`/`IncrementalSort` nodes that need `label_sort_with_costsize`, which
+/// requires the unported `cost_sort` costsize seam); it stays seam-panicked.
+fn create_join_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+) -> PgResult<Node<'mcx>> {
+    let pathtype = root.path(best_path).base().pathtype;
+    let joinrestrictinfo = match root.path(best_path) {
+        PathNode::NestPath(p) => p.jpath.joinrestrictinfo.clone(),
+        PathNode::HashPath(p) => p.jpath.joinrestrictinfo.clone(),
+        PathNode::MergePath(p) => p.jpath.joinrestrictinfo.clone(),
+        _ => unreachable!("create_join_plan on non-JoinPath"),
+    };
+
+    let plan = match pathtype {
+        T_HashJoin => create_hashjoin_plan(mcx, root, run, best_path)?,
+        T_NestLoop => create_nestloop_plan(mcx, root, run, best_path)?,
+        T_MergeJoin => {
+            return Err(PgError::error(
+                "create_mergejoin_plan (createplan.c:4493) is not ported — it inserts inline \
+                 Sort/IncrementalSort nodes calling label_sort_with_costsize, which needs the \
+                 unported cost_sort / cost_incremental_sort costsize seams",
+            ))
+        }
+        other => {
+            return Err(PgError::error(alloc::format!(
+                "unrecognized node type: {}",
+                other.0
+            )))
+        }
+    };
+
+    // If there are any pseudoconstant clauses attached to this node, insert a
+    // gating Result node that evaluates the pseudoconstants as one-time quals.
+    let gating_clauses = get_gating_quals(root, &joinrestrictinfo);
+    if !gating_clauses.is_empty() {
+        return create_gating_plan(mcx, root, best_path, plan, gating_clauses);
+    }
+    Ok(plan)
+}
+
+/// `create_gating_plan(root, path, plan, gating_quals)` (createplan.c:1022) —
+/// stack a gating `Result` node carrying the pseudoconstant `gating_quals` atop
+/// the already-built `plan`.
+fn create_gating_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    path: PathId,
+    plan: Node<'mcx>,
+    gating_quals: Vec<NodeId>,
+) -> PgResult<Node<'mcx>> {
+    debug_assert!(!gating_quals.is_empty());
+
+    // Snapshot the input plan's cost/safety before we (possibly) consume it.
+    let cost = plan_cost_snapshot(plan.plan_head());
+    let path_parallel_safe = root.path(path).base().parallel_safe;
+
+    // We might have a trivial Result plan already. Stacking one Result atop
+    // another is silly, so discard the input plan in that case.
+    let is_trivial_result = matches!(
+        &plan,
+        Node::Result(rplan)
+            if rplan.plan.lefttree.is_none() && rplan.resconstantqual.is_none()
+    );
+    let splan: Option<Node<'mcx>> = if is_trivial_result { None } else { Some(plan) };
+
+    // Always return the path's requested tlist; that's never a wrong choice.
+    let tlist = build_path_tlist(mcx, root, path)?;
+    let tlist = tlist_to_plan_field(mcx, tlist)?;
+    let resconstantqual = nodes_to_expr_qual(mcx, root, &gating_quals)?;
+
+    let mut gplan = make_result(mcx, tlist, resconstantqual, splan)?;
+
+    // We don't change cost or size estimates when gating (copy_plan_costsize).
+    apply_cost_snapshot(&mut gplan.plan, &cost);
+    gplan.plan.parallel_safe = path_parallel_safe;
+
+    Ok(Node::Result(gplan))
+}
+
+// ===========================================================================
+// Upper converters: group / unique / setop / recursiveunion / gather /
+// gather_merge / incrementalsort (createplan.c).
+// ===========================================================================
+
+/// Resolve a `SortGroupClause` arena `NodeId` list into owned values (the C
+/// `List *` of `SortGroupClause *`). Used by group / setop / recursiveunion /
+/// unique-from-sortclauses converters.
+fn resolve_sort_group_clauses(
+    root: &PlannerInfo,
+    ids: &[NodeId],
+) -> Vec<types_nodes::rawnodes::SortGroupClause> {
+    ids.iter().map(|&id| *root.sortgroupclause(id)).collect()
+}
+
+/// `make_group(tlist, qual, numGroupCols, grpColIdx, grpOperators,
+/// grpCollations, lefttree)` (createplan.c:6805).
+#[allow(clippy::too_many_arguments)]
+fn make_group<'mcx>(
+    mcx: Mcx<'mcx>,
+    tlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
+    qual: Option<PgVec<'mcx, Expr>>,
+    num_group_cols: i32,
+    grp_col_idx: Vec<AttrNumber>,
+    grp_operators: Vec<Oid>,
+    grp_collations: Vec<Oid>,
+    lefttree: Node<'mcx>,
+) -> PgResult<GroupNode<'mcx>> {
+    let mut plan = Plan::default();
+    plan.qual = qual;
+    plan.targetlist = tlist;
+    plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
+    plan.righttree = None;
+    Ok(GroupNode {
+        plan,
+        numCols: num_group_cols,
+        grpColIdx: oid_attr_vec(mcx, grp_col_idx)?,
+        grpOperators: oid_vec(mcx, grp_operators)?,
+        grpCollations: oid_vec(mcx, grp_collations)?,
+    })
+}
+
+/// `create_group_plan(root, (GroupPath *) best_path)` (createplan.c:2238).
+fn create_group_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+) -> PgResult<Node<'mcx>> {
+    let (subpath, group_clause_ids, qual_ids) = match root.path(best_path) {
+        PathNode::GroupPath(p) => (p.subpath, p.groupClause.clone(), p.qual.clone()),
+        _ => unreachable!("create_group_plan on non-GroupPath"),
+    };
+    let subpath = subpath.expect("create_group_plan: GroupPath has no subpath");
+
+    // Group can project, but grouping columns must be available.
+    let subplan = create_plan_recurse(mcx, root, run, subpath, CP_LABEL_TLIST)?;
+
+    let tlist = build_path_tlist(mcx, root, best_path)?;
+    let tlist = tlist_to_plan_field(mcx, tlist)?;
+
+    let quals = order_qual_clauses(root, &qual_ids);
+    let quals = nodes_to_expr_qual(mcx, root, &quals)?;
+
+    let group_clauses = resolve_sort_group_clauses(root, &group_clause_ids);
+    let num_group_cols = group_clauses.len() as i32;
+
+    let subplan_tlist: &[TargetEntry<'mcx>] = match subplan.plan_head().targetlist {
+        Some(ref tl) => tl.as_slice(),
+        None => &[],
+    };
+    let grp_col_idx = util_tlist::extract_grouping_cols(&group_clauses, subplan_tlist)?;
+    let grp_operators = util_tlist::extract_grouping_ops(&group_clauses);
+    let grp_collations =
+        util_tlist::extract_grouping_collations(&group_clauses, subplan_tlist)?;
+
+    let mut plan = make_group(
+        mcx,
+        tlist,
+        quals,
+        num_group_cols,
+        grp_col_idx,
+        grp_operators,
+        grp_collations,
+        subplan,
+    )?;
+
+    copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
+
+    Ok(Node::Group(plan))
+}
+
+/// `make_unique_from_pathkeys(lefttree, pathkeys, numCols)` (createplan.c:6884).
+fn make_unique_from_pathkeys<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &PlannerInfo,
+    lefttree: Node<'mcx>,
+    pathkeys: &[PathKey],
+    num_cols: i32,
+) -> PgResult<UniqueNode<'mcx>> {
+    let tlist = clone_plan_tlist(mcx, &lefttree)?;
+
+    let mut uniq_col_idx: Vec<AttrNumber> = Vec::with_capacity(num_cols as usize);
+    let mut uniq_operators: Vec<Oid> = Vec::with_capacity(num_cols as usize);
+    let mut uniq_collations: Vec<Oid> = Vec::with_capacity(num_cols as usize);
+
+    let plan_tlist: &[TargetEntry<'mcx>] = tlist.as_deref().unwrap_or(&[]);
+
+    let mut keyno = 0i32;
+    for pathkey in pathkeys {
+        if keyno >= num_cols {
+            break;
+        }
+        let ec_id = pathkey
+            .pk_eclass
+            .expect("make_unique_from_pathkeys: PathKey has no EquivalenceClass");
+        let ec = root.ec(ec_id);
+
+        let mut matched: Option<(AttrNumber, Oid)> = None; // (resno, pk_datatype)
+        if ec.ec_has_volatile {
+            if ec.ec_sortref == 0 {
+                return Err(PgError::error("volatile EquivalenceClass has no sortref"));
+            }
+            let tle = get_sortgroupref_tle(ec.ec_sortref, plan_tlist)?;
+            debug_assert_eq!(ec.ec_members.len(), 1);
+            let em = root.em(ec.ec_members[0]);
+            matched = Some((tle.resno, em.em_datatype));
+        } else {
+            for tle in plan_tlist.iter() {
+                let tle_expr = tle.expr.as_deref().cloned().unwrap_or_else(|| Expr::Var(Default::default()));
+                if let Some(em) = find_ec_member_matching_expr(root, ec_id, &tle_expr, &None) {
+                    matched = Some((tle.resno, em.em_datatype));
+                    break;
+                }
+            }
+        }
+        let (resno, pk_datatype) =
+            matched.ok_or_else(|| PgError::error("could not find pathkey item to sort"))?;
+
+        let eqop = lsyscache::get_opfamily_member_for_cmptype::call(
+            pathkey.pk_opfamily,
+            pk_datatype,
+            pk_datatype,
+            COMPARE_EQ,
+        )?;
+        if eqop == InvalidOid {
+            return Err(PgError::error(alloc::format!(
+                "missing operator {}({},{}) in opfamily {}",
+                COMPARE_EQ, pk_datatype, pk_datatype, pathkey.pk_opfamily
+            )));
+        }
+        uniq_col_idx.push(resno);
+        uniq_operators.push(eqop);
+        uniq_collations.push(ec.ec_collation);
+        keyno += 1;
+    }
+
+    let mut plan = Plan::default();
+    plan.targetlist = tlist;
+    plan.qual = None;
+    plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
+    plan.righttree = None;
+    Ok(UniqueNode {
+        plan,
+        numCols: num_cols,
+        uniqColIdx: oid_attr_vec_opt(mcx, uniq_col_idx)?,
+        uniqOperators: oid_vec_opt(mcx, uniq_operators)?,
+        uniqCollations: oid_vec_opt(mcx, uniq_collations)?,
+    })
+}
+
+/// `create_upper_unique_plan(root, (UpperUniquePath *) best_path, flags)`
+/// (createplan.c:2277). The `T_Unique` dispatch arm: C also handles
+/// `create_unique_plan` (a `UniquePath`, the JOIN_UNIQUE de-dup), which is not
+/// reached on the SELECT-DISTINCT path and stays errored here.
+fn create_unique_dispatch_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+    flags: i32,
+) -> PgResult<Node<'mcx>> {
+    match root.path(best_path) {
+        PathNode::UpperUniquePath(_) => create_upper_unique_plan(mcx, root, run, best_path, flags),
+        PathNode::UniquePath(_) => Err(PgError::error(
+            "create_unique_plan (createplan.c:1721) is not ported — the JOIN_UNIQUE \
+             UniquePath de-duplication path has no plan converter yet",
+        )),
+        _ => unreachable!("create_unique_dispatch_plan on non-Unique pathtype"),
+    }
+}
+
+fn create_upper_unique_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+    flags: i32,
+) -> PgResult<Node<'mcx>> {
+    let (subpath, numkeys) = match root.path(best_path) {
+        PathNode::UpperUniquePath(p) => (p.subpath, p.numkeys),
+        _ => unreachable!("create_upper_unique_plan on non-UpperUniquePath"),
+    };
+    let subpath = subpath.expect("create_upper_unique_plan: UpperUniquePath has no subpath");
+
+    // Unique doesn't project; tlist requirements pass through, and grouping
+    // columns must be labeled.
+    let subplan = create_plan_recurse(mcx, root, run, subpath, flags | CP_LABEL_TLIST)?;
+
+    let pathkeys = root.path(best_path).base().pathkeys.clone();
+    let mut plan = make_unique_from_pathkeys(mcx, root, subplan, &pathkeys, numkeys)?;
+
+    copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
+
+    Ok(Node::Unique(plan))
+}
+
+/// `make_setop(cmd, strategy, tlist, lefttree, righttree, groupList, numGroups)`
+/// (createplan.c:7019).
+#[allow(clippy::too_many_arguments)]
+fn make_setop<'mcx>(
+    mcx: Mcx<'mcx>,
+    cmd: types_nodes::nodesetop::SetOpCmd,
+    strategy: types_nodes::nodesetop::SetOpStrategy,
+    tlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
+    lefttree: Node<'mcx>,
+    righttree: Node<'mcx>,
+    group_list: &[types_nodes::rawnodes::SortGroupClause],
+    num_groups: i64,
+) -> PgResult<SetOpNode<'mcx>> {
+    let num_cols = group_list.len() as i32;
+
+    let mut plan = Plan::default();
+    plan.targetlist = tlist;
+    plan.qual = None;
+    plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
+    plan.righttree = Some(mcx::alloc_in(mcx, righttree)?);
+
+    let plan_tlist: &[TargetEntry<'mcx>] = plan.targetlist.as_deref().unwrap_or(&[]);
+
+    let mut cmp_col_idx: PgVec<'mcx, AttrNumber> = vec_with_capacity_in(mcx, group_list.len())?;
+    let mut cmp_operators: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, group_list.len())?;
+    let mut cmp_collations: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, group_list.len())?;
+    let mut cmp_nulls_first: PgVec<'mcx, bool> = vec_with_capacity_in(mcx, group_list.len())?;
+    for sortcl in group_list {
+        let tle = util_tlist::get_sortgroupclause_tle(sortcl, plan_tlist)?;
+        cmp_col_idx.push(tle.resno);
+        if strategy == types_nodes::nodesetop::SETOP_HASHED {
+            cmp_operators.push(sortcl.eqop);
+        } else {
+            cmp_operators.push(sortcl.sortop);
+        }
+        cmp_collations.push(expr_collation_of_tle(tle)?);
+        cmp_nulls_first.push(sortcl.nulls_first);
+    }
+
+    Ok(SetOpNode {
+        plan,
+        cmd,
+        strategy,
+        numCols: num_cols,
+        cmpColIdx: cmp_col_idx,
+        cmpOperators: cmp_operators,
+        cmpCollations: cmp_collations,
+        cmpNullsFirst: cmp_nulls_first,
+        numGroups: num_groups,
+    })
+}
+
+/// `create_setop_plan(root, (SetOpPath *) best_path, flags)` (createplan.c:2709).
+fn create_setop_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+    flags: i32,
+) -> PgResult<Node<'mcx>> {
+    let (leftpath, rightpath, cmd, strategy, group_list_ids, num_groups) =
+        match root.path(best_path) {
+            PathNode::SetOpPath(p) => (
+                p.leftpath,
+                p.rightpath,
+                p.cmd,
+                p.strategy,
+                p.groupList.clone(),
+                p.numGroups,
+            ),
+            _ => unreachable!("create_setop_plan on non-SetOpPath"),
+        };
+    let leftpath = leftpath.expect("create_setop_plan: SetOpPath has no leftpath");
+    let rightpath = rightpath.expect("create_setop_plan: SetOpPath has no rightpath");
+
+    let tlist = build_path_tlist(mcx, root, best_path)?;
+
+    // SetOp doesn't project; grouping columns must be labeled.
+    let leftplan = create_plan_recurse(mcx, root, run, leftpath, flags | CP_LABEL_TLIST)?;
+    let rightplan = create_plan_recurse(mcx, root, run, rightpath, flags | CP_LABEL_TLIST)?;
+
+    let num_groups = costsize::clamp_cardinality_to_long::call(num_groups);
+
+    let group_list = resolve_sort_group_clauses(root, &group_list_ids);
+    let tlist = tlist_to_plan_field(mcx, tlist)?;
+
+    let mut plan = make_setop(
+        mcx,
+        cmd as types_nodes::nodesetop::SetOpCmd,
+        strategy as types_nodes::nodesetop::SetOpStrategy,
+        tlist,
+        leftplan,
+        rightplan,
+        &group_list,
+        num_groups,
+    )?;
+
+    copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
+
+    Ok(Node::SetOp(plan))
+}
+
+/// `make_recursive_union(tlist, lefttree, righttree, wtParam, distinctList,
+/// numGroups)` (createplan.c:5997).
+#[allow(clippy::too_many_arguments)]
+fn make_recursive_union<'mcx>(
+    mcx: Mcx<'mcx>,
+    tlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
+    lefttree: Node<'mcx>,
+    righttree: Node<'mcx>,
+    wt_param: i32,
+    distinct_list: &[types_nodes::rawnodes::SortGroupClause],
+    num_groups: i64,
+) -> PgResult<RecursiveUnionNode<'mcx>> {
+    let num_cols = distinct_list.len() as i32;
+
+    let mut plan = Plan::default();
+    plan.targetlist = tlist;
+    plan.qual = None;
+    plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
+    plan.righttree = Some(mcx::alloc_in(mcx, righttree)?);
+
+    let plan_tlist: &[TargetEntry<'mcx>] = plan.targetlist.as_deref().unwrap_or(&[]);
+
+    let mut dup_col_idx: PgVec<'mcx, AttrNumber> = vec_with_capacity_in(mcx, distinct_list.len())?;
+    let mut dup_operators: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, distinct_list.len())?;
+    let mut dup_collations: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, distinct_list.len())?;
+    for sortcl in distinct_list {
+        let tle = util_tlist::get_sortgroupclause_tle(sortcl, plan_tlist)?;
+        dup_col_idx.push(tle.resno);
+        dup_operators.push(sortcl.eqop);
+        dup_collations.push(expr_collation_of_tle(tle)?);
+    }
+
+    Ok(RecursiveUnionNode {
+        plan,
+        wtParam: wt_param,
+        numCols: num_cols,
+        dupColIdx: dup_col_idx,
+        dupOperators: dup_operators,
+        dupCollations: dup_collations,
+        numGroups: num_groups,
+    })
+}
+
+/// `create_recursiveunion_plan(root, (RecursiveUnionPath *) best_path)`
+/// (createplan.c:2749).
+fn create_recursiveunion_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+) -> PgResult<Node<'mcx>> {
+    let (leftpath, rightpath, distinct_list_ids, wt_param, num_groups) =
+        match root.path(best_path) {
+            PathNode::RecursiveUnionPath(p) => (
+                p.leftpath,
+                p.rightpath,
+                p.distinctList.clone(),
+                p.wtParam,
+                p.numGroups,
+            ),
+            _ => unreachable!("create_recursiveunion_plan on non-RecursiveUnionPath"),
+        };
+    let leftpath = leftpath.expect("create_recursiveunion_plan: RecursiveUnionPath has no leftpath");
+    let rightpath =
+        rightpath.expect("create_recursiveunion_plan: RecursiveUnionPath has no rightpath");
+
+    // Need both children to produce the same tlist, so force it.
+    let leftplan = create_plan_recurse(mcx, root, run, leftpath, CP_EXACT_TLIST)?;
+    let rightplan = create_plan_recurse(mcx, root, run, rightpath, CP_EXACT_TLIST)?;
+
+    let tlist = build_path_tlist(mcx, root, best_path)?;
+    let tlist = tlist_to_plan_field(mcx, tlist)?;
+
+    let num_groups = costsize::clamp_cardinality_to_long::call(num_groups);
+    let distinct_list = resolve_sort_group_clauses(root, &distinct_list_ids);
+
+    let mut plan = make_recursive_union(
+        mcx,
+        tlist,
+        leftplan,
+        rightplan,
+        wt_param,
+        &distinct_list,
+        num_groups,
+    )?;
+
+    copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
+
+    Ok(Node::RecursiveUnion(plan))
+}
+
+/// `make_gather(qptlist, qpqual, nworkers, rescan_param, single_copy, subplan)`
+/// (createplan.c:6990).
+fn make_gather<'mcx>(
+    mcx: Mcx<'mcx>,
+    qptlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
+    nworkers: i32,
+    rescan_param: i32,
+    single_copy: bool,
+    subplan: Node<'mcx>,
+) -> PgResult<GatherNode<'mcx>> {
+    let mut node = GatherNode::default();
+    {
+        let plan: &mut Plan = &mut node.plan;
+        plan.targetlist = qptlist;
+        plan.qual = None; // qpqual is NIL at the only call site
+        plan.lefttree = Some(mcx::alloc_in(mcx, subplan)?);
+        plan.righttree = None;
+    }
+    node.num_workers = nworkers;
+    node.rescan_param = rescan_param;
+    node.single_copy = single_copy;
+    node.invisible = false;
+    node.initParam = None;
+    Ok(node)
+}
+
+/// `create_gather_plan(root, (GatherPath *) best_path)` (createplan.c:1921).
+fn create_gather_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+) -> PgResult<Node<'mcx>> {
+    let (subpath, num_workers, single_copy) = match root.path(best_path) {
+        PathNode::GatherPath(p) => (p.subpath, p.num_workers, p.single_copy),
+        _ => unreachable!("create_gather_plan on non-GatherPath"),
+    };
+    let subpath = subpath.expect("create_gather_plan: GatherPath has no subpath");
+
+    // Push projection down to the child node.
+    let subplan = create_plan_recurse(mcx, root, run, subpath, CP_EXACT_TLIST)?;
+
+    let tlist = build_path_tlist(mcx, root, best_path)?;
+    let tlist = tlist_to_plan_field(mcx, tlist)?;
+
+    let rescan_param = paramassign::assign_special_exec_param::call(root)?;
+
+    let mut gather_plan = make_gather(mcx, tlist, num_workers, rescan_param, single_copy, subplan)?;
+
+    copy_generic_path_info(&mut gather_plan.plan, root.path(best_path).base());
+
+    // Use parallel mode for parallel plans.
+    if let Some(g) = root.glob.as_mut() {
+        g.parallel_mode_needed = true;
+    }
+
+    Ok(Node::Gather(gather_plan))
+}
+
+/// `create_gather_merge_plan(root, (GatherMergePath *) best_path)`
+/// (createplan.c:1959).
+fn create_gather_merge_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+) -> PgResult<Node<'mcx>> {
+    let (subpath, num_workers) = match root.path(best_path) {
+        PathNode::GatherMergePath(p) => (p.subpath, p.num_workers),
+        _ => unreachable!("create_gather_merge_plan on non-GatherMergePath"),
+    };
+    let subpath = subpath.expect("create_gather_merge_plan: GatherMergePath has no subpath");
+    let pathkeys = root.path(best_path).base().pathkeys.clone();
+
+    let tlist = build_path_tlist(mcx, root, best_path)?;
+
+    // As with Gather, project away columns in the workers.
+    let subplan = create_plan_recurse(mcx, root, run, subpath, CP_EXACT_TLIST)?;
+
+    let rescan_param = paramassign::assign_special_exec_param::call(root)?;
+
+    // Gather Merge is pointless with no pathkeys.
+    debug_assert!(!pathkeys.is_empty());
+
+    let subpath_parent = root.path(subpath).base().parent;
+    let relids = root.rel(subpath_parent).relids.clone();
+    let (subplan, sort_col_idx, sort_operators, collations, nulls_first) =
+        prepare_sort_from_pathkeys(mcx, root, subplan, &pathkeys, &relids, None, false)?;
+
+    let num_cols = sort_col_idx.len() as i32;
+
+    let mut node = GatherMergeNode::default();
+    node.plan.targetlist = tlist_to_plan_field(mcx, tlist)?;
+    node.num_workers = num_workers;
+    copy_generic_path_info(&mut node.plan, root.path(best_path).base());
+    node.rescan_param = rescan_param;
+    node.numCols = num_cols;
+    node.sortColIdx = sort_col_idx.iter().copied().collect();
+    node.sortOperators = sort_operators.iter().copied().collect();
+    node.collations = collations.iter().copied().collect();
+    node.nullsFirst = nulls_first.iter().copied().collect();
+    node.plan.lefttree = Some(mcx::alloc_in(mcx, subplan)?);
+
+    if let Some(g) = root.glob.as_mut() {
+        g.parallel_mode_needed = true;
+    }
+
+    Ok(Node::GatherMerge(node))
+}
+
+/// `make_incrementalsort(lefttree, numCols, nPresortedCols, sortColIdx,
+/// sortOperators, collations, nullsFirst)` (createplan.c:6234).
+fn make_incrementalsort<'mcx>(
+    mcx: Mcx<'mcx>,
+    lefttree: Node<'mcx>,
+    n_presorted_cols: i32,
+    sort_col_idx: PgVec<'mcx, AttrNumber>,
+    sort_operators: PgVec<'mcx, Oid>,
+    collations: PgVec<'mcx, Oid>,
+    nulls_first: PgVec<'mcx, bool>,
+) -> PgResult<IncrementalSortNode<'mcx>> {
+    let num_cols = sort_col_idx.len() as i32;
+    let tlist = clone_plan_tlist(mcx, &lefttree)?;
+    let mut plan = Plan::default();
+    plan.targetlist = tlist;
+    plan.qual = None;
+    plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
+    plan.righttree = None;
+    let sort = Sort {
+        plan,
+        numCols: num_cols,
+        sortColIdx: sort_col_idx,
+        sortOperators: sort_operators,
+        collations,
+        nullsFirst: nulls_first,
+    };
+    Ok(IncrementalSortNode {
+        sort,
+        nPresortedCols: n_presorted_cols,
+    })
+}
+
+/// `make_incrementalsort_from_pathkeys(lefttree, pathkeys, relids,
+/// nPresortedCols)` (createplan.c:6516).
+fn make_incrementalsort_from_pathkeys<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &PlannerInfo,
+    lefttree: Node<'mcx>,
+    pathkeys: &[PathKey],
+    relids: &Relids,
+    n_presorted_cols: i32,
+) -> PgResult<IncrementalSortNode<'mcx>> {
+    let (lefttree, sort_col_idx, sort_operators, collations, nulls_first) =
+        prepare_sort_from_pathkeys(mcx, root, lefttree, pathkeys, relids, None, false)?;
+    make_incrementalsort(
+        mcx,
+        lefttree,
+        n_presorted_cols,
+        sort_col_idx,
+        sort_operators,
+        collations,
+        nulls_first,
+    )
+}
+
+/// `create_incrementalsort_plan(root, (IncrementalSortPath *) best_path, flags)`
+/// (createplan.c:2211).
+fn create_incrementalsort_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+    flags: i32,
+) -> PgResult<Node<'mcx>> {
+    let (subpath, n_presorted_cols) = match root.path(best_path) {
+        PathNode::IncrementalSortPath(p) => (p.spath.subpath, p.nPresortedCols),
+        _ => unreachable!("create_incrementalsort_plan on non-IncrementalSortPath"),
+    };
+    let subpath = subpath.expect("create_incrementalsort_plan: IncrementalSortPath has no subpath");
+
+    // See create_sort_plan: request a small tlist.
+    let subplan = create_plan_recurse(mcx, root, run, subpath, flags | CP_SMALL_TLIST)?;
+
+    // IS_OTHER_REL(subpath->parent) ? path.parent->relids : NULL.
+    let subpath_parent = root.path(subpath).base().parent;
+    let relids: Relids = if root.rel(subpath_parent).reloptkind >= RELOPT_OTHER_MEMBER_REL {
+        let parent = root.path(best_path).base().parent;
+        root.rel(parent).relids.clone()
+    } else {
+        None
+    };
+    let pathkeys = root.path(best_path).base().pathkeys.clone();
+
+    let mut plan =
+        make_incrementalsort_from_pathkeys(mcx, root, subplan, &pathkeys, &relids, n_presorted_cols)?;
+
+    copy_generic_path_info(&mut plan.sort.plan, root.path(best_path).base());
+
+    Ok(Node::IncrementalSort(plan))
+}
+
+// ---------------------------------------------------------------------------
+// Small owned-field / list helpers shared by the join + upper converters.
+// ---------------------------------------------------------------------------
+
+/// The cost/size fields `copy_plan_costsize` reads from a source `Plan`. We
+/// snapshot them by value (rather than borrowing the whole `Plan`, which holds
+/// non-`Clone` owned children) so the source node can then be moved.
+struct PlanCostSnapshot {
+    disabled_nodes: i32,
+    startup_cost: f64,
+    total_cost: f64,
+    plan_rows: f64,
+    plan_width: i32,
+    parallel_safe: bool,
+}
+
+fn plan_cost_snapshot(p: &Plan) -> PlanCostSnapshot {
+    PlanCostSnapshot {
+        disabled_nodes: p.disabled_nodes,
+        startup_cost: p.startup_cost,
+        total_cost: p.total_cost,
+        plan_rows: p.plan_rows,
+        plan_width: p.plan_width,
+        parallel_safe: p.parallel_safe,
+    }
+}
+
+/// `copy_plan_costsize(dest, src)` over the by-value snapshot: the inserted node
+/// is assumed not parallel-aware and parallel-safe iff the child is.
+fn apply_cost_snapshot(dest: &mut Plan, src: &PlanCostSnapshot) {
+    dest.disabled_nodes = src.disabled_nodes;
+    dest.startup_cost = src.startup_cost;
+    dest.total_cost = src.total_cost;
+    dest.plan_rows = src.plan_rows;
+    dest.plan_width = src.plan_width;
+    dest.parallel_aware = false;
+    dest.parallel_safe = src.parallel_safe;
+}
+
+/// `exprCollation((Node *) tle->expr)` over a `TargetEntry`.
+fn expr_collation_of_tle(tle: &TargetEntry<'_>) -> PgResult<Oid> {
+    backend_nodes_core::nodefuncs::expr_collation(tle.expr.as_deref())
+}
+
+/// Replace nestloop params over a list of clause `NodeId`s (the C
+/// `replace_nestloop_params(root, (Node *) clause_list)` applied per element).
+fn replace_nestloop_params_list(
+    mcx: Mcx<'_>,
+    root: &mut PlannerInfo,
+    clauses: &[NodeId],
+) -> PgResult<Vec<NodeId>> {
+    let mut out = Vec::with_capacity(clauses.len());
+    for &cid in clauses {
+        out.push(replace_nestloop_params(mcx, root, cid)?);
+    }
+    Ok(out)
+}
+
+/// `PATH_REQ_OUTER(path)` — the path's required-outer relids (from
+/// `param_info->ppi_req_outer`), or NULL.
+fn path_req_outer(root: &PlannerInfo, path: PathId) -> Relids {
+    match root.path(path).base().param_info.as_deref() {
+        Some(ppi) => ppi.ppi_req_outer.clone(),
+        None => None,
+    }
+}
+
+/// Convert a `Vec<AttrNumber>` (palloc'd array) into the owned plan-node field
+/// `PgVec<AttrNumber>` (Group's are non-optional).
+fn oid_attr_vec<'mcx>(mcx: Mcx<'mcx>, v: Vec<AttrNumber>) -> PgResult<PgVec<'mcx, AttrNumber>> {
+    let mut out = vec_with_capacity_in(mcx, v.len())?;
+    for x in v {
+        out.push(x);
+    }
+    Ok(out)
+}
+
+/// Convert a `Vec<Oid>` (palloc'd array) into the owned plan-node field
+/// `PgVec<Oid>` (non-optional).
+fn oid_vec<'mcx>(mcx: Mcx<'mcx>, v: Vec<Oid>) -> PgResult<PgVec<'mcx, Oid>> {
+    let mut out = vec_with_capacity_in(mcx, v.len())?;
+    for x in v {
+        out.push(x);
+    }
+    Ok(out)
+}
+
+/// `Option<PgVec<AttrNumber>>` field (Unique's; empty = `None`).
+fn oid_attr_vec_opt<'mcx>(
+    mcx: Mcx<'mcx>,
+    v: Vec<AttrNumber>,
+) -> PgResult<Option<PgVec<'mcx, AttrNumber>>> {
+    if v.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(oid_attr_vec(mcx, v)?))
+}
+
+/// `Option<PgVec<Oid>>` field (Unique's; empty = `None`).
+fn oid_vec_opt<'mcx>(mcx: Mcx<'mcx>, v: Vec<Oid>) -> PgResult<Option<PgVec<'mcx, Oid>>> {
+    if v.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(oid_vec(mcx, v)?))
+}
+
+/// Wrap an owned `Expr` into the `Node<'mcx>` carrier the HashJoin hashkey /
+/// hashclause lists hold (`PgVec<Node>`).
+fn expr_to_node<'mcx>(e: Expr) -> Node<'mcx> {
+    Node::Expr(e)
+}
+
+/// Move an owned `Vec<Expr>` into a `PgVec<Node>` (the HashJoin `hashclauses`
+/// field; empty = `None`).
+fn exprs_to_node_list<'mcx>(
+    mcx: Mcx<'mcx>,
+    v: Vec<Expr>,
+) -> PgResult<Option<PgVec<'mcx, Node<'mcx>>>> {
+    if v.is_empty() {
+        return Ok(None);
+    }
+    let mut out = vec_with_capacity_in(mcx, v.len())?;
+    for e in v {
+        out.push(Node::Expr(e));
+    }
+    Ok(Some(out))
+}
+
 pub fn init_seams() {
     pathnode::is_projection_capable_path::set(is_projection_capable_path);
     cp_seam::create_scan_plan::set(create_scan_plan);
@@ -3162,6 +4562,19 @@ pub fn init_seams() {
     cp_seam::create_limit_plan::set(create_limit_plan);
     // Agg upper converter (the T_Agg dispatch arm).
     cp_seam::create_agg_dispatch_plan::set(create_agg_dispatch_plan);
+    // Join family: dispatch + nestloop + hashjoin + gating. create_mergejoin_plan
+    // stays seam-panicked (needs cost_sort for inline sort nodes).
+    cp_seam::create_join_plan::set(create_join_plan);
+    cp_seam::create_gating_plan::set(create_gating_plan);
+    // Upper converters: group / unique / setop / recursiveunion / gather /
+    // gather_merge / incrementalsort.
+    cp_seam::create_group_plan::set(create_group_plan);
+    cp_seam::create_unique_dispatch_plan::set(create_unique_dispatch_plan);
+    cp_seam::create_setop_plan::set(create_setop_plan);
+    cp_seam::create_recursiveunion_plan::set(create_recursiveunion_plan);
+    cp_seam::create_gather_plan::set(create_gather_plan);
+    cp_seam::create_gather_merge_plan::set(create_gather_merge_plan);
+    cp_seam::create_incrementalsort_plan::set(create_incrementalsort_plan);
 }
 
 #[cfg(test)]

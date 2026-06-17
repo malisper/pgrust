@@ -11558,6 +11558,7 @@ dependencies = [
  "backend-optimizer-path-equivclass",
  "backend-optimizer-path-equivclass-seams",
  "backend-optimizer-plan-createplan-seams",
+ "backend-optimizer-util-clauses",
  "backend-optimizer-util-joininfo",
  "backend-optimizer-util-paramassign-seams",
  "backend-optimizer-util-pathnode-seams",

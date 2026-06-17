@@ -32,6 +32,8 @@ backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
 backend-optimizer-util-joininfo = { path = "../backend-optimizer-util-joininfo" }
 # build_physical_tlist (plancat.c).
 backend-optimizer-util-plancat = { path = "../backend-optimizer-util-plancat" }
+# CommuteOpExpr (clauses.c) — get_switched_clauses in the join converters.
+backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
 # equal_expr (equalfuncs.c) — list_difference over the OR-clause in tidscan.
 backend-nodes-equalfuncs-seams = { path = "../backend-nodes-equalfuncs-seams" }
 # is_redundant_derived_clause (equivclass.c) — tidscan single-tidqual dedup.
