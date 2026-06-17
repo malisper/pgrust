@@ -140,15 +140,94 @@ thread_local! {
     static PROC_GLOBAL: RefCell<Option<PROC_HDR>> = const { RefCell::new(None) };
 }
 
-thread_local! {
-    /// `slock_t *ProcStructLock` (proc.c file-scope global) — the spinlock that
-    /// serializes access to the `ProcGlobal` freelists / `AuxiliaryProcs` slots.
-    /// In C this is a separate `ShmemInitStruct` word; here the crate owns the
-    /// `Spinlock` word (initialized free, matching `SpinLockInit` in
-    /// `InitProcGlobal`), acquired/released through the merged `s_lock.c`
-    /// primitive.
-    static PROC_STRUCT_LOCK: types_storage::storage::Spinlock =
-        types_storage::storage::Spinlock::new();
+// ---- genuinely-shared per-PGPROC `pid` words + `ProcStructLock` ----
+//
+// The cluster-wide PGPROC array (`PROC_GLOBAL` above) is owned per-process and
+// inherited copy-on-fork, which is sound for its read-mostly fields. But the
+// `pid` word and the `ProcStructLock` spinlock are the cross-process
+// coordination point of slot assignment: `InitAuxiliaryProcess` scans the
+// AuxiliaryProcs[].pid words under ProcStructLock to find a free slot, and
+// `ProcKill` zeroes `pid` to release it. If those words were per-process, every
+// forked child would see the postmaster's image (all aux pids == 0) and claim
+// the *same* free slot, colliding on a single ProcNumber. So — exactly as C
+// does (`InitProcGlobal` ShmemInitStruct's the PGPROC block and the
+// ProcStructLock into shared memory) — the `pid` words and the ProcStructLock
+// live in a genuine shmem segment placed by the postmaster and inherited as a
+// true shared mapping by every fork. The base pointers are process-globals (an
+// `AtomicPtr`/`AtomicUsize`, set in `InitProcGlobal`, inherited across fork),
+// mirroring the `BackendStatusArray` shmem idiom.
+
+use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering as AtomicOrdering};
+
+/// Base of the genuinely-shared `[i32; total_procs]` `pid` array (the canonical
+/// `PGPROC.pid` words for slot coordination). Set by [`InitProcGlobal`], NULL
+/// until then. C: part of the `PGPROC` block placed by `ShmemInitStruct`.
+static SHARED_PROC_PIDS: AtomicPtr<i32> = AtomicPtr::new(core::ptr::null_mut());
+
+/// `total_procs` — the length of [`SHARED_PROC_PIDS`], recorded for bounds
+/// checks. Set alongside the array.
+static SHARED_PROC_PID_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Pointer to the genuinely-shared `ProcStructLock` spinlock word. Set by
+/// [`InitProcGlobal`], NULL until then. C: `slock_t *ProcStructLock` placed by
+/// `ShmemInitStruct`.
+static SHARED_PROC_STRUCT_LOCK: AtomicPtr<types_storage::storage::Spinlock> =
+    AtomicPtr::new(core::ptr::null_mut());
+
+/// `&ProcGlobal->allProcs[procno].pid` over the genuinely-shared pid array.
+/// Panics if `InitProcGlobal` has not run or `procno` is out of range — both
+/// caller bugs mirroring the C deref of a slot in the shared PGPROC block.
+fn shared_pid_slot(procno: ProcNumber) -> &'static AtomicI32 {
+    let base = SHARED_PROC_PIDS.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "shared PGPROC pid array uninitialized (InitProcGlobal not run)"
+    );
+    let count = SHARED_PROC_PID_COUNT.load(AtomicOrdering::Relaxed);
+    let idx = procno as usize;
+    assert!(idx < count, "PGPROC pid index {idx} out of range (count {count})");
+    // SAFETY: `base` addresses `count` `i32` words of genuine shared memory and
+    // `idx < count`. `i32` and `AtomicI32` share layout (`#[repr(transparent)]`
+    // / same size+align), so the word may be accessed atomically — the
+    // cross-process discipline mirrors C's plain `pid` int read/written under
+    // ProcStructLock, with atomics making the per-word access well-defined under
+    // the Rust memory model.
+    unsafe { AtomicI32::from_ptr(base.add(idx)) }
+}
+
+use core::sync::atomic::AtomicI32;
+
+/// Place the genuinely-shared `pid` array (`[i32; total_procs]`, zeroed) and the
+/// `ProcStructLock` spinlock word into real shared memory, recording their base
+/// pointers in the process-globals. Idempotent across `found` (EXEC_BACKEND
+/// re-attach): the array/lock keep their existing contents when the segment
+/// already exists. C: the `pid` words are part of the PGPROC `ShmemInitStruct`
+/// block and the lock is its own `ShmemInitStruct` + `SpinLockInit`.
+fn init_shared_pid_block(total_procs: usize) -> PgResult<()> {
+    // pid array
+    let pid_size = mul_size(total_procs, size_of::<i32>());
+    let (pid_ptr, pid_found) = shmem::shmem_init_struct::call("PGPROC pid words", pid_size)?;
+    let pid_ptr = pid_ptr as *mut i32;
+    if !pid_found {
+        // MemSet(0): no process has claimed any slot yet.
+        // SAFETY: `pid_ptr` addresses `pid_size` writable shmem bytes.
+        unsafe { core::ptr::write_bytes(pid_ptr as *mut u8, 0, pid_size) };
+    }
+    SHARED_PROC_PIDS.store(pid_ptr, AtomicOrdering::Relaxed);
+    SHARED_PROC_PID_COUNT.store(total_procs, AtomicOrdering::Relaxed);
+
+    // ProcStructLock spinlock word
+    let lock_size = size_of::<types_storage::storage::Spinlock>();
+    let (lock_ptr, lock_found) = shmem::shmem_init_struct::call("ProcStructLock", lock_size)?;
+    let lock_ptr = lock_ptr as *mut types_storage::storage::Spinlock;
+    if !lock_found {
+        // SpinLockInit(ProcStructLock): store the free (zero) word.
+        // SAFETY: `lock_ptr` addresses a writable `Spinlock` word in shmem.
+        unsafe { (*lock_ptr).unlock() };
+    }
+    SHARED_PROC_STRUCT_LOCK.store(lock_ptr, AtomicOrdering::Relaxed);
+
+    Ok(())
 }
 
 thread_local! {
@@ -181,17 +260,31 @@ pub(crate) fn proc_global_initialized() -> bool {
 /// `SpinLockAcquire(ProcStructLock)` — uncontended test-and-set fast path,
 /// falling back to the `s_lock.c` backoff loop on contention.
 pub(crate) fn spin_lock_acquire_proc_struct_lock() {
-    PROC_STRUCT_LOCK.with(|lock| {
-        // SpinLockAcquire: TAS_SPIN; on failure, s_lock() the backoff loop.
-        if lock.tas_spin() != 0 {
-            backend_storage_lmgr_s_lock::s_lock(lock, Some(file!()), line!() as i32, None);
-        }
-    });
+    let lock = proc_struct_lock();
+    // SpinLockAcquire: TAS_SPIN; on failure, s_lock() the backoff loop.
+    if lock.tas_spin() != 0 {
+        backend_storage_lmgr_s_lock::s_lock(lock, Some(file!()), line!() as i32, None);
+    }
 }
 
 /// `SpinLockRelease(ProcStructLock)` — fence-ordered store of zero.
 pub(crate) fn spin_lock_release_proc_struct_lock() {
-    PROC_STRUCT_LOCK.with(|lock| lock.unlock());
+    proc_struct_lock().unlock();
+}
+
+/// `ProcStructLock` — the genuinely-shared spinlock word placed by
+/// [`InitProcGlobal`]. Panics if it has not run (caller bug, mirroring the C
+/// deref of the `ProcStructLock` pointer before it is set).
+fn proc_struct_lock() -> &'static types_storage::storage::Spinlock {
+    let p = SHARED_PROC_STRUCT_LOCK.load(AtomicOrdering::Relaxed);
+    assert!(
+        !p.is_null(),
+        "ProcStructLock uninitialized (InitProcGlobal not run)"
+    );
+    // SAFETY: `p` addresses a `Spinlock` word (`#[repr(transparent)]` over
+    // `AtomicI32`) in genuine shared memory, placed and `SpinLockInit`'d by
+    // InitProcGlobal in the postmaster, valid for the process lifetime.
+    unsafe { &*p }
 }
 
 // ---- per-backend MyProc / MyProcNumber / MyProcPid (proc.c backend-locals) ----
@@ -487,10 +580,25 @@ pub(crate) fn prepared_xact_procno(i: i32) -> ProcNumber {
 /// `None`. Caller holds `ProcStructLock`.
 pub(crate) fn auxiliary_proc_find_free() -> Option<i32> {
     let base = globals::max_backends::call();
-    with_proc_global(|pg| {
-        (0..NUM_AUXILIARY_PROCS)
-            .find(|&proctype| pg.allProcs[(base + proctype) as usize].pid == 0)
-    })
+    // C: `if (AuxiliaryProcs[proctype].pid == 0) break;` — over the genuinely
+    // shared pid words, so a slot another forked aux process already claimed
+    // (nonzero pid) is skipped, handing each aux child a distinct ProcNumber.
+    (0..NUM_AUXILIARY_PROCS)
+        .find(|&proctype| shared_pid(base + proctype) == 0)
+}
+
+/// `GetPGProcByNumber(procno)->pid` — read of the genuinely-shared `pid` word.
+pub(crate) fn shared_pid(procno: ProcNumber) -> i32 {
+    shared_pid_slot(procno).load(AtomicOrdering::Relaxed)
+}
+
+/// `GetPGProcByNumber(procno)->pid = pid` — write of the genuinely-shared `pid`
+/// word (the cross-process slot-claim / release). Also mirrors the value into
+/// the per-process `PGPROC.pid` field so in-process readers (e.g. lock-group
+/// leader detection) stay consistent.
+pub(crate) fn set_shared_pid(procno: ProcNumber, pid: i32) {
+    shared_pid_slot(procno).store(pid, AtomicOrdering::Relaxed);
+    with_proc_by_number(procno, |p| p.pid = pid);
 }
 
 // ---- lock-group membership over the arena ----
@@ -543,6 +651,14 @@ pub fn InitProcGlobal() -> PgResult<()> {
             "InitProcGlobal: \"Proc Header\" already existed",
         ));
     }
+
+    // Place the genuinely-shared `pid` words and the `ProcStructLock` spinlock
+    // in real shared memory (C: part of the "PGPROC structures" + the separate
+    // "ProcStructLock" ShmemInitStruct blocks). These are the cross-process
+    // slot-coordination state — they MUST be shared, not inherited copy-on-fork,
+    // so each forked aux/backend child sees the others' claims and gets a
+    // distinct ProcNumber. The rest of the PGPROC arena stays process-owned.
+    init_shared_pid_block(total_procs)?;
 
     let mut proc_global = PROC_HDR::new_zeroed();
 
