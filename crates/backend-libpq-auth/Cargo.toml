@@ -17,6 +17,7 @@ backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
 backend-replication-walsender-seams = { path = "../backend-replication-walsender-seams" }
 backend-storage-ipc-ipc-seams = { path = "../backend-storage-ipc-ipc-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }

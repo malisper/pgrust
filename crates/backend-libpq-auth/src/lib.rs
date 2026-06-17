@@ -771,6 +771,52 @@ impl MemCtx {
 // init_seams — install the four seams postinit consumes.
 // ---------------------------------------------------------------------------
 
+/// GUC variable backing storage owned by `auth.c` — the C `conf->variable`
+/// targets named in `guc_tables.c` (`&pg_krb_caseins_users`,
+/// `&pg_gss_accept_delegation`, `&pg_krb_server_keyfile`). auth.c reads these
+/// globals directly at runtime (auth.c:937/1014/1136); they are *not* taken
+/// from the ControlFile. The GUC engine seeds them from the boot values in
+/// guc_tables.c and writes them on assignment through the installed accessors.
+pub mod gucvars {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// `bool pg_krb_caseins_users` (auth.c:174). Boot value `false`.
+        static KRB_CASEINS_USERS: Cell<bool> = const { Cell::new(false) };
+        /// `bool pg_gss_accept_delegation` (auth.c:175). Boot value `false`.
+        static GSS_ACCEPT_DELEGATION: Cell<bool> = const { Cell::new(false) };
+    }
+
+    thread_local! {
+        /// `char *pg_krb_server_keyfile` (auth.c:173). Boot value
+        /// `PG_KRB_SRVTAB`, which is `""` (guc_tables.c:112) — distinct from a
+        /// NULL `char *`, so `Some(String::new())`.
+        static KRB_SERVER_KEYFILE: std::cell::RefCell<Option<String>> =
+            std::cell::RefCell::new(Some(String::new()));
+    }
+
+    pub fn krb_caseins_users() -> bool {
+        KRB_CASEINS_USERS.with(|c| c.get())
+    }
+    pub fn set_krb_caseins_users(v: bool) {
+        KRB_CASEINS_USERS.with(|c| c.set(v));
+    }
+
+    pub fn gss_accept_delegation() -> bool {
+        GSS_ACCEPT_DELEGATION.with(|c| c.get())
+    }
+    pub fn set_gss_accept_delegation(v: bool) {
+        GSS_ACCEPT_DELEGATION.with(|c| c.set(v));
+    }
+
+    pub fn krb_server_keyfile() -> Option<String> {
+        KRB_SERVER_KEYFILE.with(|c| c.borrow().clone())
+    }
+    pub fn set_krb_server_keyfile(v: Option<String>) {
+        KRB_SERVER_KEYFILE.with(|c| *c.borrow_mut() = v);
+    }
+}
+
 /// Install every seam this crate owns: the `client_authentication` dispatcher
 /// and the three connection-status accessors `postinit` reads.
 pub fn init_seams() {
@@ -778,6 +824,25 @@ pub fn init_seams() {
     backend_libpq_auth_seams::authentication_timeout::set(authentication_timeout_entry);
     backend_libpq_auth_seams::log_connection_authorization::set(log_connection_authorization_entry);
     backend_libpq_auth_seams::client_authn_id::set(client_authn_id_entry);
+
+    // GUC variable accessors over auth.c's `conf->variable` backing storage.
+    // Read directly by auth.c at runtime (none come from the ControlFile);
+    // the GUC engine reads via `.read()` and writes assignments via `.write()`.
+    {
+        use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+        vars::pg_krb_caseins_users.install(GucVarAccessors {
+            get: gucvars::krb_caseins_users,
+            set: gucvars::set_krb_caseins_users,
+        });
+        vars::pg_gss_accept_delegation.install(GucVarAccessors {
+            get: gucvars::gss_accept_delegation,
+            set: gucvars::set_gss_accept_delegation,
+        });
+        vars::pg_krb_server_keyfile.install(GucVarAccessors {
+            get: gucvars::krb_server_keyfile,
+            set: gucvars::set_krb_server_keyfile,
+        });
+    }
 }
 
 /// `client_authentication()` seam: read the ambient `MyProcPort` and run
