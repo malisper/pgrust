@@ -404,6 +404,7 @@ backend-timezone-pgtz = { path = "../backend-timezone-pgtz" }
 backend-timezone-strftime = { path = "../backend-timezone-strftime" }
 backend-tsearch-dict = { path = "../backend-tsearch-dict" }
 backend-tsearch-ispell-regis = { path = "../backend-tsearch-ispell-regis" }
+backend-tsearch-parse = { path = "../backend-tsearch-parse" }
 backend-tsearch-spell = { path = "../backend-tsearch-spell" }
 backend-utils-activity-pgstat = { path = "../backend-utils-activity-pgstat" }
 backend-utils-activity-pgstat-io = { path = "../backend-utils-activity-pgstat-io" }

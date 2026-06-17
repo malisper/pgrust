@@ -16833,7 +16833,10 @@ name = "backend-tsearch-parse"
 version = "0.0.0"
 dependencies = [
  "backend-tsearch-parse-seams",
+ "backend-utils-adt-pg-locale",
  "backend-utils-error",
+ "backend-utils-mb-mbutils",
+ "libc",
  "types-error",
 ]
 
@@ -22307,6 +22310,7 @@ dependencies = [
  "backend-timezone-strftime",
  "backend-tsearch-dict",
  "backend-tsearch-ispell-regis",
+ "backend-tsearch-parse",
  "backend-tsearch-spell",
  "backend-utils-activity-pgstat",
  "backend-utils-activity-pgstat-backend",

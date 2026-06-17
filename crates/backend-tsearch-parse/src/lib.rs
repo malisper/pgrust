@@ -34,10 +34,13 @@
 
 extern crate alloc;
 
+pub mod install;
 pub mod seam;
 pub mod ts_parse;
 pub mod wparser;
 pub mod wparser_def;
+
+pub use install::init_seams;
 
 pub use ts_parse::{
     generateHeadline, hlparsetext, parsetext, DictSubState, ExecPhraseData, HeadlineParsedText,

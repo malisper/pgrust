@@ -402,6 +402,7 @@ pub fn init_all() {
     backend_timezone_strftime::init_seams();
     backend_tsearch_dict::init_seams();
     backend_tsearch_ispell_regis::init_seams();
+    backend_tsearch_parse::init_seams();
     backend_tsearch_spell::init_seams();
     backend_utils_activity_small::init_seams();
     backend_utils_activity_status::init_seams();
