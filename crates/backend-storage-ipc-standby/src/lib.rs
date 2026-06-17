@@ -1466,6 +1466,29 @@ pub fn init_seams() {
     seams::log_access_exclusive_lock_prepare::set(LogAccessExclusiveLockPrepare);
     seams::log_standby_invalidations::set(LogStandbyInvalidations);
     seams::in_hot_standby::set(in_hot_standby);
+
+    // GUC variable backing storage owned by standby.c, read directly from the
+    // GUC slot (not the ControlFile) per PG 18.3 standby.c:40-42:
+    //   int  max_standby_archive_delay   = 30 * 1000;
+    //   int  max_standby_streaming_delay = 30 * 1000;
+    //   bool log_recovery_conflict_waits = false;
+    // Install the accessors so the GUC engine's read()/set() dispatch into this
+    // crate's process-local backing storage.
+    {
+        use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+        vars::max_standby_archive_delay.install(GucVarAccessors {
+            get: max_standby_archive_delay,
+            set: set_max_standby_archive_delay,
+        });
+        vars::max_standby_streaming_delay.install(GucVarAccessors {
+            get: max_standby_streaming_delay,
+            set: set_max_standby_streaming_delay,
+        });
+        vars::log_recovery_conflict_waits.install(GucVarAccessors {
+            get: log_recovery_conflict_waits,
+            set: set_log_recovery_conflict_waits,
+        });
+    }
 }
 
 #[cfg(test)]
