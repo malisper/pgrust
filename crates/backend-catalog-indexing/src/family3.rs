@@ -362,6 +362,50 @@ fn catalog_tuple_update_pg_attribute<'mcx>(
     crate::keystone::CatalogTupleUpdate(mcx, rel, attr_tuple.tuple.t_self, &mut new_tuple)
 }
 
+/// The `pg_class.relchecks`-preserving field-modify path (the C
+/// `RemoveConstraintById` / `MergeConstraintsIntoExisting` /
+/// `StoreRelCheck` pattern, catalog/pg_constraint.c & commands/tablecmds.c):
+/// `heap_modify_tuple` replacing ONLY the `relchecks` column over the original
+/// scanned `pg_class` tuple, then `CatalogTupleUpdate`. The caller holds the
+/// original `SearchSysCacheCopy1(RELOID, relid)` copy; `heap_modify_tuple`
+/// preserves all other 33 columns (no lossy reform of the fixed-length
+/// `Form_pg_class`), and the update is applied at `class_tuple->t_self`. This
+/// is the relchecks-shaped analog of [`catalog_tuple_update_pg_attribute`].
+fn catalog_tuple_update_relchecks_pg_class<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    class_tuple: &types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+    new_relchecks: i16,
+) -> PgResult<()> {
+    use cat::pg_class as pc;
+
+    let mut values: mcx::PgVec<'mcx, Datum<'mcx>> =
+        mcx::vec_with_capacity_in(mcx, pc::Natts_pg_class)?;
+    let mut isnull: mcx::PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, pc::Natts_pg_class)?;
+    let mut replaces: mcx::PgVec<'mcx, bool> =
+        mcx::vec_with_capacity_in(mcx, pc::Natts_pg_class)?;
+    for _ in 0..pc::Natts_pg_class {
+        values.push(Datum::null());
+        isnull.push(false);
+        replaces.push(false);
+    }
+
+    // classForm->relchecks-- ; the C path mutates the Form_pg_class field in
+    // place and updates the whole tuple. We replace only that one column.
+    let i = pc::Anum_pg_class_relchecks as usize - 1;
+    replaces[i] = true;
+    values[i] = Datum::from_i16(new_relchecks);
+
+    // new_tuple = heap_modify_tuple(relTup, RelationGetDescr(pgrel),
+    //                               values, isnull, replaces);
+    let tupdesc = rel.rd_att_clone_in(mcx)?;
+    let mut new_tuple = backend_access_common_heaptuple::heap_modify_tuple(
+        mcx, class_tuple, &tupdesc, &values, &isnull, &replaces,
+    )?;
+    // CatalogTupleUpdate(pgrel, &relTup->t_self, relTup);
+    crate::keystone::CatalogTupleUpdate(mcx, rel, class_tuple.tuple.t_self, &mut new_tuple)
+}
+
 /* ======================================================================== *
  * pg_attrdef — StoreAttrDefault's insert (catalog/heap.c).
  * ======================================================================== */
@@ -742,6 +786,9 @@ pub fn install() {
     );
     backend_catalog_indexing_seams::catalog_tuple_update_pg_attribute::set(
         catalog_tuple_update_pg_attribute,
+    );
+    backend_catalog_indexing_seams::catalog_tuple_update_relchecks_pg_class::set(
+        catalog_tuple_update_relchecks_pg_class,
     );
     backend_catalog_indexing_seams::catalog_tuple_insert_pg_attrdef::set(
         catalog_tuple_insert_pg_attrdef,

@@ -1234,6 +1234,31 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// The `pg_class.relchecks`-preserving field-modify path (the C
+    /// `RemoveConstraintById` relchecks decrement, catalog/pg_constraint.c;
+    /// also `MergeConstraintsIntoExisting` / `StoreRelCheck`,
+    /// commands/tablecmds.c & catalog/heap.c): `SearchSysCacheCopy1(RELOID,
+    /// relid)` → `classForm->relchecks-- ` → `heap_modify_tuple(relTup,
+    /// RelationGetDescr(pgrel), values, isnull, replaces)` replacing ONLY the
+    /// `relchecks` column → `CatalogTupleUpdate(pgrel, &relTup->t_self,
+    /// relTup)`. `class_tuple` is the original scanned pg_class tuple (the C
+    /// `heap_modify_tuple` starts from it so all other 33 columns are preserved
+    /// verbatim — no lossy reform of the fixed-length `Form_pg_class`); the
+    /// update is applied at `class_tuple->t_self`. `rel` is the open pg_class
+    /// relation. This is the relchecks-shaped analog of
+    /// [`catalog_tuple_update_pg_attribute`] and the write leaf for the
+    /// catalog-write relchecks-update family (tablecmds / event-trigger / DROP
+    /// CHECK CONSTRAINT). `Err` carries the heap/index mutation
+    /// `ereport(ERROR)`s.
+    pub fn catalog_tuple_update_relchecks_pg_class<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        class_tuple: &types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+        new_relchecks: i16,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `StoreAttrDefault`'s pg_attrdef INSERT (catalog/heap.c): `attrdefOid =
     /// GetNewOidWithIndex(adrel, AttrDefaultOidIndexId, Anum_pg_attrdef_oid)` +
     /// `heap_form_tuple(RelationGetDescr(adrel), values, nulls)` +

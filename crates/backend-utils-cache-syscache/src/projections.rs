@@ -1900,6 +1900,23 @@ pub(crate) fn search_constraint_tuple_by_oid<'mcx>(
     Ok(Some(copy))
 }
 
+/// `relTup = SearchSysCacheCopy1(RELOID, ObjectIdGetDatum(relid))`
+/// (RemoveConstraintById's relchecks update): the writable pg_class tuple copy,
+/// held so the caller can `heap_modify_tuple` the `relchecks` column over its
+/// `t_self` (preserving all other columns). `Ok(None)` on a cache miss.
+pub(crate) fn search_syscache_copy_pg_class_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+) -> PgResult<Option<FormedTuple<'mcx>>> {
+    let tuple = SearchSysCache1(mcx, RELOID, SysCacheKey::Value(KeyDatum::from_oid(relid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let copy = tup.clone_in(mcx)?;
+    ReleaseSysCache(tup);
+    Ok(Some(copy))
+}
+
 /// `relTup = SearchSysCache1(RELOID, ObjectIdGetDatum(relid))` +
 /// `((Form_pg_class) GETSTRUCT(relTup))->relchecks` (RemoveConstraintById).
 /// `Ok(None)` on a cache miss (`!HeapTupleIsValid`); the caller raises `cache

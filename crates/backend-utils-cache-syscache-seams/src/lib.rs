@@ -2387,6 +2387,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCacheCopy1(RELOID, ObjectIdGetDatum(relid))` returned as the
+    /// owned writable `FormedTuple` copy (RemoveConstraintById's relchecks
+    /// update needs the held tuple for `heap_modify_tuple` over its `t_self`,
+    /// preserving all non-`relchecks` columns). `Ok(None)` on a cache miss
+    /// (`!HeapTupleIsValid`); the caller raises `cache lookup failed for
+    /// relation %u`. `Err` carries the syscache lookup `ereport(ERROR)`s.
+    pub fn search_syscache_copy_pg_class_tuple<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+    ) -> PgResult<Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>>
+);
+
+seam_core::seam!(
     /// RemoveConstraintById's relchecks update: `table_open(RelationRelationId,
     /// RowExclusiveLock)` + `SearchSysCacheCopy1(RELOID)` + `classForm->relchecks--`
     /// + `CatalogTupleUpdate` + `heap_freetuple` + `table_close`. The

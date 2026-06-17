@@ -1178,6 +1178,57 @@ pub fn RemoveConstraintById(conId: Oid) -> PgResult<()> {
     Ok(())
 }
 
+/// RemoveConstraintById's relchecks-decrement leg (pg_constraint.c:945-966):
+/// `pgrel = table_open(RelationRelationId, RowExclusiveLock); relTup =
+/// SearchSysCacheCopy1(RELOID, ObjectIdGetDatum(conrelid)); classForm->relchecks--;
+/// CatalogTupleUpdate(pgrel, &relTup->t_self, relTup); heap_freetuple(relTup);
+/// table_close(pgrel, RowExclusiveLock)`. The `relchecks == 0` guard is the
+/// caller's (it read the value via `fetch_relchecks` and raised the
+/// "should not happen" error). This installs the `decrement_relchecks` seam
+/// declared in syscache-seams; the catalog-write leaf is the
+/// relchecks-preserving pg_class update seam (it `heap_modify_tuple`s only the
+/// `relchecks` column over the held copy, preserving all 33 other columns).
+fn decrement_relchecks(relid: Oid) -> PgResult<()> {
+    let ctx = MemoryContext::new("decrement_relchecks");
+    let mcx = ctx.mcx();
+
+    /* pgrel = table_open(RelationRelationId, RowExclusiveLock); */
+    let pgrel = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;
+
+    /* relTup = SearchSysCacheCopy1(RELOID, ObjectIdGetDatum(conrelid)); */
+    let relchecks = syscache_seams::fetch_relchecks::call(relid)?;
+    let relchecks = match relchecks {
+        Some(rc) => rc,
+        None => {
+            return Err(PgError::error(format!(
+                "cache lookup failed for relation {relid}"
+            )));
+        }
+    };
+    let class_tuple = syscache_seams::search_syscache_copy_pg_class_tuple::call(mcx, relid)?;
+    let class_tuple = match class_tuple {
+        Some(t) => t,
+        None => {
+            return Err(PgError::error(format!(
+                "cache lookup failed for relation {relid}"
+            )));
+        }
+    };
+
+    /* classForm->relchecks--; CatalogTupleUpdate(pgrel, &relTup->t_self, relTup); */
+    indexing_seams::catalog_tuple_update_relchecks_pg_class::call(
+        mcx,
+        &pgrel,
+        &class_tuple,
+        relchecks - 1,
+    )?;
+
+    /* table_close(pgrel, RowExclusiveLock); */
+    pgrel.close(RowExclusiveLock)?;
+
+    Ok(())
+}
+
 /* ===========================================================================
  * RenameConstraintById (pg_constraint.c:1002-1045)
  * ========================================================================= */
@@ -2294,6 +2345,7 @@ pub fn init_seams() {
     seams::get_relation_constraint_oid::set(get_relation_constraint_oid);
     seams::get_domain_constraint_oid::set(get_domain_constraint_oid);
     seams::RemoveConstraintById::set(RemoveConstraintById);
+    syscache_seams::decrement_relchecks::set(decrement_relchecks);
 
     // index_create / index_constraint_create (catalog/index.c) constraint legs.
     seams::constraint_name_is_used::set(|mcx, con_cat, obj_id, conname| {
