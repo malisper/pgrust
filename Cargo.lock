@@ -18300,12 +18300,14 @@ name = "backend-utils-adt-numeric"
 version = "0.0.0"
 dependencies = [
  "backend-utils-adt-numeric-seams",
+ "backend-utils-fmgr-core",
  "common-hashfn",
  "mcx",
  "pg-prng",
  "seam-core",
  "types-datum",
  "types-error",
+ "types-fmgr",
  "types-numeric",
  "types-sortsupport",
  "types-tuple",

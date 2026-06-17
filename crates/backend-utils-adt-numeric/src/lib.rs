@@ -38,6 +38,7 @@
 
 pub mod aggregate;
 pub mod convert;
+pub mod fmgr_builtins;
 pub mod io;
 pub mod kernel_transcendental;
 pub mod kernel_var;
@@ -93,4 +94,8 @@ pub fn init_seams() {
     seams::numeric_maximum_size::set(ops_sql::seam_numeric_maximum_size);
     seams::numeric_subdiff::set(ops_sql::seam_numeric_subdiff);
     seams::numeric_subdiff_bytes::set(ops_sql::seam_numeric_subdiff_bytes);
+
+    // Register this unit's SQL-callable functions into the fmgr-core builtin
+    // table (C: fmgr_builtins[]), so by-OID dispatch resolves them.
+    fmgr_builtins::register_numeric_builtins();
 }
