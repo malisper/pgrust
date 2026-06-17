@@ -68,6 +68,7 @@
 #![allow(non_snake_case)]
 #![allow(clippy::too_many_arguments)]
 
+pub mod fmgr_builtins;
 pub mod range_bounds_compare;
 pub mod range_canonical_subdiff_hash;
 pub mod range_fmgr_boundary;
@@ -131,4 +132,8 @@ pub fn init_seams() {
     seams::range_out::set(range_io::range_out_seam);
     seams::range_recv::set(range_io::range_recv_seam);
     seams::range_send::set(range_io::range_send_seam);
+
+    // Register the scalar `rangetypes.c` fmgr builtins (C: `fmgr_builtins[]`)
+    // into the fmgr-core by-OID dispatch table.
+    fmgr_builtins::register_rangetypes_builtins();
 }
