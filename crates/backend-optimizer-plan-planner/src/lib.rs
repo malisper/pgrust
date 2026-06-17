@@ -384,11 +384,50 @@ fn standard_planner<'mcx>(
     // case) with this note; finalrowmarks is empty on the simple SELECT path.
     let row_marks: Option<mcx::PgVec<'mcx, Expr>> = None;
 
-    // unprunableRelids = bms_difference(allRelids, prunableRelids). Both are
-    // lifetime-free Relids on glob; the stmt field is `PgBox<Bitmapset<'mcx>>`,
-    // a different (lifetime-bearing) bitmapset type with no bridge to the
-    // lifetime-free Relids. On the simple path both are empty, so this is None.
-    let unprunable_relids = None;
+    // unprunableRelids = bms_difference(glob->allRelids, glob->prunableRelids)
+    // (planner.c: standard_planner, after set_plan_references populated
+    // glob->allRelids with every finalrtable index and glob->prunableRelids
+    // with the partition-pruning-only indexes). Both are the lifetime-free
+    // `Relids` on glob; the stmt field is `PgBox<Bitmapset<'mcx>>`. We compute
+    // the word-level difference and materialize it into `mcx` (an empty result
+    // is the C `NULL`/None). On the simple SELECT path prunableRelids is empty,
+    // so this is bms_copy(allRelids) = {1..=len(finalrtable)}, which the
+    // executor's ExecGetRangeTableRelation requires to open scan relations.
+    let unprunable_relids = {
+        let (all_words, prunable_words): (Vec<u64>, Vec<u64>) = root
+            .glob
+            .as_ref()
+            .map(|g| {
+                (
+                    g.all_relids.as_ref().map(|b| b.words.clone()).unwrap_or_default(),
+                    g.prunable_relids.as_ref().map(|b| b.words.clone()).unwrap_or_default(),
+                )
+            })
+            .unwrap_or_default();
+        // bms_difference word-wise: result[i] = all[i] & ~prunable[i].
+        let mut diff: Vec<u64> = Vec::with_capacity(all_words.len());
+        for (i, &aw) in all_words.iter().enumerate() {
+            let pw = prunable_words.get(i).copied().unwrap_or(0);
+            diff.push(aw & !pw);
+        }
+        // Trim trailing zero words (bms canonical form: nwords has no trailing
+        // empty word), then None for the empty set.
+        while diff.last() == Some(&0) {
+            diff.pop();
+        }
+        if diff.is_empty() {
+            None
+        } else {
+            let mut words: mcx::PgVec<'mcx, u64> = mcx::PgVec::new_in(mcx);
+            for w in diff {
+                words.push(w);
+            }
+            Some(mcx::alloc_in(
+                mcx,
+                types_nodes::bitmapset::Bitmapset { words },
+            )?)
+        }
+    };
 
     let result_relations: Option<mcx::PgVec<'mcx, i32>> = {
         let v = root.glob.as_ref().map(|g| g.result_relations.clone()).unwrap_or_default();

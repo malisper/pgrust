@@ -2552,8 +2552,8 @@ use types_cache::syscache::{ClassOwnerAcl, NamespaceOwnerAcl, ObjectOwnerAcl, Ty
 const Anum_pg_namespace_nspowner: i32 = 3;
 const Anum_pg_namespace_nspacl: i32 = 4;
 
-// `catalog/pg_class.h` ACL attribute number.
-const Anum_pg_class_relacl: i32 = 13;
+// `catalog/pg_class.h` ACL attribute number (pg_class.h: relacl is attnum 32).
+const Anum_pg_class_relacl: i32 = 32;
 
 // `catalog/pg_attribute.h` ACL + attisdropped attribute numbers.
 const Anum_pg_attribute_attacl: i32 = 22;

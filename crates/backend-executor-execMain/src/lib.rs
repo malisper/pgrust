@@ -195,11 +195,18 @@ pub fn standard_ExecutorStart(query_desc: &mut QueryDesc, mut eflags: i32) -> Pg
         }
     }
 
+    // estate->es_snapshot = RegisterSnapshot(queryDesc->snapshot);
+    // estate->es_crosscheck_snapshot = RegisterSnapshot(queryDesc->crosscheck_snapshot);
+    // (execMain.c standard_ExecutorStart.) The Rc clone is the refcount-bearing
+    // registration; the QueryDesc keeps the originals alive for the query's
+    // lifetime. Cloned out before borrowing the work bundle.
+    let es_snapshot = query_desc.snapshot.clone();
+    let es_crosscheck_snapshot = query_desc.crosscheck_snapshot.clone();
+
     query_desc.work.with_mut(|w| {
         w.estate.es_param_list_info = params;
-        // estate->es_snapshot / es_crosscheck_snapshot = RegisterSnapshot(...) —
-        // the snapmgr owner registers the bundle-carried snapshot on the plain
-        // path's first reader; the bundle keeps the snapshot alive.
+        w.estate.es_snapshot = es_snapshot.clone();
+        w.estate.es_crosscheck_snapshot = es_crosscheck_snapshot.clone();
         w.estate.es_top_eflags = eflags;
         w.estate.es_instrument = instrument;
         w.estate.es_jit_flags = w.plannedstmt.jitFlags;
@@ -511,9 +518,14 @@ fn ExecutePlan(
             let slot = procnode::exec_proc_node::call(planstate, estate)?;
 
             // if (TupIsNull(slot)) break;
+            // TupIsNull(slot) == (slot == NULL || TTS_EMPTY(slot)): the C
+            // ExecProcNode return at end-of-scan is a *non-NULL* but cleared
+            // slot (e.g. ExecScan's `return ExecClearTuple(resultslot)`), so the
+            // empty-flag check is load-bearing — without it the cleared virtual
+            // result slot would be sent to the dest receiver.
             let slot = match slot {
-                Some(s) => s,
-                None => break,
+                Some(s) if !estate.slot(s).is_empty() => s,
+                _ => break,
             };
 
             // If we have a junk filter, project a new clean tuple.
