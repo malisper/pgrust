@@ -703,14 +703,32 @@ pub fn set_session_preload_libraries(libraries: Option<String>) {
     SESSION_PRELOAD_LIBRARIES.with(|c| *c.borrow_mut() = libraries);
 }
 
+/// Read the `session_preload_libraries_string` GUC backing store
+/// (`*conf->variable` for the GUC engine).
+pub fn get_session_preload_libraries() -> Option<String> {
+    SESSION_PRELOAD_LIBRARIES.with(|c| c.borrow().clone())
+}
+
 /// Install the `shared_preload_libraries` GUC string.
 pub fn set_shared_preload_libraries(libraries: Option<String>) {
     SHARED_PRELOAD_LIBRARIES.with(|c| *c.borrow_mut() = libraries);
 }
 
+/// Read the `shared_preload_libraries_string` GUC backing store
+/// (`*conf->variable` for the GUC engine).
+pub fn get_shared_preload_libraries() -> Option<String> {
+    SHARED_PRELOAD_LIBRARIES.with(|c| c.borrow().clone())
+}
+
 /// Install the `local_preload_libraries` GUC string.
 pub fn set_local_preload_libraries(libraries: Option<String>) {
     LOCAL_PRELOAD_LIBRARIES.with(|c| *c.borrow_mut() = libraries);
+}
+
+/// Read the `local_preload_libraries_string` GUC backing store
+/// (`*conf->variable` for the GUC engine).
+pub fn get_local_preload_libraries() -> Option<String> {
+    LOCAL_PRELOAD_LIBRARIES.with(|c| c.borrow().clone())
 }
 
 /// `load_libraries(libraries, gucname, restricted)` (`miscinit.c:1850`, static)
@@ -1033,6 +1051,32 @@ pub fn init_seams() {
     backend_port_path_seams::pid_appears_live::set(boot_paths::pid_appears_live);
     backend_port_path_seams::touch_file_times::set(boot_paths::touch_file_times);
     common_username_seams::get_user_name_or_exit::set(startup_paths::get_user_name_or_exit);
+
+    // ---- GUC variable accessors (C `conf->variable` backing store) ----------
+    //
+    // These four GUCs are declared in guc_tables.c with `variable` pointing at
+    // miscinit.c's own globals (`IgnoreSystemIndexes`,
+    // `{session,shared,local}_preload_libraries_string`). The GUC engine reads
+    // and writes each through the slot's accessors; install them so the engine
+    // reaches this crate's backing store. (None of these are ControlFile-derived
+    // — they are plain GUC globals set from postgresql.conf / SetConfigOption.)
+    use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+    vars::IgnoreSystemIndexes.install(GucVarAccessors {
+        get: IgnoreSystemIndexes,
+        set: SetIgnoreSystemIndexes,
+    });
+    vars::session_preload_libraries_string.install(GucVarAccessors {
+        get: get_session_preload_libraries,
+        set: set_session_preload_libraries,
+    });
+    vars::shared_preload_libraries_string.install(GucVarAccessors {
+        get: get_shared_preload_libraries,
+        set: set_shared_preload_libraries,
+    });
+    vars::local_preload_libraries_string.install(GucVarAccessors {
+        get: get_local_preload_libraries,
+        set: set_local_preload_libraries,
+    });
 }
 
 #[cfg(test)]

@@ -19,6 +19,7 @@ types-storage = { path = "../types-storage" }
 
 backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-init-small = { path = "../backend-utils-init-small" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-storage-ipc-latch = { path = "../backend-storage-ipc-latch" }
 
 # Inward seams (this crate installs them).
