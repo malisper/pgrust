@@ -172,6 +172,16 @@ fn fc_btrim1(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     ret_varlena(fcinfo, out)
 }
 
+/// C: `text(bpchar)` — SQL `text(character)`, OID 401, `prosrc => rtrim1`. The
+/// `bpchar` argument arrives as its detoasted `VARDATA_ANY` payload on the
+/// by-ref lane (same content-bytes carrier as `text`); the value core is the
+/// shared `rtrim1` (strip trailing spaces).
+fn fc_text_bpchar(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let out = ok(crate::rtrim1(m.mcx(), arg_bytes(fcinfo, 0))).to_vec();
+    ret_varlena(fcinfo, out)
+}
+
 fn fc_byteatrim(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let m = scratch_mcx();
     let out = ok(crate::byteatrim(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1))).to_vec();
@@ -264,6 +274,8 @@ pub fn register_oracle_compat_builtins() {
         builtin(881, "ltrim", 1, fc_ltrim1),
         builtin(882, "rtrim", 1, fc_rtrim1),
         builtin(885, "btrim", 1, fc_btrim1),
+        // ---- text(bpchar) cast (prosrc => rtrim1) ----
+        builtin(401, "text", 1, fc_text_bpchar),
         // ---- trimming (bytea) ----
         builtin(2015, "btrim", 2, fc_byteatrim),
         builtin(6195, "ltrim", 2, fc_bytealtrim),
