@@ -75,6 +75,7 @@ pub const INTSTYLE_ISO_8601: i32 = 3;
 pub const INTSTYLE_POSTGRES: i32 = 0;
 pub const INTSTYLE_POSTGRES_VERBOSE: i32 = 1;
 pub const INTSTYLE_SQL_STANDARD: i32 = 2;
+pub const IOMETHOD_SYNC: i32 = 0;
 pub const IOMETHOD_WORKER: i32 = 1;
 pub const LOG: i32 = types_error::LOG.0;
 pub const LOGSTMT_ALL: i32 = 3;

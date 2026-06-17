@@ -1339,8 +1339,10 @@ mod recurrence_guard {
         // mul_size accumulator and BufferManagerShmemInit allocate-or-attaches the
         // four named buffer-pool regions via ShmemInitStruct, then publishes the
         // process-local pool view, mirroring procarray's ProcArrayShmemInit.)
-        // DELETE each entry as the aio GUC source lands.
-        ("backend_storage_buffer_bufmgr", "io_method_sync"),
+        // (io_method_sync RETIRED: the bufmgr owner now `::set`s it to read the
+        // live `io_method` enum GUC slot — `vars::io_method.read() ==
+        // IOMETHOD_SYNC` — backed by aio-methods at boot, the same `vars::*.read()`
+        // idiom as the other bufmgr GUC getter seams.)
         // (The three SetLatch-by-proc latch seams — set_latch_by_proc_number /
         // set_latch_for_proc_pid / set_latch_for_procno — are now INSTALLED.
         // The latch<->proc handle spaces were unified: a `LatchHandle` is a
@@ -1570,12 +1572,13 @@ mod recurrence_guard {
         // bufmgr.c per-database shared-buffer operations. The bufmgr owner is a
         // complete CATALOG unit but its F-decomp did not port these two
         // whole-database buffer sweeps (they scan NBuffers for matching
-        // RelFileLocator.dbOid). The seams are declared on the owner so the
-        // landed dbase_redo consumer can call them; they loud-panic until
-        // bufmgr ports DropDatabaseBuffers/FlushDatabaseBuffers. Recorded in
-        // DESIGN_DEBT.md. DELETE when bufmgr installs them.
+        // RelFileLocator.dbOid). FlushDatabaseBuffers is now ported+installed
+        // (the NBuffers sweep over BM_VALID|BM_DIRTY buffers matching dbOid);
+        // its allowlist entry was removed. DropDatabaseBuffers is still
+        // unported in the bufmgr F-decomp (only DropRelationBuffers/
+        // DropRelationsAllBuffers exist), so it loud-panics. Recorded in
+        // DESIGN_DEBT.md. DELETE when bufmgr ports DropDatabaseBuffers.
         ("backend_storage_buffer_bufmgr", "drop_database_buffers"),
-        ("backend_storage_buffer_bufmgr", "flush_database_buffers"),
         // DESIGN_DEBT (TD-INDEXING-PERCATALOG-OWNERS): backend-catalog-indexing's
         // per-catalog forming/mutation bodies have now been PORTED + installed in
         // family2.rs (pg_type insert/update/rename, pg_constraint, pg_depend/

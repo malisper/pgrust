@@ -508,6 +508,12 @@ fn flush_relation_buffers(rel: &types_rel::Relation) -> types_error::PgResult<()
     BufferManager::global_expect().FlushRelationBuffers(&rel.rd_locator)
 }
 
+/// `FlushDatabaseBuffers(dbid)` installed seam (bufmgr.c:5304) — flush every
+/// dirty buffer of one database.
+fn flush_database_buffers(dbid: types_core::Oid) -> types_error::PgResult<()> {
+    BufferManager::global_expect().FlushDatabaseBuffers(dbid)
+}
+
 // --- lifecycle + relation-size seams (bufmgr.c) ---------------------------
 
 /// `UnlockBuffers()` installed seam (bufmgr.c) — release the in-progress
@@ -661,6 +667,7 @@ pub fn init_seams() {
         flush_relations_all_buffers,
     );
     backend_storage_buffer_bufmgr_seams::flush_relation_buffers::set(flush_relation_buffers);
+    backend_storage_buffer_bufmgr_seams::flush_database_buffers::set(flush_database_buffers);
     // F5: the per-backend checkpoint/bgwriter statistics counters — no-op
     // installs (behaviour-neutral, same posture as F2's count_buffer_write /
     // count_io_op_extend until the pgstat owner ports).
@@ -711,6 +718,11 @@ pub fn init_seams() {
     });
     backend_storage_buffer_bufmgr_seams::maintenance_io_concurrency::set(|| {
         vars::maintenance_io_concurrency.read()
+    });
+    // `io_method == IOMETHOD_SYNC` (aio.c GUC) — read off the live `io_method`
+    // enum slot (backed by aio-methods at boot), mirroring C's global compare.
+    backend_storage_buffer_bufmgr_seams::io_method_sync::set(|| {
+        vars::io_method.read() == backend_utils_misc_guc_tables::consts::IOMETHOD_SYNC
     });
     backend_storage_buffer_bufmgr_seams::bgwriter_lru_maxpages::set(|| {
         vars::bgwriter_lru_maxpages.read()
