@@ -1,4 +1,6 @@
-#![no_std]
+// NB: not `#![no_std]` — the fmgr builtin registration layer (`fmgr_builtins`)
+// registers the `format_type.c` builtins into the fmgr-core table (C:
+// `fmgr_builtins[]`), which uses `String`/`std`.
 #![allow(non_snake_case)]
 #![allow(clippy::result_large_err)]
 
@@ -56,6 +58,7 @@ pub const FORMAT_TYPE_FORCE_QUALIFY: u16 = 0x04;
 /// OID is undefined.
 pub const FORMAT_TYPE_INVALID_AS_NULL: u16 = 0x08;
 
+pub mod fmgr_builtins;
 mod seams;
 pub use seams::init_seams;
 

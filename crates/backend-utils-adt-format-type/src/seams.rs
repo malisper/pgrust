@@ -14,4 +14,8 @@ pub fn init_seams() {
     );
     backend_utils_adt_format_type_seams::type_maximum_size::set(crate::type_maximum_size);
     backend_utils_adt_format_type_seams::format_type_extended::set(crate::format_type_extended);
+
+    // Register this unit's fmgr builtins into the fmgr-core table (C:
+    // `fmgr_builtins[]`), so by-OID dispatch resolves `format_type`.
+    crate::fmgr_builtins::register_format_type_builtins();
 }
