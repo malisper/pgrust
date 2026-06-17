@@ -305,6 +305,7 @@ pub fn init_seams() {
     seams::lock_wait_queue_delete::set(locking::seam_lock_wait_queue_delete);
     seams::lock_wait_queue_waiters_snapshot::set(locking::seam_lock_wait_queue_waiters_snapshot);
     seams::get_lock_holders_and_waiters::set(locking::get_lock_holders_and_waiters_seam);
+    seams::get_running_transaction_locks::set(locking::GetRunningTransactionLocks);
 
     seams::virtual_xact_lock_table_insert::set(locking::VirtualXactLockTableInsert);
 

@@ -180,6 +180,27 @@ pub fn BackgroundWriterMain(startup_data: &StartupData) -> PgResult<()> {
     miscinit::set_my_backend_type_bg_writer::call();
     auxprocess::auxiliary_process_main_common::call()?;
 
+    // Re-seed this (bgwriter) process' copy of the cluster-wide
+    // TransamVariables / MultiXactState XID bounds from the control file's
+    // checkpoint.
+    //
+    // In C these are genuine shared memory: the startup process' StartupXLOG
+    // seeding (xlog.c 5634-5642 / 6144-6148) is visible to the bgwriter because
+    // they share memory. In this tree those "shared" singletons are
+    // process-local statics inherited by fork() copy-on-write. The bgwriter and
+    // checkpointer are forked early, while pmState == PM_STARTUP (before the
+    // startup process completes), so they fork an as-yet-unseeded postmaster COW
+    // copy: their nextXid/oldestXid stay zero and GetRunningTransactionData()'s
+    // `Assert(TransactionIdIsValid(nextXid))` (which LogStandbySnapshot drives)
+    // trips. The postmaster re-seeds its own copy at the PM_RUN transition (see
+    // reaper.rs / WALL 1i), but that update can't reach an already-forked child.
+    // So we re-seed our own copy here from the control file the postmaster
+    // already loaded (LocalProcessControlFile in PostmasterMain) and we inherit
+    // by COW — exactly matching the "we just started, assume there has been a
+    // shutdown or end-of-recovery snapshot" assumption just below, under which C
+    // would see fully-seeded shared TransamVariables.
+    xlog::seed_transam_variables_from_checkpoint::call()?;
+
     // We just started, assume there has been either a shutdown or
     // end-of-recovery snapshot.
     //

@@ -1735,6 +1735,86 @@ pub(crate) fn VirtualXactLockTableCleanup() -> PgResult<()> {
     Ok(())
 }
 
+/// `GetRunningTransactionLocks(*nlocks)` (lock.c) — return every currently
+/// held `AccessExclusiveLock` with an assigned xid, for use by
+/// `LogStandbySnapshot()`.
+///
+/// C grabs all `NUM_LOCK_PARTITIONS` partition LWLocks (in partition-number
+/// order to avoid LWLock deadlock), then `hash_seq`-scans the PROCLOCK table.
+/// For each proclock that holds `AccessExclusiveLock` on a `LOCKTAG_RELATION`
+/// it reads the holder PGPROC's `xid`; transactions that have already issued
+/// their commit WAL record (and so zeroed `xid`) are skipped
+/// (`TransactionIdIsValid`). Locks are released in reverse partition order
+/// (held by the guards' reverse drop here). C `palloc`s the result in the
+/// caller's context and the caller `pfree`s it; here we allocate the result
+/// `PgVec` in `mcx`, the caller's target context.
+///
+/// In this single-process ambient model the PROCLOCK table is the
+/// `(LOCKTAG, ProcNumber)`-keyed `state::SHARED.proclocks` map — the analog of
+/// `hash_seq_search(LockMethodProcLockHash)`.
+pub fn GetRunningTransactionLocks<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+) -> PgResult<mcx::PgVec<'mcx, types_storage::storage::xl_standby_lock>> {
+    use types_core::xact::TransactionIdIsValid;
+    use types_storage::lock::AccessExclusiveLock;
+
+    // Acquire lock on the entire shared lock data structure. Must grab LWLocks
+    // in partition-number order to avoid LWLock deadlock. The guards are held
+    // until the end and dropped in reverse partition order (Vec drop is
+    // front-to-back, so we pop in reverse below).
+    let mut guards = Vec::with_capacity(NUM_LOCK_PARTITIONS as usize);
+    for i in 0..NUM_LOCK_PARTITIONS as i32 {
+        guards.push(lwlock::lwlock_acquire_main::call(
+            lock_partition_lock_offset_by_index(i),
+            LWLockMode::LW_SHARED,
+        )?);
+    }
+
+    // Scan the PROCLOCK table to copy the data.
+    //
+    // If a lock is a currently granted AccessExclusiveLock then it will have
+    // just one proclock holder, so locks are never accessed twice in this
+    // particular case. (Don't copy this code for use elsewhere because in the
+    // general case this will give you duplicate locks when looking at
+    // non-exclusive lock types.)
+    let mut access_exclusive_locks = mcx::PgVec::new_in(mcx);
+    let collected: Vec<(LOCKTAG, ProcNumber)> = state::with_shared(|s| {
+        s.proclocks
+            .iter()
+            .filter(|(_, pl)| pl.hold_mask & LOCKBIT_ON(AccessExclusiveLock) != 0)
+            .filter(|((tag, _), _)| tag.locktag_type == LOCKTAG_RELATION)
+            .map(|((tag, pno), _)| (*tag, *pno))
+            .collect()
+    });
+    for (tag, pno) in collected {
+        let xid = proc::proc_xid::call(pno);
+
+        // Don't record locks for transactions if we know they have already
+        // issued their WAL record for commit but not yet released lock. It is
+        // still possible that we see locks held by already complete
+        // transactions, if they haven't yet zeroed their xids.
+        if !TransactionIdIsValid(xid) {
+            continue;
+        }
+
+        access_exclusive_locks.push(types_storage::storage::xl_standby_lock {
+            xid,
+            dbOid: tag.locktag_field1,
+            relOid: tag.locktag_field2,
+        });
+    }
+
+    // Release locks in reverse order for two reasons: (1) Anyone else who needs
+    // more than one of the locks will be trying to lock them in increasing
+    // order; we don't want to release the other process until it can get all
+    // the locks it needs. (2) This avoids O(N^2) behavior inside LWLockRelease.
+    while let Some(guard) = guards.pop() {
+        guard.release()?;
+    }
+
+    Ok(access_exclusive_locks)
+}
+
 // ===========================================================================
 // Error-surface helpers.
 // ===========================================================================
