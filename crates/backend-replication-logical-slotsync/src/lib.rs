@@ -1592,4 +1592,17 @@ pub fn init_seams() {
     s::repl_slot_sync_worker_main::set(ReplSlotSyncWorkerMain);
     s::slot_sync_shmem_size::set(SlotSyncShmemSize);
     s::slot_sync_shmem_init::set(SlotSyncShmemInit);
+
+    // `bool sync_replication_slots = false;` GUC backing storage (slotsync.c).
+    // A plain PGC_SIGHUP bool GUC global read directly from the GUC slot (no
+    // ControlFile involvement); the GUC engine seeds it from boot_val and
+    // reads/writes it on SET/reload. Backed by the owner's per-backend
+    // SYNC_REPLICATION_SLOTS thread-local (see `sync_replication_slots_guc`).
+    {
+        use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+        vars::sync_replication_slots.install(GucVarAccessors {
+            get: sync_replication_slots_guc,
+            set: |v| SYNC_REPLICATION_SLOTS.with(|c| c.set(v)),
+        });
+    }
 }
