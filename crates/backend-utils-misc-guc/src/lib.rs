@@ -745,8 +745,16 @@ fn install_guc_state_transfer_seams() {
         };
         let total = prefix + len;
         let buf = unsafe { core::slice::from_raw_parts(space as *const u8, total) };
-        live::with_store_mut(|reg| serialize::restore_guc_state(reg, buf))
-            .ok_or_else(guc_store_uninitialized)?
+        // Collect assign hooks to fire AFTER releasing the store borrow, so a
+        // recursively re-entrant SetConfigOption (e.g. via session
+        // authorization) does not re-lock the store / alias the live `&mut reg`.
+        let mut deferred_hooks: Vec<crate::registry::DeferredAssignHook> = Vec::new();
+        let res = live::with_store_mut(|reg| serialize::restore_guc_state(reg, buf, &mut deferred_hooks))
+            .ok_or_else(guc_store_uninitialized)?;
+        for hook in deferred_hooks {
+            hook();
+        }
+        res
     });
 }
 

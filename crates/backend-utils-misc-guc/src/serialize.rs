@@ -309,7 +309,11 @@ fn read_gucstate_binary<'a>(
 /// safe-Rust reset of the record's live value/source back to its boot/default
 /// state; the `Assert(gconf->stack == NULL)` precondition holds because a
 /// parallel worker starts with an empty transactional GUC stack.
-pub fn restore_guc_state(reg: &mut GucRegistry, buf: &[u8]) -> PgResult<()> {
+pub fn restore_guc_state(
+    reg: &mut GucRegistry,
+    buf: &[u8],
+    deferred_hooks: &mut Vec<crate::registry::DeferredAssignHook>,
+) -> PgResult<()> {
     // First, reset all potentially-shippable GUCs to their default values, so
     // that applying the leader's non-default values lands us at exactly the
     // leader's state (and set_config_option won't refuse due to source-priority
@@ -381,6 +385,7 @@ pub fn restore_guc_state(reg: &mut GucRegistry, buf: &[u8]) -> PgResult<()> {
             true,
             ERROR,
             true,
+            deferred_hooks,
         )?;
         if result <= 0 {
             return Err(PgError::error(format!(

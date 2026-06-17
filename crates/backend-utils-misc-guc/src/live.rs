@@ -318,9 +318,16 @@ pub fn set_config_option_global(
     elevel: ErrorLevel,
     is_reload: bool,
 ) -> PgResult<i32> {
-    with_store_mut(|reg| {
+    // Collect the variable's assign hook(s) to fire AFTER the store borrow is
+    // released: a hook may recursively call SetConfigOption (the C
+    // assign_session_authorization -> SetSessionAuthorization -> SetOuterUserId
+    // -> SetConfigOption("is_superuser") chain), which would re-lock the store
+    // and deadlock if fired while the `with_store_mut` guard is held.
+    let mut deferred_hooks: Vec<crate::registry::DeferredAssignHook> = Vec::new();
+    let result = with_store_mut(|reg| {
         let rc = crate::registry::set_config_option(
             reg, name, value, context, source, srole, action, change_val, elevel, is_reload,
+            &mut deferred_hooks,
         )?;
         if rc == 1 {
             // Mark for the next ReportChangedGUCOptions.
@@ -335,5 +342,13 @@ pub fn set_config_option_global(
             "set_config_option_global({name:?}) called before initialize_guc_options seeded the \
              global GUC store"
         )
-    })
+    });
+
+    // Store borrow is now released: fire the assign hook(s), which may
+    // recursively re-enter set_config_option_global, in registration order.
+    for hook in deferred_hooks {
+        hook();
+    }
+
+    result
 }

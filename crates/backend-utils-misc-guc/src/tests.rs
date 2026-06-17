@@ -481,9 +481,13 @@ fn serialize_restore_round_trip() {
     .expect("perturb bgwriter_delay");
     assert_eq!(get_int("bgwriter_delay"), Some(777));
 
-    with_store_mut(|reg| restore_guc_state(reg, &buf))
+    let mut deferred_hooks = Vec::new();
+    with_store_mut(|reg| restore_guc_state(reg, &buf, &mut deferred_hooks))
         .expect("store")
         .expect("restore succeeds");
+    for hook in deferred_hooks {
+        hook();
+    }
 
     // The leader's non-default values are reproduced in the worker store.
     assert_eq!(get_int("bgwriter_delay"), Some(321));

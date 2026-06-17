@@ -780,6 +780,7 @@ pub fn set_config_option(
     change_val: bool,
     elevel: ErrorLevel,
     is_reload: bool,
+    deferred_hooks: &mut Vec<DeferredAssignHook>,
 ) -> PgResult<i32> {
     let elevel = resolve_elevel(elevel, source);
 
@@ -887,7 +888,13 @@ pub fn set_config_option(
         if !make_default {
             push_old_value(record, action);
         }
-        apply_value(record, newval.clone(), newextra, source, context, srole);
+        if let Some(hook) = apply_value(record, newval.clone(), newextra, source, context, srole) {
+            // Deferred: fired by the caller after the store borrow is released,
+            // so a recursively re-entrant SetConfigOption (e.g. the
+            // session_authorization -> is_superuser chain) does not re-lock the
+            // store / alias the live `&mut reg`.
+            deferred_hooks.push(hook);
+        }
     }
     if make_default {
         let record = &mut reg.vars[idx];
@@ -983,10 +990,15 @@ fn current_value_differs(record: &GucVariable, newval: &config_var_val) -> bool 
     }
 }
 
+/// A captured assign-hook invocation, deferred out of the store-locked region
+/// so it can recursively re-enter `SetConfigOption` (see [`apply_value`]).
+pub type DeferredAssignHook = Box<dyn FnOnce()>;
+
 /// Apply an evaluated value to a variable's live storage and update its
 /// source/scontext/srole (the `if (changeVal)` body of each per-type case),
-/// then run the variable's assign hook and push the value to the owner's
-/// storage slot (`*conf->variable = newval`).
+/// pushing the value to the owner's storage slot (`*conf->variable = newval`).
+/// Returns the variable's assign hook captured for deferred firing (the C hook
+/// call), which the caller runs after releasing the store borrow.
 fn apply_value(
     record: &mut GucVariable,
     newval: config_var_val,
@@ -994,60 +1006,79 @@ fn apply_value(
     source: GucSource,
     context: GucContext,
     srole: Oid,
-) {
-    match (&mut *record, newval) {
+) -> Option<DeferredAssignHook> {
+    // The variable's `assign_hook` is NOT run inline: in C the hook may
+    // recursively call `SetConfigOption` (e.g. `assign_session_authorization` ->
+    // `SetSessionAuthorization` -> `SetOuterUserId` -> `SetConfigOption(
+    // "is_superuser")`), re-entering the GUC store. C's store is plain process
+    // memory so the recursion just works; here the store is borrowed `&mut`
+    // across this call, so running the hook inline would re-enter
+    // `with_store_mut` and deadlock / alias the live `&mut`. So the hook
+    // invocation (which only re-reads/writes the store, not this `record`) is
+    // captured and returned to be fired by the caller AFTER the store borrow is
+    // released. The owner-storage `*conf->variable = newval` write stays inline
+    // (it does not re-enter the GUC store). This preserves C's ordering: the
+    // value is in the record before the hook fires.
+    let deferred: Option<DeferredAssignHook> = match (&mut *record, newval) {
         (GucVariable::Bool(c), config_var_val::Boolval(b)) => {
             c.value = Some(b);
-            if let Some(slot) = c.assign_hook {
-                (slot.get())(b, extra.as_ref());
-            }
             if c.variable.installed() {
                 c.variable.write(b);
             }
+            c.assign_hook.map(|slot| {
+                let f = slot.get();
+                Box::new(move || f(b, extra.as_ref())) as DeferredAssignHook
+            })
         }
         (GucVariable::Int(c), config_var_val::Intval(v)) => {
             c.value = Some(v);
-            if let Some(slot) = c.assign_hook {
-                (slot.get())(v, extra.as_ref());
-            }
             if c.variable.installed() {
                 c.variable.write(v);
             }
+            c.assign_hook.map(|slot| {
+                let f = slot.get();
+                Box::new(move || f(v, extra.as_ref())) as DeferredAssignHook
+            })
         }
         (GucVariable::Real(c), config_var_val::Realval(v)) => {
             c.value = Some(v);
-            if let Some(slot) = c.assign_hook {
-                (slot.get())(v, extra.as_ref());
-            }
             if c.variable.installed() {
                 c.variable.write(v);
             }
+            c.assign_hook.map(|slot| {
+                let f = slot.get();
+                Box::new(move || f(v, extra.as_ref())) as DeferredAssignHook
+            })
         }
         (GucVariable::String(c), config_var_val::Stringval(s)) => {
-            if let Some(slot) = c.assign_hook {
-                (slot.get())(s.as_deref(), extra.as_ref());
-            }
             if c.variable.installed() {
                 c.variable.write(s.clone());
             }
-            c.value = Some(s);
+            c.value = Some(s.clone());
+            c.assign_hook.map(|slot| {
+                let f = slot.get();
+                Box::new(move || f(s.as_deref(), extra.as_ref())) as DeferredAssignHook
+            })
         }
         (GucVariable::Enum(c), config_var_val::Enumval(v)) => {
             c.value = Some(v);
-            if let Some(slot) = c.assign_hook {
-                (slot.get())(v, extra.as_ref());
-            }
             if c.variable.installed() {
                 c.variable.write(v);
             }
+            c.assign_hook.map(|slot| {
+                let f = slot.get();
+                Box::new(move || f(v, extra.as_ref())) as DeferredAssignHook
+            })
         }
-        (_record, _) => {}
-    }
+        (_record, _) => None,
+    };
 
     let gen = record.gen_mut();
     gen.source = source;
     gen.scontext = context;
     gen.srole = srole;
+
+    deferred
 }
 
 /// The `if (makeDefault)` body of each per-type case (guc.c:3768 for bool;
