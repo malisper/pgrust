@@ -25,3 +25,4 @@ common-encnames-seams = { path = "../common-encnames-seams" }
 backend-utils-error-elog-seams = { path = "../backend-utils-error-elog-seams" }
 backend-utils-adt-xml-seams = { path = "../backend-utils-adt-xml-seams" }
 backend-utils-adt-xml-libxml-seams = { path = "../backend-utils-adt-xml-libxml-seams" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }

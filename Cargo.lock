@@ -18645,6 +18645,7 @@ dependencies = [
  "backend-utils-adt-xml-libxml-seams",
  "backend-utils-adt-xml-seams",
  "backend-utils-error-elog-seams",
+ "backend-utils-misc-guc-tables",
  "common-encnames-seams",
  "mcx",
  "seam-core",

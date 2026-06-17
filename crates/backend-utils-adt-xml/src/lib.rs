@@ -86,9 +86,77 @@ fn escape_xml_seam<'mcx>(mcx: mcx::Mcx<'mcx>, s: &str) -> PgResult<mcx::PgString
     mcx::PgString::from_str_in(text, mcx)
 }
 
+// ---------------------------------------------------------------------------
+// GUC variable backing storage (in C: `int xmlbinary = XMLBINARY_BASE64;` and
+// `int xmloption = XMLOPTION_CONTENT;`, xml.c:109-110). xml.c owns these module
+// globals (declared `extern` in guc_tables.c), read directly from the GUC slot
+// — they are NOT sourced from ControlFile. Modelled here as backend-local
+// atomics seeded with the PostgreSQL boot defaults; the GUC engine writes them
+// at startup through the installed `GucVarAccessors`.
+// ---------------------------------------------------------------------------
+
+use core::sync::atomic::{AtomicI32, Ordering};
+
+/// `int xmlbinary = XMLBINARY_BASE64;` (xml.c:109). `XMLBINARY_BASE64 == 0`.
+static XMLBINARY: AtomicI32 = AtomicI32::new(XmlBinaryType::XMLBINARY_BASE64 as i32);
+/// `int xmloption = XMLOPTION_CONTENT;` (xml.c:110). `XMLOPTION_CONTENT == 1`.
+static XMLOPTION: AtomicI32 = AtomicI32::new(XmlOptionType::XMLOPTION_CONTENT as i32);
+
+#[inline]
+fn xmlbinary_guc() -> i32 {
+    XMLBINARY.load(Ordering::Relaxed)
+}
+#[inline]
+fn set_xmlbinary_guc(v: i32) {
+    XMLBINARY.store(v, Ordering::Relaxed);
+}
+#[inline]
+fn xmloption_guc() -> i32 {
+    XMLOPTION.load(Ordering::Relaxed)
+}
+#[inline]
+fn set_xmloption_guc(v: i32) {
+    XMLOPTION.store(v, Ordering::Relaxed);
+}
+
+/// `XmlBinaryType` decode of the `xmlbinary` GUC int — for `seam::xmlbinary`.
+#[inline]
+fn xmlbinary_seam() -> XmlBinaryType {
+    match xmlbinary_guc() {
+        x if x == XmlBinaryType::XMLBINARY_HEX as i32 => XmlBinaryType::XMLBINARY_HEX,
+        _ => XmlBinaryType::XMLBINARY_BASE64,
+    }
+}
+
+/// `XmlOptionType` decode of the `xmloption` GUC int — for `seam::xmloption`.
+#[inline]
+fn xmloption_seam() -> XmlOptionType {
+    match xmloption_guc() {
+        x if x == XmlOptionType::XMLOPTION_DOCUMENT as i32 => XmlOptionType::XMLOPTION_DOCUMENT,
+        _ => XmlOptionType::XMLOPTION_CONTENT,
+    }
+}
+
 /// Install this crate's inward seams.
 pub fn init_seams() {
     backend_utils_adt_xml_seams::escape_xml::set(escape_xml_seam);
+
+    // The `xmlbinary` / `xmloption` GUC slots: install the `conf->variable`
+    // accessors (read directly from the GUC slot, never ControlFile) plus the
+    // `xmlbinary()` / `xmloption()` reader seams that decode them to enums.
+    {
+        use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+        vars::xmlbinary.install(GucVarAccessors {
+            get: xmlbinary_guc,
+            set: set_xmlbinary_guc,
+        });
+        vars::xmloption.install(GucVarAccessors {
+            get: xmloption_guc,
+            set: set_xmloption_guc,
+        });
+    }
+    seam::xmlbinary::set(xmlbinary_seam);
+    seam::xmloption::set(xmloption_seam);
 }
 
 // ---------------------------------------------------------------------------
