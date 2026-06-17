@@ -71,6 +71,7 @@ allocator-api2 = { version = "0.2", default-features = false, features = ["alloc
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-misc-guc-tables-seams = { path = "../backend-utils-misc-guc-tables-seams" }
+backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }
 backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
 backend-utils-misc-timeout-seams = { path = "../backend-utils-misc-timeout-seams" }
 backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }

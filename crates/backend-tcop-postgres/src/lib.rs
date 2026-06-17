@@ -146,6 +146,17 @@ pub fn init_seams() {
     );
     guc::install_guc_hooks();
 
+    // `debug_parallel_query` (GUC, `int` enum) — the developer GUC read by the
+    // parallel-worker error-relay (parallel.c) to decide whether to add the
+    // "parallel worker" context line (skipped under DEBUG_PARALLEL_REGRESS for
+    // test stability) and by the planner's parallel-Gather forcing. In C the
+    // backing `int debug_parallel_query` lives in optimizer/plan/planner.c; in
+    // this repo it is the `debug_parallel_query` GUC slot (a `GucEnumVar`, i.e.
+    // `GucSlot<i32>`) in guc_tables. The accessor reads that slot directly.
+    backend_access_transam_parallel_rt_seams::debug_parallel_query::set(|| {
+        backend_utils_misc_guc_tables::vars::debug_parallel_query.read()
+    });
+
     // --- F1: simple-Query analyze+rewrite entry (postgres.c owns
     // pg_analyze_and_rewrite_fixedparams; its consumer is copyto.c). COPY passes
     // no parameter types, matching the seam's no-param signature.
