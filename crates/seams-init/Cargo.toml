@@ -125,6 +125,7 @@ backend-catalog-pg-parameter-acl = { path = "../backend-catalog-pg-parameter-acl
 backend-catalog-pg-database = { path = "../backend-catalog-pg-database" }
 backend-catalog-pg-operator = { path = "../backend-catalog-pg-operator" }
 backend-catalog-pg-db-role-setting = { path = "../backend-catalog-pg-db-role-setting" }
+backend-catalog-pg-authid = { path = "../backend-catalog-pg-authid" }
 backend-catalog-pg-constraint = { path = "../backend-catalog-pg-constraint" }
 backend-catalog-pg-attrdef = { path = "../backend-catalog-pg-attrdef" }
 backend-catalog-pg-depend = { path = "../backend-catalog-pg-depend" }

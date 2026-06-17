@@ -4866,6 +4866,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-pg-authid"
+version = "0.0.0"
+dependencies = [
+ "backend-access-index-genam-seams",
+ "backend-access-table-table",
+ "backend-catalog-pg-authid-seams",
+ "mcx",
+ "seam-core",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-catalog-pg-authid-seams"
 version = "0.0.0"
 dependencies = [
@@ -21369,6 +21386,7 @@ dependencies = [
  "backend-catalog-partition",
  "backend-catalog-pg-aggregate",
  "backend-catalog-pg-attrdef",
+ "backend-catalog-pg-authid",
  "backend-catalog-pg-cast",
  "backend-catalog-pg-class",
  "backend-catalog-pg-collation",

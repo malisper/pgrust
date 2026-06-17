@@ -111,6 +111,7 @@ pub fn init_all() {
     backend_catalog_pg_parameter_acl::init_seams();
     backend_catalog_pg_database::init_seams();
     backend_catalog_pg_db_role_setting::init_seams();
+    backend_catalog_pg_authid::init_seams();
     backend_catalog_pg_constraint::init_seams();
     backend_catalog_pg_attrdef::init_seams();
     backend_catalog_pg_depend::init_seams();
