@@ -248,6 +248,17 @@ fn fc_lo_get_fragment(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     }
 }
 
+fn fc_lo_put(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let lo_oid = arg_oid(fcinfo, 0);
+    let offset = arg_i64(fcinfo, 1);
+    let str = arg_varlena(fcinfo, 2);
+    match crate::be_lo_put(lo_oid, offset, str) {
+        // C: PG_RETURN_VOID() == (Datum) 0.
+        Ok(()) => Datum::from_usize(0),
+        Err(e) => raise(e),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -295,5 +306,6 @@ pub fn register_be_fsstubs_builtins() {
         builtin(3457, "lo_from_bytea", 2, true, false, fc_lo_from_bytea),
         builtin(3458, "lo_get", 1, true, false, fc_lo_get),
         builtin(3459, "lo_get", 3, true, false, fc_lo_get_fragment),
+        builtin(3460, "lo_put", 3, true, false, fc_lo_put),
     ]);
 }
