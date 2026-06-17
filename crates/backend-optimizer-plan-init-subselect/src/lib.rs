@@ -57,9 +57,13 @@ pub fn enable_material() -> bool {
  * GUC globals (optimizer.h externs) read by deconstruct_recurse.
  * ======================================================================== */
 
-/// `from_collapse_limit` (GUC). FROM-list collapse threshold; default 8.
+/// `int from_collapse_limit` (GUC) backing storage (optimizer.h extern;
+/// allocgocon.c `conf->variable`). FROM-list collapse threshold; boot_val 8.
+/// This is the owner-held `conf->variable` the GUC engine reads/writes through
+/// the installed [`GucVarAccessors`](backend_utils_misc_guc_tables::GucVarAccessors).
 pub static mut FROM_COLLAPSE_LIMIT: i32 = 8;
-/// `join_collapse_limit` (GUC). Explicit-JOIN collapse threshold; default 8.
+/// `int join_collapse_limit` (GUC) backing storage. Explicit-JOIN collapse
+/// threshold; boot_val 8. Owner-held `conf->variable` for the GUC engine.
 pub static mut JOIN_COLLAPSE_LIMIT: i32 = 8;
 
 #[inline]
@@ -171,6 +175,28 @@ pub fn init_seams() {
     use backend_optimizer_plan_small_seams as psmall;
     use backend_optimizer_path_equivclass_ext_seams as eqext;
     use backend_optimizer_util_joininfo_ext_seams as jiext;
+
+    /* ---- GUC int var accessors owned here (initsplan.c globals) --------- *
+     * `int from_collapse_limit` / `int join_collapse_limit` are plain USERSET
+     * GUC ints (guc_tables.c, QUERY_TUNING_OTHER, boot_val 8). The C reads them
+     * directly off the `conf->variable` global at deconstruct_jointree time
+     * (initsplan.c) — they are NOT seeded from ControlFile. The GUC engine seeds
+     * the owner-held storage from boot_val and assigns user/config changes
+     * through these accessors. */
+    {
+        use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+        vars::from_collapse_limit.install(GucVarAccessors {
+            get: from_collapse_limit,
+            set: |v| {
+                // SAFETY: single-threaded GUC assignment; mirrors `conf->variable = v`.
+                unsafe { *core::ptr::addr_of_mut!(FROM_COLLAPSE_LIMIT) = v }
+            },
+        });
+        vars::join_collapse_limit.install(GucVarAccessors {
+            get: join_collapse_limit,
+            set: |v| unsafe { *core::ptr::addr_of_mut!(JOIN_COLLAPSE_LIMIT) = v },
+        });
+    }
 
     /* ---- planmain.c entry points (plan-small-seams) ------------------- */
     psmall::add_base_rels_to_query::set(|root, run, jtnode| {

@@ -11452,6 +11452,7 @@ dependencies = [
  "backend-optimizer-util-vars",
  "backend-rewrite-core",
  "backend-utils-cache-lsyscache-seams",
+ "backend-utils-misc-guc-tables",
  "mcx",
  "seam-core",
  "types-core",
