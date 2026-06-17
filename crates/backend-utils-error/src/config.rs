@@ -33,7 +33,13 @@ use types_error::{
 
 thread_local! { static LOG_MIN_MESSAGES: Cell<i32> = const { Cell::new(WARNING.0) }; }
 thread_local! { static CLIENT_MIN_MESSAGES: Cell<i32> = const { Cell::new(NOTICE.0) }; }
-thread_local! { static WHERE_TO_SEND_OUTPUT: Cell<CommandDest> = const { Cell::new(CommandDest::None) }; }
+// `CommandDest whereToSendOutput = DestDebug;` (postgres.c:91). This is the
+// single canonical home for the per-backend output destination: the error
+// reporter reads it here, `BackendInitialize` sets it to `DestRemote`, and the
+// tcop `ReadCommand` / postmaster / async / walsender consumers all delegate to
+// this cell (tcop-postgres `globals::where_to_send_output` forwards here). The
+// C default is `DestDebug` (server log / single-user interactive), NOT `None`.
+thread_local! { static WHERE_TO_SEND_OUTPUT: Cell<CommandDest> = const { Cell::new(CommandDest::Debug) }; }
 thread_local! { static CLIENT_AUTH_IN_PROGRESS: Cell<bool> = const { Cell::new(false) }; }
 thread_local! { static LOG_MIN_ERROR_STATEMENT: Cell<i32> = const { Cell::new(ERROR.0) }; }
 

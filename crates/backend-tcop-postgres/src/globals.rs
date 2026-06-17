@@ -21,9 +21,6 @@ thread_local! {
     /// query loop that sets it is F1/F2 (planner-gated).
     static DEBUG_QUERY_STRING: Cell<Option<&'static str>> = const { Cell::new(None) };
 
-    /// `CommandDest whereToSendOutput = DestDebug;` (postgres.c:91) — the output
-    /// destination for this backend.
-    static WHERE_TO_SEND_OUTPUT: Cell<CommandDest> = const { Cell::new(CommandDest::Debug) };
 
     /// `static bool xact_started = false;` (postgres.c:129) — whether a
     /// `start_xact_command` is in effect (`StartTransactionCommand` has been
@@ -80,14 +77,21 @@ pub fn set_debug_query_string(value: Option<&'static str>) {
 
 // `whereToSendOutput`.
 
+// `whereToSendOutput` (postgres.c:91) has ONE canonical home — the
+// `backend-utils-error::config` cell. C declares it once in postgres.c and both
+// the error reporter and `ReadCommand` read the same variable; the Rust split
+// previously kept a second tcop-local copy, so `BackendInitialize`'s
+// `DestRemote` (written to the error-config cell) was invisible to `ReadCommand`
+// and a forked client backend wrongly took the interactive (`backend> `) path.
+// Delegate to the single cell so every reader/writer agrees.
 #[inline]
 pub fn where_to_send_output() -> CommandDest {
-    WHERE_TO_SEND_OUTPUT.get()
+    backend_utils_error::config::where_to_send_output()
 }
 
 #[inline]
 pub fn set_where_to_send_output(value: CommandDest) {
-    WHERE_TO_SEND_OUTPUT.set(value);
+    backend_utils_error::config::set_where_to_send_output(value);
 }
 
 // `xact_started`.
