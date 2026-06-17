@@ -1992,6 +1992,19 @@ pub fn set_max_notify_queue_pages(value: i32) {
     MAX_NOTIFY_QUEUE_PAGES.with(|c| c.set(value));
 }
 
+/// Read accessor for the `bool Trace_notify` GUC (async.c line 425) — the
+/// `conf->variable` backing read by the GUC engine.
+pub fn trace_notify() -> bool {
+    TRACE_NOTIFY.with(|f| f.get())
+}
+
+/// Read accessor for the `int max_notify_queue_pages` GUC (async.c line 428) —
+/// the `conf->variable` backing read by the GUC engine and by
+/// `asyncQueueIsFull` / `asyncQueueUsage`.
+pub fn max_notify_queue_pages() -> i32 {
+    MAX_NOTIFY_QUEUE_PAGES.with(|c| c.get())
+}
+
 // ---------------------------------------------------------------------------
 // Inward seam installation
 // ---------------------------------------------------------------------------
@@ -2016,6 +2029,22 @@ pub fn init_seams() {
     backend_tcop_utility_out_seams::async_listen::set(Async_Listen);
     backend_tcop_utility_out_seams::async_unlisten::set(Async_Unlisten);
     backend_tcop_utility_out_seams::async_unlisten_all::set(Async_UnlistenAll);
+
+    // GUC variable backing storage owned by async.c. Both are plain GUC globals
+    // (`bool Trace_notify`, `int max_notify_queue_pages`) read directly from the
+    // `conf->variable` slot — not the ControlFile. The GUC engine seeds them
+    // from boot_val and reads/writes them through these accessors.
+    {
+        use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+        vars::Trace_notify.install(GucVarAccessors {
+            get: trace_notify,
+            set: set_trace_notify,
+        });
+        vars::max_notify_queue_pages.install(GucVarAccessors {
+            get: max_notify_queue_pages,
+            set: set_max_notify_queue_pages,
+        });
+    }
 }
 
 /// `case T_NotifyStmt: Async_Notify(stmt->conditionname, stmt->payload)`

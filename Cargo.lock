@@ -5953,6 +5953,7 @@ dependencies = [
  "backend-utils-error",
  "backend-utils-init-small",
  "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-tables",
  "backend-utils-misc-ps-status-seams",
  "backend-utils-time-snapmgr-pc-seams",
  "backend-utils-time-snapmgr-seams",

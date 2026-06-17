@@ -29,6 +29,7 @@ mcx = { path = "../mcx" }
 
 # Inward seams this crate owns + installs.
 backend-commands-async-seams = { path = "../backend-commands-async-seams" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 
 # ProcessUtility dispatch arms (installs the NOTIFY/LISTEN/UNLISTEN seams).
 backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
