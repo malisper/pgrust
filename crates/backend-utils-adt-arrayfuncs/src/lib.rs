@@ -77,6 +77,11 @@ pub mod sql;
 pub fn init_seams() {
     use backend_utils_adt_arrayfuncs_seams as seams;
 
+    // `Array_nulls` GUC: `array_in` reads the live value from the GUC slot
+    // (`guc_tables::vars::Array_nulls`), exactly as C reads the `Array_nulls`
+    // global. PGC_USERSET, boot value `true`.
+    seams::array_nulls::set(|| backend_utils_misc_guc_tables::vars::Array_nulls.read());
+
     seams::init_array_result_any::set(construct::init_array_result_any);
     seams::accum_array_result_any::set(construct::accum_array_result_any);
     seams::make_array_result_any::set(construct::make_array_result_any);

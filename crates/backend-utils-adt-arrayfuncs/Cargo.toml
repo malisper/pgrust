@@ -25,6 +25,9 @@ types-typcache = { path = "../types-typcache" }
 # Inward seams this crate OWNS and installs from init_seams().
 backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
 
+# GUC slots: `array_in` reads the live `Array_nulls` GUC value from its slot.
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+
 # Outward seams to unported neighbors.
 backend-utils-adt-arrayutils-seams = { path = "../backend-utils-adt-arrayutils-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }

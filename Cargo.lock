@@ -16957,6 +16957,7 @@ dependencies = [
  "backend-utils-cache-typcache-seams",
  "backend-utils-error",
  "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-misc-guc-tables",
  "mcx",
  "types-array",
  "types-core",

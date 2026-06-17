@@ -45,6 +45,17 @@ pub enum ArrayBuildCtx {
 }
 
 seam_core::seam!(
+    /// `Array_nulls` GUC (`utils/adt/arrayfuncs.c`, declared `bool Array_nulls
+    /// = true`). `array_in` reads the live value of this PGC_USERSET GUC out of
+    /// its slot to decide whether an unquoted `NULL` in array input text is a
+    /// null element (true) or a literal string (false). The owning unit
+    /// (`backend-utils-adt-arrayfuncs`) installs this reading the live value
+    /// from the GUC slot (`guc_tables::vars::Array_nulls`); it is a plain GUC
+    /// read, not a ControlFile field.
+    pub fn array_nulls() -> bool
+);
+
+seam_core::seam!(
     /// `initArrayResultAny(input_type, CurrentMemoryContext, true)`
     /// (arrayfuncs.c): create a fresh polymorphic array accumulator for
     /// elements of `input_type`, allocated in the memory context the `econtext`

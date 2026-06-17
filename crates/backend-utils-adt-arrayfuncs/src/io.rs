@@ -38,6 +38,7 @@ use crate::foundation::{
     self, MAX_ALLOC_SIZE, MAX_ARRAY_SIZE, MAX_DIM,
 };
 
+use backend_utils_adt_arrayfuncs_seams as arrayfuncs_seams;
 use backend_utils_adt_arrayutils_seams as arrayutils;
 use backend_utils_adt_format_type_seams as format_type;
 use backend_utils_cache_lsyscache_seams as lsyscache;
@@ -46,11 +47,6 @@ use backend_utils_fmgr_fmgr_seams as fmgr;
 // ---------------------------------------------------------------------------
 // Local constants mirrored from arrayfuncs.c.
 // ---------------------------------------------------------------------------
-
-/// `Array_nulls` GUC (arrayfuncs.c): defaults to `true`. The GUC owner is the
-/// guc subsystem; the array text parser only reads it, and the installed
-/// default is `true`, which is what `array_in` observes.
-const ARRAY_NULLS: bool = true;
 
 /// `ASSGN` == `"="` (arrayfuncs.c).
 const ASSGN: &[u8] = b"=";
@@ -848,7 +844,7 @@ fn read_unquoted_element<'a>(
                     elembuf.truncate(dstlen);
                     *cur_ptr = *p;
                     // Check if it's an unquoted "NULL".
-                    if ARRAY_NULLS
+                    if arrayfuncs_seams::array_nulls::call()
                         && !has_escapes
                         && elembuf.eq_ignore_ascii_case(b"NULL")
                     {
