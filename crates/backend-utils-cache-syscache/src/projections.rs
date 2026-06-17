@@ -1520,6 +1520,13 @@ pub(crate) fn get_syscache_hash_value_typeoid(type_id: Oid) -> PgResult<u32> {
     crate::GetSysCacheHashValue1(TYPEOID, SysCacheKey::Value(KeyDatum::from_oid(type_id)))
 }
 
+/// `GetSysCacheHashValue1(cache_id, ObjectIdGetDatum(oid))` — the catcache hash
+/// value for an arbitrary single-OID syscache key (e.g. `PROCOID` for
+/// `record_plan_function_dependency`).
+pub(crate) fn get_syscache_hash_value_oid(cache_id: i32, oid: Oid) -> PgResult<u32> {
+    crate::GetSysCacheHashValue1(cache_id, SysCacheKey::Value(KeyDatum::from_oid(oid)))
+}
+
 /// `GetSysCacheHashValue1(DATABASEOID, ObjectIdGetDatum(dbid))` (acl.c
 /// `initialize_acl`) — the catcache hash value for a `pg_database` row, cached
 /// to filter `DATABASEOID` invalidations for other databases.

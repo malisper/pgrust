@@ -1312,6 +1312,17 @@ seam_core::seam!(
     pub fn get_syscache_hash_value_typeoid(type_id: Oid) -> PgResult<u32>
 );
 
+seam_core::seam!(
+    /// `GetSysCacheHashValue1(cache_id, ObjectIdGetDatum(oid))`
+    /// (`utils/cache/syscache.c`) — the catcache hash value for an arbitrary
+    /// single-OID syscache key. Used by `record_plan_function_dependency`'s
+    /// VALUE form (setrefs's `extract_query_dependencies`) to build a
+    /// `PlanInvalItem.hashValue` directly (with `cache_id = PROCOID`), since
+    /// plancache consumes the computed `(cacheId, hashValue)` pair. `Err`
+    /// carries the catcache machinery's `ereport(ERROR)`s.
+    pub fn get_syscache_hash_value_oid(cache_id: i32, oid: Oid) -> PgResult<u32>
+);
+
 /// `STATISTIC_NUM_SLOTS` (pg_statistic.h) — the number of statistics slots in
 /// a `pg_statistic` row. C: `#define STATISTIC_NUM_SLOTS 5`.
 pub const STATISTIC_NUM_SLOTS: usize = 5;

@@ -88,3 +88,33 @@ seam_core::seam!(
         aggsplit: types_nodes::AggSplit,
     ) -> types_error::PgResult<()>
 );
+
+/// The three dependency out-params the VALUE `extract_query_dependencies` writes
+/// (mirrors `backend_nodes_copyfuncs_pc_seams::QueryDependencies`, but the
+/// inval-item keys are the bare `(cacheId, hashValue)` pair so this seam crate
+/// need not depend on `types-plancache`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct QueryDependenciesValue {
+    /// `relationOids`.
+    pub relation_oids: alloc::vec::Vec<types_core::Oid>,
+    /// `invalItems` — `(PlanInvalItem.cacheId, PlanInvalItem.hashValue)` pairs.
+    pub inval_items: alloc::vec::Vec<(i32, u32)>,
+    /// `*hasRowSecurity` (the `glob.dependsOnRole` hack).
+    pub depends_on_rls: bool,
+}
+
+seam_core::seam!(
+    /// `extract_query_dependencies((Node *) query_list, &relationOids,
+    /// &invalItems, &hasRowSecurity)` (setrefs.c:3635) over the OWNED value
+    /// `Query` tree. Given a rewritten-but-not-yet-planned querytree list, extract
+    /// the relation-OID and function-inval-item dependencies and detect whether
+    /// any rewrite step was affected by RLS — exactly as `set_plan_references`
+    /// would. Installed by backend-optimizer-plan-setrefs (the owner); this is the
+    /// VALUE counterpart of the handle-based
+    /// `backend_nodes_copyfuncs_pc_seams::extract_query_dependencies` that
+    /// plancache's F0 de-handle will switch to.
+    pub fn extract_query_dependencies_value<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        query_list: &[types_nodes::copy_query::Query<'mcx>],
+    ) -> types_error::PgResult<QueryDependenciesValue>
+);

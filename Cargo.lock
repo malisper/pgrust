@@ -11702,6 +11702,7 @@ dependencies = [
  "backend-nodes-core",
  "backend-nodes-equalfuncs",
  "backend-optimizer-plan-setrefs-seams",
+ "backend-utils-cache-syscache-seams",
  "mcx",
  "types-core",
  "types-error",
@@ -11713,6 +11714,7 @@ dependencies = [
 name = "backend-optimizer-plan-setrefs-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",

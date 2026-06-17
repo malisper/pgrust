@@ -1033,6 +1033,9 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::get_syscache_hash_value_typeoid::set(
         projections::get_syscache_hash_value_typeoid,
     );
+    backend_utils_cache_syscache_seams::get_syscache_hash_value_oid::set(
+        projections::get_syscache_hash_value_oid,
+    );
     backend_utils_cache_syscache_seams::opfamily_namespace_method_name::set(
         projections::opfamily_namespace_method_name,
     );

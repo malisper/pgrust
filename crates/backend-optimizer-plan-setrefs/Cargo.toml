@@ -22,3 +22,6 @@ backend-nodes-core = { path = "../backend-nodes-core" }
 backend-nodes-equalfuncs = { path = "../backend-nodes-equalfuncs" }
 # This unit's own outward seams (cross-subsystem externals that would cycle).
 backend-optimizer-plan-setrefs-seams = { path = "../backend-optimizer-plan-setrefs-seams" }
+# GetSysCacheHashValue1(PROCOID, funcid) for record_plan_function_dependency's
+# VALUE form (the extract_query_dependencies path).
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }

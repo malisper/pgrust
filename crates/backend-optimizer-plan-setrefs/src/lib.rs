@@ -69,8 +69,13 @@ fn is_special_varno(varno: i32) -> bool {
 /// syscache IDs recorded into PlanInvalItems.
 const REGCLASSOID: Oid = 2205;
 const OIDOID: Oid = 26;
-const PROCOID: i32 = 11; // SysCacheIdentifier PROCOID
-const TYPEOID: i32 = 13; // SysCacheIdentifier TYPEOID
+// `SysCacheIdentifier` ordinals (catalog/syscache_ids.h, alphabetical-by-name
+// generated enum): PROCOID is the 47th, TYPEOID the 82nd. These are the exact
+// `cacheId` values plancache stores in a `PlanInvalItem` and matches against
+// SI invalidation messages, and the index `GetSysCacheHashValue1` uses — they
+// MUST equal the C enum / `backend-utils-cache-syscache` cacheinfo ordinals.
+const PROCOID: i32 = 47; // SysCacheIdentifier PROCOID
+const TYPEOID: i32 = 82; // SysCacheIdentifier TYPEOID
 
 /// `FirstUnpinnedObjectId` (access/transam.h) — OIDs below this are built-in and
 /// not tracked for plan invalidation.
@@ -2853,7 +2858,258 @@ fn set_modifytable_references<'mcx>(
 
 // ===========================================================================
 // extract_query_dependencies — exported plancache entry points.
+//
+// `set_plan_references` (above) records dependencies into `root->glob` via the
+// `record_inval_item` seam (`Vec<NodeId>`, plancache-owned node space). The
+// VALUE entry point below is what plancache.c's invalidation of cached UNPLANNED
+// queries needs: given a rewritten querytree list it walks the owned `Query`
+// tree and produces the concrete `(relationOids, invalItems, hasRowSecurity)`
+// triple. C makes up a dummy zeroed `PlannerGlobal`/`PlannerInfo` to reuse this
+// module's machinery; here the accumulators live in a small `ExtractDepsCtx`,
+// and the func-OID inval-item hash is computed directly through the
+// `get_syscache_hash_value1_oid` seam (PROCOID) so the result carries real
+// `(cacheId, hashValue)` pairs rather than opaque node handles.
 // ===========================================================================
+
+/// The dummy `PlannerGlobal` accumulators of `extract_query_dependencies`
+/// (setrefs.c:3635). `glob.relationOids` / `glob.invalItems`, plus the
+/// `glob.dependsOnRole` field C abuses to collect the `hasRowSecurity` flag.
+struct ExtractDepsCtx {
+    relation_oids: Vec<Oid>,
+    inval_items: Vec<(i32, u32)>,
+    depends_on_role: bool,
+}
+
+/// `record_plan_function_dependency(root, funcid)` (setrefs.c:3553), VALUE form:
+/// append a `PlanInvalItem` `(PROCOID, GetSysCacheHashValue1(PROCOID, funcid))`
+/// to the accumulator, ignoring built-in functions (`funcid < FirstUnpinnedObjectId`).
+fn record_plan_function_dependency_value(ctx: &mut ExtractDepsCtx, funcid: Oid) -> PgResult<()> {
+    if funcid >= FirstUnpinnedObjectId {
+        // inval_item->cacheId = PROCOID;
+        // inval_item->hashValue = GetSysCacheHashValue1(PROCOID, ObjectIdGetDatum(funcid));
+        let hash =
+            backend_utils_cache_syscache_seams::get_syscache_hash_value_oid::call(PROCOID, funcid)?;
+        ctx.inval_items.push((PROCOID, hash));
+    }
+    Ok(())
+}
+
+/// `fix_expr_common(context, node)` (setrefs.c:2029), VALUE form for the
+/// dependency-extraction walk: record function-OID inval items and regclass
+/// `Const` relation OIDs. The opcode fill-in (`set_opfuncid`/`set_sa_opfuncid`)
+/// is reproduced on a local copy so the unplanned query's possibly-unset
+/// `opfuncid` is resolved before recording (C scribbles it in place; we read it
+/// off a clone, which yields the identical OID). The `GroupingFunc` cols fixup
+/// is a no-op here — `extract_query_dependencies` uses a zeroed root whose
+/// `grouping_map` is NULL — so it is omitted (matching the C no-op).
+fn fix_expr_common_value(ctx: &mut ExtractDepsCtx, node: &Expr) -> PgResult<()> {
+    match node {
+        Expr::Aggref(a) => record_plan_function_dependency_value(ctx, a.aggfnoid)?,
+        Expr::WindowFunc(w) => record_plan_function_dependency_value(ctx, w.winfnoid)?,
+        Expr::FuncExpr(f) => record_plan_function_dependency_value(ctx, f.funcid)?,
+        // OpExpr / DistinctExpr / NullIfExpr share the OpExpr struct.
+        Expr::OpExpr(op) | Expr::DistinctExpr(op) | Expr::NullIfExpr(op) => {
+            let mut tmp = op.clone();
+            set_opfuncid(&mut tmp)?;
+            record_plan_function_dependency_value(ctx, tmp.opfuncid)?;
+        }
+        Expr::ScalarArrayOpExpr(saop) => {
+            let mut tmp = saop.clone();
+            set_sa_opfuncid(&mut tmp)?;
+            record_plan_function_dependency_value(ctx, tmp.opfuncid)?;
+            if tmp.hashfuncid != 0 {
+                record_plan_function_dependency_value(ctx, tmp.hashfuncid)?;
+            }
+            if tmp.negfuncid != 0 {
+                record_plan_function_dependency_value(ctx, tmp.negfuncid)?;
+            }
+        }
+        Expr::Const(con) => {
+            if is_regclass_const(con) {
+                // root->glob->relationOids = lappend_oid(..., DatumGetObjectId(con->constvalue));
+                ctx.relation_oids.push(const_object_id(con));
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// `extract_query_dependencies_walker(node, context)` (setrefs.c:3671) — the
+/// recursive walker over the owned `Query`/`RangeTblEntry`/`Expr` tree. Returns
+/// `true` to abort (it never does in this module, exactly as C). Errors from the
+/// syscache-hash / opcode lookups are threaded out as `PgResult`.
+fn extract_query_dependencies_walker(node: &Node, ctx: &mut ExtractDepsCtx) -> PgResult<bool> {
+    // if (node == NULL) return false; — the caller never passes NULL here.
+    // Assert(!IsA(node, PlaceHolderVar)); — PlaceHolderVars do not appear in
+    // a not-yet-planned query tree.
+    if let Node::Query(query) = node {
+        if query.commandType == types_nodes::nodes::CmdType::CMD_UTILITY {
+            // This logic must handle any utility command for which parse
+            // analysis was nontrivial (cf. stmt_requires_parse_analysis).
+            // Notably, CALL requires its own processing.
+            if let Some(util) = query.utilityStmt.as_deref() {
+                if let Node::CallStmt(callstmt) = util {
+                    // We need not examine funccall, just the transformed exprs.
+                    if let Some(fe) = callstmt.funcexpr.as_deref() {
+                        if extract_query_dependencies_walker(fe, ctx)? {
+                            return Ok(true);
+                        }
+                    }
+                    for arg in callstmt.outargs.iter() {
+                        if extract_query_dependencies_walker(arg, ctx)? {
+                            return Ok(true);
+                        }
+                    }
+                    return Ok(false);
+                }
+            }
+
+            // Ignore other utility statements, except those (such as EXPLAIN)
+            // that contain a parsed-but-not-planned query.  For those, we just
+            // need to transfer our attention to the contained query.
+            match utility_contains_query(query.utilityStmt.as_deref()) {
+                None => return Ok(false),
+                Some(inner) => {
+                    // Recurse with the contained Query as the current node.
+                    return extract_query_dependencies_walker(inner, ctx);
+                }
+            }
+        }
+
+        // Remember if any Query has RLS quals applied by rewriter.
+        if query.hasRowSecurity {
+            ctx.depends_on_role = true;
+        }
+
+        // Collect relation OIDs in this Query's rtable.
+        for rte in query.rtable.iter() {
+            use types_nodes::parsenodes::RTEKind;
+            if rte.rtekind == RTEKind::RTE_RELATION
+                || (rte.rtekind == RTEKind::RTE_SUBQUERY && rte.relid != 0)
+                || (rte.rtekind == RTEKind::RTE_NAMEDTUPLESTORE && rte.relid != 0)
+            {
+                ctx.relation_oids.push(rte.relid);
+            }
+        }
+
+        // And recurse into the query's subexpressions:
+        //   return query_tree_walker(query, extract_query_dependencies_walker, context, 0);
+        let mut callback_err: Option<PgError> = None;
+        let aborted = {
+            let mut walker = |child: &Node| -> bool {
+                match extract_query_dependencies_walker(child, ctx) {
+                    Ok(abort) => abort,
+                    Err(e) => {
+                        if callback_err.is_none() {
+                            callback_err = Some(e);
+                        }
+                        true
+                    }
+                }
+            };
+            backend_nodes_core::node_walker::query_tree_walker(query, &mut walker, 0)
+        };
+        if let Some(e) = callback_err {
+            return Err(e);
+        }
+        return Ok(aborted);
+    }
+
+    // Extract function dependencies and check for regclass Consts:
+    //   fix_expr_common(context, node);
+    if let Node::Expr(e) = node {
+        fix_expr_common_value(ctx, e)?;
+    }
+    // return expression_tree_walker(node, extract_query_dependencies_walker, context);
+    let mut callback_err: Option<PgError> = None;
+    let aborted = {
+        let mut walker = |child: &Node| -> bool {
+            match extract_query_dependencies_walker(child, ctx) {
+                Ok(abort) => abort,
+                Err(e) => {
+                    if callback_err.is_none() {
+                        callback_err = Some(e);
+                    }
+                    true
+                }
+            }
+        };
+        backend_nodes_core::node_walker::expression_tree_walker(node, &mut walker)
+    };
+    if let Some(e) = callback_err {
+        return Err(e);
+    }
+    Ok(aborted)
+}
+
+/// `UtilityContainsQuery(parsetree)` (utility.c:2179) — return the contained
+/// not-yet-planned `Query` of an EXPLAIN / CREATE-TABLE-AS / DECLARE-CURSOR
+/// utility statement, drilling through nested utility-`Query` wrappers, or
+/// `None`. This is a pure structural recursion over the owned `Node` tree (the
+/// same three `Node` variants utility.c switches on, all in `types-nodes`), so
+/// it is mirrored locally rather than seamed — there is no catalog/runtime
+/// dependency and no crate boundary to cross.
+fn utility_contains_query<'a, 'mcx>(parsetree: Option<&'a Node<'mcx>>) -> Option<&'a Node<'mcx>> {
+    let parsetree = parsetree?;
+    // switch (nodeTag(parsetree)): each arm pulls out `->query`.
+    let qry = match parsetree {
+        Node::DeclareCursorStmt(stmt) => stmt.query.as_deref(),
+        Node::ExplainStmt(stmt) => stmt.query.as_deref(),
+        Node::CreateTableAsStmt(stmt) => stmt.query.as_deref(),
+        // default: return NULL;
+        _ => return None,
+    };
+    // qry = castNode(Query, ...): the analyzed contained statement is a Query.
+    let node = qry?;
+    match node.as_query() {
+        Some(q) => {
+            if q.commandType == types_nodes::nodes::CmdType::CMD_UTILITY {
+                // return UtilityContainsQuery(qry->utilityStmt);
+                utility_contains_query(q.utilityStmt.as_deref())
+            } else {
+                // return qry;
+                Some(node)
+            }
+        }
+        None => None,
+    }
+}
+
+/// `extract_query_dependencies(query, &relationOids, &invalItems, &hasRowSecurity)`
+/// (setrefs.c:3635) over a rewritten-but-not-yet-planned querytree list. C makes
+/// up a dummy zeroed `PlannerGlobal`/`PlannerInfo` and runs
+/// `extract_query_dependencies_walker((Node *) query_list, &root)`; the
+/// list-of-`Query` is walked element by element (the C `extract_query_dependencies`
+/// is invoked on `(Node *) querytree_list`, and `expression_tree_walker`'s `List`
+/// arm visits each `Query`). The dummy `glob`/`root` are realized as the local
+/// [`ExtractDepsCtx`] accumulators.
+fn extract_query_dependencies_value<'mcx>(
+    _mcx: Mcx<'mcx>,
+    query_list: &[types_nodes::copy_query::Query<'mcx>],
+) -> PgResult<ext::QueryDependenciesValue> {
+    let mut ctx = ExtractDepsCtx {
+        relation_oids: Vec::new(),
+        inval_items: Vec::new(),
+        depends_on_role: false,
+    };
+    // (void) extract_query_dependencies_walker((Node *) query_list, &root);
+    // The argument is a List of Query nodes; expression_tree_walker's List arm
+    // walks each element, so we walk each Query directly as the current node.
+    for query in query_list.iter() {
+        // Wrap the borrowed Query as the `Node::Query` the walker expects. The
+        // walker only reads it, so a clone of the owned value tree is faithful.
+        let node = Node::Query(query.clone_in(_mcx)?);
+        if extract_query_dependencies_walker(&node, &mut ctx)? {
+            break;
+        }
+    }
+    Ok(ext::QueryDependenciesValue {
+        relation_oids: ctx.relation_oids,
+        inval_items: ctx.inval_items,
+        depends_on_rls: ctx.depends_on_role,
+    })
+}
 
 /// `set_returning_clause_references(root, rlist, topplan, resultRelation, rtoffset)`
 /// (setrefs.c:3398). Ported as a real body (uses build_tlist_index_other_vars +
@@ -2896,10 +3152,14 @@ fn set_returning_clause_references<'mcx>(
 }
 
 // ===========================================================================
-// INWARD seams: NONE. No-op init_seams (matches the joinpath precedent).
+// INWARD seams.
 // ===========================================================================
 
-/// This crate owns no inward seams; `init_seams` is a no-op (the joinpath
-/// precedent for a leaf optimizer crate). The outward seams it consumes are
-/// installed by their respective owners.
-pub fn init_seams() {}
+/// Install the seams this unit owns. `extract_query_dependencies_value` is the
+/// VALUE entry point plancache.c uses to extract dependencies of cached
+/// not-yet-planned queries (setrefs.c:3635). The expression/plan-walking
+/// machinery itself is real in-crate code over the `Node`/`Expr` model; the
+/// outward seams this crate consumes are installed by their respective owners.
+pub fn init_seams() {
+    ext::extract_query_dependencies_value::set(extract_query_dependencies_value);
+}
