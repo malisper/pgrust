@@ -47,6 +47,8 @@ use types_storage::{
     HugePagesStatus, PGShmemHeader, LW_EXCLUSIVE, LW_SHARED, SHMEM_INDEX_LOCK,
 };
 
+pub mod fmgr_builtins;
+
 const SRCFILE: &str = "shmem.c";
 
 fn loc(funcname: &str) -> ErrorLocation {
@@ -855,6 +857,8 @@ pub fn init_seams() {
     backend_storage_ipc_shmem_seams::shmem_alloc_unlocked::set(|size| {
         ShmemAllocUnlocked(size).map(|p| p.as_ptr())
     });
+
+    fmgr_builtins::register_backend_storage_ipc_shmem_builtins();
 }
 
 #[cfg(test)]
