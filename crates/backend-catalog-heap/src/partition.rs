@@ -22,7 +22,7 @@ use types_tuple::backend_access_common_heaptuple::Datum;
 
 /* genbki catalog + index OIDs (catalog/pg_partitioned_table.h, indexing.h). */
 const PartitionedRelationId: Oid = 3350;
-const PartitionedRelidIndexId: Oid = 5040;
+const PartitionedRelidIndexId: Oid = 3351;
 
 /* pg_partitioned_table attribute number (catalog/pg_partitioned_table.h). */
 const Anum_pg_partitioned_table_partrelid: AttrNumber = 1;

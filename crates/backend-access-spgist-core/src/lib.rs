@@ -233,8 +233,8 @@ fn IsPolymorphicType(typid: Oid) -> bool {
         || typid == ANYCOMPATIBLEMULTIRANGEOID
 }
 
-/// `ANYMULTIRANGEOID` (pg_type.dat OID 4451).
-const ANYMULTIRANGEOID: Oid = 4451;
+/// `ANYMULTIRANGEOID` (pg_type.dat OID 4537).
+const ANYMULTIRANGEOID: Oid = 4537;
 /// `ANYCOMPATIBLEMULTIRANGEOID` (pg_type.dat OID 4538).
 const ANYCOMPATIBLEMULTIRANGEOID: Oid = 4538;
 
