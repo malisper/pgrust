@@ -763,6 +763,13 @@ pub fn init_seams() {
     s::get_system_identifier::set(shmem::GetSystemIdentifier);
     s::data_checksums_enabled::set(shmem::DataChecksumsEnabled);
 
+    // `InRecovery` (declared in xlog.h, but the storage is the file-static global
+    // in xlogrecovery.c — xlogrecovery.c:642 et al set it). The
+    // `backend-access-transam-xlog-seams::in_recovery` forwarding declaration
+    // delegates to the xlogrecovery owner's per-backend recovery-state read,
+    // which xlogrecovery.c installs via its own `in_recovery` seam.
+    s::in_recovery::set(backend_access_transam_xlogrecovery_seams::in_recovery::call);
+
     // The ipci shmem accumulator slots (XLOGShmemSize/XLOGShmemInit).
     s::xlog_shmem_size::set(shmem::xlog_shmem_size_seam);
     s::xlog_shmem_init::set(shmem::xlog_shmem_init_seam);
