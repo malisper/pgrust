@@ -1750,6 +1750,69 @@ pub fn init_seams() {
     seams::default_transaction_read_only::set(DefaultXactReadOnly);
     seams::default_transaction_deferrable::set(DefaultXactDeferrable);
     seams::default_transaction_isolation::set(DefaultXactIsoLevel);
+
+    install_parallel_rt_seams();
+}
+
+/// Install the parallel-worker transaction-state transfer + parallel-mode seams
+/// declared in `backend-access-transam-parallel-rt-seams` (xact.c owns the
+/// bodies). The leaf seam crate is acyclic. `parallel.c` calls these via the
+/// parallel-rt seam crate; the owner bodies were ported but only ever installed
+/// into xact's own native slots — this wires the parallel-rt slots too.
+///
+/// The `space: usize` arguments are the raw DSM start addresses
+/// `shm_toc_allocate` returned, bridged here into byte slices (the audited
+/// DSM-pointer primitive, cf. backend-utils-misc-guc `serialize_guc_state`).
+fn install_parallel_rt_seams() {
+    use backend_access_transam_parallel_rt_seams as rt;
+
+    // EnterParallelMode / ExitParallelMode return `()`; the seam is fallible.
+    rt::enter_parallel_mode::set(|| {
+        EnterParallelMode();
+        Ok(())
+    });
+    rt::exit_parallel_mode::set(|| {
+        ExitParallelMode();
+        Ok(())
+    });
+
+    // EstimateTransactionStateSpace() -> usize (Size).
+    rt::estimate_transaction_state_space::set(|| Ok(engine::EstimateTransactionStateSpace()));
+
+    // SerializeTransactionState writes the whole `len`-byte chunk the leader
+    // reserved; the owner returns the bytes written, which the seam drops.
+    rt::serialize_transaction_state::set(|len, space| {
+        // SAFETY: `space` is the start of a `len`-byte chunk shm_toc_allocate
+        // reserved for the transaction state (EstimateTransactionStateSpace
+        // sized it); the leader writes the whole chunk here.
+        let buf = unsafe { core::slice::from_raw_parts_mut(space as *mut u8, len) };
+        engine::SerializeTransactionState(buf)?;
+        Ok(())
+    });
+
+    // StartParallelWorkerTransaction restores the serialized stream. The worker
+    // has only the chunk pointer; the stream is self-describing — the n_xids
+    // count at bytes 28..32 fixes the total length (32-byte header + n_xids*4),
+    // mirroring C's pointer-only `StartParallelWorkerTransaction(char *)`.
+    rt::start_parallel_worker_transaction::set(|space| {
+        const HEADER: usize = 32;
+        // SAFETY: `space` points at the transaction-state chunk the leader
+        // serialized; the embedded header bounds the readable extent. Read the
+        // header first to learn the total length, then form the exact slice.
+        let n_xids = unsafe {
+            let head = core::slice::from_raw_parts(space as *const u8, HEADER);
+            i32::from_ne_bytes(head[28..32].try_into().expect("4-byte n_xids field"))
+        };
+        if n_xids < 0 {
+            return Err(PgError::error("invalid serialized transaction state"));
+        }
+        let total = HEADER + n_xids as usize * 4;
+        let buf = unsafe { core::slice::from_raw_parts(space as *const u8, total) };
+        engine::StartParallelWorkerTransaction(buf)
+    });
+
+    // EndParallelWorkerTransaction() -> PgResult<()> matches exactly.
+    rt::end_parallel_worker_transaction::set(engine::EndParallelWorkerTransaction);
 }
 
 #[cfg(test)]

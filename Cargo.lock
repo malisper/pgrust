@@ -3371,6 +3371,7 @@ dependencies = [
  "backend-access-transam-commit-ts-seams",
  "backend-access-transam-multixact-seams",
  "backend-access-transam-parallel",
+ "backend-access-transam-parallel-rt-seams",
  "backend-access-transam-subtrans-seams",
  "backend-access-transam-transam-seams",
  "backend-access-transam-twophase-seams",
