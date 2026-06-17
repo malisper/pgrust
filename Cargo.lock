@@ -20323,6 +20323,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-resowner-resowner"
+version = "0.0.0"
+dependencies = [
+ "backend-storage-aio-aio-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-ipc-dsm-core-seams",
+ "backend-storage-lmgr-lock",
+ "backend-storage-lmgr-predicate",
+ "backend-storage-lmgr-proc",
+ "backend-utils-error",
+ "backend-utils-resowner-all-seams",
+ "backend-utils-resowner-pc-seams",
+ "backend-utils-resowner-resowner-seams",
+ "backend-utils-resowner-seams",
+ "common-hashfn",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-logical",
+ "types-nodes",
+ "types-plancache",
+ "types-portal",
+ "types-resowner",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-resowner-resowner-seams"
 version = "0.0.0"
 dependencies = [
@@ -21711,6 +21740,7 @@ dependencies = [
  "backend-utils-mmgr-dsa",
  "backend-utils-mmgr-freepage",
  "backend-utils-mmgr-portalmem",
+ "backend-utils-resowner-resowner",
  "backend-utils-sort-small",
  "backend-utils-sort-sortsupport",
  "backend-utils-sort-storage",
@@ -22158,6 +22188,7 @@ name = "types-logical"
 version = "0.0.0"
 dependencies = [
  "types-core",
+ "types-resowner",
  "types-storage",
  "types-tuple",
 ]
@@ -22228,6 +22259,7 @@ dependencies = [
  "types-opclass",
  "types-parallel",
  "types-rel",
+ "types-resowner",
  "types-scan",
  "types-slot",
  "types-snapshot",
@@ -22331,6 +22363,7 @@ name = "types-plancache"
 version = "0.0.0"
 dependencies = [
  "types-core",
+ "types-resowner",
 ]
 
 [[package]]
@@ -22340,6 +22373,7 @@ dependencies = [
  "mcx",
  "types-core",
  "types-nodes",
+ "types-resowner",
  "types-snapshot",
  "types-tuple",
 ]
@@ -22422,6 +22456,14 @@ version = "0.0.0"
 dependencies = [
  "types-core",
  "types-tuple",
+]
+
+[[package]]
+name = "types-resowner"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-datum",
 ]
 
 [[package]]
@@ -22540,6 +22582,7 @@ dependencies = [
  "mcx",
  "types-core",
  "types-error",
+ "types-resowner",
  "types-snapshot",
 ]
 

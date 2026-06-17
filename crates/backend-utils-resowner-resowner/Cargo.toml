@@ -1,0 +1,40 @@
+[package]
+name = "backend-utils-resowner-resowner"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_resowner_resowner"
+path = "src/lib.rs"
+
+[dependencies]
+seam-core = { path = "../seam-core" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-datum = { path = "../types-datum" }
+types-resowner = { path = "../types-resowner" }
+types-tuple = { path = "../types-tuple" }
+types-portal = { path = "../types-portal" }
+types-nodes = { path = "../types-nodes" }
+types-logical = { path = "../types-logical" }
+types-storage = { path = "../types-storage" }
+types-plancache = { path = "../types-plancache" }
+common-hashfn = { path = "../common-hashfn" }
+backend-utils-error = { path = "../backend-utils-error" }
+
+# Inward seam declarations this crate installs.
+backend-utils-resowner-resowner-seams = { path = "../backend-utils-resowner-resowner-seams" }
+backend-utils-resowner-seams = { path = "../backend-utils-resowner-seams" }
+backend-utils-resowner-all-seams = { path = "../backend-utils-resowner-all-seams" }
+backend-utils-resowner-pc-seams = { path = "../backend-utils-resowner-pc-seams" }
+backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+
+# Outward calls (resowner.c -> lock/proc/predicate/aio/ipc). These owners
+# depend on resowner's *seam-decl* crates, not on this crate, so depending on
+# them directly is acyclic.
+backend-storage-lmgr-lock = { path = "../backend-storage-lmgr-lock" }
+backend-storage-lmgr-proc = { path = "../backend-storage-lmgr-proc" }
+backend-storage-lmgr-predicate = { path = "../backend-storage-lmgr-predicate" }
+backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
+backend-storage-aio-aio-seams = { path = "../backend-storage-aio-aio-seams" }

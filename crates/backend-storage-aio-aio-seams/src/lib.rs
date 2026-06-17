@@ -26,3 +26,13 @@ seam_core::seam!(
     /// the AIO side. Infallible.
     pub fn pgaio_io_start_readv(fd: i32, iovcnt: i32, offset: u64)
 );
+
+seam_core::seam!(
+    /// `pgaio_io_release_resowner(dlist_node *ioh_node, bool on_error)` (aio.c) —
+    /// release an AIO handle still registered on a resource owner during
+    /// resowner release (`ResourceOwnerReleaseInternal`, BEFORE_LOCKS phase).
+    /// The node identity is the AIO subsystem's own `dlist_node` handle (`u64`),
+    /// threaded back to its owner; the callee removes it from the owner's list.
+    /// Infallible.
+    pub fn pgaio_io_release_resowner(ioh_node: u64, on_error: bool)
+);

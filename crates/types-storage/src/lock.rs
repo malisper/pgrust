@@ -278,11 +278,11 @@ pub struct LOCALLOCKTAG {
 }
 
 /// Identity of a `ResourceOwnerData *` owned by the resowner unit
-/// (`utils/resowner/resowner.c`). The `ResourceOwnerData` body is backend-local
-/// and owned by that (unported) unit; `lock.c` only stores the pointer, so it
-/// is modeled by handle here (same pattern as [`crate::latch::LatchHandle`]).
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct ResourceOwnerHandle(pub usize);
+/// (`utils/resowner/resowner.c`). This is the one canonical
+/// [`types_resowner::ResourceOwner`] handle, re-exported here so lock.c's
+/// LOCALLOCKOWNER keeps naming it `ResourceOwnerHandle`; `lock.c` only stores
+/// and compares it, threading it to/from the resowner subsystem.
+pub type ResourceOwnerHandle = types_resowner::ResourceOwner;
 
 /// `LOCALLOCKOWNER` (`storage/lock.h`) — one resource owner that holds a
 /// backend-local lock, with the count of times it holds it. `owner == None`

@@ -74,17 +74,11 @@ impl MemoryContextHandle {
     pub const NULL: MemoryContextHandle = MemoryContextHandle(0);
 }
 
-/// Opaque handle to a `ResourceOwner` (`utils/resowner.h`). Owned by the
-/// unported resowner unit; the query-lifecycle model replaces it with owner
-/// values, but until that owner lands the driver threads the handle (C NULL ==
-/// `NULL`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ResourceOwnerHandle(pub u64);
-
-impl ResourceOwnerHandle {
-    /// The `NULL` resource owner.
-    pub const NULL: ResourceOwnerHandle = ResourceOwnerHandle(0);
-}
+/// `ResourceOwner` (`utils/resowner.h`) — the one canonical
+/// [`types_resowner::ResourceOwner`] handle, re-exported so the PREPARE/EXECUTE
+/// and decoding drivers keep naming it `ResourceOwnerHandle` (C NULL ==
+/// `ResourceOwnerHandle::NULL`).
+pub type ResourceOwnerHandle = types_resowner::ResourceOwner;
 
 /// Opaque handle to a `DestReceiver *` (`tcop/dest.h`). Owned by the caller of
 /// the EXECUTE driver.

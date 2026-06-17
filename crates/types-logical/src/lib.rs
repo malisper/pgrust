@@ -63,10 +63,10 @@ opaque_handle!(
     /// Opaque `XLogReaderRoutine *`.
     XLogReaderRoutineHandle
 );
-opaque_handle!(
-    /// Opaque `ResourceOwner` (`CurrentResourceOwner`).
-    ResourceOwnerHandle
-);
+/// `ResourceOwner` (`CurrentResourceOwner`) — the one canonical
+/// [`types_resowner::ResourceOwner`] handle, re-exported so logical decoding
+/// keeps naming it `ResourceOwnerHandle`.
+pub type ResourceOwnerHandle = types_resowner::ResourceOwner;
 opaque_handle!(
     /// Opaque `ReorderBufferTXN *`.
     TxnHandle

@@ -37,6 +37,10 @@ mod locking;
 mod state;
 mod tables;
 
+// resowner.c's LOCKS-phase release path (`ResourceOwnerRelease`) calls these to
+// hand a subtransaction's locks to its parent (commit) or release them (abort).
+pub use locking::{LockReassignCurrentOwner, LockReleaseCurrentOwner};
+
 use types_core::Size;
 use types_error::PgResult;
 use types_storage::lock::{LOCKMETHODID, LOCKMODE, LOCKTAG};

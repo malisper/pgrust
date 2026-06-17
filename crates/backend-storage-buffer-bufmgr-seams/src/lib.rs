@@ -705,6 +705,29 @@ seam_core::seam!(
 );
 
 // ---------------------------------------------------------------------------
+// resowner release callbacks (bufmgr.c `ResOwnerReleaseBufferPin` /
+// `ResOwnerReleaseBufferIO`). These are the `ReleaseResource` callbacks of the
+// bufmgr-defined `buffer_pin_resowner_desc` / `buffer_io_resowner_desc`. The
+// resowner owner crate holds the descriptors and invokes the callback when a
+// leaked pin/IO is found during release; the body is bufmgr-internal
+// (`UnpinBufferNoOwner` / `AbortBufferIO`), so it is installed by bufmgr.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `ResOwnerReleaseBufferPin(Datum res)` (bufmgr.c:6555) — release a leaked
+    /// buffer pin without touching the (already-being-released) resource owner.
+    /// `UnpinBufferNoOwner` / `UnpinLocalBufferNoOwner`. `Err` carries the
+    /// `elog(ERROR, "bad buffer ID")`.
+    pub fn release_buffer_pin(buffer: types_storage::storage::Buffer) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ResOwnerReleaseBufferIO(Datum res)` (bufmgr.c:6539) — abort a leaked
+    /// in-progress buffer I/O (`AbortBufferIO`).
+    pub fn release_buffer_io(buffer: types_storage::storage::Buffer) -> types_error::PgResult<()>
+);
+
+// ---------------------------------------------------------------------------
 // LockBufferForCleanup recovery-conflict (InHotStandby) deep leg (bufmgr.c).
 //
 // In C the InHotStandby branch of LockBufferForCleanup performs a multi-step

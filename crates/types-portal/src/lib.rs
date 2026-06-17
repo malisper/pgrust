@@ -141,19 +141,11 @@ pub use ResourceReleasePhase::AfterLocks as RESOURCE_RELEASE_AFTER_LOCKS;
 pub use ResourceReleasePhase::BeforeLocks as RESOURCE_RELEASE_BEFORE_LOCKS;
 pub use ResourceReleasePhase::Locks as RESOURCE_RELEASE_LOCKS;
 
-/// `ResourceOwner` (`utils/resowner.h`) — opaque handle to a resource owner
-/// owned by `utils/resowner/resowner.c` (not yet ported). The portal subsystem
-/// only reads `portal->resowner` and threads it back into
-/// `CurrentResourceOwner`, never dereferencing it; modeled as a shared handle
-/// to the owner's not-yet-defined payload. `None` is the C NULL.
-#[derive(Clone, Default)]
-pub struct ResourceOwner(pub Option<Rc<()>>);
-
-impl ResourceOwner {
-    pub fn is_null(&self) -> bool {
-        self.0.is_none()
-    }
-}
+/// `ResourceOwner` (`utils/resowner.h`) — the one canonical
+/// [`types_resowner::ResourceOwner`] handle. The portal subsystem reads
+/// `portal->resowner` and threads it back into `CurrentResourceOwner`, never
+/// dereferencing it. `ResourceOwner::NULL` is the C NULL.
+pub type ResourceOwner = types_resowner::ResourceOwner;
 
 /// Identity token for an object owned by a subsystem the portal subsystem does
 /// not own — the executor `QueryDesc`, the `ParamListInfo`, the
@@ -186,19 +178,10 @@ impl SnapshotHandle {
     }
 }
 
-/// `ResourceOwner` identity token (`utils/resowner.h`). Resource owners dissolve
-/// into RAII owner values (docs/query-lifecycle-raii.md); until the owner lands
-/// the holder threads this token through the resowner seam. `NULL` models C
-/// NULL.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub struct ResourceOwnerHandle(pub u64);
-
-impl ResourceOwnerHandle {
-    pub const NULL: ResourceOwnerHandle = ResourceOwnerHandle(0);
-    pub fn is_null(self) -> bool {
-        self == ResourceOwnerHandle::NULL
-    }
-}
+/// `ResourceOwner` identity token (`utils/resowner.h`) — the one canonical
+/// [`types_resowner::ResourceOwner`] handle, re-exported under the
+/// `ResourceOwnerHandle` name used by the plan-cache-threading callers.
+pub type ResourceOwnerHandle = types_resowner::ResourceOwner;
 
 /// `CachedPlan *` (`utils/plancache.h`) — pointer to plancache-private storage;
 /// portalmem only stores it, tests it against NULL, and threads it back to the

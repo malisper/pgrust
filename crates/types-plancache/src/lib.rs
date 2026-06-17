@@ -150,10 +150,10 @@ opaque_handle!(
     TupleDescHandle, NULL
 );
 
-opaque_handle!(
-    /// `ResourceOwner` (`resowner.c`). `0` is NULL.
-    ResourceOwnerHandle, NULL
-);
+/// `ResourceOwner` (`resowner.c`) — the one canonical
+/// [`types_resowner::ResourceOwner`] handle, re-exported so plancache keeps
+/// naming it `ResourceOwnerHandle`.
+pub type ResourceOwnerHandle = types_resowner::ResourceOwner;
 
 opaque_handle!(
     /// `ParamListInfo` boundParams. `0` is NULL.
