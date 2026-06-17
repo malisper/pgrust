@@ -167,11 +167,15 @@ const DROP_CASCADE: DropBehavior = DropBehavior::Cascade;
 const LOBLKSIZE_U64: uint64 = LOBLKSIZE as uint64;
 
 /// `lo_compat_privileges` (inv_api.c:56) — GUC backwards-compatibility flag to
-/// suppress LO permission checks. The GUC machinery is unported; it defaults to
-/// `false` (the boot value, `postgresql.conf` default), matching a server that
-/// has not set it. When the GUC owner lands this becomes a real `bool` GUC.
+/// suppress LO permission checks. The C declares the `bool` global here and
+/// `guc_tables.c` binds the `"lo_compat_privileges"` GUC slot (`PGC_SUSET`,
+/// `COMPAT_OPTIONS_PREVIOUS`, boot value `false`) to its address; every read
+/// dereferences that global. The GUC slot lives in
+/// `backend-utils-misc-guc-tables` (`vars::lo_compat_privileges`), so this
+/// accessor reads the slot directly — matching the sibling consumers in
+/// `acl.c` (`has_privilege.rs`) and `be-fsstubs.c`.
 fn lo_compat_privileges() -> bool {
-    false
+    backend_utils_misc_guc_tables::vars::lo_compat_privileges.read()
 }
 
 /// Allocate the `LOBLKSIZE`-byte scratch "page" the C declares as the

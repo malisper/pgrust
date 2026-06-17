@@ -23,6 +23,7 @@ types-storage = { path = "../types-storage" }
 types-rel = { path = "../types-rel" }
 types-tuple = { path = "../types-tuple" }
 backend-utils-error = { path = "../backend-utils-error" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-access-common-scankey = { path = "../backend-access-common-scankey" }
 backend-access-table-table = { path = "../backend-access-table-table" }
 backend-access-index-indexam-seams = { path = "../backend-access-index-indexam-seams" }
