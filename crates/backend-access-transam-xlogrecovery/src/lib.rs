@@ -167,6 +167,7 @@ pub fn init_seams() {
     // startup process's per-backend recovery state.
     seams::archive_recovery_requested::set(orchestrator::archive_recovery_requested);
     seams::recovery_target_tli::set(orchestrator::recovery_target_tli);
+    seams::reached_consistency::set(orchestrator::reached_consistency);
 
     // GUC `conf->variable` accessors (`*conf->variable`) for the recovery /
     // streaming GUC globals whose C file-static storage lives in

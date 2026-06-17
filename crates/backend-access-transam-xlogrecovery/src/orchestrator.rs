@@ -954,6 +954,17 @@ pub(crate) fn archive_recovery_requested() -> bool {
     recovery_state_mut().archive_recovery_requested
 }
 
+/// `reachedConsistency` (xlogrecovery.c global) read for the
+/// `reached_consistency` seam install. False until recovery's replay loop has
+/// reached a consistent state (set in CheckRecoveryConsistency); also false
+/// before InitWalRecovery has created the recovery-state holder.
+pub(crate) fn reached_consistency() -> bool {
+    if !recovery_state_is_set() {
+        return false;
+    }
+    recovery_state_mut().reached_consistency
+}
+
 /// `recoveryTargetTLI` read for the `recovery_target_tli` seam install.
 pub(crate) fn recovery_target_tli() -> TimeLineID {
     if !recovery_state_is_set() {
