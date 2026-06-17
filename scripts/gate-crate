@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+
+full=0
+if [ "${1:-}" = "--full" ]; then
+    full=1
+    shift
+fi
+
+if [ "$#" -ne 1 ]; then
+    echo "usage: scripts/gate-crate [--full] <crate>" >&2
+    exit 2
+fi
+
+crate=$1
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$repo_root"
+
+scripts/check-crate "$crate"
+cargo test -p "$crate"
+
+if [ "$full" -eq 1 ]; then
+    cargo test -p seams-init
+    cargo test -p no-todo-guard
+fi

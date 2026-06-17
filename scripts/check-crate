@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -lt 1 ]; then
+    echo "usage: scripts/check-crate <crate> [cargo-check-args...]" >&2
+    exit 2
+fi
+
+crate=$1
+shift
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$repo_root"
+
+cargo check --profile fast-check -p "$crate" "$@"
+
+if [ -d "crates/$crate-seams" ]; then
+    cargo check --profile fast-check -p "$crate-seams" "$@"
+fi
