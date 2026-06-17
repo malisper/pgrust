@@ -68,6 +68,7 @@ use types_error::{
 use types_storage::{LWTRANCHE_REPLICATION_ORIGIN_STATE, LW_EXCLUSIVE, LW_SHARED};
 use types_wal::rmgr::XLogReaderState;
 
+pub mod checkpoint_file;
 pub mod core;
 
 pub use crate::core::{
@@ -1343,6 +1344,14 @@ pub fn init_seams() {
 
     // WAL-startup entry point called once by `StartupXLOG` (xlog.c:5695).
     s::startup_replication_origin::set(StartupReplicationOrigin);
+
+    // The replorigin_checkpoint transient-file I/O codecs — declared as the
+    // origin-extern-seams checkpoint_write / checkpoint_read. The file-fd /
+    // CRC32C substrate is ported, so this crate owns them (the in-memory
+    // halves already live here in CheckPointReplicationOrigin /
+    // StartupReplicationOrigin).
+    sx::checkpoint_write::set(checkpoint_file::checkpoint_write);
+    sx::checkpoint_read::set(checkpoint_file::checkpoint_read);
 }
 
 #[cfg(test)]

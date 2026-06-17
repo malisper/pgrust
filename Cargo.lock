@@ -13811,10 +13811,13 @@ version = "0.0.0"
 dependencies = [
  "backend-replication-logical-origin-extern-seams",
  "backend-replication-logical-origin-seams",
+ "backend-storage-file-fd-seams",
+ "backend-storage-file-seams",
  "backend-storage-lmgr-condition-variable-seams",
  "backend-storage-lmgr-lwlock",
  "backend-utils-init-small-seams",
  "mcx",
+ "port-pg-crc32c-seams",
  "seam-core",
  "types-condvar",
  "types-core",

@@ -22,3 +22,6 @@ backend-storage-lmgr-condition-variable-seams = { path = "../backend-storage-lmg
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-replication-logical-origin-seams = { path = "../backend-replication-logical-origin-seams" }
 backend-replication-logical-origin-extern-seams = { path = "../backend-replication-logical-origin-extern-seams" }
+backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
+backend-storage-file-seams = { path = "../backend-storage-file-seams" }
+port-pg-crc32c-seams = { path = "../port-pg-crc32c-seams" }
