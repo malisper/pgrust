@@ -1210,6 +1210,23 @@ pub fn standby_redo(mcx: Mcx<'_>, record: RedoRecord<'_>) -> PgResult<()> {
 ///
 /// (The `USE_INJECTION_POINTS` "skip-log-running-xacts" branch is a
 /// test-only build option, absent from this build.)
+/// No-`mcx` forwarding wrapper installed into the public
+/// `backend_access_transam_xlog_seams::log_standby_snapshot` seam (consumed by
+/// bgwriter / xlogfuncs / snapbuild / slot). In C, `LogStandbySnapshot(void)`
+/// runs in the caller's `CurrentMemoryContext` and `palloc`s its transient
+/// `GetRunningTransactionLocks` array there, freeing it via `pfree` (the Rust
+/// `drop(locks)`) before returning. Here there is deliberately no ambient
+/// current context (mcx crate design: thread `Mcx` through parameters), so this
+/// wrapper creates a private throwaway context for the per-call transients —
+/// the exact pattern `standby_redo_seam` already uses for the rmgr seam — and
+/// forwards into the `mcx`-taking `LogStandbySnapshot`. The context (and any
+/// surviving allocation in it) is freed when this wrapper returns, mirroring the
+/// C cleanup.
+fn log_standby_snapshot_seam() -> PgResult<XLogRecPtr> {
+    let ctx = mcx::MemoryContext::new("LogStandbySnapshot");
+    LogStandbySnapshot(ctx.mcx())
+}
+
 pub fn LogStandbySnapshot(mcx: Mcx<'_>) -> PgResult<XLogRecPtr> {
     assert!(xlog_standby_info_active());
 
@@ -1462,6 +1479,10 @@ pub fn init_seams() {
     seams::standby_release_old_locks::set(StandbyReleaseOldLocks);
     seams::standby_redo::set(standby_redo_seam);
     seams::log_standby_snapshot::set(LogStandbySnapshot);
+    // The public no-`mcx` forwarding variant consumed by
+    // bgwriter/xlogfuncs/snapbuild/slot. Owner = this crate (it already owns
+    // `LogStandbySnapshot` and imports the xlog-seams crate).
+    xlog::log_standby_snapshot::set(log_standby_snapshot_seam);
     seams::log_access_exclusive_lock::set(LogAccessExclusiveLock);
     seams::log_access_exclusive_lock_prepare::set(LogAccessExclusiveLockPrepare);
     seams::log_standby_invalidations::set(LogStandbyInvalidations);
