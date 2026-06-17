@@ -16500,6 +16500,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-tsearch-parse"
+version = "0.0.0"
+dependencies = [
+ "backend-tsearch-parse-seams",
+ "backend-utils-error",
+ "types-error",
+]
+
+[[package]]
+name = "backend-tsearch-parse-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-tsearch-spell"
 version = "0.0.0"
 dependencies = [
@@ -17408,6 +17425,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-int"
+version = "0.0.0"
+dependencies = [
+ "backend-libpq-pqformat",
+ "backend-utils-adt-numutils",
+ "backend-utils-error",
+ "mcx",
+ "types-datum",
+ "types-error",
+ "types-stringinfo",
+]
+
+[[package]]
+name = "backend-utils-adt-int8"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-numutils",
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-adt-isoweek-seams"
 version = "0.0.0"
 dependencies = [
@@ -18045,6 +18083,20 @@ dependencies = [
  "types-core",
  "types-error",
  "types-parsenodes",
+]
+
+[[package]]
+name = "backend-utils-adt-oracle-compat"
+version = "0.0.0"
+dependencies = [
+ "backend-tcop-postgres-seams",
+ "backend-utils-adt-formatting",
+ "backend-utils-mb-mbutils-seams",
+ "common-wchar",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-wchar",
 ]
 
 [[package]]
