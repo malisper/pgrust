@@ -282,6 +282,18 @@ pub fn init_seams() {
     use backend_utils_cache_inval_pc_seams as pc_seams;
     use backend_utils_cache_inval_seams as seams;
 
+    // `int debug_discard_caches` (inval.c) is a plain GUC variable: the GUC
+    // machinery reads/writes it through `conf->variable` (C: `&debug_discard_caches`),
+    // and AcceptInvalidationMessages reads it via `recursion_depth < debug_discard_caches`.
+    // Install this owner's accessors over its backing store so the GUC slot is
+    // backed (mirrors NBuffers' GucVarAccessors install in init-small).
+    backend_utils_misc_guc_tables::vars::debug_discard_caches.install(
+        backend_utils_misc_guc_tables::GucVarAccessors {
+            get: debug_discard_caches,
+            set: set_debug_discard_caches,
+        },
+    );
+
     seams::cache_register_syscache_callback::set(cache_invalidate::CacheRegisterSyscacheCallback);
     seams::cache_register_relcache_callback::set(cache_invalidate::CacheRegisterRelcacheCallback);
     seams::accept_invalidation_messages::set(local_list::AcceptInvalidationMessages);

@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 mcx = { path = "../mcx" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 types-cache = { path = "../types-cache" }
 types-cluster = { path = "../types-cluster" }
 types-plancache = { path = "../types-plancache" }
