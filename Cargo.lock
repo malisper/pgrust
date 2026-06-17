@@ -14297,6 +14297,7 @@ dependencies = [
  "backend-replication-slot",
  "backend-replication-walsender",
  "backend-utils-error",
+ "backend-utils-fmgr-core",
  "backend-utils-fmgr-dfmgr-seams",
  "backend-utils-fmgr-funcapi-seams",
  "backend-utils-init-miscinit-seams",
