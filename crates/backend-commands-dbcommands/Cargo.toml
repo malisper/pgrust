@@ -75,6 +75,9 @@ types-wchar = { path = "../types-wchar" }
 backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 
 backend-utils-error = { path = "../backend-utils-error" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
+types-fmgr = { path = "../types-fmgr" }
+types-datum = { path = "../types-datum" }
 mcx = { path = "../mcx" }
 seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }
