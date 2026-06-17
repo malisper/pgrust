@@ -47,6 +47,8 @@ types-cluster = { path = "../types-cluster" }
 types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
+types-fmgr = { path = "../types-fmgr" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 types-namespace = { path = "../types-namespace" }
 types-nodes = { path = "../types-nodes" }
 types-syscache = { path = "../types-syscache" }

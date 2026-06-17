@@ -125,8 +125,11 @@ use backend_utils_mb_mbutils_seams as mbutils_seams;
 use backend_utils_misc_guc_seams as guc_seams;
 use backend_utils_time_snapmgr_seams as snapmgr_seams;
 
+pub mod fmgr_builtins;
+
 /// Install this crate's seam implementations (`backend-catalog-namespace-seams`).
 pub fn init_seams() {
+    fmgr_builtins::register_namespace_builtins();
     backend_catalog_namespace_seams::check_set_namespace::set(|old_nsp, nsp| {
         let scratch = MemoryContext::new("CheckSetNamespace seam");
         crate::CheckSetNamespace(scratch.mcx(), old_nsp, nsp)
