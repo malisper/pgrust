@@ -19,12 +19,12 @@
 //! core). A `text` result is written back as a `Varlena` payload (the boundary
 //! re-wraps it with the varlena header), mirroring `cstring_to_text`.
 //!
-//! Scope: only the six rows this task registers. The remaining `dbsize.c` fmgr
-//! surface — `pg_relation_size`/`pg_table_size`/`pg_indexes_size`/
-//! `pg_total_relation_size` (`regclass` arg) and `pg_relation_filenode`/
-//! `pg_filenode_relation`/`pg_relation_filepath` (`regclass`/`oid`+`text`) — is
-//! deferred (their value cores exist but bottom out on still-uninstalled
-//! catalog/relcache seams; they are not registered here).
+//! Scope: every `dbsize.c` fmgr row whose value core is ported and whose
+//! argument/result types are expressible at this boundary. A `regclass` arg
+//! arrives on the by-val word as its `oid` (C: `regclass` is an `Oid` typedef);
+//! a `regclass`-returning function writes its result `oid` on the by-val word.
+//! The `Option<Oid>`/`Option<String>` cores map `None` to C's
+//! `PG_RETURN_NULL()` via `fcinfo.set_result_null(true)`.
 
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
@@ -89,6 +89,32 @@ fn ret_int64_opt(fcinfo: &mut FunctionCallInfoBaseData, v: Option<i64>) -> Datum
 fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, s: String) -> Datum {
     fcinfo.set_ref_result(RefPayload::Varlena(s.into_bytes()));
     Datum::from_usize(0)
+}
+
+/// Write an `oid` result, or set the result NULL for `None` (C:
+/// `PG_RETURN_NULL()`). Returns the result word (a dummy `0` when NULL).
+#[inline]
+fn ret_oid_opt(fcinfo: &mut FunctionCallInfoBaseData, v: Option<Oid>) -> Datum {
+    match v {
+        Some(o) => Datum::from_oid(o),
+        None => {
+            fcinfo.set_result_null(true);
+            Datum::from_usize(0)
+        }
+    }
+}
+
+/// Write a `text` result on the by-ref lane, or set the result NULL for `None`
+/// (C: `PG_RETURN_NULL()`). Returns the dummy result word.
+#[inline]
+fn ret_text_opt(fcinfo: &mut FunctionCallInfoBaseData, v: Option<String>) -> Datum {
+    match v {
+        Some(s) => ret_text(fcinfo, s),
+        None => {
+            fcinfo.set_result_null(true);
+            Datum::from_usize(0)
+        }
+    }
 }
 
 /// A scratch context for the cores that allocate their numeric round-trips
@@ -161,6 +187,61 @@ fn fc_pg_size_bytes(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     Datum::from_i64(bytes)
 }
 
+/// `pg_relation_size(regclass, text)` (OID 2332).
+fn fc_pg_relation_size(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let rel_oid = arg_oid(fcinfo, 0);
+    // C: text_to_cstring(PG_GETARG_TEXT_PP(1)). The fork name arrives as the
+    // detoasted text payload bytes on the by-ref lane.
+    let fork_bytes = arg_text_bytes(fcinfo, 1);
+    let fork_name = core::str::from_utf8(fork_bytes)
+        .expect("dbsize fn: fork-name text arg not valid UTF-8");
+    let size = ok(crate::pg_relation_size(rel_oid, fork_name));
+    ret_int64_opt(fcinfo, size)
+}
+
+/// `pg_total_relation_size(regclass)` (OID 2286).
+fn fc_pg_total_relation_size(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let rel_oid = arg_oid(fcinfo, 0);
+    let size = ok(crate::pg_total_relation_size(rel_oid));
+    ret_int64_opt(fcinfo, size)
+}
+
+/// `pg_table_size(regclass)` (OID 2997).
+fn fc_pg_table_size(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let rel_oid = arg_oid(fcinfo, 0);
+    let size = ok(crate::pg_table_size(rel_oid));
+    ret_int64_opt(fcinfo, size)
+}
+
+/// `pg_indexes_size(regclass)` (OID 2998).
+fn fc_pg_indexes_size(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let rel_oid = arg_oid(fcinfo, 0);
+    let size = ok(crate::pg_indexes_size(rel_oid));
+    ret_int64_opt(fcinfo, size)
+}
+
+/// `pg_relation_filenode(regclass)` (OID 2999) → `oid` (or NULL).
+fn fc_pg_relation_filenode(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let relid = arg_oid(fcinfo, 0);
+    let filenode = ok(crate::pg_relation_filenode(relid));
+    ret_oid_opt(fcinfo, filenode)
+}
+
+/// `pg_filenode_relation(oid, oid)` (OID 3454) → `regclass` (an `oid`, or NULL).
+fn fc_pg_filenode_relation(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let reltablespace = arg_oid(fcinfo, 0);
+    let relfilenumber = arg_oid(fcinfo, 1);
+    let relid = ok(crate::pg_filenode_relation(reltablespace, relfilenumber));
+    ret_oid_opt(fcinfo, relid)
+}
+
+/// `pg_relation_filepath(regclass)` (OID 3034) → `text` (or NULL).
+fn fc_pg_relation_filepath(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let relid = arg_oid(fcinfo, 0);
+    let path = ok(crate::pg_relation_filepath(relid));
+    ret_text_opt(fcinfo, path)
+}
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -201,5 +282,19 @@ pub fn register_dbsize_builtins() {
         builtin(2288, "pg_size_pretty", 1, true, false, fc_pg_size_pretty),
         // pg_size_bytes(text) -> int8
         builtin(3334, "pg_size_bytes", 1, true, false, fc_pg_size_bytes),
+        // pg_relation_size(regclass, text) -> int8
+        builtin(2332, "pg_relation_size", 2, true, false, fc_pg_relation_size),
+        // pg_total_relation_size(regclass) -> int8
+        builtin(2286, "pg_total_relation_size", 1, true, false, fc_pg_total_relation_size),
+        // pg_table_size(regclass) -> int8
+        builtin(2997, "pg_table_size", 1, true, false, fc_pg_table_size),
+        // pg_indexes_size(regclass) -> int8
+        builtin(2998, "pg_indexes_size", 1, true, false, fc_pg_indexes_size),
+        // pg_relation_filenode(regclass) -> oid
+        builtin(2999, "pg_relation_filenode", 1, true, false, fc_pg_relation_filenode),
+        // pg_filenode_relation(oid, oid) -> regclass
+        builtin(3454, "pg_filenode_relation", 2, true, false, fc_pg_filenode_relation),
+        // pg_relation_filepath(regclass) -> text
+        builtin(3034, "pg_relation_filepath", 1, true, false, fc_pg_relation_filepath),
     ]);
 }
