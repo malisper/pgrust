@@ -177,6 +177,15 @@ pub fn init_seams() {
         core::pm_mut().client_auth_in_progress = value;
     });
 
+    // `set_reachedConsistency(value)` (postmaster.c file-static
+    // `reachedConsistency`) — poked from process_pm_pmsignal on the
+    // RECOVERY_STARTED / RECOVERY_CONSISTENT signals. postmaster.c owns the
+    // flag, so the setter is installed here over the per-process
+    // `PostmasterState` field.
+    sp::set_reached_consistency::set(|value| {
+        core::pm_mut().reached_consistency = value;
+    });
+
     // Postmaster-owned file writes from PostmasterMain (postmaster.c bodies).
     sp::create_opts_file::set(fileops::create_opts_file);
     sp::maybe_write_external_pid_file::set(fileops::maybe_write_external_pid_file);

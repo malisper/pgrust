@@ -21,6 +21,10 @@ backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }
 backend-storage-file-seams = { path = "../backend-storage-file-seams" }
 backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
 backend-storage-ipc-ipc-seams = { path = "../backend-storage-ipc-ipc-seams" }
+# The postmaster's crash-restart state machine calls ipc.c's `shmem_exit` via
+# its own seam declaration; dsm-core owns the body, so it installs that
+# postmaster-side seam here (same pattern as the ipc_seams::proc_exit install).
+backend-postmaster-postmaster-seams = { path = "../backend-postmaster-postmaster-seams" }
 backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" }
 backend-storage-lmgr-lwlock = { path = "../backend-storage-lmgr-lwlock" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }

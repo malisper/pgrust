@@ -895,6 +895,24 @@ pub fn init_seams() {
     // brackets below).
     s::is_binary_upgrade::set(backend_utils_init_small::globals::IsBinaryUpgrade);
 
+    // `TouchSocketLockFiles()` / `RecheckDataDirLockFile()` are miscinit.c
+    // bodies, but the postmaster's ServerLoop calls them through seams declared
+    // on backend-postmaster-postmaster-seams. The real owner is miscinit, so it
+    // installs those postmaster-side seam slots here (delegating to its own
+    // fns), mirroring the cross-crate-install pattern the syslogger owner uses
+    // for the postmaster's logrotate seams.
+    backend_postmaster_postmaster_seams::touch_socket_lock_files::set(
+        crate::lockfile::touch_socket_lock_files,
+    );
+    backend_postmaster_postmaster_seams::recheck_data_dir_lock_file::set(|| {
+        // `RecheckDataDirLockFile()` returns bool; its `PgResult` Err surface is
+        // a LOG-level ereport that does not longjmp (it returns Ok), so the
+        // value is always the carried bool. Conservatively treat any unexpected
+        // error as "lock still OK" (true), matching C's bias against an
+        // unnecessary shutdown.
+        crate::lockfile::RecheckDataDirLockFile().unwrap_or(true)
+    });
+
     // Non-miscinit seams an earlier consumer declared here. Until their real
     // owners (globals.c counters, superuser.c) land in this repo, install thin
     // delegations to the owners' values so the existing call sites keep working.

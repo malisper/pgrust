@@ -15400,6 +15400,7 @@ name = "backend-storage-ipc-dsm-core"
 version = "0.0.0"
 dependencies = [
  "backend-libpq-pqsignal",
+ "backend-postmaster-postmaster-seams",
  "backend-storage-file-seams",
  "backend-storage-ipc-dsm-core-seams",
  "backend-storage-ipc-ipc-seams",
@@ -20231,6 +20232,7 @@ dependencies = [
  "backend-port-path-seams",
  "backend-port-sysv-shmem-seams",
  "backend-postmaster-interrupt-seams",
+ "backend-postmaster-postmaster-seams",
  "backend-storage-file-fileperm-seams",
  "backend-storage-ipc-dsm-core-seams",
  "backend-storage-ipc-latch",

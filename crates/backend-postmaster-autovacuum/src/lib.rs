@@ -113,6 +113,12 @@ pub fn init_seams() {
         let _ = shmem::autovac_init();
     });
     backend_postmaster_postmaster_seams::autovacuuming_active::set(shmem::AutoVacuumingActive);
+    // `AutoVacWorkerFailed()` (autovacuum.c) — the postmaster's
+    // StartAutovacuumWorker calls this through its own seam when a worker fork
+    // fails; the body is owned here.
+    backend_postmaster_postmaster_seams::autovac_worker_failed::set(
+        launcher::AutoVacWorkerFailed,
+    );
 
     // Install the GUC var accessors for the autovacuum knobs whose
     // `conf->variable` backing (the per-backend `core::*` thread-locals) is

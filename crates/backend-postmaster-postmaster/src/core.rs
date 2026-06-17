@@ -271,6 +271,10 @@ pub struct PostmasterState {
     pub abort_start_time: i64,
     /// C: `static bool ReachedNormalRunning`.
     pub reached_normal_running: bool,
+    /// C: `static bool reachedConsistency` (postmaster.c file-static) — set when
+    /// recovery signals PMSIGNAL_RECOVERY_CONSISTENT, cleared on
+    /// PMSIGNAL_RECOVERY_STARTED.
+    pub reached_consistency: bool,
     /// C: `static bool start_autovac_launcher`.
     pub start_autovac_launcher: bool,
     /// C: `static bool avlauncher_needs_signal`.
@@ -321,6 +325,7 @@ impl PostmasterState {
             conns_allowed: true,
             abort_start_time: 0,
             reached_normal_running: false,
+            reached_consistency: false,
             start_autovac_launcher: false,
             avlauncher_needs_signal: false,
             wal_receiver_requested: false,

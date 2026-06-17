@@ -56,6 +56,10 @@ backend-access-transam-parallel = { path = "../backend-access-transam-parallel" 
 backend-port-path-seams = { path = "../backend-port-path-seams" }
 backend-port-sysv-shmem-seams = { path = "../backend-port-sysv-shmem-seams" }
 backend-postmaster-interrupt-seams = { path = "../backend-postmaster-interrupt-seams" }
+# TouchSocketLockFiles / RecheckDataDirLockFile are miscinit.c bodies, but the
+# postmaster's ServerLoop calls them via its own seam declarations; miscinit
+# installs those postmaster-side seams here (delegating to its own fns).
+backend-postmaster-postmaster-seams = { path = "../backend-postmaster-postmaster-seams" }
 backend-libpq-pqcomm-seams = { path = "../backend-libpq-pqcomm-seams" }
 backend-common-exec-seams = { path = "../backend-common-exec-seams" }
 common-path-seams = { path = "../common-path-seams" }

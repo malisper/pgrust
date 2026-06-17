@@ -82,6 +82,14 @@ pub fn init_seams() {
     backend_storage_ipc_dsm_core_seams::dsm_cleanup_using_control_segment::set(
         dsm::dsm_cleanup_using_control_segment,
     );
+    // `shmem_exit(code)` — ipc.c body, owned here, but the postmaster's
+    // crash-restart state machine calls it through its own seam declaration.
+    // Mirror the internal `let _ = shmem_exit(code)` disposition (proc_exit
+    // line 168): a callback raising ERROR longjmps out, so the value on a
+    // normal return is always Ok.
+    backend_postmaster_postmaster_seams::shmem_exit::set(|code| {
+        let _ = ipc::shmem_exit(code);
+    });
 
     option_sets::dynamic_shared_memory_options.install(dsm_impl::DYNAMIC_SHARED_MEMORY_OPTIONS);
     vars::dynamic_shared_memory_type.install(GucVarAccessors {
