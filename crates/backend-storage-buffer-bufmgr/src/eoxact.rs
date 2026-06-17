@@ -109,6 +109,11 @@ impl BufferManager {
             locator: relation.rd_locator,
             backend: relation.rd_backend,
         };
+        // `RelationGetSmgr(relation)` — the C inline lazily `smgropen`s the
+        // relation and caches it on `relation->rd_smgr` before any smgr op.
+        // `smgropen`/`cache_open` is idempotent, so call it to guarantee the
+        // SMgrRelation cache entry exists prior to `smgrnblocks`.
+        smgr::smgropen(relation.rd_locator, relation.rd_backend)?;
         smgr::smgrnblocks(rlocator, fork_num)
     }
 }
