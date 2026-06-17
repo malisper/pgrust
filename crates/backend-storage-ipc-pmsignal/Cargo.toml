@@ -14,11 +14,15 @@ seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }
 types-condvar = { path = "../types-condvar" }
 types-datum = { path = "../types-datum" }
+types-fmgr = { path = "../types-fmgr" }
 types-tuple = { path = "../types-tuple" }
 types-error = { path = "../types-error" }
 types-pgstat = { path = "../types-pgstat" }
 types-storage = { path = "../types-storage" }
 libc = "0.2"
+
+# fmgr builtin table: SQL-callable functions register here for by-OID dispatch.
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 
 # Inward seam crates this unit owns and installs.
 backend-storage-ipc-barrier-seams = { path = "../backend-storage-ipc-barrier-seams" }

@@ -63,6 +63,7 @@ use backend_utils_error::ereport;
 use types_error::{PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR};
 
 mod barrier;
+pub mod fmgr_builtins;
 mod pmsignal;
 mod signalfuncs;
 
@@ -160,6 +161,10 @@ pub fn init_seams() {
     backend_storage_ipc_pmsignal_seams::register_postmaster_child_active::set(
         pmsignal::RegisterPostmasterChildActive,
     );
+
+    // signalfuncs.c SQL-callable functions: register their fmgr_builtins[] rows
+    // for by-OID dispatch (C: the fmgr_builtins[] table).
+    fmgr_builtins::register_pmsignal_builtins();
 }
 
 #[cfg(test)]
