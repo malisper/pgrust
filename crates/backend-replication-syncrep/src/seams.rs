@@ -14,6 +14,8 @@ use types_error::PgResult;
 
 use backend_replication_syncrep_seams as own;
 use backend_utils_misc_guc_tables::hooks;
+use backend_utils_misc_guc_tables::vars;
+use backend_utils_misc_guc_tables::GucVarAccessors;
 use backend_utils_misc_guc_tables::GucHookExtra;
 use types_guc::GucSource;
 
@@ -92,7 +94,11 @@ fn check_hook(
 }
 
 /// `assign_synchronous_standby_names(const char *newval, void *extra)`.
-fn assign_standby_names_hook(_newval: Option<&str>, extra: Option<&GucHookExtra>) {
+fn assign_standby_names_hook(newval: Option<&str>, extra: Option<&GucHookExtra>) {
+    // The GUC machinery sets `SyncRepStandbyNames = newval` (its `conf->variable`)
+    // before invoking the assign hook; mirror that store write here so the var
+    // accessor reads the live value, then stash the parsed config like C does.
+    crate::set_sync_rep_standby_names(newval.map(String::from));
     let config = extra.and_then(|e| (**e).downcast_ref::<SyncRepConfig>().cloned());
     assign_synchronous_standby_names(config);
 }
@@ -109,6 +115,13 @@ pub fn init_seams() {
     own::sync_rep_init_config::set(sync_rep_init_config);
     own::sync_rep_get_candidate_standbys::set(sync_rep_get_candidate_standbys);
     own::sync_rep_config_is_priority::set(sync_rep_config_is_priority);
+
+    // GUC var accessor for `synchronous_standby_names` (`char *SyncRepStandbyNames`,
+    // syncrep.c) — `conf->variable` read/written via this crate's backing store.
+    vars::SyncRepStandbyNames.install(GucVarAccessors {
+        get: crate::sync_rep_standby_names,
+        set: crate::set_sync_rep_standby_names,
+    });
 
     hooks::check_synchronous_standby_names.install(check_hook);
     hooks::assign_synchronous_standby_names.install(assign_standby_names_hook);

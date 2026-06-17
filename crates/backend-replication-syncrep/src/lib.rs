@@ -127,6 +127,26 @@ std::thread_local! {
 
     /// `static int SyncRepWaitMode = SYNC_REP_NO_WAIT;`
     static SYNC_REP_WAIT_MODE: Cell<i32> = const { Cell::new(SYNC_REP_NO_WAIT) };
+
+    /// `char *SyncRepStandbyNames;` (syncrep.c) — the runtime storage backing
+    /// the `synchronous_standby_names` GUC. In C this `char *` is the GUC's
+    /// `conf->variable`: the GUC machinery owns the string and writes it
+    /// directly (the assign hook only stashes the parsed config). Boot value is
+    /// the empty string (guc_tables.c boot_val `""`), matching a non-NULL
+    /// pointer to an empty C string.
+    static SYNC_REP_STANDBY_NAMES: core::cell::RefCell<Option<String>> =
+        core::cell::RefCell::new(Some(String::new()));
+}
+
+/// Read `SyncRepStandbyNames` (the `synchronous_standby_names` GUC storage) —
+/// `*conf->variable` for the GUC var accessor.
+pub fn sync_rep_standby_names() -> Option<String> {
+    SYNC_REP_STANDBY_NAMES.with(|cell| cell.borrow().clone())
+}
+
+/// Write `SyncRepStandbyNames` (the GUC machinery's `*conf->variable = newval`).
+pub fn set_sync_rep_standby_names(value: Option<String>) {
+    SYNC_REP_STANDBY_NAMES.with(|cell| *cell.borrow_mut() = value);
 }
 
 /// Read `SyncRepConfig` (clone of the owned config), or `None` when unset.
