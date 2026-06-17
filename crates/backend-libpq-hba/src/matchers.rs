@@ -37,11 +37,16 @@ pub(crate) fn ss_family(sa: &SockAddr) -> i32 {
     if sa.salen == 0 {
         return libc::AF_UNSPEC;
     }
-    // SAFETY: `addr` is a real `sockaddr_storage` byte buffer; `ss_family` is its
-    // first field (this is the same access auth.c uses).
+    // `sa.addr` is a raw `[u8; 128]` byte buffer with no guaranteed alignment, so
+    // read `ss_family` with an unaligned read rather than forming a reference to
+    // a misaligned `sockaddr_storage` (UB → aborts under Rust's
+    // misaligned-pointer-dereference check). Using `addr_of!` of the named field
+    // honors the platform-correct offset (on macOS `ss_family` sits after the
+    // `ss_len` byte, not at offset 0).
+    // SAFETY: `addr` is a real `sockaddr_storage` byte buffer.
     unsafe {
         let p = sa.addr.as_ptr() as *const libc::sockaddr_storage;
-        (*p).ss_family as i32
+        core::ptr::addr_of!((*p).ss_family).read_unaligned() as i32
     }
 }
 
@@ -50,14 +55,33 @@ pub(crate) fn ss_family(sa: &SockAddr) -> i32 {
 pub(crate) fn sockaddr_to_ipaddr(sa: &SockAddr) -> Option<IpAddr> {
     match ss_family(sa) {
         f if f == libc::AF_INET => {
+            // Copy the unaligned `sockaddr_in` bytes into an aligned local (what
+            // C effectively has, since its structs are aligned) before reading
+            // `sin_addr` — never form a `&` to the misaligned byte buffer.
             // SAFETY: family is AF_INET, so the buffer holds a sockaddr_in.
-            let sin = unsafe { &*(sa.addr.as_ptr() as *const libc::sockaddr_in) };
+            let sin: libc::sockaddr_in = unsafe {
+                let mut tmp = core::mem::MaybeUninit::<libc::sockaddr_in>::zeroed();
+                core::ptr::copy_nonoverlapping(
+                    sa.addr.as_ptr(),
+                    tmp.as_mut_ptr().cast::<u8>(),
+                    core::mem::size_of::<libc::sockaddr_in>(),
+                );
+                tmp.assume_init()
+            };
             let raw = u32::from_be(sin.sin_addr.s_addr);
             Some(IpAddr::V4(std::net::Ipv4Addr::from(raw)))
         }
         f if f == libc::AF_INET6 => {
             // SAFETY: family is AF_INET6, so the buffer holds a sockaddr_in6.
-            let sin6 = unsafe { &*(sa.addr.as_ptr() as *const libc::sockaddr_in6) };
+            let sin6: libc::sockaddr_in6 = unsafe {
+                let mut tmp = core::mem::MaybeUninit::<libc::sockaddr_in6>::zeroed();
+                core::ptr::copy_nonoverlapping(
+                    sa.addr.as_ptr(),
+                    tmp.as_mut_ptr().cast::<u8>(),
+                    core::mem::size_of::<libc::sockaddr_in6>(),
+                );
+                tmp.assume_init()
+            };
             Some(IpAddr::V6(std::net::Ipv6Addr::from(sin6.sin6_addr.s6_addr)))
         }
         _ => None,
@@ -71,20 +95,36 @@ pub(crate) fn ipaddr_to_sockaddr(ip: &IpAddr) -> SockAddr {
     let mut sa = SockAddr::zeroed();
     match ip {
         IpAddr::V4(v4) => {
-            // SAFETY: writing a sockaddr_in into the storage buffer.
+            // Fill an aligned local `sockaddr_in`, then copy its bytes into the
+            // unaligned storage buffer — never write through a misaligned `&mut`.
+            // SAFETY: zeroed sockaddr_in is a valid all-fields-init value.
+            let mut sin: libc::sockaddr_in =
+                unsafe { core::mem::MaybeUninit::zeroed().assume_init() };
+            sin.sin_family = libc::AF_INET as libc::sa_family_t;
+            sin.sin_addr.s_addr = u32::from(*v4).to_be();
+            // SAFETY: copying size_of::<sockaddr_in>() bytes into the 128-byte buf.
             unsafe {
-                let sin = sa.addr.as_mut_ptr() as *mut libc::sockaddr_in;
-                (*sin).sin_family = libc::AF_INET as libc::sa_family_t;
-                (*sin).sin_addr.s_addr = u32::from(*v4).to_be();
+                core::ptr::copy_nonoverlapping(
+                    (&sin as *const libc::sockaddr_in).cast::<u8>(),
+                    sa.addr.as_mut_ptr(),
+                    core::mem::size_of::<libc::sockaddr_in>(),
+                );
             }
             sa.salen = core::mem::size_of::<libc::sockaddr_in>() as u32;
         }
         IpAddr::V6(v6) => {
-            // SAFETY: writing a sockaddr_in6 into the storage buffer.
+            // SAFETY: zeroed sockaddr_in6 is a valid all-fields-init value.
+            let mut sin6: libc::sockaddr_in6 =
+                unsafe { core::mem::MaybeUninit::zeroed().assume_init() };
+            sin6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+            sin6.sin6_addr.s6_addr = v6.octets();
+            // SAFETY: copying size_of::<sockaddr_in6>() bytes into the 128-byte buf.
             unsafe {
-                let sin6 = sa.addr.as_mut_ptr() as *mut libc::sockaddr_in6;
-                (*sin6).sin6_family = libc::AF_INET6 as libc::sa_family_t;
-                (*sin6).sin6_addr.s6_addr = v6.octets();
+                core::ptr::copy_nonoverlapping(
+                    (&sin6 as *const libc::sockaddr_in6).cast::<u8>(),
+                    sa.addr.as_mut_ptr(),
+                    core::mem::size_of::<libc::sockaddr_in6>(),
+                );
             }
             sa.salen = core::mem::size_of::<libc::sockaddr_in6>() as u32;
         }
