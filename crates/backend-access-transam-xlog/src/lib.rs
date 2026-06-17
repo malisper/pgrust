@@ -725,6 +725,20 @@ pub fn init_seams() {
     use backend_access_transam_xlog_seams as s;
     s::xlog_redo::set(redo::xlog_redo);
 
+    // `int wal_level` (xlog.c GUC) — the effective `wal_level` value. C reads the
+    // global `int wal_level` directly; here it lives in the `wal_level` enum GUC
+    // slot (boot_val WAL_LEVEL_REPLICA), whose stored int is the WalLevel ordinal
+    // (minimal=0/replica=1/logical=2, catalog/pg_control.h order).
+    s::wal_level::set(|| {
+        let lvl = backend_utils_misc_guc_tables::vars::wal_level.read();
+        match lvl {
+            x if x == WalLevel::Minimal as i32 => WalLevel::Minimal,
+            x if x == WalLevel::Replica as i32 => WalLevel::Replica,
+            x if x == WalLevel::Logical as i32 => WalLevel::Logical,
+            other => panic!("invalid wal_level GUC value {other}"),
+        }
+    });
+
     // xlog.c-owned GUC variable accessors + assign hooks (max_wal_size /
     // min_wal_size / checkpoint_completion_target). The GUC machinery fires the
     // assign hooks during InitializeGUCOptions to seed CheckPointSegments.

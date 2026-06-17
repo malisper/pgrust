@@ -920,8 +920,22 @@ const Anum_pg_collation_collnamespace: i32 = 3;
 
 // `catalog/pg_index.h` attribute numbers.
 const Anum_pg_index_indexrelid: i32 = 1;
+const Anum_pg_index_indrelid: i32 = 2;
 const Anum_pg_index_indnatts: i32 = 3;
 const Anum_pg_index_indnkeyatts: i32 = 4;
+const Anum_pg_index_indisunique: i32 = 5;
+const Anum_pg_index_indnullsnotdistinct: i32 = 6;
+const Anum_pg_index_indisprimary: i32 = 7;
+const Anum_pg_index_indisexclusion: i32 = 8;
+const Anum_pg_index_indimmediate: i32 = 9;
+const Anum_pg_index_indisclustered: i32 = 10;
+const Anum_pg_index_indisvalid: i32 = 11;
+const Anum_pg_index_indcheckxmin: i32 = 12;
+const Anum_pg_index_indisready: i32 = 13;
+const Anum_pg_index_indislive: i32 = 14;
+const Anum_pg_index_indisreplident: i32 = 15;
+const Anum_pg_index_indkey: i32 = 16;
+const Anum_pg_index_indcollation: i32 = 17;
 const Anum_pg_index_indclass: i32 = 18;
 const Anum_pg_index_indoption: i32 = 19;
 const Anum_pg_index_indpred: i32 = 21;
@@ -1910,6 +1924,108 @@ pub(crate) fn pg_index_indclass<'mcx>(
 
     ReleaseSysCache(tup);
     Ok(Some((indnatts, indnkeyatts, indclass)))
+}
+
+/// `SearchSysCache1(INDEXRELID, ObjectIdGetDatum(indexId))` then `heap_copytuple`
+/// projected to the `pg_index` row the relcache's `RelationInitIndexAccessInfo`
+/// (relcache.c) consumes off `rd_indextuple`: the fixed `Form_pg_index` scalars
+/// plus the variable-length `indkey`/`indcollation`/`indclass`/`indoption`
+/// arrays (which the C reads with `fastgetattr`/`heap_getattr` from the copied
+/// tuple). `Ok(None)` on a cache miss (`!HeapTupleIsValid`); the caller raises
+/// `cache lookup failed for index %u`.
+pub(crate) fn search_pg_index_info<'mcx>(
+    mcx: Mcx<'mcx>,
+    index_oid: Oid,
+) -> PgResult<Option<types_cache::PgIndexInfo<'mcx>>> {
+    let tuple = SearchSysCache1(mcx, INDEXRELID, SysCacheKey::Value(KeyDatum::from_oid(index_oid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+
+    // Fixed Form_pg_index scalars (GETSTRUCT in C).
+    let indexrelid = getattr_oid(mcx, INDEXRELID, &tup, Anum_pg_index_indexrelid)?;
+    let indrelid = getattr_oid(mcx, INDEXRELID, &tup, Anum_pg_index_indrelid)?;
+    let indnatts = getattr_i16(mcx, INDEXRELID, &tup, Anum_pg_index_indnatts)?;
+    let indnkeyatts = getattr_i16(mcx, INDEXRELID, &tup, Anum_pg_index_indnkeyatts)?;
+    let indisunique = getattr_bool(mcx, INDEXRELID, &tup, Anum_pg_index_indisunique)?;
+    let indnullsnotdistinct =
+        getattr_bool(mcx, INDEXRELID, &tup, Anum_pg_index_indnullsnotdistinct)?;
+    let indisprimary = getattr_bool(mcx, INDEXRELID, &tup, Anum_pg_index_indisprimary)?;
+    let indisexclusion = getattr_bool(mcx, INDEXRELID, &tup, Anum_pg_index_indisexclusion)?;
+    let indimmediate = getattr_bool(mcx, INDEXRELID, &tup, Anum_pg_index_indimmediate)?;
+    let indisclustered = getattr_bool(mcx, INDEXRELID, &tup, Anum_pg_index_indisclustered)?;
+    let indisvalid = getattr_bool(mcx, INDEXRELID, &tup, Anum_pg_index_indisvalid)?;
+    let indcheckxmin = getattr_bool(mcx, INDEXRELID, &tup, Anum_pg_index_indcheckxmin)?;
+    let indisready = getattr_bool(mcx, INDEXRELID, &tup, Anum_pg_index_indisready)?;
+    let indislive = getattr_bool(mcx, INDEXRELID, &tup, Anum_pg_index_indislive)?;
+    let indisreplident = getattr_bool(mcx, INDEXRELID, &tup, Anum_pg_index_indisreplident)?;
+
+    // Variable-length vectors. The C reads these off rd_indextuple with
+    // fastgetattr (indkey is BKI_FORCE_NOT_NULL and accessed directly; the
+    // CATALOG_VARLEN trio indcollation/indclass/indoption with heap_getattr).
+    // All four are BKI_FORCE_NOT_NULL, so SysCacheGetAttrNotNull is faithful.
+    let by_ref_bytes = |d: &Datum<'mcx>, name: &str| -> PgResult<PgVec<'mcx, u8>> {
+        match d {
+            Datum::ByRef(b) => {
+                let mut out = vec_with_capacity_in::<u8>(mcx, b.len())?;
+                out.extend_from_slice(b);
+                Ok(out)
+            }
+            Datum::ByVal(_)
+            | Datum::Cstring(_)
+            | Datum::Composite(_)
+            | Datum::Expanded(_)
+            | Datum::Internal(_) => Err(PgError::error(format!(
+                "syscache projection: {name} attribute is by-value"
+            ))),
+        }
+    };
+
+    // indkey int2vector -> AttrNumber (i16) values.
+    let indkey_datum = SysCacheGetAttrNotNull(mcx, INDEXRELID, &tup, Anum_pg_index_indkey)?;
+    let indkey_bytes = by_ref_bytes(&indkey_datum, "indkey")?;
+    let indkey = arrayfuncs_seams::int2vector_to_i16s_bytes::call(mcx, &indkey_bytes)?;
+
+    // indcollation oidvector -> Oid values.
+    let indcollation_datum =
+        SysCacheGetAttrNotNull(mcx, INDEXRELID, &tup, Anum_pg_index_indcollation)?;
+    let indcollation_bytes = by_ref_bytes(&indcollation_datum, "indcollation")?;
+    let indcollation =
+        arrayfuncs_seams::oidvector_to_oids_bytes::call(mcx, &indcollation_bytes)?;
+
+    // indclass oidvector -> Oid values.
+    let indclass_datum = SysCacheGetAttrNotNull(mcx, INDEXRELID, &tup, Anum_pg_index_indclass)?;
+    let indclass_bytes = by_ref_bytes(&indclass_datum, "indclass")?;
+    let indclass = arrayfuncs_seams::oidvector_to_oids_bytes::call(mcx, &indclass_bytes)?;
+
+    // indoption int2vector -> i16 values.
+    let indoption_datum =
+        SysCacheGetAttrNotNull(mcx, INDEXRELID, &tup, Anum_pg_index_indoption)?;
+    let indoption_bytes = by_ref_bytes(&indoption_datum, "indoption")?;
+    let indoption = arrayfuncs_seams::int2vector_to_i16s_bytes::call(mcx, &indoption_bytes)?;
+
+    ReleaseSysCache(tup);
+    Ok(Some(types_cache::PgIndexInfo {
+        indexrelid,
+        indrelid,
+        indnatts,
+        indnkeyatts,
+        indisunique,
+        indnullsnotdistinct,
+        indisprimary,
+        indisexclusion,
+        indimmediate,
+        indisclustered,
+        indisvalid,
+        indcheckxmin,
+        indisready,
+        indislive,
+        indisreplident,
+        indkey,
+        indcollation,
+        indclass,
+        indoption,
+    }))
 }
 
 /// amutils.c `indexam_property`: `SearchSysCache1(RELOID,

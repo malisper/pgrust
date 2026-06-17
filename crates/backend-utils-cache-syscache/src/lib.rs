@@ -964,6 +964,9 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::pg_index_has_predicate::set(
         projections::pg_index_has_predicate,
     );
+    backend_utils_cache_syscache_seams::search_pg_index_info::set(
+        projections::search_pg_index_info,
+    );
     backend_utils_cache_syscache_seams::rule_tuple_by_relname::set(
         projections::rule_tuple_by_relname,
     );
