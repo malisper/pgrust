@@ -140,11 +140,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// C: `getBaseType(typeoid)`.
-    pub fn get_base_type(typeoid: Oid) -> PgResult<Oid>
-);
-
-seam_core::seam!(
     /// C: `getBaseTypeAndTypmod(typeoid, &typmod)`.
     pub fn get_base_type_and_typmod(typeoid: Oid, typmod: i32) -> PgResult<(Oid, i32)>
 );
@@ -153,12 +148,6 @@ seam_core::seam!(
     /// C: `getTypeOutputInfo(type, &typeOut, &isvarlena)` +
     /// `OidOutputFunctionCall(typeOut, value)`. `value` is the raw Datum bits.
     pub fn output_function_call(typeoid: Oid, value: u64) -> PgResult<String>
-);
-
-seam_core::seam!(
-    /// C: `get_base_element_type(typid)` — the element type of an array (or
-    /// array domain), or `InvalidOid`.
-    pub fn get_base_element_type(typid: Oid) -> PgResult<Oid>
 );
 
 seam_core::seam!(

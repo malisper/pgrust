@@ -262,16 +262,6 @@ seam_core::seam!(
     ) -> PgResult<PgString<'mcx>>
 );
 
-seam_core::seam!(
-    /// `get_constraint_name(conoid)` (lsyscache.c): the name of a constraint by
-    /// OID, or `None` if the cache lookup fails (the C caller then
-    /// `elog(ERROR)`). Used by `get_insert_query_def`'s `ON CONFLICT ON
-    /// CONSTRAINT` rendering. Owner: lsyscache (unported for this entry).
-    pub fn get_constraint_name<'mcx>(
-        mcx: Mcx<'mcx>,
-        conoid: Oid,
-    ) -> PgResult<Option<PgString<'mcx>>>
-);
 
 seam_core::seam!(
     /// `AcquireRewriteLocks(query, false, false)` (rewriteHandler.c): before

@@ -414,15 +414,6 @@ seam_core::seam!(
 );
 
 /* ======================================================================
- * utils/cache/lsyscache.c — get_commutator (syscache lookup; ereport-capable).
- * ==================================================================== */
-
-seam_core::seam!(
-    /// `get_commutator(opno)`.
-    pub fn get_commutator(opno: Oid) -> PgResult<Oid>
-);
-
-/* ======================================================================
  * executor/execAmi.c — ExecMaterializesOutput(pathtype) over a NodeTag.
  * ==================================================================== */
 

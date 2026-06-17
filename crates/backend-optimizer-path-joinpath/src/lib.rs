@@ -41,6 +41,7 @@ use types_error::PgResult;
 
 use backend_optimizer_path_joinpath_seams as jp;
 use backend_optimizer_util_relnode_seams as bms;
+use backend_utils_cache_lsyscache_seams as lsc;
 
 use types_pathnodes::optimizer_plan::{CostSelector, JoinPathExtraData, SemiAntiJoinFactors};
 use types_pathnodes::planner_run::PlannerRun;
@@ -1979,7 +1980,7 @@ fn hash_inner_and_outer<'mcx>(
 
         // If "inner op outer", require valid commutator.
         if !root.rinfo(restrictinfo).outer_is_left
-            && jp::get_commutator::call(jp::clause_opexpr_opno::call(root, restrictinfo))? == 0
+            && lsc::get_commutator::call(jp::clause_opexpr_opno::call(root, restrictinfo))? == 0
         {
             continue;
         }
@@ -2221,7 +2222,7 @@ fn select_mergejoin_clauses<'mcx>(
 
         // If "inner op outer", require valid commutator.
         if !root.rinfo(restrictinfo).outer_is_left
-            && jp::get_commutator::call(jp::clause_opexpr_opno::call(root, restrictinfo))? == 0
+            && lsc::get_commutator::call(jp::clause_opexpr_opno::call(root, restrictinfo))? == 0
         {
             have_nonmergeable_joinclause = true;
             continue;

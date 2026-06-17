@@ -271,6 +271,24 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `get_constraint_name(conoid)` (lsyscache.c): the constraint's name, copied
+    /// into `mcx` (C: `pstrdup`), or `None` (C: NULL) when there is no such
+    /// `pg_constraint` row.
+    pub fn get_constraint_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        conoid: Oid,
+    ) -> PgResult<Option<PgString<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `get_constraint_index(conoid)` (lsyscache.c): for a UNIQUE / PRIMARY KEY /
+    /// EXCLUSION constraint, the OID of its supporting index (`conindid`); for any
+    /// other constraint type, or when there is no such `pg_constraint` row,
+    /// `InvalidOid`.
+    pub fn get_constraint_index(conoid: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
     /// `get_relname_relid(relname, relnamespace)` (lsyscache.c):
     /// `GetSysCacheOid2(RELNAMENSP, ...)` — the relation's OID or
     /// `InvalidOid`. `Err` carries catcache-path `ereport(ERROR)`s.

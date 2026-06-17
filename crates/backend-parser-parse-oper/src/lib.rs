@@ -67,7 +67,7 @@ use types_tuple::heaptuple::{
 use backend_catalog_namespace_seams::{
     lookup_explicit_namespace, opername_get_candidates, opername_get_oprid,
 };
-use backend_commands_functioncmds_seams::get_base_element_type;
+use backend_utils_cache_lsyscache_seams::get_base_element_type;
 use backend_nodes_core::nodefuncs::expr_type as exprType;
 use backend_parser_coerce_seams::{enforce_generic_type_consistency, is_binary_coercible};
 use backend_parser_parse_func_seams::{

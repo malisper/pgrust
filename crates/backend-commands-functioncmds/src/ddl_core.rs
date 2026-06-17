@@ -17,6 +17,7 @@ use backend_catalog_namespace::QualifiedNameGetCreationNamespace;
 use backend_commands_functioncmds_seams::{
     self as seam, AlterFunctionChanges, ProcedureCreateArgs,
 };
+use backend_utils_cache_lsyscache_seams as lsc;
 use backend_utils_misc_guc_seams as guc_seam;
 use backend_utils_error::ereport;
 use mcx::Mcx;
@@ -654,7 +655,7 @@ fn interpret_func_support(defel: DefElem) -> PgResult<Oid> {
             .into_error());
     }
 
-    if seam::get_func_rettype::call(proc_oid)? != INTERNALOID {
+    if lsc::get_func_rettype::call(proc_oid)? != INTERNALOID {
         return Err(ereport(ERROR)
             .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
             .errmsg(format!(
@@ -1009,7 +1010,7 @@ pub fn CreateFunction(
         for lc in &attrs.transform {
             let tn = as_type_name(lc)?;
             let mut typeid = seam::typename_type_id::call(tn)?;
-            let elt = seam::get_base_element_type::call(typeid)?;
+            let elt = lsc::get_base_element_type::call(typeid)?;
             typeid = if OidIsValid(elt) { elt } else { typeid };
             let transformid = get_transform_oid(mcx, typeid, language_oid, false)?;
             trftypes_list.push(typeid);

@@ -1580,7 +1580,7 @@ fn get_insert_query_def<'mcx>(
                 context.varprefix = save;
             }
         } else if confl.constraint != 0 {
-            let name = backend_utils_adt_ruleutils_seams::get_constraint_name::call(mcx, confl.constraint)?
+            let name = backend_utils_cache_lsyscache_seams::get_constraint_name::call(mcx, confl.constraint)?
                 .ok_or_else(|| elog_error(format!("cache lookup failed for constraint {}", confl.constraint)))?;
             str_(context, " ON CONSTRAINT ")?;
             let q = quote_identifier(mcx, name.as_str())?;

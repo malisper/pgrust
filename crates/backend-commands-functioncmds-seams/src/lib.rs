@@ -216,11 +216,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `get_base_element_type(typid)`.
-    pub fn get_base_element_type(type_oid: Oid) -> PgResult<Oid>
-);
-
-seam_core::seam!(
     /// `get_typtype(typid)` — the `pg_type.typtype` char.
     pub fn get_typtype(type_oid: Oid) -> PgResult<i8>
 );
@@ -305,11 +300,6 @@ seam_core::seam!(
         argtypes: Vec<Oid>,
         missing_ok: bool,
     ) -> PgResult<Oid>
-);
-
-seam_core::seam!(
-    /// `get_func_rettype(funcid)` (utils/cache/lsyscache.c).
-    pub fn get_func_rettype(func_oid: Oid) -> PgResult<Oid>
 );
 
 seam_core::seam!(

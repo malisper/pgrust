@@ -360,14 +360,6 @@ pub struct StatExtDataKinds {
     pub kinds: Vec<i8>,
 }
 
-/* ---- catalog: ON CONFLICT named constraint ------------------------- */
-
-seam_core::seam!(
-    /// `get_constraint_index(conoid)` (lsyscache.c) — the index OID backing a
-    /// constraint, or `InvalidOid`.
-    pub fn get_constraint_index(conoid: Oid) -> PgResult<Oid>
-);
-
 /* ---- get_relation_constraints helpers ------------------------------ */
 
 seam_core::seam!(

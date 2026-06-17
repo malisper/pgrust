@@ -670,7 +670,8 @@ pub fn infer_arbiter_indexes<'mcx>(
 
     // Lookup named constraint's index.
     if onconflict.constraint != InvalidOid {
-        index_oid_from_constraint = ext::get_constraint_index::call(onconflict.constraint)?;
+        index_oid_from_constraint =
+            backend_utils_cache_lsyscache_seams::get_constraint_index::call(onconflict.constraint)?;
         if index_oid_from_constraint == InvalidOid {
             return Err(types_error::PgError::error(
                 "constraint in ON CONFLICT clause has no associated index",

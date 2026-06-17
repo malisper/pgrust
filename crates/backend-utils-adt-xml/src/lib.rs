@@ -69,6 +69,7 @@ use types_pgtime::pgtime::pg_tm;
 use types_wchar::encoding::PG_UTF8;
 
 use backend_utils_adt_xml_libxml_seams as seam;
+use backend_utils_cache_lsyscache_seams as lsc;
 use types_xml::{RelationColumn, SpiColumn, SpiResult};
 
 // ---------------------------------------------------------------------------
@@ -1265,7 +1266,7 @@ pub fn map_sql_value_to_xml_value(
 ) -> PgResult<String> {
     // type_is_array_domain(type) == (get_base_element_type(type) != InvalidOid):
     // both plain arrays and domains over arrays.
-    if seam::get_base_element_type::call(type_)? != InvalidOid {
+    if lsc::get_base_element_type::call(type_)? != InvalidOid {
         // array = DatumGetArrayTypeP(value); elmtype = ARR_ELEMTYPE(array);
         // get_typlenbyvalalign(elmtype, ...);
         // deconstruct_array(array, elmtype, ..., &elem_values, &elem_nulls,
@@ -1291,7 +1292,7 @@ pub fn map_sql_value_to_xml_value(
 
     // Flatten domains; the special-case treatments below should apply to, eg,
     // domains over boolean not just boolean.
-    let type_ = seam::get_base_type::call(type_)?;
+    let type_ = lsc::get_base_type::call(type_)?;
 
     // Special XSD formatting for some data types.
     match type_ {
@@ -2277,7 +2278,7 @@ pub fn map_sql_typecoll_to_xmlschema_types(tupdesc_list: &[Vec<RelationColumn>])
     // add base types of domains
     let snapshot = uniquetypes.clone();
     for typid in snapshot {
-        let basetypid = seam::get_base_type::call(typid)?;
+        let basetypid = lsc::get_base_type::call(typid)?;
         if basetypid != typid && !uniquetypes.contains(&basetypid) {
             uniquetypes.push(basetypid);
         }
