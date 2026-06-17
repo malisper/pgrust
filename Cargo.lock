@@ -18569,6 +18569,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-rangetypes-gist"
+version = "0.0.0"
+dependencies = [
+ "allocator-api2",
+ "backend-utils-adt-float",
+ "backend-utils-adt-multirangetypes",
+ "backend-utils-adt-rangetypes",
+ "mcx",
+ "types-cache",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-gist",
+ "types-rangetypes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-adt-rangetypes-seams"
 version = "0.0.0"
 dependencies = [
