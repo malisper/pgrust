@@ -17382,6 +17382,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-cryptohashfuncs"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-fmgr-core",
+ "common-md5",
+ "common-sha2",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-fmgr",
+]
+
+[[package]]
 name = "backend-utils-adt-datetime"
 version = "0.0.0"
 dependencies = [
@@ -21091,6 +21104,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-md5"
+version = "0.0.0"
+dependencies = [
+ "backend-libpq-auth-seams",
+ "backend-libpq-crypt-seams",
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "common-parse-manifest-seams"
 version = "0.0.0"
 dependencies = [
@@ -22028,6 +22051,7 @@ dependencies = [
  "backend-utils-adt-arrayfuncs",
  "backend-utils-adt-arrayutils",
  "backend-utils-adt-char",
+ "backend-utils-adt-cryptohashfuncs",
  "backend-utils-adt-datetime",
  "backend-utils-adt-encode",
  "backend-utils-adt-float",
@@ -22122,6 +22146,7 @@ dependencies = [
  "common-extra-encnames-fgram",
  "common-hashfn",
  "common-ip",
+ "common-md5",
  "common-pglz",
  "common-prng-base64",
  "common-scram-common",
