@@ -61,6 +61,14 @@ use types_stringinfo::StringInfo;
 use backend_libpq_pqformat as pq;
 use backend_utils_mb_mbutils_seams as mb;
 
+pub mod fmgr_builtins;
+
+/// Register this unit's fmgr builtins (C: `fmgr_builtins[]` rows) so by-OID
+/// dispatch / `fmgr_isbuiltin` resolves them. Called by `seams-init::init_all`.
+pub fn init_seams() {
+    fmgr_builtins::register_varbit_builtins();
+}
+
 // ===========================================================================
 // constants (varbit.h, c.h)
 // ===========================================================================
