@@ -1445,4 +1445,27 @@ pub fn init_seams() {
 
     // --- ProcessUtility dispatch arm (utility.c CHECKPOINT → RequestCheckpoint) ---
     backend_tcop_utility_out_seams::request_checkpoint::set(RequestCheckpoint);
+
+    // --- GUC variable accessors (checkpointer.c:144-145 file globals) ---
+    //
+    // `CheckPointTimeout` / `CheckPointWarning` are plain C globals in
+    // checkpointer.c, read directly off those globals while the GUC machinery
+    // keeps them updated through the `checkpoint_timeout` / `checkpoint_warning`
+    // slots. Back them with this crate's process-local cells so an assign from
+    // the GUC table writes the same storage the checkpointer reads.
+    //
+    // (`checkpoint_completion_target` is owned + installed by xlog.c — it is read
+    // there for CalculateCheckpointSegments — so it is NOT installed here.)
+    backend_utils_misc_guc_tables::vars::CheckPointTimeout.install(
+        backend_utils_misc_guc_tables::GucVarAccessors {
+            get: CheckPointTimeout,
+            set: set_CheckPointTimeout,
+        },
+    );
+    backend_utils_misc_guc_tables::vars::CheckPointWarning.install(
+        backend_utils_misc_guc_tables::GucVarAccessors {
+            get: CheckPointWarning,
+            set: set_CheckPointWarning,
+        },
+    );
 }

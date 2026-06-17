@@ -13059,6 +13059,7 @@ dependencies = [
  "backend-utils-init-miscinit-seams",
  "backend-utils-init-small-seams",
  "backend-utils-misc-guc-seams",
+ "backend-utils-misc-guc-tables",
  "backend-utils-mmgr-mcxt-seams",
  "backend-utils-resowner-seams",
  "port-pgsleep-seams",

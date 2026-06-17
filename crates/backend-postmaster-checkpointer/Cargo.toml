@@ -51,6 +51,8 @@ backend-postmaster-auxprocess-seams = { path = "../backend-postmaster-auxprocess
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
 backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
+# GUC variable slots (checkpoint_timeout / checkpoint_warning accessors install here).
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-utils-mmgr-mcxt-seams = { path = "../backend-utils-mmgr-mcxt-seams" }
 backend-utils-resowner-seams = { path = "../backend-utils-resowner-seams" }
 backend-utils-hash-dynahash-seams = { path = "../backend-utils-hash-dynahash-seams" }
