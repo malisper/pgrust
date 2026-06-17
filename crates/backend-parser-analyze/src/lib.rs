@@ -310,6 +310,34 @@ pub fn query_requires_rewrite_plan(query: &Query<'_>) -> bool {
 /// contract is `parse_sub_analyze` (consumed by parse_cte and parse_clause).
 pub fn init_seams() {
     backend_parser_analyze_seams::parse_sub_analyze::set(parse_sub_analyze);
+    // VALUE "requires" predicates plancache calls on the owned RawStmt/Query it
+    // stores (the de-handle replaces the handle pc-seam forms). Thin PgResult
+    // wrappers over the infallible value bodies above.
+    backend_parser_analyze_seams::stmt_requires_parse_analysis_value::set(
+        stmt_requires_parse_analysis_value_impl,
+    );
+    backend_parser_analyze_seams::analyze_requires_snapshot_value::set(
+        analyze_requires_snapshot_value_impl,
+    );
+    backend_parser_analyze_seams::query_requires_rewrite_plan_value::set(
+        query_requires_rewrite_plan_value_impl,
+    );
+}
+
+/// VALUE seam impl for `stmt_requires_parse_analysis` (infallible body, wrapped
+/// in `Ok` for the seam contract).
+fn stmt_requires_parse_analysis_value_impl(raw: &RawStmt<'_>) -> PgResult<bool> {
+    Ok(stmt_requires_parse_analysis(raw))
+}
+
+/// VALUE seam impl for `analyze_requires_snapshot`.
+fn analyze_requires_snapshot_value_impl(raw: &RawStmt<'_>) -> PgResult<bool> {
+    Ok(analyze_requires_snapshot(raw))
+}
+
+/// VALUE seam impl for `query_requires_rewrite_plan`.
+fn query_requires_rewrite_plan_value_impl(query: &Query<'_>) -> PgResult<bool> {
+    Ok(query_requires_rewrite_plan(query))
 }
 
 /* ---- shared assembly helpers ---------------------------------------------- */

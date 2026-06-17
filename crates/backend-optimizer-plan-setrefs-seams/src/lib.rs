@@ -17,13 +17,14 @@ seam_core::seam!(
     ///
     /// C builds `makeNode(PlanInvalItem)`, sets `cacheId` and
     /// `hashValue = GetSysCacheHashValue1(cacheId, ObjectIdGetDatum(oid))`, and
-    /// `lappend`s it onto `glob->invalItems`. `PlanInvalItem` is not a
-    /// `node_arena` `Expr`; plancache owns the inval-item node space and the
-    /// syscache hash, so the hash computation + append are performed by the owner
-    /// over the opaque `NodeId` list. `cache_id` is the syscache identifier
-    /// (PROCOID / TYPEOID); `oid` the function/type OID.
+    /// `lappend`s it onto `glob->invalItems`. The syscache hash lives with the
+    /// syscache subsystem, so the hash computation + the concrete-pair append are
+    /// performed by the owner; the list itself is now a concrete
+    /// `Vec<PlanInvalItem>` (`(cacheId, hashValue)` pairs) so `standard_planner`
+    /// can read them straight into `PlannedStmt.invalItems`. `cache_id` is the
+    /// syscache identifier (PROCOID / TYPEOID); `oid` the function/type OID.
     pub fn record_inval_item(
-        inval_items: &mut alloc::vec::Vec<types_pathnodes::NodeId>,
+        inval_items: &mut alloc::vec::Vec<types_nodes::nodeindexscan::PlanInvalItem>,
         cache_id: i32,
         oid: types_core::Oid,
     ) -> types_error::PgResult<()>

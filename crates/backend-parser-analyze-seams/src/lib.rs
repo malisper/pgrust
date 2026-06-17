@@ -65,6 +65,30 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `stmt_requires_parse_analysis(raw_parse_tree)` (analyze.c) — VALUE form
+    /// over the owned `RawStmt`. True when parse analysis does more than wrap a
+    /// CMD_UTILITY Query. plancache's `StmtPlanRequiresRevalidation` calls it on
+    /// the stored owned raw statement (the de-handle replaces the handle pc-seam).
+    pub fn stmt_requires_parse_analysis_value(raw: &RawStmt) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `analyze_requires_snapshot(raw_parse_tree)` (analyze.c) — VALUE form over
+    /// the owned `RawStmt`. True when parse analysis requires a snapshot to be
+    /// set. plancache's `BuildingPlanRequiresSnapshot` calls it on the stored
+    /// owned raw statement.
+    pub fn analyze_requires_snapshot_value(raw: &RawStmt) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `query_requires_rewrite_plan(query)` (analyze.c) — VALUE form over the
+    /// owned `Query`. True unless the Query is a no-op CMD_UTILITY the
+    /// rewriter/planner ignore. plancache calls it on each stored owned analyzed
+    /// Query of the querytree list.
+    pub fn query_requires_rewrite_plan_value(query: &CopyQuery) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `if (post_parse_analyze_hook) (*post_parse_analyze_hook)(pstate, query,
     /// jstate);` (the call site analyze.c owns the hook for). Runs extension
     /// code; can `ereport(ERROR)`. `jstate` is `None` when query-id is off.

@@ -31,6 +31,10 @@ backend-optimizer-plan-createplan = { path = "../backend-optimizer-plan-createpl
 backend-optimizer-plan-createplan-seams = { path = "../backend-optimizer-plan-createplan-seams" }
 # set_plan_references.
 backend-optimizer-plan-setrefs = { path = "../backend-optimizer-plan-setrefs" }
+# record_inval_item seam: planner installs it (computes the syscache hash, pushes
+# the concrete PlanInvalItem onto glob->invalItems for the PlannedStmt producer).
+backend-optimizer-plan-setrefs-seams = { path = "../backend-optimizer-plan-setrefs-seams" }
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 # query_planner.
 backend-optimizer-plan-small = { path = "../backend-optimizer-plan-small" }
 # SS_* (subselect.c) incl. SS_process_ctes.

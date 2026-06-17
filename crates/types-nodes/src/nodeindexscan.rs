@@ -323,6 +323,18 @@ impl TidScan<'_> {
     }
 }
 
+/// `PlanInvalItem` (nodes/plannodes.h) — identifies a syscache entry a
+/// `PlannedStmt` depends on, by cache ID and the object's cache-lookup hash
+/// value. Used with the syscache invalidation mechanism (plancache replans the
+/// statement when a matching `(cacheId, hashValue)` is invalidated).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PlanInvalItem {
+    /// `int cacheId` — a syscache ID (see `utils/syscache.h`).
+    pub cacheId: i32,
+    /// `uint32 hashValue` — hash value of the object's cache lookup key.
+    pub hashValue: u32,
+}
+
 /// `PlannedStmt` (nodes/plannodes.h), trimmed to the fields ports consume.
 #[derive(Debug, Default)]
 pub struct PlannedStmt<'mcx> {
@@ -390,6 +402,32 @@ pub struct PlannedStmt<'mcx> {
     /// `int stmt_len` — the length in bytes of the statement's source text, or 0
     /// if unknown/unset.
     pub stmt_len: i32,
+    /// `bool transientPlan` — redo plan when TransactionXmin changes from now?
+    /// (`glob->transientPlan`, copied by `standard_planner`.) `BuildCachedPlan`
+    /// reads it to mark the generic plan transient.
+    pub transientPlan: bool,
+    /// `bool dependsOnRole` — is plan specific to current role? (`glob->
+    /// dependsOnRole`, e.g. when RLS or `current_user`-dependent qual exists.)
+    /// `BuildCachedPlan` reads it; the cached plan is invalidated on role change.
+    pub dependsOnRole: bool,
+    /// `List *invalItems` — other dependencies, as `PlanInvalItem`s
+    /// (`glob->invalItems`). `PlanCacheObjectCallback` iterates these to decide
+    /// whether a syscache invalidation should drop the cached plan. `None` = the
+    /// C `NIL`.
+    pub invalItems: Option<PgVec<'mcx, crate::nodeindexscan::PlanInvalItem>>,
+}
+
+impl<'mcx> PlannedStmt<'mcx> {
+    /// Read the top `Plan`'s `total_cost` off the owned plan tree
+    /// (`plannedstmt->planTree->total_cost`, plancache.c `cached_plan_cost`).
+    /// Returns `0.0` when `planTree` is `NULL` (a `CMD_UTILITY` PlannedStmt has
+    /// no plan tree; C would not call `cached_plan_cost` on it).
+    pub fn plan_total_cost(&self) -> f64 {
+        match &self.planTree {
+            Some(n) => n.plan_head().total_cost,
+            None => 0.0,
+        }
+    }
 }
 
 impl PlannedStmt<'_> {
@@ -469,6 +507,16 @@ impl PlannedStmt<'_> {
             }
             None => None,
         };
+        let invalItems = match &self.invalItems {
+            Some(v) => {
+                let mut out = vec_with_capacity_in(mcx, v.len())?;
+                for x in v.iter() {
+                    out.push(*x);
+                }
+                Some(out)
+            }
+            None => None,
+        };
         Ok(PlannedStmt {
             commandType: self.commandType,
             utilityStmt: match &self.utilityStmt {
@@ -497,6 +545,9 @@ impl PlannedStmt<'_> {
             subplans,
             stmt_location: self.stmt_location,
             stmt_len: self.stmt_len,
+            transientPlan: self.transientPlan,
+            dependsOnRole: self.dependsOnRole,
+            invalItems,
         })
     }
 }

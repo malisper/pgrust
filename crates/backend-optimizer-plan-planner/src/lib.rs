@@ -477,7 +477,22 @@ fn standard_planner<'mcx>(
     let glob_depends_on_role = root.glob.as_ref().map(|g| g.depends_on_role).unwrap_or(false);
     let glob_parallel_mode_needed =
         root.glob.as_ref().map(|g| g.parallel_mode_needed).unwrap_or(false);
-    let _ = (glob_transient, glob_depends_on_role);
+
+    // result->invalItems = glob->invalItems; (planner.c:579). The glob list
+    // carries concrete `PlanInvalItem` pairs (recorded via the record_inval_item
+    // seam during set_plan_references).
+    let inval_items: Option<mcx::PgVec<'mcx, types_nodes::nodeindexscan::PlanInvalItem>> = {
+        let v = root.glob.as_ref().map(|g| g.inval_items.clone()).unwrap_or_default();
+        if v.is_empty() {
+            None
+        } else {
+            let mut pv = mcx::PgVec::new_in(mcx);
+            for x in v {
+                pv.push(x);
+            }
+            Some(pv)
+        }
+    };
 
     let result = PlannedStmt {
         commandType: command_type,
@@ -503,6 +518,11 @@ fn standard_planner<'mcx>(
         // carrier is widened. ProcessUtility threads them to DoCopy/PrepareQuery.
         stmt_location: -1,
         stmt_len: 0,
+        // result->transientPlan = glob->transientPlan;
+        // result->dependsOnRole = glob->dependsOnRole; (planner.c:564-565)
+        transientPlan: glob_transient,
+        dependsOnRole: glob_depends_on_role,
+        invalItems: inval_items,
     };
 
     Ok(result)
@@ -2603,6 +2623,25 @@ fn apply_tlist_labeling_impl<'mcx>(
     Ok(())
 }
 
+/// `record_inval_item` impl (the `makeNode(PlanInvalItem)` + `GetSysCacheHashValue1`
+/// + `lappend` tail of `record_plan_function_dependency`/`record_plan_type_dependency`,
+/// setrefs.c:3553/3593). Computes the syscache hash for `(cache_id, oid)` and pushes
+/// the concrete `PlanInvalItem` onto `glob->invalItems`.
+fn record_inval_item_impl(
+    inval_items: &mut Vec<types_nodes::nodeindexscan::PlanInvalItem>,
+    cache_id: i32,
+    oid: Oid,
+) -> types_error::PgResult<()> {
+    // inval_item->hashValue = GetSysCacheHashValue1(cacheId, ObjectIdGetDatum(oid));
+    let hash_value =
+        backend_utils_cache_syscache_seams::get_syscache_hash_value_oid::call(cache_id, oid)?;
+    inval_items.push(types_nodes::nodeindexscan::PlanInvalItem {
+        cacheId: cache_id,
+        hashValue: hash_value,
+    });
+    Ok(())
+}
+
 pub fn init_seams() {
     use backend_utils_misc_guc_tables::vars;
     use backend_utils_misc_guc_tables::GucVarAccessors;
@@ -2620,6 +2659,13 @@ pub fn init_seams() {
     // the createplan-tail invocation, which the planner owns because the source
     // tlist is `root->processed_tlist` (a Vec<NodeId> of arena TargetEntrys).
     backend_optimizer_plan_createplan_seams::apply_tlist_labeling::set(apply_tlist_labeling_impl);
+
+    // record_inval_item: record_plan_function_dependency / record_plan_type_dependency
+    // append a `PlanInvalItem{cacheId, hashValue=GetSysCacheHashValue1(cacheId, oid)}`
+    // to `glob->invalItems`. The syscache hash lives with the syscache subsystem,
+    // so the planner installs this owner seam to compute the hash + push the
+    // concrete pair (then read straight into PlannedStmt.invalItems).
+    backend_optimizer_plan_setrefs_seams::record_inval_item::set(record_inval_item_impl);
 
     // GUC `conf->variable` accessors for the three planner GUCs whose backing
     // globals live in planner.c / clauses.c. Per PG 18.3 guc_tables.c all three

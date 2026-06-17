@@ -592,8 +592,12 @@ pub struct PlannerGlobal {
     pub part_prune_infos: Vec<NodeId>,
     /// `List *relationOids`.
     pub relation_oids: Vec<Oid>,
-    /// `List *invalItems`.
-    pub inval_items: Vec<NodeId>,
+    /// `List *invalItems` — `PlanInvalItem`s recorded by
+    /// `record_plan_function_dependency`/`record_plan_type_dependency`. Carried
+    /// as concrete `(cacheId, hashValue)` pairs (the syscache hash is computed at
+    /// record time via the `record_inval_item` seam), so `standard_planner` can
+    /// read them straight into `PlannedStmt.invalItems`.
+    pub inval_items: Vec<types_nodes::nodeindexscan::PlanInvalItem>,
     /// `List *paramExecTypes`.
     pub param_exec_types: Vec<Oid>,
     /// `Index lastPHId`.
