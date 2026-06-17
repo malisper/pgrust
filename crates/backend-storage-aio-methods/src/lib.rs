@@ -484,6 +484,17 @@ fn io_max_combine_limit() -> i32 {
         .expect("io_max_combine_limit GUC not registered (initialize_guc_options not called)")
 }
 
+/// Read `io_workers` from the live GUC store. In C this is the plain global
+/// `int io_workers = 3` (method_worker.c) which is *itself* the storage cell the
+/// `io_workers` GUC's `&io_workers` points at, so reading the GUC slot is reading
+/// the variable. The worker IO method (method_worker.c) that consumes it is
+/// unported (task #15 F4); this accessor still owns the variable so the GUC
+/// machinery (SIGHUP reload, SHOW) reads/writes the right cell. The boot value is
+/// `3` (`MAX_IO_WORKERS` upper bound).
+fn io_workers() -> i32 {
+    backend_utils_misc_guc::get_int("io_workers").unwrap_or(3)
+}
+
 /// `void assign_io_method(int newval, void *extra)` (aio.c) — set
 /// `pgaio_method_ops` from the table. Here `pgaio_method_ops` is resolved on
 /// demand, so the assign hook only validates the index (the C asserts the table
@@ -878,6 +889,15 @@ pub fn init_seams() {
         set: |_v| { /* read through the live store. */ },
     });
     hooks::check_io_max_concurrency.install(check_io_max_concurrency);
+
+    // io_workers variable accessor (PGC_SIGHUP int, no hooks — guc_tables.c
+    // lists check/assign/show all NULL). Owned by method_worker.c's `int
+    // io_workers` global; resolved through the live store like the other AIO
+    // GUCs.
+    vars::io_workers.install(GucVarAccessors {
+        get: io_workers,
+        set: |_v| { /* read through the live store. */ },
+    });
 }
 
 #[cfg(test)]
