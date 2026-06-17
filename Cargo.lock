@@ -10355,6 +10355,7 @@ dependencies = [
  "backend-jit-llvmjit-seams",
  "backend-storage-file-fd-seams",
  "backend-utils-error",
+ "backend-utils-fmgr-core",
  "backend-utils-init-small",
  "backend-utils-misc-guc-tables",
  "mcx",
@@ -10363,6 +10364,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-execparallel",
+ "types-fmgr",
  "types-nodes",
 ]
 
