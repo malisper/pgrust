@@ -16,3 +16,8 @@ mcx = { path = "../mcx" }
 
 # `cstring_to_text` (varlena.c) — builds the `text` result `Datum`.
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
+
+# fmgr builtin boundary: the call frame + builtin-table registration.
+types-fmgr = { path = "../types-fmgr" }
+types-tuple = { path = "../types-tuple" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
