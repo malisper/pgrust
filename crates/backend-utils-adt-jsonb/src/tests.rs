@@ -26,7 +26,9 @@ use JsonbIteratorToken::*;
 static INSTALL: Once = Once::new();
 
 /// Install the externals' seams with faithful, deterministic implementations.
-fn install_seams() {
+/// Shared with the `fmgr_builtins::tests` module (one process-global `Once`)
+/// so both test modules install the same slots exactly once.
+pub(crate) fn install_seams() {
     INSTALL.call_once(|| {
         backend_utils_misc_stack_depth_seams::check_stack_depth::set(|| Ok(()));
         backend_utils_adt_numeric_seams::numeric_eq::set(|a, b| a == b);

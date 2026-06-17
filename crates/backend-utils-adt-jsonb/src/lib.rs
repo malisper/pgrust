@@ -101,7 +101,11 @@ const PROVOLATILE_IMMUTABLE: u8 = b'i';
 /// Wires every inward seam this crate owns. The catalog/fmgr/datetime boundary
 /// seams it *consumes* are installed by their owners (jsonfuncs / timestamp /
 /// the jsonapi parser).
-pub fn init_seams() {}
+pub fn init_seams() {
+    fmgr_builtins::register_jsonb_builtins();
+}
+
+pub mod fmgr_builtins;
 
 // ===========================================================================
 // I/O entry points.

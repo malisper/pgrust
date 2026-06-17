@@ -17716,6 +17716,7 @@ dependencies = [
 name = "backend-utils-adt-jsonb"
 version = "0.0.0"
 dependencies = [
+ "backend-utils-adt-jsonb-op",
  "backend-utils-adt-jsonb-seams",
  "backend-utils-adt-jsonb-util",
  "backend-utils-adt-jsonfuncs-seams",
@@ -17723,11 +17724,14 @@ dependencies = [
  "backend-utils-adt-numeric-seams",
  "backend-utils-adt-timestamp-seams",
  "backend-utils-adt-varlena-seams",
+ "backend-utils-fmgr-core",
  "backend-utils-misc-stack-depth-seams",
  "common-hashfn-seams",
  "mcx",
  "types-core",
+ "types-datum",
  "types-error",
+ "types-fmgr",
  "types-json",
  "types-jsonb",
  "types-tuple",
