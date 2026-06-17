@@ -30,6 +30,7 @@ pub mod dch;
 pub mod dch_entry;
 pub mod dch_fromchar;
 pub mod fmgr_boundary;
+pub mod fmgr_builtins;
 pub mod fromchar;
 pub mod num;
 pub mod num_entry;
@@ -87,6 +88,7 @@ pub use tables::{FormatNode, FromCharDateMode, KeySuffix, KeyWord, NUMDesc};
 /// dictionaries through `backend-utils-adt-formatting-seams`.
 pub fn init_seams() {
     backend_utils_adt_formatting_seams::str_tolower::set(case::str_tolower);
+    fmgr_builtins::register_formatting_builtins();
 }
 
 /// Process-wide one-time install of the outward seam stubs the DCH unit tests
