@@ -1,2 +1,18 @@
 [alias]
 fast-check = "check --profile fast-check"
+
+# Bake the PostgreSQL installation directories into every build so the
+# compile-time `option_env!` lookups in
+# backend-utils-init-miscinit/src/boot_paths.rs resolve to the real share/tz
+# tree instead of the /usr/local/pgsql/... defaults.
+#
+# PGRUST_PGSHAREDIR is the one that bit us repeatedly: forgetting the
+# `PGRUST_PGSHAREDIR=/tmp/pgrust_share` build prefix baked the wrong timezone /
+# timezonesets directory into `postgres`, so the server picked the wrong tz data.
+# Setting it here makes the correct dir the default for a plain `cargo build`.
+#
+# `force` is left at its default (false): these apply only when the variable is
+# not already set in the environment, so an explicit
+# `PGRUST_PGSHAREDIR=/somewhere cargo build` still overrides them.
+[env]
+PGRUST_PGSHAREDIR = "/tmp/pgrust_share"
