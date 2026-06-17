@@ -5161,6 +5161,7 @@ dependencies = [
  "backend-access-index-genam-seams",
  "backend-access-table-table",
  "backend-catalog-catalog-seams",
+ "backend-catalog-dependency-seams",
  "backend-catalog-indexing-seams",
  "backend-catalog-objectaddress-seams",
  "backend-catalog-partition-seams",

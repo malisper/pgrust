@@ -1151,6 +1151,33 @@ pub fn init_seams() {
     seams::getIdentitySequence::set(getIdentitySequence);
     seams::get_index_constraint::set(get_index_constraint);
     seams::get_index_ref_constraints::set(get_index_ref_constraints);
+
+    // The snake_case `backend-catalog-dependency-seams` declarations are a
+    // parallel seam surface for the SAME pg_depend.c functions that catalog
+    // consumers (catalog/index.c, pg_attrdef.c, commands/sequence.c) `::call`
+    // through the `dependency` seam crate. Their real owner is pg_depend.c
+    // (this crate), so we install them here with faithful adapters that
+    // delegate straight to the bodies above — no new logic, just contract
+    // bridging between the two seam declarations. (The `dependency` crate is a
+    // CONSUMER of these, not their owner.)
+    {
+        use backend_catalog_dependency_seams as dep;
+        dep::record_dependency_on::set(|depender, referenced, behavior| {
+            let ctx = MemoryContext::new("recordDependencyOn");
+            recordDependencyOn(ctx.mcx(), &depender, &referenced, behavior)
+        });
+        dep::delete_dependency_records_for_class::set(
+            |class_id, object_id, ref_class_id, deptype| {
+                deleteDependencyRecordsForClass(
+                    class_id,
+                    object_id,
+                    ref_class_id,
+                    deptype.as_char(),
+                )
+            },
+        );
+        dep::sequence_is_owned::set(|seq_id, deptype| sequenceIsOwned(seq_id, deptype.as_char()));
+    }
 }
 
 #[cfg(test)]

@@ -1892,13 +1892,149 @@ mod recurrence_guard {
         // Delete each entry when its owner installs the seam.
         ("backend_bootstrap_bootstrap", "index_register"),
         ("backend_commands_trigger", "create_unique_key_recheck_trigger"),
+
+        // ============================================================
+        // `ported`-status owner deferrals (surfaced when is_complete_status
+        // widened to accept `ported`, 2026-06-17). Each is a declared+called
+        // seam on a code-complete owner whose FAITHFUL provider genuinely does
+        // not exist yet (keystone-blocked / unported subsystem / SSL-vtable
+        // floor). The owner legitimately mirror-pg-and-panics this surface.
+        // Delete each entry when its named blocker lands and installs the seam.
+        // ============================================================
+
+        // DESIGN_DEBT (TD-PLANCACHE-OPAQUE-HANDLE): the planner plancache-
+        // consumer slice (`backend-optimizer-plan-planner-pc-seams`, called only
+        // by backend-utils-cache-plancache) keys every PlannedStmt accessor on an
+        // OPAQUE u64 handle (PlannedStmtHandle/QueryListHandle/etc. in
+        // types_plancache). The ported planner is value-typed over `mcx` arenas
+        // (pg_plan_query returns PlannedStmt<'mcx>) and there is NO handle<->value
+        // registry anywhere, so no faithful provider can be `::set`. Same class as
+        // the documented portal-static-arena / plancache keystone — wiring would
+        // mean inventing a handle registry (forbidden). DELETE when the plancache
+        // handle/value-arena reconciliation lands.
+        ("backend_optimizer_plan_planner", "plan_queries"),
+        ("backend_optimizer_plan_planner", "pstmt_command_type_is_utility"),
+        ("backend_optimizer_plan_planner", "pstmt_depends_on_role"),
+        ("backend_optimizer_plan_planner", "pstmt_inval_items"),
+        ("backend_optimizer_plan_planner", "pstmt_plantree_total_cost"),
+        ("backend_optimizer_plan_planner", "pstmt_relation_oids"),
+        ("backend_optimizer_plan_planner", "pstmt_rtable_fields"),
+        ("backend_optimizer_plan_planner", "pstmt_rtable_length"),
+        ("backend_optimizer_plan_planner", "pstmt_transient_plan"),
+        ("backend_optimizer_plan_planner", "pstmt_utility_stmt"),
+        // Same opaque-handle keystone: tcop/utility.c's UtilityContainsQuery is
+        // value-typed (&Node -> Option<&Node>) but the plancache-consumer seam
+        // (`-pc-seams`) is handle-typed (UtilityStmtHandle -> QueryHandle); no
+        // bridge. DELETE with the plancache handle reconciliation above.
+        ("backend_tcop_utility", "utility_contains_query"),
+
+        // DESIGN_DEBT (TD-VACUUMPARALLEL-OUTWARD): the ~39 `*_pv`/`*_basvac`/
+        // `vacuum_*_nworkers`/`tid_store_*_pv`/`pgstat_*_pv` seams live in
+        // `backend-commands-vacuum-seams` (the shared declaration home) but are
+        // `::call`ed ONLY by vacuumparallel.c and represent vacuumparallel's
+        // OUTWARD dependencies on still-unported subsystems (freelist.c access
+        // strategy, tidstore.c shared TID store, pgstat/instrument, namespace.c,
+        // guc, miscinit globals) plus vacuumparallel's own DSM cost-balance /
+        // active-nworkers shared atomics (no shared-memory backing in the
+        // backend-local vacuum owner). The vacuum owner has NO provider for any
+        // of them. DELETE each as its real subsystem lands + reconciles to the
+        // handle model. (Catalog note on backend-commands-vacuumparallel records
+        // these as left seam-and-panic until owners reconcile.)
+        ("backend_commands_vacuum", "am_parallel_vacuum_options"),
+        ("backend_commands_vacuum", "am_use_maintenance_work_mem"),
+        ("backend_commands_vacuum", "debug_query_string_pv"),
+        ("backend_commands_vacuum", "free_access_strategy_pv"),
+        ("backend_commands_vacuum", "get_access_strategy_buffer_count"),
+        ("backend_commands_vacuum", "get_access_strategy_with_size_basvac"),
+        ("backend_commands_vacuum", "instr_accum_parallel_query_pv"),
+        ("backend_commands_vacuum", "instr_end_parallel_query_pv"),
+        ("backend_commands_vacuum", "instr_start_parallel_query_pv"),
+        ("backend_commands_vacuum", "is_under_postmaster_pv"),
+        ("backend_commands_vacuum", "max_parallel_maintenance_workers"),
+        ("backend_commands_vacuum", "my_proc_in_vacuum_only"),
+        ("backend_commands_vacuum", "pgstat_get_my_query_id"),
+        ("backend_commands_vacuum", "pgstat_progress_parallel_incr_param"),
+        ("backend_commands_vacuum", "pgstat_report_activity_running_pv"),
+        ("backend_commands_vacuum", "pgstat_report_query_id_pv"),
+        ("backend_commands_vacuum", "pop_parallel_vacuum_error_context"),
+        ("backend_commands_vacuum", "push_parallel_vacuum_error_context"),
+        ("backend_commands_vacuum", "pv_maintenance_work_mem"),
+        ("backend_commands_vacuum", "relation_get_namespace_name_pv"),
+        ("backend_commands_vacuum", "relation_get_number_of_blocks_pv"),
+        ("backend_commands_vacuum", "set_debug_query_string_pv"),
+        ("backend_commands_vacuum", "set_pv_maintenance_work_mem"),
+        ("backend_commands_vacuum", "set_vacuum_active_nworkers_enable"),
+        ("backend_commands_vacuum", "set_vacuum_shared_cost_balance_enable"),
+        ("backend_commands_vacuum", "table_close_lock"),
+        ("backend_commands_vacuum", "table_open_lock"),
+        ("backend_commands_vacuum", "tid_store_attach_pv"),
+        ("backend_commands_vacuum", "tid_store_create_shared_pv"),
+        ("backend_commands_vacuum", "tid_store_destroy_pv"),
+        ("backend_commands_vacuum", "tid_store_detach_pv"),
+        ("backend_commands_vacuum", "tid_store_get_dsa_handle_pv"),
+        ("backend_commands_vacuum", "tid_store_get_handle_pv"),
+        ("backend_commands_vacuum", "vac_close_indexes_lock"),
+        ("backend_commands_vacuum", "vac_open_indexes_lock"),
+        ("backend_commands_vacuum", "vacuum_active_nworkers_add"),
+        ("backend_commands_vacuum", "vacuum_active_nworkers_is_set"),
+        ("backend_commands_vacuum", "vacuum_active_nworkers_sub"),
+        ("backend_commands_vacuum", "vacuum_shared_cost_balance_read"),
+
+        // DESIGN_DEBT (TD-SUBSCRIPTION-UNPORTED): pg_subscription.c's
+        // GetSubscriptionList / CheckSubscriptionRelkind are not ported (the
+        // logical-replication launcher/relation callers seam-and-panic). No
+        // provider body in backend-catalog-pg-subscription. DELETE when ported.
+        ("backend_catalog_pg_subscription", "check_subscription_relkind"),
+        ("backend_catalog_pg_subscription", "get_subscription_list"),
+
+        // DESIGN_DEBT (TD-BE-TLS-VTABLE-FLOOR): be-secure.c's TLS peer-cert
+        // accessors (be_tls_get_peer_{subject,issuer}_name / _serial) dispatch
+        // into the SSL implementation backend (be-secure-openssl.c), which is
+        // unported. backend_status.c calls them when recording connection SSL
+        // info; with no TLS backend there is no faithful provider. SSL-vtable
+        // floor (same class as the FDW-routine floor). DELETE when be-secure's
+        // SSL backend lands.
+        ("backend_libpq_be_secure", "be_tls_get_peer_issuer_name"),
+        ("backend_libpq_be_secure", "be_tls_get_peer_serial"),
+        ("backend_libpq_be_secure", "be_tls_get_peer_subject_name"),
+
+        // DESIGN_DEBT (TD-RIR-RULE-ENGINE): rewriteHandler.c's
+        // relation_has_security_invoker is installed by the DML/RIR rule-engine
+        // slice (alongside get_view_query / relation_is_updatable), which is the
+        // NEXT rewriteHandler slice and is keystone-blocked on the query_rewrite
+        // contract collapse (portalcmds::Query opaque token). No body yet; the
+        // lockcmds caller seam-and-panics. DELETE when the RIR engine lands.
+        ("backend_rewrite_rewritehandler", "relation_has_security_invoker"),
+
+        // DESIGN_DEBT (TD-PGSTAT-CORE-UNPORTED): pgstat backend-snapshot
+        // accessors. pgstat_fetch_entry_backend needs the not-yet-ported
+        // pgstat.c snapshot core (pgstat_build_snapshot); pgstat_backend_pid_lookup
+        // needs the unported beentry accessor (pgstat_get_beentry_by_proc_number).
+        // No provider in backend-utils-activity-pgstat. DELETE when pgstat.c core
+        // + the beentry accessor land.
+        ("backend_utils_activity_pgstat", "pgstat_backend_pid_lookup"),
+        ("backend_utils_activity_pgstat", "pgstat_fetch_entry_backend"),
     ];
 
     /// CATALOG.tsv unit statuses that mean the owner crate is COMPLETE — its
     /// declared seams are an installed contract, not a mid-port frontier where
     /// `mirror-pg-and-panic` legitimately keeps them panicking.
+    ///
+    /// `ported` is COMPLETE: it means the owner crate's CODE EXISTS and is
+    /// fully written (the port is done; only the final audit pass is pending).
+    /// A `ported` owner's declared+called seams therefore have a real provider
+    /// and MUST be wired (`<fn>::set(...)`) or explicitly tracked in
+    /// `CONTRACT_RECONCILE_PENDING` — leaving one declared+called+uninstalled is
+    /// a latent runtime panic the moment a consumer reaches it. Treating
+    /// `ported` as exempt was a BLIND SPOT (86 crates) that let unwired seams
+    /// slip past the static guard until a runtime path hit them.
+    ///
+    /// The genuinely-unfinished frontier statuses (`todo`, `in-progress`,
+    /// `needs-decomp`, `partial`, `scaffold`) STAY EXEMPT: those owners
+    /// legitimately mirror-pg-and-panic across their still-incomplete surface,
+    /// so flagging them would perma-red the live port frontier.
     fn is_complete_status(status: &str) -> bool {
-        status == "merged" || status == "audited"
+        status == "merged" || status == "audited" || status == "ported"
     }
 
     /// Map every crate-dir name listed in `CATALOG.tsv`'s `crate` column to the

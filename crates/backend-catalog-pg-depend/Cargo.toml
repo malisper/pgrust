@@ -14,6 +14,7 @@ backend-access-common-scankey = { path = "../backend-access-common-scankey" }
 backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }
 backend-access-table-table = { path = "../backend-access-table-table" }
 backend-catalog-catalog-seams = { path = "../backend-catalog-catalog-seams" }
+backend-catalog-dependency-seams = { path = "../backend-catalog-dependency-seams" }
 backend-catalog-indexing-seams = { path = "../backend-catalog-indexing-seams" }
 backend-catalog-objectaddress-seams = { path = "../backend-catalog-objectaddress-seams" }
 backend-catalog-partition-seams = { path = "../backend-catalog-partition-seams" }

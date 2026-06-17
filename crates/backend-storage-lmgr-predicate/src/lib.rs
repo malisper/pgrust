@@ -165,6 +165,15 @@ pub fn init_seams() {
         },
     );
 
+    seams::check_table_for_serializable_conflict_in::set(|relation| {
+        // C: CheckTableForSerializableConflictIn(Relation) reads
+        // relation->rd_locator.dbOid, relation->rd_id and
+        // RelationUsesLocalBuffers(relation). Extract the same three fields
+        // straight off the carried Relation handle and delegate to the engine.
+        let (db_id, rd_id, uses_local_buffers) = relation_fields_from_handle(&relation)?;
+        engine::CheckTableForSerializableConflictIn(db_id, rd_id, rd_id, uses_local_buffers)
+    });
+
     seams::check_for_serializable_conflict_in::set(|index_oid| {
         let f = rel_fields(index_oid)?;
         engine::CheckForSerializableConflictIn(
