@@ -1,0 +1,118 @@
+//! The fmgr builtin layer (`Datum fn(PG_FUNCTION_ARGS)`) for the SQL-callable
+//! `cryptohashfuncs.c` functions: `md5(text)`, `md5(bytea)`, and
+//! `sha224`/`sha256`/`sha384`/`sha512` over `bytea`.
+//!
+//! Each `fc_<name>` adapter reads its single `text`/`bytea` argument off the
+//! fmgr call frame's by-ref lane (the boundary strips the varlena header, so we
+//! get the detoasted `VARDATA_ANY` payload), calls the matching value core, and
+//! writes the `text`/`bytea` result back on the by-ref `RefPayload::Varlena`
+//! lane.
+//!
+//! [`register_cryptohashfuncs_builtins`] registers every row into the
+//! fmgr-core builtin table (C: `fmgr_builtins[]`). OIDs / nargs / strict /
+//! retset are transcribed exactly from `pg_proc.dat`: every row is `nargs => 1`,
+//! `proisstrict 't'`, `proretset 'f'`.
+
+use types_datum::Datum;
+use types_fmgr::boundary::RefPayload;
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+
+/// A `text`/`bytea` arg's detoasted by-ref payload bytes (`VARDATA_ANY`).
+#[inline]
+fn arg_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("cryptohashfuncs fn: by-ref arg missing from by-ref lane")
+}
+
+/// Set a `text`/`bytea` varlena result on the by-ref lane and return the dummy
+/// word.
+#[inline]
+fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
+    fcinfo.set_ref_result(RefPayload::Varlena(bytes));
+    Datum::from_usize(0)
+}
+
+/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
+/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
+fn raise(err: types_error::PgError) -> ! {
+    let chars = types_error::unpack_sqlstate(err.sqlstate());
+    let code = core::str::from_utf8(&chars).unwrap_or("XX000");
+    std::panic::panic_any(format!("PGRUST-SQLSTATE:{code}:{}", err.message()));
+}
+
+#[inline]
+fn ok<T>(r: types_error::PgResult<T>) -> T {
+    match r {
+        Ok(v) => v,
+        Err(e) => raise(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// fc_ adapters.
+// ---------------------------------------------------------------------------
+
+fn fc_md5_text(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let out = ok(crate::md5_text(arg_bytes(fcinfo, 0)));
+    ret_varlena(fcinfo, out)
+}
+fn fc_md5_bytea(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let out = ok(crate::md5_bytea(arg_bytes(fcinfo, 0)));
+    ret_varlena(fcinfo, out)
+}
+fn fc_sha224_bytea(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let out = crate::sha224_bytea(arg_bytes(fcinfo, 0));
+    ret_varlena(fcinfo, out)
+}
+fn fc_sha256_bytea(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let out = crate::sha256_bytea(arg_bytes(fcinfo, 0));
+    ret_varlena(fcinfo, out)
+}
+fn fc_sha384_bytea(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let out = crate::sha384_bytea(arg_bytes(fcinfo, 0));
+    ret_varlena(fcinfo, out)
+}
+fn fc_sha512_bytea(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let out = crate::sha512_bytea(arg_bytes(fcinfo, 0));
+    ret_varlena(fcinfo, out)
+}
+
+// ---------------------------------------------------------------------------
+// Registration.
+// ---------------------------------------------------------------------------
+
+fn builtin(
+    foid: u32,
+    name: &str,
+    nargs: i16,
+    strict: bool,
+    retset: bool,
+    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
+) -> BuiltinFunction {
+    BuiltinFunction {
+        foid,
+        name: name.to_string(),
+        nargs,
+        strict,
+        retset,
+        func: Some(func),
+    }
+}
+
+/// Register every SQL-callable `cryptohashfuncs.c` builtin. OIDs / nargs /
+/// strict / retset transcribed exactly from `pg_proc.dat` (all `nargs => 1`,
+/// all strict, none retset).
+pub fn register_cryptohashfuncs_builtins() {
+    backend_utils_fmgr_core::register_builtins([
+        // md5(text) / md5(bytea) — prosrc md5_text / md5_bytea.
+        builtin(2311, "md5", 1, true, false, fc_md5_text),
+        builtin(2321, "md5", 1, true, false, fc_md5_bytea),
+        // sha224/256/384/512(bytea) — prosrc sha224_bytea … sha512_bytea.
+        builtin(3419, "sha224", 1, true, false, fc_sha224_bytea),
+        builtin(3420, "sha256", 1, true, false, fc_sha256_bytea),
+        builtin(3421, "sha384", 1, true, false, fc_sha384_bytea),
+        builtin(3422, "sha512", 1, true, false, fc_sha512_bytea),
+    ]);
+}

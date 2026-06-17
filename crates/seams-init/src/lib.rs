@@ -440,6 +440,8 @@ pub fn init_all() {
     backend_utils_adt_jsonfuncs::init_seams();
     backend_utils_adt_jsonpath_gram::init_seams();
     backend_utils_adt_like::init_seams();
+    common_md5::init_seams();
+    backend_utils_adt_cryptohashfuncs::init_seams();
     backend_utils_adt_encode::init_seams();
     backend_utils_adt_multirangetypes::init_seams();
     backend_utils_adt_network_gist::init_seams();
