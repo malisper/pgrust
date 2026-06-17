@@ -48,7 +48,8 @@ use types_nodes::nodectescan::CteScanState;
 use types_nodes::nodenamedtuplestorescan::NamedTuplestoreScanState;
 use types_nodes::nodes::Node;
 use types_nodes::{
-    EStateData, IndexOnlyScanState, SlotId, SubqueryScanState, TableFuncScanState,
+    EStateData, FunctionScanState, IndexOnlyScanState, SlotId, SubqueryScanState,
+    TableFuncScanState,
 };
 
 /// A scan node whose embedded `ScanState` head ([`ScanStateData`]) the generic
@@ -62,6 +63,13 @@ trait ScanNode<'mcx> {
 }
 
 impl<'mcx> ScanNode<'mcx> for TableFuncScanState<'mcx> {
+    #[inline]
+    fn ss(&mut self) -> &mut ScanStateData<'mcx> {
+        &mut self.ss
+    }
+}
+
+impl<'mcx> ScanNode<'mcx> for FunctionScanState<'mcx> {
     #[inline]
     fn ss(&mut self) -> &mut ScanStateData<'mcx> {
         &mut self.ss
@@ -113,6 +121,8 @@ pub fn init_seams() {
     execScan_seams::exec_scan::set(exec_scan_tablefunc);
     execScan_seams::exec_assign_scan_projection_info::set(exec_assign_scan_projection_info);
     execScan_seams::exec_scan_rescan::set(exec_scan_rescan_tablefunc);
+    execScan_seams::exec_scan_function::set(exec_scan_function);
+    execScan_seams::exec_scan_rescan_function::set(exec_scan_rescan_function);
     execScan_seams::exec_scan_indexonly::set(exec_scan_indexonly);
     execScan_seams::exec_scan_index::set(exec_scan_index);
     execScan_seams::exec_scan_rescan_ss::set(exec_scan_rescan_ss);
@@ -633,6 +643,29 @@ fn exec_scan_tablefunc<'mcx>(
 /// node.
 fn exec_scan_rescan_tablefunc<'mcx>(
     node: &mut TableFuncScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    exec_scan_rescan_ss(&mut node.ss, estate)
+}
+
+/// `exec_scan_function` seam — `ExecScan(&node->ss, FunctionNext,
+/// FunctionRecheck)` for a FunctionScan node. Unlike the relation-scan nodes,
+/// `FunctionNext` stores into and returns the node's scan slot directly, so the
+/// access method already yields a `SlotId`; pass it straight to the generic
+/// core (the subquery-scan pattern).
+fn exec_scan_function<'mcx>(
+    node: &mut FunctionScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    access: execScan_seams::FunctionScanAccessMtd,
+    recheck: execScan_seams::FunctionScanRecheckMtd,
+) -> PgResult<Option<SlotId>> {
+    exec_scan_core(node, access, recheck, estate)
+}
+
+/// `exec_scan_rescan_function` seam — `ExecScanReScan(&node->ss)` for a
+/// FunctionScan node.
+fn exec_scan_rescan_function<'mcx>(
+    node: &mut FunctionScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     exec_scan_rescan_ss(&mut node.ss, estate)

@@ -664,6 +664,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-core",
  "types-error",
  "types-tuple",
 ]
@@ -8252,6 +8253,7 @@ dependencies = [
  "backend-executor-nodeCtescan",
  "backend-executor-nodeCustom",
  "backend-executor-nodeForeignscan",
+ "backend-executor-nodeFunctionscan",
  "backend-executor-nodeGather",
  "backend-executor-nodeGatherMerge",
  "backend-executor-nodeGroup",
@@ -8682,6 +8684,7 @@ dependencies = [
  "backend-executor-nodeCtescan",
  "backend-executor-nodeCustom",
  "backend-executor-nodeForeignscan",
+ "backend-executor-nodeFunctionscan",
  "backend-executor-nodeGather",
  "backend-executor-nodeGatherMerge",
  "backend-executor-nodeGroup",
@@ -9239,6 +9242,28 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-execparallel",
+]
+
+[[package]]
+name = "backend-executor-nodeFunctionscan"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-toastdesc-seams",
+ "backend-access-common-tupdesc-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execSRF-seams",
+ "backend-executor-execScan-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-nodes-core-seams",
+ "backend-nodes-nodeFuncs-seams",
+ "backend-utils-sort-storage-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
 ]
 
 [[package]]

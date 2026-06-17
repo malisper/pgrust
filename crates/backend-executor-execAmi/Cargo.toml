@@ -50,6 +50,7 @@ backend-executor-nodeSort = { path = "../backend-executor-nodeSort" }
 backend-executor-nodeIncrementalSort = { path = "../backend-executor-nodeIncrementalSort" }
 backend-executor-nodeSubqueryscan = { path = "../backend-executor-nodeSubqueryscan" }
 backend-executor-nodeTableFuncscan = { path = "../backend-executor-nodeTableFuncscan" }
+backend-executor-nodeFunctionscan = { path = "../backend-executor-nodeFunctionscan" }
 backend-executor-nodeTidscan = { path = "../backend-executor-nodeTidscan" }
 backend-executor-nodeTidrangescan = { path = "../backend-executor-nodeTidrangescan" }
 backend-executor-nodeWorktablescan = { path = "../backend-executor-nodeWorktablescan" }

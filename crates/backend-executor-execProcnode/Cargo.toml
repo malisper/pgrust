@@ -31,6 +31,7 @@ backend-executor-nodeMergeAppend = { path = "../backend-executor-nodeMergeAppend
 backend-executor-nodeSeqscan = { path = "../backend-executor-nodeSeqscan" }
 backend-executor-nodeIndexonlyscan = { path = "../backend-executor-nodeIndexonlyscan" }
 backend-executor-nodeTableFuncscan = { path = "../backend-executor-nodeTableFuncscan" }
+backend-executor-nodeFunctionscan = { path = "../backend-executor-nodeFunctionscan" }
 backend-executor-nodeForeignscan = { path = "../backend-executor-nodeForeignscan" }
 backend-executor-nodeNestloop = { path = "../backend-executor-nodeNestloop" }
 backend-executor-nodeMergejoin = { path = "../backend-executor-nodeMergejoin" }

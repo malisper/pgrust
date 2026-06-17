@@ -188,6 +188,10 @@ pub fn exec_init_node<'mcx>(
         }
 
         // case T_FunctionScan: ExecInitFunctionScan(...) (nodeFunctionscan.c)
+        Node::FunctionScan(_) => {
+            let s = backend_executor_nodeFunctionscan::ExecInitFunctionScan(node, estate, eflags)?;
+            alloc_in(mcx, PlanStateNode::FunctionScan(s))?
+        }
 
         // case T_TableFuncScan: ExecInitTableFuncScan((TableFuncScan *) node, estate, eflags)
         Node::TableFuncScan(_) => {

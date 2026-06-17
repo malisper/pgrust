@@ -401,6 +401,10 @@ pub fn exec_end_node<'mcx>(
         PlanStateNode::WindowAgg(state) => {
             backend_executor_nodeWindowAgg::ExecEndWindowAgg(state, estate)
         }
+        // case T_FunctionScanState: ExecEndFunctionScan((FunctionScanState *) node);
+        PlanStateNode::FunctionScan(state) => {
+            backend_executor_nodeFunctionscan::ExecEndFunctionScan(state)
+        }
         // No clean up actions for these nodes:
         //   case T_ValuesScanState:
         //   case T_NamedTuplestoreScanState:
@@ -410,7 +414,7 @@ pub fn exec_end_node<'mcx>(
         | PlanStateNode::NamedTuplestoreScan(_)
         | PlanStateNode::WorkTableScan(_) => Ok(()),
 
-        // The remaining C arms (T_SampleScanState/T_FunctionScanState/
+        // The remaining C arms (T_SampleScanState/
         // T_IncrementalSortState/T_AggState/T_LockRowsState)
         // operate on node-state variants not yet present in
         // the `#[non_exhaustive]` `PlanStateNode` enum, so their tags cannot occur.

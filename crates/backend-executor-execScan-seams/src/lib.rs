@@ -16,7 +16,7 @@
 #![allow(non_snake_case)]
 
 use types_error::PgResult;
-use types_nodes::{EStateData, SlotId, TableFuncScanState};
+use types_nodes::{EStateData, FunctionScanState, SlotId, TableFuncScanState};
 
 /// `ExecScanAccessMtd` — the access method `ExecScan` re-enters to get the
 /// next candidate tuple. Returns `true` when a tuple is in the node's scan
@@ -62,7 +62,45 @@ seam_core::seam!(
     ) -> PgResult<()>
 );
 
-// --- Index-only-scan-specialized entry points -----------------------------
+// --- Function-scan-specialized entry points --------------------------------
+// Same `execScan.c` driver, specialized to the FunctionScan node (its own
+// in-crate `FunctionNext`/`FunctionRecheck` access/recheck functions). Unlike
+// the relation-scan nodes, `FunctionNext` stores into and returns the node's
+// scan slot directly (the C `return scanslot`), so the access method already
+// yields a `SlotId` (like the subquery scan), reported here as
+// `Option<SlotId>` (`None` is the C empty / `NULL` slot).
+
+/// `ExecScanAccessMtd`, specialized to a FunctionScan node — yields the
+/// produced scan slot id (or `None` at end of scan).
+pub type FunctionScanAccessMtd =
+    for<'mcx> fn(&mut FunctionScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<Option<SlotId>>;
+
+/// `ExecScanRecheckMtd`, specialized to a FunctionScan node.
+pub type FunctionScanRecheckMtd =
+    for<'mcx> fn(&mut FunctionScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<bool>;
+
+seam_core::seam!(
+    /// `ExecScan(&node->ss, FunctionNext, FunctionRecheck)` (execScan.c): run
+    /// the generic scan loop for a FunctionScan node. Returns the result slot
+    /// id, or `None` at end of scan. `Err` carries qual/projection
+    /// `ereport(ERROR)`s and OOM.
+    pub fn exec_scan_function<'mcx>(
+        node: &mut FunctionScanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
+        access: FunctionScanAccessMtd,
+        recheck: FunctionScanRecheckMtd,
+    ) -> PgResult<Option<SlotId>>
+);
+
+seam_core::seam!(
+    /// `ExecScanReScan(&node->ss)` (execScan.c) for a FunctionScan node.
+    pub fn exec_scan_rescan_function<'mcx>(
+        node: &mut FunctionScanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<()>
+);
+
+// --- Index-only-scan-specialized entry points --------------------------------
 // Same `execScan.c` driver, specialized to the index-only scan node (its own
 // in-crate `IndexOnlyNext`/`IndexOnlyRecheck` access/recheck functions). When
 // execScan.c lands it installs one generic implementation; each per-node entry

@@ -56,3 +56,51 @@ seam_core::seam!(
         types_nodes::execexpr::ExprDoneCond,
     )>
 );
+
+seam_core::seam!(
+    /// `ExecInitTableFunctionResult(expr, econtext, parent)` (execSRF.c): build
+    /// the [`SetExprState`](types_nodes::execexpr::SetExprState) for a
+    /// set-returning function in a range-table function (a `FunctionScan` /
+    /// `ROWS FROM` function). Like [`exec_init_function_result_set`] but for the
+    /// table-function (materialize-mode) flavour: `funcReturnsSet` is left
+    /// `false` and `init_sexpr` runs lazily on the first
+    /// `ExecMakeTableFunctionResult` call. `econtext` is the id of the node's
+    /// per-node `ExprContext`; `parent` is the lent plan-state. The compiled
+    /// state is allocated in the per-query context; fallible on OOM.
+    pub fn exec_init_table_function_result<'mcx>(
+        expr: &types_nodes::primnodes::Expr,
+        econtext: types_nodes::EcxtId,
+        parent: &mut types_nodes::execnodes::PlanStateData<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<
+        mcx::PgBox<'mcx, types_nodes::execexpr::SetExprState<'mcx>>,
+    >
+);
+
+seam_core::seam!(
+    /// `ExecMakeTableFunctionResult(setexpr, econtext, argContext, expectedDesc,
+    /// randomAccess)` (execSRF.c): evaluate a set-returning function appearing
+    /// in a range-table function and return the materialized result rows in a
+    /// [`Tuplestorestate`](types_nodes::funcapi::Tuplestorestate). This is the
+    /// value-per-call / materialize-mode SRF execution loop that reads back the
+    /// live [`ReturnSetInfo`](types_nodes::funcapi::ReturnSetInfo) the callee
+    /// mutates (`returnMode`/`isDone`/`setResult`/`setDesc`); `expectedDesc` is
+    /// the descriptor the caller expects, `arg_context` the (per-one-call
+    /// lifetime) context arguments are evaluated in, `random_access` requests a
+    /// rewindable tuplestore (the C `node->eflags & EXEC_FLAG_BACKWARD`).
+    /// Fallible on `ereport(ERROR)` from the function or argument evaluation.
+    ///
+    /// K2 BLOCKED: the owning unit `execSRF.c` is not yet ported (the frame-based
+    /// SRF invoke seam threading a live `&mut ReturnSetInfo` through by-OID
+    /// `PGFunction` dispatch — the #327 dual-fcinfo-home keystone). Until it
+    /// lands and installs this seam, a call panics loudly. See the memory note
+    /// `execSRF-blocked-on-resultinfo-srf-callconv-keystone.md` (#349 K2).
+    pub fn exec_make_table_function_result<'mcx>(
+        setexpr: &mut types_nodes::execexpr::SetExprState<'mcx>,
+        econtext: types_nodes::EcxtId,
+        arg_context: &mcx::MemoryContext,
+        expected_desc: &types_tuple::heaptuple::TupleDescData<'mcx>,
+        random_access: bool,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<mcx::PgBox<'mcx, types_nodes::funcapi::Tuplestorestate<'mcx>>>
+);

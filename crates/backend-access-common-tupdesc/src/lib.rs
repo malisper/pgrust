@@ -901,6 +901,10 @@ pub fn init_seams() {
     backend_access_common_tupdesc_seams::equal_row_types::set(equalRowTypes);
     backend_access_common_tupdesc_seams::create_tupledesc_copy::set(create_tupledesc_copy_seam);
     backend_access_common_tupdesc_seams::create_tuple_desc_copy::set(CreateTupleDescCopy);
+    backend_access_common_tupdesc_seams::tuple_desc_init_entry_collation::set(
+        TupleDescInitEntryCollation,
+    );
+    backend_access_common_tupdesc_seams::tuple_desc_copy_entry::set(TupleDescCopyEntry);
 }
 
 /// Adapter for `create_tupledesc_copy` (returns a `PgBox` in `mcx`, as the

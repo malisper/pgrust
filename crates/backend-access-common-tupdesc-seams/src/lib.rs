@@ -7,6 +7,8 @@
 //! then a call panics loudly.
 
 use mcx::{Mcx, PgBox};
+use types_core::primitive::AttrNumber;
+use types_core::Oid;
 use types_error::PgResult;
 use types_tuple::heaptuple::TupleDescData;
 
@@ -42,4 +44,29 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         tupdesc: &TupleDescData<'mcx>,
     ) -> PgResult<TupleDescData<'mcx>>
+);
+
+seam_core::seam!(
+    /// `TupleDescInitEntryCollation(desc, attributeNumber, collationid)`
+    /// (tupdesc.c): assign a nondefault collation to the `attributeNumber`-th
+    /// (1-based) already-initialized attribute of `desc`. Fallible on an
+    /// out-of-range attribute number.
+    pub fn tuple_desc_init_entry_collation(
+        desc: &mut TupleDescData<'_>,
+        attribute_number: AttrNumber,
+        collationid: Oid,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `TupleDescCopyEntry(dst, dstAttno, src, srcAttno)` (tupdesc.c): copy the
+    /// `srcAttno`-th (1-based) attribute of `src` into the `dstAttno`-th slot of
+    /// `dst` (dropping constraint/default flags). Fallible on an out-of-range
+    /// attribute number.
+    pub fn tuple_desc_copy_entry(
+        dst: &mut TupleDescData<'_>,
+        dst_attno: AttrNumber,
+        src: &TupleDescData<'_>,
+        src_attno: AttrNumber,
+    ) -> PgResult<()>
 );

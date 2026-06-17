@@ -895,6 +895,9 @@ pub fn init_seams() {
     // ExecTypeFromExprList is likewise fully owned + implemented in this crate's
     // exectype_tupoutput family, so its seam is installed here.
     seams::exec_type_from_expr_list::set(crate::exectype_tupoutput::ExecTypeFromExprList);
+    // BlessTupleDesc is fully owned + implemented in this crate's
+    // exectype_tupoutput family, so its seam is installed here.
+    seams::bless_tuple_desc::set(crate::exectype_tupoutput::BlessTupleDesc);
     // Slot-payload op seams over the pool's `SlotData` (bodies in
     // `slot_store_fetch` / `slot_deform`; the adapters resolve the `SlotId`).
     seams::exec_materialize_slot::set(seam_exec_materialize_slot);

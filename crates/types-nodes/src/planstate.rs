@@ -80,6 +80,8 @@ pub enum PlanStateNode<'mcx> {
     WindowAgg(PgBox<'mcx, crate::nodewindowagg::WindowAggState<'mcx>>),
     /// `T_TableFuncScanState`.
     TableFuncScan(PgBox<'mcx, crate::nodetablefuncscan::TableFuncScanState<'mcx>>),
+    /// `T_FunctionScanState`.
+    FunctionScan(PgBox<'mcx, crate::nodefunctionscan::FunctionScanState<'mcx>>),
     /// `T_ValuesScanState`.
     ValuesScan(PgBox<'mcx, crate::nodevaluesscan::ValuesScanState<'mcx>>),
     /// `T_CteScanState`.
@@ -150,6 +152,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             }
             PlanStateNode::WindowAgg(_) => crate::nodewindowagg::T_WindowAggState,
             PlanStateNode::TableFuncScan(_) => T_TableFuncScanState,
+            PlanStateNode::FunctionScan(_) => crate::nodefunctionscan::T_FunctionScanState,
             PlanStateNode::ValuesScan(_) => crate::nodevaluesscan::T_ValuesScanState,
             PlanStateNode::CteScan(_) => crate::nodectescan::T_CteScanState,
             PlanStateNode::NamedTuplestoreScan(_) => {
@@ -198,6 +201,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::IncrementalSort(s) => &s.ss.ps,
             PlanStateNode::WindowAgg(w) => &w.ss.ps,
             PlanStateNode::TableFuncScan(t) => &t.ss.ps,
+            PlanStateNode::FunctionScan(f) => &f.ss.ps,
             PlanStateNode::ValuesScan(v) => &v.ss.ps,
             PlanStateNode::CteScan(c) => &c.ss.ps,
             PlanStateNode::NamedTuplestoreScan(n) => &n.ss.ps,
@@ -243,6 +247,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::IncrementalSort(s) => &mut s.ss.ps,
             PlanStateNode::WindowAgg(w) => &mut w.ss.ps,
             PlanStateNode::TableFuncScan(t) => &mut t.ss.ps,
+            PlanStateNode::FunctionScan(f) => &mut f.ss.ps,
             PlanStateNode::ValuesScan(v) => &mut v.ss.ps,
             PlanStateNode::CteScan(c) => &mut c.ss.ps,
             PlanStateNode::NamedTuplestoreScan(n) => &mut n.ss.ps,
@@ -331,6 +336,8 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::BitmapIndexScan(b) => Some(&b.ss),
             // `SubqueryScanState` begins with a `ScanState`.
             PlanStateNode::SubqueryScan(s) => Some(&s.ss),
+            // `FunctionScanState` begins with a `ScanState`.
+            PlanStateNode::FunctionScan(f) => Some(&f.ss),
             // `ValuesScanState` begins with a `ScanState`.
             PlanStateNode::ValuesScan(v) => Some(&v.ss),
             // `NamedTuplestoreScanState` begins with a `ScanState`.
@@ -412,6 +419,32 @@ impl<'mcx> PlanStateNode<'mcx> {
             // nodeModifyTable's `T_ModifyTableState` variant carries a
             // `ModifyTableState`.
             PlanStateNode::ModifyTable(m) => Some(&**m),
+            _ => None,
+        }
+    }
+
+    /// `castNode(FunctionScanState, node)` — the concrete `FunctionScanState`
+    /// of a `T_FunctionScanState` node, or `None` for any other node. Unlike the
+    /// erased `AggState` carrier, the concrete `FunctionScanState` lives in
+    /// `types-nodes` (all its fields — `SetExprState`, `Tuplestorestate`, the
+    /// `ScanState` head — are already here), so it is carried directly by value
+    /// (the `TableFuncScanState`/`ValuesScanState` precedent) and the downcast
+    /// is a plain enum match, not a tag-checked trait-object recovery.
+    pub fn as_function_scan_state(
+        &self,
+    ) -> Option<&crate::nodefunctionscan::FunctionScanState<'mcx>> {
+        match self {
+            PlanStateNode::FunctionScan(f) => Some(&**f),
+            _ => None,
+        }
+    }
+
+    /// `&mut` form of [`Self::as_function_scan_state`].
+    pub fn as_function_scan_state_mut(
+        &mut self,
+    ) -> Option<&mut crate::nodefunctionscan::FunctionScanState<'mcx>> {
+        match self {
+            PlanStateNode::FunctionScan(f) => Some(&mut **f),
             _ => None,
         }
     }

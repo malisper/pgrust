@@ -57,6 +57,7 @@ use backend_executor_nodeSort as nodeSort;
 use backend_executor_nodeIncrementalSort as nodeIncrementalSort;
 use backend_executor_nodeSubqueryscan as nodeSubqueryscan;
 use backend_executor_nodeTableFuncscan as nodeTableFuncscan;
+use backend_executor_nodeFunctionscan as nodeFunctionscan;
 use backend_executor_nodeTidscan as nodeTidscan;
 use backend_executor_nodeTidrangescan as nodeTidrangescan;
 use backend_executor_nodeWorktablescan as nodeWorktablescan;
@@ -278,6 +279,10 @@ pub fn exec_re_scan<'mcx>(
             PlanStateNode::TableFuncScan(m) => {
                 nodeTableFuncscan::ExecReScanTableFuncScan(m, estate)?
             }
+            // case T_FunctionScanState: ExecReScanFunctionScan((FunctionScanState *) node);
+            PlanStateNode::FunctionScan(m) => {
+                nodeFunctionscan::ExecReScanFunctionScan(m, estate)?
+            }
             // case T_ValuesScanState: ExecReScanValuesScan((ValuesScanState *) node);
             PlanStateNode::ValuesScan(m) => nodeValuesscan::ExecReScanValuesScan(m, estate)?,
             // case T_CteScanState: ExecReScanCteScan((CteScanState *) node);
@@ -334,7 +339,7 @@ pub fn exec_re_scan<'mcx>(
                 nodeTidrangescan::ExecReScanTidRangeScan(m, estate)?
             }
 
-            // The remaining C arms (T_SampleScanState/T_FunctionScanState/
+            // The remaining C arms (T_SampleScanState/
             // T_AggState/T_LockRowsState) operate on node-state variants not yet
             // present in PlanStateNode, so their tags cannot occur. C default:
             //   elog(ERROR, "unrecognized node type: %d", (int) nodeTag(node));
@@ -572,9 +577,10 @@ pub fn exec_supports_backward_scan(node: Option<&Node<'_>>) -> PgResult<bool> {
         // case T_SeqScan / T_TidScan / T_TidRangeScan / T_FunctionScan /
         //      T_ValuesScan / T_CteScan / T_Material / T_Sort:
         //   /* these don't evaluate tlist */ return true;
-        // (T_TidScan and T_FunctionScan have no Node variant yet.)
+        // (T_TidScan has no Node variant yet.)
         Node::SeqScan(_)
         | Node::TidRangeScan(_)
+        | Node::FunctionScan(_)
         | Node::ValuesScan(_)
         | Node::CteScan(_)
         | Node::Material(_)

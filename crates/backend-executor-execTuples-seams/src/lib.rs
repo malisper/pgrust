@@ -9,6 +9,18 @@
 #![allow(non_snake_case)]
 
 seam_core::seam!(
+    /// `BlessTupleDesc(tupdesc)` (execTuples.c): register a transient record
+    /// type for an anonymous (RECORD, typmod < 0) descriptor so rowtype datums
+    /// can be made with it, and return it. A non-anonymous descriptor passes
+    /// through unchanged. Fallible on the `assign_record_type_typmod`
+    /// `ereport(ERROR)`.
+    pub fn bless_tuple_desc<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        tupdesc: types_tuple::heaptuple::TupleDesc<'mcx>,
+    ) -> types_error::PgResult<types_tuple::heaptuple::TupleDesc<'mcx>>
+);
+
+seam_core::seam!(
     /// `ExecInitResultTypeTL(planstate)` (execTuples.c): build the node's
     /// result tuple descriptor from its plan's target list
     /// (`ExecTypeFromTL`) and store it in `planstate.ps_ResultTupleDesc`.

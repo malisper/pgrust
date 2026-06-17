@@ -195,6 +195,9 @@ pub use nodememoize::{
 pub use nodetablefuncscan::{
     TableFuncRoutineKind, TableFuncScan, TableFuncScanState, T_TableFuncScanState,
 };
+pub use nodefunctionscan::{
+    FunctionScanPerFuncState, FunctionScanState, T_FunctionScanState,
+};
 pub use primnodes::{TableFunc, TableFuncType, TFT_JSON_TABLE, TFT_XMLTABLE, Expr, TargetEntry, Var};
 pub use nodehashjoin::{
     HashJoin, HashJoinState, HashJoinTableData, T_HashJoin, T_HashJoinState,
