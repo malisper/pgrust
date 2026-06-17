@@ -29,6 +29,7 @@
 
 extern crate alloc;
 
+pub mod fmgr_builtins;
 pub mod gist_insert;
 pub mod gist_page;
 pub mod gist_scan;
@@ -113,4 +114,9 @@ pub fn init_seams() {
     backend_access_gist_core_seams::gist_xlog_page_delete::set(gistxlog::gist_xlog_page_delete);
     backend_access_gist_core_seams::gist_xlog_page_reuse::set(gistxlog::gist_xlog_page_reuse);
     backend_access_gist_core_seams::gist_get_fake_lsn::set(gistxlog::gist_get_fake_lsn);
+
+    // Register the GiST fmgr builtin(s) ported in this crate into the fmgr-core
+    // builtin table (C: their `fmgr_builtins[]` rows), so by-OID dispatch /
+    // `fmgr_isbuiltin` resolves `gist_translate_cmptype_common`.
+    fmgr_builtins::register_backend_access_gist_core_builtins();
 }
