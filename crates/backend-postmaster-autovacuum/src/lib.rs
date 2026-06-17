@@ -102,4 +102,83 @@ pub fn init_seams() {
     // is now the infallible `-> Size` shape, matching the C `Size` return.
     backend_postmaster_autovacuum_seams::auto_vacuum_shmem_size::set(shmem::AutoVacuumShmemSize);
     backend_postmaster_autovacuum_seams::auto_vacuuming_active::set(shmem::AutoVacuumingActive);
+
+    // Install the GUC var accessors for the autovacuum knobs whose
+    // `conf->variable` backing (the per-backend `core::*` thread-locals) is
+    // owned here, exactly as `guc_tables.c` binds each entry's variable
+    // pointer (e.g. `&autovacuum_start_daemon`, `&autovacuum_vac_cost_limit`).
+    // All are plain runtime GUCs read through the GUC slot — none come from
+    // the ControlFile.
+    {
+        use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+        // `autovacuum` → `&autovacuum_start_daemon` (bool).
+        vars::autovacuum_start_daemon.install(GucVarAccessors {
+            get: core::autovacuum_start_daemon,
+            set: core::set_autovacuum_start_daemon,
+        });
+        vars::autovacuum_worker_slots.install(GucVarAccessors {
+            get: core::autovacuum_worker_slots,
+            set: core::set_autovacuum_worker_slots,
+        });
+        vars::autovacuum_max_workers.install(GucVarAccessors {
+            get: core::autovacuum_max_workers,
+            set: core::set_autovacuum_max_workers,
+        });
+        vars::autovacuum_work_mem.install(GucVarAccessors {
+            get: core::autovacuum_work_mem,
+            set: core::set_autovacuum_work_mem,
+        });
+        vars::autovacuum_naptime.install(GucVarAccessors {
+            get: core::autovacuum_naptime,
+            set: core::set_autovacuum_naptime,
+        });
+        vars::autovacuum_vac_thresh.install(GucVarAccessors {
+            get: core::autovacuum_vac_thresh,
+            set: core::set_autovacuum_vac_thresh,
+        });
+        vars::autovacuum_vac_max_thresh.install(GucVarAccessors {
+            get: core::autovacuum_vac_max_thresh,
+            set: core::set_autovacuum_vac_max_thresh,
+        });
+        vars::autovacuum_vac_scale.install(GucVarAccessors {
+            get: core::autovacuum_vac_scale,
+            set: core::set_autovacuum_vac_scale,
+        });
+        vars::autovacuum_vac_ins_thresh.install(GucVarAccessors {
+            get: core::autovacuum_vac_ins_thresh,
+            set: core::set_autovacuum_vac_ins_thresh,
+        });
+        vars::autovacuum_vac_ins_scale.install(GucVarAccessors {
+            get: core::autovacuum_vac_ins_scale,
+            set: core::set_autovacuum_vac_ins_scale,
+        });
+        vars::autovacuum_anl_thresh.install(GucVarAccessors {
+            get: core::autovacuum_anl_thresh,
+            set: core::set_autovacuum_anl_thresh,
+        });
+        vars::autovacuum_anl_scale.install(GucVarAccessors {
+            get: core::autovacuum_anl_scale,
+            set: core::set_autovacuum_anl_scale,
+        });
+        vars::autovacuum_freeze_max_age.install(GucVarAccessors {
+            get: core::autovacuum_freeze_max_age,
+            set: core::set_autovacuum_freeze_max_age,
+        });
+        vars::autovacuum_multixact_freeze_max_age.install(GucVarAccessors {
+            get: core::autovacuum_multixact_freeze_max_age,
+            set: core::set_autovacuum_multixact_freeze_max_age,
+        });
+        vars::autovacuum_vac_cost_delay.install(GucVarAccessors {
+            get: core::autovacuum_vac_cost_delay,
+            set: core::set_autovacuum_vac_cost_delay,
+        });
+        vars::autovacuum_vac_cost_limit.install(GucVarAccessors {
+            get: core::autovacuum_vac_cost_limit,
+            set: core::set_autovacuum_vac_cost_limit,
+        });
+        vars::Log_autovacuum_min_duration.install(GucVarAccessors {
+            get: core::Log_autovacuum_min_duration,
+            set: core::set_Log_autovacuum_min_duration,
+        });
+    }
 }
