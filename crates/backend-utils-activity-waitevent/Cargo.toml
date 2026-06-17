@@ -22,3 +22,4 @@ backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-sea
 backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-activity-waitevent-seams = { path = "../backend-utils-activity-waitevent-seams" }
+backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat-seams" }

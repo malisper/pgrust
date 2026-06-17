@@ -674,6 +674,44 @@ pub fn pgstat_reset_wait_event_storage() {
     });
 }
 
+// ---------------------------------------------------------------------------
+// Per-PGPROC wait-event storage registry (the `&MyProc->wait_event_info`
+// redirect that `InitProcess` / `InitAuxiliaryProcess` install).
+//
+// C points `my_wait_event_info` directly at the `uint32` field inside the
+// backend's own PGPROC in shared memory, so other backends scanning the proc
+// array observe the live wait event. PGPROC is modelled (types-storage) with a
+// plain `uint32 wait_event_info`, which can't alias an `Arc<AtomicU32>`; we
+// instead keep a process-global registry of one shared [`WaitEventStorage`]
+// per ProcNumber. `pgstat_set_wait_event_storage_for_proc(procno)` installs
+// that proc's slot as the current redirect (any backend can later read the
+// same slot by procno), and reset points back at the process-local default.
+// ---------------------------------------------------------------------------
+
+static PER_PROC_WAIT_EVENT_STORAGE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<i32, WaitEventStorage>>,
+> = std::sync::OnceLock::new();
+
+fn per_proc_storage(procno: types_core::ProcNumber) -> WaitEventStorage {
+    let map = PER_PROC_WAIT_EVENT_STORAGE.get_or_init(|| std::sync::Mutex::new(Default::default()));
+    let mut map = map.lock().expect("wait-event storage registry poisoned");
+    map.entry(procno)
+        .or_insert_with(WaitEventStorage::new)
+        .clone()
+}
+
+/// `pgstat_set_wait_event_storage(&GetPGProcByNumber(procno)->wait_event_info)`
+/// — the seam-shaped install used by `InitProcess` / `InitAuxiliaryProcess`.
+/// Installs the named proc's shared slot as the current redirect, valid until
+/// `pgstat_reset_wait_event_storage` (the C contract: no scope guard, the
+/// redirect persists for the backend's working life).
+pub fn pgstat_set_wait_event_storage_for_proc(procno: types_core::ProcNumber) {
+    let storage = per_proc_storage(procno);
+    CURRENT_WAIT_EVENT_STORAGE.with(|current| {
+        *current.borrow_mut() = Some(storage);
+    });
+}
+
 /// `pgstat_report_wait_start()` — record that the backend is now waiting on
 /// `wait_event_info`.
 pub fn pgstat_report_wait_start(wait_event_info: uint32) {
@@ -1121,6 +1159,14 @@ pub fn init_seams() {
     );
     backend_utils_activity_waitevent_seams::wait_event_custom_shmem_init::set(
         WaitEventCustomShmemInit,
+    );
+    // wait_event.c owns pgstat_set_wait_event_storage / _reset; the seam
+    // declarations live in the consolidated pgstat-seams crate.
+    backend_utils_activity_pgstat_seams::pgstat_set_wait_event_storage_for_proc::set(
+        pgstat_set_wait_event_storage_for_proc,
+    );
+    backend_utils_activity_pgstat_seams::pgstat_reset_wait_event_storage::set(
+        pgstat_reset_wait_event_storage,
     );
 }
 

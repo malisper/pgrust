@@ -727,6 +727,14 @@ fn postgres_main_inner(dbname: Option<&str>, username: Option<&str>) -> PgResult
     // procsignal); the install wiring is process-environment setup not exercised
     // by the in-process simple-Query path. Skipped-with-note here.
     //   if (am_walsender) WalSndSignals(); else { pqsignal(...); InitializeTimeouts(); ... }
+    //
+    // InitializeTimeouts() (postgres.c:4232) IS run here: it establishes the
+    // timeout module's per-backend slot table (and the SIGALRM handler), which
+    // InitPostgres relies on when it RegisterTimeout()s the deadlock /
+    // statement / lock timeouts. The rest of the pqsignal wiring above is
+    // process-environment setup not exercised by the in-process simple-Query
+    // path and stays skipped-with-note.
+    backend_utils_misc_timeout_seams::initialize_timeouts::call();
 
     // --- Early initialization (postgres.c:4255) ---
     // BaseInit(): open the per-backend low-level subsystems (smgr, buffers, ...).
