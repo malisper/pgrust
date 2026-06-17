@@ -169,14 +169,16 @@ pub(crate) fn auxiliary_proc_procno(proctype: i32) -> ProcNumber {
 
 // ---- per-PGPROC field access on a slot by proc number (owned by proc_shmem) ----
 
-/// `GetPGProcByNumber(procno)->pid`.
+/// `GetPGProcByNumber(procno)->pid` — the genuinely-shared `pid` word (the
+/// cross-process slot-occupancy marker).
 pub(crate) fn proc_pid(procno: ProcNumber) -> i32 {
-    crate::proc_shmem::with_proc_by_number(procno, |p| p.pid)
+    crate::proc_shmem::shared_pid(procno)
 }
 
-/// `GetPGProcByNumber(procno)->pid = pid`.
+/// `GetPGProcByNumber(procno)->pid = pid` — write of the genuinely-shared `pid`
+/// word (slot claim on assignment / zero on release).
 pub(crate) fn set_proc_pid(procno: ProcNumber, pid: i32) {
-    crate::proc_shmem::with_proc_by_number(procno, |p| p.pid = pid);
+    crate::proc_shmem::set_shared_pid(procno, pid);
 }
 
 /// `GetPGProcByNumber(procno)->vxid.procNumber = value`.

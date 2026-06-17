@@ -177,6 +177,12 @@ pub fn InitProcess(_mcx: Mcx<'_>) -> PgResult<()> {
     let am_regular_backend = seam::am_regular_backend_process();
     seam::with_my_proc(|proc| init_my_proc_common(proc, my_procno, am_regular_backend));
 
+    // Publish MyProc->pid into the genuinely-shared pid word (the cross-process
+    // slot-occupancy marker; init_my_proc_common set the per-process field). C
+    // writes the single shared `pid` field; here the shared write is split from
+    // the closure to avoid re-borrowing ProcGlobal.
+    seam::set_proc_pid(my_procno, seam::my_proc_pid());
+
     // Acquire ownership of the PGPROC's latch and repoint the process latch
     // (which so far points at the process-local one) to the shared one.
     seam::own_latch(my_procno);

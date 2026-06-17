@@ -496,6 +496,8 @@ fn standard_planner<'mcx>(
 
     let result = PlannedStmt {
         commandType: command_type,
+        // result->queryId = parse->queryId; (planner.c:578)
+        queryId: parse.queryId,
         utilityStmt: utility_stmt,
         resultRelations: result_relations,
         relationOids: relation_oids,
@@ -511,13 +513,10 @@ fn standard_planner<'mcx>(
         rtable: if rtable.is_empty() { None } else { Some(rtable) },
         unprunableRelids: unprunable_relids,
         subplans: if subplans.is_empty() { None } else { Some(subplans) },
-        // C: `result->stmt_location = parse->stmt_location; result->stmt_len =
-        // parse->stmt_len`. The owned `Query` does not yet carry the source-text
-        // span (an inherited trim, set by the rewriter from the raw parse tree),
-        // so these take the C "unknown" defaults (-1 / 0) until the Query
-        // carrier is widened. ProcessUtility threads them to DoCopy/PrepareQuery.
-        stmt_location: -1,
-        stmt_len: 0,
+        // result->stmt_location = parse->stmt_location;
+        // result->stmt_len = parse->stmt_len; (planner.c:601-602)
+        stmt_location: parse.stmt_location,
+        stmt_len: parse.stmt_len,
         // result->transientPlan = glob->transientPlan;
         // result->dependsOnRole = glob->dependsOnRole; (planner.c:564-565)
         transientPlan: glob_transient,

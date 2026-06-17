@@ -492,11 +492,17 @@ fn build_path_tlist<'mcx>(
         // the tlist, which need to be replaced with Params. There's no need to
         // remake the TargetEntry nodes, so apply this to each list item
         // separately.
+        //
+        // Materialize an owned `Expr` for the TargetEntry. The arena node may be
+        // an `Aggref` (e.g. the count(*) tlist), whose `Clone` is a deliberate
+        // panic-stub forcing the args-deep-copying `clone_in` path; route every
+        // tlist expr through `Expr::clone_in` so the deep arena copy is used
+        // (faithful to C's `copyObject` of the pathtarget expr).
         let expr: Expr = if has_param_info {
             let replaced = replace_nestloop_params(mcx, root, node_id)?;
-            root.node(replaced).clone()
+            root.node(replaced).clone_in(mcx)?
         } else {
-            root.node(node_id).clone()
+            root.node(node_id).clone_in(mcx)?
         };
 
         let mut tle = make_target_entry(mcx, expr, resno as i16, None, false)?;
