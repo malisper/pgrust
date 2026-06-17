@@ -50,6 +50,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `dsa_create_ext(int tranche_id, size_t init_segment_size,
+    /// size_t max_segment_size)` — create a new DSA area in dynamic shared
+    /// memory with the caller-chosen initial/maximum segment sizes (the form
+    /// `dsa_create` is a macro over). `Err` carries the `ereport(ERROR)` for
+    /// the underlying DSM allocation failure.
+    pub fn dsa_create_ext(
+        tranche_id: i32,
+        init_segment_size: Size,
+        max_segment_size: Size,
+    ) -> PgResult<*mut DsaArea>
+);
+
+seam_core::seam!(
     /// `dsa_pin(dsa_area *area)` — pin the area so it stays allocated even when
     /// every backend has detached. `Err` carries the C
     /// `elog(ERROR, "dsa_area already pinned")`.
@@ -100,4 +113,18 @@ seam_core::seam!(
     /// `0` for `InvalidDsaPointer` (C `NULL`). `Err` carries the C
     /// `ereport(ERROR)` for a reference to a freed segment.
     pub fn dsa_get_address_ptr(area: *mut DsaArea, dp: DsaPointer) -> PgResult<u64>
+);
+
+seam_core::seam!(
+    /// `dsa_detach(dsa_area *area)` — detach this backend from the area,
+    /// releasing its backend-local mappings (the shared data is untouched while
+    /// any other backend remains attached, or while the area is pinned).
+    pub fn dsa_detach_ptr(area: *mut DsaArea) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `dsa_get_total_size(dsa_area *area)` — the total size in bytes of all the
+    /// area's segments (the shared radix tree's `RT_GET_MEMORY_USAGE` for the
+    /// DSA-shared flavor).
+    pub fn dsa_get_total_size_ptr(area: *mut DsaArea) -> PgResult<Size>
 );

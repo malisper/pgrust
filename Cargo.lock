@@ -10629,6 +10629,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-lib-radixtree"
+version = "0.0.0"
+dependencies = [
+ "backend-lib-radixtree-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-storage-lmgr-proc-seams",
+ "backend-utils-mmgr-dsa-seams",
+ "seam-core",
+ "types-core",
+ "types-dsa",
+ "types-error",
+ "types-nodes",
+ "types-storage",
+ "types-vacuum",
+]
+
+[[package]]
 name = "backend-lib-radixtree-seams"
 version = "0.0.0"
 dependencies = [
@@ -22279,6 +22296,7 @@ dependencies = [
  "backend-jit-jit",
  "backend-lib-bloomfilter",
  "backend-lib-dshash",
+ "backend-lib-radixtree",
  "backend-libpq-auth",
  "backend-libpq-auth-scram",
  "backend-libpq-be-fsstubs",

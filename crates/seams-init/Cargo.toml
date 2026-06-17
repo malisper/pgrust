@@ -245,6 +245,7 @@ backend-executor-nodeValuesscan = { path = "../backend-executor-nodeValuesscan" 
 backend-geqo-all = { path = "../backend-geqo-all" }
 backend-lib-bloomfilter = { path = "../backend-lib-bloomfilter" }
 backend-lib-dshash = { path = "../backend-lib-dshash" }
+backend-lib-radixtree = { path = "../backend-lib-radixtree" }
 backend-main-main = { path = "../backend-main-main" }
 backend-libpq-auth = { path = "../backend-libpq-auth" }
 backend-libpq-be-fsstubs = { path = "../backend-libpq-be-fsstubs" }

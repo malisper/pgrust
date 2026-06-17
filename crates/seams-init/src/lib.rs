@@ -243,6 +243,7 @@ pub fn init_all() {
     backend_geqo_all::init_seams();
     backend_lib_bloomfilter::init_seams();
     backend_lib_dshash::init_seams();
+    backend_lib_radixtree::init_seams();
     backend_main_main::init_seams();
     backend_libpq_auth::init_seams();
     backend_libpq_be_fsstubs::init_seams();

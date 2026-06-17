@@ -160,6 +160,19 @@ pub fn install_dsa_seams() {
         Ok(runtime_handle_to_ptr(area))
     });
 
+    // `dsa_create_ext(tranche_id, init_segment_size, max_segment_size)`.
+    seam::dsa_create_ext::set(
+        |tranche_id: i32, init_segment_size: Size, max_segment_size: Size| {
+            let area = runtime::dsa_create_ext(
+                tranche_id,
+                init_segment_size,
+                max_segment_size,
+                dsa_top_mcx(),
+            )?;
+            Ok(runtime_handle_to_ptr(area))
+        },
+    );
+
     // `dsa_pin(area)`.
     seam::dsa_pin::set(|area: *mut DsaArea| runtime::dsa_pin(ptr_to_runtime_handle(area)));
 
@@ -191,6 +204,16 @@ pub fn install_dsa_seams() {
     // resolves to.
     seam::dsa_get_address_ptr::set(|area: *mut DsaArea, dp: DsaPointer| {
         runtime::dsa_get_address(ptr_to_runtime_handle(area), dp, dsa_top_mcx())
+    });
+
+    // `dsa_detach(area)` (pointer-keyed).
+    seam::dsa_detach_ptr::set(|area: *mut DsaArea| {
+        runtime::dsa_detach(ptr_to_runtime_handle(area))
+    });
+
+    // `dsa_get_total_size(area)` (pointer-keyed).
+    seam::dsa_get_total_size_ptr::set(|area: *mut DsaArea| {
+        runtime::dsa_get_total_size(ptr_to_runtime_handle(area))
     });
 }
 
