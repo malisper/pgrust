@@ -165,6 +165,23 @@ pub fn init_seams() {
     backend_port_path_seams::post_port_number::set(post_port_number_impl);
 
     install_guc_tables_owned_vars();
+
+    // `log_transaction_sample_rate` (`double log_xact_sample_rate`,
+    // guc_tables.c) — read by xact.c. The var is owned and installed here
+    // (install_guc_tables_owned_vars, above), so the accessor reads its slot;
+    // boot_val is 0.0 until set.
+    backend_utils_misc_guc_file_seams::log_xact_sample_rate::set(
+        log_xact_sample_rate_impl,
+    );
+}
+
+fn log_xact_sample_rate_impl() -> f64 {
+    if vars::log_xact_sample_rate.installed() {
+        vars::log_xact_sample_rate.read()
+    } else {
+        // boot_val for `log_transaction_sample_rate` (guc_tables.c) is 0.0.
+        0.0
+    }
 }
 
 /// Install the `GucVarAccessors` for every GUC whose C `conf->variable`

@@ -20021,6 +20021,7 @@ name = "backend-utils-misc-guc-tables"
 version = "0.0.0"
 dependencies = [
  "backend-port-path-seams",
+ "backend-utils-misc-guc-file-seams",
  "backend-utils-misc-guc-tables-seams",
  "types-error",
  "types-guc",
