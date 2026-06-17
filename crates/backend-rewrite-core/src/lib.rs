@@ -111,4 +111,29 @@ pub fn init_seams() {
 
     // rewriteSupport.c
     backend_rewrite_rewritesupport_seams::get_rewrite_oid::set(support::get_rewrite_oid);
+
+    // `ChangeVarNodes((Node *) exprs, 1, varno, 0)` (rewriteManip.c) — consumed by
+    // `optimizer/util/plancat.c`'s index-expression / predicate / constraint-
+    // expression / partition-expression re-stamping. The arena-resident node list
+    // is a `&[NodeId]`; each handle resolves to a lifetime-free `Expr`, which we
+    // wrap as a `Node::Expr` for the standalone in-place walker (mirroring the C
+    // in-place `ChangeVarNodes_walker` over `(Node *) exprs`) and store back. The
+    // handles are unchanged (in-place mutation), so the same `Vec<NodeId>` is
+    // returned.
+    backend_optimizer_util_plancat_ext_seams::change_var_nodes::set(
+        |root: &mut types_pathnodes::PlannerInfo, nodes, rt_index, new_index| {
+            for &id in nodes {
+                let mut node = types_nodes::nodes::Node::Expr(root.node(id).clone());
+                change::ChangeVarNodes(&mut node, rt_index, new_index, 0);
+                let walked = match node {
+                    types_nodes::nodes::Node::Expr(e) => e,
+                    // ChangeVarNodes never changes the top-level node kind for an
+                    // Expr input.
+                    _ => unreachable!("ChangeVarNodes returned a non-Expr for an Expr input"),
+                };
+                *root.node_mut(id) = walked;
+            }
+            nodes.to_vec()
+        },
+    );
 }

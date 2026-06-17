@@ -27,3 +27,5 @@ backend-access-table-table = { path = "../backend-access-table-table" }
 backend-catalog-indexing-seams = { path = "../backend-catalog-indexing-seams" }
 backend-rewrite-rewritemanip-seams = { path = "../backend-rewrite-rewritemanip-seams" }
 backend-rewrite-rewritesupport-seams = { path = "../backend-rewrite-rewritesupport-seams" }
+backend-optimizer-util-plancat-ext-seams = { path = "../backend-optimizer-util-plancat-ext-seams" }
+types-pathnodes = { path = "../types-pathnodes" }
