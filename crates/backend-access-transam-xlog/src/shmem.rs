@@ -247,6 +247,13 @@ pub fn set_xlog_buffers(n: i32) {
     XLOG_BUFFERS.with(|c| c.set(n));
 }
 
+/// Set the `wal_segment_size` GUC global (`conf->variable`). Normally seeded
+/// from the control file by `ReadControlFile`; exposed for the GUC accessor's
+/// `set` half (PGC_INTERNAL — assigned, not user-settable).
+pub fn set_wal_segment_size(n: i32) {
+    WAL_SEGMENT_SIZE.with(|c| c.set(n));
+}
+
 /// Read the resolved `XLOGbuffers` GUC value.
 #[inline]
 pub fn xlog_buffers() -> i32 {

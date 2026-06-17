@@ -98,6 +98,7 @@ pub use startup::{
 };
 
 pub mod guc_state;
+pub mod guc_vars;
 
 pub mod driver;
 pub use driver::{
@@ -730,6 +731,16 @@ pub fn init_seams() {
     // min_wal_size / checkpoint_completion_target). The GUC machinery fires the
     // assign hooks during InitializeGUCOptions to seed CheckPointSegments.
     guc_state::install();
+
+    // The remaining xlog.c-owned WAL-settings GUC variable accessors
+    // (full_page_writes / wal_log_hints / wal_init_zero / wal_recycle /
+    // log_checkpoints / track_wal_io_timing / archive_timeout /
+    // wal_decode_buffer_size / wal_keep_size / max_slot_wal_keep_size /
+    // commit_delay / commit_siblings / wal_retrieve_retry_interval /
+    // wal_buffers / wal_segment_size / archive_command /
+    // wal_consistency_checking / archive_mode / wal_compression / wal_level /
+    // wal_sync_method). Read by C straight from each GUC slot.
+    guc_vars::install();
 
     // LocalProcessControlFile(reset) (xlog.c:4908) — the single-user boot driver
     // (backend-tcop-postgres) reads pg_control through this seam before shmem
