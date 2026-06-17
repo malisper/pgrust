@@ -38,6 +38,8 @@ backend-catalog-pg-constraint = { path = "../backend-catalog-pg-constraint" }
 backend-access-index-amapi = { path = "../backend-access-index-amapi" }
 backend-access-table-table = { path = "../backend-access-table-table" }
 backend-access-common-reloptions = { path = "../backend-access-common-reloptions" }
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-access-common-scankey = { path = "../backend-access-common-scankey" }
 backend-parser-coerce = { path = "../backend-parser-coerce" }
 backend-parser-parse-oper = { path = "../backend-parser-parse-oper" }
 backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
@@ -53,6 +55,7 @@ backend-commands-indexcmds-seams = { path = "../backend-commands-indexcmds-seams
 
 # Seams consumed from other units.
 backend-catalog-index-seams = { path = "../backend-catalog-index-seams" }
+backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }
 backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
 backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }

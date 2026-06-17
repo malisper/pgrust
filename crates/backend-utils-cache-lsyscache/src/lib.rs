@@ -33,7 +33,7 @@
 //!    `get_op_hash_functions`, `get_opfamily_member`).
 //!  * [`opclass`] — `pg_opclass` / `pg_opfamily` / `pg_amproc`
 //!    (`get_opclass_input_type`, `get_opclass_family`, `get_opfamily_method`,
-//!    `get_opfamily_proc`, `get_opfamily_name`, `get_default_opclass`).
+//!    `get_opfamily_proc`, `get_opfamily_name`).
 //!  * [`attribute`] — `pg_attribute` (`get_attname`, `get_attnum`).
 //!  * [`collation_constraint_language_cast`] — `pg_collation` / `pg_constraint`
 //!    / `pg_language` / `pg_cast` helpers (no seam decls yet).
@@ -105,7 +105,8 @@ pub fn init_seams() {
     seams::get_opfamily_method::set(opclass::get_opfamily_method);
     seams::get_opfamily_proc::set(opclass::get_opfamily_proc);
     seams::get_opfamily_name::set(opclass::get_opfamily_name);
-    seams::get_default_opclass::set(opclass::get_default_opclass);
+    // get_default_opclass (GetDefaultOpClass) is owned by indexcmds.c; its seam
+    // is installed by backend-commands-indexcmds, not here.
     seams::get_opclass_opfamily_and_input_type::set(opclass::get_opclass_opfamily_and_input_type);
     seams::get_opclass_method::set(opclass::get_opclass_method);
 

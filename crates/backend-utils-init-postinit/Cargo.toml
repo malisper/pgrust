@@ -35,8 +35,10 @@ backend-storage-ipc-procsignal = { path = "../backend-storage-ipc-procsignal" }
 # per-owner seam crates (panic until the owner lands)
 backend-access-common-session-seams = { path = "../backend-access-common-session-seams" }
 backend-catalog-pg-database-seams = { path = "../backend-catalog-pg-database-seams" }
-backend-catalog-pg-authid-seams = { path = "../backend-catalog-pg-authid-seams" }
 backend-catalog-pg-db-role-setting-seams = { path = "../backend-catalog-pg-db-role-setting-seams" }
+# ThereIsAtLeastOneRole (postinit.c) catalog heap scan over pg_authid.
+backend-access-table-table = { path = "../backend-access-table-table" }
+backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }
 backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
 backend-commands-dbcommands-seams = { path = "../backend-commands-dbcommands-seams" }
 backend-common-relpath-seams = { path = "../backend-common-relpath-seams" }

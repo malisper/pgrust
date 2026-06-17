@@ -61,3 +61,14 @@ seam_core::seam!(
         new_owner_id: Oid,
     ) -> PgResult<types_catalog::catalog_dependency::ObjectAddress>
 );
+
+seam_core::seam!(
+    /// `SearchSysCache1(AUTHOID, ObjectIdGetDatum(roleid))` +
+    /// `((Form_pg_authid) GETSTRUCT(utup))->rolcreatedb` (dbcommands.c
+    /// `have_createdb_privilege`): read the role's `rolcreatedb` flag from the
+    /// `pg_authid` syscache. `None` when the role is not found (C's
+    /// `!HeapTupleIsValid`). The locale/tuple decode is catalog-read-owned, so
+    /// this stays a seam until the syscache/pg_authid read lands; installed by
+    /// that owner, not by dbcommands itself.
+    pub fn user_rolcreatedb<'mcx>(mcx: Mcx<'mcx>, roleid: Oid) -> PgResult<Option<bool>>
+);

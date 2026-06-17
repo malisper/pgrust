@@ -171,7 +171,7 @@ pub fn have_createdb_privilege(mcx: Mcx<'_>) -> PgResult<bool> {
     }
 
     let roleid = backend_utils_init_miscinit_seams::get_user_id::call();
-    Ok(backend_catalog_pg_authid_seams::user_rolcreatedb::call(mcx, roleid)?.unwrap_or(false))
+    Ok(inward::user_rolcreatedb::call(mcx, roleid)?.unwrap_or(false))
 }
 
 // ===========================================================================

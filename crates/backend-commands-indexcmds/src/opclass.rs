@@ -1,11 +1,10 @@
 //! `indexcmds.c` — operator-class resolution:
-//! [`ResolveOpClass`] and [`GetOperatorFromCompareType`].
+//! [`GetDefaultOpClass`], [`ResolveOpClass`] and [`GetOperatorFromCompareType`].
 //!
-//! `GetDefaultOpClass` is a home divergence already merged into the lsyscache
-//! owner; [`ResolveOpClass`] reaches it through
-//! `backend_utils_cache_lsyscache_seams::get_default_opclass`. The
-//! exact / binary-compatible / preferred-type tiebreak therefore lives there,
-//! not here.
+//! `GetDefaultOpClass` lives here (its C home, `commands/indexcmds.c`).
+//! [`ResolveOpClass`] reaches it through the canonical
+//! `backend_utils_cache_lsyscache_seams::get_default_opclass` public surface,
+//! which `init_seams()` installs to point at the body below.
 
 use alloc::format;
 use alloc::string::String;
@@ -13,28 +12,131 @@ use alloc::string::String;
 use mcx::{Mcx, MemoryContext};
 
 use types_amapi::{CompareType, COMPARE_CONTAINED_BY, COMPARE_EQ, COMPARE_OVERLAP};
+use types_core::fmgr::F_OIDEQ;
 use types_core::primitive::Oid;
 use types_core::{InvalidOid, OidIsValid};
-use types_error::PgResult;
+use types_error::{PgError, PgResult};
 use types_nodes::nodes::NodePtr;
-use types_scan::scankey::{InvalidStrategy, StrategyNumber};
+use types_scan::scankey::{BTEqualStrategyNumber, InvalidStrategy, ScanKeyData, StrategyNumber};
+use types_storage::lock::AccessShareLock;
+use types_tuple::backend_access_common_heaptuple::Datum;
 
 use mcx::PgVec;
 
 use backend_utils_error::ereport;
 use types_error::ERROR;
 
+use backend_access_common_heaptuple::heap_deform_tuple;
+use backend_access_common_scankey::ScanKeyInit;
 use backend_access_index_amapi::IndexAmTranslateCompareType;
+use backend_access_index_genam_seams as genam_seams;
+use backend_access_table_table::{table_close, table_open};
 use backend_catalog_namespace::{
     DeconstructQualifiedName, LookupExplicitNamespace, NameListToString, OpclassnameGetOpcid,
 };
-use backend_parser_coerce::IsBinaryCoercible;
+use backend_parser_coerce::{IsBinaryCoercible, IsPreferredType, TypeCategory};
+use types_catalog::opclasscmds_catalog::{
+    Anum_pg_opclass_oid, Anum_pg_opclass_opcdefault, Anum_pg_opclass_opcintype,
+    Anum_pg_opclass_opcmethod, OpclassAmNameNspIndexId, OperatorClassRelationId,
+};
 
 use backend_utils_adt_format_type_seams as formattype_seam;
 use backend_utils_cache_lsyscache_seams as lsyscache;
 use backend_utils_cache_syscache_seams as syscache;
 
 use crate::name_list;
+
+// ---------------------------------------------------------------------------
+// GetDefaultOpClass  (indexcmds.c)
+// ---------------------------------------------------------------------------
+
+/// `GetDefaultOpClass(type_id, am_id)` (commands/indexcmds.c) — the default
+/// operator class OID for `type_id` in access method `am_id`, or `InvalidOid`
+/// when there is no unambiguous default.
+///
+/// We scan through all the opclasses available for the access method, looking
+/// for one that is marked default and matches the target type (either exactly
+/// or binary-compatibly, but prefer an exact match). We could find more than
+/// one binary-compatible match; if just one is for a preferred type, use that
+/// one, otherwise we fail (the preferred-type special case is a kluge for
+/// varchar). If we find more than one exact match, then someone put bogus
+/// entries in pg_opclass.
+pub fn GetDefaultOpClass(mut type_id: Oid, am_id: Oid) -> PgResult<Oid> {
+    let mut result: Oid = InvalidOid;
+    let mut nexact: i32 = 0;
+    let mut ncompatible: i32 = 0;
+    let mut ncompatiblepreferred: i32 = 0;
+
+    // If it's a domain, look at the base type instead.
+    type_id = lsyscache::get_base_type::call(type_id)?;
+    let tcategory = TypeCategory(type_id)?;
+
+    // Scan temporaries land in a scratch context dropped at the end.
+    let scratch = MemoryContext::new("GetDefaultOpClass scan");
+    let smcx = scratch.mcx();
+
+    let rel = table_open(smcx, OperatorClassRelationId, AccessShareLock)?;
+
+    // ScanKeyInit(&skey[0], Anum_pg_opclass_opcmethod, BTEqualStrategyNumber,
+    //             F_OIDEQ, ObjectIdGetDatum(am_id));
+    let mut skey = [ScanKeyData::empty()];
+    ScanKeyInit(
+        &mut skey[0],
+        Anum_pg_opclass_opcmethod,
+        BTEqualStrategyNumber,
+        F_OIDEQ,
+        Datum::from_oid(am_id),
+    )?;
+
+    let mut scan =
+        genam_seams::systable_beginscan::call(&rel, OpclassAmNameNspIndexId, true, None, &skey)?;
+
+    while let Some(tup) = genam_seams::systable_getnext::call(smcx, scan.desc_mut())? {
+        // Form_pg_opclass opclass = (Form_pg_opclass) GETSTRUCT(tup);
+        let row = heap_deform_tuple(smcx, &tup.tuple, &rel.rd_att, &tup.data)?;
+        let opcdefault = row[(Anum_pg_opclass_opcdefault - 1) as usize].0.as_bool();
+        // ignore altogether if not a default opclass
+        if !opcdefault {
+            continue;
+        }
+        let opcintype = row[(Anum_pg_opclass_opcintype - 1) as usize].0.as_oid();
+        let opc_oid = row[(Anum_pg_opclass_oid - 1) as usize].0.as_oid();
+
+        if opcintype == type_id {
+            nexact += 1;
+            result = opc_oid;
+        } else if nexact == 0 && IsBinaryCoercible(type_id, opcintype)? {
+            if IsPreferredType(tcategory, opcintype)? {
+                ncompatiblepreferred += 1;
+                result = opc_oid;
+            } else if ncompatiblepreferred == 0 {
+                ncompatible += 1;
+                result = opc_oid;
+            }
+        }
+    }
+
+    scan.end()?;
+    table_close(rel, AccessShareLock)?;
+    drop(scratch);
+
+    // raise error if pg_opclass contains inconsistent data
+    if nexact > 1 {
+        let type_name = formattype_seam::format_type_be_owned::call(type_id)?;
+        return Err(PgError::error(format!(
+            "there are multiple default operator classes for data type {type_name}"
+        )));
+    }
+
+    if nexact == 1
+        || ncompatiblepreferred == 1
+        || (ncompatiblepreferred == 0 && ncompatible == 1)
+    {
+        return Ok(result);
+    }
+
+    Ok(InvalidOid)
+}
 
 // ---------------------------------------------------------------------------
 // ResolveOpClass  (indexcmds.c:2259-2336)

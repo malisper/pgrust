@@ -2,8 +2,7 @@
 //! `pg_opfamily` / `pg_amproc` (operator-class and operator-family metadata).
 //!
 //! C entry points covered here: `get_opclass_input_type`, `get_opclass_family`,
-//! `get_opfamily_method`, `get_opfamily_proc`, `get_opfamily_name`, plus the
-//! `GetDefaultOpClass` default-opclass convenience surface.
+//! `get_opfamily_method`, `get_opfamily_proc`, `get_opfamily_name`.
 //!
 //! The `SearchSysCache*` probes route through the `backend-utils-cache-syscache`
 //! owner's seam (a loud panic until syscache installs them). The scalar-only
@@ -15,13 +14,10 @@
 //! drops at end of call. `get_opfamily_name` copies the name into the caller's
 //! `Mcx` (C: `pstrdup`).
 //!
-//! `GetDefaultOpClass` is not a `lsyscache.c` function — it lives in
-//! `catalog/pg_opclass.c` and drives a `pg_opclass` index scan over still-
-//! unported `getBaseType` / `TypeCategory` / `IsBinaryCoercible` /
-//! `IsPreferredType` machinery — so this convenience surface delegates the
-//! whole computation to the `backend-catalog-pg-opclass` owner's seam.
+//! `GetDefaultOpClass` is NOT a `lsyscache.c` function — it lives in
+//! `commands/indexcmds.c` and is owned by `backend-commands-indexcmds`, which
+//! installs the `get_default_opclass` seam declared on this crate's seam unit.
 
-use backend_catalog_pg_opclass_seams as pg_opclass_seams;
 use backend_utils_cache_syscache_seams as syscache_seams;
 use mcx::{Mcx, MemoryContext, PgString};
 use types_core::{InvalidOid, Oid};
@@ -220,21 +216,6 @@ pub fn get_opfamily_name<'mcx>(
             Ok(None)
         }
     }
-}
-
-/// `GetDefaultOpClass(type_id, am_id)` (catalog/pg_opclass.c) — exposed through
-/// the `lsyscache` convenience surface. The default operator class for the type
-/// in the given access method, or `InvalidOid` when there is no unambiguous
-/// default.
-///
-/// `GetDefaultOpClass` is not a `lsyscache.c` function: it opens `pg_opclass`,
-/// `systable_beginscan`s `OpclassAmNameNspIndexId` for the access method and
-/// resolves the unique exact / compatible / preferred-compatible default via
-/// `getBaseType`, `TypeCategory`, `IsBinaryCoercible` and `IsPreferredType` —
-/// all still-unported neighbors. The whole computation therefore routes through
-/// the `backend-catalog-pg-opclass` owner's seam (a loud panic until it lands).
-pub fn get_default_opclass(type_id: Oid, am_id: Oid) -> PgResult<Oid> {
-    pg_opclass_seams::get_default_opclass::call(type_id, am_id)
 }
 
 /// `get_opclass_opfamily_and_input_type(opclass, &opfamily, &opcintype)`

@@ -128,7 +128,6 @@ backend-catalog-pg-parameter-acl = { path = "../backend-catalog-pg-parameter-acl
 backend-catalog-pg-database = { path = "../backend-catalog-pg-database" }
 backend-catalog-pg-operator = { path = "../backend-catalog-pg-operator" }
 backend-catalog-pg-db-role-setting = { path = "../backend-catalog-pg-db-role-setting" }
-backend-catalog-pg-authid = { path = "../backend-catalog-pg-authid" }
 backend-catalog-pg-constraint = { path = "../backend-catalog-pg-constraint" }
 backend-catalog-pg-attrdef = { path = "../backend-catalog-pg-attrdef" }
 backend-catalog-pg-depend = { path = "../backend-catalog-pg-depend" }
@@ -301,7 +300,6 @@ backend-optimizer-prep-prepagg = { path = "../backend-optimizer-prep-prepagg" }
 backend-optimizer-plan-subselect-pullup = { path = "../backend-optimizer-plan-subselect-pullup" }
 backend-optimizer-plan-analyzejoins = { path = "../backend-optimizer-plan-analyzejoins" }
 backend-optimizer-plan-createplan = { path = "../backend-optimizer-plan-createplan" }
-backend-catalog-pg-opclass = { path = "../backend-catalog-pg-opclass" }
 backend-optimizer-plan-planner = { path = "../backend-optimizer-plan-planner" }
 backend-optimizer-plan-setrefs = { path = "../backend-optimizer-plan-setrefs" }
 backend-optimizer-util-inherit-predtest = { path = "../backend-optimizer-util-inherit-predtest" }

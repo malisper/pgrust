@@ -4896,33 +4896,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "backend-catalog-pg-authid"
-version = "0.0.0"
-dependencies = [
- "backend-access-index-genam-seams",
- "backend-access-table-table",
- "backend-catalog-pg-authid-seams",
- "mcx",
- "seam-core",
- "types-catalog",
- "types-core",
- "types-error",
- "types-rel",
- "types-scan",
- "types-storage",
-]
-
-[[package]]
-name = "backend-catalog-pg-authid-seams"
-version = "0.0.0"
-dependencies = [
- "mcx",
- "seam-core",
- "types-core",
- "types-error",
-]
-
-[[package]]
 name = "backend-catalog-pg-cast"
 version = "0.0.0"
 dependencies = [
@@ -5330,37 +5303,6 @@ dependencies = [
 
 [[package]]
 name = "backend-catalog-pg-namespace-seams"
-version = "0.0.0"
-dependencies = [
- "seam-core",
- "types-core",
- "types-error",
-]
-
-[[package]]
-name = "backend-catalog-pg-opclass"
-version = "0.0.0"
-dependencies = [
- "backend-access-common-heaptuple",
- "backend-access-common-scankey",
- "backend-access-index-genam-seams",
- "backend-access-table-table",
- "backend-catalog-pg-opclass-seams",
- "backend-parser-coerce",
- "backend-utils-adt-format-type",
- "backend-utils-cache-lsyscache",
- "mcx",
- "types-catalog",
- "types-core",
- "types-datum",
- "types-error",
- "types-scan",
- "types-storage",
- "types-tuple",
-]
-
-[[package]]
-name = "backend-catalog-pg-opclass-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
@@ -6424,7 +6366,6 @@ dependencies = [
  "backend-catalog-aclchk",
  "backend-catalog-catalog",
  "backend-catalog-objectaccess",
- "backend-catalog-pg-authid-seams",
  "backend-catalog-pg-database-seams",
  "backend-catalog-pg-db-role-setting",
  "backend-catalog-pg-db-role-setting-seams",
@@ -6829,9 +6770,12 @@ dependencies = [
 name = "backend-commands-indexcmds"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
  "backend-access-common-reloptions",
+ "backend-access-common-scankey",
  "backend-access-heap-vacuumlazy-seams",
  "backend-access-index-amapi",
+ "backend-access-index-genam-seams",
  "backend-access-table-table",
  "backend-access-table-table-seams",
  "backend-catalog-aclchk-seams",
@@ -7737,7 +7681,6 @@ dependencies = [
  "backend-catalog-pg-constraint-seams",
  "backend-catalog-pg-depend-seams",
  "backend-catalog-pg-enum",
- "backend-catalog-pg-opclass-seams",
  "backend-catalog-pg-range",
  "backend-catalog-pg-shdepend-seams",
  "backend-catalog-pg-type",
@@ -19292,7 +19235,6 @@ dependencies = [
  "backend-access-index-amapi-seams",
  "backend-bootstrap-bootstrap-seams",
  "backend-catalog-namespace-seams",
- "backend-catalog-pg-opclass-seams",
  "backend-nodes-copyfuncs-pc-seams",
  "backend-nodes-makefuncs-seams",
  "backend-nodes-read-seams",
@@ -20009,12 +19951,13 @@ name = "backend-utils-init-postinit"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-session-seams",
+ "backend-access-index-genam-seams",
+ "backend-access-table-table",
  "backend-access-transam-xact-seams",
  "backend-access-transam-xlog",
  "backend-access-transam-xloginsert-seams",
  "backend-catalog-aclchk-seams",
  "backend-catalog-namespace",
- "backend-catalog-pg-authid-seams",
  "backend-catalog-pg-database-seams",
  "backend-catalog-pg-db-role-setting-seams",
  "backend-commands-dbcommands-seams",
@@ -21691,7 +21634,6 @@ dependencies = [
  "backend-catalog-partition",
  "backend-catalog-pg-aggregate",
  "backend-catalog-pg-attrdef",
- "backend-catalog-pg-authid",
  "backend-catalog-pg-cast",
  "backend-catalog-pg-class",
  "backend-catalog-pg-collation",
@@ -21704,7 +21646,6 @@ dependencies = [
  "backend-catalog-pg-inherits",
  "backend-catalog-pg-largeobject",
  "backend-catalog-pg-namespace",
- "backend-catalog-pg-opclass",
  "backend-catalog-pg-operator",
  "backend-catalog-pg-parameter-acl",
  "backend-catalog-pg-proc",

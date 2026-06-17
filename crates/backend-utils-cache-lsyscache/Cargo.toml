@@ -31,7 +31,6 @@ backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-sea
 backend-access-index-amapi-seams = { path = "../backend-access-index-amapi-seams" }
 backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
-backend-catalog-pg-opclass-seams = { path = "../backend-catalog-pg-opclass-seams" }
 backend-nodes-copyfuncs-pc-seams = { path = "../backend-nodes-copyfuncs-pc-seams" }
 backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
 backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }

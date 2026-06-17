@@ -1268,12 +1268,53 @@ fn check_dead_lock_alert_cb() {
     backend_storage_lmgr_proc_seams::check_dead_lock_alert::call();
 }
 
-/// `ThereIsAtLeastOneRole` — returns true if at least one role is defined.
+/// `ThereIsAtLeastOneRole(void)` (postinit.c): returns true if at least one
+/// role is defined.
+///
+/// ```c
+/// pg_authid_rel = table_open(AuthIdRelationId, AccessShareLock);
+/// scan = table_beginscan_catalog(pg_authid_rel, 0, NULL);
+/// result = (heap_getnext(scan, ForwardScanDirection) != NULL);
+/// table_endscan(scan);
+/// table_close(pg_authid_rel, AccessShareLock);
+/// return result;
+/// ```
+///
+/// The catalog heap scan is expressed through `systable_beginscan` with
+/// `index_ok = false` and no keys: that opens no index and runs
+/// `table_beginscan_strat(..., allow_sync = false)`, exactly what
+/// `table_beginscan_catalog(rel, 0, NULL)` does. `heap_getnext != NULL` is the
+/// first `systable_getnext` returning `Some`.
 fn ThereIsAtLeastOneRole(mcx: Mcx<'_>) -> PgResult<bool> {
-    // table_open(AuthIdRelationId, AccessShareLock) + table_beginscan_catalog +
-    // heap_getnext(ForwardScanDirection) != NULL + table_endscan + table_close
-    // — the relcache/heap-scan machinery is owned by the seam.
-    backend_catalog_pg_authid_seams::there_is_at_least_one_role::call(mcx)
+    // pg_authid_rel = table_open(AuthIdRelationId, AccessShareLock);
+    let pg_authid_rel = backend_access_table_table::table_open(
+        mcx,
+        types_catalog::catalog::AUTH_ID_RELATION_ID,
+        types_storage::lock::AccessShareLock,
+    )?;
+
+    // scan = table_beginscan_catalog(pg_authid_rel, 0, NULL);
+    let mut scan = backend_access_index_genam_seams::systable_beginscan::call(
+        &pg_authid_rel,
+        InvalidOid,
+        false,
+        None,
+        &[],
+    )?;
+
+    // result = (heap_getnext(scan, ForwardScanDirection) != NULL);
+    let row_mcx = MemoryContext::new("ThereIsAtLeastOneRole row");
+    let result =
+        backend_access_index_genam_seams::systable_getnext::call(row_mcx.mcx(), scan.desc_mut())?
+            .is_some();
+
+    // table_endscan(scan);
+    scan.end()?;
+
+    // table_close(pg_authid_rel, AccessShareLock);
+    pg_authid_rel.close(types_storage::lock::AccessShareLock)?;
+
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------

@@ -91,16 +91,16 @@ use backend_utils_adt_format_type_seams::format_type_be_owned;
 use backend_utils_init_miscinit_seams::{get_user_id, superuser};
 
 use backend_catalog_binary_upgrade_seams::{consume_next_pg_type_oid, is_binary_upgrade};
-use backend_catalog_pg_opclass_seams::get_default_opclass;
 use backend_commands_functioncmds_seams::{
     aclcheck_error_schema, func_signature_string, get_func_name, lookup_func_name,
     name_list_to_string, namespace_aclcheck,
 };
 use backend_commands_opclasscmds_seams::get_opclass_oid;
 use backend_utils_cache_lsyscache_seams::{
-    func_volatile, get_func_rettype, get_multirange_range, get_namespace_name,
-    get_opclass_input_type, get_range_multirange, get_rel_relkind, get_typcollation,
-    get_typisdefined, get_typlen, get_typlenbyvalalign, get_typtype, type_is_collatable,
+    func_volatile, get_default_opclass, get_func_rettype, get_multirange_range,
+    get_namespace_name, get_opclass_input_type, get_range_multirange, get_rel_relkind,
+    get_typcollation, get_typisdefined, get_typlen, get_typlenbyvalalign, get_typtype,
+    type_is_collatable,
 };
 use backend_utils_cache_syscache_seams::get_type_oid;
 

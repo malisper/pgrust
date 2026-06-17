@@ -937,6 +937,11 @@ pub fn init_seams() {
         choosers::makeObjectName(name1, Some(name2), Some(label))
     });
 
+    // GetDefaultOpClass(type_id, am_id) lives in indexcmds.c; the canonical
+    // public surface is lsyscache's get_default_opclass convenience wrapper, so
+    // the owner installs that seam here.
+    backend_utils_cache_lsyscache_seams::get_default_opclass::set(opclass::GetDefaultOpClass);
+
     // GetOperatorFromCompareType(opclass, rhstype, cmptype) -> (op, strat).
     backend_commands_indexcmds_seams::get_operator_from_compare_type::set(
         |opclass, rhstype, cmptype| {

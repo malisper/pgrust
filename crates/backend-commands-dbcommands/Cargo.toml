@@ -20,7 +20,6 @@ backend-catalog-pg-database-seams = { path = "../backend-catalog-pg-database-sea
 backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
 backend-utils-misc-superuser-seams = { path = "../backend-utils-misc-superuser-seams" }
-backend-catalog-pg-authid-seams = { path = "../backend-catalog-pg-authid-seams" }
 backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
 backend-storage-ipc-standby-seams = { path = "../backend-storage-ipc-standby-seams" }
 backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
