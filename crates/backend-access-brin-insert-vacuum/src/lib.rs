@@ -44,6 +44,8 @@
 
 extern crate alloc;
 
+pub mod fmgr_builtins;
+
 use mcx::Mcx;
 
 use types_brin::{BrinDesc, BrinMemTuple};
@@ -1371,4 +1373,8 @@ pub fn init_seams() {
     seams::brinvacuumcleanup::set(brinvacuumcleanup);
     seams::brin_summarize_range::set(brin_summarize_range);
     seams::brin_desummarize_range::set(brin_desummarize_range);
+
+    // Register this crate's SQL-callable BRIN range-maintenance builtins into
+    // the fmgr-core builtin table (by-OID dispatch / fmgr_isbuiltin).
+    fmgr_builtins::register_brin_insert_vacuum_builtins();
 }
