@@ -140,6 +140,14 @@ pub fn init_seams() {
     // --- WAL-startup: StartupXLOG (xlog.c:5657) drops stale init files ---
     sx::relation_cache_init_file_remove::set(crate::initfile::RelationCacheInitFileRemove);
 
+    // --- commands/vacuum.c vacuum_rel by-OID rd_rel / rd_options / rd_lockInfo reads ---
+    sx::rel_frozenxid_minmxid::set(rel_frozenxid_minmxid);
+    sx::rel_pages_tuples::set(rel_pages_tuples);
+    sx::rel_relowner::set(rel_relowner);
+    sx::rel_reltoastrelid::set(rel_reltoastrelid);
+    sx::rel_std_rd_options::set(rel_std_rd_options);
+    sx::rel_lock_relid::set(rel_lock_relid);
+
     // --- plancat.c get_relation_info relcache-owned reads (parallel-workers,
     //     index list, per-index catalog detoast, index block count) ---
     crate::plancat_ext::init_seams();
@@ -826,6 +834,38 @@ fn rd_rel_relminmxid(rel: &types_rel::Relation<'_>) -> PgResult<MultiXactId> {
 }
 fn rd_islocaltemp(rel: &types_rel::Relation<'_>) -> PgResult<bool> {
     with_entry(rel.rd_id, |rd| rd.rd_islocaltemp)
+}
+
+// --- commands/vacuum.c vacuum_rel by-OID rd_rel / rd_options / rd_lockInfo ---
+fn rel_frozenxid_minmxid(rel: Oid) -> PgResult<(TransactionId, MultiXactId)> {
+    with_entry(rel, |rd| (rd.rd_rel.relfrozenxid, rd.rd_rel.relminmxid))
+}
+fn rel_pages_tuples(rel: Oid) -> PgResult<(types_core::primitive::BlockNumber, f64)> {
+    // `relpages` is stored as `int32`, `reltuples` as `float4`; widen the
+    // latter to `f64` for the caller (`vac_estimate_reltuples`).
+    with_entry(rel, |rd| {
+        (rd.rd_rel.relpages as u32, rd.rd_rel.reltuples as f64)
+    })
+}
+fn rel_relowner(rel: Oid) -> PgResult<Oid> {
+    with_entry(rel, |rd| rd.rd_rel.relowner)
+}
+fn rel_reltoastrelid(rel: Oid) -> PgResult<Oid> {
+    with_entry(rel, |rd| rd.rd_rel.reltoastrelid)
+}
+fn rel_std_rd_options(rel: Oid) -> PgResult<sx::StdRdOptionsView> {
+    with_entry(rel, |rd| match &rd.rd_options {
+        None => sx::StdRdOptionsView::default(),
+        Some(opts) => sx::StdRdOptionsView {
+            has_options: true,
+            vacuum_index_cleanup: opts.vacuum_index_cleanup as u8,
+            max_eager_freeze_failure_rate: opts.vacuum_max_eager_freeze_failure_rate,
+            vacuum_truncate: Some((opts.vacuum_truncate_set, opts.vacuum_truncate)),
+        },
+    })
+}
+fn rel_lock_relid(rel: Oid) -> PgResult<types_storage::lock::LockRelId> {
+    with_entry(rel, |rd| rd.rd_lockInfo.lockRelId)
 }
 fn rd_index_indrelid(index: &types_rel::Relation<'_>) -> PgResult<Option<Oid>> {
     with_entry(index.rd_id, |rd| rd.rd_index.as_ref().map(|i| i.indrelid))

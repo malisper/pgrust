@@ -83,6 +83,7 @@ use backend_parser_small1_seams as parse_node;
 
 // L1 re-home owners
 use backend_access_table_table_seams as table_seam;
+use backend_utils_cache_relcache_seams as relcache_seam;
 use backend_storage_ipc_procarray_seams as procarray_seam;
 use backend_access_transam_varsup_seams as varsup_seam;
 use backend_catalog_pg_inherits_seams as pg_inherits_seam;
@@ -1345,7 +1346,7 @@ pub fn vacuum_get_cutoffs(
     multixact_freeze_table_age = p.multixact_freeze_table_age;
 
     /* Set pg_class fields in cutoffs */
-    let (relfrozenxid, relminmxid) = rt::rel_frozenxid_minmxid::call(rel)?;
+    let (relfrozenxid, relminmxid) = relcache_seam::rel_frozenxid_minmxid::call(rel)?;
     c.relfrozenxid = relfrozenxid;
     c.relminmxid = relminmxid;
 
@@ -1560,7 +1561,7 @@ pub fn vac_estimate_reltuples(
     scanned_pages: BlockNumber,
     scanned_tuples: f64,
 ) -> PgResult<f64> {
-    let (old_rel_pages, old_rel_tuples) = rt::rel_pages_tuples::call(relation)?;
+    let (old_rel_pages, old_rel_tuples) = relcache_seam::rel_pages_tuples::call(relation)?;
     let old_density: f64;
     let unscanned_pages: f64;
     let total_tuples: f64;
@@ -1926,7 +1927,7 @@ fn vacuum_rel<'mcx>(
 ) -> PgResult<bool> {
     let lmode: LOCKMODE;
     let mut rel: Option<Oid>;
-    let lockrelid: Oid;
+    let lockrelid: types_storage::lock::LockRelId;
     let priv_relid: Oid;
     let toast_relid: Oid;
     let save_userid: Oid;
@@ -2056,13 +2057,13 @@ fn vacuum_rel<'mcx>(
     /*
      * Get a session-level lock too. ...
      */
-    lockrelid = rt::rel_lock_relid::call(rel_handle)?;
-    rt::lock_relation_id_for_session::call(lockrelid, lmode)?;
+    lockrelid = relcache_seam::rel_lock_relid::call(rel_handle)?;
+    rt::lock_relation_id_for_session::call(lockrelid.relId, lmode)?;
 
     /*
      * Set index_cleanup option based on index_cleanup reloption ...
      */
-    let std_options = rt::rel_std_rd_options::call(rel_handle)?;
+    let std_options = relcache_seam::rel_std_rd_options::call(rel_handle)?;
     if p.index_cleanup == VACOPTVALUE_UNSPECIFIED {
         let vacuum_index_cleanup: u8 = if !std_options.has_options {
             STDRD_OPTION_VACUUM_INDEX_CLEANUP_AUTO
@@ -2134,7 +2135,7 @@ fn vacuum_rel<'mcx>(
     if (p.options & VACOPT_PROCESS_TOAST) != 0
         && ((p.options & VACOPT_FULL) == 0 || (p.options & VACOPT_PROCESS_MAIN) == 0)
     {
-        toast_relid = rt::rel_reltoastrelid::call(rel_handle)?;
+        toast_relid = relcache_seam::rel_reltoastrelid::call(rel_handle)?;
     } else {
         toast_relid = InvalidOid;
     }
@@ -2146,7 +2147,7 @@ fn vacuum_rel<'mcx>(
     save_userid = su;
     save_sec_context = ssc;
     rt::set_user_id_and_sec_context::call(
-        rt::rel_relowner::call(rel_handle)?,
+        relcache_seam::rel_relowner::call(rel_handle)?,
         save_sec_context | SECURITY_RESTRICTED_OPERATION,
     )?;
     save_nestlevel = rt::new_guc_nest_level::call()?;
@@ -2209,7 +2210,7 @@ fn vacuum_rel<'mcx>(
     /*
      * Now release the session-level lock on the main table.
      */
-    rt::unlock_relation_id_for_session::call(lockrelid, lmode)?;
+    rt::unlock_relation_id_for_session::call(lockrelid.relId, lmode)?;
 
     /* Report that we really did it. */
     Ok(true)

@@ -977,3 +977,75 @@ seam_core::seam!(
     /// `Err`.
     pub fn relation_cache_init_file_remove() -> types_error::PgResult<()>
 );
+
+/// Projection of `rel->rd_options` viewed as `StdRdOptions` (`access/reloptions.h`)
+/// for the VACUUM driver (`commands/vacuum.c` `vacuum_rel`). `has_options` is
+/// false when `rd_options == NULL` (no reloptions set), exactly as the C code
+/// branches on `(StdRdOptions *) onerel->rd_options`. The carried fields are the
+/// ones `vacuum_rel` reads: `vacuum_index_cleanup` (the raw `StdRdOptIndexCleanup`
+/// enum value), `max_eager_freeze_failure_rate`, and the
+/// `(vacuum_truncate_set, vacuum_truncate)` pair carried in `vacuum_truncate`
+/// (`Some` mirrors a present `rd_options`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct StdRdOptionsView {
+    /// `onerel->rd_options != NULL`.
+    pub has_options: bool,
+    /// `((StdRdOptions *) rd_options)->vacuum_index_cleanup` (raw enum value).
+    pub vacuum_index_cleanup: u8,
+    /// `((StdRdOptions *) rd_options)->vacuum_max_eager_freeze_failure_rate`.
+    pub max_eager_freeze_failure_rate: f64,
+    /// `(vacuum_truncate_set, vacuum_truncate)` of the reloptions; `None` when
+    /// `rd_options == NULL`.
+    pub vacuum_truncate: Option<(bool, bool)>,
+}
+
+seam_core::seam!(
+    /// `onerel->rd_rel->relfrozenxid` + `onerel->rd_rel->relminmxid` — the
+    /// relation's frozen-xid / min-multixact horizons, read together by
+    /// `vacuum_get_cutoffs` (`commands/vacuum.c`) to seed `cutoffs->relfrozenxid`
+    /// / `cutoffs->relminmxid`. By-OID read off the live relcache entry.
+    pub fn rel_frozenxid_minmxid(
+        rel: types_core::primitive::Oid,
+    ) -> types_error::PgResult<(types_core::TransactionId, types_core::MultiXactId)>
+);
+seam_core::seam!(
+    /// `onerel->rd_rel->relpages` + `onerel->rd_rel->reltuples` — the relation's
+    /// stored page count (`BlockNumber`) and live-tuple estimate (`float4`),
+    /// read together by `vac_estimate_reltuples` (`commands/vacuum.c`).
+    /// `reltuples` is widened from the stored `float4` to `f64` for the caller.
+    pub fn rel_pages_tuples(
+        rel: types_core::primitive::Oid,
+    ) -> types_error::PgResult<(types_core::BlockNumber, f64)>
+);
+seam_core::seam!(
+    /// `onerel->rd_rel->relowner` — the relation's owner role OID, read by
+    /// `vacuum_rel` (`commands/vacuum.c`) to switch userid before vacuuming.
+    pub fn rel_relowner(
+        rel: types_core::primitive::Oid,
+    ) -> types_error::PgResult<types_core::primitive::Oid>
+);
+seam_core::seam!(
+    /// `onerel->rd_rel->reltoastrelid` — the relation's TOAST relation OID
+    /// (`InvalidOid` if none), read by `vacuum_rel` (`commands/vacuum.c`) to
+    /// remember the TOAST table for the later recursive vacuum.
+    pub fn rel_reltoastrelid(
+        rel: types_core::primitive::Oid,
+    ) -> types_error::PgResult<types_core::primitive::Oid>
+);
+seam_core::seam!(
+    /// `(StdRdOptions *) onerel->rd_options` viewed for `vacuum_rel`
+    /// (`commands/vacuum.c`): the `index_cleanup` / `max_eager_freeze_failure_rate`
+    /// / `truncate` reloptions it consults when the corresponding GUC-derived
+    /// option is unspecified. See [`StdRdOptionsView`].
+    pub fn rel_std_rd_options(
+        rel: types_core::primitive::Oid,
+    ) -> types_error::PgResult<StdRdOptionsView>
+);
+seam_core::seam!(
+    /// `onerel->rd_lockInfo.lockRelId` — the `(relId, dbId)` pair `vacuum_rel`
+    /// (`commands/vacuum.c`) hands to `LockRelationIdForSession` /
+    /// `UnlockRelationIdForSession` for the session-level lock.
+    pub fn rel_lock_relid(
+        rel: types_core::primitive::Oid,
+    ) -> types_error::PgResult<types_storage::lock::LockRelId>
+);

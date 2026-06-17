@@ -17,7 +17,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use types_core::{bits32, BlockNumber, MultiXactId, Oid, TransactionId};
+use types_core::{bits32, MultiXactId, Oid, TransactionId};
 use types_error::PgResult;
 use types_rel::FormData_pg_class;
 use types_tuple::heaptuple::ItemPointerData;
@@ -30,17 +30,6 @@ use mcx::Mcx;
 // DTO structs that cross the outward seams (small value snapshots; the
 // owning catalog/relcache units fill them from the real structures).
 // =======================================================================
-
-/// Projection of `rel->rd_options` viewed as `StdRdOptions` for VACUUM
-/// (`access/reloptions.h`). `has_options` is false when `rd_options == NULL`.
-/// `vacuum_truncate` carries the `(vacuum_truncate_set, vacuum_truncate)` pair.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct StdRdOptionsView {
-    pub has_options: bool,
-    pub vacuum_index_cleanup: u8,
-    pub max_eager_freeze_failure_rate: f64,
-    pub vacuum_truncate: Option<(bool, bool)>,
-}
 
 /// A row of `pg_class` from `get_all_vacuum_rels`'s catalog seqscan: the OID,
 /// relkind, and the full `Form_pg_class` (for `vacuum_is_permitted_for_relation`).
@@ -203,15 +192,13 @@ seam_core::seam!(pub fn vacuum_multixact_failsafe_age() -> PgResult<i32>);
 seam_core::seam!(pub fn vacuum_truncate() -> PgResult<bool>);
 
 // ---- relcache field reads (Oid -> field value) ------------------------
-seam_core::seam!(pub fn rel_frozenxid_minmxid(rel: Oid) -> PgResult<(TransactionId, MultiXactId)>);
-seam_core::seam!(pub fn rel_pages_tuples(rel: Oid) -> PgResult<(BlockNumber, f64)>);
+// `rel_frozenxid_minmxid` / `rel_pages_tuples` / `rel_lock_relid` /
+// `rel_std_rd_options` / `rel_reltoastrelid` / `rel_relowner` (the by-OID
+// `rd_rel` / `rd_options` / `rd_lockInfo` reads) -> the owner installs them, so
+// they live in `backend-utils-cache-relcache-seams` (with `StdRdOptionsView`).
 seam_core::seam!(pub fn relation_get_relation_name(rel: Oid) -> PgResult<String>);
 seam_core::seam!(pub fn rel_relkind(rel: Oid) -> PgResult<u8>);
 seam_core::seam!(pub fn relation_is_other_temp(rel: Oid) -> PgResult<bool>);
-seam_core::seam!(pub fn rel_lock_relid(rel: Oid) -> PgResult<Oid>);
-seam_core::seam!(pub fn rel_std_rd_options(rel: Oid) -> PgResult<StdRdOptionsView>);
-seam_core::seam!(pub fn rel_reltoastrelid(rel: Oid) -> PgResult<Oid>);
-seam_core::seam!(pub fn rel_relowner(rel: Oid) -> PgResult<Oid>);
 
 // ---- catalog inplace-update workers -----------------------------------
 seam_core::seam!(pub fn vac_update_relstats_apply(
