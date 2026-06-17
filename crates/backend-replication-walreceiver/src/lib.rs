@@ -187,6 +187,20 @@ fn hot_standby_feedback() -> bool {
     with_state(|s| s.hot_standby_feedback)
 }
 
+// GUC-machinery `conf->variable` setters. `guc.c` stores the assigned value
+// for `int wal_receiver_status_interval` / `int wal_receiver_timeout` /
+// `bool hot_standby_feedback` into the C global; here it writes into the
+// per-thread file-scope backing store the daemon reads.
+fn set_wal_receiver_status_interval(v: i32) {
+    with_state(|s| s.wal_receiver_status_interval = v);
+}
+fn set_wal_receiver_timeout(v: i32) {
+    with_state(|s| s.wal_receiver_timeout = v);
+}
+fn set_hot_standby_feedback(v: bool) {
+    with_state(|s| s.hot_standby_feedback = v);
+}
+
 /// `int wal_retrieve_retry_interval = 5000;` (`xlog.c:159`, milliseconds): time
 /// to wait before retrying WAL retrieval. The GUC variable is *defined* in
 /// `xlog.c` (a still-unported TU), but `walreceiver.h` exports it and the seam
@@ -1755,6 +1769,27 @@ pub fn init_seams() {
         get_wal_rcv_flush_rec_ptr,
     );
     backend_replication_walreceiver_seams::wal_rcv_force_reply::set(WalRcvForceReply);
+
+    // GUC `conf->variable` accessors. `guc.c` reads/writes these three GUCs
+    // (`int wal_receiver_status_interval` / `int wal_receiver_timeout` /
+    // `bool hot_standby_feedback`, all defined in walreceiver.c and read from
+    // the GUC slot — none come from the ControlFile) through the slot; install
+    // the get/set over this unit's file-scope backing store.
+    {
+        use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+        vars::wal_receiver_status_interval.install(GucVarAccessors {
+            get: wal_receiver_status_interval,
+            set: set_wal_receiver_status_interval,
+        });
+        vars::wal_receiver_timeout.install(GucVarAccessors {
+            get: wal_receiver_timeout,
+            set: set_wal_receiver_timeout,
+        });
+        vars::hot_standby_feedback.install(GucVarAccessors {
+            get: hot_standby_feedback,
+            set: set_hot_standby_feedback,
+        });
+    }
 }
 
 #[cfg(test)]

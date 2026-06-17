@@ -39,6 +39,7 @@ backend-storage-ipc-procsignal-seams = { path = "../backend-storage-ipc-procsign
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 backend-utils-misc-guc-file-seams = { path = "../backend-utils-misc-guc-file-seams" }
 backend-utils-misc-guc-tables-seams = { path = "../backend-utils-misc-guc-tables-seams" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-utils-misc-ps-status-seams = { path = "../backend-utils-misc-ps-status-seams" }
 backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }
 backend-utils-adt-acl-seams = { path = "../backend-utils-adt-acl-seams" }
