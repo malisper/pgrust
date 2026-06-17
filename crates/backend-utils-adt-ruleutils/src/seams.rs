@@ -46,6 +46,10 @@ pub fn init_seams() {
         crate::select_rtable_names_for_explain,
     );
 
+    // Register the SQL-callable deparser builtins (C: their `fmgr_builtins[]`
+    // rows) so by-OID fmgr dispatch resolves them.
+    crate::register_ruleutils_builtins();
+
     // Install the `quote_all_identifiers` GUC slot's variable accessors so the
     // GUC machinery can read/write the backend-local store above. Guarded so a
     // re-run (or a future second installer) does not panic on double-install.

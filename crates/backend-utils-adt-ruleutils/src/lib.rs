@@ -1950,6 +1950,260 @@ fn bms_is_member_local(a: &types_nodes::bitmapset::Bitmapset<'_>, x: i32) -> boo
     }
 }
 
+/* -------------------------------------------------------------------------- *
+ * SQL-callable entry points (ruleutils.c) — the thin fmgr layer lives in
+ * `fmgr_builtins`; the worker bodies that the fmgr wrappers call live here.
+ * -------------------------------------------------------------------------- */
+
+mod fmgr_builtins;
+pub use fmgr_builtins::register_ruleutils_builtins;
+
+pub mod constraintdef;
+pub mod indexdef;
+
+/// `PRETTYFLAG_PAREN` (ruleutils.c 88).
+pub(crate) const PRETTYFLAG_PAREN: i32 = 0x0001;
+/// `PRETTYFLAG_INDENT` (ruleutils.c 89).
+pub(crate) const PRETTYFLAG_INDENT: i32 = 0x0002;
+/// `PRETTYFLAG_SCHEMA` (ruleutils.c 90).
+pub(crate) const PRETTYFLAG_SCHEMA: i32 = 0x0004;
+/// `WRAP_COLUMN_DEFAULT` (ruleutils.c 98) — 0 means wrap always.
+pub(crate) const WRAP_COLUMN_DEFAULT: i32 = 0;
+
+/// `GET_PRETTY_FLAGS(pretty)` (ruleutils.c 93-95).
+#[inline]
+pub(crate) fn get_pretty_flags(pretty: bool) -> i32 {
+    if pretty {
+        PRETTYFLAG_PAREN | PRETTYFLAG_INDENT | PRETTYFLAG_SCHEMA
+    } else {
+        PRETTYFLAG_INDENT
+    }
+}
+
+/// `deparse_expression_pretty(expr, dpcontext, forceprefix, showimplicit,
+/// prettyFlags, startIndent)` (ruleutils.c 3674-3700).
+///
+/// General utility for deparsing expressions: builds a fresh `deparse_context`
+/// over the supplied namespace stack, runs [`get_rule_expr`], and returns the
+/// rendered SQL text. (We charge the buffer to `mcx`, matching the C
+/// `initStringInfo` in the caller's context.)
+pub fn deparse_expression_pretty<'mcx>(
+    mcx: Mcx<'mcx>,
+    expr: &Node<'mcx>,
+    dpcontext: PgVec<'mcx, DeparseNamespace<'mcx>>,
+    forceprefix: bool,
+    showimplicit: bool,
+    pretty_flags: i32,
+    start_indent: i32,
+) -> PgResult<PgString<'mcx>> {
+    let mut context = DeparseContext {
+        buf: types_stringinfo::StringInfo::new_in(mcx),
+        namespaces: dpcontext,
+        resultDesc: None,
+        targetList: PgVec::new_in(mcx),
+        windowClause: PgVec::new_in(mcx),
+        prettyFlags: pretty_flags,
+        wrapColumn: WRAP_COLUMN_DEFAULT,
+        indentLevel: start_indent,
+        varprefix: forceprefix,
+        colNamesVisible: true,
+        inGroupBy: false,
+        varInOrderBy: false,
+        appendparents: None,
+    };
+
+    expr_deparse::get_rule_expr(expr, &mut context, showimplicit)?;
+
+    // buf.data -> String (palloc'd in C; here charged to mcx).
+    let s = core::str::from_utf8(context.buf.data.as_slice())
+        .map_err(|_| elog_error("deparse produced invalid UTF-8".into()))?;
+    pstrdup(mcx, s)
+}
+
+/// `deparse_expression(expr, dpcontext, forceprefix, showimplicit)`
+/// (ruleutils.c 3645-3672) — the public entry, a thin wrapper over
+/// [`deparse_expression_pretty`] with no pretty-printing.
+pub fn deparse_expression<'mcx>(
+    mcx: Mcx<'mcx>,
+    expr: &Node<'mcx>,
+    dpcontext: PgVec<'mcx, DeparseNamespace<'mcx>>,
+    forceprefix: bool,
+    showimplicit: bool,
+) -> PgResult<PgString<'mcx>> {
+    deparse_expression_pretty(mcx, expr, dpcontext, forceprefix, showimplicit, 0, 0)
+}
+
+/// `OidIsValid(oid)` (`c.h`).
+#[inline]
+fn oid_is_valid(oid: Oid) -> bool {
+    oid != Oid::default()
+}
+
+/// Drill down a node tree past surrounding `List` wrappers to the first
+/// non-`List` node, mirroring C's `while (tst && IsA(tst, List)) tst =
+/// linitial((List *) tst);`.
+fn drill_past_lists<'a, 'mcx>(node: &'a Node<'mcx>) -> Option<&'a Node<'mcx>> {
+    let mut tst = node;
+    loop {
+        match tst {
+            Node::List(items) => match items.first() {
+                Some(first) => tst = first.as_ref(),
+                None => return None, // empty List -> linitial would be NULL
+            },
+            other => return Some(other),
+        }
+    }
+}
+
+/// `bms_is_subset(relids, bms_make_singleton(1))` for the relids returned by
+/// `pull_varnos`: true iff every member is relid 1 (or the set is empty). The
+/// owned Bitmapset stores 64-bit words; a subset of `{1}` has all words zero
+/// except possibly word 0, which may contain only bit 1.
+fn relids_subset_of_one(relids: &types_nodes::bitmapset::Bitmapset<'_>) -> bool {
+    for (i, &w) in relids.words.iter().enumerate() {
+        if i == 0 {
+            if w & !(1u64 << 1) != 0 {
+                return false;
+            }
+        } else if w != 0 {
+            return false;
+        }
+    }
+    true
+}
+
+/// `bms_is_empty(relids)` for the owned Bitmapset image.
+fn relids_is_empty(relids: &types_nodes::bitmapset::Bitmapset<'_>) -> bool {
+    relids.words.iter().all(|&w| w == 0)
+}
+
+/// Compute `pull_varnos(NULL, node)` for a deparse input. C calls
+/// `pull_varnos` on the bare `Node*`; the `pull_varnos` owner seam takes an
+/// `&Expr`, so we apply it to each `Expr` reachable from `node` (a single
+/// `Expr`, or every element of a `List`/nested `List`), unioning the relids.
+/// Returns `None` (the empty set) when no Vars are present.
+fn pull_varnos_node<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: &Node<'mcx>,
+    acc: &mut Option<PgBox<'mcx, types_nodes::bitmapset::Bitmapset<'mcx>>>,
+) -> PgResult<()> {
+    match node {
+        Node::List(items) => {
+            for it in items.iter() {
+                pull_varnos_node(mcx, it.as_ref(), acc)?;
+            }
+            Ok(())
+        }
+        Node::Expr(expr) => {
+            let r = backend_optimizer_util_var_seams::pull_varnos::call(mcx, expr)?;
+            if let Some(more) = r {
+                match acc {
+                    None => *acc = Some(more),
+                    Some(existing) => {
+                        // bms_union (in place): OR the words together.
+                        let nwords = more.words.len();
+                        let cur = existing.words.len();
+                        if cur < nwords {
+                            existing
+                                .words
+                                .try_reserve(nwords - cur)
+                                .map_err(|_| mcx.oom(0))?;
+                            while existing.words.len() < nwords {
+                                existing.words.push(0);
+                            }
+                        }
+                        for (dst, src) in existing.words.iter_mut().zip(more.words.iter()) {
+                            *dst |= *src;
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+        // A non-List/non-Expr top node carries no Vars to pull (matches the C
+        // walk, which only follows Var-bearing expression nodes).
+        _ => Ok(()),
+    }
+}
+
+/// `pg_get_expr_worker(expr, relid, prettyFlags)` (ruleutils.c 2709-2787).
+///
+/// The shared body of `pg_get_expr` / `pg_get_expr_ext`: parse the
+/// `pg_node_tree` text into a node tree, reject querytrees and (depending on
+/// `relid`) expressions referencing relations we cannot deparse, build a
+/// one-relation deparse context if a relid was given, and deparse. Returns
+/// `Ok(None)` when the relation has gone away (C returns NULL).
+pub fn pg_get_expr_worker<'mcx>(
+    mcx: Mcx<'mcx>,
+    exprstr: &str,
+    relid: Oid,
+    pretty_flags: i32,
+) -> PgResult<Option<PgString<'mcx>>> {
+    // Convert expression to node tree.
+    let node = backend_nodes_read_seams::string_to_node::call(mcx, exprstr)?;
+
+    // Throw error if the input is a querytree rather than an expression tree.
+    // Drill past surrounding Lists, then check for a Query.
+    if let Some(tst) = drill_past_lists(&node) {
+        if matches!(tst, Node::Query(_)) {
+            return Err(PgError::error("input is a query, not an expression")
+                .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE));
+        }
+    }
+
+    // Throw error if the expression contains Vars we won't be able to deparse.
+    let mut relids: Option<PgBox<'mcx, types_nodes::bitmapset::Bitmapset<'mcx>>> = None;
+    pull_varnos_node(mcx, &node, &mut relids)?;
+    if oid_is_valid(relid) {
+        // !bms_is_subset(relids, bms_make_singleton(1))
+        let ok = match relids.as_ref() {
+            None => true,
+            Some(r) => relids_subset_of_one(r),
+        };
+        if !ok {
+            return Err(PgError::error(
+                "expression contains variables of more than one relation",
+            )
+            .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE));
+        }
+    } else {
+        // !bms_is_empty(relids)
+        let empty = match relids.as_ref() {
+            None => true,
+            Some(r) => relids_is_empty(r),
+        };
+        if !empty {
+            return Err(PgError::error("expression contains variables")
+                .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE));
+        }
+    }
+
+    // Prepare deparse context if needed. With a relid, transiently open and
+    // lock the rel so it won't go away underneath us.
+    let context: PgVec<'mcx, DeparseNamespace<'mcx>> = if oid_is_valid(relid) {
+        let rel = backend_access_common_relation_seams::try_relation_open::call(
+            mcx,
+            relid,
+            AccessShareLock,
+        )?;
+        let rel = match rel {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        let ctx = deparse_context_for(mcx, rel.name(), relid)?;
+        // relation_close(rel, AccessShareLock) (ruleutils.c 2784).
+        rel.close(AccessShareLock)?;
+        ctx
+    } else {
+        PgVec::new_in(mcx)
+    };
+
+    // Deparse.
+    let str = deparse_expression_pretty(mcx, &node, context, false, false, pretty_flags, 0)?;
+
+    Ok(Some(str))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
