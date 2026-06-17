@@ -19054,9 +19054,12 @@ name = "backend-utils-adt-version"
 version = "0.0.0"
 dependencies = [
  "backend-utils-adt-varlena-seams",
+ "backend-utils-fmgr-core",
  "mcx",
  "types-datum",
  "types-error",
+ "types-fmgr",
+ "types-tuple",
 ]
 
 [[package]]

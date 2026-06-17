@@ -17,12 +17,16 @@
 //! other change. We therefore name the seam's return type inline rather than
 //! importing the shim, so this crate carries no standalone `use types_datum`.
 
-#![no_std]
+// NB: not `#![no_std]` — the fmgr builtin boundary (`fmgr_builtins`) uses
+// `std` (the by-ref `String`/`Vec<u8>` result lane and `panic_any` for
+// `ereport`).
 
 use mcx::Mcx;
 use types_error::PgResult;
 
-use backend_utils_adt_varlena_seams::cstring_to_text;
+use backend_utils_adt_varlena_seams::{cstring_to_text, cstring_to_text_v};
+
+pub mod fmgr_builtins;
 
 /// `PG_VERSION_STR` (`pg_config.h`) — the full version banner emitted by
 /// `version()`. `configure` defines it as
@@ -41,7 +45,21 @@ pub fn pgsql_version<'mcx>(mcx: Mcx<'mcx>) -> PgResult<types_datum::Datum> {
     cstring_to_text::call(mcx, PG_VERSION_STR)
 }
 
-/// Install this unit's inward seams. This unit owns none (no cyclic inward
-/// consumer); kept for the uniform `seams-init` wiring contract and the
-/// `recurrence_guard` check.
-pub fn init_seams() {}
+/// `pgsql_version(PG_FUNCTION_ARGS)` over the unified value type — the
+/// migration-target form of [`pgsql_version`]. The `text` result is the
+/// `Datum::ByRef` varlena built by `cstring_to_text_v`. Used by the fmgr
+/// builtin adapter, which needs the flat varlena bytes for the by-reference
+/// result lane.
+pub fn pgsql_version_v<'mcx>(
+    mcx: Mcx<'mcx>,
+) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
+    cstring_to_text_v::call(mcx, PG_VERSION_STR)
+}
+
+/// Install this unit's inward seams and register its SQL-callable builtins.
+/// This unit owns no inward seam (no cyclic inward consumer), but it does
+/// register `version()` (OID 89) into the fmgr-core builtin table here so
+/// by-OID dispatch resolves it. Called by `seams-init::init_all`.
+pub fn init_seams() {
+    fmgr_builtins::register_version_builtins();
+}
