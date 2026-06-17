@@ -193,10 +193,9 @@ seam_core::seam!(
     /// `pg_plan_query(query, queryString, CURSOR_OPT_PARALLEL_OK, NULL)`.
     pub fn pg_plan_query(query: QueryHandle, query_string: String) -> PgResult<PlannedStmtHandle>
 );
-seam_core::seam!(
-    /// `PushCopiedSnapshot(GetActiveSnapshot()); UpdateActiveSnapshotCommandId();`
-    pub fn push_copied_snapshot_and_bump() -> PgResult<()>
-);
+// NOTE: `push_copied_snapshot_and_bump` was re-homed to
+// `backend-utils-time-snapmgr-seams` (its true C owner is
+// `utils/time/snapmgr.c`); matview now calls it through that crate.
 seam_core::seam!(
     /// `CreateQueryDesc(plan, queryString, GetActiveSnapshot(), InvalidSnapshot,
     /// dest, NULL, NULL, 0)`.
@@ -222,10 +221,8 @@ seam_core::seam!(
     /// `ExecutorFinish(queryDesc); ExecutorEnd(queryDesc); FreeQueryDesc(queryDesc);`
     pub fn executor_finish_end_free(query_desc: QueryDescHandle) -> PgResult<()>
 );
-seam_core::seam!(
-    /// `PopActiveSnapshot()`.
-    pub fn pop_active_snapshot() -> PgResult<()>
-);
+// NOTE: `pop_active_snapshot` is owned by snapmgr.c and already declared in
+// `backend-utils-time-snapmgr-seams`; matview calls it through that crate.
 
 // --- transientrel_* DestReceiver: the table-AM bulk-insert flush ---------------
 //

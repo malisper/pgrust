@@ -78,6 +78,7 @@ use backend_access_common_tidstore_seams as tidstore_seams;
 use backend_commands_analyze_seams as analyze;
 use backend_commands_define_seams as define;
 use backend_commands_vacuum_seams as rt;
+use backend_utils_time_snapmgr_seams as snapmgr_seam;
 use backend_parser_small1_seams as parse_node;
 
 mod seams_install;
@@ -803,7 +804,7 @@ pub fn vacuum<'mcx>(
 
         /* ActiveSnapshot is not set by autovacuum */
         if rt::active_snapshot_set::call()? {
-            rt::pop_active_snapshot::call()?;
+            snapmgr_seam::pop_active_snapshot::call()?;
         }
 
         /* matches the StartTransaction in PostgresMain() */
@@ -846,7 +847,7 @@ pub fn vacuum<'mcx>(
                 if use_own_xacts {
                     xact::start_transaction_command::call()?;
                     /* functions in indexes may want a snapshot set */
-                    rt::push_active_snapshot_transaction::call()?;
+                    snapmgr_seam::push_active_snapshot_transaction::call()?;
                 }
 
                 /* va_cols collected as a plain Vec<String> for the seam. */
@@ -869,7 +870,7 @@ pub fn vacuum<'mcx>(
                 )?;
 
                 if use_own_xacts {
-                    rt::pop_active_snapshot::call()?;
+                    snapmgr_seam::pop_active_snapshot::call()?;
                     /* standard_ProcessUtility() does CCI if !use_own_xacts */
                     xact::command_counter_increment::call()?;
                     xact::commit_transaction_command::call()?;
@@ -1940,7 +1941,7 @@ fn vacuum_rel<'mcx>(
     /*
      * Need to acquire a snapshot to prevent pg_subtrans from being truncated ...
      */
-    rt::push_active_snapshot_transaction::call()?;
+    snapmgr_seam::push_active_snapshot_transaction::call()?;
 
     /*
      * Check for user-requested abort. ...
@@ -1968,7 +1969,7 @@ fn vacuum_rel<'mcx>(
 
     /* leave if relation could not be opened or locked */
     let Some(rel_handle) = rel else {
-        rt::pop_active_snapshot::call()?;
+        snapmgr_seam::pop_active_snapshot::call()?;
         xact::commit_transaction_command::call()?;
         return Ok(false);
     };
@@ -1991,7 +1992,7 @@ fn vacuum_rel<'mcx>(
     })?;
     if !vacuum_is_permitted_for_relation(priv_relid, &rd_rel, p.options & !VACOPT_ANALYZE)? {
         rt::relation_close::call(rel_handle, lmode)?;
-        rt::pop_active_snapshot::call()?;
+        snapmgr_seam::pop_active_snapshot::call()?;
         xact::commit_transaction_command::call()?;
         return Ok(false);
     }
@@ -2013,7 +2014,7 @@ fn vacuum_rel<'mcx>(
             ))
             .finish(here("vacuum_rel"))?;
         rt::relation_close::call(rel_handle, lmode)?;
-        rt::pop_active_snapshot::call()?;
+        snapmgr_seam::pop_active_snapshot::call()?;
         xact::commit_transaction_command::call()?;
         return Ok(false);
     }
@@ -2023,7 +2024,7 @@ fn vacuum_rel<'mcx>(
      */
     if rt::relation_is_other_temp::call(rel_handle)? {
         rt::relation_close::call(rel_handle, lmode)?;
-        rt::pop_active_snapshot::call()?;
+        snapmgr_seam::pop_active_snapshot::call()?;
         xact::commit_transaction_command::call()?;
         return Ok(false);
     }
@@ -2033,7 +2034,7 @@ fn vacuum_rel<'mcx>(
      */
     if relkind == RELKIND_PARTITIONED_TABLE {
         rt::relation_close::call(rel_handle, lmode)?;
-        rt::pop_active_snapshot::call()?;
+        snapmgr_seam::pop_active_snapshot::call()?;
         xact::commit_transaction_command::call()?;
         /* It's OK to proceed with ANALYZE on this table */
         return Ok(true);
@@ -2176,7 +2177,7 @@ fn vacuum_rel<'mcx>(
     /*
      * Complete the transaction and free all temporary memory used.
      */
-    rt::pop_active_snapshot::call()?;
+    snapmgr_seam::pop_active_snapshot::call()?;
     xact::commit_transaction_command::call()?;
 
     /*

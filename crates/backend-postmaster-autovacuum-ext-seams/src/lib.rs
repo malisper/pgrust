@@ -119,9 +119,12 @@ seam!(pub fn get_database_name(dboid: Oid) -> Option<alloc::string::String>);
 seam!(pub fn database_uses_zero_freeze_ages() -> PgResult<bool>);
 seam!(pub fn start_transaction_command() -> PgResult<()>);
 seam!(pub fn commit_transaction_command() -> PgResult<()>);
+// `push_active_snapshot` here is the no-arg `PushActiveSnapshot(
+// GetTransactionSnapshot())` shape autovacuum uses, which diverges from the
+// snapmgr base crate's `push_active_snapshot(snapshot)` contract, so it stays
+// local. `pop_active_snapshot` / `active_snapshot_set` are owned by snapmgr.c
+// and called through `backend-utils-time-snapmgr-seams`.
 seam!(pub fn push_active_snapshot() -> PgResult<()>);
-seam!(pub fn pop_active_snapshot() -> PgResult<()>);
-seam!(pub fn active_snapshot_set() -> bool);
 seam!(pub fn get_vacuum_access_strategy() -> BufferStrategyHandle);
 seam!(pub fn autovacuum_do_vac_analyze(
     relid: Oid,

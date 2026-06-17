@@ -256,3 +256,44 @@ seam_core::seam!(
     /// read by `ResolveCminCmaxDuringDecoding`. Cannot `ereport`.
     pub fn historic_snapshot_get_tuple_cids() -> Option<types_logical::TupleCidHash>
 );
+
+// ---------------------------------------------------------------------------
+// Re-homed from consumer-local seam crates (true C owner is snapmgr.c).
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `ImportSnapshot(idstr)` (snapmgr.c): adopt the snapshot named by the
+    /// `SET TRANSACTION SNAPSHOT '...'` argument. Can `ereport(ERROR)`.
+    /// Re-homed from `backend-utils-misc-guc-funcs-seams`.
+    pub fn import_snapshot(idstr: std::string::String) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `PushCopiedSnapshot(GetActiveSnapshot()); UpdateActiveSnapshotCommandId();`
+    /// (snapmgr.c) — the matview-refresh "copy the active snapshot and bump its
+    /// command id" composite. Re-homed from `backend-commands-matview-deps-seams`.
+    pub fn push_copied_snapshot_and_bump() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `RegisterSnapshotOnOwner(snapshot, TopTransactionResourceOwner)`
+    /// (snapmgr.c) — pin a large-object's snapshot to the top-transaction
+    /// resource owner so it stays alive for the FD's lifetime. Consumes the
+    /// descriptor's owned snapshot and returns the (possibly copied) registered
+    /// snapshot. Re-homed from `backend-libpq-be-fsstubs-seams`. The repo port
+    /// is the `NoOwner` core (resowner lifecycle is RAII), matching the existing
+    /// `unregister_snapshot_from_owner` install.
+    pub fn register_snapshot_on_top_owner(
+        snapshot: std::rc::Rc<types_snapshot::SnapshotData>,
+    ) -> PgResult<std::rc::Rc<types_snapshot::SnapshotData>>
+);
+
+seam_core::seam!(
+    /// `UnregisterSnapshotFromOwner(snapshot, TopTransactionResourceOwner)`
+    /// (snapmgr.c) — release a large-object's snapshot from the top-transaction
+    /// resource owner. Consumes the descriptor's owned snapshot. Re-homed from
+    /// `backend-libpq-be-fsstubs-seams`.
+    pub fn unregister_snapshot_from_top_owner(
+        snapshot: std::rc::Rc<types_snapshot::SnapshotData>,
+    ) -> PgResult<()>
+);

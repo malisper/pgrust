@@ -19,6 +19,7 @@ use crate::core::{
 use crate::launcher::do_start_worker;
 use crate::schedule::{perform_work_item, relation_needs_vacanalyze, table_recheck_autovac};
 use backend_postmaster_autovacuum_ext_seams as seam;
+use backend_utils_time_snapmgr_seams as snapmgr_seam;
 
 /// `void AutoVacWorkerMain(const void *startup_data, size_t startup_data_len)`
 /// (`autovacuum.c` lines 1375-1600).
@@ -376,7 +377,7 @@ pub fn do_autovacuum() -> PgResult<()> {
          * To commit the deletion, end current transaction and start a new one.
          * Note this also releases the locks we took.
          */
-        seam::pop_active_snapshot::call()?;
+        snapmgr_seam::pop_active_snapshot::call()?;
         seam::commit_transaction_command::call()?;
         seam::start_transaction_command::call()?;
 
@@ -600,9 +601,9 @@ pub fn do_autovacuum() -> PgResult<()> {
 
         seam::push_active_snapshot::call()?;
         perform_work_item(i)?;
-        if seam::active_snapshot_set::call() {
+        if snapmgr_seam::active_snapshot_set::call() {
             /* transaction could have aborted */
-            seam::pop_active_snapshot::call()?;
+            snapmgr_seam::pop_active_snapshot::call()?;
         }
 
         /* Check for config changes before acquiring lock for further jobs. */

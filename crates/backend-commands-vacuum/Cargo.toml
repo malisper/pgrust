@@ -28,6 +28,7 @@ backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 
 # own seam crate (inward)
 backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }
+backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
 
 # ProcessUtility dispatch arm (installs the VacuumStmt forwarding seam).
 backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }

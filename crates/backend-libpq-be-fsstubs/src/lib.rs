@@ -76,6 +76,7 @@ use backend_storage_large_object::{
 use backend_utils_error::{ereport, PgError, PgResult};
 use backend_utils_init_miscinit::GetUserId;
 use backend_libpq_be_fsstubs_seams as seam;
+use backend_utils_time_snapmgr_seams as snapmgr_seam;
 use types_core::xact::SubTransactionId;
 use types_core::{int64, InvalidOid, Oid};
 use types_error::{
@@ -152,7 +153,7 @@ pub fn be_lo_open(lobjId: Oid, mode: i32) -> PgResult<i32> {
      * shuts down.
      */
     if let Some(snapshot) = lobjDesc.snapshot.take() {
-        lobjDesc.snapshot = Some(seam::register_snapshot_on_top_owner::call(snapshot)?);
+        lobjDesc.snapshot = Some(snapmgr_seam::register_snapshot_on_top_owner::call(snapshot)?);
     }
 
     // Assert(cookies[fd] == NULL); cookies[fd] = lobjDesc;
@@ -735,7 +736,7 @@ fn closeLOfd(fd: i32) -> PgResult<()> {
 
     // if (lobj->snapshot) UnregisterSnapshotFromOwner(lobj->snapshot, TopTransactionResourceOwner);
     if let Some(snapshot) = lobj.snapshot.take() {
-        seam::unregister_snapshot_from_top_owner::call(snapshot)?;
+        snapmgr_seam::unregister_snapshot_from_top_owner::call(snapshot)?;
     }
     // inv_close(lobj);
     inv_close(lobj)?;

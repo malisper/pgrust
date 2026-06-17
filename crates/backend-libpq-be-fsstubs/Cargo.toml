@@ -27,3 +27,4 @@ backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-libpq-be-fsstubs-seams = { path = "../backend-libpq-be-fsstubs-seams" }
+backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }

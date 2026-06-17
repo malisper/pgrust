@@ -20,6 +20,7 @@ use types_nodes::primnodes::OnCommitAction::{
 
 use backend_catalog_dependency_seams as dep_seam;
 use backend_commands_tablecmds_seams as seam;
+use backend_utils_time_snapmgr_seams as snapmgr_seam;
 
 use crate::helpers::RelationRelationId;
 
@@ -143,7 +144,7 @@ pub fn pre_commit_on_commit_actions() -> PgResult<()> {
          * Object deletion might involve toast table access (to clean up
          * toasted catalog entries), so ensure we have a valid snapshot.
          */
-        seam::push_active_snapshot_transaction::call()?;
+        snapmgr_seam::push_active_snapshot_transaction::call()?;
 
         /*
          * Since this is an automatic drop, rather than one directly initiated
@@ -155,7 +156,7 @@ pub fn pre_commit_on_commit_actions() -> PgResult<()> {
             dep_seam::PERFORM_DELETION_INTERNAL | dep_seam::PERFORM_DELETION_QUIETLY,
         )?;
 
-        seam::pop_active_snapshot::call()?;
+        snapmgr_seam::pop_active_snapshot::call()?;
 
         dep_seam::free_object_addresses::call(target_objects)?;
     }

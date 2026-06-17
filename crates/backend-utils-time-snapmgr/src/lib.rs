@@ -1643,6 +1643,24 @@ pub fn init_seams() {
             .expect("UnregisterSnapshotFromOwner: SnapshotResetXmin must not ereport");
     });
 
+    // Re-homed inward seams (true C owner is snapmgr.c): adopt-by-name import,
+    // the matview copy-and-bump composite, and the large-object on-top-owner
+    // register/unregister. Same `new_handle` Rc<->SnapHandle adapters as above.
+    seams::import_snapshot::set(|idstr| ImportSnapshot(&idstr));
+    seams::push_copied_snapshot_and_bump::set(|| {
+        PushCopiedSnapshot(&GetActiveSnapshot());
+        UpdateActiveSnapshotCommandId()
+    });
+    seams::register_snapshot_on_top_owner::set(|snapshot| {
+        let regd = RegisterSnapshotOnOwner(&new_handle((*snapshot).clone()));
+        let snap = regd.borrow().clone();
+        Ok(std::rc::Rc::new(snap))
+    });
+    seams::unregister_snapshot_from_top_owner::set(|snapshot| {
+        // `NoOwner` core; the resowner `Forget` is the caller's RAII business.
+        UnregisterSnapshotFromOwner(&new_handle((*snapshot).clone()))
+    });
+
     // plancache/xact/standby/subtrans's split slice of snapmgr's contract
     // (`backend-utils-time-snapmgr-pc-seams`). Same inward seams as the base
     // crate above, redeclared in the consumers' own seam crate; the owner

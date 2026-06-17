@@ -20,6 +20,7 @@ use backend_utils_error::ereport;
 use mcx::{Mcx, PgBox, PgString, PgVec};
 
 use backend_commands_matview_deps_seams as seam;
+use backend_utils_time_snapmgr_seams as snapmgr_seam;
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_core::primitive::Oid;
 use types_core::xact::CommandId;
@@ -461,7 +462,7 @@ fn refresh_matview_datafill(
      * of any previously executed queries.
      * PushCopiedSnapshot(GetActiveSnapshot()); UpdateActiveSnapshotCommandId();
      */
-    seam::push_copied_snapshot_and_bump::call()?;
+    snapmgr_seam::push_copied_snapshot_and_bump::call()?;
 
     /* Create a QueryDesc, redirecting output to our tuple receiver */
     let queryDesc = seam::create_query_desc::call(plan, query_string.to_string(), dest)?;
@@ -488,7 +489,7 @@ fn refresh_matview_datafill(
     /* and clean up: ExecutorFinish; ExecutorEnd; FreeQueryDesc */
     seam::executor_finish_end_free::call(queryDesc)?;
 
-    seam::pop_active_snapshot::call()?;
+    snapmgr_seam::pop_active_snapshot::call()?;
 
     Ok(processed)
 }

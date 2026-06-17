@@ -666,17 +666,9 @@ seam_core::seam!(
 
 /* ---- snapshot management (snapmgr.c) -------------------------------------- */
 
-seam_core::seam!(
-    /// `PushActiveSnapshot(GetTransactionSnapshot())` (snapmgr.c): ensure a
-    /// valid snapshot for the ON COMMIT DROP object-deletion path.
-    pub fn push_active_snapshot_transaction() -> PgResult<()>
-);
-
-seam_core::seam!(
-    /// `PopActiveSnapshot()` (snapmgr.c): pop the snapshot pushed by
-    /// [`push_active_snapshot_transaction`].
-    pub fn pop_active_snapshot() -> PgResult<()>
-);
+// NOTE: `push_active_snapshot_transaction` / `pop_active_snapshot` are owned by
+// snapmgr.c and already declared in `backend-utils-time-snapmgr-seams`;
+// tablecmds calls them through that crate.
 
 /* ---- ON COMMIT temp-namespace flag (xact.c) ------------------------------- */
 

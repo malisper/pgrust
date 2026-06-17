@@ -147,9 +147,12 @@ seam_core::seam!(
 seam_core::seam!(pub fn is_in_transaction_block(is_top_level: bool) -> PgResult<bool>);
 
 // ---- utils/snapmgr.h ---------------------------------------------------
+// `active_snapshot_set` stays here: vacuum's call wants `PgResult<bool>`, which
+// diverges from the snapmgr base crate's bare `bool` contract (the owner's
+// `pc-seams` carries the `PgResult<bool>` variant, but this is vacuum's local
+// fallible shape). `pop_active_snapshot` / `push_active_snapshot_transaction`
+// are owned by snapmgr.c and called through `backend-utils-time-snapmgr-seams`.
 seam_core::seam!(pub fn active_snapshot_set() -> PgResult<bool>);
-seam_core::seam!(pub fn pop_active_snapshot() -> PgResult<()>);
-seam_core::seam!(pub fn push_active_snapshot_transaction() -> PgResult<()>);
 
 // ---- postmaster/autovacuum.h + cost globals ---------------------------
 seam_core::seam!(pub fn am_autovacuum_worker_process() -> PgResult<bool>);

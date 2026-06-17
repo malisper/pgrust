@@ -124,6 +124,12 @@ seam_core::seam!(pub fn restore_guc_state(space: usize) -> PgResult<()>);
 seam_core::seam!(pub fn estimate_combocid_state_space() -> PgResult<Size>);
 seam_core::seam!(pub fn serialize_combocid_state(len: Size, space: usize) -> PgResult<()>);
 seam_core::seam!(pub fn restore_combocid_state(space: usize) -> PgResult<()>);
+// The snapshot seams below are snapmgr.c functions by C definition, but the
+// parallel DSM serialization path threads raw `usize` byte-offset/handle
+// arguments (InitializeParallelDSM / RestoreSnapshot space pointers) that
+// diverge from the snapmgr base crate's owned-`SnapshotData` contract. They
+// stay homed here as a single coupled handle-based family until the parallel
+// snapshot-serialization contract is reconciled.
 seam_core::seam!(pub fn get_transaction_snapshot() -> PgResult<usize>);
 seam_core::seam!(pub fn get_active_snapshot() -> PgResult<usize>);
 seam_core::seam!(pub fn estimate_snapshot_space(snapshot: usize) -> PgResult<Size>);

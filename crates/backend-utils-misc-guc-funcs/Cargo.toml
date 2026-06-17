@@ -26,6 +26,7 @@ backend-utils-misc-guc = { path = "../backend-utils-misc-guc" }
 backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
 backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
 backend-utils-misc-guc-funcs-seams = { path = "../backend-utils-misc-guc-funcs-seams" }
+backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 backend-storage-ipc-ipci-seams = { path = "../backend-storage-ipc-ipci-seams" }
 backend-port-sysv-shmem-seams = { path = "../backend-port-sysv-shmem-seams" }

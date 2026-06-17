@@ -88,6 +88,7 @@ use types_tuple::heaptuple::{TupleDesc, TEXTOID};
 use types_parsenodes::{Node, VariableSetKind, VariableSetStmt};
 
 use backend_utils_misc_guc_funcs_seams as seam;
+use backend_utils_time_snapmgr_seams as snapmgr_seam;
 
 /// The fmgr builtin layer (`Datum fn(PG_FUNCTION_ARGS)`) for the `text`-boundary
 /// `guc_funcs.c` SQL functions (`current_setting` / `set_config`), registered
@@ -231,7 +232,7 @@ pub fn ExecSetVariableStmt(stmt: &VariableSetStmt, isTopLevel: bool) -> PgResult
                 seam::warn_no_transaction_block::call(isTopLevel, "SET TRANSACTION".to_string());
                 // ImportSnapshot(strVal(&con->val))
                 let sval = a_const_strval(con)?;
-                seam::import_snapshot::call(sval)?;
+                snapmgr_seam::import_snapshot::call(sval)?;
             } else {
                 return Err(ereport(ERROR)
                     .errmsg_internal(format!("unexpected SET MULTI element: {name}"))

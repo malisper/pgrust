@@ -76,11 +76,9 @@ seam_core::seam!(
 
 // --- SET TRANSACTION SNAPSHOT / SET TIME ZONE INTERVAL ----------------------
 
-seam_core::seam!(
-    /// `ImportSnapshot(idstr)` (utils/time/snapmgr.c): adopt the snapshot named
-    /// by the `SET TRANSACTION SNAPSHOT '...'` argument. Can `ereport(ERROR)`.
-    pub fn import_snapshot(idstr: String) -> PgResult<()>
-);
+// NOTE: `import_snapshot` was re-homed to `backend-utils-time-snapmgr-seams`
+// (its true C owner is `utils/time/snapmgr.c`); guc_funcs now calls it through
+// that crate.
 
 // NOTE: the `SET TIME ZONE INTERVAL '...'` normalization
 // (`interval_normalize`, guc_funcs.c:272-284) is reached only through a

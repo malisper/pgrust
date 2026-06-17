@@ -21,13 +21,8 @@
 //!     import/export file transfer are the server-file primitive. Until their
 //!     owners land, a call panics loudly.
 
-extern crate alloc;
-
-use alloc::rc::Rc;
-
 use types_core::SubTransactionId;
 use types_error::PgResult;
-use types_snapshot::SnapshotData;
 
 seam_core::seam!(
     /// `AtEOXact_LargeObject(isCommit)` — close large-object descriptors at
@@ -44,24 +39,9 @@ seam_core::seam!(
     ) -> PgResult<()>
 );
 
-seam_core::seam!(
-    /// `RegisterSnapshotOnOwner(snapshot, TopTransactionResourceOwner)`
-    /// (`utils/time/snapmgr.c`) — pin the LO's snapshot to the top-transaction
-    /// resource owner so it stays alive for the FD's lifetime (rather than only
-    /// until the current portal shuts down). Consumes the descriptor's owned
-    /// snapshot and returns the (possibly copied) registered snapshot to store
-    /// back into the descriptor.
-    pub fn register_snapshot_on_top_owner(
-        snapshot: Rc<SnapshotData>,
-    ) -> PgResult<Rc<SnapshotData>>
-);
-
-seam_core::seam!(
-    /// `UnregisterSnapshotFromOwner(snapshot, TopTransactionResourceOwner)`
-    /// (`utils/time/snapmgr.c`) — release the LO's snapshot from the
-    /// top-transaction resource owner. Consumes the descriptor's owned snapshot.
-    pub fn unregister_snapshot_from_top_owner(snapshot: Rc<SnapshotData>) -> PgResult<()>
-);
+// NOTE: `register_snapshot_on_top_owner` / `unregister_snapshot_from_top_owner`
+// were re-homed to `backend-utils-time-snapmgr-seams` (their true C owner is
+// `utils/time/snapmgr.c`); be-fsstubs now calls them through that crate.
 
 seam_core::seam!(
     /// `lo_import_internal` server-file half (be-fsstubs.c:423-479): open
