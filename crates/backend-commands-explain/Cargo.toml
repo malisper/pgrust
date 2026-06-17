@@ -26,6 +26,7 @@ backend-commands-explain-seams = { path = "../backend-commands-explain-seams" }
 # Owner seam crates (calls into other owners; panic until installed).
 backend-executor-execMain-seams = { path = "../backend-executor-execMain-seams" }
 backend-executor-instrument = { path = "../backend-executor-instrument" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
 backend-utils-adt-ruleutils-seams = { path = "../backend-utils-adt-ruleutils-seams" }
 portability-instr-time = { path = "../portability-instr-time" }

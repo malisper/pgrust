@@ -105,6 +105,205 @@ fn explain_buffer_accounting(bk: &mut Bookkeeping) -> PgResult<()> {
     Ok(())
 }
 
+/// `show_buffer_usage(es, usage)` (explain.c:4084) — show buffer usage details.
+/// Kept in sync with `peek_buffer_usage`. In text format only positive counters
+/// are shown; in structured formats every counter is emitted.
+fn show_buffer_usage(es: &mut ExplainState<'_>, usage: &BufferUsage) -> PgResult<()> {
+    if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
+        let has_shared = usage.shared_blks_hit > 0
+            || usage.shared_blks_read > 0
+            || usage.shared_blks_dirtied > 0
+            || usage.shared_blks_written > 0;
+        let has_local = usage.local_blks_hit > 0
+            || usage.local_blks_read > 0
+            || usage.local_blks_dirtied > 0
+            || usage.local_blks_written > 0;
+        let has_temp = usage.temp_blks_read > 0 || usage.temp_blks_written > 0;
+        let has_shared_timing =
+            !usage.shared_blk_read_time.is_zero() || !usage.shared_blk_write_time.is_zero();
+        let has_local_timing =
+            !usage.local_blk_read_time.is_zero() || !usage.local_blk_write_time.is_zero();
+        let has_temp_timing =
+            !usage.temp_blk_read_time.is_zero() || !usage.temp_blk_write_time.is_zero();
+
+        // Show only positive counter values.
+        if has_shared || has_local || has_temp {
+            fmt::ExplainIndentText(es)?;
+            es.str.try_push_str("Buffers:")?;
+
+            if has_shared {
+                es.str.try_push_str(" shared")?;
+                if usage.shared_blks_hit > 0 {
+                    es.str.try_push_str(&format!(" hit={}", usage.shared_blks_hit))?;
+                }
+                if usage.shared_blks_read > 0 {
+                    es.str
+                        .try_push_str(&format!(" read={}", usage.shared_blks_read))?;
+                }
+                if usage.shared_blks_dirtied > 0 {
+                    es.str
+                        .try_push_str(&format!(" dirtied={}", usage.shared_blks_dirtied))?;
+                }
+                if usage.shared_blks_written > 0 {
+                    es.str
+                        .try_push_str(&format!(" written={}", usage.shared_blks_written))?;
+                }
+                if has_local || has_temp {
+                    es.str.try_push(',')?;
+                }
+            }
+            if has_local {
+                es.str.try_push_str(" local")?;
+                if usage.local_blks_hit > 0 {
+                    es.str.try_push_str(&format!(" hit={}", usage.local_blks_hit))?;
+                }
+                if usage.local_blks_read > 0 {
+                    es.str
+                        .try_push_str(&format!(" read={}", usage.local_blks_read))?;
+                }
+                if usage.local_blks_dirtied > 0 {
+                    es.str
+                        .try_push_str(&format!(" dirtied={}", usage.local_blks_dirtied))?;
+                }
+                if usage.local_blks_written > 0 {
+                    es.str
+                        .try_push_str(&format!(" written={}", usage.local_blks_written))?;
+                }
+                if has_temp {
+                    es.str.try_push(',')?;
+                }
+            }
+            if has_temp {
+                es.str.try_push_str(" temp")?;
+                if usage.temp_blks_read > 0 {
+                    es.str
+                        .try_push_str(&format!(" read={}", usage.temp_blks_read))?;
+                }
+                if usage.temp_blks_written > 0 {
+                    es.str
+                        .try_push_str(&format!(" written={}", usage.temp_blks_written))?;
+                }
+            }
+            es.str.try_push('\n')?;
+        }
+
+        // As above, show only positive counter values.
+        if has_shared_timing || has_local_timing || has_temp_timing {
+            fmt::ExplainIndentText(es)?;
+            es.str.try_push_str("I/O Timings:")?;
+
+            if has_shared_timing {
+                es.str.try_push_str(" shared")?;
+                if !usage.shared_blk_read_time.is_zero() {
+                    es.str.try_push_str(&format!(
+                        " read={:.3}",
+                        usage.shared_blk_read_time.get_millisec()
+                    ))?;
+                }
+                if !usage.shared_blk_write_time.is_zero() {
+                    es.str.try_push_str(&format!(
+                        " write={:.3}",
+                        usage.shared_blk_write_time.get_millisec()
+                    ))?;
+                }
+                if has_local_timing || has_temp_timing {
+                    es.str.try_push(',')?;
+                }
+            }
+            if has_local_timing {
+                es.str.try_push_str(" local")?;
+                if !usage.local_blk_read_time.is_zero() {
+                    es.str.try_push_str(&format!(
+                        " read={:.3}",
+                        usage.local_blk_read_time.get_millisec()
+                    ))?;
+                }
+                if !usage.local_blk_write_time.is_zero() {
+                    es.str.try_push_str(&format!(
+                        " write={:.3}",
+                        usage.local_blk_write_time.get_millisec()
+                    ))?;
+                }
+                if has_temp_timing {
+                    es.str.try_push(',')?;
+                }
+            }
+            if has_temp_timing {
+                es.str.try_push_str(" temp")?;
+                if !usage.temp_blk_read_time.is_zero() {
+                    es.str.try_push_str(&format!(
+                        " read={:.3}",
+                        usage.temp_blk_read_time.get_millisec()
+                    ))?;
+                }
+                if !usage.temp_blk_write_time.is_zero() {
+                    es.str.try_push_str(&format!(
+                        " write={:.3}",
+                        usage.temp_blk_write_time.get_millisec()
+                    ))?;
+                }
+            }
+            es.str.try_push('\n')?;
+        }
+    } else {
+        fmt::ExplainPropertyInteger("Shared Hit Blocks", None, usage.shared_blks_hit, es)?;
+        fmt::ExplainPropertyInteger("Shared Read Blocks", None, usage.shared_blks_read, es)?;
+        fmt::ExplainPropertyInteger("Shared Dirtied Blocks", None, usage.shared_blks_dirtied, es)?;
+        fmt::ExplainPropertyInteger("Shared Written Blocks", None, usage.shared_blks_written, es)?;
+        fmt::ExplainPropertyInteger("Local Hit Blocks", None, usage.local_blks_hit, es)?;
+        fmt::ExplainPropertyInteger("Local Read Blocks", None, usage.local_blks_read, es)?;
+        fmt::ExplainPropertyInteger("Local Dirtied Blocks", None, usage.local_blks_dirtied, es)?;
+        fmt::ExplainPropertyInteger("Local Written Blocks", None, usage.local_blks_written, es)?;
+        fmt::ExplainPropertyInteger("Temp Read Blocks", None, usage.temp_blks_read, es)?;
+        fmt::ExplainPropertyInteger("Temp Written Blocks", None, usage.temp_blks_written, es)?;
+        if backend_utils_misc_guc_tables::vars::track_io_timing.read() {
+            fmt::ExplainPropertyFloat(
+                "Shared I/O Read Time",
+                Some("ms"),
+                usage.shared_blk_read_time.get_millisec(),
+                3,
+                es,
+            )?;
+            fmt::ExplainPropertyFloat(
+                "Shared I/O Write Time",
+                Some("ms"),
+                usage.shared_blk_write_time.get_millisec(),
+                3,
+                es,
+            )?;
+            fmt::ExplainPropertyFloat(
+                "Local I/O Read Time",
+                Some("ms"),
+                usage.local_blk_read_time.get_millisec(),
+                3,
+                es,
+            )?;
+            fmt::ExplainPropertyFloat(
+                "Local I/O Write Time",
+                Some("ms"),
+                usage.local_blk_write_time.get_millisec(),
+                3,
+                es,
+            )?;
+            fmt::ExplainPropertyFloat(
+                "Temp I/O Read Time",
+                Some("ms"),
+                usage.temp_blk_read_time.get_millisec(),
+                3,
+                es,
+            )?;
+            fmt::ExplainPropertyFloat(
+                "Temp I/O Write Time",
+                Some("ms"),
+                usage.temp_blk_write_time.get_millisec(),
+                3,
+                es,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 // ===========================================================================
 // ExplainOnePlan (explain.c:849) — the structural slice.
 // ===========================================================================
@@ -210,9 +409,20 @@ fn explain_one_plan<'mcx>(
         .map(|b| b != BufferUsage::default())
         .unwrap_or(false);
     if peek {
-        // show_buffer_usage(es, bufusage) deparses the buffer counters; the
-        // Planning buffer block formatting is unported (show_buffer_usage).
-        panic!("explain_one_plan: Planning buffer-usage block (show_buffer_usage) unported");
+        // ExplainOpenGroup("Planning", "Planning", true, es);
+        // show_buffer_usage(es, bufusage); ExplainCloseGroup(...).
+        fmt::ExplainOpenGroup("Planning", Some("Planning"), true, es)?;
+        if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
+            // ExplainIndentText(es); appendStringInfo("Planning:\n"); es->indent++.
+            fmt::ExplainIndentText(es)?;
+            es.str.try_push_str("Planning:\n")?;
+            es.indent += 1;
+        }
+        show_buffer_usage(es, &bk.bufusage)?;
+        if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
+            es.indent -= 1;
+        }
+        fmt::ExplainCloseGroup("Planning", Some("Planning"), true, es)?;
     }
 
     // if (es->summary && planduration) Planning Time.

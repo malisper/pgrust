@@ -399,15 +399,82 @@ pub fn ExplainNode<'es, 'p>(
         }
     }
 
-    // ANALYZE actual-rows block: only when planstate->instrument && es->analyze.
-    // The structural (non-ANALYZE) slice skips it; an ANALYZE plan needs the
-    // per-node Instrumentation totals (InstrEndLoop), which are present on the
-    // PlanState head but the actual-time formatting reaches show_buffer_usage /
-    // worker detail (unported). Gate loudly.
-    if es.analyze {
+    // We have to forcibly clean up the instrumentation state because we haven't
+    // done ExecutorEnd yet. `if (planstate->instrument) InstrEndLoop(...)`.
+    //
+    // InstrEndLoop folds an in-progress loop into the totals; it is a no-op once
+    // `running == false`. In the EXPLAIN ANALYZE flow ExplainNode runs only after
+    // ExecutorRun + ExecutorFinish have completed, so every node's instrument has
+    // `running == false` (looped or never-executed) and InstrEndLoop has nothing
+    // left to fold. The `instrument` slot is reached through the immutable
+    // `ps_head()` borrow, so the still-running case (which cannot occur here)
+    // cannot be finalized in place; surface it loudly rather than print stale
+    // totals.
+    if let Some(instr) = planstate.ps_head().instrument.as_deref() {
+        if instr.running {
+            panic!(
+                "ExplainNode: InstrEndLoop on a still-running node needs &mut instrument \
+                 (cannot occur after ExecutorFinish in EXPLAIN ANALYZE)"
+            );
+        }
+    }
+
+    // ANALYZE actual-rows/timing block:
+    //   if (es->analyze && instrument && instrument->nloops > 0) { ... }
+    //   else if (es->analyze) { " (never executed)" / zeroed properties }
+    let instr_totals = planstate
+        .ps_head()
+        .instrument
+        .as_deref()
+        .filter(|_| es.analyze)
+        .map(|i| (i.nloops, i.startup, i.total, i.ntuples));
+    if let Some((nloops_raw, startup, total, ntuples)) = instr_totals {
+        if nloops_raw > 0.0 {
+            let nloops = nloops_raw;
+            let startup_ms = 1000.0 * startup / nloops;
+            let total_ms = 1000.0 * total / nloops;
+            let rows = ntuples / nloops;
+
+            if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
+                es.str.try_push_str(" (actual ")?;
+                if es.timing {
+                    es.str
+                        .try_push_str(&format!("time={startup_ms:.3}..{total_ms:.3} "))?;
+                }
+                es.str
+                    .try_push_str(&format!("rows={rows:.2} loops={nloops:.0})"))?;
+            } else {
+                if es.timing {
+                    fmt::ExplainPropertyFloat("Actual Startup Time", Some("ms"), startup_ms, 3, es)?;
+                    fmt::ExplainPropertyFloat("Actual Total Time", Some("ms"), total_ms, 3, es)?;
+                }
+                fmt::ExplainPropertyFloat("Actual Rows", None, rows, 2, es)?;
+                fmt::ExplainPropertyFloat("Actual Loops", None, nloops, 0, es)?;
+            }
+        } else {
+            // never executed
+            if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
+                es.str.try_push_str(" (never executed)")?;
+            } else {
+                if es.timing {
+                    fmt::ExplainPropertyFloat("Actual Startup Time", Some("ms"), 0.0, 3, es)?;
+                    fmt::ExplainPropertyFloat("Actual Total Time", Some("ms"), 0.0, 3, es)?;
+                }
+                fmt::ExplainPropertyFloat("Actual Rows", None, 0.0, 0, es)?;
+                fmt::ExplainPropertyFloat("Actual Loops", None, 0.0, 0, es)?;
+            }
+        }
+    }
+
+    // Per-worker general execution details:
+    //   if (es->workers_state && es->verbose) { ... worker_instrument ... }
+    // The trimmed PlanState carries no `worker_instrument`, and `workers_state`
+    // is forced to None above, so this leg is never entered on the modelled path;
+    // it is a genuinely-trimmed sub-leg. Guard loudly if it is ever reached.
+    if es.workers_state.is_some() && es.verbose {
         panic!(
-            "ExplainNode: ANALYZE actual-rows/timing block not ported (needs InstrEndLoop \
-             totals + show_buffer_usage) — structural EXPLAIN only"
+            "ExplainNode: per-worker actual-rows detail needs PlanState.worker_instrument \
+             (trimmed from PlanState) — single-loop EXPLAIN ANALYZE only"
         );
     }
 
