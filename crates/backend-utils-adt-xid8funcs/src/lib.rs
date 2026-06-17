@@ -886,5 +886,17 @@ impl<'a> Pq8Cursor<'a> {
     }
 }
 
+/// The fmgr builtin layer (C: `fmgr_builtins[]`) for this file's scalar / text
+/// transaction-id functions; registered by [`fmgr_builtins::register_xid8funcs_builtins`].
+pub mod fmgr_builtins;
+
+/// Install this crate's seams (called by `seams-init::init_all`). Registers the
+/// `xid8funcs.c` builtin rows into the fmgr-core builtin table so by-OID
+/// dispatch resolves `pg_current_xact_id` / `txid_current` / `pg_xact_status`
+/// (and their aliases).
+pub fn init_seams() {
+    fmgr_builtins::register_xid8funcs_builtins();
+}
+
 #[cfg(test)]
 mod tests;
