@@ -42,6 +42,8 @@ use types_fmgr::{
 use types_guc::GucContext;
 use types_nodes::parsenodes::ObjectType;
 
+pub mod builtin_canonical;
+
 /// C: `BYTEAOID` (`pg_type.h`) — the `consttype` of the opclass-options `Const`.
 pub const BYTEAOID: Oid = 17;
 /// C: `ProcedureRelationId` (`pg_proc` relation Oid).
@@ -141,6 +143,132 @@ pub fn fmgr_internal_function(proname: &str) -> Oid {
         Some(fbp) => fbp.foid,
         None => InvalidOid,
     }
+}
+
+// ===========================================================================
+// Built-in REGISTRY completeness guard (no C analogue — C's compile-time
+// `Gen_fmgrtab.pl` makes `fmgr_builtins[]` complete by construction; the
+// per-crate runtime registry has no such guarantee, so we assert it).
+// ===========================================================================
+
+/// A canonical built-in that is absent from (or mismatched in) the runtime
+/// registry. Reported by [`missing_builtins`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BuiltinGap {
+    /// C: `FmgrBuiltin.foid` — the canonical OID.
+    pub foid: Oid,
+    /// C: `FmgrBuiltin.funcName` — the canonical `prosrc` name.
+    pub name: &'static str,
+    /// What is wrong with this OID in the runtime registry.
+    pub kind: BuiltinGapKind,
+}
+
+/// Why a canonical built-in is reported as a gap.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BuiltinGapKind {
+    /// `fmgr_isbuiltin(foid)` returns `None`: the OID is not registered at all
+    /// (its owner crate is unported or its `init_seams()` is unwired). This is
+    /// the silent-miss / boot-recursion failure mode the guard exists to catch.
+    NotRegistered,
+    /// The OID is registered but a metadata field diverges from `pg_proc.dat`.
+    Mismatch {
+        /// The mismatching field, e.g. `"nargs"`, `"strict"`, `"retset"`,
+        /// `"name"`.
+        field: &'static str,
+    },
+}
+
+/// Compare the runtime built-in registry against the canonical set
+/// [`builtin_canonical::CANONICAL`] and return every gap.
+///
+/// MUST be called AFTER all `init_seams()` / `register_builtins` have run
+/// (i.e. on a fully-initialized backend), since the registry is per-backend
+/// `thread_local` state populated at init. An empty result means the registry
+/// is complete — every built-in `pg_proc.dat` declares is reachable through
+/// `fmgr_isbuiltin`, exactly as C's `fmgr_builtins[]` guarantees.
+///
+/// This is the runtime half of the completeness guard; the
+/// `seams-init` integration test calls `init_all()` then asserts this is empty.
+pub fn missing_builtins() -> Vec<BuiltinGap> {
+    let mut gaps = Vec::new();
+    for &(foid, name, nargs, strict, retset) in builtin_canonical::CANONICAL {
+        match fmgr_isbuiltin(foid) {
+            None => gaps.push(BuiltinGap {
+                foid,
+                name,
+                kind: BuiltinGapKind::NotRegistered,
+            }),
+            Some(reg) => {
+                // The registry is keyed by OID; verify the metadata C's
+                // `fmgr_builtins[]` row would carry actually matches. A
+                // divergence means a crate registered the right OID with the
+                // wrong calling convention — also a correctness defect.
+                let field = if reg.name != name {
+                    Some("name")
+                } else if reg.nargs != nargs {
+                    Some("nargs")
+                } else if reg.strict != strict {
+                    Some("strict")
+                } else if reg.retset != retset {
+                    Some("retset")
+                } else {
+                    None
+                };
+                if let Some(field) = field {
+                    gaps.push(BuiltinGap {
+                        foid,
+                        name,
+                        kind: BuiltinGapKind::Mismatch { field },
+                    });
+                }
+            }
+        }
+    }
+    gaps
+}
+
+/// Boot-time completeness assertion: panic loudly (naming the first missing
+/// OID + function) if the runtime registry is missing any canonical built-in.
+///
+/// Call this from backend init AFTER all `register_builtins` have run, to fail
+/// fast at startup instead of recursing to a stack overflow on the first
+/// catalog-scan comparator whose OID was never registered. The `seams-init`
+/// test exercises the same check at `cargo test` time so CI catches a regression
+/// before it ever reaches a running backend.
+pub fn assert_builtins_complete() {
+    let gaps = missing_builtins();
+    if gaps.is_empty() {
+        return;
+    }
+    let total = gaps.len();
+    let detail: String = gaps
+        .iter()
+        .take(20)
+        .map(|g| match g.kind {
+            BuiltinGapKind::NotRegistered => {
+                format!("\n  builtin {} {} not registered", g.foid, g.name)
+            }
+            BuiltinGapKind::Mismatch { field } => format!(
+                "\n  builtin {} {} registered with wrong {}",
+                g.foid, g.name, field
+            ),
+        })
+        .collect();
+    let more = if total > 20 {
+        format!("\n  ... and {} more", total - 20)
+    } else {
+        String::new()
+    };
+    panic!(
+        "fmgr built-in registry incomplete: {} of {} canonical built-ins \
+         missing or mismatched (an unported/unwired adt crate). C's \
+         Gen_fmgrtab.pl makes fmgr_builtins[] complete by construction; the \
+         per-crate registry must too:{}{}",
+        total,
+        builtin_canonical::CANONICAL.len(),
+        detail,
+        more
+    );
 }
 
 // ===========================================================================

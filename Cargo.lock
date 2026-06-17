@@ -21877,6 +21877,7 @@ dependencies = [
  "port-pgsleep",
  "port-pqsignal",
  "probe-adt-scalar-bool",
+ "types-core",
  "types-error",
 ]
 

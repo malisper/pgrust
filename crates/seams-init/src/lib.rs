@@ -4,6 +4,12 @@
 //! per ported crate, nothing else. Each crate wires its own seams in its own
 //! `init_seams()`; this is just the place that invokes them all.
 
+/// The checked-in inventory of canonical built-ins the runtime registry is
+/// currently missing or has registered with diverging metadata. The
+/// completeness guard (`builtin_registry_matches_canonical_or_baseline`) holds
+/// the live gap to exactly this set.
+pub mod builtin_gap_baseline;
+
 pub fn init_all() {
     // One line per ported crate, kept sorted:
     contrib_amcheck_verify_nbtree::init_seams();
@@ -2319,5 +2325,160 @@ mod recurrence_guard {
             }
             panic!("{}", msg);
         }
+    }
+}
+
+
+
+#[cfg(test)]
+mod builtin_registry_completeness {
+    //! Completeness guard for the fmgr built-in REGISTRY — the runtime analog of
+    //! C's compile-time-complete `fmgr_builtins[]`.
+    //!
+    //! C's `Gen_fmgrtab.pl` emits EVERY built-in from `pg_proc.dat` into one
+    //! static array, so `fmgr_isbuiltin(oid)` can never silently miss a real
+    //! built-in. The port assembles the equivalent set at runtime from per-crate
+    //! `register_builtins` calls in each `init_seams()`. If a crate is unported or
+    //! its `init_seams()` is unwired, its built-ins are silently absent and
+    //! `fmgr_isbuiltin` misses — for a catalog-scan comparator that recurses to a
+    //! boot-time stack overflow. This guard makes that gap a loud `cargo test`
+    //! failure instead.
+    //!
+    //! `init_all()` populates the (per-backend `thread_local`) registry; we then
+    //! compare the live gap against `crate::builtin_gap_baseline::KNOWN_GAP`. The
+    //! canonical set is `backend_utils_fmgr_core::builtin_canonical::CANONICAL`,
+    //! derived from the SAME `pg_proc.dat` C uses.
+
+    use backend_utils_fmgr_core::{missing_builtins, BuiltinGap, BuiltinGapKind};
+    use std::collections::BTreeMap;
+
+    fn kind_str(k: &BuiltinGapKind) -> String {
+        match k {
+            BuiltinGapKind::NotRegistered => "not-registered".to_string(),
+            BuiltinGapKind::Mismatch { field } => format!("mismatch:{}", field),
+        }
+    }
+
+    #[test]
+    fn builtin_registry_matches_canonical_or_baseline() {
+        super::init_all();
+
+        // Live gap: (foid) -> (name, kind), keyed for set comparison.
+        let live: BTreeMap<u32, BuiltinGap> = missing_builtins()
+            .into_iter()
+            .map(|g| (g.foid, g))
+            .collect();
+        // Accepted baseline gap, same keying.
+        let baseline: BTreeMap<u32, (&'static str, &BuiltinGapKind)> =
+            crate::builtin_gap_baseline::KNOWN_GAP
+                .iter()
+                .map(|(oid, name, kind)| (*oid, (*name, kind)))
+                .collect();
+
+        // REGRESSIONS: a live gap not accepted by the baseline, OR accepted but
+        // with a different failure kind (e.g. was a metadata mismatch, now fully
+        // unregistered). Naming the OID + function is the loud-failure contract.
+        let mut regressions: Vec<String> = Vec::new();
+        for (oid, g) in &live {
+            match baseline.get(oid) {
+                None => regressions.push(format!(
+                    "\n  builtin {} {} {} (NOT in baseline — an unported/unwired \
+                     builtin crate, or a previously-registered builtin went missing)",
+                    oid,
+                    g.name,
+                    kind_str(&g.kind)
+                )),
+                Some((_, bkind)) if kind_str(&g.kind) != kind_str(bkind) => regressions
+                    .push(format!(
+                        "\n  builtin {} {} now {} (baseline recorded {})",
+                        oid,
+                        g.name,
+                        kind_str(&g.kind),
+                        kind_str(bkind)
+                    )),
+                Some(_) => {}
+            }
+        }
+
+        // STALE baseline entries: recorded as a gap but no longer one (the owner
+        // crate got ported/wired). Must be DELETED so the baseline ratchets
+        // monotonically toward empty (== full C parity).
+        let mut stale: Vec<String> = Vec::new();
+        for (oid, (name, _)) in &baseline {
+            if !live.contains_key(oid) {
+                stale.push(format!("\n  builtin {} {}", oid, name));
+            }
+        }
+
+        if regressions.is_empty() && stale.is_empty() {
+            return;
+        }
+
+        let mut msg = String::new();
+        if !regressions.is_empty() {
+            let total = regressions.len();
+            let shown: String = regressions.iter().take(40).cloned().collect();
+            let more = if total > 40 {
+                format!("\n  ... and {} more", total - 40)
+            } else {
+                String::new()
+            };
+            msg.push_str(&format!(
+                "fmgr built-in registry REGRESSED: {} canonical built-in(s) newly \
+                 missing/mismatched beyond the accepted baseline (an unported or \
+                 unwired adt crate — C's fmgr_builtins[] can never miss, the \
+                 per-crate registry must not either). Wire/register the owner, or \
+                 if intentionally still-unported add the OID to \
+                 seams-init/src/builtin_gap_baseline.rs:{}{}",
+                total, shown, more
+            ));
+        }
+        if !stale.is_empty() {
+            if !msg.is_empty() {
+                msg.push_str("\n\n");
+            }
+            let total = stale.len();
+            let shown: String = stale.iter().take(40).cloned().collect();
+            let more = if total > 40 {
+                format!("\n  ... and {} more", total - 40)
+            } else {
+                String::new()
+            };
+            msg.push_str(&format!(
+                "stale builtin-gap baseline: {} entry(ies) in \
+                 seams-init/src/builtin_gap_baseline.rs are NO LONGER gaps (the \
+                 owner was ported/wired). DELETE them so the baseline ratchets \
+                 toward empty:{}{}",
+                total, shown, more
+            ));
+        }
+        panic!("{}", msg);
+    }
+
+    /// Independent of the live registry: the baseline must only ever cite OIDs
+    /// that are actually canonical built-ins (guards against a typo'd or
+    /// stale-after-PG-bump OID lingering in the baseline). Names must match the
+    /// canonical `prosrc` too.
+    #[test]
+    fn baseline_only_cites_canonical_builtins() {
+        use backend_utils_fmgr_core::builtin_canonical::CANONICAL;
+        let canon: BTreeMap<u32, &'static str> =
+            CANONICAL.iter().map(|(oid, name, ..)| (*oid, *name)).collect();
+        let mut bad: Vec<String> = Vec::new();
+        for (oid, name, _) in crate::builtin_gap_baseline::KNOWN_GAP {
+            match canon.get(oid) {
+                None => bad.push(format!("\n  {} {} (not a canonical builtin OID)", oid, name)),
+                Some(cn) if cn != name => {
+                    bad.push(format!("\n  {} baseline name {:?} != canonical {:?}", oid, name, cn))
+                }
+                Some(_) => {}
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "builtin_gap_baseline.rs cites non-canonical OID(s)/name(s) \
+             (regenerate after a PostgreSQL bump):{}",
+            bad.concat()
+        );
     }
 }
