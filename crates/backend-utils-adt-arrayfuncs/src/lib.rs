@@ -59,6 +59,7 @@
 #![allow(clippy::result_large_err)]
 #![allow(clippy::too_many_arguments)]
 
+pub mod array_userfuncs;
 pub mod arraysubs;
 pub mod foundation;
 pub mod construct;
