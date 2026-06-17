@@ -25,6 +25,7 @@
 //! [`backend_utils_adt_network_seams`] (called here, installed by the unported
 //! owner subsystems — a loud panic until they land).
 
+pub mod fmgr_builtins;
 pub mod inet_cidr_ntop;
 pub mod inet_net_ntop;
 pub mod inet_net_pton;
@@ -1162,4 +1163,10 @@ pub fn clean_ipv6_addr(addr_family: i32, addr: &mut Vec<u8>) {
 /// CALLS (installed by the unported owner subsystems). This installer is
 /// therefore empty, exactly as the seam-discipline guard expects for a crate
 /// that owns no inward contract.
-pub fn init_seams() {}
+///
+/// It does, however, register its SQL-callable `network.c` builtins into the
+/// fmgr-core builtin table (C: `fmgr_builtins[]`) so by-OID dispatch resolves
+/// them.
+pub fn init_seams() {
+    fmgr_builtins::register_network_builtins();
+}

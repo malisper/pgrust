@@ -17,3 +17,8 @@ types-network = { path = "../types-network" }
 backend-utils-adt-network-seams = { path = "../backend-utils-adt-network-seams" }
 # pg_strtoint32 (numutils.c, int4in path): owner ported, depend directly.
 backend-utils-adt-numutils = { path = "../backend-utils-adt-numutils" }
+# fmgr builtin table registration (C: fmgr_builtins[]) for the SQL-callable
+# session-info functions; their call frame lives in types-fmgr.
+types-datum = { path = "../types-datum" }
+types-fmgr = { path = "../types-fmgr" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
