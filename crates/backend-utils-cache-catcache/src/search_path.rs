@@ -225,6 +225,12 @@ pub(crate) fn search_cat_cache_internal<'mcx>(
 
     match probe {
         ProbeResult::HitPositive(cache_idx, ct_idx) => {
+            pgrust_trace::trace!(
+                pgrust_trace::Category::Catcache,
+                "SearchCatCache cache_id={} nkeys={} HIT",
+                cache_id,
+                nkeys
+            );
             let tuple = build_formed_tuple(mcx, cache_idx, ct_idx)?;
             /*
              * The owned model returns a copy; the borrowed reference's life is
@@ -234,8 +240,23 @@ pub(crate) fn search_cat_cache_internal<'mcx>(
             release_cat_cache(cache_id, ct_idx)?;
             Ok(Some(tuple))
         }
-        ProbeResult::HitNegative => Ok(None),
+        ProbeResult::HitNegative => {
+            pgrust_trace::trace!(
+                pgrust_trace::Category::Catcache,
+                "SearchCatCache cache_id={} nkeys={} HIT-NEGATIVE",
+                cache_id,
+                nkeys
+            );
+            Ok(None)
+        }
         ProbeResult::Miss(cache_idx, hash_value, hash_index) => {
+            pgrust_trace::trace!(
+                pgrust_trace::Category::Catcache,
+                "SearchCatCache cache_id={} nkeys={} MISS (hash={:#x})",
+                cache_id,
+                nkeys,
+                hash_value
+            );
             search_cat_cache_miss(
                 mcx, cache_id, cache_idx, nkeys, hash_value, hash_index, arguments,
             )

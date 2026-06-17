@@ -221,6 +221,7 @@ pub fn SearchSysCache<'mcx>(
 ) -> PgResult<Option<FormedTuple<'mcx>>> {
     assert_cache_exists(cacheId);
 
+    pgrust_trace::trace!(pgrust_trace::Category::Syscache, "SearchSysCache cacheId={}", cacheId);
     catcache_seams::search_cat_cache::call(mcx, cacheId, key1, key2, key3, key4)
 }
 
@@ -233,6 +234,7 @@ pub fn SearchSysCache1<'mcx>(
     assert_cache_exists(cacheId);
     debug_assert_eq!(catcache_seams::cache_nkeys::call(cacheId), 1);
 
+    pgrust_trace::trace!(pgrust_trace::Category::Syscache, "SearchSysCache1 cacheId={}", cacheId);
     catcache_seams::search_cat_cache_1::call(mcx, cacheId, key1)
 }
 
@@ -246,6 +248,7 @@ pub fn SearchSysCache2<'mcx>(
     assert_cache_exists(cacheId);
     debug_assert_eq!(catcache_seams::cache_nkeys::call(cacheId), 2);
 
+    pgrust_trace::trace!(pgrust_trace::Category::Syscache, "SearchSysCache2 cacheId={}", cacheId);
     catcache_seams::search_cat_cache_2::call(mcx, cacheId, key1, key2)
 }
 
@@ -260,6 +263,7 @@ pub fn SearchSysCache3<'mcx>(
     assert_cache_exists(cacheId);
     debug_assert_eq!(catcache_seams::cache_nkeys::call(cacheId), 3);
 
+    pgrust_trace::trace!(pgrust_trace::Category::Syscache, "SearchSysCache3 cacheId={}", cacheId);
     catcache_seams::search_cat_cache_3::call(mcx, cacheId, key1, key2, key3)
 }
 
@@ -275,6 +279,7 @@ pub fn SearchSysCache4<'mcx>(
     assert_cache_exists(cacheId);
     debug_assert_eq!(catcache_seams::cache_nkeys::call(cacheId), 4);
 
+    pgrust_trace::trace!(pgrust_trace::Category::Syscache, "SearchSysCache4 cacheId={}", cacheId);
     catcache_seams::search_cat_cache_4::call(mcx, cacheId, key1, key2, key3, key4)
 }
 
@@ -282,6 +287,7 @@ pub fn SearchSysCache4<'mcx>(
 /// tuple. In the owned model the search returned a copy, so releasing is
 /// consuming it (the cache-side refcount was dropped inside the search).
 pub fn ReleaseSysCache(tuple: FormedTuple<'_>) {
+    pgrust_trace::trace!(pgrust_trace::Category::Syscache, "ReleaseSysCache");
     drop(tuple);
 }
 

@@ -408,6 +408,13 @@ pub fn slot_deform_heap_tuple<'mcx>(
     }
 
     // Save state for next execution
+    pgrust_trace::trace!(
+        pgrust_trace::Category::Slot,
+        "slot_deform_heap_tuple nvalid {} -> {} (off={})",
+        slot.base.tts_nvalid,
+        attnum,
+        off
+    );
     slot.base.tts_nvalid = attnum as AttrNumber;
     slot.off = off as u32;
     if slow {

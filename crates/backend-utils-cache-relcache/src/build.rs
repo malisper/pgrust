@@ -309,6 +309,12 @@ fn project_form_pg_class<'mcx>(
 /// `RelationIdCache`. Returns the built `Relation` (the C pointer), or `null`
 /// when no `pg_class` row exists. **Own orchestration.**
 pub fn RelationBuildDesc(targetRelId: Oid, insertIt: bool) -> PgResult<Oid> {
+    let _trace = pgrust_trace::trace_scope!(
+        pgrust_trace::Category::Relcache,
+        "RelationBuildDesc relid={} insertIt={}",
+        targetRelId,
+        insertIt
+    );
     // Push our entry onto in_progress_list (the invalidation-restart protocol).
     // C grows a fixed array; the owned model is a Vec, so the offset is the
     // current length before the push.

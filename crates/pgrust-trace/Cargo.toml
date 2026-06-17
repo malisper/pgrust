@@ -1,0 +1,13 @@
+[package]
+name = "pgrust-trace"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pgrust_trace"
+path = "src/lib.rs"
+
+# Zero non-std dependencies on purpose: ANY crate (even low-level seam-core)
+# may depend on pgrust-trace without risking a dependency cycle.
+[dependencies]

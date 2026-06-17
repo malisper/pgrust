@@ -8,7 +8,15 @@ publish.workspace = true
 name = "backend_access_common_heaptuple"
 path = "src/lib.rs"
 
+# `trace` (default-on) enables env-gated deform tracing via pgrust-trace.
+# Kept behind a feature because this crate is `#![no_std]`; the feature can be
+# disabled to guarantee no std linkage if ever needed.
+[features]
+default = ["trace"]
+trace = ["pgrust-trace"]
+
 [dependencies]
+pgrust-trace = { path = "../pgrust-trace", optional = true }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-datum = { path = "../types-datum" }

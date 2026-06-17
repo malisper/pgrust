@@ -42,6 +42,11 @@ pub fn exec_proc_node<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<SlotId>> {
     // return node->ExecProcNode(node);
+    let _trace = pgrust_trace::trace_scope!(
+        pgrust_trace::Category::Exec,
+        "ExecProcNode {}",
+        node.tag()
+    );
     let cb = node.ps_head().ExecProcNode.expect(
         "ExecProcNode called on a node whose ExecProcNode callback was never installed \
          (ExecSetExecProcNode not run)",

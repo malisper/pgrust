@@ -9,6 +9,7 @@ name = "backend_utils_cache_catcache"
 path = "src/lib.rs"
 
 [dependencies]
+pgrust-trace = { path = "../pgrust-trace" }
 mcx = { path = "../mcx" }
 seam-core = { path = "../seam-core" }
 common-hashfn-seams = { path = "../common-hashfn-seams" }

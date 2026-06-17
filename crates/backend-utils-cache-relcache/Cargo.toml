@@ -9,6 +9,7 @@ name = "backend_utils_cache_relcache"
 path = "src/lib.rs"
 
 [dependencies]
+pgrust-trace = { path = "../pgrust-trace" }
 # Inward seam crate this unit owns + installs.
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
 

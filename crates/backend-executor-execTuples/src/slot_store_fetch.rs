@@ -47,6 +47,13 @@ pub fn ExecStoreHeapTuple<'mcx>(
     // slot->tts_tableOid = tuple->t_tableOid; (read before the move).
     let t_table_oid = tuple.tuple.t_tableOid;
 
+    pgrust_trace::trace!(
+        pgrust_trace::Category::Slot,
+        "ExecStoreHeapTuple tableOid={} should_free={}",
+        t_table_oid,
+        should_free
+    );
+
     // tts_heap_store_tuple(slot, tuple, shouldFree);
     tts_heap_store_tuple(hslot, tuple, should_free);
 
@@ -76,6 +83,13 @@ pub fn ExecStoreBufferHeapTuple<'mcx>(
 
     // slot->tts_tableOid = tuple->t_tableOid; (read before the move).
     let t_table_oid = tuple.tuple.t_tableOid;
+
+    pgrust_trace::trace!(
+        pgrust_trace::Category::Slot,
+        "ExecStoreBufferHeapTuple tableOid={} buffer={}",
+        t_table_oid,
+        buffer
+    );
 
     // tts_buffer_heap_store_tuple(slot, tuple, buffer, false);
     tts_buffer_heap_store_tuple(bslot, tuple, buffer, false);
@@ -226,6 +240,12 @@ pub fn ExecStoreVirtualTuple(slot: &mut SlotData) -> PgResult<()> {
     debug_assert!(slot.base().is_empty());
 
     let natts = tupdesc_natts(slot);
+
+    pgrust_trace::trace!(
+        pgrust_trace::Category::Slot,
+        "ExecStoreVirtualTuple natts={}",
+        natts
+    );
 
     let base = slot.base_mut();
     // slot->tts_flags &= ~TTS_FLAG_EMPTY;
@@ -386,6 +406,7 @@ pub fn ExecMaterializeSlot<'mcx>(mcx: Mcx<'mcx>, slot: &mut SlotData<'mcx>) -> P
 /// `ExecClearTuple(slot)` (tuptable.h inline): clear the slot's contents
 /// (`slot->tts_ops->clear`).
 pub fn ExecClearTuple(slot: &mut SlotData) -> PgResult<()> {
+    pgrust_trace::trace!(pgrust_trace::Category::Slot, "ExecClearTuple");
     slot_clear(slot);
     Ok(())
 }

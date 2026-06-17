@@ -8,6 +8,15 @@
 //! Calling an uninstalled seam panics with the seam's full path. Installing
 //! a seam twice panics. There is no silent fallback.
 
+/// Trace hooks used by the `seam!` macro expansion. Re-exported so that the
+/// macro (which expands in *other* crates that may not depend on `pgrust-trace`
+/// directly) can reach the facility through `$crate::__trace::...`.
+#[doc(hidden)]
+pub mod __trace {
+    pub use pgrust_trace::Category;
+    pub use pgrust_trace::{trace, trace_bt};
+}
+
 /// Declare one seam.
 ///
 /// ```ignore
@@ -62,8 +71,20 @@ macro_rules! seam {
 
             pub fn call $(<$($lt),+>)? ($($arg: $arg_ty),*) $(-> $ret)? {
                 match SLOT.get() {
-                    Some(f) => f($($arg),*),
-                    None => panic!(concat!("seam not installed: ", module_path!())),
+                    Some(f) => {
+                        $crate::__trace::trace!(
+                            $crate::__trace::Category::Seam, "{}", module_path!()
+                        );
+                        f($($arg),*)
+                    }
+                    None => {
+                        // Show the full caller stack before the loud panic so a
+                        // missing install is debuggable in one run.
+                        $crate::__trace::trace_bt!(
+                            $crate::__trace::Category::Seam, "MISS {}", module_path!()
+                        );
+                        panic!(concat!("seam not installed: ", module_path!()))
+                    }
                 }
             }
         }

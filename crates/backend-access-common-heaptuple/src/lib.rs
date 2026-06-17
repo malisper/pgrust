@@ -55,6 +55,12 @@
 
 extern crate alloc;
 
+// The `trace` feature uses the std-based pgrust-trace facility. This crate is
+// `#![no_std]`, so bring `std` into scope explicitly (it is always present in
+// the final binary's sysroot). Trace sites are env-gated; zero cost when off.
+#[cfg(feature = "trace")]
+extern crate std;
+
 pub mod flat;
 
 #[cfg(test)]
@@ -811,6 +817,14 @@ pub fn heap_deform_tuple<'mcx>(
         let thisatt = &tuple_desc.compact_attrs[attnum as usize];
 
         if hasnulls && att_isnull(attnum as usize, bp) {
+            #[cfg(feature = "trace")]
+            pgrust_trace::trace!(
+                pgrust_trace::Category::Heaptuple,
+                "deform attnum={} isnull=true attlen={} byval={}",
+                attnum,
+                thisatt.attlen,
+                thisatt.attbyval
+            );
             out.push((Datum::null(), true));
             slow = true; // can't use attcacheoff anymore
             attnum += 1;
@@ -837,6 +851,15 @@ pub fn heap_deform_tuple<'mcx>(
         }
 
         // values[attnum] = fetchatt(thisatt, tp + off);
+        #[cfg(feature = "trace")]
+        pgrust_trace::trace!(
+            pgrust_trace::Category::Heaptuple,
+            "deform attnum={} isnull=false off={} byval={} attlen={}",
+            attnum,
+            off,
+            thisatt.attbyval,
+            thisatt.attlen
+        );
         let value = fetchatt(mcx, thisatt, data, off)?;
         out.push((value, false));
 

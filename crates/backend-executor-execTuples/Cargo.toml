@@ -9,6 +9,7 @@ name = "backend_executor_execTuples"
 path = "src/lib.rs"
 
 [dependencies]
+pgrust-trace = { path = "../pgrust-trace" }
 mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
