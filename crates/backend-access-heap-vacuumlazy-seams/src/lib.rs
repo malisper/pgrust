@@ -283,37 +283,15 @@ seam_core::seam!(
     ) -> PgResult<Buffer>
 );
 seam_core::seam!(
-    /// `ReleaseBuffer(buffer)`.
-    pub fn release_buffer(buffer: Buffer) -> PgResult<()>
-);
-seam_core::seam!(
     /// `PrefetchBuffer(rel, fork, blkno)`.
     pub fn prefetch_buffer(rel: Oid, fork: i32, blkno: BlockNumber) -> PgResult<()>
 );
-seam_core::seam!(
-    /// `UnlockReleaseBuffer(buffer)`.
-    pub fn unlock_release_buffer(buffer: Buffer) -> PgResult<()>
-);
-seam_core::seam!(
-    /// `LockBuffer(buffer, mode)` — `mode` is `BUFFER_LOCK_*`.
-    pub fn lock_buffer(buffer: Buffer, mode: i32) -> PgResult<()>
-);
-seam_core::seam!(
-    /// `LockBufferForCleanup(buffer)`.
-    pub fn lock_buffer_for_cleanup(buffer: Buffer) -> PgResult<()>
-);
-seam_core::seam!(
-    /// `ConditionalLockBufferForCleanup(buffer)`.
-    pub fn conditional_lock_buffer_for_cleanup(buffer: Buffer) -> PgResult<bool>
-);
-seam_core::seam!(
-    /// `MarkBufferDirty(buffer)`.
-    pub fn mark_buffer_dirty(buffer: Buffer) -> PgResult<()>
-);
-seam_core::seam!(
-    /// `BufferGetBlockNumber(buffer)`.
-    pub fn buffer_get_block_number(buffer: Buffer) -> PgResult<BlockNumber>
-);
+// `release_buffer` / `unlock_release_buffer` re-homed to the canonical owner
+// `backend-storage-buffer-bufmgr-seams` (bufmgr.c); caller binds there.
+// `lock_buffer` / `lock_buffer_for_cleanup` /
+// `conditional_lock_buffer_for_cleanup` / `mark_buffer_dirty` /
+// `buffer_get_block_number` re-homed to the canonical owner
+// `backend-storage-buffer-bufmgr-seams` (bufmgr.c); caller binds there.
 seam_core::seam!(
     /// `CheckBufferIsPinnedOnce(buffer)`.
     pub fn check_buffer_is_pinned_once(buffer: Buffer) -> PgResult<()>
@@ -556,10 +534,8 @@ seam_core::seam!(
     /// `get_namespace_name(nspoid)`.
     pub fn get_namespace_name(nspoid: Oid) -> PgResult<String>
 );
-seam_core::seam!(
-    /// `CHECK_FOR_INTERRUPTS()`.
-    pub fn check_for_interrupts() -> PgResult<()>
-);
+// `check_for_interrupts` re-homed to the canonical owner
+// `backend-tcop-postgres-seams` (`CHECK_FOR_INTERRUPTS()`); caller binds there.
 seam_core::seam!(
     /// `WaitLatch(MyLatch, wakeEvents, timeout_ms, wait_event_info)`.
     pub fn wait_latch(

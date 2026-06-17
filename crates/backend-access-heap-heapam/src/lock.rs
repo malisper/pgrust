@@ -752,7 +752,7 @@ fn finish_out_unlocked<'mcx>(
     buffer: Buffer,
 ) -> PgResult<HeapLockResult<'mcx>> {
     if vmbuffer != InvalidBuffer {
-        page_seam::release_buffer::call(vmbuffer)?;
+        backend_storage_buffer_bufmgr_seams::release_buffer::call(vmbuffer);
     }
     /*
      * Now that we have marked the tuple locked, release the lmgr tuple lock.
@@ -835,7 +835,7 @@ fn commit_lock<'mcx>(
         *cleared_all_frozen = true;
     }
 
-    page_seam::mark_buffer_dirty::call(buffer)?;
+    backend_storage_buffer_bufmgr_seams::mark_buffer_dirty::call(buffer);
 
     // Write the stamped header back into the on-page tuple.
     let offnum = ItemPointerGetOffsetNumber(&tuple.t_self);
@@ -1133,7 +1133,7 @@ fn heap_lock_updated_tuple_rec<'mcx>(
                     hdr.t_infomask2 |= new_infomask2;
                 }
 
-                page_seam::mark_buffer_dirty::call(buf)?;
+                backend_storage_buffer_bufmgr_seams::mark_buffer_dirty::call(buf);
 
                 // Write the stamped header back into the page.
                 let offnum = ItemPointerGetOffsetNumber(&mytup.t_self);
@@ -1200,7 +1200,7 @@ fn finish_chain_locked<'mcx>(
 ) -> PgResult<TM_Result> {
     bufmgr_seam::unlock_release_buffer::call(buf);
     if vmbuffer != InvalidBuffer {
-        page_seam::release_buffer::call(vmbuffer)?;
+        backend_storage_buffer_bufmgr_seams::release_buffer::call(vmbuffer);
     }
     Ok(result)
 }
@@ -1208,7 +1208,7 @@ fn finish_chain_locked<'mcx>(
 /// `out_unlocked:` for the chain walker — release vm only (buffer already gone).
 fn finish_chain_unlocked<'mcx>(vmbuffer: Buffer, result: TM_Result) -> PgResult<TM_Result> {
     if vmbuffer != InvalidBuffer {
-        page_seam::release_buffer::call(vmbuffer)?;
+        backend_storage_buffer_bufmgr_seams::release_buffer::call(vmbuffer);
     }
     Ok(result)
 }

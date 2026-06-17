@@ -20,3 +20,5 @@ backend-utils-error = { path = "../backend-utils-error" }
 backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
 backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }
 backend-access-common-tidstore-seams = { path = "../backend-access-common-tidstore-seams" }
+backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }

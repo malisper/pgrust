@@ -1799,6 +1799,8 @@ dependencies = [
  "backend-access-common-tidstore-seams",
  "backend-access-heap-vacuumlazy-seams",
  "backend-commands-vacuum-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-tcop-postgres-seams",
  "backend-utils-error",
  "pg-prng-seams",
  "pg-rusage-seams",

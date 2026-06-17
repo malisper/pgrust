@@ -119,7 +119,7 @@ pub fn heap_finish_speculative<'mcx>(
 
     debug_assert!(HeapTupleHeaderIsSpeculative(&htup));
 
-    page_seam::mark_buffer_dirty::call(buffer)?;
+    backend_storage_buffer_bufmgr_seams::mark_buffer_dirty::call(buffer);
 
     /*
      * Replace the speculative insertion token with a real t_ctid, pointing to
@@ -241,7 +241,7 @@ pub fn heap_abort_speculative<'mcx>(
         hdr.t_ctid = self_tid;
     }
 
-    page_seam::mark_buffer_dirty::call(buffer)?;
+    backend_storage_buffer_bufmgr_seams::mark_buffer_dirty::call(buffer);
 
     // Apply PageSetPrunable(page, prune_xid) and write the mutated header back.
     let header_image = data_ref_f(&tp).clone();
@@ -300,7 +300,7 @@ pub fn heap_abort_speculative<'mcx>(
      */
 
     /* Now we can release the buffer */
-    page_seam::release_buffer::call(buffer)?;
+    backend_storage_buffer_bufmgr_seams::release_buffer::call(buffer);
 
     /* count deletion, as we counted the insertion too */
     backend_utils_activity_pgstat_seams::pgstat_count_heap_delete::call(
@@ -570,7 +570,7 @@ pub fn heap_inplace_update_and_unlock<'mcx>(
         Ok(())
     })?;
 
-    page_seam::mark_buffer_dirty::call(buffer)?;
+    backend_storage_buffer_bufmgr_seams::mark_buffer_dirty::call(buffer);
 
     bufmgr_seam::lock_buffer::call(buffer, BUFFER_LOCK_UNLOCK)?;
 

@@ -338,7 +338,7 @@ pub fn heap_page_prune_opt<'mcx>(
 
     if is_full || free < minfree {
         // OK, try to get exclusive buffer cleanup lock.
-        if !vacuumlazy_seam::conditional_lock_buffer_for_cleanup::call(buffer)? {
+        if !bufmgr_seam::conditional_lock_buffer_for_cleanup::call(buffer)? {
             return Ok(());
         }
 

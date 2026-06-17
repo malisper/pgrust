@@ -85,7 +85,7 @@ pub fn lazy_truncate_heap(vacrel: &mut LVRelState) -> PgResult<()> {
             }
 
             /* Check for interrupts while trying to (re-)acquire the lock. */
-            vl::check_for_interrupts::call()?;
+            backend_tcop_postgres_seams::check_for_interrupts::call()?;
 
             lock_retry += 1;
             if lock_retry > (VACUUM_TRUNCATE_LOCK_TIMEOUT / VACUUM_TRUNCATE_LOCK_WAIT_INTERVAL) {
@@ -205,7 +205,7 @@ pub fn count_nondeletable_pages(
         }
 
         /* Still need to check for interrupts (we hold the exclusive lock). */
-        vl::check_for_interrupts::call()?;
+        backend_tcop_postgres_seams::check_for_interrupts::call()?;
 
         blkno -= 1;
 
@@ -215,7 +215,7 @@ pub fn count_nondeletable_pages(
             let mut pblkno = prefetch_start;
             while pblkno <= blkno {
                 vl::prefetch_buffer::call(vacrel.rel, MAIN_FORKNUM, pblkno)?;
-                vl::check_for_interrupts::call()?;
+                backend_tcop_postgres_seams::check_for_interrupts::call()?;
                 pblkno += 1;
             }
             prefetched_until = prefetch_start;
@@ -225,10 +225,10 @@ pub fn count_nondeletable_pages(
             vl::read_buffer_extended::call(vacrel.rel, MAIN_FORKNUM, blkno, vacrel.bstrategy)?;
 
         /* In this phase we only need shared access to the buffer. */
-        vl::lock_buffer::call(buf, BUFFER_LOCK_SHARE)?;
+        backend_storage_buffer_bufmgr_seams::lock_buffer::call(buf, BUFFER_LOCK_SHARE)?;
 
         if vl::page_is_new::call(buf)? || vl::page_is_empty::call(buf)? {
-            vl::unlock_release_buffer::call(buf)?;
+            backend_storage_buffer_bufmgr_seams::unlock_release_buffer::call(buf);
             continue;
         }
 
@@ -250,7 +250,7 @@ pub fn count_nondeletable_pages(
             offnum = offset_number_next(offnum);
         }
 
-        vl::unlock_release_buffer::call(buf)?;
+        backend_storage_buffer_bufmgr_seams::unlock_release_buffer::call(buf);
 
         /* Done scanning if we found a tuple here. */
         if hastup {

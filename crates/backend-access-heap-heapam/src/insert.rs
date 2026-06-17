@@ -268,7 +268,7 @@ pub fn heap_insert<'mcx>(
      * XXX Should we set PageSetPrunable on this page ? (See heap_insert() in C.)
      */
 
-    page_seam::mark_buffer_dirty::call(buffer)?;
+    backend_storage_buffer_bufmgr_seams::mark_buffer_dirty::call(buffer);
 
     /* XLOG stuff */
     if relcache_seam::relation_needs_wal::call(relation) {
@@ -304,7 +304,7 @@ pub fn heap_insert<'mcx>(
         }
         debug_assert_eq!(
             heaptup.tuple.t_self.ip_blkid.block_number(),
-            page_seam::buffer_get_block_number::call(buffer)?
+            backend_storage_buffer_bufmgr_seams::buffer_get_block_number::call(buffer)
         );
 
         /*
@@ -361,9 +361,9 @@ pub fn heap_insert<'mcx>(
 
     // END_CRIT_SECTION()
 
-    page_seam::unlock_release_buffer::call(buffer)?;
+    backend_storage_buffer_bufmgr_seams::unlock_release_buffer::call(buffer);
     if vmbuffer != InvalidBuffer {
-        page_seam::release_buffer::call(vmbuffer)?;
+        backend_storage_buffer_bufmgr_seams::release_buffer::call(vmbuffer);
     }
 
     /*
@@ -610,7 +610,7 @@ pub fn heap_multi_insert<'mcx>(
             page_seam::page_clear_all_visible::call(buffer)?;
             visibilitymap_clear(
                 relation,
-                page_seam::buffer_get_block_number::call(buffer)?,
+                backend_storage_buffer_bufmgr_seams::buffer_get_block_number::call(buffer),
                 vmbuffer,
                 VISIBILITYMAP_VALID_BITS,
             )?;
@@ -622,7 +622,7 @@ pub fn heap_multi_insert<'mcx>(
          * XXX Should we set PageSetPrunable on this page ? (See heap_insert().)
          */
 
-        page_seam::mark_buffer_dirty::call(buffer)?;
+        backend_storage_buffer_bufmgr_seams::mark_buffer_dirty::call(buffer);
 
         /* XLOG stuff */
         if needwal {
@@ -780,7 +780,7 @@ pub fn heap_multi_insert<'mcx>(
             //                   VISIBILITYMAP_ALL_VISIBLE | VISIBILITYMAP_ALL_FROZEN);
             page_seam::visibilitymap_set::call(types_vacuum::vacuumlazy::VmSetArgs {
                 rel: relation.rd_id,
-                heap_blk: page_seam::buffer_get_block_number::call(buffer)?,
+                heap_blk: backend_storage_buffer_bufmgr_seams::buffer_get_block_number::call(buffer),
                 heap_buf: buffer,
                 rec_ptr: types_core::InvalidXLogRecPtr,
                 vm_buf: vmbuffer,
@@ -789,7 +789,7 @@ pub fn heap_multi_insert<'mcx>(
             })?;
         }
 
-        page_seam::unlock_release_buffer::call(buffer)?;
+        backend_storage_buffer_bufmgr_seams::unlock_release_buffer::call(buffer);
         ndone += nthispage;
 
         /*
@@ -800,7 +800,7 @@ pub fn heap_multi_insert<'mcx>(
 
     /* We're done with inserting all tuples, so release the last vmbuffer. */
     if vmbuffer != InvalidBuffer {
-        page_seam::release_buffer::call(vmbuffer)?;
+        backend_storage_buffer_bufmgr_seams::release_buffer::call(vmbuffer);
     }
 
     /*

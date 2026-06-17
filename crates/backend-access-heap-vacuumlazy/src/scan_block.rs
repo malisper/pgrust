@@ -52,7 +52,7 @@ pub fn heap_vac_scan_next_block(vacrel: &mut LVRelState) -> PgResult<NextBlock> 
     /* Have we reached the end of the relation? */
     if next_block >= vacrel.rel_pages {
         if buffer_is_valid(vacrel.next_unskippable_vmbuffer) {
-            vl::release_buffer::call(vacrel.next_unskippable_vmbuffer)?;
+            backend_storage_buffer_bufmgr_seams::release_buffer::call(vacrel.next_unskippable_vmbuffer);
             vacrel.next_unskippable_vmbuffer = InvalidBuffer;
         }
         return Ok(NextBlock::Exhausted);

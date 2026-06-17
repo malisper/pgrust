@@ -105,7 +105,7 @@ pub fn lazy_vacuum_heap_rel(vacrel: &mut LVRelState) -> PgResult<()> {
         let buf =
             vl::read_buffer_extended::call(vacrel.rel, MAIN_FORKNUM, reap.blkno, vacrel.bstrategy)?;
 
-        let blkno = vl::buffer_get_block_number::call(buf)?;
+        let blkno = backend_storage_buffer_bufmgr_seams::buffer_get_block_number::call(buf);
         vacrel.blkno = blkno;
 
         debug_assert!(blkno == reap.blkno);
@@ -114,12 +114,12 @@ pub fn lazy_vacuum_heap_rel(vacrel: &mut LVRelState) -> PgResult<()> {
         vmbuffer = vl::visibilitymap_pin::call(vacrel.rel, blkno, vmbuffer)?;
 
         /* We need a non-cleanup exclusive lock to mark dead_items unused. */
-        vl::lock_buffer::call(buf, BUFFER_LOCK_EXCLUSIVE)?;
+        backend_storage_buffer_bufmgr_seams::lock_buffer::call(buf, BUFFER_LOCK_EXCLUSIVE)?;
         lazy_vacuum_heap_page(vacrel, blkno, buf, &reap.offsets, vmbuffer)?;
 
         /* Record the page's available space. */
         let freespace = vl::page_get_heap_free_space::call(buf)?;
-        vl::unlock_release_buffer::call(buf)?;
+        backend_storage_buffer_bufmgr_seams::unlock_release_buffer::call(buf);
         vl::record_page_with_free_space::call(vacrel.rel, blkno, freespace)?;
         vacuumed_pages += 1;
     }
@@ -129,7 +129,7 @@ pub fn lazy_vacuum_heap_rel(vacrel: &mut LVRelState) -> PgResult<()> {
 
     vacrel.blkno = InvalidBlockNumber;
     if buffer_is_valid(vmbuffer) {
-        vl::release_buffer::call(vmbuffer)?;
+        backend_storage_buffer_bufmgr_seams::release_buffer::call(vmbuffer);
     }
 
     debug_assert!(
@@ -194,7 +194,7 @@ pub fn lazy_vacuum_heap_page(
     vl::page_truncate_line_pointer_array::call(buffer)?;
 
     /* Mark buffer dirty before we write WAL. */
-    vl::mark_buffer_dirty::call(buffer)?;
+    backend_storage_buffer_bufmgr_seams::mark_buffer_dirty::call(buffer);
 
     /* XLOG stuff. */
     if vl::relation_needs_wal::call(vacrel.rel)? {
@@ -256,7 +256,7 @@ pub fn heap_page_is_all_visible(
     vacrel: &mut LVRelState,
     buf: Buffer,
 ) -> PgResult<(bool, TransactionId, bool)> {
-    let blockno = vl::buffer_get_block_number::call(buf)?;
+    let blockno = backend_storage_buffer_bufmgr_seams::buffer_get_block_number::call(buf);
     let _ = blockno;
     let mut all_visible = true;
     let mut visibility_cutoff_xid: TransactionId = InvalidTransactionId;

@@ -366,7 +366,7 @@ pub fn heap_delete<'mcx>(
             )?;
         }
         if vmbuffer != InvalidBuffer {
-            page_seam::release_buffer::call(vmbuffer)?;
+            backend_storage_buffer_bufmgr_seams::release_buffer::call(vmbuffer);
         }
         return Ok(result);
     }
@@ -476,7 +476,7 @@ pub fn heap_delete<'mcx>(
         )?;
     }
 
-    page_seam::mark_buffer_dirty::call(buffer)?;
+    backend_storage_buffer_bufmgr_seams::mark_buffer_dirty::call(buffer);
 
     /*
      * XLOG stuff
@@ -555,7 +555,7 @@ pub fn heap_delete<'mcx>(
     lock_buffer_unlock(buffer)?;
 
     if vmbuffer != InvalidBuffer {
-        page_seam::release_buffer::call(vmbuffer)?;
+        backend_storage_buffer_bufmgr_seams::release_buffer::call(vmbuffer);
     }
 
     /*
@@ -578,7 +578,7 @@ pub fn heap_delete<'mcx>(
     backend_utils_cache_inval::cache_invalidate::CacheInvalidateHeapTuple(relation, &tp.tuple, None)?;
 
     /* Now we can release the buffer */
-    page_seam::release_buffer::call(buffer)?;
+    backend_storage_buffer_bufmgr_seams::release_buffer::call(buffer);
 
     /*
      * Release the lmgr tuple lock, if we had it.
@@ -1062,7 +1062,7 @@ fn page_is_all_visible(buffer: Buffer) -> PgResult<bool> {
 
 /// `BufferGetBlockNumber(buffer)`.
 fn buffer_get_block_number(buffer: Buffer) -> PgResult<BlockNumber> {
-    page_seam::buffer_get_block_number::call(buffer)
+    Ok(backend_storage_buffer_bufmgr_seams::buffer_get_block_number::call(buffer))
 }
 
 /// `HeapTupleHasExternal(tuple)`.

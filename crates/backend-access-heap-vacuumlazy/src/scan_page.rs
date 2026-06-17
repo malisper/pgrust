@@ -68,7 +68,7 @@ pub fn lazy_scan_new_or_empty(
          * All-zeroes pages can be left over by a crashed extend / bulk-extend.
          * Make sure these pages are in the FSM, to ensure they can be reused.
          */
-        vl::unlock_release_buffer::call(buf)?;
+        backend_storage_buffer_bufmgr_seams::unlock_release_buffer::call(buf);
 
         if vl::get_recorded_free_space::call(vacrel.rel, blkno)? == 0 {
             let freespace = BLCKSZ as usize - SIZE_OF_PAGE_HEADER_DATA;
@@ -84,8 +84,8 @@ pub fn lazy_scan_new_or_empty(
          * don't need a cleanup lock).
          */
         if sharelock {
-            vl::lock_buffer::call(buf, BUFFER_LOCK_UNLOCK)?;
-            vl::lock_buffer::call(buf, BUFFER_LOCK_EXCLUSIVE)?;
+            backend_storage_buffer_bufmgr_seams::lock_buffer::call(buf, BUFFER_LOCK_UNLOCK)?;
+            backend_storage_buffer_bufmgr_seams::lock_buffer::call(buf, BUFFER_LOCK_EXCLUSIVE)?;
 
             if !vl::page_is_empty::call(buf)? {
                 /* page isn't new or empty -- keep lock and pin for now */
@@ -96,7 +96,7 @@ pub fn lazy_scan_new_or_empty(
         /* Unlike new pages, empty pages are always set all-visible + all-frozen. */
         if !vl::page_is_all_visible::call(buf)? {
             /* mark buffer dirty before writing a WAL record */
-            vl::mark_buffer_dirty::call(buf)?;
+            backend_storage_buffer_bufmgr_seams::mark_buffer_dirty::call(buf);
 
             /*
              * If the page has not been previously WAL-logged, do so now, to
@@ -123,7 +123,7 @@ pub fn lazy_scan_new_or_empty(
         }
 
         let freespace = vl::page_get_heap_free_space::call(buf)?;
-        vl::unlock_release_buffer::call(buf)?;
+        backend_storage_buffer_bufmgr_seams::unlock_release_buffer::call(buf);
         vl::record_page_with_free_space::call(vacrel.rel, blkno, freespace)?;
         return Ok(true);
     }
@@ -145,7 +145,7 @@ pub fn lazy_scan_prune(
     let has_lpdead_items;
     let mut vm_page_frozen = false;
 
-    debug_assert!(vl::buffer_get_block_number::call(buf)? == blkno);
+    debug_assert!(backend_storage_buffer_bufmgr_seams::buffer_get_block_number::call(buf) == blkno);
 
     /*
      * Prune all HOT-update chains and potentially freeze tuples on this page.
@@ -236,7 +236,7 @@ pub fn lazy_scan_prune(
         }
 
         vl::page_set_all_visible::call(buf)?;
-        vl::mark_buffer_dirty::call(buf)?;
+        backend_storage_buffer_bufmgr_seams::mark_buffer_dirty::call(buf);
         let old_vmbits = vl::visibilitymap_set::call(types_vacuum::vacuumlazy::VmSetArgs {
             rel: vacrel.rel,
             heap_blk: blkno,
@@ -283,7 +283,7 @@ pub fn lazy_scan_prune(
             .finish(here("lazy_scan_prune"))
             .ok();
         vl::page_clear_all_visible::call(buf)?;
-        vl::mark_buffer_dirty::call(buf)?;
+        backend_storage_buffer_bufmgr_seams::mark_buffer_dirty::call(buf);
         vl::visibilitymap_clear::call(vacrel.rel, blkno, vmbuffer, VISIBILITYMAP_VALID_BITS)?;
     } else if all_visible_according_to_vm
         && presult.all_visible
@@ -296,7 +296,7 @@ pub fn lazy_scan_prune(
          */
         if !vl::page_is_all_visible::call(buf)? {
             vl::page_set_all_visible::call(buf)?;
-            vl::mark_buffer_dirty::call(buf)?;
+            backend_storage_buffer_bufmgr_seams::mark_buffer_dirty::call(buf);
         }
 
         debug_assert!(!transaction_id_is_valid(presult.vm_conflict_horizon));
@@ -341,7 +341,7 @@ pub fn lazy_scan_noprune(
     let mut no_freeze_relmin_mxid = vacrel.new_relmin_mxid;
     let mut deadoffsets: Vec<types_core::OffsetNumber> = Vec::new();
 
-    debug_assert!(vl::buffer_get_block_number::call(buf)? == blkno);
+    debug_assert!(backend_storage_buffer_bufmgr_seams::buffer_get_block_number::call(buf) == blkno);
 
     let maxoff = vl::page_get_max_offset_number::call(buf)?;
     let mut offnum = FirstOffsetNumber;

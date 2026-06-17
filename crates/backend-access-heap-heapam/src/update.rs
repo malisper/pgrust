@@ -229,7 +229,7 @@ pub fn heap_update<'mcx>(
         bufmgr_seam::unlock_release_buffer::call(buffer);
         debug_assert!(!have_tuple_lock);
         if vmbuffer != InvalidBuffer {
-            page_seam::release_buffer::call(vmbuffer)?;
+            backend_storage_buffer_bufmgr_seams::release_buffer::call(vmbuffer);
         }
         tmfd.ctid = otid;
         tmfd.xmax = InvalidTransactionId;
@@ -498,7 +498,7 @@ pub fn heap_update<'mcx>(
                 heapam_seam::unlock_tuple_tuplock::call(relation, oldtup.tuple.t_self, lockmode)?;
             }
             if vmbuffer != InvalidBuffer {
-                page_seam::release_buffer::call(vmbuffer)?;
+                backend_storage_buffer_bufmgr_seams::release_buffer::call(vmbuffer);
             }
             return Ok(heapam_seam::HeapUpdateResult {
                 result,
@@ -684,7 +684,7 @@ pub fn heap_update<'mcx>(
         // Write the stamped old header back into the page bytes.
         write_back_header(buffer, &oldtup)?;
 
-        page_seam::mark_buffer_dirty::call(buffer)?;
+        backend_storage_buffer_bufmgr_seams::mark_buffer_dirty::call(buffer);
 
         if relcache_seam::relation_needs_wal::call(relation) {
             let xlrec = xl_heap_lock {
@@ -911,9 +911,9 @@ pub fn heap_update<'mcx>(
     }
 
     if newbuf != buffer {
-        page_seam::mark_buffer_dirty::call(newbuf)?;
+        backend_storage_buffer_bufmgr_seams::mark_buffer_dirty::call(newbuf);
     }
-    page_seam::mark_buffer_dirty::call(buffer)?;
+    backend_storage_buffer_bufmgr_seams::mark_buffer_dirty::call(buffer);
 
     /* XLOG stuff */
     if relcache_seam::relation_needs_wal::call(relation) {
@@ -976,14 +976,14 @@ pub fn heap_update<'mcx>(
 
     /* Now we can release the buffer(s) */
     if newbuf != buffer {
-        page_seam::release_buffer::call(newbuf)?;
+        backend_storage_buffer_bufmgr_seams::release_buffer::call(newbuf);
     }
-    page_seam::release_buffer::call(buffer)?;
+    backend_storage_buffer_bufmgr_seams::release_buffer::call(buffer);
     if vmbuffer_new != InvalidBuffer {
-        page_seam::release_buffer::call(vmbuffer_new)?;
+        backend_storage_buffer_bufmgr_seams::release_buffer::call(vmbuffer_new);
     }
     if vmbuffer != InvalidBuffer {
-        page_seam::release_buffer::call(vmbuffer)?;
+        backend_storage_buffer_bufmgr_seams::release_buffer::call(vmbuffer);
     }
 
     /* Release the lmgr tuple lock, if we had it. */
@@ -1496,7 +1496,7 @@ fn page_is_all_visible(buffer: Buffer) -> PgResult<bool> {
 
 /// `BufferGetBlockNumber(buffer)`.
 fn buffer_get_block_number(buffer: Buffer) -> PgResult<BlockNumber> {
-    page_seam::buffer_get_block_number::call(buffer)
+    Ok(backend_storage_buffer_bufmgr_seams::buffer_get_block_number::call(buffer))
 }
 
 /// `HeapTupleHasExternal(tuple)`.

@@ -86,7 +86,7 @@ pub fn lazy_scan_heap(vacrel: &mut LVRelState) -> PgResult<()> {
         {
             /* Release any pin on the visibility map page. */
             if buffer_is_valid(vmbuffer) {
-                vl::release_buffer::call(vmbuffer)?;
+                backend_storage_buffer_bufmgr_seams::release_buffer::call(vmbuffer);
                 vmbuffer = InvalidBuffer;
             }
 
@@ -146,10 +146,10 @@ pub fn lazy_scan_heap(vacrel: &mut LVRelState) -> PgResult<()> {
          * We need a buffer cleanup lock to prune/defragment. If we can't get one
          * right away, settle for reduced processing via lazy_scan_noprune.
          */
-        let mut got_cleanup_lock = vl::conditional_lock_buffer_for_cleanup::call(buf)?;
+        let mut got_cleanup_lock = backend_storage_buffer_bufmgr_seams::conditional_lock_buffer_for_cleanup::call(buf)?;
 
         if !got_cleanup_lock {
-            vl::lock_buffer::call(buf, BUFFER_LOCK_SHARE)?;
+            backend_storage_buffer_bufmgr_seams::lock_buffer::call(buf, BUFFER_LOCK_SHARE)?;
         }
 
         /* Check for new or empty pages before lazy_scan_[no]prune call. */
@@ -169,8 +169,8 @@ pub fn lazy_scan_heap(vacrel: &mut LVRelState) -> PgResult<()> {
             has_lpdead_items = hl;
             if !processed {
                 debug_assert!(vacrel.aggressive);
-                vl::lock_buffer::call(buf, BUFFER_LOCK_UNLOCK)?;
-                vl::lock_buffer_for_cleanup::call(buf)?;
+                backend_storage_buffer_bufmgr_seams::lock_buffer::call(buf, BUFFER_LOCK_UNLOCK)?;
+                backend_storage_buffer_bufmgr_seams::lock_buffer_for_cleanup::call(buf)?;
                 got_cleanup_lock = true;
             }
         }
@@ -230,7 +230,7 @@ pub fn lazy_scan_heap(vacrel: &mut LVRelState) -> PgResult<()> {
         if vacrel.nindexes == 0 || !vacrel.do_index_vacuuming || !has_lpdead_items {
             let freespace = vl::page_get_heap_free_space::call(buf)?;
 
-            vl::unlock_release_buffer::call(buf)?;
+            backend_storage_buffer_bufmgr_seams::unlock_release_buffer::call(buf);
             vl::record_page_with_free_space::call(vacrel.rel, blkno, freespace)?;
 
             /* Periodically perform FSM vacuuming for tables without indexes. */
@@ -247,13 +247,13 @@ pub fn lazy_scan_heap(vacrel: &mut LVRelState) -> PgResult<()> {
                 next_fsm_block_to_vacuum = blkno;
             }
         } else {
-            vl::unlock_release_buffer::call(buf)?;
+            backend_storage_buffer_bufmgr_seams::unlock_release_buffer::call(buf);
         }
     }
 
     vacrel.blkno = InvalidBlockNumber;
     if buffer_is_valid(vmbuffer) {
-        vl::release_buffer::call(vmbuffer)?;
+        backend_storage_buffer_bufmgr_seams::release_buffer::call(vmbuffer);
     }
 
     /* Report that everything is now scanned. */
