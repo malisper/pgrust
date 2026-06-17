@@ -144,11 +144,7 @@ seam_core::seam!(
 );
 
 // ---- access/xact.h -----------------------------------------------------
-seam_core::seam!(pub fn prevent_in_transaction_block(is_top_level: bool, stmt_type: String) -> PgResult<()>);
 seam_core::seam!(pub fn is_in_transaction_block(is_top_level: bool) -> PgResult<bool>);
-seam_core::seam!(pub fn start_transaction_command() -> PgResult<()>);
-seam_core::seam!(pub fn commit_transaction_command() -> PgResult<()>);
-seam_core::seam!(pub fn command_counter_increment() -> PgResult<()>);
 
 // ---- utils/snapmgr.h ---------------------------------------------------
 seam_core::seam!(pub fn active_snapshot_set() -> PgResult<bool>);

@@ -33,6 +33,7 @@ backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }
 backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 
 # owner seam crates (outward / inward-install targets)
+backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
 backend-commands-analyze-seams = { path = "../backend-commands-analyze-seams" }
 backend-commands-define-seams = { path = "../backend-commands-define-seams" }

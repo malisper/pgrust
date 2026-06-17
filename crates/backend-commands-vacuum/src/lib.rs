@@ -73,6 +73,7 @@ use types_vacuum::vacuumparallel::{IndexBulkDeleteResult, IndexVacuumInfo, VacDe
 
 use backend_commands_define_seams::DefElemArg;
 
+use backend_access_transam_xact_seams as xact;
 use backend_access_heap_vacuumlazy_seams as vacuumlazy;
 use backend_commands_analyze_seams as analyze;
 use backend_commands_define_seams as define;
@@ -732,7 +733,7 @@ pub fn vacuum<'mcx>(
      */
     let in_outer_xact: bool;
     if p.options & VACOPT_VACUUM != 0 {
-        rt::prevent_in_transaction_block::call(isTopLevel, stmttype.to_string())?;
+        xact::prevent_in_transaction_block::call(isTopLevel, stmttype)?;
         in_outer_xact = false;
     } else {
         in_outer_xact = rt::is_in_transaction_block::call(isTopLevel)?;
@@ -806,7 +807,7 @@ pub fn vacuum<'mcx>(
         }
 
         /* matches the StartTransaction in PostgresMain() */
-        rt::commit_transaction_command::call()?;
+        xact::commit_transaction_command::call()?;
     }
 
     /* Turn vacuum cost accounting on or off, and set/clear in_vacuum.  The
@@ -843,7 +844,7 @@ pub fn vacuum<'mcx>(
                  * we can use the outer transaction.
                  */
                 if use_own_xacts {
-                    rt::start_transaction_command::call()?;
+                    xact::start_transaction_command::call()?;
                     /* functions in indexes may want a snapshot set */
                     rt::push_active_snapshot_transaction::call()?;
                 }
@@ -870,15 +871,15 @@ pub fn vacuum<'mcx>(
                 if use_own_xacts {
                     rt::pop_active_snapshot::call()?;
                     /* standard_ProcessUtility() does CCI if !use_own_xacts */
-                    rt::command_counter_increment::call()?;
-                    rt::commit_transaction_command::call()?;
+                    xact::command_counter_increment::call()?;
+                    xact::commit_transaction_command::call()?;
                 } else {
                     /*
                      * If we're not using separate xacts, better separate the
                      * ANALYZE actions with CCIs.  This avoids trouble if user
                      * says "ANALYZE t, t".
                      */
-                    rt::command_counter_increment::call()?;
+                    xact::command_counter_increment::call()?;
                 }
             }
 
@@ -910,7 +911,7 @@ pub fn vacuum<'mcx>(
          * This matches the CommitTransaction waiting for us in
          * PostgresMain().
          */
-        rt::start_transaction_command::call()?;
+        xact::start_transaction_command::call()?;
     }
 
     if (p.options & VACOPT_VACUUM != 0) && (p.options & VACOPT_SKIP_DATABASE_STATS == 0) {
@@ -1927,7 +1928,7 @@ fn vacuum_rel<'mcx>(
     let mut toast_vacuum_params: VacuumParams = *p;
 
     /* Begin a transaction for vacuuming this relation */
-    rt::start_transaction_command::call()?;
+    xact::start_transaction_command::call()?;
 
     if p.options & VACOPT_FULL == 0 {
         /*
@@ -1968,7 +1969,7 @@ fn vacuum_rel<'mcx>(
     /* leave if relation could not be opened or locked */
     let Some(rel_handle) = rel else {
         rt::pop_active_snapshot::call()?;
-        rt::commit_transaction_command::call()?;
+        xact::commit_transaction_command::call()?;
         return Ok(false);
     };
 
@@ -1991,7 +1992,7 @@ fn vacuum_rel<'mcx>(
     if !vacuum_is_permitted_for_relation(priv_relid, &rd_rel, p.options & !VACOPT_ANALYZE)? {
         rt::relation_close::call(rel_handle, lmode)?;
         rt::pop_active_snapshot::call()?;
-        rt::commit_transaction_command::call()?;
+        xact::commit_transaction_command::call()?;
         return Ok(false);
     }
 
@@ -2013,7 +2014,7 @@ fn vacuum_rel<'mcx>(
             .finish(here("vacuum_rel"))?;
         rt::relation_close::call(rel_handle, lmode)?;
         rt::pop_active_snapshot::call()?;
-        rt::commit_transaction_command::call()?;
+        xact::commit_transaction_command::call()?;
         return Ok(false);
     }
 
@@ -2023,7 +2024,7 @@ fn vacuum_rel<'mcx>(
     if rt::relation_is_other_temp::call(rel_handle)? {
         rt::relation_close::call(rel_handle, lmode)?;
         rt::pop_active_snapshot::call()?;
-        rt::commit_transaction_command::call()?;
+        xact::commit_transaction_command::call()?;
         return Ok(false);
     }
 
@@ -2033,7 +2034,7 @@ fn vacuum_rel<'mcx>(
     if relkind == RELKIND_PARTITIONED_TABLE {
         rt::relation_close::call(rel_handle, lmode)?;
         rt::pop_active_snapshot::call()?;
-        rt::commit_transaction_command::call()?;
+        xact::commit_transaction_command::call()?;
         /* It's OK to proceed with ANALYZE on this table */
         return Ok(true);
     }
@@ -2176,7 +2177,7 @@ fn vacuum_rel<'mcx>(
      * Complete the transaction and free all temporary memory used.
      */
     rt::pop_active_snapshot::call()?;
-    rt::commit_transaction_command::call()?;
+    xact::commit_transaction_command::call()?;
 
     /*
      * If the relation has a secondary toast rel, vacuum that too ...

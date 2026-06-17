@@ -8,6 +8,9 @@ publish.workspace = true
 name = "seam_core"
 path = "src/lib.rs"
 
-# pgrust-trace has zero non-std deps, so this cannot introduce a cycle.
+[features]
+default = []
+trace-seams = ["dep:pgrust-trace"]
+
 [dependencies]
-pgrust-trace = { path = "../pgrust-trace" }
+pgrust-trace = { path = "../pgrust-trace", optional = true }
