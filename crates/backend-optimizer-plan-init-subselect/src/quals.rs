@@ -349,14 +349,15 @@ fn check_redundant_nullability_qual(root: &PlannerInfo, clause: &Expr) -> bool {
 ///
 /// Add `restrictinfo` as a baserestrictinfo to the base relation `relid`,
 /// applying the constant-TRUE / constant-FALSE pre-checks where allowed.
-fn add_base_clause_to_rel(
+fn add_base_clause_to_rel<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     relid: i32,
     mut restrictinfo: RinfoId,
 ) -> PgResult<()> {
     let rel_id = bms::find_base_rel::call(root, relid);
     // rte = root->simple_rte_array[relid]; we only need its inh/relkind.
-    let (_rtekind, rte_inh, rte_relkind) = initext::rte_kind_inh_relkind::call(root, relid);
+    let (_rtekind, rte_inh, rte_relkind) = initext::rte_kind_inh_relkind::call(run, root, relid);
 
     debug_assert!(
         bms::relids_membership::call(&root.rinfo(restrictinfo).required_relids) == BMS_SINGLETON
@@ -653,7 +654,7 @@ pub fn distribute_restrictinfo_to_rels<'mcx>(
         if let Some(relid) = bms::relids_get_singleton_member::call(&relids) {
             // There is only one relation participating, so it is a restriction
             // clause for that relation.
-            add_base_clause_to_rel(root, relid, restrictinfo)?;
+            add_base_clause_to_rel(run, root, relid, restrictinfo)?;
         } else {
             // The clause is a join clause (more than one rel in its relid set).
             // Check for hashjoinable operators. (We don't bother setting the

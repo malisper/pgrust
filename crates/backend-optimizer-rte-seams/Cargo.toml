@@ -19,6 +19,9 @@ synthetic = []
 seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }
 types-pathnodes = { path = "../types-pathnodes" }
+# The init-subselect-ext `rte_kind_inh_relkind` is one RTE projection; this
+# resolver crate installs it through `planner_rt_fetch` (its real RTE store).
+backend-optimizer-plan-init-subselect-ext-seams = { path = "../backend-optimizer-plan-init-subselect-ext-seams" }
 
 [dev-dependencies]
 # Needed by the synthetic fixture's tests to build an (empty) PlannerRun in an

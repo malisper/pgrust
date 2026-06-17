@@ -88,6 +88,7 @@ pub mod index;
 pub mod invalidate;
 pub mod derived;
 pub mod initfile;
+pub mod plancat_ext;
 
 mod seams;
 pub use seams::init_seams;

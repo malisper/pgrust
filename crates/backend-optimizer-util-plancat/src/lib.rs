@@ -314,7 +314,9 @@ pub fn get_relation_info<'mcx>(
         )?;
 
         // For each index, get the same lock the executor will need.
-        let lmode = ext::rte_rellockmode::call(root, varno);
+        // C: `lmode = root->simple_rte_array[varno]->rellockmode`
+        // (`planner_rt_fetch(varno, root)->rellockmode`).
+        let lmode = types_pathnodes::planner_run::planner_rt_fetch(run, root, varno).rellockmode;
 
         // table-AM bitmap capability (the table-AM half of amhasgetbitmap).
         let table_bitmap = ext::table_has_scan_bitmap::call(relation_object_id)?;

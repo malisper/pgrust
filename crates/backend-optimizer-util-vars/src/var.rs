@@ -865,4 +865,38 @@ pub fn init_seams() {
     vs::contain_var_clause::set(seam_contain_var_clause);
     vs::pull_varnos::set(seam_pull_varnos_expr);
     vs::num_relids::set(seam_num_relids);
+
+    // The var.c functions the equivclass-ext consumer crate declares (its
+    // consumers — initsplan.c `build_base_rel_tlists`, equivclass.c — call them
+    // through that no-owner stub crate). var.c is their real owner.
+    use backend_optimizer_path_equivclass_ext_seams as eqext;
+    eqext::pull_var_clause::set(seam_eqext_pull_var_clause);
+    eqext::pull_var_clause_list::set(seam_eqext_pull_var_clause_list);
+    eqext::pull_varnos::set(seam_eqext_pull_varnos);
+}
+
+/// `pull_var_clause((Node *) node, flags)` (var.c) — the equivclass-ext seam
+/// over a single rootless `&Expr`.
+fn seam_eqext_pull_var_clause(node: &Expr, flags: i32) -> Vec<Expr> {
+    let wrapped = Node::Expr(node.clone());
+    pull_var_clause(&wrapped, flags)
+}
+
+/// `pull_var_clause((Node *) exprs, flags)` (var.c) over a `List` — run the walk
+/// over each expression and concatenate, matching the C single call over the
+/// whole list (the per-element order is preserved).
+fn seam_eqext_pull_var_clause_list(nodes: Vec<Expr>, flags: i32) -> Vec<Expr> {
+    let mut out: Vec<Expr> = Vec::new();
+    for node in nodes.iter() {
+        let wrapped = Node::Expr(node.clone());
+        out.extend(pull_var_clause(&wrapped, flags));
+    }
+    out
+}
+
+/// `pull_varnos(root, (Node *) expr)` (var.c) — the equivclass-ext seam,
+/// threading `root` so PlaceHolderVars are processed (the `root != NULL` path).
+fn seam_eqext_pull_varnos(root: &PlannerInfo, expr: &Expr) -> Relids {
+    let wrapped = Node::Expr(expr.clone());
+    pull_varnos(Some(root), &wrapped)
 }

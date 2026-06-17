@@ -39,6 +39,10 @@ types-tuple = { path = "../types-tuple" }
 types-storage = { path = "../types-storage" }
 types-tableam = { path = "../types-tableam" }
 types-nodes = { path = "../types-nodes" }
+# Named (not constructed) in the plancat-ext `get_index_expressions`/
+# `get_index_predicate` installs: `&mut PlannerInfo` + arena `NodeId`. A pure
+# types crate (no backend deps), so no cycle.
+types-pathnodes = { path = "../types-pathnodes" }
 types-partition = { path = "../types-partition" }
 types-reloptions = { path = "../types-reloptions" }
 types-hash = { path = "../types-hash" }
@@ -100,3 +104,10 @@ backend-utils-adt-ruleutils-seams = { path = "../backend-utils-adt-ruleutils-sea
 # attribute-bitmap index_open + pull_varattnos, publication/rule build,
 # opclass per-column index options). genam-seams is already declared above.
 backend-utils-cache-relcache-nodexform-seams = { path = "../backend-utils-cache-relcache-nodexform-seams" }
+
+# Consumer-side seam crate for the externals `optimizer/util/plancat.c`'s
+# `get_relation_info` calls; relcache OWNS the relcache reads in that family
+# (RelationGetParallelWorkers / RelationGetIndexList / the per-index catalog
+# detoast / index block count) and installs them here. No owner directory exists
+# for this crate; each relcache read installs from this crate's real owner.
+backend-optimizer-util-plancat-ext-seams = { path = "../backend-optimizer-util-plancat-ext-seams" }

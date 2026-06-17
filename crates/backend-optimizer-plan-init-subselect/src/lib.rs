@@ -220,8 +220,8 @@ pub fn init_seams() {
     psmall::match_foreign_keys_to_quals::set(|root| {
         fkeys::match_foreign_keys_to_quals(root)
     });
-    psmall::add_other_rels_to_query::set(|root| {
-        baserels::add_other_rels_to_query(root).expect("add_other_rels_to_query")
+    psmall::add_other_rels_to_query::set(|root, run| {
+        baserels::add_other_rels_to_query(root, run).expect("add_other_rels_to_query")
     });
     // rebuild_lateral_attr_needed is ported (lateral.rs); analyzejoins calls it
     // via this seam after a join removal. rebuild_joinclause_attr_needed is NOT

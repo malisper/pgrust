@@ -807,4 +807,30 @@ pub fn init_seams() {
     backend_optimizer_util_plancat_ext_seams::table_relation_estimate_size::set(
         table_relation_estimate_size,
     );
+
+    // The table-AM capability probes get_relation_info reads off the heap AM's
+    // vtable. The heap table AM (heapam_handler.c) DEFINES
+    // `scan_bitmap_next_tuple` (`heapam_scan_bitmap_next_tuple`) and both
+    // TID-range callbacks (`heapam_scan_set_tidrange` /
+    // `heapam_scan_getnextslot_tidrange`), so for a heap relation both probes
+    // are true. (Heap is the only table AM ported; the trimmed `TableAmRoutine`
+    // vtable does not carry these callbacks, so the presence is the heap AM's
+    // own constant fact rather than a vtable NULL test.)
+    backend_optimizer_util_plancat_ext_seams::table_has_scan_bitmap::set(table_has_scan_bitmap);
+    backend_optimizer_util_plancat_ext_seams::table_has_tid_range::set(table_has_tid_range);
+}
+
+/// `relation->rd_tableam->scan_bitmap_next_tuple != NULL` — the heap table AM
+/// supplies `heapam_scan_bitmap_next_tuple`, so this is true for a heap relation.
+fn table_has_scan_bitmap(relid: Oid) -> PgResult<bool> {
+    let _ = relid;
+    Ok(true)
+}
+
+/// `relation->rd_tableam->scan_set_tidrange != NULL &&
+/// scan_getnextslot_tidrange != NULL` — the heap table AM supplies both, so this
+/// is true for a heap relation.
+fn table_has_tid_range(relid: Oid) -> PgResult<bool> {
+    let _ = relid;
+    Ok(true)
 }

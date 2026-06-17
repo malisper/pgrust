@@ -493,6 +493,14 @@ pub fn init_seams() {
     smgr_seam::smgr_release_rellocator::set(smgrreleaserellocator);
     smgr_seam::process_barrier_smgr_release::set(ProcessBarrierSmgrRelease);
     smgr_seam::smgrnblocks::set(|rlocator, backend, forknum| {
+        // The seam contract is `smgrnblocks(smgropen(rlocator, backend),
+        // forknum)` — i.e. the caller hands the physical id and expects
+        // `RelationGetSmgr` semantics. `smgropen` (`md::cache_open`) is
+        // idempotent: it opens+caches the SMgrRelation on first touch and is a
+        // cache lookup thereafter. This makes the read work for a relation whose
+        // smgr has not yet been opened by a prior buffer op (e.g. an index read
+        // during planning).
+        smgropen(rlocator, backend)?;
         smgrnblocks(RelFileLocatorBackend { locator: rlocator, backend }, forknum)
     });
     smgr_seam::smgr_cached_nblocks::set(|rlocator, backend, forknum| {

@@ -104,7 +104,8 @@ pub fn remove_useless_groupby_columns(root: &mut PlannerInfo, run: &PlannerRun<'
     let mut surplusvars: Option<Vec<Relids>> = None;
 
     for relid in 1..=rtable_len {
-        let (rtekind, rte_inh, rte_relkind) = initext::rte_kind_inh_relkind::call(root, relid as i32);
+        let (rtekind, rte_inh, rte_relkind) =
+            initext::rte_kind_inh_relkind::call(run, root, relid as i32);
 
         // Only plain relations could have primary-key constraints.
         if rtekind != RTE_RELATION {

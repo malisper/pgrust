@@ -126,8 +126,13 @@ seam_core::seam!(
     /// `PlannerInfo.simple_rte_array` is the opaque `RangeTblEntryId` handle, so
     /// these are resolved via this seam (see the .port-ref reachability note).
     /// `relkind` is the `char` pg_class relkind (`'p'` =
-    /// `RELKIND_PARTITIONED_TABLE`).
-    pub fn rte_kind_inh_relkind(root: &PlannerInfo, rti: i32) -> (i32, bool, i8)
+    /// `RELKIND_PARTITIONED_TABLE`). `run` resolves the `RangeTblEntryId` handle
+    /// in `root.simple_rte_array[rti]` through the planner-run RTE store.
+    pub fn rte_kind_inh_relkind<'mcx>(
+        run: &PlannerRun<'mcx>,
+        root: &PlannerInfo,
+        rti: i32,
+    ) -> (i32, bool, i8)
 );
 
 /* ==========================================================================

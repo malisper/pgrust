@@ -486,3 +486,39 @@ fn adjust_expr_relids(
     }
     types_nodes::primnodes::ExprRelids { words }
 }
+
+/// `remove_useless_self_joins(root, joinlist)` (analyzejoins.c:2488) — remove
+/// self-joins on a unique column, returning the (possibly trimmed) joinlist.
+///
+/// The early-exit (GUC off, empty joinlist, or a single non-`List` joinlist
+/// element — the common single-relation query) is ported faithfully and returns
+/// the joinlist unchanged. The deep `remove_self_joins_recurse` surgery walks
+/// the whole `root->parse` `Query` tree for a relid substitution
+/// (`ChangeVarNodesExtended`), which the planner model does not yet carry, so it
+/// remains seam-and-panic (`crate::change_relids` only walks arena `Expr`/
+/// `RestrictInfo` handles, not the `Query` tree). Reaching it is a genuine
+/// keystone, surfaced loudly rather than silently mis-planned.
+pub fn remove_useless_self_joins(
+    root: &mut PlannerInfo,
+    joinlist: Vec<JoinlistNode>,
+) -> Vec<JoinlistNode> {
+    // C: `if (!enable_self_join_elimination || joinlist == NIL ||
+    //        (list_length(joinlist) == 1 && !IsA(linitial(joinlist), List)))
+    //         return joinlist;`
+    // A single-element joinlist whose sole entry is a RangeTblRef (not a nested
+    // `List`) has no self-join potential.
+    if !crate::enable_self_join_elimination()
+        || joinlist.is_empty()
+        || (joinlist.len() == 1 && matches!(joinlist[0], JoinlistNode::Rel(_)))
+    {
+        return joinlist;
+    }
+
+    let _ = root;
+    // The merge-pairs recursion + orphaned-relation removal needs the
+    // Query-tree relid walker the planner model does not carry yet.
+    panic!(
+        "remove_useless_self_joins: self-join surgery (remove_self_joins_recurse / \
+         ChangeVarNodesExtended over root->parse) not modeled"
+    );
+}

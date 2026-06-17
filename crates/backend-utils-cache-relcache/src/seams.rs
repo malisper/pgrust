@@ -121,6 +121,10 @@ pub fn init_seams() {
 
     // --- WAL-startup: StartupXLOG (xlog.c:5657) drops stale init files ---
     sx::relation_cache_init_file_remove::set(crate::initfile::RelationCacheInitFileRemove);
+
+    // --- plancat.c get_relation_info relcache-owned reads (parallel-workers,
+    //     index list, per-index catalog detoast, index block count) ---
+    crate::plancat_ext::init_seams();
 }
 
 /// `relation_rules(mcx, reloid)` — the per-query rewrite-rule reader for

@@ -11883,6 +11883,7 @@ dependencies = [
 name = "backend-optimizer-rte-seams"
 version = "0.0.0"
 dependencies = [
+ "backend-optimizer-plan-init-subselect-ext-seams",
  "mcx",
  "seam-core",
  "types-core",
@@ -12210,6 +12211,7 @@ version = "0.0.0"
 dependencies = [
  "backend-nodes-core",
  "backend-nodes-equalfuncs-seams",
+ "backend-optimizer-path-equivclass-ext-seams",
  "backend-optimizer-path-indxpath",
  "backend-optimizer-path-joinpath-seams",
  "backend-optimizer-prep-prepjointree-seams",
@@ -19344,6 +19346,7 @@ dependencies = [
  "backend-catalog-storage-seams",
  "backend-nodes-core-seams",
  "backend-nodes-read-seams",
+ "backend-optimizer-util-plancat-ext-seams",
  "backend-storage-file-fd-seams",
  "backend-storage-lmgr-lmgr-seams",
  "backend-storage-lmgr-lwlock-seams",
@@ -19368,6 +19371,7 @@ dependencies = [
  "types-hash",
  "types-nodes",
  "types-partition",
+ "types-pathnodes",
  "types-rel",
  "types-relcache-entry",
  "types-reloptions",

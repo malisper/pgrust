@@ -233,6 +233,15 @@ seam_core::seam!(
 pub fn init_seams() {
     // RTE field projections — `planner_rt_fetch(run, root, rti)->field`.
     rte_rtekind::set(|run, root, rti| planner_rt_fetch(run, root, rti).rtekind as RTEKind);
+
+    // `add_base_clause_to_rel` / `add_other_rels_to_query` /
+    // `remove_useless_groupby_columns` read `(rtekind, inh, relkind)` from one
+    // RTE in a single projection. Declared in the init-subselect-ext consumer
+    // crate; resolved here through the same `planner_rt_fetch` RTE store.
+    backend_optimizer_plan_init_subselect_ext_seams::rte_kind_inh_relkind::set(|run, root, rti| {
+        let rte = planner_rt_fetch(run, root, rti as Index);
+        (rte.rtekind as i32, rte.inh, rte.relkind)
+    });
     rte_relkind::set(|run, root, rti| planner_rt_fetch(run, root, rti).relkind);
     rte_relid::set(|run, root, rti| planner_rt_fetch(run, root, rti).relid);
     rte_inh::set(|run, root, rti| planner_rt_fetch(run, root, rti).inh);

@@ -67,7 +67,10 @@ fn add_base_rels_to_query_node<'mcx>(
 /// `add_other_rels_to_query` (initsplan.c:196).
 ///
 /// Create "otherrel" `RelOptInfo`s for the children of appendrel baserels.
-pub fn add_other_rels_to_query(root: &mut PlannerInfo) -> PgResult<()> {
+pub fn add_other_rels_to_query<'mcx>(
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+) -> PgResult<()> {
     for rti in 1..root.simple_rel_array_size {
         let rel_id = match root.simple_rel_array[rti as usize] {
             Some(id) => id,
@@ -81,7 +84,7 @@ pub fn add_other_rels_to_query(root: &mut PlannerInfo) -> PgResult<()> {
         }
 
         // If it's marked as inheritable, look for children.
-        let (_rtekind, rte_inh, _relkind) = initext::rte_kind_inh_relkind::call(root, rti);
+        let (_rtekind, rte_inh, _relkind) = initext::rte_kind_inh_relkind::call(run, root, rti);
         if rte_inh {
             initext::expand_inherited_rtentry::call(root, rti)?;
         }
