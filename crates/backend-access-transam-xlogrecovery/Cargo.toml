@@ -60,6 +60,10 @@ backend-replication-slot-seams = { path = "../backend-replication-slot-seams" }
 backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }
 backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
 backend-utils-adt-lsn-trigfuncs = { path = "../backend-utils-adt-lsn-trigfuncs" }
+# GUC `conf->variable` accessor slots for this unit's file-static recovery /
+# streaming GUC globals (gucvars.rs installs `GucVarAccessors` on the matching
+# `vars::*` slots from `init_seams`).
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 
 # Replay family (replay.rs): the rmgr redo-dispatch table + the cross-owner
 # seams the redo loop drives (varsup nextXid advance, standby/procarray

@@ -78,6 +78,7 @@ extern crate alloc;
 pub mod core;
 pub mod desc;
 pub mod guc;
+pub mod gucvars;
 pub mod orchestrator;
 pub mod pageread;
 pub mod promote;
@@ -166,4 +167,51 @@ pub fn init_seams() {
     // startup process's per-backend recovery state.
     seams::archive_recovery_requested::set(orchestrator::archive_recovery_requested);
     seams::recovery_target_tli::set(orchestrator::recovery_target_tli);
+
+    // GUC `conf->variable` accessors (`*conf->variable`) for the recovery /
+    // streaming GUC globals whose C file-static storage lives in
+    // xlogrecovery.c (lines 84-100). Each is a plain GUC global read directly
+    // from its slot by the GUC machinery and the recovery code (none come from
+    // the ControlFile). The owner holds the backing in [`gucvars`]; here we point
+    // the matching `guc_tables::vars` slot at its get/set pair so the GUC engine's
+    // `.read()` / `.write()` resolve. `recovery_target_time`'s `conf->variable`
+    // is guc_tables.c's own file-static `recovery_target_time_string`, not an
+    // xlogrecovery.c global, so it is not installed here.
+    use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+    vars::recoveryRestoreCommand.install(GucVarAccessors {
+        get: gucvars::recovery_restore_command,
+        set: gucvars::set_recovery_restore_command,
+    });
+    vars::recoveryEndCommand.install(GucVarAccessors {
+        get: gucvars::recovery_end_command,
+        set: gucvars::set_recovery_end_command,
+    });
+    vars::archiveCleanupCommand.install(GucVarAccessors {
+        get: gucvars::archive_cleanup_command,
+        set: gucvars::set_archive_cleanup_command,
+    });
+    vars::PrimaryConnInfo.install(GucVarAccessors {
+        get: gucvars::primary_conn_info,
+        set: gucvars::set_primary_conn_info,
+    });
+    vars::PrimarySlotName.install(GucVarAccessors {
+        get: gucvars::primary_slot_name,
+        set: gucvars::set_primary_slot_name,
+    });
+    vars::recoveryTargetInclusive.install(GucVarAccessors {
+        get: gucvars::recovery_target_inclusive,
+        set: gucvars::set_recovery_target_inclusive,
+    });
+    vars::recoveryTargetAction.install(GucVarAccessors {
+        get: gucvars::recovery_target_action,
+        set: gucvars::set_recovery_target_action,
+    });
+    vars::recovery_min_apply_delay.install(GucVarAccessors {
+        get: gucvars::recovery_min_apply_delay,
+        set: gucvars::set_recovery_min_apply_delay,
+    });
+    vars::wal_receiver_create_temp_slot.install(GucVarAccessors {
+        get: gucvars::wal_receiver_create_temp_slot,
+        set: gucvars::set_wal_receiver_create_temp_slot,
+    });
 }
