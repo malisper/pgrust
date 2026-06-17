@@ -13,6 +13,11 @@ types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-storage = { path = "../types-storage" }
 types-snapshot = { path = "../types-snapshot" }
+types-datum = { path = "../types-datum" }
+types-fmgr = { path = "../types-fmgr" }
+
+# fmgr builtin table (C: fmgr_builtins[]); register_builtins / BuiltinFunction.
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 
 # ReadNextFullTransactionId / TransamVariables->oldestClogXid (varsup.c owner).
 backend-access-transam-varsup-seams = { path = "../backend-access-transam-varsup-seams" }
