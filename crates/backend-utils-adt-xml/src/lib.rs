@@ -18,7 +18,11 @@
 //! the C code held `text *` / `char *` (matching the idiomatic
 //! `backend-utils-adt-varlena` owned-payload convention).
 
-#![no_std]
+// NB: not `#![no_std]` — the fmgr builtin registration layer (`fmgr_builtins`)
+// registers the `xml.c` `xml_is_well_formed*` builtins into the fmgr-core table
+// (C: `fmgr_builtins[]`), whose `BuiltinFunction`/raise marshalling uses
+// `String`/`std`. (The `extern crate alloc` + `alloc::` imports below stay
+// valid under std.)
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 #![allow(clippy::too_many_arguments)]
@@ -37,6 +41,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 pub mod chvalid;
+pub mod fmgr_builtins;
 
 use types_datum::Datum;
 use types_error::{
@@ -157,6 +162,10 @@ pub fn init_seams() {
     }
     seam::xmlbinary::set(xmlbinary_seam);
     seam::xmloption::set(xmloption_seam);
+
+    // Register the `xml_is_well_formed*` SQL-callable builtins into the
+    // fmgr-core builtin table (C: `fmgr_builtins[]`).
+    fmgr_builtins::register_xml_builtins();
 }
 
 // ---------------------------------------------------------------------------

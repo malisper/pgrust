@@ -20,6 +20,8 @@ types-tuple = { path = "../types-tuple" }
 types-wchar = { path = "../types-wchar" }
 types-nodes = { path = "../types-nodes" }
 types-xml = { path = "../types-xml" }
+types-fmgr = { path = "../types-fmgr" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 backend-utils-adt-datetime = { path = "../backend-utils-adt-datetime" }
 common-encnames-seams = { path = "../common-encnames-seams" }
 backend-utils-error-elog-seams = { path = "../backend-utils-error-elog-seams" }
