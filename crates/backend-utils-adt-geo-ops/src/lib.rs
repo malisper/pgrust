@@ -62,6 +62,52 @@ impl Path {
     pub fn npts(&self) -> i32 {
         self.points.len() as i32
     }
+
+    /// `offsetof(PATH, p)` (geo_decls.h:115): a 4-byte `vl_len_` varlena header,
+    /// then `int32 npts`, `int32 closed`, `int32 dummy` (double-align padding) =
+    /// 16 bytes before the `Point p[npts]` flexible array.
+    pub const HEADER_SIZE: usize = 16;
+
+    /// `DatumGetPathP(datum)` analogue: decode the in-memory `PATH` varlena image
+    /// into the owned value. The image layout matches the C `struct PATH`: a
+    /// 4-byte `vl_len_` length word, `int32 npts`, `int32 closed`, `int32 dummy`,
+    /// then `Point p[npts]` (16 bytes each).
+    ///
+    /// Panics on a too-short image — a caller bug, exactly as C would misread a
+    /// truncated detoasted pointer.
+    pub fn from_datum_image(bytes: &[u8]) -> Path {
+        let mut npts_b = [0u8; 4];
+        npts_b.copy_from_slice(&bytes[4..8]);
+        let npts = i32::from_ne_bytes(npts_b) as usize;
+        let mut closed_b = [0u8; 4];
+        closed_b.copy_from_slice(&bytes[8..12]);
+        let closed = i32::from_ne_bytes(closed_b) != 0;
+        let mut points: Vec<Point> = Vec::with_capacity(npts);
+        for i in 0..npts {
+            let off = Path::HEADER_SIZE + i * 16;
+            points.push(Point::from_datum_bytes(&bytes[off..off + 16]));
+        }
+        Path { closed, points }
+    }
+
+    /// `PathPGetDatum(path)` analogue: serialize this path to its in-memory `PATH`
+    /// varlena image (4-byte `vl_len_`, `int32 npts`, `int32 closed`, `int32
+    /// dummy`, then `Point p[npts]`). The caller wraps the bytes in a
+    /// `Datum::ByRef`.
+    pub fn to_datum_image(&self) -> Vec<u8> {
+        let npts = self.points.len();
+        let total = Path::HEADER_SIZE + npts * 16;
+        let mut out = vec![0u8; total];
+        out[0..4].copy_from_slice(&((total as u32) << 2).to_ne_bytes());
+        out[4..8].copy_from_slice(&(npts as i32).to_ne_bytes());
+        out[8..12].copy_from_slice(&(self.closed as i32).to_ne_bytes());
+        // bytes[12..16] = dummy padding, left zero.
+        for (i, p) in self.points.iter().enumerate() {
+            let off = Path::HEADER_SIZE + i * 16;
+            out[off..off + 16].copy_from_slice(&p.to_datum_bytes());
+        }
+        out
+    }
 }
 
 /// Safe-Rust representation of the varlena `POLYGON` type (geo_decls.h:151).
@@ -595,6 +641,7 @@ pub fn init_seams() {
 
     // Register the by-reference fmgr-ABI builtin wrappers (C: fmgr_builtins[]).
     crate::fmgr_builtins::register_geo_ops_builtins();
+    crate::fmgr_builtins::register_geo_ops_path_poly_builtins();
 }
 
 /// Shared one-time test-seam setup (used by this crate's `mod tests` and by

@@ -83,6 +83,10 @@ use types_nodes::primnodes::{Expr, OpExpr, TargetEntry};
 use types_nodes::jointype::{Join as JoinBase, JoinType as NodeJoinType};
 use types_nodes::nodenestloop::{NestLoop, NestLoopParam};
 use types_nodes::nodehashjoin::{Hash as HashNode, HashJoin};
+use types_nodes::nodemergejoin::MergeJoin;
+use types_nodes::nodeappend::Append as AppendNode;
+use types_nodes::nodemergeappend::MergeAppend as MergeAppendNode;
+use types_nodes::bitmapset::Bitmapset;
 use types_nodes::nodegroup::Group as GroupNode;
 use types_nodes::nodeunique::Unique as UniqueNode;
 use types_nodes::nodesetop::SetOp as SetOpNode;
@@ -99,7 +103,7 @@ use types_pathnodes::{
 };
 use types_core::primitive::{AttrNumber, InvalidOid, Oid};
 
-use backend_nodes_core::makefuncs::{make_orclause, make_target_entry};
+use backend_nodes_core::makefuncs::{make_bool_const, make_orclause, make_target_entry};
 use backend_nodes_core::nodefuncs::expression_tree_mutator;
 use backend_nodes_equalfuncs_seams::equal_expr as equal_expr_seam;
 use backend_optimizer_path_equivclass_seams as equivclass;
@@ -118,6 +122,7 @@ use backend_optimizer_util_vars::tlist::{
 };
 use backend_optimizer_util_vars::tlist as util_tlist;
 use backend_optimizer_path_costsize_seams as costsize;
+use backend_partitioning_partprune_seams as partprune;
 use backend_optimizer_path_equivclass::{find_computable_ec_member, find_ec_member_matching_expr};
 use backend_utils_cache_lsyscache_seams as lsyscache;
 use backend_utils_misc_guc_tables::vars;
@@ -192,6 +197,10 @@ const T_ForeignScan: NodeTag = NodeTag(354);
 const T_CustomScan: NodeTag = NodeTag(355);
 /// `COMPARE_EQ` (`access/cmptype.h`) — the equality compare type (= 3).
 const COMPARE_EQ: types_pathnodes::CompareType = 3;
+/// `COMPARE_GT` (`access/cmptype.h`) — the greater-than compare type (= 5).
+/// A mergeclause's outer pathkey sorted `COMPARE_GT` means the executor must
+/// reverse the comparison (`mergeReversals[i] = true`).
+const COMPARE_GT: types_pathnodes::CompareType = 5;
 
 const T_NestLoop: NodeTag = NodeTag(356);
 const T_MergeJoin: NodeTag = NodeTag(358);
@@ -785,12 +794,15 @@ fn create_scan_plan<'mcx>(
     // `scan_clauses` (each converter does its own `order_qual_clauses` /
     // `extract_actual_clauses` / `replace_nestloop_params`), exactly as C passes
     // the `scan_clauses` list. `scan_clauses` is moved into the matched arm.
+    // Scan converters live in this crate — direct calls. The index/bitmap/
+    // tablefunc/foreign/custom converters are NOT installed here (unported or
+    // owned by another unit), so they stay `cp_seam::*` seam calls.
     let plan: Node<'mcx> = match pathtype {
         t if t == T_SeqScan => {
-            cp_seam::create_seqscan_plan::call(mcx, root, run, best_path, tlist, scan_clauses)?
+            create_seqscan_plan(mcx, root, run, best_path, tlist, scan_clauses)?
         }
         t if t == T_SampleScan => {
-            cp_seam::create_samplescan_plan::call(mcx, root, run, best_path, tlist, scan_clauses)?
+            create_samplescan_plan(mcx, root, run, best_path, tlist, scan_clauses)?
         }
         t if t == T_IndexScan => cp_seam::create_indexscan_plan::call(
             mcx, root, run, best_path, tlist, scan_clauses, false,
@@ -802,35 +814,35 @@ fn create_scan_plan<'mcx>(
             cp_seam::create_bitmap_scan_plan::call(mcx, root, run, best_path, tlist, scan_clauses)?
         }
         t if t == T_TidScan => {
-            cp_seam::create_tidscan_plan::call(mcx, root, run, best_path, tlist, scan_clauses)?
+            create_tidscan_plan(mcx, root, run, best_path, tlist, scan_clauses)?
         }
         t if t == T_TidRangeScan => {
-            cp_seam::create_tidrangescan_plan::call(mcx, root, run, best_path, tlist, scan_clauses)?
+            create_tidrangescan_plan(mcx, root, run, best_path, tlist, scan_clauses)?
         }
         t if t == T_SubqueryScan => {
-            cp_seam::create_subqueryscan_plan::call(mcx, root, run, best_path, tlist, scan_clauses)?
+            create_subqueryscan_plan(mcx, root, run, best_path, tlist, scan_clauses)?
         }
         t if t == T_FunctionScan => {
-            cp_seam::create_functionscan_plan::call(mcx, root, run, best_path, tlist, scan_clauses)?
+            create_functionscan_plan(mcx, root, run, best_path, tlist, scan_clauses)?
         }
         t if t == T_TableFuncScan => cp_seam::create_tablefuncscan_plan::call(
             mcx, root, run, best_path, tlist, scan_clauses,
         )?,
         t if t == T_ValuesScan => {
-            cp_seam::create_valuesscan_plan::call(mcx, root, run, best_path, tlist, scan_clauses)?
+            create_valuesscan_plan(mcx, root, run, best_path, tlist, scan_clauses)?
         }
         t if t == T_CteScan => {
-            cp_seam::create_ctescan_plan::call(mcx, root, run, best_path, tlist, scan_clauses)?
+            create_ctescan_plan(mcx, root, run, best_path, tlist, scan_clauses)?
         }
-        t if t == T_NamedTuplestoreScan => cp_seam::create_namedtuplestorescan_plan::call(
-            mcx, root, run, best_path, tlist, scan_clauses,
-        )?,
+        t if t == T_NamedTuplestoreScan => {
+            create_namedtuplestorescan_plan(mcx, root, run, best_path, tlist, scan_clauses)?
+        }
         t if t == T_Result => {
-            cp_seam::create_resultscan_plan::call(mcx, root, run, best_path, tlist, scan_clauses)?
+            create_resultscan_plan(mcx, root, run, best_path, tlist, scan_clauses)?
         }
-        t if t == T_WorkTableScan => cp_seam::create_worktablescan_plan::call(
-            mcx, root, run, best_path, tlist, scan_clauses,
-        )?,
+        t if t == T_WorkTableScan => {
+            create_worktablescan_plan(mcx, root, run, best_path, tlist, scan_clauses)?
+        }
         t if t == T_ForeignScan => {
             cp_seam::create_foreignscan_plan::call(mcx, root, run, best_path, tlist, scan_clauses)?
         }
@@ -848,10 +860,9 @@ fn create_scan_plan<'mcx>(
     // If there are any pseudoconstant clauses attached to this node, insert a
     // gating Result node that evaluates the pseudoconstants as one-time quals.
     if !gating_clauses.is_empty() {
-        // create_gating_plan builds the gating Result via make_result (in the
-        // F2c scan-converter / make_* family); routed through its seam until
-        // that family lands.
-        cp_seam::create_gating_plan::call(mcx, root, best_path, plan, gating_clauses)
+        // create_gating_plan builds the gating Result via make_result; direct
+        // call (same crate).
+        create_gating_plan(mcx, root, best_path, plan, gating_clauses)
     } else {
         Ok(plan)
     }
@@ -1001,56 +1012,64 @@ pub fn create_plan_recurse<'mcx>(
 
     let pathtype = root.path(best_path).base().pathtype;
 
+    // The per-family converters below are direct calls. The dispatch and every
+    // converter live in this crate, so no `create_*_plan` indirection seam is
+    // needed (createplan.c is a single translation unit). The remaining
+    // `cp_seam::*` calls are genuine cross-/forward-boundary seams whose owner is
+    // unported (minmaxagg/memoize/windowagg/modifytable/lockrows) or installed by
+    // another crate.
     match pathtype {
         T_SeqScan | T_SampleScan | T_IndexScan | T_IndexOnlyScan | T_BitmapHeapScan | T_TidScan
         | T_TidRangeScan | T_SubqueryScan | T_FunctionScan | T_TableFuncScan | T_ValuesScan
         | T_CteScan | T_WorkTableScan | T_NamedTuplestoreScan | T_ForeignScan | T_CustomScan => {
-            cp_seam::create_scan_plan::call(mcx, root, run, best_path, flags)
+            create_scan_plan(mcx, root, run, best_path, flags)
         }
-        T_HashJoin | T_MergeJoin | T_NestLoop => {
-            cp_seam::create_join_plan::call(mcx, root, run, best_path)
-        }
-        T_Append => cp_seam::create_append_plan::call(mcx, root, run, best_path, flags),
-        T_MergeAppend => cp_seam::create_merge_append_plan::call(mcx, root, run, best_path, flags),
+        T_HashJoin | T_MergeJoin | T_NestLoop => create_join_plan(mcx, root, run, best_path),
+        T_Append => create_append_plan(mcx, root, run, best_path, flags),
+        T_MergeAppend => create_merge_append_plan(mcx, root, run, best_path, flags),
         T_Result => {
             // IsA(best_path, ProjectionPath) / MinMaxAggPath / GroupResultPath /
             // else simple RTE_RESULT base relation (Path).
             match root.path(best_path) {
                 PathNode::ProjectionPath(_) => {
-                    cp_seam::create_projection_plan::call(mcx, root, run, best_path, flags)
+                    create_projection_plan(mcx, root, run, best_path, flags)
                 }
                 PathNode::MinMaxAggPath(_) => {
+                    // create_minmaxagg_plan is not yet ported (MinMaxAggInfo
+                    // subplan carrier); stays a forward seam-panic.
                     cp_seam::create_minmaxagg_plan::call(mcx, root, run, best_path)
                 }
                 PathNode::GroupResultPath(_) => {
-                    cp_seam::create_group_result_plan::call(mcx, root, run, best_path)
+                    create_group_result_plan(mcx, root, run, best_path)
                 }
                 // Simple RTE_RESULT base relation — Assert(IsA(best_path, Path)).
-                _ => cp_seam::create_scan_plan::call(mcx, root, run, best_path, flags),
+                _ => create_scan_plan(mcx, root, run, best_path, flags),
             }
         }
-        T_ProjectSet => cp_seam::create_project_set_plan::call(mcx, root, run, best_path),
-        T_Material => cp_seam::create_material_plan::call(mcx, root, run, best_path, flags),
+        T_ProjectSet => create_project_set_plan(mcx, root, run, best_path),
+        T_Material => create_material_plan(mcx, root, run, best_path, flags),
+        // create_memoize_plan is not yet ported; stays a forward seam-panic.
         T_Memoize => cp_seam::create_memoize_plan::call(mcx, root, run, best_path, flags),
         // IsA(best_path, UpperUniquePath) vs UniquePath — the sub-discrimination
         // is internal to the Unique family; route the whole T_Unique pathtype.
-        T_Unique => cp_seam::create_unique_dispatch_plan::call(mcx, root, run, best_path, flags),
-        T_Gather => cp_seam::create_gather_plan::call(mcx, root, run, best_path),
-        T_Sort => cp_seam::create_sort_plan::call(mcx, root, run, best_path, flags),
-        T_IncrementalSort => {
-            cp_seam::create_incrementalsort_plan::call(mcx, root, run, best_path, flags)
-        }
-        T_Group => cp_seam::create_group_plan::call(mcx, root, run, best_path),
+        T_Unique => create_unique_dispatch_plan(mcx, root, run, best_path, flags),
+        T_Gather => create_gather_plan(mcx, root, run, best_path),
+        T_Sort => create_sort_plan(mcx, root, run, best_path, flags),
+        T_IncrementalSort => create_incrementalsort_plan(mcx, root, run, best_path, flags),
+        T_Group => create_group_plan(mcx, root, run, best_path),
         // IsA(best_path, GroupingSetsPath) vs AggPath — internal to the Agg
         // family; route the whole T_Agg pathtype.
-        T_Agg => cp_seam::create_agg_dispatch_plan::call(mcx, root, run, best_path),
+        T_Agg => create_agg_dispatch_plan(mcx, root, run, best_path),
+        // create_windowagg_plan is not yet ported; stays a forward seam-panic.
         T_WindowAgg => cp_seam::create_windowagg_plan::call(mcx, root, run, best_path),
-        T_SetOp => cp_seam::create_setop_plan::call(mcx, root, run, best_path, flags),
-        T_RecursiveUnion => cp_seam::create_recursiveunion_plan::call(mcx, root, run, best_path),
+        T_SetOp => create_setop_plan(mcx, root, run, best_path, flags),
+        T_RecursiveUnion => create_recursiveunion_plan(mcx, root, run, best_path),
+        // create_lockrows_plan is not yet ported (PlanRowMark carrier gap); seam.
         T_LockRows => cp_seam::create_lockrows_plan::call(mcx, root, run, best_path, flags),
+        // create_modifytable_plan is not yet ported; stays a forward seam-panic.
         T_ModifyTable => cp_seam::create_modifytable_plan::call(mcx, root, run, best_path),
-        T_Limit => cp_seam::create_limit_plan::call(mcx, root, run, best_path, flags),
-        T_GatherMerge => cp_seam::create_gather_merge_plan::call(mcx, root, run, best_path),
+        T_Limit => create_limit_plan(mcx, root, run, best_path, flags),
+        T_GatherMerge => create_gather_merge_plan(mcx, root, run, best_path),
         other => Err(PgError::error(alloc::format!(
             "unrecognized node type: {}",
             other.0
@@ -3710,10 +3729,757 @@ fn create_hashjoin_plan<'mcx>(
     Ok(Node::HashJoin(join_plan))
 }
 
+/// `label_sort_with_costsize(root, plan, limit_tuples)` (createplan.c:5553) —
+/// re-figure a freshly-built `Sort` plan node's cost via `cost_sort` (over a
+/// dummy stack `Path`) so EXPLAIN labels it nicely. The cost was already
+/// included in the path cost we work from, but isn't split out, so we re-derive
+/// it. Costs come from the `cost_sort_label` costsize seam.
+fn label_sort_with_costsize(root: &mut PlannerInfo, plan: &mut Sort, limit_tuples: f64) {
+    let lefttree = plan
+        .plan
+        .lefttree
+        .as_deref()
+        .expect("label_sort_with_costsize: Sort has no lefttree");
+    let lt = lefttree.plan_head();
+    let (lt_total_cost, lt_rows, lt_width, lt_parallel_safe) =
+        (lt.total_cost, lt.plan_rows, lt.plan_width, lt.parallel_safe);
+
+    let (startup_cost, total_cost) = costsize::cost_sort_label::call(
+        root,
+        plan.plan.disabled_nodes,
+        lt_total_cost,
+        lt_rows,
+        lt_width,
+        limit_tuples,
+    );
+    plan.plan.startup_cost = startup_cost;
+    plan.plan.total_cost = total_cost;
+    plan.plan.plan_rows = lt_rows;
+    plan.plan.plan_width = lt_width;
+    plan.plan.parallel_aware = false;
+    plan.plan.parallel_safe = lt_parallel_safe;
+}
+
+/// `label_incrementalsort_with_costsize(root, plan, pathkeys, limit_tuples)`
+/// (createplan.c:5581) — same as [`label_sort_with_costsize`] but labels an
+/// `IncrementalSort` node.
+fn label_incrementalsort_with_costsize<'mcx>(
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    plan: &mut IncrementalSortNode,
+    pathkeys: &[PathKey],
+    limit_tuples: f64,
+) -> PgResult<()> {
+    let lefttree = plan
+        .sort
+        .plan
+        .lefttree
+        .as_deref()
+        .expect("label_incrementalsort_with_costsize: IncrementalSort has no lefttree");
+    let lt = lefttree.plan_head();
+    let (lt_startup_cost, lt_total_cost, lt_rows, lt_width, lt_parallel_safe) = (
+        lt.startup_cost,
+        lt.total_cost,
+        lt.plan_rows,
+        lt.plan_width,
+        lt.parallel_safe,
+    );
+
+    let (startup_cost, total_cost) = costsize::cost_incremental_sort_label::call(
+        run,
+        root,
+        pathkeys,
+        plan.nPresortedCols,
+        plan.sort.plan.disabled_nodes,
+        lt_startup_cost,
+        lt_total_cost,
+        lt_rows,
+        lt_width,
+        limit_tuples,
+    )?;
+    plan.sort.plan.startup_cost = startup_cost;
+    plan.sort.plan.total_cost = total_cost;
+    plan.sort.plan.plan_rows = lt_rows;
+    plan.sort.plan.plan_width = lt_width;
+    plan.sort.plan.parallel_aware = false;
+    plan.sort.plan.parallel_safe = lt_parallel_safe;
+    Ok(())
+}
+
+/// `make_mergejoin(tlist, joinclauses, otherclauses, mergeclauses,
+/// mergefamilies, mergecollations, mergereversals, mergenullsfirst, lefttree,
+/// righttree, jointype, inner_unique, skip_mark_restore)` (createplan.c:6162).
+#[allow(clippy::too_many_arguments)]
+fn make_mergejoin<'mcx>(
+    mcx: Mcx<'mcx>,
+    tlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
+    joinclauses: Option<PgVec<'mcx, Expr>>,
+    otherclauses: Option<PgVec<'mcx, Expr>>,
+    mergeclauses: Vec<Expr>,
+    mergefamilies: Vec<Oid>,
+    mergecollations: Vec<Oid>,
+    mergereversals: Vec<bool>,
+    mergenullsfirst: Vec<bool>,
+    lefttree: Node<'mcx>,
+    righttree: Node<'mcx>,
+    jointype: NodeJoinType,
+    inner_unique: bool,
+    skip_mark_restore: bool,
+) -> PgResult<MergeJoin<'mcx>> {
+    let plan = {
+        let mut plan = Plan::default();
+        plan.targetlist = tlist;
+        plan.qual = otherclauses;
+        plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
+        plan.righttree = Some(mcx::alloc_in(mcx, righttree)?);
+        plan
+    };
+    let join = JoinBase {
+        plan,
+        jointype,
+        inner_unique,
+        // node->join.joinqual = joinclauses;
+        joinqual: joinclauses,
+    };
+    Ok(MergeJoin {
+        join,
+        skip_mark_restore,
+        mergeclauses,
+        mergeFamilies: mergefamilies,
+        mergeCollations: mergecollations,
+        mergeReversals: mergereversals,
+        mergeNullsFirst: mergenullsfirst,
+    })
+}
+
+/// `create_mergejoin_plan(root, (MergePath *) best_path)` (createplan.c:4493).
+fn create_mergejoin_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+) -> PgResult<Node<'mcx>> {
+    let (
+        outerjoinpath,
+        innerjoinpath,
+        jointype,
+        inner_unique,
+        joinrestrictinfo,
+        path_mergeclauses,
+        outersortkeys,
+        innersortkeys,
+        outer_presorted_keys,
+        skip_mark_restore,
+        materialize_inner,
+        has_param_info,
+    ) = match root.path(best_path) {
+        PathNode::MergePath(p) => (
+            p.jpath.outerjoinpath,
+            p.jpath.innerjoinpath,
+            p.jpath.jointype,
+            p.jpath.inner_unique,
+            p.jpath.joinrestrictinfo.clone(),
+            p.path_mergeclauses.clone(),
+            p.outersortkeys.clone(),
+            p.innersortkeys.clone(),
+            p.outer_presorted_keys,
+            p.skip_mark_restore,
+            p.materialize_inner,
+            p.jpath.path.param_info.is_some(),
+        ),
+        _ => unreachable!("create_mergejoin_plan on non-MergePath"),
+    };
+    let outerjoinpath =
+        outerjoinpath.expect("create_mergejoin_plan: MergePath has no outerjoinpath");
+    let innerjoinpath =
+        innerjoinpath.expect("create_mergejoin_plan: MergePath has no innerjoinpath");
+
+    let tlist = build_path_tlist(mcx, root, best_path)?;
+
+    // MergeJoin can project; request a small tlist on a side we intend to sort.
+    let outer_flags = if !outersortkeys.is_empty() { CP_SMALL_TLIST } else { 0 };
+    let inner_flags = if !innersortkeys.is_empty() { CP_SMALL_TLIST } else { 0 };
+    let mut outer_plan = create_plan_recurse(mcx, root, run, outerjoinpath, outer_flags)?;
+    let mut inner_plan = create_plan_recurse(mcx, root, run, innerjoinpath, inner_flags)?;
+
+    // Sort join qual clauses into best execution order (NB: do NOT reorder the
+    // mergeclauses).
+    let joinrestrictclauses = order_qual_clauses_rinfo(root, &joinrestrictinfo);
+
+    // Get the join qual clauses (in plain expression form). Pseudoconstant
+    // clauses are ignored here.
+    let parent_relids = root.path(best_path).base().parent;
+    let (mut joinclauses, mut otherclauses): (Vec<NodeId>, Vec<NodeId>) =
+        if is_outer_join(jointype) {
+            let relids = root.rel(parent_relids).relids.clone();
+            extract_actual_join_clauses(root, &joinrestrictclauses, &relids)
+        } else {
+            // We can treat all clauses alike for an inner join.
+            (extract_actual_clauses(root, &joinrestrictclauses, false), Vec::new())
+        };
+
+    // Remove the mergeclauses from the join qual clauses, leaving the quals to
+    // be checked as qpquals.
+    let mergeclauses_actual = get_actual_clauses(root, &path_mergeclauses);
+    let mergeclauses_actual_exprs: Vec<Expr> =
+        mergeclauses_actual.iter().map(|&id| root.node(id).clone()).collect();
+    joinclauses = list_difference_exprs(root, &joinclauses, &mergeclauses_actual_exprs);
+
+    // Replace any outer-relation variables with nestloop params. There should
+    // not be any in the mergeclauses.
+    if has_param_info {
+        joinclauses = replace_nestloop_params_list(mcx, root, &joinclauses)?;
+        otherclauses = replace_nestloop_params_list(mcx, root, &otherclauses)?;
+    }
+
+    // Rearrange mergeclauses so the outer variable is always on the left; mark
+    // the mergeclause restrictinfos with correct outer_is_left status.
+    let outer_relids = root.rel(root.path(outerjoinpath).base().parent).relids.clone();
+    let mergeclauses = get_switched_clauses(root, &path_mergeclauses, &outer_relids)?;
+
+    // Create explicit sort nodes for the outer and inner paths if necessary.
+    let outerpathkeys: Vec<PathKey> = if !outersortkeys.is_empty() {
+        let outer_path_parent = root.path(outerjoinpath).base().parent;
+        let outer_sort_relids: Relids = root.rel(outer_path_parent).relids.clone();
+
+        // We choose incremental sort if it is enabled and there are presorted
+        // keys; otherwise a full sort.
+        let enable_incremental_sort = (vars::enable_incremental_sort.get().get)();
+        let sort_node: Node<'mcx> = if enable_incremental_sort && outer_presorted_keys > 0 {
+            let mut sort_plan = make_incrementalsort_from_pathkeys(
+                mcx,
+                root,
+                outer_plan,
+                &outersortkeys,
+                &outer_sort_relids,
+                outer_presorted_keys,
+            )?;
+            label_incrementalsort_with_costsize(root, run, &mut sort_plan, &outersortkeys, -1.0)?;
+            Node::IncrementalSort(sort_plan)
+        } else {
+            let mut sort_plan =
+                make_sort_from_pathkeys(mcx, root, outer_plan, &outersortkeys, &outer_sort_relids)?;
+            label_sort_with_costsize(root, &mut sort_plan, -1.0);
+            Node::Sort(sort_plan)
+        };
+        outer_plan = sort_node;
+        outersortkeys.clone()
+    } else {
+        root.path(outerjoinpath).base().pathkeys.clone()
+    };
+
+    let innerpathkeys: Vec<PathKey> = if !innersortkeys.is_empty() {
+        // We do not consider incremental sort for the inner path, because
+        // incremental sort does not support mark/restore.
+        let inner_path_parent = root.path(innerjoinpath).base().parent;
+        let inner_sort_relids: Relids = root.rel(inner_path_parent).relids.clone();
+        let mut sort_plan =
+            make_sort_from_pathkeys(mcx, root, inner_plan, &innersortkeys, &inner_sort_relids)?;
+        label_sort_with_costsize(root, &mut sort_plan, -1.0);
+        inner_plan = Node::Sort(sort_plan);
+        innersortkeys.clone()
+    } else {
+        root.path(innerjoinpath).base().pathkeys.clone()
+    };
+
+    // If specified, add a materialize node to shield the inner plan from the
+    // need to handle mark/restore.
+    if materialize_inner {
+        let mut matplan = make_material(mcx, inner_plan)?;
+        // We assume the materialize will not spill to disk, and therefore charge
+        // just cpu_operator_cost per tuple. (Keep in sync with
+        // final_cost_mergejoin.)
+        let inner_cost = {
+            let inner_ref = matplan
+                .plan
+                .lefttree
+                .as_deref()
+                .expect("materialize has lefttree");
+            plan_cost_snapshot(inner_ref.plan_head())
+        };
+        apply_cost_snapshot(&mut matplan.plan, &inner_cost);
+        matplan.plan.total_cost += pathnode::cpu_operator_cost::call() * matplan.plan.plan_rows;
+        inner_plan = Node::Material(matplan);
+    }
+
+    // Compute the opfamily/collation/strategy/nullsfirst arrays needed by the
+    // executor. The information is in the pathkeys for the two inputs, but we
+    // must be careful about mergeclauses sharing a pathkey, and about the inner
+    // pathkeys possibly not being in mergeclause order.
+    let n_clauses = mergeclauses.len();
+    debug_assert_eq!(n_clauses, path_mergeclauses.len());
+    let mut mergefamilies: Vec<Oid> = Vec::with_capacity(n_clauses);
+    let mut mergecollations: Vec<Oid> = Vec::with_capacity(n_clauses);
+    let mut mergereversals: Vec<bool> = Vec::with_capacity(n_clauses);
+    let mut mergenullsfirst: Vec<bool> = Vec::with_capacity(n_clauses);
+
+    // opathkey / opeclass track the current outer pathkey; lop/lip are cursors
+    // into outer/inner pathkeys (index into the cloned pathkey vecs).
+    let mut opathkey: Option<PathKey> = None;
+    let mut opeclass: Option<types_pathnodes::EcId> = None;
+    let mut lop: usize = 0;
+    let mut lip: usize = 0;
+
+    for &rinfo_id in &path_mergeclauses {
+        // fetch outer/inner eclass from mergeclause
+        let (oeclass, ieclass) = {
+            let rinfo = root.rinfo(rinfo_id);
+            if rinfo.outer_is_left {
+                (rinfo.left_ec, rinfo.right_ec)
+            } else {
+                (rinfo.right_ec, rinfo.left_ec)
+            }
+        };
+        let oeclass = oeclass.expect("create_mergejoin_plan: mergeclause has no outer eclass");
+        let ieclass = ieclass.expect("create_mergejoin_plan: mergeclause has no inner eclass");
+
+        // Identify the outer pathkey for this clause by matching eclasses.
+        if Some(oeclass) != opeclass {
+            // doesn't match the current opathkey, so must match the next
+            if lop >= outerpathkeys.len() {
+                return Err(PgError::error("outer pathkeys do not match mergeclauses"));
+            }
+            let opk = outerpathkeys[lop].clone();
+            opeclass = opk.pk_eclass;
+            opathkey = Some(opk);
+            lop += 1;
+            if Some(oeclass) != opeclass {
+                return Err(PgError::error("outer pathkeys do not match mergeclauses"));
+            }
+        }
+
+        // Identify the inner pathkey, coping with redundant inner pathkeys.
+        let mut ipathkey: Option<PathKey> = None;
+        let mut ipeclass: Option<types_pathnodes::EcId> = None;
+        let mut first_inner_match = false;
+        if lip < innerpathkeys.len() {
+            let ipk = innerpathkeys[lip].clone();
+            ipeclass = ipk.pk_eclass;
+            if Some(ieclass) == ipeclass {
+                // successful first match to this inner pathkey
+                ipathkey = Some(ipk);
+                lip += 1;
+                first_inner_match = true;
+            } else {
+                ipathkey = Some(ipk);
+            }
+        }
+        if !first_inner_match {
+            // redundant clause ... must match something before lip
+            let mut matched = false;
+            for l2 in 0..lip {
+                let ipk = innerpathkeys[l2].clone();
+                ipeclass = ipk.pk_eclass;
+                ipathkey = Some(ipk);
+                if Some(ieclass) == ipeclass {
+                    matched = true;
+                    break;
+                }
+            }
+            if !matched && Some(ieclass) != ipeclass {
+                return Err(PgError::error("inner pathkeys do not match mergeclauses"));
+            }
+        }
+
+        let opathkey_ref =
+            opathkey.as_ref().expect("create_mergejoin_plan: outer pathkey not set");
+        let ipathkey_ref =
+            ipathkey.as_ref().expect("create_mergejoin_plan: inner pathkey not set");
+
+        // The pathkeys should match as to opfamily and collation (which affect
+        // equality); a redundant inner pathkey may differ in sort ordering.
+        let o_collation = root.ec(opathkey_ref.pk_eclass.expect("outer pk_eclass")).ec_collation;
+        let i_collation = root.ec(ipathkey_ref.pk_eclass.expect("inner pk_eclass")).ec_collation;
+        if opathkey_ref.pk_opfamily != ipathkey_ref.pk_opfamily || o_collation != i_collation {
+            return Err(PgError::error("left and right pathkeys do not match in mergejoin"));
+        }
+        if first_inner_match
+            && (opathkey_ref.pk_cmptype != ipathkey_ref.pk_cmptype
+                || opathkey_ref.pk_nulls_first != ipathkey_ref.pk_nulls_first)
+        {
+            return Err(PgError::error("left and right pathkeys do not match in mergejoin"));
+        }
+
+        // OK, save info for executor.
+        mergefamilies.push(opathkey_ref.pk_opfamily);
+        mergecollations.push(o_collation);
+        mergereversals.push(opathkey_ref.pk_cmptype == COMPARE_GT);
+        mergenullsfirst.push(opathkey_ref.pk_nulls_first);
+    }
+
+    // Note: it is not an error if we have additional pathkey elements (the input
+    // paths might be better-sorted than we need).
+
+    // Now build the mergejoin node.
+    let tlist = tlist_to_plan_field(mcx, tlist)?;
+    let joinclauses_e = node_ids_to_expr_list(mcx, root, &joinclauses)?;
+    let otherclauses_e = node_ids_to_expr_list(mcx, root, &otherclauses)?;
+    // mergeclauses field is the switched clause exprs (owned Vec<Expr>).
+    let mergeclauses_field: Vec<Expr> = mergeclauses;
+
+    let mut join_plan = make_mergejoin(
+        mcx,
+        tlist,
+        joinclauses_e,
+        otherclauses_e,
+        mergeclauses_field,
+        mergefamilies,
+        mergecollations,
+        mergereversals,
+        mergenullsfirst,
+        outer_plan,
+        inner_plan,
+        jointype_path_to_node(jointype),
+        inner_unique,
+        skip_mark_restore,
+    )?;
+
+    // Costs of sort and material steps are included in path cost already.
+    copy_generic_path_info(&mut join_plan.join.plan, root.path(best_path).base());
+
+    Ok(Node::MergeJoin(join_plan))
+}
+
+// ===========================================================================
+// Append / MergeAppend family (createplan.c:1216 / 1437).
+// ===========================================================================
+
+/// Convert a planner [`Relids`] (an `Option<Box<pathnodes::Bitmapset>>`) into an
+/// owned plan-node `apprelids` (`Option<PgBox<nodes::Bitmapset>>`). Both are word
+/// vectors; this re-homes the word storage into `mcx` like C's `bms_copy`.
+fn relids_to_apprelids<'mcx>(
+    mcx: Mcx<'mcx>,
+    relids: &Relids,
+) -> PgResult<Option<PgBox<'mcx, Bitmapset<'mcx>>>> {
+    match relids {
+        None => Ok(None),
+        Some(bms) => {
+            let mut words = vec_with_capacity_in(mcx, bms.words.len())?;
+            for &w in &bms.words {
+                words.push(w);
+            }
+            Ok(Some(mcx::alloc_in(mcx, Bitmapset { words })?))
+        }
+    }
+}
+
+/// `mark_async_capable_plan(plan, path)` (createplan.c:1140) — whether a child
+/// `plan` built from `path` is async-capable, marking it if so. Only foreign
+/// scans over an async-capable FDW (plus trivial SubqueryScan / Projection atop
+/// such) are ever async-capable; the FDW async callback is part of the unported
+/// FDW floor, so no path is async-capable here and this returns `false`.
+/// Faithful: `IsForeignPathAsyncCapable` returning false is a valid C outcome.
+fn mark_async_capable_plan(_plan: &mut Node<'_>, _path: &PathNode) -> bool {
+    false
+}
+
+/// `create_append_plan(root, (AppendPath *) best_path, flags)` (createplan.c:1216).
+fn create_append_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+    flags: i32,
+) -> PgResult<Node<'mcx>> {
+    let (subpaths, first_partial_path, limit_tuples) = match root.path(best_path) {
+        PathNode::AppendPath(p) => (p.subpaths.clone(), p.first_partial_path, p.limit_tuples),
+        _ => unreachable!("create_append_plan on non-AppendPath"),
+    };
+    let rel_id = root.path(best_path).base().parent;
+    let pathkeys = root.path(best_path).base().pathkeys.clone();
+    let parallel_safe = root.path(best_path).base().parallel_safe;
+    let has_param_info = root.path(best_path).base().param_info.is_some();
+
+    let tlist = build_path_tlist(mcx, root, best_path)?;
+    let orig_tlist_length = tlist.len();
+
+    // The subpaths list could be empty if every child was proven empty by
+    // constraint exclusion; generate a dummy Result that returns no rows.
+    if subpaths.is_empty() {
+        // make_result(tlist, (Node *) list_make1(makeBoolConst(false, false)), NULL)
+        let mut resconstantqual: PgVec<'mcx, Expr> = vec_with_capacity_in(mcx, 1)?;
+        resconstantqual.push(Expr::Const(make_bool_const(false, false)));
+        let tlist = tlist_to_plan_field(mcx, tlist)?;
+        let mut plan = make_result(mcx, tlist, Some(resconstantqual), None)?;
+        copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
+        return Ok(Node::Result(plan));
+    }
+
+    // Otherwise build an Append plan. We don't split the Append's creation into
+    // a make_xxx because we want to run prepare_sort_from_pathkeys on it before
+    // doing so on the individual children, to ease cross-checking sort info.
+    let apprelids = relids_to_apprelids(mcx, &root.rel(rel_id).relids.clone())?;
+    let mut append = AppendNode::default();
+    append.apprelids = apprelids;
+    append.plan.targetlist = tlist_to_plan_field(mcx, tlist)?;
+    append.plan.qual = None;
+    append.plan.lefttree = None;
+    append.plan.righttree = None;
+    let mut append_node: Node<'mcx> = Node::Append(append);
+
+    // For ordered Appends, compute the parent sort-key info (adjusting the
+    // Append's tlist in place) so children can cross-check against it.
+    let mut node_sort_col_idx: Option<PgVec<'mcx, AttrNumber>> = None;
+    let mut tlist_was_changed = false;
+    if !pathkeys.is_empty() {
+        let rel_relids = root.rel(rel_id).relids.clone();
+        let (n, sci, _sop, _coll, _nf) =
+            prepare_sort_from_pathkeys(mcx, root, append_node, &pathkeys, &rel_relids, None, true)?;
+        append_node = n;
+        node_sort_col_idx = Some(sci);
+        let new_len = append_node.plan_head().targetlist.as_deref().map(|t| t.len()).unwrap_or(0);
+        tlist_was_changed = orig_tlist_length != new_len;
+    }
+
+    // If appropriate, consider async append.
+    let enable_async_append = (vars::enable_async_append.get().get)();
+    let consider_async =
+        enable_async_append && pathkeys.is_empty() && !parallel_safe && subpaths.len() > 1;
+
+    // Build the plan for each child.
+    let mut subplans: Vec<Node<'mcx>> = Vec::with_capacity(subpaths.len());
+    let mut nasyncplans: i32 = 0;
+    for &subpath in &subpaths {
+        // Must insist that all children return the same tlist.
+        let mut subplan = create_plan_recurse(mcx, root, run, subpath, CP_EXACT_TLIST)?;
+
+        // For ordered Appends, insert a Sort if the subplan isn't ordered enough.
+        if !pathkeys.is_empty() {
+            let sub_parent = root.path(subpath).base().parent;
+            let sub_relids = root.rel(sub_parent).relids.clone();
+            let req = node_sort_col_idx.as_deref();
+            let (numsortkeys, sort_col_idx, sort_operators, collations, nulls_first) =
+                prepare_sort_from_pathkeys(mcx, root, subplan, &pathkeys, &sub_relids, req, false)?;
+            subplan = numsortkeys;
+
+            // Check we got the same sort key columns the Append expects.
+            if let Some(node_sci) = node_sort_col_idx.as_deref() {
+                if sort_col_idx.as_slice() != node_sci {
+                    return Err(PgError::error(
+                        "Append child's targetlist doesn't match Append",
+                    ));
+                }
+            }
+
+            // Insert a Sort node if subplan isn't sufficiently ordered.
+            let sub_pathkeys = root.path(subpath).base().pathkeys.clone();
+            if !pathnode::pathkeys_contained_in::call(&pathkeys, &sub_pathkeys) {
+                let mut sort = make_sort(
+                    mcx,
+                    subplan,
+                    sort_col_idx,
+                    sort_operators,
+                    collations,
+                    nulls_first,
+                )?;
+                label_sort_with_costsize(root, &mut sort, limit_tuples);
+                subplan = Node::Sort(sort);
+            }
+        }
+
+        // If needed, check whether the subplan can run asynchronously.
+        if consider_async {
+            let sub_path_node = root.path(subpath).clone();
+            if mark_async_capable_plan(&mut subplan, &sub_path_node) {
+                nasyncplans += 1;
+            }
+        }
+
+        subplans.push(subplan);
+    }
+
+    // Run-time partition pruning: gather pruning info if there are useful quals.
+    let mut part_prune_index: i32 = -1;
+    let enable_partition_pruning = (vars::enable_partition_pruning.get().get)();
+    if enable_partition_pruning {
+        let baserestrictinfo = root.rel(rel_id).baserestrictinfo.clone();
+        let mut prunequal = extract_actual_clauses(root, &baserestrictinfo, false);
+        if has_param_info {
+            let ppi_clauses = match root.path(best_path).base().param_info.as_ref() {
+                Some(ppi) => ppi.ppi_clauses.clone(),
+                None => Vec::new(),
+            };
+            let mut prmquals = extract_actual_clauses(root, &ppi_clauses, false);
+            prmquals = replace_nestloop_params_list(mcx, root, &prmquals)?;
+            prunequal.extend(prmquals);
+        }
+        if !prunequal.is_empty() {
+            part_prune_index =
+                partprune::make_partition_pruneinfo::call(root, rel_id, &subpaths, &prunequal)?;
+        }
+    }
+
+    // Fill the Append's child / async / partial fields and finalize costs.
+    {
+        let append = match &mut append_node {
+            Node::Append(a) => a,
+            _ => unreachable!("append_node is not an Append"),
+        };
+        append.appendplans = subplans;
+        append.nasyncplans = nasyncplans;
+        append.first_partial_plan = first_partial_path;
+        append.part_prune_index = part_prune_index;
+        copy_generic_path_info(&mut append.plan, root.path(best_path).base());
+    }
+
+    // If prepare_sort_from_pathkeys added sort columns but the caller wants the
+    // exact / a narrow tlist, strip them again by injecting a projection.
+    if tlist_was_changed && (flags & (CP_EXACT_TLIST | CP_SMALL_TLIST)) != 0 {
+        let parallel_safe = append_node.plan_head().parallel_safe;
+        let new_tlist = list_copy_head_tlist(mcx, &append_node, orig_tlist_length)?;
+        return inject_projection_plan(mcx, append_node, new_tlist, parallel_safe);
+    }
+    Ok(append_node)
+}
+
+/// `create_merge_append_plan(root, (MergeAppendPath *) best_path, flags)`
+/// (createplan.c:1437).
+fn create_merge_append_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+    flags: i32,
+) -> PgResult<Node<'mcx>> {
+    let (subpaths, limit_tuples) = match root.path(best_path) {
+        PathNode::MergeAppendPath(p) => (p.subpaths.clone(), p.limit_tuples),
+        _ => unreachable!("create_merge_append_plan on non-MergeAppendPath"),
+    };
+    let rel_id = root.path(best_path).base().parent;
+    let pathkeys = root.path(best_path).base().pathkeys.clone();
+    debug_assert!(root.path(best_path).base().param_info.is_none());
+
+    let tlist = build_path_tlist(mcx, root, best_path)?;
+    let orig_tlist_length = tlist.len();
+
+    // As with Append, we build the node and run prepare_sort_from_pathkeys on it
+    // before the children, to ease cross-checking sort info.
+    let apprelids = relids_to_apprelids(mcx, &root.rel(rel_id).relids.clone())?;
+    let mut node = MergeAppendNode::default();
+    node.apprelids = apprelids;
+    node.plan.targetlist = tlist_to_plan_field(mcx, tlist)?;
+    node.plan.qual = None;
+    node.plan.lefttree = None;
+    node.plan.righttree = None;
+    // copy_generic_path_info(plan, path) happens up front in C; the targetlist
+    // assignment above mirrors the field order. Copy cost/size now.
+    copy_generic_path_info(&mut node.plan, root.path(best_path).base());
+    let mut ma_node: Node<'mcx> = Node::MergeAppend(node);
+
+    // Compute parent sort-key info, adjusting the MergeAppend tlist in place.
+    let rel_relids = root.rel(rel_id).relids.clone();
+    let (n, node_sort_col_idx, node_sort_operators, node_collations, node_nulls_first) =
+        prepare_sort_from_pathkeys(mcx, root, ma_node, &pathkeys, &rel_relids, None, true)?;
+    ma_node = n;
+    let num_cols = node_sort_col_idx.len() as i32;
+    let new_len = ma_node.plan_head().targetlist.as_deref().map(|t| t.len()).unwrap_or(0);
+    let tlist_was_changed = orig_tlist_length != new_len;
+
+    // Now prepare the child plans, applying prepare_sort_from_pathkeys even to
+    // subplans that don't need an explicit sort, so they return the same sort
+    // key columns the MergeAppend expects.
+    let mut subplans: Vec<Node<'mcx>> = Vec::with_capacity(subpaths.len());
+    for &subpath in &subpaths {
+        let mut subplan = create_plan_recurse(mcx, root, run, subpath, CP_EXACT_TLIST)?;
+
+        let sub_parent = root.path(subpath).base().parent;
+        let sub_relids = root.rel(sub_parent).relids.clone();
+        let (np, sort_col_idx, sort_operators, collations, nulls_first) = prepare_sort_from_pathkeys(
+            mcx,
+            root,
+            subplan,
+            &pathkeys,
+            &sub_relids,
+            Some(&node_sort_col_idx),
+            false,
+        )?;
+        subplan = np;
+
+        // Cross-check the sort key columns match the MergeAppend.
+        if sort_col_idx.as_slice() != node_sort_col_idx.as_slice() {
+            return Err(PgError::error(
+                "MergeAppend child's targetlist doesn't match MergeAppend",
+            ));
+        }
+
+        // Insert a Sort node if subplan isn't sufficiently ordered.
+        let sub_pathkeys = root.path(subpath).base().pathkeys.clone();
+        if !pathnode::pathkeys_contained_in::call(&pathkeys, &sub_pathkeys) {
+            let mut sort = make_sort(
+                mcx,
+                subplan,
+                sort_col_idx,
+                sort_operators,
+                collations,
+                nulls_first,
+            )?;
+            label_sort_with_costsize(root, &mut sort, limit_tuples);
+            subplan = Node::Sort(sort);
+        }
+
+        subplans.push(subplan);
+    }
+
+    // Run-time partition pruning.
+    let mut part_prune_index: i32 = -1;
+    let enable_partition_pruning = (vars::enable_partition_pruning.get().get)();
+    if enable_partition_pruning {
+        let baserestrictinfo = root.rel(rel_id).baserestrictinfo.clone();
+        let prunequal = extract_actual_clauses(root, &baserestrictinfo, false);
+        // We don't currently generate any parameterized MergeAppend paths.
+        debug_assert!(root.path(best_path).base().param_info.is_none());
+        if !prunequal.is_empty() {
+            part_prune_index =
+                partprune::make_partition_pruneinfo::call(root, rel_id, &subpaths, &prunequal)?;
+        }
+    }
+
+    // Finalize the MergeAppend node fields.
+    {
+        let node = match &mut ma_node {
+            Node::MergeAppend(n) => n,
+            _ => unreachable!("ma_node is not a MergeAppend"),
+        };
+        node.numCols = num_cols;
+        node.sortColIdx = node_sort_col_idx.iter().copied().collect();
+        node.sortOperators = node_sort_operators.iter().copied().collect();
+        node.collations = node_collations.iter().copied().collect();
+        node.nullsFirst = node_nulls_first.iter().copied().collect();
+        node.mergeplans = subplans;
+        node.part_prune_index = part_prune_index;
+    }
+
+    // Strip added sort columns again if the caller wanted exact/narrow tlist.
+    if tlist_was_changed && (flags & (CP_EXACT_TLIST | CP_SMALL_TLIST)) != 0 {
+        let parallel_safe = ma_node.plan_head().parallel_safe;
+        let new_tlist = list_copy_head_tlist(mcx, &ma_node, orig_tlist_length)?;
+        return inject_projection_plan(mcx, ma_node, new_tlist, parallel_safe);
+    }
+    Ok(ma_node)
+}
+
+/// `list_copy_head(plan->targetlist, n)` — clone the first `n` `TargetEntry`s of
+/// a plan node's targetlist into a fresh `mcx` list (used to drop the resjunk
+/// sort columns added by `prepare_sort_from_pathkeys`).
+fn list_copy_head_tlist<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: &Node<'mcx>,
+    n: usize,
+) -> PgResult<Option<PgVec<'mcx, TargetEntry<'mcx>>>> {
+    let src = node.plan_head().targetlist.as_deref().unwrap_or(&[]);
+    let take = n.min(src.len());
+    if take == 0 {
+        return Ok(None);
+    }
+    let mut out = vec_with_capacity_in(mcx, take)?;
+    for tle in &src[..take] {
+        out.push(tle.clone_in(mcx)?);
+    }
+    Ok(Some(out))
+}
+
 /// `create_join_plan(root, (JoinPath *) best_path)` (createplan.c:1081) — the
-/// join dispatch. `create_mergejoin_plan` is not yet portable (it inserts inline
-/// `Sort`/`IncrementalSort` nodes that need `label_sort_with_costsize`, which
-/// requires the unported `cost_sort` costsize seam); it stays seam-panicked.
+/// join dispatch over HashJoin / NestLoop / MergeJoin.
 fn create_join_plan<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
@@ -3731,13 +4497,7 @@ fn create_join_plan<'mcx>(
     let plan = match pathtype {
         T_HashJoin => create_hashjoin_plan(mcx, root, run, best_path)?,
         T_NestLoop => create_nestloop_plan(mcx, root, run, best_path)?,
-        T_MergeJoin => {
-            return Err(PgError::error(
-                "create_mergejoin_plan (createplan.c:4493) is not ported — it inserts inline \
-                 Sort/IncrementalSort nodes calling label_sort_with_costsize, which needs the \
-                 unported cost_sort / cost_incremental_sort costsize seams",
-            ))
-        }
+        T_MergeJoin => create_mergejoin_plan(mcx, root, run, best_path)?,
         other => {
             return Err(PgError::error(alloc::format!(
                 "unrecognized node type: {}",
@@ -4534,47 +5294,19 @@ fn exprs_to_node_list<'mcx>(
 }
 
 pub fn init_seams() {
+    // `is_projection_capable_path` is owned here but consumed by pathnode/other
+    // optimizer crates, so it stays a real (cross-crate) seam install.
     pathnode::is_projection_capable_path::set(is_projection_capable_path);
-    cp_seam::create_scan_plan::set(create_scan_plan);
-    // F2c simple scan converters.
-    cp_seam::create_seqscan_plan::set(create_seqscan_plan);
-    cp_seam::create_valuesscan_plan::set(create_valuesscan_plan);
-    cp_seam::create_resultscan_plan::set(create_resultscan_plan);
-    // F2d rest-of-scan converters. The SubPlan-init-plan resolution legs of
-    // cte / worktable and the subroot recursion of subquery stay seam-panicked
-    // into subselect (resolve_cte_subplan / resolve_worktable_param /
-    // create_subqueryscan_subplan) until subselect.c lands.
-    cp_seam::create_samplescan_plan::set(create_samplescan_plan);
-    cp_seam::create_tidscan_plan::set(create_tidscan_plan);
-    cp_seam::create_tidrangescan_plan::set(create_tidrangescan_plan);
-    cp_seam::create_functionscan_plan::set(create_functionscan_plan);
-    cp_seam::create_namedtuplestorescan_plan::set(create_namedtuplestorescan_plan);
-    cp_seam::create_ctescan_plan::set(create_ctescan_plan);
-    cp_seam::create_worktablescan_plan::set(create_worktablescan_plan);
-    cp_seam::create_subqueryscan_plan::set(create_subqueryscan_plan);
-    // Upper-plan converters (non-scan/non-join create_plan_recurse arms).
-    cp_seam::create_projection_plan::set(create_projection_plan);
-    cp_seam::create_group_result_plan::set(create_group_result_plan);
-    cp_seam::create_project_set_plan::set(create_project_set_plan);
-    cp_seam::create_material_plan::set(create_material_plan);
-    // Sort / Limit upper converters.
-    cp_seam::create_sort_plan::set(create_sort_plan);
-    cp_seam::create_limit_plan::set(create_limit_plan);
-    // Agg upper converter (the T_Agg dispatch arm).
-    cp_seam::create_agg_dispatch_plan::set(create_agg_dispatch_plan);
-    // Join family: dispatch + nestloop + hashjoin + gating. create_mergejoin_plan
-    // stays seam-panicked (needs cost_sort for inline sort nodes).
-    cp_seam::create_join_plan::set(create_join_plan);
-    cp_seam::create_gating_plan::set(create_gating_plan);
-    // Upper converters: group / unique / setop / recursiveunion / gather /
-    // gather_merge / incrementalsort.
-    cp_seam::create_group_plan::set(create_group_plan);
-    cp_seam::create_unique_dispatch_plan::set(create_unique_dispatch_plan);
-    cp_seam::create_setop_plan::set(create_setop_plan);
-    cp_seam::create_recursiveunion_plan::set(create_recursiveunion_plan);
-    cp_seam::create_gather_plan::set(create_gather_plan);
-    cp_seam::create_gather_merge_plan::set(create_gather_merge_plan);
-    cp_seam::create_incrementalsort_plan::set(create_incrementalsort_plan);
+
+    // The per-family `create_*_plan` converters are NO LONGER seams: createplan.c
+    // is a single translation unit, so create_plan_recurse / create_scan_plan
+    // dispatch to them as direct in-crate calls (see the match arms above). Their
+    // former `cp_seam::create_*_plan` indirection seams have been deleted. The
+    // converters that remain `cp_seam::*` calls (index/bitmap/tablefunc/foreign/
+    // custom scan; minmaxagg/memoize/windowagg/lockrows/modifytable; the
+    // cte/worktable/subquery SubPlan resolution legs; apply_tlist_labeling /
+    // ss_attach_initplans) are genuine cross-/forward-boundary seams owned by an
+    // unported unit or installed by another crate — those decls are kept.
 }
 
 #[cfg(test)]

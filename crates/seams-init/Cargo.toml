@@ -549,6 +549,7 @@ common-pglz = { path = "../common-pglz" }
 common-prng-base64 = { path = "../common-prng-base64" }
 common-scram-common = { path = "../common-scram-common" }
 common-string = { path = "../common-string" }
+interfaces-libpq-fe = { path = "../interfaces-libpq-fe" }
 interfaces-libpq-legacy-pqsignal = { path = "../interfaces-libpq-legacy-pqsignal" }
 port-crc32c = { path = "../port-crc32c" }
 port-pg-strong-random = { path = "../port-pg-strong-random" }
