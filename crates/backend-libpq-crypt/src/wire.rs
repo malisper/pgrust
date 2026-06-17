@@ -94,4 +94,15 @@ pub fn init_seams() {
     backend_commands_user_seams::encrypt_password::set(seam_encrypt_password);
     backend_commands_user_seams::plain_crypt_verify::set(seam_plain_crypt_verify);
     backend_commands_user_seams::get_password_type::set(seam_get_password_type);
+
+    // GUC variable accessor (`conf->variable`) for `md5_password_warnings`. The
+    // C global `bool md5_password_warnings` (crypt.c) is read directly from the
+    // GUC slot; install the get/set pair pointing at this crate's `thread_local`
+    // backing store so the GUC machinery's writes (and shows) reach it.
+    backend_utils_misc_guc_tables::vars::md5_password_warnings.install(
+        backend_utils_misc_guc_tables::GucVarAccessors {
+            get: crate::get_md5_password_warnings,
+            set: crate::set_md5_password_warnings,
+        },
+    );
 }

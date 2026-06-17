@@ -10635,6 +10635,7 @@ dependencies = [
  "backend-utils-adt-timestamp-seams",
  "backend-utils-cache-syscache-seams",
  "backend-utils-error",
+ "backend-utils-misc-guc-tables",
  "mcx",
  "seam-core",
  "types-authid",

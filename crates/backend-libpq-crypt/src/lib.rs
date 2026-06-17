@@ -86,6 +86,12 @@ fn md5_password_warnings() -> bool {
     MD5_PASSWORD_WARNINGS.with(Cell::get)
 }
 
+/// Read the `md5_password_warnings` GUC backing variable (`conf->variable`
+/// getter half of the GUC accessor installed by [`init_seams`]).
+pub fn get_md5_password_warnings() -> bool {
+    md5_password_warnings()
+}
+
 /// Set the `md5_password_warnings` GUC backing variable (called by the GUC
 /// machinery when it lands).
 pub fn set_md5_password_warnings(value: bool) {

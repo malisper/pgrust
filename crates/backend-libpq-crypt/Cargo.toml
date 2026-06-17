@@ -22,3 +22,4 @@ backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-s
 backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }
 backend-libpq-auth-seams = { path = "../backend-libpq-auth-seams" }
 backend-commands-user-seams = { path = "../backend-commands-user-seams" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
