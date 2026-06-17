@@ -63,6 +63,20 @@ const F_BTINT8SORTSUPPORT: Oid = 3131;
 /// `Oid` of `btoidsortsupport`.
 const F_BTOIDSORTSUPPORT: Oid = 3134;
 
+// OIDs of the in-core btree `*skipsupport` functions (catalog/pg_proc.dat).
+/// `Oid` of `btint2skipsupport`.
+const F_BTINT2SKIPSUPPORT: Oid = 6402;
+/// `Oid` of `btint4skipsupport`.
+const F_BTINT4SKIPSUPPORT: Oid = 6403;
+/// `Oid` of `btint8skipsupport`.
+const F_BTINT8SKIPSUPPORT: Oid = 6404;
+/// `Oid` of `btoidskipsupport`.
+const F_BTOIDSKIPSUPPORT: Oid = 6405;
+/// `Oid` of `btcharskipsupport`.
+const F_BTCHARSKIPSUPPORT: Oid = 6406;
+/// `Oid` of `btboolskipsupport`.
+const F_BTBOOLSKIPSUPPORT: Oid = 6408;
+
 /// The owned-model stand-in for `OidFunctionCall1(sortfunc,
 /// PointerGetDatum(ssup))` over an in-core btree `*sortsupport` routine: an
 /// owned `Datum` cannot carry the `SortSupport` pointer, so the dispatch crosses
@@ -80,13 +94,34 @@ fn run_sortsupport(sortfunc: Oid, ssup: &mut SortSupportData) -> bool {
     true
 }
 
-/// This crate owns one inward seam ([`run_sortsupport`](sort::run_sortsupport)),
-/// the by-OID sortsupport dispatch the sort substrate calls in lieu of the
+/// The owned-model stand-in for `OidFunctionCall1(skipSupportFunction,
+/// PointerGetDatum(sksup))` over an in-core btree `*skipsupport` routine: an
+/// owned `Datum` cannot carry the `SkipSupport` pointer, so the dispatch crosses
+/// as `&mut SkipSupportData`. Returns whether `skipfunc` named one of this
+/// crate's skipsupport functions (so the caller knows whether to fall through to
+/// its fmgr path for an as-yet-unported skipsupport builtin).
+fn run_skipsupport(skipfunc: Oid, sksup: &mut SkipSupportData) -> bool {
+    match skipfunc {
+        F_BTBOOLSKIPSUPPORT => btboolskipsupport(sksup),
+        F_BTINT2SKIPSUPPORT => btint2skipsupport(sksup),
+        F_BTINT4SKIPSUPPORT => btint4skipsupport(sksup),
+        F_BTINT8SKIPSUPPORT => btint8skipsupport(sksup),
+        F_BTOIDSKIPSUPPORT => btoidskipsupport(sksup),
+        F_BTCHARSKIPSUPPORT => btcharskipsupport(sksup),
+        _ => return false,
+    }
+    true
+}
+
+/// This crate owns two inward seams ([`run_sortsupport`](sort::run_sortsupport)
+/// and [`run_skipsupport`](sort::run_skipsupport)), the by-OID sortsupport /
+/// skipsupport dispatch the sort/skip substrate calls in lieu of the
 /// pointer-carrying `OidFunctionCall1`. The comparison kernels are reached
 /// through fmgr dispatch (not a cross-crate seam call), and the sort/skip
 /// install seams are OUTWARD (owned by the substrate).
 pub fn init_seams() {
     sort::run_sortsupport::set(run_sortsupport);
+    sort::run_skipsupport::set(run_skipsupport);
     // Register the btree comparison builtins into the fmgr fast-path table so
     // `fmgr_isbuiltin` resolves the catalog-index `BTORDER_PROC`s at boot
     // without recursing into the not-yet-built syscache.

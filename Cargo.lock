@@ -18812,6 +18812,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-skipsupport"
+version = "0.0.0"
+dependencies = [
+ "backend-access-nbt-compare-seams",
+ "backend-utils-adt-skipsupport-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "types-core",
+ "types-error",
+ "types-sortsupport",
+]
+
+[[package]]
+name = "backend-utils-adt-skipsupport-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-sortsupport",
+]
+
+[[package]]
 name = "backend-utils-adt-timestamp-seams"
 version = "0.0.0"
 dependencies = [
@@ -22044,6 +22066,7 @@ dependencies = [
  "backend-utils-adt-ruleutils",
  "backend-utils-adt-scalar-datum-core",
  "backend-utils-adt-selfuncs",
+ "backend-utils-adt-skipsupport",
  "backend-utils-adt-tsvector-core",
  "backend-utils-adt-varlena",
  "backend-utils-adt-version",

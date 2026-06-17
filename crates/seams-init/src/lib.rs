@@ -457,6 +457,7 @@ pub fn init_all() {
     backend_utils_adt_regexp::init_seams();
     backend_utils_adt_pseudotypes::init_seams();
     backend_utils_adt_scalar_datum_core::init_seams();
+    backend_utils_adt_skipsupport::init_seams();
     backend_utils_adt_tsvector_core::init_seams();
     backend_utils_adt_varlena::init_seams();
     backend_utils_adt_version::init_seams();
