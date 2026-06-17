@@ -19,6 +19,11 @@ types-rangetypes = { path = "../types-rangetypes" }
 backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
 types-stringinfo = { path = "../types-stringinfo" }
 
+# fmgr/Datum boundary: the PGFunction call frame + the fmgr-core builtin table
+# (cstring I/O builtin registration). Used only by `fmgr_builtins` (std).
+types-fmgr = { path = "../types-fmgr" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
+
 # Delegating output/send targets (real type I/O functions). None of these
 # units depend on this one, so a direct cargo edge is acyclic.
 backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }

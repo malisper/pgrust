@@ -28,6 +28,11 @@
 
 extern crate alloc;
 
+/// The fmgr/`Datum` boundary (`PGFunction` adapters) for the `cstring`
+/// pseudo-type's working I/O functions. Uses `std` (the fmgr-core builtin table
+/// + `panic_any` ereport dispatch), unlike the `no_std` value cores above.
+pub mod fmgr_builtins;
+
 use backend_libpq_pqformat::{pq_begintypsend, pq_endtypsend, pq_getmsgtext};
 use mcx::{Mcx, PgString, PgVec};
 use types_datum::{Bytea, Datum};
@@ -381,9 +386,11 @@ dummy_io!("anycompatible", anycompatible_in, anycompatible_out);
 dummy_io!("anycompatiblenonarray", anycompatiblenonarray_in, anycompatiblenonarray_out);
 
 /// This unit has no inbound cyclic callers, so it owns no seam crate and
-/// installs no seams. The empty `init_seams()` keeps the uniform
-/// `seams-init::init_all()` wiring.
-pub fn init_seams() {}
+/// installs no seams. `init_seams()` registers the `cstring` fmgr builtins into
+/// the fmgr-core builtin table (the only outward wiring this unit performs).
+pub fn init_seams() {
+    fmgr_builtins::register_pseudotypes_builtins();
+}
 
 #[cfg(test)]
 mod tests;
