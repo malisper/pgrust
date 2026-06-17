@@ -14,6 +14,11 @@ types-tuple = { path = "../types-tuple" }
 types-rel = { path = "../types-rel" }
 types-gist = { path = "../types-gist" }
 
+# fmgr builtin fast-path registration (the GiST stratnum-translate support proc).
+types-datum = { path = "../types-datum" }
+types-fmgr = { path = "../types-fmgr" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
+
 # ereport / elog (miscadmin.h, elog.c).
 backend-utils-error = { path = "../backend-utils-error" }
 
