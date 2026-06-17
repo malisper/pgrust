@@ -54,6 +54,7 @@
 
 extern crate alloc;
 
+mod fmgr_builtins;
 mod heavy;
 pub use heavy::{
     createdb, check_encoding_locale_matches, dropdb, AlterDatabase, AlterDatabaseOwner,
@@ -527,6 +528,9 @@ fn alter_database_owner_seam(
 
 /// Install the inward seams this unit owns.
 pub fn init_seams() {
+    // Register this crate's SQL-callable builtins into the fmgr-core table.
+    fmgr_builtins::register_dbcommands_builtins();
+
     inward::dbase_redo::set(dbase_redo);
     inward::get_database_name::set(get_database_name);
     inward::database_is_invalid_form::set(database_is_invalid_form);
