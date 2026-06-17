@@ -29,6 +29,7 @@ backend-utils-init-small = { path = "../backend-utils-init-small" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-utils-misc-guc = { path = "../backend-utils-misc-guc" }
 backend-access-transam-rmgr = { path = "../backend-access-transam-rmgr" }
+backend-postmaster-postmaster-seams = { path = "../backend-postmaster-postmaster-seams" }
 backend-utils-adt-varlena = { path = "../backend-utils-adt-varlena" }
 port-pgstrcasecmp = { path = "../port-pgstrcasecmp" }
 types-guc = { path = "../types-guc" }

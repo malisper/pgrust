@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 # own seam crate (inward)
 backend-postmaster-pgarch-seams = { path = "../backend-postmaster-pgarch-seams" }
+backend-postmaster-postmaster-seams = { path = "../backend-postmaster-postmaster-seams" }
 
 # direct deps (acyclic leaf subsystems)
 backend-postmaster-interrupt = { path = "../backend-postmaster-interrupt" }

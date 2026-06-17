@@ -754,6 +754,83 @@ pub fn bgworker_die(bgw_type: &[u8]) -> PgResult<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Signal handlers + the BackgroundWorkerMain signal-install block.
+// ---------------------------------------------------------------------------
+
+/// `pqsigfunc`-shaped (`fn(i32)`) wrapper for the SIGTERM handler `bgworker_die`.
+/// The C handler reads `MyBgworkerEntry->bgw_type` from the global; here we read
+/// the per-backend `MY_BGWORKER_ENTRY` thread-local. `bgworker_die` returns the
+/// FATAL `Err` (its `ereport(FATAL)` longjmps in C); in this delivery context a
+/// SIGTERM means "terminate now", so we emit the report and `proc_exit(1)`,
+/// matching the C FATAL path out of a signal handler.
+fn bgworker_die_handler(_signo: i32) {
+    let bgw_type = MY_BGWORKER_ENTRY
+        .with(|e| e.borrow().as_ref().map(|w| w.bgw_type))
+        .unwrap_or([0u8; BGW_MAXLEN]);
+    if let Err(edata) = bgworker_die(&bgw_type) {
+        emit_error_report_for(&edata);
+    }
+    backend_storage_ipc_dsm_core_seams::proc_exit::call(
+        1,
+        backend_utils_init_small_seams::my_proc_pid::call(),
+    );
+}
+
+/// `pqsigfunc` wrapper for `procsignal_sigusr1_handler` (it takes no arg in this
+/// port; C's `SIGNAL_ARGS` carries an unused `postgres_signal_arg`).
+fn procsignal_sigusr1_handler_wrapper(_signo: i32) {
+    backend_storage_ipc_procsignal::procsignal_sigusr1_handler();
+}
+
+/// `pqsigfunc` wrapper for `FloatExceptionHandler` (returns `PgResult<()>` here;
+/// it `ereport(ERROR)`s in C). A genuine SIGFPE surfaces the error; mirror the C
+/// longjmp by unwrapping rather than swallowing.
+fn float_exception_handler_wrapper(signo: i32) {
+    backend_tcop_postgres::interrupt::FloatExceptionHandler(signo)
+        .expect("FloatExceptionHandler");
+}
+
+/// `BackgroundWorkerMain`'s signal-handler block (bgworker.c:775-802), invoked
+/// once the worker entry is published. `db_connection` selects the
+/// database-connection variant (`worker->bgw_flags &
+/// BGWORKER_BACKEND_DATABASE_CONNECTION`). The SIGQUIT handler was already set up
+/// by InitPostmasterChild.
+fn install_bgworker_signal_handlers(db_connection: bool) {
+    use port_pqsignal::pqsignal_be;
+    use types_signal::SigHandler;
+
+    if db_connection {
+        // SIGINT is used to signal canceling the current action.
+        pqsignal_be(
+            libc::SIGINT,
+            SigHandler::Handler(backend_tcop_postgres::interrupt::StatementCancelHandler),
+        );
+        pqsignal_be(
+            libc::SIGUSR1,
+            SigHandler::Handler(procsignal_sigusr1_handler_wrapper),
+        );
+        pqsignal_be(
+            libc::SIGFPE,
+            SigHandler::Handler(float_exception_handler_wrapper),
+        );
+    } else {
+        pqsignal_be(libc::SIGINT, SigHandler::Ignore);
+        pqsignal_be(libc::SIGUSR1, SigHandler::Ignore);
+        pqsignal_be(libc::SIGFPE, SigHandler::Ignore);
+    }
+    pqsignal_be(libc::SIGTERM, SigHandler::Handler(bgworker_die_handler));
+    // SIGQUIT handler was already set up by InitPostmasterChild.
+    pqsignal_be(libc::SIGHUP, SigHandler::Ignore);
+
+    // Establishes the SIGALRM handler.
+    backend_utils_misc_timeout::InitializeTimeouts();
+
+    pqsignal_be(libc::SIGPIPE, SigHandler::Ignore);
+    pqsignal_be(libc::SIGUSR2, SigHandler::Ignore);
+    pqsignal_be(libc::SIGCHLD, SigHandler::Default);
+}
+
+// ---------------------------------------------------------------------------
 // BackgroundWorkerMain — the worker process body.
 // ---------------------------------------------------------------------------
 
@@ -808,7 +885,7 @@ pub fn BackgroundWorkerMain(startup_data: &StartupData) -> ! {
     // bgworker_die SIGTERM handler, the SIG_IGN/SIG_DFL dispositions, and
     // InitializeTimeouts().
     let db_connection = (worker.bgw_flags & BGWORKER_BACKEND_DATABASE_CONNECTION) != 0;
-    backend_tcop_postgres_seams::install_bgworker_signal_handlers::call(db_connection);
+    install_bgworker_signal_handlers(db_connection);
 
     // We can now handle ereport(ERROR). C arms the sigsetjmp here; the
     // idiomatic model is `?` propagation: run the body and, on Err, clean up,
@@ -1380,6 +1457,43 @@ fn LookupBackgroundWorkerFunction(libraryname: &[u8], funcname: &[u8]) -> PgResu
     Ok(None)
 }
 
+/// `call_bgworker_entrypoint` — the `BackgroundWorkerMain` entry-point dispatch
+/// (bgworker.c:855-869). For the internal library "postgres", resolve
+/// `bgw_function_name` to the core `bgworker_main_type` and call it with
+/// `bgw_main_arg`. The entry points live in their own subsystem crates and are
+/// invoked here by name. An internal name whose body is not present in this
+/// build resolves to a faithful "could not find function" FATAL (the C
+/// `load_external_function`/lookup failure), exiting the worker cleanly.
+fn call_bgworker_entrypoint(
+    worker: BackgroundWorker,
+    main_arg: types_datum::Datum,
+) -> PgResult<()> {
+    debug_assert!(cstr_eq(&worker.bgw_library_name, b"postgres"));
+    let fname = cstr_str(&worker.bgw_function_name);
+    match fname {
+        // ApplyLauncherMain(Datum) — the logical-replication launcher.
+        "ApplyLauncherMain" => {
+            backend_replication_logical_launcher::ApplyLauncherMain(main_arg)
+        }
+        // ParallelApplyWorkerMain(int) — DatumGetInt32(main_arg) is the slot.
+        "ParallelApplyWorkerMain" => {
+            backend_replication_logical_applyparallelworker::ParallelApplyWorkerMain(
+                main_arg.as_i32(),
+            )
+        }
+        // Known internal name whose body is not compiled into this build:
+        // mirror the C dynamic-lookup miss (FATAL), so the worker exits cleanly.
+        _ => Err(PgError::new(
+            FATAL,
+            format!(
+                "could not find function \"{}\" in this build",
+                fname
+            ),
+        )
+        .with_error_location(loc(865, "call_bgworker_entrypoint"))),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // GetBackgroundWorkerTypeByPid
 // ---------------------------------------------------------------------------
@@ -1545,6 +1659,17 @@ fn pm_registry_init_seams() {
     psm::rw_bgw_type::set(|i| {
         BACKGROUND_WORKER_LIST.with(|l| cstr_lossy(&l.borrow()[i as usize].rw_worker.bgw_type))
     });
+
+    // Full `*rw->rw_worker` payload (StartBackgroundWorker -> StartupData).
+    psm::rw_worker::set(|i| {
+        BACKGROUND_WORKER_LIST.with(|l| l.borrow()[i as usize].rw_worker)
+    });
+
+    // `BackgroundWorkerMain` entry-point dispatch (bgworker.c:855-869): resolve
+    // the worker's internal `(library="postgres", bgw_function_name)` to its
+    // core `bgworker_main_type` and invoke it with `bgw_main_arg`. The fn lives
+    // in the worker's own subsystem crate; dispatched by name here.
+    backend_utils_fmgr_fmgr_seams::call_bgworker_entrypoint::set(call_bgworker_entrypoint);
 
     // Per-entry writes (`rw->... = v`).
     psm::rw_set_pid::set(|i, pid| {

@@ -752,6 +752,22 @@ pub fn init_seams() {
         backend_utils_misc_guc_tables::vars::wal_level.read() >= WalLevel::Replica as i32
     });
 
+    // XLogArchivingActive() (xlog.h): `XLogArchiveMode > ARCHIVE_MODE_OFF`. Read
+    // by the postmaster's LaunchMissingBackgroundProcesses to decide whether to
+    // start the archiver. `archive_mode` enum GUC (ARCHIVE_MODE_OFF = 0).
+    backend_postmaster_postmaster_seams::xlog_archiving_active::set(|| {
+        backend_utils_misc_guc_tables::vars::XLogArchiveMode.read()
+            > ArchiveMode::Off as i32
+    });
+
+    // XLogArchivingAlways() (xlog.h): `XLogArchiveMode == ARCHIVE_MODE_ALWAYS`.
+    // Read by the same postmaster path (archiver may run on a standby when
+    // archive_mode = always). ARCHIVE_MODE_ALWAYS = 2.
+    backend_postmaster_postmaster_seams::xlog_archiving_always::set(|| {
+        backend_utils_misc_guc_tables::vars::XLogArchiveMode.read()
+            == ArchiveMode::Always as i32
+    });
+
     // xlog.c-owned GUC variable accessors + assign hooks (max_wal_size /
     // min_wal_size / checkpoint_completion_target). The GUC machinery fires the
     // assign hooks during InitializeGUCOptions to seed CheckPointSegments.

@@ -96,19 +96,12 @@ pub fn StartBackgroundWorker(rw_index: u32) -> bool {
     true
 }
 
-/// The `RegisteredBgWorker.rw_worker` payload for `rw_index`. The bgworker
-/// carrier is not yet widened to expose the full struct; this routes through a
-/// dedicated seam that the bgworker owner installs alongside the `rw_*`
-/// accessors. Never reached on a default (no-bgworker) cluster.
-fn sp_bgworker_payload(_rw_index: u32) -> types_bgworker::BackgroundWorker {
-    // The bgworker carrier (K2) owes the full `rw_worker` projection. Until it
-    // lands, the worker payload cannot be reconstructed here; the default
-    // cluster registers no workers so this is unreachable. A loud panic (not a
-    // silent stub) flags the missing K2 projection if a worker is registered.
-    panic!(
-        "StartBackgroundWorker: bgworker carrier does not yet project rw_worker \
-         (K2 widen owed by backend-postmaster-bgworker)"
-    )
+/// The `RegisteredBgWorker.rw_worker` payload for `rw_index`. The bgworker owner
+/// projects the full `BackgroundWorker` struct through the `rw_worker` seam,
+/// alongside the other `rw_*` accessors; `StartBackgroundWorker` reads it to seed
+/// the forked worker's `StartupData::BgWorker`.
+fn sp_bgworker_payload(rw_index: u32) -> types_bgworker::BackgroundWorker {
+    sp::rw_worker::call(rw_index)
 }
 
 /// C: `static bool bgworker_should_start_now(BgWorkerStartTime start_time)`.

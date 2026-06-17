@@ -1593,6 +1593,22 @@ pub fn init_seams() {
     s::slot_sync_shmem_size::set(SlotSyncShmemSize);
     s::slot_sync_shmem_init::set(SlotSyncShmemInit);
 
+    // The postmaster's LaunchMissingBackgroundProcesses reads these two slotsync
+    // predicates through `backend-postmaster-postmaster-seams` (plain `-> bool`,
+    // mirroring the C `bool` returns). C's `ValidateSlotSyncParams(LOG)` and
+    // `SlotSyncWorkerCanRestart()` never longjmp at LOG — every `ereport(LOG, …)`
+    // returns and the function falls through to `return false`; so an Err from
+    // the PgResult shape here would only arise from an unexpected internal
+    // failure, which we surface loudly rather than swallow.
+    backend_postmaster_postmaster_seams::validate_slot_sync_params::set(|elevel| {
+        ValidateSlotSyncParams(elevel)
+            .expect("ValidateSlotSyncParams errored at LOG elevel (postmaster seam)")
+    });
+    backend_postmaster_postmaster_seams::slot_sync_worker_can_restart::set(|| {
+        SlotSyncWorkerCanRestart()
+            .expect("SlotSyncWorkerCanRestart errored (postmaster seam)")
+    });
+
     // `bool sync_replication_slots = false;` GUC backing storage (slotsync.c).
     // A plain PGC_SIGHUP bool GUC global read directly from the GUC slot (no
     // ControlFile involvement); the GUC engine seeds it from boot_val and

@@ -3458,6 +3458,7 @@ dependencies = [
  "backend-access-transam-xlogrecovery-seams",
  "backend-commands-vacuum-seams",
  "backend-postmaster-checkpointer-seams",
+ "backend-postmaster-postmaster-seams",
  "backend-postmaster-startup-seams",
  "backend-replication-logical-origin-seams",
  "backend-replication-logical-reorderbuffer-seams",
@@ -13194,12 +13195,16 @@ dependencies = [
  "backend-libpq-pqsignal-seams",
  "backend-postmaster-bgworker-seams",
  "backend-postmaster-postmaster-seams",
+ "backend-replication-logical-applyparallelworker",
+ "backend-replication-logical-launcher",
  "backend-storage-ipc-dsm-core-seams",
  "backend-storage-ipc-latch-seams",
  "backend-storage-ipc-pmsignal-seams",
+ "backend-storage-ipc-procsignal",
  "backend-storage-ipc-shmem-seams",
  "backend-storage-lmgr-lwlock-seams",
  "backend-storage-lmgr-proc-seams",
+ "backend-tcop-postgres",
  "backend-tcop-postgres-seams",
  "backend-utils-error",
  "backend-utils-error-seams",
@@ -13208,12 +13213,16 @@ dependencies = [
  "backend-utils-init-postinit-seams",
  "backend-utils-init-small-seams",
  "backend-utils-misc-ps-status-seams",
+ "backend-utils-misc-timeout",
+ "libc",
  "port-pgsleep-seams",
+ "port-pqsignal",
  "types-bgworker",
  "types-core",
  "types-datum",
  "types-error",
  "types-pgstat",
+ "types-signal",
  "types-startup",
  "types-storage",
 ]
@@ -13428,6 +13437,7 @@ dependencies = [
  "backend-postmaster-auxprocess-seams",
  "backend-postmaster-interrupt",
  "backend-postmaster-pgarch-seams",
+ "backend-postmaster-postmaster-seams",
  "backend-storage-aio-core-seams",
  "backend-storage-file-fd-seams",
  "backend-storage-file-seams",
@@ -13557,6 +13567,7 @@ name = "backend-postmaster-postmaster-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-bgworker",
  "types-error",
 ]
 
@@ -14190,6 +14201,7 @@ dependencies = [
  "backend-access-transam-xlogrecovery-seams",
  "backend-commands-dbcommands-seams",
  "backend-postmaster-interrupt",
+ "backend-postmaster-postmaster-seams",
  "backend-replication-libpqwalreceiver",
  "backend-replication-logical-logical-seams",
  "backend-replication-logical-slotsync-seams",
@@ -17169,6 +17181,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-transam-xact-seams",
  "backend-libpq-be-secure-seams",
+ "backend-postmaster-postmaster-seams",
  "backend-storage-ipc-dsm-core-seams",
  "backend-storage-ipc-procarray-seams",
  "backend-storage-ipc-shmem",
@@ -20350,6 +20363,7 @@ dependencies = [
 name = "backend-utils-init-small"
 version = "0.0.0"
 dependencies = [
+ "backend-postmaster-postmaster-seams",
  "backend-tcop-postgres-seams",
  "backend-utils-adt-acl-seams",
  "backend-utils-adt-timestamp-seams",

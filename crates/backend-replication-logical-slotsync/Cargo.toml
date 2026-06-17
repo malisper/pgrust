@@ -9,6 +9,7 @@ name = "backend_replication_logical_slotsync"
 path = "src/lib.rs"
 
 [dependencies]
+backend-postmaster-postmaster-seams = { path = "../backend-postmaster-postmaster-seams" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-wal = { path = "../types-wal" }

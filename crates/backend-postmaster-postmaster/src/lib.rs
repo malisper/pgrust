@@ -180,6 +180,25 @@ pub fn init_seams() {
     sp::delete_postmaster_context::set(
         backend_utils_mmgr_portalmem::top_context::delete_postmaster_context,
     );
+
+    // `pg_strsignal(signum)` (port/strsignal.c) — the reaper's LogChildExit turns
+    // a child's terminating signal into a human-readable name. C wraps libc
+    // `strsignal()`, falling back to "unrecognized signal N" on NULL.
+    sp::pg_strsignal::set(pg_strsignal);
+}
+
+/// `pg_strsignal(int signum)` (port/strsignal.c) — human-readable signal name.
+fn pg_strsignal(signum: i32) -> String {
+    // SAFETY: strsignal returns a pointer to a (possibly static) NUL-terminated
+    // string, or NULL for an unknown signal.
+    unsafe {
+        let ptr = libc::strsignal(signum);
+        if ptr.is_null() {
+            format!("unrecognized signal {signum}")
+        } else {
+            std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned()
+        }
+    }
 }
 
 /// C: `PostmasterDeathSignalInit` core — `prctl(PR_SET_PDEATHSIG, signum)`

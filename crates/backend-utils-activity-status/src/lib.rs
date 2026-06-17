@@ -1287,6 +1287,19 @@ pub fn init_seams() {
     seams::pgstat_report_plan_id::set(|plan_id, force| pgstat_report_plan_id(plan_id as i64, force));
     seams::pgstat_report_xact_timestamp::set(pgstat_report_xact_timestamp);
     seams::pgstat_get_backend_type_by_proc_number::set(pgstat_get_backend_type_by_proc_number);
+
+    // `pgstat_get_crashed_backend_activity(pid, activity, sizeof(activity))`
+    // (backend_status.c) — the postmaster reaper's LogChildExit reads a crashed
+    // backend's last activity string for the death-log detail. C passes a
+    // fixed-size `char activity[1024]` buffer; mirror that here, copy out the
+    // NUL-terminated result, and hand the postmaster an owned `Option<String>`.
+    backend_postmaster_postmaster_seams::pgstat_get_crashed_backend_activity::set(|pid| {
+        let mut activity = [0u8; 1024];
+        pgstat_get_crashed_backend_activity(pid, &mut activity).map(|()| {
+            let end = activity.iter().position(|&b| b == 0).unwrap_or(activity.len());
+            String::from_utf8_lossy(&activity[..end]).into_owned()
+        })
+    });
 }
 
 #[cfg(test)]

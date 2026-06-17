@@ -124,6 +124,10 @@ pub fn init_seams() {
     backend_utils_init_small_seams::max_connections::set(globals::MaxConnections);
     backend_utils_init_small_seams::set_max_backends::set(globals::SetMaxBackends);
     backend_utils_init_small_seams::is_binary_upgrade::set(globals::IsBinaryUpgrade);
+    // The postmaster's LaunchMissingBackgroundProcesses gates the autovacuum
+    // launcher on `IsBinaryUpgrade`; it reads the same global through
+    // `backend-postmaster-postmaster-seams`.
+    backend_postmaster_postmaster_seams::is_binary_upgrade::set(globals::IsBinaryUpgrade);
     backend_utils_init_small_seams::set_my_database_id::set(globals::SetMyDatabaseId);
     backend_utils_init_small_seams::set_my_database_table_space::set(globals::SetMyDatabaseTableSpace);
     backend_utils_init_small_seams::set_my_database_has_login_event_triggers::set(

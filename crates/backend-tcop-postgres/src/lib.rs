@@ -102,6 +102,9 @@ pub fn init_seams() {
     s::process_client_write_interrupt::set(interrupt::ProcessClientWriteInterrupt);
     s::handle_recovery_conflict_interrupt::set(interrupt::HandleRecoveryConflictInterrupt);
     s::die::set(interrupt::die);
+    // Returns the `die` SIGTERM-handler fn-pointer so callers can install it via
+    // `pqsignal(SIGTERM, ...)` (e.g. the logical-replication launcher).
+    s::die_signal_handler::set(|| interrupt::die as fn(i32));
     s::statement_cancel_handler::set(interrupt::StatementCancelHandler);
 
     // --- F5: logging / duration / resource usage ---

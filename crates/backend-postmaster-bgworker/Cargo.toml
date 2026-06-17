@@ -38,3 +38,17 @@ port-pgsleep-seams = { path = "../port-pgsleep-seams" }
 # Direct deps (acyclic): error reporting.
 backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-error-seams = { path = "../backend-utils-error-seams" }
+
+# BackgroundWorkerMain's inline signal-handler block (bgworker.c:775-802):
+# the `pqsignal()` installer + the per-signal handler bodies it references.
+# Nothing depends on this crate, so these owner deps are acyclic.
+types-signal = { path = "../types-signal" }
+port-pqsignal = { path = "../port-pqsignal" }
+libc = "0.2"
+backend-tcop-postgres = { path = "../backend-tcop-postgres" }
+backend-storage-ipc-procsignal = { path = "../backend-storage-ipc-procsignal" }
+backend-utils-misc-timeout = { path = "../backend-utils-misc-timeout" }
+# Core bgworker entry points dispatched by `call_bgworker_entrypoint` (acyclic:
+# these subsystem crates depend only on bgworker's *-seams, not this crate).
+backend-replication-logical-launcher = { path = "../backend-replication-logical-launcher" }
+backend-replication-logical-applyparallelworker = { path = "../backend-replication-logical-applyparallelworker" }

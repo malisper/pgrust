@@ -1266,6 +1266,11 @@ pub fn init_seams() {
     backend_postmaster_pgarch_seams::pg_arch_wakeup::set(PgArchWakeup);
     backend_postmaster_pgarch_seams::pg_arch_force_dir_scan::set(PgArchForceDirScan);
 
+    // `PgArchCanRestart()` (pgarch.c) — the postmaster's
+    // LaunchMissingBackgroundProcesses restart-throttle check before relaunching
+    // the archiver.
+    backend_postmaster_postmaster_seams::pgarch_can_restart::set(PgArchCanRestart);
+
     // `archive_library` GUC (guc_tables.c) — backed by the `char
     // *XLogArchiveLibrary` global pgarch.c owns (pgarch.c:95). Bridge the GUC
     // slot onto this crate's thread-local backing store so the GUC machinery's

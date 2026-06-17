@@ -7,20 +7,6 @@
 extern crate alloc;
 
 seam_core::seam!(
-    /// The `BackgroundWorkerMain` signal-handler block: install
-    /// `StatementCancelHandler`/`procsignal_sigusr1_handler`/
-    /// `FloatExceptionHandler` (database-connection workers) or `SIG_IGN`
-    /// (others) for SIGINT/SIGUSR1/SIGFPE, the `bgworker_die` SIGTERM handler,
-    /// `SIG_IGN` for SIGHUP/SIGPIPE/SIGUSR2, `SIG_DFL` for SIGCHLD, and run
-    /// `InitializeTimeouts()`. Composite because the handler fn-pointers
-    /// (`StatementCancelHandler` etc., owned by tcop/postgres.c) and the timeout
-    /// manager are owned by other subsystems; `db_connection` selects the
-    /// connection-handler variant. Installed by the tcop/postgres owner when it
-    /// lands.
-    pub fn install_bgworker_signal_handlers(db_connection: bool)
-);
-
-seam_core::seam!(
     /// `CHECK_FOR_INTERRUPTS()` (miscadmin.h): if an interrupt is pending,
     /// service it via `ProcessInterrupts()` (tcop/postgres.c). A query-cancel
     /// or backend-termination interrupt surfaces as the `Err` (the C

@@ -279,6 +279,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `*rw->rw_worker` — the full `BackgroundWorker` registration payload, read
+    /// by `StartBackgroundWorker` to seed the forked worker's `StartupData`.
+    pub fn rw_worker(rw_index: u32) -> types_bgworker::BackgroundWorker
+);
+
+seam_core::seam!(
     /// `rw->rw_pid = pid`.
     pub fn rw_set_pid(rw_index: u32, pid: i32)
 );
