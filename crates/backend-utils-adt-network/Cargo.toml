@@ -22,3 +22,6 @@ backend-utils-adt-numutils = { path = "../backend-utils-adt-numutils" }
 types-datum = { path = "../types-datum" }
 types-fmgr = { path = "../types-fmgr" }
 backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
+# hash_any / hash_any_extended for hashinet (network.c hashes VARDATA_ANY);
+# owner ported, depend directly.
+common-hashfn = { path = "../common-hashfn" }

@@ -442,6 +442,9 @@ backend-utils-adt-encode = { path = "../backend-utils-adt-encode" }
 backend-utils-adt-multirangetypes = { path = "../backend-utils-adt-multirangetypes" }
 backend-utils-adt-network-gist = { path = "../backend-utils-adt-network-gist" }
 backend-utils-adt-network-selfuncs = { path = "../backend-utils-adt-network-selfuncs" }
+backend-utils-adt-network = { path = "../backend-utils-adt-network" }
+backend-utils-adt-mac = { path = "../backend-utils-adt-mac" }
+backend-utils-adt-mac8 = { path = "../backend-utils-adt-mac8" }
 backend-utils-adt-numeric = { path = "../backend-utils-adt-numeric" }
 backend-utils-adt-uuid = { path = "../backend-utils-adt-uuid" }
 backend-utils-adt-pseudorandomfuncs = { path = "../backend-utils-adt-pseudorandomfuncs" }

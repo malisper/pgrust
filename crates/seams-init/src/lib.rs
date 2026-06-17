@@ -442,8 +442,11 @@ pub fn init_all() {
     backend_utils_adt_like::init_seams();
     backend_utils_adt_encode::init_seams();
     backend_utils_adt_multirangetypes::init_seams();
+    backend_utils_adt_network::init_seams();
     backend_utils_adt_network_gist::init_seams();
     backend_utils_adt_network_selfuncs::init_seams();
+    backend_utils_adt_mac::init_seams();
+    backend_utils_adt_mac8::init_seams();
     backend_utils_adt_numeric::init_seams();
     backend_utils_adt_uuid::init_seams();
     backend_utils_adt_pseudorandomfuncs::init_seams();

@@ -18003,8 +18003,11 @@ name = "backend-utils-adt-mac"
 version = "0.0.0"
 dependencies = [
  "backend-utils-adt-mac-seams",
+ "backend-utils-fmgr-core",
  "common-hashfn",
+ "types-datum",
  "types-error",
+ "types-fmgr",
  "types-network",
 ]
 
@@ -18019,8 +18022,11 @@ dependencies = [
 name = "backend-utils-adt-mac8"
 version = "0.0.0"
 dependencies = [
+ "backend-utils-fmgr-core",
  "common-hashfn",
+ "types-datum",
  "types-error",
+ "types-fmgr",
  "types-network",
 ]
 
@@ -18220,6 +18226,7 @@ dependencies = [
  "backend-utils-adt-network-seams",
  "backend-utils-adt-numutils",
  "backend-utils-fmgr-core",
+ "common-hashfn",
  "mcx",
  "types-datum",
  "types-error",
@@ -22034,9 +22041,12 @@ dependencies = [
  "backend-utils-adt-jsonfuncs",
  "backend-utils-adt-jsonpath-gram",
  "backend-utils-adt-like",
+ "backend-utils-adt-mac",
+ "backend-utils-adt-mac8",
  "backend-utils-adt-misc2",
  "backend-utils-adt-multirangetypes",
  "backend-utils-adt-name",
+ "backend-utils-adt-network",
  "backend-utils-adt-network-gist",
  "backend-utils-adt-network-selfuncs",
  "backend-utils-adt-numeric",

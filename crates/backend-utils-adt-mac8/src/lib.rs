@@ -25,6 +25,8 @@
 
 extern crate alloc;
 
+pub mod fmgr_builtins;
+
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -558,4 +560,6 @@ pub fn macaddr8tomacaddr(addr: &macaddr8) -> PgResult<macaddr> {
 /// `mac8.c` owns no inward seam (its functions are reached directly or via the
 /// not-yet-modeled fmgr/PGFunction registry) and reaches no unported neighbour,
 /// so this installs nothing.
-pub fn init_seams() {}
+pub fn init_seams() {
+    fmgr_builtins::register_mac8_builtins();
+}

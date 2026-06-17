@@ -27,6 +27,8 @@
 
 extern crate alloc;
 
+pub mod fmgr_builtins;
+
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -664,4 +666,6 @@ fn hex_value(byte: u8) -> u8 {
 /// fmgr/PGFunction registry), so this installs nothing; the
 /// `backend-utils-adt-mac-seams::sortsupport::register` slot is OUTWARD, owned
 /// by the unported tuplesort/hyperloglog subsystem.
-pub fn init_seams() {}
+pub fn init_seams() {
+    fmgr_builtins::register_mac_builtins();
+}

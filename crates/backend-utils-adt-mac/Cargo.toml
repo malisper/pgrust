@@ -16,3 +16,8 @@ common-hashfn = { path = "../common-hashfn" }
 # Outward seam for the external sortsupport substrate (node mutation +
 # HyperLogLog + trace_sort), called here, installed by the unported owner.
 backend-utils-adt-mac-seams = { path = "../backend-utils-adt-mac-seams" }
+# fmgr-ABI wrapper layer: register the by-ref `macaddr` builtins. Their call
+# frame lives in types-fmgr; by-OID dispatch resolves them in fmgr-core.
+types-datum = { path = "../types-datum" }
+types-fmgr = { path = "../types-fmgr" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }

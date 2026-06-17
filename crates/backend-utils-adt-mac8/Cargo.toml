@@ -13,3 +13,8 @@ types-error = { path = "../types-error" }
 types-network = { path = "../types-network" }
 # hash_any / hash_any_extended for hashmacaddr8; owner ported, depend directly.
 common-hashfn = { path = "../common-hashfn" }
+# fmgr-ABI wrapper layer: register the by-ref `macaddr8` builtins. Their call
+# frame lives in types-fmgr; by-OID dispatch resolves them in fmgr-core.
+types-datum = { path = "../types-datum" }
+types-fmgr = { path = "../types-fmgr" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
