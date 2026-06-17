@@ -109,6 +109,34 @@ const CONSTRAINT_EXCLUSION_OFF: i32 = 0;
 const CONSTRAINT_EXCLUSION_ON: i32 = 1;
 const CONSTRAINT_EXCLUSION_PARTITION: i32 = 2;
 
+/// GUC `conf->variable` backing storage owned by this unit.
+///
+/// Mirrors the C global `int constraint_exclusion = CONSTRAINT_EXCLUSION_PARTITION;`
+/// declared at `optimizer/util/plancat.c:58` (its enum value is read directly
+/// from the GUC slot in `relation_excluded_by_constraints`, not the ControlFile).
+/// Each backend owns its own copy, so this is a backend-private `thread_local!`
+/// `Cell`, like `globals.c` scalars. The getter/setter are installed into the
+/// GUC engine's `constraint_exclusion` slot from [`init_seams`].
+mod guc_backing {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// `int constraint_exclusion = CONSTRAINT_EXCLUSION_PARTITION;`
+        static CONSTRAINT_EXCLUSION: Cell<i32> =
+            const { Cell::new(super::CONSTRAINT_EXCLUSION_PARTITION) };
+    }
+
+    #[inline]
+    pub fn constraint_exclusion() -> i32 {
+        CONSTRAINT_EXCLUSION.with(Cell::get)
+    }
+
+    #[inline]
+    pub fn set_constraint_exclusion(value: i32) {
+        CONSTRAINT_EXCLUSION.with(|c| c.set(value));
+    }
+}
+
 /// `RELKIND_HAS_TABLE_AM(relkind)` (catalog/pg_class.h).
 #[inline]
 fn relkind_has_table_am(relkind: u8) -> bool {
@@ -1523,6 +1551,17 @@ pub fn init_seams() {
     backend_optimizer_path_small_seams::restriction_selectivity::set(seam_restriction_selectivity);
     backend_optimizer_path_small_seams::join_selectivity::set(seam_join_selectivity);
     backend_optimizer_path_small_seams::function_selectivity::set(seam_function_selectivity);
+
+    // GUC variable backing storage owned by plancat.c (`int constraint_exclusion`
+    // at line 58), an enum int read directly from the GUC slot by
+    // `relation_excluded_by_constraints` — never from the ControlFile.
+    {
+        use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+        vars::constraint_exclusion.install(GucVarAccessors {
+            get: guc_backing::constraint_exclusion,
+            set: guc_backing::set_constraint_exclusion,
+        });
+    }
 }
 
 fn seam_estimate_rel_size(
