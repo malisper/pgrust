@@ -18667,9 +18667,12 @@ name = "backend-utils-adt-tsginidx"
 version = "0.0.0"
 dependencies = [
  "backend-utils-adt-tsvector-core-seams",
+ "backend-utils-fmgr-core",
  "mcx",
  "types-core",
+ "types-datum",
  "types-error",
+ "types-fmgr",
  "types-tsearch",
 ]
 
