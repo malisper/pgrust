@@ -73,6 +73,8 @@ use backend_access_table_tableam as tableam;
 use backend_access_common_relation_seams as relation_seams;
 use backend_catalog_index_seams as catalog_index;
 use backend_utils_cache_relcache_seams as relcache;
+use backend_utils_cache_relcache_nodexform_seams as nodexform;
+use backend_utils_cache_lsyscache_seams as lsyscache_seams;
 use backend_utils_init_miscinit_seams as miscinit;
 use backend_utils_time_snapmgr_seams as snapmgr;
 
@@ -139,6 +141,79 @@ pub fn init_seams() {
     // RelationGetStatExtList / RelationGetFKeyList / RelationGetExclusionInfo /
     // AttrDefaultFetch / CheckNNConstraintFetch).
     decode::init_decode_seams();
+    // The two relcache `RelationGetIndexAttOptions` bridge primitives:
+    // `get_attoptions` (lsyscache.c) + `index_opclass_options` (indexam.c).
+    nodexform::get_attoptions::set(bridge_get_attoptions);
+    nodexform::index_opclass_options::set(bridge_index_opclass_options);
+}
+
+/// `get_attoptions(relid, attnum)` (lsyscache.c) — the relcache
+/// `RelationGetIndexAttOptions` bridge. The lsyscache value core returns the
+/// attribute's `attoptions` `text[]` as a `'mcx` `Datum` (`datumCopy`'d, or
+/// `None` for the C `(Datum) 0`); the mcx-free seam materializes that into the
+/// flat varlena byte image (the relcache caller hands the bytes straight to
+/// [`bridge_index_opclass_options`]).
+///
+/// A short-lived scratch context backs the value core's `datumCopy`, exactly as
+/// `LookupOpclassInfo`'s scan scratch (the bytes are copied out before it drops).
+fn bridge_get_attoptions(
+    relid: Oid,
+    attnum: AttrNumber,
+) -> PgResult<Option<alloc::vec::Vec<u8>>> {
+    let scratch = MemoryContext::new("get_attoptions");
+    let smcx = scratch.mcx();
+
+    // get_attoptions(relid, attnum): SearchSysCache2(ATTNUM) + SysCacheGetAttr +
+    // datumCopy; `None` is the C `(Datum) 0` (isnull).
+    let out = match lsyscache_seams::get_attoptions::call(smcx, relid, attnum)? {
+        // A real `text[]` varlena: flatten to its byte image, copied out of the
+        // scratch context into the caller's `Vec`.
+        Some(datum) => Some(datum.as_ref_bytes().to_vec()),
+        None => None,
+    };
+
+    drop(scratch);
+    Ok(out)
+}
+
+/// `index_opclass_options(indexrel, attnum, attoptions, validate=false)`
+/// (indexam.c) — the relcache `RelationGetIndexAttOptions` bridge. The mcx-free
+/// seam re-resolves the open index relation by OID (`index_open(NoLock)` — the
+/// relation is already open + locked by the relcache build, so `NoLock` adds no
+/// lock, matching the decode primitives' `relation_open(rd_id, NoLock)`), turns
+/// the raw `attoptions` bytes back into the `text[]` Datum the C passes by
+/// pointer (`None` is the C `(Datum) 0`), and calls the indexam value core. The
+/// parsed `bytea` is already returned as `Vec<u8>` by the value core.
+///
+/// `validate` is `false` on this relcache build path (C: `index_opclass_options(
+/// relation, i + 1, attoptions, false)`).
+fn bridge_index_opclass_options(
+    index_oid: Oid,
+    attnum: AttrNumber,
+    attoptions: Option<alloc::vec::Vec<u8>>,
+) -> PgResult<Option<alloc::vec::Vec<u8>>> {
+    use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
+
+    let scratch = MemoryContext::new("index_opclass_options");
+    let smcx = scratch.mcx();
+
+    // Reconstruct the `text[]` Datum the C `index_opclass_options` receives by
+    // pointer: a present option is the flat varlena image (the by-reference
+    // arm), an absent one is the C `(Datum) 0`.
+    let datum = match &attoptions {
+        Some(bytes) => DatumV::ByRef(mcx::slice_in(smcx, bytes)?),
+        None => DatumV::null(),
+    };
+
+    // index_open(indexOid, NoLock) — re-resolve the open relation for the
+    // amoptsprocinfo lookup; index_close(NoLock) on the way out.
+    let indrel = indexam::index_open(smcx, index_oid, NoLock)?;
+    let out = indexam::index_opclass_options(&indrel, attnum, datum, false);
+    indexam::index_close(indrel, NoLock)?;
+    let out = out?;
+
+    drop(scratch);
+    Ok(out)
 }
 
 /// `index_open(indexOid, AccessShareLock)` for the decode primitives that need

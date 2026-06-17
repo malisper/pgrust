@@ -21,6 +21,7 @@ mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 backend-utils-adt-datetime = { path = "../backend-utils-adt-datetime" }
+common-extra-encnames-fgram = { path = "../common-extra-encnames-fgram" }
 contrib-amcheck-verify-nbtree = { path = "../contrib-amcheck-verify-nbtree" }
 contrib-amcheck-verify-common = { path = "../contrib-amcheck-verify-common" }
 backend-access-common-detoast = { path = "../backend-access-common-detoast" }

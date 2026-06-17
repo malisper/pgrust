@@ -466,14 +466,38 @@ pub fn RelationBuildDesc(targetRelId: Oid, insertIt: bool) -> PgResult<Oid> {
     relation.rd_isvalid = true;
 
     let relid = relation.rd_id;
+    // Whether the deferred index opclass-options force is owed (see
+    // `RelationInitIndexAccessInfo`'s deferral note): only for index relkinds.
+    let is_index = matches!(
+        relation.rd_rel.relkind as u8,
+        RELKIND_INDEX | RELKIND_PARTITIONED_INDEX
+    );
     if insertIt {
         // RelationCacheInsert(relation, true): install into the store, replacing
         // any existing entry. The entry store owns the `Box`; the displaced
         // descriptor (if any) is freed/leak-warned there (the C macro's
         // RelationDestroyRelation / still-referenced WARNING).
         cache_insert(relation, true)?;
+        // Now that the entry is cache-resident and valid, prime `rd_opcoptions`
+        // (the force C runs inside RelationInitIndexAccessInfo off the live
+        // pointer; deferred here so the OID-keyed parse can resolve the entry
+        // instead of rebuilding the still-building one — see the deferral note
+        // in RelationInitIndexAccessInfo).
+        if is_index {
+            // OID-keyed force — must not hold the cell borrowed across the
+            // OID-re-resolving opclass-options seams (see force_index_att_options).
+            crate::derived::force_index_att_options(relid)?;
+        }
         Ok(relid)
     } else {
+        // The rebuild (`RelationRebuildRelation`) path: the OLD entry for this
+        // OID is still cache-resident (the in-place swap happens only after this
+        // returns), so the OID-keyed opclass-options parse resolves it and
+        // terminates. Prime the NEWREL's `rd_opcoptions` on the Box directly
+        // before parking it.
+        if is_index {
+            crate::derived::RelationGetIndexAttOptions(&mut relation, false)?;
+        }
         // C keeps `newrel` OUT of the hash for RelationRebuildRelation's
         // in-place swap; park it in the scratch slot and return its OID.
         finish_uninserted(relation)

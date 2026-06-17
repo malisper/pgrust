@@ -980,6 +980,30 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::search_pg_class_full_form::set(
         projections::search_pg_class_full_form,
     );
+    backend_utils_cache_syscache_seams::database_syscache_hash_value::set(
+        projections::database_syscache_hash_value,
+    );
+    // pg_locale.c catalog-read seams (the locale-relevant pg_database /
+    // pg_collation columns + the MyDatabaseId / get_namespace_name the
+    // version-mismatch path needs).
+    backend_utils_adt_pg_locale_catalog_seams::database_locale_row::set(
+        projections::database_locale_row,
+    );
+    backend_utils_adt_pg_locale_catalog_seams::collation_locale_row::set(
+        projections::collation_locale_row,
+    );
+    backend_utils_adt_pg_locale_catalog_seams::my_database_id::set(|| {
+        backend_utils_init_small_seams::my_database_id::call()
+    });
+    backend_utils_adt_pg_locale_catalog_seams::get_namespace_name::set(|nspid| {
+        let scratch = mcx::MemoryContext::new("get_namespace_name (pg_locale)");
+        let name = backend_utils_cache_lsyscache_seams::get_namespace_name::call(
+            scratch.mcx(),
+            nspid,
+        )?
+        .map(|s| s.as_str().to_string());
+        Ok(name)
+    });
     backend_utils_cache_syscache_seams::get_syscache_hash_value_constroid::set(
         projections::get_syscache_hash_value_constroid,
     );
@@ -1012,6 +1036,12 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::pg_class_owner_acl::set(projections::pg_class_owner_acl);
     backend_utils_cache_syscache_seams::pg_attribute_owner_acl::set(
         projections::pg_attribute_owner_acl,
+    );
+    // pg_attribute fixed-width form + nullable attoptions (lsyscache
+    // get_atttype/get_attgenerated/get_atttypetypmodcoll + get_attoptions).
+    backend_utils_cache_syscache_seams::pg_attribute_form::set(projections::pg_attribute_form);
+    backend_utils_cache_syscache_seams::pg_attribute_attoptions::set(
+        projections::pg_attribute_attoptions,
     );
     backend_utils_cache_syscache_seams::pg_namespace_owner_acl::set(
         projections::pg_namespace_owner_acl,

@@ -235,6 +235,12 @@ int_var!(
     set_ReservedConnections,
     0
 );
+// `int PostAuthDelay = 0;` — the `post_auth_delay` GUC's C `conf->variable`
+// lives in postgres.c (globals.c declares it; postgres.c registers the GUC).
+// That unit is not yet a GUC owner, so the process-global backing lives here
+// (boot val 0, from guc_tables.c); init-small's globals.c reader shim reads it
+// through the GUC slot.
+int_var!(I_PostAuthDelay, PostAuthDelay, set_PostAuthDelay, 0);
 
 // ---- enum GUCs (guc_tables.c) — stored as the int the enum maps to -------
 

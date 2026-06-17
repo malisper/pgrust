@@ -1903,6 +1903,7 @@ dependencies = [
  "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-adt-varlena-seams",
  "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-relcache-nodexform-seams",
  "backend-utils-cache-relcache-seams",
  "backend-utils-error",
  "backend-utils-fmgr-fmgr-seams",
@@ -7856,6 +7857,7 @@ dependencies = [
  "backend-utils-init-miscinit",
  "backend-utils-init-small",
  "backend-utils-init-small-seams",
+ "backend-utils-mb-mbutils",
  "backend-utils-mb-mbutils-seams",
  "backend-utils-misc-guc",
  "backend-utils-misc-guc-tables",
@@ -7863,6 +7865,7 @@ dependencies = [
  "backend-utils-misc-timeout",
  "backend-utils-time-snapmgr",
  "common-encnames-seams",
+ "common-extra-encnames-fgram",
  "common-path-seams",
  "common-string",
  "mcx",
@@ -19445,6 +19448,7 @@ dependencies = [
  "backend-storage-lmgr-lock-seams",
  "backend-utils-adt-amutils-seams",
  "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-adt-pg-locale-catalog-seams",
  "backend-utils-adt-varlena-seams",
  "backend-utils-cache-catcache-seams",
  "backend-utils-cache-inval-seams",
@@ -19452,6 +19456,7 @@ dependencies = [
  "backend-utils-cache-syscache-pc-seams",
  "backend-utils-cache-syscache-seams",
  "backend-utils-error",
+ "backend-utils-init-small-seams",
  "backend-utils-misc-guc-seams",
  "mcx",
  "types-acl",
@@ -20862,6 +20867,7 @@ dependencies = [
 name = "common-extra-encnames-fgram"
 version = "0.0.0"
 dependencies = [
+ "common-encnames-seams",
  "pgrust-pg-ffi-fgram",
 ]
 
@@ -21936,6 +21942,7 @@ dependencies = [
  "backend-utils-time-snapmgr",
  "common-blkreftable",
  "common-checksum-helper",
+ "common-extra-encnames-fgram",
  "common-hashfn",
  "common-ip",
  "common-pglz",

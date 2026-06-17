@@ -18,7 +18,7 @@ use crate::{
     SearchSysCacheAttName,
     SearchSysCacheExists, SearchSysCacheList, SearchSysCacheList1, SysCacheGetAttr,
     SysCacheGetAttrNotNull, AGGFNOID, AMOID, AMOPSTRATEGY, AMPROCNUM, ATTNAME, ATTNUM, AUTHNAME, AUTHOID,
-    CASTSOURCETARGET, CLAAMNAMENSP, CLAOID, COLLOID, CONSTROID, ENUMOID, ENUMTYPOIDNAME,
+    CASTSOURCETARGET, CLAAMNAMENSP, CLAOID, COLLOID, CONSTROID, DATABASEOID, ENUMOID, ENUMTYPOIDNAME,
     FOREIGNDATAWRAPPERNAME,
     FOREIGNDATAWRAPPEROID, FOREIGNSERVERNAME, FOREIGNSERVEROID, FOREIGNTABLEREL, INDEXRELID, LANGNAME,
     LANGOID, NAMESPACEOID, OPEROID, PARAMETERACLNAME, PARAMETERACLOID, PROCOID, RELOID,
@@ -770,6 +770,106 @@ pub(crate) fn attribute_fdwoptions<'mcx>(
     Ok(Some(bytes))
 }
 
+// Fixed-width `Form_pg_attribute` column numbers (catalog/pg_attribute.h),
+// plus the nullable `attoptions` (`CATALOG_VARLEN`).
+const Anum_pg_attribute_attrelid: i32 = 1;
+const Anum_pg_attribute_attname: i32 = 2;
+const Anum_pg_attribute_attlen: i32 = 4;
+const Anum_pg_attribute_atttypmod: i32 = 6;
+const Anum_pg_attribute_attndims: i32 = 7;
+const Anum_pg_attribute_attbyval: i32 = 8;
+const Anum_pg_attribute_attalign: i32 = 9;
+const Anum_pg_attribute_attstorage: i32 = 10;
+const Anum_pg_attribute_attcompression: i32 = 11;
+const Anum_pg_attribute_attnotnull: i32 = 12;
+const Anum_pg_attribute_atthasdef: i32 = 13;
+const Anum_pg_attribute_atthasmissing: i32 = 14;
+const Anum_pg_attribute_attidentity: i32 = 15;
+const Anum_pg_attribute_attgenerated: i32 = 16;
+const Anum_pg_attribute_attisdropped: i32 = 17;
+const Anum_pg_attribute_attislocal: i32 = 18;
+const Anum_pg_attribute_attinhcount: i32 = 19;
+const Anum_pg_attribute_attcollation: i32 = 20;
+const Anum_pg_attribute_attoptions: i32 = 23;
+
+/// `SearchSysCache2(ATTNUM, ObjectIdGetDatum(relid), Int16GetDatum(attnum))`
+/// + `GETSTRUCT(Form_pg_attribute)` projected to the fixed-width
+/// `FormData_pg_attribute` row (the lsyscache `get_attgenerated` /
+/// `get_atttype` / `get_atttypetypmodcoll` helpers' `GETSTRUCT`). `Ok(None)`
+/// on a cache miss; the projection owns the `ReleaseSysCache`.
+pub(crate) fn pg_attribute_form(
+    relid: Oid,
+    attnum: i16,
+) -> PgResult<Option<types_tuple::heaptuple::FormData_pg_attribute>> {
+    // GETSTRUCT projects the fixed-width part by value, so the tuple copy lives
+    // in a scratch context dropped before returning.
+    let scratch = MemoryContext::new("pg_attribute_form projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache2(
+        mcx,
+        ATTNUM,
+        SysCacheKey::Value(KeyDatum::from_oid(relid)),
+        SysCacheKey::Value(KeyDatum::from_i16(attnum)),
+    )?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let form = types_tuple::heaptuple::FormData_pg_attribute {
+        attrelid: getattr_oid(mcx, ATTNUM, &tup, Anum_pg_attribute_attrelid)?,
+        attname: types_tuple::heaptuple::NameData {
+            data: getattr_namedata(mcx, ATTNUM, &tup, Anum_pg_attribute_attname)?,
+        },
+        atttypid: getattr_oid(mcx, ATTNUM, &tup, Anum_pg_attribute_atttypid)?,
+        attlen: getattr_i16(mcx, ATTNUM, &tup, Anum_pg_attribute_attlen)?,
+        attnum: getattr_i16(mcx, ATTNUM, &tup, Anum_pg_attribute_attnum)?,
+        atttypmod: getattr_i32(mcx, ATTNUM, &tup, Anum_pg_attribute_atttypmod)?,
+        attndims: getattr_i16(mcx, ATTNUM, &tup, Anum_pg_attribute_attndims)?,
+        attbyval: getattr_bool(mcx, ATTNUM, &tup, Anum_pg_attribute_attbyval)?,
+        attalign: getattr_char(mcx, ATTNUM, &tup, Anum_pg_attribute_attalign)?,
+        attstorage: getattr_char(mcx, ATTNUM, &tup, Anum_pg_attribute_attstorage)?,
+        attcompression: getattr_char(mcx, ATTNUM, &tup, Anum_pg_attribute_attcompression)?,
+        attnotnull: getattr_bool(mcx, ATTNUM, &tup, Anum_pg_attribute_attnotnull)?,
+        atthasdef: getattr_bool(mcx, ATTNUM, &tup, Anum_pg_attribute_atthasdef)?,
+        atthasmissing: getattr_bool(mcx, ATTNUM, &tup, Anum_pg_attribute_atthasmissing)?,
+        attidentity: getattr_char(mcx, ATTNUM, &tup, Anum_pg_attribute_attidentity)?,
+        attgenerated: getattr_char(mcx, ATTNUM, &tup, Anum_pg_attribute_attgenerated)?,
+        attisdropped: getattr_bool(mcx, ATTNUM, &tup, Anum_pg_attribute_attisdropped)?,
+        attislocal: getattr_bool(mcx, ATTNUM, &tup, Anum_pg_attribute_attislocal)?,
+        attinhcount: getattr_i16(mcx, ATTNUM, &tup, Anum_pg_attribute_attinhcount)?,
+        attcollation: getattr_oid(mcx, ATTNUM, &tup, Anum_pg_attribute_attcollation)?,
+    };
+    ReleaseSysCache(tup);
+    Ok(Some(form))
+}
+
+/// `SearchSysCache2(ATTNUM, ObjectIdGetDatum(relid), Int16GetDatum(attnum))`
+/// + `SysCacheGetAttr(ATTNAME, tuple, Anum_pg_attribute_attoptions, &isnull)`
+/// + `datumCopy` (lsyscache.c `get_attoptions`): the attribute's `attoptions`
+/// `text[]` Datum copied into `mcx` (`Some(Some(datum))`), `Some(None)` for SQL
+/// NULL (the C `(Datum) 0`), or `Ok(None)` on a cache miss (the caller raises
+/// its own `cache lookup failed for attribute` error). The raw varlena bytes
+/// ride in the canonical `Datum::ByRef` arm.
+pub(crate) fn pg_attribute_attoptions<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    attnum: i16,
+) -> PgResult<Option<Option<Datum<'mcx>>>> {
+    let tuple = SearchSysCache2(
+        mcx,
+        ATTNUM,
+        SysCacheKey::Value(KeyDatum::from_oid(relid)),
+        SysCacheKey::Value(KeyDatum::from_i16(attnum)),
+    )?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    // SysCacheGetAttr + datumCopy: `None` is the C `isnull` (`(Datum) 0`).
+    let attopts =
+        getattr_option_bytes(mcx, ATTNUM, &tup, Anum_pg_attribute_attoptions)?.map(Datum::ByRef);
+    ReleaseSysCache(tup);
+    Ok(Some(attopts))
+}
+
 /// `SearchSysCache1(AGGFNOID, ObjectIdGetDatum(funcid))` projected to the
 /// [`AggRow`] fields (`Form_pg_aggregate` `aggkind` / `aggnumdirectargs`).
 /// `Ok(None)` on a cache miss (`!HeapTupleIsValid`); the caller (`func_get_detail`)
@@ -1125,6 +1225,91 @@ pub(crate) fn rel_relkind(relid: Oid) -> PgResult<Option<u8>> {
 /// hash value for a `pg_constraint` row.
 pub(crate) fn get_syscache_hash_value_constroid(oid: Oid) -> PgResult<u32> {
     crate::GetSysCacheHashValue1(CONSTROID, SysCacheKey::Value(KeyDatum::from_oid(oid)))
+}
+
+/// `GetSysCacheHashValue1(DATABASEOID, ObjectIdGetDatum(dbid))` (acl.c
+/// `initialize_acl`) — the catcache hash value for a `pg_database` row, cached
+/// to filter `DATABASEOID` invalidations for other databases.
+pub(crate) fn database_syscache_hash_value(dbid: Oid) -> PgResult<u32> {
+    crate::GetSysCacheHashValue1(DATABASEOID, SysCacheKey::Value(KeyDatum::from_oid(dbid)))
+}
+
+// pg_locale.c catalog-read seams: the locale-relevant pg_database / pg_collation
+// columns the `create_pg_locale` / `init_database_collation` / libc-default
+// paths consult. Fixed column numbers (catalog/pg_database.h, pg_collation.h).
+const Anum_pg_database_datlocprovider_loc: i32 = 5;
+const Anum_pg_database_datcollate_loc: i32 = 13;
+const Anum_pg_database_datctype_loc: i32 = 14;
+const Anum_pg_collation_collname_loc: i32 = 2;
+const Anum_pg_collation_collnamespace_loc: i32 = 3;
+const Anum_pg_collation_collprovider_loc: i32 = 5;
+const Anum_pg_collation_collcollate_loc: i32 = 8;
+const Anum_pg_collation_collctype_loc: i32 = 9;
+const Anum_pg_collation_colllocale_loc: i32 = 10;
+const Anum_pg_collation_collversion_loc: i32 = 12;
+
+/// `SearchSysCache1(DATABASEOID, MyDatabaseId)` + the locale-relevant
+/// `pg_database` columns (`init_database_collation` / libc default path,
+/// pg_locale.c): `datlocprovider` (`char`) + `datcollate` / `datctype`
+/// (`SysCacheGetAttrNotNull` text). `Ok(None)` on a cache miss (the caller's
+/// "cache lookup failed for database" path). MyDatabaseId comes from the
+/// init-small globals owner.
+pub(crate) fn database_locale_row(
+) -> PgResult<Option<backend_utils_adt_pg_locale_catalog_seams::DatabaseLocaleRow>> {
+    let dbid = backend_utils_init_small_seams::my_database_id::call();
+    let scratch = MemoryContext::new("database_locale_row projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, DATABASEOID, SysCacheKey::Value(KeyDatum::from_oid(dbid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let provider = getattr_char(mcx, DATABASEOID, &tup, Anum_pg_database_datlocprovider_loc)?;
+    // datcollate / datctype are BKI_FORCE_NOT_NULL (SysCacheGetAttrNotNull).
+    let collate = getattr_option_text(mcx, DATABASEOID, &tup, Anum_pg_database_datcollate_loc)?
+        .ok_or_else(|| PgError::error(format!("null datcollate for database {dbid}")))?;
+    let ctype = getattr_option_text(mcx, DATABASEOID, &tup, Anum_pg_database_datctype_loc)?
+        .ok_or_else(|| PgError::error(format!("null datctype for database {dbid}")))?;
+    ReleaseSysCache(tup);
+    Ok(Some(backend_utils_adt_pg_locale_catalog_seams::DatabaseLocaleRow {
+        provider,
+        collate,
+        ctype,
+    }))
+}
+
+/// `SearchSysCache1(COLLOID, collid)` + the locale-relevant `pg_collation`
+/// columns (`create_pg_locale`, pg_locale.c): `collprovider` (`char`) +
+/// `collname` (`NameStr`) + `collnamespace` + nullable `collcollate` /
+/// `collctype` / `colllocale` / `collversion` text. `Ok(None)` on a cache miss
+/// (the "cache lookup failed for collation" path).
+pub(crate) fn collation_locale_row(
+    collid: Oid,
+) -> PgResult<Option<backend_utils_adt_pg_locale_catalog_seams::CollationLocaleRow>> {
+    let scratch = MemoryContext::new("collation_locale_row projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, COLLOID, SysCacheKey::Value(KeyDatum::from_oid(collid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let provider = getattr_char(mcx, COLLOID, &tup, Anum_pg_collation_collprovider_loc)?;
+    let name = getattr_name(mcx, COLLOID, &tup, Anum_pg_collation_collname_loc)?
+        .as_str()
+        .to_string();
+    let namespace = getattr_oid(mcx, COLLOID, &tup, Anum_pg_collation_collnamespace_loc)?;
+    let collate = getattr_option_text(mcx, COLLOID, &tup, Anum_pg_collation_collcollate_loc)?;
+    let ctype = getattr_option_text(mcx, COLLOID, &tup, Anum_pg_collation_collctype_loc)?;
+    let locale = getattr_option_text(mcx, COLLOID, &tup, Anum_pg_collation_colllocale_loc)?;
+    let version = getattr_option_text(mcx, COLLOID, &tup, Anum_pg_collation_collversion_loc)?;
+    ReleaseSysCache(tup);
+    Ok(Some(backend_utils_adt_pg_locale_catalog_seams::CollationLocaleRow {
+        provider,
+        name,
+        namespace,
+        collate,
+        ctype,
+        locale,
+        version,
+    }))
 }
 
 /// `SearchSysCache1(CONSTROID, ObjectIdGetDatum(conoid))` projected to the

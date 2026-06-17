@@ -33,7 +33,9 @@ backend-utils-adt-acl-seams = { path = "../backend-utils-adt-acl-seams" }
 backend-utils-misc-superuser-seams = { path = "../backend-utils-misc-superuser-seams" }
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
 backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
+backend-utils-mb-mbutils = { path = "../backend-utils-mb-mbutils" }
 common-encnames-seams = { path = "../common-encnames-seams" }
+common-extra-encnames-fgram = { path = "../common-extra-encnames-fgram" }
 common-path-seams = { path = "../common-path-seams" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 

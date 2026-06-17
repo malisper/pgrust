@@ -14,6 +14,14 @@ pub use pgrust_pg_ffi::{
     PG_WIN1258, PG_WIN866, PG_WIN874, _PG_LAST_ENCODING_,
 };
 
+/// Install the `common/encnames.c` seams (`pg_char_to_encoding` /
+/// `pg_encoding_to_char`) from this owning unit. `pg_enc` is `i32`, so the seam
+/// `i32` boundary forwards verbatim to the value cores.
+pub fn init_seams() {
+    common_encnames_seams::pg_char_to_encoding::set(pg_char_to_encoding);
+    common_encnames_seams::pg_encoding_to_char::set(pg_encoding_to_char);
+}
+
 const NAMEDATALEN: usize = 64;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

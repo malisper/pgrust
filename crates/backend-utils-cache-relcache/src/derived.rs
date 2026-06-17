@@ -1214,6 +1214,43 @@ pub fn RelationGetIndexAttOptions(rd: &mut RelationData, _copy: bool) -> PgResul
     Ok(())
 }
 
+/// The OID-keyed form of [`RelationGetIndexAttOptions`] for the deferred force
+/// in `RelationBuildDesc` (build.rs). The cross-unit `index_opclass_options`
+/// parse re-resolves the index by OID (`index_open` / `relation_rd_indam` /
+/// `rd_support_at` all read this same cache cell), so the entry must NOT be held
+/// borrowed across the seam loop — otherwise the re-resolution's `cell.borrow()`
+/// deadlocks against an outer `borrow_mut()`. This reads `relnatts` / the
+/// already-cached guard under a short borrow, runs the (unborrowed) seam loop,
+/// then writes `rd_opcoptions` back under a short borrow.
+pub(crate) fn force_index_att_options(relid: Oid) -> PgResult<()> {
+    // RelationGetNumberOfAttributes + the present-cache short-circuit.
+    let (natts, already) = crate::core_entry_store::with_relation(relid, |rd| {
+        (rd.rd_rel.relnatts as usize, rd.rd_opcoptions.is_some())
+    })?;
+    if already {
+        return Ok(());
+    }
+
+    // Parse opclass options with NO live borrow on the entry (the seams
+    // re-resolve it by OID). `palloc0` → one `None` per attribute.
+    let mut opts: Vec<Option<Vec<u8>>> = vec![None; natts];
+    let critical_built = crate::core_entry_store::with_state(|st| st.critical_relcaches_built);
+    for (i, slot) in opts.iter_mut().enumerate() {
+        if critical_built && relid != ATTRIBUTE_RELID_NUM_INDEX_ID {
+            let attnum = (i + 1) as AttrNumber;
+            let attoptions = nodexform_seam::get_attoptions::call(relid, attnum)?;
+            *slot = nodexform_seam::index_opclass_options::call(relid, attnum, attoptions)?;
+        }
+    }
+
+    // Copy parsed options to the cache entry.
+    crate::core_entry_store::with_relation_mut(relid, |rd| {
+        rd.rd_opcoptions = Some(opts);
+    })?;
+
+    Ok(())
+}
+
 /// `AttributeRelidNumIndexId` (`pg_attribute_relid_attnum_index`) — guards the
 /// per-column opclass-option fetch in [`RelationGetIndexAttOptions`] against
 /// recursing through the pg_attribute index before the critical relcaches are

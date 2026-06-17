@@ -1162,7 +1162,7 @@ pub fn init_seams() {
 mod install {
     use super::own;
     use backend_utils_error::ereport;
-    use types_error::error::NOTICE;
+    use types_error::error::{LOG, NOTICE};
     use types_error::ErrorLocation;
 
     fn here(fn_name: &'static str) -> ErrorLocation {
@@ -1299,15 +1299,31 @@ mod install {
         // Installed by the real owner crate
         // `backend_utils_adt_pseudorandomfuncs::init_seams()`; not set here.
 
-        // -------- encoding: encnames.c / mbutils.c (unported) --------
-        own::pg_valid_client_encoding::set(|_name| {
-            panic!("pg_valid_client_encoding (encnames.c) not yet ported")
+        // -------- encoding: encnames.c (ported) / mbutils.c (unported) --------
+        // `pg_valid_client_encoding(name)` (encnames.c): the FE-valid encoding id
+        // for `name`, or `-1`. The encnames unit owns the value core.
+        own::pg_valid_client_encoding::set(|name| {
+            Ok(common_extra_encnames::pg_valid_client_encoding(&name))
         });
-        own::prepare_client_encoding::set(|_encoding| {
-            panic!("PrepareClientEncoding (mbutils.c) not yet ported")
+        // `PrepareClientEncoding(encoding)` (mbutils.c): verify the conversion
+        // procs are reachable (may run a syscache scan, so a transient context
+        // backs the lookup). `< 0` means not (yet) usable.
+        own::prepare_client_encoding::set(|encoding| {
+            let scratch = mcx::MemoryContext::new("PrepareClientEncoding");
+            backend_utils_mb_mbutils::PrepareClientEncoding(scratch.mcx(), encoding)
         });
-        own::set_client_encoding_logging::set(|_encoding| {
-            panic!("SetClientEncoding (mbutils.c) not yet ported")
+        // `assign_client_encoding`'s `SetClientEncoding(encoding)` (mbutils.c)
+        // then `elog(LOG, "SetClientEncoding(%d) failed", encoding)` on a
+        // negative return — infallible from the GUC framework's perspective.
+        own::set_client_encoding_logging::set(|encoding| {
+            match backend_utils_mb_mbutils::SetClientEncoding(encoding) {
+                Ok(rc) if rc >= 0 => {}
+                _ => {
+                    let _ = ereport(LOG)
+                        .errmsg(format!("SetClientEncoding({encoding}) failed"))
+                        .finish(here("assign_client_encoding"));
+                }
+            }
         });
 
         // -------- miscinit.c (merged) — delegate --------

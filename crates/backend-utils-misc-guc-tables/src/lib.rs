@@ -353,6 +353,12 @@ fn install_guc_tables_owned_vars() {
         get: backing::ReservedConnections,
         set: backing::set_ReservedConnections,
     });
+    // postgres.c-owned `post_auth_delay` GUC (backed here until that unit lands
+    // as a GUC owner). Read by InitPostgres's post-auth delay apply.
+    vars::PostAuthDelay.install(GucVarAccessors {
+        get: backing::PostAuthDelay,
+        set: backing::set_PostAuthDelay,
+    });
 
     // --- enum (stored as int) ---
     vars::huge_pages.install(GucVarAccessors {

@@ -38,5 +38,6 @@ backend-access-common-relation-seams = { path = "../backend-access-common-relati
 backend-catalog-index-seams = { path = "../backend-catalog-index-seams" }
 backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+backend-utils-cache-relcache-nodexform-seams = { path = "../backend-utils-cache-relcache-nodexform-seams" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
 backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }

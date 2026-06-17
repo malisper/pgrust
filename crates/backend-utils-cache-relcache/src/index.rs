@@ -352,8 +352,21 @@ pub fn RelationInitIndexAccessInfo(rd: &mut RelationData) -> PgResult<()> {
     }
 
     // Force population of the AM/opclass per-column options cache (own logic
-    // in the derived family; the result is discarded as in C's `(void)`).
-    crate::derived::RelationGetIndexAttOptions(rd, false)?;
+    // in the derived family; C's `(void) RelationGetIndexAttOptions(relation,
+    // false)` at the tail of RelationInitIndexAccessInfo).
+    //
+    // DIVERGENCE (faithful, deferred): C primes `rd_opcoptions` here off the
+    // live `relation` pointer. In this OID-keyed model the parse step
+    // (`index_opclass_options`) re-resolves the index by OID — `index_open` /
+    // `relation_rd_indam` / `rd_support_at` all read the cache cell for
+    // `rd_id`. During RelationBuildDesc the entry is a not-yet-inserted local
+    // descriptor, so an in-build re-resolve would `RelationBuildDesc` it again
+    // and recurse forever. The force is therefore deferred to
+    // `force_index_att_options` (build.rs), called once the entry is
+    // cache-resident (after `cache_insert` / scratch-park) — `rd_opcoptions` is
+    // a lazily-primed cache, so priming it a few statements later than C is
+    // behaviorally identical (the support/opclass arrays this reads are already
+    // populated above, before the entry is published).
 
     // expressions, predicate, exclusion caches will be filled later
     rd.rd_exclops = Vec::new();
