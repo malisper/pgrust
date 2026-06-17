@@ -58,6 +58,7 @@ use backend_utils_sort_tuplestore_hold_seams as tuplestore_seam;
 use backend_utils_time_snapmgr_seams as snapmgr_seam;
 
 pub mod seams_install;
+pub mod top_context;
 
 /// `InvalidSubTransactionId` (`c.h`).
 const InvalidSubTransactionId: SubTransactionId = 0;

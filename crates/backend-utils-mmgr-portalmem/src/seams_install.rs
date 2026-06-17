@@ -86,6 +86,24 @@ pub fn init_seams() {
     // has no dedicated body crate in the mcx world and `mcx` itself cannot depend
     // on the seam crate (the seam crate depends on `mcx`).
     backend_utils_mmgr_mcxt_seams::memory_context_init::set(|| Ok(()));
+
+    // `TopMemoryContext` / `MemoryContextSwitchTo(TopMemoryContext)` for the
+    // postmaster-forked child path (see `crate::top_context`). The single-user
+    // backend never needs these (the binary shell threads `Mcx<'static>` into
+    // `pg_main` explicitly); a forked child enters through
+    // `postmaster_child_launch` with no handle to thread and calls these seams
+    // as the equivalent of C's child `MemoryContextInit` +
+    // `MemoryContextSwitchTo(TopMemoryContext)` at `*Main` entry. The body
+    // establishes a per-process root `TopMemoryContext` on first call. Homed on
+    // the mmgr-family owner (portalmem) alongside `memory_context_init`, because
+    // mcxt.c has no dedicated body crate in the mcx world and `mcx` itself
+    // cannot depend on the seam crate.
+    backend_utils_mmgr_mcxt_seams::top_memory_context::set(
+        crate::top_context::top_memory_context,
+    );
+    backend_utils_mmgr_mcxt_seams::switch_to_top_memory_context::set(
+        crate::top_context::switch_to_top_memory_context,
+    );
 }
 
 /// `AtSubCommit_Portals(mySubid, parentSubid, parentLevel, parentXactOwner)`
