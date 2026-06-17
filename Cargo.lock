@@ -2614,6 +2614,7 @@ dependencies = [
  "backend-access-spg-text",
  "backend-utils-adt-geo-ops-seams",
  "backend-utils-adt-network-spgist",
+ "backend-utils-adt-rangetypes-spgist",
  "mcx",
  "types-core",
  "types-error",
@@ -18579,6 +18580,22 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-rangetypes",
+]
+
+[[package]]
+name = "backend-utils-adt-rangetypes-spgist"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-rangetypes",
+ "mcx",
+ "types-cache",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-rangetypes",
+ "types-scan",
+ "types-spgist",
+ "types-tuple",
 ]
 
 [[package]]
