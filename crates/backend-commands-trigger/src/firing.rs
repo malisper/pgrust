@@ -744,15 +744,53 @@ fn after_trigger_end_sub_xact_impl(is_commit: bool) -> PgResult<()> {
     crate::queue::after_trigger_end_sub_xact_hook(is_commit)
 }
 
-/// `AfterTriggerFireDeferred()` (trigger.c:5287) — fire deferred events at
-/// commit.  The mark+invoke core is reachable, but the surrounding commit-time
-/// snapshot push + firing-cycle loop need the xact-commit substrate (a
-/// per-query `EState` + a pushed transaction snapshot), which is not available
-/// to this seam's bare signature.  Loud, 1:1-named.
+/// `AfterTriggerFireDeferred()` (trigger.c:5287) — fire all pending DEFERRED
+/// triggers, called just before the current transaction commits.
+///
+/// ```c
+/// Assert(afterTriggers.query_depth == -1);
+/// events = &afterTriggers.events;
+/// if (events->head != NULL) {
+///     PushActiveSnapshot(GetTransactionSnapshot());
+///     snap_pushed = true;
+/// }
+/// while (afterTriggerMarkEvents(events, NULL, false)) {
+///     CommandId firing_id = afterTriggers.firing_counter++;
+///     if (afterTriggerInvokeEvents(events, firing_id, NULL, true))
+///         break;
+/// }
+/// if (snap_pushed) PopActiveSnapshot();
+/// ```
+///
+/// The empty-queue fast path (`events->head == NULL`) is the common case — at
+/// transaction commit with no deferred events queued this is a no-op, exactly
+/// as in C. That path is ported faithfully. When the queue is *non-empty* the C
+/// loop pushes the transaction snapshot and runs the firing cycle against a
+/// `NULL` `EState`; in this tree `afterTriggerInvokeEvents` requires an
+/// `&mut EStateData` and there is no `PushActiveSnapshot` seam reachable from
+/// this crate, so the deferred-firing leg stays a loud, 1:1-named boundary until
+/// the commit-time per-query `EState` + active-snapshot substrate lands. (A
+/// fresh boot never queues deferred events, so it never reaches that leg.)
 fn after_trigger_fire_deferred_impl() -> PgResult<()> {
+    // Assert(afterTriggers.query_depth == -1) — must not be inside a query.
+    debug_assert_eq!(with_after_triggers(|at| at.query_depth), -1);
+
+    // events = &afterTriggers.events; if (events->head != NULL) ...
+    let has_events = with_after_triggers(|at| !at.events.events.is_empty());
+    if !has_events {
+        // No deferred triggers to fire: the C function pushes no snapshot, the
+        // mark loop finds nothing, and it returns. No-op.
+        return Ok(());
+    }
+
+    // events->head != NULL: PushActiveSnapshot(GetTransactionSnapshot()) and run
+    // the firing cycle. This commit-time leg needs the active-snapshot push and a
+    // per-query EState that are not reachable from this crate's bare seam; keep
+    // it loud rather than silently dropping queued deferred triggers.
     Err(PgError::error(
-        "AfterTriggerFireDeferred (trigger.c:5287): the commit-time deferred-trigger \
-         firing loop needs a pushed transaction snapshot + per-query EState, not yet ported"
+        "AfterTriggerFireDeferred (trigger.c:5287): firing queued DEFERRED triggers at \
+         commit needs PushActiveSnapshot(GetTransactionSnapshot()) + a per-query EState for \
+         the afterTriggerInvokeEvents cycle, not yet ported"
             .to_string(),
     ))
 }

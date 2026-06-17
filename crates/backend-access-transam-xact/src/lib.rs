@@ -1523,6 +1523,17 @@ fn seam_set_xact_accessed_temp_namespace() {
     });
 }
 
+/// `(MyXactFlags & XACT_FLAGS_ACCESSEDTEMPNAMESPACE) != 0` — seam adapter for
+/// the `xact_accessed_temp_namespace` reader (`PreCommit_on_commit_actions`
+/// queries it to decide whether ON COMMIT DELETE ROWS truncation can be
+/// skipped). The flag lives in `MyXactFlags`, owned here; the reader is
+/// declared in `tablecmds-seams` next to its consumer.
+fn seam_xact_accessed_temp_namespace() -> PgResult<bool> {
+    Ok(xs(|s| {
+        (s.MyXactFlags & types_core::xact::XACT_FLAGS_ACCESSEDTEMPNAMESPACE) != 0
+    }))
+}
+
 /// Read `XactLastRecEnd` — the end LSN of the last WAL record written by this
 /// backend. Owned by xlog.c; this crate forwards via the xlog seam (the xact
 /// crate drives that global through `set_xact_last_rec_end`).
@@ -1683,6 +1694,9 @@ pub fn init_seams() {
     seams::get_current_sub_transaction_id::set(GetCurrentSubTransactionId);
     seams::is_sub_transaction::set(IsSubTransaction);
     seams::set_xact_accessed_temp_namespace::set(seam_set_xact_accessed_temp_namespace);
+    backend_commands_tablecmds_seams::xact_accessed_temp_namespace::set(
+        seam_xact_accessed_temp_namespace,
+    );
     seams::start_transaction_command::set(StartTransactionCommand);
     seams::commit_transaction_command::set(CommitTransactionCommand);
     seams::abort_out_of_any_transaction::set(AbortOutOfAnyTransaction);

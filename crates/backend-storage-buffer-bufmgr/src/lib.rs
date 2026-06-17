@@ -72,6 +72,13 @@ fn release_buffer(buf: Buffer) {
         .expect("ReleaseBuffer: bad buffer ID");
 }
 
+/// `ResOwnerReleaseBufferPin(res)` installed seam (bufmgr.c:6555) — release a
+/// leaked buffer pin the resource owner found during release, without touching
+/// the (already-being-released) owner.
+fn release_buffer_pin(buf: Buffer) -> types_error::PgResult<()> {
+    BufferManager::global_expect().ResOwnerReleaseBufferPin(buf)
+}
+
 /// `UnlockReleaseBuffer(buffer)` installed seam (bufmgr.c) — release the content
 /// lock then the pin.
 fn unlock_release_buffer(buffer: Buffer) {
@@ -599,6 +606,7 @@ pub fn init_seams() {
     backend_storage_buffer_bufmgr_seams::set_buf_free_next::set(set_buf_free_next);
     // F1b
     backend_storage_buffer_bufmgr_seams::release_buffer::set(release_buffer);
+    backend_storage_buffer_bufmgr_seams::release_buffer_pin::set(release_buffer_pin);
     backend_storage_buffer_bufmgr_seams::unlock_release_buffer::set(unlock_release_buffer);
     backend_storage_buffer_bufmgr_seams::incr_buffer_ref_count::set(incr_buffer_ref_count);
     backend_storage_buffer_bufmgr_seams::buffer_is_permanent::set(buffer_is_permanent);

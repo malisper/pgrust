@@ -230,6 +230,30 @@ impl BufferManager {
         Ok(())
     }
 
+    /// `ResOwnerReleaseBufferPin(Datum res)` (bufmgr.c:6555) — release a leaked
+    /// buffer pin found by the resource owner during release. Like
+    /// `ReleaseBuffer`, but does NOT call `ResourceOwnerForgetBuffer` (the owner
+    /// is already mid-release):
+    ///
+    /// ```c
+    /// if (!BufferIsValid(buffer)) elog(ERROR, "bad buffer ID: %d", buffer);
+    /// if (BufferIsLocal(buffer)) UnpinLocalBufferNoOwner(buffer);
+    /// else UnpinBufferNoOwner(GetBufferDescriptor(buffer - 1));
+    /// ```
+    ///
+    /// Local buffers (negative handle) are the separate backend-local layer not
+    /// modeled in this shared core; the reachable resource-owner release path
+    /// only ever carries shared pins.
+    pub fn ResOwnerReleaseBufferPin(&self, buffer: Buffer) -> PgResult<()> {
+        if !self.shared_buffer_is_valid(buffer) {
+            return Err(PgError::error(format!("bad buffer ID: {buffer}")));
+        }
+        // UnpinBufferNoOwner(GetBufferDescriptor(buffer - 1)) (bufmgr.c:6566).
+        let buf_id = (buffer - 1) as usize;
+        self.unpin_buffer_no_owner(buf_id);
+        Ok(())
+    }
+
     /// `UnlockReleaseBuffer(buffer)` (bufmgr.c:5383) — release the content lock
     /// then the pin: `LockBuffer(buffer, BUFFER_LOCK_UNLOCK)` + `ReleaseBuffer`.
     pub fn UnlockReleaseBuffer(&self, buffer: Buffer) -> PgResult<()> {

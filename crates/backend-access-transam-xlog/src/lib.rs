@@ -739,6 +739,19 @@ pub fn init_seams() {
         }
     });
 
+    // XLogLogicalInfoActive() (xlog.h:126): `wal_level >= WAL_LEVEL_LOGICAL`.
+    // Read by the commit-record path (RecordTransactionCommit) and procarray
+    // horizon computation to decide whether logical-decoding info is logged.
+    s::xlog_logical_info_active::set(|| {
+        backend_utils_misc_guc_tables::vars::wal_level.read() >= WalLevel::Logical as i32
+    });
+
+    // XLogStandbyInfoActive() (xlog.h): `wal_level >= WAL_LEVEL_REPLICA`. Read
+    // by the commit path to decide whether standby/hot-standby info is logged.
+    s::xlog_standby_info_active::set(|| {
+        backend_utils_misc_guc_tables::vars::wal_level.read() >= WalLevel::Replica as i32
+    });
+
     // xlog.c-owned GUC variable accessors + assign hooks (max_wal_size /
     // min_wal_size / checkpoint_completion_target). The GUC machinery fires the
     // assign hooks during InitializeGUCOptions to seed CheckPointSegments.

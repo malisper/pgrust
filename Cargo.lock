@@ -526,6 +526,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-common-session"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-session-seams",
+ "mcx",
+ "types-error",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-common-session-seams"
 version = "0.0.0"
 dependencies = [
@@ -21444,6 +21454,7 @@ dependencies = [
  "backend-access-common-printtup",
  "backend-access-common-relation",
  "backend-access-common-reloptions",
+ "backend-access-common-session",
  "backend-access-common-tidstore",
  "backend-access-common-toast-compression",
  "backend-access-common-tupdesc",
