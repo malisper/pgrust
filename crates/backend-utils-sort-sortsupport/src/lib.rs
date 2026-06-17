@@ -32,7 +32,9 @@ use types_sortsupport::{
     BTSORTSUPPORT_PROC, COMPARE_GT, GIST_AM_OID, GIST_SORTSUPPORT_PROC,
 };
 
-use backend_utils_fmgr_core::{fmgr_info_cxt, function_call2_coll};
+use backend_utils_fmgr_core::{
+    datum_to_ref_arg, fmgr_info_cxt, function_call_coll_ref_args,
+};
 use types_fmgr::ResolvedFmgrInfo;
 
 use backend_utils_cache_lsyscache_seams as lsyscache;
@@ -159,14 +161,29 @@ fn comparison_shim(mcx: Mcx<'_>, id: SortComparatorId, x: Datum<'_>, y: Datum<'_
 
     match resolved {
         Resolved::Shim(resolution, finfo, collation) => {
-            // Bridge the canonical by-value words across the fmgr/kernel layer,
-            // which still speaks the transitional bare-word `types_datum::Datum`
-            // (fmgr-core is not in this migration batch — established sibling
-            // pattern is `types_datum::Datum::from_usize(canonical.as_usize())`).
-            // The comparator args are scalar Datum words exactly as C passes them.
-            let x = types_datum::Datum::from_usize(x.as_usize());
-            let y = types_datum::Datum::from_usize(y.as_usize());
-            let result = function_call2_coll(mcx, &resolution, finfo, collation, x, y)?;
+            // C's `comparison_shim` stores the two operands into the reusable
+            // `fcinfo.args[0/1].value` and runs `FunctionCallInvoke`. The operands
+            // are canonical `Datum<'_>` that may be by-VALUE (int/oid: the bare
+            // word) OR by-REFERENCE (name/text/bytea: a `ByRef`/`Cstring` payload).
+            // Collapsing to `as_usize()` would discard the by-ref payload (and
+            // panic for `ByRef`); instead marshal each operand through the fmgr
+            // by-reference side channel exactly as the canon→ABI bridge does for
+            // output/send functions: `datum_to_ref_arg` yields `(arg-word, ref-arg)`
+            // — a by-value scalar is the bare word with no referent; a by-ref value
+            // is the null word plus its owned bytes as the `ref_args[i]` referent
+            // (the `struct varlena *` / `char *` C would pass). The old-style btree
+            // comparator (e.g. `btnamecmp`) reads its operands from the ref-args
+            // lane, so the name/text bytes reach it intact.
+            let (ax, rx) = datum_to_ref_arg(&x);
+            let (ay, ry) = datum_to_ref_arg(&y);
+            let result = function_call_coll_ref_args(
+                mcx,
+                &resolution,
+                finfo,
+                collation,
+                vec![ax, ay],
+                vec![rx, ry],
+            )?;
             // C: `comparison_shim` returns the `Datum` result as an `int`
             // (`DatumGetInt32`).
             Ok(result.as_i32())
@@ -307,9 +324,11 @@ fn oid_function_call1_sortsupport(sortfunc: Oid, ssup: &mut SortSupportData<'_>)
     // as C's contract allows a sortsupport function to decline ("it can also
     // choose not to do so", FinishSortSupportFunction). `FinishSortSupportFunction`
     // then falls back to `PrepareSortSupportComparisonShim` over the opclass's
-    // old-style btree comparator (e.g. `btnamecmp`), which yields the correct
-    // sort order — just without the abbreviated-key fast path. Once the varstr
-    // sortsupport substrate is wired, this arm can install the real comparator.
+    // old-style btree comparator (e.g. `btnamecmp`). `comparison_shim` routes the
+    // operands through the fmgr by-reference side channel, so the by-ref `name` /
+    // `text` bytes reach the comparator intact and the sort order is correct —
+    // just without the abbreviated-key fast path. Once the varstr sortsupport
+    // substrate is wired, this arm can install the native fast comparator.
     let _ = sortfunc;
     Ok(())
 }

@@ -2294,7 +2294,7 @@ fn function_call2_coll_seam(
 /// pair `function_call_coll_ref_args_out` expects: a by-value scalar is the bare
 /// word with no referent; a by-reference value is the null word plus its owned
 /// detoasted bytes as a `Varlena` referent (the `struct varlena *` C would pass).
-fn datum_to_ref_arg(
+pub fn datum_to_ref_arg(
     val: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
 ) -> (NullableDatum, Option<RefPayload>) {
     use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
