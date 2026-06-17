@@ -53,6 +53,7 @@ use backend_utils_adt_name::namein;
 use backend_utils_fmgr_fmgr_seams::{convert_via_proc, convert_via_proc_counted};
 use common_encnames_seams::{pg_char_to_encoding, pg_encoding_to_char};
 
+mod fmgr_builtins;
 mod tests;
 
 // ---------------------------------------------------------------------------
@@ -1373,6 +1374,10 @@ fn pg_utf_mblen(s: &[u8]) -> i32 {
 /// Install every seam in `backend-utils-mb-mbutils-seams`.
 pub fn init_seams() {
     use backend_utils_mb_mbutils_seams as seams;
+
+    // Register this crate's SQL-callable encoding functions into the fmgr-core
+    // builtin table (C: fmgr_builtins[]) so by-OID dispatch resolves them.
+    fmgr_builtins::register_mbutils_builtins();
 
     seams::pg_verifymbstr::set(pg_verifymbstr);
     seams::pg_server_to_client::set(pg_server_to_client);
