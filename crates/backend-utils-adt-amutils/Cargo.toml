@@ -13,3 +13,8 @@ types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 mcx = { path = "../mcx" }
 backend-utils-adt-amutils-seams = { path = "../backend-utils-adt-amutils-seams" }
+
+# fmgr builtin fast-path registration (the `amutils.c` builtins).
+types-datum = { path = "../types-datum" }
+types-fmgr = { path = "../types-fmgr" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
