@@ -207,13 +207,9 @@ pub fn pg_plan_query<'mcx>(
 /// (postgres.c:970) — generate plans for a list of already-rewritten queries.
 ///
 /// For optimizable statements, invoke the planner. For utility statements, the
-/// C makes a wrapper `PlannedStmt` (commandType = CMD_UTILITY, copying
-/// `canSetTag`/`utilityStmt`/`stmt_location`/`stmt_len`/`queryId`). The owned
-/// `PlannedStmt` model is trimmed (no `stmt_location`/`stmt_len`/`queryId`
-/// fields), and there is no `Default`/utility-wrapper constructor for it, so
-/// the utility-wrapper leg cannot be expressed faithfully yet — it is not
-/// reached on the non-utility simple-SELECT target. Mirror PG and panic on it
-/// precisely.
+/// C makes a trivial wrapper `PlannedStmt` (commandType = CMD_UTILITY, copying
+/// `canSetTag`/`utilityStmt`/`stmt_location`/`stmt_len`/`queryId`, everything
+/// else null/zero); see [`PlannedStmt::for_utility`].
 pub fn pg_plan_queries<'mcx>(
     mcx: Mcx<'mcx>,
     querytrees: PgVec<'mcx, Query<'mcx>>,
@@ -224,17 +220,10 @@ pub fn pg_plan_queries<'mcx>(
 
     for query in querytrees.iter() {
         if query.commandType == CmdType::CMD_UTILITY {
-            // Utility commands require no planning; C builds a wrapper
-            // PlannedStmt copying stmt_location/stmt_len/queryId. The trimmed
-            // owned PlannedStmt lacks those fields and has no constructor for a
-            // bare utility wrapper; not reachable on the SELECT target.
-            panic!(
-                "pg_plan_queries: CMD_UTILITY wrapper PlannedStmt is not \
-                 expressible over the trimmed owned PlannedStmt model (no \
-                 stmt_location/stmt_len/queryId fields, no utility-wrapper \
-                 constructor); only reached with a utility statement in the \
-                 simple-Query string"
-            );
+            // Utility commands require no planning; C builds a trivial wrapper
+            // PlannedStmt copying canSetTag/utilityStmt/stmt_location/stmt_len/
+            // queryId, everything else null/zero (postgres.c pg_plan_queries).
+            stmt_list.push(PlannedStmt::for_utility(mcx, query)?);
         } else {
             let stmt = pg_plan_query(mcx, query, query_string, cursor_options)?
                 .expect("pg_plan_query returned None for a non-utility query");
