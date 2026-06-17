@@ -332,3 +332,44 @@ fn create_valuesscan_plan_builds_valuesscan_node() {
         other => panic!("expected ValuesScan, got {:?}", other.tag()),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Append / MergeAppend helper tests (Phase B).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn relids_to_apprelids_roundtrips_word_storage() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    // None (the C NULL Bitmapset *) maps to None.
+    let none: types_pathnodes::Relids = None;
+    assert!(crate::relids_to_apprelids(mcx, &none).expect("none").is_none());
+    // A populated set re-homes its word vector exactly (bms_copy shape).
+    let relids: types_pathnodes::Relids =
+        Some(Box::new(types_pathnodes::Bitmapset { words: alloc::vec![0b1010_u64, 0b1_u64] }));
+    let bms = crate::relids_to_apprelids(mcx, &relids)
+        .expect("relids_to_apprelids")
+        .expect("Some");
+    assert_eq!(bms.words.as_slice(), &[0b1010_u64, 0b1_u64]);
+}
+
+#[test]
+fn mark_async_capable_plan_returns_false_without_async_fdw() {
+    // No path is async-capable in the port (the FDW async callback is the
+    // unported FDW floor), so this is always false.
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let (mut root, run, path_id) =
+        scan_setup(mcx, RTEKind::RTE_RELATION, crate::T_SeqScan);
+    let mut plan = crate::create_seqscan_plan(
+        mcx,
+        &mut root,
+        &run,
+        path_id,
+        alloc::vec::Vec::new(),
+        alloc::vec::Vec::new(),
+    )
+    .expect("create_seqscan_plan");
+    let path_node = root.path(path_id).clone();
+    assert!(!crate::mark_async_capable_plan(&mut plan, &path_node));
+}

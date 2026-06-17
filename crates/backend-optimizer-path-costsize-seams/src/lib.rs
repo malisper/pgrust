@@ -139,6 +139,39 @@ seam_core::seam!(
     ) -> (Selectivity, Selectivity, Selectivity, Selectivity)
 );
 seam_core::seam!(
+    /// `label_sort_with_costsize` cost half (createplan.c:5553): re-figure a
+    /// `Sort` plan node's cost via `cost_sort` over a dummy stack `Path`. The
+    /// caller passes the `Sort`'s `disabled_nodes` and the lefttree's
+    /// `total_cost`/`plan_rows`/`plan_width`; comparison_cost is 0.0 and
+    /// `sort_mem` is the `work_mem` GUC (both read inside the owner). Returns the
+    /// `(startup_cost, total_cost)` to copy onto the Sort node.
+    pub fn cost_sort_label(
+        root: &mut PlannerInfo,
+        input_disabled_nodes: i32,
+        input_total_cost: Cost,
+        input_rows: f64,
+        input_width: i32,
+        limit_tuples: f64,
+    ) -> (Cost, Cost)
+);
+seam_core::seam!(
+    /// `label_incrementalsort_with_costsize` cost half (createplan.c:5581):
+    /// re-figure an `IncrementalSort` plan node's cost via `cost_incremental_sort`
+    /// over a dummy stack `Path`. Returns `(startup_cost, total_cost)`.
+    pub fn cost_incremental_sort_label<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+        root: &mut PlannerInfo,
+        pathkeys: &[types_pathnodes::PathKey],
+        n_presorted_cols: i32,
+        input_disabled_nodes: i32,
+        input_startup_cost: Cost,
+        input_total_cost: Cost,
+        input_rows: f64,
+        input_width: i32,
+        limit_tuples: f64,
+    ) -> PgResult<(Cost, Cost)>
+);
+seam_core::seam!(
     /// `estimate_hash_bucket_stats(root, hashkey, nbuckets, &mcvfreq, &bucketsize)`
     /// — returns `(mcvfreq, bucketsize)`.
     pub fn estimate_hash_bucket_stats(

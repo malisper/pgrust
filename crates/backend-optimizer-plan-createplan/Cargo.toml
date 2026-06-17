@@ -49,3 +49,6 @@ types-amapi = { path = "../types-amapi" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 # clamp_cardinality_to_long (costsize.c) — make_agg numGroups reduction.
 backend-optimizer-path-costsize-seams = { path = "../backend-optimizer-path-costsize-seams" }
+# make_partition_pruneinfo (partprune.c) — ordered/partitioned Append run-time
+# pruning; keystone-blocked owner, reached only for partitioned rels w/ prunequal.
+backend-partitioning-partprune-seams = { path = "../backend-partitioning-partprune-seams" }

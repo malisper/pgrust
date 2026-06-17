@@ -11590,6 +11590,7 @@ dependencies = [
  "backend-optimizer-util-plancat",
  "backend-optimizer-util-relnode-seams",
  "backend-optimizer-util-vars",
+ "backend-partitioning-partprune-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-misc-guc-tables",
  "mcx",
@@ -13048,6 +13049,7 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-nodes",
+ "types-pathnodes",
 ]
 
 [[package]]

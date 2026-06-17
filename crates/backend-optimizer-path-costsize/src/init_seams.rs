@@ -49,6 +49,8 @@ pub fn init_seams() {
     // costsize.c genuinely owns cost_bitmap_tree_node and the
     // enable_indexonlyscan GUC; indxpath.c reaches them through these seams.
     cz::cost_bitmap_tree_node::set(crate::scans::cost_bitmap_tree_node);
+    cz::cost_sort_label::set(crate::cost_sort_label);
+    cz::cost_incremental_sort_label::set(crate::cost_incremental_sort_label);
     cz::enable_indexonlyscan::set(|| crate::ENABLE_INDEXONLYSCAN);
 
     // `get_tablespace_page_costs(spcid)` (spccache.c). costsize.c owns the
