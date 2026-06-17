@@ -17534,7 +17534,11 @@ name = "backend-utils-adt-int8"
 version = "0.0.0"
 dependencies = [
  "backend-utils-adt-numutils",
+ "backend-utils-fmgr-core",
+ "types-core",
+ "types-datum",
  "types-error",
+ "types-fmgr",
 ]
 
 [[package]]

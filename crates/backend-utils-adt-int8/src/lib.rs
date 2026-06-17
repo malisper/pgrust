@@ -47,8 +47,17 @@ use types_error::{
     ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
 };
 
+pub mod fmgr_builtins;
+
 #[cfg(test)]
 mod tests;
+
+/// Install this crate's seams. Registers every scalar `int8.c` builtin into the
+/// fmgr-core builtin table (C: `fmgr_builtins[]`) so by-OID dispatch resolves
+/// them. Called by `seams-init::init_all`.
+pub fn init_seams() {
+    fmgr_builtins::register_int8_builtins();
+}
 
 /// `PG_INT64_MIN` (`c.h`).
 const PG_INT64_MIN: i64 = i64::MIN;
