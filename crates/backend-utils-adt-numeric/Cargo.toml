@@ -38,3 +38,8 @@ seam-core = { path = "../seam-core" }
 
 # The real (merged) trimmed SortSupportData node numeric_sortsupport fills.
 types-sortsupport = { path = "../types-sortsupport" }
+
+# The fmgr Datum/call-frame boundary + the builtin table registration: each
+# SQL-callable numeric.c function is registered here as a `fc_<name>` adapter.
+types-fmgr = { path = "../types-fmgr" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
