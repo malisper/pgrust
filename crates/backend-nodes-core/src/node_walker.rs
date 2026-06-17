@@ -26,13 +26,20 @@
 //! * a `NodePtr` (`PgBox<Node>`) child — already a `Node`, walked directly
 //!   (this is how the parse/raw nodes carry their expression sub-trees);
 //! * an owned `Expr` child inside an `Expr` struct (`Box<Expr>`/`Vec<Expr>`/
-//!   `PgBox<Expr>`) — wrapped on the fly into `Node::Expr(child.clone())` so the
-//!   `FnMut(&Node)` walker observes it. This clone-wrap mirrors the C walker
-//!   visiting the in-place `(Node *) child`: the walker only borrows the node,
-//!   so the clone is observationally identical (the same approach the
-//!   src-idiomatic `backend-nodes-nodefuncs` walker uses for its typed-child
-//!   arms). The `Expr` subtree is lifetime-free, so the clone is cheap and
-//!   total.
+//!   `PgBox<Expr>`) — wrapped on the fly into a `Node::Expr` so the
+//!   `FnMut(&Node)` walker observes it. C visits the in-place `(Node *) child`
+//!   *by pointer* and never copies; the split Expr/Node model cannot borrow an
+//!   `&Expr` into the owned `Node::Expr(Expr)` arm, so the read-only walker
+//!   materializes the wrapper. A bare `Expr::clone()` is wrong: it is a
+//!   deliberate panic for the arena-pointer-carrying variants (`Aggref`/
+//!   `WindowFunc`/`SubLink`/`SubPlan`/`AlternativeSubPlan` — e.g. the `count(*)`
+//!   target list's `Aggref`). Instead [`node_expr_wrapper`] deep-copies the
+//!   child into a per-walk scratch `MemoryContext` via the non-panicking
+//!   `Expr::clone_in` (the `copyObject`-shape path). The wrapper is only
+//!   read-borrowed by the callback (no consumer takes ownership) and freed when
+//!   the walk level returns, so a deep copy is observationally identical to C's
+//!   borrowed pointer. The in-place `*_mut` walkers avoid even the copy by
+//!   moving the child out and back (`expr_walk_sentinel`).
 //!
 //! # `raw_expression_tree_walker`
 //!
@@ -63,6 +70,22 @@ use types_nodes::primnodes::Expr;
 /// C contract the current `node` has already been visited by the caller; this
 /// only recurses into its immediate children.
 pub fn expression_tree_walker(node: &Node, walker: &mut dyn FnMut(&Node) -> bool) -> bool {
+    // A scratch `MemoryContext` for the transient `Node::Expr` wrappers built
+    // over this node's `Expr` children (see [`node_expr_wrapper`]). C's
+    // `expression_tree_walker` passes child *pointers* and never copies; the
+    // split Expr/Node model forces an owned `Node::Expr(child)` to satisfy the
+    // `FnMut(&Node)` callback, and a bare `.clone()` of an `Aggref`/`SubLink`/…
+    // child is a deliberate panic (its arena-pointer children are not shallow-
+    // cloneable — see `Expr::clone_in`). We deep-copy each immediate child into
+    // this scratch context via the non-panicking `clone_in` path; the wrapper
+    // is only read-borrowed by the callback (no consumer takes ownership) so a
+    // deep copy is observationally identical to C's pointer, and the context —
+    // with every wrapper allocated in it — is freed when this call returns.
+    // Re-recursion (a callback re-invoking `expression_tree_walker` on a
+    // wrapper) creates its own nested scratch context for the next level, which
+    // outlives the wrapper it walks.
+    let scratch = mcx::MemoryContext::new("expression_tree_walker scratch");
+    let mcx = scratch.mcx();
     // `WALK(child: Option<&NodePtr>)` — a NULL-able `Node *` child.
     macro_rules! walk_opt {
         ($opt:expr) => {
@@ -90,7 +113,7 @@ pub fn expression_tree_walker(node: &Node, walker: &mut dyn FnMut(&Node) -> bool
     match node {
         // An embedded expression node: recurse into its `Expr` children, each
         // wrapped back into a `Node` for the `FnMut(&Node)` walker.
-        Node::Expr(e) => walk_expr_children(e, walker),
+        Node::Expr(e) => walk_expr_children(e, walker, mcx),
 
         // C `case T_List: foreach(temp, (List *) node) WALK(lfirst(temp));` —
         // visit each element. A bare `List` node is a legitimate walker argument
@@ -118,7 +141,7 @@ pub fn expression_tree_walker(node: &Node, walker: &mut dyn FnMut(&Node) -> bool
         // `Node::Expr` (the `Expr` payload is lifetime-free, so the clone is
         // total — no allocator needed).
         Node::TargetEntry(te) => match te.expr.as_deref() {
-            Some(e) => walker(&Node::Expr(e.clone())),
+            Some(e) => walker(&node_expr_wrapper(e, mcx)),
             None => false,
         },
 
@@ -167,7 +190,7 @@ pub fn expression_tree_walker(node: &Node, walker: &mut dyn FnMut(&Node) -> bool
         // colvalexprs, passingvalexprs (all `Expr`-list/`Expr` children, wrapped
         // back into `Node::Expr` for the `FnMut(&Node)` walker; the lists may
         // hold NULL elements).
-        Node::TableFunc(tf) => walk_table_func(tf, walker),
+        Node::TableFunc(tf) => walk_table_func(tf, walker, mcx),
 
         Node::SetOperationStmt(setop) => {
             walk_opt!(setop.larg.as_ref()) || walk_opt!(setop.rarg.as_ref())
@@ -195,16 +218,21 @@ pub fn expression_tree_walker(node: &Node, walker: &mut dyn FnMut(&Node) -> bool
 /// `Node`-level bridge over the trimmed [`crate::nodefuncs::expression_tree_walker`]
 /// child set (same children, same order), re-expressed so the callback sees a
 /// `Node`.
-fn walk_expr_children(e: &Expr, walker: &mut dyn FnMut(&Node) -> bool) -> bool {
+fn walk_expr_children(
+    e: &Expr,
+    walker: &mut dyn FnMut(&Node) -> bool,
+    mcx: mcx::Mcx<'_>,
+) -> bool {
     let mut aborted = false;
     // Delegate the *child enumeration* to the canonical Expr-level walker, and
-    // for each `&Expr` child re-wrap it as a `Node::Expr` clone before invoking
-    // the `Node` walker. The Expr-level walker has already-visited semantics
-    // identical to C (it recurses into children only), so the set/order of
-    // children observed here is exactly the C `expression_tree_walker` child set
-    // for the corresponding node tag.
+    // for each `&Expr` child re-wrap it as a `Node::Expr` for the `Node` walker.
+    // The Expr-level walker has already-visited semantics identical to C (it
+    // recurses into children only), so the set/order of children observed here
+    // is exactly the C `expression_tree_walker` child set for the corresponding
+    // node tag. The wrapper is built via [`node_expr_wrapper`] (deep-copy into
+    // `mcx`, never a panicking shallow `.clone()`).
     let mut child_walker = |child: &Expr| -> bool {
-        if walker(&Node::Expr(child.clone())) {
+        if walker(&node_expr_wrapper(child, mcx)) {
             aborted = true;
             return true;
         }
@@ -214,21 +242,57 @@ fn walk_expr_children(e: &Expr, walker: &mut dyn FnMut(&Node) -> bool) -> bool {
     aborted
 }
 
+/// Build the transient `Node::Expr` wrapper an immutable `Node`-level walker
+/// hands to its `FnMut(&Node)` callback for an `Expr` child.
+///
+/// C passes the child *pointer* `(Node *) child` and never copies. The split
+/// Expr/Node model cannot borrow an `&Expr` into the owned `Node::Expr(Expr)`
+/// arm, and a bare `Expr::clone()` is a deliberate panic for the arena-pointer-
+/// carrying variants (`Aggref`/`WindowFunc`/`SubLink`/`SubPlan`/
+/// `AlternativeSubPlan` — e.g. the `count(*)` target list's `Aggref`, whose
+/// `args` are a `TargetEntry` list with `PgBox` children). So we deep-copy the
+/// child into the caller's per-walk scratch `mcx` via the non-panicking
+/// `Expr::clone_in` (the same `copyObject`-shape path the planner uses). The
+/// wrapper is read-only-borrowed by the callback and freed with the scratch
+/// context when the walk level returns, so the deep copy is observationally
+/// identical to C's borrowed pointer.
+///
+/// `clone_in` only fails on allocation failure; an OOM mid-walk is unrecoverable
+/// here (the read-only walker contract returns a plain `bool`), so it is a loud
+/// `expect` — mirror-PG-and-fail, not a silent skip.
+#[inline]
+fn node_expr_wrapper(e: &Expr, mcx: mcx::Mcx<'_>) -> Node<'static> {
+    // `Node::Expr` carries the lifetime-free `primnodes::Expr`, so the wrapper
+    // type does not borrow `mcx` (the deep-copied arena children live in `mcx`,
+    // but the `Expr` enum erases that lifetime — the same `'static` marker the
+    // planner uses for `clone_in`-produced expressions). The scratch context
+    // outliving each callback invocation keeps those children valid.
+    Node::Expr(
+        e.clone_in(mcx)
+            .expect("node_expr_wrapper: Expr::clone_in failed (out of memory) during read-only tree walk"),
+    )
+}
+
 /// C `T_TableFunc` arm of `expression_tree_walker` (nodeFuncs.c:2647): WALK
 /// each of ns_uris, docexpr, rowexpr, colexprs, coldefexprs, colvalexprs,
 /// passingvalexprs in that order. The owned `TableFunc` carries these as
 /// `Expr`/`PgVec<PgBox<Expr>>`/`PgVec<Option<PgBox<Expr>>>`; each `&Expr` is
 /// re-wrapped as a `Node::Expr` clone for the `FnMut(&Node)` walker (same
 /// clone-wrap as [`walk_expr_children`]).
-fn walk_table_func(tf: &types_nodes::primnodes::TableFunc, walker: &mut dyn FnMut(&Node) -> bool) -> bool {
+fn walk_table_func(
+    tf: &types_nodes::primnodes::TableFunc,
+    walker: &mut dyn FnMut(&Node) -> bool,
+    mcx: mcx::Mcx<'_>,
+) -> bool {
     // `List *` of `Expr *` (no NULL elements).
     fn list(
         l: &Option<mcx::PgVec<'_, mcx::PgBox<'_, Expr>>>,
         walker: &mut dyn FnMut(&Node) -> bool,
+        mcx: mcx::Mcx<'_>,
     ) -> bool {
         if let Some(v) = l {
             for e in v.iter() {
-                if walker(&Node::Expr((**e).clone())) {
+                if walker(&node_expr_wrapper(&**e, mcx)) {
                     return true;
                 }
             }
@@ -239,29 +303,34 @@ fn walk_table_func(tf: &types_nodes::primnodes::TableFunc, walker: &mut dyn FnMu
     fn list_opt(
         l: &Option<mcx::PgVec<'_, Option<mcx::PgBox<'_, Expr>>>>,
         walker: &mut dyn FnMut(&Node) -> bool,
+        mcx: mcx::Mcx<'_>,
     ) -> bool {
         if let Some(v) = l {
             for e in v.iter().flatten() {
-                if walker(&Node::Expr((**e).clone())) {
+                if walker(&node_expr_wrapper(&**e, mcx)) {
                     return true;
                 }
             }
         }
         false
     }
-    fn opt(e: &Option<mcx::PgBox<'_, Expr>>, walker: &mut dyn FnMut(&Node) -> bool) -> bool {
+    fn opt(
+        e: &Option<mcx::PgBox<'_, Expr>>,
+        walker: &mut dyn FnMut(&Node) -> bool,
+        mcx: mcx::Mcx<'_>,
+    ) -> bool {
         match e.as_deref() {
-            Some(e) => walker(&Node::Expr(e.clone())),
+            Some(e) => walker(&node_expr_wrapper(e, mcx)),
             None => false,
         }
     }
-    list(&tf.ns_uris, walker)
-        || opt(&tf.docexpr, walker)
-        || opt(&tf.rowexpr, walker)
-        || list_opt(&tf.colexprs, walker)
-        || list_opt(&tf.coldefexprs, walker)
-        || list_opt(&tf.colvalexprs, walker)
-        || list(&tf.passingvalexprs, walker)
+    list(&tf.ns_uris, walker, mcx)
+        || opt(&tf.docexpr, walker, mcx)
+        || opt(&tf.rowexpr, walker, mcx)
+        || list_opt(&tf.colexprs, walker, mcx)
+        || list_opt(&tf.coldefexprs, walker, mcx)
+        || list_opt(&tf.colvalexprs, walker, mcx)
+        || list(&tf.passingvalexprs, walker, mcx)
 }
 
 /// C default arm of `expression_tree_walker`: `elog(ERROR, "unrecognized node
@@ -867,6 +936,11 @@ pub fn query_tree_walker(
     walker: &mut dyn FnMut(&Node) -> bool,
     flags: i32,
 ) -> bool {
+    // Per-walk scratch context for the transient `Node::Expr` wrappers built
+    // over this `Query`'s `Expr`-typed fields (see [`node_expr_wrapper`] and the
+    // matching rationale on `expression_tree_walker`).
+    let scratch = mcx::MemoryContext::new("query_tree_walker scratch");
+    let mcx = scratch.mcx();
     macro_rules! walk_opt {
         ($opt:expr) => {
             match $opt {
@@ -891,19 +965,20 @@ pub fn query_tree_walker(
     // Expression-only `Query` fields (havingQual/limitOffset/limitCount/
     // mergeJoinCondition) are concretely typed `Option<PgBox<Expr>>`; like a
     // TargetEntry's expr they cannot be re-wrapped into a `Node` without an
-    // allocator, so WALK the expression directly as `Node::Expr` (the same child
-    // the C reaches). The lifetime-free `Expr` clone is total.
+    // allocator, so WALK the expression directly as a `Node::Expr` wrapper (the
+    // same child the C reaches), deep-copied into `mcx` via `node_expr_wrapper`
+    // rather than a panicking shallow `.clone()`.
     macro_rules! walk_opt_expr {
         ($opt:expr) => {
             match $opt {
-                Some(e) => walker(&Node::Expr((**e).clone())),
+                Some(e) => walker(&node_expr_wrapper(&**e, mcx)),
                 None => false,
             }
         };
     }
 
     // targetList / returningList are `Vec<TargetEntry>` (typed), wrapped per-elem.
-    if walk_targetentry_list(&query.targetList, walker) {
+    if walk_targetentry_list(&query.targetList, walker, mcx) {
         return true;
     }
     if let Some(oc) = query.onConflict.as_deref() {
@@ -911,7 +986,7 @@ pub fn query_tree_walker(
             return true;
         }
     }
-    if walk_targetentry_list(&query.returningList, walker) {
+    if walk_targetentry_list(&query.returningList, walker, mcx) {
         return true;
     }
     if let Some(jt) = query.jointree.as_deref() {
@@ -1111,7 +1186,12 @@ pub fn query_tree_mutator(
         ($opt:expr) => {
             match $opt {
                 Some(e) => {
-                    let mut wrapped = Node::Expr((**e).clone());
+                    // Move the child out (a plain `.clone()` hits `Aggref`'s
+                    // deliberate panic-`Clone`), wrap it, mutate, then move the
+                    // (possibly mutated) result back — the in-place no-copy
+                    // analogue used throughout the `*_mut` walkers.
+                    let owned = core::mem::replace(&mut **e, expr_walk_sentinel());
+                    let mut wrapped = Node::Expr(owned);
                     let aborted = mutator(&mut wrapped);
                     if let Node::Expr(ne) = wrapped {
                         **e = ne;
@@ -1264,7 +1344,10 @@ fn mutate_targetentry_list(
 ) -> bool {
     for te in list.iter_mut() {
         if let Some(e) = te.expr.as_deref_mut() {
-            let mut wrapped = Node::Expr(e.clone());
+            // Move the child out rather than `.clone()` it — an `Aggref` child's
+            // `Clone` is a deliberate panic (see `expr_walk_sentinel`).
+            let owned = core::mem::replace(e, expr_walk_sentinel());
+            let mut wrapped = Node::Expr(owned);
             let aborted = mutator(&mut wrapped);
             if let Node::Expr(ne) = wrapped {
                 *e = ne;
@@ -1429,6 +1512,99 @@ mod tests {
         assert!(node.as_var().is_none());
     }
 
+    /// Build a `count(*)`-shaped `Aggref` (no args, no filter). Its derived
+    /// `Clone` is a deliberate panic-stub, so any read-only walk that wraps it
+    /// via a bare `.clone()` aborts; this is the exact node the `count(*)`
+    /// target list carries.
+    fn count_star_aggref() -> Expr {
+        use types_nodes::nodeagg::AggSplit;
+        use types_nodes::primnodes::Aggref;
+        Expr::Aggref(Aggref {
+            aggfnoid: 2803, // count(*)
+            aggtype: 20,
+            aggcollid: 0,
+            inputcollid: 0,
+            aggtranstype: 20,
+            aggargtypes: Vec::new(),
+            aggdirectargs: Vec::new(),
+            args: Vec::new(),
+            aggorder: Vec::new(),
+            aggdistinct: Vec::new(),
+            aggfilter: None,
+            aggstar: true,
+            aggvariadic: false,
+            aggkind: b'n' as i8,
+            aggpresorted: false,
+            agglevelsup: 0,
+            aggsplit: AggSplit::default(),
+            aggno: -1,
+            aggtransno: -1,
+            location: -1,
+        })
+    }
+
+    /// Regression for the immutable-walker clone divergence: an immutable walk
+    /// over a target list carrying an `Aggref` must NOT panic. Previously
+    /// `walk_targetentry_list` wrapped the `Aggref` via `Node::Expr(e.clone())`,
+    /// hitting `Aggref`'s deliberate panic-`Clone` (the `count(*)` wall). The
+    /// fix deep-copies the child into a per-walk scratch context via
+    /// `node_expr_wrapper`/`Expr::clone_in` instead.
+    #[test]
+    fn immutable_targetentry_list_walk_over_aggref_does_not_panic() {
+        let ctx = mcx::MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let mut tlist: Vec<types_nodes::primnodes::TargetEntry> = Vec::new();
+        tlist.push(types_nodes::primnodes::TargetEntry {
+            expr: Some(mcx::alloc_in(mcx, count_star_aggref()).unwrap()),
+            resno: 1,
+            ..Default::default()
+        });
+
+        // Visit the tlist; the callback inspects the wrapped node (read-only)
+        // and re-recurses, exactly as e.g. `rangeTableEntry_used_walker` does.
+        let mut seen_aggref = false;
+        let aborted = walk_targetentry_list(&tlist, &mut |c: &Node| {
+            if let Node::Expr(Expr::Aggref(_)) = c {
+                seen_aggref = true;
+            }
+            // Re-recurse into children (no-op for the arg-less count(*) Aggref),
+            // exercising the nested-scratch-context path.
+            expression_tree_walker(c, &mut |_g: &Node| false)
+        }, mcx);
+
+        assert!(!aborted);
+        assert!(seen_aggref, "walker should observe the Aggref target");
+    }
+
+    /// The same divergence on the `query_tree_walker` entry (`havingQual` and
+    /// the `targetList`), driven through a `Query` carrying an `Aggref` target.
+    #[test]
+    fn immutable_query_tree_walk_over_aggref_does_not_panic() {
+        let ctx = mcx::MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let mut query = types_nodes::copy_query::Query::new(mcx);
+        query.targetList.push(types_nodes::primnodes::TargetEntry {
+            expr: Some(mcx::alloc_in(mcx, count_star_aggref()).unwrap()),
+            resno: 1,
+            ..Default::default()
+        });
+        // havingQual is an `Option<PgBox<Expr>>` Expr field walked via
+        // `walk_opt_expr!` — also previously clone-panicked on an Aggref.
+        query.havingQual = Some(mcx::alloc_in(mcx, count_star_aggref()).unwrap());
+
+        let mut count = 0;
+        let aborted = query_tree_walker(&query, &mut |c: &Node| {
+            if let Node::Expr(Expr::Aggref(_)) = c {
+                count += 1;
+            }
+            false
+        }, 0);
+        assert!(!aborted);
+        assert_eq!(count, 2, "both the tlist Aggref and havingQual Aggref are visited");
+    }
+
     #[test]
     fn mut_walker_writes_child_back() {
         // Mutate each Var child's varno via the in-place Node walker.
@@ -1459,15 +1635,18 @@ mod tests {
 fn walk_targetentry_list(
     list: &[types_nodes::primnodes::TargetEntry],
     walker: &mut dyn FnMut(&Node) -> bool,
+    mcx: mcx::Mcx<'_>,
 ) -> bool {
     // C visits `(Node *) tle`, whose `T_TargetEntry` arm WALKs `tle->expr`. In
     // the split `PgBox`-based model a `TargetEntry` cannot be re-wrapped into a
     // `Node` without an allocator (its `expr` is a `PgBox`), so we WALK the
-    // expression directly as `Node::Expr` — the same child the TargetEntry arm
-    // would reach. The lifetime-free `Expr` clone is total.
+    // expression directly as a `Node::Expr` wrapper — the same child the
+    // TargetEntry arm would reach. The wrapper is deep-copied into `mcx` via
+    // [`node_expr_wrapper`] (never a panicking shallow `.clone()`, which would
+    // abort on an `Aggref` target — e.g. the `count(*)` tlist).
     for te in list {
         if let Some(e) = te.expr.as_deref() {
-            if walker(&Node::Expr(e.clone())) {
+            if walker(&node_expr_wrapper(e, mcx)) {
                 return true;
             }
         }
