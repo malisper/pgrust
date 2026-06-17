@@ -42,6 +42,7 @@ backend-optimizer-util-plancat-ext-seams = { path = "../backend-optimizer-util-p
 backend-optimizer-path-small-seams = { path = "../backend-optimizer-path-small-seams" }
 backend-optimizer-path-costsize-seams = { path = "../backend-optimizer-path-costsize-seams" }
 backend-optimizer-util-predtest-seams = { path = "../backend-optimizer-util-predtest-seams" }
+backend-utils-adt-datetime = { path = "../backend-utils-adt-datetime" }
 backend-utils-adt-range-selfuncs = { path = "../backend-utils-adt-range-selfuncs" }
 backend-utils-adt-network-selfuncs = { path = "../backend-utils-adt-network-selfuncs" }
 backend-utils-adt-array-selfuncs = { path = "../backend-utils-adt-array-selfuncs" }

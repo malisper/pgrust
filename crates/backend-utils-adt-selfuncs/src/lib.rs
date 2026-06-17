@@ -42,6 +42,7 @@
 
 extern crate alloc;
 
+pub mod convert;
 pub mod cost;
 pub mod dispatch;
 pub mod entry;

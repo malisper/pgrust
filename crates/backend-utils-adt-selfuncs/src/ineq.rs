@@ -161,17 +161,62 @@ pub(crate) fn histogram_selectivity<'mcx>(
 
 /* ---------------------------------------------------------------------------
  * convert_to_scalar / get_actual_variable_range — private statics of
- * selfuncs.c that ineq_histogram_selectivity drives. Both depend on unported
- * machinery (per-type scalar conversion; an index endpoint probe via Snapshot
-
- * + an index-only scan). Kept structurally and panic when reached.
+ * selfuncs.c that ineq_histogram_selectivity drives.
+ *
+ * `convert_to_scalar` (the per-type scalar-conversion dispatch) is now ported
+ * faithfully in [`crate::convert`] — its by-value legs are computed in full and
+ * its by-reference legs panic with a precise blocker (the bare-word `Datum`
+ * model cannot dereference a histogram-bin value of a pass-by-reference type;
+ * see that module's header).
+ *
+ * `get_actual_variable_range` (the index endpoint probe) stays structural and
+ * panics when reached; the precise blocker is documented below.
  * ------------------------------------------------------------------------- */
 
 /// `get_actual_variable_range(root, vardata, sortop, collation, &min, &max)`
 /// (selfuncs.c) — try to replace a histogram endpoint with the column's true
-/// current min/max via an index scan. Unported: it opens the cheapest suitable
-/// index and runs `index_beginscan` / `index_getnext_slot` under a fresh
-/// snapshot, which is not available here.
+/// current min/max via an index endpoint probe.
+///
+/// BLOCKED (documented STOP; this lane owns `backend-utils-adt-selfuncs` only).
+/// `get_actual_variable_endpoint` (selfuncs.c:6770) deliberately bypasses the
+/// executor's plan-state layer: it sets up a transient `AllocSetContext`, opens
+/// the table + index with `NoLock`, makes a *bare* `table_slot_create` slot
+/// (no `EState`), builds an `IS NOT NULL` `ScanKeyData[1]`, and then runs
+/// `index_beginscan` + `index_rescan(scan, scankeys, 1, NULL, 0)` +
+/// `index_getnext_tid` + (`VM_ALL_VISIBLE` / `index_fetch_heap`) +
+/// `index_deform_tuple(xs_itup, ...)` directly on the raw `IndexScanDesc`, under
+/// an `InitNonVacuumableSnapshot(SnapshotNonVacuumable, GlobalVisTestFor(heap))`
+/// transient snapshot. Two sub-dependencies are genuinely unavailable from this
+/// crate and live in other owners:
+///
+/// 1. There is NO raw `index_rescan(scan, ScanKey[], nkeys, orderbys, n)` seam.
+///    The `backend-access-index-indexam-seams` owner exposes `index_rescan`
+///    only over a full executor `IndexOnlyScanState` / `IndexScanState` /
+///    `BitmapIndexScanState` node (it reads the node's `*_ScanKeys` arrays and
+///    `*_ScanDesc`). `get_actual_variable_endpoint` has no plan-state node — it
+///    drives a bare scan descriptor with a locally-built scankey array — so the
+///    node-shaped seams cannot express it.
+///
+/// 2. `index_fetch_heap` / `index_getnext_slot` require an `EStateData` + a
+///    `SlotId` from the executor tuple-table pool, but the endpoint probe runs
+///    *without* an executor (its slot is a standalone `table_slot_create` slot,
+///    its memory a private transient context). There is no executor-free
+///    heap-fetch-into-bare-slot form of these seams.
+///
+/// Lifting this requires the indexam-seams owner to add a raw-scankey
+/// `index_rescan` form and an executor-free `index_fetch_heap` (taking a
+/// standalone slot), plus the transient `SnapshotNonVacuumable` setup wired
+/// through — all out of this crate's lane. (Substrate that DOES exist:
+/// `IndexOptInfo` carries `sortopfamily`/`indpred`/`hypothetical`/`canreturn`/
+/// `indexcollations`/`reverse_sort`/`relam`; `index_beginscan`,
+/// `index_getnext_tid`, the `xs_want_itup`/`xs_itup`/`xs_itupdesc`/`xs_recheck`
+/// scan-desc fields, and `GlobalVisTestFor` are all present.)
+///
+/// Separately, this code path is not even reached in the current single-user
+/// boot: with `search_statrelattinh` uninstalled, `examine_simple_variable`
+/// cannot pin a `pg_statistic` `statsTuple` for a relation column, so
+/// `ineq_histogram_selectivity` takes the stats-absent default-estimate path
+/// and never calls `get_actual_variable_range`.
 fn get_actual_variable_range(
     _root: &PlannerInfo,
     _vardata: &VariableStatData,
@@ -181,31 +226,17 @@ fn get_actual_variable_range(
     _max: Option<&mut Datum>,
 ) -> bool {
     panic!(
-        "selfuncs: get_actual_variable_range is unported — it probes the column's live min/max \
-         through an index-only scan (index_beginscan/index_getnext_slot under a fresh snapshot), \
-         which the planner-stats path cannot reach yet"
+        "selfuncs: get_actual_variable_range is blocked — the index endpoint probe \
+         (get_actual_variable_endpoint) needs a raw-scankey index_rescan(scan, ScanKey[], ...) \
+         form and an executor-free index_fetch_heap over a bare table_slot_create slot under a \
+         transient SnapshotNonVacuumable, none of which the node-shaped indexam-seams expose \
+         (out-of-lane: backend-access-index-indexam owner)"
     )
 }
 
-/// `convert_to_scalar(value, valuetypid, collid, &scaledvalue, lobound,
-/// hibound, boundstypid, &scaledlobound, &scaledhibound)` (selfuncs.c) — map a
-/// value and the two bracketing histogram bounds onto a common numeric scale
-/// for linear interpolation. Unported: it is an ~700-line per-type dispatch
-/// (numeric / string / bytea / timestamp / network conversion) over unported
-/// type internals. Returns `(ok, scaledvalue, scaledlo, scaledhi)`.
-fn convert_to_scalar(
-    _value: Datum,
-    _valuetypid: Oid,
-    _collid: Oid,
-    _lobound: Datum,
-    _hibound: Datum,
-    _boundstypid: Oid,
-) -> (bool, f64, f64, f64) {
-    panic!(
-        "selfuncs: convert_to_scalar is unported — the per-type (numeric/string/bytea/timestamp/\
-         network) scalar-conversion dispatch over unported type internals is not available yet"
-    )
-}
+/// `convert_to_scalar(...)` (selfuncs.c) — the faithful per-type
+/// scalar-conversion dispatch, ported in [`crate::convert`].
+use crate::convert::convert_to_scalar;
 
 /* ---------------------------------------------------------------------------
  * ineq_histogram_selectivity (selfuncs.c:1048)
