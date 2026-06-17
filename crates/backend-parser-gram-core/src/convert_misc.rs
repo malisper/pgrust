@@ -175,10 +175,56 @@ fn conv_rangefunction<'mcx>(
         lateral: r.lateral,
         ordinality: r.ordinality,
         is_rowsfrom: r.is_rowsfrom,
-        functions: node_list(mcx, r.functions)?,
+        functions: conv_rangefunction_functions(mcx, r.functions)?,
         alias: child_opt(mcx, r.alias, conv_alias)?,
         coldeflist: node_list(mcx, r.coldeflist)?,
     })
+}
+
+/// Convert `RangeFunction.functions` — a `List` whose every element is itself a
+/// 2-element sublist `list_make2(func_expr, coldeflist)` (gram.y `func_table`).
+/// The first element is the function-call expression (required); the second is
+/// a `List *` column-definition list that is **NIL (NULL) when absent**.
+///
+/// The generic `node_list` path can't handle this: it routes each sublist cell
+/// through `node_req`, which would panic on the NIL coldeflist cell (a NULL
+/// `List *` carries no `NodeTag`). Mirror C faithfully: each sublist becomes a
+/// `Node::List` of exactly two entries — the converted funcexpr and the
+/// coldeflist as a `Node::List` (empty when NIL).
+fn conv_rangefunction_functions<'mcx>(
+    mcx: Mcx<'mcx>,
+    l: *mut RawList,
+) -> PgResult<PgVec<'mcx, NodePtr<'mcx>>> {
+    if l.is_null() {
+        return Ok(PgVec::new_in(mcx));
+    }
+    let list: &RawList = unsafe { &*l };
+    let mut out = mcx::vec_with_capacity_in(mcx, list.len().max(0) as usize)?;
+    for cell in list.cells() {
+        let sub: *mut RawList = cell.ptr::<RawList>();
+        let sublist: &RawList = unsafe { &*sub };
+        let sub_cells = sublist.cells();
+
+        // First element: the function-call expression (required Node).
+        let fexpr_cell = sub_cells
+            .first()
+            .expect("RangeFunction per-function sublist is missing its funcexpr");
+        let fexpr_ptr: *mut RawNode = fexpr_cell.ptr::<RawNode>();
+        let fexpr = node_req(mcx, fexpr_ptr)?;
+
+        // Second element: the coldeflist, a `List *` that may be NIL (NULL).
+        let coldef_raw: *mut RawList = match sub_cells.get(1) {
+            Some(c) => c.ptr::<RawList>(),
+            None => core::ptr::null_mut(),
+        };
+        let coldef = Node::List(node_list(mcx, coldef_raw)?);
+
+        let mut pair = mcx::vec_with_capacity_in::<NodePtr<'mcx>>(mcx, 2)?;
+        pair.push(fexpr);
+        pair.push(mcx::alloc_in(mcx, coldef)?);
+        out.push(mcx::alloc_in(mcx, Node::List(pair))?);
+    }
+    Ok(out)
 }
 
 fn conv_rangetablesample<'mcx>(

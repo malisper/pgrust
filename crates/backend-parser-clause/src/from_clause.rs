@@ -1812,13 +1812,21 @@ fn check_srf_top_level<'mcx>(
     Ok(())
 }
 
-/// Structural "is this the same node" used for the C pointer-equality SRF
-/// check. Both operands are `p_last_srf` snapshots / freshly-produced FuncExpr
-/// trees; comparing the rendered tag + a pointer-shaped identity is sufficient
-/// for the C's "did a NEW srf appear" test (the C only ever asks whether the
-/// pointer changed vs the saved one or equals the just-built expr).
+/// Models the C pointer-equality SRF check (`pstate->p_last_srf == fexpr`).
+///
+/// The C compares two `Node *` pointers, asking "did the SRF that bubbled up
+/// out of `transformExpr` end up being the very node we're examining?" In the
+/// owned tree there are no shared pointers: `p_last_srf` is set to an
+/// independent *clone* of the transformed result (`set_p_last_srf` clones), and
+/// the funcexpr handed to the check is a separately-allocated `Node::Expr`
+/// wrapping the same transformed expression. Pointer identity therefore never
+/// holds and would spuriously reject a legitimate top-level SRF
+/// (`SELECT * FROM generate_series(1,3)`). Structural equality (`equal()`,
+/// equalfuncs.c) is the faithful proxy: two clones of the same node are equal,
+/// and the same pointer is trivially equal.
 fn nodes_ptr_eq(a: &Node<'_>, b: &Node<'_>) -> bool {
     core::ptr::eq(a as *const _, b as *const _)
+        || backend_nodes_equalfuncs_seams::equal_node::call(a, b)
 }
 
 /// `(Node *) expr` viewed for `exprType`/etc. — wraps a borrowed [`Node::Expr`].
