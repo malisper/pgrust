@@ -132,8 +132,14 @@ pub fn pg_main(mcx: Mcx<'static>, argv: &[&str]) -> PgResult<MainOutcome> {
     // Fire up essential subsystems: error and memory management. Code after
     // this point may use elog/ereport.
     //
-    // (MyProcPid = getpid() is owned by the per-backend init globals, not by
-    // main(); the top-level MemoryContext was created by our caller.)
+    // C (main.c:113): `MyProcPid = getpid(); MemoryContextInit();` — main() sets
+    // MyProcPid for *every* dispatch path (postmaster, single-user, bootstrap)
+    // before anything else, so signal handlers / elog see a non-zero PID. (The
+    // postmaster additionally copies it into PostmasterPid; forked children
+    // overwrite it with their own getpid() in fork_process.) The top-level
+    // MemoryContext was created by our caller, so memory_context_init is the
+    // (no-op) MemoryContextInit analog here.
+    backend_utils_init_small::globals::SetMyProcPid(unsafe { libc::getpid() });
     memory_context_init::call()?;
 
     // Set the reference point for stack-depth checking.
