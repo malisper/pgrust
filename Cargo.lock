@@ -1470,12 +1470,16 @@ dependencies = [
  "backend-executor-execExpr-seams",
  "backend-executor-execTuples-seams",
  "backend-executor-execUtils-seams",
+ "backend-optimizer-path-costsize-seams",
+ "backend-optimizer-util-plancat-ext-seams",
+ "backend-optimizer-util-plancat-seams",
  "backend-storage-buffer-bufmgr-seams",
  "backend-storage-ipc-procarray-seams",
  "backend-storage-lmgr-lmgr-seams",
  "backend-storage-page",
  "backend-utils-activity-small-seams",
  "backend-utils-adt-format-type-seams",
+ "backend-utils-cache-relcache-seams",
  "backend-utils-error",
  "backend-utils-init-miscinit",
  "backend-utils-time-snapmgr-seams",
@@ -7760,8 +7764,10 @@ version = "0.0.0"
 dependencies = [
  "backend-catalog-catalog-seams",
  "backend-commands-user-seams",
+ "backend-utils-adt-acl-seams",
  "backend-utils-error",
  "backend-utils-misc-guc-tables",
+ "backend-utils-misc-superuser-seams",
  "mcx",
  "types-authid",
  "types-catalog",
@@ -11789,6 +11795,7 @@ dependencies = [
  "backend-rewrite-core",
  "backend-rewrite-rewritemanip-seams",
  "backend-tcop-postgres-seams",
+ "backend-utils-cache-relcache-seams",
  "backend-utils-fmgr-funcapi",
  "mcx",
  "seam-core",
@@ -11796,6 +11803,7 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-pathnodes",
+ "types-rel",
 ]
 
 [[package]]

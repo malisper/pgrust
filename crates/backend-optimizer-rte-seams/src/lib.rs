@@ -101,6 +101,14 @@ seam_core::seam!(
     pub fn rte_inh<'mcx>(run: &PlannerRun<'mcx>, root: &PlannerInfo, rti: Index) -> bool
 );
 seam_core::seam!(
+    /// `getRTEPermissionInfo(root->parse->rteperminfos, rte)->checkAsUser`
+    /// (parse_relation.c) for the RTE at 1-based `rti`: the userid to check
+    /// access as, or `InvalidOid` when the RTE has no permission info
+    /// (`perminfoindex == 0`). `build_simple_rel` (relnode.c) reads this for the
+    /// base relation's `rel->userid`.
+    pub fn rte_perminfo_checkasuser<'mcx>(run: &PlannerRun<'mcx>, root: &PlannerInfo, rti: Index) -> types_core::primitive::Oid
+);
+seam_core::seam!(
     /// `root->simple_rte_array[rti]->subquery` (allpaths.c `set_subquery_pathlist`):
     /// the sub-Query as an opaque [`QueryId`] handle, or `None` when the RTE has
     /// no subquery. The owned `Query<'mcx>` value stays in the planner-entry
@@ -228,6 +236,15 @@ pub fn init_seams() {
     rte_relkind::set(|run, root, rti| planner_rt_fetch(run, root, rti).relkind);
     rte_relid::set(|run, root, rti| planner_rt_fetch(run, root, rti).relid);
     rte_inh::set(|run, root, rti| planner_rt_fetch(run, root, rti).inh);
+    rte_perminfo_checkasuser::set(|run, root, rti| {
+        // getRTEPermissionInfo(parse->rteperminfos, rte): list_nth(rteperminfos,
+        // rte->perminfoindex - 1). perminfoindex == 0 ⇒ no permission info.
+        let perminfoindex = planner_rt_fetch(run, root, rti).perminfoindex;
+        if perminfoindex == 0 {
+            return types_core::primitive::Oid::default(); // InvalidOid
+        }
+        run.resolve(root.parse).rteperminfos[(perminfoindex - 1) as usize].checkAsUser
+    });
     rte_functions_len::set(|run, root, rti| {
         planner_rt_fetch(run, root, rti).functions.len() as i32
     });

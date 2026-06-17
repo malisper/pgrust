@@ -12,15 +12,10 @@ use alloc::vec::Vec;
 use alloc::string::String;
 
 use types_cache::backend_utils_cache_catcache::{
-    ArenaCatCList, ArenaCatCTup, ArenaCatCache, CacheIdx, CatCInProgress, CatCacheArena, ClIdx,
-    CtIdx, FetchedCatalogTuple, CATCACHE_MAXKEYS, CT_MAGIC,
+    ArenaCatCList, ArenaCatCTup, ArenaCatCache, CacheIdx, CatCInProgress, CatCacheArena, CatKey,
+    ClIdx, CtIdx, FetchedCatalogTuple, CATCACHE_MAXKEYS, CT_MAGIC,
 };
 use types_core::Oid;
-// Bare-word machine-word `Datum` (`types_datum::Datum`), aliased `ScalarWord`:
-// the catalog key arguments cross as by-value scalar words. Pass-by-value scalar
-// keys stay the audited bare word, not the canonical `types_tuple::Datum<'mcx>`
-// enum (which carries deformed tuple values).
-use types_datum::Datum as ScalarWord;
 use types_error::{PgError, PgResult};
 
 use crate::core_compute::HASH_INDEX;
@@ -634,7 +629,7 @@ pub(crate) fn create_entry_positive(
 pub(crate) fn create_entry_negative(
     arena: &mut CatCacheArena,
     cache_idx: CacheIdx,
-    arguments: [ScalarWord; CATCACHE_MAXKEYS],
+    arguments: [CatKey; CATCACHE_MAXKEYS],
     hash_value: u32,
     hash_index: usize,
 ) -> PgResult<CtIdx> {

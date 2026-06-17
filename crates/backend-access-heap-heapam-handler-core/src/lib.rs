@@ -662,6 +662,129 @@ fn release_and_read_buffer<'mcx>(
     bufmgr_seam::release_and_read_buffer::call(buffer, relation, block_num)
 }
 
+/* ----------------------------------------------------------------------------
+ * heapam_estimate_rel_size / table_block_relation_estimate_size
+ *  (heapam_handler.c + tableam.c) — the planner-facing table-AM size estimator.
+ * ------------------------------------------------------------------------- */
+
+/// `HEAP_OVERHEAD_BYTES_PER_TUPLE` (heapam_handler.c):
+/// `MAXALIGN(SizeofHeapTupleHeader) + sizeof(ItemIdData)`.
+/// `SizeofHeapTupleHeader == offsetof(HeapTupleHeaderData, t_bits) == 23`,
+/// `MAXALIGN(23) == 24`, `sizeof(ItemIdData) == 4` ⇒ 28.
+const HEAP_OVERHEAD_BYTES_PER_TUPLE: usize = 24 + 4;
+/// `HEAP_USABLE_BYTES_PER_PAGE` (heapam_handler.c):
+/// `BLCKSZ - SizeOfPageHeaderData` == `8192 - 24` == 8168.
+const HEAP_USABLE_BYTES_PER_PAGE: usize = 8192 - 24;
+/// `HEAP_DEFAULT_FILLFACTOR` (utils/rel.h).
+const HEAP_DEFAULT_FILLFACTOR: i32 = 100;
+
+/// `rint(x)` — round half to even (C `rint` under the default rounding mode).
+#[inline]
+fn rint(x: f64) -> f64 {
+    x.round_ties_even()
+}
+
+/// `table_relation_estimate_size(rel, attr_widths, &pages, &tuples,
+/// &allvisfrac)` (tableam.h) for the heap AM = `heapam_estimate_rel_size`
+/// (heapam_handler.c), which delegates to `table_block_relation_estimate_size`
+/// (tableam.c) with the heap per-tuple overhead / per-page usable constants.
+///
+/// `relid` is opened via the relcache (the seam carries the OID, mirroring the
+/// C callback that receives the open `Relation`). Returns `(pages, tuples,
+/// allvisfrac)`.
+fn table_relation_estimate_size(
+    relid: Oid,
+    attr_widths: Option<&mut [i32]>,
+) -> PgResult<(types_core::primitive::BlockNumber, f64, f64)> {
+    // The estimator reads pg_class stats + RelationGetNumberOfBlocks; the
+    // relation handle is opened from a scratch context (the callback's borrowed
+    // `Relation` lifetime).
+    let scratch = mcx::MemoryContext::new("table_relation_estimate_size");
+    let data = backend_utils_cache_relcache_seams::relation_id_get_relation::call(
+        scratch.mcx(),
+        relid,
+    )?
+    .expect("table_relation_estimate_size: relation must exist in relcache");
+    // Wrap the projected RelationData in a cache-less handle (no close authority
+    // — the caller in plancat owns the lock/open lifecycle; this is a read-only
+    // stats/size projection mirroring the borrowed `Relation` the C callback gets).
+    let rel = Relation::open(data, None);
+
+    table_block_relation_estimate_size(
+        &rel,
+        relid,
+        attr_widths,
+        HEAP_OVERHEAD_BYTES_PER_TUPLE,
+        HEAP_USABLE_BYTES_PER_PAGE,
+    )
+}
+
+/// `table_block_relation_estimate_size(rel, attr_widths, &pages, &tuples,
+/// &allvisfrac, overhead_bytes_per_tuple, usable_bytes_per_page)` (tableam.c).
+fn table_block_relation_estimate_size(
+    rel: &Relation<'_>,
+    relid: Oid,
+    attr_widths: Option<&mut [i32]>,
+    overhead_bytes_per_tuple: usize,
+    usable_bytes_per_page: usize,
+) -> PgResult<(types_core::primitive::BlockNumber, f64, f64)> {
+    // it should have storage, so we can call the smgr
+    // curpages = RelationGetNumberOfBlocks(rel);
+    let mut curpages =
+        backend_utils_cache_relcache_seams::relation_get_number_of_blocks::call(rel)?;
+
+    // coerce values in pg_class to more desirable types
+    let relpages = rel.rd_rel.relpages as u32;
+    let reltuples = rel.rd_rel.reltuples as f64;
+    let relallvisible = rel.rd_rel.relallvisible as u32;
+
+    // HACK: if the relation has never yet been vacuumed (reltuples < 0), use a
+    // minimum size estimate of 10 pages — unless it has inheritance children.
+    if curpages < 10 && reltuples < 0.0 && !rel.rd_rel.relhassubclass {
+        curpages = 10;
+    }
+
+    // report estimated # pages
+    let pages = curpages;
+
+    // quick exit if rel is clearly empty
+    if curpages == 0 {
+        return Ok((pages, 0.0, 0.0));
+    }
+
+    // estimate number of tuples from previous tuple density
+    let density: f64 = if reltuples >= 0.0 && relpages > 0 {
+        reltuples / relpages as f64
+    } else {
+        // No data (never vacuumed): estimate tuple width from attribute
+        // datatypes, assuming pages are completely full, accounting for
+        // fillfactor. Integer division is intentional, matching C.
+        let fillfactor = rel.get_fillfactor(HEAP_DEFAULT_FILLFACTOR);
+
+        let mut tuple_width =
+            backend_optimizer_util_plancat_seams::get_rel_data_width::call(relid, attr_widths)?
+                as usize;
+        tuple_width += overhead_bytes_per_tuple;
+        // note: integer division is intentional here
+        let raw = (usable_bytes_per_page * fillfactor as usize / 100) / tuple_width;
+        // There's at least one row on the page, even with low fillfactor.
+        backend_optimizer_path_costsize_seams::clamp_row_est::call(raw as f64)
+    };
+
+    let tuples = rint(density * curpages as f64);
+
+    // relallvisible is used as-is (converted to a fraction by costsize.c).
+    let allvisfrac = if relallvisible == 0 || curpages == 0 {
+        0.0
+    } else if relallvisible as f64 >= curpages as f64 {
+        1.0
+    } else {
+        relallvisible as f64 / curpages as f64
+    };
+
+    Ok((pages, tuples, allvisfrac))
+}
+
 /// Install the provider-facing table-AM dispatch seams.
 pub fn init_seams() {
     use backend_access_table_tableam_seams as sx;
@@ -678,4 +801,10 @@ pub fn init_seams() {
     // execnodes::IndexInfo + mcx through their ambuild signatures.
     sx::table_index_build_range_scan::set(build_scan::provider_index_build_range_scan);
     sx::table_index_build_scan::set(build_scan::provider_index_build_scan);
+
+    // heapam_estimate_rel_size — the planner-facing table-AM size estimator
+    // (plancat's estimate_rel_size dispatches RELKIND_HAS_TABLE_AM here).
+    backend_optimizer_util_plancat_ext_seams::table_relation_estimate_size::set(
+        table_relation_estimate_size,
+    );
 }

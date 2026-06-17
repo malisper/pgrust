@@ -79,7 +79,7 @@ use backend_access_common_indextuple_seams as indextuple;
 use backend_access_index_indexam_seams as indexam;
 use backend_storage_buffer_bufmgr_seams as bufmgr;
 use backend_utils_cache_lsyscache_seams as lsyscache;
-use backend_utils_fmgr_fmgr_seams::function_call2_coll;
+use backend_utils_fmgr_fmgr_seams::function_call2_coll_datum;
 
 use crate::page::{
     bt_metaversion, bt_relbuf as page_bt_relbuf, _bt_getbuf, _bt_getroot, _bt_gettrueroot,
@@ -182,18 +182,6 @@ fn rel_natts(rel: &Relation) -> i32 {
     rel.rd_att.natts
 }
 
-/// `DatumGetInt32(d)` — a btree ORDER support proc returns an int32.
-#[inline]
-fn datum_get_int32(d: types_datum::Datum) -> i32 {
-    d.as_i32()
-}
-
-/// Convert a canonical `Datum<'mcx>` argument into the bare-word
-/// `types_datum::Datum` the fmgr seam dispatches on (mirrors `utils::to_word`).
-#[inline]
-fn to_word(d: &Datum) -> types_datum::Datum {
-    types_datum::Datum::from_usize(d.as_usize())
-}
 
 /// The scan/index memory context for `BufferGetPage` reads + `'mcx` scan-state
 /// allocations. The `bt_*` seams do not carry an explicit `Mcx`; the index
@@ -1034,13 +1022,19 @@ pub fn bt_compare<'mcx>(
             /*
              * sk_func compares the index value (left) to sk_argument (right).
              * Flip the sign unless it's a DESC column.
+             *
+             * Use the canonical per-attribute `Datum` lane so by-reference index
+             * column types (`name`/`text`/`varlena`) pass their payloads to the
+             * comparison support proc — a bare-word dispatch cannot carry them.
              */
-            let mut r = datum_get_int32(function_call2_coll::call(
+            let mut r = function_call2_coll_datum::call(
+                rel_mcx(rel),
                 scankey.sk_func.fn_oid,
                 scankey.sk_collation,
-                to_word(&datum),
-                to_word(&scankey.sk_argument),
-            )?);
+                datum.clone(),
+                scankey.sk_argument.clone(),
+            )?
+            .as_i32();
             if (scankey.sk_flags & SK_BT_DESC) == 0 {
                 r = invert_compare_result(r);
             }

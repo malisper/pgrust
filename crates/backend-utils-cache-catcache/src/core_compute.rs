@@ -9,7 +9,7 @@
 //! crosses the seam as a [`SysCacheKey`], so the fast functions take the
 //! resolved bytes / scalar directly rather than dereferencing a pointer.
 
-use types_cache::backend_utils_cache_catcache::CCFastKind;
+use types_cache::backend_utils_cache_catcache::{CatKey, CCFastKind};
 use types_core::Oid;
 // Bare-word machine-word `Datum` (`types_datum::Datum`), aliased `ScalarWord`:
 // these fast hash/equality functions consume the by-value scalar key word (C's
@@ -244,32 +244,77 @@ pub fn oidvectorhashfast(v: &[Oid]) -> PgResult<u32> {
  * routed through this scalar dispatch.
  * ------------------------------------------------------------------------- */
 
-/// Apply the fast hash function for a by-value key kind to one key datum.
-pub fn fast_hash(kind: CCFastKind, datum: ScalarWord) -> PgResult<u32> {
-    match kind {
-        CCFastKind::Char => Ok(charhashfast(datum)),
-        CCFastKind::Int2 => Ok(int2hashfast(datum)),
-        CCFastKind::Int4 => Ok(int4hashfast(datum)),
-        CCFastKind::Name | CCFastKind::Text | CCFastKind::OidVector => panic!(
-            "catcache::core_compute::fast_hash: by-reference key kind {kind:?} \
-             must be hashed from its resolved payload bytes \
-             (namehashfast/texthashfast/oidvectorhashfast), not the scalar Datum dispatch"
+/// The scalar word of a by-value key slot. The C `cc_hashfunc`/`cc_fastequal`
+/// for a by-value kind reads the `Datum` word; in this model that is a
+/// [`CatKey::Scalar`]. A by-reference payload in a by-value position (or vice
+/// versa) is a key-kind/key-storage mismatch — the C model never produces it.
+#[inline]
+fn scalar_word(kind: CCFastKind, key: &CatKey) -> ScalarWord {
+    match key {
+        CatKey::Scalar(w) => *w,
+        CatKey::ByRef(_) => panic!(
+            "catcache::core_compute: by-value key kind {kind:?} carries a \
+             by-reference payload (key-storage mismatch)"
         ),
     }
 }
 
-/// Apply the fast equality function for a by-value key kind to two key datums.
-pub fn fast_eq(kind: CCFastKind, a: ScalarWord, b: ScalarWord) -> PgResult<bool> {
-    match kind {
-        CCFastKind::Char => Ok(chareqfast(a, b)),
-        CCFastKind::Int2 => Ok(int2eqfast(a, b)),
-        CCFastKind::Int4 => Ok(int4eqfast(a, b)),
-        CCFastKind::Name | CCFastKind::Text | CCFastKind::OidVector => panic!(
-            "catcache::core_compute::fast_eq: by-reference key kind {kind:?} \
-             must be compared from its resolved payload bytes \
-             (nameeqfast/texteqfast/oidvectoreqfast), not the scalar Datum dispatch"
+/// The resolved payload bytes of a by-reference key slot (C's `name`/`text`/
+/// `oidvector` payload behind the key `Datum`'s pointer).
+#[inline]
+fn byref_payload(kind: CCFastKind, key: &CatKey) -> &[u8] {
+    match key {
+        CatKey::ByRef(bytes) => bytes,
+        CatKey::Scalar(_) => panic!(
+            "catcache::core_compute: by-reference key kind {kind:?} carries a \
+             by-value scalar word (key-storage mismatch)"
         ),
     }
+}
+
+/// Apply the fast hash function for a key kind to one key slot (the C indirect
+/// `cc_hashfunc[i](key)` call). By-value kinds read the scalar word; by-reference
+/// kinds (`name`/`text`/`oidvector`) hash their resolved payload bytes via
+/// [`namehashfast`]/[`texthashfast`]/[`oidvectorhashfast`].
+pub fn fast_hash(kind: CCFastKind, key: &CatKey) -> PgResult<u32> {
+    match kind {
+        CCFastKind::Char => Ok(charhashfast(scalar_word(kind, key))),
+        CCFastKind::Int2 => Ok(int2hashfast(scalar_word(kind, key))),
+        CCFastKind::Int4 => Ok(int4hashfast(scalar_word(kind, key))),
+        CCFastKind::Name => Ok(namehashfast(byref_payload(kind, key))),
+        CCFastKind::Text => Ok(texthashfast(byref_payload(kind, key))),
+        CCFastKind::OidVector => {
+            oidvectorhashfast(&oid_slice_from_bytes(byref_payload(kind, key)))
+        }
+    }
+}
+
+/// Apply the fast equality function for a key kind to two key slots (the C
+/// indirect `cc_fastequal[i](a, b)` call). By-value kinds compare scalar words;
+/// by-reference kinds compare resolved payload bytes via [`nameeqfast`]/
+/// [`texteqfast`]/[`oidvectoreqfast`].
+pub fn fast_eq(kind: CCFastKind, a: &CatKey, b: &CatKey) -> PgResult<bool> {
+    match kind {
+        CCFastKind::Char => Ok(chareqfast(scalar_word(kind, a), scalar_word(kind, b))),
+        CCFastKind::Int2 => Ok(int2eqfast(scalar_word(kind, a), scalar_word(kind, b))),
+        CCFastKind::Int4 => Ok(int4eqfast(scalar_word(kind, a), scalar_word(kind, b))),
+        CCFastKind::Name => Ok(nameeqfast(byref_payload(kind, a), byref_payload(kind, b))),
+        CCFastKind::Text => Ok(texteqfast(byref_payload(kind, a), byref_payload(kind, b))),
+        CCFastKind::OidVector => Ok(oidvectoreqfast(
+            &oid_slice_from_bytes(byref_payload(kind, a)),
+            &oid_slice_from_bytes(byref_payload(kind, b)),
+        )),
+    }
+}
+
+/// Reinterpret an `oidvector` key's contiguous native-endian `Oid` element
+/// bytes (as produced by [`oidvectorhashfast`]'s inverse) back into `Oid`s.
+#[inline]
+fn oid_slice_from_bytes(bytes: &[u8]) -> alloc::vec::Vec<Oid> {
+    bytes
+        .chunks_exact(core::mem::size_of::<Oid>())
+        .map(|c| Oid::from_ne_bytes(c.try_into().unwrap()))
+        .collect()
 }
 
 /* ----------------------------------------------------------------------------
@@ -314,7 +359,7 @@ pub fn pg_rotate_left32(word: u32, n: u32) -> u32 {
 pub fn CatalogCacheComputeHashValue(
     kinds: &[CCFastKind],
     nkeys: i32,
-    keys: &[ScalarWord],
+    keys: &[CatKey],
 ) -> PgResult<u32> {
     let mut hash_value: u32 = 0;
     let mut one_hash: u32;
@@ -323,31 +368,31 @@ pub fn CatalogCacheComputeHashValue(
     // a position-dependent left-rotate before XOR.
     match nkeys {
         4 => {
-            one_hash = fast_hash(kinds[3], keys[3])?;
+            one_hash = fast_hash(kinds[3], &keys[3])?;
             hash_value ^= pg_rotate_left32(one_hash, 24);
-            one_hash = fast_hash(kinds[2], keys[2])?;
+            one_hash = fast_hash(kinds[2], &keys[2])?;
             hash_value ^= pg_rotate_left32(one_hash, 16);
-            one_hash = fast_hash(kinds[1], keys[1])?;
+            one_hash = fast_hash(kinds[1], &keys[1])?;
             hash_value ^= pg_rotate_left32(one_hash, 8);
-            one_hash = fast_hash(kinds[0], keys[0])?;
+            one_hash = fast_hash(kinds[0], &keys[0])?;
             hash_value ^= one_hash;
         }
         3 => {
-            one_hash = fast_hash(kinds[2], keys[2])?;
+            one_hash = fast_hash(kinds[2], &keys[2])?;
             hash_value ^= pg_rotate_left32(one_hash, 16);
-            one_hash = fast_hash(kinds[1], keys[1])?;
+            one_hash = fast_hash(kinds[1], &keys[1])?;
             hash_value ^= pg_rotate_left32(one_hash, 8);
-            one_hash = fast_hash(kinds[0], keys[0])?;
+            one_hash = fast_hash(kinds[0], &keys[0])?;
             hash_value ^= one_hash;
         }
         2 => {
-            one_hash = fast_hash(kinds[1], keys[1])?;
+            one_hash = fast_hash(kinds[1], &keys[1])?;
             hash_value ^= pg_rotate_left32(one_hash, 8);
-            one_hash = fast_hash(kinds[0], keys[0])?;
+            one_hash = fast_hash(kinds[0], &keys[0])?;
             hash_value ^= one_hash;
         }
         1 => {
-            one_hash = fast_hash(kinds[0], keys[0])?;
+            one_hash = fast_hash(kinds[0], &keys[0])?;
             hash_value ^= one_hash;
         }
         _ => {
@@ -363,13 +408,13 @@ pub fn CatalogCacheComputeHashValue(
 pub fn CatalogCacheCompareTuple(
     kinds: &[CCFastKind],
     nkeys: i32,
-    cachekeys: &[ScalarWord],
-    searchkeys: &[ScalarWord],
+    cachekeys: &[CatKey],
+    searchkeys: &[CatKey],
 ) -> PgResult<bool> {
     // C: `for (i = 0; i < nkeys; i++) if (!cc_fastequal[i](cachekeys[i],
     // searchkeys[i])) return false; return true;`
     for i in 0..(nkeys as usize) {
-        if !fast_eq(kinds[i], cachekeys[i], searchkeys[i])? {
+        if !fast_eq(kinds[i], &cachekeys[i], &searchkeys[i])? {
             return Ok(false);
         }
     }

@@ -359,6 +359,16 @@ fn install_guc_tables_owned_vars() {
         get: backing::PostAuthDelay,
         set: backing::set_PostAuthDelay,
     });
+    // postgres.c-owned statement-logging GUCs (backed here until that unit lands
+    // as a GUC owner). Read by the command loop's statement-duration logging.
+    vars::log_min_duration_sample.install(GucVarAccessors {
+        get: backing::log_min_duration_sample,
+        set: backing::set_log_min_duration_sample,
+    });
+    vars::log_min_duration_statement.install(GucVarAccessors {
+        get: backing::log_min_duration_statement,
+        set: backing::set_log_min_duration_statement,
+    });
 
     // --- enum (stored as int) ---
     vars::log_statement.install(GucVarAccessors {

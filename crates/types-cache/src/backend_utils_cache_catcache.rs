@@ -73,6 +73,45 @@ pub enum CCFastKind {
 /// `CATCACHE_MAXKEYS` (`catcache.h`).
 pub const CATCACHE_MAXKEYS: usize = 4;
 
+/// One catcache key slot — the owned form of C's `Datum keys[CATCACHE_MAXKEYS]`.
+///
+/// In C a key slot is a bare `Datum`: for the by-value key types (`bool`/`char`/
+/// `int2`/`int4`/`oid`/`reg*`) it is the scalar word, and for the by-reference
+/// types (`name`/`text`/`oidvector`) it is a *pointer* into a payload buffer that
+/// catcache copies with `datumCopy`/`CatCacheCopyKeys`. A bare machine word
+/// cannot carry that payload in the owned model, so a by-reference slot owns its
+/// resolved payload bytes directly (the `datumCopy` of the C model), while a
+/// by-value slot keeps the scalar word.
+///
+/// `cc_hashfunc`/`cc_fastequal` dispatch on the key's [`CCFastKind`], reading the
+/// scalar word for by-value kinds and the byte payload for by-reference kinds —
+/// exactly the C `DatumGet*` vs `NameStr`/`VARDATA_ANY`/`(Oid *)` split.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CatKey {
+    /// A by-value scalar key word (C `DatumGetChar/Int16/Int32/ObjectId`).
+    Scalar(ScalarWord),
+    /// A by-reference key's resolved payload bytes (the `datumCopy` of C's
+    /// `name`/`text`/`oidvector` key): for `name` the NUL-padded significant
+    /// bytes, for `text` the detoasted `VARDATA_ANY` image, for `oidvector` the
+    /// contiguous `Oid` element bytes.
+    ByRef(Vec<u8>),
+}
+
+impl CatKey {
+    /// The unused/NULL by-value key slot (C's zero `Datum`).
+    #[inline]
+    pub fn scalar_null() -> CatKey {
+        CatKey::Scalar(ScalarWord::null())
+    }
+}
+
+impl Default for CatKey {
+    #[inline]
+    fn default() -> CatKey {
+        CatKey::scalar_null()
+    }
+}
+
 /// `CT_MAGIC` — sentinel stored in a tuple entry, checked by `ReleaseCatCache`.
 pub const CT_MAGIC: i32 = 0x5726_1502;
 /// `CL_MAGIC` — sentinel stored in a list entry, checked by `ReleaseCatCacheList`.
@@ -178,7 +217,7 @@ pub struct ArenaCatCTup {
     /// `hash_value` — hash of the tuple's keys (selects the bucket).
     pub hash_value: u32,
     /// `keys[CATCACHE_MAXKEYS]` — the entry's key datums.
-    pub keys: [ScalarWord; CATCACHE_MAXKEYS],
+    pub keys: [CatKey; CATCACHE_MAXKEYS],
     /// `refcount` — number of active references (callers + lists).
     pub refcount: i32,
     /// `dead` — set when invalidated while still referenced.
@@ -214,7 +253,7 @@ pub struct ArenaCatCList {
     /// `hash_value` — hash of the partial key.
     pub hash_value: u32,
     /// `keys[CATCACHE_MAXKEYS]` — the partial key datums.
-    pub keys: [ScalarWord; CATCACHE_MAXKEYS],
+    pub keys: [CatKey; CATCACHE_MAXKEYS],
     /// `refcount`.
     pub refcount: i32,
     /// `dead`.
@@ -307,7 +346,7 @@ pub struct FetchedCatalogTuple {
     /// The flattened tuple data bytes (post-detoast).
     pub t_data: Vec<u8>,
     /// The tuple's key datums, extracted via the cache's `cc_keyno` + tupdesc.
-    pub keys: [ScalarWord; CATCACHE_MAXKEYS],
+    pub keys: [CatKey; CATCACHE_MAXKEYS],
 }
 
 /* ===========================================================================
@@ -350,7 +389,7 @@ impl Default for ArenaCatCTup {
         ArenaCatCTup {
             ct_magic: CT_MAGIC,
             hash_value: 0,
-            keys: [ScalarWord::null(); CATCACHE_MAXKEYS],
+            keys: core::array::from_fn(|_| CatKey::scalar_null()),
             refcount: 0,
             dead: false,
             negative: false,
@@ -369,7 +408,7 @@ impl Default for ArenaCatCList {
         ArenaCatCList {
             cl_magic: CL_MAGIC,
             hash_value: 0,
-            keys: [ScalarWord::null(); CATCACHE_MAXKEYS],
+            keys: core::array::from_fn(|_| CatKey::scalar_null()),
             refcount: 0,
             dead: false,
             ordered: false,

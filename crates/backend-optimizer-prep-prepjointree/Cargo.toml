@@ -35,5 +35,9 @@ backend-optimizer-util-placeholder-seams = { path = "../backend-optimizer-util-p
 backend-rewrite-rewritemanip-seams = { path = "../backend-rewrite-rewritemanip-seams" }
 backend-optimizer-plan-subselect-pullup = { path = "../backend-optimizer-plan-subselect-pullup" }
 
+# expand_virtual_generated_columns relcache leg: table_open + RelationGetDescr.
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+types-rel = { path = "../types-rel" }
+
 # Inward seams this unit owns + installs.
 backend-optimizer-prep-prepjointree-seams = { path = "../backend-optimizer-prep-prepjointree-seams" }

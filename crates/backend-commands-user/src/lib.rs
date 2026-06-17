@@ -2763,6 +2763,23 @@ pub fn init_seams() {
     seam::password_encryption::set(|| Ok(get_password_encryption()));
     seam::createrole_self_grant_enabled::set(|| Ok(get_createrole_self_grant_enabled()));
     seam::createrole_self_grant_options::set(|| Ok(get_createrole_self_grant_options()));
+
+    /*
+     * Back the user.c-seams superuser/role-membership substrate by delegating to
+     * the canonical owners: superuser()/superuser_arg() are superuser.c (owned by
+     * backend-utils-misc-more), has_privs_of_role() is acl.c (owned by
+     * backend-utils-adt-acl). These declarations in `backend-commands-user-seams`
+     * are consumed by user.c command paths and by aclchk's permission checks; the
+     * delegation makes them the same faithful implementation, with no divergent
+     * second copy.
+     */
+    seam::superuser::set(|| backend_utils_misc_superuser_seams::superuser::call());
+    seam::superuser_arg::set(|roleid| {
+        backend_utils_misc_superuser_seams::superuser_arg::call(roleid)
+    });
+    seam::has_privs_of_role::set(|member, role| {
+        backend_utils_adt_acl_seams::has_privs_of_role::call(member, role)
+    });
 }
 
 #[cfg(test)]

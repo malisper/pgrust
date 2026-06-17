@@ -2259,12 +2259,12 @@ pub fn bt_set_startikey<'mcx>(
 
             // Test firsttup.
             if firstnull
-                || !scankey_apply(&so.keyData[startikey as usize], &firstdatum)?
+                || !scankey_apply(rel_mcx(rel), &so.keyData[startikey as usize], &firstdatum)?
             {
                 break; // unsafe
             }
             // Test lasttup.
-            if lastnull || !scankey_apply(&so.keyData[startikey as usize], &lastdatum)? {
+            if lastnull || !scankey_apply(rel_mcx(rel), &so.keyData[startikey as usize], &lastdatum)? {
                 break; // unsafe
             }
             startikey += 1;
@@ -2291,7 +2291,7 @@ pub fn bt_set_startikey<'mcx>(
                 startikey += 1;
                 continue;
             }
-            if firstnull || !scankey_apply(&so.keyData[startikey as usize], &firstdatum)? {
+            if firstnull || !scankey_apply(rel_mcx(rel), &so.keyData[startikey as usize], &firstdatum)? {
                 break; // unsafe
             }
             startikey += 1;
@@ -2382,13 +2382,23 @@ pub fn bt_set_startikey<'mcx>(
 
 /// `DatumGetBool(FunctionCall2Coll(&key->sk_func, key->sk_collation, datum,
 /// key->sk_argument))` for an ordinary scankey applied to a tuple value.
-fn scankey_apply(key: &ScanKeyData, datum: &Datum) -> PgResult<bool> {
-    Ok(datum_get_bool(fmgr::function_call2_coll::call(
+///
+/// Uses the canonical per-attribute `Datum` lane so by-reference index column
+/// types (`name`/`text`/`varlena`) pass their payloads to the operator proc;
+/// the bare-word dispatch cannot carry them.
+fn scankey_apply<'mcx>(
+    mcx: Mcx<'mcx>,
+    key: &ScanKeyData<'mcx>,
+    datum: &Datum<'mcx>,
+) -> PgResult<bool> {
+    Ok(fmgr::function_call2_coll_datum::call(
+        mcx,
         key.sk_func.fn_oid,
         key.sk_collation,
-        to_word(datum),
-        to_word(&key.sk_argument),
-    )?))
+        datum.clone(),
+        key.sk_argument.clone(),
+    )?
+    .as_bool())
 }
 
 // ===========================================================================
@@ -2514,7 +2524,7 @@ fn bt_check_compare<'mcx>(
             return Ok(false);
         }
 
-        if !scankey_apply(&so.keyData[*ikey as usize], &datum)? {
+        if !scankey_apply(rel_mcx(rel), &so.keyData[*ikey as usize], &datum)? {
             // Tuple fails this qual.
             if required_same_dir {
                 *continuescan = false;

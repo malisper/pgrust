@@ -64,3 +64,13 @@ backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" 
 backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
 backend-utils-activity-small-seams = { path = "../backend-utils-activity-small-seams" }
 backend-utils-error = { path = "../backend-utils-error" }
+# table_relation_estimate_size (heapam_estimate_rel_size / table_block_relation_
+# estimate_size): the planner-facing table-AM size estimator this crate installs.
+#   plancat-ext-seams — the seam declaration installed here
+#   relcache-seams    — table_open (RelationIdGetRelation) + RelationGetNumberOfBlocks
+#   plancat-seams     — get_rel_data_width (never-vacuumed tuple-width estimate)
+#   costsize-seams    — clamp_row_est
+backend-optimizer-util-plancat-ext-seams = { path = "../backend-optimizer-util-plancat-ext-seams" }
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+backend-optimizer-util-plancat-seams = { path = "../backend-optimizer-util-plancat-seams" }
+backend-optimizer-path-costsize-seams = { path = "../backend-optimizer-path-costsize-seams" }

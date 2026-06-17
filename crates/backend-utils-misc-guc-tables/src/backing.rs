@@ -242,6 +242,23 @@ int_var!(
 // through the GUC slot.
 int_var!(I_PostAuthDelay, PostAuthDelay, set_PostAuthDelay, 0);
 
+// `int log_min_duration_sample = -1;` and `int log_min_duration_statement = -1;`
+// (postgres.c). Both postgres.c-owned statement-logging GUC globals, backed here
+// (boot -1, from guc_tables.c) until that unit lands as a GUC owner. Read by the
+// command loop's statement-duration logging path.
+int_var!(
+    I_log_min_duration_sample,
+    log_min_duration_sample,
+    set_log_min_duration_sample,
+    -1
+);
+int_var!(
+    I_log_min_duration_statement,
+    log_min_duration_statement,
+    set_log_min_duration_statement,
+    -1
+);
+
 // ---- enum GUCs (guc_tables.c) — stored as the int the enum maps to -------
 
 // `int log_statement = LOGSTMT_NONE;` (postgres.c) — the `log_statement` GUC's

@@ -959,6 +959,11 @@ pub fn init_seams() {
         projections::search_syscache_attname,
     );
     backend_utils_cache_syscache_seams::lookup_authid_by_oid::set(projections::lookup_authid_by_oid);
+    backend_utils_cache_syscache_seams::authid_rolname::set(projections::authid_rolname);
+    backend_utils_cache_syscache_seams::get_namespace_oid_cached::set(
+        projections::get_namespace_oid_cached,
+    );
+    backend_utils_cache_syscache_seams::relname_relid::set(projections::relname_relid);
     backend_utils_cache_syscache_seams::lookup_authid_by_name::set(
         projections::lookup_authid_by_name,
     );

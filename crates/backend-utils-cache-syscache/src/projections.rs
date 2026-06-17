@@ -21,7 +21,8 @@ use crate::{
     CASTSOURCETARGET, CLAAMNAMENSP, CLAOID, COLLOID, CONSTROID, DATABASEOID, ENUMOID, ENUMTYPOIDNAME,
     FOREIGNDATAWRAPPERNAME,
     FOREIGNDATAWRAPPEROID, FOREIGNSERVERNAME, FOREIGNSERVEROID, FOREIGNTABLEREL, INDEXRELID, LANGNAME,
-    LANGOID, NAMESPACEOID, OPEROID, PARAMETERACLNAME, PARAMETERACLOID, PROCOID, RELOID,
+    LANGOID, NAMESPACENAME, NAMESPACEOID, OPEROID, PARAMETERACLNAME, PARAMETERACLOID, PROCOID,
+    RELNAMENSP, RELOID,
     RULERELNAME, STATRELATTINH, TYPEOID,
     USERMAPPINGOID, USERMAPPINGUSERSERVER,
 };
@@ -1770,6 +1771,22 @@ pub(crate) fn lookup_authid_by_oid<'mcx>(
     Ok(Some(row))
 }
 
+/// `SearchSysCache1(AUTHOID, roleid)` projected to `rolname`, copied into
+/// `mcx`; `Ok(None)` on cache miss. Mirrors namespace.c's `$user` resolution,
+/// which does `SearchSysCache1(AUTHOID, ...)` then `pstrdup(NameStr(rolname))`.
+pub(crate) fn authid_rolname<'mcx>(
+    mcx: Mcx<'mcx>,
+    roleid: Oid,
+) -> PgResult<Option<PgString<'mcx>>> {
+    let tuple = SearchSysCache1(mcx, AUTHOID, SysCacheKey::Value(KeyDatum::from_oid(roleid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let rolname = getattr_name(mcx, AUTHOID, &tup, Anum_pg_authid_rolname)?;
+    ReleaseSysCache(tup);
+    Ok(Some(rolname))
+}
+
 /// `SearchSysCache1(AUTHNAME, rolename)` projected to the role-identity fields.
 pub(crate) fn lookup_authid_by_name<'mcx>(
     mcx: Mcx<'mcx>,
@@ -1867,6 +1884,42 @@ pub(crate) fn lookup_language<'mcx>(
     };
     ReleaseSysCache(tup);
     Ok(Some(info))
+}
+
+/// `GetSysCacheOid2(RELNAMENSP, Anum_pg_class_oid, PointerGetDatum(relname),
+/// ObjectIdGetDatum(relnamespace))` (the syscache leg of `get_relname_relid`,
+/// lsyscache.c): the relation's OID by (name, namespace), or `InvalidOid` on a
+/// cache miss.
+pub(crate) fn relname_relid(relname: &str, relnamespace: Oid) -> PgResult<Oid> {
+    // `Anum_pg_class_oid` == 1 (pg_class.h).
+    let scratch = MemoryContext::new("syscache relname relid");
+    GetSysCacheOid(
+        scratch.mcx(),
+        RELNAMENSP,
+        1,
+        SysCacheKey::Str(relname),
+        SysCacheKey::Value(KeyDatum::from_oid(relnamespace)),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )
+}
+
+/// `GetSysCacheOid1(NAMESPACENAME, Anum_pg_namespace_oid, CStringGetDatum(nspname))`
+/// (the syscache leg of `get_namespace_oid`, namespace.c): the schema's OID by
+/// name, or `InvalidOid` on a cache miss. The `namespace` owner wraps this with
+/// the `missing_ok` error decision.
+pub(crate) fn get_namespace_oid_cached(nspname: &str) -> PgResult<Oid> {
+    // `Anum_pg_namespace_oid` == 1 (pg_namespace.h).
+    let scratch = MemoryContext::new("syscache namespace oid-by-name");
+    GetSysCacheOid(
+        scratch.mcx(),
+        NAMESPACENAME,
+        1,
+        SysCacheKey::Str(nspname),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )
 }
 
 /// `GetSysCacheOid1(LANGNAME, Anum_pg_language_oid, CStringGetDatum(langname))`

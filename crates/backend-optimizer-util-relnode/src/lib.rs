@@ -316,7 +316,7 @@ pub fn build_simple_rel<'mcx>(
         if rel.reloptkind == RELOPT_BASEREL
             || (rel.reloptkind == RELOPT_OTHER_MEMBER_REL && parent_is_subquery)
         {
-            rel.userid = ext::get_rte_perminfo_checkasuser::call(root, relid as u32);
+            rel.userid = rte::rte_perminfo_checkasuser::call(run, root, relid as u32);
         } else {
             rel.userid = root.rel(parent.unwrap()).userid;
         }

@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
 use types_core::primitive::InvalidOid;
 use types_core::Oid;
-use types_cache::backend_utils_cache_catcache::{CCFastKind, CacheIdx};
+use types_cache::backend_utils_cache_catcache::{CCFastKind, CacheIdx, CatKey};
 // Bare-word machine-word `Datum` (`types_datum::Datum`), aliased `ScalarWord`:
 // `CatalogCacheComputeHashValue` consumes the by-value scalar key word (and the
 // `PointerGetDatum` of a detoasted by-reference payload). Pass-by-value scalar
@@ -97,7 +97,7 @@ fn catalog_cache_compute_tuple_hash_value(
 
     // The C reads of `v1..v4` start zeroed and the `case 4..1` fall-through
     // fills only the used slots.
-    let mut v: [ScalarWord; 4] = [ScalarWord::null(); 4];
+    let mut v: [CatKey; 4] = core::array::from_fn(|_| CatKey::scalar_null());
 
     // Borrow the cache's tuple descriptor (lives in CacheMemoryContext) and
     // deform the key columns against it, exactly as the C reads
@@ -120,25 +120,16 @@ fn catalog_cache_compute_tuple_hash_value(
                 }
             };
             debug_assert!(!is_null, "catcache key column unexpectedly NULL");
-            // The scalar key word fed to `CatalogCacheComputeHashValue` is the
-            // by-value word. A by-reference key (`name`/`text`/`oidvector`)
-            // never inhabits this scalar slot: `fast_hash`/`fast_eq` dispatch
-            // those kinds to the byte/slice fast functions and panic if reached
-            // through the scalar word, and the by-reference payload is resolved
-            // from its bytes — so we keep the canonical `Datum<'mcx>` value
-            // un-collapsed (no `PointerGetDatum` pointer forge) and only lift the
-            // `ByVal` word here.
+            // The key value fed to `CatalogCacheComputeHashValue` is a by-value
+            // scalar word for by-value kinds and the resolved payload bytes for a
+            // by-reference key (`name`/`text`/`oidvector`) — the same `CatKey`
+            // shape the search/build paths produce (`CatCacheCopyKeys`).
             v[i] = match &value {
-                Datum::ByVal(d) => ScalarWord::from_usize(*d),
-                Datum::ByRef(_) => panic!(
-                    "catcache::inval_support: a by-reference key value \
-                     (name/text/oidvector) is hashed from its resolved payload \
-                     bytes, never lifted into the scalar key word"
-                ),
+                Datum::ByVal(d) => CatKey::Scalar(ScalarWord::from_usize(*d)),
+                Datum::ByRef(b) => CatKey::ByRef(b.to_vec()),
                 Datum::Cstring(_) | Datum::Composite(_) | Datum::Expanded(_) | Datum::Internal(_) => panic!(
                     "catcache::inval_support: a Cstring/Composite/Expanded/Internal key value \
-                     is hashed from its resolved payload, never lifted into the scalar key word \
-                     — not yet produced — wave 2"
+                     is not a catcache key type (GetCCHashEqFuncs rejects them)"
                 ),
             };
         }

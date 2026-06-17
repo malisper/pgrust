@@ -16,17 +16,14 @@
 
 use mcx::Mcx;
 use types_cache::backend_utils_cache_catcache::{
-    CacheIdx, CtIdx, FetchedCatalogTuple, ItemPointer,
+    CacheIdx, CatKey, CtIdx, FetchedCatalogTuple, ItemPointer,
 };
 use types_cache::SysCacheKey;
 use types_core::Oid;
-// Bare-word machine-word `Datum` (`types_datum::Datum`), aliased `ScalarWord`:
-// the per-search key arguments cross as by-value scalar words (C's
-// `cur_skey[i].sk_argument = vN`); a by-reference key's `catcache_byref_key_datum`
-// seam reconstitutes a pointer-bearing word. Pass-by-value scalar keys stay the
-// audited bare word, not the canonical `types_tuple::Datum<'mcx>` enum (which
-// carries deformed tuple values).
-use types_datum::Datum as ScalarWord;
+// Catcache key slots cross as `CatKey` (the owned form of C's `Datum keys[]`):
+// by-value keys carry the scalar word (C's `cur_skey[i].sk_argument = vN`), and
+// by-reference keys (name/text/oidvector) carry their resolved payload bytes —
+// the pointer-bearing `Datum` C's search key already holds.
 use types_error::PgResult;
 use types_tuple::backend_access_common_heaptuple::FormedTuple;
 
@@ -69,7 +66,7 @@ seam_core::seam!(
     pub fn catcache_scan_single(
         cache_id: i32,
         nkeys: i32,
-        arguments: [ScalarWord; 4],
+        arguments: &[CatKey; 4],
     ) -> PgResult<alloc::vec::Vec<FetchedCatalogTuple>>
 );
 
@@ -86,14 +83,6 @@ seam_core::seam!(
     ) -> PgResult<FormedTuple<'mcx>>
 );
 
-seam_core::seam!(
-    /// Reconstitute the search-key `Datum` for a by-reference key
-    /// (`name`/`text`/`oidvector`) from its on-disk bytes — in C the search key
-    /// already arrives as a pointer-bearing `Datum`. Owned by the
-    /// datum/heaptuple substrate. Panics until it lands.
-    pub fn catcache_byref_key_datum(bytes: &[u8]) -> ScalarWord
-);
-
 /// One probe outcome from the bucket scan.
 pub(crate) enum ProbeResult {
     HitPositive(CacheIdx, CtIdx),
@@ -101,16 +90,16 @@ pub(crate) enum ProbeResult {
     Miss(CacheIdx, u32, usize),
 }
 
-/// Resolve a [`SysCacheKey`] to the `Datum` the hash/compare core consumes.
-/// By-value keys keep their word (the C `sk_argument = vN`); by-reference keys
-/// carry on-disk bytes that the datum substrate reconstitutes into a
-/// pointer-bearing `Datum`.
+/// Resolve a [`SysCacheKey`] to the [`CatKey`] the hash/compare core consumes.
+/// By-value keys keep their scalar word (the C `sk_argument = vN`); by-reference
+/// keys carry their resolved payload bytes (in C the search key arrives as a
+/// pointer-bearing `Datum` into that payload).
 #[inline]
-fn key_to_datum(key: SysCacheKey<'_>) -> ScalarWord {
+fn key_to_catkey(key: SysCacheKey<'_>) -> CatKey {
     match key {
-        SysCacheKey::Value(d) => d,
-        SysCacheKey::Str(s) => catcache_byref_key_datum::call(s.as_bytes()),
-        SysCacheKey::Bytes(b) => catcache_byref_key_datum::call(b),
+        SysCacheKey::Value(d) => CatKey::Scalar(d),
+        SysCacheKey::Str(s) => CatKey::ByRef(s.as_bytes().to_vec()),
+        SysCacheKey::Bytes(b) => CatKey::ByRef(b.to_vec()),
     }
 }
 
@@ -122,12 +111,12 @@ fn build_arguments(
     v2: SysCacheKey<'_>,
     v3: SysCacheKey<'_>,
     v4: SysCacheKey<'_>,
-) -> [ScalarWord; 4] {
+) -> [CatKey; 4] {
     [
-        key_to_datum(v1),
-        key_to_datum(v2),
-        key_to_datum(v3),
-        key_to_datum(v4),
+        key_to_catkey(v1),
+        key_to_catkey(v2),
+        key_to_catkey(v3),
+        key_to_catkey(v4),
     ]
 }
 
@@ -264,7 +253,7 @@ pub(crate) fn search_cat_cache_miss<'mcx>(
     nkeys: i32,
     hash_value: u32,
     hash_index: usize,
-    arguments: [ScalarWord; 4],
+    arguments: [CatKey; 4],
 ) -> PgResult<Option<FormedTuple<'mcx>>> {
     /*
      * Tuple was not found in cache, so we have to try to retrieve it directly
@@ -276,7 +265,7 @@ pub(crate) fn search_cat_cache_miss<'mcx>(
      * crosses the scan seam, which returns the matched, flattened tuples (at
      * most one for a single-tuple cache).
      */
-    let fetched = catcache_scan_single::call(cache_id, nkeys, arguments)?;
+    let fetched = catcache_scan_single::call(cache_id, nkeys, &arguments)?;
 
     if let Some(fetched) = fetched.into_iter().next() {
         /*
@@ -597,7 +586,7 @@ pub(crate) fn reuse_or_create_entry(
 fn catcache_scan_single_impl(
     cache_id: i32,
     nkeys: i32,
-    arguments: [ScalarWord; 4],
+    arguments: &[CatKey; 4],
 ) -> PgResult<alloc::vec::Vec<FetchedCatalogTuple>> {
     use types_cache::backend_utils_cache_catcache::CATCACHE_MAXKEYS;
     // The canonical by-value Datum the keystone-owned `ScanKeyData.sk_argument`
@@ -612,7 +601,7 @@ fn catcache_scan_single_impl(
     // Read the per-cache scan inputs (reloid, indexoid, scankey template) out of
     // the arena up front. Phase-2 init has already populated cc_skey for all
     // cc_nkeys (the caller ran CatalogCacheInitializeCache before this).
-    let (cc_reloid, cc_indexoid, mut cur_skey) = with_arena(|arena| {
+    let (cc_reloid, cc_indexoid, skey_tmpl) = with_arena(|arena| {
         let cache = &arena.caches[cache_idx.0];
         (cache.cc_reloid, cache.cc_indexoid, skey_template(cache))
     });
@@ -620,8 +609,13 @@ fn catcache_scan_single_impl(
     // The catalog scan + its result tuples live in a scratch context (C's
     // CurrentMemoryContext during the scan); the bytes we keep are copied into
     // owned `FetchedCatalogTuple`s, so the scratch is dropped when the scan ends.
+    // Declared before `cur_skey` so it outlives the by-reference `sk_argument`s
+    // that borrow it.
     let scratch = mcx::MemoryContext::new("SearchCatCacheMiss scan");
     let scan_mcx = scratch.mcx();
+    let mut cur_skey: [types_scan::scankey::ScanKeyData<'_>;
+        types_cache::backend_utils_cache_catcache::CATCACHE_MAXKEYS] =
+        core::array::from_fn(|i| skey_tmpl[i].clone());
 
     // relation = table_open(cache->cc_reloid, AccessShareLock);
     // The catalog must be locked (AccessShareLock) before the scan: genam's
@@ -635,8 +629,15 @@ fn catcache_scan_single_impl(
 
     // memcpy(cur_skey, cache->cc_skey, sizeof(ScanKeyData) * nkeys);
     // cur_skey[0..nkeys].sk_argument = v1..vN;
+    // A by-value key becomes the canonical by-value `Datum` word; a by-reference
+    // key (name/text/oidvector) becomes a `Datum::ByRef` over the payload bytes
+    // (the pointer-bearing `Datum` C's scan key already carries), allocated in
+    // the scan's scratch context. genam's scankey decode (genam:204) handles both.
     for i in 0..(nkeys as usize) {
-        cur_skey[i].sk_argument = DatumV::ByVal(arguments[i].as_usize());
+        cur_skey[i].sk_argument = match &arguments[i] {
+            CatKey::Scalar(w) => DatumV::ByVal(w.as_usize()),
+            CatKey::ByRef(bytes) => DatumV::ByRef(mcx::slice_in(scan_mcx, bytes)?),
+        };
     }
 
     // scandesc = systable_beginscan(relation, cache->cc_indexoid,
@@ -687,30 +688,14 @@ fn catcache_form_cached_tuple_impl<'mcx>(
     )
 }
 
-/// `catcache_byref_key_datum` — reconstitute the search-key word for a
-/// by-reference key (`name`/`text`/`oidvector`) from its on-disk bytes.
-///
-/// In C the search key already arrives as a pointer-bearing `Datum` into the
-/// caller's payload. The canonical owned model carries keys as bare machine
-/// words ([`ScalarWord`] = `types_datum::Datum`, a `usize`), which cannot hold a
-/// payload pointer; the by-reference comparison/hash core re-resolves the key
-/// from the cached tuple bytes (see `core_compute`'s `Name`/`Text`/`OidVector`
-/// fast functions), so the carried word is the by-reference placeholder the
-/// owned model uses uniformly (matching `list_path`'s `key_datum` and
-/// `build_fetched`). The bytes are consumed only to assert a non-spurious call.
-fn catcache_byref_key_datum_impl(bytes: &[u8]) -> ScalarWord {
-    let _ = bytes;
-    ScalarWord::null()
-}
-
 /// `memcpy(cur_skey, cache->cc_skey, sizeof(cur_skey))` — the scankey template
 /// the scan stamps its per-search arguments into (the `cc_skey` slots are all
 /// populated by phase-2 init by the time a miss scans). `sk_argument` is reset
 /// to a fresh by-value NULL (immediately overwritten by the stamping loop),
 /// which decouples the returned key's `'mcx` from the borrowed cache.
-fn skey_template(
+fn skey_template<'a>(
     cache: &types_cache::backend_utils_cache_catcache::ArenaCatCache,
-) -> [types_scan::scankey::ScanKeyData<'static>;
+) -> [types_scan::scankey::ScanKeyData<'a>;
     types_cache::backend_utils_cache_catcache::CATCACHE_MAXKEYS] {
     use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
     core::array::from_fn(|i| match &cache.cc_skey[i] {
@@ -733,5 +718,4 @@ fn skey_template(
 pub(crate) fn install_substrate_seams() {
     catcache_scan_single::set(catcache_scan_single_impl);
     catcache_form_cached_tuple::set(catcache_form_cached_tuple_impl);
-    catcache_byref_key_datum::set(catcache_byref_key_datum_impl);
 }

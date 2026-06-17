@@ -1493,6 +1493,48 @@ pub fn expand_virtual_generated_columns<'mcx>(
     Ok(parse)
 }
 
+/// The relcache leg of `expand_virtual_generated_columns` (prepjointree.c:993):
+/// `table_open(rte->relid, NoLock)` + `RelationGetDescr`, then — only if
+/// `tupdesc->constr->has_generated_virtual` — build the per-attribute
+/// replacement targetlist. Returns `Ok(None)` for the common no-virtual-
+/// generated-columns case (the early `table_close` + skip in C).
+///
+/// The actual tlist construction needs `build_generation_expression`
+/// (rewriteHandler.c), which is unported; until it lands this leg faithfully
+/// serves the no-op case (which covers every system catalog) and panics if a
+/// relation actually carries virtual generated columns.
+pub(crate) fn build_virtual_generated_columns_tlist<'mcx>(
+    mcx: Mcx<'mcx>,
+    _root: &mut PlannerInfo,
+    relid: types_core::primitive::Oid,
+    _rt_index: i32,
+) -> PgResult<Option<PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>>>> {
+    // rel = table_open(rte->relid, NoLock);
+    let rel = backend_utils_cache_relcache_seams::relation_id_get_relation::call(mcx, relid)?
+        .expect("expand_virtual_generated_columns: rangetable relation must exist in relcache");
+
+    // tupdesc = RelationGetDescr(rel);
+    // if (!tupdesc->constr || !tupdesc->constr->has_generated_virtual) { skip }
+    let has_virtual = rel
+        .rd_att
+        .constr
+        .as_ref()
+        .is_some_and(|c| c.has_generated_virtual);
+
+    if !has_virtual {
+        // table_close(rel, NoLock); continue;  — no virtual generated columns.
+        return Ok(None);
+    }
+
+    // The tlist build runs build_generation_expression(rel, i + 1) per generated
+    // attribute (rewriteHandler.c) and makeVar for the rest; that rewriter is
+    // unported. No system catalog reaches here.
+    panic!(
+        "expand_virtual_generated_columns: relation {relid} has virtual generated \
+         columns; build_generation_expression (rewriteHandler.c) is not yet ported"
+    )
+}
+
 /// `pull_up_simple_values(root, jtnode, rte)` (prepjointree.c:1947).
 fn pull_up_simple_values<'mcx>(
     mcx: Mcx<'mcx>,
