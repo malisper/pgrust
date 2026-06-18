@@ -1024,12 +1024,14 @@ fn swap_relfilelocator_subids(r1: Oid, r2: Oid) -> PgResult<()> {
  * ======================================================================== */
 
 fn rd_opfamily(index: &types_rel::Relation<'_>, attno: AttrNumber) -> PgResult<Oid> {
-    // `index->rd_opfamily[attno]` off the cached index entry.
-    with_entry(index.rd_id, |rd| rd.rd_opfamily[attno as usize])
+    // `index->rd_opfamily[attno - 1]` off the cached index entry (attno is
+    // 1-based, as in C — all callers pass `varattno`/`ssup_attno`/`i + 1`).
+    with_entry(index.rd_id, |rd| rd.rd_opfamily[(attno - 1) as usize])
 }
 fn rd_opcintype(index: &types_rel::Relation<'_>, attno: AttrNumber) -> PgResult<Oid> {
-    // `index->rd_opcintype[attno]` off the cached index entry.
-    with_entry(index.rd_id, |rd| rd.rd_opcintype[attno as usize])
+    // `index->rd_opcintype[attno - 1]` off the cached index entry (attno is
+    // 1-based, as in C).
+    with_entry(index.rd_id, |rd| rd.rd_opcintype[(attno - 1) as usize])
 }
 fn rd_indam_amcanorder(index: &types_rel::Relation<'_>) -> PgResult<bool> {
     // `index->rd_indam->amcanorder`: not carried on the trimmed in-cache
