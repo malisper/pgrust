@@ -38,17 +38,22 @@ use mcx::{Mcx, PgVec};
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_core::primitive::{InvalidOid, Oid};
 use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR};
+use types_acl::ACLCHECK_NOT_OWNER;
 use types_nodes::ddlnodes::{AlterTableCmd, AlterTableStmt, AlterTableType};
 use types_nodes::ddlnodes::AlterTableType::*;
 use types_nodes::nodes::{Node, NodePtr};
+use types_nodes::parsenodes::{
+    ObjectType, OBJECT_FOREIGN_TABLE, OBJECT_INDEX, OBJECT_MATVIEW, OBJECT_SEQUENCE, OBJECT_TYPE,
+    OBJECT_VIEW,
+};
 use types_rel::Relation;
 use types_storage::lock::{
     LOCKMODE, AccessExclusiveLock, NoLock, ShareRowExclusiveLock, ShareUpdateExclusiveLock,
 };
 use types_tuple::access::{
-    RELKIND_COMPOSITE_TYPE, RELKIND_FOREIGN_TABLE, RELKIND_INDEX, RELKIND_MATVIEW,
-    RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_SEQUENCE,
-    RELKIND_VIEW, RELPERSISTENCE_PERMANENT,
+    RangeVar as AccessRangeVar, RELKIND_COMPOSITE_TYPE, RELKIND_FOREIGN_TABLE, RELKIND_INDEX,
+    RELKIND_MATVIEW, RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
+    RELKIND_SEQUENCE, RELKIND_VIEW, RELPERSISTENCE_PERMANENT,
 };
 use types_tuple::heaptuple::TupleDescData;
 
@@ -301,6 +306,133 @@ pub fn AlterTableInternal<'mcx>(
         query_string: None,
     };
     ATController(mcx, None, rel, cmds, recurse, lockmode, &context)
+}
+
+// ===========================================================================
+// AlterTableLookupRelation (tablecmds.c:4475) + RangeVarCallbackForAlterRelation
+// (tablecmds.c:19586)
+// ===========================================================================
+
+/// `AlterTableLookupRelation(stmt, lockmode)` (tablecmds.c:4475) —
+/// `RangeVarGetRelidExtended(stmt->relation, lockmode, missing_ok ? RVR_MISSING_OK
+/// : 0, RangeVarCallbackForAlterRelation, stmt)`.
+pub fn AlterTableLookupRelation<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &AlterTableStmt<'mcx>,
+    lockmode: LOCKMODE,
+) -> PgResult<Oid> {
+    let rv_node = stmt
+        .relation
+        .as_ref()
+        .expect("AlterTableStmt.relation is non-NULL");
+    let rv = match &**rv_node {
+        Node::RangeVar(rv) => rv,
+        _ => unreachable!("AlterTableStmt.relation is a Node::RangeVar"),
+    };
+    let access_rv = crate::helpers::to_access_range_var(rv);
+    let flags = if stmt.missing_ok {
+        backend_catalog_namespace::RVR_MISSING_OK
+    } else {
+        0
+    };
+    let mut cb = |callback_rel: &AccessRangeVar, relid: Oid, oldrelid: Oid| {
+        RangeVarCallbackForAlterRelation(mcx, callback_rel, relid, oldrelid, stmt.objtype)
+    };
+    backend_catalog_namespace::RangeVarGetRelidExtended(
+        mcx,
+        &access_rv,
+        lockmode,
+        flags,
+        Some(&mut cb),
+    )
+}
+
+/// `RangeVarCallbackForAlterRelation(rv, relid, oldrelid, arg)` (tablecmds.c:19586)
+/// — the `RangeVarGetRelidExtended` callback used by ALTER. The C function is
+/// shared by RenameStmt / AlterObjectSchemaStmt / AlterTableStmt; the
+/// `alter_table_slow` entry always passes an AlterTableStmt, so `reltype` is the
+/// statement's `objtype`. (The RenameStmt namespace-`ACL_CREATE` recheck and the
+/// `RenameStmt`-relaxed ALTER INDEX rule live in the rename/schema utility arms,
+/// which carry their own callback; here `objtype` is the ALTER TABLE objtype.)
+fn RangeVarCallbackForAlterRelation<'mcx>(
+    _mcx: Mcx<'mcx>,
+    rv: &AccessRangeVar,
+    relid: Oid,
+    _oldrelid: Oid,
+    reltype: ObjectType,
+) -> PgResult<()> {
+    // tuple = SearchSysCache1(RELOID, relid); if (!valid) return; (concurrently dropped)
+    let Some(info) = seam::get_pg_class_drop_info::call(relid)? else {
+        return Ok(());
+    };
+    let relkind = info.relkind;
+
+    // Must own relation.
+    if !aclchk_seam::object_ownercheck::call(RelationRelationId, relid, GetUserId())? {
+        let actual_kind = backend_utils_cache_lsyscache_seams::get_rel_relkind::call(relid)?;
+        aclchk_seam::aclcheck_error::call(
+            ACLCHECK_NOT_OWNER,
+            objaddr_seam::get_relkind_objtype::call(actual_kind),
+            Some(rv.relname.clone()),
+        )?;
+    }
+
+    // No system table modifications unless explicitly allowed.
+    if !backend_commands_tablespace_globals_seams::allowSystemTableMods::call()?
+        && seam::is_system_class_relid::call(relid, relkind, info.relnamespace)?
+    {
+        return backend_utils_error::ereport(ERROR)
+            .errcode(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
+            .errmsg(format!(
+                "permission denied: \"{}\" is a system catalog",
+                rv.relname
+            ))
+            .finish(here("RangeVarCallbackForAlterRelation"));
+    }
+
+    // For compatibility, ALTER TABLE works on most relation types; the explicit
+    // forms must match the relkind.
+    if reltype == OBJECT_SEQUENCE && relkind != RELKIND_SEQUENCE {
+        return wrong_object_type(&rv.relname, "is not a sequence");
+    }
+    if reltype == OBJECT_VIEW && relkind != RELKIND_VIEW {
+        return wrong_object_type(&rv.relname, "is not a view");
+    }
+    if reltype == OBJECT_MATVIEW && relkind != RELKIND_MATVIEW {
+        return wrong_object_type(&rv.relname, "is not a materialized view");
+    }
+    if reltype == OBJECT_FOREIGN_TABLE && relkind != RELKIND_FOREIGN_TABLE {
+        return wrong_object_type(&rv.relname, "is not a foreign table");
+    }
+    if reltype == OBJECT_TYPE && relkind != RELKIND_COMPOSITE_TYPE {
+        return wrong_object_type(&rv.relname, "is not a composite type");
+    }
+    if reltype == OBJECT_INDEX
+        && relkind != RELKIND_INDEX
+        && relkind != RELKIND_PARTITIONED_INDEX
+    {
+        return wrong_object_type(&rv.relname, "is not an index");
+    }
+
+    // Don't allow ALTER TABLE on composite types — use ALTER TYPE instead.
+    if reltype != OBJECT_TYPE && relkind == RELKIND_COMPOSITE_TYPE {
+        return backend_utils_error::ereport(ERROR)
+            .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(format!("\"{}\" is a composite type", rv.relname))
+            .errhint("Use ALTER TYPE instead.")
+            .finish(here("RangeVarCallbackForAlterRelation"));
+    }
+
+    Ok(())
+}
+
+/// The `ereport(ERROR, ERRCODE_WRONG_OBJECT_TYPE, "\"%s\" <suffix>")` raised by
+/// the relkind/objtype mismatch checks in `RangeVarCallbackForAlterRelation`.
+fn wrong_object_type(relname: &str, suffix: &str) -> PgResult<()> {
+    backend_utils_error::ereport(ERROR)
+        .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+        .errmsg(format!("\"{relname}\" {suffix}"))
+        .finish(here("RangeVarCallbackForAlterRelation"))
 }
 
 // ===========================================================================
@@ -816,11 +948,17 @@ fn ATPrepCmd<'mcx>(
             )?;
             unported("ENABLE/DISABLE TRIGGER variants");
         }
-        AT_EnableRule | AT_EnableAlwaysRule | AT_EnableReplicaRule | AT_DisableRule | AT_AddOf
-        | AT_DropOf | AT_EnableRowSecurity | AT_DisableRowSecurity | AT_ForceRowSecurity
+        AT_EnableRowSecurity | AT_DisableRowSecurity | AT_ForceRowSecurity
         | AT_NoForceRowSecurity => {
+            // utility.c:5251 — ATSimplePermissions, never recurses, no
+            // command-specific prep.
             ATSimplePermissions(cmd.subtype, rel, ATT_TABLE | ATT_PARTITIONED_TABLE)?;
-            unported("ENABLE/DISABLE RULE / OF / NOT OF / ROW SECURITY variants");
+            pass = AT_PASS_MISC;
+        }
+        AT_EnableRule | AT_EnableAlwaysRule | AT_EnableReplicaRule | AT_DisableRule | AT_AddOf
+        | AT_DropOf => {
+            ATSimplePermissions(cmd.subtype, rel, ATT_TABLE | ATT_PARTITIONED_TABLE)?;
+            unported("ENABLE/DISABLE RULE / OF / NOT OF variants");
         }
         AT_GenericOptions => {
             ATSimplePermissions(cmd.subtype, rel, ATT_FOREIGN_TABLE)?;
@@ -1132,8 +1270,22 @@ fn ATExecCmd<'mcx>(
         AT_EnableRule | AT_EnableAlwaysRule | AT_EnableReplicaRule | AT_DisableRule => {
             unported("ENABLE/DISABLE RULE (EnableDisableRule)")
         }
-        AT_EnableRowSecurity | AT_DisableRowSecurity | AT_ForceRowSecurity
-        | AT_NoForceRowSecurity => unported("ROW SECURITY (ATExecSetRowSecurity)"),
+        AT_EnableRowSecurity => {
+            // ATExecSetRowSecurity(rel, true)
+            _address = crate::at_column::ATExecSetRowSecurity(rel, true)?;
+        }
+        AT_DisableRowSecurity => {
+            // ATExecSetRowSecurity(rel, false)
+            _address = crate::at_column::ATExecSetRowSecurity(rel, false)?;
+        }
+        AT_ForceRowSecurity => {
+            // ATExecForceNoForceRowSecurity(rel, true)
+            _address = crate::at_column::ATExecForceNoForceRowSecurity(rel, true)?;
+        }
+        AT_NoForceRowSecurity => {
+            // ATExecForceNoForceRowSecurity(rel, false)
+            _address = crate::at_column::ATExecForceNoForceRowSecurity(rel, false)?;
+        }
         AT_GenericOptions => unported("OPTIONS (ATExecGenericOptions)"),
         AT_AttachPartition => unported("ATTACH PARTITION (ATExecAttachPartition)"),
         AT_DetachPartition => unported("DETACH PARTITION (ATExecDetachPartition)"),

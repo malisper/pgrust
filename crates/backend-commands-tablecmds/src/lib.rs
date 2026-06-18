@@ -39,7 +39,8 @@ mod smallfns;
 mod truncate;
 
 pub use at_phase::{
-    AlterTable, AlterTableGetLockLevel, AlterTableInternal, AlterTableUtilityContext,
+    AlterTable, AlterTableGetLockLevel, AlterTableInternal, AlterTableLookupRelation,
+    AlterTableUtilityContext,
 };
 
 use backend_commands_tablecmds_seams as seam;
@@ -64,6 +65,7 @@ pub fn init_seams() {
     seam::get_pg_class_drop_info::set(smallfns::get_pg_class_drop_info);
     seam::is_system_class_relid::set(smallfns::is_system_class_relid);
     seam::check_table_not_in_use::set(smallfns::check_table_not_in_use);
+    seam::relation_is_other_temp::set(smallfns::relation_is_other_temp);
     seam::set_relation_has_subclass::set(smallfns::set_relation_has_subclass);
     seam::check_relation_tablespace_move::set(smallfns::check_relation_tablespace_move);
     seam::set_relation_tablespace::set(smallfns::set_relation_tablespace);
@@ -90,10 +92,15 @@ pub fn init_seams() {
     // `NewRelationCreateToastTable` follow-on (utility.c:1170-1190): parse +
     // validate toast reloptions then create the TOAST table if needed.
     backend_tcop_utility_out_seams::create_toast_for_relation::set(create::create_toast_for_relation);
+
+    // --- ProcessUtilitySlow ALTER TABLE arm (utility.c:1270-1331) ---
+    backend_tcop_utility_out_seams::alter_table_slow::set(alter_table_slow_arm);
 }
 
 use mcx::Mcx;
+use types_core::primitive::{Oid, OidIsValid};
 use types_error::PgResult;
+use types_nodes::ddlnodes::AlterTableType::AT_DetachPartition;
 use types_nodes::nodes::Node;
 
 /// `case T_TruncateStmt: ExecuteTruncate(stmt)` (utility.c). The dispatch carries
@@ -112,4 +119,81 @@ fn remove_relations_arm<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<()>
         panic!("remove_relations: parse tree is not a DropStmt");
     };
     drop::remove_relations(mcx, s)
+}
+
+/// `case T_AlterTableStmt:` (utility.c:1270-1331). The DETACH-CONCURRENTLY
+/// transaction-block guard, `AlterTableGetLockLevel` + `AlterTableLookupRelation`,
+/// the `EventTriggerAlterTableStart` / `EventTriggerAlterTableRelid` fence,
+/// `AlterTable`, and the `EventTriggerAlterTableEnd` close (or the "does not
+/// exist, skipping" NOTICE). The `pstmt`/`params`/`queryEnv` recursive-callback
+/// fields of the C `AlterTableUtilityContext` are needed only by the
+/// transform-and-recurse families that are themselves unported; this port's
+/// context carries the portable `relid` + `queryString` subset.
+fn alter_table_slow_arm<'mcx>(
+    mcx: Mcx<'mcx>,
+    _pstmt: &types_nodes::nodeindexscan::PlannedStmt<'mcx>,
+    parsetree: &Node<'mcx>,
+    query_string: &str,
+    _params: types_nodes::portalcmds::ParamListInfo,
+    is_top_level: bool,
+) -> PgResult<()> {
+    let Node::AlterTableStmt(atstmt) = parsetree else {
+        panic!("alter_table_slow: parse tree is not an AlterTableStmt");
+    };
+
+    // Disallow ALTER TABLE ... DETACH CONCURRENTLY in a transaction block.
+    for cmd_node in atstmt.cmds.iter() {
+        let Node::AlterTableCmd(cmd) = &**cmd_node else {
+            unreachable!("AlterTableStmt.cmds element is a Node::AlterTableCmd");
+        };
+        if cmd.subtype == AT_DetachPartition {
+            if let Some(def) = cmd.def.as_ref() {
+                if let Node::PartitionCmd(pc) = &**def {
+                    if pc.concurrent {
+                        backend_access_transam_xact::PreventInTransactionBlock(
+                            is_top_level,
+                            "ALTER TABLE ... DETACH CONCURRENTLY",
+                        )?;
+                    }
+                }
+            }
+        }
+    }
+
+    // Figure out lock mode, and acquire lock (this also does basic permission
+    // checks, via the lookup callback).
+    let lockmode = at_phase::AlterTableGetLockLevel(&atstmt.cmds)?;
+    let relid: Oid = at_phase::AlterTableLookupRelation(mcx, atstmt, lockmode)?;
+
+    if OidIsValid(relid) {
+        // Set up info needed for recursive callbacks ...
+        let atcontext = at_phase::AlterTableUtilityContext {
+            relid,
+            query_string: Some(query_string),
+        };
+
+        // ... ensure we have an event trigger context ...
+        backend_tcop_utility_out_seams::event_trigger_alter_table_start::call(parsetree);
+        backend_tcop_utility_out_seams::event_trigger_alter_table_relid::call(relid);
+
+        // ... and do it.
+        at_phase::AlterTable(mcx, atstmt, lockmode, &atcontext)?;
+
+        // done.
+        backend_tcop_utility_out_seams::event_trigger_alter_table_end::call();
+    } else {
+        // relation "%s" does not exist, skipping
+        let relname: String = atstmt
+            .relation
+            .as_ref()
+            .and_then(|rv| match &**rv {
+                Node::RangeVar(rv) => rv.relname.as_ref().map(|s| s.as_str().to_string()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        backend_utils_error::ereport(types_error::NOTICE)
+            .errmsg(format!("relation \"{relname}\" does not exist, skipping"))
+            .finish(helpers::here("alter_table_slow"))?;
+    }
+    Ok(())
 }

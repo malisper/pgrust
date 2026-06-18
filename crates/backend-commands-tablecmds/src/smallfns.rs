@@ -20,6 +20,14 @@ use crate::helpers::{here, GLOBALTABLESPACE_OID};
 
 /// `CheckTableNotInUse(rel, stmt)` (tablecmds.c:4416). Installed as the inward
 /// `check_table_not_in_use` seam.
+/// `RELATION_IS_OTHER_TEMP(rel)` (rel.h:669): `rd_rel->relpersistence ==
+/// RELPERSISTENCE_TEMP && !rel->rd_islocaltemp` — a temp table belonging to some
+/// *other* session.
+pub fn relation_is_other_temp(rel: &Relation<'_>) -> PgResult<bool> {
+    Ok(rel.rd_rel.relpersistence == types_tuple::access::RELPERSISTENCE_TEMP
+        && !backend_utils_cache_relcache_seams::rd_islocaltemp::call(rel)?)
+}
+
 pub fn check_table_not_in_use(rel: &Relation<'_>, stmt: &str) -> PgResult<()> {
     let expected_refcnt = if seam::relation_is_nailed::call(rel)? { 2 } else { 1 };
     if seam::relation_get_refcount::call(rel)? != expected_refcnt {

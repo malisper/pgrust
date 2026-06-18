@@ -547,6 +547,42 @@ pub fn ATExecDropCluster<'mcx>(
     Ok(object_address_subset(types_core::InvalidOid, types_core::InvalidOid, 0))
 }
 
+/// `ATExecSetRowSecurity(rel, rls)` (tablecmds.c:18604) — ALTER TABLE
+/// ENABLE/DISABLE ROW LEVEL SECURITY. Sets `pg_class.relrowsecurity`.
+pub fn ATExecSetRowSecurity<'mcx>(rel: &Relation<'mcx>, rls: bool) -> PgResult<ObjectAddress> {
+    let relid = rel.rd_id;
+    // pg_class = table_open(RelationRelationId, RowExclusiveLock);
+    // tuple = SearchSysCacheCopy1(RELOID, relid);
+    // ((Form_pg_class) GETSTRUCT(tuple))->relrowsecurity = rls;
+    // CatalogTupleUpdate(pg_class, &tuple->t_self, tuple);
+    let valid = indexing_seam::set_pg_class_row_security::call(relid, Some(rls), None)?;
+    if !valid {
+        return backend_utils_error::ereport(ERROR)
+            .errmsg(format!("cache lookup failed for relation {relid}"))
+            .finish(here("ATExecSetRowSecurity"))
+            .map(|()| unreachable!());
+    }
+    // InvokeObjectPostAlterHook(RelationRelationId, relid, 0): no-op.
+    Ok(object_address_subset(types_core::InvalidOid, types_core::InvalidOid, 0))
+}
+
+/// `ATExecForceNoForceRowSecurity(rel, force_rls)` (tablecmds.c:18634) — ALTER
+/// TABLE FORCE/NO FORCE ROW LEVEL SECURITY. Sets `pg_class.relforcerowsecurity`.
+pub fn ATExecForceNoForceRowSecurity<'mcx>(
+    rel: &Relation<'mcx>,
+    force_rls: bool,
+) -> PgResult<ObjectAddress> {
+    let relid = rel.rd_id;
+    let valid = indexing_seam::set_pg_class_row_security::call(relid, None, Some(force_rls))?;
+    if !valid {
+        return backend_utils_error::ereport(ERROR)
+            .errmsg(format!("cache lookup failed for relation {relid}"))
+            .finish(here("ATExecForceNoForceRowSecurity"))
+            .map(|()| unreachable!());
+    }
+    Ok(object_address_subset(types_core::InvalidOid, types_core::InvalidOid, 0))
+}
+
 /// `ATExecSetRelOptions` (tablecmds.c:16645). See module docs.
 pub fn ATExecSetRelOptions<'mcx>(
     _mcx: Mcx<'mcx>,
