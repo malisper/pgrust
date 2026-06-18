@@ -65,6 +65,7 @@ pub use relevance::{
 
 use backend_optimizer_path_costsize_seams as cz_seam;
 use backend_optimizer_path_equivclass_seams as ec_seam;
+use backend_optimizer_path_small_seams as ps_seam;
 use types_error::PgResult;
 use types_pathnodes::{
     EcId, PathNode, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo,
@@ -122,6 +123,16 @@ pub fn init_seams() {
     // the index path by `PathId`; resolve it to the `IndexPath.indexclauses` the
     // C caller passes (`path->indexclauses`) before delegating to the impl. A
     // non-`IndexPath` here is a caller bug (C only calls this with an IndexPath).
+    // `generate_implied_equalities_for_column` (equivclass.c:3239) is owned
+    // here; its seam is homed on path-small-seams (tidpath.c is the sole
+    // consumer). The seam carries the per-column matcher as a bare `fn`; adapt
+    // it to the real impl's `&mut dyn FnMut` callback.
+    ps_seam::generate_implied_equalities_for_column::set(
+        |root, run, rel, callback, prohibited_rels| {
+            let mut cb = move |r: &PlannerInfo, rl: RelId, ec, em| callback(r, rl, ec, em);
+            join::generate_implied_equalities_for_column(root, run, rel, &mut cb, prohibited_rels)
+        },
+    );
     cz_seam::is_redundant_with_indexclauses::set(|root, rinfo, index_path| {
         let indexclauses = match root.path(index_path) {
             PathNode::IndexPath(ip) => ip.indexclauses.clone(),

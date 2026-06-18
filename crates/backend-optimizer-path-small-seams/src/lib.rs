@@ -330,8 +330,9 @@ seam_core::seam!(
     /// `generate_implied_equalities_for_column(root, rel, callback, callback_arg,
     /// prohibited_rels)` (equivclass.c). Returns the generated join-clause
     /// `RestrictInfo` list as `RinfoId` handles.
-    pub fn generate_implied_equalities_for_column(
+    pub fn generate_implied_equalities_for_column<'mcx>(
         root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
         rel: RelId,
         callback: fn(&PlannerInfo, RelId, EcId, EmId) -> bool,
         prohibited_rels: &Relids,

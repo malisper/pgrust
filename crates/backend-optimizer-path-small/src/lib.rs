@@ -1628,6 +1628,7 @@ pub fn create_tidscan_paths<'mcx>(
         let lateral_referencers = clone_relids(&root.rel(rel).lateral_referencers);
         let clauses = seam::generate_implied_equalities_for_column::call(
             root,
+            run,
             rel,
             ec_member_matches_ctid,
             &lateral_referencers,
