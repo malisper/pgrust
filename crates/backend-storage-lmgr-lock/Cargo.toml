@@ -50,3 +50,12 @@ backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" 
 backend-utils-error = { path = "../backend-utils-error" }
 backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
 backend-access-transam-xlogrecovery-seams = { path = "../backend-access-transam-xlogrecovery-seams" }
+
+# 2PC: AtPrepare_Locks registers TWOPHASE_RM_LOCK_ID records; the recover /
+# postcommit / postabort callbacks reach the prepared-xact dummy PGPROC.
+backend-access-transam-twophase-seams = { path = "../backend-access-transam-twophase-seams" }
+backend-access-transam-twophase-rmgr = { path = "../backend-access-transam-twophase-rmgr" }
+
+# lock_twophase_standby_recover hands relation AccessExclusiveLocks to the
+# standby lock machinery.
+backend-storage-ipc-standby-seams = { path = "../backend-storage-ipc-standby-seams" }

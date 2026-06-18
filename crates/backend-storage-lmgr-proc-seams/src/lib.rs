@@ -381,6 +381,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pg_atomic_read_u64(&GetPGProcByNumber(procno)->waitStart)` — the
+    /// timestamp the proc started waiting (0 when not waiting). Read by
+    /// `GetLockStatusData` for each PROCLOCK holder.
+    pub fn proc_wait_start(procno: ProcNumber) -> TimestampTz
+);
+
+seam_core::seam!(
     /// `dlist_node_is_detached(&GetPGProcByNumber(procno)->links)`.
     pub fn proc_wait_link_is_detached(procno: ProcNumber) -> bool
 );

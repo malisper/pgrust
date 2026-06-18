@@ -16225,9 +16225,12 @@ dependencies = [
 name = "backend-storage-lmgr-lock"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-twophase-rmgr",
+ "backend-access-transam-twophase-seams",
  "backend-access-transam-xlog-seams",
  "backend-access-transam-xlogrecovery-seams",
  "backend-storage-ipc-shmem-seams",
+ "backend-storage-ipc-standby-seams",
  "backend-storage-lmgr-deadlock-seams",
  "backend-storage-lmgr-lmgr-seams",
  "backend-storage-lmgr-lock-seams",
@@ -16303,6 +16306,7 @@ dependencies = [
  "backend-lib-ilist",
  "backend-storage-ipc-procarray-seams",
  "backend-storage-ipc-shmem",
+ "backend-storage-lmgr-lock-seams",
  "backend-storage-lmgr-lwlock",
  "backend-storage-lmgr-predicate-seams",
  "backend-storage-lmgr-proc-seams",
@@ -16311,6 +16315,7 @@ dependencies = [
  "backend-utils-init-small-seams",
  "backend-utils-misc-guc-tables",
  "backend-utils-time-snapmgr-seams",
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",

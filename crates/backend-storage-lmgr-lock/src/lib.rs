@@ -34,6 +34,7 @@ extern crate alloc;
 
 mod fastpath;
 mod locking;
+mod recovery;
 mod state;
 mod tables;
 
@@ -308,6 +309,18 @@ pub fn init_seams() {
     seams::get_running_transaction_locks::set(locking::GetRunningTransactionLocks);
 
     seams::virtual_xact_lock_table_insert::set(locking::VirtualXactLockTableInsert);
+    seams::virtual_xact_lock_table_cleanup::set(locking::VirtualXactLockTableCleanup);
+
+    // Recovery / two-phase-commit / introspection entry points (recovery.rs).
+    seams::at_prepare_locks::set(recovery::AtPrepare_Locks);
+    seams::post_prepare_locks::set(recovery::PostPrepare_Locks);
+    seams::lock_twophase_recover::set(recovery::lock_twophase_recover);
+    seams::lock_twophase_postcommit::set(recovery::lock_twophase_postcommit);
+    seams::lock_twophase_postabort::set(recovery::lock_twophase_postabort);
+    seams::lock_twophase_standby_recover::set(recovery::lock_twophase_standby_recover);
+    seams::get_lock_conflicts::set(recovery::GetLockConflicts);
+    seams::get_lock_status_data::set(recovery::GetLockStatusData);
+    seams::proc_locks_hold_masks::set(recovery::proc_locks_hold_masks);
 
     // `describe_lock_tag` (proc.c's log path): delegate to lmgr.c's owner.
     seams::describe_lock_tag::set(|tag| {

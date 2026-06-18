@@ -445,6 +445,11 @@ fn set_proc_wait_start(procno: ProcNumber, value: u64) {
     with_proc_by_number(procno, |p| p.waitStart.write(value));
 }
 
+fn proc_wait_start(procno: ProcNumber) -> TimestampTz {
+    // `pg_atomic_read_u64(&GetPGProcByNumber(procno)->waitStart)`.
+    with_proc_by_number(procno, |p| p.waitStart.read() as TimestampTz)
+}
+
 fn proc_wait_link_is_detached(procno: ProcNumber) -> bool {
     // `dlist_node_is_detached(&GetPGProcByNumber(procno)->links)`: a node is
     // detached when both links are NULL (zero).
@@ -1017,6 +1022,7 @@ pub(crate) fn install() {
     seams::proc_wait_status::set(proc_wait_status);
     seams::set_proc_wait_fields::set(set_proc_wait_fields);
     seams::set_proc_wait_start::set(set_proc_wait_start);
+    seams::proc_wait_start::set(proc_wait_start);
     seams::proc_wait_link_is_detached::set(proc_wait_link_is_detached);
     seams::wakeup_proc_clear_wait::set(wakeup_proc_clear_wait);
     seams::proc_unlinked_from_wait_queue::set(proc_unlinked_from_wait_queue);

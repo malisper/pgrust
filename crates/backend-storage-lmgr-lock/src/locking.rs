@@ -94,20 +94,20 @@ fn warning(message: alloc::string::String) {
 
 /// `LockHashPartition(hashcode)` (lock.h) — the partition index of a hashcode.
 #[inline]
-fn lock_hash_partition(hashcode: u32) -> i32 {
+pub(crate) fn lock_hash_partition(hashcode: u32) -> i32 {
     (hashcode % (NUM_LOCK_PARTITIONS as u32)) as i32
 }
 
 /// `LockHashPartitionLock(hashcode)` (lock.h) — the `MainLWLockArray` offset of
 /// the partition LWLock for a hashcode.
 #[inline]
-fn lock_partition_lock_offset(hashcode: u32) -> usize {
+pub(crate) fn lock_partition_lock_offset(hashcode: u32) -> usize {
     (LOCK_MANAGER_LWLOCK_OFFSET + lock_hash_partition(hashcode)) as usize
 }
 
 /// `LockHashPartitionLockByIndex(i)` (lock.h).
 #[inline]
-fn lock_partition_lock_offset_by_index(i: i32) -> usize {
+pub(crate) fn lock_partition_lock_offset_by_index(i: i32) -> usize {
     (LOCK_MANAGER_LWLOCK_OFFSET + i) as usize
 }
 
@@ -1824,4 +1824,49 @@ fn out_of_shared_memory() -> types_error::PgError {
         types_error::ERRCODE_OUT_OF_MEMORY,
         "out of shared memory".into(),
     )
+}
+
+// ===========================================================================
+// Wrappers exposed to `crate::recovery` (the 2PC / introspection entry points
+// live in a sibling module but reuse this module's grant/release bookkeeping).
+// ===========================================================================
+
+/// `pg_error` for the recovery module.
+pub(crate) fn pg_error_internal(
+    sqlstate: types_error::SqlState,
+    message: alloc::string::String,
+) -> types_error::PgError {
+    pg_error(sqlstate, message)
+}
+
+/// `warning` for the recovery module.
+pub(crate) fn warning_msg(message: alloc::string::String) {
+    warning(message)
+}
+
+/// `GrantLock` for the recovery module.
+pub(crate) fn grant_lock_seam(locktag: &LOCKTAG, proc_no: ProcNumber, lockmode: LOCKMODE) {
+    grant_lock(locktag, proc_no, lockmode)
+}
+
+/// `SetupLockInTable(lockMethodTable, proc, locktag, hashcode, lockmode)` for a
+/// named proc (recovery / 2PC use it for the dummy PGPROC). The partition lock
+/// is held by the caller. Returns the holder ProcNumber on success.
+pub(crate) fn setup_lock_in_table_for(
+    proc_no: ProcNumber,
+    locktag: &LOCKTAG,
+    lockmode: LOCKMODE,
+) -> PgResult<Option<ProcNumber>> {
+    setup_lock_in_table(proc_no, locktag, lockmode)
+}
+
+/// `ConflictsWithRelationFastPath` for the recovery module.
+pub(crate) fn conflicts_with_relation_fast_path_pub(locktag: &LOCKTAG, mode: LOCKMODE) -> bool {
+    conflicts_with_relation_fast_path(locktag, mode)
+}
+
+/// `RemoveLocalLock` keyed on a (LOCKTAG, mode) pair for the recovery module.
+pub(crate) fn remove_local_lock_for(locktag: &LOCKTAG, mode: LOCKMODE) {
+    let localtag = make_localtag(locktag, mode);
+    remove_local_lock(&localtag)
 }

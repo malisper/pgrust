@@ -10,7 +10,12 @@ path = "src/lib.rs"
 
 [dependencies]
 seam-core = { path = "../seam-core" }
+mcx = { path = "../mcx" }
 backend-storage-lmgr-predicate-seams = { path = "../backend-storage-lmgr-predicate-seams" }
+
+# pg_safe_snapshot_blocking_pids: the seam is declared in lock-seams (reached
+# through lock.c's view function) but predicate.c owns the body; install here.
+backend-storage-lmgr-lock-seams = { path = "../backend-storage-lmgr-lock-seams" }
 
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }

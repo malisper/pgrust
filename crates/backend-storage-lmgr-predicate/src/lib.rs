@@ -202,6 +202,22 @@ pub fn init_seams() {
 
     seams::register_predicate_locking_xid::set(|xid| engine::RegisterPredicateLockingXid(xid));
 
+    // `pg_safe_snapshot_blocking_pids` (lockfuncs.c) surfaces this predicate.c
+    // entry point. The seam is *declared* in lock-seams (it is reached through
+    // lock.c's view function) but predicate.c owns the body, so we install it
+    // here (cross-crate). C `pg_safe_snapshot_blocking_pids` sizes the output
+    // buffer at `MaxBackends`; we collect into a `PgVec` in the caller context.
+    backend_storage_lmgr_lock_seams::safe_snapshot_blocking_pids::set(|mcx, blocked_pid| {
+        let max_backends = backend_utils_init_small_seams::max_backends::call();
+        let mut buf = vec![0i32; max_backends.max(0) as usize];
+        let n = engine::GetSafeSnapshotBlockingPids(blocked_pid, &mut buf, max_backends)?;
+        let mut out = mcx::PgVec::new_in(mcx);
+        for &pid in buf.iter().take(n.max(0) as usize) {
+            out.push(pid);
+        }
+        Ok(out)
+    });
+
     seams::pre_commit_check_for_serialization_failure::set(|| {
         engine::PreCommit_CheckForSerializationFailure()
     });
