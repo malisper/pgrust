@@ -557,6 +557,20 @@ pub fn relation_id_get_relation_shared(
     Ok(cell_of(handle))
 }
 
+/// Clone the shared cell for an ALREADY-PINNED entry WITHOUT taking another
+/// `rd_refcnt` pin (the dual-carry companion fetch — see the
+/// `relation_id_get_relation_cell` seam). Unlike
+/// [`relation_id_get_relation_shared`], this does NOT route through
+/// [`RelationIdGetRelation`], so it never increments the reference count: the
+/// copy path of the same `relation_open` already took the single pin this
+/// open's close releases. A miss returns `None` (the entry must already be in
+/// the cache, having been built/pinned by the copy fetch moments earlier).
+pub fn relation_id_get_relation_cell(
+    relation_id: Oid,
+) -> PgResult<Option<Rc<RefCell<RelationData>>>> {
+    Ok(cell_of(relation_id))
+}
+
 /* ==========================================================================
  * Seam-facing scalar reads off the owned entry.
  * ======================================================================== */

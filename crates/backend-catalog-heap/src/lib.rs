@@ -780,10 +780,15 @@ pub fn heap_create<'mcx>(
 
     // Open the just-built relcache entry to read its `rd_rel`/`rd_locator` for
     // the storage providers below (C: `new_rel_desc->rd_rel->relkind`, the
-    // `rd_locator` smgr uses). The entry is registry-owned; relation_open with
-    // NoLock just bumps the refcount (the AccessExclusiveLock is taken by the
-    // caller for the cataloged path; the uncataloged callers hold their own).
-    let rel_data = backend_access_common_relation::relation_open(mcx, rel, NoLock)?;
+    // `rd_locator` smgr uses). The entry was already pinned once by
+    // `RelationBuildLocalRelation`'s `RelationIncrementReferenceCount`; open it
+    // PIN-FREE so closing this handle (`rel_data.close(NoLock)` below) releases
+    // exactly that single build pin — mirroring C's `heap_create` returning the
+    // pinned `new_rel_desc` and `heap_create_with_catalog` closing it with
+    // `table_close(new_rel_desc, NoLock)`. A normal `relation_open` here would
+    // take a second pin, leaving the build pin stuck (a later DROP/TRUNCATE
+    // `CheckTableNotInUse` would see refcnt > expected and fail).
+    let rel_data = backend_access_common_relation::relation_open_prebuilt(mcx, rel)?;
 
     /*
      * Have the storage manager create the relation's disk file, if needed.

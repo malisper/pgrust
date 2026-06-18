@@ -21,7 +21,9 @@ use types_error::{PgError, PgResult};
 pub fn init_seams() {
     // --- core-entry-store ---
     sx::relation_id_get_relation::set(relation_id_get_relation);
+    sx::relation_project_existing::set(relation_project_existing);
     sx::relation_id_get_relation_shared::set(relation_id_get_relation_shared);
+    sx::relation_id_get_relation_cell::set(relation_id_get_relation_cell);
     sx::relation_close::set(relation_close);
     sx::relation_rd_tableam::set(relation_rd_tableam);
     sx::relation_rd_tableam_by_oid::set(relation_rd_tableam_by_oid);
@@ -209,6 +211,31 @@ pub fn init_seams() {
     hx::relation_is_local::set(hio_relation_is_local);
     hx::relation_get_relation_name::set(hio_relation_get_relation_name);
     hx::relation_extension_lock_waiter_count::set(relation_extension_lock_waiter_count);
+
+    // tablecmds.c CheckTableNotInUse / ExecuteTruncate read these rel.h fields
+    // (rd_isnailed / rd_refcnt / rd_createSubid) off `&Relation`; the relcache
+    // owns them, resolving against the live owned entry by OID.
+    use backend_commands_tablecmds_seams as tcx;
+    tcx::relation_is_nailed::set(tc_relation_is_nailed);
+    tcx::relation_get_refcount::set(tc_relation_get_refcount);
+    tcx::relation_get_create_subid::set(tc_relation_get_create_subid);
+}
+
+/// `rel->rd_isnailed` (rel.h) — read off the live owned relcache entry.
+fn tc_relation_is_nailed(rel: &types_rel::Relation<'_>) -> PgResult<bool> {
+    crate::core_entry_store::with_relation(rel.rd_id, |rd| rd.rd_isnailed)
+}
+
+/// `rel->rd_refcnt` (rel.h) — the relcache pin count on the live owned entry.
+fn tc_relation_get_refcount(rel: &types_rel::Relation<'_>) -> PgResult<i32> {
+    crate::core_entry_store::with_relation(rel.rd_id, |rd| rd.rd_refcnt)
+}
+
+/// `rel->rd_createSubid` (rel.h) — the sub-xact that created this relation.
+fn tc_relation_get_create_subid(
+    rel: &types_rel::Relation<'_>,
+) -> PgResult<types_core::SubTransactionId> {
+    crate::core_entry_store::with_relation(rel.rd_id, |rd| rd.rd_createSubid)
 }
 
 /// Project the registry-owned relcache entry into a transient `Relation` read
@@ -836,6 +863,21 @@ fn relation_id_get_relation<'mcx>(
         .map(Some)
 }
 
+fn relation_project_existing<'mcx>(
+    mcx: Mcx<'mcx>,
+    relation_id: Oid,
+) -> PgResult<Option<types_rel::RelationData<'mcx>>> {
+    // Pin-free projection of an already-pinned entry: no RelationIdGetRelation
+    // (and so no second `rd_refcnt += 1`); just project the live entry.
+    match crate::core_entry_store::cache_lookup(relation_id) {
+        Some(rd) => crate::core_entry_store::with_relation(rd, |r| {
+            crate::build::project_relation_data(mcx, r)
+        })?
+        .map(Some),
+        None => Ok(None),
+    }
+}
+
 fn relation_id_get_relation_shared(
     relation_id: Oid,
 ) -> PgResult<
@@ -846,6 +888,16 @@ fn relation_id_get_relation_shared(
     // crate-local core-entry-store routine; coexists with the copy-projecting
     // `relation_id_get_relation` above.
     crate::core_entry_store::relation_id_get_relation_shared(relation_id)
+}
+
+fn relation_id_get_relation_cell(
+    relation_id: Oid,
+) -> PgResult<
+    Option<std::rc::Rc<std::cell::RefCell<crate::core_entry_store::RelationData>>>,
+> {
+    // Pin-free dual-carry cell fetch: clone the cell of an already-pinned
+    // entry without a second `rd_refcnt` increment (see the seam doc).
+    crate::core_entry_store::relation_id_get_relation_cell(relation_id)
 }
 
 fn relation_close(relation_id: Oid) -> PgResult<()> {

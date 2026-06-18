@@ -57,12 +57,15 @@ fn relation_closer(relid: Oid, lockmode: LOCKMODE) -> PgResult<()> {
 /// Fetch a CLONE of the relcache's shared cell for `relationId` (the
 /// dual-carry handle's pin). This is called right after
 /// `relation_id_get_relation` (the copy) succeeds, so the entry is already
-/// built and pinned in the cache; the shared lookup against the same cache must
-/// find it. A `None` here would mean the entry vanished between the two
+/// built and pinned in the cache; this PIN-FREE cell fetch finds the same
+/// cell WITHOUT taking a second `rd_refcnt` pin (the copy path already took
+/// the single pin this open's close releases — taking another here would
+/// double-count the open, so `CheckTableNotInUse` would later see an inflated
+/// refcount). A `None` here would mean the entry vanished between the two
 /// lookups, which cannot happen within a single open — treated as the same
 /// `could not open relation` error C raises for the copy path.
-fn relation_id_get_relation_shared(relationId: Oid) -> PgResult<types_rel::RelcacheCell> {
-    match backend_utils_cache_relcache_seams::relation_id_get_relation_shared::call(relationId)? {
+fn relation_id_get_relation_cell(relationId: Oid) -> PgResult<types_rel::RelcacheCell> {
+    match backend_utils_cache_relcache_seams::relation_id_get_relation_cell::call(relationId)? {
         // Erase the concrete `Rc<RefCell<RelationData>>` to the handle's
         // type-erased `Rc<dyn Any>` pin (lossless `Rc` unsizing coercion). The
         // `strong_count` pin rides along; the concrete cell is recovered by
@@ -85,6 +88,23 @@ fn finish_open<'mcx>(
     lockmode: LOCKMODE,
     check_bootstrap: bool,
 ) -> PgResult<Relation<'mcx>> {
+    finish_open_inner(cell, data, lockmode, check_bootstrap, false)
+}
+
+/// `finish_open` with control over the lock-held-by-me self-check. `prebuilt`
+/// suppresses that check for a just-built local relation
+/// ([`relation_open_prebuilt`]): C never re-opens the freshly built
+/// `new_rel_desc` through `relation_open` (it uses the build's return directly
+/// and locks it *afterwards* via `LockRelation` in `index_create`), so the
+/// "caller must already hold a lock" assertion — which guards opens of
+/// *existing* relations — does not apply.
+fn finish_open_inner<'mcx>(
+    cell: types_rel::RelcacheCell,
+    data: RelationData<'mcx>,
+    lockmode: LOCKMODE,
+    check_bootstrap: bool,
+    prebuilt: bool,
+) -> PgResult<Relation<'mcx>> {
     // DUAL-CARRY (F1): the handle holds a CLONE of the relcache's shared cell
     // alongside the trimmed projected copy. The clone makes
     // `Rc::strong_count > 1` for as long as this relation is open, so the
@@ -100,7 +120,8 @@ fn finish_open<'mcx>(
     //        [IsBootstrapProcessingMode() ||]
     //        CheckRelationLockedByMe(r, AccessShareLock, true));
     debug_assert!(
-        lockmode != NoLock
+        prebuilt
+            || lockmode != NoLock
             || (check_bootstrap
                 && backend_utils_init_miscinit_seams::is_bootstrap_processing_mode::call())
             || backend_storage_lmgr_lmgr_seams::check_relation_locked_by_me::call(
@@ -170,9 +191,45 @@ pub fn relation_open<'mcx>(
     // Also obtain a CLONE of the cache's shared cell (C's live `RelationData
     // *`) for the handle to pin (dual-carry, F1). Same lookup against the same
     // cache the copy came from; the entry is already built/pinned above.
-    let cell = relation_id_get_relation_shared(relationId)?;
+    let cell = relation_id_get_relation_cell(relationId)?;
 
     finish_open(cell, data, lockmode, true)
+}
+
+/// Open a just-built local relation (`RelationBuildLocalRelation`'s result)
+/// WITHOUT taking a fresh `rd_refcnt` pin: the build already took the single
+/// `RelationIncrementReferenceCount` pin, so a normal [`relation_open`] would
+/// over-pin the entry (leaving a stuck reference that later makes
+/// `CheckTableNotInUse` on DROP/TRUNCATE report the relation as still in use).
+/// The returned handle is armed with the close path, so dropping/closing it
+/// releases that single build pin — exactly mirroring C's
+/// `heap_create` (returns the pinned `new_rel_desc`) followed by
+/// `table_close(new_rel_desc, NoLock)` in `heap_create_with_catalog`.
+///
+/// Takes `NoLock` (the caller already holds `AccessExclusiveLock` for the
+/// cataloged path, or holds its own for the uncataloged callers), so no lock
+/// is acquired or released here.
+pub fn relation_open_prebuilt<'mcx>(
+    mcx: Mcx<'mcx>,
+    relationId: Oid,
+) -> PgResult<Relation<'mcx>> {
+    // Pin-free projection of the already-pinned entry.
+    let data = backend_utils_cache_relcache_seams::relation_project_existing::call(
+        mcx, relationId,
+    )?
+    .ok_or_else(|| {
+        PgError::error(format!("could not open relation with OID {relationId}"))
+            .with_sqlstate(ERRCODE_INTERNAL_ERROR)
+    })?;
+
+    // Pin-free shared-cell clone (the dual-carry strong_count pin only).
+    let cell = relation_id_get_relation_cell(relationId)?;
+
+    // prebuilt => suppress the lock-held-by-me self-check: this is a just-built
+    // local relation nobody else can see yet (C locks it AFTER the build, e.g.
+    // `LockRelation` in `index_create`), so the assertion guarding opens of
+    // existing relations does not apply.
+    finish_open_inner(cell, data, NoLock, true, true)
 }
 
 /// `try_relation_open(Oid relationId, LOCKMODE lockmode)`.
@@ -215,7 +272,7 @@ pub fn try_relation_open<'mcx>(
     };
 
     // Also obtain a CLONE of the cache's shared cell to pin (dual-carry, F1).
-    let cell = relation_id_get_relation_shared(relationId)?;
+    let cell = relation_id_get_relation_cell(relationId)?;
 
     // No bootstrap short-circuit in try_relation_open's C Assert.
     Ok(Some(finish_open(cell, data, lockmode, false)?))

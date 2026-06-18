@@ -26,6 +26,12 @@ backend-access-heap-hio-seams = { path = "../backend-access-heap-hio-seams" }
 # handle off the owned entry to bridge the OID-keyed hio-seam to the FSM owner.
 backend-storage-freespace-seams = { path = "../backend-storage-freespace-seams" }
 
+# tablecmds.c's CheckTableNotInUse / truncate read rel.h fields
+# (rd_isnailed / rd_refcnt / rd_createSubid) declared on `&Relation` in
+# tablecmds-seams; the relcache is their real owner (resolves off the owned
+# entry by OID).
+backend-commands-tablecmds-seams = { path = "../backend-commands-tablecmds-seams" }
+
 # bufmgr / visibilitymap &Relation-keyed seams: relcache projects a transient
 # read handle off the owned entry to bridge the OID-keyed hio.c seams (the heap
 # insertion read/extend buffer path) to their real owners.

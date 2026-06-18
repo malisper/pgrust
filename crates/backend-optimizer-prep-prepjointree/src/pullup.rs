@@ -1523,6 +1523,12 @@ pub(crate) fn build_virtual_generated_columns_tlist<'mcx>(
 
     if !has_virtual {
         // table_close(rel, NoLock); continue;  — no virtual generated columns.
+        // `relation_id_get_relation` took the `RelationIncrementReferenceCount`
+        // pin but handed back a value-slice copy (no RAII closer), so release
+        // it explicitly here to match C's `table_close(rel, NoLock)`. Without
+        // this the pin leaks and a later `CheckTableNotInUse` (DROP/TRUNCATE)
+        // sees the relation as still in use.
+        backend_utils_cache_relcache_seams::relation_close::call(relid)?;
         return Ok(None);
     }
 

@@ -20277,6 +20277,7 @@ dependencies = [
  "backend-catalog-binary-upgrade-seams",
  "backend-catalog-catalog-seams",
  "backend-catalog-storage-seams",
+ "backend-commands-tablecmds-seams",
  "backend-nodes-core-seams",
  "backend-nodes-read-seams",
  "backend-optimizer-util-plancat-ext-seams",

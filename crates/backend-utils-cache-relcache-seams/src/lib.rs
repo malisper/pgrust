@@ -97,6 +97,23 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// Project the consumed slice of an ALREADY-PINNED entry into `mcx`
+    /// WITHOUT taking another `rd_refcnt` pin. The prebuilt-entry companion to
+    /// [`relation_id_get_relation`], used by `heap_create`: the entry was just
+    /// built by `RelationBuildLocalRelation`, which already took the single
+    /// `RelationIncrementReferenceCount` pin C's `heap_create_with_catalog`
+    /// later releases with `table_close(new_rel_desc, NoLock)`. Opening the
+    /// just-built entry via the normal (incrementing) path would over-pin it,
+    /// leaving a stuck reference that makes a later `CheckTableNotInUse`
+    /// (DROP/TRUNCATE) report the relation as still in use. `Ok(None)` if the
+    /// entry is absent (cannot happen for a freshly built local relation).
+    pub fn relation_project_existing<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        relation_id: types_core::primitive::Oid,
+    ) -> types_error::PgResult<Option<types_rel::RelationData<'mcx>>>
+);
+
+seam_core::seam!(
     /// `RelationIdGetRelation(relationId)` + hand back C's live shared pointer
     /// (relcache.c): the ADDITIVE shared-ref entry point. Same lookup/build/pin
     /// logic as [`relation_id_get_relation`], but instead of projecting a *copy*
@@ -115,6 +132,22 @@ seam_core::seam!(
     /// (kept alive for the consumers that have not migrated yet); both
     /// representations are produced from the same cell.
     pub fn relation_id_get_relation_shared(
+        relation_id: types_core::primitive::Oid,
+    ) -> types_error::PgResult<
+        Option<std::rc::Rc<std::cell::RefCell<types_relcache_entry::RelationData>>>,
+    >
+);
+
+seam_core::seam!(
+    /// Clone the cache's shared cell for an ALREADY-PINNED entry, WITHOUT
+    /// taking a second `rd_refcnt` pin. This is the dual-carry companion to
+    /// [`relation_id_get_relation`]: `relation_open` pins the entry once via
+    /// the copy path, then fetches the same cell here to ride alongside the
+    /// trimmed copy. Taking another `rd_refcnt` here would double-count the
+    /// single open (the handle's closer only decrements once), so this is a
+    /// pin-free clone — the `Rc::strong_count` it adds is the cell-allocation
+    /// pin, not the `rd_refcnt` bookkeeping. `Ok(None)` if the entry is absent.
+    pub fn relation_id_get_relation_cell(
         relation_id: types_core::primitive::Oid,
     ) -> types_error::PgResult<
         Option<std::rc::Rc<std::cell::RefCell<types_relcache_entry::RelationData>>>,
