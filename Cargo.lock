@@ -18787,6 +18787,7 @@ dependencies = [
  "backend-utils-adt-expanded-methods-seams",
  "backend-utils-adt-format-type-seams",
  "backend-utils-adt-misc2-seams",
+ "backend-utils-adt-oid",
  "backend-utils-adt-oid-seams",
  "backend-utils-adt-regproc-seams",
  "backend-utils-adt-ruleutils-seams",

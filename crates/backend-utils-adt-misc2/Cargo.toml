@@ -73,6 +73,11 @@ backend-utils-adt-ruleutils-seams = { path = "../backend-utils-adt-ruleutils-sea
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
 backend-utils-adt-acl-seams = { path = "../backend-utils-adt-acl-seams" }
 backend-utils-adt-oid-seams = { path = "../backend-utils-adt-oid-seams" }
+# The reg* binary wire codecs (reg*recv/reg*send) are byte-for-byte oidrecv /
+# oidsend (regproc.c: `return oidrecv/oidsend(fcinfo)`); we register them under
+# the reg* OIDs pointing at the real oid.c value cores (no cycle — oid.c does
+# not depend on this unit).
+backend-utils-adt-oid = { path = "../backend-utils-adt-oid" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
 backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
 backend-parser-parse-type-seams = { path = "../backend-parser-parse-type-seams" }

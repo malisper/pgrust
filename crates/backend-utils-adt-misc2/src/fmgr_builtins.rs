@@ -23,6 +23,7 @@ use std::string::{String, ToString};
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
 use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_stringinfo::StringInfo;
 
 use types_core::Oid;
 
@@ -202,6 +203,41 @@ fn fc_regout(
         Ok(s) => ret_cstring(fcinfo, s.as_str().to_string()),
         Err(e) => raise(e),
     }
+}
+
+/// `reg*recv(internal)` — every reg* binary-input is byte-for-byte `oidrecv`
+/// (regproc.c: `return oidrecv(fcinfo)`). The wire `StringInfo` message buffer
+/// arrives on the by-ref lane as its raw bytes; rebuild a `StringInfo` (in a
+/// scratch context) and hand it to the real `oid.c` value core.
+fn fc_regrecv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let src = fcinfo
+        .ref_arg(0)
+        .and_then(|p| p.as_varlena())
+        .expect("reg*recv: by-ref StringInfo arg missing from by-ref lane");
+    let m = scratch_mcx();
+    let mut data = mcx::PgVec::new_in(m.mcx());
+    if data.try_reserve(src.len()).is_err() {
+        raise(types_error::PgError::error("out of memory"));
+    }
+    data.extend_from_slice(src);
+    let mut buf = StringInfo::from_vec(data);
+    match backend_utils_adt_oid::oidrecv(&mut buf) {
+        Ok(o) => ret_oid(o),
+        Err(e) => raise(e),
+    }
+}
+
+/// `reg*send(reg*)` — every reg* binary-output is byte-for-byte `oidsend`
+/// (regproc.c: `return oidsend(fcinfo)`). Delegates to the real `oid.c` value
+/// core and writes the `bytea` wire image onto the by-ref lane.
+fn fc_regsend(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let arg1 = arg_oid(fcinfo, 0);
+    let m = scratch_mcx();
+    let image = match backend_utils_adt_oid::oidsend(m.mcx(), arg1) {
+        Ok(bytea) => bytea.as_bytes().to_vec(),
+        Err(e) => raise(e),
+    };
+    ret_bytea_image(fcinfo, &image)
 }
 
 fn fc_regprocin(f: &mut FunctionCallInfoBaseData) -> Datum {
@@ -900,6 +936,29 @@ pub fn register_misc2_builtins() {
         builtin(4098, "regrolein", 1, true, false, fc_regrolein),
         builtin(4193, "regcollationin", 1, true, false, fc_regcollationin),
         builtin(4194, "regcollationout", 1, true, false, fc_regcollationout),
+        // ---- regproc.c: reg* binary wire codecs (byte-for-byte oidrecv/oidsend) ----
+        builtin(2444, "regprocrecv", 1, true, false, fc_regrecv),
+        builtin(2445, "regprocsend", 1, true, false, fc_regsend),
+        builtin(2446, "regprocedurerecv", 1, true, false, fc_regrecv),
+        builtin(2447, "regproceduresend", 1, true, false, fc_regsend),
+        builtin(2448, "regoperrecv", 1, true, false, fc_regrecv),
+        builtin(2449, "regopersend", 1, true, false, fc_regsend),
+        builtin(2450, "regoperatorrecv", 1, true, false, fc_regrecv),
+        builtin(2451, "regoperatorsend", 1, true, false, fc_regsend),
+        builtin(2452, "regclassrecv", 1, true, false, fc_regrecv),
+        builtin(2453, "regclasssend", 1, true, false, fc_regsend),
+        builtin(2454, "regtyperecv", 1, true, false, fc_regrecv),
+        builtin(2455, "regtypesend", 1, true, false, fc_regsend),
+        builtin(4196, "regcollationrecv", 1, true, false, fc_regrecv),
+        builtin(4197, "regcollationsend", 1, true, false, fc_regsend),
+        builtin(3738, "regconfigrecv", 1, true, false, fc_regrecv),
+        builtin(3739, "regconfigsend", 1, true, false, fc_regsend),
+        builtin(3773, "regdictionaryrecv", 1, true, false, fc_regrecv),
+        builtin(3774, "regdictionarysend", 1, true, false, fc_regsend),
+        builtin(4094, "regrolerecv", 1, true, false, fc_regrecv),
+        builtin(4095, "regrolesend", 1, true, false, fc_regsend),
+        builtin(4087, "regnamespacerecv", 1, true, false, fc_regrecv),
+        builtin(4088, "regnamespacesend", 1, true, false, fc_regsend),
         // ---- regproc.c: text->reg implicit cast + to_reg* lookups ----
         builtin(1079, "text_regclass", 1, true, false, fc_text_regclass),
         builtin(3476, "to_regoperator", 1, true, false, fc_to_regoperator),
