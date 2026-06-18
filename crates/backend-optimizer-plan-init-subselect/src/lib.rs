@@ -275,6 +275,24 @@ pub fn init_seams() {
     backend_optimizer_plan_createplan_seams::ss_attach_initplans::set(|mcx, root, plan| {
         finalize::SS_attach_initplans(mcx, root, plan)
     });
+
+    // `resolve_cte_subplan` / `resolve_worktable_param` — the SubPlan-init /
+    // wt_param_id resolution legs of create_ctescan_plan / create_worktablescan_plan
+    // (createplan.c:3884 / :4055). They dereference the init SubPlans and
+    // `wt_param_id` that SS_process_ctes builds here, so subselect.c owns them.
+    backend_optimizer_plan_createplan_seams::resolve_cte_subplan::set(
+        subplan::resolve_cte_subplan,
+    );
+    backend_optimizer_plan_createplan_seams::resolve_worktable_param::set(
+        subplan::resolve_worktable_param,
+    );
+
+    // `multiexpr_param_lookup` (setrefs-seams) — resolve a PARAM_MULTIEXPR Param
+    // to its replacement expression. The replacement Params are interned into the
+    // node arena by SS_process_sublinks here, so subselect.c owns the lookup.
+    backend_optimizer_plan_setrefs_seams::multiexpr_param_lookup::set(
+        subplan::resolve_multiexpr_param,
+    );
 }
 
 // Suppress "unused" until consumers reference these re-exports.
