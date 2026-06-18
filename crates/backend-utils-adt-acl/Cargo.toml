@@ -21,6 +21,9 @@ backend-utils-misc-superuser-seams = { path = "../backend-utils-misc-superuser-s
 backend-utils-misc-guc-funcs-seams = { path = "../backend-utils-misc-guc-funcs-seams" }
 mcx = { path = "../mcx" }
 types-acl = { path = "../types-acl" }
+types-fmgr = { path = "../types-fmgr" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
+backend-utils-error-elog-seams = { path = "../backend-utils-error-elog-seams" }
 types-cache = { path = "../types-cache" }
 types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }

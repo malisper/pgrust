@@ -31,21 +31,13 @@
 extern crate alloc;
 
 use types_acl::AclMode;
-use types_nodes::fmgr::FunctionCallInfoBaseData;
 
 pub mod acl_ops;
 pub mod acldefault;
 pub mod aclitem_io;
+pub mod fmgr_builtins;
 pub mod has_privilege;
 pub mod role_membership;
-
-/// `FunctionCallInfo` (`fmgr.h`): the call frame an fmgr-callable
-/// (`PG_FUNCTION_ARGS`) function receives. C passes
-/// `FunctionCallInfoBaseData *`; the owned model passes the frame by mutable
-/// reference. The argument decoding (`PG_GETARG_*`) and result encoding
-/// (`PG_RETURN_*`) happen inside each function against this frame, routed
-/// through the fmgr owner's seams.
-pub type FunctionCallInfo<'a, 'mcx> = &'a mut FunctionCallInfoBaseData<'mcx>;
 
 /// C: `typedef struct { const char *name; AclMode value; } priv_map` —
 /// one entry of a privilege-name → privilege-bit table.
@@ -75,4 +67,9 @@ pub fn init_seams() {
     backend_utils_adt_acl_seams::has_bypassrls_privilege::set(
         role_membership::has_bypassrls_privilege,
     );
+
+    // Register acl.c's SQL-callable functions into the fmgr-core builtin table
+    // (C: their `fmgr_builtins[]` rows): the aclitem type I/O + the
+    // has_*_privilege / pg_has_role read families.
+    fmgr_builtins::register_acl_builtins();
 }
