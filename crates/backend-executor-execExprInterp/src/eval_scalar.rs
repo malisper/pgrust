@@ -33,6 +33,7 @@
 
 use backend_utils_fmgr_fmgr_seams::{
     function_call1_coll, function_call2_coll, function_call_invoke,
+    function_call_invoke_datum,
 };
 // The bare-word newtype: the scalar form the fmgr/arrayfuncs seams and the
 // step-payload eval helpers operate on.
@@ -60,14 +61,22 @@ use types_nodes::EStateData;
 /// call frame's `args[]` (the C recursion writes `fcinfo->args[i]` directly;
 /// the owned model gathers them here, immediately before dispatch).
 ///
-/// `func_step_inputs(state, op)` returns `(fn_oid, fncollation, args, nargs)`.
+/// `func_step_inputs(state, op)` returns `(fn_oid, fncollation, args, nulls,
+/// nargs)`.
+///
+/// The per-argument `args[i]` carry the CANONICAL `Datum<'mcx>` cloned straight
+/// from the gathered result cell (the cell already holds the canonical value,
+/// e.g. a by-reference `text`/`name` column word) — they are NOT flattened to a
+/// bare word, so a by-reference argument survives the call-frame gather (WALL
+/// 1aq). The accompanying per-arg `isnull` flags are returned in parallel.
 fn func_step_inputs<'mcx>(
     state: &ExprState<'mcx>,
     op: usize,
 ) -> (
     types_core::primitive::Oid,
     types_core::primitive::Oid,
-    Vec<types_datum::NullableDatum>,
+    Vec<DatumV<'mcx>>,
+    Vec<bool>,
     usize,
 ) {
     match step_data(state, op) {
@@ -87,19 +96,17 @@ fn func_step_inputs<'mcx>(
             let cells = arg_cells
                 .as_ref()
                 .expect("EEOP_FUNCEXPR: op->d.func.arg_cells missing");
-            // fcinfo->args[i].value  = *cell.value (the bare word);
+            // fcinfo->args[i].value  = *cell.value (the canonical Datum — the cell
+            //                          already carries the by-ref/by-value image);
             // fcinfo->args[i].isnull =  cell.isnull.
-            let args: Vec<types_datum::NullableDatum> = cells
-                .iter()
-                .map(|&cell| {
-                    let c = state.result_cells.get(cell);
-                    types_datum::NullableDatum {
-                        value: word_of(&c.value),
-                        isnull: c.isnull,
-                    }
-                })
-                .collect();
-            (finfo.fn_oid, fcinfo.fncollation, args, *nargs as usize)
+            let mut args: Vec<DatumV<'mcx>> = Vec::with_capacity(cells.len());
+            let mut nulls: Vec<bool> = Vec::with_capacity(cells.len());
+            for &cell in cells.iter() {
+                let c = state.result_cells.get(cell);
+                args.push(c.value.clone());
+                nulls.push(c.isnull);
+            }
+            (finfo.fn_oid, fcinfo.fncollation, args, nulls, *nargs as usize)
         }
         other => unreachable!("EEOP_FUNCEXPR step carries the wrong payload: {other:?}"),
     }
@@ -126,8 +133,9 @@ pub fn exec_func_step<'mcx>(
     state: &mut ExprState<'mcx>,
     op: usize,
     strict: bool,
+    estate: &EStateData<'mcx>,
 ) -> PgResult<()> {
-    let (fn_oid, collation, args, _nargs) = func_step_inputs(state, op);
+    let (fn_oid, collation, args, nulls, _nargs) = func_step_inputs(state, op);
     let (resvalue_id, resnull_id) = res_cells(state, op);
     let _ = resnull_id; // value/is-null share one cell
 
@@ -139,31 +147,37 @@ pub fn exec_func_step<'mcx>(
     // `result_cells[0]`. The raw `result_cells.set` bypassed that, so a step
     // whose result slot is the ExprState's own cell (e.g. a top-level qual's
     // FUNCEXPR) wrote into the wrong location and the EEOP_QUAL reader saw zero.
-    if strict && args.iter().any(|a| a.isnull) {
+    if strict && nulls.iter().any(|&n| n) {
         crate::interp_loop::write_cell(state, resvalue_id, DatumV::null(), true);
         return Ok(());
     }
 
     // fcinfo->isnull = false; d = op->d.func.fn_addr(fcinfo); read back isnull.
-    let (word, isnull) = function_call_invoke::call(fn_oid, collation, &args)?;
+    // The canonical (by-reference-capable) call-frame lane: args carry their full
+    // Datum image — a by-ref text/name column survives the gather (WALL 1aq). The
+    // result is materialized into the per-query context.
+    let mcx = estate.es_query_cxt;
+    let (value, isnull) = function_call_invoke_datum::call(mcx, fn_oid, collation, &args)?;
 
     // *op->resvalue = d;  *op->resnull = fcinfo->isnull;
-    crate::interp_loop::write_cell(state, resvalue_id, DatumV::from_usize(word.as_usize()), isnull);
+    crate::interp_loop::write_cell(state, resvalue_id, value, isnull);
     Ok(())
 }
 
 /// Read a `Func`-payload step's `(fn_oid, fncollation, make_ro)` and gather its
 /// argument result cells into the `args[]` call frame. Shared by the
 /// `EEOP_DISTINCT` / `EEOP_NOT_DISTINCT` / `EEOP_NULLIF` arms (they all carry the
-/// C `op->d.func` payload). Mirrors `func_step_inputs` but also surfaces the
-/// `make_ro` flag NULLIF needs.
+/// C `op->d.func` payload). Mirrors `func_step_inputs` (the canonical
+/// by-reference-capable gather — WALL 1aq) but also surfaces the `make_ro` flag
+/// NULLIF needs.
 fn distinct_step_inputs<'mcx>(
     state: &ExprState<'mcx>,
     op: usize,
 ) -> (
     types_core::primitive::Oid,
     types_core::primitive::Oid,
-    Vec<types_datum::NullableDatum>,
+    Vec<DatumV<'mcx>>,
+    Vec<bool>,
     bool,
 ) {
     match step_data(state, op) {
@@ -183,17 +197,14 @@ fn distinct_step_inputs<'mcx>(
             let cells = arg_cells
                 .as_ref()
                 .expect("EEOP_DISTINCT/NULLIF: op->d.func.arg_cells missing");
-            let args: Vec<types_datum::NullableDatum> = cells
-                .iter()
-                .map(|&cell| {
-                    let c = state.result_cells.get(cell);
-                    types_datum::NullableDatum {
-                        value: word_of(&c.value),
-                        isnull: c.isnull,
-                    }
-                })
-                .collect();
-            (finfo.fn_oid, fcinfo.fncollation, args, *make_ro)
+            let mut args: Vec<DatumV<'mcx>> = Vec::with_capacity(cells.len());
+            let mut nulls: Vec<bool> = Vec::with_capacity(cells.len());
+            for &cell in cells.iter() {
+                let c = state.result_cells.get(cell);
+                args.push(c.value.clone());
+                nulls.push(c.isnull);
+            }
+            (finfo.fn_oid, fcinfo.fncollation, args, nulls, *make_ro)
         }
         other => unreachable!("EEOP_DISTINCT/NULLIF step carries the wrong payload: {other:?}"),
     }
@@ -216,12 +227,13 @@ pub fn exec_distinct_step<'mcx>(
     state: &mut ExprState<'mcx>,
     op: usize,
     not_distinct: bool,
+    estate: &EStateData<'mcx>,
 ) -> PgResult<()> {
-    let (fn_oid, collation, args, _make_ro) = distinct_step_inputs(state, op);
+    let (fn_oid, collation, args, nulls, _make_ro) = distinct_step_inputs(state, op);
     let (resvalue_id, _resnull_id) = res_cells(state, op);
 
-    let a0_null = args[0].isnull;
-    let a1_null = args[1].isnull;
+    let a0_null = nulls[0];
+    let a1_null = nulls[1];
 
     if a0_null && a1_null {
         // Both NULL: DISTINCT -> false, NOT DISTINCT -> true.
@@ -237,14 +249,16 @@ pub fn exec_distinct_step<'mcx>(
         );
     } else {
         // Neither null: apply the equality function. fcinfo->isnull = false;
-        // eqresult = op->d.func.fn_addr(fcinfo);
-        let (eqword, isnull) = function_call_invoke::call(fn_oid, collation, &args)?;
+        // eqresult = op->d.func.fn_addr(fcinfo). The canonical (by-ref-capable)
+        // call frame: the compared values keep their full Datum image.
+        let mcx = estate.es_query_cxt;
+        let (eqval, isnull) = function_call_invoke_datum::call(mcx, fn_oid, collation, &args)?;
         // DISTINCT inverts "=" (BoolGetDatum(!DatumGetBool(eqresult))); NOT
         // DISTINCT returns the raw "=" result.
         let value = if not_distinct {
-            DatumV::from_usize(eqword.as_usize())
+            eqval
         } else {
-            DatumV::from_bool(!Datum::from_usize(eqword.as_usize()).as_bool())
+            DatumV::from_bool(!eqval.as_bool())
         };
         state
             .result_cells
@@ -273,14 +287,15 @@ pub fn exec_nullif_step<'mcx>(
     op: usize,
     estate: &EStateData<'mcx>,
 ) -> PgResult<()> {
-    let (fn_oid, collation, mut args, make_ro) = distinct_step_inputs(state, op);
+    let (fn_oid, collation, mut args, nulls, make_ro) = distinct_step_inputs(state, op);
     let (resvalue_id, _resnull_id) = res_cells(state, op);
 
     // Datum save_arg0 = fcinfo->args[0].value (preserved across the make_ro
     // rewrite so the returned value is the ORIGINAL arg0, possibly read-write).
-    let save_arg0 = args[0].value;
+    // The canonical (by-ref-capable) gather: keep arg0's full Datum image.
+    let save_arg0 = args[0].clone();
 
-    if !args[0].isnull && !args[1].isnull {
+    if !nulls[0] && !nulls[1] {
         // The first argument might be an expanded datum; the comparison function
         // must receive a read-only pointer. The make_ro transform lives in the
         // expandeddatum owner, so it crosses the seam (mirror EEOP_ASSIGN_TMP_*).
@@ -288,16 +303,18 @@ pub fn exec_nullif_step<'mcx>(
             let mcx = estate.es_query_cxt;
             let ro = backend_utils_adt_misc2_seams::make_expanded_object_read_only_internal_v::call(
                 mcx,
-                &DatumV::from_usize(save_arg0.as_usize()),
+                &save_arg0,
             )?;
-            args[0].value = Datum::from_usize(ro.as_usize());
+            args[0] = ro;
         }
 
-        // fcinfo->isnull = false; result = op->d.func.fn_addr(fcinfo);
-        let (result_word, isnull) = function_call_invoke::call(fn_oid, collation, &args)?;
+        // fcinfo->isnull = false; result = op->d.func.fn_addr(fcinfo).
+        let mcx = estate.es_query_cxt;
+        let (result_val, isnull) =
+            function_call_invoke_datum::call(mcx, fn_oid, collation, &args)?;
 
         // if (!fcinfo->isnull && DatumGetBool(result)) -> equal -> return NULL.
-        if !isnull && Datum::from_usize(result_word.as_usize()).as_bool() {
+        if !isnull && result_val.as_bool() {
             state
                 .result_cells
                 .set(resvalue_id, ResultCell { value: DatumV::null(), isnull: true });
@@ -309,7 +326,7 @@ pub fn exec_nullif_step<'mcx>(
     // *op->resvalue = save_arg0; *op->resnull = fcinfo->args[0].isnull;
     state.result_cells.set(
         resvalue_id,
-        ResultCell { value: DatumV::from_usize(save_arg0.as_usize()), isnull: args[0].isnull },
+        ResultCell { value: save_arg0, isnull: nulls[0] },
     );
     Ok(())
 }

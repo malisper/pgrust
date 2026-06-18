@@ -2764,6 +2764,58 @@ fn function_call_invoke_seam(
     Ok((d, fcinfo.isnull))
 }
 
+/// `FunctionCallInvoke(fcinfo)` (fmgr.h) over the canonical per-attribute
+/// [`Datum`] lane — the by-reference-arg form of [`function_call_invoke_seam`]
+/// (the WALL-1aq by-ref execExpr arg-gather). Each canonical arg crosses the fmgr
+/// boundary as its bare by-value word OR its by-reference referent bytes (the same
+/// `datum_to_ref_arg` marshalling the BRIN `*_coll_datum` seams + `fmgr_call_seam`
+/// use), with `args[i].isnull` carried through. Like `function_call_invoke_seam`,
+/// it does NOT apply the `null_check` self-test: a non-strict function legitimately
+/// returns NULL through `fcinfo->isnull`, which the caller reads back; the strict
+/// short-circuit was already applied by the interpreter's `_STRICT` opcodes. The
+/// result `Datum` (by-value or by-reference) is materialized into `mcx`.
+fn function_call_invoke_datum_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    fn_oid: Oid,
+    collation: Oid,
+    args: &[types_tuple::backend_access_common_heaptuple::Datum<'mcx>],
+) -> PgResult<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)> {
+    let resolved = fmgr_info(mcx, fn_oid)?;
+
+    // Build the `fcinfo->args[]` frame: by-value word lane + by-reference side
+    // channel. The canonical arg's own NULL state rides its variant; the
+    // interpreter has already applied the strict-null short-circuit upstream.
+    let mut nargs: Vec<NullableDatum> = Vec::with_capacity(args.len());
+    let mut ref_args: Vec<Option<RefPayload>> = Vec::with_capacity(args.len());
+    for val in args {
+        let (nd, refp) = datum_to_ref_arg(val);
+        nargs.push(nd);
+        ref_args.push(refp);
+    }
+
+    // C: fcache->flinfo.fn_expr = fcinfo->flinfo->fn_expr (fmgr.c:658).
+    let fn_expr = resolved.finfo.fn_expr.clone();
+    let mut fcinfo = init_fcinfo(Some(resolved.finfo), collation, nargs);
+    fcinfo.ref_args = ref_args;
+    fcinfo.debug_assert_ref_null_consistency();
+    // C: fcinfo->isnull = false; d = op->d.func.fn_addr(fcinfo). Dispatch directly
+    // (NOT through `invoke_flinfo`/`null_check`): a function may legitimately
+    // return NULL via `fcinfo->isnull`, which the caller stores.
+    fcinfo.isnull = false;
+    let word = function_call_invoke_with_expr(mcx, &resolved.resolution, &mut fcinfo, fn_expr)?;
+    let isnull = fcinfo.isnull;
+    let ref_result = fcinfo.take_ref_result();
+    if isnull {
+        return Ok((
+            types_tuple::backend_access_common_heaptuple::Datum::null(),
+            true,
+        ));
+    }
+    // Materialize the result into `mcx` (by-value or by-reference).
+    let result = ref_out_to_datum(mcx, word, ref_result)?;
+    Ok((result, false))
+}
+
 /// `CreateConversionCommand`'s conversion-function empty-input self-test
 /// (conversioncmds.c):
 /// ```c
@@ -2925,6 +2977,7 @@ pub fn init_seams() {
     backend_utils_fmgr_fmgr_seams::oid_function_call0::set(oid_function_call0_seam);
     backend_utils_fmgr_fmgr_seams::function_call_invoke::set(function_call_invoke_seam);
     backend_utils_fmgr_fmgr_seams::fastpath_function_call_invoke::set(function_call_invoke_seam);
+    backend_utils_fmgr_fmgr_seams::function_call_invoke_datum::set(function_call_invoke_datum_seam);
     // The planner const-folder's `evaluate_expr` fmgr leg (clauses.c): fmgr owns
     // the function-by-OID invocation over constant args.
     backend_optimizer_util_clauses_seams::fmgr_call::set(fmgr_call_seam);

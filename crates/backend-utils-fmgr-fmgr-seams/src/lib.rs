@@ -930,6 +930,33 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `FunctionCallInvoke(fcinfo)` (fmgr.h) over the canonical per-attribute
+    /// [`Datum`] lane — the by-reference-arg form of [`function_call_invoke`] the
+    /// executor's `EEOP_FUNCEXPR[_STRICT]` / `EEOP_DISTINCT` / `EEOP_NULLIF` steps
+    /// drive when an argument is a by-reference value (text/name/varchar/numeric
+    /// column or const). Each canonical `args[i]` crosses the fmgr boundary as
+    /// either its bare by-value word OR its by-reference referent bytes (the same
+    /// `datum_to_ref_arg` marshalling the BRIN `*_coll_datum` seams use), with
+    /// `args[i].isnull` carried on the canonical `(Datum, isnull)` pair. As with
+    /// [`function_call_invoke`], this does NOT apply the
+    /// `elog(ERROR, "function returned NULL")` self-test: an expression-level call
+    /// legitimately returns NULL through `fcinfo->isnull`, which the interpreter
+    /// reads back and stores. The caller has already applied the strict-null arg
+    /// short-circuit (the `_STRICT` opcodes), so this is entered only when the
+    /// function is to run. The resolved `FmgrInfo` cannot cross, so the owner
+    /// re-resolves by `fn_oid` and invokes under `collation` (`fcinfo->fncollation`).
+    /// Returns the result as a canonical `Datum<'mcx>` (by-value `ByVal` or a
+    /// by-reference value materialized into `mcx`) and the callee's read-back
+    /// `fcinfo->isnull`. `Err` carries whatever the called function raises.
+    pub fn function_call_invoke_datum<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        fn_oid: Oid,
+        collation: Oid,
+        args: &[Datum<'mcx>],
+    ) -> PgResult<(Datum<'mcx>, bool)>
+);
+
+seam_core::seam!(
     /// `construct_array_builtin(datums, n, CSTRINGOID)` +
     /// `DatumGetInt32(OidFunctionCall1(typmodin, PointerGetDatum(arrtypmod)))`
     /// (parse_type.c `typenameTypeMod`): apply a type's `typmodin` function to

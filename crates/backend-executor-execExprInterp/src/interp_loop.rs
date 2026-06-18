@@ -306,7 +306,7 @@ pub fn ExecInterpExpr<'mcx>(
             // already sized by the step).
             EEOP_FUNCEXPR => {
                 // C: ExecInterpExecuteFuncStep (non-strict path).
-                eval_scalar::exec_func_step(state, op, false)?;
+                eval_scalar::exec_func_step(state, op, false, estate)?;
                 op += 1;
             }
             EEOP_FUNCEXPR_STRICT
@@ -314,7 +314,7 @@ pub fn ExecInterpExpr<'mcx>(
             | EEOP_FUNCEXPR_STRICT_2 => {
                 // C: strict function — short-circuit to NULL on any NULL arg,
                 //    else dispatch.
-                eval_scalar::exec_func_step(state, op, true)?;
+                eval_scalar::exec_func_step(state, op, true, estate)?;
                 op += 1;
             }
 
@@ -615,14 +615,14 @@ pub fn ExecInterpExpr<'mcx>(
             EEOP_DISTINCT => {
                 // C: IS DISTINCT FROM — both NULL -> false, one NULL -> true,
                 //    else invert the equality function's result.
-                eval_scalar::exec_distinct_step(state, op, false)?;
+                eval_scalar::exec_distinct_step(state, op, false, estate)?;
                 op += 1;
             }
 
             EEOP_NOT_DISTINCT => {
                 // C: IS NOT DISTINCT FROM — both NULL -> true, one NULL -> false,
                 //    else the raw equality function result.
-                eval_scalar::exec_distinct_step(state, op, true)?;
+                eval_scalar::exec_distinct_step(state, op, true, estate)?;
                 op += 1;
             }
 
