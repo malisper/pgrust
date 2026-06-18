@@ -689,6 +689,7 @@ mod bitmap;
 pub use bitmap::create_partial_bitmap_paths;
 
 mod dummy;
+mod guc;
 pub use dummy::set_dummy_rel_pathlist;
 
 /* ==========================================================================
@@ -878,6 +879,12 @@ pub fn init_seams() {
     backend_commands_vacuum_seams::min_parallel_index_scan_size::set(|| {
         Ok(min_parallel_index_scan_size())
     });
+
+    // allpaths.c owns the GUC storage for `enable_geqo`, `geqo_threshold`,
+    // `min_parallel_table_scan_size`, and `min_parallel_index_scan_size`
+    // (allpaths.c:79-82). Install the `conf->variable` accessors into their
+    // guc-table slots so the planner (and vacuum) can read them.
+    guc::install_allpaths_gucs();
 }
 
 /// Seam adapter for `compute_parallel_worker` (the seam takes `&PlannerInfo`;
