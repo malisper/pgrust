@@ -58,7 +58,7 @@ use types_error::{PgError, PgResult};
 
 use types_nodes::copy_query::Query;
 use types_nodes::nodeindexscan::PlannedStmt;
-use types_nodes::nodes::{CmdType, Node};
+use types_nodes::nodes::{ntag, CmdType, Node};
 use types_nodes::nodelockrows::PlanRowMark;
 use types_nodes::execnodes::RowMarkType;
 use types_nodes::primnodes::Expr;
@@ -1066,8 +1066,9 @@ fn subquery_planner<'mcx>(
                             let row_exprs: mcx::PgVec<'mcx, Expr> = {
                                 let parse = run.resolve(root.parse);
                                 let row_node = &parse.rtable[i].values_lists[r];
-                                let cols = match &**row_node {
-                                    Node::List(items) => items,
+                                let row_node = &**row_node;
+                                let cols = match row_node.node_tag() {
+                                    ntag::T_List => row_node.expect_list(),
                                     _ => {
                                         return Err(types_error::PgError::error(
                                             "subquery_planner: VALUES row is not a List",
@@ -1158,8 +1159,9 @@ fn subquery_planner<'mcx>(
                             // absent) is left untouched.
                             let fe: Option<Expr> = {
                                 let parse = run.resolve(root.parse);
-                                match &*parse.rtable[i].functions[f] {
-                                    Node::RangeTblFunction(rtf) => match rtf.funcexpr.as_deref() {
+                                let fn_node = &*parse.rtable[i].functions[f];
+                                match fn_node.node_tag() {
+                                    ntag::T_RangeTblFunction => match fn_node.expect_rangetblfunction().funcexpr.as_deref() {
                                         Some(Node::Expr(e)) => Some(e.clone()),
                                         _ => None,
                                     },
@@ -1184,8 +1186,8 @@ fn subquery_planner<'mcx>(
                                         "subquery_planner: RTE_FUNCTION funcexpr folded to NULL",
                                     )
                                 })?;
-                                if let Node::RangeTblFunction(rtf) =
-                                    &mut *run.resolve_mut(root.parse).rtable[i].functions[f]
+                                if let Some(rtf) =
+                                    (*run.resolve_mut(root.parse).rtable[i].functions[f]).as_rangetblfunction_mut()
                                 {
                                     rtf.funcexpr = Some(mcx::alloc_in(mcx, Node::Expr(pe))?);
                                 }
@@ -1335,8 +1337,8 @@ fn subquery_planner<'mcx>(
                 // linitial(groupingSets) is a GroupingSet node; its emptiness is
                 // whether that GroupingSet's content list is empty.
                 let first_gset_nonempty = match parse.groupingSets.first() {
-                    Some(gs) => match gs.as_ref() {
-                        Node::GroupingSet(g) => !g.content.is_empty(),
+                    Some(gs) => match gs.as_ref().node_tag() {
+                        ntag::T_GroupingSet => !gs.as_ref().expect_groupingset().content.is_empty(),
                         // A non-GroupingSet first element is unexpected; treat as
                         // non-empty (the conservative branch keeps a WHERE copy).
                         _ => true,
@@ -1700,10 +1702,9 @@ fn preprocess_qual_conditions_query<'mcx>(
     if let Some(jt) = jt {
         let mut node = Node::FromExpr(mcx::PgBox::into_inner(jt));
         preprocess_qual_conditions(mcx, root, run, outer_query, &mut node)?;
-        let f = match node {
-            Node::FromExpr(f) => f,
-            _ => unreachable!("jointree top stays a FromExpr"),
-        };
+        let f = node
+            .into_fromexpr()
+            .unwrap_or_else(|| unreachable!("jointree top stays a FromExpr"));
         run.resolve_mut(root.parse).jointree = Some(mcx::alloc_in(mcx, f)?);
     }
     Ok(())
@@ -1725,17 +1726,23 @@ pub fn preprocess_qual_conditions<'mcx>(
     outer_query: Option<&Node<'mcx>>,
     jtnode: &mut Node<'mcx>,
 ) -> PgResult<()> {
-    match jtnode {
-        Node::RangeTblRef(_) => {
+    match jtnode.node_tag() {
+        ntag::T_RangeTblRef => {
             // nothing to do here (C:1362).
         }
-        Node::FromExpr(f) => {
+        ntag::T_FromExpr => {
+            let f = jtnode
+                .as_fromexpr_mut()
+                .expect("node_tag() == T_FromExpr");
             for i in 0..f.fromlist.len() {
                 preprocess_qual_conditions(mcx, root, run, outer_query, &mut f.fromlist[i])?;
             }
             preprocess_jointree_quals(mcx, root, run, outer_query, &mut f.quals)?;
         }
-        Node::JoinExpr(j) => {
+        ntag::T_JoinExpr => {
+            let j = jtnode
+                .as_joinexpr_mut()
+                .expect("node_tag() == T_JoinExpr");
             if let Some(larg) = j.larg.as_deref_mut() {
                 preprocess_qual_conditions(mcx, root, run, outer_query, larg)?;
             }
@@ -1744,10 +1751,10 @@ pub fn preprocess_qual_conditions<'mcx>(
             }
             preprocess_jointree_quals(mcx, root, run, outer_query, &mut j.quals)?;
         }
-        other => {
+        _ => {
             return Err(PgError::error(alloc::format!(
                 "preprocess_qual_conditions: unrecognized jointree node type: {:?}",
-                other.node_tag()
+                jtnode.node_tag()
             )));
         }
     }
@@ -2761,10 +2768,10 @@ fn intern_parse_window_clauses<'mcx>(
             in_range_nulls_first,
             winref,
         ) = {
-            let wc_node = &run.resolve(root.parse).windowClause[i];
-            let wc = match &**wc_node {
-                Node::WindowClause(wc) => wc,
-                other => panic!("windowClause element is not a WindowClause (got {:?})", other.tag()),
+            let wc_node = &*run.resolve(root.parse).windowClause[i];
+            let wc = match wc_node.node_tag() {
+                ntag::T_WindowClause => wc_node.expect_windowclause(),
+                _ => panic!("windowClause element is not a WindowClause (got {:?})", wc_node.tag()),
             };
             let name = wc.name.as_ref().map(|s| alloc::string::String::from(s.as_str()));
             let part: Vec<types_nodes::rawnodes::SortGroupClause> = wc
@@ -4194,11 +4201,12 @@ fn standard_qp_callback(
 fn sortgroupclause_from_node(
     np: &mcx::PgBox<'_, Node<'_>>,
 ) -> PgResult<types_nodes::rawnodes::SortGroupClause> {
-    match &**np {
-        Node::SortGroupClause(sgc) => Ok(*sgc),
-        other => panic!(
+    let np = &**np;
+    match np.node_tag() {
+        ntag::T_SortGroupClause => Ok(*np.expect_sortgroupclause()),
+        _ => panic!(
             "grouping_planner: sortClause element is not a SortGroupClause (got {:?})",
-            other.tag()
+            np.tag()
         ),
     }
 }
@@ -5072,11 +5080,12 @@ fn pathtarget_exprs_equal(root: &PlannerInfo, path: PathId, target: &PathTarget)
 fn rowmarkclause_from_node(
     np: &mcx::PgBox<'_, Node<'_>>,
 ) -> PgResult<types_nodes::rawnodes::RowMarkClause> {
-    match &**np {
-        Node::RowMarkClause(rc) => Ok(*rc),
-        other => panic!(
+    let np = &**np;
+    match np.node_tag() {
+        ntag::T_RowMarkClause => Ok(*np.expect_rowmarkclause()),
+        _ => panic!(
             "preprocess_rowmarks: rowMarks element is not a RowMarkClause (got {:?})",
-            other.tag()
+            np.tag()
         ),
     }
 }
@@ -5636,12 +5645,12 @@ fn extract_windowclause_offset<'mcx>(
     i: usize,
     start: bool,
 ) -> Option<Expr> {
-    let wc_node = &run.resolve(root.parse).windowClause[i];
-    let wc = match &**wc_node {
-        Node::WindowClause(wc) => wc,
-        other => panic!(
+    let wc_node = &*run.resolve(root.parse).windowClause[i];
+    let wc = match wc_node.node_tag() {
+        ntag::T_WindowClause => wc_node.expect_windowclause(),
+        _ => panic!(
             "windowClause element is not a WindowClause (got {:?})",
-            other.tag()
+            wc_node.tag()
         ),
     };
     let offset = if start { &wc.startOffset } else { &wc.endOffset };
@@ -5668,12 +5677,14 @@ fn set_windowclause_offset<'mcx>(
         Some(e) => Some(mcx::alloc_in(mcx, Node::Expr(e))?),
         None => None,
     };
-    let wc_node = &mut run.resolve_mut(root.parse).windowClause[i];
-    let wc = match &mut **wc_node {
-        Node::WindowClause(wc) => wc,
-        other => panic!(
+    let wc_node = &mut *run.resolve_mut(root.parse).windowClause[i];
+    let wc = match wc_node.node_tag() {
+        ntag::T_WindowClause => wc_node
+            .as_windowclause_mut()
+            .expect("node_tag() == T_WindowClause"),
+        _ => panic!(
             "windowClause element is not a WindowClause (got {:?})",
-            other.tag()
+            wc_node.tag()
         ),
     };
     if start {
