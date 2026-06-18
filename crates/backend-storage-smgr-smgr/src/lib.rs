@@ -518,8 +518,17 @@ pub fn init_seams() {
     smgr_seam::smgrdestroyall::set(smgrdestroyall);
     smgr_seam::smgrreleaseall::set(smgrreleaseall);
     smgr_seam::relation_close_smgr::set(|rlocator| {
-        // RelationCloseSmgr is void (smgrclose is void); absorb the result.
-        let _ = smgrclose(rlocator);
+        // C: RelationCloseSmgr(rel) == `if (rel->rd_smgr != NULL) smgrclose(...)`
+        // — a no-op when the relation's smgr was never opened. The owned mirror
+        // has no rd_smgr field; the presence of an smgr cache entry for this
+        // RelFileLocatorBackend is the rd_smgr != NULL analog. Without this guard,
+        // RelationClearRelation on a never-opened relation (e.g. a nailed catalog
+        // whose storage a fresh backend never touched) reaches smgrclose ->
+        // md_close on an absent MdRelnState and panics. (smgrclose is void;
+        // absorb the result.)
+        if md::cache_contains(rlocator) {
+            let _ = smgrclose(rlocator);
+        }
     });
     smgr_seam::smgrinit::set(smgrinit);
     // localbuf.c temp-relation I/O consumers (smgr.c static-inline helpers).

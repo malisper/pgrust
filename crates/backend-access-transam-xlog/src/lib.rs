@@ -788,6 +788,14 @@ pub fn init_seams() {
     // exists. Real body in [`crate::shmem`].
     backend_tcop_postgres_seams::local_process_control_file::set(shmem::LocalProcessControlFile);
 
+    // Same LocalProcessControlFile(reset), exposed to the postmaster crash-restart
+    // reaper (PostmasterStateMachine -> local_process_control_file(true),
+    // statemachine.rs:299). The postmaster-side seam returns unit (the postmaster
+    // FATAL-aborts on a control-file read failure, like C), so wrap the PgResult.
+    backend_postmaster_postmaster_seams::local_process_control_file::set(|reset| {
+        shmem::LocalProcessControlFile(reset).expect("LocalProcessControlFile failed");
+    });
+
     // InitializeWalConsistencyChecking() (xlog.c:4846) — reapply the
     // wal_consistency_checking GUC after shared_preload_libraries are loaded
     // (so custom resource managers are known). Called from

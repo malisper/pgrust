@@ -644,37 +644,52 @@ pub fn RelationReloadIndexInfo(rd: &mut RelationData) -> PgResult<()> {
 
 /// `RelationReloadNailed(relation)` (relcache.c): refresh a nailed entry's
 /// `pg_class` fields in place during rebuild.
-pub fn RelationReloadNailed(rd: &mut RelationData) -> PgResult<()> {
-    // Should be called only for invalidated, nailed, non-index relations.
-    debug_assert!(!rd.rd_isvalid);
-    debug_assert!(rd.rd_isnailed);
-    debug_assert_eq!(rd.rd_rel.relkind, RELKIND_RELATION);
+///
+/// Takes the relation's Oid (not a held `&mut RelationData`) because the
+/// `ScanPgRelation` re-read below re-enters the relcache — and when the reloaded
+/// relation IS pg_class, that re-read re-borrows pg_class's own cell. A held
+/// borrow would alias (RefCell double-borrow panic). C operates on a bare
+/// `Relation` pointer with no borrow exclusivity, marking `rd_isvalid = true`
+/// before the scan to break self-recursion; we mirror that by using short
+/// scoped borrows (`with_rel_mut`) around the un-borrowed catalog scan.
+pub fn RelationReloadNailed(relation: Oid) -> PgResult<()> {
+    use crate::core_entry_store::with_rel_mut;
 
+    // Should be called only for invalidated, nailed, non-index relations.
     // Redo RelationInitPhysicalAddr in case it is a mapped relation whose
-    // mapping changed.
-    RelationInitPhysicalAddr(rd)?;
+    // mapping changed. (Short borrow; RelationInitPhysicalAddr does not scan.)
+    with_rel_mut(relation, |rd| {
+        debug_assert!(!rd.rd_isvalid);
+        debug_assert!(rd.rd_isnailed);
+        debug_assert_eq!(rd.rd_rel.relkind, RELKIND_RELATION);
+        RelationInitPhysicalAddr(rd)
+    })?;
 
     // Reload a non-index entry. We can't easily do so if relcaches aren't yet
     // built; in that case leave it invalid but usable.
     let critical_built = crate::core_entry_store::with_state(|st| st.critical_relcaches_built);
     if critical_built {
         // Mark valid before scanning, to avoid self-recursion when re-building
-        // pg_class.
-        rd.rd_isvalid = true;
+        // pg_class. Short borrow; the cell is NOT borrowed across the scan.
+        with_rel_mut(relation, |rd| rd.rd_isvalid = true);
 
-        let (pg_class, _reloptions) = match crate::build::ScanPgRelation(rd.rd_id, true, false)? {
+        // ScanPgRelation re-enters the relcache (may re-open pg_class) — run it
+        // with NO relcache cell borrowed.
+        let (pg_class, _reloptions) = match crate::build::ScanPgRelation(relation, true, false)? {
             Some(pair) => pair,
             None => {
                 return Err(ereport(ERROR)
-                    .errmsg_internal(format!("could not find pg_class tuple for {}", rd.rd_id))
+                    .errmsg_internal(format!("could not find pg_class tuple for {relation}"))
                     .into_error());
             }
         };
-        rd.rd_rel = pg_class;
 
-        // Again mark valid, to protect against concurrently arriving
-        // invalidations.
-        rd.rd_isvalid = true;
+        // Store the refreshed pg_class form back, and again mark valid to protect
+        // against concurrently arriving invalidations. Short borrow.
+        with_rel_mut(relation, |rd| {
+            rd.rd_rel = pg_class;
+            rd.rd_isvalid = true;
+        });
     }
 
     Ok(())

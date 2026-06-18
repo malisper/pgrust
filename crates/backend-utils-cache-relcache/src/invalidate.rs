@@ -196,9 +196,13 @@ pub fn RelationRebuildRelation(relation: Oid) -> PgResult<()> {
     if is_index && index_info_initialized {
         return with_rel_mut(relation, crate::index::RelationReloadIndexInfo);
     }
-    // Nailed relations are handled separately.
+    // Nailed relations are handled separately. NB: RelationReloadNailed reads
+    // pg_class via ScanPgRelation, which re-enters the relcache (and, when the
+    // reloaded relation IS pg_class, re-borrows pg_class's own cell). So it must
+    // NOT be run under a held `with_rel_mut` borrow — it takes the Oid and uses
+    // short scoped borrows internally instead.
     if is_nailed {
-        return with_rel_mut(relation, crate::index::RelationReloadNailed);
+        return crate::index::RelationReloadNailed(relation);
     }
 
     // Build a new entry from scratch, swap its contents with the old entry,
@@ -329,6 +333,15 @@ pub fn RelationRebuildRelation(relation: Oid) -> PgResult<()> {
             old.rd_has_partkey = old_has_partkey;
             old.rd_has_partdesc = old_has_partdesc;
         }
+
+        // The temporary `newrel` now holds the OLD contents, INCLUDING the old
+        // entry's (nonzero) rd_refcnt — but in C the entry handed to
+        // RelationDestroyRelation is the freshly-built one, which always has
+        // rd_refcnt == 0 (the wholesale-move port carries the refcnt the other
+        // way, so reset it here). C's SWAPFIELD(rd_refcnt) keeps the live count on
+        // the surviving entry (restored above) and leaves 0 on the discarded one;
+        // matching that lets RelationDestroyRelation's HasReferenceCountZero hold.
+        newrel.rd_refcnt = 0;
 
         // Hand the temporary entry (now holding the OLD contents) back out so the
         // caller destroys it once the store borrow is released.

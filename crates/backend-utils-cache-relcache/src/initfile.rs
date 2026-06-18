@@ -927,6 +927,12 @@ fn write_entry(buf: &mut Vec<u8>, r: &RelationData) {
     header.extend_from_slice(&r.rd_locator.spcOid.to_ne_bytes());
     header.extend_from_slice(&r.rd_locator.dbOid.to_ne_bytes());
     header.extend_from_slice(&r.rd_locator.relNumber.to_ne_bytes());
+    // rd_amhandler is a top-level RelationData scalar that C's whole-struct
+    // fread restores for free; this field-wise framing must persist it
+    // explicitly so the load side does NOT re-derive it via a syscache lookup
+    // (which, during the SHARED Phase2 load, would recurse into building
+    // pg_class before pg_class exists — infinite recursion / stack overflow).
+    header.extend_from_slice(&r.rd_amhandler.to_ne_bytes());
     write_item(buf, &header);
 
     // C: write_item(relform, CLASS_TUPLE_SIZE) — the pg_class form.
@@ -1111,6 +1117,10 @@ pub fn load_relcache_init_file(shared: bool) -> PgResult<bool> {
             rel.rd_locator.spcOid = hc.read_oid().unwrap_or(InvalidOid);
             rel.rd_locator.dbOid = hc.read_oid().unwrap_or(InvalidOid);
             rel.rd_locator.relNumber = hc.read_oid().unwrap_or(InvalidOid);
+            // rd_amhandler — persisted by write_entry (mirrors C's whole-struct
+            // fread). Read it back here so the index branch below does not need a
+            // syscache lookup (which would recurse during the Phase2 shared load).
+            rel.rd_amhandler = hc.read_oid().unwrap_or(InvalidOid);
         }
 
         // C: read rd_rel (the pg_class form).
@@ -1175,25 +1185,19 @@ pub fn load_relcache_init_file(shared: bool) -> PgResult<bool> {
                 }
             };
             // C: InitIndexAmRoutine(rel) reads rel->rd_amhandler, which in C is
-            // restored for free by the whole-RelationData struct fread. This port
-            // reconstructs the entry field-by-field and never read rd_amhandler,
-            // so resolve it from the (restored) rd_rel->relam via the pg_am
-            // (AMOID) syscache, exactly as RelationInitIndexAccessInfo does, before
-            // the handler call. (C's struct memcpy also avoids the lookup, but the
-            // field-wise reconstruction must do it; pg_am is always heap-scannable.)
+            // restored for free by the whole-RelationData struct fread. The
+            // field-wise reconstruction persists rd_amhandler in the entry header
+            // (above) and restores it there, mirroring C. We must NOT re-derive it
+            // here via a syscache lookup: the SHARED Phase2 load runs BEFORE
+            // pg_class is built, so SearchSysCache1(AMOID) recurses into building
+            // pg_class -> ScanPgRelation(pg_class) -> open pg_class (not yet
+            // cached) -> infinite recursion / stack overflow (WALL 1ab).
             debug_assert!(rel.rd_rel.relam != InvalidOid);
-            rel.rd_amhandler =
-                match backend_utils_cache_syscache_seams::search_am_handler::call(rel.rd_rel.relam)? {
-                    Some(h) => h,
-                    None => {
-                        return Err(ereport(ERROR)
-                            .errmsg_internal(format!(
-                                "cache lookup failed for access method {}",
-                                rel.rd_rel.relam
-                            ))
-                            .into_error());
-                    }
-                };
+            if rel.rd_amhandler == InvalidOid {
+                // A pre-existing init file from before rd_amhandler was framed:
+                // treat as corrupt and rebuild from catalog (C read_failed path).
+                return read_failed(rels);
+            }
             // C: InitIndexAmRoutine(rel) — index family (on the local entry).
             crate::index::InitIndexAmRoutine(&mut rel)?;
             // C: rd_opfamily / rd_opcintype / rd_support / rd_indcollation /
@@ -1224,8 +1228,26 @@ pub fn load_relcache_init_file(shared: bool) -> PgResult<bool> {
                     _ => return read_failed(rels),
                 }
             }
-            // C: rd_supportinfo = palloc0(natts * amsupport * sizeof(FmgrInfo));
-            // lazily filled by index_getprocinfo, so left empty here.
+            // C: rel->rd_supportinfo = (FmgrInfo *)
+            //        MemoryContextAllocZero(indexcxt, relsupport * sizeof(FmgrInfo));
+            // where relsupport = relform->relnatts * am->amsupport. The slots are
+            // lazily filled by index_getprocinfo, but the array MUST be sized
+            // up-front (zero-filled) so index_getprocinfo can index into it — the
+            // from-catalog RelationInitIndexAccessInfo sizes it identically. (The
+            // prior port left it empty, so index_getprocinfo on an init-file-loaded
+            // index panicked out-of-bounds.)
+            let amsupport = rel
+                .rd_indam
+                .as_ref()
+                .map(|am| am.amsupport)
+                .unwrap_or(0);
+            if amsupport > 0 {
+                let nsupport = natts * amsupport as i32;
+                rel.rd_supportinfo =
+                    (0..nsupport).map(|_| types_core::fmgr::FmgrInfo::default()).collect();
+            } else {
+                rel.rd_supportinfo = Vec::new();
+            }
         } else {
             if rel.rd_isnailed {
                 nailed_rels += 1;
