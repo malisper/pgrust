@@ -96,3 +96,5 @@ backend-catalog-pg-inherits = { path = "../backend-catalog-pg-inherits" }
 backend-foreign-foreign = { path = "../backend-foreign-foreign" }
 # guc consts (DEBUG_PARALLEL_OFF / DEFAULT_CURSOR_TUPLE_FRACTION).
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+backend-utils-init-small = { path = "../backend-utils-init-small" }
+backend-catalog-index-seams = { path = "../backend-catalog-index-seams" }

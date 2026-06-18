@@ -5739,9 +5739,41 @@ fn mark_partial_aggref_impl(
     Ok(())
 }
 
+/// `plan_create_index_workers(tableOid, indexOid)` (planner.c) — decide how
+/// many parallel workers a CREATE INDEX should use.
+///
+/// The standalone / parallelism-disabled gate is the C's exact early return.
+/// The parallel-build estimation tail (dummy-`PlannerInfo` assembly +
+/// `build_simple_rel` + `estimate_rel_size` + `compute_parallel_worker` +
+/// `maintenance_work_mem` cap) is only reachable under the postmaster with
+/// `max_parallel_maintenance_workers > 0`; it is a precise loud panic until that
+/// planner-parallel substrate for CREATE INDEX lands (single-user and
+/// parallelism-off always return 0 here, the complete behavior for those modes).
+fn plan_create_index_workers(table_oid: Oid, index_oid: Oid) -> PgResult<i32> {
+    use backend_utils_misc_guc_tables::vars;
+
+    // We don't allow performing parallel operation in standalone backend or
+    // when parallelism is disabled.
+    if !backend_utils_init_small::globals::IsUnderPostmaster()
+        || vars::max_parallel_maintenance_workers.read() == 0
+    {
+        return Ok(0);
+    }
+
+    let _ = (table_oid, index_oid);
+    panic!(
+        "plan_create_index_workers: parallel CREATE INDEX worker planning \
+         (dummy-PlannerInfo build_simple_rel / estimate_rel_size / \
+         compute_parallel_worker) is not yet ported — reached only under the \
+         postmaster with max_parallel_maintenance_workers > 0"
+    );
+}
+
 pub fn init_seams() {
     use backend_utils_misc_guc_tables::vars;
     use backend_utils_misc_guc_tables::GucVarAccessors;
+
+    backend_catalog_index_seams::plan_create_index_workers::set(plan_create_index_workers);
 
     backend_optimizer_plan_planner_seams::pg_plan_query::set(pg_plan_query_impl);
     backend_optimizer_plan_planner_seams::plan_cluster_use_sort::set(plan_cluster_use_sort_impl);
