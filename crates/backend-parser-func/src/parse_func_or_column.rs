@@ -1282,7 +1282,7 @@ fn ParseComplexProjection<'mcx>(
     };
 
     // Special case for whole-row Vars: resolve (foo.*).bar directly.
-    if let Expr::Var(var) = &first_arg {
+    if let Some(var) = first_arg.expect_var() {
         if var.varattno == InvalidAttrNumber {
             // Return a Var if funcname matches a column, else NULL.
             return scan_ns_item_for_column_by_posn::call(
@@ -1298,7 +1298,7 @@ fn ParseComplexProjection<'mcx>(
     // Else use get_expr_result_tupdesc(); a RECORD Var needs expandRecordVariable.
     // get_expr_result_tupdesc takes Option<&Node> (C: (Node *) first_arg).
     let first_arg_node = Node::Expr(first_arg.clone());
-    let tupdesc = if let Expr::Var(var) = &first_arg {
+    let tupdesc = if let Some(var) = first_arg.expect_var() {
         if var.vartype == RECORDOID {
             let var = var.clone();
             expand_record_variable::call(mcx, pstate, &var, 0)?
