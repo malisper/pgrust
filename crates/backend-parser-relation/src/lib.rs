@@ -1802,25 +1802,97 @@ pub fn addRangeTableEntryForTableFunc<'mcx>(
 
 /// `addRangeTableEntryForValues` — make a values RTE.
 ///
-/// Each VALUES row is a `List` of column expressions, but the central `Node`
-/// enum has no `List` variant and `RTE.values_lists` is `PgVec<NodePtr>` — there
-/// is no node wrapper to carry a row's expression list. Mirror-PG-and-panic
-/// until the central `Node` enum gains a list-carrying arm.
+/// `exprs` is a list of rows; each row is a `Node::List` of the row's column
+/// expressions (carried in `RTE.values_lists`).
 pub fn addRangeTableEntryForValues<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _pstate: &mut ParseState<'mcx>,
-    _exprs: PgVec<'mcx, NodePtr<'mcx>>,
-    _coltypes: PgVec<'mcx, Oid>,
-    _coltypmods: PgVec<'mcx, i32>,
-    _colcollations: PgVec<'mcx, Oid>,
-    _alias: Option<Alias<'mcx>>,
-    _lateral: bool,
-    _in_from_cl: bool,
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'mcx>,
+    exprs: PgVec<'mcx, NodePtr<'mcx>>,
+    coltypes: PgVec<'mcx, Oid>,
+    coltypmods: PgVec<'mcx, i32>,
+    colcollations: PgVec<'mcx, Oid>,
+    alias: Option<Alias<'mcx>>,
+    lateral: bool,
+    in_from_cl: bool,
 ) -> PgResult<ParseNamespaceItem<'mcx>> {
-    panic!(
-        "addRangeTableEntryForValues: a VALUES row is a List of column expressions, \
-         but the central Node enum has no List variant to carry it in \
-         RTE.values_lists (parse_relation.c:2151)"
+    let refname: &str = match &alias {
+        Some(a) => a.aliasname.as_deref().unwrap_or("*VALUES*"),
+        None => "*VALUES*",
+    };
+
+    let mut rte = RangeTblEntry::new_in(mcx);
+    rte.rtekind = RTE_VALUES;
+
+    // eref = alias ? copyObject(alias) : makeAlias(refname, NIL)
+    let mut eref = match &alias {
+        Some(a) => a.clone_in(mcx)?,
+        None => make_alias(mcx, refname, PgVec::new_in(mcx))?,
+    };
+
+    // numcolumns = list_length(linitial(exprs))
+    let numcolumns = match exprs.first().map(|n| n.as_ref()) {
+        Some(Node::List(items)) => items.len(),
+        _ => {
+            return Err(ereport(ERROR)
+                .errmsg(format!("VALUES exprs first row is not a List"))
+                .into_error())
+        }
+    };
+    let mut numaliases = eref.colnames.len();
+    while numaliases < numcolumns {
+        numaliases += 1;
+        let attrname = format!("column{numaliases}");
+        eref.colnames.push(make_string_node(mcx, attrname.as_str())?);
+    }
+    if numcolumns < numaliases {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_INVALID_COLUMN_REFERENCE)
+            .errmsg(format!(
+                "VALUES lists \"{refname}\" have {numcolumns} columns available but {numaliases} columns specified"
+            ))
+            .into_error());
+    }
+
+    rte.values_lists = exprs;
+    rte.coltypes = coltypes;
+    rte.coltypmods = coltypmods;
+    rte.colcollations = colcollations;
+    rte.alias = match &alias {
+        Some(a) => Some(mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
+        None => None,
+    };
+    rte.eref = Some(mcx::alloc_in(mcx, eref)?);
+    rte.lateral = lateral;
+    rte.inFromCl = in_from_cl;
+
+    // Snapshot the column lists for buildNSItemFromLists.
+    let coltypes_snap: PgVec<'mcx, Oid> = {
+        let mut v = mcx::vec_with_capacity_in(mcx, rte.coltypes.len())?;
+        for t in rte.coltypes.iter() { v.push(*t); }
+        v
+    };
+    let coltypmods_snap: PgVec<'mcx, i32> = {
+        let mut v = mcx::vec_with_capacity_in(mcx, rte.coltypmods.len())?;
+        for t in rte.coltypmods.iter() { v.push(*t); }
+        v
+    };
+    let colcollations_snap: PgVec<'mcx, Oid> = {
+        let mut v = mcx::vec_with_capacity_in(mcx, rte.colcollations.len())?;
+        for t in rte.colcollations.iter() { v.push(*t); }
+        v
+    };
+
+    pstate.p_rtable.push(rte);
+    let rtindex = pstate.p_rtable.len() as Index;
+    let rte_ref = &pstate.p_rtable[(rtindex - 1) as usize];
+
+    buildNSItemFromLists(
+        mcx,
+        rte_ref,
+        rtindex,
+        &coltypes_snap,
+        &coltypmods_snap,
+        &colcollations_snap,
     )
 }
 
