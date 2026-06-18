@@ -3421,6 +3421,46 @@ pub(crate) fn search_pg_class_full_form<'mcx>(
     Ok(Some(form))
 }
 
+/// `SearchSysCacheCopy1(RELOID, relid)` + `GETSTRUCT` → the writable
+/// `types_cluster::PgClassForm` and the held tuple's heap TID (`tup->t_self`).
+/// `Ok(None)` on a cache miss. Backs the `search_syscache_copy_pg_class` seam
+/// (`RelationSetNewRelfilenumber` / heap-drop storage path / CLUSTER swap),
+/// which copies the row, mutates fixed-width columns, and writes it back via
+/// `CatalogTupleUpdate` keyed on the returned `t_self`.
+pub(crate) fn search_syscache_copy_pg_class<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+) -> PgResult<Option<(types_tuple::heaptuple::ItemPointerData, types_cluster::PgClassForm)>> {
+    const Anum_pg_class_relam: i32 = 7;
+    const Anum_pg_class_relallfrozen: i32 = 13;
+    let tuple = SearchSysCache1(mcx, RELOID, SysCacheKey::Value(KeyDatum::from_oid(relid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let form = types_cluster::PgClassForm {
+        relname: getattr_name(mcx, RELOID, &tup, Anum_pg_class_relname)?
+            .as_str()
+            .to_owned(),
+        relnamespace: getattr_oid(mcx, RELOID, &tup, Anum_pg_class_relnamespace)?,
+        relfilenode: getattr_oid(mcx, RELOID, &tup, Anum_pg_class_relfilenode)?,
+        reltablespace: getattr_oid(mcx, RELOID, &tup, Anum_pg_class_reltablespace)?,
+        relam: getattr_oid(mcx, RELOID, &tup, Anum_pg_class_relam)?,
+        reltoastrelid: getattr_oid(mcx, RELOID, &tup, Anum_pg_class_reltoastrelid)?,
+        relisshared: getattr_bool(mcx, RELOID, &tup, Anum_pg_class_relisshared)?,
+        relpersistence: getattr_char(mcx, RELOID, &tup, Anum_pg_class_relpersistence)? as u8,
+        relkind: getattr_char(mcx, RELOID, &tup, Anum_pg_class_relkind)? as u8,
+        relpages: getattr_i32(mcx, RELOID, &tup, Anum_pg_class_relpages)?,
+        reltuples: getattr_f32(mcx, RELOID, &tup, Anum_pg_class_reltuples)?,
+        relallvisible: getattr_i32(mcx, RELOID, &tup, Anum_pg_class_relallvisible)?,
+        relallfrozen: getattr_i32(mcx, RELOID, &tup, Anum_pg_class_relallfrozen)?,
+        relfrozenxid: getattr_u32(mcx, RELOID, &tup, Anum_pg_class_relfrozenxid)?,
+        relminmxid: getattr_u32(mcx, RELOID, &tup, Anum_pg_class_relminmxid)?,
+    };
+    let tid = tup.tuple.t_self;
+    ReleaseSysCache(tup);
+    Ok(Some((tid, form)))
+}
+
 /* ===========================================================================
  * ACL / owner catalog-row projections (the aclmask/aclcheck family in
  * catalog/aclchk.c — the F0 keystone). Each reads the object's owner OID and
