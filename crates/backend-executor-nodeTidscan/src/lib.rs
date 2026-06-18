@@ -103,7 +103,8 @@ pub use types_nodes::nodetidscan::{TidExpr, TidScanState};
 /// column (`varattno == SelfItemPointerAttributeNumber`). Any `Var` in the
 /// relation scan qual must be for our table.
 fn is_ctid_var(node: Option<&Expr>) -> bool {
-    matches!(node, Some(Expr::Var(v)) if v.varattno == SelfItemPointerAttributeNumber)
+    node.and_then(|e| e.as_var())
+        .is_some_and(|v| v.varattno == SelfItemPointerAttributeNumber)
 }
 
 /// `get_leftop(expr)` — left arg of a binary opclause (only arg of a unary).
@@ -194,7 +195,7 @@ fn TidExprListCreate<'mcx>(
         let quals = node.tidquals.as_ref().unwrap();
         let expr = &quals[i];
 
-        if let Expr::OpExpr(op) = expr {
+        if let Some(op) = expr.as_opexpr() {
             // is_opclause(expr)
             let arg1 = get_leftop(&op.args);
             let arg2 = get_rightop(&op.args);
@@ -212,7 +213,7 @@ fn TidExprListCreate<'mcx>(
                 return Err(elog_internal("could not identify CTID variable"));
             }
             tidexpr.isarray = false;
-        } else if let Expr::ScalarArrayOpExpr(saex) = expr {
+        } else if let Some(saex) = expr.as_scalararrayopexpr() {
             // Assert(IsCTIDVar(linitial(saex->args)));
             debug_assert!(is_ctid_var(saex.args.first()));
             // tidexpr->exprstate = ExecInitExpr(lsecond(saex->args), &tidstate->ss.ps);
@@ -223,7 +224,7 @@ fn TidExprListCreate<'mcx>(
             tidexpr.exprstate =
                 Some(execExpr::exec_init_expr::call(array_arg, &mut tidstate.ss.ps, estate)?);
             tidexpr.isarray = true;
-        } else if let Expr::CurrentOfExpr(cexpr) = expr {
+        } else if let Some(cexpr) = expr.as_currentofexpr() {
             // tidexpr->cexpr = cexpr; tidstate->tss_isCurrentOf = true;
             tidexpr.cexpr = Some(cexpr.clone());
             tidstate.tss_isCurrentOf = true;
