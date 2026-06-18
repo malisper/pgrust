@@ -1751,6 +1751,21 @@ pub fn init_seams() {
     seams::default_transaction_deferrable::set(DefaultXactDeferrable);
     seams::default_transaction_isolation::set(DefaultXactIsoLevel);
 
+    // ProcessUtility (utility.c) reaches the xact-owned transaction-state
+    // helpers through `backend-tcop-utility-out-seams`; install the bodies
+    // xact owns. `IsTransactionBlock` computes the atomic-context flag and is
+    // the first xact seam every CREATE TABLE / CREATE DATABASE hits.
+    {
+        use backend_tcop_utility_out_seams as util;
+        util::is_transaction_block::set(IsTransactionBlock);
+        util::command_counter_increment::set(CommandCounterIncrement);
+        util::prevent_in_transaction_block::set(PreventInTransactionBlock);
+        util::require_transaction_block::set(RequireTransactionBlock);
+        util::warn_no_transaction_block::set(WarnNoTransactionBlock);
+        util::xact_read_only::set(XactReadOnly);
+        util::is_in_parallel_mode::set(IsInParallelMode);
+    }
+
     install_parallel_rt_seams();
 }
 

@@ -273,6 +273,10 @@ pub fn init_seams() {
     // as this crate's own `check_stack_depth` seam.
     backend_tcop_postgres_seams::check_stack_depth::set(check_stack_depth);
 
+    // ProcessUtility (utility.c) guards its own recursion through the
+    // tcop-utility out-seam crate; install the same body there.
+    backend_tcop_utility_out_seams::check_stack_depth::set(check_stack_depth);
+
     backend_utils_misc_guc_tables::hooks::check_max_stack_depth
         .install(|newval, _extra, source| Ok(check_max_stack_depth(*newval, source)));
     backend_utils_misc_guc_tables::hooks::assign_max_stack_depth

@@ -3408,6 +3408,7 @@ dependencies = [
  "backend-storage-lmgr-predicate-seams",
  "backend-storage-lmgr-proc-seams",
  "backend-storage-smgr-seams",
+ "backend-tcop-utility-out-seams",
  "backend-utils-activity-small",
  "backend-utils-activity-status-seams",
  "backend-utils-activity-waitevent-seams",
@@ -20912,6 +20913,7 @@ name = "backend-utils-misc-stack-depth"
 version = "0.0.0"
 dependencies = [
  "backend-tcop-postgres-seams",
+ "backend-tcop-utility-out-seams",
  "backend-utils-error",
  "backend-utils-misc-guc-seams",
  "backend-utils-misc-guc-tables",

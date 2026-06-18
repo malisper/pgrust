@@ -43,6 +43,7 @@ backend-catalog-storage-seams = { path = "../backend-catalog-storage-seams" }
 backend-commands-async-seams = { path = "../backend-commands-async-seams" }
 backend-commands-tablecmds-seams = { path = "../backend-commands-tablecmds-seams" }
 backend-commands-trigger-seams = { path = "../backend-commands-trigger-seams" }
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 backend-executor-spi-seams = { path = "../backend-executor-spi-seams" }
 backend-libpq-be-fsstubs-seams = { path = "../backend-libpq-be-fsstubs-seams" }
 backend-replication-logical-launcher-seams = { path = "../backend-replication-logical-launcher-seams" }
