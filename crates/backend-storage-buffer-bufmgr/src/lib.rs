@@ -254,6 +254,18 @@ fn extend_buffered_rel(
     )
 }
 
+/// `ExtendBufferedRel(BMR_REL(rel), MAIN_FORKNUM, NULL, EB_LOCK_FIRST)` installed
+/// seam (bufmgr.c) — extend MAIN_FORKNUM by one block, returning the new
+/// write-locked, pinned buffer. Unlike [`extend_buffered_rel`], the
+/// relation-extension lock IS taken (no `EB_SKIP_EXTENSION_LOCK`); this is the
+/// `_bt_allocbuf` / new-page nbtree variant.
+fn extend_buffered_rel_locked(
+    rel: &types_rel::Relation,
+    fork_num: types_core::primitive::ForkNumber,
+) -> types_error::PgResult<Buffer> {
+    BufferManager::global_expect().ExtendBufferedRel(rel, fork_num, false, EB_LOCK_FIRST)
+}
+
 /// `ExtendBufferedRelBy(BMR_REL(rel), MAIN_FORKNUM, strategy, EB_LOCK_FIRST,
 /// extend_by, victim_buffers, &extend_by)` installed seam (bufmgr.c) — hio.c's
 /// `RelationAddBlocks` multi-page extension. `extend_by` is capped at
@@ -705,6 +717,7 @@ pub fn init_seams() {
     backend_storage_buffer_bufmgr_seams::page_is_new::set(page_is_new);
     // F2b: relation-extension entry points.
     backend_storage_buffer_bufmgr_seams::extend_buffered_rel::set(extend_buffered_rel);
+    backend_storage_buffer_bufmgr_seams::extend_buffered_rel_locked::set(extend_buffered_rel_locked);
     backend_storage_buffer_bufmgr_seams::extend_buffered_rel_to_fsm::set(extend_buffered_rel_to_fsm);
     backend_storage_buffer_bufmgr_seams::extend_buffered_rel_to_vm::set(extend_buffered_rel_to_vm);
     // F2b: the relation-extension I/O accounting (stats-only; no-op installs,

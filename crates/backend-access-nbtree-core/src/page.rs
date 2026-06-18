@@ -36,6 +36,7 @@
 use mcx::{vec_with_capacity_in, MemoryContext, Mcx, PgVec};
 use types_core::primitive::{
     BlockNumber, InvalidBlockNumber, InvalidBuffer, OffsetNumber, RmgrId, Size, TransactionId,
+    BLCKSZ,
 };
 use types_core::xact::{FirstNormalFullTransactionId, FullTransactionId};
 use types_error::error::{DEBUG1, LOG};
@@ -48,7 +49,7 @@ use types_nbtree::{
     BTREE_MIN_VERSION, BTREE_NOVAC_VERSION, BTREE_VERSION, BT_IS_POSTING, BT_OFFSET_MASK,
     INDEX_ALT_TID_MASK, MaxIndexTuplesPerPage, P_FIRSTKEY, P_HIKEY, P_NONE, XLOG_BTREE_DELETE,
     XLOG_BTREE_MARK_PAGE_HALFDEAD, XLOG_BTREE_META_CLEANUP, XLOG_BTREE_NEWROOT,
-    XLOG_BTREE_UNLINK_PAGE, XLOG_BTREE_UNLINK_PAGE_META, XLOG_BTREE_VACUUM,
+    XLOG_BTREE_REUSE_PAGE, XLOG_BTREE_UNLINK_PAGE, XLOG_BTREE_UNLINK_PAGE_META, XLOG_BTREE_VACUUM,
 };
 use types_rel::Relation;
 use types_storage::buf::{BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK};
@@ -883,23 +884,127 @@ pub(crate) fn _bt_getbuf<'mcx>(
     Ok(buf)
 }
 
+/// Serialize the `xl_btree_reuse_page` WAL record payload (nbtxlog.h:
+/// `RelFileLocator locator; BlockNumber block; FullTransactionId
+/// snapshotConflictHorizon; bool isCatalogRel`). `SizeOfBtreeReusePage` excludes
+/// trailing alignment padding after `isCatalogRel`.
+fn serialize_btree_reuse_page<'mcx>(
+    rel: &Relation<'mcx>,
+    block: BlockNumber,
+    snapshot_conflict_horizon: FullTransactionId,
+    is_catalog_rel: bool,
+) -> Vec<u8> {
+    let loc = &rel.rd_locator;
+    let mut b = Vec::with_capacity(4 * 3 + 4 + 8 + 1);
+    b.extend_from_slice(&loc.spcOid.to_ne_bytes());
+    b.extend_from_slice(&loc.dbOid.to_ne_bytes());
+    b.extend_from_slice(&loc.relNumber.to_ne_bytes());
+    b.extend_from_slice(&block.to_ne_bytes());
+    b.extend_from_slice(&snapshot_conflict_horizon.value.to_ne_bytes());
+    b.push(is_catalog_rel as u8);
+    b
+}
+
 /// `_bt_allocbuf(rel, heaprel)` — allocate a new write-locked nbtree page.
-fn _bt_allocbuf<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _rel: &Relation<'mcx>,
-    _heaprel: &Relation<'mcx>,
+pub(crate) fn _bt_allocbuf<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    heaprel: &Relation<'mcx>,
 ) -> PgResult<Buffer> {
     /*
-     * GetFreeIndexPage (freespace) and ConditionalLockBuffer (bufmgr) now have
-     * seams, but the extend-the-relation tail uses ExtendBufferedRel(BMR_REL,
-     * MAIN_FORKNUM, NULL, EB_LOCK_FIRST) — WITHOUT EB_SKIP_EXTENSION_LOCK, so it
-     * takes the relation-extension lock.  The only ExtendBufferedRel seam bakes
-     * in EB_LOCK_FIRST | EB_SKIP_EXTENSION_LOCK (the _hash_getnewbuf variant),
-     * which would skip the extension lock nbtree requires; faithfully porting
-     * this needs an EB_LOCK_FIRST-only (extension-lock-taking) ExtendBufferedRel
-     * seam, which does not exist yet.
+     * First see if the FSM knows of any free pages.
+     *
+     * We can't trust the FSM's report unreservedly; we have to check that the
+     * page is still free.  We ask for only a conditional lock on the reported
+     * page to avoid deadlock against our own caller.
      */
-    panic!("_bt_allocbuf: ExtendBufferedRel(EB_LOCK_FIRST, extension-lock-taking) seam not yet ported")
+    loop {
+        let blkno = indexfsm::get_free_index_page::call(rel)?;
+        if blkno == InvalidBlockNumber {
+            break;
+        }
+        /* ReadBuffer(rel, blkno): pinned, not yet locked. */
+        let buf = bufmgr::read_buffer_extended::call(rel, blkno)?;
+        if _bt_conditionallockbuf(rel, buf) {
+            let page_bytes = bufmgr::buffer_get_page::call(mcx, buf)?;
+
+            /*
+             * It's possible to find an all-zeroes page in an index.  If we find
+             * a zeroed page then reclaim it immediately.
+             */
+            if PageIsNew(&PageRef::new(&page_bytes)?) {
+                /* Okay to use page.  Initialize and return it. */
+                bufmgr::with_buffer_page::call(buf, &mut |page: &mut [u8]| {
+                    _bt_pageinit(page, BLCKSZ as Size);
+                    Ok(())
+                })?;
+                return Ok(buf);
+            }
+
+            if bt_page_is_recyclable(&page_bytes, heaprel) {
+                /*
+                 * If we are generating WAL for Hot Standby then create a WAL
+                 * record that will allow us to conflict with queries running on
+                 * standby, in case they have snapshots older than safexid value.
+                 */
+                if relcache::relation_needs_wal::call(rel)
+                    && backend_access_transam_xlog_seams::xlog_standby_info_active::call()
+                {
+                    /*
+                     * Note that we don't register the buffer with the record,
+                     * because this operation doesn't modify the page (that
+                     * already happened, back when VACUUM deleted the page).
+                     * This record only exists to provide a conflict point for
+                     * Hot Standby.
+                     */
+                    let opaque = opaque_from_page(&page_bytes)?;
+                    let snapshot_conflict_horizon = bt_page_get_delete_xid(&page_bytes, &opaque);
+                    let is_catalog_rel = relation_is_accessible_in_logical_decoding(heaprel)?;
+
+                    xloginsert::xlog_begin_insert::call()?;
+                    xloginsert::xlog_register_data::call(&serialize_btree_reuse_page(
+                        rel,
+                        blkno,
+                        snapshot_conflict_horizon,
+                        is_catalog_rel,
+                    ))?;
+                    xloginsert::xlog_insert_record::call(RM_BTREE_ID, XLOG_BTREE_REUSE_PAGE)?;
+                }
+
+                /* Okay to use page.  Re-initialize and return it. */
+                bufmgr::with_buffer_page::call(buf, &mut |page: &mut [u8]| {
+                    _bt_pageinit(page, BLCKSZ as Size);
+                    Ok(())
+                })?;
+                return Ok(buf);
+            }
+            log_debug("FSM returned nonrecyclable page");
+            _bt_relbuf(rel, buf);
+        } else {
+            log_debug("FSM returned nonlockable page");
+            /* couldn't get lock, so just drop pin */
+            bufmgr::release_buffer::call(buf);
+        }
+    }
+
+    /*
+     * Extend the relation by one page. Uses EB_LOCK_FIRST (taking the
+     * relation-extension lock); the returned buffer is RBM_ZERO_AND_LOCK
+     * equivalent.
+     */
+    let buf = bufmgr::extend_buffered_rel_locked::call(
+        rel,
+        types_core::primitive::ForkNumber::MAIN_FORKNUM,
+    )?;
+
+    /* Initialize the new page before returning it */
+    bufmgr::with_buffer_page::call(buf, &mut |page: &mut [u8]| {
+        debug_assert!(PageIsNew(&PageRef::new(page)?));
+        _bt_pageinit(page, BLCKSZ as Size);
+        Ok(())
+    })?;
+
+    Ok(buf)
 }
 
 /// `_bt_relandgetbuf(rel, obuf, blkno, access)` — release `obuf`, get `blkno`.

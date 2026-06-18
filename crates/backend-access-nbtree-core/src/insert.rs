@@ -561,17 +561,13 @@ fn build_index_value_desc<'mcx>(
 }
 
 /// `_bt_allocbuf(rel, heaprel)` (nbtpage.c) — allocate a new write-locked nbtree
-/// page. The page.rs copy is private and already panics here; re-stated for the
-/// split / new-root paths that need a fresh page. GetFreeIndexPage and
-/// ConditionalLockBuffer now have seams, but the extend tail needs an
-/// EB_LOCK_FIRST-only (extension-lock-taking) ExtendBufferedRel seam that does
-/// not exist (the one seam bakes in EB_SKIP_EXTENSION_LOCK).
+/// page. Delegates to the single real implementation in `page.rs`.
 fn _bt_allocbuf<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _rel: &Relation<'mcx>,
-    _heaprel: &Relation<'mcx>,
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    heaprel: &Relation<'mcx>,
 ) -> PgResult<Buffer> {
-    panic!("_bt_allocbuf: ExtendBufferedRel(EB_LOCK_FIRST, extension-lock-taking) seam not yet ported")
+    crate::page::_bt_allocbuf(mcx, rel, heaprel)
 }
 
 /// `_bt_conditionallockbuf(rel, buf)` (nbtpage.c) — conditionally BT_WRITE-lock a

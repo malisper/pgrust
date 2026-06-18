@@ -452,6 +452,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExtendBufferedRel(BMR_REL(rel), forkNum, NULL, EB_LOCK_FIRST)` (bufmgr.c)
+    /// — extend the relation fork by one block, returning the new write-locked,
+    /// pinned buffer, TAKING the relation-extension lock (no
+    /// `EB_SKIP_EXTENSION_LOCK`). This is the `_bt_allocbuf` new-page nbtree
+    /// variant. `Err` carries the extension `ereport(ERROR)`s.
+    pub fn extend_buffered_rel_locked<'mcx>(
+        rel: &types_rel::Relation<'mcx>,
+        fork_num: types_core::primitive::ForkNumber,
+    ) -> types_error::PgResult<types_storage::storage::Buffer>
+);
+
+seam_core::seam!(
     /// `ExtendBufferedRelBy(BMR_REL(rel), MAIN_FORKNUM, strategy, EB_LOCK_FIRST,
     /// extend_by, victim_buffers, &extend_by)` (bufmgr.c) — the hio.c
     /// `RelationAddBlocks` multi-page extension: extend MAIN_FORKNUM by up to
