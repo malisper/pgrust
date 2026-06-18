@@ -75,12 +75,12 @@ fn preprocess_qual_conditions_fromexpr_qual() {
     preprocess_qual_conditions(mcx, &root, &mut node)
         .expect("preprocess_qual_conditions must not panic for a Const qual");
 
-    match node {
-        Node::FromExpr(f) => match f.quals.as_deref() {
-            Some(Node::Expr(Expr::Const(_))) => {}
+    match node.into_fromexpr() {
+        Some(f) => match f.quals.as_deref() {
+            Some(n) if n.is_const() => {}
             other => panic!("expected re-wrapped Node::Expr(Const) qual, got {other:?}"),
         },
-        _ => panic!("jointree top must stay a FromExpr"),
+        None => panic!("jointree top must stay a FromExpr"),
     }
 }
 

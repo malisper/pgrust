@@ -1121,9 +1121,9 @@ fn subquery_planner<'mcx>(
                                 };
                                 let mut v = mcx::vec_with_capacity_in(mcx, cols.len())?;
                                 for c in cols.iter() {
-                                    match &**c {
-                                        Node::Expr(e) => v.push(e.clone()),
-                                        _ => {
+                                    match c.as_expr() {
+                                        Some(e) => v.push(e.clone()),
+                                        None => {
                                             return Err(types_error::PgError::error(
                                                 "subquery_planner: VALUES column is not an Expr",
                                             ))
@@ -1157,9 +1157,9 @@ fn subquery_planner<'mcx>(
                         for g in 0..ng {
                             let e: Expr = {
                                 let parse = run.resolve(root.parse);
-                                match &*parse.rtable[i].groupexprs[g] {
-                                    Node::Expr(e) => e.clone(),
-                                    _ => {
+                                match parse.rtable[i].groupexprs[g].as_expr() {
+                                    Some(e) => e.clone(),
+                                    None => {
                                         return Err(types_error::PgError::error(
                                             "subquery_planner: RTE_GROUP groupexpr is not an Expr",
                                         ))
@@ -1304,7 +1304,7 @@ fn subquery_planner<'mcx>(
                     let flattened = backend_optimizer_util_vars::flatten::flatten_group_exprs(
                         mcx, &mut root, &ctx_query, node,
                     )?;
-                    if let Node::Expr(ne) = flattened {
+                    if let Some(ne) = flattened.into_expr() {
                         run.resolve_mut(root.parse).targetList[t].expr =
                             Some(mcx::alloc_in(mcx, ne)?);
                     }
@@ -1321,7 +1321,7 @@ fn subquery_planner<'mcx>(
                 let flattened = backend_optimizer_util_vars::flatten::flatten_group_exprs(
                     mcx, &mut root, &ctx_query, node,
                 )?;
-                if let Node::Expr(ne) = flattened {
+                if let Some(ne) = flattened.into_expr() {
                     run.resolve_mut(root.parse).havingQual = Some(mcx::alloc_in(mcx, ne)?);
                 }
             }
@@ -1505,7 +1505,7 @@ fn subquery_planner<'mcx>(
                     let existing: Option<Expr> = match f.quals.take() {
                         None => None,
                         Some(n) => match mcx::PgBox::into_inner(n) {
-                            Node::Expr(e) => Some(e),
+                            other if other.is_expr() => Some(other.into_expr().unwrap()),
                             other => {
                                 return Err(PgError::error(alloc::format!(
                                     "subquery_planner: jointree quals is a non-Expr \
@@ -1686,9 +1686,9 @@ pub fn preprocess_expression<'mcx>(
             query_node,
             Node::Expr(expr),
         )?;
-        expr = match flat {
-            Node::Expr(e) => e,
-            _ => {
+        expr = match flat.into_expr() {
+            Some(e) => e,
+            None => {
                 return Err(PgError::error(
                     "preprocess_expression: flatten_join_alias_vars returned a non-Expr node",
                 ))
@@ -1850,7 +1850,7 @@ fn preprocess_jointree_quals<'mcx>(
     let expr = match taken {
         None => None,
         Some(n) => match mcx::PgBox::into_inner(n) {
-            Node::Expr(e) => Some(e),
+            other if other.is_expr() => Some(other.into_expr().unwrap()),
             other => {
                 return Err(PgError::error(alloc::format!(
                     "preprocess_qual_conditions: jointree quals is a non-Expr node: {:?}",
@@ -2862,13 +2862,13 @@ fn intern_parse_window_clauses<'mcx>(
                 .iter()
                 .map(|np| sortgroupclause_from_node(np))
                 .collect::<PgResult<Vec<_>>>()?;
-            let start_off = wc.startOffset.as_ref().map(|np| match &**np {
-                Node::Expr(e) => e.clone(),
-                other => panic!("WindowClause startOffset is not an Expr (got {:?})", other.tag()),
+            let start_off = wc.startOffset.as_ref().map(|np| match np.as_expr() {
+                Some(e) => e.clone(),
+                None => panic!("WindowClause startOffset is not an Expr (got {:?})", np.tag()),
             });
-            let end_off = wc.endOffset.as_ref().map(|np| match &**np {
-                Node::Expr(e) => e.clone(),
-                other => panic!("WindowClause endOffset is not an Expr (got {:?})", other.tag()),
+            let end_off = wc.endOffset.as_ref().map(|np| match np.as_expr() {
+                Some(e) => e.clone(),
+                None => panic!("WindowClause endOffset is not an Expr (got {:?})", np.tag()),
             });
             (
                 name,
@@ -5732,11 +5732,11 @@ fn extract_windowclause_offset<'mcx>(
         ),
     };
     let offset = if start { &wc.startOffset } else { &wc.endOffset };
-    offset.as_ref().map(|np| match &**np {
-        Node::Expr(e) => e.clone(),
-        other => panic!(
+    offset.as_ref().map(|np| match np.as_expr() {
+        Some(e) => e.clone(),
+        None => panic!(
             "WindowClause offset is not an Expr (got {:?})",
-            other.tag()
+            np.tag()
         ),
     })
 }
@@ -5800,17 +5800,21 @@ fn take_onconflict_list_expr<'mcx>(
 ) -> Option<Expr> {
     let oc = run.resolve_mut(root.parse).onConflict.as_deref_mut()?;
     match which {
-        OcList::ArbiterElems => match &*oc.arbiterElems[i] {
-            Node::Expr(e) => Some(e.clone()),
-            other => panic!("arbiterElems element is not an Expr (got {:?})", other.tag()),
+        OcList::ArbiterElems => match oc.arbiterElems[i].as_expr() {
+            Some(e) => Some(e.clone()),
+            None => panic!("arbiterElems element is not an Expr (got {:?})", oc.arbiterElems[i].tag()),
         },
-        OcList::OnConflictSet => match &mut *oc.onConflictSet[i] {
-            Node::TargetEntry(te) => te.expr.take().map(mcx::PgBox::into_inner),
-            other => panic!(
-                "onConflictSet element is not a TargetEntry (got {:?})",
-                other.tag()
-            ),
-        },
+        OcList::OnConflictSet => {
+            let el = &mut oc.onConflictSet[i];
+            let tag = el.tag();
+            match el.as_targetentry_mut() {
+                Some(te) => te.expr.take().map(mcx::PgBox::into_inner),
+                None => panic!(
+                    "onConflictSet element is not a TargetEntry (got {:?})",
+                    tag
+                ),
+            }
+        }
     }
 }
 
@@ -5835,18 +5839,22 @@ fn set_onconflict_list_expr<'mcx>(
             })?;
             *oc.arbiterElems[i] = Node::Expr(e);
         }
-        OcList::OnConflictSet => match &mut *oc.onConflictSet[i] {
-            Node::TargetEntry(te) => {
-                te.expr = match processed {
-                    Some(e) => Some(mcx::alloc_in(mcx, e)?),
-                    None => None,
-                };
+        OcList::OnConflictSet => {
+            let el = &mut oc.onConflictSet[i];
+            let tag = el.tag();
+            match el.as_targetentry_mut() {
+                Some(te) => {
+                    te.expr = match processed {
+                        Some(e) => Some(mcx::alloc_in(mcx, e)?),
+                        None => None,
+                    };
+                }
+                None => panic!(
+                    "onConflictSet element is not a TargetEntry (got {:?})",
+                    tag
+                ),
             }
-            other => panic!(
-                "onConflictSet element is not a TargetEntry (got {:?})",
-                other.tag()
-            ),
-        },
+        }
     }
     Ok(())
 }
@@ -5863,12 +5871,16 @@ fn take_onconflict_scalar<'mcx>(
         OcScalar::ArbiterWhere => &mut oc.arbiterWhere,
         OcScalar::OnConflictWhere => &mut oc.onConflictWhere,
     };
-    slot.take().map(|np| match mcx::PgBox::into_inner(np) {
-        Node::Expr(e) => e,
-        other => panic!(
-            "OnConflict scalar clause is not an Expr (got {:?})",
-            other.tag()
-        ),
+    slot.take().map(|np| {
+        let node = mcx::PgBox::into_inner(np);
+        let tag = node.tag();
+        match node.into_expr() {
+            Some(e) => e,
+            None => panic!(
+                "OnConflict scalar clause is not an Expr (got {:?})",
+                tag
+            ),
+        }
     })
 }
 
