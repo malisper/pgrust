@@ -18,7 +18,16 @@ backend-catalog-pg-type = { path = "../backend-catalog-pg-type" }
 backend-catalog-pg-cast = { path = "../backend-catalog-pg-cast" }
 backend-catalog-pg-enum = { path = "../backend-catalog-pg-enum" }
 backend-catalog-pg-range = { path = "../backend-catalog-pg-range" }
+backend-catalog-pg-constraint = { path = "../backend-catalog-pg-constraint" }
 backend-parser-func = { path = "../backend-parser-func" }
+backend-parser-small1 = { path = "../backend-parser-small1" }
+backend-parser-parse-expr = { path = "../backend-parser-parse-expr" }
+backend-parser-coerce = { path = "../backend-parser-coerce" }
+backend-parser-parse-collate = { path = "../backend-parser-parse-collate" }
+backend-optimizer-util-var-seams = { path = "../backend-optimizer-util-var-seams" }
+backend-nodes-core = { path = "../backend-nodes-core" }
+backend-parser-parse-type = { path = "../backend-parser-parse-type" }
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 
 # Per-owner seam crates
 backend-commands-typecmds-seams = { path = "../backend-commands-typecmds-seams" }

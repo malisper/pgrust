@@ -333,6 +333,11 @@ pub enum ParseRefHookState {
     VarParams(VarParamState),
     /// `setup_parse_fixed_parameters`' fixed type array.
     FixedParams(FixedParamState),
+    /// `domainAddCheckConstraint`'s prepared `CoerceToDomainValue *` (typecmds.c):
+    /// the template node `replace_domain_constraint_value` copies when it sees a
+    /// reference to `VALUE` in a domain CHECK constraint expression. C stores the
+    /// bare `CoerceToDomainValue *` in `p_ref_hook_state`; here we carry the value.
+    DomainCheckValue(crate::primnodes::CoerceToDomainValue),
 }
 
 impl ParseRefHookState {

@@ -2292,11 +2292,27 @@ fn transformColumnRef<'mcx>(
             .into_error());
     }
 
-    // Give the PreParseColumnRefHook, if any, first shot. The hook ABI carries
-    // opaque cross-ABI function pointers; route through the columnref seam when
-    // a hook is installed (absent in the stock server).
-    if pstate.p_pre_columnref_hook.is_some() {
-        return seam_transform_column_ref_hook(pstate, cref);
+    // Give the PreParseColumnRefHook, if any, first shot.
+    //
+    //   if (pstate->p_pre_columnref_hook != NULL)
+    //   {
+    //       node = pstate->p_pre_columnref_hook(pstate, cref);
+    //       if (node != NULL)
+    //           return node;
+    //   }
+    //
+    // The owned hook is a real `fn` pointer stored on the ParseState by its
+    // installer (e.g. domainAddCheckConstraint's `replace_domain_constraint_value`,
+    // which reads the prepared `CoerceToDomainValue` out of
+    // `pstate.p_ref_hook_state`). A non-NULL result replaces the reference; a
+    // `None` falls through to the standard resolution below.
+    if let Some(hook) = pstate.p_pre_columnref_hook {
+        if let Some(node) = hook(pstate, &cref)? {
+            let node: Node<'mcx> = mcx::PgBox::into_inner(node);
+            return node_into_expr(node).ok_or_else(|| {
+                PgError::error("transformColumnRef: pre-columnref-hook node is not an expression")
+            });
+        }
     }
 
     // node: the resolved Node, if any.
@@ -3158,17 +3174,6 @@ fn transformMultiAssignRef<'mcx>(
 /// The PreParseColumnRefHook leg of `transformColumnRef` — the hook ABI carries
 /// opaque cross-ABI function pointers; reached only when a hook is installed
 /// (absent in the stock server).
-fn seam_transform_column_ref_hook<'mcx>(
-    _pstate: &mut ParseState<'mcx>,
-    _cref: ColumnRef<'mcx>,
-) -> PgResult<Expr> {
-    panic!(
-        "transformColumnRef's PreParseColumnRefHook leg needs the opaque \
-         columnref parser-hook ABI; the hook-installed path is reached only when \
-         a hook is present (absent in the stock server)."
-    )
-}
-
 /// The PostParseColumnRefHook leg of `transformColumnRef`.
 fn seam_transform_post_columnref_hook<'mcx>(
     _pstate: &mut ParseState<'mcx>,
@@ -3230,7 +3235,10 @@ fn transformParamRef<'mcx>(
         ParseRefHookState::VarParams(parstate) => Some(
             backend_parser_small1::variable_paramref_hook(pstate, parstate, &hook_pref)?,
         ),
-        ParseRefHookState::None => None,
+        // A domain CHECK parse state installs no paramref hook (C
+        // `p_paramref_hook == NULL`): a `$n` reference falls to the generic
+        // "there is no parameter $n" error below.
+        ParseRefHookState::None | ParseRefHookState::DomainCheckValue(_) => None,
     };
 
     // if (result == NULL) ereport(ERROR, "there is no parameter $%d", ...)

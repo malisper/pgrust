@@ -2160,13 +2160,13 @@ pub fn DefineCompositeType<'mcx>(
 // set_type_namespace / set_type_not_null / set_domain_default /
 // alter_type_recurse_update) and the ported pg_constraint / namespace /
 // dependency / pg_shdepend / pg_depend / objectaccess owners. The
-// executor-VALIDATE scans and the parser DEFAULT/CHECK expression cook
-// (cookDefault/transformExpr/deparse_expression/nodeToString) are unported and
-// seam-and-panic through this unit's own outward seams (validate_domain_*,
-// cook_default, deparse_expression, node_to_string, domain_add_check_constraint,
-// domain_add_not_null_constraint). The composite-rel ALTER paths
-// (RenameRelationInternal / ATExecChangeOwner / AlterRelationNamespaceInternal)
-// cross tablecmds-seams (no tablecmds owner yet → panic).
+// DEFAULT/CHECK expression cook (cookDefault / transformExpr /
+// coerce_to_{boolean,target_type} / assign_expr_collations) is done in-crate by
+// calling the parser owners directly; `deparse_expression` / `nodeToString` are
+// reached through this unit's installed outward seams. The composite-rel ALTER
+// paths (RenameRelationInternal / ATExecChangeOwner /
+// AlterRelationNamespaceInternal) cross tablecmds-seams (no tablecmds owner yet
+// → panic).
 // ===========================================================================
 
 use types_catalog::catalog::{NAMESPACE_RELATION_ID, RELATION_RELATION_ID};
@@ -2176,7 +2176,10 @@ use types_catalog::pg_type::{
 use types_nodes::ddlnodes::{ConstrType, CONSTR_CHECK, CONSTR_DEFAULT, CONSTR_NOTNULL, CONSTR_NULL};
 use types_nodes::nodes::Node as RichNode;
 use types_nodes::parsenodes::{DropBehavior, ObjectType, DROP_RESTRICT, OBJECT_DOMAIN, OBJECT_SCHEMA};
+use types_nodes::parsestmt::ParseExprKind;
 use types_nodes::primnodes::Expr;
+use types_catalog::pg_constraint::{ConstraintCategory, CONSTRAINT_CHECK, CONSTRAINT_NOTNULL};
+use types_error::ERRCODE_INVALID_COLUMN_REFERENCE;
 
 /// `F_DOMAIN_IN` (fmgroids.h) — `domain_in`.
 const F_DOMAIN_IN: Oid = 4150;
@@ -2242,6 +2245,370 @@ fn type_name_str(typ: &types_tuple::pg_type::FormData_pg_type) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// cookDefault / domainAddCheckConstraint / domainAddNotNullConstraint
+//
+// In C these are `catalog/heap.c` (cookDefault) and `commands/typecmds.c`
+// statics. They are ported here as real functions calling the parser /
+// pg_constraint owners directly (no cycle), replacing the prior outward-seam
+// placeholders.
+// ---------------------------------------------------------------------------
+
+/// `cookDefault(pstate, raw_default, atttypid, atttypmod, attname, 0)`
+/// (catalog/heap.c:3323) — transform a raw DEFAULT / domain-default expression
+/// to the target type and cook it into an executable [`Expr`]. The domain path
+/// always passes `attgenerated == 0`, so the generated-column legs are omitted.
+/// Returns the cooked node (`Node::Expr`); a NULL-constant default flows through
+/// here as a `Const` whose `constisnull` is set, exactly as in C.
+fn cook_default<'mcx>(
+    mcx: Mcx<'mcx>,
+    raw_default: RichNode<'mcx>,
+    atttypid: Oid,
+    atttypmod: i32,
+    attname: &str,
+) -> PgResult<Option<RichNode<'mcx>>> {
+    let mut pstate = backend_parser_small1::make_parsestate(mcx, None)?;
+
+    /* Transform raw parsetree to executable expression. */
+    let expr = backend_parser_parse_expr::transformExpr(
+        &mut pstate,
+        Some(raw_default),
+        ParseExprKind::EXPR_KIND_COLUMN_DEFAULT,
+    )?;
+    let mut expr = match expr {
+        Some(e) => e,
+        None => return Ok(None),
+    };
+
+    /*
+     * For a default expression, transformExpr() should have rejected column
+     * references (Assert(!contain_var_clause(expr)) in C).
+     */
+
+    /*
+     * Coerce the expression to the correct type and typmod, if given. This
+     * matches the parser's processing of non-defaulted expressions
+     * (transformAssignedExpr).
+     */
+    if OidIsValid(atttypid) {
+        let type_id = backend_nodes_core::nodefuncs::expr_type(Some(&expr))?;
+        let coerced = backend_parser_coerce::coerce_to_target_type(
+            mcx,
+            Some(&mut pstate),
+            expr,
+            type_id,
+            atttypid,
+            atttypmod,
+            types_nodes::ddlnodes::CoercionContext::COERCION_ASSIGNMENT,
+            types_nodes::primnodes::CoercionForm::COERCE_IMPLICIT_CAST,
+            -1,
+        )?;
+        expr = match coerced {
+            Some(c) => c,
+            None => {
+                return ereport(ERROR)
+                    .errcode(ERRCODE_DATATYPE_MISMATCH)
+                    .errmsg(format!(
+                        "column \"{}\" is of type {} but default expression is of type {}",
+                        attname,
+                        format_type_be(atttypid)?,
+                        format_type_be(type_id)?
+                    ))
+                    .errhint("You will need to rewrite or cast the expression.")
+                    .finish(errloc(3375, "cookDefault"))
+                    .map(|()| unreachable!());
+            }
+        };
+    }
+
+    /* Finally, take care of collations in the finished expression. */
+    backend_parser_parse_collate::assign_expr_collations(Some(&pstate), &mut expr)?;
+
+    Ok(Some(RichNode::Expr(expr)))
+}
+
+/// `replace_domain_constraint_value(pstate, cref)` (typecmds.c:3633) — the
+/// `p_pre_columnref_hook` used while parsing a domain CHECK constraint: a
+/// single-field reference named `value` is replaced by the
+/// `CoerceToDomainValue` prepared by [`domain_add_check_constraint`] (carried in
+/// `pstate.p_ref_hook_state`), with the reference's location propagated.
+fn replace_domain_constraint_value<'mcx>(
+    pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
+    cref: &types_nodes::rawnodes::ColumnRef<'mcx>,
+) -> PgResult<Option<types_nodes::nodes::NodePtr<'mcx>>> {
+    use types_nodes::parsestmt::ParseRefHookState;
+    if cref.fields.len() == 1 {
+        if let RichNode::String(s) = &*cref.fields[0] {
+            let colname = s.sval.as_str();
+            if colname == "value" {
+                if let ParseRefHookState::DomainCheckValue(template) = &pstate.p_ref_hook_state {
+                    let mut dom_val = *template;
+                    /* Propagate location knowledge, if any */
+                    dom_val.location = cref.location;
+                    let mcx = *pstate.p_rtable.allocator();
+                    let node = RichNode::Expr(Expr::CoerceToDomainValue(dom_val));
+                    return Ok(Some(mcx::alloc_in(mcx, node)?));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// `domainAddCheckConstraint(domainOid, domainNamespace, baseTypeOid, typMod,
+/// constr, domainName, constrAddr)` (typecmds.c:3504) — assign/validate the
+/// CHECK constraint name, cook `constr->raw_expr` into a boolean expression with
+/// a `VALUE` → `CoerceToDomainValue` substitution, and `CreateConstraintEntry`.
+/// Returns the cooked `conbin` text and (when `want_constr_addr`) the new
+/// constraint's address.
+fn domain_add_check_constraint<'mcx>(
+    mcx: Mcx<'mcx>,
+    domain_oid: Oid,
+    domain_namespace: Oid,
+    base_type_oid: Oid,
+    typ_mod: i32,
+    constr_node: RichNode<'mcx>,
+    domain_name: &str,
+    want_constr_addr: bool,
+) -> PgResult<(String, Option<ObjectAddress>)> {
+    let constr = match &constr_node {
+        RichNode::Constraint(c) => c,
+        _ => unreachable!("domainAddCheckConstraint: not a Constraint"),
+    };
+    debug_assert!(constr.contype == CONSTR_CHECK);
+
+    /* Assign or validate constraint name. */
+    let conname: String = match constr.conname.as_deref() {
+        Some(name) => {
+            if backend_catalog_pg_constraint::ConstraintNameIsUsed(
+                mcx,
+                ConstraintCategory::Domain,
+                domain_oid,
+                name,
+            )? {
+                return ereport(ERROR)
+                    .errcode(ERRCODE_DUPLICATE_OBJECT)
+                    .errmsg(format!(
+                        "constraint \"{name}\" for domain \"{domain_name}\" already exists"
+                    ))
+                    .finish(errloc(3527, "domainAddCheckConstraint"))
+                    .map(|()| unreachable!());
+            }
+            name.to_string()
+        }
+        None => backend_catalog_pg_constraint::ChooseConstraintName(
+            mcx,
+            domain_name,
+            "",
+            "check",
+            domain_namespace,
+            &[],
+        )?,
+    };
+
+    /* Convert the raw_expr into an EXPR via a parse state with the VALUE hook. */
+    let mut pstate = backend_parser_small1::make_parsestate(mcx, None)?;
+
+    /*
+     * Set up a CoerceToDomainValue to represent the occurrence of VALUE in the
+     * expression. It appears to have the type of the base type, not the domain.
+     */
+    let dom_val = types_nodes::primnodes::CoerceToDomainValue {
+        typeId: base_type_oid,
+        typeMod: typ_mod,
+        collation: backend_utils_cache_lsyscache_seams::get_typcollation::call(base_type_oid)?,
+        location: -1,
+    };
+    pstate.p_pre_columnref_hook = Some(replace_domain_constraint_value);
+    pstate.p_ref_hook_state =
+        types_nodes::parsestmt::ParseRefHookState::DomainCheckValue(dom_val);
+
+    let raw_expr = constr
+        .raw_expr
+        .as_deref()
+        .expect("domainAddCheckConstraint: CHECK constraint has no raw_expr")
+        .clone_in(mcx)?;
+    let expr = backend_parser_parse_expr::transformExpr(
+        &mut pstate,
+        Some(raw_expr),
+        ParseExprKind::EXPR_KIND_DOMAIN_CHECK,
+    )?
+    .expect("domainAddCheckConstraint: CHECK expression cannot be NULL");
+
+    /* Make sure it yields a boolean result. */
+    let mut expr = backend_parser_coerce::coerce_to_boolean(mcx, Some(&mut pstate), expr, "CHECK")?;
+
+    /* Fix up collation information. */
+    backend_parser_parse_collate::assign_expr_collations(Some(&pstate), &mut expr)?;
+
+    /* Domains don't allow variables. */
+    if !pstate.p_rtable.is_empty()
+        || backend_optimizer_util_var_seams::contain_var_clause::call(&expr)
+    {
+        return ereport(ERROR)
+            .errcode(ERRCODE_INVALID_COLUMN_REFERENCE)
+            .errmsg("cannot use table references in domain check constraint")
+            .finish(errloc(3576, "domainAddCheckConstraint"))
+            .map(|()| unreachable!());
+    }
+
+    /* Convert to string form for storage. */
+    let expr_node = RichNode::Expr(expr);
+    let ccbin = me::node_to_string::call(mcx, expr_node.clone_in(mcx)?)?
+        .as_str()
+        .to_string();
+
+    /* Store the constraint in pg_constraint. */
+    let skip_validation = match &constr_node {
+        RichNode::Constraint(c) => c.skip_validation,
+        _ => unreachable!(),
+    };
+    let ccoid = backend_catalog_pg_constraint::CreateConstraintEntry(
+        mcx,
+        &conname,
+        domain_namespace,
+        CONSTRAINT_CHECK,
+        false, /* isDeferrable */
+        false, /* isDeferred */
+        true,  /* isEnforced */
+        !skip_validation,
+        InvalidOid, /* parentConstrId */
+        InvalidOid, /* relId */
+        &[],
+        0,
+        0,
+        domain_oid, /* domainId */
+        InvalidOid, /* indexRelId */
+        InvalidOid, /* foreignRelId */
+        &[],
+        &[],
+        &[],
+        &[],
+        0,
+        b' ' as i8,
+        b' ' as i8,
+        &[],
+        0,
+        b' ' as i8,
+        None,             /* exclOp */
+        Some(&expr_node), /* conExpr */
+        Some(&ccbin),     /* conBin */
+        true,             /* conIsLocal */
+        0,                /* conInhCount */
+        false,            /* conNoInherit */
+        false,            /* conPeriod */
+        false,            /* is_internal */
+    )?;
+
+    let constr_addr = if want_constr_addr {
+        Some(ObjectAddress {
+            classId: ConstraintRelationId,
+            objectId: ccoid,
+            objectSubId: 0,
+        })
+    } else {
+        None
+    };
+
+    Ok((ccbin, constr_addr))
+}
+
+/// `domainAddNotNullConstraint(domainOid, domainNamespace, baseTypeOid, typMod,
+/// constr, domainName, constrAddr)` (typecmds.c:3664) — assign/validate the NOT
+/// NULL constraint name and `CreateConstraintEntry(CONSTRAINT_NOTNULL, ...)`.
+fn domain_add_not_null_constraint<'mcx>(
+    mcx: Mcx<'mcx>,
+    domain_oid: Oid,
+    domain_namespace: Oid,
+    _base_type_oid: Oid,
+    _typ_mod: i32,
+    constr_node: RichNode<'mcx>,
+    domain_name: &str,
+    want_constr_addr: bool,
+) -> PgResult<Option<ObjectAddress>> {
+    let constr = match &constr_node {
+        RichNode::Constraint(c) => c,
+        _ => unreachable!("domainAddNotNullConstraint: not a Constraint"),
+    };
+    debug_assert!(constr.contype == CONSTR_NOTNULL);
+
+    /* Assign or validate constraint name. */
+    let conname: String = match constr.conname.as_deref() {
+        Some(name) => {
+            if backend_catalog_pg_constraint::ConstraintNameIsUsed(
+                mcx,
+                ConstraintCategory::Domain,
+                domain_oid,
+                name,
+            )? {
+                return ereport(ERROR)
+                    .errcode(ERRCODE_DUPLICATE_OBJECT)
+                    .errmsg(format!(
+                        "constraint \"{name}\" for domain \"{domain_name}\" already exists"
+                    ))
+                    .finish(errloc(3683, "domainAddNotNullConstraint"))
+                    .map(|()| unreachable!());
+            }
+            name.to_string()
+        }
+        None => backend_catalog_pg_constraint::ChooseConstraintName(
+            mcx,
+            domain_name,
+            "",
+            "not_null",
+            domain_namespace,
+            &[],
+        )?,
+    };
+
+    let ccoid = backend_catalog_pg_constraint::CreateConstraintEntry(
+        mcx,
+        &conname,
+        domain_namespace,
+        CONSTRAINT_NOTNULL,
+        false,
+        false,
+        true,
+        !constr.skip_validation,
+        InvalidOid,
+        InvalidOid,
+        &[],
+        0,
+        0,
+        domain_oid,
+        InvalidOid,
+        InvalidOid,
+        &[],
+        &[],
+        &[],
+        &[],
+        0,
+        b' ' as i8,
+        b' ' as i8,
+        &[],
+        0,
+        b' ' as i8,
+        None, /* exclOp */
+        None, /* conExpr */
+        None, /* conBin */
+        true, /* conIsLocal */
+        0,    /* conInhCount */
+        false,
+        false,
+        false,
+    )?;
+
+    if want_constr_addr {
+        Ok(Some(ObjectAddress {
+            classId: ConstraintRelationId,
+            objectId: ccoid,
+            objectSubId: 0,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // checkDomainOwner   (typecmds.c:3484)
 // ---------------------------------------------------------------------------
 
@@ -2293,11 +2660,12 @@ pub fn AlterDomainDefault<'mcx>(
 
     if let Some(raw) = default_raw {
         /* Cook the colDef->raw_expr into an expression. */
-        let default_expr = me::cook_default::call(
+        let default_expr = cook_default(
+            mcx,
             raw.clone_in(mcx)?,
             typ.typbasetype,
             typ.typtypmod,
-            type_name_str(&typ),
+            &type_name_str(&typ),
         )?;
 
         /*
@@ -2353,13 +2721,14 @@ pub fn AlterDomainNotNull<'mcx>(
 
     if not_null {
         let constr = make_constraint(mcx, CONSTR_NOTNULL);
-        me::domain_add_not_null_constraint::call(
+        domain_add_not_null_constraint(
+            mcx,
             domainoid,
             typ.typnamespace,
             typ.typbasetype,
             typ.typtypmod,
             constr,
-            type_name_str(&typ),
+            &type_name_str(&typ),
             false,
         )?;
         me::validate_domain_not_null_constraint::call(domainoid)?;
@@ -2494,13 +2863,14 @@ pub fn AlterDomainAddConstraint<'mcx>(
     let mut constr_addr: Option<ObjectAddress> = None;
 
     if constr.contype == CONSTR_CHECK {
-        let (ccbin, addr) = me::domain_add_check_constraint::call(
+        let (ccbin, addr) = domain_add_check_constraint(
+            mcx,
             domainoid,
             typ.typnamespace,
             typ.typbasetype,
             typ.typtypmod,
             new_constraint.clone_in(mcx)?,
-            type_name_str(&typ),
+            &type_name_str(&typ),
             want_constr_addr,
         )?;
         constr_addr = addr;
@@ -2518,13 +2888,14 @@ pub fn AlterDomainAddConstraint<'mcx>(
         if typ.typnotnull {
             return Ok((InvalidObjectAddress(), None));
         }
-        constr_addr = me::domain_add_not_null_constraint::call(
+        constr_addr = domain_add_not_null_constraint(
+            mcx,
             domainoid,
             typ.typnamespace,
             typ.typbasetype,
             typ.typtypmod,
             new_constraint.clone_in(mcx)?,
-            type_name_str(&typ),
+            &type_name_str(&typ),
             want_constr_addr,
         )?;
 
@@ -2732,11 +3103,12 @@ pub fn DefineDomain<'mcx>(
 
                 if let Some(raw) = constr.raw_expr.as_deref() {
                     /* Cook the constr->raw_expr into an expression. */
-                    let default_expr = me::cook_default::call(
+                    let default_expr = cook_default(
+                        mcx,
                         raw.clone_in(mcx)?,
                         basetypeoid,
                         basetypeMod,
-                        domainName.clone(),
+                        &domainName,
                     )?;
                     let is_null_const = match default_expr.as_ref() {
                         None => true,
@@ -2905,24 +3277,26 @@ pub fn DefineDomain<'mcx>(
         };
         match constr.contype {
             CONSTR_CHECK => {
-                me::domain_add_check_constraint::call(
+                domain_add_check_constraint(
+                    mcx,
                     address.objectId,
                     domainNamespace,
                     basetypeoid,
                     basetypeMod,
                     node.clone_in(mcx)?,
-                    domainName.clone(),
+                    &domainName,
                     false,
                 )?;
             }
             CONSTR_NOTNULL => {
-                me::domain_add_not_null_constraint::call(
+                domain_add_not_null_constraint(
+                    mcx,
                     address.objectId,
                     domainNamespace,
                     basetypeoid,
                     basetypeMod,
                     node.clone_in(mcx)?,
-                    domainName.clone(),
+                    &domainName,
                     false,
                 )?;
             }
@@ -3899,4 +4273,81 @@ pub fn init_seams() {
     me::AlterTypeNamespace::set(alter_type_namespace_seam);
     me::AlterTypeNamespace_oid::set(AlterTypeNamespace_oid);
     me::AlterTypeOwner::set(alter_type_owner_seam);
+
+    // ProcessUtilitySlow dispatch target (utility.c) for CREATE DOMAIN — decode
+    // the `CreateDomainStmt` and run the ported `DefineDomain` body.
+    backend_tcop_utility_out_seams::define_domain::set(define_domain_seam);
+}
+
+/// Outward-seam adapter for `DefineDomain(pstate, (CreateDomainStmt *) stmt)`
+/// (utility.c `ProcessUtilitySlow`): decode the `CreateDomainStmt`'s qualified
+/// name, base `TypeName`, optional `COLLATE` clause, and constraint list, then
+/// run the ported [`DefineDomain`] body. `pstate` is threaded for parity with C
+/// but `DefineDomain` does not consult it.
+fn define_domain_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    _pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
+    stmt: &RichNode<'mcx>,
+) -> PgResult<ObjectAddress> {
+    let cds = match stmt {
+        RichNode::CreateDomainStmt(s) => s,
+        _ => {
+            return Err(PgError::error(
+                "define_domain_seam: statement is not a CreateDomainStmt",
+            ))
+        }
+    };
+
+    // domainname: List of String nodes -> Vec<String>.
+    let mut domainname: Vec<String> = Vec::with_capacity(cds.domainname.len());
+    for n in cds.domainname.iter() {
+        match &**n {
+            RichNode::String(s) => domainname.push(s.sval.as_str().to_string()),
+            _ => {
+                return Err(PgError::error(
+                    "CREATE DOMAIN: domain name element is not a String",
+                ))
+            }
+        }
+    }
+
+    // typeName: raw TypeName node -> resolver TypeName.
+    let raw_tn = match cds.typeName.as_deref() {
+        Some(RichNode::TypeName(tn)) => tn,
+        _ => return Err(PgError::error("CREATE DOMAIN: missing or invalid base TypeName")),
+    };
+    let type_name = backend_parser_parse_type::raw_typename_to_parse(raw_tn)?;
+
+    // collClause: optional CollateClause -> Option<Vec<String>> (the COLLATE name).
+    let coll_clause: Option<Vec<String>> = match cds.collClause.as_deref() {
+        Some(RichNode::CollateClause(cc)) => {
+            let mut names: Vec<String> = Vec::with_capacity(cc.collname.len());
+            for n in cc.collname.iter() {
+                match &**n {
+                    RichNode::String(s) => names.push(s.sval.as_str().to_string()),
+                    _ => {
+                        return Err(PgError::error(
+                            "CREATE DOMAIN: COLLATE name element is not a String",
+                        ))
+                    }
+                }
+            }
+            Some(names)
+        }
+        _ => None,
+    };
+
+    // constraints: List of Constraint nodes -> Vec<RichNode>.
+    let mut constraints: Vec<RichNode<'mcx>> = Vec::with_capacity(cds.constraints.len());
+    for n in cds.constraints.iter() {
+        constraints.push((**n).clone_in(mcx)?);
+    }
+
+    DefineDomain(
+        mcx,
+        &domainname,
+        &type_name,
+        coll_clause.as_deref(),
+        &constraints,
+    )
 }

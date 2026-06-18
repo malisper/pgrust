@@ -139,25 +139,6 @@ seam_core::seam!(
     pub fn validate_domain_check_constraint(domainoid: Oid, ccbin: String) -> PgResult<()>
 );
 
-seam_core::seam!(
-    /// `cookDefault(pstate, raw_default, atttypid, atttypmod, attname, 0)`
-    /// (parser/parse_node.c): parse-analyze + coerce a raw DEFAULT/domain-default
-    /// expression to the target type, returning the cooked expression node (or
-    /// `None`).
-    ///
-    /// OUTWARD seam: `cookDefault`'s real owner is `parser/parse_node.c`
-    /// (`backend-parser-small1`), but its body drives `transformExpr` +
-    /// `coerce_to_target_type` + `assign_expr_collations` over a full
-    /// `ParseState`, none reachable from this layer; this `cook_default` is the
-    /// node-level surface that AlterDomainDefault/DefineDomain reach. PANICS
-    /// until that parser path is wired through.
-    pub fn cook_default<'mcx>(
-        raw_default: types_nodes::nodes::Node<'mcx>,
-        type_id: Oid,
-        typmod: i32,
-        attname: String,
-    ) -> PgResult<Option<types_nodes::nodes::Node<'mcx>>>
-);
 
 seam_core::seam!(
     /// `deparse_expression(expr, NIL, false, false)` (utils/adt/ruleutils.c): the
@@ -180,51 +161,6 @@ seam_core::seam!(
     ) -> PgResult<mcx::PgString<'mcx>>
 );
 
-seam_core::seam!(
-    /// `domainAddCheckConstraint(...)` (typecmds.c:3504): the shared CREATE/ALTER
-    /// DOMAIN CHECK-constraint builder — assign/validate the constraint name,
-    /// cook the `raw_expr` into a boolean expression (with a `VALUE`
-    /// `CoerceToDomainValue` substitution), and `CreateConstraintEntry`. Returns
-    /// the cooked `conbin` text (the C return) and, via `constr_addr`, the new
-    /// constraint's OID when requested.
-    ///
-    /// OUTWARD seam: the cook half (`transformExpr` / `coerce_to_boolean` /
-    /// `assign_expr_collations` / `contain_var_clause` / `nodeToString`) is
-    /// parser-blocked; `CreateConstraintEntry` is reachable (pg_constraint
-    /// ported) but the cook precedes it. Declared as one node-level surface so
-    /// the domain CHECK path is a single seam-and-panic until the parser cook is
-    /// wired. PANICS until then.
-    pub fn domain_add_check_constraint<'mcx>(
-        domain_oid: Oid,
-        domain_namespace: Oid,
-        base_type_oid: Oid,
-        typ_mod: i32,
-        constr: types_nodes::nodes::Node<'mcx>,
-        domain_name: String,
-        want_constr_addr: bool,
-    ) -> PgResult<(String, Option<ObjectAddress>)>
-);
-
-seam_core::seam!(
-    /// `domainAddNotNullConstraint(...)` (typecmds.c:3664): the shared CREATE/ALTER
-    /// DOMAIN NOT NULL constraint builder — assign/validate the constraint name
-    /// and `CreateConstraintEntry(CONSTRAINT_NOTNULL, ...)`. Returns the new
-    /// constraint's OID via `constr_addr` when requested.
-    ///
-    /// `ConstraintNameIsUsed`/`ChooseConstraintName`/`CreateConstraintEntry` are
-    /// all in the ported pg_constraint owner; this seam is declared as the unit's
-    /// own surface (the C statics live in typecmds.c) and is installed by F3's
-    /// `init_seams()` once the pg_constraint dep is wired.
-    pub fn domain_add_not_null_constraint<'mcx>(
-        domain_oid: Oid,
-        domain_namespace: Oid,
-        base_type_oid: Oid,
-        typ_mod: i32,
-        constr: types_nodes::nodes::Node<'mcx>,
-        domain_name: String,
-        want_constr_addr: bool,
-    ) -> PgResult<Option<ObjectAddress>>
-);
 
 // ---------------------------------------------------------------------------
 // Generic ALTER dispatch targets driven by commands/alter.c.

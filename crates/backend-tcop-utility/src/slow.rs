@@ -257,6 +257,11 @@ fn process_utility_slow_body<'mcx>(
             address = rt::define_stmt::call(mcx, pstate, parsetree)?;
         }
 
+        Node::CreateDomainStmt(_) => {
+            // CREATE DOMAIN.
+            address = rt::define_domain::call(mcx, pstate, parsetree)?;
+        }
+
         Node::IndexStmt(stmt) => {
             // CREATE INDEX.
             if stmt.concurrent {
