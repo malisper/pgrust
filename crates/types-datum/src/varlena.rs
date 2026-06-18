@@ -40,6 +40,26 @@ fn varsize_4b(header: [u8; VARHDRSZ]) -> usize {
     len as usize
 }
 
+/// Read the total length encoded by a 4-byte uncompressed varlena header at the
+/// start of `bytes` (`VARSIZE_4B`), or `None` if `bytes` is shorter than the
+/// header or its leading byte is the 1-byte / external tag (not a 4-byte header).
+/// Used to disambiguate a header-FUL canonical `Datum::ByRef` image from a
+/// header-LESS payload at the fmgr boundary without a catalog typlen lookup.
+pub fn varsize_4b_of(bytes: &[u8]) -> Option<usize> {
+    if bytes.len() < VARHDRSZ {
+        return None;
+    }
+    // A 4-byte uncompressed header (`VARATT_IS_4B_U`) has its low two tag bits
+    // clear; a 1-byte short header (`VARATT_IS_1B`, low bit set) or external
+    // pointer is not the form `set_varsize_4b` produces.
+    if bytes[0] & 0x03 != 0 {
+        return None;
+    }
+    let mut header = [0u8; VARHDRSZ];
+    header.copy_from_slice(&bytes[..VARHDRSZ]);
+    Some(varsize_4b(header))
+}
+
 /// The size of the length header in front of a `struct varlena` image (`bytes`
 /// addresses the start of the varlena): `VARHDRSZ_SHORT` (1) for the 1-byte
 /// short header (`VARATT_IS_1B`), else `VARHDRSZ` (4) for the standard 4-byte

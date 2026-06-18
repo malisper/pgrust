@@ -2284,6 +2284,27 @@ fn typmodin_seam(typmodin: Oid, cstrings: &[String], location: i32) -> PgResult<
     }
 }
 
+/// Strip the on-disk varlena length header from a canonical `Datum::ByRef` image
+/// to the header-LESS payload the fmgr `RefPayload::Varlena` lane (and the adt
+/// output/send cores' `VARDATA` readers) expect — but ONLY when the image is in
+/// fact a self-consistent 4-byte-header-ful varlena (`VARSIZE == len`), the form
+/// `ref_out_to_datum`/heap-deform produce. A fixed-length-by-ref image (`name`'s
+/// 64-byte NUL-padded buffer) or an already-header-less Const image is NOT a
+/// valid varlena header (its `VARSIZE` won't equal its length), so it passes
+/// verbatim. This disambiguates the tree's two `Datum::ByRef` header conventions
+/// at the boundary WITHOUT a catalog `typlen` lookup, so it is safe on the boot
+/// (pre-catalog) `InsertOneValue`/`OutputFunctionCall` paths too. (Without the
+/// strip, `textout` over a header-ful column value rendered the 4-byte length
+/// word as leading garbage, e.g. `"$\0\0\0boolX"`.)
+fn byref_to_headerless_payload(bytes: &[u8]) -> Vec<u8> {
+    match types_datum::varlena::varsize_4b_of(bytes) {
+        Some(total) if total == bytes.len() && total >= types_datum::varlena::VARHDRSZ => {
+            bytes[types_datum::varlena::VARHDRSZ..].to_vec()
+        }
+        _ => bytes.to_vec(),
+    }
+}
+
 /// Marshal a tuple-attribute [`Datum`] into the boundary [`FmgrArg`] an
 /// output/send function expects: a by-value scalar stays a `Datum` word; a
 /// by-reference attribute's owned byte image is its `Varlena` referent (the
@@ -2296,7 +2317,7 @@ fn tuple_value_to_arg(
         CanonDatum::ByVal(d) => (Datum::from_usize(*d), None),
         CanonDatum::ByRef(b) => (
             Datum::null(),
-            Some(RefPayload::Varlena(b.as_slice().to_vec())),
+            Some(RefPayload::Varlena(byref_to_headerless_payload(b.as_slice()))),
         ),
         // A cstring referent maps directly to the cstring boundary arm.
         CanonDatum::Cstring(s) => (Datum::null(), Some(RefPayload::Cstring(s.clone()))),
@@ -2394,9 +2415,15 @@ pub fn datum_to_ref_arg(
     use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
     match val {
         CanonDatum::ByVal(d) => (NullableDatum::value(Datum::from_usize(*d)), None),
+        // Strip the canonical (header-FUL) varlena length header to the
+        // header-LESS payload the adt cores read on the by-ref arg lane (the
+        // inverse of `ref_out_to_datum`'s re-stamp); a fixed-by-ref (`name`) or
+        // already-header-less image passes verbatim (header-detection, no
+        // catalog `typlen` lookup — boot-safe). Without this, textcat/substring
+        // over a header-ful column value read the 4-byte length word as data.
         CanonDatum::ByRef(b) => (
             NullableDatum::value(Datum::null()),
-            Some(RefPayload::Varlena(b.as_slice().to_vec())),
+            Some(RefPayload::Varlena(byref_to_headerless_payload(b.as_slice()))),
         ),
         CanonDatum::Cstring(s) => (
             NullableDatum::value(Datum::null()),
@@ -2448,8 +2475,10 @@ pub fn datum_to_ref_arg_owned(
 /// a fixed-by-ref ByRef passes verbatim.
 fn byref_payload_for_typlen(bytes: &[u8], typlen: i32) -> Vec<u8> {
     if typlen == -1 {
-        let off = types_datum::varlena::varhdrsz_of(bytes);
-        bytes[off..].to_vec()
+        // Strip only a self-consistent header-ful varlena (header-detection), so
+        // an already-header-less varlena image (a parser Const not yet restamped)
+        // is not over-stripped.
+        byref_to_headerless_payload(bytes)
     } else {
         bytes.to_vec()
     }
@@ -2824,7 +2853,12 @@ fn oid_output_function_call_datum_seam<'mcx>(
             FmgrArg::ByVal(val.clone()),
         )?,
         CanonDatum::ByRef(bytes) => {
-            let payload = types_fmgr::boundary::RefPayload::Varlena(bytes.as_slice().to_vec());
+            // Strip a header-FUL varlena image to the header-less payload the
+            // output function's `VARDATA` reader expects (header-detection;
+            // a fixed-by-ref / header-less image passes verbatim).
+            let payload = types_fmgr::boundary::RefPayload::Varlena(
+                byref_to_headerless_payload(bytes.as_slice()),
+            );
             output_function_call_typed(
                 mcx,
                 &resolved.resolution,
