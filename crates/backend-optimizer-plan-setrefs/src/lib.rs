@@ -311,7 +311,7 @@ fn add_rtes_to_flat_rtable<'mcx>(
                 // For the common case (no dead subqueries), neither branch
                 // fires. When it does, the unplanned/dummy pull-up is owned by
                 // the subquery-planner cohort and reached through the seam below.
-                if ext::subroot_final_rel_is_dummy::call(glob_ref(root)?, rti)? {
+                if ext::subroot_final_rel_is_dummy::call(root, rti)? {
                     // recurse into subroot — owned by subquery_planner cohort.
                     return Err(PgError::error(
                         "add_rtes_to_flat_rtable: recursion into a dummy subroot \
@@ -2652,25 +2652,108 @@ fn relids_to_bms_node<'mcx>(
 // ===========================================================================
 
 /// `set_subqueryscan_references(root, plan, rtoffset)` (setrefs.c:1406).
+///
+/// In this port the subquery's path subtree was deep-imported into THIS root's
+/// arena (set-op `import_path_from_subroot`), and `create_subqueryscan_plan`
+/// built the subplan in-root. So the subplan's Vars already reference the flat
+/// range table; we recurse with `set_plan_refs(root, subplan, rtoffset)` rather
+/// than into a separate subroot. Then triviality-strip or keep+fix the
+/// SubqueryScan, exactly as C.
 fn set_subqueryscan_references<'mcx>(
     mcx: Mcx<'mcx>,
-    _run: &mut types_pathnodes::planner_run::PlannerRun<'mcx>,
-    _root: &mut PlannerInfo,
-    _plan: Node<'mcx>,
-    _rtoffset: i32,
+    run: &mut types_pathnodes::planner_run::PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    plan: Node<'mcx>,
+    rtoffset: i32,
 ) -> PgResult<Node<'mcx>> {
-    let _ = mcx;
-    // Requires set_plan_references(rel->subroot, plan->subplan), i.e. recursion
-    // into a per-subquery PlannerInfo (rel->subroot). RelOptInfo.subroot is a
-    // RelId handle into root.rel_arena and the subroot PlannerInfo is an unported
-    // per-subquery planner state. The triviality test + clean_up_removed_plan_level
-    // (SS_compute_initplan_cost) are reachable, but the subplan recursion's
-    // subroot is owned by the subquery_planner cohort.
-    Err(PgError::error(
-        "set_plan_refs(T_SubqueryScan): recursion into the subquery's subroot \
-         PlannerInfo (set_plan_references(rel->subroot, subplan)) is owned by the \
-         subquery_planner cohort and not ported",
-    ))
+    let mut sqs = match plan {
+        Node::SubqueryScan(s) => s,
+        _ => panic!("set_subqueryscan_references: plan is not a SubqueryScan"),
+    };
+
+    // Recursively process the subplan (set_plan_references(rel->subroot,
+    // subplan); here in-root).
+    let subplan = sqs
+        .subplan
+        .take()
+        .expect("set_subqueryscan_references: SubqueryScan has no subplan");
+    let processed = set_plan_refs(mcx, run, root, PgBox::into_inner(subplan), rtoffset)?;
+    sqs.subplan = Some(mcx::alloc_in(mcx, processed)?);
+
+    if trivial_subqueryscan(&mut sqs) {
+        // Omit the SubqueryScan node and pull up the subplan.
+        let child = sqs
+            .subplan
+            .take()
+            .expect("set_subqueryscan_references: trivial scan has no subplan");
+        clean_up_removed_plan_level(&sqs.scan.plan, PgBox::into_inner(child), mcx)
+    } else {
+        // Keep the SubqueryScan. Do the processing set_plan_references would
+        // otherwise have done on it (no set_upper_references — a SubqueryScan is
+        // created with correct references to its subplan's outputs already).
+        fix_scan_common(root, &mut sqs.scan, rtoffset, mcx)?;
+        Ok(Node::SubqueryScan(sqs))
+    }
+}
+
+/// `trivial_subqueryscan(plan)` (setrefs.c:1476) — detect whether a SubqueryScan
+/// can be deleted from the plan tree (no qual, tlist regurgitates the child).
+fn trivial_subqueryscan(plan: &mut types_nodes::nodeindexscan::SubqueryScan<'_>) -> bool {
+    use types_nodes::nodeindexscan::SubqueryScanStatus;
+
+    if plan.scanstatus == SubqueryScanStatus::Trivial {
+        return true;
+    }
+    if plan.scanstatus == SubqueryScanStatus::Nontrivial {
+        return false;
+    }
+    debug_assert!(plan.scanstatus == SubqueryScanStatus::Unknown);
+    // Initially mark non-deletable.
+    plan.scanstatus = SubqueryScanStatus::Nontrivial;
+
+    if plan.scan.plan.qual.as_ref().map(|q| !q.is_empty()).unwrap_or(false) {
+        return false;
+    }
+
+    let parent_tlist = plan.scan.plan.targetlist.as_deref().unwrap_or(&[]);
+    let scanrelid = plan.scan.scanrelid;
+    let child_tlist = match plan.subplan.as_deref() {
+        Some(n) => n.plan_head().targetlist.as_deref().unwrap_or(&[]),
+        None => return false,
+    };
+    if parent_tlist.len() != child_tlist.len() {
+        return false; // tlists not same length
+    }
+
+    let mut attrno: i16 = 1;
+    for (ptle, ctle) in parent_tlist.iter().zip(child_tlist.iter()) {
+        if ptle.resjunk != ctle.resjunk {
+            return false; // junk status mismatch
+        }
+        match ptle.expr.as_deref() {
+            // A Var referencing the matching subplan tlist element.
+            Some(types_nodes::primnodes::Expr::Var(var)) => {
+                debug_assert!(var.varno == scanrelid as i32);
+                debug_assert!(var.varlevelsup == 0);
+                if var.varattno != attrno {
+                    return false; // out of order
+                }
+            }
+            // A Const equaling the subplan element.
+            Some(pe @ types_nodes::primnodes::Expr::Const(_)) => {
+                match ctle.expr.as_deref() {
+                    Some(ce) if equal_expr(pe, ce) => {}
+                    _ => return false,
+                }
+            }
+            _ => return false,
+        }
+        attrno += 1;
+    }
+
+    // Re-mark deletable.
+    plan.scanstatus = SubqueryScanStatus::Trivial;
+    true
 }
 
 /// `set_append_references(root, aplan, rtoffset)` (setrefs.c:1820).

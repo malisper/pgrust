@@ -38,3 +38,4 @@ backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 # allpaths.c owns the `min_parallel_index_scan_size` GUC; vacuumparallel reads
 # it through this accessor seam, which allpaths installs in `init_seams`.
 backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }
+backend-optimizer-plan-setrefs-seams = { path = "../backend-optimizer-plan-setrefs-seams" }

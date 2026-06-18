@@ -33,9 +33,12 @@ seam_core::seam!(
 seam_core::seam!(
     /// `IS_DUMMY_REL(fetch_upper_rel(subroot, UPPERREL_FINAL, NULL))`
     /// (`add_rtes_to_flat_rtable`) — is the subquery's final upper rel dummy?
-    /// The upper-rel fetch + dummy test lives with the path/relnode owner.
+    /// `subroot_index` is the outer RT index; the owner navigates
+    /// `root.simple_rel_array[subroot_index].subroot` to the subquery's
+    /// `PlannerInfo`, fetches its `UPPERREL_FINAL` rel and runs `is_dummy_rel`.
+    /// The upper-rel fetch + dummy test live with the path/relnode owner.
     pub fn subroot_final_rel_is_dummy(
-        glob: &types_pathnodes::PlannerGlobal,
+        root: &mut types_pathnodes::PlannerInfo,
         subroot_index: usize,
     ) -> types_error::PgResult<bool>
 );

@@ -862,6 +862,37 @@ fn build_ordinality_pathkeys(
 /// `create_partial_bitmap_paths` (declared in costsize-seams; consumed by
 /// costsize/indxpath), and `build_and_cost_join_rel` (declared in geqo-all-seams;
 /// consumed by geqo).
+/// `subroot_final_rel_is_dummy` seam impl: navigate the outer rel's subroot,
+/// fetch its `UPPERREL_FINAL` rel and report `is_dummy_rel`. If the outer rel /
+/// subroot is absent (no planned subquery there), report false (the C
+/// `rel->subroot != NULL` guard precedes the dummy test).
+fn subroot_final_rel_is_dummy_impl(
+    root: &mut PlannerInfo,
+    subroot_index: usize,
+) -> PgResult<bool> {
+    let rel_id = match root.simple_rel_array.get(subroot_index).copied().flatten() {
+        Some(id) => id,
+        None => return Ok(false),
+    };
+    // Take the subroot out to satisfy the borrow checker, test, restore.
+    let subroot = match root.rel_mut(rel_id).subroot.0.take() {
+        Some(s) => s,
+        None => return Ok(false),
+    };
+    let result = {
+        let final_rel = subroot.upper_rels
+            [types_pathnodes::UPPERREL_FINAL as usize]
+            .first()
+            .copied();
+        match final_rel {
+            Some(fr) => is_dummy_rel(&subroot, fr),
+            None => false,
+        }
+    };
+    root.rel_mut(rel_id).subroot.0 = Some(subroot);
+    Ok(result)
+}
+
 pub fn init_seams() {
     costsize::compute_parallel_worker::set(compute_parallel_worker_seam);
     costsize::create_partial_bitmap_paths::set(create_partial_bitmap_paths);
@@ -870,6 +901,14 @@ pub fn init_seams() {
     // declared in `crate::seams` and consumed by standard_planner (planner.c)
     // when it picks the final path off the upper rel; install our real body.
     seams::get_cheapest_fractional_path::set(append::get_cheapest_fractional_path);
+
+    // setrefs.c's add_rtes_to_flat_rtable tests whether a subquery RTE's planned
+    // subroot has a dummy final rel. The subroot lives in
+    // `root.simple_rel_array[idx].subroot`; fetch its UPPERREL_FINAL rel and run
+    // is_dummy_rel. Owned here (is_dummy_rel + arena navigation reachable).
+    backend_optimizer_plan_setrefs_seams::subroot_final_rel_is_dummy::set(
+        subroot_final_rel_is_dummy_impl,
+    );
 
     // allpaths.c declares the GUC `int min_parallel_index_scan_size;`
     // (allpaths.c:82), populated from the GUC slot by guc_tables.c. vacuumparallel

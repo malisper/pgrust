@@ -192,6 +192,7 @@ pub fn ExecInitAppend<'mcx>(
     // appendstate->ps.plan = (Plan *) node; appendstate->ps.state = estate;
     // appendstate->ps.ExecProcNode = ExecAppend;
     appendstate.ps.plan = Some(node);
+    appendstate.ps.ExecProcNode = Some(exec_append_node);
 
     // Let choose_next_subplan_* function handle setting the first subplan.
     appendstate.as_whichplan = INVALID_SUBPLAN_INDEX;
@@ -388,6 +389,21 @@ pub fn ExecInitAppend<'mcx>(
     appendstate.choose_next_subplan = AppendChooseStrategy::Locally;
 
     Ok(appendstate)
+}
+
+/// `PlanState.ExecProcNode` adapter for an Append node: recover the
+/// `AppendStateData` from the `PlanStateNode` enum and dispatch to [`ExecAppend`]
+/// (mirrors the C function-pointer call through `node->ExecProcNode`).
+fn exec_append_node<'mcx>(
+    pstate: &mut types_nodes::PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<SlotId>> {
+    let mcx = estate.es_query_cxt;
+    let node = match pstate {
+        types_nodes::PlanStateNode::Append(node) => node,
+        other => panic!("castNode(AppendState, pstate) failed: tag {}", other.tag()),
+    };
+    ExecAppend(mcx, node, estate)
 }
 
 /// `ExecAppend(pstate)` — the `PlanState.ExecProcNode` callback; handles
