@@ -142,3 +142,51 @@ fn nested_result_recursion_text() {
     assert_eq!(out.matches("Result").count(), 2, "two node lines: {out:?}");
     assert!(out.contains("->  Result"), "child arrow: {out:?}");
 }
+
+/// `ExplainTargetRel` for a ValuesScan (RTE_VALUES) — no catalog lookup; the
+/// alias is taken from the RTE's eref. Exercises the structural scan-target
+/// port (`ExplainScanTarget` -> `ExplainTargetRel`) without a live catalog.
+#[test]
+fn target_rel_valuesscan_alias_text() {
+    use types_nodes::nodevaluesscan::ValuesScan;
+    use types_nodes::nodeindexscan::Scan;
+    use types_nodes::parsenodes::{RTEKind, RangeTblEntry};
+    use types_nodes::rawnodes::Alias;
+
+    let ctx = MemoryContext::new("explain-test");
+    let mcx = ctx.mcx();
+
+    let plan_node: Node<'_> = Node::ValuesScan(ValuesScan {
+        scan: Scan {
+            plan: empty_plan(),
+            scanrelid: 1,
+        },
+        values_lists: PgVec::new_in(mcx),
+    });
+
+    let mut es = ExplainState::new_in(mcx);
+    es.format = ExplainFormat::EXPLAIN_FORMAT_TEXT;
+
+    // One RTE for rti=1: RTE_VALUES with eref aliasname "v".
+    let mut rte = RangeTblEntry::new_in(mcx);
+    rte.rtekind = RTEKind::RTE_VALUES;
+    rte.eref = Some(
+        alloc_in(
+            mcx,
+            Alias {
+                aliasname: Some(mcx::PgString::from_str_in("v", mcx).unwrap()),
+                colnames: PgVec::new_in(mcx),
+            },
+        )
+        .unwrap(),
+    );
+    let mut rtable: PgVec<'_, RangeTblEntry<'_>> = PgVec::new_in(mcx);
+    rtable.push(rte);
+    es.rtable = Some(rtable);
+
+    crate::scantarget::ExplainScanTarget(&mut es, &plan_node, 1).unwrap();
+
+    let out = es.str.as_str();
+    // ExplainTargetRel for VALUES prints " on" then the refname (no objectname).
+    assert!(out.contains(" on v"), "values-scan alias: {out:?}");
+}
