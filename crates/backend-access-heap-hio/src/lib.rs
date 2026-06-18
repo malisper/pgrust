@@ -125,6 +125,7 @@ pub fn RelationPutHeapTuple(
     relation: &RelationData<'_>,
     buffer: Buffer,
     tuple: &mut HeapTupleData<'_>,
+    image: &[u8],
     token: bool,
 ) -> PgResult<()> {
     let _ = relation;
@@ -144,7 +145,8 @@ pub fn RelationPutHeapTuple(
     // Add the tuple to the page.
     // `offnum = PageAddItem(page, (Item) tuple->t_data, tuple->t_len,
     //                       InvalidOffsetNumber, false, true)`.
-    let offnum = hio_seam::page_add_item::call(buffer, tuple.clone())?;
+    debug_assert_eq!(image.len(), tuple.t_len as usize);
+    let offnum = hio_seam::page_add_item::call(buffer, image)?;
 
     if offnum == InvalidOffsetNumber {
         return Err(ereport(PANIC)
@@ -860,9 +862,12 @@ pub fn RelationGetBufferForTuple(
 mod wire {
     use backend_storage_buffer_bufmgr_seams as bufmgr_seam;
     use backend_storage_page::{
-        PageGetHeapFreeSpace, PageGetMaxOffsetNumber, PageGetPageSize, PageIsAllVisible, PageRef,
+        ItemIdGetOffset, PageAddItemExtended, PageGetHeapFreeSpace, PageGetItemId,
+        PageGetMaxOffsetNumber, PageGetPageSize, PageIsAllVisible, PageMut, PageRef,
     };
     use types_core::{BlockNumber, OffsetNumber, Size};
+    use types_storage::bufpage::PAI_IS_HEAP;
+    use types_tuple::heaptuple::ItemPointerData;
     use types_error::PgResult;
     use types_storage::storage::Buffer;
 
@@ -944,6 +949,47 @@ mod wire {
         })?;
         Ok(out)
     }
+
+    /// `PageAddItem(BufferGetPage(buffer), (Item) tuple->t_data, tuple->t_len,
+    /// InvalidOffsetNumber, false, true)` (bufpage.c) ==
+    /// `PageAddItemExtended(page, item, size, InvalidOffsetNumber, PAI_IS_HEAP)`.
+    /// `image` is the full contiguous on-disk tuple image. The owner holds the
+    /// exclusive content lock; `with_buffer_page` hands the live mutable page.
+    pub fn page_add_item(buffer: Buffer, image: &[u8]) -> PgResult<OffsetNumber> {
+        use types_tuple::heaptuple::INVALID_OFFSET_NUMBER;
+        let mut out: OffsetNumber = INVALID_OFFSET_NUMBER;
+        bufmgr_seam::with_buffer_page::call(buffer, &mut |bytes| {
+            let mut page = PageMut::new(bytes)?;
+            out = PageAddItemExtended(&mut page, image, INVALID_OFFSET_NUMBER, PAI_IS_HEAP)?;
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    /// `((HeapTupleHeader) PageGetItem(page, PageGetItemId(page, offnum)))->t_ctid
+    /// = ctid` (the `RelationPutHeapTuple` ctid stamp). `t_ctid` is the 6-byte
+    /// field at offset 12 of the on-page heap-tuple header.
+    pub fn set_stored_tuple_ctid(
+        buffer: Buffer,
+        offnum: OffsetNumber,
+        ctid: ItemPointerData,
+    ) -> PgResult<()> {
+        // Offset of `t_ctid` within HeapTupleHeaderData: t_choice (12 bytes)
+        // precedes it; t_ctid is BlockIdData(bi_hi u16, bi_lo u16) + ip_posid u16.
+        const T_CTID_OFF: usize = 12;
+        bufmgr_seam::with_buffer_page::call(buffer, &mut |bytes| {
+            let item_off = {
+                let page = PageRef::new(bytes)?;
+                let item_id = PageGetItemId(&page, offnum)?;
+                ItemIdGetOffset(&item_id) as usize
+            };
+            let base = item_off + T_CTID_OFF;
+            bytes[base..base + 2].copy_from_slice(&ctid.ip_blkid.bi_hi.to_ne_bytes());
+            bytes[base + 2..base + 4].copy_from_slice(&ctid.ip_blkid.bi_lo.to_ne_bytes());
+            bytes[base + 4..base + 6].copy_from_slice(&ctid.ip_posid.to_ne_bytes());
+            Ok(())
+        })
+    }
 }
 
 /// Install the buffer/page-keyed `hio.c` outward seams whose contract matches
@@ -964,4 +1010,6 @@ pub fn init_seams() {
     hio_seam::page_get_max_offset_number::set(wire::page_get_max_offset_number);
     hio_seam::page_get_heap_free_space::set(wire::page_get_heap_free_space);
     hio_seam::page_is_all_visible::set(wire::page_is_all_visible);
+    hio_seam::page_add_item::set(wire::page_add_item);
+    hio_seam::set_stored_tuple_ctid::set(wire::set_stored_tuple_ctid);
 }

@@ -30,7 +30,7 @@ use alloc::string::String;
 use types_core::{BlockNumber, Buffer, OffsetNumber, Oid, Size};
 use types_error::PgResult;
 use types_storage::buf::ExtendedRelation;
-use types_tuple::heaptuple::{HeapTupleData, ItemPointerData};
+use types_tuple::heaptuple::ItemPointerData;
 
 // --- bufmgr.c — buffer read / pin / lock / dirty ---------------------------
 
@@ -147,12 +147,13 @@ seam_core::seam!(
     /// `PageAddItem(BufferGetPage(buffer), (Item) tuple->t_data, tuple->t_len,
     /// InvalidOffsetNumber, false, true)` (`storage/page/bufpage.c`) — add the
     /// prepared heap tuple's data to the page, returning the assigned offset (or
-    /// `InvalidOffsetNumber` on failure). The tuple crosses owned; the runtime
-    /// serializes its full on-disk image (header + column bytes) onto the page.
-    pub fn page_add_item<'mcx>(
-        buffer: Buffer,
-        tuple: HeapTupleData<'mcx>,
-    ) -> PgResult<OffsetNumber>
+    /// `InvalidOffsetNumber` on failure). `image` is the tuple's full
+    /// contiguous on-disk byte image (`tuple->t_data[0 .. t_len]`, header +
+    /// null-bitmap + column bytes), which the caller serializes from its
+    /// `FormedTuple` via `heap_tuple_to_disk_image` — the decoded
+    /// `HeapTupleData` carries only the fixed header, not the user-data area, so
+    /// the contiguous image must cross the boundary as bytes (the C `Item`).
+    pub fn page_add_item(buffer: Buffer, image: &[u8]) -> PgResult<OffsetNumber>
 );
 
 seam_core::seam!(

@@ -246,10 +246,12 @@ pub fn heap_insert<'mcx>(
     // buffer/WAL substrate; the panic-on-error contract is mirrored by the
     // seam signatures (a seam erroring here is a PANIC-class bug).
 
+    let put_image = heap_tuple_to_disk_image(mcx, heaptup)?;
     RelationPutHeapTuple(
         relation,
         buffer,
         &mut heaptup.tuple,
+        &put_image,
         (options & HEAP_INSERT_SPECULATIVE) != 0,
     )?;
 
@@ -569,7 +571,8 @@ pub fn heap_multi_insert<'mcx>(
          * RelationGetBufferForTuple has ensured the first tuple fits. Put that
          * on the page, then as many others as fit.
          */
-        RelationPutHeapTuple(relation, buffer, &mut heaptuples[ndone].tuple, false)?;
+        let put_image = heap_tuple_to_disk_image(mcx, &heaptuples[ndone])?;
+        RelationPutHeapTuple(relation, buffer, &mut heaptuples[ndone].tuple, &put_image, false)?;
 
         /* For logical decoding we need combo CIDs to properly decode the catalog. */
         if needwal && need_cids {
@@ -586,10 +589,12 @@ pub fn heap_multi_insert<'mcx>(
                 break;
             }
 
+            let put_image = heap_tuple_to_disk_image(mcx, &heaptuples[ndone + nthispage])?;
             RelationPutHeapTuple(
                 relation,
                 buffer,
                 &mut heaptuples[ndone + nthispage].tuple,
+                &put_image,
                 false,
             )?;
 

@@ -853,7 +853,8 @@ pub fn heap_update<'mcx>(
             Some(t) => t,
             None => newtup,
         };
-        RelationPutHeapTuple(relation, newbuf, &mut heaptup.tuple, false)?;
+        let put_image = heap_tuple_to_disk_image(mcx, heaptup)?;
+        RelationPutHeapTuple(relation, newbuf, &mut heaptup.tuple, &put_image, false)?;
     }
 
     /*
