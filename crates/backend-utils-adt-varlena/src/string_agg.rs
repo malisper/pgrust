@@ -49,14 +49,23 @@ fn arg_isnull(fcinfo: &FunctionCallInfoBaseData, i: usize) -> bool {
     fcinfo.arg(i).map(|d| d.isnull).unwrap_or(true)
 }
 
-/// `PG_GETARG_TEXT_PP(i)` — the detoasted `text` payload (`VARDATA_ANY`,
-/// header-stripped) the by-ref lane delivers.
+/// `VARHDRSZ` — the 4-byte uncompressed varlena length word.
+const VARHDRSZ: usize = 4;
+
+/// `PG_GETARG_TEXT_PP(i)` — the detoasted `text` payload (`VARDATA_ANY`). Under
+/// the header-ful-everywhere convention the by-ref lane carries the full
+/// varlena image (4-byte length word + payload); this skips the header.
 #[inline]
 fn arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    fcinfo
+    let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
-        .expect("string_agg fn: by-ref `text` arg missing from by-ref lane")
+        .expect("string_agg fn: by-ref `text` arg missing from by-ref lane");
+    if image.len() >= VARHDRSZ {
+        &image[VARHDRSZ..]
+    } else {
+        &[]
+    }
 }
 
 /// Take the `internal` transition state out of `args[0]`. `None` is C's
@@ -88,10 +97,15 @@ fn ret_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     Datum::from_usize(0)
 }
 
-/// `PG_RETURN_TEXT_P(image)` — a by-ref `text` result, header-stripped (the
-/// payload bytes; symmetric with the `arg_text` lane).
+/// `PG_RETURN_TEXT_P(image)` — a by-ref `text` result. Under the
+/// header-ful-everywhere convention this stamps the 4-byte uncompressed varlena
+/// length word in front of the payload (`SET_VARSIZE`), symmetric with how
+/// `arg_text` reads args back (skipping the header).
 fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, payload: Vec<u8>) -> Datum {
-    fcinfo.set_ref_result(RefPayload::Varlena(payload));
+    let mut image = Vec::with_capacity(payload.len() + VARHDRSZ);
+    image.extend_from_slice(&types_datum::varlena::set_varsize_4b(payload.len() + VARHDRSZ));
+    image.extend_from_slice(&payload);
+    fcinfo.set_ref_result(RefPayload::Varlena(image));
     Datum::from_usize(0)
 }
 

@@ -32,14 +32,41 @@ use crate::{
 // Argument readers / result writers.
 // ---------------------------------------------------------------------------
 
+/// `VARHDRSZ` — the 4-byte uncompressed varlena length word.
+const VARHDRSZ: usize = 4;
+
+/// `VARDATA_ANY` of a header-ful varlena image: the payload after the 4-byte
+/// length word.
+#[inline]
+fn varlena_payload(image: &[u8]) -> &[u8] {
+    if image.len() >= VARHDRSZ {
+        &image[VARHDRSZ..]
+    } else {
+        &[]
+    }
+}
+
+/// Stamp a 4-byte uncompressed varlena length word in front of `payload`
+/// (`SET_VARSIZE`), producing the full header-ful image.
+#[inline]
+fn varlena_image(payload: &[u8]) -> Vec<u8> {
+    let mut image = Vec::with_capacity(payload.len() + VARHDRSZ);
+    image.extend_from_slice(&types_datum::varlena::set_varsize_4b(payload.len() + VARHDRSZ));
+    image.extend_from_slice(payload);
+    image
+}
+
 /// `PG_GETARG_NAME(i)`: a `name` value as a `NameData` (a copy of the varlena
-/// image, NUL-padded to the fixed size).
+/// payload, NUL-padded to the fixed size). Under the header-ful-everywhere
+/// convention the by-ref lane carries the full varlena image; this skips the
+/// 4-byte header.
 #[inline]
 fn arg_name(fcinfo: &FunctionCallInfoBaseData, i: usize) -> NameData {
-    let bytes = fcinfo
+    let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("mbutils fn: name arg missing from by-ref lane");
+    let bytes = varlena_payload(image);
     let mut nd = NameData::default();
     let n = bytes.len().min(NAMEDATALEN as usize);
     nd.data[..n].copy_from_slice(&bytes[..n]);
@@ -47,13 +74,17 @@ fn arg_name(fcinfo: &FunctionCallInfoBaseData, i: usize) -> NameData {
 }
 
 /// `PG_GETARG_TEXT_PP(i)` / `PG_GETARG_BYTEA_PP(i)`: the varlena payload bytes
-/// (already de-toasted; C reads `VARDATA_ANY`/`VARSIZE_ANY_EXHDR`).
+/// (C reads `VARDATA_ANY`/`VARSIZE_ANY_EXHDR`). Under the header-ful-everywhere
+/// convention the by-ref lane carries the full varlena image; this skips the
+/// 4-byte header.
 #[inline]
 fn arg_varlena<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    fcinfo
-        .ref_arg(i)
-        .and_then(|p| p.as_varlena())
-        .expect("mbutils fn: varlena arg missing from by-ref lane")
+    varlena_payload(
+        fcinfo
+            .ref_arg(i)
+            .and_then(|p| p.as_varlena())
+            .expect("mbutils fn: varlena arg missing from by-ref lane"),
+    )
 }
 
 #[inline]
@@ -61,17 +92,21 @@ fn ret_i32(v: i32) -> Datum {
     Datum::from_i32(v)
 }
 
-/// Set a `name` result: the full `NAMEDATALEN`-byte image on the by-ref lane.
+/// Set a `name` result: the full `NAMEDATALEN`-byte buffer, framed as a
+/// header-ful varlena on the by-ref lane (4-byte length word + buffer),
+/// symmetric with how `arg_name` reads it back.
 #[inline]
 fn ret_name(fcinfo: &mut FunctionCallInfoBaseData, nd: &NameData) -> Datum {
-    fcinfo.set_ref_result(RefPayload::Varlena(nd.data.to_vec()));
+    fcinfo.set_ref_result(RefPayload::Varlena(varlena_image(&nd.data)));
     Datum::from_usize(0)
 }
 
-/// Set a `text`/`bytea` result: the varlena payload bytes on the by-ref lane.
+/// Set a `text`/`bytea` result: the varlena payload, framed as a header-ful
+/// varlena on the by-ref lane (4-byte length word + payload), symmetric with
+/// how `arg_varlena` reads it back.
 #[inline]
 fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
-    fcinfo.set_ref_result(RefPayload::Varlena(bytes));
+    fcinfo.set_ref_result(RefPayload::Varlena(varlena_image(&bytes)));
     Datum::from_usize(0)
 }
 

@@ -179,16 +179,33 @@ pub fn ascii_safe_strlcpy(dest: &mut [u8], src: &[u8]) {
 /// payload [`FmgrOut`].
 fn encode_to_ascii_arg<'mcx>(data: FmgrArg<'_, 'mcx>, enc: pg_enc) -> PgResult<FmgrOut<'mcx>> {
     let bytes = arg_text(data);
-    let out = encode_to_ascii(bytes, enc)?;
+    let payload = encode_to_ascii(bytes, enc)?;
+    // Under the header-ful-everywhere convention the `text` result is the full
+    // varlena image: a 4-byte uncompressed length word (`SET_VARSIZE`) followed
+    // by the payload, symmetric with how `arg_text` reads args back.
+    const VARHDRSZ: usize = 4;
+    let mut out = Vec::with_capacity(payload.len() + VARHDRSZ);
+    out.extend_from_slice(&types_datum::varlena::set_varsize_4b(payload.len() + VARHDRSZ));
+    out.extend_from_slice(&payload);
     Ok(FmgrOut::Ref(RefPayload::Varlena(out)))
 }
 
 /// `PG_GETARG_TEXT_P_COPY(0)` → `VARDATA`: borrow the by-reference `text`
-/// referent's content bytes. (The C copy is implicit: the port produces a
-/// fresh result `Vec` rather than rewriting in place.)
+/// referent's content bytes. Under the header-ful-everywhere convention the
+/// by-ref lane carries the full varlena image (4-byte length word + payload),
+/// so the `Varlena` arm skips the header. (The C copy is implicit: the port
+/// produces a fresh result `Vec` rather than rewriting in place.)
 fn arg_text<'a>(arg: FmgrArg<'a, '_>) -> &'a [u8] {
+    const VARHDRSZ: usize = 4;
     match arg {
-        FmgrArg::Ref(RefPayload::Varlena(b)) => b.as_slice(),
+        FmgrArg::Ref(RefPayload::Varlena(b)) => {
+            let image = b.as_slice();
+            if image.len() >= VARHDRSZ {
+                &image[VARHDRSZ..]
+            } else {
+                &[]
+            }
+        }
         FmgrArg::Ref(RefPayload::Cstring(s)) => s.as_bytes(),
         FmgrArg::Ref(RefPayload::Composite(_))
         | FmgrArg::Ref(RefPayload::Expanded(_))

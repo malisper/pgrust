@@ -53,8 +53,18 @@ fn arg_name<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
     let payload = fcinfo
         .ref_arg(i)
         .expect("to_ascii: name arg missing from by-ref lane");
+    // Under the header-ful-everywhere convention a `name` arrives as a
+    // varlena-framed NAMEDATALEN buffer; skip the 4-byte length word.
+    const VARHDRSZ: usize = 4;
     let bytes: &[u8] = match payload {
-        RefPayload::Varlena(b) => b.as_slice(),
+        RefPayload::Varlena(b) => {
+            let image = b.as_slice();
+            if image.len() >= VARHDRSZ {
+                &image[VARHDRSZ..]
+            } else {
+                &[]
+            }
+        }
         RefPayload::Cstring(s) => s.as_bytes(),
         other => panic!("to_ascii: name arg has unexpected by-ref payload {other:?}"),
     };

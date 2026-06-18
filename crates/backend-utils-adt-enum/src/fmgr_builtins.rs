@@ -98,10 +98,28 @@ fn ret_cstring(fcinfo: &mut FunctionCallInfoBaseData, s: String) -> Datum {
     Datum::from_usize(0)
 }
 
-/// Set a `bytea`/array (by-reference) result on the by-ref lane.
+/// Set an array (by-reference) result on the by-ref lane. The `enum_range`
+/// array image is already a header-ful varlena (`arrayfuncs` stamps the 4-byte
+/// length word when it constructs the array), so it crosses verbatim under the
+/// header-ful-everywhere convention.
 #[inline]
 fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
     fcinfo.set_ref_result(RefPayload::Varlena(bytes));
+    Datum::from_usize(0)
+}
+
+/// Set a `bytea` (by-reference) `_send` result on the by-ref lane. The
+/// `enum_send` core builds the bare wire payload; under the header-ful-
+/// everywhere convention a `bytea` value is the full varlena image, so this
+/// stamps the 4-byte uncompressed length word in front (`SET_VARSIZE`). The
+/// wire layer strips that header downstream.
+#[inline]
+fn ret_send(fcinfo: &mut FunctionCallInfoBaseData, payload: Vec<u8>) -> Datum {
+    const VARHDRSZ: usize = 4;
+    let mut image = Vec::with_capacity(payload.len() + VARHDRSZ);
+    image.extend_from_slice(&types_datum::varlena::set_varsize_4b(payload.len() + VARHDRSZ));
+    image.extend_from_slice(&payload);
+    fcinfo.set_ref_result(RefPayload::Varlena(image));
     Datum::from_usize(0)
 }
 
@@ -175,7 +193,7 @@ fn fc_enum_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let val = arg_oid(fcinfo, 0);
     let m = scratch_mcx();
     let bytes = ok(crate::enum_send(m.mcx(), val));
-    ret_varlena(fcinfo, bytes.as_slice().to_vec())
+    ret_send(fcinfo, bytes.as_slice().to_vec())
 }
 
 // ---------------------------------------------------------------------------

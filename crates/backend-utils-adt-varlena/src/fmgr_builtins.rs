@@ -32,15 +32,25 @@ use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
 // Argument readers / result writers.
 // ---------------------------------------------------------------------------
 
-/// A `text`/`name` arg's by-ref payload bytes (the boundary strips the varlena
-/// header for `text`; for `name` this is the fixed `NAMEDATALEN` buffer, which
-/// the cores NUL-trim).
+/// `VARHDRSZ` — the 4-byte uncompressed varlena length word.
+const VARHDRSZ: usize = 4;
+
+/// A `text`/`bytea`/`name` arg's `VARDATA_ANY` payload bytes. Under the
+/// header-ful-everywhere convention the by-ref lane carries the full varlena
+/// image (4-byte length word + payload); this reads the payload by skipping the
+/// header. For `name` (typlen 64, framed as a varlena-headered NAMEDATALEN
+/// buffer) this yields the 64-byte buffer, which the cores NUL-trim.
 #[inline]
 fn arg_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    fcinfo
+    let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
-        .expect("varlena cmp fn: by-ref arg missing from by-ref lane")
+        .expect("varlena cmp fn: by-ref arg missing from by-ref lane");
+    if image.len() >= VARHDRSZ {
+        &image[VARHDRSZ..]
+    } else {
+        &[]
+    }
 }
 
 /// `PG_GET_COLLATION()`: the collation the operator was invoked under.
@@ -91,14 +101,19 @@ fn arg_cstring<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
         .expect("varlena fn: cstring arg missing from by-ref lane")
 }
 
-/// Set a `text`/`bytea`/`name` (by-reference) result on the by-ref lane. The
-/// fmgr boundary carries `text`/`bytea`/`name` results header-stripped (the
-/// payload bytes), symmetric with how the arg lane delivers them (the value
-/// cores here build/consume the header-less payload); `_send` results carry the
-/// wire bytes. Returns the dummy by-value word.
+/// Set a `text`/`bytea`/`name` (by-reference) result on the by-ref lane. Under
+/// the header-ful-everywhere convention the cores produce a header-LESS payload
+/// here, and this stamps the 4-byte uncompressed varlena length word in front
+/// (`SET_VARSIZE`), symmetric with how `arg_bytes` reads args back (skipping the
+/// header). `_send` results are themselves `bytea` values and are framed the
+/// same way; the wire layer strips the header downstream. Returns the dummy
+/// by-value word.
 #[inline]
 fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
-    fcinfo.set_ref_result(RefPayload::Varlena(bytes));
+    let mut image = Vec::with_capacity(bytes.len() + VARHDRSZ);
+    image.extend_from_slice(&types_datum::varlena::set_varsize_4b(bytes.len() + VARHDRSZ));
+    image.extend_from_slice(&bytes);
+    fcinfo.set_ref_result(RefPayload::Varlena(image));
     Datum::from_usize(0)
 }
 /// Set a `cstring` (`_out`) result on the by-ref lane and return the dummy word.

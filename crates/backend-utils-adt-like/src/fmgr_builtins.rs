@@ -31,15 +31,25 @@ use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
 // Argument readers / result writers.
 // ---------------------------------------------------------------------------
 
-/// A `text`/`bytea`/`name` arg's by-ref payload bytes (the boundary strips the
-/// varlena header for `text`/`bytea`; for `name` this is the fixed
-/// `NAMEDATALEN` buffer, which the cores NUL-trim or `name_text`).
+/// `VARHDRSZ` — the 4-byte uncompressed varlena length word.
+const VARHDRSZ: usize = 4;
+
+/// A `text`/`bytea`/`name` arg's `VARDATA_ANY` payload bytes. Under the
+/// header-ful-everywhere convention the by-ref lane carries the full varlena
+/// image (4-byte length word + payload); this skips the header. For `name`
+/// (typlen 64, framed as a varlena-headered NAMEDATALEN buffer) this yields the
+/// 64-byte buffer, which the cores NUL-trim or `name_text`.
 #[inline]
 fn arg_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    fcinfo
+    let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
-        .expect("like fn: by-ref arg missing from by-ref lane")
+        .expect("like fn: by-ref arg missing from by-ref lane");
+    if image.len() >= VARHDRSZ {
+        &image[VARHDRSZ..]
+    } else {
+        &[]
+    }
 }
 
 /// `PG_GET_COLLATION()`: the collation the operator was invoked under.
@@ -54,10 +64,15 @@ fn ret_bool(v: bool) -> Datum {
 }
 
 /// Set a `text`/`bytea` varlena result on the by-ref lane and return the dummy
-/// word.
+/// word. Under the header-ful-everywhere convention this stamps the 4-byte
+/// uncompressed varlena length word in front of the payload (`SET_VARSIZE`),
+/// symmetric with how `arg_bytes` reads args back.
 #[inline]
 fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
-    fcinfo.set_ref_result(RefPayload::Varlena(bytes));
+    let mut image = Vec::with_capacity(bytes.len() + VARHDRSZ);
+    image.extend_from_slice(&types_datum::varlena::set_varsize_4b(bytes.len() + VARHDRSZ));
+    image.extend_from_slice(&bytes);
+    fcinfo.set_ref_result(RefPayload::Varlena(image));
     Datum::from_usize(0)
 }
 

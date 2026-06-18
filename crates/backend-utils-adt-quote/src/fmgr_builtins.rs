@@ -35,28 +35,50 @@ use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
 // Argument readers / result writers.
 // ---------------------------------------------------------------------------
 
-/// A `text` arg's by-ref payload bytes (the boundary strips the varlena
-/// header), i.e. the `VARDATA_ANY` content the value cores operate on.
+/// `VARHDRSZ` — the 4-byte uncompressed varlena length word.
+const VARHDRSZ: usize = 4;
+
+/// `VARDATA_ANY` of a header-ful varlena image: the payload after the 4-byte
+/// length word.
+#[inline]
+fn varlena_payload(image: &[u8]) -> &[u8] {
+    if image.len() >= VARHDRSZ {
+        &image[VARHDRSZ..]
+    } else {
+        &[]
+    }
+}
+
+/// A `text` arg's `VARDATA_ANY` content. Under the header-ful-everywhere
+/// convention the by-ref lane carries the full varlena image (4-byte length
+/// word + payload); this skips the header.
 #[inline]
 fn arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    fcinfo
-        .ref_arg(i)
-        .and_then(|p| p.as_varlena())
-        .expect("quote fn: text arg missing from by-ref lane")
+    varlena_payload(
+        fcinfo
+            .ref_arg(i)
+            .and_then(|p| p.as_varlena())
+            .expect("quote fn: text arg missing from by-ref lane"),
+    )
 }
 
 /// A possibly-NULL `text` arg: `None` models `PG_ARGISNULL(i)` (the by-ref lane
 /// carries no payload for an SQL NULL). Used by the non-strict `quote_nullable`.
 #[inline]
 fn arg_text_opt<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> Option<&'a [u8]> {
-    fcinfo.ref_arg(i).and_then(|p| p.as_varlena())
+    fcinfo.ref_arg(i).and_then(|p| p.as_varlena()).map(varlena_payload)
 }
 
-/// Set a `text` result on the by-ref lane (header-stripped content, symmetric
-/// with the arg lane) and return the dummy by-value word.
+/// Set a `text` result on the by-ref lane. Under the header-ful-everywhere
+/// convention this stamps the 4-byte uncompressed varlena length word in front
+/// of the payload (`SET_VARSIZE`), symmetric with how `arg_text` reads args
+/// back. Returns the dummy by-value word.
 #[inline]
 fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
-    fcinfo.set_ref_result(RefPayload::Varlena(bytes));
+    let mut image = Vec::with_capacity(bytes.len() + VARHDRSZ);
+    image.extend_from_slice(&types_datum::varlena::set_varsize_4b(bytes.len() + VARHDRSZ));
+    image.extend_from_slice(&bytes);
+    fcinfo.set_ref_result(RefPayload::Varlena(image));
     Datum::from_usize(0)
 }
 

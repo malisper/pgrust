@@ -33,24 +33,43 @@ use mcx::{Mcx, PgVec};
 // Argument readers / result writers.
 // ---------------------------------------------------------------------------
 
-/// A `text` arg's by-ref payload bytes (the boundary strips the varlena
-/// header).
+/// `VARHDRSZ` — the 4-byte uncompressed varlena length word.
+const VARHDRSZ: usize = 4;
+
+/// `VARDATA_ANY` of a header-ful varlena image: the payload after the 4-byte
+/// length word.
 #[inline]
-fn arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    fcinfo
-        .ref_arg(i)
-        .and_then(|p| p.as_varlena())
-        .expect("regexp fn: text arg missing from by-ref lane")
+fn varlena_payload(image: &[u8]) -> &[u8] {
+    if image.len() >= VARHDRSZ {
+        &image[VARHDRSZ..]
+    } else {
+        &[]
+    }
 }
 
-/// A `name` arg's value bytes: the fixed `NAMEDATALEN` buffer trimmed at the
-/// first NUL (C: `NameStr(name)`).
+/// A `text` arg's `VARDATA_ANY` content. Under the header-ful-everywhere
+/// convention the by-ref lane carries the full varlena image (4-byte length
+/// word + payload); this skips the header.
+#[inline]
+fn arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    varlena_payload(
+        fcinfo
+            .ref_arg(i)
+            .and_then(|p| p.as_varlena())
+            .expect("regexp fn: text arg missing from by-ref lane"),
+    )
+}
+
+/// A `name` arg's value bytes: the varlena-framed NAMEDATALEN buffer (header
+/// skipped) trimmed at the first NUL (C: `NameStr(name)`).
 #[inline]
 fn arg_name<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    let buf = fcinfo
-        .ref_arg(i)
-        .and_then(|p| p.as_varlena())
-        .expect("regexp fn: name arg missing from by-ref lane");
+    let buf = varlena_payload(
+        fcinfo
+            .ref_arg(i)
+            .and_then(|p| p.as_varlena())
+            .expect("regexp fn: name arg missing from by-ref lane"),
+    );
     match buf.iter().position(|&b| b == 0) {
         Some(n) => &buf[..n],
         None => buf,
@@ -79,10 +98,17 @@ fn ret_i32(v: i32) -> Datum {
 }
 
 /// Set a `text` result on the by-ref `Varlena` lane. The core's result lives in
-/// `m`; copy its bytes out before `m` drops.
+/// `m`; copy its bytes out before `m` drops. Under the header-ful-everywhere
+/// convention this stamps the 4-byte uncompressed varlena length word in front
+/// of the payload (`SET_VARSIZE`), symmetric with how `arg_text` reads args
+/// back.
 #[inline]
 fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, v: PgVec<'_, u8>) -> Datum {
-    fcinfo.set_ref_result(RefPayload::Varlena(v.as_slice().to_vec()));
+    let payload = v.as_slice();
+    let mut image = Vec::with_capacity(payload.len() + VARHDRSZ);
+    image.extend_from_slice(&types_datum::varlena::set_varsize_4b(payload.len() + VARHDRSZ));
+    image.extend_from_slice(payload);
+    fcinfo.set_ref_result(RefPayload::Varlena(image));
     Datum::from_usize(0)
 }
 
