@@ -19464,6 +19464,7 @@ name = "backend-utils-adt-ruleutils"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-relation-seams",
+ "backend-catalog-namespace-seams",
  "backend-commands-typecmds-seams",
  "backend-nodes-core-seams",
  "backend-nodes-nodeFuncs-seams",

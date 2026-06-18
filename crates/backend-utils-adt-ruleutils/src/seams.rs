@@ -54,6 +54,13 @@ pub fn init_seams() {
         crate::quote_qualified_identifier,
     );
 
+    // The catalog half of `generate_relation_name` (the CTE-conflict scan is
+    // done in-crate by the deparser). Reads relname/relnamespace + visibility,
+    // qualifies, and quotes — all owners (lsyscache/namespace) are installed.
+    backend_utils_adt_ruleutils_seams::generate_relation_name::set(
+        crate::generate_relation_name_catalog,
+    );
+
     // guc_funcs.c's GUC_LIST_QUOTE flatten branch (flatten_set_variable_args)
     // reaches `quote_identifier` through its own outward seam crate. C:
     // `char *quote_identifier(const char *)`; the owner is Mcx-bound (the result

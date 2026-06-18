@@ -150,6 +150,52 @@ pub fn quote_qualified_identifier<'mcx>(
     PgString::from_str_in(&buf, mcx)
 }
 
+/// The catalog half of `generate_relation_name` (`ruleutils.c` 13160-13205).
+///
+/// The CTE-name-conflict scan over the deparse namespace stack is done in-crate
+/// by the caller (`query_deparse::generate_relation_name`, which owns the
+/// namespace list); this performs the remaining catalog work that C does after
+/// `SearchSysCache1(RELOID)`: read `relname`/`relnamespace`, qualify the name
+/// iff `force_qual` (the CTE conflict) or the relation is not visible in the
+/// search path, and `quote_qualified_identifier`.
+///
+/// Installed as the ruleutils inward seam `generate_relation_name`.
+pub fn generate_relation_name_catalog<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    force_qual: bool,
+) -> PgResult<PgString<'mcx>> {
+    // SearchSysCache1(RELOID, ...); elog(ERROR) on miss. The two GETSTRUCT
+    // reads (relname, relnamespace) come off the same tuple in C; here they are
+    // two lsyscache reads of the same cache entry.
+    let relname = match backend_utils_cache_lsyscache_seams::get_rel_name::call(mcx, relid)? {
+        Some(s) => s,
+        None => {
+            return Err(elog_error(alloc::format!(
+                "cache lookup failed for relation {}",
+                relid
+            )))
+        }
+    };
+
+    // need_qual = force_qual (CTE conflict, found by the caller) ||
+    //             !RelationIsVisible(relid)
+    let need_qual = if force_qual {
+        true
+    } else {
+        !backend_catalog_namespace_seams::relation_is_visible::call(mcx, relid)?
+    };
+
+    let nspname: Option<PgString<'mcx>> = if need_qual {
+        let relnamespace = backend_utils_cache_lsyscache_seams::get_rel_namespace::call(relid)?;
+        backend_utils_cache_lsyscache_seams::get_namespace_name_or_temp::call(mcx, relnamespace)?
+    } else {
+        None
+    };
+
+    quote_qualified_identifier(mcx, nspname.as_deref(), relname.as_str())
+}
+
 mod seams;
 pub use seams::init_seams;
 
@@ -2531,6 +2577,58 @@ mod tests {
         };
         set_rtable_names(mcx, &mut dpns, &[], None).unwrap();
         assert_eq!(dpns.rtable_names[0].as_ref().unwrap().as_str(), "myrel");
+    }
+
+    #[test]
+    fn generate_relation_name_catalog_visible_and_qualified() {
+        // Install faithful owner bodies for the four catalog reads
+        // generate_relation_name_catalog drives, then check both the visible
+        // (unqualified) and not-visible (schema-qualified) paths plus the
+        // force_qual (CTE-conflict) override of a visible relation.
+        if !backend_utils_cache_lsyscache_seams::get_rel_name::is_installed() {
+            backend_utils_cache_lsyscache_seams::get_rel_name::set(|mcx, relid| {
+                let name = match relid {
+                    100 => "vis_rel",
+                    200 => "hidden_rel",
+                    _ => return Ok(None),
+                };
+                Ok(Some(PgString::from_str_in(name, mcx)?))
+            });
+        }
+        if !backend_utils_cache_lsyscache_seams::get_rel_namespace::is_installed() {
+            backend_utils_cache_lsyscache_seams::get_rel_namespace::set(|relid| Ok(relid + 1));
+        }
+        if !backend_catalog_namespace_seams::relation_is_visible::is_installed() {
+            // relid 100 visible; relid 200 not visible.
+            backend_catalog_namespace_seams::relation_is_visible::set(|_mcx, relid| Ok(relid == 100));
+        }
+        if !backend_utils_cache_lsyscache_seams::get_namespace_name_or_temp::is_installed() {
+            backend_utils_cache_lsyscache_seams::get_namespace_name_or_temp::set(|mcx, nspid| {
+                Ok(Some(PgString::from_str_in(
+                    &alloc::format!("ns{}", nspid),
+                    mcx,
+                )?))
+            });
+        }
+
+        let ctx = MemoryContext::new("genrelname");
+        let mcx = ctx.mcx();
+
+        // Visible relation: unqualified.
+        let r = generate_relation_name_catalog(mcx, 100, false).unwrap();
+        assert_eq!(r.as_str(), "vis_rel");
+
+        // Visible relation but force_qual (CTE conflict): qualified with its
+        // schema name (nspid = relid + 1 = 101 -> "ns101").
+        let r = generate_relation_name_catalog(mcx, 100, true).unwrap();
+        assert_eq!(r.as_str(), "ns101.vis_rel");
+
+        // Not-visible relation: qualified (nspid = 201 -> "ns201").
+        let r = generate_relation_name_catalog(mcx, 200, false).unwrap();
+        assert_eq!(r.as_str(), "ns201.hidden_rel");
+
+        // Cache miss -> elog(ERROR).
+        assert!(generate_relation_name_catalog(mcx, 999, false).is_err());
     }
 
     #[test]
