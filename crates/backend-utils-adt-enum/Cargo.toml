@@ -22,6 +22,8 @@ types-scan = { path = "../types-scan" }
 types-stringinfo = { path = "../types-stringinfo" }
 backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
 backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
+backend-utils-time-snapmgr = { path = "../backend-utils-time-snapmgr" }
 backend-catalog-pg-enum-seams = { path = "../backend-catalog-pg-enum-seams" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }

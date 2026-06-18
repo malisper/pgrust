@@ -1,0 +1,329 @@
+//! The fmgr builtin layer (`Datum fn(PG_FUNCTION_ARGS)`) for the SQL-callable
+//! functions in `enum.c`. Each entry is a `fc_<name>` adapter that reads its
+//! arguments off the fmgr call frame, calls the matching value core in [`crate`],
+//! and writes back the result word / by-reference payload.
+//! [`register_enum_builtins`] registers every row into the fmgr-core builtin
+//! table (C: `fmgr_builtins[]`), so by-OID dispatch resolves them. OIDs / nargs /
+//! strict / retset are transcribed exactly from `fmgrtab.c` / `pg_proc.dat`.
+//!
+//! # Threaded state at the registry boundary
+//!
+//!  * An enum value is a 4-byte pass-by-value type, so its `Datum` word is the
+//!    value's OID (`PG_GETARG_OID` / `PG_RETURN_OID`).
+//!  * `enum_in`/`enum_recv` take the enum type OID in their second argument (C's
+//!    `PG_GETARG_OID(1)`); `enum_first`/`enum_last`/`enum_range` read it off the
+//!    calling expression tree via `get_fn_expr_argtype(flinfo, 0)`, the
+//!    polymorphic-resolution path (the argument value itself is never examined).
+//!  * `transaction_xmin` is C's `TransactionXmin` global, read live off the
+//!    active snapshot (`snapmgr::TransactionXmin()`) and threaded into the cores
+//!    per the no-ambient-global rule.
+//!  * `enum_in`'s soft-error context (`escontext = fcinfo->context`) is not
+//!    carried on a bare registry call frame, so this layer takes the hard-error
+//!    path (`None`), mirroring `numeric_in`'s registry adapter.
+//!
+//! `cstring` inputs/outputs cross on the by-ref `Cstring` lane; `enum_send`'s
+//! `bytea` body and `enum_range`'s array image cross on the by-ref `Varlena`
+//! lane.
+
+use mcx::MemoryContext;
+use types_datum::Datum;
+use types_error::PgResult;
+use types_fmgr::boundary::RefPayload;
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_core::primitive::Oid;
+use types_core::TransactionId;
+
+use backend_utils_time_snapmgr as snapmgr;
+use backend_utils_fmgr_core as fmgr_core;
+
+// ---------------------------------------------------------------------------
+// Argument readers / result writers.
+// ---------------------------------------------------------------------------
+
+/// `PG_GETARG_OID(i)`: read a by-value OID argument (an enum value's `Datum`).
+#[inline]
+fn arg_oid(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Oid {
+    fcinfo.arg(i).expect("enum fn: missing arg").value.as_oid()
+}
+
+/// `PG_GETARG_CSTRING(i)`: the input cstring on the by-ref lane.
+#[inline]
+fn arg_cstring<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
+    fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_cstring())
+        .expect("enum fn: cstring arg missing from by-ref lane")
+}
+
+/// `PG_GETARG_POINTER(0)` as a `StringInfo` wire buffer: the `recv` byte image
+/// on the by-ref lane.
+#[inline]
+fn arg_recv_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("enum fn: recv buffer arg missing from by-ref lane")
+}
+
+/// `get_fn_expr_argtype(fcinfo->flinfo, 0)`: the actual enum type OID resolved
+/// from the calling expression tree (the polymorphic-resolution path).
+#[inline]
+fn fn_expr_argtype0(fcinfo: &FunctionCallInfoBaseData) -> Oid {
+    fmgr_core::get_fn_expr_argtype(fcinfo.flinfo.as_deref(), 0)
+}
+
+/// `TransactionXmin` (snapmgr.c:158) read off the active snapshot.
+#[inline]
+fn transaction_xmin() -> TransactionId {
+    snapmgr::TransactionXmin()
+}
+
+#[inline]
+fn ret_oid(v: Oid) -> Datum {
+    Datum::from_oid(v)
+}
+#[inline]
+fn ret_bool(v: bool) -> Datum {
+    Datum::from_bool(v)
+}
+#[inline]
+fn ret_i32(v: i32) -> Datum {
+    Datum::from_i32(v)
+}
+
+/// Set a `cstring` (`_out`) result on the by-ref lane and return the dummy word.
+#[inline]
+fn ret_cstring(fcinfo: &mut FunctionCallInfoBaseData, s: String) -> Datum {
+    fcinfo.set_ref_result(RefPayload::Cstring(s));
+    Datum::from_usize(0)
+}
+
+/// Set a `bytea`/array (by-reference) result on the by-ref lane.
+#[inline]
+fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
+    fcinfo.set_ref_result(RefPayload::Varlena(bytes));
+    Datum::from_usize(0)
+}
+
+/// A scratch / result context for the enum cores that allocate through `Mcx`
+/// (the `enum_send` body, the `enum_range` array image, the ordered scan). The
+/// result bytes are copied off the by-ref lane before it is dropped (C: the
+/// palloc'd result lives in the caller's context; here it crosses by value).
+fn scratch_mcx() -> MemoryContext {
+    MemoryContext::new("enum fmgr scratch")
+}
+
+/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
+/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
+fn raise(err: types_error::PgError) -> ! {
+    let chars = types_error::unpack_sqlstate(err.sqlstate());
+    let code = core::str::from_utf8(&chars).unwrap_or("XX000");
+    std::panic::panic_any(format!("PGRUST-SQLSTATE:{code}:{}", err.message()));
+}
+
+/// Unwrap a `PgResult`, re-raising its error through `raise`.
+#[inline]
+fn ok<T>(r: PgResult<T>) -> T {
+    match r {
+        Ok(v) => v,
+        Err(e) => raise(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// fc_ adapters — I/O.
+// ---------------------------------------------------------------------------
+
+/// `enum_in(cstring, oid) -> anyenum` (oid 3506). C: `escontext =
+/// fcinfo->context`; at the registry boundary that soft-error sink is absent, so
+/// the hard-error path is taken (`None`), and a soft error surfaces as ERROR.
+fn fc_enum_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let name = arg_cstring(fcinfo, 0).to_string();
+    let enumtypoid = arg_oid(fcinfo, 1);
+    let xmin = transaction_xmin();
+    match ok(crate::enum_in(&name, enumtypoid, xmin, None)) {
+        Some(oid) => ret_oid(oid),
+        // Soft-error path returned `(Datum) 0` to the (absent) escontext; with no
+        // sink the core would have raised, so this arm is unreachable in practice.
+        None => {
+            fcinfo.set_result_null(true);
+            Datum::from_usize(0)
+        }
+    }
+}
+
+/// `enum_out(anyenum) -> cstring` (oid 3507).
+fn fc_enum_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let val = arg_oid(fcinfo, 0);
+    let s = ok(crate::enum_out(val));
+    ret_cstring(fcinfo, s)
+}
+
+/// `enum_recv(internal, oid) -> anyenum` (oid 3532).
+fn fc_enum_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let src = arg_recv_bytes(fcinfo, 0).to_vec();
+    let enumtypoid = arg_oid(fcinfo, 1);
+    let xmin = transaction_xmin();
+    let m = scratch_mcx();
+    let mut data = mcx::PgVec::new_in(m.mcx());
+    data.extend_from_slice(&src);
+    let mut buf = types_stringinfo::StringInfo::from_vec(data);
+    let oid = ok(crate::enum_recv(&mut buf, enumtypoid, xmin));
+    ret_oid(oid)
+}
+
+/// `enum_send(anyenum) -> bytea` (oid 3533).
+fn fc_enum_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let val = arg_oid(fcinfo, 0);
+    let m = scratch_mcx();
+    let bytes = ok(crate::enum_send(m.mcx(), val));
+    ret_varlena(fcinfo, bytes.as_slice().to_vec())
+}
+
+// ---------------------------------------------------------------------------
+// fc_ adapters — comparison operators.
+// ---------------------------------------------------------------------------
+
+macro_rules! fc_cmp_bool {
+    ($fc:ident, $core:path) => {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+            let a = arg_oid(fcinfo, 0);
+            let b = arg_oid(fcinfo, 1);
+            ret_bool(ok($core(a, b)))
+        }
+    };
+}
+fc_cmp_bool!(fc_enum_lt, crate::enum_lt);
+fc_cmp_bool!(fc_enum_le, crate::enum_le);
+fc_cmp_bool!(fc_enum_gt, crate::enum_gt);
+fc_cmp_bool!(fc_enum_ge, crate::enum_ge);
+
+/// `enum_eq(anyenum, anyenum) -> bool` (oid 3508) — OID equality, no catalog.
+fn fc_enum_eq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_bool(crate::enum_eq(arg_oid(fcinfo, 0), arg_oid(fcinfo, 1)))
+}
+
+/// `enum_ne(anyenum, anyenum) -> bool` (oid 3509) — OID inequality, no catalog.
+fn fc_enum_ne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_bool(crate::enum_ne(arg_oid(fcinfo, 0), arg_oid(fcinfo, 1)))
+}
+
+/// `enum_cmp(anyenum, anyenum) -> int4` (oid 3514).
+fn fc_enum_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let a = arg_oid(fcinfo, 0);
+    let b = arg_oid(fcinfo, 1);
+    ret_i32(ok(crate::enum_cmp(a, b)))
+}
+
+/// `enum_smaller(anyenum, anyenum) -> anyenum` (oid 3524).
+fn fc_enum_smaller(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let a = arg_oid(fcinfo, 0);
+    let b = arg_oid(fcinfo, 1);
+    ret_oid(ok(crate::enum_smaller(a, b)))
+}
+
+/// `enum_larger(anyenum, anyenum) -> anyenum` (oid 3525).
+fn fc_enum_larger(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let a = arg_oid(fcinfo, 0);
+    let b = arg_oid(fcinfo, 1);
+    ret_oid(ok(crate::enum_larger(a, b)))
+}
+
+// ---------------------------------------------------------------------------
+// fc_ adapters — programming support (enum_first / enum_last / enum_range).
+// ---------------------------------------------------------------------------
+
+/// `enum_first(anyenum) -> anyenum` (oid 3528, NOT strict — the arg may be NULL;
+/// the type is taken from the call expression, not the value).
+fn fc_enum_first(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let enumtypoid = fn_expr_argtype0(fcinfo);
+    let xmin = transaction_xmin();
+    let m = scratch_mcx();
+    ret_oid(ok(crate::enum_first(m.mcx(), enumtypoid, xmin)))
+}
+
+/// `enum_last(anyenum) -> anyenum` (oid 3529, NOT strict).
+fn fc_enum_last(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let enumtypoid = fn_expr_argtype0(fcinfo);
+    let xmin = transaction_xmin();
+    let m = scratch_mcx();
+    ret_oid(ok(crate::enum_last(m.mcx(), enumtypoid, xmin)))
+}
+
+/// `enum_range(anyenum, anyenum) -> anyarray` (oid 3530, NOT strict): every
+/// member from `lower` to `upper` inclusive; a NULL bound is open-ended.
+fn fc_enum_range_bounds(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let lower = fcinfo
+        .arg(0)
+        .filter(|d| !d.isnull)
+        .map(|d| d.value.as_oid());
+    let upper = fcinfo
+        .arg(1)
+        .filter(|d| !d.isnull)
+        .map(|d| d.value.as_oid());
+    let enumtypoid = fn_expr_argtype0(fcinfo);
+    let xmin = transaction_xmin();
+    let m = scratch_mcx();
+    let image = ok(crate::enum_range_bounds(m.mcx(), lower, upper, enumtypoid, xmin));
+    ret_varlena(fcinfo, image.as_slice().to_vec())
+}
+
+/// `enum_range(anyenum) -> anyarray` (oid 3531, NOT strict): every member.
+fn fc_enum_range_all(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let enumtypoid = fn_expr_argtype0(fcinfo);
+    let xmin = transaction_xmin();
+    let m = scratch_mcx();
+    let image = ok(crate::enum_range_all(m.mcx(), enumtypoid, xmin));
+    ret_varlena(fcinfo, image.as_slice().to_vec())
+}
+
+// ---------------------------------------------------------------------------
+// Registration.
+// ---------------------------------------------------------------------------
+
+fn builtin(
+    foid: u32,
+    name: &str,
+    nargs: i16,
+    strict: bool,
+    retset: bool,
+    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
+) -> BuiltinFunction {
+    BuiltinFunction {
+        foid,
+        name: name.to_string(),
+        nargs,
+        strict,
+        retset,
+        func: Some(func),
+    }
+}
+
+/// Register every `enum.c` builtin into the fmgr-core builtin table (C:
+/// `fmgr_builtins[]`), so by-OID dispatch resolves them. Called from this
+/// crate's `init_seams()`. OIDs/nargs/strict/retset transcribed from
+/// `fmgrtab.c`.
+pub fn register_enum_builtins() {
+    fmgr_core::register_builtins([
+        // ---- basic + binary I/O ----
+        builtin(3506, "enum_in", 2, true, false, fc_enum_in),
+        builtin(3507, "enum_out", 1, true, false, fc_enum_out),
+        builtin(3532, "enum_recv", 2, true, false, fc_enum_recv),
+        builtin(3533, "enum_send", 1, true, false, fc_enum_send),
+        // ---- comparison operators ----
+        builtin(3508, "enum_eq", 2, true, false, fc_enum_eq),
+        builtin(3509, "enum_ne", 2, true, false, fc_enum_ne),
+        builtin(3510, "enum_lt", 2, true, false, fc_enum_lt),
+        builtin(3511, "enum_gt", 2, true, false, fc_enum_gt),
+        builtin(3512, "enum_le", 2, true, false, fc_enum_le),
+        builtin(3513, "enum_ge", 2, true, false, fc_enum_ge),
+        builtin(3514, "enum_cmp", 2, true, false, fc_enum_cmp),
+        builtin(3524, "enum_smaller", 2, true, false, fc_enum_smaller),
+        builtin(3525, "enum_larger", 2, true, false, fc_enum_larger),
+        // ---- programming support ----
+        builtin(3528, "enum_first", 1, false, false, fc_enum_first),
+        builtin(3529, "enum_last", 1, false, false, fc_enum_last),
+        builtin(3530, "enum_range_bounds", 2, false, false, fc_enum_range_bounds),
+        builtin(3531, "enum_range_all", 1, false, false, fc_enum_range_all),
+    ]);
+}

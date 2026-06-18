@@ -54,6 +54,15 @@ use backend_libpq_pqformat as pqformat;
 use backend_utils_adt_arrayfuncs::construct as arrayfuncs;
 
 pub mod boundary;
+pub mod fmgr_builtins;
+
+/// Register every `enum.c` builtin into the fmgr-core builtin table (C:
+/// `fmgr_builtins[]`), so by-OID dispatch resolves the enum I/O, comparison and
+/// programming-support functions. This crate owns no inward seams (it is a leaf
+/// consumer); `init_seams` exists only to perform the builtin registration.
+pub fn init_seams() {
+    fmgr_builtins::register_enum_builtins();
+}
 
 /// `TYPALIGN_INT` (`catalog/pg_type.h`).
 const TYPALIGN_INT: u8 = b'i';
