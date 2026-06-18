@@ -28,6 +28,7 @@ pub mod categorize;
 pub mod common;
 pub mod each;
 pub mod elements;
+pub mod fmgr_builtins;
 pub mod getfield;
 pub mod iterate;
 pub mod json_render;

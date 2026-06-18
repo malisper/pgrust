@@ -29,6 +29,10 @@ use crate::json_render;
 
 /// Install the inward seams in `backend-utils-adt-jsonfuncs-seams`.
 pub fn init_seams() {
+    // Register the expressible scalar/operator `jsonfuncs.c` builtins into the
+    // fmgr-core builtin table (C: `fmgr_builtins[]`).
+    crate::fmgr_builtins::register_jsonfuncs_builtins();
+
     // `json_categorize_type(typoid, false, ...)` — json always passes
     // is_jsonb = false (jsonb renders through its own datum_to_jsonb).
     seams::categorize_type::set(|typoid| json_categorize_type(typoid, false));
