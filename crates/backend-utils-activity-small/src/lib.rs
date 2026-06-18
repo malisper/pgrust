@@ -61,6 +61,43 @@ pub fn init_seams() {
         backend_progress::pgstat_progress_incr_param(index, incr);
         Ok(())
     });
+
+    // --- lazy-vacuum driver progress reporting (vacuumlazy.c). These home in
+    //     vacuumlazy-seams; backend_progress.c owns the bodies. ---
+    {
+        use backend_access_heap_vacuumlazy_seams as vx;
+        vx::pgstat_progress_start_command::set(|cmdtype, relid| {
+            let cmdtype = match cmdtype {
+                0 => ProgressCommandType::Invalid,
+                1 => ProgressCommandType::Vacuum,
+                2 => ProgressCommandType::Analyze,
+                3 => ProgressCommandType::Cluster,
+                4 => ProgressCommandType::CreateIndex,
+                5 => ProgressCommandType::Basebackup,
+                6 => ProgressCommandType::Copy,
+                other => {
+                    panic!("pgstat_progress_start_command: invalid ProgressCommandType {other}")
+                }
+            };
+            backend_progress::pgstat_progress_start_command(cmdtype, relid);
+            Ok(())
+        });
+        vx::pgstat_progress_update_param::set(|index, val| {
+            backend_progress::pgstat_progress_update_param(index, val);
+            Ok(())
+        });
+        vx::pgstat_progress_update_multi_param::set(|index, val| {
+            backend_progress::pgstat_progress_update_multi_param(&index, &val);
+            Ok(())
+        });
+        vx::pgstat_progress_end_command::set(|| {
+            backend_progress::pgstat_progress_end_command();
+            Ok(())
+        });
+        vx::my_be_entry_progress_param::set(|idx| {
+            Ok(backend_progress::pgstat_read_progress_param(idx))
+        });
+    }
 }
 
 #[cfg(test)]

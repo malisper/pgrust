@@ -888,6 +888,12 @@ pub fn init_seams() {
 
     // vacuum's `vac_update_datfrozenxid` wraparound-limit refresh predicate.
     seams::force_transaction_id_limit_update::set(ForceTransactionIdLimitUpdate);
+
+    // --- lazy-vacuum driver `ReadNextTransactionId()` (vacuumlazy.c index-scans
+    //     diagnostic); home in vacuumlazy-seams, varsup.c/transam.h is its owner. ---
+    backend_access_heap_vacuumlazy_seams::read_next_transaction_id::set(|| {
+        Ok(XidFromFullTransactionId(ReadNextFullTransactionId()))
+    });
 }
 
 #[cfg(test)]

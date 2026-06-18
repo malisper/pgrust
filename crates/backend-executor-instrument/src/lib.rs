@@ -356,6 +356,26 @@ pub fn init_seams() {
     backend_executor_instrument_seams::instr_stop_node::set(InstrStopNode);
     backend_executor_instrument_seams::instr_end_loop::set(InstrEndLoop);
     backend_executor_instrument_seams::instr_update_tuple_count::set(InstrUpdateTupleCount);
+
+    // --- lazy-vacuum driver's pgBufferUsage / pgWalUsage snapshot reads
+    //     (vacuumlazy.c BufferUsageAccumDiff / WalUsageAccumDiff logging). These
+    //     are this file's backend-global counters; the read seams home in
+    //     vacuumlazy-seams. The tuples mirror the fields the driver diffs. ---
+    backend_access_heap_vacuumlazy_seams::pg_buffer_usage::set(|| {
+        let u = pgBufferUsage();
+        Ok((
+            u.shared_blks_hit,
+            u.shared_blks_read,
+            u.shared_blks_dirtied,
+            u.local_blks_hit,
+            u.local_blks_read,
+            u.local_blks_dirtied,
+        ))
+    });
+    backend_access_heap_vacuumlazy_seams::pg_wal_usage::set(|| {
+        let w = pgWalUsage();
+        Ok((w.wal_records, w.wal_fpi, w.wal_bytes, w.wal_buffers_full))
+    });
 }
 
 #[cfg(test)]

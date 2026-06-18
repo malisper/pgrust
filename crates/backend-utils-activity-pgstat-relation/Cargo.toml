@@ -9,6 +9,9 @@ name = "backend_utils_activity_pgstat_relation"
 path = "src/lib.rs"
 
 [dependencies]
+# Lazy-vacuum driver's pgstat_report_vacuum seam homes in vacuumlazy-seams;
+# pgstat_relation.c owns it.
+backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-pgstat = { path = "../types-pgstat" }

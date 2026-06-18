@@ -9,6 +9,9 @@ name = "backend_utils_activity_pgstat_database"
 path = "src/lib.rs"
 
 [dependencies]
+# Lazy-vacuum driver's pgStatBlockReadTime/WriteTime read seams home in
+# vacuumlazy-seams; pgstat_database.c owns those backend-local accumulators.
+backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-storage = { path = "../types-storage" }

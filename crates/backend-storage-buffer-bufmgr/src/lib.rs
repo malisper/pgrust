@@ -737,10 +737,82 @@ pub fn init_seams() {
         vars::bgwriter_flush_after.read()
     });
 
+    // --- lazy-vacuum driver's BufferGetPage(buffer)-over-page + buffer-read
+    //     seams (vacuumlazy.c, re-signed off `Buffer`/`&Relation` in
+    //     vacuumlazy-seams). The buffer manager owns the buffer→page mapping. ---
+    use backend_access_heap_vacuumlazy_seams as vx;
+    vx::read_buffer_extended::set(vac_read_buffer_extended);
+    vx::prefetch_buffer::set(vac_prefetch_buffer);
+    vx::check_buffer_is_pinned_once::set(|buffer| {
+        BufferManager::global_expect().CheckBufferIsPinnedOnce(buffer)
+    });
+    vx::page_get_heap_free_space::set(|buffer| {
+        BufferManager::global_expect().page_get_heap_free_space(buffer)
+    });
+    vx::page_is_new::set(|buffer| BufferManager::global_expect().page_is_new(buffer));
+    vx::page_is_empty::set(|buffer| BufferManager::global_expect().page_is_empty(buffer));
+    vx::page_is_all_visible::set(|buffer| {
+        BufferManager::global_expect().page_is_all_visible(buffer)
+    });
+    vx::page_set_all_visible::set(|buffer| {
+        BufferManager::global_expect().page_set_all_visible(buffer)
+    });
+    vx::page_clear_all_visible::set(|buffer| {
+        BufferManager::global_expect().page_clear_all_visible(buffer)
+    });
+    vx::page_lsn_is_invalid::set(|buffer| {
+        BufferManager::global_expect().page_lsn_is_invalid(buffer)
+    });
+    vx::page_get_max_offset_number::set(|buffer| {
+        BufferManager::global_expect().page_get_max_offset_number(buffer)
+    });
+    vx::page_truncate_line_pointer_array::set(|buffer| {
+        BufferManager::global_expect().page_truncate_line_pointer_array(buffer)
+    });
+    vx::page_item_id_state::set(|buffer, offnum| {
+        BufferManager::global_expect().page_item_id_state(buffer, offnum)
+    });
+    vx::page_item_id_set_unused::set(|buffer, offnum| {
+        BufferManager::global_expect().page_item_id_set_unused(buffer, offnum)
+    });
+
     // Install the backing storage for the GUC int/real variables defined as
     // bufmgr.c globals (the `.read()` calls above resolve through these). The
     // GUC bootstrap writes each boot_val through the accessor at startup.
     guc_vars::install();
+}
+
+/// `ReadBufferExtended(rel, fork, blkno, RBM_NORMAL, bstrategy)` for the lazy
+/// vacuum driver's read-stream block fetch (vacuumlazy-seams signature off
+/// `&Relation` + `fork: i32` + an explicit strategy).
+fn vac_read_buffer_extended<'mcx>(
+    rel: &types_rel::Relation<'mcx>,
+    fork: i32,
+    blkno: types_core::primitive::BlockNumber,
+    strategy: types_storage::buf::BufferAccessStrategy,
+) -> types_error::PgResult<Buffer> {
+    let forknum = types_core::primitive::ForkNumber::from_i32(fork)
+        .expect("vacuumlazy read_buffer_extended: invalid fork number");
+    BufferManager::global_expect().ReadBufferExtended(
+        rel,
+        forknum,
+        blkno,
+        types_storage::storage::ReadBufferMode::Normal,
+        strategy.is_some(),
+    )
+}
+
+/// `PrefetchBuffer(rel, fork, blkno)` for the lazy vacuum truncation pre-read.
+fn vac_prefetch_buffer<'mcx>(
+    rel: &types_rel::Relation<'mcx>,
+    fork: i32,
+    blkno: types_core::primitive::BlockNumber,
+) -> types_error::PgResult<()> {
+    let forknum = types_core::primitive::ForkNumber::from_i32(fork)
+        .expect("vacuumlazy prefetch_buffer: invalid fork number");
+    BufferManager::global_expect()
+        .PrefetchBuffer(rel, forknum, blkno)
+        .map(|_| ())
 }
 
 /// Backing storage for the GUC variables that are file-scope globals in

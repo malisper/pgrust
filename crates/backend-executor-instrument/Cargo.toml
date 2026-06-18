@@ -10,6 +10,9 @@ path = "src/lib.rs"
 
 [dependencies]
 backend-executor-instrument-seams = { path = "../backend-executor-instrument-seams" }
+# Lazy-vacuum driver's pgBufferUsage/pgWalUsage snapshot read seams home in
+# vacuumlazy-seams; instrument.c owns those backend-global counters.
+backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
 mcx = { path = "../mcx" }
 portability-instr-time = { path = "../portability-instr-time" }
 types-core = { path = "../types-core" }

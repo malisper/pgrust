@@ -9,6 +9,9 @@ name = "backend_catalog_storage"
 path = "src/lib.rs"
 
 [dependencies]
+# Lazy-vacuum driver's RelationTruncate seam homes in vacuumlazy-seams;
+# catalog/storage.c is its real owner.
+backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
 seam-core = { path = "../seam-core" }
 mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }

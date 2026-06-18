@@ -151,6 +151,44 @@ pub fn init_seams() {
     // --- plancat.c get_relation_info relcache-owned reads (parallel-workers,
     //     index list, per-index catalog detoast, index block count) ---
     crate::plancat_ext::init_seams();
+
+    // --- lazy-vacuum driver relcache-field reads (vacuumlazy.c reads these
+    //     inline off the relcache entry; they home in vacuumlazy-seams off
+    //     `&Relation<'mcx>`, the relcache is their real owner) ---
+    use backend_access_heap_vacuumlazy_seams as vx;
+    vx::relation_get_namespace::set(rd_rel_relnamespace);
+    vx::relation_is_shared::set(rd_rel_relisshared);
+    vx::relation_get_number_of_blocks::set(relation_get_number_of_blocks);
+    vx::relation_get_relation_name::set(vac_relation_get_relation_name);
+    vx::relation_get_reltuples::set(vac_relation_get_reltuples);
+    vx::relation_needs_wal::set(vac_relation_needs_wal);
+    vx::relation_uses_local_buffers::set(vac_relation_uses_local_buffers);
+}
+
+// --- vacuumlazy.c inline relcache reads ---
+
+/// `RelationGetRelationName(rel)` = `rel->rd_rel->relname`.
+fn vac_relation_get_relation_name(rel: &types_rel::Relation<'_>) -> PgResult<String> {
+    with_entry(rel.rd_id, |rd| rd.rd_rel.relname.to_string())
+}
+
+/// `rel->rd_rel->reltuples` (float4) widened to f64.
+fn vac_relation_get_reltuples(rel: &types_rel::Relation<'_>) -> PgResult<f64> {
+    with_entry(rel.rd_id, |rd| rd.rd_rel.reltuples as f64)
+}
+
+/// `RelationNeedsWAL(rel)`.
+fn vac_relation_needs_wal(rel: &types_rel::Relation<'_>) -> PgResult<bool> {
+    Ok(relation_needs_wal(rel))
+}
+
+/// `RelationUsesLocalBuffers(rel)` = `rel->rd_rel->relpersistence ==
+/// RELPERSISTENCE_TEMP`.
+fn vac_relation_uses_local_buffers(rel: &types_rel::Relation<'_>) -> PgResult<bool> {
+    const RELPERSISTENCE_TEMP: i8 = b't' as i8;
+    with_entry(rel.rd_id, |rd| {
+        rd.rd_rel.relpersistence == RELPERSISTENCE_TEMP
+    })
 }
 
 /// `relation_rules(mcx, reloid)` — the per-query rewrite-rule reader for

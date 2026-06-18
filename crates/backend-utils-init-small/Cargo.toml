@@ -9,6 +9,9 @@ name = "backend_utils_init_small"
 path = "src/lib.rs"
 
 [dependencies]
+# Lazy-vacuum driver's MyDatabaseId / AmAutoVacuumWorkerProcess reads home in
+# vacuumlazy-seams; globals.c owns both process globals.
+backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
 backend-postmaster-postmaster-seams = { path = "../backend-postmaster-postmaster-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 backend-utils-adt-acl-seams = { path = "../backend-utils-adt-acl-seams" }

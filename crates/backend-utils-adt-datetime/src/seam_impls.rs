@@ -513,6 +513,17 @@ pub fn init_seams() {
     // their `seam_*` adapters in `crate::seam_impls` are now `pub` and called
     // directly by the consumers (formatting, timeout). Faithful de-indirection.
 
+    // --- lazy-vacuum driver timestamp reads (vacuumlazy.c logging /
+    //     cost-delay; home in vacuumlazy-seams, timestamp.c is their owner) ---
+    {
+        use backend_access_heap_vacuumlazy_seams as vx;
+        vx::get_current_timestamp::set(|| Ok(crate::timestamp::GetCurrentTimestamp()));
+        vx::timestamp_difference::set(|start, stop| Ok(timestamp_difference(start, stop)));
+        vx::timestamp_difference_exceeds::set(|start, stop, msec| {
+            Ok(timestamp_difference_exceeds(start, stop, msec))
+        });
+    }
+
     use backend_utils_adt_isoweek_seams as iw;
     iw::date2isoweek::set(seam_date2isoweek);
     iw::date2isoyear::set(seam_date2isoyear);

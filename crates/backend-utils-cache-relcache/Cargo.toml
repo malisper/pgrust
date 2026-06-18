@@ -12,6 +12,11 @@ path = "src/lib.rs"
 pgrust-trace = { path = "../pgrust-trace" }
 # Inward seam crate this unit owns + installs.
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+# Lazy-vacuum driver's relcache-field read seams (RelationGetNamespace /
+# RelationGetRelationName / relisshared / reltuples / RelationNeedsWAL /
+# RelationUsesLocalBuffers / RelationGetNumberOfBlocks) home in vacuumlazy-seams
+# (re-signed off `&Relation<'mcx>`); the relcache is their real owner.
+backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
 
 # The RelationIdCache is a real dynahash table (merged C-faithful raw-pointer
 # dynahash) — the substrate, not a stand-in. Acyclic: dynahash depends only on

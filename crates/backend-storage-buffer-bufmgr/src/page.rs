@@ -13,7 +13,7 @@
 
 use std::sync::atomic::Ordering;
 
-use types_core::primitive::{BlockNumber, Buffer, XLogRecPtr, BLCKSZ};
+use types_core::primitive::{BlockNumber, Buffer, OffsetNumber, XLogRecPtr, BLCKSZ};
 use types_error::{PgError, PgResult};
 use types_storage::buf::{BM_DIRTY, BM_JUST_DIRTIED, BM_LOCKED};
 use types_storage::RelFileLocator;
@@ -215,6 +215,130 @@ impl BufferManager {
                 .expect("buffer block is BLCKSZ");
             backend_storage_page::PageIsNew(&page)
         }))
+    }
+
+    /// `PageIsEmpty(BufferGetPage(buffer))` (bufpage.h).
+    pub fn page_is_empty(&self, buffer: Buffer) -> PgResult<bool> {
+        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
+        Ok(self.with_block(buf_id, |block| {
+            let page = backend_storage_page::PageRef::new(block)
+                .expect("buffer block is BLCKSZ");
+            backend_storage_page::PageIsEmpty(&page)
+        }))
+    }
+
+    /// `PageIsAllVisible(BufferGetPage(buffer))` (bufpage.h).
+    pub fn page_is_all_visible(&self, buffer: Buffer) -> PgResult<bool> {
+        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
+        Ok(self.with_block(buf_id, |block| {
+            let page = backend_storage_page::PageRef::new(block)
+                .expect("buffer block is BLCKSZ");
+            backend_storage_page::PageIsAllVisible(&page)
+        }))
+    }
+
+    /// `PageSetAllVisible(BufferGetPage(buffer))` (bufpage.h). Caller holds the
+    /// exclusive content lock.
+    pub fn page_set_all_visible(&self, buffer: Buffer) -> PgResult<()> {
+        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
+        self.with_block_mut(buf_id, |block| {
+            let mut page = backend_storage_page::PageMut::new(block)
+                .expect("buffer block is BLCKSZ");
+            backend_storage_page::PageSetAllVisible(&mut page);
+            Ok(())
+        })
+    }
+
+    /// `PageClearAllVisible(BufferGetPage(buffer))` (bufpage.h). Caller holds the
+    /// exclusive content lock.
+    pub fn page_clear_all_visible(&self, buffer: Buffer) -> PgResult<()> {
+        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
+        self.with_block_mut(buf_id, |block| {
+            let mut page = backend_storage_page::PageMut::new(block)
+                .expect("buffer block is BLCKSZ");
+            backend_storage_page::PageClearAllVisible(&mut page);
+            Ok(())
+        })
+    }
+
+    /// `PageGetLSN(BufferGetPage(buffer)) == InvalidXLogRecPtr`? (bufpage.h).
+    pub fn page_lsn_is_invalid(&self, buffer: Buffer) -> PgResult<bool> {
+        Ok(self.page_get_lsn(buffer)? == 0)
+    }
+
+    /// `PageGetMaxOffsetNumber(BufferGetPage(buffer))` (bufpage.h).
+    pub fn page_get_max_offset_number(&self, buffer: Buffer) -> PgResult<OffsetNumber> {
+        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
+        Ok(self.with_block(buf_id, |block| {
+            let page = backend_storage_page::PageRef::new(block)
+                .expect("buffer block is BLCKSZ");
+            backend_storage_page::PageGetMaxOffsetNumber(&page)
+        }))
+    }
+
+    /// `PageGetHeapFreeSpace(BufferGetPage(buffer))` (bufpage.c).
+    pub fn page_get_heap_free_space(&self, buffer: Buffer) -> PgResult<usize> {
+        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
+        Ok(self.with_block(buf_id, |block| {
+            let page = backend_storage_page::PageRef::new(block)
+                .expect("buffer block is BLCKSZ");
+            backend_storage_page::PageGetHeapFreeSpace(&page) as usize
+        }))
+    }
+
+    /// `PageTruncateLinePointerArray(BufferGetPage(buffer))` (bufpage.c). Caller
+    /// holds the exclusive content lock.
+    pub fn page_truncate_line_pointer_array(&self, buffer: Buffer) -> PgResult<()> {
+        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
+        self.with_block_mut(buf_id, |block| {
+            let mut page = backend_storage_page::PageMut::new(block)
+                .expect("buffer block is BLCKSZ");
+            backend_storage_page::PageTruncateLinePointerArray(&mut page);
+            Ok(())
+        })
+    }
+
+    /// Read the line-pointer flag state at `(BufferGetPage(buffer), offnum)`
+    /// (itemid.h accessors over `PageGetItemId`).
+    pub fn page_item_id_state(
+        &self,
+        buffer: Buffer,
+        offnum: OffsetNumber,
+    ) -> PgResult<types_vacuum::vacuumlazy::LinePointerState> {
+        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
+        self.with_block(buf_id, |block| {
+            let page = backend_storage_page::PageRef::new(block)
+                .expect("buffer block is BLCKSZ");
+            let itemid = backend_storage_page::PageGetItemId(&page, offnum)?;
+            Ok(types_vacuum::vacuumlazy::LinePointerState {
+                is_used: backend_storage_page::ItemIdIsUsed(&itemid),
+                is_redirected: backend_storage_page::ItemIdIsRedirected(&itemid),
+                is_dead: backend_storage_page::ItemIdIsDead(&itemid),
+                is_normal: backend_storage_page::ItemIdIsNormal(&itemid),
+                has_storage: backend_storage_page::ItemIdHasStorage(&itemid),
+            })
+        })
+    }
+
+    /// `ItemIdSetUnused(PageGetItemId(BufferGetPage(buffer), offnum))`
+    /// (itemid.h). Caller holds the exclusive content lock.
+    pub fn page_item_id_set_unused(
+        &self,
+        buffer: Buffer,
+        offnum: OffsetNumber,
+    ) -> PgResult<()> {
+        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
+        self.with_block_mut(buf_id, |block| {
+            let mut itemid = {
+                let r = backend_storage_page::PageRef::new(block)
+                    .expect("buffer block is BLCKSZ");
+                backend_storage_page::PageGetItemId(&r, offnum)?
+            };
+            backend_storage_page::ItemIdSetUnused(&mut itemid);
+            let mut page = backend_storage_page::PageMut::new(block)
+                .expect("buffer block is BLCKSZ");
+            backend_storage_page::PageSetItemId(&mut page, offnum, itemid)
+        })
     }
 
     // -- FSM page round-trip ((FSMPage) PageGetContents, fsm_internals.h) ---

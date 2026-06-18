@@ -9,6 +9,9 @@ name = "backend_storage_freespace"
 path = "src/lib.rs"
 
 [dependencies]
+# Lazy-vacuum driver FSM seams (RecordPageWithFreeSpace / GetRecordedFreeSpace /
+# FreeSpaceMapVacuumRange) home in vacuumlazy-seams; freespace.c is their owner.
+backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-storage = { path = "../types-storage" }

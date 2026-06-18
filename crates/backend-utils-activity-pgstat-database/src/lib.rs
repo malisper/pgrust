@@ -641,4 +641,14 @@ pub fn init_seams() {
                 last_autovac_time: e.last_autovac_time,
             })
     });
+
+    // --- lazy-vacuum driver's I/O-timing accumulator reads (vacuumlazy.c
+    //     logging). `pgStatBlockReadTime` / `pgStatBlockWriteTime` are this
+    //     file's backend-local globals; the read seams home in vacuumlazy-seams. ---
+    backend_access_heap_vacuumlazy_seams::pgstat_block_read_time::set(|| {
+        Ok(PG_STAT_BLOCK_READ_TIME.with(|c| c.get()))
+    });
+    backend_access_heap_vacuumlazy_seams::pgstat_block_write_time::set(|| {
+        Ok(PG_STAT_BLOCK_WRITE_TIME.with(|c| c.get()))
+    });
 }
