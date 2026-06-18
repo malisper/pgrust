@@ -79,6 +79,29 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `get_fn_expr_variadic` body over a *field-bearing* owned call-expression
+    /// node (`&Expr`), the form the fmgr `get_fn_expr_variadic` reader uses once
+    /// `fmgr_info_set_expr` stamps a real `Expr` onto `FmgrInfo.fn_expr`. C:
+    /// `IsA(expr, FuncExpr) ? ((FuncExpr *) expr)->funcvariadic : false`. Unlike
+    /// the tag-only [`expr_variadic`] carrier (which cannot see `funcvariadic`),
+    /// this reads the real flag off the node.
+    pub fn expr_variadic_expr(expr: &Expr) -> bool
+);
+
+seam_core::seam!(
+    /// `get_call_expr_arg_stable(expr, argnum)` (fmgr.c) over a *field-bearing*
+    /// owned call-expression node (`&Expr`), the form the fmgr
+    /// `get_fn_expr_arg_stable` reader uses once `fmgr_info_set_expr` stamps a
+    /// real `Expr`. C: the `IsA` arg-list dispatch
+    /// (`FuncExpr`/`OpExpr`/`DistinctExpr`/`ScalarArrayOpExpr`/`NullIfExpr`/
+    /// `WindowFunc`), range guard, then true iff `list_nth(args, argnum)` is a
+    /// `Const` or an external (`PARAM_EXTERN`) `Param`. Unlike the tag-only
+    /// [`call_expr_arg_stable`] carrier (which cannot see the argument list),
+    /// this reads the real arguments off the node.
+    pub fn call_expr_arg_stable_expr(expr: &Expr, argnum: i32) -> bool
+);
+
+seam_core::seam!(
     /// `get_call_expr_argtype(call_expr, argnum)` (fmgr.c:1929) keyed by the
     /// unified plan/expression `Node` the funcapi result-type cluster threads as
     /// its `call_expr` (`resolve_polymorphic_tupdesc` / `_argtypes`). The

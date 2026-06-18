@@ -1580,6 +1580,8 @@ pub fn init_seams() {
     seams::get_call_expr_argtype_expr::set(seam_get_call_expr_argtype_expr);
     seams::call_expr_arg_stable::set(seam_call_expr_arg_stable);
     seams::expr_variadic::set(seam_expr_variadic);
+    seams::expr_variadic_expr::set(seam_expr_variadic_expr);
+    seams::call_expr_arg_stable_expr::set(seam_call_expr_arg_stable_expr);
     seams::get_call_expr_argtype_node::set(seam_get_call_expr_argtype_node);
     seams::expr_input_collation_node::set(seam_expr_input_collation_node);
     seams::targetentry_info::set(seam_targetentry_info);
@@ -1834,6 +1836,40 @@ fn seam_get_call_expr_argtype_expr(expr: &Expr, argnum: i32) -> PgResult<Oid> {
 /// non-FuncExpr or unknown node).
 fn seam_expr_variadic(_expr: types_fmgr::ExternalFnExpr) -> bool {
     false
+}
+
+/// `get_fn_expr_variadic` (fmgr.c) over the field-bearing owned `Expr`:
+/// `IsA(expr, FuncExpr) ? ((FuncExpr *) expr)->funcvariadic : false`.
+fn seam_expr_variadic_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::FuncExpr(f) => f.funcvariadic,
+        _ => false,
+    }
+}
+
+/// `get_call_expr_arg_stable(expr, argnum)` (fmgr.c) over the field-bearing owned
+/// `Expr`: select the arg list by node kind (the C `IsA` dispatch), range-guard,
+/// then true iff the argument is a `Const` or an external (`PARAM_EXTERN`)
+/// `Param`.
+fn seam_call_expr_arg_stable_expr(expr: &Expr, argnum: i32) -> bool {
+    use types_nodes::primnodes::PARAM_EXTERN;
+    // DistinctExpr / NullIfExpr are OpExpr-shaped here, so their `.args` is read
+    // the same way (mirrors seam_get_call_expr_argtype_expr).
+    let args: &[Expr] = match expr {
+        Expr::FuncExpr(f) => &f.args,
+        Expr::OpExpr(o) | Expr::DistinctExpr(o) | Expr::NullIfExpr(o) => &o.args,
+        Expr::ScalarArrayOpExpr(s) => &s.args,
+        Expr::WindowFunc(w) => &w.args,
+        _ => return false,
+    };
+    if argnum < 0 || argnum as usize >= args.len() {
+        return false;
+    }
+    match &args[argnum as usize] {
+        Expr::Const(_) => true,
+        Expr::Param(p) => p.paramkind == PARAM_EXTERN,
+        _ => false,
+    }
 }
 
 /// `get_call_expr_argtype(call_expr, argnum)` keyed by the plan-tree `Node`
