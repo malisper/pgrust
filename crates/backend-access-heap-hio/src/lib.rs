@@ -847,17 +847,23 @@ pub fn RelationGetBufferForTuple(
 // crate installs them directly. The bufmgr delegates are wrapped to the
 // hio-seam `PgResult` shape (the canonical buffer mutators are infallible).
 //
-// NOT installed here (genuine keystones, see the lane note / DESIGN_DEBT):
-//   * the relation-KEYED slots (`read_buffer` / `read_buffer_extended` /
-//     `extend_buffered_rel_by` / the four freespace slots /
-//     `relation_extension_lock_waiter_count`) cross the relation as a bare
-//     `Oid` with no `Mcx`, but every canonical owner takes `&Relation<'mcx>`
-//     resolved from the relcache — there is no `Mcx`-free by-Oid resolver, so
-//     installing them needs the hio-seams Oid->&Relation re-sign campaign.
-//   * `page_add_item` takes a header-only `HeapTupleData`, which cannot carry
-//     the tuple's user-data area (that lives in a `FormedTuple`); serializing
-//     a full on-page item from it is impossible — the FormedTuple-carrier
-//     re-sign keystone.
+// `page_add_item` is installed here too: the seam was re-signed to cross the
+// tuple's full contiguous on-disk byte image (`image: &[u8]`), serialized by
+// the caller from its `FormedTuple` — so the owner reconstructs the C `Item`
+// from bytes and calls `PageAddItemExtended` over `with_buffer_page` (the prior
+// header-only `HeapTupleData` carrier could not carry the user-data area; that
+// FormedTuple-carrier keystone is resolved).
+//
+// Installed by the relcache owner (`backend-utils-cache-relcache/src/seams.rs`,
+// not here): the relation-KEYED slots (`read_buffer` / `read_buffer_extended` /
+// `extend_buffered_rel_by` / the four freespace slots / `visibilitymap_pin{,_ok}`
+// / `relation_get_target_*` / `relation_set_target_block` /
+// `relation_extension_lock_waiter_count` / `relation_is_local` /
+// `relation_get_relation_name`). These cross the relation as a bare `Oid`; the
+// relcache is the OID→`&Relation<'mcx>` owner, so it projects a transient read
+// handle (`project_open`, its own `Mcx` arena) off the registry-owned entry and
+// delegates to each canonical owner's `&Relation`-keyed seam — the prior
+// "no Mcx-free by-Oid resolver" keystone is resolved there, not via a re-sign.
 
 mod wire {
     use backend_storage_buffer_bufmgr_seams as bufmgr_seam;
