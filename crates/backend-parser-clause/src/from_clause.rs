@@ -69,7 +69,7 @@ use types_tuple::heaptuple::{FLOAT8OID, INTERNALOID};
 
 use types_core::primitive::AttrNumber;
 use types_nodes::jointype::JoinType;
-use types_nodes::nodes::{CmdType, Node, NodePtr};
+use types_nodes::nodes::{ntag, CmdType, Node, NodePtr};
 use types_nodes::parsenodes::RTEKind;
 use types_nodes::parsestmt::{
     ParseExprKind, ParseNamespaceColumn, ParseNamespaceItem, ParseState,
@@ -521,8 +521,8 @@ fn transformRangeSubselect<'mcx>(
      * restrictions of the grammar, but check anyway.
      * (C: `!IsA(query, Query) || query->commandType != CMD_SELECT`.)
      */
-    let query = match &*query_node {
-        Node::Query(q) => q.clone_in(mcx)?,
+    let query = match query_node.node_tag() {
+        ntag::T_Query => query_node.expect_query().clone_in(mcx)?,
         _ => return Err(elog_error("unexpected non-SELECT command in subquery in FROM")),
     };
     if query.commandType != CmdType::CMD_SELECT {
@@ -570,14 +570,14 @@ fn transformRangeFunction<'mcx>(
      */
     for lc in r.functions.iter() {
         /* Disassemble the function-call/column-def-list pairs */
-        let pair = match &**lc {
-            Node::List(pair) => pair,
+        let pair = match lc.node_tag() {
+            ntag::T_List => lc.expect_list(),
             _ => return Err(elog_error("transformRangeFunction: function item is not a List")),
         };
         debug_assert!(pair.len() == 2);
         let fexpr = &*pair[0];
-        let coldeflist = match &*pair[1] {
-            Node::List(l) => copy_node_pgvec(mcx, l)?,
+        let coldeflist = match pair[1].node_tag() {
+            ntag::T_List => copy_node_pgvec(mcx, pair[1].expect_list())?,
             // C: lsecond(pair) is a `List *` (possibly NIL == empty list).
             _ => PgVec::new_in(mcx),
         };
@@ -589,7 +589,7 @@ fn transformRangeFunction<'mcx>(
          * each argument.
          */
         let mut handled_unnest = false;
-        if let Node::FuncCall(fc) = fexpr {
+        if let Some(fc) = fexpr.as_funccall() {
             if fc.funcname.len() == 1
                 && str_val(&fc.funcname[0]) == Some("unnest")
                 && fc.args.len() > 1
@@ -935,8 +935,9 @@ fn transformFromClauseItem<'mcx>(
     /* Guard against stack overflow due to overly deep subtree */
     /* check_stack_depth() handled by the host runtime */
 
-    match n {
-        Node::RangeVar(rv) => {
+    match n.node_tag() {
+        ntag::T_RangeVar => {
+            let rv = n.expect_rangevar();
             /* Plain relation reference, or perhaps a CTE reference */
 
             /* Check if it's a CTE or tuplestore reference */
@@ -951,7 +952,8 @@ fn transformFromClauseItem<'mcx>(
             let rtr = Node::RangeTblRef(RangeTblRef { rtindex });
             Ok((rtr, namespace))
         }
-        Node::RangeSubselect(rs) => {
+        ntag::T_RangeSubselect => {
+            let rs = n.expect_rangesubselect();
             /* sub-SELECT is like a plain relation */
             let nsitem = transformRangeSubselect(mcx, pstate, rs)?;
             let rtindex = nsitem.p_rtindex;
@@ -959,7 +961,8 @@ fn transformFromClauseItem<'mcx>(
             let rtr = Node::RangeTblRef(RangeTblRef { rtindex });
             Ok((rtr, namespace))
         }
-        Node::RangeFunction(rf) => {
+        ntag::T_RangeFunction => {
+            let rf = n.expect_rangefunction();
             /* function is like a plain relation */
             let nsitem = transformRangeFunction(mcx, pstate, rf)?;
             let rtindex = nsitem.p_rtindex;
@@ -975,7 +978,8 @@ fn transformFromClauseItem<'mcx>(
          * (`transformRangeTableFunc` / `transformJsonTable`) are deferred to
          * F3b. There is therefore no reachable arm to write here.
          */
-        Node::RangeTableSample(rts) => {
+        ntag::T_RangeTableSample => {
+            let rts = n.expect_rangetablesample();
             /* TABLESAMPLE clause (wrapping some other valid FROM node) */
 
             /* Recursively transform the contained relation */
@@ -1017,9 +1021,12 @@ fn transformFromClauseItem<'mcx>(
 
             Ok((rel, namespace))
         }
-        Node::JoinExpr(j) => transform_from_clause_item_join(mcx, pstate, j),
-        other => Err(ereport(ERROR)
-            .errmsg(format!("unrecognized node type: {:?}", other.node_tag()))
+        ntag::T_JoinExpr => {
+            let j = n.expect_joinexpr();
+            transform_from_clause_item_join(mcx, pstate, j)
+        }
+        _ => Err(ereport(ERROR)
+            .errmsg(format!("unrecognized node type: {:?}", n.node_tag()))
             .into_error()),
     }
 }
@@ -1646,9 +1653,10 @@ fn markRelsAsNulledBy<'mcx>(
     jindex: i32,
 ) -> PgResult<()> {
     /* Note: we can't see FromExpr here */
-    let varno: i32 = match n {
-        Node::RangeTblRef(r) => r.rtindex,
-        Node::JoinExpr(j) => {
+    let varno: i32 = match n.node_tag() {
+        ntag::T_RangeTblRef => n.expect_rangetblref().rtindex,
+        ntag::T_JoinExpr => {
+            let j = n.expect_joinexpr();
             /* recurse to children */
             if let Some(l) = j.larg.as_deref() {
                 let l = l.clone_in(mcx)?;
@@ -1660,10 +1668,10 @@ fn markRelsAsNulledBy<'mcx>(
             }
             j.rtindex
         }
-        other => {
+        _ => {
             return Err(elog_error(format!(
                 "unrecognized node type: {:?}",
-                other.node_tag()
+                n.node_tag()
             )));
         }
     };
@@ -1761,11 +1769,13 @@ fn system_func_name<'mcx>(mcx: Mcx<'mcx>, name: &str) -> PgResult<PgVec<'mcx, No
 /// `exprLocation` `default: loc = -1` for the others (C reads the same
 /// missing-location fields as -1).
 fn node_location(node: &Node<'_>) -> PgResult<i32> {
-    let loc = match node {
-        Node::RangeVar(rv) => rv.location,
-        Node::RangeTableSample(rts) => rts.location,
-        Node::Expr(e) => expr_location(Some(e))?,
-        _ => -1,
+    let loc = match node.node_tag() {
+        ntag::T_RangeVar => node.expect_rangevar().location,
+        ntag::T_RangeTableSample => node.expect_rangetablesample().location,
+        _ => match node.as_expr() {
+            Some(e) => expr_location(Some(e))?,
+            None => -1,
+        },
     };
     Ok(loc)
 }
@@ -1831,10 +1841,7 @@ fn nodes_ptr_eq(a: &Node<'_>, b: &Node<'_>) -> bool {
 
 /// `(Node *) expr` viewed for `exprType`/etc. — wraps a borrowed [`Node::Expr`].
 fn node_as_expr<'a>(node: &'a Node<'_>) -> Option<&'a Expr> {
-    match node {
-        Node::Expr(e) => Some(e),
-        _ => None,
-    }
+    node.as_expr()
 }
 
 /// Convert a `List *` of `String` value nodes into owned `Vec<String>` (the
@@ -2017,9 +2024,9 @@ fn clone_namespace<'mcx>(
 fn funcexprs_to_expr_vec(funcexprs: &[NodePtr<'_>]) -> PgResult<Vec<Expr>> {
     let mut v = Vec::with_capacity(funcexprs.len());
     for n in funcexprs.iter() {
-        match &**n {
-            Node::Expr(e) => v.push(e.clone()),
-            _ => return Err(elog_error("transformRangeFunction: funcexpr is not a transformed Expr")),
+        match n.as_expr() {
+            Some(e) => v.push(e.clone()),
+            None => return Err(elog_error("transformRangeFunction: funcexpr is not a transformed Expr")),
         }
     }
     Ok(v)

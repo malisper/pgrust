@@ -19,7 +19,7 @@ use backend_utils_error::ereport;
 use types_acl::acl::ACL_SELECT;
 use types_tuple::heaptuple::{INT8OID, UNKNOWNOID};
 
-use types_nodes::nodes::{Node, NodePtr, ONCONFLICT_UPDATE};
+use types_nodes::nodes::{ntag, Node, NodePtr, ONCONFLICT_UPDATE};
 use types_nodes::parsestmt::{ParseExprKind, ParseState};
 use types_nodes::primnodes::{Expr, InferenceElem, TargetEntry};
 use types_nodes::ddlnodes::IndexElem;
@@ -503,8 +503,8 @@ fn resolve_unique_index_expr<'mcx>(
     let mut result: Vec<Expr> = Vec::new();
 
     for ielem_node in infer.indexElems.iter() {
-        let ielem: &IndexElem = match &**ielem_node {
-            Node::IndexElem(ie) => ie,
+        let ielem: &IndexElem = match ielem_node.node_tag() {
+            ntag::T_IndexElem => ielem_node.expect_indexelem(),
             _ => {
                 return Err(crate::elog_error(
                     "resolve_unique_index_expr: indexElems member is not an IndexElem",
@@ -771,8 +771,8 @@ fn node_vec_as_sortby<'mcx>(
 ) -> PgResult<Vec<types_nodes::rawnodes::SortBy<'mcx>>> {
     let mut out = Vec::with_capacity(list.len());
     for n in list.iter() {
-        match &**n {
-            Node::SortBy(sb) => out.push(sb.clone_in(mcx)?),
+        match n.node_tag() {
+            ntag::T_SortBy => out.push(n.expect_sortby().clone_in(mcx)?),
             _ => {
                 return Err(crate::elog_error(
                     "transformWindowDefinitions: orderClause member is not a SortBy",
@@ -792,10 +792,10 @@ fn node_vec_to_collnames(
 ) -> PgResult<Vec<types_parsenodes::Node>> {
     let mut out = Vec::with_capacity(list.len());
     for n in list.iter() {
-        match &**n {
-            Node::String(s) => out.push(types_parsenodes::Node::String(
+        match n.node_tag() {
+            ntag::T_String => out.push(types_parsenodes::Node::String(
                 types_parsenodes::StringNode {
-                    sval: Some(String::from(s.sval.as_str())),
+                    sval: Some(String::from(n.expect_string().sval.as_str())),
                 },
             )),
             _ => {

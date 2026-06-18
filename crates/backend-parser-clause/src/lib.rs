@@ -65,7 +65,7 @@ use types_error::{
 use backend_utils_error::ereport;
 use types_tuple::heaptuple::{INT8OID, TEXTOID, UNKNOWNOID};
 
-use types_nodes::nodes::{Node, NodePtr};
+use types_nodes::nodes::{ntag, Node, NodePtr};
 use types_nodes::parsestmt::{ParseExprKind, ParseState};
 use types_nodes::nodelimit::{LimitOption, LIMIT_OPTION_WITH_TIES};
 
@@ -106,8 +106,8 @@ const COERCE_IMPLICIT_CAST: CoercionForm = CoercionForm::COERCE_IMPLICIT_CAST;
 
 /// `strVal(node)` if `node` is a `T_String` value node, else `None`.
 pub(crate) fn str_val<'a>(node: &'a Node<'_>) -> Option<&'a str> {
-    match node {
-        Node::String(s) => Some(s.sval.as_str()),
+    match node.node_tag() {
+        ntag::T_String => Some(node.expect_string().sval.as_str()),
         _ => None,
     }
 }
@@ -191,8 +191,8 @@ pub fn transformLimitClause<'mcx>(
 
     // The C re-reads the original `clause` pointer (unchanged by transformExpr)
     // for the WITH TIES NULL check below.
-    let raw_is_null_const = match &clause {
-        Node::A_Const(ac) => ac.isnull,
+    let raw_is_null_const = match clause.node_tag() {
+        ntag::T_A_Const => clause.expect_a_const().isnull,
         _ => false,
     };
 
@@ -321,7 +321,7 @@ fn findTargetlistEntrySQL92<'mcx>(
      * Check for a bare column reference of the form `colname` (a single-field
      * ColumnRef whose field is a String).
      */
-    if let Node::ColumnRef(cref) = node {
+    if let Some(cref) = node.as_columnref() {
         if cref.fields.len() == 1 {
             if let Some(field0_name) = str_val(&cref.fields[0]) {
                 let location = cref.location;
@@ -384,10 +384,10 @@ fn findTargetlistEntrySQL92<'mcx>(
     /*
      * Check for a constant-integer ordinal reference of the form `n`.
      */
-    if let Node::A_Const(aconst) = node {
+    if let Some(aconst) = node.as_a_const() {
         let aconst_location = aconst.location;
-        let target_pos = match aconst.val.as_deref() {
-            Some(Node::Integer(i)) => i.ival,
+        let target_pos = match aconst.val.as_deref().and_then(|v| v.as_integer()) {
+            Some(i) => i.ival,
             _ => {
                 return Err(ereport(ERROR)
                     .errcode(ERRCODE_SYNTAX_ERROR)
@@ -743,13 +743,14 @@ fn transformGroupingSet<'mcx>(
     let mut content: Vec<NodePtr<'mcx>> = Vec::new();
 
     for n in gset.content.iter() {
-        match &**n {
+        match n.node_tag() {
             /*
              * A parenthesized sublist of expressions: transform the whole list
              * (duplicates within it can be eliminated locally) into a SIMPLE
              * grouping set of ressortgrouprefs.
              */
-            Node::List(sublist) => {
+            ntag::T_List => {
+                let sublist = n.expect_list();
                 let l = transformGroupClauseList(
                     mcx, flatresult, pstate, sublist, targetlist, sortClause, exprKind, useSQL99,
                     false,
@@ -762,7 +763,8 @@ fn transformGroupingSet<'mcx>(
                 );
                 content.push(alloc_in(mcx, Node::GroupingSet(gs))?);
             }
-            Node::GroupingSet(gset2) => {
+            ntag::T_GroupingSet => {
+                let gset2 = n.expect_groupingset();
                 let tg = transformGroupingSet(
                     mcx, flatresult, pstate, gset2, targetlist, sortClause, exprKind, useSQL99,
                     false,
@@ -846,7 +848,7 @@ pub fn transformGroupClause<'mcx>(
     }
 
     for gexpr in flat_grouplist.iter() {
-        if let Node::GroupingSet(gset) = &**gexpr {
+        if let Some(gset) = gexpr.as_groupingset() {
             match gset.kind {
                 GroupingSetKind::GROUPING_SET_EMPTY => {
                     gsets.push(alloc_in(mcx, gexpr.clone_in(mcx)?)?);
@@ -1349,37 +1351,42 @@ fn leftmost_loc(loc1: i32, loc2: i32) -> i32 {
 /// switch are ported here directly (delegating to `expr_location` for an already
 /// typed [`Node::Expr`]).
 fn node_expr_location(node: &Node<'_>) -> PgResult<i32> {
-    let loc = match node {
-        Node::ColumnRef(c) => c.location,
-        Node::ParamRef(p) => p.location,
-        Node::A_Const(a) => a.location,
-        Node::A_Expr(a) => {
+    let loc = match node.node_tag() {
+        ntag::T_ColumnRef => node.expect_columnref().location,
+        ntag::T_ParamRef => node.expect_paramref().location,
+        ntag::T_A_Const => node.expect_a_const().location,
+        ntag::T_A_Expr => {
+            let a = node.expect_a_expr();
             // leftmost of operator or left operand (if any)
             leftmost_loc(a.location, opt_node_expr_location(a.lexpr.as_deref())?)
         }
-        Node::FuncCall(fc) => {
+        ntag::T_FuncCall => {
+            let fc = node.expect_funccall();
             // consider both function name and leftmost arg
             leftmost_loc(fc.location, list_exprLocation(&fc.args)?)
         }
-        Node::A_ArrayExpr(a) => a.location,
-        Node::TypeCast(tc) => {
+        ntag::T_A_ArrayExpr => node.expect_a_arrayexpr().location,
+        ntag::T_TypeCast => {
+            let tc = node.expect_typecast();
             let mut loc = opt_node_expr_location(tc.arg.as_deref())?;
             if let Some(tn) = tc.typeName.as_deref() {
                 loc = leftmost_loc(loc, tn.location);
             }
             leftmost_loc(loc, tc.location)
         }
-        Node::CollateClause(c) => opt_node_expr_location(c.arg.as_deref())?,
-        Node::SortBy(s) => opt_node_expr_location(s.node.as_deref())?,
-        Node::A_Indirection(a) => opt_node_expr_location(a.arg.as_deref())?,
-        Node::GroupingSet(g) => g.location,
-        Node::TypeName(t) => t.location,
-        Node::RowExpr(r) => r.location,
-        Node::List(list) => list_exprLocation(list)?,
+        ntag::T_CollateClause => opt_node_expr_location(node.expect_collateclause().arg.as_deref())?,
+        ntag::T_SortBy => opt_node_expr_location(node.expect_sortby().node.as_deref())?,
+        ntag::T_A_Indirection => opt_node_expr_location(node.expect_a_indirection().arg.as_deref())?,
+        ntag::T_GroupingSet => node.expect_groupingset().location,
+        ntag::T_TypeName => node.expect_typename().location,
+        ntag::T_RowExpr => node.expect_rowexpr().location,
+        ntag::T_List => list_exprLocation(node.expect_list())?,
         // Typed expression leaf: delegate to the nodefuncs implementation.
-        Node::Expr(e) => expr_location(Some(e))?,
         // Value nodes and other locationless raw kinds: unknown (C `-1`).
-        _ => -1,
+        _ => match node.as_expr() {
+            Some(e) => expr_location(Some(e))?,
+            None => -1,
+        },
     };
     Ok(loc)
 }
