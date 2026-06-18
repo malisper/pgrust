@@ -556,6 +556,7 @@ pub fn init_all() {
     common_blkreftable::init_seams();
     common_checksum_helper::init_seams();
     common_hashfn::init_seams();
+    common_unicode_category::init_seams();
     common_ip::init_seams();
     common_pglz::init_seams();
     common_prng_base64::init_seams();

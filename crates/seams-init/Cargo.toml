@@ -557,6 +557,7 @@ common-blkreftable = { path = "../common-blkreftable" }
 common-checksum-helper = { path = "../common-checksum-helper" }
 common-hashfn = { path = "../common-hashfn" }
 common-ip = { path = "../common-ip" }
+common-unicode-category = { path = "../common-unicode-category" }
 common-pglz = { path = "../common-pglz" }
 common-prng-base64 = { path = "../common-prng-base64" }
 common-scram-common = { path = "../common-scram-common" }

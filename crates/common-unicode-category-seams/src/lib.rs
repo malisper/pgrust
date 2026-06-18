@@ -1,11 +1,9 @@
 //! Seam declarations for `src/common/unicode_category.c` — the generated
 //! Unicode general-category lookup tables.
 //!
-//! The owning unit (`common/unicode_category`) installs these from its
-//! `init_seams()` when it lands; until then a call panics loudly. This unit is
-//! NOT yet ported (no `common-unicode-category` crate exists), so callers
-//! reach it through this seam (mirror-pg-and-panic: a genuinely-unported
-//! owner, not a stand-in).
+//! The owning unit (`common-unicode-category`) installs these from its
+//! `init_seams()`. The seam exists because the consumer (`varlena`) would
+//! otherwise pull in the large generated category tables across a cycle.
 
 seam_core::seam!(
     /// `unicode_category(pg_wchar code)` (`common/unicode_category.c`) — the

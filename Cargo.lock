@@ -21718,6 +21718,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-unicode-case"
+version = "0.0.0"
+dependencies = [
+ "common-unicode-category",
+ "mcx",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "common-unicode-category"
+version = "0.0.0"
+dependencies = [
+ "common-unicode-category-seams",
+ "types-core",
+]
+
+[[package]]
 name = "common-unicode-category-seams"
 version = "0.0.0"
 dependencies = [
@@ -22718,6 +22736,7 @@ dependencies = [
  "common-prng-base64",
  "common-scram-common",
  "common-string",
+ "common-unicode-category",
  "contrib-amcheck-verify-common",
  "contrib-amcheck-verify-nbtree",
  "interfaces-libpq-fe",
