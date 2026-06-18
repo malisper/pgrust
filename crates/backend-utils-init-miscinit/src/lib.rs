@@ -875,6 +875,19 @@ pub fn init_seams() {
     // already installed above.)
     s::in_no_force_rls_operation::set(InNoForceRLSOperation);
     s::in_security_restricted_operation::set(InSecurityRestrictedOperation);
+    // ProcessUtility's CheckRestrictedOperation (utility.c) reads the same
+    // predicate through the utility-out-seams copy; install it here (the body
+    // is miscinit-owned), mirroring xact's cross-install of xact_read_only.
+    backend_tcop_utility_out_seams::in_security_restricted_operation::set(
+        InSecurityRestrictedOperation,
+    );
+    // plancache's GetCachedPlan revalidation slice (backendstate-pc-seams):
+    // get_user_id is this crate's body; row_security reads the guc-tables slot
+    // (the `plan_cache_mode` member is installed by plancache itself).
+    backend_utils_misc_backendstate_pc_seams::get_user_id::set(|| Ok(GetUserId()));
+    backend_utils_misc_backendstate_pc_seams::row_security::set(|| {
+        Ok((backend_utils_misc_guc_tables::vars::row_security.get().get)())
+    });
     s::in_local_user_id_change::set(InLocalUserIdChange);
     s::get_backend_type_desc::set(GetBackendTypeDesc);
     s::check_data_dir::set(crate::process::checkDataDir);

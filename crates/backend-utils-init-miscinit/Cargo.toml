@@ -32,6 +32,14 @@ backend-storage-ipc-latch = { path = "../backend-storage-ipc-latch" }
 
 # Inward seams (this crate installs them).
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+# ProcessUtility reaches InSecurityRestrictedOperation (CheckRestrictedOperation,
+# utility.c) through the utility-out-seams; miscinit owns the real body, so it
+# cross-installs that copy too (mirrors xact's xact_read_only cross-install).
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
+# plancache's consumer slice (GetCachedPlan plan-revalidation predicates):
+# get_user_id is miscinit-owned, row_security reads the guc-tables slot. Cross-
+# install here so EXECUTE's GetCachedPlan revalidation resolves.
+backend-utils-misc-backendstate-pc-seams = { path = "../backend-utils-misc-backendstate-pc-seams" }
 
 # Outward seams into owners that would cycle or are not yet ported.
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }

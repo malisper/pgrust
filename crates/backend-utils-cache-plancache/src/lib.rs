@@ -940,32 +940,38 @@ fn RevalidateCachedQuery(
     // alive through the comparison; copy into the permanent context only if it
     // actually changed.
     let desc_scratch = MemoryContext::new("plancache_newdesc");
-    let new_desc = PlanCacheComputeResultDesc(&desc_scratch, tlist.as_slice())?;
-    let had_existing = src.borrow().result_desc.is_some();
-    let equal = match (&new_desc, src.borrow().result_desc.as_ref()) {
-        (Some(a), Some(b)) => tupdesc_seams::equal_row_types::call(a, b),
-        _ => false,
-    };
-    if new_desc.is_none() && !had_existing {
-        // OK, doesn't return tuples.
-    } else if new_desc.is_none() || !had_existing || !equal {
-        if src.borrow().fixed_result {
-            return Err(PgError::new(
-                ERROR,
-                "cached plan must not change result type".to_string(),
-            )
-            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
-        }
-        // Copy the new descriptor into the source's permanent context; drop the
-        // old one (FreeTupleDesc).
-        let owned = match &new_desc {
-            Some(td) => {
-                let p = src.borrow();
-                Some(clone_tupdesc_into(&p.context, td)?)
-            }
-            None => None,
+    {
+        // `new_desc` is charged to `desc_scratch`; it MUST drop before
+        // `desc_scratch` is freed (otherwise its TupleDesc uncharges a
+        // already-freed context). Scope it so it drops at the end of this block,
+        // ahead of `drop(desc_scratch)`.
+        let new_desc = PlanCacheComputeResultDesc(&desc_scratch, tlist.as_slice())?;
+        let had_existing = src.borrow().result_desc.is_some();
+        let equal = match (&new_desc, src.borrow().result_desc.as_ref()) {
+            (Some(a), Some(b)) => tupdesc_seams::equal_row_types::call(a, b),
+            _ => false,
         };
-        src.borrow_mut().result_desc = owned;
+        if new_desc.is_none() && !had_existing {
+            // OK, doesn't return tuples.
+        } else if new_desc.is_none() || !had_existing || !equal {
+            if src.borrow().fixed_result {
+                return Err(PgError::new(
+                    ERROR,
+                    "cached plan must not change result type".to_string(),
+                )
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
+            }
+            // Copy the new descriptor into the source's permanent context; drop
+            // the old one (FreeTupleDesc).
+            let owned = match &new_desc {
+                Some(td) => {
+                    let p = src.borrow();
+                    Some(clone_tupdesc_into(&p.context, td)?)
+                }
+                None => None,
+            };
+            src.borrow_mut().result_desc = owned;
+        }
     }
     drop(desc_scratch);
 
