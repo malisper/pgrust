@@ -2589,12 +2589,17 @@ fn datum_to_ref_arg_owned_typed(
 fn type_adt_core_is_header_ful(mcx: Mcx<'_>, argtype: Oid) -> PgResult<bool> {
     use types_tuple::heaptuple::{
         ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLERANGEOID,
-        ANYMULTIRANGEOID, ANYRANGEOID, RECORDOID,
+        ANYMULTIRANGEOID, ANYRANGEOID, JSONBOID, RECORDOID,
     };
     if argtype == 0 {
         return Ok(false);
     }
-    // The container pseudotypes whose I/O cores read a framed varlena.
+    // The container pseudotypes whose I/O cores read a framed varlena.  `jsonb`
+    // belongs here too: its container engine (`jsonb_out`/`jsonb_op`/…) reads
+    // `&jb->root`, i.e. the on-disk varlena with its 4-byte `VARSIZE` header
+    // intact (it skips `VARHDRSZ` itself), so its `ByRef` referent must cross
+    // the fmgr boundary VERBATIM — stripping the header would shift the
+    // container word and leave an empty (or short) image to dereference.
     if matches!(
         argtype,
         ANYARRAYOID
@@ -2604,6 +2609,7 @@ fn type_adt_core_is_header_ful(mcx: Mcx<'_>, argtype: Oid) -> PgResult<bool> {
             | ANYMULTIRANGEOID
             | ANYCOMPATIBLEMULTIRANGEOID
             | RECORDOID
+            | JSONBOID
     ) {
         return Ok(true);
     }
