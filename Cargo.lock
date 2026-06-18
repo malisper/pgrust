@@ -22539,6 +22539,7 @@ dependencies = [
  "backend-optimizer-path-costsize",
  "backend-optimizer-path-equivclass",
  "backend-optimizer-path-indxpath",
+ "backend-optimizer-path-joinpath",
  "backend-optimizer-path-joinrels",
  "backend-optimizer-path-pathkeys",
  "backend-optimizer-path-small",

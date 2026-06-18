@@ -290,6 +290,7 @@ backend-access-nbtree-core = { path = "../backend-access-nbtree-core" }
 backend-access-nbtree-nbtsort = { path = "../backend-access-nbtree-nbtsort" }
 backend-common-relpath = { path = "../backend-common-relpath" }
 backend-optimizer-path-costsize = { path = "../backend-optimizer-path-costsize" }
+backend-optimizer-path-joinpath = { path = "../backend-optimizer-path-joinpath" }
 backend-optimizer-path-equivclass = { path = "../backend-optimizer-path-equivclass" }
 backend-optimizer-plan-init-subselect = { path = "../backend-optimizer-plan-init-subselect" }
 backend-optimizer-path-small = { path = "../backend-optimizer-path-small" }

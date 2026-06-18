@@ -2264,14 +2264,64 @@ fn rinfo_is_pushed_down(root: &PlannerInfo, rinfo: RinfoId, joinrelids: &Relids)
     ri.is_pushed_down || !bms::relids_is_subset::call(&ri.required_relids, joinrelids)
 }
 
-/// Install this crate's own seams. joinpath owns no cross-cycle entry points
-/// yet — `add_paths_to_joinrel` is called directly by the join-search driver
-/// (`joinrels.c`) once it lands, not through a seam — so there is nothing to
-/// install. The seams joinpath *calls* (pathnode.c / costsize.c / pathkeys.c /
-/// …) are installed by their own owners when those units are ported. This
-/// no-op exists so the `seams-init` aggregator can list every ported crate
-/// uniformly.
-pub fn init_seams() {}
+/// `joinrel->fdwroutine->GetForeignJoinPaths(...)` if set (joinpath.c step 5).
+///
+/// A baserel/joinrel only carries an `fdwroutine` once the FDW machinery has
+/// resolved one for a foreign table or foreign join; in that case the planner
+/// gives the FDW a chance to push the join down. In the current bootstrap no
+/// `RelOptInfo` ever has `fdwroutine` set, so this faithfully mirrors the C
+/// `if (joinrel->fdwroutine && joinrel->fdwroutine->GetForeignJoinPaths)`
+/// guard: when there is no routine it is a no-op (the C `false` branch). The
+/// modelled [`FdwRoutine`](types_nodes::FdwRoutine) carries only the
+/// executor-time callbacks, so a present routine's planner-time
+/// `GetForeignJoinPaths` callback is not yet expressible — reaching it is the
+/// unported FDW join-pushdown path and panics loudly.
+fn fdw_get_foreign_join_paths(
+    root: &mut PlannerInfo,
+    joinrel: RelId,
+    _outerrel: RelId,
+    _innerrel: RelId,
+    _jointype: JoinType,
+    _extra: &JoinPathExtraData,
+) -> PgResult<()> {
+    if root.rel(joinrel).fdwroutine.is_some() {
+        panic!(
+            "GetForeignJoinPaths: FDW join pushdown is not ported \
+             (FdwRoutine planner callbacks are unmodeled)"
+        );
+    }
+    Ok(())
+}
+
+/// `set_join_pathlist_hook(...)` if installed (joinpath.c step 6).
+///
+/// `set_join_pathlist_hook` is a plain global function pointer that defaults to
+/// `NULL`; an extension assigns it from its `_PG_init`. With no extension
+/// loaded the pointer is `NULL`, so the C `if (set_join_pathlist_hook)` guard
+/// is false and this is a no-op. There is no extension-hook registry yet, so
+/// the hook is always absent here and this faithfully reproduces the default.
+fn set_join_pathlist_hook(
+    _root: &mut PlannerInfo,
+    _joinrel: RelId,
+    _outerrel: RelId,
+    _innerrel: RelId,
+    _jointype: JoinType,
+    _extra: &JoinPathExtraData,
+) -> PgResult<()> {
+    Ok(())
+}
+
+/// Install the seams joinpath owns. The join-method enumeration itself is
+/// reached through the direct `add_paths_to_joinrel` call from the join-search
+/// driver (`joinrels.c`), not a seam; the cross-subsystem seams joinpath *calls*
+/// (pathnode.c / costsize.c / pathkeys.c / …) are installed by their own owners.
+/// What joinpath.c owns are its two trailing hook dispatch sites — the FDW
+/// join-pushdown callback and the `set_join_pathlist_hook` extension hook — both
+/// of which default to no-op (no FDW routine / NULL hook) in C.
+pub fn init_seams() {
+    jp::fdw_get_foreign_join_paths::set(fdw_get_foreign_join_paths);
+    jp::set_join_pathlist_hook::set(set_join_pathlist_hook);
+}
 
 #[cfg(test)]
 mod tests;
