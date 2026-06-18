@@ -345,7 +345,7 @@ pub fn set_rel_size<'mcx>(
                 if rte::rte_self_reference::call(run, root, rti) {
                     subquery::set_worktable_pathlist(root, rel, rti)?;
                 } else {
-                    subquery::set_cte_pathlist(root, rel, rti)?;
+                    subquery::set_cte_pathlist(run, root, rel, rti)?;
                 }
             }
             RTE_NAMEDTUPLESTORE => set_namedtuplestore_pathlist(run, root, rel)?,

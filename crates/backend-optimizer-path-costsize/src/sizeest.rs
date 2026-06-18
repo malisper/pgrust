@@ -78,7 +78,7 @@ pub fn set_tablefunc_size_estimates<'mcx>(run: &PlannerRun<'mcx>, root: &mut Pla
 /// `set_cte_size_estimates` (costsize.c:6151).
 pub fn set_cte_size_estimates<'mcx>(run: &PlannerRun<'mcx>, root: &mut PlannerInfo, rel: RelId, cte_rows: f64) {
     debug_assert!(root.rel(rel).relid > 0);
-    let self_reference = cz::rte_cte_self_reference::call(root, rel);
+    let self_reference = cz::rte_cte_self_reference::call(run, root, rel);
     if self_reference {
         root.rel_mut(rel).tuples = clamp_row_est(recursive_worktable_factor() * cte_rows);
     } else {

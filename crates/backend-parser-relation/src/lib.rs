@@ -330,6 +330,32 @@ pub fn scanNameSpaceForCTE<'mcx>(
     Ok(None)
 }
 
+/// Increment `cterefcount` on the canonical `p_ctenamespace` entry named
+/// `ctename`, found `levelsup` ParseStates up from `pstate` — the writeback for
+/// the C `cte->cterefcount++` on the shared pointer (the owned model passes a
+/// clone of the CTE to `addRangeTableEntryForCTE`). Walks the same parent chain
+/// `scanNameSpaceForCTE` did, so the bumped entry is the one that becomes
+/// `qry->cteList`.
+fn bump_cte_namespace_refcount<'mcx>(
+    pstate: &mut ParseState<'mcx>,
+    ctename: &str,
+    levelsup: Index,
+) {
+    let mut ps: &mut ParseState<'mcx> = pstate;
+    for _ in 0..levelsup {
+        ps = match ps.parentParseState.as_deref_mut() {
+            Some(p) => p,
+            None => return,
+        };
+    }
+    for cte in ps.p_ctenamespace.iter_mut() {
+        if cte.ctename.as_deref() == Some(ctename) {
+            cte.cterefcount += 1;
+            return;
+        }
+    }
+}
+
 /// `isFutureCTE` — true iff `refname` names a not-yet-in-scope CTE.
 fn isFutureCTE(pstate: &ParseState<'_>, refname: &str) -> bool {
     let mut cur: Option<&ParseState> = Some(pstate);
@@ -2354,7 +2380,15 @@ pub fn addRangeTableEntryForCTE<'mcx>(
     rte.self_reference = !cte.ctequery.as_deref().map_or(false, |n| n.as_query().is_some());
     debug_assert!(cte.cterecursive || !rte.self_reference);
     if !rte.self_reference {
+        // C: cte->cterefcount++ on the shared CommonTableExpr that also lives in
+        // p_ctenamespace / qry->cteList. In the owned model `cte` is a clone
+        // returned by scanNameSpaceForCTE, so bump the canonical namespace entry
+        // (at the resolved levelsup) too, or the planner sees cterefcount==0 and
+        // drops the CTE plan.
         cte.cterefcount += 1;
+        if let Some(ctename) = cte.ctename.as_deref() {
+            bump_cte_namespace_refcount(pstate, ctename, levelsup);
+        }
     }
 
     // Error if the CTE is data-modifying without RETURNING.

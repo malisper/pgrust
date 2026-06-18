@@ -302,6 +302,13 @@ pub fn init_seams() {
         planner_rt_fetch(run, root, rti).relid
     });
 
+    // costsize.c `set_cte_size_estimates` — `rte->self_reference` from a
+    // RelOptInfo handle (the self-reference / recursive-worktable CTE leg).
+    backend_optimizer_path_costsize_seams::rte_cte_self_reference::set(|run, root, rel| {
+        let rti = root.rel(rel).relid;
+        planner_rt_fetch(run, root, rti).self_reference
+    });
+
     // costsize.c `set_function_size_estimates` (6066): rel->tuples is the largest
     // `expression_returns_set_rows(root, rtfunc->funcexpr)` over the FUNCTION
     // RTE's `functions`. Reached through this resolver because cost_functionscan

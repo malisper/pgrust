@@ -532,5 +532,34 @@ pub(crate) fn cte_vec_to_nodes<'mcx>(
     Ok(out)
 }
 
+/// Refresh each `qry->cteList` CTE's `cterefcount` from the final
+/// `pstate->p_ctenamespace` (matched by name). In C the cteList and the
+/// ctenamespace hold pointers to one shared `CommonTableExpr`, so the
+/// `cte->cterefcount++` that `addRangeTableEntryForCTE` does while transforming
+/// the body is automatically visible in `qry->cteList`. In the owned model the
+/// two are separate clones, so the bumped count must be copied back here, after
+/// the whole statement body (FROM / targetlist / WHERE / sublinks) is
+/// transformed. Without this the planner sees `cterefcount == 0` and drops
+/// every CTE plan.
+pub(crate) fn sync_cte_refcounts<'mcx>(
+    pstate: &ParseState<'mcx>,
+    cte_list: &mut [NodePtr<'mcx>],
+) {
+    for node in cte_list.iter_mut() {
+        if let Node::CommonTableExpr(cte) = &mut **node {
+            let name = match cte.ctename.as_deref() {
+                Some(n) => n,
+                None => continue,
+            };
+            for ns in pstate.p_ctenamespace.iter() {
+                if ns.ctename.as_deref() == Some(name) {
+                    cte.cterefcount = ns.cterefcount;
+                    break;
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;

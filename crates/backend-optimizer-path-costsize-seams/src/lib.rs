@@ -433,8 +433,15 @@ seam_core::seam!(
     ) -> f64
 );
 seam_core::seam!(
-    /// `rte->self_reference` (set_cte_size_estimates).
-    pub fn rte_cte_self_reference(root: &PlannerInfo, rel: RelId) -> bool
+    /// `rte->self_reference` (set_cte_size_estimates). `rel` is the `RelOptInfo`
+    /// handle; the owner resolves it to the RT index (`rel->relid`) and fetches
+    /// the RTE through the planner run, so `run` is threaded (matching the
+    /// `backend-optimizer-rte-seams` RTE-projection contract).
+    pub fn rte_cte_self_reference<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+        root: &PlannerInfo,
+        rel: RelId,
+    ) -> bool
 );
 seam_core::seam!(
     /// `rte->enrtuples` (set_namedtuplestore_size_estimates).

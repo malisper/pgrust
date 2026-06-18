@@ -289,6 +289,7 @@ pub fn transformSelectStmt<'mcx>(
         backend_parser_agg::parseCheckAggregates(mcx, pstate, &mut qry)?;
     }
 
+    crate::sync_cte_refcounts(pstate, &mut qry.cteList);
     Ok(qry)
 }
 
