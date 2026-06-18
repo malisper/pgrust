@@ -2341,7 +2341,7 @@ fn load_enum_cache_data(type_id: Oid) -> PgResult<()> {
     let numitems = items.len() as i32;
 
     // Sort into OID order (enum_oid_cmp == pg_cmp_u32).
-    items.sort_by(|a, b| a.enum_oid.cmp(&b.enum_oid));
+    items.sort_by(enum_oid_cmp);
 
     // Build the bitmap and the finished, cache-context-charged enumdata, then
     // link it in (replacing any prior enumdata in place).
@@ -2402,14 +2402,23 @@ fn load_enum_cache_data(type_id: Oid) -> PgResult<()> {
     Ok(())
 }
 
-/// `find_enumitem` — locate the EnumItem with the given OID via binary search.
+/// `enum_oid_cmp` — qsort/bsearch comparison function for OID-ordered
+/// `EnumItem`s. The C body is `pg_cmp_u32(l->enum_oid, r->enum_oid)`.
+fn enum_oid_cmp(left: &EnumItem, right: &EnumItem) -> core::cmp::Ordering {
+    left.enum_oid.cmp(&right.enum_oid)
+}
+
+/// `find_enumitem` — locate the EnumItem with the given OID via binary search
+/// (`bsearch(..., enum_oid_cmp)`).
 fn find_enumitem(enumdata: &TypeCacheEnumData<'_>, arg: Oid) -> Option<EnumItem> {
-    if enumdata.enum_values.is_empty() {
+    // On some versions of Solaris, bsearch of zero items dumps core.
+    if enumdata.num_values <= 0 || enumdata.enum_values.is_empty() {
         return None;
     }
+    let srch = EnumItem { enum_oid: arg, sort_order: 0.0 };
     enumdata
         .enum_values
-        .binary_search_by(|probe| probe.enum_oid.cmp(&arg))
+        .binary_search_by(|probe| enum_oid_cmp(probe, &srch))
         .ok()
         .map(|idx| enumdata.enum_values[idx])
 }
