@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 mcx = { path = "../mcx" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+types-guc = { path = "../types-guc" }
 backend-utils-error = { path = "../backend-utils-error" }
 
 backend-access-transam-parallel = { path = "../backend-access-transam-parallel" }

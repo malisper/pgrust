@@ -215,6 +215,12 @@ pub fn init_seams() {
         crate::SetTempNamespaceState(ns, toast_ns);
         Ok(())
     });
+
+    // `search_path` GUC check/assign hooks (namespace.c). Installed here so
+    // set_config_option("search_path", ...) — e.g. RestrictSearchPath during
+    // CREATE INDEX / VACUUM — finds the owning unit's hooks.
+    backend_utils_misc_guc_tables::hooks::check_search_path.install(check_search_path_hook);
+    backend_utils_misc_guc_tables::hooks::assign_search_path.install(assign_search_path_hook);
 }
 
 /// Adapt a seam-borne `&[&str]` qualified name into the owned `NameList`
@@ -777,6 +783,30 @@ fn seam_range_var_get_relid_owns_seq(
         flags,
         Some(&mut callback),
     )
+}
+
+/// `RangeVarGetRelidExtended(stmt->relation, lockmode, 0,
+/// RangeVarCallbackOwnsRelation, NULL)` (utility.c `ProcessUtilitySlow`,
+/// the CREATE INDEX relation-OID lookup) over the K1 parse node.
+///
+/// The `RangeVarCallbackOwnsRelation` callback is tablecmds.c's; this bridge
+/// only marshals (`relname` is the callback's sole `RangeVar` input) and
+/// delegates to the tablecmds owner via its seam.
+pub fn RangeVarGetRelidOwnsRelation<'mcx>(
+    mcx: Mcx<'mcx>,
+    relation: &types_nodes::rawnodes::RangeVar<'_>,
+    lockmode: LOCKMODE,
+) -> PgResult<Oid> {
+    let rv = rangevar_from_node(relation);
+    let mut callback =
+        |relation: &RangeVar, rel_id: Oid, old_rel_id: Oid| -> PgResult<()> {
+            backend_commands_tablecmds_seams::range_var_callback_owns_relation::call(
+                relation.relname.as_str(),
+                rel_id,
+                old_rel_id,
+            )
+        };
+    RangeVarGetRelidExtended(mcx, &rv, lockmode, 0, Some(&mut callback))
 }
 
 /// `RangeVarGetRelidExtended` — given a `RangeVar` describing an existing
@@ -4426,6 +4456,28 @@ pub fn assign_search_path(_newval: &str) {
      * recomputation may not be necessary.
      */
     STATE.with(|s| s.borrow_mut().base_search_path_valid = false);
+}
+
+/// Slot-shaped wrapper installing `check_search_path` as `search_path`'s
+/// GUC `check_hook` (the hook signature the GUC machinery invokes). Supplies a
+/// scratch context for the identifier-list split / cache.
+fn check_search_path_hook(
+    newval: &mut Option<String>,
+    _extra: &mut Option<backend_utils_misc_guc_tables::GucHookExtra>,
+    _source: types_guc::GucSource,
+) -> PgResult<bool> {
+    let scratch = MemoryContext::new("check_search_path");
+    let s = newval.as_deref().unwrap_or("");
+    check_search_path(scratch.mcx(), s)
+}
+
+/// Slot-shaped wrapper installing `assign_search_path` as `search_path`'s
+/// GUC `assign_hook`.
+fn assign_search_path_hook(
+    newval: Option<&str>,
+    _extra: Option<&backend_utils_misc_guc_tables::GucHookExtra>,
+) {
+    assign_search_path(newval.unwrap_or(""));
 }
 
 /// `InitializeSearchPath` — initialize module during InitPostgres (called
