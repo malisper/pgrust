@@ -15,6 +15,9 @@ types-pgstat = { path = "../types-pgstat" }
 backend-executor-instrument = { path = "../backend-executor-instrument" }
 backend-utils-activity-pgstat = { path = "../backend-utils-activity-pgstat" }
 backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat-seams" }
+backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
+backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
+backend-utils-activity-status-seams = { path = "../backend-utils-activity-status-seams" }
 backend-utils-activity-pgstat-io = { path = "../backend-utils-activity-pgstat-io" }
 backend-utils-activity-pgstat-io-seams = { path = "../backend-utils-activity-pgstat-io-seams" }
 backend-utils-activity-pgstat-wal-seams = { path = "../backend-utils-activity-pgstat-wal-seams" }

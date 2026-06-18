@@ -56,12 +56,12 @@ backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
 backend-utils-resowner-resowner-seams = { path = "../backend-utils-resowner-resowner-seams" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
-backend-utils-activity-pgstat-io-seams = { path = "../backend-utils-activity-pgstat-io-seams" }
 backend-postmaster-postmaster-seams = { path = "../backend-postmaster-postmaster-seams" }
 backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }
 backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }
 backend-storage-aio-aio-seams = { path = "../backend-storage-aio-aio-seams" }
 backend-utils-activity-waitevent-seams = { path = "../backend-utils-activity-waitevent-seams" }
+backend-utils-activity-pgstat-io-seams = { path = "../backend-utils-activity-pgstat-io-seams" }
 backend-utils-misc-timeout-seams = { path = "../backend-utils-misc-timeout-seams" }
 backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }
 port-pqsignal-seams = { path = "../port-pqsignal-seams" }

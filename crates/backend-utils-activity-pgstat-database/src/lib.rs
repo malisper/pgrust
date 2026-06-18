@@ -90,6 +90,21 @@ pub fn set_pgstat_transaction_idle_time(usecs: PgStat_Counter) {
     PG_STAT_TRANSACTION_IDLE_TIME.with(|c| c.set(usecs));
 }
 
+/// `pgstat_count_conn_active_time(n)` (pgstat.h): `pgStatActiveTime += n`.
+/// Called by `backend_status.c` (`pgstat_report_activity`) when a backend
+/// leaves the running/fastpath state.
+pub fn pgstat_count_conn_active_time(usecs: PgStat_Counter) {
+    PG_STAT_ACTIVE_TIME.with(|c| c.set(c.get() + usecs));
+}
+
+/// `pgstat_count_conn_txn_idle_time(n)` (pgstat.h):
+/// `pgStatTransactionIdleTime += n`. Called by `backend_status.c`
+/// (`pgstat_report_activity`) when a backend leaves the idle-in-transaction
+/// state.
+pub fn pgstat_count_conn_txn_idle_time(usecs: PgStat_Counter) {
+    PG_STAT_TRANSACTION_IDLE_TIME.with(|c| c.set(c.get() + usecs));
+}
+
 // ---------------------------------------------------------------------------
 // Drop.
 // ---------------------------------------------------------------------------
@@ -614,6 +629,14 @@ pub fn init_seams() {
     });
     backend_utils_activity_stat_seams::pgstat_count_buffer_write_time::set(|usecs| {
         PG_STAT_BLOCK_WRITE_TIME.with(|c| c.set(c.get() + usecs as PgStat_Counter));
+    });
+    // backend_status.c calls these when a backend leaves the active /
+    // idle-in-transaction state (pgstat.h macros: += into the module statics).
+    backend_utils_activity_pgstat_database_seams::pgstat_count_conn_active_time::set(|usecs| {
+        pgstat_count_conn_active_time(usecs as PgStat_Counter);
+    });
+    backend_utils_activity_pgstat_database_seams::pgstat_count_conn_txn_idle_time::set(|usecs| {
+        pgstat_count_conn_txn_idle_time(usecs as PgStat_Counter);
     });
     backend_utils_activity_stat_seams::at_eoxact_pgstat_database::set(AtEOXact_PgStat_Database);
     backend_utils_activity_stat_seams::pgstat_set_session_end_cause_fatal::set(|| {

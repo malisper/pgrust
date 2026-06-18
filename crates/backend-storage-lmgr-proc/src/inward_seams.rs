@@ -993,6 +993,7 @@ pub(crate) fn install() {
     seams::proc_vxid::set(proc_vxid);
     seams::proc_xmin::set(proc_xmin);
     seams::proc_role_id::set(proc_role_id);
+    seams::auxiliary_pid_get_proc::set(crate::proc_lifecycle::AuxiliaryPidGetProc);
     seams::proc_temp_namespace_id::set(proc_temp_namespace_id);
     seams::proc_all_proc_count::set(proc_all_proc_count);
     seams::proc_subxids::set(proc_subxids);

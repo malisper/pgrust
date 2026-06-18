@@ -290,6 +290,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `AuxiliaryPidGetProc(int pid)` (proc.c) — the auxiliary-process slot with
+    /// the given pid, projected to its `ProcNumber` (`GetNumberFromPGProc`), or
+    /// `None`. Plain shared-memory scan over `AuxiliaryProcs`; cannot `ereport`.
+    /// Consumed by `pgstat_backend_pid_lookup` (pgstat_backend.c's
+    /// `pgstat_fetch_stat_backend_by_pid`).
+    pub fn auxiliary_pid_get_proc(pid: i32) -> Option<ProcNumber>
+);
+
+seam_core::seam!(
     /// `GetPGProcByNumber(pgprocno)->tempNamespaceId` — the dummy PGPROC's
     /// temp-namespace oid, read by `checkTempNamespaceStatus`. Plain
     /// shared-memory read.

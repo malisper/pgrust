@@ -13,11 +13,23 @@
 
 extern crate alloc;
 
+use types_core::init::BackendType;
+use types_core::ProcNumber;
 use types_pgstat::backend_status::PgBackendStatus;
 
 seam_core::seam!(
     /// `MyBEEntry != NULL` — is the backend status entry initialized?
     pub fn my_be_entry_present() -> bool
+);
+
+seam_core::seam!(
+    /// `pgstat_get_beentry_by_proc_number(procNumber)` (backend_status.c),
+    /// projected to the two fields `pgstat_fetch_stat_backend_by_pid` reads:
+    /// `(st_backendType, st_procpid)`. `None` mirrors a `NULL` beentry (no live
+    /// backend at that proc number). Plain local-status-table read.
+    pub fn beentry_backend_type_and_pid(
+        proc_number: ProcNumber,
+    ) -> Option<(BackendType, i32)>
 );
 
 seam_core::seam!(

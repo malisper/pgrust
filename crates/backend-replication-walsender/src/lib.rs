@@ -58,7 +58,6 @@ use backend_storage_ipc_shmem_seams as shmem;
 use backend_storage_lmgr_condition_variable_seams as condvar;
 use backend_tcop_dest_seams as dest;
 use backend_tcop_postgres_seams as tcop;
-use backend_utils_activity_pgstat_io_seams as pgstat_io;
 use backend_utils_adt_acl_seams as acl;
 use backend_utils_adt_timestamp_seams as timestamp;
 use backend_utils_init_small_seams as miscinit;
@@ -197,9 +196,12 @@ pub(crate) fn lwlock_release_all() {
     backend_storage_lmgr_lwlock_seams::lwlock_release_all::call();
 }
 
-/// `pgstat_report_wait_end()`.
+use backend_utils_activity_pgstat_io_seams as pgstat_io;
+
+/// `pgstat_report_wait_end()` — clear this backend's reported wait event
+/// (wait_event.c, owned by `backend-utils-activity-waitevent`).
 pub(crate) fn pgstat_report_wait_end() {
-    pgstat_io::pgstat_report_wait_end::call();
+    backend_utils_activity_waitevent_seams::pgstat_report_wait_end::call();
 }
 
 /// `pgaio_error_cleanup()`.

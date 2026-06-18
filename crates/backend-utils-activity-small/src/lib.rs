@@ -51,6 +51,25 @@ pub fn init_seams() {
         Ok(())
     });
 
+    // The properly-typed `backend_progress.c` seam family (carries the
+    // `ProgressCommandType` enum directly, is infallible like the C `void`
+    // entry points, and exposes `pgstat_progress_update_multi_param` which the
+    // i32-flavored `small-seams` family lacks). Consumers: backend-catalog-index
+    // (CREATE INDEX / CLUSTER progress) and backend-commands-copyto (COPY TO
+    // progress). These bodies are this crate's `backend_progress` port verbatim.
+    backend_utils_activity_backend_progress_seams::pgstat_progress_start_command::set(
+        |cmdtype, relid| backend_progress::pgstat_progress_start_command(cmdtype, relid),
+    );
+    backend_utils_activity_backend_progress_seams::pgstat_progress_update_param::set(|index, val| {
+        backend_progress::pgstat_progress_update_param(index, val);
+    });
+    backend_utils_activity_backend_progress_seams::pgstat_progress_update_multi_param::set(
+        |index, val| backend_progress::pgstat_progress_update_multi_param(index, val),
+    );
+    backend_utils_activity_backend_progress_seams::pgstat_progress_end_command::set(|| {
+        backend_progress::pgstat_progress_end_command();
+    });
+
     // Parallel-worker message handling forwards an incremental progress update
     // from a worker to the leader's backend status entry (parallel.c
     // HandleParallelMessage `pgstat_progress_incr_param(index, incr)`). The body

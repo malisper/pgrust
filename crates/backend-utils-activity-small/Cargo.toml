@@ -18,6 +18,7 @@ types-error = { path = "../types-error" }
 types-storage = { path = "../types-storage" }
 types-pgstat = { path = "../types-pgstat" }
 backend-utils-activity-small-seams = { path = "../backend-utils-activity-small-seams" }
+backend-utils-activity-backend-progress-seams = { path = "../backend-utils-activity-backend-progress-seams" }
 backend-access-transam-parallel = { path = "../backend-access-transam-parallel" }
 # Parallel-worker progress forwarding (parallel.c pgstat_progress_incr_param).
 backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }

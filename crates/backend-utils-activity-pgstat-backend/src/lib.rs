@@ -166,14 +166,59 @@ pub fn pgstat_count_backend_io_op(
 
 /// Port of `PgStat_Backend *pgstat_fetch_stat_backend(ProcNumber procNumber)`.
 ///
-/// Returns statistics of a backend by proc number, or `None` (C `NULL`). This
-/// bottoms out on `pgstat_fetch_entry` — the variable-kind snapshot fetch in
-/// the not-yet-ported `pgstat.c` core — so it is routed through the
-/// `pgstat_fetch_entry_backend` seam (seam-and-panic until that core lands).
+/// Returns statistics of a backend by proc number, or `None` (C `NULL`). The
+/// variable-numbered fetch goes through the generic `pgstat_fetch_entry` seam
+/// (the `pgstat.c` fetch-consistency snapshot/cache machinery); the returned
+/// `shared_data_len` byte blob is the `PGSTAT_KIND_BACKEND` body, which we
+/// decode into the typed `PgStat_Backend` (C: `(PgStat_Backend *) ...`).
 pub fn pgstat_fetch_stat_backend(proc_number: ProcNumber) -> PgResult<Option<PgStat_Backend>> {
     // backend_entry = (PgStat_Backend *) pgstat_fetch_entry(PGSTAT_KIND_BACKEND,
     //                                                        InvalidOid, procNumber);
-    backend_utils_activity_pgstat_seams::pgstat_fetch_entry_backend::call(proc_number)
+    let bytes = backend_utils_activity_pgstat_seams::pgstat_fetch_entry::call(
+        PGSTAT_KIND_BACKEND,
+        InvalidOid,
+        proc_number as u64,
+    )?;
+    Ok(bytes.map(|b| decode_backend_entry(&b)))
+}
+
+/// Decode the `shared_data_len` bytes `pgstat_fetch_entry` copies out into the
+/// typed `PgStat_Backend` (C's `(PgStat_Backend *) ...`).
+fn decode_backend_entry(bytes: &[u8]) -> PgStat_Backend {
+    assert_eq!(
+        bytes.len(),
+        core::mem::size_of::<PgStat_Backend>(),
+        "pgstat_fetch_stat_backend: unexpected stats blob size"
+    );
+    // SAFETY: the blob is exactly a `PgStat_Backend` (a Copy, pointer-free POD),
+    // copied byte-for-byte by pgstat_fetch_entry.
+    unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const PgStat_Backend) }
+}
+
+/// The PID-resolution prefix of `pgstat_fetch_stat_backend_by_pid`
+/// (pgstat_backend.c): `BackendPidGetProc(pid)` else `AuxiliaryPidGetProc(pid)`
+/// (procarray.c / proc.c), `GetNumberFromPGProc(proc)`, then
+/// `pgstat_get_beentry_by_proc_number(procNumber)` (backend_status.c) projected
+/// to `(st_backendType, st_procpid)`. Returns `(proc_number, st_backend_type,
+/// st_procpid)`, or `None` when the pid is not a live (auxiliary or regular)
+/// backend with a beentry. Installs the `pgstat_backend_pid_lookup` seam.
+fn pgstat_backend_pid_lookup(pid: i32) -> Option<(ProcNumber, BackendType, i32)> {
+    // proc = BackendPidGetProc(pid); if (!proc) proc = AuxiliaryPidGetProc(pid);
+    let proc_number =
+        match backend_storage_ipc_procarray_seams::backend_pid_get_proc_role::call(pid) {
+            Some((_role, procno)) => procno,
+            None => match backend_storage_lmgr_proc_seams::auxiliary_pid_get_proc::call(pid) {
+                Some(procno) => procno,
+                None => return None,
+            },
+        };
+
+    // procNumber = GetNumberFromPGProc(proc) — already folded into the lookups.
+    // beentry = pgstat_get_beentry_by_proc_number(procNumber); if (!beentry) NULL.
+    let (st_backend_type, st_procpid) =
+        backend_utils_activity_status_seams::beentry_backend_type_and_pid::call(proc_number)?;
+
+    Some((proc_number, st_backend_type, st_procpid))
 }
 
 /// Port of `PgStat_Backend *pgstat_fetch_stat_backend_by_pid(int pid,
@@ -184,9 +229,9 @@ pub fn pgstat_fetch_stat_backend(proc_number: ProcNumber) -> PgResult<Option<PgS
 /// returned (or `B_INVALID`), matching the optional out-parameter in C.
 ///
 /// The `BackendPidGetProc` / `AuxiliaryPidGetProc` / `GetNumberFromPGProc` /
-/// `pgstat_get_beentry_by_proc_number` prefix is resolved through the
-/// `pgstat_backend_pid_lookup` seam (its `pgstat_get_beentry_by_proc_number`
-/// dependency is unported); the entry fetch reuses [`pgstat_fetch_stat_backend`].
+/// `pgstat_get_beentry_by_proc_number` prefix is resolved by the in-crate
+/// [`pgstat_backend_pid_lookup`] (each piece reached through its owner's seam);
+/// the entry fetch reuses [`pgstat_fetch_stat_backend`].
 pub fn pgstat_fetch_stat_backend_by_pid(
     pid: i32,
     mut bktype: Option<&mut BackendType>,
@@ -200,11 +245,10 @@ pub fn pgstat_fetch_stat_backend_by_pid(
     // if (!proc) return NULL; procNumber = GetNumberFromPGProc(proc);
     // beentry = pgstat_get_beentry_by_proc_number(procNumber);
     // if (!beentry) return NULL;
-    let (proc_number, st_backend_type, st_procpid) =
-        match backend_utils_activity_pgstat_seams::pgstat_backend_pid_lookup::call(pid) {
-            None => return Ok(None),
-            Some(t) => t,
-        };
+    let (proc_number, st_backend_type, st_procpid) = match pgstat_backend_pid_lookup(pid) {
+        None => return Ok(None),
+        Some(t) => t,
+    };
 
     // check if the backend type tracks statistics
     if !pgstat_tracks_backend_bktype(st_backend_type) {
