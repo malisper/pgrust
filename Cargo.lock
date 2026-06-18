@@ -13972,6 +13972,7 @@ dependencies = [
  "backend-utils-error",
  "backend-utils-init-small-seams",
  "backend-utils-misc-guc-file-seams",
+ "backend-utils-misc-guc-tables",
  "seam-core",
  "types-applyparallel",
  "types-core",

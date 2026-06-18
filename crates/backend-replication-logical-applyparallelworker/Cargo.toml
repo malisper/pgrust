@@ -27,6 +27,10 @@ backend-replication-logical-applyparallelworker-seams = { path = "../backend-rep
 # Direct deps (acyclic: these crates depend on our -seams crate, not on us).
 backend-storage-ipc-procsignal = { path = "../backend-storage-ipc-procsignal" }
 backend-postmaster-interrupt = { path = "../backend-postmaster-interrupt" }
+# GUC variable substrate (low leaf): the `max_parallel_apply_workers_per_subscription`
+# and `debug_logical_replication_streaming` globals are read inline here, exactly
+# as C reads the C globals (launcher.c:422 / applyparallelworker.c:1166).
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 
 # Outward seams (calls into not-yet-ported owners, or owners across a cycle).
 backend-replication-logical-worker-seams = { path = "../backend-replication-logical-worker-seams" }

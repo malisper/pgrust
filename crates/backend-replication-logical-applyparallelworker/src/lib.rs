@@ -623,7 +623,10 @@ fn pa_free_worker(winfo_index: WorkerHandle) -> PgResult<()> {
      */
     let pool_len = pool_length();
     if serialize_changes
-        || pool_len > (worker::max_parallel_apply_workers_per_subscription::call() / 2)
+        || pool_len
+            > (backend_utils_misc_guc_tables::vars::max_parallel_apply_workers_per_subscription
+                .read()
+                / 2)
     {
         /*
          * logicalrep_pa_worker_stop(winfo) (launcher.c) reads
@@ -1079,7 +1082,11 @@ pub fn pa_send_data(winfo_index: WorkerHandle, data: &[u8]) -> PgResult<bool> {
     let _ = serialize_changes;
 
     /* We don't try to send data to parallel worker for 'immediate' mode. */
-    if worker::debug_streaming_is_immediate::call() {
+    // C: `if (unlikely(debug_logical_replication_streaming ==
+    //      DEBUG_LOGICAL_REP_STREAMING_IMMEDIATE))` (applyparallelworker.c:1166)
+    if backend_utils_misc_guc_tables::vars::debug_logical_replication_streaming.read()
+        == backend_utils_misc_guc_tables::consts::DEBUG_LOGICAL_REP_STREAMING_IMMEDIATE
+    {
         return Ok(false);
     }
 

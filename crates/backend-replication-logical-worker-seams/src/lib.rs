@@ -38,8 +38,12 @@ seam_core::seam!(pub fn my_worker_subid() -> Oid);
 seam_core::seam!(pub fn my_worker_leader_pid() -> i32);
 seam_core::seam!(pub fn my_worker_generation() -> u16);
 seam_core::seam!(pub fn maybe_reread_subscription() -> PgResult<()>);
-seam_core::seam!(pub fn max_parallel_apply_workers_per_subscription() -> i32);
-seam_core::seam!(pub fn debug_streaming_is_immediate() -> bool);
+// `max_parallel_apply_workers_per_subscription` and
+// `debug_logical_replication_streaming` are plain process-global GUC ints owned
+// by launcher.c / reorderbuffer.c, NOT worker.c. C reads them inline as globals
+// (launcher.c:422, applyparallelworker.c:1166). The coordinator reads them
+// directly through the GUC variable substrate
+// (`backend-utils-misc-guc-tables::vars`), so no worker-owned seam is needed.
 
 extern crate alloc;
 
