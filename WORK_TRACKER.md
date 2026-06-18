@@ -16,15 +16,15 @@ _Last updated: 2026-06-18 · origin/main ≈ `5f57e550a`_
 ## 🔥 Critical path (fastest route to test-wins)
 1. **Aggregate follow-ons:** `min`/`max` fall-through ✅. **SHARED BLOCKER → column-agg `ecxt_scantuple` NULL / SCAN_VAR** — `min`/`max`/`count(col)`/`sum` all reach exec then wall in agg result-projection (the Agg references a scan Var but `ecxt_scantuple` is NULL). Gates *every column aggregate*; fire after `a2abe0c1` (setrefs) lands. `count(*) FROM pg_class` setrefs INDEX_VAR *(firing `a2abe0c1`)*. `sum`/`avg` also need **Datum tail (K4)** + numeric transfns.
 2. **GROUP BY / DISTINCT / FOR UPDATE** — planner.c completion *(firing `abe15b79`)*.
-3. **boolean.sql** — fix workflow *(`wf9ys7ghh`)* + error-position.
+3. **boolean.sql** — bool TYPE correct ✅ (I/O, ops, seqscans, error text verbatim). **Forcing-function gaps in its 2nd half (hit the whole suite):** error-position LINE/caret (~10 hunks) · text-cast literal truncation bug · **`set_joinrel_size_estimates` seam (JOINS — highest fan-out)** · `relation_is_nailed` (DROP) · INSERT slice-range · `proc_arg_attrs`. Owned by `a85f618f`; broad ones (joins first) queued.
 4. **fmgr completeness** — core seams *(re-fired `a6d5c9d6`)* + adt registration *(`a58be86c`)*.
 
 ---
 
 ## The 10 categories (status)
 1. **pg_regress + correctness bugs** [DRIVER] — boolean workflow active; open diffs: boolin ws, error-position, pg_input_is_valid, func-in-FROM.
-2. **Wiring seams** — fmgr dispatch Phase 1 re-firing `a6d5c9d6`; install floor ~163 keystone/FDW-gated.
-3. **Finishing partial ports — 176 gaps / 47 crates** — firing: planner(35), createplan(2); ✅ done: typcache(7), lmgr-lock(15→6 keystone-blocked); pending: arrayfuncs(19), misc2(16), relcache(14), xlog(6); deferred off-path: EXPLAIN(63), walsender(20), reorderbuffer(9).
+2. **Wiring seams** — fmgr dispatch **56/67 installed** (floor: 6 blocked on the fmgr frame-carrier by-ref keystone + 5 fastpath/bgworker); seam-install floor ~163 keystone/FDW-gated.
+3. **Finishing partial ports — 176 gaps / 47 crates** — firing: planner(35), arrayfuncs(19), misc2(16), EXPLAIN(63 structural); ✅ done: typcache(7), lmgr-lock(15→6), createplan(3→0); pending: relcache(14, needs policy `a3b93c9f`), xlog(6); deferred off-path: walsender(20), reorderbuffer(9).
 4. **Keystones** — see register below.
 5. **Entirely-unported units** — datetime registration `a58be86c`; JSON node-model (queued); array_expanded.c (queued); 76 adt crates unregistered (driving to 0).
 6. **Registry-completeness** — GUC ✅ **402/404** (floor 2) · fmgr seams 🔨 · fmgr builtins 🔨 · syscache 85/85 ✅. ⚠️ installing a GUC activates its assign-hook → boot panic if unported.
@@ -66,13 +66,14 @@ _Last updated: 2026-06-18 · origin/main ≈ `5f57e550a`_
 - **ts_lexize fmgr-dispatch** — gates full-text search.
 - **proc/procarray-private accessors** — FastPath F3 lock family (per-slot `fpRelId[]`/`fpLockBits[]` + cross-proc `allProcs` iterator) + blocker-status reporters (`BackendPidGetProc`, `lockGroupMembers`). Gates lmgr-lock's last 6 + pg_locks blocker views.
 - **prepunion subroot / cross-root PathId** — set-op child path import (relates to K8).
+- **fmgr frame-carrier by-ref widening** (TD-FMGR-GETARG-BYREF) — trimmed `types_nodes` FunctionCallInfoBaseData carries bare-word args, no by-ref channel → blocks `pg_getarg_{name,text_pp,varlena_pp,cstring}` + `typmodin`. Cousin of K4.
 
 > Legend: K1–K3 done · K4–K6 committed/sequenced · K7–K10 deferred · 📡 longer-term, feature-area-gated.
 
 ---
 
 ## Active lanes
-`abe15b79` planner (GROUP BY) · `a58be86c` fmgr-register · `a6d5c9d6` fmgr Phase-1 seams · `a0b9a1b9` createplan · `a4ba09d6` min/max fall-through · `a2abe0c1` setrefs INDEX_VAR · `wf9ys7ghh` boolean workflow
+`abe15b79` planner (GROUP BY) · `a58be86c` fmgr-register · `a2abe0c1` setrefs INDEX_VAR · `a85f618f` boolean→PASS · `ae2d175a` arrayfuncs · `ac327c72` misc2 · `a3b93c9f` policy/RLS · `a870e34d` EXPLAIN structural
 
 ## Build/infra notes
 - Artifacts ~6 GB/build (was ~10–14) after `713252a14` (line-tables-only + `incremental=false`). Cap **~8**, keep ~20 GB buffer.
@@ -80,7 +81,7 @@ _Last updated: 2026-06-18 · origin/main ≈ `5f57e550a`_
 - Reaper = shm + `git worktree prune` ONLY (idle-based auto-rm disrupted live lanes twice; lanes self-clean + orchestrator reaps on pressure).
 
 ## Recently landed
-count(\*) exec (#165) · min/max planner fall-through · GUC registry 402/404 · typcache complete · lmgr-lock (15→6) · io_combine_limit boot fix · Datum by-ref bridge (+saophash) · crash-reinit (TLS-unwind) · seclabel→DROP · comment→DROP · multi-row VALUES · parse_expr XML · t_bits crash · setrefs Aggref fixup · smaller build artifacts · plancache F0
+count(\*) exec (#165) · min/max planner fall-through · createplan (unique/groupingsets/async, 3→0) · GUC registry 402/404 · typcache complete · lmgr-lock (15→6) · fmgr Phase-1 seams (56/67) · bool.c 100% (type correct e2e) + boolean parser/func-RTE fixes · io_combine_limit boot fix · Datum by-ref bridge (+saophash) · crash-reinit (TLS-unwind) · seclabel→DROP · comment→DROP · multi-row VALUES · parse_expr XML · t_bits crash · setrefs Aggref fixup · smaller build artifacts · plancache F0
 
 ## DROP status
 CREATE→INSERT→SELECT ✓ · DROP: comment ✓ → seclabel ✓ → **next wall `relation_is_nailed`** (tablecmds seam).
