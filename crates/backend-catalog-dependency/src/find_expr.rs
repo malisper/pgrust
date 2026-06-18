@@ -30,7 +30,7 @@ use types_catalog::catalog_dependency::ObjectAddresses;
 use types_core::primitive::{AttrNumber, InvalidAttrNumber, Oid};
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_UNDEFINED_COLUMN, ERROR};
 use types_nodes::copy_query::Query;
-use types_nodes::nodes::{Node, CMD_INSERT, CMD_UPDATE};
+use types_nodes::nodes::{ntag, Node, CMD_INSERT, CMD_UPDATE};
 use types_nodes::parsenodes::{
     RangeTblEntry, RTE_FUNCTION, RTE_JOIN, RTE_NAMEDTUPLESTORE, RTE_RELATION,
 };
@@ -140,15 +140,17 @@ pub fn find_expr_references_walker(
         return find_expr_references_expr(node, expr, context);
     }
 
-    match node {
-        Node::SortGroupClause(sgc) => {
+    match node.node_tag() {
+        ntag::T_SortGroupClause => {
+            let sgc = node.expect_sortgroupclause();
             add_object_address(OperatorRelationId, sgc.eqop, 0, &mut context.addrs);
             if OidIsValid(sgc.sortop) {
                 add_object_address(OperatorRelationId, sgc.sortop, 0, &mut context.addrs);
             }
             Ok(false)
         }
-        Node::WindowClause(wc) => {
+        ntag::T_WindowClause => {
+            let wc = node.expect_windowclause();
             if OidIsValid(wc.startInRangeFunc) {
                 add_object_address(ProcedureRelationId, wc.startInRangeFunc, 0, &mut context.addrs);
             }
@@ -161,8 +163,12 @@ pub fn find_expr_references_walker(
             /* fall through to examine substructure */
             run_subwalk(node, context)
         }
-        Node::Query(query) => find_expr_references_query(node, query, context),
-        Node::SetOperationStmt(setop) => {
+        ntag::T_Query => {
+            let query = node.expect_query();
+            find_expr_references_query(node, query, context)
+        }
+        ntag::T_SetOperationStmt => {
+            let setop = node.expect_setoperationstmt();
             /*
              * we need to look at the groupClauses for operator references.
              *
@@ -177,7 +183,8 @@ pub fn find_expr_references_walker(
             /* fall through to examine child nodes */
             run_subwalk(node, context)
         }
-        Node::RangeTblFunction(rtfunc) => {
+        ntag::T_RangeTblFunction => {
+            let rtfunc = node.expect_rangetblfunction();
             /*
              * Add refs for any datatypes and collations used in a column
              * definition list for a RECORD function. (For other cases, it
@@ -193,19 +200,22 @@ pub fn find_expr_references_walker(
             }
             run_subwalk(node, context)
         }
-        Node::OnConflictExpr(onconflict) => {
+        ntag::T_OnConflictExpr => {
+            let onconflict = node.expect_onconflictexpr();
             if OidIsValid(onconflict.constraint) {
                 add_object_address(ConstraintRelationId, onconflict.constraint, 0, &mut context.addrs);
             }
             /* fall through to examine arguments */
             run_subwalk(node, context)
         }
-        Node::TableSampleClause(tsc) => {
+        ntag::T_TableSampleClause => {
+            let tsc = node.expect_tablesampleclause();
             add_object_address(ProcedureRelationId, tsc.tsmhandler, 0, &mut context.addrs);
             /* fall through to examine arguments */
             run_subwalk(node, context)
         }
-        Node::TableFunc(tf) => {
+        ntag::T_TableFunc => {
+            let tf = node.expect_tablefunc();
             /*
              * Add refs for the datatypes and collations used in the TableFunc.
              */
@@ -224,7 +234,8 @@ pub fn find_expr_references_walker(
             /* fall through to examine substructure */
             run_subwalk(node, context)
         }
-        Node::CTECycleClause(cc) => {
+        ntag::T_CTECycleClause => {
+            let cc = node.expect_ctecycleclause();
             if OidIsValid(cc.cycle_mark_type) {
                 add_object_address(TypeRelationId, cc.cycle_mark_type, 0, &mut context.addrs);
             }
@@ -727,7 +738,7 @@ fn process_function_rte_ref(
      * relation).
      */
     for rtfunc_node in rte.functions.iter() {
-        let Node::RangeTblFunction(rtfunc) = &**rtfunc_node else {
+        let Some(rtfunc) = (**rtfunc_node).as_rangetblfunction() else {
             panic!(
                 "process_function_rte_ref: RangeTblEntry.functions element is not a \
                  RangeTblFunction (tag {})",
