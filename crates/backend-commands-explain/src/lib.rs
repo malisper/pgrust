@@ -36,6 +36,7 @@ use backend_executor_execMain_seams as execmain_s;
 use backend_executor_instrument as instr;
 use backend_utils_time_snapmgr_seams as snapmgr_s;
 
+pub mod scantarget;
 pub mod walk;
 
 #[cfg(test)]

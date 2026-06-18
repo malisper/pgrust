@@ -20,6 +20,12 @@ types-snapshot = { path = "../types-snapshot" }
 # Sibling EXPLAIN crates (emitters + option parsing).
 backend-commands-explain-format = { path = "../backend-commands-explain-format" }
 
+# Catalog name lookups + identifier quoting for the scan/modify target relation
+# names (ExplainTargetRel / explain_get_index_name). No expression deparse, no
+# cycle (neither crate depends on explain).
+backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }
+backend-utils-adt-ruleutils = { path = "../backend-utils-adt-ruleutils" }
+
 # Inward seam crate this unit installs.
 backend-commands-explain-seams = { path = "../backend-commands-explain-seams" }
 

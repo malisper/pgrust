@@ -20,7 +20,7 @@ use types_error::PgResult;
 use types_explain::{ExplainFormat, ExplainState};
 use types_nodes::nodeindexscan::{Plan, PlannedStmt};
 use types_nodes::nodes::{CmdType, Node};
-use types_nodes::parsenodes::{RTEKind, RangeTblEntry};
+use types_nodes::parsenodes::RTEKind;
 use types_nodes::planstate::PlanStateNode;
 
 use backend_commands_explain_format as fmt;
@@ -376,12 +376,10 @@ pub fn ExplainNode<'es, 'p>(
         fmt::ExplainPropertyBool("Async Capable", plan.async_capable, es)?;
     }
 
-    // Scan/target switch: ExplainScanTarget / ExplainModifyTarget /
-    // ExplainIndexScanDetails all reach ExplainTargetRel (get_rel_name /
-    // rtable_names) and explain_get_index_name — ruleutils / lsyscache
-    // unported. Reached for any scan/modify node; route through the loud
-    // seam-and-panic helper. A no-relation node (Result, Sort over Result, ...)
-    // never enters this branch.
+    // Scan/target switch (explain.c:1655): show the relation/index name of the
+    // scan or modify node. These resolve names through the catalog and quote
+    // them through ruleutils `quote_identifier` — no expression deparse — so
+    // they are part of the structural slice.
     explain_scan_target_switch(es, plan_node)?;
 
     // Cost block: if (es->costs) { ... }.
@@ -596,49 +594,65 @@ pub fn ExplainNode<'es, 'p>(
 }
 
 /// The `ExplainScanTarget`/`ExplainModifyTarget`/`ExplainIndexScanDetails`
-/// branch of `ExplainNode` (explain.c). Every arm reaches `ExplainTargetRel`
-/// (`get_rel_name` / `es->rtable_names`) or `explain_get_index_name`, all of
-/// which are ruleutils / lsyscache and unported. Reached only for scan / modify
-/// nodes; panic loudly with the node name so the boundary is obvious.
+/// branch of `ExplainNode` (explain.c:1655) — show the relation / index name of
+/// the scan or modify node. Mirrors the C `nodeTag(plan)` switch exactly.
 fn explain_scan_target_switch<'es, 'p>(
     es: &mut ExplainState<'es>,
     plan_node: &Node<'p>,
 ) -> PgResult<()> {
-    let _ = es;
-    let needs_target = matches!(
-        plan_node,
-        Node::SeqScan(_)
-            | Node::IndexScan(_)
-            | Node::IndexOnlyScan(_)
-            | Node::BitmapIndexScan(_)
-            | Node::TidRangeScan(_)
-            | Node::SubqueryScan(_)
-            | Node::TableFuncScan(_)
-            | Node::ValuesScan(_)
-            | Node::CteScan(_)
-            | Node::NamedTuplestoreScan(_)
-            | Node::ForeignScan(_)
-            | Node::CustomScan(_)
-            | Node::ModifyTable(_)
-    );
-    if needs_target {
-        panic!(
-            "ExplainNode scan/modify target: ExplainTargetRel (get_rel_name / \
-             rtable_names) + explain_get_index_name are ruleutils/lsyscache and \
-             unported — structural EXPLAIN reaches relation-named nodes here"
-        );
-    }
-    Ok(())
-}
+    use crate::scantarget;
 
-/// `ExplainTargetRel` faithful reference: an RTE lookup helper kept for when the
-/// deparse seams land. Returns the RTE's eref alias if `rtable_names` has no
-/// override. Unused in the structural slice (the scan-target switch panics
-/// first); retained as the documented shape.
-#[allow(dead_code)]
-fn rt_fetch<'a, 'mcx>(
-    rtable: &'a PgVec<'mcx, RangeTblEntry<'mcx>>,
-    rti: usize,
-) -> &'a RangeTblEntry<'mcx> {
-    &rtable[rti - 1]
+    match plan_node {
+        Node::SeqScan(s) => scantarget::ExplainScanTarget(es, plan_node, s.scan.scanrelid),
+        Node::SampleScan(s) => scantarget::ExplainScanTarget(es, plan_node, s.scan.scanrelid),
+        Node::TidScan(s) => scantarget::ExplainScanTarget(es, plan_node, s.scan.scanrelid),
+        Node::TidRangeScan(s) => scantarget::ExplainScanTarget(es, plan_node, s.scan.scanrelid),
+        Node::SubqueryScan(s) => scantarget::ExplainScanTarget(es, plan_node, s.scan.scanrelid),
+        Node::FunctionScan(s) => scantarget::ExplainScanTarget(es, plan_node, s.scan.scanrelid),
+        Node::TableFuncScan(s) => scantarget::ExplainScanTarget(es, plan_node, s.scan.scanrelid),
+        Node::ValuesScan(s) => scantarget::ExplainScanTarget(es, plan_node, s.scan.scanrelid),
+        Node::CteScan(s) => scantarget::ExplainScanTarget(es, plan_node, s.scan.scanrelid),
+        Node::WorkTableScan(s) => scantarget::ExplainScanTarget(es, plan_node, s.scan.scanrelid),
+        Node::ForeignScan(s) => {
+            // if (((Scan *) plan)->scanrelid > 0) ExplainScanTarget(...)
+            if s.scan.scanrelid > 0 {
+                scantarget::ExplainScanTarget(es, plan_node, s.scan.scanrelid)
+            } else {
+                Ok(())
+            }
+        }
+        Node::CustomScan(s) => {
+            if s.scan.scanrelid > 0 {
+                scantarget::ExplainScanTarget(es, plan_node, s.scan.scanrelid)
+            } else {
+                Ok(())
+            }
+        }
+        Node::IndexScan(s) => {
+            scantarget::ExplainIndexScanDetails(es, s.indexid, s.indexorderdir)?;
+            scantarget::ExplainScanTarget(es, plan_node, s.scan.scanrelid)
+        }
+        Node::IndexOnlyScan(s) => {
+            scantarget::ExplainIndexScanDetails(es, s.indexid, s.indexorderdir)?;
+            scantarget::ExplainScanTarget(es, plan_node, s.scan.scanrelid)
+        }
+        Node::BitmapIndexScan(s) => {
+            // explain_get_index_name + quote_identifier — no ExplainTargetRel.
+            let mcx = es.str.allocator();
+            let indexname = scantarget::explain_get_index_name(mcx, s.indexid)?;
+            if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
+                let quoted =
+                    backend_utils_adt_ruleutils::quote_identifier(mcx, indexname.as_str())?;
+                es.str.try_push_str(" on ")?;
+                es.str.try_push_str(quoted.as_str())?;
+            } else {
+                fmt::ExplainPropertyText("Index Name", indexname.as_str(), es)?;
+            }
+            Ok(())
+        }
+        Node::ModifyTable(m) => {
+            scantarget::ExplainModifyTarget(es, plan_node, m.nominalRelation)
+        }
+        _ => Ok(()),
+    }
 }
