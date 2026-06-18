@@ -964,7 +964,7 @@ pub fn get_rule_expr_toplevel(
     context: &mut DeparseContext<'_>,
     showimplicit: bool,
 ) -> PgResult<()> {
-    if let Node::Expr(Expr::Var(var)) = node {
+    if let Some(var) = node.as_var() {
         get_variable(var, 0, true, context)?;
         Ok(())
     } else {

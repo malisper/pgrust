@@ -267,7 +267,7 @@ fn generate_relation_name<'mcx>(
 fn cte_name_conflict(context: &DeparseContext<'_>, relname: &str) -> bool {
     for dpns in context.namespaces.iter() {
         for cte in dpns.ctes.iter() {
-            if let Node::CommonTableExpr(c) = &**cte {
+            if let Some(c) = (**cte).as_commontableexpr() {
                 if let Some(name) = c.ctename.as_deref() {
                     if name == relname {
                         return true;
@@ -662,7 +662,7 @@ fn get_with_clause<'mcx>(
 /// Test whether a node is a non-null boolean Const equal to `want`
 /// (ruleutils.c 5876-5877).
 fn is_const_bool(node: &Node<'_>, want: bool) -> bool {
-    if let Node::Expr(Expr::Const(c)) = node {
+    if let Some(c) = node.as_const() {
         if c.consttype == BOOLOID && !c.constisnull {
             // DatumGetBool: the Datum's low byte.
             return c.constvalue.as_bool() == want;
@@ -1107,7 +1107,7 @@ fn get_setop_stmt<'mcx>(
     let rarg = op.rarg.as_deref().ok_or_else(|| missing_field("SetOperationStmt.rarg"))?;
 
     // LHS parens.
-    let mut need_paren = if let Node::SetOperationStmt(lop) = larg {
+    let mut need_paren = if let Some(lop) = larg.as_setoperationstmt() {
         !(op.op == lop.op && op.all == lop.all)
     } else {
         false
@@ -1910,7 +1910,7 @@ fn get_from_clause<'mcx>(
     let mut first = true;
     for l in jointree.fromlist.iter() {
         // Skip auto-added not-inFromCl RTEs at top level.
-        if let Node::RangeTblRef(rtr) = &**l {
+        if let Some(rtr) = (**l).as_rangetblref() {
             let rte = rt_fetch(rtr.rtindex, &query.rtable)?;
             if !rte.inFromCl {
                 continue;
@@ -2019,7 +2019,7 @@ fn get_from_clause_item<'mcx>(
             // Tablesample.
             if rte.rtekind == RTE_RELATION {
                 if let Some(ts) = rte.tablesample.as_deref() {
-                    if let Node::TableSampleClause(t) = ts {
+                    if let Some(t) = ts.as_tablesampleclause() {
                         get_tablesample_def(mcx, t, context)?;
                     }
                 }
@@ -2153,7 +2153,7 @@ fn get_function_rte<'mcx>(
             let mut allargs: PgVec<'mcx, PgBox<'mcx, Node<'mcx>>> = PgVec::new_in(mcx);
             for lc in rte.functions.iter() {
                 let rtfunc = as_rtfunc(lc)?;
-                if let Some(Node::Expr(Expr::FuncExpr(f))) = rtfunc.funcexpr.as_deref() {
+                if let Some(f) = rtfunc.funcexpr.as_deref().and_then(|n| n.as_funcexpr()) {
                     for a in f.args.iter() {
                         allargs.try_reserve(1).map_err(|_| mcx.oom(0))?;
                         allargs.push(mcx::alloc_in(mcx, Node::Expr(a.clone_in(mcx)?))?);
@@ -2361,7 +2361,7 @@ fn process_indirection<'mcx>(
     _context: &mut DeparseContext<'mcx>,
 ) -> PgResult<PgBox<'mcx, Node<'mcx>>> {
     // Detect whether any indirection is present at the top.
-    if let Node::Expr(e) = node {
+    if let Some(e) = node.as_expr() {
         match e {
             Expr::FieldStore(_) => {
                 return Err(deferred(
