@@ -47,7 +47,6 @@ types-opclass = { path = "../types-opclass" }
 # Outward dependency seams (callees whose owners are not yet ported).
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-parser-target-seams = { path = "../backend-parser-target-seams" }
-backend-parser-parse-agg-seams = { path = "../backend-parser-parse-agg-seams" }
 backend-rewrite-rewritemanip-seams = { path = "../backend-rewrite-rewritemanip-seams" }
 backend-parser-small1-seams = { path = "../backend-parser-small1-seams" }
 backend-parser-analyze-seams = { path = "../backend-parser-analyze-seams" }

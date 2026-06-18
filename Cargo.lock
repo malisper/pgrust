@@ -12587,7 +12587,6 @@ dependencies = [
  "backend-parser-analyze-seams",
  "backend-parser-clause-seams",
  "backend-parser-coerce",
- "backend-parser-parse-agg-seams",
  "backend-parser-parse-collate",
  "backend-parser-parse-expr",
  "backend-parser-parse-func-seams",

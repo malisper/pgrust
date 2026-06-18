@@ -105,6 +105,7 @@ pub use walkers::{
 /// Install the rewriteManip.c- and rewriteSupport.c-owned seams.
 pub fn init_seams() {
     use backend_rewrite_rewritemanip_seams as s;
+    s::contain_aggs_of_level::set(|node, levelsup| walkers::contain_aggs_of_level(node, levelsup));
     s::contain_windowfuncs::set(|node| walkers::contain_windowfuncs(node));
     s::locate_windowfunc::set(|node| walkers::locate_windowfunc(node));
     s::locate_agg_of_level::set(|node, levelsup| walkers::locate_agg_of_level(node, levelsup));

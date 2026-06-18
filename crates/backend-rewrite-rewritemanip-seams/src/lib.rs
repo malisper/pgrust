@@ -13,6 +13,13 @@ use types_error::PgResult;
 use types_nodes::nodes::Node;
 
 seam_core::seam!(
+    /// `contain_aggs_of_level(node, levelsup)` (rewriteManip.c): does the node
+    /// contain any aggregate of the specified query level? Infallible (a pure
+    /// expression-tree walk).
+    pub fn contain_aggs_of_level(node: &Node<'_>, levelsup: i32) -> bool
+);
+
+seam_core::seam!(
     /// `contain_windowfuncs(node)` (rewriteManip.c): does the node contain any
     /// window function? Infallible (a pure expression-tree walk).
     pub fn contain_windowfuncs(node: &Node<'_>) -> bool

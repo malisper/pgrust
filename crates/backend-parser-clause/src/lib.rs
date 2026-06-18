@@ -20,8 +20,7 @@
 //! # Seams (panic-until-owner-lands)
 //!
 //! `transformTargetEntry` (parse_target — `backend-parser-target-seams`),
-//! `contain_aggs_of_level` / `locate_agg_of_level` (parse_agg —
-//! `backend-parser-parse-agg-seams`), `contain_windowfuncs` /
+//! `contain_aggs_of_level` / `locate_agg_of_level` / `contain_windowfuncs` /
 //! `locate_windowfunc` (rewriteManip — `backend-rewrite-rewritemanip-seams`),
 //! and `equal` over `Expr` (equalfuncs — `backend-nodes-equalfuncs-seams`).
 //!
@@ -87,7 +86,6 @@ use backend_parser_parse_expr::transformExpr;
 use backend_parser_parse_oper::{compatible_oper_opid, get_sort_group_operators};
 
 use backend_nodes_equalfuncs_seams as equalfuncs;
-use backend_parser_parse_agg_seams as parse_agg;
 use backend_parser_small1_seams as parse_node;
 use backend_parser_target_seams as parse_target;
 use backend_rewrite_rewritemanip_seams as rewritemanip;
@@ -263,7 +261,7 @@ fn checkTargetlistEntrySQL92(
     if exprKind == EXPR_KIND_GROUP_BY {
         let tle_expr = tle_expr_node(tle);
         /* reject aggregates and window functions */
-        if pstate.p_hasAggs && parse_agg::contain_aggs_of_level::call(&tle_expr, 0) {
+        if pstate.p_hasAggs && rewritemanip::contain_aggs_of_level::call(&tle_expr, 0) {
             return Err(ereport(ERROR)
                 .errcode(ERRCODE_GROUPING_ERROR)
                 // translator: %s is name of a SQL construct, eg GROUP BY
@@ -273,7 +271,7 @@ fn checkTargetlistEntrySQL92(
                 ))
                 .errposition(errpos(
                     pstate,
-                    parse_agg::locate_agg_of_level::call(&tle_expr, 0),
+                    rewritemanip::locate_agg_of_level::call(&tle_expr, 0),
                 ))
                 .into_error());
         }

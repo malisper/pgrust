@@ -15,19 +15,6 @@ use types_nodes::parsestmt::ParseState;
 use types_nodes::primnodes::{Aggref, Expr};
 
 seam_core::seam!(
-    /// `contain_aggs_of_level(node, levelsup)` (parse_agg.c): does the node
-    /// contain any aggregate of the specified query level? Infallible (a pure
-    /// expression-tree walk).
-    pub fn contain_aggs_of_level(node: &Node<'_>, levelsup: i32) -> bool
-);
-
-seam_core::seam!(
-    /// `locate_agg_of_level(node, levelsup)` (parse_agg.c): the parse location
-    /// of any aggregate of the specified query level, or `-1`. Infallible.
-    pub fn locate_agg_of_level(node: &Node<'_>, levelsup: i32) -> i32
-);
-
-seam_core::seam!(
     /// `transformAggregateCall(pstate, agg, args, aggorder, agg_distinct)`
     /// (parse_agg.c): finish building an `Aggref` — wrap the (already
     /// type-coerced) plain argument expressions and any `ORDER BY` items into
