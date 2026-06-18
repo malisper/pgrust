@@ -1665,6 +1665,13 @@ pub fn init_seams() {
     s::log_newpage_range::set(log_newpage_range);
     s::xlog_save_buffer_for_hint::set(XLogSaveBufferForHint);
 
+    // `XLogCheckBufferNeedsBackup` (xloginsert.c:1026) — the "does this existing
+    // buffer need a full-page image" decision (page LSN <= RedoRecPtr while
+    // doPageWrites). The seam homes in transam-xlog-seams (consumed by heapam's
+    // heap_update and pruneheap's opportunistic-freeze path); xloginsert OWNS the
+    // C function, so it installs it here.
+    xlog_seam::xlog_check_buffer_needs_backup::set(XLogCheckBufferNeedsBackup);
+
     // `log_newpage` (xloginsert.c) is declared as a bufmgr seam (consumed by the
     // hash AM); xloginsert OWNS the C function, so it installs it here. The seam
     // hands the page image in as a slice and only wants the record LSN back; the
