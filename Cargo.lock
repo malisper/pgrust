@@ -12383,6 +12383,7 @@ version = "0.0.0"
 dependencies = [
  "backend-nodes-core",
  "backend-optimizer-path-costsize",
+ "backend-optimizer-path-equivclass",
  "backend-optimizer-path-pathkeys",
  "backend-optimizer-plan-planner-seams",
  "backend-optimizer-prep-prepunion-seams",
@@ -12392,6 +12393,7 @@ dependencies = [
  "backend-optimizer-util-vars",
  "backend-parser-coerce-seams",
  "backend-utils-adt-selfuncs-seams",
+ "backend-utils-misc-guc-tables",
  "mcx",
  "seam-core",
  "types-core",

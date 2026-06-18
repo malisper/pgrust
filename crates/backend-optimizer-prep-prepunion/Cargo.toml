@@ -35,6 +35,11 @@ backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
 # makeVar / makeTargetEntry / exprType / exprTypmod / exprCollation /
 # applyRelabelType.
 backend-nodes-core = { path = "../backend-nodes-core" }
+# add_setop_child_rel_equivalences (sorted set-op child equivalences). No cycle:
+# equivclass does not depend (transitively) on prepunion.
+backend-optimizer-path-equivclass = { path = "../backend-optimizer-path-equivclass" }
+# enable_incremental_sort GUC for the sorted-child-path branch.
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 
 # Cross-cycle seams.
 backend-optimizer-plan-planner-seams = { path = "../backend-optimizer-plan-planner-seams" }

@@ -702,54 +702,167 @@ fn build_setop_child_paths<'mcx>(
 ) -> PgResult<()> {
     debug_assert!(root.rel(rel).rtekind == RTE_SUBQUERY);
 
+    // setop_pathkeys = rel->subroot->setop_pathkeys (C:486). These are the keys
+    // that, if the child can produce a presorted path, let the parent set-op
+    // avoid re-sorting. They are expressed in the SUBROOT's representation.
+    let setop_pathkeys: Vec<types_pathnodes::PathKey> = root
+        .rel(rel)
+        .subroot
+        .0
+        .as_deref()
+        .expect("child rel has no subroot")
+        .setop_pathkeys
+        .clone();
+
+    // When sorting is needed, add child rel equivalences (C:493-497).
     if !interesting_pathkeys.is_empty() {
-        // add_setop_child_rel_equivalences — sorted-child equivalence machinery
-        // (only reached for INTERSECT/EXCEPT sort path / sorted UNION).
-        return Err(PgError::error(String::from(
-            "build_setop_child_paths: add_setop_child_rel_equivalences (sorted set-op child \
-             equivalences) is not yet ported",
-        )));
+        backend_optimizer_path_equivclass::add_setop_child_rel_equivalences(
+            root,
+            rel,
+            child_tlist,
+            interesting_pathkeys,
+        )?;
     }
 
     // Mark rel with estimated size BEFORE generating outer paths (C:504).
     set_subquery_size_estimates(run, root, rel);
 
     // consider_parallel from subroot final rel (C:510-511).
-    // Move subroot out, read its FINAL rel, restore. consider_parallel=false on
-    // this non-parallel first cut.
-    root.rel_mut(rel).consider_parallel = false;
-
-    // Generate subquery scan paths for interesting paths in the subroot's final
-    // rel (C:514-609). With interesting_pathkeys == NIL we only add the cheapest
-    // input path as-is.
-    let (cheapest_sub_id, cheapest_pathkeys) = {
-        let subroot = root.rel(rel).subroot.0.as_deref().expect("child rel has no subroot");
+    let final_consider_parallel = {
+        let subroot = root.rel(rel).subroot.0.as_deref().expect("subroot vanished");
         let final_rel = find_existing_upper_final(subroot);
-        let cheapest = subroot
+        subroot.rel(final_rel).consider_parallel
+    };
+    root.rel_mut(rel).consider_parallel = final_consider_parallel;
+
+    // Generate subquery scan paths for each interesting path in the subroot's
+    // final_rel (C:514-609). We must sort some paths within the SUBROOT arena
+    // before importing them, so collect the (subroot path id) of every outer
+    // path we want and build the sort paths in a single subroot-mutating pass.
+    let enable_incremental_sort = backend_utils_misc_guc_tables::vars::enable_incremental_sort.read();
+
+    // (subroot_path_id, was_just_sorted) pairs to import + wrap below.
+    let mut to_import: Vec<PathId> = Vec::new();
+    let limit_tuples = root
+        .rel(rel)
+        .subroot
+        .0
+        .as_deref()
+        .expect("subroot vanished")
+        .limit_tuples;
+
+    {
+        // Take the subroot out so we can mutate it to build sort paths.
+        let mut subroot = root.rel_mut(rel).subroot.0.take().expect("subroot vanished");
+        let final_rel = find_existing_upper_final(&subroot);
+        let cheapest_input_path = subroot
             .rel(final_rel)
             .cheapest_total_path
             .expect("build_setop_child_paths: subroot FINAL rel has no cheapest_total_path");
-        (cheapest, subroot.path(cheapest).base().pathkeys.clone())
-    };
+        let pathlist = subroot.rel(final_rel).pathlist.clone();
 
-    // Import the cheapest subroot path into the outer root's arena.
-    let imported = {
-        // Need &mut root and &subroot simultaneously: take subroot out.
-        let subroot = root.rel_mut(rel).subroot.0.take().expect("subroot vanished");
-        let id = import_path_from_subroot(root, &subroot, cheapest_sub_id);
+        for subpath in pathlist {
+            // Include the cheapest path as-is (C:524-538).
+            if subpath == cheapest_input_path {
+                to_import.push(subpath);
+            }
+
+            // Skip sorted-path handling if the setop doesn't need them (C:541).
+            if interesting_pathkeys.is_empty() {
+                continue;
+            }
+
+            // Create paths to suit the final sort order required for
+            // setop_pathkeys (C:547-587). setop_pathkeys is in subroot repr.
+            let subpath_pathkeys = subroot.path(subpath).base().pathkeys.clone();
+            let (is_sorted, presorted_keys) =
+                pathkeys::pathkeys_count_contained_in(&setop_pathkeys, &subpath_pathkeys);
+
+            let mut sorted_subpath = subpath;
+            if !is_sorted {
+                // Only sort the cheapest path; incrementally sort any partially
+                // sorted path (skip non-cheapest paths with no presorted keys or
+                // when incremental sort is disabled) (C:559-587).
+                if subpath != cheapest_input_path
+                    && (presorted_keys == 0 || !enable_incremental_sort)
+                {
+                    continue;
+                }
+                sorted_subpath = if presorted_keys == 0 || !enable_incremental_sort {
+                    pathnode::create::create_sort_path(
+                        &mut subroot,
+                        final_rel,
+                        subpath,
+                        setop_pathkeys.clone(),
+                        limit_tuples,
+                    )?
+                } else {
+                    pathnode::create::create_incremental_sort_path(
+                        &mut subroot,
+                        run,
+                        final_rel,
+                        subpath,
+                        setop_pathkeys.clone(),
+                        presorted_keys,
+                        limit_tuples,
+                    )?
+                };
+            }
+
+            // subpath is now sorted; add it unless it is the (already-added)
+            // cheapest input path (C:589-608).
+            if sorted_subpath != cheapest_input_path {
+                to_import.push(sorted_subpath);
+            }
+        }
+
         root.rel_mut(rel).subroot.0 = Some(subroot);
-        id
+    }
+
+    // Import each chosen subroot path into the outer root's arena, convert its
+    // pathkeys to outer representation, and wrap in a subqueryscan path.
+    for sub_id in to_import {
+        let imported = {
+            let subroot = root.rel_mut(rel).subroot.0.take().expect("subroot vanished");
+            let sub_pathkeys = subroot.path(sub_id).base().pathkeys.clone();
+            let id = import_path_from_subroot(root, &subroot, sub_id);
+            root.rel_mut(rel).subroot.0 = Some(subroot);
+            (id, sub_pathkeys)
+        };
+        let (imported_id, sub_pathkeys) = imported;
+
+        let imported_tlist = make_tlist_from_pathtarget_ids(root, imported_id)?;
+        let pathkeys_outer =
+            pathkeys::convert_subquery_pathkeys(root, rel, &sub_pathkeys, &imported_tlist);
+
+        let sqs = pathnode::create::create_subqueryscan_path(
+            root, run, rel, imported_id, trivial_tlist, pathkeys_outer, &None,
+        )?;
+        pathnode::add_path(root, rel, sqs)?;
+    }
+
+    // Partial path for the child relation, if the subroot has one (C:611-637).
+    let partial_sub = if root.rel(rel).consider_parallel
+        && bms::relids_is_empty::call(&root.rel(rel).lateral_relids)
+    {
+        let subroot = root.rel(rel).subroot.0.as_deref().expect("subroot vanished");
+        let final_rel = find_existing_upper_final(subroot);
+        subroot.rel(final_rel).partial_pathlist.first().copied()
+    } else {
+        None
     };
-
-    // convert_subquery_pathkeys over the imported path's pathkeys (C:530).
-    let imported_tlist = make_tlist_from_pathtarget_ids(root, imported)?;
-    let pathkeys_outer =
-        pathkeys::convert_subquery_pathkeys(root, rel, &cheapest_pathkeys, &imported_tlist);
-
-    let sqs = pathnode::create::create_subqueryscan_path(
-        root, run, rel, imported, trivial_tlist, pathkeys_outer, &None,
-    )?;
-    pathnode::add_path(root, rel, sqs)?;
+    if let Some(partial_sub_id) = partial_sub {
+        let imported = {
+            let subroot = root.rel_mut(rel).subroot.0.take().expect("subroot vanished");
+            let id = import_path_from_subroot(root, &subroot, partial_sub_id);
+            root.rel_mut(rel).subroot.0 = Some(subroot);
+            id
+        };
+        let partial_path = pathnode::create::create_subqueryscan_path(
+            root, run, rel, imported, trivial_tlist, Vec::new(), &None,
+        )?;
+        pathnode::add_partial_path(root, rel, partial_path)?;
+    }
 
     postprocess_setop_rel(root, rel)?;
 
