@@ -114,6 +114,17 @@ pub fn pg_main(mcx: Mcx<'static>, argv: &[&str]) -> PgResult<MainOutcome> {
 
     REACHED_MAIN.with(|r| r.set(true));
 
+    // Install the ereport panic hook. A builtin's `ereport(ERROR)` is delivered
+    // across the one `catch_unwind` dispatch point (fmgr's `invoke_pgfunction`)
+    // as a `panic_any("PGRUST-SQLSTATE:<code>:<msg>")` string payload, which the
+    // catcher converts back to a clean `PgResult` error (C's `ereport` longjmp).
+    // That panic is *caught and handled*, but the default panic hook still dumps
+    // a full backtrace to stderr first — noise that masquerades as a crash (and
+    // breaks pg_regress's expected output for every error-path test, e.g.
+    // `bool 'invalid'`). Suppress the backtrace for those handled-error payloads
+    // while leaving genuine programming-error panics fully reported.
+    install_ereport_panic_hook();
+
     let progname = get_progname::call(argv.first().copied().unwrap_or(""));
 
     // Store `progname` in the process globals home so the read-only `progname`
@@ -249,6 +260,36 @@ fn run_bootstrap(mcx: Mcx<'static>, argv: &[&str], check_only: bool) -> PgResult
 #[cold]
 fn unreachable_dispatch(reason: &str) -> ! {
     panic!("main dispatch reached an impossible state: {reason}");
+}
+
+/// The marker prefix every caught `ereport(ERROR)` panic payload carries (set
+/// by each adt crate's `raise` helper, decoded by fmgr's `invoke_pgfunction`).
+const EREPORT_PANIC_PREFIX: &str = "PGRUST-SQLSTATE:";
+
+/// Install a process panic hook that silences the default backtrace dump for a
+/// handled `ereport(ERROR)` payload (`"PGRUST-SQLSTATE:..."`). Such a panic is
+/// always caught by fmgr's `invoke_pgfunction` and re-surfaced as a real SQL
+/// `ERROR`; printing a backtrace for it is pure noise. Any other panic payload
+/// (a genuine bug) is delegated to the previously-installed hook unchanged.
+fn install_ereport_panic_hook() {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let is_handled_ereport = info
+            .payload()
+            .downcast_ref::<String>()
+            .map(|s| s.starts_with(EREPORT_PANIC_PREFIX))
+            .unwrap_or(false)
+            || info
+                .payload()
+                .downcast_ref::<&str>()
+                .map(|s| s.starts_with(EREPORT_PANIC_PREFIX))
+                .unwrap_or(false);
+        if is_handled_ereport {
+            // Caught downstream and turned into a clean SQL ERROR: stay quiet.
+            return;
+        }
+        prev(info);
+    }));
 }
 
 /// `startup_hacks(progname)` (main.c): platform-specific early startup. The
