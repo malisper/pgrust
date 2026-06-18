@@ -40,6 +40,7 @@ use alloc::vec::Vec;
 use backend_nodes_core::makefuncs::{
     make_andclause, make_bool_const, make_notclause, make_orclause,
 };
+use mcx::Mcx;
 use types_core::{InvalidOid, Oid};
 use types_error::{PgError, PgResult};
 use types_nodes::primnodes::{
@@ -100,14 +101,14 @@ fn list_member(list: &[Expr], datum: &Expr) -> bool {
 }
 
 /// `list_union(list1, list2)` — generic list union using `equal()`. The C call
-/// site is `list_union(NIL, reference)`, so `list1` is always empty; this keeps
-/// the general shape (copy `list1`, append every `list2` element not already
-/// present).
-fn list_union(list1: &[Expr], list2: &[Expr]) -> Vec<Expr> {
-    let mut result: Vec<Expr> = list1.to_vec();
+/// site is `list_union(NIL, reference)`, so `list1` is always empty. C appends
+/// each not-already-present cell's pointer (no node copy); the owned model moves
+/// each surviving element from `list2` into the result (consuming `list2`),
+/// which avoids deep-cloning Aggref-bearing clauses.
+fn list_union(mut result: Vec<Expr>, list2: Vec<Expr>) -> Vec<Expr> {
     for cell in list2 {
-        if !list_member(&result, cell) {
-            result.push(cell.clone());
+        if !list_member(&result, &cell) {
+            result.push(cell);
         }
     }
     result
@@ -320,7 +321,11 @@ pub fn negate_clause_opt(node: Option<Expr>) -> PgResult<Expr> {
 /// `qual` is an `Expr *` that may be NULL → modeled as `Option<Expr>`. Returns
 /// the modified qualification (also `Option<Expr>` since an empty input maps to
 /// an empty output).
-pub fn canonicalize_qual(qual: Option<Expr>, is_check: bool) -> PgResult<Option<Expr>> {
+pub fn canonicalize_qual<'mcx>(
+    mcx: Mcx<'mcx>,
+    qual: Option<Expr>,
+    is_check: bool,
+) -> PgResult<Option<Expr>> {
     /* Quick exit for empty qual */
     let qual = match qual {
         None => return Ok(None),
@@ -338,7 +343,7 @@ pub fn canonicalize_qual(qual: Option<Expr>, is_check: bool) -> PgResult<Option<
      * within the top-level AND/OR structure; there's no point in looking
      * deeper.  Also remove any NULL constants in the top-level structure.
      */
-    let newqual = find_duplicate_ors(qual, is_check)?;
+    let newqual = find_duplicate_ors(mcx, qual, is_check)?;
 
     Ok(Some(newqual))
 }
@@ -393,14 +398,14 @@ fn pull_ors(orlist: Vec<Expr>) -> Vec<Expr> {
 /// structure, eg in a WHERE clause, "x OR NULL::boolean" is reduced to "x".
 ///
 /// C: `static Expr *find_duplicate_ors(Expr *qual, bool is_check)` (prepqual.c:406)
-fn find_duplicate_ors(qual: Expr, is_check: bool) -> PgResult<Expr> {
+fn find_duplicate_ors<'mcx>(mcx: Mcx<'mcx>, qual: Expr, is_check: bool) -> PgResult<Expr> {
     if is_orclause(&qual) {
         let be = qual.expect_into_boolexpr();
         let mut orlist: Vec<Expr> = Vec::new();
 
         /* Recurse */
         for arg in be.args {
-            let arg = find_duplicate_ors(arg, is_check)?;
+            let arg = find_duplicate_ors(mcx, arg, is_check)?;
 
             /* Get rid of any constant inputs */
             if let Some(carg) = arg.as_const() {
@@ -428,14 +433,14 @@ fn find_duplicate_ors(qual: Expr, is_check: bool) -> PgResult<Expr> {
         let orlist = pull_ors(orlist);
 
         /* Now we can look for duplicate ORs */
-        process_duplicate_ors(orlist)
+        process_duplicate_ors(mcx, orlist)
     } else if is_andclause(&qual) {
         let be = qual.expect_into_boolexpr();
         let mut andlist: Vec<Expr> = Vec::new();
 
         /* Recurse */
         for arg in be.args {
-            let arg = find_duplicate_ors(arg, is_check)?;
+            let arg = find_duplicate_ors(mcx, arg, is_check)?;
 
             /* Get rid of any constant inputs */
             if let Some(carg) = arg.as_const() {
@@ -487,7 +492,7 @@ fn find_duplicate_ors(qual: Expr, is_check: bool) -> PgResult<Expr> {
 /// clause, or maybe even a single subexpression).
 ///
 /// C: `static Expr *process_duplicate_ors(List *orlist)`         (prepqual.c:517)
-fn process_duplicate_ors(mut orlist: Vec<Expr>) -> PgResult<Expr> {
+fn process_duplicate_ors<'mcx>(mcx: Mcx<'mcx>, mut orlist: Vec<Expr>) -> PgResult<Expr> {
     /* OR of no inputs reduces to FALSE */
     if orlist.is_empty() {
         return Ok(Expr::Const(make_bool_const(false, false)));
@@ -519,11 +524,21 @@ fn process_duplicate_ors(mut orlist: Vec<Expr>) -> PgResult<Expr> {
             let nclauses = subclauses.len() as i32;
 
             if reference.is_none() || nclauses < num_subclauses {
-                reference = Some(subclauses.clone());
+                // C aliases the AND clause's `args` list (no copy). The owned
+                // `Expr` model must materialize a list; deep-copy each subclause
+                // into `mcx` (a plain `.clone()` panics on Aggref-bearing
+                // children — e.g. `min(a) = max(a)` in a HAVING qual).
+                let mut copied: Vec<Expr> = Vec::with_capacity(subclauses.len());
+                for sub in subclauses {
+                    copied.push(sub.clone_in(mcx)?);
+                }
+                reference = Some(copied);
                 num_subclauses = nclauses;
             }
         } else {
-            reference = Some(vec![clause.clone()]); /* list_make1(clause) */
+            /* list_make1(clause): C stores the same pointer; the owned model
+             * deep-copies into mcx (clone_in handles Aggref children). */
+            reference = Some(vec![clause.clone_in(mcx)?]);
             break;
         }
     }
@@ -532,7 +547,7 @@ fn process_duplicate_ors(mut orlist: Vec<Expr>) -> PgResult<Expr> {
     /*
      * Just in case, eliminate any duplicates in the reference list.
      */
-    let reference = list_union(&[], &reference);
+    let reference = list_union(Vec::new(), reference);
 
     /*
      * Check each element of the reference list to see if it's in all the OR
@@ -558,7 +573,9 @@ fn process_duplicate_ors(mut orlist: Vec<Expr>) -> PgResult<Expr> {
         }
 
         if win {
-            winners.push(refclause.clone());
+            // Deep-copy into mcx (clone_in handles Aggref-bearing clauses; a
+            // plain `.clone()` panics on them).
+            winners.push(refclause.clone_in(mcx)?);
         }
     }
 

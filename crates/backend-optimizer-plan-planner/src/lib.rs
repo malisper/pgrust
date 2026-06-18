@@ -1743,7 +1743,7 @@ pub fn preprocess_expression<'mcx>(
 
     // canonicalize_qual (C:1306-1308).
     if kind == EXPRKIND_QUAL {
-        expr = match backend_optimizer_prep_prepqual::canonicalize_qual(Some(expr), false)? {
+        expr = match backend_optimizer_prep_prepqual::canonicalize_qual(mcx, Some(expr), false)? {
             Some(e) => e,
             None => return Ok(None),
         };

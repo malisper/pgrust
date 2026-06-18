@@ -28,7 +28,8 @@ seam_core::seam!(
     /// canonical (implicit-AND-of-ORs) form, dropping redundant clauses.
     /// `is_check` selects the CHECK-constraint NULL semantics. `Err` carries
     /// the catalog-lookup `ereport(ERROR)` surface.
-    pub fn canonicalize_qual(
+    pub fn canonicalize_qual<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         qual: Option<types_nodes::primnodes::Expr>,
         is_check: bool,
     ) -> types_error::PgResult<Option<types_nodes::primnodes::Expr>>

@@ -572,7 +572,7 @@ pub fn get_proposed_default_constraint<'mcx>(
     let defPartConstraint = eval_const_expressions(mcx, defPartConstraint)?;
 
     // defPartConstraint = canonicalize_qual(defPartConstraint, true);
-    let defPartConstraint = canonicalize_qual(Some(defPartConstraint), true)?;
+    let defPartConstraint = canonicalize_qual(mcx, Some(defPartConstraint), true)?;
 
     // return make_ands_implicit(defPartConstraint);
     let implicit = make_ands_implicit(defPartConstraint);

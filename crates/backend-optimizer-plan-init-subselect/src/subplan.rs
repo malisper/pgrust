@@ -1443,7 +1443,7 @@ fn convert_EXISTS_to_ANY<'mcx>(
         }
     };
     let where_clause =
-        backend_optimizer_prep_prepqual::canonicalize_qual(Some(where_clause), false)?;
+        backend_optimizer_prep_prepqual::canonicalize_qual(mcx, Some(where_clause), false)?;
     let where_list: Vec<Expr> = make_ands_implicit(where_clause);
 
     // Break the implicit-AND list into "outervar = innervar" hash clauses.

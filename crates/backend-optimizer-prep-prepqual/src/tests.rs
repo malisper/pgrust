@@ -161,14 +161,18 @@ fn negate_not_cancels() {
 
 #[test]
 fn canonicalize_empty_qual_is_none() {
-    assert!(super::canonicalize_qual(None, false).expect("canon").is_none());
+    let cx = mcx::MemoryContext::new("prepqual-test");
+    let mcx = cx.mcx();
+    assert!(super::canonicalize_qual(mcx, None, false).expect("canon").is_none());
 }
 
 #[test]
 fn canonicalize_or_with_true_const_reduces_to_true() {
     // WHERE: OR(x, true) -> Const TRUE
     let q = or_of(vec![leaf(1), bool_const(true)]);
-    let r = super::canonicalize_qual(Some(q), false)
+    let cx = mcx::MemoryContext::new("prepqual-test");
+    let mcx = cx.mcx();
+    let r = super::canonicalize_qual(mcx, Some(q), false)
         .expect("canon")
         .expect("some");
     let c = r.as_const().expect("Const");
@@ -180,7 +184,9 @@ fn canonicalize_or_with_true_const_reduces_to_true() {
 fn canonicalize_and_with_false_const_reduces_to_false() {
     // WHERE: AND(x, false) -> Const FALSE
     let q = and_of(vec![leaf(1), bool_const(false)]);
-    let r = super::canonicalize_qual(Some(q), false)
+    let cx = mcx::MemoryContext::new("prepqual-test");
+    let mcx = cx.mcx();
+    let r = super::canonicalize_qual(mcx, Some(q), false)
         .expect("canon")
         .expect("some");
     let c = r.as_const().expect("Const");
@@ -192,7 +198,9 @@ fn canonicalize_and_with_false_const_reduces_to_false() {
 fn canonicalize_and_drops_true_const() {
     // WHERE: AND(x, true) -> x  (single-element AND reduces to that expr)
     let q = and_of(vec![leaf(7), bool_const(true)]);
-    let r = super::canonicalize_qual(Some(q), false)
+    let cx = mcx::MemoryContext::new("prepqual-test");
+    let mcx = cx.mcx();
+    let r = super::canonicalize_qual(mcx, Some(q), false)
         .expect("canon")
         .expect("some");
     let v = r.as_var().expect("Var");
@@ -203,7 +211,9 @@ fn canonicalize_and_drops_true_const() {
 fn canonicalize_flattens_nested_and() {
     // AND(AND(x, y), z) with no consts -> single AND of [x, y, z]
     let q = and_of(vec![and_of(vec![leaf(1), leaf(2)]), leaf(3)]);
-    let r = super::canonicalize_qual(Some(q), false)
+    let cx = mcx::MemoryContext::new("prepqual-test");
+    let mcx = cx.mcx();
+    let r = super::canonicalize_qual(mcx, Some(q), false)
         .expect("canon")
         .expect("some");
     let be = r.as_boolexpr().expect("BoolExpr");
