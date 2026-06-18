@@ -37,6 +37,7 @@ use backend_nodes_equalfuncs::equal_expr;
 
 use types_core::primitive::{AttrNumber, Index, Oid};
 use types_nodes::nodes::Node;
+use types_nodes::nodes::ntag;
 use types_nodes::nodeagg::do_aggsplit_combine;
 use types_nodes::primnodes::{Const, Expr, Param, ParamKind, TargetEntry, Var, VarReturningType};
 use types_nodes::nodeindexscan::{Plan, Scan};
@@ -1674,38 +1675,38 @@ pub fn set_plan_refs<'mcx>(
     // `Node` variants in this repo's enum (verified against nodes.rs), so they
     // cannot reach this dispatch; their C arms have no place to land and are
     // therefore absent (a plan carrying them is unconstructible in this model).
-    match &mut plan {
+    match plan.node_tag() {
         // -- plain scan types -------------------------------------------------
-        Node::SeqScan(_)
-        | Node::SampleScan(_)
-        | Node::IndexScan(_)
-        | Node::TidScan(_)
-        | Node::TidRangeScan(_)
-        | Node::FunctionScan(_)
-        | Node::TableFuncScan(_)
-        | Node::ValuesScan(_)
-        | Node::CteScan(_)
-        | Node::NamedTuplestoreScan(_)
-        | Node::WorkTableScan(_)
-        | Node::BitmapIndexScan(_) => {
+        ntag::T_SeqScan
+        | ntag::T_SampleScan
+        | ntag::T_IndexScan
+        | ntag::T_TidScan
+        | ntag::T_TidRangeScan
+        | ntag::T_FunctionScan
+        | ntag::T_TableFuncScan
+        | ntag::T_ValuesScan
+        | ntag::T_CteScan
+        | ntag::T_NamedTuplestoreScan
+        | ntag::T_WorkTableScan
+        | ntag::T_BitmapIndexScan => {
             set_scan_node_refs(mcx, root, &mut plan, rtoffset)?;
         }
 
         // -- IndexOnlyScan (set_indexonlyscan_references) --------------------
-        Node::IndexOnlyScan(_) => {
+        ntag::T_IndexOnlyScan => {
             return set_indexonlyscan_references(mcx, run, root, plan, rtoffset);
         }
 
         // -- SubqueryScan (set_subqueryscan_references) ----------------------
-        Node::SubqueryScan(_) => {
+        ntag::T_SubqueryScan => {
             return set_subqueryscan_references(mcx, run, root, plan, rtoffset);
         }
 
         // -- ForeignScan / CustomScan ----------------------------------------
-        Node::ForeignScan(_) => {
+        ntag::T_ForeignScan => {
             set_foreignscan_references(mcx, root, &mut plan, rtoffset)?;
         }
-        Node::CustomScan(_) => {
+        ntag::T_CustomScan => {
             return Err(PgError::error(
                 "set_plan_refs(CustomScan): custom-scan provider fix-up \
                  (set_customscan_references over the CustomScanMethods vtable + \
@@ -1714,35 +1715,35 @@ pub fn set_plan_refs<'mcx>(
         }
 
         // -- joins ------------------------------------------------------------
-        Node::NestLoop(_) | Node::MergeJoin(_) | Node::HashJoin(_) => {
+        ntag::T_NestLoop | ntag::T_MergeJoin | ntag::T_HashJoin => {
             set_join_references(mcx, root, &mut plan, rtoffset)?;
         }
 
         // -- Gather / GatherMerge --------------------------------------------
-        Node::Gather(_) => {
+        ntag::T_Gather => {
             set_upper_references(mcx, root, plan.plan_head_mut(), rtoffset, false, false)?;
             let init = set_param_references(root, plan.plan_head(), mcx)?;
-            if let Node::Gather(g) = &mut plan {
+            if let Some(g) = plan.as_gather_mut() {
                 g.initParam = init;
             }
         }
-        Node::GatherMerge(_) => {
+        ntag::T_GatherMerge => {
             set_upper_references(mcx, root, plan.plan_head_mut(), rtoffset, false, false)?;
             let init = set_param_references(root, plan.plan_head(), mcx)?;
-            if let Node::GatherMerge(g) = &mut plan {
+            if let Some(g) = plan.as_gathermerge_mut() {
                 g.initParam = init;
             }
         }
 
         // -- Hash ------------------------------------------------------------
-        Node::Hash(_) => {
+        ntag::T_Hash => {
             set_hash_references(mcx, root, &mut plan, rtoffset)?;
         }
 
         // -- Memoize ---------------------------------------------------------
-        Node::Memoize(_) => {
+        ntag::T_Memoize => {
             set_dummy_tlist_references(plan.plan_head_mut(), rtoffset, mcx)?;
-            if let Node::Memoize(m) = &mut plan {
+            if let Some(m) = plan.as_memoize_mut() {
                 let num_exec = num_exec_tlist(&m.plan);
                 let exprs = core::mem::replace(&mut m.param_exprs, PgVec::new_in(mcx));
                 let mut out: PgVec<Expr> = PgVec::new_in(mcx);
@@ -1754,19 +1755,19 @@ pub fn set_plan_refs<'mcx>(
         }
 
         // -- dummy-tlist-only plan types -------------------------------------
-        Node::Material(_)
-        | Node::Sort(_)
-        | Node::IncrementalSort(_)
-        | Node::Unique(_)
-        | Node::SetOp(_)
-        | Node::RecursiveUnion(_) => {
+        ntag::T_Material
+        | ntag::T_Sort
+        | ntag::T_IncrementalSort
+        | ntag::T_Unique
+        | ntag::T_SetOp
+        | ntag::T_RecursiveUnion => {
             set_dummy_tlist_references(plan.plan_head_mut(), rtoffset, mcx)?;
         }
 
         // -- Limit -----------------------------------------------------------
-        Node::Limit(_) => {
+        ntag::T_Limit => {
             set_dummy_tlist_references(plan.plan_head_mut(), rtoffset, mcx)?;
-            if let Node::Limit(l) = &mut plan {
+            if let Some(l) = plan.as_limit_mut() {
                 if let Some(off) = l.limitOffset.take() {
                     let f = fix_scan_expr(mcx, root, PgBox::into_inner(off), rtoffset, 1.0)?;
                     l.limitOffset = Some(mcx::alloc_in(mcx, f)?);
@@ -1779,8 +1780,8 @@ pub fn set_plan_refs<'mcx>(
         }
 
         // -- Agg -------------------------------------------------------------
-        Node::Agg(_) => {
-            let (combine, grouping_sets) = if let Node::Agg(a) = &plan {
+        ntag::T_Agg => {
+            let (combine, grouping_sets) = if let Some(a) = plan.as_agg() {
                 (do_aggsplit_combine(a.aggsplit), a.grouping_sets.is_some())
             } else {
                 (false, false)
@@ -1796,24 +1797,24 @@ pub fn set_plan_refs<'mcx>(
         }
 
         // -- Group -----------------------------------------------------------
-        Node::Group(_) => {
+        ntag::T_Group => {
             set_upper_references(mcx, root, plan.plan_head_mut(), rtoffset, false, false)?;
         }
 
         // -- WindowAgg -------------------------------------------------------
-        Node::WindowAgg(_) => {
-            let rc = if let Node::WindowAgg(w) = &mut plan {
+        ntag::T_WindowAgg => {
+            let rc = if let Some(w) = plan.as_windowagg_mut() {
                 w.runCondition.take()
             } else {
                 None
             };
             let new_rc =
                 set_windowagg_runcondition_references(root, rc, plan.plan_head(), mcx)?;
-            if let Node::WindowAgg(w) = &mut plan {
+            if let Some(w) = plan.as_windowagg_mut() {
                 w.runCondition = new_rc;
             }
             set_upper_references(mcx, root, plan.plan_head_mut(), rtoffset, false, false)?;
-            if let Node::WindowAgg(w) = &mut plan {
+            if let Some(w) = plan.as_windowagg_mut() {
                 if let Some(off) = w.startOffset.take() {
                     let f = fix_scan_expr(mcx, root, PgBox::into_inner(off), rtoffset, 1.0)?;
                     w.startOffset = Some(mcx::alloc_in(mcx, f)?);
@@ -1831,7 +1832,7 @@ pub fn set_plan_refs<'mcx>(
         }
 
         // -- Result ----------------------------------------------------------
-        Node::Result(_) => {
+        ntag::T_Result => {
             let has_left = plan.plan_head().lefttree.is_some();
             if has_left {
                 set_upper_references(mcx, root, plan.plan_head_mut(), rtoffset, false, false)?;
@@ -1861,33 +1862,33 @@ pub fn set_plan_refs<'mcx>(
                 let ql = p.qual.take();
                 p.qual = fix_scan_list_expr(mcx, root, ql, rtoffset, num_exec_q)?;
             }
-            if let Node::Result(r) = &mut plan {
+            if let Some(r) = plan.as_result_mut() {
                 let rcq = r.resconstantqual.take();
                 r.resconstantqual = fix_scan_list_expr(mcx, root, rcq, rtoffset, 1.0)?;
             }
         }
 
         // -- ProjectSet ------------------------------------------------------
-        Node::ProjectSet(_) => {
+        ntag::T_ProjectSet => {
             set_upper_references(mcx, root, plan.plan_head_mut(), rtoffset, false, false)?;
         }
 
         // -- ModifyTable -----------------------------------------------------
-        Node::ModifyTable(_) => {
+        ntag::T_ModifyTable => {
             return set_modifytable_references(mcx, run, root, plan, rtoffset);
         }
 
         // -- Append / MergeAppend (special early returns) --------------------
-        Node::Append(_) => {
+        ntag::T_Append => {
             return set_append_references(mcx, run, root, plan, rtoffset);
         }
-        Node::MergeAppend(_) => {
+        ntag::T_MergeAppend => {
             return set_mergeappend_references(mcx, run, root, plan, rtoffset);
         }
 
         // -- BitmapAnd -------------------------------------------------------
-        Node::BitmapAnd(_) => {
-            if let Node::BitmapAnd(b) = &mut plan {
+        ntag::T_BitmapAnd => {
+            if let Some(b) = plan.as_bitmapand_mut() {
                 let kids = core::mem::take(&mut b.bitmapplans);
                 let mut newkids = Vec::with_capacity(kids.len());
                 for k in kids {
@@ -1898,10 +1899,10 @@ pub fn set_plan_refs<'mcx>(
             return Ok(plan);
         }
 
-        other => {
+        _ => {
             return Err(PgError::error(format!(
                 "set_plan_refs: unrecognized plan node: {}",
-                other.tag()
+                plan.tag()
             )));
         }
     }
@@ -1943,16 +1944,21 @@ fn set_scan_node_refs<'mcx>(
     plan: &mut Node<'mcx>,
     rtoffset: i32,
 ) -> PgResult<()> {
-    match plan {
-        Node::SeqScan(s) => fix_scan_common(root, &mut s.scan, rtoffset, mcx)?,
-        Node::SampleScan(s) => {
+    match plan.node_tag() {
+        ntag::T_SeqScan => {
+            let s = plan.as_seqscan_mut().unwrap();
+            fix_scan_common(root, &mut s.scan, rtoffset, mcx)?
+        }
+        ntag::T_SampleScan => {
+            let s = plan.as_samplescan_mut().unwrap();
             fix_scan_common(root, &mut s.scan, rtoffset, mcx)?;
             // tablesample = fix_scan_expr over the TableSampleClause's args+repeatable.
             if let Some(ts) = s.tablesample.as_mut() {
                 fix_tablesample(root, ts, rtoffset, mcx)?;
             }
         }
-        Node::IndexScan(s) => {
+        ntag::T_IndexScan => {
+            let s = plan.as_indexscan_mut().unwrap();
             fix_scan_common(root, &mut s.scan, rtoffset, mcx)?;
             let neq = num_exec_qual(&s.scan.plan);
             s.indexqual = fix_scan_list_expr(mcx, root, s.indexqual.take(), rtoffset, 1.0)?;
@@ -1962,7 +1968,8 @@ fn set_scan_node_refs<'mcx>(
             s.indexorderbyorig =
                 fix_scan_list_expr(mcx, root, s.indexorderbyorig.take(), rtoffset, neq)?;
         }
-        Node::BitmapIndexScan(s) => {
+        ntag::T_BitmapIndexScan => {
+            let s = plan.as_bitmapindexscan_mut().unwrap();
             // scanrelid += rtoffset; no tlist/qual to fix.
             s.scan.scanrelid = s.scan.scanrelid.wrapping_add(rtoffset as u32);
             let neq = num_exec_qual(&s.scan.plan);
@@ -1973,16 +1980,19 @@ fn set_scan_node_refs<'mcx>(
         // NOTE: `Node::BitmapHeapScan` is not a variant in this repo's Node enum
         // (verified against nodes.rs), so the C `T_BitmapHeapScan` arm has no
         // place to land here and is omitted (unconstructible in this model).
-        Node::TidScan(s) => {
+        ntag::T_TidScan => {
+            let s = plan.as_tidscan_mut().unwrap();
             fix_scan_common(root, &mut s.scan, rtoffset, mcx)?;
             s.tidquals = fix_scan_list_expr(mcx, root, s.tidquals.take(), rtoffset, 1.0)?;
         }
-        Node::TidRangeScan(s) => {
+        ntag::T_TidRangeScan => {
+            let s = plan.as_tidrangescan_mut().unwrap();
             fix_scan_common(root, &mut s.scan, rtoffset, mcx)?;
             s.tidrangequals =
                 fix_scan_list_expr(mcx, root, s.tidrangequals.take(), rtoffset, 1.0)?;
         }
-        Node::FunctionScan(s) => {
+        ntag::T_FunctionScan => {
+            let s = plan.as_functionscan_mut().unwrap();
             fix_scan_common(root, &mut s.scan, rtoffset, mcx)?;
             // C: scan->functions = fix_scan_list(root, scan->functions, rtoffset,
             //    1); — fix_scan_list walks each RangeTblFunction node's funcexpr
@@ -1993,15 +2003,17 @@ fn set_scan_node_refs<'mcx>(
                 let nfuncs = functions.len();
                 for f in 0..nfuncs {
                     let funcexpr: Option<Expr> = match functions[f].funcexpr.take() {
-                        Some(node) => match PgBox::into_inner(node) {
-                            Node::Expr(e) => Some(e),
-                            other => {
-                                // Non-Expr funcexpr: put it back untouched.
-                                functions[f].funcexpr =
-                                    Some(mcx::alloc_in(mcx, other)?);
+                        Some(node) => {
+                            let node = PgBox::into_inner(node);
+                            // Peel the Expr-family node (Node::Expr spans every
+                            // Expr tag); a non-Expr funcexpr is put back untouched.
+                            if node.as_expr().is_some() {
+                                node.into_expr()
+                            } else {
+                                functions[f].funcexpr = Some(mcx::alloc_in(mcx, node)?);
                                 None
                             }
-                        },
+                        }
                         None => None,
                     };
                     if let Some(e) = funcexpr {
@@ -2012,7 +2024,8 @@ fn set_scan_node_refs<'mcx>(
                 }
             }
         }
-        Node::TableFuncScan(s) => {
+        ntag::T_TableFuncScan => {
+            let s = plan.as_tablefuncscan_mut().unwrap();
             fix_scan_common(root, &mut s.scan, rtoffset, mcx)?;
             // tablefunc = fix_scan_expr over a TableFunc node (a Node, not Expr).
             let _ = &s.tablefunc;
@@ -2022,12 +2035,22 @@ fn set_scan_node_refs<'mcx>(
                  walker and is not ported",
             ));
         }
-        Node::ValuesScan(s) => {
+        ntag::T_ValuesScan => {
+            let s = plan.as_valuesscan_mut().unwrap();
             fix_scan_common_valuesscan(root, s, rtoffset, mcx)?;
         }
-        Node::CteScan(s) => fix_scan_common(root, &mut s.scan, rtoffset, mcx)?,
-        Node::NamedTuplestoreScan(s) => fix_scan_common(root, &mut s.scan, rtoffset, mcx)?,
-        Node::WorkTableScan(s) => fix_scan_common(root, &mut s.scan, rtoffset, mcx)?,
+        ntag::T_CteScan => {
+            let s = plan.as_ctescan_mut().unwrap();
+            fix_scan_common(root, &mut s.scan, rtoffset, mcx)?
+        }
+        ntag::T_NamedTuplestoreScan => {
+            let s = plan.as_namedtuplestorescan_mut().unwrap();
+            fix_scan_common(root, &mut s.scan, rtoffset, mcx)?
+        }
+        ntag::T_WorkTableScan => {
+            let s = plan.as_worktablescan_mut().unwrap();
+            fix_scan_common(root, &mut s.scan, rtoffset, mcx)?
+        }
         _ => {
             return Err(PgError::error(
                 "set_scan_node_refs: not a recognized plain-scan node",
@@ -2153,8 +2176,9 @@ fn set_join_references<'mcx>(
     }
 
     // Join-type-specific stuff.
-    match plan {
-        Node::NestLoop(nl) => {
+    match plan.node_tag() {
+        ntag::T_NestLoop => {
+            let nl = plan.as_nestloop_mut().unwrap();
             for nlp in nl.nestParams.iter_mut() {
                 let pv = core::mem::take(&mut nlp.paramval);
                 let fixed = fix_upper_expr(
@@ -2179,7 +2203,8 @@ fn set_join_references<'mcx>(
                 }
             }
         }
-        Node::MergeJoin(mj) => {
+        ntag::T_MergeJoin => {
+            let mj = plan.as_mergejoin_mut().unwrap();
             // mergeclauses: Vec<Expr>.
             let mc = core::mem::take(&mut mj.mergeclauses);
             mj.mergeclauses = fix_join_expr(
@@ -2196,7 +2221,8 @@ fn set_join_references<'mcx>(
                 },
             )?;
         }
-        Node::HashJoin(hj) => {
+        ntag::T_HashJoin => {
+            let hj = plan.as_hashjoin_mut().unwrap();
             // hashclauses: Option<PgVec<Node>> — each element is a Node::Expr.
             let hc = hj.hashclauses.take();
             hj.hashclauses = fix_join_expr_nodelist(
@@ -2291,27 +2317,27 @@ fn set_join_references<'mcx>(
 }
 
 fn take_joinqual<'mcx>(plan: &mut Node<'mcx>) -> Vec<Expr> {
-    match plan {
-        Node::NestLoop(n) => take_pgvec_expr(&mut n.join.joinqual),
-        Node::MergeJoin(m) => take_pgvec_expr(&mut m.join.joinqual),
-        Node::HashJoin(h) => take_pgvec_expr(&mut h.join.joinqual),
+    match plan.node_tag() {
+        ntag::T_NestLoop => take_pgvec_expr(&mut plan.as_nestloop_mut().unwrap().join.joinqual),
+        ntag::T_MergeJoin => take_pgvec_expr(&mut plan.as_mergejoin_mut().unwrap().join.joinqual),
+        ntag::T_HashJoin => take_pgvec_expr(&mut plan.as_hashjoin_mut().unwrap().join.joinqual),
         _ => Vec::new(),
     }
 }
 fn set_joinqual<'mcx>(plan: &mut Node<'mcx>, list: Vec<Expr>, mcx: Mcx<'mcx>) {
     let v = put_pgvec_expr(list, mcx);
-    match plan {
-        Node::NestLoop(n) => n.join.joinqual = v,
-        Node::MergeJoin(m) => m.join.joinqual = v,
-        Node::HashJoin(h) => h.join.joinqual = v,
+    match plan.node_tag() {
+        ntag::T_NestLoop => plan.as_nestloop_mut().unwrap().join.joinqual = v,
+        ntag::T_MergeJoin => plan.as_mergejoin_mut().unwrap().join.joinqual = v,
+        ntag::T_HashJoin => plan.as_hashjoin_mut().unwrap().join.joinqual = v,
         _ => {}
     }
 }
 fn join_jointype<'mcx>(plan: &Node<'mcx>) -> types_pathnodes::JoinType {
-    match plan {
-        Node::NestLoop(n) => n.join.jointype as types_pathnodes::JoinType,
-        Node::MergeJoin(m) => m.join.jointype as types_pathnodes::JoinType,
-        Node::HashJoin(h) => h.join.jointype as types_pathnodes::JoinType,
+    match plan.node_tag() {
+        ntag::T_NestLoop => plan.as_nestloop().unwrap().join.jointype as types_pathnodes::JoinType,
+        ntag::T_MergeJoin => plan.as_mergejoin().unwrap().join.jointype as types_pathnodes::JoinType,
+        ntag::T_HashJoin => plan.as_hashjoin().unwrap().join.jointype as types_pathnodes::JoinType,
         _ => types_pathnodes::JOIN_INNER,
     }
 }
@@ -2394,7 +2420,7 @@ fn set_hash_references<'mcx>(
         build_tlist_index(outer.plan_head().targetlist.as_deref().unwrap_or(&[]), mcx)?
     };
     let neq = num_exec_qual(plan.plan_head());
-    if let Node::Hash(h) = plan {
+    if let Some(h) = plan.as_hash_mut() {
         let hk = h.hashkeys.take();
         h.hashkeys = fix_upper_nodelist(
             root,
@@ -2486,10 +2512,9 @@ fn set_indexonlyscan_references<'mcx>(
     rtoffset: i32,
 ) -> PgResult<Node<'mcx>> {
     {
-        let s = match &mut plan {
-            Node::IndexOnlyScan(s) => s,
-            _ => return Err(PgError::error("set_indexonlyscan_references: not IndexOnlyScan")),
-        };
+        let s = plan
+            .as_indexonlyscan_mut()
+            .ok_or_else(|| PgError::error("set_indexonlyscan_references: not IndexOnlyScan"))?;
         // Build index_itlist from the resjunk-stripped indextlist. TargetEntry
         // is not `Clone`; deep-copy each non-resjunk entry via `clone_in`.
         let mut stripped: Vec<TargetEntry> = Vec::new();
@@ -2552,10 +2577,9 @@ fn set_foreignscan_references<'mcx>(
     plan: &mut Node<'mcx>,
     rtoffset: i32,
 ) -> PgResult<()> {
-    let f = match plan {
-        Node::ForeignScan(f) => f,
-        _ => return Err(PgError::error("set_foreignscan_references: not ForeignScan")),
-    };
+    let f = plan
+        .as_foreignscan_mut()
+        .ok_or_else(|| PgError::error("set_foreignscan_references: not ForeignScan"))?;
     if f.scan.scanrelid > 0 {
         f.scan.scanrelid = f.scan.scanrelid.wrapping_add(rtoffset as u32);
     }
@@ -2666,10 +2690,9 @@ fn set_subqueryscan_references<'mcx>(
     plan: Node<'mcx>,
     rtoffset: i32,
 ) -> PgResult<Node<'mcx>> {
-    let mut sqs = match plan {
-        Node::SubqueryScan(s) => s,
-        _ => panic!("set_subqueryscan_references: plan is not a SubqueryScan"),
-    };
+    let mut sqs = plan
+        .into_subqueryscan()
+        .unwrap_or_else(|| panic!("set_subqueryscan_references: plan is not a SubqueryScan"));
 
     // Recursively process the subplan (set_plan_references(rel->subroot,
     // subplan); here in-root).
@@ -2766,10 +2789,9 @@ fn set_append_references<'mcx>(
 ) -> PgResult<Node<'mcx>> {
     // Recurse on children first.
     {
-        let a = match &mut plan {
-            Node::Append(a) => a,
-            _ => return Err(PgError::error("set_append_references: not Append")),
-        };
+        let a = plan
+            .as_append_mut()
+            .ok_or_else(|| PgError::error("set_append_references: not Append"))?;
         let kids = core::mem::take(&mut a.appendplans);
         let mut newkids: Vec<Node> = Vec::with_capacity(kids.len());
         for k in kids {
@@ -2780,18 +2802,12 @@ fn set_append_references<'mcx>(
 
     // Single-child elision.
     {
-        let a = match &plan {
-            Node::Append(a) => a,
-            _ => unreachable!(),
-        };
+        let a = plan.as_append().unwrap();
         if a.appendplans.len() == 1 {
             let child_safe = a.appendplans[0].plan_head().parallel_aware;
             let self_safe = a.plan.parallel_aware;
             if child_safe == self_safe {
-                let mut a = match plan {
-                    Node::Append(a) => a,
-                    _ => unreachable!(),
-                };
+                let mut a = plan.into_append().unwrap();
                 let child = a.appendplans.pop().unwrap();
                 return clean_up_removed_plan_level(&a.plan, child, mcx);
             }
@@ -2800,10 +2816,7 @@ fn set_append_references<'mcx>(
 
     // Otherwise clean up the Append as needed.
     {
-        let a = match &mut plan {
-            Node::Append(a) => a,
-            _ => unreachable!(),
-        };
+        let a = plan.as_append_mut().unwrap();
         set_dummy_tlist_references(&mut a.plan, rtoffset, mcx)?;
         let ar = bms_nodes_to_relids(a.apprelids.as_deref());
         let ar = offset_relid_set(ar, rtoffset);
@@ -2829,10 +2842,9 @@ fn set_mergeappend_references<'mcx>(
     rtoffset: i32,
 ) -> PgResult<Node<'mcx>> {
     {
-        let m = match &mut plan {
-            Node::MergeAppend(m) => m,
-            _ => return Err(PgError::error("set_mergeappend_references: not MergeAppend")),
-        };
+        let m = plan
+            .as_mergeappend_mut()
+            .ok_or_else(|| PgError::error("set_mergeappend_references: not MergeAppend"))?;
         let kids = core::mem::take(&mut m.mergeplans);
         let mut newkids: Vec<Node> = Vec::with_capacity(kids.len());
         for k in kids {
@@ -2841,28 +2853,19 @@ fn set_mergeappend_references<'mcx>(
         m.mergeplans = newkids;
     }
     {
-        let m = match &plan {
-            Node::MergeAppend(m) => m,
-            _ => unreachable!(),
-        };
+        let m = plan.as_mergeappend().unwrap();
         if m.mergeplans.len() == 1 {
             let child_safe = m.mergeplans[0].plan_head().parallel_aware;
             let self_safe = m.plan.parallel_aware;
             if child_safe == self_safe {
-                let mut m = match plan {
-                    Node::MergeAppend(m) => m,
-                    _ => unreachable!(),
-                };
+                let mut m = plan.into_mergeappend().unwrap();
                 let child = m.mergeplans.pop().unwrap();
                 return clean_up_removed_plan_level(&m.plan, child, mcx);
             }
         }
     }
     {
-        let m = match &mut plan {
-            Node::MergeAppend(m) => m,
-            _ => unreachable!(),
-        };
+        let m = plan.as_mergeappend_mut().unwrap();
         set_dummy_tlist_references(&mut m.plan, rtoffset, mcx)?;
         let ar = bms_nodes_to_relids(m.apprelids.as_deref());
         let ar = offset_relid_set(ar, rtoffset);
@@ -2931,10 +2934,9 @@ fn set_modifytable_references<'mcx>(
     rtoffset: i32,
 ) -> PgResult<Node<'mcx>> {
     {
-        let m = match &mut plan {
-            Node::ModifyTable(m) => m,
-            _ => return Err(PgError::error("set_modifytable_references: not ModifyTable")),
-        };
+        let m = plan
+            .as_modifytable_mut()
+            .ok_or_else(|| PgError::error("set_modifytable_references: not ModifyTable"))?;
         let has_wco = m.withCheckOptionLists.as_ref().map(|l| !l.is_empty()).unwrap_or(false);
         let has_returning = m.returningLists.as_ref().map(|l| !l.is_empty()).unwrap_or(false);
         let has_onconflict = m.onConflictSet.as_ref().map(|l| !l.is_empty()).unwrap_or(false);
@@ -3125,13 +3127,13 @@ fn extract_query_dependencies_walker(node: &Node, ctx: &mut ExtractDepsCtx) -> P
     // if (node == NULL) return false; — the caller never passes NULL here.
     // Assert(!IsA(node, PlaceHolderVar)); — PlaceHolderVars do not appear in
     // a not-yet-planned query tree.
-    if let Node::Query(query) = node {
+    if let Some(query) = node.as_query() {
         if query.commandType == types_nodes::nodes::CmdType::CMD_UTILITY {
             // This logic must handle any utility command for which parse
             // analysis was nontrivial (cf. stmt_requires_parse_analysis).
             // Notably, CALL requires its own processing.
             if let Some(util) = query.utilityStmt.as_deref() {
-                if let Node::CallStmt(callstmt) = util {
+                if let Some(callstmt) = util.as_callstmt() {
                     // We need not examine funccall, just the transformed exprs.
                     if let Some(fe) = callstmt.funcexpr.as_deref() {
                         if extract_query_dependencies_walker(fe, ctx)? {
@@ -3200,7 +3202,7 @@ fn extract_query_dependencies_walker(node: &Node, ctx: &mut ExtractDepsCtx) -> P
 
     // Extract function dependencies and check for regclass Consts:
     //   fix_expr_common(context, node);
-    if let Node::Expr(e) = node {
+    if let Some(e) = node.as_expr() {
         fix_expr_common_value(ctx, e)?;
     }
     // return expression_tree_walker(node, extract_query_dependencies_walker, context);
@@ -3235,10 +3237,10 @@ fn extract_query_dependencies_walker(node: &Node, ctx: &mut ExtractDepsCtx) -> P
 fn utility_contains_query<'a, 'mcx>(parsetree: Option<&'a Node<'mcx>>) -> Option<&'a Node<'mcx>> {
     let parsetree = parsetree?;
     // switch (nodeTag(parsetree)): each arm pulls out `->query`.
-    let qry = match parsetree {
-        Node::DeclareCursorStmt(stmt) => stmt.query.as_deref(),
-        Node::ExplainStmt(stmt) => stmt.query.as_deref(),
-        Node::CreateTableAsStmt(stmt) => stmt.query.as_deref(),
+    let qry = match parsetree.node_tag() {
+        ntag::T_DeclareCursorStmt => parsetree.expect_declarecursorstmt().query.as_deref(),
+        ntag::T_ExplainStmt => parsetree.expect_explainstmt().query.as_deref(),
+        ntag::T_CreateTableAsStmt => parsetree.expect_createtableasstmt().query.as_deref(),
         // default: return NULL;
         _ => return None,
     };
