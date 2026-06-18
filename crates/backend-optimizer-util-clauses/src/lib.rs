@@ -129,4 +129,63 @@ pub fn init_seams() {
         };
         Ok(relids_empty && !grounded::contain_volatile_functions(Some(clause))?)
     });
+
+    // clauses.c:751 `is_parallel_safe(root, (Node *) exprs/quals)` — the pathnode
+    // create_*_path / gather-path parallel-safety guards. The pathnode-seams
+    // contract passes the tlist/qual as `&[NodeId]` (handles into `root`'s node
+    // arena); the planner globals C reads off `root->glob` / the `init_plans`
+    // chain are threaded here from `PlannerInfo`. Both seam declarations (tlist
+    // and qual) share the identical walk (C wraps the whole `List` as one Node).
+    backend_optimizer_util_pathnode_seams::is_parallel_safe::set(is_parallel_safe_nodes);
+    backend_optimizer_util_pathnode_seams::is_parallel_safe_quals::set(is_parallel_safe_nodes);
+}
+
+/// `is_parallel_safe(root, (Node *) nodes)` (clauses.c:751) over a list of
+/// expression handles. Mirrors the C control flow: short-circuit when the global
+/// `maxParallelHazard` is SAFE and no PARAM_EXEC params were generated, else walk
+/// every element collecting the init-plan `setParam` ids (this query level and
+/// all parents) as parallel-safe. Resolving the `is_parallel_safe` grounded impl
+/// (which takes one `&Expr`) per list element is equivalent to walking the C
+/// `List` node (the walker recurses element-wise). A propagated planner error is
+/// a loud panic (mirrors C's elog/ereport).
+fn is_parallel_safe_nodes(
+    root: &types_pathnodes::PlannerInfo,
+    nodes: &[types_pathnodes::NodeId],
+) -> bool {
+    let glob = root
+        .glob
+        .as_ref()
+        .expect("is_parallel_safe: PlannerInfo.glob is NULL");
+    let max_parallel_hazard_glob = glob.max_parallel_hazard as u8;
+    let param_exec_types_is_empty = glob.param_exec_types.is_empty();
+
+    // `safe_param_ids` = the setParam ids of every init SubPlan at this query
+    // level and all parent levels (computed once; the same set applies to each
+    // list element). C: `for (proot = root; proot; proot = proot->parent_root)
+    // foreach init_plans: concat initsubplan->setParam`.
+    let mut safe_param_ids: alloc::vec::Vec<i32> = alloc::vec::Vec::new();
+    let mut proot: Option<&types_pathnodes::PlannerInfo> = Some(root);
+    while let Some(pr) = proot {
+        for &ip in &pr.init_plans {
+            if let Some(sp) = pr.node(ip).as_subplan() {
+                safe_param_ids.extend(sp.0.setParam.iter().copied());
+            }
+        }
+        proot = pr.parent_root.as_deref();
+    }
+
+    for &nid in nodes {
+        let expr = root.node(nid);
+        let safe = grounded::is_parallel_safe(
+            max_parallel_hazard_glob,
+            param_exec_types_is_empty,
+            safe_param_ids.clone(),
+            Some(expr),
+        )
+        .expect("is_parallel_safe");
+        if !safe {
+            return false;
+        }
+    }
+    true
 }
