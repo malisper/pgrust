@@ -868,7 +868,16 @@ pub fn portal_run(
                  * in the portal's tuplestore. But we don't do that for the
                  * PORTAL_ONE_SELECT case.
                  */
-                if strategy != PORTAL_ONE_SELECT && portal.borrow().holdStore.is_none() {
+                // Bind the borrow result so the portal `Ref` is released before
+                // `fill_portal_store` runs the executor (which `borrow_mut`s the
+                // portal via the tuplestore receiver). A bare `portal.borrow()`
+                // in the `if` condition keeps the temporary alive for the whole
+                // block, double-borrowing the portal.
+                let need_fill = strategy != PORTAL_ONE_SELECT && {
+                    let hold_none = portal.borrow().holdStore.is_none();
+                    hold_none
+                };
+                if need_fill {
                     fill_portal_store(portal, is_top_level)?;
                 }
 
@@ -1433,33 +1442,49 @@ fn portal_run_multi(
             }
 
             let params = portal.borrow().portalParams.clone();
-            if can_set_tag {
-                /* statement can set tag string */
-                let p = portal.borrow();
-                let portal_context = p.portalContext.as_ref().expect("portal has no portalContext");
-                let stmts = p.stmts.as_deref().unwrap_or(&[]);
-                process_query(
-                    portal_context,
-                    &stmts[idx],
-                    &source_text,
-                    params.clone(),
-                    dest,
-                    qc.as_deref_mut(),
-                )?;
-            } else {
-                /* stmt added by rewrite cannot set tag */
-                let p = portal.borrow();
-                let portal_context = p.portalContext.as_ref().expect("portal has no portalContext");
-                let stmts = p.stmts.as_deref().unwrap_or(&[]);
-                process_query(
-                    portal_context,
-                    &stmts[idx],
-                    &source_text,
-                    params.clone(),
-                    altdest,
-                    None,
-                )?;
-            }
+
+            // process_query runs the executor, which (for a RETURNING/MOD_WITH
+            // tuplestore dest) re-borrows the portal mutably to append to
+            // holdStore. So we must NOT hold a PortalData borrow across the call.
+            // Move the (stable, unmutated) portalContext + stmts out, run, and
+            // restore — mirroring C's stable `portal->portalContext`/`->stmts`
+            // pointers that the executor never touches.
+            let portal_context = portal
+                .borrow_mut()
+                .portalContext
+                .take()
+                .expect("portal has no portalContext");
+            let stmts = portal.borrow_mut().stmts.take().unwrap_or_default();
+
+            let run_result = (|| {
+                if can_set_tag {
+                    /* statement can set tag string */
+                    process_query(
+                        &portal_context,
+                        &stmts[idx],
+                        &source_text,
+                        params.clone(),
+                        dest,
+                        qc.as_deref_mut(),
+                    )
+                } else {
+                    /* stmt added by rewrite cannot set tag */
+                    process_query(
+                        &portal_context,
+                        &stmts[idx],
+                        &source_text,
+                        params.clone(),
+                        altdest,
+                        None,
+                    )
+                }
+            })();
+
+            // Restore the moved-out fields before propagating any error so the
+            // portal stays well-formed for cleanup/MarkPortalFailed.
+            portal.borrow_mut().portalContext = Some(portal_context);
+            portal.borrow_mut().stmts = Some(stmts);
+            run_result?;
 
             if postgres_seam::log_executor_stats::call() {
                 postgres_seam::show_usage::call("EXECUTOR STATISTICS");
