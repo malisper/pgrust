@@ -319,9 +319,9 @@ pub fn ExecInitValuesScan<'mcx>(
 ) -> PgResult<mcx::PgBox<'mcx, ValuesScanState<'mcx>>> {
     let mcx = estate.es_query_cxt;
 
-    let plan: &'mcx ValuesScan<'mcx> = match node {
-        Node::ValuesScan(v) => v,
-        other => panic!("castNode(ValuesScan, node) failed: {other:?}"),
+    let plan: &'mcx ValuesScan<'mcx> = match node.as_valuesscan() {
+        Some(v) => v,
+        None => panic!("castNode(ValuesScan, node) failed: {node:?}"),
     };
 
     // ValuesScan should not have any children.
@@ -713,7 +713,7 @@ fn ExecScan<'mcx>(
 #[inline]
 fn scan_scanrelid(node: &ValuesScanState<'_>) -> u32 {
     match node.ss.ps.plan {
-        Some(Node::ValuesScan(v)) => v.scan.scanrelid,
+        Some(p) if p.is_valuesscan() => p.expect_valuesscan().scan.scanrelid,
         Some(other) => panic!("ValuesScanState.plan is not a ValuesScan: {other:?}"),
         None => panic!("ValuesScanState.plan is not set"),
     }
