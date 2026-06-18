@@ -135,6 +135,28 @@ pub fn domain_check<'mcx>(
     typcache_seams::domain_check_input::call(value, isnull, domain_type)
 }
 
+/// `domain_check_safe(value, isnull, domainType, extra, mcxt, escontext)` — the
+/// error-safe variant of [`domain_check`] (domains.c). C is a thin
+/// `return domain_check_internal(..., escontext)`; it returns `false` (with the
+/// `ErrorSaveContext` populated) when a constraint violation is captured softly,
+/// `true` otherwise.
+///
+/// The owned-model `domain_check_input` engine is the hard-error variant
+/// (`escontext == NULL`); a soft `ErrorSaveContext` is not yet carried across
+/// the typcache seam (that soft path belongs to the typcache owner, like every
+/// other adt `*_safe`). With no soft context the C `escontext == NULL` reduces
+/// to `domain_check`: an `Err` propagates the hard `ereport(ERROR)`, and success
+/// is `true` (`!SOFT_ERROR_OCCURRED(NULL)`).
+pub fn domain_check_safe<'mcx>(
+    _mcx: Mcx<'mcx>,
+    value: &Datum<'mcx>,
+    isnull: bool,
+    domain_type: u32,
+) -> PgResult<bool> {
+    typcache_seams::domain_check_input::call(value, isnull, domain_type)?;
+    Ok(true)
+}
+
 /// `errdatatype(datatypeOid)` — errcontext helper naming the domain type.
 ///
 /// In C, `errdatatype` augments the *current* `ErrorData` in flight: it looks
