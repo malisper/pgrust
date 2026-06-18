@@ -106,6 +106,9 @@ pub fn init_seams() {
     // `pqsignal(SIGTERM, ...)` (e.g. the logical-replication launcher).
     s::die_signal_handler::set(|| interrupt::die as fn(i32));
     s::statement_cancel_handler::set(interrupt::StatementCancelHandler);
+    // Returns the SIGFPE `FloatExceptionHandler` fn-pointer so callers can
+    // install it via `pqsignal(SIGFPE, ...)` (e.g. the slot-sync worker).
+    s::float_exception_handler::set(|| interrupt::float_exception_handler_fn as fn(i32));
 
     // --- F5: logging / duration / resource usage ---
     s::log_statement_is_all::set(logging::log_statement_is_all);

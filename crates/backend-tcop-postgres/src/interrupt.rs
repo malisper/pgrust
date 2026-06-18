@@ -314,6 +314,16 @@ pub fn FloatExceptionHandler(_postgres_signal_arg: i32) -> PgResult<()> {
     Ok(())
 }
 
+/// `pqsigfunc`-shaped wrapper for [`FloatExceptionHandler`]: the C handler is
+/// `void (*)(int)` and `ereport(ERROR)`s (longjmping out via the active
+/// `PG_exception_stack`). The Rust body returns `PgResult<()>`; a genuine
+/// SIGFPE surfaces the error, so unwrap it (mirroring the C longjmp) rather
+/// than swallow it. Returned by the `float_exception_handler` seam so callers
+/// can install it with `pqsignal(SIGFPE, ...)`.
+pub fn float_exception_handler_fn(postgres_signal_arg: i32) {
+    FloatExceptionHandler(postgres_signal_arg).expect("FloatExceptionHandler");
+}
+
 /// `HandleRecoveryConflictInterrupt(ProcSignalReason reason)` (postgres.c:3088)
 /// — tell the next `CHECK_FOR_INTERRUPTS()` to check for a particular type of
 /// recovery conflict. Runs in a SIGUSR1 handler. Async-signal-safe, infallible.

@@ -125,6 +125,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `FloatExceptionHandler(SIGNAL_ARGS)` (tcop/postgres.c) — the SIGFPE
+    /// handler: `ereport(ERROR, ...)` reporting an unexpected arithmetic
+    /// exception (it longjmps out of the handler in C). Returns the handler
+    /// `fn(i32)` so callers can install it with `pqsignal(SIGFPE, ...)`; tcop
+    /// owns the body (which surfaces the `ereport(ERROR)` via the active
+    /// `PG_exception_stack`), so this resolves only once tcop lands.
+    pub fn float_exception_handler() -> fn(i32)
+);
+
+seam_core::seam!(
     /// `pg_parse_query(query_string)` (tcop/postgres.c) — run the raw parser on
     /// a single SQL string, returning the `List *` of `RawStmt *` as their
     /// opaque handles (the raw parse trees are owned by the parser). The IMPORT

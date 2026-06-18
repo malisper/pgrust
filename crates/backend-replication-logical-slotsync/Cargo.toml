@@ -55,3 +55,9 @@ backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-sea
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 backend-utils-error-seams = { path = "../backend-utils-error-seams" }
 backend-utils-adt-quote-seams = { path = "../backend-utils-adt-quote-seams" }
+backend-storage-ipc-procsignal-seams = { path = "../backend-storage-ipc-procsignal-seams" }
+
+# signal-handler install block (ReplSlotSyncWorkerMain, slotsync.c:1413-1421)
+port-pqsignal-seams = { path = "../port-pqsignal-seams" }
+types-signal = { path = "../types-signal" }
+libc = "0.2"

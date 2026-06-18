@@ -1231,6 +1231,58 @@ fn reset_syncing_flag() -> PgResult<()> {
     Ok(())
 }
 
+/// `pqsigfunc`-shaped wrapper for `SignalHandlerForConfigReload(SIGNAL_ARGS)`
+/// (interrupt.c): the SIGHUP handler. C's handler takes the unused
+/// `postgres_signal_arg`; the ported `backend_postmaster_interrupt`
+/// entry point is `void f(void)`, so adapt it to the `fn(i32)` `pqsignal`
+/// expects.
+fn signal_handler_for_config_reload(_postgres_signal_arg: i32) {
+    backend_postmaster_interrupt::SignalHandlerForConfigReload();
+}
+
+/// The slot-sync worker's signal-handler install block
+/// (`ReplSlotSyncWorkerMain`, slotsync.c:1413-1421): the eight `pqsignal()`
+/// calls run once the worker entry is published and the exception stack is
+/// armed, before `InitializeTimeouts()` and the signal unblock. The named
+/// handlers come from their real owners via seams (config-reload from the
+/// merged interrupt unit, `StatementCancelHandler`/`die`/`FloatExceptionHandler`
+/// from tcop's postgres.c, `procsignal_sigusr1_handler` from procsignal.c).
+fn setup_signal_handlers() -> PgResult<()> {
+    use types_signal::SigHandler;
+    let pqsignal = port_pqsignal_seams::pqsignal::call;
+
+    // pqsignal(SIGHUP, SignalHandlerForConfigReload);
+    pqsignal(
+        libc::SIGHUP,
+        SigHandler::Handler(signal_handler_for_config_reload),
+    );
+    // pqsignal(SIGINT, StatementCancelHandler);
+    pqsignal(
+        libc::SIGINT,
+        SigHandler::Handler(postgres::statement_cancel_handler::call),
+    );
+    // pqsignal(SIGTERM, die);
+    pqsignal(libc::SIGTERM, SigHandler::Handler(postgres::die::call));
+    // pqsignal(SIGFPE, FloatExceptionHandler);
+    pqsignal(
+        libc::SIGFPE,
+        SigHandler::Handler(postgres::float_exception_handler::call()),
+    );
+    // pqsignal(SIGUSR1, procsignal_sigusr1_handler);
+    pqsignal(
+        libc::SIGUSR1,
+        SigHandler::Handler(backend_storage_ipc_procsignal_seams::procsignal_sigusr1_handler::call),
+    );
+    // pqsignal(SIGUSR2, SIG_IGN);
+    pqsignal(libc::SIGUSR2, SigHandler::Ignore);
+    // pqsignal(SIGPIPE, SIG_IGN);
+    pqsignal(libc::SIGPIPE, SigHandler::Ignore);
+    // pqsignal(SIGCHLD, SIG_DFL);
+    pqsignal(libc::SIGCHLD, SigHandler::Default);
+
+    Ok(())
+}
+
 // ===========================================================================
 // ReplSlotSyncWorkerMain
 // ===========================================================================
@@ -1592,6 +1644,13 @@ pub fn init_seams() {
     s::repl_slot_sync_worker_main::set(ReplSlotSyncWorkerMain);
     s::slot_sync_shmem_size::set(SlotSyncShmemSize);
     s::slot_sync_shmem_init::set(SlotSyncShmemInit);
+
+    // The slot-sync worker's signal-handler install block (slotsync.c:1413-1421).
+    // The seam is declared on `backend-utils-init-miscinit-seams` so the worker
+    // bootstrap (which sequences miscinit's InitProcess/BaseInit/InitializeTimeouts
+    // through that crate) can drive it; its real body lives here in slotsync.c's
+    // owner (cross-crate install, the C-function's true home).
+    miscinit::setup_signal_handlers::set(setup_signal_handlers);
 
     // The postmaster's LaunchMissingBackgroundProcesses reads these two slotsync
     // predicates through `backend-postmaster-postmaster-seams` (plain `-> bool`,

@@ -1433,18 +1433,17 @@ mod recurrence_guard {
         // `shmem_request_hook` pointer, NULL in core PG); only the dynamic-loader
         // leg below remains owner-unported.
         ("backend_utils_fmgr_dfmgr", "load_archive_module_init"),
-        // DESIGN_DEBT: owner-unported (narrowed). `setup_signal_handlers` is the
-        // slot-sync worker's `pqsignal(SIGHUP, SignalHandlerForConfigReload)`
-        // ... block (slotsync.c:1515-1522). interrupt.c (SignalHandlerForConfigReload)
-        // and procsignal.c (procsignal_sigusr1_handler) are now BOTH merged, but the
-        // postgres.c handler bodies it still wires — `die` / `StatementCancelHandler`
-        // / `FloatExceptionHandler` — exist only as decls in
-        // backend-tcop-postgres-seams whose owner backend-tcop-postgres is CATALOG
-        // `todo`, so there is still no real body to install. Becomes a real install
-        // when postgres.c lands. (The other 8 slot-sync bootstrap seams declared
-        // alongside it ARE installed in miscinit's init_seams by delegating to their
-        // now-ported owners.)
-        ("backend_utils_init_miscinit", "setup_signal_handlers"),
+        // RESOLVED: `setup_signal_handlers` (the slot-sync worker's
+        // `pqsignal(...)` block, slotsync.c:1413-1421) is now installed by the
+        // slotsync owner's init_seams() (cross-crate install — the C function's
+        // true home is slotsync.c, not miscinit.c). interrupt.c
+        // (SignalHandlerForConfigReload) and procsignal.c
+        // (procsignal_sigusr1_handler) are merged, and the postgres.c handler
+        // bodies it wires — `die` / `StatementCancelHandler` /
+        // `FloatExceptionHandler` — are now all installed by the now-merged
+        // backend-tcop-postgres unit (a `float_exception_handler` seam returning
+        // the SIGFPE handler fn-pointer was added alongside `die_signal_handler`).
+        // Allowlist entry removed.
         // RETIRED (task #161): `record_from_values` is now installed by funcapi's
         // init_seams(). The composite/record-Datum carrier bridge landed.
         // NOTE: `value_srf_unported` is now INSTALLED by funcapi's init_seams() as
