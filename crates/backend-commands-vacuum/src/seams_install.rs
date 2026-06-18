@@ -36,6 +36,25 @@ pub fn init_seams() {
     vacuum::set_vacuum_cost_balance_local::set(crate::set_vacuum_cost_balance_local_impl);
     vacuum::add_vacuum_cost_balance_local::set(crate::add_vacuum_cost_balance_local_impl);
 
+    // VacuumSharedCostBalance / VacuumActiveNWorkers — the parallel-vacuum
+    // DSM-shared cost-state pointers. vacuum.c owns these globals; the leader
+    // and worker (vacuumparallel.c) install the shared atomics handle through
+    // the enable seams, and both vacuum.c's compute_parallel_delay and the
+    // worker setup atomic-mutate the shared cell. All read/written here against
+    // the one VACUUM_SHARED_COST_STATE thread-local handle.
+    vacuum::set_vacuum_shared_cost_balance_enable::set(
+        crate::set_vacuum_shared_cost_balance_enable_impl,
+    );
+    vacuum::set_vacuum_active_nworkers_enable::set(crate::set_vacuum_active_nworkers_enable_impl);
+    vacuum::vacuum_shared_cost_balance_is_set::set(crate::vacuum_shared_cost_balance_is_set_impl);
+    vacuum::vacuum_active_nworkers_is_set::set(crate::vacuum_active_nworkers_is_set_impl);
+    vacuum::vacuum_active_nworkers_add::set(crate::vacuum_active_nworkers_add_impl);
+    vacuum::vacuum_active_nworkers_sub::set(crate::vacuum_active_nworkers_sub_impl);
+    vacuum::read_vacuum_active_nworkers::set(crate::read_vacuum_active_nworkers_impl);
+    vacuum::vacuum_shared_cost_balance_read::set(crate::vacuum_shared_cost_balance_read_impl);
+    vacuum::shared_cost_balance_add_fetch::set(crate::shared_cost_balance_add_fetch_impl);
+    vacuum::shared_cost_balance_sub_fetch::set(crate::shared_cost_balance_sub_fetch_impl);
+
     // vacuumparallel.c's index-vacuum bridges. The parallel coordinator (leader
     // and re-opened-by-OID workers) drives each index through these same vacuum.c
     // wrappers; they pass an explicit lock mode (workers use RowExclusiveLock).

@@ -2602,6 +2602,33 @@ thread_local! {
     static VACUUM_COST_ACTIVE: Cell<bool> = const { Cell::new(false) };
     static VACUUM_COST_BALANCE: Cell<i32> = const { Cell::new(0) };
     static VACUUM_COST_BALANCE_LOCAL: Cell<i32> = const { Cell::new(0) };
+    /// `pg_atomic_uint32 *VacuumSharedCostBalance;` and
+    /// `pg_atomic_uint32 *VacuumActiveNWorkers;` (vacuum.c globals). Both point
+    /// into the same parallel-vacuum DSM shared cost-state cell, so one shared
+    /// handle (`None` == both `NULL`, the non-parallel case) models the pair —
+    /// the leader/worker enable seams install it, vacuum.c's
+    /// `compute_parallel_delay` and vacuumparallel.c's worker setup
+    /// atomic-mutate it. A backend is in at most one parallel vacuum at a time,
+    /// so a single cell is exact.
+    static VACUUM_SHARED_COST_STATE:
+        core::cell::RefCell<Option<alloc::sync::Arc<types_vacuum::vacuumparallel::VacuumSharedCostState>>> =
+        const { core::cell::RefCell::new(None) };
+}
+
+/// Run `f` against the shared cost-state handle (the `VacuumSharedCostBalance` /
+/// `VacuumActiveNWorkers` globals), or panic loudly if it is `NULL` — exactly
+/// like dereferencing the C pointer when the caller has already checked it is
+/// non-NULL (the `vacuum_*_is_set` guards gate every mutating call).
+fn with_shared_cost_state<R>(
+    f: impl FnOnce(&types_vacuum::vacuumparallel::VacuumSharedCostState) -> R,
+) -> R {
+    VACUUM_SHARED_COST_STATE.with(|s| {
+        let s = s.borrow();
+        let arc = s
+            .as_ref()
+            .expect("VacuumSharedCostBalance/VacuumActiveNWorkers is NULL");
+        f(arc)
+    })
 }
 
 /* =========================================================================
@@ -2691,4 +2718,74 @@ fn add_vacuum_cost_balance_local_impl(v: i32) -> PgResult<i32> {
         c.set(n);
         n
     }))
+}
+
+/* =========================================================================
+ * VacuumSharedCostBalance / VacuumActiveNWorkers — the DSM-shared cost-state
+ * pointers. The leader/worker enable seams install the shared handle; vacuum.c
+ * (compute_parallel_delay) and vacuumparallel.c atomic-mutate it.
+ * ========================================================================= */
+
+use types_vacuum::vacuumparallel::VacuumSharedCostState;
+
+/// `VacuumSharedCostBalance = enable ? &shared->cost_balance : NULL`.
+fn set_vacuum_shared_cost_balance_enable_impl(
+    shared: Option<alloc::sync::Arc<VacuumSharedCostState>>,
+) -> PgResult<()> {
+    VACUUM_SHARED_COST_STATE.with(|s| *s.borrow_mut() = shared);
+    Ok(())
+}
+
+/// `VacuumActiveNWorkers = enable ? &shared->active_nworkers : NULL`. Both
+/// globals alias the one shared cell, so this and
+/// [`set_vacuum_shared_cost_balance_enable_impl`] install/clear the same handle.
+fn set_vacuum_active_nworkers_enable_impl(
+    shared: Option<alloc::sync::Arc<VacuumSharedCostState>>,
+) -> PgResult<()> {
+    VACUUM_SHARED_COST_STATE.with(|s| *s.borrow_mut() = shared);
+    Ok(())
+}
+
+/// `VacuumSharedCostBalance != NULL`.
+fn vacuum_shared_cost_balance_is_set_impl() -> PgResult<bool> {
+    Ok(VACUUM_SHARED_COST_STATE.with(|s| s.borrow().is_some()))
+}
+
+/// `VacuumActiveNWorkers != NULL` (same handle as the cost balance).
+fn vacuum_active_nworkers_is_set_impl() -> PgResult<bool> {
+    Ok(VACUUM_SHARED_COST_STATE.with(|s| s.borrow().is_some()))
+}
+
+/// `pg_atomic_add_fetch_u32(VacuumActiveNWorkers, v)` (return discarded by the
+/// caller).
+fn vacuum_active_nworkers_add_impl(v: u32) -> PgResult<()> {
+    with_shared_cost_state(|s| s.active_nworkers_add(v));
+    Ok(())
+}
+
+/// `pg_atomic_sub_fetch_u32(VacuumActiveNWorkers, v)`.
+fn vacuum_active_nworkers_sub_impl(v: u32) -> PgResult<()> {
+    with_shared_cost_state(|s| s.active_nworkers_sub(v));
+    Ok(())
+}
+
+/// `pg_atomic_read_u32(VacuumActiveNWorkers)` (compute_parallel_delay).
+fn read_vacuum_active_nworkers_impl() -> PgResult<u32> {
+    Ok(with_shared_cost_state(|s| s.active_nworkers_read()))
+}
+
+/// `pg_atomic_read_u32(VacuumSharedCostBalance)` — carry the balance back to the
+/// heap scan when disabling shared costing.
+fn vacuum_shared_cost_balance_read_impl() -> PgResult<u32> {
+    Ok(with_shared_cost_state(|s| s.cost_balance_read()))
+}
+
+/// `pg_atomic_add_fetch_u32(VacuumSharedCostBalance, v)` (compute_parallel_delay).
+fn shared_cost_balance_add_fetch_impl(v: i32) -> PgResult<u32> {
+    Ok(with_shared_cost_state(|s| s.cost_balance_add_fetch(v as u32)))
+}
+
+/// `pg_atomic_sub_fetch_u32(VacuumSharedCostBalance, v)` (compute_parallel_delay).
+fn shared_cost_balance_sub_fetch_impl(v: i32) -> PgResult<u32> {
+    Ok(with_shared_cost_state(|s| s.cost_balance_sub_fetch(v as u32)))
 }

@@ -1874,13 +1874,6 @@ mod recurrence_guard {
         //    blocks vacuum.c's own get_access_strategy_with_size (excluded as an
         //    outward call there). → free_access_strategy_pv,
         //    get_access_strategy_with_size_basvac, get_access_strategy_buffer_count.
-        //  * VacuumSharedCostBalance / VacuumActiveNWorkers DSM atomics: these
-        //    are `pg_atomic_uint32*` pointers into the PVShared DSM struct, set by
-        //    vacuumparallel and read by both vacuumparallel and vacuum.c's
-        //    compute_parallel_delay. No shared-memory owner installs the pointer
-        //    yet. → set_vacuum_shared_cost_balance_enable,
-        //    set_vacuum_active_nworkers_enable, vacuum_active_nworkers_{is_set,add,sub},
-        //    vacuum_shared_cost_balance_read.
         //  * #4 by-OID heap relation reopen (rides the vacuumlazy-mcx work): the
         //    worker reopens the heap + indexes BY OID and the seams model the
         //    relation as an opaque Oid handle; there is no provider returning the
@@ -1893,33 +1886,26 @@ mod recurrence_guard {
         //    → push_parallel_vacuum_error_context, pop_parallel_vacuum_error_context.
         //  * MyProc->statusFlags / PROC_IN_VACUUM accessor (UNPORTED).
         //    → my_proc_in_vacuum_only.
-        //  * per-worker DSM instrument usage slots: backend-executor-instrument
-        //    uses an owned-snapshot model (InstrStartParallelQuery returns a
-        //    snapshot the caller holds), not vacuumparallel's per-worker
-        //    buffer_usage[]/wal_usage[] DSM arrays; the start/end/accum seams drop
-        //    the snapshot/usage and can't be faithfully installed without
-        //    re-signing them to carry it. → instr_{start,accum,end}_parallel_query_pv.
+        //
+        // RESOLVED (vp-dsm lane): the VacuumSharedCostBalance/VacuumActiveNWorkers
+        // DSM atomics and the per-worker DSM instrument usage slots are now
+        // installed. The shared cost-state is modeled as a genuinely-shared
+        // `Arc<VacuumSharedCostState>` (two `AtomicU32`s): the leader/worker
+        // enable seams point vacuum.c's globals at it, both atomic-mutate the same
+        // cell. The instrument slots live in vacuumparallel's DSM side-table and
+        // delegate the buffer/WAL math to backend-executor-instrument.
         ("backend_commands_vacuum", "am_parallel_vacuum_options"),
         ("backend_commands_vacuum", "am_use_maintenance_work_mem"),
         ("backend_commands_vacuum", "free_access_strategy_pv"),
         ("backend_commands_vacuum", "get_access_strategy_buffer_count"),
         ("backend_commands_vacuum", "get_access_strategy_with_size_basvac"),
-        ("backend_commands_vacuum", "instr_accum_parallel_query_pv"),
-        ("backend_commands_vacuum", "instr_end_parallel_query_pv"),
-        ("backend_commands_vacuum", "instr_start_parallel_query_pv"),
         ("backend_commands_vacuum", "my_proc_in_vacuum_only"),
         ("backend_commands_vacuum", "pop_parallel_vacuum_error_context"),
         ("backend_commands_vacuum", "push_parallel_vacuum_error_context"),
         ("backend_commands_vacuum", "relation_get_namespace_name_pv"),
         ("backend_commands_vacuum", "relation_get_number_of_blocks_pv"),
-        ("backend_commands_vacuum", "set_vacuum_active_nworkers_enable"),
-        ("backend_commands_vacuum", "set_vacuum_shared_cost_balance_enable"),
         ("backend_commands_vacuum", "table_close_lock"),
         ("backend_commands_vacuum", "table_open_lock"),
-        ("backend_commands_vacuum", "vacuum_active_nworkers_add"),
-        ("backend_commands_vacuum", "vacuum_active_nworkers_is_set"),
-        ("backend_commands_vacuum", "vacuum_active_nworkers_sub"),
-        ("backend_commands_vacuum", "vacuum_shared_cost_balance_read"),
 
         // DESIGN_DEBT (TD-SUBSCRIPTION-CHECKRELKIND): CheckSubscriptionRelkind
         // is declared here but actually lives in executor/execReplication.c

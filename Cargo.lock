@@ -7929,6 +7929,7 @@ dependencies = [
  "backend-access-transam-parallel",
  "backend-access-transam-parallel-rt-seams",
  "backend-commands-vacuum-seams",
+ "backend-executor-instrument",
  "backend-tcop-postgres",
  "backend-utils-activity-small",
  "backend-utils-activity-status",

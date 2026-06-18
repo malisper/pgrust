@@ -75,7 +75,9 @@ use types_vacuum::vacuumlazy::{
 };
 use types_vacuum::vacuumparallel::{
     BufferAccessStrategyHandle, IndexBulkDeleteResult, IndexVacuumInfo, VacDeadItemsInfo,
+    VacuumSharedCostState,
 };
+use alloc::sync::Arc;
 
 use backend_commands_vacuum_seams as vac;
 use backend_access_heap_vacuumlazy_seams as vl;
@@ -83,6 +85,7 @@ use backend_access_transam_parallel as p;
 use backend_access_transam_parallel_rt_seams as prt;
 
 use backend_access_common_tidstore as tidstore;
+use backend_executor_instrument as instrument;
 use backend_tcop_postgres::globals as tcop;
 use backend_utils_init_small::globals as initglobals;
 use backend_utils_activity_status as activity_status;
@@ -142,8 +145,13 @@ struct PVShared {
     estimated_count: bool,
     maintenance_work_mem_worker: i32,
     ring_nbuffers: i32,
-    cost_balance: core::sync::atomic::AtomicU32,
-    active_nworkers: core::sync::atomic::AtomicU32,
+    /// `pg_atomic_uint32 cost_balance` + `pg_atomic_uint32 active_nworkers` —
+    /// the genuinely-shared cost-state cell that lives in the DSM segment. Held
+    /// by `Arc` so the leader's enable-seam hands the SAME atomics to the
+    /// `VacuumSharedCostBalance`/`VacuumActiveNWorkers` globals, and the worker
+    /// codepath attaches to the same cell (faithful single-process image of the
+    /// shared DSM page).
+    cost_state: Arc<VacuumSharedCostState>,
     idx: core::sync::atomic::AtomicU32,
     dead_items_dsa_handle: DsaHandle,
     dead_items_handle: DsaPointer,
@@ -160,8 +168,7 @@ impl Default for PVShared {
             estimated_count: false,
             maintenance_work_mem_worker: 0,
             ring_nbuffers: 0,
-            cost_balance: core::sync::atomic::AtomicU32::new(0),
-            active_nworkers: core::sync::atomic::AtomicU32::new(0),
+            cost_state: VacuumSharedCostState::new(0, 0),
             idx: core::sync::atomic::AtomicU32::new(0),
             dead_items_dsa_handle: 0,
             dead_items_handle: 0,
@@ -281,20 +288,36 @@ fn with_state<R>(
 // =======================================================================
 
 /// Snapshot of the worker-visible fields of `PVShared`
-/// (`PARALLEL_VACUUM_KEY_SHARED`). The atomics are snapshotted by value here;
-/// the worker re-installs `VacuumSharedCostBalance`/`VacuumActiveNWorkers`
-/// pointing at the leader-shared atomics via the cost-balance enable seams.
-#[derive(Clone, Copy, Default)]
+/// (`PARALLEL_VACUUM_KEY_SHARED`). The scalar fields are snapshotted by value;
+/// the shared cost-state cell crosses by `Arc` clone so the worker codepath
+/// gets the SAME atomics the leader allocated (the genuinely-shared DSM page),
+/// and re-installs `VacuumSharedCostBalance`/`VacuumActiveNWorkers` pointing at
+/// them via the cost-balance enable seams.
+#[derive(Clone)]
 struct SharedSnapshot {
     relid: Oid,
     elevel: i32,
     queryid: i64,
     maintenance_work_mem_worker: i32,
     ring_nbuffers: i32,
-    cost_balance: u32,
-    active_nworkers: u32,
+    cost_state: Arc<VacuumSharedCostState>,
     dead_items_dsa_handle: DsaHandle,
     dead_items_handle: DsaPointer,
+}
+
+impl Default for SharedSnapshot {
+    fn default() -> Self {
+        SharedSnapshot {
+            relid: Oid::from(0u32),
+            elevel: 0,
+            queryid: 0,
+            maintenance_work_mem_worker: 0,
+            ring_nbuffers: 0,
+            cost_state: VacuumSharedCostState::new(0, 0),
+            dead_items_dsa_handle: 0,
+            dead_items_handle: 0,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -305,10 +328,49 @@ struct DsmContents {
     indstats: Vec<PVIndStats>,
     /// `PARALLEL_VACUUM_KEY_QUERY_TEXT` (`None` == no `debug_query_string`).
     query_text: Option<String>,
+    /// `PARALLEL_VACUUM_KEY_BUFFER_USAGE` — per-worker `BufferUsage` slots in
+    /// the DSM. The worker writes its own slot in `InstrEndParallelQuery`; the
+    /// leader reads slot `i` in `InstrAccumParallelQuery`.
+    buffer_usage: Vec<BufferUsage>,
+    /// `PARALLEL_VACUUM_KEY_WAL_USAGE` — per-worker `WalUsage` slots in the DSM.
+    wal_usage: Vec<WalUsage>,
 }
 
 thread_local! {
     static DSM: RefCell<DsmContents> = RefCell::new(DsmContents::default());
+    /// C's file-local `save_pgBufferUsage` / `save_pgWalUsage`: the
+    /// `InstrStartParallelQuery` snapshot held by this backend between Start and
+    /// End. `None` until `instr_start_parallel_query_pv` runs.
+    static PV_INSTR_SNAPSHOT: core::cell::Cell<Option<instrument::ParallelQueryUsageSnapshot>> =
+        const { core::cell::Cell::new(None) };
+}
+
+/// `InstrStartParallelQuery()` — note current usage; mirror C's file-local save.
+fn instr_start_parallel_query_pv_impl() -> PgResult<()> {
+    let snap = instrument::InstrStartParallelQuery();
+    PV_INSTR_SNAPSHOT.with(|c| c.set(Some(snap)));
+    Ok(())
+}
+
+/// `InstrEndParallelQuery(&buffer_usage[worker], &wal_usage[worker])` — the
+/// worker stores its deltas (since the saved snapshot) into its DSM slot.
+fn instr_end_parallel_query_pv_impl(worker: i32) -> PgResult<()> {
+    let snap = PV_INSTR_SNAPSHOT
+        .with(|c| c.get())
+        .expect("InstrEndParallelQuery without a prior InstrStartParallelQuery");
+    let mut buf = BufferUsage::default();
+    let mut wal = WalUsage::default();
+    instrument::InstrEndParallelQuery(snap, &mut buf, &mut wal);
+    dsm_store_worker_usage(worker as usize, buf, wal);
+    Ok(())
+}
+
+/// `InstrAccumParallelQuery(&pvs->buffer_usage[i], &pvs->wal_usage[i])` — leader
+/// accumulates worker `i`'s DSM slot into its own running stats.
+fn instr_accum_parallel_query_pv_impl(worker: i32) -> PgResult<()> {
+    let (buf, wal) = dsm_load_worker_usage(worker as usize);
+    instrument::InstrAccumParallelQuery(&buf, &wal);
+    Ok(())
 }
 
 fn dsm_store_shared(s: SharedSnapshot) {
@@ -329,13 +391,43 @@ fn dsm_store_query_text(q: Option<String>) {
     DSM.with(|d| d.borrow_mut().query_text = q);
 }
 fn dsm_lookup_shared() -> SharedSnapshot {
-    DSM.with(|d| d.borrow().shared)
+    DSM.with(|d| d.borrow().shared.clone())
 }
 fn dsm_lookup_indstats() -> Vec<PVIndStats> {
     DSM.with(|d| d.borrow().indstats.clone())
 }
 fn dsm_lookup_query_text() -> Option<String> {
     DSM.with(|d| d.borrow().query_text.clone())
+}
+/// Allocate the per-worker `BufferUsage`/`WalUsage` DSM slots (zeroed); the
+/// leader calls this so workers and the leader-accum path share the same slots.
+fn dsm_alloc_usage_slots(nworkers: usize) {
+    DSM.with(|d| {
+        let mut d = d.borrow_mut();
+        d.buffer_usage = alloc::vec![BufferUsage::default(); nworkers];
+        d.wal_usage = alloc::vec![WalUsage::default(); nworkers];
+    });
+}
+/// Worker writes its `BufferUsage`/`WalUsage` deltas into its own DSM slot.
+fn dsm_store_worker_usage(worker: usize, buf: BufferUsage, wal: WalUsage) {
+    DSM.with(|d| {
+        let mut d = d.borrow_mut();
+        if worker < d.buffer_usage.len() {
+            d.buffer_usage[worker] = buf;
+            d.wal_usage[worker] = wal;
+        }
+    });
+}
+/// Leader reads worker `i`'s `BufferUsage`/`WalUsage` DSM slot.
+fn dsm_load_worker_usage(worker: usize) -> (BufferUsage, WalUsage) {
+    DSM.with(|d| {
+        let d = d.borrow();
+        if worker < d.buffer_usage.len() {
+            (d.buffer_usage[worker], d.wal_usage[worker])
+        } else {
+            (BufferUsage::default(), WalUsage::default())
+        }
+    })
 }
 
 // =======================================================================
@@ -529,8 +621,15 @@ fn parallel_vacuum_init(args: ParallelVacuumInitArgs) -> PgResult<ParallelVacuum
     /* Use the same buffer size for all workers */
     shared.ring_nbuffers = vac::get_access_strategy_buffer_count::call(bstrategy)?;
 
-    shared.cost_balance.store(0, core::sync::atomic::Ordering::Relaxed);
-    shared.active_nworkers.store(0, core::sync::atomic::Ordering::Relaxed);
+    /* pg_atomic_init_u32(&(shared->cost_balance), 0); ...active_nworkers, ...idx */
+    shared
+        .cost_state
+        .cost_balance
+        .store(0, core::sync::atomic::Ordering::Relaxed);
+    shared
+        .cost_state
+        .active_nworkers
+        .store(0, core::sync::atomic::Ordering::Relaxed);
     shared.idx.store(0, core::sync::atomic::Ordering::Relaxed);
 
     /* shm_toc_insert(toc, PARALLEL_VACUUM_KEY_SHARED, shared) */
@@ -543,6 +642,9 @@ fn parallel_vacuum_init(args: ParallelVacuumInitArgs) -> PgResult<ParallelVacuum
      */
     pvs.buffer_usage = alloc::vec![BufferUsage::default(); pcxt_nworkers as usize];
     pvs.wal_usage = alloc::vec![WalUsage::default(); pcxt_nworkers as usize];
+    /* The per-worker slots live in the DSM segment; the worker writes its slot
+     * and the leader reads slot i to accumulate. */
+    dsm_alloc_usage_slots(pcxt_nworkers as usize);
 
     /* Store query string for workers */
     dsm_store_query_text(debug_query);
@@ -721,10 +823,7 @@ fn shared_snapshot(shared: &PVShared) -> SharedSnapshot {
         queryid: shared.queryid,
         maintenance_work_mem_worker: shared.maintenance_work_mem_worker,
         ring_nbuffers: shared.ring_nbuffers,
-        cost_balance: shared.cost_balance.load(core::sync::atomic::Ordering::Relaxed),
-        active_nworkers: shared
-            .active_nworkers
-            .load(core::sync::atomic::Ordering::Relaxed),
+        cost_state: Arc::clone(&shared.cost_state),
         dead_items_dsa_handle: shared.dead_items_dsa_handle,
         dead_items_handle: shared.dead_items_handle,
     }
@@ -872,11 +971,12 @@ fn parallel_vacuum_process_all_indexes(
          * otherwise, they might not see the updated values for these
          * parameters.
          */
-        pvs.shared.cost_balance.store(
+        pvs.shared.cost_state.cost_balance.store(
             vac::vacuum_cost_balance::call()? as u32,
             core::sync::atomic::Ordering::Relaxed,
         );
         pvs.shared
+            .cost_state
             .active_nworkers
             .store(0, core::sync::atomic::Ordering::Relaxed);
 
@@ -898,17 +998,15 @@ fn parallel_vacuum_process_all_indexes(
             vac::set_vacuum_cost_balance::call(0)?;
             vac::set_vacuum_cost_balance_local::call(0)?;
 
-            /* Enable shared cost balance for leader backend */
-            vac::set_vacuum_shared_cost_balance_enable::call(
-                true,
-                pvs.shared.cost_balance.load(core::sync::atomic::Ordering::Relaxed),
-            )?;
-            vac::set_vacuum_active_nworkers_enable::call(
-                true,
-                pvs.shared
-                    .active_nworkers
-                    .load(core::sync::atomic::Ordering::Relaxed),
-            )?;
+            /* Enable shared cost balance for leader backend
+             * (VacuumSharedCostBalance = &(shared->cost_balance);
+             *  VacuumActiveNWorkers = &(shared->active_nworkers);) */
+            vac::set_vacuum_shared_cost_balance_enable::call(Some(Arc::clone(
+                &pvs.shared.cost_state,
+            )))?;
+            vac::set_vacuum_active_nworkers_enable::call(Some(Arc::clone(
+                &pvs.shared.cost_state,
+            )))?;
         }
 
         let nworkers_launched = p::pcxt_nworkers_launched(pcxt);
@@ -969,8 +1067,9 @@ fn parallel_vacuum_process_all_indexes(
      */
     if vac::vacuum_shared_cost_balance_is_set::call()? {
         vac::set_vacuum_cost_balance::call(vac::vacuum_shared_cost_balance_read::call()? as i32)?;
-        vac::set_vacuum_shared_cost_balance_enable::call(false, 0)?;
-        vac::set_vacuum_active_nworkers_enable::call(false, 0)?;
+        /* VacuumSharedCostBalance = NULL; VacuumActiveNWorkers = NULL; */
+        vac::set_vacuum_shared_cost_balance_enable::call(None)?;
+        vac::set_vacuum_active_nworkers_enable::call(None)?;
     }
 
     Ok(())
@@ -1233,8 +1332,12 @@ pub fn parallel_vacuum_main() -> PgResult<()> {
     vac::vacuum_update_costs::call()?;
     vac::set_vacuum_cost_balance::call(0)?;
     vac::set_vacuum_cost_balance_local::call(0)?;
-    vac::set_vacuum_shared_cost_balance_enable::call(true, shared.cost_balance)?;
-    vac::set_vacuum_active_nworkers_enable::call(true, shared.active_nworkers)?;
+    /* VacuumSharedCostBalance = &(shared->cost_balance);
+     * VacuumActiveNWorkers = &(shared->active_nworkers);
+     * The worker attached to the same shared cell, so it points the globals at
+     * the leader's atomics. */
+    vac::set_vacuum_shared_cost_balance_enable::call(Some(Arc::clone(&shared.cost_state)))?;
+    vac::set_vacuum_active_nworkers_enable::call(Some(Arc::clone(&shared.cost_state)))?;
 
     /* Set parallel vacuum state */
     let relnamespace = vac::relation_get_namespace_name_pv::call(rel)?;
@@ -1251,8 +1354,7 @@ pub fn parallel_vacuum_main() -> PgResult<()> {
             estimated_count: false,
             maintenance_work_mem_worker: shared.maintenance_work_mem_worker,
             ring_nbuffers: shared.ring_nbuffers,
-            cost_balance: core::sync::atomic::AtomicU32::new(shared.cost_balance),
-            active_nworkers: core::sync::atomic::AtomicU32::new(shared.active_nworkers),
+            cost_state: Arc::clone(&shared.cost_state),
             idx: core::sync::atomic::AtomicU32::new(0),
             dead_items_dsa_handle: shared.dead_items_dsa_handle,
             dead_items_handle: shared.dead_items_handle,
@@ -1398,6 +1500,14 @@ fn install_pv_outward_seams() {
     vac::tid_store_attach_pv::set(tidstore::TidStoreAttach);
     vac::tid_store_destroy_pv::set(|ts| tidstore::TidStoreDestroy(&ts));
     vac::tid_store_detach_pv::set(|ts| tidstore::TidStoreDetach(&ts));
+
+    // --- per-worker DSM instrument usage slots (instrument.c) ---------------
+    // InstrStartParallelQuery saves into a backend-local snapshot (C's file-local
+    // save_pgBufferUsage); InstrEndParallelQuery writes the worker's deltas into
+    // its DSM slot; InstrAccumParallelQuery folds slot i into the leader's stats.
+    vac::instr_start_parallel_query_pv::set(instr_start_parallel_query_pv_impl);
+    vac::instr_end_parallel_query_pv::set(instr_end_parallel_query_pv_impl);
+    vac::instr_accum_parallel_query_pv::set(instr_accum_parallel_query_pv_impl);
 
     // --- tcop debug_query_string -------------------------------------------
     vac::debug_query_string_pv::set(|| Ok(tcop::debug_query_string().map(String::from)));

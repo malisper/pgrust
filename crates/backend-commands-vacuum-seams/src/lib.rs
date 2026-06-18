@@ -23,7 +23,10 @@ use types_rel::{FormData_pg_class, Relation};
 use types_tuple::heaptuple::ItemPointerData;
 use types_vacuum::vacuum::VacuumParams;
 use types_vacuum::vacuumlazy::{StrategyHandle, TidStore, UpdateRelStatsArgs};
-use types_vacuum::vacuumparallel::{IndexBulkDeleteResult, IndexVacuumInfo, VacDeadItemsInfo};
+use types_vacuum::vacuumparallel::{
+    IndexBulkDeleteResult, IndexVacuumInfo, VacDeadItemsInfo, VacuumSharedCostState,
+};
+use alloc::sync::Arc;
 use mcx::Mcx;
 
 // =======================================================================
@@ -474,13 +477,21 @@ seam_core::seam!(
     pub fn my_proc_in_vacuum_only() -> PgResult<bool>
 );
 seam_core::seam!(
-    /// Enable/disable `VacuumSharedCostBalance` (set to `&shared->cost_balance`
-    /// initialized to `initial`, or `NULL`).
-    pub fn set_vacuum_shared_cost_balance_enable(enable: bool, initial: u32) -> PgResult<()>
+    /// Point `VacuumSharedCostBalance` at `&shared->cost_balance` (the shared DSM
+    /// atomic, `Some`) or set it to `NULL` (`None`). The handle is the genuinely
+    /// shared cost-state cell; subsequent `shared_cost_balance_*` calls
+    /// atomic-mutate it.
+    pub fn set_vacuum_shared_cost_balance_enable(
+        shared: Option<Arc<VacuumSharedCostState>>,
+    ) -> PgResult<()>
 );
 seam_core::seam!(
-    /// Enable/disable `VacuumActiveNWorkers`.
-    pub fn set_vacuum_active_nworkers_enable(enable: bool, initial: u32) -> PgResult<()>
+    /// Point `VacuumActiveNWorkers` at `&shared->active_nworkers` (the shared DSM
+    /// atomic, `Some`) or set it to `NULL` (`None`). The same shared cost-state
+    /// cell carries both counters.
+    pub fn set_vacuum_active_nworkers_enable(
+        shared: Option<Arc<VacuumSharedCostState>>,
+    ) -> PgResult<()>
 );
 seam_core::seam!(
     /// `VacuumActiveNWorkers != NULL`.
