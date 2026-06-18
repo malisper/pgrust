@@ -619,20 +619,22 @@ pub fn typeTypeCollation(typ: Type) -> Oid {
 /// `stringTypeDatum()` (parse_type.c:654): build a Datum by running the type's
 /// input function over `string` with the given atttypmod. `string` is `None`
 /// for a SQL NULL.
-pub fn stringTypeDatum(
-    mcx: Mcx<'_>,
+pub fn stringTypeDatum<'mcx>(
+    mcx: Mcx<'mcx>,
     tp: Type,
     string: Option<&str>,
     atttypmod: i32,
-) -> PgResult<Datum> {
+) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
     let typinput = tp.typinput;
     let typioparam = getTypeIOParam(&tp);
 
     /* OidInputFunctionCall(typinput, string, typioparam, atttypmod). The C
      * `string` may be NULL (NULL conversion, accepted by non-strict input
-     * functions); the merged owner's input_function_call carries that and
-     * returns the raw call-frame Datum word, mirroring the C bare-Datum
-     * return. */
+     * functions). The merged owner's input_function_call now returns the
+     * canonical `Datum<'mcx>` — a by-value scalar as `ByVal`, a by-reference
+     * value (text/name/varchar/numeric) as an owned `ByRef` over the input
+     * function's flattened payload bytes in `mcx`, mirroring C's bare-Datum
+     * return that points into the palloc'd result. */
     fmgr::input_function_call::call(mcx, typinput, string, typioparam, atttypmod)
 }
 

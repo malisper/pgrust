@@ -2650,22 +2650,28 @@ fn fmgr_out_word(out: FmgrOut<'_>) -> Datum {
 
 /// `InputFunctionCall(flinfo, str, typioparam, typmod)` seam (fmgr.c) for a
 /// hard-error caller: one-shot lookup by `function_id` + call of the text input
-/// function on `str` (`None` is C's NULL cstring). Returns the bare scalar word
-/// (`parse-type`/`domains.rs` callers wrap it as a by-value `Datum`).
-fn input_function_call_seam(
-    mcx: Mcx<'_>,
+/// function on `str` (`None` is C's NULL cstring). Returns the result as the
+/// canonical `Datum<'mcx>` — a by-value scalar is `ByVal` (the bare word); a
+/// by-reference result (text/name/varchar/numeric) is an owned `ByRef` over the
+/// input function's flattened payload bytes in `mcx` (C's
+/// `PointerGetDatum(palloc'd result)`). `parse-type`'s `stringTypeDatum` and
+/// `domains.rs`/`rangetypes` thread this canonical value straight into their
+/// `Const`/range carriers (no by-reference loss).
+fn input_function_call_seam<'mcx>(
+    mcx: Mcx<'mcx>,
     function_id: Oid,
     str: Option<&str>,
     typioparam: Oid,
     typmod: i32,
-) -> PgResult<Datum> {
-    Ok(fmgr_out_word(oid_input_function_call_out(
-        mcx,
-        function_id,
-        str,
-        typioparam,
-        typmod,
-    )?))
+) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
+    use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
+    match oid_input_function_call_out(mcx, function_id, str, typioparam, typmod)? {
+        FmgrOut::ByVal(d) => Ok(CanonDatum::ByVal(canon_word(&d).as_usize())),
+        FmgrOut::Ref(payload) => {
+            let bytes: Vec<u8> = payload.flatten();
+            Ok(CanonDatum::ByRef(mcx::slice_in(mcx, &bytes)?))
+        }
+    }
 }
 
 /// `ReceiveFunctionCall(flinfo, buf, typioparam, typmod)` seam (fmgr.c): one-shot

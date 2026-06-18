@@ -13,6 +13,7 @@ mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-datum = { path = "../types-datum" }
+types-tuple = { path = "../types-tuple" }
 types-nodes = { path = "../types-nodes" }
 types-pathnodes = { path = "../types-pathnodes" }
 types-selfuncs = { path = "../types-selfuncs" }

@@ -525,6 +525,23 @@ fn resolve_base_typmod(target_type_id: Oid, target_typmod: i32) -> PgResult<i32>
     }
 }
 
+thread_local! {
+    /// The backend-lifetime memory context backing a by-reference
+    /// `coerce_unknown_const` `Const.constvalue` image. C builds the coerced
+    /// `Const` in the long-lived parse context where the input function's
+    /// palloc'd varlena already lives; the owned model `datumCopy`'s the
+    /// by-reference value into this leaked, never-reset context so the stored
+    /// `Datum<'static>` referent stays valid for the node's lifetime (mirrors
+    /// `makefuncs::CONST_VALUE_CONTEXT` / `params::PARAM_LIST_CONTEXT`).
+    static CONST_VALUE_CONTEXT: &'static MemoryContext =
+        Box::leak(Box::new(MemoryContext::new("Const value")));
+}
+
+/// `Mcx<'static>` for the backend-lifetime [`CONST_VALUE_CONTEXT`].
+fn const_value_mcx() -> Mcx<'static> {
+    CONST_VALUE_CONTEXT.with(|c| c.mcx())
+}
+
 /// The `inputTypeId == UNKNOWNOID && IsA(node, Const)` arm of coerce_type.
 fn coerce_unknown_const<'mcx>(
     mcx: Mcx<'mcx>,
@@ -594,28 +611,32 @@ fn coerce_unknown_const<'mcx>(
              (make_const builds the T_String UNKNOWN const as Datum::Cstring)",
         ))
     };
-    // `stringTypeDatum` returns the raw call-frame `Datum` word C produces (the
-    // bare-word shim type), mirroring C's `Datum stringTypeDatum(...)`.
+    // `stringTypeDatum` returns the canonical `Datum<'mcx>` C's input function
+    // produces: a by-value scalar as `ByVal`, a by-reference value
+    // (text/name/varchar/numeric) as an owned `ByRef` over the flattened
+    // payload bytes (C's `Datum stringTypeDatum(...)` pointing into the palloc'd
+    // result).
     let datum = parse_type::stringTypeDatum(mcx, baseType, string, inputTypeMod)?;
 
     // The new Const lives in its plan node's long-lived context, so its value
-    // carries `'static` (the `Const.constvalue` field type). For a by-value
-    // target (`constbyval`, e.g. `char`) the bare word IS the value — store it
-    // as the canonical `ByVal` arm, exactly as C's `Const.constvalue`. A
-    // pass-by-reference (varlena) target would yield a pointer word that cannot
-    // be safely stored into the lifetime-free Const without the canonical
-    // by-reference Const carrier (#113); not reachable for the scalar targets
-    // this arm coerces (the catalog `WHERE relkind = 'r'` path resolves to
-    // `char`, which is pass-by-value).
-    if !constbyval && !constisnull {
-        panic!(
-            "coerce_unknown_const: pass-by-reference coercion target ({} bytes) \
-             requires the by-reference Const carrier (#113); stringTypeDatum \
-             returned a pointer-word Datum with no lifetime-free Const store path",
-            constlen
-        );
-    }
-    let constvalue: TupleDatum<'static> = TupleDatum::ByVal(datum.as_usize());
+    // carries `'static` (the `Const.constvalue` field type). A by-value target
+    // (`constbyval`, e.g. `char`) stores the bare word as `ByVal`, exactly as
+    // C's `Const.constvalue`. A pass-by-reference (varlena) target — the
+    // `WHERE relname = 'pg_type'` path resolves to `name`/`text` — copies its
+    // by-reference image into the backend-lifetime const-value context so the
+    // stored `Datum<'static>` referent stays valid for the node's lifetime,
+    // mirroring `makeConst`/`params::PARAM_LIST_CONTEXT` (C: the input
+    // function's palloc'd varlena lives in the long-lived parse context the
+    // Const is built in). A NULL const has no value to copy.
+    let _ = constlen;
+    let constvalue: TupleDatum<'static> = if constisnull {
+        TupleDatum::null()
+    } else {
+        match datum {
+            TupleDatum::ByVal(word) => TupleDatum::ByVal(word),
+            other => other.clone_in(const_value_mcx())?,
+        }
+    };
 
     let newcon = Const {
         consttype,

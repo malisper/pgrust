@@ -19,7 +19,6 @@
 
 use mcx::Mcx;
 use types_core::primitive::{InvalidOid, Oid};
-use types_datum::datum::Datum;
 use types_error::PgResult;
 use types_nodes::primnodes::Expr;
 use types_pathnodes::planner_run::PlannerRun;
@@ -90,7 +89,8 @@ pub(crate) fn boolvarsel<'mcx>(
             &vardata,
             BOOLEAN_EQUAL_OPERATOR,
             InvalidOid,
-            Datum::from_bool(true),
+            // V = 't': the by-value `true` const as the canonical `ByVal` Datum.
+            &types_tuple::backend_access_common_heaptuple::Datum::from_bool(true),
             false, // constisnull
             true,  // varonleft
             false, // negate

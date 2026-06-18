@@ -373,7 +373,11 @@ seam_core::seam!(
     /// is equivalent to `InputFunctionCall`): look up `function_id`'s text
     /// input function and run it on `str` (`None` is C's `NULL` cstring, which
     /// non-strict input functions accept). The C `FmgrInfo` cannot cross, so
-    /// the owner re-resolves by OID. `Err` carries the lookup failure and
+    /// the owner re-resolves by OID. Returns the result as the canonical
+    /// `Datum<'mcx>` (a by-value scalar is `ByVal` (the bare word); a
+    /// by-reference result — text/name/varchar/numeric — is an owned `ByRef`
+    /// over the input function's flattened payload bytes in `mcx`, C's
+    /// `PointerGetDatum(palloc'd result)`). `Err` carries the lookup failure and
     /// whatever the input function raises.
     pub fn input_function_call<'mcx>(
         mcx: mcx::Mcx<'mcx>,
@@ -381,7 +385,7 @@ seam_core::seam!(
         str: Option<&str>,
         typioparam: Oid,
         typmod: i32,
-    ) -> PgResult<DatumWord>
+    ) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>>
 );
 
 seam_core::seam!(

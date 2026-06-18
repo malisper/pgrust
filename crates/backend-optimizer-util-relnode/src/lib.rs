@@ -2547,6 +2547,17 @@ pub fn init_seams() {
     bms::relids_overlap::set(bms_overlap);
     bms::relids_nonempty_difference::set(bms_nonempty_difference);
     pathnode::relids_subset_compare::set(bms_subset_compare);
+    // The pathnode crate consumes a parallel set of `relids_*` bitmapset wrappers
+    // declared on pathnode-seams (the `ps`/`seam` alias) — the same `bms_*`
+    // operations relnode owns. Install them here from the bms impls, exactly as
+    // `relids_subset_compare` above (relnode is the bitmapset-algebra owner;
+    // `create_bitmap_and_path`/`choose_bitmap_and` and the path-small lateral
+    // paths drive these). `bms_del_members(a, b)` (a minus b, consuming a) is
+    // `bms_difference(&a, b)`.
+    pathnode::relids_union::set(bms_union);
+    pathnode::relids_add_members::set(bms_add_members);
+    pathnode::relids_del_members::set(|a, b| bms_difference(&a, b));
+    pathnode::relids_equal::set(bms_equal);
 }
 
 fn seam_find_base_rel(root: &PlannerInfo, relid: i32) -> RelId {

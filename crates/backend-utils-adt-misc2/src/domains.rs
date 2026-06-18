@@ -61,18 +61,17 @@ pub fn domain_in<'mcx>(
 
     // Invoke the base type's typinput procedure to convert the data. With no
     // escontext (hard-error caller), InputFunctionCallSafe is equivalent to
-    // InputFunctionCall. The seam yields the bare scalar word; wrap it in the
-    // canonical by-value arm.
-    let value = Datum::ByVal(
-        fmgr_seams::input_function_call::call(
-            mcx,
-            io.typiofunc,
-            string,
-            io.typioparam,
-            io.typtypmod,
-        )?
-        .as_usize(),
-    );
+    // InputFunctionCall. The seam yields the canonical `Datum<'mcx>` — a
+    // by-value scalar as `ByVal`, a by-reference base value (e.g. a domain over
+    // text/varchar) as an owned `ByRef` — threaded straight through (C: the
+    // base input function's `Datum` is the domain value).
+    let value = fmgr_seams::input_function_call::call(
+        mcx,
+        io.typiofunc,
+        string,
+        io.typioparam,
+        io.typtypmod,
+    )?;
 
     // Do the necessary checks to ensure it's a valid domain value.
     typcache_seams::domain_check_input::call(&value, string.is_none(), domain_type)?;

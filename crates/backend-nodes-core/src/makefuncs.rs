@@ -51,7 +51,7 @@
 //! (`PG_DETOAST_DATUM`) delegates to the `backend-access-common-detoast` owner's
 //! `detoast_attr` seam.
 
-use mcx::{alloc_in, Mcx, PgBox, PgString, PgVec};
+use mcx::{alloc_in, Mcx, MemoryContext, PgBox, PgString, PgVec};
 use types_core::primitive::{AttrNumber, Index, Oid};
 use types_core::catalog::BOOLOID;
 use types_core::InvalidOid;
@@ -116,6 +116,25 @@ pub fn make_var(
     }
 }
 
+thread_local! {
+    /// The backend-lifetime memory context backing every by-reference
+    /// `Const.constvalue` image. C's `makeConst` builds the `Const` in the
+    /// current (message/parse) memory context, where the input function's
+    /// palloc'd varlena already lives — long-lived enough to outlive the planner
+    /// run. The owned model `datumCopy`'s by-reference const values into this
+    /// leaked, never-reset context so the stored `Datum<'static>` referent stays
+    /// valid for the node's lifetime (mirrors `params::PARAM_LIST_CONTEXT` and
+    /// the `SubPlan`/`AlternativeSubPlan` `'static`-erase convention).
+    static CONST_VALUE_CONTEXT: &'static MemoryContext =
+        Box::leak(Box::new(MemoryContext::new("Const value")));
+}
+
+/// `Mcx<'static>` for the backend-lifetime [`CONST_VALUE_CONTEXT`] — where a
+/// by-reference `Const.constvalue` image is copied so it can carry `'static`.
+fn const_value_mcx() -> Mcx<'static> {
+    CONST_VALUE_CONTEXT.with(|c| c.mcx())
+}
+
 /// `makeConst(consttype, consttypmod, constcollid, constlen, constvalue,
 /// constisnull, constbyval)` (makefuncs.c) — create a `Const` node.
 ///
@@ -155,13 +174,16 @@ pub fn make_const<'mcx>(
     }
 
     // The trimmed `Const.constvalue` field is typed `Datum<'static>` (the node
-    // carries no lifetime parameter), so only the lifetime-free by-value arm
-    // can be stored. The by-value word IS the canonical `ByVal` payload (a bare
-    // machine word, or — for a varlena — a pointer into a varlena image that
-    // outlives `mcx`), exactly C's `Const.constvalue` Datum. A by-reference
-    // value would require a lifetime-carrying `Const`: the execTuples
-    // canonical-carrier follow-on (#113). We record that edge rather than forge
-    // a pointer across the lifetime boundary.
+    // carries no lifetime parameter). The by-value word IS the canonical `ByVal`
+    // payload (a bare machine word, or — for a varlena — a pointer into a varlena
+    // image that outlives `mcx`), exactly C's `Const.constvalue` Datum. A
+    // by-REFERENCE value (text/name/varchar/numeric) carries borrowed-from-`mcx`
+    // bytes; C's `make_const` leaves them where the input function placed them,
+    // in the long-lived parse/plan context that outlives the planner run. The
+    // owned model mirrors that by `datumCopy`'ing the by-reference image into a
+    // backend-lifetime context ([`const_value_mcx`]), which yields a genuine
+    // `Datum<'static>` (the SubPlan/ParamListInfo `'static`-erase convention) —
+    // no pointer is forged across the lifetime boundary.
     let constvalue: Datum<'static> = match constvalue {
         Datum::ByVal(word) => Datum::ByVal(word),
         // A `cstring` value (e.g. the UNKNOWN const make_const builds for an
@@ -169,12 +191,14 @@ pub fn make_const<'mcx>(
         // borrows nothing from `mcx`, so it is freely a `'static` value, exactly
         // like C's `Const.constvalue` cstring pointer that outlives the parse.
         Datum::Cstring(s) => Datum::Cstring(s),
-        Datum::ByRef(_) => panic!(
-            "make_const: by-reference Const value requires a lifetime-carrying \
-             Const carrier (execTuples canonical-carrier follow-on, #113)"
-        ),
-        Datum::Composite(_) | Datum::Expanded(_) | Datum::Internal(_) => panic!(
-            "make_const: Composite/Expanded/Internal Const value requires a \
+        // A by-reference / composite literal: copy the (already-flat, detoasted
+        // above) bytes into the backend-lifetime const-value context so the
+        // stored `Datum<'static>` referent stays valid for the node's lifetime
+        // (C: the input function's palloc'd varlena lives in the message/parse
+        // context the Const is built in).
+        other @ (Datum::ByRef(_) | Datum::Composite(_)) => other.clone_in(const_value_mcx())?,
+        Datum::Expanded(_) | Datum::Internal(_) => panic!(
+            "make_const: Expanded/Internal Const value requires a \
              lifetime-carrying Const carrier — not yet produced — wave 2"
         ),
     };

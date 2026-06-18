@@ -193,7 +193,7 @@ pub(crate) fn var_eq_const<'mcx>(
     vardata: &VariableStatData,
     oproid: Oid,
     collation: Oid,
-    constval: Datum,
+    constval: &types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
     constisnull: bool,
     varonleft: bool,
     negate: bool,
@@ -247,13 +247,36 @@ pub(crate) fn var_eq_const<'mcx>(
         let mcv_values: &[Datum] = slot_opt.as_ref().map(|s| s.values.as_slice()).unwrap_or(empty_v);
         let mcv_numbers: &[f32] = slot_opt.as_ref().map(|s| s.numbers.as_slice()).unwrap_or(empty_n);
 
+        // The constant crosses the operator's `function_call_invoke` boundary as
+        // the bare ABI word. A by-value scalar IS its word; a by-reference value
+        // (text/name/varchar/numeric) compared against ACTUAL MCV slot values is
+        // the selfuncs by-reference value-carrier follow-on (WALL 1ai): the MCV
+        // slot values (`mcv_values`) are themselves bare pointer words from the
+        // C-shaped `pg_statistic` tuple, so comparing a `ByRef` const against them
+        // needs the canonical by-reference fmgr lane threaded through
+        // `get_attstatsslot` — out of this lane's scope. The extraction is
+        // deferred to actual use: on a fresh cluster the MCV slot is EMPTY
+        // (no `ANALYZE`), so the loop body never runs and a by-reference constant
+        // (e.g. `WHERE relname = 'pg_type'`) flows through to the no-MCV-match
+        // branch below without ever needing the bare word.
+        let constval_word = |c: &types_tuple::backend_access_common_heaptuple::Datum<'_>| -> Datum {
+            match c {
+                types_tuple::backend_access_common_heaptuple::Datum::ByVal(w) => {
+                    Datum::from_usize(*w)
+                }
+                _ => panic!(
+                    "var_eq_const: by-reference constant compared against MCV slot \
+                     values requires the selfuncs by-reference value carrier (WALL 1ai)"
+                ),
+            }
+        };
         // Is the constant "=" to any of the column's most common values?
         for i in 0..mcv_values.len() {
             // be careful to apply operator right way 'round
             let (arg0, arg1) = if varonleft {
-                (mcv_values[i], constval)
+                (mcv_values[i], constval_word(constval))
             } else {
-                (constval, mcv_values[i])
+                (constval_word(constval), mcv_values[i])
             };
             let (fresult, isnull) = fmgr::function_call_invoke::call(
                 opfuncoid,

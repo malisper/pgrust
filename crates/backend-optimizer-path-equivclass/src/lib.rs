@@ -63,10 +63,11 @@ pub use relevance::{
     select_equality_operator, setup_eclass_member_iterator,
 };
 
+use backend_optimizer_path_costsize_seams as cz_seam;
 use backend_optimizer_path_equivclass_seams as ec_seam;
 use types_error::PgResult;
 use types_pathnodes::{
-    EcId, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo,
+    EcId, PathNode, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo,
 };
 
 /// Install the inward seams owned by equivclass.c. Called once at
@@ -114,6 +115,21 @@ pub fn init_seams() {
     });
     ec_seam::add_child_rel_equivalences::set(|root, appinfo, parent_rel, child_rel| {
         add_child_rel_equivalences(root, appinfo, parent_rel, child_rel)
+    });
+    // `is_redundant_with_indexclauses` lives in equivclass.c (real impl in
+    // `relevance.rs`) but its public seam is declared on costsize-seams (the
+    // `extract_nonindex_conditions` / `cost_index` consumer). The seam carries
+    // the index path by `PathId`; resolve it to the `IndexPath.indexclauses` the
+    // C caller passes (`path->indexclauses`) before delegating to the impl. A
+    // non-`IndexPath` here is a caller bug (C only calls this with an IndexPath).
+    cz_seam::is_redundant_with_indexclauses::set(|root, rinfo, index_path| {
+        let indexclauses = match root.path(index_path) {
+            PathNode::IndexPath(ip) => ip.indexclauses.clone(),
+            _ => panic!(
+                "is_redundant_with_indexclauses: PathId does not resolve to an IndexPath"
+            ),
+        };
+        is_redundant_with_indexclauses(root, rinfo, &indexclauses)
     });
 }
 

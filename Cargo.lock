@@ -11476,6 +11476,7 @@ dependencies = [
 name = "backend-optimizer-path-equivclass"
 version = "0.0.0"
 dependencies = [
+ "backend-optimizer-path-costsize-seams",
  "backend-optimizer-path-equivclass-ext-seams",
  "backend-optimizer-path-equivclass-seams",
  "backend-optimizer-util-relnode-seams",
@@ -19173,6 +19174,7 @@ dependencies = [
  "types-scan",
  "types-selfuncs",
  "types-statistics",
+ "types-tuple",
 ]
 
 [[package]]

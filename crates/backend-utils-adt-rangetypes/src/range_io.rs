@@ -25,6 +25,27 @@ use types_rangetypes::{
 
 use crate::range_repr_serialize::{make_range, range_deserialize, range_get_flags};
 
+/// Collapse a canonical input-function result onto the bare element word the
+/// `RangeBound.val` carrier (`types_datum::Datum`) holds. A by-value range
+/// element (e.g. `int4range`/`tsrange`) IS its machine word. A by-reference
+/// element (e.g. `textrange`) is the rangetypes by-reference-carrier follow-on
+/// (the `RangeBound.val` carrier is still bare-word, not the lifetime-carrying
+/// canonical `Datum`) — not on the `WHERE`-literal milestone path, and it
+/// equally panicked under the prior `DatumWord` lane.
+#[inline]
+fn canon_to_bound_word(
+    d: types_tuple::backend_access_common_heaptuple::Datum<'_>,
+) -> types_datum::datum::Datum {
+    use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
+    match d {
+        CanonDatum::ByVal(w) => types_datum::datum::Datum::from_usize(w),
+        _ => panic!(
+            "range bound: by-reference range element requires the rangetypes \
+             by-reference carrier (RangeBound.val is the bare element word)"
+        ),
+    }
+}
+
 /// `RANGE_HAS_LBOUND(flags)` (rangetypes.h:48).
 #[inline]
 fn range_has_lbound(flags: u8) -> bool {
@@ -165,26 +186,28 @@ pub fn range_in<'mcx>(
         // type's text input function is resolved by its OID (`cache.typiofunc`)
         // and run, raising on error rather than returning the soft-error `false`
         // that would `PG_RETURN_NULL`. The seam yields the element value as the
-        // bare word straight into `lower.val`.
-        lower.val = fmgr_seams::input_function_call::call(
+        // canonical `Datum`; the `RangeBound.val` carrier is the bare element
+        // word, so collapse the by-value arm (a by-reference range element is
+        // the rangetypes by-ref carrier follow-on, not on this path).
+        lower.val = canon_to_bound_word(fmgr_seams::input_function_call::call(
             mcx,
             cache.typiofunc,
             Some(lbound_str.as_str()),
             cache.typioparam,
             _typmod,
-        )?;
+        )?);
     }
     if range_has_ubound(flags) {
         let ubound_str = ubound_str.expect("RANGE_HAS_UBOUND implies a parsed upper bound string");
         // C: InputFunctionCallSafe(&cache->typioproc, ubound_str,
         //                          cache->typioparam, typmod, escontext, &upper.val)
-        upper.val = fmgr_seams::input_function_call::call(
+        upper.val = canon_to_bound_word(fmgr_seams::input_function_call::call(
             mcx,
             cache.typiofunc,
             Some(ubound_str.as_str()),
             cache.typioparam,
             _typmod,
-        )?;
+        )?);
     }
 
     lower.infinite = flags & RANGE_LB_INF != 0;

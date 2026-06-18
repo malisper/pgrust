@@ -72,7 +72,12 @@ pub fn eqsel_internal<'mcx>(
             &vardata,
             operator,
             collation,
-            Datum::from_usize(c.constvalue.as_usize()),
+            // Thread the canonical `Const.constvalue` (by-value `ByVal` or
+            // by-reference `ByRef`) — the bare-word extraction is deferred to the
+            // MCV-comparison point in `var_eq_const`, so a by-reference literal on
+            // the no-stats path (e.g. `WHERE relname = 'pg_type'`) no longer
+            // panics at this call site.
+            &c.constvalue,
             c.constisnull,
             varonleft,
             negate,
