@@ -399,6 +399,13 @@ pub fn expression_tree_walker_mut(
     match node {
         Node::Expr(e) => walk_expr_children_mut(e, walker),
 
+        // C `case T_List: foreach(temp, (List *) node) WALK(lfirst(temp));` —
+        // visit each element in place. A bare `List` node is a legitimate walker
+        // argument (e.g. the `VALUES` rows reached by `assign_collations`'s
+        // in-place walk over `(VALUES ...)` sublists). Mirrors the read-only
+        // `expression_tree_walker`'s `Node::List` arm.
+        Node::List(items) => list_walk!(items),
+
         Node::RangeTblRef(_)
         | Node::SortGroupClause(_)
         | Node::RowMarkClause(_)
