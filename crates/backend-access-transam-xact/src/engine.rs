@@ -774,7 +774,13 @@ fn PrepareTransaction() -> PgResult<()> {
     // too late to abort if an error is raised here.
     CallXactCallbacks(XACT_EVENT_PREPARE)?;
 
-    // ResourceOwnerRelease(BEFORE_LOCKS) dissolves.
+    // ResourceOwnerRelease(TopTransactionResourceOwner, BEFORE_LOCKS, true, true)
+    // (xact.c PrepareTransaction): releases the transaction's buffer pins (and
+    // other before-lock resources) before AtEOXact_Buffers asserts they are all
+    // gone. Unlike Commit/Abort, Prepare does NOT reset CurrentResourceOwner
+    // here (it clears it at the tail, with the delete).
+    backend_utils_resowner_resowner_seams::release_transaction_owner_before_locks::call(true)?;
+
     aio_seams::at_eoxact_aio::call(true);
 
     // Check we've released all buffer pins.
@@ -798,7 +804,9 @@ fn PrepareTransaction() -> PgResult<()> {
 
     predicate_seams::post_prepare_predicate_locks::call(xid)?;
 
-    // ResourceOwnerRelease(LOCKS / AFTER_LOCKS) dissolve.
+    // ResourceOwnerRelease(TopTransactionResourceOwner, LOCKS, true, true) +
+    // (AFTER_LOCKS, true, true) — xact.c PrepareTransaction.
+    backend_utils_resowner_resowner_seams::release_transaction_owner_locks::call(true)?;
 
     // Allow another backend to finish the transaction; after this the
     // transaction is completely detached from our backend.
@@ -821,6 +829,12 @@ fn PrepareTransaction() -> PgResult<()> {
     lrworker_seams::at_eoxact_logical_rep_workers::call(false);
     status_seams::pgstat_report_xact_timestamp::call(0);
 
+    // CurrentResourceOwner = NULL; ResourceOwnerDelete(TopTransactionResourceOwner);
+    // s->curTransactionOwner = NULL; CurTransactionResourceOwner = NULL;
+    // TopTransactionResourceOwner = NULL (xact.c PrepareTransaction). Prepare
+    // clears CurrentResourceOwner here (Commit/Abort do it earlier).
+    backend_utils_resowner_resowner_seams::reset_current_resource_owner::call();
+    backend_utils_resowner_resowner_seams::delete_transaction_owner::call()?;
     xs(|s| s.current_mut().has_resource_owner = false);
 
     AtCommit_Memory();
