@@ -59,6 +59,7 @@
 #![allow(clippy::result_large_err)]
 #![allow(clippy::too_many_arguments)]
 
+pub mod agg_fmgr;
 pub mod array_userfuncs;
 pub mod arraysubs;
 pub mod foundation;
@@ -90,6 +91,13 @@ pub fn init_seams() {
     // getTypeInputInfo resolves for every `_T` array type (e.g. nodeAgg's
     // GetAggInitVal materializing an aggregate's `{0,0}` agginitval).
     fmgr_builtins::register_arrayfuncs_builtins();
+
+    // Register the `internal`-transtype `array_agg` aggregate transition/final
+    // functions (array_userfuncs.c) so `SELECT array_agg(x) FROM t` resolves
+    // them by OID. setup_peragg_finalfn resolves the finalfn via `fmgr_info` at
+    // ExecInitAgg, so an unregistered builtin would abort the node before any
+    // row is processed.
+    agg_fmgr::register_array_agg_builtins();
 
     // `Array_nulls` GUC: arrayfuncs.c owns the `bool Array_nulls = true`
     // global (PGC_USERSET, boot value `true`). Install the guc-table slot

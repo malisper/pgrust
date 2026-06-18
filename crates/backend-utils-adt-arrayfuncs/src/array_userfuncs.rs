@@ -47,34 +47,17 @@
 //! expanded-object-infra keystone, not this lane. They are left out (no hollow
 //! stub) per Mirror-PG-and-panic.
 //!
-//! # STOP: the `array_agg` family (agg-context-channel-blocked)
+//! # `array_agg` (scalar) family
 //!
-//! `array_agg_transfn` / `array_agg_combine` / `array_agg_serialize` /
-//! `array_agg_deserialize` / `array_agg_finalfn` and the `array_agg_array_*`
-//! variants are *not* ported. Their aggregate transition type is `internal` — a
-//! bare `ArrayBuildState *` (or `ArrayBuildStateArr *`) carried through
-//! `nodeAgg.c` as a pass-by-value Datum word. Two things make them un-invokable
-//! in the owned model:
-//!
-//!  * `array_agg_transfn` calls `AggCheckCallContext(fcinfo, &aggcontext)` and
-//!    *requires* the returned `aggcontext` to `initArrayResult(arg1_typeid,
-//!    aggcontext, false)` (the build state, and every accumulated element copy,
-//!    must live in the per-aggregate context, not the per-tuple context). The
-//!    `nodeAgg` transition dispatch threads transfns by `fn_oid` through
-//!    `function_call_invoke_datum` and explicitly does **not** carry the fcinfo
-//!    `(Node *) aggstate` context (the deferred K2 re-sign — see
-//!    `backend-executor-nodeAgg::transition`), so a transfn that reads
-//!    `AggCheckCallContext` cannot obtain its context. Unlike count/sum/avg
-//!    (which don't), `array_agg` cannot run without it.
-//!  * the `internal` transition state would ride in `Datum::Internal(Box<dyn
-//!    Any>)`, but the by-OID transition dispatch has no way to construct/thread
-//!    that boxed state in the per-aggregate context.
-//!
-//! Porting the bodies now would produce a shell no caller can reach (no fmgr/agg
-//! wiring threads the context). They are left out (no hollow stub) until the
-//! agg-context channel (nodeAgg K2) lands; the bodies are then a mechanical
-//! `ArrayBuildState`-over-`accumArrayResult` port (the build-state machinery
-//! they need already lives in `construct`).
+//! `array_agg_transfn`(2333) / `array_agg_finalfn`(2334) — the scalar-element
+//! `internal`-transtype aggregate — are ported in [`crate::agg_fmgr`]. They ride
+//! the `Datum::Internal(Box<dyn Any>)` arm: an `ArrayAggInternal` carrier owns a
+//! leaked `&'static MemoryContext` modeling C's aggcontext (the same resolution
+//! the numeric internal-state family uses, `backend-utils-adt-numeric::agg_fmgr`)
+//! over the `ArrayBuildState`-over-`accumArrayResult` machinery in
+//! [`crate::construct`]. The `array_agg_combine`/`array_agg_serialize`/
+//! `array_agg_deserialize` parallel-aggregation half and the `array_agg_array_*`
+//! (sub-array) variants are not yet ported.
 
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
 use types_array::ArrayElementDatum;

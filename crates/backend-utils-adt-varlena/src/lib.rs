@@ -68,6 +68,7 @@ pub mod position_ops;
 pub mod replace_regexp;
 pub mod sortsupport;
 pub mod split_format;
+pub mod string_agg;
 pub mod wire_io;
 
 use mcx::{Mcx, PgString, PgVec};
@@ -485,6 +486,13 @@ pub fn init_seams() {
     // (text_to_array{,_null} / array_to_text{,_null}); the array de/construction
     // is the already-installed arrayfuncs owner seam.
     fmgr_builtins::register_varlena_array_string_builtins();
+
+    // The `internal`-transtype `string_agg` aggregate transition/final functions
+    // (varlena.c) so `SELECT string_agg(x::text, ',') FROM t` resolves them by
+    // OID. setup_peragg_finalfn resolves the finalfn via `fmgr_info` at
+    // ExecInitAgg, so an unregistered builtin would abort the node before any
+    // row is processed.
+    string_agg::register_string_agg_builtins();
 
     // The `bytea_output` GUC variable accessor (varlena.c owns the storage;
     // guc_tables.c binds the config_enum's `variable` pointer here). The GUC

@@ -25,7 +25,7 @@
 //! test that runs `crate::init_all()` then formats `missing_builtins()` (sorted
 //! by `foid`) as the `(oid, "prosrc", BuiltinGapKind::...)` rows below.
 //!
-//! Current gap: 1289 of 3102 canonical built-ins (1289 not registered,
+//! Current gap: 1285 of 3102 canonical built-ins (1285 not registered,
 //! 0 registered with diverging metadata).
 
 use backend_utils_fmgr_core::BuiltinGapKind;
@@ -318,8 +318,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (2313, "anyelement_out", BuiltinGapKind::NotRegistered),
     (2316, "postgresql_fdw_validator", BuiltinGapKind::NotRegistered),
     (2331, "array_unnest", BuiltinGapKind::NotRegistered),
-    (2333, "array_agg_transfn", BuiltinGapKind::NotRegistered),
-    (2334, "array_agg_finalfn", BuiltinGapKind::NotRegistered),
     (2400, "array_recv", BuiltinGapKind::NotRegistered),
     (2401, "array_send", BuiltinGapKind::NotRegistered),
     (2402, "record_recv", BuiltinGapKind::NotRegistered),
@@ -755,8 +753,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (3531, "enum_range_all", BuiltinGapKind::NotRegistered),
     (3532, "enum_recv", BuiltinGapKind::NotRegistered),
     (3533, "enum_send", BuiltinGapKind::NotRegistered),
-    (3535, "string_agg_transfn", BuiltinGapKind::NotRegistered),
-    (3536, "string_agg_finalfn", BuiltinGapKind::NotRegistered),
     (3539, "text_format", BuiltinGapKind::NotRegistered),
     (3540, "text_format_nv", BuiltinGapKind::NotRegistered),
     (3543, "bytea_string_agg_transfn", BuiltinGapKind::NotRegistered),
