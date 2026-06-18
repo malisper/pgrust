@@ -70,18 +70,35 @@ pub const DEFAULT_NUM_DISTINCT: f64 = 200.0;
  * holds the canonical knobs).
  * ------------------------------------------------------------------------ */
 
-pub static SEQ_PAGE_COST: f64 = DEFAULT_SEQ_PAGE_COST;
-pub static RANDOM_PAGE_COST: f64 = DEFAULT_RANDOM_PAGE_COST;
-pub static CPU_TUPLE_COST: f64 = DEFAULT_CPU_TUPLE_COST;
-pub static CPU_INDEX_TUPLE_COST: f64 = DEFAULT_CPU_INDEX_TUPLE_COST;
-pub static CPU_OPERATOR_COST: f64 = DEFAULT_CPU_OPERATOR_COST;
-pub static PARALLEL_TUPLE_COST: f64 = DEFAULT_PARALLEL_TUPLE_COST;
-pub static PARALLEL_SETUP_COST: f64 = DEFAULT_PARALLEL_SETUP_COST;
-pub static RECURSIVE_WORKTABLE_FACTOR: f64 = DEFAULT_RECURSIVE_WORKTABLE_FACTOR;
-pub static EFFECTIVE_CACHE_SIZE: i32 = DEFAULT_EFFECTIVE_CACHE_SIZE;
+// These GUCs are mutable at runtime (the GUC engine writes them through the
+// guc-table slot accessors installed in `guc.rs`), so they are thread_local
+// `Cell`s seeded to their boot_vals rather than `const` statics. Both the
+// in-crate accessor fns below and the guc-table slot `set` route through the
+// same cells.
+std::thread_local! {
+    static SEQ_PAGE_COST_CELL: core::cell::Cell<f64> =
+        const { core::cell::Cell::new(DEFAULT_SEQ_PAGE_COST) };
+    static RANDOM_PAGE_COST_CELL: core::cell::Cell<f64> =
+        const { core::cell::Cell::new(DEFAULT_RANDOM_PAGE_COST) };
+    static CPU_TUPLE_COST_CELL: core::cell::Cell<f64> =
+        const { core::cell::Cell::new(DEFAULT_CPU_TUPLE_COST) };
+    static CPU_INDEX_TUPLE_COST_CELL: core::cell::Cell<f64> =
+        const { core::cell::Cell::new(DEFAULT_CPU_INDEX_TUPLE_COST) };
+    static CPU_OPERATOR_COST_CELL: core::cell::Cell<f64> =
+        const { core::cell::Cell::new(DEFAULT_CPU_OPERATOR_COST) };
+    static PARALLEL_TUPLE_COST_CELL: core::cell::Cell<f64> =
+        const { core::cell::Cell::new(DEFAULT_PARALLEL_TUPLE_COST) };
+    static PARALLEL_SETUP_COST_CELL: core::cell::Cell<f64> =
+        const { core::cell::Cell::new(DEFAULT_PARALLEL_SETUP_COST) };
+    static RECURSIVE_WORKTABLE_FACTOR_CELL: core::cell::Cell<f64> =
+        const { core::cell::Cell::new(DEFAULT_RECURSIVE_WORKTABLE_FACTOR) };
+    static EFFECTIVE_CACHE_SIZE_CELL: core::cell::Cell<i32> =
+        const { core::cell::Cell::new(DEFAULT_EFFECTIVE_CACHE_SIZE) };
+    static MAX_PARALLEL_WORKERS_PER_GATHER_CELL: core::cell::Cell<i32> =
+        const { core::cell::Cell::new(2) };
+}
 /// `disable_cost` (costsize.c).
 pub static DISABLE_COST: Cost = 1.0e10;
-pub static MAX_PARALLEL_WORKERS_PER_GATHER: i32 = 2;
 pub static PARALLEL_LEADER_PARTICIPATION: bool = true;
 
 // enable_* GUCs (default ON).
@@ -104,50 +121,98 @@ pub static ENABLE_PARALLEL_HASH: bool = true;
 // enable_partitionwise_* GUCs default OFF (costsize.c lines 159-160).
 pub static ENABLE_PARTITIONWISE_JOIN: bool = false;
 
-// Inline GUC accessors so the cost arithmetic reads like the C source.
+// Inline GUC accessors so the cost arithmetic reads like the C source. Each
+// reads the runtime-mutable cell (the GUC engine writes them via guc.rs).
 #[inline]
-pub(crate) fn seq_page_cost() -> f64 {
-    SEQ_PAGE_COST
+pub fn seq_page_cost() -> f64 {
+    SEQ_PAGE_COST_CELL.with(core::cell::Cell::get)
 }
 #[inline]
-pub(crate) fn random_page_cost() -> f64 {
-    RANDOM_PAGE_COST
+pub fn random_page_cost() -> f64 {
+    RANDOM_PAGE_COST_CELL.with(core::cell::Cell::get)
 }
 #[inline]
-pub(crate) fn cpu_tuple_cost() -> f64 {
-    CPU_TUPLE_COST
+pub fn cpu_tuple_cost() -> f64 {
+    CPU_TUPLE_COST_CELL.with(core::cell::Cell::get)
 }
 #[inline]
 pub fn cpu_operator_cost() -> f64 {
-    CPU_OPERATOR_COST
+    CPU_OPERATOR_COST_CELL.with(core::cell::Cell::get)
 }
 #[inline]
 pub fn cpu_index_tuple_cost() -> f64 {
-    CPU_INDEX_TUPLE_COST
+    CPU_INDEX_TUPLE_COST_CELL.with(core::cell::Cell::get)
 }
 #[inline]
 pub(crate) fn parallel_tuple_cost() -> f64 {
-    PARALLEL_TUPLE_COST
+    PARALLEL_TUPLE_COST_CELL.with(core::cell::Cell::get)
 }
 #[inline]
 pub(crate) fn parallel_setup_cost() -> f64 {
-    PARALLEL_SETUP_COST
+    PARALLEL_SETUP_COST_CELL.with(core::cell::Cell::get)
 }
 #[inline]
 pub(crate) fn recursive_worktable_factor() -> f64 {
-    RECURSIVE_WORKTABLE_FACTOR
+    RECURSIVE_WORKTABLE_FACTOR_CELL.with(core::cell::Cell::get)
 }
 #[inline]
-pub(crate) fn effective_cache_size() -> f64 {
-    EFFECTIVE_CACHE_SIZE as f64
+pub fn effective_cache_size() -> f64 {
+    effective_cache_size_raw() as f64
+}
+/// `int effective_cache_size` raw value (for the guc-table slot getter).
+#[inline]
+pub fn effective_cache_size_raw() -> i32 {
+    EFFECTIVE_CACHE_SIZE_CELL.with(core::cell::Cell::get)
 }
 #[inline]
 pub(crate) fn disable_cost() -> Cost {
     DISABLE_COST
 }
 #[inline]
-pub(crate) fn max_parallel_workers_per_gather() -> i32 {
-    MAX_PARALLEL_WORKERS_PER_GATHER
+pub fn max_parallel_workers_per_gather() -> i32 {
+    MAX_PARALLEL_WORKERS_PER_GATHER_CELL.with(core::cell::Cell::get)
+}
+
+/// GUC `set` accessors (the GUC engine writes these via `guc.rs`).
+#[inline]
+pub(crate) fn set_seq_page_cost(v: f64) {
+    SEQ_PAGE_COST_CELL.with(|c| c.set(v));
+}
+#[inline]
+pub(crate) fn set_random_page_cost(v: f64) {
+    RANDOM_PAGE_COST_CELL.with(|c| c.set(v));
+}
+#[inline]
+pub(crate) fn set_cpu_tuple_cost(v: f64) {
+    CPU_TUPLE_COST_CELL.with(|c| c.set(v));
+}
+#[inline]
+pub(crate) fn set_cpu_index_tuple_cost(v: f64) {
+    CPU_INDEX_TUPLE_COST_CELL.with(|c| c.set(v));
+}
+#[inline]
+pub(crate) fn set_cpu_operator_cost(v: f64) {
+    CPU_OPERATOR_COST_CELL.with(|c| c.set(v));
+}
+#[inline]
+pub(crate) fn set_parallel_tuple_cost(v: f64) {
+    PARALLEL_TUPLE_COST_CELL.with(|c| c.set(v));
+}
+#[inline]
+pub(crate) fn set_parallel_setup_cost(v: f64) {
+    PARALLEL_SETUP_COST_CELL.with(|c| c.set(v));
+}
+#[inline]
+pub(crate) fn set_recursive_worktable_factor(v: f64) {
+    RECURSIVE_WORKTABLE_FACTOR_CELL.with(|c| c.set(v));
+}
+#[inline]
+pub(crate) fn set_effective_cache_size(v: i32) {
+    EFFECTIVE_CACHE_SIZE_CELL.with(|c| c.set(v));
+}
+#[inline]
+pub(crate) fn set_max_parallel_workers_per_gather(v: i32) {
+    MAX_PARALLEL_WORKERS_PER_GATHER_CELL.with(|c| c.set(v));
 }
 #[inline]
 pub(crate) fn parallel_leader_participation() -> bool {

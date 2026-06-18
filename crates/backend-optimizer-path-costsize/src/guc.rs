@@ -76,3 +76,52 @@ pub(crate) fn install_enable_gucs() {
     vars::enable_partitionwise_join
         .install(GucVarAccessors { get: get_partitionwise_join, set: set_partitionwise_join });
 }
+
+/// Install costsize.c's cost / sizing GUC slots (`seq_page_cost`,
+/// `random_page_cost`, the `cpu_*_cost`s, the `parallel_*_cost`s,
+/// `recursive_worktable_factor`, `effective_cache_size`,
+/// `max_parallel_workers_per_gather`). Their backing storage is the
+/// thread_local cells in `lib.rs`; the GUC engine reads/writes through these
+/// accessors. Called once from `init_seams()`.
+pub(crate) fn install_cost_gucs() {
+    vars::seq_page_cost.install(GucVarAccessors {
+        get: crate::seq_page_cost,
+        set: crate::set_seq_page_cost,
+    });
+    vars::random_page_cost.install(GucVarAccessors {
+        get: crate::random_page_cost,
+        set: crate::set_random_page_cost,
+    });
+    vars::cpu_tuple_cost.install(GucVarAccessors {
+        get: crate::cpu_tuple_cost,
+        set: crate::set_cpu_tuple_cost,
+    });
+    vars::cpu_index_tuple_cost.install(GucVarAccessors {
+        get: crate::cpu_index_tuple_cost,
+        set: crate::set_cpu_index_tuple_cost,
+    });
+    vars::cpu_operator_cost.install(GucVarAccessors {
+        get: crate::cpu_operator_cost,
+        set: crate::set_cpu_operator_cost,
+    });
+    vars::parallel_tuple_cost.install(GucVarAccessors {
+        get: crate::parallel_tuple_cost,
+        set: crate::set_parallel_tuple_cost,
+    });
+    vars::parallel_setup_cost.install(GucVarAccessors {
+        get: crate::parallel_setup_cost,
+        set: crate::set_parallel_setup_cost,
+    });
+    vars::recursive_worktable_factor.install(GucVarAccessors {
+        get: crate::recursive_worktable_factor,
+        set: crate::set_recursive_worktable_factor,
+    });
+    vars::effective_cache_size.install(GucVarAccessors {
+        get: crate::effective_cache_size_raw,
+        set: crate::set_effective_cache_size,
+    });
+    vars::max_parallel_workers_per_gather.install(GucVarAccessors {
+        get: crate::max_parallel_workers_per_gather,
+        set: crate::set_max_parallel_workers_per_gather,
+    });
+}

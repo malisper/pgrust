@@ -42,6 +42,8 @@ const SIZEOF_MINIMAL_TUPLE_HEADER: usize = {
 pub fn init_seams() {
     /* ---- costsize.c-owned scan/join `enable_*` cost GUC slots ---------- */
     crate::guc::install_enable_gucs();
+    /* ---- costsize.c-owned cost / sizing GUC slots ---------------------- */
+    crate::guc::install_cost_gucs();
 
     /* ---- costsize-seams (this unit's own clamp helpers) ---------------- */
     cz::clamp_row_est::set(crate::clamp_row_est);
@@ -60,8 +62,8 @@ pub fn init_seams() {
     // those defaults and the init-small `MyDatabaseTableSpace` global.
     cz::get_tablespace_page_costs::set(|spcid| {
         let defaults = backend_utils_cache_spccache::PageCostDefaults {
-            random_page_cost: crate::RANDOM_PAGE_COST,
-            seq_page_cost: crate::SEQ_PAGE_COST,
+            random_page_cost: crate::random_page_cost(),
+            seq_page_cost: crate::seq_page_cost(),
         };
         let my_db_ts = backend_utils_init_small_seams::my_database_table_space::call();
         let mut spc_random_page_cost = 0.0f64;
@@ -104,12 +106,12 @@ pub fn init_seams() {
     // unported, but costsize.c owns this GUC global, so install it here. The
     // seam signature is `() -> PgResult<f64>` (infallible read).
     backend_optimizer_plan_planner_pc_seams::cpu_operator_cost::set(
-        || Ok(crate::CPU_OPERATOR_COST),
+        || Ok(crate::cpu_operator_cost()),
     );
 
     /* ---- pathnode-seams: cost GUC getters + sizing helpers owned here -- */
-    ps::cpu_tuple_cost::set(|| crate::CPU_TUPLE_COST);
-    ps::cpu_operator_cost::set(|| crate::CPU_OPERATOR_COST);
+    ps::cpu_tuple_cost::set(|| crate::cpu_tuple_cost());
+    ps::cpu_operator_cost::set(|| crate::cpu_operator_cost());
     ps::enable_hashagg::set(|| crate::ENABLE_HASHAGG);
     ps::sizeof_minimal_tuple_header::set(|| SIZEOF_MINIMAL_TUPLE_HEADER);
     // `work_mem` (utils/guc.c GUC, default 4 MB) read by the cost estimators

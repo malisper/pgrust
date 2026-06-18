@@ -2651,7 +2651,7 @@ fn make_sort_input_target<'mcx>(
     let mut have_expensive = false;
     let mut have_srf_sortcols = false;
 
-    let cpu_op_cost = backend_optimizer_path_costsize::CPU_OPERATOR_COST;
+    let cpu_op_cost = backend_optimizer_path_costsize::cpu_operator_cost();
 
     for i in 0..ncols {
         let expr_id = final_target.exprs[i];
