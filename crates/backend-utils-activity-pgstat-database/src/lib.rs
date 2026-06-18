@@ -622,6 +622,13 @@ pub fn init_seams() {
             set_pgstat_session_end_cause(SessionEndType::DISCONNECT_FATAL);
         }
     });
+    // `pgStatSessionEndCause = DISCONNECT_KILLED;` (tcop/postgres.c:3036, `die()`)
+    // — record the session as terminated by an administrator. The
+    // `pgStatSessionEndCause` session-stats global is owned here; C sets it
+    // unconditionally on this path.
+    backend_tcop_postgres_seams::set_session_end_cause_killed::set(|| {
+        set_pgstat_session_end_cause(SessionEndType::DISCONNECT_KILLED);
+    });
 
     backend_utils_activity_pgstat_seams::pgstat_drop_database::set(pgstat_drop_database);
     backend_utils_activity_pgstat_seams::pgstat_prepare_report_checksum_failure::set(

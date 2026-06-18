@@ -1666,6 +1666,20 @@ pub fn init_seams() {
         |_handle| Ok(()),
     );
 
+    // `MyBgworkerEntry->bgw_type` (tcop/postgres.c:3344 `ProcessInterrupts`) —
+    // the bgw_type string of the background worker the current process runs,
+    // read to phrase the bgworker-termination FATAL. bgworker.c owns
+    // `MyBgworkerEntry` (the per-backend `MY_BGWORKER_ENTRY` thread-local here);
+    // install the accessor from the real owner. C dereferences the pointer
+    // unconditionally on this path (the caller has already established
+    // `IsBackgroundWorker`), so a missing entry is a hard logic error and panics
+    // rather than masking it.
+    backend_tcop_postgres_seams::my_bgworker_type::set(|| {
+        MY_BGWORKER_ENTRY
+            .with(|e| e.borrow().as_ref().map(|w| cstr_lossy(&w.bgw_type)))
+            .expect("MyBgworkerEntry->bgw_type read with no MyBgworkerEntry set")
+    });
+
     pm_registry_init_seams();
 }
 
