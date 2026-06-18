@@ -7535,6 +7535,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-subscriptioncmds"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-table-table",
+ "backend-catalog-aclchk",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-indexing",
+ "backend-catalog-objectaccess-seams",
+ "backend-catalog-pg-shdepend",
+ "backend-commands-dbcommands-seams",
+ "backend-commands-subscriptioncmds-seams",
+ "backend-commands-tablespace-globals-seams",
+ "backend-replication-logical-launcher-seams",
+ "backend-replication-logical-worker-seams",
+ "backend-utils-adt-acl-seams",
+ "backend-utils-cache-syscache",
+ "backend-utils-error",
+ "backend-utils-init-miscinit",
+ "backend-utils-misc-superuser-seams",
+ "mcx",
+ "seam-core",
+ "types-acl",
+ "types-cache",
+ "types-catalog",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-storage",
+ "types-syscache",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-commands-subscriptioncmds-seams"
 version = "0.0.0"
 dependencies = [
@@ -22257,6 +22293,7 @@ dependencies = [
  "backend-commands-seclabel",
  "backend-commands-sequence",
  "backend-commands-statscmds",
+ "backend-commands-subscriptioncmds",
  "backend-commands-tablecmds",
  "backend-commands-tablespace",
  "backend-commands-trigger",

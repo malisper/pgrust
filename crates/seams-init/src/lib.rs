@@ -136,6 +136,7 @@ pub fn init_all() {
     backend_catalog_pg_publication::init_seams();
     backend_catalog_pg_subscription::init_seams();
     backend_commands_publicationcmds::init_seams();
+    backend_commands_subscriptioncmds::init_seams();
     backend_catalog_pg_shdepend::init_seams();
     backend_catalog_toasting::init_seams();
     backend_commands_amcmds::init_seams();
