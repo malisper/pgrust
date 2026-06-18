@@ -3201,15 +3201,23 @@ fn function_call_invoke_datum_owned_seam<'mcx>(
     fn_oid: Oid,
     collation: Oid,
     args: Vec<types_tuple::backend_access_common_heaptuple::Datum<'mcx>>,
+    args_null: Vec<bool>,
     fn_expr: Option<&types_nodes::primnodes::Expr>,
 ) -> PgResult<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)> {
+    debug_assert_eq!(args.len(), args_null.len());
     let arg_typlens = proc_arg_typlens(mcx, fn_oid, args.len())?;
     let mut nargs: Vec<NullableDatum> = Vec::with_capacity(args.len());
     let mut ref_args: Vec<Option<RefPayload>> = Vec::with_capacity(args.len());
     for (i, val) in args.into_iter().enumerate() {
-        let (nd, refp) = datum_to_ref_arg_owned_typed(val, arg_typlens[i]);
+        let (mut nd, refp) = datum_to_ref_arg_owned_typed(val, arg_typlens[i]);
+        // Thread `fcinfo->args[i].isnull` (a NULL running state / NULL input):
+        // the canonical word cannot carry it, so the caller passes it alongside.
+        // A NULL arg never carries a by-reference referent.
+        if args_null[i] {
+            nd.isnull = true;
+        }
         nargs.push(nd);
-        ref_args.push(refp);
+        ref_args.push(if args_null[i] { None } else { refp });
     }
     function_call_invoke_datum_core(mcx, fn_oid, collation, nargs, ref_args, fn_expr)
 }

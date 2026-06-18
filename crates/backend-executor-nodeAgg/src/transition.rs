@@ -393,16 +393,23 @@ fn invoke_transfn<'mcx>(
     trans_value: AggDatum<'mcx>,
     trans_value_is_null: bool,
     input_args: &[AggDatum<'mcx>],
+    input_args_null: &[bool],
     mcx: Mcx<'mcx>,
 ) -> PgResult<(AggDatum<'mcx>, bool)> {
     // fcinfo->args[0] = transValue (a NULL one is the canonical null Datum);
     // args[1..] = the per-row inputs the compiler evaluated into the arg cells.
-    let _ = trans_value_is_null;
+    // `args_null` carries each `fcinfo->args[i].isnull` (the canonical word
+    // cannot encode SQL NULL): a transition function reads `PG_ARGISNULL(0)` to
+    // detect the first call (NULL running state) and `PG_ARGISNULL(i)` per input.
     let mut args: alloc::vec::Vec<AggDatum<'mcx>> =
         alloc::vec::Vec::with_capacity(1 + input_args.len());
+    let mut args_null: alloc::vec::Vec<bool> =
+        alloc::vec::Vec::with_capacity(1 + input_args.len());
     args.push(trans_value);
-    for a in input_args {
+    args_null.push(trans_value_is_null);
+    for (i, a) in input_args.iter().enumerate() {
         args.push(a.clone());
+        args_null.push(input_args_null.get(i).copied().unwrap_or(false));
     }
     // C: `pertrans->transfn_fcinfo->flinfo` is `&pertrans->transfn`, onto which
     // `build_pertrans_for_aggref` ran `fmgr_info_set_expr((Node*) transfnexpr,
@@ -423,6 +430,7 @@ fn invoke_transfn<'mcx>(
         pertrans.transfn.fn_oid,
         pertrans.agg_collation,
         args,
+        args_null,
         fn_expr,
     )
 }
@@ -465,6 +473,7 @@ pub fn ExecAggPlainTransByVal<'mcx>(
     setno: i32,
     _aggcontext: Option<types_nodes::execnodes::EcxtId>,
     input_args: &[AggDatum<'mcx>],
+    input_args_null: &[bool],
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     // cf. select_current_set(): aggstate->curaggcontext = aggcontext (= setno for
@@ -473,14 +482,22 @@ pub fn ExecAggPlainTransByVal<'mcx>(
     aggstate.current_set = setno;
     aggstate.curpertrans = transno as i32;
 
+    // MOVE the running value out (replaced immediately below): the `internal`
+    // pseudo-type transition state is a `Datum::Internal` box that cannot be
+    // cloned (C passes it by pointer); a by-value scalar move is identical to a
+    // copy. Internal-transtype aggregates compile to BYVAL (internal is
+    // pass-by-value), so this path — not ByRef — carries them.
     let (trans_value, trans_value_is_null) = {
-        let pg = pergroup_ref(aggstate, setoff, transno);
-        (pg.trans_value.clone(), pg.trans_value_is_null)
+        let pg = pergroup_mut(aggstate, setoff, transno);
+        (
+            core::mem::replace(&mut pg.trans_value, AggDatum::null()),
+            pg.trans_value_is_null,
+        )
     };
     let mcx = estate.es_query_cxt;
     let (new_val, isnull) = {
         let pertrans = pertrans_ref(aggstate, transno);
-        invoke_transfn(pertrans, trans_value, trans_value_is_null, input_args, mcx)?
+        invoke_transfn(pertrans, trans_value, trans_value_is_null, input_args, input_args_null, mcx)?
     };
     let pergroup = pergroup_mut(aggstate, setoff, transno);
     pergroup.trans_value = new_val;
@@ -500,6 +517,7 @@ pub fn ExecAggPlainTransByRef<'mcx>(
     setno: i32,
     aggcontext: Option<types_nodes::execnodes::EcxtId>,
     input_args: &[AggDatum<'mcx>],
+    input_args_null: &[bool],
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     aggstate.curaggcontext = setno;
@@ -527,7 +545,7 @@ pub fn ExecAggPlainTransByRef<'mcx>(
         };
         let (new_val, isnull) = {
             let pertrans = pertrans_ref(aggstate, transno);
-            invoke_transfn(pertrans, trans_value, trans_value_is_null, input_args, mcx)?
+            invoke_transfn(pertrans, trans_value, trans_value_is_null, input_args, input_args_null, mcx)?
         };
         let pergroup = pergroup_mut(aggstate, setoff, transno);
         pergroup.trans_value = new_val;
@@ -551,6 +569,7 @@ pub fn ExecAggPlainTransByRef<'mcx>(
             trans_value.clone(),
             trans_value_is_null,
             input_args,
+            input_args_null,
             mcx,
         )?
     };

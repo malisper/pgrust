@@ -76,6 +76,13 @@ impl Default for Datum<'_> {
 }
 
 impl Datum<'_> {
+    /// True if this is the `internal` pseudo-type arm (a live `Box<dyn Any>`
+    /// state, e.g. an aggregate transition state) that cannot be cloned.
+    #[inline]
+    pub fn is_internal(&self) -> bool {
+        matches!(self, Datum::Internal(_))
+    }
+
     /// `DatumGetPointer(datum)` analogue: borrow the by-reference bytes. Panics
     /// if this is a by-value scalar (a caller bug — C would have a type/length
     /// mismatch here too).

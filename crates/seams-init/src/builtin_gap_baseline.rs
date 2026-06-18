@@ -25,7 +25,7 @@
 //! test that runs `crate::init_all()` then formats `missing_builtins()` (sorted
 //! by `foid`) as the `(oid, "prosrc", BuiltinGapKind::...)` rows below.
 //!
-//! Current gap: 1305 of 3102 canonical built-ins (1305 not registered,
+//! Current gap: 1289 of 3102 canonical built-ins (1289 not registered,
 //! 0 registered with diverging metadata).
 
 use backend_utils_fmgr_core::BuiltinGapKind;
@@ -245,13 +245,7 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (1830, "float8_avg", BuiltinGapKind::NotRegistered),
     (1831, "float8_var_samp", BuiltinGapKind::NotRegistered),
     (1832, "float8_stddev_samp", BuiltinGapKind::NotRegistered),
-    (1833, "numeric_accum", BuiltinGapKind::NotRegistered),
-    (1834, "int2_accum", BuiltinGapKind::NotRegistered),
-    (1835, "int4_accum", BuiltinGapKind::NotRegistered),
     (1836, "int8_accum", BuiltinGapKind::NotRegistered),
-    (1837, "numeric_avg", BuiltinGapKind::NotRegistered),
-    (1838, "numeric_var_samp", BuiltinGapKind::NotRegistered),
-    (1839, "numeric_stddev_samp", BuiltinGapKind::NotRegistered),
     (1840, "int2_sum", BuiltinGapKind::NotRegistered),
     (1841, "int4_sum", BuiltinGapKind::NotRegistered),
     (1842, "int8_sum", BuiltinGapKind::NotRegistered),
@@ -366,7 +360,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (2511, "pg_cursor", BuiltinGapKind::NotRegistered),
     (2512, "float8_var_pop", BuiltinGapKind::NotRegistered),
     (2513, "float8_stddev_pop", BuiltinGapKind::NotRegistered),
-    (2514, "numeric_var_pop", BuiltinGapKind::NotRegistered),
     (2556, "pg_tablespace_databases", BuiltinGapKind::NotRegistered),
     (2559, "lastval", BuiltinGapKind::NotRegistered),
     (2560, "pg_postmaster_start_time", BuiltinGapKind::NotRegistered),
@@ -381,7 +374,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (2586, "gist_poly_compress", BuiltinGapKind::NotRegistered),
     (2591, "gist_circle_consistent", BuiltinGapKind::NotRegistered),
     (2592, "gist_circle_compress", BuiltinGapKind::NotRegistered),
-    (2596, "numeric_stddev_pop", BuiltinGapKind::NotRegistered),
     (2597, "domain_in", BuiltinGapKind::NotRegistered),
     (2598, "domain_recv", BuiltinGapKind::NotRegistered),
     (2599, "pg_timezone_abbrevs_abbrevs", BuiltinGapKind::NotRegistered),
@@ -455,7 +447,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (2853, "pg_stat_get_backend_wait_event", BuiltinGapKind::NotRegistered),
     (2856, "pg_timezone_names", BuiltinGapKind::NotRegistered),
     (2857, "pg_stat_get_backend_xact_start", BuiltinGapKind::NotRegistered),
-    (2858, "numeric_avg_accum", BuiltinGapKind::NotRegistered),
     (2859, "pg_stat_get_buf_alloc", BuiltinGapKind::NotRegistered),
     (2878, "pg_stat_get_live_tuples", BuiltinGapKind::NotRegistered),
     (2879, "pg_stat_get_dead_tuples", BuiltinGapKind::NotRegistered),
@@ -593,7 +584,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (3173, "json_agg_transfn", BuiltinGapKind::NotRegistered),
     (3174, "json_agg_finalfn", BuiltinGapKind::NotRegistered),
     (3177, "pg_stat_get_mod_since_analyze", BuiltinGapKind::NotRegistered),
-    (3178, "numeric_sum", BuiltinGapKind::NotRegistered),
     (3179, "array_cardinality", BuiltinGapKind::NotRegistered),
     (3180, "json_object_agg_transfn", BuiltinGapKind::NotRegistered),
     (3187, "btrecordimagecmp", BuiltinGapKind::NotRegistered),
@@ -695,12 +685,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (3385, "brin_minmax_consistent", BuiltinGapKind::NotRegistered),
     (3386, "brin_minmax_union", BuiltinGapKind::NotRegistered),
     (3387, "int8_avg_accum_inv", BuiltinGapKind::NotRegistered),
-    (3388, "numeric_poly_sum", BuiltinGapKind::NotRegistered),
-    (3389, "numeric_poly_avg", BuiltinGapKind::NotRegistered),
-    (3390, "numeric_poly_var_pop", BuiltinGapKind::NotRegistered),
-    (3391, "numeric_poly_var_samp", BuiltinGapKind::NotRegistered),
-    (3392, "numeric_poly_stddev_pop", BuiltinGapKind::NotRegistered),
-    (3393, "numeric_poly_stddev_samp", BuiltinGapKind::NotRegistered),
     (3396, "regexp_match_no_flags", BuiltinGapKind::NotRegistered),
     (3397, "regexp_match", BuiltinGapKind::NotRegistered),
     (3399, "int8_mul_cash", BuiltinGapKind::NotRegistered),

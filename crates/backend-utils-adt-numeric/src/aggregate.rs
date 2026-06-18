@@ -776,6 +776,47 @@ pub fn numeric_poly_sum<'mcx>(
     Ok(Some(res))
 }
 
+/// `numeric_poly_avg(state)` (numeric.c:6219): AVG final over the 128-bit state.
+pub fn numeric_poly_avg<'mcx>(
+    mcx: Mcx<'mcx>,
+    state: &Int128AggState,
+) -> PgResult<Option<PgVec<'mcx, u8>>> {
+    if state.n == 0 {
+        return Ok(None);
+    }
+    // sumX_var = int128_to_numericvar(state->sumX); numericvar_to_numeric(...)
+    let sum_x_var = int128_to_numericvar(mcx, state.sum_x)?;
+    let sum_x_datum = convert::make_result(mcx, &sum_x_var)?;
+    let n_datum = convert::int64_to_numeric(mcx, state.n)?;
+    Ok(Some(ops_sql::numeric_div(mcx, &sum_x_datum, &n_datum)?))
+}
+
+/// `numeric_poly_stddev_internal(state, variance, sample, is_null)`
+/// (numeric.c:6135): build a `NumericAggState` from the 128-bit sums and run the
+/// numeric variance/stddev. `Ok(None)` is the C `*is_null = true`.
+pub fn numeric_poly_stddev_internal<'mcx>(
+    mcx: Mcx<'mcx>,
+    state: &Int128AggState,
+    variance: bool,
+    sample: bool,
+) -> PgResult<Option<PgVec<'mcx, u8>>> {
+    // Initialize an empty agg state (calc_sum_x2 so accum_sum_final is valid).
+    let mut numstate = NumericAggState::new(mcx, true);
+
+    // numstate.N = state->N;
+    numstate.n = state.n;
+
+    // int128_to_numericvar(state->sumX, &tmp); accum_sum_add(&numstate.sumX, &tmp);
+    let tmp_x = int128_to_numericvar(mcx, state.sum_x)?;
+    accum_sum_add(&mut numstate.sum_x, &tmp_x)?;
+
+    // int128_to_numericvar(state->sumX2, &tmp); accum_sum_add(&numstate.sumX2, &tmp);
+    let tmp_x2 = int128_to_numericvar(mcx, state.sum_x2)?;
+    accum_sum_add(&mut numstate.sum_x2, &tmp_x2)?;
+
+    numeric_stddev_internal(mcx, &numstate, variance, sample)
+}
+
 /// `int128_to_numericvar(val, var)` (numeric.c:8414): convert a 128-bit integer
 /// to a `NumericVar`.  Private aggregate-only helper (only the `numeric_poly_*`
 /// finals need it).

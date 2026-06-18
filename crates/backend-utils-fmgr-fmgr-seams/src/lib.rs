@@ -996,11 +996,16 @@ seam_core::seam!(
     /// result `Datum<'mcx>` (a by-value scalar, a materialized by-reference value,
     /// or a `Datum::Internal` carrying the returned state) and the callee's
     /// read-back `fcinfo->isnull`.
+    /// `args_null[i]` carries `fcinfo->args[i].isnull` explicitly (the canonical
+    /// `Datum::ByVal(0)` word cannot encode SQL NULL on its own): an aggregate
+    /// transition function reads `PG_ARGISNULL(0)` to detect the first call
+    /// (NULL running state) and `PG_ARGISNULL(i)` for each NULL input.
     pub fn function_call_invoke_datum_owned<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         fn_oid: Oid,
         collation: Oid,
         args: Vec<Datum<'mcx>>,
+        args_null: Vec<bool>,
         fn_expr: Option<&types_nodes::primnodes::Expr>,
     ) -> PgResult<(Datum<'mcx>, bool)>
 );

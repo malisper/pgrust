@@ -137,8 +137,17 @@ pub fn finalize_aggregate<'mcx>(
         //     pertrans->transtypeLen);
         // fcinfo->args[0].isnull = pergroupstate->transValueIsNull;
         // anynull |= pergroupstate->transValueIsNull;
+        // C reads `args[0] = transValue` without consuming it (nodeAgg owns the
+        // aggcontext reset). An `internal` transValue is a `Datum::Internal` box
+        // that cannot be cloned, so MOVE it out of the pergroup (it is finalized
+        // once per group at end of input); a by-value scalar/by-ref value clones.
+        let trans_value = if pergroupstate.trans_value.is_internal() {
+            core::mem::replace(&mut pergroupstate.trans_value, Datum::null())
+        } else {
+            pergroupstate.trans_value.clone()
+        };
         let arg0 = make_expanded_object_read_only(
-            pergroupstate.trans_value.clone(),
+            trans_value,
             pergroupstate.trans_value_is_null,
             transtype_len,
         );
@@ -171,8 +180,8 @@ pub fn finalize_aggregate<'mcx>(
             let (result, isnull) = invoke_finalfn(
                 peragg.finalfn_oid,
                 agg_collation,
-                &final_args,
-                &final_arg_isnull,
+                final_args,
+                final_arg_isnull,
                 estate,
             )?;
             result_is_null = isnull;
@@ -333,16 +342,21 @@ fn finalfn_is_strict(peragg: &AggStatePerAggData<'_>) -> PgResult<bool> {
 fn invoke_finalfn<'mcx>(
     finalfn_oid: Oid,
     collation: Oid,
-    args: &[Datum<'mcx>],
-    _arg_isnull: &[bool],
+    args: alloc::vec::Vec<Datum<'mcx>>,
+    arg_isnull: alloc::vec::Vec<bool>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<(Datum<'mcx>, bool)> {
     let mcx = estate.es_query_cxt;
-    backend_utils_fmgr_fmgr_seams::function_call_invoke_datum::call(
+    // The finalfn takes its args by value: an `internal`-transtype aggregate's
+    // `args[0]` is a `Datum::Internal` box that cannot be cloned out of a
+    // borrow, so it crosses by move through the by-value dispatch (the same form
+    // the transition path uses). `arg_isnull[i]` carries `PG_ARGISNULL(i)`.
+    backend_utils_fmgr_fmgr_seams::function_call_invoke_datum_owned::call(
         mcx,
         finalfn_oid,
         collation,
         args,
+        arg_isnull,
         None,
     )
 }

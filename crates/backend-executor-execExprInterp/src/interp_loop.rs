@@ -1136,8 +1136,11 @@ pub fn ExecInterpExpr<'mcx>(
                 // BEFORE re-deriving the &mut AggState (the cells live on `state`,
                 // the trans state on the parent AggState — disjoint, as in C).
                 let mut input_args: Vec<Datum<'mcx>> = Vec::with_capacity(arg_cell_ids.len());
+                let mut input_args_null: Vec<bool> = Vec::with_capacity(arg_cell_ids.len());
                 for &c in &arg_cell_ids {
-                    input_args.push(read_cell(state, c).0);
+                    let (v, isnull) = read_cell(state, c);
+                    input_args.push(v);
+                    input_args_null.push(isnull);
                 }
 
                 let byref = matches!(
@@ -1181,6 +1184,7 @@ pub fn ExecInterpExpr<'mcx>(
                         setno,
                         aggcontext,
                         &input_args,
+                        &input_args_null,
                         estate,
                     )?;
                 } else {
@@ -1191,6 +1195,7 @@ pub fn ExecInterpExpr<'mcx>(
                         setno,
                         aggcontext,
                         &input_args,
+                        &input_args_null,
                         estate,
                     )?;
                 }

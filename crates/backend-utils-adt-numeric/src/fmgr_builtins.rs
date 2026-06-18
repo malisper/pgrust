@@ -104,7 +104,7 @@ fn ret_i64(v: i64) -> Datum {
 /// A scratch context for cores that allocate their result through `Mcx`. The
 /// resulting bytes are copied onto the by-ref lane before it is dropped (C: the
 /// palloc'd result lives in the caller's context; here it crosses by value).
-fn scratch_mcx() -> mcx::MemoryContext {
+pub(crate) fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("numeric fmgr scratch")
 }
 
@@ -629,7 +629,7 @@ fn fc_int2int4_sum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // Registration.
 // ---------------------------------------------------------------------------
 
-fn builtin(
+pub(crate) fn builtin(
     foid: u32,
     name: &str,
     nargs: i16,

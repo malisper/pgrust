@@ -36,6 +36,7 @@
 #![allow(clippy::result_large_err)]
 #![allow(clippy::too_many_arguments)]
 
+pub mod agg_fmgr;
 pub mod aggregate;
 pub mod convert;
 pub mod fmgr_builtins;
@@ -109,4 +110,5 @@ pub fn init_seams() {
     // Register this unit's SQL-callable functions into the fmgr-core builtin
     // table (C: fmgr_builtins[]), so by-OID dispatch resolves them.
     fmgr_builtins::register_numeric_builtins();
+    agg_fmgr::register_numeric_agg_builtins();
 }
