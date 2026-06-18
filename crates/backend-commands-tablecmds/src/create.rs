@@ -753,13 +753,15 @@ pub fn define_relation<'mcx>(
     Ok(address)
 }
 
-/// `RELKIND_HAS_TABLE_AM(relkind)` (pg_class.h): does this relkind have a table
-/// access method? True for ordinary tables, toast tables, matviews, sequences.
+/// `RELKIND_HAS_TABLE_AM(relkind)` (pg_class.h): does this relkind carry a table
+/// access method in `pg_class.relam`? True for ordinary tables, toast tables,
+/// and matviews. Sequences are *accessed* like heaps (relcache overwrites
+/// `rd_amhandler` for them), but their `pg_class.relam` stays `InvalidOid`, so
+/// they are deliberately excluded here — matching pg_class.h exactly.
 fn RELKIND_HAS_TABLE_AM(relkind: u8) -> bool {
     relkind == RELKIND_RELATION
         || relkind == types_tuple::access::RELKIND_TOASTVALUE
         || relkind == types_tuple::access::RELKIND_MATVIEW
-        || relkind == types_tuple::access::RELKIND_SEQUENCE
 }
 
 /// `BuildDescForRelation(const List *columns)` (tablecmds.c:1380).
