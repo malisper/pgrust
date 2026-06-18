@@ -1096,29 +1096,22 @@ mod recurrence_guard {
         // relcache GinOptions keystone lands.
         ("backend_access_gin_ginutil", "gin_get_pending_list_cleanup_size"),
         ("backend_access_gin_ginutil", "gin_get_use_fast_update"),
-        // DESIGN_DEBT (TD-HEAPAM-UNPORTED-DRIVERS): six heapam-seams whose real
-        // bodies are NOT in the merged heap-AM slice yet — sanctioned
-        // mirror-pg-and-panic on a complete owner. Each is `::call`ed in a live
-        // consumer but the owner has no contract-matching body:
-        //   * insert_one_tuple — bootstrap.c `InsertOneTuple` (form tuple from
-        //     attrtypes/values/nulls + simple_heap_insert). The owner's
-        //     init_seams() explicitly documents this as out-of-slice-scope
-        //     (heap-INSERT family's job); only `simple_heap_insert` exists.
-        //   * read_pg_type — bootstrap.c pg_type catalog-scan driver
-        //     (populate_typ_list); scan substrate exists, the driver is unwritten.
-        //   * scan_indisclustered — cluster.c `get_tables_to_cluster` pg_index
-        //     `indisclustered` systable scan; driver unwritten.
-        //   * index_compute_xid_horizon_for_tuples — the full index-buffer
-        //     line-pointer + heap-page conflict-horizon driver; only the per-tuple
-        //     helper HeapTupleHeaderAdvanceConflictHorizon is ported.
-        // (heap_multi_insert — heapam.c's page-at-a-time batch heap insert — is
-        //  now ported in backend-access-heap-heapam (insert::heap_multi_insert)
-        //  and installed from its init_seams(); its allowlist entry was removed.)
-        // DELETE each entry when its driver lands in the heap-AM port.
-        ("backend_access_heap_heapam", "index_compute_xid_horizon_for_tuples"),
-        ("backend_access_heap_heapam", "insert_one_tuple"),
-        ("backend_access_heap_heapam", "read_pg_type"),
-        ("backend_access_heap_heapam", "scan_indisclustered"),
+        // (TD-HEAPAM-UNPORTED-DRIVERS RETIRED: the four heapam-seams driver
+        //  bodies are now ported + installed by the heap owner
+        //  (backend-access-heap-heapam, catalog_drivers.rs):
+        //    * insert_one_tuple — bootstrap.c `InsertOneTuple`: CreateTupleDesc
+        //      + heap_form_tuple + simple_heap_insert (the seam was re-signed to
+        //      carry the full open `Relation`, which simple_heap_insert needs).
+        //    * read_pg_type — bootstrap.c `populate_typ_list`: table_open(NoLock)
+        //      + table_beginscan_catalog + heap_getnext loop + GETSTRUCT deform.
+        //    * scan_indisclustered — cluster.c `get_tables_to_cluster`: pg_index
+        //      indisclustered table_beginscan_catalog scan; the per-row aclcheck
+        //      stays in the cluster.c caller.
+        //    * index_compute_xid_horizon_for_tuples — genam.c's AM-generic
+        //      table_index_delete_tuples() shim over the installed
+        //      heap_index_delete_tuples.
+        //  heap_multi_insert was already ported+installed; its entry was removed
+        //  earlier.)
         // (TD-DEST-COMMAND-LIFECYCLE RETIRED: printtup.c's
         // `SetRemoteDestReceiverParams` + the `DestRemote`/`DestRemoteExecute`/
         // `DestDebug` receiver routing now land — `backend-access-common-printtup`

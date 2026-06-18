@@ -777,7 +777,7 @@ pub fn InsertOneTuple(mcx: Mcx<'static>) -> PgResult<()> {
         vals.push(values(i));
         nulls.push(nulls_(i));
     }
-    with_boot_reldesc_res(|rel| {
+    with_boot_reldesc_rel_res(|rel| {
         backend_access_heap_heapam_seams::insert_one_tuple::call(mcx, rel, &attr, &vals, &nulls)
     })?;
 
@@ -1123,8 +1123,12 @@ fn with_boot_reldesc<R>(f: impl FnOnce(&RelationData<'static>) -> R) -> R {
         f(rel)
     })
 }
-/// As [`with_boot_reldesc`] but `f` may fail.
-fn with_boot_reldesc_res<R>(f: impl FnOnce(&RelationData<'static>) -> PgResult<R>) -> PgResult<R> {
+/// As [`with_boot_reldesc`] but hands `f` the full open [`Relation`] handle
+/// (not the dereffed `RelationData`), for the `simple_heap_insert` path that
+/// needs the relcache-aware handle.
+fn with_boot_reldesc_rel_res<R>(
+    f: impl FnOnce(&Relation<'static>) -> PgResult<R>,
+) -> PgResult<R> {
     STATE.with(|s| {
         let st = s.borrow();
         let rel = st

@@ -21,6 +21,9 @@ types-xlog-records = { path = "../types-xlog-records" }
 types-wal = { path = "../types-wal" }
 types-nbtree = { path = "../types-nbtree" }
 types-snapshot = { path = "../types-snapshot" }
+types-catalog = { path = "../types-catalog" }
+backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
+backend-access-table-table-seams = { path = "../backend-access-table-table-seams" }
 backend-storage-page = { path = "../backend-storage-page" }
 backend-rmgrdesc-next = { path = "../backend-rmgrdesc-next" }
 backend-access-heap-heapam-seams = { path = "../backend-access-heap-heapam-seams" }

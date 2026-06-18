@@ -28,6 +28,7 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+pub mod catalog_drivers;
 pub mod delete;
 pub mod fetch;
 pub mod freeze;
@@ -612,10 +613,24 @@ pub fn init_seams() {
     heapam_seam::simple_heap_update::set(|mcx, rel, otid, tup| {
         update::simple_heap_update(mcx, rel, otid, tup)
     });
-    // NB: the `insert_one_tuple` seam (bootstrap.c `InsertOneTuple` batch) stays
-    // uninstalled here: it carries canonical `Datum<'mcx>` (so by-ref column
-    // images survive), but forming + `simple_heap_insert`ing the tuple is the
-    // heap-INSERT family's job, out of this slice's scope.
+    // Cross-family driver seams (catalog_drivers.rs): the bootstrap.c /
+    // cluster.c callers and genam.c's AM-generic shim batch a small amount of
+    // catalog-scan / tuple-form vocabulary the heap owner already has the
+    // substrate for.
+    // bootstrap.c InsertOneTuple — CreateTupleDesc + heap_form_tuple +
+    // simple_heap_insert.
+    heapam_seam::insert_one_tuple::set(|mcx, rel, attrtypes, values, nulls| {
+        catalog_drivers::insert_one_tuple(mcx, rel, attrtypes, values, nulls)
+    });
+    // bootstrap.c populate_typ_list — pg_type catalog-scan driver.
+    heapam_seam::read_pg_type::set(|mcx| catalog_drivers::read_pg_type(mcx));
+    // cluster.c get_tables_to_cluster — pg_index indisclustered systable scan.
+    heapam_seam::scan_indisclustered::set(|mcx| catalog_drivers::scan_indisclustered(mcx));
+    // genam.c index_compute_xid_horizon_for_tuples — AM-generic
+    // table_index_delete_tuples() shim over heap_index_delete_tuples.
+    heapam_seam::index_compute_xid_horizon_for_tuples::set(|irel, hrel, ibuf, itemnos| {
+        catalog_drivers::index_compute_xid_horizon_for_tuples(irel, hrel, ibuf, itemnos)
+    });
 
     // Inplace-update lock/apply/unlock trio (heapam.c, ported in `inplace.rs`),
     // the primitives `systable_inplace_update_{begin,finish,cancel}` drive.

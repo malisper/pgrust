@@ -1438,6 +1438,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
  "backend-access-common-syncscan-seams",
+ "backend-access-common-tupdesc",
  "backend-access-heap-heapam-seams",
  "backend-access-heap-heapam-visibility",
  "backend-access-heap-heaptoast",
@@ -1445,6 +1446,7 @@ dependencies = [
  "backend-access-heap-hio-seams",
  "backend-access-heap-pruneheap-seams",
  "backend-access-heap-vacuumlazy-seams",
+ "backend-access-table-table-seams",
  "backend-access-table-tableam",
  "backend-access-transam-multixact-seams",
  "backend-access-transam-parallel",
@@ -1480,6 +1482,7 @@ dependencies = [
  "backend-utils-time-snapmgr-seams",
  "mcx",
  "seam-core",
+ "types-catalog",
  "types-core",
  "types-datum",
  "types-error",

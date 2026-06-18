@@ -53,10 +53,12 @@ seam_core::seam!(
     /// canonical `Datum<'mcx>` (`heap_form_tuple`'s element type), so
     /// by-reference column images (`bytea`/`text`/`oidvector`/etc.) carry their
     /// bytes through, not a nulled bare word. `Err` carries the heap-insert
-    /// error surface (and OOM).
+    /// error surface (and OOM). `rel` is the full open [`Relation`] (C's
+    /// `boot_reldesc`), as `simple_heap_insert` needs the relcache-aware handle
+    /// (WAL/logical-decoding/invalidation reads), not a bare `RelationData`.
     pub fn insert_one_tuple<'mcx>(
         mcx: Mcx<'mcx>,
-        rel: &RelationData<'mcx>,
+        rel: &Relation<'mcx>,
         attrtypes: &[FormData_pg_attribute],
         values: &[TupleDatum<'mcx>],
         nulls: &[bool],
