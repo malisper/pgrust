@@ -941,15 +941,95 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             expr_eval_push_step(mcx, state, scratch)?;
             Ok(())
         }
-        Expr::MinMaxExpr(_) => panic!(
-            "execExpr-core: MinMaxExpr recurses each arg into &scratch.d.minmax.values[off] / \
-             nulls[off] (execExpr.c:2274-2284), but the ExprEvalStepData::MinMax variant models \
-             values/nulls as plain Datum/bool workspace vecs with no per-element ResultCellId — \
-             so there is no arena cell for exec_init_expr_rec to write each argument into. \
-             Genuine model gap (gap-2 not extended to MinMax): the MinMax step payload needs a \
-             per-element arg-cell vector, landed in lockstep with the interpreter (joint \
-             keystone). cmp_proc (lookup_element_cmp_proc) and fmgr_info seams are landed."
-        ),
+        // ----- T_MinMaxExpr -----
+        Expr::MinMaxExpr(minmaxexpr) => {
+            let nelems = minmaxexpr.args.len();
+
+            // Look up the btree comparison function for the datatype.
+            //   typentry = lookup_type_cache(minmaxexpr->minmaxtype,
+            //                                TYPECACHE_CMP_PROC);
+            //   if (!OidIsValid(typentry->cmp_proc)) ereport(ERROR, ...);
+            let cmp_proc = backend_utils_cache_typcache_seams::lookup_element_cmp_proc::call(
+                minmaxexpr.minmaxtype,
+            )?;
+            if cmp_proc == types_core::InvalidOid {
+                return Err(types_error::PgError::error(format!(
+                    "could not identify a comparison function for type {}",
+                    minmaxexpr.minmaxtype
+                ))
+                .with_sqlstate(types_error::ERRCODE_UNDEFINED_FUNCTION));
+            }
+
+            // Perform function lookup.
+            //   finfo = palloc0(sizeof(FmgrInfo));
+            //   fcinfo = palloc0(SizeForFunctionCallInfo(2));
+            //   fmgr_info(typentry->cmp_proc, finfo);
+            //   fmgr_info_set_expr((Node *) node, finfo);
+            //   InitFunctionCallInfoData(*fcinfo, finfo, 2,
+            //                            minmaxexpr->inputcollid, NULL, NULL);
+            let flinfo = backend_utils_fmgr_fmgr_seams::fmgr_info::call(mcx, cmp_proc)?;
+            let fcinfo_data = mcx::alloc_in(
+                mcx,
+                types_nodes::fmgr::FunctionCallInfoBaseData {
+                    flinfo: Some(flinfo.clone()),
+                    context: None,
+                    resultinfo: None,
+                    fncollation: minmaxexpr.inputcollid,
+                    isnull: false,
+                    nargs: 2,
+                    args: Vec::new(),
+                    ..Default::default()
+                },
+            )?;
+
+            // Allocate space to store arguments (the C `scratch.d.minmax.values`
+            // / `nulls` Datum/bool workspace), pre-sized to `nelems` so the
+            // interpreter can index `values[off]`/`nulls[off]`.
+            let mut values: PgVec<'mcx, DatumV<'mcx>> = mcx::vec_with_capacity_in(mcx, nelems)?;
+            let mut nulls: PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, nelems)?;
+            for _ in 0..nelems {
+                values.push(DatumV::null());
+                nulls.push(false);
+            }
+
+            // Evaluate expressions into minmax->values/nulls. The C writes each
+            // arg directly into `&scratch.d.minmax.values[off]`; the owned model
+            // gives each argument its own result cell and records it in
+            // `arg_cells`, which the interpreter gathers into `values`/`nulls`
+            // immediately before the comparison loop.
+            let mut arg_cells: PgVec<'mcx, types_nodes::execexpr::ResultCellId> =
+                mcx::vec_with_capacity_in(mcx, nelems)?;
+            for e in &minmaxexpr.args {
+                let cell = crate::execExpr_core::new_result_cell(mcx, state)?;
+                exec_init_expr_rec(mcx, e, state, cell)?;
+                arg_cells.push(cell);
+            }
+
+            // And push the final comparison.
+            let scratch = ExprEvalStep {
+                opcode: ExprEvalOp::EEOP_MINMAX,
+                resvalue: resv,
+                resnull: resv,
+                d: ExprEvalStepData::MinMax {
+                    values: Some(values),
+                    nulls: Some(nulls),
+                    arg_cells: Some(arg_cells),
+                    nelems: nelems as i32,
+                    op: match minmaxexpr.op {
+                        types_nodes::primnodes::MinMaxOp::IS_GREATEST => {
+                            types_nodes::execexpr::MinMaxOp::IS_GREATEST
+                        }
+                        types_nodes::primnodes::MinMaxOp::IS_LEAST => {
+                            types_nodes::execexpr::MinMaxOp::IS_LEAST
+                        }
+                    },
+                    finfo: Some(mcx::alloc_in(mcx, flinfo)?),
+                    fcinfo_data: Some(fcinfo_data),
+                },
+            };
+            expr_eval_push_step(mcx, state, scratch)?;
+            Ok(())
+        }
         // ----- T_ArrayExpr -----
         Expr::ArrayExpr(arrayexpr) => {
             // Evaluate by computing each element, then forming the array.

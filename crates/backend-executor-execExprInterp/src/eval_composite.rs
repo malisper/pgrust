@@ -233,21 +233,19 @@ pub fn ExecEvalMinMax<'mcx>(
     // Assert(fcinfo->args[0].isnull == false);
     // Assert(fcinfo->args[1].isnull == false);
     let steps = state.steps.as_ref().expect("eval_composite: steps not ready");
-    let (values, nulls, nelems, operator, fn_oid, collation) = match &steps[op].d {
+    let (arg_cells, nelems, operator, fn_oid, collation) = match &steps[op].d {
         ExprEvalStepData::MinMax {
-            values,
-            nulls,
+            arg_cells,
             nelems,
             op: minmax_op,
             finfo,
             fcinfo_data,
+            ..
         } => {
-            let values = values
+            let arg_cells = arg_cells
                 .as_ref()
-                .expect("ExecEvalMinMax: op->d.minmax.values not allocated");
-            let nulls = nulls
-                .as_ref()
-                .expect("ExecEvalMinMax: op->d.minmax.nulls not allocated");
+                .expect("ExecEvalMinMax: op->d.minmax.arg_cells missing")
+                .clone();
             let finfo = finfo
                 .as_ref()
                 .expect("ExecEvalMinMax: op->d.minmax.finfo not resolved");
@@ -255,8 +253,7 @@ pub fn ExecEvalMinMax<'mcx>(
                 .as_ref()
                 .expect("ExecEvalMinMax: op->d.minmax.fcinfo_data missing");
             (
-                values.clone(),
-                nulls.clone(),
+                arg_cells,
                 *nelems,
                 *minmax_op,
                 finfo.fn_oid,
@@ -265,6 +262,18 @@ pub fn ExecEvalMinMax<'mcx>(
         }
         other => unreachable!("ExecEvalMinMax: step.d is not MinMax: {other:?}"),
     };
+
+    // Gather the per-argument result cells into the `values`/`nulls` workspace
+    // (the C `ExecInitExprRec` wrote `values[off]` directly; the owned model
+    // recorded each arg's result cell in `arg_cells` and gathers them here,
+    // immediately before the comparison loop).
+    let mut values: Vec<Datum<'mcx>> = Vec::with_capacity(arg_cells.len());
+    let mut nulls: Vec<bool> = Vec::with_capacity(arg_cells.len());
+    for &cell in arg_cells.iter() {
+        let c = state.result_cells.get(cell);
+        values.push(c.value.clone());
+        nulls.push(c.isnull);
+    }
 
     // /* default to null result */
     // *op->resnull = true;

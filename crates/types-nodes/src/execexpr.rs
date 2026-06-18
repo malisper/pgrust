@@ -964,7 +964,11 @@ pub enum ExprEvalStepData<'mcx> {
     NextValueExpr { seqid: Oid, seqtypid: Oid },
     /// `arrayexpr` — for EEOP_ARRAYEXPR.
     ArrayExpr {
-        /// `Datum *elemvalues` — element values get stored here.
+        /// `Datum *elemvalues` — element values get stored here. In the owned
+        /// model each element is evaluated into its own [`ResultCellId`] in
+        /// `elem_cells`; the interpreter gathers those into
+        /// `elemvalues`/`elemnulls` before constructing the array (the C
+        /// `ExecInitExprRec` writes `elemvalues[elemoff]` directly).
         elemvalues: Option<PgVec<'mcx, Datum<'mcx>>>,
         /// `bool *elemnulls`.
         elemnulls: Option<PgVec<'mcx, bool>>,
@@ -1022,10 +1026,17 @@ pub enum ExprEvalStepData<'mcx> {
     RowCompareFinal { cmptype: CompareType },
     /// `minmax` — for EEOP_MINMAX.
     MinMax {
-        /// `Datum *values` — argument workspace.
+        /// `Datum *values` — argument workspace. In the owned model each
+        /// argument is evaluated into its own [`ResultCellId`] in `arg_cells`;
+        /// the interpreter gathers those cells into `values`/`nulls` before the
+        /// comparison loop (the C `ExecInitExprRec` writes `values[off]`
+        /// directly). Pre-sized to `nelems` so the interpreter can index it.
         values: Option<PgVec<'mcx, Datum<'mcx>>>,
         /// `bool *nulls`.
         nulls: Option<PgVec<'mcx, bool>>,
+        /// Per-argument result cells (the owned replacement for the C
+        /// `&values[off]` write targets); one [`ResultCellId`] per argument.
+        arg_cells: Option<PgVec<'mcx, ResultCellId>>,
         nelems: i32,
         /// is it GREATEST or LEAST?
         op: MinMaxOp,
