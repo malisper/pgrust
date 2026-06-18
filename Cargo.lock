@@ -20268,6 +20268,7 @@ dependencies = [
  "types-acl",
  "types-cache",
  "types-catalog",
+ "types-cluster",
  "types-core",
  "types-datum",
  "types-error",

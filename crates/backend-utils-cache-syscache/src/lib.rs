@@ -1198,6 +1198,13 @@ pub fn init_seams() {
     s::user_mapping_user_server::set(projections::user_mapping_user_server);
     s::statext_get_relid::set(projections::statext_get_relid);
     s::statext_namespace::set(projections::statext_namespace);
+    s::statext_search_tuple::set(projections::statext_search_tuple);
+    s::statext_data_search_tuple::set(projections::statext_data_search_tuple);
+    s::search_seqrelid::set(projections::search_seqrelid);
+    s::pg_type_default::set(projections::pg_type_default);
+    s::search_pg_proc_fastpath::set(projections::search_pg_proc_fastpath);
+    s::fetch_class_reloptions::set(projections::fetch_class_reloptions);
+    s::aggregate_tuple_by_fnoid::set(projections::aggregate_tuple_by_fnoid);
     s::publication_rel_pub_rel::set(projections::publication_rel_pub_rel);
     s::publication_rel_ids::set(projections::publication_rel_ids);
     s::publication_namespace_pub_nsp::set(projections::publication_namespace_pub_nsp);
