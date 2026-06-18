@@ -81,7 +81,7 @@ use types_catalog::pg_aggregate::{
     Anum_pg_aggregate_aggtransfn, Anum_pg_aggregate_aggtransspace, Anum_pg_aggregate_aggtranstype,
 };
 use types_catalog::pg_language::FormData_pg_language;
-use types_nodes::nodes::{Node, NodePtr};
+use types_nodes::nodes::NodePtr;
 
 /// `Anum_pg_class_relam` (`catalog/pg_class.h`).
 const Anum_pg_class_relam: i32 = 7;
@@ -746,9 +746,9 @@ pub(crate) fn proc_argdefaults<'mcx>(
     // castNode(List, stringToNode(str)).
     let node = nodes_read_seams::string_to_node::call(mcx, s.as_str())?;
     ReleaseSysCache(tup);
-    match mcx::PgBox::into_inner(node) {
-        Node::List(elems) => Ok(elems),
-        _ => Err(PgError::error(
+    match mcx::PgBox::into_inner(node).into_list() {
+        Some(elems) => Ok(elems),
+        None => Err(PgError::error(
             "proargdefaults: stringToNode did not yield a List",
         )),
     }
