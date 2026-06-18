@@ -2261,4 +2261,11 @@ pub fn init_seams() {
     s::get_extension_oid::set(get_extension_oid);
     s::RemoveExtensionById::set(RemoveExtensionById);
     s::AlterExtensionNamespace::set(AlterExtensionNamespace_seam);
+
+    // Cross-crate install: `extension_file_exists` (extension.c, body here) is
+    // consumed by functioncmds `CreateFunction`/language lookup; its decl lives
+    // on `backend-commands-functioncmds-seams` (owned `String` arg).
+    backend_commands_functioncmds_seams::extension_file_exists::set(|ext_name| {
+        extension_file_exists(&ext_name)
+    });
 }

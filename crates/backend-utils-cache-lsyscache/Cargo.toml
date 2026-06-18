@@ -13,6 +13,7 @@ path = "src/lib.rs"
 # lsyscache.c is its owner.
 backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
 seam-core = { path = "../seam-core" }
+backend-commands-functioncmds-seams = { path = "../backend-commands-functioncmds-seams" }
 mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }

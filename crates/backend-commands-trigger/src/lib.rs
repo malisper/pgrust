@@ -31,4 +31,12 @@ pub mod queue;
 pub fn init_seams() {
     firing::init_seams();
     fmgr_builtins::register_trigger_builtins();
+
+    // Cross-crate install: `AfterTriggerPendingOnRel` (trigger.c, body in
+    // `queue`) is consumed by tablecmds `ExecuteTruncate`; its decl lives on
+    // `backend-commands-tablecmds-seams`. The body returns a bare `bool`; the
+    // seam contract is `PgResult<bool>` (it cannot fail), so wrap in `Ok`.
+    backend_commands_tablecmds_seams::after_trigger_pending_on_rel::set(|relid| {
+        Ok(queue::after_trigger_pending_on_rel(relid))
+    });
 }

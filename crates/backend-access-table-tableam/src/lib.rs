@@ -129,6 +129,7 @@ pub fn init_seams() {
     backend_access_table_tableam_seams::table_scan_analyze_next_tuple::set(
         table_scan_analyze_next_tuple,
     );
+
 }
 
 /// Adapter for `backend-access-table-tableam-bm-seams::table_endscan` — the

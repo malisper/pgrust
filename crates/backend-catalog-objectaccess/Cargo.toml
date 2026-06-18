@@ -14,3 +14,4 @@ types-catalog = { path = "../types-catalog" }
 types-error = { path = "../types-error" }
 backend-catalog-objectaccess-seams = { path = "../backend-catalog-objectaccess-seams" }
 backend-utils-misc-guc-funcs-seams = { path = "../backend-utils-misc-guc-funcs-seams" }
+backend-commands-tablecmds-seams = { path = "../backend-commands-tablecmds-seams" }
