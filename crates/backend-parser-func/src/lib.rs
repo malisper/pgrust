@@ -1384,6 +1384,23 @@ pub fn init_seams() {
             funcname_signature_string(&proname, pronargs, &[], &arg_types)
         },
     );
+
+    // Cross-crate install: `func_signature_string` (parse_func.c, body here)
+    // consumed by typecmds/pg_aggregate/functioncmds for `ereport` signature
+    // text. The decl carries owned `Vec<String>` name components; the body
+    // wants `&[PgString]`. The names are read only to render the (owned)
+    // result string, so materialise them in a throwaway scratch context.
+    backend_commands_functioncmds_seams::func_signature_string::set(
+        |funcname, nargs, argtypes| {
+            let scratch = mcx::MemoryContext::new("func_signature_string scratch");
+            let mcx = scratch.mcx();
+            let names: Vec<PgString<'_>> = funcname
+                .iter()
+                .map(|s| PgString::from_str_in(s, mcx))
+                .collect::<PgResult<_>>()?;
+            func_signature_string(&names, nargs, &[], &argtypes)
+        },
+    );
 }
 
 /// Seam entry for `func_get_detail`. The sole cross-crate caller is

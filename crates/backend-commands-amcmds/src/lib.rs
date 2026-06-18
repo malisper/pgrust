@@ -312,4 +312,13 @@ pub fn init_seams() {
         let scratch = mcx::MemoryContext::new("amcmds get_am_oid");
         get_am_oid(scratch.mcx(), amname, missing_ok)
     });
+
+    // Cross-crate install: tablecmds (DefineRelation) reaches
+    // `get_table_am_oid(amname, missing_ok)` (amcmds.c, this owner) through its
+    // own `-seams` shim, which carries no mcx (the body needs one only for the
+    // transient wrong-type error name copy — same scratch pattern as above).
+    backend_commands_tablecmds_seams::get_table_am_oid::set(|amname, missing_ok| {
+        let scratch = mcx::MemoryContext::new("amcmds get_table_am_oid");
+        get_table_am_oid(scratch.mcx(), amname, missing_ok)
+    });
 }

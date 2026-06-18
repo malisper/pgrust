@@ -225,4 +225,21 @@ pub fn init_seams() {
             statistics::get_attavgwidth(relid, attnum).expect("get_attavgwidth")
         });
     }
+
+    // Cross-crate install: functioncmds (CreateTransform) reaches
+    // `get_language_name(langid, false)` (lsyscache.c, this owner) through its
+    // own `-seams` shim, which carries no mcx and returns an owned `String`.
+    // The body needs an mcx for the name copy and would error on a missing
+    // language (`missing_ok = false`); render to an owned String in a scratch
+    // context (the name is only consumed for error text / catalog naming).
+    backend_commands_functioncmds_seams::get_language_name::set(|lang_oid| {
+        let scratch = mcx::MemoryContext::new("get_language_name scratch");
+        let name = collation_constraint_language_cast::get_language_name(
+            scratch.mcx(),
+            lang_oid,
+            false,
+        )?
+        .map(|n| n.as_str().to_string());
+        Ok(name.expect("get_language_name(missing_ok=false) returns Some or Err"))
+    });
 }
