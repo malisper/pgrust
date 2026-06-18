@@ -27,7 +27,9 @@
 
 use backend_utils_adt_arrayfuncs_seams as arrayfuncs_seam;
 use types_error::PgResult;
-use types_nodes::execexpr::{ExprEvalStepData, ExprState};
+use types_nodes::execexpr::{
+    ExprEvalStepData, ExprState, ResultCell, ResultCellId, STATE_RESULT_CELL,
+};
 use types_nodes::execnodes::EcxtId;
 use types_nodes::EStateData;
 use types_tuple::backend_access_common_heaptuple::Datum;
@@ -69,34 +71,40 @@ pub fn ExecEvalArrayExpr<'mcx>(
         _ => unreachable!("ExecEvalArrayExpr: step is not EEOP_ARRAYEXPR"),
     };
 
-    // Gather the per-element 6-arm values / nulls the compiler evaluated into
-    // op->d.arrayexpr.elemvalues[]/elemnulls[]. Clone them out so the immutable
-    // borrow of `state.steps` ends before we write the result cell.
-    let (elemvalues, elemnulls): (Vec<Datum<'mcx>>, Vec<bool>) = match &step.d {
-        ExprEvalStepData::ArrayExpr {
-            elemvalues,
-            elemnulls,
-            ..
-        } => {
-            let n = nelems as usize;
-            let vals = elemvalues.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
-            let nulls = elemnulls.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
-            let mut vv = Vec::with_capacity(n);
-            let mut nn = Vec::with_capacity(n);
-            for i in 0..n {
-                vv.push(vals.get(i).cloned().unwrap_or_else(Datum::null));
-                nn.push(nulls.get(i).copied().unwrap_or(false));
-            }
-            (vv, nn)
-        }
+    // The element sub-expressions evaluated their results into the step's
+    // per-element result cells (op->d.arrayexpr.elem_cells, the owned-model
+    // stand-in for C's &op->d.arrayexpr.elemvalues[i]/elemnulls[i] aliasing).
+    // Collect those cell ids, then gather them into elemvalues/elemnulls below
+    // (the C code reads them straight from the scratch arrays the recursion
+    // wrote). Clone the ids out so the immutable borrow of `state.steps` ends
+    // before we read/write the result cells.
+    let elem_cells: Vec<ResultCellId> = match &step.d {
+        ExprEvalStepData::ArrayExpr { elem_cells, .. } => elem_cells
+            .as_ref()
+            .map(|v| v.as_slice().to_vec())
+            .unwrap_or_default(),
         _ => unreachable!(),
     };
 
+    let mut elemvalues: Vec<Datum<'mcx>> = Vec::with_capacity(nelems as usize);
+    let mut elemnulls: Vec<bool> = Vec::with_capacity(nelems as usize);
+    for &cell in &elem_cells {
+        let c = state.result_cells.get(cell);
+        elemvalues.push(c.value.clone());
+        elemnulls.push(c.isnull);
+    }
+
     // Set non-null as default.
     // *op->resnull = false;
-    let mut cell = state.result_cells.get(resnull_id);
-    cell.isnull = false;
-    state.result_cells.set(resnull_id, cell);
+    // STATE_RESULT_CELL aliases state.resnull (the C &state->resnull default
+    // target); any other id is a per-step arena cell.
+    if resnull_id == STATE_RESULT_CELL {
+        state.resnull = false;
+    } else {
+        let mut cell = state.result_cells.get(resnull_id);
+        cell.isnull = false;
+        state.result_cells.set(resnull_id, cell);
+    }
 
     // C allocates the result varlena in CurrentMemoryContext (the per-tuple
     // expression context during ExecInterpExpr); the owned model resolves that
@@ -120,11 +128,22 @@ pub fn ExecEvalArrayExpr<'mcx>(
     )?;
 
     // *op->resvalue = PointerGetDatum(result): the 6-arm result cell carries the
-    // array varlena image inline as a ByRef value.
-    let mut cell = state.result_cells.get(resvalue_id);
-    cell.value = Datum::ByRef(image);
-    cell.isnull = false;
-    state.result_cells.set(resvalue_id, cell);
+    // array varlena image inline as a ByRef value. STATE_RESULT_CELL writes
+    // through state.resvalue/resnull (the C &state->resvalue default target),
+    // which EEOP_DONE_RETURN reads back; any other id is a per-step arena cell.
+    let value = Datum::ByRef(image);
+    if resvalue_id == STATE_RESULT_CELL {
+        state.resvalue = value;
+        state.resnull = false;
+    } else {
+        state.result_cells.set(
+            resvalue_id,
+            ResultCell {
+                value,
+                isnull: false,
+            },
+        );
+    }
 
     Ok(())
 }

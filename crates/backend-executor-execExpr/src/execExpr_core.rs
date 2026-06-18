@@ -951,15 +951,52 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
              per-element arg-cell vector, landed in lockstep with the interpreter (joint \
              keystone). cmp_proc (lookup_element_cmp_proc) and fmgr_info seams are landed."
         ),
-        Expr::ArrayExpr(_) => panic!(
-            "execExpr-core: ArrayExpr recurses each element into \
-             &scratch.d.arrayexpr.elemvalues[elemoff] / elemnulls[elemoff] (execExpr.c:1950-1958), \
-             but the ExprEvalStepData::ArrayExpr variant models elemvalues/elemnulls as plain \
-             Datum/bool workspace vecs with no per-element ResultCellId, so there is no arena \
-             cell for the element recursion to target. Genuine model gap (gap-2 not extended to \
-             ArrayExpr): the step payload needs a per-element arg-cell vector landed in lockstep \
-             with the interpreter (joint keystone). get_typlenbyvalalign is a landed seam."
-        ),
+        // ----- T_ArrayExpr -----
+        Expr::ArrayExpr(arrayexpr) => {
+            // Evaluate by computing each element, then forming the array.
+            // Elements are computed into per-element result cells associated
+            // with the ARRAYEXPR step (the owned-model stand-in for C's
+            // scratch.d.arrayexpr.elemvalues[]/elemnulls[] scratch arrays).
+            let nelems = arrayexpr.elements.len() as i32;
+
+            // do one-time catalog lookup for type info
+            let tlbva = backend_utils_cache_lsyscache_seams::get_typlenbyvalalign::call(
+                arrayexpr.element_typeid,
+            )?;
+
+            // prepare to evaluate all arguments: each element gets its own
+            // result cell; the cell id is recorded in elem_cells[elemoff]. The
+            // interpreter gathers these cells into elemvalues/elemnulls just
+            // before fabricating the array (mirroring C's per-element write into
+            // &scratch.d.arrayexpr.elemvalues[elemoff]).
+            let mut elem_cells = mcx::vec_with_capacity_in(mcx, nelems as usize)?;
+            for e in &arrayexpr.elements {
+                let cell = new_result_cell(mcx, state)?;
+                exec_init_expr_rec(mcx, e, state, cell)?;
+                elem_cells.push(cell);
+            }
+
+            let scratch = ExprEvalStep {
+                opcode: ExprEvalOp::EEOP_ARRAYEXPR,
+                resvalue: resv,
+                resnull: resv,
+                d: ExprEvalStepData::ArrayExpr {
+                    elemvalues: None,
+                    elemnulls: None,
+                    elem_cells: Some(elem_cells),
+                    nelems,
+                    elemtype: arrayexpr.element_typeid,
+                    elemlength: tlbva.typlen,
+                    elembyval: tlbva.typbyval,
+                    elemalign: tlbva.typalign as u8,
+                    multidims: arrayexpr.multidims,
+                },
+            };
+
+            // and then collect all into an array
+            expr_eval_push_step(mcx, state, scratch)?;
+            Ok(())
+        }
         Expr::RowExpr(_) => panic!(
             "execExpr-core: RowExpr recurses each field into &scratch.d.row.elemvalues[i] / \
              elemnulls[i] (execExpr.c:2048-2050), but the ExprEvalStepData::Row variant models \
