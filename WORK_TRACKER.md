@@ -67,21 +67,22 @@ _Last updated: 2026-06-18 · origin/main ≈ `5f57e550a`_
 - **proc/procarray-private accessors** — FastPath F3 lock family (per-slot `fpRelId[]`/`fpLockBits[]` + cross-proc `allProcs` iterator) + blocker-status reporters (`BackendPidGetProc`, `lockGroupMembers`). Gates lmgr-lock's last 6 + pg_locks blocker views.
 - **prepunion subroot / cross-root PathId** — set-op child path import (relates to K8).
 - **fmgr frame-carrier by-ref widening** (TD-FMGR-GETARG-BYREF) — trimmed `types_nodes` FunctionCallInfoBaseData carries bare-word args, no by-ref channel → blocks `pg_getarg_{name,text_pp,varlena_pp,cstring}` + `typmodin`. Cousin of K4.
+- **numeric by-ref Datum const-fold** (`make_const`, parse_node.c:418) — `abs(x::numeric)` + numeric-literal const-folding wall here; part of the K4 Datum-by-ref cluster. Also blocks the ~619 unregistered numeric/by-ref builtins from const-folding.
 
 > Legend: K1–K3 done · K4–K6 committed/sequenced · K7–K10 deferred · 📡 longer-term, feature-area-gated.
 
 ---
 
 ## Active lanes
-`abe15b79` planner (GROUP BY) · `a58be86c` fmgr-register · `a2abe0c1` setrefs INDEX_VAR · `a85f618f` boolean→PASS · `ae2d175a` arrayfuncs · `ac327c72` misc2 · `a3b93c9f` policy/RLS · `a870e34d` EXPLAIN structural
+`abe15b79` planner (GROUP BY) · `a85f618f` boolean→PASS · `ae2d175a` arrayfuncs · `ac327c72` misc2 · `a3b93c9f` policy/RLS · `a870e34d` EXPLAIN structural · `a59005ae` column-agg ecxt_scantuple · `a9b78cc5` joins (set_joinrel_size_estimates)
 
 ## Build/infra notes
-- Artifacts ~6 GB/build (was ~10–14) after `713252a14` (line-tables-only + `incremental=false`). Cap **~8**, keep ~20 GB buffer.
+- Artifacts ~6 GB/build (was ~10–14): `713252a14` (line-tables-only) + `c794aeac6` (**`incremental=false` now on `[profile.dev]`** — the lanes' default build; was only on the unused fast-check profile). Cap **~8**, keep ~20 GB buffer.
 - **Rebuild cost = crate depth.** Leaf crates rebuild cheap → fan out freely. **Deep types** (`types-nodes`/`types-tuple`/`types-datum`) invalidate the world → **serialize** K4/K5/K6 into thin windows.
 - Reaper = shm + `git worktree prune` ONLY (idle-based auto-rm disrupted live lanes twice; lanes self-clean + orchestrator reaps on pressure).
 
 ## Recently landed
-count(\*) exec (#165) · min/max planner fall-through · createplan (unique/groupingsets/async, 3→0) · GUC registry 402/404 · typcache complete · lmgr-lock (15→6) · fmgr Phase-1 seams (56/67) · bool.c 100% (type correct e2e) + boolean parser/func-RTE fixes · io_combine_limit boot fix · Datum by-ref bridge (+saophash) · crash-reinit (TLS-unwind) · seclabel→DROP · comment→DROP · multi-row VALUES · parse_expr XML · t_bits crash · setrefs Aggref fixup · smaller build artifacts · plancache F0
+count(\*) exec (#165) · **count(\*) FROM pg_class = 415** (setrefs varno + IndexOnlyScan) · fmgr builtin registry 2003→1574 (0 mismatches) · cargo dev incremental=0 · min/max planner fall-through · createplan (unique/groupingsets/async, 3→0) · GUC registry 402/404 · typcache complete · lmgr-lock (15→6) · fmgr Phase-1 seams (56/67) · bool.c 100% (type correct e2e) + boolean parser/func-RTE fixes · io_combine_limit boot fix · Datum by-ref bridge (+saophash) · crash-reinit (TLS-unwind) · seclabel→DROP · comment→DROP · multi-row VALUES · parse_expr XML · t_bits crash · setrefs Aggref fixup · smaller build artifacts · plancache F0
 
 ## DROP status
 CREATE→INSERT→SELECT ✓ · DROP: comment ✓ → seclabel ✓ → **next wall `relation_is_nailed`** (tablecmds seam).
