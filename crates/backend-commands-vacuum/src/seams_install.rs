@@ -192,7 +192,7 @@ fn exec_vacuum_arm<'mcx>(
     stmt: &Node<'mcx>,
     is_top_level: bool,
 ) -> PgResult<()> {
-    let Node::VacuumStmt(vacstmt) = stmt else {
+    let Some(vacstmt) = stmt.as_vacuumstmt() else {
         panic!("exec_vacuum: parse tree is not a VacuumStmt");
     };
     crate::ExecVacuum(pstate, vacstmt, is_top_level, mcx)

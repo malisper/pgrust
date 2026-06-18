@@ -248,12 +248,25 @@ fn pg_strcasecmp(a: &str, b: &str) -> i32 {
 /// Project a `DefElem`'s value node into the `DefElemArg` the define.c value
 /// accessors switch on (mirrors `nodeTag(def->arg)`); `None` for `arg == NULL`.
 fn defel_arg(opt: &types_nodes::ddlnodes::DefElem<'_>) -> Option<DefElemArg> {
+    use types_nodes::nodes::ntag;
     let node = opt.arg.as_deref()?;
-    Some(match node {
-        Node::Integer(i) => DefElemArg::Integer(i.ival as i64),
-        Node::Float(f) => DefElemArg::Float(f.fval.as_str().to_string()),
-        Node::Boolean(b) => DefElemArg::Boolean(b.boolval),
-        Node::String(s) => DefElemArg::String(s.sval.as_str().to_string()),
+    Some(match node.node_tag() {
+        ntag::T_Integer => {
+            let i = node.expect_integer();
+            DefElemArg::Integer(i.ival as i64)
+        }
+        ntag::T_Float => {
+            let f = node.expect_float();
+            DefElemArg::Float(f.fval.as_str().to_string())
+        }
+        ntag::T_Boolean => {
+            let b = node.expect_boolean();
+            DefElemArg::Boolean(b.boolval)
+        }
+        ntag::T_String => {
+            let s = node.expect_string();
+            DefElemArg::String(s.sval.as_str().to_string())
+        }
         _ => DefElemArg::AStar,
     })
 }
@@ -300,7 +313,10 @@ fn vacrel_range_var<'mcx>(
 ) -> PgResult<Option<RangeVar<'mcx>>> {
     match relation {
         None => Ok(None),
-        Some(Node::RangeVar(rv)) => Ok(Some(rv.clone_in(mcx)?)),
+        Some(n) if n.is_rangevar() => {
+            let rv = n.expect_rangevar();
+            Ok(Some(rv.clone_in(mcx)?))
+        }
         Some(_) => elog_node_type_error(funcname, "RangeVar"),
     }
 }
@@ -413,7 +429,7 @@ pub fn ExecVacuum<'mcx>(
     /* Parse options list */
     for opt_node in stmt.options.iter() {
         /* DefElem *opt = (DefElem *) lfirst(lc); */
-        let Node::DefElem(opt) = &**opt_node else {
+        let Some(opt) = opt_node.as_defelem() else {
             return elog_node_type_error("ExecVacuum", "DefElem");
         };
         let defname = def_name(opt);
@@ -597,7 +613,7 @@ pub fn ExecVacuum<'mcx>(
     if params.options & VACOPT_ANALYZE == 0 {
         for vrel_node in stmt.rels.iter() {
             /* VacuumRelation *vrel = lfirst_node(VacuumRelation, lc); */
-            let Node::VacuumRelation(vrel) = &**vrel_node else {
+            let Some(vrel) = vrel_node.as_vacuumrelation() else {
                 return elog_node_type_error("ExecVacuum", "VacuumRelation");
             };
             if !vrel.va_cols.is_empty() {
@@ -786,7 +802,7 @@ pub fn vacuum<'mcx>(
         let mut newrels: Vec<VacuumRelation<'mcx>> = Vec::new();
         for vrel_node in relations.iter() {
             /* VacuumRelation *vrel = lfirst_node(VacuumRelation, cur); */
-            let Node::VacuumRelation(vrel) = &**vrel_node else {
+            let Some(vrel) = vrel_node.as_vacuumrelation() else {
                 return elog_node_type_error("vacuum", "VacuumRelation");
             };
             let sublist = expand_vacuum_rel(vrel, p.options, mcx)?;
@@ -874,9 +890,9 @@ pub fn vacuum<'mcx>(
                 /* va_cols collected as a plain Vec<String> for the seam. */
                 let mut va_cols: Vec<String> = Vec::new();
                 for c in vrel.va_cols.iter() {
-                    match &**c {
-                        Node::String(s) => va_cols.push(s.sval.as_str().to_string()),
-                        _ => return elog_node_type_error("vacuum", "String"),
+                    match c.as_string() {
+                        Some(s) => va_cols.push(s.sval.as_str().to_string()),
+                        None => return elog_node_type_error("vacuum", "String"),
                     }
                 }
 
@@ -1149,7 +1165,7 @@ fn expand_vacuum_rel<'mcx>(
                 "expand_vacuum_rel: VacuumRelation with InvalidOid must carry a RangeVar",
             ));
         };
-        let Node::RangeVar(relation) = relation_node else {
+        let Some(relation) = relation_node.as_rangevar() else {
             return elog_node_type_error("expand_vacuum_rel", "RangeVar");
         };
 
