@@ -136,4 +136,76 @@ pub fn init_seams() {
     // Register the scalar `rangetypes.c` fmgr builtins (C: `fmgr_builtins[]`)
     // into the fmgr-core by-OID dispatch table.
     fmgr_builtins::register_rangetypes_builtins();
+
+    install_range_planner_support_seams();
+}
+
+/// Wire the `range-planner-support` up-call seams to their already-real owners.
+///
+/// The range `<@`/`@>` planner support functions fabricate/analyze planner
+/// nodes (`makeConst` / `make_opclause` / `makeBoolConst` / `make_andclause` /
+/// `contain_volatile_functions` / `contain_subplans` / `cost_qual_eval_node` /
+/// `get_opfamily_member` / `get_typcollation`). Each of those neighbors is now
+/// real and ported; this installs the thin seam adapters that route to them,
+/// re-signed onto the real `Expr`/`Const`/`PlannerInfo` types (the prior bare
+/// `PlannerNode(u64)` handle shim is gone).
+fn install_range_planner_support_seams() {
+    use range_planner_support as rps;
+
+    // makefuncs.c node fabrication.
+    rps::make_bool_const::set(backend_nodes_core::makefuncs::make_bool_const);
+    rps::make_andclause::set(|a, b| backend_nodes_core::makefuncs::make_andclause(vec![a, b]));
+    rps::make_opclause::set(
+        |opno, opresulttype, opretset, leftop, rightop, opcollid, inputcollid| {
+            backend_nodes_core::makefuncs::make_opclause(
+                opno,
+                opresulttype,
+                opretset,
+                leftop,
+                Some(rightop),
+                opcollid,
+                inputcollid,
+            )
+        },
+    );
+    // makeConst(consttype, -1, constcollid, constlen, constvalue, false,
+    // constbyval): consttypmod is always -1 and constisnull always false for the
+    // bound `Const`s this support fn builds.
+    rps::make_const::set(|mcx, consttype, constcollid, constlen, constvalue, constbyval| {
+        backend_nodes_core::makefuncs::make_const(
+            mcx, consttype, -1, constcollid, constlen, constvalue, false, constbyval,
+        )
+    });
+
+    // clauses.c structural predicates (the C `(Node *) elemExpr` walkers).
+    rps::contain_volatile_functions::set(|node| {
+        backend_optimizer_util_clauses::contain_volatile_functions(Some(node))
+    });
+    rps::contain_subplans::set(|node| {
+        backend_optimizer_util_clauses::contain_subplans(Some(node))
+    });
+
+    // costsize.c cost estimation (the free-standing `&Expr` form).
+    rps::cost_qual_eval_expr::set(backend_optimizer_path_costsize::qualcost::cost_qual_eval_expr);
+    rps::cpu_operator_cost::set(backend_optimizer_path_costsize::cpu_operator_cost);
+
+    // lsyscache.c catalog lookups.
+    rps::get_opfamily_member::set(
+        backend_utils_cache_lsyscache::opfamily_operator::get_opfamily_member,
+    );
+    rps::get_typcollation::set(backend_utils_cache_lsyscache::type_::get_typcollation);
+
+    // typcache.h `rngtypcache->rng_opfamily`: the btree opfamily of the range's
+    // subtype opclass. C reads it off the `TYPECACHE_RANGE_INFO` entry; we
+    // recompute it from the `pg_range.rngsubopc` opclass (the trimmed
+    // `TypeCacheEntry` the range engine carries does not include it).
+    rps::range_opfamily::set(|rngtypid| {
+        let pg_range = backend_utils_cache_lsyscache::type_::lookup_pg_range(rngtypid)?
+            .ok_or_else(|| {
+                types_error::PgError::error(format!(
+                    "cache lookup failed for range type {rngtypid}"
+                ))
+            })?;
+        backend_utils_cache_lsyscache::opclass::get_opclass_family(pg_range.rngsubopc)
+    });
 }

@@ -4,138 +4,114 @@
 //! Mirrors `rangetypes.c`: `elem_contained_by_range_support` /
 //! `range_contains_elem_support` (the `range_support` entry points) and their
 //! shared helpers `find_simplified_clause` / `build_bound_expr`. These rewrite
-//! a `<@` / `@>` clause into a pair of bound comparisons. The `SupportRequest*`
-//! and produced `Expr` nodes are planner `Node *` (inherited opacity from the
-//! not-yet-ported optimizer/makefuncs/lsyscache neighbors); the support fns
-//! reach those neighbors through their owners' seams.
+//! a `<@` / `@>` clause into a pair of bound comparisons.
 //!
-//! The range engine itself is real: the range `Const` is detoasted through the
-//! crate's own `datum_get_range_type_p` seam into a `RangeTypeP`, its
-//! `TypeCacheEntry` comes from the `range_get_typcache` seam, and
-//! `range_deserialize` explodes it into real `RangeBound`s. The bound-by-bound
-//! control flow (`empty` / both-infinite shortcuts, the volatile/subplan/cost
-//! guards that protect against evaluating `elemExpr` twice, and the AND
-//! assembly) is logic this crate owns and runs over those real values; only the
-//! node fabrication and clause analysis cross into the planner neighbors via
-//! the seams below.
+//! ## Real-node re-sign (`#159` range-planner-support lane)
+//!
+//! The optimizer's node vocabulary now exists in production: `Expr`, `Const`,
+//! `FuncExpr`, `OpExpr`, `PlannerInfo`, `TypeCacheEntry` are all real
+//! value-typed carriers. The clause analysis runs over those real values
+//! directly:
+//!
+//! * `IsA(expr, Const)` / `((Const*)expr)->constvalue|constisnull` →
+//!   pattern-match on [`Expr::Const`].
+//! * `linitial/lsecond(fexpr->args)` → index the real [`FuncExpr::args`] `Vec`.
+//!
+//! The node-FABRICATION and analysis primitives that genuinely belong to the
+//! optimizer/makefuncs/lsyscache/costsize neighbors (`makeConst`,
+//! `make_opclause`, `makeBoolConst`, `make_andclause`,
+//! `contain_volatile_functions`, `contain_subplans`, `cost_qual_eval_node`,
+//! `get_opfamily_member`) still cross thin outward seams below — but those seams
+//! are now declared over the REAL [`Expr`]/[`Const`]/[`PlannerInfo`] types and
+//! are wired in `seams-init` to their already-real owners (makefuncs.rs,
+//! clauses.rs, costsize.rs, lsyscache.rs), rather than the prior bare
+//! `PlannerNode(u64)` handle shim.
+//!
+//! The range engine itself is real: the range `Const`'s payload `Datum` is
+//! detoasted through the crate's own `datum_get_range_type_p` seam into a
+//! `RangeTypeP`, its `TypeCacheEntry` comes from the `range_get_typcache` seam,
+//! and `range_deserialize` explodes it into real `RangeBound`s.
+//!
+//! ## `root` threading (faithful conservative decline)
+//!
+//! C's support function reads `req->root` (the `PlannerInfo *`) and feeds it to
+//! `cost_qual_eval_node` for the "both bounds present" guard (which protects
+//! against evaluating a volatile/expensive `elemExpr` twice). The
+//! `eval_const_expressions` entry path passes `req.root == NULL` in C, and the
+//! value-typed `call_support_simplify` dispatch likewise carries no
+//! `PlannerInfo`. We therefore thread `root: Option<&PlannerInfo>`: when both
+//! bounds are present but no root is available to cost the `elemExpr`, we take
+//! the same exit C takes for an "expensive" `elemExpr` — decline the
+//! simplification (`Ok(None)`). Declining is always a semantically-valid planner
+//! answer (the original clause is left in place); the result is correct, only a
+//! missed optimization, exactly mirroring C's expensive-`elemExpr` behavior.
 
 use mcx::Mcx;
 use types_core::catalog::BOOLOID;
-use types_core::primitive::{Oid, OidIsValid};
-use types_datum::datum::Datum;
+use types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_error::PgResult;
+use types_nodes::primnodes::{Const, Expr, FuncExpr};
+use types_pathnodes::PlannerInfo;
+// The canonical `Const.constvalue` carrier is the `types_tuple` `Datum<'mcx>`
+// enum (`ByVal(word)` / `ByRef(bytes)`), which `make_const` consumes. The range
+// engine's `RangeBound.val` is the bare-word `types_datum::Datum` (a serialized
+// pointer/word into the range image); we lift it into a `ByVal` word — exactly
+// the `Datum` C's `makeConst(... val ...)` stores (for a by-reference element
+// type the word is a pointer the makefuncs owner detoasts, as in C).
+use types_tuple::backend_access_common_heaptuple::Datum as NodeDatum;
 use types_scan::scankey::{
     BTGreaterEqualStrategyNumber, BTGreaterStrategyNumber, BTLessEqualStrategyNumber,
     BTLessStrategyNumber,
 };
 
-/// A planner `Node *` (`nodes.h`). Inherited opacity: the optimizer is a
-/// genuinely-external neighbor whose node trees this crate only forwards to the
-/// optimizer/makefuncs seams. `0` models C's `NULL`. Resolves to the real node
-/// type when the optimizer's node vocabulary lands.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-pub struct PlannerNode(pub u64);
-
-impl PlannerNode {
-    /// C's `NULL` node.
-    pub const NULL: PlannerNode = PlannerNode(0);
-
-    /// `node != NULL` test (C: pointer non-null).
-    fn is_null(self) -> bool {
-        self.0 == 0
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Outward seams: the planner-neighbor primitives these support fns call.
 //
-// Each is owned by the neighbor that fabricates/analyzes the node (nodes core,
-// nodeFuncs/primnodes, makefuncs, optimizer clauses/cost, lsyscache, typcache).
-// They are declared over the inherited `PlannerNode` opacity (and the real
-// `Datum`/`Oid`/cost scalars) and panic loudly until that owner lands.
+// Each is owned by the neighbor that fabricates/analyzes the node (makefuncs,
+// optimizer clauses/cost, lsyscache). They are declared over the REAL
+// `Expr`/`Const`/`PlannerInfo` types and wired in `seams-init` to their
+// already-real owners (panic loudly until that wiring runs).
 // ---------------------------------------------------------------------------
 
 seam_core::seam!(
-    /// `IsA(rawreq, SupportRequestSimplify)` (nodes.h): does the support request
-    /// node carry the `T_SupportRequestSimplify` tag.
-    pub fn is_support_request_simplify(node: PlannerNode) -> bool
-);
-
-seam_core::seam!(
-    /// `req->root` of a `SupportRequestSimplify` (supportnodes.h): the
-    /// `PlannerInfo *` for the query being planned.
-    pub fn support_request_simplify_root(req: PlannerNode) -> PlannerNode
-);
-
-seam_core::seam!(
-    /// `req->fcall` of a `SupportRequestSimplify` (supportnodes.h): the
-    /// `FuncExpr *` for the operator's underlying function call.
-    pub fn support_request_simplify_fcall(req: PlannerNode) -> PlannerNode
-);
-
-seam_core::seam!(
-    /// `linitial(fexpr->args)` / `lsecond(fexpr->args)` (pg_list.h), with the
-    /// `Assert(list_length(fexpr->args) == 2)`: the two argument `Expr *` of the
-    /// binary function call, returned `(leftop, rightop)`.
-    pub fn func_expr_two_args(fexpr: PlannerNode) -> (PlannerNode, PlannerNode)
-);
-
-seam_core::seam!(
-    /// `IsA(expr, Const)` (nodes.h): is the expression a `Const` node.
-    pub fn is_const(expr: PlannerNode) -> bool
-);
-
-seam_core::seam!(
-    /// `((Const *) expr)->constisnull` (primnodes.h): the `Const`'s null flag.
-    pub fn const_is_null(expr: PlannerNode) -> bool
-);
-
-seam_core::seam!(
-    /// `((Const *) expr)->constvalue` (primnodes.h): the `Const`'s payload
-    /// `Datum` (only meaningful when `constisnull` is false).
-    pub fn const_value(expr: PlannerNode) -> Datum
-);
-
-seam_core::seam!(
-    /// `makeBoolConst(value, isnull)` (makefuncs.c): a boolean `Const`,
-    /// allocated in `mcx` (C: the current memory context).
-    pub fn make_bool_const<'mcx>(mcx: Mcx<'mcx>, value: bool, isnull: bool) -> PlannerNode
+    /// `makeBoolConst(value, isnull)` (makefuncs.c): a boolean `Const`.
+    /// Owner: `backend-nodes-core/src/makefuncs.rs::make_bool_const`.
+    pub fn make_bool_const(value: bool, isnull: bool) -> Const
 );
 
 seam_core::seam!(
     /// `contain_volatile_functions(node)` (clauses.c): does the expression tree
-    /// contain any volatile function.
-    pub fn contain_volatile_functions(node: PlannerNode) -> bool
+    /// contain any volatile function. Owner:
+    /// `backend-optimizer-util-clauses/src/grounded.rs::contain_volatile_functions`.
+    pub fn contain_volatile_functions(node: &Expr) -> PgResult<bool>
 );
 
 seam_core::seam!(
     /// `contain_subplans(node)` (clauses.c): does the expression tree contain a
     /// `SubPlan`/`AlternativeSubPlan` (searched explicitly because
-    /// `cost_qual_eval()` cannot cost unplanned subselects).
-    pub fn contain_subplans(node: PlannerNode) -> bool
+    /// `cost_qual_eval()` cannot cost unplanned subselects). Owner:
+    /// `backend-optimizer-util-clauses/src/grounded.rs::contain_subplans`.
+    pub fn contain_subplans(node: &Expr) -> PgResult<bool>
 );
 
 seam_core::seam!(
     /// `cost_qual_eval_node(&cost, node, root)` (costsize.c): the
-    /// `(startup, per_tuple)` evaluation cost of the expression.
-    pub fn cost_qual_eval_node(root: PlannerNode, node: PlannerNode) -> (f64, f64)
+    /// `(startup, per_tuple)` evaluation cost of the expression. Owner:
+    /// `backend-optimizer-path-costsize` `&Expr` cost form. Only reached on the
+    /// both-bounds path, and only when a real `root` is available.
+    pub fn cost_qual_eval_expr(root: &PlannerInfo, node: &Expr) -> (f64, f64)
 );
 
 seam_core::seam!(
     /// `cpu_operator_cost` (costsize.c GUC): per-operator CPU cost estimate.
+    /// Owner: `backend-optimizer-path-costsize::cpu_operator_cost`.
     pub fn cpu_operator_cost() -> f64
 );
 
 seam_core::seam!(
-    /// `copyObject(node)` (copyfuncs.c): a deep copy of the expression tree,
-    /// allocated in `mcx`.
-    pub fn copy_object<'mcx>(mcx: Mcx<'mcx>, node: PlannerNode) -> PlannerNode
-);
-
-seam_core::seam!(
     /// `make_andclause(list_make2(a, b))` (clauses.c): a two-clause `BoolExpr`
-    /// `AND`, allocated in `mcx`.
-    pub fn make_andclause<'mcx>(mcx: Mcx<'mcx>, a: PlannerNode, b: PlannerNode) -> PlannerNode
+    /// `AND`. Owner: `backend-nodes-core/src/makefuncs.rs::make_andclause`.
+    pub fn make_andclause(a: Expr, b: Expr) -> Expr
 );
 
 seam_core::seam!(
@@ -149,10 +125,8 @@ seam_core::seam!(
 seam_core::seam!(
     /// `get_opfamily_member(opfamily, lefttype, righttype, strategy)`
     /// (lsyscache.c): the OID of the btree operator in `opfamily` for the given
-    /// left/right input types and strategy number, or `InvalidOid` if none. The
-    /// strategy-number selection and the `OidIsValid` guard stay in this crate's
-    /// `build_bound_expr`; this is the bare catalog lookup. `Err` carries the
-    /// catalog-lookup `ereport(ERROR)`s.
+    /// left/right input types and strategy number, or `InvalidOid` if none.
+    /// Owner: `backend-utils-cache-lsyscache/src/opfamily_operator.rs`.
     pub fn get_opfamily_member(
         opfamily: Oid,
         lefttype: Oid,
@@ -162,91 +136,82 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `get_typcollation(typid)` (lsyscache.c): the element type's
+    /// `pg_type.typcollation` (the `elemCollation` C reads off
+    /// `typeCache->typcollation`; the trimmed [`TypeCacheEntry`] does not carry
+    /// it). Owner: `backend-utils-cache-lsyscache/src/type_.rs`.
+    pub fn get_typcollation(typid: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
     /// `makeConst(consttype, -1, constcollid, constlen, constvalue, false,
-    /// constbyval)` (makefuncs.c): fabricate a `Const` node. The element type's
-    /// `typlen`/`typbyval`/`typcollation` are read off `elem_type`'s typcache
-    /// entry on the owner side (the trimmed `TypeCacheEntry` here does not carry
-    /// them). Allocated in `mcx`.
+    /// constbyval)` (makefuncs.c): fabricate a `Const` node. Owner:
+    /// `backend-nodes-core/src/makefuncs.rs::make_const` (the eight-arg form;
+    /// the detoast/`datumCopy` of a by-reference payload happens on that owner
+    /// side).
     pub fn make_const<'mcx>(
         mcx: Mcx<'mcx>,
         consttype: Oid,
-        constvalue: Datum,
-    ) -> PlannerNode
+        constcollid: Oid,
+        constlen: i32,
+        constvalue: NodeDatum<'mcx>,
+        constbyval: bool,
+    ) -> PgResult<Const>
 );
 
 seam_core::seam!(
     /// `make_opclause(opno, opresulttype, opretset, leftop, rightop,
     /// opcollid, inputcollid)` (makefuncs.c): fabricate an `OpExpr` node.
     /// Called here as `make_opclause(oproid, BOOLOID, false, elemExpr,
-    /// constExpr, InvalidOid, rng_collation)`. Allocated in `mcx`.
-    pub fn make_opclause<'mcx>(
-        mcx: Mcx<'mcx>,
+    /// constExpr, InvalidOid, rng_collation)`. Owner:
+    /// `backend-nodes-core/src/makefuncs.rs::make_opclause`.
+    pub fn make_opclause(
         opno: Oid,
         opresulttype: Oid,
         opretset: bool,
-        leftop: PlannerNode,
-        rightop: PlannerNode,
+        leftop: Expr,
+        rightop: Expr,
         opcollid: Oid,
         inputcollid: Oid,
-    ) -> PlannerNode
+    ) -> Expr
 );
 
-/// `elem_contained_by_range_support(arg)` body (rangetypes.c:2251): the support
-/// fn for `elem <@ range`. Returns the simplified clause node (or `NULL`).
+/// `elem_contained_by_range_support` body (rangetypes.c:2251): the support fn
+/// for `elem <@ range`. The `IsA(rawreq, SupportRequestSimplify)` dispatch and
+/// the `Node*`→typed-request unwrap happen on the fmgr/optimizer dispatch side
+/// (the `call_support_simplify` boundary, which hands us the real `root`/
+/// `fcall`); this is the simplification kernel over the already-typed request.
+/// Returns the simplified clause (or `None`).
 pub fn elem_contained_by_range_support<'mcx>(
     mcx: Mcx<'mcx>,
-    request: PlannerNode,
-) -> PgResult<PlannerNode> {
-    // Node *rawreq = (Node *) PG_GETARG_POINTER(0);
-    let rawreq = request;
-    // Node *ret = NULL;
-    let mut ret = PlannerNode::NULL;
+    root: Option<&PlannerInfo>,
+    fcall: &FuncExpr,
+) -> PgResult<Option<Expr>> {
+    // Assert(list_length(fexpr->args) == 2);
+    // leftop = linitial(fexpr->args); rightop = lsecond(fexpr->args);
+    debug_assert_eq!(fcall.args.len(), 2);
+    let leftop = &fcall.args[0];
+    let rightop = &fcall.args[1];
 
-    if is_support_request_simplify::call(rawreq) {
-        // SupportRequestSimplify *req = (SupportRequestSimplify *) rawreq;
-        // FuncExpr *fexpr = req->fcall;
-        let fexpr = support_request_simplify_fcall::call(rawreq);
-
-        // Assert(list_length(fexpr->args) == 2);
-        // leftop = linitial(fexpr->args); rightop = lsecond(fexpr->args);
-        let (leftop, rightop) = func_expr_two_args::call(fexpr);
-
-        // ret = find_simplified_clause(req->root, rightop, leftop);
-        let root = support_request_simplify_root::call(rawreq);
-        ret = find_simplified_clause(mcx, root, rightop, leftop)?;
-    }
-
-    // PG_RETURN_POINTER(ret);
-    Ok(ret)
+    // ret = find_simplified_clause(req->root, rightop, leftop);
+    find_simplified_clause(mcx, root, rightop, leftop)
 }
 
-/// `range_contains_elem_support(arg)` body (rangetypes.c:2277): the support fn
-/// for `range @> elem`.
+/// `range_contains_elem_support` body (rangetypes.c:2277): the support fn for
+/// `range @> elem`.
 pub fn range_contains_elem_support<'mcx>(
     mcx: Mcx<'mcx>,
-    request: PlannerNode,
-) -> PgResult<PlannerNode> {
-    // Node *rawreq = (Node *) PG_GETARG_POINTER(0);
-    let rawreq = request;
-    // Node *ret = NULL;
-    let mut ret = PlannerNode::NULL;
+    root: Option<&PlannerInfo>,
+    fcall: &FuncExpr,
+) -> PgResult<Option<Expr>> {
+    // Assert(list_length(fexpr->args) == 2);
+    // leftop = linitial(fexpr->args); rightop = lsecond(fexpr->args);
+    debug_assert_eq!(fcall.args.len(), 2);
+    let leftop = &fcall.args[0];
+    let rightop = &fcall.args[1];
 
-    if is_support_request_simplify::call(rawreq) {
-        // SupportRequestSimplify *req = (SupportRequestSimplify *) rawreq;
-        // FuncExpr *fexpr = req->fcall;
-        let fexpr = support_request_simplify_fcall::call(rawreq);
-
-        // Assert(list_length(fexpr->args) == 2);
-        // leftop = linitial(fexpr->args); rightop = lsecond(fexpr->args);
-        let (leftop, rightop) = func_expr_two_args::call(fexpr);
-
-        // ret = find_simplified_clause(req->root, leftop, rightop);
-        let root = support_request_simplify_root::call(rawreq);
-        ret = find_simplified_clause(mcx, root, leftop, rightop)?;
-    }
-
-    // PG_RETURN_POINTER(ret);
-    Ok(ret)
+    // ret = find_simplified_clause(req->root, leftop, rightop);
+    find_simplified_clause(mcx, root, leftop, rightop)
 }
 
 /// `find_simplified_clause(root, rangeExpr, elemExpr)` (rangetypes.c:2850):
@@ -254,17 +219,25 @@ pub fn range_contains_elem_support<'mcx>(
 /// the range argument is a constant; else `NULL`.
 pub fn find_simplified_clause<'mcx>(
     mcx: Mcx<'mcx>,
-    root: PlannerNode,
-    range_expr: PlannerNode,
-    mut elem_expr: PlannerNode,
-) -> PgResult<PlannerNode> {
+    root: Option<&PlannerInfo>,
+    range_expr: &Expr,
+    elem_expr: &Expr,
+) -> PgResult<Option<Expr>> {
     // can't do anything unless the range is a non-null constant
     // if (!IsA(rangeExpr, Const) || ((Const *) rangeExpr)->constisnull) return NULL;
-    if !is_const::call(range_expr) || const_is_null::call(range_expr) {
-        return Ok(PlannerNode::NULL);
+    let Expr::Const(range_const) = range_expr else {
+        return Ok(None);
+    };
+    if range_const.constisnull {
+        return Ok(None);
     }
+
     // range = DatumGetRangeTypeP(((Const *) rangeExpr)->constvalue);
-    let constvalue = const_value::call(range_expr);
+    // The `Const.constvalue` is the canonical `types_tuple` `Datum` (a `ByVal`
+    // pointer-word into the range's varlena image for a varlena range); the
+    // range-deserialize seam takes the bare-word `types_datum::Datum`, so lift
+    // the pointer word across (DatumGetRangeTypeP detoasts it owner-side).
+    let constvalue = types_datum::datum::Datum::from_usize(range_const.constvalue.as_usize());
     let range =
         backend_utils_adt_rangetypes_seams::datum_get_range_type_p::call(mcx, constvalue)?;
 
@@ -291,88 +264,99 @@ pub fn find_simplified_clause<'mcx>(
 
     if empty {
         // if the range is empty, then there can be no matches
-        return Ok(make_bool_const::call(mcx, false, false));
+        return Ok(Some(Expr::Const(make_bool_const::call(false, false))));
     } else if lower.infinite && upper.infinite {
         // the range has infinite bounds, so it matches everything
-        return Ok(make_bool_const::call(mcx, true, false));
-    } else {
-        // at least one bound is available, we have something to work with
-        // TypeCacheEntry *elemTypcache = rangetypcache->rngelemtype;
-        // Oid opfamily = rangetypcache->rng_opfamily;
-        // Oid rng_collation = rangetypcache->rng_collation;
-        let opfamily = range_opfamily::call(rngtypid)?;
-        let rng_collation = rangetypcache.rng_collation;
-        let mut lower_expr = PlannerNode::NULL;
-        let mut upper_expr = PlannerNode::NULL;
+        return Ok(Some(Expr::Const(make_bool_const::call(true, false))));
+    }
 
-        if !lower.infinite && !upper.infinite {
-            // When both bounds are present, we have a problem: the "simplified"
-            // clause would need to evaluate the elemExpr twice. That's definitely
-            // not okay if the elemExpr is volatile, and it's also unattractive if
-            // the elemExpr is expensive.
-            if contain_volatile_functions::call(elem_expr) {
-                return Ok(PlannerNode::NULL);
-            }
+    // at least one bound is available, we have something to work with
+    // TypeCacheEntry *elemTypcache = rangetypcache->rngelemtype;
+    // Oid opfamily = rangetypcache->rng_opfamily;
+    // Oid rng_collation = rangetypcache->rng_collation;
+    let opfamily = range_opfamily::call(rngtypid)?;
+    let rng_collation = rangetypcache.rng_collation;
+    let mut lower_expr: Option<Expr> = None;
+    let mut upper_expr: Option<Expr> = None;
 
-            // We define "expensive" as "contains any subplan or more than 10
-            // operators". Note that the subplan search has to be done explicitly,
-            // since cost_qual_eval() will barf on unplanned subselects.
-            if contain_subplans::call(elem_expr) {
-                return Ok(PlannerNode::NULL);
-            }
-            let (startup, per_tuple) = cost_qual_eval_node::call(root, elem_expr);
-            if startup + per_tuple > 10.0 * cpu_operator_cost::call() {
-                return Ok(PlannerNode::NULL);
-            }
+    if !lower.infinite && !upper.infinite {
+        // When both bounds are present, we have a problem: the "simplified"
+        // clause would need to evaluate the elemExpr twice. That's definitely
+        // not okay if the elemExpr is volatile, and it's also unattractive if
+        // the elemExpr is expensive.
+        if contain_volatile_functions::call(elem_expr)? {
+            return Ok(None);
         }
 
-        // Okay, try to build boundary comparison expressions
-        if !lower.infinite {
-            lower_expr = build_bound_expr(
-                mcx,
-                elem_expr,
-                lower.val,
-                true,
-                lower.inclusive,
-                elem_typcache.type_id,
-                opfamily,
-                rng_collation,
-            )?;
-            if lower_expr.is_null() {
-                return Ok(PlannerNode::NULL);
-            }
+        // We define "expensive" as "contains any subplan or more than 10
+        // operators". Note that the subplan search has to be done explicitly,
+        // since cost_qual_eval() will barf on unplanned subselects.
+        if contain_subplans::call(elem_expr)? {
+            return Ok(None);
         }
-
-        if !upper.infinite {
-            // Copy the elemExpr if we need two copies
-            if !lower.infinite {
-                elem_expr = copy_object::call(mcx, elem_expr);
-            }
-            upper_expr = build_bound_expr(
-                mcx,
-                elem_expr,
-                upper.val,
-                false,
-                upper.inclusive,
-                elem_typcache.type_id,
-                opfamily,
-                rng_collation,
-            )?;
-            if upper_expr.is_null() {
-                return Ok(PlannerNode::NULL);
-            }
+        // cost_qual_eval_node(&eval_cost, (Node *) elemExpr, root). C's
+        // `eval_const_expressions` entry passes a NULL root; we mirror that by
+        // declining when no PlannerInfo is available to cost the elemExpr
+        // (declining is always a valid planner answer — same exit C takes for an
+        // "expensive" elemExpr).
+        let Some(root) = root else {
+            return Ok(None);
+        };
+        let (startup, per_tuple) = cost_qual_eval_expr::call(root, elem_expr);
+        if startup + per_tuple > 10.0 * cpu_operator_cost::call() {
+            return Ok(None);
         }
+    }
 
-        if !lower_expr.is_null() && !upper_expr.is_null() {
-            Ok(make_andclause::call(mcx, lower_expr, upper_expr))
-        } else if !lower_expr.is_null() {
-            Ok(lower_expr)
-        } else if !upper_expr.is_null() {
-            Ok(upper_expr)
-        } else {
+    // Okay, try to build boundary comparison expressions
+    if !lower.infinite {
+        lower_expr = build_bound_expr(
+            mcx,
+            elem_expr.clone(),
+            NodeDatum::from_usize(lower.val.as_usize()),
+            true,
+            lower.inclusive,
+            elem_typcache.type_id,
+            elem_typcache.typlen as i32,
+            elem_typcache.typbyval,
+            opfamily,
+            rng_collation,
+        )?;
+        if lower_expr.is_none() {
+            return Ok(None);
+        }
+    }
+
+    if !upper.infinite {
+        upper_expr = build_bound_expr(
+            mcx,
+            // The C copies the elemExpr (copyObject) only when it needs two
+            // copies; here each `build_bound_expr` already takes an owned `Expr`
+            // by value, so we just clone the borrowed `elemExpr` for each bound
+            // (the value model's deep `Clone` IS `copyObject`).
+            elem_expr.clone(),
+            NodeDatum::from_usize(upper.val.as_usize()),
+            false,
+            upper.inclusive,
+            elem_typcache.type_id,
+            elem_typcache.typlen as i32,
+            elem_typcache.typbyval,
+            opfamily,
+            rng_collation,
+        )?;
+        if upper_expr.is_none() {
+            return Ok(None);
+        }
+    }
+
+    match (lower_expr, upper_expr) {
+        (Some(l), Some(u)) => Ok(Some(make_andclause::call(l, u))),
+        (Some(l), None) => Ok(Some(l)),
+        (None, Some(u)) => Ok(Some(u)),
+        (None, None) => {
             // Assert(false);
             debug_assert!(false, "find_simplified_clause produced no bound expression");
-            Ok(PlannerNode::NULL)
+            Ok(None)
         }
     }
 }
@@ -381,24 +365,27 @@ pub fn find_simplified_clause<'mcx>(
 /// opfamily, rng_collation)` (rangetypes.c:2972): construct one
 /// `elem <op> boundval` `OpExpr`.
 ///
-/// The element-type identity that C reads off the `typeCache` argument is the
-/// `type_id` threaded here (the element type's `typlen`/`typbyval`/
-/// `typcollation` are resolved on the `make_const` owner side, since the trimmed
-/// `TypeCacheEntry` does not carry them). The strategy-number selection and the
-/// `OidIsValid` guard are this crate's own logic; only the catalog lookup
-/// (`get_opfamily_member`) and the node fabrication (`makeConst` /
-/// `make_opclause`) route to the lsyscache / makefuncs owners through thin
+/// The element-type identity C reads off the `typeCache` argument is threaded
+/// here as `elem_type`/`elem_type_len`/`elem_byvalue`; the element collation is
+/// resolved via the `get_typcollation` seam (C reads `typeCache->typcollation`;
+/// the trimmed [`TypeCacheEntry`] does not carry it). The strategy-number
+/// selection and the `OidIsValid` guard are this crate's own logic; only the
+/// catalog lookup (`get_opfamily_member`) and the node fabrication (`makeConst`
+/// / `make_opclause`) route to the lsyscache / makefuncs owners through thin
 /// seams.
+#[allow(clippy::too_many_arguments)]
 pub fn build_bound_expr<'mcx>(
     mcx: Mcx<'mcx>,
-    elem_expr: PlannerNode,
-    val: Datum,
+    elem_expr: Expr,
+    val: NodeDatum<'mcx>,
     is_lower_bound: bool,
     is_inclusive: bool,
     elem_type: Oid,
+    elem_type_len: i32,
+    elem_byvalue: bool,
     opfamily: Oid,
     rng_collation: Oid,
-) -> PgResult<PlannerNode> {
+) -> PgResult<Option<Expr>> {
     // Identify the comparison operator to use. C's local `strategy` is `int16`;
     // the `BT*StrategyNumber` macros are small positive constants.
     let strategy: i16 = (if is_lower_bound {
@@ -419,23 +406,31 @@ pub fn build_bound_expr<'mcx>(
 
     // We don't really expect failure here, but just in case ...
     if !OidIsValid(oproid) {
-        return Ok(PlannerNode::NULL);
+        return Ok(None);
     }
 
     // OK, convert "val" to a full-fledged Const node, and make the OpExpr.
     // makeConst(elemType, -1, elemCollation, elemTypeLen, val, false, elemByValue)
-    let const_expr = make_const::call(mcx, elem_type, val);
+    // elemCollation = typeCache->typcollation.
+    let elem_collation = get_typcollation::call(elem_type)?;
+    let const_expr = make_const::call(
+        mcx,
+        elem_type,
+        elem_collation,
+        elem_type_len,
+        val,
+        elem_byvalue,
+    )?;
 
     // make_opclause(oproid, BOOLOID, false, elemExpr, constExpr, InvalidOid,
     //               rng_collation)
-    Ok(make_opclause::call(
-        mcx,
+    Ok(Some(make_opclause::call(
         oproid,
         BOOLOID,
         false,
         elem_expr,
-        const_expr,
-        types_core::primitive::InvalidOid,
+        Expr::Const(const_expr),
+        InvalidOid,
         rng_collation,
-    ))
+    )))
 }

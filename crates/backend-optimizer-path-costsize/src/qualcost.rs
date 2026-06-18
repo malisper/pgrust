@@ -43,6 +43,21 @@ pub fn cost_qual_eval_walker(root: &PlannerInfo, node: types_pathnodes::NodeId) 
     (total.startup, total.per_tuple)
 }
 
+/// `cost_qual_eval_node(&cost, (Node *) expr, root)` (costsize.c:4782) over an
+/// in-memory `&Expr` that is NOT in the planner's node arena — e.g. a
+/// free-standing `elemExpr` a planner-support function (rangetypes.c's
+/// `find_simplified_clause`) wants to cost before deciding to duplicate it.
+/// Mirrors [`cost_qual_eval_walker`] but takes the root `Expr` by reference
+/// instead of resolving it through a `NodeId`.
+pub fn cost_qual_eval_expr(root: &PlannerInfo, node: &Expr) -> (f64, f64) {
+    let mut total = QualCost {
+        startup: 0.0,
+        per_tuple: 0.0,
+    };
+    walk(root, node, &mut total);
+    (total.startup, total.per_tuple)
+}
+
 /// `cost_qual_eval_walker` over an in-memory `&Expr` (the recursion form). Mirrors
 /// the C `IsA` dispatch; `expression_tree_walker` drives the default recursion.
 fn walk(root: &PlannerInfo, node: &Expr, total: &mut QualCost) {

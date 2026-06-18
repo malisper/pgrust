@@ -44,10 +44,15 @@ use crate::range_io::{
     range_in as range_in_kernel, range_out as range_out_kernel, range_recv as range_recv_kernel,
     range_send as range_send_kernel,
 };
-use crate::range_planner_support::{
-    elem_contained_by_range_support as elem_contained_by_range_support_kernel,
-    range_contains_elem_support as range_contains_elem_support_kernel, PlannerNode,
-};
+// The `range-planner-support` kernels (`elem_contained_by_range_support` /
+// `range_contains_elem_support`) now run over the REAL `(root, FuncExpr)`
+// request and are reached through the value-typed `call_support_simplify`
+// dispatch (wired in `seams-init`), not the fmgr-`Node*`-request boundary: the
+// `OidFunctionCall1(prosupport, PointerGetDatum(&SupportRequestSimplify))`
+// convention (a `Node*` argument carried in a `Datum` word) is not modeled on
+// the ported fmgr surface, so the two support fns are NOT registered as fmgr
+// builtins here (their `pg_proc` rows 6345/6346 stay on the
+// `builtin_gap_baseline` allowlist until that fmgr-support protocol lands).
 use crate::range_repr_serialize::{make_range, range_get_flags};
 use crate::range_setops::{
     range_intersect_agg_transfn as range_intersect_agg_transfn_kernel,
@@ -794,30 +799,15 @@ fn float8_datum(x: f64) -> Datum {
 
 // ---------------------------------------------------------------------------
 // planner support (range-planner-support)
+//
+// `elem_contained_by_range_support` / `range_contains_elem_support` are NOT
+// fmgr-boundary wrappers anymore: their support-request argument is a planner
+// `Node *` (`SupportRequestSimplify`) carried in a `Datum` word, a convention
+// not modeled on the ported fmgr surface. The simplification logic lives in
+// `range_planner_support` over the real `(root, FuncExpr)` request and is
+// reached through the value-typed `call_support_simplify` dispatch wired in
+// `seams-init`.
 // ---------------------------------------------------------------------------
-
-/// `elem_contained_by_range_support(PG_FUNCTION_ARGS)` (rangetypes.c:2251).
-pub fn elem_contained_by_range_support<'mcx>(
-    mcx: Mcx<'mcx>,
-    fcinfo: &mut FunctionCallInfoBaseData,
-) -> PgResult<Datum> {
-    // Node *rawreq = (Node *) PG_GETARG_POINTER(0): the support request node is
-    // a planner Node* (inherited opacity). The IsA(SupportRequestSimplify)
-    // dispatch + find_simplified_clause live in the kernel.
-    let rawreq = PlannerNode(getarg_datum(fcinfo, 0).as_usize() as u64);
-    let ret = elem_contained_by_range_support_kernel(mcx, rawreq)?;
-    Ok(Datum::from_usize(ret.0 as usize))
-}
-
-/// `range_contains_elem_support(PG_FUNCTION_ARGS)` (rangetypes.c:2277).
-pub fn range_contains_elem_support<'mcx>(
-    mcx: Mcx<'mcx>,
-    fcinfo: &mut FunctionCallInfoBaseData,
-) -> PgResult<Datum> {
-    let rawreq = PlannerNode(getarg_datum(fcinfo, 0).as_usize() as u64);
-    let ret = range_contains_elem_support_kernel(mcx, rawreq)?;
-    Ok(Datum::from_usize(ret.0 as usize))
-}
 
 // Silence the unused-import lint for `RangeType` (only its `rangetypid` field is
 // reached, via the raw `*const RangeType` deref in `range_type_get_oid`).

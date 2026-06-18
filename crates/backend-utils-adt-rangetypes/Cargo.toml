@@ -19,6 +19,16 @@ types-tuple = { path = "../types-tuple" }
 types-fmgr = { path = "../types-fmgr" }
 types-cache = { path = "../types-cache" }
 types-rangetypes = { path = "../types-rangetypes" }
+types-nodes = { path = "../types-nodes" }
+types-pathnodes = { path = "../types-pathnodes" }
+# Planner-support up-call owners (range-planner-support seam wiring): the range
+# `<@`/`@>` support functions fabricate/analyze planner nodes through these
+# already-real owners (makefuncs / clauses / costsize / lsyscache). The same
+# direct-dep-on-optimizer pattern `backend-utils-adt-selfuncs` already uses.
+backend-nodes-core = { path = "../backend-nodes-core" }
+backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
+backend-optimizer-path-costsize = { path = "../backend-optimizer-path-costsize" }
+backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }
 allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
 backend-utils-adt-rangetypes-seams = { path = "../backend-utils-adt-rangetypes-seams" }
 backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
