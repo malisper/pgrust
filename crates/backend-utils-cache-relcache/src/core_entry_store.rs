@@ -685,13 +685,13 @@ pub(crate) fn set_partcheck(
 ) -> PgResult<()> {
     let mut owned: Vec<types_nodes::primnodes::Expr> = Vec::with_capacity(partcheck.len());
     for node in partcheck.iter() {
-        match node {
-            types_nodes::nodes::Node::Expr(e) => owned.push(e.clone()),
-            other => {
+        match node.as_expr() {
+            Some(e) => owned.push(e.clone()),
+            None => {
                 return Err(ereport(ERROR)
                     .errmsg_internal(format!(
                         "rd_partcheck entry is not an expression node (tag {:?})",
-                        other.tag()
+                        node.tag()
                     ))
                     .into_error());
             }

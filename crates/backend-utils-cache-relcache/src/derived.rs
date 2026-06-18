@@ -651,7 +651,7 @@ pub fn RelationBuildPublicationDesc(relation: Oid) -> PgResult<()> {
 /// `qsort` the rules by `ruleId` (`RewriteRuleCompare`) and store the
 /// [`RuleLock`] on the entry. An empty scan stores `None` (C `rd_rules = NULL`).
 pub fn RelationBuildRuleLock(relation: &mut RelationData) -> PgResult<()> {
-    use types_nodes::nodes::{CmdType, Node};
+    use types_nodes::nodes::{ntag, CmdType, Node};
 
     let cache_mcx = cache_memory_context();
 
@@ -701,18 +701,21 @@ pub fn RelationBuildRuleLock(relation: &mut RelationData) -> PgResult<()> {
             // `ev_action` deserializes to a `List` of `Query` (the C
             // `List *actions`). An empty action list is a valid INSTEAD NOTHING
             // rule.
-            match mcx::PgBox::into_inner(action_node) {
-                Node::List(elems) => {
+            let action_inner = mcx::PgBox::into_inner(action_node);
+            match action_inner.node_tag() {
+                ntag::T_List => {
+                    let elems = action_inner.into_list().unwrap();
                     actions.try_reserve(elems.len()).map_err(|_| cache_mcx.oom(elems.len()))?;
                     for elem in elems {
-                        match mcx::PgBox::into_inner(elem) {
-                            Node::Query(q) => actions.push(q),
-                            other => {
+                        let elem_inner = mcx::PgBox::into_inner(elem);
+                        match elem_inner.node_tag() {
+                            ntag::T_Query => actions.push(elem_inner.into_query().unwrap()),
+                            _ => {
                                 return Err(ereport(ERROR)
                                 .errmsg_internal(format!(
                                     "pg_rewrite ev_action element is {:?}, expected Query \
                                      (relation {})",
-                                    other.tag(),
+                                    elem_inner.tag(),
                                     relation.rd_id
                                 ))
                                 .into_error());
@@ -720,11 +723,11 @@ pub fn RelationBuildRuleLock(relation: &mut RelationData) -> PgResult<()> {
                         }
                     }
                 }
-                other => {
+                _ => {
                     return Err(ereport(ERROR)
                         .errmsg_internal(format!(
                             "pg_rewrite ev_action is {:?}, expected a List (relation {})",
-                            other.tag(),
+                            action_inner.tag(),
                             relation.rd_id
                         ))
                         .into_error());
