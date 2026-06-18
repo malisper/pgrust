@@ -12,6 +12,9 @@ crate-type = ["rlib"]
 [dependencies]
 mcx = { path = "../mcx" }
 seam-core = { path = "../seam-core" }
+# tablecmds DefineRelation resolves the table AM name to its OID via
+# get_table_am_oid (owned here). Seam crate -> no cycle.
+backend-commands-tablecmds-seams = { path = "../backend-commands-tablecmds-seams" }
 
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
