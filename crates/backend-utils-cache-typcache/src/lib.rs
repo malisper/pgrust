@@ -47,9 +47,9 @@ use types_cache::typcache::{
 use types_core::fmgr::FmgrInfo;
 use types_core::primitive::{Oid, INVALID_OID};
 use types_error::{
-    PgError, PgResult, SqlState, ERRCODE_DATATYPE_MISMATCH, ERRCODE_OUT_OF_MEMORY,
-    ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT,
-    ERRCODE_WRONG_OBJECT_TYPE,
+    PgError, PgResult, SqlState, ERRCODE_CHECK_VIOLATION, ERRCODE_DATATYPE_MISMATCH,
+    ERRCODE_NOT_NULL_VIOLATION, ERRCODE_OUT_OF_MEMORY, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+    ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE,
 };
 use types_tuple::heaptuple::{TupleDescData, RECORDOID};
 
@@ -2644,6 +2644,93 @@ fn domain_get_base_input_info(
     })
 }
 
+/// `domain_check_input` (domains.c:138) — apply every cached constraint of
+/// `domain_type` to `(value, isnull)`. Hard-error variant only (the seam carries
+/// no `escontext`): a violation is an `Err`.
+///
+/// The C memoizes a `DomainIOData` (constraint ref + econtext) on the caller's
+/// `FmgrInfo`; the owned model re-runs the setup per call (see the domains
+/// family note), so here we create a fresh "Domain constraints" exec context,
+/// build a `DomainConstraintRef` (with `need_exprstate` so CHECK constraints get
+/// compiled), evaluate each constraint, and drop the context. NOT NULL handling
+/// and violation-error construction (with the `errdatatype` /
+/// `errdomainconstraint` diagnostic fields) live here; only the per-CHECK
+/// `ExprContext`/`ExecCheck` evaluation crosses the (substrate-blocked)
+/// `domain_check_exec` seam.
+fn domain_check_input(
+    value: &ColumnDatum<'_>,
+    isnull: bool,
+    domain_type: Oid,
+) -> PgResult<()> {
+    // Standalone execution context for the compiled CHECK exprstates
+    // (C: my_extra->mcxt, populated lazily; here per-call).
+    let execctx = domains_seams::create_domain_ctx::call()?;
+
+    // InitDomainConstraintRef(domainType, &constraint_ref, mcxt,
+    //                         /*need_exprstate=*/true).
+    let result = (|| -> PgResult<()> {
+        let mut cref = init_domain_constraint_ref(domain_type, execctx, true)?;
+
+        // UpdateDomainConstraintRef(&my_extra->constraint_ref).
+        update_domain_constraint_ref(&mut cref)?;
+
+        // The base type's typlen, read off the (now-loaded) cache entry — the C
+        // `my_extra->constraint_ref.tcache->typlen` used by
+        // MakeExpandedObjectReadOnly.
+        let typlen = with_state(|st| st.entry(domain_type).typlen);
+
+        for con in &cref.constraints {
+            match con.constrainttype {
+                DOM_CONSTRAINT_NOTNULL => {
+                    if isnull {
+                        // C also attaches errdatatype() diagnostic fields
+                        // (PG_DIAG_SCHEMA_NAME / PG_DIAG_DATATYPE_NAME); the
+                        // domains family currently treats `errdatatype` as a
+                        // no-op (no type-name lsyscache seam), so the message +
+                        // sqlstate carry the violation.
+                        return Err(PgError::error(format!(
+                            "domain {} does not allow null values",
+                            format_type(domain_type)?
+                        ))
+                        .with_sqlstate(ERRCODE_NOT_NULL_VIOLATION));
+                    }
+                }
+                DOM_CONSTRAINT_CHECK => {
+                    let ok = domains_seams::domain_check_exec::call(
+                        con.check_exprstate,
+                        value,
+                        isnull,
+                        typlen,
+                    )?;
+                    if !ok {
+                        // C: errcode(ERRCODE_CHECK_VIOLATION),
+                        // errdomainconstraint(domain_type, con->name) — the
+                        // constraint name is the carried diagnostic; the
+                        // schema/datatype errdatatype fields are the no-op
+                        // documented in the domains family.
+                        return Err(PgError::error(format!(
+                            "value for domain {} violates check constraint \"{}\"",
+                            format_type(domain_type)?,
+                            con.name
+                        ))
+                        .with_sqlstate(ERRCODE_CHECK_VIOLATION)
+                        .with_constraint_name(con.name.clone()));
+                    }
+                }
+                other => {
+                    return elog_error(format!("unrecognized constraint type: {}", other));
+                }
+            }
+        }
+        Ok(())
+    })();
+
+    // Free the per-call exec context (and the refs/refcount it holds, via the
+    // reset callback the ref registered).
+    domains_seams::delete_domain_ctx::call(execctx)?;
+    result
+}
+
 /* ==========================================================================
  * Typed public accessors — read fields off a cache entry the caller has
  * already populated via lookup_type_cache (the C reads `typentry->field`).
@@ -2804,6 +2891,196 @@ fn lookup_range_elem_hash_proc(elem_type_id: Oid, extended: bool) -> PgResult<Oi
 }
 
 /* ==========================================================================
+ * Element / column compare/hash seams: typcache lookup + fmgr invoke.
+ *
+ * These bundle a `lookup_type_cache(coltype, TYPECACHE_*_FINFO)` with a
+ * `FunctionCallInvoke` of the resolved support function — the typcache owner is
+ * the natural home (it holds the cache entry; the trimmed copy-out does not
+ * carry the support-function fields). The fmgr dispatch crosses the fmgr seam
+ * (re-resolved by OID; the C `FmgrInfo *` cannot cross).
+ * ======================================================================== */
+
+use types_tuple::backend_access_common_heaptuple::Datum as ColumnDatum;
+
+/// `array_typanalyze`'s element-type typcache lookup (array_typanalyze.c:124):
+/// `lookup_type_cache(element_typeid, TYPECACHE_EQ_OPR | TYPECACHE_CMP_PROC_FINFO
+/// | TYPECACHE_HASH_PROC_FINFO)` then project the metadata `compute_array_stats`
+/// needs. Returns `None` (the C `PG_RETURN_BOOL(true)` standard-stats path) when
+/// any of `eq_opr` / `cmp_proc_finfo.fn_oid` / `hash_proc_finfo.fn_oid` is
+/// invalid.
+fn array_typanalyze_element_typcache(
+    element_typeid: Oid,
+    collid: Oid,
+) -> PgResult<Option<types_statistics::ArrayAnalyzeExtraData>> {
+    lookup_type_cache(
+        element_typeid,
+        TYPECACHE_EQ_OPR | TYPECACHE_CMP_PROC_FINFO | TYPECACHE_HASH_PROC_FINFO,
+    )?;
+    Ok(with_state(|st| {
+        let e = st.entry(element_typeid);
+        let eq_opr = e.eq_opr;
+        let cmp = e.cmp_proc_finfo.fn_oid;
+        let hash = e.hash_proc_finfo.fn_oid;
+        if !oid_is_valid(eq_opr) || !oid_is_valid(cmp) || !oid_is_valid(hash) {
+            return None;
+        }
+        Some(types_statistics::ArrayAnalyzeExtraData {
+            type_id: e.type_id,
+            eq_opr,
+            coll_id: collid,
+            typbyval: e.typbyval,
+            typlen: e.typlen,
+            typalign: e.typalign,
+            cmp,
+            hash,
+        })
+    }))
+}
+
+/// `element_hash` (array_typanalyze.c:715):
+/// `DatumGetUInt32(FunctionCall1Coll(hash, coll, value))`.
+fn array_element_hash<'mcx>(
+    hash_proc: Oid,
+    coll: Oid,
+    value: ColumnDatum<'mcx>,
+) -> PgResult<u32> {
+    let scratch = MemoryContext::new("typcache array_element_hash");
+    let r = fmgr_seams::function_call1_coll_datum::call(scratch.mcx(), hash_proc, coll, value)?;
+    Ok(r.as_u32())
+}
+
+/// `element_compare` (array_typanalyze.c:746):
+/// `DatumGetInt32(FunctionCall2Coll(cmp, coll, a, b))`.
+fn array_element_compare<'mcx>(
+    cmp_proc: Oid,
+    coll: Oid,
+    a: ColumnDatum<'mcx>,
+    b: ColumnDatum<'mcx>,
+) -> PgResult<i32> {
+    let scratch = MemoryContext::new("typcache array_element_compare");
+    let r = fmgr_seams::function_call2_coll_datum::call(scratch.mcx(), cmp_proc, coll, a, b)?;
+    Ok(r.as_i32())
+}
+
+/// rowtypes.c `record_cmp` per-column step (rowtypes.c:969):
+/// `lookup_type_cache(coltype, TYPECACHE_CMP_PROC_FINFO)` + the
+/// `OidIsValid(cmp_proc_finfo.fn_oid)` guard + `FunctionCallInvoke` of the
+/// three-way compare support function.
+fn record_column_cmp(
+    coltype: Oid,
+    collation: Oid,
+    v1: &ColumnDatum<'_>,
+    v2: &ColumnDatum<'_>,
+) -> PgResult<i32> {
+    lookup_type_cache(coltype, TYPECACHE_CMP_PROC_FINFO)?;
+    let cmp = with_state(|st| st.entry(coltype).cmp_proc_finfo.fn_oid);
+    if !oid_is_valid(cmp) {
+        return ereport_error(
+            ERRCODE_UNDEFINED_FUNCTION,
+            format!(
+                "could not identify a comparison function for type {}",
+                format_type(coltype)?
+            ),
+        );
+    }
+    let scratch = MemoryContext::new("typcache record_column_cmp");
+    let r = fmgr_seams::function_call2_coll_datum::call(
+        scratch.mcx(),
+        cmp,
+        collation,
+        v1.clone(),
+        v2.clone(),
+    )?;
+    Ok(r.as_i32())
+}
+
+/// rowtypes.c `record_eq` per-column step (rowtypes.c:1215):
+/// `lookup_type_cache(coltype, TYPECACHE_EQ_OPR_FINFO)` + the
+/// `OidIsValid(eq_opr_finfo.fn_oid)` guard + `FunctionCallInvoke` of the
+/// equality operator. C folds a null operator result to `false`.
+fn record_column_eq(
+    coltype: Oid,
+    collation: Oid,
+    v1: &ColumnDatum<'_>,
+    v2: &ColumnDatum<'_>,
+) -> PgResult<bool> {
+    lookup_type_cache(coltype, TYPECACHE_EQ_OPR_FINFO)?;
+    let eq = with_state(|st| st.entry(coltype).eq_opr_finfo.fn_oid);
+    if !oid_is_valid(eq) {
+        return ereport_error(
+            ERRCODE_UNDEFINED_FUNCTION,
+            format!(
+                "could not identify an equality operator for type {}",
+                format_type(coltype)?
+            ),
+        );
+    }
+    let scratch = MemoryContext::new("typcache record_column_eq");
+    let r = fmgr_seams::function_call2_coll_datum::call(
+        scratch.mcx(),
+        eq,
+        collation,
+        v1.clone(),
+        v2.clone(),
+    )?;
+    // Equality operators are strict, so a non-null result is returned for the
+    // two non-null inputs the caller guarantees; the C `locfcinfo->isnull`
+    // fold-to-false defends an unreachable case.
+    Ok(r.as_i32() != 0)
+}
+
+/// rowtypes.c `hash_record` per-column step (rowtypes.c:1888):
+/// `lookup_type_cache(coltype, TYPECACHE_HASH_PROC_FINFO)` + the
+/// `OidIsValid(hash_proc_finfo.fn_oid)` guard + `FunctionCallInvoke` of the
+/// standard hash support function.
+fn record_column_hash(coltype: Oid, collation: Oid, v: &ColumnDatum<'_>) -> PgResult<u32> {
+    lookup_type_cache(coltype, TYPECACHE_HASH_PROC_FINFO)?;
+    let hash = with_state(|st| st.entry(coltype).hash_proc_finfo.fn_oid);
+    if !oid_is_valid(hash) {
+        return ereport_error(
+            ERRCODE_UNDEFINED_FUNCTION,
+            format!("could not identify a hash function for type {}", format_type(coltype)?),
+        );
+    }
+    let scratch = MemoryContext::new("typcache record_column_hash");
+    let r =
+        fmgr_seams::function_call1_coll_datum::call(scratch.mcx(), hash, collation, v.clone())?;
+    Ok(r.as_u32())
+}
+
+/// rowtypes.c `hash_record_extended` per-column step (rowtypes.c:2009):
+/// `lookup_type_cache(coltype, TYPECACHE_HASH_EXTENDED_PROC_FINFO)` + the
+/// `OidIsValid(hash_extended_proc_finfo.fn_oid)` guard + `FunctionCallInvoke`
+/// of the extended hash support function with the `seed` (`Int64GetDatum`).
+fn record_column_hash_extended(
+    coltype: Oid,
+    collation: Oid,
+    v: &ColumnDatum<'_>,
+    seed: u64,
+) -> PgResult<u64> {
+    lookup_type_cache(coltype, TYPECACHE_HASH_EXTENDED_PROC_FINFO)?;
+    let hash = with_state(|st| st.entry(coltype).hash_extended_proc_finfo.fn_oid);
+    if !oid_is_valid(hash) {
+        return ereport_error(
+            ERRCODE_UNDEFINED_FUNCTION,
+            format!(
+                "could not identify an extended hash function for type {}",
+                format_type(coltype)?
+            ),
+        );
+    }
+    let scratch = MemoryContext::new("typcache record_column_hash_extended");
+    let r = fmgr_seams::function_call2_coll_datum::call(
+        scratch.mcx(),
+        hash,
+        collation,
+        v.clone(),
+        ColumnDatum::from_i64(seed as i64),
+    )?;
+    Ok(r.as_u64())
+}
+
+/* ==========================================================================
  * Small numeric helpers.
  * ======================================================================== */
 
@@ -2888,4 +3165,23 @@ pub fn init_seams() {
     backend_utils_cache_typcache_seams::domain_get_base_input_info::set(
         domain_get_base_input_info,
     );
+    // domain_check_input engine (domains.c): NOT NULL handling + violation
+    // errors live here; per-CHECK ExecCheck crosses the (substrate-blocked)
+    // domains domain_check_exec seam.
+    backend_utils_cache_typcache_seams::domain_check_input::set(domain_check_input);
+    // rowtypes.c per-column compare/eq/hash steps (typcache lookup + fmgr
+    // invoke). The record ADT (backend-utils-adt-misc2) calls these.
+    backend_utils_cache_typcache_seams::record_column_cmp::set(record_column_cmp);
+    backend_utils_cache_typcache_seams::record_column_eq::set(record_column_eq);
+    backend_utils_cache_typcache_seams::record_column_hash::set(record_column_hash);
+    backend_utils_cache_typcache_seams::record_column_hash_extended::set(
+        record_column_hash_extended,
+    );
+    // array_typanalyze.c element-type typcache lookup + element hash/compare
+    // fmgr invokes. The array-typanalyze ADT calls these.
+    backend_utils_cache_typcache_seams::array_typanalyze_element_typcache::set(
+        array_typanalyze_element_typcache,
+    );
+    backend_utils_cache_typcache_seams::array_element_hash::set(array_element_hash);
+    backend_utils_cache_typcache_seams::array_element_compare::set(array_element_compare);
 }

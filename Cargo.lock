@@ -17764,6 +17764,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -20167,6 +20168,7 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
+ "types-statistics",
  "types-tuple",
  "types-typcache",
 ]

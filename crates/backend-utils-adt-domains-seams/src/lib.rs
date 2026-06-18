@@ -13,6 +13,7 @@ use types_cache::typcache::{DomainCheckConstraintRow, DomainCtxHandle, DomainLev
 use types_core::Oid;
 use types_error::PgResult;
 use types_nodes::primnodes::Expr;
+use types_tuple::backend_access_common_heaptuple::Datum;
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -91,6 +92,30 @@ seam_core::seam!(
         check_expr: &Expr,
         execctx: DomainCtxHandle,
     ) -> PgResult<ExprStateHandle>
+);
+
+seam_core::seam!(
+    /// `domain_check_input`'s per-CHECK evaluation (domains.c:163-203): create a
+    /// standalone `ExprContext` (lazily, once per call), set
+    /// `econtext->domainValue_datum = MakeExpandedObjectReadOnly(value, isnull,
+    /// typlen)` and `domainValue_isNull = isnull`, then `ExecCheck(exprstate,
+    /// econtext)`. Returns the CHECK result (`false` → the caller raises
+    /// ERRCODE_CHECK_VIOLATION). The typcache owns the constraint list, the NOT
+    /// NULL handling, and the violation-error construction; only the
+    /// `ExprContext`/`ExecCheck` evaluation crosses here.
+    ///
+    /// GENUINELY UNINSTALLED / blocked on the same substrate as
+    /// [`exec_init_expr`]: `ExecCheck` evaluates a compiled `ExprState`, which is
+    /// only produced once the `EState`-less `ExecInitExpr(expr, NULL)` substrate
+    /// lands. Until then `exprstate` is `ExprStateHandle::NULL` and this seam has
+    /// no owner; a call panics. A domain whose only constraints are NOT NULL
+    /// never reaches this seam.
+    pub fn domain_check_exec(
+        exprstate: ExprStateHandle,
+        value: &Datum<'_>,
+        isnull: bool,
+        typlen: i16,
+    ) -> PgResult<bool>
 );
 
 seam_core::seam!(
