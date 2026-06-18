@@ -1548,10 +1548,17 @@ fn grouping_planner<'mcx>(
         }
     }
 
-    // Preprocess targetlist (C:1567).
+    // Preprocess targetlist (C:1567). Resolve the FOR-UPDATE/SHARE PlanRowMark
+    // values (Copy) before taking the &mut Query borrow, so preprocess_targetlist
+    // can build the rowmark junk Vars without the &PlannerRun registry.
     {
+        let rowmarks: alloc::vec::Vec<types_nodes::nodelockrows::PlanRowMark> = root
+            .rowMarks
+            .iter()
+            .map(|&id| *run.resolve_rowmark(id))
+            .collect();
         let parse = run.resolve_mut(root.parse);
-        backend_optimizer_prep_preptlist::preprocess_targetlist(mcx, root, parse)?;
+        backend_optimizer_prep_preptlist::preprocess_targetlist(mcx, root, parse, &rowmarks)?;
     }
 
     // preprocess_aggrefs over processed_tlist + havingQual if hasAggs (C:1576-1580).
@@ -1908,9 +1915,28 @@ fn grouping_planner<'mcx>(
         )
     };
     if has_rowmarks {
+        // FOR [KEY] UPDATE/SHARE wraps each path in a LockRows node
+        // (create_lockrows_path over root->rowMarks, planner.c:1905-1910). The
+        // upstream analyze/rowmark planning IS ported now (transformLockingClause,
+        // isLockedRefname, preprocess_rowmarks, the preptlist rowmark junk Vars),
+        // so the parse->rowMarks / root->rowMarks (Vec<PlanRowMarkId>) are built
+        // and reach here. The LockRows PATH cannot yet be created faithfully: the
+        // ported create_lockrows_path / LockRowsPath / the LockRows plan node all
+        // carry rowMarks as Vec<NodeId> (the node_arena Expr id-space), the WRONG
+        // id-space for a PlanRowMark (which lives in the PlannerRun rowmark
+        // registry as PlanRowMarkId). Routing root->rowMarks through it would
+        // require either a forbidden cross-id-space token reuse or the cross-crate
+        // PlanRowMark-carrier widen (types-pathnodes LockRowsPath/LockRows.rowMarks
+        // -> Vec<PlanRowMarkId>, create_lockrows_path re-sign, createplan
+        // create_lockrows_plan port [currently seam-panics, createplan.c:1088], +
+        // the LockRows plan-node Node arm). Execution then bottoms out on the
+        // EvalPlanQual executor (ExecLockRows / EPQ re-eval). STOP here: this is
+        // the PlanRowMark-carrier + EPQ keystone, out of planner.c's lane.
         panic!(
-            "grouping_planner: FOR [KEY] UPDATE/SHARE adds create_lockrows_path \
-             (planner.c:1907) — not reached on a plain SELECT"
+            "grouping_planner: FOR [KEY] UPDATE/SHARE LockRows path needs the \
+             PlanRowMark-carrier widen (LockRowsPath/LockRows.rowMarks -> \
+             Vec<PlanRowMarkId>) + create_lockrows_plan (createplan.c, unported) + \
+             the EvalPlanQual executor (planner.c:1905)"
         );
     }
     if has_limit_clause {
@@ -3638,32 +3664,50 @@ fn pathtarget_exprs_equal(root: &PlannerInfo, path: PathId, target: &PathTarget)
 // preprocess_rowmarks()  (planner.c:2399)
 // ===========================================================================
 
+/// Read a `parse->rowMarks` element (a `RowMarkClause` carried as `NodePtr<Node>`)
+/// as a plain (`Copy`) [`types_nodes::rawnodes::RowMarkClause`] value. Every
+/// rowMarks element is a `RowMarkClause` (parser invariant: built by
+/// `transformLockingClause`).
+fn rowmarkclause_from_node(
+    np: &mcx::PgBox<'_, Node<'_>>,
+) -> PgResult<types_nodes::rawnodes::RowMarkClause> {
+    match &**np {
+        Node::RowMarkClause(rc) => Ok(*rc),
+        other => panic!(
+            "preprocess_rowmarks: rowMarks element is not a RowMarkClause (got {:?})",
+            other.tag()
+        ),
+    }
+}
+
 /// `preprocess_rowmarks(root)` (planner.c:2399).
 fn preprocess_rowmarks<'mcx>(
-    _mcx: Mcx<'mcx>,
+    mcx: Mcx<'mcx>,
     run: &mut PlannerRun<'mcx>,
     root: &mut PlannerInfo,
 ) -> PgResult<()> {
-    let (has_rowmarks, command_type, first_strength) = {
+    // Snapshot the RowMarkClause values + command type from the Query. The
+    // rowMarks list elements are RowMarkClause nodes (Copy values).
+    let (row_mark_clauses, command_type, result_relation) = {
         let parse = run.resolve(root.parse);
-        let has = !parse.rowMarks.is_empty();
-        (has, parse.commandType, ())
+        let rmcs: Vec<types_nodes::rawnodes::RowMarkClause> = parse
+            .rowMarks
+            .iter()
+            .map(|np| rowmarkclause_from_node(np))
+            .collect::<PgResult<Vec<_>>>()?;
+        (rmcs, parse.commandType, parse.resultRelation)
     };
-    let _ = first_strength;
 
-    if has_rowmarks {
+    if !row_mark_clauses.is_empty() {
+        // We've got trouble if FOR [KEY] UPDATE/SHARE appears inside grouping,
+        // since grouping renders a reference to individual tuple CTIDs invalid.
         // CheckSelectLocking(parse, linitial(rowMarks)->strength) (C:2415-2416).
-        // The RowMarkClause node (with .strength) lives in parse->rowMarks as a
-        // NodePtr<Node>; extracting LockClauseStrength requires the RowMarkClause
-        // Node variant. CheckSelectLocking's owner (parser-analyze) takes
-        // (&Query, LockClauseStrength). Reached only for FOR UPDATE/SHARE.
-        panic!(
-            "preprocess_rowmarks: FOR [KEY] UPDATE/SHARE rowmark processing requires \
-             reading RowMarkClause.strength from parse->rowMarks (NodePtr) + \
-             get_relids_in_jointree (prepjointree, pub(crate)); neither reachable"
-        );
+        let first_strength = row_mark_clauses[0].strength;
+        let parse = run.resolve(root.parse);
+        backend_parser_analyze::CheckSelectLocking(parse, first_strength)?;
     } else {
-        // We only need rowmarks for UPDATE/DELETE/MERGE (C:2424-2427).
+        // We only need rowmarks for UPDATE, DELETE, MERGE, or FOR [KEY]
+        // UPDATE/SHARE (C:2419-2427).
         if command_type != CmdType::CMD_UPDATE
             && command_type != CmdType::CMD_DELETE
             && command_type != CmdType::CMD_MERGE
@@ -3672,19 +3716,111 @@ fn preprocess_rowmarks<'mcx>(
         }
     }
 
-    // rels = get_relids_in_jointree(parse->jointree, false, false) (C:2435). The
-    // owner (prepjointree result_rtes.rs) is `pub(crate)` and unreachable, and
-    // the bms_* set algebra below runs over the lifetime-free Relids. The
-    // RowMarkClause / non-target base-rel rowmark loops (C:2442-2502) build
-    // PlanRowMark values via run.intern_rowmark + root.rowMarks.push, but they
-    // all depend on `rels`. Reached only for UPDATE/DELETE/MERGE. Mirror PG and
-    // panic precisely at the unreachable callee.
-    let _ = run;
-    panic!(
-        "preprocess_rowmarks: get_relids_in_jointree (prepjointree result_rtes.rs, \
-         pub(crate)) is not reachable; the UPDATE/DELETE/MERGE base-rel rowmark \
-         construction (planner.c:2435-2504) is gated on it"
-    );
+    // We need rowmarks for all base relations except the target. Make a bitmapset
+    // of all base rels, then remove items we don't need or have FOR [KEY]
+    // UPDATE/SHARE marks for (C:2429-2437).
+    //
+    // rels = get_relids_in_jointree((Node *) parse->jointree, false, false).
+    let mut rels: Option<mcx::PgBox<'mcx, types_nodes::bitmapset::Bitmapset<'mcx>>> = {
+        let jointree_node: Option<Node<'mcx>> = match run.resolve(root.parse).jointree.as_deref() {
+            Some(f) => Some(Node::FromExpr(f.clone_in(mcx)?)),
+            None => None,
+        };
+        match jointree_node {
+            Some(node) => backend_optimizer_prep_prepjointree::get_relids_in_jointree(
+                mcx, &node, false, false,
+            )?,
+            None => None,
+        }
+    };
+    if result_relation != 0 {
+        rels = backend_nodes_core::bitmapset::bms_del_member(rels, result_relation);
+    }
+
+    // Convert RowMarkClauses to PlanRowMark representation (C:2439-2479).
+    let mut prowmarks: Vec<types_pathnodes::PlanRowMarkId> = Vec::new();
+    for rc in &row_mark_clauses {
+        // rte = rt_fetch(rc->rti, parse->rtable).
+        let rte_is_relation = {
+            let parse = run.resolve(root.parse);
+            let rte = &parse.rtable[(rc.rti - 1) as usize];
+            rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_RELATION
+        };
+
+        // Currently it is syntactically impossible to have FOR UPDATE et al
+        // applied to an update/delete target rel (C:2451 Assert).
+        debug_assert!(rc.rti as i32 != result_relation);
+
+        // Ignore RowMarkClauses for subqueries; they aren't real tables and can't
+        // support true locking. Any non-flattened subquery RTE gets a
+        // ROW_MARK_COPY item in the next loop (C:2460-2467).
+        if !rte_is_relation {
+            continue;
+        }
+
+        rels = backend_nodes_core::bitmapset::bms_del_member(rels, rc.rti as i32);
+
+        let mark_type = {
+            let parse = run.resolve(root.parse);
+            let rte = &parse.rtable[(rc.rti - 1) as usize];
+            select_rowmark_type(rte, rc.strength)?
+        };
+        let rowmark_id = {
+            let glob = root.glob.as_mut().expect("preprocess_rowmarks: glob");
+            glob.last_row_mark_id += 1;
+            glob.last_row_mark_id
+        };
+        let newrc = types_nodes::nodelockrows::PlanRowMark {
+            type_: types_nodes::nodelockrows::T_PlanRowMark,
+            rti: rc.rti,
+            prti: rc.rti,
+            rowmarkId: rowmark_id,
+            markType: mark_type as u32 as i32,
+            allMarkTypes: 1 << (mark_type as u32),
+            strength: rc.strength as u32 as i32,
+            waitPolicy: rc.waitPolicy as u32 as i32,
+            isParent: false,
+        };
+        prowmarks.push(run.intern_rowmark(newrc));
+    }
+
+    // Now add rowmarks for any non-target, non-locked base relations (C:2481-2503).
+    let rtable_len = run.resolve(root.parse).rtable.len();
+    for idx in 0..rtable_len {
+        // i is the 1-based RT index.
+        let i = (idx + 1) as i32;
+        if !backend_nodes_core::bitmapset::bms_is_member(i, rels.as_deref()) {
+            continue;
+        }
+
+        let mark_type = {
+            let parse = run.resolve(root.parse);
+            let rte = &parse.rtable[idx];
+            select_rowmark_type(rte, LockClauseStrength::LCS_NONE)?
+        };
+        let rowmark_id = {
+            let glob = root.glob.as_mut().expect("preprocess_rowmarks: glob");
+            glob.last_row_mark_id += 1;
+            glob.last_row_mark_id
+        };
+        let newrc = types_nodes::nodelockrows::PlanRowMark {
+            type_: types_nodes::nodelockrows::T_PlanRowMark,
+            rti: i as types_core::Index,
+            prti: i as types_core::Index,
+            rowmarkId: rowmark_id,
+            markType: mark_type as u32 as i32,
+            allMarkTypes: 1 << (mark_type as u32),
+            strength: LockClauseStrength::LCS_NONE as u32 as i32,
+            // waitPolicy doesn't matter for a reference rowmark.
+            waitPolicy: types_nodes::rawnodes::LockWaitPolicy::LockWaitBlock as u32 as i32,
+            isParent: false,
+        };
+        prowmarks.push(run.intern_rowmark(newrc));
+    }
+
+    // root->rowMarks = prowmarks (C:2505).
+    root.rowMarks = prowmarks;
+    Ok(())
 }
 
 // ===========================================================================

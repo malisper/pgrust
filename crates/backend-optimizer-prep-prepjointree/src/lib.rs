@@ -80,6 +80,8 @@ pub use pullup::{
     pull_up_subqueries,
 };
 pub use result_rtes::remove_useless_result_rtes;
+// preprocess_rowmarks (planner.c) needs the base-rel set of the jointree.
+pub use result_rtes::get_relids_in_jointree;
 // `reduce_outer_joins` is defined as a `pub fn` directly in this lib.rs, so it is
 // already crate-visible (no re-export needed).
 

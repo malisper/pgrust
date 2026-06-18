@@ -49,5 +49,6 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         root: &mut types_pathnodes::PlannerInfo,
         parse: &mut types_nodes::copy_query::Query<'mcx>,
+        rowmarks: &[types_nodes::nodelockrows::PlanRowMark],
     ) -> types_error::PgResult<()>
 );

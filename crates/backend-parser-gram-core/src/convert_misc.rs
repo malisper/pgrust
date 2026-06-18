@@ -521,6 +521,21 @@ fn conv_rowmark(p: *mut cp::RowMarkClause) -> tn::RowMarkClause {
     }
 }
 
+/// `LockingClause` (FOR [KEY] UPDATE/SHARE in the raw parse tree). `lockedRels`
+/// is a `List *` of `RangeVar` (empty == "all rels"). Surfaced as the owned
+/// `tn::LockingClause`; analyze (`transformLockingClause`) consumes it.
+fn conv_lockingclause<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cp::LockingClause,
+) -> PgResult<tn::LockingClause<'mcx>> {
+    let l = unsafe { &*p };
+    Ok(tn::LockingClause {
+        lockedRels: node_list(mcx, l.locked_rels)?,
+        strength: lock_clause_strength(l.strength),
+        waitPolicy: lock_wait_policy(l.wait_policy),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Value (leaf literal) nodes — produce the central Node arms directly.
 // ---------------------------------------------------------------------------

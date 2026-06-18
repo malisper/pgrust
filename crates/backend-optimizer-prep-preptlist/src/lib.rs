@@ -90,6 +90,10 @@ pub fn preprocess_targetlist<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     root: &mut PlannerInfo,
     parse: &mut Query<'mcx>,
+    // The FOR-UPDATE/SHARE PlanRowMark values (resolved by the caller from
+    // root->rowMarks; PlanRowMark is a Copy value, so passing the resolved slice
+    // avoids threading the `&PlannerRun` registry through this owner).
+    rowmarks: &[types_nodes::nodelockrows::PlanRowMark],
 ) -> PgResult<()> {
     let result_relation = parse.resultRelation;
     let command_type = parse.commandType;
@@ -163,14 +167,60 @@ pub fn preprocess_targetlist<'mcx>(
     }
 
     // C 229-287: rowMarks junk-column stanza (FOR UPDATE/SHARE locking +
-    // EvalPlanQual). `root->rowMarks` is empty on every reachable path
-    // (produced by the unported `preprocess_rowmarks`); seam-and-panic if not.
-    if !root.rowMarks.is_empty() {
-        panic!(
-            "preprocess_targetlist: FOR-UPDATE/SHARE rowMarks junk-column stanza not yet ported — \
-             needs the DML/locking analyze family to thread the `&PlannerRun` to resolve \
-             `rc->rti`/`allMarkTypes`/`rowmarkId` and build the junk Vars"
-        );
+    // EvalPlanQual). For each PlanRowMark add resjunk Vars the executor's
+    // EvalPlanQual / row locking needs (ctid for a TID-fetchable mark; whole-row
+    // for a ROW_MARK_COPY mark; tableoid for an inheritance parent).
+    const ROW_MARK_COPY: i32 = types_nodes::execnodes::RowMarkType::Copy as u32 as i32;
+    for rc in rowmarks {
+        // Child rels use the same junk attrs as their parents (C:237-238).
+        if rc.rti != rc.prti {
+            continue;
+        }
+
+        if rc.allMarkTypes & !(1 << ROW_MARK_COPY) != 0 {
+            // Need to fetch TID: makeVar(rti, SelfItemPointerAttributeNumber,
+            // TIDOID, -1, InvalidOid, 0) labeled "ctid%u" (C:240-254).
+            let var = backend_nodes_core::makefuncs::make_var(
+                rc.rti as i32,
+                types_tuple::heaptuple::SelfItemPointerAttributeNumber,
+                types_tuple::heaptuple::TIDOID,
+                -1,
+                InvalidOid,
+                0,
+            );
+            let resname = alloc::format!("ctid{}", rc.rowmarkId);
+            let expr_id = root.alloc_node(types_nodes::primnodes::Expr::Var(var));
+            let resno = (tlist.len() + 1) as AttrNumber;
+            let te = TargetEntryNode {
+                expr: expr_id,
+                resno,
+                resname: Some(resname),
+                ressortgroupref: 0,
+                resorigtbl: InvalidOid,
+                resorigcol: 0,
+                resjunk: true,
+            };
+            tlist.push(root.alloc_targetentry(te));
+        }
+        if rc.allMarkTypes & (1 << ROW_MARK_COPY) != 0 {
+            // Need the whole row as a junk var (makeWholeRowVar) (C:255-267).
+            // Reached only for a ROW_MARK_COPY mark (a non-relation / view RTE);
+            // makeWholeRowVar is not yet ported. Regular-table FOR UPDATE never
+            // takes this leg (its allMarkTypes excludes ROW_MARK_COPY).
+            panic!(
+                "preprocess_targetlist: ROW_MARK_COPY whole-row junk Var needs makeWholeRowVar \
+                 (makefuncs.c) — not ported (only reached for non-relation/view rowmarks)"
+            );
+        }
+
+        // If parent of an inheritance tree, always fetch the tableoid too
+        // (C:269-285). isParent is false for a non-inherited base relation.
+        if rc.isParent {
+            panic!(
+                "preprocess_targetlist: inheritance-parent rowmark tableoid junk Var \
+                 (isParent) not yet ported (needs the inheritance-expansion family)"
+            );
+        }
     }
 
     // C 296-325: RETURNING-list resjunk Vars for other relations. `returningList`

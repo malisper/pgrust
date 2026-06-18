@@ -850,12 +850,12 @@ pub(crate) fn fix_append_rel_relids<'mcx>(
 
 /// `get_relids_in_jointree(jtnode, include_outer_joins, include_inner_joins)`
 /// (prepjointree.c:4234). Set of RT indexes present in a jointree.
-pub(crate) fn get_relids_in_jointree<'mcx>(
+pub fn get_relids_in_jointree<'mcx>(
     mcx: Mcx<'mcx>,
     jtnode: &Node<'mcx>,
     include_outer_joins: bool,
     include_inner_joins: bool,
-) -> PgResult<Relids<'mcx>> {
+) -> PgResult<Option<PgBox<'mcx, Bitmapset<'mcx>>>> {
     match jtnode {
         Node::RangeTblRef(r) => Ok(Some(bms_make_singleton(mcx, r.rtindex)?)),
         Node::FromExpr(f) => get_relids_in_fromexpr(mcx, f, include_outer_joins, include_inner_joins),

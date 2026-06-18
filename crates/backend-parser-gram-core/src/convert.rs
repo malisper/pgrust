@@ -302,10 +302,7 @@ pub fn convert_node<'mcx>(mcx: Mcx<'mcx>, n: *mut RawNode) -> PgResult<Node<'mcx
         }
         tags::T_RowMarkClause => Ok(Node::RowMarkClause(conv_rowmark(n.cast()))),
         tags::T_LockingClause => {
-            // No concrete `LockingClause` struct exists in types-nodes yet;
-            // the grammar carries it in SelectStmt.lockingClause as raw list
-            // elements. Until the type is authored, surfacing one is F2+.
-            unported(tag, "LockingClause")
+            Ok(Node::LockingClause(conv_lockingclause(mcx, n.cast())?))
         }
 
         // --- value (leaf literal) nodes ---

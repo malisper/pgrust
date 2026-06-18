@@ -2619,21 +2619,35 @@ pub fn isLockedRefname(pstate: &ParseState<'_>, refname: Option<&str>) -> bool {
         return true;
     }
 
-    // The C iterates pstate->p_locking_clause (a list of LockingClause nodes),
-    // reading each lc->lockedRels. The LockingClause node type is not yet
-    // modeled in this repo's central Node enum (rawnodes.rs carries it only as a
-    // comment), so the per-clause loop can't be ported faithfully. An empty
-    // p_locking_clause (no FOR UPDATE/SHARE) is handled correctly (returns
-    // false); only a populated list — which can't be produced until the
-    // parse_clause owner that builds LockingClause nodes lands — would require
-    // it, so mirror-PG-and-panic there.
-    if !pstate.p_locking_clause.is_empty() {
-        let _ = refname;
-        panic!(
-            "isLockedRefname: iterating pstate.p_locking_clause needs the LockingClause \
-             node (lockedRels list), not yet modeled in the central Node enum \
-             (parse_relation.c:2677)"
-        );
+    // Iterate pstate->p_locking_clause (a list of LockingClause nodes), reading
+    // each lc->lockedRels (parse_relation.c:2677-2702).
+    for lc_node in pstate.p_locking_clause.iter() {
+        let lc = match &**lc_node {
+            Node::LockingClause(lc) => lc,
+            other => panic!(
+                "isLockedRefname: p_locking_clause element is not a LockingClause (got {:?})",
+                other.tag()
+            ),
+        };
+
+        if lc.lockedRels.is_empty() {
+            // All tables used in query.
+            return true;
+        } else if let Some(refname) = refname {
+            // Just the named tables.
+            for relnode in lc.lockedRels.iter() {
+                let thisrel = match &**relnode {
+                    Node::RangeVar(rv) => rv,
+                    other => panic!(
+                        "isLockedRefname: lockedRels element is not a RangeVar (got {:?})",
+                        other.tag()
+                    ),
+                };
+                if thisrel.relname.as_ref().map(|s| s.as_str()) == Some(refname) {
+                    return true;
+                }
+            }
+        }
     }
     false
 }
