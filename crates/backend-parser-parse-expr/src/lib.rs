@@ -272,6 +272,11 @@ pub fn transformExprRecurse<'mcx>(
             }
         }
 
+        // T_BoolExpr → transformBoolExpr(pstate, (BoolExpr *) expr). The raw
+        // grammar emits a `Node::BoolExpr` carrying untransformed `NodePtr`
+        // children; we transform+coerce each and rebuild a cooked BoolExpr.
+        Node::BoolExpr(a) => transformBoolExpr(pstate, a)?,
+
         Node::FuncCall(f) => transformFuncCall(pstate, f)?,
         Node::MultiAssignRef(m) => transformMultiAssignRef(pstate, m)?,
 
@@ -307,7 +312,15 @@ fn transform_expr_node<'mcx>(
     e: Expr,
 ) -> PgResult<Expr> {
     match e {
-        Expr::BoolExpr(a) => transformBoolExpr(pstate, a),
+        // A raw-grammar BoolExpr reaches the dispatcher as the `Node::BoolExpr`
+        // arm above (the C `T_BoolExpr` case). An already-analyzed
+        // `Expr::BoolExpr` re-entering transformExprRecurse would be a bug (the
+        // C never re-transforms an analyzed BoolExpr).
+        Expr::BoolExpr(_) => {
+            return Err(PgError::error(
+                "transformExprRecurse: unexpected already-analyzed BoolExpr",
+            ))
+        }
         Expr::GroupingFunc(_) => seam_transform_grouping_func(pstate, Node::Expr(e)),
         Expr::MergeSupportFunc(f) => transformMergeSupportFunc(pstate, f),
 
@@ -923,7 +936,7 @@ fn transformAExprNullIf<'mcx>(
 
 fn transformBoolExpr<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    a: types_nodes::primnodes::BoolExpr,
+    a: types_nodes::rawexprnodes::BoolExpr<'mcx>,
 ) -> PgResult<Expr> {
     let opname = match a.boolop {
         AND_EXPR => "AND",
@@ -931,15 +944,17 @@ fn transformBoolExpr<'mcx>(
         NOT_EXPR => "NOT",
     };
 
+    let location = a.location;
     let mut args: Vec<Expr> = Vec::with_capacity(a.args.len());
     for arg in a.args {
-        let arg = transformExprRecurse(pstate, Some(expr_to_node(arg)))?
+        // `Node *arg = (Node *) lfirst(lc);` — the raw child node, moved out.
+        let arg = transformExprRecurse(pstate, boxed_node(Some(arg)))?
             .ok_or_else(|| PgError::error("transformBoolExpr: BoolExpr argument is NULL"))?;
         let arg = coerce::coerce_to_boolean::call(pstate, arg, opname)?;
         args.push(arg);
     }
 
-    Ok(make_bool_expr(a.boolop, args, -1))
+    Ok(make_bool_expr(a.boolop, args, location))
 }
 
 // ===========================================================================
