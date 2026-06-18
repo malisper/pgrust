@@ -1381,7 +1381,16 @@ fn exec_proc_node_child<'mcx>(
     let mut ps = take_subplanstate(estate, idx)?;
     let r = exec_procnode::exec_proc_node::call(&mut ps, estate);
     put_subplanstate(estate, idx, ps);
-    r
+    // The C subplan tuple loops are `for (slot = ExecProcNode(planstate);
+    // !TupIsNull(slot); slot = ExecProcNode(planstate))`. ExecProcNode at
+    // end-of-scan returns a *non-NULL* but cleared slot (e.g. ExecScan's
+    // `return ExecClearTuple(resultslot)` when a qual filtered out every row),
+    // so the `while let Some(slot)` loops at the call sites must treat an empty
+    // slot as end-of-scan. Apply TupIsNull here (map a cleared slot to `None`)
+    // so all three callers (ExecScanSubPlan / buildSubPlanHash / ExecSetParamPlan)
+    // see the C `!TupIsNull` semantics. Without this an EXISTS whose subquery
+    // returns zero rows wrongly reports TRUE.
+    Ok(r?.filter(|&s| !estate.slot(s).is_empty()))
 }
 
 /// `ResetExprContext(node->innerecontext)` — reset the inner exprcontext's
