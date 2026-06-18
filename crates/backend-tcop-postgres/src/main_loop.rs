@@ -959,6 +959,16 @@ fn postgres_main_inner(dbname: Option<&str>, username: Option<&str>) -> PgResult
             // The C switches into MessageContext before FlushErrorState; we pass
             // the (about-to-be-reset) per-iteration context.
             error_recovery(message_context.mcx(), err, &mut state)?;
+
+            // C's sigsetjmp handler ends with `if (!ignore_till_sync)
+            // send_ready_for_query = true;` (postgres.c) so the next loop
+            // iteration re-issues ReadyForQuery after recovering from an error.
+            // Without this the backend skips ready_state and blocks forever in
+            // ReadCommand while the client waits for a ReadyForQuery that never
+            // comes — the post-error hang that looked like a backend crash.
+            if !globals::ignore_till_sync() {
+                state.send_ready_for_query = true;
+            }
         }
         // MemoryContextReset(MessageContext): the per-iteration arena is
         // reclaimed by dropping the child context (all `'mcx` borrows ended).
