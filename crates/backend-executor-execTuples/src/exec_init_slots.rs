@@ -71,10 +71,18 @@ pub fn MakeSingleTupleTableSlot<'mcx>(
 
 /// `ExecDropSingleTupleTableSlot(slot)` (execTuples.c): release a slot made
 /// with [`MakeSingleTupleTableSlot`] (clears it first, releasing any pin).
-pub fn ExecDropSingleTupleTableSlot(slot: SlotData<'_>) -> PgResult<()> {
+pub fn ExecDropSingleTupleTableSlot(mut slot: SlotData<'_>) -> PgResult<()> {
     // ExecClearTuple(slot); ... pfree(slot);
-    // The owned SlotData carries the value arrays and (optional) stored tuple;
-    // clearing + freeing reduces to dropping the owned value here.
+    // The owned SlotData carries the value arrays and (optional) stored tuple,
+    // so dropping the value frees that. But a BufferHeap slot also holds a
+    // *buffer pin* (taken by ExecStore[Pinned]BufferHeapTuple via
+    // IncrBufferRefCount) which lives in the bufmgr's private refcount + the
+    // current ResourceOwner, NOT in this owned value — `drop` alone does not
+    // release it. C's ExecDropSingleTupleTableSlot calls ExecClearTuple first,
+    // whose tts_buffer_heap_clear runs `ReleaseBuffer(bslot->buffer)`. Skipping
+    // it leaked one buffer pin per slot-drop, i.e. one per systable/index
+    // catalog scan ("resource was not closed" at commit). Clear, then drop.
+    crate::slot_store_fetch::ExecClearTuple(&mut slot)?;
     drop(slot);
     Ok(())
 }

@@ -31,6 +31,7 @@ backend-utils-mmgr-mcxt-seams = { path = "../backend-utils-mmgr-mcxt-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
 backend-utils-resowner-seams = { path = "../backend-utils-resowner-seams" }
+backend-utils-resowner-resowner-seams = { path = "../backend-utils-resowner-resowner-seams" }
 backend-utils-cache-plancache-portal-seams = { path = "../backend-utils-cache-plancache-portal-seams" }
 backend-commands-portalcmds-seams = { path = "../backend-commands-portalcmds-seams" }
 backend-utils-sort-tuplestore-hold-seams = { path = "../backend-utils-sort-tuplestore-hold-seams" }

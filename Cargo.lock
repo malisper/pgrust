@@ -21662,6 +21662,7 @@ dependencies = [
  "backend-utils-init-small-seams",
  "backend-utils-mmgr-mcxt-seams",
  "backend-utils-mmgr-portalmem-seams",
+ "backend-utils-resowner-resowner-seams",
  "backend-utils-resowner-seams",
  "backend-utils-sort-tuplestore-hold-seams",
  "backend-utils-time-snapmgr-seams",

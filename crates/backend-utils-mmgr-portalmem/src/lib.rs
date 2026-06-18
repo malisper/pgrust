@@ -54,6 +54,7 @@ use backend_access_transam_xact_seams as xact_seam;
 use backend_commands_portalcmds_seams as portalcmds_seam;
 use backend_utils_cache_plancache_portal_seams as plancache_seam;
 use backend_utils_resowner_seams as resowner_seam;
+use backend_utils_resowner_resowner_seams as resowner_cur_seam;
 use backend_utils_sort_tuplestore_hold_seams as tuplestore_seam;
 use backend_utils_time_snapmgr_seams as snapmgr_seam;
 
@@ -1524,6 +1525,20 @@ fn with_portal_globals(
     let saved_active = ACTIVE_PORTAL.with(|c| c.borrow_mut().replace(portal.clone()));
     let saved_ctx = PORTAL_CONTEXT_OWNER.with(|c| c.borrow_mut().replace(portal.clone()));
 
+    // C (pquery.c PortalRun/PortalRunFetch and the FillPortalStore PG_TRY):
+    //   saveResourceOwner = CurrentResourceOwner;
+    //   if (portal->resowner) CurrentResourceOwner = portal->resowner;
+    //   ... body ...
+    //   CurrentResourceOwner = saveResourceOwner;
+    // The executor's buffer pins / relation refs / snapshot registrations must
+    // land on the portal's OWN resource owner so they are released when the
+    // portal's owner is released — without this swap they were remembered
+    // against the (longer-lived) TopTransaction owner, leaking per statement
+    // ("resource was not closed"). `with_current_resource_owner` is the scoped
+    // save/set/restore (it leaves the owner unchanged when `resowner` is the C
+    // NULL, mirroring `if (portal->resowner)`), and restores on the error path.
+    let resowner = portal.borrow().resowner.clone();
+
     // C's PG_TRY/PG_CATCH restores ActivePortal/PortalContext on ANY non-local
     // exit. In this port an unported path can leave the body via a `panic!`
     // rather than a `PgResult::Err`; a bare `let result = f();` would skip the
@@ -1533,7 +1548,9 @@ fn with_portal_globals(
     // portal". Catch the unwind, restore the globals like the Err arm, then
     // resume the panic so the main-loop catch_unwind still turns it into the
     // proper recoverable ERROR.
-    let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f())) {
+    let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        resowner_cur_seam::with_current_resource_owner::call(resowner.clone(), &mut || f())
+    })) {
         Ok(r) => r,
         Err(payload) => {
             ACTIVE_PORTAL.with(|c| *c.borrow_mut() = saved_active);
