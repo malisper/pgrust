@@ -7316,10 +7316,12 @@ dependencies = [
 name = "backend-commands-publicationcmds-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-catalog",
  "types-core",
  "types-error",
+ "types-rel",
 ]
 
 [[package]]
@@ -19939,9 +19941,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-cache-relcache-nodexform"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-relation-seams",
+ "backend-access-index-indexam-seams",
+ "backend-catalog-partition-seams",
+ "backend-catalog-pg-publication-seams",
+ "backend-commands-publicationcmds-seams",
+ "backend-nodes-core",
+ "backend-nodes-read-seams",
+ "backend-optimizer-util-var-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-relcache-nodexform-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "mcx",
+ "seam-core",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-storage",
+ "types-tableam",
+]
+
+[[package]]
 name = "backend-utils-cache-relcache-nodexform-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-catalog",
  "types-core",
@@ -22629,6 +22660,7 @@ dependencies = [
  "backend-utils-cache-partcache",
  "backend-utils-cache-plancache",
  "backend-utils-cache-relcache",
+ "backend-utils-cache-relcache-nodexform",
  "backend-utils-cache-relfilenumbermap",
  "backend-utils-cache-relmapper",
  "backend-utils-cache-spccache",

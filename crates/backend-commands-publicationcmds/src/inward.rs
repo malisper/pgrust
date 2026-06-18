@@ -41,4 +41,10 @@ pub fn init_seams() {
         let ctx = mcx::MemoryContext::new("InvalidatePubRelSyncCache");
         crate::InvalidatePubRelSyncCache(ctx.mcx(), pubid, puballtables)
     });
+
+    // The two REPLICA IDENTITY validity checks `RelationBuildPublicationDesc`
+    // runs per publishing publication. These carry an `Mcx` and an `'mcx`-bound
+    // `&Relation` directly, so they install without the fresh-context bridge.
+    s::pub_rf_contains_invalid_column::set(crate::pub_rf_contains_invalid_column);
+    s::pub_contains_invalid_column::set(crate::pub_contains_invalid_column);
 }

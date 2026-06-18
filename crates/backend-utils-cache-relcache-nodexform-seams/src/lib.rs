@@ -98,8 +98,16 @@ seam_core::seam!(
     /// validity flags. The publication-catalog traversal (`pg_publication.c`'s
     /// validity computation) is the unported owner's; this panics until it
     /// lands. Can `ereport(ERROR)`, carried on `Err`.
-    pub fn relation_build_publication_desc(
-        rel: &types_rel::Relation<'_>,
+    ///
+    /// The `mcx` (the caller's `CurrentMemoryContext`) is threaded through
+    /// because the publication-catalog traversal and the two REPLICA-IDENTITY
+    /// validity checks (`pub_rf_contains_invalid_column` /
+    /// `pub_contains_invalid_column`) allocate scan buffers / node trees and
+    /// read the `'mcx`-bound relation, exactly as the C runs in
+    /// `CurrentMemoryContext`.
+    pub fn relation_build_publication_desc<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
     ) -> PgResult<types_catalog::pg_publication::PublicationDesc>
 );
 
