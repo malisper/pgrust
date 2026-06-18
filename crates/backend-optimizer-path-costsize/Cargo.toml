@@ -22,6 +22,7 @@ backend-optimizer-util-relnode-seams = { path = "../backend-optimizer-util-relno
 backend-optimizer-util-relnode-ext-seams = { path = "../backend-optimizer-util-relnode-ext-seams" }
 backend-optimizer-util-joininfo-ext-seams = { path = "../backend-optimizer-util-joininfo-ext-seams" }
 backend-optimizer-plan-planner-pc-seams = { path = "../backend-optimizer-plan-planner-pc-seams" }
+backend-optimizer-plan-init-subselect-ext-seams = { path = "../backend-optimizer-plan-init-subselect-ext-seams" }
 backend-utils-adt-selfuncs-seams = { path = "../backend-utils-adt-selfuncs-seams" }
 types-selfuncs = { path = "../types-selfuncs" }
 # cost_qual_eval_walker dispatches on the Expr node vocabulary (nodeFuncs.c

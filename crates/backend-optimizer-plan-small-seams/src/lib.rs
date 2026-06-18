@@ -54,8 +54,10 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `find_lateral_references(root)` (initsplan.c:658): mark Vars/PHVs needed
-    /// by LATERAL references in the jointree.
-    pub fn find_lateral_references<'mcx>(root: &mut PlannerInfo, run: &PlannerRun<'mcx>)
+    /// by LATERAL references in the jointree. Takes `&mut PlannerRun` because
+    /// upper-level PHV preprocessing (`preprocess_phv_expression` ->
+    /// `preprocess_expression` -> `SS_process_sublinks`) can intern subplans.
+    pub fn find_lateral_references<'mcx>(root: &mut PlannerInfo, run: &mut PlannerRun<'mcx>)
 );
 
 seam_core::seam!(

@@ -56,12 +56,12 @@ seam_core::seam!(
     /// `preprocess_phv_expression(root, expr)` (planner.c) — run
     /// `preprocess_expression(root, expr, EXPRKIND_PHV)` over an upper-level
     /// PlaceHolderVar's expression. Owner planner.c is ported; the body threads an
-    /// `Mcx` and reads (not mutates) `root`, so the seam carries the planner-run
-    /// `Mcx<'mcx>` plus a shared `&PlannerInfo`. Only reached for LATERAL PHVs with
-    /// `phlevelsup > 0`.
+    /// `Mcx` and mutates `root`/the planner run (it may run `SS_process_sublinks`,
+    /// which interns subplans), so the seam carries `&mut PlannerInfo` plus
+    /// `&mut PlannerRun`. Only reached for LATERAL PHVs with `phlevelsup > 0`.
     pub fn preprocess_phv_expression<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        root: &PlannerInfo,
+        root: &mut PlannerInfo,
+        run: &mut PlannerRun<'mcx>,
         expr: Expr,
     ) -> PgResult<Expr>
 );

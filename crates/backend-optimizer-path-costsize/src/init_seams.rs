@@ -45,6 +45,13 @@ pub fn init_seams() {
     /* ---- costsize.c-owned cost / sizing GUC slots ---------------------- */
     crate::guc::install_cost_gucs();
 
+    // cost_subplan (costsize.c:4534) — costsize.c owns it; consumed by
+    // init-subselect (make_subplan / build_subplan / SS_process_ctes) across a
+    // cycle via init-subselect-ext-seams.
+    backend_optimizer_plan_init_subselect_ext_seams::cost_subplan::set(
+        crate::exprcost::cost_subplan_owned,
+    );
+
     /* ---- costsize-seams (this unit's own clamp helpers) ---------------- */
     cz::clamp_row_est::set(crate::clamp_row_est);
     cz::clamp_cardinality_to_long::set(crate::clamp_cardinality_to_long);

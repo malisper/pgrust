@@ -412,6 +412,38 @@ impl<'mcx> PlannerRun<'mcx> {
         &mut self.subplans[id.0 as usize]
     }
 
+    /// Move a subplan's owned `Plan` tree out of the store (replacing it with a
+    /// throwaway placeholder), so the caller can hold it owned while taking a
+    /// shared borrow of the run (e.g. the subplan's `subroot` + the recursion's
+    /// `&PlannerRun` in `SS_finalize_plan` / `set_plan_references`, which can't
+    /// coexist with `&mut self.subplans[..]`). Pair with [`put_subplan`].
+    #[inline]
+    pub fn take_subplan(&mut self, id: PlanId) -> Node<'mcx> {
+        let placeholder = Node::RangeTblRef(types_nodes::rawnodes::RangeTblRef { rtindex: 0 });
+        core::mem::replace(&mut self.subplans[id.0 as usize], placeholder)
+    }
+
+    /// Restore a subplan's owned `Plan` tree taken via [`take_subplan`].
+    #[inline]
+    pub fn put_subplan(&mut self, id: PlanId, plan: Node<'mcx>) {
+        self.subplans[id.0 as usize] = plan;
+    }
+
+    /// Move a subplan's `subroot` [`PlannerInfo`] out of the store (replacing it
+    /// with a default), so the caller can hold it `&mut` (e.g. to lend it the
+    /// shared parent `glob`) while also passing `&mut PlannerRun` to
+    /// `set_plan_references`. Pair with [`put_subroot`].
+    #[inline]
+    pub fn take_subroot(&mut self, id: PlanId) -> PlannerInfo {
+        core::mem::take(&mut self.subroots[id.0 as usize])
+    }
+
+    /// Restore a subplan's `subroot` taken via [`take_subroot`].
+    #[inline]
+    pub fn put_subroot(&mut self, id: PlanId, subroot: PlannerInfo) {
+        self.subroots[id.0 as usize] = subroot;
+    }
+
     /// Resolve a [`PlanId`] to its per-subplan `subroot` [`PlannerInfo`]
     /// (`list_nth(glob->subroots, plan_id - 1)`). `SS_finalize_plan` reads each
     /// subplan's subroot while finalizing.

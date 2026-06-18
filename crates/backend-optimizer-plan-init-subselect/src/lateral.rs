@@ -51,7 +51,7 @@ use backend_optimizer_plan_init_subselect_ext_seams as initext;
 /// relations' targetlists, so that those values will be available for evaluation
 /// of the subquery. This has to run before `deconstruct_jointree`, since it
 /// might result in creation of PlaceHolderInfos.
-pub fn find_lateral_references(root: &mut PlannerInfo, run: &PlannerRun<'_>) {
+pub fn find_lateral_references<'mcx>(root: &mut PlannerInfo, run: &mut PlannerRun<'mcx>) {
     // We need do nothing if the query contains no LATERAL RTEs.
     if !root.hasLateralRTEs {
         return;
@@ -84,9 +84,9 @@ pub fn find_lateral_references(root: &mut PlannerInfo, run: &PlannerRun<'_>) {
 /// RTE, adjust them to the current query level, push them into their source
 /// relations' targetlists (and PHVs into `root->placeholder_list`), and remember
 /// them in `brel->lateral_vars`.
-fn extract_lateral_references(
+fn extract_lateral_references<'mcx>(
     root: &mut PlannerInfo,
-    run: &PlannerRun<'_>,
+    run: &mut PlannerRun<'mcx>,
     rel_id: types_pathnodes::RelId,
     rtindex: i32,
 ) {
@@ -197,7 +197,7 @@ fn extract_lateral_references(
                         .map(|b| *b)
                         .expect("upper-level PHV has phexpr");
                     let processed =
-                        initext::preprocess_phv_expression::call(run.mcx(), root, phexpr)
+                        initext::preprocess_phv_expression::call(root, run, phexpr)
                             .expect("preprocess_phv_expression");
                     phv.phexpr = Some(alloc::boxed::Box::new(processed));
                 }

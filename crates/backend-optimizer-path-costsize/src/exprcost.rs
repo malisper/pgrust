@@ -476,3 +476,61 @@ pub fn cost_subplan(
     (sp_cost.startup, sp_cost.per_tuple)
 }
 
+/// `cost_subplan(root, subplan, plan)` (costsize.c:4534) over the owned model:
+/// reads the owned `SubPlan` and its finished `Plan` `Node`, fills in
+/// `subplan.startup_cost` / `per_call_cost` in place. The testexpr cost is
+/// computed over the owned `Expr` (the C `make_ands_implicit(subplan->testexpr)`
+/// then `cost_qual_eval`); per-element costing folds into `cost_qual_eval_expr`,
+/// which iterates the implicit-AND clauses.
+pub fn cost_subplan_owned(
+    root: &PlannerInfo,
+    subplan: &mut types_nodes::primnodes::SubPlan<'_>,
+    plan: &types_nodes::nodes::Node<'_>,
+) -> PgResult<()> {
+    use types_nodes::primnodes::SubLinkType;
+
+    let head = plan.plan_head();
+    let plan_startup = head.startup_cost;
+    let plan_total = head.total_cost;
+    let plan_rows = head.plan_rows;
+
+    // cost_qual_eval(&sp_cost, make_ands_implicit(subplan->testexpr), NULL).
+    // The owned testexpr is an Expr; cost_qual_eval_expr walks it (treating the
+    // top-level AND as the implicit-AND clause list internally).
+    let (mut sp_startup, mut sp_per_tuple) = match &subplan.testexpr {
+        Some(te) => crate::qualcost::cost_qual_eval_expr(root, te),
+        None => (0.0, 0.0),
+    };
+
+    if subplan.useHashTable {
+        sp_startup += plan_total + cpu_operator_cost() * plan_rows;
+    } else {
+        let plan_run_cost = plan_total - plan_startup;
+
+        if subplan.subLinkType == SubLinkType::Exists {
+            sp_per_tuple += plan_run_cost / clamp_row_est(plan_rows);
+        } else if subplan.subLinkType == SubLinkType::All
+            || subplan.subLinkType == SubLinkType::Any
+        {
+            sp_per_tuple += 0.50 * plan_run_cost;
+            sp_per_tuple += 0.50 * plan_rows * cpu_operator_cost();
+        } else {
+            sp_per_tuple += plan_run_cost;
+        }
+
+        // parParam == NIL && ExecMaterializesOutput(nodeTag(plan)).
+        let materializes = backend_optimizer_path_joinpath_seams::exec_materializes_output::call(
+            plan.node_tag(),
+        );
+        if subplan.parParam.is_empty() && materializes {
+            sp_startup += plan_startup;
+        } else {
+            sp_per_tuple += plan_startup;
+        }
+    }
+
+    subplan.startup_cost = sp_startup;
+    subplan.per_call_cost = sp_per_tuple;
+    Ok(())
+}
+

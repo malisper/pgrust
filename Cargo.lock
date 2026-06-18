@@ -11681,6 +11681,7 @@ dependencies = [
  "backend-nodes-core",
  "backend-optimizer-path-costsize-seams",
  "backend-optimizer-path-joinpath-seams",
+ "backend-optimizer-plan-init-subselect-ext-seams",
  "backend-optimizer-plan-planner-pc-seams",
  "backend-optimizer-util-clauses",
  "backend-optimizer-util-joininfo-ext-seams",

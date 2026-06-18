@@ -308,23 +308,30 @@ fn standard_planner<'mcx>(
     // harmlessly — `planner_subplan_get_plan` is only called for initPlan/SubPlan
     // children, of which there are none here). This is the bounded path.
     if !root.glob.as_ref().map(|g| g.param_exec_types.is_empty()).unwrap_or(true) {
-        let n_subplans = root.glob.as_ref().map(|g| g.subplans.len()).unwrap_or(0);
-        if n_subplans != 0 {
-            // forboth(lp, glob->subplans, lr, glob->subroots): SS_finalize_plan on
-            // each subplan before the top plan. The subroot lives in the run store
-            // beside the subplan, so finalizing it requires a `&mut`/`&` borrow of
-            // `run` that is not expressible alongside `SS_finalize_plan`'s own
-            // `&run` deref. Mirror PG and panic precisely on this subplan-bearing
-            // path; the no-subplan path below is the supported bounded case.
-            panic!(
-                "planner: SS_finalize_plan loop (subselect.c) over \
-                 glob->subplans/subroots is not expressible over the PlannerRun \
-                 subplan store (needs per-subplan subroot retrieval); reached with \
-                 a paramExec-bearing subplan present"
-            );
+        // forboth(lp, glob->subplans, lr, glob->subroots): SS_finalize_plan on
+        // each subplan before the top plan (C:528-535). Each subplan node and
+        // its subroot both live in the run store; to finalize a subplan we move
+        // its Plan node out of the store (take_subplan), borrow its subroot +
+        // the run (both shared, for the recursion's `planner_subplan_get_plan`),
+        // run SS_finalize_plan, then put the node back.
+        let subplan_ids: Vec<types_pathnodes::PlanId> = root
+            .glob
+            .as_ref()
+            .map(|g| g.subplans.clone())
+            .unwrap_or_default();
+        for pid in subplan_ids.iter().copied() {
+            let mut subplan_node = run.take_subplan(pid);
+            backend_optimizer_plan_init_subselect::finalize::SS_finalize_plan(
+                mcx,
+                run.resolve_subroot(pid),
+                &run,
+                &mut subplan_node,
+            )?;
+            run.put_subplan(pid, subplan_node);
         }
-        // No subplans: SS_finalize_plan(root, top_plan) only (the forboth is a
-        // no-op). Walk the top plan tree to populate extParam/allParam.
+
+        // SS_finalize_plan(root, top_plan) (C:536). Walk the top plan tree to
+        // populate extParam/allParam.
         backend_optimizer_plan_init_subselect::finalize::SS_finalize_plan(
             mcx,
             &root,
@@ -336,9 +343,15 @@ fn standard_planner<'mcx>(
     // set_plan_references on the top plan (C:540-545).
     top_plan = backend_optimizer_plan_setrefs::set_plan_references(mcx, &mut run, &mut root, top_plan)?;
 
-    // ... and the subplans (C:547-554). With no params (we only reach here when
-    // paramExecTypes is empty), glob->subplans is likewise empty in the simple
-    // case; if a subplan exists without params, faithfully run setrefs on each.
+    // ... and the subplans, both regular subplans and initplans (C:547-554):
+    // forboth(subplans, subroots) lfirst(lp) = set_plan_references(subroot,
+    // subplan). Each subplan node and its subroot live in the run store, and
+    // set_plan_references needs `&mut subroot` plus `&mut run`. The C subroot
+    // shares the parent root's `glob` by pointer; here glob lives on the parent
+    // root, so we move it into the subroot for the duration of its setrefs call
+    // (so the accumulated glob->finalrtable / relationOids / ... thread through
+    // every call as one shared glob) and move it back afterwards. The subplan
+    // node is taken out of the store, rewritten, and the result stored back.
     {
         let subplan_ids: Vec<types_pathnodes::PlanId> = root
             .glob
@@ -346,18 +359,21 @@ fn standard_planner<'mcx>(
             .map(|g| g.subplans.clone())
             .unwrap_or_default();
         for pid in subplan_ids {
-            let _ = pid; // subroot lives in run beside subplan
-            // set_plan_references needs &mut PlannerInfo for the subroot; the
-            // subroot lives in the run store. We cannot borrow run mutably (for
-            // the subroot) and pass run mutably to set_plan_references at once.
-            // This subplan-setrefs leg over the value store is not expressible;
-            // panic precisely (only reached if a param-free subplan exists).
-            panic!(
-                "planner: subplan set_plan_references loop (setrefs.c) over \
-                 glob->subplans is not expressible over the PlannerRun subplan/\
-                 subroot store (simultaneous &mut subroot + &mut run borrow); \
-                 reached with a param-free subplan present"
-            );
+            // Move subroot out of the run, give it the shared glob.
+            let mut subroot = run.take_subroot(pid);
+            subroot.glob = root.glob.take();
+            // Move the subplan node out, run setrefs, store the result back.
+            let subplan_node = run.take_subplan(pid);
+            let new_node = backend_optimizer_plan_setrefs::set_plan_references(
+                mcx,
+                &mut run,
+                &mut subroot,
+                subplan_node,
+            )?;
+            run.put_subplan(pid, new_node);
+            // Move the (accumulated) shared glob back to the parent root.
+            root.glob = subroot.glob.take();
+            run.put_subroot(pid, subroot);
         }
     }
 
@@ -608,7 +624,7 @@ fn subquery_planner<'mcx>(
     run: &mut PlannerRun<'mcx>,
     glob: PlannerGlobal,
     parse_id: types_pathnodes::QueryId,
-    _parent_root: Option<Box<PlannerInfo>>,
+    parent_query_level: Option<u32>,
     has_recursion: bool,
     tuple_fraction: f64,
     setops: Option<()>,
@@ -617,7 +633,11 @@ fn subquery_planner<'mcx>(
     let mut root = PlannerInfo::default();
     root.parse = parse_id;
     root.glob = Some(Box::new(glob));
-    root.query_level = 1; // parent_root is None at the top level here.
+    // root->query_level = parent_root ? parent_root->query_level + 1 : 1 (C:666).
+    root.query_level = match parent_query_level {
+        Some(l) => l + 1,
+        None => 1,
+    };
     root.hasRecursion = has_recursion;
     root.wt_param_id = -1; // hasRecursion=false on the top SELECT path.
 
@@ -834,7 +854,7 @@ fn subquery_planner<'mcx>(
                     Some(b) => Some(mcx::PgBox::into_inner(b)),
                     None => None,
                 };
-                let processed = preprocess_expression(mcx, &root, outer_query_ref, e, EXPRKIND_TARGET)?;
+                let processed = preprocess_expression(mcx, &mut root, run, outer_query_ref, e, EXPRKIND_TARGET)?;
                 run.resolve_mut(root.parse).targetList[i].expr = match processed {
                     Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
                     None => None,
@@ -864,7 +884,7 @@ fn subquery_planner<'mcx>(
                     Some(b) => Some(mcx::PgBox::into_inner(b)),
                     None => None,
                 };
-                let processed = preprocess_expression(mcx, &root, outer_query_ref, e, EXPRKIND_TARGET)?;
+                let processed = preprocess_expression(mcx, &mut root, run, outer_query_ref, e, EXPRKIND_TARGET)?;
                 run.resolve_mut(root.parse).returningList[i].expr = match processed {
                     Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
                     None => None,
@@ -873,13 +893,13 @@ fn subquery_planner<'mcx>(
         }
 
         // preprocess_qual_conditions(root, (Node *) parse->jointree) (C:922).
-        preprocess_qual_conditions_query(mcx, &root, outer_query_ref, run)?;
+        preprocess_qual_conditions_query(mcx, &mut root, outer_query_ref, run)?;
 
         // parse->havingQual = preprocess_expression(..., EXPRKIND_QUAL) (C:924).
         {
             let h = run.resolve_mut(root.parse).havingQual.take();
             let h = h.map(mcx::PgBox::into_inner);
-            let processed = preprocess_expression(mcx, &root, outer_query_ref, h, EXPRKIND_QUAL)?;
+            let processed = preprocess_expression(mcx, &mut root, run, outer_query_ref, h, EXPRKIND_QUAL)?;
             run.resolve_mut(root.parse).havingQual = match processed {
                 Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
                 None => None,
@@ -895,13 +915,13 @@ fn subquery_planner<'mcx>(
                 // wc->startOffset = preprocess_expression(startOffset, EXPRKIND_LIMIT).
                 let start = extract_windowclause_offset(run, &root, i, true);
                 let processed =
-                    preprocess_expression(mcx, &root, outer_query_ref, start, EXPRKIND_LIMIT)?;
+                    preprocess_expression(mcx, &mut root, run, outer_query_ref, start, EXPRKIND_LIMIT)?;
                 set_windowclause_offset(mcx, run, &root, i, true, processed)?;
 
                 // wc->endOffset = preprocess_expression(endOffset, EXPRKIND_LIMIT).
                 let end = extract_windowclause_offset(run, &root, i, false);
                 let processed =
-                    preprocess_expression(mcx, &root, outer_query_ref, end, EXPRKIND_LIMIT)?;
+                    preprocess_expression(mcx, &mut root, run, outer_query_ref, end, EXPRKIND_LIMIT)?;
                 set_windowclause_offset(mcx, run, &root, i, false, processed)?;
             }
         }
@@ -911,7 +931,7 @@ fn subquery_planner<'mcx>(
         {
             let lo = run.resolve_mut(root.parse).limitOffset.take();
             let lo = lo.map(mcx::PgBox::into_inner);
-            let processed = preprocess_expression(mcx, &root, outer_query_ref, lo, EXPRKIND_LIMIT)?;
+            let processed = preprocess_expression(mcx, &mut root, run, outer_query_ref, lo, EXPRKIND_LIMIT)?;
             run.resolve_mut(root.parse).limitOffset = match processed {
                 Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
                 None => None,
@@ -920,7 +940,7 @@ fn subquery_planner<'mcx>(
         {
             let lc = run.resolve_mut(root.parse).limitCount.take();
             let lc = lc.map(mcx::PgBox::into_inner);
-            let processed = preprocess_expression(mcx, &root, outer_query_ref, lc, EXPRKIND_LIMIT)?;
+            let processed = preprocess_expression(mcx, &mut root, run, outer_query_ref, lc, EXPRKIND_LIMIT)?;
             run.resolve_mut(root.parse).limitCount = match processed {
                 Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
                 None => None,
@@ -949,7 +969,7 @@ fn subquery_planner<'mcx>(
         {
             let c = run.resolve_mut(root.parse).mergeJoinCondition.take();
             let c = c.map(mcx::PgBox::into_inner);
-            let processed = preprocess_expression(mcx, &root, outer_query_ref, c, EXPRKIND_QUAL)?;
+            let processed = preprocess_expression(mcx, &mut root, run, outer_query_ref, c, EXPRKIND_QUAL)?;
             run.resolve_mut(root.parse).mergeJoinCondition = match processed {
                 Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
                 None => None,
@@ -1039,7 +1059,7 @@ fn subquery_planner<'mcx>(
                             let mut new_cols: mcx::PgVec<'mcx, types_nodes::nodes::NodePtr<'mcx>> =
                                 mcx::vec_with_capacity_in(mcx, row_exprs.len())?;
                             for e in row_exprs.into_iter() {
-                                let pe = preprocess_expression(mcx, &root, outer_query_ref, Some(e), kind)?;
+                                let pe = preprocess_expression(mcx, &mut root, run, outer_query_ref, Some(e), kind)?;
                                 let pe = pe.ok_or_else(|| {
                                     types_error::PgError::error(
                                         "subquery_planner: VALUES column folded to NULL",
@@ -1072,7 +1092,8 @@ fn subquery_planner<'mcx>(
                             };
                             let pe = preprocess_expression(
                                 mcx,
-                                &root,
+                                &mut root,
+                                run,
                                 outer_query_ref,
                                 Some(e),
                                 EXPRKIND_GROUPEXPR,
@@ -1121,7 +1142,8 @@ fn subquery_planner<'mcx>(
                             if let Some(e) = fe {
                                 let pe = preprocess_expression(
                                     mcx,
-                                    &root,
+                                    &mut root,
+                                    run,
                                     outer_query_ref,
                                     Some(e),
                                     kind,
@@ -1326,7 +1348,8 @@ fn subquery_planner<'mcx>(
                     // preprocess fully and move it to WHERE.
                     let whereclause = preprocess_expression(
                         mcx,
-                        &root,
+                        &mut root,
+                        run,
                         outer_query_ref,
                         Some(havingclause),
                         EXPRKIND_QUAL,
@@ -1345,7 +1368,8 @@ fn subquery_planner<'mcx>(
                     let copy = havingclause.clone_in(mcx)?;
                     let whereclause = preprocess_expression(
                         mcx,
-                        &root,
+                        &mut root,
+                        run,
                         outer_query_ref,
                         Some(copy),
                         EXPRKIND_QUAL,
@@ -1522,7 +1546,8 @@ const EXPRKIND_GROUPEXPR: i32 = 13;
 /// + `make_ands_implicit` core is faithfully ported.
 pub fn preprocess_expression<'mcx>(
     mcx: Mcx<'mcx>,
-    root: &PlannerInfo,
+    root: &mut PlannerInfo,
+    run: &mut PlannerRun<'mcx>,
     outer_query: Option<&Node<'mcx>>,
     expr: Option<Expr>,
     kind: i32,
@@ -1582,21 +1607,22 @@ pub fn preprocess_expression<'mcx>(
         backend_optimizer_util_clauses::convert_saop_to_hashed_saop(mcx, &mut expr)?;
     }
 
-    // SS_process_sublinks (C:1326-1328).
-    if run_parse_has_sublinks(root) {
-        panic!(
-            "preprocess_expression: SS_process_sublinks (subselect.c) over a single \
-             arena Expr has no ported entry (its owner walks the whole Query); \
-             reached because parse->hasSubLinks is set"
-        );
+    // SS_process_sublinks (C:1326-1328): expand SubLinks to SubPlans.
+    if run.resolve(root.parse).hasSubLinks {
+        expr = backend_optimizer_plan_init_subselect::correlation::SS_process_sublinks(
+            mcx,
+            root,
+            run,
+            expr,
+            kind == EXPRKIND_QUAL,
+        )?;
     }
 
     // SS_replace_correlation_vars for sub-queries (C:1336-1337).
     if root.query_level > 1 {
-        panic!(
-            "preprocess_expression: SS_replace_correlation_vars (subselect.c) over a \
-             single arena Expr has no ported entry; reached because query_level > 1"
-        );
+        expr = backend_optimizer_plan_init_subselect::correlation::SS_replace_correlation_vars(
+            mcx, root, run, expr,
+        )?;
     }
 
     // make_ands_implicit (C:1345-1346): convert qual to implicit-AND list. The
@@ -1635,14 +1661,14 @@ fn run_parse_has_sublinks(_root: &PlannerInfo) -> bool {
 /// Query), recurse, and store it back.
 fn preprocess_qual_conditions_query<'mcx>(
     mcx: Mcx<'mcx>,
-    root: &PlannerInfo,
+    root: &mut PlannerInfo,
     outer_query: Option<&Node<'mcx>>,
     run: &mut PlannerRun<'mcx>,
 ) -> PgResult<()> {
     let jt = run.resolve_mut(root.parse).jointree.take();
     if let Some(jt) = jt {
         let mut node = Node::FromExpr(mcx::PgBox::into_inner(jt));
-        preprocess_qual_conditions(mcx, root, outer_query, &mut node)?;
+        preprocess_qual_conditions(mcx, root, run, outer_query, &mut node)?;
         let f = match node {
             Node::FromExpr(f) => f,
             _ => unreachable!("jointree top stays a FromExpr"),
@@ -1663,7 +1689,8 @@ fn preprocess_qual_conditions_query<'mcx>(
 /// recurse; a `RangeTblRef` leaf has nothing to do.
 pub fn preprocess_qual_conditions<'mcx>(
     mcx: Mcx<'mcx>,
-    root: &PlannerInfo,
+    root: &mut PlannerInfo,
+    run: &mut PlannerRun<'mcx>,
     outer_query: Option<&Node<'mcx>>,
     jtnode: &mut Node<'mcx>,
 ) -> PgResult<()> {
@@ -1673,18 +1700,18 @@ pub fn preprocess_qual_conditions<'mcx>(
         }
         Node::FromExpr(f) => {
             for i in 0..f.fromlist.len() {
-                preprocess_qual_conditions(mcx, root, outer_query, &mut f.fromlist[i])?;
+                preprocess_qual_conditions(mcx, root, run, outer_query, &mut f.fromlist[i])?;
             }
-            preprocess_jointree_quals(mcx, root, outer_query, &mut f.quals)?;
+            preprocess_jointree_quals(mcx, root, run, outer_query, &mut f.quals)?;
         }
         Node::JoinExpr(j) => {
             if let Some(larg) = j.larg.as_deref_mut() {
-                preprocess_qual_conditions(mcx, root, outer_query, larg)?;
+                preprocess_qual_conditions(mcx, root, run, outer_query, larg)?;
             }
             if let Some(rarg) = j.rarg.as_deref_mut() {
-                preprocess_qual_conditions(mcx, root, outer_query, rarg)?;
+                preprocess_qual_conditions(mcx, root, run, outer_query, rarg)?;
             }
-            preprocess_jointree_quals(mcx, root, outer_query, &mut j.quals)?;
+            preprocess_jointree_quals(mcx, root, run, outer_query, &mut j.quals)?;
         }
         other => {
             return Err(PgError::error(alloc::format!(
@@ -1700,7 +1727,8 @@ pub fn preprocess_qual_conditions<'mcx>(
 /// jointree node's `quals` (`Option<NodePtr>` holding `Node::Expr`).
 fn preprocess_jointree_quals<'mcx>(
     mcx: Mcx<'mcx>,
-    root: &PlannerInfo,
+    root: &mut PlannerInfo,
+    run: &mut PlannerRun<'mcx>,
     outer_query: Option<&Node<'mcx>>,
     quals: &mut Option<types_nodes::nodes::NodePtr<'mcx>>,
 ) -> PgResult<()> {
@@ -1719,7 +1747,7 @@ fn preprocess_jointree_quals<'mcx>(
             }
         },
     };
-    let processed = preprocess_expression(mcx, root, outer_query, expr, EXPRKIND_QUAL)?;
+    let processed = preprocess_expression(mcx, root, run, outer_query, expr, EXPRKIND_QUAL)?;
     *quals = match processed {
         Some(e) => Some(mcx::alloc_in(mcx, Node::Expr(e))?),
         None => None,
@@ -5736,13 +5764,84 @@ pub fn init_seams() {
     // The planner owns `preprocess_expression`; a non-NULL input always yields a
     // non-NULL result (the only NULL fall-out is the empty-input fast path).
     backend_optimizer_plan_init_subselect_ext_seams::preprocess_phv_expression::set(
-        |mcx, root, expr| {
+        |root, run, expr| {
             // No outer Query node is threaded into this PHV seam; if root.hasJoinRTEs
             // is set, preprocess_expression returns an Err (LATERAL-PHV join-alias
             // flattening through this entry point is not wired). The common
             // (non-join-RTE) PHV path is unaffected.
-            Ok(preprocess_expression(mcx, root, None, Some(expr), EXPRKIND_PHV)?
+            let mcx = run.mcx();
+            Ok(preprocess_expression(mcx, root, run, None, Some(expr), EXPRKIND_PHV)?
                 .expect("preprocess_expression of a non-NULL PHV expr is non-NULL"))
+        },
+    );
+
+    // `plan_sublink_subquery` = the lower-planner recursion (planner.c
+    // subquery_planner -> fetch_upper_rel(UPPERREL_FINAL) ->
+    // get_cheapest_fractional_path -> create_plan) consumed by make_subplan /
+    // build_subplan / SS_process_ctes (init-subselect) to turn a SubLink's /
+    // CTE's owned sub-Query into a finished (subroot, plan, path) triple. The C
+    // glob is shared by pointer across all planning levels; in the owned model
+    // glob lives on the parent root, so we move it down into the subroot for the
+    // duration of the recursion (all paramExecTypes / subplans accumulated by the
+    // sub-planning land in the one glob) and move it back to the parent on the
+    // way out, exactly mirroring the single shared `PlannerGlobal`.
+    backend_optimizer_plan_init_subselect_ext_seams::plan_sublink_subquery::set(
+        |root, run, subquery, has_recursion, tuple_fraction| {
+            let mcx = run.mcx();
+
+            // Intern the owned sub-Query so the run can resolve its targetList.
+            let subquery_id = run.intern(subquery);
+
+            // Move the shared glob from the parent root into the recursion.
+            let parent_level = root.query_level;
+            let glob = *root
+                .glob
+                .take()
+                .expect("plan_sublink_subquery: parent root->glob is NULL");
+
+            // subroot = subquery_planner(glob, subquery, root, hasRecursion,
+            //                            tuple_fraction, NULL) (subselect.c:221).
+            let mut subroot = subquery_planner(
+                mcx,
+                run,
+                glob,
+                subquery_id,
+                Some(parent_level),
+                has_recursion,
+                tuple_fraction,
+                None,
+            )?;
+
+            // final_rel = fetch_upper_rel(subroot, UPPERREL_FINAL, NULL);
+            // best_path = get_cheapest_fractional_path(final_rel, tuple_fraction);
+            let final_rel = backend_optimizer_util_relnode::fetch_upper_rel(
+                &mut subroot,
+                UPPERREL_FINAL,
+                &None,
+            );
+            let best_path =
+                backend_optimizer_path_allpaths::seams::get_cheapest_fractional_path::call(
+                    &subroot,
+                    final_rel,
+                    tuple_fraction,
+                );
+
+            // plan = create_plan(subroot, best_path) (subselect.c:235).
+            let plan =
+                backend_optimizer_plan_createplan::create_plan(mcx, &mut subroot, run, best_path)?;
+
+            // Move the (now-accumulated) glob back to the parent root so
+            // build_subplan / generate_new_exec_param see one shared glob.
+            root.glob = subroot.glob.take();
+
+            Ok(
+                backend_optimizer_plan_init_subselect_ext_seams::SublinkPlanResult {
+                    subroot,
+                    plan,
+                    subpath: Some(best_path),
+                    subquery_id,
+                },
+            )
         },
     );
 
