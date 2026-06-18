@@ -780,9 +780,16 @@ pub fn init_seams() {
     // builder in aio, and the bgwriter/checkpoint flush loops here) cannot carry
     // these process-global knobs as parameters.
     use backend_utils_misc_guc_tables::vars;
-    backend_storage_buffer_bufmgr_seams::io_combine_limit::set(|| {
-        vars::io_combine_limit_guc.read()
-    });
+    // The effective `io_combine_limit` global (bufmgr.c) is the clamped value
+    // `Min(io_combine_limit_guc, io_max_combine_limit)` maintained by the GUC
+    // assign-hooks (variable.c). Read/write it through the dedicated effective
+    // backing cell rather than the raw `io_combine_limit_guc` slot. It is seeded
+    // to its boot default and updated by `set_io_combine_limit` whenever either
+    // contributing GUC is assigned.
+    backend_storage_buffer_bufmgr_seams::io_combine_limit::set(guc_vars::effective_io_combine_limit_get);
+    backend_storage_buffer_bufmgr_seams::set_io_combine_limit::set(
+        guc_vars::effective_io_combine_limit_set,
+    );
     backend_storage_buffer_bufmgr_seams::effective_io_concurrency::set(|| {
         vars::effective_io_concurrency.read()
     });
@@ -925,6 +932,13 @@ mod guc_vars {
 
     int_guc!(EFFECTIVE_IO_CONCURRENCY, eff_get, eff_set, 16);
     int_guc!(MAINTENANCE_IO_CONCURRENCY, maint_get, maint_set, 16);
+    // bufmgr.c keeps two distinct globals: `io_combine_limit_guc` is the raw GUC
+    // variable backing the `io_combine_limit` setting, while `io_combine_limit`
+    // is the *effective* derived value `Min(io_combine_limit_guc,
+    // io_max_combine_limit)` maintained by the assign-hooks. They need separate
+    // storage so the GUC framework's write-through of the raw setting does not
+    // clobber the clamped effective value.
+    int_guc!(IO_COMBINE_LIMIT_GUC, iocl_guc_get, iocl_guc_set, 16);
     int_guc!(IO_COMBINE_LIMIT, iocl_get, iocl_set, 16);
     int_guc!(BGWRITER_LRU_MAXPAGES, blm_get, blm_set, 100);
     int_guc!(CHECKPOINT_FLUSH_AFTER, cfa_get, cfa_set, 0);
@@ -947,6 +961,17 @@ mod guc_vars {
         BGWRITER_LRU_MULTIPLIER.with(|c| c.set(value));
     }
 
+    /// Read the effective `io_combine_limit` global (bufmgr.c) — the clamped
+    /// `Min(io_combine_limit_guc, io_max_combine_limit)`.
+    pub(super) fn effective_io_combine_limit_get() -> i32 {
+        iocl_get()
+    }
+    /// Write the effective `io_combine_limit` global (bufmgr.c). Called by the
+    /// GUC assign-hooks via the `set_io_combine_limit` seam.
+    pub(super) fn effective_io_combine_limit_set(value: i32) {
+        iocl_set(value);
+    }
+
     pub(super) fn install() {
         vars::effective_io_concurrency.install(GucVarAccessors {
             get: eff_get,
@@ -957,8 +982,8 @@ mod guc_vars {
             set: maint_set,
         });
         vars::io_combine_limit_guc.install(GucVarAccessors {
-            get: iocl_get,
-            set: iocl_set,
+            get: iocl_guc_get,
+            set: iocl_guc_set,
         });
         vars::bgwriter_lru_maxpages.install(GucVarAccessors {
             get: blm_get,

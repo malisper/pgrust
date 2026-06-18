@@ -8130,6 +8130,7 @@ dependencies = [
  "backend-commands-variable-seams",
  "backend-libpq-pqcomm",
  "backend-postmaster-syslogger",
+ "backend-storage-buffer-bufmgr-seams",
  "backend-timezone-localtime",
  "backend-timezone-pgtz",
  "backend-utils-adt-acl-seams",

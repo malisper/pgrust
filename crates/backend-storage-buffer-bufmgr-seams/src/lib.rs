@@ -560,9 +560,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `io_combine_limit` (GUC) — the maximum number of blocks a single I/O may
-    /// combine, consulted when sizing a `BAS_BULKREAD` ring.
+    /// `io_combine_limit` (bufmgr.c global) — the *effective* maximum number of
+    /// blocks a single I/O may combine, consulted when sizing a `BAS_BULKREAD`
+    /// ring. This is the derived value `Min(io_combine_limit_guc,
+    /// io_max_combine_limit)` maintained by the GUC assign-hooks, not the raw
+    /// `io_combine_limit` GUC setting (`io_combine_limit_guc`).
     pub fn io_combine_limit() -> i32
+);
+
+seam_core::seam!(
+    /// Store the *effective* `io_combine_limit` global (bufmgr.c). Called by the
+    /// GUC assign-hooks `assign_io_combine_limit` / `assign_io_max_combine_limit`
+    /// (variable.c) after recomputing `Min(io_combine_limit_guc,
+    /// io_max_combine_limit)`, mirroring C's write to the file-scope global.
+    pub fn set_io_combine_limit(value: i32)
 );
 
 seam_core::seam!(

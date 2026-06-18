@@ -38,6 +38,10 @@ common-encnames-seams = { path = "../common-encnames-seams" }
 common-extra-encnames-fgram = { path = "../common-extra-encnames-fgram" }
 common-path-seams = { path = "../common-path-seams" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+# Effective `io_combine_limit` global lives in bufmgr.c; the assign-hooks store
+# the recomputed clamp through its setter seam. (Acyclic: bufmgr-seams is a pure
+# seam-declaration crate and does not depend on this unit.)
+backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
 
 # Ported owners this unit's adapter seams delegate to in init_seams().
 backend-timezone-pgtz = { path = "../backend-timezone-pgtz" }

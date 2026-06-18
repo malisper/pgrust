@@ -1009,6 +1009,28 @@ pub fn assign_maintenance_io_concurrency(_newval: i32, _extra: Option<&GucHookEx
     }
 }
 
+/// Recompute the effective `io_combine_limit` global (bufmgr.c) whenever either
+/// of its two contributing GUCs (`io_combine_limit_guc` / `io_max_combine_limit`)
+/// is assigned. The GUC subsystem does not support dependencies between GUCs and
+/// may assign them in either order, so each assign-hook clamps using its own
+/// fresh `newval` for the GUC that changed and the live slot for the other:
+///
+/// * `assign_io_max_combine_limit`: `io_combine_limit = Min(newval, io_combine_limit_guc)`
+/// * `assign_io_combine_limit`:     `io_combine_limit = Min(io_max_combine_limit, newval)`
+///
+/// `from_max` selects which GUC `newval` belongs to (true = io_max_combine_limit).
+/// This mirrors C's two one-line assign-hooks (variable.c L1163-1172), which both
+/// write the file-scope effective `io_combine_limit` global in bufmgr.c.
+fn recompute_io_combine_limit(newval: i32, from_max: bool) {
+    use backend_utils_misc_guc_tables::vars;
+    let effective = if from_max {
+        std::cmp::min(newval, vars::io_combine_limit_guc.read())
+    } else {
+        std::cmp::min(vars::io_max_combine_limit.read(), newval)
+    };
+    backend_storage_buffer_bufmgr_seams::set_io_combine_limit::call(effective);
+}
+
 /// `assign_io_max_combine_limit` (variable.c L1163-1167).
 /// `io_combine_limit = Min(newval, io_combine_limit_guc)`.
 pub fn assign_io_max_combine_limit(newval: i32, _extra: Option<&GucHookExtra>) {
@@ -1378,11 +1400,7 @@ mod install {
         own::xlog_prefetch_reconfigure::set(
             backend_access_transam_xlogprefetcher::XLogPrefetchReconfigure,
         );
-        own::recompute_io_combine_limit::set(|_newval, _from_max| {
-            // io_combine_limit's derived global storage + setter are not yet
-            // wired in production (only the read-through getter is installed).
-            panic!("recompute io_combine_limit (bufmgr.c) not yet ported")
-        });
+        own::recompute_io_combine_limit::set(crate::recompute_io_combine_limit);
 
         // -------- octal show-hook globals --------
         own::data_directory_mode::set(backend_utils_init_small::globals::data_directory_mode);
