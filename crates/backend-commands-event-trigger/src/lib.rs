@@ -412,6 +412,54 @@ pub fn event_trigger_collect_simple_command(
     })
 }
 
+/// `EventTriggerAlterTableStart(parsetree)` (event_trigger.c:1753) — begin
+/// collecting an ALTER TABLE command. When no event-trigger state is set or
+/// collection is inhibited (the standalone / no-trigger case), this is a no-op,
+/// matching the C early `return`. The active-collection path pushes a fresh
+/// `SCT_AlterTable` `CollectedCommand` onto the `currentCommand` stack; that
+/// command variant (with its `parent` back-pointer and `alterTable.subcmds`
+/// list) is part of the deeper command-deparse sub-campaign and is not modelled
+/// by this crate's simple-command `CollectedCommand`, so it loudly stops.
+pub fn event_trigger_alter_table_start(_parsetree: &Node) {
+    // if (!currentEventTriggerState || commandCollectionInhibited) return;
+    if !collecting() {
+        return;
+    }
+    panic!(
+        "EventTriggerAlterTableStart: SCT_AlterTable command collection (the \
+         currentCommand stack + alterTable.subcmds list) is part of the \
+         command-deparse sub-campaign and is not modelled here"
+    );
+}
+
+/// `EventTriggerAlterTableRelid(objectId)` (event_trigger.c:1787) — stash the
+/// OID of the relation being altered on the in-progress `currentCommand`. No-op
+/// without an active collection state (standalone). The active path writes
+/// `currentCommand->d.alterTable.objectId`, which lives on the unmodelled
+/// `SCT_AlterTable` command.
+pub fn event_trigger_alter_table_relid(_object_id: Oid) {
+    if !collecting() {
+        return;
+    }
+    panic!(
+        "EventTriggerAlterTableRelid: writes the unmodelled SCT_AlterTable \
+         currentCommand (command-deparse sub-campaign)"
+    );
+}
+
+/// `EventTriggerAlterTableEnd()` (event_trigger.c:1840) — finish collecting the
+/// ALTER TABLE command and, if it gathered any subcommands, append it to the
+/// command list. No-op without an active collection state (standalone).
+pub fn event_trigger_alter_table_end() {
+    if !collecting() {
+        return;
+    }
+    panic!(
+        "EventTriggerAlterTableEnd: pops/commits the unmodelled SCT_AlterTable \
+         currentCommand (command-deparse sub-campaign)"
+    );
+}
+
 // ===========================================================================
 // Object-type support tables (event_trigger.c).
 // ===========================================================================
@@ -484,6 +532,15 @@ pub fn init_seams() {
     });
     backend_tcop_utility_out_seams::event_trigger_collect_simple_command::set(
         event_trigger_collect_simple_command,
+    );
+    backend_tcop_utility_out_seams::event_trigger_alter_table_start::set(
+        event_trigger_alter_table_start,
+    );
+    backend_tcop_utility_out_seams::event_trigger_alter_table_relid::set(
+        event_trigger_alter_table_relid,
+    );
+    backend_tcop_utility_out_seams::event_trigger_alter_table_end::set(
+        event_trigger_alter_table_end,
     );
     backend_tcop_utility_out_seams::event_trigger_supports_object_type::set(
         event_trigger_supports_object_type,
