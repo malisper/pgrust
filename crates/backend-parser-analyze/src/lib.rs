@@ -236,6 +236,54 @@ fn transformOptionalSelectInto<'mcx>(
     transformStmt(mcx, pstate, parse_tree)
 }
 
+/// `transformExplainStmt(pstate, stmt)` (analyze.c:3093) — analyze an
+/// `ExplainStmt`. Parse analysis of EXPLAIN just transforms the contained query
+/// (allowing SELECT INTO) and represents the command as a CMD_UTILITY `Query`
+/// wrapping the `ExplainStmt`. The C edits `stmt->query` in place; we deep-copy
+/// the (borrowed) options and store the transformed inner `Query` back into a
+/// fresh `ExplainStmt` so the executor (`ExplainQuery`) reads the analyzed query.
+fn transformExplainStmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'mcx>,
+    stmt: &types_nodes::ddlnodes::ExplainStmt<'mcx>,
+) -> PgResult<Query<'mcx>> {
+    // GENERIC_PLAN with no external paramref source accepts variable parameter
+    // definitions (like PREPARE). pstate->p_paramref_hook is always NULL on this
+    // path; the variable-parameter substrate (setup_parse_variable_parameters /
+    // check_variable_parameters) is the PREPARE follow-on. Reject loudly if
+    // GENERIC_PLAN is requested with no paramref hook.
+    if pstate.p_paramref_hook.is_none() {
+        for opt in stmt.options.iter() {
+            if let Node::DefElem(d) = &**opt {
+                if d.defname.as_ref().map(|s| s.as_str()) == Some("generic_plan") {
+                    panic!(
+                        "transformExplainStmt: EXPLAIN (GENERIC_PLAN) needs \
+                         setup_parse_variable_parameters / check_variable_parameters \
+                         (PREPARE variable-parameter substrate, unported)"
+                    );
+                }
+            }
+        }
+    }
+
+    // transform contained query, allowing SELECT INTO.
+    let inner = stmt
+        .query
+        .as_deref()
+        .expect("transformExplainStmt: ExplainStmt->query is NULL");
+    let transformed = transformOptionalSelectInto(mcx, pstate, inner)?;
+
+    // represent the command as a utility Query wrapping a fresh ExplainStmt that
+    // carries the transformed inner Query (mirrors C's `stmt->query = <Query>`).
+    let mut new_stmt = stmt.clone_in(mcx)?;
+    new_stmt.query = Some(mcx::alloc_in(mcx, Node::Query(transformed))?);
+
+    let mut result = Query::new(mcx);
+    result.commandType = CmdType::CMD_UTILITY;
+    result.utilityStmt = Some(mcx::alloc_in(mcx, Node::ExplainStmt(new_stmt))?);
+    Ok(result)
+}
+
 /// Helper for the INTO rewrite: clear `intoClause` on the leftmost leaf of a
 /// (possibly set-op) `SelectStmt`, matching the C `stmt->intoClause = NULL`.
 fn clear_leftmost_into(stmt: &mut SelectStmt<'_>) {
@@ -271,13 +319,13 @@ pub fn transformStmt<'mcx>(
             }
         }
         Node::InsertStmt(n) => insert::transformInsertStmt(mcx, pstate, n)?,
+        Node::ExplainStmt(n) => transformExplainStmt(mcx, pstate, n)?,
         Node::DeleteStmt(_)
         | Node::UpdateStmt(_)
         | Node::MergeStmt(_)
         | Node::ReturnStmt(_)
         | Node::PLAssignStmt(_)
         | Node::DeclareCursorStmt(_)
-        | Node::ExplainStmt(_)
         | Node::CreateTableAsStmt(_)
         | Node::CallStmt(_) => {
             // The remaining DML / special-statement transforms are a follow-on
@@ -286,7 +334,7 @@ pub fn transformStmt<'mcx>(
             panic!(
                 "transformStmt: DML/special statement (tag {:?}) is in the \
                  follow-on family (transformUpdate/Delete/Merge/Return/\
-                 PLAssign/DeclareCursor/Explain/CreateTableAs/Call) — not yet \
+                 PLAssign/DeclareCursor/CreateTableAs/Call) — not yet \
                  ported (analyze.c:312)",
                 parse_tree.tag()
             );
