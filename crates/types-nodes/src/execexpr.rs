@@ -968,6 +968,14 @@ pub enum ExprEvalStepData<'mcx> {
         elemvalues: Option<PgVec<'mcx, Datum<'mcx>>>,
         /// `bool *elemnulls`.
         elemnulls: Option<PgVec<'mcx, bool>>,
+        /// Per-element result cells: the `&op->d.arrayexpr.elemvalues[i]` /
+        /// `&elemnulls[i]` aliasing targets the element sub-expressions evaluate
+        /// into (one [`ResultCellId`] per element, mirroring `Func`'s
+        /// `arg_cells`). In C the recursion writes directly through
+        /// `&scratch.d.arrayexpr.elemvalues[elemoff]`; the owned model gathers
+        /// these arena cells into `elemvalues`/`elemnulls` immediately before the
+        /// array is fabricated. Empty for a 0-element array.
+        elem_cells: Option<PgVec<'mcx, ResultCellId>>,
         /// length of the above arrays
         nelems: i32,
         /// array element type
