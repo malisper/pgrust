@@ -211,6 +211,28 @@ pub fn event_trigger_end_complete_query() {
     });
 }
 
+/// Process-global backing for the `event_triggers` GUC.
+///
+/// C: `bool event_triggers = true;` (event_trigger.c:86) is the
+/// `conf->variable` for the `event_triggers` entry in guc_tables.c. This unit
+/// owns that global, so it owns its backing store here and installs the
+/// matching [`GucVarAccessors`](backend_utils_misc_guc_tables::GucVarAccessors)
+/// into the GUC engine's [`vars::event_triggers`] slot from [`init_seams`].
+/// Seeded to the C `boot_val` (`true`).
+mod gucs {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static EVENT_TRIGGERS: AtomicBool = AtomicBool::new(true);
+
+    pub fn event_triggers() -> bool {
+        EVENT_TRIGGERS.load(Ordering::Relaxed)
+    }
+
+    pub fn set_event_triggers(v: bool) {
+        EVENT_TRIGGERS.store(v, Ordering::Relaxed);
+    }
+}
+
 // ===========================================================================
 // Firing fences (event_trigger.c) — gated off in standalone single-user mode.
 // ===========================================================================
@@ -397,6 +419,17 @@ pub fn event_trigger_supports_object(object: &ObjectAddress) -> bool {
 
 /// Install this unit's fence entry points into the consumers' seam tables.
 pub fn init_seams() {
+    // The `event_triggers` GUC's C `conf->variable` (`bool event_triggers`,
+    // event_trigger.c:86) is owned by this unit. Install its accessors over our
+    // backing store so the GUC engine's `.read()`/`.write()` (and the firing
+    // fences' `vars::event_triggers.read()`) reach it. Mirrors C's
+    // build_guc_variables wiring `&event_triggers` at startup, before any
+    // statement runs.
+    vars::event_triggers.install(backend_utils_misc_guc_tables::GucVarAccessors {
+        get: gucs::event_triggers,
+        set: gucs::set_event_triggers,
+    });
+
     backend_tcop_utility_out_seams::event_trigger_begin_complete_query::set(
         event_trigger_begin_complete_query,
     );
