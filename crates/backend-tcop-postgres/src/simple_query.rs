@@ -128,6 +128,82 @@ pub fn pg_analyze_and_rewrite_fixedparams<'mcx>(
 }
 
 // ===========================================================================
+// pg_analyze_and_rewrite_varparams — postgres.c:704
+// ===========================================================================
+
+/// `pg_analyze_and_rewrite_varparams(parsetree, query_string, &paramTypes,
+/// &numParams, queryEnv)` (postgres.c:704) — like
+/// [`pg_analyze_and_rewrite_fixedparams`] except it is okay to deduce `$n`
+/// datatypes from context. PREPARE uses this so undeclared parameter types can
+/// be inferred. The resolved/grown parameter OID array is read back from the
+/// `VarParamState` carrier `parse_analyze_varparams` returns (its `Vec` length is
+/// the C `*numParams`). `queryEnv` is `NULL` on this path.
+pub fn pg_analyze_and_rewrite_varparams<'mcx>(
+    mcx: Mcx<'mcx>,
+    parsetree: &RawStmt<'mcx>,
+    query_string: &str,
+    arg_types: &[types_core::primitive::Oid],
+) -> PgResult<backend_parser_analyze_seams::AnalyzedVarparams<'mcx>> {
+    // (1) Perform parse analysis.
+    if log_parser_stats() {
+        logging::ResetUsage();
+    }
+
+    let (query, parstate) =
+        analyze::parse_analyze_varparams(mcx, parsetree, query_string, arg_types)?;
+
+    // Check all parameter types got determined.
+    //   for (int i = 0; i < *numParams; i++) { ptype = (*paramTypes)[i];
+    //       if (ptype == InvalidOid || ptype == UNKNOWNOID) ereport(ERROR, ...); }
+    // The resolved `*numParams`-length array is the shared VarParamState Vec.
+    const UNKNOWNOID: types_core::primitive::Oid = 705; // pg_type.h UNKNOWNOID
+    {
+        let resolved = parstate.param_types.borrow();
+        for (i, &ptype) in resolved.iter().enumerate() {
+            if ptype == types_core::primitive::InvalidOid || ptype == UNKNOWNOID {
+                return Err(ereport(ERROR)
+                    .errcode(types_error::error::ERRCODE_INDETERMINATE_DATATYPE)
+                    .errmsg(alloc::format!(
+                        "could not determine data type of parameter ${}",
+                        i + 1
+                    ))
+                    .into_error());
+            }
+        }
+    }
+
+    if log_parser_stats() {
+        let _ = logging::ShowUsage("PARSE ANALYSIS STATISTICS");
+    }
+
+    // (2) Rewrite the queries, as necessary.
+    let query_list = pg_rewrite_query(mcx, query)?;
+
+    // Return the rewritten list + the resolved parameter OID array (C returns the
+    // list and writes back *paramTypes/*numParams; the carrier holds the array).
+    let resolved = parstate.param_types.borrow();
+    let mut arg_types_out: PgVec<'mcx, types_core::primitive::Oid> =
+        mcx::vec_with_capacity_in(mcx, resolved.len())?;
+    for &t in resolved.iter() {
+        arg_types_out.push(t);
+    }
+    drop(resolved);
+
+    // pg_rewrite_query yields a `PgVec<Query>`; the varparams contract wants a
+    // `PgVec<Node>` (the rewritten `List *` of `Query *`, wrapped as nodes — the
+    // PREPARE/plancache consumer reads `Node::Query`).
+    let mut query_nodes: PgVec<'mcx, Node<'mcx>> = mcx::vec_with_capacity_in(mcx, query_list.len())?;
+    for q in query_list {
+        query_nodes.push(Node::Query(q));
+    }
+
+    Ok(backend_parser_analyze_seams::AnalyzedVarparams {
+        query_list: query_nodes,
+        arg_types: arg_types_out,
+    })
+}
+
+// ===========================================================================
 // pg_rewrite_query — postgres.c:798
 // ===========================================================================
 

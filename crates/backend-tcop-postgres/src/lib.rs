@@ -191,6 +191,14 @@ pub fn init_seams() {
             )
         },
     );
+    // PREPARE's analyze+rewrite-with-varparams entry. postgres.c owns
+    // pg_analyze_and_rewrite_varparams (it wraps analyze.c's parse_analyze_var
+    // params + the parameter-completeness check + pg_rewrite_query). The PREPARE
+    // driver (prepare.c) consumes it through this seam.
+    backend_parser_analyze_seams::analyze_and_rewrite_varparams::set(
+        simple_query::pg_analyze_and_rewrite_varparams,
+    );
+
     s::pg_plan_queries_value::set(
         |mcx, querytrees, query_string, cursor_options, bound_params| {
             // The value body owns its querytree list (C scribbles on / copies

@@ -1488,12 +1488,15 @@ mod recurrence_guard {
         //     xlog's init_seams (the real owner). XLogShutdownWalRcv reaches the
         //     inner ShutdownWalRcv via the new `shutdown_wal_rcv` seam.
         // Allowlist entries removed.
-        // DESIGN_DEBT (TD-ANALYZE-REWRITE): the remaining genuinely-uninstalled
-        // analyze.c seams after the #159 STEP C plancache de-handle:
-        //   * analyze_and_rewrite_varparams — the varparam analyze+rewrite leg is
-        //     still unported (the rewriter varparam path is absent). Loud-panics.
-        //   * run_post_parse_analyze_hook — the post-parse hook is NULL by default
-        //     and has no body. Loud-panics if a hook is ever set.
+        // (analyze_and_rewrite_varparams — now ported: analyze.c's
+        //  parse_analyze_varparams [setup_parse_variable_parameters +
+        //  transformTopLevelStmt + check_variable_parameters] in
+        //  backend-parser-analyze, wrapped by postgres.c's
+        //  pg_analyze_and_rewrite_varparams [param-completeness check +
+        //  pg_rewrite_query] installed from backend-tcop-postgres.)
+        // (run_post_parse_analyze_hook — now installed (NULL-hook no-op) from
+        //  backend-parser-analyze; the C `if (post_parse_analyze_hook)` guard
+        //  falls through with no extension loaded.)
         // (#159 STEP C plancache de-handle RETIRED: the 16 -pc-seams handle forms
         // [QueryHandle/RawStmtHandle/AnalyzedQueryHandle/QueryListHandle/...] plus
         // analyze_and_rewrite_fixedparams / analyze_and_rewrite_withcb /
@@ -1504,9 +1507,6 @@ mod recurrence_guard {
         // stmt_requires_parse_analysis_value / analyze_requires_snapshot_value /
         // query_requires_rewrite_plan_value / pg_analyze_and_rewrite_fixedparams_params,
         // reads Query fields directly, and walks sublinks via node_walker.)
-        // DELETE these as the rewriter varparam/hook legs land.
-        ("backend_parser_analyze", "analyze_and_rewrite_varparams"),
-        ("backend_parser_analyze", "run_post_parse_analyze_hook"),
         // DESIGN_DEBT (TD-PARSETYPE-TYPENAME-CARRIER, narrowed): parse_type.c's
         // `typeStringToTypeName` drives `raw_parser(str, RAW_PARSE_TYPE_NAME)` and
         // extracts the single `TypeName` node. The grammar IS now ported

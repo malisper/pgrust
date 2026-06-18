@@ -80,6 +80,62 @@ pub fn parse_analyze_fixedparams<'mcx>(
     Ok(query)
 }
 
+/// `parse_analyze_varparams(parseTree, sourceText, paramTypes, numParams,
+/// queryEnv)` (analyze.c:144) — analyze a raw statement deducing unknown `$n`
+/// parameter types from context. The passed-in type array can be grown/replaced
+/// as `$n` refs appear; the resolved array is read back through the shared
+/// `VarParamState` carrier (its `Vec`'s length is the C `*numParams`).
+///
+/// The milestone caller (PREPARE) passes a `None` query environment. The query
+/// returned is the analyzed tree; the post-parse-analyze hook (NULL by default)
+/// is run by the rewrite wrapper's caller, mirroring the C call at analyze.c:169
+/// — modeled here through the `run_post_parse_analyze_hook` seam.
+pub fn parse_analyze_varparams<'mcx>(
+    mcx: Mcx<'mcx>,
+    parse_tree: &RawStmt<'mcx>,
+    source_text: &str,
+    arg_types: &[types_core::primitive::Oid],
+) -> PgResult<(Query<'mcx>, types_nodes::parsestmt::VarParamState)> {
+    let mut pstate = backend_parser_small1::make_parsestate(mcx, None)?;
+
+    // Assert(sourceText != NULL); pstate->p_sourcetext = sourceText;
+    pstate.p_sourcetext = Some(mcx::PgString::from_str_in(source_text, mcx)?);
+
+    // setup_parse_variable_parameters(pstate, paramTypes, numParams);
+    //
+    // C seeds the growable VarParamState from the caller's `Oid **paramTypes` /
+    // `int *numParams` and aliases it. The owned carrier is a shared `Rc<RefCell
+    // <Vec<Oid>>>`; seed it with the caller's fixed arg-type prefix (the PREPARE
+    // driver's declared `$n` types), which the variable_paramref_hook then grows
+    // and resolves in place.
+    let parstate = types_nodes::parsestmt::VarParamState::from_shared(
+        alloc::rc::Rc::new(core::cell::RefCell::new(arg_types.to_vec())),
+    );
+    backend_parser_small1::setup_parse_variable_parameters(&mut pstate, parstate.clone());
+
+    // pstate->p_queryEnv = queryEnv;  (milestone caller passes None)
+
+    let query = transformTopLevelStmt(mcx, &mut pstate, parse_tree)?;
+
+    // make sure all is well with parameter types
+    backend_parser_small1::check_variable_parameters(&pstate, &query)?;
+
+    // IsQueryIdEnabled() -> JumbleQuery(query): query-id jumbling is a separate
+    // unported subsystem (queryId stays 0, jstate stays NULL).
+    //
+    //   if (post_parse_analyze_hook)
+    //       (*post_parse_analyze_hook) (pstate, query, jstate);
+    // The post_parse_analyze_hook is a per-backend `fn` pointer extensions install
+    // (NULL by default). With no extension loaded it is unset, so this is a no-op
+    // — exactly the C `if (hook)` guard falling through. (The portalcmds consumer
+    // models the same call through the `run_post_parse_analyze_hook` seam over its
+    // trimmed ParseState/Query view; that seam is the canonical NULL-hook no-op.)
+
+    backend_parser_small1::free_parsestate(pstate)?;
+
+    Ok((query, parstate))
+}
+
 /* ===========================================================================
  * parse_sub_analyze
  * =========================================================================== */
@@ -322,6 +378,27 @@ pub fn init_seams() {
     backend_parser_analyze_seams::query_requires_rewrite_plan_value::set(
         query_requires_rewrite_plan_value_impl,
     );
+    // `if (post_parse_analyze_hook) (*post_parse_analyze_hook)(pstate, query,
+    // jstate);` (analyze.c:127/169/206). The hook is a per-backend `fn` pointer
+    // extensions install; it is NULL by default. With no extension loaded the C
+    // `if` guard falls through, so the canonical seam body is a no-op. analyze.c
+    // owns this call site, so this crate installs the seam.
+    backend_parser_analyze_seams::run_post_parse_analyze_hook::set(
+        run_post_parse_analyze_hook_impl,
+    );
+}
+
+/// Seam impl for the post-parse-analyze hook (analyze.c:127/169/206). The hook
+/// (`post_parse_analyze_hook`) is NULL unless an extension installs it; with no
+/// extension loaded the C `if (post_parse_analyze_hook)` guard falls through, so
+/// this is a no-op. Extensions wiring their own hook is a follow-on (the hook
+/// `fn`-pointer slot is not modeled until a loadable-module consumer needs it).
+fn run_post_parse_analyze_hook_impl(
+    _pstate: &types_nodes::portalcmds::ParseState,
+    _query: &types_nodes::portalcmds::Query,
+    _jstate: Option<&types_nodes::portalcmds::JumbleState>,
+) -> PgResult<()> {
+    Ok(())
 }
 
 /// VALUE seam impl for `stmt_requires_parse_analysis` (infallible body, wrapped
