@@ -84,7 +84,7 @@ fn tup_is_null(slot: Option<SlotId>, estate: &EStateData<'_>) -> bool {
 /// the link is missing or the wrong node type.
 fn plan_of<'a, 'mcx>(node: &'a RecursiveUnionStateData<'mcx>) -> &'a RecursiveUnion<'mcx> {
     match node.ps.plan {
-        Some(Node::RecursiveUnion(ru)) => ru,
+        Some(p) if p.is_recursiveunion() => p.expect_recursiveunion(),
         Some(other) => panic!(
             "ExecRecursiveUnion: node->ps.plan is not a RecursiveUnion: {:?}",
             other.tag()
@@ -414,9 +414,9 @@ pub fn ExecInitRecursiveUnion<'mcx>(
 ) -> PgResult<PgBox<'mcx, RecursiveUnionStateData<'mcx>>> {
     let mcx = estate.es_query_cxt;
 
-    let plan: &'mcx RecursiveUnion<'mcx> = match node {
-        Node::RecursiveUnion(ru) => ru,
-        other => panic!("castNode(RecursiveUnion, node) failed: {other:?}"),
+    let plan: &'mcx RecursiveUnion<'mcx> = match node.as_recursiveunion() {
+        Some(ru) => ru,
+        None => panic!("castNode(RecursiveUnion, node) failed: {node:?}"),
     };
 
     // check for unsupported flags
