@@ -689,7 +689,7 @@ pub fn generic_restriction_selectivity<'mcx>(
         };
 
     // If the something is a NULL constant, assume operator is strict.
-    if let Expr::Const(c) = &other {
+    if let Some(c) = other.as_const() {
         if c.constisnull {
             release_variable_stats(vardata);
             return Ok(0.0);
@@ -697,7 +697,7 @@ pub fn generic_restriction_selectivity<'mcx>(
     }
 
     let mut selec;
-    if let Expr::Const(c) = &other {
+    if let Some(c) = other.as_const() {
         // Variable is being compared to a known non-null constant.
         let constval = types_datum::datum::Datum::from_usize(c.constvalue.as_usize());
         let opproc_oid = lsc::get_opcode::call(oproid)?;
@@ -778,7 +778,7 @@ pub fn estimate_array_length<'mcx>(
     // falls back to the default guess of 10 (matching `scalararraysel`), which
     // is what C returns when no recognized form yields a count.
     let _ = mcx;
-    if let Expr::ArrayExpr(ae) = root.node(arrayexpr) {
+    if let Some(ae) = root.node(arrayexpr).as_arrayexpr() {
         return Ok(ae.elements.len() as f64);
     }
     Ok(10.0)

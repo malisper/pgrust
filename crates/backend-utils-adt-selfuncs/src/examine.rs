@@ -65,7 +65,7 @@ const STATS_EXT_EXPRESSIONS: i8 = b'e' as i8;
 /// [`expression_tree_walker`](backend_nodes_core::nodefuncs::expression_tree_walker),
 /// so the PHV test is done here and the walker recurses into the rest.
 fn contain_placeholder(node: &Expr) -> bool {
-    if matches!(node, Expr::PlaceHolderVar(_)) {
+    if node.is_placeholdervar() {
         return true;
     }
     let mut found = false;
@@ -141,7 +141,7 @@ pub(crate) fn examine_variable<'mcx, 'run>(
     let mut basenode = strip_all_phvs_deep(root, &node_expr, mcx)?;
 
     // Look inside any binary-compatible relabeling (handle nested RelabelTypes).
-    while let Expr::RelabelType(rt) = &basenode {
+    while let Some(rt) = basenode.as_relabeltype() {
         let arg = rt
             .arg
             .as_deref()
@@ -151,7 +151,7 @@ pub(crate) fn examine_variable<'mcx, 'run>(
     }
 
     // Fast path for a simple Var.
-    if let Expr::Var(var) = &basenode {
+    if let Some(var) = basenode.as_var() {
         if var_relid == 0 || var_relid == var.varno {
             let var = var.clone();
             // Re-intern the stripped Var so vardata->var is a handle to the Var
@@ -265,7 +265,7 @@ fn examine_expression_stats<'mcx, 'run>(
                 .next()
                 .ok_or_else(|| PgError::error("too few entries in indexprs list"))?;
             let mut indexkey = root.node(indexkey_id).clone();
-            if let Expr::RelabelType(rt) = &indexkey {
+            if let Some(rt) = indexkey.as_relabeltype() {
                 indexkey = *rt
                     .arg
                     .clone()
@@ -325,7 +325,7 @@ fn examine_expression_stats<'mcx, 'run>(
         let exprs = info.exprs.clone();
         for (pos, &expr_id) in exprs.iter().enumerate() {
             let mut expr = root.node(expr_id).clone();
-            if let Expr::RelabelType(rt) = &expr {
+            if let Some(rt) = expr.as_relabeltype() {
                 expr = *rt
                     .arg
                     .clone()

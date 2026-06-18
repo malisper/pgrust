@@ -217,7 +217,7 @@ pub(crate) fn genericcostestimate<'mcx, 'run>(
         num_sa_scans = 1.0;
         for &rid in &index_quals {
             let clause = root.node(root.rinfo(rid).clause).clone();
-            if let Expr::ScalarArrayOpExpr(saop) = &clause {
+            if let Some(saop) = clause.as_scalararrayopexpr() {
                 if let Some(arr) = saop.args.get(1).cloned() {
                     let node_id = root.alloc_node(arr);
                     let alength = crate::misc::estimate_array_length(mcx, root, node_id)?;
