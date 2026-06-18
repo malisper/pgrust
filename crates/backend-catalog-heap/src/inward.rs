@@ -101,6 +101,7 @@ pub fn init_seams() {
     );
     backend_catalog_heap_seams::heap_create_with_catalog::set(heap_create_with_catalog_seam);
     backend_catalog_heap_seams::heap_drop_with_catalog::set(heap_drop_with_catalog_seam);
+    backend_catalog_heap_seams::check_attribute_names_types::set(check_attribute_names_types_seam);
     // Low-level relation-create seams `index_create` (catalog/index.c) calls
     // directly. Their owner signatures match the seam signatures exactly, so
     // they install without a wrapper.
@@ -122,4 +123,15 @@ pub fn init_seams() {
     backend_commands_tablecmds_seams::add_relation_not_null_constraints::set(
         crate::AddRelationNotNullConstraints,
     );
+}
+
+/// Seam body for `CheckAttributeNamesTypes` (catalog/heap.c). The descriptor
+/// crosses by reference; the real validator reads its `attrs`.
+fn check_attribute_names_types_seam<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    tupdesc: &types_tuple::heaptuple::TupleDescData<'mcx>,
+    relkind: u8,
+    flags: i32,
+) -> PgResult<()> {
+    crate::CheckAttributeNamesTypes(mcx, &tupdesc.attrs, relkind, flags)
 }

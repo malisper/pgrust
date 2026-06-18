@@ -125,6 +125,23 @@ seam_core::seam!(
     pub fn heap_drop_with_catalog(relid: Oid) -> PgResult<()>
 );
 
+seam_core::seam!(
+    /// `CheckAttributeNamesTypes(tupdesc, relkind, flags)` (catalog/heap.c):
+    /// validate a candidate `TupleDesc`'s column names (no duplicates / system
+    /// names) and datatypes (no disallowed pseudo-types) for a relation of the
+    /// given `relkind`. `flags` is the `CHKATYPE_*` bitmask. Consumed by the
+    /// `addRangeTableEntryForFunction` RECORD-coldeflist arm (parse_relation.c)
+    /// — catalog/heap.c sits above parse_relation.c, so the call crosses the
+    /// owner seam. The descriptor crosses by reference; catalog-heap reads its
+    /// `attrs`. `Err` carries the validation `ereport(ERROR)` surface.
+    pub fn check_attribute_names_types<'mcx>(
+        mcx: Mcx<'mcx>,
+        tupdesc: &TupleDescData<'mcx>,
+        relkind: u8,
+        flags: i32,
+    ) -> PgResult<()>
+);
+
 /* ===========================================================================
  * Constraint-cooker / attribute-mutate sub-seams: the catalog-write carriers
  * the typed model has not yet assembled. `backend-catalog-heap` drives these
