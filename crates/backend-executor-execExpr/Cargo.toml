@@ -33,6 +33,9 @@ backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams
 # execTuples owns the TupleTableSlot accessors (slot_getattr / natts /
 # ExecClearTuple) the SubPlan projection-slot seams route through.
 backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
+# ExecInitSubPlanExpr compiles a SubPlan reference by building its SubPlanState
+# through nodeSubplan's ExecInitSubPlan seam (installed by that owner).
+backend-executor-nodeSubplan-seams = { path = "../backend-executor-nodeSubplan-seams" }
 # lsyscache owns the catalog operator lookups (get_compatible_hash_operators /
 # get_opcode / get_op_hash_functions) the hashed-subplan combining-op
 # resolution routes through.

@@ -8667,6 +8667,7 @@ dependencies = [
  "backend-executor-execTuples-seams",
  "backend-executor-execUtils-seams",
  "backend-executor-nodeAgg",
+ "backend-executor-nodeSubplan-seams",
  "backend-nodes-core",
  "backend-nodes-core-seams",
  "backend-nodes-nodeFuncs-seams",

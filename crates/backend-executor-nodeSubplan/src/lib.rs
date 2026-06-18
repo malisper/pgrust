@@ -1521,6 +1521,7 @@ pub fn init_seams() {
     backend_executor_nodeSubplan_seams::exec_re_scan_set_param_plan::set(ExecReScanSetParamPlan);
     backend_executor_nodeSubplan_seams::exec_set_param_plan::set(ExecSetParamPlan);
     backend_executor_nodeSubplan_seams::exec_sub_plan::set(ExecSubPlan);
+    backend_executor_nodeSubplan_seams::exec_init_sub_plan::set(ExecInitSubPlan);
 
     // `ExecSetParamPlanMulti(params, econtext)` (nodeSubplan.c) on the parallel
     // executor's `execParallel-support` surface. The support seam carries a

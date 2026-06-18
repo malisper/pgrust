@@ -28,6 +28,7 @@ use types_nodes::primnodes::Expr;
 use types_nodes::{EStateData, EcxtId, SlotId};
 
 use backend_executor_execExpr_seams::{ProjectionKind, SlotAttr};
+use backend_executor_nodeSubplan_seams as nodesubplan;
 
 // --- inherited-opaque carriers ------------------------------------------------
 //
@@ -178,18 +179,20 @@ pub fn sub_init_testexpr<'mcx>(
     };
 
     // The parent PlanState ExecInitExpr threads through is the SubPlan's parent
-    // expression context. The owned model lends it as a `&mut PlanStateData`;
-    // route through the execExpr-core ExecInitExpr seam (this crate). The
-    // parent is the node's own planstate's head (the subselect plan state),
-    // which is what carries the EState param/slot context here.
-    let parent_node = node
-        .planstate
-        .as_mut()
-        .expect("SubPlanState.planstate is NULL in ExecInitSubPlanExpr");
-    let parent = parent_node.ps_head_mut();
+    // expression context (C `sstate->testexpr = ExecInitExpr(testexpr, parent)`).
+    // The owned `exec_init_expr` ignores the `parent` head — it back-fills the
+    // `ExprState.parent` via `stamp_expr_parents` and reaches the `EState`
+    // through the explicitly-threaded `estate` (stamped onto `es_link`) — and a
+    // combining `testexpr` is only PARAM_EXEC references over the sub-select's
+    // output columns (no Var/SubPlan that would consult the parent head). So a
+    // throwaway `PlanStateData` head satisfies the signature faithfully. (The
+    // C `sstate->planstate` aliasing field is not materialized in the owned
+    // model — the child plan state is owned by `es_subplanstates` and reached by
+    // `plan_id` index at run time, never through `node.planstate`.)
+    let mut parent_head = types_nodes::execnodes::PlanStateData::default();
 
     // `ExecInitExpr` is owned by execExpr-core; route through its seam.
-    let state = crate::execExpr_core::exec_init_expr(testexpr, parent, estate)?;
+    let state = crate::execExpr_core::exec_init_expr(testexpr, &mut parent_head, estate)?;
 
     store_testexpr_carrier(&mut node.testexpr, TestExprCarrier { state });
     Ok(())
@@ -750,7 +753,16 @@ pub(crate) fn exec_init_sub_plan_expr<'mcx>(
     // C: ExprEvalStep scratch = {0};
     // C: if (!state->parent)
     //        elog(ERROR, "SubPlan found with no parent plan");
-    if state.parent.is_none() {
+    //
+    // C reaches the EState through `state->parent->state`. In the owned model
+    // `ExprState.parent` is stamped only AFTER the enclosing PlanStateNode is
+    // address-stable (`stamp_expr_parents`), so at this compile point `parent`
+    // is still `None`; the faithful test for "is there a parent plan" is the
+    // EState back-link the compile entry stamped (`es_link`). A standalone
+    // parent-less expression compile (`ExecInitExpr(node, NULL)` /
+    // `ExecInitExprWithParams`) leaves it `None`, so a SubPlan there errors
+    // exactly as C's `!parent` branch does.
+    if state.es_link.is_none() {
         return Err(types_error::PgError::error(
             "SubPlan found with no parent plan",
         ));
@@ -804,21 +816,42 @@ pub(crate) fn exec_init_sub_plan_expr<'mcx>(
     //    scratch.d.subplan.sstate = sstate;
     //    ExprEvalPushStep(state, &scratch);
     //
-    // `ExecInitSubPlan` is owned by nodeSubplan (builds the SubPlanState, sets
-    // up the hash tables / projections / combining-expr); it is not exported as
-    // a callable seam here, and the parent PlanState's `subPlan` list append is
-    // the parent owner's. The PARAM_SET argument-evaluation steps above are this
-    // unit's own logic and are emitted; the EEOP_SUBPLAN step needs the
-    // nodeSubplan-built SubPlanState the step must carry. Faithful structure;
-    // genuine cross-unit blocker.
-    let _ = subplan;
-    panic!(
-        "execExpr-func-subscript: ExecInitSubPlanExpr — ExecInitSubPlan(subplan, state->parent) \
-         is owned by nodeSubplan (builds the SubPlanState the EEOP_SUBPLAN step carries) and is \
-         not exported as a callable seam; the state->parent->subPlan lappend is the parent \
-         PlanState owner's. The EEOP_PARAM_SET argument descent above is this unit's own logic \
-         and is emitted."
-    );
+    // `ExecInitSubPlan` (nodeSubplan) builds the `SubPlanState` — it links to its
+    // plan-state tree by 1-based `plan_id` into `es_subplanstates` and reads
+    // `es_subplanstates` synchronously, so it needs the `EState`. C reaches that
+    // through `state->parent->state`; the owned model has not stamped
+    // `state->parent` yet (deferred to `stamp_expr_parents`), so the `EState` is
+    // reached through the compile-entry-stamped `es_link` back-pointer (checked
+    // non-`None` above). The built `SubPlanState` is carried directly on the
+    // `EEOP_SUBPLAN` step (the owned-model equivalent of the C
+    // `op->d.subplan.sstate`), where `ExecEvalSubPlan` finds it at run time. The
+    // C `state->parent->subPlan = lappend(...)` list registration is only used
+    // for ReScan/cleanup walking; in the owned model the step owns the
+    // `SubPlanState`, so no separate parent-list append is needed for the
+    // expression SubPlan execution path.
+    let owned_subplan: mcx::PgBox<'mcx, types_nodes::primnodes::SubPlan<'mcx>> =
+        mcx::alloc_in(mcx, subplan.clone_in(mcx)?)?;
+
+    // sstate = ExecInitSubPlan(subplan, state->parent->state);
+    // `es_link` is Some (guarded above); reach the EState through the
+    // non-owning back-pointer (the single audited deref, mirroring
+    // `parent->state`).
+    let mut es_link = state.es_link.expect("ExecInitSubPlanExpr: es_link present (guarded above)");
+    let estate = es_link.get_mut();
+    let sstate = nodesubplan::exec_init_sub_plan::call(owned_subplan, estate)?;
+
+    // scratch.opcode = EEOP_SUBPLAN; scratch.d.subplan.sstate = sstate;
+    let scratch = types_nodes::execexpr::ExprEvalStep {
+        opcode: ExprEvalOp::EEOP_SUBPLAN,
+        resvalue: resv,
+        resnull: resv,
+        d: ExprEvalStepData::SubPlan {
+            sstate: Some(mcx::alloc_in(mcx, sstate)?),
+        },
+    };
+    crate::execExpr_core::expr_eval_push_step(mcx, state, scratch)?;
+
+    Ok(())
 }
 
 /// `ExecInitWholeRowVar(scratch, variable, state)` (execExpr.c:3206) — set up an

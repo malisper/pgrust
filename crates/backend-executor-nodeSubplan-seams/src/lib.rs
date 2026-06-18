@@ -37,6 +37,25 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecInitSubPlan(subplan, parent)` (nodeSubplan.c): build the
+    /// out-of-line [`SubPlanState`](types_nodes::SubPlanState) for a `SubPlan`
+    /// reference found while compiling an expression (`ExecInitSubPlanExpr`).
+    /// The C `parent` argument is reached for `parent->state` (the `EState`)
+    /// only — the `SubPlanState` links to its plan-state tree by 1-based
+    /// `plan_id` index into `es_subplanstates` — so the owned model threads the
+    /// `estate` explicitly. The owned `SubPlan` is moved in (the C
+    /// `node->initPlan`/expression `SubPlan` lives in the plan tree;
+    /// `ExecInitSubPlan` reads it and stores a per-query-context copy on
+    /// `sstate->subplan`). Returns the built `SubPlanState` the caller attaches
+    /// to the `EEOP_SUBPLAN` step; `ereport(ERROR)`s (catalog lookups for the
+    /// hashed-subplan combining operators) carried on `Err`.
+    pub fn exec_init_sub_plan<'mcx>(
+        subplan: mcx::PgBox<'mcx, types_nodes::primnodes::SubPlan<'mcx>>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<types_nodes::SubPlanState<'mcx>>
+);
+
+seam_core::seam!(
     /// `ExecSubPlan(node, econtext, isNull)` (nodeSubplan.c): process a
     /// sub-select and return its result `Datum`. The C `bool *isNull`
     /// out-parameter is returned alongside the result as `(Datum, bool)`. This

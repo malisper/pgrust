@@ -1503,6 +1503,21 @@ pub struct ExprState<'mcx> {
     /// (mirroring `EStateLink`) that lets an in-flight node be its own
     /// expressions' parent.
     pub parent: Option<PlanStateLink>,
+    /// NON-owning back-pointer to the `EState` this `ExprState` is being compiled
+    /// in (the C `parent->state`). The owned model defers stamping
+    /// [`ExprState::parent`] until the enclosing `PlanStateNode` is
+    /// address-stable (`stamp_expr_parents`), so at expression-COMPILE time
+    /// `parent` is still `None` and the C `parent->state` route to the executor
+    /// state is not yet reachable. Compiling a `SubPlan` reference
+    /// (`ExecInitSubPlanExpr` → `ExecInitSubPlan(subplan, parent->state)`) needs
+    /// the `EState` synchronously at that point (to look up `es_subplanstates`
+    /// by `plan_id` and build the `SubPlanState`). The compile entry points
+    /// (`ExecInitExpr`/`ExecInitQual`/...) all hold `estate`, so they stamp this
+    /// link directly — the faithful owned-model equivalent of C's
+    /// `parent->state` (a non-owning `EState *` back-ptr; mirrors
+    /// [`EStateLink`](crate::execnodes::EStateLink)). `None` is the C `NULL`
+    /// (no parent / `ExecInitExprWithParams` standalone-expr compile).
+    pub es_link: Option<crate::execnodes::EStateLink>,
     /// `ParamListInfo ext_params` — for compiling PARAM_EXTERN nodes (opaque
     /// address; the param-list owner threads the real list).
     pub ext_params: usize,
@@ -1569,6 +1584,7 @@ impl<'mcx> Clone for ExprState<'mcx> {
             steps_len: self.steps_len,
             steps_alloc: self.steps_alloc,
             parent: None,
+            es_link: None,
             ext_params: self.ext_params,
             innermost_caseval: None,
             innermost_domainval: None,
@@ -1598,6 +1614,7 @@ impl Default for ExprState<'_> {
             steps_len: 0,
             steps_alloc: 0,
             parent: None,
+            es_link: None,
             ext_params: 0,
             innermost_caseval: None,
             innermost_domainval: None,

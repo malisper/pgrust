@@ -35,6 +35,7 @@ use types_nodes::nodehashjoin::HashJoinState;
 use types_nodes::primnodes::{
     BoolExprType, Const, Expr, NullTestType, ParamKind, VarReturningType as VrtKind,
 };
+use types_nodes::execnodes::EStateLink;
 use types_nodes::{EStateData, EcxtId, SlotId};
 use types_tuple::heaptuple::{ItemPointerData, TupleDescData};
 
@@ -1250,6 +1251,11 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             // element value). So leaving it unset is faithful for every shape
             // this sub-expression can take.
             elemstate.parent = None;
+            // Inherit the EState back-link so any nested compile sees the same
+            // executor state (the per-element coercion cannot contain a SubPlan,
+            // but keep the link consistent with the C `elemstate` sharing
+            // `parent->state`).
+            elemstate.es_link = state.es_link;
             elemstate.ext_params = state.ext_params;
             ensure_result_arena(mcx, &mut elemstate)?;
             // C palloc's a dedicated innermost_caseval/casenull cell for the
@@ -1537,6 +1543,12 @@ pub fn exec_init_expr<'mcx>(
     let mcx = estate.es_query_cxt;
 
     let mut state = make_expr_state();
+    // C `state->parent = parent` reaches the EState via `parent->state`; the
+    // owned model defers parent stamping to `stamp_expr_parents`, so we stamp
+    // the non-owning EState back-link here (a parent IS present at this entry —
+    // it is `ExecInitExpr(node, parent)`), letting a SubPlan compile find
+    // `es_subplanstates` synchronously.
+    state.es_link = Some(EStateLink::from_ref(estate));
     state.ext_params = 0;
     ensure_result_arena(mcx, &mut state)?;
 
@@ -1590,6 +1602,11 @@ pub fn exec_init_qual<'mcx>(
     let mcx = estate.es_query_cxt;
 
     let mut state = make_expr_state();
+    // A parent IS present at this entry (`ExecInitQual(qual, parent)`); stamp the
+    // non-owning EState back-link so a SubPlan in the qual can find
+    // `es_subplanstates` at compile time (parent itself is stamped later by
+    // `stamp_expr_parents`).
+    state.es_link = Some(EStateLink::from_ref(estate));
     state.ext_params = 0;
     state.flags = EEO_FLAG_IS_QUAL;
     ensure_result_arena(mcx, &mut state)?;
@@ -1819,6 +1836,12 @@ pub fn exec_build_projection_info_impl<'mcx>(
     // state->parent = parent;  state->ext_params = NULL;  (the owned spine does
     // not thread parent/ext_params; mirrors ExecInitExpr's parent-ignoring path)
     let state = &mut proj_info.pi_state;
+    // Stamp the non-owning EState back-link (a parent IS present at this entry,
+    // `ExecBuildProjectionInfo(targetList, ..., parent, ...)`), so a SubPlan in
+    // the projection target list (e.g. `SELECT x IN (SELECT ...)`) can find
+    // `es_subplanstates` synchronously at compile time. The `parent` PlanState
+    // itself is stamped later by `stamp_expr_parents`.
+    state.es_link = Some(EStateLink::from_ref(estate));
     state.ext_params = 0;
     // state->resultslot = slot; — the projection's output slot (a pool SlotId,
     // C's `TupleTableSlot *`). The interpreter's EEOP_ASSIGN_* arms write the
