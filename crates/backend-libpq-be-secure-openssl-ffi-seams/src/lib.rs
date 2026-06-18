@@ -371,6 +371,31 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `X509_get_issuer_name(cert)` — the issuer name handle.
+    pub fn x509_get_issuer_name(cert: X509) -> X509Name
+);
+
+seam_core::seam!(
+    /// `X509_NAME_to_cstring(name)` (be-secure-openssl.c) — render a certificate
+    /// subject/issuer `X509_NAME *` into the `/CN=.../O=...` slash-delimited
+    /// string used by `be_tls_get_peer_subject_name` /
+    /// `be_tls_get_peer_issuer_name`. All of the BIO + `ASN1_STRING_print_ex`
+    /// (`ASN1_STRFLGS_RFC2253 & ~ASN1_STRFLGS_ESC_MSB | ASN1_STRFLGS_UTF8_CONVERT`)
+    /// + `pg_any_to_server(..., PG_UTF8)` work stays inside the provider (it owns
+    /// the live libcrypto name entries); the already-decoded UTF-8 bytes (without
+    /// the trailing NUL) cross the seam. Mirrors [`x509_name_print_rfc2253`].
+    pub fn x509_name_to_cstring(name: X509Name) -> Vec<u8>
+);
+
+seam_core::seam!(
+    /// `be_tls_get_peer_serial`'s serial-number extraction:
+    /// `BN_bn2dec(ASN1_INTEGER_to_BN(X509_get_serialNumber(cert)))` — the peer
+    /// certificate's serial number as a decimal string. The ASN.1/BIGNUM work
+    /// stays inside the provider; the decimal string crosses the seam.
+    pub fn x509_get_serial_decimal(cert: X509) -> String
+);
+
+seam_core::seam!(
     /// `X509_free(cert)` — release a certificate handle (`be_tls_close`'s
     /// `port->peer`). A no-op on `0`.
     pub fn x509_free(cert: X509)
