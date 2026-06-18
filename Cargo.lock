@@ -12302,6 +12302,7 @@ dependencies = [
  "backend-optimizer-util-predtest-seams",
  "backend-optimizer-util-relnode-seams",
  "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-cache-inval-seams",
  "backend-utils-cache-lsyscache-seams",
  "mcx",
  "types-core",
@@ -12321,7 +12322,6 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
- "types-syscache",
  "types-tuple",
 ]
 

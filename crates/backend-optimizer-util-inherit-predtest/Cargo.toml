@@ -24,3 +24,4 @@ backend-optimizer-util-relnode-seams = { path = "../backend-optimizer-util-relno
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
 backend-optimizer-util-pathnode-seams = { path = "../backend-optimizer-util-pathnode-seams" }
+backend-utils-cache-inval-seams = { path = "../backend-utils-cache-inval-seams" }
