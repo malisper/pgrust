@@ -43,6 +43,8 @@ backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
 
 # Inward seams owned by this unit.
 backend-commands-policy-seams = { path = "../backend-commands-policy-seams" }
+# ProcessUtilitySlow dispatch entry points (CREATE/ALTER POLICY) installed here.
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 
 # Cross-subsystem externals via their owners' -seams crates.
 backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }

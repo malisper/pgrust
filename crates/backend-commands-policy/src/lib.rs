@@ -1390,9 +1390,26 @@ fn node_to_string_opt<'mcx>(
 
 pub fn init_seams() {
     use backend_commands_policy_seams as seams;
+    use backend_tcop_utility_out_seams as rt;
+    use types_nodes::nodes::Node;
 
     seams::RemovePolicyById::set(RemovePolicyById);
     seams::remove_role_from_object_policy::set(RemoveRoleFromObjectPolicy);
     seams::get_relation_policy_oid::set(get_relation_policy_oid);
     seams::rename_policy::set(rename_policy);
+
+    // ProcessUtilitySlow dispatch (utility.c): CREATE/ALTER POLICY. The C
+    // `castNode(CreatePolicyStmt, parsetree)` is the runtime tag assert.
+    rt::create_policy::set(|mcx, parsetree| match parsetree {
+        Node::CreatePolicyStmt(stmt) => CreatePolicy(mcx, stmt),
+        _ => Err(types_error::PgError::error(
+            "create_policy: parse tree is not a CreatePolicyStmt",
+        )),
+    });
+    rt::alter_policy::set(|mcx, parsetree| match parsetree {
+        Node::AlterPolicyStmt(stmt) => AlterPolicy(mcx, stmt),
+        _ => Err(types_error::PgError::error(
+            "alter_policy: parse tree is not an AlterPolicyStmt",
+        )),
+    });
 }
