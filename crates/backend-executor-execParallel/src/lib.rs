@@ -578,8 +578,8 @@ pub fn ExecInitParallelPlan<'mcx>(
     parallel::shm_toc_estimate_keys(estimator, 1);
 
     // Estimate space for serialized ParamListInfo.
-    let param_li = estate.es_param_list_info;
-    let paramlistinfo_len: i32 = sup::estimate_param_list_space::call(param_li) as i32;
+    let param_li = estate.es_param_list_info.clone();
+    let paramlistinfo_len: i32 = sup::estimate_param_list_space::call(param_li.clone()) as i32;
     parallel::shm_toc_estimate_chunk(estimator, paramlistinfo_len as Size);
     parallel::shm_toc_estimate_keys(estimator, 1);
 

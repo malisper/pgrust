@@ -11,8 +11,9 @@
 //! then a call panics loudly.
 
 use types_error::PgResult;
+use types_nodes::params::ParamListInfo;
 use types_nodes::parsestmt::{
-    DestReceiverHandle, ParamListInfoHandle, PortalHandle, QueryCompletionHandle,
+    DestReceiverHandle, PortalHandle, QueryCompletionHandle,
 };
 use types_execparallel::SnapshotHandle;
 
@@ -22,7 +23,7 @@ seam_core::seam!(
     /// `ereport(ERROR)`.
     pub fn portal_start(
         portal: &PortalHandle,
-        params: ParamListInfoHandle,
+        params: ParamListInfo,
         eflags: i32,
         snapshot: Option<SnapshotHandle>,
     ) -> PgResult<()>

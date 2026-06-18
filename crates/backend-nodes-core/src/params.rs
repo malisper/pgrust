@@ -5,19 +5,22 @@
 //! `ParamsErrorCallback`, and the parser hooks `paramlist_parser_setup` /
 //! `paramlist_param_ref`.
 //!
-//! ## Handle-backed store
+//! ## Value-typed `ParamListInfo`
 //!
-//! A live `ParamListInfo` crosses crate boundaries as the opaque
-//! [`ParamListInfoHandle`] (`types_nodes::parsestmt`). This family backs each
-//! handle with a real [`ParamListInfoData`] (`types_nodes::params`, mirrored
-//! field-for-field from `nodes/params.h`) in a backend-local
-//! ([`thread_local!`]) handle-keyed store — the same "real entry store" idiom
-//! the relcache / portalmem units use. `makeParamList` allocates a new entry and
-//! returns its handle; the remaining operations look the entry up by handle and
-//! operate on the owned struct. C's `palloc`'d flexible-array `params[]` is the
+//! A live `ParamListInfo` is a real value: `Option<Rc<ParamListInfoData>>`
+//! ([`types_nodes::params::ParamListInfo`]), shared by reference count exactly
+//! as C shares its `ParamListInfoData *` by pointer. `makeParamList` allocates a
+//! new struct and returns it; the other operations read/derive from a borrowed
+//! `&ParamListInfoData`. C's `palloc`'d flexible-array `params[]` is the
 //! struct's `Vec<ParamExternData>`; C's `char **start_address` serialize cursor
 //! is a raw `*mut u8` cursor (the `datum.c` seam contract), advanced exactly as
 //! the C advances `*start_address`.
+//!
+//! By-reference datum images (`copyParamList`/`RestoreParamList` `datumCopy`)
+//! are interned into the leaked, backend-lifetime [`param_list_mcx`] so the
+//! `Datum<'static>` carried by the struct stays valid for the value's life —
+//! the faithful analogue of C palloc'ing into a long-lived (per-portal /
+//! backend) context. There is no handle registry: the struct travels by value.
 //!
 //! ## Seams (genuinely unported owners)
 //!
@@ -38,15 +41,13 @@
 
 #![allow(non_snake_case)]
 
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::rc::Rc;
 
 use mcx::{Mcx, MemoryContext};
 use types_error::{PgError, PgResult, ERRCODE_OUT_OF_MEMORY};
 use types_nodes::params::{
-    ParamExternData, ParamListInfoData, ParamRef, ParamsErrorCbData, T_Param,
+    ParamExternData, ParamListInfo, ParamListInfoData, ParamRef, ParamsErrorCbData, T_Param,
 };
-use types_nodes::parsestmt::ParamListInfoHandle;
 use types_nodes::primnodes::{Param, PARAM_EXTERN};
 
 use backend_access_transam_xact_seams as xact_seam;
@@ -55,9 +56,9 @@ use backend_utils_cache_lsyscache_seams as lsyscache_seam;
 use backend_utils_fmgr_fmgr_seams as fmgr_seam;
 use types_core::Oid;
 // The canonical unified value type (Datum-unification keystone). The owned
-// `ParamListInfoData`/`ParamExternData` carry `Datum<'mcx>`; the handle-keyed
-// store backs them in a backend-lifetime context, so the stored value type is
-// `Datum<'static>` (see `PARAM_LIST_CONTEXT`).
+// `ParamListInfoData`/`ParamExternData` carry `Datum<'mcx>`; a live param list
+// is interned into the backend-lifetime context, so the value type is
+// `ParamListInfoData<'static>` (see `param_list_mcx`).
 use types_tuple::backend_access_common_heaptuple::Datum;
 
 /// `sizeof(int)` — the 4-byte count word written/read by the serializer
@@ -75,85 +76,23 @@ fn oid_is_valid(oid: Oid) -> bool {
 }
 
 // ===========================================================================
-// Handle-keyed store
+// Backend-lifetime by-reference datum context
 // ===========================================================================
 
 thread_local! {
-    /// The backend-local `ParamListInfo` store. The C `ParamListInfo` pointer is
-    /// the [`ParamListInfoHandle`] key; the palloc'd object is the owned value.
-    ///
-    /// The stored value carries `Datum<'static>`: the C objects are palloc'd in a
-    /// long-lived (backend-lifetime) context, modeled by [`param_list_mcx`].
-    static PARAM_LISTS: RefCell<HashMap<u64, ParamListInfoData<'static>>> =
-        RefCell::new(HashMap::new());
-    /// Monotonic handle allocator (`1..`; `0` is reserved for the C `NULL`
-    /// `ParamListInfoHandle::NULL`).
-    static NEXT_HANDLE: RefCell<u64> = const { RefCell::new(1) };
-    /// The backend-lifetime memory context backing the store's by-reference
-    /// datum images. C's `copyParamList` / `RestoreParamList` `datumCopy` into a
-    /// caller context that outlives the `ParamListInfo`; the owned model copies
-    /// into this leaked, never-reset context so the stored `Datum<'static>`
-    /// by-reference bytes stay valid for the store's lifetime.
+    /// The backend-lifetime memory context backing a value param list's
+    /// by-reference datum images. C's `copyParamList` / `RestoreParamList`
+    /// `datumCopy` into a caller context that outlives the `ParamListInfo`; the
+    /// owned model copies into this leaked, never-reset context so the stored
+    /// `Datum<'static>` by-reference bytes stay valid for the value's lifetime.
     static PARAM_LIST_CONTEXT: &'static MemoryContext =
         Box::leak(Box::new(MemoryContext::new("ParamListInfo")));
 }
 
-/// `Mcx<'static>` for the backend-lifetime [`PARAM_LIST_CONTEXT`] — where the
-/// store's owned by-reference datum images are allocated.
+/// `Mcx<'static>` for the backend-lifetime [`PARAM_LIST_CONTEXT`] — where a
+/// value param list's owned by-reference datum images are allocated.
 fn param_list_mcx() -> Mcx<'static> {
     PARAM_LIST_CONTEXT.with(|c| c.mcx())
-}
-
-/// Allocate the next non-NULL handle id.
-fn alloc_handle() -> u64 {
-    NEXT_HANDLE.with(|n| {
-        let mut n = n.borrow_mut();
-        let h = *n;
-        *n += 1;
-        h
-    })
-}
-
-/// Run `f` over the owned `ParamListInfoData` behind `handle` (read-only).
-fn with_list<R>(
-    handle: ParamListInfoHandle,
-    f: impl FnOnce(&ParamListInfoData<'static>) -> R,
-) -> R {
-    PARAM_LISTS.with(|store| {
-        let store = store.borrow();
-        let pl = store
-            .get(&handle.0)
-            .expect("ParamListInfoHandle refers to a live ParamListInfo");
-        f(pl)
-    })
-}
-
-/// Run `f` over the owned `ParamListInfoData` behind `handle` (mutable).
-fn with_list_mut<R>(
-    handle: ParamListInfoHandle,
-    f: impl FnOnce(&mut ParamListInfoData<'static>) -> R,
-) -> R {
-    PARAM_LISTS.with(|store| {
-        let mut store = store.borrow_mut();
-        let pl = store
-            .get_mut(&handle.0)
-            .expect("ParamListInfoHandle refers to a live ParamListInfo");
-        f(pl)
-    })
-}
-
-/// Install a freshly built `ParamListInfoData` into the store and return its
-/// handle.
-fn install(pl: ParamListInfoData<'static>) -> ParamListInfoHandle {
-    let h = alloc_handle();
-    PARAM_LISTS.with(|store| store.borrow_mut().insert(h, pl));
-    ParamListInfoHandle(h)
-}
-
-/// Snapshot the owned struct behind `handle` (used where the C reads `*paramLI`
-/// out of the store before re-entering it under a fresh allocation).
-fn snapshot(handle: ParamListInfoHandle) -> ParamListInfoData<'static> {
-    with_list(handle, |pl| pl.clone())
 }
 
 // ===========================================================================
@@ -168,7 +107,11 @@ fn snapshot(handle: ParamListInfoHandle) -> ParamListInfoData<'static> {
 /// (`paramlist_parser_setup`) automatically; the owned model records only that a
 /// parser setup is present and the parser installs the concrete resolver
 /// ([`paramlist_param_ref`]) explicitly (see the module docs).
-pub fn makeParamList(num_params: i32) -> PgResult<ParamListInfoHandle> {
+///
+/// Returns the owned struct so the caller (e.g. `EvaluateParams`) can fill the
+/// `params[]` slots before sharing it; wrap in `Rc` to hand off as a
+/// [`ParamListInfo`].
+pub fn makeParamList(num_params: i32) -> PgResult<ParamListInfoData<'static>> {
     // size = offsetof(ParamListInfoData, params)
     //        + numParams * sizeof(ParamExternData);
     // modeled by allocating `numParams` empty slots (zero when non-positive,
@@ -186,7 +129,7 @@ pub fn makeParamList(num_params: i32) -> PgResult<ParamListInfoHandle> {
         params.push(ParamExternData::empty());
     }
 
-    let pl = ParamListInfoData {
+    Ok(ParamListInfoData {
         param_fetch: false,
         param_fetch_arg: None,
         param_compile: false,
@@ -197,9 +140,12 @@ pub fn makeParamList(num_params: i32) -> PgResult<ParamListInfoHandle> {
         param_values_str: None,
         num_params,
         params,
-    };
+    })
+}
 
-    Ok(install(pl))
+/// The `make_param_list` seam shape: build a fresh, shareable value param list.
+pub fn make_param_list_value(num_params: i32) -> PgResult<ParamListInfo> {
+    Ok(Some(Rc::new(makeParamList(num_params)?)))
 }
 
 // ===========================================================================
@@ -207,26 +153,24 @@ pub fn makeParamList(num_params: i32) -> PgResult<ParamListInfoHandle> {
 // ===========================================================================
 
 /// `copyParamList(from)` (params.c): make a static, self-contained copy of a
-/// `ParamListInfo`, `datumCopy`-ing pass-by-reference values into the current
-/// context. Dynamic hooks and `paramValuesStr` are intentionally not copied.
+/// `ParamListInfo`, `datumCopy`-ing pass-by-reference values into the
+/// backend-lifetime context. Dynamic hooks and `paramValuesStr` are
+/// intentionally not copied.
 ///
-/// Returns `ParamListInfoHandle::NULL` when `from` is NULL or has
-/// `numParams <= 0` (C's `return NULL`).
-pub fn copyParamList(from: ParamListInfoHandle) -> PgResult<ParamListInfoHandle> {
-    if from == ParamListInfoHandle::NULL {
-        return Ok(ParamListInfoHandle::NULL);
-    }
-    let from = snapshot(from);
-    if from.num_params <= 0 {
-        return Ok(ParamListInfoHandle::NULL);
-    }
+/// Returns `None` (C's `return NULL`) when `from` is NULL or has
+/// `numParams <= 0`.
+pub fn copyParamList(from: Option<&ParamListInfoData<'static>>) -> PgResult<ParamListInfo> {
+    let from = match from {
+        Some(f) if f.num_params > 0 => f,
+        _ => return Ok(None),
+    };
 
-    let retval = makeParamList(from.num_params)?;
+    let mut retval = makeParamList(from.num_params)?;
 
     for i in 0..from.num_params as usize {
         // give hook a chance in case parameter is dynamic
         let oprm = if from.param_fetch {
-            paramFetch(&from, (i + 1) as i32)
+            paramFetch(from, (i + 1) as i32)
         } else {
             from.params[i].clone()
         };
@@ -241,10 +185,10 @@ pub fn copyParamList(from: ParamListInfoHandle) -> PgResult<ParamListInfoHandle>
                 datum_seam::datum_copy_v::call(param_list_mcx(), &nprm.value, typ_byval, typ_len as i32)?;
         }
 
-        with_list_mut(retval, |pl| pl.params[i] = nprm);
+        retval.params[i] = nprm;
     }
 
-    Ok(retval)
+    Ok(Some(Rc::new(retval)))
 }
 
 // ===========================================================================
@@ -260,7 +204,7 @@ pub fn copyParamList(from: ParamListInfoHandle) -> PgResult<ParamListInfoHandle>
 /// the `ParamListInfo` as the resolver's argument; this is the documented marker
 /// of that contract (the resolver and its argument are the real artifacts). The
 /// `p_coerce_param_hook` is left unset, exactly as C does.
-pub fn paramlist_parser_setup(_arg: ParamListInfoHandle) {
+pub fn paramlist_parser_setup(_arg: Option<&ParamListInfoData<'static>>) {
     // no need to use p_coerce_param_hook
 }
 
@@ -270,10 +214,9 @@ pub fn paramlist_parser_setup(_arg: ParamListInfoHandle) {
 /// `None` if the parameter number is out of range or the parameter has no type
 /// (C's `return NULL`).
 pub fn paramlist_param_ref(
-    param_li: ParamListInfoHandle,
+    param_li: &ParamListInfoData<'static>,
     pref: &ParamRef,
 ) -> PgResult<Option<Param>> {
-    let param_li = snapshot(param_li);
     let paramno = pref.number;
 
     // check parameter number is valid
@@ -283,7 +226,7 @@ pub fn paramlist_param_ref(
 
     // give hook a chance in case parameter is dynamic
     let prm = if param_li.param_fetch {
-        paramFetch(&param_li, paramno)
+        paramFetch(param_li, paramno)
     } else {
         param_li.params[(paramno - 1) as usize].clone()
     };
@@ -329,21 +272,18 @@ fn paramFetch(_param_li: &ParamListInfoData<'static>, _paramid: i32) -> ParamExt
 /// `EstimateParamListSpace(paramLI)` (params.c): estimate the bytes needed to
 /// serialize a `ParamListInfo` (4-byte count, then per-param OID / flags /
 /// datum).
-pub fn EstimateParamListSpace(param_li: ParamListInfoHandle) -> PgResult<usize> {
+pub fn EstimateParamListSpace(param_li: Option<&ParamListInfoData<'static>>) -> PgResult<usize> {
     let mut sz: usize = SIZEOF_INT;
 
-    if param_li == ParamListInfoHandle::NULL {
-        return Ok(sz);
-    }
-    let param_li = snapshot(param_li);
-    if param_li.num_params <= 0 {
-        return Ok(sz);
-    }
+    let param_li = match param_li {
+        Some(p) if p.num_params > 0 => p,
+        _ => return Ok(sz),
+    };
 
     for i in 0..param_li.num_params as usize {
         // give hook a chance in case parameter is dynamic
         let prm = if param_li.param_fetch {
-            paramFetch(&param_li, (i + 1) as i32)
+            paramFetch(param_li, (i + 1) as i32)
         } else {
             param_li.params[i].clone()
         };
@@ -411,17 +351,17 @@ fn add_size(s1: usize, s2: usize) -> PgResult<usize> {
 /// `start_address` must point into a writable buffer with at least
 /// `EstimateParamListSpace(paramLI)` bytes remaining.
 pub unsafe fn SerializeParamList(
-    param_li: ParamListInfoHandle,
+    param_li: Option<&ParamListInfoData<'static>>,
     start_address: *mut u8,
 ) -> PgResult<*mut u8> {
     let mut cursor = start_address;
 
     // Write number of parameters.
-    let live = param_li != ParamListInfoHandle::NULL && {
-        with_list(param_li, |pl| pl.num_params > 0)
+    let live = match param_li {
+        Some(p) if p.num_params > 0 => Some(p),
+        _ => None,
     };
-    let snapshot = if live { Some(snapshot(param_li)) } else { None };
-    let nparams: i32 = snapshot.as_ref().map_or(0, |pl| pl.num_params);
+    let nparams: i32 = live.map_or(0, |pl| pl.num_params);
 
     // memcpy(*start_address, &nparams, sizeof(int)); *start_address += sizeof(int);
     core::ptr::copy_nonoverlapping(
@@ -432,11 +372,11 @@ pub unsafe fn SerializeParamList(
     cursor = cursor.add(SIZEOF_INT);
 
     // Write each parameter in turn.
-    if let Some(param_li) = snapshot {
+    if let Some(param_li) = live {
         for i in 0..nparams as usize {
             // give hook a chance in case parameter is dynamic
             let prm = if param_li.param_fetch {
-                paramFetch(&param_li, (i + 1) as i32)
+                paramFetch(param_li, (i + 1) as i32)
             } else {
                 param_li.params[i].clone()
             };
@@ -476,7 +416,7 @@ pub unsafe fn SerializeParamList(
 /// `RestoreParamList(&start_address)` (params.c): recreate a static,
 /// self-contained `ParamListInfo` from the serialized representation, advancing
 /// the cursor. The result is what [`copyParamList`] would create. Returns the
-/// new handle and the advanced cursor.
+/// new value and the advanced cursor.
 ///
 /// # Safety
 ///
@@ -484,7 +424,7 @@ pub unsafe fn SerializeParamList(
 /// with the full serialized image remaining.
 pub unsafe fn RestoreParamList(
     start_address: *mut u8,
-) -> PgResult<(ParamListInfoHandle, *mut u8)> {
+) -> PgResult<(ParamListInfo, *mut u8)> {
     let mut cursor = start_address;
 
     // memcpy(&nparams, *start_address, sizeof(int)); *start_address += sizeof(int);
@@ -493,7 +433,7 @@ pub unsafe fn RestoreParamList(
     let nparams = i32::from_ne_bytes(nbuf);
     cursor = cursor.add(SIZEOF_INT);
 
-    let param_li = makeParamList(nparams)?;
+    let mut param_li = makeParamList(nparams)?;
 
     for i in 0..nparams.max(0) as usize {
         // Read type OID.
@@ -516,16 +456,14 @@ pub unsafe fn RestoreParamList(
         let (value, isnull, adv) = datum_seam::datum_restore::call(cursor);
         cursor = adv;
 
-        with_list_mut(param_li, |pl| {
-            let prm = &mut pl.params[i];
-            prm.ptype = ptype;
-            prm.pflags = pflags;
-            prm.value = Datum::ByVal(value.as_usize());
-            prm.isnull = isnull;
-        });
+        let prm = &mut param_li.params[i];
+        prm.ptype = ptype;
+        prm.pflags = pflags;
+        prm.value = Datum::ByVal(value.as_usize());
+        prm.isnull = isnull;
     }
 
-    Ok((param_li, cursor))
+    Ok((Some(Rc::new(param_li)), cursor))
 }
 
 // ===========================================================================
@@ -547,7 +485,7 @@ pub unsafe fn RestoreParamList(
 /// model takes the caller's `mcx` for the `OidOutputFunctionCall` result bytes.
 pub fn BuildParamLogString<'mcx>(
     mcx: Mcx<'mcx>,
-    params: ParamListInfoHandle,
+    params: &ParamListInfoData<'static>,
     known_text_values: &[Option<String>],
     maxlen: i32,
 ) -> PgResult<Option<String>> {
@@ -555,7 +493,6 @@ pub fn BuildParamLogString<'mcx>(
     // generated with a different maxlen, and this is what creates that string.
 
     // No work if the param fetch hook is in use, nor in an aborted transaction.
-    let params = snapshot(params);
     if params.param_fetch || xact_seam::is_aborted_transaction_block_state::call() {
         return Ok(None);
     }

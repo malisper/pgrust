@@ -709,20 +709,51 @@ pub fn ExecEvalParamExtern<'mcx>(
     // ereport(ERROR, (ERRCODE_UNDEFINED_OBJECT,
     //                 errmsg("no value found for parameter %d", paramId)));
     //
-    // ecxt_param_list_info aliases the EState's es_param_list_info, which in the
-    // owned model is a ParamListInfoHandle into the (unported) param-list unit:
-    // the params[] array, numParams, and the dynamic paramFetch hook all live
-    // there. Reading prm->ptype/value/isnull (and firing paramFetch) needs that
-    // owner. The step payload (d.param.paramid / paramtype) is modeled; the
-    // lookup itself is blocked on the param-list owner.
-    let _ = (op, econtext, estate);
-    let _ = state;
-    panic!(
-        "ExecEvalParamExtern: resolving econtext->ecxt_param_list_info \
-         (params[paramId-1] / numParams / the dynamic paramFetch hook) needs the \
-         unported param-list owner; the EState only carries a ParamListInfoHandle \
-         into it. Blocked until the param-list unit lands."
-    )
+    // ecxt_param_list_info aliases the EState's es_param_list_info, now a real
+    // value `ParamListInfo` (`Option<Rc<ParamListInfoData>>`); the params[]
+    // array / numParams are read directly off it. The dynamic paramFetch hook
+    // lives in an unported subsystem (`param_fetch == true` would reach a loud
+    // panic in the params owner); the static array path is the common case.
+    let _ = econtext;
+    let (paramid, paramtype) = match &step_data(state, op) {
+        ExprEvalStepData::Param { paramid, paramtype } => (*paramid, *paramtype),
+        _ => unreachable!("ExecEvalParamExtern: step is not an EEOP_PARAM_EXTERN"),
+    };
+
+    if let Some(param_info) = estate.es_param_list_info.as_ref() {
+        if paramid > 0 && paramid <= param_info.num_params {
+            // give hook a chance in case parameter is dynamic
+            if param_info.param_fetch {
+                panic!(
+                    "ExecEvalParamExtern: dynamic ParamListInfo paramFetch hook \
+                     invoked, but no paramFetch owner is ported (the hook lives in \
+                     an unported subsystem)"
+                );
+            }
+            let prm = &param_info.params[(paramid - 1) as usize];
+            if prm.ptype != 0 {
+                if prm.ptype != paramtype {
+                    return Err(types_error::PgError::error(format!(
+                        "type of parameter {paramid} ({}) does not match that when \
+                         preparing the plan ({})",
+                        prm.ptype, paramtype
+                    ))
+                    .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH));
+                }
+                let (resvalue_id, _resnull_id) = res_cells(state, op);
+                state.result_cells.set(
+                    resvalue_id,
+                    ResultCell { value: prm.value.clone(), isnull: prm.isnull },
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    Err(types_error::PgError::error(format!(
+        "no value found for parameter {paramid}"
+    ))
+    .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT))
 }
 
 /// `ExecEvalParamSet(...)` — store a value into a PARAM_EXEC slot.

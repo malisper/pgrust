@@ -12,8 +12,9 @@ use types_core::Oid;
 use types_error::PgResult;
 use types_nodes::nodes::Node;
 use types_nodes::nodeindexscan::PlannedStmt;
+use types_nodes::params::ParamListInfo;
 use types_nodes::parsestmt::{
-    CachedPlanHandle, CachedPlanSourceHandle, CommandTag, ParamListInfoHandle, RawStmt,
+    CachedPlanHandle, CachedPlanSourceHandle, CommandTag, RawStmt,
     ResourceOwnerHandle,
 };
 use types_nodes::queryenvironment::QueryEnvironment;
@@ -64,7 +65,7 @@ seam_core::seam!(
     /// Can `ereport(ERROR)`.
     pub fn get_cached_plan<'mcx>(
         plansource: CachedPlanSourceHandle,
-        bound_params: ParamListInfoHandle,
+        bound_params: ParamListInfo,
         owner: ResourceOwnerHandle,
         query_env: Option<&QueryEnvironment<'mcx>>,
     ) -> PgResult<CachedPlanHandle>

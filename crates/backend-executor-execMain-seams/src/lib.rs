@@ -313,7 +313,7 @@ seam_core::seam!(
         plan: &types_nodes::nodeindexscan::PlannedStmt<'mcx>,
         source_text: &str,
         snapshot: Option<std::rc::Rc<types_snapshot::SnapshotData>>,
-        params: types_nodes::parsestmt::ParamListInfoHandle,
+        params: types_nodes::params::ParamListInfo,
         instrument_option: i32,
         eflags: i32,
     ) -> types_error::PgResult<types_nodes::querydesc::QueryDesc>

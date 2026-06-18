@@ -40,7 +40,8 @@ use mcx::{Mcx, McxOwned, MemoryContext, PgBox, PgString, PgVec};
 use crate::execnodes::EStateData;
 use crate::nodeindexscan::PlannedStmt;
 use crate::nodes::{CmdType, Node};
-use crate::parsestmt::{DestReceiverHandle, ParamListInfoHandle};
+use crate::params::ParamListInfo;
+use crate::parsestmt::DestReceiverHandle;
 use crate::planstate::PlanStateNode;
 use types_error::PgResult;
 use types_tuple::heaptuple::TupleDescData;
@@ -91,8 +92,8 @@ pub struct QueryDesc {
     /// receiver-handle bridge until the DestReceiver receiver-value router
     /// (F0b / tcop-dest keystone) lands; `NULL` is no output.
     pub dest: DestReceiverHandle,
-    /// `ParamListInfo params` — external parameter values, or `NULL`.
-    pub params: ParamListInfoHandle,
+    /// `ParamListInfo params` — external parameter values, or `None`.
+    pub params: ParamListInfo,
     /// `int instrument_options` — OR of `InstrumentOption` flags.
     pub instrument_options: i32,
     /// `bool already_executed` — `ExecutorRun` has already been called once.
@@ -120,7 +121,7 @@ impl QueryDesc {
         snapshot: Option<alloc::rc::Rc<types_snapshot::SnapshotData>>,
         crosscheck_snapshot: Option<alloc::rc::Rc<types_snapshot::SnapshotData>>,
         dest: DestReceiverHandle,
-        params: ParamListInfoHandle,
+        params: ParamListInfo,
         instrument_options: i32,
     ) -> PgResult<Self> {
         // qd->operation = plannedstmt->commandType;

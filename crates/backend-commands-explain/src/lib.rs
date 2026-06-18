@@ -25,7 +25,8 @@ use types_error::{PgError, PgResult};
 use types_explain::{ExplainFormat, ExplainState};
 use types_nodes::nodeindexscan::PlannedStmt;
 use types_nodes::nodes::Node;
-use types_nodes::parsestmt::{IntoClause, ParamListInfoHandle};
+use types_nodes::params::ParamListInfo;
+use types_nodes::parsestmt::IntoClause;
 use types_nodes::queryenvironment::QueryEnvironment;
 use types_scan::sdir::ForwardScanDirection;
 
@@ -319,7 +320,7 @@ fn explain_one_plan<'mcx>(
     into: Option<&IntoClause<'mcx>>,
     es: &mut ExplainState<'mcx>,
     query_string: &str,
-    params: ParamListInfoHandle,
+    params: ParamListInfo,
     _query_env: Option<&QueryEnvironment<'mcx>>,
     bk: &Bookkeeping,
     es_buffers: bool,
@@ -501,7 +502,7 @@ fn explain_one_utility<'mcx>(
     es: &mut ExplainState<'mcx>,
     _source_text: &str,
     _query_env: Option<&QueryEnvironment<'mcx>>,
-    _params: ParamListInfoHandle,
+    _params: ParamListInfo,
 ) -> PgResult<()> {
     let _ = es;
     panic!(

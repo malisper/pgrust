@@ -47,7 +47,8 @@ use types_error::{
 };
 use types_nodes::ddlnodes::{CreateTableAsStmt, IntoClause};
 use types_nodes::nodes::{CmdType, Node};
-use types_nodes::parsestmt::{DestReceiverHandle, ParamListInfoHandle};
+use types_nodes::params::ParamListInfo;
+use types_nodes::parsestmt::DestReceiverHandle;
 use types_nodes::tuptable::SlotData;
 use types_portal::QueryCompletion;
 use types_rel::Relation;
@@ -378,7 +379,7 @@ pub fn ExecCreateTableAs<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &CreateTableAsStmt<'mcx>,
     query_string: &str,
-    params: ParamListInfoHandle,
+    params: ParamListInfo,
     mut qc: Option<QueryCompletion>,
 ) -> PgResult<(ObjectAddress, Option<QueryCompletion>)> {
     /* query = castNode(Query, stmt->query); into = stmt->into; */
@@ -903,7 +904,7 @@ fn exec_create_table_as_seam<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &CreateTableAsStmt<'mcx>,
     query_string: &str,
-    params: ParamListInfoHandle,
+    params: ParamListInfo,
     qc: Option<QueryCompletion>,
 ) -> PgResult<(ObjectAddress, Option<QueryCompletion>)> {
     ExecCreateTableAs(mcx, stmt, query_string, params, qc)

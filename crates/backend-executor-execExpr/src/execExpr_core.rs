@@ -32,7 +32,6 @@ use types_nodes::execexpr::{
 };
 use types_nodes::execnodes::PlanStateData;
 use types_nodes::nodehashjoin::HashJoinState;
-use types_nodes::parsestmt::ParamListInfoHandle;
 use types_nodes::primnodes::{
     BoolExprType, Const, Expr, NullTestType, ParamKind, VarReturningType as VrtKind,
 };
@@ -2529,19 +2528,54 @@ pub fn evaluate_expr_fallback(
     Ok(Expr::Const(result))
 }
 
-/// `EvaluateParams` leaf (prepare.c).
+thread_local! {
+    /// Backend-lifetime context for prepared-parameter by-reference datum
+    /// images. `EvaluateParams` evaluates each `$n` value into the EState's
+    /// per-tuple context, then deep-copies it into the param list's long-lived
+    /// storage (C palloc's `paramLI` in `CreateExecutorState`'s context, which
+    /// outlives the per-tuple context the value is computed in). The owned value
+    /// `ParamListInfoData` carries `Datum<'static>`, so the copy target is this
+    /// leaked, never-reset context.
+    static PREPARED_PARAM_CONTEXT: &'static mcx::MemoryContext =
+        Box::leak(Box::new(mcx::MemoryContext::new("PreparedParams")));
+}
+
+/// `EvaluateParams` leaf (prepare.c): for the `i`-th prepared `ExprState`, set
+/// `paramLI->params[i]`: `ptype = param_types[i]`, `pflags = PARAM_FLAG_CONST`,
+/// `value = ExecEvalExprSwitchContext(n, GetPerTupleExprContext(estate),
+/// &prm->isnull)`.
 pub fn eval_exec_param_into_list<'mcx>(
-    param_li: ParamListInfoHandle,
+    param_li: &mut types_nodes::params::ParamListInfoData<'static>,
     exprstate: &ExprState<'mcx>,
     param_index: i32,
     ptype: types_core::Oid,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    let _ = (param_li, exprstate, param_index, ptype, estate);
-    panic!(
-        "execExpr-core: EvaluateParams leaf needs GetPerTupleExprContext (execUtils) and the \
-         ParamListInfo slot-write (params unit); no seams exported yet"
-    );
+    // ExprState is consumed by-&mut by the evaluator (it threads result cells);
+    // clone the borrowed compiled program into a local the evaluator can drive,
+    // matching the C `ExecEvalExprSwitchContext(n, ...)` which mutates the
+    // ExprState's scratch in place.
+    let mut state = exprstate.clone();
+
+    // prm->value = ExecEvalExprSwitchContext(n, GetPerTupleExprContext(estate),
+    //                                        &prm->isnull);
+    let econtext =
+        backend_executor_execUtils_seams::get_per_tuple_expr_context::call(estate)?;
+    let (value, isnull) = exec_eval_expr_switch_context(&mut state, econtext, estate)?;
+
+    // Deep-copy the computed value out of the per-tuple context into the param
+    // list's backend-lifetime storage (`Datum<'static>`). For a by-value datum
+    // this is a word copy; for by-reference it re-allocs the bytes.
+    let owned_value: types_nodes::params::Datum<'static> =
+        PREPARED_PARAM_CONTEXT.with(|c| value.clone_in(c.mcx()))?;
+
+    let prm = &mut param_li.params[param_index as usize];
+    prm.ptype = ptype;
+    prm.pflags = types_nodes::params::PARAM_FLAG_CONST;
+    prm.value = owned_value;
+    prm.isnull = isnull;
+
+    Ok(())
 }
 
 // ===========================================================================

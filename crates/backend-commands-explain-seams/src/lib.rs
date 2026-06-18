@@ -14,7 +14,8 @@ use types_error::PgResult;
 use types_explain::ExplainState;
 use types_nodes::nodeindexscan::PlannedStmt;
 use types_nodes::nodes::Node;
-use types_nodes::parsestmt::{IntoClause, ParamListInfoHandle};
+use types_nodes::params::ParamListInfo;
+use types_nodes::parsestmt::IntoClause;
 use types_nodes::queryenvironment::QueryEnvironment;
 
 /// The EXPLAIN-EXECUTE bookkeeping the C `ExplainExecuteQuery` keeps on its
@@ -82,7 +83,7 @@ seam_core::seam!(
         into: Option<&IntoClause<'mcx>>,
         es: &mut ExplainState<'mcx>,
         query_string: &str,
-        param_li: ParamListInfoHandle,
+        param_li: ParamListInfo,
         query_env: Option<&QueryEnvironment<'mcx>>,
         bk: &Bookkeeping,
         es_buffers: bool,
@@ -100,7 +101,7 @@ seam_core::seam!(
         es: &mut ExplainState<'mcx>,
         source_text: &str,
         query_env: Option<&QueryEnvironment<'mcx>>,
-        param_li: ParamListInfoHandle,
+        param_li: ParamListInfo,
     ) -> PgResult<()>
 );
 

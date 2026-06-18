@@ -248,17 +248,20 @@ pub fn init_seams() {
     s::pg_plan_queries_value::set(
         |mcx, querytrees, query_string, cursor_options, bound_params| {
             // The value body owns its querytree list (C scribbles on / copies
-            // them); clone the borrowed slice into `mcx`. `boundParams` is NULL
-            // (None) on the generic-plan / simple-Query path; a Some
-            // (custom-plan parameter substitution) is not yet threaded through
-            // the value planning stack — mirror PG and panic precisely rather
-            // than silently dropping it.
+            // them); clone the borrowed slice into `mcx`. `boundParams` is now a
+            // real value `ParamListInfo` (param-list de-handle landed); a Some
+            // (custom-plan parameter substitution) still needs the planner-side
+            // `glob->boundParams` const-fold leg (`standard_planner` does not yet
+            // take boundParams) — mirror PG and panic precisely rather than
+            // silently dropping it. The generic-plan / simple-Query path passes
+            // None and runs end-to-end; the executor binds params at run time
+            // off `es_param_list_info`.
             if bound_params.is_some() {
                 panic!(
-                    "pg_plan_queries_value: custom-plan boundParams are not yet \
-                     threaded through the value planning stack (standard_planner \
-                     drops boundParams); only reached for parameterized custom \
-                     plans, not the generic-plan / simple-Query path"
+                    "pg_plan_queries_value: custom-plan boundParams const-folding \
+                     needs the planner `glob->boundParams` leg (standard_planner \
+                     does not yet take boundParams); only reached for parameterized \
+                     custom plans, not the generic-plan / simple-Query path"
                 );
             }
             let mut owned: mcx::PgVec<'_, _> = mcx::PgVec::new_in(mcx);

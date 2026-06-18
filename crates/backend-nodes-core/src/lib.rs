@@ -73,7 +73,7 @@ pub fn init_seams() {
     tidbitmap::init_seams();
 
     // params family (nodes/params.c): the canonical `make_param_list` seam.
-    backend_nodes_params_seams::make_param_list::set(params::makeParamList);
+    backend_nodes_params_seams::make_param_list::set(params::make_param_list_value);
 
     // read family (nodes/read.c): string_to_node.
     backend_nodes_read_seams::string_to_node::set(read::string_to_node);
@@ -142,22 +142,22 @@ fn install_execparallel_support_bms_seams() {
         // `get_typlenbyval` lookups are over already-resolved param types, so
         // an error is a programming error (matches the seam's infallible
         // contract).
-        params::EstimateParamListSpace(param_li).expect("EstimateParamListSpace")
+        params::EstimateParamListSpace(param_li.as_deref()).expect("EstimateParamListSpace")
     });
     sup::serialize_param_list::set(|param_li, chunk| {
         // SAFETY: `chunk` addresses a leader-reserved chunk of at least
         // `EstimateParamListSpace(param_li)` bytes (execParallel allocated it).
         let advanced =
-            unsafe { params::SerializeParamList(param_li, chunk.0 as *mut u8) }?;
+            unsafe { params::SerializeParamList(param_li.as_deref(), chunk.0 as *mut u8) }?;
         Ok(types_execparallel::SerializeCursor(advanced as usize))
     });
     sup::restore_param_list::set(|chunk| {
         // SAFETY: `chunk` addresses a `SerializeParamList` image in the worker's
         // mapped DSM segment. C discards the advanced cursor here (the chunk is
-        // looked up by key), so only the rebuilt handle is returned.
-        let (handle, _advanced) =
+        // looked up by key), so only the rebuilt value is returned.
+        let (param_li, _advanced) =
             unsafe { params::RestoreParamList(chunk.0 as *mut u8) }
                 .expect("RestoreParamList");
-        handle
+        param_li
     });
 }

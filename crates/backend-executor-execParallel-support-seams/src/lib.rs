@@ -59,7 +59,7 @@ seam_core::seam!(pub fn create_parallel_query_desc<'mcx>(
     pstmt_text: String,
     query_string: String,
     receiver: types_execparallel::DestReceiverHandle,
-    params: types_nodes::parsestmt::ParamListInfoHandle,
+    params: types_nodes::params::ParamListInfo,
     instrument_options: i32,
 ) -> PgResult<QueryDesc>);
 
@@ -103,13 +103,13 @@ seam_core::seam!(pub fn exec_set_param_plan_multi<'mcx>(
 // ===========================================================================
 
 /// `EstimateParamListSpace(paramLI)`.
-seam_core::seam!(pub fn estimate_param_list_space(param_li: types_nodes::parsestmt::ParamListInfoHandle) -> Size);
+seam_core::seam!(pub fn estimate_param_list_space(param_li: types_nodes::params::ParamListInfo) -> Size);
 /// `SerializeParamList(paramLI, &start_address)` into the chunk. Its
 /// `get_typlenbyval` path can `ereport(ERROR)`, so the seam is fallible
 /// (returns the advanced cursor on success).
-seam_core::seam!(pub fn serialize_param_list(param_li: types_nodes::parsestmt::ParamListInfoHandle, chunk: SerializeCursor) -> PgResult<SerializeCursor>);
+seam_core::seam!(pub fn serialize_param_list(param_li: types_nodes::params::ParamListInfo, chunk: SerializeCursor) -> PgResult<SerializeCursor>);
 /// `RestoreParamList(&start_address)`.
-seam_core::seam!(pub fn restore_param_list(chunk: SerializeCursor) -> types_nodes::parsestmt::ParamListInfoHandle);
+seam_core::seam!(pub fn restore_param_list(chunk: SerializeCursor) -> types_nodes::params::ParamListInfo);
 /// `estate->es_param_exec_vals[paramid]` value/isnull + resolved type metadata.
 // The serialized param value is a machine-word `Datum` read out of
 // `es_param_exec_vals` and copied through the DSM chunk (params.c/datum.c);

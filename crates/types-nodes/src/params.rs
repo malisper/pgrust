@@ -7,9 +7,9 @@
 //! `numParams` entries; here `params` is an owned `Vec<ParamExternData>` of that
 //! length (length zero when a dynamic `paramFetch` hook is supplied).
 //!
-//! The opaque [`crate::parsestmt::ParamListInfoHandle`] is the cross-crate
-//! pass-through token for a live `ParamListInfo`; the params family backs each
-//! handle with one of these structs in its handle-keyed store.
+//! [`ParamListInfo`] (`Option<Rc<ParamListInfoData>>`) is the cross-crate value
+//! type for a live `ParamListInfo`, shared by reference count exactly as C
+//! shares its `ParamListInfoData *` by pointer — no handle, no side registry.
 //!
 //! ## Hooks
 //!
@@ -23,15 +23,30 @@
 //! parser-setup hooks are never invoked from `params.c` itself.
 
 use alloc::boxed::Box;
+use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use mcx::Mcx;
 use types_core::primitive::{Oid, ParseLoc};
 use types_error::PgResult;
-use types_tuple::backend_access_common_heaptuple::Datum;
+pub use types_tuple::backend_access_common_heaptuple::Datum;
 
 use crate::nodes::NodeTag;
+
+/// `ParamListInfo` (`nodes/params.h`) — the bound-parameter list passed to a
+/// query. In C this is `ParamListInfoData *`: a palloc'd, shared-by-pointer
+/// value. The owned model carries it as `Option<Rc<ParamListInfoData>>` — a
+/// real value shared by reference count (C's pointer aliasing), never an
+/// opaque handle into a side registry. `None` is the C `NULL`.
+///
+/// The `'static` lifetime marks that the params live in a long-lived context
+/// (`makeParamList` allocates by-reference datum images into a backend/portal
+/// -lifetime `MemoryContext`, exactly as C palloc's into the per-query or
+/// portal context). The struct is shared, not handle-keyed; consumers
+/// (executor, plancache, pquery, prepare) read `params[id-1]` / `numParams`
+/// directly off the `Rc`.
+pub type ParamListInfo = Option<Rc<ParamListInfoData<'static>>>;
 
 /// `PARAM_FLAG_CONST` (`nodes/params.h`) — the planner may treat this parameter
 /// as a constant.

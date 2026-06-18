@@ -102,12 +102,8 @@ pub struct ParseState {
 }
 
 /// `ParamListInfo` (`nodes/params.h`) — the bound parameter list passed to a
-/// query. Owned by the executor/SPI machinery; portalcmds only copies it into
-/// the portal context and threads it into `PortalStart`. `None` is the C NULL.
-pub type ParamListInfo = Option<Rc<ParamListInfoData>>;
-
-/// `ParamListInfoData` (`nodes/params.h`) — opaque bound-parameter payload
-/// (not yet modeled; portalcmds never inspects it).
-pub struct ParamListInfoData {
-    _private: (),
-}
+/// query. Re-exported from the canonical [`crate::params`] vocabulary: this is
+/// the same shared-by-`Rc` value the executor reads (`params[id-1]` /
+/// `numParams`), not an opaque placeholder. portalcmds copies it into the
+/// portal context and threads it into `PortalStart`. `None` is the C NULL.
+pub use crate::params::{ParamListInfo, ParamListInfoData};

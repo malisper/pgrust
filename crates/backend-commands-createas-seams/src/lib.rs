@@ -18,7 +18,8 @@ use mcx::Mcx;
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_error::PgResult;
 use types_nodes::ddlnodes::{CreateTableAsStmt, ExecuteStmt, IntoClause as DdlIntoClause};
-use types_nodes::parsestmt::{DestReceiverHandle, IntoClause, ParamListInfoHandle};
+use types_nodes::params::ParamListInfo;
+use types_nodes::parsestmt::{DestReceiverHandle, IntoClause};
 use types_portal::QueryCompletion;
 
 seam_core::seam!(
@@ -39,7 +40,7 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         stmt: &CreateTableAsStmt<'mcx>,
         query_string: &str,
-        params: ParamListInfoHandle,
+        params: ParamListInfo,
         qc: Option<QueryCompletion>,
     ) -> PgResult<(ObjectAddress, Option<QueryCompletion>)>
 );
@@ -90,7 +91,7 @@ seam_core::seam!(
         query: types_nodes::copy_query::Query<'mcx>,
         into: types_nodes::ddlnodes::IntoClause<'mcx>,
         query_string: &str,
-        params: ParamListInfoHandle,
+        params: ParamListInfo,
         dest: DestReceiverHandle,
         qc: Option<QueryCompletion>,
     ) -> PgResult<Option<QueryCompletion>>
@@ -164,7 +165,7 @@ seam_core::seam!(
         estmt: ExecuteStmt<'mcx>,
         into: DdlIntoClause<'mcx>,
         query_string: &str,
-        params: ParamListInfoHandle,
+        params: ParamListInfo,
         dest: DestReceiverHandle,
         qc: Option<QueryCompletion>,
     ) -> PgResult<Option<QueryCompletion>>

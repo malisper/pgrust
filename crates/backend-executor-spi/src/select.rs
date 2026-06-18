@@ -31,7 +31,7 @@ use backend_utils_error::ereport;
 use mcx::{MemoryContext, Mcx, PgVec};
 use types_error::{PgResult, ERROR};
 use types_nodes::nodeindexscan::PlannedStmt;
-use types_nodes::parsestmt::{CachedPlanHandle, ParamListInfoHandle};
+use types_nodes::parsestmt::CachedPlanHandle;
 use types_resowner::ResourceOwner;
 use types_xml::{SpiColumn, SpiResult};
 
@@ -161,7 +161,7 @@ fn run_select(query: &str) -> PgResult<SpiResult> {
 fn run_cached_select<'mcx>(mcx: Mcx<'mcx>, plansource: SourceHandle) -> PgResult<SpiResult> {
     let cplan = plancache::GetCachedPlan(
         plansource,
-        ParamListInfoHandle::NULL,
+        None,
         ResourceOwner::NULL,
         None,
     )?;
@@ -195,7 +195,7 @@ fn run_one_select_stmt<'mcx>(stmt: &PlannedStmt<'mcx>) -> PgResult<SpiResult> {
         snap,
         None, // crosscheck snapshot
         receiver,
-        ParamListInfoHandle::NULL,
+        None,
         0, // instrument_options
     )?;
 

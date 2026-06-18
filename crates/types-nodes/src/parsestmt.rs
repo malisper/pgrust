@@ -48,16 +48,6 @@ impl CachedPlanHandle {
     pub const NULL: CachedPlanHandle = CachedPlanHandle(0);
 }
 
-/// Opaque handle to a `ParamListInfo` (`nodes/params.h`). `NULL` is the C NULL.
-/// Owned by the unported params/executor unit.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ParamListInfoHandle(pub u64);
-
-impl ParamListInfoHandle {
-    /// The `NULL` parameter list.
-    pub const NULL: ParamListInfoHandle = ParamListInfoHandle(0);
-}
-
 /// Opaque handle to a `Portal` (`utils/portal.h`, name-keyed in portalmem.c).
 /// Owned by the unported portalmem unit.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

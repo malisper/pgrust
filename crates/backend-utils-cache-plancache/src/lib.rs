@@ -50,9 +50,10 @@ use types_namespace::namespace::SearchPathMatcher;
 use types_nodes::copy_query::{Query, CURSOR_OPT_PARALLEL_OK};
 use types_nodes::nodeindexscan::PlannedStmt;
 use types_nodes::nodes::{CmdType, Node};
+use types_nodes::params::ParamListInfo;
 use types_nodes::parsestmt::{
     CachedPlanHandle as SeamPlanHandle, CachedPlanSourceHandle as SeamSourceHandle, CommandTag,
-    ParamListInfoHandle, RawStmt, ResourceOwnerHandle,
+    RawStmt, ResourceOwnerHandle,
 };
 use types_nodes::primnodes::Expr;
 use types_nodes::queryenvironment::QueryEnvironment;
@@ -1061,7 +1062,7 @@ fn CheckCachedPlan(plansource: CachedPlanSourceHandle) -> PgResult<bool> {
 fn BuildCachedPlan(
     plansource: CachedPlanSourceHandle,
     qlist_in: &[Query<'_>],
-    bound_params: ParamListInfoHandle,
+    bound_params: ParamListInfo,
     query_env: Option<&QueryEnvironment<'_>>,
 ) -> PgResult<CachedPlanHandle> {
     let src = get_source(plansource);
@@ -1109,23 +1110,17 @@ fn BuildCachedPlan(
 
     // pg_plan_queries(qlist, query_string, cursor_options, boundParams). The
     // generic-plan spine passes NULL boundParams; custom-plan substitution
-    // (non-NULL) has no value `ParamListInfoData` reachable from the opaque
-    // handle (map B-bis 2b) — precise panic, never on the SELECT/EXECUTE
-    // -without-params spine.
+    // passes the bound value param list through to the planner so the planner
+    // can fold `$n` consts (`ParamListInfo` is now a real shared value, not an
+    // opaque handle).
     let plan_context = MemoryContext::new("CachedPlan");
     let plist: Vec<PlannedStmt<'static>> = {
-        if bound_params != ParamListInfoHandle::NULL {
-            panic!(
-                "plancache BuildCachedPlan: custom-plan boundParams substitution not yet \
-                 threaded through the value planning stack (map B-bis 2b)"
-            );
-        }
         let planned = postgres_seams::pg_plan_queries_value::call(
             plan_context.mcx(),
             qlist.as_slice(),
             qstr.as_str(),
             cursor_options,
-            None,
+            bound_params.as_deref(),
         )?;
         // Own the planned stmts in plan_context (already allocated there).
         clone_plan_list_into(&plan_context, planned.as_slice())?
@@ -1197,7 +1192,7 @@ fn BuildCachedPlan(
 /// `choose_custom_plan(plansource, boundParams)`.
 fn choose_custom_plan(
     plansource: CachedPlanSourceHandle,
-    bound_params: ParamListInfoHandle,
+    bound_params: &ParamListInfo,
 ) -> PgResult<bool> {
     let src = get_source(plansource);
 
@@ -1205,7 +1200,7 @@ fn choose_custom_plan(
         return Ok(true);
     }
 
-    if bound_params == ParamListInfoHandle::NULL {
+    if bound_params.is_none() {
         return Ok(false);
     }
     if !StmtPlanRequiresRevalidation(&src)? {
@@ -1276,7 +1271,7 @@ fn cached_plan_cost(plan: CachedPlanHandle, include_planner: bool) -> PgResult<f
 /// `GetCachedPlan(plansource, boundParams, owner, queryEnv)`.
 pub fn GetCachedPlan(
     plansource: CachedPlanSourceHandle,
-    bound_params: ParamListInfoHandle,
+    bound_params: ParamListInfo,
     owner: ResourceOwnerHandle,
     query_env: Option<&QueryEnvironment<'_>>,
 ) -> PgResult<CachedPlanHandle> {
@@ -1294,7 +1289,7 @@ pub fn GetCachedPlan(
     let qlist = RevalidateCachedQuery(plansource, query_env)?;
     let mut have_qlist = !qlist.is_empty();
 
-    let mut customplan = choose_custom_plan(plansource, bound_params)?;
+    let mut customplan = choose_custom_plan(plansource, &bound_params)?;
 
     if !customplan {
         if CheckCachedPlan(plansource)? {
@@ -1302,7 +1297,7 @@ pub fn GetCachedPlan(
             debug_assert_eq!(get_plan(plan).borrow().magic, CACHEDPLAN_MAGIC);
         } else {
             let qslice: &[Query<'_>] = if have_qlist { qlist.as_slice() } else { &[] };
-            plan = BuildCachedPlan(plansource, qslice, ParamListInfoHandle::NULL, query_env)?;
+            plan = BuildCachedPlan(plansource, qslice, None, query_env)?;
             ReleaseGenericPlan(plansource)?;
             src.borrow_mut().gplan = plan;
             get_plan(plan).borrow_mut().refcount += 1;
@@ -1315,7 +1310,7 @@ pub fn GetCachedPlan(
             let cost = cached_plan_cost(plan, false)?;
             src.borrow_mut().generic_cost = cost;
 
-            customplan = choose_custom_plan(plansource, bound_params)?;
+            customplan = choose_custom_plan(plansource, &bound_params)?;
 
             have_qlist = false;
         }
@@ -2274,7 +2269,7 @@ fn seam_drop_cached_plan(plansource: SeamSourceHandle) -> PgResult<()> {
 /// `get_cached_plan(plansource, bound_params, owner, query_env)`.
 fn seam_get_cached_plan<'mcx>(
     plansource: SeamSourceHandle,
-    bound_params: ParamListInfoHandle,
+    bound_params: ParamListInfo,
     owner: ResourceOwnerHandle,
     query_env: Option<&QueryEnvironment<'mcx>>,
 ) -> PgResult<SeamPlanHandle> {

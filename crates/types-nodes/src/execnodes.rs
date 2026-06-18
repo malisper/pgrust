@@ -827,10 +827,11 @@ pub struct EStateData<'mcx> {
     /// `List *es_insert_pending_modifytables` — their ModifyTableStates.
     pub es_insert_pending_modifytables: PgVec<'mcx, Opaque>,
     /// `ParamListInfo es_param_list_info` — values of external params. The
-    /// `ParamListInfo` lives in the (unported) params unit, so this carries the
-    /// opaque handle (`NULL` == no external params). The PREPARE/EXECUTE driver
-    /// sets it on the throwaway EState before evaluating EXECUTE parameters.
-    pub es_param_list_info: crate::parsestmt::ParamListInfoHandle,
+    /// shared-by-`Rc` value param list (`None` == no external params). The
+    /// PREPARE/EXECUTE driver sets it on the throwaway EState before evaluating
+    /// EXECUTE parameters; the executor reads `params[id-1]` off it directly
+    /// (`ExecEvalParamExtern`).
+    pub es_param_list_info: crate::params::ParamListInfo,
     /// `ParamExecData *es_param_exec_vals` — values of internal params.
     /// Empty = the C `NULL`.
     pub es_param_exec_vals: PgVec<'mcx, ParamExecData<'mcx>>,
@@ -945,7 +946,7 @@ impl<'mcx> EStateData<'mcx> {
             es_insert_pending_result_relations: PgVec::new_in(mcx),
             es_insert_pending_modifytables: PgVec::new_in(mcx),
             // es_param_list_info = NULL;
-            es_param_list_info: crate::parsestmt::ParamListInfoHandle::NULL,
+            es_param_list_info: None,
             // es_param_exec_vals = NULL;
             es_param_exec_vals: PgVec::new_in(mcx),
             // es_query_cxt = qcontext;

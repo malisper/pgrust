@@ -123,7 +123,7 @@ pub fn create_query_desc(
     snapshot: Option<Rc<SnapshotData>>,
     crosscheck_snapshot: Option<Rc<SnapshotData>>,
     dest: DestReceiverHandle,
-    params: types_nodes::parsestmt::ParamListInfoHandle,
+    params: ParamListInfo,
     instrument_options: i32,
 ) -> PgResult<QueryDesc> {
     QueryDesc::create(
@@ -163,7 +163,7 @@ fn process_query(
     parent: &mcx::MemoryContext,
     plan: &PlannedStmt<'_>,
     source_text: &str,
-    params: types_nodes::parsestmt::ParamListInfoHandle,
+    params: ParamListInfo,
     dest: DestReceiverHandle,
     qc: Option<&mut QueryCompletion>,
 ) -> PgResult<()> {
@@ -244,7 +244,7 @@ fn run_ctas_executor<'mcx>(
     query: Query<'mcx>,
     into: types_nodes::ddlnodes::IntoClause<'mcx>,
     query_string: &str,
-    params: types_nodes::parsestmt::ParamListInfoHandle,
+    params: ParamListInfo,
     dest: DestReceiverHandle,
     qc: Option<QueryCompletion>,
 ) -> PgResult<Option<QueryCompletion>> {
@@ -601,7 +601,7 @@ pub fn portal_start(
              * destination to DestNone.
              */
             let source_text = portal.borrow().sourceText.clone().unwrap_or_default();
-            let params_handle = handle_from_param_list(&params);
+            let params_value = params.clone();
             let active_snapshot = get_active_snapshot()?;
             let mut query_desc = {
                 let p = portal.borrow();
@@ -617,7 +617,7 @@ pub fn portal_start(
                     active_snapshot,
                     None, /* InvalidSnapshot */
                     backend_tcop_dest::none_receiver(),
-                    params_handle,
+                    params_value,
                     0,
                 )?
             };
@@ -1423,7 +1423,6 @@ fn portal_run_multi(
             }
 
             let params = portal.borrow().portalParams.clone();
-            let params_handle = handle_from_param_list(&params);
             if can_set_tag {
                 /* statement can set tag string */
                 let p = portal.borrow();
@@ -1433,7 +1432,7 @@ fn portal_run_multi(
                     portal_context,
                     &stmts[idx],
                     &source_text,
-                    params_handle,
+                    params.clone(),
                     dest,
                     qc.as_deref_mut(),
                 )?;
@@ -1446,7 +1445,7 @@ fn portal_run_multi(
                     portal_context,
                     &stmts[idx],
                     &source_text,
-                    params_handle,
+                    params.clone(),
                     altdest,
                     None,
                 )?;
@@ -1815,18 +1814,6 @@ pub fn ensure_portal_snapshot_exists() -> PgResult<()> {
 // handle bridges
 // ===========================================================================
 
-/// Bridge a portal's owned `ParamListInfo` to the `ParamListInfoHandle` the
-/// `QueryDesc`/`ProcessUtility` interfaces carry. The owned param list is shared
-/// (`Option<Rc<...>>`); there is no `Rc`->handle registry, so a present param
-/// list crosses as the `NULL` handle here (the executor reads parameters off the
-/// owned `EState` once the param-list de-handle keystone lands). `None` is the
-/// C `NULL`.
-fn handle_from_param_list(
-    _params: &ParamListInfo,
-) -> types_nodes::parsestmt::ParamListInfoHandle {
-    types_nodes::parsestmt::ParamListInfoHandle(0)
-}
-
 /// The portal's `queryEnv` handle. `QueryDesc::create` drops `queryEnv`, so this
 /// is only the C `portal->queryEnv` read; it is unused by the owned core.
 fn handle_query_env(_portal: &Portal) -> u64 {
@@ -1840,12 +1827,13 @@ fn handle_query_env(_portal: &Portal) -> u64 {
 /// Install this crate's inward seams. Wired into `seams-init`.
 ///
 /// The `backend-tcop-pquery-seams` (portalcmds' owned slice) install cleanly.
-/// The `backend-tcop-pquery-pre-seams` (PREPARE/EXECUTE's handle slice) cannot
-/// be installed: they carry `ParamListInfoHandle`/`QueryCompletionHandle`/
+/// The `backend-tcop-pquery-pre-seams` (PREPARE/EXECUTE's slice) carry the now
+/// value-typed `ParamListInfo` (param-list de-handle landed), but still cannot
+/// be installed: they carry `PortalHandle`/`QueryCompletionHandle`/
 /// `SnapshotHandle` opaque `u64` newtypes with no resolver to the owned
-/// `ParamListInfo`/`QueryCompletion`/`Rc<SnapshotData>` the owned core requires.
-/// They install once PREPARE/EXECUTE is de-handled (the plancache de-handle
-/// keystone). Leaving them uninstalled is faithful (a fake `u64`->`Rc` cast is
+/// `Portal`/`QueryCompletion`/`Rc<SnapshotData>` the owned core requires.
+/// They install once those handles are de-handled (the portal/snapshot-handle
+/// keystone). Leaving them uninstalled is faithful (a fake `u64`->owned cast is
 /// forbidden); a call panics loudly with the seam path.
 pub fn init_seams() {
     backend_tcop_pquery_seams::portal_start::set(|portal, params, eflags, snapshot| {

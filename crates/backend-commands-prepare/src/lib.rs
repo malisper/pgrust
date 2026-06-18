@@ -57,9 +57,10 @@ use types_nodes::nodes::{CmdType, Node};
 use types_nodes::primnodes::Expr;
 use types_nodes::EStateData;
 use types_explain::ExplainState;
+use types_nodes::params::ParamListInfo;
 use types_nodes::parsestmt::{
     CachedPlanHandle, CachedPlanSourceHandle, CommandTag, DeallocateStmt, DestReceiverHandle,
-    ExecuteStmt, IntoClause, ParamListInfoHandle, ParseState,
+    ExecuteStmt, IntoClause, ParseState,
     PortalHandle, PrepareStmt, PreparedStatement, QueryCompletionHandle, RawStmt,
     ResourceOwnerHandle,
 };
@@ -238,12 +239,12 @@ pub fn ExecuteQuery<'mcx>(
     pstate: &ParseState<'mcx>,
     stmt: ExecuteStmt<'mcx>,
     into_clause: Option<&IntoClause<'mcx>>,
-    params: ParamListInfoHandle,
+    params: ParamListInfo,
     dest: DestReceiverHandle,
     qc: QueryCompletionHandle,
 ) -> PgResult<()> {
     // ParamListInfo paramLI = NULL; EState *estate = NULL;
-    let mut param_li: ParamListInfoHandle = ParamListInfoHandle::NULL;
+    let mut param_li: ParamListInfo = None;
     let mut estate: Option<mcx::PgBox<'mcx, EStateData<'mcx>>> = None;
     let eflags: i32;
     let count: i64;
@@ -286,7 +287,7 @@ pub fn ExecuteQuery<'mcx>(
     // plan_list = cplan->stmt_list;
     let cplan: CachedPlanHandle = plancache_seam::get_cached_plan::call(
         entry.plansource,
-        param_li,
+        param_li.clone(),
         ResourceOwnerHandle::NULL,
         None,
     )?;
@@ -360,16 +361,16 @@ pub fn ExecuteQuery<'mcx>(
 // EvaluateParams — prepare.c:280 (static)
 // ===========================================================================
 
-/// `EvaluateParams` — evaluate a list of EXECUTE parameters into a
-/// `ParamListInfo` (carried as a handle), or `ParamListInfoHandle::NULL` when
-/// there are none.
+/// `EvaluateParams` — evaluate a list of EXECUTE parameters into a value
+/// `ParamListInfo` (`Some(Rc<ParamListInfoData>)`), or `None` when there are
+/// none.
 fn EvaluateParams<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &ParseState<'mcx>,
     pstmt: &PreparedStatement,
     params: &[mcx::PgBox<'mcx, Node<'mcx>>],
     estate: &mut EStateData<'mcx>,
-) -> PgResult<ParamListInfoHandle> {
+) -> PgResult<ParamListInfo> {
     // Oid *param_types = pstmt->plansource->param_types;
     // int num_params = pstmt->plansource->num_params;
     // int nparams = list_length(params);
@@ -391,7 +392,7 @@ fn EvaluateParams<'mcx>(
 
     // if (num_params == 0) return NULL;
     if num_params == 0 {
-        return Ok(ParamListInfoHandle::NULL);
+        return Ok(None);
     }
 
     // params = copyObject(params); — the parser scribbles on its input, so it
@@ -452,6 +453,13 @@ fn EvaluateParams<'mcx>(
     let param_li = params_seam::make_param_list::call(num_params)?;
     let _ = PARAM_FLAG_CONST; // pflags = PARAM_FLAG_CONST is set inside the eval seam
 
+    // The value param list is built fresh (refcount 1), so we can fill its slots
+    // in place through `Rc::get_mut` before sharing it; this mirrors C mutating
+    // `paramLI->params[i]` on the just-`makeParamList`'d pointer.
+    let mut param_rc = param_li.expect("makeParamList(num_params > 0) returns a list");
+    let param_data = std::rc::Rc::get_mut(&mut param_rc)
+        .expect("freshly made ParamListInfo is uniquely owned");
+
     // foreach(l, exprstates) { ParamExternData *prm = &paramLI->params[i];
     //     prm->ptype = param_types[i]; prm->pflags = PARAM_FLAG_CONST;
     //     prm->value = ExecEvalExprSwitchContext(n, GetPerTupleExprContext(estate),
@@ -459,7 +467,7 @@ fn EvaluateParams<'mcx>(
     let mut i: i32 = 0;
     while i < num_params {
         execexpr_seam::eval_exec_param_into_list::call(
-            param_li,
+            param_data,
             &exprstates[i as usize],
             i,
             param_types[i as usize],
@@ -468,7 +476,7 @@ fn EvaluateParams<'mcx>(
         i += 1;
     }
 
-    Ok(param_li)
+    Ok(Some(param_rc))
 }
 
 // ===========================================================================
@@ -682,10 +690,10 @@ pub fn ExplainExecuteQuery<'mcx>(
     into: Option<&IntoClause<'mcx>>,
     es: &mut ExplainState<'mcx>,
     pstate: &ParseState<'mcx>,
-    params: ParamListInfoHandle,
+    params: ParamListInfo,
 ) -> PgResult<()> {
     // ParamListInfo paramLI = NULL; EState *estate = NULL;
-    let mut param_li: ParamListInfoHandle = ParamListInfoHandle::NULL;
+    let mut param_li: ParamListInfo = None;
     let mut estate: Option<mcx::PgBox<'mcx, EStateData<'mcx>>> = None;
 
     // if (es->memory) { create+switch planner ctx } if (es->buffers) snapshot
@@ -728,7 +736,7 @@ pub fn ExplainExecuteQuery<'mcx>(
     let owner = resowner_seam::current_resource_owner::call()?;
     let query_env = pstate.p_queryEnv.as_deref();
     let cplan: CachedPlanHandle =
-        plancache_seam::get_cached_plan::call(entry.plansource, param_li, owner, query_env)?;
+        plancache_seam::get_cached_plan::call(entry.plansource, param_li.clone(), owner, query_env)?;
 
     // INSTR_TIME_SET_CURRENT(planduration); INSTR_TIME_SUBTRACT(planduration, planstart);
     explain_seam::explain_planduration::call(&mut bk)?;
@@ -771,7 +779,7 @@ pub fn ExplainExecuteQuery<'mcx>(
                 into,
                 &mut *es,
                 query_string.as_str(),
-                param_li,
+                param_li.clone(),
                 query_env,
                 &bk,
                 es_buffers,
@@ -790,7 +798,7 @@ pub fn ExplainExecuteQuery<'mcx>(
                 &mut *es,
                 p_sourcetext,
                 query_env,
-                param_li,
+                param_li.clone(),
             )?;
         }
 

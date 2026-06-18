@@ -4,10 +4,11 @@
 //! then a call panics loudly.
 
 use types_error::PgResult;
-use types_nodes::parsestmt::ParamListInfoHandle;
+use types_nodes::params::ParamListInfo;
 
 seam_core::seam!(
     /// `makeParamList(numParams)` (params.c) — allocate a `ParamListInfo` with
-    /// `numParams` `ParamExternData` slots. Allocates.
-    pub fn make_param_list(num_params: i32) -> PgResult<ParamListInfoHandle>
+    /// `numParams` `ParamExternData` slots. Returns the value param list
+    /// (`Option<Rc<ParamListInfoData>>`), shared by `Rc`. Allocates.
+    pub fn make_param_list(num_params: i32) -> PgResult<ParamListInfo>
 );

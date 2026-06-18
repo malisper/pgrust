@@ -69,7 +69,8 @@ use types_core::primitive::Oid;
 use types_error::PgResult;
 use types_nodes::nodeindexscan::PlannedStmt;
 use types_nodes::nodes::CmdType;
-use types_nodes::parsestmt::{DestReceiverHandle, ParamListInfoHandle};
+use types_nodes::params::ParamListInfo;
+use types_nodes::parsestmt::DestReceiverHandle;
 use types_nodes::querydesc::QueryDesc;
 use types_scan::sdir::{ScanDirection, ScanDirectionIsNoMovement};
 
@@ -113,7 +114,7 @@ pub fn CreateQueryDesc(
     snapshot: Option<alloc::rc::Rc<types_snapshot::SnapshotData>>,
     crosscheck_snapshot: Option<alloc::rc::Rc<types_snapshot::SnapshotData>>,
     dest: DestReceiverHandle,
-    params: ParamListInfoHandle,
+    params: ParamListInfo,
     instrument_options: i32,
 ) -> PgResult<QueryDesc> {
     QueryDesc::create(
@@ -155,7 +156,7 @@ pub fn standard_ExecutorStart(query_desc: &mut QueryDesc, mut eflags: i32) -> Pg
     // `ExecCheckXactReadOnly(queryDesc->plannedstmt)`.
 
     let operation = query_desc.operation;
-    let params = query_desc.params;
+    let params = query_desc.params.clone();
     let instrument = query_desc.instrument_options;
 
     // estate->es_param_list_info = queryDesc->params;
@@ -733,7 +734,7 @@ pub fn CreateQueryDescAndStartExplain(
     plan: &PlannedStmt<'_>,
     source_text: &str,
     snapshot: Option<alloc::rc::Rc<types_snapshot::SnapshotData>>,
-    params: ParamListInfoHandle,
+    params: ParamListInfo,
     instrument_option: i32,
     eflags: i32,
 ) -> PgResult<QueryDesc> {
@@ -774,7 +775,7 @@ pub fn CreateQueryDescAndStartCopy(
         snapshot,
         None,                                     // InvalidSnapshot crosscheck_snapshot
         DestReceiverHandle(copy_receiver),        // COPY-OUT receiver
-        ParamListInfoHandle::NULL,                // NULL params
+        None,                                     // NULL params
         0,                                        // instrument_options
     )?;
     // ExecutorStart(queryDesc, 0);
