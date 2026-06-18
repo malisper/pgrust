@@ -25,6 +25,7 @@ extern crate alloc;
 use alloc::string::String;
 
 use types_error::PgResult;
+use types_resowner::ResourceOwner;
 
 seam_core::seam!(
     /// `pgaio_io_call_stage(ioh)` leg for one registered callback id
@@ -88,11 +89,11 @@ seam_core::seam!(
     /// `ResourceOwnerRememberAioHandle(owner, &ioh->resowner_node)`
     /// (resowner.c) — register an AIO handle node on a resource owner. The node
     /// identity is the io-handle index; `owner` is the resowner handle.
-    pub fn resource_owner_remember_aio_handle(owner: u64, ioh_index: u32) -> PgResult<()>
+    pub fn resource_owner_remember_aio_handle(owner: ResourceOwner, ioh_index: u32) -> PgResult<()>
 );
 
 seam_core::seam!(
     /// `ResourceOwnerForgetAioHandle(owner, &ioh->resowner_node)` (resowner.c) —
     /// unregister an AIO handle node from a resource owner.
-    pub fn resource_owner_forget_aio_handle(owner: u64, ioh_index: u32) -> PgResult<()>
+    pub fn resource_owner_forget_aio_handle(owner: ResourceOwner, ioh_index: u32) -> PgResult<()>
 );

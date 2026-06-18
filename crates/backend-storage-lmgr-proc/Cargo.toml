@@ -28,6 +28,7 @@ backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" 
 # bufmgr-side outward seam: GetStartupBufferPinWaitBufId is read by
 # HoldingBufferPinThatDelaysRecovery; proc owns and installs it.
 backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+backend-storage-aio-funcs-seams = { path = "../backend-storage-aio-funcs-seams" }
 
 # Outward seams: neighbors this unit calls into (panic until each owner lands).
 # globals.c (MaxBackends/MaxConnections/max_prepared_xacts/...), shmem.c

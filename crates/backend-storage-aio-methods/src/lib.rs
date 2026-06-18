@@ -111,6 +111,7 @@ use std::sync::Mutex;
 use types_condvar::ConditionVariable;
 use types_core::primitive::Size;
 use types_error::{PgError, PgResult};
+use types_resowner::ResourceOwner;
 use types_storage::storage::NUM_AUXILIARY_PROCS;
 
 // ===========================================================================
@@ -301,11 +302,11 @@ pub struct PgAioReturn {
     pub target_data: PgAioTargetData,
 }
 
-/// `struct ResourceOwnerData *` (`utils/resowner.c`) — opaque to `aio_init.c`,
-/// which only ever stores the null pointer (`None`). The resowner AIO
-/// integration (`pgaio_io_resowner_register`) belongs to the unported engine.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ResourceOwnerId(pub u64);
+/// `struct ResourceOwnerData *resowner` (`utils/resowner.c`) — the value-typed
+/// resource-owner handle (`types_resowner::ResourceOwner`), `None` until an
+/// owner is set. The resowner AIO integration (`pgaio_io_resowner_register`)
+/// threads this through the `resource_owner_remember/forget_aio_handle` seams.
+pub type ResourceOwnerId = ResourceOwner;
 
 /// Head of the intrusive idle/in-flight handle lists (`dclist_head`,
 /// `lib/ilist.h`). The owned model carries the same `count` plus the ordered

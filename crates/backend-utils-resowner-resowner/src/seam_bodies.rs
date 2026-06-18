@@ -34,6 +34,9 @@ mod rp {
 mod bm {
     pub use backend_storage_buffer_bufmgr_seams::*;
 }
+mod ac {
+    pub use backend_storage_aio_completion_seams::*;
+}
 
 /// `Option<ResourceOwner>` → the seam carrier (`ResourceOwner::NULL` for None).
 fn flat(o: Option<ResourceOwner>) -> ResourceOwner {
@@ -254,6 +257,19 @@ pub fn install() {
         let owner = current_or_err().expect("forget_buffer_io: CurrentResourceOwner is NULL");
         ResourceOwnerForget(owner, Datum::from_i32(buffer), &BUFFER_IO_DESC)
             .expect("ResourceOwnerForgetBufferIO");
+    });
+
+    // --- aio-completion-seams: AIO-handle resowner registry ----------------
+    // `ResourceOwnerRememberAioHandle(owner, &ioh->resowner_node)` /
+    // `ResourceOwnerForgetAioHandle(...)` (resowner.c) — the node identity is
+    // the io-handle index.
+    ac::resource_owner_remember_aio_handle::set(|owner, ioh_index| {
+        crate::ResourceOwnerRememberAioHandle(owner, ioh_index as u64)
+    });
+
+    ac::resource_owner_forget_aio_handle::set(|owner, ioh_index| {
+        crate::ResourceOwnerForgetAioHandle(owner, ioh_index as u64);
+        Ok(())
     });
 
     let _ = AuxProcessResourceOwner; // referenced for clarity; silence unused

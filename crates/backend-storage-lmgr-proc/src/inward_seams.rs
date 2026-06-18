@@ -1031,6 +1031,9 @@ pub(crate) fn install() {
     seams::proc_pgxactoff::set(proc_pgxactoff);
     seams::proc_global_status_flags::set(proc_global_status_flags);
     seams::proc_pid::set(proc_pid);
+    // `GetPGProcByNumber(owner)->pid` (storage/proc.h), the AIO `pg_get_aios()`
+    // SRF's owner-pid lookup; same PGPROC->pid mapping as `proc_pid`.
+    backend_storage_aio_funcs_seams::proc_pid_by_number::set(|owner| Ok(proc_pid(owner)));
     seams::proc_is_regular_backend::set(proc_is_regular_backend);
     seams::remove_running_subxids_from_proc::set(remove_running_subxids_from_proc);
 
