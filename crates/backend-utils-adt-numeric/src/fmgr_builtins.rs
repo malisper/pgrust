@@ -228,6 +228,121 @@ fn fc_hash_numeric_extended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     ret_i64(crate::aggregate::hash_numeric_extended(num, seed) as i64)
 }
 
+/// A `bytea`/`internal StringInfo` arg's raw byte payload, read from the by-ref
+/// Varlena lane. For `numeric_recv` this is the binary-protocol message body
+/// (the boundary delivers the header-less bytes).
+#[inline]
+fn arg_varlena<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("numeric fn: by-ref varlena arg missing from by-ref lane")
+}
+
+/// Set a `bytea` result (header-less payload) on the by-ref Varlena lane and
+/// return the dummy by-value word.
+#[inline]
+fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
+    fcinfo.set_ref_result(RefPayload::Varlena(bytes));
+    Datum::from_usize(0)
+}
+
+// --- Unary numeric -> numeric (additional ported cores). ---
+fc_unary_numeric!(fc_numeric_sign, crate::ops_sql::numeric_sign);
+fc_unary_numeric!(fc_numeric_inc, crate::ops_sql::numeric_inc);
+fc_unary_numeric!(fc_numeric_ceil, crate::ops_sql::numeric_ceil);
+fc_unary_numeric!(fc_numeric_floor, crate::ops_sql::numeric_floor);
+fc_unary_numeric!(fc_numeric_sqrt, crate::ops_sql::numeric_sqrt);
+fc_unary_numeric!(fc_numeric_exp, crate::ops_sql::numeric_exp);
+fc_unary_numeric!(fc_numeric_ln, crate::ops_sql::numeric_ln);
+fc_unary_numeric!(fc_numeric_trim_scale, crate::ops_sql::numeric_trim_scale);
+
+// --- Binary (numeric, numeric) -> numeric (additional ported cores). ---
+fc_binary_numeric!(fc_numeric_mod, crate::ops_sql::numeric_mod);
+fc_binary_numeric!(fc_numeric_div_trunc, crate::ops_sql::numeric_div_trunc);
+fc_binary_numeric!(fc_numeric_log, crate::ops_sql::numeric_log);
+fc_binary_numeric!(fc_numeric_power, crate::ops_sql::numeric_power);
+fc_binary_numeric!(fc_numeric_gcd, crate::ops_sql::numeric_gcd);
+fc_binary_numeric!(fc_numeric_lcm, crate::ops_sql::numeric_lcm);
+
+/// Body of a `(numeric, int4) -> numeric` builtin (round/trunc) around a
+/// `fn(Mcx, &[u8], i32) -> PgResult<PgVec<u8>>` core.
+macro_rules! fc_numeric_scale_arg {
+    ($fc:ident, $core:path) => {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+            let num = arg_numeric(fcinfo, 0);
+            let scale = arg_int32(fcinfo, 1);
+            let m = scratch_mcx();
+            let image = ok($core(m.mcx(), num, scale));
+            ret_numeric(fcinfo, image.as_slice().to_vec())
+        }
+    };
+}
+
+fc_numeric_scale_arg!(fc_numeric_round, crate::ops_sql::numeric_round);
+fc_numeric_scale_arg!(fc_numeric_trunc, crate::ops_sql::numeric_trunc);
+
+/// `numeric_scale(numeric) -> int4` (oid 3281): the display scale. C returns
+/// SQL NULL for special (NaN/Inf) inputs.
+fn fc_numeric_scale(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let num = arg_numeric(fcinfo, 0);
+    if types_numeric::numeric_is_special(num) {
+        fcinfo.set_result_null(true);
+        return Datum::from_usize(0);
+    }
+    ret_i32(ok(crate::ops_sql::numeric_scale(num)))
+}
+
+/// `width_bucket_numeric(numeric, numeric, numeric, int4) -> int4` (oid 2170).
+/// The `count` arg is int4 in `pg_proc`; the core decodes it from a numeric byte
+/// image, so re-encode the int4 to a numeric for the core call.
+fn fc_width_bucket_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let operand = arg_numeric(fcinfo, 0);
+    let bound1 = arg_numeric(fcinfo, 1);
+    let bound2 = arg_numeric(fcinfo, 2);
+    let count = arg_int32(fcinfo, 3);
+    let m = scratch_mcx();
+    let count_num = ok(crate::convert::int64_to_numeric(m.mcx(), count as i64));
+    ret_i32(ok(crate::ops_sql::width_bucket_numeric(
+        operand,
+        bound1,
+        bound2,
+        count_num.as_slice(),
+    )))
+}
+
+/// `in_range_numeric_numeric(numeric, numeric, numeric, bool, bool) -> bool`
+/// (oid 4141): the window `RANGE` offset predicate.
+fn fc_in_range_numeric_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let val = arg_numeric(fcinfo, 0);
+    let base = arg_numeric(fcinfo, 1);
+    let offset = arg_numeric(fcinfo, 2);
+    let sub = fcinfo.arg(3).expect("missing arg").value.as_bool();
+    let less = fcinfo.arg(4).expect("missing arg").value.as_bool();
+    ret_bool(ok(crate::ops_sql::in_range_numeric_numeric(
+        val, base, offset, sub, less,
+    )))
+}
+
+/// `numeric_recv(internal, oid, int4) -> numeric` (oid 2460). Arg 0 is the
+/// binary message buffer (StringInfo); arg 1 (typelem oid) is unused; arg 2 is
+/// the typmod.
+fn fc_numeric_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let buf = arg_varlena(fcinfo, 0);
+    let typmod = arg_int32(fcinfo, 2);
+    let m = scratch_mcx();
+    let image = ok(crate::io::numeric_recv(m.mcx(), buf, typmod));
+    ret_numeric(fcinfo, image.as_slice().to_vec())
+}
+
+/// `numeric_send(numeric) -> bytea` (oid 2461): binary wire form.
+fn fc_numeric_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let num = arg_numeric(fcinfo, 0);
+    let m = scratch_mcx();
+    let bytes = ok(crate::io::numeric_send(m.mcx(), num));
+    ret_varlena(fcinfo, bytes.as_slice().to_vec())
+}
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -289,6 +404,44 @@ pub fn register_numeric_builtins() {
         ),
         // The pre-existing typmod-output (kept).
         builtin(2918, "numerictypmodout", 1, true, false, fc_numerictypmodout),
+        // Additional unary numeric -> numeric (each distinct pg_proc OID).
+        builtin(1705, "numeric_abs", 1, true, false, fc_numeric_abs),
+        builtin(1706, "numeric_sign", 1, true, false, fc_numeric_sign),
+        builtin(1764, "numeric_inc", 1, true, false, fc_numeric_inc),
+        builtin(1711, "numeric_ceil", 1, true, false, fc_numeric_ceil),
+        builtin(2167, "numeric_ceil", 1, true, false, fc_numeric_ceil),
+        builtin(1712, "numeric_floor", 1, true, false, fc_numeric_floor),
+        builtin(1730, "numeric_sqrt", 1, true, false, fc_numeric_sqrt),
+        builtin(1731, "numeric_sqrt", 1, true, false, fc_numeric_sqrt),
+        builtin(1732, "numeric_exp", 1, true, false, fc_numeric_exp),
+        builtin(1733, "numeric_exp", 1, true, false, fc_numeric_exp),
+        builtin(1734, "numeric_ln", 1, true, false, fc_numeric_ln),
+        builtin(1735, "numeric_ln", 1, true, false, fc_numeric_ln),
+        builtin(5043, "numeric_trim_scale", 1, true, false, fc_numeric_trim_scale),
+        // (numeric, int4) -> numeric.
+        builtin(1707, "numeric_round", 2, true, false, fc_numeric_round),
+        builtin(1709, "numeric_trunc", 2, true, false, fc_numeric_trunc),
+        // Binary (numeric, numeric) -> numeric (each distinct pg_proc OID).
+        builtin(1728, "numeric_mod", 2, true, false, fc_numeric_mod),
+        builtin(1729, "numeric_mod", 2, true, false, fc_numeric_mod),
+        builtin(1973, "numeric_div_trunc", 2, true, false, fc_numeric_div_trunc),
+        builtin(1980, "numeric_div_trunc", 2, true, false, fc_numeric_div_trunc),
+        builtin(1736, "numeric_log", 2, true, false, fc_numeric_log),
+        builtin(1737, "numeric_log", 2, true, false, fc_numeric_log),
+        builtin(1738, "numeric_power", 2, true, false, fc_numeric_power),
+        builtin(1739, "numeric_power", 2, true, false, fc_numeric_power),
+        builtin(2169, "numeric_power", 2, true, false, fc_numeric_power),
+        builtin(5048, "numeric_gcd", 2, true, false, fc_numeric_gcd),
+        builtin(5049, "numeric_lcm", 2, true, false, fc_numeric_lcm),
+        // numeric_scale (numeric) -> int4.
+        builtin(3281, "numeric_scale", 1, true, false, fc_numeric_scale),
+        // width_bucket_numeric (numeric, numeric, numeric, int4) -> int4.
+        builtin(2170, "width_bucket_numeric", 4, true, false, fc_width_bucket_numeric),
+        // in_range_numeric_numeric (numeric, numeric, numeric, bool, bool) -> bool.
+        builtin(4141, "in_range_numeric_numeric", 5, true, false, fc_in_range_numeric_numeric),
+        // recv/send.
+        builtin(2460, "numeric_recv", 3, true, false, fc_numeric_recv),
+        builtin(2461, "numeric_send", 1, true, false, fc_numeric_send),
     ]);
 }
 
