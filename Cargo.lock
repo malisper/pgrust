@@ -12070,6 +12070,7 @@ dependencies = [
  "backend-optimizer-util-relnode",
  "backend-optimizer-util-vars",
  "backend-parser-analyze",
+ "backend-rewrite-rewritemanip-seams",
  "backend-utils-adt-selfuncs-seams",
  "backend-utils-cache-syscache-seams",
  "backend-utils-misc-guc-tables",

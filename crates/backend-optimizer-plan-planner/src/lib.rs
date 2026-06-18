@@ -783,6 +783,20 @@ fn subquery_planner<'mcx>(
     // `expand_grouping_sets` for grouping queries) panic precisely inside the
     // helpers, exactly where the C performs them.
     {
+        // When the query has join RTEs, `preprocess_expression` must flatten
+        // join-alias Vars first (C:1274-1279, via flatten_join_alias_vars). That
+        // seam reads the outer Query's range table (root->parse) for the
+        // RTE_JOIN joinaliasvars lists. The arena PlannerInfo carries `parse` as a
+        // handle, not the Query itself, so clone the parse Query into the run
+        // arena as the immutable context node, exactly as the hasGroupRTE block
+        // below does for flatten_group_exprs. Cheap and only built when needed.
+        let outer_query: Option<Node<'mcx>> = if root.hasJoinRTEs {
+            Some(Node::Query(run.resolve(root.parse).clone_in(mcx)?))
+        } else {
+            None
+        };
+        let outer_query_ref: Option<&Node<'mcx>> = outer_query.as_ref();
+
         // parse->targetList = preprocess_expression(..., EXPRKIND_TARGET) (C:903).
         // The C casts the whole `List *` to a Node and processes it; in the
         // value model each TargetEntry's `expr` is preprocessed in place.
@@ -794,7 +808,7 @@ fn subquery_planner<'mcx>(
                     Some(b) => Some(mcx::PgBox::into_inner(b)),
                     None => None,
                 };
-                let processed = preprocess_expression(mcx, &root, e, EXPRKIND_TARGET)?;
+                let processed = preprocess_expression(mcx, &root, outer_query_ref, e, EXPRKIND_TARGET)?;
                 run.resolve_mut(root.parse).targetList[i].expr = match processed {
                     Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
                     None => None,
@@ -824,7 +838,7 @@ fn subquery_planner<'mcx>(
                     Some(b) => Some(mcx::PgBox::into_inner(b)),
                     None => None,
                 };
-                let processed = preprocess_expression(mcx, &root, e, EXPRKIND_TARGET)?;
+                let processed = preprocess_expression(mcx, &root, outer_query_ref, e, EXPRKIND_TARGET)?;
                 run.resolve_mut(root.parse).returningList[i].expr = match processed {
                     Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
                     None => None,
@@ -833,13 +847,13 @@ fn subquery_planner<'mcx>(
         }
 
         // preprocess_qual_conditions(root, (Node *) parse->jointree) (C:922).
-        preprocess_qual_conditions_query(mcx, &root, run)?;
+        preprocess_qual_conditions_query(mcx, &root, outer_query_ref, run)?;
 
         // parse->havingQual = preprocess_expression(..., EXPRKIND_QUAL) (C:924).
         {
             let h = run.resolve_mut(root.parse).havingQual.take();
             let h = h.map(mcx::PgBox::into_inner);
-            let processed = preprocess_expression(mcx, &root, h, EXPRKIND_QUAL)?;
+            let processed = preprocess_expression(mcx, &root, outer_query_ref, h, EXPRKIND_QUAL)?;
             run.resolve_mut(root.parse).havingQual = match processed {
                 Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
                 None => None,
@@ -862,7 +876,7 @@ fn subquery_planner<'mcx>(
         {
             let lo = run.resolve_mut(root.parse).limitOffset.take();
             let lo = lo.map(mcx::PgBox::into_inner);
-            let processed = preprocess_expression(mcx, &root, lo, EXPRKIND_LIMIT)?;
+            let processed = preprocess_expression(mcx, &root, outer_query_ref, lo, EXPRKIND_LIMIT)?;
             run.resolve_mut(root.parse).limitOffset = match processed {
                 Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
                 None => None,
@@ -871,7 +885,7 @@ fn subquery_planner<'mcx>(
         {
             let lc = run.resolve_mut(root.parse).limitCount.take();
             let lc = lc.map(mcx::PgBox::into_inner);
-            let processed = preprocess_expression(mcx, &root, lc, EXPRKIND_LIMIT)?;
+            let processed = preprocess_expression(mcx, &root, outer_query_ref, lc, EXPRKIND_LIMIT)?;
             run.resolve_mut(root.parse).limitCount = match processed {
                 Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
                 None => None,
@@ -900,7 +914,7 @@ fn subquery_planner<'mcx>(
         {
             let c = run.resolve_mut(root.parse).mergeJoinCondition.take();
             let c = c.map(mcx::PgBox::into_inner);
-            let processed = preprocess_expression(mcx, &root, c, EXPRKIND_QUAL)?;
+            let processed = preprocess_expression(mcx, &root, outer_query_ref, c, EXPRKIND_QUAL)?;
             run.resolve_mut(root.parse).mergeJoinCondition = match processed {
                 Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
                 None => None,
@@ -990,7 +1004,7 @@ fn subquery_planner<'mcx>(
                             let mut new_cols: mcx::PgVec<'mcx, types_nodes::nodes::NodePtr<'mcx>> =
                                 mcx::vec_with_capacity_in(mcx, row_exprs.len())?;
                             for e in row_exprs.into_iter() {
-                                let pe = preprocess_expression(mcx, &root, Some(e), kind)?;
+                                let pe = preprocess_expression(mcx, &root, outer_query_ref, Some(e), kind)?;
                                 let pe = pe.ok_or_else(|| {
                                     types_error::PgError::error(
                                         "subquery_planner: VALUES column folded to NULL",
@@ -1024,6 +1038,7 @@ fn subquery_planner<'mcx>(
                             let pe = preprocess_expression(
                                 mcx,
                                 &root,
+                                outer_query_ref,
                                 Some(e),
                                 EXPRKIND_GROUPEXPR,
                             )?;
@@ -1056,14 +1071,17 @@ fn subquery_planner<'mcx>(
             }
         }
 
-        // Drop joinaliasvars lists once flattening is done (C:1067-1078). Only
-        // relevant when hasJoinRTEs; the simple SELECT path has no join RTEs.
+        // Drop joinaliasvars lists once flattening is done (C:1067-1078). The
+        // lists no longer match what expressions in the rest of the tree look
+        // like (the join-alias Vars have all been expanded), and leaving them in
+        // place creates a hazard for later scans of the tree. C sets each RTE's
+        // `joinaliasvars = NIL`; the owned model clears the PgVec.
         if root.hasJoinRTEs {
-            panic!(
-                "subquery_planner: joinaliasvars cleanup (planner.c:1067-1078) is \
-                 reached only with join RTEs, whose flatten_join_alias_vars path \
-                 is unported"
-            );
+            let nrtes = run.resolve(root.parse).rtable.len();
+            for i in 0..nrtes {
+                run.resolve_mut(root.parse).rtable[i].joinaliasvars =
+                    mcx::PgVec::new_in(mcx);
+            }
         }
 
         // Replace any Vars in targetList/havingQual that reference GROUP outputs
@@ -1249,6 +1267,7 @@ const EXPRKIND_GROUPEXPR: i32 = 13;
 pub fn preprocess_expression<'mcx>(
     mcx: Mcx<'mcx>,
     root: &PlannerInfo,
+    outer_query: Option<&Node<'mcx>>,
     expr: Option<Expr>,
     kind: i32,
 ) -> PgResult<Option<Expr>> {
@@ -1258,17 +1277,35 @@ pub fn preprocess_expression<'mcx>(
         Some(e) => e,
     };
 
-    // flatten_join_alias_vars (C:1274-1279).
+    // flatten_join_alias_vars (C:1274-1279). If the query has any join RTEs,
+    // replace join alias variables with base-relation variables. Must run first,
+    // before const-folding/sublink processing. Skipped for non-lateral RTE
+    // functions, VALUES lists, TABLESAMPLE and TABLEFUNC clauses.
     if root.hasJoinRTEs
         && !(kind == EXPRKIND_RTFUNC
             || kind == EXPRKIND_VALUES
             || kind == EXPRKIND_TABLESAMPLE
             || kind == EXPRKIND_TABLEFUNC)
     {
-        panic!(
-            "preprocess_expression: flatten_join_alias_vars (rewriteManip.c) has no \
-             ported owner (reached because root.hasJoinRTEs is set)"
-        );
+        let query_node = outer_query.ok_or_else(|| {
+            PgError::error(
+                "preprocess_expression: flatten_join_alias_vars needs the outer Query \
+                 (root->parse) but none was threaded in (root.hasJoinRTEs is set)",
+            )
+        })?;
+        let flat = backend_rewrite_rewritemanip_seams::flatten_join_alias_vars::call(
+            mcx,
+            query_node,
+            Node::Expr(expr),
+        )?;
+        expr = match flat {
+            Node::Expr(e) => e,
+            _ => {
+                return Err(PgError::error(
+                    "preprocess_expression: flatten_join_alias_vars returned a non-Expr node",
+                ))
+            }
+        };
     }
 
     // eval_const_expressions (C:1300-1301).
@@ -1343,12 +1380,13 @@ fn run_parse_has_sublinks(_root: &PlannerInfo) -> bool {
 fn preprocess_qual_conditions_query<'mcx>(
     mcx: Mcx<'mcx>,
     root: &PlannerInfo,
+    outer_query: Option<&Node<'mcx>>,
     run: &mut PlannerRun<'mcx>,
 ) -> PgResult<()> {
     let jt = run.resolve_mut(root.parse).jointree.take();
     if let Some(jt) = jt {
         let mut node = Node::FromExpr(mcx::PgBox::into_inner(jt));
-        preprocess_qual_conditions(mcx, root, &mut node)?;
+        preprocess_qual_conditions(mcx, root, outer_query, &mut node)?;
         let f = match node {
             Node::FromExpr(f) => f,
             _ => unreachable!("jointree top stays a FromExpr"),
@@ -1370,6 +1408,7 @@ fn preprocess_qual_conditions_query<'mcx>(
 pub fn preprocess_qual_conditions<'mcx>(
     mcx: Mcx<'mcx>,
     root: &PlannerInfo,
+    outer_query: Option<&Node<'mcx>>,
     jtnode: &mut Node<'mcx>,
 ) -> PgResult<()> {
     match jtnode {
@@ -1378,18 +1417,18 @@ pub fn preprocess_qual_conditions<'mcx>(
         }
         Node::FromExpr(f) => {
             for i in 0..f.fromlist.len() {
-                preprocess_qual_conditions(mcx, root, &mut f.fromlist[i])?;
+                preprocess_qual_conditions(mcx, root, outer_query, &mut f.fromlist[i])?;
             }
-            preprocess_jointree_quals(mcx, root, &mut f.quals)?;
+            preprocess_jointree_quals(mcx, root, outer_query, &mut f.quals)?;
         }
         Node::JoinExpr(j) => {
             if let Some(larg) = j.larg.as_deref_mut() {
-                preprocess_qual_conditions(mcx, root, larg)?;
+                preprocess_qual_conditions(mcx, root, outer_query, larg)?;
             }
             if let Some(rarg) = j.rarg.as_deref_mut() {
-                preprocess_qual_conditions(mcx, root, rarg)?;
+                preprocess_qual_conditions(mcx, root, outer_query, rarg)?;
             }
-            preprocess_jointree_quals(mcx, root, &mut j.quals)?;
+            preprocess_jointree_quals(mcx, root, outer_query, &mut j.quals)?;
         }
         other => {
             return Err(PgError::error(alloc::format!(
@@ -1406,6 +1445,7 @@ pub fn preprocess_qual_conditions<'mcx>(
 fn preprocess_jointree_quals<'mcx>(
     mcx: Mcx<'mcx>,
     root: &PlannerInfo,
+    outer_query: Option<&Node<'mcx>>,
     quals: &mut Option<types_nodes::nodes::NodePtr<'mcx>>,
 ) -> PgResult<()> {
     // The C field is `Node *quals`; in the analyzed jointree it is `Node::Expr`.
@@ -1423,7 +1463,7 @@ fn preprocess_jointree_quals<'mcx>(
             }
         },
     };
-    let processed = preprocess_expression(mcx, root, expr, EXPRKIND_QUAL)?;
+    let processed = preprocess_expression(mcx, root, outer_query, expr, EXPRKIND_QUAL)?;
     *quals = match processed {
         Some(e) => Some(mcx::alloc_in(mcx, Node::Expr(e))?),
         None => None,
@@ -4186,7 +4226,11 @@ pub fn init_seams() {
     // non-NULL result (the only NULL fall-out is the empty-input fast path).
     backend_optimizer_plan_init_subselect_ext_seams::preprocess_phv_expression::set(
         |mcx, root, expr| {
-            Ok(preprocess_expression(mcx, root, Some(expr), EXPRKIND_PHV)?
+            // No outer Query node is threaded into this PHV seam; if root.hasJoinRTEs
+            // is set, preprocess_expression returns an Err (LATERAL-PHV join-alias
+            // flattening through this entry point is not wired). The common
+            // (non-join-RTE) PHV path is unaffected.
+            Ok(preprocess_expression(mcx, root, None, Some(expr), EXPRKIND_PHV)?
                 .expect("preprocess_expression of a non-NULL PHV expr is non-NULL"))
         },
     );

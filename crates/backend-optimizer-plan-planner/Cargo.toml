@@ -74,6 +74,8 @@ backend-optimizer-path-pathkeys = { path = "../backend-optimizer-path-pathkeys" 
 backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
 # get_sortgroupref_clause / make_pathtarget_from_tlist / copy_pathtarget.
 backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
+# flatten_join_alias_vars seam (installed by backend-optimizer-util-vars).
+backend-rewrite-rewritemanip-seams = { path = "../backend-rewrite-rewritemanip-seams" }
 # set_pathtarget_cost_width (the create_pathtarget macro tail).
 backend-optimizer-path-costsize = { path = "../backend-optimizer-path-costsize" }
 # get_sortgroupclause_expr (get_number_of_groups GROUP BY estimate).
