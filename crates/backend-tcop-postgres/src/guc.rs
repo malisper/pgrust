@@ -59,6 +59,23 @@ fn set_restrict_nonsystem_relation_kind(value: i32) {
     RESTRICT_NONSYSTEM_RELATION_KIND.with(|c| c.set(value));
 }
 
+thread_local! {
+    /// `char *restrict_nonsystem_relation_kind_string;` (postgres.c) — the GUC's
+    /// own `conf->variable` (the raw comma-list text). The check/assign hooks
+    /// parse it into the `restrict_nonsystem_relation_kind` bitmask above; this
+    /// cell is the string storage the GUC engine reads/writes. boot_val `""`.
+    static RESTRICT_NONSYSTEM_RELATION_KIND_STRING: core::cell::RefCell<Option<alloc::string::String>> =
+        const { core::cell::RefCell::new(Some(alloc::string::String::new())) };
+}
+
+fn restrict_nonsystem_relation_kind_string() -> Option<alloc::string::String> {
+    RESTRICT_NONSYSTEM_RELATION_KIND_STRING.with(|c| c.borrow().clone())
+}
+
+fn set_restrict_nonsystem_relation_kind_string(value: Option<alloc::string::String>) {
+    RESTRICT_NONSYSTEM_RELATION_KIND_STRING.with(|c| *c.borrow_mut() = value);
+}
+
 // ---- set_debug_options / set_plan_disabling_options / get_stats_option_name ----
 
 /// `SetConfigOption(name, value, context, source)`.
@@ -552,6 +569,16 @@ pub fn install_guc_hooks() {
     hooks::assign_transaction_timeout.install(assign_transaction_timeout);
     hooks::check_restrict_nonsystem_relation_kind.install(check_restrict_nonsystem_relation_kind);
     hooks::assign_restrict_nonsystem_relation_kind.install(assign_restrict_nonsystem_relation_kind);
+
+    // The GUC's own `conf->variable` is the raw string
+    // `restrict_nonsystem_relation_kind_string` (postgres.c); install its slot
+    // over the string backing cell. The check/assign hooks above turn the
+    // string into the parsed `restrict_nonsystem_relation_kind` bitmask.
+    use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+    vars::restrict_nonsystem_relation_kind_string.install(GucVarAccessors {
+        get: restrict_nonsystem_relation_kind_string,
+        set: set_restrict_nonsystem_relation_kind_string,
+    });
 }
 
 // ===========================================================================

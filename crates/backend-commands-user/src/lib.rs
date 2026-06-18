@@ -2650,6 +2650,7 @@ fn make_current_rolespec() -> RoleSpec {
  * ------------------------------------------------------------------------- */
 
 use std::cell::Cell;
+use std::cell::RefCell;
 
 thread_local! {
     /// `Password_encryption` — the GUC's `conf->variable` storage. C boots it
@@ -2661,6 +2662,11 @@ thread_local! {
     /// `createrole_self_grant_enabled` — derived by the assign hook. Boots
     /// false (the `""` boot value disables self-grants).
     static CREATEROLE_SELF_GRANT_ENABLED: Cell<bool> = const { Cell::new(false) };
+    /// `char *createrole_self_grant = "";` — the GUC's own `conf->variable`,
+    /// the raw string the check/assign hooks parse into the enabled/options
+    /// above. boot_val `""`.
+    static CREATEROLE_SELF_GRANT_STRING: RefCell<Option<String>> =
+        const { RefCell::new(Some(String::new())) };
     /// `createrole_self_grant_options` — derived by the assign hook. C
     /// zero-inits the static struct (all bits clear) before any assignment.
     static CREATEROLE_SELF_GRANT_OPTIONS: Cell<GrantRoleOptions> = const {
@@ -2686,6 +2692,16 @@ fn set_password_encryption(value: i32) {
 /// `createrole_self_grant_enabled`.
 fn get_createrole_self_grant_enabled() -> bool {
     CREATEROLE_SELF_GRANT_ENABLED.with(Cell::get)
+}
+
+/// Read `char *createrole_self_grant` (`*conf->variable`).
+fn get_createrole_self_grant_string() -> Option<String> {
+    CREATEROLE_SELF_GRANT_STRING.with(|c| c.borrow().clone())
+}
+
+/// Write `char *createrole_self_grant` — the GUC machinery's assignment path.
+fn set_createrole_self_grant_string(value: Option<String>) {
+    CREATEROLE_SELF_GRANT_STRING.with(|c| *c.borrow_mut() = value);
 }
 
 /// `createrole_self_grant_options` projected to the seam's tuple shape
@@ -2758,6 +2774,13 @@ pub fn init_seams() {
     /* `createrole_self_grant` check/assign hooks (user.c). */
     hooks::check_createrole_self_grant.install(check_createrole_self_grant_hook);
     hooks::assign_createrole_self_grant.install(assign_createrole_self_grant_hook);
+
+    /* `char *createrole_self_grant` — the GUC's own `conf->variable` (raw
+     * string). The check/assign hooks above derive enabled/options from it. */
+    vars::createrole_self_grant.install(GucVarAccessors {
+        get: get_createrole_self_grant_string,
+        set: set_createrole_self_grant_string,
+    });
 
     /* Read seams consumed within this crate's command paths. */
     seam::password_encryption::set(|| Ok(get_password_encryption()));

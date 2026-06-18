@@ -209,6 +209,45 @@ pub fn init_seams() {
     // copy invisible to the tcop writer / error reporter).
     sp::client_auth_in_progress::set(backend_utils_error::config::client_auth_in_progress);
     sp::set_client_auth_in_progress::set(backend_utils_error::config::set_client_auth_in_progress);
+
+    install_bonjour_gucs();
+}
+
+/// Install the two Bonjour GUC slots whose `conf->variable` backing globals
+/// live in postmaster.c: `bool enable_bonjour = false` (postmaster.c:245) and
+/// `char *bonjour_name` (postmaster.c:246, boot_val `""`). Process-private
+/// backing cells; the GUC engine reads/writes them through these accessors.
+fn install_bonjour_gucs() {
+    use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+    use std::cell::{Cell, RefCell};
+
+    thread_local! {
+        static ENABLE_BONJOUR: Cell<bool> = const { Cell::new(false) };
+        static BONJOUR_NAME: RefCell<Option<String>> =
+            const { RefCell::new(Some(String::new())) };
+    }
+
+    fn enable_bonjour_get() -> bool {
+        ENABLE_BONJOUR.with(Cell::get)
+    }
+    fn enable_bonjour_set(v: bool) {
+        ENABLE_BONJOUR.with(|c| c.set(v));
+    }
+    fn bonjour_name_get() -> Option<String> {
+        BONJOUR_NAME.with(|c| c.borrow().clone())
+    }
+    fn bonjour_name_set(v: Option<String>) {
+        BONJOUR_NAME.with(|c| *c.borrow_mut() = v);
+    }
+
+    vars::enable_bonjour.install(GucVarAccessors {
+        get: enable_bonjour_get,
+        set: enable_bonjour_set,
+    });
+    vars::bonjour_name.install(GucVarAccessors {
+        get: bonjour_name_get,
+        set: bonjour_name_set,
+    });
 }
 
 /// `pg_strsignal(int signum)` (port/strsignal.c) — human-readable signal name.
