@@ -1373,6 +1373,67 @@ pub fn init_seams() {
     me::make_fn_arguments::set(seam_make_fn_arguments);
     me::check_srf_call_placement::set(check_srf_call_placement);
     me::set_last_srf::set(seam_set_last_srf);
+    me::func_get_detail::set(seam_func_get_detail);
+}
+
+/// Seam entry for `func_get_detail`. The sole cross-crate caller is
+/// `pg_aggregate.c`'s `lookup_agg_function`, which calls
+/// `func_get_detail(fnName, NIL, NIL, nargs, input_types, false, false, false,
+/// ..., NULL)` — i.e. no argument expressions or names, no variadic/default
+/// expansion, no OUT arguments, and a NULL `argdefaults` out-param. This
+/// wrapper threads those fixed flags into the full private port and maps the
+/// owner's local `FuncDetail`/`FuncDetailCode` onto the seam contract's
+/// (`mcx`-allocated `true_typeids`).
+fn seam_func_get_detail<'mcx>(
+    mcx: Mcx<'mcx>,
+    funcname: &[String],
+    nargs: i32,
+    argtypes: &[Oid],
+) -> PgResult<me::FuncDetail<'mcx>> {
+    let names: Vec<PgString<'mcx>> = funcname
+        .iter()
+        .map(|s| PgString::from_str_in(s, mcx))
+        .collect::<Result<_, _>>()?;
+    let detail = func_get_detail(
+        mcx,
+        &names,
+        &[],   // fargs = NIL
+        &[],   // fargnames = NIL
+        nargs,
+        argtypes,
+        false, // expand_variadic
+        false, // expand_defaults
+        false, // include_out_arguments
+        false, // argdefaults out-param is NULL
+    )?;
+
+    let mut true_typeids = PgVec::new_in(mcx);
+    for &t in &detail.true_typeids {
+        true_typeids.push(t);
+    }
+
+    Ok(me::FuncDetail {
+        fdresult: func_detail_code_to_seam(detail.fdresult),
+        funcid: detail.funcid,
+        rettype: detail.rettype,
+        retset: detail.retset,
+        nvargs: detail.nvargs,
+        vatype: detail.vatype,
+        true_typeids,
+    })
+}
+
+/// Map the owner's local [`FuncDetailCode`] onto the seam contract's enum.
+fn func_detail_code_to_seam(code: FuncDetailCode) -> me::FuncDetailCode {
+    match code {
+        FuncDetailCode::NotFound => me::FuncDetailCode::NotFound,
+        FuncDetailCode::Multiple => me::FuncDetailCode::Multiple,
+        FuncDetailCode::Normal => me::FuncDetailCode::Normal,
+        FuncDetailCode::Procedure => me::FuncDetailCode::Procedure,
+        FuncDetailCode::Aggregate => me::FuncDetailCode::Aggregate,
+        FuncDetailCode::WindowFunc => me::FuncDetailCode::WindowFunc,
+        FuncDetailCode::Coercion => me::FuncDetailCode::Coercion,
+    }
 }
 
 fn seam_lookup_func_name(
