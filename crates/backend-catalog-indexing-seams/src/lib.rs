@@ -102,6 +102,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ATExecSetRowSecurity` / `ATExecForceNoForceRowSecurity` (tablecmds.c):
+    /// open pg_class RowExclusiveLock, `SearchSysCacheCopy1(RELOID, relid)`, poke
+    /// `relrowsecurity` (or `relforcerowsecurity`) on the `GETSTRUCT` copy, and
+    /// `CatalogTupleUpdate`. Exactly one of the two `Option`s is `Some`. The
+    /// boolean result is `HeapTupleIsValid(tuple)`; the caller raises the
+    /// `cache lookup failed for relation %u` `elog(ERROR)` when it is `false`.
+    pub fn set_pg_class_row_security(
+        relid: Oid,
+        relrowsecurity: Option<bool>,
+        relforcerowsecurity: Option<bool>,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `systable_inplace_update_begin(class_rel, ClassOidIndexId, true, NULL,
     /// key[oid = rel_oid], &reltup, &state)`; if the tuple is found, write
     /// `((Form_pg_class) GETSTRUCT(reltup))->reltoastrelid = toast_relid` and

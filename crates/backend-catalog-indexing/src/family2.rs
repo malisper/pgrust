@@ -86,6 +86,8 @@ const ANUM_PG_CLASS_RELALLFROZEN: i16 = 13;
 const ANUM_PG_CLASS_RELTOASTRELID: i16 = 14;
 const ANUM_PG_CLASS_RELHASINDEX: i16 = 15;
 const ANUM_PG_CLASS_RELHASRULES: i16 = 21;
+const ANUM_PG_CLASS_RELROWSECURITY: i16 = 24;
+const ANUM_PG_CLASS_RELFORCEROWSECURITY: i16 = 25;
 
 // pg_sequence (CATALOG(pg_sequence,2224)): 8 fixed columns.
 const ANUM_PG_SEQUENCE_SEQRELID: i16 = 1;
@@ -957,6 +959,39 @@ fn set_relation_rule_status(
             &form,
         )?;
     }
+    Ok(true)
+}
+
+/// `ATExecSetRowSecurity` / `ATExecForceNoForceRowSecurity` (tablecmds.c:18604,
+/// 18634): open pg_class RowExclusiveLock, `SearchSysCacheCopy1(RELOID, relid)`,
+/// poke `relrowsecurity` (or `relforcerowsecurity`) on the `GETSTRUCT` copy, and
+/// `CatalogTupleUpdate`. Exactly one of `relrowsecurity` / `relforcerowsecurity`
+/// is `Some`. The C `InvokeObjectPostAlterHook` is a no-op without an installed
+/// object-access hook. The boolean result is `HeapTupleIsValid(tuple)`; the
+/// caller raises the `cache lookup failed for relation %u` `elog(ERROR)` when it
+/// is `false`.
+fn set_pg_class_row_security(
+    relid: Oid,
+    relrowsecurity: Option<bool>,
+    relforcerowsecurity: Option<bool>,
+) -> PgResult<bool> {
+    let ctx = MemoryContext::new("set_pg_class_row_security");
+    let mcx = ctx.mcx();
+    let pg_class = table_open(mcx, cat::catalog::RELATION_RELATION_ID, RowExclusiveLock)?;
+    let Some(oldtup) = fetch_by_oid(mcx, &pg_class, ANUM_PG_CLASS_OID, relid)? else {
+        pg_class.close(RowExclusiveLock)?;
+        return Ok(false);
+    };
+    let (mut values, mut nulls) = deform(mcx, &pg_class, &oldtup)?;
+    let mut replaces = vec![false; values.len()];
+    if let Some(rls) = relrowsecurity {
+        set_col(&mut values, &mut nulls, &mut replaces, ANUM_PG_CLASS_RELROWSECURITY, Datum::from_bool(rls));
+    }
+    if let Some(force) = relforcerowsecurity {
+        set_col(&mut values, &mut nulls, &mut replaces, ANUM_PG_CLASS_RELFORCEROWSECURITY, Datum::from_bool(force));
+    }
+    modify_and_update(mcx, &pg_class, &oldtup, &values, &nulls, &replaces)?;
+    pg_class.close(RowExclusiveLock)?;
     Ok(true)
 }
 
@@ -2476,6 +2511,7 @@ pub fn install() {
     s::set_pg_class_reltoastrelid::set(set_pg_class_reltoastrelid);
     s::set_pg_class_reltoastrelid_inplace::set(set_pg_class_reltoastrelid_inplace);
     s::set_relation_rule_status::set(set_relation_rule_status);
+    s::set_pg_class_row_security::set(set_pg_class_row_security);
 
     // pg_sequence.
     s::catalog_insert_pg_sequence::set(catalog_insert_pg_sequence);
