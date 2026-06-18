@@ -8,7 +8,7 @@
 use backend_utils_misc_stack_depth_seams as stack_depth;
 use mcx::{alloc_in, Mcx, PgBox, PgVec};
 use types_error::{PgError, PgResult};
-use types_nodes::nodes::Node;
+use types_nodes::nodes::{ntag, Node};
 use types_nodes::{EStateData, ExecProcNodeMtd, PlanStateNode, SubPlanState};
 
 use crate::execProcnode_run_end::exec_proc_node_first;
@@ -53,24 +53,25 @@ pub fn exec_init_node<'mcx>(
     stack_depth::check_stack_depth::call()?;
 
     // switch (nodeTag(node))
-    let mut result: PgBox<'mcx, PlanStateNode<'mcx>> = match node {
+    let mut result: PgBox<'mcx, PlanStateNode<'mcx>> = match node.node_tag() {
         // ------------------------------------------------------------------
         // control nodes
         // ------------------------------------------------------------------
         // case T_Result: ExecInitResult((Result *) node, estate, eflags)
-        Node::Result(_) => {
+        ntag::T_Result => {
             let s = backend_executor_nodeResult::ExecInitResult(node, estate, eflags)?;
             alloc_in(mcx, PlanStateNode::Result(s))?
         }
 
         // case T_ProjectSet: ExecInitProjectSet(...) (nodeProjectSet.c)
-        Node::ProjectSet(_) => {
+        ntag::T_ProjectSet => {
             let s = backend_executor_nodeProjectSet::ExecInitProjectSet(node, estate, eflags)?;
             alloc_in(mcx, PlanStateNode::ProjectSet(s))?
         }
 
         // case T_ModifyTable: ExecInitModifyTable(...) (nodeModifyTable.c)
-        Node::ModifyTable(m) => {
+        ntag::T_ModifyTable => {
+            let m = node.expect_modifytable();
             let s = backend_executor_nodeModifyTable::init::ExecInitModifyTable(
                 mcx, node, m, estate, eflags,
             )?;
@@ -78,19 +79,20 @@ pub fn exec_init_node<'mcx>(
         }
 
         // case T_Append: ExecInitAppend((Append *) node, estate, eflags)
-        Node::Append(append) => {
+        ntag::T_Append => {
+            let append = node.expect_append();
             let s = backend_executor_nodeAppend::ExecInitAppend(mcx, node, append, estate, eflags)?;
             alloc_in(mcx, PlanStateNode::Append(s))?
         }
 
         // case T_MergeAppend: ExecInitMergeAppend((MergeAppend *) node, estate, eflags)
-        Node::MergeAppend(_) => {
+        ntag::T_MergeAppend => {
             let s = backend_executor_nodeMergeAppend::ExecInitMergeAppend(node, estate, eflags)?;
             alloc_in(mcx, PlanStateNode::MergeAppend(s))?
         }
 
         // case T_RecursiveUnion: ExecInitRecursiveUnion(...) (nodeRecursiveunion.c)
-        Node::RecursiveUnion(_) => {
+        ntag::T_RecursiveUnion => {
             let s = backend_executor_nodeRecursiveunion::ExecInitRecursiveUnion(
                 node, estate, eflags,
             )?;
@@ -102,7 +104,8 @@ pub fn exec_init_node<'mcx>(
         // `ExecInitBitmapAnd` already returns a `PgBox<PlanStateNode>` (its
         // makeNode wraps the result in the enum), so this arm passes it through
         // directly rather than re-wrapping a concrete state struct.
-        Node::BitmapAnd(bitmap_and) => {
+        ntag::T_BitmapAnd => {
+            let bitmap_and = node.expect_bitmapand();
             backend_executor_nodeBitmapAnd::ExecInitBitmapAnd(
                 mcx, node, bitmap_and, estate, eflags,
             )?
@@ -121,7 +124,8 @@ pub fn exec_init_node<'mcx>(
         // scan nodes
         // ------------------------------------------------------------------
         // case T_SeqScan: ExecInitSeqScan((SeqScan *) node, estate, eflags)
-        Node::SeqScan(seqscan) => {
+        ntag::T_SeqScan => {
+            let seqscan = node.expect_seqscan();
             let s = backend_executor_nodeSeqscan::ExecInitSeqScan(seqscan, node, estate, eflags)?;
             alloc_in(mcx, PlanStateNode::SeqScan(s))?
         }
@@ -135,19 +139,19 @@ pub fn exec_init_node<'mcx>(
         // `ExecInitSampleScan` is ported; a plain SELECT does not use TABLESAMPLE.
 
         // case T_IndexScan: ExecInitIndexScan(...) (nodeIndexscan.c)
-        Node::IndexScan(_) => {
+        ntag::T_IndexScan => {
             let s = backend_executor_nodeIndexscan::ExecInitIndexScan(node, estate, eflags)?;
             alloc_in(mcx, PlanStateNode::IndexScan(s))?
         }
 
         // case T_IndexOnlyScan: ExecInitIndexOnlyScan((IndexOnlyScan *) node, estate, eflags)
-        Node::IndexOnlyScan(_) => {
+        ntag::T_IndexOnlyScan => {
             let s = backend_executor_nodeIndexonlyscan::ExecInitIndexOnlyScan(node, estate, eflags)?;
             alloc_in(mcx, PlanStateNode::IndexOnlyScan(s))?
         }
 
         // case T_BitmapIndexScan: ExecInitBitmapIndexScan(...) (nodeBitmapIndexscan.c)
-        Node::BitmapIndexScan(_) => {
+        ntag::T_BitmapIndexScan => {
             let s = backend_executor_nodeBitmapIndexscan::ExecInitBitmapIndexScan(
                 node, estate, eflags,
             )?;
@@ -168,7 +172,8 @@ pub fn exec_init_node<'mcx>(
         // is ported.
 
         // case T_TidRangeScan: ExecInitTidRangeScan((TidRangeScan *) node, estate, eflags)
-        Node::TidRangeScan(tidrangescan) => {
+        ntag::T_TidRangeScan => {
+            let tidrangescan = node.expect_tidrangescan();
             let s = backend_executor_nodeTidrangescan::ExecInitTidRangeScan(
                 tidrangescan,
                 estate,
@@ -178,7 +183,8 @@ pub fn exec_init_node<'mcx>(
         }
 
         // case T_SubqueryScan: ExecInitSubqueryScan(...) (nodeSubqueryscan.c)
-        Node::SubqueryScan(subqueryscan) => {
+        ntag::T_SubqueryScan => {
+            let subqueryscan = node.expect_subqueryscan();
             let s = backend_executor_nodeSubqueryscan::ExecInitSubqueryScan(
                 subqueryscan,
                 node,
@@ -189,25 +195,25 @@ pub fn exec_init_node<'mcx>(
         }
 
         // case T_FunctionScan: ExecInitFunctionScan(...) (nodeFunctionscan.c)
-        Node::FunctionScan(_) => {
+        ntag::T_FunctionScan => {
             let s = backend_executor_nodeFunctionscan::ExecInitFunctionScan(node, estate, eflags)?;
             alloc_in(mcx, PlanStateNode::FunctionScan(s))?
         }
 
         // case T_TableFuncScan: ExecInitTableFuncScan((TableFuncScan *) node, estate, eflags)
-        Node::TableFuncScan(_) => {
+        ntag::T_TableFuncScan => {
             let s = backend_executor_nodeTableFuncscan::ExecInitTableFuncScan(node, estate, eflags)?;
             alloc_in(mcx, PlanStateNode::TableFuncScan(s))?
         }
 
         // case T_ValuesScan: ExecInitValuesScan(...) (nodeValuesscan.c)
-        Node::ValuesScan(_) => {
+        ntag::T_ValuesScan => {
             let s = backend_executor_nodeValuesscan::ExecInitValuesScan(node, estate, eflags)?;
             alloc_in(mcx, PlanStateNode::ValuesScan(s))?
         }
 
         // case T_CteScan: ExecInitCteScan(...) (nodeCtescan.c)
-        Node::CteScan(_) => {
+        ntag::T_CteScan => {
             let s = backend_executor_nodeCtescan::ExecInitCteScan(node, eflags, estate)?;
             alloc_in(mcx, PlanStateNode::CteScan(s))?
         }
@@ -229,7 +235,8 @@ pub fn exec_init_node<'mcx>(
         // variant both exist (the state struct lives in `types-nodes`, no crate
         // cycle), so this arm is fully wired. WorkTableScan only appears inside a
         // RecursiveUnion (WITH RECURSIVE).
-        Node::WorkTableScan(wts) => {
+        ntag::T_WorkTableScan => {
+            let wts = node.expect_worktablescan();
             let s = backend_executor_nodeWorktablescan::ExecInitWorkTableScan(
                 wts, estate, eflags,
             )?;
@@ -237,13 +244,13 @@ pub fn exec_init_node<'mcx>(
         }
 
         // case T_ForeignScan: ExecInitForeignScan((ForeignScan *) node, estate, eflags)
-        Node::ForeignScan(_) => {
+        ntag::T_ForeignScan => {
             let s = backend_executor_nodeForeignscan::ExecInitForeignScan(node, estate, eflags)?;
             alloc_in(mcx, PlanStateNode::ForeignScan(s))?
         }
 
         // case T_CustomScan: ExecInitCustomScan(...) (nodeCustom.c)
-        Node::CustomScan(_) => {
+        ntag::T_CustomScan => {
             let s = backend_executor_nodeCustom::ExecInitCustomScan(node, estate, eflags)?;
             alloc_in(mcx, PlanStateNode::CustomScan(s))?
         }
@@ -252,19 +259,19 @@ pub fn exec_init_node<'mcx>(
         // join nodes
         // ------------------------------------------------------------------
         // case T_NestLoop: ExecInitNestLoop((NestLoop *) node, estate, eflags)
-        Node::NestLoop(_) => {
+        ntag::T_NestLoop => {
             let s = backend_executor_nodeNestloop::ExecInitNestLoop(node, estate, eflags)?;
             alloc_in(mcx, PlanStateNode::NestLoop(s))?
         }
 
         // case T_MergeJoin: ExecInitMergeJoin((MergeJoin *) node, estate, eflags)
-        Node::MergeJoin(_) => {
+        ntag::T_MergeJoin => {
             let s = backend_executor_nodeMergejoin::ExecInitMergeJoin(node, estate, eflags)?;
             alloc_in(mcx, PlanStateNode::MergeJoin(s))?
         }
 
         // case T_HashJoin: ExecInitHashJoin((HashJoin *) node, estate, eflags)
-        Node::HashJoin(_) => {
+        ntag::T_HashJoin => {
             let s = backend_executor_nodeHashjoin::ExecInitHashJoin(node, estate, eflags)?;
             alloc_in(mcx, PlanStateNode::HashJoin(s))?
         }
@@ -273,20 +280,20 @@ pub fn exec_init_node<'mcx>(
         // materialization nodes
         // ------------------------------------------------------------------
         // case T_Material: ExecInitMaterial((Material *) node, estate, eflags)
-        Node::Material(_) => {
+        ntag::T_Material => {
             let s = backend_executor_nodeMaterial::ExecInitMaterial(node, estate, eflags)?;
             alloc_in(mcx, PlanStateNode::Material(s))?
         }
 
         // case T_Sort: ExecInitSort((Sort *) node, estate, eflags)
-        Node::Sort(_) => {
+        ntag::T_Sort => {
             let s = backend_executor_nodeSort::ExecInitSort(node, estate, eflags)?;
             alloc_in(mcx, PlanStateNode::Sort(s))?
         }
 
         // case T_IncrementalSort:
         //   ExecInitIncrementalSort((IncrementalSort *) node, estate, eflags)
-        Node::IncrementalSort(_) => {
+        ntag::T_IncrementalSort => {
             let s = backend_executor_nodeIncrementalSort::ExecInitIncrementalSort(
                 node, estate, eflags,
             )?;
@@ -302,13 +309,13 @@ pub fn exec_init_node<'mcx>(
         // the owned `MemoizeScanState` into the query context via `alloc_in`,
         // matching the C `makeNode(MemoizeState)` allocation in the executor
         // memory context (move-only; the state struct owns its contents).
-        Node::Memoize(_) => {
+        ntag::T_Memoize => {
             let s = backend_executor_nodeMemoize::ExecInitMemoize(node, estate, eflags)?;
             alloc_in(mcx, PlanStateNode::Memoize(alloc_in(mcx, *s)?))?
         }
 
         // case T_Group: ExecInitGroup(...) (nodeGroup.c)
-        Node::Group(_) => {
+        ntag::T_Group => {
             let s = backend_executor_nodeGroup::ExecInitGroup(node, estate, eflags)?;
             alloc_in(mcx, PlanStateNode::Group(s))?
         }
@@ -319,7 +326,8 @@ pub fn exec_init_node<'mcx>(
         // so the `PlanStateNode::Agg` variant carries it behind the owned,
         // tag-checked erased `AggStateLive` carrier (#324/#165 keystone). The
         // `ExecInitAgg` result is unsized into that trait object here.
-        Node::Agg(agg) => {
+        ntag::T_Agg => {
+            let agg = node.expect_agg();
             // Pass the wrapping `&Node` too so ExecInitAgg can set
             // `aggstate->ss.ps.plan = (Plan *) node` (the plan back-link the
             // result projection reads its targetlist from).
@@ -329,37 +337,37 @@ pub fn exec_init_node<'mcx>(
         }
 
         // case T_WindowAgg: ExecInitWindowAgg((WindowAgg *) node, estate, eflags)
-        Node::WindowAgg(_) => {
+        ntag::T_WindowAgg => {
             let s = backend_executor_nodeWindowAgg::ExecInitWindowAgg(node, estate, eflags)?;
             alloc_in(mcx, PlanStateNode::WindowAgg(s))?
         }
 
         // case T_Unique: ExecInitUnique(...) (nodeUnique.c)
-        Node::Unique(_) => {
+        ntag::T_Unique => {
             let s = backend_executor_nodeUnique::ExecInitUnique(node, estate, eflags)?;
             alloc_in(mcx, PlanStateNode::Unique(s))?
         }
 
         // case T_Gather: ExecInitGather((Gather *) node, estate, eflags)
-        Node::Gather(_) => {
+        ntag::T_Gather => {
             let s = backend_executor_nodeGather::ExecInitGather(node, estate, eflags)?;
             alloc_in(mcx, PlanStateNode::Gather(s))?
         }
 
         // case T_GatherMerge: ExecInitGatherMerge(...) (nodeGatherMerge.c)
-        Node::GatherMerge(_) => {
+        ntag::T_GatherMerge => {
             let s = backend_executor_nodeGatherMerge::ExecInitGatherMerge(node, estate, eflags)?;
             alloc_in(mcx, PlanStateNode::GatherMerge(s))?
         }
 
         // case T_Hash: ExecInitHash((Hash *) node, estate, eflags)
-        Node::Hash(_) => {
+        ntag::T_Hash => {
             let s = backend_executor_nodeHash::exec_hash::ExecInitHash(mcx, node, estate, eflags)?;
             alloc_in(mcx, PlanStateNode::Hash(s))?
         }
 
         // case T_SetOp: ExecInitSetOp(...) (nodeSetop.c)
-        Node::SetOp(_) => {
+        ntag::T_SetOp => {
             let s = backend_executor_nodeSetOp::ExecInitSetOp(node, estate, eflags)?;
             alloc_in(mcx, PlanStateNode::SetOp(s))?
         }
@@ -367,7 +375,7 @@ pub fn exec_init_node<'mcx>(
         // case T_LockRows: ExecInitLockRows(...) (nodeLockRows.c)
 
         // case T_Limit: ExecInitLimit((Limit *) node, estate, eflags)
-        Node::Limit(_) => {
+        ntag::T_Limit => {
             let limitstate = backend_executor_nodeLimit::ExecInitLimit(node, estate, eflags)?;
             alloc_in(mcx, PlanStateNode::Limit(limitstate))?
         }
@@ -378,7 +386,7 @@ pub fn exec_init_node<'mcx>(
         //
         // Reached for `Plan` tags that have no `Node` enum variant yet; each
         // node port that adds a variant adds its arm above.
-        other => return Err(unrecognized_node_type(other)),
+        _ => return Err(unrecognized_node_type(node)),
     };
 
     // Set the `ExprState.parent` back-link on every expression this node owns.
