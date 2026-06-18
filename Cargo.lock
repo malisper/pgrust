@@ -9492,7 +9492,6 @@ dependencies = [
  "backend-executor-execExpr-seams",
  "backend-executor-execTuples-seams",
  "backend-executor-execUtils-seams",
- "backend-executor-nodeCustom-seams",
  "backend-nodes-extensible-seams",
  "backend-storage-ipc-shm-toc-seams",
  "backend-tcop-postgres-seams",
@@ -9500,15 +9499,6 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
-]
-
-[[package]]
-name = "backend-executor-nodeCustom-seams"
-version = "0.0.0"
-dependencies = [
- "seam-core",
- "types-error",
- "types-execparallel",
 ]
 
 [[package]]
@@ -9836,7 +9826,6 @@ dependencies = [
  "backend-executor-execScan-seams",
  "backend-executor-execTuples-seams",
  "backend-executor-execUtils-seams",
- "backend-executor-nodeIndexscan-pq-seams",
  "backend-executor-nodeIndexscan-seams",
  "backend-nodes-nodeFuncs-seams",
  "backend-storage-buffer-bufmgr-seams",
@@ -9856,15 +9845,6 @@ dependencies = [
  "types-scan",
  "types-sortsupport",
  "types-tuple",
-]
-
-[[package]]
-name = "backend-executor-nodeIndexscan-pq-seams"
-version = "0.0.0"
-dependencies = [
- "seam-core",
- "types-error",
- "types-execparallel",
 ]
 
 [[package]]
@@ -9951,7 +9931,6 @@ dependencies = [
  "backend-executor-execTuples-seams",
  "backend-executor-execUtils-seams",
  "backend-executor-nodeHash-seams",
- "backend-executor-nodeMemoize-seams",
  "backend-nodes-core-seams",
  "backend-tcop-postgres-seams",
  "backend-utils-adt-datum-seams",
@@ -9964,15 +9943,6 @@ dependencies = [
  "types-execparallel",
  "types-nodes",
  "types-tuple",
-]
-
-[[package]]
-name = "backend-executor-nodeMemoize-seams"
-version = "0.0.0"
-dependencies = [
- "seam-core",
- "types-error",
- "types-execparallel",
 ]
 
 [[package]]

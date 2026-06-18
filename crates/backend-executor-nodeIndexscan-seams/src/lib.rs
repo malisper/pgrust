@@ -5,7 +5,8 @@
 //!
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly. (The parallel-executor methods on index-scan
-//! nodes live in the separate `backend-executor-nodeIndexscan-pq-seams` crate.)
+//! nodes are dispatched directly by `backend-executor-execParallel` over the
+//! value-typed `PlanStateNode::IndexScan` enum arm, so no handle seam exists.)
 
 #![allow(non_snake_case)]
 

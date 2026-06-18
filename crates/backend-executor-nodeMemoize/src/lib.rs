@@ -50,8 +50,7 @@ use types_tuple::backend_access_common_heaptuple::FormedMinimalTuple;
 use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 
 use backend_access_transam_parallel as parallel;
-use backend_executor_nodeMemoize_seams as seam;
-use types_execparallel::{ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle};
+use types_execparallel::{ParallelContextHandle, ParallelWorkerContextHandle};
 
 // Owner `-seams` crates this node calls outward through, with the node-side
 // marshaling living in this crate.
@@ -1264,51 +1263,11 @@ pub fn ExecMemoizeRetrieveInstrumentation<'mcx>(
     );
 }
 
-// ---------------------------------------------------------------------------
-// Seam shims installed into `backend-executor-nodeMemoize-seams`.
-//
-// `execParallel` dispatches the per-node parallel hooks generically, holding a
-// `PlanState *` (the opaque [`PlanStateHandle`]); the C `ExecMemoizeEstimate`
-// etc. begin with the `(MemoizeState *) node` cast. Recovering the live
-// `MemoizeScanState` from the handle is the executor's `PlanState`-pointer
-// registry — that pointer-table is the unported executor surface, so each shim
-// performs the C cast through `resolve_memoize_state` (which panics until that
-// registry lands) and then runs the real, ported owned entry point above.
-// ---------------------------------------------------------------------------
-
-/// `(MemoizeState *) node` — recover the live `MemoizeScanState` a
-/// `PlanStateHandle` refers to. The executor's `PlanState` pointer registry that
-/// backs this lookup is not yet ported.
-fn resolve_memoize_state<'mcx>(_node: PlanStateHandle) -> &'mcx mut MemoizeScanState<'mcx> {
-    panic!(
-        "backend-executor-nodeMemoize: resolving a PlanStateHandle to the live MemoizeState needs \
-         the executor PlanState pointer registry (unported); the (MemoizeState *) node cast in the \
-         ExecMemoize* parallel hooks cannot run yet"
-    );
-}
-
-/// Seam shim for `ExecMemoizeEstimate`.
-fn exec_memoize_estimate(node: PlanStateHandle, pcxt: ParallelContextHandle) -> PgResult<()> {
-    ExecMemoizeEstimate(resolve_memoize_state(node), pcxt)
-}
-
-/// Seam shim for `ExecMemoizeInitializeDSM`.
-fn exec_memoize_initialize_dsm(node: PlanStateHandle, pcxt: ParallelContextHandle) -> PgResult<()> {
-    ExecMemoizeInitializeDSM(resolve_memoize_state(node), pcxt)
-}
-
-/// Seam shim for `ExecMemoizeInitializeWorker`.
-fn exec_memoize_initialize_worker(
-    node: PlanStateHandle,
-    pwcxt: ParallelWorkerContextHandle,
-) -> PgResult<()> {
-    ExecMemoizeInitializeWorker(resolve_memoize_state(node), pwcxt)
-}
-
-/// Seam shim for `ExecMemoizeRetrieveInstrumentation`.
-fn exec_memoize_retrieve_instrumentation(node: PlanStateHandle) -> PgResult<()> {
-    ExecMemoizeRetrieveInstrumentation(resolve_memoize_state(node))
-}
+// The per-node parallel hooks (ExecMemoize{Estimate,InitializeDSM,
+// InitializeWorker,RetrieveInstrumentation} above) are dispatched directly by
+// `backend-executor-execParallel` over the value-typed
+// `PlanStateNode::Memoize(&mut MemoizeScanState)` enum arm; no `PlanStateHandle`
+// seam is needed.
 
 // ===========================================================================
 // Owned-cache primitives (the replacement for simplehash + dlist).
@@ -1532,9 +1491,8 @@ fn lru_move_to_back(cache: &mut MemoizeCache, slot_id: usize) {
 // ===========================================================================
 // Node-side marshaling over owner-subsystem leaves, and the genuinely
 // Memoize-owned operations that have no owner-type leaf matching this port's
-// owned-vector data model. These were previously per-call seams in the
-// nodeMemoize-seams crate; per the seam-ownership convention they are now
-// either thin in-crate wrappers over an owner `-seams` leaf, or in-crate plain
+// owned-vector data model. Per the seam-ownership convention these are either
+// thin in-crate wrappers over an owner `-seams` leaf, or in-crate plain
 // functions for the Memoize-owned operations.
 // ===========================================================================
 
@@ -1985,10 +1943,11 @@ fn out_of_memory(what: &str) -> PgError {
 // Seam installation.
 // ===========================================================================
 
-/// Install every seam declared in `backend-executor-nodeMemoize-seams` that this
-/// crate owns: the four parallel-executor entry points.
+/// This node declares no inward seams. Its parallel-executor entry points are
+/// dispatched directly by `backend-executor-execParallel` over the value-typed
+/// `PlanStateNode::Memoize` enum arm.
 ///
-/// Every other operation the node performs is an outward call to an owner
+/// Every operation the node performs is an outward call to an owner
 /// subsystem's `-seams` crate (the expression engine `execExpr` — incl.
 /// `ExecBuildParamSetEqual`; the tuple-slot ops `execTuples` — incl.
 /// `ExecTypeFromExprList`, `MakeSingleTupleTableSlot`, the minimal-tuple
@@ -2004,8 +1963,7 @@ fn out_of_memory(what: &str) -> PgError {
 /// /`deform_key_params`/`copy_probe_slot_minimal_tuple`) living in this crate as
 /// plain functions over the owned `MemoizeScanState`.
 pub fn init_seams() {
-    seam::exec_memoize_estimate::set(exec_memoize_estimate);
-    seam::exec_memoize_initialize_dsm::set(exec_memoize_initialize_dsm);
-    seam::exec_memoize_initialize_worker::set(exec_memoize_initialize_worker);
-    seam::exec_memoize_retrieve_instrumentation::set(exec_memoize_retrieve_instrumentation);
+    // This node declares no inward seams: its parallel-executor methods are
+    // dispatched directly by `backend-executor-execParallel` over the
+    // value-typed `PlanStateNode::Memoize` enum arm.
 }

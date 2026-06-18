@@ -51,35 +51,15 @@ use types_nodes::{
 /// `#define INDEX_VAR (-3)`.
 const INDEX_VAR: i32 = -3;
 
-/// Install this crate's implementations of the parallel-scan inward seams (the
-/// ones `execParallel` calls through `backend-executor-nodeCustom-seams`).
-///
-/// `execParallel` holds the custom-scan node as an opaque
-/// `PlanStateHandle`/`ParallelContextHandle` (a not-yet-bridged pointer into
-/// executor/DSM-owned state). Until the DSM owner can hand this crate the owned
-/// `CustomScanState`, the parallel path is unreachable, so these installed
-/// implementations panic loudly (mirror-PG-and-panic). The owned parallel entry
-/// points ([`ExecCustomScanEstimate`] et al.) carry the real C logic and are
-/// callable directly.
-pub fn init_seams() {
-    use backend_executor_nodeCustom_seams as pq;
-    pq::exec_customscan_estimate::set(|_node, _pcxt| {
-        panic!(
-            "ExecCustomScanEstimate via parallel DSM is unreachable until the \
-             DSM owner can pass the owned CustomScanState (the opaque \
-             PlanStateHandle cannot be resolved here yet)"
-        )
-    });
-    pq::exec_customscan_initialize_dsm::set(|_node, _pcxt| {
-        panic!("ExecCustomScanInitializeDSM via parallel DSM is unreachable until the DSM owner lands")
-    });
-    pq::exec_customscan_reinitialize_dsm::set(|_node, _pcxt| {
-        panic!("ExecCustomScanReInitializeDSM via parallel DSM is unreachable until the DSM owner lands")
-    });
-    pq::exec_customscan_initialize_worker::set(|_node, _pwcxt| {
-        panic!("ExecCustomScanInitializeWorker via parallel DSM is unreachable until the DSM owner lands")
-    });
-}
+/// This node declares no inward seams: its parallel-scan entry points
+/// ([`ExecCustomScanEstimate`] et al.) are dispatched directly by
+/// `backend-executor-execParallel` over the value-typed
+/// `PlanStateNode::CustomScan` enum arm. (That dispatch currently bottoms out on
+/// the owned-`ParallelContext` carrier keystone — execParallel holds a
+/// `ParallelContextHandle` with no bridge to the owned `&mut ParallelContext`
+/// these methods take — and the methods themselves call FDW/extension-owned
+/// provider seams, so the parallel path is a sanctioned floor.)
+pub fn init_seams() {}
 
 // ===========================================================================
 //                          Public node entry points

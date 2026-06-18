@@ -77,22 +77,10 @@ type RecheckMtd<'mcx> =
 /// logic and are callable directly.
 pub fn init_seams() {
     use backend_executor_nodeForeignscan_seams as pq;
-    pq::exec_foreignscan_estimate::set(|_node, _pcxt| {
-        panic!(
-            "ExecForeignScanEstimate via parallel DSM is unreachable until the \
-             DSM owner can pass the owned ForeignScanState (the opaque \
-             PlanStateHandle cannot be resolved here yet)"
-        )
-    });
-    pq::exec_foreignscan_initialize_dsm::set(|_node, _pcxt| {
-        panic!("ExecForeignScanInitializeDSM via parallel DSM is unreachable until the DSM owner lands")
-    });
-    pq::exec_foreignscan_reinitialize_dsm::set(|_node, _pcxt| {
-        panic!("ExecForeignScanReInitializeDSM via parallel DSM is unreachable until the DSM owner lands")
-    });
-    pq::exec_foreignscan_initialize_worker::set(|_node, _pwcxt| {
-        panic!("ExecForeignScanInitializeWorker via parallel DSM is unreachable until the DSM owner lands")
-    });
+    // The parallel-scan entry points (ExecForeignScanEstimate et al.) are
+    // dispatched directly by `backend-executor-execParallel` over the
+    // value-typed `PlanStateNode::ForeignScan` enum arm, so they declare no
+    // inward seam. Only the execAsync entry points need an installed seam.
     pq::exec_async_foreignscan_request::set(ExecAsyncForeignScanRequest);
     pq::exec_async_foreignscan_configure_wait::set(ExecAsyncForeignScanConfigureWait);
     pq::exec_async_foreignscan_notify::set(ExecAsyncForeignScanNotify);

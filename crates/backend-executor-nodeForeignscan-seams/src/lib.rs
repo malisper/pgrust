@@ -5,14 +5,13 @@
 #![allow(unused_doc_comments)]
 #![allow(non_snake_case)]
 
-use types_execparallel::{ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle};
 use types_error::PgResult;
 use types_nodes::{AsyncRequestData, ForeignScanState};
 
-seam_core::seam!(pub fn exec_foreignscan_estimate(node: PlanStateHandle, pcxt: ParallelContextHandle) -> PgResult<()>);
-seam_core::seam!(pub fn exec_foreignscan_initialize_dsm(node: PlanStateHandle, pcxt: ParallelContextHandle) -> PgResult<()>);
-seam_core::seam!(pub fn exec_foreignscan_reinitialize_dsm(node: PlanStateHandle, pcxt: ParallelContextHandle) -> PgResult<()>);
-seam_core::seam!(pub fn exec_foreignscan_initialize_worker(node: PlanStateHandle, pwcxt: ParallelWorkerContextHandle) -> PgResult<()>);
+// The parallel-scan methods (ExecForeignScanEstimate / InitializeDSM /
+// ReInitializeDSM / InitializeWorker) are NOT seamed here: `execParallel`
+// dispatches them directly over the value-typed `PlanStateNode::ForeignScan`
+// enum arm. Only the execAsync entry points below need an inward seam.
 
 // Async-execution entry points (`nodeForeignscan.c`). The execAsync dispatch
 // (re-homed onto the Append node) resolves the requestee `ForeignScanState`

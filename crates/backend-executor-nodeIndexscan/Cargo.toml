@@ -18,7 +18,6 @@ backend-executor-execScan-seams = { path = "../backend-executor-execScan-seams" 
 backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
 backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
 backend-executor-nodeIndexscan-seams = { path = "../backend-executor-nodeIndexscan-seams" }
-backend-executor-nodeIndexscan-pq-seams = { path = "../backend-executor-nodeIndexscan-pq-seams" }
 backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
 backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
 backend-storage-ipc-shm_toc-seams = { path = "../backend-storage-ipc-shm_toc-seams" }

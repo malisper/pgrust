@@ -61,7 +61,7 @@ use backend_utils_sort_sortsupport_seams as sortsupport;
 use mcx::{Mcx, PgBox, PgVec};
 use types_core::{AttrNumber, InvalidOid, Oid};
 use types_error::{PgError, PgResult};
-use types_execparallel::{ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle};
+use types_execparallel::{ParallelContextHandle, ParallelWorkerContextHandle};
 use types_nodes::nodeindexonlyscan::{
     IndexRuntimeKeyInfo, IndexScanInstrumentation, IndexScanState, SharedIndexScanInstrumentation,
 };
@@ -1952,13 +1952,6 @@ pub fn init_seams() {
     sx::exec_index_eval_runtime_keys_bis::set(seam_eval_runtime_keys_bis);
     sx::exec_index_eval_array_keys_bis::set(seam_eval_array_keys_bis);
     sx::exec_index_advance_array_keys_bis::set(seam_advance_array_keys_bis);
-
-    use backend_executor_nodeIndexscan_pq_seams as pq;
-    pq::exec_indexscan_estimate::set(bridge_estimate);
-    pq::exec_indexscan_initialize_dsm::set(bridge_initialize_dsm);
-    pq::exec_indexscan_reinitialize_dsm::set(bridge_reinitialize_dsm);
-    pq::exec_indexscan_initialize_worker::set(bridge_initialize_worker);
-    pq::exec_indexscan_retrieve_instrumentation::set(bridge_retrieve_instrumentation);
 }
 
 // --- shared scan-key seam adapters (IndexOnlyScanState) --------------------
@@ -2087,38 +2080,8 @@ fn seam_advance_array_keys_bis<'mcx>(
     exec_index_advance_array_keys_into(biss_ScanKeys, biss_ArrayKeys, num, mcx)
 }
 
-// --- parallel-executor handle bridges (execParallel frontier) --------------
-
-fn bridge_estimate(_node: PlanStateHandle, _pcxt: ParallelContextHandle) -> PgResult<()> {
-    panic!(
-        "exec_indexscan_estimate: PlanStateHandle->IndexScanState resolution is owned by \
-         execParallel and not yet wired"
-    )
-}
-fn bridge_initialize_dsm(_node: PlanStateHandle, _pcxt: ParallelContextHandle) -> PgResult<()> {
-    panic!(
-        "exec_indexscan_initialize_dsm: PlanStateHandle->IndexScanState resolution is owned by \
-         execParallel and not yet wired"
-    )
-}
-fn bridge_reinitialize_dsm(_node: PlanStateHandle, _pcxt: ParallelContextHandle) -> PgResult<()> {
-    panic!(
-        "exec_indexscan_reinitialize_dsm: PlanStateHandle->IndexScanState resolution is owned by \
-         execParallel and not yet wired"
-    )
-}
-fn bridge_initialize_worker(
-    _node: PlanStateHandle,
-    _pwcxt: ParallelWorkerContextHandle,
-) -> PgResult<()> {
-    panic!(
-        "exec_indexscan_initialize_worker: PlanStateHandle->IndexScanState resolution is owned by \
-         execParallel and not yet wired"
-    )
-}
-fn bridge_retrieve_instrumentation(_node: PlanStateHandle) -> PgResult<()> {
-    panic!(
-        "exec_indexscan_retrieve_instrumentation: PlanStateHandle->IndexScanState resolution is \
-         owned by execParallel and not yet wired"
-    )
-}
+// The parallel-executor methods (ExecIndexScanEstimate/InitializeDSM/
+// ReInitializeDSM/InitializeWorker/RetrieveInstrumentation above) are dispatched
+// directly by `backend-executor-execParallel` over the value-typed
+// `PlanStateNode::IndexScan(&mut IndexScanState)` enum arm; no `PlanStateHandle`
+// seam is needed.

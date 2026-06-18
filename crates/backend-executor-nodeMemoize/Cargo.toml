@@ -16,7 +16,6 @@ types-nodes = { path = "../types-nodes" }
 types-tuple = { path = "../types-tuple" }
 types-datum = { path = "../types-datum" }
 types-execparallel = { path = "../types-execparallel" }
-backend-executor-nodeMemoize-seams = { path = "../backend-executor-nodeMemoize-seams" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 backend-access-transam-parallel = { path = "../backend-access-transam-parallel" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
