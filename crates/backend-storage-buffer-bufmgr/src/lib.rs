@@ -254,6 +254,36 @@ fn extend_buffered_rel(
     )
 }
 
+/// `ExtendBufferedRelBy(BMR_REL(rel), MAIN_FORKNUM, strategy, EB_LOCK_FIRST,
+/// extend_by, victim_buffers, &extend_by)` installed seam (bufmgr.c) — hio.c's
+/// `RelationAddBlocks` multi-page extension. `extend_by` is capped at
+/// `MAX_BUFFERS_TO_EXTEND_BY` (64) by the caller, so the victim-buffer slice is
+/// sized accordingly.
+fn extend_buffered_rel_by_main(
+    rel: &types_rel::Relation,
+    has_strategy: bool,
+    extend_by: u32,
+) -> types_error::PgResult<types_storage::buf::ExtendedRelation> {
+    // MAX_BUFFERS_TO_EXTEND_BY (hio.c) — the caller's hard cap on extend_by.
+    const MAX_BUFFERS_TO_EXTEND_BY: usize = 64;
+    let mut buffers = [Buffer::default(); MAX_BUFFERS_TO_EXTEND_BY];
+    let mut extended_by: u32 = 0;
+    let first_block = BufferManager::global_expect().ExtendBufferedRelBy(
+        rel,
+        types_core::primitive::ForkNumber::MAIN_FORKNUM,
+        has_strategy,
+        EB_LOCK_FIRST,
+        extend_by,
+        &mut buffers[..extend_by as usize],
+        &mut extended_by,
+    )?;
+    Ok(types_storage::buf::ExtendedRelation {
+        first_block,
+        victim_buffers: buffers[..extended_by as usize].to_vec(),
+        extended_by,
+    })
+}
+
 /// `ExtendBufferedRelTo(BMR_REL(rel), FSM_FORKNUM, NULL, EB_CREATE_FORK_IF_NEEDED
 /// | EB_CLEAR_SIZE_CACHE, fsm_nblocks, RBM_ZERO_ON_ERROR)` installed seam
 /// (bufmgr.c) — ensure the FSM fork is at least `fsm_nblocks` long and pin the
@@ -338,6 +368,23 @@ fn read_buffer_extended<'mcx>(
         blkno,
         types_storage::storage::ReadBufferMode::Normal,
         true,
+    )
+}
+
+/// `ReadBufferExtended(rel, MAIN_FORKNUM, blkno, mode, strategy)` (bufmgr.c) —
+/// the runtime-mode form for hio.c's `ReadBufferBI`.
+fn read_buffer_extended_mode<'mcx>(
+    rel: &types_rel::Relation<'mcx>,
+    blkno: types_core::primitive::BlockNumber,
+    mode: types_storage::storage::ReadBufferMode,
+    has_strategy: bool,
+) -> types_error::PgResult<Buffer> {
+    BufferManager::global_expect().ReadBufferExtended(
+        rel,
+        types_core::primitive::ForkNumber::MAIN_FORKNUM,
+        blkno,
+        mode,
+        has_strategy,
     )
 }
 
@@ -670,6 +717,8 @@ pub fn init_seams() {
     backend_storage_buffer_bufmgr_seams::read_buffer::set(read_buffer);
     backend_storage_buffer_bufmgr_seams::release_and_read_buffer::set(release_and_read_buffer);
     backend_storage_buffer_bufmgr_seams::read_buffer_extended::set(read_buffer_extended);
+    backend_storage_buffer_bufmgr_seams::read_buffer_extended_mode::set(read_buffer_extended_mode);
+    backend_storage_buffer_bufmgr_seams::extend_buffered_rel_by_main::set(extend_buffered_rel_by_main);
     backend_storage_buffer_bufmgr_seams::read_buffer_extended_fork::set(read_buffer_extended_fork);
     backend_storage_buffer_bufmgr_seams::read_buffer_zero_and_lock::set(read_buffer_zero_and_lock);
     backend_storage_buffer_bufmgr_seams::read_buffer_with_strategy::set(read_buffer_with_strategy);

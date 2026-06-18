@@ -409,3 +409,14 @@ seam_core::seam!(
     /// carries the lock-manager `ereport(ERROR)` surface.
     pub fn speculative_insertion_wait(xid: TransactionId, token: u32) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `RelationExtensionLockWaiterCount(relation)` (lmgr.c): how many backends
+    /// are waiting on the relation-extension lock for `lock_rel_id` (the
+    /// relation's `rd_lockInfo.lockRelId`). hio.c's `RelationGetBufferForTuple`
+    /// uses it to decide how aggressively to bulk-extend. `Err` carries the
+    /// lock-manager `ereport(ERROR)` surface.
+    pub fn relation_extension_lock_waiter_count(
+        lock_rel_id: types_storage::lock::LockRelId,
+    ) -> PgResult<i32>
+);

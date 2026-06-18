@@ -185,6 +185,177 @@ pub fn init_seams() {
     // delegate to the freespace owner's `&Relation`-keyed seams.
     hx::get_page_with_free_space::set(get_page_with_free_space);
     hx::record_and_get_page_with_free_space::set(record_and_get_page_with_free_space);
+    // `RecordPageWithFreeSpace` / `FreeSpaceMapVacuumRange` (freespace.c) — the
+    // remaining OID-keyed FSM hio-seams (the relation-extension FSM updates).
+    hx::record_page_with_free_space::set(record_page_with_free_space);
+    hx::free_space_map_vacuum_range::set(free_space_map_vacuum_range);
+    // `ReadBuffer` / `ReadBufferExtended` / `ExtendBufferedRelBy` /
+    // `RelationGetNumberOfBlocks` (bufmgr.c) — the heap-insertion buffer
+    // round-trip, projected off the owned entry to the bufmgr `&Relation` seams.
+    hx::read_buffer::set(read_buffer);
+    hx::read_buffer_extended::set(read_buffer_extended);
+    hx::extend_buffered_rel_by::set(extend_buffered_rel_by);
+    hx::relation_get_number_of_blocks::set(hio_relation_get_number_of_blocks);
+    // `visibilitymap_pin` / `visibilitymap_pin_ok` (visibilitymap.c) — pin the
+    // VM page covering the target heap block.
+    hx::visibilitymap_pin::set(visibilitymap_pin);
+    hx::visibilitymap_pin_ok::set(|heap_blk, vmbuf| {
+        Ok(backend_access_heap_visibilitymap_seams::visibilitymap_pin_ok::call(heap_blk, vmbuf))
+    });
+    // `RELATION_IS_LOCAL` / `RelationGetRelationName` (utils/rel.h) and
+    // `RelationExtensionLockWaiterCount` (lmgr.c) off the owned entry.
+    hx::relation_is_local::set(hio_relation_is_local);
+    hx::relation_get_relation_name::set(hio_relation_get_relation_name);
+    hx::relation_extension_lock_waiter_count::set(relation_extension_lock_waiter_count);
+}
+
+/// Project the registry-owned relcache entry into a transient `Relation` read
+/// handle (no release authority) — the OID→`&Relation` bridge the buffer/FSM/VM
+/// owners need. The arena is dropped when the returned handle is dropped.
+fn project_open(
+    relcx: &mcx::MemoryContext,
+    rel: Oid,
+) -> PgResult<types_rel::Relation<'_>> {
+    let data = crate::core_entry_store::with_relation(rel, |rd| {
+        crate::build::project_relation_data(relcx.mcx(), rd)
+    })??;
+    Ok(types_rel::Relation::open(data, None))
+}
+
+/// `RecordPageWithFreeSpace(rel, heapBlk, spaceAvail)` (freespace.c), OID-keyed.
+fn record_page_with_free_space(
+    rel: Oid,
+    heap_blk: types_core::primitive::BlockNumber,
+    space_avail: types_core::Size,
+) -> PgResult<()> {
+    let relcx = mcx::MemoryContext::new("record_page_with_free_space");
+    let rel = project_open(&relcx, rel)?;
+    backend_storage_freespace_seams::record_page_with_free_space::call(&rel, heap_blk, space_avail)
+}
+
+/// `FreeSpaceMapVacuumRange(rel, start, end)` (freespace.c), OID-keyed.
+fn free_space_map_vacuum_range(
+    rel: Oid,
+    start: types_core::primitive::BlockNumber,
+    end: types_core::primitive::BlockNumber,
+) -> PgResult<()> {
+    let relcx = mcx::MemoryContext::new("free_space_map_vacuum_range");
+    let rel = project_open(&relcx, rel)?;
+    backend_storage_freespace_seams::free_space_map_vacuum_range::call(&rel, start, end)
+}
+
+/// `ReadBuffer(rel, blkno)` (bufmgr.c), OID-keyed.
+fn read_buffer(
+    rel: Oid,
+    target_block: types_core::primitive::BlockNumber,
+) -> PgResult<types_storage::storage::Buffer> {
+    let relcx = mcx::MemoryContext::new("read_buffer");
+    let rel = project_open(&relcx, rel)?;
+    backend_storage_buffer_bufmgr_seams::read_buffer::call(&rel, target_block)
+}
+
+/// `ReadBufferExtended(rel, MAIN_FORKNUM, blkno, mode, strategy)` (bufmgr.c),
+/// OID-keyed. The hio.c `mode` is the int `RBM_*` value (0/1/2 == the
+/// `ReadBufferMode` discriminants).
+fn read_buffer_extended(
+    rel: Oid,
+    target_block: types_core::primitive::BlockNumber,
+    mode: i32,
+    has_strategy: bool,
+) -> PgResult<types_storage::storage::Buffer> {
+    let mode = match mode {
+        0 => types_storage::storage::ReadBufferMode::Normal,
+        1 => types_storage::storage::ReadBufferMode::ZeroAndLock,
+        2 => types_storage::storage::ReadBufferMode::ZeroAndCleanupLock,
+        other => {
+            return Err(PgError::new(
+                types_error::ERROR,
+                format!("unexpected read-buffer mode {other} from hio.c"),
+            ));
+        }
+    };
+    let relcx = mcx::MemoryContext::new("read_buffer_extended");
+    let rel = project_open(&relcx, rel)?;
+    backend_storage_buffer_bufmgr_seams::read_buffer_extended_mode::call(
+        &rel,
+        target_block,
+        mode,
+        has_strategy,
+    )
+}
+
+/// `ExtendBufferedRelBy(rel, MAIN_FORKNUM, strategy, EB_LOCK_FIRST, extend_by)`
+/// (bufmgr.c), OID-keyed.
+fn extend_buffered_rel_by(
+    rel: Oid,
+    has_strategy: bool,
+    extend_by: u32,
+) -> PgResult<types_storage::buf::ExtendedRelation> {
+    let relcx = mcx::MemoryContext::new("extend_buffered_rel_by");
+    let rel = project_open(&relcx, rel)?;
+    backend_storage_buffer_bufmgr_seams::extend_buffered_rel_by_main::call(
+        &rel,
+        has_strategy,
+        extend_by,
+    )
+}
+
+/// `RelationGetNumberOfBlocks(rel)` (bufmgr.h) == `relation_get_number_of_blocks_in_fork(rel, MAIN_FORKNUM)`, OID-keyed.
+fn hio_relation_get_number_of_blocks(
+    rel: Oid,
+) -> PgResult<types_core::primitive::BlockNumber> {
+    let relcx = mcx::MemoryContext::new("relation_get_number_of_blocks");
+    let rel = project_open(&relcx, rel)?;
+    backend_storage_buffer_bufmgr_seams::relation_get_number_of_blocks_in_fork::call(
+        &rel,
+        types_core::primitive::ForkNumber::MAIN_FORKNUM,
+    )
+}
+
+/// `visibilitymap_pin(rel, heapBlk, &vmbuf)` (visibilitymap.c), OID-keyed.
+fn visibilitymap_pin(
+    rel: Oid,
+    heap_blk: types_core::primitive::BlockNumber,
+    vmbuf: types_storage::storage::Buffer,
+) -> PgResult<types_storage::storage::Buffer> {
+    let relcx = mcx::MemoryContext::new("visibilitymap_pin");
+    let rel = project_open(&relcx, rel)?;
+    backend_access_heap_visibilitymap_seams::visibilitymap_pin::call(rel, heap_blk, vmbuf)
+}
+
+/// `RELATION_IS_LOCAL(rel)` (utils/rel.h) == `rd_islocaltemp || rd_createSubid
+/// != InvalidSubTransactionId`, off the owned entry.
+fn hio_relation_is_local(rel: Oid) -> PgResult<bool> {
+    with_entry(rel, |rd| {
+        rd.rd_islocaltemp
+            || rd.rd_createSubid != types_core::xact::InvalidSubTransactionId
+    })
+}
+
+/// `RelationGetRelationName(rel)` (utils/rel.h), off the owned entry.
+fn hio_relation_get_relation_name(rel: Oid) -> PgResult<String> {
+    with_entry(rel, |rd| rd.rd_rel.relname.to_string())
+}
+
+/// `RelationExtensionLockWaiterCount(rel)` (lmgr.c): build the relation's
+/// `LockRelId` (`relId = rd_id`, `dbId = relisshared ? InvalidOid :
+/// MyDatabaseId`) off the owned entry and delegate to the lmgr owner.
+fn relation_extension_lock_waiter_count(rel: Oid) -> PgResult<u32> {
+    let (relid, relisshared) =
+        crate::core_entry_store::with_relation(rel, |rd| (rd.rd_id, rd.rd_rel.relisshared))?;
+    let db_id = if relisshared {
+        types_core::InvalidOid
+    } else {
+        backend_utils_init_small_seams::my_database_id::call()
+    };
+    let lock_rel_id = types_storage::lock::LockRelId {
+        relId: relid,
+        dbId: db_id,
+    };
+    let n = backend_storage_lmgr_lmgr_seams::relation_extension_lock_waiter_count::call(
+        lock_rel_id,
+    )?;
+    Ok(n as u32)
 }
 
 /// `GetPageWithFreeSpace(relation, len)` (freespace.c) as an OID-keyed hio-seam:

@@ -25,3 +25,24 @@ seam_core::seam!(
         vmbuf: types_storage::Buffer,
     ) -> types_error::PgResult<(u8, types_storage::Buffer)>
 );
+
+seam_core::seam!(
+    /// `visibilitymap_pin(rel, heapBlk, &vmbuf)` (visibilitymap.c): ensure the
+    /// VM page covering `heapBlk` is pinned (extending the VM fork if needed),
+    /// returning the (possibly newly pinned) VM buffer. Fallible on the smgr
+    /// `ereport(ERROR)`s.
+    pub fn visibilitymap_pin<'mcx>(
+        rel: types_rel::Relation<'mcx>,
+        heap_blk: types_core::primitive::BlockNumber,
+        vmbuf: types_storage::Buffer,
+    ) -> types_error::PgResult<types_storage::Buffer>
+);
+
+seam_core::seam!(
+    /// `visibilitymap_pin_ok(heapBlk, vmbuf)` (visibilitymap.c): whether `vmbuf`
+    /// already covers the VM page for `heapBlk`. Infallible.
+    pub fn visibilitymap_pin_ok(
+        heap_blk: types_core::primitive::BlockNumber,
+        vmbuf: types_storage::Buffer,
+    ) -> bool
+);

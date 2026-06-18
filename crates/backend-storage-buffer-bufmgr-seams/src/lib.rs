@@ -150,6 +150,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ReadBufferExtended(rel, MAIN_FORKNUM, blkno, mode, strategy)` (bufmgr.c):
+    /// pin (reading in / zeroing per `mode`) a MAIN_FORKNUM block with a runtime
+    /// read-buffer mode and optional bulk-insert strategy. The hio.c
+    /// `ReadBufferBI` path needs the full mode (`RBM_NORMAL` for re-reads,
+    /// `RBM_ZERO_AND_LOCK` / `RBM_ZERO_AND_CLEANUP_LOCK` for the extend path) and
+    /// `has_strategy` (`bistate->strategy != NULL`) on one call. `Err` carries
+    /// the smgr read ereports.
+    pub fn read_buffer_extended_mode<'mcx>(
+        rel: &types_rel::Relation<'mcx>,
+        blkno: types_core::primitive::BlockNumber,
+        mode: types_storage::storage::ReadBufferMode,
+        has_strategy: bool,
+    ) -> types_error::PgResult<types_storage::storage::Buffer>
+);
+
+seam_core::seam!(
     /// `ReadBufferExtended(rel, forknum, blkno, RBM_NORMAL, NULL)` (bufmgr.c):
     /// pin (reading in if needed) a block of an explicit fork with no
     /// buffer-access strategy. Used by `log_newpage_range`, which logs an
@@ -433,6 +449,21 @@ seam_core::seam!(
         rel: &types_rel::Relation<'mcx>,
         fork_num: types_core::primitive::ForkNumber,
     ) -> types_error::PgResult<types_storage::storage::Buffer>
+);
+
+seam_core::seam!(
+    /// `ExtendBufferedRelBy(BMR_REL(rel), MAIN_FORKNUM, strategy, EB_LOCK_FIRST,
+    /// extend_by, victim_buffers, &extend_by)` (bufmgr.c) — the hio.c
+    /// `RelationAddBlocks` multi-page extension: extend MAIN_FORKNUM by up to
+    /// `extend_by` pages with the bulk-insert strategy (when `has_strategy`),
+    /// returning the first new block (exclusive-locked via `EB_LOCK_FIRST`), the
+    /// pinned victim buffers, and the actual extension count. `Err` carries the
+    /// extension `ereport(ERROR)`s.
+    pub fn extend_buffered_rel_by_main<'mcx>(
+        rel: &types_rel::Relation<'mcx>,
+        has_strategy: bool,
+        extend_by: u32,
+    ) -> types_error::PgResult<types_storage::buf::ExtendedRelation>
 );
 
 seam_core::seam!(

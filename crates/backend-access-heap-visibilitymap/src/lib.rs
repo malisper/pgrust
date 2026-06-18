@@ -641,6 +641,16 @@ pub fn init_seams() {
             Ok((status, vmbuf))
         },
     );
+    backend_access_heap_visibilitymap_seams::visibilitymap_pin::set(
+        |rel, heap_blk, vmbuf_in| {
+            let mut vmbuf = vmbuf_in;
+            visibilitymap_pin(&rel, heap_blk, &mut vmbuf)?;
+            Ok(vmbuf)
+        },
+    );
+    backend_access_heap_visibilitymap_seams::visibilitymap_pin_ok::set(|heap_blk, vmbuf| {
+        visibilitymap_pin_ok(heap_blk, vmbuf)
+    });
 
     // The five `&Relation<'mcx>`-keyed VM seams in vacuumlazy-seams.
     backend_access_heap_vacuumlazy_seams::visibilitymap_count::set(|rel| {

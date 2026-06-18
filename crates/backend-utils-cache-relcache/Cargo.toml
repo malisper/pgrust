@@ -26,6 +26,12 @@ backend-access-heap-hio-seams = { path = "../backend-access-heap-hio-seams" }
 # handle off the owned entry to bridge the OID-keyed hio-seam to the FSM owner.
 backend-storage-freespace-seams = { path = "../backend-storage-freespace-seams" }
 
+# bufmgr / visibilitymap &Relation-keyed seams: relcache projects a transient
+# read handle off the owned entry to bridge the OID-keyed hio.c seams (the heap
+# insertion read/extend buffer path) to their real owners.
+backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+backend-access-heap-visibilitymap-seams = { path = "../backend-access-heap-visibilitymap-seams" }
+
 # The RelationIdCache is a real dynahash table (merged C-faithful raw-pointer
 # dynahash) — the substrate, not a stand-in. Acyclic: dynahash depends only on
 # types/error/storage/core.
