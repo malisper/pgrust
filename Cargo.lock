@@ -20639,6 +20639,7 @@ dependencies = [
  "backend-executor-functions-seams",
  "backend-nodes-nodeFuncs-seams",
  "backend-optimizer-util-clauses-seams",
+ "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-syscache-seams",
  "backend-utils-fmgr-dfmgr-seams",
  "backend-utils-fmgr-fmgr-seams",

@@ -2726,6 +2726,59 @@ fn input_function_call_safe_seam(
     Ok(out.map(fmgr_out_word))
 }
 
+/// `pg_input_is_valid_common()` post-parse work (misc.c:804-814): given the
+/// already-resolved `typoid`/`typmod`, run `getTypeInputInfo(typoid,
+/// &typiofunc, &typioparam)` + `fmgr_info_cxt` + `InputFunctionCallSafe(...)`
+/// over the input bytes `str_`, recording any soft error into `escontext`.
+/// Returns the C `bool` (true = `str_` is valid input for the type). `Err`
+/// carries any hard `ereport(ERROR)` from the type-I/O resolution. The per-call
+/// `ValidIOData`/`fn_extra` caching (misc.c:777) is the fmgr shim's concern and
+/// is not modeled here; this is the cache-miss body, run on every call.
+fn input_is_valid_by_type_seam(
+    typoid: Oid,
+    typmod: i32,
+    str_: &[u8],
+    escontext: &mut types_error::SoftErrorContext,
+) -> PgResult<bool> {
+    let ctx = MemoryContext::new("input_is_valid_by_type");
+    let mcx = ctx.mcx();
+
+    // getTypeInputInfo(typoid, &typiofunc, &typioparam) (misc.c:806).
+    let (typiofunc, typioparam) =
+        backend_utils_cache_lsyscache_seams::get_type_input_info::call(typoid)?;
+
+    // fmgr_info_cxt(typiofunc, &inputproc, ...) (misc.c:808).
+    let resolved = fmgr_info(mcx, typiofunc)?;
+
+    // text_to_cstring(txt) (misc.c:768): the input bytes as a C string. PG's
+    // text_to_cstring would itself reject embedded NULs; UTF-8 validity is the
+    // closest invariant here and a malformed string is a soft-error candidate.
+    let str_s = match core::str::from_utf8(str_) {
+        Ok(s) => s,
+        Err(_) => {
+            escontext.save(
+                PgError::error("invalid byte sequence for encoding")
+                    .with_sqlstate(types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE),
+            );
+            return Ok(false);
+        }
+    };
+
+    // InputFunctionCallSafe(&inputproc, str, typioparam, typmod, escontext,
+    // &converted) (misc.c:813): true iff the conversion succeeded (no soft
+    // error saved). The converted datum is discarded.
+    let out = input_function_call_safe_typed(
+        mcx,
+        &resolved.resolution,
+        resolved.finfo,
+        Some(str_s),
+        typioparam,
+        typmod,
+        Some(escontext),
+    )?;
+    Ok(out.is_some())
+}
+
 /// `OidFunctionCall0(functionId)` seam (fmgr.c): one-shot lookup + zero-argument
 /// call under the default (invalid) collation. Returns the bare result word (the
 /// handler's opaque `void *` pointer word for subscript-routines callers).
@@ -2975,6 +3028,7 @@ pub fn init_seams() {
     backend_utils_fmgr_fmgr_seams::input_function_call::set(input_function_call_seam);
     backend_utils_fmgr_fmgr_seams::receive_function_call::set(receive_function_call_seam);
     backend_utils_fmgr_fmgr_seams::input_function_call_safe::set(input_function_call_safe_seam);
+    backend_utils_fmgr_fmgr_seams::input_is_valid_by_type::set(input_is_valid_by_type_seam);
     backend_utils_fmgr_fmgr_seams::oid_function_call0::set(oid_function_call0_seam);
     backend_utils_fmgr_fmgr_seams::function_call_invoke::set(function_call_invoke_seam);
     backend_utils_fmgr_fmgr_seams::fastpath_function_call_invoke::set(function_call_invoke_seam);
