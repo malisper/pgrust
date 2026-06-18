@@ -2659,6 +2659,25 @@ fn create_worktablescan_plan<'mcx>(
 // ordering / nestloop params / make_subqueryscan) is ported.
 // ---------------------------------------------------------------------------
 
+/// `create_subqueryscan_subplan` seam impl for the in-root (set-operation
+/// imported) case: the `SubqueryScanPath`'s `subpath` resolves in `root`'s
+/// arena (it was deep-imported by `import_path_from_subroot`), so build its plan
+/// with `create_plan_recurse(root, subpath)` directly.
+fn create_subqueryscan_subplan_inroot<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+) -> PgResult<Node<'mcx>> {
+    let subpath = match root.path(best_path) {
+        types_pathnodes::PathNode::SubqueryScanPath(p) => p
+            .subpath
+            .expect("create_subqueryscan_subplan: SubqueryScanPath has no subpath"),
+        _ => panic!("create_subqueryscan_subplan: best_path is not a SubqueryScanPath"),
+    };
+    create_plan_recurse(mcx, root, run, subpath, CP_EXACT_TLIST)
+}
+
 /// `create_subqueryscan_plan(root, best_path, tlist, scan_clauses)` — return a
 /// subqueryscan plan for the base relation scanned by `best_path`.
 fn create_subqueryscan_plan<'mcx>(
@@ -6886,6 +6905,14 @@ pub fn init_seams() {
     // `cp_seam` indirection (declared in this unit's -seams crate). Install it now
     // that the converter is ported (covers both T_IndexScan and T_IndexOnlyScan).
     cp_seam::create_indexscan_plan::set(create_indexscan_plan);
+
+    // `create_subqueryscan_subplan`: the subroot-recursion leg of
+    // create_subqueryscan_plan. For set-operation children the subquery path
+    // subtree has been deep-imported into THIS root's arena
+    // (import_path_from_subroot), so the SubqueryScanPath's subpath resolves here
+    // and create_plan_recurse(root, subpath) builds the child plan directly — no
+    // separate subroot context. Install that in-root resolution.
+    cp_seam::create_subqueryscan_subplan::set(create_subqueryscan_subplan_inroot);
 
     // The per-family `create_*_plan` converters are NO LONGER seams: createplan.c
     // is a single translation unit, so create_plan_recurse / create_scan_plan

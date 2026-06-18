@@ -1765,22 +1765,67 @@ fn grouping_planner<'mcx>(
 
     let has_setops = run.resolve(root.parse).setOperations.is_some();
     if has_setops {
-        // Set-operation branch (C:1468-1523).
-        let _current_rel =
+        // Set-operation branch (C:1468-1523). Construct Paths for set ops; the
+        // result needs only an optional top-level sort and/or LIMIT.
+        let current_rel =
             backend_optimizer_prep_prepunion_seams::plan_set_operations::call(mcx, run, root)?;
 
-        // Assert(parse->commandType == CMD_SELECT). postprocess_setop_tlist over
-        // copyObject(processed_tlist), final_target from the path's pathtarget,
-        // is_parallel_safe(final_target->exprs), the rowMarks FOR UPDATE guard
-        // (CheckSelectLocking already done at parse), and
-        // make_pathkeys_for_sortclauses for sort_pathkeys. final_target comes from
-        // `current_rel->cheapest_total_path->pathtarget`, an unported
-        // PathTarget. Mirror PG and panic precisely after plan_set_operations.
-        panic!(
-            "grouping_planner: set-operation post-processing (postprocess_setop_tlist \
-             + final_target from cheapest_total_path->pathtarget + \
-             make_pathkeys_for_sortclauses) is gated on the unported PathTarget \
-             upper-rel machinery (planner.c:1478-1522)"
+        debug_assert!(run.resolve(root.parse).commandType == CmdType::CMD_SELECT);
+
+        // Use the processed_tlist from plan_set_operations, transferring sort key
+        // info from the original tlist (C:1487-1490). The processed_tlist already
+        // lives in root's arena; copy sortgrouprefs from parse->targetList.
+        postprocess_setop_tlist(run, root)?;
+
+        // final_target = current_rel->cheapest_total_path->pathtarget (C:1493).
+        let final_target: types_pathnodes::PathTarget = {
+            let cheapest = root
+                .rel(current_rel)
+                .cheapest_total_path
+                .expect("setop final_target: cheapest_total_path is NULL");
+            root.path(cheapest)
+                .base()
+                .pathtarget
+                .as_deref()
+                .cloned()
+                .expect("setop final_target: path has no pathtarget")
+        };
+        let final_target_parallel_safe = is_target_exprs_parallel_safe(root, &final_target.exprs);
+
+        // The setop result tlist couldn't contain any SRFs (C:1500).
+        debug_assert!(!run.resolve(root.parse).hasTargetSRFs);
+
+        // FOR [KEY] UPDATE/SHARE is not allowed with set ops (C:1507-1514).
+        if !run.resolve(root.parse).rowMarks.is_empty() {
+            return Err(PgError::error(alloc::string::String::from(
+                "FOR UPDATE/SHARE is not allowed with UNION/INTERSECT/EXCEPT",
+            )));
+        }
+
+        // sort_pathkeys = make_pathkeys_for_sortclauses(root, sortClause,
+        // processed_tlist) (C:1519-1522). DISTINCT is rejected at parse.
+        debug_assert!(run.resolve(root.parse).distinctClause.is_empty());
+        let sort_clause_ids = intern_sortclauses(run, root)?;
+        let processed = root.processed_tlist.clone();
+        root.sort_pathkeys =
+            backend_optimizer_path_pathkeys::make_pathkeys_for_sortclauses(
+                root,
+                &sort_clause_ids,
+                &processed,
+            );
+        let has_sort = !root.sort_pathkeys.is_empty();
+
+        // Fall through to the shared final-paths tail (C:1849-2169).
+        return build_final_paths(
+            mcx,
+            run,
+            root,
+            current_rel,
+            &final_target,
+            final_target_parallel_safe,
+            has_sort,
+            false,
+            limit_tuples,
         );
     }
 
@@ -2162,6 +2207,41 @@ fn grouping_planner<'mcx>(
         )?;
     }
 
+    // adjust_paths_for_srfs when final_target contains SRFs (C:1860-1862) is
+    // gated out: hasTargetSRFs loud-panics above before this point.
+    debug_assert!(!has_target_srfs);
+
+    // Shared tail (ORDER BY ordered-paths + final-rel build): used by both the
+    // regular and set-operation branches (planner.c:1849-2169).
+    build_final_paths(
+        mcx,
+        run,
+        root,
+        current_rel,
+        &final_target,
+        final_target_parallel_safe,
+        has_sort,
+        have_postponed_srfs,
+        limit_tuples,
+    )
+}
+
+/// Shared `grouping_planner` tail: optional ORDER BY ordered-paths step then the
+/// final-output upperrel build (LockRows/Limit guards, ModifyTable, add_path).
+/// `planner.c:1849-2169`. Both the regular and the set-operation branches reach
+/// here with their `current_rel` and `final_target`.
+fn build_final_paths<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &mut PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    mut current_rel: RelId,
+    final_target: &types_pathnodes::PathTarget,
+    final_target_parallel_safe: bool,
+    has_sort: bool,
+    have_postponed_srfs: bool,
+    limit_tuples: f64,
+) -> PgResult<()> {
+    let _ = mcx;
     // If ORDER BY was given, generate a new upperrel of paths that emit the
     // correct ordering and project final_target (C:1849-1866). We can apply the
     // limit_tuples bound in sort costing only if there are no postponed SRFs.
@@ -2171,13 +2251,10 @@ fn grouping_planner<'mcx>(
             root,
             run,
             current_rel,
-            &final_target,
+            final_target,
             final_target_parallel_safe,
             limit_for_sort,
         )?;
-        // adjust_paths_for_srfs when final_target contains SRFs (C:1860-1862) is
-        // gated out: hasTargetSRFs loud-panics above before this point.
-        debug_assert!(!has_target_srfs);
         // current_rel becomes the ordered upperrel for the final-output build.
         current_rel = ordered_rel;
     }
@@ -4032,6 +4109,65 @@ fn sortgroupclause_from_node(
             other.tag()
         ),
     }
+}
+
+/// Intern `parse->sortClause` (a List of `SortGroupClause`) into the planner
+/// node arena, returning the `NodeId` handles (the form
+/// `make_pathkeys_for_sortclauses` consumes).
+fn intern_sortclauses<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+) -> PgResult<Vec<types_pathnodes::NodeId>> {
+    let clauses: Vec<types_nodes::rawnodes::SortGroupClause> = run
+        .resolve(root.parse)
+        .sortClause
+        .iter()
+        .map(sortgroupclause_from_node)
+        .collect::<PgResult<Vec<_>>>()?;
+    Ok(clauses
+        .into_iter()
+        .map(|sgc| root.alloc_sortgroupclause(sgc))
+        .collect())
+}
+
+/// `postprocess_setop_tlist(processed_tlist, parse->targetList)` (planner.c:5778)
+/// — transfer `ressortgroupref` from the original parser tlist onto the setop
+/// result tlist (already in `root`'s arena), skipping resjunk columns.
+fn postprocess_setop_tlist<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+) -> PgResult<()> {
+    // Snapshot the original tlist's (resno, resjunk, ressortgroupref).
+    let orig: Vec<(types_core::primitive::AttrNumber, bool, types_core::primitive::Index)> = run
+        .resolve(root.parse)
+        .targetList
+        .iter()
+        .map(|te| (te.resno, te.resjunk, te.ressortgroupref))
+        .collect();
+
+    let tlist = root.processed_tlist.clone();
+    let mut orig_idx = 0usize;
+    for &te_id in tlist.iter() {
+        if root.targetentry(te_id).resjunk {
+            continue;
+        }
+        debug_assert!(orig_idx < orig.len());
+        let (orig_resno, orig_resjunk, orig_ref) = orig[orig_idx];
+        orig_idx += 1;
+        if orig_resjunk {
+            return Err(PgError::error(alloc::string::String::from(
+                "resjunk output columns are not implemented",
+            )));
+        }
+        debug_assert!(root.targetentry(te_id).resno == orig_resno);
+        root.targetentry_mut(te_id).ressortgroupref = orig_ref;
+    }
+    if orig_idx != orig.len() {
+        return Err(PgError::error(alloc::string::String::from(
+            "resjunk output columns are not implemented",
+        )));
+    }
+    Ok(())
 }
 
 /// `enable_incremental_sort` GUC, read through the guc-tables slot.
