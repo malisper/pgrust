@@ -530,6 +530,113 @@ pub fn range_adjacent_multirange_internal(
     Ok(false)
 }
 
+/// `multirange_overleft_range(mr, r)` (multirangetypes.c:2109): the entry point's
+/// inlined logic (no C `*_internal` helper). True iff `mr`'s last upper bound is
+/// `<=` `r`'s upper bound.
+pub fn multirange_overleft_range_internal(
+    rangetyp: &TypeCacheEntry,
+    mr: MultirangeTypeP<'_>,
+    r: RangeTypeP<'_>,
+) -> PgResult<bool> {
+    if multirange_is_empty(mr) || range_is_empty(r) {
+        return Ok(false);
+    }
+
+    let (_lower1, upper1) = multirange_get_bounds(rangetyp, mr, multirange_range_count(mr) - 1)?;
+    let (_lower2, upper2, empty) = range_deserialize::call(rangetyp, r)?;
+    debug_assert!(!empty);
+
+    Ok(range_cmp_bounds::call(rangetyp, &upper1, &upper2)? <= 0)
+}
+
+/// `multirange_overleft_multirange(mr1, mr2)` (multirangetypes.c:2134): inlined.
+/// True iff `mr1`'s last upper bound is `<=` `mr2`'s last upper bound.
+pub fn multirange_overleft_multirange_internal(
+    rangetyp: &TypeCacheEntry,
+    mr1: MultirangeTypeP<'_>,
+    mr2: MultirangeTypeP<'_>,
+) -> PgResult<bool> {
+    if multirange_is_empty(mr1) || multirange_is_empty(mr2) {
+        return Ok(false);
+    }
+
+    let (_lower1, upper1) = multirange_get_bounds(rangetyp, mr1, multirange_range_count(mr1) - 1)?;
+    let (_lower2, upper2) = multirange_get_bounds(rangetyp, mr2, multirange_range_count(mr2) - 1)?;
+
+    Ok(range_cmp_bounds::call(rangetyp, &upper1, &upper2)? <= 0)
+}
+
+/// `multirange_overright_range(mr, r)` (multirangetypes.c:2192): inlined. True iff
+/// `mr`'s first lower bound is `>=` `r`'s lower bound.
+pub fn multirange_overright_range_internal(
+    rangetyp: &TypeCacheEntry,
+    mr: MultirangeTypeP<'_>,
+    r: RangeTypeP<'_>,
+) -> PgResult<bool> {
+    if multirange_is_empty(mr) || range_is_empty(r) {
+        return Ok(false);
+    }
+
+    let (lower1, _upper1) = multirange_get_bounds(rangetyp, mr, 0)?;
+    let (lower2, _upper2, empty) = range_deserialize::call(rangetyp, r)?;
+    debug_assert!(!empty);
+
+    Ok(range_cmp_bounds::call(rangetyp, &lower1, &lower2)? >= 0)
+}
+
+/// `multirange_overright_multirange(mr1, mr2)` (multirangetypes.c:2216): inlined.
+/// True iff `mr1`'s first lower bound is `>=` `mr2`'s first lower bound.
+pub fn multirange_overright_multirange_internal(
+    rangetyp: &TypeCacheEntry,
+    mr1: MultirangeTypeP<'_>,
+    mr2: MultirangeTypeP<'_>,
+) -> PgResult<bool> {
+    if multirange_is_empty(mr1) || multirange_is_empty(mr2) {
+        return Ok(false);
+    }
+
+    let (lower1, _upper1) = multirange_get_bounds(rangetyp, mr1, 0)?;
+    let (lower2, _upper2) = multirange_get_bounds(rangetyp, mr2, 0)?;
+
+    Ok(range_cmp_bounds::call(rangetyp, &lower1, &lower2)? >= 0)
+}
+
+/// `multirange_adjacent_multirange(mr1, mr2)` (multirangetypes.c:2535): inlined.
+pub fn multirange_adjacent_multirange_internal(
+    rangetyp: &TypeCacheEntry,
+    mr1: MultirangeTypeP<'_>,
+    mr2: MultirangeTypeP<'_>,
+) -> PgResult<bool> {
+    if multirange_is_empty(mr1) || multirange_is_empty(mr2) {
+        return Ok(false);
+    }
+
+    let range_count1 = multirange_range_count(mr1);
+    let range_count2 = multirange_range_count(mr2);
+    let (mut lower1, upper1) = multirange_get_bounds(rangetyp, mr1, range_count1 - 1)?;
+    let (lower2, mut upper2) = multirange_get_bounds(rangetyp, mr2, 0)?;
+
+    if bounds_adjacent::call(rangetyp, upper1, lower2)? {
+        return Ok(true);
+    }
+
+    // C reassigns lower1/upper1 from mr1's first range and lower2/upper2 from
+    // mr2's last range; below only mr1's first lower and mr2's last upper read.
+    if range_count1 > 1 {
+        let (l, _u) = multirange_get_bounds(rangetyp, mr1, 0)?;
+        lower1 = l;
+    }
+    if range_count2 > 1 {
+        let (_l, u) = multirange_get_bounds(rangetyp, mr2, range_count2 - 1)?;
+        upper2 = u;
+    }
+
+    if bounds_adjacent::call(rangetyp, upper2, lower1)? {
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 // ---------------------------------------------------------------------------
 // equality.
 // ---------------------------------------------------------------------------
