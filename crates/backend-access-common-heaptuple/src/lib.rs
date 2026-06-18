@@ -254,6 +254,21 @@ fn set_varsize_short(dest: &mut [u8], len: usize) {
 /// `VARDATA(PTR)` byte offset for a 4-byte-header varlena (== `VARHDRSZ`).
 const VARDATA_4B_OFF: usize = VARHDRSZ;
 
+/// Whether `heap_form_tuple` packs a packable varlena into a 1-byte ("short")
+/// on-disk header.
+///
+/// **Disabled (`false`) under the header-ful-everywhere convention**
+/// (docs/proposals/byref-headerful-flip-plan.md §RECOMMENDATION). After the
+/// by-ref flip, the fmgr lane and ~30 adt-core arg readers consume a stored
+/// varlena by skipping a FIXED 4-byte `VARHDRSZ` header (`&image[VARHDRSZ..]`),
+/// not the size-aware `VARDATA_ANY`. A 1-byte short header on disk therefore made
+/// every such reader land 3 bytes (`VARHDRSZ - VARHDRSZ_SHORT`) into the payload,
+/// so heap-stored `text` came back truncated from the front. Keeping the full
+/// 4-byte header on every stored varlena makes those fixed strips correct;
+/// `varsize_any` / `VARDATA_ANY` deform-side readers still accept short headers,
+/// so on-disk compatibility is one-directional and safe.
+const SHORT_VARLENA_PACKING: bool = false;
+
 /// `SET_VARSIZE(PTR, len)` (varatt.h, little-endian): a 4-byte uncompressed
 /// header whose `VARSIZE_4B == len` (low two bits 00). Returns the header bytes.
 #[inline]
@@ -400,7 +415,19 @@ pub fn heap_compute_data_size(
         };
 
         // COMPACT_ATTR_IS_PACKABLE(atti) && VARATT_CAN_MAKE_SHORT(DatumGetPointer(val))
-        if compact_attr_is_packable(atti)
+        //
+        // SHORT-HEADER PACKING IS DISABLED under the header-ful-everywhere
+        // convention (docs/proposals/byref-headerful-flip-plan.md §RECOMMENDATION:
+        // "keep cores emitting 4-byte (not short 1-byte) headers"). The fmgr lane
+        // and ~30 adt cores read a stored varlena by skipping a FIXED 4-byte
+        // header; a 1-byte short header on disk made every such reader land 3
+        // bytes into the payload (text came back truncated from the front). So we
+        // always store the full 4-byte header here and in `fill_val`, and let
+        // `varsize_any`/`VARDATA_ANY` consumers (which still accept short) read
+        // them. (`compact_attr_is_packable`/`varatt_converted_short_size` kept for
+        // the symmetric `fill_val` guard / future re-enable.)
+        if SHORT_VARLENA_PACKING
+            && compact_attr_is_packable(atti)
             && varatt_can_make_short(varlena_image.as_deref().unwrap())
         {
             // we're anticipating converting to a short varlena header, so
@@ -577,8 +604,10 @@ fn fill_val(
             // no alignment for short varlenas
             data_length = varsize_short(val);
             data[off..off + data_length].copy_from_slice(&val[..data_length]);
-        } else if att.attispackable && varatt_can_make_short(val) {
+        } else if SHORT_VARLENA_PACKING && att.attispackable && varatt_can_make_short(val) {
             // convert to short varlena -- no alignment
+            // (disabled: see `SHORT_VARLENA_PACKING` — keep the full 4-byte header
+            // so fixed-`VARHDRSZ` consumers read the payload, not 3 bytes in)
             data_length = varatt_converted_short_size(val);
             set_varsize_short(&mut data[off..], data_length);
             // memcpy(data + 1, VARDATA(val), data_length - 1)
