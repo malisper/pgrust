@@ -289,6 +289,7 @@ backend-optimizer-path-indxpath = { path = "../backend-optimizer-path-indxpath" 
 backend-optimizer-path-joinrels = { path = "../backend-optimizer-path-joinrels" }
 backend-optimizer-util-relnode = { path = "../backend-optimizer-util-relnode" }
 backend-optimizer-util-appendinfo = { path = "../backend-optimizer-util-appendinfo" }
+backend-optimizer-util-inherit = { path = "../backend-optimizer-util-inherit" }
 backend-optimizer-util-plancat = { path = "../backend-optimizer-util-plancat" }
 backend-optimizer-path-pathkeys = { path = "../backend-optimizer-path-pathkeys" }
 backend-access-nbt-compare = { path = "../backend-access-nbt-compare" }

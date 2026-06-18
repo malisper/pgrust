@@ -65,7 +65,8 @@ seam_core::seam!(
     /// `apply_child_basequals(root, parentrel, childrel, childRTE, appinfo)`
     /// (inherit.c) — translate the parent's base quals onto the child; returns
     /// false if the result is constant-FALSE/NULL.
-    pub fn apply_child_basequals(
+    pub fn apply_child_basequals<'mcx>(
+        run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         parent: RelId,
         rel: RelId,

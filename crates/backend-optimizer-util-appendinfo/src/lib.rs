@@ -1214,6 +1214,35 @@ pub fn init_seams() {
     // relnode-ext-homed appendinfo seams (this unit is their C-source owner).
     relnode_ext::adjust_appendrel_attrs_node::set(seam_adjust_appendrel_attrs_node);
     relnode_ext::row_identity_var_rowidwidth::set(row_identity_var_rowidwidth);
+
+    // equivclass-ext-homed appendinfo seams (this unit is their C-source owner).
+    // The `Vec<RelId>` carrier names the child rels whose AppendRelInfos drive
+    // the parent→child Var translation; resolve each through append_rel_array
+    // (find_appinfos_by_relids over the child's relids).
+    use backend_optimizer_path_equivclass_ext_seams as eq_ext;
+    eq_ext::adjust_appendrel_attrs::set(seam_adjust_appendrel_attrs);
+    eq_ext::adjust_appendrel_attrs_multilevel::set(|root, node, child_rel, top_parent| {
+        let parentrel = top_parent.ok_or_else(|| {
+            PgError::error("adjust_appendrel_attrs_multilevel: top_parent is NULL")
+        })?;
+        adjust_appendrel_attrs_multilevel(root, node, child_rel, parentrel)
+    });
+}
+
+/// `adjust_appendrel_attrs(root, (Node *) node, nappinfos, appinfos)` — the
+/// single-expression equivclass/allpaths consumer. The seam carries the child
+/// rels as `Vec<RelId>`; resolve their AppendRelInfos and translate.
+fn seam_adjust_appendrel_attrs(
+    root: &mut PlannerInfo,
+    node: Expr,
+    child_rels: Vec<RelId>,
+) -> PgResult<Expr> {
+    let mut appinfos: Vec<AppendRelInfo> = Vec::with_capacity(child_rels.len());
+    for cr in child_rels {
+        let relids = root.rel(cr).relids.clone();
+        appinfos.extend(find_appinfos_by_relids(root, &relids)?);
+    }
+    adjust_appendrel_attrs(root, node, &appinfos)
 }
 
 /// `(List *) adjust_appendrel_attrs(root, restrictlist, nappinfos, appinfos)` —

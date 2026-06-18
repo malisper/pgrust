@@ -12443,6 +12443,7 @@ dependencies = [
  "backend-access-table-table-seams",
  "backend-nodes-core",
  "backend-nodes-equalfuncs-seams",
+ "backend-optimizer-path-equivclass-ext-seams",
  "backend-optimizer-plan-small-seams",
  "backend-optimizer-util-appendinfo-ext-seams",
  "backend-optimizer-util-appendinfo-seams",
@@ -12523,6 +12524,23 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
+ "types-pathnodes",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-optimizer-util-inherit"
+version = "0.0.0"
+dependencies = [
+ "backend-optimizer-plan-init-subselect-ext-seams",
+ "backend-optimizer-rte-seams",
+ "backend-optimizer-util-relnode",
+ "backend-optimizer-util-relnode-ext-seams",
+ "backend-optimizer-util-relnode-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
  "types-pathnodes",
  "types-tuple",
 ]
@@ -23014,6 +23032,7 @@ dependencies = [
  "backend-optimizer-rte-seams",
  "backend-optimizer-util-appendinfo",
  "backend-optimizer-util-clauses",
+ "backend-optimizer-util-inherit",
  "backend-optimizer-util-inherit-predtest",
  "backend-optimizer-util-joininfo",
  "backend-optimizer-util-paramassign",

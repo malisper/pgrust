@@ -86,7 +86,7 @@ pub fn add_other_rels_to_query<'mcx>(
         // If it's marked as inheritable, look for children.
         let (_rtekind, rte_inh, _relkind) = initext::rte_kind_inh_relkind::call(run, root, rti);
         if rte_inh {
-            initext::expand_inherited_rtentry::call(root, rti)?;
+            initext::expand_inherited_rtentry::call(run, root, rti)?;
         }
     }
     Ok(())

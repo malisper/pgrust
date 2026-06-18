@@ -2428,6 +2428,12 @@ pub struct PlannerInfo {
 /// `targetentry_mut`/`alloc_targetentry` accessors.
 #[derive(Debug)]
 pub enum ArenaNode {
+    /// Reserved sentinel occupying arena index 0. No real node is ever interned
+    /// at index 0, so [`NodeId::default()`] (`NodeId(0)`) is an unambiguous NULL
+    /// marker — the convention `AppendRelInfo::translated_vars` (and other
+    /// `Node *`-handle lists) rely on for "dropped column / NULL element".
+    /// Dereferencing it via `node`/`node_mut`/… panics.
+    Reserved,
     /// An expression node (the original, sole arena payload).
     Expr(Expr),
     /// A `TargetEntry` node (lifetime-free; child `expr` is an arena handle).
@@ -3068,9 +3074,21 @@ impl PlannerInfo {
     /// field a real backing node that the walking seams can dereference.
     #[inline]
     pub fn alloc_node(&mut self, node: Expr) -> NodeId {
-        let id = NodeId(self.node_arena.len() as u32);
+        let id = self.reserve_node_id();
         self.node_arena.push(ArenaNode::Expr(node));
         id
+    }
+
+    /// Reserve the next free [`NodeId`], seeding the index-0 sentinel
+    /// ([`ArenaNode::Reserved`]) on first use so that no real node is ever
+    /// interned at index 0. This keeps [`NodeId::default()`] (`NodeId(0)`) a
+    /// valid NULL marker for handle lists (e.g. `translated_vars`).
+    #[inline]
+    fn reserve_node_id(&mut self) -> NodeId {
+        if self.node_arena.is_empty() {
+            self.node_arena.push(ArenaNode::Reserved);
+        }
+        NodeId(self.node_arena.len() as u32)
     }
     /// Intern a [`TargetEntryNode`] into the node store, returning its
     /// [`NodeId`] handle. The producer path: plancat / the plan layer build
@@ -3078,7 +3096,7 @@ impl PlannerInfo {
     /// of these handles.
     #[inline]
     pub fn alloc_targetentry(&mut self, te: TargetEntryNode) -> NodeId {
-        let id = NodeId(self.node_arena.len() as u32);
+        let id = self.reserve_node_id();
         self.node_arena.push(ArenaNode::TargetEntry(te));
         id
     }
@@ -3093,7 +3111,7 @@ impl PlannerInfo {
         &mut self,
         sgc: types_nodes::rawnodes::SortGroupClause,
     ) -> NodeId {
-        let id = NodeId(self.node_arena.len() as u32);
+        let id = self.reserve_node_id();
         self.node_arena.push(ArenaNode::SortGroupClause(sgc));
         id
     }
@@ -3102,7 +3120,7 @@ impl PlannerInfo {
     /// `create_window_paths` (planner.c) when stacking WindowAgg paths.
     #[inline]
     pub fn alloc_windowclause(&mut self, wc: WindowClauseNode) -> NodeId {
-        let id = NodeId(self.node_arena.len() as u32);
+        let id = self.reserve_node_id();
         self.node_arena.push(ArenaNode::WindowClause(wc));
         id
     }
@@ -3111,7 +3129,7 @@ impl PlannerInfo {
     /// appendinfo's `add_row_identity_var`.
     #[inline]
     pub fn alloc_rowidvar(&mut self, r: RowIdentityVarInfo) -> NodeId {
-        let id = NodeId(self.node_arena.len() as u32);
+        let id = self.reserve_node_id();
         self.node_arena.push(ArenaNode::RowIdentityVar(r));
         id
     }
@@ -3120,7 +3138,7 @@ impl PlannerInfo {
     /// `get_relation_foreign_keys`.
     #[inline]
     pub fn alloc_foreign_key(&mut self, fk: ForeignKeyOptInfo) -> NodeId {
-        let id = NodeId(self.node_arena.len() as u32);
+        let id = self.reserve_node_id();
         self.node_arena.push(ArenaNode::ForeignKey(fk));
         id
     }
@@ -3129,7 +3147,7 @@ impl PlannerInfo {
     /// `get_relation_statistics`.
     #[inline]
     pub fn alloc_statistic_ext(&mut self, s: StatisticExtInfo) -> NodeId {
-        let id = NodeId(self.node_arena.len() as u32);
+        let id = self.reserve_node_id();
         self.node_arena.push(ArenaNode::StatisticExt(s));
         id
     }
@@ -3138,7 +3156,7 @@ impl PlannerInfo {
     /// `preprocess_aggref`.
     #[inline]
     pub fn alloc_agg_info(&mut self, a: AggInfo) -> NodeId {
-        let id = NodeId(self.node_arena.len() as u32);
+        let id = self.reserve_node_id();
         self.node_arena.push(ArenaNode::AggInfo(a));
         id
     }
@@ -3147,7 +3165,7 @@ impl PlannerInfo {
     /// `preprocess_aggref`.
     #[inline]
     pub fn alloc_agg_trans_info(&mut self, a: AggTransInfo) -> NodeId {
-        let id = NodeId(self.node_arena.len() as u32);
+        let id = self.reserve_node_id();
         self.node_arena.push(ArenaNode::AggTransInfo(a));
         id
     }
@@ -3157,7 +3175,7 @@ impl PlannerInfo {
     /// `assign_param_for_placeholdervar`.
     #[inline]
     pub fn alloc_planner_param_item(&mut self, p: PlannerParamItem) -> NodeId {
-        let id = NodeId(self.node_arena.len() as u32);
+        let id = self.reserve_node_id();
         self.node_arena.push(ArenaNode::PlannerParamItem(p));
         id
     }
@@ -3167,7 +3185,7 @@ impl PlannerInfo {
     /// `process_subquery_nestloop_params`.
     #[inline]
     pub fn alloc_nestloop_param(&mut self, n: NestLoopParamNode) -> NodeId {
-        let id = NodeId(self.node_arena.len() as u32);
+        let id = self.reserve_node_id();
         self.node_arena.push(ArenaNode::NestLoopParam(n));
         id
     }

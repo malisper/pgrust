@@ -409,7 +409,7 @@ pub fn build_simple_rel<'mcx>(
         let appinfo = root.append_rel_array[relid as usize]
             .clone()
             .expect("appinfo != NULL");
-        if !ext::apply_child_basequals::call(root, p, id, relid as u32, &appinfo)? {
+        if !ext::apply_child_basequals::call(run, root, p, id, relid as u32, &appinfo)? {
             /* Restriction clause reduced to constant FALSE or NULL. */
             ext::mark_dummy_rel::call(root, run, id)?;
         }

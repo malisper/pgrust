@@ -34,3 +34,4 @@ backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-s
 backend-optimizer-util-relnode-seams = { path = "../backend-optimizer-util-relnode-seams" }
 backend-optimizer-plan-small-seams = { path = "../backend-optimizer-plan-small-seams" }
 backend-optimizer-util-appendinfo-ext-seams = { path = "../backend-optimizer-util-appendinfo-ext-seams" }
+backend-optimizer-path-equivclass-ext-seams = { path = "../backend-optimizer-path-equivclass-ext-seams" }

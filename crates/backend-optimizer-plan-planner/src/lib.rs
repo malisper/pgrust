@@ -977,15 +977,46 @@ fn subquery_planner<'mcx>(
         }
 
         // root->append_rel_list = preprocess_expression(..., EXPRKIND_APPINFO)
-        // (C:983-985). append_rel_list is empty until inheritance/UNION-ALL
-        // expansion, which the simple SELECT path does not produce. Panic
-        // precisely if present (its AppendRelInfo translated_vars would need the
-        // EXPRKIND_APPINFO walk).
-        if !root.append_rel_list.is_empty() {
-            panic!(
-                "subquery_planner: append_rel_list expression preprocessing \
-                 (planner.c:983-985) is not wired over the owned model"
-            );
+        // (C:983-985). The C casts the whole `List *` of AppendRelInfos to a
+        // Node and runs `preprocess_expression`; the only expression-bearing
+        // field walked is each AppendRelInfo's `translated_vars` list (every
+        // other field is scalar). In the owned model `translated_vars` is a
+        // `Vec<NodeId>` of arena `Expr`s, so process each translated Var in
+        // place: take it out of the node arena (resolving the borrow against
+        // `&mut root`, as the processed_tlist aggref block does), run
+        // `preprocess_expression` with EXPRKIND_APPINFO, and write it back.
+        {
+            // Snapshot (appinfo index, var slot index, NodeId) for every
+            // translated_var; a default-NodeId (0) slot is a dropped column
+            // (C NULL) and is skipped.
+            let mut work: Vec<(usize, usize, types_pathnodes::NodeId)> = Vec::new();
+            for (ai, appinfo) in root.append_rel_list.iter().enumerate() {
+                for (vi, id) in appinfo.translated_vars.iter().enumerate() {
+                    if *id == types_pathnodes::NodeId::default() {
+                        continue;
+                    }
+                    work.push((ai, vi, *id));
+                }
+            }
+            for (_ai, _vi, id) in work {
+                let live = root.node(id).clone_in(mcx)?;
+                let processed = preprocess_expression(
+                    mcx,
+                    &mut root,
+                    run,
+                    outer_query_ref,
+                    Some(live),
+                    EXPRKIND_APPINFO,
+                )?;
+                match processed {
+                    Some(e) => *root.node_mut(id) = e,
+                    // EXPRKIND_APPINFO (not a QUAL) never reduces an expression
+                    // to NULL; preprocess_expression only returns None for a
+                    // None input or a canonicalize_qual collapse, neither of
+                    // which applies here. Keep the original node if it ever did.
+                    None => {}
+                }
+            }
         }
 
         // Preprocess expressions within RTEs (C:987-1054): tablesample / subquery

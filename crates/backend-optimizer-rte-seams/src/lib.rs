@@ -101,6 +101,11 @@ seam_core::seam!(
     pub fn rte_inh<'mcx>(run: &PlannerRun<'mcx>, root: &PlannerInfo, rti: Index) -> bool
 );
 seam_core::seam!(
+    /// `root->simple_rte_array[rti]->securityQuals != NIL` — does the RTE carry
+    /// security-barrier quals? (inherit.c `apply_child_basequals`.)
+    pub fn rte_has_security_quals<'mcx>(run: &PlannerRun<'mcx>, root: &PlannerInfo, rti: Index) -> bool
+);
+seam_core::seam!(
     /// `getRTEPermissionInfo(root->parse->rteperminfos, rte)->checkAsUser`
     /// (parse_relation.c) for the RTE at 1-based `rti`: the userid to check
     /// access as, or `InvalidOid` when the RTE has no permission info
@@ -245,6 +250,9 @@ pub fn init_seams() {
     rte_relkind::set(|run, root, rti| planner_rt_fetch(run, root, rti).relkind);
     rte_relid::set(|run, root, rti| planner_rt_fetch(run, root, rti).relid);
     rte_inh::set(|run, root, rti| planner_rt_fetch(run, root, rti).inh);
+    rte_has_security_quals::set(|run, root, rti| {
+        !planner_rt_fetch(run, root, rti).securityQuals.is_empty()
+    });
     rte_perminfo_checkasuser::set(|run, root, rti| {
         // getRTEPermissionInfo(parse->rteperminfos, rte): list_nth(rteperminfos,
         // rte->perminfoindex - 1). perminfoindex == 0 ⇒ no permission info.
