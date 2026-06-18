@@ -996,7 +996,12 @@ pub fn compute_semi_anti_join_factors<'mcx>(
     sjinfo: &SpecialJoinInfo,
     restrictlist: &[RinfoId],
 ) -> SemiAntiJoinFactors {
-    debug_assert!(jointype == JOIN_SEMI || jointype == JOIN_ANTI || sjinfo.jointype != JOIN_INNER);
+    // No precondition assert here: upstream `compute_semi_anti_join_factors`
+    // (costsize.c:5114) has none, and the caller (joinpath.c:223) invokes it for
+    // *any* `inner_unique` join — including a plain JOIN_INNER, whose dummy
+    // SpecialJoinInfo carries `jointype == JOIN_INNER`. Asserting otherwise
+    // (the prior `jointype == JOIN_SEMI || JOIN_ANTI || sjinfo.jointype !=
+    // JOIN_INNER`) wrongly aborted unique inner joins in debug builds.
 
     // Build the joinquals list (drop pushed-down clauses for outer joins).
     let joinquals_ids: Vec<RinfoId> = if is_outer_join(jointype) {
