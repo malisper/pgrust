@@ -43,7 +43,7 @@ use mcx::Mcx;
 use types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_error::PgResult;
 use types_nodes::copy_query::Query;
-use types_nodes::nodes::Node;
+use types_nodes::nodes::{ntag, Node};
 use types_nodes::primnodes::{Aggref, Expr};
 use types_pathnodes::PlannerInfo;
 
@@ -109,8 +109,9 @@ pub fn preprocess_minmax_aggregates<'mcx>(
     }
     let mut cur: &Node<'mcx> = top.fromlist[0].as_ref();
     loop {
-        match cur {
-            Node::FromExpr(f) => {
+        match cur.node_tag() {
+            ntag::T_FromExpr => {
+                let f = cur.expect_fromexpr();
                 if f.fromlist.len() != 1 {
                     return Ok(());
                 }
@@ -121,8 +122,8 @@ pub fn preprocess_minmax_aggregates<'mcx>(
     }
 
     // if (!IsA(jtnode, RangeTblRef)) return;
-    let rtindex = match cur {
-        Node::RangeTblRef(rtr) => rtr.rtindex,
+    let rtindex = match cur.node_tag() {
+        ntag::T_RangeTblRef => cur.expect_rangetblref().rtindex,
         _ => return Ok(()),
     };
 
