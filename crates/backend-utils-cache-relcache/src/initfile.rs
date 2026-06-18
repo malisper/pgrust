@@ -747,8 +747,16 @@ pub fn RelationSetNewRelfilenumber(relation: Oid, persistence: i8) -> PgResult<(
     if relkind_has_table_am(relkind) {
         // C: table_relation_set_new_filelocator(relation, &newrlocator,
         //    persistence, &freezeXid, &minmulti);
+        // The dispatch needs the open Relation (it carries the AM vtable); the
+        // entry is registry-owned, so project a transient read handle from the
+        // store (no release authority — same pattern as plancat_ext).
+        let relcx = mcx::MemoryContext::new("RelationSetNewRelfilenumber");
+        let data = crate::core_entry_store::with_relation(relid, |rd| {
+            crate::build::project_relation_data(relcx.mcx(), rd)
+        })??;
+        let rel = types_rel::Relation::open(data, None);
         let (fx, mm) = backend_access_table_tableam_seams::table_relation_set_new_filelocator::call(
-            relid,
+            &rel,
             newrlocator,
             persistence,
         )?;

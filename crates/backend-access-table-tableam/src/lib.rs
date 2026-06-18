@@ -204,36 +204,18 @@ pub fn table_scan_getnextslot<'mcx>(
 /// `table_relation_set_new_filelocator(rel, newrlocator, persistence,
 /// &freezeXid, &minmulti)` (access/tableam.h inline) — create storage for the
 /// relation's new relfilelocator (and its init fork if unlogged), handing back
-/// the AM-chosen `relfrozenxid`/`relminmxid`. Keyed by relation OID: the C call
-/// holds a `Relation*`, but the `rd_tableam` vtable cannot cross the seam
-/// boundary, so the dispatch resolves the AM by OID. Returns
-/// `(freeze_xid, minmulti)`.
-fn table_relation_set_new_filelocator(
-    relid: types_core::primitive::Oid,
+/// the AM-chosen `relfrozenxid`/`relminmxid`. The C
+/// `rel->rd_tableam->relation_set_new_filelocator(...)`: the open `Relation`
+/// carries the AM vtable. Returns `(freeze_xid, minmulti)`.
+fn table_relation_set_new_filelocator<'mcx>(
+    rel: &Relation<'mcx>,
     newrlocator: types_storage::RelFileLocator,
     relpersistence: i8,
 ) -> PgResult<(u32, u32)> {
-    // relation->rd_tableam->relation_set_new_filelocator(...). C dereferences
-    // rd_tableam unconditionally: a missing vtable is the NULL-pointer crash,
-    // so panic loudly (the heap AM provider, heapam_handler.c, is unported, so
-    // there is no installed vtable yet — mirror-PG-and-panic).
-    let routine = relcache::relation_rd_tableam_by_oid::call(relid).expect(
-        "relation has no table access method (C would dereference NULL rd_tableam)",
-    );
-    // The AM callback takes the open `Relation`; reconstructing the `&Relation`
-    // from the OID is the relation_open plumbing (backend-access-common-relation
-    // needs an mcx the seam contract doesn't carry). Unreachable in practice —
-    // the callback's heapam_handler.c provider is unported, so the `.expect`
-    // above already panicked. Bind the resolved routine so its dispatch shape is
-    // wired and the resolver seam is exercised.
-    let _ = &routine.relation_set_new_filelocator;
-    let _ = (newrlocator, relpersistence);
-    panic!(
-        "table_relation_set_new_filelocator: dispatching to the AM \
-         relation_set_new_filelocator callback needs the open Relation handle \
-         (relation_open / mcx, backend-access-common-relation) and the heap AM \
-         provider (heapam_handler.c), both not yet reachable here"
-    );
+    // rel->rd_tableam->relation_set_new_filelocator(rel, &newrlocator,
+    //     persistence, &freezeXid, &minmulti);
+    let routine = am(rel);
+    (routine.relation_set_new_filelocator)(rel, &newrlocator, relpersistence)
 }
 
 // ===========================================================================

@@ -799,7 +799,7 @@ pub fn heap_create<'mcx>(
             //     relpersistence, &relfrozenxid, &relminmxid);
             let (fx, mm) =
                 backend_access_table_tableam_seams::table_relation_set_new_filelocator::call(
-                    rel_data.rd_id,
+                    &rel_data,
                     rel_data.rd_locator,
                     relpersistence as i8,
                 )?;

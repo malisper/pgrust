@@ -130,11 +130,12 @@ seam_core::seam!(
     /// `rel->rd_tableam->relation_set_new_filelocator(...)` — create storage for
     /// the new relfilelocator of a table-AM relation (also its init fork if
     /// unlogged), and hand back the AM-chosen `relfrozenxid`/`relminmxid` to
-    /// store in pg_class. Dispatch is keyed by the relation OID (the relcache
-    /// entry owns the `rd_tableam` vtable, which can't cross this boundary).
+    /// store in pg_class. The open `Relation` is threaded through so the
+    /// dispatch can invoke the AM's `relation_set_new_filelocator` callback
+    /// (which the C `Relation*` carries via `rd_tableam`).
     /// Returns `(freeze_xid, minmulti)`. `Err` carries its `ereport(ERROR)`s.
-    pub fn table_relation_set_new_filelocator(
-        relid: Oid,
+    pub fn table_relation_set_new_filelocator<'mcx>(
+        rel: &Relation<'mcx>,
         newrlocator: types_storage::RelFileLocator,
         relpersistence: i8,
     ) -> PgResult<(u32, u32)>
