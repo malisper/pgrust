@@ -105,6 +105,7 @@ use backend_storage_buffer_bufmgr_seams as bufmgr;
 use backend_utils_cache_lsyscache_seams as lsyscache;
 use backend_utils_fmgr_fmgr_seams as fmgr;
 use backend_access_common_indextuple_seams as indextuple;
+use backend_access_index_indexam_seams as indexam;
 use backend_access_nbtree_core_seams as core_seams;
 
 // ===========================================================================
@@ -502,12 +503,17 @@ fn index_getattr<'mcx>(
     indextuple::nocache_index_getattr::call(mcx, tuple, attno as i32, rel.rd_att.as_ref())
 }
 
-/// `index_getprocinfo(rel, attno, BTORDER_PROC)` materialised as the `u64`
-/// fmgr handle that `_bt_mkscankey`'s scankeys / `so->orderProcs[]` carry. No
-/// handle producer exists. (Same blocker `nbtpreprocesskeys::index_getprocinfo`
-/// documents.)
-fn index_getprocinfo(_rel: &Relation, _attno: AttrNumber, _procnum: i16) -> u64 {
-    panic!("_bt_mkscankey: index_getprocinfo (ORDER proc handle) not yet ported")
+/// `index_getprocinfo(rel, attno, BTORDER_PROC)` — the cached `FmgrInfo` for
+/// the index AM's ORDER support procedure for the given attribute. Delegates to
+/// the installed `indexam::index_getprocinfo` seam, which resolves the proc OID
+/// off the relcache `rd_support` array and lazily materialises the `FmgrInfo`
+/// (`rd_supportinfo`), exactly as search.rs's `_bt_preprocess_keys` path does.
+fn index_getprocinfo<'mcx>(
+    rel: &Relation<'mcx>,
+    attno: AttrNumber,
+    procnum: u16,
+) -> PgResult<FmgrInfo> {
+    indexam::index_getprocinfo::call(rel, attno, procnum)
 }
 
 /// `datumCopy(value, attbyval, attlen)` (utils/datum.c). For by-value datums
@@ -589,7 +595,7 @@ fn scan_key_entry_initialize_with_info<'mcx>(
     strategy: StrategyNumber,
     subtype: Oid,
     collation: Oid,
-    procinfo: u64,
+    procinfo: FmgrInfo,
     argument: Datum<'mcx>,
 ) {
     entry.sk_flags = flags;
@@ -597,10 +603,9 @@ fn scan_key_entry_initialize_with_info<'mcx>(
     entry.sk_strategy = strategy;
     entry.sk_subtype = subtype;
     entry.sk_collation = collation;
-    // The trimmed FmgrInfo carries the proc OID in fn_oid; record the handle's
-    // low-word OID so later fmgr dispatch can use sk_func.fn_oid.
-    entry.sk_func = FmgrInfo::empty();
-    entry.sk_func.fn_oid = handle_fn_oid(procinfo);
+    // C: `fmgr_info_copy(&entry->sk_func, finfo, CurrentMemoryContext)`. The
+    // resolved ORDER-proc FmgrInfo is recorded directly.
+    entry.sk_func = procinfo;
     entry.sk_argument = argument;
 }
 
@@ -657,7 +662,7 @@ pub fn bt_mkscankey<'mcx>(
     for i in 0..indnkeyatts {
         // We can use the cached (default) support procs since no cross-type
         // comparison can be needed.
-        let procinfo = index_getprocinfo(rel, (i + 1) as AttrNumber, BTORDER_PROC);
+        let procinfo = index_getprocinfo(rel, (i + 1) as AttrNumber, BTORDER_PROC as u16)?;
 
         // Key arguments built from truncated attributes (or when caller
         // provides no tuple) are defensively represented as NULL values.
