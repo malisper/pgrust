@@ -24,7 +24,6 @@ use types_catalog::pg_proc::PROKIND_FUNCTION;
 use types_core::catalog::{PROCEDURE_RELATION_ID, VOIDOID};
 use types_core::Oid;
 use types_error::PgResult;
-use types_nodes::nodes::Node;
 use types_nodes::parsenodes::{RangeTblEntry, RTEKind};
 use types_nodes::primnodes::Expr;
 use types_pathnodes::PlannerInfo;
@@ -132,15 +131,9 @@ pub fn inline_set_returning_function<'mcx>(
 fn rtfunc_funcexpr<'a, 'mcx>(
     node: &'a types_nodes::nodes::NodePtr<'mcx>,
 ) -> Option<&'a types_nodes::primnodes::FuncExpr> {
-    let Node::RangeTblFunction(rtf) = &**node else {
-        return None;
-    };
+    let rtf = node.as_rangetblfunction()?;
     let fe = rtf.funcexpr.as_deref()?;
-    if let Node::Expr(Expr::FuncExpr(funcexpr)) = fe {
-        Some(funcexpr)
-    } else {
-        None
-    }
+    fe.as_funcexpr()
 }
 
 /// Re-export of the funcid-keyed scalar-inline declination, kept for the
