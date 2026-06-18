@@ -204,14 +204,6 @@ seam_core::seam!(
     pub fn es_snapshot(estate: &EStateData<'_>) -> Snapshot
 );
 
-seam_core::seam!(
-    /// `ExecUpdateLockMode(estate, resultRelInfo)` (execMain.c): the
-    /// `LockTupleMode` to acquire on the conflicting tuple before updating.
-    pub fn exec_update_lock_mode<'mcx>(
-        estate: &mut EStateData<'mcx>,
-        result_rel_info: RriId,
-    ) -> LockTupleMode
-);
 
 seam_core::seam!(
     /// `table_tuple_lock(rel, tid, snapshot, slot, cid, mode, LockWaitBlock, 0,
@@ -601,7 +593,8 @@ pub fn ExecOnConflictUpdate<'mcx>(
 
     // Determine lock mode to use
     // lockmode = ExecUpdateLockMode(context->estate, resultRelInfo);
-    let lockmode: LockTupleMode = exec_update_lock_mode::call(estate, result_rel_info);
+    let lockmode: LockTupleMode =
+        backend_executor_execMain_seams::exec_update_lock_mode::call(estate, result_rel_info)?;
 
     // Lock tuple for update.  Don't follow updates when tuple cannot be locked
     // without doing so.  A row locking conflict here means our previous

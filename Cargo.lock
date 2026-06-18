@@ -8655,14 +8655,17 @@ version = "0.0.0"
 dependencies = [
  "backend-catalog-aclchk-seams",
  "backend-catalog-objectaddress-seams",
+ "backend-executor-execAmi",
  "backend-executor-execAmi-seams",
  "backend-executor-execJunk",
  "backend-executor-execMain-seams",
  "backend-executor-execProcnode-seams",
  "backend-executor-execUtils",
  "backend-executor-execUtils-seams",
+ "backend-nodes-core-seams",
  "backend-tcop-dest-seams",
  "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-relcache-seams",
  "backend-utils-init-miscinit-seams",
  "mcx",
  "seam-core",
@@ -8672,6 +8675,7 @@ dependencies = [
  "types-nodes",
  "types-scan",
  "types-snapshot",
+ "types-tableam",
  "types-tuple",
 ]
 

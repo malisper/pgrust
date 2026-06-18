@@ -17,6 +17,7 @@ types-acl = { path = "../types-acl" }
 types-tuple = { path = "../types-tuple" }
 types-snapshot = { path = "../types-snapshot" }
 types-scan = { path = "../types-scan" }
+types-tableam = { path = "../types-tableam" }
 mcx = { path = "../mcx" }
 
 # Driver-loop dependencies: the node-dispatch seams (ExecInitNode / ExecProcNode
@@ -44,3 +45,14 @@ backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-sea
 
 # ExecutorRewind's ExecReScan(planstate) dispatch.
 backend-executor-execAmi-seams = { path = "../backend-executor-execAmi-seams" }
+
+# ExecSupportsBackwardScan body lives in execAmi (execAmi.c); execMain owns the
+# execMain-seams `exec_supports_backward_scan` decl (its caller, portalcmds,
+# passes the whole PlannedStmt) and delegates to execAmi's planTree walker.
+# execAmi does not depend on execMain(-seams), so this is acyclic.
+backend-executor-execAmi = { path = "../backend-executor-execAmi" }
+
+# ExecUpdateLockMode reads the relation's key-column bitmap via the relcache.
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+# ExecGetAllUpdatedCols / bms_overlap for ExecUpdateLockMode.
+backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
