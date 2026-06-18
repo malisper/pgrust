@@ -369,6 +369,52 @@ fn get_cte_target_list<'mcx>(
     Ok(out)
 }
 
+/// Return the analyzed CTE's non-recursive (leftmost) UNION term targetlist —
+/// the subquery in the leftmost `RangeTblRef` of the query's `setOperations`
+/// tree (or the query's own targetlist when there's no set-op).  Mirrors the
+/// targetlist `determineRecursiveColTypes` (analyze.c) used to size the
+/// recursive CTE's output columns.
+fn nonrecursive_term_targetlist<'mcx>(
+    mcx: Mcx<'mcx>,
+    cte: &CommonTableExpr<'mcx>,
+) -> PgResult<Vec<TargetEntry<'mcx>>> {
+    let q = query_of(cte.ctequery.as_deref())
+        .ok_or_else(|| elog_error("nonrecursive_term_targetlist: ctequery is not a Query"))?;
+
+    let src_tlist: &PgVec<'mcx, TargetEntry<'mcx>> = match q.setOperations.as_deref() {
+        Some(setop_node) => {
+            // Descend to the leftmost leaf RangeTblRef of the set-op tree.
+            let mut node: &Node = setop_node;
+            let leftmost_rti = loop {
+                match node {
+                    Node::SetOperationStmt(s) => {
+                        node = s
+                            .larg
+                            .as_deref()
+                            .ok_or_else(|| elog_error("set-op tree has no left child"))?;
+                    }
+                    Node::RangeTblRef(r) => break r.rtindex,
+                    _ => return Err(elog_error("set-op leftmost is not a RangeTblRef")),
+                }
+            };
+            let rte = &q.rtable[(leftmost_rti - 1) as usize];
+            let leftq = rte
+                .subquery
+                .as_deref()
+                .ok_or_else(|| elog_error("leftmost set-op member is not a subquery"))?;
+            &leftq.targetList
+        }
+        None => &q.targetList,
+    };
+
+    let mut out: Vec<TargetEntry<'mcx>> = Vec::new();
+    out.try_reserve(src_tlist.len()).map_err(|_| out_of_memory())?;
+    for te in src_tlist.iter() {
+        out.push(te.clone_in(mcx)?);
+    }
+    Ok(out)
+}
+
 /// `exprLocation((Node *) list)` over a list of raw nodes — the minimum
 /// non-negative child location (-1 if empty / all unknown).
 fn expr_location_of_list(list: &PgVec<'_, PgBox<'_, Node<'_>>>) -> PgResult<i32> {
@@ -723,6 +769,18 @@ fn analyzeCTE<'mcx>(
         let tlist = get_cte_target_list(mcx, cte)?;
         analyzeCTETargetList(mcx, pstate, cte, &tlist)?;
     } else {
+        // For a recursive CTE the output columns were determined by
+        // `determineRecursiveColTypes` (analyze.c) while transforming the
+        // non-recursive term.  In C that mutated this very `cte` (it aliases
+        // `pstate->p_parent_cte`); the owned model handed the sub-analysis a
+        // clone, so re-derive the columns here from the analyzed query's
+        // non-recursive (leftmost) term before verifying — leaving `cte` in the
+        // same state C would have at this point.
+        if cte.ctecolnames.is_empty() {
+            let nr_tlist = nonrecursive_term_targetlist(mcx, cte)?;
+            analyzeCTETargetList(mcx, pstate, cte, &nr_tlist)?;
+        }
+
         // Verify that the previously determined output column types and
         // collations match what the query really produced.  We have to check
         // this because the recursive term could have overridden the

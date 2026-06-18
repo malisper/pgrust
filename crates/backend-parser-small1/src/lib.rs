@@ -297,6 +297,15 @@ pub fn make_parsestate<'mcx>(
                  (no sub-statement ParseState caller has landed)"
             );
         }
+
+        // C aliases `parentParseState` as a live back-pointer; the owned model
+        // holds it by value, so deep-copy the parent's read-only spine (range
+        // table, namespaces, CTE namespace, containing CTE, source text). This
+        // is what lets the parent-chain walks — notably the recursive-CTE
+        // self-reference in `scanNameSpaceForCTE` — find the outer CTE namespace
+        // from a child sub-statement state.
+        pstate.parentParseState = Some(PgBox::try_new_in(parent.clone_read_spine(mcx)?, mcx)
+            .map_err(|_| mcx.oom(core::mem::size_of::<ParseState>()))?);
     }
 
     PgBox::try_new_in(pstate, mcx).map_err(|_| mcx.oom(core::mem::size_of::<ParseState>()))

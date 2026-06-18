@@ -493,6 +493,68 @@ impl<'mcx> ParseState<'mcx> {
             p_ref_hook_state: ParseRefHookState::None,
         })
     }
+
+    /// Clone the read-only spine of this `ParseState` (and, recursively, its
+    /// ancestors) into `mcx` for use as a child state's `parentParseState`.
+    ///
+    /// C threads `parentParseState` as a non-owning back-pointer so a child
+    /// state reads the live parent. The owned model holds the parent by value,
+    /// so a child built by `make_parsestate(parent)` instead carries a deep copy
+    /// of the fields the upper-level walks read: the range table, the namespace
+    /// and CTE namespace, the containing CTE, the source text, and the hooks.
+    /// Mutable-back-write fields (per-RTE select-priv marks, refcount bumps that
+    /// must reach `qry->cteList`) resolve at the same query level in practice;
+    /// the recursive-CTE self-reference, which only *reads* the parent's
+    /// `p_ctenamespace`, is the case this copy enables.
+    pub fn clone_read_spine<'b>(&self, mcx: Mcx<'b>) -> PgResult<ParseState<'b>> {
+        let mut out = ParseState::new(mcx)?;
+
+        out.parentParseState = match self.parentParseState.as_deref() {
+            Some(p) => Some(PgBox::new_in(p.clone_read_spine(mcx)?, mcx)),
+            None => None,
+        };
+        out.p_sourcetext = match self.p_sourcetext.as_ref() {
+            Some(s) => Some(s.clone_in(mcx)?),
+            None => None,
+        };
+
+        out.p_rtable = PgVec::new_in(mcx);
+        out.p_rtable
+            .try_reserve(self.p_rtable.len())
+            .map_err(|_| mcx.oom(self.p_rtable.len()))?;
+        for rte in self.p_rtable.iter() {
+            out.p_rtable.push(rte.clone_in(mcx)?);
+        }
+
+        out.p_namespace = PgVec::new_in(mcx);
+        out.p_namespace
+            .try_reserve(self.p_namespace.len())
+            .map_err(|_| mcx.oom(self.p_namespace.len()))?;
+        for ns in self.p_namespace.iter() {
+            out.p_namespace.push(ns.clone_in(mcx)?);
+        }
+
+        out.p_ctenamespace = PgVec::new_in(mcx);
+        out.p_ctenamespace
+            .try_reserve(self.p_ctenamespace.len())
+            .map_err(|_| mcx.oom(self.p_ctenamespace.len()))?;
+        for cte in self.p_ctenamespace.iter() {
+            out.p_ctenamespace.push(cte.clone_in(mcx)?);
+        }
+
+        out.p_lateral_active = self.p_lateral_active;
+
+        out.p_parent_cte = match self.p_parent_cte.as_deref() {
+            Some(c) => Some(PgBox::new_in(c.clone_in(mcx)?, mcx)),
+            None => None,
+        };
+
+        // Hooks (fn pointers carrying the `'mcx` lifetime) are not re-lifetimed
+        // into the cloned ancestor; `make_parsestate` copies them onto the child
+        // directly, and hook dispatch happens at the child's own level.
+
+        Ok(out)
+    }
 }
 
 /// `ParseNamespaceItem` (`parser/parse_node.h`) — an element of a namespace
@@ -520,6 +582,44 @@ pub struct ParseNamespaceItem<'mcx> {
     pub p_lateral_ok: bool,
     /// `VarReturningType p_returning_type` — OLD/NEW for use in RETURNING.
     pub p_returning_type: VarReturningType,
+}
+
+impl<'mcx> ParseNamespaceItem<'mcx> {
+    /// Deep-copy this namespace item into `mcx` (used to clone a parent
+    /// `ParseState`'s read-only namespace spine into a child state).
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<ParseNamespaceItem<'b>> {
+        let p_names = match self.p_names.as_deref() {
+            Some(a) => Some(PgBox::new_in(a.clone_in(mcx)?, mcx)),
+            None => None,
+        };
+        let p_rte = match self.p_rte.as_deref() {
+            Some(r) => Some(PgBox::new_in(r.clone_in(mcx)?, mcx)),
+            None => None,
+        };
+        let p_perminfo = match self.p_perminfo.as_deref() {
+            Some(p) => Some(PgBox::new_in(p.clone_in(mcx)?, mcx)),
+            None => None,
+        };
+        let mut p_nscolumns: PgVec<'b, ParseNamespaceColumn> = PgVec::new_in(mcx);
+        p_nscolumns
+            .try_reserve(self.p_nscolumns.len())
+            .map_err(|_| mcx.oom(self.p_nscolumns.len()))?;
+        for c in self.p_nscolumns.iter() {
+            p_nscolumns.push(*c);
+        }
+        Ok(ParseNamespaceItem {
+            p_names,
+            p_rte,
+            p_rtindex: self.p_rtindex,
+            p_perminfo,
+            p_nscolumns,
+            p_rel_visible: self.p_rel_visible,
+            p_cols_visible: self.p_cols_visible,
+            p_lateral_only: self.p_lateral_only,
+            p_lateral_ok: self.p_lateral_ok,
+            p_returning_type: self.p_returning_type,
+        })
+    }
 }
 
 /// `ParseNamespaceColumn` (`parser/parse_node.h`) — data about one column of a

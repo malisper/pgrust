@@ -5,7 +5,7 @@
 use alloc::format;
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgVec};
+use mcx::{Mcx, PgBox, PgVec};
 use types_core::primitive::Oid;
 use types_error::PgResult;
 use types_nodes::copy_query::Query;
@@ -624,8 +624,54 @@ fn determineRecursiveColTypes<'mcx>(
     }
     let mut cte = pstate.p_parent_cte.take().unwrap();
     let r = backend_parser_cte::analyzeCTETargetList(mcx, pstate, &mut cte, &target_list);
+
+    // In C, `p_parent_cte` and the `p_ctenamespace` entry that the recursive
+    // self-reference resolves against are the same pointer, so writing the
+    // analyzed columns onto `p_parent_cte` makes them visible to the recursive
+    // term. The owned model holds separate copies (and the namespace entry lives
+    // in an ancestor `ParseState`), so push the freshly-determined column
+    // metadata into every matching `p_ctenamespace` entry up the parent chain.
+    // The recursive term's child state is cloned from `pstate` *after* this
+    // runs, so it then sees a CTE that exposes its columns.
+    if r.is_ok() {
+        if let Some(name) = cte.ctename.as_deref().map(|s| s.to_string()) {
+            propagate_recursive_cte_columns(mcx, pstate, &name, &cte)?;
+        }
+    }
+
     pstate.p_parent_cte = Some(cte);
     r
+}
+
+/// Copy the analyzed output-column metadata of a recursive CTE into the
+/// matching `p_ctenamespace` entry of `pstate` and every ancestor — the owned-
+/// model stand-in for C aliasing `p_parent_cte` with the namespace CTE pointer.
+fn propagate_recursive_cte_columns<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'mcx>,
+    name: &str,
+    cte: &types_nodes::rawnodes::CommonTableExpr<'mcx>,
+) -> PgResult<()> {
+    let mut cur: Option<&mut ParseState<'mcx>> = Some(pstate);
+    while let Some(ps) = cur {
+        for entry in ps.p_ctenamespace.iter_mut() {
+            if entry.ctename.as_deref() == Some(name) {
+                let mut ctecolnames: PgVec<'mcx, PgBox<'mcx, Node<'mcx>>> = PgVec::new_in(mcx);
+                ctecolnames
+                    .try_reserve(cte.ctecolnames.len())
+                    .map_err(|_| mcx.oom(cte.ctecolnames.len()))?;
+                for n in cte.ctecolnames.iter() {
+                    ctecolnames.push(mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
+                }
+                entry.ctecolnames = ctecolnames;
+                entry.ctecoltypes = mcx::slice_in(mcx, &cte.ctecoltypes)?;
+                entry.ctecoltypmods = mcx::slice_in(mcx, &cte.ctecoltypmods)?;
+                entry.ctecolcollations = mcx::slice_in(mcx, &cte.ctecolcollations)?;
+            }
+        }
+        cur = ps.parentParseState.as_deref_mut();
+    }
+    Ok(())
 }
 
 /// `exprType(node)` for a typed `Expr` — delegate to nodes-core.
