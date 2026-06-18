@@ -33,6 +33,7 @@ mod create;
 mod drop;
 mod f1_rename;
 mod helpers;
+mod mergeattr;
 mod oncommit;
 mod smallfns;
 mod truncate;
@@ -53,6 +54,7 @@ pub fn init_seams() {
     // validate, tablecmds.c:930-946). Declared as an outward seam from create.rs
     // but its body — the create-time reloptions transform — is F0-owned here.
     seam::transform_and_check_reloptions::set(create::transform_and_check_reloptions);
+    seam::merge_attributes::set(mergeattr::merge_attributes);
 
     seam::remove_relations::set(drop::remove_relations);
 
