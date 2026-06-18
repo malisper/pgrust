@@ -274,13 +274,15 @@ const EREPORT_PANIC_PREFIX: &str = "PGRUST-SQLSTATE:";
 fn install_ereport_panic_hook() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        // A string/&str payload is a recoverable hard error: either a structured
-        // `PGRUST-SQLSTATE:` ereport, or a generic seam-miss/`panic!` message
-        // that the main loop's catch_unwind now turns into a clean SQL ERROR.
-        // Either way the backtrace is noise — stay quiet. Non-string payloads
-        // are genuine programming errors and still print.
+        // A recoverable hard error payload: either a structured `PgError` value
+        // (the preferred channel — carries hint/detail/all ErrorData fields), a
+        // legacy `PGRUST-SQLSTATE:` string, or a generic seam-miss/`panic!`
+        // message. The main loop's catch_unwind turns all of these into a clean
+        // SQL ERROR, so the backtrace is noise — stay quiet. Any other payload is
+        // a genuine programming error and still prints.
         let _ = EREPORT_PANIC_PREFIX;
-        let is_handled_ereport = info.payload().downcast_ref::<String>().is_some()
+        let is_handled_ereport = info.payload().downcast_ref::<types_error::PgError>().is_some()
+            || info.payload().downcast_ref::<String>().is_some()
             || info.payload().downcast_ref::<&str>().is_some();
         if is_handled_ereport && std::env::var_os("PGRUST_PANIC_VERBOSE").is_none() {
             // Caught downstream and turned into a clean SQL ERROR: stay quiet.

@@ -413,12 +413,23 @@ fn invoke_pgfunction(func: &PGFunction, fcinfo: &mut FunctionCallInfoBaseData) -
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(fcinfo))) {
                 Ok(d) => Ok(d),
                 Err(payload) => {
+                    // Preferred channel: the *_v1 wrapper panicked with the full
+                    // structured `PgError` value. This carries every ErrorData
+                    // field (hint/detail/schema/column/...), exactly as C's
+                    // ereport longjmp preserves the whole errordata — no field is
+                    // lost crossing the bare-Datum PGFunction dispatch boundary.
+                    let payload = match payload.downcast::<PgError>() {
+                        Ok(err) => return Err(*err),
+                        Err(payload) => payload,
+                    };
+                    // Legacy string channel (a few sites still encode just
+                    // sqlstate + message as "PGRUST-SQLSTATE:XXXXX:<msg>"), and
+                    // generic `panic!("...")` seam-miss messages.
                     let msg = payload
                         .downcast_ref::<String>()
                         .cloned()
                         .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()));
                     match msg {
-                        // A structured *_v1 hard error: "PGRUST-SQLSTATE:XXXXX:<msg>".
                         Some(m) => match m.strip_prefix("PGRUST-SQLSTATE:") {
                             Some(rest) if rest.len() > 6 && rest.as_bytes()[5] == b':' => {
                                 let (code, msg) = rest.split_at(5);

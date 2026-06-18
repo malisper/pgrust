@@ -81,9 +81,7 @@ fn scratch_mcx() -> mcx::MemoryContext {
 /// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
 /// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
 fn raise(err: PgError) -> ! {
-    let chars = types_error::unpack_sqlstate(err.sqlstate());
-    let code = core::str::from_utf8(&chars).unwrap_or("XX000");
-    std::panic::panic_any(format!("PGRUST-SQLSTATE:{code}:{}", err.message()));
+    std::panic::panic_any(err);
 }
 
 /// Drive one `to_char(scalar, text)` overload: take the owned `text` format

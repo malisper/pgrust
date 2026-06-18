@@ -380,9 +380,7 @@ fn ret_u64(v: u64) -> Datum {
 /// message panic carrying the SQLSTATE and text, which the dispatcher rebuilds
 /// into the `PgResult` error C's `ereport` longjmp delivers.
 fn raise(err: types_error::PgError) -> ! {
-    let chars = types_error::unpack_sqlstate(err.sqlstate());
-    let code = core::str::from_utf8(&chars).unwrap_or("XX000");
-    std::panic::panic_any(format!("PGRUST-SQLSTATE:{code}:{}", err.message()));
+    std::panic::panic_any(err);
 }
 
 fn fc_hashchar(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
