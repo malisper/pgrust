@@ -335,9 +335,10 @@ fn StoreIndexTuple<'mcx>(
     // `index_deform_tuple` deforms the on-disk `xs_itup` byte image into the
     // per-attribute `(value, isnull)` pairs; the owned model returns them and
     // we write them into the slot's `tts_values`/`tts_isnull` via
-    // `store_virtual_values` (the clear + fill + ExecStoreVirtualTuple
-    // primitive). The AM-supplied `itupdesc` is used for the deform (not the
-    // slot's), in case datatypes differ (btree name_ops).
+    // `fill_virtual_values` (the clear + fill primitive, WITHOUT the
+    // `ExecStoreVirtualTuple` store — C does the store once at the end, after the
+    // name-cstring fixup). The AM-supplied `itupdesc` is used for the deform (not
+    // the slot's), in case datatypes differ (btree name_ops).
     {
         let mcx = estate.es_query_cxt;
         let scandesc = node.ioss_ScanDesc.as_ref().unwrap();
@@ -356,7 +357,7 @@ fn StoreIndexTuple<'mcx>(
             values.push(value.clone());
             isnull.push(*null);
         }
-        execTuples::store_virtual_values::call(estate, slot, values.as_slice(), isnull.as_slice())?;
+        execTuples::fill_virtual_values::call(estate, slot, values.as_slice(), isnull.as_slice())?;
     }
 
     // Copy all name columns stored as cstrings back into NAMEDATALEN-byte

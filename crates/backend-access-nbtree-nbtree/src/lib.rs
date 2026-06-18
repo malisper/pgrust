@@ -387,6 +387,13 @@ fn btbeginscan_am<'mcx>(
     // RelationGetIndexScan(): allocate the generic descriptor; opaque = NbtScan.
     let mut desc = relation_get_index_scan(mcx, index_relation, nkeys, norderbys)?;
     desc.opaque = Some(erase_nbtscan(mcx, nbtscan)?);
+    // C (nbtree.c:374): `scan->xs_itupdesc = RelationGetDescr(rel);` — set up the
+    // index's rowtype descriptor whether the scan turns out to be index-only or
+    // not (it's cheap). In C this is a borrowed pointer into the relcache entry;
+    // the owned model carries an `Option<Box<TupleDescData>>`, so clone the
+    // relation's descriptor into the scan's memory context. Index-only scans
+    // (StoreIndexTuple) deform `xs_itup` against this descriptor.
+    desc.xs_itupdesc = Some(std::boxed::Box::new(index_relation.rd_att.clone_in(mcx)?));
     Ok(desc)
 }
 

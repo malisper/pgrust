@@ -425,6 +425,24 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecClearTuple(slot); index_deform_tuple(itup, itupdesc,
+    /// slot->tts_values, slot->tts_isnull)` (nodeIndexonlyscan.c StoreIndexTuple,
+    /// genam.c index_deform_tuple): clear the slot and write the deformed
+    /// per-column `values`/`isnull` into its `tts_values`/`tts_isnull` payload —
+    /// WITHOUT marking it as a stored virtual tuple. Unlike [`store_virtual_values`]
+    /// this does NOT call `ExecStoreVirtualTuple`, because the IndexOnlyScan caller
+    /// performs an intervening name-cstring fixup and a single trailing
+    /// `ExecStoreVirtualTuple` (matching C). Targets the slot by pool id. Fallible
+    /// on the slot-ops `ereport(ERROR)` paths.
+    pub fn fill_virtual_values<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        slot: types_nodes::SlotId,
+        values: &[types_tuple::backend_access_common_heaptuple::Datum<'mcx>],
+        isnull: &[bool],
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ExecTypeFromExprList(exprList)` (execTuples.c): build a `TupleDesc` (a
     /// RECORD type, no column names) describing the result types of a bare list
     /// of expressions. Used to derive a Memoize node's `hashkeydesc` from its

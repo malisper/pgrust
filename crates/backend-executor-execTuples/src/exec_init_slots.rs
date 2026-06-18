@@ -623,6 +623,31 @@ fn seam_store_virtual_values<'mcx>(
     crate::slot_store_fetch::ExecStoreVirtualTuple(slot_data)
 }
 
+/// Seam `fill_virtual_values` — clear the slot and write the per-column
+/// `values`/`isnull` payload WITHOUT storing it as a virtual tuple. Mirrors the
+/// C `ExecClearTuple(slot); index_deform_tuple(itup, itupdesc, slot->tts_values,
+/// slot->tts_isnull)` in `StoreIndexTuple` (the trailing `ExecStoreVirtualTuple`
+/// is a separate, single call the caller makes after the name-cstring fixup).
+fn seam_fill_virtual_values<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    slot: SlotId,
+    values: &[Datum<'mcx>],
+    isnull: &[bool],
+) -> PgResult<()> {
+    let slot_data = estate.slot_data_mut(slot);
+    // ExecClearTuple(slot);
+    crate::slot_store_fetch::ExecClearTuple(slot_data)?;
+    // index_deform_tuple writes into slot->tts_values / slot->tts_isnull.
+    let base = slot_data.base_mut();
+    for (i, v) in values.iter().enumerate() {
+        base.tts_values[i] = v.clone();
+    }
+    for (i, n) in isnull.iter().enumerate() {
+        base.tts_isnull[i] = *n;
+    }
+    Ok(())
+}
+
 /// Seam `exec_copy_slot_heap_tuple` — `ExecCopySlotHeapTuple` (returns the
 /// owned [`FormedTuple`] carrier copied in the per-query context).
 fn seam_exec_copy_slot_heap_tuple<'mcx>(
@@ -970,6 +995,7 @@ pub fn init_seams() {
     seams::exec_store_virtual_tuple::set(seam_exec_store_virtual_tuple);
     seams::exec_store_first_datum::set(seam_exec_store_first_datum);
     seams::store_virtual_values::set(seam_store_virtual_values);
+    seams::fill_virtual_values::set(seam_fill_virtual_values);
     seams::exec_copy_slot_heap_tuple::set(seam_exec_copy_slot_heap_tuple);
     seams::exec_force_store_formed_heap_tuple::set(seam_exec_force_store_formed_heap_tuple);
     // nodeSubplan curTuple copy + read (SubPlanState.curTuple is the owned
