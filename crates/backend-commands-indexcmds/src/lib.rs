@@ -935,7 +935,12 @@ pub fn init_seams() {
     // makeObjectName(name1, name2, label) — name2/label are non-null at the
     // pg_constraint call sites (ChooseConstraintName), matching the &str seam.
     backend_commands_indexcmds_seams::make_object_name::set(|name1, name2, label| {
-        choosers::makeObjectName(name1, Some(name2), Some(label))
+        // The seam flattens C's `const char *name2` (which may be NULL) to `&str`;
+        // an empty `name2` is the NULL case (callers like `ChooseConstraintName`
+        // for a domain constraint pass NULL → empty here), so the separating
+        // underscore is omitted, matching C `makeObjectName(name1, NULL, label)`.
+        let name2 = if name2.is_empty() { None } else { Some(name2) };
+        choosers::makeObjectName(name1, name2, Some(label))
     });
 
     // GetDefaultOpClass(type_id, am_id) lives in indexcmds.c; the canonical

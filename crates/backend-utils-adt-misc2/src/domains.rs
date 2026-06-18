@@ -34,13 +34,18 @@
 //! * **syscache / lsyscache**: the `errdatatype` diagnostic lookups
 //!   (`SearchSysCache1(TYPEOID)` + `get_namespace_name`).
 
+use backend_utils_cache_syscache_seams as syscache_seams;
 use backend_utils_cache_typcache_seams as typcache_seams;
 use backend_utils_fmgr_fmgr_seams as fmgr_seams;
 use mcx::{Mcx, MemoryContext};
-use types_cache::typcache::DomainCtxHandle;
+use types_cache::typcache::{DomainCtxHandle, DomainLevelScan};
+use types_core::Oid;
 use types_error::{PgError, PgResult};
 use types_nodes::primnodes::Expr;
 use types_tuple::backend_access_common_heaptuple::Datum;
+
+/// `TYPTYPE_DOMAIN` (`pg_type.h`).
+const TYPTYPE_DOMAIN: i8 = b'd' as i8;
 
 /// `domain_in(string, typioparam, typmod)` — FmgrInfo entrypoint.
 ///
@@ -236,4 +241,26 @@ pub fn plan_check_expr(conbin: &str, _ctx: DomainCtxHandle) -> PgResult<Expr> {
     let planned = backend_optimizer_plan_planner_pc_seams::expression_planner_value::call(mcx, expr)?;
 
     Ok(planned)
+}
+
+/// One level of `load_domaintype_info`'s domain-stack crawl (typcache.c:1126):
+/// `tup = SearchSysCache1(TYPEOID, typeOid)` (`elog(ERROR, "cache lookup failed
+/// for type %u")` when missing) then reading `typtype` / `typnotnull` /
+/// `typbasetype` from the `Form_pg_type`. `is_domain` is `typtype ==
+/// TYPTYPE_DOMAIN`; when false the typcache stops crawling. Installed here
+/// (alongside the other domain-constraint seams) because `domains.c` is the
+/// natural home of the domain machinery and reaches the `pg_type` syscache
+/// projection through its thin seam crate without a cycle.
+pub fn lookup_domain_type_level(type_id: Oid) -> PgResult<DomainLevelScan> {
+    // SearchSysCache1(TYPEOID, ObjectIdGetDatum(typeOid)); the projection seam
+    // returns None on !HeapTupleIsValid so we raise the C elog(ERROR).
+    let form = syscache_seams::pg_type_form::call(type_id)?.ok_or_else(|| {
+        PgError::error(alloc::format!("cache lookup failed for type {type_id}"))
+    })?;
+
+    Ok(DomainLevelScan {
+        is_domain: form.typtype == TYPTYPE_DOMAIN,
+        typnotnull: form.typnotnull,
+        typbasetype: form.typbasetype,
+    })
 }

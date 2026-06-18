@@ -67,6 +67,12 @@ pub fn init_seams() {
     // installed by those owners; `exec_init_expr` in particular is still blocked
     // on EState-less `ExecInitExpr` substrate.
     backend_utils_adt_domains_seams::plan_check_expr::set(domains::plan_check_expr);
+    // The per-level `SearchSysCache1(TYPEOID)` projection that drives the
+    // domain-stack crawl (typtype/typnotnull/typbasetype). Reached through the
+    // pg_type syscache seam; no cycle.
+    backend_utils_adt_domains_seams::lookup_domain_type_level::set(
+        domains::lookup_domain_type_level,
+    );
 
     // regproc.c printable-name / name-parsing helpers (owned seam crate
     // `backend-utils-adt-regproc-seams`). `format_procedure`/`format_operator`

@@ -18,6 +18,8 @@ pub const ConstraintNameNspIndexId: Oid = 2664;
 /// `ConstraintRelidTypidNameIndexId` —
 /// `pg_constraint_conrelid_contypid_conname_index` (OID 2665).
 pub const ConstraintRelidTypidNameIndexId: Oid = 2665;
+/// `ConstraintTypidIndexId` — `pg_constraint_contypid_index` (OID 2666).
+pub const ConstraintTypidIndexId: Oid = 2666;
 
 /* ==========================================================================
  * Constraint type codes (pg_constraint.h).

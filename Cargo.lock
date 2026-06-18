@@ -8684,6 +8684,7 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-acl",
+ "types-cache",
  "types-core",
  "types-datum",
  "types-error",

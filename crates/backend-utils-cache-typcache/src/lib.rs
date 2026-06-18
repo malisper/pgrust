@@ -475,6 +475,67 @@ thread_local! {
     static STATE: RefCell<Option<McxOwned<TypCacheStateTy>>> = const { RefCell::new(None) };
 }
 
+thread_local! {
+    /// Backend-local registry of the "Domain constraints" / ref memory contexts
+    /// reached through the [`DomainCtxHandle`] opacity. C creates each with
+    /// `AllocSetContextCreate` and frees it with `MemoryContextDelete`; here a
+    /// `DomainCtxHandle` is a slab key and the owned [`MemoryContext`] lives in
+    /// the slab until `delete_domain_ctx` removes it (firing the reset callbacks,
+    /// exactly like C's `MemoryContextDelete`). Handle `0` is reserved NULL.
+    static DOMAIN_CTXS: RefCell<std::collections::HashMap<u64, MemoryContext>> =
+        RefCell::new(std::collections::HashMap::new());
+    /// Monotonic handle counter (never 0, so `0` stays a NULL sentinel).
+    static DOMAIN_CTX_NEXT: Cell<u64> = const { Cell::new(1) };
+}
+
+/// `AllocSetContextCreate(CurrentMemoryContext, "Domain constraints", ...)` — the
+/// `create_domain_ctx` seam. Mints a fresh malloc-backed context, registers it
+/// in the slab under a fresh non-zero handle, and returns that handle.
+fn create_domain_ctx() -> PgResult<DomainCtxHandle> {
+    let handle = DOMAIN_CTX_NEXT.with(|n| {
+        let h = n.get();
+        n.set(h + 1);
+        h
+    });
+    let ctx = MemoryContext::new("Domain constraints");
+    DOMAIN_CTXS.with(|m| m.borrow_mut().insert(handle, ctx));
+    Ok(DomainCtxHandle(handle))
+}
+
+/// `MemoryContextSetParent(ctx, CacheMemoryContext)` — the
+/// `set_parent_to_cache_context` seam. C reparents the domain context under
+/// `CacheMemoryContext` so it lives at cache lifetime; the slab already keeps the
+/// context alive at backend lifetime (it is only dropped by `delete_domain_ctx`),
+/// so reparenting is a no-op in the owned model. We assert the handle is live.
+fn set_parent_to_cache_context(ctx: DomainCtxHandle) -> PgResult<()> {
+    let exists = DOMAIN_CTXS.with(|m| m.borrow().contains_key(&ctx.0));
+    debug_assert!(exists, "set_parent_to_cache_context: unknown DomainCtxHandle");
+    Ok(())
+}
+
+/// `MemoryContextDelete(ctx)` — the `delete_domain_ctx` seam. Removes the context
+/// from the slab; dropping the owned [`MemoryContext`] fires its registered reset
+/// callbacks LIFO (the C `MemoryContextDelete` callback firing), which is how a
+/// ref's `dccref_deletion_callback` releases its refcount.
+fn delete_domain_ctx(ctx: DomainCtxHandle) -> PgResult<()> {
+    DOMAIN_CTXS.with(|m| m.borrow_mut().remove(&ctx.0));
+    Ok(())
+}
+
+/// `MemoryContextRegisterResetCallback(refctx, dccref_deletion_callback)` — the
+/// `register_ref_reset_callback` seam. Arranges for
+/// [`release_domain_constraint_ref`] to run when `refctx` is reset/deleted.
+fn register_ref_reset_callback(refctx: DomainCtxHandle, ref_token: u64) -> PgResult<()> {
+    DOMAIN_CTXS.with(|m| {
+        let map = m.borrow();
+        let ctx = map.get(&refctx.0).ok_or_else(|| {
+            PgError::error("register_ref_reset_callback: unknown DomainCtxHandle")
+        })?;
+        ctx.register_reset_callback(move || release_domain_constraint_ref(ref_token));
+        Ok(())
+    })
+}
+
 /// Run `f` over the backend-local typcache state, creating it on first use.
 /// Catalog/seam reads happen OUTSIDE this borrow so an invalidation callback
 /// fired mid-read can take the state.
@@ -2645,6 +2706,21 @@ pub fn domain_has_constraints(type_id: Oid) -> PgResult<bool> {
     Ok(with_state(|st| st.entry(type_id).domain_data.is_some()))
 }
 
+/// `InitDomainConstraintRef(type_id, ..., need_exprstate=false)` reduced to the
+/// constraint list `ExecInitCoerceToDomain` bakes into the `ExprState`: load the
+/// typcache `DOMAIN_CONSTRAINT_INFO` and clone out the parent-first constraint
+/// list (`constrainttype` / `name` / planned `check_expr`). The executor
+/// compiles each `check_expr` itself, so no `ExprState` is produced here.
+pub fn domain_constraint_list(type_id: Oid) -> PgResult<Vec<DomainConstraintState>> {
+    lookup_type_cache(type_id, TYPECACHE_DOMAIN_CONSTR_INFO)?;
+    Ok(with_state(|st| {
+        match &st.entry(type_id).domain_data {
+            Some(dcc) => dcc.constraints.clone(),
+            None => Vec::new(),
+        }
+    }))
+}
+
 /// `domain_state_setup`'s typcache half (utils/adt/domains.c). Mirrors the C:
 /// `lookup_type_cache(domainType, TYPECACHE_DOMAIN_BASE_INFO)` (which throws a
 /// clean user-facing error for a bad OID and caches the base-type info), the
@@ -3215,6 +3291,7 @@ pub fn init_seams() {
     backend_utils_cache_typcache_seams::compare_values_of_enum::set(compare_values_of_enum);
     backend_utils_cache_typcache_seams::type_cache_typtype::set(type_cache_typtype_seam);
     backend_utils_cache_typcache_seams::domain_has_constraints::set(domain_has_constraints);
+    backend_utils_cache_typcache_seams::domain_constraint_list::set(domain_constraint_list);
     backend_utils_cache_typcache_seams::sort_group_operators::set(sort_group_operators);
     backend_utils_cache_typcache_seams::lookup_rowtype_tupdesc::set(lookup_rowtype_tupdesc);
     backend_utils_cache_typcache_seams::assign_record_type_typmod::set(assign_record_type_typmod);
@@ -3263,6 +3340,15 @@ pub fn init_seams() {
     // errors live here; per-CHECK ExecCheck crosses the (substrate-blocked)
     // domains domain_check_exec seam.
     backend_utils_cache_typcache_seams::domain_check_input::set(domain_check_input);
+    // The "Domain constraints" memory-context lifecycle reached by
+    // load_domaintype_info / InitDomainConstraintRef. Owned here because the
+    // typcache owns the DomainConstraintCache lifetime + release_domain_constraint_ref
+    // (the reset callback target), so no cycle: the contexts are a backend-local
+    // slab keyed by DomainCtxHandle.
+    domains_seams::create_domain_ctx::set(create_domain_ctx);
+    domains_seams::set_parent_to_cache_context::set(set_parent_to_cache_context);
+    domains_seams::delete_domain_ctx::set(delete_domain_ctx);
+    domains_seams::register_ref_reset_callback::set(register_ref_reset_callback);
     // rowtypes.c per-column compare/eq/hash steps (typcache lookup + fmgr
     // invoke). The record ADT (backend-utils-adt-misc2) calls these.
     backend_utils_cache_typcache_seams::record_column_cmp::set(record_column_cmp);

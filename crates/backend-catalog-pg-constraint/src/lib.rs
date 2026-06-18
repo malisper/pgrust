@@ -35,6 +35,7 @@ use types_catalog::pg_constraint::{
     Anum_pg_constraint_contypid, Anum_pg_constraint_convalidated, Anum_pg_constraint_oid,
     ConKeyArray, ConstraintCategory, ConstraintFieldUpdate, FormData_pg_constraint, OidArray,
     PgConstraintInsertRow, ConstraintNameNspIndexId, ConstraintRelidTypidNameIndexId,
+    ConstraintTypidIndexId,
     CONSTRAINT_CHECK, CONSTRAINT_EXCLUSION, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL,
     CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, OID_MULTIRANGE_INTERSECT_MULTIRANGE_OP,
     OID_RANGE_INTERSECT_RANGE_OP,
@@ -59,6 +60,7 @@ use types_tuple::heaptuple::{
 };
 
 use backend_access_common_heaptuple::heap_deform_tuple;
+use types_cache::typcache::DomainCheckConstraintRow;
 use backend_access_common_scankey::ScanKeyInit;
 use backend_access_index_genam_seams as genam_seams;
 use backend_access_table_table as table;
@@ -2284,6 +2286,90 @@ fn find_domain_check_constraint(
     Ok(result)
 }
 
+/// `scan_domain_check_constraints` — the per-level `pg_constraint` CHECK scan of
+/// `load_domaintype_info` (typcache.c:1145-1167). Opens `pg_constraint`,
+/// `ScanKeyInit(Anum_pg_constraint_contypid == type_id)`,
+/// `systable_beginscan(conRel, ConstraintTypidIndexId, ...)`, and for every
+/// matching row keeps only CHECK constraints (`c->contype == CONSTRAINT_CHECK`),
+/// raising on a NULL `conbin` (`elog(ERROR, "... has NULL conbin")`), and
+/// returning each CHECK's `conname` plus its `conbin` node-string
+/// (`TextDatumGetCString(val)`) in scan (index) order. The typcache plans each
+/// (`stringToNode` + `expression_planner`), sorts by name, and orders
+/// parent-first; this seam only does the catalog read. Owned here because
+/// `pg_constraint.c` can do the systable scan without a cycle (the typcache
+/// reaches it through `backend-utils-adt-domains-seams`).
+fn scan_domain_check_constraints(type_id: Oid) -> PgResult<Vec<DomainCheckConstraintRow>> {
+    let con_ctx = MemoryContext::new("pg_constraint");
+    let conrel = table::table_open(con_ctx.mcx(), CONSTRAINT_RELATION_ID, AccessShareLock)?;
+
+    let skey = [oid_key(Anum_pg_constraint_contypid, type_id)?];
+
+    let mut rows: Vec<DomainCheckConstraintRow> = Vec::new();
+
+    // One scratch context for the whole scan: the genam scan's internal tuple
+    // slot materializes each fetched tuple into the context passed to
+    // `systable_getnext`, and that slot is only dropped at `scan.end()`. A
+    // per-iteration context (dropped each loop turn) would free the slot's last
+    // tuple out from under the end-of-scan slot teardown (use-after-free in
+    // ExecDropSingleTupleTableSlot). The single context lives until after
+    // `scan.end()` returns, so the slot's storage is valid through teardown.
+    let scratch = MemoryContext::new("pg_constraint scan row");
+    let smcx = scratch.mcx();
+    let mut scan =
+        genam_seams::systable_beginscan::call(&conrel, ConstraintTypidIndexId, true, None, &skey)?;
+    let mut null_conbin_name: Option<String> = None;
+    loop {
+        let Some(tup) = genam_seams::systable_getnext::call(smcx, scan.desc_mut())? else {
+            break;
+        };
+        let cols = heap_deform_tuple(smcx, &tup.tuple, &conrel.rd_att, &tup.data)?;
+        let mut values: PgVec<'_, Datum<'_>> = mcx::vec_with_capacity_in(smcx, cols.len())?;
+        let mut conbin_is_null = true;
+        for (i, (value, null)) in cols.iter().enumerate() {
+            values.push(value.clone());
+            if i == Anum_pg_constraint_conbin as usize - 1 {
+                conbin_is_null = *null;
+            }
+        }
+        let form = form_pg_constraint(&values);
+
+        /* Ignore non-CHECK constraints. */
+        if form.contype != CONSTRAINT_CHECK {
+            continue;
+        }
+
+        /* Not expecting conbin to be NULL, but we'll test for it anyway. */
+        if conbin_is_null {
+            null_conbin_name = Some(name_str(&form.conname).to_string());
+            break;
+        }
+
+        /* Convert conbin to a C string (TextDatumGetCString). */
+        let conbin_datum = &values[Anum_pg_constraint_conbin as usize - 1];
+        let conbin = varlena_seams::text_to_cstring_v::call(smcx, conbin_datum)?
+            .as_str()
+            .to_string();
+
+        rows.push(DomainCheckConstraintRow {
+            conname: name_str(&form.conname).to_string(),
+            conbin,
+        });
+    }
+
+    scan.end()?;
+    conrel.close(AccessShareLock)?;
+
+    if let Some(conname) = null_conbin_name {
+        return Err(PgError::error(format!(
+            "domain \"{}\" constraint \"{}\" has NULL conbin",
+            format_type_seams::format_type_be_str::call(type_id)?,
+            conname,
+        )));
+    }
+
+    Ok(rows)
+}
+
 /// `copy_con->convalidated = true; CatalogTupleUpdate` for the constraint OID
 /// (the catalog-write half of `AlterDomainValidateConstraint`,
 /// typecmds.c:3106). Reads the existing row by OID and re-stores it with
@@ -2330,6 +2416,12 @@ pub fn init_seams() {
     seams::find_domain_check_constraint::set(|mcx, domainoid, constr_name| {
         find_domain_check_constraint(mcx, domainoid, constr_name)
     });
+    // typcache's load_domaintype_info domain-stack CHECK scan (the
+    // ConstraintTypidIndexId systable scan over contypid). The typcache reaches
+    // it through backend-utils-adt-domains-seams.
+    backend_utils_adt_domains_seams::scan_domain_check_constraints::set(
+        scan_domain_check_constraints,
+    );
     seams::set_constraint_validated::set(set_constraint_validated);
     seams::alter_constraint_namespaces::set(
         |_mcx, owner_id, old_nsp, new_nsp, is_type, objs_moved| {

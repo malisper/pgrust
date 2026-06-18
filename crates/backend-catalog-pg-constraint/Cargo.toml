@@ -20,6 +20,7 @@ backend-catalog-pg-constraint-seams = { path = "../backend-catalog-pg-constraint
 backend-catalog-pg-depend-seams = { path = "../backend-catalog-pg-depend-seams" }
 backend-commands-indexcmds-seams = { path = "../backend-commands-indexcmds-seams" }
 backend-nodes-core = { path = "../backend-nodes-core" }
+backend-utils-adt-domains-seams = { path = "../backend-utils-adt-domains-seams" }
 backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
 backend-utils-cache-inval-pc-seams = { path = "../backend-utils-cache-inval-pc-seams" }
@@ -28,6 +29,7 @@ backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-s
 backend-utils-adt-ri-triggers-seams = { path = "../backend-utils-adt-ri-triggers-seams" }
 mcx = { path = "../mcx" }
 types-amapi = { path = "../types-amapi" }
+types-cache = { path = "../types-cache" }
 types-catalog = { path = "../types-catalog" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }

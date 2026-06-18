@@ -480,3 +480,19 @@ seam_core::seam!(
         type_id: types_core::primitive::Oid,
     ) -> types_error::PgResult<bool>
 );
+
+seam_core::seam!(
+    /// `InitDomainConstraintRef(type_id, ref, ctx, need_exprstate=false)`
+    /// (typcache.c) — the constraint list `ExecInitCoerceToDomain` bakes into the
+    /// `ExprState`. Loads the typcache entry (`TYPECACHE_DOMAIN_CONSTRAINT_INFO`),
+    /// returning each constraint's `constrainttype` / `name` / planned CHECK
+    /// `check_expr` (the executor compiles `check_expr` itself via
+    /// `ExecInitExprRec`, so `need_exprstate` is false and no executor
+    /// `ExprState` is produced here). Parent-first ordering as the typcache
+    /// emits it. `Err` carries the cache-load surface.
+    pub fn domain_constraint_list(
+        type_id: types_core::primitive::Oid,
+    ) -> types_error::PgResult<
+        std::vec::Vec<types_cache::typcache::DomainConstraintState>,
+    >
+);
