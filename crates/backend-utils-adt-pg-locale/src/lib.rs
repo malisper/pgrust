@@ -41,6 +41,7 @@ use types_error::{
 };
 
 pub mod cache;
+pub mod chklocale;
 pub mod dispatch;
 pub mod libc_provider;
 pub mod localeconv;
@@ -174,6 +175,13 @@ pub fn init_seams() {
     seams::localized_full_days::set(localeconv::localized_full_days);
     seams::localized_abbrev_days::set(localeconv::localized_abbrev_days);
 
+    // `pg_get_encoding_from_locale` (chklocale.c) is the lone remaining
+    // encoding-env seam owned outside mbutils (which installs
+    // set_message_encoding/pg_any_to_server). Install the chklocale owner here.
+    backend_utils_adt_pg_locale_env_seams::pg_get_encoding_from_locale::set(|locale| {
+        chklocale::pg_get_encoding_from_locale(locale)
+    });
+
     // The `pg_wc_*` probe seams (regc_pg_locale.c) reach the locale's provider
     // `info` union, which this crate's permanent cache owns; the regex engine
     // keeps only the C-strategy hard-wired. Install the non-C-strategy legs here
@@ -268,6 +276,25 @@ mod tests {
         assert_eq!(builtin_locale_encoding("PG_UNICODE_FAST").unwrap(), PG_UTF8);
         let err = builtin_locale_encoding("en_US").unwrap_err();
         assert_eq!(err.sqlstate(), ERRCODE_WRONG_OBJECT_TYPE);
+    }
+
+    #[test]
+    fn chklocale_encoding_from_locale() {
+        use crate::chklocale::pg_get_encoding_from_locale;
+        // C / POSIX allow any encoding -> PG_SQL_ASCII (0).
+        assert_eq!(pg_get_encoding_from_locale("C").unwrap(), 0);
+        assert_eq!(pg_get_encoding_from_locale("POSIX").unwrap(), 0);
+        // Case-insensitive (pg_strcasecmp("c"/"posix")).
+        assert_eq!(pg_get_encoding_from_locale("c").unwrap(), 0);
+        // A UTF-8 locale resolves to PG_UTF8 (6). Both "C.UTF-8" (glibc) and an
+        // empty-CODESET locale on macOS land on UTF-8 via the special-case kluge;
+        // this locale is present on both CI hosts.
+        assert_eq!(pg_get_encoding_from_locale("C.UTF-8").unwrap(), PG_UTF8);
+        // A bogus ctype -> newlocale fails -> -1.
+        assert_eq!(
+            pg_get_encoding_from_locale("this_is_not_a_real_locale.bogus").unwrap(),
+            -1
+        );
     }
 
     #[test]

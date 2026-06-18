@@ -18809,12 +18809,14 @@ dependencies = [
  "common-string",
  "libc",
  "mcx",
+ "port-pgstrcasecmp",
  "types-cash",
  "types-core",
  "types-error",
  "types-guc",
  "types-locale",
  "types-tuple",
+ "types-wchar",
 ]
 
 [[package]]
