@@ -37,7 +37,7 @@ use crate::primnodes::{
 
 // Shared copy helpers live in `rawnodes`; re-use them here to keep the uniform
 // `copyObject` shape (deep-copy onto a target `mcx`).
-use crate::rawnodes::{copy_node_vec, copy_opt_node, copy_opt_str};
+use crate::rawnodes::{copy_node_vec, copy_opt_node, copy_opt_str, TypeName};
 
 /// `BoolExpr` (`nodes/primnodes.h`) — AND/OR/NOT over raw `Node *` arguments.
 ///
@@ -467,6 +467,40 @@ pub struct XmlExpr<'mcx> {
     pub typmod: i32,
     /// `ParseLoc location`.
     pub location: i32,
+}
+
+/// `XmlSerialize` (nodes/parsenodes.h:868) — the raw-grammar representation of
+/// an `XMLSERIALIZE(... AS type)` expression. Transformed by
+/// `transformXmlSerialize` (parse_expr.c) into a cooked `XmlExpr` wrapped in a
+/// coercion to the target type.
+#[derive(Debug)]
+pub struct XmlSerialize<'mcx> {
+    /// `XmlOptionType xmloption` — DOCUMENT or CONTENT.
+    pub xmloption: XmlOptionType,
+    /// `Node *expr` — the value expression to serialize.
+    pub expr: Option<NodePtr<'mcx>>,
+    /// `TypeName *typeName` — the target SQL type (`AS <type>`).
+    pub type_name: Option<mcx::PgBox<'mcx, TypeName<'mcx>>>,
+    /// `bool indent` — `[NO] INDENT`.
+    pub indent: bool,
+    /// `ParseLoc location`.
+    pub location: i32,
+}
+
+impl XmlSerialize<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` over `XmlSerialize`).
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<XmlSerialize<'b>> {
+        Ok(XmlSerialize {
+            xmloption: self.xmloption,
+            expr: copy_opt_node(&self.expr, mcx)?,
+            type_name: match &self.type_name {
+                Some(t) => Some(mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
+                None => None,
+            },
+            indent: self.indent,
+            location: self.location,
+        })
+    }
 }
 
 impl XmlExpr<'_> {

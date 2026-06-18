@@ -13029,6 +13029,7 @@ dependencies = [
  "backend-parser-small1",
  "backend-parser-small1-seams",
  "backend-utils-adt-format-type",
+ "backend-utils-adt-xml",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-error",
  "backend-utils-init-small-seams",

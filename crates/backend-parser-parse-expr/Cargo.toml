@@ -43,6 +43,7 @@ backend-parser-parse-oper = { path = "../backend-parser-parse-oper" }
 backend-parser-parse-type = { path = "../backend-parser-parse-type" }
 backend-parser-parse-collate = { path = "../backend-parser-parse-collate" }
 backend-utils-adt-format-type = { path = "../backend-utils-adt-format-type" }
+backend-utils-adt-xml = { path = "../backend-utils-adt-xml" }
 
 # Sibling parser owners now landed (downward calls; they depend only on
 # backend-parser-parse-expr-seams, so these impl deps stay cycle-free).

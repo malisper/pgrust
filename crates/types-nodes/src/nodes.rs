@@ -566,6 +566,8 @@ pub enum Node<'mcx> {
     SQLValueFunction(crate::rawexprnodes::SQLValueFunction),
     /// `T_XmlExpr` (raw).
     XmlExpr(crate::rawexprnodes::XmlExpr<'mcx>),
+    /// `T_XmlSerialize` (raw).
+    XmlSerialize(crate::rawexprnodes::XmlSerialize<'mcx>),
     // --- value nodes (nodes/value.h) — leaf literals ---
     // The lexer/grammar emits these `Value`-family leaves (`A_Const.val`,
     // operator-name `list_make1(makeString(name))`, etc.) as `Node *`, so they
@@ -1041,6 +1043,7 @@ impl<'mcx> Node<'mcx> {
             Node::NamedArgExpr(_) => T_NamedArgExpr,
             Node::SQLValueFunction(_) => T_SQLValueFunction,
             Node::XmlExpr(_) => T_XmlExpr,
+            Node::XmlSerialize(_) => T_XmlSerialize,
             Node::Integer(_) => T_Integer,
             Node::Float(_) => T_Float,
             Node::Boolean(_) => T_Boolean,
@@ -1416,6 +1419,7 @@ impl<'mcx> Node<'mcx> {
             Node::NamedArgExpr(n) => Ok(Node::NamedArgExpr(n.clone_in(mcx)?)),
             Node::SQLValueFunction(s) => Ok(Node::SQLValueFunction(s.clone_in(mcx)?)),
             Node::XmlExpr(x) => Ok(Node::XmlExpr(x.clone_in(mcx)?)),
+            Node::XmlSerialize(x) => Ok(Node::XmlSerialize(x.clone_in(mcx)?)),
             // Value nodes (nodes/value.h) — real per-struct `copyObject`.
             Node::Integer(i) => Ok(Node::Integer(i.clone_in(mcx)?)),
             Node::Float(f) => Ok(Node::Float(f.clone_in(mcx)?)),
@@ -1621,6 +1625,7 @@ const T_CoalesceExpr: NodeTag = NodeTag(38);
 const T_MinMaxExpr: NodeTag = NodeTag(39);
 const T_SQLValueFunction: NodeTag = NodeTag(40);
 const T_XmlExpr: NodeTag = NodeTag(41);
+const T_XmlSerialize: NodeTag = NodeTag(95);
 const T_JsonValueExpr: NodeTag = NodeTag(44);
 const T_JsonConstructorExpr: NodeTag = NodeTag(45);
 const T_JsonIsPredicate: NodeTag = NodeTag(46);

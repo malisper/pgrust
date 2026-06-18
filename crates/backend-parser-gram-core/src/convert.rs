@@ -287,6 +287,7 @@ pub fn convert_node<'mcx>(mcx: Mcx<'mcx>, n: *mut RawNode) -> PgResult<Node<'mcx
             Ok(Node::SQLValueFunction(conv_sqlvaluefunction(n.cast())))
         }
         tags::T_XmlExpr => Ok(Node::XmlExpr(conv_xmlexpr(mcx, n.cast())?)),
+        tags::T_XmlSerialize => Ok(Node::XmlSerialize(conv_xmlserialize(mcx, n.cast())?)),
 
         // --- DDL "CREATE" family (F2): supporting / helper nodes ---
         tags::T_RoleSpec => Ok(Node::RoleSpec(conv_rolespec(mcx, n.cast())?)),

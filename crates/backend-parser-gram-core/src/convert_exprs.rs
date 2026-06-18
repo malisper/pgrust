@@ -249,6 +249,20 @@ fn conv_xmlexpr<'mcx>(mcx: Mcx<'mcx>, p: *mut cpr::XmlExpr) -> PgResult<tn_re::X
     })
 }
 
+fn conv_xmlserialize<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cp::XmlSerialize,
+) -> PgResult<tn_re::XmlSerialize<'mcx>> {
+    let e = unsafe { &*p };
+    Ok(tn_re::XmlSerialize {
+        xmloption: xml_option_type(e.xmloption),
+        expr: node_opt(mcx, e.expr)?,
+        type_name: child_opt(mcx, e.type_name, conv_typename)?,
+        indent: e.indent,
+        location: e.location,
+    })
+}
+
 // --- small-enum discriminant mappers for the raw `Expr`-deriving nodes ---
 
 fn bool_expr_type(v: cpr::BoolExprType) -> tn_prim::BoolExprType {
