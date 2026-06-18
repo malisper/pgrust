@@ -12,12 +12,15 @@
 //! RETURNING are follow-on work and panic loudly until their substrate lands.
 
 use mcx::{Mcx, PgVec};
-use types_error::PgResult;
+use types_core::{InvalidOid, Oid};
+use types_error::{PgResult, ERRCODE_SYNTAX_ERROR, ERROR};
 use types_nodes::copy_query::Query;
-use types_nodes::nodes::{CmdType, Node};
+use types_nodes::nodes::{CmdType, Node, NodePtr};
 use types_nodes::parsestmt::{ParseExprKind, ParseState};
 use types_nodes::primnodes::Expr;
 use types_nodes::rawnodes::{InsertStmt, ResTarget, SelectStmt};
+
+use backend_utils_error::ereport;
 
 use crate::elog_error;
 
@@ -111,35 +114,33 @@ pub fn transformInsertStmt<'mcx>(
     } else {
         let s = select_stmt.unwrap();
         if s.valuesLists.len() > 1 {
-            // The multi-row VALUES branch builds a VALUES RTE, which is blocked
-            // on the List-carrier RTE keystone (addRangeTableEntryForValues).
-            return Err(elog_error(
-                "INSERT ... VALUES with multiple rows builds a VALUES RTE, which is \
-                 blocked on the List-carrier RTE keystone (analyze.c:830, \
-                 addRangeTableEntryForValues)",
-            ));
+            // INSERT ... VALUES with multiple sublists: generate a VALUES RTE
+            // holding the transformed expression lists, and build a targetlist
+            // of Vars referencing it (analyze.c:825).
+            transformInsertMultiRowValues(mcx, pstate, s, stmt, &icolumns, &attrnos)?
+        } else {
+            // INSERT ... VALUES with a single sublist: treat it like a SELECT
+            // with no FROM — the sublist becomes the targetlist directly, no
+            // VALUES RTE.
+            debug_assert!(s.intoClause.is_none());
+            let sublist = match s.valuesLists.first().map(|n| n.as_ref()) {
+                Some(Node::List(items)) => items,
+                _ => return Err(elog_error("INSERT single VALUES sublist is not a List")),
+            };
+            let mut sublist_owned = mcx::vec_with_capacity_in(mcx, sublist.len())?;
+            for item in sublist.iter() {
+                sublist_owned.push(mcx::alloc_in(mcx, item.clone_in(mcx)?)?);
+            }
+            let raw = backend_parser_parse_target::transformExpressionList(
+                mcx,
+                pstate,
+                sublist_owned,
+                ParseExprKind::EXPR_KIND_VALUES_SINGLE,
+                true,
+            )?;
+            // Prepare row for assignment to the target table.
+            transformInsertRow(mcx, pstate, raw, &stmt.cols, &icolumns, &attrnos, false)?
         }
-
-        // INSERT ... VALUES with a single sublist: treat it like a SELECT with
-        // no FROM — the sublist becomes the targetlist directly, no VALUES RTE.
-        debug_assert!(s.intoClause.is_none());
-        let sublist = match s.valuesLists.first().map(|n| n.as_ref()) {
-            Some(Node::List(items)) => items,
-            _ => return Err(elog_error("INSERT single VALUES sublist is not a List")),
-        };
-        let mut sublist_owned = mcx::vec_with_capacity_in(mcx, sublist.len())?;
-        for item in sublist.iter() {
-            sublist_owned.push(mcx::alloc_in(mcx, item.clone_in(mcx)?)?);
-        }
-        let raw = backend_parser_parse_target::transformExpressionList(
-            mcx,
-            pstate,
-            sublist_owned,
-            ParseExprKind::EXPR_KIND_VALUES_SINGLE,
-            true,
-        )?;
-        // Prepare row for assignment to the target table.
-        transformInsertRow(mcx, pstate, raw, &stmt.cols, &icolumns, &attrnos, false)?
     };
 
     // Generate the query's target list from the computed expression list, and
@@ -211,6 +212,147 @@ pub fn transformInsertStmt<'mcx>(
     Ok(qry)
 }
 
+/// The multi-row `INSERT ... VALUES (...), (...), ...` branch of
+/// `transformInsertStmt` (analyze.c:825). Transforms each row, builds a VALUES
+/// RTE carrying the coerced expression lists, adds it to the query, and returns
+/// the targetlist expression list (Vars referencing the RTE).
+fn transformInsertMultiRowValues<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'mcx>,
+    select_stmt: &SelectStmt<'mcx>,
+    stmt: &InsertStmt<'mcx>,
+    icolumns: &PgVec<'mcx, ResTarget<'mcx>>,
+    attrnos: &PgVec<'mcx, i32>,
+) -> PgResult<PgVec<'mcx, Expr>> {
+    debug_assert!(select_stmt.intoClause.is_none());
+
+    // exprsLists: a List (PgVec<NodePtr>) where each element is a Node::List of
+    // Node::Expr — one row of coerced column expressions.
+    let mut exprs_lists: PgVec<'mcx, NodePtr<'mcx>> =
+        mcx::vec_with_capacity_in(mcx, select_stmt.valuesLists.len())?;
+    let mut sublist_length: i32 = -1;
+
+    for row_node in select_stmt.valuesLists.iter() {
+        let sublist = match row_node.as_ref() {
+            Node::List(items) => items,
+            _ => return Err(elog_error("INSERT VALUES sublist is not a List")),
+        };
+        let mut sublist_owned = mcx::vec_with_capacity_in(mcx, sublist.len())?;
+        for item in sublist.iter() {
+            sublist_owned.push(mcx::alloc_in(mcx, item.clone_in(mcx)?)?);
+        }
+
+        // Basic expression transformation (same as a ROW() expr, but allow
+        // SetToDefault at top level).
+        let transformed = backend_parser_parse_target::transformExpressionList(
+            mcx,
+            pstate,
+            sublist_owned,
+            ParseExprKind::EXPR_KIND_VALUES,
+            true,
+        )?;
+
+        // All sublists must be the same length after transformation.
+        if sublist_length < 0 {
+            sublist_length = transformed.len() as i32;
+        } else if sublist_length != transformed.len() as i32 {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_SYNTAX_ERROR)
+                .errmsg("VALUES lists must all be the same length".to_string())
+                .into_error());
+        }
+
+        // Prepare row for assignment to target table, stripping the resulting
+        // field/array assignment nodes (strip_indirection = true).
+        let mut row = transformInsertRow(
+            mcx,
+            pstate,
+            transformed,
+            &stmt.cols,
+            icolumns,
+            attrnos,
+            true,
+        )?;
+
+        // Assign collations now (assign_query_collations doesn't process the
+        // rangetable). Each row independently.
+        backend_parser_parse_collate::assign_list_collations(Some(pstate), &mut row[..])?;
+
+        // Wrap the row as a Node::List of Node::Expr for the VALUES RTE.
+        let mut row_nodes: PgVec<'mcx, NodePtr<'mcx>> =
+            mcx::vec_with_capacity_in(mcx, row.len())?;
+        for expr in row.into_iter() {
+            row_nodes.push(mcx::alloc_in(mcx, Node::Expr(expr))?);
+        }
+        exprs_lists.push(mcx::alloc_in(mcx, Node::List(row_nodes))?);
+    }
+
+    // Construct column type/typmod/collation lists from the first row.
+    let mut coltypes: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
+    let mut coltypmods: PgVec<'mcx, i32> = PgVec::new_in(mcx);
+    let mut colcollations: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
+    if let Some(first) = exprs_lists.first() {
+        if let Node::List(items) = first.as_ref() {
+            for val in items.iter() {
+                let expr = match val.as_ref() {
+                    Node::Expr(e) => Some(e),
+                    _ => None,
+                };
+                coltypes.push(backend_nodes_core::nodefuncs::expr_type(expr)?);
+                coltypmods.push(backend_nodes_core::nodefuncs::expr_typmod(expr)?);
+                colcollations.push(InvalidOid);
+            }
+        }
+    }
+
+    // LATERAL only if there are current-level Vars (CREATE RULE NEW/OLD). The
+    // namespace is otherwise empty.
+    let lateral = if pstate.p_rtable.len() != 1 {
+        let probe = Node::List({
+            let mut v: PgVec<'mcx, NodePtr<'mcx>> =
+                mcx::vec_with_capacity_in(mcx, exprs_lists.len())?;
+            for e in exprs_lists.iter() {
+                v.push(mcx::alloc_in(mcx, e.clone_in(mcx)?)?);
+            }
+            v
+        });
+        backend_optimizer_util_vars::contain_vars_of_level(&probe, 0)
+    } else {
+        false
+    };
+
+    // Generate the VALUES RTE.
+    let nsitem = backend_parser_relation::addRangeTableEntryForValues(
+        mcx,
+        pstate,
+        exprs_lists,
+        coltypes,
+        coltypmods,
+        colcollations,
+        None,
+        lateral,
+        true,
+    )?;
+    // Generate the list of Vars referencing the RTE. expandNSItemVars reads
+    // only the nsitem's p_names/p_nscolumns (set at build time), so it is safe
+    // to read before addNSItemToQuery (which only flips visibility flags and
+    // pushes a RangeTblRef to the joinlist).
+    let var_nodes = backend_parser_relation::expandNSItemVars(mcx, pstate, &nsitem, 0, -1, None)?;
+
+    backend_parser_relation::addNSItemToQuery(mcx, pstate, nsitem, true, false, false)?;
+
+    let mut var_exprs: PgVec<'mcx, Expr> = mcx::vec_with_capacity_in(mcx, var_nodes.len())?;
+    for vn in var_nodes.into_iter() {
+        match mcx::PgBox::into_inner(vn) {
+            Node::Expr(e) => var_exprs.push(e),
+            _ => return Err(elog_error("expandNSItemVars produced a non-Expr node")),
+        }
+    }
+
+    // Re-apply any indirection on the target column specs to the Vars.
+    transformInsertRow(mcx, pstate, var_exprs, &stmt.cols, icolumns, attrnos, false)
+}
+
 /// `transformInsertRow(pstate, exprlist, stmtcols, icolumns, attrnos,
 /// strip_indirection)` (analyze.c:1043) — prepare an expression list for
 /// assignment to the target table (length checks + `transformAssignedExpr`).
@@ -225,7 +367,7 @@ pub fn transformInsertRow<'mcx>(
     stmtcols: &PgVec<'mcx, types_nodes::nodes::NodePtr<'mcx>>,
     icolumns: &PgVec<'mcx, ResTarget<'mcx>>,
     attrnos: &PgVec<'mcx, i32>,
-    _strip_indirection: bool,
+    strip_indirection: bool,
 ) -> PgResult<PgVec<'mcx, Expr>> {
     // Check length of the expr list: it must not have more expressions than
     // there are target columns. Fewer is allowed only if no explicit column
@@ -242,7 +384,7 @@ pub fn transformInsertRow<'mcx>(
     for (idx, expr) in exprlist.into_iter().enumerate() {
         let col: &ResTarget<'mcx> = &icolumns[idx];
         let attno = attrnos[idx];
-        let transformed = backend_parser_parse_target::transformAssignedExpr(
+        let mut transformed = backend_parser_parse_target::transformAssignedExpr(
             mcx,
             pstate,
             Some(expr),
@@ -252,7 +394,36 @@ pub fn transformInsertRow<'mcx>(
             &col.indirection,
             col.location,
         )?;
-        // `strip_indirection` (multi-row VALUES) is unreachable on this path.
+
+        if strip_indirection {
+            // Remove top-level FieldStores and SubscriptingRefs, as well as any
+            // CoerceToDomain appearing above one of those (analyze.c:1117).
+            loop {
+                let mut subexpr = &transformed;
+                while let Expr::CoerceToDomain(c) = subexpr {
+                    match c.arg.as_deref() {
+                        Some(a) => subexpr = a,
+                        None => break,
+                    }
+                }
+                match subexpr {
+                    Expr::FieldStore(f) => {
+                        let next = f
+                            .newvals
+                            .first()
+                            .cloned()
+                            .ok_or_else(|| elog_error("FieldStore has no newvals"))?;
+                        transformed = next;
+                    }
+                    Expr::SubscriptingRef(s) => match s.refassgnexpr.as_deref() {
+                        Some(a) => transformed = a.clone(),
+                        None => break,
+                    },
+                    _ => break,
+                }
+            }
+        }
+
         result.push(transformed);
     }
     Ok(result)
