@@ -68,7 +68,7 @@ use core::fmt::Write as _;
 
 use mcx::{Mcx, PgString};
 use types_error::PgResult;
-use types_nodes::nodes::Node;
+use types_nodes::nodes::{ntag, Node};
 use types_nodes::primnodes::{
     BoolExpr, BoolExprType, Const, Expr, FuncExpr, OpExpr, Param, TargetEntry, Var,
 };
@@ -630,37 +630,42 @@ pub fn out_node(buf: &mut String, obj: &Node<'_>) {
 
 /// `outNode` with the `write_location_fields` flag threaded (outfuncs.c:730-772).
 pub(crate) fn out_node_inner(buf: &mut String, obj: &Node<'_>, write_loc: bool) {
-    match obj {
+    // The `{`-switch (outfuncs.c:753-770): the common primitive-expression family
+    // is carried as `Node::Expr(e)`, a wrapper that spans every `Expr` tag
+    // (Var/Const/…/Aggref). That is many tags, not one, so it cannot be a single
+    // `ntag::T_*` arm — peel it first via the `as_expr` accessor and dispatch the
+    // inner `Expr` enum in `out_expr`.
+    if let Some(e) = obj.as_expr() {
+        out_expr(buf, e, write_loc);
+        return;
+    }
+    match obj.node_tag() {
         // _outList — bare `(...)` token (nodeRead does not want `{}`).
-        Node::List(elements) => out_list(buf, elements.as_slice()),
+        ntag::T_List => out_list(buf, obj.expect_list().as_slice()),
         // Value nodes — bare value tokens (nodeRead does not want `{}`).
-        Node::Integer(n) => out_integer(buf, n),
-        Node::Float(n) => out_float(buf, n),
-        Node::Boolean(n) => out_boolean(buf, n),
-        Node::String(n) => out_string(buf, n),
-        Node::BitString(n) => out_bit_string(buf, n),
-        // The `{`-switch (outfuncs.c:753-770): a per-node `_out<Type>` chosen by
-        // nodeTag, framed by `{`...`}`. The common primitive-expression family
-        // (carried as `Node::Expr`) and `TargetEntry` are ported field-for-field.
-        Node::Expr(e) => out_expr(buf, e, write_loc),
+        ntag::T_Integer => out_integer(buf, obj.expect_integer()),
+        ntag::T_Float => out_float(buf, obj.expect_float()),
+        ntag::T_Boolean => out_boolean(buf, obj.expect_boolean()),
+        ntag::T_String => out_string(buf, obj.expect_string()),
+        ntag::T_BitString => out_bit_string(buf, obj.expect_bitstring()),
         // `_outTargetEntry` (lib-owned writer; the parse family does not claim it).
-        Node::TargetEntry(te) => framed(buf, |b| out_targetentry(b, te, write_loc)),
+        ntag::T_TargetEntry => framed(buf, |b| out_targetentry(b, obj.expect_targetentry(), write_loc)),
         // The remaining framed `{LABEL ...}` node tags are dispatched through
         // the per-family `try_out` chain (each opens `{`, runs the per-node
         // `_out<Type>`, closes `}`). A tag no family claims `mirror-pg-and-panic`s
         // rather than emit a partial / empty `{}` dump (C's `default:` WARNING +
         // empty `{}`).
-        other => {
-            if out_expr_family::try_out(buf, other, write_loc)
-                || out_parse_family::try_out(buf, other, write_loc)
-                || out_plan_family::try_out(buf, other, write_loc)
-                || out_ddl_family::try_out(buf, other, write_loc)
+        _ => {
+            if out_expr_family::try_out(buf, obj, write_loc)
+                || out_parse_family::try_out(buf, obj, write_loc)
+                || out_plan_family::try_out(buf, obj, write_loc)
+                || out_ddl_family::try_out(buf, obj, write_loc)
             {
                 return;
             }
             panic!(
                 "outNode: no _out<Type> writer ported for node tag {:?}",
-                other.node_tag()
+                obj.node_tag()
             )
         }
     }

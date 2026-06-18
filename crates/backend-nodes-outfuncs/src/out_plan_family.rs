@@ -24,7 +24,7 @@ use core::fmt::Write as _;
 
 use types_nodes::jointype::Join;
 use types_nodes::nodeindexscan::{Plan, Scan};
-use types_nodes::nodes::Node;
+use types_nodes::nodes::{ntag, Node};
 use types_nodes::primnodes::{Expr, TargetEntry};
 
 use crate::{
@@ -871,43 +871,43 @@ fn opt_slice<'a, T>(o: &'a Option<mcx::PgVec<'_, T>>) -> &'a [T] {
 
 /// Dispatch the out_plan_family `Node` arms this module owns.
 pub(crate) fn try_out(buf: &mut String, node: &Node<'_>, wl: bool) -> bool {
-    match node {
-        Node::SeqScan(n) => crate::framed(buf, |b| out_seqscan(b, n, wl)),
-        Node::Material(n) => crate::framed(buf, |b| out_material(b, n, wl)),
-        Node::ProjectSet(n) => crate::framed(buf, |b| out_projectset(b, n, wl)),
-        Node::Result(n) => crate::framed(buf, |b| out_result(b, n, wl)),
-        Node::Append(n) => crate::framed(buf, |b| out_append(b, n, wl)),
-        Node::BitmapAnd(n) => crate::framed(buf, |b| out_bitmapand(b, n, wl)),
-        Node::Gather(n) => crate::framed(buf, |b| out_gather(b, n, wl)),
-        Node::GatherMerge(n) => crate::framed(buf, |b| out_gathermerge(b, n, wl)),
-        Node::MergeAppend(n) => crate::framed(buf, |b| out_mergeappend(b, n, wl)),
-        Node::RecursiveUnion(n) => crate::framed(buf, |b| out_recursiveunion(b, n, wl)),
-        Node::Group(n) => crate::framed(buf, |b| out_group(b, n, wl)),
-        Node::SetOp(n) => crate::framed(buf, |b| out_setop(b, n, wl)),
-        Node::Unique(n) => crate::framed(buf, |b| out_unique(b, n, wl)),
-        Node::Sort(n) => crate::framed(buf, |b| out_sort(b, n, wl)),
-        Node::IncrementalSort(n) => crate::framed(buf, |b| out_incrementalsort(b, n, wl)),
-        Node::Limit(n) => crate::framed(buf, |b| out_limit(b, n, wl)),
-        Node::Agg(n) => crate::framed(buf, |b| out_agg(b, n, wl)),
-        Node::NestLoop(n) => crate::framed(buf, |b| out_nestloop(b, n, wl)),
-        Node::MergeJoin(n) => crate::framed(buf, |b| out_mergejoin(b, n, wl)),
-        Node::HashJoin(n) => crate::framed(buf, |b| out_hashjoin(b, n, wl)),
-        Node::Hash(n) => crate::framed(buf, |b| out_hash(b, n, wl)),
-        Node::Memoize(n) => crate::framed(buf, |b| out_memoize(b, n, wl)),
-        Node::IndexScan(n) => crate::framed(buf, |b| out_indexscan(b, n, wl)),
-        Node::IndexOnlyScan(n) => crate::framed(buf, |b| out_indexonlyscan(b, n, wl)),
-        Node::BitmapIndexScan(n) => crate::framed(buf, |b| out_bitmapindexscan(b, n, wl)),
-        Node::TidScan(n) => crate::framed(buf, |b| out_tidscan(b, n, wl)),
-        Node::TidRangeScan(n) => crate::framed(buf, |b| out_tidrangescan(b, n, wl)),
-        Node::SubqueryScan(n) => crate::framed(buf, |b| out_subqueryscan(b, n, wl)),
-        Node::WorkTableScan(n) => crate::framed(buf, |b| out_worktablescan(b, n, wl)),
-        Node::CteScan(n) => crate::framed(buf, |b| out_ctescan(b, n, wl)),
-        Node::NamedTuplestoreScan(n) => crate::framed(buf, |b| out_namedtuplestorescan(b, n, wl)),
-        Node::ValuesScan(n) => crate::framed(buf, |b| out_valuesscan(b, n, wl)),
-        Node::ForeignScan(n) => crate::framed(buf, |b| out_foreignscan(b, n, wl)),
+    match node.node_tag() {
+        ntag::T_SeqScan => { let n = node.expect_seqscan(); crate::framed(buf, |b| out_seqscan(b, n, wl)) },
+        ntag::T_Material => { let n = node.expect_material(); crate::framed(buf, |b| out_material(b, n, wl)) },
+        ntag::T_ProjectSet => { let n = node.expect_projectset(); crate::framed(buf, |b| out_projectset(b, n, wl)) },
+        ntag::T_Result => { let n = node.expect_result(); crate::framed(buf, |b| out_result(b, n, wl)) },
+        ntag::T_Append => { let n = node.expect_append(); crate::framed(buf, |b| out_append(b, n, wl)) },
+        ntag::T_BitmapAnd => { let n = node.expect_bitmapand(); crate::framed(buf, |b| out_bitmapand(b, n, wl)) },
+        ntag::T_Gather => { let n = node.expect_gather(); crate::framed(buf, |b| out_gather(b, n, wl)) },
+        ntag::T_GatherMerge => { let n = node.expect_gathermerge(); crate::framed(buf, |b| out_gathermerge(b, n, wl)) },
+        ntag::T_MergeAppend => { let n = node.expect_mergeappend(); crate::framed(buf, |b| out_mergeappend(b, n, wl)) },
+        ntag::T_RecursiveUnion => { let n = node.expect_recursiveunion(); crate::framed(buf, |b| out_recursiveunion(b, n, wl)) },
+        ntag::T_Group => { let n = node.expect_group(); crate::framed(buf, |b| out_group(b, n, wl)) },
+        ntag::T_SetOp => { let n = node.expect_setop(); crate::framed(buf, |b| out_setop(b, n, wl)) },
+        ntag::T_Unique => { let n = node.expect_unique(); crate::framed(buf, |b| out_unique(b, n, wl)) },
+        ntag::T_Sort => { let n = node.expect_sort(); crate::framed(buf, |b| out_sort(b, n, wl)) },
+        ntag::T_IncrementalSort => { let n = node.expect_incrementalsort(); crate::framed(buf, |b| out_incrementalsort(b, n, wl)) },
+        ntag::T_Limit => { let n = node.expect_limit(); crate::framed(buf, |b| out_limit(b, n, wl)) },
+        ntag::T_Agg => { let n = node.expect_agg(); crate::framed(buf, |b| out_agg(b, n, wl)) },
+        ntag::T_NestLoop => { let n = node.expect_nestloop(); crate::framed(buf, |b| out_nestloop(b, n, wl)) },
+        ntag::T_MergeJoin => { let n = node.expect_mergejoin(); crate::framed(buf, |b| out_mergejoin(b, n, wl)) },
+        ntag::T_HashJoin => { let n = node.expect_hashjoin(); crate::framed(buf, |b| out_hashjoin(b, n, wl)) },
+        ntag::T_Hash => { let n = node.expect_hash(); crate::framed(buf, |b| out_hash(b, n, wl)) },
+        ntag::T_Memoize => { let n = node.expect_memoize(); crate::framed(buf, |b| out_memoize(b, n, wl)) },
+        ntag::T_IndexScan => { let n = node.expect_indexscan(); crate::framed(buf, |b| out_indexscan(b, n, wl)) },
+        ntag::T_IndexOnlyScan => { let n = node.expect_indexonlyscan(); crate::framed(buf, |b| out_indexonlyscan(b, n, wl)) },
+        ntag::T_BitmapIndexScan => { let n = node.expect_bitmapindexscan(); crate::framed(buf, |b| out_bitmapindexscan(b, n, wl)) },
+        ntag::T_TidScan => { let n = node.expect_tidscan(); crate::framed(buf, |b| out_tidscan(b, n, wl)) },
+        ntag::T_TidRangeScan => { let n = node.expect_tidrangescan(); crate::framed(buf, |b| out_tidrangescan(b, n, wl)) },
+        ntag::T_SubqueryScan => { let n = node.expect_subqueryscan(); crate::framed(buf, |b| out_subqueryscan(b, n, wl)) },
+        ntag::T_WorkTableScan => { let n = node.expect_worktablescan(); crate::framed(buf, |b| out_worktablescan(b, n, wl)) },
+        ntag::T_CteScan => { let n = node.expect_ctescan(); crate::framed(buf, |b| out_ctescan(b, n, wl)) },
+        ntag::T_NamedTuplestoreScan => { let n = node.expect_namedtuplestorescan(); crate::framed(buf, |b| out_namedtuplestorescan(b, n, wl)) },
+        ntag::T_ValuesScan => { let n = node.expect_valuesscan(); crate::framed(buf, |b| out_valuesscan(b, n, wl)) },
+        ntag::T_ForeignScan => { let n = node.expect_foreignscan(); crate::framed(buf, |b| out_foreignscan(b, n, wl)) },
 
         // ---- mirror-pg-and-panic: field-type unmodeled in this family ----
-        Node::ModifyTable(_) => panic!(
+        ntag::T_ModifyTable => panic!(
             "_outModifyTable: not serialized — `rowMarks` is `List *` of \
              `PlanRowMark` (C `WRITE_NODE_FIELD(rowMarks)`), but `PlanRowMark` is \
              NOT a `Node` enum variant and has no `_outPlanRowMark`/`_readPlanRowMark` \
@@ -920,11 +920,11 @@ pub(crate) fn try_out(buf: &mut String, node: &Node<'_>, wl: bool) -> bool {
              updateColnosLists/withCheckOptionLists/returningLists/mergeActionLists/\
              mergeJoinConditions list-of-lists) are all modeled and writable"
         ),
-        Node::WindowAgg(n) => crate::framed(buf, |b| out_windowagg(b, n, wl)),
-        Node::TableFuncScan(n) => crate::framed(buf, |b| out_tablefuncscan(b, n, wl)),
-        Node::FunctionScan(n) => crate::framed(buf, |b| out_functionscan(b, n, wl)),
-        Node::SampleScan(n) => crate::framed(buf, |b| out_samplescan(b, n, wl)),
-        Node::CustomScan(_) => panic!(
+        ntag::T_WindowAgg => { let n = node.expect_windowagg(); crate::framed(buf, |b| out_windowagg(b, n, wl)) },
+        ntag::T_TableFuncScan => { let n = node.expect_tablefuncscan(); crate::framed(buf, |b| out_tablefuncscan(b, n, wl)) },
+        ntag::T_FunctionScan => { let n = node.expect_functionscan(); crate::framed(buf, |b| out_functionscan(b, n, wl)) },
+        ntag::T_SampleScan => { let n = node.expect_samplescan(); crate::framed(buf, |b| out_samplescan(b, n, wl)) },
+        ntag::T_CustomScan => panic!(
             "_outCustomScan: not serialized — `custom_private` and `methods` are \
              opaque provider pointers (the C `:methods` token reads \
              node->methods->CustomName from a static provider table)"

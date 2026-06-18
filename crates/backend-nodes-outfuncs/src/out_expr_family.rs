@@ -19,7 +19,7 @@
 
 use alloc::string::String;
 
-use types_nodes::nodes::Node;
+use types_nodes::nodes::{ntag, Node};
 use types_nodes::primnodes::Expr;
 
 use crate::{
@@ -935,11 +935,22 @@ pub(crate) fn out_expr_body(buf: &mut String, e: &Expr, wl: bool) -> bool {
 }
 
 /// Dispatch the expression-family `Node` arms this module owns.
+///
+/// The post-analysis `Expr`-family variants (`BoolExpr`, `CaseExpr`, `SubLink`,
+/// `NullTest`, …) share a `NodeTag` with their raw-grammar `Node::X` twins (both
+/// are `T_BoolExpr`/`T_CaseExpr`/… — the same numeric tag), so they cannot be
+/// told apart by tag alone. We therefore peel the `Node::Expr` case first via
+/// `as_expr()` (the inner dispatch is a `match` on `Expr`, not on `Node`, so it
+/// stays on the `Expr` enum — there is no `Node` to call an accessor on); every
+/// node reaching the tag dispatch below is NOT a `Node::Expr`, so each
+/// `expect_<raw>()` resolves to the raw-grammar variant unambiguously.
 pub(crate) fn try_out(buf: &mut String, node: &Node<'_>, wl: bool) -> bool {
-    match node {
-        // Post-analysis `Expr` arms. (Reached once lib.rs `out_expr` chains here;
-        // included for completeness + so the writers are tested directly.)
-        Node::Expr(e) => match e {
+    // Post-analysis `Expr` arms. (Reached once lib.rs `out_expr` chains here;
+    // included for completeness + so the writers are tested directly.) The inner
+    // dispatch is on the `Expr` enum, whose variants share tags with the
+    // raw-grammar twins, so it is left as an enum match (no Node accessor fits).
+    if let Some(e) = node.as_expr() {
+        match e {
             Expr::Aggref(n) => crate::framed(buf, |b| out_aggref(b, n, wl)),
             Expr::GroupingFunc(n) => crate::framed(buf, |b| out_grouping_func(b, n, wl)),
             Expr::WindowFunc(n) => crate::framed(buf, |b| out_window_func(b, n, wl)),
@@ -986,25 +997,29 @@ pub(crate) fn try_out(buf: &mut String, node: &Node<'_>, wl: bool) -> bool {
             // (SubPlan is a plan-layer node; PHV/RestrictInfo are pathnodes.h
             // planner-internal). Decline so the central dispatch panics loudly.
             _ => return false,
-        },
-        // Raw-grammar `Node::X` arms (reachable through `out_node_inner`'s
-        // `other =>` fallthrough today).
-        Node::BoolExpr(n) => crate::framed(buf, |b| out_raw_bool_expr(b, n, wl)),
-        Node::CaseExpr(n) => crate::framed(buf, |b| out_raw_case_expr(b, n, wl)),
-        Node::CaseWhen(n) => crate::framed(buf, |b| out_raw_case_when(b, n, wl)),
-        Node::CoalesceExpr(n) => crate::framed(buf, |b| out_raw_coalesce_expr(b, n, wl)),
-        Node::MinMaxExpr(n) => crate::framed(buf, |b| out_raw_minmax_expr(b, n, wl)),
-        Node::SubLink(n) => crate::framed(buf, |b| out_raw_sublink(b, n, wl)),
-        Node::NullTest(n) => crate::framed(buf, |b| out_raw_null_test(b, n, wl)),
-        Node::BooleanTest(n) => crate::framed(buf, |b| out_raw_boolean_test(b, n, wl)),
-        Node::RowExpr(n) => crate::framed(buf, |b| out_raw_row_expr(b, n, wl)),
-        Node::GroupingFunc(n) => crate::framed(buf, |b| out_raw_grouping_func(b, n, wl)),
-        Node::CollateExpr(n) => crate::framed(buf, |b| out_raw_collate_expr(b, n, wl)),
-        Node::SetToDefault(n) => crate::framed(buf, |b| out_raw_set_to_default(b, n, wl)),
-        Node::CurrentOfExpr(n) => crate::framed(buf, |b| out_raw_current_of_expr(b, n, wl)),
-        Node::NamedArgExpr(n) => crate::framed(buf, |b| out_raw_named_arg_expr(b, n, wl)),
-        Node::SQLValueFunction(n) => crate::framed(buf, |b| out_raw_sqlvalue_function(b, n, wl)),
-        Node::XmlExpr(n) => crate::framed(buf, |b| out_raw_xml_expr(b, n, wl)),
+        }
+        return true;
+    }
+    // Raw-grammar `Node::X` arms (reachable through `out_node_inner`'s
+    // `other =>` fallthrough today). Not a `Node::Expr`, so each `expect_<raw>`
+    // resolves to the raw-grammar variant.
+    match node.node_tag() {
+        ntag::T_BoolExpr => { let n = node.expect_boolexpr(); crate::framed(buf, |b| out_raw_bool_expr(b, n, wl)) }
+        ntag::T_CaseExpr => { let n = node.expect_caseexpr(); crate::framed(buf, |b| out_raw_case_expr(b, n, wl)) }
+        ntag::T_CaseWhen => { let n = node.expect_casewhen(); crate::framed(buf, |b| out_raw_case_when(b, n, wl)) }
+        ntag::T_CoalesceExpr => { let n = node.expect_coalesceexpr(); crate::framed(buf, |b| out_raw_coalesce_expr(b, n, wl)) }
+        ntag::T_MinMaxExpr => { let n = node.expect_minmaxexpr(); crate::framed(buf, |b| out_raw_minmax_expr(b, n, wl)) }
+        ntag::T_SubLink => { let n = node.expect_sublink(); crate::framed(buf, |b| out_raw_sublink(b, n, wl)) }
+        ntag::T_NullTest => { let n = node.expect_nulltest(); crate::framed(buf, |b| out_raw_null_test(b, n, wl)) }
+        ntag::T_BooleanTest => { let n = node.expect_booleantest(); crate::framed(buf, |b| out_raw_boolean_test(b, n, wl)) }
+        ntag::T_RowExpr => { let n = node.expect_rowexpr(); crate::framed(buf, |b| out_raw_row_expr(b, n, wl)) }
+        ntag::T_GroupingFunc => { let n = node.expect_groupingfunc(); crate::framed(buf, |b| out_raw_grouping_func(b, n, wl)) }
+        ntag::T_CollateExpr => { let n = node.expect_collateexpr(); crate::framed(buf, |b| out_raw_collate_expr(b, n, wl)) }
+        ntag::T_SetToDefault => { let n = node.expect_settodefault(); crate::framed(buf, |b| out_raw_set_to_default(b, n, wl)) }
+        ntag::T_CurrentOfExpr => { let n = node.expect_currentofexpr(); crate::framed(buf, |b| out_raw_current_of_expr(b, n, wl)) }
+        ntag::T_NamedArgExpr => { let n = node.expect_namedargexpr(); crate::framed(buf, |b| out_raw_named_arg_expr(b, n, wl)) }
+        ntag::T_SQLValueFunction => { let n = node.expect_sqlvaluefunction(); crate::framed(buf, |b| out_raw_sqlvalue_function(b, n, wl)) }
+        ntag::T_XmlExpr => { let n = node.expect_xmlexpr(); crate::framed(buf, |b| out_raw_xml_expr(b, n, wl)) }
         _ => return false,
     }
     true
