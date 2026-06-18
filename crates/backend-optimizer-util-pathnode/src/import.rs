@@ -32,7 +32,13 @@
 //!   `lateral_vars`, allocating fresh [`RelId`]s;
 //! - each referenced [`RestrictInfo`]'s `clause`/`orclause` expression nodes,
 //!   allocating fresh [`RinfoId`]s and [`NodeId`]s;
-//! - the [`PathTarget`] expression nodes ([`NodeId`] → fresh [`NodeId`]).
+//! - the parent rel's `reltarget` [`PathTarget`] expression nodes, **and the
+//!   path's own `pathtarget` exprs** ([`NodeId`] → fresh [`NodeId`]). A Path can
+//!   carry a `pathtarget` distinct from its rel's `reltarget` (the `target` arg of
+//!   `create_*_path`), so both must be remapped; missing the per-Path one left a
+//!   subroot [`NodeId`] aliasing into `root`'s arena at the wrong index (it
+//!   resolved a `TargetEntry` where `build_path_tlist` wanted an `Expr`);
+//! - any `param_info.ppi_clauses` [`RestrictInfo`] handles.
 //!
 //! Every handle is memoized, so a node shared by several parents (the C aliased
 //! `Path *`) is copied exactly once and the shared identity is preserved within
@@ -199,6 +205,34 @@ impl<'a> PathImporter<'a> {
         let parent = node.base().parent;
         let new_parent = self.import_rel(root, parent);
         node.base_mut().parent = new_parent;
+
+        // Remap the path's own `pathtarget` exprs. These are `NodeId`s into the
+        // subroot expression arena; without remapping they would alias into
+        // `root`'s arena at the wrong indices (the bug that made a `SubqueryScan`
+        // child's seqscan pathtarget resolve a `TargetEntry` where `build_path_tlist`
+        // expects an `Expr`). C's path pathtarget shares the same `Node *` exprs
+        // that `copyObject` would deep-copy on import; mirror that here. The parent
+        // `RelOptInfo.reltarget` is imported separately in `import_rel`, but a Path
+        // can carry its own pathtarget (create_*_path's `target` arg) distinct from
+        // the rel's, so it must be remapped on the Path too.
+        if let Some(sub_exprs) =
+            node.base().pathtarget.as_deref().map(|t| t.exprs.clone())
+        {
+            let exprs: Vec<NodeId> =
+                sub_exprs.iter().map(|&n| self.import_node(root, n)).collect();
+            node.base_mut().pathtarget.as_deref_mut().unwrap().exprs = exprs;
+        }
+
+        // Remap `param_info.ppi_clauses` (RestrictInfo handles into the subroot
+        // rinfo arena). NULL for the flat scan paths a set-op child carries, but
+        // handle it for faithfulness with the cross-root copy contract.
+        if let Some(sub_clauses) =
+            node.base().param_info.as_deref().map(|p| p.ppi_clauses.clone())
+        {
+            let clauses: Vec<RinfoId> =
+                sub_clauses.iter().map(|&r| self.import_rinfo(root, r)).collect();
+            node.base_mut().param_info.as_deref_mut().unwrap().ppi_clauses = clauses;
+        }
 
         // Remap every subpath handle the variant carries.
         self.remap_subpaths(root, &mut node);
