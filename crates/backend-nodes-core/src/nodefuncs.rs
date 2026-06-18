@@ -1504,6 +1504,21 @@ fn expr_variant_name(expr: &Expr) -> &'static str {
     }
 }
 
+/// relnode.c `set_joinrel_partition_key_exprs` builds, for each full-join
+/// output column, `makeNode(CoalesceExpr)` with `coalescetype = exprType(larg)`,
+/// `coalescecollid = exprCollation(larg)`, `args = list_make2(larg, rarg)`,
+/// `location = -1`. The node build is trivial but needs `exprType`/
+/// `exprCollation` (nodeFuncs.c, this crate), so relnode reaches it through the
+/// relnode-ext seam; this crate owns it.
+pub fn make_coalesce_expr(larg: &Expr, rarg: &Expr) -> Expr {
+    Expr::CoalesceExpr(types_nodes::primnodes::CoalesceExpr {
+        coalescetype: expr_type(Some(larg)).expect("exprType"),
+        coalescecollid: expr_collation(Some(larg)).expect("exprCollation"),
+        args: vec![larg.clone(), rarg.clone()],
+        location: -1,
+    })
+}
+
 // ===========================================================================
 // Seam wiring (the inward seams this family owns)
 // ===========================================================================
@@ -1562,6 +1577,22 @@ pub fn init_seams() {
         eqext::expr_typmod::set(|expr| expr_typmod(Some(expr)).expect("exprTypmod"));
         eqext::expr_collation::set(|expr| expr_collation(Some(expr)).expect("exprCollation"));
     }
+
+    // joininfo.c / restrictinfo.c reach the same nodeFuncs.c accessors
+    // (`exprType`/`exprTypmod`) over an owned rootless `&Expr` through the
+    // joininfo-ext consumer-side seam crate (no owner directory). nodeFuncs.c
+    // owns these accessor legs; same shape as the equivclass-ext legs above.
+    {
+        use backend_optimizer_util_joininfo_ext_seams as jiext;
+        jiext::expr_type::set(|expr| expr_type(Some(expr)).expect("exprType"));
+        jiext::expr_typmod::set(|expr| expr_typmod(Some(expr)).expect("exprTypmod"));
+    }
+
+    // relnode.c `set_joinrel_partition_key_exprs` builds a CoalesceExpr whose
+    // type/collation come from this unit's `exprType`/`exprCollation`; it reaches
+    // the build through the relnode-ext seam (no owner directory). This crate
+    // (nodeFuncs.c + the makefuncs.c node builders) owns it.
+    backend_optimizer_util_relnode_ext_seams::make_coalesce_expr::set(make_coalesce_expr);
 }
 
 /// `exprType((Node *) expr)` (nodeFuncs.c) over an arena-resolved planner node.

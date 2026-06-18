@@ -225,4 +225,13 @@ pub fn init_seams() {
             statistics::get_attavgwidth(relid, attnum).expect("get_attavgwidth")
         });
     }
+
+    // relnode.c's `set_joinrel_partition_key_exprs` reaches
+    // `linitial_oid(get_mergejoin_opfamilies(opno))` (lsyscache.c, owned here)
+    // through its no-owner ext seam crate; lsyscache.c is the owner. A catalog
+    // miss is a loud panic (mirrors C's syscache elog).
+    backend_optimizer_util_relnode_ext_seams::get_mergejoin_opfamilies_first::set(|opno| {
+        opfamily_operator::get_mergejoin_opfamilies_first(opno)
+            .expect("get_mergejoin_opfamilies_first")
+    });
 }

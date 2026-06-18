@@ -1596,6 +1596,11 @@ fn get_matching_part_pairs(
 /// reaches it.
 pub fn init_seams() {
     geqo::have_join_order_restriction::set(have_join_order_restriction);
+
+    // relnode.c `build_simple_rel` proves a child empty and calls
+    // `mark_dummy_rel(rel)` (joinrels.c, owned here) through its no-owner ext
+    // seam crate; install the real body.
+    backend_optimizer_util_relnode_ext_seams::mark_dummy_rel::set(mark_dummy_rel);
 }
 
 #[cfg(test)]

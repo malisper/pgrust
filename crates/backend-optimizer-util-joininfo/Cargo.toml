@@ -30,6 +30,7 @@ backend-geqo-all-seams = { path = "../backend-geqo-all-seams" }
 
 # Outward seams this unit calls.
 backend-optimizer-util-relnode-seams = { path = "../backend-optimizer-util-relnode-seams" }
+backend-optimizer-util-relnode-ext-seams = { path = "../backend-optimizer-util-relnode-ext-seams" }
 backend-optimizer-util-pathnode-seams = { path = "../backend-optimizer-util-pathnode-seams" }
 backend-optimizer-path-equivclass-seams = { path = "../backend-optimizer-path-equivclass-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }

@@ -41,3 +41,6 @@ backend-nodes-read-seams = { path = "../backend-nodes-read-seams" }
 # costsize.c reaches get_typavgwidth/get_attavgwidth (lsyscache.c, this owner)
 # through these costsize-seams. Leaf seam crate — no cycle.
 backend-optimizer-path-costsize-seams = { path = "../backend-optimizer-path-costsize-seams" }
+# relnode.c reaches `get_mergejoin_opfamilies_first` (lsyscache owner) through
+# this no-owner ext seam crate. Leaf seam crate — no cycle.
+backend-optimizer-util-relnode-ext-seams = { path = "../backend-optimizer-util-relnode-ext-seams" }

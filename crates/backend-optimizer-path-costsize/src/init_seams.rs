@@ -89,6 +89,16 @@ pub fn init_seams() {
     backend_optimizer_util_relnode_ext_seams::enable_partitionwise_join::set(
         || crate::ENABLE_PARTITIONWISE_JOIN,
     );
+    // `clamp_width_est(tuple_width)` (costsize.c) — relnode.c / joininfo.c /
+    // restrictinfo.c each reach it through their own no-owner consumer-side ext
+    // seam crate; costsize.c is the owner.
+    backend_optimizer_util_relnode_ext_seams::clamp_width_est::set(crate::clamp_width_est);
+    backend_optimizer_util_joininfo_ext_seams::clamp_width_est::set(crate::clamp_width_est);
+    // `cost_qual_eval_node(&cost, (Node *) expr, root)` over a free-standing
+    // `&Expr` (restrictinfo.c / joininfo.c). costsize.c owns it.
+    backend_optimizer_util_joininfo_ext_seams::cost_qual_eval_node_expr::set(
+        crate::qualcost::cost_qual_eval_expr,
+    );
     // `cpu_operator_cost` (costsize.c GUC) — plancache reads it through the
     // planner-pc seam crate; planner.c (the rest of that crate's seams) is
     // unported, but costsize.c owns this GUC global, so install it here. The
