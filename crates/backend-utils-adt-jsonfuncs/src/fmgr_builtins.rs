@@ -39,27 +39,37 @@ use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
 
 use backend_utils_adt_arrayfuncs::construct::deconstruct_text_array_with_ndim_bytes;
 
+/// `VARHDRSZ` — the uncompressed 4-byte varlena length-word size.
+const VARHDRSZ: usize = 4;
+
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
 // ---------------------------------------------------------------------------
 
-/// A `jsonb` arg's FULL varlena byte image (with `VARHDRSZ` header), read off
-/// the by-reference lane.
+/// A by-reference varlena arg's FULL byte image (with `VARHDRSZ` header), read
+/// off the by-reference lane verbatim. Under the header-ful convention `jsonb`
+/// and array (`text[]`) values both cross as their complete on-disk image.
 #[inline]
-fn arg_jsonb_image<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+fn arg_varlena_image<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
     fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
-        .expect("jsonfuncs fn: by-ref `jsonb` arg missing from by-ref lane")
+        .expect("jsonfuncs fn: by-ref varlena arg missing from by-ref lane")
 }
 
-/// A `json`/`text` arg's payload bytes (`VARDATA_ANY`): header-stripped.
+/// A `jsonb` arg's FULL varlena byte image (with `VARHDRSZ` header). The
+/// getfield / setops cores slice `&jb[VARHDRSZ..]` themselves.
+#[inline]
+fn arg_jsonb_image<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    arg_varlena_image(fcinfo, i)
+}
+
+/// A `json`/`text` arg's payload bytes (`VARDATA_ANY`): under the header-ful
+/// convention the lane carries the full varlena image, so strip its leading
+/// `VARHDRSZ` header to recover the payload the cores consume.
 #[inline]
 fn arg_text_payload<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    fcinfo
-        .ref_arg(i)
-        .and_then(|p| p.as_varlena())
-        .expect("jsonfuncs fn: by-ref `json`/`text` arg missing from by-ref lane")
+    &arg_varlena_image(fcinfo, i)[VARHDRSZ..]
 }
 
 /// `PG_GETARG_INT32(i)`.
@@ -81,7 +91,7 @@ fn arg_text_array(
     fcinfo: &FunctionCallInfoBaseData,
     i: usize,
 ) -> (i32, Vec<Option<Vec<u8>>>) {
-    let bytes = arg_text_payload(fcinfo, i);
+    let bytes = arg_varlena_image(fcinfo, i);
     let (ndim, elems) = ok(deconstruct_text_array_with_ndim_bytes(bytes));
     let path = elems
         .into_iter()
@@ -90,21 +100,57 @@ fn arg_text_array(
     (ndim, path)
 }
 
-/// Set a `jsonb`/`text`/`bytea` (by-reference) result on the by-ref lane and
-/// return the dummy by-value word. For `jsonb` the bytes are the full varlena
-/// image (with header); for `json`/`text` the content payload.
+/// Set a `jsonb` (by-reference) result on the by-ref lane and return the dummy
+/// by-value word. The bytes are the full jsonb varlena image (header-ful);
+/// carried verbatim.
 #[inline]
 fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
     fcinfo.set_ref_result(RefPayload::Varlena(bytes));
     Datum::from_usize(0)
 }
 
-/// Set an optional by-reference result; `None` produces a SQL NULL.
+/// Set an optional `jsonb` by-reference result; `None` produces a SQL NULL. The
+/// bytes are the full jsonb varlena image (header-ful); carried verbatim.
 #[inline]
 fn ret_opt_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: Option<Vec<u8>>) -> Datum {
     match bytes {
         Some(b) => {
             fcinfo.set_ref_result(RefPayload::Varlena(b));
+            Datum::from_usize(0)
+        }
+        None => {
+            fcinfo.set_result_null(true);
+            Datum::from_usize(0)
+        }
+    }
+}
+
+/// Frame a bare `text`/`json` content payload as a full 4-byte-header varlena
+/// image (`SET_VARSIZE(image, VARHDRSZ + len)`, native-order `(total) << 2`) —
+/// the header-ful form the lane now carries for every varlena value.
+fn frame_text(payload: &[u8]) -> Vec<u8> {
+    let total = VARHDRSZ + payload.len();
+    let mut image = Vec::with_capacity(total);
+    image.extend_from_slice(&((total as u32) << 2).to_ne_bytes());
+    image.extend_from_slice(payload);
+    image
+}
+
+/// Set a `text`/`json` (by-reference) result on the by-ref lane. The cores
+/// return the bare content payload, so frame it header-ful.
+#[inline]
+fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, payload: Vec<u8>) -> Datum {
+    fcinfo.set_ref_result(RefPayload::Varlena(frame_text(&payload)));
+    Datum::from_usize(0)
+}
+
+/// Set an optional `text`/`json` by-reference result; `None` produces a SQL
+/// NULL. The cores return the bare content payload, so frame it header-ful.
+#[inline]
+fn ret_opt_text(fcinfo: &mut FunctionCallInfoBaseData, payload: Option<Vec<u8>>) -> Datum {
+    match payload {
+        Some(b) => {
+            fcinfo.set_ref_result(RefPayload::Varlena(frame_text(&b)));
             Datum::from_usize(0)
         }
         None => {
@@ -164,7 +210,7 @@ fn fc_jsonb_object_field_text(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let key = arg_text_payload(fcinfo, 1).to_vec();
     let m = scratch_mcx();
     let r = opt_bytes(ok(crate::getfield::jsonb_object_field_text(m.mcx(), &jb, &key)));
-    ret_opt_varlena(fcinfo, r)
+    ret_opt_text(fcinfo, r)
 }
 
 /// `jsonb_array_element(jsonb, int4) -> jsonb` (oid 3215): `jb -> n`.
@@ -182,7 +228,7 @@ fn fc_jsonb_array_element_text(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let n = arg_int32(fcinfo, 1);
     let m = scratch_mcx();
     let r = opt_bytes(ok(crate::getfield::jsonb_array_element_text(m.mcx(), &jb, n)));
-    ret_opt_varlena(fcinfo, r)
+    ret_opt_text(fcinfo, r)
 }
 
 /// `jsonb_extract_path(jsonb, variadic text[]) -> jsonb` (oid 3217): `jb #> path`.
@@ -200,7 +246,7 @@ fn fc_jsonb_extract_path_text(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let (_ndim, path) = arg_text_array(fcinfo, 1);
     let m = scratch_mcx();
     let r = opt_bytes(ok(crate::getfield::jsonb_extract_path_text(m.mcx(), &jb, &path)));
-    ret_opt_varlena(fcinfo, r)
+    ret_opt_text(fcinfo, r)
 }
 
 // ---------------------------------------------------------------------------
@@ -213,7 +259,7 @@ fn fc_json_object_field(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let fname = arg_text_payload(fcinfo, 1).to_vec();
     let m = scratch_mcx();
     let r = opt_bytes(ok(crate::getfield::json_object_field(m.mcx(), &json, &fname)));
-    ret_opt_varlena(fcinfo, r)
+    ret_opt_text(fcinfo, r)
 }
 
 /// `json_object_field_text(json, text) -> text` (oid 3948).
@@ -222,7 +268,7 @@ fn fc_json_object_field_text(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let fname = arg_text_payload(fcinfo, 1).to_vec();
     let m = scratch_mcx();
     let r = opt_bytes(ok(crate::getfield::json_object_field_text(m.mcx(), &json, &fname)));
-    ret_opt_varlena(fcinfo, r)
+    ret_opt_text(fcinfo, r)
 }
 
 /// `json_array_element(json, int4) -> json` (oid 3949).
@@ -231,7 +277,7 @@ fn fc_json_array_element(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let n = arg_int32(fcinfo, 1);
     let m = scratch_mcx();
     let r = opt_bytes(ok(crate::getfield::json_array_element(m.mcx(), &json, n)));
-    ret_opt_varlena(fcinfo, r)
+    ret_opt_text(fcinfo, r)
 }
 
 /// `json_array_element_text(json, int4) -> text` (oid 3950).
@@ -240,7 +286,7 @@ fn fc_json_array_element_text(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let n = arg_int32(fcinfo, 1);
     let m = scratch_mcx();
     let r = opt_bytes(ok(crate::getfield::json_array_element_text(m.mcx(), &json, n)));
-    ret_opt_varlena(fcinfo, r)
+    ret_opt_text(fcinfo, r)
 }
 
 /// `json_extract_path(json, variadic text[]) -> json` (oid 3951).
@@ -249,7 +295,7 @@ fn fc_json_extract_path(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let (_ndim, path) = arg_text_array(fcinfo, 1);
     let m = scratch_mcx();
     let r = opt_bytes(ok(crate::getfield::json_extract_path(m.mcx(), &json, &path)));
-    ret_opt_varlena(fcinfo, r)
+    ret_opt_text(fcinfo, r)
 }
 
 /// `json_extract_path_text(json, variadic text[]) -> text` (oid 3953).
@@ -258,7 +304,7 @@ fn fc_json_extract_path_text(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let (_ndim, path) = arg_text_array(fcinfo, 1);
     let m = scratch_mcx();
     let r = opt_bytes(ok(crate::getfield::json_extract_path_text(m.mcx(), &json, &path)));
-    ret_opt_varlena(fcinfo, r)
+    ret_opt_text(fcinfo, r)
 }
 
 // ---------------------------------------------------------------------------
@@ -337,7 +383,7 @@ fn fc_jsonb_pretty(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let jb = arg_jsonb_image(fcinfo, 0).to_vec();
     let m = scratch_mcx();
     let r = ok(crate::setops::jsonb_pretty(m.mcx(), &jb));
-    ret_varlena(fcinfo, r.as_slice().to_vec())
+    ret_text(fcinfo, r.as_slice().to_vec())
 }
 
 // ---------------------------------------------------------------------------
@@ -359,7 +405,7 @@ fn fc_json_strip_nulls(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let strip_in_arrays = arg_bool(fcinfo, 1);
     let m = scratch_mcx();
     let r = ok(crate::strip::json_strip_nulls(m.mcx(), &json, strip_in_arrays));
-    ret_varlena(fcinfo, r.as_slice().to_vec())
+    ret_text(fcinfo, r.as_slice().to_vec())
 }
 
 // ---------------------------------------------------------------------------
@@ -370,7 +416,7 @@ fn fc_json_strip_nulls(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 fn fc_jsonb_typeof(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let jb = arg_jsonb_image(fcinfo, 0).to_vec();
     let typ = ok(backend_utils_adt_jsonb::jsonb_typeof(&jb));
-    ret_varlena(fcinfo, typ.as_bytes().to_vec())
+    ret_text(fcinfo, typ.as_bytes().to_vec())
 }
 
 /// `jsonb_array_length(jsonb) -> int4` (oid 3207).

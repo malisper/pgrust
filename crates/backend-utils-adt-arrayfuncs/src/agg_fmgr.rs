@@ -122,20 +122,14 @@ fn ret_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     Datum::from_usize(0)
 }
 
-/// Set an `anyarray` (by-reference) result on the by-ref lane, header-stripped
-/// (symmetric with how the array arg lane delivers `anyarray`). Returns the
+/// Set an `anyarray` (by-reference) result on the by-ref lane. Returns the
 /// dummy by-value word.
 fn ret_array(fcinfo: &mut FunctionCallInfoBaseData, image: Vec<u8>) -> Datum {
     // `makeMdArrayResult` returns a full varlena (4-byte header + ARR_* body).
-    // The `RefPayload::Varlena` result lane carries the HEADER-LESS payload, which
-    // `ref_out_to_datum` (`byref_element_ondisk_image`) re-stamps with a fresh
-    // 4-byte `SET_VARSIZE` header into the canonical `ByRef` image. So strip the
-    // header here (exactly as numeric's `ret_numeric` does) — handing the lane the
-    // full header-ful image would double-stamp it and corrupt the array. The ARR
-    // dims/dataoffset are relative to the array start, so the strip+restamp of an
-    // identical 4-byte header preserves the layout.
-    let off = types_datum::varlena::varhdrsz_of(&image);
-    fcinfo.set_ref_result(RefPayload::Varlena(image[off..].to_vec()));
+    // Under the header-ful-everywhere convention the `RefPayload::Varlena` result
+    // lane carries that complete on-disk image verbatim (`ref_out_to_datum` no
+    // longer strips or re-stamps), so hand it back unchanged.
+    fcinfo.set_ref_result(RefPayload::Varlena(image));
     Datum::from_usize(0)
 }
 

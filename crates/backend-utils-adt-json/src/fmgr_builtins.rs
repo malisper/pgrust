@@ -36,15 +36,20 @@ use types_tuple::Datum as ValDatum;
 // Argument readers / result writers.
 // ---------------------------------------------------------------------------
 
-/// `PG_GETARG_TEXT_PP(i)` payload bytes (`VARDATA_ANY`): the lane carries
-/// `json`/`text` args header-stripped.
+/// `PG_GETARG_TEXT_PP(i)` payload bytes (`VARDATA_ANY`): under the header-ful
+/// convention the lane carries the full `json`/`text` varlena image, so strip
+/// its leading `VARHDRSZ` header to recover the payload the cores consume.
 #[inline]
 fn arg_text_payload<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    fcinfo
+    let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
-        .expect("json fn: by-ref `json`/`text` arg missing from by-ref lane")
+        .expect("json fn: by-ref `json`/`text` arg missing from by-ref lane");
+    &image[VARHDRSZ..]
 }
+
+/// `VARHDRSZ` — the uncompressed 4-byte varlena length-word size.
+const VARHDRSZ: usize = 4;
 
 /// `PG_GETARG_CSTRING(i)`: the input cstring on the by-ref lane.
 #[inline]
@@ -63,44 +68,11 @@ fn fn_expr_argtype(fcinfo: &FunctionCallInfoBaseData, i: i32) -> types_core::Oid
     fmgr_core::get_fn_expr_argtype(fcinfo.flinfo.as_deref(), i)
 }
 
-/// Normalize a `RefPayload::Varlena` lane image into the FULL varlena image
-/// (header present) the json value cores' `Datum::ByRef` convention requires.
-///
-/// The fmgr by-reference lane is not uniform: a *scalar* varlena type
-/// (`text`/`varchar`/numeric/...) crosses header-STRIPPED (`VARDATA_ANY`
-/// payload — what `PG_GETARG_TEXT_PP` consumers like `upper` read directly),
-/// while an *array*/composite varlena crosses as its full on-disk image (what
-/// `deconstruct_array`'s `detoast_attr` consumes). The json cores
-/// (`text_to_cstring_v`, `detoast_attr`) uniformly expect the full image, so
-/// re-attach a 4-byte varlena header to a stripped scalar payload; an image
-/// whose 4-byte header already accounts for its full byte length is passed
-/// through unchanged.
-fn varlena_full_image<'mcx>(mcx: mcx::Mcx<'mcx>, b: &[u8]) -> types_error::PgResult<ValDatum<'mcx>> {
-    // VARATT_IS_4B_U + VARSIZE == len ⇒ already a full uncompressed varlena
-    // image (an array / composite / numeric on-disk value). The 4-byte header's
-    // low two bits are 0 for the uncompressed 4-byte form, and the high 30 bits
-    // are the total size including the header.
-    let already_full = b.len() >= 4 && (b[0] & 0x03) == 0 && {
-        let hdr = u32::from_ne_bytes([b[0], b[1], b[2], b[3]]);
-        ((hdr >> 2) & 0x3FFF_FFFF) as usize == b.len()
-    };
-    if already_full {
-        return Ok(ValDatum::ByRef(mcx::slice_in(mcx, b)?));
-    }
-    // SET_VARSIZE(image, VARHDRSZ + len): native-order `(total) << 2`.
-    let total = 4 + b.len();
-    let mut image = mcx::vec_with_capacity_in::<u8>(mcx, total)?;
-    let header = ((total as u32) << 2).to_ne_bytes();
-    image.extend_from_slice(&header);
-    image.extend_from_slice(b);
-    Ok(ValDatum::ByRef(image))
-}
-
 /// Materialize argument `i` as the unified `types_tuple::Datum` the json value
 /// cores consume: a by-value scalar word, a by-reference varlena (`ByRef`, the
-/// FULL image — see [`varlena_full_image`]), a `cstring`, or a composite record
-/// (`Composite`). Scratch copies live in `mcx`. The arg must be non-NULL (every
-/// entry here is `proisstrict`).
+/// FULL header-ful image, carried verbatim under the header-ful convention), a
+/// `cstring`, or a composite record (`Composite`). Scratch copies live in `mcx`.
+/// The arg must be non-NULL (every entry here is `proisstrict`).
 fn arg_value<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     fcinfo: &FunctionCallInfoBaseData,
@@ -108,7 +80,7 @@ fn arg_value<'mcx>(
 ) -> types_error::PgResult<ValDatum<'mcx>> {
     // A by-reference arg rides the by-ref lane; a by-value arg is the bare word.
     Ok(match fcinfo.ref_arg(i) {
-        Some(RefPayload::Varlena(b)) => varlena_full_image(mcx, b)?,
+        Some(RefPayload::Varlena(b)) => ValDatum::ByRef(mcx::slice_in(mcx, b)?),
         Some(RefPayload::Cstring(s)) => ValDatum::Cstring(s.clone()),
         Some(RefPayload::Composite(image)) => ValDatum::Composite(
             types_tuple::FormedTuple::from_datum_image(mcx, image)?,
@@ -133,10 +105,16 @@ fn arg_value<'mcx>(
 }
 
 /// Set a `json`/`text`/`bytea` (by-reference) result on the by-ref lane and
-/// return the dummy by-value word.
+/// return the dummy by-value word. Under the header-ful convention the cores
+/// return the bare payload, so frame it as a full 4-byte-header varlena image
+/// (`SET_VARSIZE(image, VARHDRSZ + len)`, native-order `(total) << 2`).
 #[inline]
-fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
-    fcinfo.set_ref_result(RefPayload::Varlena(bytes));
+fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, payload: Vec<u8>) -> Datum {
+    let total = VARHDRSZ + payload.len();
+    let mut image = Vec::with_capacity(total);
+    image.extend_from_slice(&((total as u32) << 2).to_ne_bytes());
+    image.extend_from_slice(&payload);
+    fcinfo.set_ref_result(RefPayload::Varlena(image));
     Datum::from_usize(0)
 }
 

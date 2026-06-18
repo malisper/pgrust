@@ -2003,16 +2003,13 @@ fn prepare_value_elem<'mcx>(
     match v {
         TDatum::ByRef(bytes) => {
             if elmlen == -1 {
-                // Varlena: PG_DETOAST_DATUM. An on-disk array element must be a
-                // header-FUL varlena, but the executor's 6-arm `ByRef` lane has
-                // two conventions: a header-ful image (heap-deform / ref_out)
-                // OR a header-LESS payload (a parser/executor Const, e.g. a text
-                // literal carries its raw UTF-8 with no length word). Frame the
-                // header-less form before detoasting so VARSIZE is valid — the
-                // same `VARSIZE == len` disambiguation fmgr-core uses at the I/O
-                // boundary (byref_to_headerless_payload, inverted).
-                let framed = ensure_headerful_varlena(mcx, bytes)?;
-                let detoasted = detoast_seam::detoast_attr::call(mcx, &framed)?;
+                // Varlena: PG_DETOAST_DATUM. Under the header-ful-everywhere
+                // convention the executor's `Datum::ByRef` lane always carries a
+                // self-describing header-ful varlena image (heap-deform / ref_out
+                // / a Const literal framed at the parser boundary), so detoast it
+                // verbatim — `varsize_any` reads its length straight off the
+                // header (no header-less disambiguation, no restamp).
+                let detoasted = detoast_seam::detoast_attr::call(mcx, bytes)?;
                 Ok(PreparedElem::Bytes(detoasted))
             } else {
                 // Fixed-length by-ref (e.g. NAMEDATALEN / tid): copy verbatim.
@@ -2125,39 +2122,6 @@ fn store_prepared_elem(
     let aligned = foundation::att_align_nominal(inc, typalign);
     dest += aligned;
     dest
-}
-
-/// Normalize a 6-arm `ByRef` varlena element image to the header-FUL form an
-/// on-disk array element requires.
-///
-/// The executor's `Datum::ByRef` lane carries varlena elements in one of two
-/// conventions: a self-consistent header-ful varlena (`VARSIZE == len`, the
-/// heap-deform / `ref_out` form) OR a header-LESS raw payload (a parser/executor
-/// `Const`, e.g. a `text` literal carries bare UTF-8 with no length word). A
-/// header-ful image passes through verbatim; a header-less payload is framed
-/// with a 4-byte length header (`SET_VARSIZE`) so `varsize_any` / `detoast_attr`
-/// read a valid length. Mirror of `byref_to_headerless_payload` (fmgr-core),
-/// inverted, using the same `VARSIZE == len` disambiguation — no catalog typlen
-/// lookup, so it is correct on the boot path too.
-fn ensure_headerful_varlena<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
-    // Already a self-consistent 4-byte-header varlena.
-    if let Some(total) = types_datum::varlena::varsize_4b_of(bytes) {
-        if total == bytes.len() && total >= types_datum::varlena::VARHDRSZ {
-            return slice_to_pgvec(mcx, bytes);
-        }
-    }
-    // Already a self-consistent 1-byte ("short") header varlena.
-    if let Some(total) = types_datum::varlena::varsize_1b_of(bytes) {
-        if total == bytes.len() && total >= 1 {
-            return slice_to_pgvec(mcx, bytes);
-        }
-    }
-    // Header-less payload: frame as a 4-byte-header varlena (VARHDRSZ + payload).
-    let total = types_datum::varlena::VARHDRSZ + bytes.len();
-    let mut buf = mcx::vec_with_capacity_in::<u8>(mcx, total)?;
-    buf.extend_from_slice(&types_datum::varlena::set_varsize_4b(total));
-    buf.extend_from_slice(bytes);
-    Ok(buf)
 }
 
 /// Copy a byte slice into a fresh `mcx`-allocated `PgVec`.

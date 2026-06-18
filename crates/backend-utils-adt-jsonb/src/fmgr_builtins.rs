@@ -68,14 +68,23 @@ fn arg_jsonb_root<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8
     &arg_jsonb_image(fcinfo, i)[VARHDRSZ..]
 }
 
-/// `PG_GETARG_TEXT_PP(i)` payload bytes (`VARDATA_ANY`): the lane carries
-/// `text`/`bytea` args header-stripped.
+/// `PG_GETARG_TEXT_PP(i)` payload bytes (`VARDATA_ANY`): under the header-ful
+/// convention the lane carries the full `text` varlena image, so strip its
+/// leading `VARHDRSZ` header to recover the payload the cores consume.
 #[inline]
 fn arg_text_payload<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    &arg_varlena_image(fcinfo, i)[VARHDRSZ..]
+}
+
+/// The FULL by-reference varlena image of arg `i` (e.g. a detoasted `text[]`
+/// array), read off the by-ref lane verbatim (header-ful) — the form
+/// `deconstruct_text_array` and other whole-image consumers expect.
+#[inline]
+fn arg_varlena_image<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
     fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
-        .expect("jsonb fn: by-ref `text` arg missing from by-ref lane")
+        .expect("jsonb fn: by-ref varlena arg missing from by-ref lane")
 }
 
 /// `PG_GETARG_CSTRING(i)`: the input cstring on the by-ref lane.
@@ -327,14 +336,14 @@ fn fc_jsonb_exists(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 /// `deconstruct_text_array` seam.
 fn fc_jsonb_exists_any(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let jb = arg_jsonb_root(fcinfo, 0);
-    let keys = arg_text_payload(fcinfo, 1);
+    let keys = arg_varlena_image(fcinfo, 1);
     ret_bool(ok(backend_utils_adt_jsonb_op::jsonb_exists_any(jb, keys)))
 }
 
 /// `jsonb_exists_all(jsonb, _text) -> bool` (oid 4049).
 fn fc_jsonb_exists_all(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let jb = arg_jsonb_root(fcinfo, 0);
-    let keys = arg_text_payload(fcinfo, 1);
+    let keys = arg_varlena_image(fcinfo, 1);
     ret_bool(ok(backend_utils_adt_jsonb_op::jsonb_exists_all(jb, keys)))
 }
 
