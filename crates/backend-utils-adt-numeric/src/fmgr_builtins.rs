@@ -279,6 +279,8 @@ macro_rules! fc_numeric_scale_arg {
 
 fc_numeric_scale_arg!(fc_numeric_round, crate::ops_sql::numeric_round);
 fc_numeric_scale_arg!(fc_numeric_trunc, crate::ops_sql::numeric_trunc);
+// `numeric(numeric, int4)` — the typmod-application length-coercion cast.
+fc_numeric_scale_arg!(fc_numeric, crate::ops_sql::numeric);
 
 /// `numeric_scale(numeric) -> int4` (oid 3281): the display scale. C returns
 /// SQL NULL for special (NaN/Inf) inputs.
@@ -654,6 +656,8 @@ pub fn register_numeric_builtins() {
         // I/O: cstring <-> numeric.
         builtin(1701, "numeric_in", 3, true, false, fc_numeric_in),
         builtin(1702, "numeric_out", 1, true, false, fc_numeric_out),
+        // Length coercion (typmod application): numeric(numeric, int4) -> numeric.
+        builtin(1703, "numeric", 2, true, false, fc_numeric),
         // Unary numeric -> numeric.
         builtin(1704, "numeric_abs", 1, true, false, fc_numeric_abs),
         builtin(1771, "numeric_uminus", 1, true, false, fc_numeric_uminus),

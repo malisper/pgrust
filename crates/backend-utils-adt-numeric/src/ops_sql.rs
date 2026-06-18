@@ -599,6 +599,66 @@ pub fn numeric_round<'mcx>(mcx: Mcx<'mcx>, num: &[u8], scale: i32) -> PgResult<P
     make_result(mcx, &arg)
 }
 
+/// `numeric(num numeric, typmod int4)` (numeric.c:1246): the length-coercion
+/// (typmod-application) cast — adjust `num` to the precision/scale of `typmod`,
+/// erroring if it overflows. Returns a fresh on-disk image.
+pub fn numeric<'mcx>(mcx: Mcx<'mcx>, num: &[u8], typmod: i32) -> PgResult<PgVec<'mcx, u8>> {
+    use types_numeric::{
+        is_valid_numeric_typmod, numeric_dscale, numeric_is_short, numeric_typmod_precision,
+        numeric_typmod_scale, numeric_weight, NUMERIC_DSCALE_MASK, NUMERIC_SHORT_DSCALE_MASK,
+        NUMERIC_SHORT_DSCALE_SHIFT,
+    };
+
+    // Handle NaN and infinities: if apply_typmod_special doesn't complain, just
+    // return a copy of the input.
+    if numeric_is_special(num) {
+        crate::convert::apply_typmod_special(num, typmod)?;
+        return duplicate_numeric(mcx, num);
+    }
+
+    // If the value isn't a valid type modifier, simply return a copy of the
+    // input value.
+    if !is_valid_numeric_typmod(typmod) {
+        return duplicate_numeric(mcx, num);
+    }
+
+    let precision = numeric_typmod_precision(typmod);
+    let scale = numeric_typmod_scale(typmod);
+    let maxdigits = precision - scale;
+
+    // The target display scale is non-negative.
+    let dscale = scale.max(0);
+
+    // If the number is certainly in bounds and due to the target scale no
+    // rounding could be necessary, just make a copy of the input and modify its
+    // scale fields, unless the larger scale forces us to abandon the short
+    // representation.
+    let weight = numeric_weight(num);
+    let ddigits = (weight + 1) * DEC_DIGITS;
+    if ddigits <= maxdigits
+        && scale >= numeric_dscale(num) as i32
+        && (crate::convert::numeric_can_be_short(dscale, weight) || !numeric_is_short(num))
+    {
+        let mut new = duplicate_numeric(mcx, num)?;
+        let hw = u16::from_ne_bytes([new[VARHDRSZ_U], new[VARHDRSZ_U + 1]]);
+        let new_hw = if numeric_is_short(num) {
+            (hw & !NUMERIC_SHORT_DSCALE_MASK)
+                | ((dscale as u16) << NUMERIC_SHORT_DSCALE_SHIFT)
+        } else {
+            // n_sign_dscale = NUMERIC_SIGN(new) | (dscale & NUMERIC_DSCALE_MASK)
+            numeric_sign_word(num) | ((dscale as u16) & NUMERIC_DSCALE_MASK)
+        };
+        write_header_word(&mut new, new_hw);
+        return Ok(new);
+    }
+
+    // We really need to fiddle with things - unpack the number into a variable
+    // and let apply_typmod() do it.
+    let mut var = set_var_from_num(mcx, num)?;
+    crate::convert::apply_typmod(&mut var, typmod)?;
+    make_result(mcx, &var)
+}
+
 pub fn numeric_trunc<'mcx>(mcx: Mcx<'mcx>, num: &[u8], scale: i32) -> PgResult<PgVec<'mcx, u8>> {
     // numeric_trunc (numeric.c:1597).
     if numeric_is_special(num) {

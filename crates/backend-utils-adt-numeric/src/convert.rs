@@ -86,7 +86,7 @@ fn write_digits(dst: &mut [u8], digits: &[NumericDigit]) {
 
 /// `NUMERIC_CAN_BE_SHORT(scale, weight)` (numeric.c:500).
 #[inline]
-fn numeric_can_be_short(scale: i32, weight: i32) -> bool {
+pub(crate) fn numeric_can_be_short(scale: i32, weight: i32) -> bool {
     scale <= NUMERIC_SHORT_DSCALE_MAX as i32
         && (NUMERIC_SHORT_WEIGHT_MIN..=NUMERIC_SHORT_WEIGHT_MAX).contains(&weight)
 }
