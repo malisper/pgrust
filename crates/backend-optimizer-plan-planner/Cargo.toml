@@ -59,6 +59,8 @@ backend-optimizer-prep-prepqual = { path = "../backend-optimizer-prep-prepqual" 
 backend-optimizer-util-relnode = { path = "../backend-optimizer-util-relnode" }
 # set_cheapest.
 backend-optimizer-util-pathnode = { path = "../backend-optimizer-util-pathnode" }
+# assign_special_exec_param (ModifyTable epqParam).
+backend-optimizer-util-paramassign-seams = { path = "../backend-optimizer-util-paramassign-seams" }
 # AggClauseCostsLite carrier (create_agg_path / cost_agg cost input).
 backend-optimizer-util-pathnode-seams = { path = "../backend-optimizer-util-pathnode-seams" }
 # get_cheapest_fractional_path (allpaths seam).

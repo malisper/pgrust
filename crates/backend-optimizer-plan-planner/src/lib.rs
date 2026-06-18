@@ -1655,16 +1655,18 @@ fn grouping_planner<'mcx>(
              (planner.c:1917) — the limit upper path is not ported"
         );
     }
-    if command_type != CmdType::CMD_SELECT {
-        panic!(
-            "grouping_planner: INSERT/UPDATE/DELETE/MERGE adds \
-             create_modifytable_path (planner.c:2111) — not ported"
-        );
-    }
 
+    // For each surviving path of current_rel, optionally wrap it in a
+    // ModifyTable node (INSERT/UPDATE/DELETE/MERGE), then shove it into
+    // final_rel (C:1891-2131). LockRows / Limit wrappers are guarded out above.
     let surviving: Vec<PathId> = root.rel(current_rel).pathlist.clone();
     for path in surviving {
-        backend_optimizer_util_pathnode::add_path(root, final_rel, path)?;
+        let final_path = if command_type != CmdType::CMD_SELECT {
+            add_modifytable_to_path(root, run, final_rel, path)?
+        } else {
+            path
+        };
+        backend_optimizer_util_pathnode::add_path(root, final_rel, final_path)?;
     }
 
     // Partial paths for final_rel (C:2134-2146): final_rel->consider_parallel is
@@ -1675,6 +1677,133 @@ fn grouping_planner<'mcx>(
 
     // Note: caller (subquery_planner) does set_cheapest(final_rel) (C:2169).
     Ok(())
+}
+
+/// `bms_membership(set) == BMS_MULTIPLE` (bitmapset.c) — true if the relid set
+/// has more than one member. Counts set bits over the planner `Relids` word
+/// storage (`None` == empty == not multiple).
+fn relids_is_multiple(relids: &Relids) -> bool {
+    match relids {
+        None => false,
+        Some(bms) => bms.words.iter().map(|w| w.count_ones()).sum::<u32>() > 1,
+    }
+}
+
+/// The INSERT/UPDATE/DELETE/MERGE ModifyTable wrapper from the per-path loop of
+/// `grouping_planner` (planner.c:1925-2112). Builds the per-target-rel lists and
+/// calls `create_modifytable_path` over `subpath`, returning the wrapping
+/// ModifyTablePath. Bounded to the non-inherited, non-ON-CONFLICT, non-RETURNING
+/// INSERT/UPDATE/DELETE case (a single-row VALUES INSERT lands here); the
+/// inherited (`BMS_MULTIPLE`), MERGE, ON CONFLICT, RETURNING and
+/// WITH-CHECK-OPTION sub-cases error out faithfully because their per-target-rel
+/// node-list translation (`adjust_appendrel_attrs_multilevel` / the
+/// OnConflict/RETURNING/WCO node carriers) is not modeled here.
+fn add_modifytable_to_path<'mcx>(
+    root: &mut PlannerInfo,
+    run: &mut PlannerRun<'mcx>,
+    final_rel: RelId,
+    subpath: PathId,
+) -> PgResult<PathId> {
+    // Snapshot the parse fields and the root planner fields we need.
+    let (
+        command_type,
+        result_relation,
+        can_set_tag,
+        has_returning,
+        has_wco,
+        has_merge_action,
+        has_onconflict,
+    ) = {
+        let parse = run.resolve(root.parse);
+        (
+            parse.commandType,
+            parse.resultRelation,
+            parse.canSetTag,
+            !parse.returningList.is_empty(),
+            !parse.withCheckOptions.is_empty(),
+            !parse.mergeActionList.is_empty(),
+            parse.onConflict.is_some(),
+        )
+    };
+
+    // Inherited UPDATE/DELETE/MERGE (BMS_MULTIPLE) splits into per-leaf result
+    // rels via adjust_appendrel_attrs_multilevel (C:1937-2079) — not modeled.
+    if relids_is_multiple(&root.all_result_relids) {
+        panic!(
+            "grouping_planner: inherited UPDATE/DELETE/MERGE ModifyTable \
+             (BMS_MULTIPLE, planner.c:1937) — per-leaf result-rel translation \
+             is not ported"
+        );
+    }
+    if command_type == CmdType::CMD_MERGE {
+        panic!(
+            "grouping_planner: MERGE ModifyTable (planner.c:2095) — \
+             mergeActionList / mergeJoinCondition carriers are not ported"
+        );
+    }
+    if has_merge_action {
+        panic!("grouping_planner: ModifyTable mergeActionList is not ported");
+    }
+    if has_onconflict {
+        panic!(
+            "grouping_planner: INSERT ... ON CONFLICT ModifyTable \
+             (parse->onConflict) — OnConflictExpr carrier is not ported"
+        );
+    }
+    if has_returning {
+        panic!(
+            "grouping_planner: ModifyTable RETURNING (parse->returningList) — \
+             returningLists carrier is not ported"
+        );
+    }
+    if has_wco {
+        panic!(
+            "grouping_planner: ModifyTable WITH CHECK OPTION \
+             (parse->withCheckOptions) is not ported"
+        );
+    }
+
+    // Single-relation INSERT/UPDATE/DELETE (C:2082-2093). rootRelation = 0
+    // (there's no separate root rel). updateColnosLists is set for UPDATE.
+    let mut result_relations: Vec<i32> = Vec::with_capacity(1);
+    result_relations.push(result_relation);
+    let mut update_colnos_lists: Vec<Vec<types_core::primitive::AttrNumber>> = Vec::new();
+    if command_type == CmdType::CMD_UPDATE {
+        update_colnos_lists.push(root.update_colnos.clone());
+    }
+
+    // If there was a FOR [KEY] UPDATE/SHARE clause the LockRows node dealt with
+    // it; else ModifyTable handles it. parse->rowMarks is empty here (guarded
+    // out above), so rowMarks = root->rowMarks (also empty on this path).
+    let row_marks: Vec<types_pathnodes::NodeId> = Vec::new();
+
+    let part_cols_updated = root.partColsUpdated;
+    let epq_param = backend_optimizer_util_paramassign_seams::assign_special_exec_param::call(root)?;
+
+    // The planner's `CmdType` is the enum (types_nodes); the pathnode seam's
+    // `CmdType` is the `u32` alias (types_pathnodes). The discriminants agree
+    // (CMD_SELECT=1 .. CMD_MERGE=5), so cast.
+    let operation = command_type as u32;
+
+    backend_optimizer_util_pathnode::create::create_modifytable_path(
+        root,
+        final_rel,
+        subpath,
+        operation,
+        can_set_tag,
+        result_relation as types_core::primitive::Index,
+        0, // rootRelation
+        part_cols_updated,
+        result_relations,
+        update_colnos_lists,
+        Vec::new(), // withCheckOptionLists
+        Vec::new(), // returningLists
+        row_marks,
+        None, // onconflict
+        Vec::new(), // mergeActionLists
+        Vec::new(), // mergeJoinConditions
+        epq_param,
+    )
 }
 
 // ===========================================================================

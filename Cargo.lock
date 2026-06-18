@@ -12004,6 +12004,7 @@ dependencies = [
  "backend-optimizer-prep-preptlist",
  "backend-optimizer-prep-prepunion-seams",
  "backend-optimizer-util-clauses",
+ "backend-optimizer-util-paramassign-seams",
  "backend-optimizer-util-pathnode",
  "backend-optimizer-util-pathnode-seams",
  "backend-optimizer-util-relnode",
