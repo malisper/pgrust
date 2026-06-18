@@ -167,9 +167,9 @@ pub mod transform_null_equals_storage {
 
 /// `strVal(node)` — the string contents of a boxed `String` value node.
 fn str_val(node: &nodes::NodePtr<'_>) -> Option<String> {
-    match &**node {
-        Node::String(s) => Some(String::from(s.sval.as_str())),
-        _ => None,
+    match node.as_string() {
+        Some(s) => Some(String::from(s.sval.as_str())),
+        None => None,
     }
 }
 
@@ -1155,10 +1155,7 @@ fn clone_last_srf(pstate: &ParseState<'_>) -> Option<(types_nodes::nodes::NodeTa
 
 /// View the inner `Expr` of a boxed `p_last_srf` `Node`.
 fn node_as_expr<'a>(b: &'a nodes::NodePtr<'_>) -> Option<&'a Expr> {
-    match &**b {
-        Node::Expr(e) => Some(e),
-        _ => None,
-    }
+    b.as_expr()
 }
 
 // ===========================================================================
@@ -1880,39 +1877,38 @@ fn typename_type_id_and_mod<'mcx>(
 ) -> PgResult<(Oid, i32)> {
     let mut typmods: Vec<types_parsenodes::Node> = Vec::with_capacity(tn.typmods.len());
     for tm in tn.typmods.iter() {
-        let bridged: types_parsenodes::Node = match &**tm {
+        let bridged: types_parsenodes::Node = match tm.node_tag() {
             // `IsA(tm, A_Const)`: the literal rides in `A_Const.val`.
-            Node::A_Const(ac) => match ac.val.as_deref() {
-                Some(Node::Integer(i)) => types_parsenodes::Node::Integer(
-                    types_parsenodes::Integer { ival: i.ival },
-                ),
-                Some(Node::Float(f)) => {
+            nodes::ntag::T_A_Const => {
+                let ac = tm.expect_a_const();
+                if let Some(i) = ac.val.as_deref().and_then(|v| v.as_integer()) {
+                    types_parsenodes::Node::Integer(types_parsenodes::Integer { ival: i.ival })
+                } else if let Some(f) = ac.val.as_deref().and_then(|v| v.as_float()) {
                     types_parsenodes::Node::Float(types_parsenodes::Float {
                         fval: Some(String::from(f.fval.as_str())),
                     })
-                }
-                Some(Node::String(s)) => types_parsenodes::Node::String(
-                    types_parsenodes::StringNode {
+                } else if let Some(s) = ac.val.as_deref().and_then(|v| v.as_string()) {
+                    types_parsenodes::Node::String(types_parsenodes::StringNode {
                         sval: Some(String::from(s.sval.as_str())),
-                    },
-                ),
-                Some(Node::Boolean(b)) => types_parsenodes::Node::Boolean(
-                    types_parsenodes::Boolean { boolval: b.boolval },
-                ),
-                Some(Node::BitString(b)) => types_parsenodes::Node::BitString(
-                    types_parsenodes::BitString {
+                    })
+                } else if let Some(b) = ac.val.as_deref().and_then(|v| v.as_boolean()) {
+                    types_parsenodes::Node::Boolean(types_parsenodes::Boolean { boolval: b.boolval })
+                } else if let Some(b) = ac.val.as_deref().and_then(|v| v.as_bitstring()) {
+                    types_parsenodes::Node::BitString(types_parsenodes::BitString {
                         bsval: Some(String::from(b.bsval.as_str())),
-                    },
-                ),
-                // SQL NULL constant or any other val: not a simple constant; carry
-                // an A_Star so the owner rejects it with the C error message.
-                _ => types_parsenodes::Node::A_Star,
-            },
+                    })
+                } else {
+                    // SQL NULL constant or any other val: not a simple constant;
+                    // carry an A_Star so the owner rejects it with the C error.
+                    types_parsenodes::Node::A_Star
+                }
+            }
             // `IsA(tm, ColumnRef)` with a single String field is an identifier
             // typmod (the trimmed parser-node model carries it as a bare String).
-            Node::ColumnRef(cr) => {
+            nodes::ntag::T_ColumnRef => {
+                let cr = tm.expect_columnref();
                 if cr.fields.len() == 1 {
-                    if let Node::String(s) = &*cr.fields[0] {
+                    if let Some(s) = cr.fields[0].as_string() {
                         types_parsenodes::Node::String(types_parsenodes::StringNode {
                             sval: Some(String::from(s.sval.as_str())),
                         })
@@ -1932,18 +1928,17 @@ fn typename_type_id_and_mod<'mcx>(
     }
     let mut names: Vec<types_parsenodes::Node> = Vec::with_capacity(tn.names.len());
     for n in tn.names.iter() {
-        match &**n {
-            Node::String(s) => names.push(types_parsenodes::Node::String(
+        if let Some(s) = n.as_string() {
+            names.push(types_parsenodes::Node::String(
                 types_parsenodes::StringNode {
                     sval: Some(String::from(s.sval.as_str())),
                 },
-            )),
-            other => {
-                return Err(PgError::error(alloc::format!(
-                    "transformTypeCast: TypeName.names element is not a String node (tag {})",
-                    other.node_tag().0
-                )))
-            }
+            ));
+        } else {
+            return Err(PgError::error(alloc::format!(
+                "transformTypeCast: TypeName.names element is not a String node (tag {})",
+                n.node_tag().0
+            )));
         }
     }
     let mut array_bounds: Vec<types_parsenodes::Node> =
@@ -1951,13 +1946,14 @@ fn typename_type_id_and_mod<'mcx>(
     for n in tn.arrayBounds.iter() {
         // typeNameTypeId only tests `arrayBounds != NIL` (the bound values are
         // ignored by the lookup); carry the Integer bound through.
-        match &**n {
-            Node::Integer(i) => array_bounds.push(types_parsenodes::Node::Integer(
+        if let Some(i) = n.as_integer() {
+            array_bounds.push(types_parsenodes::Node::Integer(
                 types_parsenodes::Integer { ival: i.ival },
-            )),
-            _ => array_bounds.push(types_parsenodes::Node::Integer(
+            ));
+        } else {
+            array_bounds.push(types_parsenodes::Node::Integer(
                 types_parsenodes::Integer { ival: -1 },
-            )),
+            ));
         }
     }
     let tn_pn = types_parsenodes::TypeName {
@@ -2194,10 +2190,10 @@ pub fn ParseExprKindName(expr_kind: ParseExprKind) -> &'static str {
 /// View `pstate->p_last_srf` as an `&Expr` for passing to `make_op`'s
 /// `last_srf` argument (a `Node *` in C).
 fn last_srf_expr(pstate: &ParseState<'_>) -> Option<Expr> {
-    pstate.p_last_srf.as_ref().and_then(|b| match &**b {
-        Node::Expr(e) => Some(e.clone()),
-        _ => None,
-    })
+    pstate
+        .p_last_srf
+        .as_ref()
+        .and_then(|b| b.as_expr().map(|e| e.clone()))
 }
 
 // NB: the `pstate->p_last_srf` *write* for a set-returning operator is performed
@@ -2521,10 +2517,10 @@ fn namelist_to_string(fields: &mcx::PgVec<'_, nodes::NodePtr<'_>>) -> String {
         if i > 0 {
             out.push('.');
         }
-        match &**n {
-            Node::String(s) => out.push_str(s.sval.as_str()),
-            Node::A_Star(_) => out.push('*'),
-            _ => {}
+        if let Some(s) = n.as_string() {
+            out.push_str(s.sval.as_str());
+        } else if n.is_a_star() {
+            out.push('*');
         }
     }
     out
@@ -2906,9 +2902,9 @@ fn transformFuncCall<'mcx>(
     // WITHIN GROUP: treat the ORDER BY expressions as additional arguments.
     if fn_call.agg_within_group {
         for sb in fn_call.agg_order.iter() {
-            let node = match &**sb {
-                Node::SortBy(s) => s.node.as_deref().map(|n| n.clone_in(aexpr_clone_ctx(pstate))),
-                _ => None,
+            let node = match sb.as_sortby() {
+                Some(s) => s.node.as_deref().map(|n| n.clone_in(aexpr_clone_ctx(pstate))),
+                None => None,
             };
             let node = match node {
                 Some(r) => Some(r?),
