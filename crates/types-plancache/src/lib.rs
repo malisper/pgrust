@@ -8,16 +8,17 @@
 //! revalidate/check/build/invalidate routine). Only calls into *other*
 //! subsystems cross a seam.
 //!
-//! The querytree (`List *` of `Query`), the planned-statement list (`List *`
-//! of `PlannedStmt`), the raw/analyzed parse trees, the search-path matcher
-//! (`namespace.c`), the result `TupleDesc` (`tupdesc.c`), and the parameter /
-//! resource-owner / query-environment values are all owned by subsystems that
-//! are not yet ported. plancache never constructs or owns their internals; it
-//! refers to them by opaque identity and reads their fields through owner
-//! seam accessors — exactly the boundary `plancache.c` itself draws. Each such
-//! identity is a newtype token here (inherited opacity; no bare integer
-//! aliases). When an owner lands it replaces the token with its real type and
-//! updates the seam signatures.
+//! plancache de-handled its querytree / plan / parse-tree storage in #159
+//! STEP C: it now owns `Query` / `PlannedStmt` / `RawStmt` / `Expr` values,
+//! cloning them via `clone_in` into private `MemoryContext`s and crossing
+//! value seams. The querytree-list / plan-list / analyzed-query / expr /
+//! search-path-matcher / result-tupdesc / query-environment / param-list /
+//! parser-setup identity tokens that used to live here were retired with that
+//! switch (and their orphaned producer pc-seams deleted). What remains is
+//! value vocabulary — magic numbers, GUC-mode / cursor-option constants, the
+//! inval-item key, the syscache id set, and the inval callback aliases — plus
+//! the two raw/utility-statement tokens (`RawStmtHandle` / `UtilityStmtHandle`)
+//! that `types-foreigncmds` and `backend-tcop-postgres-seams` still name.
 
 #![no_std]
 #![allow(non_camel_case_types)]
@@ -80,43 +81,16 @@ macro_rules! opaque_handle {
     };
 }
 
-opaque_handle!(
-    /// Implementation-owned querytree `List *` (`List *query_list`, the
-    /// rewritten `Query` nodes), or the transient list a planner pass returns.
-    /// `0` models NIL. Owned by the parser/rewrite subsystem.
-    QueryListHandle, NIL
-);
-
-impl QueryListHandle {
-    /// Whether this is NIL (alias of [`is_null`](Self::is_null)).
-    #[inline]
-    pub fn is_nil(self) -> bool {
-        self.0 == 0
-    }
-}
-
-opaque_handle!(
-    /// One querytree element (`Query *`). `0` is NULL. Owned by parser/rewrite.
-    QueryHandle, NULL
-);
-
-opaque_handle!(
-    /// The cached plan's planned-statement list (`List *stmt_list`, the
-    /// `PlannedStmt` nodes from `pg_plan_queries`). `0` is NIL. Owned by the
-    /// planner; plancache reads its elements through the planner seam.
-    PlannedStmtListHandle, NIL
-);
-
-opaque_handle!(
-    /// One `PlannedStmt *` element of a [`PlannedStmtListHandle`]. `0` is NULL.
-    PlannedStmtHandle, NULL
-);
-
-opaque_handle!(
-    /// Analyzed query (`Query *analyzed_parse_tree`). `0` is NULL. Owned by
-    /// parser/analyze.
-    AnalyzedQueryHandle, NULL
-);
+// NOTE (#159 STEP C plancache de-handle prune): the querytree/plan/parse-tree
+// identity tokens that used to live here — QueryListHandle, QueryHandle,
+// PlannedStmtListHandle, PlannedStmtHandle, AnalyzedQueryHandle, ExprHandle,
+// TargetListHandle, SearchPathMatcherHandle, TupleDescHandle, QueryEnvHandle,
+// CtxId, ParserSetupHandle, PostRewriteHandle, ParamListInfoHandle — were
+// retired once plancache de-handled onto owned node values (it clones
+// Query/PlannedStmt/RawStmt/Expr via `clone_in` into private MemoryContexts and
+// crosses value seams instead). The orphaned producer pc-seams were deleted
+// with them. RawStmtHandle and UtilityStmtHandle stay below because
+// types-foreigncmds / backend-tcop-postgres-seams still name them.
 
 opaque_handle!(
     /// Raw parse tree (`RawStmt *raw_parse_tree`). `0` is NULL. Owned by the
@@ -125,103 +99,14 @@ opaque_handle!(
 );
 
 opaque_handle!(
-    /// An expression node (`Node *expr` of a `CachedExpression`). `0` is NULL.
-    ExprHandle, NULL
-);
-
-opaque_handle!(
-    /// Target `List *` (`targetList`/`returningList`). `0` is NIL.
-    TargetListHandle, NIL
-);
-
-opaque_handle!(
     /// Utility statement node (`Node *utilityStmt`). `0` is NULL.
     UtilityStmtHandle, NULL
-);
-
-opaque_handle!(
-    /// Implementation-owned `SearchPathMatcher *` (`namespace.c`). `0` is NULL.
-    SearchPathMatcherHandle, NULL
-);
-
-opaque_handle!(
-    /// Implementation-owned `TupleDesc` (`tupdesc.c`). `0` models a NULL
-    /// descriptor (statement returns no tuples).
-    TupleDescHandle, NULL
 );
 
 /// `ResourceOwner` (`resowner.c`) — the one canonical
 /// [`types_resowner::ResourceOwner`] handle, re-exported so plancache keeps
 /// naming it `ResourceOwnerHandle`.
 pub type ResourceOwnerHandle = types_resowner::ResourceOwner;
-
-opaque_handle!(
-    /// `ParamListInfo` boundParams. `0` is NULL.
-    ParamListInfoHandle, NULL
-);
-
-opaque_handle!(
-    /// `QueryEnvironment *`. `0` is NULL.
-    QueryEnvHandle, NULL
-);
-
-opaque_handle!(
-    /// `MemoryContext` identity (`memutils.c`). `0` is NULL. The plancache
-    /// memory-context manipulations (create / switch / set-parent / delete /
-    /// identifier) are owned by the mctx-remainder subsystem; plancache
-    /// threads this token through the mcxt seam.
-    CtxId, NULL
-);
-
-impl CtxId {
-    /// Whether a context handle is present.
-    #[inline]
-    pub fn is_some(self) -> bool {
-        self.0 != 0
-    }
-}
-
-opaque_handle!(
-    /// A parser-setup hook + its `void *arg`, threaded opaquely from
-    /// `CompleteCachedPlan` callers to the analyze seam. `0` means "no hook".
-    ParserSetupHandle, NONE
-);
-
-impl ParserSetupHandle {
-    /// Whether a hook is present.
-    #[inline]
-    pub fn is_some(self) -> bool {
-        self.0 != 0
-    }
-}
-
-opaque_handle!(
-    /// A post-rewrite hook + its `void *arg`. `0` means "no hook".
-    PostRewriteHandle, NONE
-);
-
-impl PostRewriteHandle {
-    /// Whether a hook is present.
-    #[inline]
-    pub fn is_some(self) -> bool {
-        self.0 != 0
-    }
-}
-
-/// One `RangeTblEntry`'s fields that plancache reads
-/// (`AcquireExecutorLocks`/`ScanQueryForLocks`/
-/// `CachedPlanAllowsSimpleValidityCheck`), bundled into a single seam crossing.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct RteFields {
-    /// `rte->rtekind` (`RTE_RELATION`/`RTE_SUBQUERY`/...).
-    pub rtekind: i32,
-    /// `rte->relid`.
-    pub relid: Oid,
-    /// `rte->rellockmode`.
-    pub rellockmode: i32,
-    /// `rte->subquery` (`Query *`), NULL if none.
-    pub subquery: QueryHandle,
-}
 
 /// The `(cacheId, hashValue)` pair of a `PlanInvalItem` (`plannodes.h`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

@@ -660,16 +660,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "backend-access-common-tupdesc-pc-seams"
-version = "0.0.0"
-dependencies = [
- "seam-core",
- "types-core",
- "types-error",
- "types-plancache",
-]
-
-[[package]]
 name = "backend-access-common-tupdesc-seams"
 version = "0.0.0"
 dependencies = [
@@ -4708,16 +4698,6 @@ dependencies = [
  "types-storage",
  "types-syscache",
  "types-tuple",
-]
-
-[[package]]
-name = "backend-catalog-namespace-pc-seams"
-version = "0.0.0"
-dependencies = [
- "seam-core",
- "types-core",
- "types-error",
- "types-plancache",
 ]
 
 [[package]]
@@ -11196,7 +11176,6 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
- "types-plancache",
 ]
 
 [[package]]
@@ -12584,16 +12563,6 @@ dependencies = [
  "types-nodes",
  "types-parsenodes",
  "types-rel",
-]
-
-[[package]]
-name = "backend-parser-analyze-pc-seams"
-version = "0.0.0"
-dependencies = [
- "seam-core",
- "types-core",
- "types-error",
- "types-plancache",
 ]
 
 [[package]]
@@ -14920,16 +14889,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "backend-rewrite-rewriteHandler-pc-seams"
-version = "0.0.0"
-dependencies = [
- "seam-core",
- "types-core",
- "types-error",
- "types-plancache",
-]
-
-[[package]]
 name = "backend-rewrite-rewriteRemove"
 version = "0.0.0"
 dependencies = [
@@ -16812,16 +16771,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "backend-tcop-pquery-pc-seams"
-version = "0.0.0"
-dependencies = [
- "seam-core",
- "types-core",
- "types-error",
- "types-plancache",
-]
-
-[[package]]
 name = "backend-tcop-pquery-pre-seams"
 version = "0.0.0"
 dependencies = [
@@ -16885,16 +16834,6 @@ dependencies = [
  "types-portal",
  "types-storage",
  "types-tuple",
-]
-
-[[package]]
-name = "backend-tcop-utility-pc-seams"
-version = "0.0.0"
-dependencies = [
- "seam-core",
- "types-core",
- "types-error",
- "types-plancache",
 ]
 
 [[package]]
@@ -21091,16 +21030,6 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-freepage",
-]
-
-[[package]]
-name = "backend-utils-mmgr-mcxt-pc-seams"
-version = "0.0.0"
-dependencies = [
- "seam-core",
- "types-core",
- "types-error",
- "types-plancache",
 ]
 
 [[package]]
