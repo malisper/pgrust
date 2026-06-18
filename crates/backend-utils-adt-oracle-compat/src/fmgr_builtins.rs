@@ -271,15 +271,15 @@ pub fn register_oracle_compat_builtins() {
         builtin(875, "ltrim", 2, fc_ltrim),
         builtin(876, "rtrim", 2, fc_rtrim),
         builtin(884, "btrim", 2, fc_btrim),
-        builtin(881, "ltrim", 1, fc_ltrim1),
-        builtin(882, "rtrim", 1, fc_rtrim1),
-        builtin(885, "btrim", 1, fc_btrim1),
+        builtin(881, "ltrim1", 1, fc_ltrim1),
+        builtin(882, "rtrim1", 1, fc_rtrim1),
+        builtin(885, "btrim1", 1, fc_btrim1),
         // ---- text(bpchar) cast (prosrc => rtrim1) ----
-        builtin(401, "text", 1, fc_text_bpchar),
+        builtin(401, "rtrim1", 1, fc_text_bpchar),
         // ---- trimming (bytea) ----
-        builtin(2015, "btrim", 2, fc_byteatrim),
-        builtin(6195, "ltrim", 2, fc_bytealtrim),
-        builtin(6196, "rtrim", 2, fc_byteartrim),
+        builtin(2015, "byteatrim", 2, fc_byteatrim),
+        builtin(6195, "bytealtrim", 2, fc_bytealtrim),
+        builtin(6196, "byteartrim", 2, fc_byteartrim),
         // ---- translate / ascii / chr / repeat ----
         builtin(878, "translate", 3, fc_translate),
         builtin(1620, "ascii", 1, fc_ascii),

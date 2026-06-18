@@ -89,6 +89,7 @@ backend-access-transam-twophase = { path = "../backend-access-transam-twophase" 
 backend-access-transam-varsup = { path = "../backend-access-transam-varsup" }
 backend-access-transam-xact = { path = "../backend-access-transam-xact" }
 backend-access-transam-xlog = { path = "../backend-access-transam-xlog" }
+backend-access-transam-xlogfuncs = { path = "../backend-access-transam-xlogfuncs" }
 backend-access-transam-xloginsert = { path = "../backend-access-transam-xloginsert" }
 backend-access-transam-xlogarchive = { path = "../backend-access-transam-xlogarchive" }
 backend-access-transam-xlogprefetcher = { path = "../backend-access-transam-xlogprefetcher" }
@@ -160,6 +161,7 @@ backend-commands-comment = { path = "../backend-commands-comment" }
 backend-commands-indexcmds = { path = "../backend-commands-indexcmds" }
 backend-commands-proclang = { path = "../backend-commands-proclang" }
 backend-commands-dbcommands = { path = "../backend-commands-dbcommands" }
+backend-commands-collationcmds = { path = "../backend-commands-collationcmds" }
 backend-commands-conversioncmds = { path = "../backend-commands-conversioncmds" }
 backend-commands-statscmds = { path = "../backend-commands-statscmds" }
 backend-commands-copyto = { path = "../backend-commands-copyto" }
@@ -354,6 +356,7 @@ backend-replication-syncrep-scanner = { path = "../backend-replication-syncrep-s
 backend-replication-repl-scanner = { path = "../backend-replication-repl-scanner" }
 backend-replication-syncrep = { path = "../backend-replication-syncrep" }
 backend-replication-slot = { path = "../backend-replication-slot" }
+backend-replication-slotfuncs = { path = "../backend-replication-slotfuncs" }
 backend-replication-walreceiver = { path = "../backend-replication-walreceiver" }
 backend-replication-walreceiverfuncs = { path = "../backend-replication-walreceiverfuncs" }
 backend-replication-walsender = { path = "../backend-replication-walsender" }
@@ -438,6 +441,15 @@ backend-utils-adt-dbsize = { path = "../backend-utils-adt-dbsize" }
 backend-utils-adt-char = { path = "../backend-utils-adt-char" }
 backend-utils-adt-oid = { path = "../backend-utils-adt-oid" }
 backend-utils-adt-int = { path = "../backend-utils-adt-int" }
+backend-utils-adt-int8 = { path = "../backend-utils-adt-int8" }
+backend-utils-adt-jsonb = { path = "../backend-utils-adt-jsonb" }
+backend-utils-adt-ascii = { path = "../backend-utils-adt-ascii" }
+backend-utils-adt-amutils = { path = "../backend-utils-adt-amutils" }
+backend-utils-adt-mcxtfuncs = { path = "../backend-utils-adt-mcxtfuncs" }
+backend-utils-adt-oracle-compat = { path = "../backend-utils-adt-oracle-compat" }
+backend-utils-adt-tsginidx = { path = "../backend-utils-adt-tsginidx" }
+backend-utils-adt-varbit = { path = "../backend-utils-adt-varbit" }
+backend-utils-adt-xid8funcs = { path = "../backend-utils-adt-xid8funcs" }
 backend-utils-adt-name = { path = "../backend-utils-adt-name" }
 backend-utils-adt-format-type = { path = "../backend-utils-adt-format-type" }
 backend-utils-adt-ruleutils = { path = "../backend-utils-adt-ruleutils" }

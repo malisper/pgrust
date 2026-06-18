@@ -82,6 +82,7 @@ pub fn init_all() {
     backend_access_transam_varsup::init_seams();
     backend_access_transam_xact::init_seams();
     backend_access_transam_xlog::init_seams();
+    backend_access_transam_xlogfuncs::init_seams();
     backend_access_transam_xlogarchive::init_seams();
     backend_access_transam_xloginsert::init_seams();
     backend_access_transam_xlogprefetcher::init_seams();
@@ -151,6 +152,7 @@ pub fn init_all() {
     backend_commands_indexcmds::init_seams();
     backend_commands_proclang::init_seams();
     backend_commands_dbcommands::init_seams();
+    backend_commands_collationcmds::init_seams();
     backend_commands_conversioncmds::init_seams();
     backend_commands_statscmds::init_seams();
     backend_commands_copyto::init_seams();
@@ -355,6 +357,7 @@ pub fn init_all() {
     backend_replication_repl_scanner::init_seams();
     backend_replication_syncrep::init_seams();
     backend_replication_slot::init_seams();
+    backend_replication_slotfuncs::init_seams();
     backend_replication_walreceiver::init_seams();
     backend_replication_walreceiverfuncs::init_seams();
     backend_replication_walsender::init_seams();
@@ -443,6 +446,15 @@ pub fn init_all() {
     backend_utils_adt_char::init_seams();
     backend_utils_adt_oid::init_seams();
     backend_utils_adt_int::init_seams();
+    backend_utils_adt_int8::init_seams();
+    backend_utils_adt_jsonb::init_seams();
+    backend_utils_adt_ascii::init_seams();
+    backend_utils_adt_amutils::init_seams();
+    backend_utils_adt_mcxtfuncs::init_seams();
+    backend_utils_adt_oracle_compat::init_seams();
+    backend_utils_adt_tsginidx::init_seams();
+    backend_utils_adt_varbit::init_seams();
+    backend_utils_adt_xid8funcs::init_seams();
     backend_utils_adt_name::init_seams();
     backend_utils_adt_float::init_seams();
     // libm provider: binds the float8 erf/erfc/tgamma/lgamma seams to the

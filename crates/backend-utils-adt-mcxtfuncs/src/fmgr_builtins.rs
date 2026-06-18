@@ -86,14 +86,15 @@ fn builtin(
 
 /// Register every expressible `mcxtfuncs.c` builtin (C: their `fmgr_builtins[]`
 /// rows). Called from this crate's `init_seams()`. OIDs/nargs/strict/retset
-/// transcribed exactly from `pg_proc.dat` (oid 4543: int4 → bool, no
-/// `proisstrict`/`proretset` so both default to false).
+/// transcribed exactly from the generated `fmgrtab.c` (oid 4543: int4 → bool;
+/// inherits `proisstrict BKI_DEFAULT(t)` so `strict = true`; no `proretset` so
+/// `retset = false`).
 pub fn register_mcxtfuncs_builtins() {
     backend_utils_fmgr_core::register_builtins([builtin(
         4543,
         "pg_log_backend_memory_contexts",
         1,
-        false,
+        true,
         false,
         fc_pg_log_backend_memory_contexts,
     )]);

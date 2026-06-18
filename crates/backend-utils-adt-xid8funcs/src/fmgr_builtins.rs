@@ -138,11 +138,11 @@ fn builtin(
 pub fn register_xid8funcs_builtins() {
     backend_utils_fmgr_core::register_builtins([
         // ---- current transaction id (no args) ----
-        builtin(2943, "txid_current", 0, true, false, fc_pg_current_xact_id),
+        builtin(2943, "pg_current_xact_id", 0, true, false, fc_pg_current_xact_id),
         builtin(5059, "pg_current_xact_id", 0, true, false, fc_pg_current_xact_id),
         builtin(
             3348,
-            "txid_current_if_assigned",
+            "pg_current_xact_id_if_assigned",
             0,
             true,
             false,
@@ -157,7 +157,7 @@ pub fn register_xid8funcs_builtins() {
             fc_pg_current_xact_id_if_assigned,
         ),
         // ---- transaction status (1 arg) ----
-        builtin(3360, "txid_status", 1, true, false, fc_pg_xact_status),
+        builtin(3360, "pg_xact_status", 1, true, false, fc_pg_xact_status),
         builtin(5066, "pg_xact_status", 1, true, false, fc_pg_xact_status),
     ]);
 }

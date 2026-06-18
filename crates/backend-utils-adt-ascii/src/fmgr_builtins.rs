@@ -162,8 +162,8 @@ fn builtin(
 /// `to_ascii`, all strict by default, none retset).
 pub fn register_ascii_builtins() {
     backend_utils_fmgr_core::register_builtins([
-        builtin(1845, "to_ascii", 1, true, false, fc_to_ascii_default),
-        builtin(1846, "to_ascii", 2, true, false, fc_to_ascii_enc),
-        builtin(1847, "to_ascii", 2, true, false, fc_to_ascii_encname),
+        builtin(1845, "to_ascii_default", 1, true, false, fc_to_ascii_default),
+        builtin(1846, "to_ascii_enc", 2, true, false, fc_to_ascii_enc),
+        builtin(1847, "to_ascii_encname", 2, true, false, fc_to_ascii_encname),
     ]);
 }
