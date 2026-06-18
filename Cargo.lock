@@ -19542,12 +19542,15 @@ dependencies = [
 name = "backend-utils-adt-xml"
 version = "0.0.0"
 dependencies = [
+ "backend-catalog-namespace",
  "backend-utils-adt-datetime",
  "backend-utils-adt-xml-libxml-seams",
  "backend-utils-adt-xml-seams",
+ "backend-utils-cache-lsyscache",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-error-elog-seams",
  "backend-utils-fmgr-core",
+ "backend-utils-mb-mbutils",
  "backend-utils-misc-guc-tables",
  "common-encnames-seams",
  "mcx",
@@ -19561,6 +19564,20 @@ dependencies = [
  "types-pgtime",
  "types-tuple",
  "types-wchar",
+ "types-xml",
+]
+
+[[package]]
+name = "backend-utils-adt-xml-libxml-ffi"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-xml",
+ "backend-utils-adt-xml-libxml-seams",
+ "libc",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
  "types-xml",
 ]
 
@@ -22621,6 +22638,7 @@ dependencies = [
  "backend-utils-adt-varlena",
  "backend-utils-adt-version",
  "backend-utils-adt-xml",
+ "backend-utils-adt-xml-libxml-ffi",
  "backend-utils-cache-attoptcache",
  "backend-utils-cache-catcache",
  "backend-utils-cache-evtcache",

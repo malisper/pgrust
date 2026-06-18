@@ -451,6 +451,7 @@ pub fn init_all() {
     backend_utils_adt_format_type::init_seams();
     backend_utils_adt_ruleutils::init_seams();
     backend_utils_adt_xml::init_seams();
+    backend_utils_adt_xml_libxml_ffi::init_seams();
     backend_utils_adt_geo_ops::init_seams();
     backend_utils_adt_formatting::init_seams();
     backend_utils_adt_json::init_seams();

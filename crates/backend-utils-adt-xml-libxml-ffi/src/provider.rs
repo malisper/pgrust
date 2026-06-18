@@ -1,0 +1,1137 @@
+//! The libxml2 binding + seam installs (only compiled with `with-libxml`).
+//!
+//! Mirrors `src/backend/utils/adt/xml.c`'s `#ifdef USE_LIBXML` bodies. Each
+//! seam install reproduces one C function's libxml2 call sequence:
+//!
+//!  * `xml_parse_libxml`      <- `xml_parse`           (xml.c:1748)
+//!  * `serialize_with_options`<- `xmltotext_with_options` (xml.c:638)
+//!  * `build_element`         <- `xmlelement`          (xml.c:864)
+//!  * `encode_special_chars`  <- `xmltext`             (xml.c:526)
+//!  * `encode_binary`         <- BYTEAOID arm of `map_sql_value_to_xml_value` (xml.c:2615)
+//!  * `xpath_eval`            <- `xpath_internal` + `xml_xpathobjtoxmlarray` (xml.c:4323/4243)
+//!  * `is_blank_ch`           <- `xmlIsBlank_ch`
+//!  * `get_utf8_char`         <- `xmlGetUTF8Char`
+//!  * `have_libxml`           <- the `NO_XML_SUPPORT()` condition (true here)
+//!
+//! Error handling: xml.c installs a structured libxml error handler via
+//! `pg_xml_init`. Here we mirror the *observable* contract (a libxml failure
+//! becomes a `PgError` with the matching SQLSTATE) by checking the documented
+//! return values (NULL doc / -1 result codes) rather than by re-publishing the
+//! collected diagnostic text — the diagnostic buffering is an internal detail
+//! the seams do not surface. We DO suppress libxml's default stderr printing and
+//! block external entity loading (`xmlSetExternalEntityLoader`) exactly as
+//! `pg_xml_init`/`xmlPgEntityLoader` do, so parses are sandboxed identically.
+
+use core::ffi::{c_char, c_int, c_uchar, c_void};
+
+use types_error::{
+    PgError, PgResult, ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_ARGUMENT_FOR_XQUERY,
+    ERRCODE_INVALID_XML_CONTENT, ERRCODE_INVALID_XML_DOCUMENT, ERRCODE_OUT_OF_MEMORY,
+};
+use types_nodes::primnodes::XmlOptionType;
+use types_xml::XmlBinaryType;
+
+use backend_utils_adt_xml as owner;
+use backend_utils_adt_xml_libxml_seams as seams;
+
+/* ===================================================================== *
+ *  Opaque libxml2 types. Only pointers cross the FFI.
+ * ===================================================================== */
+#[repr(C)]
+struct xmlDoc {
+    _p: [u8; 0],
+}
+#[repr(C)]
+struct xmlParserCtxt {
+    _p: [u8; 0],
+}
+#[repr(C)]
+struct xmlBuffer {
+    _p: [u8; 0],
+}
+#[repr(C)]
+struct xmlTextWriter {
+    _p: [u8; 0],
+}
+#[repr(C)]
+struct xmlSaveCtxt {
+    _p: [u8; 0],
+}
+#[repr(C)]
+struct xmlXPathContext {
+    _p: [u8; 0],
+}
+#[repr(C)]
+struct xmlXPathCompExpr {
+    _p: [u8; 0],
+}
+#[repr(C)]
+struct xmlXPathObject {
+    _p: [u8; 0],
+}
+
+/// `xmlNode` — we only read `type` (first int field after two pointers... but we
+/// never deref the struct layout directly except through accessor calls, so it
+/// stays opaque). Node-set members are read via `xmlXPathNodeSetItem`.
+#[repr(C)]
+struct xmlNode {
+    _p: [u8; 0],
+}
+
+/// `xmlNodeSet` — pointed at by `xmlXPathObject.nodesetval`; its fields are read
+/// through [`xmlNodeSetHdr`] (the libxml header accessors are macros, not
+/// exported symbols).
+#[repr(C)]
+struct xmlNodeSet {
+    _p: [u8; 0],
+}
+
+// libxml2 XML node types we must distinguish in `xml_xmlnodetoxmltype`.
+const XML_ATTRIBUTE_NODE: c_int = 2;
+const XML_TEXT_NODE: c_int = 3;
+const XML_DOCUMENT_NODE: c_int = 9;
+
+// `xmlXPathObjectType`.
+const XPATH_NODESET: c_int = 1;
+const XPATH_BOOLEAN: c_int = 2;
+const XPATH_NUMBER: c_int = 3;
+const XPATH_STRING: c_int = 4;
+
+// xmlParserOption bits used by xml_parse.
+const XML_PARSE_NOENT: c_int = 1 << 1;
+const XML_PARSE_DTDATTR: c_int = 1 << 3;
+const XML_PARSE_NOBLANKS: c_int = 1 << 8;
+const XML_PARSE_NONET: c_int = 1 << 11;
+
+// xmlSaveOption bits used by xmltotext_with_options.
+const XML_SAVE_FORMAT: c_int = 1 << 0;
+const XML_SAVE_NO_DECL: c_int = 1 << 1;
+
+type xmlExternalEntityLoader = unsafe extern "C" fn(
+    URL: *const c_char,
+    ID: *const c_char,
+    ctxt: *mut c_void,
+) -> *mut c_void;
+
+/* ===================================================================== *
+ *  libxml2 symbols (the subset xml.c actually invokes through its seams).
+ * ===================================================================== */
+extern "C" {
+    fn xmlInitParser();
+    fn xmlFree(p: *mut c_void);
+
+    // parsing
+    fn xmlNewParserCtxt() -> *mut xmlParserCtxt;
+    fn xmlFreeParserCtxt(ctxt: *mut xmlParserCtxt);
+    fn xmlCtxtReadDoc(
+        ctxt: *mut xmlParserCtxt,
+        cur: *const c_uchar,
+        URL: *const c_char,
+        encoding: *const c_char,
+        options: c_int,
+    ) -> *mut xmlDoc;
+    fn xmlCtxtReadMemory(
+        ctxt: *mut xmlParserCtxt,
+        buffer: *const c_char,
+        size: c_int,
+        URL: *const c_char,
+        encoding: *const c_char,
+        options: c_int,
+    ) -> *mut xmlDoc;
+    fn xmlNewDoc(version: *const c_uchar) -> *mut xmlDoc;
+    fn xmlFreeDoc(doc: *mut xmlDoc);
+    fn xmlParseBalancedChunkMemory(
+        doc: *mut xmlDoc,
+        sax: *mut c_void,
+        user_data: *mut c_void,
+        depth: c_int,
+        string: *const c_uchar,
+        lst: *mut *mut xmlNode,
+    ) -> c_int;
+    fn xmlKeepBlanksDefault(val: c_int) -> c_int;
+    fn xmlDocSetRootElement(doc: *mut xmlDoc, root: *mut xmlNode) -> *mut xmlNode;
+    fn xmlNewNode(ns: *mut c_void, name: *const c_uchar) -> *mut xmlNode;
+    fn xmlNewDocText(doc: *mut xmlDoc, content: *const c_uchar) -> *mut xmlNode;
+    fn xmlAddChildList(parent: *mut xmlNode, cur: *mut xmlNode) -> *mut xmlNode;
+    fn xmlFreeNode(node: *mut xmlNode);
+
+    // buffers
+    fn xmlBufferCreate() -> *mut xmlBuffer;
+    fn xmlBufferFree(buf: *mut xmlBuffer);
+    fn xmlBufferContent(buf: *const xmlBuffer) -> *const c_uchar;
+    fn xmlBufferLength(buf: *const xmlBuffer) -> c_int;
+
+    // serialization (save)
+    fn xmlSaveToBuffer(
+        buffer: *mut xmlBuffer,
+        encoding: *const c_char,
+        options: c_int,
+    ) -> *mut xmlSaveCtxt;
+    fn xmlSaveDoc(ctxt: *mut xmlSaveCtxt, doc: *mut xmlDoc) -> std::os::raw::c_long;
+    fn xmlSaveTree(ctxt: *mut xmlSaveCtxt, node: *mut xmlNode) -> std::os::raw::c_long;
+    fn xmlSaveClose(ctxt: *mut xmlSaveCtxt) -> c_int;
+
+    // node dump / copy (xml_xmlnodetoxmltype)
+    fn xmlNodeDump(
+        buf: *mut xmlBuffer,
+        doc: *mut xmlDoc,
+        cur: *mut xmlNode,
+        level: c_int,
+        format: c_int,
+    ) -> c_int;
+    fn xmlCopyNode(node: *mut xmlNode, extended: c_int) -> *mut xmlNode;
+
+    // text writer (xmlelement / encode_binary / encode_special_chars)
+    fn xmlNewTextWriterMemory(buf: *mut xmlBuffer, compression: c_int) -> *mut xmlTextWriter;
+    fn xmlFreeTextWriter(writer: *mut xmlTextWriter);
+    fn xmlTextWriterStartElement(writer: *mut xmlTextWriter, name: *const c_uchar) -> c_int;
+    fn xmlTextWriterEndElement(writer: *mut xmlTextWriter) -> c_int;
+    fn xmlTextWriterWriteAttribute(
+        writer: *mut xmlTextWriter,
+        name: *const c_uchar,
+        content: *const c_uchar,
+    ) -> c_int;
+    fn xmlTextWriterWriteRaw(writer: *mut xmlTextWriter, content: *const c_uchar) -> c_int;
+    fn xmlTextWriterWriteBase64(
+        writer: *mut xmlTextWriter,
+        data: *const c_char,
+        start: c_int,
+        len: c_int,
+    ) -> c_int;
+    fn xmlTextWriterWriteBinHex(
+        writer: *mut xmlTextWriter,
+        data: *const c_char,
+        start: c_int,
+        len: c_int,
+    ) -> c_int;
+    fn xmlEncodeSpecialChars(doc: *const xmlDoc, input: *const c_uchar) -> *mut c_uchar;
+
+    // XPath
+    fn xmlXPathNewContext(doc: *mut xmlDoc) -> *mut xmlXPathContext;
+    fn xmlXPathFreeContext(ctxt: *mut xmlXPathContext);
+    fn xmlXPathRegisterNs(
+        ctxt: *mut xmlXPathContext,
+        prefix: *const c_uchar,
+        ns_uri: *const c_uchar,
+    ) -> c_int;
+    fn xmlXPathCtxtCompile(
+        ctxt: *mut xmlXPathContext,
+        expr: *const c_uchar,
+    ) -> *mut xmlXPathCompExpr;
+    fn xmlXPathFreeCompExpr(comp: *mut xmlXPathCompExpr);
+    fn xmlXPathCompiledEval(
+        comp: *mut xmlXPathCompExpr,
+        ctxt: *mut xmlXPathContext,
+    ) -> *mut xmlXPathObject;
+    fn xmlXPathFreeObject(obj: *mut xmlXPathObject);
+    fn xmlXPathCastNodeToString(node: *mut xmlNode) -> *mut c_uchar;
+
+    // entity loader sandboxing (pg_xml_init / xmlPgEntityLoader)
+    fn xmlSetExternalEntityLoader(f: Option<xmlExternalEntityLoader>);
+    fn xmlSetStructuredErrorFunc(ctx: *mut c_void, handler: Option<xmlStructuredErrorFunc>);
+
+    fn xmlStrlen(s: *const c_uchar) -> c_int;
+}
+
+type xmlStructuredErrorFunc = unsafe extern "C" fn(user_data: *mut c_void, error: *mut c_void);
+
+/* ===================================================================== *
+ *  xmlNode / xmlDoc / xmlXPathObject field accessors.
+ *
+ *  libxml2's public structs ARE part of its stable ABI, but we only need a
+ *  handful of fields. To avoid hand-mirroring the whole layout we read them
+ *  through tiny `#[repr(C)]` prefixes that match the documented field order.
+ *  These layouts are fixed across all libxml2 2.x releases (xml.c relies on
+ *  the same stability, e.g. reading `doc->encoding`, `node->type`,
+ *  `node->children`, `node->next`, `node->prev`, `xpathobj->type`).
+ * ===================================================================== */
+
+/// Prefix of `struct _xmlNode` (tree.h) up through the fields xml.c reads.
+#[repr(C)]
+struct xmlNodeHdr {
+    _private: *mut c_void,
+    type_: c_int,
+    name: *const c_uchar,
+    children: *mut xmlNode,
+    last: *mut xmlNode,
+    parent: *mut xmlNode,
+    next: *mut xmlNode,
+    prev: *mut xmlNode,
+    doc: *mut xmlDoc,
+}
+
+/// Prefix of `struct _xmlDoc` (tree.h) up through `standalone`/`encoding`.
+#[repr(C)]
+struct xmlDocHdr {
+    _private: *mut c_void,
+    type_: c_int,
+    name: *const c_char,
+    children: *mut xmlNode,
+    last: *mut xmlNode,
+    parent: *mut xmlNode,
+    next: *mut xmlNode,
+    prev: *mut xmlNode,
+    doc: *mut xmlDoc,
+    // doc-specific:
+    compression: c_int,
+    standalone: c_int,
+    int_subset: *mut c_void,
+    ext_subset: *mut c_void,
+    old_ns: *mut c_void,
+    version: *const c_uchar,
+    encoding: *const c_uchar,
+}
+
+/// `struct _xmlNodeSet` (xpath.h). `xmlXPathNodeSetGetLength` /
+/// `xmlXPathNodeSetItem` are header *macros* in libxml2 (not exported
+/// symbols), so we read these fields directly, exactly as those macros do.
+#[repr(C)]
+struct xmlNodeSetHdr {
+    node_nr: c_int,
+    node_max: c_int,
+    node_tab: *mut *mut xmlNode,
+}
+
+/// Prefix of `struct _xmlXPathObject` (xpath.h).
+#[repr(C)]
+struct xmlXPathObjectHdr {
+    type_: c_int,
+    nodesetval: *mut xmlNodeSet,
+    boolval: c_int,
+    floatval: f64,
+    stringval: *mut c_uchar,
+}
+
+#[inline]
+unsafe fn node_type(node: *mut xmlNode) -> c_int {
+    (*(node as *const xmlNodeHdr)).type_
+}
+#[inline]
+unsafe fn node_children(node: *mut xmlNode) -> *mut xmlNode {
+    (*(node as *const xmlNodeHdr)).children
+}
+#[inline]
+unsafe fn node_next(node: *mut xmlNode) -> *mut xmlNode {
+    (*(node as *const xmlNodeHdr)).next
+}
+#[inline]
+unsafe fn node_prev(node: *mut xmlNode) -> *mut xmlNode {
+    (*(node as *const xmlNodeHdr)).prev
+}
+#[inline]
+unsafe fn doc_set_encoding_utf8(doc: *mut xmlDoc) {
+    // doc->encoding = xmlStrdup("UTF-8"); standalone is set separately.
+    let hdr = doc as *mut xmlDocHdr;
+    (*hdr).encoding = xmlStrdupConst(b"UTF-8\0".as_ptr() as *const c_uchar);
+}
+#[inline]
+unsafe fn doc_set_standalone(doc: *mut xmlDoc, standalone: c_int) {
+    (*(doc as *mut xmlDocHdr)).standalone = standalone;
+}
+
+extern "C" {
+    fn xmlStrdup(cur: *const c_uchar) -> *mut c_uchar;
+}
+#[inline]
+unsafe fn xmlStrdupConst(s: *const c_uchar) -> *const c_uchar {
+    xmlStrdup(s) as *const c_uchar
+}
+
+/* ===================================================================== *
+ *  Small helpers.
+ * ===================================================================== */
+
+/// A NUL-terminated copy of `bytes` for passing to libxml as an `xmlChar*`.
+fn cstr(bytes: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(bytes.len() + 1);
+    v.extend_from_slice(bytes);
+    v.push(0);
+    v
+}
+
+/// Read a NUL-terminated libxml `xmlChar*` into an owned `Vec<u8>` (no trailing
+/// NUL), without freeing it.
+unsafe fn xmlchar_to_vec(p: *const c_uchar) -> Vec<u8> {
+    if p.is_null() {
+        return Vec::new();
+    }
+    let len = xmlStrlen(p) as usize;
+    std::slice::from_raw_parts(p as *const u8, len).to_vec()
+}
+
+fn oom(msg: &str) -> PgError {
+    PgError::error(msg.to_string()).with_sqlstate(ERRCODE_OUT_OF_MEMORY)
+}
+
+/// Outputs of the owner's `parse_xml_decl` we care about.
+struct XmlDecl {
+    /// byte length consumed by the declaration (C `*lenp`).
+    count: usize,
+    /// declared version, if any.
+    version: Option<Vec<u8>>,
+    /// standalone flag (-1 = not present).
+    standalone: i32,
+    /// res_code (0 == valid declaration / no declaration).
+    res_code: i32,
+}
+
+/// Thin wrapper over the owner's `parse_xml_decl(str, &lenp, &version, _, &standalone)`.
+fn parse_xml_decl(data: &[u8]) -> PgResult<XmlDecl> {
+    let mut count: usize = 0;
+    let mut version: Option<Vec<u8>> = None;
+    let mut standalone: i32 = 0;
+    let res_code = owner::parse_xml_decl(
+        data,
+        Some(&mut count),
+        Some(&mut version),
+        None,
+        Some(&mut standalone),
+    )?;
+    Ok(XmlDecl {
+        count,
+        version,
+        standalone,
+        res_code,
+    })
+}
+
+/// libxml entity loader that refuses every external fetch — mirrors
+/// `xmlPgEntityLoader` (xml.c), which returns NULL to block external DTDs/URLs.
+unsafe extern "C" fn pg_entity_loader(
+    _url: *const c_char,
+    _id: *const c_char,
+    _ctxt: *mut c_void,
+) -> *mut c_void {
+    core::ptr::null_mut()
+}
+
+/// Silence libxml's default stderr error printing. `pg_xml_init` installs a
+/// structured handler that buffers diagnostics into PostgreSQL's error context;
+/// we install a no-op structured handler (the seams surface failures via return
+/// values), which also suppresses libxml's default stderr output.
+unsafe extern "C" fn silent_structured_error(_ud: *mut c_void, _err: *mut c_void) {}
+
+/// `pg_xml_init`: one-time parser init + install our sandboxing handlers.
+/// Idempotent; cheap to call before each operation as xml.c does.
+unsafe fn pg_xml_init() {
+    xmlInitParser();
+    xmlSetExternalEntityLoader(Some(pg_entity_loader));
+    xmlSetStructuredErrorFunc(core::ptr::null_mut(), Some(silent_structured_error));
+}
+
+/* ===================================================================== *
+ *  Seam bodies.
+ * ===================================================================== */
+
+/// C `xml_parse` (xml.c:1748) reduced to its libxml core. `data` is already
+/// server-encoded; the in-crate body has handed us the bytes + declared
+/// `encoding`. We convert to a NUL-terminated UTF-8 buffer (the in-crate code
+/// only calls this on UTF-8-convertible input; non-UTF8 server encodings are
+/// converted to UTF-8 by the `any_to_server`/encoding seams before reaching
+/// here in xml.c — but since the seam hands us bytes already in the server
+/// encoding plus the encoding id, and the only supported path for libxml is
+/// UTF-8, we treat the bytes as UTF-8 and let libxml's parser validate).
+///
+/// Returns `Ok(Ok(true))` when the document/content parses well-formed.
+/// A malformed parse becomes `Ok(Err(soft))` so the caller can choose soft vs
+/// hard reporting (it currently escalates to a hard error via `?`).
+fn xml_parse_libxml(
+    data: &[u8],
+    xmloption_arg: XmlOptionType,
+    preserve_whitespace: bool,
+    _encoding: i32,
+) -> PgResult<core::result::Result<bool, PgError>> {
+    unsafe {
+        pg_xml_init();
+
+        // Decide document vs content (xml.c: parse_xml_decl + xml_doctype_in_content,
+        // both ported in the owner crate as pure helpers).
+        let mut count: usize = 0;
+        let mut parse_as_document = matches!(xmloption_arg, XmlOptionType::XMLOPTION_DOCUMENT);
+        let mut version_bytes: Option<Vec<u8>> = None;
+        let mut standalone: i32 = 0;
+
+        if !parse_as_document {
+            let decl = parse_xml_decl(data)?;
+            if decl.res_code != 0 {
+                return Ok(Err(PgError::error(
+                    "invalid XML content: invalid XML declaration",
+                )
+                .with_sqlstate(ERRCODE_INVALID_XML_CONTENT)));
+            }
+            count = decl.count;
+            standalone = decl.standalone;
+            version_bytes = decl.version;
+            let tail = &data[count.min(data.len())..];
+            if owner::xml_doctype_in_content(tail)? {
+                parse_as_document = true;
+            }
+        }
+
+        if parse_as_document {
+            let ctxt = xmlNewParserCtxt();
+            if ctxt.is_null() {
+                return Err(oom("could not allocate parser context"));
+            }
+            let options = XML_PARSE_NOENT
+                | XML_PARSE_DTDATTR
+                | XML_PARSE_NONET
+                | if preserve_whitespace { 0 } else { XML_PARSE_NOBLANKS };
+            let buf = cstr(data);
+            let doc = xmlCtxtReadDoc(
+                ctxt,
+                buf.as_ptr() as *const c_uchar,
+                core::ptr::null(),
+                b"UTF-8\0".as_ptr() as *const c_char,
+                options,
+            );
+            let result = if doc.is_null() {
+                let (code, msg) = match xmloption_arg {
+                    XmlOptionType::XMLOPTION_DOCUMENT => {
+                        (ERRCODE_INVALID_XML_DOCUMENT, "invalid XML document")
+                    }
+                    _ => (ERRCODE_INVALID_XML_CONTENT, "invalid XML content"),
+                };
+                Ok(Err(PgError::error(msg.to_string()).with_sqlstate(code)))
+            } else {
+                xmlFreeDoc(doc);
+                Ok(Ok(true))
+            };
+            xmlFreeParserCtxt(ctxt);
+            result
+        } else {
+            // content fragment via xmlParseBalancedChunkMemory.
+            let version_c = version_bytes.as_ref().map(|v| cstr(v));
+            let version_ptr = version_c
+                .as_ref()
+                .map(|v| v.as_ptr() as *const c_uchar)
+                .unwrap_or(core::ptr::null());
+            let doc = xmlNewDoc(version_ptr);
+            if doc.is_null() {
+                return Err(oom("could not allocate XML document"));
+            }
+            doc_set_encoding_utf8(doc);
+            doc_set_standalone(doc, standalone);
+            let save = xmlKeepBlanksDefault(if preserve_whitespace { 1 } else { 0 });
+
+            let tail = &data[count.min(data.len())..];
+            let result = if !tail.is_empty() {
+                let chunk = cstr(tail);
+                let mut nodes: *mut xmlNode = core::ptr::null_mut();
+                let rc = xmlParseBalancedChunkMemory(
+                    doc,
+                    core::ptr::null_mut(),
+                    core::ptr::null_mut(),
+                    0,
+                    chunk.as_ptr() as *const c_uchar,
+                    &mut nodes,
+                );
+                if rc != 0 {
+                    Ok(Err(PgError::error("invalid XML content".to_string())
+                        .with_sqlstate(ERRCODE_INVALID_XML_CONTENT)))
+                } else {
+                    Ok(Ok(true))
+                }
+            } else {
+                Ok(Ok(true))
+            };
+
+            xmlKeepBlanksDefault(save);
+            xmlFreeDoc(doc);
+            result
+        }
+    }
+}
+
+/// C `xmltext` (xml.c:526) libxml core: `xmlEncodeSpecialChars(NULL, arg)`.
+fn encode_special_chars(arg: &[u8]) -> PgResult<Vec<u8>> {
+    unsafe {
+        let input = cstr(arg);
+        let out = xmlEncodeSpecialChars(core::ptr::null(), input.as_ptr() as *const c_uchar);
+        if out.is_null() {
+            return Err(oom("could not allocate xmlBuffer"));
+        }
+        let v = xmlchar_to_vec(out);
+        xmlFree(out as *mut c_void);
+        Ok(v)
+    }
+}
+
+/// C `xmltotext_with_options` (xml.c:638) — parse then optionally indent-serialize.
+/// The seam is only reached for the `indent` (or DOCUMENT) path; the non-indent
+/// content fast-return is handled in the owner crate before the seam call.
+fn serialize_with_options(
+    data: &[u8],
+    xmloption_arg: XmlOptionType,
+    indent: bool,
+    _encoding: i32,
+) -> PgResult<Vec<u8>> {
+    unsafe {
+        pg_xml_init();
+
+        // Parse (preserve_whitespace = !indent), tracking doc vs content.
+        let preserve_whitespace = !indent;
+        let mut count: usize = 0;
+        let mut parse_as_document = matches!(xmloption_arg, XmlOptionType::XMLOPTION_DOCUMENT);
+        let mut version_bytes: Option<Vec<u8>> = None;
+        let mut standalone: i32 = 0;
+
+        if !parse_as_document {
+            let decl = parse_xml_decl(data)?;
+            count = decl.count;
+            standalone = decl.standalone;
+            version_bytes = decl.version;
+            let tail = &data[count.min(data.len())..];
+            if owner::xml_doctype_in_content(tail)? {
+                parse_as_document = true;
+            }
+        }
+
+        let doc;
+        let mut content_nodes: *mut xmlNode = core::ptr::null_mut();
+        if parse_as_document {
+            let ctxt = xmlNewParserCtxt();
+            if ctxt.is_null() {
+                return Err(oom("could not allocate parser context"));
+            }
+            let options = XML_PARSE_NOENT
+                | XML_PARSE_DTDATTR
+                | XML_PARSE_NONET
+                | if preserve_whitespace { 0 } else { XML_PARSE_NOBLANKS };
+            let buf = cstr(data);
+            doc = xmlCtxtReadDoc(
+                ctxt,
+                buf.as_ptr() as *const c_uchar,
+                core::ptr::null(),
+                b"UTF-8\0".as_ptr() as *const c_char,
+                options,
+            );
+            xmlFreeParserCtxt(ctxt);
+            if doc.is_null() {
+                return Err(PgError::error("not an XML document")
+                    .with_sqlstate(types_error::ERRCODE_NOT_AN_XML_DOCUMENT));
+            }
+        } else {
+            let version_c = version_bytes.as_ref().map(|v| cstr(v));
+            let version_ptr = version_c
+                .as_ref()
+                .map(|v| v.as_ptr() as *const c_uchar)
+                .unwrap_or(core::ptr::null());
+            doc = xmlNewDoc(version_ptr);
+            if doc.is_null() {
+                return Err(oom("could not allocate XML document"));
+            }
+            doc_set_encoding_utf8(doc);
+            doc_set_standalone(doc, standalone);
+            let save = xmlKeepBlanksDefault(if preserve_whitespace { 1 } else { 0 });
+            let tail = &data[count.min(data.len())..];
+            if !tail.is_empty() {
+                let chunk = cstr(tail);
+                let rc = xmlParseBalancedChunkMemory(
+                    doc,
+                    core::ptr::null_mut(),
+                    core::ptr::null_mut(),
+                    0,
+                    chunk.as_ptr() as *const c_uchar,
+                    &mut content_nodes,
+                );
+                if rc != 0 {
+                    xmlKeepBlanksDefault(save);
+                    xmlFreeDoc(doc);
+                    return Err(PgError::error("not an XML document")
+                        .with_sqlstate(types_error::ERRCODE_NOT_AN_XML_DOCUMENT));
+                }
+            }
+            xmlKeepBlanksDefault(save);
+        }
+
+        // If we weren't asked to indent, the owner returns the input unchanged
+        // and never calls us; but guard anyway.
+        if !indent {
+            let out = data.to_vec();
+            xmlFreeDoc(doc);
+            return Ok(out);
+        }
+
+        // Indent-serialize.
+        let result = serialize_indented(doc, data, parse_as_document, content_nodes);
+        xmlFreeDoc(doc);
+        result
+    }
+}
+
+unsafe fn serialize_indented(
+    doc: *mut xmlDoc,
+    data: &[u8],
+    parse_as_document: bool,
+    content_nodes: *mut xmlNode,
+) -> PgResult<Vec<u8>> {
+    let buf = xmlBufferCreate();
+    if buf.is_null() {
+        return Err(oom("could not allocate xmlBuffer"));
+    }
+
+    // Detect whether the input had an XML declaration (parse_xml_decl, ported).
+    let decl_len = parse_xml_decl(data).map(|d| d.count).unwrap_or(0);
+
+    let save_opts = if decl_len == 0 {
+        XML_SAVE_NO_DECL | XML_SAVE_FORMAT
+    } else {
+        XML_SAVE_FORMAT
+    };
+    let ctxt = xmlSaveToBuffer(buf, core::ptr::null(), save_opts);
+    if ctxt.is_null() {
+        xmlBufferFree(buf);
+        return Err(oom("could not allocate xmlSaveCtxt"));
+    }
+
+    if parse_as_document {
+        if xmlSaveDoc(ctxt, doc) == -1 {
+            xmlSaveClose(ctxt);
+            xmlBufferFree(buf);
+            return Err(oom("could not save document to xmlBuffer"));
+        }
+    } else if !content_nodes.is_null() {
+        // Build a fake "content-root" container and serialize its children with
+        // newlines between non-text nodes (xml.c:776-810).
+        let root = xmlNewNode(core::ptr::null_mut(), b"content-root\0".as_ptr() as *const c_uchar);
+        if root.is_null() {
+            xmlSaveClose(ctxt);
+            xmlBufferFree(buf);
+            return Err(oom("could not allocate xml node"));
+        }
+        let oldroot = xmlDocSetRootElement(doc, root);
+        if !oldroot.is_null() {
+            xmlFreeNode(oldroot);
+        }
+        xmlAddChildList(root, content_nodes);
+
+        let newline = xmlNewDocText(core::ptr::null_mut(), b"\n\0".as_ptr() as *const c_uchar);
+        if newline.is_null() {
+            xmlSaveClose(ctxt);
+            xmlBufferFree(buf);
+            return Err(oom("could not allocate xml node"));
+        }
+
+        let mut node = node_children(root);
+        while !node.is_null() {
+            if node_type(node) != XML_TEXT_NODE && !node_prev(node).is_null()
+                && xmlSaveTree(ctxt, newline) == -1
+            {
+                xmlFreeNode(newline);
+                xmlSaveClose(ctxt);
+                xmlBufferFree(buf);
+                return Err(oom("could not save newline to xmlBuffer"));
+            }
+            if xmlSaveTree(ctxt, node) == -1 {
+                xmlFreeNode(newline);
+                xmlSaveClose(ctxt);
+                xmlBufferFree(buf);
+                return Err(oom("could not save content to xmlBuffer"));
+            }
+            node = node_next(node);
+        }
+        xmlFreeNode(newline);
+    }
+
+    if xmlSaveClose(ctxt) == -1 {
+        xmlBufferFree(buf);
+        return Err(PgError::error("could not close xmlSaveCtxtPtr".to_string())
+            .with_sqlstate(ERRCODE_INTERNAL_ERROR));
+    }
+
+    let content = xmlBufferContent(buf);
+    let len = xmlBufferLength(buf) as usize;
+    let bytes = if content.is_null() {
+        Vec::new()
+    } else {
+        std::slice::from_raw_parts(content as *const u8, len).to_vec()
+    };
+    xmlBufferFree(buf);
+
+    // xmlDocContentDumpOutput may add a trailing newline for documents.
+    let out = if parse_as_document {
+        let mut end = bytes.len();
+        while end > 0 && (bytes[end - 1] == b'\n' || bytes[end - 1] == b'\r') {
+            end -= 1;
+        }
+        bytes[..end].to_vec()
+    } else {
+        bytes
+    };
+    Ok(out)
+}
+
+/// C `xmlelement` (xml.c:864) libxml core via `xmlTextWriter*`.
+fn build_element(
+    name: String,
+    named_args: Vec<(String, Option<String>)>,
+    content: Vec<String>,
+) -> PgResult<Vec<u8>> {
+    unsafe {
+        pg_xml_init();
+        let buf = xmlBufferCreate();
+        if buf.is_null() {
+            return Err(oom("could not allocate xmlBuffer"));
+        }
+        let writer = xmlNewTextWriterMemory(buf, 0);
+        if writer.is_null() {
+            xmlBufferFree(buf);
+            return Err(oom("could not allocate xmlTextWriter"));
+        }
+
+        let name_c = cstr(name.as_bytes());
+        xmlTextWriterStartElement(writer, name_c.as_ptr() as *const c_uchar);
+
+        for (argname, value) in &named_args {
+            if let Some(str) = value {
+                let n = cstr(argname.as_bytes());
+                let v = cstr(str.as_bytes());
+                xmlTextWriterWriteAttribute(
+                    writer,
+                    n.as_ptr() as *const c_uchar,
+                    v.as_ptr() as *const c_uchar,
+                );
+            }
+        }
+
+        for str in &content {
+            let c = cstr(str.as_bytes());
+            xmlTextWriterWriteRaw(writer, c.as_ptr() as *const c_uchar);
+        }
+
+        xmlTextWriterEndElement(writer);
+        // MUST flush by freeing the writer before reading the buffer.
+        xmlFreeTextWriter(writer);
+
+        let result = buffer_to_vec(buf);
+        xmlBufferFree(buf);
+        Ok(result)
+    }
+}
+
+/// C BYTEAOID arm of `map_sql_value_to_xml_value` (xml.c:2615) — base64/binhex.
+fn encode_binary(bytes: &[u8], binary: XmlBinaryType) -> PgResult<String> {
+    unsafe {
+        pg_xml_init();
+        let buf = xmlBufferCreate();
+        if buf.is_null() {
+            return Err(oom("could not allocate xmlBuffer"));
+        }
+        let writer = xmlNewTextWriterMemory(buf, 0);
+        if writer.is_null() {
+            xmlBufferFree(buf);
+            return Err(oom("could not allocate xmlTextWriter"));
+        }
+        let data_ptr = bytes.as_ptr() as *const c_char;
+        let len = bytes.len() as c_int;
+        match binary {
+            XmlBinaryType::XMLBINARY_BASE64 => {
+                xmlTextWriterWriteBase64(writer, data_ptr, 0, len);
+            }
+            XmlBinaryType::XMLBINARY_HEX => {
+                xmlTextWriterWriteBinHex(writer, data_ptr, 0, len);
+            }
+        }
+        xmlFreeTextWriter(writer);
+
+        let v = buffer_to_vec(buf);
+        xmlBufferFree(buf);
+        Ok(String::from_utf8_lossy(&v).into_owned())
+    }
+}
+
+unsafe fn buffer_to_vec(buf: *mut xmlBuffer) -> Vec<u8> {
+    let content = xmlBufferContent(buf);
+    let len = xmlBufferLength(buf) as usize;
+    if content.is_null() {
+        Vec::new()
+    } else {
+        std::slice::from_raw_parts(content as *const u8, len).to_vec()
+    }
+}
+
+/// C `xpath_internal` + `xml_xpathobjtoxmlarray` (xml.c:4323 / 4243).
+fn xpath_eval(
+    xpath_expr: &[u8],
+    data: &[u8],
+    namespaces: &[(String, String)],
+    count_only: bool,
+    database_encoding: i32,
+) -> PgResult<Vec<Vec<u8>>> {
+    unsafe {
+        pg_xml_init();
+
+        // In a UTF8 database, skip any leading xml declaration (xml.c).
+        const PG_UTF8: i32 = 6;
+        let xmldecl_len = if database_encoding == PG_UTF8 {
+            parse_xml_decl(data).map(|d| d.count).unwrap_or(0)
+        } else {
+            0
+        };
+        let payload = &data[xmldecl_len.min(data.len())..];
+
+        let ctxt = xmlNewParserCtxt();
+        if ctxt.is_null() {
+            return Err(oom("could not allocate parser context"));
+        }
+        let doc = xmlCtxtReadMemory(
+            ctxt,
+            payload.as_ptr() as *const c_char,
+            payload.len() as c_int,
+            core::ptr::null(),
+            core::ptr::null(),
+            0,
+        );
+        if doc.is_null() {
+            xmlFreeParserCtxt(ctxt);
+            return Err(PgError::error("could not parse XML document".to_string())
+                .with_sqlstate(ERRCODE_INVALID_XML_DOCUMENT));
+        }
+
+        let xpathctx = xmlXPathNewContext(doc);
+        if xpathctx.is_null() {
+            xmlFreeDoc(doc);
+            xmlFreeParserCtxt(ctxt);
+            return Err(oom("could not allocate XPath context"));
+        }
+
+        let cleanup = |xpathobj: *mut xmlXPathObject,
+                       xpathcomp: *mut xmlXPathCompExpr,
+                       xpathctx: *mut xmlXPathContext,
+                       doc: *mut xmlDoc,
+                       ctxt: *mut xmlParserCtxt| {
+            if !xpathobj.is_null() {
+                xmlXPathFreeObject(xpathobj);
+            }
+            if !xpathcomp.is_null() {
+                xmlXPathFreeCompExpr(xpathcomp);
+            }
+            if !xpathctx.is_null() {
+                xmlXPathFreeContext(xpathctx);
+            }
+            if !doc.is_null() {
+                xmlFreeDoc(doc);
+            }
+            if !ctxt.is_null() {
+                xmlFreeParserCtxt(ctxt);
+            }
+        };
+
+        // Register namespaces.
+        for (name, uri) in namespaces {
+            let n = cstr(name.as_bytes());
+            let u = cstr(uri.as_bytes());
+            if xmlXPathRegisterNs(
+                xpathctx,
+                n.as_ptr() as *const c_uchar,
+                u.as_ptr() as *const c_uchar,
+            ) != 0
+            {
+                cleanup(core::ptr::null_mut(), core::ptr::null_mut(), xpathctx, doc, ctxt);
+                return Err(PgError::error(format!(
+                    "could not register XML namespace with name \"{name}\" and URI \"{uri}\""
+                )));
+            }
+        }
+
+        let expr = cstr(xpath_expr);
+        let xpathcomp = xmlXPathCtxtCompile(xpathctx, expr.as_ptr() as *const c_uchar);
+        if xpathcomp.is_null() {
+            cleanup(core::ptr::null_mut(), core::ptr::null_mut(), xpathctx, doc, ctxt);
+            return Err(PgError::error("invalid XPath expression".to_string())
+                .with_sqlstate(ERRCODE_INVALID_ARGUMENT_FOR_XQUERY));
+        }
+
+        let xpathobj = xmlXPathCompiledEval(xpathcomp, xpathctx);
+        if xpathobj.is_null() {
+            cleanup(core::ptr::null_mut(), xpathcomp, xpathctx, doc, ctxt);
+            return Err(PgError::error("could not create XPath object".to_string())
+                .with_sqlstate(ERRCODE_INVALID_ARGUMENT_FOR_XQUERY));
+        }
+
+        let result = xpathobj_to_xmlarray(xpathobj, count_only);
+        cleanup(xpathobj, xpathcomp, xpathctx, doc, ctxt);
+        result
+    }
+}
+
+/// C `xml_xpathobjtoxmlarray` (xml.c:4243). When `count_only` (astate==NULL in
+/// C) we return one placeholder entry per match so the caller's `.len()` equals
+/// the C `result` count without per-node serialization.
+unsafe fn xpathobj_to_xmlarray(
+    xpathobj: *mut xmlXPathObject,
+    count_only: bool,
+) -> PgResult<Vec<Vec<u8>>> {
+    let hdr = &*(xpathobj as *const xmlXPathObjectHdr);
+    match hdr.type_ {
+        XPATH_NODESET => {
+            if hdr.nodesetval.is_null() {
+                return Ok(Vec::new());
+            }
+            // xmlXPathNodeSetGetLength(ns) == ns ? ns->nodeNr : 0 (header macro).
+            let ns = &*(hdr.nodesetval as *const xmlNodeSetHdr);
+            let n = ns.node_nr;
+            let mut out = Vec::with_capacity(n.max(0) as usize);
+            for i in 0..n {
+                if count_only {
+                    out.push(Vec::new());
+                    continue;
+                }
+                // xmlXPathNodeSetItem(ns, i) == ns->nodeTab[i] (header macro).
+                let node = *ns.node_tab.add(i as usize);
+                out.push(xml_xmlnodetoxmltype(node)?);
+            }
+            Ok(out)
+        }
+        XPATH_BOOLEAN => {
+            if count_only {
+                return Ok(vec![Vec::new()]);
+            }
+            // Float8GetDatum/BoolGetDatum -> map_sql_value_to_xml_value(BOOLOID).
+            let s = if hdr.boolval != 0 { "true" } else { "false" };
+            Ok(vec![s.as_bytes().to_vec()])
+        }
+        XPATH_NUMBER => {
+            if count_only {
+                return Ok(vec![Vec::new()]);
+            }
+            // map_sql_value_to_xml_value(FLOAT8OID) == float8out(floatval).
+            Ok(vec![float8out(hdr.floatval).into_bytes()])
+        }
+        XPATH_STRING => {
+            if count_only {
+                return Ok(vec![Vec::new()]);
+            }
+            // map_sql_value_to_xml_value(CSTRINGOID, escape=true) == escape_xml(str).
+            let s = xmlchar_to_vec(hdr.stringval);
+            Ok(vec![owner::escape_xml(&s)])
+        }
+        other => Err(PgError::error(format!(
+            "xpath expression result type {other} is unsupported"
+        ))
+        .with_sqlstate(ERRCODE_INTERNAL_ERROR)),
+    }
+}
+
+/// C `xml_xmlnodetoxmltype` (xml.c:4151). For attr/text nodes, escape the
+/// cast-to-string; otherwise copy + `xmlNodeDump` the subtree.
+unsafe fn xml_xmlnodetoxmltype(cur: *mut xmlNode) -> PgResult<Vec<u8>> {
+    let t = node_type(cur);
+    if t != XML_ATTRIBUTE_NODE && t != XML_TEXT_NODE {
+        let buf = xmlBufferCreate();
+        if buf.is_null() {
+            return Err(oom("could not allocate xmlBuffer"));
+        }
+        let cur_copy = xmlCopyNode(cur, 1);
+        if cur_copy.is_null() {
+            xmlBufferFree(buf);
+            return Err(oom("could not copy node"));
+        }
+        let is_doc = node_type(cur_copy) == XML_DOCUMENT_NODE;
+        let bytes = xmlNodeDump(buf, core::ptr::null_mut(), cur_copy, 0, 0);
+        if bytes == -1 {
+            // free per xml.c: xmlFreeDoc for doc-node copies, else xmlFreeNode.
+            if is_doc {
+                xmlFreeDoc(cur_copy as *mut xmlDoc);
+            } else {
+                xmlFreeNode(cur_copy);
+            }
+            xmlBufferFree(buf);
+            return Err(oom("could not dump node"));
+        }
+        let v = buffer_to_vec(buf);
+        if is_doc {
+            xmlFreeDoc(cur_copy as *mut xmlDoc);
+        } else {
+            xmlFreeNode(cur_copy);
+        }
+        xmlBufferFree(buf);
+        Ok(v)
+    } else {
+        let str = xmlXPathCastNodeToString(cur);
+        let raw = xmlchar_to_vec(str);
+        if !str.is_null() {
+            xmlFree(str as *mut c_void);
+        }
+        Ok(owner::escape_xml(&raw))
+    }
+}
+
+/// `float8out` equivalent for the XPATH_NUMBER scalar. PostgreSQL with the
+/// default `extra_float_digits` (>= 1, PG12+) emits the shortest round-trippable
+/// decimal, which is exactly Rust's `{}` float formatting. NaN/Inf map to the
+/// SQL spellings PostgreSQL uses.
+fn float8out(v: f64) -> String {
+    if v.is_nan() {
+        "NaN".to_string()
+    } else if v.is_infinite() {
+        if v < 0.0 {
+            "-Infinity".to_string()
+        } else {
+            "Infinity".to_string()
+        }
+    } else {
+        let s = format!("{v}");
+        // Rust prints integral floats as "1" while PG float8out keeps no ".0"
+        // either, so the bare `{}` form matches.
+        s
+    }
+}
+
+/* ===================================================================== *
+ *  Tiny per-byte predicates (xmlIsBlank_ch / xmlGetUTF8Char).
+ * ===================================================================== */
+
+/// C `xmlIsBlank_ch(c)` — XML S production for a single byte.
+fn is_blank_ch(c: u8) -> PgResult<bool> {
+    Ok(c == 0x20 || c == 0x9 || c == 0xA || c == 0xD)
+}
+
+/// C `xmlGetUTF8Char(utf8, &len)` — decode one UTF-8 codepoint; -1 on error.
+/// Faithful reproduction of libxml2's `xmlGetUTF8Char` (encoding.c).
+fn get_utf8_char(utf8: &[u8]) -> PgResult<i32> {
+    if utf8.is_empty() {
+        return Ok(-1);
+    }
+    let c0 = utf8[0] as u32;
+    // 1-byte
+    if c0 & 0x80 == 0 {
+        return Ok(c0 as i32);
+    }
+    // multi-byte: determine length
+    let (need, mut val): (usize, u32) = if c0 & 0xE0 == 0xC0 {
+        (2, c0 & 0x1F)
+    } else if c0 & 0xF0 == 0xE0 {
+        (3, c0 & 0x0F)
+    } else if c0 & 0xF8 == 0xF0 {
+        (4, c0 & 0x07)
+    } else {
+        return Ok(-1);
+    };
+    if utf8.len() < need {
+        return Ok(-1);
+    }
+    for &b in &utf8[1..need] {
+        if b & 0xC0 != 0x80 {
+            return Ok(-1);
+        }
+        val = (val << 6) | (b as u32 & 0x3F);
+    }
+    Ok(val as i32)
+}
+
+/* ===================================================================== *
+ *  Install.
+ * ===================================================================== */
+pub fn install() {
+    seams::have_libxml::set(|| true);
+    seams::is_blank_ch::set(is_blank_ch);
+    seams::get_utf8_char::set(get_utf8_char);
+    seams::xml_parse_libxml::set(xml_parse_libxml);
+    seams::encode_special_chars::set(encode_special_chars);
+    seams::serialize_with_options::set(serialize_with_options);
+    seams::build_element::set(build_element);
+    seams::encode_binary::set(encode_binary);
+    seams::xpath_eval::set(xpath_eval);
+}

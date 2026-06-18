@@ -29,3 +29,12 @@ backend-utils-adt-xml-seams = { path = "../backend-utils-adt-xml-seams" }
 backend-utils-adt-xml-libxml-seams = { path = "../backend-utils-adt-xml-libxml-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+
+# Real owners of the cross-subsystem (non-libxml2) dependency seams xml.c
+# reaches: the syscache/lsyscache lookups, the namespace resolution, and the
+# utils/mb encoding conversions. These are installed from `init_seams()` below
+# (the `xml.c` consumer is the only crate that deps the libxml-seams contract,
+# so it is the natural wiring point; verified no dependency cycle).
+backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }
+backend-catalog-namespace = { path = "../backend-catalog-namespace" }
+backend-utils-mb-mbutils = { path = "../backend-utils-mb-mbutils" }

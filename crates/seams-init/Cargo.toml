@@ -443,6 +443,7 @@ backend-utils-adt-format-type = { path = "../backend-utils-adt-format-type" }
 backend-utils-adt-ruleutils = { path = "../backend-utils-adt-ruleutils" }
 backend-utils-adt-formatting = { path = "../backend-utils-adt-formatting" }
 backend-utils-adt-xml = { path = "../backend-utils-adt-xml" }
+backend-utils-adt-xml-libxml-ffi = { path = "../backend-utils-adt-xml-libxml-ffi" }
 backend-utils-adt-geo-ops = { path = "../backend-utils-adt-geo-ops" }
 backend-utils-adt-json = { path = "../backend-utils-adt-json" }
 backend-utils-adt-jsonb-gin = { path = "../backend-utils-adt-jsonb-gin" }

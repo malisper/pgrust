@@ -41,6 +41,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 pub mod chvalid;
+pub mod dep_seams;
 pub mod fmgr_builtins;
 
 use types_datum::Datum;
@@ -167,6 +168,11 @@ pub fn init_seams() {
     // Register the `xml_is_well_formed*` SQL-callable builtins into the
     // fmgr-core builtin table (C: `fmgr_builtins[]`).
     fmgr_builtins::register_xml_builtins();
+
+    // Install the cross-subsystem (non-libxml2) dependency seams xml.c reaches
+    // through: syscache/lsyscache lookups, namespace resolution, utils/mb
+    // encoding conversions — wired from their real ported owners.
+    dep_seams::install();
 }
 
 // ---------------------------------------------------------------------------
