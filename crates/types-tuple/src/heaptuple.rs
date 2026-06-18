@@ -399,6 +399,21 @@ impl<'mcx> HeapTupleHeaderData<'mcx> {
             HeapTupleField3::TCid(field3_raw)
         };
 
+        // Capture the on-page null bitmap into the owned header. C leaves it on
+        // the page (the `t_data` pointer aliases it); the owned model copies the
+        // `BITMAPLEN(natts)` bytes between the fixed header and `t_hoff` so that
+        // `heap_attisnull` / `att_isnull` can read it. A tuple with no nulls
+        // (`HEAP_HASNULL` clear) has no bitmap, leaving `t_bits` empty.
+        let mut t_bits = PgVec::new_in(mcx);
+        if (t_infomask & HEAP_HASNULL) != 0 {
+            let end = core::cmp::min(t_hoff as usize, item.len());
+            if end > ON_PAGE_HEADER_SIZE {
+                for &b in &item[ON_PAGE_HEADER_SIZE..end] {
+                    t_bits.push(b);
+                }
+            }
+        }
+
         Ok(HeapTupleHeaderData {
             t_choice: HeapTupleHeaderChoice::THeap(HeapTupleFields {
                 t_xmin,
@@ -412,7 +427,7 @@ impl<'mcx> HeapTupleHeaderData<'mcx> {
             t_infomask2,
             t_infomask,
             t_hoff,
-            t_bits: PgVec::new_in(mcx),
+            t_bits,
         })
     }
 
