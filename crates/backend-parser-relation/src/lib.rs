@@ -2351,14 +2351,14 @@ pub fn addRangeTableEntryForCTE<'mcx>(
     rte.ctelevelsup = levelsup;
 
     // Self-reference iff CTE's parse analysis isn't completed.
-    rte.self_reference = !matches!(cte.ctequery.as_deref(), Some(Node::Query(_)));
+    rte.self_reference = !cte.ctequery.as_deref().map_or(false, |n| n.as_query().is_some());
     debug_assert!(cte.cterecursive || !rte.self_reference);
     if !rte.self_reference {
         cte.cterefcount += 1;
     }
 
     // Error if the CTE is data-modifying without RETURNING.
-    if let Some(Node::Query(ctequery)) = cte.ctequery.as_deref() {
+    if let Some(ctequery) = cte.ctequery.as_deref().and_then(|n| n.as_query()) {
         if ctequery.commandType != CMD_SELECT && ctequery.returningList.is_empty() {
             let name = cte.ctename.as_deref().unwrap_or("");
             return Err(ereport(ERROR)
@@ -3556,7 +3556,7 @@ pub fn isQueryUsingTempRelation(mcx: Mcx<'_>, query: &Query<'_>) -> PgResult<boo
 }
 
 fn isQueryUsingTempRelation_walker(mcx: Mcx<'_>, node: &Node<'_>) -> PgResult<bool> {
-    if let Node::Query(query) = node {
+    if let Some(query) = node.as_query() {
         return isQueryUsingTempRelation_walker_query(mcx, query);
     }
     // C: `return expression_tree_walker(node, walker, context)`. In the owned
