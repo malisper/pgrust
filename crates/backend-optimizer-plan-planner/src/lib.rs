@@ -947,13 +947,57 @@ fn subquery_planner<'mcx>(
             };
         }
 
-        // onConflict expression lists (C:943-963). onConflict is only present for
-        // INSERT ... ON CONFLICT; a SELECT has none. Panic precisely if present.
+        // onConflict expression lists (C:943-963). onConflict is only present
+        // for INSERT ... ON CONFLICT.
         if run.resolve(root.parse).onConflict.is_some() {
-            panic!(
-                "subquery_planner: onConflict expression preprocessing \
-                 (planner.c:943-963) is not wired over the owned Query model"
-            );
+            // arbiterElems: each element is an InferenceElem Expr wrapped in a
+            // Node::Expr (EXPRKIND_ARBITER_ELEM).
+            let n = run
+                .resolve(root.parse)
+                .onConflict
+                .as_deref()
+                .map(|oc| oc.arbiterElems.len())
+                .unwrap_or(0);
+            for i in 0..n {
+                let e = take_onconflict_list_expr(run, &root, OcList::ArbiterElems, i);
+                let processed = preprocess_expression(
+                    mcx, &mut root, run, outer_query_ref, e, EXPRKIND_ARBITER_ELEM,
+                )?;
+                set_onconflict_list_expr(mcx, run, &root, OcList::ArbiterElems, i, processed)?;
+            }
+
+            // arbiterWhere (EXPRKIND_QUAL).
+            {
+                let w = take_onconflict_scalar(run, &root, OcScalar::ArbiterWhere);
+                let processed =
+                    preprocess_expression(mcx, &mut root, run, outer_query_ref, w, EXPRKIND_QUAL)?;
+                set_onconflict_scalar(mcx, run, &root, OcScalar::ArbiterWhere, processed)?;
+            }
+
+            // onConflictSet: each element is a TargetEntry; preprocess its expr
+            // (EXPRKIND_TARGET).
+            let n = run
+                .resolve(root.parse)
+                .onConflict
+                .as_deref()
+                .map(|oc| oc.onConflictSet.len())
+                .unwrap_or(0);
+            for i in 0..n {
+                let e = take_onconflict_list_expr(run, &root, OcList::OnConflictSet, i);
+                let processed = preprocess_expression(
+                    mcx, &mut root, run, outer_query_ref, e, EXPRKIND_TARGET,
+                )?;
+                set_onconflict_list_expr(mcx, run, &root, OcList::OnConflictSet, i, processed)?;
+            }
+
+            // onConflictWhere (EXPRKIND_QUAL).
+            {
+                let w = take_onconflict_scalar(run, &root, OcScalar::OnConflictWhere);
+                let processed =
+                    preprocess_expression(mcx, &mut root, run, outer_query_ref, w, EXPRKIND_QUAL)?;
+                set_onconflict_scalar(mcx, run, &root, OcScalar::OnConflictWhere, processed)?;
+            }
+            // exclRelTlist contains only Vars, so no preprocessing needed.
         }
 
         // mergeActionList (C:965-978). MERGE-only; a SELECT has none.
@@ -2488,12 +2532,6 @@ fn add_modifytable_to_path<'mcx>(
     if has_merge_action {
         panic!("grouping_planner: ModifyTable mergeActionList is not ported");
     }
-    if has_onconflict {
-        panic!(
-            "grouping_planner: INSERT ... ON CONFLICT ModifyTable \
-             (parse->onConflict) — OnConflictExpr carrier is not ported"
-        );
-    }
     if has_wco {
         panic!(
             "grouping_planner: ModifyTable WITH CHECK OPTION \
@@ -2557,6 +2595,16 @@ fn add_modifytable_to_path<'mcx>(
     let part_cols_updated = root.partColsUpdated;
     let epq_param = backend_optimizer_util_paramassign_seams::assign_special_exec_param::call(root)?;
 
+    // The owned `OnConflictExpr` lives on `root->parse->onConflict`; the path /
+    // plan carrier holds only a presence handle (the analysis runs in
+    // createplan.c, which reads parse->onConflict directly). Allocate a marker
+    // node so the path's `onconflict` slot is Some(..) iff ON CONFLICT is present.
+    let onconflict_marker: Option<types_pathnodes::NodeId> = if has_onconflict {
+        Some(root.alloc_node(Expr::Const(types_nodes::primnodes::Const::default())))
+    } else {
+        None
+    };
+
     // The planner's `CmdType` is the enum (types_nodes); the pathnode seam's
     // `CmdType` is the `u32` alias (types_pathnodes). The discriminants agree
     // (CMD_SELECT=1 .. CMD_MERGE=5), so cast.
@@ -2576,7 +2624,7 @@ fn add_modifytable_to_path<'mcx>(
         Vec::new(), // withCheckOptionLists
         returning_lists,
         row_marks,
-        None, // onconflict
+        onconflict_marker,
         Vec::new(), // mergeActionLists
         Vec::new(), // mergeJoinConditions
         epq_param,
@@ -5691,6 +5739,128 @@ fn set_windowclause_offset<'mcx>(
         wc.startOffset = wrapped;
     } else {
         wc.endOffset = wrapped;
+    }
+    Ok(())
+}
+
+/// Which list field of the `OnConflictExpr` a preprocessing helper targets.
+#[derive(Clone, Copy)]
+enum OcList {
+    ArbiterElems,
+    OnConflictSet,
+}
+
+/// Which scalar (`Option<NodePtr>`) field of the `OnConflictExpr` a helper
+/// targets.
+#[derive(Clone, Copy)]
+enum OcScalar {
+    ArbiterWhere,
+    OnConflictWhere,
+}
+
+/// Take the preprocessable `Expr` out of the `i`th element of an
+/// `OnConflictExpr` list field. For `arbiterElems` the element is itself an
+/// `Expr` (InferenceElem); for `onConflictSet` it is a `TargetEntry` and the
+/// preprocessed value is its `.expr`.
+fn take_onconflict_list_expr<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    root: &PlannerInfo,
+    which: OcList,
+    i: usize,
+) -> Option<Expr> {
+    let oc = run.resolve_mut(root.parse).onConflict.as_deref_mut()?;
+    match which {
+        OcList::ArbiterElems => match &*oc.arbiterElems[i] {
+            Node::Expr(e) => Some(e.clone()),
+            other => panic!("arbiterElems element is not an Expr (got {:?})", other.tag()),
+        },
+        OcList::OnConflictSet => match &mut *oc.onConflictSet[i] {
+            Node::TargetEntry(te) => te.expr.take().map(mcx::PgBox::into_inner),
+            other => panic!(
+                "onConflictSet element is not a TargetEntry (got {:?})",
+                other.tag()
+            ),
+        },
+    }
+}
+
+/// Store the preprocessed `Expr` back into the `i`th element of an
+/// `OnConflictExpr` list field.
+fn set_onconflict_list_expr<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &mut PlannerRun<'mcx>,
+    root: &PlannerInfo,
+    which: OcList,
+    i: usize,
+    processed: Option<Expr>,
+) -> PgResult<()> {
+    let oc = match run.resolve_mut(root.parse).onConflict.as_deref_mut() {
+        Some(oc) => oc,
+        None => return Ok(()),
+    };
+    match which {
+        OcList::ArbiterElems => {
+            let e = processed.ok_or_else(|| {
+                PgError::error("preprocess_expression reduced an arbiterElem to NULL")
+            })?;
+            *oc.arbiterElems[i] = Node::Expr(e);
+        }
+        OcList::OnConflictSet => match &mut *oc.onConflictSet[i] {
+            Node::TargetEntry(te) => {
+                te.expr = match processed {
+                    Some(e) => Some(mcx::alloc_in(mcx, e)?),
+                    None => None,
+                };
+            }
+            other => panic!(
+                "onConflictSet element is not a TargetEntry (got {:?})",
+                other.tag()
+            ),
+        },
+    }
+    Ok(())
+}
+
+/// Take the inner `Expr` out of a scalar (`Option<NodePtr>`) `OnConflictExpr`
+/// field for preprocessing.
+fn take_onconflict_scalar<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    root: &PlannerInfo,
+    which: OcScalar,
+) -> Option<Expr> {
+    let oc = run.resolve_mut(root.parse).onConflict.as_deref_mut()?;
+    let slot = match which {
+        OcScalar::ArbiterWhere => &mut oc.arbiterWhere,
+        OcScalar::OnConflictWhere => &mut oc.onConflictWhere,
+    };
+    slot.take().map(|np| match mcx::PgBox::into_inner(np) {
+        Node::Expr(e) => e,
+        other => panic!(
+            "OnConflict scalar clause is not an Expr (got {:?})",
+            other.tag()
+        ),
+    })
+}
+
+/// Store the preprocessed `Expr` back into a scalar `OnConflictExpr` field.
+fn set_onconflict_scalar<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &mut PlannerRun<'mcx>,
+    root: &PlannerInfo,
+    which: OcScalar,
+    processed: Option<Expr>,
+) -> PgResult<()> {
+    let oc = match run.resolve_mut(root.parse).onConflict.as_deref_mut() {
+        Some(oc) => oc,
+        None => return Ok(()),
+    };
+    let wrapped = match processed {
+        Some(e) => Some(mcx::alloc_in(mcx, Node::Expr(e))?),
+        None => None,
+    };
+    match which {
+        OcScalar::ArbiterWhere => oc.arbiterWhere = wrapped,
+        OcScalar::OnConflictWhere => oc.onConflictWhere = wrapped,
     }
     Ok(())
 }
