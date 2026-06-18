@@ -21,6 +21,17 @@ backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache
 backend-utils-sort-storage-seams = { path = "../backend-utils-sort-storage-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
+backend-catalog-objectaccess-seams = { path = "../backend-catalog-objectaccess-seams" }
+backend-parser-parse-agg-seams = { path = "../backend-parser-parse-agg-seams" }
+backend-parser-coerce-seams = { path = "../backend-parser-coerce-seams" }
+backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
+backend-optimizer-path-small-seams = { path = "../backend-optimizer-path-small-seams" }
+backend-optimizer-util-clauses-seams = { path = "../backend-optimizer-util-clauses-seams" }
+backend-utils-adt-regproc-seams = { path = "../backend-utils-adt-regproc-seams" }
+types-acl = { path = "../types-acl" }
+types-catalog = { path = "../types-catalog" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-tuple = { path = "../types-tuple" }

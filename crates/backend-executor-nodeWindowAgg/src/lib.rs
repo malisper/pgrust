@@ -65,9 +65,36 @@ use types_nodes::{EStateData, PlanStateNode};
 
 const INVALID_OID: Oid = 0;
 
+/// `AGGMODIFY_READ_ONLY` (catalog/pg_aggregate.h) — the `aggfinalmodify` /
+/// `aggmfinalmodify` char `'r'`.
+const AGGMODIFY_READ_ONLY: i8 = b'r' as i8;
+
 #[inline]
 fn oid_is_valid(o: Oid) -> bool {
     o != INVALID_OID
+}
+
+/// C: `aclresult = object_aclcheck(ProcedureRelationId, fnoid, aggOwner,
+/// ACL_EXECUTE); if (aclresult != ACLCHECK_OK) aclcheck_error(aclresult,
+/// OBJECT_FUNCTION, get_func_name(fnoid)); InvokeFunctionExecuteHook(fnoid);`
+/// for a transition/inverse/final component function of a window aggregate.
+fn check_component_fn_acl<'mcx>(mcx: mcx::Mcx<'mcx>, fnoid: Oid, agg_owner: Oid) -> PgResult<()> {
+    let aclresult = backend_catalog_aclchk_seams::object_aclcheck::call(
+        types_core::catalog::PROCEDURE_RELATION_ID,
+        fnoid,
+        agg_owner,
+        types_acl::acl::ACL_EXECUTE,
+    )?;
+    if aclresult != types_acl::acl::AclResult::AclcheckOk {
+        let name = lsyscache::get_func_name::call(mcx, fnoid)?.map(|s| s.as_str().into());
+        backend_catalog_aclchk_seams::aclcheck_error::call(
+            aclresult,
+            types_nodes::parsenodes::ObjectType::Function,
+            name,
+        )?;
+    }
+    backend_catalog_objectaccess_seams::invoke_function_execute_hook::call(fnoid)?;
+    Ok(())
 }
 
 /// Build a `function_call_invoke` argument cell from an in-crate `Datum<'mcx>`
@@ -2325,7 +2352,7 @@ pub fn ExecInitWindowAgg<'mcx>(
             aggno += 1;
             perfunc_mut(&mut winstate, perfuncno).aggno = aggno;
             let peraggno = aggno as usize;
-            initialize_peragg(&mut winstate, peraggno, winfnoid)?;
+            initialize_peragg(&mut winstate, perfuncno, peraggno, estate, mcx)?;
             peragg_mut(&mut winstate, peraggno).wfuncno = wfuncno;
         } else {
             // A real window function — set up its WindowObject and fmgr lookup.
@@ -2494,28 +2521,282 @@ pub fn ExecReScanWindowAgg<'mcx>(
 // ===========================================================================
 
 /// `initialize_peragg` — almost the same as in nodeAgg.c (no DISTINCT support).
-///
-/// The whole body reads `pg_aggregate` via `SearchSysCache1(AGGFNOID, ...)`,
-/// which has no seam in this repo, and resolves transition expressions via
-/// parser/optimizer helpers (`resolve_aggregate_transtype`,
-/// `build_aggregate_transfn_expr`, `contain_volatile_functions`,
-/// `contain_subplans`, `IsBinaryCoercible`, ...) that likewise have no seams.
-/// This is the genuine catalog/parser boundary of WindowAgg init.
-#[allow(dead_code)]
+/// Reads `pg_aggregate` (AGGFNOID), decides whether the moving-aggregate
+/// implementation is usable, builds the transfn/finalfn expression trees, looks
+/// up the component fmgr infos, and resolves the textual initval.
 fn initialize_peragg<'mcx>(
     winstate: &mut WindowAggState<'mcx>,
+    perfuncno: usize,
     peraggno: usize,
-    winfnoid: Oid,
+    estate: &mut EStateData<'mcx>,
+    mcx: mcx::Mcx<'mcx>,
 ) -> PgResult<()> {
-    let _ = (winstate, peraggno, winfnoid);
-    panic!(
-        "backend-executor-nodeWindowAgg::initialize_peragg: \
-         the pg_aggregate read (SearchSysCache1(AGGFNOID, ...)) and the aggregate \
-         transition-expression resolution (resolve_aggregate_transtype / \
-         build_aggregate_transfn_expr / contain_volatile_functions / contain_subplans / \
-         IsBinaryCoercible) are owned by the not-yet-ported syscache and \
-         parser/optimizer units; no seam exists yet"
-    );
+    // Pull the data we need off the perfunc's WindowFunc node. `wfunc` was just
+    // cloned into the perfunc slot by the caller; it carries winfnoid, the arg
+    // expressions, wintype and inputcollid.
+    let (winfnoid, wintype, inputcollid, input_types): (Oid, Oid, Oid, PgVec<'mcx, Oid>) = {
+        let pf = perfunc_ref(winstate, perfuncno);
+        let wfunc = pf.wfunc.as_ref().expect("perfunc.wfunc not set");
+        // numArguments = list_length(wfunc->args);
+        // inputTypes[i] = exprType((Node *) lfirst(lc));
+        let mut its: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, wfunc.args.len())?;
+        for arg in wfunc.args.iter() {
+            its.push(backend_nodes_nodeFuncs_seams::expr_type_info::call(arg)?.typid);
+        }
+        (wfunc.winfnoid, wfunc.wintype, wfunc.inputcollid, its)
+    };
+    let num_arguments = input_types.len() as i32;
+
+    // aggTuple = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(wfunc->winfnoid));
+    let aggform = backend_utils_cache_syscache_seams::agg_form_by_oid::call(mcx, winfnoid)?
+        .ok_or_else(|| {
+            types_error::PgError::error(alloc::format!(
+                "cache lookup failed for aggregate {winfnoid}"
+            ))
+        })?;
+
+    // Figure out whether to use the moving-aggregate implementation.
+    let use_ma_code: bool = if !oid_is_valid(aggform.aggminvtransfn) {
+        false // sine qua non
+    } else if aggform.aggmfinalmodify == AGGMODIFY_READ_ONLY
+        && aggform.aggfinalmodify != AGGMODIFY_READ_ONLY
+    {
+        true // decision forced by safety
+    } else if (winstate.frameOptions & FRAMEOPTION_START_UNBOUNDED_PRECEDING) != 0 {
+        false // non-moving frame head
+    } else if contain_volatile_functions_wfunc(winstate, perfuncno)? {
+        false // avoid possible behavioral change
+    } else if contain_subplans_wfunc(winstate, perfuncno)? {
+        false // subplans might contain volatile functions
+    } else {
+        true // yes, let's use it
+    };
+
+    let transfn_oid: Oid;
+    let invtransfn_oid: Oid;
+    let finalfn_oid: Oid;
+    let finalextra: bool;
+    let finalmodify: i8;
+    let mut aggtranstype: Oid;
+    if use_ma_code {
+        transfn_oid = aggform.aggmtransfn;
+        invtransfn_oid = aggform.aggminvtransfn;
+        finalfn_oid = aggform.aggmfinalfn;
+        finalextra = aggform.aggmfinalextra;
+        finalmodify = aggform.aggmfinalmodify;
+        aggtranstype = aggform.aggmtranstype;
+    } else {
+        transfn_oid = aggform.aggtransfn;
+        invtransfn_oid = INVALID_OID;
+        finalfn_oid = aggform.aggfinalfn;
+        finalextra = aggform.aggfinalextra;
+        finalmodify = aggform.aggfinalmodify;
+        aggtranstype = aggform.aggtranstype;
+    }
+    {
+        let pa = peragg_mut(winstate, peraggno);
+        pa.transfn_oid = transfn_oid;
+        pa.invtransfn_oid = invtransfn_oid;
+        pa.finalfn_oid = finalfn_oid;
+    }
+
+    // ExecInitWindowAgg already checked permission to call the aggregate
+    // function; we still need to check the component functions. Get the
+    // aggregate's owner from pg_proc.
+    let agg_owner = {
+        let proc = backend_utils_cache_syscache_seams::lookup_proc::call(mcx, winfnoid)?
+            .ok_or_else(|| {
+                types_error::PgError::error(alloc::format!(
+                    "cache lookup failed for function {winfnoid}"
+                ))
+            })?;
+        proc.proowner
+    };
+    check_component_fn_acl(mcx, transfn_oid, agg_owner)?;
+    if oid_is_valid(invtransfn_oid) {
+        check_component_fn_acl(mcx, invtransfn_oid, agg_owner)?;
+    }
+    if oid_is_valid(finalfn_oid) {
+        check_component_fn_acl(mcx, finalfn_oid, agg_owner)?;
+    }
+
+    // If the selected finalfn isn't read-only, we can't run this aggregate as a
+    // window function.
+    if finalmodify != AGGMODIFY_READ_ONLY {
+        let name = backend_utils_adt_regproc_seams::format_procedure::call(mcx, winfnoid)?;
+        return Err(types_error::PgError::error(alloc::format!(
+            "aggregate function {} does not support use as a window function",
+            name.as_str()
+        )));
+    }
+
+    // Detect how many arguments to pass to the finalfn.
+    let num_final_args = if finalextra {
+        num_arguments + 1
+    } else {
+        1
+    };
+    peragg_mut(winstate, peraggno).numFinalArgs = num_final_args;
+
+    // resolve actual type of transition state, if polymorphic.
+    aggtranstype = backend_parser_parse_agg_seams::resolve_aggregate_transtype::call(
+        mcx,
+        winfnoid,
+        aggtranstype,
+        &input_types,
+        num_arguments,
+    )?;
+
+    // build expression trees using actual argument & result types.
+    let (transfnexpr, invtransfnexpr) =
+        backend_parser_parse_agg_seams::build_aggregate_transfn_expr::call(
+            &input_types,
+            num_arguments,
+            0,     // no ordered-set window functions yet
+            false, // no variadic window functions yet
+            aggtranstype,
+            inputcollid,
+            transfn_oid,
+            invtransfn_oid,
+            oid_is_valid(invtransfn_oid),
+        )?;
+
+    // set up infrastructure for calling the transfn(s) and finalfn.
+    let mut transfn = backend_utils_fmgr_fmgr_seams::fmgr_info::call(mcx, transfn_oid)?;
+    backend_utils_fmgr_fmgr_seams::fmgr_info_set_expr::call(mcx, &mut transfn, &transfnexpr)?;
+    peragg_mut(winstate, peraggno).transfn = transfn;
+
+    if oid_is_valid(invtransfn_oid) {
+        let mut invtransfn = backend_utils_fmgr_fmgr_seams::fmgr_info::call(mcx, invtransfn_oid)?;
+        let inv = invtransfnexpr.as_ref().expect(
+            "build_aggregate_transfn_expr did not return an inverse transfn expr",
+        );
+        backend_utils_fmgr_fmgr_seams::fmgr_info_set_expr::call(mcx, &mut invtransfn, inv)?;
+        peragg_mut(winstate, peraggno).invtransfn = invtransfn;
+    }
+
+    if oid_is_valid(finalfn_oid) {
+        let finalfnexpr = backend_parser_parse_agg_seams::build_aggregate_finalfn_expr::call(
+            &input_types,
+            num_final_args,
+            aggtranstype,
+            wintype,
+            inputcollid,
+            finalfn_oid,
+        )?;
+        let mut finalfn = backend_utils_fmgr_fmgr_seams::fmgr_info::call(mcx, finalfn_oid)?;
+        backend_utils_fmgr_fmgr_seams::fmgr_info_set_expr::call(mcx, &mut finalfn, &finalfnexpr)?;
+        peragg_mut(winstate, peraggno).finalfn = finalfn;
+    }
+
+    // get info about relevant datatypes.
+    let (resulttype_len, resulttype_byval) = lsyscache::get_typlenbyval::call(wintype)?;
+    let (transtype_len, transtype_byval) = lsyscache::get_typlenbyval::call(aggtranstype)?;
+    {
+        let pa = peragg_mut(winstate, peraggno);
+        pa.resulttypeLen = resulttype_len;
+        pa.resulttypeByVal = resulttype_byval;
+        pa.transtypeLen = transtype_len;
+        pa.transtypeByVal = transtype_byval;
+    }
+
+    // initval is potentially null; the syscache projection already read it.
+    // textInitVal = SysCacheGetAttr(AGGFNOID, aggTuple, initvalAttNo, &isnull);
+    let init_val_text = if use_ma_code {
+        aggform.aggminitval.as_deref()
+    } else {
+        aggform.agginitval.as_deref()
+    };
+    let (init_value, init_value_is_null) = match init_val_text {
+        None => (Datum::null(), true),
+        Some(s) => (GetAggInitVal(estate, s, aggtranstype)?, false),
+    };
+    {
+        let pa = peragg_mut(winstate, peraggno);
+        pa.initValue = init_value;
+        pa.initValueIsNull = init_value_is_null;
+    }
+
+    // If the transfn is strict and the initval is NULL, input type and transtype
+    // must be binary-compatible.
+    let transfn_strict = peragg_ref(winstate, peraggno).transfn.fn_strict;
+    if transfn_strict && init_value_is_null {
+        let coercible = num_arguments >= 1
+            && backend_parser_coerce_seams::is_binary_coercible::call(
+                input_types[0],
+                aggtranstype,
+            )?;
+        if !coercible {
+            return Err(types_error::PgError::error(alloc::format!(
+                "aggregate {winfnoid} needs to have compatible input type and transition type"
+            )));
+        }
+    }
+
+    // Forward and inverse transition functions must have the same strictness.
+    if oid_is_valid(invtransfn_oid) {
+        let pa = peragg_ref(winstate, peraggno);
+        if pa.transfn.fn_strict != pa.invtransfn.fn_strict {
+            return Err(types_error::PgError::error(
+                "strictness of aggregate's forward and inverse transition functions must match",
+            ));
+        }
+    }
+
+    // Moving aggregates use their own aggcontext (a private context that drops
+    // when the WindowAgg ends). Plain aggregates share winstate->aggcontext,
+    // which the owned model represents as `aggcontext = None`.
+    if oid_is_valid(invtransfn_oid) {
+        peragg_mut(winstate, peraggno).aggcontext =
+            Some(mcx.context().new_child("WindowAgg Per Aggregate"));
+    } else {
+        peragg_mut(winstate, peraggno).aggcontext = None;
+    }
+
+    Ok(())
+}
+
+/// C: `contain_volatile_functions((Node *) wfunc)` over the perfunc's WindowFunc
+/// (args + FILTER). The clauses.c walker descends the whole node; we feed it the
+/// arg expressions (and aggfilter, if any), which is where any volatile call
+/// would live.
+fn contain_volatile_functions_wfunc<'mcx>(
+    winstate: &WindowAggState<'mcx>,
+    perfuncno: usize,
+) -> PgResult<bool> {
+    let pf = perfunc_ref(winstate, perfuncno);
+    let wfunc = pf.wfunc.as_ref().expect("perfunc.wfunc not set");
+    for arg in wfunc.args.iter() {
+        if backend_optimizer_path_small_seams::contain_volatile_functions_expr::call(arg) {
+            return Ok(true);
+        }
+    }
+    if let Some(filter) = wfunc.aggfilter.as_deref() {
+        if backend_optimizer_path_small_seams::contain_volatile_functions_expr::call(filter) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// C: `contain_subplans((Node *) wfunc)` over the perfunc's WindowFunc (args +
+/// FILTER).
+fn contain_subplans_wfunc<'mcx>(
+    winstate: &WindowAggState<'mcx>,
+    perfuncno: usize,
+) -> PgResult<bool> {
+    let pf = perfunc_ref(winstate, perfuncno);
+    let wfunc = pf.wfunc.as_ref().expect("perfunc.wfunc not set");
+    if backend_optimizer_util_clauses_seams::contain_subplans::call(&wfunc.args) {
+        return Ok(true);
+    }
+    if let Some(filter) = wfunc.aggfilter.as_deref() {
+        let one = core::slice::from_ref(filter);
+        if backend_optimizer_util_clauses_seams::contain_subplans::call(one) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// `GetAggInitVal` — convert a pg_aggregate textual initval to a Datum.
