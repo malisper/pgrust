@@ -92,7 +92,8 @@ use types_catalog::catalog::{GLOBALTABLESPACE_OID, TABLESPACE_RELATION_ID};
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_core::catalog::{NAMESPACE_RELATION_ID, RELATION_RELATION_ID};
 use types_tuple::access::{
-    ATTRIBUTE_GENERATED_VIRTUAL, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
+    ATTRIBUTE_GENERATED_VIRTUAL, RELKIND_FOREIGN_TABLE, RELKIND_MATVIEW,
+    RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
 };
 use types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber;
 use types_pgstat::backend_progress::ProgressCommandType;
@@ -970,4 +971,133 @@ pub fn init_seams() {
             args.quiet,
         )
     });
+
+    // --- ProcessUtilitySlow CREATE INDEX arm (utility.c:1455-1560) ---
+    // The three CREATE-INDEX dispatch seams the command owner installs.
+    backend_tcop_utility_out_seams::range_var_get_relid_owns_relation::set(
+        utility_range_var_get_relid_owns_relation,
+    );
+    backend_tcop_utility_out_seams::create_index_count_partitions::set(
+        create_index_count_partitions,
+    );
+    backend_tcop_utility_out_seams::define_index::set(define_index_dispatch_arm);
+}
+
+/// `RangeVarGetRelidExtended(stmt->relation, lockmode, 0,
+/// RangeVarCallbackOwnsRelation, NULL)` (utility.c) — resolve+lock the CREATE
+/// INDEX target. Marshals the parse `RangeVar` node and delegates to the
+/// namespace owner.
+fn utility_range_var_get_relid_owns_relation<'mcx>(
+    mcx: Mcx<'mcx>,
+    relation: types_nodes::nodes::NodePtr<'mcx>,
+    lockmode: types_storage::lock::LOCKMODE,
+) -> PgResult<Oid> {
+    let rv = match &*relation {
+        Node::RangeVar(rv) => rv,
+        other => unreachable!(
+            "range_var_get_relid_owns_relation: not a RangeVar node: {}",
+            other.node_tag()
+        ),
+    };
+    backend_catalog_namespace::RangeVarGetRelidOwnsRelation(mcx, rv, lockmode)
+}
+
+/// utility.c:1490-1525 — CREATE INDEX on a partitioned table recurses to
+/// partitions; lock them early, validate each partition's relkind, and count
+/// the partitions so `DefineIndex` need not redo the `find_all_inheritors`
+/// search. Returns the partition count, or -1 for a non-partitioned target.
+fn create_index_count_partitions<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    stmt: types_nodes::nodes::NodePtr<'mcx>,
+    lockmode: types_storage::lock::LOCKMODE,
+) -> PgResult<i32> {
+    let index_stmt = match &*stmt {
+        Node::IndexStmt(s) => s,
+        other => unreachable!(
+            "create_index_count_partitions: not an IndexStmt node: {}",
+            other.node_tag()
+        ),
+    };
+    let rv = match index_stmt_relation(index_stmt) {
+        Some(rv) => rv,
+        None => return Ok(-1),
+    };
+
+    if !(rv.inh && lsyscache::get_rel_relkind::call(relid)? == RELKIND_PARTITIONED_TABLE) {
+        return Ok(-1);
+    }
+
+    let relname = rv
+        .relname
+        .as_ref()
+        .map(|s| s.as_str())
+        .unwrap_or_default();
+    let unique_or_primary = index_stmt.unique || index_stmt.primary;
+
+    let inheritors =
+        backend_catalog_pg_inherits_seams::find_all_inheritors::call(mcx, relid, lockmode)?;
+    for &partrelid in inheritors.iter() {
+        let relkind = lsyscache::get_rel_relkind::call(partrelid)?;
+        if relkind != RELKIND_RELATION
+            && relkind != RELKIND_MATVIEW
+            && relkind != RELKIND_PARTITIONED_TABLE
+            && relkind != RELKIND_FOREIGN_TABLE
+        {
+            ereport(ERROR)
+                .errmsg(format!(
+                    "unexpected relkind \"{}\" on partition \"{}\"",
+                    relkind as char, relname
+                ))
+                .finish(here("create_index_count_partitions"))?;
+        }
+        if relkind == RELKIND_FOREIGN_TABLE && unique_or_primary {
+            ereport(ERROR)
+                .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                .errmsg(format!(
+                    "cannot create unique index on partitioned table \"{}\"",
+                    relname
+                ))
+                .errdetail(format!(
+                    "Table \"{}\" contains partitions that are foreign tables.",
+                    relname
+                ))
+                .finish(here("create_index_count_partitions"))?;
+        }
+    }
+    // count direct and indirect children, but not rel
+    Ok(inheritors.len() as i32 - 1)
+}
+
+/// `DefineIndex(relid, stmt, InvalidOid, InvalidOid, InvalidOid, nparts,
+/// is_alter_table, true, true, false, false)` (utility.c) — the CREATE INDEX
+/// command. Marshals the transformed `IndexStmt` node and delegates.
+fn define_index_dispatch_arm<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    stmt: types_nodes::nodes::NodePtr<'mcx>,
+    nparts: i32,
+    is_alter_table: bool,
+) -> PgResult<ObjectAddress> {
+    let stmt = match mcx::PgBox::into_inner(stmt) {
+        Node::IndexStmt(s) => s,
+        other => unreachable!(
+            "define_index: not an IndexStmt node: {}",
+            other.node_tag()
+        ),
+    };
+    DefineIndex(
+        mcx,
+        relid,
+        &stmt,
+        InvalidOid,
+        InvalidOid,
+        InvalidOid,
+        nparts,
+        is_alter_table,
+        true,
+        true,
+        false,
+        false,
+    )
 }

@@ -277,15 +277,15 @@ fn process_utility_slow_body<'mcx>(
             let relation = mcx::alloc_in(mcx, relation_src.clone_in(mcx)?)?;
             let relid = rt::range_var_get_relid_owns_relation::call(mcx, relation, lockmode)?;
 
-            // CREATE INDEX on partitioned tables recurses to partitions; lock
-            // them early, validate relkinds, and count the partitions.
-            let relation_inh = matches!(&**relation_src, Node::RangeVar(rv) if rv.inh);
-            let nparts: i32 = if relation_inh {
-                let rel2 = mcx::alloc_in(mcx, relation_src.clone_in(mcx)?)?;
-                rt::create_index_count_partitions::call(mcx, relid, rel2, lockmode)?
-            } else {
-                -1
-            };
+            // CREATE INDEX on partitioned tables (but not regular inherited
+            // tables) recurses to partitions; lock them early, validate
+            // relkinds, and count the partitions so DefineIndex needn't redo
+            // the find_all_inheritors search. The owner reads stmt->relation->inh
+            // and stmt->unique/primary internally and returns -1 when the target
+            // is not a partitioned table.
+            let stmt_for_count = mcx::alloc_in(mcx, parsetree.clone_in(mcx)?)?;
+            let nparts: i32 =
+                rt::create_index_count_partitions::call(mcx, relid, stmt_for_count, lockmode)?;
 
             // An already-transformed IndexStmt came from generateClonedIndexStmt
             // (expandTableLikeClause) — treat it like ALTER TABLE ADD INDEX.

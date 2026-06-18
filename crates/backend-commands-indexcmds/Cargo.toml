@@ -65,6 +65,8 @@ backend-utils-adt-regproc-seams = { path = "../backend-utils-adt-regproc-seams" 
 backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
 backend-optimizer-util-var-seams = { path = "../backend-optimizer-util-var-seams" }
 backend-commands-tablecmds-seams = { path = "../backend-commands-tablecmds-seams" }
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
+backend-catalog-pg-inherits-seams = { path = "../backend-catalog-pg-inherits-seams" }
 backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
 backend-access-table-table-seams = { path = "../backend-access-table-table-seams" }
 backend-utils-activity-small = { path = "../backend-utils-activity-small" }
