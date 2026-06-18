@@ -314,16 +314,12 @@ pub fn init_seams() {
     // RTE's `functions`. Reached through this resolver because cost_functionscan
     // has no PlannerRun; here `planner_rt_fetch` reaches the owned funcexprs.
     backend_optimizer_path_costsize_seams::rte_function_max_set_rows::set(|run, root, rel| {
-        use types_nodes::nodes::Node;
         let rti = root.rel(rel).relid;
         let rte = planner_rt_fetch(run, root, rti);
         let mut tuples = 0.0_f64;
         for f in rte.functions.iter() {
-            if let Node::RangeTblFunction(rtf) = &**f {
-                let funcexpr = match rtf.funcexpr.as_deref() {
-                    Some(Node::Expr(e)) => Some(e),
-                    _ => None,
-                };
+            if let Some(rtf) = (&**f).as_rangetblfunction() {
+                let funcexpr = rtf.funcexpr.as_deref().and_then(|n| n.as_expr());
                 let ntup =
                     backend_optimizer_util_clauses::expression_returns_set_rows(funcexpr)
                         .expect("rte_function_max_set_rows: expression_returns_set_rows");
@@ -339,14 +335,13 @@ pub fn init_seams() {
     // `cost_qual_eval_node((Node *) rte->functions, root)` accumulated over the
     // FUNCTION RTE's funcexprs.
     backend_optimizer_path_costsize_seams::rte_functions_exprcost::set(|run, root, rel| {
-        use types_nodes::nodes::Node;
         let rti = root.rel(rel).relid;
         let rte = planner_rt_fetch(run, root, rti);
         let mut startup = 0.0_f64;
         let mut per_tuple = 0.0_f64;
         for f in rte.functions.iter() {
-            if let Node::RangeTblFunction(rtf) = &**f {
-                if let Some(Node::Expr(e)) = rtf.funcexpr.as_deref() {
+            if let Some(rtf) = (&**f).as_rangetblfunction() {
+                if let Some(e) = rtf.funcexpr.as_deref().and_then(|n| n.as_expr()) {
                     let (s, pt) =
                         backend_optimizer_path_costsize::qualcost::cost_qual_eval_expr(root, e);
                     startup += s;
@@ -421,7 +416,6 @@ fn parse_onconflict<'mcx>(
     Option<backend_optimizer_util_plancat_ext_seams::OnConflictInfo>,
 > {
     use backend_optimizer_util_plancat_ext_seams::{InferenceElemInfo, OnConflictInfo};
-    use types_nodes::nodes::Node;
     use types_nodes::primnodes::Expr;
 
     let mcx = run.mcx();
@@ -440,12 +434,12 @@ fn parse_onconflict<'mcx>(
                 let mut elems: Vec<(Expr, types_core::primitive::Oid, types_core::primitive::Oid)> =
                     Vec::with_capacity(oc.arbiterElems.len());
                 for np in oc.arbiterElems.iter() {
-                    let infer = match &**np {
-                        Node::Expr(Expr::InferenceElem(ie)) => ie,
-                        other => {
+                    let infer = match (&**np).as_inferenceelem() {
+                        Some(ie) => ie,
+                        None => {
                             return Err(types_error::PgError::error(format!(
                                 "arbiterElems element is not an InferenceElem (got {:?})",
-                                other.tag()
+                                (&**np).tag()
                             )));
                         }
                     };
@@ -462,16 +456,18 @@ fn parse_onconflict<'mcx>(
                 // make_ands_implicit, cloning each conjunct into mcx.
                 let arbiter_where: Vec<Expr> = match oc.arbiterWhere.as_deref() {
                     None => Vec::new(),
-                    Some(Node::Expr(e)) => {
-                        let cloned = e.clone_in(mcx)?;
-                        backend_nodes_core::makefuncs::make_ands_implicit(Some(cloned))
-                    }
-                    Some(other) => {
-                        return Err(types_error::PgError::error(format!(
-                            "OnConflict arbiterWhere is not an Expr (got {:?})",
-                            other.tag()
-                        )));
-                    }
+                    Some(other) => match other.as_expr() {
+                        Some(e) => {
+                            let cloned = e.clone_in(mcx)?;
+                            backend_nodes_core::makefuncs::make_ands_implicit(Some(cloned))
+                        }
+                        None => {
+                            return Err(types_error::PgError::error(format!(
+                                "OnConflict arbiterWhere is not an Expr (got {:?})",
+                                other.tag()
+                            )));
+                        }
+                    },
                 };
 
                 let action_is_update =
