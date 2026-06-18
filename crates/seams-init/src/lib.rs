@@ -455,7 +455,6 @@ pub fn init_all() {
     backend_utils_adt_oid::init_seams();
     backend_utils_adt_int::init_seams();
     backend_utils_adt_int8::init_seams();
-    backend_utils_adt_jsonb::init_seams();
     backend_utils_adt_ascii::init_seams();
     backend_utils_adt_amutils::init_seams();
     backend_utils_adt_mcxtfuncs::init_seams();
