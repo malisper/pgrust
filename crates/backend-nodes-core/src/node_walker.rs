@@ -429,7 +429,7 @@ pub fn expression_tree_walker_mut(
                 let owned = core::mem::replace(e, expr_walk_sentinel());
                 let mut wrapped = Node::Expr(owned);
                 let aborted = walker(&mut wrapped);
-                if let Node::Expr(ne) = wrapped {
+                if let Some(ne) = wrapped.into_expr() {
                     *e = ne;
                 }
                 aborted
@@ -500,7 +500,7 @@ fn walk_table_func_mut(
         let owned = core::mem::replace(e, expr_walk_sentinel());
         let mut wrapped = Node::Expr(owned);
         let aborted = walker(&mut wrapped);
-        if let Node::Expr(ne) = wrapped {
+        if let Some(ne) = wrapped.into_expr() {
             *e = ne;
         }
         aborted
@@ -563,7 +563,7 @@ fn walk_expr_children_mut(e: &mut Expr, walker: &mut dyn FnMut(&mut Node) -> boo
         if walker(&mut wrapped) {
             aborted = true;
         }
-        if let Node::Expr(nc) = wrapped {
+        if let Some(nc) = wrapped.into_expr() {
             *child = nc;
         }
     });
@@ -1202,7 +1202,7 @@ pub fn query_tree_mutator(
                     let owned = core::mem::replace(&mut **e, expr_walk_sentinel());
                     let mut wrapped = Node::Expr(owned);
                     let aborted = mutator(&mut wrapped);
-                    if let Node::Expr(ne) = wrapped {
+                    if let Some(ne) = wrapped.into_expr() {
                         **e = ne;
                     }
                     aborted
@@ -1358,7 +1358,7 @@ fn mutate_targetentry_list(
             let owned = core::mem::replace(e, expr_walk_sentinel());
             let mut wrapped = Node::Expr(owned);
             let aborted = mutator(&mut wrapped);
-            if let Node::Expr(ne) = wrapped {
+            if let Some(ne) = wrapped.into_expr() {
                 *e = ne;
             }
             if aborted {
@@ -1574,7 +1574,7 @@ mod tests {
         // and re-recurses, exactly as e.g. `rangeTableEntry_used_walker` does.
         let mut seen_aggref = false;
         let aborted = walk_targetentry_list(&tlist, &mut |c: &Node| {
-            if let Node::Expr(Expr::Aggref(_)) = c {
+            if c.is_aggref() {
                 seen_aggref = true;
             }
             // Re-recurse into children (no-op for the arg-less count(*) Aggref),
@@ -1605,7 +1605,7 @@ mod tests {
 
         let mut count = 0;
         let aborted = query_tree_walker(&query, &mut |c: &Node| {
-            if let Node::Expr(Expr::Aggref(_)) = c {
+            if c.is_aggref() {
                 count += 1;
             }
             false
@@ -1625,7 +1625,7 @@ mod tests {
             false
         });
         assert!(!aborted);
-        if let Node::Expr(Expr::OpExpr(o)) = &node {
+        if let Some(o) = node.as_opexpr() {
             for a in &o.args {
                 if let Expr::Var(v) = a {
                     assert_eq!(v.varno, 42);
