@@ -64,6 +64,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `CreateDestReceiver(DestSPI)` (spi.c `spi_printtupDR`): build the DestSPI
+    /// receiver and register its `spi_dest_startup` / `spi_printtup` vtable into
+    /// the `backend-tcop-dest` router, returning the handle that names it. The
+    /// router's `CreateDestReceiver(Spi)` arm calls this, mirroring how it
+    /// reaches printtup's `printtup_create_dr` and copyto's
+    /// `create_copy_dest_receiver`.
+    pub fn create_spi_dest_receiver() -> types_nodes::parsestmt::DestReceiverHandle
+);
+
+seam_core::seam!(
     /// `AtEOXact_SPI(isCommit)` — clean up SPI state; WARNs about leaked
     /// connections at commit.
     pub fn at_eoxact_spi(is_commit: bool) -> PgResult<()>

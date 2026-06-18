@@ -30,12 +30,36 @@
 //!   helpers;
 //! * the SPI result-code constants and [`SPI_result_code_string`].
 //!
-//! What is **seam-and-panic** (faithful structure, honest decomp-stub bodies
-//! that `panic!` into the genuinely-unported owner, never `todo!`): the
-//! execute / prepare / cursor legs ([`spi::spi_execute_snapshot`],
-//! [`spi::spi_prepare`], cursor open/fetch) and the `DestSPI` install. These
-//! cannot be filled until the executor-driver / parser / portal / dest-router
-//! owners above land. See the per-fn doc comments for the exact prerequisite.
+//! What is now **landed** (the consumer-facing SELECT/cursor core, since the
+//! executor driver, plancache, portal, parser and dest-router substrate landed):
+//!
+//! * the `DestSPI` receiver ([`mod@dest_spi`]: `spi_dest_startup` /
+//!   `spi_printtup`), registered into the `backend-tcop-dest` router via the
+//!   `create_spi_dest_receiver` seam (the router's `CreateDestReceiver(Spi)` arm
+//!   calls it, mirroring printtup/copyto);
+//! * the value-returning SELECT path ([`mod@select`]: `spi_execute_select` /
+//!   `spi_query_tupdesc`) — `SPI_connect` → one-shot `CreateOneShotCachedPlan` +
+//!   parse-analyze + `CompleteCachedPlan` → `GetCachedPlan` →
+//!   `CreateQueryDesc` + `ExecutorStart/Run/Finish/End` to the DestSPI receiver
+//!   → collected rows → `SPI_finish`;
+//! * the forward cursor fetch ([`mod@cursor`]: `spi_cursor_fetch` /
+//!   `spi_cursor_tupdesc`) — `GetPortalByName` + `PortalRunFetch` into DestSPI;
+//! * the tuple accessors ([`mod@accessors`]: `SPI_getbinval`, `SPI_fnumber`,
+//!   `SPI_gettypeid`, `SPI_getvalue`).
+//!
+//! These unblock the xml `table/query/cursor_to_xml(schema)` family and the
+//! tsvector trigger / `ts_rewrite` SPI reads.
+//!
+//! What remains **seam-and-panic** (honest decomp-stub bodies that `panic!`,
+//! never `todo!`): the prepared-plan / `SpiPlanPtr` legs the RI triggers use
+//! ([`exec`]: `spi_prepare` / `spi_keepplan` / `spi_execute_snapshot` /
+//! `spi_first_row_columns`). `SpiPlanPtr` is still the opaque `u64` handle in
+//! `types-ri-triggers` (not the real `_SPI_plan` carrier holding
+//! `plancache_list`/`argtypes`/`nargs`/`saved`); re-modelling it to the real
+//! struct + wiring `SPI_prepare`/`SPI_execute_plan` over a saved cached plan is
+//! a separate keystone, and the non-SELECT executor (DML / utility /
+//! `FOR UPDATE` / parallel) is the execMain `#167 F0d` boundary. Only the plain
+//! read-only SELECT the xml/tsvector consumers issue is wired here.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -43,12 +67,18 @@
 
 mod accessors;
 mod backbone;
+mod cursor;
+mod dest_spi;
 mod exec;
 mod result_code;
+mod select;
 
 pub use accessors::*;
 pub use backbone::*;
+pub use cursor::{spi_cursor_fetch, spi_cursor_tupdesc};
+pub use dest_spi::create_spi_dest_receiver;
 pub use result_code::*;
+pub use select::{spi_execute_select, spi_query_tupdesc};
 
 /// Install SPI's inward seams (the ones `backend-executor-spi-seams` declares
 /// and other crates already consume). Wired into `seams-init`.
@@ -62,6 +92,18 @@ pub fn init_seams() {
     seams::spi_connect::set(backbone::spi_connect_seam);
     seams::spi_finish::set(backbone::spi_finish_seam);
     seams::spi_result_code_string::set(result_code::spi_result_code_string_seam);
+
+    // --- DestSPI receiver registration (called by the tcop-dest router's
+    //     CreateDestReceiver(Spi) arm) ---
+    seams::create_spi_dest_receiver::set(dest_spi::create_spi_dest_receiver);
+
+    // --- consumer-facing high-level SPI seams (declared in the consumers'
+    //     seam crates; the SPI owner installs them) ---
+    // xml: table/query/cursor-to-xml SELECT + descriptor reads.
+    backend_utils_adt_xml_libxml_seams::spi_execute_select::set(select::spi_execute_select);
+    backend_utils_adt_xml_libxml_seams::spi_query_tupdesc::set(select::spi_query_tupdesc);
+    backend_utils_adt_xml_libxml_seams::spi_cursor_fetch::set(cursor::spi_cursor_fetch);
+    backend_utils_adt_xml_libxml_seams::spi_cursor_tupdesc::set(cursor::spi_cursor_tupdesc);
 
     // --- seam-and-panic execution/prepare/cursor legs (honest decomp-stubs) ---
     seams::spi_prepare::set(exec::spi_prepare_seam);

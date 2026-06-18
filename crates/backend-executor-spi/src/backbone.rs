@@ -120,6 +120,16 @@ pub fn SPI_result() -> i32 {
     SPI_RESULT.with(|r| *r.borrow())
 }
 
+/// Set the public `SPI_processed` global (C's `SPI_processed = my_processed;`).
+pub(crate) fn set_spi_processed(n: u64) {
+    SPI_PROCESSED.with(|p| *p.borrow_mut() = n);
+}
+
+/// Read the public `SPI_processed` global (C's `SPI_processed`).
+pub fn SPI_processed() -> u64 {
+    SPI_PROCESSED.with(|p| *p.borrow())
+}
+
 /// True when `_SPI_connected >= 0` (we are inside some SPI context).
 fn is_connected() -> bool {
     SPI_CONNECTED.with(|c| *c.borrow() >= 0)

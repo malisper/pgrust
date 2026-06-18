@@ -83,8 +83,11 @@ pub struct SpiColumn {
     pub is_dropped: bool,
 }
 
-/// One row's already-XML-mapped column values, parallel to the descriptor.
-/// `None` is SQL NULL; `Some(s)` is the `map_sql_value_to_xml_value` output.
+/// One row's column values, parallel to the descriptor. `None` is SQL NULL;
+/// `Some(s)` is the value rendered to its text image by the column type's output
+/// function (the SPI provider's faithful `SPI_getvalue`). The xml consumer
+/// applies `map_sql_value_to_xml_value` over these (see the `spi_execute_select`
+/// seam note).
 pub type SpiRow = Vec<Option<String>>;
 
 /// A SELECT result surfaced through the SPI seam.

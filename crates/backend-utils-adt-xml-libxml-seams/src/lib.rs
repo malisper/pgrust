@@ -235,12 +235,25 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// C: `SPI_connect(); SPI_execute(query, true, 0); ...; SPI_finish();`
-    /// returning the produced rows already XML-mapped, or a soft error.
+    /// returning the produced rows, each value rendered to its text image via
+    /// the column type's output function (`SPI_getvalue` =
+    /// `getTypeOutputInfo` + `OidOutputFunctionCall`), or a soft error.
+    ///
+    /// NOTE (contract): the SPI provider renders each value with its *default*
+    /// output function, the faithful `SPI_getvalue` behaviour. C's
+    /// `SPI_sql_row_to_xmlelement` additionally runs `map_sql_value_to_xml_value`
+    /// over each value (ISO datetime, `true`/`false` for bool, base64 for bytea,
+    /// XML escaping), which lives in xml.c — i.e. in this consumer crate, not in
+    /// the SPI owner. The consumer therefore owns applying
+    /// `map_sql_value_to_xml_value` to the returned strings; for the common
+    /// catalog columns (oid / name / text) the two renderings coincide.
     pub fn spi_execute_select(query: &str) -> PgResult<SpiResult>
 );
 
 seam_core::seam!(
     /// C: `SPI_cursor_find(name)` + `SPI_cursor_fetch(portal, true, count)`.
+    /// Values are output-function-rendered; see [`spi_execute_select`] for the
+    /// `map_sql_value_to_xml_value` ownership note.
     pub fn spi_cursor_fetch(name: &str, count: i32) -> PgResult<SpiResult>
 );
 

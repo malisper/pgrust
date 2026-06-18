@@ -349,8 +349,12 @@ pub fn CreateDestReceiver(dest: CommandDest) -> DestReceiverHandle {
             backend_access_common_printtup_seams::create_debug_dest_receiver::call()
         }
 
+        // DestSPI -> spi_printtupDR (spi.c): the SPI owner registers its real
+        // collecting vtable (spi_dest_startup / spi_printtup) into this router
+        // via the seam, the same delegation copyto/printtup use.
+        CommandDest::Spi => backend_executor_spi_seams::create_spi_dest_receiver::call(),
+
         // DestRemoteSimple                     -> printsimpleDR             (printsimple.c)
-        // DestSPI                              -> spi_printtupDR            (spi.c)
         // DestTuplestore                       -> CreateTuplestoreDestReceiver  (tstoreReceiver.c)
         // DestIntoRel                          -> CreateIntoRelDestReceiver (createas.c)
         // DestSqlFunction                      -> CreateSQLFunctionDestReceiver (functions.c)

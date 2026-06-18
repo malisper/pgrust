@@ -113,3 +113,44 @@ pub fn SPI_gettypeid(tupdesc: &TupleDescData<'_>, fnumber: i32) -> PgResult<Oid>
         Ok(backend_catalog_heap::SystemAttributeDefinition(fnumber as i16)?.atttypid)
     }
 }
+
+/// `SPI_getvalue(HeapTuple tuple, TupleDesc tupdesc, int fnumber)` (`spi.c:1220`)
+/// — the text image of column `fnumber`: `heap_getattr` then `getTypeOutputInfo`
+/// + `OidOutputFunctionCall` on the column's type. `None` for SQL NULL or a bad
+/// index (with `SPI_result` set to `SPI_ERROR_NOATTRIBUTE`).
+pub fn SPI_getvalue<'mcx>(
+    mcx: Mcx<'mcx>,
+    tuple: &FormedTuple<'_>,
+    tupdesc: &TupleDescData<'_>,
+    fnumber: i32,
+) -> PgResult<Option<mcx::PgVec<'mcx, u8>>> {
+    // SPI_result = 0;
+    set_spi_result(0);
+
+    if fnumber_out_of_range(tupdesc, fnumber) {
+        // SPI_result = SPI_ERROR_NOATTRIBUTE; return NULL;
+        set_spi_result(SPI_ERROR_NOATTRIBUTE);
+        return Ok(None);
+    }
+
+    // val = heap_getattr(tuple, fnumber, tupdesc, &isnull); if (isnull) return NULL;
+    let (val, isnull) = heap_getattr(mcx, tuple, fnumber, tupdesc)?;
+    if isnull {
+        return Ok(None);
+    }
+
+    // typoid = TupleDescAttr(...)->atttypid  /  SystemAttributeDefinition(...).
+    let typoid = if fnumber > 0 {
+        tupdesc.attr((fnumber - 1) as usize).atttypid
+    } else {
+        backend_catalog_heap::SystemAttributeDefinition(fnumber as i16)?.atttypid
+    };
+
+    // getTypeOutputInfo(typoid, &foutoid, &typisvarlena);
+    let (foutoid, _typisvarlena) =
+        backend_utils_cache_lsyscache_seams::get_type_output_info::call(typoid)?;
+    // return OidOutputFunctionCall(foutoid, val);
+    let bytes =
+        backend_utils_fmgr_fmgr_seams::oid_output_function_call::call(mcx, foutoid, &val)?;
+    Ok(Some(bytes))
+}

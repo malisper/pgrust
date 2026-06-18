@@ -16,3 +16,5 @@ types-error = { path = "../types-error" }
 types-tuple = { path = "../types-tuple" }
 types-snapshot = { path = "../types-snapshot" }
 types-ri-triggers = { path = "../types-ri-triggers" }
+types-nodes = { path = "../types-nodes" }
+types-xml = { path = "../types-xml" }
