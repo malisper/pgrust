@@ -114,14 +114,14 @@ fn convert_VALUES_to_ANY_panic<'mcx>(
 /// OpExprs). We run the substitution over the `Expr` model; `subst_nodes` are
 /// the `Var` Exprs produced by [`generate_subquery_vars`].
 fn convert_testexpr<'mcx>(testexpr: &Node<'mcx>, subst_nodes: &[Expr]) -> Node<'mcx> {
-    match testexpr {
-        Node::Expr(e) => Node::Expr(convert_testexpr_mutator(e.clone(), subst_nodes)),
+    match testexpr.as_expr() {
+        Some(e) => Node::Expr(convert_testexpr_mutator(e.clone(), subst_nodes)),
         // The C always passes an expression tree here; an ANY SubLink's testexpr
         // is an OpExpr / BoolExpr, i.e. a `Node::Expr`. Anything else is a
         // malformed parse tree.
-        other => panic!(
+        None => panic!(
             "convert_testexpr: ANY SubLink testexpr is not an expression node: {:?}",
-            other.node_tag()
+            testexpr.node_tag()
         ),
     }
 }
@@ -379,9 +379,9 @@ pub fn convert_EXISTS_sublink_to_join<'mcx>(
             }
         }
         // Unwrap the Query back out.
-        subselect = match subselect_as_node {
-            Node::Query(q) => q,
-            _ => unreachable!(),
+        subselect = match subselect_as_node.into_query() {
+            Some(q) => q,
+            None => unreachable!(),
         };
     }
 
@@ -397,9 +397,9 @@ pub fn convert_EXISTS_sublink_to_join<'mcx>(
         backend_rewrite_core::offset::OffsetVarNodes(&mut subselect_node2, rtoffset, 0);
         // IncrementVarSublevelsUp((Node *) subselect, -1, 1)
         backend_rewrite_core::increment::IncrementVarSublevelsUp(&mut subselect_node2, -1, 1)?;
-        subselect = match subselect_node2 {
-            Node::Query(q) => q,
-            _ => unreachable!(),
+        subselect = match subselect_node2.into_query() {
+            Some(q) => q,
+            None => unreachable!(),
         };
     }
     if let Some(wc) = where_clause.as_deref_mut() {
