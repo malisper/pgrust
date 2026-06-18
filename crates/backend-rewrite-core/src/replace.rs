@@ -83,18 +83,15 @@ fn replace_rte_variables_mutator(
     context: &mut ReplaceRteVariablesContext,
     callback: &mut (dyn FnMut(&Var, &mut ReplaceRteVariablesContext) -> PgResult<Expr> + '_),
 ) -> PgResult<bool> {
-    match node {
-        Node::Expr(Expr::Var(_)) => {
+    match node.node_tag() {
+        ntag::T_Var => {
             let (is_match, var_clone) = {
-                if let Node::Expr(Expr::Var(var)) = node {
-                    (
-                        var.varno == context.target_varno
-                            && var.varlevelsup as i32 == context.sublevels_up,
-                        var.clone(),
-                    )
-                } else {
-                    unreachable!()
-                }
+                let var = node.as_var().unwrap();
+                (
+                    var.varno == context.target_varno
+                        && var.varlevelsup as i32 == context.sublevels_up,
+                    var.clone(),
+                )
             };
             if is_match {
                 // Found a matching variable, make the substitution.
@@ -109,7 +106,8 @@ fn replace_rte_variables_mutator(
             }
             Ok(false)
         }
-        Node::CurrentOfExpr(cexpr) => {
+        ntag::T_CurrentOfExpr => {
+            let cexpr = node.as_currentofexpr().unwrap();
             if cexpr.cvarno as i32 == context.target_varno && context.sublevels_up == 0 {
                 return Err(feature_not_supported(
                     "WHERE CURRENT OF on a view is not implemented",
@@ -117,7 +115,8 @@ fn replace_rte_variables_mutator(
             }
             Ok(false)
         }
-        Node::Query(q) => {
+        ntag::T_Query => {
+            let q = node.as_query_mut().unwrap();
             context.sublevels_up += 1;
             let save_inserted_sublink = context.inserted_sublink;
             context.inserted_sublink = q.hasSubLinks;

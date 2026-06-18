@@ -20,8 +20,8 @@
 
 use backend_nodes_core::node_walker::{expression_tree_walker_mut, query_tree_mutator};
 use types_nodes::copy_query::Query;
-use types_nodes::nodes::Node;
-use types_nodes::primnodes::{Expr, ExprRelids};
+use types_nodes::nodes::{ntag, Node};
+use types_nodes::primnodes::ExprRelids;
 
 use crate::relids;
 
@@ -70,8 +70,9 @@ fn ChangeVarNodes_walker(
         }
     }
 
-    match node {
-        Node::Expr(Expr::Var(var)) => {
+    match node.node_tag() {
+        ntag::T_Var => {
+            let var = node.as_var_mut().unwrap();
             if var.varlevelsup as i32 == context.sublevels_up {
                 if var.varno == context.rt_index {
                     var.varno = context.new_index;
@@ -84,19 +85,22 @@ fn ChangeVarNodes_walker(
             }
             false
         }
-        Node::CurrentOfExpr(cexpr) => {
+        ntag::T_CurrentOfExpr => {
+            let cexpr = node.as_currentofexpr_mut().unwrap();
             if context.sublevels_up == 0 && cexpr.cvarno as i32 == context.rt_index {
                 cexpr.cvarno = context.new_index as u32;
             }
             false
         }
-        Node::RangeTblRef(rtr) => {
+        ntag::T_RangeTblRef => {
+            let rtr = node.as_rangetblref_mut().unwrap();
             if context.sublevels_up == 0 && rtr.rtindex == context.rt_index {
                 rtr.rtindex = context.new_index;
             }
             false
         }
-        Node::JoinExpr(j) => {
+        ntag::T_JoinExpr => {
+            let j = node.as_joinexpr_mut().unwrap();
             if context.sublevels_up == 0 && j.rtindex == context.rt_index {
                 j.rtindex = context.new_index;
             }
@@ -104,23 +108,23 @@ fn ChangeVarNodes_walker(
                 ChangeVarNodes_walker(n, context, callback)
             })
         }
-        Node::Expr(Expr::PlaceHolderVar(_)) => {
-            if let Node::Expr(Expr::PlaceHolderVar(phv)) = node {
-                if phv.phlevelsup as i32 == context.sublevels_up {
-                    phv.phrels =
-                        adjust_relid_set(&phv.phrels, context.rt_index, context.new_index);
-                    phv.phnullingrels = adjust_relid_set(
-                        &phv.phnullingrels,
-                        context.rt_index,
-                        context.new_index,
-                    );
-                }
+        ntag::T_PlaceHolderVar => {
+            let phv = node.as_placeholdervar_mut().unwrap();
+            if phv.phlevelsup as i32 == context.sublevels_up {
+                phv.phrels =
+                    adjust_relid_set(&phv.phrels, context.rt_index, context.new_index);
+                phv.phnullingrels = adjust_relid_set(
+                    &phv.phnullingrels,
+                    context.rt_index,
+                    context.new_index,
+                );
             }
             expression_tree_walker_mut(node, &mut |n| {
                 ChangeVarNodes_walker(n, context, callback)
             })
         }
-        Node::Query(q) => {
+        ntag::T_Query => {
+            let q = node.as_query_mut().unwrap();
             context.sublevels_up += 1;
             let result =
                 query_tree_mutator(q, &mut |n| ChangeVarNodes_walker(n, context, callback), 0);

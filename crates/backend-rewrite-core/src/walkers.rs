@@ -15,8 +15,8 @@ use backend_nodes_core::node_walker::{
     expression_tree_walker, query_or_expression_tree_walker, query_tree_walker,
     QTW_IGNORE_CTE_SUBQUERIES, QTW_IGNORE_RT_SUBQUERIES,
 };
-use types_nodes::nodes::Node;
-use types_nodes::primnodes::{Expr, ParamKind};
+use types_nodes::nodes::{ntag, Node};
+use types_nodes::primnodes::ParamKind;
 
 use crate::relids;
 
@@ -37,21 +37,24 @@ pub fn contain_aggs_of_level(node: &Node, levelsup: i32) -> bool {
 }
 
 fn contain_aggs_of_level_walker(node: &Node, sublevels_up: &mut i32) -> bool {
-    match node {
-        Node::Expr(Expr::Aggref(agg)) => {
+    match node.node_tag() {
+        ntag::T_Aggref => {
+            let agg = node.expect_aggref();
             if agg.agglevelsup as i32 == *sublevels_up {
                 return true;
             }
             // else fall through to examine argument
             expression_tree_walker(node, &mut |n| contain_aggs_of_level_walker(n, sublevels_up))
         }
-        Node::Expr(Expr::GroupingFunc(grp)) => {
+        ntag::T_GroupingFunc => {
+            let grp = node.expect_groupingfunc();
             if grp.agglevelsup as i32 == *sublevels_up {
                 return true;
             }
             expression_tree_walker(node, &mut |n| contain_aggs_of_level_walker(n, sublevels_up))
         }
-        Node::Query(q) => {
+        ntag::T_Query => {
+            let q = node.expect_query();
             *sublevels_up += 1;
             let result =
                 query_tree_walker(q, &mut |n| contain_aggs_of_level_walker(n, sublevels_up), 0);
@@ -87,22 +90,25 @@ pub fn locate_agg_of_level(node: &Node, levelsup: i32) -> i32 {
 }
 
 fn locate_agg_of_level_walker(node: &Node, ctx: &mut LocateAggCtx) -> bool {
-    match node {
-        Node::Expr(Expr::Aggref(agg)) => {
+    match node.node_tag() {
+        ntag::T_Aggref => {
+            let agg = node.expect_aggref();
             if agg.agglevelsup as i32 == ctx.sublevels_up && agg.location >= 0 {
                 ctx.agg_location = agg.location;
                 return true;
             }
             expression_tree_walker(node, &mut |n| locate_agg_of_level_walker(n, ctx))
         }
-        Node::Expr(Expr::GroupingFunc(grp)) => {
+        ntag::T_GroupingFunc => {
+            let grp = node.expect_groupingfunc();
             if grp.agglevelsup as i32 == ctx.sublevels_up && grp.location >= 0 {
                 ctx.agg_location = grp.location;
                 return true;
             }
             expression_tree_walker(node, &mut |n| locate_agg_of_level_walker(n, ctx))
         }
-        Node::Query(q) => {
+        ntag::T_Query => {
+            let q = node.expect_query();
             ctx.sublevels_up += 1;
             let result = query_tree_walker(q, &mut |n| locate_agg_of_level_walker(n, ctx), 0);
             ctx.sublevels_up -= 1;
@@ -174,7 +180,7 @@ pub fn checkExprHasSubLink(node: &Node) -> bool {
 }
 
 fn checkExprHasSubLink_walker(node: &Node) -> bool {
-    if let Node::Expr(Expr::SubLink(_)) = node {
+    if node.is_sublink() {
         return true;
     }
     expression_tree_walker(node, &mut checkExprHasSubLink_walker)
@@ -221,8 +227,9 @@ pub fn rangeTableEntry_used(node: &Node, rt_index: i32, sublevels_up: i32) -> bo
 }
 
 fn rangeTableEntry_used_walker(node: &Node, ctx: &mut RteUsedCtx) -> bool {
-    match node {
-        Node::Expr(Expr::Var(var)) => {
+    match node.node_tag() {
+        ntag::T_Var => {
+            let var = node.expect_var();
             if var.varlevelsup as i32 == ctx.sublevels_up
                 && (var.varno == ctx.rt_index
                     || relids::is_member(ctx.rt_index, &var.varnullingrels))
@@ -231,27 +238,31 @@ fn rangeTableEntry_used_walker(node: &Node, ctx: &mut RteUsedCtx) -> bool {
             }
             false
         }
-        Node::CurrentOfExpr(cexpr) => {
+        ntag::T_CurrentOfExpr => {
+            let cexpr = node.expect_currentofexpr();
             if ctx.sublevels_up == 0 && cexpr.cvarno as i32 == ctx.rt_index {
                 return true;
             }
             false
         }
-        Node::RangeTblRef(rtr) => {
+        ntag::T_RangeTblRef => {
+            let rtr = node.expect_rangetblref();
             if rtr.rtindex == ctx.rt_index && ctx.sublevels_up == 0 {
                 return true;
             }
             // the subquery itself is visited separately
             false
         }
-        Node::JoinExpr(j) => {
+        ntag::T_JoinExpr => {
+            let j = node.expect_joinexpr();
             if j.rtindex == ctx.rt_index && ctx.sublevels_up == 0 {
                 return true;
             }
             // fall through to examine children
             expression_tree_walker(node, &mut |n| rangeTableEntry_used_walker(n, ctx))
         }
-        Node::Query(q) => {
+        ntag::T_Query => {
+            let q = node.expect_query();
             ctx.sublevels_up += 1;
             let result =
                 query_tree_walker(q, &mut |n| rangeTableEntry_used_walker(n, ctx), 0);

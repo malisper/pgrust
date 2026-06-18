@@ -23,7 +23,7 @@ use types_error::{PgError, PgResult, ERROR};
 use types_nodes::copy_query::Query;
 use types_nodes::nodes::{ntag, Node};
 use types_nodes::parsenodes::{RangeTblEntry, RTEKind};
-use types_nodes::primnodes::{Expr, VarReturningType};
+use types_nodes::primnodes::VarReturningType;
 
 /// `elog(ERROR, ...)` shorthand.
 fn elog_error(msg: &str) -> PgError {
@@ -46,15 +46,16 @@ fn IncrementVarSublevelsUp_walker(node: &mut Node, ctx: &mut IncrCtx) -> bool {
     if ctx.err.is_some() {
         return true; // abort the remaining walk
     }
-    match node {
-        Node::Expr(Expr::Var(var)) => {
+    match node.node_tag() {
+        ntag::T_Var => {
+            let var = node.as_var_mut().unwrap();
             if var.varlevelsup as i32 >= ctx.min_sublevels_up {
                 var.varlevelsup =
                     (var.varlevelsup as i32 + ctx.delta_sublevels_up) as u32;
             }
             false // done here
         }
-        Node::CurrentOfExpr(_) => {
+        ntag::T_CurrentOfExpr => {
             // this should not happen
             if ctx.min_sublevels_up == 0 {
                 ctx.err = Some(elog_error("cannot push down CurrentOfExpr"));
@@ -62,43 +63,40 @@ fn IncrementVarSublevelsUp_walker(node: &mut Node, ctx: &mut IncrCtx) -> bool {
             }
             false
         }
-        Node::Expr(Expr::Aggref(_)) => {
-            if let Node::Expr(Expr::Aggref(agg)) = node {
-                if agg.agglevelsup as i32 >= ctx.min_sublevels_up {
-                    agg.agglevelsup =
-                        (agg.agglevelsup as i32 + ctx.delta_sublevels_up) as u32;
-                }
+        ntag::T_Aggref => {
+            let agg = node.as_aggref_mut().unwrap();
+            if agg.agglevelsup as i32 >= ctx.min_sublevels_up {
+                agg.agglevelsup =
+                    (agg.agglevelsup as i32 + ctx.delta_sublevels_up) as u32;
             }
             // fall through to recurse into argument
             expression_tree_walker_mut(node, &mut |n| IncrementVarSublevelsUp_walker(n, ctx))
         }
-        Node::Expr(Expr::GroupingFunc(_)) => {
-            if let Node::Expr(Expr::GroupingFunc(grp)) = node {
-                if grp.agglevelsup as i32 >= ctx.min_sublevels_up {
-                    grp.agglevelsup =
-                        (grp.agglevelsup as i32 + ctx.delta_sublevels_up) as u32;
-                }
+        ntag::T_GroupingFunc => {
+            let grp = node.as_groupingfunc_mut().unwrap();
+            if grp.agglevelsup as i32 >= ctx.min_sublevels_up {
+                grp.agglevelsup =
+                    (grp.agglevelsup as i32 + ctx.delta_sublevels_up) as u32;
             }
             expression_tree_walker_mut(node, &mut |n| IncrementVarSublevelsUp_walker(n, ctx))
         }
-        Node::Expr(Expr::PlaceHolderVar(_)) => {
-            if let Node::Expr(Expr::PlaceHolderVar(phv)) = node {
-                if phv.phlevelsup as i32 >= ctx.min_sublevels_up {
-                    phv.phlevelsup =
-                        (phv.phlevelsup as i32 + ctx.delta_sublevels_up) as u32;
-                }
+        ntag::T_PlaceHolderVar => {
+            let phv = node.as_placeholdervar_mut().unwrap();
+            if phv.phlevelsup as i32 >= ctx.min_sublevels_up {
+                phv.phlevelsup =
+                    (phv.phlevelsup as i32 + ctx.delta_sublevels_up) as u32;
             }
             expression_tree_walker_mut(node, &mut |n| IncrementVarSublevelsUp_walker(n, ctx))
         }
-        Node::Expr(Expr::ReturningExpr(_)) => {
-            if let Node::Expr(Expr::ReturningExpr(rexpr)) = node {
-                if rexpr.retlevelsup >= ctx.min_sublevels_up {
-                    rexpr.retlevelsup += ctx.delta_sublevels_up;
-                }
+        ntag::T_ReturningExpr => {
+            let rexpr = node.as_returningexpr_mut().unwrap();
+            if rexpr.retlevelsup >= ctx.min_sublevels_up {
+                rexpr.retlevelsup += ctx.delta_sublevels_up;
             }
             expression_tree_walker_mut(node, &mut |n| IncrementVarSublevelsUp_walker(n, ctx))
         }
-        Node::Query(q) => {
+        ntag::T_Query => {
+            let q = node.as_query_mut().unwrap();
             ctx.min_sublevels_up += 1;
             increment_query_ctes(q, ctx);
             let result =

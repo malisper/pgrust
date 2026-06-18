@@ -12,8 +12,8 @@
 
 use backend_nodes_core::node_walker::{expression_tree_walker_mut, query_tree_mutator};
 use types_nodes::copy_query::Query;
-use types_nodes::nodes::Node;
-use types_nodes::primnodes::{Expr, ExprRelids};
+use types_nodes::nodes::{ntag, Node};
+use types_nodes::primnodes::ExprRelids;
 
 use crate::relids;
 
@@ -35,8 +35,9 @@ fn offset_relid_set(relids_set: &ExprRelids, offset: i32) -> ExprRelids {
 }
 
 fn OffsetVarNodes_walker(node: &mut Node, ctx: &mut OffsetCtx) -> bool {
-    match node {
-        Node::Expr(Expr::Var(var)) => {
+    match node.node_tag() {
+        ntag::T_Var => {
+            let var = node.as_var_mut().unwrap();
             if var.varlevelsup as i32 == ctx.sublevels_up {
                 var.varno += ctx.offset;
                 var.varnullingrels = offset_relid_set(&var.varnullingrels, ctx.offset);
@@ -46,37 +47,40 @@ fn OffsetVarNodes_walker(node: &mut Node, ctx: &mut OffsetCtx) -> bool {
             }
             false
         }
-        Node::CurrentOfExpr(cexpr) => {
+        ntag::T_CurrentOfExpr => {
+            let cexpr = node.as_currentofexpr_mut().unwrap();
             if ctx.sublevels_up == 0 {
                 cexpr.cvarno = (cexpr.cvarno as i32 + ctx.offset) as u32;
             }
             false
         }
-        Node::RangeTblRef(rtr) => {
+        ntag::T_RangeTblRef => {
+            let rtr = node.as_rangetblref_mut().unwrap();
             if ctx.sublevels_up == 0 {
                 rtr.rtindex += ctx.offset;
             }
             // the subquery itself is visited separately
             false
         }
-        Node::JoinExpr(j) => {
+        ntag::T_JoinExpr => {
+            let j = node.as_joinexpr_mut().unwrap();
             if j.rtindex != 0 && ctx.sublevels_up == 0 {
                 j.rtindex += ctx.offset;
             }
             // fall through to examine children
             expression_tree_walker_mut(node, &mut |n| OffsetVarNodes_walker(n, ctx))
         }
-        Node::Expr(Expr::PlaceHolderVar(_)) => {
+        ntag::T_PlaceHolderVar => {
             // mutate phrels/phnullingrels in place, then recurse into children
-            if let Node::Expr(Expr::PlaceHolderVar(phv)) = node {
-                if phv.phlevelsup as i32 == ctx.sublevels_up {
-                    phv.phrels = offset_relid_set(&phv.phrels, ctx.offset);
-                    phv.phnullingrels = offset_relid_set(&phv.phnullingrels, ctx.offset);
-                }
+            let phv = node.as_placeholdervar_mut().unwrap();
+            if phv.phlevelsup as i32 == ctx.sublevels_up {
+                phv.phrels = offset_relid_set(&phv.phrels, ctx.offset);
+                phv.phnullingrels = offset_relid_set(&phv.phnullingrels, ctx.offset);
             }
             expression_tree_walker_mut(node, &mut |n| OffsetVarNodes_walker(n, ctx))
         }
-        Node::Query(q) => {
+        ntag::T_Query => {
+            let q = node.as_query_mut().unwrap();
             ctx.sublevels_up += 1;
             let result = query_tree_mutator(q, &mut |n| OffsetVarNodes_walker(n, ctx), 0);
             ctx.sublevels_up -= 1;
