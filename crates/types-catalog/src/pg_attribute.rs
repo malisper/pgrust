@@ -172,4 +172,9 @@ pub struct PgAttributeUpdateRow {
     /// `attoptions` — `Some(Some(image))` stores the built `text[]` varlena,
     /// `Some(None)` stores SQL NULL (`RESET`), `None` leaves it unchanged.
     pub attoptions: Option<Option<Vec<u8>>>,
+    /// `attmissingval` — `Some(Some(image))` stores the built `anyarray`
+    /// varlena (`StoreAttrMissingVal`'s `construct_array`), `Some(None)` stores
+    /// SQL NULL (`RelationClearMissing` clears the missing value), `None`
+    /// leaves it unchanged.
+    pub attmissingval: Option<Option<Vec<u8>>>,
 }

@@ -1439,13 +1439,127 @@ pub fn RemoveAttributeById<'mcx>(mcx: Mcx<'mcx>, relid: Oid, attnum: AttrNumber)
     Ok(())
 }
 
-/// `RelationClearMissing` (heap.c) — clear the `atthasmissing` flag and the
-/// `attmissingval` for every column of `rel`. Needs a writable full-row
-/// `ATTNUM` syscache copy + a `pg_attribute` `CatalogTupleUpdate` carrier;
-/// driven through a mirror-and-panic seam.
-pub fn RelationClearMissing<'mcx>(_mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<()> {
-    let natts = rel.rd_att.natts;
-    backend_catalog_heap_seams::relation_clear_missing_update::call(rel.rd_id, natts)
+/// `RelationClearMissing` (heap.c) — clear `atthasmissing` and null
+/// `attmissingval` for every (user) column of `rel` where `atthasmissing` is
+/// set. Safe + useful when the table is rewritten (VACUUM FULL / CLUSTER) so
+/// no rows can be missing a full attribute complement. The caller holds an
+/// `AccessExclusive` lock on the relation.
+///
+/// The C reads each row through `SearchSysCache2(ATTNUM, relid, attnum)` for
+/// `attnum` 1..=natts; the equivalent here is a keyed `systable_beginscan` on
+/// the `AttributeRelidNumIndexId` over `attrelid = relid` (the same idiom as
+/// `DeleteAttributeTuples`), filtered to user columns (`attnum >= 1`,
+/// including dropped). For each row with `atthasmissing` set, `heap_modify_tuple`
+/// clears `atthasmissing` and nulls `attmissingval`, then `CatalogTupleUpdate`.
+pub fn RelationClearMissing<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<()> {
+    use backend_access_common_scankey::ScanKeyInit;
+    use types_core::fmgr::F_OIDEQ;
+    use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+    use types_tuple::backend_access_common_heaptuple::Datum;
+
+    // pg_attribute catalog OID + its (attrelid, attnum) index, and the columns
+    // touched (catalog/pg_attribute.h).
+    const AttributeRelationId: Oid = 1249;
+    const AttributeRelidNumIndexId: Oid = 2659;
+    const Anum_pg_attribute_attrelid: AttrNumber = 1;
+    const Anum_pg_attribute_attnum: AttrNumber = 6;
+    const Anum_pg_attribute_atthasmissing: AttrNumber = 14;
+    const Anum_pg_attribute_attmissingval: AttrNumber = 25;
+
+    let relid = rel.rd_id;
+
+    // attr_rel = table_open(AttributeRelationId, RowExclusiveLock);
+    let attr_rel = backend_access_table_table::table_open(
+        mcx,
+        AttributeRelationId,
+        types_storage::lock::RowExclusiveLock,
+    )?;
+
+    // Use the index to scan only attributes of the target relation.
+    let mut key = [ScanKeyData::empty()];
+    ScanKeyInit(
+        &mut key[0],
+        Anum_pg_attribute_attrelid,
+        BTEqualStrategyNumber,
+        F_OIDEQ,
+        Datum::from_oid(relid),
+    )?;
+
+    let mut scan = backend_access_index_genam_seams::systable_beginscan::call(
+        &attr_rel,
+        AttributeRelidNumIndexId,
+        true,
+        None,
+        &key[..1],
+    )?;
+
+    let natts = attr_rel.rd_att.natts as usize;
+    loop {
+        let Some(tuple) =
+            backend_access_index_genam_seams::systable_getnext::call(mcx, scan.desc_mut())?
+        else {
+            break;
+        };
+
+        // attrtuple = (Form_pg_attribute) GETSTRUCT(tuple); the C loop is over
+        // attnum 1..=natts (user columns, including dropped). System columns
+        // (attnum <= 0) are skipped.
+        let (attnum_val, _) = backend_access_common_heaptuple::heap_getattr(
+            mcx,
+            &tuple,
+            Anum_pg_attribute_attnum as i32,
+            &attr_rel.rd_att,
+        )?;
+        if attnum_val.as_i16() < 1 {
+            continue;
+        }
+
+        // if (attrtuple->atthasmissing)
+        let (hasmissing, _) = backend_access_common_heaptuple::heap_getattr(
+            mcx,
+            &tuple,
+            Anum_pg_attribute_atthasmissing as i32,
+            &attr_rel.rd_att,
+        )?;
+        if !hasmissing.as_bool() {
+            continue;
+        }
+
+        // newtuple = heap_modify_tuple(tuple, RelationGetDescr(attr_rel),
+        //     repl_val, repl_null, repl_repl): atthasmissing := false,
+        //     attmissingval := NULL.
+        let mut repl_val = alloc::vec![Datum::null(); natts];
+        let mut repl_null = alloc::vec![false; natts];
+        let mut repl_repl = alloc::vec![false; natts];
+
+        repl_val[(Anum_pg_attribute_atthasmissing - 1) as usize] = Datum::from_bool(false);
+        repl_repl[(Anum_pg_attribute_atthasmissing - 1) as usize] = true;
+
+        repl_null[(Anum_pg_attribute_attmissingval - 1) as usize] = true;
+        repl_repl[(Anum_pg_attribute_attmissingval - 1) as usize] = true;
+
+        let mut newtuple = backend_access_common_heaptuple::heap_modify_tuple(
+            mcx,
+            &tuple,
+            &attr_rel.rd_att,
+            &repl_val,
+            &repl_null,
+            &repl_repl,
+        )?;
+
+        // CatalogTupleUpdate(attr_rel, &newtuple->t_self, newtuple);
+        backend_catalog_indexing::keystone::CatalogTupleUpdate(
+            mcx,
+            &attr_rel,
+            tuple.tuple.t_self,
+            &mut newtuple,
+        )?;
+    }
+
+    // Our update of the pg_attribute rows forces a relcache rebuild; nothing
+    // else to do. table_close(attr_rel, RowExclusiveLock).
+    scan.end()?;
+    attr_rel.close(types_storage::lock::RowExclusiveLock)
 }
 
 /// `StoreAttrMissingVal` (heap.c) — set the missing value of a single
