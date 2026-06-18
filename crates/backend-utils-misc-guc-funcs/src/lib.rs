@@ -832,6 +832,43 @@ pub fn InitializeShmemGUCs() -> PgResult<()> {
 /// `types_parsenodes::Node` value (the SET-args flattener only inspects these
 /// four value-node tags). This mirrors C's `castNode(VariableSetStmt,
 /// parsetree)` — the same node, viewed through the trimmed projection.
+/// Project a single SET/transaction-option value node from the post-analyze
+/// `types_nodes` universe into the `types_parsenodes` node that `SetPGVariable`
+/// / `flatten_set_variable_args` consume. Mirrors the per-arg arm of
+/// `variable_set_stmt_from_nodes`.
+fn set_arg_from_nodes(arg: &types_nodes::nodes::Node<'_>) -> PgResult<Node> {
+    use types_nodes::nodes::Node as TnNode;
+
+    // The DefElem arg is an `A_Const` (a SET literal); read its inner value.
+    let val_node: &TnNode = match arg {
+        TnNode::A_Const(c) => match &c.val {
+            Some(v) => &**v,
+            None => {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                    .errmsg("SET argument is NULL".to_string())
+                    .into_error());
+            }
+        },
+        // The parse model may carry the value node directly (no A_Const wrapper).
+        other => other,
+    };
+    match val_node {
+        TnNode::Integer(i) => Ok(Node::Integer(types_parsenodes::Integer { ival: i.ival })),
+        TnNode::Float(f) => Ok(Node::Float(types_parsenodes::Float {
+            fval: Some(f.fval.to_string()),
+        })),
+        TnNode::Boolean(b) => Ok(Node::Boolean(types_parsenodes::Boolean { boolval: b.boolval })),
+        TnNode::String(st) => Ok(Node::String(types_parsenodes::StringNode {
+            sval: Some(st.sval.to_string()),
+        })),
+        other => Err(types_error::PgError::error(format!(
+            "set_pg_variable: unexpected SET argument node {:?}",
+            other.node_tag()
+        ))),
+    }
+}
+
 fn variable_set_stmt_from_nodes(
     s: &types_nodes::ddlnodes::VariableSetStmt<'_>,
 ) -> PgResult<VariableSetStmt> {
@@ -925,6 +962,17 @@ pub fn init_seams() {
     // args list maps to `arg = None`; `is_local = false`.
     backend_utils_misc_guc_seams::set_pg_variable_session_authorization_reset::set(|| {
         SetPGVariable("session_authorization", None, false)
+    });
+    // `SetPGVariable(name, list_make1(item->arg), true)` — the BEGIN /
+    // START TRANSACTION transaction-characteristics options
+    // (transaction_isolation / transaction_read_only / transaction_deferrable;
+    // utility.c T_TransactionStmt arm). `SetPGVariable` is guc_funcs.c's body
+    // (this crate); the dispatch reaches it through the utility-out-seam. The
+    // option-value `Node` arrives in the post-analyze `types_nodes` universe and
+    // is projected into the `types_parsenodes` node `SetPGVariable` consumes.
+    backend_tcop_utility_out_seams::set_pg_variable::set(|name, arg, is_local| {
+        let projected = set_arg_from_nodes(arg)?;
+        SetPGVariable(name, Some(&projected), is_local)
     });
     // `InitializeShmemGUCs()` is guc_funcs.c's own body; its standalone-boot
     // seam is declared in `backend-tcop-postgres-seams` (the boot driver's seam
