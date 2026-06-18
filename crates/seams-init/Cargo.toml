@@ -450,7 +450,6 @@ backend-utils-adt-char = { path = "../backend-utils-adt-char" }
 backend-utils-adt-oid = { path = "../backend-utils-adt-oid" }
 backend-utils-adt-int = { path = "../backend-utils-adt-int" }
 backend-utils-adt-int8 = { path = "../backend-utils-adt-int8" }
-backend-utils-adt-jsonb = { path = "../backend-utils-adt-jsonb" }
 backend-utils-adt-ascii = { path = "../backend-utils-adt-ascii" }
 backend-utils-adt-amutils = { path = "../backend-utils-adt-amutils" }
 backend-utils-adt-mcxtfuncs = { path = "../backend-utils-adt-mcxtfuncs" }
