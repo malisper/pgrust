@@ -30,7 +30,18 @@ use backend_utils_sort_storage_seams as seams;
 pub fn init_seams() {
     install_logtape_seams();
     install_tuplestore_seams();
+    install_tuplestore_hold_seams();
     sharedtuplestore::init_seams();
+}
+
+/// The held-cursor portal-lifetime tuplestore seam (`PortalCreateHoldStore` →
+/// `tuplestore_begin_heap(randomAccess, false, work_mem)` allocated in the
+/// portal's `holdContext`). The store is `'static` (outlives the per-query
+/// memory). Allocation failure errors out like the C `palloc`.
+fn install_tuplestore_hold_seams() {
+    backend_utils_sort_tuplestore_hold_seams::tuplestore_begin_heap::set(|random_access| {
+        tuplestore::tuplestore_begin_heap_hold(random_access)
+    });
 }
 
 /// logtape.c — the value-typed logical-tape surface (the hash-agg spill path;

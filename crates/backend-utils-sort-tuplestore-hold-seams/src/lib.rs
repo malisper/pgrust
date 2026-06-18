@@ -5,14 +5,17 @@
 //! outlive any single `Mcx<'mcx>` borrow — it carries the `'static` lifetime
 //! `types_portal::PortalData::holdStore` declares. The store is the real owned
 //! `types_nodes::Tuplestorestate`; releasing it (C `tuplestore_end`) is dropping
-//! the value (RAII), which the owner's `Drop` performs. Reconciling the
-//! `'static` hold store with the storage unit's `'mcx`-bound begin is DESIGN_DEBT
-//! until held-cursor persistence lands.
+//! the value (RAII), which the owner's `Drop` performs. The owned engine state
+//! is itself self-owned (it carries its own working-memory arena), so the
+//! `'static` carrier the storage unit builds (`tuplestore_begin_heap_hold` via
+//! `Tuplestorestate::begin_static`) borrows nothing from a caller's `'mcx`.
 
+use types_error::PgResult;
 use types_nodes::Tuplestorestate;
 
 seam_core::seam!(
     /// `tuplestore_begin_heap(randomAccess, false, work_mem)` allocated in the
-    /// portal's already-switched-to `holdContext`. Returns the owned store.
-    pub fn tuplestore_begin_heap(random_access: bool) -> Tuplestorestate<'static>
+    /// portal's `holdContext`. Returns the owned `'static` store; `Err` on the
+    /// C `palloc` failure path.
+    pub fn tuplestore_begin_heap(random_access: bool) -> PgResult<Tuplestorestate<'static>>
 );

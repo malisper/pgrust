@@ -22,9 +22,12 @@ backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" 
 
 # Owned inward seams installed by this unit.
 backend-utils-sort-storage-seams = { path = "../backend-utils-sort-storage-seams" }
+# Held-cursor portal-lifetime tuplestore seam, also installed by this unit.
+backend-utils-sort-tuplestore-hold-seams = { path = "../backend-utils-sort-tuplestore-hold-seams" }
 
 # Outward seams this unit drives.
 backend-storage-file-buffile-seams = { path = "../backend-storage-file-buffile-seams" }
 backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
 backend-commands-tablespace-seams = { path = "../backend-commands-tablespace-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }

@@ -219,19 +219,18 @@ fn with_store_ref<R>(
 // tuplestore_begin_xxx
 // ----------------------------------------------------------------------------
 
-fn tuplestore_begin_common<'mcx>(
-    mcx: Mcx<'mcx>,
-    eflags: i32,
-    interXact: bool,
-    maxKBytes: i32,
-) -> PgResult<types_nodes::Tuplestorestate<'mcx>> {
+/// Build the self-owned engine bundle (the C `tuplestore_begin_common` state +
+/// its `state->context`). The bundle borrows nothing from any caller's `'mcx`,
+/// so it is shared by both the `'mcx`-bound [`tuplestore_begin_heap`] and the
+/// `'static` held-cursor [`tuplestore_begin_heap_hold`].
+fn build_owned_store(eflags: i32, interXact: bool, maxKBytes: i32) -> PgResult<OwnedStore> {
     let limit = if maxKBytes > 0 {
         maxKBytes as usize * 1024
     } else {
         0
     };
 
-    let owned = OwnedStore::try_new(MemoryContext::new("tuplestore").with_limit(limit), |sx| {
+    OwnedStore::try_new(MemoryContext::new("tuplestore").with_limit(limit), |sx| {
         let memtupsize = core::cmp::max(
             16384 / POINTER_SIZE,
             ALLOCSET_SEPARATE_THRESHOLD / POINTER_SIZE + 1,
@@ -275,8 +274,16 @@ fn tuplestore_begin_common<'mcx>(
             writepos_file: 0,
             writepos_offset: 0,
         })
-    })?;
+    })
+}
 
+fn tuplestore_begin_common<'mcx>(
+    mcx: Mcx<'mcx>,
+    eflags: i32,
+    interXact: bool,
+    maxKBytes: i32,
+) -> PgResult<types_nodes::Tuplestorestate<'mcx>> {
+    let owned = build_owned_store(eflags, interXact, maxKBytes)?;
     types_nodes::Tuplestorestate::begin(mcx, owned)
 }
 
@@ -294,6 +301,29 @@ pub fn tuplestore_begin_heap<'mcx>(
     };
     let carrier = tuplestore_begin_common(mcx, eflags, interXact, maxKBytes)?;
     mcx::alloc_in(mcx, carrier)
+}
+
+/// Held-cursor variant of `tuplestore_begin_heap(randomAccess, false, work_mem)`
+/// (C: `PortalCreateHoldStore`, called with `CurrentMemoryContext` switched to
+/// the portal's `holdContext` so the store outlives the source transaction).
+///
+/// The store is created in its own self-owned arena (the owned analogue of the
+/// `holdContext`-allocated `Tuplestorestate`), yielding a `'static` carrier the
+/// portal record stores by value as `portal->holdStore`. `interXact` is `false`
+/// just as in C: the temp file (if it spills) is dropped at end of the
+/// *creating* transaction, but the in-memory rows are copied across by
+/// `PersistHoldablePortal` before that. Errors out (`elog ERROR`) on allocation
+/// failure, mirroring `palloc`.
+pub fn tuplestore_begin_heap_hold(
+    randomAccess: bool,
+) -> PgResult<types_nodes::Tuplestorestate<'static>> {
+    let eflags = if randomAccess {
+        EXEC_FLAG_BACKWARD | EXEC_FLAG_REWIND
+    } else {
+        EXEC_FLAG_REWIND
+    };
+    let owned = build_owned_store(eflags, false, backend_utils_init_small_seams::work_mem::call())?;
+    types_nodes::Tuplestorestate::begin_static(owned)
 }
 
 /// `tuplestore_set_eflags(state, eflags)`.

@@ -614,7 +614,7 @@ pub fn PortalCreateHoldStore(portal: &Portal) -> PgResult<()> {
     // tuplestore_begin_heap pallocs the store there. Here the store is created
     // by the tuplestore owner (seam); allocation targeting is the owner's
     // concern once it lands, so the switch is a no-op for portalmem.
-    let store = tuplestore_seam::tuplestore_begin_heap::call(random_access);
+    let store = tuplestore_seam::tuplestore_begin_heap::call(random_access)?;
     portal.borrow_mut().holdStore = Some(store);
     Ok(())
 }

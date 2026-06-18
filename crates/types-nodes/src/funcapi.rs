@@ -13,7 +13,7 @@
 
 use core::any::Any;
 
-use mcx::{Mcx, PgBox};
+use mcx::{Mcx, MemoryContext, PgBox};
 use types_error::PgResult;
 
 pub struct Tuplestorestate<'mcx> {
@@ -22,6 +22,14 @@ pub struct Tuplestorestate<'mcx> {
     /// context); `None` for a default-constructed (not-yet-begun) carrier —
     /// the C `NULL` `Tuplestorestate *`.
     store: Option<PgBox<'mcx, dyn Any>>,
+    /// The self-owned arena the type-erased payload lives in, present only for
+    /// a [`begin_static`](Self::begin_static)-constructed carrier (the held
+    /// cursor's portal-lifetime store). For the ordinary [`begin`](Self::begin)
+    /// carrier the payload is allocated in the caller's `'mcx` and this is
+    /// `None`. Heap-pinned (`Box`) so its address is stable across moves of the
+    /// carrier, exactly like [`mcx::McxOwned`]'s context; the explicit `Drop`
+    /// frees the payload **before** this arena.
+    hold_ctx: Option<alloc::boxed::Box<MemoryContext>>,
 }
 
 impl<'mcx> Tuplestorestate<'mcx> {
@@ -38,6 +46,37 @@ impl<'mcx> Tuplestorestate<'mcx> {
         let erased: PgBox<'mcx, dyn Any> = unsafe { PgBox::from_raw_in(ptr as *mut dyn Any, alloc) };
         Ok(Tuplestorestate {
             store: Some(erased),
+            hold_ctx: None,
+        })
+    }
+
+    /// `tuplestore_begin_heap(..)` allocated in a portal's `holdContext` — the
+    /// held-cursor store that must outlive the per-query memory (C:
+    /// `portal->holdStore`, created under `TopPortalContext`). The owned engine
+    /// state is itself self-owned (it carries its own working-memory context),
+    /// so the only thing this constructor adds over [`begin`](Self::begin) is a
+    /// self-owned arena for the type-erased carrier box, making the result a
+    /// `Tuplestorestate<'static>` that borrows nothing from any caller's `'mcx`.
+    ///
+    /// The `'static` is the hold-context-lived marker (mirroring
+    /// `PortalData::holdStore` / `stmts` / `tupDesc`): the payload is real
+    /// `Global`-heap memory owned by the inner `PgBox`, freed by this carrier's
+    /// `Drop`. Only the owning tuplestore unit calls this.
+    pub fn begin_static<T: Any>(store: T) -> PgResult<Tuplestorestate<'static>> {
+        let ctx = alloc::boxed::Box::new(MemoryContext::new("PortalHoldStore"));
+        // SAFETY: mirror `mcx::McxOwned::try_new` — the box's heap address is
+        // stable across moves of the carrier, the context is dropped only after
+        // the payload (explicit `Drop` impl), and the `'static` payload never
+        // escapes except re-shortened through the `'mcx`-universal accessors.
+        let mcx: Mcx<'static> = unsafe { core::mem::transmute::<Mcx<'_>, Mcx<'static>>(ctx.mcx()) };
+        let boxed = mcx::alloc_in(mcx, store)?;
+        let (ptr, alloc) = PgBox::into_raw_with_allocator(boxed);
+        // Unsizing through the raw pointer (see `begin`).
+        let erased: PgBox<'static, dyn Any> =
+            unsafe { PgBox::from_raw_in(ptr as *mut dyn Any, alloc) };
+        Ok(Tuplestorestate {
+            store: Some(erased),
+            hold_ctx: Some(ctx),
         })
     }
 
@@ -56,7 +95,19 @@ impl<'mcx> Tuplestorestate<'mcx> {
 impl Default for Tuplestorestate<'_> {
     /// The C `Tuplestorestate *tuplestorestate = NULL` initial state.
     fn default() -> Self {
-        Tuplestorestate { store: None }
+        Tuplestorestate { store: None, hold_ctx: None }
+    }
+}
+
+impl Drop for Tuplestorestate<'_> {
+    /// Free the type-erased payload **before** its self-owned `hold_ctx` arena:
+    /// the payload's `Drop` deallocates through an `Mcx` reference into that
+    /// context (the held-store case), so the context must outlive it. The
+    /// ordinary (`begin`) carrier has `hold_ctx == None`, so this is a no-op
+    /// beyond the normal field drop. Mirrors `mcx::McxOwned::drop`.
+    fn drop(&mut self) {
+        self.store = None;
+        self.hold_ctx = None;
     }
 }
 
@@ -76,7 +127,7 @@ impl Clone for Tuplestorestate<'_> {
     /// cloning a live store stops loud.
     fn clone(&self) -> Self {
         match self.store {
-            None => Tuplestorestate { store: None },
+            None => Tuplestorestate { store: None, hold_ctx: None },
             Some(_) => panic!(
                 "Tuplestorestate: cannot clone a live tuplestore \
                  (tuplestore.c has no copy operation; C would alias the pointer)"
