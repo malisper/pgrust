@@ -26,6 +26,13 @@ use types_fmgr::boundary::RefPayload;
 use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
 use types_network::macaddr;
 
+/// A scratch context for the `_send` adapter to frame the `bytea` result, copied
+/// onto the by-ref lane before it is dropped (C: the palloc'd result lives in
+/// the caller's context; here it crosses by value).
+fn scratch_mcx() -> mcx::MemoryContext {
+    mcx::MemoryContext::new("macaddr fmgr scratch")
+}
+
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
 // ---------------------------------------------------------------------------
@@ -164,6 +171,33 @@ fn fc_macaddr_or(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     ret_macaddr(fcinfo, crate::macaddr_or(&a, &b))
 }
 
+/// `macaddr_recv(internal) -> macaddr` (oid 2494). The raw wire-message bytes
+/// ride the by-ref lane (as `oidrecv`/`uuid_recv` do); the core reads the six
+/// octets off them.
+fn fc_macaddr_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let src = fcinfo
+        .ref_arg(0)
+        .and_then(|p| p.as_varlena())
+        .expect("macaddr_recv: by-ref message arg missing from by-ref lane");
+    let m = ok(crate::macaddr_recv(src));
+    ret_macaddr(fcinfo, m)
+}
+
+/// `macaddr_send(macaddr) -> bytea` (oid 2495). The core returns the six wire
+/// octets; frame them into a `bytea` varlena image through the same pq_*typsend
+/// path C uses, and carry it on the by-ref `Varlena` result lane.
+fn fc_macaddr_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = arg_macaddr(fcinfo, 0);
+    let wire = crate::macaddr_send(&m);
+    let scratch = scratch_mcx();
+    let mut buf =
+        ok(backend_libpq_pqformat::pq_begintypsend(scratch.mcx()));
+    ok(backend_libpq_pqformat::pq_sendbytes(&mut buf, &wire));
+    let bytea = backend_libpq_pqformat::pq_endtypsend(buf);
+    fcinfo.set_ref_result(RefPayload::Varlena(bytea.as_bytes().to_vec()));
+    Datum::from_usize(0)
+}
+
 fn fc_macaddr_trunc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let m = arg_macaddr(fcinfo, 0);
     ret_macaddr(fcinfo, crate::macaddr_trunc(&m))
@@ -198,6 +232,8 @@ pub fn register_mac_builtins() {
     backend_utils_fmgr_core::register_builtins([
         builtin(436, "macaddr_in", 1, true, false, fc_macaddr_in),
         builtin(437, "macaddr_out", 1, true, false, fc_macaddr_out),
+        builtin(2494, "macaddr_recv", 1, true, false, fc_macaddr_recv),
+        builtin(2495, "macaddr_send", 1, true, false, fc_macaddr_send),
         builtin(830, "macaddr_eq", 2, true, false, fc_macaddr_eq),
         builtin(831, "macaddr_lt", 2, true, false, fc_macaddr_lt),
         builtin(832, "macaddr_le", 2, true, false, fc_macaddr_le),

@@ -24,6 +24,13 @@ use types_fmgr::boundary::RefPayload;
 use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
 use types_network::{macaddr, macaddr8};
 
+/// A scratch context for the `_send` adapter to frame the `bytea` result, copied
+/// onto the by-ref lane before it is dropped (C: the palloc'd result lives in
+/// the caller's context; here it crosses by value).
+fn scratch_mcx() -> mcx::MemoryContext {
+    mcx::MemoryContext::new("macaddr8 fmgr scratch")
+}
+
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
 // ---------------------------------------------------------------------------
@@ -191,6 +198,39 @@ fn fc_macaddr8_or(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     ret_macaddr8(fcinfo, crate::macaddr8_or(&a, &b))
 }
 
+/// `macaddr8_recv(internal) -> macaddr8` (oid 3446). The raw wire-message bytes
+/// ride the by-ref lane; the core reads the EUI-48/EUI-64 octets off them.
+fn fc_macaddr8_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let src = fcinfo
+        .ref_arg(0)
+        .and_then(|p| p.as_varlena())
+        .expect("macaddr8_recv: by-ref message arg missing from by-ref lane");
+    let m = ok(crate::macaddr8_recv(src));
+    ret_macaddr8(fcinfo, m)
+}
+
+/// `macaddr8_send(macaddr8) -> bytea` (oid 3447). The core returns the eight
+/// wire octets; frame them into a `bytea` varlena image through the same
+/// pq_*typsend path C uses, on the by-ref `Varlena` result lane.
+fn fc_macaddr8_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = arg_macaddr8(fcinfo, 0);
+    let wire = crate::macaddr8_send(&m);
+    let scratch = scratch_mcx();
+    let mut buf =
+        ok(backend_libpq_pqformat::pq_begintypsend(scratch.mcx()));
+    ok(backend_libpq_pqformat::pq_sendbytes(&mut buf, &wire));
+    let bytea = backend_libpq_pqformat::pq_endtypsend(buf);
+    fcinfo.set_ref_result(RefPayload::Varlena(bytea.as_bytes().to_vec()));
+    Datum::from_usize(0)
+}
+
+/// `macaddr8_trunc(macaddr8) -> macaddr8` (oid 4112). Zeroes the last five
+/// octets (the device portion).
+fn fc_macaddr8_trunc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = arg_macaddr8(fcinfo, 0);
+    ret_macaddr8(fcinfo, crate::macaddr8_trunc(&m))
+}
+
 fn fc_macaddr8_set7bit(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let m = arg_macaddr8(fcinfo, 0);
     ret_macaddr8(fcinfo, crate::macaddr8_set7bit(&m))
@@ -236,6 +276,9 @@ pub fn register_mac8_builtins() {
     backend_utils_fmgr_core::register_builtins([
         builtin(4110, "macaddr8_in", 1, true, false, fc_macaddr8_in),
         builtin(4111, "macaddr8_out", 1, true, false, fc_macaddr8_out),
+        builtin(3446, "macaddr8_recv", 1, true, false, fc_macaddr8_recv),
+        builtin(3447, "macaddr8_send", 1, true, false, fc_macaddr8_send),
+        builtin(4112, "macaddr8_trunc", 1, true, false, fc_macaddr8_trunc),
         builtin(4113, "macaddr8_eq", 2, true, false, fc_macaddr8_eq),
         builtin(4114, "macaddr8_lt", 2, true, false, fc_macaddr8_lt),
         builtin(4115, "macaddr8_le", 2, true, false, fc_macaddr8_le),

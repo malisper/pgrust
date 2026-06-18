@@ -25,7 +25,7 @@
 //! test that runs `crate::init_all()` then formats `missing_builtins()` (sorted
 //! by `foid`) as the `(oid, "prosrc", BuiltinGapKind::...)` rows below.
 //!
-//! Current gap: 1585 of 3102 canonical built-ins (1585 not registered,
+//! Current gap: 1574 of 3102 canonical built-ins (1574 not registered,
 //! 0 registered with diverging metadata).
 
 use backend_utils_fmgr_core::BuiltinGapKind;
@@ -505,8 +505,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (2490, "circle_recv", BuiltinGapKind::NotRegistered),
     (2492, "cash_recv", BuiltinGapKind::NotRegistered),
     (2493, "cash_send", BuiltinGapKind::NotRegistered),
-    (2494, "macaddr_recv", BuiltinGapKind::NotRegistered),
-    (2495, "macaddr_send", BuiltinGapKind::NotRegistered),
     (2496, "inet_recv", BuiltinGapKind::NotRegistered),
     (2497, "inet_send", BuiltinGapKind::NotRegistered),
     (2498, "cidr_recv", BuiltinGapKind::NotRegistered),
@@ -947,7 +945,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (3426, "pg_stat_get_db_checksum_failures", BuiltinGapKind::NotRegistered),
     (3427, "pg_stats_ext_mcvlist_items", BuiltinGapKind::NotRegistered),
     (3428, "pg_stat_get_db_checksum_last_failure", BuiltinGapKind::NotRegistered),
-    (3432, "gen_random_uuid", BuiltinGapKind::NotRegistered),
     (3434, "gtsvector_options", BuiltinGapKind::NotRegistered),
     (3435, "gist_point_sortsupport", BuiltinGapKind::NotRegistered),
     (3437, "prefixsel", BuiltinGapKind::NotRegistered),
@@ -956,8 +953,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (3442, "pg_control_checkpoint", BuiltinGapKind::NotRegistered),
     (3443, "pg_control_recovery", BuiltinGapKind::NotRegistered),
     (3444, "pg_control_init", BuiltinGapKind::NotRegistered),
-    (3446, "macaddr8_recv", BuiltinGapKind::NotRegistered),
-    (3447, "macaddr8_send", BuiltinGapKind::NotRegistered),
     (3449, "jsonb_numeric", BuiltinGapKind::NotRegistered),
     (3450, "jsonb_int2", BuiltinGapKind::NotRegistered),
     (3451, "jsonb_int4", BuiltinGapKind::NotRegistered),
@@ -1290,7 +1285,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (4106, "brin_inclusion_add_value", BuiltinGapKind::NotRegistered),
     (4107, "brin_inclusion_consistent", BuiltinGapKind::NotRegistered),
     (4108, "brin_inclusion_union", BuiltinGapKind::NotRegistered),
-    (4112, "macaddr8_trunc", BuiltinGapKind::NotRegistered),
     (4187, "pg_lsn_larger", BuiltinGapKind::NotRegistered),
     (4188, "pg_lsn_smaller", BuiltinGapKind::NotRegistered),
     (4196, "regcollationrecv", BuiltinGapKind::NotRegistered),
@@ -1566,8 +1560,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (6329, "pg_stat_get_checkpointer_restartpoints_performed", BuiltinGapKind::NotRegistered),
     (6338, "jsonb_populate_record_valid", BuiltinGapKind::NotRegistered),
     (6341, "numeric_random", BuiltinGapKind::NotRegistered),
-    (6342, "uuid_extract_timestamp", BuiltinGapKind::NotRegistered),
-    (6343, "uuid_extract_version", BuiltinGapKind::NotRegistered),
     (6345, "range_contains_elem_support", BuiltinGapKind::NotRegistered),
     (6346, "elem_contained_by_range_support", BuiltinGapKind::NotRegistered),
     (6348, "has_largeobject_privilege_name_id", BuiltinGapKind::NotRegistered),
@@ -1620,7 +1612,4 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (6423, "hashcid", BuiltinGapKind::NotRegistered),
     (6424, "hashcidextended", BuiltinGapKind::NotRegistered),
     (6427, "pg_get_sequence_data", BuiltinGapKind::NotRegistered),
-    (6428, "gen_random_uuid", BuiltinGapKind::NotRegistered),
-    (6429, "uuidv7", BuiltinGapKind::NotRegistered),
-    (6430, "uuidv7_interval", BuiltinGapKind::NotRegistered),
 ];

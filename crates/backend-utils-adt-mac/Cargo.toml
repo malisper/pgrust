@@ -21,3 +21,7 @@ backend-utils-adt-mac-seams = { path = "../backend-utils-adt-mac-seams" }
 types-datum = { path = "../types-datum" }
 types-fmgr = { path = "../types-fmgr" }
 backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
+# `macaddr_send` frames its `bytea` result through the same pq_*typsend path C
+# uses (the body returns the wire bytes; the adapter adds the varlena header).
+mcx = { path = "../mcx" }
+backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }

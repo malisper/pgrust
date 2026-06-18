@@ -18656,9 +18656,11 @@ dependencies = [
 name = "backend-utils-adt-mac"
 version = "0.0.0"
 dependencies = [
+ "backend-libpq-pqformat",
  "backend-utils-adt-mac-seams",
  "backend-utils-fmgr-core",
  "common-hashfn",
+ "mcx",
  "types-datum",
  "types-error",
  "types-fmgr",
@@ -18676,8 +18678,10 @@ dependencies = [
 name = "backend-utils-adt-mac8"
 version = "0.0.0"
 dependencies = [
+ "backend-libpq-pqformat",
  "backend-utils-fmgr-core",
  "common-hashfn",
+ "mcx",
  "types-datum",
  "types-error",
  "types-fmgr",

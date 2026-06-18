@@ -25,6 +25,7 @@
 //! bytes ride the by-ref lane as `Varlena`, exactly as `oidrecv` does.
 //! `uuid_send` returns `bytea`: its full varlena image rides the result lane.
 
+use types_datetime::Interval;
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
 use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
@@ -77,6 +78,23 @@ fn arg_msg_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8]
 #[inline]
 fn arg_int64(fcinfo: &FunctionCallInfoBaseData, i: usize) -> i64 {
     fcinfo.arg(i).expect("uuid fn: missing arg").value.as_i64()
+}
+
+/// `PG_GETARG_INTERVAL_P(i)`: decode an `interval` arg from its 16-byte by-ref
+/// image on the side channel (`time:i64`, `day:i32`, `month:i32`, all LE) — the
+/// same POD layout the `datetime` fmgr adapters use.
+#[inline]
+fn arg_interval(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Interval {
+    let b = fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("uuid fn: by-ref `interval` arg missing from by-ref lane");
+    assert!(b.len() >= 16, "uuid fn: interval image must be >= 16 bytes");
+    Interval {
+        time: i64::from_le_bytes(b[0..8].try_into().expect("interval image >= 16 bytes")),
+        day: i32::from_le_bytes(b[8..12].try_into().expect("interval image >= 16 bytes")),
+        month: i32::from_le_bytes(b[12..16].try_into().expect("interval image >= 16 bytes")),
+    }
 }
 
 /// Set a `uuid` (by-reference, fixed-length) result on the by-ref lane: the raw
@@ -227,6 +245,54 @@ fn fc_uuid_hash_extended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     ret_i64(crate::uuid_hash_extended(&uuid, seed) as i64)
 }
 
+/// `gen_random_uuid() -> uuid` (oids 3432 / 6428). A v4 random UUID; the core
+/// draws randomness through the strong-random seam (may panic if that seam is
+/// unported at call time, like every other seam-backed builtin).
+fn fc_gen_random_uuid(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let uuid = ok(crate::gen_random_uuid());
+    ret_uuid(fcinfo, uuid)
+}
+
+/// `uuidv7() -> uuid` (oid 6429). A v7 (time-ordered) UUID.
+fn fc_uuidv7(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let uuid = ok(crate::uuidv7());
+    ret_uuid(fcinfo, uuid)
+}
+
+/// `uuidv7(interval) -> uuid` (oid 6430). A v7 UUID with the timestamp shifted
+/// by the given interval.
+fn fc_uuidv7_interval(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let shift = arg_interval(fcinfo, 0);
+    let uuid = ok(crate::uuidv7_interval(&shift));
+    ret_uuid(fcinfo, uuid)
+}
+
+/// `uuid_extract_timestamp(uuid) -> timestamptz` (oid 6342). Returns SQL NULL
+/// (via `fcinfo->isnull`) when the UUID carries no extractable timestamp.
+fn fc_uuid_extract_timestamp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let uuid = arg_uuid(fcinfo, 0);
+    match crate::uuid_extract_timestamp(&uuid) {
+        Some(ts) => Datum::from_i64(ts),
+        None => {
+            fcinfo.set_result_null(true);
+            Datum::from_usize(0)
+        }
+    }
+}
+
+/// `uuid_extract_version(uuid) -> int4` (oid 6343). Returns SQL NULL when the
+/// UUID is not an RFC-9562 (variant-2) UUID.
+fn fc_uuid_extract_version(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let uuid = arg_uuid(fcinfo, 0);
+    match crate::uuid_extract_version(&uuid) {
+        Some(v) => Datum::from_i32(v as i32),
+        None => {
+            fcinfo.set_result_null(true);
+            Datum::from_usize(0)
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -272,6 +338,14 @@ pub fn register_uuid_builtins() {
         // ---- hash ----
         builtin(2963, "uuid_hash", 1, true, false, fc_uuid_hash),
         builtin(3412, "uuid_hash_extended", 2, true, false, fc_uuid_hash_extended),
+        // ---- generation (v4 / v7) ----
+        builtin(3432, "gen_random_uuid", 0, true, false, fc_gen_random_uuid),
+        builtin(6428, "gen_random_uuid", 0, true, false, fc_gen_random_uuid),
+        builtin(6429, "uuidv7", 0, true, false, fc_uuidv7),
+        builtin(6430, "uuidv7_interval", 1, true, false, fc_uuidv7_interval),
+        // ---- timestamp / version extraction ----
+        builtin(6342, "uuid_extract_timestamp", 1, true, false, fc_uuid_extract_timestamp),
+        builtin(6343, "uuid_extract_version", 1, true, false, fc_uuid_extract_version),
     ]);
 }
 
