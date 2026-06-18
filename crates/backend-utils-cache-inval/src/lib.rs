@@ -326,6 +326,14 @@ pub fn init_seams() {
         cache_invalidate::CacheInvalidateRelcacheByPgClass,
     );
 
+    // typecmds' ALTER DOMAIN paths send an sinval for a pg_type row they did
+    // not change (so dependent cached plans rebuild). The seam carries only the
+    // (classId, objectId) pair; the wrapper re-opens the catalog relation and
+    // re-fetches the syscache tuple, then runs the shared
+    // CacheInvalidateHeapTuple body. C: table_open + SearchSysCache1 +
+    // CacheInvalidateHeapTuple(rel, tup, NULL).
+    seams::cache_invalidate_heap_tuple::set(cache_invalidate::CacheInvalidateHeapTupleByOid);
+
     // twophase's FinishPreparedTransaction replays the 2PC state file's raw
     // serialized SharedInvalidationMessage[] buffer; this owner decodes it and
     // forwards to sinval (C: `SendSharedInvalidMessages((SI *) buf, nmsgs)`).

@@ -31,6 +31,7 @@ use types_cache::{RelcacheCallbackFunction, SyscacheCallbackFunction};
 use backend_catalog_catalog_seams as catalog_seams;
 use backend_storage_ipc_sinval_seams as sinval_seams;
 use backend_utils_cache_catcache_seams as catcache_seams;
+use backend_utils_cache_relcache_seams as relcache_seams;
 use backend_utils_cache_syscache_seams as syscache_seams;
 use backend_utils_init_miscinit_seams as miscinit_seams;
 use backend_utils_init_small_seams as init_small_seams;
@@ -172,6 +173,74 @@ pub fn CacheInvalidateHeapTuple(
     newtuple: Option<&HeapTupleData<'_>>,
 ) -> PgResult<()> {
     cache_invalidate_heap_tuple_common(relation, tuple, newtuple, false)
+}
+
+/// `CacheInvalidateHeapTuple(rel, tuple, NULL)` reduced to the
+/// `(classId, objectId)` shape the typecmds ALTER DOMAIN paths use: they send
+/// an sinval for a catalog row they did not themselves change (so dependent
+/// cached plans get rebuilt). In C the caller already holds the open relation
+/// and a freshly fetched syscache tuple:
+///
+/// ```c
+/// rel = table_open(TypeRelationId, ...Lock);
+/// tup = SearchSysCacheCopy1(TYPEOID, ObjectIdGetDatum(domainoid));
+/// ...
+/// CacheInvalidateHeapTuple(rel, tup, NULL);
+/// ```
+///
+/// The seam hands only the OID pair, so re-fetch both here: open the catalog
+/// relcache entry (`RelationIdGetRelation`) and the live syscache tuple
+/// (`SearchSysCache1`), then run the shared `CacheInvalidateHeapTuple` body
+/// over them. Only `TypeRelationId` is exercised (both ALTER DOMAIN call
+/// sites), which maps to the `TYPEOID` syscache; other catalogs would need
+/// their class->cacheid mapping added here.
+pub fn CacheInvalidateHeapTupleByOid(class_id: Oid, object_id: Oid) -> PgResult<()> {
+    /* SysCacheIdentifier for the catalog: only pg_type is reached today. */
+    const TYPEOID: i32 = 82;
+    let cache_id = if class_id == types_core::catalog::TYPE_RELATION_ID {
+        TYPEOID
+    } else {
+        return Err(PgError::error(format!(
+            "CacheInvalidateHeapTuple: unsupported catalog {class_id}"
+        )));
+    };
+
+    /*
+     * The re-fetched relation copy and syscache tuple only need to live for the
+     * duration of this call (mirroring C's SearchSysCache tuple, which the
+     * caller releases right after CacheInvalidateHeapTuple). Host them in a
+     * short-lived context.
+     */
+    let ctx = mcx::MemoryContext::new("CacheInvalidateHeapTuple");
+    let mcx = ctx.mcx();
+
+    /* rel = table_open(classId, AccessShareLock) */
+    let relation = match relcache_seams::relation_id_get_relation::call(mcx, class_id)? {
+        Some(rel) => rel,
+        None => {
+            return Err(PgError::error(format!(
+                "could not open relation with OID {class_id}"
+            )));
+        }
+    };
+
+    /* tup = SearchSysCache1(cacheId, ObjectIdGetDatum(objectId)) */
+    let result = (|| {
+        let key = types_cache::SysCacheKey::Value(ScalarWord::from_oid(object_id));
+        let formed = catcache_seams::search_cat_cache_1::call(mcx, cache_id, key)?;
+        match formed {
+            Some(tuple) => {
+                cache_invalidate_heap_tuple_common(&relation, &tuple.tuple, None, false)
+            }
+            None => Err(PgError::error(format!(
+                "cache lookup failed for object {object_id} in catalog {class_id}"
+            ))),
+        }
+    })();
+
+    /* table_close(rel, AccessShareLock) — drop the relcache pin either way. */
+    relcache_seams::relation_close::call(class_id)?;
+    result
 }
 
 /// `CacheInvalidateHeapTupleInplace`.

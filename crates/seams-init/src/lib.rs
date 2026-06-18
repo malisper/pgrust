@@ -1729,19 +1729,6 @@ mod recurrence_guard {
         // Install + DELETE when catalog-indexing ports `InsertPgAttributeTuples`.
         ("backend_catalog_indexing", "append_attribute_tuples"),
         //
-        // -- backend-utils-cache-inval (OID-refetch wrapper unported) --
-        // DESIGN_DEBT (TD-INVAL-OID-REFETCH): `cache_invalidate_heap_tuple`
-        // (class_id, object_id) is the `CacheInvalidateHeapTuple(rel, tuple,
-        // NULL)` reduction the typecmds ALTER DOMAIN paths need — re-fetch the
-        // catalog row by OID (table_open(class_id) + syscache fetch by
-        // object_id), then run the shared invalidation logic. The inval owner
-        // HAS the shared engine (`cache_invalidate_heap_tuple_common(relation,
-        // tuple, ...)`) but NOT the (classId, objectId) re-fetch wrapper around
-        // it (it has no catalog open + OID syscache fetch by dynamic class). The
-        // signature diverges (OID pair vs &RelationData + &HeapTupleData), so no
-        // bare `::set` of the common body fits. Install + DELETE when the inval
-        // owner adds the OID-keyed re-fetch wrapper.
-        ("backend_utils_cache_inval", "cache_invalidate_heap_tuple"),
         // (TD-ENCNAMES-ICU RETIRED: `is_encoding_supported_by_icu` —
         // `common/encnames.c`'s `pg_enc2icu_tbl` reader (encnames.c:461),
         // declared in `backend-utils-mb-mbutils-seams` but mbutils.c never calls
