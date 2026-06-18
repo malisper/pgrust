@@ -9,7 +9,6 @@ use alloc::vec::Vec;
 use mcx::Mcx;
 use types_core::primitive::{Index, InvalidAttrNumber};
 use types_error::PgResult;
-use types_nodes::primnodes::Expr;
 use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{
     BackwardScanDirection, ForwardScanDirection, PathId, PathKey, PathNode, PlannerInfo, RelId,
@@ -212,11 +211,11 @@ pub fn set_append_rel_size<'mcx>(
         let child_attr_widths = root.rel(childrel).attr_widths.clone();
 
         for (pv, cv) in parent_exprs2.iter().zip(child_exprs2.iter()) {
-            if let Expr::Var(parentvar) = root.node(*pv).clone() {
+            if let Some(parentvar) = root.node(*pv).as_var() {
                 if parentvar.varno == parent_rtindex as i32 {
                     let pndx = (parentvar.varattno - rel_min_attr) as usize;
                     let mut width: i32 = 0;
-                    if let Expr::Var(childvar) = root.node(*cv).clone() {
+                    if let Some(childvar) = root.node(*cv).as_var() {
                         if childvar.varno == child_relid as i32 {
                             let cndx = (childvar.varattno - child_min_attr) as usize;
                             width = child_attr_widths.get(cndx).copied().unwrap_or(0);

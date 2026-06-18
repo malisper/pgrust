@@ -831,7 +831,7 @@ fn build_ordinality_pathkeys(
     let mut found_var: Option<Expr> = None;
     let exprs = root.rel(rel).reltarget.as_ref().map(|t| t.exprs.clone()).unwrap_or_default();
     for nid in exprs {
-        if let Expr::Var(v) = root.node(nid) {
+        if let Some(v) = root.node(nid).as_var() {
             if v.varattno == ordattno && v.varno == relid as i32 && v.varlevelsup == 0 {
                 found_var = Some(Expr::Var(v.clone()));
                 break;
