@@ -1275,6 +1275,7 @@ pub fn load_relcache_init_file(shared: bool) -> PgResult<bool> {
         rel.rd_rules = None;
         rel.rd_trigdesc = None;
         rel.rd_has_trigdesc = false;
+        rel.rd_rsdesc = None;
         rel.rd_has_rsdesc = false;
         rel.rd_has_partkey = false;
         rel.rd_has_partdesc = false;

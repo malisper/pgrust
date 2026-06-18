@@ -88,6 +88,9 @@ backend-access-common-reloptions-seams = { path = "../backend-access-common-relo
 # `pg_rewrite.ev_qual`/`ev_action` into `Query<'static>` in the cache arena).
 # Seam crate (leaf): acyclic.
 backend-nodes-read-seams = { path = "../backend-nodes-read-seams" }
+# `checkExprHasSubLink` (rewriteManip.c) for RelationBuildRowSecurity's
+# RowSecurityPolicy.hassublinks. Seam crate (leaf): acyclic.
+backend-rewrite-rewritemanip-seams = { path = "../backend-rewrite-rewritemanip-seams" }
 backend-access-table-tableam-seams = { path = "../backend-access-table-tableam-seams" }
 backend-utils-cache-relmapper-seams = { path = "../backend-utils-cache-relmapper-seams" }
 backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }

@@ -436,14 +436,14 @@ pub fn RelationBuildDesc(targetRelId: Oid, insertIt: bool) -> PgResult<Oid> {
             relation.rd_has_trigdesc = false;
         }
         if relation.rd_rel.relrowsecurity {
-            // RelationBuildRowSecurity is policy.c (cross-unit). Seam-and-panic.
-            return Err(ereport(ERROR)
-                .errmsg_internal(
-                    "relcache-build: RelationBuildRowSecurity is rewrite/rowsecurity.c \
-                     (cross-unit); not yet landed",
-                )
-                .into_error());
+            // RelationBuildRowSecurity (commands/policy.c): scan pg_policy, build
+            // the RowSecurityDesc, store it on the not-yet-inserted descriptor.
+            // Catalog-read leg is OWN logic over the genam `relcache_scan_pg_policy`
+            // primitive; the descriptor lives in the CacheMemoryContext arena.
+            crate::derived::RelationBuildRowSecurity(&mut relation)?;
+            relation.rd_has_rsdesc = relation.rd_rsdesc.is_some();
         } else {
+            relation.rd_rsdesc = None;
             relation.rd_has_rsdesc = false;
         }
 

@@ -33,7 +33,9 @@ use types_tuple::{
     REPLICA_IDENTITY_INDEX,
 };
 
-use crate::core_entry_store::entry::{FormPgIndex, RelationData, RewriteRule, RuleLock};
+use crate::core_entry_store::entry::{
+    FormPgIndex, RelationData, RewriteRule, RowSecurityDesc, RowSecurityPolicy, RuleLock,
+};
 use crate::core_entry_store::{with_rel, with_rel_mut};
 
 /// `IndexAttrBitmapKind` (relcache.h) — which attribute-bitmap to fetch.
@@ -967,6 +969,94 @@ pub fn RelationBuildTriggers(relation: &mut RelationData) -> PgResult<()> {
 
     let boxed = mcx::alloc_in(cache_mcx, trigdesc).map_err(|_| cache_mcx.oom(0))?;
     relation.rd_trigdesc = Some(boxed);
+    Ok(())
+}
+
+/* ==========================================================================
+ * RelationBuildRowSecurity -- row-security descriptor (rd_rsdesc).
+ *
+ * C: commands/policy.c:193. Loads the relation's RLS policies from pg_policy
+ * and stores the assembled RowSecurityDesc in the relcache entry. The
+ * descriptor and its policy expression trees live in a row-security memory
+ * context that C reparents under CacheMemoryContext; here the whole descriptor
+ * is allocated directly in the process-lifetime `cache_memory_context` arena
+ * (so the reparent is implicit — every owned field already lands there).
+ *
+ * The pg_policy scan + per-row Form/array/text decode is the genam cross-unit
+ * primitive (`relcache_scan_pg_policy`, in polname order). The qual texts are
+ * reconstructed via `string_to_node` (read-funcs owner) into the same arena;
+ * `hassublinks` is computed via `check_expr_has_sub_link` (rewriteManip owner).
+ * ======================================================================== */
+
+/// `RelationBuildRowSecurity(relation)` (commands/policy.c): scan `pg_policy`
+/// for the relation's policies (name order), build each [`RowSecurityPolicy`]
+/// (roles, qual, with-check qual, sublink flag) in the cache arena, and attach
+/// the assembled [`RowSecurityDesc`] to `relation.rd_rsdesc`.
+///
+/// C unconditionally creates a `RowSecurityDesc` (even when the relation has no
+/// explicit policies — `RelationBuildRowSecurity` is only called when
+/// `relrowsecurity` is set, and an empty descriptor drives the default-deny
+/// policy in `get_policies_for_relation`). So an empty scan still installs a
+/// `Some(descriptor)` with an empty policy list, matching C.
+pub fn RelationBuildRowSecurity(relation: &mut RelationData) -> PgResult<()> {
+    let cache_mcx = cache_memory_context();
+
+    // catalog = table_open(PolicyRelationId); systable_beginscan(
+    //   PolicyPolrelidPolnameIndexId, polrelid = rd_id); per-row GETSTRUCT +
+    // the polroles oid[] decode + the polqual/polwithcheck text reads.
+    let scanned = genam_seam::relcache_scan_pg_policy::call(relation.rd_id)?;
+
+    let mut policies: mcx::PgVec<'static, RowSecurityPolicy> = mcx::PgVec::new_in(cache_mcx);
+    policies.try_reserve(scanned.len()).map_err(|_| cache_mcx.oom(scanned.len()))?;
+
+    for row in scanned {
+        // policy->policy_name = MemoryContextStrdup(rscxt, NameStr(polname)).
+        let policy_name = mcx::PgString::from_str_in(&row.polname, cache_mcx)
+            .map_err(|_| cache_mcx.oom(row.polname.len()))?;
+
+        // policy->roles = DatumGetArrayTypePCopy(polroles) — decoded Oid[].
+        let mut roles: mcx::PgVec<'static, Oid> = mcx::PgVec::new_in(cache_mcx);
+        roles.try_reserve(row.polroles.len()).map_err(|_| cache_mcx.oom(row.polroles.len()))?;
+        for &r in &row.polroles {
+            roles.push(r);
+        }
+
+        // policy->qual = (Expr *) stringToNode(TextDatumGetCString(polqual)).
+        let qual = match &row.polqual {
+            Some(text) => Some(read_seam::string_to_node::call(cache_mcx, text.as_str())?),
+            None => None,
+        };
+        // policy->with_check_qual = stringToNode(polwithcheck).
+        let with_check_qual = match &row.polwithcheck {
+            Some(text) => Some(read_seam::string_to_node::call(cache_mcx, text.as_str())?),
+            None => None,
+        };
+
+        // policy->hassublinks = checkExprHasSubLink((Node *) qual) ||
+        //                       checkExprHasSubLink((Node *) with_check_qual);
+        let hassublinks = qual.as_ref().is_some_and(|q| {
+            backend_rewrite_rewritemanip_seams::check_expr_has_sub_link::call(q)
+        }) || with_check_qual.as_ref().is_some_and(|q| {
+            backend_rewrite_rewritemanip_seams::check_expr_has_sub_link::call(q)
+        });
+
+        let policy = RowSecurityPolicy {
+            policy_name,
+            polcmd: row.polcmd,
+            roles,
+            permissive: row.polpermissive,
+            qual,
+            with_check_qual,
+            hassublinks,
+        };
+
+        // rsdesc->policies = lcons(policy, rsdesc->policies) — built in reverse.
+        policies.insert(0, policy);
+    }
+
+    let rsdesc = RowSecurityDesc { policies };
+    let boxed = mcx::alloc_in(cache_mcx, rsdesc).map_err(|_| cache_mcx.oom(0))?;
+    relation.rd_rsdesc = Some(boxed);
     Ok(())
 }
 

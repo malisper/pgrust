@@ -280,6 +280,9 @@ pub fn RelationRebuildRelation(relation: Oid) -> PgResult<()> {
         // `rd_rules` is now an owned tree (not Copy): move it out so the
         // wholesale content move below cannot drop it, restore conditionally.
         let old_rules = std::mem::take(&mut old.rd_rules);
+        // `rd_rsdesc` is now an owned tree (not Copy): move it out so the
+        // wholesale content move below cannot drop it, restore conditionally.
+        let old_rsdesc = std::mem::take(&mut old.rd_rsdesc);
         let old_has_rsdesc = old.rd_has_rsdesc;
         let old_has_partkey = old.rd_has_partkey;
         let old_has_partdesc = old.rd_has_partdesc;
@@ -326,7 +329,15 @@ pub fn RelationRebuildRelation(relation: Oid) -> PgResult<()> {
             drop(old_rules);
         }
         if keep_policies {
+            // SWAPFIELD(rd_rsdesc): put the preserved old descriptor back; the
+            // freshly built one (now in `old.rd_rsdesc`) is handed to `newrel`
+            // and dropped with it.
+            let freshly_built_rsdesc = std::mem::replace(&mut old.rd_rsdesc, old_rsdesc);
+            newrel.rd_rsdesc = freshly_built_rsdesc;
             old.rd_has_rsdesc = old_has_rsdesc;
+        } else {
+            // Keep the freshly built `rd_rsdesc`; the old descriptor is dropped.
+            drop(old_rsdesc);
         }
         // preserve old partition key/descriptor presence if we have one.
         if keep_partkey {
