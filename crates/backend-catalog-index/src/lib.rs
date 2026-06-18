@@ -1096,10 +1096,11 @@ pub fn index_create<'mcx>(
      * Obtain exclusive lock on it, and open the relcache entry. (C: heap_create
      * returns the open uncataloged Relation with NoLock, then LockRelation takes
      * AccessExclusiveLock. In the owned model the relcache entry is registry-
-     * owned; table_open with AccessExclusiveLock both pins it and takes the
-     * lock.)
+     * owned; index_open with AccessExclusiveLock both pins it and takes the
+     * lock. `index_open` — not `table_open` — because the new relation is an
+     * INDEX; `table_open`'s `validate_relation_kind` rejects RELKIND_INDEX.)
      */
-    let index_relation = table_am::table_open::call(mcx, index_relation_id, ACCESS_EXCLUSIVE_LOCK)?;
+    let index_relation = indexam::index_open::call(mcx, index_relation_id, ACCESS_EXCLUSIVE_LOCK)?;
 
     /*
      * Fill in the index's pg_class entry fields that heap_create did not set
