@@ -1766,6 +1766,10 @@ pub fn init_seams() {
         util::is_in_parallel_mode::set(IsInParallelMode);
     }
 
+    // matview.c reaches CommandCounterIncrement through its outward frontier
+    // seam crate; xact owns the body.
+    backend_commands_matview_deps_seams::command_counter_increment::set(CommandCounterIncrement);
+
     install_parallel_rt_seams();
 }
 

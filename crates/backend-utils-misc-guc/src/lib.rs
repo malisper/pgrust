@@ -703,6 +703,18 @@ pub fn init_seams() {
     // reset) is installed by the seam's owner, guc_funcs.c
     // (backend-utils-misc-guc-funcs), which owns `SetPGVariable` and depends on
     // this crate's seam crate (acyclic). See its `init_seams`.
+
+    // matview.c reaches NewGUCNestLevel / AtEOXact_GUC (both guc.c) through its
+    // outward frontier seam crate; guc owns the bodies. Both can ereport via
+    // GUC assign hooks, so the seams carry PgResult.
+    {
+        use backend_commands_matview_deps_seams as m;
+        m::new_guc_nest_level::set(|| Ok(NewGUCNestLevel()));
+        m::at_eoxact_guc::set(|is_commit, nest_level| {
+            at_eoxact_guc(is_commit, nest_level);
+            Ok(())
+        });
+    }
 }
 
 /// Install the parallel-worker GUC-state transfer seams declared in
