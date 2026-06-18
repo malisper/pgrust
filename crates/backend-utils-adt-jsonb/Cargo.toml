@@ -18,6 +18,7 @@ types-json = { path = "../types-json" }
 types-jsonb = { path = "../types-jsonb" }
 types-fmgr = { path = "../types-fmgr" }
 backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
+backend-optimizer-util-clauses-seams = { path = "../backend-optimizer-util-clauses-seams" }
 backend-utils-adt-jsonb-util = { path = "../backend-utils-adt-jsonb-util" }
 backend-utils-adt-jsonb-op = { path = "../backend-utils-adt-jsonb-op" }
 backend-utils-adt-numeric = { path = "../backend-utils-adt-numeric" }

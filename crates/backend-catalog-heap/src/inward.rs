@@ -75,9 +75,30 @@ fn relation_clear_missing_seam(rel: &types_rel::Relation<'_>) -> PgResult<()> {
     crate::RelationClearMissing(ctx.mcx(), rel)
 }
 
+/// `SystemAttributeDefinition(attno)` for `plancat.c`'s negative-index-key path:
+/// returns `(atttypid, atttypmod, attcollation)` of the system column.
+fn system_attribute_definition_seam(
+    attno: i32,
+) -> PgResult<(types_core::Oid, i32, types_core::Oid)> {
+    let att = crate::SystemAttributeDefinition(attno as types_core::AttrNumber)?;
+    Ok((att.atttypid, att.atttypmod, att.attcollation))
+}
+
+/// `SystemAttributeByName(attname)` (`specialAttNum`): the system column's
+/// negative `attnum`, or `None` if the name is not a system attribute.
+fn system_attribute_by_name_seam(attname: &str) -> PgResult<Option<i32>> {
+    Ok(crate::SystemAttributeByName(attname.as_bytes()).map(|att| att.attnum as i32))
+}
+
 /// `init_seams()` — install the heap.c inward seams this crate owns. Wired into
 /// the workspace `seams-init` aggregator.
 pub fn init_seams() {
+    backend_optimizer_util_plancat_ext_seams::system_attribute_definition::set(
+        system_attribute_definition_seam,
+    );
+    backend_optimizer_util_plancat_ext_seams::system_attribute_by_name::set(
+        system_attribute_by_name_seam,
+    );
     backend_catalog_heap_seams::heap_create_with_catalog::set(heap_create_with_catalog_seam);
     backend_catalog_heap_seams::heap_drop_with_catalog::set(heap_drop_with_catalog_seam);
     // Low-level relation-create seams `index_create` (catalog/index.c) calls

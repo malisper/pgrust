@@ -11,6 +11,7 @@ crate-type = ["rlib"]
 
 [dependencies]
 mcx = { path = "../mcx" }
+backend-optimizer-util-plancat-ext-seams = { path = "../backend-optimizer-util-plancat-ext-seams" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-cache = { path = "../types-cache" }

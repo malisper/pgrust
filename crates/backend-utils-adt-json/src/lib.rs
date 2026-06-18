@@ -1645,6 +1645,7 @@ pub fn init_seams() {
     backend_utils_adt_json_seams::escape_json::set(escape_json_into_pgstring);
     backend_utils_adt_json_seams::escape_json_with_len::set(escape_json_with_len_into_pgstring);
     backend_utils_adt_json_seams::json_encode_datetime::set(JsonEncodeDateTime);
+    backend_optimizer_util_clauses_seams::to_json_is_immutable::set(to_json_is_immutable);
 }
 
 #[cfg(test)]

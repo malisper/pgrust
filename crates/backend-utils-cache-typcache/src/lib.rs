@@ -2845,7 +2845,43 @@ fn sort_group_operators(argtype: Oid, want_hashable: bool) -> PgResult<(Oid, Oid
     Ok((lt_opr, eq_opr, gt_opr, hashable))
 }
 
+/// `lookup_type_cache(typid, TYPECACHE_CMP_PROC)->cmp_proc` (clauses.c's
+/// `contain_leaked_vars` MinMaxExpr arm).
+fn type_cmp_proc_seam(typid: Oid) -> PgResult<Oid> {
+    lookup_type_cache(typid, TYPECACHE_CMP_PROC)?;
+    Ok(type_cache_cmp_proc(typid))
+}
+
+/// `rowtype_field_matches` non-RECORD leg (clauses.c): the caller has already
+/// short-circuited `rowtypeid == RECORDOID`; consult the composite type's tuple
+/// descriptor and report whether `fieldnum` has the expected
+/// type/typmod/collation and is not dropped.
+fn rowtype_field_matches_lookup_seam(
+    rowtypeid: Oid,
+    fieldnum: i32,
+    expectedtype: Oid,
+    expectedtypmod: i32,
+    expectedcollation: Oid,
+) -> PgResult<bool> {
+    let ctx = MemoryContext::new("rowtype_field_matches");
+    let tupdesc = lookup_rowtype_tupdesc_domain(ctx.mcx(), rowtypeid, -1, false)?
+        .expect("non-RECORD composite tupdesc");
+    if fieldnum <= 0 || fieldnum > tupdesc.natts {
+        return Ok(false);
+    }
+    let attr = tupdesc.attr((fieldnum - 1) as usize);
+    Ok(!attr.attisdropped
+        && attr.atttypid == expectedtype
+        && attr.atttypmod == expectedtypmod
+        && attr.attcollation == expectedcollation)
+}
+
 pub fn init_seams() {
+    backend_optimizer_util_clauses_seams::domain_has_constraints::set(domain_has_constraints);
+    backend_optimizer_util_clauses_seams::type_cmp_proc::set(type_cmp_proc_seam);
+    backend_optimizer_util_clauses_seams::rowtype_field_matches_lookup::set(
+        rowtype_field_matches_lookup_seam,
+    );
     backend_utils_cache_typcache_seams::compare_values_of_enum::set(compare_values_of_enum);
     backend_utils_cache_typcache_seams::type_cache_typtype::set(type_cache_typtype_seam);
     backend_utils_cache_typcache_seams::sort_group_operators::set(sort_group_operators);

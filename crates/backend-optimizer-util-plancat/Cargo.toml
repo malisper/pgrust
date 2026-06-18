@@ -19,6 +19,7 @@ mcx = { path = "../mcx" }
 
 backend-optimizer-util-plancat-seams = { path = "../backend-optimizer-util-plancat-seams" }
 backend-optimizer-util-plancat-ext-seams = { path = "../backend-optimizer-util-plancat-ext-seams" }
+backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
 backend-optimizer-util-relnode-seams = { path = "../backend-optimizer-util-relnode-seams" }
 backend-optimizer-util-relnode-ext-seams = { path = "../backend-optimizer-util-relnode-ext-seams" }
 backend-optimizer-util-clauses-seams = { path = "../backend-optimizer-util-clauses-seams" }

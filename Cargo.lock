@@ -4473,6 +4473,7 @@ dependencies = [
  "backend-nodes-nodeFuncs-seams",
  "backend-nodes-outfuncs",
  "backend-optimizer-util-clauses",
+ "backend-optimizer-util-plancat-ext-seams",
  "backend-optimizer-util-vars",
  "backend-parser-coerce",
  "backend-parser-parse-collate",
@@ -10507,6 +10508,7 @@ dependencies = [
  "backend-foreign-fdwapi-seams",
  "backend-foreign-foreign-seams",
  "backend-optimizer-path-pathkeys",
+ "backend-optimizer-util-plancat-ext-seams",
  "backend-utils-adt-varlena",
  "backend-utils-cache-relcache-seams",
  "backend-utils-cache-syscache-seams",
@@ -12384,6 +12386,7 @@ name = "backend-optimizer-util-plancat"
 version = "0.0.0"
 dependencies = [
  "backend-access-table-table",
+ "backend-access-transam-xlog-seams",
  "backend-optimizer-path-allpaths",
  "backend-optimizer-path-costsize-seams",
  "backend-optimizer-path-small-seams",
@@ -18040,6 +18043,7 @@ dependencies = [
 name = "backend-utils-adt-json"
 version = "0.0.0"
 dependencies = [
+ "backend-optimizer-util-clauses-seams",
  "backend-utils-adt-json-seams",
  "backend-utils-adt-jsonfuncs-seams",
  "backend-utils-adt-timestamp-seams",
@@ -18068,6 +18072,7 @@ dependencies = [
 name = "backend-utils-adt-jsonb"
 version = "0.0.0"
 dependencies = [
+ "backend-optimizer-util-clauses-seams",
  "backend-utils-adt-jsonb-op",
  "backend-utils-adt-jsonb-seams",
  "backend-utils-adt-jsonb-util",
@@ -20222,6 +20227,7 @@ dependencies = [
  "backend-access-common-session-seams",
  "backend-access-common-tupdesc-seams",
  "backend-catalog-pg-enum-seams",
+ "backend-optimizer-util-clauses-seams",
  "backend-utils-adt-domains-seams",
  "backend-utils-adt-format-type-seams",
  "backend-utils-cache-inval-seams",
@@ -22651,6 +22657,7 @@ dependencies = [
  "backend-utils-adt-geo-selfuncs",
  "backend-utils-adt-int",
  "backend-utils-adt-json",
+ "backend-utils-adt-jsonb",
  "backend-utils-adt-jsonb-gin",
  "backend-utils-adt-jsonbsubs",
  "backend-utils-adt-jsonfuncs",

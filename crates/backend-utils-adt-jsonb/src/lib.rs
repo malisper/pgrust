@@ -103,6 +103,7 @@ const PROVOLATILE_IMMUTABLE: u8 = b'i';
 /// the jsonapi parser).
 pub fn init_seams() {
     fmgr_builtins::register_jsonb_builtins();
+    backend_optimizer_util_clauses_seams::to_jsonb_is_immutable::set(to_jsonb_is_immutable);
 }
 
 pub mod fmgr_builtins;
