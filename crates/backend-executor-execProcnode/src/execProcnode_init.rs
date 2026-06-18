@@ -353,8 +353,8 @@ pub fn exec_init_node<'mcx>(
         }
 
         // case T_Hash: ExecInitHash((Hash *) node, estate, eflags)
-        Node::Hash(hash) => {
-            let s = backend_executor_nodeHash::exec_hash::ExecInitHash(mcx, hash, estate, eflags)?;
+        Node::Hash(_) => {
+            let s = backend_executor_nodeHash::exec_hash::ExecInitHash(mcx, node, estate, eflags)?;
             alloc_in(mcx, PlanStateNode::Hash(s))?
         }
 

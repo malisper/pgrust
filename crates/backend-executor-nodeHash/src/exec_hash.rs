@@ -455,10 +455,14 @@ pub fn MultiExecParallelHash<'mcx>(
 /// `mcx`.
 pub fn ExecInitHash<'mcx>(
     mcx: Mcx<'mcx>,
-    node: &'mcx Hash<'mcx>,
+    node_enum: &'mcx types_nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<PgBox<'mcx, HashState<'mcx>>> {
+    let node: &'mcx Hash<'mcx> = match node_enum {
+        types_nodes::nodes::Node::Hash(h) => h,
+        other => panic!("ExecInitHash: node is not a Hash plan node: {other:?}"),
+    };
     // check for unsupported flags
     //   Assert(!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK)));
     debug_assert!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) == 0);
@@ -470,12 +474,11 @@ pub fn ExecInitHash<'mcx>(
     //   hashstate->ps.ExecProcNode = ExecHash;
     //   hashstate->hashtable = NULL;
     //
-    // The Hash plan node is not yet a `Node` enum variant, so `ps.plan` (a
-    // `&Node`) cannot reference it; it is wired when `Node::Hash` lands. The
-    // `ExecProcNode` callback (`ExecHash`) is installed by the execProcnode
-    // owner when `HashState` joins the `PlanStateNode` dispatch enum (its
-    // signature is the error-stub, never actually dispatched — Hash runs via
-    // MultiExecProcNode).
+    // `ps.plan` aliases the read-only `Node::Hash` plan node (the borrow does
+    // what C's `hashstate->ps.plan = (Plan *) node` does). The `ExecProcNode`
+    // callback (`ExecHash`) is installed by the execProcnode owner when
+    // `HashState` joins the `PlanStateNode` dispatch enum (its signature is the
+    // error-stub, never actually dispatched — Hash runs via MultiExecProcNode).
     let mut hashstate = alloc_in(
         mcx,
         HashState {
@@ -489,6 +492,8 @@ pub fn ExecInitHash<'mcx>(
             parallel_state: None,
         },
     )?;
+
+    hashstate.ps.plan = Some(node_enum);
 
     // Miscellaneous initialization: create expression context for node.
     //   ExecAssignExprContext(estate, &hashstate->ps);

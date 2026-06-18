@@ -2583,52 +2583,137 @@ pub fn eval_exec_param_into_list<'mcx>(
 // ===========================================================================
 
 /// `ExecQual` for a hash-join node's `js.joinqual` / `js.ps.qual`.
+///
+/// C (nodeHashjoin.c:554, :558): `ExecQual(joinqual, econtext)` /
+/// `ExecQual(otherqual, econtext)` where `econtext = node->js.ps.ps_ExprContext`,
+/// `joinqual = node->js.joinqual`, `otherqual = node->js.ps.qual`. A `NULL`
+/// `ExprState` is treated as always-true by the caller, which gates the call on
+/// `*_present`; this wrapper is only invoked when the selected state is non-NULL.
 pub fn exec_hashjoin_qual<'mcx>(
     node: &mut HashJoinState<'mcx>,
     joinqual: bool,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
-    let _ = (node, joinqual, estate);
-    panic!(
-        "execExpr-core: ExecQual over a HashJoin qual needs the owned HashJoinState field \
-         accessors (js.ps.ps_ExprContext / js.joinqual / js.ps.qual) threaded from nodeHashjoin"
-    );
+    let econtext = node
+        .js
+        .ps
+        .ps_ExprContext
+        .expect("ExecHashJoin qual: PlanState has no ps_ExprContext");
+    let state = if joinqual {
+        node.js
+            .joinqual
+            .as_deref_mut()
+            .expect("ExecHashJoin: js.joinqual is NULL but caller invoked ExecQual on it")
+    } else {
+        node.js
+            .ps
+            .qual
+            .as_deref_mut()
+            .expect("ExecHashJoin: js.ps.qual is NULL but caller invoked ExecQual on it")
+    };
+    exec_qual(state, econtext, estate)
 }
 
 /// `ExecInitQual` of one of a hash-join node's qual lists.
+///
+/// C (nodeHashjoin.c:916-921):
+/// ```c
+/// hjstate->js.ps.qual  = ExecInitQual(node->join.plan.qual, hjstate);
+/// hjstate->js.joinqual = ExecInitQual(node->join.joinqual,  hjstate);
+/// hjstate->hashclauses = ExecInitQual(node->hashclauses,    hjstate);
+/// ```
+/// The source list lives on the read-only plan node (`js.ps.plan`, a borrowed
+/// `&'mcx Node::HashJoin`); the compiled `ExprState` is stored on the matching
+/// state field.
 pub fn exec_init_hashjoin_qual<'mcx>(
     node: &mut HashJoinState<'mcx>,
     kind: HashJoinQualKind,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    let _ = (node, kind, estate);
-    panic!(
-        "execExpr-core: ExecInitQual over a HashJoin qual list needs the owned HashJoin plan \
-         accessors (node->join.plan.qual / joinqual / hashclauses) threaded from nodeHashjoin"
-    );
+    let mcx = estate.es_query_cxt;
+
+    // The plan node is a borrowed `&'mcx Node`; copy the reference out so the
+    // borrow is tied to `'mcx`, not to `node`, freeing `&mut node.js.ps` below.
+    let plan = node
+        .js
+        .ps
+        .plan
+        .expect("ExecInitHashJoin: js.ps.plan is NULL");
+    let hj = match plan {
+        types_nodes::nodes::Node::HashJoin(h) => h,
+        other => panic!("ExecInitHashJoin: js.ps.plan is not a HashJoin node: {other:?}"),
+    };
+
+    match kind {
+        HashJoinQualKind::Qual => {
+            let qual = hj.join.plan.qual.as_deref();
+            let compiled = exec_init_qual(qual, &mut node.js.ps, estate)?;
+            node.js.ps.qual = compiled;
+        }
+        HashJoinQualKind::JoinQual => {
+            let qual = hj.join.joinqual.as_deref();
+            let compiled = exec_init_qual(qual, &mut node.js.ps, estate)?;
+            node.js.joinqual = compiled;
+        }
+        HashJoinQualKind::HashClauses => {
+            // `node->hashclauses` is a heterogeneous expression `List`; each
+            // element is an `OpExpr` (`Node::Expr`). Materialize the `Expr`
+            // slice ExecInitQual expects.
+            let exprs: PgVec<'mcx, Expr> = match hj.hashclauses.as_deref() {
+                None => mcx::vec_with_capacity_in(mcx, 0)?,
+                Some(list) => {
+                    let mut out = mcx::vec_with_capacity_in(mcx, list.len())?;
+                    for n in list.iter() {
+                        match n {
+                            types_nodes::nodes::Node::Expr(e) => out.push(e.clone()),
+                            other => panic!(
+                                "ExecInitHashJoin: hashclauses element is not an \
+                                 expression node: {other:?}"
+                            ),
+                        }
+                    }
+                    out
+                }
+            };
+            let slice = if exprs.is_empty() {
+                None
+            } else {
+                Some(exprs.as_slice())
+            };
+            let compiled = exec_init_qual(slice, &mut node.js.ps, estate)?;
+            node.hashclauses = compiled;
+        }
+    }
+    Ok(())
 }
 
-/// `ExecProject(node->js.ps.ps_ProjInfo)` for a hash-join node.
+/// `ExecProject(node->js.ps.ps_ProjInfo)` for a hash-join node
+/// (nodeHashjoin.c:591/:618/:647).
 pub fn exec_hashjoin_project<'mcx>(
     node: &mut HashJoinState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<SlotId> {
-    let _ = (node, estate);
-    panic!(
-        "execExpr-core: ExecProject of the HashJoin result projection needs the owned \
-         ProjectionInfo / interpreter projection dispatch"
-    );
+    exec_project(&mut node.js.ps, estate)
 }
 
-/// `DatumGetUInt32(ExecEvalExprSwitchContext(hj_OuterHash, ...))`.
+/// `DatumGetUInt32(ExecEvalExprSwitchContext(hj_OuterHash, econtext, isNull))`
+/// (nodeHashjoin.c:1012/:1085) — evaluate the outer tuple's hash-key expression
+/// against the node's per-tuple expression context.
 pub fn eval_outer_hash<'mcx>(
     node: &mut HashJoinState<'mcx>,
     isnull: &mut bool,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<u32> {
-    let _ = (node, isnull, estate);
-    panic!(
-        "execExpr-core: evaluating the HashJoin outer hash needs the owned HashJoinState field \
-         accessors (hj_OuterHash / js.ps.ps_ExprContext) threaded from nodeHashjoin"
-    );
+    let econtext = node
+        .js
+        .ps
+        .ps_ExprContext
+        .expect("ExecHashGetHashValue: PlanState has no ps_ExprContext");
+    let state = node
+        .hj_OuterHash
+        .as_deref_mut()
+        .expect("ExecHashGetHashValue: hj_OuterHash ExprState is NULL");
+    let (datum, null) = exec_eval_expr_switch_context(state, econtext, estate)?;
+    *isnull = null;
+    Ok(datum.as_u32())
 }
