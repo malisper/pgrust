@@ -11,6 +11,7 @@ crate-type = ["rlib"]
 
 [dependencies]
 backend-catalog-pg-db-role-setting-seams = { path = "../backend-catalog-pg-db-role-setting-seams" }
+backend-utils-error = { path = "../backend-utils-error" }
 backend-access-common-scankey = { path = "../backend-access-common-scankey" }
 backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }
 backend-access-table-table = { path = "../backend-access-table-table" }
@@ -24,6 +25,7 @@ types-catalog = { path = "../types-catalog" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-guc = { path = "../types-guc" }
+types-nodes = { path = "../types-nodes" }
 types-parsenodes = { path = "../types-parsenodes" }
 types-rel = { path = "../types-rel" }
 types-scan = { path = "../types-scan" }

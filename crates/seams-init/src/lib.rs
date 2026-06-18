@@ -1738,18 +1738,6 @@ mod recurrence_guard {
         // Loud-panics until the pg_database owner wires the aclitem[] varlena
         // decode/encode around `aclnewowner`. DELETE this entry then.
         ("backend_catalog_pg_database", "aclnewowner_datacl"),
-        // DESIGN_DEBT (TD-DBROLESETTING-VARSETSTMT): `alter_database_setting`
-        // (declared in `backend-catalog-pg-db-role-setting-seams`) is the
-        // AlterDatabaseSet -> `AlterSetting(datid, InvalidOid, setstmt)` boundary.
-        // The parser hands a `types_nodes::ddlnodes::VariableSetStmt<'mcx>` (the
-        // arena parse-node layer), but the owner's ported `AlterSetting` consumes
-        // `types_parsenodes::VariableSetStmt` (the owned-`String` layer); the two
-        // parse-node models meet only here and no node-model converter for
-        // VariableSetStmt is ported yet. The owner deliberately does NOT install
-        // it (force-wiring would require a converter that doesn't exist); it
-        // loud-panics until the VariableSetStmt node-model bridge lands. DELETE
-        // this entry then.
-        ("backend_catalog_pg_db_role_setting", "alter_database_setting"),
         // DESIGN_DEBT (TD-STORAGE-DBCOPY-ENGINE): `create_and_copy_relation_data`
         // and `scan_source_database_pg_class` (declared in
         // `backend-catalog-storage-seams`) are the createdb WAL_LOG copy engine.
