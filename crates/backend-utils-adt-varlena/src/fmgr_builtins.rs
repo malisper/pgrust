@@ -262,7 +262,7 @@ fn fc_textin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 fn fc_textout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let m = scratch_mcx();
     let out = ok(crate::wire_io::textout(m.mcx(), arg_bytes(fcinfo, 0)));
-    ret_cstring(fcinfo, String::from_utf8_lossy(&out).into_owned())
+    ret_cstring(fcinfo, cstring_lane(&out))
 }
 fn fc_textsend(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let m = scratch_mcx();
@@ -278,7 +278,7 @@ fn fc_byteain(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 fn fc_byteaout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let m = scratch_mcx();
     let out = ok(crate::bytea::byteaout(m.mcx(), arg_bytes(fcinfo, 0)));
-    ret_cstring(fcinfo, String::from_utf8_lossy(&out).into_owned())
+    ret_cstring(fcinfo, cstring_lane(&out))
 }
 fn fc_byteasend(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let m = scratch_mcx();
