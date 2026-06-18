@@ -265,7 +265,7 @@ pub fn preprocess_targetlist<'mcx>(
 
         for var in vars.into_iter() {
             // if (IsA(var, Var) && var->varno == result_relation) continue;
-            if let types_nodes::primnodes::Expr::Var(v) = &var {
+            if let Some(v) = var.as_var() {
                 if v.varno == result_relation {
                     continue; // don't need it
                 }
