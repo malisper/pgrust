@@ -360,6 +360,28 @@ pub fn deconstruct_array_values_bytes<'mcx>(
     deconstruct_array_values(mcx, &arr, elmtype, elmlen as i32, elmbyval, elmalign as u8)
 }
 
+/// `deconstruct_array(DatumGetArrayTypeP(arraydatum), elmtype, elmlen, elmbyval,
+/// elmalign, ...)` (arrayfuncs.c) over the canonical unified value type
+/// ([`types_tuple::Datum`]). The array `Datum` arrives as a pass-by-reference
+/// [`types_tuple::Datum::ByRef`] carrying the verbatim on-disk array varlena
+/// bytes; this detoasts it (`DatumGetArrayTypeP`) and runs the value-lane
+/// element walk, returning each element as a real `(types_tuple::Datum, isnull)`
+/// pair (the array_typanalyze MCELEM path needs the elements as carried values,
+/// not bare words). Mirrors [`deconstruct_array_values_bytes`].
+pub fn deconstruct_array_v<'mcx>(
+    mcx: Mcx<'mcx>,
+    arraydatum: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+    elmtype: Oid,
+    elmlen: i16,
+    elmbyval: bool,
+    elmalign: core::ffi::c_char,
+) -> PgResult<PgVec<'mcx, (types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)>> {
+    // DatumGetArrayTypeP(arraydatum): detoast the array varlena from the
+    // by-reference value's verbatim stored bytes.
+    let arr = detoast_seam::detoast_attr::call(mcx, arraydatum.as_ref_bytes())?;
+    deconstruct_array_values(mcx, &arr, elmtype, elmlen as i32, elmbyval, elmalign as u8)
+}
+
 /// Seam adapter for `deconstruct_array(DatumGetArrayTypeP(arraydatum), elmtype,
 /// elmlen, elmbyval, elmalign, ...)` (arrayfuncs.c). The seam takes the raw
 /// array `Datum` and the element's `(typlen, typbyval, typalign)` exactly as
