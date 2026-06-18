@@ -13,11 +13,13 @@ backend-access-transam-parallel = { path = "../backend-access-transam-parallel" 
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 backend-executor-execAmi-seams = { path = "../backend-executor-execAmi-seams" }
 backend-executor-execAsync-seams = { path = "../backend-executor-execAsync-seams" }
+backend-executor-instrument-seams = { path = "../backend-executor-instrument-seams" }
 backend-executor-execPartition-seams = { path = "../backend-executor-execPartition-seams" }
 backend-executor-execProcnode-seams = { path = "../backend-executor-execProcnode-seams" }
 backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
 backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
 backend-executor-nodeAppend-seams = { path = "../backend-executor-nodeAppend-seams" }
+backend-executor-nodeForeignscan-seams = { path = "../backend-executor-nodeForeignscan-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
 backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" }

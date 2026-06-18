@@ -7,8 +7,37 @@
 
 use types_execparallel::{ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle};
 use types_error::PgResult;
+use types_nodes::{AsyncRequestData, ForeignScanState};
 
 seam_core::seam!(pub fn exec_foreignscan_estimate(node: PlanStateHandle, pcxt: ParallelContextHandle) -> PgResult<()>);
 seam_core::seam!(pub fn exec_foreignscan_initialize_dsm(node: PlanStateHandle, pcxt: ParallelContextHandle) -> PgResult<()>);
 seam_core::seam!(pub fn exec_foreignscan_reinitialize_dsm(node: PlanStateHandle, pcxt: ParallelContextHandle) -> PgResult<()>);
 seam_core::seam!(pub fn exec_foreignscan_initialize_worker(node: PlanStateHandle, pwcxt: ParallelWorkerContextHandle) -> PgResult<()>);
+
+// Async-execution entry points (`nodeForeignscan.c`). The execAsync dispatch
+// (re-homed onto the Append node) resolves the requestee `ForeignScanState`
+// and calls these; the C reaches the same node via `(ForeignScanState *)
+// areq->requestee`. The bodies run the node's `fdwroutine` async callback
+// (FDW-extension-owned, so they bottom out at the uninstalled foreign FDW
+// seam — sanctioned FLOOR).
+seam_core::seam!(
+    /// `ExecAsyncForeignScanRequest(areq)` — `node` is the requestee.
+    pub fn exec_async_foreignscan_request<'mcx>(
+        node: &mut ForeignScanState<'mcx>,
+        areq: &mut AsyncRequestData,
+    ) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `ExecAsyncForeignScanConfigureWait(areq)`.
+    pub fn exec_async_foreignscan_configure_wait<'mcx>(
+        node: &mut ForeignScanState<'mcx>,
+        areq: &mut AsyncRequestData,
+    ) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `ExecAsyncForeignScanNotify(areq)`.
+    pub fn exec_async_foreignscan_notify<'mcx>(
+        node: &mut ForeignScanState<'mcx>,
+        areq: &mut AsyncRequestData,
+    ) -> PgResult<()>
+);

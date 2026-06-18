@@ -50,7 +50,7 @@ use types_error::{PgError, PgResult};
 use types_nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
 use types_nodes::nodes::{CmdType, Node};
 use types_nodes::{
-    AsyncRequest, EStateData, ForeignScan, ForeignScanState, ParallelContext,
+    AsyncRequestData, EStateData, ForeignScan, ForeignScanState, ParallelContext,
     ParallelWorkerContext, PlanStateNode, SlotId, TupleSlotKind,
 };
 
@@ -93,6 +93,9 @@ pub fn init_seams() {
     pq::exec_foreignscan_initialize_worker::set(|_node, _pwcxt| {
         panic!("ExecForeignScanInitializeWorker via parallel DSM is unreachable until the DSM owner lands")
     });
+    pq::exec_async_foreignscan_request::set(ExecAsyncForeignScanRequest);
+    pq::exec_async_foreignscan_configure_wait::set(ExecAsyncForeignScanConfigureWait);
+    pq::exec_async_foreignscan_notify::set(ExecAsyncForeignScanNotify);
 }
 
 // ===========================================================================
@@ -612,33 +615,43 @@ pub fn ExecShutdownForeignScan<'mcx>(
 // ===========================================================================
 
 /// `ExecAsyncForeignScanRequest(areq)` — asynchronously request a tuple from a
-/// designated async-capable node.
-pub fn ExecAsyncForeignScanRequest(areq: &mut AsyncRequest) -> PgResult<()> {
-    // ForeignScanState *node = (ForeignScanState *) areq->requestee;
+/// designated async-capable node. The C derives `node` from
+/// `(ForeignScanState *) areq->requestee`; the owned execAsync dispatch resolves
+/// the requestee node before reaching here, so it is passed by reference (no
+/// aliasing pointer is reconstructed).
+pub fn ExecAsyncForeignScanRequest<'mcx>(
+    node: &mut ForeignScanState<'mcx>,
+    areq: &mut AsyncRequestData,
+) -> PgResult<()> {
     // FdwRoutine *fdwroutine = node->fdwroutine;
     // Assert(fdwroutine->ForeignAsyncRequest != NULL);
     // fdwroutine->ForeignAsyncRequest(areq);
     //
-    // The requestee node's `fdwroutine` is resolved inside the seam (areq holds
-    // the requestee PlanState pointer opaquely); the presence Assert and the
-    // invocation both run there.
-    foreign::foreign_async_request::call(areq)
+    // The presence Assert and the invocation run behind the FDW seam (the
+    // callback is extension-owned).
+    foreign::foreign_async_request::call(node, areq)
 }
 
 /// `ExecAsyncForeignScanConfigureWait(areq)` — in async mode, configure for a
 /// wait.
-pub fn ExecAsyncForeignScanConfigureWait(areq: &mut AsyncRequest) -> PgResult<()> {
+pub fn ExecAsyncForeignScanConfigureWait<'mcx>(
+    node: &mut ForeignScanState<'mcx>,
+    areq: &mut AsyncRequestData,
+) -> PgResult<()> {
     // Assert(fdwroutine->ForeignAsyncConfigureWait != NULL);
     // fdwroutine->ForeignAsyncConfigureWait(areq);
-    foreign::foreign_async_configure_wait::call(areq)
+    foreign::foreign_async_configure_wait::call(node, areq)
 }
 
 /// `ExecAsyncForeignScanNotify(areq)` — callback invoked when a relevant event
 /// has occurred.
-pub fn ExecAsyncForeignScanNotify(areq: &mut AsyncRequest) -> PgResult<()> {
+pub fn ExecAsyncForeignScanNotify<'mcx>(
+    node: &mut ForeignScanState<'mcx>,
+    areq: &mut AsyncRequestData,
+) -> PgResult<()> {
     // Assert(fdwroutine->ForeignAsyncNotify != NULL);
     // fdwroutine->ForeignAsyncNotify(areq);
-    foreign::foreign_async_notify::call(areq)
+    foreign::foreign_async_notify::call(node, areq)
 }
 
 // ===========================================================================
