@@ -97,15 +97,19 @@ fn strip_all_phvs_mutator(node: Expr) -> Expr {
 /// PlaceHolderVars. The lightweight walker first checks for any PHV (avoiding a
 /// tree copy in the common case); the expensive mutator runs only when one is
 /// present. Returns an owned [`Expr`] (a clone of `node` when nothing changed).
-fn strip_all_phvs_deep(root: &PlannerInfo, node: &Expr) -> Expr {
+fn strip_all_phvs_deep<'mcx>(
+    root: &PlannerInfo,
+    node: &Expr,
+    mcx: Mcx<'mcx>,
+) -> PgResult<Expr> {
     let last_ph_id = root.glob.as_ref().map(|g| g.last_ph_id).unwrap_or(0);
     if last_ph_id == 0 {
-        return node.clone();
+        return node.clone_in(mcx);
     }
     if !contain_placeholder(node) {
-        return node.clone();
+        return node.clone_in(mcx);
     }
-    strip_all_phvs_mutator(node.clone())
+    Ok(strip_all_phvs_mutator(node.clone_in(mcx)?))
 }
 
 /* ===========================================================================
@@ -127,20 +131,23 @@ pub(crate) fn examine_variable<'mcx, 'run>(
     // Make sure we don't return dangling pointers in vardata.
     let mut vardata = VariableStatData::zeroed(node_id);
 
-    // Save the exposed type of the expression.
-    let node_expr = root.node(node_id).clone();
+    // Save the exposed type of the expression. clone_in: the examined node may
+    // be an Aggref (e.g. a HAVING `count(*) > 1`), whose context-allocated
+    // TargetEntry args a bare derived `.clone()` panics on.
+    let node_expr = root.node(node_id).clone_in(mcx)?;
     vardata.vartype = backend_nodes_core::nodefuncs::expr_type(Some(&node_expr))?;
 
     // PlaceHolderVars are transparent for statistics lookup; strip them first.
-    let mut basenode = strip_all_phvs_deep(root, &node_expr);
+    let mut basenode = strip_all_phvs_deep(root, &node_expr, mcx)?;
 
     // Look inside any binary-compatible relabeling (handle nested RelabelTypes).
     while let Expr::RelabelType(rt) = &basenode {
         let arg = rt
             .arg
-            .clone()
-            .expect("examine_variable: RelabelType has no arg");
-        basenode = *arg;
+            .as_deref()
+            .expect("examine_variable: RelabelType has no arg")
+            .clone_in(mcx)?;
+        basenode = arg;
     }
 
     // Fast path for a simple Var.
@@ -166,7 +173,7 @@ pub(crate) fn examine_variable<'mcx, 'run>(
     // varRelid isn't zero, only vars of that relation are considered "real".
     // pull_varnos(root, basenode): intern the stripped node and use the
     // root-aware NodeId form (varlevelsup-correct).
-    let basenode_id = root.alloc_node(basenode.clone());
+    let basenode_id = root.alloc_node(basenode.clone_in(mcx)?);
     let varnos: Relids = jp::pull_varnos::call(root, basenode_id);
     let outer_join_rels = root.outer_join_rels.clone();
     let basevarnos: Relids = rel_seams::relids_difference::call(&varnos, &outer_join_rels);
@@ -183,24 +190,27 @@ pub(crate) fn examine_variable<'mcx, 'run>(
             let r = rel_seams::find_base_rel::call(root, relid);
             onerel = Some(r);
             vardata.rel = Some(r);
-            node_for_var = Some(basenode.clone());
+            node_for_var = Some(basenode.clone_in(mcx)?);
         }
         // else treat it as a constant
     } else if var_relid == 0 {
         // Treat it as a variable of a join relation.
         vardata.rel = rel_seams::find_join_rel::call(root, &varnos);
-        node_for_var = Some(basenode.clone());
+        node_for_var = Some(basenode.clone_in(mcx)?);
     } else if rel_seams::relids_is_member::call(var_relid, &varnos) {
         // Ignore the vars belonging to other relations.
         vardata.rel = Some(rel_seams::find_base_rel::call(root, var_relid));
-        node_for_var = Some(basenode.clone());
+        node_for_var = Some(basenode.clone_in(mcx)?);
         // note: no point in expressional-index search here
     }
     // else treat it as a constant
 
     // vardata->var = node (the recognized stripped node, else the original).
-    let final_node = node_for_var.clone().unwrap_or_else(|| node_expr.clone());
-    vardata.var = root.alloc_node(final_node.clone());
+    let final_node = match node_for_var {
+        Some(n) => n,
+        None => node_expr.clone_in(mcx)?,
+    };
+    vardata.var = root.alloc_node(final_node.clone_in(mcx)?);
     vardata.atttype = backend_nodes_core::nodefuncs::expr_type(Some(&final_node))?;
     vardata.atttypmod = backend_nodes_core::nodefuncs::expr_typmod(Some(&final_node))?;
 

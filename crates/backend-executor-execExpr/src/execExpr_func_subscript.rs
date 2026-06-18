@@ -456,7 +456,7 @@ pub(crate) fn exec_init_func<'mcx>(
     // re-threads the step's fn_expr to the callee at call time (see
     // `func_step_fn_expr`).
     let mut flinfo = backend_utils_fmgr_fmgr_seams::fmgr_info::call(mcx, funcid)?;
-    backend_utils_fmgr_fmgr_seams::fmgr_info_set_expr::call(&mut flinfo, node);
+    backend_utils_fmgr_fmgr_seams::fmgr_info_set_expr::call(mcx, &mut flinfo, node)?;
 
     // C: InitFunctionCallInfoData(*fcinfo, flinfo, nargs, inputcollid, NULL, NULL);
     //    scratch->d.func.fn_addr = flinfo->fn_addr;  scratch->d.func.nargs = nargs;

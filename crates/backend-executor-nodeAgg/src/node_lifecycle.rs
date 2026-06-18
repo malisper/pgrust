@@ -392,7 +392,7 @@ pub fn build_pertrans_for_aggref<'mcx>(
             false,
         )?;
     let mut transfn = backend_utils_fmgr_fmgr_seams::fmgr_info::call(mcx, transfn_oid)?;
-    backend_utils_fmgr_fmgr_seams::fmgr_info_set_expr::call(&mut transfn, &transfnexpr);
+    backend_utils_fmgr_fmgr_seams::fmgr_info_set_expr::call(mcx, &mut transfn, &transfnexpr)?;
     pertrans.transfn = transfn.clone();
     // pertrans->transfn_fcinfo = palloc(SizeForFunctionCallInfo(numTransArgs));
     // InitFunctionCallInfoData(*fcinfo, &pertrans->transfn, numTransArgs,
@@ -730,7 +730,7 @@ fn build_serialfn_call_frame_owned<'mcx>(
     let serialfnexpr =
         backend_parser_parse_agg_seams::build_aggregate_serialfn_expr::call(aggserialfn)?;
     let mut serialfn = backend_utils_fmgr_fmgr_seams::fmgr_info::call(mcx, aggserialfn)?;
-    backend_utils_fmgr_fmgr_seams::fmgr_info_set_expr::call(&mut serialfn, &serialfnexpr);
+    backend_utils_fmgr_fmgr_seams::fmgr_info_set_expr::call(mcx, &mut serialfn, &serialfnexpr)?;
     pertrans.serialfn = serialfn.clone();
     // InitFunctionCallInfoData(..., 1, InvalidOid, (Node *) aggstate, NULL)
     let agg_link = agg_state_context_link(aggstate);
@@ -749,7 +749,7 @@ fn build_deserialfn_call_frame_owned<'mcx>(
     let deserialfnexpr =
         backend_parser_parse_agg_seams::build_aggregate_deserialfn_expr::call(aggdeserialfn)?;
     let mut deserialfn = backend_utils_fmgr_fmgr_seams::fmgr_info::call(mcx, aggdeserialfn)?;
-    backend_utils_fmgr_fmgr_seams::fmgr_info_set_expr::call(&mut deserialfn, &deserialfnexpr);
+    backend_utils_fmgr_fmgr_seams::fmgr_info_set_expr::call(mcx, &mut deserialfn, &deserialfnexpr)?;
     pertrans.deserialfn = deserialfn.clone();
     // InitFunctionCallInfoData(..., 2, InvalidOid, (Node *) aggstate, NULL)
     let agg_link = agg_state_context_link(aggstate);

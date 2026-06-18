@@ -1157,13 +1157,155 @@ fn subquery_planner<'mcx>(
 
         // newHaving HAVING→WHERE transfer loop (C:1154-1199). Runs only when there
         // is a havingQual; a SELECT without HAVING skips it entirely.
+        //
+        // Both havingQual and jointree->quals are in implicitly-ANDed-list form
+        // (C:1152). In the owned model each is a single `Expr`; `make_ands_implicit`
+        // splits it into the per-clause Vec the C `foreach` iterates, and
+        // `make_ands_explicit` reassembles the residual list back into a single
+        // `Expr` (empty list => NULL/None, matching C's NIL).
         if run.resolve(root.parse).havingQual.is_some() {
-            panic!(
-                "subquery_planner: HAVING→WHERE transfer loop (planner.c:1154-1199) \
-                 needs contain_agg_clause/contain_volatile_functions/contain_subplans/\
-                 pull_varnos over the HAVING clause and list_concat into jointree \
-                 quals; not yet wired over the owned model"
-            );
+            use backend_nodes_core::makefuncs::{make_ands_explicit, make_ands_implicit};
+
+            // havingQual is the implicitly-ANDed list of HAVING clauses.
+            let having_expr: Option<Expr> = run
+                .resolve_mut(root.parse)
+                .havingQual
+                .take()
+                .map(mcx::PgBox::into_inner);
+            let having_clauses: alloc::vec::Vec<Expr> = make_ands_implicit(having_expr);
+
+            // Snapshot the grouping flags the loop branches on. groupClause and
+            // groupingSets are NIL/non-NIL tests; for grouping sets we also need
+            // whether the first grouping set is empty (linitial(groupingSets) != NIL).
+            let (has_group_clause, has_grouping_sets, first_gset_nonempty) = {
+                let parse = run.resolve(root.parse);
+                let has_group_clause = !parse.groupClause.is_empty();
+                let has_grouping_sets = !parse.groupingSets.is_empty();
+                // linitial(groupingSets) is a GroupingSet node; its emptiness is
+                // whether that GroupingSet's content list is empty.
+                let first_gset_nonempty = match parse.groupingSets.first() {
+                    Some(gs) => match gs.as_ref() {
+                        Node::GroupingSet(g) => !g.content.is_empty(),
+                        // A non-GroupingSet first element is unexpected; treat as
+                        // non-empty (the conservative branch keeps a WHERE copy).
+                        _ => true,
+                    },
+                    None => false,
+                };
+                (has_group_clause, has_grouping_sets, first_gset_nonempty)
+            };
+            let group_rtindex = root.group_rtindex;
+
+            let mut new_having: alloc::vec::Vec<Expr> = alloc::vec::Vec::new();
+            // Accumulate clauses moved/copied into WHERE; appended to the
+            // jointree's existing quals after the loop (C list_concat).
+            let mut moved_to_where: alloc::vec::Vec<Expr> = alloc::vec::Vec::new();
+
+            for havingclause in having_clauses {
+                // contain_agg_clause / contain_volatile_functions / contain_subplans
+                // / (grouping-sets GROUP-Var membership) => keep in HAVING (C:1158-1166).
+                let keep_in_having = backend_optimizer_util_clauses::grounded::contain_agg_clause(
+                    Some(&havingclause),
+                )? || backend_optimizer_util_clauses::grounded::contain_volatile_functions(
+                    Some(&havingclause),
+                )? || backend_optimizer_util_clauses::grounded::contain_subplans(
+                    Some(&havingclause),
+                )? || (has_group_clause
+                    && has_grouping_sets
+                    && {
+                        // bms_is_member(root->group_rtindex, pull_varnos(root, havingclause))
+                        let node = Node::Expr(havingclause.clone_in(mcx)?);
+                        let varnos =
+                            backend_optimizer_util_vars::var::pull_varnos(Some(&root), &node);
+                        bms_is_member_relids(group_rtindex, &varnos)
+                    });
+
+                if keep_in_having {
+                    // keep it in HAVING (C:1166).
+                    new_having.push(havingclause);
+                } else if has_group_clause && (!has_grouping_sets || first_gset_nonempty) {
+                    // There is GROUP BY, but no empty grouping set (C:1168-1180):
+                    // preprocess fully and move it to WHERE.
+                    let whereclause = preprocess_expression(
+                        mcx,
+                        &root,
+                        outer_query_ref,
+                        Some(havingclause),
+                        EXPRKIND_QUAL,
+                    )?;
+                    // make_ands_implicit so the moved clause matches the
+                    // implicitly-ANDed list form of jointree->quals (the C
+                    // list_concat splices a List* directly; preprocess_expression
+                    // here returns an already make_ands_implicit'd single Expr).
+                    for c in make_ands_implicit(whereclause) {
+                        moved_to_where.push(c);
+                    }
+                } else {
+                    // There is an empty grouping set, perhaps implicitly (C:1182-1197):
+                    // preprocess a *copy* into WHERE and also keep the original in
+                    // HAVING.
+                    let copy = havingclause.clone_in(mcx)?;
+                    let whereclause = preprocess_expression(
+                        mcx,
+                        &root,
+                        outer_query_ref,
+                        Some(copy),
+                        EXPRKIND_QUAL,
+                    )?;
+                    for c in make_ands_implicit(whereclause) {
+                        moved_to_where.push(c);
+                    }
+                    new_having.push(havingclause);
+                }
+            }
+
+            // parse->havingQual = (Node *) newHaving (C:1199). Empty list => NULL.
+            run.resolve_mut(root.parse).havingQual = if new_having.is_empty() {
+                None
+            } else {
+                Some(mcx::alloc_in(mcx, make_ands_explicit(new_having))?)
+            };
+
+            // list_concat the moved clauses onto jointree->quals (C:1173-1180,
+            // 1190-1197). The jointree quals live as a single `Node::Expr`; splice
+            // by re-imploding the existing-plus-moved implicit-AND list.
+            if !moved_to_where.is_empty() {
+                let jt = run.resolve_mut(root.parse).jointree.take();
+                if let Some(jt) = jt {
+                    let mut f = mcx::PgBox::into_inner(jt);
+                    let existing: Option<Expr> = match f.quals.take() {
+                        None => None,
+                        Some(n) => match mcx::PgBox::into_inner(n) {
+                            Node::Expr(e) => Some(e),
+                            other => {
+                                return Err(PgError::error(alloc::format!(
+                                    "subquery_planner: jointree quals is a non-Expr \
+                                     node during HAVING transfer: {:?}",
+                                    other.node_tag()
+                                )));
+                            }
+                        },
+                    };
+                    let mut combined = make_ands_implicit(existing);
+                    combined.append(&mut moved_to_where);
+                    f.quals = Some(mcx::alloc_in(
+                        mcx,
+                        Node::Expr(make_ands_explicit(combined)),
+                    )?);
+                    run.resolve_mut(root.parse).jointree = Some(mcx::alloc_in(mcx, f)?);
+                } else {
+                    // No jointree (replace_empty_jointree should have created one);
+                    // build a bare FromExpr to hold the moved quals.
+                    let f = types_nodes::rawnodes::FromExpr {
+                        fromlist: mcx::PgVec::new_in(mcx),
+                        quals: Some(mcx::alloc_in(
+                            mcx,
+                            Node::Expr(make_ands_explicit(moved_to_where)),
+                        )?),
+                    };
+                    run.resolve_mut(root.parse).jointree = Some(mcx::alloc_in(mcx, f)?);
+                }
+            }
         }
     }
 
@@ -1205,6 +1347,22 @@ fn subquery_planner<'mcx>(
 
         Ok(root)
     }
+}
+
+/// `bms_is_member(x, a)` over the lifetime-free planner `Relids`
+/// (`Option<Box<Bitmapset>>` with `Bitmapset { words: Vec<u64> }`).
+fn bms_is_member_relids(x: i32, a: &Relids) -> bool {
+    debug_assert!(x >= 0);
+    let a = match a {
+        None => return false,
+        Some(a) => a,
+    };
+    let wordnum = (x as usize) / 64;
+    let bitnum = (x as usize) % 64;
+    if wordnum >= a.words.len() {
+        return false;
+    }
+    a.words[wordnum] & (1u64 << bitnum) != 0
 }
 
 /// `bms_make_singleton(x)` over the lifetime-free `Relids` (`Option<Box<Bitmapset>>`):
@@ -1593,16 +1751,20 @@ fn grouping_planner<'mcx>(
                 *root.node_mut(expr_id) = live;
             }
             // preprocess_aggrefs(root, (Node *) parse->havingQual) (C:1580).
-            // `havingQual` is the concretely-typed `Option<PgBox<Expr>>` view;
-            // clone the owned `Expr` and walk it (HAVING Aggrefs are also
-            // cataloged + numbered; HAVING is not re-read off this clone, so a
-            // write-back to the source tree is not needed here).
-            let having: Option<Expr> = match run.resolve(root.parse).havingQual.as_deref() {
-                Some(e) => Some(e.clone_in(mcx)?),
-                None => None,
-            };
+            // `havingQual` is the concretely-typed `Option<PgBox<Expr>>` view.
+            // Take it out (resolving the borrow against `&mut root`), catalog +
+            // number its Aggrefs in place, and write it BACK: the HAVING qual is
+            // re-read by createplan to build the Agg plan node's `qual`, and its
+            // Aggrefs must carry the assigned aggno/aggtransno/aggtranstype, else
+            // ExecInitAgg indexes peraggs[-1].
+            let having: Option<Expr> = run
+                .resolve_mut(root.parse)
+                .havingQual
+                .take()
+                .map(mcx::PgBox::into_inner);
             if let Some(mut having) = having {
                 backend_optimizer_prep_prepagg::preprocess_aggrefs(mcx, root, &mut having)?;
+                run.resolve_mut(root.parse).havingQual = Some(mcx::alloc_in(mcx, having)?);
             }
         }
     }

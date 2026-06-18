@@ -1737,7 +1737,7 @@ fn seam_restriction_selectivity<'mcx>(
     inputcollid: Oid,
     var_relid: i32,
 ) -> PgResult<f64> {
-    let arg_ids = intern_args(root, args);
+    let arg_ids = intern_args(root, args, run.mcx())?;
     restriction_selectivity(run, root, operatorid, &arg_ids, inputcollid, var_relid)
 }
 
@@ -1750,7 +1750,7 @@ fn seam_join_selectivity<'mcx>(
     jointype: types_pathnodes::JoinType,
     sjinfo: Option<&types_pathnodes::SpecialJoinInfo>,
 ) -> PgResult<f64> {
-    let arg_ids = intern_args(root, args);
+    let arg_ids = intern_args(root, args, run.mcx())?;
     join_selectivity(run, root, operatorid, &arg_ids, inputcollid, jointype as i16, sjinfo)
 }
 
@@ -1765,15 +1765,26 @@ fn seam_function_selectivity<'mcx>(
     jointype: types_pathnodes::JoinType,
     sjinfo: Option<&types_pathnodes::SpecialJoinInfo>,
 ) -> PgResult<f64> {
-    let arg_ids = intern_args(root, args);
+    let arg_ids = intern_args(root, args, run.mcx())?;
     function_selectivity(
         run, root, funcid, &arg_ids, inputcollid, is_join, var_relid, jointype as i16, sjinfo,
     )
 }
 
-/// Intern a borrowed `args` slice into arena node handles.
-fn intern_args(root: &mut PlannerInfo, args: &[Expr]) -> Vec<NodeId> {
-    args.iter().map(|e| root.alloc_node(e.clone())).collect()
+/// Intern a borrowed `args` slice into arena node handles. Deep-copy via
+/// `clone_in` (a selectivity clause arg may be an Aggref, whose context-allocated
+/// TargetEntry args a bare derived `.clone()` panics on).
+fn intern_args<'mcx>(
+    root: &mut PlannerInfo,
+    args: &[Expr],
+    mcx: mcx::Mcx<'mcx>,
+) -> PgResult<Vec<NodeId>> {
+    let mut out = Vec::with_capacity(args.len());
+    for e in args {
+        let cloned = e.clone_in(mcx)?;
+        out.push(root.alloc_node(cloned));
+    }
+    Ok(out)
 }
 
 // RTE-kind constants used by build_physical_tlist (parsenodes.h `RTEKind`;

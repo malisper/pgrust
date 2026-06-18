@@ -911,7 +911,9 @@ fn resolve_targetentry_list<'mcx>(
     let mut out = Vec::with_capacity(tes.len());
     for &te_id in tes {
         let te = root.targetentry(te_id).clone();
-        let expr = root.node(te.expr).clone();
+        // clone_in: the target expr may be an Aggref whose context-allocated
+        // TargetEntry args a bare derived `.clone()` cannot copy.
+        let expr = root.node(te.expr).clone_in(mcx)?;
         let mut tle = make_target_entry(mcx, expr, te.resno, te.resname.as_deref(), te.resjunk)?;
         tle.ressortgroupref = te.ressortgroupref;
         tle.resorigtbl = te.resorigtbl;
@@ -2851,7 +2853,10 @@ fn nodes_to_expr_qual<'mcx>(
     }
     let mut out = vec_with_capacity_in(mcx, clauses.len())?;
     for &cid in clauses {
-        out.push(root.node(cid).clone());
+        // Deep-copy via clone_in: a HAVING qual clause may carry an Aggref,
+        // whose `args` TargetEntry list has context-allocated children that a
+        // bare derived `.clone()` cannot copy (it panics by design).
+        out.push(root.node(cid).clone_in(mcx)?);
     }
     Ok(Some(out))
 }

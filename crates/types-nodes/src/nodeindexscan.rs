@@ -89,7 +89,10 @@ impl Plan<'_> {
             Some(q) => {
                 let mut out = vec_with_capacity_in(mcx, q.len())?;
                 for e in q.iter() {
-                    out.push(e.clone());
+                    // clone_in: the qual may carry an Aggref (a HAVING qual on an
+                    // Agg plan), whose context-allocated TargetEntry args a bare
+                    // derived `.clone()` panics on.
+                    out.push(e.clone_in(mcx)?);
                 }
                 Some(out)
             }

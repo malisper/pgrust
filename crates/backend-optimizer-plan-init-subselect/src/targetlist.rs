@@ -63,21 +63,20 @@ pub fn build_base_rel_tlists(root: &mut PlannerInfo, run: &PlannerRun<'_>) -> Pg
     }
 
     // If there's a HAVING clause, we'll need the Vars it uses, too. Note that
-    // HAVING can contain Aggrefs but not WindowFuncs.
-    let having: Option<Expr> = run
-        .resolve(root.parse)
-        .havingQual
-        .as_deref()
-        .cloned();
-    if let Some(having_qual) = having {
-        let having_vars = eqext::pull_var_clause::call(
-            &having_qual,
+    // HAVING can contain Aggrefs but not WindowFuncs. Borrow the qual straight
+    // from the parse Query and walk it by reference (a shallow `Expr::clone`
+    // panics on an Aggref, whose args are a context-allocated TargetEntry list),
+    // exactly as the tlist walk above does.
+    let having_vars: Vec<Expr> = match run.resolve(root.parse).havingQual.as_deref() {
+        Some(having_qual) => eqext::pull_var_clause::call(
+            having_qual,
             PVC_RECURSE_AGGREGATES | PVC_INCLUDE_PLACEHOLDERS,
-        );
-        if !having_vars.is_empty() {
-            let where_needed = bms::relids_make_singleton::call(0);
-            add_vars_to_targetlist(root, having_vars, where_needed)?;
-        }
+        ),
+        None => Vec::new(),
+    };
+    if !having_vars.is_empty() {
+        let where_needed = bms::relids_make_singleton::call(0);
+        add_vars_to_targetlist(root, having_vars, where_needed)?;
     }
     Ok(())
 }

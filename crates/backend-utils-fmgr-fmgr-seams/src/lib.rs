@@ -178,11 +178,15 @@ seam_core::seam!(
     /// finalize functions). `types_core::FmgrInfo.fn_expr` carries the node
     /// erased (`FnExprErased`); the owner (which depends on `types-nodes`) boxes
     /// the owned `Expr` into it. C stores the bare `Node *`; the owned model
-    /// shares the node value through a refcounted box.
-    pub fn fmgr_info_set_expr(
+    /// shares the node value through a refcounted box. Takes `Mcx` because the
+    /// owner deep-copies the node via `Expr::clone_in` (a bare derived `.clone()`
+    /// panics on an Aggref, whose args are a context-allocated TargetEntry list),
+    /// which is an allocating, fallible step.
+    pub fn fmgr_info_set_expr<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         finfo: &mut types_core::fmgr::FmgrInfo,
         expr: &types_nodes::primnodes::Expr,
-    )
+    ) -> PgResult<()>
 );
 
 seam_core::seam!(

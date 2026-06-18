@@ -190,21 +190,24 @@ struct RangeQueryClause {
 
 /// `addRangeClause(&rqlist, clause, varonleft, isLTsel, s2)` (clausesel.c):
 /// match a new range-query clause against the accumulating pair list.
-fn addRangeClause(
+fn addRangeClause<'mcx>(
     rqlist: &mut Vec<RangeQueryClause>,
     clause_args: &[Expr],
     varonleft: bool,
     isLTsel: bool,
     s2: f64,
-) {
+    mcx: mcx::Mcx<'mcx>,
+) -> PgResult<()> {
     let var: Expr;
     let is_lobound: bool;
 
+    // clone_in: a HAVING range clause's var may be an Aggref (e.g. count(*) > 1),
+    // whose context-allocated TargetEntry args a bare derived `.clone()` panics on.
     if varonleft {
-        var = get_leftop(clause_args).clone();
+        var = get_leftop(clause_args).clone_in(mcx)?;
         is_lobound = !isLTsel; // x < something is high bound
     } else {
-        var = get_rightop(clause_args).clone();
+        var = get_rightop(clause_args).clone_in(mcx)?;
         is_lobound = isLTsel; // something < x is low bound
     }
 
@@ -238,7 +241,7 @@ fn addRangeClause(
                 }
             }
         }
-        return;
+        return Ok(());
     }
 
     // No matching var found, so make a new clause-pair data structure
@@ -262,6 +265,7 @@ fn addRangeClause(
     // C prepends to the singly-linked list; order is irrelevant to the final
     // result (the list is scanned once, unordered), so we append.
     rqlist.push(rqelem);
+    Ok(())
 }
 
 /* ==========================================================================
@@ -270,11 +274,12 @@ fn addRangeClause(
 
 /// `find_single_rel_for_clauses(root, clauses)` (clausesel.c): if all clauses
 /// reference only a single relation, return its [`RelId`]; else `None`.
-fn find_single_rel_for_clauses(
+fn find_single_rel_for_clauses<'mcx>(
     root: &mut PlannerInfo,
     clauses: &[ListEntry],
+    mcx: mcx::Mcx<'mcx>,
 ) -> PgResult<Option<RelId>> {
-    match find_single_relid_for_clauses(root, clauses)? {
+    match find_single_relid_for_clauses(root, clauses, mcx)? {
         Some(lastrelid) if lastrelid != 0 => Ok(Some(find_base_rel(root, lastrelid))),
         _ => Ok(None), // no clauses
     }
@@ -285,9 +290,10 @@ fn find_single_rel_for_clauses(
 /// reads `rel->relid`; the arena form threads the relid through to avoid the
 /// `find_base_rel` round-trip mid-recursion). Returns `None` if not single-rel,
 /// `Some(0)` if no rel was referenced, else `Some(relid)`.
-fn find_single_relid_for_clauses(
+fn find_single_relid_for_clauses<'mcx>(
     root: &mut PlannerInfo,
     clauses: &[ListEntry],
+    mcx: mcx::Mcx<'mcx>,
 ) -> PgResult<Option<Index>> {
     let mut lastrelid: Index = 0;
 
@@ -302,8 +308,8 @@ fn find_single_relid_for_clauses(
         match entry {
             ListEntry::Bare(node) => {
                 if is_andclause(node) {
-                    let subentries = boolexpr_args_as_entries(node);
-                    match find_single_relid_for_clauses(root, &subentries)? {
+                    let subentries = boolexpr_args_as_entries(node, mcx)?;
+                    match find_single_relid_for_clauses(root, &subentries, mcx)? {
                         None => return Ok(None),
                         Some(0) => {
                             // rel == NULL in C -> not single-rel.
@@ -374,13 +380,13 @@ pub fn clauselist_selectivity_mixed<'mcx>(
     jointype: JoinType,
     sjinfo: Option<&SpecialJoinInfo>,
 ) -> PgResult<f64> {
-    let entries: Vec<ListEntry> = clauses
-        .iter()
-        .map(|e| match e {
+    let mut entries: Vec<ListEntry> = Vec::with_capacity(clauses.len());
+    for e in clauses {
+        entries.push(match e {
             seam::ClauseListEntry::Rinfo(r) => ListEntry::Rinfo(*r),
-            seam::ClauseListEntry::Bare(x) => ListEntry::Bare(x.clone()),
-        })
-        .collect();
+            seam::ClauseListEntry::Bare(x) => ListEntry::Bare(x.clone_in(run.mcx())?),
+        });
+    }
     clauselist_selectivity_ext_entries(run, root, &entries, var_relid, jointype, sjinfo, true)
 }
 
@@ -418,7 +424,7 @@ fn clauselist_selectivity_ext_entries<'mcx>(
     // If there's exactly one clause, just go directly to
     // clause_selectivity_ext(). None of what we might do below is relevant.
     if clauses.len() == 1 {
-        let clause = clauses[0].clause(root);
+        let clause = clauses[0].clause(root, run.mcx())?;
         return clause_selectivity_ext(
             run,
             root,
@@ -433,7 +439,7 @@ fn clauselist_selectivity_ext_entries<'mcx>(
 
     // Determine if these clauses reference a single relation.  If so, and if it
     // has extended statistics, try to apply those.
-    let rel = find_single_rel_for_clauses(root, clauses)?;
+    let rel = find_single_rel_for_clauses(root, clauses, run.mcx())?;
     if use_extended_stats {
         if let Some(rel) = rel {
             if root.rel(rel).rtekind == RTE_RELATION && !root.rel(rel).statlist.is_empty() {
@@ -476,7 +482,7 @@ fn clauselist_selectivity_ext_entries<'mcx>(
         }
 
         // Compute the selectivity of this clause in isolation.
-        let clause0 = entry.clause(root);
+        let clause0 = entry.clause(root, run.mcx())?;
         let s2 = clause_selectivity_ext(
             run,
             root,
@@ -507,7 +513,18 @@ fn clauselist_selectivity_ext_entries<'mcx>(
         // side.  Most of the tests here can be done more efficiently with rinfo.
         let mut handled = false;
         if is_opclause(&clause) {
-            let args: Vec<Expr> = opexpr_args(&clause).map(|a| a.to_vec()).unwrap_or_default();
+            // clone_in each arg: a HAVING op clause's arg may be an Aggref, whose
+            // context-allocated TargetEntry args a bare derived `.clone()` panics on.
+            let args: Vec<Expr> = match opexpr_args(&clause) {
+                Some(a) => {
+                    let mut v = Vec::with_capacity(a.len());
+                    for e in a {
+                        v.push(e.clone_in(run.mcx())?);
+                    }
+                    v
+                }
+                None => Vec::new(),
+            };
             if args.len() == 2 {
                 {
                     let mut varonleft = true;
@@ -548,10 +565,10 @@ fn clauselist_selectivity_ext_entries<'mcx>(
                         let oprrest = lsc::get_oprrest::call(opno)?;
                         match oprrest {
                             F_SCALARLTSEL | F_SCALARLESEL => {
-                                addRangeClause(&mut rqlist, &args, varonleft, true, s2);
+                                addRangeClause(&mut rqlist, &args, varonleft, true, s2, run.mcx())?;
                             }
                             F_SCALARGTSEL | F_SCALARGESEL => {
-                                addRangeClause(&mut rqlist, &args, varonleft, false, s2);
+                                addRangeClause(&mut rqlist, &args, varonleft, false, s2, run.mcx())?;
                             }
                             _ => {
                                 // Just merge the selectivity in generically
@@ -645,7 +662,7 @@ fn clauselist_selectivity_or<'mcx>(
 
     // Determine if these clauses reference a single relation.  If so, and if it
     // has extended statistics, try to apply those.
-    let rel = find_single_rel_for_clauses(root, clauses)?;
+    let rel = find_single_rel_for_clauses(root, clauses, run.mcx())?;
     if use_extended_stats {
         if let Some(rel) = rel {
             if root.rel(rel).rtekind == RTE_RELATION && !root.rel(rel).statlist.is_empty() {
@@ -680,7 +697,7 @@ fn clauselist_selectivity_or<'mcx>(
             continue;
         }
 
-        let clause = entry.clause(root);
+        let clause = entry.clause(root, run.mcx())?;
         let s2 = clause_selectivity_ext(
             run,
             root,
@@ -745,11 +762,13 @@ enum ListEntry {
 impl ListEntry {
     /// `(Node *) lfirst(l)` — the element's clause expression. For a
     /// RestrictInfo this is `rinfo->clause`; for a bare element it is the
-    /// element itself.
-    fn clause(&self, root: &PlannerInfo) -> Expr {
+    /// element itself. Deep-copy via `clone_in` (a HAVING qual clause may carry
+    /// an Aggref, whose context-allocated TargetEntry args a bare derived
+    /// `.clone()` cannot copy).
+    fn clause<'mcx>(&self, root: &PlannerInfo, mcx: mcx::Mcx<'mcx>) -> PgResult<Expr> {
         match self {
-            ListEntry::Rinfo(rid) => root.node(root.rinfo(*rid).clause).clone(),
-            ListEntry::Bare(e) => e.clone(),
+            ListEntry::Rinfo(rid) => root.node(root.rinfo(*rid).clause).clone_in(mcx),
+            ListEntry::Bare(e) => e.clone_in(mcx),
         }
     }
 
@@ -769,10 +788,19 @@ fn rinfos_as_entries(clauses: &[RinfoId]) -> Vec<ListEntry> {
 
 /// The bare-expr `args` of an AND/OR `BoolExpr`, as `ListEntry`s (the C
 /// `((BoolExpr *) clause)->args`).
-fn boolexpr_args_as_entries(clause: &Expr) -> Vec<ListEntry> {
+fn boolexpr_args_as_entries<'mcx>(
+    clause: &Expr,
+    mcx: mcx::Mcx<'mcx>,
+) -> PgResult<Vec<ListEntry>> {
     match clause {
-        Expr::BoolExpr(b) => b.args.iter().cloned().map(ListEntry::Bare).collect(),
-        _ => Vec::new(),
+        Expr::BoolExpr(b) => {
+            let mut out = Vec::with_capacity(b.args.len());
+            for a in &b.args {
+                out.push(ListEntry::Bare(a.clone_in(mcx)?));
+            }
+            Ok(out)
+        }
+        _ => Ok(Vec::new()),
     }
 }
 
@@ -812,7 +840,7 @@ pub fn clause_selectivity<'mcx>(
     jointype: JoinType,
     sjinfo: Option<&SpecialJoinInfo>,
 ) -> PgResult<f64> {
-    let clause_node = root.node(root.rinfo(clause).clause).clone();
+    let clause_node = root.node(root.rinfo(clause).clause).clone_in(run.mcx())?;
     clause_selectivity_ext(
         run,
         root,
@@ -883,8 +911,8 @@ fn clause_selectivity_ext<'mcx>(
         // 1.0.  The only exception is that a constant FALSE may be taken as
         // having selectivity 0.0.  Simple enough that we need not cache.
         if root.rinfo(rid).pseudoconstant {
-            let inner = root.node(root.rinfo(rid).clause).clone();
-            if !matches!(inner, Expr::Const(_)) {
+            let is_const = matches!(root.node(root.rinfo(rid).clause), Expr::Const(_));
+            if !is_const {
                 return Ok(1.0);
             }
         }
@@ -913,12 +941,12 @@ fn clause_selectivity_ext<'mcx>(
         // OR-clause, we want to look at the variant with sub-RestrictInfos, so
         // that per-subclause selectivities can be cached.
         if let Some(orc) = root.rinfo(rid).orclause {
-            working_clause = root.node(orc).clone();
+            working_clause = root.node(orc).clone_in(run.mcx())?;
         } else {
-            working_clause = root.node(root.rinfo(rid).clause).clone();
+            working_clause = root.node(root.rinfo(rid).clause).clone_in(run.mcx())?;
         }
     } else {
-        working_clause = clause.clone();
+        working_clause = clause.clone_in(run.mcx())?;
     }
 
     let clause = &working_clause;
@@ -955,7 +983,7 @@ fn clause_selectivity_ext<'mcx>(
         }
     } else if is_notclause(clause) {
         // inverse of the selectivity of the underlying clause
-        let arg = get_notclausearg(clause).clone();
+        let arg = get_notclausearg(clause).clone_in(run.mcx())?;
         s1 = 1.0
             - clause_selectivity_ext(
                 run,
@@ -969,7 +997,7 @@ fn clause_selectivity_ext<'mcx>(
             )?;
     } else if is_andclause(clause) {
         // share code with clauselist_selectivity()
-        let args = boolexpr_args_as_entries(clause);
+        let args = boolexpr_args_as_entries(clause, run.mcx())?;
         s1 = clauselist_selectivity_ext_entries(
             run,
             root,
@@ -982,7 +1010,7 @@ fn clause_selectivity_ext<'mcx>(
     } else if is_orclause(clause) {
         // Almost the same thing as clauselist_selectivity, but with the clauses
         // connected by OR.
-        let args = boolexpr_args_as_entries(clause);
+        let args = boolexpr_args_as_entries(clause, run.mcx())?;
         s1 = clauselist_selectivity_or(
             run,
             root,
@@ -995,7 +1023,18 @@ fn clause_selectivity_ext<'mcx>(
     } else if is_opclause(clause) {
         // is_opclause(clause) || IsA(clause, DistinctExpr)
         let opno = opexpr_opno(clause);
-        let args = opexpr_args(clause).map(|a| a.to_vec()).unwrap_or_default();
+        // clone_in each arg: a HAVING op clause's arg may be an Aggref, whose
+        // context-allocated TargetEntry args a bare derived `.clone()` panics on.
+        let args: Vec<Expr> = match opexpr_args(clause) {
+            Some(a) => {
+                let mut v = Vec::with_capacity(a.len());
+                for e in a {
+                    v.push(e.clone_in(run.mcx())?);
+                }
+                v
+            }
+            None => Vec::new(),
+        };
         let inputcollid = opexpr_inputcollid(clause);
 
         if treat_as_join_clause(root, clause, cref, var_relid, sjinfo)? {
@@ -1715,10 +1754,13 @@ fn clauselist_selectivity_nodes<'mcx>(
     jointype: i32,
     sjinfo: Option<&SpecialJoinInfo>,
 ) -> f64 {
+    // clone_in: a HAVING qual clause may carry an Aggref, whose context-allocated
+    // TargetEntry args a bare derived `.clone()` panics on.
     let entries: Vec<ListEntry> = clauses
         .iter()
-        .map(|&id| ListEntry::Bare(root.node(id).clone()))
-        .collect();
+        .map(|&id| Ok(ListEntry::Bare(root.node(id).clone_in(run.mcx())?)))
+        .collect::<PgResult<Vec<ListEntry>>>()
+        .expect("clauselist_selectivity clone_in");
     clauselist_selectivity_ext_entries(
         run,
         root,
@@ -1741,7 +1783,10 @@ fn clause_selectivity_nodes<'mcx>(
     jointype: i32,
     sjinfo: Option<&SpecialJoinInfo>,
 ) -> f64 {
-    let clause_node = root.node(clause).clone();
+    let clause_node = root
+        .node(clause)
+        .clone_in(run.mcx())
+        .expect("clause_selectivity clone_in");
     clause_selectivity_ext(
         run,
         root,

@@ -1615,7 +1615,7 @@ fn setup_peragg_finalfn<'mcx>(
     // fmgr_info(finalfn_oid, &peragg->finalfn);
     // fmgr_info_set_expr((Node *) finalfnexpr, &peragg->finalfn);
     let mut finfo = backend_utils_fmgr_fmgr_seams::fmgr_info::call(mcx, finalfn_oid)?;
-    backend_utils_fmgr_fmgr_seams::fmgr_info_set_expr::call(&mut finfo, &finalfnexpr);
+    backend_utils_fmgr_fmgr_seams::fmgr_info_set_expr::call(mcx, &mut finfo, &finalfnexpr)?;
     if let Some(p) = aggstate.peragg.as_mut() {
         p[aggno as usize].finalfn = finfo;
     }
