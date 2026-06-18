@@ -71,6 +71,7 @@ const TEXTOID: Oid = 25;
 const ACLITEMOID: Oid = 1033;
 
 // pg_namespace (CATALOG(pg_namespace,2615): oid, nspname, nspowner, nspacl).
+const ANUM_PG_NAMESPACE_OID: i16 = 1;
 const ANUM_PG_NAMESPACE_NSPNAME: i16 = 2;
 const ANUM_PG_NAMESPACE_NSPOWNER: i16 = 3;
 const ANUM_PG_NAMESPACE_NSPACL: i16 = 4;
@@ -1444,6 +1445,59 @@ fn update_namespace_owner_tuple(nspoid: Oid, old_owner: Oid, new_owner: Oid) -> 
     rel.close(RowExclusiveLock)
 }
 
+/// `NamespaceCreate`'s pg_namespace INSERT (pg_namespace.c:76-96): zero the
+/// `values[]`/`nulls[]`, allocate the OID via `GetNewOidWithIndex(rel,
+/// NamespaceOidIndexId, Anum_pg_namespace_oid)`, `namestrcpy(&nname, nspName)`
+/// into the `nspname` column, set `nspowner`, and either install the supplied
+/// default ACL into `nspacl` or mark it NULL (`nspacl == None`). The caller has
+/// already opened pg_namespace RowExclusiveLock and crossed it as
+/// `&RelationData`; `reopen` re-derives an owned `Relation<'mcx>` over the same
+/// OID under this seam's `mcx` (the family-wide convention). Returns the new
+/// namespace OID.
+fn insert_pg_namespace(
+    rel: &RelationData<'_>,
+    nspname: &str,
+    nspowner: Oid,
+    nspacl: Option<types_array::ArrayType>,
+) -> PgResult<Oid> {
+    let ctx = MemoryContext::new("insert_pg_namespace");
+    let mcx = ctx.mcx();
+    let rel = reopen(mcx, rel)?;
+
+    // for (i = 0; i < Natts_pg_namespace; i++) nulls[i] = false;
+    let mut values: [Datum; NATTS_PG_NAMESPACE] = core::array::from_fn(|_| Datum::null());
+    let mut nulls = [false; NATTS_PG_NAMESPACE];
+
+    // nspoid = GetNewOidWithIndex(nspdesc, NamespaceOidIndexId,
+    //                             Anum_pg_namespace_oid);
+    let nspoid = backend_catalog_catalog::GetNewOidWithIndex(
+        &rel,
+        cat::catalog::NAMESPACE_OID_INDEX_ID,
+        ANUM_PG_NAMESPACE_OID,
+    )?;
+    // values[Anum_pg_namespace_oid - 1] = ObjectIdGetDatum(nspoid);
+    values[(ANUM_PG_NAMESPACE_OID - 1) as usize] = Datum::from_oid(nspoid);
+    // namestrcpy(&nname, nspName); values[..nspname] = NameGetDatum(&nname);
+    values[(ANUM_PG_NAMESPACE_NSPNAME - 1) as usize] =
+        name_datum(mcx, &namestrcpy_image(nspname))?;
+    // values[Anum_pg_namespace_nspowner - 1] = ObjectIdGetDatum(ownerId);
+    values[(ANUM_PG_NAMESPACE_NSPOWNER - 1) as usize] = Datum::from_oid(nspowner);
+    // if (nspacl != NULL) values[..nspacl] = PointerGetDatum(nspacl);
+    // else nulls[Anum_pg_namespace_nspacl - 1] = true;
+    match &nspacl {
+        Some(acl) => {
+            values[(ANUM_PG_NAMESPACE_NSPACL - 1) as usize] =
+                Datum::ByRef(mcx::slice_in(mcx, &arraytype_header_bytes(acl))?)
+        }
+        None => nulls[(ANUM_PG_NAMESPACE_NSPACL - 1) as usize] = true,
+    }
+
+    // tup = heap_form_tuple(...); CatalogTupleInsert(nspdesc, tup);
+    form_and_insert(mcx, &rel, &values, &nulls)?;
+    rel.close(RowExclusiveLock)?;
+    Ok(nspoid)
+}
+
 /// `AlterObjectOwner_internal`'s modified-tuple write (alter.c 1012-1046) for an
 /// arbitrary simple catalog. The caller (alter.c) opened `rel` (catalog
 /// `catalog_id`, RowExclusiveLock) and locked the row via
@@ -2207,6 +2261,7 @@ pub fn install() {
     s::get_new_oid_with_index_pg_type::set(get_new_oid_with_index_pg_type);
 
     // pg_namespace.
+    s::catalog_tuple_insert_pg_namespace::set(insert_pg_namespace);
     s::rename_namespace_tuple::set(rename_namespace_tuple);
     s::update_namespace_owner_tuple::set(update_namespace_owner_tuple);
 
