@@ -75,6 +75,8 @@ use types_scan::sdir::{ScanDirection, ScanDirectionIsNoMovement};
 
 use backend_catalog_aclchk_seams as aclchk;
 use backend_catalog_objectaddress_seams as objaddr;
+use backend_nodes_core_seams as bms_seams;
+use backend_utils_cache_relcache_seams as relcache;
 use backend_executor_execJunk as execJunk;
 use backend_executor_execMain_seams as seams;
 use backend_executor_execProcnode_seams as procnode;
@@ -1043,6 +1045,81 @@ pub fn exec_check_permissions(
     Ok(true)
 }
 
+// ===========================================================================
+// ExecSupportsBackwardScan — execMain owns the seam decl (its caller passes the
+// whole PlannedStmt); the body is execAmi's planTree walker.
+// ===========================================================================
+
+/// `ExecSupportsBackwardScan(queryDesc->plannedstmt->planTree)` (execAmi.c via
+/// the portalcmds caller): does the plan tree support backward scanning?
+/// Delegates to execAmi's recursive `Plan`-node walker, handed `planTree`.
+pub fn exec_supports_backward_scan(plan: &PlannedStmt<'_>) -> PgResult<bool> {
+    backend_executor_execAmi::exec_supports_backward_scan(plan.planTree.as_deref())
+}
+
+// ===========================================================================
+// ExecUpdateLockMode (execMain.c).
+// ===========================================================================
+
+/// `ExecUpdateLockMode(estate, relinfo)` (execMain.c): the row-lock mode to
+/// acquire on a conflicting tuple before updating. If no key column has been
+/// modified a weaker lock is sufficient (better concurrency).
+pub fn ExecUpdateLockMode<'mcx>(
+    estate: &mut types_nodes::EStateData<'mcx>,
+    result_rel_info: types_nodes::RriId,
+) -> PgResult<types_tableam::tableam::LockTupleMode> {
+    // updatedCols = ExecGetAllUpdatedCols(relinfo, estate);
+    // keyCols = RelationGetIndexAttrBitmap(relinfo->ri_RelationDesc,
+    //                                      INDEX_ATTR_BITMAP_KEY);
+    let mcx = estate.es_query_cxt;
+    let updated_cols = execUtils::ExecGetAllUpdatedCols(estate, result_rel_info, mcx)?;
+
+    let rel = estate
+        .result_rel(result_rel_info)
+        .ri_RelationDesc
+        .as_ref()
+        .expect("ExecUpdateLockMode: result relation must be open")
+        .alias();
+    let key_cols = relcache::relation_get_index_attr_bitmap::call(
+        mcx,
+        &rel,
+        relcache::IndexAttrBitmapKind::Keys,
+    )?;
+
+    // if (bms_overlap(keyCols, updatedCols)) return LockTupleExclusive;
+    if bms_seams::bms_overlap::call(key_cols.as_deref(), updated_cols.as_deref()) {
+        return Ok(types_tableam::tableam::LockTupleMode::LockTupleExclusive);
+    }
+    // return LockTupleNoKeyExclusive;
+    Ok(types_tableam::tableam::LockTupleMode::LockTupleNoKeyExclusive)
+}
+
+// ===========================================================================
+// ExecGetReturningSlot / ExecGetChildToRootMap (execUtils.c) — execMain owns
+// the seam decl (consumed by nodeModifyTable); the bodies are execUtils's.
+// ===========================================================================
+
+/// `ExecGetReturningSlot(estate, relInfo)` (execUtils.c): get (lazily creating)
+/// the per-relation slot used to hold a tuple for RETURNING. Delegates to
+/// execUtils.
+fn exec_get_returning_slot<'mcx>(
+    estate: &mut types_nodes::EStateData<'mcx>,
+    result_rel_info: types_nodes::RriId,
+) -> PgResult<types_nodes::SlotId> {
+    execUtils::ExecGetReturningSlot(estate, result_rel_info)
+}
+
+/// `ExecGetChildToRootMap(resultRelInfo)` (execUtils.c): compute lazily the
+/// child→root tuple-conversion map. The seam reports whether a conversion is
+/// needed (the map is `NULL` when the rowtypes already match); the map itself
+/// lives on the pooled `ResultRelInfo`. Delegates to execUtils.
+fn exec_get_child_to_root_map<'mcx>(
+    estate: &mut types_nodes::EStateData<'mcx>,
+    result_rel_info: types_nodes::RriId,
+) -> PgResult<bool> {
+    Ok(execUtils::ExecGetChildToRootMap(estate, result_rel_info)?.is_some())
+}
+
 /// `get_rel_name(relid)` → owned `String` (the `aclcheck_error` objectname).
 fn lsyscache_get_rel_name(relid: Oid) -> PgResult<Option<alloc::string::String>> {
     let tmp = MemoryContext::new("execMain get_rel_name");
@@ -1069,6 +1146,15 @@ pub fn init_seams() {
     seams::executor_rewind::set(ExecutorRewind);
     seams::free_query_desc::set(FreeQueryDesc);
     seams::create_query_desc_and_start_explain::set(CreateQueryDescAndStartExplain);
+
+    // ExecSupportsBackwardScan (body in execAmi) + ExecUpdateLockMode.
+    seams::exec_supports_backward_scan::set(exec_supports_backward_scan);
+    seams::exec_update_lock_mode::set(ExecUpdateLockMode);
+
+    // ExecGetReturningSlot / ExecGetChildToRootMap bodies live in execUtils;
+    // execMain owns these seam decls (consumed by nodeModifyTable) and delegates.
+    seams::exec_get_returning_slot::set(exec_get_returning_slot);
+    seams::exec_get_child_to_root_map::set(exec_get_child_to_root_map);
 
     // PARAM_EXEC `execPlan` link plumbing. nodeSubplan parked these executor
     // PARAM_EXEC / `es_subplanstates` seams in the execProcnode-seams crate, but
