@@ -44,7 +44,7 @@ pub fn transformTableLikeClause<'mcx>(
 ) -> PgResult<()> {
     let mcx = cxt.mcx;
 
-    if !matches!(table_like_clause.as_ref(), Node::TableLikeClause(_)) {
+    if !table_like_clause.as_ref().is_tablelikeclause() {
         unreachable!(
             "transformTableLikeClause: not a TableLikeClause node: {}",
             table_like_clause.node_tag()
@@ -84,7 +84,7 @@ pub fn transformOfType<'mcx>(
 ) -> PgResult<()> {
     let mcx = cxt.mcx;
 
-    let Node::TypeName(of_tn) = of_typename.as_ref() else {
+    let Some(of_tn) = of_typename.as_ref().as_typename() else {
         unreachable!("transformOfType: not a TypeName node: {}", of_typename.node_tag());
     };
 

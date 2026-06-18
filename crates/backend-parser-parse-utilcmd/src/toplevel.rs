@@ -109,7 +109,7 @@ pub fn transformCreateStmt<'mcx>(
     // If the target name isn't schema-qualified, make it so (unless a local temp
     // table, which is effectively in pg_temp).
     if schemaname_is_none && relpersistence != RELPERSISTENCE_TEMP {
-        if let Some(Node::RangeVar(rv)) = stmt.relation.as_deref_mut() {
+        if let Some(rv) = stmt.relation.as_deref_mut().and_then(|n| n.as_rangevar_mut()) {
             rv.schemaname = namespace_name;
         }
     }

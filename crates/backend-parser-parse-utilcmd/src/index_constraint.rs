@@ -112,16 +112,16 @@ fn as_index<'a, 'mcx>(n: &'a NodePtr<'mcx>) -> &'a IndexStmt<'mcx> {
 /// PRIMARY-KEY index in `indexlist` is the one whose `primary` flag is set and
 /// equals the pkey definition.
 fn index_equals_pkey(index: &NodePtr<'_>, cxt: &CreateStmtContext<'_>) -> bool {
-    match (index.as_ref(), cxt.pkey.as_deref()) {
-        (Node::IndexStmt(i), Some(Node::IndexStmt(_pk))) => i.primary,
+    match (index.as_ref().as_indexstmt(), cxt.pkey.as_deref().and_then(|n| n.as_indexstmt())) {
+        (Some(i), Some(_pk)) => i.primary,
         _ => false,
     }
 }
 
 /// The C `equal(...)` cluster comparing two `IndexStmt`s for redundancy.
 fn indexes_equivalent(index: &NodePtr<'_>, prior: &NodePtr<'_>) -> bool {
-    let (i, p) = match (index.as_ref(), prior.as_ref()) {
-        (Node::IndexStmt(i), Node::IndexStmt(p)) => (i, p),
+    let (i, p) = match (index.as_ref().as_indexstmt(), prior.as_ref().as_indexstmt()) {
+        (Some(i), Some(p)) => (i, p),
         _ => return false,
     };
     equal_node_vec(&i.indexParams, &p.indexParams)
@@ -346,8 +346,8 @@ pub fn transform_index_constraint_catalog<'mcx>(
     // EXCLUDE: break the (IndexElem, opname) pairs apart.
     if contype == CONSTR_EXCLUSION {
         for pair in con.exclusions.iter() {
-            let (elem, opname) = match pair.as_ref() {
-                Node::List(items) if items.len() == 2 => (
+            let (elem, opname) = match pair.as_ref().as_list() {
+                Some(items) if items.len() == 2 => (
                     mcx::alloc_in(mcx, items[0].clone_in(mcx)?)?,
                     mcx::alloc_in(mcx, items[1].clone_in(mcx)?)?,
                 ),
@@ -431,9 +431,9 @@ pub fn transform_index_constraint_catalog<'mcx>(
             }
 
             // Check for PRIMARY KEY(foo, foo).
-            if let Node::IndexStmt(i) = index.as_ref() {
+            if let Some(i) = index.as_ref().as_indexstmt() {
                 for iparam in i.indexParams.iter() {
-                    if let Node::IndexElem(e) = iparam.as_ref() {
+                    if let Some(e) = iparam.as_ref().as_indexelem() {
                         if e.name.as_ref().map(PgString::as_str) == Some(key) {
                             let code = ERRCODE_DUPLICATE_COLUMN;
                             let msg = if is_primary {

@@ -133,32 +133,40 @@ fn raw_typename_to_parse(
 
     let mut typmods: Vec<types_parsenodes::Node> = Vec::with_capacity(tn.typmods.len());
     for tm in tn.typmods.iter() {
-        let bridged: types_parsenodes::Node = match tm.as_ref() {
-            Node::A_Const(ac) => match ac.val.as_deref() {
-                Some(Node::Integer(i)) => {
+        let bridged: types_parsenodes::Node = match tm.node_tag() {
+            ntag::T_A_Const => match tm.expect_a_const().val.as_deref() {
+                Some(v) if v.is_integer() => {
+                    let i = v.expect_integer();
                     types_parsenodes::Node::Integer(types_parsenodes::Integer { ival: i.ival })
                 }
-                Some(Node::Float(f)) => types_parsenodes::Node::Float(types_parsenodes::Float {
-                    fval: Some(f.fval.as_str().to_string()),
-                }),
-                Some(Node::String(s)) => types_parsenodes::Node::String(
-                    types_parsenodes::StringNode {
+                Some(v) if v.is_float() => {
+                    let f = v.expect_float();
+                    types_parsenodes::Node::Float(types_parsenodes::Float {
+                        fval: Some(f.fval.as_str().to_string()),
+                    })
+                }
+                Some(v) if v.is_string() => {
+                    let s = v.expect_string();
+                    types_parsenodes::Node::String(types_parsenodes::StringNode {
                         sval: Some(s.sval.as_str().to_string()),
-                    },
-                ),
-                Some(Node::Boolean(b)) => {
+                    })
+                }
+                Some(v) if v.is_boolean() => {
+                    let b = v.expect_boolean();
                     types_parsenodes::Node::Boolean(types_parsenodes::Boolean {
                         boolval: b.boolval,
                     })
                 }
-                Some(Node::BitString(b)) => types_parsenodes::Node::BitString(
-                    types_parsenodes::BitString {
+                Some(v) if v.is_bitstring() => {
+                    let b = v.expect_bitstring();
+                    types_parsenodes::Node::BitString(types_parsenodes::BitString {
                         bsval: Some(b.bsval.as_str().to_string()),
-                    },
-                ),
+                    })
+                }
                 _ => types_parsenodes::Node::A_Star,
             },
-            Node::ColumnRef(cr) => {
+            ntag::T_ColumnRef => {
+                let cr = tm.expect_columnref();
                 if cr.fields.len() == 1 {
                     if let Some(s) = cr.fields[0].as_string() {
                         types_parsenodes::Node::String(types_parsenodes::StringNode {

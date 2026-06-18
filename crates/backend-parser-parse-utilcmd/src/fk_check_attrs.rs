@@ -280,7 +280,7 @@ fn set_deferrable(n: &mut NodePtr<'_>, v: bool) {
     }
 }
 fn get_deferrable(n: &NodePtr<'_>) -> bool {
-    matches!(n.as_ref(), Node::Constraint(c) if c.deferrable)
+    n.as_ref().as_constraint().is_some_and(|c| c.deferrable)
 }
 fn set_initdeferred(n: &mut NodePtr<'_>, v: bool) {
     if let Some(c) = n.as_constraint_mut() {
@@ -288,7 +288,7 @@ fn set_initdeferred(n: &mut NodePtr<'_>, v: bool) {
     }
 }
 fn get_initdeferred(n: &NodePtr<'_>) -> bool {
-    matches!(n.as_ref(), Node::Constraint(c) if c.initdeferred)
+    n.as_ref().as_constraint().is_some_and(|c| c.initdeferred)
 }
 
 // Suppress unused-const warning if INVALID_OID is not referenced; kept for

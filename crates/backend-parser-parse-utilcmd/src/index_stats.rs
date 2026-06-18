@@ -82,7 +82,7 @@ pub fn transformIndexStmt<'mcx>(
 
     // take care of any index expressions
     for param in stmt.indexParams.iter_mut() {
-        let Node::IndexElem(ielem) = param.as_mut() else {
+        let Some(ielem) = param.as_mut().as_indexelem_mut() else {
             continue;
         };
         transform_index_elem_expr(mcx, &mut pstate, ielem)?;
@@ -179,7 +179,7 @@ pub fn transformStatsStmt<'mcx>(
 
     // take care of any expressions
     for expr_node in stmt.exprs.iter_mut() {
-        let Node::StatsElem(selem) = expr_node.as_mut() else {
+        let Some(selem) = expr_node.as_mut().as_statselem_mut() else {
             continue;
         };
         transform_stats_elem_expr(mcx, &mut pstate, selem)?;
