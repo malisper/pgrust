@@ -1610,7 +1610,619 @@ fn ExecBuildSlotValueDescription<'mcx>(
     Ok(Some(buf))
 }
 
+// ===========================================================================
+//  Constraint cluster (execMain.c): ExecRelCheck / ExecPartitionCheck /
+//  ExecPartitionCheckEmitError / ExecConstraints / ExecRelGenVirtualNotNull /
+//  ReportNotNullViolationError, de-handled onto the owned EState slot/RRI
+//  pools. The cached constraint `ExprState`s live on the owned `ResultRelInfo`
+//  (`ri_CheckConstraintExprs` / `ri_PartitionCheckExpr` /
+//  `ri_GenVirtualNotNullConstraintExprs`); the take-evaluate-put-back idiom
+//  mirrors nodeModifyTable's `ri_GeneratedExprs*` handling so a `&mut ExprState`
+//  and `&mut EStateData` can co-exist (C shares the pointer freely).
+//
+//  Expression *compilation* (ExecPrepareExpr / ExecPrepareCheck) bottoms out on
+//  the unported `expression_planner` (#159) and loud-panics there; the
+//  not-null slot-read path (the common COPY/INSERT case for relations without
+//  CHECK / partition / virtual-generated constraints) needs no compilation and
+//  runs end-to-end.
+// ===========================================================================
+
+use backend_executor_execExpr::execExpr_core as execExpr;
+use backend_utils_error::ereport;
+use types_error::error::{ERRCODE_CHECK_VIOLATION, ERRCODE_NOT_NULL_VIOLATION, ERROR};
+use types_tuple::heaptuple::TupleDescData;
+
+/// `ExecRelCheck(resultRelInfo, slot, estate)` (execMain.c): evaluate the
+/// relation's CHECK constraints against `slot`. Returns the name of the first
+/// failing constraint, or `None` (the C `NULL`) when all pass.
+fn ExecRelCheck<'mcx>(
+    estate: &mut types_nodes::EStateData<'mcx>,
+    result_rel_info: types_nodes::RriId,
+    slot: types_nodes::SlotId,
+) -> PgResult<Option<mcx::PgString<'mcx>>> {
+    let mcx = estate.es_query_cxt;
+
+    // Snapshot the relation's check list (ccname / ccbin / ccenforced) and the
+    // pg_class relchecks count. The C dereferences ccname/ccbin
+    // unconditionally for enforced checks.
+    struct CheckInfo<'m> {
+        ccname: mcx::PgString<'m>,
+        ccbin: mcx::PgString<'m>,
+        ccenforced: bool,
+    }
+    let (checks, num_check, relname): (alloc::vec::Vec<CheckInfo<'mcx>>, i32, alloc::string::String) = {
+        let rri = estate.result_rel(result_rel_info);
+        let rel = rri
+            .ri_RelationDesc
+            .as_ref()
+            .expect("ExecRelCheck: ri_RelationDesc is NULL");
+        let mut v: alloc::vec::Vec<CheckInfo<'mcx>> = alloc::vec::Vec::new();
+        let mut num_check = 0i32;
+        if let Some(constr) = rel.rd_att.constr.as_ref() {
+            num_check = constr.num_check as i32;
+            for ck in constr.check.iter() {
+                let ccname = ck
+                    .ccname
+                    .as_ref()
+                    .expect("pg_constraint CHECK has ccname")
+                    .clone_in(mcx)?;
+                let ccbin = ck
+                    .ccbin
+                    .as_ref()
+                    .expect("pg_constraint CHECK has ccbin")
+                    .clone_in(mcx)?;
+                v.push(CheckInfo {
+                    ccname,
+                    ccbin,
+                    ccenforced: ck.ccenforced,
+                });
+            }
+        }
+        (v, num_check, rel.name().to_string())
+    };
+    let ncheck = checks.len() as i32;
+
+    // CheckNNConstraintFetch let this pass with only a warning; we fail rather
+    // than risk not enforcing an important constraint. The owned model's
+    // `rd_att->constr` is the parsed source for both counts, so this compares
+    // the materialized check list against `constr->num_check`.
+    if ncheck != num_check {
+        return Err(ereport(ERROR)
+            .errmsg_internal(alloc::format!(
+                "{} pg_constraint record(s) missing for relation \"{}\"",
+                num_check - ncheck,
+                relname
+            ))
+            .into_error());
+    }
+
+    // If first time through, build the per-constraint ExprStates (kept in the
+    // query-lifespan context, owned by the arena ResultRelInfo).
+    if estate
+        .result_rel(result_rel_info)
+        .ri_CheckConstraintExprs
+        .is_none()
+        && ncheck > 0
+    {
+        let rel_alias = estate
+            .result_rel(result_rel_info)
+            .ri_RelationDesc
+            .as_ref()
+            .expect("ExecRelCheck: ri_RelationDesc is NULL")
+            .alias();
+        let mut exprs: mcx::PgVec<'mcx, Option<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>> =
+            mcx::vec_with_capacity_in(mcx, ncheck as usize)?;
+        for ci in checks.iter() {
+            // Skip not-enforced constraints (leaving a None placeholder so the
+            // list stays index-aligned with the check list).
+            if !ci.ccenforced {
+                exprs.push(None);
+                continue;
+            }
+            // checkconstr = stringToNode(check[i].ccbin);
+            let node = backend_nodes_core::read::string_to_node(mcx, ci.ccbin.as_str())?;
+            let checkconstr_expr = match &*node {
+                types_nodes::nodes::Node::Expr(e) => e.clone(),
+                other => {
+                    return Err(unported_node("ExecRelCheck: ccbin is not an Expr", other))
+                }
+            };
+            // checkconstr = expand_generated_columns_in_expr(checkconstr, rel, 1);
+            let expanded = backend_rewrite_rewritehandler::expand_generated_columns_in_expr(
+                mcx,
+                Some(checkconstr_expr),
+                &rel_alias,
+                1,
+            )?;
+            let expanded_expr = expanded
+                .expect("expand_generated_columns_in_expr returned NULL for a non-NULL Expr");
+            exprs.push(Some(execExpr::exec_prepare_expr(&expanded_expr, estate)?));
+        }
+        estate
+            .result_rel_mut(result_rel_info)
+            .ri_CheckConstraintExprs = Some(exprs);
+    }
+
+    // econtext = GetPerTupleExprContext(estate); econtext->ecxt_scantuple = slot;
+    let econtext = execUtils::MakePerTupleExprContext(estate)?;
+    estate.ecxt_mut(econtext).ecxt_scantuple = Some(slot);
+
+    // Evaluate each constraint (NULL counts as success: use ExecCheck).
+    for (i, ci) in checks.iter().enumerate() {
+        // Take the owned ExprState out, evaluate, put it back.
+        let state = estate
+            .result_rel_mut(result_rel_info)
+            .ri_CheckConstraintExprs
+            .as_mut()
+            .and_then(|arr| arr.get_mut(i))
+            .and_then(|slot| slot.take());
+        if let Some(mut state) = state {
+            let ok = execExpr::exec_check(Some(&mut state), econtext, estate)?;
+            estate
+                .result_rel_mut(result_rel_info)
+                .ri_CheckConstraintExprs
+                .as_mut()
+                .expect("ri_CheckConstraintExprs initialized above")[i] = Some(state);
+            if !ok {
+                return Ok(Some(ci.ccname.clone_in(mcx)?));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// `ExecPartitionCheck(resultRelInfo, slot, estate, emitError)` (execMain.c):
+/// check that the tuple in `slot` meets the relation's partition constraint.
+pub fn ExecPartitionCheck<'mcx>(
+    estate: &mut types_nodes::EStateData<'mcx>,
+    result_rel_info: types_nodes::RriId,
+    slot: types_nodes::SlotId,
+    emit_error: bool,
+) -> PgResult<bool> {
+    let mcx = estate.es_query_cxt;
+
+    // If first time through, build the partition-check expression state
+    // (owned by the arena ResultRelInfo, query-lifespan).
+    if estate
+        .result_rel(result_rel_info)
+        .ri_PartitionCheckExpr
+        .is_none()
+    {
+        let rel_alias = estate
+            .result_rel(result_rel_info)
+            .ri_RelationDesc
+            .as_ref()
+            .expect("ExecPartitionCheck: ri_RelationDesc is NULL")
+            .alias();
+        // qual = RelationGetPartitionQual(rel);
+        let qual = backend_utils_cache_partcache::RelationGetPartitionQual(mcx, &rel_alias)?;
+        // ExecPrepareCheck takes an implicit-AND Expr list.
+        let mut exprs: alloc::vec::Vec<types_nodes::primnodes::Expr> = alloc::vec::Vec::new();
+        for n in qual.iter() {
+            match n {
+                types_nodes::nodes::Node::Expr(e) => exprs.push(e.clone()),
+                other => {
+                    return Err(unported_node(
+                        "ExecPartitionCheck: partition qual element is not an Expr",
+                        other,
+                    ))
+                }
+            }
+        }
+        let expr = execExpr::exec_prepare_check(&exprs, estate)?;
+        estate
+            .result_rel_mut(result_rel_info)
+            .ri_PartitionCheckExpr = expr;
+    }
+
+    // econtext = GetPerTupleExprContext(estate); econtext->ecxt_scantuple = slot;
+    let econtext = execUtils::MakePerTupleExprContext(estate)?;
+    estate.ecxt_mut(econtext).ecxt_scantuple = Some(slot);
+
+    // success = ExecCheck(ri_PartitionCheckExpr, econtext); (NULL == success)
+    let state = estate
+        .result_rel_mut(result_rel_info)
+        .ri_PartitionCheckExpr
+        .take();
+    let success = match state {
+        None => execExpr::exec_check(None, econtext, estate)?,
+        Some(mut state) => {
+            let ok = execExpr::exec_check(Some(&mut state), econtext, estate)?;
+            estate
+                .result_rel_mut(result_rel_info)
+                .ri_PartitionCheckExpr = Some(state);
+            ok
+        }
+    };
+
+    // If asked to emit an error, don't return on failure.
+    if !success && emit_error {
+        ExecPartitionCheckEmitError(estate, result_rel_info, slot)?;
+    }
+
+    Ok(success)
+}
+
+/// `ExecPartitionCheckEmitError(resultRelInfo, slot, estate)` (execMain.c):
+/// form and emit the error after a failed partition-constraint check.
+pub fn ExecPartitionCheckEmitError<'mcx>(
+    estate: &mut types_nodes::EStateData<'mcx>,
+    result_rel_info: types_nodes::RriId,
+    slot: types_nodes::SlotId,
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+
+    // If the tuple was routed, convert it back to the root rowtype so val_desc
+    // matches the input tuple.
+    let (root_relid, slot, relname) =
+        convert_routed_slot_for_error(estate, result_rel_info, slot)?;
+    let modified_cols = constraint_modified_cols(estate, result_rel_info)?;
+
+    let val_desc = build_slot_value_desc(estate, root_relid, slot, modified_cols.as_deref())?;
+
+    let mut err = ereport(ERROR)
+        .errcode(ERRCODE_CHECK_VIOLATION)
+        .errmsg(alloc::format!(
+            "new row for relation \"{}\" violates partition constraint",
+            relname
+        ));
+    if let Some(vd) = val_desc {
+        err = err.errdetail(alloc::format!("Failing row contains {}.", vd.as_str()));
+    }
+    Err(err.into_error())
+}
+
+/// `ExecConstraints(resultRelInfo, slot, estate)` (execMain.c): check the
+/// relation's NOT NULL and CHECK constraints against `slot`. The partition
+/// constraint is *not* checked here.
+fn ExecConstraints<'mcx>(
+    estate: &mut types_nodes::EStateData<'mcx>,
+    result_rel_info: types_nodes::RriId,
+    slot: types_nodes::SlotId,
+) -> PgResult<()> {
+    // Snapshot the not-null / has-not-null / relchecks shape and per-attribute
+    // (attnotnull, attgenerated) flags.
+    struct AttInfo {
+        attnum: i32,
+        attnotnull: bool,
+        is_virtual_generated: bool,
+    }
+    let (has_constr, has_not_null, natts, atts, relchecks): (bool, bool, i32, alloc::vec::Vec<AttInfo>, i32) = {
+        let rri = estate.result_rel(result_rel_info);
+        let rel = rri
+            .ri_RelationDesc
+            .as_ref()
+            .expect("ExecConstraints: ri_RelationDesc is NULL");
+        let tupdesc = &*rel.rd_att;
+        let constr = tupdesc.constr.as_ref();
+        let has_not_null = constr.map(|c| c.has_not_null).unwrap_or(false);
+        let natts = tupdesc.natts;
+        let mut atts: alloc::vec::Vec<AttInfo> = alloc::vec::Vec::new();
+        if has_not_null {
+            for a in 0..natts {
+                let att = tupdesc.attr(a as usize);
+                atts.push(AttInfo {
+                    attnum: (a + 1),
+                    attnotnull: att.attnotnull,
+                    is_virtual_generated: att.attgenerated
+                        == types_tuple::access::ATTRIBUTE_GENERATED_VIRTUAL,
+                });
+            }
+        }
+        let num_check = constr.map(|c| c.num_check as i32).unwrap_or(0);
+        (constr.is_some(), has_not_null, natts, atts, num_check)
+    };
+
+    // We should not be called otherwise.
+    debug_assert!(has_constr);
+
+    // Verify not-null constraints (collecting virtual generated columns).
+    let mut notnull_virtual_attrs: alloc::vec::Vec<i32> = alloc::vec::Vec::new();
+    if has_not_null {
+        // Deform the slot once so slot_attisnull reads are valid.
+        let nulls = slot_isnulls(estate, slot, natts as usize)?;
+        for ai in atts.iter() {
+            if ai.attnotnull && ai.is_virtual_generated {
+                notnull_virtual_attrs.push(ai.attnum);
+            } else if ai.attnotnull && nulls[(ai.attnum - 1) as usize] {
+                ReportNotNullViolationError(estate, result_rel_info, slot, ai.attnum)?;
+            }
+        }
+    }
+
+    // Verify not-null constraints on virtual generated columns, if any.
+    if !notnull_virtual_attrs.is_empty() {
+        let attnum =
+            ExecRelGenVirtualNotNull(estate, result_rel_info, slot, &notnull_virtual_attrs)?;
+        if attnum != 0 {
+            ReportNotNullViolationError(estate, result_rel_info, slot, attnum)?;
+        }
+    }
+
+    // Verify check constraints.
+    if relchecks > 0 {
+        if let Some(failed) = ExecRelCheck(estate, result_rel_info, slot)? {
+            let orig_relname = {
+                let rel = estate
+                    .result_rel(result_rel_info)
+                    .ri_RelationDesc
+                    .as_ref()
+                    .expect("ExecConstraints: ri_RelationDesc is NULL");
+                rel.name().to_string()
+            };
+            // If routed, convert back to the root rowtype for the message.
+            let (reloid, slot, _relname) =
+                convert_routed_slot_for_error(estate, result_rel_info, slot)?;
+            let modified_cols = constraint_modified_cols(estate, result_rel_info)?;
+            let val_desc =
+                build_slot_value_desc(estate, reloid, slot, modified_cols.as_deref())?;
+
+            let mut err = ereport(ERROR)
+                .errcode(ERRCODE_CHECK_VIOLATION)
+                .errmsg(alloc::format!(
+                    "new row for relation \"{}\" violates check constraint \"{}\"",
+                    orig_relname,
+                    failed.as_str()
+                ));
+            if let Some(vd) = val_desc {
+                err = err.errdetail(alloc::format!("Failing row contains {}.", vd.as_str()));
+            }
+            return Err(err.into_error());
+        }
+    }
+
+    Ok(())
+}
+
+/// `ExecRelGenVirtualNotNull(resultRelInfo, slot, estate, notnull_virtual_attrs)`
+/// (execMain.c): verify not-null constraints on virtual generated columns.
+/// Returns `InvalidAttrNumber` (0) when all satisfied, else the violating attnum.
+fn ExecRelGenVirtualNotNull<'mcx>(
+    estate: &mut types_nodes::EStateData<'mcx>,
+    result_rel_info: types_nodes::RriId,
+    slot: types_nodes::SlotId,
+    notnull_virtual_attrs: &[i32],
+) -> PgResult<i32> {
+    let mcx = estate.es_query_cxt;
+
+    // Build a NullTest ExprState per virtual generated column (cached, owned by
+    // the arena ResultRelInfo).
+    if estate
+        .result_rel(result_rel_info)
+        .ri_GenVirtualNotNullConstraintExprs
+        .is_none()
+        && !notnull_virtual_attrs.is_empty()
+    {
+        let rel_alias = estate
+            .result_rel(result_rel_info)
+            .ri_RelationDesc
+            .as_ref()
+            .expect("ExecRelGenVirtualNotNull: ri_RelationDesc is NULL")
+            .alias();
+        let mut exprs: mcx::PgVec<'mcx, Option<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>> =
+            mcx::vec_with_capacity_in(mcx, notnull_virtual_attrs.len())?;
+        for &attnum in notnull_virtual_attrs {
+            // "generated_expression IS NOT NULL".
+            let arg = backend_rewrite_rewritehandler::build_generation_expression(
+                mcx, &rel_alias, attnum,
+            )?;
+            let nnulltest = types_nodes::primnodes::NullTest {
+                arg: Some(alloc::boxed::Box::new(arg)),
+                nulltesttype: types_nodes::primnodes::NullTestType::IS_NOT_NULL,
+                argisrow: false,
+                location: -1,
+            };
+            let expr = types_nodes::primnodes::Expr::NullTest(nnulltest);
+            exprs.push(Some(execExpr::exec_prepare_expr(&expr, estate)?));
+        }
+        estate
+            .result_rel_mut(result_rel_info)
+            .ri_GenVirtualNotNullConstraintExprs = Some(exprs);
+    }
+
+    // econtext = GetPerTupleExprContext(estate); econtext->ecxt_scantuple = slot;
+    let econtext = execUtils::MakePerTupleExprContext(estate)?;
+    estate.ecxt_mut(econtext).ecxt_scantuple = Some(slot);
+
+    // Evaluate each virtual-not-null check.
+    for (i, &attnum) in notnull_virtual_attrs.iter().enumerate() {
+        let state = estate
+            .result_rel_mut(result_rel_info)
+            .ri_GenVirtualNotNullConstraintExprs
+            .as_mut()
+            .and_then(|arr| arr.get_mut(i))
+            .and_then(|s| s.take());
+        let mut state = state.expect("ExecRelGenVirtualNotNull: cached ExprState is NULL");
+        let ok = execExpr::exec_check(Some(&mut state), econtext, estate)?;
+        estate
+            .result_rel_mut(result_rel_info)
+            .ri_GenVirtualNotNullConstraintExprs
+            .as_mut()
+            .expect("ri_GenVirtualNotNullConstraintExprs initialized above")[i] = Some(state);
+        if !ok {
+            return Ok(attnum);
+        }
+    }
+
+    Ok(0)
+}
+
+/// `ReportNotNullViolationError(resultRelInfo, slot, estate, attnum)`
+/// (execMain.c): report an already-detected not-null violation for `attnum`.
+fn ReportNotNullViolationError<'mcx>(
+    estate: &mut types_nodes::EStateData<'mcx>,
+    result_rel_info: types_nodes::RriId,
+    slot: types_nodes::SlotId,
+    attnum: i32,
+) -> PgResult<()> {
+    debug_assert!(attnum > 0);
+
+    let (orig_relname, attname) = {
+        let rel = estate
+            .result_rel(result_rel_info)
+            .ri_RelationDesc
+            .as_ref()
+            .expect("ReportNotNullViolationError: ri_RelationDesc is NULL");
+        let att = rel.rd_att.attr((attnum - 1) as usize);
+        (
+            rel.name().to_string(),
+            alloc::string::String::from_utf8_lossy(att.attname.name_str()).into_owned(),
+        )
+    };
+
+    // If routed, convert back to the root rowtype for the message.
+    let (reloid, slot, _relname) =
+        convert_routed_slot_for_error(estate, result_rel_info, slot)?;
+    let modified_cols = constraint_modified_cols(estate, result_rel_info)?;
+    let val_desc = build_slot_value_desc(estate, reloid, slot, modified_cols.as_deref())?;
+
+    let mut err = ereport(ERROR)
+        .errcode(ERRCODE_NOT_NULL_VIOLATION)
+        .errmsg(alloc::format!(
+            "null value in column \"{}\" of relation \"{}\" violates not-null constraint",
+            attname,
+            orig_relname
+        ));
+    if let Some(vd) = val_desc {
+        err = err.errdetail(alloc::format!("Failing row contains {}.", vd.as_str()));
+    }
+    Err(err.into_error())
+}
+
+// --- constraint-cluster helpers -------------------------------------------
+
+fn unported_node(msg: &str, node: &types_nodes::nodes::Node<'_>) -> types_error::PgError {
+    unported(&alloc::format!("{msg}: {:?}", core::mem::discriminant(node)))
+}
+
+/// Deform `slot` and return its per-attribute null flags (`slot_attisnull`).
+fn slot_isnulls<'mcx>(
+    estate: &mut types_nodes::EStateData<'mcx>,
+    slot: types_nodes::SlotId,
+    natts: usize,
+) -> PgResult<alloc::vec::Vec<bool>> {
+    let deformed = backend_executor_execTuples_seams::slot_getallattrs_by_id::call(estate, slot)?;
+    let mut nulls = alloc::vec::Vec::with_capacity(natts);
+    for (_v, n) in deformed.iter() {
+        nulls.push(*n);
+    }
+    // A short slot reads remaining attributes as NULL (slot_attisnull contract).
+    while nulls.len() < natts {
+        nulls.push(true);
+    }
+    Ok(nulls)
+}
+
+/// `bms_union(ExecGetInsertedCols(rri, estate), ExecGetUpdatedCols(rri, estate))`
+/// over the (root, when routed) result relation for the error `val_desc`.
+fn constraint_modified_cols<'mcx>(
+    estate: &mut types_nodes::EStateData<'mcx>,
+    result_rel_info: types_nodes::RriId,
+) -> PgResult<Option<mcx::PgBox<'mcx, Bitmapset<'mcx>>>> {
+    let mcx = estate.es_query_cxt;
+    // C unions over the root RRI when the tuple was routed; otherwise the RRI.
+    let target = estate
+        .result_rel(result_rel_info)
+        .ri_RootResultRelInfo
+        .unwrap_or(result_rel_info);
+    let inserted = execUtils::ExecGetInsertedCols(estate, target, mcx)?;
+    let updated = execUtils::ExecGetUpdatedCols(estate, target, mcx)?;
+    backend_nodes_core::bitmapset::bms_union(mcx, inserted.as_deref(), updated.as_deref())
+}
+
+/// Build the `val_desc` for a constraint error: deform the slot, then call
+/// [`ExecBuildSlotValueDescription`] against the (root, when routed) relation's
+/// descriptor.
+fn build_slot_value_desc<'mcx>(
+    estate: &mut types_nodes::EStateData<'mcx>,
+    reloid: Oid,
+    slot: types_nodes::SlotId,
+    modified_cols: Option<&Bitmapset<'_>>,
+) -> PgResult<Option<mcx::PgString<'mcx>>> {
+    let mcx = estate.es_query_cxt;
+    // slot_getallattrs(slot): make the value/null arrays valid for the reader.
+    let _ = backend_executor_execTuples_seams::slot_getallattrs_by_id::call(estate, slot)?;
+    // Clone the descriptor + a value snapshot so the borrow of `estate` ends
+    // before ExecBuildSlotValueDescription reads it (it takes &TupleTableSlot).
+    let tupdesc = estate
+        .slot(slot)
+        .tts_tupleDescriptor
+        .as_ref()
+        .expect("build_slot_value_desc: slot has no descriptor")
+        .clone_in(mcx)?;
+    let slot_ref = estate.slot(slot);
+    ExecBuildSlotValueDescription(mcx, reloid, slot_ref, &tupdesc, modified_cols, 64)
+}
+
+/// If the tuple was routed (the RRI has a root), convert `slot` back to the
+/// root table's rowtype so the error `val_desc` matches the input tuple.
+/// Returns `(reloid_for_val_desc, slot_to_describe, relname_of_root_or_self)`.
+fn convert_routed_slot_for_error<'mcx>(
+    estate: &mut types_nodes::EStateData<'mcx>,
+    result_rel_info: types_nodes::RriId,
+    slot: types_nodes::SlotId,
+) -> PgResult<(Oid, types_nodes::SlotId, alloc::string::String)> {
+    let mcx = estate.es_query_cxt;
+    let root = estate.result_rel(result_rel_info).ri_RootResultRelInfo;
+    let Some(root) = root else {
+        // Not routed: describe against this relation directly.
+        let rel = estate
+            .result_rel(result_rel_info)
+            .ri_RelationDesc
+            .as_ref()
+            .expect("convert_routed_slot_for_error: ri_RelationDesc is NULL");
+        return Ok((rel.rd_id, slot, rel.name().to_string()));
+    };
+
+    // map = build_attrmap_by_name_if_req(old_tupdesc, root_tupdesc, false);
+    let old_tupdesc: TupleDescData<'mcx> = estate
+        .result_rel(result_rel_info)
+        .ri_RelationDesc
+        .as_ref()
+        .expect("convert_routed_slot_for_error: ri_RelationDesc is NULL")
+        .rd_att
+        .clone_in(mcx)?;
+    let (root_relid, root_relname, root_tupdesc): (Oid, alloc::string::String, TupleDescData<'mcx>) = {
+        let root_rel = estate
+            .result_rel(root)
+            .ri_RelationDesc
+            .as_ref()
+            .expect("convert_routed_slot_for_error: root ri_RelationDesc is NULL");
+        (
+            root_rel.rd_id,
+            root_rel.name().to_string(),
+            root_rel.rd_att.clone_in(mcx)?,
+        )
+    };
+
+    let map = backend_access_common_next::attmap::build_attrmap_by_name_if_req(
+        mcx,
+        &old_tupdesc,
+        &root_tupdesc,
+        false,
+    )?;
+
+    let out_slot = if let Some(map) = map {
+        // slot = execute_attr_map_slot(map, slot, MakeTupleTableSlot(root_tupdesc, &TTSOpsVirtual));
+        let new_slot = backend_executor_execTuples::slot_payload_model::MakeTupleTableSlot(
+            mcx,
+            Some(mcx::alloc_in(mcx, root_tupdesc.clone_in(mcx)?)?),
+            types_nodes::TupleSlotKind::Virtual,
+        )?;
+        let out = estate.push_slot_data(new_slot)?;
+        backend_access_common_next::tupconvert::execute_attr_map_slot(estate, &map, slot, out)?
+    } else {
+        slot
+    };
+
+    Ok((root_relid, out_slot, root_relname))
+}
+
 pub fn init_seams() {
+    seams::exec_constraints::set(ExecConstraints);
+    seams::exec_partition_check::set(ExecPartitionCheck);
+    seams::exec_partition_check_emit_error::set(ExecPartitionCheckEmitError);
     seams::exec_check_permissions_select::set(exec_check_permissions_select);
     seams::exec_build_slot_value_description::set(ExecBuildSlotValueDescription);
     seams::init_result_rel_info::set(InitResultRelInfo);

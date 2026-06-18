@@ -1847,6 +1847,40 @@ pub fn exec_prepare_expr<'mcx>(
     );
 }
 
+/// `ExecPrepareCheck(qual, estate)` (execExpr.c) — compile an implicit-AND
+/// `qual` list as a CHECK constraint (a NULL conjunction result is TRUE) for
+/// use outside a normal Plan tree.
+///
+/// C does `qual = (List *) expression_planner((Expr *) qual)` then
+/// `ExecInitCheck(qual, NULL)` in `estate->es_query_cxt`. An empty `qual` (the
+/// C `NIL`) compiles to `None` (the always-true `NULL` ExprState) without
+/// touching the planner; a non-empty `qual` reaches `expression_planner`
+/// (optimizer/planner.c, unported, no reachable owner seam) and loud-panics
+/// there, mirror-PG-and-panic — the `ExecInitCheck` compile that would follow
+/// (`make_ands_explicit` + the parent-less `exec_init_check`) is this crate's
+/// own logic.
+pub fn exec_prepare_check<'mcx>(
+    qual: &[Expr],
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<PgBox<'mcx, ExprState<'mcx>>>> {
+    // MemoryContextSwitchTo(estate->es_query_cxt) is implicit: the compile in
+    // exec_init_check allocates in estate.es_query_cxt.
+    let _ = estate;
+    if qual.is_empty() {
+        // ExecInitCheck(NIL, ...) == NULL
+        return Ok(None);
+    }
+
+    // qual = (List *) expression_planner((Expr *) qual);
+    panic!(
+        "execExpr-core: ExecPrepareCheck needs expression_planner (optimizer/planner.c, \
+         unported — no reachable owner seam) for a non-empty CHECK qual; the \
+         ExecInitCheck(make_ands_explicit(qual), NULL) compile that follows it is this \
+         crate's own logic. An empty partition/CHECK qual compiles to the always-true NULL \
+         ExprState without the planner."
+    );
+}
+
 /// `ExecInitExpr(node, NULL)` (execExpr.c) — the `parent = NULL` shape used by
 /// [`exec_prepare_expr`] and `ExecInitExprWithParams`. Identical to
 /// [`exec_init_expr`] but threads no `PlanState` (the owned spine already

@@ -511,6 +511,23 @@ pub struct ResultRelInfo<'mcx> {
     /// `ExprState *ri_MergeJoinCondition` — compiled MERGE join-condition qual
     /// for this relation. `None` is the C `NULL`.
     pub ri_MergeJoinCondition: Option<PgBox<'mcx, ExprState<'mcx>>>,
+    /// `ExprState **ri_CheckConstraintExprs` — array of compiled CHECK
+    /// constraint expression states, parallel to the relation's
+    /// `rd_att->constr->check[]` (one entry per declared CHECK; a `None`
+    /// element is a not-enforced constraint left as a placeholder so the list
+    /// stays index-aligned with the check list). `None` for the whole field is
+    /// the C `NULL` (`ExecRelCheck` not yet entered for this relation).
+    pub ri_CheckConstraintExprs: Option<PgVec<'mcx, Option<PgBox<'mcx, ExprState<'mcx>>>>>,
+    /// `ExprState *ri_PartitionCheckExpr` — compiled partition-constraint
+    /// qual (built by `ExecPartitionCheck`). `None` is the C `NULL` (not yet
+    /// built).
+    pub ri_PartitionCheckExpr: Option<PgBox<'mcx, ExprState<'mcx>>>,
+    /// `ExprState **ri_GenVirtualNotNullConstraintExprs` — compiled
+    /// `IS NOT NULL` tests for virtual generated columns with not-null
+    /// constraints, parallel to the collected attnum list. `None` is the C
+    /// `NULL` (not yet built).
+    pub ri_GenVirtualNotNullConstraintExprs:
+        Option<PgVec<'mcx, Option<PgBox<'mcx, ExprState<'mcx>>>>>,
 }
 
 /// `ExecProcNodeMtd` — the per-node execution callback stored in

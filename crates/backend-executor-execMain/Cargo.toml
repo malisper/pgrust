@@ -73,3 +73,20 @@ backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams
 backend-utils-misc-more-seams = { path = "../backend-utils-misc-more-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
 backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
+
+# ExecConstraints / ExecPartitionCheck / ExecRelGenVirtualNotNull constraint
+# cluster: ExecCheck (execExpr), ExecPrepareExpr (execExpr; panics on the
+# unported expression_planner), GetPerTupleExprContext (execUtils, already a
+# dep), slot nullness (execTuples-seams slot_getallattrs_by_id),
+# RelationGetPartitionQual (partcache), expand_generated_columns_in_expr /
+# build_generation_expression (rewritehandler), build_attrmap_by_name_if_req /
+# execute_attr_map_slot (common-next tupconvert), bms_union (nodes-core). None
+# of these owners depend on execMain(-seams), so all are acyclic direct deps.
+backend-utils-error = { path = "../backend-utils-error" }
+backend-executor-execExpr = { path = "../backend-executor-execExpr" }
+backend-executor-execTuples = { path = "../backend-executor-execTuples" }
+backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
+backend-utils-cache-partcache = { path = "../backend-utils-cache-partcache" }
+backend-rewrite-rewritehandler = { path = "../backend-rewrite-rewritehandler" }
+backend-access-common-next = { path = "../backend-access-common-next" }
+backend-nodes-core = { path = "../backend-nodes-core" }
