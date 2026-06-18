@@ -324,6 +324,10 @@ fn create_toast_table<'mcx>(
         ii_BrokenHotChain: false,
         ii_ParallelWorkers: 0,
         ii_Am: BTREE_AM_OID,
+        // The owning context index_create allocates the index entry against
+        // (C: makeIndexInfo runs in CurrentMemoryContext). The owned model
+        // threads it explicitly, as the DefineIndex caller does.
+        ii_Context: Some(mcx),
         ..Default::default()
     };
 
