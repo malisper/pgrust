@@ -55,6 +55,7 @@ pub fn init_seams() {
     // but its body — the create-time reloptions transform — is F0-owned here.
     seam::transform_and_check_reloptions::set(create::transform_and_check_reloptions);
     seam::merge_attributes::set(mergeattr::merge_attributes);
+    seam::get_attribute_compression::set(create::get_attribute_compression);
 
     seam::remove_relations::set(drop::remove_relations);
 

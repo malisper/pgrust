@@ -765,6 +765,55 @@ pub(crate) fn storage_name(c: i8) -> &'static str {
     }
 }
 
+/// `GetAttributeCompression(atttypid, compression)` (tablecmds.c:22044):
+/// resolve a column's `attcompression` from its compression name and type.
+/// `None` / `"default"` selects the cluster default (`InvalidCompressionMethod`).
+pub(crate) fn get_attribute_compression(
+    atttypid: Oid,
+    compression: Option<&str>,
+) -> PgResult<i8> {
+    use backend_access_common_toast_compression::{
+        compression_name_to_method, INVALID_COMPRESSION_METHOD,
+    };
+
+    match compression {
+        None => return Ok(INVALID_COMPRESSION_METHOD as i8),
+        Some("default") => return Ok(INVALID_COMPRESSION_METHOD as i8),
+        Some(_) => {}
+    }
+    let compression = compression.unwrap();
+
+    /*
+     * To specify a nondefault method, the column data type must be toastable.
+     * (attstorage and attcompression are intentionally independent.)
+     */
+    if !type_is_toastable(atttypid)? {
+        let typ = backend_utils_adt_format_type_seams::format_type_be_str::call(atttypid)?;
+        return ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!("column data type {typ} does not support compression"))
+            .finish(here("GetAttributeCompression"))
+            .map(|()| unreachable!());
+    }
+
+    let cmethod = compression_name_to_method(compression.as_bytes())?;
+    if cmethod == INVALID_COMPRESSION_METHOD {
+        return ereport(ERROR)
+            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+            .errmsg(format!("invalid compression method \"{compression}\""))
+            .finish(here("GetAttributeCompression"))
+            .map(|()| unreachable!());
+    }
+    Ok(cmethod as i8)
+}
+
+/// `TypeIsToastable(typid)` (catalog/pg_type.h) ==
+/// `get_typstorage(typid) != TYPSTORAGE_PLAIN`.
+fn type_is_toastable(typid: Oid) -> PgResult<bool> {
+    let storage = lsyscache_seam::get_typstorage::call(typid)?;
+    Ok(storage as i8 != types_tuple::heaptuple::TYPSTORAGE_PLAIN)
+}
+
 // ---------------------------------------------------------------------------
 // Small node-construction / list helpers.
 // ---------------------------------------------------------------------------
