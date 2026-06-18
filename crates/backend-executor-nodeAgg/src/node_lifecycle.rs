@@ -1192,8 +1192,10 @@ pub fn ExecReScanAgg<'mcx>(
 
     if node.aggstrategy != AGG_HASHED {
         // Reset the per-group state (in particular, mark transvalues null).
+        // The sorted-path pergroups ALIAS the head of all_pergroups (the single
+        // source of truth the transition interpreter mutates), so reset there.
         let numaggs = node.numaggs;
-        if let Some(pergroups) = node.pergroups.as_mut() {
+        if let Some(pergroups) = node.all_pergroups.as_mut() {
             for setno in 0..num_grouping_sets as usize {
                 if let Some(set) = pergroups.get_mut(setno).and_then(|s| s.as_mut()) {
                     for i in 0..numaggs as usize {

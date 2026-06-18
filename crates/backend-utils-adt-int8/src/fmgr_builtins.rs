@@ -282,6 +282,11 @@ fn fc_int8inc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 fn fc_int8dec(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     try_i64(crate::int8dec(arg_i64(fcinfo, 0)))
 }
+fn fc_int8inc_any(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    // C: int8inc_any(fcinfo) { return int8inc(fcinfo); } — the count(any) transfn:
+    // increments arg0 (the running int8 count), ignoring the (any-typed) input.
+    try_i64(crate::int8inc_any(arg_i64(fcinfo, 0)))
+}
 fn fc_int8inc_float8_float8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     // C: int8inc_float8_float8(fcinfo) { return int8inc(fcinfo); } — ignores the
     // two trailing float8 args and increments arg0 in place.
@@ -508,6 +513,7 @@ pub fn register_int8_builtins() {
         builtin(5045, "int8gcd", 2, true, false, fc_int8gcd),
         builtin(5047, "int8lcm", 2, true, false, fc_int8lcm),
         builtin(1219, "int8inc", 1, true, false, fc_int8inc),
+        builtin(2804, "int8inc_any", 2, true, false, fc_int8inc_any),
         builtin(3546, "int8dec", 1, true, false, fc_int8dec),
         builtin(
             2805,

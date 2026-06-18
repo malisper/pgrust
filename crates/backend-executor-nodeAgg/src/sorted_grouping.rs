@@ -513,16 +513,22 @@ fn initialize_aggregates_pergroups<'mcx>(
     num_reset: i32,
     mcx: mcx::Mcx<'mcx>,
 ) -> PgResult<()> {
-    let mut pergroups = aggstate.pergroups.take();
-    let result = match pergroups.as_mut() {
+    // The C `pergroups = aggstate->pergroups` ALIASES the head of
+    // `aggstate->all_pergroups` (the first numGroupingSets entries, non-hashed
+    // path). In the owned model `pergroups` was a separate split copy; the
+    // transition interpreter (`EEOP_AGG_PLAIN_TRANS_*`) mutates
+    // `all_pergroups[setoff][transno]`, so initialize/finalize must read/write
+    // the SAME storage. Operate directly on `all_pergroups` (whose head IS the
+    // sorted-path pergroups) so the alias is faithful.
+    let mut all_pergroups = aggstate.all_pergroups.take();
+    let result = match all_pergroups.as_mut() {
         Some(pg) => crate::transition::initialize_aggregates(aggstate, pg, num_reset, mcx),
         None => {
-            // pergroups == NULL: there is nothing to initialize (the C passes
-            // the pointer straight through; a NULL one is the empty case).
+            // all_pergroups == NULL: nothing to initialize.
             Ok(())
         }
     };
-    aggstate.pergroups = pergroups;
+    aggstate.all_pergroups = all_pergroups;
     result
 }
 
@@ -533,8 +539,11 @@ fn finalize_aggregates_for_set<'mcx>(
     current_set: i32,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    let mut pergroups = aggstate.pergroups.take();
-    let result = match pergroups.as_mut() {
+    // See initialize_aggregates_pergroups: read the SAME storage the transition
+    // interpreter writes (`all_pergroups`, whose head is the sorted-path
+    // `pergroups`).
+    let mut all_pergroups = aggstate.all_pergroups.take();
+    let result = match all_pergroups.as_mut() {
         Some(pg) => match pg[current_set as usize].as_mut() {
             Some(pergroup) => {
                 crate::finalize::finalize_aggregates(aggstate, pergroup.as_mut_slice(), estate)
@@ -543,6 +552,6 @@ fn finalize_aggregates_for_set<'mcx>(
         },
         None => Ok(()),
     };
-    aggstate.pergroups = pergroups;
+    aggstate.all_pergroups = all_pergroups;
     result
 }

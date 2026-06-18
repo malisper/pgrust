@@ -131,11 +131,20 @@ pub fn initialize_aggregate<'mcx>(
         //   pertrans->transtypeByVal, pertrans->transtypeLen);
         // MemoryContextSwitchTo(oldContext);
         curaggcontext_assert_built(aggstate);
-        pergroupstate.trans_value = datum_copy_into(
-            pertrans.init_value.clone(),
-            pertrans.transtype_by_val,
-            pertrans.transtype_len,
-        )?;
+        // datumCopy(pertrans->initValue, transtypeByVal, transtypeLen) into the
+        // curaggcontext per-tuple memory. By-value is verbatim; by-reference
+        // (e.g. avg's `{0,0}` int8[] initial value) is deep-copied via the
+        // datum.c seam into the per-query context (see datum_copy_into_ecxt).
+        pergroupstate.trans_value = if pertrans.transtype_by_val {
+            pertrans.init_value.clone()
+        } else {
+            backend_utils_adt_datum_seams::datum_copy_v::call(
+                mcx,
+                &pertrans.init_value,
+                pertrans.transtype_by_val,
+                pertrans.transtype_len as i32,
+            )?
+        };
     }
     pergroupstate.trans_value_is_null = pertrans.init_value_is_null;
 
@@ -351,6 +360,206 @@ pub fn advance_aggregates<'mcx>(
         evaltrans, tmpcontext, estate,
     )?;
     Ok(())
+}
+
+// ===========================================================================
+// EEOP_AGG_PLAIN_TRANS_* runtime support (execExprInterp.c) — the per-row
+// transition-step bodies the compiled `evaltrans` interpreter drives. These
+// mutate `aggstate->all_pergroups[setoff][transno]` from inside the
+// interpreter (reached through `state->parent`), exactly as C's
+// ExecAggInitGroup / ExecAggPlainTransByVal / ExecAggPlainTransByRef do. They
+// live here (the AggState owner) and are called directly by
+// `backend-executor-execExprInterp` (which depends on this crate, as
+// `ExecEvalGroupingFunc` already does).
+// ===========================================================================
+
+/// The canonical unified `Datum` (Datum-unification keystone).
+type AggDatum<'mcx> = types_tuple::backend_access_common_heaptuple::Datum<'mcx>;
+
+/// `transval = FunctionCallInvoke(pertrans->transfn_fcinfo)` over the unified
+/// `Datum` lane — invoke the transition function with `args[0] = transValue`
+/// (the running per-group value) followed by the per-row `input_args`
+/// (`fcinfo->args[1..]`). The resolved `FmgrInfo` cannot cross the fmgr seam,
+/// so the owner re-resolves by `transfn.fn_oid` under `aggCollation`. Returns
+/// `(newVal, isnull)`.
+///
+/// The fcinfo context (`(Node *) aggstate`) the C frame carries is the K1
+/// `AggStateContextLink` channel installed at build time; the by-OID re-dispatch
+/// seam does not thread it (the deferred K2 re-sign), which only affects transfns
+/// that call `AggCheckCallContext`/`AggGetAggref` — the count/min/max/sum/avg
+/// transfns do not.
+fn invoke_transfn<'mcx>(
+    pertrans: &AggStatePerTransData<'mcx>,
+    trans_value: AggDatum<'mcx>,
+    trans_value_is_null: bool,
+    input_args: &[AggDatum<'mcx>],
+    mcx: Mcx<'mcx>,
+) -> PgResult<(AggDatum<'mcx>, bool)> {
+    // fcinfo->args[0] = transValue (a NULL one is the canonical null Datum);
+    // args[1..] = the per-row inputs the compiler evaluated into the arg cells.
+    let _ = trans_value_is_null;
+    let mut args: alloc::vec::Vec<AggDatum<'mcx>> =
+        alloc::vec::Vec::with_capacity(1 + input_args.len());
+    args.push(trans_value);
+    for a in input_args {
+        args.push(a.clone());
+    }
+    backend_utils_fmgr_fmgr_seams::function_call_invoke_datum::call(
+        mcx,
+        pertrans.transfn.fn_oid,
+        pertrans.agg_collation,
+        &args,
+    )
+}
+
+/// `ExecAggInitGroup(aggstate, pertrans, pergroup, aggcontext)`
+/// (execExprInterp.c:5616) — first-non-NULL-input initialization of a group's
+/// transition value: copy `fcinfo->args[1].value` (here `input_args[0]`) into
+/// the aggcontext (by-ref) and clear the NULL/noTrans flags.
+pub fn ExecAggInitGroup<'mcx>(
+    aggstate: &mut AggStateData<'mcx>,
+    transno: usize,
+    setoff: usize,
+    aggcontext: Option<types_nodes::execnodes::EcxtId>,
+    input_args: &[AggDatum<'mcx>],
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let (transtype_by_val, transtype_len) = {
+        let pertrans = pertrans_ref(aggstate, transno);
+        (pertrans.transtype_by_val, pertrans.transtype_len)
+    };
+    let arg1 = input_args
+        .first()
+        .cloned()
+        .expect("ExecAggInitGroup: transfn args[1] missing (numTransInputs must be >= 1)");
+    let copied = datum_copy_into_ecxt(arg1, transtype_by_val, transtype_len, aggcontext, estate)?;
+    let pergroup = pergroup_mut(aggstate, setoff, transno);
+    pergroup.trans_value = copied;
+    pergroup.trans_value_is_null = false;
+    pergroup.no_trans_value = false;
+    Ok(())
+}
+
+/// `ExecAggPlainTransByVal(aggstate, pertrans, pergroup, aggcontext, setno)`
+/// (execExprInterp.c:5836) — by-value transition: invoke the transfn with the
+/// current transValue + inputs and store the new value back. No by-ref copy.
+pub fn ExecAggPlainTransByVal<'mcx>(
+    aggstate: &mut AggStateData<'mcx>,
+    transno: usize,
+    setoff: usize,
+    setno: i32,
+    _aggcontext: Option<types_nodes::execnodes::EcxtId>,
+    input_args: &[AggDatum<'mcx>],
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    // cf. select_current_set(): aggstate->curaggcontext = aggcontext (= setno for
+    // the non-hash path); aggstate->current_set = setno; curpertrans = pertrans.
+    aggstate.curaggcontext = setno;
+    aggstate.current_set = setno;
+    aggstate.curpertrans = transno as i32;
+
+    let (trans_value, trans_value_is_null) = {
+        let pg = pergroup_ref(aggstate, setoff, transno);
+        (pg.trans_value.clone(), pg.trans_value_is_null)
+    };
+    let mcx = estate.es_query_cxt;
+    let (new_val, isnull) = {
+        let pertrans = pertrans_ref(aggstate, transno);
+        invoke_transfn(pertrans, trans_value, trans_value_is_null, input_args, mcx)?
+    };
+    let pergroup = pergroup_mut(aggstate, setoff, transno);
+    pergroup.trans_value = new_val;
+    pergroup.trans_value_is_null = isnull;
+    aggstate.curpertrans = -1;
+    Ok(())
+}
+
+/// `ExecAggPlainTransByRef(aggstate, pertrans, pergroup, aggcontext, setno)`
+/// (execExprInterp.c:5868) — by-reference transition: like the by-value form,
+/// but the returned datum must be copied into the aggcontext (and the prior
+/// transValue freed) unless the transfn returned its own input pointer.
+pub fn ExecAggPlainTransByRef<'mcx>(
+    aggstate: &mut AggStateData<'mcx>,
+    transno: usize,
+    setoff: usize,
+    setno: i32,
+    aggcontext: Option<types_nodes::execnodes::EcxtId>,
+    input_args: &[AggDatum<'mcx>],
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    aggstate.curaggcontext = setno;
+    aggstate.current_set = setno;
+    aggstate.curpertrans = transno as i32;
+
+    let (trans_value, trans_value_is_null) = {
+        let pg = pergroup_ref(aggstate, setoff, transno);
+        (pg.trans_value.clone(), pg.trans_value_is_null)
+    };
+    let mcx = estate.es_query_cxt;
+    let (transtype_by_val, transtype_len) = {
+        let pertrans = pertrans_ref(aggstate, transno);
+        (pertrans.transtype_by_val, pertrans.transtype_len)
+    };
+    let (new_val, isnull) = {
+        let pertrans = pertrans_ref(aggstate, transno);
+        invoke_transfn(
+            pertrans,
+            trans_value.clone(),
+            trans_value_is_null,
+            input_args,
+            mcx,
+        )?
+    };
+
+    // For pass-by-ref, must copy the new value into aggcontext and free the prior
+    // transValue. But if the transfn returned a pointer to its own input, do
+    // nothing. The owned `Datum` enum compares by value image.
+    let new_val = if !datum_ptr_eq(&new_val, &trans_value) {
+        ExecAggCopyTransValue(
+            aggstate,
+            transno,
+            new_val,
+            isnull,
+            trans_value,
+            trans_value_is_null,
+            transtype_by_val,
+            transtype_len,
+            aggcontext,
+            estate,
+        )?
+    } else {
+        new_val
+    };
+
+    let pergroup = pergroup_mut(aggstate, setoff, transno);
+    pergroup.trans_value = new_val;
+    pergroup.trans_value_is_null = isnull;
+    aggstate.curpertrans = -1;
+    Ok(())
+}
+
+/// `ExecAggCopyTransValue(...)` (execExprInterp.c:5668) — ensure the new
+/// transition value lives in the aggcontext (copy it there) and free the prior
+/// value. The expanded-object R/W fast paths are not modeled (the owned `Datum`
+/// carries no expanded-object handle); we copy non-NULL new values and drop the
+/// old (the owned-context GC handles the free).
+#[allow(clippy::too_many_arguments)]
+pub fn ExecAggCopyTransValue<'mcx>(
+    _aggstate: &mut AggStateData<'mcx>,
+    _transno: usize,
+    new_value: AggDatum<'mcx>,
+    new_value_is_null: bool,
+    _old_value: AggDatum<'mcx>,
+    _old_value_is_null: bool,
+    transtype_by_val: bool,
+    transtype_len: i16,
+    aggcontext: Option<types_nodes::execnodes::EcxtId>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<AggDatum<'mcx>> {
+    if new_value_is_null {
+        return Ok(AggDatum::null());
+    }
+    datum_copy_into_ecxt(new_value, transtype_by_val, transtype_len, aggcontext, estate)
 }
 
 /// `process_ordered_aggregate_single(aggstate, pertrans, pergroupstate)` — run
@@ -629,6 +838,100 @@ pub fn process_ordered_aggregate_multi<'mcx>(
 // File-scope helpers (in-crate marshaling and the small externals reached
 // through their owners' seams)
 // ---------------------------------------------------------------------------
+
+/// `&aggstate->pertrans[transno]` — the per-trans state.
+fn pertrans_ref<'a, 'mcx>(
+    aggstate: &'a AggStateData<'mcx>,
+    transno: usize,
+) -> &'a AggStatePerTransData<'mcx> {
+    &aggstate
+        .pertrans
+        .as_ref()
+        .expect("ExecAggPlainTrans: aggstate->pertrans is NULL")[transno]
+}
+
+/// `&aggstate->all_pergroups[setoff][transno]` — the per-group state (shared).
+fn pergroup_ref<'a, 'mcx>(
+    aggstate: &'a AggStateData<'mcx>,
+    setoff: usize,
+    transno: usize,
+) -> &'a AggStatePerGroupData<'mcx> {
+    let set = aggstate
+        .all_pergroups
+        .as_ref()
+        .expect("ExecAggPlainTrans: aggstate->all_pergroups is NULL")[setoff]
+        .as_ref()
+        .expect("ExecAggPlainTrans: all_pergroups[setoff] is NULL");
+    &set[transno]
+}
+
+/// `&aggstate->all_pergroups[setoff][transno]` — the per-group state (mut).
+fn pergroup_mut<'a, 'mcx>(
+    aggstate: &'a mut AggStateData<'mcx>,
+    setoff: usize,
+    transno: usize,
+) -> &'a mut AggStatePerGroupData<'mcx> {
+    let set = aggstate
+        .all_pergroups
+        .as_mut()
+        .expect("ExecAggPlainTrans: aggstate->all_pergroups is NULL")[setoff]
+        .as_mut()
+        .expect("ExecAggPlainTrans: all_pergroups[setoff] is NULL");
+    &mut set[transno]
+}
+
+/// `pergroup->{noTransValue, transValueIsNull}` for the
+/// `EEOP_AGG_PLAIN_TRANS_*` interpreter dispatch.
+pub fn agg_pergroup_flags(
+    aggstate: &AggStateData<'_>,
+    setoff: usize,
+    transno: usize,
+) -> (bool, bool) {
+    let pg = pergroup_ref(aggstate, setoff, transno);
+    (pg.no_trans_value, pg.trans_value_is_null)
+}
+
+/// `aggstate->all_pergroups[setoff] == NULL` for EEOP_AGG_PLAIN_PERGROUP_NULLCHECK.
+pub fn agg_pergroup_allaggs_is_null(aggstate: &AggStateData<'_>, setoff: usize) -> bool {
+    match aggstate.all_pergroups.as_ref() {
+        Some(v) => v.get(setoff).map(|s| s.is_none()).unwrap_or(true),
+        None => true,
+    }
+}
+
+/// `datumCopy(value, byval, len)` into the aggcontext per-tuple memory.
+/// By-value datums are returned verbatim; by-reference datums are deep-copied
+/// via the datum.c seam. C switches into `aggcontext->ecxt_per_tuple_memory`
+/// before the copy so the by-ref transValue is reset with the grouping set; in
+/// the owned model the per-grouping-set context's `Mcx` is borrowed (it lives
+/// inside the per-query context) and `datum_copy_v` must return a `Datum<'mcx>`,
+/// so the value-lifetime-correct allocation context is the per-query context.
+/// For the non-hashed single-group path (the current gate: count/min/max/sum/avg
+/// without GROUP BY) the aggcontext and the query context coincide in lifetime,
+/// so this is faithful; multi-group hashagg (which resets per group) is gated
+/// elsewhere (#324/hashagg).
+fn datum_copy_into_ecxt<'mcx>(
+    value: AggDatum<'mcx>,
+    typ_by_val: bool,
+    typ_len: i16,
+    aggcontext: Option<types_nodes::execnodes::EcxtId>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<AggDatum<'mcx>> {
+    if typ_by_val {
+        return Ok(value);
+    }
+    let _ = aggcontext;
+    let mcx = estate.es_query_cxt;
+    backend_utils_adt_datum_seams::datum_copy_v::call(mcx, &value, typ_by_val, typ_len as i32)
+}
+
+/// `DatumGetPointer(a) == DatumGetPointer(b)` — pointer identity of two by-ref
+/// datums (the C reparent fast-path test). For the owned `Datum` enum this is a
+/// by-ref byte-image identity test; conservatively returning `false` (= "copy")
+/// is always safe.
+fn datum_ptr_eq(a: &AggDatum<'_>, b: &AggDatum<'_>) -> bool {
+    a == b
+}
 
 /// `TUPLESORT_NONE` (tuplesort.h) — no extra sort options.
 const TUPLESORT_NONE: i32 = 0;

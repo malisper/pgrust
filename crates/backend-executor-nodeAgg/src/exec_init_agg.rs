@@ -1061,27 +1061,27 @@ fn assign_pergroup_regions<'mcx>(
     mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
     // The C aliases:  pergroups = all_pergroups (head of numGroupingSets, when
-    // not AGG_HASHED), hash_pergroup = all_pergroups + pergroup_offset.
-    // The owned model carries owned PgVecs for each region; move the buffer's
-    // entries into the two views (entries are Option<PgVec<..>> so they move).
+    // not AGG_HASHED), hash_pergroup = all_pergroups + pergroup_offset — the SAME
+    // per-group arrays under different pointers. The transition interpreter
+    // (`EEOP_AGG_PLAIN_TRANS_*`) mutates `all_pergroups[setoff][transno]`, and
+    // initialize/finalize on the sorted path read the SAME head entries; so
+    // `all_pergroups` is kept as the single source of truth and the sorted-path
+    // init/finalize/rescan operate on it directly (see sorted_grouping.rs).
+    // `aggstate.pergroups` is therefore left NULL (the head alias is reached
+    // through `all_pergroups`); only the hash region is copied out into
+    // `hash_pergroup` for the (separate, hashagg-gated) hash path.
+    let _ = num_grouping_sets;
     let total = all_pergroups.len();
-    // Build hash_pergroup from the tail [pergroup_offset..].
+    // Build hash_pergroup from the tail [pergroup_offset..]. For the non-hashed
+    // sorted path pergroup_offset == total, so this is empty (no tail).
     let mut hash_pergroup: PgVec<'mcx, Option<PgVec<'mcx, AggStatePerGroupData<'mcx>>>> =
-        vec_with_capacity_in(mcx, total - pergroup_offset)?;
+        vec_with_capacity_in(mcx, total.saturating_sub(pergroup_offset))?;
     for k in pergroup_offset..total {
-        hash_pergroup.push(all_pergroups[k].take());
+        // Clone the hash tail (the hash path mutates its own copy). The head
+        // stays in all_pergroups untouched.
+        hash_pergroup.push(all_pergroups[k].clone());
     }
-    // pergroups is the head [0..numGroupingSets] when not AGG_HASHED.
-    if pergroup_offset > 0 {
-        let mut pergroups: PgVec<'mcx, Option<PgVec<'mcx, AggStatePerGroupData<'mcx>>>> =
-            vec_with_capacity_in(mcx, num_grouping_sets as usize)?;
-        for k in 0..num_grouping_sets as usize {
-            pergroups.push(all_pergroups[k].take());
-        }
-        aggstate.pergroups = Some(pergroups);
-    } else {
-        aggstate.pergroups = None;
-    }
+    aggstate.pergroups = None;
     aggstate.hash_pergroup = Some(hash_pergroup);
     aggstate.all_pergroups = Some(all_pergroups);
     Ok(())

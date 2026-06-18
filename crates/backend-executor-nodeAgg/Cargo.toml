@@ -17,6 +17,7 @@ backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-sea
 backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
 backend-executor-execGrouping-seams = { path = "../backend-executor-execGrouping-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-utils-adt-datum-seams = { path = "../backend-utils-adt-datum-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }

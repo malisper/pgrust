@@ -105,6 +105,32 @@ pub(crate) fn write_cell<'mcx>(
     }
 }
 
+/// `castNode(AggState, state->parent)` — re-derive the live, owned
+/// `AggStateData` the aggregate's compiled `evaltrans` `ExprState` belongs to,
+/// for exclusive mutation by the `EEOP_AGG_PLAIN_TRANS_*` /
+/// `EEOP_AGG_PLAIN_PERGROUP_NULLCHECK` steps.
+///
+/// The `PlanStateLink` is `Copy`, so it is copied out of `state.parent` first;
+/// `get_mut` then re-derives a fresh `&mut PlanStateNode` from the raw address
+/// without borrowing `state`, and the tag-checked downcast recovers the concrete
+/// `AggStateData`. This is the owned-model rendering of C's `castNode(AggState,
+/// state->parent)` + the subsequent `aggstate->all_pergroups[...]` mutation: in
+/// C the same node is reached both through the `ExprState` being walked and
+/// through `state->parent`; the trans steps touch only per-group/per-trans
+/// state, disjoint from the `ExprState`'s step program, so the aliasing is sound
+/// (the same discipline `ExecEvalGroupingFunc` uses, here for `&mut`).
+#[inline]
+fn agg_parent_mut<'a, 'mcx>(
+    state: &ExprState<'mcx>,
+) -> &'a mut backend_executor_nodeAgg::AggStateData<'mcx> {
+    let mut link = state
+        .parent
+        .expect("EEOP_AGG_*: aggregate-owned ExprState has no parent AggState back-link");
+    link.get_mut()
+        .as_agg_state_mut_typed::<backend_executor_nodeAgg::AggStateData<'mcx>>()
+        .expect("EEOP_AGG_*: castNode(AggState, state->parent) — parent is not an AggStateData")
+}
+
 /// `ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)` —
 /// the main interpreter: walk the step program and return the result datum and
 /// its null flag.
@@ -1002,43 +1028,70 @@ pub fn ExecInterpExpr<'mcx>(
                 // C (NULLS): bool *nulls = op->d.agg_strict_input_check.nulls;
                 //   for argno in 0..nargs { if (nulls[argno]) EEO_JUMP(jumpnull); }
                 //
-                // The ARGS variants scan trans_fcinfo->args[i].isnull — in the F0
-                // model named by op->d.agg_strict_input_check.arg_cells (the
-                // per-arg ResultCellId cells the transfn-argument sub-expressions
-                // evaluate into) — and the NULLS variant scans
-                // pertrans->sortslot->tts_isnull. The arg_cells path is
-                // expressible against the arena, but the NULLS path reads a
-                // nodeAgg-owned sortslot isnull array (parked), and both rely on
-                // the nodeAgg transfn-fcinfo arg layout the compiler has not yet
-                // populated (op->d.agg_strict_input_check.args/nulls are owned
-                // copies left empty until nodeAgg threads them). Blocked until
-                // nodeAgg threads the real per-trans argument null state.
-                let _ = (op, estate);
-                panic!(
-                    "EEOP_AGG_STRICT_INPUT_CHECK_*: scans op->d.agg_strict_input_check.\
-                     args[i].isnull (the nodeAgg trans_fcinfo arg cells) or .nulls (the \
-                     nodeAgg pertrans->sortslot->tts_isnull array), neither populated by \
-                     the compiler yet; blocked until nodeAgg threads the real per-trans \
-                     argument null state into the step payload"
-                );
+                // The ARGS variants scan the per-arg cells the transfn-argument
+                // sub-expressions evaluated into (`arg_cells`, the owned-model
+                // `trans_fcinfo->args + 1`). The single-column-sort NULLS variant
+                // reads `&state->resnull` (STATE_RESULT_CELL), into which that
+                // path evaluated its single input.
+                let (arg_cells, uses_nulls, jumpnull) = {
+                    let steps = state.steps.as_ref().unwrap();
+                    match &steps[op].d {
+                        ExprEvalStepData::AggStrictInputCheck {
+                            arg_cells,
+                            jumpnull,
+                            ..
+                        } => {
+                            let uses_nulls = opcode == EEOP_AGG_STRICT_INPUT_CHECK_NULLS;
+                            let cells: Vec<ResultCellId> = arg_cells
+                                .as_ref()
+                                .map(|v| v.iter().copied().collect())
+                                .unwrap_or_default();
+                            (cells, uses_nulls, *jumpnull)
+                        }
+                        other => unreachable!(
+                            "EEOP_AGG_STRICT_INPUT_CHECK_*: payload is not AggStrictInputCheck: {other:?}"
+                        ),
+                    }
+                };
+                let any_null = if uses_nulls {
+                    // strictnulls = &state->resnull (the single-column sort path).
+                    read_cell(state, types_nodes::execexpr::STATE_RESULT_CELL).1
+                } else {
+                    arg_cells.iter().any(|&c| read_cell(state, c).1)
+                };
+                if any_null {
+                    op = jumpnull as usize; // EEO_JUMP(jumpnull)
+                } else {
+                    op += 1; // EEO_NEXT()
+                }
             }
 
             EEOP_AGG_PLAIN_PERGROUP_NULLCHECK => {
                 // C: AggState *aggstate = castNode(AggState, state->parent);
                 //    AggStatePerGroup pergroup_allaggs =
                 //        aggstate->all_pergroups[op->d.agg_plain_pergroup_nullcheck.setoff];
-                //    if (pergroup_allaggs == NULL)
-                //        EEO_JUMP(op->d.agg_plain_pergroup_nullcheck.jumpnull);
-                //
-                // Needs the nodeAgg-owned AggState (state->parent) and its
-                // all_pergroups indexing; blocked until nodeAgg threads it.
-                let _ = (op, estate);
-                panic!(
-                    "EEOP_AGG_PLAIN_PERGROUP_NULLCHECK: tests \
-                     aggstate->all_pergroups[op->d.agg_plain_pergroup_nullcheck.setoff] == \
-                     NULL on the nodeAgg-owned AggState (state->parent); blocked until \
-                     nodeAgg threads the AggState all_pergroups into the executor model"
-                );
+                //    if (pergroup_allaggs == NULL) EEO_JUMP(jumpnull);
+                let (setoff, jumpnull) = {
+                    let steps = state.steps.as_ref().unwrap();
+                    match &steps[op].d {
+                        ExprEvalStepData::AggPlainPergroupNullcheck { setoff, jumpnull } => {
+                            (*setoff as usize, *jumpnull)
+                        }
+                        other => unreachable!(
+                            "EEOP_AGG_PLAIN_PERGROUP_NULLCHECK: payload mismatch: {other:?}"
+                        ),
+                    }
+                };
+                let aggstate = agg_parent_mut(state);
+                let is_null =
+                    backend_executor_nodeAgg::transition::agg_pergroup_allaggs_is_null(
+                        aggstate, setoff,
+                    );
+                if is_null {
+                    op = jumpnull as usize; // EEO_JUMP(jumpnull)
+                } else {
+                    op += 1; // EEO_NEXT()
+                }
             }
 
             EEOP_AGG_PLAIN_TRANS_INIT_STRICT_BYVAL
@@ -1049,24 +1102,100 @@ pub fn ExecInterpExpr<'mcx>(
             | EEOP_AGG_PLAIN_TRANS_BYREF => {
                 // C: aggstate = castNode(AggState, state->parent);
                 //    pertrans = op->d.agg_trans.pertrans;
-                //    pergroup = &aggstate->all_pergroups[op->d.agg_trans.setoff]
-                //                                       [op->d.agg_trans.transno];
-                //    ... ExecAggInitGroup / ExecAggPlainTransBy{Val,Ref}(...);
-                //
-                // op->d.agg_trans.pertrans and .aggcontext are opaque usize
-                // placeholders (nodeAgg has not threaded AggStatePerTrans / the
-                // aggcontext EcxtId / the all_pergroups[setoff][transno] indexing
-                // into the F0 step model), and pergroup comes from the
-                // nodeAgg-owned AggState (state->parent). Blocked until nodeAgg
-                // threads the real per-trans/per-group state.
-                let _ = (op, estate);
-                panic!(
-                    "EEOP_AGG_PLAIN_TRANS_*: drives ExecAggInitGroup / \
-                     ExecAggPlainTransBy{{Val,Ref}} over aggstate->all_pergroups\
-                     [setoff][transno] with op->d.agg_trans.pertrans/.aggcontext, all \
-                     nodeAgg-owned and parked as opaque usize in the F0 step model; \
-                     blocked until nodeAgg threads the real per-trans/per-group state"
+                //    pergroup = &aggstate->all_pergroups[setoff][transno];
+                //    INIT_STRICT: if (noTransValue) ExecAggInitGroup(...)
+                //                 else if (!transValueIsNull) ExecAggPlainTransBy*(...)
+                //    STRICT:      if (!transValueIsNull) ExecAggPlainTransBy*(...)
+                //    plain:       ExecAggPlainTransBy*(...)
+                let (transno, setoff, setno, aggcontext, arg_cell_ids) = {
+                    let steps = state.steps.as_ref().unwrap();
+                    match &steps[op].d {
+                        ExprEvalStepData::AggTrans {
+                            pertrans,
+                            aggcontext,
+                            setno,
+                            transno,
+                            setoff,
+                            arg_cells,
+                        } => {
+                            let _ = transno;
+                            let cells: Vec<ResultCellId> = arg_cells.iter().copied().collect();
+                            (*pertrans, *setoff as usize, *setno, *aggcontext, cells)
+                        }
+                        other => unreachable!(
+                            "EEOP_AGG_PLAIN_TRANS_*: payload is not AggTrans: {other:?}"
+                        ),
+                    }
+                };
+                // `pertrans` (carried as the AggTrans `pertrans` field) is the
+                // index into `aggstate->pertrans`.
+                let transno_idx = transno;
+
+                // Gather the transfn's per-row input args (fcinfo->args[1..]) from
+                // the cells the input sub-expressions evaluated into. Read these
+                // BEFORE re-deriving the &mut AggState (the cells live on `state`,
+                // the trans state on the parent AggState — disjoint, as in C).
+                let mut input_args: Vec<Datum<'mcx>> = Vec::with_capacity(arg_cell_ids.len());
+                for &c in &arg_cell_ids {
+                    input_args.push(read_cell(state, c).0);
+                }
+
+                let byref = matches!(
+                    opcode,
+                    EEOP_AGG_PLAIN_TRANS_INIT_STRICT_BYREF
+                        | EEOP_AGG_PLAIN_TRANS_STRICT_BYREF
+                        | EEOP_AGG_PLAIN_TRANS_BYREF
                 );
+                let is_init = matches!(
+                    opcode,
+                    EEOP_AGG_PLAIN_TRANS_INIT_STRICT_BYVAL
+                        | EEOP_AGG_PLAIN_TRANS_INIT_STRICT_BYREF
+                );
+                let is_strict = matches!(
+                    opcode,
+                    EEOP_AGG_PLAIN_TRANS_STRICT_BYVAL | EEOP_AGG_PLAIN_TRANS_STRICT_BYREF
+                );
+
+                let aggstate = agg_parent_mut(state);
+                let (no_trans_value, trans_value_is_null) =
+                    backend_executor_nodeAgg::transition::agg_pergroup_flags(
+                        aggstate, setoff, transno_idx,
+                    );
+
+                if is_init && no_trans_value {
+                    backend_executor_nodeAgg::transition::ExecAggInitGroup(
+                        aggstate,
+                        transno_idx,
+                        setoff,
+                        aggcontext,
+                        &input_args,
+                        estate,
+                    )?;
+                } else if (is_init || is_strict) && trans_value_is_null {
+                    // strict: skip the transfn while the running value is NULL.
+                } else if byref {
+                    backend_executor_nodeAgg::transition::ExecAggPlainTransByRef(
+                        aggstate,
+                        transno_idx,
+                        setoff,
+                        setno,
+                        aggcontext,
+                        &input_args,
+                        estate,
+                    )?;
+                } else {
+                    backend_executor_nodeAgg::transition::ExecAggPlainTransByVal(
+                        aggstate,
+                        transno_idx,
+                        setoff,
+                        setno,
+                        aggcontext,
+                        &input_args,
+                        estate,
+                    )?;
+                }
+
+                op += 1; // EEO_NEXT()
             }
 
             EEOP_AGG_PRESORTED_DISTINCT_SINGLE | EEOP_AGG_PRESORTED_DISTINCT_MULTI => {

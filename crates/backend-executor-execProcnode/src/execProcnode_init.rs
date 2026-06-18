@@ -396,6 +396,16 @@ pub fn exec_init_node<'mcx>(
     // is stamped now, mirroring C's `(PlanState *) state` identity.
     result.stamp_expr_parents();
 
+    // Agg nodes additionally own the compiled `evaltrans` ExprState on every
+    // phase (and its cached recompiled variants). C sets `state->parent =
+    // &aggstate->ss.ps` inside `ExecBuildAggTrans`; in the owned tree the
+    // enclosing `PlanStateNode::Agg` only becomes address-stable here, so the
+    // back-link onto each phase's `evaltrans` is stamped now (the
+    // `EEOP_AGG_PLAIN_TRANS_*` / `EEOP_AGG_PLAIN_PERGROUP_NULLCHECK` interpreter
+    // steps recover the AggState through it, exactly as `EEOP_GROUPING_FUNC`
+    // recovers it from the qual/proj `parent`).
+    stamp_agg_evaltrans_parents(&mut result);
+
     // ExecSetExecProcNode(result, result->ExecProcNode);
     //
     // The owning `ExecInit*` routine has already stored the node's real
@@ -473,6 +483,38 @@ pub fn exec_init_node<'mcx>(
 /// `elog(ERROR, "unrecognized node type: %d", (int) nodeTag(node))` — the C
 /// `ExecInitNode` `default:` arm. Carries `ERRCODE_INTERNAL_ERROR`, as every
 /// bare `elog(ERROR)` does.
+/// Stamp the `ExprState.parent` back-link onto every `evaltrans` ExprState an
+/// Agg node owns (each phase's `evaltrans` + the cached recompiled variants),
+/// pointing at the enclosing, now-address-stable `PlanStateNode::Agg`. The
+/// owned-model rendering of C's `state->parent = &aggstate->ss.ps` in
+/// `ExecBuildAggTrans` — done here because the enum wrapper's address only
+/// becomes stable after `ExecInitAgg` returns and the node is boxed. No-op for
+/// non-Agg nodes.
+fn stamp_agg_evaltrans_parents<'mcx>(result: &mut PlanStateNode<'mcx>) {
+    // Compute the back-link to the boxed node first (Copy; releases the &self
+    // borrow) before taking the &mut downcast, mirroring stamp_expr_parents.
+    let link = types_nodes::planstate::PlanStateLink::from_ref(&*result);
+    let Some(agg) =
+        result.as_agg_state_mut_typed::<backend_executor_nodeAgg::AggStateData<'mcx>>()
+    else {
+        return;
+    };
+    if let Some(phases) = agg.phases.as_mut() {
+        for phase in phases.iter_mut() {
+            if let Some(evaltrans) = phase.evaltrans.as_mut() {
+                evaltrans.parent = Some(link);
+            }
+            for row in phase.evaltrans_cache.iter_mut() {
+                for cached in row.iter_mut() {
+                    if let Some(es) = cached.as_mut() {
+                        es.parent = Some(link);
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn unrecognized_node_type(node: &Node<'_>) -> PgError {
     PgError::error(format!("unrecognized node type: {}", node.tag()))
 }
