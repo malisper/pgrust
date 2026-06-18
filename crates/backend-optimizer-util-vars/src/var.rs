@@ -850,6 +850,22 @@ fn seam_num_relids(node: &Expr) -> PgResult<i32> {
     Ok(n)
 }
 
+/// `NumRelids(root, clause)` (clauses.c:2131) — the root-aware seam. The number
+/// of distinct base relations referenced in `clause`:
+/// `bms_num_members(bms_difference(pull_varnos(root, clause),
+/// root->outer_join_rels))`. Unlike `seam_num_relids` (the rootless ride), this
+/// threads `root` so `outer_join_rels` is subtracted exactly as C does.
+fn seam_num_relids_root(root: &mut PlannerInfo, clause: &Expr) -> PgResult<i32> {
+    let wrapped = Node::Expr(clause.clone());
+    let varnos = pull_varnos(Some(root), &wrapped);
+    let varnos = bms_difference(&varnos, &root.outer_join_rels);
+    let n = match varnos {
+        None => 0,
+        Some(bms) => bms.words.iter().map(|w| w.count_ones() as i32).sum(),
+    };
+    Ok(n)
+}
+
 /// Install the var.c-owned seams consumed by the join-path enumerator, by
 /// clauses.c (`contain_var_clause`/`pull_varnos`/`num_relids`), and by
 /// `nodeModifyTable` (`pull_varattnos`).
@@ -879,6 +895,13 @@ pub fn init_seams() {
     // Same `root`-threading shape as the equivclass-ext seam; var.c is the owner.
     use backend_optimizer_util_joininfo_ext_seams as joinext;
     joinext::pull_varnos_expr::set(seam_eqext_pull_varnos);
+
+    // clauses.c's root-aware `NumRelids(root, clause)` (path-small.c's
+    // mark_index_clause_usable / clauselist_selectivity ride this). The rootless
+    // `vs::num_relids` above cannot subtract `root->outer_join_rels`; this one
+    // does, matching C exactly.
+    use backend_optimizer_path_small_seams as ps;
+    ps::num_relids::set(seam_num_relids_root);
 }
 
 /// `pull_var_clause((Node *) node, flags)` (var.c) — the equivclass-ext seam

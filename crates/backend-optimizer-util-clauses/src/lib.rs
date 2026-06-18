@@ -109,4 +109,24 @@ pub fn init_seams() {
         grounded::contain_volatile_functions(Some(clause))
             .expect("contain_volatile_functions")
     });
+
+    // clauses.c's clause-classification predicates declared in path-small-seams
+    // (path-small.c's clauselist_selectivity / restriction analysis ride them).
+    // The grounded impls take `Option<&Expr>` (the C `Node *clause`, possibly
+    // NULL); the always-present seam `&Expr` maps to `Some(clause)`.
+    backend_optimizer_path_small_seams::is_pseudo_constant_clause::set(|clause| {
+        grounded::is_pseudo_constant_clause(Some(clause))
+    });
+    backend_optimizer_path_small_seams::is_pseudo_constant_clause_relids::set(|clause, relids| {
+        // C: `if (bms_is_empty(relids) && !contain_volatile_functions(clause))
+        // return true;`. The seam threads `relids` as the planner-side
+        // `types_pathnodes::Relids` (= Option<Box<Bitmapset>>, empty ⇔ None or
+        // all-zero words), distinct from the grounded impl's `types_nodes`
+        // Bitmapset; the only predicate over it is emptiness, computed inline.
+        let relids_empty = match relids {
+            None => true,
+            Some(bms) => bms.words.iter().all(|w| *w == 0),
+        };
+        Ok(relids_empty && !grounded::contain_volatile_functions(Some(clause))?)
+    });
 }
