@@ -39,6 +39,12 @@ use crate::core::{make_string, CreateStmtContext, NodePtr};
 use crate::errpos::parser_errposition;
 use crate::fk_check_attrs::transformConstraintAttrs;
 
+use alloc::string::ToString;
+
+use backend_parser_parse_type::{typenameType, typeTypeCollation, typeTypeId, LookupCollation};
+use types_core::OidIsValid;
+use types_error::ERRCODE_DATATYPE_MISMATCH;
+
 /// `transformColumnDefinition` — transform one column definition.
 pub fn transformColumnDefinition<'mcx>(
     cxt: &mut CreateStmtContext<'mcx>,
@@ -729,4 +735,141 @@ fn default_constraint<'mcx>(mcx: Mcx<'mcx>) -> Constraint<'mcx> {
         old_pktable_oid: 0,
         location: -1,
     }
+}
+
+/// Project one value `Node` (`types_nodes`, the post-analyze universe carried
+/// across the `transformColumnType` seam) to the raw-parser `types_parsenodes`
+/// `Node` that `typenameType` / `LookupCollation` consume. Only the value-node
+/// leaves that appear in a `TypeName`'s `names` / `typmods` / `arrayBounds`
+/// lists or a `CollateClause`'s `collname` list (`String` for qualified names,
+/// the `Integer` / `Float` / `BitString` literals a typmod expression can hold)
+/// are representable here; any other tag is a structural impossibility for these
+/// lists and raises a loud internal error rather than mis-projecting.
+fn value_node_to_parsenode(n: &Node<'_>) -> PgResult<types_parsenodes::Node> {
+    use types_parsenodes::Node as PNode;
+    Ok(match n {
+        Node::String(s) => PNode::String(types_parsenodes::StringNode {
+            sval: Some(s.sval.as_str().to_string()),
+        }),
+        Node::Integer(i) => PNode::Integer(types_parsenodes::Integer { ival: i.ival }),
+        Node::Float(f) => PNode::Float(types_parsenodes::Float {
+            fval: Some(f.fval.as_str().to_string()),
+        }),
+        Node::BitString(b) => PNode::BitString(types_parsenodes::BitString {
+            bsval: Some(b.bsval.as_str().to_string()),
+        }),
+        other => {
+            return Err(ereport(ERROR)
+                .errmsg_internal(alloc::format!(
+                    "transformColumnType: unexpected node {} in TypeName/CollateClause list",
+                    other.node_tag()
+                ))
+                .into_error());
+        }
+    })
+}
+
+/// Project a `types_nodes::TypeName` (carried across the seam) to the raw-parser
+/// `types_parsenodes::TypeName` that `typenameType` consumes. Field-for-field
+/// identical except the list element / arena representation (`PgVec<NodePtr>` vs
+/// `Vec<Node>`), so this is C's identity — the same `TypeName` viewed through
+/// the trimmed raw-parser universe.
+fn type_name_to_parsenode(tn: &TypeName<'_>) -> PgResult<types_parsenodes::TypeName> {
+    let mut names = alloc::vec::Vec::with_capacity(tn.names.len());
+    for elem in tn.names.iter() {
+        names.push(value_node_to_parsenode(elem)?);
+    }
+    let mut typmods = alloc::vec::Vec::with_capacity(tn.typmods.len());
+    for elem in tn.typmods.iter() {
+        typmods.push(value_node_to_parsenode(elem)?);
+    }
+    let mut array_bounds = alloc::vec::Vec::with_capacity(tn.arrayBounds.len());
+    for elem in tn.arrayBounds.iter() {
+        array_bounds.push(value_node_to_parsenode(elem)?);
+    }
+    Ok(types_parsenodes::TypeName {
+        names,
+        typeOid: tn.typeOid,
+        setof: tn.setof,
+        pct_type: tn.pct_type,
+        typmods,
+        typemod: tn.typemod,
+        arrayBounds: array_bounds,
+        location: tn.location,
+    })
+}
+
+/// `transformColumnType(cxt, column)` (parse_utilcmd.c:3608): verify a column's
+/// declared type, including any `COLLATE` clause. This is parse_utilcmd.c's own
+/// function; its sole cross-unit dependencies are `typenameType` /
+/// `LookupCollation` (parse_type.c, a direct dependency of this crate). The seam
+/// crosses the post-analyze `types_nodes` universe (the `cxt` columns carry
+/// `types_nodes::ColumnDef`) while parse_type consumes raw-parser
+/// `types_parsenodes::TypeName`, so the body projects across — C's identity
+/// `castNode` viewed through the trimmed raw-parser universe.
+///
+/// Returns the resolved type OID (`((Form_pg_type) GETSTRUCT(ctype))->oid`),
+/// which the IDENTITY path reads.
+fn transform_column_type<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &types_nodes::parsestmt::ParseState<'mcx>,
+    column: &Node<'mcx>,
+) -> PgResult<Oid> {
+    let column = match column {
+        Node::ColumnDef(c) => c,
+        other => {
+            return Err(ereport(ERROR)
+                .errmsg_internal(alloc::format!(
+                    "transformColumnType: not a ColumnDef node: {}",
+                    other.node_tag()
+                ))
+                .into_error());
+        }
+    };
+
+    /*
+     * All we really need to do here is verify that the type is valid,
+     * including any collation spec that might be present.
+     *
+     *   Type ctype = typenameType(cxt->pstate, column->typeName, NULL);
+     */
+    let type_name = column.typeName.as_deref().ok_or_else(|| {
+        ereport(ERROR)
+            .errmsg_internal("transformColumnType: ColumnDef has no typeName")
+            .into_error()
+    })?;
+    let projected = type_name_to_parsenode(type_name)?;
+    let (ctype, _typmod) = typenameType(mcx, Some(pstate), &projected)?;
+
+    if let Some(coll_clause) = column.collClause.as_deref() {
+        /* Form_pg_type typtup = (Form_pg_type) GETSTRUCT(ctype); */
+        let typcollation = typeTypeCollation(ctype);
+
+        let mut collname = alloc::vec::Vec::with_capacity(coll_clause.collname.len());
+        for elem in coll_clause.collname.iter() {
+            collname.push(value_node_to_parsenode(elem)?);
+        }
+        LookupCollation(mcx, Some(pstate), &collname, coll_clause.location)?;
+
+        /* Complain if COLLATE is applied to an uncollatable type */
+        if !OidIsValid(typcollation) {
+            let type_oid = typeTypeId(Some(ctype))?;
+            let type_str = backend_utils_adt_format_type::format_type_be_str(type_oid)?;
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_DATATYPE_MISMATCH)
+                .errmsg(alloc::format!("collations are not supported by type {type_str}"))
+                .errposition(parser_errposition(pstate, coll_clause.location))
+                .into_error());
+        }
+    }
+
+    /* ReleaseSysCache(ctype) — RAII; return the resolved type OID. */
+    typeTypeId(Some(ctype))
+}
+
+/// Install the `transformColumnType` outward seam (this crate owns the body —
+/// it is parse_utilcmd.c's own function; the seam exists only to bridge the
+/// post-analyze node universe at the call site).
+pub fn init_column_seams() {
+    sx::transformColumnType::set(transform_column_type);
 }
