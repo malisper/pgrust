@@ -308,21 +308,100 @@ pub fn pull_up_subqueries<'mcx>(
     root: &mut PlannerInfo,
     parse: &mut Query<'mcx>,
 ) -> PgResult<()> {
-    // Top level of jointree must always be a FromExpr. Take it out, wrap as a
-    // Node, recurse, store the (still-FromExpr) result back.
-    let jt = parse
-        .jointree
-        .take()
-        .expect("pull_up_subqueries: top jointree must be a FromExpr");
-    let jt_node = Node::FromExpr(PgBox::into_inner(jt));
-    let new_top = pull_up_subqueries_recurse(mcx, root, parse, jt_node, None, None)?;
-    // We should still have a FromExpr.
-    let f = match new_top {
-        Node::FromExpr(f) => f,
-        _ => panic!("pull_up_subqueries: top jointree node is no longer a FromExpr"),
-    };
-    parse.jointree = Some(alloc_in(mcx, f)?);
+    // Top level of jointree must always be a FromExpr.
+    debug_assert!(parse.jointree.is_some());
+    // C: `root->parse->jointree = pull_up_subqueries_recurse(root, root->parse->jointree, ...)`.
+    // The C `jtnode` arg aliases `root->parse->jointree`; the slot stays
+    // populated for the whole recursion (the assignment only writes back the
+    // *same* pointer after the call returns). We mirror that exactly: the
+    // recursion mutates the jointree in place through `parse.jointree`, never
+    // detaching it, so `perform_pullup_replace_vars` (deep in the recursion)
+    // can always walk the live `parse->jointree`.
+    pull_up_subqueries_recurse(mcx, root, parse, &JtPath::Top, None, None)?;
+    // We should still have a FromExpr at the top.
+    debug_assert!(parse.jointree.is_some());
     Ok(())
+}
+
+/// A location of a jointree `Node` within `parse.jointree`. The C passes a
+/// `Node *` that aliases the live tree; we cannot hold a `&mut Node` borrowed
+/// out of `parse` across calls that also need `&mut parse`, so the recursion
+/// addresses the node it is processing by a path from the top FromExpr and
+/// re-derives a transient `&mut` only when it needs to read or overwrite the
+/// slot — leaving the rest of the tree intact in `parse.jointree` throughout.
+enum JtPath<'p, 'mcx> {
+    /// The top `parse.jointree` FromExpr node itself.
+    Top,
+    /// `fromlist[index]` of the FromExpr at `parent`.
+    From { parent: &'p JtPath<'p, 'mcx>, index: usize },
+    /// `larg` of the JoinExpr at `parent`.
+    Larg { parent: &'p JtPath<'p, 'mcx> },
+    /// `rarg` of the JoinExpr at `parent`.
+    Rarg { parent: &'p JtPath<'p, 'mcx> },
+    /// A standalone jointree node that is *not* part of `parse.jointree`
+    /// (`pull_up_union_leaf_queries` builds a fresh `RangeTblRef` and recurses
+    /// on it with a containing appendrel, so `perform_pullup_replace_vars` takes
+    /// the translated-vars early return and never walks `parse.jointree`).
+    Detached(&'p core::cell::RefCell<Node<'mcx>>),
+}
+
+/// Resolve a `&mut Node` for `path` within `parse.jointree`. The borrow lives
+/// only as long as the returned reference; callers must drop it before touching
+/// `parse` otherwise.
+fn jt_node_at<'a, 'mcx>(parse: &'a mut Query<'mcx>, path: &JtPath<'_, 'mcx>) -> &'a mut Node<'mcx> {
+    match path {
+        JtPath::Detached(_) => {
+            unreachable!("jt_node_at(Detached): a detached node is handled inline by the recursion")
+        }
+        JtPath::Top => {
+            // The top jointree node is the FromExpr held in `parse.jointree`,
+            // but our `Node` enum needs a `Node::FromExpr` view. The recursion
+            // never overwrites the Top slot with a non-FromExpr (the top stays
+            // a FromExpr), and it only descends into its fromlist, so callers of
+            // `jt_node_at(Top)` are confined to the FromExpr arm helpers below.
+            unreachable!("jt_node_at(Top): the top FromExpr is addressed via its fromlist")
+        }
+        JtPath::From { parent, index } => {
+            let f = jt_fromexpr_at(parse, parent);
+            &mut *f.fromlist[*index]
+        }
+        JtPath::Larg { parent } => {
+            let j = jt_joinexpr_at(parse, parent);
+            j.larg.as_deref_mut().expect("JoinExpr with NULL larg")
+        }
+        JtPath::Rarg { parent } => {
+            let j = jt_joinexpr_at(parse, parent);
+            j.rarg.as_deref_mut().expect("JoinExpr with NULL rarg")
+        }
+    }
+}
+
+/// Resolve a `&mut FromExpr` for the FromExpr node at `path`.
+fn jt_fromexpr_at<'a, 'mcx>(
+    parse: &'a mut Query<'mcx>,
+    path: &JtPath<'_, 'mcx>,
+) -> &'a mut FromExpr<'mcx> {
+    match path {
+        JtPath::Top => parse
+            .jointree
+            .as_deref_mut()
+            .expect("pull_up_subqueries: top jointree must be a FromExpr"),
+        _ => match jt_node_at(parse, path) {
+            Node::FromExpr(f) => f,
+            _ => unreachable!("jt_fromexpr_at: node is not a FromExpr"),
+        },
+    }
+}
+
+/// Resolve a `&mut JoinExpr` for the JoinExpr node at `path`.
+fn jt_joinexpr_at<'a, 'mcx>(
+    parse: &'a mut Query<'mcx>,
+    path: &JtPath<'_, 'mcx>,
+) -> &'a mut types_nodes::rawnodes::JoinExpr<'mcx> {
+    match jt_node_at(parse, path) {
+        Node::JoinExpr(j) => j,
+        _ => unreachable!("jt_joinexpr_at: node is not a JoinExpr"),
+    }
 }
 
 // ===========================================================================
@@ -344,22 +423,49 @@ fn pull_up_subqueries_recurse<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     parse: &mut Query<'mcx>,
-    jtnode: Node<'mcx>,
+    path: &JtPath<'_, 'mcx>,
     lowest_outer_join: Option<&LowestOuterJoin<'mcx>>,
     containing_appendrel: Option<usize>,
-) -> PgResult<Node<'mcx>> {
+) -> PgResult<()> {
     // Since this function recurses, it could be driven to stack overflow.
     backend_tcop_postgres_seams::check_stack_depth::call()?;
     // Also, since it's a bit expensive, let's check for query cancel.
     backend_tcop_postgres_seams::check_for_interrupts::call()?;
 
-    match jtnode {
-        Node::RangeTblRef(r) => {
-            let varno = r.rtindex;
+    // Classify the node at `path` without holding the borrow across the
+    // sub-processing (which needs `&mut parse`). The top is always a FromExpr.
+    enum Kind {
+        RangeTblRef(i32),
+        FromExpr(usize),
+        Join,
+        Other,
+    }
+    let kind = match path {
+        JtPath::Top => Kind::FromExpr(jt_fromexpr_at(parse, path).fromlist.len()),
+        JtPath::Detached(cell) => match &*cell.borrow() {
+            Node::RangeTblRef(r) => Kind::RangeTblRef(r.rtindex),
+            Node::FromExpr(f) => Kind::FromExpr(f.fromlist.len()),
+            Node::JoinExpr(_) => Kind::Join,
+            _ => Kind::Other,
+        },
+        _ => match jt_node_at(parse, path) {
+            Node::RangeTblRef(r) => Kind::RangeTblRef(r.rtindex),
+            Node::FromExpr(f) => Kind::FromExpr(f.fromlist.len()),
+            Node::JoinExpr(_) => Kind::Join,
+            _ => Kind::Other,
+        },
+    };
+
+    match kind {
+        Kind::RangeTblRef(varno) => {
             let rtekind = parse.rtable[(varno - 1) as usize].rtekind;
 
             // Is this a subquery RTE simple enough to pull up? (Append-rel
-            // members need is_safe_append_member too.)
+            // members need is_safe_append_member too.) The live `RangeTblRef`
+            // stays in `parse.jointree` throughout the pull-up; the leaf
+            // helpers only use the by-value `jtnode` as the give-up return
+            // value, so a fresh `RangeTblRef` (rtindex) reconstruction is
+            // equivalent to C's aliased pointer.
             if rtekind == RTEKind::RTE_SUBQUERY {
                 let simple = {
                     let rte = &parse.rtable[(varno - 1) as usize];
@@ -369,15 +475,17 @@ fn pull_up_subqueries_recurse<'mcx>(
                             || is_safe_append_member(sub))
                 };
                 if simple {
-                    return pull_up_simple_subquery(
+                    let new = pull_up_simple_subquery(
                         mcx,
                         root,
                         parse,
-                        Node::RangeTblRef(r),
+                        Node::RangeTblRef(types_nodes::rawnodes::RangeTblRef { rtindex: varno }),
                         varno,
                         lowest_outer_join,
                         containing_appendrel,
-                    );
+                    )?;
+                    jt_store(parse, path, new);
+                    return Ok(());
                 }
 
                 // Alternatively, a simple UNION ALL subquery? Flatten into an
@@ -388,7 +496,15 @@ fn pull_up_subqueries_recurse<'mcx>(
                     is_simple_union_all(sub)?
                 };
                 if is_union_all {
-                    return pull_up_simple_union_all(mcx, root, parse, Node::RangeTblRef(r), varno);
+                    let new = pull_up_simple_union_all(
+                        mcx,
+                        root,
+                        parse,
+                        Node::RangeTblRef(types_nodes::rawnodes::RangeTblRef { rtindex: varno }),
+                        varno,
+                    )?;
+                    jt_store(parse, path, new);
+                    return Ok(());
                 }
             } else if rtekind == RTEKind::RTE_VALUES {
                 // A simple VALUES RTE? Not allowed below an outer join nor into
@@ -397,39 +513,46 @@ fn pull_up_subqueries_recurse<'mcx>(
                     && containing_appendrel.is_none()
                     && is_simple_values(root, parse, &parse.rtable[(varno - 1) as usize])
                 {
-                    return pull_up_simple_values(mcx, root, parse, Node::RangeTblRef(r), varno);
+                    let new = pull_up_simple_values(
+                        mcx,
+                        root,
+                        parse,
+                        Node::RangeTblRef(types_nodes::rawnodes::RangeTblRef { rtindex: varno }),
+                        varno,
+                    )?;
+                    jt_store(parse, path, new);
+                    return Ok(());
                 }
             } else if rtekind == RTEKind::RTE_FUNCTION {
                 // A FUNCTION RTE we could inline?
-                return pull_up_constant_function(
+                let new = pull_up_constant_function(
                     mcx,
                     root,
                     parse,
-                    Node::RangeTblRef(r),
+                    Node::RangeTblRef(types_nodes::rawnodes::RangeTblRef { rtindex: varno }),
                     varno,
                     containing_appendrel,
-                );
+                )?;
+                jt_store(parse, path, new);
+                return Ok(());
             }
 
             // Otherwise, do nothing at this node.
-            Ok(Node::RangeTblRef(r))
+            Ok(())
         }
-        Node::FromExpr(mut f) => {
+        Kind::FromExpr(n) => {
             debug_assert!(containing_appendrel.is_none());
-            // Recursively transform all the child nodes.
-            let n = f.fromlist.len();
+            // Recursively transform all the child nodes, in place.
             for i in 0..n {
-                let child = core::mem::replace(&mut *f.fromlist[i], dummy_node());
-                let newchild =
-                    pull_up_subqueries_recurse(mcx, root, parse, child, lowest_outer_join, None)?;
-                *f.fromlist[i] = newchild;
+                let child = JtPath::From { parent: path, index: i };
+                pull_up_subqueries_recurse(mcx, root, parse, &child, lowest_outer_join, None)?;
             }
-            Ok(Node::FromExpr(f))
+            Ok(())
         }
-        Node::JoinExpr(mut j) => {
+        Kind::Join => {
             debug_assert!(containing_appendrel.is_none());
             // Recurse, being careful to tell myself when inside an outer join.
-            let jointype = j.jointype;
+            let jointype = jt_joinexpr_at(parse, path).jointype;
             // For the INNER case, pass down the *existing* lowest_outer_join; for
             // the outer cases pass down a snapshot of this JoinExpr.
             let inner_arg: Option<LowestOuterJoin<'mcx>> = match jointype {
@@ -438,7 +561,10 @@ fn pull_up_subqueries_recurse<'mcx>(
                 | JoinType::JOIN_SEMI
                 | JoinType::JOIN_ANTI
                 | JoinType::JOIN_FULL
-                | JoinType::JOIN_RIGHT => Some(LowestOuterJoin::snapshot(mcx, &j)?),
+                | JoinType::JOIN_RIGHT => {
+                    let j = jt_joinexpr_at(parse, path);
+                    Some(LowestOuterJoin::snapshot(mcx, j)?)
+                }
                 _ => {
                     return Err(types_error::PgError::error("unrecognized join type"));
                 }
@@ -448,19 +574,33 @@ fn pull_up_subqueries_recurse<'mcx>(
                 _ => inner_arg.as_ref(),
             };
 
-            let larg = j.larg.take().expect("JoinExpr with NULL larg");
-            let new_larg =
-                pull_up_subqueries_recurse(mcx, root, parse, PgBox::into_inner(larg), pass, None)?;
-            j.larg = Some(alloc_in(mcx, new_larg)?);
+            let larg = JtPath::Larg { parent: path };
+            pull_up_subqueries_recurse(mcx, root, parse, &larg, pass, None)?;
+            let rarg = JtPath::Rarg { parent: path };
+            pull_up_subqueries_recurse(mcx, root, parse, &rarg, pass, None)?;
 
-            let rarg = j.rarg.take().expect("JoinExpr with NULL rarg");
-            let new_rarg =
-                pull_up_subqueries_recurse(mcx, root, parse, PgBox::into_inner(rarg), pass, None)?;
-            j.rarg = Some(alloc_in(mcx, new_rarg)?);
-
-            Ok(Node::JoinExpr(j))
+            Ok(())
         }
-        _ => Err(types_error::PgError::error("unrecognized node type")),
+        Kind::Other => Err(types_error::PgError::error("unrecognized node type")),
+    }
+}
+
+/// Store `new` into the jointree slot at `path` (the recursion's in-place
+/// equivalent of C's `*slot = pull_up_..._recurse(*slot, ...)`).
+fn jt_store<'mcx>(parse: &mut Query<'mcx>, path: &JtPath<'_, 'mcx>, new: Node<'mcx>) {
+    match path {
+        JtPath::Top => {
+            // The top stays a FromExpr; a leaf pull-up never targets Top.
+            unreachable!("jt_store(Top): the top FromExpr is never replaced by a pull-up");
+        }
+        JtPath::Detached(cell) => {
+            // C ignores the recurse result for the union-leaf standalone node;
+            // store it back into the cell for symmetry (it is discarded).
+            *cell.borrow_mut() = new;
+        }
+        _ => {
+            *jt_node_at(parse, path) = new;
+        }
     }
 }
 
@@ -1003,6 +1143,7 @@ fn pull_up_union_leaf_queries<'mcx>(
             };
             make_setop_translation_list(root, set_op_query, child_rt_index, &mut appinfo);
             root.append_rel_list.push(appinfo);
+            let appinfo_idx = root.append_rel_list.len() - 1;
 
             // Recursively apply pull_up_subqueries to the new child RTE. (We must
             // build the AppendRelInfo first, because this will modify it; indeed,
@@ -1014,10 +1155,19 @@ fn pull_up_union_leaf_queries<'mcx>(
             // the join. We ignore the possibility that the recurse returns a
             // different jointree node; the important thing is it replaced the
             // child relid in the AppendRelInfo node.
-            let rtr = Node::RangeTblRef(types_nodes::rawnodes::RangeTblRef {
-                rtindex: child_rt_index,
-            });
-            let _ = pull_up_subqueries_recurse(mcx, root, parse, rtr, None, None)?;
+            let rtr = core::cell::RefCell::new(Node::RangeTblRef(
+                types_nodes::rawnodes::RangeTblRef {
+                    rtindex: child_rt_index,
+                },
+            ));
+            pull_up_subqueries_recurse(
+                mcx,
+                root,
+                parse,
+                &JtPath::Detached(&rtr),
+                None,
+                Some(appinfo_idx),
+            )?;
             Ok(())
         }
         Node::SetOperationStmt(op) => {
