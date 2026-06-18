@@ -37,7 +37,7 @@ use backend_nodes_core::node_walker::{
     expression_tree_walker, node_expr_wrapper, query_or_expression_tree_walker, query_tree_walker,
 };
 use types_error::PgResult;
-use types_nodes::nodes::Node;
+use types_nodes::nodes::{ntag, Node};
 use types_nodes::primnodes::Expr;
 use types_pathnodes::{Bitmapset, NodeId, PlannerInfo, Relids};
 
@@ -245,8 +245,30 @@ pub fn pull_varnos_of_level(root: Option<&PlannerInfo>, node: &Node, levelsup: i
 
 /// `pull_varnos_walker` (var.c:160).
 fn pull_varnos_walker(node: &Node, context: &mut PullVarnosContext<'_>) -> bool {
-    match node {
-        Node::Expr(Expr::Var(var)) => {
+    if let Some(expr) = node.as_expr() {
+        return pull_varnos_walker_expr(node, expr, context);
+    }
+    if node.node_tag() == ntag::T_Query {
+        let q = node.as_query().unwrap();
+        // Recurse into RTE subquery or not-yet-planned sublink subquery.
+        context.sublevels_up += 1;
+        let result = query_tree_walker(q, &mut |n: &Node| pull_varnos_walker(n, context), 0);
+        context.sublevels_up -= 1;
+        return result;
+    }
+    expression_tree_walker(node, &mut |n: &Node| pull_varnos_walker(n, context))
+}
+
+/// The `Node::Expr` peel of [`pull_varnos_walker`] (kept structural per the
+/// dual-homed-tag rule: `Node::Expr` spans every `Expr` tag, so we peel the
+/// `Expr` first and dispatch its enum).
+fn pull_varnos_walker_expr(
+    node: &Node,
+    expr: &Expr,
+    context: &mut PullVarnosContext<'_>,
+) -> bool {
+    match expr {
+        Expr::Var(var) => {
             if var.varlevelsup as i32 == context.sublevels_up {
                 context.varnos = bms_add_member(context.varnos.take(), var.varno);
                 context.varnos = bms_add_members(
@@ -256,13 +278,13 @@ fn pull_varnos_walker(node: &Node, context: &mut PullVarnosContext<'_>) -> bool 
             }
             false
         }
-        Node::Expr(Expr::CurrentOfExpr(cexpr)) => {
+        Expr::CurrentOfExpr(cexpr) => {
             if context.sublevels_up == 0 {
                 context.varnos = bms_add_member(context.varnos.take(), cexpr.cvarno as i32);
             }
             false
         }
-        Node::Expr(Expr::PlaceHolderVar(phv)) => {
+        Expr::PlaceHolderVar(phv) => {
             // If a PlaceHolderVar is not of the target query level, ignore it,
             // instead recursing into its expression to see if it contains any
             // vars of the target level. We also do that when no "root" is
@@ -318,14 +340,6 @@ fn pull_varnos_walker(node: &Node, context: &mut PullVarnosContext<'_>) -> bool 
             // PHV of a different level (or no root): recurse into the expr.
             expression_tree_walker(node, &mut |n: &Node| pull_varnos_walker(n, context))
         }
-        Node::Query(q) => {
-            // Recurse into RTE subquery or not-yet-planned sublink subquery.
-            context.sublevels_up += 1;
-            let result =
-                query_tree_walker(q, &mut |n: &Node| pull_varnos_walker(n, context), 0);
-            context.sublevels_up -= 1;
-            result
-        }
         _ => expression_tree_walker(node, &mut |n: &Node| pull_varnos_walker(n, context)),
     }
 }
@@ -355,20 +369,18 @@ pub fn pull_varattnos(node: &Node, varno: i32, varattnos: Relids) -> Relids {
 
 /// `pull_varattnos_walker` (var.c:308).
 fn pull_varattnos_walker(node: &Node, context: &mut PullVarattnosContext) -> bool {
-    match node {
-        Node::Expr(Expr::Var(var)) => {
-            if var.varno == context.varno && var.varlevelsup == 0 {
-                let member = var.varattno as i32 - FIRST_LOW_INVALID_HEAP_ATTRIBUTE_NUMBER;
-                context.varattnos = bms_add_member(context.varattnos.take(), member);
-            }
-            false
+    if let Some(Expr::Var(var)) = node.as_expr() {
+        if var.varno == context.varno && var.varlevelsup == 0 {
+            let member = var.varattno as i32 - FIRST_LOW_INVALID_HEAP_ATTRIBUTE_NUMBER;
+            context.varattnos = bms_add_member(context.varattnos.take(), member);
         }
-        // Should not find an unplanned subquery (C: Assert(!IsA(node, Query))).
-        Node::Query(_) => {
-            panic!("pull_varattnos_walker: unexpected unplanned Query subtree");
-        }
-        _ => expression_tree_walker(node, &mut |n: &Node| pull_varattnos_walker(n, context)),
+        return false;
     }
+    // Should not find an unplanned subquery (C: Assert(!IsA(node, Query))).
+    if node.node_tag() == ntag::T_Query {
+        panic!("pull_varattnos_walker: unexpected unplanned Query subtree");
+    }
+    expression_tree_walker(node, &mut |n: &Node| pull_varattnos_walker(n, context))
 }
 
 // ===========================================================================
@@ -401,28 +413,32 @@ pub fn pull_vars_of_level(node: &Node, levelsup: i32) -> Vec<Expr> {
 
 /// `pull_vars_walker` (var.c:358).
 fn pull_vars_walker(node: &Node, context: &mut PullVarsContext) -> bool {
-    match node {
-        Node::Expr(Expr::Var(var)) => {
-            if var.varlevelsup as i32 == context.sublevels_up {
-                context.vars.push(Expr::Var(var.clone()));
+    if let Some(expr) = node.as_expr() {
+        match expr {
+            Expr::Var(var) => {
+                if var.varlevelsup as i32 == context.sublevels_up {
+                    context.vars.push(Expr::Var(var.clone()));
+                }
+                return false;
             }
-            false
-        }
-        Node::Expr(Expr::PlaceHolderVar(phv)) => {
-            if phv.phlevelsup as i32 == context.sublevels_up {
-                context.vars.push(Expr::PlaceHolderVar(phv.clone()));
+            Expr::PlaceHolderVar(phv) => {
+                if phv.phlevelsup as i32 == context.sublevels_up {
+                    context.vars.push(Expr::PlaceHolderVar(phv.clone()));
+                }
+                // we don't want to look into the contained expression
+                return false;
             }
-            // we don't want to look into the contained expression
-            false
+            _ => return expression_tree_walker(node, &mut |n: &Node| pull_vars_walker(n, context)),
         }
-        Node::Query(q) => {
-            context.sublevels_up += 1;
-            let result = query_tree_walker(q, &mut |n: &Node| pull_vars_walker(n, context), 0);
-            context.sublevels_up -= 1;
-            result
-        }
-        _ => expression_tree_walker(node, &mut |n: &Node| pull_vars_walker(n, context)),
     }
+    if node.node_tag() == ntag::T_Query {
+        let q = node.as_query().unwrap();
+        context.sublevels_up += 1;
+        let result = query_tree_walker(q, &mut |n: &Node| pull_vars_walker(n, context), 0);
+        context.sublevels_up -= 1;
+        return result;
+    }
+    expression_tree_walker(node, &mut |n: &Node| pull_vars_walker(n, context))
 }
 
 // ===========================================================================
@@ -438,18 +454,21 @@ pub fn contain_var_clause(node: &Node) -> bool {
 
 /// `contain_var_clause_walker` (var.c:411).
 fn contain_var_clause_walker(node: &Node) -> bool {
-    match node {
-        Node::Expr(Expr::Var(var)) => var.varlevelsup == 0,
-        Node::Expr(Expr::CurrentOfExpr(_)) => true,
-        Node::Expr(Expr::PlaceHolderVar(phv)) => {
-            if phv.phlevelsup == 0 {
-                return true;
+    if let Some(expr) = node.as_expr() {
+        match expr {
+            Expr::Var(var) => return var.varlevelsup == 0,
+            Expr::CurrentOfExpr(_) => return true,
+            Expr::PlaceHolderVar(phv) => {
+                if phv.phlevelsup == 0 {
+                    return true;
+                }
+                // else fall through to check the contained expr
+                return expression_tree_walker(node, &mut |n: &Node| contain_var_clause_walker(n));
             }
-            // else fall through to check the contained expr
-            expression_tree_walker(node, &mut |n: &Node| contain_var_clause_walker(n))
+            _ => {}
         }
-        _ => expression_tree_walker(node, &mut |n: &Node| contain_var_clause_walker(n)),
     }
+    expression_tree_walker(node, &mut |n: &Node| contain_var_clause_walker(n))
 }
 
 // ===========================================================================
@@ -470,31 +489,39 @@ pub fn contain_vars_of_level(node: &Node, levelsup: i32) -> bool {
 
 /// `contain_vars_of_level_walker` (var.c:454).
 fn contain_vars_of_level_walker(node: &Node, sublevels_up: &mut i32) -> bool {
-    match node {
-        Node::Expr(Expr::Var(var)) => var.varlevelsup as i32 == *sublevels_up,
-        Node::Expr(Expr::CurrentOfExpr(_)) => *sublevels_up == 0,
-        Node::Expr(Expr::PlaceHolderVar(phv)) => {
-            if phv.phlevelsup as i32 == *sublevels_up {
-                return true;
+    if let Some(expr) = node.as_expr() {
+        match expr {
+            Expr::Var(var) => return var.varlevelsup as i32 == *sublevels_up,
+            Expr::CurrentOfExpr(_) => return *sublevels_up == 0,
+            Expr::PlaceHolderVar(phv) => {
+                if phv.phlevelsup as i32 == *sublevels_up {
+                    return true;
+                }
+                return expression_tree_walker(node, &mut |n: &Node| {
+                    contain_vars_of_level_walker(n, sublevels_up)
+                });
             }
-            expression_tree_walker(node, &mut |n: &Node| {
-                contain_vars_of_level_walker(n, sublevels_up)
-            })
+            _ => {
+                return expression_tree_walker(node, &mut |n: &Node| {
+                    contain_vars_of_level_walker(n, sublevels_up)
+                })
+            }
         }
-        Node::Query(q) => {
-            *sublevels_up += 1;
-            let result = query_tree_walker(
-                q,
-                &mut |n: &Node| contain_vars_of_level_walker(n, sublevels_up),
-                0,
-            );
-            *sublevels_up -= 1;
-            result
-        }
-        _ => expression_tree_walker(node, &mut |n: &Node| {
-            contain_vars_of_level_walker(n, sublevels_up)
-        }),
     }
+    if node.node_tag() == ntag::T_Query {
+        let q = node.as_query().unwrap();
+        *sublevels_up += 1;
+        let result = query_tree_walker(
+            q,
+            &mut |n: &Node| contain_vars_of_level_walker(n, sublevels_up),
+            0,
+        );
+        *sublevels_up -= 1;
+        return result;
+    }
+    expression_tree_walker(node, &mut |n: &Node| {
+        contain_vars_of_level_walker(n, sublevels_up)
+    })
 }
 
 // ===========================================================================
@@ -510,16 +537,19 @@ pub fn contain_vars_returning_old_or_new(node: &Node) -> bool {
 
 /// `contain_vars_returning_old_or_new_walker` (var.c:516).
 fn contain_vars_returning_old_or_new_walker(node: &Node) -> bool {
-    match node {
-        Node::Expr(Expr::Var(var)) => {
-            var.varlevelsup == 0
-                && var.varreturningtype != VarReturningType::VAR_RETURNING_DEFAULT
+    if let Some(expr) = node.as_expr() {
+        match expr {
+            Expr::Var(var) => {
+                return var.varlevelsup == 0
+                    && var.varreturningtype != VarReturningType::VAR_RETURNING_DEFAULT
+            }
+            Expr::ReturningExpr(rexpr) => return rexpr.retlevelsup == 0,
+            _ => {}
         }
-        Node::Expr(Expr::ReturningExpr(rexpr)) => rexpr.retlevelsup == 0,
-        _ => expression_tree_walker(node, &mut |n: &Node| {
-            contain_vars_returning_old_or_new_walker(n)
-        }),
     }
+    expression_tree_walker(node, &mut |n: &Node| {
+        contain_vars_returning_old_or_new_walker(n)
+    })
 }
 
 // ===========================================================================
@@ -549,31 +579,37 @@ pub fn locate_var_of_level(node: &Node, levelsup: i32) -> i32 {
 
 /// `locate_var_of_level_walker` (var.c:570).
 fn locate_var_of_level_walker(node: &Node, context: &mut LocateVarOfLevelContext) -> bool {
-    match node {
-        Node::Expr(Expr::Var(var)) => {
-            if var.varlevelsup as i32 == context.sublevels_up && var.location >= 0 {
-                context.var_location = var.location;
-                return true;
+    if let Some(expr) = node.as_expr() {
+        match expr {
+            Expr::Var(var) => {
+                if var.varlevelsup as i32 == context.sublevels_up && var.location >= 0 {
+                    context.var_location = var.location;
+                    return true;
+                }
+                return false;
             }
-            false
+            // since CurrentOfExpr doesn't carry location, nothing we can do
+            Expr::CurrentOfExpr(_) => return false,
+            // No extra code needed for PlaceHolderVar; just look in contained expr.
+            _ => {
+                return expression_tree_walker(node, &mut |n: &Node| {
+                    locate_var_of_level_walker(n, context)
+                })
+            }
         }
-        // since CurrentOfExpr doesn't carry location, nothing we can do
-        Node::Expr(Expr::CurrentOfExpr(_)) => false,
-        // No extra code needed for PlaceHolderVar; just look in contained expr.
-        Node::Query(q) => {
-            context.sublevels_up += 1;
-            let result = query_tree_walker(
-                q,
-                &mut |n: &Node| locate_var_of_level_walker(n, context),
-                0,
-            );
-            context.sublevels_up -= 1;
-            result
-        }
-        _ => expression_tree_walker(node, &mut |n: &Node| {
-            locate_var_of_level_walker(n, context)
-        }),
     }
+    if node.node_tag() == ntag::T_Query {
+        let q = node.as_query().unwrap();
+        context.sublevels_up += 1;
+        let result = query_tree_walker(
+            q,
+            &mut |n: &Node| locate_var_of_level_walker(n, context),
+            0,
+        );
+        context.sublevels_up -= 1;
+        return result;
+    }
+    expression_tree_walker(node, &mut |n: &Node| locate_var_of_level_walker(n, context))
 }
 
 // ===========================================================================
@@ -629,65 +665,67 @@ pub fn pull_var_clause(node: &Node, flags: i32) -> Vec<Expr> {
 
 /// `pull_var_clause_walker` (var.c:672).
 fn pull_var_clause_walker(node: &Node, context: &mut PullVarClauseContext) -> bool {
-    match node {
-        Node::Expr(Expr::Var(var)) => {
-            if var.varlevelsup != 0 {
-                panic!("Upper-level Var found where not expected");
-            }
-            context.varlist.push(Expr::Var(var.clone()));
-            return false;
-        }
-        Node::Expr(Expr::Aggref(agg)) => {
-            if agg.agglevelsup != 0 {
-                panic!("Upper-level Aggref found where not expected");
-            }
-            if context.flags & PVC_INCLUDE_AGGREGATES != 0 {
-                context.varlist.push(node_expr_clone(node));
-                return false; // do NOT descend into the contained expression
-            } else if context.flags & PVC_RECURSE_AGGREGATES != 0 {
-                // fall through to recurse into the aggregate's arguments
-            } else {
-                panic!("Aggref found where not expected");
-            }
-        }
-        Node::Expr(Expr::GroupingFunc(grp)) => {
-            if grp.agglevelsup != 0 {
-                panic!("Upper-level GROUPING found where not expected");
-            }
-            if context.flags & PVC_INCLUDE_AGGREGATES != 0 {
-                context.varlist.push(node_expr_clone(node));
+    if let Some(expr) = node.as_expr() {
+        match expr {
+            Expr::Var(var) => {
+                if var.varlevelsup != 0 {
+                    panic!("Upper-level Var found where not expected");
+                }
+                context.varlist.push(Expr::Var(var.clone()));
                 return false;
-            } else if context.flags & PVC_RECURSE_AGGREGATES != 0 {
-                // fall through to recurse into the GroupingFunc's arguments
-            } else {
-                panic!("GROUPING found where not expected");
             }
+            Expr::Aggref(agg) => {
+                if agg.agglevelsup != 0 {
+                    panic!("Upper-level Aggref found where not expected");
+                }
+                if context.flags & PVC_INCLUDE_AGGREGATES != 0 {
+                    context.varlist.push(node_expr_clone(node));
+                    return false; // do NOT descend into the contained expression
+                } else if context.flags & PVC_RECURSE_AGGREGATES != 0 {
+                    // fall through to recurse into the aggregate's arguments
+                } else {
+                    panic!("Aggref found where not expected");
+                }
+            }
+            Expr::GroupingFunc(grp) => {
+                if grp.agglevelsup != 0 {
+                    panic!("Upper-level GROUPING found where not expected");
+                }
+                if context.flags & PVC_INCLUDE_AGGREGATES != 0 {
+                    context.varlist.push(node_expr_clone(node));
+                    return false;
+                } else if context.flags & PVC_RECURSE_AGGREGATES != 0 {
+                    // fall through to recurse into the GroupingFunc's arguments
+                } else {
+                    panic!("GROUPING found where not expected");
+                }
+            }
+            Expr::WindowFunc(_) => {
+                // WindowFuncs have no levelsup field to check ...
+                if context.flags & PVC_INCLUDE_WINDOWFUNCS != 0 {
+                    context.varlist.push(node_expr_clone(node));
+                    return false;
+                } else if context.flags & PVC_RECURSE_WINDOWFUNCS != 0 {
+                    // fall through to recurse into the windowfunc's arguments
+                } else {
+                    panic!("WindowFunc found where not expected");
+                }
+            }
+            Expr::PlaceHolderVar(phv) => {
+                if phv.phlevelsup != 0 {
+                    panic!("Upper-level PlaceHolderVar found where not expected");
+                }
+                if context.flags & PVC_INCLUDE_PLACEHOLDERS != 0 {
+                    context.varlist.push(Expr::PlaceHolderVar(phv.clone()));
+                    return false;
+                } else if context.flags & PVC_RECURSE_PLACEHOLDERS != 0 {
+                    // fall through to recurse into the placeholder's expression
+                } else {
+                    panic!("PlaceHolderVar found where not expected");
+                }
+            }
+            _ => {}
         }
-        Node::Expr(Expr::WindowFunc(_)) => {
-            // WindowFuncs have no levelsup field to check ...
-            if context.flags & PVC_INCLUDE_WINDOWFUNCS != 0 {
-                context.varlist.push(node_expr_clone(node));
-                return false;
-            } else if context.flags & PVC_RECURSE_WINDOWFUNCS != 0 {
-                // fall through to recurse into the windowfunc's arguments
-            } else {
-                panic!("WindowFunc found where not expected");
-            }
-        }
-        Node::Expr(Expr::PlaceHolderVar(phv)) => {
-            if phv.phlevelsup != 0 {
-                panic!("Upper-level PlaceHolderVar found where not expected");
-            }
-            if context.flags & PVC_INCLUDE_PLACEHOLDERS != 0 {
-                context.varlist.push(Expr::PlaceHolderVar(phv.clone()));
-                return false;
-            } else if context.flags & PVC_RECURSE_PLACEHOLDERS != 0 {
-                // fall through to recurse into the placeholder's expression
-            } else {
-                panic!("PlaceHolderVar found where not expected");
-            }
-        }
-        _ => {}
     }
     expression_tree_walker(node, &mut |n: &Node| pull_var_clause_walker(n, context))
 }
@@ -695,9 +733,9 @@ fn pull_var_clause_walker(node: &Node, context: &mut PullVarClauseContext) -> bo
 /// Clone the `Expr` payload of a `Node::Expr(..)` arm. Only called on arms known
 /// to be `Node::Expr`.
 fn node_expr_clone(node: &Node) -> Expr {
-    match node {
-        Node::Expr(e) => e.clone(),
-        _ => unreachable!("node_expr_clone on non-Expr node"),
+    match node.as_expr() {
+        Some(e) => e.clone(),
+        None => unreachable!("node_expr_clone on non-Expr node"),
     }
 }
 

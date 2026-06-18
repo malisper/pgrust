@@ -39,7 +39,7 @@ use backend_rewrite_core::walkers::checkExprHasSubLink;
 use mcx::Mcx;
 use types_error::{PgError, PgResult};
 use types_nodes::copy_query::Query;
-use types_nodes::nodes::Node;
+use types_nodes::nodes::{ntag, Node};
 use types_nodes::parsenodes::RTEKind;
 use types_nodes::primnodes::{CoercionForm, Expr, ExprRelids, RowExpr, Var};
 
@@ -67,9 +67,9 @@ pub fn flatten_join_alias_vars<'mcx>(
     query: &Node<'mcx>,
     mut node: Node<'mcx>,
 ) -> PgResult<Node<'mcx>> {
-    let query = match query {
-        Node::Query(q) => q,
-        _ => {
+    let query = match query.as_query() {
+        Some(q) => q,
+        None => {
             return Err(PgError::error(
                 "flatten_join_alias_vars: query argument is not a Query node",
             ))
@@ -96,10 +96,15 @@ fn flatten_join_alias_vars_mutator<'mcx>(
     node: &mut Node,
     context: &mut FlattenCtx<'_, 'mcx>,
 ) -> PgResult<()> {
-    match node {
-        Node::Expr(Expr::Var(_)) => {
-            let var = match node {
-                Node::Expr(Expr::Var(v)) => v.clone(),
+    // Classify the node by peeling the `Expr` first (dual-homed-tag rule); the
+    // `Var` / `PlaceHolderVar` legs then dispatch the inner `Expr` enum.
+    let is_var = matches!(node.as_expr(), Some(Expr::Var(_)));
+    let is_phv = matches!(node.as_expr(), Some(Expr::PlaceHolderVar(_)));
+    let is_query = node.node_tag() == ntag::T_Query;
+    if is_var {
+        {
+            let var = match node.as_expr() {
+                Some(Expr::Var(v)) => v.clone(),
                 _ => unreachable!(),
             };
 
@@ -139,9 +144,9 @@ fn flatten_join_alias_vars_mutator<'mcx>(
                     if is_dropped_alias_var(&**lv) {
                         continue;
                     }
-                    let aliasvar_expr = match &**lv {
-                        Node::Expr(e) => e.clone(),
-                        _ => {
+                    let aliasvar_expr = match lv.as_expr() {
+                        Some(e) => e.clone(),
+                        None => {
                             return Err(PgError::error(
                                 "flatten_join_alias_vars: join alias var is not an expression",
                             ))
@@ -162,9 +167,9 @@ fn flatten_join_alias_vars_mutator<'mcx>(
                     // Recurse in case join input is itself a join.
                     // (also takes care of setting inserted_sublink if needed)
                     flatten_join_alias_vars_mutator(mcx, &mut newvar, context)?;
-                    let field_expr = match newvar {
-                        Node::Expr(e) => e,
-                        _ => {
+                    let field_expr = match newvar.into_expr() {
+                        Some(e) => e,
+                        None => {
                             return Err(PgError::error(
                                 "flatten_join_alias_vars: join alias expansion is not an expression",
                             ))
@@ -174,10 +179,7 @@ fn flatten_join_alias_vars_mutator<'mcx>(
                     // We need the names of non-dropped columns, too.
                     let cn = eref_colnames
                         .get(lv_idx)
-                        .and_then(|n| match &**n {
-                            Node::String(s) => Some(String::from(s.sval.as_str())),
-                            _ => None,
-                        })
+                        .and_then(|n| n.as_string().map(|s| String::from(s.sval.as_str())))
                         .unwrap_or_default();
                     colnames.push(cn);
                 }
@@ -210,9 +212,9 @@ fn flatten_join_alias_vars_mutator<'mcx>(
                 .ok_or_else(|| {
                     PgError::error("flatten_join_alias_vars: join alias var index out of range")
                 })?;
-            let aliasvar_expr = match &**aliasvar {
-                Node::Expr(e) => e.clone(),
-                _ => {
+            let aliasvar_expr = match aliasvar.as_expr() {
+                Some(e) => e.clone(),
+                None => {
                     return Err(PgError::error(
                         "flatten_join_alias_vars: join alias var is not an expression",
                     ))
@@ -243,66 +245,45 @@ fn flatten_join_alias_vars_mutator<'mcx>(
             *node = add_nullingrels_if_needed(mcx, context, newvar, &var)?;
             Ok(())
         }
-        Node::Expr(Expr::PlaceHolderVar(_)) => {
-            // Copy the PlaceHolderVar node with correct mutation of subnodes: the
-            // C `expression_tree_mutator(node, ...)` recurses into the PHV's
-            // phexpr. The repo's generic in-place walker does not descend into a
-            // PlaceHolderVar's phexpr, so do it explicitly here (matching C).
-            if let Node::Expr(Expr::PlaceHolderVar(phv)) = node {
-                if let Some(phexpr) = phv.phexpr.as_deref_mut() {
-                    let mut child = Node::Expr(phexpr.clone());
-                    flatten_join_alias_vars_mutator(mcx, &mut child, context)?;
-                    if let Node::Expr(e) = child {
-                        *phexpr = e;
+    } else if is_phv {
+        // Copy the PlaceHolderVar node with correct mutation of subnodes: the
+        // C `expression_tree_mutator(node, ...)` recurses into the PHV's
+        // phexpr. The repo's generic in-place walker does not descend into a
+        // PlaceHolderVar's phexpr, so do it explicitly here (matching C).
+        if let Some(Expr::PlaceHolderVar(phv)) = node.as_expr_mut() {
+            if let Some(phexpr) = phv.phexpr.as_deref_mut() {
+                let mut child = Node::Expr(phexpr.clone());
+                flatten_join_alias_vars_mutator(mcx, &mut child, context)?;
+                if let Some(e) = child.into_expr() {
+                    if let Some(Expr::PlaceHolderVar(phv)) = node.as_expr_mut() {
+                        if let Some(phexpr) = phv.phexpr.as_deref_mut() {
+                            *phexpr = e;
+                        }
                     }
                 }
             }
-            // Now fix PlaceHolderVar's relid sets.
-            if let Node::Expr(Expr::PlaceHolderVar(phv)) = node {
-                if phv.phlevelsup as i32 == context.sublevels_up {
-                    phv.phrels = alias_relid_set(mcx, context.query, &phv.phrels)?;
+        }
+        // Now fix PlaceHolderVar's relid sets.
+        if let Some(Expr::PlaceHolderVar(phv)) = node.as_expr() {
+            if phv.phlevelsup as i32 == context.sublevels_up {
+                let newrels = alias_relid_set(mcx, context.query, &phv.phrels)?;
+                if let Some(Expr::PlaceHolderVar(phv)) = node.as_expr_mut() {
+                    phv.phrels = newrels;
                     // we *don't* change phnullingrels
                 }
             }
-            Ok(())
         }
-        Node::Query(q) => {
-            // Recurse into RTE subquery or not-yet-planned sublink subquery.
-            context.sublevels_up += 1;
-            let save_inserted_sublink = context.inserted_sublink;
-            context.inserted_sublink = q.hasSubLinks;
-            let mut err: Option<PgError> = None;
-            query_tree_mutator(
-                q,
-                &mut |n| {
-                    if err.is_some() {
-                        return true;
-                    }
-                    match flatten_join_alias_vars_mutator(mcx, n, context) {
-                        Ok(()) => false,
-                        Err(e) => {
-                            err = Some(e);
-                            true
-                        }
-                    }
-                },
-                backend_nodes_core::node_walker::QTW_IGNORE_JOINALIASES,
-            );
-            if let Some(e) = err {
-                return Err(e);
-            }
-            q.hasSubLinks |= context.inserted_sublink;
-            context.inserted_sublink = save_inserted_sublink;
-            context.sublevels_up -= 1;
-            Ok(())
-        }
-        _ => {
-            // Already-planned tree not supported (SubPlan / AlternativeSubPlan)
-            // and planner auxiliary nodes (SpecialJoinInfo / PlaceHolderInfo /
-            // MinMaxAggInfo) shouldn't appear here; the central walker has no arms
-            // for them, so recursion over the remaining node types is correct.
-            let mut err: Option<PgError> = None;
-            expression_tree_walker_mut(node, &mut |n| {
+        Ok(())
+    } else if is_query {
+        let q = node.as_query_mut().unwrap();
+        // Recurse into RTE subquery or not-yet-planned sublink subquery.
+        context.sublevels_up += 1;
+        let save_inserted_sublink = context.inserted_sublink;
+        context.inserted_sublink = q.hasSubLinks;
+        let mut err: Option<PgError> = None;
+        query_tree_mutator(
+            q,
+            &mut |n| {
                 if err.is_some() {
                     return true;
                 }
@@ -313,11 +294,37 @@ fn flatten_join_alias_vars_mutator<'mcx>(
                         true
                     }
                 }
-            });
-            match err {
-                Some(e) => Err(e),
-                None => Ok(()),
+            },
+            backend_nodes_core::node_walker::QTW_IGNORE_JOINALIASES,
+        );
+        if let Some(e) = err {
+            return Err(e);
+        }
+        q.hasSubLinks |= context.inserted_sublink;
+        context.inserted_sublink = save_inserted_sublink;
+        context.sublevels_up -= 1;
+        Ok(())
+    } else {
+        // Already-planned tree not supported (SubPlan / AlternativeSubPlan)
+        // and planner auxiliary nodes (SpecialJoinInfo / PlaceHolderInfo /
+        // MinMaxAggInfo) shouldn't appear here; the central walker has no arms
+        // for them, so recursion over the remaining node types is correct.
+        let mut err: Option<PgError> = None;
+        expression_tree_walker_mut(node, &mut |n| {
+            if err.is_some() {
+                return true;
             }
+            match flatten_join_alias_vars_mutator(mcx, n, context) {
+                Ok(()) => false,
+                Err(e) => {
+                    err = Some(e);
+                    true
+                }
+            }
+        });
+        match err {
+            Some(e) => Err(e),
+            None => Ok(()),
         }
     }
 }
@@ -326,7 +333,7 @@ fn flatten_join_alias_vars_mutator<'mcx>(
 /// element; in the owned model it is a null `Const` placeholder (matching
 /// parse_relation.c `get_rte_attribute_is_dropped`).
 fn is_dropped_alias_var(node: &Node) -> bool {
-    matches!(node, Node::Expr(Expr::Const(c)) if c.constisnull)
+    matches!(node.as_expr(), Some(Expr::Const(c)) if c.constisnull)
 }
 
 /// `rt_fetch(varno, query->rtable)` (parsetree.h) — one-based range-table fetch.
@@ -371,9 +378,9 @@ fn add_nullingrels_if_needed<'n, 'mcx>(
 /// PlaceHolderVar? Handles `Var`s, `PlaceHolderVar`s, and implicit-coercion /
 /// COALESCE expressions built from those.
 fn is_standard_join_alias_expression(newnode: &Node, oldvar: &Var) -> bool {
-    let expr = match newnode {
-        Node::Expr(e) => e,
-        _ => return false,
+    let expr = match newnode.as_expr() {
+        Some(e) => e,
+        None => return false,
     };
     is_standard_expr(expr, oldvar)
 }
@@ -414,7 +421,7 @@ fn is_standard_expr(expr: &Expr, oldvar: &Var) -> bool {
 /// `adjust_standard_join_alias_expression(newnode, oldvar)` (var.c:1302). Insert
 /// nullingrels into an expression accepted by `is_standard_join_alias_expression`.
 fn adjust_standard_join_alias_expression(newnode: &mut Node, oldvar: &Var) {
-    if let Node::Expr(e) = newnode {
+    if let Some(e) = newnode.as_expr_mut() {
         adjust_standard_expr(e, oldvar);
     }
 }
@@ -535,134 +542,138 @@ fn flatten_group_exprs_mutator<'mcx>(
     node: &mut Node,
     context: &mut FlattenGroupCtx<'_, 'mcx>,
 ) -> PgResult<()> {
-    match node {
-        Node::Expr(Expr::Var(_)) => {
-            let var: Var = match node {
-                Node::Expr(Expr::Var(v)) => v.clone(),
-                _ => unreachable!(),
-            };
+    // Classify by peeling the `Expr` first (dual-homed-tag rule).
+    let inner_tag = match node.as_expr() {
+        Some(Expr::Var(_)) => 1,
+        Some(Expr::Aggref(_)) => 2,
+        Some(Expr::GroupingFunc(_)) => 3,
+        _ => 0,
+    };
+    if inner_tag == 1 {
+        let var: Var = match node.as_expr() {
+            Some(Expr::Var(v)) => v.clone(),
+            _ => unreachable!(),
+        };
 
-            // No change unless Var belongs to the GROUP of the target level.
-            if var.varlevelsup as i32 != context.sublevels_up {
-                return Ok(()); // no need to copy, really
-            }
-            let rte = rt_fetch(context.query, var.varno)?;
-            if rte.rtekind != RTEKind::RTE_GROUP {
-                return Ok(());
-            }
+        // No change unless Var belongs to the GROUP of the target level.
+        if var.varlevelsup as i32 != context.sublevels_up {
+            return Ok(()); // no need to copy, really
+        }
+        let rte = rt_fetch(context.query, var.varno)?;
+        if rte.rtekind != RTEKind::RTE_GROUP {
+            return Ok(());
+        }
 
-            // Expand group exprs reference: newvar = list_nth(rte->groupexprs,
-            // varattno-1). varattno > 0 (parser invariant).
-            debug_assert!(var.varattno > 0);
-            let idx = (var.varattno - 1) as usize;
-            let src = rte.groupexprs.get(idx).ok_or_else(|| {
-                PgError::error("flatten_group_exprs: groupexpr index out of range")
-            })?;
-            let group_expr = match &**src {
-                Node::Expr(e) => e.clone_in(mcx)?, // copyObject(newvar)
-                _ => {
-                    return Err(PgError::error(
-                        "flatten_group_exprs: groupexpr is not an expression",
-                    ))
+        // Expand group exprs reference: newvar = list_nth(rte->groupexprs,
+        // varattno-1). varattno > 0 (parser invariant).
+        debug_assert!(var.varattno > 0);
+        let idx = (var.varattno - 1) as usize;
+        let src = rte.groupexprs.get(idx).ok_or_else(|| {
+            PgError::error("flatten_group_exprs: groupexpr index out of range")
+        })?;
+        let group_expr = match src.as_expr() {
+            Some(e) => e.clone_in(mcx)?, // copyObject(newvar)
+            None => {
+                return Err(PgError::error(
+                    "flatten_group_exprs: groupexpr is not an expression",
+                ))
+            }
+        };
+        let mut newvar = Node::Expr(group_expr);
+
+        // If expanding an expr carried down from an upper query, adjust its
+        // varlevelsup fields.
+        if context.sublevels_up != 0 {
+            IncrementVarSublevelsUp(&mut newvar, context.sublevels_up, 0)?;
+        }
+
+        // Preserve original Var's location, if possible.
+        if let Some(nv) = newvar.as_var_mut() {
+            nv.location = var.location;
+        }
+
+        // Detect if we are adding a sublink to query.
+        if context.possible_sublink && !context.inserted_sublink {
+            context.inserted_sublink = checkExprHasSubLink(&newvar);
+        }
+
+        // Lastly, add any varnullingrels to the replacement expression.
+        *node = mark_nullable_by_grouping(mcx, context.root, context.query, newvar, &var)?;
+        Ok(())
+    } else if inner_tag == 2 {
+        let agglevelsup = match node.as_expr() {
+            Some(Expr::Aggref(a)) => a.agglevelsup as i32,
+            _ => unreachable!(),
+        };
+        if agglevelsup == context.sublevels_up {
+            // Aggregate of the original level: do not recurse into its
+            // normal args / ORDER BY / filter (no grouped vars there), but
+            // check direct args as though not in an aggregate.
+            if let Some(Expr::Aggref(agg)) = node.as_expr_mut() {
+                let mut dargs = core::mem::take(&mut agg.aggdirectargs);
+                for e in dargs.iter_mut() {
+                    let owned = core::mem::replace(e, Expr::Const(Default::default()));
+                    let mut wrapped = Node::Expr(owned);
+                    flatten_group_exprs_mutator(mcx, &mut wrapped, context)?;
+                    if let Some(ne) = wrapped.into_expr() {
+                        *e = ne;
+                    }
                 }
-            };
-            let mut newvar = Node::Expr(group_expr);
-
-            // If expanding an expr carried down from an upper query, adjust its
-            // varlevelsup fields.
-            if context.sublevels_up != 0 {
-                IncrementVarSublevelsUp(&mut newvar, context.sublevels_up, 0)?;
+                if let Some(Expr::Aggref(agg)) = node.as_expr_mut() {
+                    agg.aggdirectargs = dargs;
+                }
             }
-
-            // Preserve original Var's location, if possible.
-            if let Some(nv) = newvar.as_var_mut() {
-                nv.location = var.location;
-            }
-
-            // Detect if we are adding a sublink to query.
-            if context.possible_sublink && !context.inserted_sublink {
-                context.inserted_sublink = checkExprHasSubLink(&newvar);
-            }
-
-            // Lastly, add any varnullingrels to the replacement expression.
-            *node = mark_nullable_by_grouping(mcx, context.root, context.query, newvar, &var)?;
-            Ok(())
+            return Ok(());
         }
-        Node::Expr(Expr::Aggref(_)) => {
-            let agglevelsup = match node {
-                Node::Expr(Expr::Aggref(a)) => a.agglevelsup as i32,
-                _ => unreachable!(),
-            };
-            if agglevelsup == context.sublevels_up {
-                // Aggregate of the original level: do not recurse into its
-                // normal args / ORDER BY / filter (no grouped vars there), but
-                // check direct args as though not in an aggregate.
-                if let Node::Expr(Expr::Aggref(agg)) = node {
-                    let mut dargs = core::mem::take(&mut agg.aggdirectargs);
-                    for e in dargs.iter_mut() {
-                        let owned = core::mem::replace(e, Expr::Const(Default::default()));
-                        let mut wrapped = Node::Expr(owned);
-                        flatten_group_exprs_mutator(mcx, &mut wrapped, context)?;
-                        if let Node::Expr(ne) = wrapped {
-                            *e = ne;
-                        }
-                    }
-                    if let Node::Expr(Expr::Aggref(agg)) = node {
-                        agg.aggdirectargs = dargs;
+        if agglevelsup > context.sublevels_up {
+            // Aggregates of higher levels cannot contain Vars of concern.
+            return Ok(());
+        }
+        // Lower-level aggregate: fall through to generic recursion below.
+        generic_recurse(mcx, node, context)
+    } else if inner_tag == 3 {
+        let agglevelsup = match node.as_expr() {
+            Some(Expr::GroupingFunc(g)) => g.agglevelsup as i32,
+            _ => unreachable!(),
+        };
+        // GroupingFunc of the original or higher level: no grouped vars in
+        // its arguments.
+        if agglevelsup >= context.sublevels_up {
+            return Ok(());
+        }
+        generic_recurse(mcx, node, context)
+    } else if node.node_tag() == ntag::T_Query {
+        let q = node.as_query_mut().unwrap();
+        // Recurse into RTE subquery or not-yet-planned sublink subquery.
+        context.sublevels_up += 1;
+        let save_inserted_sublink = context.inserted_sublink;
+        context.inserted_sublink = q.hasSubLinks;
+        let mut err: Option<PgError> = None;
+        query_tree_mutator(
+            q,
+            &mut |n| {
+                if err.is_some() {
+                    return true;
+                }
+                match flatten_group_exprs_mutator(mcx, n, context) {
+                    Ok(()) => false,
+                    Err(e) => {
+                        err = Some(e);
+                        true
                     }
                 }
-                return Ok(());
-            }
-            if agglevelsup > context.sublevels_up {
-                // Aggregates of higher levels cannot contain Vars of concern.
-                return Ok(());
-            }
-            // Lower-level aggregate: fall through to generic recursion below.
-            generic_recurse(mcx, node, context)
+            },
+            backend_nodes_core::node_walker::QTW_IGNORE_GROUPEXPRS,
+        );
+        if let Some(e) = err {
+            return Err(e);
         }
-        Node::Expr(Expr::GroupingFunc(_)) => {
-            let agglevelsup = match node {
-                Node::Expr(Expr::GroupingFunc(g)) => g.agglevelsup as i32,
-                _ => unreachable!(),
-            };
-            // GroupingFunc of the original or higher level: no grouped vars in
-            // its arguments.
-            if agglevelsup >= context.sublevels_up {
-                return Ok(());
-            }
-            generic_recurse(mcx, node, context)
-        }
-        Node::Query(q) => {
-            // Recurse into RTE subquery or not-yet-planned sublink subquery.
-            context.sublevels_up += 1;
-            let save_inserted_sublink = context.inserted_sublink;
-            context.inserted_sublink = q.hasSubLinks;
-            let mut err: Option<PgError> = None;
-            query_tree_mutator(
-                q,
-                &mut |n| {
-                    if err.is_some() {
-                        return true;
-                    }
-                    match flatten_group_exprs_mutator(mcx, n, context) {
-                        Ok(()) => false,
-                        Err(e) => {
-                            err = Some(e);
-                            true
-                        }
-                    }
-                },
-                backend_nodes_core::node_walker::QTW_IGNORE_GROUPEXPRS,
-            );
-            if let Some(e) = err {
-                return Err(e);
-            }
-            q.hasSubLinks |= context.inserted_sublink;
-            context.inserted_sublink = save_inserted_sublink;
-            context.sublevels_up -= 1;
-            Ok(())
-        }
-        _ => generic_recurse(mcx, node, context),
+        q.hasSubLinks |= context.inserted_sublink;
+        context.inserted_sublink = save_inserted_sublink;
+        context.sublevels_up -= 1;
+        Ok(())
+    } else {
+        generic_recurse(mcx, node, context)
     }
 }
 
@@ -760,9 +771,9 @@ fn mark_nullable_by_grouping<'n, 'mcx>(
             debug_assert!(!expr_relids::is_empty(&phrels_expr));
             let phrels = expr_relids_to_relids(&phrels_expr);
 
-            let expr_val = match newnode {
-                Node::Expr(e) => e,
-                _ => unreachable!(),
+            let expr_val = match newnode.into_expr() {
+                Some(e) => e,
+                None => unreachable!(),
             };
             let mut newphv =
                 backend_optimizer_util_placeholder_seams::make_placeholder_expr::call(
