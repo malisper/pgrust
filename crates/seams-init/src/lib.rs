@@ -1857,23 +1857,22 @@ mod recurrence_guard {
         // DESIGN_DEBT (TD-VACUUMPARALLEL-OUTWARD): the `*_pv`/`*_basvac`/
         // `vacuum_*_nworkers` seams live in `backend-commands-vacuum-seams` (the
         // shared declaration home) but are `::call`ed only by vacuumparallel.c.
-        // The value-typed-clean tranche (tidstore shared store, tcop
-        // debug_query_string, miscinit IsUnderPostmaster, pgstat query-id /
-        // activity / parallel progress, the maintenance_work_mem /
-        // max_parallel_maintenance_workers GUC reads, and the Oid-keyed
-        // vac_{open,close}_indexes_lock index path) is now INSTALLED — by
+        // The whole tranche is now INSTALLED — by
         // backend-commands-vacuumparallel::init_seams (the outward subsystems)
-        // and backend-commands-vacuum::init_seams (the GUC + index path). The
-        // entries below are the genuinely-keystone-blocked remainder; DELETE
-        // each as its blocker lands:
+        // and backend-commands-vacuum::init_seams (the GUC + index path):
         //
-        //  * #4 by-OID heap relation reopen (rides the vacuumlazy-mcx work): the
-        //    worker reopens the heap + indexes BY OID and the seams model the
-        //    relation as an opaque Oid handle; there is no provider returning the
-        //    Oid handle for table_open / RelationGetNumberOfBlocks / the index-AM
-        //    options / get_namespace_name in this shape. → table_open_lock,
-        //    table_close_lock, am_parallel_vacuum_options, am_use_maintenance_work_mem,
-        //    relation_get_number_of_blocks_pv, relation_get_namespace_name_pv.
+        // RESOLVED (vacuumparallel-worker-mcx lane): the #4 by-OID heap/index
+        // reopen keystone. parallel_vacuum_main now holds its own transaction
+        // Mcx and reopens the heap + indexes as owned `Relation<'mcx>`s (the
+        // leader transiently reopens each index for its AM-options read); the 6
+        // seams (table_open_lock, table_close_lock, am_parallel_vacuum_options,
+        // am_use_maintenance_work_mem, relation_get_number_of_blocks_pv,
+        // relation_get_namespace_name_pv) carry the real value types
+        // (Relation<'mcx> / &Relation<'mcx>) and are installed by
+        // vacuumparallel::init_seams, delegating to the canonical table-AM
+        // (table_open), index-AM (GetIndexAmRoutineByAmId), relcache/smgr
+        // (RelationGetNumberOfBlocks) and lsyscache (get_namespace_name)
+        // providers. Allowlist entries removed below.
         //
         // RESOLVED (vp-dsm lane): the VacuumSharedCostBalance/VacuumActiveNWorkers
         // DSM atomics and the per-worker DSM instrument usage slots are now
@@ -1898,13 +1897,6 @@ mod recurrence_guard {
         // `get_access_strategy_with_size` + `get_access_strategy_buffer_count`
         // seams are INSTALLED by vacuumparallel::init_seams over
         // backend-storage-buffer-support; entry removed below.
-        ("backend_commands_vacuum", "am_parallel_vacuum_options"),
-        ("backend_commands_vacuum", "am_use_maintenance_work_mem"),
-        ("backend_commands_vacuum", "relation_get_namespace_name_pv"),
-        ("backend_commands_vacuum", "relation_get_number_of_blocks_pv"),
-        ("backend_commands_vacuum", "table_close_lock"),
-        ("backend_commands_vacuum", "table_open_lock"),
-
         // DESIGN_DEBT (TD-SUBSCRIPTION-CHECKRELKIND): CheckSubscriptionRelkind
         // is declared here but actually lives in executor/execReplication.c
         // (and is called from worker.c / relation.c / subscriptioncmds.c), not

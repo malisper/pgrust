@@ -45,3 +45,12 @@ backend-utils-activity-small = { path = "../backend-utils-activity-small" }
 backend-storage-buffer-support = { path = "../backend-storage-buffer-support" }
 # `MyProc->statusFlags` PROC_IN_VACUUM accessor (proc.c).
 backend-storage-lmgr-proc = { path = "../backend-storage-lmgr-proc" }
+
+# Value-typed Relation reopen + accessors for the 6 worker/leader seams:
+#  * `table_open(mcx, oid, lockmode)` — the worker/leader Relation reopen;
+#  * `GetIndexAmRoutineByAmId` — the index-AM options;
+#  * `RelationGetNumberOfBlocks` — relcache/smgr block count.
+# (`get_namespace_name` rides the vacuumlazy seam hub already depended on.)
+backend-access-table-table-seams = { path = "../backend-access-table-table-seams" }
+backend-access-index-amapi-seams = { path = "../backend-access-index-amapi-seams" }
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }

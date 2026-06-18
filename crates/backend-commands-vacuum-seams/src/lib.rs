@@ -343,28 +343,33 @@ seam_core::seam!(
     pub fn vac_close_indexes_lock(indrels: Vec<Oid>, lockmode: i32) -> PgResult<()>
 );
 seam_core::seam!(
-    /// `table_open(relid, lockmode)`.
-    pub fn table_open_lock(relid: Oid, lockmode: i32) -> PgResult<Oid>
+    /// `table_open(relid, lockmode)` — the parallel-vacuum worker reopens the
+    /// heap as an owned `Relation` allocated in the worker's transaction arena.
+    pub fn table_open_lock<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+        lockmode: i32,
+    ) -> PgResult<Relation<'mcx>>
 );
 seam_core::seam!(
-    /// `table_close(rel, lockmode)`.
-    pub fn table_close_lock(rel: Oid, lockmode: i32) -> PgResult<()>
+    /// `table_close(rel, lockmode)` — release the worker's heap `Relation`.
+    pub fn table_close_lock<'mcx>(rel: Relation<'mcx>, lockmode: i32) -> PgResult<()>
 );
 seam_core::seam!(
     /// `indrel->rd_indam->amparallelvacuumoptions`.
-    pub fn am_parallel_vacuum_options(indrel: Oid) -> PgResult<u8>
+    pub fn am_parallel_vacuum_options<'mcx>(indrel: &Relation<'mcx>) -> PgResult<u8>
 );
 seam_core::seam!(
     /// `indrel->rd_indam->amusemaintenanceworkmem`.
-    pub fn am_use_maintenance_work_mem(indrel: Oid) -> PgResult<bool>
+    pub fn am_use_maintenance_work_mem<'mcx>(indrel: &Relation<'mcx>) -> PgResult<bool>
 );
 seam_core::seam!(
     /// `RelationGetNumberOfBlocks(indrel)`.
-    pub fn relation_get_number_of_blocks_pv(indrel: Oid) -> PgResult<u32>
+    pub fn relation_get_number_of_blocks_pv<'mcx>(indrel: &Relation<'mcx>) -> PgResult<u32>
 );
 seam_core::seam!(
     /// `get_namespace_name(RelationGetNamespace(rel))`.
-    pub fn relation_get_namespace_name_pv(rel: Oid) -> PgResult<String>
+    pub fn relation_get_namespace_name_pv<'mcx>(rel: &Relation<'mcx>) -> PgResult<String>
 );
 seam_core::seam!(
     /// `min_parallel_index_scan_size` GUC (optimizer/paths.h).

@@ -69,7 +69,7 @@ use types_core::Oid;
 use types_dsa::{DsaHandle, DsaPointer};
 use types_execparallel::ParallelContextHandle;
 use types_storage::buf::BufferAccessStrategy;
-use types_storage::lock::{RowExclusiveLock, ShareUpdateExclusiveLock};
+use types_storage::lock::{NoLock, RowExclusiveLock, ShareUpdateExclusiveLock};
 use types_storage::storage::LWTRANCHE_PARALLEL_VACUUM_DSA;
 use types_vacuum::vacuumlazy::{
     ParallelVacuumInit, ParallelVacuumInitArgs, ParallelVacuumStateHandle, TidStore,
@@ -83,6 +83,10 @@ use backend_commands_vacuum_seams as vac;
 use backend_access_heap_vacuumlazy_seams as vl;
 use backend_access_transam_parallel as p;
 use backend_access_transam_parallel_rt_seams as prt;
+
+use backend_access_table_table_seams as table_seam;
+use backend_access_index_amapi_seams as amapi;
+use backend_utils_cache_relcache_seams as relcache_sx;
 
 use backend_access_common_tidstore as tidstore;
 use backend_executor_instrument as instrument;
@@ -469,12 +473,23 @@ fn parallel_vacuum_init(args: ParallelVacuumInitArgs) -> PgResult<ParallelVacuum
     debug_assert!(nrequested >= 0);
     debug_assert!(nindexes > 0);
 
+    // The C `CreateParallelContext` allocates the worker array + DSM bookkeeping
+    // in TopTransactionContext; the parallel-infra seams need an Mcx, and the
+    // leader transiently reopens each index `Relation` (to read its index-AM
+    // options / block count off the real value type, exactly as C reads
+    // `indrel->rd_indam->...` off the already-open leader relations). There is
+    // no Mcx in the inward `parallel_vacuum_init` contract, so use a crate-owned
+    // context for the duration of the calls (mirrors the src-idiomatic
+    // `MemoryContext::new` idiom for the same calls).
+    let ctx = mcx::MemoryContext::new("parallel_vacuum_init");
+    let mcx = ctx.mcx();
+
     /*
      * Compute the number of parallel vacuum workers to launch.
      */
     let mut will_parallel_vacuum = alloc::vec![false; nindexes as usize];
     let parallel_workers =
-        parallel_vacuum_compute_workers(&indrels, nrequested, &mut will_parallel_vacuum)?;
+        parallel_vacuum_compute_workers(mcx, &indrels, nrequested, &mut will_parallel_vacuum)?;
     if parallel_workers <= 0 {
         /* Can't perform vacuum in parallel -- return NULL */
         return Ok(ParallelVacuumInit {
@@ -496,14 +511,6 @@ fn parallel_vacuum_init(args: ParallelVacuumInitArgs) -> PgResult<ParallelVacuum
     };
 
     prt::enter_parallel_mode::call()?;
-
-    // The C `CreateParallelContext` allocates the worker array + DSM bookkeeping
-    // in TopTransactionContext; the parallel-infra seams need an Mcx. There is
-    // no Mcx in the inward `parallel_vacuum_init` contract, so use a crate-owned
-    // context for the duration of the calls (mirrors the src-idiomatic
-    // `MemoryContext::new` idiom for the same calls).
-    let ctx = mcx::MemoryContext::new("parallel_vacuum_init");
-    let mcx = ctx.mcx();
 
     let pcxt = p::create_parallel_context(
         mcx,
@@ -561,8 +568,11 @@ fn parallel_vacuum_init(args: ParallelVacuumInitArgs) -> PgResult<ParallelVacuum
     let mut indstats: Vec<PVIndStats> = alloc::vec![PVIndStats::default(); nindexes as usize];
     let mut nindexes_mwm = 0;
     for i in 0..nindexes as usize {
-        let indrel = pvs.indrels[i];
-        let vacoptions = vac::am_parallel_vacuum_options::call(indrel)?;
+        /* Recover the leader's already-open index Relation from the relcache
+         * (NoLock: the index is held under RowExclusiveLock by the leader) to
+         * read its index-AM options off the real value type. */
+        let indrel = vac::table_open_lock::call(mcx, pvs.indrels[i], NoLock)?;
+        let vacoptions = vac::am_parallel_vacuum_options::call(&indrel)?;
 
         /*
          * Cleanup option should be either disabled, always performing in
@@ -578,7 +588,7 @@ fn parallel_vacuum_init(args: ParallelVacuumInitArgs) -> PgResult<ParallelVacuum
             continue;
         }
 
-        if vac::am_use_maintenance_work_mem::call(indrel)? {
+        if vac::am_use_maintenance_work_mem::call(&indrel)? {
             nindexes_mwm += 1;
         }
 
@@ -837,7 +847,8 @@ fn shared_snapshot(shared: &PVShared) -> SharedSnapshot {
 
 /// `parallel_vacuum_compute_workers(indrels, nindexes, nrequested,
 /// will_parallel_vacuum)` (vacuumparallel.c:548).
-fn parallel_vacuum_compute_workers(
+fn parallel_vacuum_compute_workers<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
     indrels: &[Oid],
     nrequested: i32,
     will_parallel_vacuum: &mut [bool],
@@ -858,12 +869,12 @@ fn parallel_vacuum_compute_workers(
      * Compute the number of indexes that can participate in parallel vacuum.
      */
     for i in 0..nindexes {
-        let indrel = indrels[i];
-        let vacoptions = vac::am_parallel_vacuum_options::call(indrel)?;
+        let indrel = vac::table_open_lock::call(mcx, indrels[i], NoLock)?;
+        let vacoptions = vac::am_parallel_vacuum_options::call(&indrel)?;
 
         /* Skip index that is not a suitable target for parallel index vacuum */
         if vacoptions == VACUUM_OPTION_NO_PARALLEL
-            || vac::relation_get_number_of_blocks_pv::call(indrel)?
+            || vac::relation_get_number_of_blocks_pv::call(&indrel)?
                 < vac::min_parallel_index_scan_size::call()? as u32
         {
             continue;
@@ -950,10 +961,19 @@ fn parallel_vacuum_process_all_indexes(
      * Set index vacuum status and mark whether parallel vacuum worker can
      * process it.
      */
+    // Reopen each index Relation transiently (NoLock relcache recover) to read
+    // its index-AM options off the real value type in `is_parallel_safe`.
+    let safe_ctx = mcx::MemoryContext::new("parallel_vacuum_index_is_parallel_safe");
+    let safe_mcx = safe_ctx.mcx();
     for i in 0..pvs.nindexes as usize {
         debug_assert!(pvs.indstats[i].status == PVIndVacStatus::Initial);
         let new_can_process = pvs.will_parallel_vacuum[i]
-            && parallel_vacuum_index_is_parallel_safe(pvs.indrels[i], num_index_scans, vacuum)?;
+            && parallel_vacuum_index_is_parallel_safe(
+                safe_mcx,
+                pvs.indrels[i],
+                num_index_scans,
+                vacuum,
+            )?;
         let indstats = &mut pvs.indstats[i];
         indstats.status = new_status;
         indstats.parallel_workers_can_process = new_can_process;
@@ -1253,12 +1273,14 @@ fn parallel_vacuum_process_one_index(
 
 /// `parallel_vacuum_index_is_parallel_safe(indrel, num_index_scans, vacuum)`
 /// (vacuumparallel.c:950).
-fn parallel_vacuum_index_is_parallel_safe(
+fn parallel_vacuum_index_is_parallel_safe<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
     indrel: Oid,
     num_index_scans: i32,
     vacuum: bool,
 ) -> PgResult<bool> {
-    let vacoptions = vac::am_parallel_vacuum_options::call(indrel)?;
+    let indrel = vac::table_open_lock::call(mcx, indrel, NoLock)?;
+    let vacoptions = vac::am_parallel_vacuum_options::call(&indrel)?;
 
     /* In parallel vacuum case, check if it supports parallel bulk-deletion */
     if vacuum {
@@ -1308,15 +1330,26 @@ pub fn parallel_vacuum_main() -> PgResult<()> {
     vac::pgstat_report_query_id_pv::call(shared.queryid, false)?;
 
     /*
+     * The parallel-vacuum worker runs inside its own transaction (the parallel
+     * bootstrap started one before dispatching here), so it has its own memory
+     * context / arena. Reopen the heap + indexes as owned `Relation<'mcx>`
+     * allocated in that arena — held live for the whole worker call, exactly as
+     * C holds `rel` open from `table_open` to `table_close` (vacuumparallel.c:
+     * 1026..1108).
+     */
+    let ctx = mcx::MemoryContext::new("parallel_vacuum_main");
+    let mcx = ctx.mcx();
+
+    /*
      * Open table.  The lock mode is the same as the leader process.
      */
-    let rel = vac::table_open_lock::call(shared.relid, ShareUpdateExclusiveLock)?;
+    let rel = vac::table_open_lock::call(mcx, shared.relid, ShareUpdateExclusiveLock)?;
 
     /*
      * Open all indexes. indrels are sorted in order by OID, matching the
      * leader's.
      */
-    let indrels = vac::vac_open_indexes_lock::call(rel, RowExclusiveLock)?;
+    let indrels = vac::vac_open_indexes_lock::call(rel.rd_id, RowExclusiveLock)?;
     let nindexes = indrels.len() as i32;
     debug_assert!(nindexes > 0);
 
@@ -1346,8 +1379,9 @@ pub fn parallel_vacuum_main() -> PgResult<()> {
     vac::set_vacuum_active_nworkers_enable::call(Some(Arc::clone(&shared.cost_state)))?;
 
     /* Set parallel vacuum state */
-    let relnamespace = vac::relation_get_namespace_name_pv::call(rel)?;
-    let relname = vac::relation_get_relation_name::call(rel)?;
+    let relnamespace = vac::relation_get_namespace_name_pv::call(&rel)?;
+    let relname = vac::relation_get_relation_name::call(rel.rd_id)?;
+    let heaprel_oid = rel.rd_id;
     let mut pvs = ParallelVacuumState {
         indrels,
         nindexes,
@@ -1369,7 +1403,7 @@ pub fn parallel_vacuum_main() -> PgResult<()> {
         dead_items,
         relnamespace: Some(relnamespace),
         relname: Some(relname),
-        heaprel: rel,
+        heaprel: heaprel_oid,
         /* These fields will be filled during index vacuum or cleanup */
         indname: None,
         status: PVIndVacStatus::Initial,
@@ -1409,6 +1443,9 @@ pub fn parallel_vacuum_main() -> PgResult<()> {
     vac::vac_close_indexes_lock::call(pvs.indrels.clone(), RowExclusiveLock)?;
     vac::table_close_lock::call(rel, ShareUpdateExclusiveLock)?;
     vac::free_access_strategy_pv::call(core::mem::take(&mut pvs.bstrategy))?;
+
+    /* The worker's relation arena is released with the worker transaction. */
+    drop(ctx);
 
     Ok(())
 }
@@ -1576,6 +1613,46 @@ fn install_pv_outward_seams() {
     // current exactly as C does.
     vac::push_parallel_vacuum_error_context::set(|| Ok(()));
     vac::pop_parallel_vacuum_error_context::set(|| Ok(()));
+
+    // --- by-OID heap/index reopen -> real value-typed Relation accessors -----
+    // The parallel-vacuum worker (and the leader transiently, when reading an
+    // index's AM options) reopens the heap + indexes BY OID as owned
+    // `Relation<'mcx>`s allocated in the caller's transaction arena. These 6
+    // seams used to carry Oid tokens; they now carry the real value types,
+    // delegating to the canonical table-AM / index-AM / relcache providers.
+
+    // `table_open(relid, lockmode)` — recover the owned `Relation` from the
+    // relcache (the worker takes the real lock; the leader passes NoLock to
+    // recover an already-locked index without re-locking), exactly the
+    // open-then-recover idiom the heap/vac_open_indexes path uses.
+    vac::table_open_lock::set(|mcx, relid, lockmode| {
+        table_seam::table_open::call(mcx, relid, lockmode)
+    });
+    // `table_close(rel, lockmode)` — drop the relcache reference; the lock is
+    // held until commit, so `Relation::close` releases the entry.
+    vac::table_close_lock::set(|rel, lockmode| rel.close(lockmode));
+
+    // `indrel->rd_indam->amparallelvacuumoptions` / `->amusemaintenanceworkmem`
+    // — resolve the index AM routine from the index's `rd_rel->relam` and read
+    // the flag off it.
+    vac::am_parallel_vacuum_options::set(|indrel| {
+        Ok(amapi::get_index_am_routine_by_amid::call(indrel.rd_rel.relam)?.amparallelvacuumoptions)
+    });
+    vac::am_use_maintenance_work_mem::set(|indrel| {
+        Ok(amapi::get_index_am_routine_by_amid::call(indrel.rd_rel.relam)?.amusemaintenanceworkmem)
+    });
+
+    // `RelationGetNumberOfBlocks(indrel)` — the relcache/smgr block count.
+    vac::relation_get_number_of_blocks_pv::set(|rel| {
+        relcache_sx::relation_get_number_of_blocks::call(rel)
+    });
+
+    // `get_namespace_name(RelationGetNamespace(rel))` — the schema name for the
+    // worker's reopened heap relation (via the lsyscache seam already on the
+    // vacuumlazy hub).
+    vac::relation_get_namespace_name_pv::set(|rel| {
+        vl::get_namespace_name::call(rel.rd_rel.relnamespace)
+    });
 }
 
 /// `debug_query_string = sharedquery` (vacuumparallel.c:1015). The worker copies
