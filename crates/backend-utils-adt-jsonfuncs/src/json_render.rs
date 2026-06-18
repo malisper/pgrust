@@ -181,6 +181,80 @@ pub fn deconstruct_array<'mcx>(mcx: Mcx<'mcx>, array: &Datum<'mcx>) -> PgResult<
     })
 }
 
+/// `deconstruct_array(in_array, TEXTOID, -1, false, TYPALIGN_INT, ...)` for
+/// `json_object` (json.c:1405) / `json_object_two_arg` (json.c:1489): walk a
+/// `text[]` array image and return its `ndim` / `dims` plus, per element, the
+/// header-stripped `text` payload bytes (`VARDATA_ANY` over
+/// `VARSIZE_ANY_EXHDR`) or `None` for a SQL-NULL element. Mirrors the per-byte
+/// element walk in `deconstruct_array` above but with the fixed text element
+/// triple (`typlen=-1`, `typbyval=false`, `typalign='i'`).
+pub fn deconstruct_text_array<'mcx>(
+    mcx: Mcx<'mcx>,
+    array: &Datum<'mcx>,
+) -> PgResult<(i32, Vec<i32>, Vec<Option<Vec<u8>>>)> {
+    let v = backend_access_common_detoast_seams::detoast_attr::call(mcx, array.as_ref_bytes())?;
+
+    let ndim = foundation::arr_ndim(&v);
+    let dims = foundation::arr_dims(mcx, &v)?;
+
+    // text element triple: typlen = -1 (varlena), typbyval = false,
+    // typalign = TYPALIGN_INT ('i').
+    const ELMLEN: i32 = -1;
+    const ELMALIGN: u8 = b'i';
+
+    let nelems: i64 = if ndim <= 0 {
+        0
+    } else {
+        let mut n: i64 = 1;
+        for &d in dims.as_slice() {
+            n *= d as i64;
+        }
+        n
+    };
+
+    let mut out: Vec<Option<Vec<u8>>> = Vec::with_capacity(nelems.max(0) as usize);
+
+    let mut p = foundation::arr_data_ptr_off(&v);
+    let bitmap = foundation::arr_nullbitmap_off(&v);
+    let mut bitmap_byte = bitmap;
+    let mut bitmask: i32 = 1;
+
+    for _ in 0..nelems {
+        let is_null_here = match bitmap_byte {
+            Some(b) => (v[b] as i32 & bitmask) == 0,
+            None => false,
+        };
+        if is_null_here {
+            out.push(None);
+        } else {
+            // VARDATA_ANY(p) / VARSIZE_ANY_EXHDR(p): a 1-byte-header (short)
+            // varlena's payload starts at off+1 (len = VARSIZE_1B - 1); a
+            // 4-byte-header varlena's payload starts at off+4 (len =
+            // VARSIZE_4B - 4). Elements are never externally toasted (the array
+            // image was detoasted above).
+            let (data_off, data_len) = if foundation::varatt_is_1b(&v, p) {
+                (p + 1, foundation::varsize_1b(&v, p) - 1)
+            } else {
+                (p + 4, foundation::varsize_4b(&v, p) - 4)
+            };
+            out.push(Some(v[data_off..data_off + data_len].to_vec()));
+
+            p = foundation::att_addlength_pointer(p, ELMLEN, &v, p);
+            p = foundation::att_align_nominal(p, ELMALIGN);
+        }
+
+        if let Some(b) = bitmap_byte.as_mut() {
+            bitmask <<= 1;
+            if bitmask == 0x100 {
+                *b += 1;
+                bitmask = 1;
+            }
+        }
+    }
+
+    Ok((ndim, dims.as_slice().to_vec(), out))
+}
+
 /// The catalog/typcache half of `composite_to_json` (json.c:520):
 /// `lookup_rowtype_tupdesc(HeapTupleHeaderGetTypeId/TypMod)`, the per-attribute
 /// `heap_getattr`, and the per-attribute `json_categorize_type`. Returns one

@@ -48,5 +48,6 @@ pub fn init_seams() {
     seams::cast_function_call::set(json_render::cast_function_call);
     seams::text_datum_bytes::set(json_render::text_datum_bytes);
     seams::deconstruct_array::set(json_render::deconstruct_array);
+    seams::deconstruct_text_array::set(json_render::deconstruct_text_array);
     seams::walk_composite::set(json_render::walk_composite);
 }

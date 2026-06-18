@@ -42,6 +42,9 @@ use types_fmgr::boundary::RefPayload;
 use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
 
 use backend_utils_adt_jsonb_util::VARHDRSZ;
+use backend_utils_fmgr_core as fmgr_core;
+/// The unified value type the `to_jsonb` core consumes (`types_tuple::Datum`).
+use types_tuple::Datum as ValDatum;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -88,6 +91,54 @@ fn arg_cstring<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
 #[inline]
 fn arg_int64(fcinfo: &FunctionCallInfoBaseData, i: usize) -> i64 {
     fcinfo.arg(i).expect("jsonb fn: missing arg").value.as_i64()
+}
+
+/// `get_fn_expr_argtype(fcinfo->flinfo, i)`: the actual type OID of a
+/// polymorphic argument resolved from the calling expression tree (the
+/// `anyelement` resolution path for `to_jsonb`).
+#[inline]
+fn fn_expr_argtype(fcinfo: &FunctionCallInfoBaseData, i: i32) -> types_core::Oid {
+    fmgr_core::get_fn_expr_argtype(fcinfo.flinfo.as_deref(), i)
+}
+
+/// Materialize argument `i` as the unified `types_tuple::Datum` the `to_jsonb`
+/// value core consumes: a by-value scalar word, a by-reference varlena, a
+/// `cstring`, or a composite record. Scratch copies live in `mcx`. The arg must
+/// be non-NULL (`to_jsonb` is `proisstrict`).
+///
+/// The `to_jsonb` core routes scalar by-reference types (`text`/numeric/...)
+/// through `output_function_call` → the type's output function, which reads its
+/// arg off the fmgr by-reference lane in the same header-STRIPPED form the lane
+/// already carries; arrays/composites cross as full images and the core's
+/// `detoast_attr` consumes them directly. So the lane bytes are forwarded as
+/// the `ByRef` image verbatim — no header re-attachment (which would corrupt the
+/// scalar output-function path).
+fn arg_value<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    fcinfo: &FunctionCallInfoBaseData,
+    i: usize,
+) -> types_error::PgResult<ValDatum<'mcx>> {
+    Ok(match fcinfo.ref_arg(i) {
+        Some(RefPayload::Varlena(b)) => ValDatum::ByRef(mcx::slice_in(mcx, b)?),
+        Some(RefPayload::Cstring(s)) => ValDatum::Cstring(s.clone()),
+        Some(RefPayload::Composite(image)) => {
+            ValDatum::Composite(types_tuple::FormedTuple::from_datum_image(mcx, image)?)
+        }
+        Some(RefPayload::Expanded(eo)) => {
+            ValDatum::ByRef(mcx::slice_in(mcx, &types_datum::flatten_expanded(eo.as_ref()))?)
+        }
+        // `to_jsonb` does not take an `internal` argument.
+        Some(RefPayload::Internal(_)) => {
+            panic!("to_jsonb: unexpected `internal` argument on the by-ref lane")
+        }
+        None => ValDatum::ByVal(
+            fcinfo
+                .arg(i)
+                .expect("jsonb fn: missing by-value arg")
+                .value
+                .as_usize(),
+        ),
+    })
 }
 
 /// Set a `jsonb` (by-reference) result on the by-ref lane and return the dummy
@@ -201,6 +252,21 @@ fn fc_jsonb_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     out.extend_from_slice(&header.to_ne_bytes());
     out.extend_from_slice(&wire);
     ret_varlena(fcinfo, out)
+}
+
+// ---------------------------------------------------------------------------
+// Output family (jsonb.c) -> jsonb.
+// ---------------------------------------------------------------------------
+
+/// `to_jsonb(anyelement) -> jsonb` (oid 3787). `val_type =
+/// get_fn_expr_argtype(flinfo, 0)` resolves the polymorphic input type, then
+/// the value is classified + rendered into a `jsonb` image by the core.
+fn fc_to_jsonb(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let val_type = fn_expr_argtype(fcinfo, 0);
+    let m = scratch_mcx();
+    let val = ok(arg_value(m.mcx(), fcinfo, 0));
+    let image = ok(crate::to_jsonb(m.mcx(), &val, val_type));
+    ret_jsonb(fcinfo, image.as_slice().to_vec())
 }
 
 // ---------------------------------------------------------------------------
@@ -324,6 +390,8 @@ pub fn register_jsonb_builtins() {
         builtin(3805, "jsonb_recv", 1, true, false, fc_jsonb_recv),
         builtin(3804, "jsonb_out", 1, true, false, fc_jsonb_out),
         builtin(3803, "jsonb_send", 1, true, false, fc_jsonb_send),
+        // Output family: resolved-arg-type + arbitrary-type output dispatch.
+        builtin(3787, "to_jsonb", 1, true, false, fc_to_jsonb),
         // B-Tree comparison -> bool.
         builtin(4043, "jsonb_eq", 2, true, false, fc_jsonb_eq),
         builtin(4038, "jsonb_ne", 2, true, false, fc_jsonb_ne),

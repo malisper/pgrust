@@ -83,6 +83,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `deconstruct_array(in_array, TEXTOID, -1, false, TYPALIGN_INT, ...)` for
+    /// `json_object` / `json_object_two_arg`: walk a `text[]` array image and
+    /// return its dimensionality (`ndim`, `dims`) plus one entry per element —
+    /// the header-stripped `text` payload bytes (`VARDATA_ANY`) or `None` for a
+    /// SQL NULL element. Allocates the detoasted image + payload copies in `mcx`.
+    pub fn deconstruct_text_array<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        array: &Datum<'mcx>,
+    ) -> PgResult<(i32, Vec<i32>, Vec<Option<Vec<u8>>>)>
+);
+
+seam_core::seam!(
     /// The catalog half of `composite_to_json` — `lookup_rowtype_tupdesc`, the
     /// per-attribute `heap_getattr`, and the per-attribute
     /// `json_categorize_type`. Returns one entry per *non-dropped* attribute

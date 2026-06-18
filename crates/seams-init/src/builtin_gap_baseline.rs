@@ -25,7 +25,7 @@
 //! test that runs `crate::init_all()` then formats `missing_builtins()` (sorted
 //! by `foid`) as the `(oid, "prosrc", BuiltinGapKind::...)` rows below.
 //!
-//! Current gap: 1347 of 3102 canonical built-ins (1347 not registered,
+//! Current gap: 1339 of 3102 canonical built-ins (1339 not registered,
 //! 0 registered with diverging metadata).
 
 use backend_utils_fmgr_core::BuiltinGapKind;
@@ -605,10 +605,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (3150, "pg_stat_get_db_temp_files", BuiltinGapKind::NotRegistered),
     (3151, "pg_stat_get_db_temp_bytes", BuiltinGapKind::NotRegistered),
     (3152, "pg_stat_get_db_deadlocks", BuiltinGapKind::NotRegistered),
-    (3153, "array_to_json", BuiltinGapKind::NotRegistered),
-    (3154, "array_to_json_pretty", BuiltinGapKind::NotRegistered),
-    (3155, "row_to_json", BuiltinGapKind::NotRegistered),
-    (3156, "row_to_json_pretty", BuiltinGapKind::NotRegistered),
     (3157, "numeric_support", BuiltinGapKind::NotRegistered),
     (3158, "varbit_support", BuiltinGapKind::NotRegistered),
     (3159, "pg_get_viewdef_wrap", BuiltinGapKind::NotRegistered),
@@ -622,7 +618,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (3169, "rangesel", BuiltinGapKind::NotRegistered),
     (3173, "json_agg_transfn", BuiltinGapKind::NotRegistered),
     (3174, "json_agg_finalfn", BuiltinGapKind::NotRegistered),
-    (3176, "to_json", BuiltinGapKind::NotRegistered),
     (3177, "pg_stat_get_mod_since_analyze", BuiltinGapKind::NotRegistered),
     (3178, "numeric_sum", BuiltinGapKind::NotRegistered),
     (3179, "array_cardinality", BuiltinGapKind::NotRegistered),
@@ -634,8 +629,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (3199, "json_build_array_noargs", BuiltinGapKind::NotRegistered),
     (3200, "json_build_object", BuiltinGapKind::NotRegistered),
     (3201, "json_build_object_noargs", BuiltinGapKind::NotRegistered),
-    (3202, "json_object", BuiltinGapKind::NotRegistered),
-    (3203, "json_object_two_arg", BuiltinGapKind::NotRegistered),
     (3204, "json_to_record", BuiltinGapKind::NotRegistered),
     (3205, "json_to_recordset", BuiltinGapKind::NotRegistered),
     (3208, "jsonb_each", BuiltinGapKind::NotRegistered),
@@ -952,7 +945,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (3784, "pg_logical_slot_peek_changes", BuiltinGapKind::NotRegistered),
     (3785, "pg_logical_slot_peek_binary_changes", BuiltinGapKind::NotRegistered),
     (3786, "pg_create_logical_replication_slot", BuiltinGapKind::NotRegistered),
-    (3787, "to_jsonb", BuiltinGapKind::NotRegistered),
     (3788, "pg_stat_get_snapshot_timestamp", BuiltinGapKind::NotRegistered),
     (3789, "gin_clean_pending_list", BuiltinGapKind::NotRegistered),
     (3790, "gtsvector_consistent_oldsig", BuiltinGapKind::NotRegistered),
