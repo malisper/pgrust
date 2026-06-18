@@ -60,6 +60,7 @@ use types_tuple::heaptuple::TupleDescData;
 use backend_executor_execSRF_seams as seams;
 
 mod generate_series;
+mod pg_input_error_info;
 mod srf_registry;
 pub use srf_registry::{register_srf, srf_invoke_by_oid, srf_is_registered};
 
@@ -77,6 +78,9 @@ pub fn init_seams() {
     // SRFs (the by-OID builtin registry's tag-only resultinfo can't carry the
     // live ReturnSetInfo — WONTFIX dual-home).
     generate_series::register_generate_series();
+    // `pg_input_error_info(text, text) RETURNS record` (OID 6211) — a
+    // single-row composite record function reached via nodeFunctionscan.
+    pg_input_error_info::register_pg_input_error_info();
 }
 
 // ===========================================================================
@@ -408,27 +412,62 @@ fn ExecMakeTableFunctionResult<'mcx>(
                     // C: store current resultset item.
                     if returns_tuple {
                         // Composite return: C stores the returned HeapTupleHeader
-                        // Datum directly (`tuplestore_puttuple`). The owned model
-                        // carries it as `Datum::Composite(FormedTuple)`; decomposing
-                        // it into per-column values + `tuplestore_putvalues` is
-                        // BLOCKED on the by-reference-Datum varlena-header convention
-                        // unification (the deep follow-on): `heap_deform_tuple` /
-                        // `tuplestore_putvalues` carry a varlena `ByRef` as the FULL
-                        // on-disk image (header included), but the const/output lane
-                        // (`textout` → `text_to_cstring`) reads a HEADER-LESS payload,
-                        // so a text column round-tripped through a tuplestore prints
-                        // with a stray header byte. Surfaces loudly until the ByRef
-                        // varlena-header convention is unified tree-wide.
-                        let _ = (&result, result_isnull);
-                        return Err(ereport(ERROR)
-                            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-                            .errmsg(
-                                "composite-returning table function not yet supported \
-                                 (by-reference Datum varlena-header convention unification \
-                                 keystone: heap-tuple ByRef is header-full, the output lane \
-                                 reads header-less)",
+                        // Datum directly (`tuplestore_puttuple(tupstore, tuple)`).
+                        // The owned model carries it as `Datum::Composite(FormedTuple)`;
+                        // we deform it against the expected row descriptor and store
+                        // the per-column `(value, isnull)` series with
+                        // `tuplestore_putvalues` (the same descriptor the printtup
+                        // output lane reads it back with, so a text column's
+                        // by-reference varlena round-trips header-for-header).
+                        if !result_isnull {
+                            let formed = result.as_composite().ok_or_else(|| {
+                                ereport(ERROR)
+                                    .errcode(ERRCODE_INTERNAL_ERROR)
+                                    .errmsg(
+                                        "table function returning a composite type did not \
+                                         return a composite Datum",
+                                    )
+                                    .into_error()
+                            })?;
+                            let cols = backend_access_common_heaptuple::heap_deform_tuple(
+                                per_query,
+                                &formed.tuple,
+                                expected_desc,
+                                &formed.data,
                             )
-                            .into_error());
+                            .map_err(|e| {
+                                ereport(ERROR)
+                                    .errcode(ERRCODE_INTERNAL_ERROR)
+                                    .errmsg(alloc::format!(
+                                        "heap_deform_tuple in table function: {e:?}"
+                                    ))
+                                    .into_error()
+                            })?;
+                            let values: Vec<Datum> =
+                                cols.iter().map(|(d, _)| d.clone()).collect();
+                            let nulls: Vec<bool> = cols.iter().map(|(_, n)| *n).collect();
+                            backend_utils_sort_storage_seams::tuplestore_putvalues::call(
+                                &mut rsinfo.setResult,
+                                expected_desc,
+                                &values,
+                                &nulls,
+                            )?;
+                        } else {
+                            // A NULL composite Datum stores a single all-NULLs row
+                            // (C: `tuplestore_puttuple` of a NULL is not reached; a
+                            // strict composite SRF that yields NULL puts an all-NULL
+                            // row matching the descriptor).
+                            let natts = expected_desc.natts.max(0) as usize;
+                            let values: Vec<Datum> =
+                                (0..natts).map(|_| Datum::default()).collect();
+                            let nulls: Vec<bool> = (0..natts).map(|_| true).collect();
+                            backend_utils_sort_storage_seams::tuplestore_putvalues::call(
+                                &mut rsinfo.setResult,
+                                expected_desc,
+                                &values,
+                                &nulls,
+                            )?;
+                        }
                     } else {
                         // C: tuplestore_putvalues(tupstore, tupdesc, &result,
                         //                         &fcinfo->isnull);

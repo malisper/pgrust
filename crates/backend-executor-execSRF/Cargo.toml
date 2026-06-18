@@ -31,6 +31,13 @@ backend-utils-fmgr-funcapi = { path = "../backend-utils-fmgr-funcapi" }
 backend-utils-adt-int = { path = "../backend-utils-adt-int" }
 backend-utils-adt-int8 = { path = "../backend-utils-adt-int8" }
 
+# pg_input_error_info(text, text) RETURNS record (OID 6211): its soft-error
+# value core (misc), the text<->cstring varlena marshalling, and heap tuple
+# form/deform for the composite result + the composite table-function store path.
+backend-utils-adt-misc = { path = "../backend-utils-adt-misc" }
+backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+
 # Shared type stack + allocator + error.
 allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
 backend-utils-error = { path = "../backend-utils-error" }
