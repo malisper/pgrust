@@ -203,6 +203,25 @@ fc_range_result!(fc_range_in, crate::range_fmgr_boundary::range_in, 0usize);
 /// it as the cursor, NOT a `RangeType`, so it is not staged as a range arg).
 fc_range_result!(fc_range_recv, crate::range_fmgr_boundary::range_recv, 0usize);
 
+/// `range_constructor2(anyelement, anyelement) -> anyrange` (oid 3840 + per-type
+/// dups). Element args ride the by-value words; the result range type is read
+/// off `flinfo->fn_expr` (`get_fn_expr_rettype`), so a real planned call frame is
+/// required. Result range on the by-ref lane.
+fc_range_result!(
+    fc_range_constructor2,
+    crate::range_fmgr_boundary::range_constructor2,
+    0usize
+);
+
+/// `range_constructor3(anyelement, anyelement, text) -> anyrange` (oid 3841 +
+/// per-type dups). Like `_constructor2` plus a `text` flags arg (read off its
+/// by-value Datum word through the varlena seam).
+fc_range_result!(
+    fc_range_constructor3,
+    crate::range_fmgr_boundary::range_constructor3,
+    0usize
+);
+
 /// `range_out(anyrange) -> cstring` (oid 3835). Stages arg 0; the kernel sets the
 /// cstring result on the by-ref lane.
 fc_range_scalar!(fc_range_out, crate::range_fmgr_boundary::range_out, 1usize);
@@ -262,6 +281,26 @@ fc_range_result!(
     fc_range_intersect,
     crate::range_fmgr_boundary::range_intersect,
     2usize
+);
+
+// --- canonicalization (anyrange) -> anyrange -------------------------------
+// The result range type is the SAME as the input's (read off the arg range's
+// own header OID, not `flinfo->fn_expr`), so these need no planned call frame.
+
+fc_range_result!(
+    fc_int4range_canonical,
+    crate::range_fmgr_boundary::int4range_canonical_v1,
+    1usize
+);
+fc_range_result!(
+    fc_int8range_canonical,
+    crate::range_fmgr_boundary::int8range_canonical_v1,
+    1usize
+);
+fc_range_result!(
+    fc_daterange_canonical,
+    crate::range_fmgr_boundary::daterange_canonical_v1,
+    1usize
 );
 
 // --- hash -> int4 / int8 ----------------------------------------------------
@@ -338,9 +377,6 @@ fn builtin(
 /// - `range_sortsupport` (6391) / `range_typanalyze` (3916): take an `internal`
 ///   (`SortSupport` / `VacAttrStats`) executor-owned scratch struct, not
 ///   expressible on the by-ref boundary.
-/// - `range_constructor2` (3840) / `range_constructor3` (3841): resolve the
-///   result range type via `get_fn_expr_rettype(flinfo)`, which needs a
-///   populated `FmgrInfo.fn_expr` — not available on a bare registry call frame.
 /// - the `numrange`/`daterange`/`tsrange`/`tstzrange` subdiffs: ride the
 ///   Datum-seam arg surface of their element types (numeric/date/timestamp), not
 ///   the generic by-ref range boundary.
@@ -379,6 +415,25 @@ pub fn register_rangetypes_builtins() {
         builtin(3874, "range_gt", 2, true, false, fc_range_gt),
         // (range, range) -> int4 (3-way compare).
         builtin(3870, "range_cmp", 2, true, false, fc_range_cmp),
+        // constructors (anyelement[, anyelement[, text]]) -> anyrange. Non-strict
+        // (NULL bound => infinite); one (oid) row per built-in range type, all
+        // sharing the same kernel (C: identical prosrc across the six range types).
+        builtin(3840, "range_constructor2", 2, false, false, fc_range_constructor2),
+        builtin(3841, "range_constructor3", 3, false, false, fc_range_constructor3),
+        builtin(3844, "range_constructor2", 2, false, false, fc_range_constructor2),
+        builtin(3845, "range_constructor3", 3, false, false, fc_range_constructor3),
+        builtin(3933, "range_constructor2", 2, false, false, fc_range_constructor2),
+        builtin(3934, "range_constructor3", 3, false, false, fc_range_constructor3),
+        builtin(3937, "range_constructor2", 2, false, false, fc_range_constructor2),
+        builtin(3938, "range_constructor3", 3, false, false, fc_range_constructor3),
+        builtin(3941, "range_constructor2", 2, false, false, fc_range_constructor2),
+        builtin(3942, "range_constructor3", 3, false, false, fc_range_constructor3),
+        builtin(3945, "range_constructor2", 2, false, false, fc_range_constructor2),
+        builtin(3946, "range_constructor3", 3, false, false, fc_range_constructor3),
+        // canonicalize (anyrange) -> anyrange (the discrete-type rngcanonical procs).
+        builtin(3914, "int4range_canonical", 1, true, false, fc_int4range_canonical),
+        builtin(3928, "int8range_canonical", 1, true, false, fc_int8range_canonical),
+        builtin(3915, "daterange_canonical", 1, true, false, fc_daterange_canonical),
         // set operations (range, range) -> range.
         builtin(3867, "range_union", 2, true, false, fc_range_union),
         builtin(3868, "range_intersect", 2, true, false, fc_range_intersect),
