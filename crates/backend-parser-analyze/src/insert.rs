@@ -28,6 +28,9 @@ use crate::elog_error;
 /// to fold a real `AttrNumber` into the `RTEPermissionInfo` column bitmapset.
 const FIRST_LOW_INVALID_HEAP_ATTRIBUTE_NUMBER: i32 = -7;
 
+/// `UNKNOWNOID` (catalog/pg_type_d.h) — the unknown literal type.
+const UNKNOWNOID: Oid = 705;
+
 /// `transformInsertStmt(pstate, stmt)` (analyze.c:625) — transform an
 /// `InsertStmt` into an analyzed `Query`.
 pub fn transformInsertStmt<'mcx>(
@@ -81,6 +84,20 @@ pub fn transformInsertStmt<'mcx>(
             || s.withClause.is_some()
     });
 
+    // If a non-nil rangetable/namespace was passed in, and we are doing
+    // INSERT/SELECT, arrange to pass the rangetable/rteperminfos/namespace down
+    // to the SELECT (only happens inside CREATE RULE, for OLD/NEW). We must do
+    // this before adding the target table to the INSERT's rtable.
+    let (sub_rtable, sub_rteperminfos, sub_namespace) = if is_general_select {
+        (
+            core::mem::replace(&mut pstate.p_rtable, PgVec::new_in(mcx)),
+            core::mem::replace(&mut pstate.p_rteperminfos, PgVec::new_in(mcx)),
+            core::mem::replace(&mut pstate.p_namespace, PgVec::new_in(mcx)),
+        )
+    } else {
+        (PgVec::new_in(mcx), PgVec::new_in(mcx), PgVec::new_in(mcx))
+    };
+
     // Must get write lock on the INSERT target table before scanning SELECT.
     let mut target_perms = types_acl::acl::ACL_INSERT;
     if is_on_conflict_update {
@@ -108,9 +125,17 @@ pub fn transformInsertStmt<'mcx>(
         // defaulted when the planner expands the targetlist.
         PgVec::new_in(mcx)
     } else if is_general_select {
-        return Err(elog_error(
-            "INSERT ... SELECT (general select source) is not yet ported (analyze.c:731)",
-        ));
+        transformInsertSelect(
+            mcx,
+            pstate,
+            stmt.selectStmt.as_deref().unwrap(),
+            stmt,
+            sub_rtable,
+            sub_rteperminfos,
+            sub_namespace,
+            &icolumns,
+            &attrnos,
+        )?
     } else {
         let s = select_stmt.unwrap();
         if s.valuesLists.len() > 1 {
@@ -222,6 +247,112 @@ pub fn transformInsertStmt<'mcx>(
     backend_parser_parse_collate::assign_query_collations(Some(pstate), &mut qry)?;
 
     Ok(qry)
+}
+
+/// The general-SELECT source branch of `transformInsertStmt` (analyze.c:731).
+/// Transforms `INSERT INTO t SELECT ...` (and `INSERT ... SELECT <const>`): the
+/// source SELECT is transformed in a sub-pstate, wrapped as a `*SELECT*`
+/// subquery RTE in the INSERT's range table, and an expression list of Vars
+/// (or copied-up unknown literals) is built selecting the non-resjunk subquery
+/// columns.
+#[allow(clippy::too_many_arguments)]
+fn transformInsertSelect<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'mcx>,
+    select_stmt_node: &Node<'mcx>,
+    stmt: &InsertStmt<'mcx>,
+    sub_rtable: PgVec<'mcx, types_nodes::parsenodes::RangeTblEntry<'mcx>>,
+    sub_rteperminfos: PgVec<'mcx, types_nodes::parsenodes::RTEPermissionInfo<'mcx>>,
+    sub_namespace: PgVec<'mcx, types_nodes::parsestmt::ParseNamespaceItem<'mcx>>,
+    icolumns: &PgVec<'mcx, ResTarget<'mcx>>,
+    attrnos: &PgVec<'mcx, i32>,
+) -> PgResult<PgVec<'mcx, Expr>> {
+    // We make the sub-pstate a child of the outer pstate so that it can see any
+    // Param definitions supplied from above. Since the outer pstate's rtable and
+    // namespace are presently empty, there are no side-effects of exposing names
+    // the sub-SELECT shouldn't be able to see.
+    let mut sub_pstate = backend_parser_small1::make_parsestate(mcx, Some(pstate))?;
+    sub_pstate.p_rtable = sub_rtable;
+    sub_pstate.p_rteperminfos = sub_rteperminfos;
+    sub_pstate.p_joinexprs = PgVec::new_in(mcx); // sub_rtable has no joins
+    sub_pstate.p_nullingrels = PgVec::new_in(mcx);
+    sub_pstate.p_namespace = sub_namespace;
+    // Prevent resolving unknown-type outputs as TEXT; the target column type is
+    // applied below (analyze.c).
+    sub_pstate.p_resolve_unknowns = false;
+
+    let select_query = crate::transformStmt(mcx, &mut sub_pstate, select_stmt_node)?;
+
+    backend_parser_small1::free_parsestate(sub_pstate)?;
+
+    // The grammar should have produced a SELECT.
+    if select_query.commandType != CmdType::CMD_SELECT {
+        return Err(elog_error(
+            "unexpected non-SELECT command in INSERT ... SELECT",
+        ));
+    }
+
+    // Make the source be a subquery in the INSERT's rangetable, and add it to
+    // the INSERT's joinlist (but not the namespace).
+    let alias = backend_nodes_core::makefuncs::make_alias(mcx, "*SELECT*", PgVec::new_in(mcx))?;
+    let nsitem = backend_parser_relation::addRangeTableEntryForSubquery(
+        mcx,
+        pstate,
+        select_query,
+        Some(alias),
+        false,
+        false,
+    )?;
+    let rtindex = nsitem.p_rtindex;
+    // Read the subquery's targetlist (stored in the just-added RTE) before
+    // addNSItemToQuery consumes the nsitem.
+    let sub_target_list: PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>> = {
+        let rte = &pstate.p_rtable[(rtindex - 1) as usize];
+        let subq = rte
+            .subquery
+            .as_deref()
+            .ok_or_else(|| elog_error("INSERT ... SELECT subquery RTE has no subquery"))?;
+        let mut tl = mcx::vec_with_capacity_in(mcx, subq.targetList.len())?;
+        for te in subq.targetList.iter() {
+            tl.push(te.clone_in(mcx)?);
+        }
+        tl
+    };
+
+    backend_parser_relation::addNSItemToQuery(mcx, pstate, nsitem, true, false, false)?;
+
+    // Generate an expression list for the INSERT that selects all the
+    // non-resjunk columns from the subquery.
+    //
+    // HACK: unknown-type constants and params in the SELECT's targetlist are
+    // copied up as-is rather than referenced as subquery outputs, so they can
+    // be coerced to the target column type (see coerce_type special cases).
+    let mut expr_list: PgVec<'mcx, Expr> = PgVec::new_in(mcx);
+    for tle in sub_target_list.iter() {
+        if tle.resjunk {
+            continue;
+        }
+        let copy_up = matches!(
+            tle.expr.as_deref(),
+            Some(Expr::Const(_)) | Some(Expr::Param(_))
+        ) && backend_nodes_core::nodefuncs::expr_type(tle.expr.as_deref())? == UNKNOWNOID;
+
+        let expr = if copy_up {
+            tle.expr
+                .as_deref()
+                .ok_or_else(|| elog_error("INSERT ... SELECT TLE has no expr"))?
+                .clone_in(mcx)?
+        } else {
+            let mut var =
+                backend_nodes_core::makefuncs::make_var_from_target_entry(rtindex, tle)?;
+            var.location = backend_nodes_core::nodefuncs::expr_location(tle.expr.as_deref())?;
+            Expr::Var(var)
+        };
+        expr_list.push(expr);
+    }
+
+    // Prepare row for assignment to target table.
+    transformInsertRow(mcx, pstate, expr_list, &stmt.cols, icolumns, attrnos, false)
 }
 
 /// The multi-row `INSERT ... VALUES (...), (...), ...` branch of
