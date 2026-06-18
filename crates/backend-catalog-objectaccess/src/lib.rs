@@ -495,6 +495,23 @@ pub fn init_seams() {
     s::invoke_object_post_alter_hook_arg::set(invoke_object_post_alter_hook);
     s::invoke_function_execute_hook::set(invoke_function_execute_hook);
     s::InvokeObjectDropHookArg::set(invoke_object_drop_hook);
+
+    // guc_funcs.c (SetPGVariable) invokes the by-name post-alter hook for the
+    // GUC change through its own outward seam crate. C macro
+    // `InvokeObjectPostAlterHookArgStr(classId, name, subId, auxiliaryId,
+    // is_internal)` -> `RunObjectPostAlterHookStr`. The seam carries `name` as an
+    // owned String; borrow it for the &str-taking owner body.
+    backend_utils_misc_guc_funcs_seams::invoke_object_post_alter_hook_arg_str::set(
+        |class_id, object_name, sub_id, auxiliary_id, is_internal| {
+            invoke_object_post_alter_hook_str(
+                class_id,
+                &object_name,
+                sub_id,
+                auxiliary_id,
+                is_internal,
+            )
+        },
+    );
 }
 
 use types_core::primitive::InvalidOid;

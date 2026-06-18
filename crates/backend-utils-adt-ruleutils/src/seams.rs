@@ -54,6 +54,17 @@ pub fn init_seams() {
         crate::quote_qualified_identifier,
     );
 
+    // guc_funcs.c's GUC_LIST_QUOTE flatten branch (flatten_set_variable_args)
+    // reaches `quote_identifier` through its own outward seam crate. C:
+    // `char *quote_identifier(const char *)`; the owner is Mcx-bound (the result
+    // palloc), so run it in a scratch context and hand back an owned String.
+    backend_utils_misc_guc_funcs_seams::quote_identifier::set(|val| {
+        let scratch = mcx::MemoryContext::new("guc_funcs quote_identifier seam");
+        crate::quote_identifier(scratch.mcx(), &val)
+            .map(|s| alloc::string::String::from(s.as_str()))
+            .expect("quote_identifier failed")
+    });
+
     // Register the SQL-callable deparser builtins (C: their `fmgr_builtins[]`
     // rows) so by-OID fmgr dispatch resolves them.
     crate::register_ruleutils_builtins();
