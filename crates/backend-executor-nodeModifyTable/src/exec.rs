@@ -3,13 +3,13 @@
 //! enough to body-port independently of the rest of the node lifecycle.
 
 use mcx::Mcx;
-use types_datum::datum::Datum;
 use types_error::{PgError, PgResult};
 use types_nodes::nodes::CmdType;
 use types_nodes::{EStateData, ModifyTableState, RriId, SlotId};
 use types_tuple::access::{
     RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
 };
+use types_tuple::backend_access_common_heaptuple::{Datum, SlotAttr};
 use types_tuple::heaptuple::{HeapTuple, HeapTupleData, ItemPointerData};
 
 use crate::lifecycle::{ExecLookupResultRelByOid, ExecProcessReturning};
@@ -38,11 +38,17 @@ seam_core::seam!(
     /// `ExecGetJunkAttribute(slot, attno, &isNull)` (execJunk.h): read the
     /// Datum of the junk attribute `attno` from `slot`, returning the value and
     /// its null flag. The slot payload is owned by the execTuples slot model.
+    ///
+    /// The result is the canonical
+    /// [`types_tuple::backend_access_common_heaptuple::SlotAttr`], so a
+    /// by-reference value (e.g. the 6-byte `ctid` `ItemPointerData` image) crosses
+    /// intact as the `ByRef` arm — never collapsed onto a scalar word. The OID
+    /// (`mt_resultOidAttno`) consumer reads `value.as_oid()` off the `ByVal` arm.
     pub fn exec_get_junk_attribute<'mcx>(
         estate: &mut EStateData<'mcx>,
         slot: SlotId,
         attno: i32,
-    ) -> PgResult<(Datum, bool)>
+    ) -> PgResult<SlotAttr<'mcx>>
 );
 
 seam_core::seam!(
@@ -64,8 +70,9 @@ seam_core::seam!(
     /// `(ItemPointer) DatumGetPointer(datum)` then `tuple_ctid = *tupleid`
     /// (htup_details.h / itemptr.h): recover the ctid `ItemPointerData` a ctid
     /// junk Datum points at. The Datum payload model is owned by the
-    /// execTuples/heaptuple slot model.
-    pub fn datum_get_item_pointer(datum: Datum) -> ItemPointerData
+    /// execTuples/heaptuple slot model. The ctid arrives as the canonical
+    /// `Datum::ByRef` 6-byte `ItemPointerData` image (`PointerGetDatum(&t_self)`).
+    pub fn datum_get_item_pointer<'mcx>(datum: &Datum<'mcx>) -> ItemPointerData
 );
 
 seam_core::seam!(
@@ -76,7 +83,7 @@ seam_core::seam!(
     /// detoast + header decode is owned by the heaptuple model.
     pub fn datum_get_wholerow_heap_tuple<'mcx>(
         mcx: Mcx<'mcx>,
-        datum: Datum,
+        datum: &Datum<'mcx>,
         tableoid: types_core::Oid,
     ) -> PgResult<HeapTupleData<'mcx>>
 );
@@ -233,8 +240,8 @@ pub fn ExecModifyTable<'mcx>(
         if attribute_number_is_valid(node.mt_resultOidAttno) {
             // datum = ExecGetJunkAttribute(context.planSlot,
             //                              node->mt_resultOidAttno, &isNull);
-            let (datum, is_null) =
-                exec_get_junk_attribute::call(estate, plan_slot, node.mt_resultOidAttno)?;
+            let attr = exec_get_junk_attribute::call(estate, plan_slot, node.mt_resultOidAttno)?;
+            let is_null = attr.isnull;
             if is_null {
                 // For commands other than MERGE, any tuples having InvalidOid
                 // for tableoid are errors.  For MERGE, we may need to handle
@@ -269,7 +276,7 @@ pub fn ExecModifyTable<'mcx>(
                 return Err(PgError::error("tableoid is NULL"));
             }
             // resultoid = DatumGetObjectId(datum);
-            let resultoid = datum.as_oid();
+            let resultoid = attr.value.as_oid();
 
             // If it's not the same as last time, we need to locate the rel.
             if resultoid != node.mt_lastResultOid {
@@ -329,7 +336,8 @@ pub fn ExecModifyTable<'mcx>(
                 // ri_RowIdAttNo refers to a ctid attribute.  See the comment in
                 // ExecInitModifyTable().
                 //   datum = ExecGetJunkAttribute(slot, ri_RowIdAttNo, &isNull);
-                let (datum, is_null) = exec_get_junk_attribute::call(estate, plan_slot, row_id_attno)?;
+                let attr = exec_get_junk_attribute::call(estate, plan_slot, row_id_attno)?;
+                let is_null = attr.isnull;
 
                 // For commands other than MERGE, any tuples having a null row
                 // identifier are errors.  For MERGE, we may need to handle them
@@ -363,13 +371,14 @@ pub fn ExecModifyTable<'mcx>(
                 // tupleid = (ItemPointer) DatumGetPointer(datum);
                 // tuple_ctid = *tupleid;  (be sure we don't free ctid!!)
                 // tupleid = &tuple_ctid;
-                tuple_ctid = datum_get_item_pointer::call(datum);
+                tuple_ctid = datum_get_item_pointer::call(&attr.value);
                 tupleid = Some(&tuple_ctid);
             } else if attribute_number_is_valid(row_id_attno) {
                 // Use the wholerow attribute, when available, to reconstruct the
                 // old relation tuple.
                 //   datum = ExecGetJunkAttribute(slot, ri_RowIdAttNo, &isNull);
-                let (datum, is_null) = exec_get_junk_attribute::call(estate, plan_slot, row_id_attno)?;
+                let attr = exec_get_junk_attribute::call(estate, plan_slot, row_id_attno)?;
+                let is_null = attr.isnull;
 
                 if is_null {
                     if operation == CmdType::CMD_MERGE {
@@ -406,7 +415,7 @@ pub fn ExecModifyTable<'mcx>(
                 } else {
                     relation_relid(estate, result_rel_info)
                 };
-                let oldtupdata = datum_get_wholerow_heap_tuple::call(mcx, datum, tableoid)?;
+                let oldtupdata = datum_get_wholerow_heap_tuple::call(mcx, &attr.value, tableoid)?;
                 oldtuple = Some(mcx::alloc_in(mcx, oldtupdata)?);
             } else {
                 // Only foreign tables are allowed to omit a row-ID attr.

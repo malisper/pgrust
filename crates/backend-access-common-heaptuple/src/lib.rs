@@ -1709,6 +1709,28 @@ pub fn item_pointer_bytes<'mcx>(mcx: Mcx<'mcx>, ip: &ItemPointerData) -> PgResul
     Ok(out)
 }
 
+/// `*(ItemPointer) DatumGetPointer(datum)`: decode the 6-byte on-disk image an
+/// [`item_pointer_bytes`] (`PointerGetDatum(&t_self)`) produced back into an
+/// [`ItemPointerData`] (2 bytes `bi_hi`, 2 bytes `bi_lo`, 2 bytes `ip_posid`,
+/// native byte order). Panics if the image is not 6 bytes (a caller bug — C
+/// would read past the buffer).
+#[inline]
+pub fn item_pointer_from_bytes(bytes: &[u8]) -> ItemPointerData {
+    assert_eq!(
+        bytes.len(),
+        6,
+        "item_pointer_from_bytes: ctid image is {} bytes, expected 6",
+        bytes.len()
+    );
+    let bi_hi = u16::from_ne_bytes([bytes[0], bytes[1]]);
+    let bi_lo = u16::from_ne_bytes([bytes[2], bytes[3]]);
+    let ip_posid = u16::from_ne_bytes([bytes[4], bytes[5]]);
+    ItemPointerData {
+        ip_blkid: BlockIdData { bi_hi, bi_lo },
+        ip_posid,
+    }
+}
+
 // ===========================================================================
 // expand_tuple / heap_expand_tuple / minimal_expand_tuple (heaptuple.c)
 //

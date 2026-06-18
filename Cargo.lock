@@ -10090,6 +10090,7 @@ dependencies = [
 name = "backend-executor-nodeModifyTable"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
  "backend-access-table-tableam",
  "backend-access-transam-xact-seams",
  "backend-catalog-indexing-seams",

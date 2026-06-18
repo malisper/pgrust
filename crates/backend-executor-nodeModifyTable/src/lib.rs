@@ -151,6 +151,27 @@ pub fn init_seams() {
     //
     // `ri_RowIdAttNo` is now carried on the trimmed ResultRelInfo (set up in
     // ExecInitModifyTable for UPDATE/DELETE/MERGE; 0 for INSERT).
+    // `ExecGetJunkAttribute(slot, attno, &isNull)` (execJunk.h) is the macro
+    // `slot_getattr(slot, attno, isNull)`: the junk attributes ModifyTable reads
+    // (the row-ID ctid/wholerow and the tableoid) are positive resnos projected
+    // into the plan slot, so they take the regular `slot_getattr` path. The
+    // canonical `SlotAttr` is returned whole, so a by-reference ctid image (the
+    // 6-byte `ItemPointerData`) crosses as the `Datum::ByRef` arm intact.
+    exec::exec_get_junk_attribute::set(|estate, slot, attno| {
+        backend_executor_execTuples_seams::slot_getattr_by_id::call(
+            estate,
+            slot,
+            attno as types_core::AttrNumber,
+        )
+    });
+
+    // `(ItemPointer) DatumGetPointer(datum)` then `*tupleid`: the ctid junk
+    // Datum arrives as the canonical `Datum::ByRef` 6-byte `ItemPointerData`
+    // image (`PointerGetDatum(&slot->tts_tid)`); decode it back.
+    exec::datum_get_item_pointer::set(|datum| {
+        backend_access_common_heaptuple::item_pointer_from_bytes(datum.as_ref_bytes())
+    });
+
     exec::ri_row_id_attno::set(|estate, rri| estate.result_rel(rri).ri_RowIdAttNo as i32);
     // `ri_usesFdwDirectModify` is not carried on the trimmed ResultRelInfo, but
     // it is only ever true for a foreign table whose FDW does direct modify —
