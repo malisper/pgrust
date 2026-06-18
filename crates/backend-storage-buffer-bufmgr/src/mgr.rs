@@ -12,7 +12,7 @@
 //! posture, keeping the backend-local `RefCell`/`Cell` state correct without
 //! forcing `Sync`).
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, RefCell, UnsafeCell};
 use std::sync::atomic::Ordering;
 
 use backend_storage_buffer_support::{BufTable, BufferStrategyControl, StrategyShmemSize};
@@ -96,7 +96,18 @@ pub struct BufferManager {
     /// only under the header spinlock / strategy spinlock.
     fields: RefCell<Vec<DescFields>>,
     /// `BufferBlocks` — `nbuffers * BLCKSZ` page bytes.
-    blocks: RefCell<Vec<u8>>,
+    ///
+    /// Modelled as an `UnsafeCell` rather than a `RefCell` to match C's bare
+    /// `char *BufferBlocks` shared array: in C, reading one page's header (e.g.
+    /// `BufferGetLSNAtomic`) while another page is being written, or reading the
+    /// LSN of the very page a hint-bit write is updating, is legal because
+    /// synchronisation is provided by the per-buffer content lock and the header
+    /// spinlock — not by an interpreter-level borrow. A single `RefCell` over the
+    /// whole pool would spuriously conflict on these legal disjoint/same-page
+    /// re-entrant accesses (e.g. `with_buffer_page` holding the page while the
+    /// per-tuple visibility check calls `SetHintBits`→`MarkBufferDirtyHint`→
+    /// `BufferGetLSNAtomic`). The content lock is the real serialiser.
+    blocks: UnsafeCell<Vec<u8>>,
     /// The per-buffer content `LWLock` array
     /// (`BufferDescriptorGetContentLock`). One real lock per buffer.
     content_locks: Vec<LWLock>,
@@ -188,7 +199,7 @@ impl BufferManager {
         Self {
             states,
             fields: RefCell::new(fields),
-            blocks: RefCell::new(blocks),
+            blocks: UnsafeCell::new(blocks),
             content_locks,
             io_cvs,
             private_refcount: PrivateRefCount::default(),
@@ -410,8 +421,14 @@ impl BufferManager {
     /// `MarkBufferDirtyHint` to stamp the page LSN under the header lock.
     #[allow(dead_code)]
     pub(crate) fn with_block_mut<R>(&self, buf_id: usize, f: impl FnOnce(&mut [u8]) -> R) -> R {
-        let mut blocks = self.blocks.borrow_mut();
         let start = buf_id * BLCKSZ;
+        // SAFETY: faithful to C's bare `char *BufferBlocks` pointer arithmetic.
+        // The caller holds this buffer's content lock (exclusive for writes), so
+        // the `[start, start+BLCKSZ)` slice is exclusively this backend's to
+        // mutate. Reads of *other* pages, or a re-entrant read of *this* page's
+        // header LSN (the `MarkBufferDirtyHint`/`BufferGetLSNAtomic` hint-bit
+        // path), are governed by the same locks as in C, not by Rust borrows.
+        let blocks = unsafe { &mut *self.blocks.get() };
         f(&mut blocks[start..start + BLCKSZ])
     }
 
@@ -421,8 +438,10 @@ impl BufferManager {
     /// backend's pin and not yet valid, so no content lock is needed.
     #[allow(dead_code)]
     pub(crate) fn zero_block(&self, buf_id: usize) {
-        let mut blocks = self.blocks.borrow_mut();
         let start = buf_id * BLCKSZ;
+        // SAFETY: see `with_block_mut`. The freshly-acquired victim buffer is
+        // pinned exclusively by this backend; the page is not yet valid.
+        let blocks = unsafe { &mut *self.blocks.get() };
         blocks[start..start + BLCKSZ].fill(0);
     }
 
@@ -430,8 +449,10 @@ impl BufferManager {
     /// lock (F1d `BufferGetPage` read / `PageGetLSN` / `PageIsNew`).
     #[allow(dead_code)]
     pub(crate) fn with_block<R>(&self, buf_id: usize, f: impl FnOnce(&[u8]) -> R) -> R {
-        let blocks = self.blocks.borrow();
         let start = buf_id * BLCKSZ;
+        // SAFETY: see `with_block_mut`. A shared read under the caller-held
+        // content lock / header spinlock, faithful to C's bare-pointer read.
+        let blocks = unsafe { &*self.blocks.get() };
         f(&blocks[start..start + BLCKSZ])
     }
 
