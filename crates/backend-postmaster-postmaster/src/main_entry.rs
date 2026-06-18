@@ -405,6 +405,12 @@ pub fn PostmasterMain(argv: &[&str]) -> ! {
 
     /* Set up shared memory and semaphores. */
     backend_storage_ipc_ipci_seams::create_shared_memory_and_semaphores::call();
+    /*
+     * Record that this postmaster process has created its (process-local)
+     * shared-memory statics, so the crash-recovery reinit path knows not to
+     * re-create them (which would panic — see PostmasterStateMachine).
+     */
+    crate::core::pm_mut().shmem_created = true;
 
     /* Estimate number of openable files. */
     backend_storage_file_fd_seams::set_max_safe_fds::call()

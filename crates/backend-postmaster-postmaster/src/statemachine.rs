@@ -298,8 +298,38 @@ pub fn PostmasterStateMachine() {
         /* re-read control file into local memory */
         sp::local_process_control_file::call(true);
 
-        /* re-create shared memory and semaphores */
-        backend_storage_ipc_ipci_seams::create_shared_memory_and_semaphores::call();
+        /*
+         * Re-create shared memory and semaphores.
+         *
+         * DIVERGENCE FROM C: in C this destroys the old shared-memory segment
+         * (an OS-level SysV/mmap region the crashed child may have corrupted)
+         * and allocates a fresh, zeroed one, which every re-forked child then
+         * attaches to. In this tree the "shared" structures are process-local
+         * statics that backends inherit through fork()'s copy-on-write: the
+         * crashed backend only ever scribbled on its OWN private copy, so the
+         * postmaster's copy is still intact and consistent. We have just run
+         * shmem_exit(1) to drop this process' shmem-exit callbacks / LWLocks,
+         * which leaves the postmaster's shmem statics in exactly the state a
+         * freshly re-created (but already-populated-by-the-postmaster) segment
+         * would be in. The re-forked startup process inherits that copy through
+         * fork().
+         *
+         * Re-running CreateSharedMemoryAndSemaphores here would, in fact,
+         * CRASH the postmaster: the per-subsystem *ShmemInit functions publish
+         * their structures into write-once cells (e.g. MainLWLockArray's
+         * OnceLock, handing out `&'static` references the rest of the process
+         * already holds), so a second create panics ("MainLWLockArray
+         * published twice") and the panic propagates out of the postmaster's
+         * server loop, taking the whole cluster down — which is precisely the
+         * crash this guard fixes. Because the postmaster's segment is never
+         * corrupted in the fork-COW model, skipping the re-creation is both
+         * necessary (the cells cannot be safely re-published) and faithful (the
+         * data is already correct).
+         */
+        if !pm().shmem_created {
+            backend_storage_ipc_ipci_seams::create_shared_memory_and_semaphores::call();
+            pm_mut().shmem_created = true;
+        }
 
         UpdatePMState(PMState::PmStartup);
 

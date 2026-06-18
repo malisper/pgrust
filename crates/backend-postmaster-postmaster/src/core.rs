@@ -286,6 +286,21 @@ pub struct PostmasterState {
     /// C: `static bool HaveCrashedWorker`.
     pub have_crashed_worker: bool,
 
+    /// NO C COUNTERPART — process-local-statics divergence bookkeeping.
+    ///
+    /// `true` once `CreateSharedMemoryAndSemaphores` has run in this postmaster
+    /// process (set at boot in `main_entry`, and would be set by the crash-
+    /// recovery reinit path). In C, crash recovery destroys and re-creates the
+    /// OS shared-memory segment every time; in this tree the "shared" structures
+    /// are process-local statics published into write-once cells (and handed out
+    /// as `&'static`), so they can be created exactly once per process. The
+    /// crashed child only corrupts its own fork-COW copy, never the
+    /// postmaster's, so the postmaster's segment is still valid after a crash
+    /// and re-creation is both unnecessary and unsafe. The reinit path consults
+    /// this flag to skip the (panic-inducing) second creation. See
+    /// `PostmasterStateMachine`.
+    pub shmem_created: bool,
+
     /// C: `static int io_worker_count` + `static PMChild
     /// *io_worker_children[MAX_IO_WORKERS]`.
     pub io_worker_count: i32,
@@ -332,6 +347,7 @@ impl PostmasterState {
             // C: `static bool StartWorkerNeeded = true;`
             start_worker_needed: true,
             have_crashed_worker: false,
+            shmem_created: false,
 
             io_worker_count: 0,
             io_worker_children: [None; MAX_IO_WORKERS],
