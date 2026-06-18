@@ -407,6 +407,31 @@ impl BufferManager {
         }
         Ok(())
     }
+
+    /// `DropDatabaseBuffers(dbid)` (bufmgr.c:4888) — remove from the shared
+    /// buffer pool every page belonging to database `dbid`. Dirty pages are
+    /// dropped without being written (used when the database directory tree is
+    /// being destroyed). Local buffers need not be considered — by assumption
+    /// the target database is not our own.
+    pub fn DropDatabaseBuffers(&self, dbid: types_core::Oid) -> PgResult<()> {
+        for buf_id in 0..self.nbuffers() as usize {
+            // As in DropRelationBuffers, an unlocked precheck should be safe and
+            // saves some cycles.
+            let buf_tag = self.desc_tag(buf_id);
+            if buf_tag.dbOid != dbid {
+                continue;
+            }
+
+            let buf_state = self.lock_buf_hdr(buf_id);
+            let buf_tag = self.desc_tag(buf_id);
+            if buf_tag.dbOid == dbid {
+                self.invalidate_buffer(buf_id, buf_state)?; // releases spinlock
+            } else {
+                self.unlock_buf_hdr(buf_id, buf_state);
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

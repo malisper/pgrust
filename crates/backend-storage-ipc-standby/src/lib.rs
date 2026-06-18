@@ -811,6 +811,88 @@ pub fn ResolveRecoveryConflictWithBufferPin() -> PgResult<()> {
     Ok(())
 }
 
+/// The whole `InHotStandby` recovery-conflict wait leg of
+/// `LockBufferForCleanup` (bufmgr.c:5751-5794): set the "waiting" ps-display
+/// suffix on first pass, emit the deadlock-timeout `LogRecoveryConflict` once
+/// the wait exceeds `DeadlockTimeout`, set the wait-start timestamp when
+/// logging is enabled, publish the bufid the Startup process waits on, set the
+/// alarm + park (`ResolveRecoveryConflictWithBufferPin`), then reset the
+/// published bufid. Returns the loop-carried
+/// `(wait_start, waiting, logged_recovery_conflict)`. Installed as the bufmgr
+/// `lock_buffer_for_cleanup_recovery_wait_park` outward seam.
+fn lock_buffer_for_cleanup_recovery_wait_park(
+    buffer: types_storage::storage::Buffer,
+    mut wait_start: TimestampTz,
+    mut waiting: bool,
+    mut logged_recovery_conflict: bool,
+) -> PgResult<(TimestampTz, bool, bool)> {
+    use backend_utils_adt_timestamp_seams as ts;
+
+    if !waiting {
+        // adjust the process title to indicate that it's waiting
+        ps_status::set_ps_display_suffix::call("waiting");
+        waiting = true;
+    }
+
+    // Emit the log message if the startup process is waiting longer than
+    // deadlock_timeout for recovery conflict on buffer pin. Skipped first time
+    // through because the startup process has not started waiting yet then (the
+    // wait start timestamp is set after this logic).
+    if wait_start != 0 && !logged_recovery_conflict {
+        let now = ts::get_current_timestamp::call();
+        if ts::timestamp_difference_exceeds::call(wait_start, now, proc::deadlock_timeout::call()) {
+            let ctx = mcx::MemoryContext::new("LockBufferForCleanup");
+            LogRecoveryConflict(
+                ctx.mcx(),
+                ProcSignalReason::PROCSIG_RECOVERY_CONFLICT_BUFFERPIN,
+                wait_start,
+                now,
+                None,
+                true,
+            )?;
+            logged_recovery_conflict = true;
+        }
+    }
+
+    // Set the wait start timestamp if logging is enabled and first time through.
+    if log_recovery_conflict_waits() && wait_start == 0 {
+        wait_start = ts::get_current_timestamp::call();
+    }
+
+    // Publish the bufid that Startup process waits on (buffer - 1 == buf_id).
+    proc::set_startup_buffer_pin_wait_buf_id::call(buffer - 1);
+    // Set alarm and then wait to be signaled by UnpinBuffer().
+    ResolveRecoveryConflictWithBufferPin()?;
+    // Reset the published bufid.
+    proc::set_startup_buffer_pin_wait_buf_id::call(-1);
+
+    Ok((wait_start, waiting, logged_recovery_conflict))
+}
+
+/// `LogRecoveryConflict(PROCSIG_RECOVERY_CONFLICT_BUFFERPIN, waitStart,
+/// GetCurrentTimestamp(), NULL, false)` (bufmgr.c:5725) — the
+/// "resolved after deadlock_timeout" recovery-conflict log emitted from
+/// `LockBufferForCleanup` once the cleanup lock is finally acquired (only
+/// reachable after the park leg set `logged_recovery_conflict`). Installed as
+/// the bufmgr `lock_buffer_for_cleanup_recovery_wait` outward seam.
+fn lock_buffer_for_cleanup_recovery_wait(
+    _buffer: types_storage::storage::Buffer,
+    wait_start: TimestampTz,
+    _waiting: bool,
+    _logged_recovery_conflict: bool,
+    _resolved: bool,
+) -> PgResult<()> {
+    let ctx = mcx::MemoryContext::new("LockBufferForCleanup");
+    LogRecoveryConflict(
+        ctx.mcx(),
+        ProcSignalReason::PROCSIG_RECOVERY_CONFLICT_BUFFERPIN,
+        wait_start,
+        backend_utils_adt_timestamp_seams::get_current_timestamp::call(),
+        None,
+        false,
+    )
+}
+
 /// `SendRecoveryConflictWithBufferPin` — signal all backends to ask whether
 /// they hold the buffer pin delaying the Startup process. The conflict flag
 /// must not be set yet, since most backends will be innocent; the SIGUSR1
@@ -1487,6 +1569,18 @@ pub fn init_seams() {
     seams::log_access_exclusive_lock_prepare::set(LogAccessExclusiveLockPrepare);
     seams::log_standby_invalidations::set(LogStandbyInvalidations);
     seams::in_hot_standby::set(in_hot_standby);
+
+    // bufmgr LockBufferForCleanup InHotStandby recovery-conflict wait leg
+    // (bufmgr.c:5751-5794). The whole standby/startup branch is owned here:
+    // the InHotStandby predicate, the deadlock-timeout publish-bufid alarm+park,
+    // and the "resolved after deadlock" log.
+    backend_storage_buffer_bufmgr_seams::in_hot_standby::set(in_hot_standby);
+    backend_storage_buffer_bufmgr_seams::lock_buffer_for_cleanup_recovery_wait_park::set(
+        lock_buffer_for_cleanup_recovery_wait_park,
+    );
+    backend_storage_buffer_bufmgr_seams::lock_buffer_for_cleanup_recovery_wait::set(
+        lock_buffer_for_cleanup_recovery_wait,
+    );
 
     // GUC variable backing storage owned by standby.c, read directly from the
     // GUC slot (not the ControlFile) per PG 18.3 standby.c:40-42:

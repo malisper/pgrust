@@ -16477,6 +16477,7 @@ dependencies = [
  "backend-postmaster-autovacuum-ext-seams",
  "backend-replication-syncrep-seams",
  "backend-replication-walsender-seams",
+ "backend-storage-buffer-bufmgr-seams",
  "backend-storage-ipc-dsm-core-seams",
  "backend-storage-ipc-latch-seams",
  "backend-storage-ipc-pmsignal-seams",

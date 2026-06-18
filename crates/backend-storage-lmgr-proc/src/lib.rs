@@ -114,4 +114,16 @@ pub fn init_seams() {
     backend_tcop_postgres_seams::report_autovac_cancel::set(seam::report_autovac_cancel);
     backend_tcop_postgres_seams::signal_autovacuum_worker::set(seam::signal_autovacuum_worker);
     backend_tcop_postgres_seams::report_lock_wait_log::set(seam::report_lock_wait_log);
+
+    // Startup-process buffer-pin-wait bufid (proc.c
+    // Get/SetStartupBufferPinWaitBufId, backed by ProcGlobal). The getter is the
+    // bufmgr-side outward seam read by HoldingBufferPinThatDelaysRecovery; the
+    // setter is published by the LockBufferForCleanup InHotStandby park leg
+    // (installed by the standby/recovery owner).
+    backend_storage_buffer_bufmgr_seams::startup_buffer_pin_wait_buf_id::set(
+        proc_lifecycle::GetStartupBufferPinWaitBufId,
+    );
+    backend_storage_lmgr_proc_seams::set_startup_buffer_pin_wait_buf_id::set(
+        proc_lifecycle::SetStartupBufferPinWaitBufId,
+    );
 }

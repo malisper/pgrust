@@ -1543,19 +1543,6 @@ mod recurrence_guard {
         // installs tuplesort_begin_index_btree/hash/gist + putindextuplevalues +
         // getindextuple from its init_seams(), with real comparetup_index_* /
         // writetup_index / readtup_index / removeabbrev_index bodies.)
-        // DESIGN_DEBT (TD-BUFMGR-DBASE-BUFFERS): dbcommands.c's `dbase_redo`
-        // (XLOG_DBASE_CREATE_FILE_COPY / XLOG_DBASE_DROP) calls
-        // `FlushDatabaseBuffers(dbid)` and `DropDatabaseBuffers(dbid)` — two
-        // bufmgr.c per-database shared-buffer operations. The bufmgr owner is a
-        // complete CATALOG unit but its F-decomp did not port these two
-        // whole-database buffer sweeps (they scan NBuffers for matching
-        // RelFileLocator.dbOid). FlushDatabaseBuffers is now ported+installed
-        // (the NBuffers sweep over BM_VALID|BM_DIRTY buffers matching dbOid);
-        // its allowlist entry was removed. DropDatabaseBuffers is still
-        // unported in the bufmgr F-decomp (only DropRelationBuffers/
-        // DropRelationsAllBuffers exist), so it loud-panics. Recorded in
-        // DESIGN_DEBT.md. DELETE when bufmgr ports DropDatabaseBuffers.
-        ("backend_storage_buffer_bufmgr", "drop_database_buffers"),
         // DESIGN_DEBT (TD-INDEXING-PERCATALOG-OWNERS): backend-catalog-indexing's
         // per-catalog forming/mutation bodies have now been PORTED + installed in
         // family2.rs (pg_type insert/update/rename, pg_constraint, pg_depend/

@@ -514,6 +514,20 @@ fn flush_database_buffers(dbid: types_core::Oid) -> types_error::PgResult<()> {
     BufferManager::global_expect().FlushDatabaseBuffers(dbid)
 }
 
+/// `DropDatabaseBuffers(dbid)` installed seam (bufmgr.c:4888) — drop (without
+/// writing) every shared-buffer page of one database, for `dropdb` /
+/// `dbase_redo` XLOG_DBASE_DROP cleanup.
+fn drop_database_buffers(dbid: types_core::Oid) -> types_error::PgResult<()> {
+    BufferManager::global_expect().DropDatabaseBuffers(dbid)
+}
+
+/// `ResOwnerReleaseBufferIO(res)` installed seam (bufmgr.c:6539) — abort a
+/// leaked in-progress buffer I/O (`AbortBufferIO`) the resource owner found
+/// during release, without removing the I/O from the (being-released) owner.
+fn release_buffer_io(buffer: types_storage::storage::Buffer) -> types_error::PgResult<()> {
+    BufferManager::global_expect().abort_buffer_io(buffer)
+}
+
 // --- lifecycle + relation-size seams (bufmgr.c) ---------------------------
 
 /// `UnlockBuffers()` installed seam (bufmgr.c) — release the in-progress
@@ -673,6 +687,8 @@ pub fn init_seams() {
     );
     backend_storage_buffer_bufmgr_seams::flush_relation_buffers::set(flush_relation_buffers);
     backend_storage_buffer_bufmgr_seams::flush_database_buffers::set(flush_database_buffers);
+    backend_storage_buffer_bufmgr_seams::drop_database_buffers::set(drop_database_buffers);
+    backend_storage_buffer_bufmgr_seams::release_buffer_io::set(release_buffer_io);
     // F5: the per-backend checkpoint/bgwriter statistics counters — no-op
     // installs (behaviour-neutral, same posture as F2's count_buffer_write /
     // count_io_op_extend until the pgstat owner ports).
