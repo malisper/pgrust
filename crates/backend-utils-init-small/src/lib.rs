@@ -128,6 +128,13 @@ pub fn init_seams() {
     // launcher on `IsBinaryUpgrade`; it reads the same global through
     // `backend-postmaster-postmaster-seams`.
     backend_postmaster_postmaster_seams::is_binary_upgrade::set(globals::IsBinaryUpgrade);
+    // Catalog-creation (pg_type / pg_enum OID preselection), tablecmds TRUNCATE,
+    // and the tablespace ambient-globals bundle read the same flag.
+    backend_catalog_binary_upgrade_seams::is_binary_upgrade::set(globals::IsBinaryUpgrade);
+    backend_commands_tablecmds_seams::is_binary_upgrade::set(|| Ok(globals::IsBinaryUpgrade()));
+    backend_commands_tablespace_globals_seams::IsBinaryUpgrade::set(|| {
+        Ok(globals::IsBinaryUpgrade())
+    });
     backend_utils_init_small_seams::set_my_database_id::set(globals::SetMyDatabaseId);
     backend_utils_init_small_seams::set_my_database_table_space::set(globals::SetMyDatabaseTableSpace);
     backend_utils_init_small_seams::set_my_database_has_login_event_triggers::set(
