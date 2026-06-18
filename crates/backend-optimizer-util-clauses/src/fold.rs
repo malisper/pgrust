@@ -789,7 +789,7 @@ fn arm_arraycoerce(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
     let foldable = match (&ac.arg, &ac.elemexpr) {
         (Some(arg), Some(elem)) => {
             arg.is_const()
-                && !matches!(**elem, Expr::CoerceToDomain(_))
+                && !elem.is_coercetodomain()
                 && !contain_mutable_functions(Some(elem))?
         }
         _ => false,

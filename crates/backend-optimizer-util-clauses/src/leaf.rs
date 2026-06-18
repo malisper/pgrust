@@ -78,7 +78,7 @@ fn strip_array_coercion(node: &Expr) -> &Expr {
                 .as_deref()
                 .and_then(|e| e.as_relabeltype())
                 .and_then(|r| r.arg.as_deref())
-                .map(|a| matches!(a, Expr::CaseTestExpr(_)))
+                .map(|a| a.is_casetestexpr())
                 .unwrap_or(false);
             if is_binary_relabel {
                 if let Some(arg) = acoerce.arg.as_deref() {

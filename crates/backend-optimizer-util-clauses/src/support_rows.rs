@@ -93,7 +93,7 @@ pub fn register_builtin_support_rows() {
 /// `None` for a non-`Const` (decline). Used for both int4 and int8 (int4
 /// `Const`s carry their value in the low 32 bits of the Datum).
 fn const_int_arg(arg: &Expr, is_int8: bool) -> Option<Option<i64>> {
-    let Expr::Const(c) = arg else {
+    let Some(c) = arg.as_const() else {
         return None;
     };
     if c.constisnull {
@@ -122,7 +122,7 @@ fn generate_series_int8_support_rows(_funcid: Oid, node: &Expr) -> PgResult<Opti
 
 fn generate_series_support_rows(node: &Expr, is_int8: bool) -> PgResult<Option<f64>> {
     // if (is_funcclause(req->node)) — be paranoid.
-    let Expr::FuncExpr(fexpr) = node else {
+    let Some(fexpr) = node.as_funcexpr() else {
         return Ok(None);
     };
     let args = &fexpr.args;
