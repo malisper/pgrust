@@ -23,3 +23,8 @@ backend-utils-adt-numeric = { path = "../backend-utils-adt-numeric" }
 types-numeric = { path = "../types-numeric" }
 # pg_toupper (port/pgstrcasecmp.c): a leaf, depend directly.
 port-pgstrcasecmp = { path = "../port-pgstrcasecmp" }
+# fmgr builtin registration (the Datum fn(FunctionCallInfo) boundary): register
+# every cash.c builtin into fmgr-core's table for by-OID dispatch.
+types-datum = { path = "../types-datum" }
+types-fmgr = { path = "../types-fmgr" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }

@@ -40,11 +40,21 @@ use types_cash::{Cash, CashLconv};
 use types_error::{
     PgError, PgResult, SoftErrorContext, ERRCODE_DIVISION_BY_ZERO, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+    ERRCODE_PROTOCOL_VIOLATION,
 };
 use types_numeric::var::NumericSign;
 
+pub mod fmgr_builtins;
+
 #[cfg(test)]
 mod tests;
+
+/// Register every `cash.c` builtin into the fmgr-core builtin table (C:
+/// `fmgr_builtins[]`), so by-OID dispatch resolves the `money` type's I/O,
+/// arithmetic, comparison, and cast functions. Called once at startup.
+pub fn init_seams() {
+    fmgr_builtins::register_cash_builtins();
+}
 
 /// `PG_INT64_MIN` (`c.h`).
 const PG_INT64_MIN: i64 = i64::MIN;
@@ -726,17 +736,33 @@ fn build_cash_out_buf(
 // ===========================================================================
 // cash_recv / cash_send (cash.c:591 / 602)
 // ===========================================================================
-//
-// The C `cash_recv` / `cash_send` bodies are pure `libpq/pqformat.h` wire calls:
-//
-//     cash_recv: PG_RETURN_CASH((Cash) pq_getmsgint64(buf));
-//     cash_send: pq_begintypsend(&buf); pq_sendint64(&buf, arg1);
-//                PG_RETURN_BYTEA_P(pq_endtypsend(&buf));
-//
-// There is no `cash`-specific logic to port: both delegate entirely to the
-// `pqformat` wire layer (a separate, not-yet-ported subsystem) wrapping the raw
-// `Cash` (an `int64`); they are documented rather than re-emitted as trivial
-// pass-throughs.
+
+/// `cash_recv()` (cash.c:591) — binary receive.
+///
+/// C: `PG_RETURN_CASH((Cash) pq_getmsgint64(buf));`. `pq_getmsgint64` reads a
+/// network-order (big-endian) `int64` off the message buffer. A short buffer
+/// mirrors C's `pq_getmsgint64` running off the message end
+/// (`ERRCODE_PROTOCOL_VIOLATION`).
+pub fn cash_recv(buf: &[u8]) -> PgResult<Cash> {
+    if buf.len() < 8 {
+        return Err(PgError::error("insufficient data left in message")
+            .with_sqlstate(ERRCODE_PROTOCOL_VIOLATION));
+    }
+    let bytes: [u8; 8] = buf[..8].try_into().expect("checked len >= 8");
+    Ok(i64::from_be_bytes(bytes))
+}
+
+/// `cash_send()` (cash.c:602) — binary send.
+///
+/// C: `pq_begintypsend(&buf); pq_sendint64(&buf, arg1);
+/// PG_RETURN_BYTEA_P(pq_endtypsend(&buf));`. Returns the owned `bytea` payload
+/// (the network-order int64), allocated in `mcx` (C's palloc'd send buffer).
+pub fn cash_send<'mcx>(mcx: Mcx<'mcx>, value: Cash) -> PgResult<PgVec<'mcx, u8>> {
+    let mut buf = PgVec::new_in(mcx);
+    buf.try_reserve(8).map_err(|_| mcx.oom(8))?;
+    buf.extend_from_slice(&value.to_be_bytes());
+    Ok(buf)
+}
 
 // ===========================================================================
 // Comparison functions (cash.c:617-683)

@@ -17954,10 +17954,13 @@ dependencies = [
  "backend-utils-adt-float-seams",
  "backend-utils-adt-numeric",
  "backend-utils-adt-pg-locale-seams",
+ "backend-utils-fmgr-core",
  "mcx",
  "port-pgstrcasecmp",
  "types-cash",
+ "types-datum",
  "types-error",
+ "types-fmgr",
  "types-numeric",
 ]
 
@@ -23036,6 +23039,7 @@ dependencies = [
  "backend-utils-adt-arrayfuncs",
  "backend-utils-adt-arrayutils",
  "backend-utils-adt-ascii",
+ "backend-utils-adt-cash",
  "backend-utils-adt-char",
  "backend-utils-adt-cryptohashfuncs",
  "backend-utils-adt-datetime",

@@ -464,6 +464,9 @@ pub fn init_all() {
     backend_utils_adt_xid8funcs::init_seams();
     backend_utils_adt_name::init_seams();
     backend_utils_adt_float::init_seams();
+    // money (cash.c): register the `money` type's fmgr builtins (I/O, arithmetic,
+    // comparison, casts) into fmgr-core's by-OID dispatch table.
+    backend_utils_adt_cash::init_seams();
     // libm provider: binds the float8 erf/erfc/tgamma/lgamma seams to the
     // system math library (same `<math.h>` PostgreSQL links).
     backend_utils_adt_float_libm_ffi::init_seams();
