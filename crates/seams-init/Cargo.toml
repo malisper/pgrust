@@ -167,6 +167,7 @@ backend-commands-createas = { path = "../backend-commands-createas" }
 backend-commands-view = { path = "../backend-commands-view" }
 backend-commands-define = { path = "../backend-commands-define" }
 backend-commands-dropcmds = { path = "../backend-commands-dropcmds" }
+backend-commands-event-trigger = { path = "../backend-commands-event-trigger" }
 backend-commands-extension = { path = "../backend-commands-extension" }
 backend-commands-explain = { path = "../backend-commands-explain" }
 backend-commands-foreigncmds = { path = "../backend-commands-foreigncmds" }

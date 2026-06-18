@@ -160,6 +160,7 @@ pub fn init_all() {
     backend_commands_alter::init_seams();
     backend_commands_policy::init_seams();
     backend_commands_dropcmds::init_seams();
+    backend_commands_event_trigger::init_seams();
     backend_commands_extension::init_seams();
     backend_commands_explain::init_seams();
     backend_commands_foreigncmds::init_seams();

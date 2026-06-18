@@ -58,7 +58,8 @@ pub fn process_utility_slow<'mcx>(
     let is_complete_query = context != PROCESS_UTILITY_SUBCOMMAND;
 
     // All event trigger calls are done only when isCompleteQuery is true.
-    let need_cleanup = is_complete_query && rt::event_trigger_begin_complete_query::call();
+    let need_cleanup =
+        is_complete_query && rt::event_trigger_begin_complete_query::call()?;
 
     // The C `PG_TRY { body } PG_FINALLY { if (needCleanup) EventTriggerEndCompleteQuery(); }`.
     // We run the body, capture its result, run the finally, then propagate.
@@ -155,7 +156,7 @@ fn process_utility_slow_body<'mcx>(
                             address,
                             secondary_object,
                             &stmt,
-                        );
+                        )?;
 
                         // Let NewRelationCreateToastTable decide if this one
                         // needs a secondary relation too.
@@ -186,7 +187,7 @@ fn process_utility_slow_body<'mcx>(
                             address,
                             secondary_object,
                             &stmt,
-                        );
+                        )?;
                     }
                     Node::TableLikeClause(_) => {
                         // Delayed processing of LIKE options; prepend the
@@ -300,7 +301,7 @@ fn process_utility_slow_body<'mcx>(
 
             // Add the CREATE INDEX node itself to the stash right away; commands
             // stashed in the ALTER TABLE code must appear after this one.
-            rt::event_trigger_collect_simple_command::call(address, secondary_object, parsetree);
+            rt::event_trigger_collect_simple_command::call(address, secondary_object, parsetree)?;
             command_collected = true;
             rt::event_trigger_alter_table_end::call();
         }
@@ -338,7 +339,7 @@ fn process_utility_slow_body<'mcx>(
                 pstmt.stmt_location,
                 pstmt.stmt_len,
             )?;
-            rt::event_trigger_collect_simple_command::call(address, secondary_object, parsetree);
+            rt::event_trigger_collect_simple_command::call(address, secondary_object, parsetree)?;
             // stashed internally
             command_collected = true;
             rt::event_trigger_alter_table_end::call();
@@ -490,7 +491,7 @@ fn process_utility_slow_body<'mcx>(
 
     // Remember the object so that ddl_command_end event triggers can reach it.
     if !command_collected {
-        rt::event_trigger_collect_simple_command::call(address, secondary_object, parsetree);
+        rt::event_trigger_collect_simple_command::call(address, secondary_object, parsetree)?;
     }
 
     if is_complete_query {

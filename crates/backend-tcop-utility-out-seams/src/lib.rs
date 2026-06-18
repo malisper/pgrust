@@ -687,7 +687,9 @@ seam!(
     /// `EventTriggerBeginCompleteQuery()` (event_trigger.c) — install event-trigger
     /// query state for the duration of a complete query; returns whether cleanup is
     /// needed (false when no sql_drop/table_rewrite/ddl_command_end triggers exist).
-    pub fn event_trigger_begin_complete_query() -> bool
+    /// The interest test calls `EventCacheLookup`, whose cache rebuild scans
+    /// `pg_event_trigger` and can `ereport(ERROR)`, carried on `Err`.
+    pub fn event_trigger_begin_complete_query() -> PgResult<bool>
 );
 seam!(
     /// `EventTriggerEndCompleteQuery()` (event_trigger.c) — tear down the state
@@ -711,12 +713,14 @@ seam!(
 );
 seam!(
     /// `EventTriggerCollectSimpleCommand(address, secondaryObject, parsetree)`
-    /// (event_trigger.c) — stash a completed command for `ddl_command_end`.
+    /// (event_trigger.c) — stash a completed command for `ddl_command_end`. The
+    /// C body `copyObject`s the parse tree into the event-trigger state context;
+    /// that allocation can `ereport(ERROR)` (palloc OOM), carried on `Err`.
     pub fn event_trigger_collect_simple_command<'mcx>(
         address: ObjectAddress,
         secondary_object: ObjectAddress,
         parsetree: &Node<'mcx>,
-    )
+    ) -> PgResult<()>
 );
 seam!(
     /// `EventTriggerCollectAlterDefPrivs(stmt)` (event_trigger.c) — stash an ALTER
