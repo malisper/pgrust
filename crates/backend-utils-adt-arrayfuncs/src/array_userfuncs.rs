@@ -1,8 +1,8 @@
 //! Port of `src/backend/utils/adt/array_userfuncs.c` — the SQL-callable array
-//! "user" functions (`array_append`, `array_prepend`, `array_cat`,
-//! `array_position`, `array_position_start`, `array_positions`, and the
-//! aggregate transition/final functions which live elsewhere in the crate or
-//! depend on the agg call frame).
+//! "user" functions (`array_cat`, `array_position`, `array_position_start`,
+//! `array_positions`, `array_shuffle`, `array_sample`, `array_reverse`,
+//! `array_sort` + order/nulls_first; `array_append`/`array_prepend` and the
+//! `array_agg` family STOP on the keystones noted below).
 //!
 //! `array_userfuncs.c` is a distinct `.c` unit, but its functions operate on the
 //! same `ArrayType` byte machinery this crate already owns (construct/deconstruct,
@@ -46,6 +46,35 @@
 //! expanded-array carrier + RW-datum + in-place set path first — a separate
 //! expanded-object-infra keystone, not this lane. They are left out (no hollow
 //! stub) per Mirror-PG-and-panic.
+//!
+//! # STOP: the `array_agg` family (agg-context-channel-blocked)
+//!
+//! `array_agg_transfn` / `array_agg_combine` / `array_agg_serialize` /
+//! `array_agg_deserialize` / `array_agg_finalfn` and the `array_agg_array_*`
+//! variants are *not* ported. Their aggregate transition type is `internal` — a
+//! bare `ArrayBuildState *` (or `ArrayBuildStateArr *`) carried through
+//! `nodeAgg.c` as a pass-by-value Datum word. Two things make them un-invokable
+//! in the owned model:
+//!
+//!  * `array_agg_transfn` calls `AggCheckCallContext(fcinfo, &aggcontext)` and
+//!    *requires* the returned `aggcontext` to `initArrayResult(arg1_typeid,
+//!    aggcontext, false)` (the build state, and every accumulated element copy,
+//!    must live in the per-aggregate context, not the per-tuple context). The
+//!    `nodeAgg` transition dispatch threads transfns by `fn_oid` through
+//!    `function_call_invoke_datum` and explicitly does **not** carry the fcinfo
+//!    `(Node *) aggstate` context (the deferred K2 re-sign — see
+//!    `backend-executor-nodeAgg::transition`), so a transfn that reads
+//!    `AggCheckCallContext` cannot obtain its context. Unlike count/sum/avg
+//!    (which don't), `array_agg` cannot run without it.
+//!  * the `internal` transition state would ride in `Datum::Internal(Box<dyn
+//!    Any>)`, but the by-OID transition dispatch has no way to construct/thread
+//!    that boxed state in the per-aggregate context.
+//!
+//! Porting the bodies now would produce a shell no caller can reach (no fmgr/agg
+//! wiring threads the context). They are left out (no hollow stub) until the
+//! agg-context channel (nodeAgg K2) lands; the bodies are then a mechanical
+//! `ArrayBuildState`-over-`accumArrayResult` port (the build-state machinery
+//! they need already lives in `construct`).
 
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
 use types_array::ArrayElementDatum;
