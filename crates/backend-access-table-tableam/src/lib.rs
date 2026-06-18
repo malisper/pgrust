@@ -92,6 +92,9 @@ pub fn init_seams() {
     );
     backend_access_table_tableam_seams::table_rescan::set(table_rescan_seam);
     backend_access_table_tableam_seams::table_endscan::set(table_endscan);
+    backend_access_table_tableam_seams::table_index_fetch_tuple_check::set(
+        table_index_fetch_tuple_check,
+    );
     backend_access_table_tableam_seams::table_relation_set_new_filelocator::set(
         table_relation_set_new_filelocator,
     );

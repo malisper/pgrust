@@ -263,3 +263,34 @@ seam_core::seam!(
     /// `ereport(ERROR)`.
     pub fn table_endscan<'mcx>(scan: TableScanDesc<'mcx>) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `table_index_fetch_tuple_check(rel, tid, snapshot, all_dead)`
+    /// (access/table/tableam.c): the convenience wrapper used by
+    /// `_bt_check_unique` for a one-shot heap visibility probe of a single TID
+    /// reachable through one index entry. Internally it starts an index-fetch
+    /// scan, creates a slot, does `table_index_fetch_tuple`, and tears
+    /// everything down again, returning whether a tuple satisfying `snapshot`
+    /// was found.
+    ///
+    /// `tid` is `&mut` because the heap AM may update it to a live HOT child's
+    /// TID when it returns `true` (the AM supports storing multiple row
+    /// versions reachable via a single index entry). `snapshot` is `&mut` for
+    /// the same reason as the underlying `table_index_fetch_tuple`: when the
+    /// caller passes a dirty snapshot it is used as an output param, and
+    /// `_bt_check_unique` reads the conflict info (`xmin`/`xmax`/
+    /// `speculativeToken`) back out of it on return. `all_dead` is the
+    /// LP_DEAD-hint out-param (`None` when the caller does not want it).
+    ///
+    /// Owned by the tableam.c unit (`backend-access-table-tableam`), which
+    /// installs it from `init_seams()`; nbtree-core calls through this seam
+    /// because depending on the tableam crate directly would cycle (the heap AM
+    /// the dispatch reaches transitively depends on nbtree).
+    pub fn table_index_fetch_tuple_check<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &Relation<'mcx>,
+        tid: &mut types_tuple::heaptuple::ItemPointerData,
+        snapshot: &mut types_tableam::tableam::Snapshot,
+        all_dead: Option<&mut bool>,
+    ) -> PgResult<bool>
+);
