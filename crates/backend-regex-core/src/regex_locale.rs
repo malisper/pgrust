@@ -38,7 +38,7 @@ use crate::regex_consts::{NUM_CCLASSES, REG_ECOLLATE, REG_ECTYPE, REG_ERANGE, RE
     REG_ETOOBIG, REG_FAKE, REG_ULOCALE};
 use crate::regex_error::{RegError, RegResult};
 use crate::regex_foundation::{addchr, addrange, getcvec};
-use crate::regguts::{char_classes, chr, ColorMap, Cvec, MAX_SIMPLE_CHR};
+use crate::regguts::{char_classes, chr, ColorMap, Cvec, CvecRange, MAX_SIMPLE_CHR};
 
 // ---------------------------------------------------------------------------
 // regc_pg_locale.c — strategy / collation state (per-backend; C globals)
@@ -453,7 +453,10 @@ pub fn pg_ctype_get_cache<'mcx>(
         PgLocaleStrategy::Icu => MAX_SIMPLE_CHR,
     };
 
-    let mut cv = getcvec(mcx, None, 0, 0)?;
+    // C: pcc->cv.chrspace = 128; pcc->cv.rangespace = 64 (regc_pg_locale.c:719-723).
+    // store_match grows these on overflow (its own realloc-doubling, NOT the
+    // fixed-space addchr/addrange), so seed the initial reservation here.
+    let mut cv = getcvec(mcx, None, 128, 64)?;
     cv.cclasscode = effective_cclasscode;
 
     // And scan 'em ... accumulating consecutive matches into ranges/singletons,
@@ -481,14 +484,23 @@ pub fn pg_ctype_get_cache<'mcx>(
 
 /// `store_match(pcc, chr1, nchrs)` (regc_pg_locale.c): append a run of `nchrs`
 /// consecutive matching chrs starting at `chr1` to the cvec — as a range when
-/// `nchrs > 1`, else as a single chr. The C realloc-on-overflow returns false on
-/// OOM; here `addrange`/`addchr` push into growable `Vec`s.
+/// `nchrs > 1`, else as a single chr.
+///
+/// C's `store_match` does NOT use the fixed-space `addrange`/`addchr` (which
+/// assert `n < space`); it owns a realloc-doubling grow loop
+/// (regc_pg_locale.c:654-674: `if (nranges >= rangespace) { rangespace *= 2;
+/// realloc(...) }`). Mirror that here by pushing onto the growable `Vec`
+/// directly — `Vec::push` reallocates (doubling) on overflow, exactly the C
+/// behavior — rather than routing through the capacity-asserting helpers.
 fn store_match(cv: &mut Cvec, chr1: chr, nchrs: u32) {
     if nchrs > 1 {
-        addrange(cv, chr1, chr1 + nchrs - 1);
+        cv.ranges.push(CvecRange {
+            from: chr1,
+            to: chr1 + nchrs - 1,
+        });
     } else {
         debug_assert_eq!(nchrs, 1);
-        addchr(cv, chr1);
+        cv.chrs.push(chr1);
     }
 }
 
