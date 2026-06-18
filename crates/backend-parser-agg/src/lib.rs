@@ -29,7 +29,7 @@ use types_error::error::{
 };
 use types_error::{PgError, PgResult};
 
-use types_nodes::nodes::{Node, NodePtr};
+use types_nodes::nodes::{ntag, Node, NodePtr};
 use types_nodes::parsenodes::{RangeTblEntry, RTEKind};
 use types_nodes::parsestmt::{ParseExprKind, ParseState};
 use types_nodes::primnodes::{Aggref, Expr, GroupingFunc, Param, ParamKind, Var};
@@ -134,11 +134,11 @@ fn exprLocation_list(list: &[NodePtr]) -> i32 {
 /// `exprLocation((Node *) n)` for a generic node — only the `Expr` arm and a
 /// few raw arms carry a location; others report -1.
 fn node_location(n: &Node) -> i32 {
-    match n {
-        Node::Expr(e) => exprLocation_node(e),
-        Node::GroupingSet(gs) => gs.location,
-        Node::SortGroupClause(_) => -1,
-        Node::TargetEntry(te) => match te.expr.as_deref() {
+    match n.node_tag() {
+        _ if n.is_expr() => exprLocation_node(n.as_expr().unwrap()),
+        ntag::T_GroupingSet => n.expect_groupingset().location,
+        ntag::T_SortGroupClause => -1,
+        ntag::T_TargetEntry => match n.expect_targetentry().expr.as_deref() {
             Some(e) => exprLocation_node(e),
             None => -1,
         },
@@ -192,9 +192,9 @@ pub fn transformAggregateCall<'mcx>(
                 (Some(a), Some(b)) => (a, b),
                 _ => break,
             };
-            let sortby = match &*sortby_node {
-                Node::SortBy(sb) => sb,
-                _ => {
+            let sortby = match sortby_node.as_sortby() {
+                Some(sb) => sb,
+                None => {
                     return Err(PgError::error(
                         "transformAggregateCall: aggorder element is not a SortBy node",
                     ))
@@ -236,9 +236,9 @@ pub fn transformAggregateCall<'mcx>(
         let mut orderlist: Vec<types_nodes::rawnodes::SortBy<'mcx>> =
             Vec::with_capacity(aggorder.len());
         for sortby_node in aggorder.into_iter() {
-            match PgBox::into_inner(sortby_node) {
-                Node::SortBy(sb) => orderlist.push(sb),
-                _ => {
+            match PgBox::into_inner(sortby_node).into_sortby() {
+                Some(sb) => orderlist.push(sb),
+                None => {
                     return Err(PgError::error(
                         "transformAggregateCall: aggorder element is not a SortBy node",
                     ))
@@ -362,6 +362,9 @@ pub fn transformGroupingFunc<'mcx>(
     pstate: &mut ParseState<'mcx>,
     p_node: Node<'mcx>,
 ) -> PgResult<Expr> {
+    // NOTE: left on the enum — the generated `into_groupingfunc` accessor is
+    // shadowed by the Node-direct *raw* `rawexprnodes::GroupingFunc` variant, so
+    // it does not reach the analyzed `primnodes::GroupingFunc` payload here.
     let p: GroupingFunc = match p_node {
         Node::Expr(Expr::GroupingFunc(g)) => g,
         _ => {
@@ -867,6 +870,11 @@ fn locate_var_of_level_list(list: &[Node], levelsup: i32) -> i32 {
 
 fn check_agg_arguments_walker(node: &Node, context: &mut CheckAggArgumentsContext) -> bool {
     // (C: node == NULL -> false; the owned tree has no NULL nodes here.)
+    // NOTE: this match stays on the enum — the `GroupingFunc` arm's payload is
+    // the analyzed `primnodes::GroupingFunc`, but the generated
+    // `as_groupingfunc` accessor is shadowed by the Node-direct *raw*
+    // `rawexprnodes::GroupingFunc` variant (same T_GroupingFunc tag), so the
+    // accessor does not fit; keeping the whole match on the enum preserves it.
     match node {
         Node::Expr(Expr::Var(var)) => {
             let mut varlevelsup = var.varlevelsup as i32;
@@ -905,9 +913,9 @@ fn check_agg_arguments_walker(node: &Node, context: &mut CheckAggArgumentsContex
 
     // SRFs and window functions: rejected immediately unless within a sub-select.
     if context.sublevels_up == 0 {
-        let is_srf = match node {
-            Node::Expr(Expr::FuncExpr(f)) => f.funcretset,
-            Node::Expr(Expr::OpExpr(o)) => o.opretset,
+        let is_srf = match node.node_tag() {
+            ntag::T_FuncExpr => node.as_funcexpr().unwrap().funcretset,
+            ntag::T_OpExpr => node.as_opexpr().unwrap().opretset,
             _ => false,
         };
         if is_srf {
@@ -922,7 +930,7 @@ fn check_agg_arguments_walker(node: &Node, context: &mut CheckAggArgumentsContex
             );
             return true;
         }
-        if let Node::Expr(Expr::WindowFunc(wf)) = node {
+        if let Some(wf) = node.as_windowfunc() {
             let loc = wf.location;
             context.error = Some(
                 ereport(ERROR)
@@ -935,7 +943,7 @@ fn check_agg_arguments_walker(node: &Node, context: &mut CheckAggArgumentsContex
         }
     }
 
-    if let Node::RangeTblEntry(rte) = node {
+    if let Some(rte) = node.as_rangetblentry() {
         if rte.rtekind == RTEKind::RTE_CTE {
             let mut ctelevelsup = rte.ctelevelsup as i32;
             ctelevelsup -= context.sublevels_up;
@@ -1339,9 +1347,9 @@ pub fn parseCheckAggregates<'mcx>(
 
     // Build the acceptable GROUP BY expressions list (TLEs).
     for grpcl_node in qry.groupClause.iter() {
-        let grpcl = match &**grpcl_node {
-            Node::SortGroupClause(s) => s,
-            _ => continue,
+        let grpcl = match grpcl_node.as_sortgroupclause() {
+            Some(s) => s,
+            None => continue,
         };
         let tle = backend_optimizer_util_vars::tlist::get_sortgroupclause_tle(
             grpcl,
@@ -1449,9 +1457,9 @@ pub fn parseCheckAggregates<'mcx>(
     )?;
     let mut new_tl: PgVec<types_nodes::primnodes::TargetEntry<'mcx>> = PgVec::new_in(mcx);
     for n in new_tlist {
-        match n {
-            Node::TargetEntry(te) => new_tl.push(te),
-            _ => {
+        match n.into_targetentry() {
+            Some(te) => new_tl.push(te),
+            None => {
                 return Err(PgError::error(
                     "parseCheckAggregates: targetList element is not a TargetEntry after substitution",
                 ))
@@ -1494,9 +1502,9 @@ pub fn parseCheckAggregates<'mcx>(
             &mut func_grouped_rels,
             &mut constraint_deps,
         )?;
-        let new_having_expr = match new_having {
-            Node::Expr(e) => e,
-            _ => {
+        let new_having_expr = match new_having.into_expr() {
+            Some(e) => e,
+            None => {
                 return Err(PgError::error(
                     "parseCheckAggregates: havingQual lowered to a non-Expr node",
                 ))
@@ -1539,9 +1547,9 @@ fn flatten_group_clauses<'mcx>(
             qry_node,
             Node::TargetEntry(tle),
         )?;
-        match flat {
-            Node::TargetEntry(te) => out.push(te),
-            _ => {
+        match flat.into_targetentry() {
+            Some(te) => out.push(te),
+            None => {
                 return Err(PgError::error(
                     "flatten_join_alias_vars on a groupClause TargetEntry did not return a TargetEntry",
                 ))
@@ -1665,6 +1673,10 @@ fn substitute_grouped_columns_mutator(node: &mut Node, context: &mut SubstituteC
         return;
     }
 
+    // NOTE: stays on the enum — the `GroupingFunc` arm needs the analyzed
+    // `primnodes::GroupingFunc`, but the generated `as_groupingfunc` accessor is
+    // shadowed by the Node-direct *raw* `rawexprnodes::GroupingFunc` (same tag)
+    // and would mis-resolve; keeping the match on the enum preserves it.
     match node {
         Node::Expr(Expr::Aggref(agg)) => {
             let agglevelsup = agg.agglevelsup as i32;
@@ -1708,7 +1720,7 @@ fn substitute_grouped_columns_mutator(node: &mut Node, context: &mut SubstituteC
     // If we have any GROUP BY items that are not simple Vars, check whether the
     // subexpression as a whole matches any GROUP BY item.
     if context.have_non_var_grouping && context.sublevels_up == 0 {
-        if let Node::Expr(this_expr) = node {
+        if let Some(this_expr) = node.as_expr() {
             let mut attnum: i32 = 0;
             for tle in context.group_clauses {
                 attnum += 1;
@@ -1731,12 +1743,12 @@ fn substitute_grouped_columns_mutator(node: &mut Node, context: &mut SubstituteC
     }
 
     // Constants/Params are always acceptable (after the whole-expr check).
-    if matches!(node, Node::Expr(Expr::Const(_)) | Node::Expr(Expr::Param(_))) {
+    if node.is_const() || node.is_param() {
         return;
     }
 
     // Ungrouped Var of the original query level => failure.
-    if let Node::Expr(Expr::Var(var)) = node {
+    if let Some(var) = node.as_var() {
         if var.varlevelsup as i32 != context.sublevels_up {
             return; // not local to my query, ignore
         }
@@ -1885,9 +1897,9 @@ fn replace_expr_dummy(slot: &mut Expr) -> Expr {
 
 /// Unwrap a `Node::Expr` back into its `Expr`.
 fn unwrap_node_expr(n: Node) -> Expr {
-    match n {
-        Node::Expr(e) => e,
-        _ => Expr::Const(types_nodes::primnodes::Const::default()),
+    match n.into_expr() {
+        Some(e) => e,
+        None => Expr::Const(types_nodes::primnodes::Const::default()),
     }
 }
 
@@ -2030,10 +2042,14 @@ fn finalize_grouping_exprs_walker(node: &mut Node, context: &mut FinalizeContext
         return;
     }
     // constants are always acceptable
-    if matches!(node, Node::Expr(Expr::Const(_)) | Node::Expr(Expr::Param(_))) {
+    if node.is_const() || node.is_param() {
         return;
     }
 
+    // NOTE: stays on the enum — the `GroupingFunc` arm needs the analyzed
+    // `primnodes::GroupingFunc` (read+write `refs`), but the generated
+    // `as_groupingfunc` accessor is shadowed by the Node-direct *raw*
+    // `rawexprnodes::GroupingFunc` (same tag); keep the match on the enum.
     match node {
         Node::Expr(Expr::Aggref(agg)) => {
             let agglevelsup = agg.agglevelsup as i32;
@@ -2123,9 +2139,9 @@ fn compute_grouping_refs(
             Node::Expr(expr.clone())
         };
 
-        let cur_expr: &Expr = match &expr_node {
-            Node::Expr(e) => e,
-            _ => {
+        let cur_expr: &Expr = match expr_node.as_expr() {
+            Some(e) => e,
+            None => {
                 // flatten_join_alias_vars on an Expr always yields an Expr node.
                 return Err(PgError::error(
                     "finalize_grouping_exprs: flattened GROUPING argument is not an expression",
@@ -2265,7 +2281,7 @@ fn expand_groupingset_node(gs: &GroupingSet) -> PgResult<Vec<Vec<i32>>> {
 /// A `GROUPING_SET_SIMPLE` node's content is a list of `Integer` nodes.
 fn collect_simple_content_ints(content: &[NodePtr], out: &mut Vec<i32>) -> PgResult<()> {
     for n in content {
-        if let Node::Integer(i) = &**n {
+        if let Some(i) = n.as_integer() {
             out.push(i.ival);
         }
     }
@@ -2273,9 +2289,9 @@ fn collect_simple_content_ints(content: &[NodePtr], out: &mut Vec<i32>) -> PgRes
 }
 
 fn node_as_groupingset<'a, 'mcx>(n: &'a Node<'mcx>) -> PgResult<&'a GroupingSet<'mcx>> {
-    match n {
-        Node::GroupingSet(gs) => Ok(gs),
-        _ => Err(PgError::error(
+    match n.as_groupingset() {
+        Some(gs) => Ok(gs),
+        None => Err(PgError::error(
             "expand_groupingset_node: content element is not a GroupingSet",
         )),
     }
