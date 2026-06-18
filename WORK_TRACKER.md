@@ -9,7 +9,7 @@ _Last updated: 2026-06-18 · origin/main ≈ `5f57e550a`_
 
 ## Where we are
 - **Passing:** `smoke` (SELECT 1; `pg_class` seqscan 415/68 rows) — verified live.
-- **Just unlocked:** **aggregates + GROUP BY EXECUTE** (`count`/`min`/`max`/`sum` + `SELECT … GROUP BY` return rows; `avg` pending). **Joins** (comma + INNER/LEFT/FULL). `count(*) FROM pg_class`=415. GUC registry complete.
+- **Just unlocked:** **numeric/bit literals** (`1.5`, `B'101'`) · **polymorphic fns** (`int4range(1,5)`) · **aggregates + GROUP BY execute** (count/min/max/sum + grouped rows; `avg` pending) · **joins** (comma + INNER/LEFT/FULL). `count(*) FROM pg_class`=415.
 - **Closest test wins:** `boolean` (~5 bounded fixes); int/text suite (VALUES ✓; needs agg follow-ons + GROUP BY).
 - **Infra:** persistent harness ✓ · shm-leak fixed ✓ · crash-survival ✓ · live boot restored ✓ · artifacts ~6 GB → **~8 build lanes** · reaper shm+prune-only (idle-rm disrupted live lanes, removed).
 
@@ -79,7 +79,7 @@ _Last updated: 2026-06-18 · origin/main ≈ `5f57e550a`_
 ---
 
 ## Active lanes
-`ac81ca4b` DDL/DML · `a3e10fdd` build-size · `af31b5cf` fn_expr-thru-Func (polymorphic) · `ae958c49` make_const by-ref (numeric/bit literals) · `a0983eed` geo
+`ac81ca4b` DDL/DML · `a3e10fdd` build-size · `a0555cff` reparameterize (cross/non-equi join → boolean)
 
 ## Build/infra notes
 - Artifacts ~6 GB/build (was ~10–14): `713252a14` (line-tables-only) + `c794aeac6` (**`incremental=false` now on `[profile.dev]`** — the lanes' default build; was only on the unused fast-check profile). Cap **~8**, keep ~20 GB buffer.
@@ -87,7 +87,7 @@ _Last updated: 2026-06-18 · origin/main ≈ `5f57e550a`_
 - Reaper = shm + `git worktree prune` ONLY (idle-based auto-rm disrupted live lanes twice; lanes self-clean + orchestrator reaps on pressure).
 
 ## Recently landed
-**GROUP BY exec (returns rows) ✅** · **INNER/LEFT/FULL JOIN ✅** · **2-table joins** ✅ · **DISTINCT + FOR-UPDATE planning** · **count/min/max/sum aggregates** ✅ · type-adt registration: inet/enum/cash/range/acl/bit · arrayfuncs (sort/shuffle/sample) · EXPLAIN structural · **boolean error-position (LINE/caret) + varlena cstring-NUL** · policy/RLS (CREATE POLICY + RelationBuildRowSecurity) · proc_arg_attrs · count(\*) exec (#165) · **GROUP BY planning** (+ real parser p_rtable bug fix) · misc2 (15/16) · **count(\*) FROM pg_class = 415** (setrefs varno + IndexOnlyScan) · fmgr builtin registry 2003→1574 (0 mismatches) · cargo dev incremental=0 · min/max planner fall-through · createplan (unique/groupingsets/async, 3→0) · GUC registry 402/404 · typcache complete · lmgr-lock (15→6) · fmgr Phase-1 seams (56/67) · bool.c 100% (type correct e2e) + boolean parser/func-RTE fixes · io_combine_limit boot fix · Datum by-ref bridge (+saophash) · crash-reinit (TLS-unwind) · seclabel→DROP · comment→DROP · multi-row VALUES · parse_expr XML · t_bits crash · setrefs Aggref fixup · smaller build artifacts · plancache F0
+**numeric/bit literals (make_const) ✅** · **polymorphic fns (fn_expr) ✅** · **GROUP BY exec (returns rows) ✅** · geo (74 OIDs) · **INNER/LEFT/FULL JOIN ✅** · **2-table joins** ✅ · **DISTINCT + FOR-UPDATE planning** · **count/min/max/sum aggregates** ✅ · type-adt registration: inet/enum/cash/range/acl/bit · arrayfuncs (sort/shuffle/sample) · EXPLAIN structural · **boolean error-position (LINE/caret) + varlena cstring-NUL** · policy/RLS (CREATE POLICY + RelationBuildRowSecurity) · proc_arg_attrs · count(\*) exec (#165) · **GROUP BY planning** (+ real parser p_rtable bug fix) · misc2 (15/16) · **count(\*) FROM pg_class = 415** (setrefs varno + IndexOnlyScan) · fmgr builtin registry 2003→1574 (0 mismatches) · cargo dev incremental=0 · min/max planner fall-through · createplan (unique/groupingsets/async, 3→0) · GUC registry 402/404 · typcache complete · lmgr-lock (15→6) · fmgr Phase-1 seams (56/67) · bool.c 100% (type correct e2e) + boolean parser/func-RTE fixes · io_combine_limit boot fix · Datum by-ref bridge (+saophash) · crash-reinit (TLS-unwind) · seclabel→DROP · comment→DROP · multi-row VALUES · parse_expr XML · t_bits crash · setrefs Aggref fixup · smaller build artifacts · plancache F0
 
 ## DROP status
 CREATE→INSERT→SELECT ✓ · DROP: comment ✓ → seclabel ✓ → **next wall `relation_is_nailed`** (tablecmds seam).
