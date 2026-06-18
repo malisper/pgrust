@@ -36,16 +36,34 @@ use types_error::PgError;
 // Argument readers / result writers.
 // ---------------------------------------------------------------------------
 
-/// `PG_GETARG_INET_PP(i)`: decode an `inet`/`cidr` arg from its 18-byte by-ref
-/// image on the side channel.
+/// `VARHDRSZ` — the 4-byte uncompressed varlena length word.
+const VARHDRSZ: usize = 4;
+
+/// Build a header-ful 4-byte-header varlena image from a payload.
+#[inline]
+fn varlena_image(payload: &[u8]) -> Vec<u8> {
+    let total = payload.len() + VARHDRSZ;
+    let mut img = Vec::with_capacity(total);
+    img.extend_from_slice(&((total as u32) << 2).to_ne_bytes());
+    img.extend_from_slice(payload);
+    img
+}
+
+/// `PG_GETARG_INET_PP(i)`: decode an `inet`/`cidr` arg from its header-ful by-ref
+/// image (`SET_VARSIZE_4B` length word + the 18-byte canonical `inet_struct`
+/// image) on the side channel. inet/cidr is typlen==-1; under
+/// header-ful-everywhere `VARDATA_ANY` is the payload after the 4-byte header.
 #[inline]
 fn arg_inet(fcinfo: &FunctionCallInfoBaseData, i: usize) -> inet_struct {
-    let b = fcinfo
+    let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("inet fn: by-ref `inet` arg missing from by-ref lane");
-    assert!(b.len() >= 18, "inet fn: by-ref image too short");
-    inet_struct::from_datum_bytes(b)
+    assert!(
+        image.len() >= VARHDRSZ + 18,
+        "inet fn: by-ref image too short"
+    );
+    inet_struct::from_datum_bytes(&image[VARHDRSZ..])
 }
 
 /// `PG_GETARG_CSTRING(i)`: the input cstring on the by-ref lane.
@@ -69,18 +87,19 @@ fn arg_int64(fcinfo: &FunctionCallInfoBaseData, i: usize) -> i64 {
     fcinfo.arg(i).expect("inet fn: missing arg").value.as_i64()
 }
 
-/// Set an `inet`/`cidr` (by-reference) result on the by-ref lane as its 18-byte
-/// canonical image.
+/// Set an `inet`/`cidr` (by-reference) result on the by-ref lane as a header-ful
+/// varlena image: `SET_VARSIZE_4B(4 + 18)` length word + the 18-byte canonical
+/// `inet_struct` image.
 #[inline]
 fn ret_inet(fcinfo: &mut FunctionCallInfoBaseData, addr: inet_struct) -> Datum {
-    fcinfo.set_ref_result(RefPayload::Varlena(addr.to_datum_bytes().to_vec()));
+    fcinfo.set_ref_result(RefPayload::Varlena(varlena_image(&addr.to_datum_bytes())));
     Datum::from_usize(0)
 }
 
-/// Set a `text` (header-stripped payload) result on the by-ref lane.
+/// Set a `text` result on the by-ref lane as a header-ful varlena image.
 #[inline]
 fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
-    fcinfo.set_ref_result(RefPayload::Varlena(bytes));
+    fcinfo.set_ref_result(RefPayload::Varlena(varlena_image(&bytes)));
     Datum::from_usize(0)
 }
 

@@ -17,20 +17,45 @@ use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
 use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
 
+/// `VARHDRSZ` — the 4-byte uncompressed varlena length word.
+const VARHDRSZ: usize = 4;
+
+/// `VARDATA_ANY` of a header-ful varlena image: payload after the 4-byte header.
+#[inline]
+fn vardata_any(image: &[u8]) -> &[u8] {
+    if image.len() >= VARHDRSZ {
+        &image[VARHDRSZ..]
+    } else {
+        &[]
+    }
+}
+
+/// Build a header-ful 4-byte-header varlena image from a payload.
+#[inline]
+fn varlena_image(payload: &[u8]) -> Vec<u8> {
+    let total = payload.len() + VARHDRSZ;
+    let mut img = Vec::with_capacity(total);
+    img.extend_from_slice(&((total as u32) << 2).to_ne_bytes());
+    img.extend_from_slice(payload);
+    img
+}
+
 /// A `text`/`bytea` arg's detoasted by-ref payload bytes (`VARDATA_ANY`).
 #[inline]
 fn arg_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    fcinfo
-        .ref_arg(i)
-        .and_then(|p| p.as_varlena())
-        .expect("cryptohashfuncs fn: by-ref arg missing from by-ref lane")
+    vardata_any(
+        fcinfo
+            .ref_arg(i)
+            .and_then(|p| p.as_varlena())
+            .expect("cryptohashfuncs fn: by-ref arg missing from by-ref lane"),
+    )
 }
 
 /// Set a `text`/`bytea` varlena result on the by-ref lane and return the dummy
 /// word.
 #[inline]
 fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
-    fcinfo.set_ref_result(RefPayload::Varlena(bytes));
+    fcinfo.set_ref_result(RefPayload::Varlena(varlena_image(&bytes)));
     Datum::from_usize(0)
 }
 

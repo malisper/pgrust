@@ -47,12 +47,24 @@ fn ret_fxid(v: FullTransactionId) -> Datum {
     Datum::from_u64(v.to_u64())
 }
 
-/// Set a `text` result on the by-ref lane (the boundary owns the `VARHDRSZ`
-/// framing; we hand over the header-less payload bytes), mirroring
-/// `PG_RETURN_TEXT_P(cstring_to_text(...))`.
+/// `VARHDRSZ` — the 4-byte uncompressed varlena length word.
+const VARHDRSZ: usize = 4;
+
+/// Build a header-ful 4-byte-header varlena image from a payload.
+#[inline]
+fn varlena_image(payload: &[u8]) -> Vec<u8> {
+    let total = payload.len() + VARHDRSZ;
+    let mut img = Vec::with_capacity(total);
+    img.extend_from_slice(&((total as u32) << 2).to_ne_bytes());
+    img.extend_from_slice(payload);
+    img
+}
+
+/// Set a `text` result on the by-ref lane as a header-ful varlena image,
+/// mirroring `PG_RETURN_TEXT_P(cstring_to_text(...))`.
 #[inline]
 fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, s: &str) -> Datum {
-    fcinfo.set_ref_result(RefPayload::Varlena(s.as_bytes().to_vec()));
+    fcinfo.set_ref_result(RefPayload::Varlena(varlena_image(s.as_bytes())));
     Datum::from_usize(0)
 }
 

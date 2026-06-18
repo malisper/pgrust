@@ -88,22 +88,39 @@ fn ret_cstring(fcinfo: &mut FunctionCallInfoBaseData, s: String) -> Datum {
     fcinfo.set_ref_result(RefPayload::Cstring(s));
     Datum::from_usize(0)
 }
-/// Set a `bytea` (`_send`) / `numeric` (`cash_numeric`) varlena image result on
-/// the by-ref lane. The bytes are the full varlena image including any header
-/// the core already wrote (numeric carries one; the bytea wire payload does not).
+/// `VARHDRSZ` — the 4-byte uncompressed varlena length word.
+const VARHDRSZ: usize = 4;
+
+/// Build a header-ful 4-byte-header varlena image from a payload.
+#[inline]
+fn varlena_image(payload: &[u8]) -> Vec<u8> {
+    let total = payload.len() + VARHDRSZ;
+    let mut img = Vec::with_capacity(total);
+    img.extend_from_slice(&((total as u32) << 2).to_ne_bytes());
+    img.extend_from_slice(payload);
+    img
+}
+
+/// Set a `numeric` (`cash_numeric`) varlena image result on the by-ref lane.
+/// numeric is already a structured header-ful varlena; carry the bytes verbatim.
 #[inline]
 fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
     fcinfo.set_ref_result(RefPayload::Varlena(bytes));
     Datum::from_usize(0)
 }
-/// Set a `text` result (`cash_words`) on the by-ref lane. The fmgr boundary
-/// carries `text` results header-stripped (the canonical `Varlena` image at
-/// this boundary is the payload bytes without the `VARHDRSZ` length word; the
-/// printtup/`textout` consumer re-wraps the header), mirroring the
-/// `backend-utils-adt-varlena` text-result convention. C: `cstring_to_text`.
+/// Set a `bytea` (`_send`) result on the by-ref lane. The core returns the bare
+/// wire payload (no header); under header-ful-everywhere a `bytea` result must
+/// carry a 4-byte varlena header.
+#[inline]
+fn ret_bytea(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
+    fcinfo.set_ref_result(RefPayload::Varlena(varlena_image(&bytes)));
+    Datum::from_usize(0)
+}
+/// Set a `text` result (`cash_words`) on the by-ref lane as a header-ful varlena
+/// image. C: `cstring_to_text`.
 #[inline]
 fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, s: String) -> Datum {
-    fcinfo.set_ref_result(RefPayload::Varlena(s.into_bytes()));
+    fcinfo.set_ref_result(RefPayload::Varlena(varlena_image(s.as_bytes())));
     Datum::from_usize(0)
 }
 
@@ -149,7 +166,7 @@ fn fc_cash_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let v = arg_cash(fcinfo, 0);
     let m = scratch_mcx();
     let bytes = ok(crate::cash_send(m.mcx(), v));
-    ret_varlena(fcinfo, bytes.as_slice().to_vec())
+    ret_bytea(fcinfo, bytes.as_slice().to_vec())
 }
 
 // ---- comparisons ----

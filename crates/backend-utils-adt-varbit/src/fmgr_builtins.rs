@@ -77,26 +77,30 @@ fn arg_varbit_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [
         .expect("varbit fn: varbit arg missing from by-ref lane")
 }
 
-/// Parse a full `varbit` varlena image `[varsize_le | bit_len_le | data]` into a
-/// borrowed [`VarBitRef`]. Mirror of `encode_varbit`.
+/// Parse a full header-ful `varbit` varlena image
+/// `[VARSIZE_4B | bit_len_ne | bit_dat]` into a borrowed [`VarBitRef`]. The
+/// 4-byte varlena length word (`SET_VARSIZE_4B`) is skipped; `bit_len` is the
+/// native-order `int32` field of the C `VarBit` struct. Mirror of `encode_varbit`.
 #[inline]
 fn decode_varbit(image: &[u8]) -> VarBitRef<'_> {
     assert!(
         image.len() >= VARBIT_PREFIX,
         "varbit fn: by-ref image shorter than the varlena prefix"
     );
-    let bit_len = i32::from_le_bytes([image[4], image[5], image[6], image[7]]);
+    let bit_len = i32::from_ne_bytes([image[4], image[5], image[6], image[7]]);
     VarBitRef::new(bit_len, &image[VARBIT_PREFIX..])
 }
 
-/// Serialise an owned [`VarBit`] result into a full varlena image
-/// `[varsize_le | bit_len_le | data]`. Mirror of `decode_varbit`.
+/// Serialise an owned [`VarBit`] result into a full header-ful varlena image
+/// `[VARSIZE_4B | bit_len_ne | bit_dat]`: the leading length word is the real
+/// `SET_VARSIZE_4B(total)` encoding (so cross-tree VARSIZE readers interpret it
+/// correctly). Mirror of `decode_varbit`.
 #[inline]
 fn encode_varbit(v: &VarBit<'_>) -> Vec<u8> {
     let total = VARBIT_PREFIX + v.data.len();
     let mut out = Vec::with_capacity(total);
-    out.extend_from_slice(&(total as u32).to_le_bytes());
-    out.extend_from_slice(&v.bit_len.to_le_bytes());
+    out.extend_from_slice(&types_datum::varlena::set_varsize_4b(total));
+    out.extend_from_slice(&v.bit_len.to_ne_bytes());
     out.extend_from_slice(&v.data);
     out
 }
