@@ -921,6 +921,12 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::proc_argdefaults::set(projections::proc_argdefaults);
     backend_utils_cache_syscache_seams::agg_row_by_oid::set(projections::agg_row_by_oid);
     backend_utils_cache_syscache_seams::agg_form_by_oid::set(projections::agg_form_by_oid);
+    // prepagg.c `preprocess_aggref`'s bundled pg_aggregate read + transtype
+    // resolution + GetAggInitVal — installed here (the syscache / type-IO owner)
+    // since prepagg can't reach this layer without a dependency cycle.
+    backend_optimizer_prep_prepagg_seams::get_agg_catalog_info::set(
+        projections::get_agg_catalog_info,
+    );
     backend_utils_cache_syscache_seams::foreign_data_wrapper_options::set(
         projections::foreign_data_wrapper_options,
     );

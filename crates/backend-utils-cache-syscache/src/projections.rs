@@ -67,6 +67,9 @@ use types_namespace::OperRow;
 use types_namespace::{OidArrayDatum, ProcRow};
 use backend_nodes_read_seams as nodes_read_seams;
 use backend_utils_adt_varlena_seams as varlena_seams;
+use backend_optimizer_prep_prepagg_seams as prepagg_seams;
+use backend_parser_parse_agg_seams as parse_agg_seams;
+use backend_utils_fmgr_fmgr_seams as fmgr_seams;
 use types_catalog::pg_aggregate::{
     AggFormData, AggRow, Anum_pg_aggregate_aggcombinefn, Anum_pg_aggregate_aggdeserialfn,
     Anum_pg_aggregate_aggfinalextra, Anum_pg_aggregate_aggfinalfn, Anum_pg_aggregate_aggfinalmodify,
@@ -1200,6 +1203,77 @@ pub(crate) fn agg_form_by_oid<'mcx>(
     };
     ReleaseSysCache(tup);
     Ok(Some(form))
+}
+
+/// `preprocess_aggref`'s bundled catalog read (prepagg.c:149-216): the
+/// `AGGFNOID` `SearchSysCache1` + `GETSTRUCT(Form_pg_aggregate)` reads, the
+/// polymorphic `resolve_aggregate_transtype`, and the `GetAggInitVal`
+/// type-input deserialization — all the pg_aggregate / type-IO work the C does
+/// while the AGGFNOID tuple is pinned, folded into one boundary so prepagg
+/// (which can't reach the syscache / fmgr layers without a cycle) crosses a
+/// single seam. Returns the [`AggCatalogInfo`] with the **resolved** transition
+/// type and the **resolved** initial-value `Datum` (post-`GetAggInitVal`).
+pub(crate) fn get_agg_catalog_info<'mcx>(
+    mcx: Mcx<'mcx>,
+    aggfnoid: Oid,
+    input_types: &[Oid],
+) -> PgResult<prepagg_seams::AggCatalogInfo> {
+    // aggTuple = SearchSysCache1(AGGFNOID, ...); aggform = GETSTRUCT(aggTuple);
+    // plus the nullable agginitval/aggminitval text columns — `agg_form_by_oid`
+    // performs exactly this (it is the `ExecInitAgg` projection of the same
+    // tuple). `!HeapTupleIsValid` -> the cache-lookup-failed elog(ERROR).
+    let Some(form) = agg_form_by_oid(mcx, aggfnoid)? else {
+        return Err(elog_cache_lookup_failed_aggregate(aggfnoid));
+    };
+
+    // resolve_aggregate_transtype(aggfnoid, aggform->aggtranstype, inputTypes,
+    // numArguments) — owned by the parser (parse_agg.c), called across its seam.
+    let aggtranstype = parse_agg_seams::resolve_aggregate_transtype::call(
+        mcx,
+        aggfnoid,
+        form.aggtranstype,
+        input_types,
+        input_types.len() as i32,
+    )?;
+
+    // textInitVal = SysCacheGetAttr(.., agginitval, &initValueIsNull);
+    // initValue = initValueIsNull ? 0 : GetAggInitVal(textInitVal, aggtranstype);
+    let (agginitval, agginitval_isnull) = match &form.agginitval {
+        None => (KeyDatum::null(), true),
+        Some(text) => {
+            // GetAggInitVal: getTypeInputInfo(transtype, &typinput, &typioparam);
+            // OidInputFunctionCall(typinput, strInitVal, typioparam, -1).
+            let (typinput, typioparam) =
+                lsyscache_seams::get_type_input_info::call(aggtranstype)?;
+            let init = fmgr_seams::oid_input_function_call::call(
+                mcx, typinput, text, typioparam, -1,
+            )?;
+            // The planner carries the init value as the canonical machine word
+            // (its `Datum` is the by-value arm). A by-reference transition init
+            // value (e.g. numeric `sum`/`avg`) can't be represented as a bare
+            // word here — `as_usize` panics, the honest by-ref-Datum boundary.
+            (KeyDatum::from_usize(init.as_usize()), false)
+        }
+    };
+
+    Ok(prepagg_seams::AggCatalogInfo {
+        aggtransfn: form.aggtransfn,
+        aggfinalfn: form.aggfinalfn,
+        aggcombinefn: form.aggcombinefn,
+        aggserialfn: form.aggserialfn,
+        aggdeserialfn: form.aggdeserialfn,
+        aggtranstype,
+        aggtransspace: form.aggtransspace,
+        aggfinalmodify: form.aggfinalmodify,
+        agginitval,
+        agginitval_isnull,
+    })
+}
+
+/// `elog(ERROR, "cache lookup failed for aggregate %u", aggfnoid)`
+/// (prepagg.c:152).
+fn elog_cache_lookup_failed_aggregate(aggfnoid: Oid) -> PgError {
+    PgError::error(format!("cache lookup failed for aggregate {}", aggfnoid))
 }
 
 /// `text = SysCacheGetAttr(cacheId, tup, attnum, &isnull)`: `None` when the

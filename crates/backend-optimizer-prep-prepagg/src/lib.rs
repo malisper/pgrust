@@ -42,8 +42,8 @@
 //! ## Boundaries (seam-and-panic into unported owners)
 //!
 //! Genuinely-external reads cross focused seams: the `pg_aggregate` catalog read
-//! + polymorphic transtype resolution (`get_agg_catalog_info`), `GetAggInitVal`
-//! (`get_agg_init_val`), and `datumIsEqual` over the canonical `Datum` word
+//! + polymorphic transtype resolution + `GetAggInitVal` (all bundled into
+//! `get_agg_catalog_info`), and `datumIsEqual` over the canonical `Datum` word
 //! (`datum_is_equal`) — all owned by the syscache / aggregate-IO / datum layers,
 //! declared in `backend-optimizer-prep-prepagg-seams`. The cost helpers
 //! `add_function_cost` / `cost_qual_eval_walker` cross the already-declared
@@ -146,31 +146,41 @@ fn OidIsValid(oid: Oid) -> bool {
 
 /// `preprocess_aggrefs(root, clause)` (prepagg.c:109) — walk `clause`, running
 /// [`preprocess_aggref`] on every `Aggref` to set up transition-state sharing
-/// and record the aggregates into `root`.
+/// and record the aggregates into `root`, AND writing the assigned
+/// `aggno`/`aggtransno`/`aggtranstype` back onto the live `Aggref` node (the C
+/// mutates the source tree in place; the plan's tlist Aggrefs must carry these
+/// for `ExecInitAgg`).
+///
+/// `clause` is the live source-tree `Expr` (e.g. a `processed_tlist` entry's
+/// expr or the `havingQual`), mutated in place.
 pub fn preprocess_aggrefs<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     root: &mut PlannerInfo,
-    clause: &Expr,
+    clause: &mut Expr,
 ) -> PgResult<()> {
-    preprocess_aggrefs_walker(mcx, root, Some(clause))?;
+    preprocess_aggrefs_walker(mcx, root, clause)?;
     Ok(())
 }
 
 /// `preprocess_aggrefs_walker(node, root)` (prepagg.c:343) — on an `Aggref`,
-/// run [`preprocess_aggref`] and stop descending (the parser guaranteed no
-/// nested aggregates in the args/direct-args/filter); else recurse via
-/// `expression_tree_walker`.
+/// run [`preprocess_aggref`] (which catalogs the agg and returns its assigned
+/// numbers), write those numbers back onto the live node, and stop descending
+/// (the parser guaranteed no nested aggregates in the args/direct-args/filter);
+/// else recurse into the node's `Expr` children in place.
 fn preprocess_aggrefs_walker<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     root: &mut PlannerInfo,
-    node: Option<&Expr>,
+    node: &mut Expr,
 ) -> PgResult<bool> {
-    let node = match node {
-        None => return Ok(false),
-        Some(n) => n,
-    };
     if let Expr::Aggref(_) = node {
-        preprocess_aggref(mcx, root, node)?;
+        let nums = preprocess_aggref(mcx, root, node)?;
+        // aggref->aggno = aggno; aggref->aggtransno = aggtransno;
+        // aggref->aggtranstype = aggtranstype; (the live-node mutation C does).
+        if let Expr::Aggref(a) = node {
+            a.aggno = nums.aggno;
+            a.aggtransno = nums.aggtransno;
+            a.aggtranstype = nums.aggtranstype;
+        }
 
         /*
          * We assume that the parser checked that there are no aggregates (of
@@ -182,27 +192,62 @@ fn preprocess_aggrefs_walker<'mcx>(
     // Assert(!IsA(node, SubLink));
     debug_assert!(!matches!(node, Expr::SubLink(_)));
 
-    // expression_tree_walker(node, preprocess_aggrefs_walker, root). The engine
-    // callback is `-> bool`; a `PgError` raised inside is captured in a cell and
-    // re-raised after the walk (the walker only short-circuits on it).
-    let captured: core::cell::RefCell<PgResult<()>> = core::cell::RefCell::new(Ok(()));
-    let root_cell = core::cell::RefCell::new(root);
-    let aborted =
-        backend_nodes_core::nodefuncs::expression_tree_walker(Some(node), &mut |child: &Expr| {
-            if captured.borrow().is_err() {
-                return true;
+    // Recurse into the node's immediate Expr children in place. (C uses
+    // expression_tree_walker; here we mutate each child so the write-back lands
+    // on the live tree.)
+    for child in expr_children_mut(node) {
+        if preprocess_aggrefs_walker(mcx, root, child)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The immediate `Expr` children of `node` that may contain `Aggref`s, as
+/// mutable references — the in-place analogue of `expression_tree_walker`'s
+/// child recursion for the node types a planner tlist / HAVING qual can carry.
+/// (The parser guarantees no nested same-level aggregates inside an `Aggref`'s
+/// own args/filter, so `Aggref` is handled by the caller and not descended.)
+fn expr_children_mut<'a>(node: &'a mut Expr) -> alloc::vec::Vec<&'a mut Expr> {
+    let mut out: alloc::vec::Vec<&'a mut Expr> = alloc::vec::Vec::new();
+    match node {
+        Expr::FuncExpr(f) => out.extend(f.args.iter_mut()),
+        Expr::OpExpr(o) | Expr::DistinctExpr(o) | Expr::NullIfExpr(o) => {
+            out.extend(o.args.iter_mut())
+        }
+        Expr::ScalarArrayOpExpr(s) => out.extend(s.args.iter_mut()),
+        Expr::BoolExpr(b) => out.extend(b.args.iter_mut()),
+        Expr::CoalesceExpr(c) => out.extend(c.args.iter_mut()),
+        Expr::MinMaxExpr(m) => out.extend(m.args.iter_mut()),
+        Expr::RelabelType(r) => {
+            if let Some(arg) = r.arg.as_deref_mut() {
+                out.push(arg);
             }
-            let mut root_ref = root_cell.borrow_mut();
-            match preprocess_aggrefs_walker(mcx, *root_ref, Some(child)) {
-                Ok(stop) => stop,
-                Err(e) => {
-                    *captured.borrow_mut() = Err(e);
-                    true
+        }
+        Expr::CoerceViaIO(c) => {
+            if let Some(arg) = c.arg.as_deref_mut() {
+                out.push(arg);
+            }
+        }
+        Expr::CaseExpr(c) => {
+            if let Some(arg) = c.arg.as_deref_mut() {
+                out.push(arg);
+            }
+            for w in c.args.iter_mut() {
+                if let Some(e) = w.expr.as_deref_mut() {
+                    out.push(e);
+                }
+                if let Some(r) = w.result.as_deref_mut() {
+                    out.push(r);
                 }
             }
-        });
-    captured.into_inner()?;
-    Ok(aborted)
+            if let Some(d) = c.defresult.as_deref_mut() {
+                out.push(d);
+            }
+        }
+        _ => {}
+    }
+    out
 }
 
 /// `preprocess_aggref(aggref, root)` (prepagg.c:115) — the per-aggregate de-dup
@@ -214,7 +259,7 @@ fn preprocess_aggref<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     root: &mut PlannerInfo,
     aggref_node: &Expr,
-) -> PgResult<()> {
+) -> PgResult<AggrefNumbers> {
     debug_assert!(matches!(aggref_node, Expr::Aggref(_)));
 
     // Working copy of the node (the C mutates the live `Aggref` in place; here the
@@ -239,7 +284,8 @@ fn preprocess_aggref<'mcx>(
      * Fetch info about the aggregate from pg_aggregate (tuple pinned across the
      * reads) + resolve the possibly-polymorphic transition type.
      */
-    let aggform = seam::get_agg_catalog_info::call(as_aggref(&working).aggfnoid, input_types)?;
+    let aggform =
+        seam::get_agg_catalog_info::call(mcx, as_aggref(&working).aggfnoid, input_types)?;
 
     let aggtransfn = aggform.aggtransfn;
     let aggfinalfn = aggform.aggfinalfn;
@@ -280,11 +326,16 @@ fn preprocess_aggref<'mcx>(
     let _ = backend_utils_cache_lsyscache::type_::get_typlenbyval(as_aggref(&working).aggtype)?;
 
     /* get initial value */
+    // The catalog owner already ran GetAggInitVal (getTypeInputInfo +
+    // OidInputFunctionCall) while the AGGFNOID tuple was pinned, with the
+    // resolved aggtranstype, and allocated the result in `mcx`. So
+    // `aggform.agginitval` is the resolved transition Datum directly (C does
+    // this inline in preprocess_aggref).
     let initValueIsNull = aggform.agginitval_isnull;
     let initValue: Datum = if initValueIsNull {
         Datum::null()
     } else {
-        GetAggInitVal(aggform.agginitval, aggtranstype)?
+        aggform.agginitval
     };
 
     /*
@@ -474,11 +525,35 @@ fn preprocess_aggref<'mcx>(
      * The Aggref's aggno/aggtransno/aggtranstype have been filled in on the
      * canonical interned copy above (the arena form `AggInfo.aggrefs` references,
      * which every downstream prep/plan reader consults). The C also writes them
-     * back into the live source-tree node in place; that source mutation is the
-     * planner driver's responsibility once it threads a mutable clause — see the
-     * crate docs.
+     * back into the live source-tree node in place; we return the assigned
+     * numbers so the caller (`preprocess_aggrefs_walker`) can mutate the live
+     * tlist/havingQual `Aggref` node — without this, the plan's tlist Aggrefs
+     * keep aggno = aggtransno = -1, and `ExecInitAgg` (which sizes peraggs from
+     * `max(aggno)+1`) reads a -1 index.
      */
-    Ok(())
+    Ok(AggrefNumbers {
+        aggno: match aggno {
+            -1 => {
+                // aggno was -1 from find_compatible_agg → a new agginfo was made;
+                // its index is the one just appended.
+                (root.agginfos.len() as i32) - 1
+            }
+            n => n,
+        },
+        aggtransno: transno,
+        aggtranstype,
+    })
+}
+
+/// The planner-visible numbers `preprocess_aggref` assigns to an `Aggref`
+/// (`aggref->aggno`, `aggref->aggtransno`, `aggref->aggtranstype`), returned so
+/// the caller can write them onto the live source-tree node (C mutates the
+/// `Aggref` in place; here the live node is a distinct arena copy).
+#[derive(Clone, Copy)]
+struct AggrefNumbers {
+    aggno: i32,
+    aggtransno: i32,
+    aggtranstype: Oid,
 }
 
 // ===========================================================================
@@ -649,13 +724,12 @@ fn find_compatible_trans(
 // ===========================================================================
 // GetAggInitVal (prepagg.c:520)
 // ===========================================================================
-
-/// `GetAggInitVal(textInitVal, transtype)` (prepagg.c:520) — deserialize an
-/// aggregate's initial transition value text into a `Datum` of `transtype`. The
-/// entire C body is calls into the type-IO subsystem, realized via the seam.
-fn GetAggInitVal(textInitVal: Datum, transtype: Oid) -> PgResult<Datum> {
-    seam::get_agg_init_val::call(textInitVal, transtype)
-}
+//
+// `GetAggInitVal(textInitVal, transtype)` (getTypeInputInfo +
+// TextDatumGetCString + OidInputFunctionCall) is folded into the
+// `get_agg_catalog_info` boundary seam: the catalog owner runs it while the
+// AGGFNOID tuple is pinned (with the resolved aggtranstype) and returns the
+// resolved init-value Datum directly. See `preprocess_aggref` above.
 
 // ===========================================================================
 // get_agg_clause_costs (prepagg.c:558)

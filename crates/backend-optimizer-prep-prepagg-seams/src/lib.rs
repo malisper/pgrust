@@ -65,9 +65,11 @@ pub struct AggCatalogInfo {
     /// `aggform->aggfinalmodify` — used for the `shareable` test
     /// (`!= AGGMODIFY_READ_WRITE`).
     pub aggfinalmodify: i8,
-    /// `SysCacheGetAttr(AGGFNOID, tuple, Anum_pg_aggregate_agginitval,
-    /// &isNull)` — the raw `text` initial-value datum (only valid when
-    /// `agginitval_isnull` is false).
+    /// The *resolved* initial transition value `Datum` — `GetAggInitVal`
+    /// (getTypeInputInfo + OidInputFunctionCall) applied to the
+    /// `SysCacheGetAttr(agginitval)` text, of the resolved `aggtranstype`,
+    /// allocated in the caller's `mcx`. Only valid when `agginitval_isnull` is
+    /// false (else `Datum::null()`).
     pub agginitval: types_datum::datum::Datum,
     /// Whether `agginitval` was SQL NULL.
     pub agginitval_isnull: bool,
@@ -84,7 +86,7 @@ seam_core::seam!(
     pub fn preprocess_aggrefs<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         root: &mut types_pathnodes::PlannerInfo,
-        clause: &types_nodes::primnodes::Expr,
+        clause: &mut types_nodes::primnodes::Expr,
     ) -> types_error::PgResult<()>
 );
 
@@ -102,28 +104,22 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `SearchSysCache1(AGGFNOID, aggfnoid)` + `GETSTRUCT` +
-    /// `SysCacheGetAttr(agginitval)` + `resolve_aggregate_transtype(...)`
-    /// (prepagg.c:149-216), bundled — the `pg_aggregate` reads `preprocess_aggref`
-    /// performs while the tuple is pinned. `input_types` are the already-extracted
-    /// argument type OIDs (`get_aggregate_argtypes`), used to resolve a
-    /// polymorphic transition type. `Err` on `elog(ERROR, "cache lookup
-    /// failed")`. Owned by the syscache / aggregate-catalog layer.
-    pub fn get_agg_catalog_info(
+    /// `SysCacheGetAttr(agginitval)` + `resolve_aggregate_transtype(...)` +
+    /// `GetAggInitVal(...)` (prepagg.c:149-216), bundled — all the
+    /// `pg_aggregate` reads `preprocess_aggref` performs while the tuple is
+    /// pinned. `input_types` are the already-extracted argument type OIDs
+    /// (`get_aggregate_argtypes`), used to resolve a polymorphic transition
+    /// type. The folded `GetAggInitVal` (getTypeInputInfo +
+    /// OidInputFunctionCall) deserializes the `agginitval` text into a `Datum`
+    /// of the resolved transition type, allocated in `mcx` — so
+    /// [`AggCatalogInfo::agginitval`] is the *resolved* initial transition
+    /// value, not the raw text. `Err` on `elog(ERROR, "cache lookup failed")`.
+    /// Owned by the syscache / aggregate-catalog / type-IO layer.
+    pub fn get_agg_catalog_info<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         aggfnoid: types_core::primitive::Oid,
         input_types: &[types_core::primitive::Oid],
     ) -> types_error::PgResult<AggCatalogInfo>
-);
-
-seam_core::seam!(
-    /// `GetAggInitVal(textInitVal, transtype)` (prepagg.c:520) —
-    /// `getTypeInputInfo(transtype)` + `TextDatumGetCString` +
-    /// `OidInputFunctionCall` to deserialize the aggregate's initial transition
-    /// value text into a `Datum` of `transtype`. Owned by the type-IO / fmgr
-    /// layer. `Err` carries the input-function `ereport(ERROR)`.
-    pub fn get_agg_init_val(
-        text_init_val: types_datum::datum::Datum,
-        transtype: types_core::primitive::Oid,
-    ) -> types_error::PgResult<types_datum::datum::Datum>
 );
 
 seam_core::seam!(

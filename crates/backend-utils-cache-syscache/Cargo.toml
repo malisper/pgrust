@@ -33,6 +33,9 @@ backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache
 backend-optimizer-util-clauses-seams = { path = "../backend-optimizer-util-clauses-seams" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
+backend-optimizer-prep-prepagg-seams = { path = "../backend-optimizer-prep-prepagg-seams" }
+backend-parser-parse-agg-seams = { path = "../backend-parser-parse-agg-seams" }
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
 backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
 backend-utils-adt-amutils-seams = { path = "../backend-utils-adt-amutils-seams" }
 backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
