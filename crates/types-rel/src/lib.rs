@@ -489,7 +489,19 @@ impl Drop for Relation<'_> {
     /// with `NoLock` has no error surface, so a failure here is ignored.
     fn drop(&mut self) {
         if let Some(closer) = self.closer.take() {
-            let _ = closer(self.data.rd_id, NoLock);
+            // The C `relation_close(rel, NoLock)` has no error surface and a
+            // failure here is ignored. The closer dispatches through the relcache
+            // seam, which can `panic!` on an unported path; if this Drop runs
+            // while the thread is ALREADY unwinding from an earlier panic (the
+            // common case — a relation opened by a statement that then errored on
+            // an unported path), a second panic escaping Drop turns the unwind
+            // into an abort() (SIGABRT) and kills the whole backend. Since the
+            // failure is ignored anyway, catch and swallow any panic so closing a
+            // relation on the error path can never escalate to a process abort.
+            let id = self.data.rd_id;
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = closer(id, NoLock);
+            }));
         }
     }
 }
