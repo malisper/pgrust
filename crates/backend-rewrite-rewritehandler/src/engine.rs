@@ -94,10 +94,9 @@ fn get_generated_columns<'mcx>(
             // ChangeVarNodes(defexpr, 1, rt_index, 0)
             let mut defnode = Node::Expr(defexpr);
             ChangeVarNodes(&mut defnode, 1, rt_index, 0);
-            let defexpr = match defnode {
-                Node::Expr(e) => e,
-                _ => unreachable!("ChangeVarNodes preserves the node kind"),
-            };
+            let defexpr = defnode
+                .into_expr()
+                .unwrap_or_else(|| unreachable!("ChangeVarNodes preserves the node kind"));
             let te = make_target_entry(mcx, defexpr, (i + 1) as i16, None, false)?;
             gen_cols.push(te);
         }
@@ -288,9 +287,9 @@ fn get_assignment_input<'a>(node: Option<&'a Expr>) -> Option<&'a Expr> {
 /// contain a `SetToDefault`?
 fn searchForDefault(rte: &RangeTblEntry<'_>) -> bool {
     for sublist in rte.values_lists.iter() {
-        if let Node::List(list) = &**sublist {
+        if let Some(list) = (**sublist).as_list() {
             for col in list.iter() {
-                if matches!(&**col, Node::Expr(Expr::SetToDefault(_))) {
+                if (**col).as_expr().is_some_and(|e| matches!(e, Expr::SetToDefault(_))) {
                     return true;
                 }
             }
@@ -310,7 +309,7 @@ fn findDefaultOnlyColumns<'mcx>(
     let mut initialized = false;
 
     for sublist_node in rte.values_lists.iter() {
-        let Node::List(sublist) = &**sublist_node else {
+        let Some(sublist) = (**sublist_node).as_list() else {
             continue;
         };
         if !initialized {
@@ -318,7 +317,7 @@ fn findDefaultOnlyColumns<'mcx>(
             let mut i = 0;
             for col in sublist.iter() {
                 i += 1;
-                if matches!(&**col, Node::Expr(Expr::SetToDefault(_))) {
+                if (**col).as_expr().is_some_and(|e| matches!(e, Expr::SetToDefault(_))) {
                     let prev = default_only_cols.take();
                     default_only_cols = Some(bms_add_member(mcx, prev, i)?);
                 }
@@ -329,7 +328,7 @@ fn findDefaultOnlyColumns<'mcx>(
             let mut i = 0;
             for col in sublist.iter() {
                 i += 1;
-                if !matches!(&**col, Node::Expr(Expr::SetToDefault(_))) {
+                if !(**col).as_expr().is_some_and(|e| matches!(e, Expr::SetToDefault(_))) {
                     let prev = default_only_cols.take();
                     default_only_cols = bms_del_member(prev, i);
                 }
@@ -610,10 +609,10 @@ pub fn rewriteValuesRTE<'mcx>(
     // Map each VALUES column (1-based) to the targetlist resno that consumes it.
     let numattrs = {
         let rte = &parsetree.rtable[(rti - 1) as usize];
-        match rte.values_lists.first().map(|n| &**n) {
-            Some(Node::List(list)) => list.len(),
-            _ => 0,
-        }
+        rte.values_lists
+            .first()
+            .and_then(|n| (**n).as_list())
+            .map_or(0, |list| list.len())
     };
     let mut attrnos = vec![0i16; numattrs];
     for tle in parsetree.targetList.iter() {
@@ -657,7 +656,7 @@ pub fn rewriteValuesRTE<'mcx>(
     let old_values = core_take_vec(&mut parsetree.rtable[(rti - 1) as usize].values_lists);
 
     for sublist_node in old_values.iter() {
-        let Node::List(sublist) = &**sublist_node else {
+        let Some(sublist) = (**sublist_node).as_list() else {
             new_values.push(alloc_in(mcx, sublist_node.clone_in(mcx)?)?);
             continue;
         };
@@ -666,7 +665,7 @@ pub fn rewriteValuesRTE<'mcx>(
         for col in sublist.iter() {
             let attrno = attrnos[i];
             i += 1;
-            if let Node::Expr(Expr::SetToDefault(def)) = &**col {
+            if let Some(Expr::SetToDefault(def)) = (**col).as_expr() {
                 let def: SetToDefault = *def;
                 // unused column -> NULL const
                 if bms_is_member(i as i32, unused_cols) {
@@ -725,13 +724,13 @@ pub fn rewriteValuesRTEToNulls<'mcx>(
     let old_values = core_take_vec(&mut parsetree.rtable[(rti - 1) as usize].values_lists);
     let mut new_values: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
     for sublist_node in old_values.iter() {
-        let Node::List(sublist) = &**sublist_node else {
+        let Some(sublist) = (**sublist_node).as_list() else {
             new_values.push(alloc_in(mcx, sublist_node.clone_in(mcx)?)?);
             continue;
         };
         let mut new_list: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
         for col in sublist.iter() {
-            if let Node::Expr(Expr::SetToDefault(def)) = &**col {
+            if let Some(Expr::SetToDefault(def)) = (**col).as_expr() {
                 let nc = make_null_const(mcx, def.typeId, def.typeMod, def.collation)?;
                 new_list.push(alloc_in(mcx, Node::Expr(Expr::Const(nc)))?);
             } else {
@@ -1010,10 +1009,7 @@ pub fn rewriteRuleAction<'mcx>(
         OffsetVarNodes(&mut sub_node, rt_length, 0);
         // references to OLD should point at original rt_index
         ChangeVarNodes(&mut sub_node, PRS2_OLD_VARNO + rt_length, rt_index, 0);
-        *sub_action = match sub_node {
-            Node::Query(q) => q,
-            _ => unreachable!(),
-        };
+        *sub_action = sub_node.into_query().unwrap_or_else(|| unreachable!());
     }
     if let Some(q) = rule_qual.as_deref_mut() {
         OffsetVarNodes(q, rt_length, 0);
@@ -1256,10 +1252,7 @@ pub fn rewriteRuleAction<'mcx>(
             &mut outer,
             mcx,
         )?;
-        *sub_action = match sub_node {
-            Node::Query(q) => q,
-            _ => unreachable!(),
-        };
+        *sub_action = sub_node.into_query().unwrap_or_else(|| unreachable!());
     }
 
     // Now drop the sub_action borrow; handle RETURNING on rule_action.
@@ -1307,10 +1300,7 @@ pub fn rewriteRuleAction<'mcx>(
             if let Some(f) = outer {
                 had_sublink = f;
             }
-            match node {
-                Node::TargetEntry(t) => ret_list.push(t),
-                _ => unreachable!(),
-            }
+            ret_list.push(node.into_targetentry().unwrap_or_else(|| unreachable!()));
         }
         rule_action.hasSubLinks = had_sublink;
         rule_action.returningList = ret_list;
@@ -1757,7 +1747,7 @@ fn fireRIRonSubLink<'mcx>(
     if err.is_some() {
         return true;
     }
-    if let Node::Expr(Expr::SubLink(sub)) = node {
+    if let Some(Expr::SubLink(sub)) = node.as_expr_mut() {
         // Do what we came for: take the embedded 'static subselect, rebind it
         // to 'mcx (the data is mcx-owned — same lifetime-only relabel used by
         // make_subplan / query_box_into_static), rewrite, and re-embed.
@@ -1912,7 +1902,7 @@ fn RewriteQuery<'mcx>(
                 let mut values_rte_found: Option<i32> = None;
                 if let Some(jt) = parsetree.jointree.as_deref() {
                     for item in jt.fromlist.iter() {
-                        if let Node::RangeTblRef(rtr) = &**item {
+                        if let Some(rtr) = (**item).as_rangetblref() {
                             if rtr.rtindex > orig_rt_length {
                                 let rte = &parsetree.rtable[(rtr.rtindex - 1) as usize];
                                 if rte.rtekind == RTEKind::RTE_VALUES {
@@ -2039,7 +2029,7 @@ fn RewriteQuery<'mcx>(
                         .unwrap_or(false)
                 {
                     let jt = pt.jointree.as_deref().unwrap();
-                    if let Node::RangeTblRef(rtr) = &*jt.fromlist[0] {
+                    if let Some(rtr) = (*jt.fromlist[0]).as_rangetblref() {
                         let src = &pt.rtable[(rtr.rtindex - 1) as usize];
                         if src.rtekind == RTEKind::RTE_SUBQUERY
                             && src
@@ -2285,18 +2275,12 @@ fn make_string<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<StringNode<'mcx>> {
 /// `&mut Node::CommonTableExpr` from a `cteList` element (the C
 /// `lfirst_node(CommonTableExpr, lc)`).
 fn cte_mut<'a, 'mcx>(node: &'a mut NodePtr<'mcx>) -> Option<&'a mut CommonTableExpr<'mcx>> {
-    match &mut **node {
-        Node::CommonTableExpr(c) => Some(c),
-        _ => None,
-    }
+    (**node).as_commontableexpr_mut()
 }
 
 /// `&Node::CommonTableExpr` from a `cteList` element.
 fn cte_ref<'a, 'mcx>(node: &'a NodePtr<'mcx>) -> Option<&'a CommonTableExpr<'mcx>> {
-    match &**node {
-        Node::CommonTableExpr(c) => Some(c),
-        _ => None,
-    }
+    (**node).as_commontableexpr()
 }
 
 /// The CTE's name (`cte->ctename`).
@@ -2311,22 +2295,18 @@ fn cte_has_search_or_cycle(node: &NodePtr<'_>) -> bool {
 
 /// `castNode(Query, cte->ctequery)->commandType`.
 fn cte_query_command_type(node: &NodePtr<'_>) -> Option<CmdType> {
-    match cte_ref(node).and_then(|c| c.ctequery.as_deref()) {
-        Some(Node::Query(q)) => Some(q.commandType),
-        _ => None,
-    }
+    cte_ref(node)
+        .and_then(|c| c.ctequery.as_deref())
+        .and_then(|n| n.as_query())
+        .map(|q| q.commandType)
 }
 
 /// Take the CTE's `ctequery` (a `Node::Query`) out as an owned `Query`.
 fn take_cte_query<'mcx>(node: &mut NodePtr<'mcx>) -> Option<Query<'mcx>> {
     let cte = cte_mut(node)?;
-    match cte.ctequery.take() {
-        Some(boxed) => match PgBox::into_inner(boxed) {
-            Node::Query(q) => Some(q),
-            _ => None,
-        },
-        None => None,
-    }
+    cte.ctequery
+        .take()
+        .and_then(|boxed| PgBox::into_inner(boxed).into_query())
 }
 
 /// Store an owned `Query` back as the CTE's `ctequery`.

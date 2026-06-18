@@ -176,15 +176,17 @@ pub fn build_column_default<'mcx>(
 /// a default value is always an `Expr`. Unwrap `Node::Expr`, else it's a model
 /// violation (the parser stores defaults as expressions).
 fn node_into_expr(node: Node<'_>) -> PgResult<Expr> {
-    match node {
-        Node::Expr(e) => Ok(e),
-        other => Err(PgError::new(
+    let tag = node.tag();
+    if let Some(e) = node.into_expr() {
+        Ok(e)
+    } else {
+        Err(PgError::new(
             ERROR,
             format!(
                 "build_column_default: default expression is not an Expr node (tag {:?})",
-                other.tag()
+                tag
             ),
-        )),
+        ))
     }
 }
 
@@ -207,14 +209,11 @@ pub fn view_has_instead_trigger(
         CmdType::CMD_DELETE => Ok(trig.is_some_and(|t| t.trig_delete_instead_row)),
         CmdType::CMD_MERGE => {
             for node in merge_action_list {
-                let action = match &**node {
-                    Node::MergeAction(a) => a,
-                    other => {
-                        return Err(PgError::new(
-                            ERROR,
-                            format!("unrecognized node type: {:?}", other.tag()),
-                        ))
-                    }
+                let Some(action) = (**node).as_mergeaction() else {
+                    return Err(PgError::new(
+                        ERROR,
+                        format!("unrecognized node type: {:?}", (**node).tag()),
+                    ));
                 };
                 match action.commandType {
                     CmdType::CMD_INSERT => {
@@ -346,13 +345,10 @@ pub fn view_query_is_auto_updatable(
         ));
     };
 
-    let rtr = match &*fromlist[0] {
-        Node::RangeTblRef(rtr) => rtr,
-        _ => {
-            return Ok(Some(
-                "Views that do not select from a single table or view are not automatically updatable.",
-            ))
-        }
+    let Some(rtr) = (*fromlist[0]).as_rangetblref() else {
+        return Ok(Some(
+            "Views that do not select from a single table or view are not automatically updatable.",
+        ));
     };
 
     let base_rte = rt_fetch(&viewquery.rtable, rtr.rtindex);
@@ -406,10 +402,9 @@ fn view_cols_are_auto_updatable<'mcx>(
 ) -> PgResult<Option<&'static str>> {
     // The caller verified this view is auto-updatable -> single base relation.
     let jt = viewquery.jointree.as_ref().expect("auto-updatable view has a jointree");
-    let rtr = match &*jt.fromlist[0] {
-        Node::RangeTblRef(rtr) => rtr,
-        _ => panic!("auto-updatable view fromlist[0] is not a RangeTblRef"),
-    };
+    let rtr = (*jt.fromlist[0])
+        .as_rangetblref()
+        .unwrap_or_else(|| panic!("auto-updatable view fromlist[0] is not a RangeTblRef"));
 
     if let Some(slot) = updatable_cols.as_deref_mut() {
         *slot = None;
@@ -541,14 +536,11 @@ pub fn error_view_not_updatable(
         CmdType::CMD_MERGE => {
             let trig = view.rd_trigdesc.as_deref();
             for node in merge_action_list {
-                let action = match &**node {
-                    Node::MergeAction(a) => a,
-                    other => {
-                        return PgError::new(
-                            ERROR,
-                            format!("unrecognized node type: {:?}", other.tag()),
-                        )
-                    }
+                let Some(action) = (**node).as_mergeaction() else {
+                    return PgError::new(
+                        ERROR,
+                        format!("unrecognized node type: {:?}", (**node).tag()),
+                    );
                 };
                 match action.commandType {
                     CmdType::CMD_INSERT => {
@@ -770,10 +762,9 @@ fn relation_is_updatable_internal<'mcx>(
                 .jointree
                 .as_ref()
                 .expect("auto-updatable view has a jointree");
-            let rtr = match &*jt.fromlist[0] {
-                Node::RangeTblRef(rtr) => rtr,
-                _ => panic!("auto-updatable view fromlist[0] is not a RangeTblRef"),
-            };
+            let rtr = (*jt.fromlist[0])
+                .as_rangetblref()
+                .unwrap_or_else(|| panic!("auto-updatable view fromlist[0] is not a RangeTblRef"));
             let base_rte = rt_fetch(&viewquery.rtable, rtr.rtindex);
             debug_assert_eq!(base_rte.rtekind, RTEKind::RTE_RELATION);
 
@@ -832,10 +823,9 @@ fn expand_generated_columns_internal<'mcx>(
             // ChangeVarNodes(defexpr, 1, rt_index, 0)
             let mut defnode = Node::Expr(defexpr);
             ChangeVarNodes(&mut defnode, 1, rt_index, 0);
-            defexpr = match defnode {
-                Node::Expr(e) => e,
-                _ => unreachable!("ChangeVarNodes preserves the node kind"),
-            };
+            defexpr = defnode
+                .into_expr()
+                .unwrap_or_else(|| unreachable!("ChangeVarNodes preserves the node kind"));
             let te = make_target_entry(mcx, defexpr, (i + 1) as i16, None, false)?;
             tlist.push(te);
         }
@@ -894,10 +884,9 @@ pub fn expand_generated_columns_in_expr<'mcx>(
 
     let mut wrapped = Node::Expr(node);
     expand_generated_columns_internal(mcx, &mut wrapped, rel, rt_index, &rte, 0)?;
-    let out = match wrapped {
-        Node::Expr(e) => e,
-        _ => unreachable!("expand_generated_columns_internal keeps an Expr an Expr"),
-    };
+    let out = wrapped
+        .into_expr()
+        .unwrap_or_else(|| unreachable!("expand_generated_columns_internal keeps an Expr an Expr"));
     Ok(Some(out))
 }
 
