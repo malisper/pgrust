@@ -53,24 +53,24 @@ pub use types_relcache_entry::IndexAttrBitmapKind;
 
 /// `RelationGetFKeyList(relation)` (relcache.c): the relation's foreign-key
 /// cache-info list, built from `pg_constraint` and cached in `rd_fkeylist`.
-pub fn RelationGetFKeyList(relation: Oid) -> PgResult<()> {
-    /* Quick exit if we already computed the list. */
-    let (fkeyvalid, relid) = with_rel(relation, |rd| (rd.rd_fkeyvalid, rd.rd_id));
-    if fkeyvalid {
-        return Ok(());
-    }
-
+/// Returns the assembled `ForeignKeyCacheInfo` rows (the C return value the
+/// planner's `get_relation_foreign_keys` walks); the presence flag is cached on
+/// the entry. The owned model re-scans rather than reading a cached `rd_fkeylist`
+/// payload (the entry caches only the presence flag), which is behaviorally the
+/// same list — pg_constraint is unchanged within the planning snapshot.
+pub fn RelationGetFKeyList(relation: Oid) -> PgResult<Vec<ForeignKeyCacheInfo>> {
     /*
      * Scan pg_constraint for entries having conrelid = this rel, keeping only
      * the foreign keys. The FK-node build (`ForeignKeyCacheInfo` +
      * `DeconstructFkConstraintRow`) is FK node vocabulary owned cross-unit; the
      * seam returns the assembled rows. The orchestration here mirrors C.
      */
-    let _fkeys = scan_pg_constraint_fkeys_seam(relid)?;
+    let relid = with_rel(relation, |rd| rd.rd_id);
+    let fkeys = scan_pg_constraint_fkeys_seam(relid)?;
 
     /* Now mark the completed list saved in the relcache entry. */
     with_rel_mut(relation, |rd| rd.rd_fkeyvalid = true);
-    Ok(())
+    Ok(fkeys)
 }
 
 /* ==========================================================================
@@ -1052,15 +1052,31 @@ fn scan_pg_constraint_fkeys_seam(relid: Oid) -> PgResult<Vec<ForeignKeyCacheInfo
     let rows = genam_seam::relcache_scan_pg_constraint_fkeys::call(relid)?;
     Ok(rows
         .into_iter()
-        .map(|r| ForeignKeyCacheInfo { conoid: r.conoid })
+        .map(|r| ForeignKeyCacheInfo {
+            conoid: r.conoid,
+            conrelid: r.conrelid,
+            confrelid: r.confrelid,
+            conenforced: r.conenforced,
+            nkeys: r.nkeys,
+            conkey: r.conkey,
+            confkey: r.confkey,
+            conpfeqop: r.conpfeqop,
+        })
         .collect())
 }
 
-/// `ForeignKeyCacheInfo` (nodes/parsenodes.h) — FK node vocabulary owned
-/// cross-unit; opaque to the derived orchestration (it only stores the list).
+/// `ForeignKeyCacheInfo` (nodes/parsenodes.h) — the FK cache-info the planner
+/// (`get_relation_foreign_keys`, plancat.c) reads from `rd_fkeylist`.
+#[derive(Clone)]
 pub(crate) struct ForeignKeyCacheInfo {
-    #[allow(dead_code)]
     pub(crate) conoid: Oid,
+    pub(crate) conrelid: Oid,
+    pub(crate) confrelid: Oid,
+    pub(crate) conenforced: bool,
+    pub(crate) nkeys: i32,
+    pub(crate) conkey: Vec<types_core::primitive::AttrNumber>,
+    pub(crate) confkey: Vec<types_core::primitive::AttrNumber>,
+    pub(crate) conpfeqop: Vec<Oid>,
 }
 
 /// `RelationGetIndexExpressions(relation)`'s node-tree transform: `stringToNode`

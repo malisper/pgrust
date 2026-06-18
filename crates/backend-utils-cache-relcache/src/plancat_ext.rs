@@ -30,6 +30,7 @@ pub fn init_seams() {
     px::relation_parallel_workers::set(relation_parallel_workers);
     px::ignore_system_indexes_for::set(ignore_system_indexes_for);
     px::relation_get_index_list_oids::set(relation_get_index_list_oids);
+    px::get_relation_fkey_list::set(get_relation_fkey_list);
     px::get_index_cat_info::set(get_index_cat_info);
     px::get_index_expressions::set(get_index_expressions);
     px::get_index_predicate::set(get_index_predicate);
@@ -185,6 +186,33 @@ fn ignore_system_indexes_for(relid: Oid) -> PgResult<bool> {
 /// `RelationGetIndexList(relation)` as a lifetime-free `Vec<Oid>` (relcache.c).
 fn relation_get_index_list_oids(relid: Oid) -> PgResult<Vec<Oid>> {
     crate::derived::RelationGetIndexList(relid)
+}
+
+/// `RelationGetFKeyList(relation)` (relcache.c) as the planner-ready
+/// [`px::CachedFkInfo`] rows `get_relation_foreign_keys` (plancat.c) walks. The
+/// entry is forced to be built/cached (the C `relation_open` in
+/// `get_relation_info`'s caller already did this), then the FK list is built
+/// from `pg_constraint`.
+fn get_relation_fkey_list(relid: Oid) -> PgResult<Vec<px::CachedFkInfo>> {
+    let built = RelationIdGetRelation(relid)?;
+    if built == types_core::InvalidOid {
+        return Err(PgError::error(format!(
+            "could not open relation with OID {relid}"
+        )));
+    }
+    let fkeys = crate::derived::RelationGetFKeyList(relid)?;
+    Ok(fkeys
+        .into_iter()
+        .map(|fk| px::CachedFkInfo {
+            conrelid: fk.conrelid,
+            confrelid: fk.confrelid,
+            conenforced: fk.conenforced,
+            nkeys: fk.nkeys,
+            conkey: fk.conkey,
+            confkey: fk.confkey,
+            conpfeqop: fk.conpfeqop,
+        })
+        .collect())
 }
 
 /// Open the index `indexoid` (forcing a relcache build) and extract everything

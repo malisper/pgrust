@@ -175,11 +175,27 @@ pub struct ScannedPgAmproc {
 
 /// One decoded `pg_constraint` foreign-key row as `RelationGetFKeyList`
 /// consumes it (the `ForeignKeyCacheInfo` payload built by
-/// `DeconstructFkConstraintRow`). Opaque to the relcache caller (it only caches
-/// the list and the presence flag), so only the constraint OID is exposed.
+/// `DeconstructFkConstraintRow`). The relcache caller caches the list and the
+/// presence flag; the planner (`get_relation_foreign_keys`, plancat.c) also
+/// reads the FK key arrays, so the full `ForeignKeyCacheInfo` shape is exposed.
 #[derive(Clone, Debug)]
 pub struct ScannedFkInfo {
+    /// `info->conoid` — the constraint OID.
     pub conoid: Oid,
+    /// `info->conrelid` — the referencing (FK) table OID.
+    pub conrelid: Oid,
+    /// `info->confrelid` — the referenced (PK) table OID.
+    pub confrelid: Oid,
+    /// `info->conenforced`.
+    pub conenforced: bool,
+    /// `info->nkeys` — number of key columns.
+    pub nkeys: i32,
+    /// `info->conkey[0..nkeys]` (`DeconstructFkConstraintRow`).
+    pub conkey: Vec<AttrNumber>,
+    /// `info->confkey[0..nkeys]`.
+    pub confkey: Vec<AttrNumber>,
+    /// `info->conpfeqop[0..nkeys]`.
+    pub conpfeqop: Vec<Oid>,
 }
 
 /// One decoded `pg_rewrite` row as `RelationBuildRuleLock` consumes it: the

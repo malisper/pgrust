@@ -78,8 +78,9 @@ use types_catalog::pg_class::{
 use types_catalog::pg_constraint::{
     ConstraintRelidTypidNameIndexId, Anum_pg_constraint_conbin,
     Anum_pg_constraint_conenforced, Anum_pg_constraint_conexclop,
-    Anum_pg_constraint_conindid, Anum_pg_constraint_conname,
-    Anum_pg_constraint_connoinherit, Anum_pg_constraint_conrelid,
+    Anum_pg_constraint_confkey, Anum_pg_constraint_confrelid,
+    Anum_pg_constraint_conindid, Anum_pg_constraint_conkey, Anum_pg_constraint_conname,
+    Anum_pg_constraint_connoinherit, Anum_pg_constraint_conpfeqop, Anum_pg_constraint_conrelid,
     Anum_pg_constraint_contype, Anum_pg_constraint_convalidated,
     Anum_pg_constraint_oid, CONSTRAINT_CHECK, CONSTRAINT_EXCLUSION,
     CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL,
@@ -905,8 +906,40 @@ fn relcache_scan_pg_constraint_fkeys(relid: Oid) -> PgResult<Vec<seam::ScannedFk
         if col(&row, Anum_pg_constraint_contype, "contype")?.as_char() != CONSTRAINT_FOREIGN {
             continue;
         }
+        // info = makeNode(ForeignKeyCacheInfo);
+        // info->conoid/conrelid/confrelid/conenforced = constraint->...;
+        let conrelid = col(&row, Anum_pg_constraint_conrelid, "conrelid")?.as_oid();
+        let confrelid = col(&row, Anum_pg_constraint_confrelid, "confrelid")?.as_oid();
+        let conenforced =
+            col(&row, Anum_pg_constraint_conenforced, "conenforced")?.as_bool();
+        // DeconstructFkConstraintRow(htup, &info->nkeys, info->conkey,
+        //                            info->confkey, info->conpfeqop,
+        //                            NULL, NULL, NULL, NULL);
+        let conkey = int16_array_elems(
+            col(&row, Anum_pg_constraint_conkey, "conkey")?.as_ref_bytes(),
+            "conkey",
+        )?;
+        let confkey = int16_array_elems(
+            col(&row, Anum_pg_constraint_confkey, "confkey")?.as_ref_bytes(),
+            "confkey",
+        )?;
+        let conpfeqop =
+            oid_array_elems(col(&row, Anum_pg_constraint_conpfeqop, "conpfeqop")?.as_ref_bytes())?;
+        let nkeys = conkey.len() as i32;
+        if confkey.len() as i32 != nkeys || conpfeqop.len() as i32 != nkeys {
+            return Err(PgError::error(
+                "foreign key constraint key arrays have inconsistent lengths",
+            ));
+        }
         out.push(seam::ScannedFkInfo {
             conoid: col(&row, Anum_pg_constraint_oid, "pg_constraint.oid")?.as_oid(),
+            conrelid,
+            confrelid,
+            conenforced,
+            nkeys,
+            conkey,
+            confkey,
+            conpfeqop,
         });
     }
 
@@ -958,6 +991,41 @@ fn oid_array_elems(bytes: &[u8]) -> PgResult<Vec<Oid>> {
             bytes[off + 2],
             bytes[off + 3],
         ]));
+    }
+    Ok(out)
+}
+
+/// 1-D `int2[]` `ArrayType` C image → its elements as `AttrNumber` (int16).
+/// Same `ArrayType` header layout as [`oid_array_elems`] (24-byte header, no
+/// null bitmap) but with 2-byte elements. `DeconstructFkConstraintRow` reads
+/// `conkey`/`confkey` this way (a non-NULL 1-D smallint array). `what` names the
+/// column for the error text.
+fn int16_array_elems(bytes: &[u8], what: &str) -> PgResult<Vec<AttrNumber>> {
+    const HEADER: usize = 24;
+    if bytes.len() < HEADER {
+        return Err(PgError::error(alloc::format!("{what} array image too short")));
+    }
+    let ndim = i32::from_ne_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+    if ndim != 1 {
+        return Err(PgError::error(alloc::format!("{what} is not a 1-D smallint array")));
+    }
+    let dataoffset = i32::from_ne_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+    if dataoffset != 0 {
+        return Err(PgError::error(alloc::format!("{what} array unexpectedly has nulls")));
+    }
+    let nelems = i32::from_ne_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+    if nelems < 0 {
+        return Err(PgError::error(alloc::format!("{what} array has negative dim0")));
+    }
+    let nelems = nelems as usize;
+    let need = HEADER + nelems * 2;
+    if bytes.len() < need {
+        return Err(PgError::error(alloc::format!("{what} array shorter than dim0 implies")));
+    }
+    let mut out = Vec::with_capacity(nelems);
+    for i in 0..nelems {
+        let off = HEADER + i * 2;
+        out.push(i16::from_ne_bytes([bytes[off], bytes[off + 1]]));
     }
     Ok(out)
 }
