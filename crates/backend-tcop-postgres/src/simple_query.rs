@@ -484,7 +484,7 @@ pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgRes
         // Select the output format: text unless doing a FETCH from a binary
         // cursor.
         let mut format: i16 = 0; // TEXT is default
-        if let Node::FetchStmt(stmt) = &*parsetree.stmt {
+        if let Some(stmt) = parsetree.stmt.as_fetchstmt() {
             if !stmt.ismove {
                 if let Some(name) = stmt.portalname.as_ref() {
                     if let Some(fportal) =
@@ -539,7 +539,7 @@ pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgRes
                 backend_access_transam_xact::EndImplicitTransactionBlock();
             }
             finish_xact_command()?;
-        } else if matches!(&*parsetree.stmt, Node::TransactionStmt(_)) {
+        } else if parsetree.stmt.is_transactionstmt() {
             // Transaction control statement: commit it; a new xact command
             // starts for the next command.
             finish_xact_command()?;
@@ -669,7 +669,7 @@ pub fn finish_xact_command() -> PgResult<()> {
 /// transaction-aborted state)?
 pub fn is_transaction_exit_stmt(parsetree: &Node<'_>) -> bool {
     use types_nodes::ddlnodes::TransactionStmtKind;
-    if let Node::TransactionStmt(stmt) = parsetree {
+    if let Some(stmt) = parsetree.as_transactionstmt() {
         matches!(
             stmt.kind,
             TransactionStmtKind::TRANS_STMT_COMMIT
