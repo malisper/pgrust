@@ -18,6 +18,7 @@ backend-executor-tablefuncRoutine-seams = { path = "../backend-executor-tablefun
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
+backend-utils-adt-xml = { path = "../backend-utils-adt-xml" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
