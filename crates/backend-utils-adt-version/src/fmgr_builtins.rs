@@ -70,6 +70,6 @@ fn builtin(
 /// retset).
 pub fn register_version_builtins() {
     backend_utils_fmgr_core::register_builtins([builtin(
-        89, "version", 0, false, false, fc_version,
+        89, "pgsql_version", 0, true, false, fc_version,
     )]);
 }

@@ -114,7 +114,7 @@ pub fn register_backend_utils_misc_more_builtins() {
         builtin(3298, "row_security_active", 1, true, false, fc_row_security_active),
         builtin(
             3299,
-            "row_security_active",
+            "row_security_active_name",
             1,
             true,
             false,

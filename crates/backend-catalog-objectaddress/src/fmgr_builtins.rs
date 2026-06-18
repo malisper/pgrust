@@ -128,7 +128,7 @@ pub fn register_objectaddress_builtins() {
             3537,
             "pg_describe_object",
             3,
-            false,
+            true,
             false,
             fc_pg_describe_object,
         ),

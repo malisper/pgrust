@@ -61,7 +61,7 @@ pub fn register_trigger_builtins() {
         3163,
         "pg_trigger_depth",
         0,
-        false,
+        true,
         false,
         fc_pg_trigger_depth,
     )]);

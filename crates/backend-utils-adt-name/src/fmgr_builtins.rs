@@ -284,9 +284,9 @@ pub fn register_name_builtins() {
         // ---- no-argument SQL functions (name result) ----
         // pg_proc.dat: proargtypes => '' (nargs 0), no proisstrict (strict 'f'),
         // no proretset (retset 'f').
-        builtin_full(710, "getpgusername", 0, false, false, fc_current_user),
-        builtin_full(745, "current_user", 0, false, false, fc_current_user),
-        builtin_full(746, "session_user", 0, false, false, fc_session_user),
-        builtin_full(1402, "current_schema", 0, false, false, fc_current_schema),
+        builtin_full(710, "current_user", 0, true, false, fc_current_user),
+        builtin_full(745, "current_user", 0, true, false, fc_current_user),
+        builtin_full(746, "session_user", 0, true, false, fc_session_user),
+        builtin_full(1402, "current_schema", 0, true, false, fc_current_schema),
     ]);
 }

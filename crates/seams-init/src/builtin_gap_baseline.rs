@@ -25,8 +25,8 @@
 //! test that runs `crate::init_all()` then formats `missing_builtins()` (sorted
 //! by `foid`) as the `(oid, "prosrc", BuiltinGapKind::...)` rows below.
 //!
-//! Current gap: 1666 of 3102 canonical built-ins (1656 not registered,
-//! 10 registered with diverging metadata).
+//! Current gap: 1656 of 3102 canonical built-ins (1656 not registered,
+//! 0 registered with diverging metadata).
 
 use backend_utils_fmgr_core::BuiltinGapKind;
 use types_core::Oid;
@@ -54,7 +54,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (86, "pg_ddl_command_in", BuiltinGapKind::NotRegistered),
     (87, "pg_ddl_command_out", BuiltinGapKind::NotRegistered),
     (88, "pg_ddl_command_recv", BuiltinGapKind::NotRegistered),
-    (89, "pgsql_version", BuiltinGapKind::Mismatch { field: "name" }),
     (90, "pg_ddl_command_send", BuiltinGapKind::NotRegistered),
     (101, "eqsel", BuiltinGapKind::NotRegistered),
     (102, "neqsel", BuiltinGapKind::NotRegistered),
@@ -165,13 +164,10 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (681, "oidvectorgt", BuiltinGapKind::NotRegistered),
     (702, "dist_lp", BuiltinGapKind::NotRegistered),
     (704, "dist_ls", BuiltinGapKind::NotRegistered),
-    (710, "current_user", BuiltinGapKind::Mismatch { field: "name" }),
     (725, "dist_pl", BuiltinGapKind::NotRegistered),
     (727, "dist_sl", BuiltinGapKind::NotRegistered),
     (728, "dist_cpoly", BuiltinGapKind::NotRegistered),
     (744, "array_eq", BuiltinGapKind::NotRegistered),
-    (745, "current_user", BuiltinGapKind::Mismatch { field: "strict" }),
-    (746, "session_user", BuiltinGapKind::Mismatch { field: "strict" }),
     (747, "array_dims", BuiltinGapKind::NotRegistered),
     (748, "array_ndims", BuiltinGapKind::NotRegistered),
     (750, "array_in", BuiltinGapKind::NotRegistered),
@@ -270,7 +266,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (1391, "pg_stat_get_backend_start", BuiltinGapKind::NotRegistered),
     (1392, "pg_stat_get_backend_client_addr", BuiltinGapKind::NotRegistered),
     (1393, "pg_stat_get_backend_client_port", BuiltinGapKind::NotRegistered),
-    (1402, "current_schema", BuiltinGapKind::Mismatch { field: "strict" }),
     (1403, "current_schemas", BuiltinGapKind::NotRegistered),
     (1406, "point_vert", BuiltinGapKind::NotRegistered),
     (1407, "point_horiz", BuiltinGapKind::NotRegistered),
@@ -863,7 +858,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (3160, "pg_stat_get_checkpointer_write_time", BuiltinGapKind::NotRegistered),
     (3161, "pg_stat_get_checkpointer_sync_time", BuiltinGapKind::NotRegistered),
     (3162, "pg_collation_for", BuiltinGapKind::NotRegistered),
-    (3163, "pg_trigger_depth", BuiltinGapKind::Mismatch { field: "strict" }),
     (3165, "pg_wal_lsn_diff", BuiltinGapKind::NotRegistered),
     (3166, "pg_size_pretty_numeric", BuiltinGapKind::NotRegistered),
     (3167, "array_remove", BuiltinGapKind::NotRegistered),
@@ -936,10 +930,8 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (3288, "gist_poly_distance", BuiltinGapKind::NotRegistered),
     (3290, "dist_cpoint", BuiltinGapKind::NotRegistered),
     (3292, "dist_polyp", BuiltinGapKind::NotRegistered),
-    (3294, "show_config_by_name_missing_ok", BuiltinGapKind::Mismatch { field: "name" }),
     (3296, "pg_notification_queue_usage", BuiltinGapKind::NotRegistered),
     (3297, "pg_ls_dir", BuiltinGapKind::NotRegistered),
-    (3299, "row_security_active_name", BuiltinGapKind::Mismatch { field: "name" }),
     (3300, "uuid_sortsupport", BuiltinGapKind::NotRegistered),
     (3301, "jsonb_concat", BuiltinGapKind::NotRegistered),
     (3302, "jsonb_delete", BuiltinGapKind::NotRegistered),
@@ -1080,7 +1072,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (3533, "enum_send", BuiltinGapKind::NotRegistered),
     (3535, "string_agg_transfn", BuiltinGapKind::NotRegistered),
     (3536, "string_agg_finalfn", BuiltinGapKind::NotRegistered),
-    (3537, "pg_describe_object", BuiltinGapKind::Mismatch { field: "strict" }),
     (3539, "text_format", BuiltinGapKind::NotRegistered),
     (3540, "text_format_nv", BuiltinGapKind::NotRegistered),
     (3543, "bytea_string_agg_transfn", BuiltinGapKind::NotRegistered),
@@ -1650,7 +1641,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (6343, "uuid_extract_version", BuiltinGapKind::NotRegistered),
     (6345, "range_contains_elem_support", BuiltinGapKind::NotRegistered),
     (6346, "elem_contained_by_range_support", BuiltinGapKind::NotRegistered),
-    (6347, "gist_translate_cmptype_common", BuiltinGapKind::Mismatch { field: "strict" }),
     (6348, "has_largeobject_privilege_name_id", BuiltinGapKind::NotRegistered),
     (6349, "has_largeobject_privilege_id", BuiltinGapKind::NotRegistered),
     (6350, "has_largeobject_privilege_id_id", BuiltinGapKind::NotRegistered),

@@ -208,7 +208,7 @@ pub fn register_guc_funcs_builtins() {
         // current_setting(text, bool) -> text  (prosrc show_config_by_name_missing_ok)
         builtin(
             3294,
-            "current_setting",
+            "show_config_by_name_missing_ok",
             2,
             true,
             false,

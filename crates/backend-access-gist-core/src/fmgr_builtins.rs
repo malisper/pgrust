@@ -65,7 +65,7 @@ pub fn register_backend_access_gist_core_builtins() {
         foid: 6347,
         name: "gist_translate_cmptype_common".to_string(),
         nargs: 1,
-        strict: false,
+        strict: true,
         retset: false,
         func: Some(fc_gist_translate_cmptype_common),
     }]);
