@@ -10,8 +10,12 @@
 //!
 //! Accumulators bear charged `PgVec`s (the `'mcx` lifetime); allocating
 //! transitions take an explicit `Mcx<'mcx>` and return [`PgResult`] where the C
-//! `ereport`s. The sort-support node registration and HyperLogLog cardinality
-//! estimator are genuine externals reached via seams (NOT modeled here).
+//! `ereport`s. The HyperLogLog cardinality estimator is held by value in the
+//! abbreviated-key sort state ([`NumericSortSupportState`]) and operated on
+//! directly via `backend-lib-hyperloglog` (mirroring varlena). Only the
+//! function-pointer / `ssup_extra` install into the trimmed `SortSupportData`
+//! node is a genuine external reached via seam (the unported tuplesort
+//! abbreviation machinery).
 
 use mcx::{Mcx, PgVec};
 use types_error::PgResult;
@@ -21,6 +25,9 @@ use types_numeric::{
     numeric_ndigits, numeric_weight, Int128AggState, NumericDigit, NumericSortSupport, DEC_DIGITS,
     NBASE, NUMERIC_ABBREV_NAN, NUMERIC_ABBREV_NINF, NUMERIC_ABBREV_PINF,
 };
+
+use backend_lib_hyperloglog as hll;
+use types_nodes::nodeagg::HyperLogLog;
 
 use crate::{convert, kernel_transcendental, kernel_var, ops_sql};
 
@@ -828,9 +835,9 @@ fn int128_to_numericvar<'mcx>(mcx: Mcx<'mcx>, val: i128) -> PgResult<NumericVar<
 pub fn numeric_abbrev_convert<'mcx>(
     mcx: Mcx<'mcx>,
     original: &[u8],
-    ssup: &mut NumericSortSupport,
+    nss: &mut NumericSortSupportState<'mcx>,
 ) -> PgResult<i64> {
-    ssup.input_count += 1;
+    nss.payload.input_count += 1;
 
     if numeric_is_special(original) {
         let result = if numeric_is_pinf(original) {
@@ -843,16 +850,19 @@ pub fn numeric_abbrev_convert<'mcx>(
         Ok(result)
     } else {
         let var = convert::set_var_from_num(mcx, original)?;
-        numeric_abbrev_convert_var(&var, ssup)
+        numeric_abbrev_convert_var(&var, nss)
     }
 }
 
 /// `numeric_abbrev_convert_var(var, nss)` (numeric.c:2384, the 64-bit variant):
 /// pack a finite `NumericVar` into its 64-bit abbreviated key (negated, with
-/// excess-44 weight in the top bits).  `nss.estimating` controls HLL updates;
-/// the HyperLogLog accumulation is a genuine external behind the sort-support
-/// seam.
-fn numeric_abbrev_convert_var(var: &NumericVar<'_>, nss: &mut NumericSortSupport) -> PgResult<i64> {
+/// excess-44 weight in the top bits).  `nss.payload.estimating` controls HLL
+/// updates; the HyperLogLog accumulation runs directly on the counter held by
+/// value in the sort state (mirrors varlena's `varstr_abbrev_convert`).
+fn numeric_abbrev_convert_var<'mcx>(
+    var: &NumericVar<'_>,
+    nss: &mut NumericSortSupportState<'mcx>,
+) -> PgResult<i64> {
     let ndigits = var.ndigits() as i32;
     let weight = var.weight;
     let mut result: i64;
@@ -895,15 +905,14 @@ fn numeric_abbrev_convert_var(var: &NumericVar<'_>, nss: &mut NumericSortSupport
         result = result.wrapping_neg();
     }
 
-    if nss.estimating {
+    if nss.payload.estimating {
         // C: uint32 tmp = (uint32) result ^ (uint32) ((uint64) result >> 32);
         //    addHyperLogLog(&nss->abbr_card, DatumGetUInt32(hash_uint32(tmp)));
-        // The `tmp` folding is pure (ported here); the `hash_uint32` + HLL
-        // accumulation against the sort's HLL counter live behind the seam
-        // (genuinely unported owner: the sort-support setup that attaches the
-        // `hyperLogLogState` to `ssup_extra`).
+        // `hash_uint32(k)` is `hash_bytes_uint32(k)` (common/hashfn.h:42); the
+        // HLL accumulation runs directly on the by-value counter.
         let tmp = (result as u32) ^ (((result as u64) >> 32) as u32);
-        backend_utils_adt_numeric_seams::numeric_abbrev_add_sample::call(tmp);
+        let hash = common_hashfn::hash_bytes_uint32(tmp);
+        hll::addHyperLogLog(&mut nss.abbr_card, hash);
     }
 
     Ok(result)
@@ -936,29 +945,29 @@ pub fn numeric_cmp_abbrev(x: i64, y: i64) -> i32 {
 }
 
 /// `numeric_abbrev_abort(memtupcount, ssup)` (numeric.c:2233): decide whether
-/// to abort abbreviation. The HyperLogLog cardinality read is behind the
-/// `numeric_abbrev_estimate` seam (its state lives in the sort's `ssup_extra`);
-/// the threshold logic and the `estimating` toggle are in-crate. Returns
-/// `true` if abbreviation should be aborted. Pure decision; never ereports.
+/// to abort abbreviation. The HyperLogLog cardinality read runs directly on the
+/// counter held by value in the sort state; the threshold logic and the
+/// `estimating` toggle are in-crate. Returns `true` if abbreviation should be
+/// aborted. Pure decision; never ereports.
 ///
 /// `trace_sort` LOG `elog`s in the C are diagnostics with no SQL-visible
 /// effect and are elided.
-pub fn numeric_abbrev_abort(memtupcount: i32, nss: &mut NumericSortSupport) -> bool {
-    if memtupcount < 10000 || nss.input_count < 10000 || !nss.estimating {
+pub fn numeric_abbrev_abort(memtupcount: i32, nss: &mut NumericSortSupportState<'_>) -> bool {
+    if memtupcount < 10000 || nss.payload.input_count < 10000 || !nss.payload.estimating {
         return false;
     }
 
-    let abbr_card = backend_utils_adt_numeric_seams::numeric_abbrev_estimate::call();
+    let abbr_card = hll::estimateHyperLogLog(&nss.abbr_card);
 
     // If we have >100k distinct values, stop even counting at that point.
     if abbr_card > 100000.0 {
-        nss.estimating = false;
+        nss.payload.estimating = false;
         return false;
     }
 
     // Target minimum cardinality is 1 per ~10k of non-null inputs, with a 0.5
     // row fudge factor.
-    if abbr_card < nss.input_count as f64 / 10000.0 + 0.5 {
+    if abbr_card < nss.payload.input_count as f64 / 10000.0 + 0.5 {
         return true;
     }
 
@@ -973,16 +982,37 @@ pub fn numeric_abbrev_abort(memtupcount: i32, nss: &mut NumericSortSupport) -> b
 // `numeric_abbrev_abort`). What `numeric_sortsupport` does is INSTALL them into
 // the `SortSupport` node's function-pointer slots and, when abbreviation is
 // enabled, allocate the `NumericSortSupport`/HyperLogLog buffer into the sort's
-// `ssup_extra` in `ssup->ssup_cxt`. Those slots (`comparator`,
-// `abbrev_converter`, `abbrev_abort`, `abbrev_full_comparator`, `ssup_extra`)
-// and the HLL state are owned/consumed by the (unported) tuplesort abbreviation
-// machinery; the trimmed `SortSupportData` deliberately carries only
-// `comparator`. So the install + ssup_extra/HLL setup route OUT to that owner
-// through the seams below, threaded over the real `SortSupportData`. Mirror PG
-// and panic there until the tuplesort abbreviation owner lands.
+// `ssup_extra` in `ssup->ssup_cxt`.
+//
+// The `NumericSortSupport` payload (`input_count`/`estimating`) *and* its
+// HyperLogLog cardinality counter (`abbr_card`) are this unit's own state — held
+// by value in the [`NumericSortSupportState`] sort state below, exactly as C
+// holds `NumericSortSupport` (with its inline `hyperLogLogState abbr_card`) in
+// `ssup_extra`, and mirroring varlena's `VarStringSortSupport`. The HLL ops run
+// directly on that counter (no seam). What still routes OUT to the (unported)
+// tuplesort abbreviation machinery is purely the *function-pointer / ssup_extra
+// install into the `SortSupportData` node* — minting the comparator/converter/
+// abort tokens and storing the state — since the trimmed `SortSupportData`
+// deliberately carries only `comparator`. Those installs panic until the
+// tuplesort abbreviation owner lands.
 // ---------------------------------------------------------------------------
 
 use types_sortsupport::SortSupportData;
+
+/// The `ssup->ssup_extra` payload for numeric abbreviated-key sorting
+/// (numeric.c:340-347 `NumericSortSupport`): the in-crate computation fields
+/// ([`NumericSortSupport`]) plus the HyperLogLog cardinality estimator held by
+/// value (C `hyperLogLogState abbr_card`). The short-varlena reuse buffer (C
+/// `nss->buf`) is the fmgr/toast deferral surface and is elided. Mirrors
+/// varlena's `VarStringSortSupport`: the counter lives here and the
+/// init/add/estimate ops are called directly from `backend-lib-hyperloglog`.
+pub struct NumericSortSupportState<'mcx> {
+    /// `input_count` / `estimating` — the trimmed [`NumericSortSupport`]
+    /// payload.
+    pub payload: NumericSortSupport,
+    /// `hyperLogLogState abbr_card` — abbreviated-key cardinality counter.
+    pub abbr_card: HyperLogLog<'mcx>,
+}
 
 seam_core::seam!(
     /// `ssup->comparator = numeric_fast_cmp;` — register this unit's full
@@ -994,16 +1024,18 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// The abbreviation wiring of `numeric_sortsupport` when `ssup->abbreviate`:
-    /// `palloc` a `NumericSortSupport` + the short-varlena reuse buffer
-    /// (`VARATT_SHORT_MAX + VARHDRSZ + 1`) in `ssup->ssup_cxt`, seed it
-    /// (`input_count = 0`, `estimating = true`, `initHyperLogLog(&abbr_card,10)`),
-    /// store it as `ssup->ssup_extra`, then set
+    /// store the freshly-built [`NumericSortSupportState`] (payload seeded
+    /// `input_count = 0`, `estimating = true`, plus `initHyperLogLog(&abbr_card,
+    /// 10)`, all done in-crate by the caller) as `ssup->ssup_extra`, then set
     /// `abbrev_full_comparator = comparator; comparator = numeric_cmp_abbrev;
     /// abbrev_converter = numeric_abbrev_convert; abbrev_abort =
-    /// numeric_abbrev_abort`. The in-crate seed values are passed in; the
-    /// `ssup_extra`/HLL/abbrev-slot fields live on the (unported) tuplesort
-    /// abbreviation owner. Owner: the tuplesort abbreviation machinery.
-    pub fn install_numeric_abbrev(ssup: &mut SortSupportData<'_>, nss: NumericSortSupport)
+    /// numeric_abbrev_abort`. The `ssup_extra`/abbrev-slot fields live on the
+    /// (unported) tuplesort abbreviation owner. Owner: the tuplesort
+    /// abbreviation machinery.
+    pub fn install_numeric_abbrev<'mcx>(
+        ssup: &mut SortSupportData<'mcx>,
+        nss: NumericSortSupportState<'mcx>,
+    )
 );
 
 /// `numeric_sortsupport(PG_FUNCTION_ARGS)` (numeric.c:2130): set up sort support
@@ -1011,19 +1043,22 @@ seam_core::seam!(
 ///
 /// `ssup` is the `SortSupport` node (C `(SortSupport) PG_GETARG_POINTER(0)`).
 /// Returns `PG_RETURN_VOID()`.
-pub fn numeric_sortsupport(ssup: &mut SortSupportData<'_>) {
+pub fn numeric_sortsupport(ssup: &mut SortSupportData<'_>) -> PgResult<()> {
     // ssup->comparator = numeric_fast_cmp;
     install_numeric_comparator::call(ssup);
 
     if ssup.abbreviate {
         // oldcontext = MemoryContextSwitchTo(ssup->ssup_cxt);
         // nss = palloc(sizeof(NumericSortSupport));
-        // nss->buf = palloc(VARATT_SHORT_MAX + VARHDRSZ + 1);
+        // nss->buf = palloc(VARATT_SHORT_MAX + VARHDRSZ + 1);  (toast surface; elided)
         // nss->input_count = 0; nss->estimating = true;
         // initHyperLogLog(&nss->abbr_card, 10);
-        let nss = NumericSortSupport {
-            input_count: 0,
-            estimating: true,
+        let nss = NumericSortSupportState {
+            payload: NumericSortSupport {
+                input_count: 0,
+                estimating: true,
+            },
+            abbr_card: hll::initHyperLogLog(ssup.ssup_cxt, 10)?,
         };
 
         // ssup->ssup_extra = nss;
@@ -1034,6 +1069,8 @@ pub fn numeric_sortsupport(ssup: &mut SortSupportData<'_>) {
         // MemoryContextSwitchTo(oldcontext);
         install_numeric_abbrev::call(ssup, nss);
     }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
