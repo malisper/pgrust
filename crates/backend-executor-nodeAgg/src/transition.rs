@@ -1144,20 +1144,42 @@ fn fcinfo_arg_value<'mcx>(
 }
 
 /// `fcinfo->args[i].value = v; fcinfo->args[i].isnull = isnull;` — store one
-/// argument into the transfn call frame.
+/// argument into the transfn call frame. The unified `Datum` carries a by-value
+/// word; the fcinfo `args[]` are `types_datum::NullableDatum`, so convert the
+/// word across the two Datum models (by-value).
 fn fcinfo_set_arg(
     pertrans: &mut AggStatePerTransData<'_>,
-    _i: i32,
-    _value: types_tuple::backend_access_common_heaptuple::Datum<'_>,
-    _isnull: bool,
+    i: i32,
+    value: types_tuple::backend_access_common_heaptuple::Datum<'_>,
+    isnull: bool,
 ) {
-    let _ = pertrans.transfn_fcinfo.as_mut();
-    panic!(
-        "backend-executor-nodeAgg::process_ordered_aggregate: the shared call frame \
-         carries args[] (#296), but the nodeAgg-owned per-trans frame \
-         AggStatePerTransData.transfn_fcinfo is not yet built/populated by the \
-         unported ExecInitAgg/build_pertrans path; nothing to write into"
-    );
+    let fcinfo = pertrans
+        .transfn_fcinfo
+        .as_mut()
+        .expect("fcinfo_set_arg: pertrans->transfn_fcinfo not built by build_pertrans_for_aggref");
+    fcinfo.args[i as usize] = types_datum::NullableDatum {
+        value: types_datum::Datum::from_usize(value.as_usize()),
+        isnull,
+    };
+}
+
+/// `pertrans->transfn_fcinfo->args[n] = { value, isnull }` — the interpreter's
+/// `EEOP_AGG_PRESORTED_DISTINCT_SINGLE` dispatch loads the just-evaluated input
+/// into the per-trans transfn call frame before the distinct comparison reads it
+/// (`ExecEvalPreOrderedDistinctSingle` reads `args[1]`). Mirrors C, where the
+/// compiler recursed the input directly into `&trans_fcinfo->args[1]`.
+pub fn set_transfn_arg<'mcx>(
+    aggstate: &mut AggStateData<'mcx>,
+    transno: usize,
+    n: i32,
+    value: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+    isnull: bool,
+) {
+    let pertrans = &mut aggstate
+        .pertrans
+        .as_mut()
+        .expect("set_transfn_arg: aggstate->pertrans not built")[transno];
+    fcinfo_set_arg(pertrans, n, value, isnull);
 }
 
 /// `DatumGetBool(FunctionCall2Coll(&pertrans->equalfnOne, aggCollation,

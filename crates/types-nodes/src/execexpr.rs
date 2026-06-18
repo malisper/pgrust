@@ -1263,11 +1263,19 @@ pub enum ExprEvalStepData<'mcx> {
     /// `agg_presorted_distinctcheck` — for
     /// EEOP_AGG_PRESORTED_DISTINCT_{SINGLE,MULTI}.
     AggPresortedDistinctCheck {
-        /// `AggStatePerTrans pertrans` — parked (nodeAgg-owned) opaque address.
+        /// `AggStatePerTrans pertrans` — the nodeAgg per-trans index (C parks an
+        /// `AggStatePerTrans` pointer; the owned model uses the `transno` index).
         pertrans: usize,
         /// `ExprContext *aggcontext` — EState ExprContext pool id is threaded by
         /// the owner; opaque address for now.
         aggcontext: usize,
+        /// The result cell the (single-column) DISTINCT input sub-expression was
+        /// evaluated into (the C recurses the input straight into
+        /// `&pertrans->transfn_fcinfo->args[1]`; this owned model uses a separate
+        /// arena cell, so the interpreter copies it into the per-trans fcinfo's
+        /// `args[1]` before the distinct comparison reads it). The MULTI variant
+        /// reads the per-trans `sortslot` instead and ignores this.
+        input_cell: ResultCellId,
         jumpdistinct: i32,
     },
     /// `agg_trans` — for EEOP_AGG_PLAIN_TRANS_[INIT_][STRICT_]{BYVAL,BYREF}

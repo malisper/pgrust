@@ -4151,6 +4151,304 @@ fn apply_scanjoin_target_to_paths<'mcx>(
     Ok(())
 }
 
+/// `has_volatile_pathkey(keys)` (planner.c:3179) — true if any pathkey's
+/// EquivalenceClass has a volatile member.
+fn has_volatile_pathkey(root: &PlannerInfo, keys: &[types_pathnodes::PathKey]) -> bool {
+    for pathkey in keys {
+        if let Some(ec_id) = pathkey.pk_eclass {
+            if root.ec(ec_id).ec_has_volatile {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// `adjust_group_pathkeys_for_groupagg(root)` (planner.c:3229) — add pathkeys to
+/// `root->group_pathkeys` to reflect the best set of pre-ordered input for
+/// ordered/DISTINCT aggregates, marking each covered `Aggref` `aggpresorted`.
+///
+/// "Best" = the pathkeys that suit the largest number of aggregates. We take the
+/// pathkeys of the first ORDER BY / DISTINCT aggregate, then search for others
+/// requiring the same or a stricter variation, repeating for any remaining
+/// aggregates with different pathkeys. The `Bitmapset` sets of AggInfo indexes
+/// are rendered as sorted `Vec<usize>` (the C uses small index sets).
+fn adjust_group_pathkeys_for_groupagg(root: &mut PlannerInfo) {
+    use backend_optimizer_util_pathnode_seams::PathKeysComparison;
+
+    // grouppathkeys = root->group_pathkeys (clone so the by-value list arithmetic
+    // below — append_pathkeys / list_copy — does not alias root->group_pathkeys).
+    let grouppathkeys = root.group_pathkeys.clone();
+
+    // Shouldn't be here unless there are some ordered aggregates.
+    debug_assert!(root.numOrderedAggs > 0);
+
+    // Do nothing if disabled.
+    if !backend_utils_misc_guc_tables::vars::enable_presorted_aggregate.read() {
+        return;
+    }
+
+    // First pass: collect the AggInfo indexes to be processed below.
+    let mut unprocessed_aggs: Vec<usize> = Vec::new();
+    for (idx, &agginfo_id) in root.agginfos.clone().iter().enumerate() {
+        // aggref = linitial_node(Aggref, agginfo->aggrefs)
+        let aggref_id = root.agg_info(agginfo_id).aggrefs[0];
+        let aggref = aggref_of_node(root, aggref_id);
+
+        // AGGKIND_IS_ORDERED_SET(aggref->aggkind): kind != AGGKIND_NORMAL.
+        if aggref.aggkind != types_parsenodes::AGGKIND_NORMAL {
+            continue;
+        }
+
+        // Skip unless there's a DISTINCT or ORDER BY clause.
+        if aggref.aggdistinct.is_empty() && aggref.aggorder.is_empty() {
+            continue;
+        }
+
+        // Additional safety checks are needed if there's a FILTER clause: the
+        // filter removes rows that could error when sorted, and presorting
+        // happens before the FILTER. Only Vars and Consts (peeling RelabelType)
+        // are guaranteed safe to presort.
+        if aggref.aggfilter.is_some() {
+            let mut allow_presort = true;
+            for tle in aggref.args.iter() {
+                let mut expr: &types_nodes::primnodes::Expr = match tle.expr.as_deref() {
+                    Some(e) => e,
+                    None => {
+                        allow_presort = false;
+                        break;
+                    }
+                };
+                while let types_nodes::primnodes::Expr::RelabelType(rt) = expr {
+                    match rt.arg.as_deref() {
+                        Some(inner) => expr = inner,
+                        None => break,
+                    }
+                }
+                match expr {
+                    types_nodes::primnodes::Expr::Var(_)
+                    | types_nodes::primnodes::Expr::Const(_) => continue,
+                    _ => {
+                        allow_presort = false;
+                        break;
+                    }
+                }
+            }
+            if !allow_presort {
+                continue;
+            }
+        }
+
+        unprocessed_aggs.push(idx);
+    }
+
+    // Process unprocessed_aggs to find the best set of pathkeys.
+    let mut bestpathkeys: Vec<types_pathnodes::PathKey> = Vec::new();
+    let mut bestaggs: Vec<usize> = Vec::new();
+
+    while unprocessed_aggs.len() > bestaggs.len() {
+        let mut aggindexes: Vec<usize> = Vec::new();
+        let mut currpathkeys: Vec<types_pathnodes::PathKey> = Vec::new();
+        let mut currpathkeys_set = false;
+        // Track the volatile aggs we drop from unprocessed during this pass.
+        let mut to_drop: Vec<usize> = Vec::new();
+
+        for &i in unprocessed_aggs.iter() {
+            let agginfo_id = root.agginfos[i];
+            let aggref_id = root.agg_info(agginfo_id).aggrefs[0];
+
+            // sortlist = aggref->aggdistinct ? : aggref->aggorder; args =
+            // aggref->args. Intern both into the planner node arena (the form
+            // make_pathkeys_for_sortclauses consumes).
+            let (sortlist_ids, args_ids) = intern_aggref_sort_inputs(root, aggref_id);
+            let pathkeys = backend_optimizer_path_pathkeys::make_pathkeys_for_sortclauses(
+                root,
+                &sortlist_ids,
+                &args_ids,
+            );
+
+            // Ignore Aggrefs with volatile functions in their sort clause.
+            if has_volatile_pathkey(root, &pathkeys) {
+                to_drop.push(i);
+                continue;
+            }
+
+            if !currpathkeys_set {
+                // Take the pathkeys from the first unprocessed aggregate.
+                currpathkeys = pathkeys;
+                // include the GROUP BY pathkeys, if they exist.
+                if !grouppathkeys.is_empty() {
+                    currpathkeys = backend_optimizer_path_pathkeys::append_pathkeys(
+                        root,
+                        grouppathkeys.clone(),
+                        &currpathkeys,
+                    );
+                }
+                currpathkeys_set = true;
+                aggindexes.push(i);
+            } else {
+                // Look for a stronger set of matching pathkeys.
+                let pathkeys = if !grouppathkeys.is_empty() {
+                    backend_optimizer_path_pathkeys::append_pathkeys(
+                        root,
+                        grouppathkeys.clone(),
+                        &pathkeys,
+                    )
+                } else {
+                    pathkeys
+                };
+                match backend_optimizer_path_pathkeys::compare_pathkeys(&currpathkeys, &pathkeys) {
+                    PathKeysComparison::Better2 => {
+                        // 'pathkeys' are stronger, use these instead; FALLTHROUGH
+                        // to mark this aggregate as covered.
+                        currpathkeys = pathkeys;
+                        aggindexes.push(i);
+                    }
+                    PathKeysComparison::Better1 | PathKeysComparison::Equal => {
+                        aggindexes.push(i);
+                    }
+                    PathKeysComparison::Different => {}
+                }
+            }
+        }
+
+        // remove the aggregates that we've just processed (the covered ones and
+        // the volatile ones dropped above).
+        unprocessed_aggs.retain(|x| !aggindexes.contains(x) && !to_drop.contains(x));
+
+        // If this pass included more aggregates than the previous best, use these.
+        if aggindexes.len() > bestaggs.len() {
+            bestaggs = aggindexes;
+            bestpathkeys = currpathkeys;
+        }
+    }
+
+    // If we found any ordered aggregates, update root->group_pathkeys to add the
+    // best set of aggregate pathkeys (bestpathkeys already includes GROUP BY).
+    if !bestpathkeys.is_empty() {
+        root.group_pathkeys = bestpathkeys;
+    }
+
+    // Set aggpresorted on every Aggref of the covered AggInfos so the executor
+    // needn't perform a sort for them. In C, `agginfo->aggrefs` and the live
+    // processed-tlist / HAVING-qual Aggrefs are the same pointers; this port
+    // interns a separate working clone into `AggInfo.aggrefs` (carrying the
+    // assigned `aggno`), while the executor reads the live processed-tlist arena
+    // Aggrefs (cloned into the plan tree by createplan). So mark by `aggno`: each
+    // covered AggInfo's index is the `aggno` stamped on its Aggrefs by
+    // `preprocess_aggref`. Walk processed_tlist (the gate) and set the flag on
+    // every Aggref whose aggno is covered.
+    if !bestaggs.is_empty() {
+        let aggnos: Vec<i32> = bestaggs
+            .iter()
+            .map(|&i| {
+                let agginfo_id = root.agginfos[i];
+                aggref_of_node(root, root.agg_info(agginfo_id).aggrefs[0]).aggno
+            })
+            .collect();
+        let tlist_exprs: Vec<types_pathnodes::NodeId> = root
+            .processed_tlist
+            .iter()
+            .map(|&te| root.targetentry(te).expr)
+            .collect();
+        for expr_id in tlist_exprs {
+            // node_mut yields the live arena Expr; mark in place (mirrors C).
+            let node = root.node_mut(expr_id);
+            backend_optimizer_prep_prepagg::mark_aggrefs_presorted(node, &aggnos);
+        }
+    }
+}
+
+/// `linitial_node(Aggref, ...)` — resolve an arena node handle to its `Aggref`.
+fn aggref_of_node<'a>(
+    root: &'a PlannerInfo,
+    id: types_pathnodes::NodeId,
+) -> &'a types_nodes::primnodes::Aggref {
+    match root.node(id) {
+        types_nodes::primnodes::Expr::Aggref(a) => a,
+        other => panic!(
+            "adjust_group_pathkeys_for_groupagg: agginfo->aggrefs node is not an Aggref: {:?}",
+            core::mem::discriminant(other)
+        ),
+    }
+}
+
+/// Intern an `Aggref`'s DISTINCT/ORDER BY `SortGroupClause` list (whichever is
+/// present — DISTINCT preferred, as in C) and its `args` (`TargetEntry` list)
+/// into the planner node arena, returning the `(sortclause_ids, tlist_ids)` that
+/// `make_pathkeys_for_sortclauses(root, sortlist, aggref->args)` consumes.
+fn intern_aggref_sort_inputs(
+    root: &mut PlannerInfo,
+    aggref_id: types_pathnodes::NodeId,
+) -> (Vec<types_pathnodes::NodeId>, Vec<types_pathnodes::NodeId>) {
+    // Snapshot the inputs out of the arena into plain (cloneable) values so we
+    // can re-intern them without holding a borrow on root. `TargetEntry<'static>`
+    // is not `Clone` (it holds PgBox/PgString), so extract the per-TLE fields we
+    // need (the expr cloned, plus the scalar labels) up front.
+    type TleSnapshot = (
+        types_nodes::primnodes::Expr,
+        types_core::primitive::AttrNumber,
+        Option<alloc::string::String>,
+        types_core::primitive::Index,
+        types_core::primitive::Oid,
+        types_core::primitive::AttrNumber,
+        bool,
+    );
+    let (sortlist, args): (Vec<types_nodes::rawnodes::SortGroupClause>, Vec<TleSnapshot>) = {
+        let aggref = aggref_of_node(root, aggref_id);
+        let sortlist = if !aggref.aggdistinct.is_empty() {
+            aggref.aggdistinct.clone()
+        } else {
+            aggref.aggorder.clone()
+        };
+        let args = aggref
+            .args
+            .iter()
+            .map(|tle| {
+                let expr = tle
+                    .expr
+                    .as_deref()
+                    .cloned()
+                    .unwrap_or_else(|| types_nodes::primnodes::Expr::Const(Default::default()));
+                (
+                    expr,
+                    tle.resno,
+                    tle.resname.as_ref().map(|s| alloc::string::String::from(s.as_str())),
+                    tle.ressortgroupref,
+                    tle.resorigtbl,
+                    tle.resorigcol,
+                    tle.resjunk,
+                )
+            })
+            .collect();
+        (sortlist, args)
+    };
+
+    let sortlist_ids: Vec<types_pathnodes::NodeId> = sortlist
+        .into_iter()
+        .map(|sgc| root.alloc_sortgroupclause(sgc))
+        .collect();
+
+    let args_ids: Vec<types_pathnodes::NodeId> = args
+        .into_iter()
+        .map(|(expr, resno, resname, ressortgroupref, resorigtbl, resorigcol, resjunk)| {
+            let expr_id = root.alloc_node(expr);
+            let te = types_pathnodes::TargetEntryNode {
+                expr: expr_id,
+                resno,
+                resname,
+                ressortgroupref,
+                resorigtbl,
+                resorigcol,
+                resjunk,
+            };
+            root.alloc_targetentry(te)
+        })
+        .collect();
+
+    (sortlist_ids, args_ids)
+}
+
 /// `standard_qp_callback(root, extra)` (planner.c:3453) — the
 /// `query_pathkeys_callback` upcall, computing the grouping/ordering pathkeys
 /// once EquivalenceClasses are canonical.
@@ -4205,10 +4503,7 @@ fn standard_qp_callback(
             root.group_pathkeys = pathkeys;
             // If we have ordered aggs, consider adding onto group_pathkeys.
             if root.numOrderedAggs > 0 {
-                return Err(PgError::error(
-                    "standard_qp_callback: adjust_group_pathkeys_for_groupagg \
-                     (ordered aggregates, planner.c) is not ported",
-                ));
+                adjust_group_pathkeys_for_groupagg(root);
             }
         }
     } else {

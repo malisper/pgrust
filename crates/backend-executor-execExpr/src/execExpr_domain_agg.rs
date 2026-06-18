@@ -701,8 +701,15 @@ pub fn exec_build_agg_trans<'mcx>(
                 ExprEvalOp::EEOP_AGG_PRESORTED_DISTINCT_SINGLE
             };
             // scratch.d.agg_presorted_distinctcheck.pertrans = pertrans;
-            // The AggStatePerTrans back-pointer is nodeAgg-owned; carried as a
-            // parked address (opaque usize) in the payload, like the C pointer.
+            // For the SINGLE variant the C reads pertrans->transfn_fcinfo->args[1],
+            // which the input recursion populated; this owned model put the input
+            // into trans_input_cells[0] (args[1]), so thread that cell so the
+            // interpreter can copy it into the per-trans fcinfo. MULTI reads the
+            // sortslot and ignores it.
+            let input_cell = trans_input_cells
+                .first()
+                .copied()
+                .unwrap_or(STATE_RESULT_CELL);
             let scratch = ExprEvalStep {
                 opcode,
                 resvalue: STATE_RESULT_CELL,
@@ -710,6 +717,7 @@ pub fn exec_build_agg_trans<'mcx>(
                 d: ExprEvalStepData::AggPresortedDistinctCheck {
                     pertrans: transno,
                     aggcontext: 0,
+                    input_cell,
                     jumpdistinct: -1, // adjust later
                 },
             };

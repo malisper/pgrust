@@ -1227,16 +1227,41 @@ pub fn ExecInterpExpr<'mcx>(
                 //    if (ExecEvalPreOrderedDistinct{Single,Multi}(aggstate, pertrans))
                 //        EEO_NEXT();
                 //    else EEO_JUMP(op->d.agg_presorted_distinctcheck.jumpdistinct);
-                //
-                // pertrans is an opaque usize placeholder and aggstate is the
-                // nodeAgg-owned state->parent; blocked until nodeAgg threads them.
-                let _ = (op, estate);
-                panic!(
-                    "EEOP_AGG_PRESORTED_DISTINCT_*: calls ExecEvalPreOrderedDistinct\
-                     {{Single,Multi}}(aggstate, op->d.agg_presorted_distinctcheck.pertrans), \
-                     both nodeAgg-owned (pertrans parked as opaque usize, aggstate = \
-                     state->parent); blocked until nodeAgg threads the per-trans state"
-                );
+                let (pertrans, input_cell, jumpdistinct) = {
+                    let steps = state.steps.as_ref().unwrap();
+                    match &steps[op].d {
+                        ExprEvalStepData::AggPresortedDistinctCheck {
+                            pertrans,
+                            input_cell,
+                            jumpdistinct,
+                            ..
+                        } => (*pertrans, *input_cell, *jumpdistinct),
+                        other => unreachable!(
+                            "EEOP_AGG_PRESORTED_DISTINCT_*: payload mismatch: {other:?}"
+                        ),
+                    }
+                };
+                let is_single = opcode == EEOP_AGG_PRESORTED_DISTINCT_SINGLE;
+                let distinct = if is_single {
+                    // The SINGLE comparator reads pertrans->transfn_fcinfo->args[1];
+                    // the owned model evaluated the input into `input_cell`, so copy
+                    // it into the per-trans frame before the comparison (C recurses
+                    // the input straight into that fcinfo arg).
+                    let (value, isnull) = read_cell(state, input_cell);
+                    let aggstate = agg_parent_mut(state);
+                    backend_executor_nodeAgg::transition::set_transfn_arg(
+                        aggstate, pertrans, 1, value, isnull,
+                    );
+                    eval_agg::ExecEvalPreOrderedDistinctSingle(aggstate, pertrans, estate)?
+                } else {
+                    let aggstate = agg_parent_mut(state);
+                    eval_agg::ExecEvalPreOrderedDistinctMulti(aggstate, pertrans, estate)?
+                };
+                if distinct {
+                    op += 1; // EEO_NEXT()
+                } else {
+                    op = jumpdistinct as usize; // EEO_JUMP(jumpdistinct)
+                }
             }
 
             EEOP_AGG_ORDERED_TRANS_DATUM => {

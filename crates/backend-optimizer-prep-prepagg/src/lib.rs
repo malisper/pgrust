@@ -203,6 +203,24 @@ fn preprocess_aggrefs_walker<'mcx>(
     Ok(false)
 }
 
+/// Set `aggpresorted = true` on every `Aggref` in `node`'s tree whose `aggno`
+/// is in `aggnos`. Used by `adjust_group_pathkeys_for_groupagg` (planner.c) to
+/// mark the live processed-tlist / HAVING-qual `Aggref`s the executor reads,
+/// mirroring C's in-place mutation of the shared `Aggref` pointers.
+pub fn mark_aggrefs_presorted(node: &mut Expr, aggnos: &[i32]) {
+    if let Expr::Aggref(a) = node {
+        if aggnos.contains(&a.aggno) {
+            a.aggpresorted = true;
+        }
+        // Parser guarantees no nested same-level aggregates inside an Aggref's
+        // own args/filter, so do not descend.
+        return;
+    }
+    for child in expr_children_mut(node) {
+        mark_aggrefs_presorted(child, aggnos);
+    }
+}
+
 /// The immediate `Expr` children of `node` that may contain `Aggref`s, as
 /// mutable references — the in-place analogue of `expression_tree_walker`'s
 /// child recursion for the node types a planner tlist / HAVING qual can carry.

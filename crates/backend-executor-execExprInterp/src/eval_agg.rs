@@ -325,8 +325,7 @@ pub fn ExecEvalPreOrderedDistinctSingle<'mcx>(
             // oldContext = MemoryContextSwitchTo(aggstate->curaggcontext->ecxt_per_tuple_memory);
             // pertrans->lastdatum = datumCopy(value, inputtypeByVal, inputtypeLen);
             // MemoryContextSwitchTo(oldContext);
-            let _ = (inputtype_by_val, inputtype_len);
-            distinct_last_datum_copy(aggstate, pertrans, value)
+            distinct_last_datum_copy(aggstate, pertrans, value, inputtype_by_val, inputtype_len, estate)?
         } else {
             // pertrans->lastdatum = (Datum) 0;
             Datum::null()
@@ -362,17 +361,32 @@ fn pfree_last_datum<'mcx>(_aggstate: &mut AggState<'mcx>, _pertrans: usize, _las
 }
 
 /// `pertrans->lastdatum = datumCopy(value, inputtypeByVal, inputtypeLen)` into
-/// the curaggcontext per-tuple memory. By-ref deep copy is the datum.c owner's.
+/// the curaggcontext per-tuple memory. By-value datums are returned verbatim (no
+/// allocation, as in C); by-reference datums are deep-copied through the datum.c
+/// seam into the per-query context (the value-lifetime-correct context; see the
+/// nodeAgg `datum_copy_into_ecxt` note — for the non-hashed single-group gate the
+/// aggcontext and query context coincide in lifetime).
 fn distinct_last_datum_copy<'mcx>(
-    _aggstate: &mut AggState<'mcx>,
+    aggstate: &mut AggState<'mcx>,
     _pertrans: usize,
-    _value: Datum,
-) -> Datum {
-    panic!(
-        "backend-executor-execExprInterp::eval_agg: datumCopy of the single-column DISTINCT \
-         last value into the curaggcontext is owned by the datum.c unit; the trimmed model \
-         cannot round-trip a by-reference Datum"
-    );
+    value: Datum,
+    inputtype_by_val: bool,
+    inputtype_len: i16,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Datum> {
+    if inputtype_by_val {
+        return Ok(value);
+    }
+    let _ = aggstate;
+    let mcx = estate.es_query_cxt;
+    let value_v = DatumV::from_usize(value.as_usize());
+    let copied = backend_utils_adt_datum_seams::datum_copy_v::call(
+        mcx,
+        &value_v,
+        inputtype_by_val,
+        inputtype_len as i32,
+    )?;
+    Ok(Datum::from_usize(copied.as_usize()))
 }
 
 /// `ExecEvalPreOrderedDistinctMulti(AggState *aggstate,
