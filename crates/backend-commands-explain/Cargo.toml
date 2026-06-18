@@ -36,6 +36,16 @@ backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
 backend-commands-define-seams = { path = "../backend-commands-define-seams" }
 
+# SQL-EXPLAIN driver: option parsing (state crate), rewriter + planner entries,
+# and the tuple-output sink that writes the plan text to the dest receiver.
+backend-commands-explain-state = { path = "../backend-commands-explain-state" }
+backend-rewrite-rewritehandler-seams = { path = "../backend-rewrite-rewritehandler-seams" }
+backend-optimizer-plan-planner-seams = { path = "../backend-optimizer-plan-planner-seams" }
+backend-executor-execTuples = { path = "../backend-executor-execTuples" }
+backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
+backend-utils-error = { path = "../backend-utils-error" }
+types-slot = { path = "../types-slot" }
+
 # Owner seam crates (calls into other owners; panic until installed).
 backend-executor-execMain-seams = { path = "../backend-executor-execMain-seams" }
 backend-executor-instrument = { path = "../backend-executor-instrument" }

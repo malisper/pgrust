@@ -560,4 +560,5 @@ pub fn init_seams() {
     seams::explain_one_utility::set(explain_one_utility);
     seams::explain_separate_plans::set(explain_separate_plans);
     backend_tcop_utility_out_seams::explain_result_desc::set(explain_result_desc_seam);
+    backend_tcop_utility_out_seams::explain_query::set(driver::ExplainQuery);
 }

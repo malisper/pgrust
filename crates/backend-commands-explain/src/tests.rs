@@ -190,3 +190,67 @@ fn target_rel_valuesscan_alias_text() {
     // ExplainTargetRel for VALUES prints " on" then the refname (no objectname).
     assert!(out.contains(" on v"), "values-scan alias: {out:?}");
 }
+
+/// `EXPLAIN (COSTS OFF, FORMAT json)` option list configures the
+/// `ExplainState`: `costs=false`, `format=JSON`. Exercises the analyzed-tree
+/// `ddlnodes::DefElem` option parser (`ParseExplainOptionList`).
+#[test]
+fn parse_option_list_costs_off_format_json() {
+    // Install the def_get_* seams the option parser reads through.
+    backend_commands_define_seams::def_get_boolean::set(|_defname, arg| {
+        Ok(match arg {
+            None => true,
+            Some(backend_commands_define_seams::DefElemArg::Boolean(b)) => b,
+            Some(backend_commands_define_seams::DefElemArg::String(s)) => {
+                matches!(s.as_str(), "on" | "true" | "1")
+            }
+            other => panic!("unexpected boolean arg: {other:?}"),
+        })
+    });
+    backend_commands_define_seams::def_get_string::set(|mcx, _defname, arg| {
+        let s = match arg {
+            Some(backend_commands_define_seams::DefElemArg::String(s)) => s,
+            other => panic!("unexpected string arg: {other:?}"),
+        };
+        mcx::PgString::from_str_in(&s, mcx)
+    });
+
+    let ctx = MemoryContext::new("explain-opt-test");
+    let mcx = ctx.mcx();
+
+    let mut options: PgVec<'_, PgBox<'_, Node<'_>>> = PgVec::new_in(mcx);
+    options.push(mk_defelem(mcx, "costs", "off"));
+    options.push(mk_defelem(mcx, "format", "json"));
+
+    let mut pstate = types_nodes::parsestmt::ParseState::new(mcx).unwrap();
+    let mut es = backend_commands_explain_state::NewExplainState(mcx);
+    es.costs = true;
+
+    crate::driver::ParseExplainOptionList(&mut es, options.as_slice(), &mut pstate).unwrap();
+
+    assert!(!es.costs, "COSTS OFF should clear es.costs");
+    assert_eq!(es.format, ExplainFormat::EXPLAIN_FORMAT_JSON);
+}
+
+/// Build a string-valued `DefElem` option node (`name = 'val'`).
+#[cfg(test)]
+fn mk_defelem<'mcx>(mcx: mcx::Mcx<'mcx>, name: &str, val: &str) -> PgBox<'mcx, Node<'mcx>> {
+    let arg = alloc_in(
+        mcx,
+        Node::String(types_nodes::value::StringNode {
+            sval: mcx::PgString::from_str_in(val, mcx).unwrap(),
+        }),
+    )
+    .unwrap();
+    alloc_in(
+        mcx,
+        Node::DefElem(types_nodes::ddlnodes::DefElem {
+            defnamespace: None,
+            defname: Some(mcx::PgString::from_str_in(name, mcx).unwrap()),
+            arg: Some(arg),
+            defaction: types_nodes::ddlnodes::DEFELEM_UNSPEC,
+            location: -1,
+        }),
+    )
+    .unwrap()
+}
