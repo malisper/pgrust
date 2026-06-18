@@ -244,9 +244,9 @@ pub fn ExecInitForeignScan<'mcx>(
 ) -> PgResult<PgBox<'mcx, ForeignScanState<'mcx>>> {
     let mcx = estate.es_query_cxt;
 
-    let plan: &'mcx ForeignScan<'mcx> = match node {
-        Node::ForeignScan(f) => f,
-        other => panic!("castNode(ForeignScan, node) failed: {other:?}"),
+    let plan: &'mcx ForeignScan<'mcx> = match node.as_foreignscan() {
+        Some(f) => f,
+        None => panic!("castNode(ForeignScan, node) failed: {node:?}"),
     };
 
     // check for unsupported flags
@@ -874,7 +874,10 @@ const INDEX_VAR: i32 = -3;
 #[inline]
 fn foreignscan_plan_fields(node: &ForeignScanState<'_>) -> (CmdType, bool) {
     match node.ss.ps.plan {
-        Some(Node::ForeignScan(f)) => (f.operation, f.fsSystemCol),
+        Some(p) if p.is_foreignscan() => {
+            let f = p.expect_foreignscan();
+            (f.operation, f.fsSystemCol)
+        }
         Some(other) => panic!("ForeignScanState.plan is not a ForeignScan: {other:?}"),
         None => panic!("ForeignScanState.plan is not set"),
     }
@@ -884,7 +887,7 @@ fn foreignscan_plan_fields(node: &ForeignScanState<'_>) -> (CmdType, bool) {
 #[inline]
 fn scan_scanrelid(node: &ForeignScanState<'_>) -> u32 {
     match node.ss.ps.plan {
-        Some(Node::ForeignScan(f)) => f.scan.scanrelid,
+        Some(p) if p.is_foreignscan() => p.expect_foreignscan().scan.scanrelid,
         Some(other) => panic!("ForeignScanState.plan is not a ForeignScan: {other:?}"),
         None => panic!("ForeignScanState.plan is not set"),
     }
