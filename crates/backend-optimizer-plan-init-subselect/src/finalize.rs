@@ -424,7 +424,7 @@ fn finalize_node_specific<'mcx>(
                 for rtfunc in functions.iter_mut() {
                     let mut funccontext = FinalizeCtx { paramids: None };
                     if let Some(fe) = rtfunc.funcexpr.as_deref() {
-                        if let Node::Expr(e) = fe {
+                        if let Some(e) = fe.as_expr() {
                             finalize_primnode(mcx, root, run, Some(e), &mut funccontext)?;
                         }
                     }
@@ -600,7 +600,7 @@ fn finalize_node_specific<'mcx>(
             }
             if let Some(hc) = hj.hashclauses.as_ref() {
                 for n in hc.iter() {
-                    if let Node::Expr(e) = n {
+                    if let Some(e) = n.as_expr() {
                         finalize_primnode(mcx, root, run, Some(e), context)?;
                     }
                 }
@@ -609,7 +609,7 @@ fn finalize_node_specific<'mcx>(
         Node::Hash(h) => {
             if let Some(hk) = h.hashkeys.as_ref() {
                 for n in hk.iter() {
-                    if let Node::Expr(e) = n {
+                    if let Some(e) = n.as_expr() {
                         finalize_primnode(mcx, root, run, Some(e), context)?;
                     }
                 }

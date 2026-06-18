@@ -280,7 +280,7 @@ fn deconstruct_recurse(
     };
     let joinlist: Vec<JoinlistNode>;
 
-    if let Node::RangeTblRef(rtr) = jtnode {
+    if let Some(rtr) = jtnode.as_rangetblref() {
         let varno = rtr.rtindex;
         jtitem.kind = JtNodeKind::RangeTblRef { rtindex: varno };
         // Fill all_baserels as we encounter baserel jointree nodes.
@@ -294,7 +294,7 @@ fn deconstruct_recurse(
         // A single baserel does not create an inner join.
         jtitem.inner_join_rels = None;
         joinlist = alloc::vec![JoinlistNode::Rel(varno)];
-    } else if let Node::FromExpr(f) = jtnode {
+    } else if let Some(f) = jtnode.as_fromexpr() {
         jtitem.kind = JtNodeKind::FromExpr {
             quals: quals_implicit_and(f.quals.as_deref()),
         };
@@ -331,7 +331,7 @@ fn deconstruct_recurse(
             jtitem.inner_join_rels = bms::relids_copy::call(&jtitem.qualscope);
         }
         joinlist = jl;
-    } else if let Node::JoinExpr(j) = jtnode {
+    } else if let Some(j) = jtnode.as_joinexpr() {
         let leftjoinlist: Vec<JoinlistNode>;
         let rightjoinlist: Vec<JoinlistNode>;
         jtitem.kind = JtNodeKind::JoinExpr {

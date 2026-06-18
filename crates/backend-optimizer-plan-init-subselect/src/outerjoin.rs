@@ -44,7 +44,6 @@ use alloc::vec::Vec;
 
 use types_core::primitive::Oid;
 use types_error::PgResult;
-use types_nodes::nodes::Node;
 use types_nodes::primnodes::{Expr, ExprRelids};
 use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{
@@ -91,7 +90,7 @@ pub fn make_outerjoininfo(
     // nullable rel is FOR [KEY] UPDATE/SHARE. We use the original RowMarkClause
     // list (root->parse->rowMarks), not the PlanRowMark list.
     for rm in run.resolve(root.parse).rowMarks.iter() {
-        if let Node::RowMarkClause(rc) = &**rm {
+        if let Some(rc) = (**rm).as_rowmarkclause() {
             let rti = rc.rti as i32;
             if bms::relids_is_member::call(rti, right_rels)
                 || (jointype == JOIN_FULL && bms::relids_is_member::call(rti, left_rels))

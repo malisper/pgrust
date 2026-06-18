@@ -970,7 +970,7 @@ fn query_contains_volatile(node: &Node<'_>) -> PgResult<bool> {
         if found || err.is_some() {
             return true;
         }
-        if let Node::Expr(e) = n {
+        if let Some(e) = n.as_expr() {
             match contain_volatile_functions(Some(e)) {
                 Ok(true) => {
                     found = true;
@@ -1272,7 +1272,7 @@ fn inline_cte_walk_query_exprs<'mcx>(
         if err.is_some() {
             return true;
         }
-        if let Node::Expr(e) = n {
+        if let Some(e) = n.as_expr_mut() {
             if let Expr::SubLink(sl) = e {
                 if let Some(subq) = sl.subselect.as_deref_mut() {
                     // SubLink.subselect is PgBox<'static, Query<'static>>; the
