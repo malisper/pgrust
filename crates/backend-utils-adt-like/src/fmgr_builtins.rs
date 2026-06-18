@@ -3,11 +3,14 @@
 //! pattern normalizers from `like.c` (the matcher template `like_match.c`).
 //!
 //! Each entry is a `fc_<name>` adapter that reads its arguments off the fmgr
-//! call frame, calls the matching value core, and writes back the result. A
-//! `text`/`bytea` arg arrives as its detoasted `VARDATA_ANY` payload on the
-//! by-ref lane (the boundary strips the varlena header); a `name` arg arrives
-//! as its fixed `NAMEDATALEN` buffer bytes (the cores NUL-trim / `name_text`
-//! it). The collation is read from `fcinfo.fncollation` (C:
+//! call frame, calls the matching value core, and writes back the result.
+//! Under the header-ful-everywhere convention a `text`/`bytea` arg arrives as
+//! its full self-describing varlena image (4-byte length word + payload) on the
+//! by-ref lane; `arg_bytes` skips the header to the `VARDATA_ANY` payload. A
+//! `name` arg is a fixed-length (typlen 64) non-varlena type: it arrives as its
+//! raw `NAMEDATALEN` buffer bytes with NO header, read VERBATIM by
+//! `arg_name_bytes` (the cores NUL-trim / `name_text` it). The collation is
+//! read from `fcinfo.fncollation` (C:
 //! `PG_GET_COLLATION()`); the `bytea` family takes no collation. The two
 //! `like_escape` functions return a `text`/`bytea` varlena on the by-ref lane.
 //!
@@ -50,6 +53,21 @@ fn arg_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
     } else {
         &[]
     }
+}
+
+/// A `name` arg's raw `NAMEDATALEN` buffer bytes. Unlike `text`/`bytea`, a
+/// `name` is a fixed-length (typlen 64) pass-by-reference type that is NOT a
+/// varlena: it crosses the by-ref lane as its raw NUL-padded `NameData` buffer
+/// with NO 4-byte length word in front (exactly as C's `Name`/`NameStr`). It
+/// must therefore be read VERBATIM — skipping a 4-byte header here would chop
+/// off the first 4 characters of the name. The cores NUL-trim it (`name_str` /
+/// `name_text`).
+#[inline]
+fn arg_name_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("like fn: name arg missing from by-ref lane")
 }
 
 /// `PG_GET_COLLATION()`: the collation the operator was invoked under.
@@ -113,12 +131,12 @@ fn fc_textnlike(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 fn fc_namelike(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let c = collation(fcinfo);
     let m = scratch_mcx();
-    ret_bool(ok(crate::namelike(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c, m.mcx())))
+    ret_bool(ok(crate::namelike(arg_name_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c, m.mcx())))
 }
 fn fc_namenlike(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let c = collation(fcinfo);
     let m = scratch_mcx();
-    ret_bool(ok(crate::namenlike(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c, m.mcx())))
+    ret_bool(ok(crate::namenlike(arg_name_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c, m.mcx())))
 }
 
 // ---------------------------------------------------------------------------
@@ -138,12 +156,12 @@ fn fc_texticnlike(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 fn fc_nameiclike(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let c = collation(fcinfo);
     let m = scratch_mcx();
-    ret_bool(ok(crate::nameiclike(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c, m.mcx())))
+    ret_bool(ok(crate::nameiclike(arg_name_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c, m.mcx())))
 }
 fn fc_nameicnlike(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let c = collation(fcinfo);
     let m = scratch_mcx();
-    ret_bool(ok(crate::nameicnlike(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c, m.mcx())))
+    ret_bool(ok(crate::nameicnlike(arg_name_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c, m.mcx())))
 }
 
 // ---------------------------------------------------------------------------
