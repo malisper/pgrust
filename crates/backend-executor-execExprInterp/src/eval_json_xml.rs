@@ -2,148 +2,35 @@
 //! constructors and predicates, JSON_VALUE/JSON_QUERY/JSON_EXISTS path
 //! evaluation, and the JSON coercion steps.
 //!
-//! Porting status — every handler in this family reads a step payload that the
-//! COMPILER (`backend-executor-execExpr`) cannot yet emit, and calls runtime
-//! workers that no seam exposes. Both blockers are *genuinely unported owners*,
-//! not gaps in the interpreter's own logic:
-//!
-//!  1. The step-data node/state back-pointers these opcodes branch on are parked
-//!     by the keystone F0 model as opaque addresses, because their owning units
-//!     have not landed:
-//!       - `EEOP_XMLEXPR`            → `ExprEvalStepData::XmlExpr { xexpr: usize }`
-//!         — the `XmlExpr` primnode the switch reads (`xexpr->op`,
-//!         `xexpr->args`, `xexpr->named_args`, `xexpr->arg_names`,
-//!         `xexpr->xmloption`, `xexpr->name`, `xexpr->indent`) is parked.
-//!       - `EEOP_JSON_CONSTRUCTOR`   → `ExprEvalStepData::JsonConstructor { jcstate }`.
-//!         The `JsonConstructorExprState` workspace arrays ARE carried, but its
-//!         `constructor` back-pointer (`JsonConstructorExpr *ctor`) — whose
-//!         `ctor->type` / `ctor->returning->format->format_type` /
-//!         `ctor->absent_on_null` / `ctor->unique` drive the whole switch — is
-//!         NOT a field of the ported state (parked until the SQL/JSON primnode
-//!         + JsonReturning/JsonFormat unit lands).
-//!       - `EEOP_IS_JSON`            → `ExprEvalStepData::IsJson { pred: usize }`
-//!         — the `JsonIsPredicate` node (`pred->expr`, `pred->item_type`,
-//!         `pred->unique_keys`) is parked.
-//!       - `EEOP_JSONEXPR_PATH` /
-//!         `EEOP_JSONEXPR_COERCION_FINISH`
-//!                                   → `ExprEvalStepData::JsonExpr { jsestate: usize }`
-//!         — the entire `JsonExprState` runtime-state group (`JsonExpr`,
-//!         `JsonPathVariable`, `ErrorSaveContext`, the `jump_*` targets,
-//!         `input_fcinfo`, `formatted_expr`/`pathspec`/`args`/`error`/`empty`)
-//!         is parked. The companion compiler entry `exec_init_json_expr`
-//!         (`execExpr_json.rs`) records the identical blocker and also panics:
-//!         the interpreter cannot read a payload the compiler never writes.
-//!       - `EEOP_JSONEXPR_COERCION`  → `ExprEvalStepData::JsonExprCoercion { .. }`.
-//!         The scalar flags (`targettype`/`targettypmod`/`omit_quotes`/
-//!         `exists_*`) ARE carried, but the `escontext` (`ErrorSaveContext *`)
-//!         and `json_coercion_cache` it threads are parked opaque addresses
-//!         owned by the same unported JSON-state unit.
-//!
-//!  2. The actual evaluation workers have no seam this unit can call (the crate
-//!     depends only on the execExpr / execTuples / nodeSubplan / fmgr seams):
-//!       - xml.c: `xmlconcat`, `xmlelement`, `xmlparse`, `xmlpi`, `xmlroot`,
-//!         `xmltotext_with_options`, `xml_is_document`,
-//!         `map_sql_value_to_xml_value` (only `escape_xml` is seamed today).
-//!       - json.c / jsonb.c: `json_build_array_worker`,
-//!         `jsonb_build_array_worker`, `json_build_object_worker`,
-//!         `jsonb_build_object_worker`, `datum_to_json`, `datum_to_jsonb`,
-//!         `json_validate`, `jsonb_from_text`, `json_get_first_token`,
-//!         `JsonbValueToJsonb`, `JB_ROOT_IS_*` (the unit `backend-utils-adt-json`
-//!         exists but exposes no executor-facing seam).
-//!       - jsonpath_exec.c: `JsonPathExists`, `JsonPathQuery`, `JsonPathValue`,
-//!         `json_populate_type`, `DatumGetJsonPathP` (unported unit, no seam).
-//!       - the `DirectFunctionCall1` output/cast targets (`numeric_out`,
-//!         `boolout`, `date_out`, `time_out`, `timetz_out`, `timestamp_out`,
-//!         `timestamptz_out`, `jsonb_out`, `jsonb_in`, `textin`, `bool_int4`)
-//!         and `domain_check_safe` — their owning adt units are unported.
-//!
-//! Per "Mirror PG and panic", each handler below carries the full faithful
-//! `execExprInterp.c` logic as a structural comment and a loud seam-and-panic
-//! body naming the unported owners — it is neither a silent stub nor an invented
-//! opaque stand-in, and it is not a placeholder stub (this family's own interpreter logic
-//! is complete: every branch, every field read, every worker call is mirrored).
-//! These bodies become real the moment the parked node/state types and the
-//! xml/json/jsonpath worker seams land, exactly as the compiler-side
-//! `exec_init_json_expr` does.
+//! The `JsonExpr` path / coercion family (`EEOP_JSONEXPR_PATH`,
+//! `EEOP_JSONEXPR_COERCION`, `EEOP_JSONEXPR_COERCION_FINISH`) is ported over the
+//! real `JsonPathExists`/`Query`/`Value` workers and `json_populate_type`
+//! coercion. `XmlExpr` / `JsonConstructor` / `IsJson` remain panics: their
+//! parse-node back-pointers are still parked and their xml.c / json.c workers
+//! have no executor-facing seam yet.
 
 use mcx::{Mcx, PgString};
-use types_error::PgResult;
-use types_nodes::execexpr::ExprState;
+use types_error::{PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_NO_SQL_JSON_ITEM};
+use types_nodes::execexpr::{
+    ExprEvalStepData, ExprState, JsonCoercionCacheId, JsonExprStateId, ResultCellId,
+};
 use types_nodes::execnodes::EcxtId;
 use types_nodes::EStateData;
+use types_tuple::backend_access_common_heaptuple::Datum;
+use types_tuple::heaptuple::{JSONBOID, JSONOID};
+
+use backend_utils_adt_jsonpath_exec::{
+    JsonPathExists, JsonPathQuery, JsonPathValue, JsonPathVariable, JsonPathVars,
+    JsonWrapper as PathJsonWrapper,
+};
+use types_jsonb::backend_utils_adt_jsonb_util::{JsonbValue, JsonbValueData};
+use types_nodes::primnodes::{JsonBehaviorType, JsonExprOp, JsonWrapper};
+
+use crate::interp_loop::{read_cell, write_cell};
 
 /// `ExecEvalXmlExpr(ExprState *state, ExprEvalStep *op)` — evaluate an
-/// XMLELEMENT / XMLFOREST / XMLPARSE / etc. expression.
-///
-/// C logic (execExprInterp.c:4441-4651):
-///
-///   XmlExpr *xexpr = op->d.xmlexpr.xexpr;
-///   Datum    value;
-///   *op->resnull = true;          /* until we get a result */
-///   *op->resvalue = (Datum) 0;
-///   switch (xexpr->op)
-///   {
-///     case IS_XMLCONCAT:
-///       Datum *argvalue = op->d.xmlexpr.argvalue;
-///       bool  *argnull  = op->d.xmlexpr.argnull;
-///       List  *values = NIL;
-///       for (int i = 0; i < list_length(xexpr->args); i++)
-///         if (!argnull[i]) values = lappend(values, DatumGetPointer(argvalue[i]));
-///       if (values != NIL) { *op->resvalue = PointerGetDatum(xmlconcat(values));
-///                            *op->resnull = false; }
-///       break;
-///     case IS_XMLFOREST:
-///       Datum *argvalue = op->d.xmlexpr.named_argvalue;
-///       bool  *argnull  = op->d.xmlexpr.named_argnull;
-///       StringInfoData buf; initStringInfo(&buf); i = 0;
-///       forboth(lc, xexpr->named_args, lc2, xexpr->arg_names) {
-///         Expr *e = lfirst(lc); char *argname = strVal(lfirst(lc2));
-///         if (!argnull[i]) {
-///           value = argvalue[i];
-///           appendStringInfo(&buf, "<%s>%s</%s>", argname,
-///             map_sql_value_to_xml_value(value, exprType((Node*)e), true), argname);
-///           *op->resnull = false; }
-///         i++; }
-///       if (!*op->resnull) { text *result = cstring_to_text_with_len(buf.data, buf.len);
-///                            *op->resvalue = PointerGetDatum(result); }
-///       pfree(buf.data); break;
-///     case IS_XMLELEMENT:
-///       *op->resvalue = PointerGetDatum(xmlelement(xexpr,
-///         op->d.xmlexpr.named_argvalue, op->d.xmlexpr.named_argnull,
-///         op->d.xmlexpr.argvalue, op->d.xmlexpr.argnull));
-///       *op->resnull = false; break;
-///     case IS_XMLPARSE:
-///       Datum *argvalue = op->d.xmlexpr.argvalue; bool *argnull = op->d.xmlexpr.argnull;
-///       Assert(list_length(xexpr->args) == 2);
-///       if (argnull[0]) return; data = DatumGetTextPP(argvalue[0]);
-///       if (argnull[1]) return; preserve_whitespace = DatumGetBool(argvalue[1]);
-///       *op->resvalue = PointerGetDatum(xmlparse(data, xexpr->xmloption, preserve_whitespace));
-///       *op->resnull = false; break;
-///     case IS_XMLPI:
-///       Assert(list_length(xexpr->args) <= 1);
-///       if (xexpr->args) { isnull = op->d.xmlexpr.argnull[0];
-///                          arg = isnull ? NULL : DatumGetTextPP(op->d.xmlexpr.argvalue[0]); }
-///       else { arg = NULL; isnull = false; }
-///       *op->resvalue = PointerGetDatum(xmlpi(xexpr->name, arg, isnull, op->resnull)); break;
-///     case IS_XMLROOT:
-///       Assert(list_length(xexpr->args) == 3);
-///       if (argnull[0]) return; data = DatumGetXmlP(argvalue[0]);
-///       version = argnull[1] ? NULL : DatumGetTextPP(argvalue[1]);
-///       Assert(!argnull[2]); standalone = DatumGetInt32(argvalue[2]);
-///       *op->resvalue = PointerGetDatum(xmlroot(data, version, standalone));
-///       *op->resnull = false; break;
-///     case IS_XMLSERIALIZE:
-///       Assert(list_length(xexpr->args) == 1);
-///       if (argnull[0]) return; value = argvalue[0];
-///       *op->resvalue = PointerGetDatum(xmltotext_with_options(DatumGetXmlP(value),
-///         xexpr->xmloption, xexpr->indent)); *op->resnull = false; break;
-///     case IS_DOCUMENT:
-///       Assert(list_length(xexpr->args) == 1);
-///       if (argnull[0]) return; value = argvalue[0];
-///       *op->resvalue = BoolGetDatum(xml_is_document(DatumGetXmlP(value)));
-///       *op->resnull = false; break;
-///     default: elog(ERROR, "unrecognized XML operation");
-///   }
+/// XMLELEMENT / XMLFOREST / XMLPARSE / etc. expression. Still parked (the
+/// `XmlExpr` primnode and xml.c workers are unported).
 pub fn ExecEvalXmlExpr<'mcx>(
     state: &mut ExprState<'mcx>,
     op: usize,
@@ -159,37 +46,9 @@ pub fn ExecEvalXmlExpr<'mcx>(
     )
 }
 
-/// `ExecEvalJsonConstructor(ExprState *state, ExprEvalStep *op,
-/// ExprContext *econtext)` — JSON / JSONB object/array constructor.
-///
-/// C logic (execExprInterp.c:4656-4729):
-///
-///   JsonConstructorExprState *jcstate = op->d.json_constructor.jcstate;
-///   JsonConstructorExpr *ctor = jcstate->constructor;
-///   bool is_jsonb = ctor->returning->format->format_type == JS_FORMAT_JSONB;
-///   bool isnull = false;
-///   if (ctor->type == JSCTOR_JSON_ARRAY)
-///     res = (is_jsonb ? jsonb_build_array_worker : json_build_array_worker)
-///             (jcstate->nargs, jcstate->arg_values, jcstate->arg_nulls,
-///              jcstate->arg_types, ctor->absent_on_null);
-///   else if (ctor->type == JSCTOR_JSON_OBJECT)
-///     res = (is_jsonb ? jsonb_build_object_worker : json_build_object_worker)
-///             (jcstate->nargs, jcstate->arg_values, jcstate->arg_nulls,
-///              jcstate->arg_types, ctor->absent_on_null, ctor->unique);
-///   else if (ctor->type == JSCTOR_JSON_SCALAR) {
-///     if (jcstate->arg_nulls[0]) { res = (Datum)0; isnull = true; }
-///     else { value = jcstate->arg_values[0];
-///            outfuncid = jcstate->arg_type_cache[0].outfuncid;
-///            category = jcstate->arg_type_cache[0].category;
-///            res = is_jsonb ? datum_to_jsonb(value, category, outfuncid)
-///                           : datum_to_json(value, category, outfuncid); } }
-///   else if (ctor->type == JSCTOR_JSON_PARSE) {
-///     if (jcstate->arg_nulls[0]) { res = (Datum)0; isnull = true; }
-///     else { value = jcstate->arg_values[0]; js = DatumGetTextP(value);
-///            if (is_jsonb) res = jsonb_from_text(js, true);
-///            else { (void) json_validate(js, true, true); res = value; } } }
-///   else elog(ERROR, "invalid JsonConstructorExpr type %d", ctor->type);
-///   *op->resvalue = res; *op->resnull = isnull;
+/// `ExecEvalJsonConstructor` — JSON / JSONB object/array constructor. Still
+/// parked (the `JsonConstructorExpr` back-pointer and the json.c/jsonb.c
+/// constructor workers are unported).
 pub fn ExecEvalJsonConstructor<'mcx>(
     state: &mut ExprState<'mcx>,
     op: usize,
@@ -199,45 +58,14 @@ pub fn ExecEvalJsonConstructor<'mcx>(
     let _ = (state, op, econtext, estate);
     panic!(
         "execExprInterp: EEOP_JSON_CONSTRUCTOR — the JsonConstructorExpr node \
-         (jcstate->constructor, whose type/returning->format/absent_on_null/\
-         unique drive the switch) is parked off JsonConstructorExprState, and \
-         the json.c/jsonb.c constructor workers (json[b]_build_array_worker, \
-         json[b]_build_object_worker, datum_to_json[b], jsonb_from_text, \
-         json_validate) have no executor-facing seam — not yet ported"
+         (jcstate->constructor) is parked off JsonConstructorExprState, and the \
+         json.c/jsonb.c constructor workers have no executor-facing seam — not \
+         yet ported"
     )
 }
 
-/// `ExecEvalJsonIsPredicate(ExprState *state, ExprEvalStep *op)` —
-/// `IS JSON [VALUE|OBJECT|ARRAY|SCALAR]` predicate.
-///
-/// C logic (execExprInterp.c:4734-4817):
-///
-///   JsonIsPredicate *pred = op->d.is_json.pred;
-///   Datum js = *op->resvalue;
-///   if (*op->resnull) { *op->resvalue = BoolGetDatum(false); return; }
-///   exprtype = exprType(pred->expr);
-///   if (exprtype == TEXTOID || exprtype == JSONOID) {
-///     text *json = DatumGetTextP(js);
-///     if (pred->item_type == JS_TYPE_ANY) res = true;
-///     else switch (json_get_first_token(json, false)) {
-///       case JSON_TOKEN_OBJECT_START: res = pred->item_type == JS_TYPE_OBJECT; break;
-///       case JSON_TOKEN_ARRAY_START:  res = pred->item_type == JS_TYPE_ARRAY;  break;
-///       case JSON_TOKEN_STRING: case JSON_TOKEN_NUMBER: case JSON_TOKEN_TRUE:
-///       case JSON_TOKEN_FALSE:  case JSON_TOKEN_NULL:
-///         res = pred->item_type == JS_TYPE_SCALAR; break;
-///       default: res = false; break; }
-///     if (res && (pred->unique_keys || exprtype == TEXTOID))
-///       res = json_validate(json, pred->unique_keys, false);
-///   } else if (exprtype == JSONBOID) {
-///     if (pred->item_type == JS_TYPE_ANY) res = true;
-///     else { Jsonb *jb = DatumGetJsonbP(js);
-///       switch (pred->item_type) {
-///         case JS_TYPE_OBJECT: res = JB_ROOT_IS_OBJECT(jb); break;
-///         case JS_TYPE_ARRAY:  res = JB_ROOT_IS_ARRAY(jb) && !JB_ROOT_IS_SCALAR(jb); break;
-///         case JS_TYPE_SCALAR: res = JB_ROOT_IS_ARRAY(jb) && JB_ROOT_IS_SCALAR(jb); break;
-///         default: res = false; break; } }
-///   } else res = false;
-///   *op->resvalue = BoolGetDatum(res);
+/// `ExecEvalJsonIsPredicate` — `IS JSON [VALUE|OBJECT|ARRAY|SCALAR]` predicate.
+/// Still parked (the `JsonIsPredicate` node is unported).
 pub fn ExecEvalJsonIsPredicate<'mcx>(
     state: &mut ExprState<'mcx>,
     op: usize,
@@ -246,235 +74,568 @@ pub fn ExecEvalJsonIsPredicate<'mcx>(
     let _ = (state, op, estate);
     panic!(
         "execExprInterp: EEOP_IS_JSON — the JsonIsPredicate node \
-         (op->d.is_json.pred, parked as ExprEvalStepData::IsJson {{ pred: usize }}; \
-         supplies pred->expr/item_type/unique_keys) and the json.c/jsonb.c \
-         probes (exprType, json_get_first_token, json_validate, the JB_ROOT_IS_* \
-         macros) have no executor-facing seam — not yet ported"
+         (op->d.is_json.pred, parked as ExprEvalStepData::IsJson {{ pred: usize }}) \
+         and the json.c/jsonb.c probes have no executor-facing seam — not yet ported"
     )
 }
 
-/// `ExecEvalJsonExprPath(ExprState *state, ExprEvalStep *op,
-/// ExprContext *econtext)` — run a jsonpath for JSON_VALUE/QUERY/EXISTS,
-/// choosing the success/error/empty coercion jump. Returns the next step
-/// address (one of jump_error/jump_empty/jump_eval_coercion/jump_end).
-///
-/// C logic (execExprInterp.c:4834-5029):
-///
-///   JsonExprState *jsestate = op->d.jsonexpr.jsestate;
-///   JsonExpr *jsexpr = jsestate->jsexpr;
-///   bool throw_error = jsexpr->on_error->btype == JSON_BEHAVIOR_ERROR;
-///   bool error = false, empty = false;
-///   int jump_eval_coercion = jsestate->jump_eval_coercion;
-///   char *val_string = NULL;
-///   item = jsestate->formatted_expr.value;
-///   path = DatumGetJsonPathP(jsestate->pathspec.value);
-///   memset(&jsestate->error, 0, sizeof(NullableDatum));
-///   memset(&jsestate->empty, 0, sizeof(NullableDatum));
-///   if (jsestate->escontext.details_wanted) {
-///     jsestate->escontext.error_data = NULL; jsestate->escontext.details_wanted = false; }
-///   jsestate->escontext.error_occurred = false;
-///   switch (jsexpr->op) {
-///     case JSON_EXISTS_OP:
-///       exists = JsonPathExists(item, path, !throw_error ? &error : NULL, jsestate->args);
-///       if (!error) { *op->resnull = false; *op->resvalue = BoolGetDatum(exists); } break;
-///     case JSON_QUERY_OP:
-///       *op->resvalue = JsonPathQuery(item, path, jsexpr->wrapper, &empty,
-///         !throw_error ? &error : NULL, jsestate->args, jsexpr->column_name);
-///       *op->resnull = (DatumGetPointer(*op->resvalue) == NULL); break;
-///     case JSON_VALUE_OP:
-///       jbv = JsonPathValue(item, path, &empty, !throw_error ? &error : NULL,
-///         jsestate->args, jsexpr->column_name);
-///       if (jbv == NULL) { *op->resvalue = (Datum)0; *op->resnull = true; }
-///       else if (!error && !empty) {
-///         if (returning->typid == JSONOID || JSONBOID)
-///           val_string = DatumGetCString(DirectFunctionCall1(jsonb_out,
-///             JsonbPGetDatum(JsonbValueToJsonb(jbv))));
-///         else if (jsexpr->use_json_coercion) {
-///           *op->resvalue = JsonbPGetDatum(JsonbValueToJsonb(jbv)); *op->resnull = false; }
-///         else { val_string = ExecGetJsonValueItemString(jbv, op->resnull);
-///                if (!jsexpr->use_io_coercion)
-///                  *op->resvalue = DirectFunctionCall1(textin, CStringGetDatum(val_string)); } }
-///       break;
-///     default: elog(ERROR, "unrecognized SQL/JSON expression op %d", jsexpr->op); return false; }
-///   if (!*op->resnull && jsexpr->use_io_coercion) {
-///     fcinfo = jsestate->input_fcinfo;
-///     fcinfo->args[0].value = PointerGetDatum(val_string); fcinfo->args[0].isnull = *op->resnull;
-///     fcinfo->isnull = false; *op->resvalue = FunctionCallInvoke(fcinfo);
-///     if (SOFT_ERROR_OCCURRED(&jsestate->escontext)) error = true; }
-///   if (empty) {
-///     *op->resvalue = (Datum)0; *op->resnull = true;
-///     if (jsexpr->on_empty) { if (on_empty->btype != JSON_BEHAVIOR_ERROR) {
-///         jsestate->empty.value = BoolGetDatum(true);
-///         jsestate->escontext.error_occurred = false; jsestate->escontext.details_wanted = true;
-///         return jsestate->jump_empty >= 0 ? jsestate->jump_empty : jsestate->jump_end; } }
-///     else if (on_error->btype != JSON_BEHAVIOR_ERROR) {
-///         jsestate->error.value = BoolGetDatum(true);
-///         jsestate->escontext.error_occurred = false; jsestate->escontext.details_wanted = true;
-///         return jsestate->jump_error >= 0 ? jsestate->jump_error : jsestate->jump_end; }
-///     ereport(ERROR, errcode(ERRCODE_NO_SQL_JSON_ITEM), "no SQL/JSON item found ..."); }
-///   if (error) {
-///     *op->resvalue = (Datum)0; *op->resnull = true; jsestate->error.value = BoolGetDatum(true);
-///     jsestate->escontext.error_occurred = false; jsestate->escontext.details_wanted = true;
-///     return jsestate->jump_error >= 0 ? jsestate->jump_error : jsestate->jump_end; }
-///   return jump_eval_coercion >= 0 ? jump_eval_coercion : jsestate->jump_end;
+/// Map the primnodes `JsonWrapper` to the jsonpath-exec worker's `JsonWrapper`.
+fn map_wrapper(w: JsonWrapper) -> PathJsonWrapper {
+    match w {
+        JsonWrapper::JSW_UNSPEC => PathJsonWrapper::JSW_UNSPEC,
+        JsonWrapper::JSW_NONE => PathJsonWrapper::JSW_NONE,
+        JsonWrapper::JSW_CONDITIONAL => PathJsonWrapper::JSW_CONDITIONAL,
+        JsonWrapper::JSW_UNCONDITIONAL => PathJsonWrapper::JSW_UNCONDITIONAL,
+    }
+}
+
+/// `ExecEvalJsonExprPath(ExprState *state, ExprEvalStep *op, ExprContext
+/// *econtext)` (execExprInterp.c:4835) — run a jsonpath for JSON_VALUE / QUERY /
+/// EXISTS, choosing the success / error / empty / coercion jump. Returns the
+/// next step address.
 pub fn ExecEvalJsonExprPath<'mcx>(
     state: &mut ExprState<'mcx>,
     op: usize,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<i32> {
-    let _ = (state, op, econtext, estate);
-    panic!(
-        "execExprInterp: EEOP_JSONEXPR_PATH — the whole JsonExprState runtime-state \
-         group (op->d.jsonexpr.jsestate, parked as ExprEvalStepData::JsonExpr \
-         {{ jsestate: usize }}: jsexpr/formatted_expr/pathspec/args/escontext/\
-         jump_*/input_fcinfo/error/empty) is not ported — its companion compiler \
-         emitter exec_init_json_expr (execExpr_json.rs) panics for the same \
-         reason — and the jsonpath_exec.c workers (JsonPathExists/Query/Value, \
-         DatumGetJsonPathP, JsonbValueToJsonb) have no executor-facing seam"
-    )
+    let _ = econtext;
+    let mcx = estate.es_query_cxt;
+
+    // jsestate = op->d.jsonexpr.jsestate;
+    let jsestate_id = match &state.steps.as_ref().unwrap()[op].d {
+        ExprEvalStepData::JsonExpr { jsestate } => *jsestate,
+        _ => unreachable!("EEOP_JSONEXPR_PATH: payload is not JsonExpr"),
+    };
+    let resv = state.steps.as_ref().unwrap()[op].resvalue;
+    let resnull = state.steps.as_ref().unwrap()[op].resnull;
+
+    // Snapshot the immutable jsestate fields the evaluation needs (jsexpr op /
+    // wrapper / column_name / behavior, the cell ids, the jump targets).
+    let js = &state.json_states.states.as_ref().unwrap()[jsestate_id.0 as usize];
+    let jsexpr = js.jsexpr.clone();
+    let formatted_expr_cell = js.formatted_expr_cell;
+    let pathspec_cell = js.pathspec_cell;
+    let error_cell = js.error_cell;
+    let empty_cell = js.empty_cell;
+    let jump_empty = js.jump_empty;
+    let jump_error = js.jump_error;
+    let jump_eval_coercion = js.jump_eval_coercion;
+    let jump_end = js.jump_end;
+    let returning = jsexpr
+        .returning
+        .as_ref()
+        .expect("JsonExpr.returning present");
+    let on_error = jsexpr.on_error.as_ref().expect("JsonExpr.on_error present");
+
+    let throw_error = on_error.btype == JsonBehaviorType::JSON_BEHAVIOR_ERROR;
+    let suppress_errors = !throw_error;
+    let mut error = false;
+    let mut empty = false;
+
+    // item = jsestate->formatted_expr.value;  path = DatumGetJsonPathP(pathspec.value);
+    let item = read_cell(state, formatted_expr_cell).0;
+    let path = read_cell(state, pathspec_cell).0;
+    let item_bytes = item.as_ref_bytes().to_vec();
+    let path_bytes = path.as_ref_bytes().to_vec();
+
+    // Build the PASSING-variable list from jsestate->args.
+    let vars = build_path_vars(state, jsestate_id)?;
+
+    // Reset error/empty cells and the soft-error context for this row.
+    write_cell(state, error_cell, Datum::from_bool(false), false);
+    write_cell(state, empty_cell, Datum::from_bool(false), false);
+    {
+        let js = &mut state.json_states.states.as_mut().unwrap()[jsestate_id.0 as usize];
+        js.escontext = types_error::SoftErrorContext::default();
+    }
+
+    let column_name = jsexpr.column_name.as_deref();
+    let mut val_string: Option<PgString<'mcx>> = None;
+
+    match jsexpr.op {
+        JsonExprOp::JSON_EXISTS_OP => {
+            let r = JsonPathExists(mcx, &item_bytes, &path_bytes, suppress_errors, &vars)?;
+            error = r.error;
+            if !error {
+                write_cell(state, resv, Datum::from_bool(r.matched), false);
+                if resnull != resv {
+                    write_cell(state, resnull, Datum::from_bool(r.matched), false);
+                }
+            }
+        }
+        JsonExprOp::JSON_QUERY_OP => {
+            let r = JsonPathQuery(
+                mcx,
+                &item_bytes,
+                &path_bytes,
+                map_wrapper(jsexpr.wrapper),
+                suppress_errors,
+                &vars,
+                column_name,
+            )?;
+            error = r.error;
+            empty = r.empty;
+            match r.value {
+                Some(bytes) => {
+                    let v = mcx::slice_in(mcx, &bytes)?;
+                    write_cell(state, resv, Datum::ByRef(v), false);
+                }
+                None => write_cell(state, resv, Datum::null(), true),
+            }
+        }
+        JsonExprOp::JSON_VALUE_OP => {
+            let r = JsonPathValue(
+                mcx,
+                &item_bytes,
+                &path_bytes,
+                suppress_errors,
+                &vars,
+                column_name,
+            )?;
+            error = r.error;
+            empty = r.empty;
+            match r.value {
+                None => write_cell(state, resv, Datum::null(), true),
+                Some(jbv) => {
+                    if !error && !empty {
+                        let rettypid = returning.typid;
+                        if rettypid == JSONOID || rettypid == JSONBOID {
+                            // jsonb_out(JsonbValueToJsonb(jbv))
+                            let jb =
+                                backend_utils_adt_jsonb_util::JsonbValueToJsonb(mcx, &jbv)?;
+                            let s = backend_utils_adt_jsonb::jsonb_out(mcx, &jb)?;
+                            val_string = Some(pgstring_from_bytes(mcx, s.as_slice())?);
+                        } else if jsexpr.use_json_coercion {
+                            let jb =
+                                backend_utils_adt_jsonb_util::JsonbValueToJsonb(mcx, &jbv)?;
+                            let v = mcx::slice_in(mcx, jb.as_slice())?;
+                            write_cell(state, resv, Datum::ByRef(v), false);
+                        } else {
+                            let (s, is_null) = exec_get_json_value_item_string(mcx, &jbv)?;
+                            if is_null {
+                                write_cell(state, resv, Datum::null(), true);
+                            }
+                            val_string = s;
+                            if !jsexpr.use_io_coercion {
+                                // *op->resvalue = DirectFunctionCall1(textin,
+                                //     CStringGetDatum(val_string));
+                                if let Some(vs) = val_string.as_ref() {
+                                    let t = backend_utils_adt_varlena_seams::cstring_to_text_v::call(mcx, vs.as_str())?;
+                                    write_cell(state, resv, t, false);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // JSON_TABLE_OP can't happen here.
+        _ => {
+            return Err(PgError::error(format!(
+                "unrecognized SQL/JSON expression op {}",
+                jsexpr.op as i32
+            )));
+        }
+    }
+
+    // Coerce the result by calling the RETURNING type's input function.
+    let resnull_now = read_cell(state, resv).1;
+    if !resnull_now && jsexpr.use_io_coercion {
+        // C: fcinfo = jsestate->input_fcinfo; args[0] = val_string; the second
+        // and third args (typioparam / typmod) were preloaded at compile. The
+        // owned input-function call re-resolves by OID, so read the preloaded
+        // fn_oid / typioparam / returning typmod off the stored input_fcinfo.
+        let vs = val_string
+            .as_ref()
+            .expect("use_io_coercion: val_string must be set")
+            .to_string();
+        let js = &state.json_states.states.as_ref().unwrap()[jsestate_id.0 as usize];
+        let fcinfo = js
+            .input_fcinfo
+            .as_ref()
+            .expect("use_io_coercion: input_fcinfo must be set");
+        let fn_oid = fcinfo
+            .flinfo
+            .as_ref()
+            .expect("input_fcinfo flinfo present")
+            .fn_oid;
+        let typioparam =
+            types_core::primitive::Oid::from(fcinfo.args[1].value.as_usize() as u32);
+        let typmod = fcinfo.args[2].value.as_usize() as i32;
+        // C threads jsestate->escontext for soft IO-coercion errors; the owned
+        // hard-error input_function_call seam (escontext == NULL) is used here,
+        // so a malformed value raises hard rather than steering ON ERROR. This
+        // is the one IO-coercion narrowing (no soft InputFunctionCallSafe seam).
+        let coerced = backend_utils_fmgr_fmgr_seams::input_function_call::call(
+            mcx,
+            fn_oid,
+            Some(&vs),
+            typioparam,
+            typmod,
+        )?;
+        write_cell(state, resv, coerced, false);
+    }
+
+    // Handle ON EMPTY.
+    if empty {
+        write_cell(state, resv, Datum::null(), true);
+        if jsexpr.on_empty.is_some() {
+            let on_empty = jsexpr.on_empty.as_ref().unwrap();
+            if on_empty.btype != JsonBehaviorType::JSON_BEHAVIOR_ERROR {
+                write_cell(state, empty_cell, Datum::from_bool(true), false);
+                let js = &mut state.json_states.states.as_mut().unwrap()[jsestate_id.0 as usize];
+                js.escontext = types_error::SoftErrorContext::new(true);
+                return Ok(if jump_empty >= 0 { jump_empty } else { jump_end });
+            }
+        } else if on_error.btype != JsonBehaviorType::JSON_BEHAVIOR_ERROR {
+            write_cell(state, error_cell, Datum::from_bool(true), false);
+            let js = &mut state.json_states.states.as_mut().unwrap()[jsestate_id.0 as usize];
+            js.escontext = types_error::SoftErrorContext::new(true);
+            return Ok(if jump_error >= 0 { jump_error } else { jump_end });
+        }
+
+        return Err(no_sql_json_item_error(column_name));
+    }
+
+    // Handle ON ERROR (not reached when the behavior is ERROR — already thrown).
+    if error {
+        write_cell(state, resv, Datum::null(), true);
+        write_cell(state, error_cell, Datum::from_bool(true), false);
+        let js = &mut state.json_states.states.as_mut().unwrap()[jsestate_id.0 as usize];
+        js.escontext = types_error::SoftErrorContext::new(true);
+        return Ok(if jump_error >= 0 { jump_error } else { jump_end });
+    }
+
+    Ok(if jump_eval_coercion >= 0 {
+        jump_eval_coercion
+    } else {
+        jump_end
+    })
 }
 
-/// `ExecGetJsonValueItemString(JsonbValue *item, bool *resnull)` — render a
-/// scalar jsonb item as its text form. Allocates the result string.
-///
-/// The `JsonbValue` argument is owned by the jsonb adt unit (the real type is
-/// `types_jsonb::...::JsonbValue`); this helper's only caller,
-/// `ExecEvalJsonExprPath`, is itself gated behind the unported `JsonExprState`,
-/// so the trimmed real type is not threaded here yet — the parameter remains the
-/// raw jsonb `Datum` the (still-parked) caller would hold.
-///
-/// C logic (execExprInterp.c:5036-5102):
-///
-///   *resnull = false;
-///   switch (item->type) {
-///     case jbvNull:    *resnull = true; return NULL;
-///     case jbvString:  str = palloc(len+1); memcpy(str, val, len); str[len]=0; return str;
-///     case jbvNumeric: return DatumGetCString(DirectFunctionCall1(numeric_out,
-///                               NumericGetDatum(item->val.numeric)));
-///     case jbvBool:    return DatumGetCString(DirectFunctionCall1(boolout,
-///                               BoolGetDatum(item->val.boolean)));
-///     case jbvDatetime: switch (item->val.datetime.typid) {
-///       case DATEOID:        return DatumGetCString(DirectFunctionCall1(date_out, ...));
-///       case TIMEOID:        return DatumGetCString(DirectFunctionCall1(time_out, ...));
-///       case TIMETZOID:      return DatumGetCString(DirectFunctionCall1(timetz_out, ...));
-///       case TIMESTAMPOID:   return DatumGetCString(DirectFunctionCall1(timestamp_out, ...));
-///       case TIMESTAMPTZOID: return DatumGetCString(DirectFunctionCall1(timestamptz_out, ...));
-///       default: elog(ERROR, "unexpected jsonb datetime type oid %u", typid); }
-///     case jbvArray: case jbvObject: case jbvBinary:
-///       return DatumGetCString(DirectFunctionCall1(jsonb_out,
-///         JsonbPGetDatum(JsonbValueToJsonb(item))));
-///     default: elog(ERROR, "unexpected jsonb value type %d", item->type); }
-///   Assert(false); *resnull = true; return NULL;
-pub fn ExecGetJsonValueItemString<'mcx>(
+/// Build the `JsonPathVars` from a jsestate's compiled PASSING args, gathering
+/// each arg's value out of its result cell.
+fn build_path_vars<'mcx>(
+    state: &ExprState<'mcx>,
+    jsestate_id: JsonExprStateId,
+) -> PgResult<JsonPathVars> {
+    let js = &state.json_states.states.as_ref().unwrap()[jsestate_id.0 as usize];
+    if js.args.is_empty() {
+        return Ok(JsonPathVars::None);
+    }
+    let mut vars = Vec::with_capacity(js.args.len());
+    // Collect (name, typid, typmod, value_cell) first to drop the jsestate borrow.
+    let specs: Vec<(Vec<u8>, u32, i32, ResultCellId)> = js
+        .args
+        .iter()
+        .map(|v| {
+            (
+                v.name.as_bytes().to_vec(),
+                v.typid,
+                v.typmod,
+                v.value_cell,
+            )
+        })
+        .collect();
+    for (name, typid, typmod, cell) in specs {
+        let (val, isnull) = read_cell(state, cell);
+        // JsonPathVariable.value is a bare-word types_datum::Datum. A by-value
+        // arg maps directly; a by-reference arg cannot be carried by the bare
+        // word — that is the genuine by-ref-Datum substrate gap (and the
+        // json_item_from_datum seam that would consume it is itself
+        // uninstalled), so it loud-panics here.
+        let word = match val {
+            Datum::ByVal(w) => w,
+            _ => panic!(
+                "execExprInterp: ExecEvalJsonExprPath PASSING variable {:?} has a by-reference \
+                 value; the bare-word JsonPathVariable.value carrier and the json_item_from_datum \
+                 detoast seam for varlena PASSING args are not yet landed",
+                String::from_utf8_lossy(&name)
+            ),
+        };
+        vars.push(JsonPathVariable {
+            name,
+            typid,
+            typmod,
+            value: types_datum::Datum::from_usize(word),
+            isnull,
+        });
+    }
+    Ok(JsonPathVars::List(vars))
+}
+
+/// `ExecGetJsonValueItemString(JsonbValue *item, bool *resnull)`
+/// (execExprInterp.c:5037) — render a scalar jsonb item as its text form.
+/// Returns `(string, is_null)`.
+fn exec_get_json_value_item_string<'mcx>(
     mcx: Mcx<'mcx>,
-    item: types_datum::Datum,
+    item: &JsonbValue,
 ) -> PgResult<(Option<PgString<'mcx>>, bool)> {
-    let _ = (mcx, item);
-    panic!(
-        "execExprInterp: ExecGetJsonValueItemString — the per-type *_out cast \
-         targets (numeric_out/boolout/date_out/time_out/timetz_out/timestamp_out/\
-         timestamptz_out/jsonb_out via DirectFunctionCall1) and JsonbValueToJsonb \
-         have no executor-facing seam; its sole caller ExecEvalJsonExprPath is \
-         gated behind the unported JsonExprState — not yet ported"
-    )
+    match &item.val {
+        JsonbValueData::Null => Ok((None, true)),
+        JsonbValueData::String(bytes) => Ok((Some(pgstring_from_bytes(mcx, bytes)?), false)),
+        JsonbValueData::Numeric(num) => {
+            let s = backend_utils_adt_numeric::io::numeric_out(mcx, num)?;
+            Ok((Some(pgstring_from_bytes(mcx, s.as_bytes())?), false))
+        }
+        JsonbValueData::Bool(b) => {
+            // DirectFunctionCall1(boolout, ...): "t" / "f".
+            let s = if *b { "t" } else { "f" };
+            Ok((Some(pgstring_from_bytes(mcx, s.as_bytes())?), false))
+        }
+        JsonbValueData::Array { .. } | JsonbValueData::Object(_) | JsonbValueData::Binary { .. } => {
+            // jsonb_out(JsonbValueToJsonb(item))
+            let jb = backend_utils_adt_jsonb_util::JsonbValueToJsonb(mcx, item)?;
+            let s = backend_utils_adt_jsonb::jsonb_out(mcx, &jb)?;
+            Ok((Some(pgstring_from_bytes(mcx, s.as_slice())?), false))
+        }
+        JsonbValueData::Datetime(_) => {
+            // The per-type datetime *_out casts (date_out/time_out/timetz_out/
+            // timestamp_out/timestamptz_out via DirectFunctionCall1) live in the
+            // datetime adt unit, not threaded into the interpreter; JSON_VALUE of
+            // a jsonb datetime scalar to text is the one narrow arm not yet
+            // reachable here.
+            panic!(
+                "execExprInterp: ExecGetJsonValueItemString — the jbvDatetime arm needs the \
+                 date_out/time_out/timetz_out/timestamp_out/timestamptz_out casts \
+                 (backend-utils-adt-datetime), not yet threaded into the interpreter"
+            )
+        }
+    }
 }
 
-/// `ExecEvalJsonCoercion(ExprState *state, ExprEvalStep *op,
-/// ExprContext *econtext)` — coerce a JSON path result to the output type.
-///
-/// C logic (execExprInterp.c:5111-5161):
-///
-///   ErrorSaveContext *escontext = op->d.jsonexpr_coercion.escontext;
-///   if (op->d.jsonexpr_coercion.exists_coerce) {
-///     if (op->d.jsonexpr_coercion.exists_cast_to_int) {
-///       if (op->d.jsonexpr_coercion.exists_check_domain &&
-///           !domain_check_safe(*op->resvalue, *op->resnull,
-///                              op->d.jsonexpr_coercion.targettype,
-///                              &op->d.jsonexpr_coercion.json_coercion_cache,
-///                              econtext->ecxt_per_query_memory, (Node*)escontext)) {
-///         *op->resnull = true; *op->resvalue = (Datum)0; }
-///       else *op->resvalue = DirectFunctionCall1(bool_int4, *op->resvalue);
-///       return; }
-///     *op->resvalue = DirectFunctionCall1(jsonb_in,
-///       DatumGetBool(*op->resvalue) ? CStringGetDatum("true") : CStringGetDatum("false")); }
-///   *op->resvalue = json_populate_type(*op->resvalue, JSONBOID,
-///     op->d.jsonexpr_coercion.targettype, op->d.jsonexpr_coercion.targettypmod,
-///     &op->d.jsonexpr_coercion.json_coercion_cache, econtext->ecxt_per_query_memory,
-///     op->resnull, op->d.jsonexpr_coercion.omit_quotes, (Node*)escontext);
+/// `ExecEvalJsonCoercion(ExprState *state, ExprEvalStep *op, ExprContext
+/// *econtext)` (execExprInterp.c:5112) — coerce a JSON path result to the
+/// output type.
 pub fn ExecEvalJsonCoercion<'mcx>(
     state: &mut ExprState<'mcx>,
     op: usize,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    let _ = (state, op, econtext, estate);
-    panic!(
-        "execExprInterp: EEOP_JSONEXPR_COERCION — the ErrorSaveContext escontext \
-         and json_coercion_cache (op->d.jsonexpr_coercion, parked opaque off the \
-         unported JsonExprState unit) and the coercion workers (json_populate_type, \
-         domain_check_safe, bool_int4/jsonb_in via DirectFunctionCall1) have no \
-         executor-facing seam — not yet ported"
-    )
+    let _ = econtext;
+    let mcx = estate.es_query_cxt;
+
+    let (
+        targettype,
+        targettypmod,
+        omit_quotes,
+        exists_coerce,
+        exists_cast_to_int,
+        exists_check_domain,
+        cache_id,
+        escontext_id,
+    ) = match &state.steps.as_ref().unwrap()[op].d {
+        ExprEvalStepData::JsonExprCoercion {
+            targettype,
+            targettypmod,
+            omit_quotes,
+            exists_coerce,
+            exists_cast_to_int,
+            exists_check_domain,
+            json_coercion_cache,
+            jsestate,
+        } => (
+            *targettype,
+            *targettypmod,
+            *omit_quotes,
+            *exists_coerce,
+            *exists_cast_to_int,
+            *exists_check_domain,
+            *json_coercion_cache,
+            *jsestate,
+        ),
+        _ => unreachable!("EEOP_JSONEXPR_COERCION: payload is not JsonExprCoercion"),
+    };
+    let resv = state.steps.as_ref().unwrap()[op].resvalue;
+
+    if exists_coerce {
+        if exists_cast_to_int {
+            // Check domain constraints if any (domain_check_safe). Not yet
+            // threaded; only reached for JSON_EXISTS RETURNING a domain over int
+            // with constraints.
+            if exists_check_domain {
+                panic!(
+                    "execExprInterp: EEOP_JSONEXPR_COERCION — the exists_check_domain branch \
+                     needs domain_check_safe (utils/adt/domains.c), not yet threaded into the \
+                     interpreter"
+                );
+            }
+            // *op->resvalue = DirectFunctionCall1(bool_int4, *op->resvalue);
+            let (v, n) = read_cell(state, resv);
+            let b = if n { false } else { v.as_bool() };
+            write_cell(state, resv, Datum::from_i32(if b { 1 } else { 0 }), n);
+            return Ok(());
+        }
+
+        // *op->resvalue = DirectFunctionCall1(jsonb_in, "true"/"false")
+        let (v, n) = read_cell(state, resv);
+        let truth = if n { false } else { v.as_bool() };
+        let s: &[u8] = if truth { b"true" } else { b"false" };
+        let jb = backend_utils_adt_jsonb::jsonb_in(mcx, s)?;
+        write_cell(state, resv, Datum::ByRef(mcx::slice_in(mcx, jb.as_slice())?), false);
+    }
+
+    // *op->resvalue = json_populate_type(*op->resvalue, JSONBOID, targettype,
+    //     targettypmod, &json_coercion_cache, per_query_memory, op->resnull,
+    //     omit_quotes, escontext);
+    let (val, mut isnull) = read_cell(state, resv);
+    let json_val = if isnull { Vec::new() } else { val.as_ref_bytes().to_vec() };
+
+    // Take the persistent cache and the soft-error sink out so the borrows do
+    // not alias `state` while json_populate_type runs, then restore them.
+    let mut cache = take_coercion_cache(state, cache_id);
+    let mut escontext = escontext_id.map(|id| {
+        core::mem::take(&mut state.json_states.states.as_mut().unwrap()[id.0 as usize].escontext)
+    });
+
+    let result = backend_utils_adt_jsonfuncs::populate::json_populate_type(
+        mcx,
+        &json_val,
+        JSONBOID,
+        targettype,
+        targettypmod,
+        &mut cache,
+        &mut isnull,
+        omit_quotes,
+        escontext.as_mut(),
+    );
+
+    // Restore the cache and the soft-error sink regardless of outcome.
+    put_coercion_cache(state, cache_id, cache);
+    if let (Some(id), Some(ec)) = (escontext_id, escontext) {
+        state.json_states.states.as_mut().unwrap()[id.0 as usize].escontext = ec;
+    }
+
+    let datum = result?;
+    write_cell(state, resv, datum, isnull);
+    Ok(())
 }
 
-/// `GetJsonBehaviorValueString(JsonBehavior *behavior)` — text of an ON
-/// ERROR / ON EMPTY behavior for error messages. Allocates the string.
-///
-/// The `JsonBehavior` node is owned by the parsenodes/SQL-JSON unit (not yet
-/// ported); the helper reads it off the step's compiled `JsonExprState` payload,
-/// which is parked, so it takes the owning `ExprState` + step index here.
-///
-/// C logic (execExprInterp.c:5163-5184):
-///
-///   const char *behavior_names[] = { "NULL","ERROR","EMPTY","TRUE","FALSE",
-///                                    "UNKNOWN","EMPTY ARRAY","EMPTY OBJECT","DEFAULT" };
-///   return pstrdup(behavior_names[behavior->btype]);
-pub fn GetJsonBehaviorValueString<'mcx>(
-    mcx: Mcx<'mcx>,
-    state: &ExprState<'mcx>,
-    op: usize,
-) -> PgResult<PgString<'mcx>> {
-    let _ = (mcx, state, op);
-    panic!(
-        "execExprInterp: GetJsonBehaviorValueString — the JsonBehavior node \
-         (read off the parked JsonExprState->jsexpr->on_error/on_empty; supplies \
-         behavior->btype) is not ported — the JSON SQL/JSON parsenode + state \
-         unit has not landed"
-    )
+/// `GetJsonBehaviorValueString(JsonBehavior *behavior)` (execExprInterp.c:5164)
+/// — the text of an ON ERROR / ON EMPTY behavior, for error messages.
+fn get_json_behavior_value_string(btype: JsonBehaviorType) -> &'static str {
+    // Order must match JsonBehaviorType.
+    const NAMES: [&str; 9] = [
+        "NULL",
+        "ERROR",
+        "EMPTY",
+        "TRUE",
+        "FALSE",
+        "UNKNOWN",
+        "EMPTY ARRAY",
+        "EMPTY OBJECT",
+        "DEFAULT",
+    ];
+    NAMES[btype as usize]
 }
 
-/// `ExecEvalJsonCoercionFinish(ExprState *state, ExprEvalStep *op)` — finalize
-/// a JSON coercion that needed a sub-expression evaluation.
-///
-/// C logic (execExprInterp.c:5191-5233):
-///
-///   JsonExprState *jsestate = op->d.jsonexpr.jsestate;
-///   if (SOFT_ERROR_OCCURRED(&jsestate->escontext)) {
-///     if (DatumGetBool(jsestate->error.value))
-///       ereport(ERROR, errcode(ERRCODE_DATATYPE_MISMATCH),
-///         errmsg("could not coerce %s expression (%s) to the RETURNING type",
-///                "ON ERROR", GetJsonBehaviorValueString(jsestate->jsexpr->on_error)),
-///         errdetail("%s", jsestate->escontext.error_data->message));
-///     else if (DatumGetBool(jsestate->empty.value))
-///       ereport(ERROR, errcode(ERRCODE_DATATYPE_MISMATCH),
-///         errmsg("could not coerce %s expression (%s) to the RETURNING type",
-///                "ON EMPTY", GetJsonBehaviorValueString(jsestate->jsexpr->on_empty)),
-///         errdetail("%s", jsestate->escontext.error_data->message));
-///     *op->resvalue = (Datum)0; *op->resnull = true;
-///     jsestate->error.value = BoolGetDatum(true);
-///     jsestate->escontext.error_occurred = false; jsestate->escontext.details_wanted = true; }
+/// `ExecEvalJsonCoercionFinish(ExprState *state, ExprEvalStep *op)`
+/// (execExprInterp.c:5192) — finalize a JSON coercion that needed a
+/// sub-expression evaluation, rethrowing a soft coercion error.
 pub fn ExecEvalJsonCoercionFinish<'mcx>(
     state: &mut ExprState<'mcx>,
     op: usize,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    let _ = (state, op, estate);
-    panic!(
-        "execExprInterp: EEOP_JSONEXPR_COERCION_FINISH — the JsonExprState \
-         runtime-state group (op->d.jsonexpr.jsestate, parked as \
-         ExprEvalStepData::JsonExpr {{ jsestate: usize }}: escontext/error/empty/\
-         jsexpr->on_error/on_empty) is not ported — same blocker as its compiler \
-         emitter exec_init_json_expr (execExpr_json.rs)"
-    )
+    let _ = estate;
+    let jsestate_id = match &state.steps.as_ref().unwrap()[op].d {
+        ExprEvalStepData::JsonExpr { jsestate } => *jsestate,
+        _ => unreachable!("EEOP_JSONEXPR_COERCION_FINISH: payload is not JsonExpr"),
+    };
+    let resv = state.steps.as_ref().unwrap()[op].resvalue;
+
+    let js = &state.json_states.states.as_ref().unwrap()[jsestate_id.0 as usize];
+    if js.escontext.error_occurred() {
+        let error_set = read_cell(state, js.error_cell).0.as_bool();
+        let empty_set = read_cell(state, js.empty_cell).0.as_bool();
+        let js = &state.json_states.states.as_ref().unwrap()[jsestate_id.0 as usize];
+        let jsexpr = &js.jsexpr;
+        let detail = js
+            .escontext
+            .error()
+            .map(|e| e.message().to_string())
+            .unwrap_or_default();
+
+        if error_set {
+            let clause = jsexpr
+                .on_error
+                .as_ref()
+                .map(|b| get_json_behavior_value_string(b.btype))
+                .unwrap_or("ON ERROR");
+            return Err(coercion_error("ON ERROR", clause, &detail));
+        } else if empty_set {
+            let clause = jsexpr
+                .on_empty
+                .as_ref()
+                .map(|b| get_json_behavior_value_string(b.btype))
+                .unwrap_or("ON EMPTY");
+            return Err(coercion_error("ON EMPTY", clause, &detail));
+        }
+
+        // Reset for next use: resvalue NULL, error TRUE, escontext cleared.
+        let error_cell = state.json_states.states.as_ref().unwrap()[jsestate_id.0 as usize].error_cell;
+        write_cell(state, resv, Datum::null(), true);
+        write_cell(state, error_cell, Datum::from_bool(true), false);
+        let js = &mut state.json_states.states.as_mut().unwrap()[jsestate_id.0 as usize];
+        js.escontext = types_error::SoftErrorContext::default();
+    }
+    Ok(())
+}
+
+// --- helpers -----------------------------------------------------------------
+
+/// Build a `PgString` from raw bytes (C `pstrdup` of a rendered cstring).
+fn pgstring_from_bytes<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> PgResult<PgString<'mcx>> {
+    PgString::from_str_in(&String::from_utf8_lossy(bytes), mcx)
+}
+
+/// Take the persistent coercion cache out of the arena (replacing it with a
+/// fresh default so the slot is restored after the call).
+fn take_coercion_cache<'mcx>(
+    state: &mut ExprState<'mcx>,
+    id: JsonCoercionCacheId,
+) -> types_nodes::execexpr::JsonCoercionCache<'mcx> {
+    let caches = state
+        .json_coercion_caches
+        .caches
+        .as_mut()
+        .expect("coercion-cache arena allocated at compile");
+    core::mem::take(&mut caches[id.0 as usize])
+}
+
+/// Restore a coercion cache taken by [`take_coercion_cache`].
+fn put_coercion_cache<'mcx>(
+    state: &mut ExprState<'mcx>,
+    id: JsonCoercionCacheId,
+    cache: types_nodes::execexpr::JsonCoercionCache<'mcx>,
+) {
+    let caches = state.json_coercion_caches.caches.as_mut().unwrap();
+    caches[id.0 as usize] = cache;
+}
+
+fn no_sql_json_item_error(column_name: Option<&str>) -> PgError {
+    let msg = match column_name {
+        Some(c) => format!(
+            "no SQL/JSON item found for specified path of column \"{}\"",
+            c
+        ),
+        None => "no SQL/JSON item found for specified path".to_string(),
+    };
+    PgError::error(msg).with_sqlstate(ERRCODE_NO_SQL_JSON_ITEM)
+}
+
+fn coercion_error(clause: &str, behavior: &str, detail: &str) -> PgError {
+    let e = PgError::error(format!(
+        "could not coerce {} expression ({}) to the RETURNING type",
+        clause,
+        behavior
+    ))
+    .with_sqlstate(ERRCODE_DATATYPE_MISMATCH);
+    if detail.is_empty() {
+        e
+    } else {
+        e.with_detail(detail.to_string())
+    }
 }

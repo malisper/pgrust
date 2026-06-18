@@ -42,3 +42,12 @@ backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-s
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 # jsonb subscripting execution bodies (jsonbsubs.c) reached per-callback.
 backend-utils-adt-jsonbsubs-seams = { path = "../backend-utils-adt-jsonbsubs-seams" }
+# SQL/JSON path evaluation (jsonpath_exec.c) for EEOP_JSONEXPR_PATH:
+# JsonPathExists/Query/Value + JsonbValueToJsonb + json_populate_type coercion.
+# These are leaf adt units with no executor deps, so the edges are acyclic.
+backend-utils-adt-jsonpath-exec = { path = "../backend-utils-adt-jsonpath-exec" }
+backend-utils-adt-jsonb-util = { path = "../backend-utils-adt-jsonb-util" }
+backend-utils-adt-jsonb = { path = "../backend-utils-adt-jsonb" }
+backend-utils-adt-numeric = { path = "../backend-utils-adt-numeric" }
+backend-utils-adt-jsonfuncs = { path = "../backend-utils-adt-jsonfuncs" }
+types-jsonb = { path = "../types-jsonb" }

@@ -77,6 +77,7 @@ use JsonPathItemType::*;
 
 mod datetime;
 mod json_table;
+mod routine_install;
 mod seams;
 #[cfg(test)]
 mod tests;

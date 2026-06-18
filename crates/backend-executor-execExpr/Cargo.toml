@@ -37,6 +37,9 @@ backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-sea
 # get_opcode / get_op_hash_functions) the hashed-subplan combining-op
 # resolution routes through.
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+# typcache owns DomainHasConstraints (get_typtype is lsyscache) for the
+# JSON_EXISTS-coercion-to-domain path of ExecInitJsonCoercion.
+backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
 # format_type_be(refcontainertype) for the "cannot subscript type %s" /
 # "does not support subscripted assignment" error texts in ExecInitSubscriptingRef.
 backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }

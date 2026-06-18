@@ -993,7 +993,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
 
             // C: if (state->escontext == NULL) opcode = EEOP_IOCOERCE;
             //    else opcode = EEOP_IOCOERCE_SAFE;
-            let opcode = if state.escontext == 0 {
+            let opcode = if state.escontext.is_none() {
                 ExprEvalOp::EEOP_IOCOERCE
             } else {
                 ExprEvalOp::EEOP_IOCOERCE_SAFE
@@ -1311,10 +1311,14 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             "execExpr-core: WindowFunc setup is owned by nodeWindowAgg (WindowFuncExprState); the \
              parent WindowAggState must be threaded"
         ),
+        // ----- T_JsonExpr (JSON_VALUE / JSON_QUERY / JSON_EXISTS) -----
+        Expr::JsonExpr(jsexpr) => {
+            crate::execExpr_json::exec_init_json_expr(mcx, jsexpr, state, resv)
+        }
         Expr::XmlExpr(_) | Expr::JsonValueExpr(_) | Expr::JsonConstructorExpr(_)
-        | Expr::JsonIsPredicate(_) | Expr::JsonExpr(_) => panic!(
-            "execExpr-core: XML/JSON expression compilation is owned by execExpr_json \
-             (ExecInitJsonExpr / ExecInitJsonConstructor / xml)"
+        | Expr::JsonIsPredicate(_) => panic!(
+            "execExpr-core: XML/JSON-constructor expression compilation is owned by execExpr_json \
+             (ExecInitJsonConstructor / xml)"
         ),
         Expr::SetToDefault(_) => panic!(
             "execExpr-core: SetToDefault must have been replaced before execution (planner); \
