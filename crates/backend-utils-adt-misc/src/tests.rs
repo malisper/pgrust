@@ -296,3 +296,52 @@ fn parse_ident_errors_match_c() {
     let parts = parse_ident(mcx, b"a b", false).unwrap();
     assert_eq!(parts_to_vecs(parts), vec![b"a".to_vec()]);
 }
+
+// -------------------------------------------------------------------
+// pg_get_catalog_foreign_keys() / sys_fk_relationships[] (pure data)
+// -------------------------------------------------------------------
+
+#[test]
+fn catalog_foreign_keys_row_count_matches_header() {
+    // system_fk_info.h has 219 sys_fk_relationships[] entries.
+    let rows = build_sys_fk_rows();
+    assert_eq!(rows.len(), 219);
+}
+
+#[test]
+fn catalog_foreign_keys_representative_rows() {
+    let rows = build_sys_fk_rows();
+
+    // First entry: pg_proc(1255).pronamespace -> pg_namespace(2615).oid
+    let first = &rows[0];
+    assert_eq!(first.fktable, 1255);
+    assert_eq!(first.pktable, 2615);
+    assert_eq!(first.fkcols, vec![b"pronamespace".to_vec()]);
+    assert_eq!(first.pkcols, vec![b"oid".to_vec()]);
+    assert!(!first.is_array);
+    assert!(!first.is_opt);
+
+    // Multi-column entry: pg_attrdef(2604).{adrelid, adnum}
+    //   -> pg_attribute(1249).{attrelid, attnum}
+    let multi = rows
+        .iter()
+        .find(|r| r.fktable == 2604 && r.fkcols.len() == 2)
+        .expect("pg_attrdef multi-column FK present");
+    assert_eq!(multi.pktable, 1249);
+    assert_eq!(
+        multi.fkcols,
+        vec![b"adrelid".to_vec(), b"adnum".to_vec()]
+    );
+    assert_eq!(
+        multi.pkcols,
+        vec![b"attrelid".to_vec(), b"attnum".to_vec()]
+    );
+    assert!(!multi.is_array);
+    assert!(!multi.is_opt);
+
+    // Last entry: pg_subscription_rel(6102).srrelid -> pg_class(1259).oid
+    let last = rows.last().unwrap();
+    assert_eq!(last.fktable, 6102);
+    assert_eq!(last.pktable, 1259);
+    assert_eq!(last.fkcols, vec![b"srrelid".to_vec()]);
+}

@@ -55,6 +55,9 @@ use backend_storage_ipc_latch_seams::{
 };
 
 pub mod fmgr_builtins;
+mod system_fk_info;
+
+pub use system_fk_info::build_sys_fk_rows;
 
 #[cfg(test)]
 mod tests;
@@ -865,15 +868,17 @@ pub fn any_value_transfn<T>(state: T) -> T {
     state
 }
 
-// This crate owns no inward seams: its `misc.c` functions are SQL-callable
-// leaves that no other crate calls across a cycle, so there is no `-seams` crate
-// for it. `init_seams()` exists solely to register this crate's `fmgr_builtins`
-// rows into the fmgr-core builtin table (C: `fmgr_builtins[]`), matching the
-// other adt crates (`oid`/`dbsize`/`mcxtfuncs`/...). `seams-init::init_all` calls
-// it alongside the rest.
+// `init_seams()` registers this crate's `fmgr_builtins` rows into the fmgr-core
+// builtin table (C: `fmgr_builtins[]`), matching the other adt crates
+// (`oid`/`dbsize`/`mcxtfuncs`/...), and installs the one inward data seam this
+// crate owns — `catalog_foreign_keys`, the generated `sys_fk_relationships[]`
+// table (catalog/system_fk_info.h) that `pg_get_catalog_foreign_keys()`
+// consumes. `seams-init::init_all` calls it alongside the rest.
 
-/// Register this crate's fmgr builtins into the fmgr-core builtin table. Called
-/// once at startup by `seams-init::init_all`.
+/// Register this crate's fmgr builtins into the fmgr-core builtin table and
+/// install the `catalog_foreign_keys` data seam. Called once at startup by
+/// `seams-init::init_all`.
 pub fn init_seams() {
     fmgr_builtins::register_misc_builtins();
+    backend_utils_adt_misc_seams::catalog_foreign_keys::set(|| Ok(build_sys_fk_rows()));
 }

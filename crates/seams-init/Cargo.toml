@@ -427,6 +427,7 @@ backend-utils-activity-status = { path = "../backend-utils-activity-status" }
 backend-utils-activity-waitevent = { path = "../backend-utils-activity-waitevent" }
 backend-utils-activity-xact = { path = "../backend-utils-activity-xact" }
 backend-utils-adt-misc2 = { path = "../backend-utils-adt-misc2" }
+backend-utils-adt-misc = { path = "../backend-utils-adt-misc" }
 backend-utils-adt-acl = { path = "../backend-utils-adt-acl" }
 backend-utils-adt-array-selfuncs = { path = "../backend-utils-adt-array-selfuncs" }
 backend-utils-adt-geo-selfuncs = { path = "../backend-utils-adt-geo-selfuncs" }

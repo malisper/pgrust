@@ -343,9 +343,10 @@ pub fn register_misc_builtins() {
             fc_pg_current_logfile,
         ),
         // 3801 pg_current_logfile(text)        -> text   (proisstrict => 'f')
+        // C: prosrc/funcName is `pg_current_logfile_1arg` (pg_proc.dat:6815).
         builtin(
             3801,
-            "pg_current_logfile",
+            "pg_current_logfile_1arg",
             1,
             false,
             false,
