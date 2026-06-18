@@ -953,6 +953,62 @@ pub(crate) fn AllocatedFileMetadata(index: i32) -> Result<std::fs::Metadata, i32
     })
 }
 
+/// `fseeko(file, seek_offset, whence)` on the stream at table `index`:
+/// `SEEK_SET` when `seek_offset >= 0`, else `SEEK_END`. Returns the failing
+/// errno on a seek error (the `read_binary_file` fseeko half).
+pub(crate) fn stream_seek(index: i32, seek_offset: i64) -> Result<(), i32> {
+    use std::io::{Seek, SeekFrom};
+    with_fd(|fd| {
+        let i = index as usize;
+        if i >= fd.allocated_descs.len() {
+            return Err(libc::EBADF);
+        }
+        match &mut fd.allocated_descs[i].desc {
+            AllocatedHandle::File(file) => {
+                let pos = if seek_offset >= 0 {
+                    SeekFrom::Start(seek_offset as u64)
+                } else {
+                    SeekFrom::End(seek_offset)
+                };
+                file.seek(pos)
+                    .map(|_| ())
+                    .map_err(|e| e.raw_os_error().unwrap_or(libc::EIO))
+            }
+            _ => Err(libc::EBADF),
+        }
+    })
+}
+
+/// `fread` exactly up to `n` bytes from the stream at table `index` (the
+/// explicit `bytes_to_read >= 0` branch of `read_binary_file`). A short read at
+/// EOF returns fewer bytes — mirroring C's `nbytes = fread(...)`. Returns the
+/// failing errno on a read error.
+pub(crate) fn stream_read_n(index: i32, n: usize) -> Result<Vec<u8>, i32> {
+    use std::io::Read;
+    with_fd(|fd| {
+        let i = index as usize;
+        if i >= fd.allocated_descs.len() {
+            return Err(libc::EBADF);
+        }
+        match &mut fd.allocated_descs[i].desc {
+            AllocatedHandle::File(file) => {
+                let mut out = vec![0u8; n];
+                let mut filled = 0usize;
+                while filled < n {
+                    match file.read(&mut out[filled..]) {
+                        Ok(0) => break,
+                        Ok(k) => filled += k,
+                        Err(e) => return Err(e.raw_os_error().unwrap_or(libc::EIO)),
+                    }
+                }
+                out.truncate(filled);
+                Ok(out)
+            }
+            _ => Err(libc::EBADF),
+        }
+    })
+}
+
 /// Read the entire stream at table `index` into a byte buffer (the
 /// `fstat`+`fread` pattern snapmgr's `ImportSnapshot` uses). Returns the failing
 /// errno on a read error.

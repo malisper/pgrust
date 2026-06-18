@@ -956,6 +956,103 @@ pub fn seam_rename_file(from: &str, to: &str) -> i32 {
     }
 }
 
+/// `pg_mkdir_p(path, pg_dir_create_mode)` (src/port/pgmkdirp.c) — create every
+/// missing parent directory in `path`, POSIX `mkdir -p` semantics (changing the
+/// umask to `~(S_IWUSR|S_IXUSR)` for the parents, restoring it for the final
+/// component and on exit). Returns `Ok(())` on success, `Err(errno)` on `< 0`.
+/// Seam adapter for `pg_mkdir_p`.
+pub(crate) fn seam_pg_mkdir_p(path: &str) -> Result<(), i32> {
+    let omode = pg_dir_create_mode() as libc::mode_t;
+    // bytes copy we can mutate in place (the C truncates at each '/').
+    let mut bytes: Vec<u8> = path.as_bytes().to_vec();
+    bytes.push(0); // NUL terminator; we index up to the '\0'.
+
+    let mut retval: Result<(), i32> = Ok(());
+
+    // oumask = umask(0); numask = oumask & ~(S_IWUSR|S_IXUSR); umask(numask);
+    // SAFETY: umask(2) only swaps the process file-creation mask.
+    let oumask = unsafe { libc::umask(0) };
+    let numask = oumask & !((libc::S_IWUSR | libc::S_IXUSR) as libc::mode_t);
+    unsafe {
+        libc::umask(numask);
+    }
+
+    let mut i = 0usize;
+    if bytes[0] == b'/' {
+        i += 1; // Skip leading '/'.
+    }
+    let mut last = false;
+    while !last {
+        if bytes[i] == 0 {
+            last = true;
+        } else if bytes[i] != b'/' {
+            i += 1;
+            continue;
+        }
+        // Save and NUL out the separator so `path[..i]` names this prefix.
+        let saved = bytes[i];
+        bytes[i] = 0;
+        if !last && bytes[i + 1] == 0 {
+            last = true;
+        }
+        if last {
+            // SAFETY: restore umask for the final component.
+            unsafe {
+                libc::umask(oumask);
+            }
+        }
+
+        let cpath = std::ffi::CString::new(&bytes[..i]).unwrap_or_else(|_| {
+            std::ffi::CString::new("").unwrap()
+        });
+
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // check for pre-existing directory
+        // SAFETY: cpath is NUL-terminated; st is a valid out-param.
+        if unsafe { libc::stat(cpath.as_ptr(), &mut st) } == 0 {
+            if (st.st_mode & libc::S_IFMT) != libc::S_IFDIR {
+                set_errno(if last { libc::EEXIST } else { libc::ENOTDIR });
+                retval = Err(errno());
+                break;
+            }
+        } else {
+            let mode = if last {
+                omode
+            } else {
+                (libc::S_IRWXU | libc::S_IRWXG | libc::S_IRWXO) as libc::mode_t
+            };
+            // SAFETY: cpath is NUL-terminated.
+            if unsafe { libc::mkdir(cpath.as_ptr(), mode) } < 0 {
+                retval = Err(errno());
+                break;
+            }
+        }
+        if !last {
+            bytes[i] = saved; // restore '/'
+        }
+        i += 1;
+    }
+
+    // ensure we restored umask
+    // SAFETY: umask(2).
+    unsafe {
+        libc::umask(oumask);
+    }
+    retval
+}
+
+/// `rmdir(path)` (libc) — remove the empty directory `path`. `Ok(())` on
+/// success, `Err(errno)` on `< 0`. Seam adapter for the fd-seams `rmdir`.
+pub(crate) fn seam_rmdir(path: &str) -> Result<(), i32> {
+    let cpath = path_to_cstring(Path::new(path));
+    // SAFETY: cpath is NUL-terminated.
+    if unsafe { libc::rmdir(cpath.as_ptr()) } == 0 {
+        Ok(())
+    } else {
+        Err(errno())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Small helpers.
 // ---------------------------------------------------------------------------

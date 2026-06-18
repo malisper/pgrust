@@ -29,6 +29,9 @@ backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 # Seam crates this unit OWNS (installs every decl from its own init_seams()).
 backend-storage-file-seams = { path = "../backend-storage-file-seams" }
 backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
+# tblspc.c raw-POSIX primitive decls (no separate owner; installed here as
+# they are fd.c/`src/port` primitives — sanctioned cross-crate install).
+backend-storage-file-tblspc-fs-seams = { path = "../backend-storage-file-tblspc-fs-seams" }
 backend-postmaster-postmaster-seams = { path = "../backend-postmaster-postmaster-seams" }
 backend-storage-file-fileperm-seams = { path = "../backend-storage-file-fileperm-seams" }
 # Seam crates for UNPORTED neighbors (calls panic loudly until the owner lands).

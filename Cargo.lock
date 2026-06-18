@@ -15495,6 +15495,7 @@ dependencies = [
  "backend-storage-file-fd-seams",
  "backend-storage-file-fileperm-seams",
  "backend-storage-file-seams",
+ "backend-storage-file-tblspc-fs-seams",
  "backend-storage-ipc-dsm-core-seams",
  "backend-tcop-postgres-seams",
  "backend-utils-activity-stat-seams",
