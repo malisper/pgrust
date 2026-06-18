@@ -362,9 +362,9 @@ fn create_ctas_nodata<'mcx>(
 /// `strVal(lfirst(lc))` — the string value of a `colNames` list element (a
 /// `String`/`T_String` value node).
 fn node_string_value<'a>(node: &'a PgBox<'_, Node<'_>>) -> &'a str {
-    match &**node {
-        Node::String(s) => s.sval.as_str(),
-        _ => panic!("createas: into->colNames element is not a String value node"),
+    match node.as_string() {
+        Some(s) => s.sval.as_str(),
+        None => panic!("createas: into->colNames element is not a String value node"),
     }
 }
 
@@ -524,15 +524,15 @@ fn stmt_query<'a, 'mcx>(stmt: &'a CreateTableAsStmt<'mcx>) -> &'a types_nodes::c
 
 /// `stmt->into` — the `IntoClause` target spec (never NULL for a CTAS stmt).
 fn stmt_into<'a, 'mcx>(stmt: &'a CreateTableAsStmt<'mcx>) -> &'a IntoClause<'mcx> {
-    match stmt.into.as_deref() {
-        Some(Node::IntoClause(into)) => into,
+    match stmt.into.as_deref().and_then(Node::as_intoclause) {
+        Some(into) => into,
         _ => panic!("createas: stmt->into is not an IntoClause"),
     }
 }
 
 /// `query->commandType == CMD_UTILITY && IsA(query->utilityStmt, ExecuteStmt)`.
 fn query_is_execute_stmt(query: &types_nodes::copy_query::Query<'_>) -> bool {
-    matches!(query.utilityStmt.as_deref(), Some(Node::ExecuteStmt(_)))
+    query.utilityStmt.as_deref().is_some_and(|n| n.is_executestmt())
 }
 
 /// `castNode(ExecuteStmt, query->utilityStmt)` — a deep copy of the contained
@@ -541,8 +541,8 @@ fn execute_stmt_of<'mcx>(
     mcx: Mcx<'mcx>,
     query: &types_nodes::copy_query::Query<'mcx>,
 ) -> PgResult<types_nodes::ddlnodes::ExecuteStmt<'mcx>> {
-    match query.utilityStmt.as_deref() {
-        Some(Node::ExecuteStmt(estmt)) => estmt.clone_in(mcx),
+    match query.utilityStmt.as_deref().and_then(Node::as_executestmt) {
+        Some(estmt) => estmt.clone_in(mcx),
         _ => panic!("createas: query->utilityStmt is not an ExecuteStmt"),
     }
 }
@@ -573,8 +573,8 @@ pub fn CreateTableAsRelExists<'mcx>(
     ctas: &CreateTableAsStmt<'mcx>,
 ) -> PgResult<bool> {
     let into = stmt_into(ctas);
-    let rel_node = match into.rel.as_deref() {
-        Some(Node::RangeVar(rv)) => rv,
+    let rel_node = match into.rel.as_deref().and_then(Node::as_rangevar) {
+        Some(rv) => rv,
         _ => panic!("createas: into->rel is not a RangeVar"),
     };
 
