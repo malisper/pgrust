@@ -20,6 +20,7 @@ use types_error::{
     PgResult, ERRCODE_CANNOT_COERCE, ERRCODE_DATATYPE_MISMATCH, ERRCODE_UNDEFINED_OBJECT,
     ERRCODE_INTERNAL_ERROR,
 };
+use types_nodes::primnodes::etag;
 use types_nodes::primnodes::{
     ArrayCoerceExpr, CaseTestExpr, CoerceToDomain, CoerceViaIO, CoercionForm, CollateExpr,
     Const, ConvertRowtypeExpr, Expr, RowExpr,
@@ -210,7 +211,7 @@ pub fn coerce_to_target_type<'mcx>(
 
     // result != expr && !IsA(result, Const)
     let force_implicit =
-        !exprs_identical(&result, &stripped) && !matches!(result, Expr::Const(_));
+        !exprs_identical(&result, &stripped) && !result.is_const();
     let result = coerce_type_typmod(
         mcx,
         result,
@@ -245,31 +246,27 @@ fn strip_top_collate(expr: Expr) -> (Expr, Option<CollateExpr>) {
     let mut top: Option<CollateExpr> = None;
     let mut cur = expr;
     loop {
-        match cur {
-            Expr::CollateExpr(coll) => {
-                if top.is_none() {
-                    top = Some(CollateExpr {
-                        arg: None,
-                        collOid: coll.collOid,
-                        location: coll.location,
-                    });
-                }
-                match coll.arg {
-                    Some(b) => cur = *b,
-                    None => {
-                        // No inner arg; the stripped result is a degenerate
-                        // empty value. Mirror C: the loop stops at NULL arg.
-                        cur = Expr::CollateExpr(CollateExpr {
-                            arg: None,
-                            collOid: coll.collOid,
-                            location: coll.location,
-                        });
-                        break;
-                    }
-                }
-            }
-            other => {
-                cur = other;
+        if !cur.is_collateexpr() {
+            break;
+        }
+        let coll = cur.expect_into_collateexpr();
+        if top.is_none() {
+            top = Some(CollateExpr {
+                arg: None,
+                collOid: coll.collOid,
+                location: coll.location,
+            });
+        }
+        match coll.arg {
+            Some(b) => cur = *b,
+            None => {
+                // No inner arg; the stripped result is a degenerate
+                // empty value. Mirror C: the loop stops at NULL arg.
+                cur = Expr::CollateExpr(CollateExpr {
+                    arg: None,
+                    collOid: coll.collOid,
+                    location: coll.location,
+                });
                 break;
             }
         }
@@ -334,7 +331,7 @@ pub fn coerce_type<'mcx>(
             if baseTypeId != inputTypeId {
                 let mut r = make_relabel_type(node, baseTypeId, -1, InvalidOid, cformat);
                 // r->location = location;
-                if let Expr::RelabelType(rt) = &mut r {
+                if let Some(rt) = r.as_relabeltype_mut() {
                     rt.location = location;
                 }
                 return Ok(Some(r));
@@ -345,7 +342,7 @@ pub fn coerce_type<'mcx>(
         // UNKNOWN input falls through.
     }
 
-    if inputTypeId == UNKNOWNOID && matches!(node, Expr::Const(_)) {
+    if inputTypeId == UNKNOWNOID && node.is_const() {
         return coerce_unknown_const(
             mcx,
             pstate,
@@ -358,7 +355,7 @@ pub fn coerce_type<'mcx>(
         );
     }
 
-    if matches!(node, Expr::Param(_)) {
+    if node.is_param() {
         if let Some(pstate) = pstate.as_deref() {
             if pstate.p_coerce_param_hook.is_some() {
                 // p_coerce_param_hook returns a NodePtr (raw node universe);
@@ -375,7 +372,7 @@ pub fn coerce_type<'mcx>(
         }
     }
 
-    if let Expr::CollateExpr(coll) = &node {
+    if let Some(coll) = node.as_collateexpr() {
         // Push the coercion underneath the COLLATE (or discard if target not
         // collatable).
         let coll_oid = coll.collOid;
@@ -444,7 +441,7 @@ pub fn coerce_type<'mcx>(
             if exprs_identical(&result, &node) {
                 let mut r = make_relabel_type(result, targetTypeId, -1, InvalidOid, cformat);
                 // r->location = location;
-                if let Expr::RelabelType(rt) = &mut r {
+                if let Some(rt) = r.as_relabeltype_mut() {
                     rt.location = location;
                 }
                 return Ok(Some(r));
@@ -487,7 +484,7 @@ pub fn coerce_type<'mcx>(
                 COERCE_IMPLICIT_CAST,
             );
             // rt->location = location;
-            if let Expr::RelabelType(r) = &mut rt {
+            if let Some(r) = rt.as_relabeltype_mut() {
                 r.location = location;
             }
             node = rt;
@@ -553,10 +550,7 @@ fn coerce_unknown_const<'mcx>(
     cformat: CoercionForm,
     location: i32,
 ) -> PgResult<Option<Expr>> {
-    let con = match node {
-        Expr::Const(c) => c,
-        _ => unreachable!("coerce_unknown_const called on a non-Const"),
-    };
+    let con = node.expect_into_const();
 
     // baseTypeMod starts at targetTypeMod, base resolved by domain chain.
     let baseTypeId = lsyscache::get_base_type_and_typmod::call(targetTypeId)?.0;
@@ -848,39 +842,46 @@ fn coerce_type_typmod<'mcx>(
 /// `hide_coercion_node(node)` (parse_coerce.c) — force the top coercion node to
 /// IMPLICIT display form. Caller error if the node has no CoercionForm field.
 fn hide_coercion_node(node: Expr) -> PgResult<Expr> {
-    let out = match node {
-        Expr::FuncExpr(mut f) => {
+    let out = match node.expr_tag() {
+        etag::T_FuncExpr => {
+            let mut f = node.expect_into_funcexpr();
             f.funcformat = COERCE_IMPLICIT_CAST;
             Expr::FuncExpr(f)
         }
-        Expr::RelabelType(mut r) => {
+        etag::T_RelabelType => {
+            let mut r = node.expect_into_relabeltype();
             r.relabelformat = COERCE_IMPLICIT_CAST;
             Expr::RelabelType(r)
         }
-        Expr::CoerceViaIO(mut c) => {
+        etag::T_CoerceViaIO => {
+            let mut c = node.expect_into_coerceviaio();
             c.coerceformat = COERCE_IMPLICIT_CAST;
             Expr::CoerceViaIO(c)
         }
-        Expr::ArrayCoerceExpr(mut a) => {
+        etag::T_ArrayCoerceExpr => {
+            let mut a = node.expect_into_arraycoerceexpr();
             a.coerceformat = COERCE_IMPLICIT_CAST;
             Expr::ArrayCoerceExpr(a)
         }
-        Expr::ConvertRowtypeExpr(mut c) => {
+        etag::T_ConvertRowtypeExpr => {
+            let mut c = node.expect_into_convertrowtypeexpr();
             c.convertformat = COERCE_IMPLICIT_CAST;
             Expr::ConvertRowtypeExpr(c)
         }
-        Expr::RowExpr(mut r) => {
+        etag::T_RowExpr => {
+            let mut r = node.expect_into_rowexpr();
             r.row_format = COERCE_IMPLICIT_CAST;
             Expr::RowExpr(r)
         }
-        Expr::CoerceToDomain(mut c) => {
+        etag::T_CoerceToDomain => {
+            let mut c = node.expect_into_coercetodomain();
             c.coercionformat = COERCE_IMPLICIT_CAST;
             Expr::CoerceToDomain(c)
         }
-        other => {
+        _ => {
             return Err(types_error::PgError::error(format!(
                 "unsupported node type: {}",
-                node_tag_int(&other)
+                node_tag_int(&node)
             ))
             .with_sqlstate(ERRCODE_INTERNAL_ERROR));
         }
@@ -888,10 +889,10 @@ fn hide_coercion_node(node: Expr) -> PgResult<Expr> {
     Ok(out)
 }
 
-/// A best-effort `nodeTag(node)` integer for the unsupported-node error. The
-/// owned-value model has no numeric tag table; report the variant name slot.
-fn node_tag_int(_node: &Expr) -> i32 {
-    0
+/// `nodeTag(node)` integer for the unsupported-node error, via the Expr tag
+/// surface (expr_tag()).
+fn node_tag_int(node: &Expr) -> i32 {
+    node.expr_tag().0 as i32
 }
 
 // ===========================================================================
@@ -968,7 +969,7 @@ fn build_coercion_expression<'mcx>(
             let mut fexpr =
                 make_func_expr(funcId, targetTypeId, args, InvalidOid, InvalidOid, cformat);
             // fexpr->location = location;
-            if let Expr::FuncExpr(fe) = &mut fexpr {
+            if let Some(fe) = fexpr.as_funcexpr_mut() {
                 fe.location = location;
             }
             Ok(fexpr)
@@ -1062,10 +1063,10 @@ fn coerce_record_to_complex<'mcx>(
     cformat: CoercionForm,
     location: i32,
 ) -> PgResult<Expr> {
-    let args: Vec<Expr> = if let Expr::RowExpr(re) = &node {
+    let args: Vec<Expr> = if let Some(re) = node.as_rowexpr() {
         // RowExpr is RECORD; needn't worry about dropped columns.
         re.args.clone()
-    } else if let Expr::Var(v) = &node {
+    } else if let Some(v) = node.as_var() {
         if v.varattno == 0 {
             // Whole-row Var: expandNSItemVars yields NodePtrs (raw node
             // universe), which the Expr coercion path cannot walk. This is the
