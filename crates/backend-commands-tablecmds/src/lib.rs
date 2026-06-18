@@ -49,6 +49,10 @@ use backend_commands_tablecmds_seams as seam;
 pub fn init_seams() {
     seam::define_relation::set(create::define_relation);
     seam::build_desc_for_relation::set(create::build_desc_for_relation);
+    // DefineRelation's reloptions block (transformRelOptions + per-relkind
+    // validate, tablecmds.c:930-946). Declared as an outward seam from create.rs
+    // but its body — the create-time reloptions transform — is F0-owned here.
+    seam::transform_and_check_reloptions::set(create::transform_and_check_reloptions);
 
     seam::remove_relations::set(drop::remove_relations);
 

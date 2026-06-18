@@ -21,7 +21,8 @@ use types_nodes::nodes::{Node, NodePtr};
 use types_nodes::primnodes::OnCommitAction;
 use types_nodes::rawnodes::{ColumnDef, RangeVar, TypeName};
 use types_tuple::access::{
-    RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELPERSISTENCE_TEMP, RELPERSISTENCE_UNLOGGED,
+    RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_VIEW, RELPERSISTENCE_TEMP,
+    RELPERSISTENCE_UNLOGGED,
 };
 use types_tuple::heaptuple::TupleDescData;
 
@@ -68,6 +69,166 @@ fn as_typename<'a, 'mcx>(node: &'a Node<'mcx>) -> &'a TypeName<'mcx> {
         Node::TypeName(tn) => tn,
         _ => unreachable!("Node::TypeName expected"),
     }
+}
+
+/// `HEAP_RELOPT_NAMESPACES` (access/reloptions.h) — `{ "toast", NULL }`. The
+/// namespaces `transformRelOptions` accepts for a heap relation's `WITH (...)`.
+const HEAP_RELOPT_NAMESPACES: &[&str] = &["toast"];
+
+/// `def->arg` (a `nodes/value.h` value node) projected to the
+/// `define.c` `DefElemArg` the reloptions `defGetString`/`defGetBoolean`
+/// dispatch on — the same projection every DDL caller uses (cf.
+/// `backend-commands-vacuum::defel_arg`). `None` mirrors `def->arg == NULL`.
+fn defel_arg(def: &types_nodes::ddlnodes::DefElem<'_>) -> Option<backend_commands_define_seams::DefElemArg> {
+    use backend_commands_define_seams::DefElemArg;
+    let node = def.arg.as_deref()?;
+    Some(match node {
+        Node::Integer(i) => DefElemArg::Integer(i.ival as i64),
+        Node::Float(f) => DefElemArg::Float(f.fval.as_str().to_string()),
+        Node::Boolean(b) => DefElemArg::Boolean(b.boolval),
+        Node::String(s) => DefElemArg::String(s.sval.as_str().to_string()),
+        _ => DefElemArg::AStar,
+    })
+}
+
+/// `transformRelOptions((Datum) 0, stmt->options, NULL, validnsps, true, false)`
+/// then the per-relkind `view_reloptions` / `partitioned_table_reloptions` /
+/// `heap_reloptions` validation (the `DefineRelation` reloptions block,
+/// tablecmds.c:930-946). Returns the constructed `text[]` reloptions image as a
+/// [`RelOptionsToken`](types_cluster::RelOptionsToken) — null (`is_null`) when
+/// there were no options (the no-`WITH` case, `(Datum) 0`), else the array
+/// varlena bytes the catalog owner stores in `pg_class.reloptions`.
+///
+/// This is the create-time specialisation of `transformRelOptions` where
+/// `oldOptions` is always `(Datum) 0`, so the "copy unreplaced old options"
+/// branch is dead and only the flatten-`defList` half runs. We build the
+/// `name=value` element strings (skipping `WITH (oids=false)`, validating
+/// namespaces against `HEAP_RELOPT_NAMESPACES`, rejecting `name` containing
+/// `=`), assemble the on-disk `text[]` varlena via `build_text_array_nullable`,
+/// then validate it by relkind exactly as C's switch does. `Err` carries the
+/// transform/validation `ereport(ERROR)` surface.
+pub(crate) fn transform_and_check_reloptions<'mcx>(
+    mcx: Mcx<'mcx>,
+    options: &[NodePtr<'mcx>],
+    relkind: u8,
+) -> PgResult<types_cluster::RelOptionsToken> {
+    // transformRelOptions: build the new text[] from defList (oldOptions is
+    // (Datum) 0 here, so there are no old options to copy).
+    let mut astate: Vec<String> = Vec::new();
+
+    for opt in options {
+        let Node::DefElem(def) = &**opt else {
+            // CreateStmt.options is a List of DefElem (gram.y); a non-DefElem
+            // would be a parser invariant violation.
+            unreachable!("CreateStmt.options element is not a DefElem");
+        };
+        let defname = def.defname.as_deref().unwrap_or("");
+
+        // Error out if the namespace is not valid. A NULL namespace is always
+        // valid. (validnsps = HEAP_RELOPT_NAMESPACES.)
+        if let Some(defns) = def.defnamespace.as_deref() {
+            let valid = HEAP_RELOPT_NAMESPACES.iter().any(|ns| *ns == defns);
+            if !valid {
+                return ereport(ERROR)
+                    .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                    .errmsg(format!("unrecognized parameter namespace \"{defns}\""))
+                    .finish(here("transformRelOptions"))
+                    .map(|()| unreachable!());
+            }
+        }
+
+        // ignore if not in the same namespace (namspace == NULL here, so skip
+        // any qualified option — it belongs to the "toast" pass, not this one).
+        if def.defnamespace.is_some() {
+            continue;
+        }
+
+        // Flatten the DefElem into "name=value"; bare "name" means "name=true".
+        let value: String = if def.arg.is_some() {
+            backend_commands_define_seams::def_get_string::call(
+                mcx,
+                defname.to_string(),
+                defel_arg(def),
+            )?
+            .as_str()
+            .to_string()
+        } else {
+            "true".to_string()
+        };
+
+        // Insist that name not contain "=", else "a=b=c" is ambiguous.
+        if defname.contains('=') {
+            return ereport(ERROR)
+                .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                .errmsg(format!(
+                    "invalid option name \"{defname}\": must not contain \"=\""
+                ))
+                .finish(here("transformRelOptions"))
+                .map(|()| unreachable!());
+        }
+
+        // acceptOidsOff: filter out WITH (oids=false); error on oids=true.
+        if def.defnamespace.is_none() && defname == "oids" {
+            if backend_commands_define_seams::def_get_boolean::call(
+                defname.to_string(),
+                defel_arg(def),
+            )? {
+                return ereport(ERROR)
+                    .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .errmsg("tables declared WITH OIDS are not supported")
+                    .finish(here("transformRelOptions"))
+                    .map(|()| unreachable!());
+            }
+            // skip over option, reloptions machinery doesn't know it
+            continue;
+        }
+
+        astate.push(format!("{defname}={value}"));
+    }
+
+    // makeArrayResult / (Datum) 0: no elements means a NULL reloptions token.
+    if astate.is_empty() {
+        // Validate the empty set (heap/view/partitioned_table_reloptions with a
+        // NULL `reloptions` Datum) — a no-op that just confirms emptiness is
+        // acceptable for the relkind.
+        validate_reloptions(mcx, relkind, None)?;
+        return Ok(types_cluster::RelOptionsToken {
+            is_null: true,
+            bytes: Vec::new(),
+        });
+    }
+
+    // Assemble the on-disk text[] varlena image (the C makeArrayResult).
+    let elems: Vec<Option<&[u8]>> = astate.iter().map(|s| Some(s.as_bytes())).collect();
+    let bytes: Vec<u8> =
+        backend_utils_adt_arrayfuncs_seams::build_text_array_nullable::call(mcx, &elems)?
+            .iter()
+            .copied()
+            .collect();
+
+    // Validate by relkind (the C switch on relkind, validate=true).
+    validate_reloptions(mcx, relkind, Some(&bytes))?;
+
+    Ok(types_cluster::RelOptionsToken {
+        is_null: false,
+        bytes,
+    })
+}
+
+/// The `switch (relkind)` validate block of the DefineRelation reloptions
+/// handling (tablecmds.c:936-946): `view_reloptions` for views,
+/// `partitioned_table_reloptions` for partitioned tables, else
+/// `heap_reloptions`. All run with `validate = true`; the parsed struct is
+/// discarded (C `(void) ...`), only the `ereport(ERROR)` matters.
+fn validate_reloptions(mcx: Mcx<'_>, relkind: u8, reloptions: Option<&[u8]>) -> PgResult<()> {
+    if relkind == RELKIND_VIEW {
+        backend_access_common_reloptions::view_reloptions(mcx, reloptions, true)?;
+    } else if relkind == RELKIND_PARTITIONED_TABLE {
+        backend_access_common_reloptions::partitioned_table_reloptions(reloptions, true)?;
+    } else {
+        backend_access_common_reloptions::heap_reloptions(mcx, relkind, reloptions, true)?;
+    }
+    Ok(())
 }
 
 /// `DefineRelation(stmt, relkind, ownerId, typaddress=NULL, queryString)`

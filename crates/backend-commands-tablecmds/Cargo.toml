@@ -52,6 +52,8 @@ backend-catalog-catalog = { path = "../backend-catalog-catalog" }
 backend-catalog-toasting = { path = "../backend-catalog-toasting" }
 backend-access-common-reloptions = { path = "../backend-access-common-reloptions" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-commands-define-seams = { path = "../backend-commands-define-seams" }
+backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
 backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }
 backend-utils-cache-syscache = { path = "../backend-utils-cache-syscache" }
 backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
