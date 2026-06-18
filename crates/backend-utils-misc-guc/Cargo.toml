@@ -13,6 +13,9 @@ path = "src/lib.rs"
 # / track_io_timing / track_cost_delay_timing) home in vacuumlazy-seams; guc.c
 # is their real owner.
 backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
+# tablespace.c-family ambient-GUC reader bundle: allowSystemTableMods reads the
+# live GUC store, whose owner is guc.c. Seam crate -> no cycle.
+backend-commands-tablespace-globals-seams = { path = "../backend-commands-tablespace-globals-seams" }
 seam-core = { path = "../seam-core" }
 mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }

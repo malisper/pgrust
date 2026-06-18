@@ -580,6 +580,9 @@ pub fn init_seams() {
 
     // --- Backend-local GUC reads (read through the live store). ---
     s::allow_system_table_mods::set(|| get_bool("allow_system_table_mods").unwrap_or(false));
+    backend_commands_tablespace_globals_seams::allowSystemTableMods::set(|| {
+        Ok(get_bool("allow_system_table_mods").unwrap_or(false))
+    });
     s::maintenance_work_mem::set(|| get_int("maintenance_work_mem").unwrap_or(0));
     s::work_mem::set(|| get_int("work_mem").unwrap_or(0));
     s::standard_conforming_strings::set(|| {
