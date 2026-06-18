@@ -905,6 +905,46 @@ pub fn init_seams() {
         TupleDescInitEntryCollation,
     );
     backend_access_common_tupdesc_seams::tuple_desc_copy_entry::set(TupleDescCopyEntry);
+
+    // The `tupdesc.c` constructor surface other crates reach across the cycle
+    // through `toastdesc-seams` (value-typed `TupleDescData`).
+    backend_access_common_toastdesc_seams::create_template_tuple_desc::set(CreateTemplateTupleDesc);
+    backend_access_common_toastdesc_seams::tuple_desc_init_entry::set(tuple_desc_init_entry_seam);
+    backend_access_common_toastdesc_seams::build_desc_from_lists::set(build_desc_from_lists_seam);
+}
+
+/// Adapter for the `toastdesc-seams` `tuple_desc_init_entry` (always-present
+/// name) over [`TupleDescInitEntry`] (`Option<&str>` name).
+fn tuple_desc_init_entry_seam(
+    desc: &mut TupleDescData<'_>,
+    attribute_number: AttrNumber,
+    attribute_name: &str,
+    oidtypeid: Oid,
+    typmod: i32,
+    attdim: i32,
+) -> PgResult<()> {
+    TupleDescInitEntry(
+        desc,
+        attribute_number,
+        Some(attribute_name),
+        oidtypeid,
+        typmod,
+        attdim,
+    )
+}
+
+/// Adapter for the `toastdesc-seams` `build_desc_from_lists` (names as
+/// `PgString`) over [`BuildDescFromLists`] (names as `&str`).
+fn build_desc_from_lists_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    names: &[mcx::PgString<'_>],
+    types: &[Oid],
+    typmods: &[i32],
+    collations: &[Oid],
+) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>> {
+    let name_refs: alloc::vec::Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+    let desc = BuildDescFromLists(mcx, &name_refs, types, typmods, collations)?;
+    Ok(Some(alloc_in(mcx, desc)?))
 }
 
 /// Adapter for `create_tupledesc_copy` (returns a `PgBox` in `mcx`, as the

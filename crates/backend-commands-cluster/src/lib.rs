@@ -1321,8 +1321,8 @@ fn swap_relation_files(
         && relform1.relkind == RELKIND_TOASTVALUE
         && relform2.relkind == RELKIND_TOASTVALUE
     {
-        let toastIndex1 = toast_internals::toast_get_valid_index::call(r1, AccessExclusiveLock)?;
-        let toastIndex2 = toast_internals::toast_get_valid_index::call(r2, AccessExclusiveLock)?;
+        let toastIndex1 = toast_internals::toast_get_valid_index::call(mcx, r1, AccessExclusiveLock)?;
+        let toastIndex2 = toast_internals::toast_get_valid_index::call(mcx, r2, AccessExclusiveLock)?;
 
         swap_relation_files(
             mcx,
@@ -1463,7 +1463,7 @@ pub fn finish_heap_swap(
         let reltoastrelid = newrel.rd_rel.reltoastrelid;
         if OidIsValid(reltoastrelid) {
             /* Get the associated valid index to be renamed */
-            let toastidx = toast_internals::toast_get_valid_index::call(reltoastrelid, NoLock)?;
+            let toastidx = toast_internals::toast_get_valid_index::call(mcx, reltoastrelid, NoLock)?;
 
             /* rename the toast table ... */
             let new_toast_name = format_namedata(&format!("pg_toast_{}", OIDOldHeap));

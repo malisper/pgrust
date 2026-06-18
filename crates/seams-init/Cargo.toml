@@ -29,6 +29,8 @@ backend-access-common-toast-compression = { path = "../backend-access-common-toa
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-access-common-indextuple = { path = "../backend-access-common-indextuple" }
 backend-access-common-next = { path = "../backend-access-common-next" }
+backend-access-common-bufmask = { path = "../backend-access-common-bufmask" }
+backend-access-common-toast-internals = { path = "../backend-access-common-toast-internals" }
 backend-access-common-printtup = { path = "../backend-access-common-printtup" }
 backend-access-common-relation = { path = "../backend-access-common-relation" }
 backend-access-common-reloptions = { path = "../backend-access-common-reloptions" }

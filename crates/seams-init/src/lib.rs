@@ -22,6 +22,8 @@ pub fn init_all() {
     backend_access_common_heaptuple::init_seams();
     backend_access_common_indextuple::init_seams();
     backend_access_common_next::init_seams();
+    backend_access_common_bufmask::init_seams();
+    backend_access_common_toast_internals::init_seams();
     backend_access_common_printtup::init_seams();
     backend_access_common_relation::init_seams();
     backend_access_common_reloptions::init_seams();
