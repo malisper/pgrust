@@ -2381,6 +2381,78 @@ fn function_call1_coll_datum_seam<'mcx>(
     ref_out_to_datum(mcx, word, ref_result)
 }
 
+/// The fmgr leg of `evaluate_expr` (clauses.c) — the planner const-folder's
+/// `EEOP_FUNCEXPR[_STRICT]` substitute. C runs the all-`Const` `FuncExpr`/`OpExpr`
+/// through `ExecInitExpr` + `ExecEvalExprSwitchContext`; the in-crate fast path
+/// has already established that every argument is a `Const`, so this directly
+/// invokes `funcid` over the constant argument values (the executor's strict
+/// opcode is the only `evaluate_expr`-relevant behavior on this shape, and it is
+/// applied here explicitly).
+///
+/// Each argument crosses the fmgr boundary as either its bare by-value word or
+/// its by-reference referent (the same `datum_to_ref_arg` marshalling the BRIN
+/// `*_coll_datum` seams use), with `args[i].isnull` carried through. A strict
+/// function with any NULL argument short-circuits to `(NULL, true)` WITHOUT
+/// calling (C: the `EEOP_FUNCEXPR_STRICT` arg loop). The result `Datum` (by-value
+/// or by-reference) is materialized into `mcx`, mirroring C's "copy result out of
+/// the sub-context" step in `evaluate_expr`; `makeConst`'s detoast/`datumCopy`
+/// tail lives on the clauses-crate side.
+fn fmgr_call_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    funcid: Oid,
+    inputcollid: Oid,
+    args: Vec<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool, Oid)>,
+    rettype: Oid,
+) -> PgResult<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)> {
+    let _ = rettype; // result classification rides the callee's `ref_result` arm.
+    let resolved = fmgr_info(mcx, funcid)?;
+
+    // C: the `_STRICT` opcode's arg loop — a strict function with any NULL input
+    // returns NULL without being called. `fn_strict` is `proisstrict`.
+    if resolved.finfo.fn_strict && args.iter().any(|(_, isnull, _)| *isnull) {
+        return Ok((
+            types_tuple::backend_access_common_heaptuple::Datum::null(),
+            true,
+        ));
+    }
+
+    // Build the `fcinfo->args[]` frame: by-value word lane + by-reference side
+    // channel, with each arg's NULL flag threaded through.
+    let mut nargs: Vec<NullableDatum> = Vec::with_capacity(args.len());
+    let mut ref_args: Vec<Option<RefPayload>> = Vec::with_capacity(args.len());
+    for (val, isnull, _argtype) in &args {
+        let (mut nd, refp) = datum_to_ref_arg(val);
+        nd.isnull = *isnull;
+        nargs.push(nd);
+        ref_args.push(refp);
+    }
+
+    // C: fcache->flinfo.fn_expr = fcinfo->flinfo->fn_expr (fmgr.c:658).
+    let fn_expr = resolved.finfo.fn_expr.clone();
+    let mut fcinfo = init_fcinfo(Some(resolved.finfo), inputcollid, nargs);
+    fcinfo.ref_args = ref_args;
+    fcinfo.debug_assert_ref_null_consistency();
+    // C: fcinfo->isnull = false; const_val = ExecEvalExpr(...);
+    //    const_is_null = fcinfo->isnull;
+    // Dispatch directly (NOT through `invoke_flinfo`/`null_check`): a non-strict
+    // function legitimately returns NULL through `fcinfo->isnull`, which
+    // `evaluate_expr` folds into a NULL `Const` — the `function returned NULL`
+    // self-test does NOT apply on this path.
+    fcinfo.isnull = false;
+    let word = function_call_invoke_with_expr(mcx, &resolved.resolution, &mut fcinfo, fn_expr)?;
+    let const_is_null = fcinfo.isnull;
+    let ref_result = fcinfo.take_ref_result();
+    if const_is_null {
+        return Ok((
+            types_tuple::backend_access_common_heaptuple::Datum::null(),
+            true,
+        ));
+    }
+    // Materialize the result into `mcx` (C: "copy result out of sub-context").
+    let result = ref_out_to_datum(mcx, word, ref_result)?;
+    Ok((result, false))
+}
+
 /// `FunctionCall2Coll(flinfo, collation, arg1, arg2)` over the canonical `Datum`
 /// lane (re-resolve by OID); see the seam doc.
 fn function_call2_coll_datum_seam<'mcx>(
@@ -2847,6 +2919,9 @@ pub fn init_seams() {
     backend_utils_fmgr_fmgr_seams::oid_function_call0::set(oid_function_call0_seam);
     backend_utils_fmgr_fmgr_seams::function_call_invoke::set(function_call_invoke_seam);
     backend_utils_fmgr_fmgr_seams::fastpath_function_call_invoke::set(function_call_invoke_seam);
+    // The planner const-folder's `evaluate_expr` fmgr leg (clauses.c): fmgr owns
+    // the function-by-OID invocation over constant args.
+    backend_optimizer_util_clauses_seams::fmgr_call::set(fmgr_call_seam);
     backend_utils_fmgr_fmgr_seams::conversion_proc_empty_input_test::set(
         conversion_proc_empty_input_test_seam,
     );

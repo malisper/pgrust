@@ -82,14 +82,17 @@ seam_core::seam!(
     /// (strictness honored by the FunctionCallInvoke), returning the result
     /// `(value, isnull)`. `rettype` is the concrete result type (for the
     /// by-value/by-ref result lane and the "copy result out of context"
-    /// detoast). `Err` carries the function's `ereport(ERROR)` surface. Owner:
-    /// fmgr/executor.
-    pub fn fmgr_call(
+    /// detoast). The result `Datum` is allocated in the caller's `mcx` (a
+    /// by-reference value materializes its referent there, mirroring C's "copy
+    /// result out of sub-context"). `Err` carries the function's
+    /// `ereport(ERROR)` surface. Owner: fmgr (`backend-utils-fmgr-fmgr`).
+    pub fn fmgr_call<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         funcid: Oid,
         inputcollid: Oid,
-        args: alloc::vec::Vec<(Datum<'static>, bool, Oid)>,
+        args: alloc::vec::Vec<(Datum<'mcx>, bool, Oid)>,
         rettype: Oid,
-    ) -> PgResult<(Datum<'static>, bool)>
+    ) -> PgResult<(Datum<'mcx>, bool)>
 );
 
 seam_core::seam!(

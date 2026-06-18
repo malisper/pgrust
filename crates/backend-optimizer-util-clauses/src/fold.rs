@@ -84,7 +84,7 @@ type CDatum = types_tuple::backend_access_common_heaptuple::Datum<'static>;
 
 /// `DatumGetBool(d)` — `((bool) ((d) & 1))`.
 #[inline]
-fn datum_get_bool(d: &CDatum) -> bool {
+fn datum_get_bool(d: &types_tuple::backend_access_common_heaptuple::Datum<'_>) -> bool {
     (d.as_usize() & 1) != 0
 }
 
@@ -1415,8 +1415,8 @@ fn inline_function(
 /// `FuncExpr`/`OpExpr`, `NullIfExpr` — through the `fmgr_call` seam; every other
 /// shape rides the executor-backed `evaluate_expr_fallback` seam (NEVER silently
 /// returned unsimplified, because C does fold them).
-pub fn evaluate_expr(
-    mcx: Mcx<'_>,
+pub fn evaluate_expr<'mcx>(
+    mcx: Mcx<'mcx>,
     mut expr: Expr,
     result_type: Oid,
     result_typmod: i32,
@@ -1486,8 +1486,13 @@ pub fn evaluate_expr(
                         .first()
                         .cloned()
                         .ok_or_else(|| PgError::error("NULLIF without arguments"))?;
+                    let pairs: Vec<(
+                        types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+                        bool,
+                        Oid,
+                    )> = pairs;
                     let (eq, eq_isnull) =
-                        clauses_seam::fmgr_call::call(opfuncid, inputcollid, pairs, BOOLOID)?;
+                        clauses_seam::fmgr_call::call(mcx, opfuncid, inputcollid, pairs, BOOLOID)?;
                     if !eq_isnull && datum_get_bool(&eq) {
                         Ok(Expr::Const(make_null_const(
                             mcx,
@@ -1543,16 +1548,16 @@ fn const_datum_args(args: &[Expr]) -> Option<Vec<(CDatum, bool, Oid)>> {
 
 /// Execute `funcid` over the evaluated arguments and wrap the result in a
 /// `Const` (the tail of C's `evaluate_expr`: `get_typlenbyval` + `makeConst`).
-fn fmgr_fold(
-    mcx: Mcx<'_>,
+fn fmgr_fold<'mcx>(
+    mcx: Mcx<'mcx>,
     funcid: Oid,
     inputcollid: Oid,
-    args: Vec<(CDatum, bool, Oid)>,
+    args: Vec<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool, Oid)>,
     result_type: Oid,
     result_typmod: i32,
     result_collation: Oid,
 ) -> PgResult<Expr> {
-    let (value, isnull) = clauses_seam::fmgr_call::call(funcid, inputcollid, args, result_type)?;
+    let (value, isnull) = clauses_seam::fmgr_call::call(mcx, funcid, inputcollid, args, result_type)?;
     let (typlen, typbyval) = lsyscache::get_typlenbyval::call(result_type)?;
     Ok(Expr::Const(make_const(
         mcx,
