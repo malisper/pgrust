@@ -305,6 +305,13 @@ pub fn transformExprRecurse<'mcx>(
         // grammar emits ROW(...) as `Node::RowExpr` carrying raw field nodes.
         Node::RowExpr(r) => transformRowExpr(pstate, r, false)?,
 
+        // T_CaseExpr / T_CoalesceExpr / T_MinMaxExpr — the raw-grammar nodes
+        // (rawexprnodes, NodePtr children) the parser emits for CASE / COALESCE /
+        // GREATEST / LEAST.
+        Node::CaseExpr(c) => transformCaseExpr(pstate, c)?,
+        Node::CoalesceExpr(c) => transformCoalesceExpr(pstate, c)?,
+        Node::MinMaxExpr(m) => transformMinMaxExpr(pstate, m)?,
+
         // Expr-carried nodes that reach the dispatcher untransformed-or-recursed.
         Node::Expr(e) => transform_expr_node(pstate, e)?,
 
@@ -363,15 +370,24 @@ fn transform_expr_node<'mcx>(
                 "transformExprRecurse: unexpected already-analyzed SubLink",
             ))
         }
-        Expr::CaseExpr(c) => transformCaseExpr(pstate, c),
-        // A raw-grammar RowExpr reaches the dispatcher as the top-level
-        // `Node::RowExpr` arm (the C `T_RowExpr` case); an already-analyzed
-        // `Expr::RowExpr` re-entering transformExprRecurse would be a bug.
+        // A raw-grammar CaseExpr / CoalesceExpr / MinMaxExpr / RowExpr reaches
+        // the dispatcher as the `Node::CaseExpr` / `Node::CoalesceExpr` /
+        // `Node::MinMaxExpr` / `Node::RowExpr` arms above (the C `T_CaseExpr`
+        // etc cases); an already-analyzed `Expr::*` re-entering
+        // transformExprRecurse would be a bug (the C never re-transforms an
+        // analyzed node).
+        Expr::CaseExpr(_) => Err(PgError::error(
+            "transformExprRecurse: unexpected already-analyzed CaseExpr",
+        )),
         Expr::RowExpr(_) => Err(PgError::error(
             "transformExprRecurse: unexpected already-analyzed RowExpr",
         )),
-        Expr::CoalesceExpr(c) => transformCoalesceExpr(pstate, c),
-        Expr::MinMaxExpr(m) => transformMinMaxExpr(pstate, m),
+        Expr::CoalesceExpr(_) => Err(PgError::error(
+            "transformExprRecurse: unexpected already-analyzed CoalesceExpr",
+        )),
+        Expr::MinMaxExpr(_) => Err(PgError::error(
+            "transformExprRecurse: unexpected already-analyzed MinMaxExpr",
+        )),
         Expr::SQLValueFunction(svf) => transformSQLValueFunction(pstate, svf),
         // A raw-grammar XmlExpr reaches the dispatcher as the `Node::XmlExpr`
         // arm above (the C `T_XmlExpr` case); an already-analyzed `Expr::XmlExpr`
@@ -1026,14 +1042,14 @@ fn transformMergeSupportFunc<'mcx>(
 
 fn transformCoalesceExpr<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    c: CoalesceExpr,
+    c: types_nodes::rawexprnodes::CoalesceExpr<'mcx>,
 ) -> PgResult<Expr> {
     let last_srf = clone_last_srf(pstate);
     let location = c.location;
 
     let mut newargs: Vec<Expr> = Vec::with_capacity(c.args.len());
     for e in c.args {
-        let newe = transformExprRecurse(pstate, Some(expr_to_node(e)))?
+        let newe = transformExprRecurse(pstate, boxed_node(Some(e)))?
             .ok_or_else(|| PgError::error("transformCoalesceExpr: COALESCE argument is NULL"))?;
         newargs.push(newe);
     }
@@ -1059,7 +1075,7 @@ fn transformCoalesceExpr<'mcx>(
 
 fn transformMinMaxExpr<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    m: MinMaxExpr,
+    m: types_nodes::rawexprnodes::MinMaxExpr<'mcx>,
 ) -> PgResult<Expr> {
     let funcname = if m.op == MinMaxOp::IS_GREATEST {
         "GREATEST"
@@ -1070,7 +1086,7 @@ fn transformMinMaxExpr<'mcx>(
 
     let mut newargs: Vec<Expr> = Vec::with_capacity(m.args.len());
     for e in m.args {
-        let newe = transformExprRecurse(pstate, Some(expr_to_node(e)))?
+        let newe = transformExprRecurse(pstate, boxed_node(Some(e)))?
             .ok_or_else(|| PgError::error("transformMinMaxExpr: GREATEST/LEAST argument is NULL"))?;
         newargs.push(newe);
     }
@@ -1358,13 +1374,13 @@ fn transformCollateClause<'mcx>(
 /// `transformCaseExpr(pstate, c)`.
 fn transformCaseExpr<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    c: CaseExpr,
+    c: types_nodes::rawexprnodes::CaseExpr<'mcx>,
 ) -> PgResult<Expr> {
     let last_srf = clone_last_srf(pstate);
     let case_location = c.location;
 
     // Transform the test expression, if any.
-    let arg = c.arg.map(|b| expr_to_node(*b));
+    let arg = boxed_node(c.arg);
     let arg = transformExprRecurse(pstate, arg)?;
 
     // Generate the placeholder for the test expression.
@@ -1388,7 +1404,18 @@ fn transformCaseExpr<'mcx>(
     // Transform the WHEN/THEN list.
     let mut newargs: Vec<CaseWhen> = Vec::with_capacity(c.args.len());
     let mut resultexprs: Vec<Expr> = Vec::new();
-    for w in c.args {
+    for w_ptr in c.args {
+        // Each list element is a raw `Node::CaseWhen` (the grammar's
+        // `makeNode(CaseWhen)`); pull out its raw `expr`/`result` children.
+        let w = match mcx::PgBox::into_inner(w_ptr) {
+            Node::CaseWhen(w) => w,
+            other => {
+                return Err(PgError::error(alloc::format!(
+                    "transformCaseExpr: CASE arm is not a CaseWhen: {}",
+                    other.node_tag().0
+                )))
+            }
+        };
         let when_location = w.location;
         // Optional CASE shorthand (form 2): expand `placeholder = warg`.
         // The C builds `makeSimpleA_Expr(AEXPR_OP, "=", placeholder, warg)` then
@@ -1398,7 +1425,7 @@ fn transformCaseExpr<'mcx>(
         // CaseTestExpr, warg_t)` — equivalent to recursing on the synthesized
         // A_Expr but without a raw-pointer-backed transient `List` opname.
         let cond = if let Some(ph) = &placeholder {
-            let warg = w.expr.map(|b| expr_to_node(*b));
+            let warg = boxed_node(w.expr);
             let warg_t = transformExprRecurse(pstate, warg)?;
             let eqname = vec![String::from("=")];
             let last_srf = last_srf_expr(pstate);
@@ -1413,13 +1440,13 @@ fn transformCaseExpr<'mcx>(
             )?;
             res
         } else {
-            let cond = w.expr.map(|b| expr_to_node(*b));
+            let cond = boxed_node(w.expr);
             transformExprRecurse(pstate, cond)?
                 .ok_or_else(|| PgError::error("transformCaseExpr: CASE/WHEN condition is NULL"))?
         };
         let cond = coerce::coerce_to_boolean::call(pstate, cond, "CASE/WHEN")?;
 
-        let wresult = w.result.map(|b| expr_to_node(*b));
+        let wresult = boxed_node(w.result);
         let wresult = transformExprRecurse(pstate, wresult)?
             .ok_or_else(|| PgError::error("transformCaseExpr: CASE/THEN result is NULL"))?;
 
@@ -1433,8 +1460,8 @@ fn transformCaseExpr<'mcx>(
     }
 
     // Transform the default clause; NULL → untyped NULL A_Const.
-    let defresult_node: Node<'static> = match c.defresult {
-        Some(d) => expr_to_node(*d),
+    let defresult_node: Node<'mcx> = match boxed_node(c.defresult) {
+        Some(d) => d,
         None => Node::A_Const(A_Const {
             val: None,
             isnull: true,
