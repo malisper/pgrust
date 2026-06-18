@@ -1212,9 +1212,12 @@ pub fn ExecEvalSysVar<'mcx>(
         || (varreturningtype == VarReturningType::VAR_RETURNING_NEW
             && (state.flags & EEO_FLAG_NEW_IS_NULL) != 0)
     {
-        state
-            .result_cells
-            .set(resvalue_id, ResultCell { value: DatumV::null(), isnull: true });
+        // Write through `write_cell`, which routes `STATE_RESULT_CELL` (== id 0)
+        // to the ExprState's own `resvalue`/`resnull` rather than the dead
+        // `result_cells[0]` slot — a `Var` step's `resvalue` is STATE_RESULT_CELL,
+        // so a raw `result_cells.set` would never reach the cell the following
+        // ASSIGN_TMP reads (`state.resvalue`).
+        crate::interp_loop::write_cell(state, resvalue_id, DatumV::null(), true);
         return Ok(());
     }
 
@@ -1258,9 +1261,8 @@ pub fn ExecEvalSysVar<'mcx>(
             "failed to fetch attribute from slot",
         ));
     }
-    state
-        .result_cells
-        .set(resvalue_id, ResultCell { value, isnull });
+    // Write through `write_cell` (STATE_RESULT_CELL routes to `state.resvalue`).
+    crate::interp_loop::write_cell(state, resvalue_id, value, isnull);
     Ok(())
 }
 
