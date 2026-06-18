@@ -665,9 +665,9 @@ pub fn adjust_inherited_attnums(
                 rel_name_or_unknown(root, context.parent_reloid)
             )));
         }
-        match root.node(handle) {
-            Expr::Var(childvar) => result.push(childvar.varattno),
-            _ => {
+        match root.node(handle).as_var() {
+            Some(childvar) => result.push(childvar.varattno),
+            None => {
                 return Err(PgError::error(format!(
                     "attribute {} of relation \"{}\" does not exist",
                     parentattno,
@@ -1052,10 +1052,11 @@ pub fn distribute_row_identity_vars(
     let tlist = root.processed_tlist.clone();
     for tle_id in tlist {
         let expr_id = root.targetentry(tle_id).expr;
-        let var_opt = match root.node(expr_id) {
-            Expr::Var(v) if v.varno == ROWID_VAR => Some(v.clone()),
-            _ => None,
-        };
+        let var_opt = root
+            .node(expr_id)
+            .as_var()
+            .filter(|v| v.varno == ROWID_VAR)
+            .cloned();
         if let Some(v) = var_opt {
             let copy_id = root.alloc_node(Expr::Var(v));
             if let Some(rt) = root.rel_mut(target_rel).reltarget.as_mut() {
