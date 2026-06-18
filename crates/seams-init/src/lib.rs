@@ -965,12 +965,14 @@ mod recurrence_guard {
         // grows the modify-callback fields. Loud-panics (mirror-PG) until then;
         // DELETE this entry when the FdwRoutine modify-callback carrier lands.
         ("backend_foreign_foreign", "foreign_rel_updatable_events"),
-        // DESIGN_DEBT (TD-DEPENDENCY-REMOVEFUNC): dependency.c's `doDeletion` calls
-        // `remove_function_tuple` (the pg_proc `RemoveFunctionById` catalog delete)
-        // for OCLASS_PROC. functioncmds.c is a CONSUMER of this seam (it also calls
-        // it at ddl_core.rs:1163); the real owner is pg_proc.c's RemoveFunctionById,
-        // which is unported, so nobody installs it. Loud-panics until pg_proc lands.
-        ("backend_commands_functioncmds", "remove_function_tuple"),
+        // (TD-DEPENDENCY-REMOVEFUNC RETIRED: `remove_function_tuple`
+        // (functioncmds.c:1311 `RemoveFunctionById`) is now INSTALLED cross-crate
+        // from backend-catalog-indexing's family2 — it opens pg_proc, reads the
+        // row's `prokind`, `CatalogTupleDelete`s it, `pgstat_drop_function`s, and
+        // for `PROKIND_AGGREGATE` also deletes the `pg_aggregate` row keyed on
+        // `aggfnoid`. The catalog-delete leg lives where `CatalogTupleDelete` +
+        // the heap-scan substrate do, not in functioncmds.c — so the entry was
+        // DELETED.)
         // NOTE (TD-SYSCACHE-DYNAMIC-TID): dependency.c's generic `DropObjectById`
         // calls `backend_utils_cache_syscache::search_syscache1_tid` — a new
         // generic `SearchSysCache1(cacheId, ...)` primitive for a DYNAMIC cacheId,
@@ -1551,21 +1553,19 @@ mod recurrence_guard {
         // set_relation_rule_status, set_pg_class_*). Those allowlist entries were
         // therefore DELETED — the seams are real installs now.
         //
-        // The entries that REMAIN below are still genuinely uninstalled+called:
-        // the typecmds.c F3/F4 narrow single-column pg_type mutators (their
-        // owning typecmds arms are not yet ported). DELETE each as its owner
-        // installs it.
+        // The typecmds.c F3/F4 narrow single-column pg_type mutators
+        // (catalog_tuple_update_{typowner_typacl,typnamespace,typnotnull,
+        // typdefault,attrs}_pg_type) are now INSTALLED by backend-catalog-
+        // indexing's family2 — each re-fetches the row by `type_oid`, deforms it,
+        // replaces only the targeted column(s) (heap_modify_tuple over the
+        // selectively-set `replaces[]`), and CatalogTupleUpdate — so their
+        // entries were DELETED.
         //
         // The generic update_object_owner_tuple (alter.c AlterObjectOwner_internal)
         // is now INSTALLED by backend-catalog-indexing's family2 — it deforms the
         // re-fetched row, sets the owner column, re-serializes aclnewowner(acl,
         // old, new) into the aclitem[] varlena via the shared acl_new_owner_datum
         // codec, CatalogTupleUpdate + UnlockTuple — so its entry was DELETED.
-        ("backend_catalog_indexing", "catalog_tuple_update_typowner_typacl_pg_type"),
-        ("backend_catalog_indexing", "catalog_tuple_update_typnamespace_pg_type"),
-        ("backend_catalog_indexing", "catalog_tuple_update_typnotnull_pg_type"),
-        ("backend_catalog_indexing", "catalog_tuple_update_typdefault_pg_type"),
-        ("backend_catalog_indexing", "catalog_tuple_update_attrs_pg_type"),
         // ===================================================================
         // AUDIT-FIX #345 — blind-spot revealed by the col-4-fallback guard fix.
         // The 24 merged/audited rows with an EMPTY `crate` column (and the
@@ -1689,20 +1689,15 @@ mod recurrence_guard {
         ("backend_utils_cache_relcache_nodexform", "index_predicate"),
         ("backend_utils_cache_relcache_nodexform", "dummy_index_expressions"),
         //
-        // -- backend-catalog-indexing (pg_attribute insert substrate unported) --
-        // DESIGN_DEBT (TD-INDEXING-APPEND-ATTRIBUTE-TUPLES): `AppendAttributeTuples`
-        // (#334, catalog/index.c) inserts one `pg_attribute` row per index column
-        // (`InsertPgAttributeTuples(pg_attribute, indexTupDesc, InvalidOid,
-        // attrs_extra, indstate)`), having first run `InitializeAttributeOids`
-        // (scribble the new index's OID onto its stored descriptor's `attrelid`s).
-        // The catalog-indexing owner owns pg_attribute writes but has not yet
-        // ported `InsertPgAttributeTuples` (the `heap_form_tuple` over
-        // `Form_pg_attribute` + `CatalogTuplesMultiInsertWithInfo` path) nor the
-        // descriptor-mutation entry point, so it cannot install this and the seam
-        // loud-panics (mirror-PG-and-panic). Reached only from `index_create`,
-        // which is itself uninstalled (catalog-write driver substrate unported).
-        // Install + DELETE when catalog-indexing ports `InsertPgAttributeTuples`.
-        ("backend_catalog_indexing", "append_attribute_tuples"),
+        // (TD-INDEXING-APPEND-ATTRIBUTE-TUPLES RETIRED: `AppendAttributeTuples`
+        // (catalog/index.c) is now INSTALLED by backend-catalog-indexing's
+        // family3 — it opens pg_attribute RowExclusiveLock, builds one
+        // `PgAttributeInsertRow` per index column from
+        // `RelationGetDescr(indexRelation)` (the per-attno `Form_pg_attribute`,
+        // whose `attrelid` `InitializeAttributeOids` already stamped), applies the
+        // optional `attopts`/`stattargets` overrides, and delegates to the
+        // already-ported `catalog_insert_pg_attribute_tuples`
+        // (`InsertPgAttributeTuples`) — so its entry was DELETED.)
         //
         // (TD-ENCNAMES-ICU RETIRED: `is_encoding_supported_by_icu` —
         // `common/encnames.c`'s `pg_enc2icu_tbl` reader (encnames.c:461),

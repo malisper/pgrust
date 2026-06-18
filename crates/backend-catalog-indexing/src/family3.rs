@@ -25,7 +25,9 @@ use types_rel::Relation;
 use types_tuple::backend_access_common_heaptuple::Datum;
 
 use backend_access_common_heaptuple::heap_form_tuple;
+use backend_access_table_table::table_open;
 use backend_catalog_catalog::GetNewOidWithIndex;
+use types_storage::lock::RowExclusiveLock;
 
 use crate::keystone::{CatalogCloseIndexes, CatalogOpenIndexes, CatalogTupleInsert};
 
@@ -182,6 +184,76 @@ fn catalog_insert_pg_attribute_tuples<'mcx>(
     crate::keystone::CatalogTuplesMultiInsertWithInfo(mcx, rel, tuples, &mut indstate)?;
     // CatalogCloseIndexes(indstate);
     CatalogCloseIndexes(indstate)
+}
+
+/// `AppendAttributeTuples(indexRelation, attopts, stattargets)`
+/// (catalog/index.c:511): `table_open(AttributeRelationId, RowExclusiveLock)`,
+/// build one `pg_attribute` row per index column from
+/// `RelationGetDescr(indexRelation)` (the per-attno `Form_pg_attribute`, whose
+/// `attrelid` `InitializeAttributeOids` already scribbled with the new index's
+/// OID — the C `new_rel_oid == InvalidOid` branch reads `attrs->attrelid`), and
+/// `InsertPgAttributeTuples`. The `attopts`/`stattargets` overrides ride in
+/// optional parallel arrays indexed by attno-1; the C builds `attrs_extra` only
+/// when `attopts != NULL`, so when `attopts` is `None` every row's
+/// `attstattarget`/`attoptions` is SQL NULL.
+fn append_attribute_tuples<'mcx>(
+    mcx: Mcx<'mcx>,
+    index_relation: &Relation<'mcx>,
+    attopts: Option<&[Option<std::vec::Vec<u8>>]>,
+    stattargets: Option<&[Option<i16>]>,
+) -> PgResult<()> {
+    // indexTupDesc = RelationGetDescr(indexRelation);
+    let tupdesc = index_relation.rd_att_clone_in(mcx)?;
+    let natts = tupdesc.natts as usize;
+
+    let mut rows: std::vec::Vec<cat::pg_attribute::PgAttributeInsertRow> =
+        std::vec::Vec::with_capacity(natts);
+    for i in 0..natts {
+        let a = tupdesc.attr(i);
+        // attrs_extra[i]: only populated when the C `attopts != NULL`.
+        let (attstattarget, attoptions) = if attopts.is_some() {
+            let opt = attopts.and_then(|o| o.get(i)).and_then(|v| v.clone());
+            // attrs_extra[i].attstattarget = stattargets[i] (else isnull).
+            let stat = stattargets.and_then(|s| s.get(i).copied()).flatten();
+            (stat, opt)
+        } else {
+            // attrs_extra == NULL ⇒ both fields default to SQL NULL.
+            (None, None)
+        };
+        rows.push(cat::pg_attribute::PgAttributeInsertRow {
+            // new_rel_oid == InvalidOid ⇒ attrs->attrelid (set by InitializeAttributeOids).
+            attrelid: a.attrelid,
+            attname: a.attname.data,
+            atttypid: a.atttypid,
+            attlen: a.attlen,
+            attnum: a.attnum,
+            atttypmod: a.atttypmod,
+            attndims: a.attndims,
+            attbyval: a.attbyval,
+            attalign: a.attalign,
+            attstorage: a.attstorage,
+            attcompression: a.attcompression,
+            attnotnull: a.attnotnull,
+            atthasdef: a.atthasdef,
+            atthasmissing: a.atthasmissing,
+            attidentity: a.attidentity,
+            attgenerated: a.attgenerated,
+            attisdropped: a.attisdropped,
+            attislocal: a.attislocal,
+            attinhcount: a.attinhcount,
+            attcollation: a.attcollation,
+            attstattarget,
+            attoptions,
+        });
+    }
+
+    // pg_attribute = table_open(AttributeRelationId, RowExclusiveLock);
+    let pg_attribute = table_open(mcx, cat::pg_attribute::AttributeRelationId, RowExclusiveLock)?;
+    // InsertPgAttributeTuples(pg_attribute, indexTupDesc, InvalidOid, attrs_extra, indstate)
+    // — CatalogOpenIndexes / MultiInsert / CatalogCloseIndexes happen inside.
+    catalog_insert_pg_attribute_tuples(mcx, &pg_attribute, &rows)?;
+    // table_close(pg_attribute, RowExclusiveLock);
+    pg_attribute.close(RowExclusiveLock)
 }
 
 /// The `values[]` / `nulls[]` for one `pg_attribute` row (the per-slot fill in
@@ -794,6 +866,7 @@ pub fn install() {
     backend_catalog_indexing_seams::catalog_insert_pg_attribute_tuples::set(
         catalog_insert_pg_attribute_tuples,
     );
+    backend_catalog_indexing_seams::append_attribute_tuples::set(append_attribute_tuples);
     backend_catalog_indexing_seams::catalog_tuple_update_pg_attribute::set(
         catalog_tuple_update_pg_attribute,
     );

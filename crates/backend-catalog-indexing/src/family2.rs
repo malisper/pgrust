@@ -1047,6 +1047,48 @@ fn catalog_delete_pg_sequence(relid: Oid) -> PgResult<bool> {
     Ok(true)
 }
 
+/// `RemoveFunctionById(funcOid)` (functioncmds.c:1311): delete the `pg_proc`
+/// row (reading its `prokind` first), `pgstat_drop_function(funcOid)`, and — if
+/// it was an aggregate (`prokind == PROKIND_AGGREGATE`) — also delete the
+/// `pg_aggregate` row keyed on `aggfnoid == funcOid`. This is the catalog-write
+/// leg of the `backend-commands-functioncmds` seam (functioncmds.c can't do raw
+/// catalog tuple I/O directly), installed cross-crate from the catalog-indexing
+/// owner that holds `CatalogTupleDelete` + the heap scan substrate.
+fn remove_function_tuple(func_oid: Oid) -> PgResult<()> {
+    use cat::pg_aggregate as pa;
+    use cat::pg_proc as pp;
+
+    let ctx = MemoryContext::new("remove_function_tuple");
+    let mcx = ctx.mcx();
+
+    // relation = table_open(ProcedureRelationId, RowExclusiveLock);
+    let relation = table_open(mcx, cat::catalog::PROCEDURE_RELATION_ID, RowExclusiveLock)?;
+    // tup = SearchSysCache1(PROCOID, funcOid);
+    let tup = fetch_by_oid(mcx, &relation, pp::Anum_pg_proc_oid, func_oid)?
+        .ok_or_else(|| PgError::error("cache lookup failed for function (remove)"))?;
+    // prokind = ((Form_pg_proc) GETSTRUCT(tup))->prokind;
+    let (values, _nulls) = deform(mcx, &relation, &tup)?;
+    let prokind = values[(pp::Anum_pg_proc_prokind - 1) as usize].as_char();
+    // CatalogTupleDelete(relation, &tup->t_self);
+    CatalogTupleDelete(mcx, &relation, tup.tuple.t_self)?;
+    relation.close(RowExclusiveLock)?;
+
+    // pgstat_drop_function(funcOid);
+    backend_utils_activity_pgstat_function::pgstat_drop_function(func_oid)?;
+
+    // If there's a pg_aggregate tuple, delete that too.
+    if prokind == pp::PROKIND_AGGREGATE {
+        let aggrel = table_open(mcx, pa::AggregateRelationId, RowExclusiveLock)?;
+        let aggtup = fetch_by_oid(mcx, &aggrel, pa::Anum_pg_aggregate_aggfnoid, func_oid)?
+            .ok_or_else(|| {
+                PgError::error("cache lookup failed for pg_aggregate tuple for function")
+            })?;
+        CatalogTupleDelete(mcx, &aggrel, aggtup.tuple.t_self)?;
+        aggrel.close(RowExclusiveLock)?;
+    }
+    Ok(())
+}
+
 /* ======================================================================== *
  * pg_depend / pg_shdepend single-row update + insert.
  * ======================================================================== */
@@ -1376,6 +1418,201 @@ fn catalog_tuple_update_typname_pg_type(
         name_datum(mcx, &namestrcpy_image(new_type_name))?,
     );
     modify_and_update(mcx, &r, &oldtup, &values, &nulls, &replaces)
+}
+
+/// `AlterTypeOwnerInternal`'s single-row write (typecmds.c:3986): re-fetch the
+/// row by `type_oid`, set `typowner = new_owner_id`, and — when the held row's
+/// `typacl` is non-NULL — `typacl = aclnewowner(old_acl, old_owner, new_owner)`
+/// (the old owner is the row's pre-write `typowner`), then `CatalogTupleUpdate`.
+fn catalog_tuple_update_typowner_typacl_pg_type(
+    rel: &RelationData<'_>,
+    type_oid: Oid,
+    new_owner_id: Oid,
+) -> PgResult<()> {
+    use cat::pg_type as pt;
+    let ctx = MemoryContext::new("catalog_tuple_update_typowner_typacl_pg_type");
+    let mcx = ctx.mcx();
+    let r = reopen(mcx, rel)?;
+    let oldtup = fetch_by_oid(mcx, &r, pt::Anum_pg_type_oid, type_oid)?
+        .ok_or_else(|| PgError::error("cache lookup failed for type"))?;
+    let (mut values, mut nulls) = deform(mcx, &r, &oldtup)?;
+    // typTup->typowner (the OLD owner) is read before we overwrite it.
+    let old_owner = values[(pt::Anum_pg_type_typowner - 1) as usize].as_oid();
+    let mut replaces = vec![false; values.len()];
+    set_col(
+        &mut values,
+        &mut nulls,
+        &mut replaces,
+        pt::Anum_pg_type_typowner,
+        Datum::from_oid(new_owner_id),
+    );
+    // /* Null ACLs do not require changes */
+    let acl_idx = (pt::Anum_pg_type_typacl - 1) as usize;
+    if !nulls[acl_idx] {
+        if let Datum::ByRef(bytes) = &values[acl_idx] {
+            let new_acl = acl_new_owner_datum(mcx, &bytes.clone(), old_owner, new_owner_id)?;
+            set_col(&mut values, &mut nulls, &mut replaces, pt::Anum_pg_type_typacl, new_acl);
+        }
+    }
+    modify_and_update(mcx, &r, &oldtup, &values, &nulls, &replaces)
+}
+
+/// `AlterTypeNamespaceInternal`'s single-row write (typecmds.c:4231): re-fetch
+/// the row by `type_oid`, set `typnamespace = nsp_oid`, `CatalogTupleUpdate`.
+/// (The `oldNspOid != nspOid` guard + dup-name checks stay on the pg_type
+/// owner side; the seam is the unconditional row write.)
+fn catalog_tuple_update_typnamespace_pg_type(
+    rel: &RelationData<'_>,
+    type_oid: Oid,
+    nsp_oid: Oid,
+) -> PgResult<()> {
+    use cat::pg_type as pt;
+    let ctx = MemoryContext::new("catalog_tuple_update_typnamespace_pg_type");
+    let mcx = ctx.mcx();
+    let r = reopen(mcx, rel)?;
+    let oldtup = fetch_by_oid(mcx, &r, pt::Anum_pg_type_oid, type_oid)?
+        .ok_or_else(|| PgError::error("cache lookup failed for type"))?;
+    let (mut values, mut nulls) = deform(mcx, &r, &oldtup)?;
+    let mut replaces = vec![false; values.len()];
+    set_col(
+        &mut values,
+        &mut nulls,
+        &mut replaces,
+        pt::Anum_pg_type_typnamespace,
+        Datum::from_oid(nsp_oid),
+    );
+    modify_and_update(mcx, &r, &oldtup, &values, &nulls, &replaces)
+}
+
+/// `AlterDomainNotNull`/`AlterDomainAddConstraint`/`AlterDomainDropConstraint`
+/// single-row write (typecmds.c:2806/3014/2885): re-fetch by `type_oid`, set
+/// `typnotnull = not_null`, `CatalogTupleUpdate`.
+fn catalog_tuple_update_typnotnull_pg_type(
+    rel: &RelationData<'_>,
+    type_oid: Oid,
+    not_null: bool,
+) -> PgResult<()> {
+    use cat::pg_type as pt;
+    let ctx = MemoryContext::new("catalog_tuple_update_typnotnull_pg_type");
+    let mcx = ctx.mcx();
+    let r = reopen(mcx, rel)?;
+    let oldtup = fetch_by_oid(mcx, &r, pt::Anum_pg_type_oid, type_oid)?
+        .ok_or_else(|| PgError::error("cache lookup failed for type"))?;
+    let (mut values, mut nulls) = deform(mcx, &r, &oldtup)?;
+    let mut replaces = vec![false; values.len()];
+    set_col(
+        &mut values,
+        &mut nulls,
+        &mut replaces,
+        pt::Anum_pg_type_typnotnull,
+        Datum::from_bool(not_null),
+    );
+    modify_and_update(mcx, &r, &oldtup, &values, &nulls, &replaces)
+}
+
+/// `AlterDomainDefault`'s pg_type write (typecmds.c:2691-2705): replace
+/// `typdefaultbin` (text) and `typdefault` (text). `None` for either marks the
+/// column SQL NULL (`nulls[..] = true; replaces[..] = true` — the DROP DEFAULT
+/// and NULL-constant arms); a value is `CStringGetTextDatum`. Both columns are
+/// always in `replaces`.
+fn catalog_tuple_update_typdefault_pg_type(
+    rel: &RelationData<'_>,
+    type_oid: Oid,
+    default_value: Option<String>,
+    default_bin: Option<String>,
+) -> PgResult<()> {
+    use cat::pg_type as pt;
+    let ctx = MemoryContext::new("catalog_tuple_update_typdefault_pg_type");
+    let mcx = ctx.mcx();
+    let r = reopen(mcx, rel)?;
+    let oldtup = fetch_by_oid(mcx, &r, pt::Anum_pg_type_oid, type_oid)?
+        .ok_or_else(|| PgError::error("cache lookup failed for type"))?;
+    let (mut values, mut nulls) = deform(mcx, &r, &oldtup)?;
+    let mut replaces = vec![false; values.len()];
+
+    match default_bin {
+        Some(s) => set_col(
+            &mut values,
+            &mut nulls,
+            &mut replaces,
+            pt::Anum_pg_type_typdefaultbin,
+            cstring_to_text_datum(mcx, &s)?,
+        ),
+        None => {
+            let i = (pt::Anum_pg_type_typdefaultbin - 1) as usize;
+            values[i] = Datum::null();
+            nulls[i] = true;
+            replaces[i] = true;
+        }
+    }
+    match default_value {
+        Some(s) => set_col(
+            &mut values,
+            &mut nulls,
+            &mut replaces,
+            pt::Anum_pg_type_typdefault,
+            cstring_to_text_datum(mcx, &s)?,
+        ),
+        None => {
+            let i = (pt::Anum_pg_type_typdefault - 1) as usize;
+            values[i] = Datum::null();
+            nulls[i] = true;
+            replaces[i] = true;
+        }
+    }
+    modify_and_update(mcx, &r, &oldtup, &values, &nulls, &replaces)
+}
+
+/// `AlterTypeRecurse`'s per-row update (typecmds.c:4576-4621): build `replaces[]`
+/// from the [`TypeAttrUpdate`] gates (`typstorage`/`typreceive`/`typsend`/
+/// `typmodin`/`typmodout`/`typanalyze`/`typsubscript`), `heap_modify_tuple`,
+/// `CatalogTupleUpdate`. Returns the row's `typarray` OID so the caller can
+/// recurse to the array type.
+fn catalog_tuple_update_attrs_pg_type(
+    rel: &RelationData<'_>,
+    type_oid: Oid,
+    attr: cat::pg_type::TypeAttrUpdate,
+) -> PgResult<Oid> {
+    use cat::pg_type as pt;
+    let ctx = MemoryContext::new("catalog_tuple_update_attrs_pg_type");
+    let mcx = ctx.mcx();
+    let r = reopen(mcx, rel)?;
+    let oldtup = fetch_by_oid(mcx, &r, pt::Anum_pg_type_oid, type_oid)?
+        .ok_or_else(|| PgError::error("cache lookup failed for type"))?;
+    let (mut values, mut nulls) = deform(mcx, &r, &oldtup)?;
+    let typarray = values[(pt::Anum_pg_type_typarray - 1) as usize].as_oid();
+    let mut replaces = vec![false; values.len()];
+
+    if attr.update_storage {
+        set_col(&mut values, &mut nulls, &mut replaces, pt::Anum_pg_type_typstorage,
+                Datum::from_char(attr.storage));
+    }
+    if attr.update_receive {
+        set_col(&mut values, &mut nulls, &mut replaces, pt::Anum_pg_type_typreceive,
+                Datum::from_oid(attr.receive_oid));
+    }
+    if attr.update_send {
+        set_col(&mut values, &mut nulls, &mut replaces, pt::Anum_pg_type_typsend,
+                Datum::from_oid(attr.send_oid));
+    }
+    if attr.update_typmodin {
+        set_col(&mut values, &mut nulls, &mut replaces, pt::Anum_pg_type_typmodin,
+                Datum::from_oid(attr.typmodin_oid));
+    }
+    if attr.update_typmodout {
+        set_col(&mut values, &mut nulls, &mut replaces, pt::Anum_pg_type_typmodout,
+                Datum::from_oid(attr.typmodout_oid));
+    }
+    if attr.update_analyze {
+        set_col(&mut values, &mut nulls, &mut replaces, pt::Anum_pg_type_typanalyze,
+                Datum::from_oid(attr.analyze_oid));
+    }
+    if attr.update_subscript {
+        set_col(&mut values, &mut nulls, &mut replaces, pt::Anum_pg_type_typsubscript,
+                Datum::from_oid(attr.subscript_oid));
+    }
+    modify_and_update(mcx, &r, &oldtup, &values, &nulls, &replaces)?;
+    Ok(typarray)
 }
 
 /// `GetNewOidWithIndex(pg_type, TypeOidIndexId, Anum_pg_type_oid)`.
@@ -2245,6 +2482,11 @@ pub fn install() {
     s::catalog_update_pg_sequence::set(catalog_update_pg_sequence);
     s::catalog_delete_pg_sequence::set(catalog_delete_pg_sequence);
 
+    // functioncmds.c RemoveFunctionById catalog-delete leg (cross-crate install:
+    // the seam is declared on backend-commands-functioncmds-seams but the body
+    // needs this crate's CatalogTupleDelete + heap scan substrate).
+    backend_commands_functioncmds_seams::remove_function_tuple::set(remove_function_tuple);
+
     // pg_depend / pg_shdepend.
     s::catalog_tuple_update_pg_depend::set(catalog_tuple_update_pg_depend);
     s::catalog_tuple_insert_pg_shdepend::set(catalog_tuple_insert_pg_shdepend);
@@ -2258,6 +2500,12 @@ pub fn install() {
     s::catalog_tuple_insert_pg_type::set(catalog_tuple_insert_pg_type);
     s::catalog_tuple_update_pg_type::set(catalog_tuple_update_pg_type);
     s::catalog_tuple_update_typname_pg_type::set(catalog_tuple_update_typname_pg_type);
+    // typecmds.c F3/F4 narrow single-column pg_type mutators.
+    s::catalog_tuple_update_typowner_typacl_pg_type::set(catalog_tuple_update_typowner_typacl_pg_type);
+    s::catalog_tuple_update_typnamespace_pg_type::set(catalog_tuple_update_typnamespace_pg_type);
+    s::catalog_tuple_update_typnotnull_pg_type::set(catalog_tuple_update_typnotnull_pg_type);
+    s::catalog_tuple_update_typdefault_pg_type::set(catalog_tuple_update_typdefault_pg_type);
+    s::catalog_tuple_update_attrs_pg_type::set(catalog_tuple_update_attrs_pg_type);
     s::get_new_oid_with_index_pg_type::set(get_new_oid_with_index_pg_type);
 
     // pg_namespace.
