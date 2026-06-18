@@ -84,6 +84,10 @@ pub fn init_seams() {
     // --- ProcessUtilitySlow CREATE TABLE spine (utility.c:1135-1190) ---
     // `DefineRelation(cstmt, RELKIND_RELATION, InvalidOid, NULL, queryString)`.
     backend_tcop_utility_out_seams::define_relation::set(create::define_relation);
+
+    // `NewRelationCreateToastTable` follow-on (utility.c:1170-1190): parse +
+    // validate toast reloptions then create the TOAST table if needed.
+    backend_tcop_utility_out_seams::create_toast_for_relation::set(create::create_toast_for_relation);
 }
 
 use mcx::Mcx;

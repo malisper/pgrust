@@ -231,6 +231,130 @@ fn validate_reloptions(mcx: Mcx<'_>, relkind: u8, reloptions: Option<&[u8]>) -> 
     Ok(())
 }
 
+/// The CREATE TABLE TOAST-table follow-on (utility.c:1170-1190):
+///
+/// ```c
+/// toast_options = transformRelOptions((Datum) 0, cstmt->options, "toast",
+///                                     validnsps, true, false);
+/// (void) heap_reloptions(RELKIND_TOASTVALUE, toast_options, true);
+/// NewRelationCreateToastTable(address.objectId, toast_options);
+/// ```
+///
+/// `transformRelOptions` is called here with `namspace = "toast"`, so only the
+/// `WITH (toast.*)` qualified options participate (the unqualified heap options
+/// were already consumed by the table's own `transform_and_check_reloptions`).
+/// The toast namespace is stripped from each surviving element. The validated
+/// `text[]` image is the `reloptions` Datum forwarded into
+/// `NewRelationCreateToastTable`, which (via `CheckAndCreateToastTable` →
+/// `create_toast_table` → `needs_toast_table`) decides whether the relation
+/// actually needs a TOAST table and creates it if so. For a relation whose
+/// columns are all fixed-width / non-toastable (e.g. `t(f1 int)`) this is the
+/// early-return no-op and CREATE TABLE completes here.
+pub fn create_toast_for_relation<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    options: &PgVec<'mcx, NodePtr<'mcx>>,
+) -> PgResult<()> {
+    // transformRelOptions((Datum) 0, options, "toast", validnsps, true, false):
+    // build the toast text[] from the `toast.*`-qualified DefElems, stripping
+    // the namespace. oldOptions is (Datum) 0 so there are no old options to
+    // copy; only the flatten-defList half runs.
+    let mut astate: Vec<String> = Vec::new();
+
+    for opt in options.iter() {
+        let Node::DefElem(def) = &**opt else {
+            unreachable!("CreateStmt.options element is not a DefElem");
+        };
+        let defname = def.defname.as_deref().unwrap_or("");
+
+        // Error out if the namespace is not valid. A NULL namespace is always
+        // valid. (validnsps = HEAP_RELOPT_NAMESPACES.)
+        if let Some(defns) = def.defnamespace.as_deref() {
+            let valid = HEAP_RELOPT_NAMESPACES.iter().any(|ns| *ns == defns);
+            if !valid {
+                return ereport(ERROR)
+                    .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                    .errmsg(format!("unrecognized parameter namespace \"{defns}\""))
+                    .finish(here("transformRelOptions"))
+                    .map(|()| unreachable!());
+            }
+        }
+
+        // ignore if not in the same namespace (namspace == "toast" here, so
+        // skip any option that is NOT in the toast namespace).
+        match def.defnamespace.as_deref() {
+            Some("toast") => {}
+            _ => continue,
+        }
+
+        // Flatten the DefElem into "name=value"; bare "name" means "name=true".
+        let value: String = if def.arg.is_some() {
+            backend_commands_define_seams::def_get_string::call(
+                mcx,
+                defname.to_string(),
+                defel_arg(def),
+            )?
+            .as_str()
+            .to_string()
+        } else {
+            "true".to_string()
+        };
+
+        // Insist that name not contain "=", else "a=b=c" is ambiguous.
+        if defname.contains('=') {
+            return ereport(ERROR)
+                .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                .errmsg(format!(
+                    "invalid option name \"{defname}\": must not contain \"=\""
+                ))
+                .finish(here("transformRelOptions"))
+                .map(|()| unreachable!());
+        }
+
+        astate.push(format!("{defname}={value}"));
+    }
+
+    // makeArrayResult / (Datum) 0: no elements means a NULL reloptions token.
+    let toast_options = if astate.is_empty() {
+        // (void) heap_reloptions(RELKIND_TOASTVALUE, (Datum) 0, true): validate
+        // the empty set (a no-op confirming emptiness is acceptable).
+        backend_access_common_reloptions::heap_reloptions(
+            mcx,
+            types_tuple::access::RELKIND_TOASTVALUE,
+            None,
+            true,
+        )?;
+        types_cluster::RelOptionsToken {
+            is_null: true,
+            bytes: Vec::new(),
+        }
+    } else {
+        // Assemble the on-disk text[] varlena image (the C makeArrayResult).
+        let elems: Vec<Option<&[u8]>> = astate.iter().map(|s| Some(s.as_bytes())).collect();
+        let bytes: Vec<u8> =
+            backend_utils_adt_arrayfuncs_seams::build_text_array_nullable::call(mcx, &elems)?
+                .iter()
+                .copied()
+                .collect();
+
+        // (void) heap_reloptions(RELKIND_TOASTVALUE, toast_options, true).
+        backend_access_common_reloptions::heap_reloptions(
+            mcx,
+            types_tuple::access::RELKIND_TOASTVALUE,
+            Some(&bytes),
+            true,
+        )?;
+
+        types_cluster::RelOptionsToken {
+            is_null: false,
+            bytes,
+        }
+    };
+
+    // NewRelationCreateToastTable(relid, toast_options).
+    backend_catalog_toasting::NewRelationCreateToastTable(mcx, relid, toast_options)
+}
+
 /// `DefineRelation(stmt, relkind, ownerId, typaddress=NULL, queryString)`
 /// (tablecmds.c:764). The CREATE TABLE / relation driver.
 pub fn define_relation<'mcx>(
