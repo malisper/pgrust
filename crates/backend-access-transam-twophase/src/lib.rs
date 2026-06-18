@@ -54,6 +54,9 @@ use backend_access_transam_twophase_rmgr as rmgrcb; // 2PC rmgr callback tables 
 use rmgrcb::TwoPhaseCallback;
 use backend_utils_activity_stat_seams as pgstat; // transactional drops / AtEOXact_PgStat
 use backend_catalog_storage_seams as storage_smgr; // DropRelationFiles
+use backend_utils_init_small_seams as init_small; // MyDatabaseId / MyDatabaseTableSpace
+use backend_utils_adt_timestamp_seams as timestamp; // GetCurrentTimestamp
+use backend_utils_time_snapmgr_pc_seams as snapmgr; // TransactionXmin
 
 /// Source location stamped onto raised errors (twophase.c).
 fn here() -> ErrorLocation {
@@ -2704,6 +2707,50 @@ pub fn init_seams() {
             })
         })
     });
+
+    // `FinishPreparedTransaction(gid, isCommit)` — the utility dispatch
+    // (`standard_ProcessUtility`'s COMMIT/ROLLBACK PREPARED arms) reaches this
+    // twophase.c entry point through `backend-tcop-utility-out-seams`. The
+    // function lives here; the adapter snapshots the ambient backend state C's
+    // `FinishPreparedTransaction` reads off its own globals (GetUserId,
+    // MyDatabaseId, the replication-origin session, GetCurrentTimestamp,
+    // TransactionXmin, MyXactFlags, MyDatabaseTableSpace, XLogLogicalInfoActive)
+    // and threads it as the explicit `FinishContext`, then runs the algorithm
+    // over the process-global `TwoPhaseState` and this backend's
+    // MyLockedGxact / twophaseExitRegistered statics.
+    backend_tcop_utility_out_seams::finish_prepared_transaction::set(
+        |gid, is_commit| -> PgResult<()> {
+            let gid = gid.expect("COMMIT/ROLLBACK PREPARED requires a transaction id");
+            let ctx = FinishContext {
+                user_id: miscinit::get_user_id::call(),
+                my_database_id: init_small::my_database_id::call(),
+                repl: ReplOriginSession {
+                    origin: origin::replorigin_session_origin::call(),
+                    origin_lsn: origin::replorigin_session_origin_lsn::call(),
+                    origin_timestamp: origin::replorigin_session_origin_timestamp::call(),
+                },
+                current_timestamp: timestamp::get_current_timestamp::call(),
+                transaction_xmin: snapmgr::transaction_xmin::call()?,
+                my_xact_flags: xact::my_xact_flags::call(),
+                my_database_table_space: init_small::my_database_table_space::call(),
+                xlog_logical_info_active: wal::xlog_logical_info_active::call(),
+            };
+            with_twophase_state(|state| {
+                MY_LOCKED_GXACT.with(|locked| {
+                    TWOPHASE_EXIT_REGISTERED.with(|reg| {
+                        finish_prepared_transaction(
+                            state,
+                            &mut reg.borrow_mut(),
+                            &mut locked.borrow_mut(),
+                            gid,
+                            is_commit,
+                            ctx,
+                        )
+                    })
+                })
+            })
+        },
+    );
 }
 
 /// Read this backend's `MyLockedGxact` slot, panicking if unset (the prepare

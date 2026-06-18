@@ -127,6 +127,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `MyXactFlags` (xact.c backend-global) — the current transaction's
+    /// accumulated flags. Read by `FinishPreparedTransaction` (twophase.c) to
+    /// OR into the 2nd-phase commit/abort record's `xinfo`.
+    pub fn my_xact_flags() -> i32
+);
+
+seam_core::seam!(
     /// `GetCurrentSubTransactionId()` (xact.c): the current subtransaction's
     /// id. Pure read of backend-local transaction state.
     pub fn get_current_sub_transaction_id() -> types_core::SubTransactionId

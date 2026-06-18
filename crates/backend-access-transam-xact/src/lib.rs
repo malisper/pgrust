@@ -1732,6 +1732,7 @@ pub fn init_seams() {
     seams::set_my_xact_flags_acquired_access_exclusive_lock::set(
         seam_set_my_xact_flags_acquired_access_exclusive_lock,
     );
+    seams::my_xact_flags::set(MyXactFlags);
     seams::get_current_sub_transaction_id::set(GetCurrentSubTransactionId);
     seams::is_sub_transaction::set(IsSubTransaction);
     seams::set_xact_accessed_temp_namespace::set(seam_set_xact_accessed_temp_namespace);
