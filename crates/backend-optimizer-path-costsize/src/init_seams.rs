@@ -96,6 +96,24 @@ pub fn init_seams() {
     // seam crate; costsize.c is the owner.
     backend_optimizer_util_relnode_ext_seams::clamp_width_est::set(crate::clamp_width_est);
     backend_optimizer_util_joininfo_ext_seams::clamp_width_est::set(crate::clamp_width_est);
+    // Joinrel/baserel size estimators (costsize.c) — relnode.c/joinrels.c reach
+    // them through the relnode-ext consumer-side seam crate; costsize.c owns
+    // them. `set_joinrel_size_estimates` is infallible in the body; the seam
+    // mirrors the C `ereport`-free path with an Ok wrapper.
+    backend_optimizer_util_relnode_ext_seams::set_joinrel_size_estimates::set(
+        |run, root, joinrel, outer_rel, inner_rel, sjinfo, restrictlist| {
+            crate::joins::set_joinrel_size_estimates(
+                run, root, joinrel, outer_rel, inner_rel, sjinfo, restrictlist,
+            );
+            Ok(())
+        },
+    );
+    backend_optimizer_util_relnode_ext_seams::get_parameterized_baserel_size::set(
+        crate::joins::get_parameterized_baserel_size,
+    );
+    backend_optimizer_util_relnode_ext_seams::get_parameterized_joinrel_size::set(
+        crate::joins::get_parameterized_joinrel_size,
+    );
     // `cost_qual_eval_node(&cost, (Node *) expr, root)` over a free-standing
     // `&Expr` (restrictinfo.c / joininfo.c). costsize.c owns it.
     backend_optimizer_util_joininfo_ext_seams::cost_qual_eval_node_expr::set(
