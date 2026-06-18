@@ -28,4 +28,5 @@ backend-catalog-indexing-seams = { path = "../backend-catalog-indexing-seams" }
 backend-rewrite-rewritemanip-seams = { path = "../backend-rewrite-rewritemanip-seams" }
 backend-rewrite-rewritesupport-seams = { path = "../backend-rewrite-rewritesupport-seams" }
 backend-optimizer-util-plancat-ext-seams = { path = "../backend-optimizer-util-plancat-ext-seams" }
+backend-optimizer-plan-init-subselect-ext-seams = { path = "../backend-optimizer-plan-init-subselect-ext-seams" }
 types-pathnodes = { path = "../types-pathnodes" }

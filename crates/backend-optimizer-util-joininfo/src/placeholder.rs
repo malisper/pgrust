@@ -155,6 +155,22 @@ pub fn find_placeholder_info(root: &mut PlannerInfo, phv: &PlaceHolderVar) -> Pg
     Ok(phinfo_id)
 }
 
+/// `find_placeholder_info(root, phv); phinfo->ph_needed = bms_add_members(
+/// phinfo->ph_needed, where_needed)` (initsplan.c:325/382, via placeholder.c) —
+/// record that a PlaceHolderVar's value is needed at `where_needed`. Homed here
+/// (the joininfo unit ports `find_placeholder_info`); consumed by
+/// `add_vars_to_targetlist` / `add_vars_to_attr_needed` in init-subselect.
+pub fn phinfo_add_needed(
+    root: &mut PlannerInfo,
+    phv: &PlaceHolderVar,
+    where_needed: &Relids,
+) -> PgResult<()> {
+    let phinfo_id = find_placeholder_info(root, phv)?;
+    let cur = bms::relids_copy::call(&root.phinfo(phinfo_id).ph_needed);
+    root.phinfo_mut(phinfo_id).ph_needed = bms::relids_add_members::call(cur, where_needed);
+    Ok(())
+}
+
 /// `find_placeholders_in_jointree`
 ///		Search the jointree for PlaceHolderVars, and build PlaceHolderInfos.
 ///

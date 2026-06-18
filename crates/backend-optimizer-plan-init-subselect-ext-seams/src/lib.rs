@@ -53,11 +53,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `preprocess_phv_expression(root, expr)` (subselect.c) — run
-    /// SS_process_sublinks / SS_replace_correlation_vars over an upper-level
-    /// PlaceHolderVar's expression. UNPORTED owner; only reached for
-    /// LATERAL PHVs with `phlevelsup > 0`.
-    pub fn preprocess_phv_expression(root: &mut PlannerInfo, expr: Expr) -> PgResult<Expr>
+    /// `preprocess_phv_expression(root, expr)` (planner.c) — run
+    /// `preprocess_expression(root, expr, EXPRKIND_PHV)` over an upper-level
+    /// PlaceHolderVar's expression. Owner planner.c is ported; the body threads an
+    /// `Mcx` and reads (not mutates) `root`, so the seam carries the planner-run
+    /// `Mcx<'mcx>` plus a shared `&PlannerInfo`. Only reached for LATERAL PHVs with
+    /// `phlevelsup > 0`.
+    pub fn preprocess_phv_expression<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        root: &PlannerInfo,
+        expr: Expr,
+    ) -> PgResult<Expr>
 );
 
 seam_core::seam!(
@@ -101,8 +107,11 @@ seam_core::seam!(
     /// `Expr`. Used by `process_implied_equality` when both operands are
     /// pseudo-constant, to fold a derived `item1 op item2` clause to a boolean
     /// `Const` where possible. clauses.c is ported but works over `&Node`/`Mcx`;
-    /// this per-`Expr` seam is the cycle break.
-    pub fn eval_const_expressions_expr(root: &mut PlannerInfo, node: Expr) -> PgResult<Expr>
+    /// this per-`Expr` seam is the cycle break. The owner body
+    /// (`fold::eval_const_expressions`) threads only an `Mcx` (the C `root` is used
+    /// solely for `boundParams`, not modeled by the port), so the seam carries the
+    /// planner-run `Mcx<'mcx>` rather than `&mut PlannerInfo`.
+    pub fn eval_const_expressions_expr<'mcx>(mcx: mcx::Mcx<'mcx>, node: Expr) -> PgResult<Expr>
 );
 
 seam_core::seam!(

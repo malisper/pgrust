@@ -196,8 +196,9 @@ fn extract_lateral_references(
                         .take()
                         .map(|b| *b)
                         .expect("upper-level PHV has phexpr");
-                    let processed = initext::preprocess_phv_expression::call(root, phexpr)
-                        .expect("preprocess_phv_expression");
+                    let processed =
+                        initext::preprocess_phv_expression::call(run.mcx(), root, phexpr)
+                            .expect("preprocess_phv_expression");
                     phv.phexpr = Some(alloc::boxed::Box::new(processed));
                 }
 

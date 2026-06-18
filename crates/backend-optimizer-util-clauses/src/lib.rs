@@ -99,6 +99,38 @@ pub fn init_seams() {
         grounded::find_forced_null_var(Some(clause)).cloned()
     });
 
+    // `eval_const_expressions(root, node)` (clauses.c) over an owned arena `Expr`.
+    // The port's `fold::eval_const_expressions` threads only an `Mcx` (the C
+    // `root` is used solely for `boundParams`, not modeled here), so the seam
+    // carries the planner-run `Mcx`. Used by `process_implied_equality` /
+    // `simplify_EXISTS_query` / `convert_EXISTS_to_ANY` in init-subselect.
+    backend_optimizer_plan_init_subselect_ext_seams::eval_const_expressions_expr::set(|mcx, node| {
+        fold::eval_const_expressions(mcx, node)
+    });
+
+    // `find_nonnullable_rels((Node *) expr)` (clauses.c) over a rootless `&Expr`,
+    // the union of base relids non-nullable for the clause. The port allocates the
+    // result `Bitmapset` in an `Mcx` and returns a `PgBox<Bitmapset<'mcx>>`; the
+    // seam contract returns an owned, lifetime-free `Relids`
+    // (`Option<Box<Bitmapset>>`), so the adapter copies the bit words out into an
+    // owned `Bitmapset`. A `None`/empty result maps to the empty set (`None`).
+    backend_optimizer_plan_init_subselect_ext_seams::find_nonnullable_rels_expr::set(|expr| {
+        // The port builds the result `Bitmapset` in an `Mcx`; the seam contract
+        // returns an owned, lifetime-free `Relids`, so run the walker in a private
+        // throwaway context and copy the bit words out before it drops.
+        let scratch = mcx::MemoryContext::new("find_nonnullable_rels_expr");
+        let bms = grounded::find_nonnullable_rels(scratch.mcx(), Some(expr))
+            .expect("find_nonnullable_rels");
+        match bms {
+            Some(b) if !b.words.is_empty() => {
+                Some(alloc::boxed::Box::new(types_pathnodes::Bitmapset {
+                    words: b.words.iter().copied().collect(),
+                }))
+            }
+            _ => None,
+        }
+    });
+
     // The equivclass-ext cycle-break leg owned by clauses.c:
     // `contain_volatile_functions((Node *) clause)` over a rootless `&Expr`
     // (initsplan.c `check_mergejoinable`/`check_hashjoinable` reject clauses with

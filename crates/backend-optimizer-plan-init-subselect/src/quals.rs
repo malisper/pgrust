@@ -710,7 +710,7 @@ pub fn process_implied_equality<'mcx>(
 
     // If both constant, try to reduce to a boolean constant.
     if both_const {
-        clause = initext::eval_const_expressions_expr::call(root, clause)?;
+        clause = initext::eval_const_expressions_expr::call(run.mcx(), clause)?;
 
         // If we produced const TRUE, just drop the clause.
         if let Expr::Const(c) = &clause {

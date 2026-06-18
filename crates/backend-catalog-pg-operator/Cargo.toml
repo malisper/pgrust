@@ -22,6 +22,7 @@ backend-catalog-namespace = { path = "../backend-catalog-namespace" }
 backend-catalog-objectaccess-seams = { path = "../backend-catalog-objectaccess-seams" }
 backend-catalog-pg-depend = { path = "../backend-catalog-pg-depend" }
 backend-catalog-pg-operator-seams = { path = "../backend-catalog-pg-operator-seams" }
+backend-optimizer-plan-init-subselect-ext-seams = { path = "../backend-optimizer-plan-init-subselect-ext-seams" }
 backend-catalog-pg-shdepend = { path = "../backend-catalog-pg-shdepend" }
 backend-parser-parse-oper = { path = "../backend-parser-parse-oper" }
 backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }

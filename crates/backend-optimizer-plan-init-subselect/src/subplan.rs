@@ -1332,7 +1332,7 @@ fn simplify_EXISTS_query<'mcx>(
         // `limitCount` is the concretely-typed `Option<PgBox<Expr>>` view.
         let limit_expr = PgBox::into_inner(limit_node);
         // eval_const_expressions(root, query->limitCount).
-        let folded = initext::eval_const_expressions_expr::call(root, limit_expr)?;
+        let folded = initext::eval_const_expressions_expr::call(mcx, limit_expr)?;
         // Might as well update the query if we simplified the clause.
         let keep = match &folded {
             Expr::Const(limit) => {
@@ -1436,7 +1436,7 @@ fn convert_EXISTS_to_ANY<'mcx>(
     // Clean up the WHERE clause: eval_const_expressions, canonicalize_qual,
     // make_ands_implicit.
     let where_clause = match where_clause {
-        Some(wc) => initext::eval_const_expressions_expr::call(root, wc)?,
+        Some(wc) => initext::eval_const_expressions_expr::call(mcx, wc)?,
         None => {
             // eval_const_expressions(NULL) is NULL → make_ands_implicit yields [].
             return Ok(None);
