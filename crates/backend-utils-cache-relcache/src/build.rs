@@ -302,6 +302,17 @@ fn project_form_pg_class<'mcx>(
     })
 }
 
+/// `ProcNumberForTempRelations()` (`storage/procnumber.h`): our own proc number
+/// normally, but parallel workers use their leader's.
+fn proc_number_for_temp_relations() -> types_core::ProcNumber {
+    let leader = backend_access_transam_parallel_rt_seams::parallel_leader_proc_number::call();
+    if leader == INVALID_PROC_NUMBER {
+        backend_utils_init_small_seams::my_proc_number::call()
+    } else {
+        leader
+    }
+}
+
 /// `RelationBuildDesc(targetRelId, insertIt)` (relcache.c): assemble a fresh
 /// relcache entry for `targetRelId` by reading `pg_class` (via
 /// [`ScanPgRelation`]), build its tuple descriptor, parse reloptions,
@@ -366,16 +377,27 @@ pub fn RelationBuildDesc(targetRelId: Oid, insertIt: bool) -> PgResult<Oid> {
                 relation.rd_islocaltemp = false;
             }
             PERSIST_TEMP => {
-                // Temp-namespace ownership resolution (isTempOrTempToastNamespace
-                // / GetTempNamespaceProcNumber) is namespace.c logic — a genuine
-                // cross-unit dependency. Seam-and-panic until that owner lands.
-                return Err(ereport(ERROR)
-                    .errmsg_internal(
-                        "relcache-build: temp-relation backend resolution \
-                         (isTempOrTempToastNamespace/GetTempNamespaceProcNumber) \
-                         is namespace.c (cross-unit); not yet landed",
-                    )
-                    .into_error());
+                let relnamespace = relation.rd_rel.relnamespace;
+                if backend_catalog_namespace_seams::is_temp_or_temp_toast_namespace::call(
+                    relnamespace,
+                )? {
+                    // Our own temp namespace: ProcNumberForTempRelations() (the
+                    // leader's proc number under parallelism, else MyProcNumber).
+                    relation.rd_backend = proc_number_for_temp_relations();
+                    relation.rd_islocaltemp = true;
+                } else {
+                    // A temp table, but not one of ours: resolve the owning
+                    // backend by parsing the pg_temp_<N> namespace name. The
+                    // result may coincide with MyProcNumber for a leftover entry
+                    // from a crashed backend, which is why rd_islocaltemp is set
+                    // separately (and stays false).
+                    relation.rd_backend =
+                        backend_catalog_namespace_seams::get_temp_namespace_proc_number::call(
+                            relnamespace,
+                        )?;
+                    debug_assert!(relation.rd_backend != INVALID_PROC_NUMBER);
+                    relation.rd_islocaltemp = false;
+                }
             }
             other => {
                 return Err(ereport(ERROR)

@@ -173,6 +173,12 @@ pub fn init_seams() {
     backend_catalog_namespace_seams::type_is_visible::set(crate::TypeIsVisible);
     backend_catalog_namespace_seams::is_temp_namespace::set(seam_is_temp_namespace);
     backend_catalog_namespace_seams::is_any_temp_namespace::set(crate::isAnyTempNamespace);
+    backend_catalog_namespace_seams::is_temp_or_temp_toast_namespace::set(
+        crate::isTempOrTempToastNamespace,
+    );
+    backend_catalog_namespace_seams::get_temp_namespace_proc_number::set(
+        crate::get_temp_namespace_proc_number_no_mcx,
+    );
     backend_catalog_namespace_seams::lookup_creation_namespace::set(seam_lookup_creation_namespace);
     backend_catalog_namespace_seams::get_conversion_oid::set(seam_get_conversion_oid);
     backend_catalog_namespace_seams::get_ts_parser_oid::set(seam_get_ts_parser_oid);
@@ -3440,6 +3446,17 @@ pub fn GetTempNamespaceProcNumber(mcx: Mcx<'_>, namespaceId: Oid) -> PgResult<Pr
         result = INVALID_PROC_NUMBER;
     }
     Ok(result)
+}
+
+/// `GetTempNamespaceProcNumber(namespaceId)` for callers with no `Mcx` of their
+/// own (relcache's `RelationBuildDesc`). The only allocation is the transient
+/// namespace-name string, which C `pfree`s before returning a bare scalar; here
+/// it lives in a short-lived child of `TopMemoryContext` that is dropped on
+/// return, so nothing of the caller's lifetime is involved.
+pub fn get_temp_namespace_proc_number_no_mcx(namespaceId: Oid) -> PgResult<ProcNumber> {
+    let top = backend_utils_mmgr_mcxt_seams::top_memory_context::call();
+    let scratch = top.context().new_child("GetTempNamespaceProcNumber");
+    GetTempNamespaceProcNumber(scratch.mcx(), namespaceId)
 }
 
 /// C `atoi(str)` — parse the leading decimal integer, defaulting to 0.

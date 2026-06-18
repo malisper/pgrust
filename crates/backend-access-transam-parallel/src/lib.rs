@@ -53,7 +53,7 @@ use backend_storage_ipc_dsm_core::dsm::{
 use backend_storage_ipc_shm_toc::{shm_toc_estimate, ShmToc};
 use backend_utils_error::{elog, ereport, PgResult};
 use mcx::{Allocator, Mcx};
-use types_core::{pid_t, Size, SubTransactionId, XLogRecPtr};
+use types_core::{pid_t, ProcNumber, Size, SubTransactionId, XLogRecPtr, INVALID_PROC_NUMBER};
 use types_tuple::Datum;
 use types_error::{
     ERRCODE_ADMIN_SHUTDOWN, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, FATAL, WARNING,
@@ -247,6 +247,10 @@ struct ParallelGlobals {
     my_fixed_parallel_state: usize,
     /// `static pid_t ParallelLeaderPid;`
     parallel_leader_pid: pid_t,
+    /// `ProcNumber ParallelLeaderProcNumber = INVALID_PROC_NUMBER;` (globals.c).
+    /// A parallel worker sets this from its leader's `FixedParallelState` in
+    /// `ParallelWorkerMain`; in any other backend it stays `INVALID_PROC_NUMBER`.
+    parallel_leader_proc_number: ProcNumber,
 }
 
 impl ParallelGlobals {
@@ -259,6 +263,7 @@ impl ParallelGlobals {
             initializing_parallel_worker: false,
             my_fixed_parallel_state: 0,
             parallel_leader_pid: 0,
+            parallel_leader_proc_number: INVALID_PROC_NUMBER,
         }
     }
 
@@ -2285,6 +2290,15 @@ fn install_fps_driver_seams() {
     rt::fps_get_last_xlog_end::set(|base| Ok(fps_driver::fps_get_last_xlog_end(base)));
     rt::fps_report_last_rec_end::set(|base, last_xlog_end| {
         fps_driver::fps_report_last_rec_end(base, last_xlog_end);
+        Ok(())
+    });
+
+    // `ParallelLeaderProcNumber` (globals.c): read by `GetProcNumberForTempRelations`
+    // and the bgworker-state serializers, written only by `ParallelWorkerMain`.
+    // Defaults to `INVALID_PROC_NUMBER` in any non-parallel-worker backend.
+    rt::parallel_leader_proc_number::set(|| with_globals(|g| g.parallel_leader_proc_number));
+    rt::set_parallel_leader_proc_number::set(|procno| {
+        with_globals(|g| g.parallel_leader_proc_number = procno);
         Ok(())
     });
 }

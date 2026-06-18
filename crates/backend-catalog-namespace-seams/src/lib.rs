@@ -6,6 +6,7 @@
 
 use mcx::{Mcx, PgVec};
 use types_core::Oid;
+use types_core::ProcNumber;
 use types_core::SubTransactionId;
 use types_error::PgResult;
 use types_namespace::FuncCandidateList;
@@ -36,6 +37,27 @@ seam_core::seam!(
     /// `pg_temp%` / `pg_toast_temp%` naming). May read `pg_namespace`.
     /// Consumed by pg_publication.c's `check_publication_add_schema`.
     pub fn is_any_temp_namespace<'mcx>(mcx: Mcx<'mcx>, namespace_id: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `isTempOrTempToastNamespace(namespaceId)` (namespace.c): is the namespace
+    /// THIS backend's temp-table or temp-toast namespace? Reads only the
+    /// per-backend `myTempNamespace`/`myTempToastNamespace` globals (no catalog
+    /// access). Consumed by relcache.c's `RelationBuildDesc` temp-relation
+    /// backend resolution.
+    pub fn is_temp_or_temp_toast_namespace(namespace_id: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `GetTempNamespaceProcNumber(namespaceId)` (namespace.c): the proc number
+    /// owning a temp-table namespace (mine or another backend's), or
+    /// `INVALID_PROC_NUMBER` if not a temp namespace. Resolves the owner by
+    /// parsing the `pg_temp_<N>` / `pg_toast_temp_<N>` name read from
+    /// `pg_namespace`. The transient namespace-name string is allocated and
+    /// freed inside the owner (C `pfree`s it), so the result is a bare scalar
+    /// and the seam needs no caller `Mcx`. Consumed by relcache.c's
+    /// `RelationBuildDesc` temp-relation backend resolution.
+    pub fn get_temp_namespace_proc_number(namespace_id: Oid) -> PgResult<ProcNumber>
 );
 
 seam_core::seam!(
