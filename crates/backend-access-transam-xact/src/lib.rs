@@ -1381,6 +1381,18 @@ pub fn PreventCommandIfReadOnly(cmdname: &str) -> PgResult<()> {
     Ok(())
 }
 
+/// `PreventCommandIfParallelMode` (utility.c:421)
+pub fn PreventCommandIfParallelMode(cmdname: &str) -> PgResult<()> {
+    if IsInParallelMode() {
+        return ereport(ERROR)
+            .errcode(ERRCODE_INVALID_TRANSACTION_STATE)
+            // translator: %s is name of a SQL command, eg CREATE
+            .errmsg(format!("cannot execute {cmdname} during a parallel operation"))
+            .finish(xact_location("PreventCommandIfParallelMode"));
+    }
+    Ok(())
+}
+
 /// `PreventInTransactionBlock` (xact.c:3648)
 pub fn PreventInTransactionBlock(isTopLevel: bool, stmtType: &str) -> PgResult<()> {
     // xact block?
@@ -1718,6 +1730,7 @@ pub fn init_seams() {
 
     seams::command_counter_increment::set(CommandCounterIncrement);
     seams::prevent_command_if_read_only::set(PreventCommandIfReadOnly);
+    seams::prevent_command_if_parallel_mode::set(PreventCommandIfParallelMode);
     seams::get_current_transaction_nest_level::set(GetCurrentTransactionNestLevel);
     seams::transaction_id_is_current_transaction_id::set(TransactionIdIsCurrentTransactionId);
     seams::is_transaction_state::set(IsTransactionState);
