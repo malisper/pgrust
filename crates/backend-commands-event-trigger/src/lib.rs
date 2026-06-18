@@ -243,10 +243,37 @@ fn event_triggers_active() -> bool {
     init_small_seams::is_under_postmaster::call() && vars::event_triggers.read()
 }
 
+/// `EventTriggerCommonSetup` (event_trigger.c) — the fast-exit head: look up the
+/// event cache and decide whether any trigger could possibly fire.
+///
+/// In C the function returns the OID run-list (`NIL` if empty). Here we split
+/// it at the cache lookup: if `EventCacheLookup(event)` is empty there is no run
+/// list and the caller early-returns (the fresh-cluster / type-tests case — no
+/// `pg_event_trigger` rows). Only when the cache is non-empty do we cross
+/// [`fire_seams::event_trigger_fire`], which carries the rest of
+/// `EventTriggerCommonSetup` (the `CreateCommandTag` + `filter_event_trigger`
+/// run-list build) and `EventTriggerInvoke` (the fmgr dispatch). That tail is
+/// the deeper firing sub-campaign and stays a loud panic until ported —
+/// unreachable until an event trigger actually exists.
+fn event_trigger_cache_nonempty(event: EventTriggerEvent) -> PgResult<bool> {
+    // C runs `EventCacheLookup` in `CurrentMemoryContext`; the result is only
+    // inspected for emptiness here, so charge it to a transient context that is
+    // freed on return (the run-list copy into the query context happens inside
+    // the firing tail, behind the seam, only when non-empty).
+    let cxt = MemoryContext::new("event trigger common-setup lookup");
+    let any = !evtcache_seams::event_cache_lookup::call(cxt.mcx(), event)?.is_empty();
+    Ok(any)
+}
+
 /// `EventTriggerDDLCommandStart` (event_trigger.c) — fire ddl_command_start
 /// triggers.
 pub fn event_trigger_ddl_command_start(parsetree: &Node) -> PgResult<()> {
     if !event_triggers_active() {
+        return Ok(());
+    }
+    // EventTriggerCommonSetup fast-exit: no triggers in the cache → NIL run-list
+    // → return. The firing tail is unreached on a fresh cluster.
+    if !event_trigger_cache_nonempty(EventTriggerEvent::DdlCommandStart)? {
         return Ok(());
     }
     fire_seams::event_trigger_fire::call(
@@ -265,6 +292,10 @@ pub fn event_trigger_ddl_command_end(parsetree: &Node) -> PgResult<()> {
     // Also do nothing if our state isn't set up; this can happen when an event
     // trigger fires another command from a function, etc.
     if !state_is_set() {
+        return Ok(());
+    }
+    // EventTriggerCommonSetup fast-exit (see ddl_command_start).
+    if !event_trigger_cache_nonempty(EventTriggerEvent::DdlCommandEnd)? {
         return Ok(());
     }
     fire_seams::event_trigger_fire::call(
@@ -288,6 +319,12 @@ pub fn event_trigger_sql_drop(parsetree: &Node) -> PgResult<()> {
             .unwrap_or(false)
     });
     if !have_drops {
+        return Ok(());
+    }
+
+    // EventTriggerCommonSetup fast-exit (see ddl_command_start): if no sql_drop
+    // trigger is in the cache the run-list is NIL and nothing fires.
+    if !event_trigger_cache_nonempty(EventTriggerEvent::SqlDrop)? {
         return Ok(());
     }
 
