@@ -12,13 +12,21 @@ use mcx::{Mcx, PgString, PgVec};
 
 use backend_nodes_equalfuncs::equal_node;
 use backend_utils_error::ereport;
-use types_error::{PgResult, ERRCODE_INVALID_TABLE_DEFINITION, ERROR};
+use types_error::{
+    PgResult, ERRCODE_DUPLICATE_COLUMN, ERRCODE_FEATURE_NOT_SUPPORTED,
+    ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_COLUMN, ERROR,
+};
 
-use types_nodes::ddlnodes::{IndexStmt, CONSTR_EXCLUSION, CONSTR_PRIMARY};
+use types_nodes::ddlnodes::{IndexElem, IndexStmt, CONSTR_EXCLUSION, CONSTR_PRIMARY};
 use types_nodes::nodes::Node;
+use types_nodes::parsestmt::ParseState;
+use types_nodes::rawnodes::{SORTBY_DEFAULT, SORTBY_NULLS_DEFAULT};
+use types_core::Oid;
 
+use backend_optimizer_util_plancat_ext_seams as plancat_ext;
 use backend_parser_parse_utilcmd_outward_seams as sx;
 
+use crate::column::make_not_null_constraint;
 use crate::core::{CreateStmtContext, NodePtr};
 use crate::errpos::parser_errposition;
 
@@ -254,6 +262,266 @@ fn transformIndexConstraint<'mcx>(
     cxt.nnconstraints.extend(extra_nn);
 
     Ok(index)
+}
+
+/// `strVal(lfirst(lc))` — read the string payload of a `String` value node.
+fn str_val<'a>(n: &'a NodePtr<'_>) -> &'a str {
+    match n.as_ref() {
+        Node::String(s) => s.sval.as_str(),
+        other => unreachable!("expected String value node, got {}", other.node_tag()),
+    }
+}
+
+/// A zeroed `IndexElem` whose only set field is `name` (the simple
+/// column-name index element makeNode(IndexElem) builds in
+/// `transformIndexConstraint`).
+fn make_index_elem<'mcx>(mcx: Mcx<'mcx>, key: &str) -> PgResult<NodePtr<'mcx>> {
+    mcx::alloc_in(
+        mcx,
+        Node::IndexElem(IndexElem {
+            name: Some(PgString::from_str_in(key, mcx)?),
+            expr: None,
+            indexcolname: None,
+            collation: PgVec::new_in(mcx),
+            opclass: PgVec::new_in(mcx),
+            opclassopts: PgVec::new_in(mcx),
+            ordering: SORTBY_DEFAULT,
+            nulls_ordering: SORTBY_NULLS_DEFAULT,
+        }),
+    )
+}
+
+/// The catalog-resident leaf of `transformIndexConstraint` (`parse_utilcmd.c`),
+/// installed behind [`sx::transformIndexConstraintCatalog`]. Given the partly
+/// built `IndexStmt`, the source `Constraint`, the table's `RangeVar`, the
+/// column / inherited-relation accumulators, and whether this is ALTER TABLE,
+/// it finishes the index definition (filling `indexParams` /
+/// `indexIncludingParams` / `excludeOpNames`) and returns the finished
+/// `IndexStmt` together with any PRIMARY-KEY-implied not-null constraints.
+#[allow(clippy::too_many_arguments)]
+pub fn transform_index_constraint_catalog<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &ParseState<'mcx>,
+    constraint: NodePtr<'mcx>,
+    mut index: NodePtr<'mcx>,
+    _relation: NodePtr<'mcx>,
+    _rel_oid: Oid,
+    isalter: bool,
+    mut columns: PgVec<'mcx, NodePtr<'mcx>>,
+    inh_relations: PgVec<'mcx, NodePtr<'mcx>>,
+) -> PgResult<(NodePtr<'mcx>, PgVec<'mcx, NodePtr<'mcx>>)> {
+    let con = match constraint.as_ref() {
+        Node::Constraint(c) => c,
+        other => unreachable!("transformIndexConstraintCatalog: not a Constraint: {}", other.node_tag()),
+    };
+    let contype = con.contype;
+    let is_primary = match index.as_ref() {
+        Node::IndexStmt(i) => i.primary,
+        _ => unreachable!("transformIndexConstraintCatalog: index is not an IndexStmt"),
+    };
+
+    // PRIMARY-KEY-implied not-null constraints accumulate here and are returned
+    // to the caller (which appends them to cxt->nnconstraints).
+    let mut extra_nn: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
+
+    // ALTER TABLE ADD CONSTRAINT USING INDEX: look up the existing index and
+    // verify it. Requires relcache/syscache by-OID reads not available here.
+    if con.indexname.is_some() {
+        if !isalter {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg("cannot use an existing index in CREATE TABLE")
+                .errposition(parser_errposition(pstate, con.location))
+                .into_error());
+        }
+        unimplemented!(
+            "transformIndexConstraint USING INDEX path needs index_open / \
+             get_relname_relid / GetDefaultOpClass by-OID catalog reads"
+        );
+    }
+
+    // EXCLUDE: break the (IndexElem, opname) pairs apart.
+    if contype == CONSTR_EXCLUSION {
+        for pair in con.exclusions.iter() {
+            let (elem, opname) = match pair.as_ref() {
+                Node::List(items) if items.len() == 2 => (
+                    mcx::alloc_in(mcx, items[0].clone_in(mcx)?)?,
+                    mcx::alloc_in(mcx, items[1].clone_in(mcx)?)?,
+                ),
+                _ => unreachable!("EXCLUDE pair is not a 2-element List"),
+            };
+            if let Node::IndexStmt(i) = index.as_mut() {
+                i.indexParams.push(elem);
+                i.excludeOpNames.push(opname);
+            }
+        }
+    } else {
+        // UNIQUE / PRIMARY KEY: a list of column names.
+        let n_keys = con.keys.len();
+        for (kidx, key_node) in con.keys.iter().enumerate() {
+            let key = str_val(key_node);
+            let mut found = false;
+            let mut col_idx: Option<usize> = None;
+
+            for (i, c) in columns.iter().enumerate() {
+                if let Node::ColumnDef(col) = c.as_ref() {
+                    if col.colname.as_ref().map(PgString::as_str) == Some(key) {
+                        found = true;
+                        col_idx = Some(i);
+                        break;
+                    }
+                }
+            }
+
+            if found {
+                let ci = col_idx.unwrap();
+                if contype == CONSTR_PRIMARY && !isalter {
+                    let is_not_null = match columns[ci].as_ref() {
+                        Node::ColumnDef(col) => col.is_not_null,
+                        _ => false,
+                    };
+                    if is_not_null {
+                        // Verify any existing not-null constraint isn't NO INHERIT.
+                        for nn in extra_nn.iter() {
+                            if let Node::Constraint(nnc) = nn.as_ref() {
+                                if nnc.keys.first().map(|k| str_val(k)) == Some(key) {
+                                    if nnc.is_no_inherit {
+                                        return Err(ereport(ERROR)
+                                            .errcode(ERRCODE_SYNTAX_ERROR)
+                                            .errmsg(alloc::format!(
+                                                "conflicting NO INHERIT declaration for not-null constraint on column \"{}\"",
+                                                key
+                                            ))
+                                            .into_error());
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    } else {
+                        if let Node::ColumnDef(col) = columns[ci].as_mut() {
+                            col.is_not_null = true;
+                        }
+                        let nn = make_not_null_constraint(mcx, key)?;
+                        extra_nn.push(mcx::alloc_in(mcx, Node::Constraint(nn))?);
+                    }
+                }
+                // (contype == PRIMARY && isalter) — Assert(column->is_not_null),
+                // already handled by ATPrepAddPrimaryKey; nothing to do.
+            } else if plancat_ext::system_attribute_by_name::call(key)?.is_some() {
+                // A system column in the new table; accept it (never null).
+                found = true;
+            } else if !inh_relations.is_empty() {
+                // Inherited tables — needs table_openrv on each parent.
+                unimplemented!(
+                    "transformIndexConstraint inherited-relation column search \
+                     needs table_openrv by name"
+                );
+            }
+
+            if !found && !isalter {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_UNDEFINED_COLUMN)
+                    .errmsg(alloc::format!("column \"{}\" named in key does not exist", key))
+                    .errposition(parser_errposition(pstate, con.location))
+                    .into_error());
+            }
+
+            // Check for PRIMARY KEY(foo, foo).
+            if let Node::IndexStmt(i) = index.as_ref() {
+                for iparam in i.indexParams.iter() {
+                    if let Node::IndexElem(e) = iparam.as_ref() {
+                        if e.name.as_ref().map(PgString::as_str) == Some(key) {
+                            let code = ERRCODE_DUPLICATE_COLUMN;
+                            let msg = if is_primary {
+                                alloc::format!("column \"{}\" appears twice in primary key constraint", key)
+                            } else {
+                                alloc::format!("column \"{}\" appears twice in unique constraint", key)
+                            };
+                            return Err(ereport(ERROR)
+                                .errcode(code)
+                                .errmsg(msg)
+                                .errposition(parser_errposition(pstate, con.location))
+                                .into_error());
+                        }
+                    }
+                }
+            }
+
+            // WITHOUT OVERLAPS: the last key must be a range/multirange type.
+            if con.without_overlaps && kidx == n_keys - 1 {
+                if found {
+                    unimplemented!(
+                        "transformIndexConstraint WITHOUT OVERLAPS range-type check \
+                         needs typenameTypeId / type_is_range by-OID reads"
+                    );
+                }
+            }
+
+            let iparam = make_index_elem(mcx, key)?;
+            if let Node::IndexStmt(i) = index.as_mut() {
+                i.indexParams.push(iparam);
+            }
+        }
+
+        if con.without_overlaps {
+            if con.keys.len() < 2 {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_SYNTAX_ERROR)
+                    .errmsg("constraint using WITHOUT OVERLAPS needs at least two columns")
+                    .into_error());
+            }
+            if let Node::IndexStmt(i) = index.as_mut() {
+                i.accessMethod = Some(PgString::from_str_in("gist", mcx)?);
+            }
+        }
+    }
+
+    // Add included columns (INCLUDE list). Like the simple-column path above,
+    // but no NOT NULL marking and no duplicate-column complaint.
+    for key_node in con.including.iter() {
+        let key = str_val(key_node);
+        let mut found = false;
+
+        for c in columns.iter() {
+            if let Node::ColumnDef(col) = c.as_ref() {
+                if col.colname.as_ref().map(PgString::as_str) == Some(key) {
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        if !found {
+            if plancat_ext::system_attribute_by_name::call(key)?.is_some() {
+                found = true;
+            } else if !inh_relations.is_empty() {
+                unimplemented!(
+                    "transformIndexConstraint INCLUDE inherited-relation column search \
+                     needs table_openrv by name"
+                );
+            }
+        }
+
+        if !found && !isalter {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_UNDEFINED_COLUMN)
+                .errmsg(alloc::format!("column \"{}\" named in key does not exist", key))
+                .errposition(parser_errposition(pstate, con.location))
+                .into_error());
+        }
+
+        let iparam = make_index_elem(mcx, key)?;
+        if let Node::IndexStmt(i) = index.as_mut() {
+            i.indexIncludingParams.push(iparam);
+        }
+    }
+
+    // `columns` may have been mutated (is_not_null); the caller's accumulator
+    // effect flows through `extra_nn`, so dropping the local copy is correct.
+    drop(columns);
+
+    Ok((index, extra_nn))
 }
 
 fn opt_clone<'mcx>(mcx: Mcx<'mcx>, s: &Option<PgString<'_>>) -> PgResult<Option<PgString<'mcx>>> {

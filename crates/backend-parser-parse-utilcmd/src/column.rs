@@ -688,7 +688,10 @@ fn system_func_name<'mcx>(mcx: Mcx<'mcx>, name: &str) -> PgResult<PgVec<'mcx, No
 
 /// `makeNotNullConstraint(makeString(colname))` (`nodes/makefuncs.c`) — build a
 /// fresh CONSTR_NOTNULL constraint over a single column key.
-fn make_not_null_constraint<'mcx>(mcx: Mcx<'mcx>, colname: &str) -> PgResult<Constraint<'mcx>> {
+pub(crate) fn make_not_null_constraint<'mcx>(
+    mcx: Mcx<'mcx>,
+    colname: &str,
+) -> PgResult<Constraint<'mcx>> {
     let mut keys: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
     keys.push(make_string(mcx, colname)?);
     Ok(Constraint {

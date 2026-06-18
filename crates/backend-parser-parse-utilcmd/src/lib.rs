@@ -73,4 +73,12 @@ pub fn init_seams() {
     backend_tcop_utility_out_seams::transform_create_stmt::set(transformCreateStmt);
     backend_tcop_utility_out_seams::transform_index_stmt::set(transformIndexStmt);
     backend_tcop_utility_out_seams::transform_stats_stmt::set(transformStatsStmt);
+
+    // The catalog-resident leaf of transformIndexConstraint (USING INDEX checks,
+    // column resolution against cxt.columns / system attrs, PRIMARY-KEY-implied
+    // not-null additions). Lives in index_constraint.rs; reached across the
+    // outward seam from transformIndexConstraint in this same crate.
+    backend_parser_parse_utilcmd_outward_seams::transformIndexConstraintCatalog::set(
+        index_constraint::transform_index_constraint_catalog,
+    );
 }

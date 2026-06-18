@@ -29,6 +29,10 @@ backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 # Outward dependency seams (catalog/relcache/partcache-bound leaves).
 backend-parser-parse-utilcmd-outward-seams = { path = "../backend-parser-parse-utilcmd-outward-seams" }
 
+# SystemAttributeByName lookup for index-constraint column resolution
+# (decls-only seam crate: leaf, cycle-free).
+backend-optimizer-util-plancat-ext-seams = { path = "../backend-optimizer-util-plancat-ext-seams" }
+
 # Merged sibling owner called directly (cycle-free): node equality for the
 # index-redundancy dedup (equal()).
 backend-nodes-equalfuncs = { path = "../backend-nodes-equalfuncs" }
