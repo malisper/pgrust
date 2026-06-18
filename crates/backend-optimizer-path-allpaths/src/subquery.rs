@@ -15,7 +15,8 @@
 //! `SS_process_ctes`), and `glob->subplans`/`subpaths`/`cte_plan_ids` are all
 //! populated by the time `set_rel_size` runs, so `set_cte_pathlist` is ported
 //! here in full. `set_worktable_pathlist` (the self-reference / recursive leg)
-//! still routes to its owner.
+//! reads `cteroot->non_recursive_path` (set by `generate_recursion_path`) and is
+//! likewise ported here in full.
 
 extern crate alloc;
 use alloc::format;
@@ -189,10 +190,75 @@ pub fn set_cte_pathlist<'mcx>(
 }
 
 /// `set_worktable_pathlist` (allpaths.c:3039) — the access path for a
-/// self-reference (recursive) CTE RTE. Reads `cteroot->non_recursive_path` after
-/// resolving the CTE by name; routed to the planner-entry owner.
-pub fn set_worktable_pathlist(root: &mut PlannerInfo, rel: RelId, rti: Index) -> PgResult<()> {
-    seams::set_worktable_pathlist::call(root, rel, rti)
+/// self-reference (recursive) CTE RTE. The non-recursive term's path is in the
+/// plan level processing the recursive UNION, which is one level *below* where
+/// the CTE comes from; walk `parent_root` `ctelevelsup - 1` times and read
+/// `cteroot->non_recursive_path`.
+pub fn set_worktable_pathlist<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    rel: RelId,
+    rti: Index,
+) -> PgResult<()> {
+    let rte = types_pathnodes::planner_run::planner_rt_fetch(run, root, rti);
+    let ctename = rte
+        .ctename
+        .as_ref()
+        .map(|s| s.as_str().to_string())
+        .unwrap_or_default();
+    let levelsup = rte.ctelevelsup;
+    if levelsup == 0 {
+        // shouldn't happen
+        return Err(PgError::error(format!("bad levelsup for CTE \"{ctename}\"")));
+    }
+
+    // C reads `cteroot->non_recursive_path->rows` by walking `parent_root`
+    // `ctelevelsup - 1` times to the recursion-planning root. PlannerInfo is not
+    // `Clone` in this model, so `parent_root` is not populated; the recursion
+    // planner instead stamps the non-recursive term's row estimate (and the
+    // work-table param id) onto this leaf subroot. Prefer the parent-root walk
+    // when present; otherwise use the stamped carrier.
+    let cte_rows = {
+        let mut up = levelsup - 1;
+        let mut cteroot: &PlannerInfo = root;
+        let mut walked = true;
+        while up > 0 {
+            match cteroot.parent_root.as_deref() {
+                Some(p) => {
+                    cteroot = p;
+                    up -= 1;
+                }
+                None => {
+                    walked = false;
+                    break;
+                }
+            }
+        }
+        if walked {
+            if let Some(ctepath) = cteroot.non_recursive_path {
+                cteroot.path(ctepath).base().rows
+            } else {
+                root.non_recursive_rows.ok_or_else(|| {
+                    PgError::error(format!("could not find path for CTE \"{ctename}\""))
+                })?
+            }
+        } else {
+            root.non_recursive_rows.ok_or_else(|| {
+                PgError::error(format!("could not find path for CTE \"{ctename}\""))
+            })?
+        }
+    };
+
+    // Mark rel with estimated output rows, width, etc.
+    backend_optimizer_path_costsize::sizeest::set_cte_size_estimates(run, root, rel, cte_rows);
+
+    // We don't support pushing join clauses into a worktable scan's quals, but
+    // it could still have required parameterization due to LATERAL refs.
+    let required_outer = bms::relids_copy::call(&root.rel(rel).lateral_relids);
+
+    let path = pathnode::create_worktablescan_path::call(root, run, rel, &required_outer)?;
+    pathnode::add_path::call(root, rel, path)?;
+    Ok(())
 }
 
 /// Planner-entry-owned seams for the subquery/CTE vertical (Query-value
@@ -208,9 +274,5 @@ pub mod seams {
         /// `set_subquery_pathlist(root, rel, rti, rte)` (allpaths.c) — runs
         /// `subquery_planner` over `rte->subquery` and builds SubqueryScan paths.
         pub fn set_subquery_pathlist(root: &mut PlannerInfo, rel: RelId, rti: Index) -> PgResult<()>
-    );
-    seam_core::seam!(
-        /// `set_worktable_pathlist(root, rel, rti, rte)` (allpaths.c).
-        pub fn set_worktable_pathlist(root: &mut PlannerInfo, rel: RelId, rti: Index) -> PgResult<()>
     );
 }

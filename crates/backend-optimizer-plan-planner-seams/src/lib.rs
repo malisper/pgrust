@@ -51,6 +51,7 @@ seam_core::seam!(
         run: &mut PlannerRun<'mcx>,
         glob: PlannerGlobal,
         subquery_id: QueryId,
+        recursion_carry: Option<(i32, f64)>,
         has_recursion: bool,
         tuple_fraction: f64,
     ) -> PgResult<PlannerInfo>

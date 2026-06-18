@@ -343,7 +343,7 @@ pub fn set_rel_size<'mcx>(
             RTE_VALUES => backend_optimizer_path_costsize::sizeest::set_values_size_estimates(run, root, rel),
             RTE_CTE => {
                 if rte::rte_self_reference::call(run, root, rti) {
-                    subquery::set_worktable_pathlist(root, rel, rti)?;
+                    subquery::set_worktable_pathlist(run, root, rel, rti)?;
                 } else {
                     subquery::set_cte_pathlist(run, root, rel, rti)?;
                 }

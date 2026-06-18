@@ -600,15 +600,17 @@ fn subquery_planner_for_setop_impl<'mcx>(
     run: &mut PlannerRun<'mcx>,
     glob: PlannerGlobal,
     subquery_id: types_pathnodes::QueryId,
+    recursion_carry: Option<(i32, f64)>,
     has_recursion: bool,
     tuple_fraction: f64,
 ) -> PgResult<PlannerInfo> {
-    subquery_planner(
+    subquery_planner_carried(
         mcx,
         run,
         glob,
         subquery_id,
         None,
+        recursion_carry,
         has_recursion,
         tuple_fraction,
         None,
@@ -629,6 +631,27 @@ fn subquery_planner<'mcx>(
     tuple_fraction: f64,
     setops: Option<()>,
 ) -> PgResult<PlannerInfo> {
+    subquery_planner_carried(
+        mcx, run, glob, parse_id, parent_query_level, None, has_recursion,
+        tuple_fraction, setops,
+    )
+}
+
+/// As [`subquery_planner`], but with the recursive-term carrier
+/// (`(wt_param_id, non_recursive_rows)`) seeded onto the root before its access
+/// paths (including the self-reference WorkTableScan) are built.
+#[allow(clippy::too_many_arguments)]
+fn subquery_planner_carried<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &mut PlannerRun<'mcx>,
+    glob: PlannerGlobal,
+    parse_id: types_pathnodes::QueryId,
+    parent_query_level: Option<u32>,
+    recursion_carry: Option<(i32, f64)>,
+    has_recursion: bool,
+    tuple_fraction: f64,
+    setops: Option<()>,
+) -> PgResult<PlannerInfo> {
     // root = makeNode(PlannerInfo); + field init (C:664-703).
     let mut root = PlannerInfo::default();
     root.parse = parse_id;
@@ -639,7 +662,22 @@ fn subquery_planner<'mcx>(
         None => 1,
     };
     root.hasRecursion = has_recursion;
-    root.wt_param_id = -1; // hasRecursion=false on the top SELECT path.
+    // For a recursive WITH query, assign the work-table PARAM_EXEC id now so the
+    // self-reference's WorkTableScan and the RecursiveUnion path agree (C:698).
+    root.wt_param_id = if has_recursion {
+        backend_optimizer_util_paramassign_seams::assign_special_exec_param::call(&mut root)?
+    } else {
+        -1
+    };
+
+    // Seed the recursive-term carrier (see set_worktable_pathlist): the
+    // work-table param id this leaf's WorkTableScan reads (overriding the -1 just
+    // assigned for a non-recursive leaf), and the non-recursive term's row
+    // estimate used to size it. Set before make_one_rel builds the scan path.
+    if let Some((wt_param_id, nr_rows)) = recursion_carry {
+        root.wt_param_id = wt_param_id;
+        root.non_recursive_rows = Some(nr_rows);
+    }
 
     // Top-level join domain (C:710).
     root.join_domains.push(JoinDomain { jd_relids: None });
@@ -6439,7 +6477,7 @@ pub fn init_seams() {
                 Some(parent_level),
                 has_recursion,
                 tuple_fraction,
-                None,
+                None, // setops
             )?;
 
             // final_rel = fetch_upper_rel(subroot, UPPERREL_FINAL, NULL);

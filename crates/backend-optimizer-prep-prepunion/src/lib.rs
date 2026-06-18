@@ -340,11 +340,26 @@ fn plan_leaf_subquery<'mcx>(
         .glob
         .take()
         .expect("recurse_set_operations: outer root has no glob");
+    // When planning the recursive term of a recursive UNION, C passes the
+    // recursion-planning `root` as the leaf's `parent_root` so the self-reference
+    // WorkTableScan can read `cteroot->non_recursive_path` and `wt_param_id`.
+    // PlannerInfo is not `Clone` here, so instead stamp the two values the
+    // worktable scan needs (the work-table param id and the non-recursive term's
+    // row estimate) onto the leaf subroot before its access paths are built.
+    let recursion_carry: Option<(i32, f64)> =
+        if root.hasRecursion && root.non_recursive_path.is_some() {
+            let nrp = root.non_recursive_path.unwrap();
+            Some((root.wt_param_id, root.path(nrp).base().rows))
+        } else {
+            None
+        };
+
     let mut subroot = backend_optimizer_plan_planner_seams::subquery_planner_for_setop::call(
         mcx,
         run,
         glob,
         subquery_id,
+        recursion_carry,
         false,
         root.tuple_fraction,
     )?;
@@ -678,16 +693,111 @@ fn sorted_input_for_setop(
 // ===========================================================================
 
 fn generate_recursion_path<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _run: &mut PlannerRun<'mcx>,
-    _root: &mut PlannerInfo,
-    _set_op: &SetOperationStmt<'mcx>,
-    _refnames_tlist: &[NodeId],
+    mcx: Mcx<'mcx>,
+    run: &mut PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    set_op: &SetOperationStmt<'mcx>,
+    refnames_tlist: &[NodeId],
 ) -> PgResult<(RelId, Vec<NodeId>)> {
-    Err(PgError::error(String::from(
-        "generate_recursion_path: recursive UNION (WITH RECURSIVE) set-op planning is not yet \
-         ported (prepunion.c:356)",
-    )))
+    // Parser should have rejected other cases (C:374).
+    if set_op.op != SetOperation::SETOP_UNION {
+        return Err(PgError::error(String::from(
+            "only UNION queries can be recursive",
+        )));
+    }
+    // Worktable ID should be assigned (C:376).
+    debug_assert!(root.wt_param_id >= 0);
+
+    let larg = node_ref(&set_op.larg).expect("recursive UNION: NULL larg");
+    let rarg = node_ref(&set_op.rarg).expect("recursive UNION: NULL rarg");
+    let lnode = decode_setop_node(mcx, larg)?;
+    let rnode = decode_setop_node(mcx, rarg)?;
+
+    // Process the left and right inputs separately, without combining them into
+    // an Append (C:382).
+    let mut lpath_tlist: Vec<NodeId> = Vec::new();
+    let mut lpath_trivial = true;
+    let lrel = recurse_set_operations(
+        mcx, run, root, &lnode, None, &set_op.colTypes, &set_op.colCollations,
+        refnames_tlist, &mut lpath_tlist, &mut lpath_trivial,
+    )?;
+    if root.rel(lrel).rtekind == RTE_SUBQUERY {
+        build_setop_child_paths(mcx, run, root, lrel, lpath_trivial, &lpath_tlist, &[], None)?;
+    }
+    let lpath = root
+        .rel(lrel)
+        .cheapest_total_path
+        .expect("generate_recursion_path: non-recursive term has no cheapest_total_path");
+
+    // The right (recursive) path will want to look at the left one (C:394).
+    root.non_recursive_path = Some(lpath);
+    let mut rpath_tlist: Vec<NodeId> = Vec::new();
+    let mut rpath_trivial = true;
+    let rrel = recurse_set_operations(
+        mcx, run, root, &rnode, None, &set_op.colTypes, &set_op.colCollations,
+        refnames_tlist, &mut rpath_tlist, &mut rpath_trivial,
+    )?;
+    if root.rel(rrel).rtekind == RTE_SUBQUERY {
+        build_setop_child_paths(mcx, run, root, rrel, rpath_trivial, &rpath_tlist, &[], None)?;
+    }
+    let rpath = root
+        .rel(rrel)
+        .cheapest_total_path
+        .expect("generate_recursion_path: recursive term has no cheapest_total_path");
+    root.non_recursive_path = None;
+
+    // Generate tlist for the RecursiveUnion path node — same as the Append cases
+    // (C:409).
+    let tlist_list = alloc::vec![lpath_tlist.clone(), rpath_tlist.clone()];
+    let tlist = generate_append_tlist(
+        root,
+        &set_op.colTypes,
+        &set_op.colCollations,
+        &tlist_list,
+        refnames_tlist,
+    )?;
+
+    // Build result relation (C:419).
+    let relids = bms::relids_union::call(&root.rel(lrel).relids, &root.rel(rrel).relids);
+    let result_rel = relnode::fetch_upper_rel(root, UPPERREL_SETOP, &relids);
+    set_rel_reltarget_from_tlist(root, result_rel, &tlist);
+
+    // If UNION (not ALL), identify the grouping operators (C:426).
+    let lrows = root.path(lpath).base().rows;
+    let rrows = root.path(rpath).base().rows;
+    let (group_list, d_num_groups) = if set_op.all {
+        (Vec::new(), 0.0)
+    } else {
+        let group_list = generate_setop_grouplist(mcx, root, set_op, &tlist)?;
+        // We only support hashing here (C:435).
+        let group_clauses_owned: Vec<SortGroupClause> =
+            group_list.iter().map(|&id| *root.sortgroupclause(id)).collect();
+        if !tlist::grouping_is_hashable(&group_clauses_owned) {
+            return Err(PgError::error(String::from(
+                "could not implement recursive UNION: all column datatypes must be hashable",
+            )));
+        }
+        // Worst case: distinct groups == total input size (C:446).
+        (group_list, lrows + rrows * 10.0)
+    };
+
+    // Make the path node (C:451).
+    let target = make_pathtarget(root, &tlist);
+    let wt_param = root.wt_param_id;
+    let path = pathnode::create::create_recursiveunion_path(
+        root,
+        result_rel,
+        lpath,
+        rpath,
+        Box::new(target),
+        group_list,
+        wt_param,
+        d_num_groups,
+    )?;
+    pathnode::add_path(root, result_rel, path)?;
+    postprocess_setop_rel(root, result_rel)?;
+
+    Ok((result_rel, tlist))
 }
 
 // ===========================================================================

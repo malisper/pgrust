@@ -2352,6 +2352,12 @@ pub struct PlannerInfo {
     /// `struct Path *non_recursive_path` — path for the non-recursive term
     /// (handle into `path_arena`).
     pub non_recursive_path: Option<PathId>,
+    /// Owned-model carrier for the non-recursive term's row estimate. C resolves
+    /// `cteroot->non_recursive_path->rows` by walking `parent_root` from the
+    /// recursive term's subroot; PlannerInfo is not `Clone`, so the recursion
+    /// planner instead stamps the row count onto the recursive-term leaf subroot
+    /// here (alongside its inherited `wt_param_id`). `None` when not recursive.
+    pub non_recursive_rows: Option<f64>,
     /// `Relids curOuterRels` — outer rels above the current node (createplan).
     #[allow(non_snake_case)]
     pub curOuterRels: Relids,
