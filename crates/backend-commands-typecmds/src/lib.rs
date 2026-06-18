@@ -2316,8 +2316,9 @@ pub fn AlterDomainDefault<'mcx>(
         } else {
             let expr = default_expr.unwrap();
             /* require a valid textual representation (deparse) */
-            default_value = Some(me::deparse_expression::call(expr.clone_in(mcx)?)?);
-            default_bin = Some(me::node_to_string::call(expr)?);
+            default_value =
+                Some(me::deparse_expression::call(mcx, expr.clone_in(mcx)?)?.as_str().to_string());
+            default_bin = Some(me::node_to_string::call(mcx, expr)?.as_str().to_string());
         }
     }
     /* else: ALTER ... DROP DEFAULT — both None */
@@ -2747,8 +2748,13 @@ pub fn DefineDomain<'mcx>(
                         defaultValueBin = None;
                     } else {
                         let expr = default_expr.unwrap();
-                        defaultValue = Some(me::deparse_expression::call(expr.clone_in(mcx)?)?);
-                        defaultValueBin = Some(me::node_to_string::call(expr)?);
+                        defaultValue = Some(
+                            me::deparse_expression::call(mcx, expr.clone_in(mcx)?)?
+                                .as_str()
+                                .to_string(),
+                        );
+                        defaultValueBin =
+                            Some(me::node_to_string::call(mcx, expr)?.as_str().to_string());
                     }
                 } else {
                     defaultValue = None;

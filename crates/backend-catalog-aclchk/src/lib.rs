@@ -46,7 +46,8 @@ use types_snapshot::SnapshotData;
 use backend_utils_error::ereport;
 
 use backend_catalog_objectaddress::consts::{
-    DatabaseRelationId, ForeignDataWrapperRelationId, ForeignServerRelationId, LanguageRelationId,
+    CollationRelationId, DatabaseRelationId, ForeignDataWrapperRelationId, ForeignServerRelationId,
+    LanguageRelationId,
     LargeObjectMetadataRelationId, LargeObjectRelationId, NamespaceRelationId, ProcedureRelationId,
     RelationRelationId, TableSpaceRelationId, TypeRelationId,
 };
@@ -1314,6 +1315,21 @@ pub fn init_seams() {
         aclcheck_error_type(ctx.mcx(), aclerr, type_oid)
     });
     seam::error_conflicting_def_elem::set(errorConflictingDefElem);
+
+    // collationcmds.c (ALTER COLLATION owner check) — `object_ownercheck(
+    // CollationRelationId, ...)` and `aclcheck_error(ACLCHECK_NOT_OWNER,
+    // OBJECT_COLLATION, ...)`.
+    backend_commands_collationcmds_seams::collation_ownercheck::set(|coll_oid, roleid| {
+        let ctx = MemoryContext::new("collation_ownercheck");
+        object_ownercheck(ctx.mcx(), CollationRelationId, coll_oid, roleid)
+    });
+    backend_commands_collationcmds_seams::aclcheck_error_not_owner_collation::set(|collname| {
+        aclcheck_error(
+            ACLCHECK_NOT_OWNER,
+            types_nodes::parsenodes::ObjectType::Collation,
+            Some(collname),
+        )
+    });
 
     // NOTE (F1 STOP): get_user_default_acl, record_dependency_on_new_acl
     // (ArrayType-payload + DEFACLROLENSPOBJ blocked) and the three F2/F3

@@ -164,18 +164,20 @@ seam_core::seam!(
     /// human-readable SQL text of a cooked default/check expression (for
     /// `typdefault` / pg_dump).
     ///
-    /// OUTWARD seam: ruleutils.c is unported (NEEDS_DECOMP). PANICS until it lands.
-    pub fn deparse_expression<'mcx>(expr: types_nodes::nodes::Node<'mcx>) -> PgResult<String>
+    pub fn deparse_expression<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        expr: types_nodes::nodes::Node<'mcx>,
+    ) -> PgResult<mcx::PgString<'mcx>>
 );
 
 seam_core::seam!(
     /// `nodeToString(expr)` (nodes/outfuncs.c): the serialized node text of a
     /// cooked default/check expression (for `typdefaultbin` / `conbin`).
     ///
-    /// OUTWARD seam: the cooked node only exists on the parser-cook path that is
-    /// itself seam-panicked (`cook_default`), so this serialization surface is
-    /// reached only there. PANICS until that path is wired.
-    pub fn node_to_string<'mcx>(node: types_nodes::nodes::Node<'mcx>) -> PgResult<String>
+    pub fn node_to_string<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        node: types_nodes::nodes::Node<'mcx>,
+    ) -> PgResult<mcx::PgString<'mcx>>
 );
 
 seam_core::seam!(

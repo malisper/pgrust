@@ -202,6 +202,16 @@ pub fn init_seams() {
     // -- namespace_range_index_pubsub ---------------------------------------
     seams::get_namespace_name::set(namespace_range_index_pubsub::get_namespace_name);
     seams::get_namespace_name_or_temp::set(namespace_range_index_pubsub::get_namespace_name_or_temp);
+
+    // collationcmds.c re-declares `get_namespace_name` (lsyscache.c) returning an
+    // owned `Option<String>` (no caller `mcx`); convert from the by-`mcx`
+    // owner here.
+    backend_commands_collationcmds_seams::get_namespace_name::set(|nspid| {
+        let scratch = mcx::MemoryContext::new("get_namespace_name");
+        let name = namespace_range_index_pubsub::get_namespace_name(scratch.mcx(), nspid)?;
+        let owned = name.map(|s| s.as_str().to_string());
+        Ok(owned)
+    });
     seams::get_am_name::set(namespace_range_index_pubsub::get_am_name);
     seams::get_range_subtype::set(namespace_range_index_pubsub::get_range_subtype);
     seams::get_range_collation::set(namespace_range_index_pubsub::get_range_collation);

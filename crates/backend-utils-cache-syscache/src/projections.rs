@@ -1552,10 +1552,14 @@ pub(crate) fn database_syscache_hash_value(dbid: Oid) -> PgResult<u32> {
 const Anum_pg_database_datlocprovider_loc: i32 = 5;
 const Anum_pg_database_datcollate_loc: i32 = 13;
 const Anum_pg_database_datctype_loc: i32 = 14;
+const Anum_pg_database_datlocale_loc: i32 = 15;
 const Anum_pg_collation_collname_loc: i32 = 2;
 const Anum_pg_collation_collnamespace_loc: i32 = 3;
 const Anum_pg_collation_collprovider_loc: i32 = 5;
+const Anum_pg_collation_collisdeterministic_loc: i32 = 6;
+const Anum_pg_collation_collencoding_loc: i32 = 7;
 const Anum_pg_collation_collcollate_loc: i32 = 8;
+const Anum_pg_collation_collicurules_loc: i32 = 11;
 const Anum_pg_collation_collctype_loc: i32 = 9;
 const Anum_pg_collation_colllocale_loc: i32 = 10;
 const Anum_pg_collation_collversion_loc: i32 = 12;
@@ -1587,6 +1591,44 @@ pub(crate) fn database_locale_row(
         collate,
         ctype,
     }))
+}
+
+/// `SearchSysCache1(DATABASEOID, MyDatabaseId)` for the
+/// `pg_collation_actual_version(DEFAULT_COLLATION_OID)` path (collationcmds.c):
+/// `datlocprovider`, then `datcollate` (LIBC) or `datlocale` (else). `Ok(None)`
+/// on the "database with OID %u does not exist" path.
+pub(crate) fn database_locale_for_default_collation() -> PgResult<Option<(i8, String)>> {
+    let dbid = backend_utils_init_small_seams::my_database_id::call();
+    let scratch = MemoryContext::new("database_locale_for_default_collation projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, DATABASEOID, SysCacheKey::Value(KeyDatum::from_oid(dbid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let provider = getattr_char(mcx, DATABASEOID, &tup, Anum_pg_database_datlocprovider_loc)?;
+    // COLLPROVIDER_LIBC == 'c'
+    let attnum = if provider == b'c' as i8 {
+        Anum_pg_database_datcollate_loc
+    } else {
+        Anum_pg_database_datlocale_loc
+    };
+    let locale = getattr_option_text(mcx, DATABASEOID, &tup, attnum)?
+        .ok_or_else(|| PgError::error(format!("null locale for database {dbid}")))?;
+    ReleaseSysCache(tup);
+    Ok(Some((provider, locale)))
+}
+
+/// `SearchSysCacheExists1(NAMESPACEOID, ObjectIdGetDatum(nspid))` — whether the
+/// schema exists (collationcmds.c `pg_import_system_collations` target check).
+pub(crate) fn namespace_exists(nspid: Oid) -> PgResult<bool> {
+    let scratch = MemoryContext::new("namespace_exists probe");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, NAMESPACEOID, SysCacheKey::Value(KeyDatum::from_oid(nspid)))?;
+    let exists = tuple.is_some();
+    if let Some(tup) = tuple {
+        ReleaseSysCache(tup);
+    }
+    Ok(exists)
 }
 
 /// `SearchSysCache1(COLLOID, collid)` + the locale-relevant `pg_collation`
@@ -1622,6 +1664,62 @@ pub(crate) fn collation_locale_row(
         locale,
         version,
     }))
+}
+
+/// `SearchSysCache1(COLLOID, ObjectIdGetDatum(collid))` projected to the full
+/// `pg_collation` row collationcmds.c reads back (`pg_collation_actual_version`
+/// / `AlterCollation`). `Ok(None)` on a cache miss.
+pub(crate) fn collation_row_by_oid(
+    collid: Oid,
+) -> PgResult<Option<backend_commands_collationcmds_seams::CollationRow>> {
+    let scratch = MemoryContext::new("collation_row_by_oid projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, COLLOID, SysCacheKey::Value(KeyDatum::from_oid(collid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let provider = getattr_char(mcx, COLLOID, &tup, Anum_pg_collation_collprovider_loc)?;
+    let is_deterministic = getattr_bool(mcx, COLLOID, &tup, Anum_pg_collation_collisdeterministic_loc)?;
+    let encoding = getattr_i32(mcx, COLLOID, &tup, Anum_pg_collation_collencoding_loc)?;
+    let collate = getattr_option_text(mcx, COLLOID, &tup, Anum_pg_collation_collcollate_loc)?;
+    let ctype = getattr_option_text(mcx, COLLOID, &tup, Anum_pg_collation_collctype_loc)?;
+    let locale = getattr_option_text(mcx, COLLOID, &tup, Anum_pg_collation_colllocale_loc)?;
+    let icurules = getattr_option_text(mcx, COLLOID, &tup, Anum_pg_collation_collicurules_loc)?;
+    let version = getattr_option_text(mcx, COLLOID, &tup, Anum_pg_collation_collversion_loc)?;
+    ReleaseSysCache(tup);
+    Ok(Some(backend_commands_collationcmds_seams::CollationRow {
+        provider,
+        is_deterministic,
+        encoding,
+        collate,
+        ctype,
+        locale,
+        icurules,
+        version,
+    }))
+}
+
+/// `SearchSysCacheExists3(COLLNAMEENCNSP, name, enc, nspid)` — the
+/// `IsThereCollationInNamespace` existence probe collationcmds.c uses.
+pub(crate) fn collation_name_enc_nsp_exists(
+    collname: String,
+    enc: i32,
+    nspid: Oid,
+) -> PgResult<bool> {
+    let scratch = MemoryContext::new("collation_name_enc_nsp_exists probe");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache3(
+        mcx,
+        COLLNAMEENCNSP,
+        SysCacheKey::Str(&collname),
+        SysCacheKey::Value(KeyDatum::from_i32(enc)),
+        SysCacheKey::Value(KeyDatum::from_oid(nspid)),
+    )?;
+    let exists = tuple.is_some();
+    if let Some(tup) = tuple {
+        ReleaseSysCache(tup);
+    }
+    Ok(exists)
 }
 
 /// `SearchSysCache1(CONSTROID, ObjectIdGetDatum(conoid))` projected to the
@@ -3583,6 +3681,7 @@ const Anum_pg_amop_amoprighttype_b2: i32 = 4;
 const Anum_pg_amop_amopopr_b2: i32 = 7;
 const Anum_pg_amproc_oid_b2: i32 = 1;
 const Anum_pg_authid_rolsuper_b2: i32 = 3;
+const Anum_pg_authid_rolcreatedb: i32 = 6;
 const Anum_pg_database_datdba_b2: i32 = 3;
 const Anum_pg_constraint_conname_b2: i32 = 2;
 const Anum_pg_constraint_contype_b2: i32 = 4;
@@ -4328,6 +4427,18 @@ pub(crate) fn search_authid_rolsuper(roleid: Oid) -> PgResult<Option<bool>> {
     let rolsuper = getattr_bool(mcx, AUTHOID, &tup, Anum_pg_authid_rolsuper_b2)?;
     ReleaseSysCache(tup);
     Ok(Some(rolsuper))
+}
+
+pub(crate) fn search_authid_rolcreatedb(roleid: Oid) -> PgResult<Option<bool>> {
+    let scratch = MemoryContext::new("syscache authid rolcreatedb");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, AUTHOID, SysCacheKey::Value(KeyDatum::from_oid(roleid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let rolcreatedb = getattr_bool(mcx, AUTHOID, &tup, Anum_pg_authid_rolcreatedb)?;
+    ReleaseSysCache(tup);
+    Ok(Some(rolcreatedb))
 }
 
 pub(crate) fn database_datdba(dbid: Oid) -> PgResult<Option<Oid>> {

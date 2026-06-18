@@ -172,6 +172,7 @@ pub fn init_all() {
     backend_commands_portalcmds::init_seams();
     backend_commands_seclabel::init_seams();
     backend_commands_sequence::init_seams();
+    backend_commands_collationcmds::init_seams();
     backend_commands_tablespace::init_seams();
     backend_commands_trigger::init_seams();
     backend_commands_tsearchcmds::init_seams();

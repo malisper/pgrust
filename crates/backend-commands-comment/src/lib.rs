@@ -442,6 +442,19 @@ fn reduce_empty(comment: Option<&str>) -> Option<&str> {
 /// Present and wired into `seams-init::init_all()` for the registry invariant.
 pub fn init_seams() {
     backend_commands_comment_seams::DeleteComments::set(DeleteComments);
+
+    // collationcmds.c attaches an ICU display-name comment to the collation it
+    // imports: `CreateComments(collid, CollationRelationId, 0, comment)`.
+    backend_commands_collationcmds_seams::create_comment::set(|collid, comment| {
+        let scratch = mcx::MemoryContext::new("create_comment");
+        CreateComments(
+            scratch.mcx(),
+            collid,
+            types_catalog::catalog::COLLATION_RELATION_ID,
+            0,
+            Some(comment),
+        )
+    });
 }
 
 #[cfg(test)]

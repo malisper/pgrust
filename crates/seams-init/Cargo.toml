@@ -181,6 +181,7 @@ backend-commands-policy = { path = "../backend-commands-policy" }
 backend-commands-portalcmds = { path = "../backend-commands-portalcmds" }
 backend-commands-seclabel = { path = "../backend-commands-seclabel" }
 backend-commands-sequence = { path = "../backend-commands-sequence" }
+backend-commands-collationcmds = { path = "../backend-commands-collationcmds" }
 backend-commands-tablespace = { path = "../backend-commands-tablespace" }
 backend-commands-trigger = { path = "../backend-commands-trigger" }
 backend-commands-tsearchcmds = { path = "../backend-commands-tsearchcmds" }

@@ -4279,6 +4279,7 @@ dependencies = [
  "backend-catalog-objectaddress",
  "backend-catalog-pg-largeobject-seams",
  "backend-catalog-pg-shdepend-seams",
+ "backend-commands-collationcmds-seams",
  "backend-commands-user-seams",
  "backend-utils-adt-acl",
  "backend-utils-adt-format-type-seams",
@@ -6167,7 +6168,9 @@ dependencies = [
  "backend-catalog-aclchk-seams",
  "backend-catalog-namespace",
  "backend-commands-collationcmds-seams",
+ "backend-commands-define",
  "backend-commands-define-seams",
+ "backend-storage-file-fd-seams",
  "backend-utils-adt-pg-locale-seams",
  "backend-utils-error",
  "backend-utils-fmgr-core",
@@ -6204,6 +6207,7 @@ version = "0.0.0"
 dependencies = [
  "backend-catalog-objectaddress-seams",
  "backend-catalog-pg-class",
+ "backend-commands-collationcmds-seams",
  "backend-commands-comment-seams",
  "backend-commands-dbcommands-seams",
  "backend-utils-error",
@@ -11374,6 +11378,7 @@ dependencies = [
 name = "backend-nodes-outfuncs"
 version = "0.0.0"
 dependencies = [
+ "backend-commands-typecmds-seams",
  "backend-nodes-core-seams",
  "mcx",
  "types-error",
@@ -13148,6 +13153,7 @@ name = "backend-parser-small1"
 version = "0.0.0"
 dependencies = [
  "backend-access-table-table",
+ "backend-commands-collationcmds-seams",
  "backend-nodes-core",
  "backend-parser-analyze-seams",
  "backend-parser-scansup-seams",
@@ -18790,6 +18796,7 @@ dependencies = [
 name = "backend-utils-adt-pg-locale"
 version = "0.0.0"
 dependencies = [
+ "backend-commands-collationcmds-seams",
  "backend-utils-adt-pg-locale-builtin-seams",
  "backend-utils-adt-pg-locale-catalog-seams",
  "backend-utils-adt-pg-locale-env-seams",
@@ -19159,6 +19166,7 @@ name = "backend-utils-adt-ruleutils"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-relation-seams",
+ "backend-commands-typecmds-seams",
  "backend-nodes-core-seams",
  "backend-nodes-nodeFuncs-seams",
  "backend-nodes-read-seams",
@@ -19816,6 +19824,7 @@ dependencies = [
  "backend-access-index-amapi-seams",
  "backend-bootstrap-bootstrap-seams",
  "backend-catalog-namespace-seams",
+ "backend-commands-collationcmds-seams",
  "backend-nodes-copyfuncs-pc-seams",
  "backend-nodes-makefuncs-seams",
  "backend-nodes-read-seams",
@@ -20114,6 +20123,8 @@ version = "0.0.0"
 dependencies = [
  "backend-access-common-detoast-seams",
  "backend-access-common-heaptuple",
+ "backend-commands-collationcmds-seams",
+ "backend-commands-dbcommands-seams",
  "backend-nodes-read-seams",
  "backend-optimizer-util-clauses-seams",
  "backend-storage-lmgr-lock-seams",
@@ -20631,6 +20642,7 @@ dependencies = [
 name = "backend-utils-init-small"
 version = "0.0.0"
 dependencies = [
+ "backend-commands-collationcmds-seams",
  "backend-postmaster-postmaster-seams",
  "backend-tcop-postgres-seams",
  "backend-utils-adt-acl-seams",
@@ -21557,6 +21569,7 @@ dependencies = [
 name = "common-extra-encnames-fgram"
 version = "0.0.0"
 dependencies = [
+ "backend-commands-collationcmds-seams",
  "backend-utils-mb-mbutils-seams",
  "common-encnames-seams",
  "pgrust-pg-ffi-fgram",
@@ -22342,6 +22355,7 @@ dependencies = [
  "backend-commands-analyze",
  "backend-commands-async",
  "backend-commands-cluster",
+ "backend-commands-collationcmds",
  "backend-commands-comment",
  "backend-commands-conversioncmds",
  "backend-commands-copyto",

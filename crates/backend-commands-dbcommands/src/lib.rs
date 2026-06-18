@@ -544,6 +544,16 @@ pub fn init_seams() {
     backend_tcop_utility_out_seams::alter_database_refresh_coll::set(alter_database_refresh_coll_arm);
     backend_tcop_utility_out_seams::alter_database_set::set(alter_database_set_arm);
     backend_tcop_utility_out_seams::drop_database::set(drop_database_arm);
+
+    // collationcmds.c (CREATE COLLATION, libc provider) re-declares
+    // `check_encoding_locale_matches` (pg_locale.c) in its own seam crate;
+    // this repo homes the function in dbcommands/heavy.rs, so install it here.
+    backend_commands_collationcmds_seams::check_encoding_locale_matches::set(
+        |encoding, collate, ctype| {
+            let scratch = mcx::MemoryContext::new("check_encoding_locale_matches");
+            heavy::check_encoding_locale_matches(scratch.mcx(), encoding, collate, ctype)
+        },
+    );
 }
 
 use types_nodes::nodes::Node as UtilNode;

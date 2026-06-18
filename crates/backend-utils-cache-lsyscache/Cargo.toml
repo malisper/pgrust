@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 seam-core = { path = "../seam-core" }
 mcx = { path = "../mcx" }
+backend-commands-collationcmds-seams = { path = "../backend-commands-collationcmds-seams" }
 types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }

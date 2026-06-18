@@ -109,6 +109,8 @@ pub fn init_seams() {
     backend_utils_init_small_seams::nbuffers::set(globals::NBuffers);
     backend_utils_init_small_seams::nloc_buffer::set(globals::NLocBuffer);
     backend_utils_init_small_seams::my_database_id::set(globals::MyDatabaseId);
+    // collationcmds.c re-declares `MyDatabaseId` in its own seam crate.
+    backend_commands_collationcmds_seams::my_database_id::set(globals::MyDatabaseId);
     backend_utils_init_small_seams::my_database_table_space::set(globals::MyDatabaseTableSpace);
     backend_utils_init_small_seams::my_start_timestamp::set(globals::MyStartTimestamp);
     backend_utils_init_small_seams::is_postmaster_environment::set(globals::IsPostmasterEnvironment);

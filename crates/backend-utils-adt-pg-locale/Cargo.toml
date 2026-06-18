@@ -21,6 +21,7 @@ backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 types-guc = { path = "../types-guc" }
 types-wchar = { path = "../types-wchar" }
 port-pgstrcasecmp = { path = "../port-pgstrcasecmp" }
+backend-commands-collationcmds-seams = { path = "../backend-commands-collationcmds-seams" }
 libc = "0.2"
 
 # Inward seams this crate owns + installs.

@@ -25,6 +25,11 @@ pub fn init_seams() {
     // unit installs it (the mbutils owner deliberately defers to encnames).
     // `pg_enc` is `i32`, matching the seam boundary verbatim.
     backend_utils_mb_mbutils_seams::is_encoding_supported_by_icu::set(is_encoding_supported_by_icu);
+    // collationcmds.c (CREATE COLLATION, ICU provider) re-declares the same
+    // encnames.c probe in its own seam crate; this owning unit installs it too.
+    backend_commands_collationcmds_seams::is_encoding_supported_by_icu::set(|encoding| {
+        Ok(is_encoding_supported_by_icu(encoding))
+    });
 }
 
 const NAMEDATALEN: usize = 64;

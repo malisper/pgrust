@@ -44,3 +44,5 @@ types-plancache = { path = "../types-plancache" }
 backend-utils-cache-syscache-pc-seams = { path = "../backend-utils-cache-syscache-pc-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-adt-pg-locale-catalog-seams = { path = "../backend-utils-adt-pg-locale-catalog-seams" }
+backend-commands-collationcmds-seams = { path = "../backend-commands-collationcmds-seams" }
+backend-commands-dbcommands-seams = { path = "../backend-commands-dbcommands-seams" }

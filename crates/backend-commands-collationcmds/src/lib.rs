@@ -253,14 +253,16 @@ pub fn DefineCollation<'mcx>(
 
     if let Some(fromEl) = fromEl {
         /* collid = get_collation_oid(defGetQualifiedName(fromEl), false); */
-        let from_name = seam::def_get_qualified_name::call(
-            fromEl.defname.clone().unwrap_or_default(),
-            fromEl.arg.as_deref().and_then(|n| match n {
-                Node::String(s) => s.sval.clone(),
-                _ => None,
-            }),
-        )?;
-        let from_name_list: Vec<Option<String>> = from_name.into_iter().map(Some).collect();
+        let from_name = backend_commands_define::defGetQualifiedName(fromEl)?;
+        let from_name_list: Vec<Option<String>> = from_name
+            .iter()
+            .map(|n| match n {
+                Node::String(s) => Ok(s.sval.clone()),
+                _ => Err(PgError::error("collation name must be a string").with_sqlstate(
+                    types_error::ERRCODE_SYNTAX_ERROR,
+                )),
+            })
+            .collect::<PgResult<_>>()?;
         let collid = get_collation_oid(mcx, &from_name_list, false)?;
 
         /* tp = SearchSysCache1(COLLOID, ObjectIdGetDatum(collid)); */
@@ -1097,4 +1099,63 @@ mod fmgr_builtins;
 /// table, so by-OID dispatch resolves them.
 pub fn init_seams() {
     fmgr_builtins::register_collationcmds_builtins();
+
+    // `pg_import_system_collations` static helpers — these bodies live in
+    // collationcmds.c itself, so this unit installs them.
+    seam::elog_debug1::set(|msg| {
+        let _ = ereport(types_error::DEBUG1).errmsg(msg.to_string());
+        Ok(())
+    });
+    // `enumerate_icu_locales` / `get_icu_locale_comment` are entirely under
+    // `#ifdef USE_ICU`; in this ICU-disabled build they are empty / None.
+    seam::enumerate_icu_locales::set(|| Ok(Vec::new()));
+    seam::get_icu_locale_comment::set(|_localename| Ok(None));
+    // `enumerate_libc_locales` — the `OpenPipeStream("locale -a")` read loop
+    // (`READ_LOCALE_A_OUTPUT`, non-WIN32), yielding newline-stripped names.
+    seam::enumerate_libc_locales::set(enumerate_libc_locales);
+}
+
+/// `OpenPipeStream("locale -a", "r")` + `fgets` loop (collationcmds.c:852-888),
+/// returning each locale name with its trailing newline stripped. Names with no
+/// trailing newline (too long for the 128-byte buffer) are skipped with a
+/// `DEBUG1`. `Err(errcode_for_file_access)` if the pipe cannot be opened.
+fn enumerate_libc_locales() -> PgResult<Vec<String>> {
+    use backend_storage_file_fd_seams::{
+        close_pipe_stream, open_pipe_stream_read, pipe_read_line, PipeReadLine,
+    };
+
+    const LOCALE_NAME_BUFLEN: i32 = 128;
+
+    let stream = match open_pipe_stream_read::call("locale -a")? {
+        Some(s) => s,
+        None => {
+            return Err(PgError::error("could not execute command \"locale -a\"")
+                .with_sqlstate(types_error::ERRCODE_IO_ERROR));
+        }
+    };
+
+    let mut names = Vec::new();
+    loop {
+        match pipe_read_line::call(stream, LOCALE_NAME_BUFLEN)? {
+            PipeReadLine::Line(bytes) => {
+                if bytes.last() != Some(&b'\n') {
+                    let shown = String::from_utf8_lossy(&bytes);
+                    let _ = ereport(types_error::DEBUG1)
+                        .errmsg(format!("skipping locale with too-long name: \"{shown}\""));
+                    continue;
+                }
+                let name = String::from_utf8_lossy(&bytes[..bytes.len() - 1]).into_owned();
+                names.push(name);
+            }
+            PipeReadLine::Eof => break,
+            // C doesn't check the pipe read return value (supports a missing
+            // "locale" command); a read error just ends the loop.
+            PipeReadLine::Error(_) => break,
+        }
+    }
+
+    // C ignores ClosePipeStream's status here (missing-command tolerance).
+    let _ = close_pipe_stream::call(stream);
+
+    Ok(names)
 }
