@@ -871,6 +871,12 @@ fn set_peer_cert(sock: i32, peer: X509) {
 fn take_peer_cert(sock: i32) -> X509 {
     PORT_PEER.with(|m| m.borrow_mut().remove(&sock).unwrap_or(0))
 }
+/// Non-removing read of the stashed `port->peer` (the `be_tls_get_peer_*`
+/// accessors read it without consuming; `be_tls_close` consumes via
+/// [`take_peer_cert`]). `0` (NULL) when the client presented no certificate.
+fn peer_cert(sock: i32) -> X509 {
+    PORT_PEER.with(|m| m.borrow().get(&sock).copied().unwrap_or(0))
+}
 
 /* ========================================================================= *
  *  Internal functions: callbacks (the C `static` callbacks, ported as the
@@ -1167,6 +1173,56 @@ pub fn be_tls_get_cipher<'mcx>(mcx: Mcx<'mcx>, port: &mut Port) -> PgResult<PgSt
     PgString::from_str_in(&s, mcx)
 }
 
+/// `void be_tls_get_peer_subject_name(Port *port, char *ptr, size_t len)`.
+/// C writes `X509_NAME_to_cstring(X509_get_subject_name(port->peer))` (or an
+/// empty string when `port->peer` is NULL) into a fixed buffer with `strlcpy`;
+/// the seam contract returns the (untruncated) string and the caller does the
+/// `strlcpy`.
+pub fn be_tls_get_peer_subject_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    port: &mut Port,
+) -> PgResult<PgString<'mcx>> {
+    let peer = peer_cert(port.sock);
+    let s = if peer != 0 {
+        let name = ffi::x509_get_subject_name::call(peer);
+        let bytes = ffi::x509_name_to_cstring::call(name);
+        String::from_utf8_lossy(&bytes).into_owned()
+    } else {
+        String::new()
+    };
+    PgString::from_str_in(&s, mcx)
+}
+
+/// `void be_tls_get_peer_issuer_name(Port *port, char *ptr, size_t len)`.
+pub fn be_tls_get_peer_issuer_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    port: &mut Port,
+) -> PgResult<PgString<'mcx>> {
+    let peer = peer_cert(port.sock);
+    let s = if peer != 0 {
+        let name = ffi::x509_get_issuer_name::call(peer);
+        let bytes = ffi::x509_name_to_cstring::call(name);
+        String::from_utf8_lossy(&bytes).into_owned()
+    } else {
+        String::new()
+    };
+    PgString::from_str_in(&s, mcx)
+}
+
+/// `void be_tls_get_peer_serial(Port *port, char *ptr, size_t len)`.
+pub fn be_tls_get_peer_serial<'mcx>(
+    mcx: Mcx<'mcx>,
+    port: &mut Port,
+) -> PgResult<PgString<'mcx>> {
+    let peer = peer_cert(port.sock);
+    let s = if peer != 0 {
+        ffi::x509_get_serial_decimal::call(peer)
+    } else {
+        String::new()
+    };
+    PgString::from_str_in(&s, mcx)
+}
+
 /* ========================================================================= *
  *  File-scope GUC reads used by the open-server protocol-hint path.
  * ========================================================================= */
@@ -1201,5 +1257,8 @@ pub fn init_seams() {
     backend_libpq_be_secure_seams::be_tls_get_version::set(be_tls_get_version);
     backend_libpq_be_secure_seams::be_tls_get_cipher::set(be_tls_get_cipher);
     backend_libpq_be_secure_seams::be_tls_get_cipher_bits::set(be_tls_get_cipher_bits);
+    backend_libpq_be_secure_seams::be_tls_get_peer_subject_name::set(be_tls_get_peer_subject_name);
+    backend_libpq_be_secure_seams::be_tls_get_peer_issuer_name::set(be_tls_get_peer_issuer_name);
+    backend_libpq_be_secure_seams::be_tls_get_peer_serial::set(be_tls_get_peer_serial);
     init_bio_bridge_seams();
 }

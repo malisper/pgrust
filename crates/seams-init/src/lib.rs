@@ -1924,17 +1924,6 @@ mod recurrence_guard {
         // entry when execReplication lands.
         ("backend_catalog_pg_subscription", "check_subscription_relkind"),
 
-        // DESIGN_DEBT (TD-BE-TLS-VTABLE-FLOOR): be-secure.c's TLS peer-cert
-        // accessors (be_tls_get_peer_{subject,issuer}_name / _serial) dispatch
-        // into the SSL implementation backend (be-secure-openssl.c), which is
-        // unported. backend_status.c calls them when recording connection SSL
-        // info; with no TLS backend there is no faithful provider. SSL-vtable
-        // floor (same class as the FDW-routine floor). DELETE when be-secure's
-        // SSL backend lands.
-        ("backend_libpq_be_secure", "be_tls_get_peer_issuer_name"),
-        ("backend_libpq_be_secure", "be_tls_get_peer_serial"),
-        ("backend_libpq_be_secure", "be_tls_get_peer_subject_name"),
-
         // DESIGN_DEBT (TD-RIR-RULE-ENGINE): rewriteHandler.c's
         // relation_has_security_invoker is installed by the DML/RIR rule-engine
         // slice (alongside get_view_query / relation_is_updatable), which is the
