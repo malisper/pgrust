@@ -407,19 +407,26 @@ fn ExecMakeTableFunctionResult<'mcx>(
 
                     // C: store current resultset item.
                     if returns_tuple {
-                        // Composite return: a HeapTupleHeader Datum. The repo's
-                        // rowtype-from-Datum path (lookup_rowtype_tupdesc_copy +
-                        // tuplestore_puttuple over a bare HeapTupleHeader) is not
-                        // yet wired at this layer (the expanded-rowtype Datum
-                        // keystone). The scalar SRF path below is fully wired;
-                        // composite-returning table functions surface loudly
-                        // until that lands.
+                        // Composite return: C stores the returned HeapTupleHeader
+                        // Datum directly (`tuplestore_puttuple`). The owned model
+                        // carries it as `Datum::Composite(FormedTuple)`; decomposing
+                        // it into per-column values + `tuplestore_putvalues` is
+                        // BLOCKED on the by-reference-Datum varlena-header convention
+                        // unification (the deep follow-on): `heap_deform_tuple` /
+                        // `tuplestore_putvalues` carry a varlena `ByRef` as the FULL
+                        // on-disk image (header included), but the const/output lane
+                        // (`textout` → `text_to_cstring`) reads a HEADER-LESS payload,
+                        // so a text column round-tripped through a tuplestore prints
+                        // with a stray header byte. Surfaces loudly until the ByRef
+                        // varlena-header convention is unified tree-wide.
                         let _ = (&result, result_isnull);
                         return Err(ereport(ERROR)
                             .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
                             .errmsg(
                                 "composite-returning table function not yet supported \
-                                 (rowtype-Datum tuplestore_puttuple path unported)",
+                                 (by-reference Datum varlena-header convention unification \
+                                 keystone: heap-tuple ByRef is header-full, the output lane \
+                                 reads header-less)",
                             )
                             .into_error());
                     } else {
@@ -536,11 +543,40 @@ fn exec_eval_func_args<'mcx>(
             .fcinfo
             .as_mut()
             .expect("ExecEvalFuncArgs: fcinfo not initialized");
-        // The fcinfo args carry the bare-word `types_datum::Datum`; the compiled
-        // expression produced a `types_tuple::Datum`. For a by-value argument
-        // (the only kind a value-per-call SRF's args take here) the word is the
-        // payload (`Datum::as_usize`).
-        fcinfo.args[i].value = types_datum::Datum::from_usize(value.as_usize());
+        // The compiled argument expression produced a canonical
+        // `types_tuple::Datum`; the fmgr call frame carries the bare-word
+        // `args[i].value` plus the by-reference `ref_args[i]` side channel.
+        // Marshal each kind onto the frame: a by-value scalar is the bare word
+        // (no referent); a by-reference value (text/varlena/cstring/composite)
+        // passes a null word plus its image in `ref_args[i]` — exactly the C
+        // "`args[i].value` is a pointer to the referent" convention, so the
+        // callee's `PG_GETARG_TEXT_PP`/`PG_GETARG_CSTRING` readers see the
+        // value. (The old `as_usize()` downgrade panicked on a by-ref arg —
+        // the `pg_input_error_info('junk','bool')` wall.)
+        use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
+        use types_nodes::fmgr::FmgrArgRef;
+        match value {
+            CanonDatum::ByVal(word) => {
+                fcinfo.args[i].value = types_datum::Datum::from_usize(word);
+            }
+            CanonDatum::ByRef(bytes) => {
+                fcinfo.args[i].value = types_datum::Datum::null();
+                fcinfo.set_ref_arg(i, FmgrArgRef::Varlena(bytes.as_slice().to_vec()));
+            }
+            CanonDatum::Cstring(s) => {
+                fcinfo.args[i].value = types_datum::Datum::null();
+                fcinfo.set_ref_arg(i, FmgrArgRef::Cstring(s.to_string()));
+            }
+            CanonDatum::Composite(t) => {
+                fcinfo.args[i].value = types_datum::Datum::null();
+                fcinfo.set_ref_arg(i, FmgrArgRef::Varlena(t.to_datum_image()));
+            }
+            CanonDatum::Expanded(_) | CanonDatum::Internal(_) => {
+                return Err(types_error::PgError::error(
+                    "ExecEvalFuncArgs: Expanded/Internal argument not supported on the SRF call frame",
+                ));
+            }
+        }
         fcinfo.args[i].isnull = isnull;
     }
     Ok(())
