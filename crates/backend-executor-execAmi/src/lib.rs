@@ -71,7 +71,7 @@ use types_nodes::nodes::NodeTag;
 use types_error::{PgError, PgResult, DEBUG2};
 use types_nodes::nodeindexscan::CUSTOMPATH_SUPPORT_MARK_RESTORE;
 use types_nodes::nodes::{
-    Node, T_CteScan, T_FunctionScan, T_IndexOnlyScan, T_IndexScan, T_Material, T_MergeAppend,
+    ntag, Node, T_CteScan, T_FunctionScan, T_IndexOnlyScan, T_IndexScan, T_Material, T_MergeAppend,
     T_NamedTuplestoreScan, T_Result, T_Sort, T_TableFuncScan, T_WorkTableScan, T_Append,
     T_CustomScan,
 };
@@ -532,13 +532,13 @@ pub fn exec_supports_backward_scan(node: Option<&Node<'_>>) -> PgResult<bool> {
         return Ok(false);
     }
 
-    match node {
+    match node.node_tag() {
         // case T_Result:
         //   if (outerPlan(node) != NULL)
         //       return ExecSupportsBackwardScan(outerPlan(node));
         //   else
         //       return false;
-        Node::Result(_) => {
+        ntag::T_Result => {
             match node.plan_head().lefttree.as_deref() {
                 Some(outer) => exec_supports_backward_scan(Some(outer)),
                 None => Ok(false),
@@ -551,7 +551,8 @@ pub fn exec_supports_backward_scan(node: Option<&Node<'_>>) -> PgResult<bool> {
         //   foreach(l, appendplans) if (!ExecSupportsBackwardScan(...)) return false;
         //   /* need not check tlist because Append doesn't evaluate it */
         //   return true;
-        Node::Append(append) => {
+        ntag::T_Append => {
+            let append = node.expect_append();
             if append.nasyncplans > 0 {
                 return Ok(false);
             }
@@ -564,45 +565,50 @@ pub fn exec_supports_backward_scan(node: Option<&Node<'_>>) -> PgResult<bool> {
         }
 
         // case T_Gather: return false;
-        Node::Gather(_) => Ok(false),
+        ntag::T_Gather => Ok(false),
 
         // case T_IndexScan:
         //   return IndexSupportsBackwardScan(((IndexScan *) node)->indexid);
-        Node::IndexScan(iscan) => index_supports_backward_scan(iscan.indexid),
+        ntag::T_IndexScan => index_supports_backward_scan(node.expect_indexscan().indexid),
 
         // case T_IndexOnlyScan:
         //   return IndexSupportsBackwardScan(((IndexOnlyScan *) node)->indexid);
-        Node::IndexOnlyScan(ioscan) => index_supports_backward_scan(ioscan.indexid),
+        ntag::T_IndexOnlyScan => index_supports_backward_scan(node.expect_indexonlyscan().indexid),
 
         // case T_SubqueryScan:
         //   return ExecSupportsBackwardScan(((SubqueryScan *) node)->subplan);
-        Node::SubqueryScan(sqscan) => {
-            exec_supports_backward_scan(sqscan.subplan.as_deref())
+        ntag::T_SubqueryScan => {
+            exec_supports_backward_scan(node.expect_subqueryscan().subplan.as_deref())
         }
 
         // case T_CustomScan:
         //   if (flags & CUSTOMPATH_SUPPORT_BACKWARD_SCAN) return true;
         //   return false;
-        Node::CustomScan(cscan) => Ok(
-            (cscan.flags & types_nodes::nodeindexscan::CUSTOMPATH_SUPPORT_BACKWARD_SCAN) != 0,
+        ntag::T_CustomScan => Ok(
+            (node.expect_customscan().flags
+                & types_nodes::nodeindexscan::CUSTOMPATH_SUPPORT_BACKWARD_SCAN)
+                != 0,
         ),
 
         // case T_SeqScan / T_TidScan / T_TidRangeScan / T_FunctionScan /
         //      T_ValuesScan / T_CteScan / T_Material / T_Sort:
         //   /* these don't evaluate tlist */ return true;
         // (T_TidScan has no Node variant yet.)
-        Node::SeqScan(_)
-        | Node::TidRangeScan(_)
-        | Node::FunctionScan(_)
-        | Node::ValuesScan(_)
-        | Node::CteScan(_)
-        | Node::Material(_)
-        | Node::Sort(_) => Ok(true),
+        t if t == ntag::T_SeqScan
+            || t == ntag::T_TidRangeScan
+            || t == ntag::T_FunctionScan
+            || t == ntag::T_ValuesScan
+            || t == ntag::T_CteScan
+            || t == ntag::T_Material
+            || t == ntag::T_Sort =>
+        {
+            Ok(true)
+        }
 
         // case T_Limit: return ExecSupportsBackwardScan(outerPlan(node));
         // (T_LockRows has no Node variant yet; T_IncrementalSort/T_SampleScan
         // return false in C, the wildcard default below covers them.)
-        Node::Limit(_) => {
+        ntag::T_Limit => {
             exec_supports_backward_scan(node.plan_head().lefttree.as_deref())
         }
 
