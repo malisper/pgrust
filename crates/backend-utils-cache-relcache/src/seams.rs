@@ -51,6 +51,7 @@ pub fn init_seams() {
     sx::relation_get_identity_key_bitmap::set(relation_get_identity_key_bitmap);
     sx::relation_get_index_attr_bitmap::set(relation_get_index_attr_bitmap);
     sx::relation_get_index_list::set(relation_get_index_list);
+    sx::relation_get_index_expressions::set(relation_get_index_expressions);
 
     // --- partition cache read/write (owned per-entry state; build via partcache) ---
     sx::relation_get_partkey::set(relation_get_partkey);
@@ -351,6 +352,43 @@ fn critical_relcaches_built() -> bool {
 /// once the critical *shared* relcache entries are built.
 fn critical_shared_relcaches_built() -> bool {
     crate::core_entry_store::with_state(|st| st.critical_shared_relcaches_built)
+}
+
+/// `RelationGetIndexExpressions(index)` (relcache.c:5096): the index's
+/// expression trees. The C quick-exits to `NIL` when `rd_indextuple == NULL ||
+/// heap_attisnull(rd_indextuple, Anum_pg_index_indexprs)`. The owned entry
+/// carries the full `indkey` vector, and an index has expression columns iff
+/// some `indkey[i] == InvalidAttrNumber` (the on-disk marker; `pg_index.indexprs`
+/// is non-NULL exactly when such a column exists). So a non-index relation
+/// (`rd_index == None`) or one with no zero `indkey` entry returns `Ok(None)`
+/// (== NIL) — the path every system-catalog index (all simple-column) takes.
+/// When an expression column IS present, the `indexprs` node-tree decode
+/// (`stringToNode`/`eval_const_expressions`/`fix_opfuncids`) is node vocabulary
+/// owned cross-unit and unported, so it routes through the node-tree owner seam
+/// (mirror-PG-and-panic until `stringToNode` lands).
+fn relation_get_index_expressions<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+) -> PgResult<Option<PgVec<'mcx, types_nodes::Expr>>> {
+    let has_expression_col = crate::core_entry_store::with_relation(rel.rd_id, |rd| {
+        match &rd.rd_index {
+            None => false,
+            Some(idx) => idx
+                .indkey
+                .iter()
+                .any(|&k| k == types_core::primitive::InvalidAttrNumber),
+        }
+    })?;
+    if !has_expression_col {
+        // NIL — no expression columns.
+        return Ok(None);
+    }
+    // An expression column is present: defer to the still-unported node-tree
+    // decode owner (mirror-PG-and-panic). The existing `derived` path keeps the
+    // by-OID caching shell; here we go straight to the node-tree seam.
+    crate::derived::RelationGetIndexExpressions(rel.rd_id)?;
+    // Unreachable until the node-tree decode lands (the call above panics).
+    Ok(None)
 }
 
 /// `AssertCouldGetRelation()` (relcache.c) — an assertion-build-only check;

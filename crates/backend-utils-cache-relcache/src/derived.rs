@@ -264,9 +264,32 @@ pub fn RelationGetReplicaIndex(relation: Oid) -> PgResult<Oid> {
 /// `RelationGetIndexExpressions(relation)` (relcache.c): the index's expression
 /// trees (node vocabulary — seamed for the tree, own caching).
 pub fn RelationGetIndexExpressions(relation: Oid) -> PgResult<()> {
-    // Quick-exit / has-no-expressions decisions need the rd_indextuple's
-    // `indexprs` datum, whose node-tree transform is node vocabulary owned
-    // cross-unit. Route the whole build through the node-tree owner seam.
+    // Quick exit if there is nothing to do (relcache.c:5108-5111): the C tests
+    // `rd_indextuple == NULL || heap_attisnull(rd_indextuple,
+    // Anum_pg_index_indexprs)` and returns `NIL`. An index carries expression
+    // columns iff some `indkey[i] == InvalidAttrNumber` (a zero key column is
+    // the on-disk marker for an expression column, and `pg_index.indexprs` is
+    // non-NULL exactly when such a column exists). The owned entry carries the
+    // full `indkey` vector, so this faithful proxy is computable here without
+    // touching the node-tree decode: a non-index relation (`rd_index == None`,
+    // the C `rd_indextuple == NULL`) or an index whose `indkey` has no zero
+    // entry returns `Ok(())` (== NIL). This is the path every system-catalog
+    // index (all simple-column) takes.
+    let has_expression_col = with_rel(relation, |rd| match &rd.rd_index {
+        None => false,
+        Some(idx) => idx
+            .indkey
+            .iter()
+            .any(|&k| k == types_core::primitive::InvalidAttrNumber),
+    });
+    if !has_expression_col {
+        return Ok(());
+    }
+
+    // An expression column IS present: the `indexprs` node-tree decode
+    // (`stringToNode`/`eval_const_expressions`/`fix_opfuncids`) is node
+    // vocabulary owned cross-unit and still unported — route through the
+    // node-tree owner seam (mirror-PG-and-panic until `stringToNode` lands).
     index_expressions_seam(relation)
 }
 

@@ -1674,7 +1674,11 @@ mod recurrence_guard {
         // simple columns, where the C returns NIL without decoding; the panic
         // only fires on a real expression / predicate / exclusion index. Install
         // + DELETE these three when the node-tree decode (`stringToNode`) lands.
-        ("backend_utils_cache_relcache", "relation_get_index_expressions"),
+        // (`relation_get_index_expressions` is now installed: its NIL quick-exit
+        // — `rd_index == None` or no zero `indkey` entry — is computable off the
+        // owned entry's full `indkey` vector without the node-tree decode, which
+        // every system-catalog index takes. The decode-bearing path still
+        // mirror-PG-and-panics until `stringToNode` lands.)
         ("backend_utils_cache_relcache", "relation_get_index_predicate"),
         ("backend_utils_cache_relcache", "relation_get_exclusion_info"),
         // DESIGN_DEBT (TD-RELCACHE-INDEX-NODETREE, cont.):
