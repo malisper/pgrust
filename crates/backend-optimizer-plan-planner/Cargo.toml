@@ -14,6 +14,8 @@ types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
 types-pathnodes = { path = "../types-pathnodes" }
+# Datum (Const.constvalue for the LIMIT-1 const in the all-redundant DISTINCT leg).
+types-tuple = { path = "../types-tuple" }
 types-parsenodes = { path = "../types-parsenodes" }
 backend-nodes-core = { path = "../backend-nodes-core" }
 # equal() over PathTarget expr handles (scanjoin_target_same_exprs test).

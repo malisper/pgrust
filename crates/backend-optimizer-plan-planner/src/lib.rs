@@ -1631,8 +1631,24 @@ fn grouping_planner<'mcx>(
             .map(|sgc| root.alloc_sortgroupclause(sgc))
             .collect()
     };
+    // DISTINCT clause: like sortClause, intern parse->distinctClause (a List of
+    // SortGroupClause values) into the planner arena up front so the qp_callback —
+    // which can't reach `run` — can build root->distinct_pathkeys /
+    // processed_distinctClause (standard_qp_callback, planner.c:3564-3580).
+    let distinct_clause_ids: Vec<types_pathnodes::NodeId> = {
+        let distinct_clauses: Vec<types_nodes::rawnodes::SortGroupClause> = run
+            .resolve(root.parse)
+            .distinctClause
+            .iter()
+            .map(|np| sortgroupclause_from_node(np))
+            .collect::<PgResult<Vec<_>>>()?;
+        distinct_clauses
+            .into_iter()
+            .map(|sgc| root.alloc_sortgroupclause(sgc))
+            .collect()
+    };
     let mut qp_callback = move |root: &mut PlannerInfo| -> PgResult<()> {
-        standard_qp_callback(root, &sort_clause_ids)
+        standard_qp_callback(root, &sort_clause_ids, &distinct_clause_ids)
     };
     let mut current_rel =
         backend_optimizer_plan_small::query_planner(mcx, run, root, &mut qp_callback)?;
@@ -1716,13 +1732,8 @@ fn grouping_planner<'mcx>(
         );
     }
 
-    // DISTINCT (C:1834-1841): create_distinct_paths is not ported.
-    if has_distinct {
-        panic!(
-            "grouping_planner: DISTINCT needs create_distinct_paths \
-             (planner.c:1837) — not ported"
-        );
-    }
+    // DISTINCT is handled below, after grouping/window, in its C order
+    // (planner.c:1834-1841) — see the create_distinct_paths call.
 
     // No SRFs: scanjoin_targets = list_make1(scanjoin_target) (C:1764-1767).
 
@@ -1777,8 +1788,21 @@ fn grouping_planner<'mcx>(
         debug_assert!(!has_target_srfs);
     }
 
-    // Window / DISTINCT upper rels on this path (C:1813-1841) are guarded out
-    // above (each loud-panics).
+    // Window upper rels on this path (C:1813-1828) are guarded out above
+    // (create_window_paths loud-panics).
+    debug_assert!(!has_window);
+
+    // If there is a DISTINCT clause, consider ways to implement that; we build a
+    // new upperrel representing the output of this phase (C:1834-1841).
+    if has_distinct {
+        current_rel = create_distinct_paths(
+            mcx,
+            run,
+            root,
+            current_rel,
+            &sort_input_target,
+        )?;
+    }
 
     // If ORDER BY was given, generate a new upperrel of paths that emit the
     // correct ordering and project final_target (C:1849-1866). We can apply the
@@ -2365,7 +2389,9 @@ fn add_paths_to_grouping_rel<'mcx>(
         // GROUP BY the same make_ordered_path used elsewhere applies, but
         // create_sort_path over group_pathkeys is the same machinery as ORDER BY;
         // reuse it via make_ordered_path.
-        let ordered = make_ordered_path(root, run, grouped_rel, path, path, -1.0)?;
+        let group_pathkeys = root.group_pathkeys.clone();
+        let ordered =
+            make_ordered_path(root, run, grouped_rel, path, path, group_pathkeys, -1.0)?;
         let ordered = match ordered {
             Some(p) => p,
             None => continue,
@@ -2426,18 +2452,17 @@ fn agg_clause_costs_to_lite(
 
 /// `make_ordered_path(root, rel, path, cheapest_path, pathkeys, limit_tuples)`
 /// (planner.c:7644) — return a path ordered by `pathkeys` based on `path`, or
-/// `None` if it doesn't make sense to generate an ordered path here. Uses the
-/// group_pathkeys ordering; an empty `pathkeys` (no GROUP BY) is contained in
-/// any path, so the path is returned unchanged.
+/// `None` if it doesn't make sense to generate an ordered path here. An empty
+/// `pathkeys` is contained in any path, so the path is returned unchanged.
 fn make_ordered_path<'mcx>(
     root: &mut PlannerInfo,
     run: &PlannerRun<'mcx>,
     rel: RelId,
     path: PathId,
     cheapest_path: PathId,
+    pathkeys: Vec<types_pathnodes::PathKey>,
     limit_tuples: f64,
 ) -> PgResult<Option<PathId>> {
-    let pathkeys = root.group_pathkeys.clone();
     let path_pathkeys = root.path(path).base().pathkeys.clone();
     let (is_sorted, presorted_keys) =
         backend_optimizer_path_pathkeys::pathkeys_count_contained_in(&pathkeys, &path_pathkeys);
@@ -2652,6 +2677,7 @@ fn apply_scanjoin_target_to_paths<'mcx>(
 fn standard_qp_callback(
     root: &mut PlannerInfo,
     sort_clause_ids: &[types_pathnodes::NodeId],
+    distinct_clause_ids: &[types_pathnodes::NodeId],
 ) -> PgResult<()> {
     // tlist = root->processed_tlist (C:3457).
     let tlist = root.processed_tlist.clone();
@@ -2695,10 +2721,34 @@ fn standard_qp_callback(
         root.num_groupby_pathkeys = 0;
     }
 
-    // Window / DISTINCT / set-op pathkeys are NIL on this path (their clauses are
-    // gated out upstream). Mirror the C else-branches that assign NIL.
+    // Window pathkeys: NIL on this path (window clauses gated out upstream).
     root.window_pathkeys = Vec::new();
-    root.distinct_pathkeys = Vec::new();
+
+    // DISTINCT pathkeys (C:3564-3580). As with GROUP BY, discard DISTINCT items
+    // proven redundant by EquivalenceClass processing; the non-redundant list is
+    // kept in root->processed_distinctClause, leaving parse->distinctClause alone.
+    // The interned distinctClause handles (a List of SortGroupClause values) were
+    // bridged up front by the caller.
+    if !distinct_clause_ids.is_empty() {
+        // root->processed_distinctClause = list_copy(parse->distinctClause).
+        let mut processed = distinct_clause_ids.to_vec();
+        let (pathkeys, sortable) =
+            backend_optimizer_path_pathkeys::make_pathkeys_for_sortclauses_extended(
+                root,
+                &mut processed,
+                &tlist,
+                true,  // remove_redundant
+                false, // remove_group_rtindex
+                false, // set_ec_sortref
+            );
+        root.processed_distinctClause = processed;
+        root.distinct_pathkeys = if sortable { pathkeys } else { Vec::new() };
+    } else {
+        root.processed_distinctClause = Vec::new();
+        root.distinct_pathkeys = Vec::new();
+    }
+
+    // set-op pathkeys: NIL on this path (set operations gated out upstream).
     root.setop_pathkeys = Vec::new();
 
     // root->sort_pathkeys =
@@ -2887,6 +2937,524 @@ fn make_sort_input_target<'mcx>(
     // set_pathtarget_cost_width(root, input_target) (C:6603).
     backend_optimizer_path_costsize::sizeest::set_pathtarget_cost_width(root, &mut input_target);
     Ok(input_target)
+}
+
+// ===========================================================================
+// create_distinct_paths()  (planner.c:4779)
+// ===========================================================================
+
+/// `create_distinct_paths(root, input_rel, target)` (planner.c:4790).
+///
+/// Build a new `UPPERREL_DISTINCT` upperrel containing Paths for SELECT DISTINCT
+/// evaluation. Input paths must already compute the desired pathtarget (Sort/
+/// Unique won't project anything).
+fn create_distinct_paths<'mcx>(
+    _mcx: Mcx<'mcx>,
+    run: &mut PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    input_rel: RelId,
+    target: &PathTarget,
+) -> PgResult<RelId> {
+    // distinct_rel = fetch_upper_rel(root, UPPERREL_DISTINCT, NULL) (C:4796).
+    let distinct_rel =
+        backend_optimizer_util_relnode::fetch_upper_rel(root, UPPERREL_DISTINCT, &None);
+
+    // distinct_rel is parallel-safe iff the input rel is; the FDW fields are
+    // copied from input_rel (C:4805-4813).
+    {
+        let (cp, serverid, userid, useridiscurrent, has_fdwroutine) = {
+            let ir = root.rel(input_rel);
+            (
+                ir.consider_parallel,
+                ir.serverid,
+                ir.userid,
+                ir.useridiscurrent,
+                ir.has_fdwroutine,
+            )
+        };
+        let dr = root.rel_mut(distinct_rel);
+        dr.consider_parallel = cp;
+        dr.serverid = serverid;
+        dr.userid = userid;
+        dr.useridiscurrent = useridiscurrent;
+        dr.has_fdwroutine = has_fdwroutine;
+    }
+
+    // Build distinct paths based on input_rel's pathlist (C:4815).
+    create_final_distinct_paths(run, root, input_rel, distinct_rel)?;
+
+    // Build distinct paths based on input_rel's partial_pathlist (C:4818).
+    create_partial_distinct_paths(run, root, input_rel, distinct_rel, target)?;
+
+    // Give a helpful error if we failed to create any paths (C:4821-4826).
+    if root.rel(distinct_rel).pathlist.is_empty() {
+        return Err(PgError::error(
+            "could not implement DISTINCT: some of the datatypes only support \
+             hashing, while others only support sorting",
+        ));
+    }
+
+    // FDW GetForeignUpperPaths (C:4831-4838) and create_upper_paths_hook
+    // (C:4841-4843): no FDW upper paths and no extension hook are modeled on this
+    // path; has_fdwroutine being set would mean a foreign-table query, which the
+    // scan path does not reach here. Mirror PG: skip when absent.
+    debug_assert!(!root.rel(distinct_rel).has_fdwroutine);
+
+    // set_cheapest(distinct_rel) (C:4846).
+    backend_optimizer_util_pathnode::set_cheapest(root, distinct_rel)?;
+
+    Ok(distinct_rel)
+}
+
+/// `create_partial_distinct_paths(root, input_rel, final_distinct_rel, target)`
+/// (planner.c:4860).
+///
+/// Process `input_rel`'s partial paths and add unique/aggregate paths to the
+/// `UPPERREL_PARTIAL_DISTINCT` rel, then add Gather/GatherMerge on top and a
+/// final unique/aggregate to de-duplicate combined worker rows.
+fn create_partial_distinct_paths<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    input_rel: RelId,
+    final_distinct_rel: RelId,
+    target: &PathTarget,
+) -> PgResult<()> {
+    // Nothing to do when there are no partial paths in the input rel (C:4874).
+    let (consider_parallel, partial_pathlist_empty) = {
+        let ir = root.rel(input_rel);
+        (ir.consider_parallel, ir.partial_pathlist.is_empty())
+    };
+    if !consider_parallel || partial_pathlist_empty {
+        return Ok(());
+    }
+
+    // can't do parallel DISTINCT ON (C:4880-4881).
+    let has_distinct_on = run.resolve(root.parse).hasDistinctOn;
+    if has_distinct_on {
+        return Ok(());
+    }
+
+    // partial_distinct_rel = fetch_upper_rel(root, UPPERREL_PARTIAL_DISTINCT,
+    //   NULL); reltarget = target; copy parallel/FDW fields (C:4883-4895).
+    let partial_distinct_rel = backend_optimizer_util_relnode::fetch_upper_rel(
+        root,
+        UPPERREL_PARTIAL_DISTINCT,
+        &None,
+    );
+    {
+        let (cp, serverid, userid, useridiscurrent, has_fdwroutine) = {
+            let ir = root.rel(input_rel);
+            (
+                ir.consider_parallel,
+                ir.serverid,
+                ir.userid,
+                ir.useridiscurrent,
+                ir.has_fdwroutine,
+            )
+        };
+        let pdr = root.rel_mut(partial_distinct_rel);
+        pdr.reltarget = Some(Box::new(target.clone()));
+        pdr.consider_parallel = cp;
+        pdr.serverid = serverid;
+        pdr.userid = userid;
+        pdr.useridiscurrent = useridiscurrent;
+        pdr.has_fdwroutine = has_fdwroutine;
+    }
+
+    // cheapest_partial_path = linitial(input_rel->partial_pathlist) (C:4897).
+    let cheapest_partial_path = root.rel(input_rel).partial_pathlist[0];
+
+    // distinctExprs = get_sortgrouplist_exprs(processed_distinctClause, targetList)
+    // (C:4899); numDistinctRows = estimate_num_groups(...) (C:4903) over the
+    // cheapest partial path's row estimate.
+    let distinct_exprs = distinct_list_exprs(root)?;
+    let cheapest_partial_rows = root.path(cheapest_partial_path).base().rows;
+    let num_distinct_rows = backend_utils_adt_selfuncs_seams::estimate_num_groups::call(
+        run,
+        root,
+        &distinct_exprs,
+        cheapest_partial_rows,
+        None,
+    )?;
+
+    let distinct_clauses: Vec<types_nodes::rawnodes::SortGroupClause> = root
+        .processed_distinctClause
+        .iter()
+        .map(|&id| *root.sortgroupclause(id))
+        .collect();
+
+    // Sort-based partial distinct (C:4912-4969).
+    if backend_optimizer_util_vars::tlist::grouping_is_sortable(&distinct_clauses) {
+        let input_paths = root.rel(input_rel).partial_pathlist.clone();
+        for input_path in input_paths {
+            let input_path_pathkeys = root.path(input_path).base().pathkeys.clone();
+            let distinct_pathkeys = root.distinct_pathkeys.clone();
+            // hasDistinctOn is false here (parallel DISTINCT ON returned early).
+            let useful_pathkeys_list = get_useful_pathkeys_for_distinct(
+                root,
+                false,
+                &distinct_pathkeys,
+                &input_path_pathkeys,
+            )?;
+            debug_assert!(!useful_pathkeys_list.is_empty());
+
+            for useful_pathkeys in useful_pathkeys_list {
+                let sorted_path = make_ordered_path(
+                    root,
+                    run,
+                    partial_distinct_rel,
+                    input_path,
+                    cheapest_partial_path,
+                    useful_pathkeys,
+                    -1.0,
+                )?;
+                let sorted_path = match sorted_path {
+                    Some(p) => p,
+                    None => continue,
+                };
+
+                if root.distinct_pathkeys.is_empty() {
+                    // All tuples have the same value for the DISTINCT clause; cap
+                    // each worker to 1 row via a LimitPath (C:4938-4961).
+                    let limit_count = make_int8_one_const(root);
+                    let limit_path = backend_optimizer_util_pathnode::create::create_limit_path(
+                        root,
+                        partial_distinct_rel,
+                        sorted_path,
+                        None,
+                        Some(limit_count),
+                        types_pathnodes::LIMIT_OPTION_COUNT,
+                        0,
+                        1,
+                    )?;
+                    backend_optimizer_util_pathnode::add_partial_path(
+                        root,
+                        partial_distinct_rel,
+                        limit_path,
+                    )?;
+                } else {
+                    let num_cols = root.distinct_pathkeys.len() as i32;
+                    let unique_path =
+                        backend_optimizer_util_pathnode::create::create_upper_unique_path(
+                            root,
+                            partial_distinct_rel,
+                            sorted_path,
+                            num_cols,
+                            num_distinct_rows,
+                        )?;
+                    backend_optimizer_util_pathnode::add_partial_path(
+                        root,
+                        partial_distinct_rel,
+                        unique_path,
+                    )?;
+                }
+            }
+        }
+    }
+
+    // Hash-aggregate partial distinct (C:4977-4990). enable_hashagg is a hard
+    // off-switch here.
+    let enable_hashagg = backend_utils_misc_guc_tables::vars::enable_hashagg.read();
+    if enable_hashagg
+        && backend_optimizer_util_vars::tlist::grouping_is_hashable(&distinct_clauses)
+    {
+        let target = root
+            .path(cheapest_partial_path)
+            .base()
+            .pathtarget
+            .clone()
+            .expect("create_partial_distinct_paths: cheapest_partial_path has no pathtarget");
+        let group_clause = root.processed_distinctClause.clone();
+        let agg_path = backend_optimizer_util_pathnode::create::create_agg_path(
+            run,
+            root,
+            partial_distinct_rel,
+            cheapest_partial_path,
+            target,
+            types_pathnodes::AGG_HASHED,
+            types_pathnodes::AGGSPLIT_SIMPLE,
+            group_clause,
+            Vec::new(),
+            None,
+            num_distinct_rows,
+        )?;
+        backend_optimizer_util_pathnode::add_partial_path(root, partial_distinct_rel, agg_path)?;
+    }
+
+    // FDW upper paths / create_upper_paths_hook (C:4996-5008): not modeled.
+    debug_assert!(!root.rel(partial_distinct_rel).has_fdwroutine);
+
+    // If we made any partial paths, Gather them and add a final distinctify step
+    // to remove duplicates from combining workers (C:5010-5034).
+    if !root.rel(partial_distinct_rel).partial_pathlist.is_empty() {
+        backend_optimizer_path_allpaths::generate_useful_gather_paths(
+            root,
+            run,
+            partial_distinct_rel,
+            true,
+        )?;
+        backend_optimizer_util_pathnode::set_cheapest(root, partial_distinct_rel)?;
+        create_final_distinct_paths(run, root, partial_distinct_rel, final_distinct_rel)?;
+    }
+
+    Ok(())
+}
+
+/// `create_final_distinct_paths(root, input_rel, distinct_rel)` (planner.c:5043).
+///
+/// Create distinct paths in `distinct_rel` based on `input_rel`'s pathlist.
+fn create_final_distinct_paths<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    input_rel: RelId,
+    distinct_rel: RelId,
+) -> PgResult<RelId> {
+    let cheapest_input_path = root
+        .rel(input_rel)
+        .cheapest_total_path
+        .expect("create_final_distinct_paths: input_rel has no cheapest_total_path");
+
+    // Estimate number of distinct rows (C:5052-5074).
+    let (has_group_clause, has_grouping_sets, has_aggs) = {
+        let parse = run.resolve(root.parse);
+        (
+            !parse.groupClause.is_empty(),
+            !parse.groupingSets.is_empty(),
+            parse.hasAggs,
+        )
+    };
+    let cheapest_input_rows = root.path(cheapest_input_path).base().rows;
+    let num_distinct_rows =
+        if has_group_clause || has_grouping_sets || has_aggs || root.hasHavingQual {
+            // Grouping/aggregation already mostly unique: assume input rows.
+            cheapest_input_rows
+        } else {
+            // UNIQUE filter has effects comparable to GROUP BY.
+            let distinct_exprs = distinct_list_exprs(root)?;
+            backend_utils_adt_selfuncs_seams::estimate_num_groups::call(
+                run,
+                root,
+                &distinct_exprs,
+                cheapest_input_rows,
+                None,
+            )?
+        };
+
+    let distinct_clauses: Vec<types_nodes::rawnodes::SortGroupClause> = root
+        .processed_distinctClause
+        .iter()
+        .map(|&id| *root.sortgroupclause(id))
+        .collect();
+
+    // Sort-based DISTINCT (C:5079-5184).
+    if backend_optimizer_util_vars::tlist::grouping_is_sortable(&distinct_clauses) {
+        let limittuples = if root.distinct_pathkeys.is_empty() { 1.0 } else { -1.0 };
+
+        // With DISTINCT ON, sort by the more rigorous of DISTINCT and ORDER BY
+        // (C:5099-5104). The parser ensures one is a prefix of the other.
+        let has_distinct_on = run.resolve(root.parse).hasDistinctOn;
+        let needed_pathkeys = if has_distinct_on
+            && root.distinct_pathkeys.len() < root.sort_pathkeys.len()
+        {
+            root.sort_pathkeys.clone()
+        } else {
+            root.distinct_pathkeys.clone()
+        };
+
+        let input_paths = root.rel(input_rel).pathlist.clone();
+        for input_path in input_paths {
+            let input_path_pathkeys = root.path(input_path).base().pathkeys.clone();
+            let useful_pathkeys_list =
+                get_useful_pathkeys_for_distinct(
+                    root,
+                    has_distinct_on,
+                    &needed_pathkeys,
+                    &input_path_pathkeys,
+                )?;
+            debug_assert!(!useful_pathkeys_list.is_empty());
+
+            for useful_pathkeys in useful_pathkeys_list {
+                let sorted_path = make_ordered_path(
+                    root,
+                    run,
+                    distinct_rel,
+                    input_path,
+                    cheapest_input_path,
+                    useful_pathkeys,
+                    limittuples,
+                )?;
+                let sorted_path = match sorted_path {
+                    Some(p) => p,
+                    None => continue,
+                };
+
+                if root.distinct_pathkeys.is_empty() {
+                    // All pathkeys redundant => every DISTINCT target single-valued
+                    // => "LIMIT 1" suffices (C:5147-5168).
+                    let limit_count = make_int8_one_const(root);
+                    let limit_path = backend_optimizer_util_pathnode::create::create_limit_path(
+                        root,
+                        distinct_rel,
+                        sorted_path,
+                        None,
+                        Some(limit_count),
+                        types_pathnodes::LIMIT_OPTION_COUNT,
+                        0,
+                        1,
+                    )?;
+                    backend_optimizer_util_pathnode::add_path(root, distinct_rel, limit_path)?;
+                } else {
+                    let num_cols = root.distinct_pathkeys.len() as i32;
+                    let unique_path =
+                        backend_optimizer_util_pathnode::create::create_upper_unique_path(
+                            root,
+                            distinct_rel,
+                            sorted_path,
+                            num_cols,
+                            num_distinct_rows,
+                        )?;
+                    backend_optimizer_util_pathnode::add_path(root, distinct_rel, unique_path)?;
+                }
+            }
+        }
+    }
+
+    // Hash-based DISTINCT (C:5186-5213).
+    let enable_hashagg = backend_utils_misc_guc_tables::vars::enable_hashagg.read();
+    let has_distinct_on = run.resolve(root.parse).hasDistinctOn;
+    let allow_hash = if root.rel(distinct_rel).pathlist.is_empty() {
+        // No alternatives — we *must* hash or die trying.
+        true
+    } else if has_distinct_on || !enable_hashagg {
+        // Policy-based decision not to hash.
+        false
+    } else {
+        true
+    };
+
+    if allow_hash
+        && backend_optimizer_util_vars::tlist::grouping_is_hashable(&distinct_clauses)
+    {
+        let target = root
+            .path(cheapest_input_path)
+            .base()
+            .pathtarget
+            .clone()
+            .expect("create_final_distinct_paths: cheapest_input_path has no pathtarget");
+        let group_clause = root.processed_distinctClause.clone();
+        let agg_path = backend_optimizer_util_pathnode::create::create_agg_path(
+            run,
+            root,
+            distinct_rel,
+            cheapest_input_path,
+            target,
+            types_pathnodes::AGG_HASHED,
+            types_pathnodes::AGGSPLIT_SIMPLE,
+            group_clause,
+            Vec::new(),
+            None,
+            num_distinct_rows,
+        )?;
+        backend_optimizer_util_pathnode::add_path(root, distinct_rel, agg_path)?;
+    }
+
+    Ok(distinct_rel)
+}
+
+/// `get_useful_pathkeys_for_distinct(root, needed_pathkeys, path_pathkeys)`
+/// (planner.c:5223).
+///
+/// Returns a list of pathkey orderings useful for DISTINCT / DISTINCT ON by
+/// reordering `needed_pathkeys` to match `path_pathkeys` as much as possible.
+/// Always includes `needed_pathkeys` itself.
+fn get_useful_pathkeys_for_distinct(
+    root: &PlannerInfo,
+    has_distinct_on: bool,
+    needed_pathkeys: &[types_pathnodes::PathKey],
+    path_pathkeys: &[types_pathnodes::PathKey],
+) -> PgResult<Vec<Vec<types_pathnodes::PathKey>>> {
+    // Always include the given 'needed_pathkeys' (C:5230).
+    let mut useful_pathkeys_list: Vec<Vec<types_pathnodes::PathKey>> =
+        alloc::vec![needed_pathkeys.to_vec()];
+
+    if !get_enable_distinct_reordering() {
+        return Ok(useful_pathkeys_list);
+    }
+
+    // Scan path_pathkeys, building the longest prefix that matches needed_pathkeys
+    // (C:5241-5258). PathKeys are canonical: pointer comparison in C == PathKey
+    // value equality here (the Ec id + opfamily + cmptype + nulls_first identify
+    // the canonical key).
+    let mut useful_pathkeys: Vec<types_pathnodes::PathKey> = Vec::new();
+    for pathkey in path_pathkeys {
+        if !needed_pathkeys.contains(pathkey) {
+            break;
+        }
+        if has_distinct_on && !root.distinct_pathkeys.contains(pathkey) {
+            break;
+        }
+        useful_pathkeys.push(pathkey.clone());
+    }
+
+    // If no match at all, no point in reordering needed_pathkeys (C:5261).
+    if useful_pathkeys.is_empty() {
+        return Ok(useful_pathkeys_list);
+    }
+
+    // If not a full match, the result is not useful without incremental sort
+    // (C:5267-5269).
+    if useful_pathkeys.len() < needed_pathkeys.len() && !enable_incremental_sort() {
+        return Ok(useful_pathkeys_list);
+    }
+
+    // Append the remaining PathKey nodes in needed_pathkeys
+    // (list_concat_unique_ptr) (C:5272).
+    for pk in needed_pathkeys {
+        if !useful_pathkeys.contains(pk) {
+            useful_pathkeys.push(pk.clone());
+        }
+    }
+
+    // If the resulting list equals needed_pathkeys, just drop it (C:5277-5279).
+    if backend_optimizer_path_pathkeys::compare_pathkeys(needed_pathkeys, &useful_pathkeys)
+        == backend_optimizer_util_pathnode_seams::PathKeysComparison::Equal
+    {
+        return Ok(useful_pathkeys_list);
+    }
+
+    useful_pathkeys_list.push(useful_pathkeys);
+    Ok(useful_pathkeys_list)
+}
+
+/// `get_sortgrouplist_exprs(root->processed_distinctClause, parse->targetList)` —
+/// the DISTINCT expressions as arena node handles, for estimate_num_groups. Each
+/// SortGroupClause's expression resolves against processed_tlist (the planner's
+/// working targetlist, which derives from parse->targetList).
+fn distinct_list_exprs(root: &mut PlannerInfo) -> PgResult<Vec<types_pathnodes::NodeId>> {
+    let distinct_clause = root.processed_distinctClause.clone();
+    let tlist = root.processed_tlist.clone();
+    Ok(distinct_clause
+        .iter()
+        .map(|&sgc| backend_nodes_nodeFuncs_seams::get_sortgroupclause_expr::call(root, sgc, &tlist))
+        .collect())
+}
+
+/// Build an `INT8` `Const` of value 1 (`makeConst(INT8OID, -1, InvalidOid,
+/// sizeof(int64), Int64GetDatum(1), false, FLOAT8PASSBYVAL)`) and intern it,
+/// returning its arena handle — the `LIMIT 1` count used by the all-redundant-
+/// pathkeys DISTINCT legs (planner.c:4942 / 5151).
+fn make_int8_one_const(root: &mut PlannerInfo) -> types_pathnodes::NodeId {
+    let c = types_nodes::primnodes::Const {
+        consttype: types_core::catalog::INT8OID,
+        consttypmod: -1,
+        constcollid: 0,
+        constlen: core::mem::size_of::<i64>() as i32,
+        constvalue: types_tuple::backend_access_common_heaptuple::Datum::ByVal(1),
+        constisnull: false,
+        constbyval: true,
+        location: -1,
+    };
+    root.alloc_node(types_nodes::primnodes::Expr::Const(c))
 }
 
 /// `create_ordered_paths(root, input_rel, target, target_parallel_safe,
