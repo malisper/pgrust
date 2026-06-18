@@ -43,14 +43,27 @@ fn arg_cstring<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
         .and_then(|p| p.as_cstring())
         .expect("char fn: cstring arg missing from by-ref lane")
 }
-/// A `text`/`bytea` arg's detoasted `VARDATA_ANY` payload (header already
-/// stripped by the boundary).
+/// A by-ref `bytea`/wire arg's verbatim image (used by `charrecv`, which builds
+/// a `StringInfo` over the raw wire bytes — there is no varlena header to skip).
 #[inline]
 fn arg_varlena<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
     fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("char fn: by-ref arg missing from by-ref lane")
+}
+/// `VARHDRSZ` — the uncompressed varlena length-word size, in bytes.
+const VARHDRSZ: usize = 4;
+/// `VARDATA_ANY` of a header-ful `text`/`bytea` arg: the payload bytes after the
+/// (4-byte uncompressed) length header.
+#[inline]
+fn arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    let image = arg_varlena(fcinfo, i);
+    if image.len() >= VARHDRSZ {
+        &image[VARHDRSZ..]
+    } else {
+        &[]
+    }
 }
 
 #[inline]
@@ -72,11 +85,23 @@ fn ret_cstring(fcinfo: &mut FunctionCallInfoBaseData, s: String) -> Datum {
     fcinfo.set_ref_result(RefPayload::Cstring(s));
     Datum::from_usize(0)
 }
-/// Set a varlena (`charsend`/`char_text`) result on the by-ref lane. The bytes
-/// are the header-less payload (the boundary owns the `VARHDRSZ` framing).
+/// Set a varlena (`charsend`) result on the by-ref lane. The bytes are the
+/// already-header-ful wire `bytea` image (`pq_endtypsend` stamps the length
+/// word), carried verbatim.
 #[inline]
 fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
     fcinfo.set_ref_result(RefPayload::Varlena(bytes));
+    Datum::from_usize(0)
+}
+/// Set a `text` (`char_text`) result: prepend the 4-byte varlena length header
+/// to the header-less payload (`cstring_to_text`'s `SET_VARSIZE` + `memcpy`).
+#[inline]
+fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, payload: &[u8]) -> Datum {
+    let total = payload.len() + VARHDRSZ;
+    let mut img = Vec::with_capacity(total);
+    img.extend_from_slice(&((total as u32) << 2).to_ne_bytes());
+    img.extend_from_slice(payload);
+    fcinfo.set_ref_result(RefPayload::Varlena(img));
     Datum::from_usize(0)
 }
 
@@ -158,19 +183,19 @@ fn fc_i4tochar(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     }
 }
 fn fc_text_char(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_char(crate::text_char(arg_varlena(fcinfo, 0)))
+    ret_char(crate::text_char(arg_text(fcinfo, 0)))
 }
 fn fc_char_text(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    // C: char_text wraps charout's cstring into a `text` varlena. The boundary
-    // owns the VARHDRSZ framing, so the result payload is exactly charout's
-    // bytes (byte-identical to cstring_to_text's payload, minus the header).
+    // C: char_text wraps charout's cstring into a `text` varlena. `ret_text`
+    // prepends the 4-byte VARHDRSZ length word (cstring_to_text's SET_VARSIZE +
+    // memcpy), so the image crosses header-ful like every other text value.
     let m = scratch_mcx();
     let arg1 = arg_char(fcinfo, 0);
     let bytes = match crate::charout(m.mcx(), arg1) {
         Ok(s) => s.as_str().as_bytes().to_vec(),
         Err(e) => raise(e),
     };
-    ret_varlena(fcinfo, bytes)
+    ret_text(fcinfo, &bytes)
 }
 
 // ---------------------------------------------------------------------------

@@ -66,11 +66,13 @@ fn arg_varlena<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
 }
 
 /// Decode a `text` argument's varlena image into a `&str` (C: `text_to_cstring`).
-/// The value cores take ordinary `&str`; the varlena 4-byte length header is
-/// already stripped by the boundary, which hands us the bare payload bytes.
+/// The value cores take ordinary `&str`; the arg arrives as a header-ful varlena
+/// image, so skip the 4-byte length word to reach `VARDATA_ANY`.
 #[inline]
 fn arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
-    core::str::from_utf8(arg_varlena(fcinfo, i)).expect("datetime fn: invalid UTF-8 text arg")
+    let image = arg_varlena(fcinfo, i);
+    let payload = if image.len() >= 4 { &image[4..] } else { &image[..] };
+    core::str::from_utf8(payload).expect("datetime fn: invalid UTF-8 text arg")
 }
 
 #[inline]
@@ -104,10 +106,24 @@ fn ret_cstring(fcinfo: &mut FunctionCallInfoBaseData, s: String) -> Datum {
     fcinfo.set_ref_result(types_fmgr::boundary::RefPayload::Cstring(s));
     Datum::from_usize(0)
 }
-/// Set a varlena result (interval/timetz/bytea/text) on the by-ref lane.
+/// Set a verbatim by-ref result on the by-ref lane. Used for the fixed-length
+/// POD types (interval/timetz — not varlenas, no header), `*send` results (the
+/// already-header-ful wire `bytea` image), and numeric varlena images (built
+/// header-ful by `make_result`).
 #[inline]
 fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
     fcinfo.set_ref_result(types_fmgr::boundary::RefPayload::Varlena(bytes));
+    Datum::from_usize(0)
+}
+/// Set a `text` result: prepend the 4-byte varlena length header to the
+/// header-less payload (`cstring_to_text`'s `SET_VARSIZE` + `memcpy`).
+#[inline]
+fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, payload: Vec<u8>) -> Datum {
+    let total = payload.len() + 4;
+    let mut img = Vec::with_capacity(total);
+    img.extend_from_slice(&((total as u32) << 2).to_ne_bytes());
+    img.extend_from_slice(&payload);
+    fcinfo.set_ref_result(types_fmgr::boundary::RefPayload::Varlena(img));
     Datum::from_usize(0)
 }
 
@@ -1112,7 +1128,7 @@ fn fc_clock_timestamp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 fn fc_timeofday(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     // returns text.
     let s = crate::current::timeofday();
-    ret_varlena(fcinfo, s.into_bytes())
+    ret_text(fcinfo, s.into_bytes())
 }
 
 fn fc_timestamp_finite(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
