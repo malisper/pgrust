@@ -39,9 +39,11 @@ pub fn transformIndexStmt<'mcx>(
     stmt: NodePtr<'mcx>,
     query_string: &str,
 ) -> PgResult<NodePtr<'mcx>> {
-    let mut stmt = match mcx::PgBox::into_inner(stmt) {
-        Node::IndexStmt(s) => s,
-        other => unreachable!("transformIndexStmt: not an IndexStmt node: {}", other.node_tag()),
+    let stmt_node = mcx::PgBox::into_inner(stmt);
+    let stmt_tag = stmt_node.node_tag();
+    let mut stmt = match stmt_node.into_indexstmt() {
+        Some(s) => s,
+        None => unreachable!("transformIndexStmt: not an IndexStmt node: {}", stmt_tag),
     };
 
     // Nothing to do if statement already transformed.
@@ -148,10 +150,12 @@ pub fn transformStatsStmt<'mcx>(
     stmt: NodePtr<'mcx>,
     query_string: &str,
 ) -> PgResult<NodePtr<'mcx>> {
-    let mut stmt = match mcx::PgBox::into_inner(stmt) {
-        Node::CreateStatsStmt(s) => s,
-        other => {
-            unreachable!("transformStatsStmt: not a CreateStatsStmt node: {}", other.node_tag())
+    let stmt_node = mcx::PgBox::into_inner(stmt);
+    let stmt_tag = stmt_node.node_tag();
+    let mut stmt = match stmt_node.into_createstatsstmt() {
+        Some(s) => s,
+        None => {
+            unreachable!("transformStatsStmt: not a CreateStatsStmt node: {}", stmt_tag)
         }
     };
 

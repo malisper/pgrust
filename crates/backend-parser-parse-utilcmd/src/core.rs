@@ -87,9 +87,9 @@ impl<'mcx> CreateStmtContext<'mcx> {
     /// Convenience: the bare relation name (for error messages), as C reads
     /// `cxt->relation->relname`.
     pub fn relname(&self) -> &str {
-        match self.relation.as_deref() {
-            Some(Node::RangeVar(rv)) => rv.relname.as_ref().map_or("", PgString::as_str),
-            _ => "",
+        match self.relation.as_deref().and_then(|n| n.as_rangevar()) {
+            Some(rv) => rv.relname.as_ref().map_or("", PgString::as_str),
+            None => "",
         }
     }
 }

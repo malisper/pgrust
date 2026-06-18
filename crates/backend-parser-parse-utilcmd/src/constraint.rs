@@ -15,7 +15,7 @@ use types_nodes::ddlnodes::{
     CONSTR_EXCLUSION, CONSTR_FOREIGN, CONSTR_GENERATED, CONSTR_IDENTITY, CONSTR_NOTNULL,
     CONSTR_NULL, CONSTR_PRIMARY, CONSTR_UNIQUE,
 };
-use types_nodes::nodes::Node;
+use types_nodes::nodes::ntag;
 
 use crate::core::{CreateStmtContext, NodePtr};
 use crate::errpos::parser_errposition;
@@ -26,9 +26,12 @@ pub fn transformTableConstraint<'mcx>(
     cxt: &mut CreateStmtContext<'mcx>,
     constraint: NodePtr<'mcx>,
 ) -> PgResult<()> {
-    let (contype, location, is_no_inherit) = match constraint.as_ref() {
-        Node::Constraint(c) => (c.contype, c.location, c.is_no_inherit),
-        other => unreachable!("transformTableConstraint: not a Constraint node: {}", other.node_tag()),
+    let (contype, location, is_no_inherit) = match constraint.node_tag() {
+        ntag::T_Constraint => {
+            let c = constraint.expect_constraint();
+            (c.contype, c.location, c.is_no_inherit)
+        }
+        _ => unreachable!("transformTableConstraint: not a Constraint node: {}", constraint.node_tag()),
     };
 
     match contype {
@@ -128,7 +131,7 @@ pub fn transformCheckConstraints(cxt: &mut CreateStmtContext<'_>, skip_validatio
 
     if skip_validation {
         for c in cxt.ckconstraints.iter_mut() {
-            if let Node::Constraint(constraint) = c.as_mut() {
+            if let Some(constraint) = c.as_constraint_mut() {
                 constraint.skip_validation = true;
                 constraint.initially_valid = constraint.is_enforced;
             }

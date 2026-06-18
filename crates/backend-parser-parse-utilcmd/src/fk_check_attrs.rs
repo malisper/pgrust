@@ -16,7 +16,7 @@ use types_nodes::ddlnodes::{
     CONSTR_ATTR_NOT_ENFORCED, CONSTR_CHECK, CONSTR_EXCLUSION, CONSTR_FOREIGN, CONSTR_PRIMARY,
     CONSTR_UNIQUE,
 };
-use types_nodes::nodes::Node;
+use types_nodes::nodes::{ntag, Node};
 use types_nodes::parsenodes::{DROP_RESTRICT, OBJECT_TABLE};
 
 use crate::core::{CreateStmtContext, NodePtr};
@@ -38,7 +38,7 @@ pub fn transformFKConstraints<'mcx>(
 
     if skip_validation {
         for c in cxt.fkconstraints.iter_mut() {
-            if let Node::Constraint(constraint) = c.as_mut() {
+            if let Some(constraint) = c.as_constraint_mut() {
                 constraint.skip_validation = true;
                 constraint.initially_valid = constraint.is_enforced;
             }
@@ -109,22 +109,25 @@ pub fn transformConstraintAttrs<'mcx>(
     let mut saw_enforced = false;
 
     for i in 0..constraint_list.len() {
-        let (contype, location) = match constraint_list[i].as_ref() {
-            Node::Constraint(c) => (c.contype, c.location),
-            other => {
+        let (contype, location) = match constraint_list[i].node_tag() {
+            ntag::T_Constraint => {
+                let c = constraint_list[i].expect_constraint();
+                (c.contype, c.location)
+            }
+            _ => {
                 return Err(ereport(ERROR)
                     .errmsg_internal(alloc::format!(
                         "unrecognized node type: {}",
-                        other.node_tag()
+                        constraint_list[i].node_tag()
                     ))
                     .into_error());
             }
         };
 
         // The contype of the current lastprimary (for SUPPORTS_ATTRS / ENFORCED).
-        let primary_contype = lastprimary.map(|j| match constraint_list[j].as_ref() {
-            Node::Constraint(c) => c.contype,
-            _ => unreachable!(),
+        let primary_contype = lastprimary.map(|j| match constraint_list[j].as_constraint() {
+            Some(c) => c.contype,
+            None => unreachable!(),
         });
 
         match contype {
@@ -220,7 +223,7 @@ pub fn transformConstraintAttrs<'mcx>(
                     ));
                 }
                 saw_enforced = true;
-                if let Node::Constraint(c) = constraint_list[require_primary(lastprimary)?].as_mut() {
+                if let Some(c) = constraint_list[require_primary(lastprimary)?].as_constraint_mut() {
                     c.is_enforced = true;
                 }
             }
@@ -237,7 +240,7 @@ pub fn transformConstraintAttrs<'mcx>(
                     ));
                 }
                 saw_enforced = true;
-                if let Node::Constraint(c) = constraint_list[require_primary(lastprimary)?].as_mut() {
+                if let Some(c) = constraint_list[require_primary(lastprimary)?].as_constraint_mut() {
                     c.is_enforced = false;
                     // A NOT ENFORCED constraint must be marked as invalid.
                     c.skip_validation = true;
@@ -272,7 +275,7 @@ fn syntax_err(cxt: &CreateStmtContext<'_>, msg: &str, location: i32) -> PgError 
 }
 
 fn set_deferrable(n: &mut NodePtr<'_>, v: bool) {
-    if let Node::Constraint(c) = n.as_mut() {
+    if let Some(c) = n.as_constraint_mut() {
         c.deferrable = v;
     }
 }
@@ -280,7 +283,7 @@ fn get_deferrable(n: &NodePtr<'_>) -> bool {
     matches!(n.as_ref(), Node::Constraint(c) if c.deferrable)
 }
 fn set_initdeferred(n: &mut NodePtr<'_>, v: bool) {
-    if let Node::Constraint(c) = n.as_mut() {
+    if let Some(c) = n.as_constraint_mut() {
         c.initdeferred = v;
     }
 }

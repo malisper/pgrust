@@ -28,7 +28,7 @@ use types_error::{
 
 use types_nodes::copy_query::Query;
 use types_nodes::ddlnodes::{CreateStmt, RuleStmt};
-use types_nodes::nodes::Node;
+use types_nodes::nodes::{ntag, Node};
 
 use backend_parser_parse_utilcmd_outward_seams as sx;
 use backend_parser_small1::make_parsestate;
@@ -59,13 +59,15 @@ pub fn transformCreateStmt<'mcx>(
 ) -> PgResult<PgVec<'mcx, NodePtr<'mcx>>> {
     // The caller hands us a CreateStmt (or CreateForeignTableStmt). The shared
     // struct is `CreateStmt`; the foreign-table variant carries the same fields.
+    let stmt_node = PgBox::into_inner(stmt);
+    let stmt_tag = stmt_node.node_tag();
     let (mut stmt, isforeign, stmt_type): (CreateStmt<'mcx>, bool, &'static str) =
-        match PgBox::into_inner(stmt) {
-            Node::CreateStmt(s) => (s, false, "CREATE TABLE"),
-            Node::CreateForeignTableStmt(s) => {
-                (PgBox::into_inner(s.base), true, "CREATE FOREIGN TABLE")
+        match stmt_tag {
+            ntag::T_CreateStmt => (stmt_node.into_createstmt().unwrap(), false, "CREATE TABLE"),
+            ntag::T_CreateForeignTableStmt => {
+                (PgBox::into_inner(stmt_node.into_createforeigntablestmt().unwrap().base), true, "CREATE FOREIGN TABLE")
             }
-            other => unreachable!("transformCreateStmt: not a CreateStmt node: {}", other.node_tag()),
+            _ => unreachable!("transformCreateStmt: not a CreateStmt node: {}", stmt_tag),
         };
 
     // Set up pstate.
@@ -84,13 +86,13 @@ pub fn transformCreateStmt<'mcx>(
     stmt.relation = Some(relation);
 
     // Pull the (possibly-mutated) relation's schemaname / relpersistence / name.
-    let (schemaname_is_none, relpersistence, relname) = match stmt.relation.as_deref() {
-        Some(Node::RangeVar(rv)) => (
+    let (schemaname_is_none, relpersistence, relname) = match stmt.relation.as_deref().and_then(|n| n.as_rangevar()) {
+        Some(rv) => (
             rv.schemaname.is_none(),
             rv.relpersistence,
             rv.relname.as_ref().map_or_else(alloc::string::String::new, |s| s.as_str().into()),
         ),
-        _ => unreachable!("CreateStmt.relation must be a RangeVar"),
+        None => unreachable!("CreateStmt.relation must be a RangeVar"),
     };
 
     // IF NOT EXISTS and the relation already exists: bail with a NOTICE.
@@ -168,15 +170,15 @@ pub fn transformCreateStmt<'mcx>(
     // Run through each primary element, separating column defs from constraints.
     let table_elts = core::mem::replace(&mut stmt.tableElts, PgVec::new_in(mcx));
     for element in table_elts {
-        match element.as_ref() {
-            Node::ColumnDef(_) => transformColumnDefinition(&mut cxt, element)?,
-            Node::Constraint(_) => transformTableConstraint(&mut cxt, element)?,
-            Node::TableLikeClause(_) => transformTableLikeClause(&mut cxt, element)?,
-            other => {
+        match element.node_tag() {
+            ntag::T_ColumnDef => transformColumnDefinition(&mut cxt, element)?,
+            ntag::T_Constraint => transformTableConstraint(&mut cxt, element)?,
+            ntag::T_TableLikeClause => transformTableLikeClause(&mut cxt, element)?,
+            _ => {
                 return Err(ereport(ERROR)
                     .errmsg_internal(alloc::format!(
                         "unrecognized node type: {}",
-                        other.node_tag()
+                        element.node_tag()
                     ))
                     .into_error());
             }
@@ -225,9 +227,9 @@ fn propagate_notnull(cxt: &mut CreateStmtContext<'_>) {
     // Collect target column names first (strVal(linitial(nn->keys))).
     let mut colnames: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
     for nn in cxt.nnconstraints.iter() {
-        if let Node::Constraint(c) = nn.as_ref() {
+        if let Some(c) = nn.as_constraint() {
             if let Some(k) = c.keys.first() {
-                if let Node::String(s) = k.as_ref() {
+                if let Some(s) = k.as_string() {
                     colnames.push(s.sval.as_str().into());
                 }
             }
@@ -236,7 +238,7 @@ fn propagate_notnull(cxt: &mut CreateStmtContext<'_>) {
 
     for colname in colnames {
         for cd in cxt.columns.iter_mut() {
-            if let Node::ColumnDef(col) = cd.as_mut() {
+            if let Some(col) = cd.as_columndef_mut() {
                 // not our column?
                 if col.colname.as_ref().map(PgString::as_str) != Some(colname.as_str()) {
                     continue;
@@ -289,11 +291,11 @@ fn range_var_get_and_check_creation_namespace<'mcx>(
     // `types_tuple::access::RangeVar` (no `'mcx`); bridge the node's
     // `rawnodes::RangeVar` across, then propagate the (possibly temp-promoted)
     // `relpersistence` back onto the node.
-    let mut access_rv = match relation.as_ref() {
-        Node::RangeVar(rv) => to_access_range_var(rv),
-        other => unreachable!(
+    let mut access_rv = match relation.node_tag() {
+        ntag::T_RangeVar => to_access_range_var(relation.expect_rangevar()),
+        _ => unreachable!(
             "RangeVarGetAndCheckCreationNamespace: not a RangeVar node: {}",
-            other.node_tag()
+            relation.node_tag()
         ),
     };
     let namespaceid = backend_catalog_namespace::RangeVarGetAndCheckCreationNamespace(
@@ -302,7 +304,7 @@ fn range_var_get_and_check_creation_namespace<'mcx>(
         NoLock,
         Some(&mut existing_relid),
     )?;
-    if let Node::RangeVar(rv) = relation.as_mut() {
+    if let Some(rv) = relation.as_rangevar_mut() {
         rv.relpersistence = access_rv.relpersistence as i8;
     }
 

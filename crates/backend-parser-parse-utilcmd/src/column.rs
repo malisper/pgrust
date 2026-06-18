@@ -23,7 +23,7 @@ use types_nodes::ddlnodes::{
     CONSTR_EXCLUSION, CONSTR_FOREIGN, CONSTR_GENERATED, CONSTR_IDENTITY, CONSTR_NOTNULL,
     CONSTR_NULL, CONSTR_PRIMARY, CONSTR_UNIQUE,
 };
-use types_nodes::nodes::Node;
+use types_nodes::nodes::{ntag, Node};
 use types_nodes::parsenodes::{DROP_RESTRICT, OBJECT_FOREIGN_TABLE};
 use types_nodes::primnodes::CoercionForm::COERCE_EXPLICIT_CALL;
 use types_nodes::rawnodes::{A_Const, FuncCall, TypeCast, TypeName};
@@ -57,9 +57,11 @@ pub fn transformColumnDefinition<'mcx>(
     // pointer at entry and mutates it in place. Since nothing reads cxt.columns
     // until all columns are processed, we keep the (owned) `column` local and
     // push the finished node at the end (equivalent).
-    let mut column = match mcx::PgBox::into_inner(column) {
-        Node::ColumnDef(c) => c,
-        other => unreachable!("transformColumnDefinition: not a ColumnDef node: {}", other.node_tag()),
+    let column_node = mcx::PgBox::into_inner(column);
+    let column_tag = column_node.node_tag();
+    let mut column = match column_node.into_columndef() {
+        Some(c) => c,
+        None => unreachable!("transformColumnDefinition: not a ColumnDef node: {}", column_tag),
     };
 
     let mut need_notnull = false;
@@ -126,7 +128,7 @@ pub fn transformColumnDefinition<'mcx>(
                 false,
             )?;
         // generateSerialExtraStmts sets column->identitySequence.
-        if let Node::ColumnDef(c) = column_out.as_ref() {
+        if let Some(c) = column_out.as_columndef() {
             column.identitySequence = match &c.identitySequence {
                 Some(r) => Some(mcx::alloc_in(mcx, r.clone_in(mcx)?)?),
                 None => None,
@@ -197,7 +199,7 @@ pub fn transformColumnDefinition<'mcx>(
     // NO INHERIT (PRIMARY KEY / IDENTITY).
     if !disallow_noinherit_notnull {
         for c in column.constraints.iter() {
-            if let Node::Constraint(con) = c.as_ref() {
+            if let Some(con) = c.as_constraint() {
                 match con.contype {
                     CONSTR_IDENTITY | CONSTR_PRIMARY => {
                         disallow_noinherit_notnull = true;
@@ -220,18 +222,21 @@ pub fn transformColumnDefinition<'mcx>(
     let colname = clone_colname(mcx, &column)?;
 
     for constraint in constraints {
-        let (contype, location, is_no_inherit, conname) = match constraint.as_ref() {
-            Node::Constraint(c) => (
-                c.contype,
-                c.location,
-                c.is_no_inherit,
-                opt_clone_str(mcx, &c.conname)?,
-            ),
-            other => {
+        let (contype, location, is_no_inherit, conname) = match constraint.node_tag() {
+            ntag::T_Constraint => {
+                let c = constraint.expect_constraint();
+                (
+                    c.contype,
+                    c.location,
+                    c.is_no_inherit,
+                    opt_clone_str(mcx, &c.conname)?,
+                )
+            }
+            _ => {
                 return Err(ereport(ERROR)
                     .errmsg_internal(alloc::format!(
                         "unrecognized node type: {}",
-                        other.node_tag()
+                        constraint.node_tag()
                     ))
                     .into_error());
             }
@@ -274,7 +279,7 @@ pub fn transformColumnDefinition<'mcx>(
 
                     // constraint->keys = list_make1(makeString(column->colname));
                     let mut constraint = constraint;
-                    if let Node::Constraint(c) = constraint.as_mut() {
+                    if let Some(c) = constraint.as_constraint_mut() {
                         let mut keys: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
                         keys.push(make_string(mcx, &colname)?);
                         c.keys = keys;
@@ -283,12 +288,12 @@ pub fn transformColumnDefinition<'mcx>(
                     notnull_idx = Some(cxt.nnconstraints.len() - 1);
                 } else if let Some(idx) = notnull_idx {
                     let (existing_conname, existing_no_inherit) =
-                        match cxt.nnconstraints[idx].as_ref() {
-                            Node::Constraint(c) => (
+                        match cxt.nnconstraints[idx].as_constraint() {
+                            Some(c) => (
                                 opt_clone_str(mcx, &c.conname)?,
                                 c.is_no_inherit,
                             ),
-                            _ => (None, false),
+                            None => (None, false),
                         };
 
                     if conname.is_some()
@@ -314,7 +319,7 @@ pub fn transformColumnDefinition<'mcx>(
                     }
 
                     if existing_conname.is_none() && conname.is_some() {
-                        if let Node::Constraint(c) = cxt.nnconstraints[idx].as_mut() {
+                        if let Some(c) = cxt.nnconstraints[idx].as_constraint_mut() {
                             c.conname = match &conname {
                                 Some(s) => Some(PgString::from_str_in(s, mcx)?),
                                 None => None,
@@ -336,9 +341,9 @@ pub fn transformColumnDefinition<'mcx>(
                         .into_error());
                 }
                 // column->raw_default = constraint->raw_expr;
-                column.raw_default = match mcx::PgBox::into_inner(constraint) {
-                    Node::Constraint(c) => c.raw_expr,
-                    _ => None,
+                column.raw_default = match mcx::PgBox::into_inner(constraint).into_constraint() {
+                    Some(c) => c.raw_expr,
+                    None => None,
                 };
                 saw_default = true;
             }
@@ -373,9 +378,9 @@ pub fn transformColumnDefinition<'mcx>(
                         .into_error());
                 }
 
-                let (options, generated_when) = match mcx::PgBox::into_inner(constraint) {
-                    Node::Constraint(c) => (c.options, c.generated_when),
-                    _ => (PgVec::new_in(mcx), 0),
+                let (options, generated_when) = match mcx::PgBox::into_inner(constraint).into_constraint() {
+                    Some(c) => (c.options, c.generated_when),
+                    None => (PgVec::new_in(mcx), 0),
                 };
 
                 let relation = clone_relation(cxt)?;
@@ -424,9 +429,9 @@ pub fn transformColumnDefinition<'mcx>(
                         .errposition(parser_errposition(&cxt.pstate, location))
                         .into_error());
                 }
-                let (generated_kind, raw_expr) = match mcx::PgBox::into_inner(constraint) {
-                    Node::Constraint(c) => (c.generated_kind, c.raw_expr),
-                    _ => (0, None),
+                let (generated_kind, raw_expr) = match mcx::PgBox::into_inner(constraint).into_constraint() {
+                    Some(c) => (c.generated_kind, c.raw_expr),
+                    None => (0, None),
                 };
                 column.generated = generated_kind;
                 column.raw_default = raw_expr;
@@ -459,7 +464,7 @@ pub fn transformColumnDefinition<'mcx>(
                         .into_error());
                 }
                 let mut constraint = constraint;
-                if let Node::Constraint(c) = constraint.as_mut() {
+                if let Some(c) = constraint.as_constraint_mut() {
                     if c.keys.is_empty() {
                         let mut keys: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
                         keys.push(make_string(mcx, &colname)?);
@@ -478,7 +483,7 @@ pub fn transformColumnDefinition<'mcx>(
                         .into_error());
                 }
                 let mut constraint = constraint;
-                if let Node::Constraint(c) = constraint.as_mut() {
+                if let Some(c) = constraint.as_constraint_mut() {
                     if c.keys.is_empty() {
                         let mut keys: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
                         keys.push(make_string(mcx, &colname)?);
@@ -505,7 +510,7 @@ pub fn transformColumnDefinition<'mcx>(
                 }
                 // Fill in the FK's attribute name and queue it.
                 let mut constraint = constraint;
-                if let Node::Constraint(c) = constraint.as_mut() {
+                if let Some(c) = constraint.as_constraint_mut() {
                     let mut fk_attrs: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
                     fk_attrs.push(make_string(mcx, &colname)?);
                     c.fk_attrs = fk_attrs;
@@ -604,8 +609,8 @@ pub fn transformColumnDefinition<'mcx>(
 
 /// `strVal(node)` for a name-list element (`String` value node).
 fn strval_of<'a>(n: &'a Node<'_>) -> Option<&'a str> {
-    match n {
-        Node::String(s) => Some(s.sval.as_str()),
+    match n.node_tag() {
+        ntag::T_String => Some(n.expect_string().sval.as_str()),
         _ => None,
     }
 }

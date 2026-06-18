@@ -13,7 +13,7 @@ use backend_utils_adt_format_type::format_type_be;
 use backend_utils_error::ereport;
 use types_core::{Oid, OidIsValid};
 use types_error::{PgResult, ERRCODE_DATATYPE_MISMATCH, ERROR};
-use types_nodes::nodes::Node;
+use types_nodes::nodes::{ntag, Node};
 use types_nodes::parsestmt::ParseState;
 
 use crate::errpos::parser_errposition;
@@ -27,13 +27,13 @@ pub fn transformColumnType<'mcx>(
     pstate: &ParseState<'mcx>,
     column: &Node<'mcx>,
 ) -> PgResult<Oid> {
-    let column = match column {
-        Node::ColumnDef(c) => c,
-        other => {
+    let column = match column.node_tag() {
+        ntag::T_ColumnDef => column.expect_columndef(),
+        _ => {
             return Err(ereport(ERROR)
                 .errmsg_internal(alloc::format!(
                     "transformColumnType: not a ColumnDef node: {}",
-                    other.node_tag()
+                    column.node_tag()
                 ))
                 .into_error());
         }
@@ -58,19 +58,19 @@ pub fn transformColumnType<'mcx>(
         let mut collname_pn: alloc::vec::Vec<types_parsenodes::Node> =
             alloc::vec::Vec::with_capacity(coll_clause.collname.len());
         for n in coll_clause.collname.iter() {
-            match n.as_ref() {
-                Node::String(s) => {
+            match n.node_tag() {
+                ntag::T_String => {
                     collname_pn.push(types_parsenodes::Node::String(
                         types_parsenodes::StringNode {
-                            sval: Some(alloc::string::String::from(s.sval.as_str())),
+                            sval: Some(alloc::string::String::from(n.expect_string().sval.as_str())),
                         },
                     ));
                 }
-                other => {
+                _ => {
                     return Err(ereport(ERROR)
                         .errmsg_internal(alloc::format!(
                             "transformColumnType: collname element is not a String value node (tag {})",
-                            other.node_tag().0
+                            n.node_tag().0
                         ))
                         .into_error());
                 }
@@ -114,17 +114,17 @@ fn raw_typename_to_parse(
 
     let mut names: Vec<types_parsenodes::Node> = Vec::with_capacity(tn.names.len());
     for n in tn.names.iter() {
-        match n.as_ref() {
-            Node::String(s) => names.push(types_parsenodes::Node::String(
+        match n.node_tag() {
+            ntag::T_String => names.push(types_parsenodes::Node::String(
                 types_parsenodes::StringNode {
-                    sval: Some(s.sval.as_str().to_string()),
+                    sval: Some(n.expect_string().sval.as_str().to_string()),
                 },
             )),
-            other => {
+            _ => {
                 return Err(ereport(ERROR)
                     .errmsg_internal(alloc::format!(
                         "transformColumnType: TypeName.names element is not a String node (tag {})",
-                        other.node_tag().0
+                        n.node_tag().0
                     ))
                     .into_error());
             }
@@ -160,7 +160,7 @@ fn raw_typename_to_parse(
             },
             Node::ColumnRef(cr) => {
                 if cr.fields.len() == 1 {
-                    if let Node::String(s) = cr.fields[0].as_ref() {
+                    if let Some(s) = cr.fields[0].as_string() {
                         types_parsenodes::Node::String(types_parsenodes::StringNode {
                             sval: Some(s.sval.as_str().to_string()),
                         })
@@ -178,11 +178,11 @@ fn raw_typename_to_parse(
 
     let mut array_bounds: Vec<types_parsenodes::Node> = Vec::with_capacity(tn.arrayBounds.len());
     for n in tn.arrayBounds.iter() {
-        match n.as_ref() {
-            Node::Integer(i) => array_bounds.push(types_parsenodes::Node::Integer(
+        match n.as_integer() {
+            Some(i) => array_bounds.push(types_parsenodes::Node::Integer(
                 types_parsenodes::Integer { ival: i.ival },
             )),
-            _ => array_bounds.push(types_parsenodes::Node::Integer(types_parsenodes::Integer {
+            None => array_bounds.push(types_parsenodes::Node::Integer(types_parsenodes::Integer {
                 ival: -1,
             })),
         }

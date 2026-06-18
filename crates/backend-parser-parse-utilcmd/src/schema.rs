@@ -10,7 +10,7 @@ use mcx::{Mcx, PgString, PgVec};
 use backend_utils_error::ereport;
 use types_error::{PgResult, ERRCODE_INVALID_SCHEMA_DEFINITION, ERROR};
 
-use types_nodes::nodes::Node;
+use types_nodes::nodes::{ntag, Node};
 
 use crate::core::{CreateSchemaStmtContext, NodePtr};
 
@@ -35,37 +35,42 @@ pub fn transformCreateSchemaStmtElements<'mcx>(
     // Run through each schema element, separating statements by type.
     for element in schema_elts {
         let mut element = mcx::alloc_in(mcx, element.clone_in(mcx)?)?;
-        match element.as_mut() {
-            Node::CreateSeqStmt(elp) => {
+        match element.node_tag() {
+            ntag::T_CreateSeqStmt => {
+                let elp = element.as_createseqstmt_mut().unwrap();
                 set_schema_on_rangevar(mcx, cxt.schemaname.as_ref(), elp.sequence.as_deref_mut())?;
                 cxt.sequences.push(element);
             }
-            Node::CreateStmt(elp) => {
+            ntag::T_CreateStmt => {
+                let elp = element.as_createstmt_mut().unwrap();
                 set_schema_on_rangevar(mcx, cxt.schemaname.as_ref(), elp.relation.as_deref_mut())?;
                 // XXX todo: deal with constraints
                 cxt.tables.push(element);
             }
-            Node::ViewStmt(elp) => {
+            ntag::T_ViewStmt => {
+                let elp = element.as_viewstmt_mut().unwrap();
                 set_schema_on_rangevar(mcx, cxt.schemaname.as_ref(), elp.view.as_deref_mut())?;
                 // XXX todo: deal with references between views
                 cxt.views.push(element);
             }
-            Node::IndexStmt(elp) => {
+            ntag::T_IndexStmt => {
+                let elp = element.as_indexstmt_mut().unwrap();
                 set_schema_on_rangevar(mcx, cxt.schemaname.as_ref(), elp.relation.as_deref_mut())?;
                 cxt.indexes.push(element);
             }
-            Node::CreateTrigStmt(elp) => {
+            ntag::T_CreateTrigStmt => {
+                let elp = element.as_createtrigstmt_mut().unwrap();
                 set_schema_on_rangevar(mcx, cxt.schemaname.as_ref(), elp.relation.as_deref_mut())?;
                 cxt.triggers.push(element);
             }
-            Node::GrantStmt(_) => {
+            ntag::T_GrantStmt => {
                 cxt.grants.push(element);
             }
-            other => {
+            _ => {
                 return Err(ereport(ERROR)
                     .errmsg_internal(alloc::format!(
                         "unrecognized node type: {}",
-                        other.node_tag()
+                        element.node_tag()
                     ))
                     .into_error());
             }
@@ -98,11 +103,11 @@ fn set_schema_on_rangevar<'mcx>(
     context_schema: Option<&PgString<'mcx>>,
     rv: Option<&mut Node<'mcx>>,
 ) -> PgResult<()> {
-    match rv {
-        Some(Node::RangeVar(rangevar)) => {
+    match rv.and_then(|n| n.as_rangevar_mut()) {
+        Some(rangevar) => {
             setSchemaName(mcx, context_schema, &mut rangevar.schemaname)
         }
-        _ => Ok(()),
+        None => Ok(()),
     }
 }
 

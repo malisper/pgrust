@@ -18,7 +18,7 @@ use types_error::{
 };
 
 use types_nodes::ddlnodes::{IndexElem, IndexStmt, CONSTR_EXCLUSION, CONSTR_PRIMARY};
-use types_nodes::nodes::Node;
+use types_nodes::nodes::{ntag, Node};
 use types_nodes::parsestmt::ParseState;
 use types_nodes::rawnodes::{SORTBY_DEFAULT, SORTBY_NULLS_DEFAULT};
 use types_core::Oid;
@@ -76,7 +76,7 @@ pub fn transformIndexConstraints(cxt: &mut CreateStmtContext<'_>) -> PgResult<()
                     Some(s) => Some(s.clone_in(mcx)?),
                     None => None,
                 };
-                if let Node::IndexStmt(prior) = finalindexlist[k].as_mut() {
+                if let Some(prior) = finalindexlist[k].as_indexstmt_mut() {
                     prior.unique |= index_unique;
                     // Transfer the name to the prior index if it's unnamed.
                     if prior.idxname.is_none() {
@@ -99,9 +99,9 @@ pub fn transformIndexConstraints(cxt: &mut CreateStmtContext<'_>) -> PgResult<()
 }
 
 fn as_index<'a, 'mcx>(n: &'a NodePtr<'mcx>) -> &'a IndexStmt<'mcx> {
-    match n.as_ref() {
-        Node::IndexStmt(i) => i,
-        _ => unreachable!("transformIndexConstraints: expected IndexStmt"),
+    match n.as_indexstmt() {
+        Some(i) => i,
+        None => unreachable!("transformIndexConstraints: expected IndexStmt"),
     }
 }
 
@@ -168,22 +168,25 @@ fn transformIndexConstraint<'mcx>(
 
     let (contype, conname, location, nulls_not_distinct, without_overlaps, deferrable, initdeferred,
          options, indexspace, where_clause, access_method, reset_default_tblspc) =
-        match constraint.as_ref() {
-            Node::Constraint(c) => (
-                c.contype,
-                opt_clone(mcx, &c.conname)?,
-                c.location,
-                c.nulls_not_distinct,
-                c.without_overlaps,
-                c.deferrable,
-                c.initdeferred,
-                clone_vec(mcx, &c.options)?,
-                opt_clone(mcx, &c.indexspace)?,
-                opt_clone_node(mcx, &c.where_clause)?,
-                opt_clone(mcx, &c.access_method)?,
-                c.reset_default_tblspc,
-            ),
-            other => unreachable!("transformIndexConstraint: not a Constraint: {}", other.node_tag()),
+        match constraint.node_tag() {
+            ntag::T_Constraint => {
+                let c = constraint.expect_constraint();
+                (
+                    c.contype,
+                    opt_clone(mcx, &c.conname)?,
+                    c.location,
+                    c.nulls_not_distinct,
+                    c.without_overlaps,
+                    c.deferrable,
+                    c.initdeferred,
+                    clone_vec(mcx, &c.options)?,
+                    opt_clone(mcx, &c.indexspace)?,
+                    opt_clone_node(mcx, &c.where_clause)?,
+                    opt_clone(mcx, &c.access_method)?,
+                    c.reset_default_tblspc,
+                )
+            }
+            _ => unreachable!("transformIndexConstraint: not a Constraint: {}", constraint.node_tag()),
         };
 
     let primary = contype == CONSTR_PRIMARY;
@@ -266,9 +269,9 @@ fn transformIndexConstraint<'mcx>(
 
 /// `strVal(lfirst(lc))` — read the string payload of a `String` value node.
 fn str_val<'a>(n: &'a NodePtr<'_>) -> &'a str {
-    match n.as_ref() {
-        Node::String(s) => s.sval.as_str(),
-        other => unreachable!("expected String value node, got {}", other.node_tag()),
+    match n.node_tag() {
+        ntag::T_String => n.expect_string().sval.as_str(),
+        _ => unreachable!("expected String value node, got {}", n.node_tag()),
     }
 }
 
@@ -310,14 +313,14 @@ pub fn transform_index_constraint_catalog<'mcx>(
     mut columns: PgVec<'mcx, NodePtr<'mcx>>,
     inh_relations: PgVec<'mcx, NodePtr<'mcx>>,
 ) -> PgResult<(NodePtr<'mcx>, PgVec<'mcx, NodePtr<'mcx>>)> {
-    let con = match constraint.as_ref() {
-        Node::Constraint(c) => c,
-        other => unreachable!("transformIndexConstraintCatalog: not a Constraint: {}", other.node_tag()),
+    let con = match constraint.node_tag() {
+        ntag::T_Constraint => constraint.expect_constraint(),
+        _ => unreachable!("transformIndexConstraintCatalog: not a Constraint: {}", constraint.node_tag()),
     };
     let contype = con.contype;
-    let is_primary = match index.as_ref() {
-        Node::IndexStmt(i) => i.primary,
-        _ => unreachable!("transformIndexConstraintCatalog: index is not an IndexStmt"),
+    let is_primary = match index.as_indexstmt() {
+        Some(i) => i.primary,
+        None => unreachable!("transformIndexConstraintCatalog: index is not an IndexStmt"),
     };
 
     // PRIMARY-KEY-implied not-null constraints accumulate here and are returned
@@ -350,7 +353,7 @@ pub fn transform_index_constraint_catalog<'mcx>(
                 ),
                 _ => unreachable!("EXCLUDE pair is not a 2-element List"),
             };
-            if let Node::IndexStmt(i) = index.as_mut() {
+            if let Some(i) = index.as_indexstmt_mut() {
                 i.indexParams.push(elem);
                 i.excludeOpNames.push(opname);
             }
@@ -364,7 +367,7 @@ pub fn transform_index_constraint_catalog<'mcx>(
             let mut col_idx: Option<usize> = None;
 
             for (i, c) in columns.iter().enumerate() {
-                if let Node::ColumnDef(col) = c.as_ref() {
+                if let Some(col) = c.as_columndef() {
                     if col.colname.as_ref().map(PgString::as_str) == Some(key) {
                         found = true;
                         col_idx = Some(i);
@@ -376,14 +379,14 @@ pub fn transform_index_constraint_catalog<'mcx>(
             if found {
                 let ci = col_idx.unwrap();
                 if contype == CONSTR_PRIMARY && !isalter {
-                    let is_not_null = match columns[ci].as_ref() {
-                        Node::ColumnDef(col) => col.is_not_null,
-                        _ => false,
+                    let is_not_null = match columns[ci].as_columndef() {
+                        Some(col) => col.is_not_null,
+                        None => false,
                     };
                     if is_not_null {
                         // Verify any existing not-null constraint isn't NO INHERIT.
                         for nn in extra_nn.iter() {
-                            if let Node::Constraint(nnc) = nn.as_ref() {
+                            if let Some(nnc) = nn.as_constraint() {
                                 if nnc.keys.first().map(|k| str_val(k)) == Some(key) {
                                     if nnc.is_no_inherit {
                                         return Err(ereport(ERROR)
@@ -399,7 +402,7 @@ pub fn transform_index_constraint_catalog<'mcx>(
                             }
                         }
                     } else {
-                        if let Node::ColumnDef(col) = columns[ci].as_mut() {
+                        if let Some(col) = columns[ci].as_columndef_mut() {
                             col.is_not_null = true;
                         }
                         let nn = make_not_null_constraint(mcx, key)?;
@@ -459,7 +462,7 @@ pub fn transform_index_constraint_catalog<'mcx>(
             }
 
             let iparam = make_index_elem(mcx, key)?;
-            if let Node::IndexStmt(i) = index.as_mut() {
+            if let Some(i) = index.as_indexstmt_mut() {
                 i.indexParams.push(iparam);
             }
         }
@@ -471,7 +474,7 @@ pub fn transform_index_constraint_catalog<'mcx>(
                     .errmsg("constraint using WITHOUT OVERLAPS needs at least two columns")
                     .into_error());
             }
-            if let Node::IndexStmt(i) = index.as_mut() {
+            if let Some(i) = index.as_indexstmt_mut() {
                 i.accessMethod = Some(PgString::from_str_in("gist", mcx)?);
             }
         }
@@ -484,7 +487,7 @@ pub fn transform_index_constraint_catalog<'mcx>(
         let mut found = false;
 
         for c in columns.iter() {
-            if let Node::ColumnDef(col) = c.as_ref() {
+            if let Some(col) = c.as_columndef() {
                 if col.colname.as_ref().map(PgString::as_str) == Some(key) {
                     found = true;
                     break;
@@ -512,7 +515,7 @@ pub fn transform_index_constraint_catalog<'mcx>(
         }
 
         let iparam = make_index_elem(mcx, key)?;
-        if let Node::IndexStmt(i) = index.as_mut() {
+        if let Some(i) = index.as_indexstmt_mut() {
             i.indexIncludingParams.push(iparam);
         }
     }

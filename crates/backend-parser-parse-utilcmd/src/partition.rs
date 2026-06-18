@@ -12,7 +12,7 @@
 use types_core::Oid;
 use types_error::PgResult;
 
-use types_nodes::nodes::Node;
+use types_nodes::nodes::{ntag, Node};
 use types_nodes::parsestmt::ParseState;
 
 use backend_parser_parse_utilcmd_outward_seams as sx;
@@ -42,12 +42,12 @@ pub fn transformPartitionCmd<'mcx>(
     cmd: &Node<'mcx>,
 ) -> PgResult<()> {
     let mcx = cxt.mcx;
-    let bound = match cmd {
-        Node::PartitionCmd(pc) => match pc.bound.as_deref() {
+    let bound = match cmd.node_tag() {
+        ntag::T_PartitionCmd => match cmd.expect_partitioncmd().bound.as_deref() {
             Some(b) => Some(mcx::alloc_in(mcx, b.clone_in(mcx)?)?),
             None => None,
         },
-        other => unreachable!("transformPartitionCmd: not a PartitionCmd node: {}", other.node_tag()),
+        _ => unreachable!("transformPartitionCmd: not a PartitionCmd node: {}", cmd.node_tag()),
     };
 
     if let Some(bound) = bound {

@@ -98,7 +98,7 @@ pub fn transformOfType<'mcx>(
     // Cache the resolved type OID on the (caller-owned) node for later. The C
     // mutates `ofTypename->typeOid`; mirror it on the node we hold.
     let mut of_typename = of_typename;
-    if let Node::TypeName(tn) = of_typename.as_mut() {
+    if let Some(tn) = of_typename.as_typename_mut() {
         tn.typeOid = of_type_id;
     }
 
