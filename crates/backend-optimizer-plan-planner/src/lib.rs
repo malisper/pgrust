@@ -2456,12 +2456,6 @@ fn add_modifytable_to_path<'mcx>(
              (parse->onConflict) — OnConflictExpr carrier is not ported"
         );
     }
-    if has_returning {
-        panic!(
-            "grouping_planner: ModifyTable RETURNING (parse->returningList) — \
-             returningLists carrier is not ported"
-        );
-    }
     if has_wco {
         panic!(
             "grouping_planner: ModifyTable WITH CHECK OPTION \
@@ -2476,6 +2470,45 @@ fn add_modifytable_to_path<'mcx>(
     let mut update_colnos_lists: Vec<Vec<types_core::primitive::AttrNumber>> = Vec::new();
     if command_type == CmdType::CMD_UPDATE {
         update_colnos_lists.push(root.update_colnos.clone());
+    }
+
+    // returningLists = list_make1(parse->returningList). Materialize the owned
+    // RETURNING TargetEntry list into the node arena so the path/plan carriers
+    // can hold node handles (resolved back to owned TLEs in createplan).
+    let mut returning_lists: Vec<Vec<types_pathnodes::NodeId>> = Vec::new();
+    if has_returning {
+        let mcx = run.mcx();
+        let n = run.resolve(root.parse).returningList.len();
+        let mut ids: Vec<types_pathnodes::NodeId> = Vec::with_capacity(n);
+        for i in 0..n {
+            let (expr_clone, resno, resname, ressortgroupref, resorigtbl, resorigcol, resjunk) = {
+                let tle = &run.resolve(root.parse).returningList[i];
+                let expr = tle.expr.as_deref().expect(
+                    "grouping_planner: RETURNING TargetEntry with NULL expr (parser bug)",
+                );
+                (
+                    expr.clone_in(mcx)?,
+                    tle.resno,
+                    tle.resname.as_ref().map(|s| alloc::string::String::from(s.as_str())),
+                    tle.ressortgroupref,
+                    tle.resorigtbl,
+                    tle.resorigcol,
+                    tle.resjunk,
+                )
+            };
+            let expr_id = root.alloc_node(expr_clone);
+            let te = types_pathnodes::TargetEntryNode {
+                expr: expr_id,
+                resno,
+                resname,
+                ressortgroupref,
+                resorigtbl,
+                resorigcol,
+                resjunk,
+            };
+            ids.push(root.alloc_targetentry(te));
+        }
+        returning_lists.push(ids);
     }
 
     // If there was a FOR [KEY] UPDATE/SHARE clause the LockRows node dealt with
@@ -2503,7 +2536,7 @@ fn add_modifytable_to_path<'mcx>(
         result_relations,
         update_colnos_lists,
         Vec::new(), // withCheckOptionLists
-        Vec::new(), // returningLists
+        returning_lists,
         row_marks,
         None, // onconflict
         Vec::new(), // mergeActionLists

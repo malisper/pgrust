@@ -12352,9 +12352,11 @@ version = "0.0.0"
 dependencies = [
  "backend-access-table-table",
  "backend-nodes-core",
+ "backend-nodes-equalfuncs-seams",
  "backend-optimizer-prep-preptlist-seams",
  "backend-optimizer-util-appendinfo-seams",
  "backend-optimizer-util-restrictinfo-seams",
+ "backend-optimizer-util-vars",
  "backend-parser-coerce-seams",
  "backend-utils-cache-lsyscache-seams",
  "mcx",

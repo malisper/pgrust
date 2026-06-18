@@ -2943,12 +2943,54 @@ fn set_modifytable_references<'mcx>(
             .as_ref()
             .map(|l| !l.is_empty())
             .unwrap_or(false);
-        if has_wco || has_returning || has_onconflict || has_merge {
+        if has_wco || has_onconflict || has_merge {
             return Err(PgError::error(
-                "set_plan_refs(T_ModifyTable): WCO / RETURNING / ON CONFLICT / MERGE \
-                 fix-up (set_returning_clause_references / fix_join_expr / \
-                 build_tlist_index over exclRelTlist+source tlists) is not ported",
+                "set_plan_refs(T_ModifyTable): WCO / ON CONFLICT / MERGE \
+                 fix-up (fix_join_expr / build_tlist_index over exclRelTlist+source \
+                 tlists) is not ported",
             ));
+        }
+
+        // Pass each per-resultrel returningList through
+        // set_returning_clause_references() (setrefs.c:1076). resultRelation is
+        // the still-un-bumped RT index here; rtoffset is applied inside the
+        // fix-up. The visible plan targetlist becomes a copy of the first list.
+        if has_returning {
+            let subplan = m.plan.lefttree.as_deref().ok_or_else(|| {
+                PgError::error("set_modifytable_references: ModifyTable has no subplan")
+            })?;
+            let subplan_clone = subplan.plan_head().clone_in(mcx)?;
+            let result_rels: Vec<i32> = m
+                .resultRelations
+                .as_deref()
+                .map(|v| v.iter().map(|&i| i as i32).collect())
+                .unwrap_or_default();
+            let lists = m.returningLists.take().unwrap_or_else(|| PgVec::new_in(mcx));
+            debug_assert_eq!(lists.len(), result_rels.len());
+            let mut new_rl: PgVec<PgVec<TargetEntry>> = PgVec::new_in(mcx);
+            let mut first: Option<PgVec<TargetEntry>> = None;
+            for (i, rlist) in lists.into_iter().enumerate() {
+                let resultrel = result_rels[i] as Index;
+                let fixed = set_returning_clause_references(
+                    mcx,
+                    root,
+                    rlist,
+                    &subplan_clone,
+                    resultrel,
+                    rtoffset,
+                )?;
+                if first.is_none() {
+                    let mut copy: PgVec<TargetEntry> = PgVec::new_in(mcx);
+                    for tle in fixed.iter() {
+                        copy.push(tle.clone_in(mcx)?);
+                    }
+                    first = Some(copy);
+                }
+                new_rl.push(fixed);
+            }
+            m.returningLists = Some(new_rl);
+            // splan->plan.targetlist = copyObject(linitial(newRL));
+            m.plan.targetlist = first;
         }
 
         // RT-index bumps.

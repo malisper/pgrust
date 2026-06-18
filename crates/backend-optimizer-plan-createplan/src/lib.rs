@@ -3420,9 +3420,7 @@ fn create_modifytable_plan<'mcx>(
     if !p.withCheckOptionLists.is_empty() {
         panic!("create_modifytable_plan: WITH CHECK OPTION lists not yet ported");
     }
-    if !p.returningLists.is_empty() {
-        panic!("create_modifytable_plan: RETURNING lists not yet ported");
-    }
+    let returning_lists: Vec<Vec<NodeId>> = p.returningLists.clone();
     if !p.mergeActionLists.is_empty() || !p.mergeJoinConditions.is_empty() {
         panic!("create_modifytable_plan: MERGE action/join-condition lists not yet ported");
     }
@@ -3447,6 +3445,7 @@ fn create_modifytable_plan<'mcx>(
         part_cols_updated,
         result_relations,
         update_colnos_lists,
+        returning_lists,
         row_marks,
         onconflict,
         epq_param,
@@ -3473,6 +3472,7 @@ fn make_modifytable<'mcx>(
     part_cols_updated: bool,
     result_relations: Vec<i32>,
     update_colnos_lists: Vec<Vec<AttrNumber>>,
+    returning_lists: Vec<Vec<NodeId>>,
     row_marks: Vec<NodeId>,
     onconflict: Option<NodeId>,
     epq_param: i32,
@@ -3534,6 +3534,25 @@ fn make_modifytable<'mcx>(
              (needs the PlanRowMark carrier)"
         );
     }
+
+    // returningLists -> List of per-result-rel RETURNING tlists. Resolve each
+    // arena handle list back to an owned TargetEntry list (setrefs.c later
+    // fix-ups the Var references via set_returning_clause_references).
+    let returning_lists_field: Option<PgVec<'mcx, PgVec<'mcx, TargetEntry<'mcx>>>> =
+        if returning_lists.is_empty() {
+            None
+        } else {
+            let mut outer = vec_with_capacity_in(mcx, returning_lists.len())?;
+            for sub in &returning_lists {
+                let owned = resolve_targetentry_list(mcx, root, sub)?;
+                let mut inner = vec_with_capacity_in(mcx, owned.len())?;
+                for tle in owned {
+                    inner.push(tle);
+                }
+                outer.push(inner);
+            }
+            Some(outer)
+        };
 
     // returningOldAlias / returningNewAlias come off root->parse.
     let parse = run.resolve(root.parse);
@@ -3601,7 +3620,7 @@ fn make_modifytable<'mcx>(
         withCheckOptionLists: None,
         returningOldAlias: returning_old_alias,
         returningNewAlias: returning_new_alias,
-        returningLists: None,
+        returningLists: returning_lists_field,
         fdwPrivLists: Some(fdw_priv_lists),
         fdwDirectModifyPlans: None,
         rowMarks: None,
