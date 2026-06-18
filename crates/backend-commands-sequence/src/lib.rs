@@ -63,7 +63,7 @@ use types_error::{
 };
 use types_nodes::ddlnodes::{AlterSeqStmt, CreateSeqStmt, DefElem};
 use types_nodes::fmgr::FunctionCallInfoBaseData;
-use types_nodes::nodes::Node;
+use types_nodes::nodes::{ntag, Node};
 use types_nodes::parsestmt::ParseState;
 use types_nodes::rawnodes::RangeVar;
 use types_rel::Relation;
@@ -213,24 +213,24 @@ fn encode_seq_data(userdata: &mut [u8], seq: &FormData_pg_sequence_data) {
 
 /// Borrow the `RangeVar` carried by `seq->sequence` (a non-NULL `RangeVar *`).
 fn sequence_rangevar<'a, 'mcx>(seq: &'a Option<types_nodes::nodes::NodePtr<'mcx>>) -> &'a RangeVar<'mcx> {
-    match seq.as_deref() {
-        Some(Node::RangeVar(rv)) => rv,
+    match seq.as_deref().and_then(|n| n.as_rangevar()) {
+        Some(rv) => rv,
         _ => panic!("sequence.c: CreateSeqStmt/AlterSeqStmt.sequence is not a RangeVar node"),
     }
 }
 
 /// Borrow a sequence option `Node` as its inner `DefElem`.
 fn as_defelem<'a, 'mcx>(node: &'a Node<'mcx>) -> &'a DefElem<'mcx> {
-    match node {
-        Node::DefElem(d) => d,
+    match node.node_tag() {
+        ntag::T_DefElem => node.expect_defelem(),
         _ => panic!("sequence.c: sequence option is not a DefElem node"),
     }
 }
 
 /// `boolVal(node)` (`nodes/value.h`): read a `T_Boolean` node's value.
 fn bool_val(node: &Node<'_>) -> bool {
-    match node {
-        Node::Boolean(b) => b.boolval,
+    match node.node_tag() {
+        ntag::T_Boolean => node.expect_boolean().boolval,
         _ => panic!("sequence.c: CYCLE option arg is not a Boolean node"),
     }
 }
@@ -1744,15 +1744,24 @@ fn init_params(
 /// literal text as int8). `Err(ERRCODE_SYNTAX_ERROR)` for `NULL`/other tags.
 fn def_get_int64(def: &DefElem<'_>) -> PgResult<i64> {
     let defname = def.defname.as_deref().unwrap_or("");
-    match def.arg.as_deref() {
-        Some(Node::Integer(i)) => Ok(i.ival as i64),
-        Some(Node::Float(f)) => f.fval.as_str().trim().parse::<i64>().map_err(|_| {
-            ereport(ERROR)
-                .errcode(ERRCODE_SYNTAX_ERROR)
-                .errmsg(format!("{defname} requires a numeric value"))
-                .finish(here("defGetInt64"))
-                .unwrap_err()
-        }),
+    match def.arg.as_deref().map(|n| n.node_tag()) {
+        Some(ntag::T_Integer) => Ok(def.arg.as_deref().unwrap().expect_integer().ival as i64),
+        Some(ntag::T_Float) => def
+            .arg
+            .as_deref()
+            .unwrap()
+            .expect_float()
+            .fval
+            .as_str()
+            .trim()
+            .parse::<i64>()
+            .map_err(|_| {
+                ereport(ERROR)
+                    .errcode(ERRCODE_SYNTAX_ERROR)
+                    .errmsg(format!("{defname} requires a numeric value"))
+                    .finish(here("defGetInt64"))
+                    .unwrap_err()
+            }),
         _ => ereport(ERROR)
             .errcode(ERRCODE_SYNTAX_ERROR)
             .errmsg(format!("{defname} requires a numeric value"))
@@ -1767,19 +1776,34 @@ fn def_get_int64(def: &DefElem<'_>) -> PgResult<i64> {
 fn def_get_qualified_name(def: &DefElem<'_>) -> PgResult<Vec<String>> {
     let defname = def.defname.as_deref().unwrap_or("");
     let strval = |n: &Node<'_>| -> Option<String> {
-        match n {
-            Node::String(s) => Some(s.sval.as_str().to_string()),
-            _ => None,
-        }
+        n.as_string().map(|s| s.sval.as_str().to_string())
     };
-    match def.arg.as_deref() {
-        Some(Node::TypeName(t)) => Ok(t
+    match def.arg.as_deref().map(|n| n.node_tag()) {
+        Some(ntag::T_TypeName) => Ok(def
+            .arg
+            .as_deref()
+            .unwrap()
+            .expect_typename()
             .names
             .iter()
             .filter_map(|n| strval(n))
             .collect()),
-        Some(Node::List(cells)) => Ok(cells.iter().filter_map(|n| strval(n)).collect()),
-        Some(Node::String(s)) => Ok(vec![s.sval.as_str().to_string()]),
+        Some(ntag::T_List) => Ok(def
+            .arg
+            .as_deref()
+            .unwrap()
+            .expect_list()
+            .iter()
+            .filter_map(|n| strval(n))
+            .collect()),
+        Some(ntag::T_String) => Ok(vec![def
+            .arg
+            .as_deref()
+            .unwrap()
+            .expect_string()
+            .sval
+            .as_str()
+            .to_string()]),
         _ => ereport(ERROR)
             .errcode(ERRCODE_SYNTAX_ERROR)
             .errmsg(format!("argument of {defname} must be a name"))
@@ -2334,8 +2358,9 @@ fn define_sequence_arm<'mcx>(
     pstate: &mut ParseState<'mcx>,
     stmt: &Node<'mcx>,
 ) -> PgResult<ObjectAddress> {
-    let Node::CreateSeqStmt(s) = stmt else {
-        panic!("define_sequence: parse tree is not a CreateSeqStmt");
+    let s = match stmt.node_tag() {
+        ntag::T_CreateSeqStmt => stmt.expect_createseqstmt(),
+        _ => panic!("define_sequence: parse tree is not a CreateSeqStmt"),
     };
     DefineSequence(mcx, pstate, s)
 }
@@ -2346,8 +2371,9 @@ fn alter_sequence_arm<'mcx>(
     pstate: &mut ParseState<'mcx>,
     stmt: &Node<'mcx>,
 ) -> PgResult<ObjectAddress> {
-    let Node::AlterSeqStmt(s) = stmt else {
-        panic!("alter_sequence: parse tree is not an AlterSeqStmt");
+    let s = match stmt.node_tag() {
+        ntag::T_AlterSeqStmt => stmt.expect_alterseqstmt(),
+        _ => panic!("alter_sequence: parse tree is not an AlterSeqStmt"),
     };
     AlterSequence(mcx, pstate, s)
 }
