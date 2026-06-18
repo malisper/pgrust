@@ -123,6 +123,12 @@ fn pg_prevpower2_size_t(num: usize) -> usize {
 /// Install this crate's implementations into its seam slots
 /// (`crates/backend-executor-execUtils-seams`).
 pub fn init_seams() {
+    // `CreateExecutorState()` / `FreeExecutorState(estate)` (execUtils.c): the
+    // de-handled seam form builds/tears down a throwaway boxed `EState` in the
+    // caller's context (PREPARE/EXECUTE/EXPLAIN parameter evaluation).
+    backend_executor_execUtils_seams::create_executor_state::set(create_executor_state_in);
+    backend_executor_execUtils_seams::free_executor_state::set(free_executor_state_in);
+
     backend_executor_execUtils_seams::exec_create_scan_slot_from_outer_plan::set(
         ExecCreateScanSlotFromOuterPlan,
     );
@@ -282,6 +288,52 @@ pub fn CreateExecutorState(parent: &MemoryContext) -> PgResult<ExecutorState> {
     })
 }
 
+/// `CreateExecutorState()` in the de-handled seam form: build the throwaway
+/// `EState` directly in the caller's `mcx` and hand it back as a boxed value
+/// (`PgBox`). The caller's context plays the role of C's private per-query
+/// "ExecutorState" context — the PREPARE/EXECUTE/EXPLAIN drivers only use this
+/// EState to evaluate parameter expressions, and reset their own context after.
+pub fn create_executor_state_in<'mcx>(
+    mcx: Mcx<'mcx>,
+) -> PgResult<PgBox<'mcx, EStateData<'mcx>>> {
+    alloc_in(mcx, EStateData::new_in(mcx))
+}
+
+/// `FreeExecutorState(estate)` in the de-handled seam form: run the same
+/// teardown as [`FreeExecutorState`] over the boxed, caller-context-owned
+/// `EState`, then drop the box. There is no private per-query context to
+/// delete here (the caller owns the context); the working memory is reclaimed
+/// when the caller resets its `mcx`.
+pub fn free_executor_state_in<'mcx>(
+    mut estate: PgBox<'mcx, EStateData<'mcx>>,
+) -> PgResult<()> {
+    free_executor_state_teardown(&mut estate)
+}
+
+/// Shared teardown for both the `McxOwned` and boxed `EState` forms: shut down
+/// and free any remaining `ExprContext`s (firing shutdown callbacks newest
+/// first), then release the JIT context and partition directory.
+fn free_executor_state_teardown(estate: &mut EStateData<'_>) -> PgResult<()> {
+    // C: `while (estate->es_exprcontexts) FreeExprContext(linitial(...), true)`
+    // — newest first (lcons order); the pool equivalent is highest index first.
+    for i in (0..estate.es_exprcontexts.len()).rev() {
+        if estate.es_exprcontexts[i].is_some() {
+            FreeExprContext(estate, EcxtId(i as u32), true)?;
+        }
+    }
+
+    // Release JIT context, if allocated.
+    if let Some(jit) = estate.es_jit.0.take() {
+        jit_seams::jit_release_context::call(jit);
+    }
+
+    // Release partition directory, if allocated.
+    if let Some(pdir) = estate.es_partition_directory.0.take() {
+        partdesc_seams::destroy_partition_directory::call(pdir);
+    }
+    Ok(())
+}
+
 /// `FreeExecutorState` — release an EState along with all remaining working
 /// storage.
 ///
@@ -294,29 +346,7 @@ pub fn CreateExecutorState(parent: &MemoryContext) -> PgResult<ExecutorState> {
 /// error here escapes mid-teardown). The per-query context is freed either
 /// way (the consumed bundle drops).
 pub fn FreeExecutorState(mut estate: ExecutorState) -> PgResult<()> {
-    let result = estate.with_mut(|estate| {
-        // Shut down and free any remaining ExprContexts, so any remaining
-        // shutdown callbacks get called. C: `while (estate->es_exprcontexts)
-        // FreeExprContext(linitial(...), true)` — newest first (lcons order);
-        // the pool equivalent is highest index first.
-        for i in (0..estate.es_exprcontexts.len()).rev() {
-            if estate.es_exprcontexts[i].is_some() {
-                FreeExprContext(estate, EcxtId(i as u32), true)?;
-            }
-        }
-
-        // Release JIT context, if allocated.
-        if let Some(jit) = estate.es_jit.0.take() {
-            jit_seams::jit_release_context::call(jit);
-            // estate->es_jit = NULL (the take() above)
-        }
-
-        // Release partition directory, if allocated.
-        if let Some(pdir) = estate.es_partition_directory.0.take() {
-            partdesc_seams::destroy_partition_directory::call(pdir);
-        }
-        Ok(())
-    });
+    let result = estate.with_mut(free_executor_state_teardown);
 
     // Free the per-query memory context, thereby releasing all working
     // memory, including the EState node itself.

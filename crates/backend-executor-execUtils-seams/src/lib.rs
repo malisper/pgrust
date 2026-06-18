@@ -8,6 +8,27 @@
 #![allow(non_snake_case)]
 
 seam_core::seam!(
+    /// `CreateExecutorState()` (execUtils.c): build a throwaway `EState` in a
+    /// fresh per-query context (here: boxed in the caller's `mcx`), owned by the
+    /// caller. The PREPARE/EXECUTE/EXPLAIN drivers create it only to evaluate
+    /// parameter expressions: they set `es_param_list_info` on it and thread
+    /// `&mut` into the parameter-evaluation seams. Allocates, so fallible.
+    pub fn create_executor_state<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+    ) -> types_error::PgResult<mcx::PgBox<'mcx, types_nodes::EStateData<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `FreeExecutorState(estate)` (execUtils.c): shut down any still-active
+    /// `ExprContext`s (running their shutdown callbacks), release the JIT and
+    /// partition-directory resources, and free the throwaway executor state,
+    /// consuming the owned `EState`. Fallible (a shutdown callback can ereport).
+    pub fn free_executor_state<'mcx>(
+        estate: mcx::PgBox<'mcx, types_nodes::EStateData<'mcx>>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ExecCreateScanSlotFromOuterPlan(estate, scanstate, tts_ops)`
     /// (execUtils.c): set up the node's scan tuple slot using the outer plan's
     /// result tuple type (`ExecGetResultType(outerPlanState(scanstate))`),

@@ -2400,20 +2400,12 @@ pub fn exec_project_info<'mcx>(
 
 /// `CreateExecutorState()` (execUtils.c) — a throwaway EState.
 pub fn create_executor_state<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgBox<'mcx, EStateData<'mcx>>> {
-    let _ = mcx;
-    panic!(
-        "execExpr-core: CreateExecutorState alias needs the execUtils seam \
-         (backend-executor-execUtils owns CreateExecutorState; no seam exported yet)"
-    );
+    backend_executor_execUtils_seams::create_executor_state::call(mcx)
 }
 
 /// `FreeExecutorState(estate)` (execUtils.c).
 pub fn free_executor_state<'mcx>(estate: PgBox<'mcx, EStateData<'mcx>>) -> PgResult<()> {
-    let _ = estate;
-    panic!(
-        "execExpr-core: FreeExecutorState alias needs the execUtils seam \
-         (backend-executor-execUtils owns FreeExecutorState; no seam exported yet)"
-    );
+    backend_executor_execUtils_seams::free_executor_state::call(estate)
 }
 
 /// The executor-backed constant test of `operator_predicate_proof`
