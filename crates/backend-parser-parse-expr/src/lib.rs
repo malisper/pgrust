@@ -103,6 +103,7 @@ use types_nodes::rawnodes::{
     A_Const, A_Expr, A_Expr_Kind, A_ArrayExpr, A_Indices, A_Indirection, ColumnRef, CollateClause,
     FuncCall, MultiAssignRef, TypeCast,
 };
+use types_nodes::rawexprnodes::RowExpr as RawRowExpr;
 use types_parsenodes::CoercionContext;
 
 use backend_utils_error::ereport;
@@ -300,6 +301,10 @@ pub fn transformExprRecurse<'mcx>(
         // T_SubLink → transformSubLink(pstate, (SubLink *) expr).
         Node::SubLink(s) => transformSubLink(pstate, s)?,
 
+        // T_RowExpr → transformRowExpr(pstate, (RowExpr *) expr, false). The raw
+        // grammar emits ROW(...) as `Node::RowExpr` carrying raw field nodes.
+        Node::RowExpr(r) => transformRowExpr(pstate, r, false)?,
+
         // Expr-carried nodes that reach the dispatcher untransformed-or-recursed.
         Node::Expr(e) => transform_expr_node(pstate, e)?,
 
@@ -359,7 +364,12 @@ fn transform_expr_node<'mcx>(
             ))
         }
         Expr::CaseExpr(c) => transformCaseExpr(pstate, c),
-        Expr::RowExpr(r) => transformRowExpr(pstate, r, false),
+        // A raw-grammar RowExpr reaches the dispatcher as the top-level
+        // `Node::RowExpr` arm (the C `T_RowExpr` case); an already-analyzed
+        // `Expr::RowExpr` re-entering transformExprRecurse would be a bug.
+        Expr::RowExpr(_) => Err(PgError::error(
+            "transformExprRecurse: unexpected already-analyzed RowExpr",
+        )),
         Expr::CoalesceExpr(c) => transformCoalesceExpr(pstate, c),
         Expr::MinMaxExpr(m) => transformMinMaxExpr(pstate, m),
         Expr::SQLValueFunction(svf) => transformSQLValueFunction(pstate, svf),
@@ -2922,23 +2932,20 @@ fn clone_namelist_pgstrings<'mcx>(
 /// expressions; wrap them as `Node`s for `transformExpressionList`.
 fn transformRowExpr<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    r: RowExpr,
+    r: RawRowExpr<'mcx>,
     allow_default: bool,
 ) -> PgResult<Expr> {
     let mcx = aexpr_clone_ctx(pstate);
     let location = r.location;
 
     // Transform the field expressions. transformExpressionList expands any
-    // "something.*" entries; build the raw-node list from the carried args.
-    let mut exprlist: mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = mcx::PgVec::new_in(mcx);
-    for e in r.args {
-        exprlist.push(mcx::alloc_in(mcx, expr_to_node(e))?);
-    }
+    // "something.*" entries; the raw-grammar RowExpr carries its fields as a
+    // raw node list (C: r->args), passed straight through.
     let expr_kind = pstate.p_expr_kind;
     let newargs_vec = backend_parser_parse_target::transformExpressionList(
         mcx,
         pstate,
-        exprlist,
+        r.args,
         expr_kind,
         allow_default,
     )?;
@@ -2997,15 +3004,14 @@ fn transformMultiAssignRef<'mcx>(
             .ok_or_else(|| PgError::error("transformMultiAssignRef: NULL source"))?;
         // We only allow EXPR SubLinks and RowExprs as the source of an UPDATE
         // multiassignment. The raw-grammar SubLink is `Node::SubLink`; the
-        // RowExpr carrier follows the crate's `Expr::RowExpr` convention
-        // (transformRowExpr consumes the primnodes RowExpr, whose `args` are
-        // the raw field expressions).
+        // raw-grammar RowExpr is `Node::RowExpr` (transformRowExpr consumes the
+        // raw RowExpr, whose `args` are the raw field expressions).
         let is_expr_sublink = matches!(
             &src,
             Node::SubLink(s)
                 if s.sub_link_type == SubLinkType::Expr
         );
-        let is_rowexpr = matches!(&src, Node::Expr(Expr::RowExpr(_)));
+        let is_rowexpr = matches!(&src, Node::RowExpr(_));
 
         if is_expr_sublink {
             let mut sublink = match src {
@@ -3046,7 +3052,7 @@ fn transformMultiAssignRef<'mcx>(
             let tle = make_target_entry(mcx, Expr::SubLink(sublink), 0, None, true)?;
             pstate.p_multiassign_exprs.push(tle);
         } else if is_rowexpr {
-            let Node::Expr(Expr::RowExpr(rexpr)) = src else {
+            let Node::RowExpr(rexpr) = src else {
                 unreachable!()
             };
             // Transform the RowExpr, allowing SetToDefault items.
