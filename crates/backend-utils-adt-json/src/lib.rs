@@ -38,6 +38,8 @@
 
 extern crate alloc;
 
+pub mod fmgr_builtins;
+
 use alloc::string::String;
 
 use mcx::{Mcx, PgString, PgVec, MAX_ALLOC_SIZE};
@@ -1642,6 +1644,7 @@ fn escape_json_with_len_into_pgstring(buf: &mut PgString<'_>, str: &[u8]) -> PgR
 /// Install every seam this crate owns (`backend-utils-adt-json-seams`). Only
 /// `set()` calls; called once from `seams-init::init_all()`.
 pub fn init_seams() {
+    fmgr_builtins::register_json_builtins();
     backend_utils_adt_json_seams::escape_json::set(escape_json_into_pgstring);
     backend_utils_adt_json_seams::escape_json_with_len::set(escape_json_with_len_into_pgstring);
     backend_utils_adt_json_seams::json_encode_datetime::set(JsonEncodeDateTime);
