@@ -1239,14 +1239,33 @@ pub enum ExprEvalStepData<'mcx> {
     },
     /// `agg_trans` — for EEOP_AGG_PLAIN_TRANS_[INIT_][STRICT_]{BYVAL,BYREF}
     /// and EEOP_AGG_ORDERED_TRANS_{DATUM,TUPLE}.
+    ///
+    /// `pertrans`/`transno`/`setno`/`setoff` are the value-typed nodeAgg indices
+    /// the C `op->d.agg_trans.{pertrans,transno,setno,setoff}` carry: `pertrans`
+    /// and `transno` index `aggstate->pertrans` / the per-trans slot;
+    /// `setoff`/`setno` index `aggstate->all_pergroups[setoff][transno]` and the
+    /// grouping set. `aggcontext` is the resolved [`EcxtId`] of the
+    /// `aggstate->aggcontexts[setno]` (or `hashcontext`) `ExprContext` the C
+    /// stores as `op->d.agg_trans.aggcontext` — the by-ref `datumCopy` target
+    /// the transition step copies the new transValue into.
     AggTrans {
-        /// `AggStatePerTrans pertrans` — parked opaque address.
+        /// `AggStatePerTrans pertrans` — index into `aggstate->pertrans`.
         pertrans: usize,
-        /// `ExprContext *aggcontext` — opaque address.
-        aggcontext: usize,
+        /// `ExprContext *aggcontext` — the resolved per-grouping-set (or hash)
+        /// aggregate-context `EcxtId` (the C `op->d.agg_trans.aggcontext`).
+        aggcontext: Option<EcxtId>,
         setno: i32,
         transno: i32,
         setoff: i32,
+        /// The transition function's per-row INPUT argument cells — the
+        /// `&trans_fcinfo->args[i + 1]` aliasing targets the input
+        /// sub-expressions evaluated into (execExpr.c:3777/3804). The interpreter
+        /// gathers these into `fcinfo->args[1..]` (`args[0]` is the running
+        /// transValue) before invoking the transfn. Empty for a zero-input
+        /// aggregate (e.g. `count(*)`, where the transfn `int8inc` takes only the
+        /// state). For the ordered (`DATUM`/`TUPLE`) opcodes this is unused (the
+        /// input rides through the sort), so it is left empty there.
+        arg_cells: PgVec<'mcx, ResultCellId>,
     },
     /// `is_json` — for EEOP_IS_JSON.
     IsJson {

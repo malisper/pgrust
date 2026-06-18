@@ -661,6 +661,34 @@ impl PlanStateLink {
         unsafe { fresh.as_ref() }
     }
 
+    /// Momentary EXCLUSIVE read of the owning `PlanStateNode` through the
+    /// back-link — the `&mut` form of [`Self::get`]. The owned-model rendering of
+    /// C's `castNode(AggState, state->parent)` followed by a mutation of the
+    /// aggregate's per-group/per-trans state from inside the
+    /// transition-evaluation interpreter (`EEOP_AGG_PLAIN_TRANS_*`): C mutates
+    /// `aggstate->all_pergroups[...]` while the `aggstate`-owned `evaltrans`
+    /// `ExprState` is being run, i.e. the same node is reached both through the
+    /// `ExprState` being walked and through this back-link. The two access paths
+    /// are disjoint (the trans steps touch only per-group/per-trans state, never
+    /// the `ExprState`'s own step program), exactly as in C.
+    ///
+    /// SAFETY: as [`Self::get`], but the exclusive borrow is justified because
+    /// the interpreter does not touch the `ExprState` for the duration of the
+    /// trans-step call. The owning node outlives + never moves while linked. The
+    /// `'mcx` payload lifetime is re-attached at the caller's choice
+    /// (lifetime-invariant at runtime), mirroring `AggStateContextLink::get_mut`.
+    #[allow(unsafe_code)]
+    #[inline]
+    pub fn get_mut<'a, 'mcx>(&mut self) -> &'a mut PlanStateNode<'mcx> {
+        // SAFETY: `self.0` is non-null (newtype invariant); re-derive a fresh
+        // pointer so provenance is current. See the method docs for the
+        // exclusive-borrow justification.
+        let fresh = unsafe {
+            core::ptr::NonNull::new_unchecked(self.0.as_ptr() as *mut PlanStateNode<'mcx>)
+        };
+        unsafe { &mut *fresh.as_ptr() }
+    }
+
     /// Raw escape hatch (the bare `PlanState *` the C executor holds), for the
     /// rare spot where tying the borrow to `&self` is too restrictive. The
     /// caller takes on the liveness obligation [`Self::get`] discharges.

@@ -450,6 +450,15 @@ pub fn exec_build_agg_trans<'mcx>(
         let mut strict_arg_cells: Option<PgVec<'mcx, ResultCellId>> = None;
         let mut strict_uses_nulls = false;
 
+        // The transition function's per-row INPUT arg cells (`&trans_fcinfo->args[i
+        // + 1]`), kept separately from `strict_arg_cells` (which is consumed by
+        // the strict-input-check step) so they can be threaded into the
+        // transition-call step's `AggTrans.arg_cells` for the interpreter to
+        // gather into `fcinfo->args[1..]`. Empty for ordered (DATUM/TUPLE) and
+        // zero-input aggregates (e.g. `count(*)`).
+        let mut trans_input_cells: PgVec<'mcx, ResultCellId> =
+            mcx::vec_with_capacity_in(mcx, p.num_trans_inputs.max(0) as usize)?;
+
         // ---- filter (before evaluating input; skipped when combining) ----
         if p.has_aggfilter && !is_combine {
             // evaluate filter expression into &state->resvalue/&state->resnull.
@@ -492,6 +501,7 @@ pub fn exec_build_agg_trans<'mcx>(
                 let arg_cell = new_result_cell(mcx, &mut state)?;
                 core::exec_init_expr_rec(mcx, &source_expr, &mut state, arg_cell)?;
                 strict_arg_cells = Some(single_cell_vec(mcx, arg_cell)?);
+                trans_input_cells.push(arg_cell);
             } else {
                 // deserialfn_oid set: we must deserialize the input transition
                 // state before calling the combine function.
@@ -522,6 +532,7 @@ pub fn exec_build_agg_trans<'mcx>(
                 // with a fresh arena cell so the strict-input check and the
                 // transition call read it as the transfn input.
                 let out_cell = new_result_cell(mcx, &mut state)?;
+                trans_input_cells.push(out_cell);
 
                 // Don't call a strict deserialization function with NULL input.
                 let opcode = if p.deserialfn_strict {
@@ -569,6 +580,7 @@ pub fn exec_build_agg_trans<'mcx>(
                 let arg_cell = new_result_cell(mcx, &mut state)?;
                 core::exec_init_expr_rec(mcx, &arg, &mut state, arg_cell)?;
                 cells.push(arg_cell);
+                trans_input_cells.push(arg_cell);
                 argno += 1;
             }
             debug_assert_eq!(p.num_trans_inputs, argno);
@@ -687,7 +699,7 @@ pub fn exec_build_agg_trans<'mcx>(
             for setno in 0..process_grouping_sets {
                 exec_build_agg_trans_call(
                     mcx, &mut state, aggstate, transno, transno as i32, setno, setoff, false,
-                    nullcheck,
+                    nullcheck, &trans_input_cells,
                 )?;
                 setoff += 1;
             }
@@ -704,7 +716,7 @@ pub fn exec_build_agg_trans<'mcx>(
             for setno in 0..num_hashes {
                 exec_build_agg_trans_call(
                     mcx, &mut state, aggstate, transno, transno as i32, setno, setoff, true,
-                    nullcheck,
+                    nullcheck, &trans_input_cells,
                 )?;
                 setoff += 1;
             }
@@ -794,15 +806,22 @@ pub fn exec_build_agg_trans_call<'mcx>(
     setoff: i32,
     ishash: bool,
     nullcheck: bool,
+    trans_input_cells: &[ResultCellId],
 ) -> PgResult<()> {
     // aggcontext = ishash ? aggstate->hashcontext : aggstate->aggcontexts[setno];
-    // In the owned model the ExprContext is a nodeAgg-owned product; carried as
-    // a parked address (opaque usize) in the AggTrans payload, exactly as the C
-    // ExprContext* pointer is. (The owned ExprContext has no stable address word
-    // until nodeAgg threads its EState pool id; 0 is the parked sentinel, matched
-    // by the interpreter resolving the context via aggstate.)
-    let _ = (aggstate, ishash, setno);
-    let aggcontext_addr: usize = 0;
+    // In the owned model an `ExprContext *` is an `EcxtId` into the EState pool
+    // (`aggstate.hashcontext` / `aggstate.aggcontexts[setno]`, threaded by
+    // ExecInitAgg before ExecBuildAggTrans runs). Resolve and store the real
+    // id — the C `op->d.agg_trans.aggcontext` — so the transition step's by-ref
+    // `datumCopy` target is the correct per-grouping-set (or hash) context.
+    let aggcontext: Option<types_nodes::execnodes::EcxtId> = if ishash {
+        aggstate.hashcontext
+    } else {
+        aggstate
+            .aggcontexts
+            .as_ref()
+            .and_then(|v| v.get(setno as usize).copied())
+    };
 
     let mut adjust_jumpnull: i32 = -1;
 
@@ -850,16 +869,33 @@ pub fn exec_build_agg_trans_call<'mcx>(
     };
 
     // scratch->d.agg_trans = { pertrans, setno, setoff, transno, aggcontext };
+    // The ordered (DATUM/TUPLE) opcodes feed input through the per-trans sort,
+    // not `fcinfo->args` — leave arg_cells empty for them; the plain TRANS
+    // opcodes gather these into `fcinfo->args[1..]`.
+    let arg_cells: PgVec<'mcx, ResultCellId> = if matches!(
+        opcode,
+        ExprEvalOp::EEOP_AGG_ORDERED_TRANS_DATUM | ExprEvalOp::EEOP_AGG_ORDERED_TRANS_TUPLE
+    ) {
+        mcx::vec_with_capacity_in(mcx, 0)?
+    } else {
+        let mut v: PgVec<'mcx, ResultCellId> =
+            mcx::vec_with_capacity_in(mcx, trans_input_cells.len())?;
+        for &c in trans_input_cells {
+            v.push(c);
+        }
+        v
+    };
     let scratch = ExprEvalStep {
         opcode,
         resvalue: STATE_RESULT_CELL,
         resnull: STATE_RESULT_CELL,
         d: ExprEvalStepData::AggTrans {
             pertrans,
-            aggcontext: aggcontext_addr,
+            aggcontext,
             setno,
             transno,
             setoff,
+            arg_cells,
         },
     };
     core::expr_eval_push_step(mcx, state, scratch)?;
