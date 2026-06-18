@@ -9,31 +9,13 @@
 use alloc::vec::Vec;
 
 use types_core::{BlockNumber, Buffer, MultiXactId, OffsetNumber, Oid, TransactionId, XLogRecPtr};
+use types_storage::buf::BufferAccessStrategy;
 
 use crate::vacuum::VacuumCutoffs;
 use crate::vacuum::PruneFreezeResult;
 use crate::vacuumparallel::VacDeadItemsInfo;
 
 // ---- Identity handles for substrate-owned state ----------------------
-
-/// A `BufferAccessStrategy` ring. `id == 0` is the C `NULL` strategy (use all
-/// of shared buffers); the runtime maps a non-zero id to the ring.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Default)]
-pub struct StrategyHandle {
-    pub id: u64,
-}
-impl StrategyHandle {
-    pub const fn new(id: u64) -> Self {
-        Self { id }
-    }
-    /// The C `NULL` strategy.
-    pub const fn none() -> Self {
-        Self { id: 0 }
-    }
-    pub const fn is_none(self) -> bool {
-        self.id == 0
-    }
-}
 
 /// A `TidStore` (the radix-tree dead-TID store). `id == 0` is the C `NULL`
 /// store (not yet allocated).
@@ -212,5 +194,5 @@ pub struct ParallelVacuumInitArgs {
     pub nrequested: i32,
     pub vac_work_mem: i32,
     pub elevel: i32,
-    pub bstrategy: StrategyHandle,
+    pub bstrategy: BufferAccessStrategy,
 }

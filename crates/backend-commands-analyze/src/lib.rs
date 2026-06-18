@@ -23,9 +23,8 @@
 //! Genuinely-unported / model-unreachable callees panic loudly through the
 //! analyze-owned `backend-commands-analyze-rt-seams` (extended statistics,
 //! `pgstat_report_analyze`, the FDW analyze hook, ANALYZE-only
-//! `index_vacuum_cleanup`, and the `StrategyHandle`-keyed block-sampling read
-//! stream — the opaque vacuum `StrategyHandle(u64)` has no bridge to the real
-//! `BufferAccessStrategy`). These mirror their C call sites exactly.
+//! `index_vacuum_cleanup`, and the block-sampling read stream over the real
+//! vacuum `BufferAccessStrategy`). These mirror their C call sites exactly.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -74,8 +73,8 @@ use types_statistics::{
     Anum_pg_statistic_stawidth, Natts_pg_statistic, StatisticRelationId, FLOAT4OID,
     STATISTIC_KIND_CORRELATION, STATISTIC_KIND_HISTOGRAM, STATISTIC_KIND_MCV, STATISTIC_NUM_SLOTS,
 };
+use types_storage::buf::BufferAccessStrategy;
 use types_vacuum::vacuum::{VacuumParams, VACOPT_VACUUM, VACOPT_VERBOSE};
-use types_vacuum::vacuumlazy::StrategyHandle;
 
 use types_sortsupport::SortSupportData;
 
@@ -236,7 +235,7 @@ pub fn analyze_rel<'mcx>(
     params: VacuumParams,
     va_cols: Vec<String>,
     in_outer_xact: bool,
-    bstrategy: StrategyHandle,
+    bstrategy: BufferAccessStrategy,
 ) -> PgResult<()> {
     // Select logging level.
     let elevel = if params.options & VACOPT_VERBOSE != 0 {
@@ -343,7 +342,7 @@ pub fn analyze_rel<'mcx>(
             false,
             in_outer_xact,
             elevel,
-            bstrategy,
+            bstrategy.clone(),
         )?;
     }
 
@@ -394,7 +393,7 @@ fn do_analyze_rel<'mcx>(
     inh: bool,
     in_outer_xact: bool,
     elevel: types_error::ErrorLevel,
-    bstrategy: StrategyHandle,
+    bstrategy: BufferAccessStrategy,
 ) -> PgResult<()> {
     let verbose = params.options & VACOPT_VERBOSE != 0;
     // instrument = verbose || (autovacuum worker && log_min_duration >= 0).
@@ -593,6 +592,7 @@ fn do_analyze_rel<'mcx>(
             targrows,
             &mut totalrows,
             &mut totaldeadrows,
+            bstrategy,
         )?
     } else {
         match acquirefunc {
@@ -1077,7 +1077,7 @@ fn acquire_sample_rows<'mcx>(
     targrows: i32,
     totalrows: &mut f64,
     totaldeadrows: &mut f64,
-    bstrategy: StrategyHandle,
+    bstrategy: BufferAccessStrategy,
 ) -> PgResult<i32> {
     use backend_utils_misc_sampling::{
         reservoir_get_next_S, reservoir_init_selection_state, sampler_random_fract,
@@ -1115,9 +1115,9 @@ fn acquire_sample_rows<'mcx>(
     let mut scan = tableam::table_beginscan_analyze::call(mcx, onerel)?;
     let mut slot = table_slot_create(mcx, onerel)?;
 
-    // Begin the block-sampling read stream. The opaque vacuum StrategyHandle has
-    // no bridge to the real BufferAccessStrategy, so the read stream is reached
-    // through the analyze-owned handle-keyed seam (mirroring vacuumlazy).
+    // Begin the block-sampling read stream over the real vacuum
+    // BufferAccessStrategy, reached through the analyze-owned seam (mirroring
+    // vacuumlazy).
     let mut bs_for_cb = bs;
     let mut next_block = move || -> BlockNumber {
         if BlockSampler_HasMore(&bs_for_cb) {
@@ -1234,6 +1234,7 @@ fn acquire_inherited_sample_rows<'mcx>(
     targrows: i32,
     totalrows: &mut f64,
     totaldeadrows: &mut f64,
+    bstrategy: BufferAccessStrategy,
 ) -> PgResult<i32> {
     *totalrows = 0.0;
     *totaldeadrows = 0.0;
@@ -1363,7 +1364,7 @@ fn acquire_inherited_sample_rows<'mcx>(
                         childtargrows,
                         &mut trows,
                         &mut tdrows,
-                        StrategyHandle { id: 0 },
+                        bstrategy.clone(),
                     )?,
                     AcquireFunc::Fdw => {
                         return Err(PgError::error(

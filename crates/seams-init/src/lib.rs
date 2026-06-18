@@ -1867,16 +1867,6 @@ mod recurrence_guard {
         // entries below are the genuinely-keystone-blocked remainder; DELETE
         // each as its blocker lands:
         //
-        //  * StrategyHandle↔BufferAccessStrategy bridge (UNPORTED, leader side):
-        //    the leader's inherited vacuum `StrategyHandle(u64)` still has no
-        //    bridge to freelist.c's real `BufferAccessStrategyData` (the broad
-        //    vacuum/vacuumlazy/analyze `StrategyHandle` keystone), so the leader's
-        //    `get_access_strategy_buffer_count(StrategyHandle)` read stays blocked.
-        //    (The WORKER-side `get_access_strategy_with_size_basvac` /
-        //    `free_access_strategy_pv` are now re-signed to the real
-        //    `BufferAccessStrategy` and INSTALLED by vacuumparallel::init_seams
-        //    over backend-storage-buffer-support — each worker creates/frees its
-        //    own ring; entries removed below.) → get_access_strategy_buffer_count.
         //  * #4 by-OID heap relation reopen (rides the vacuumlazy-mcx work): the
         //    worker reopens the heap + indexes BY OID and the seams model the
         //    relation as an opaque Oid handle; there is no provider returning the
@@ -1900,9 +1890,16 @@ mod recurrence_guard {
         // over backend-storage-lmgr-proc), and the parallel error-context callback
         // (push/pop_parallel_vacuum_error_context, faithful no-ops since the
         // ambient error_context_stack chain is retired) are now installed.
+        //
+        // RESOLVED (vacuum-strategy-resign lane): the leader/serial buffer-access
+        // strategy is now the real `BufferAccessStrategy` threaded through the
+        // whole vacuum()/ExecVacuum/vacuum_rel/heap_vacuum_rel + analyze.c spine
+        // (the `StrategyHandle(u64)` opaque carrier is retired). The leader
+        // `get_access_strategy_with_size` + `get_access_strategy_buffer_count`
+        // seams are INSTALLED by vacuumparallel::init_seams over
+        // backend-storage-buffer-support; entry removed below.
         ("backend_commands_vacuum", "am_parallel_vacuum_options"),
         ("backend_commands_vacuum", "am_use_maintenance_work_mem"),
-        ("backend_commands_vacuum", "get_access_strategy_buffer_count"),
         ("backend_commands_vacuum", "relation_get_namespace_name_pv"),
         ("backend_commands_vacuum", "relation_get_number_of_blocks_pv"),
         ("backend_commands_vacuum", "table_close_lock"),

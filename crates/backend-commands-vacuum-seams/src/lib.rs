@@ -22,7 +22,8 @@ use types_error::PgResult;
 use types_rel::{FormData_pg_class, Relation};
 use types_tuple::heaptuple::ItemPointerData;
 use types_vacuum::vacuum::VacuumParams;
-use types_vacuum::vacuumlazy::{StrategyHandle, TidStore, UpdateRelStatsArgs};
+use types_storage::buf::BufferAccessStrategy;
+use types_vacuum::vacuumlazy::{TidStore, UpdateRelStatsArgs};
 use types_vacuum::vacuumparallel::{
     IndexBulkDeleteResult, IndexVacuumInfo, VacDeadItemsInfo, VacuumSharedCostState,
 };
@@ -150,7 +151,7 @@ seam_core::seam!(pub fn set_vacuum_cost_balance_local(v: i32) -> PgResult<()>);
 seam_core::seam!(pub fn clear_parallel_cost_pointers() -> PgResult<()>);
 seam_core::seam!(pub fn vacuum_max_eager_freeze_failure_rate() -> PgResult<f64>);
 seam_core::seam!(pub fn vacuum_buffer_usage_limit() -> PgResult<i32>);
-seam_core::seam!(pub fn get_access_strategy_with_size(ring_size: i32) -> PgResult<StrategyHandle>);
+seam_core::seam!(pub fn get_access_strategy_with_size(ring_size: i32) -> PgResult<BufferAccessStrategy>);
 
 // ---- utils/acl.h -------------------------------------------------------
 seam_core::seam!(pub fn database_ownercheck() -> PgResult<bool>);
@@ -237,7 +238,7 @@ seam_core::seam!(pub fn check_for_interrupts() -> PgResult<()>);
 seam_core::seam!(pub fn injection_point(name: String) -> PgResult<()>);
 // `cluster_rel_for_vacuum_full` -> backend-commands-cluster-seams::cluster_rel
 //   (vacuum opens the held relation NoLock and calls the real cluster_rel).
-seam_core::seam!(pub fn table_relation_vacuum<'mcx>(mcx: mcx::Mcx<'mcx>, rel: Relation<'mcx>, params: VacuumParams, bstrategy: StrategyHandle) -> PgResult<()>);
+seam_core::seam!(pub fn table_relation_vacuum<'mcx>(mcx: mcx::Mcx<'mcx>, rel: Relation<'mcx>, params: VacuumParams, bstrategy: BufferAccessStrategy) -> PgResult<()>);
 seam_core::seam!(pub fn at_eoxact_guc(is_commit: bool, nestlevel: i32) -> PgResult<()>);
 // `get_user_id_and_sec_context` -> backend-utils-init-miscinit-seams.
 seam_core::seam!(pub fn set_user_id_and_sec_context(userid: Oid, sec_context: i32) -> PgResult<()>);
@@ -412,11 +413,11 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `GetAccessStrategyBufferCount(bstrategy)` — number of buffers in the
-    /// strategy ring (`freelist.c`); `0` for the NULL strategy. Keyed on the
-    /// leader's inherited `StrategyHandle` (the broad
-    /// `StrategyHandle↔BufferAccessStrategy` bridge keystone), not the worker's
-    /// own real strategy.
-    pub fn get_access_strategy_buffer_count(strategy: StrategyHandle) -> PgResult<i32>
+    /// strategy ring (`freelist.c`); `0` for the NULL strategy. Reads the
+    /// leader's inherited real `BufferAccessStrategy` (the
+    /// `Rc<RefCell<BufferAccessStrategyData>>` the leader created in `ExecVacuum`
+    /// via `GetAccessStrategyWithSize(BAS_VACUUM, ...)`).
+    pub fn get_access_strategy_buffer_count(strategy: BufferAccessStrategy) -> PgResult<i32>
 );
 seam_core::seam!(
     /// `InstrStartParallelQuery()`.

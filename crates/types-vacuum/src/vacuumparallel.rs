@@ -76,11 +76,6 @@ impl VacuumSharedCostState {
     }
 }
 
-/// `BufferAccessStrategy` — a buffer-replacement ring, owned by `freelist.c`;
-/// named here by an opaque handle (`0` is the C `NULL` strategy).
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-pub struct BufferAccessStrategyHandle(pub u64);
-
 /// `VacDeadItemsInfo` (`commands/vacuum.h`) — TID-store sizing/accounting.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct VacDeadItemsInfo {
@@ -98,7 +93,7 @@ pub use types_tableam::genam::IndexBulkDeleteResult;
 
 /// `IndexVacuumInfo` (`access/genam.h`) — the per-call info struct handed to
 /// `ambulkdelete` / `amvacuumcleanup`.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct IndexVacuumInfo {
     /// `Relation index` — the index being vacuumed (its `Oid`).
     pub index: Oid,
@@ -114,6 +109,7 @@ pub struct IndexVacuumInfo {
     pub message_level: i32,
     /// `double num_heap_tuples` — tuples remaining in heap.
     pub num_heap_tuples: f64,
-    /// `BufferAccessStrategy strategy` — access strategy for reads.
-    pub strategy: BufferAccessStrategyHandle,
+    /// `BufferAccessStrategy strategy` — access strategy for reads (`None` for
+    /// the C `NULL` strategy).
+    pub strategy: types_storage::buf::BufferAccessStrategy,
 }

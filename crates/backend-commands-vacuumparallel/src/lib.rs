@@ -20,7 +20,7 @@
 //!
 //! At the vacuum layer this repo addresses substrate-owned objects by opaque
 //! `Copy` handles: relations are [`Oid`], the dead-items store is a
-//! [`TidStore`], the buffer-access ring is a [`StrategyHandle`], the parallel
+//! [`TidStore`], the buffer-access ring is the real `BufferAccessStrategy`, the parallel
 //! context is a [`ParallelContextHandle`], and the lazy-vacuum driver addresses
 //! *this* state by an opaque [`ParallelVacuumStateHandle`]. The owned
 //! `ParallelVacuumState`/`PVShared`/`PVIndStats` live PRIVATELY in a process-
@@ -75,8 +75,7 @@ use types_vacuum::vacuumlazy::{
     ParallelVacuumInit, ParallelVacuumInitArgs, ParallelVacuumStateHandle, TidStore,
 };
 use types_vacuum::vacuumparallel::{
-    BufferAccessStrategyHandle, IndexBulkDeleteResult, IndexVacuumInfo, VacDeadItemsInfo,
-    VacuumSharedCostState,
+    IndexBulkDeleteResult, IndexVacuumInfo, VacDeadItemsInfo, VacuumSharedCostState,
 };
 use alloc::sync::Arc;
 
@@ -220,8 +219,8 @@ struct ParallelVacuumState {
     /// `freelist.c` object (`Rc<RefCell<BufferAccessStrategyData>>`, `None` for
     /// the C `NULL` strategy). Each parallel worker creates its own ring sized
     /// from the DSM-shared `ring_nbuffers`; the leader never populates this field
-    /// (its inherited `StrategyHandle` is consumed only for `ring_nbuffers` in
-    /// `parallel_vacuum_init`).
+    /// (its inherited real `BufferAccessStrategy` is consumed only for
+    /// `ring_nbuffers` in `parallel_vacuum_init`).
     bstrategy: BufferAccessStrategy,
     relnamespace: Option<String>,
     relname: Option<String>,
@@ -443,22 +442,6 @@ fn dsm_load_worker_usage(worker: usize) -> (BufferUsage, WalUsage) {
 // Conversions between the two strategy-handle newtypes.
 // =======================================================================
 
-/// Bridge the worker's real `BufferAccessStrategy` to the opaque
-/// `BufferAccessStrategyHandle` carried by `types_vacuum`'s `IndexVacuumInfo`.
-///
-/// `IndexVacuumInfo.strategy` is an opaque carrier on the still-keystone-blocked
-/// vacuumparallel index path (`vac_bulkdel_one_index` /
-/// `vac_cleanup_one_index`), which is never dereferenced back to a real ring
-/// (the broad `StrategyHandle↔BufferAccessStrategy` bridge keystone). We name
-/// the strategy by its backing-object identity (the `Rc` allocation address),
-/// `0` for the C `NULL` strategy.
-#[inline]
-fn strategy_to_buffer_access(s: &BufferAccessStrategy) -> BufferAccessStrategyHandle {
-    match s {
-        None => BufferAccessStrategyHandle(0),
-        Some(rc) => BufferAccessStrategyHandle(alloc::rc::Rc::as_ptr(rc) as u64),
-    }
-}
 
 // =======================================================================
 // Public seam entrypoints (registry borrow happens here).
@@ -505,9 +488,9 @@ fn parallel_vacuum_init(args: ParallelVacuumInitArgs) -> PgResult<ParallelVacuum
         indrels: indrels.clone(),
         nindexes,
         will_parallel_vacuum,
-        // The leader's inherited `bstrategy` (a `StrategyHandle`) is consumed
-        // only for `ring_nbuffers` below; `pvs.bstrategy` (the real worker ring)
-        // stays `None` on the leader — each worker creates its own.
+        // The leader's inherited `bstrategy` (the real `BufferAccessStrategy`) is
+        // consumed only for `ring_nbuffers` below; `pvs.bstrategy` (the worker
+        // ring) stays `None` on the leader — each worker creates its own.
         heaprel: rel,
         ..Default::default()
     };
@@ -1203,7 +1186,7 @@ fn parallel_vacuum_process_one_index(
         estimated_count: pvs.shared.estimated_count,
         message_level: MESSAGE_LEVEL_DEBUG2,
         num_heap_tuples: pvs.shared.reltuples,
-        strategy: strategy_to_buffer_access(&pvs.bstrategy),
+        strategy: pvs.bstrategy.clone(),
     };
     debug_assert_eq!(ivinfo.message_level, DEBUG2.0);
 
@@ -1509,10 +1492,7 @@ pub fn init_seams() {
 /// `backend-commands-vacuum-seams` hub, `::call`ed only by this crate) whose
 /// owning subsystem has a real value-typed provider. Each wrapper is a thin
 /// marshal + delegate. The remaining `*_pv` seams stay seam-and-panic until
-/// their keystone lands (StrategyHandle↔BufferAccessStrategy bridge, the
-/// VacuumSharedCostBalance/VacuumActiveNWorkers DSM atomics, the parallel
-/// error-context callback model, MyProc->statusFlags, the per-worker DSM
-/// instrument usage slots, and the #4 by-OID heap relation reopen); see the
+/// their keystone lands (the #4 by-OID heap relation reopen); see the
 /// allowlist note in seams-init.
 fn install_pv_outward_seams() {
     // --- tidstore.c shared TID store (radixtree-backed) ---------------------
@@ -1560,6 +1540,22 @@ fn install_pv_outward_seams() {
     vac::free_access_strategy_pv::set(|strategy| {
         buffer_support::free_access_strategy(strategy);
         Ok(())
+    });
+
+    // --- freelist.c leader/serial buffer-access strategy -------------------
+    // `GetAccessStrategyWithSize(BAS_VACUUM, ring_size_kb)` — the leader/serial
+    // VACUUM (`ExecVacuum`) creates the one shared `vac_strategy` ring.
+    vac::get_access_strategy_with_size::set(|ring_size_kb| {
+        buffer_support::get_access_strategy_with_size(
+            types_storage::buf::BufferAccessStrategyType::BasVacuum,
+            ring_size_kb,
+        )
+    });
+    // `GetAccessStrategyBufferCount(bstrategy)` — number of buffers in the
+    // leader's inherited ring (`0` for the NULL strategy), used by
+    // `parallel_vacuum_init` to seed the DSM-shared `ring_nbuffers`.
+    vac::get_access_strategy_buffer_count::set(|strategy| {
+        Ok(buffer_support::get_access_strategy_buffer_count(&strategy))
     });
 
     // --- proc.c MyProc->statusFlags PROC_IN_VACUUM -------------------------

@@ -120,7 +120,7 @@ pub fn lazy_scan_heap<'mcx>(vacrel: &mut LVRelState<'mcx>) -> PgResult<()> {
 
         /* Read (and pin) the chosen block's buffer. */
         let buf =
-            vl::read_buffer_extended::call(&vacrel.rel, MAIN_FORKNUM, blkno, vacrel.bstrategy)?;
+            vl::read_buffer_extended::call(&vacrel.rel, MAIN_FORKNUM, blkno, vacrel.bstrategy.clone())?;
 
         vl::check_buffer_is_pinned_once::call(buf)?;
 

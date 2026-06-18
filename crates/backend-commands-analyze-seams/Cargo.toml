@@ -14,5 +14,6 @@ mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-vacuum = { path = "../types-vacuum" }
+types-storage = { path = "../types-storage" }
 types-nodes = { path = "../types-nodes" }
 types-statistics = { path = "../types-statistics" }

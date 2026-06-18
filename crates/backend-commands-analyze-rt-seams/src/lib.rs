@@ -101,18 +101,16 @@ seam_core::seam!(
 );
 
 // ---------------------------------------------------------------------------
-// Block-sampling read stream (read_stream.c) keyed on the vacuum `StrategyHandle`.
+// Block-sampling read stream (read_stream.c) over the vacuum `BufferAccessStrategy`.
 //
 // `acquire_sample_rows` builds a read stream whose block callback is
 // `block_sampling_read_stream_next` and whose `BufferAccessStrategy` is
-// `vac_strategy`. The landed `backend-storage-aio-read-stream` constructor wants
-// the real `Rc<RefCell<BufferAccessStrategyData>>`, but ANALYZE only holds the
-// opaque vacuum `StrategyHandle(u64)` (the inherited cross-transaction handle),
-// for which no bridge to the real strategy exists. So the read stream is reached
-// through these analyze-owned seams (mirroring the vacuumlazy read-stream seams),
-// keyed on the handle. The block callback is supplied as a closure pulling the
-// next sampled block. They are NOT installed (the handle→strategy bridge owner
-// is unported); a call panics loudly.
+// `vac_strategy` — the real `Rc<RefCell<BufferAccessStrategyData>>` the leader
+// created in `ExecVacuum` and threaded down the vacuum/analyze spine. The read
+// stream is reached through these analyze-owned seams (mirroring the vacuumlazy
+// read-stream seams). The block callback is supplied as a closure pulling the
+// next sampled block. They are NOT installed (the read_stream.c owner is
+// unported); a call panics loudly.
 // ---------------------------------------------------------------------------
 
 /// An opaque owner-side `ReadStream *` handle (the analyze block-sampling stream).
@@ -128,7 +126,7 @@ seam_core::seam!(
     /// `BlockNumber`, or `InvalidBlockNumber` to end). Owner unported; panics.
     pub fn analyze_read_stream_begin(
         rel: Oid,
-        bstrategy: types_vacuum::vacuumlazy::StrategyHandle,
+        bstrategy: types_storage::buf::BufferAccessStrategy,
         next_block: &mut dyn FnMut() -> BlockNumber,
     ) -> PgResult<AnalyzeReadStreamHandle>
 );

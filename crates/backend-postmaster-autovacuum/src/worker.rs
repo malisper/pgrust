@@ -520,7 +520,7 @@ pub fn do_autovacuum() -> PgResult<()> {
                 tab.at_nspname.clone().unwrap(),
                 tab.at_relname.clone().unwrap(),
                 tab.at_params,
-                bstrategy,
+                bstrategy.clone(),
             ) {
                 Ok(()) => {
                     /*

@@ -137,7 +137,7 @@ pub fn heap_vacuum_rel<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     rel: types_rel::Relation<'mcx>,
     params: &VacuumParams,
-    bstrategy: types_vacuum::vacuumlazy::StrategyHandle,
+    bstrategy: types_storage::buf::BufferAccessStrategy,
 ) -> PgResult<()> {
     let mut frozenxid_updated;
     let mut minmulti_updated;

@@ -222,7 +222,7 @@ pub fn count_nondeletable_pages<'mcx>(
         }
 
         let buf =
-            vl::read_buffer_extended::call(&vacrel.rel, MAIN_FORKNUM, blkno, vacrel.bstrategy)?;
+            vl::read_buffer_extended::call(&vacrel.rel, MAIN_FORKNUM, blkno, vacrel.bstrategy.clone())?;
 
         /* In this phase we only need shared access to the buffer. */
         backend_storage_buffer_bufmgr_seams::lock_buffer::call(buf, BUFFER_LOCK_SHARE)?;

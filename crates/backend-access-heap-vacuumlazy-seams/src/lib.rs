@@ -33,8 +33,9 @@ use types_vacuum::vacuum::{HeapTupleFreeze, VacuumCutoffs, VacuumParams};
 use types_vacuum::vacuumlazy::{
     GlobalVisStateHandle, LinePointerState, ParallelVacuumInit, ParallelVacuumInitArgs,
     ParallelVacuumStateHandle, PruneAndFreezeArgs, PruneAndFreezeOut, ReadStreamHandle,
-    ScanCallback, StrategyHandle, TidStore, TidStoreIterHandle, UpdateRelStatsArgs, VmSetArgs,
+    ScanCallback, TidStore, TidStoreIterHandle, UpdateRelStatsArgs, VmSetArgs,
 };
+use types_storage::buf::BufferAccessStrategy;
 use types_vacuum::vacuumparallel::{IndexBulkDeleteResult, IndexVacuumInfo, VacDeadItemsInfo};
 
 // =======================================================================
@@ -50,7 +51,7 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         rel: Relation<'mcx>,
         params: VacuumParams,
-        bstrategy: StrategyHandle,
+        bstrategy: BufferAccessStrategy,
     ) -> PgResult<()>
 );
 
@@ -265,7 +266,7 @@ seam_core::seam!(
     /// through `read_buffer_extended`.
     pub fn read_stream_begin_relation<'mcx>(
         flags: i32,
-        bstrategy: StrategyHandle,
+        bstrategy: BufferAccessStrategy,
         rel: &Relation<'mcx>,
         fork: i32,
         callback: ScanCallback,
@@ -287,7 +288,7 @@ seam_core::seam!(
         rel: &Relation<'mcx>,
         fork: i32,
         blkno: BlockNumber,
-        bstrategy: StrategyHandle,
+        bstrategy: BufferAccessStrategy,
     ) -> PgResult<Buffer>
 );
 seam_core::seam!(

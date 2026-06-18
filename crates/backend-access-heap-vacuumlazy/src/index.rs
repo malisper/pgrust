@@ -81,7 +81,7 @@ pub fn lazy_vacuum_one_index<'mcx>(
         estimated_count: true,
         message_level: DEBUG2.0,
         num_heap_tuples: reltuples,
-        strategy: strategy_to_types(vacrel.bstrategy),
+        strategy: vacrel.bstrategy.clone(),
     };
 
     /* The index name is saved during this phase and restored after. */
@@ -132,7 +132,7 @@ pub fn lazy_cleanup_one_index<'mcx>(
         estimated_count,
         message_level: DEBUG2.0,
         num_heap_tuples: reltuples,
-        strategy: strategy_to_types(vacrel.bstrategy),
+        strategy: vacrel.bstrategy.clone(),
     };
 
     debug_assert!(vacrel.indname.is_none());
@@ -185,11 +185,4 @@ pub fn update_relstats_all_indexes<'mcx>(vacrel: &mut LVRelState<'mcx>) -> PgRes
         })?;
     }
     Ok(())
-}
-
-#[inline]
-fn strategy_to_types(
-    h: types_vacuum::vacuumlazy::StrategyHandle,
-) -> types_vacuum::vacuumparallel::BufferAccessStrategyHandle {
-    types_vacuum::vacuumparallel::BufferAccessStrategyHandle(h.id)
 }

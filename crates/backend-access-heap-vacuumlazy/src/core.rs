@@ -37,8 +37,9 @@ use types_vacuum::vacuum::VacuumCutoffs;
 use types_vacuum::vacuumparallel::{IndexBulkDeleteResult, VacDeadItemsInfo};
 
 use types_vacuum::vacuumlazy::{
-    GlobalVisStateHandle, ParallelVacuumStateHandle, StrategyHandle, TidStore,
+    GlobalVisStateHandle, ParallelVacuumStateHandle, TidStore,
 };
+use types_storage::buf::BufferAccessStrategy;
 
 // ===========================================================================
 // File-scope constants (vacuumlazy.c:169-256).
@@ -128,7 +129,7 @@ pub struct LVRelState<'mcx> {
 
     // -- Buffer access strategy and parallel vacuum state --
     /// `BufferAccessStrategy bstrategy`.
-    pub bstrategy: StrategyHandle,
+    pub bstrategy: BufferAccessStrategy,
     /// `ParallelVacuumState *pvs`.
     pub pvs: ParallelVacuumStateHandle,
 
@@ -259,7 +260,7 @@ impl<'mcx> LVRelState<'mcx> {
             rel,
             indrels: Vec::new(),
             nindexes: 0,
-            bstrategy: StrategyHandle::none(),
+            bstrategy: None,
             pvs: ParallelVacuumStateHandle::none(),
             aggressive: false,
             skipwithvm: false,

@@ -57,7 +57,7 @@ pub fn dead_items_alloc<'mcx>(vacrel: &mut LVRelState<'mcx>, nworkers: i32) -> P
                 nrequested: nworkers,
                 vac_work_mem,
                 elevel: if vacrel.verbose { INFO.0 } else { DEBUG2.0 },
-                bstrategy: vacrel.bstrategy,
+                bstrategy: vacrel.bstrategy.clone(),
             })?;
             vacrel.pvs = init.pvs;
             vacrel.dead_items = init.dead_items;

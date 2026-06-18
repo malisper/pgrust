@@ -18,8 +18,8 @@ use types_core::Oid;
 use types_error::PgResult;
 use types_nodes::rawnodes::RangeVar;
 use types_statistics::{AnalyzeAttrFetchFunc, VacAttrStats};
+use types_storage::buf::BufferAccessStrategy;
 use types_vacuum::vacuum::VacuumParams;
-use types_vacuum::vacuumlazy::StrategyHandle;
 
 seam_core::seam!(
     /// `analyze_rel(relid, relation, params, va_cols, in_outer_xact, bstrategy)`
@@ -34,7 +34,7 @@ seam_core::seam!(
         params: VacuumParams,
         va_cols: Vec<String>,
         in_outer_xact: bool,
-        bstrategy: StrategyHandle,
+        bstrategy: BufferAccessStrategy,
     ) -> PgResult<()>
 );
 

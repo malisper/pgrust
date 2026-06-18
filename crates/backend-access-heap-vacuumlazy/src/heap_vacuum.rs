@@ -84,7 +84,7 @@ pub fn lazy_vacuum_heap_rel<'mcx>(vacrel: &mut LVRelState<'mcx>) -> PgResult<()>
      */
     let stream = vl::read_stream_begin_relation::call(
         READ_STREAM_MAINTENANCE | READ_STREAM_USE_BATCHING,
-        vacrel.bstrategy,
+        vacrel.bstrategy.clone(),
         &vacrel.rel,
         MAIN_FORKNUM,
         types_vacuum::vacuumlazy::ScanCallback::ReapNextBlock,
@@ -103,7 +103,7 @@ pub fn lazy_vacuum_heap_rel<'mcx>(vacrel: &mut LVRelState<'mcx>) -> PgResult<()>
 
         /* Read (and pin) the chosen block's buffer. */
         let buf =
-            vl::read_buffer_extended::call(&vacrel.rel, MAIN_FORKNUM, reap.blkno, vacrel.bstrategy)?;
+            vl::read_buffer_extended::call(&vacrel.rel, MAIN_FORKNUM, reap.blkno, vacrel.bstrategy.clone())?;
 
         let blkno = backend_storage_buffer_bufmgr_seams::buffer_get_block_number::call(buf);
         vacrel.blkno = blkno;

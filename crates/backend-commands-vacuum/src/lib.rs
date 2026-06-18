@@ -69,7 +69,8 @@ use types_vacuum::vacuum::{
     VACOPT_PROCESS_TOAST, VACOPT_SKIP_DATABASE_STATS, VACOPT_SKIP_LOCKED, VACOPT_VACUUM,
     VACOPT_VERBOSE,
 };
-use types_vacuum::vacuumlazy::{StrategyHandle, TidStore, UpdateRelStatsArgs};
+use types_storage::buf::BufferAccessStrategy;
+use types_vacuum::vacuumlazy::{TidStore, UpdateRelStatsArgs};
 use types_vacuum::vacuumparallel::{IndexBulkDeleteResult, IndexVacuumInfo, VacDeadItemsInfo};
 
 use backend_commands_define_seams::DefElemArg;
@@ -380,7 +381,7 @@ pub fn ExecVacuum<'mcx>(
         max_eager_freeze_failure_rate: 0.0,
         nworkers: 0,
     };
-    let mut bstrategy = StrategyHandle::none();
+    let mut bstrategy: BufferAccessStrategy = None;
     let mut verbose = false;
     let mut skip_locked = false;
     let mut analyze_opt = false;
@@ -736,7 +737,7 @@ fn in_vacuum_set(v: bool) {
 pub fn vacuum<'mcx>(
     relations: &PgVec<'mcx, types_nodes::nodes::NodePtr<'mcx>>,
     params: &mut VacuumParams,
-    bstrategy: StrategyHandle,
+    bstrategy: BufferAccessStrategy,
     isTopLevel: bool,
     mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
@@ -854,7 +855,7 @@ pub fn vacuum<'mcx>(
                 let mut params_copy: VacuumParams = *p;
                 let relation = vacrel_range_var("vacuum", vrel.relation.as_deref(), mcx)?;
 
-                if !vacuum_rel(vrel.oid, relation, &mut params_copy, bstrategy, mcx)? {
+                if !vacuum_rel(vrel.oid, relation, &mut params_copy, bstrategy.clone(), mcx)? {
                     continue;
                 }
             }
@@ -886,7 +887,7 @@ pub fn vacuum<'mcx>(
                     *p,
                     va_cols,
                     in_outer_xact,
-                    bstrategy,
+                    bstrategy.clone(),
                 )?;
 
                 if use_own_xacts {
@@ -1928,7 +1929,7 @@ fn vacuum_rel<'mcx>(
     relid: Oid,
     relation: Option<RangeVar<'mcx>>,
     params: &mut VacuumParams,
-    bstrategy: StrategyHandle,
+    bstrategy: BufferAccessStrategy,
     mcx: Mcx<'mcx>,
 ) -> PgResult<bool> {
     let lmode: LOCKMODE;
@@ -2194,7 +2195,7 @@ fn vacuum_rel<'mcx>(
              * (rel_handle) is closed below.
              */
             let open_relation = table_seam::table_open::call(mcx, rel_handle, NoLock)?;
-            rt::table_relation_vacuum::call(mcx, open_relation, *p, bstrategy)?;
+            rt::table_relation_vacuum::call(mcx, open_relation, *p, bstrategy.clone())?;
             rel = Some(rel_handle);
         }
     } else {
@@ -2480,11 +2481,13 @@ pub fn vac_bulkdel_one_index(
     dead_items: TidStore,
     dead_items_info: VacDeadItemsInfo,
 ) -> PgResult<IndexBulkDeleteResult> {
+    let ivinfo_index = ivinfo.index;
+    let ivinfo_message_level = ivinfo.message_level;
     /* Do bulk deletion (the callback is vac_tid_reaped). */
     let istat = rt::index_bulk_delete::call(ivinfo, istat, dead_items)?;
 
-    let relname = rt::relation_get_relation_name::call(ivinfo.index)?;
-    ereport(ErrorLevel(ivinfo.message_level))
+    let relname = rt::relation_get_relation_name::call(ivinfo_index)?;
+    ereport(ErrorLevel(ivinfo_message_level))
         .errmsg(format!(
             "scanned index \"{}\" to remove {} row versions",
             relname, dead_items_info.num_items
@@ -2504,11 +2507,13 @@ pub fn vac_cleanup_one_index(
     ivinfo: IndexVacuumInfo,
     istat: Option<IndexBulkDeleteResult>,
 ) -> PgResult<Option<IndexBulkDeleteResult>> {
+    let ivinfo_index = ivinfo.index;
+    let ivinfo_message_level = ivinfo.message_level;
     let istat = rt::index_vacuum_cleanup::call(ivinfo, istat)?;
 
     if let Some(stat) = istat {
-        let relname = rt::relation_get_relation_name::call(ivinfo.index)?;
-        ereport(ErrorLevel(ivinfo.message_level))
+        let relname = rt::relation_get_relation_name::call(ivinfo_index)?;
+        ereport(ErrorLevel(ivinfo_message_level))
             .errmsg(format!(
                 "index \"{}\" now contains {:.0} row versions in {} pages",
                 relname, stat.num_index_tuples, stat.num_pages

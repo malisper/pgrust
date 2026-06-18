@@ -159,7 +159,7 @@ pub fn lazy_check_wraparound_failsafe<'mcx>(vacrel: &mut LVRelState<'mcx>) -> Pg
          * Abandon use of a buffer access strategy to allow use of all of shared
          * buffers.
          */
-        vacrel.bstrategy = types_vacuum::vacuumlazy::StrategyHandle::none();
+        vacrel.bstrategy = None;
 
         /* Disable index vacuuming, index cleanup, and heap rel truncation. */
         vacrel.do_index_vacuuming = false;

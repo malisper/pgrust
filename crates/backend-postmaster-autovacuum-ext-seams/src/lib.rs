@@ -27,8 +27,8 @@ use seam_core::seam;
 
 use types_core::{BlockNumber, MultiXactId, Oid, TimestampTz, TransactionId};
 use types_error::PgResult;
+use types_storage::buf::BufferAccessStrategy;
 use types_vacuum::vacuum::VacuumParams;
-use types_vacuum::vacuumparallel::BufferAccessStrategyHandle as BufferStrategyHandle;
 use types_autovacuum::{
     AvwDbase, DbStatEntry, OrphanClassRow, PgClassScanRow, RecheckClassRow, TabStatEntry,
 };
@@ -125,13 +125,13 @@ seam!(pub fn commit_transaction_command() -> PgResult<()>);
 // local. `pop_active_snapshot` / `active_snapshot_set` are owned by snapmgr.c
 // and called through `backend-utils-time-snapmgr-seams`.
 seam!(pub fn push_active_snapshot() -> PgResult<()>);
-seam!(pub fn get_vacuum_access_strategy() -> BufferStrategyHandle);
+seam!(pub fn get_vacuum_access_strategy() -> BufferAccessStrategy);
 seam!(pub fn autovacuum_do_vac_analyze(
     relid: Oid,
     nspname: alloc::string::String,
     relname: alloc::string::String,
     params: VacuumParams,
-    bstrategy: BufferStrategyHandle,
+    bstrategy: BufferAccessStrategy,
 ) -> PgResult<()>);
 seam!(pub fn perform_brin_summarize_range(relation: Oid, blkno: BlockNumber) -> PgResult<()>);
 seam!(pub fn set_query_cancel_pending(v: bool));
