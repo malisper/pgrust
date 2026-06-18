@@ -1311,21 +1311,36 @@ pub fn ExecEvalScalarArrayOp<'mcx>(
     let (resvalue_id, resnull_id) = res_cells(state, op);
 
     // if (*op->resnull) return;  /* NULL array => NULL result */
-    let arr_cell = state.result_cells.get(resvalue_id);
-    if arr_cell.isnull {
+    //
+    // Read the array value through `read_cell`, which routes a
+    // `STATE_RESULT_CELL` (id 0) target to `state.resvalue`/`state.resnull` —
+    // the array arg is `ExecInitExprRec`'d into `*op->resvalue`, which is the
+    // top-level result cell when this SAOP is the whole expression (so the
+    // bare `result_cells.get(0)` arena read would return a default-NULL cell).
+    let (arr_value, arr_isnull) = crate::interp_loop::read_cell(state, resvalue_id);
+    if arr_isnull {
         return Ok(());
     }
 
     // arr = DatumGetArrayTypeP(*op->resvalue); detoast + deconstruct.
-    let arraydatum = word_of(&arr_cell.value);
+    //
+    // The array Const/result value is a canonical by-reference value (the
+    // on-disk array varlena image lives in its `ByRef` bytes). Read it through
+    // the bytes/value lane — NOT the bare-word `Datum` surrogate, which carries
+    // no payload and detoasts to an empty buffer (the "index out of bounds:
+    // len 0 index 0" array-deconstruct fault).
+    let arr_bytes = arr_value.as_ref_bytes();
     let mcx = estate.es_query_cxt;
-    let elemtype = backend_utils_adt_arrayfuncs_seams::array_get_elemtype::call(mcx, arraydatum)?;
+    let elemtype =
+        backend_utils_adt_arrayfuncs_seams::array_get_elemtype_bytes::call(mcx, arr_bytes)?;
     let tlba = backend_utils_cache_lsyscache_seams::get_typlenbyvalalign::call(elemtype)?;
-    // deconstruct_array subsumes ArrayGetNItems + the ARR_DATA_PTR / null-bitmap
-    // fetch_att walk: it yields the per-element (Datum, isnull) pairs.
-    let elements = backend_utils_adt_arrayfuncs_seams::deconstruct_array::call(
+    // deconstruct subsumes ArrayGetNItems + the ARR_DATA_PTR / null-bitmap
+    // fetch_att walk: it yields the per-element canonical `(Datum, isnull)`
+    // pairs (by-ref elements keep their full image so the comparison function
+    // sees the real value, not a downgraded word).
+    let elements = backend_utils_adt_arrayfuncs_seams::deconstruct_array_values_bytes::call(
         mcx,
-        arraydatum,
+        arr_bytes,
         elemtype,
         tlba.typlen,
         tlba.typbyval,
@@ -1335,21 +1350,16 @@ pub fn ExecEvalScalarArrayOp<'mcx>(
 
     // if (nitems <= 0) { *op->resvalue = BoolGetDatum(!useOr); *op->resnull = false; return; }
     if nitems == 0 {
-        state.result_cells.set(
-            resvalue_id,
-            ResultCell { value: DatumV::from_bool(!use_or), isnull: false },
-        );
+        crate::interp_loop::write_cell(state, resvalue_id, DatumV::from_bool(!use_or), false);
         return Ok(());
     }
 
     // if (fcinfo->args[0].isnull && strictfunc) { *op->resnull = true; return; }
-    let scalar = state.result_cells.get(scalar_cell);
-    let scalar_isnull = scalar.isnull;
-    let scalar_word = word_of(&scalar.value);
+    // The scalar (LHS) crosses the comparison on the canonical by-ref-capable
+    // lane too — it may itself be a by-reference value (e.g. `'x' IN (...)`).
+    let (scalar_value, scalar_isnull) = crate::interp_loop::read_cell(state, scalar_cell);
     if scalar_isnull && strictfunc {
-        state
-            .result_cells
-            .set(resnull_id, ResultCell { value: arr_cell.value, isnull: true });
+        crate::interp_loop::write_cell(state, resnull_id, DatumV::null(), true);
         return Ok(());
     }
 
@@ -1363,12 +1373,17 @@ pub fn ExecEvalScalarArrayOp<'mcx>(
         let (this_isnull, thisresult) = if elt_isnull && strictfunc {
             (true, false)
         } else {
-            let args = [
-                types_datum::NullableDatum { value: scalar_word, isnull: scalar_isnull },
-                types_datum::NullableDatum { value: elt, isnull: elt_isnull },
-            ];
-            let (word, isnull) = function_call_invoke::call(fn_oid, collation, &args)?;
-            (isnull, Datum::from_usize(word.as_usize()).as_bool())
+            // Dispatch on the canonical by-reference-capable lane: a by-ref
+            // scalar or element (text/numeric/...) reaches the comparison
+            // function as its full image, not a downgraded word.
+            let args = if scalar_isnull {
+                [DatumV::null(), elt]
+            } else {
+                [scalar_value.clone(), elt]
+            };
+            let (result_v, isnull) =
+                function_call_invoke_datum::call(mcx, fn_oid, collation, &args[..], None)?;
+            (isnull, result_v.as_bool())
         };
 
         // Combine results per OR or AND semantics.
@@ -1388,10 +1403,7 @@ pub fn ExecEvalScalarArrayOp<'mcx>(
     }
 
     // *op->resvalue = result; *op->resnull = resultnull;
-    state.result_cells.set(
-        resvalue_id,
-        ResultCell { value: DatumV::from_bool(result), isnull: resultnull },
-    );
+    crate::interp_loop::write_cell(state, resvalue_id, DatumV::from_bool(result), resultnull);
     Ok(())
 }
 
@@ -1531,8 +1543,7 @@ pub fn ExecEvalHashedScalarArrayOp<'mcx>(
         ExprEvalStepData::HashedScalarArrayOp { scalar_cell, .. } => *scalar_cell,
         _ => unreachable!(),
     };
-    let scalar = state.result_cells.get(scalar_cell_id);
-    let (scalar_value, scalar_isnull) = (scalar.value, scalar.isnull);
+    let (scalar_value, scalar_isnull) = crate::interp_loop::read_cell(state, scalar_cell_id);
 
     let (resvalue_id, resnull_id) = res_cells(state, op);
 
@@ -1542,9 +1553,7 @@ pub fn ExecEvalHashedScalarArrayOp<'mcx>(
     // searching.
     //   if (fcinfo->args[0].isnull && strictfunc) { *op->resnull = true; return; }
     if scalar_isnull && strictfunc {
-        state
-            .result_cells
-            .set(resnull_id, ResultCell { value: scalar_value, isnull: true });
+        crate::interp_loop::write_cell(state, resnull_id, DatumV::null(), true);
         return Ok(());
     }
 
@@ -1555,12 +1564,15 @@ pub fn ExecEvalHashedScalarArrayOp<'mcx>(
         // arr = DatumGetArrayTypeP(*op->resvalue);
         // nitems = ArrayGetNItems(ARR_NDIM(arr), ARR_DIMS(arr));
         // get_typlenbyvalalign(ARR_ELEMTYPE(arr), &typlen, &typbyval, &typalign);
-        let arraydatum_v = state.result_cells.get(resvalue_id).value.clone();
-        let arraydatum = word_of(&arraydatum_v);
+        let (arraydatum_v, _) = crate::interp_loop::read_cell(state, resvalue_id);
         let mcx = estate.es_query_cxt;
 
-        let elemtype =
-            backend_utils_adt_arrayfuncs_seams::array_get_elemtype::call(mcx, arraydatum)?;
+        // Read the element type from the array's on-disk byte image (the
+        // canonical by-ref value lane), not the empty bare-word surrogate.
+        let elemtype = backend_utils_adt_arrayfuncs_seams::array_get_elemtype_bytes::call(
+            mcx,
+            arraydatum_v.as_ref_bytes(),
+        )?;
         let tlba =
             backend_utils_cache_lsyscache_seams::get_typlenbyvalalign::call(elemtype)?;
 
@@ -1668,21 +1680,18 @@ pub fn ExecEvalHashedScalarArrayOp<'mcx>(
             //   if (!inclause) result = !result;
             //
             // The resolved FmgrInfo cannot cross the seam, so dispatch by
-            // fn_oid through function_call_invoke (#296: the call frame carries
-            // nullable args + collation + isnull). args[1] is the NULL rhs.
-            let args = [
-                types_datum::NullableDatum {
-                    value: word_of(&scalar_value),
-                    isnull: scalar_isnull,
-                },
-                types_datum::NullableDatum {
-                    value: Datum::from_usize(0),
-                    isnull: true,
-                },
-            ];
-            let (word, isnull) = function_call_invoke::call(matchfuncid, collation, &args)?;
+            // fn_oid through the canonical by-ref-capable lane (a by-ref scalar
+            // reaches the function as its full image). args[1] is the NULL rhs.
+            let mcx = estate.es_query_cxt;
+            let args = if scalar_isnull {
+                [DatumV::null(), DatumV::null()]
+            } else {
+                [scalar_value.clone(), DatumV::null()]
+            };
+            let (result_v, isnull) =
+                function_call_invoke_datum::call(mcx, matchfuncid, collation, &args[..], None)?;
             // result = DatumGetBool(...); resultnull = fcinfo->isnull;
-            result = Datum::from_usize(word.as_usize()).as_bool();
+            result = result_v.as_bool();
             resultnull = isnull;
             // Reverse the result for NOT IN clauses (the function is equality).
             if !inclause {
@@ -1692,10 +1701,7 @@ pub fn ExecEvalHashedScalarArrayOp<'mcx>(
     }
 
     // *op->resvalue = result; *op->resnull = resultnull;
-    state.result_cells.set(
-        resvalue_id,
-        ResultCell { value: DatumV::from_bool(result), isnull: resultnull },
-    );
+    crate::interp_loop::write_cell(state, resvalue_id, DatumV::from_bool(result), resultnull);
     Ok(())
 }
 

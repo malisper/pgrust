@@ -128,6 +128,7 @@ impl Datum<'_> {
     /// The raw machine word of a by-value scalar. Panics on a by-reference
     /// value (a caller bug — C would read garbage too).
     #[inline]
+    #[track_caller]
     fn byval_word(&self) -> usize {
         match self {
             Datum::ByVal(d) => *d,
@@ -151,6 +152,7 @@ impl Datum<'_> {
         Datum::ByVal(value)
     }
     /// C: `as_usize` — the raw machine word.
+    #[track_caller]
     pub fn as_usize(&self) -> usize {
         self.byval_word()
     }
