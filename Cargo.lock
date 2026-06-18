@@ -6729,10 +6729,13 @@ dependencies = [
 name = "backend-commands-explain"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-tupdesc",
+ "backend-commands-define-seams",
  "backend-commands-explain-format",
  "backend-commands-explain-seams",
  "backend-executor-execMain-seams",
  "backend-executor-instrument",
+ "backend-tcop-utility-out-seams",
  "backend-utils-adt-ruleutils",
  "backend-utils-adt-ruleutils-seams",
  "backend-utils-cache-lsyscache",
@@ -6746,6 +6749,7 @@ dependencies = [
  "types-nodes",
  "types-scan",
  "types-snapshot",
+ "types-tuple",
 ]
 
 [[package]]

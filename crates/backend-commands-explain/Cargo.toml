@@ -16,6 +16,7 @@ types-explain = { path = "../types-explain" }
 types-nodes = { path = "../types-nodes" }
 types-scan = { path = "../types-scan" }
 types-snapshot = { path = "../types-snapshot" }
+types-tuple = { path = "../types-tuple" }
 
 # Sibling EXPLAIN crates (emitters + option parsing).
 backend-commands-explain-format = { path = "../backend-commands-explain-format" }
@@ -28,6 +29,12 @@ backend-utils-adt-ruleutils = { path = "../backend-utils-adt-ruleutils" }
 
 # Inward seam crate this unit installs.
 backend-commands-explain-seams = { path = "../backend-commands-explain-seams" }
+
+# ExplainResultDesc: tcop-utility out-seam this unit installs + the tupdesc
+# constructor + the format-option string accessor.
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
+backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
+backend-commands-define-seams = { path = "../backend-commands-define-seams" }
 
 # Owner seam crates (calls into other owners; panic until installed).
 backend-executor-execMain-seams = { path = "../backend-executor-execMain-seams" }

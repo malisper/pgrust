@@ -37,6 +37,7 @@ use backend_executor_instrument as instr;
 use backend_utils_time_snapmgr_seams as snapmgr_s;
 
 pub mod details;
+pub mod driver;
 pub mod scantarget;
 pub mod walk;
 
@@ -536,7 +537,19 @@ fn _imports_witness(_e: PgError, _f: ExplainFormat) {}
 // init_seams
 // ===========================================================================
 
-/// Install this unit's 7 inward seams.
+/// `ExplainResultDesc` install adapter. The `explain_result_desc` out-seam is
+/// infallible (`-> TupleDesc`), mirroring the C signature whose error paths
+/// longjmp; the owned port returns `PgResult` (the format option is already
+/// validated and only allocation can fail). Surface a failure loudly.
+fn explain_result_desc_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &Node<'mcx>,
+) -> types_tuple::heaptuple::TupleDesc<'mcx> {
+    driver::ExplainResultDesc(mcx, stmt).expect("ExplainResultDesc failed")
+}
+
+/// Install this unit's 7 inward seams plus the `explain_result_desc`
+/// `tcop`-utility out-seam.
 pub fn init_seams() {
     seams::explain_execute_begin::set(explain_execute_begin);
     seams::explain_planduration::set(explain_planduration);
@@ -545,4 +558,5 @@ pub fn init_seams() {
     seams::explain_one_plan::set(explain_one_plan);
     seams::explain_one_utility::set(explain_one_utility);
     seams::explain_separate_plans::set(explain_separate_plans);
+    backend_tcop_utility_out_seams::explain_result_desc::set(explain_result_desc_seam);
 }
