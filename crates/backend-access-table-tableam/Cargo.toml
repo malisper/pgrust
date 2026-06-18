@@ -10,6 +10,9 @@ path = "src/lib.rs"
 
 [dependencies]
 mcx = { path = "../mcx" }
+# tablecmds reads the default_table_access_method GUC (owned here) to pick a
+# table AM in DefineRelation. Seam crate -> no cycle.
+backend-commands-tablecmds-seams = { path = "../backend-commands-tablecmds-seams" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-tuple = { path = "../types-tuple" }

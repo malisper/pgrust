@@ -78,6 +78,11 @@ pub fn init_seams() {
     backend_access_table_tableam_bm_seams::table_endscan::set(table_endscan_bm);
     backend_access_table_tableam_bm_seams::table_rescan::set(table_rescan_bm);
 
+    // tablecmds DefineRelation reads the default_table_access_method GUC.
+    backend_commands_tablecmds_seams::default_table_access_method::set(|mcx| {
+        mcx::PgString::from_str_in(&default_table_access_method(), mcx)
+    });
+
     // The COPY/seqscan value-typed scan seams (unified off the retired
     // opaque-scan-handle model onto the C-faithful `TableScanDesc<'mcx>`).
     backend_access_table_tableam_seams::table_beginscan::set(table_beginscan_seam);
