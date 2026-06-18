@@ -2329,16 +2329,52 @@ pub fn reparameterize_path(
     unique_seam::reparameterize_path::call(root, path, required_outer, loop_count)
 }
 
-/// `reparameterize_path_by_child(root, path, child_rel)` (pathnode.c:4408). The
-/// heart is `adjust_appendrel_attrs` over the path's clauses/quals/orderbys (an
-/// `expression_tree_mutator` over the whole node vocabulary) + FDW/Custom
-/// reparameterization callbacks — crosses the reparam seam.
+/// `reparameterize_path_by_child(root, path, child_rel)` (pathnode.c:4408).
+///
+/// Deep-rewrites a path so that it is parameterized by `child_rel` instead of
+/// `child_rel`'s topmost parent. This is applied to the inner side of a nestloop
+/// join (createplan.c `create_nestloop_plan`) and, in the partitionwise-join
+/// code, to child join inputs.
+///
+/// The very first thing the C does is the early-out: if the path is **not**
+/// parameterized by the parent of `child_rel`, no reparameterization is needed
+/// and the path is returned unchanged. For an ordinary (non-partitioned) join,
+/// `child_rel` is the outer rel itself — it has no `top_parent_relids` — so this
+/// early-out always fires and the inner path comes back untouched. That is the
+/// path every plain `a, b` / `a, b WHERE a.x <> b.y` cross/non-equi join takes.
+///
+/// The per-path-type body (the `ADJUST_CHILD_ATTRS` rewrites via
+/// `adjust_appendrel_attrs_multilevel` and the `adjust_child_relids_multilevel`
+/// PPI re-key) is only reachable when the path is genuinely parameterized by a
+/// partition parent — i.e. the partitionwise-join leg. Those cross into the
+/// unported `adjust_appendrel_attrs` expression mutator (prepunion.c), so they
+/// are routed through the dedicated `adjust_child` seam below: it panics only
+/// when the partitionwise leg actually fires, never for an ordinary join.
 pub fn reparameterize_path_by_child(
     root: &mut PlannerInfo,
     path: PathId,
     child_rel: RelId,
 ) -> PgResult<Option<PathId>> {
-    unique_seam::reparameterize_path_by_child::call(root, path, child_rel)
+    // If the path is not parameterized by the parent of the given relation, it
+    // doesn't need reparameterization. (pathnode.c:4443)
+    let needs_reparam = {
+        let base = root.path(path).base();
+        base.param_info.is_some()
+            && bms::relids_overlap::call(
+                &path_req_outer(base),
+                &root.rel(child_rel).top_parent_relids,
+            )
+    };
+    if !needs_reparam {
+        return Ok(Some(path));
+    }
+
+    // Genuinely parameterized by a partition parent: this is the
+    // partitionwise-join leg, whose per-path-type `adjust_appendrel_attrs`
+    // rewrites are not ported in this wave. Faithfully cross the mutator seam
+    // (panics until the prepunion/appendrel-attrs owner lands); ordinary joins
+    // never reach here.
+    adjust_child_seam::reparameterize_path_by_child_partitionwise::call(root, path, child_rel)
 }
 
 /// `path_is_reparameterizable_by_child(path, child_rel)` (pathnode.c:4704) — a
@@ -2476,9 +2512,23 @@ mod unique_seam {
             loop_count: f64,
         ) -> PgResult<Option<PathId>>
     );
+}
+
+/// Outward seam for the genuinely-unported partitionwise leg of
+/// `reparameterize_path_by_child` — the per-path-type `ADJUST_CHILD_ATTRS`
+/// rewrites (`adjust_appendrel_attrs_multilevel`) + `adjust_child_relids_multilevel`
+/// PPI re-key, which cross into the unported `adjust_appendrel_attrs` expression
+/// mutator (prepunion.c). The early-out (non-partitioned join) is handled inline
+/// in [`reparameterize_path_by_child`]; this seam fires only when a path is truly
+/// parameterized by a partition parent, and panics until the appendrel-attrs
+/// owner lands.
+mod adjust_child_seam {
+    use super::*;
+
     seam_core::seam!(
-        /// pathnode.c:4408 cross-subsystem body of `reparameterize_path_by_child`.
-        pub fn reparameterize_path_by_child(
+        /// pathnode.c:4459-4660 partitionwise per-path-type body of
+        /// `reparameterize_path_by_child` (`adjust_appendrel_attrs` mutator leg).
+        pub fn reparameterize_path_by_child_partitionwise(
             root: &mut PlannerInfo,
             path: PathId,
             child_rel: RelId,
