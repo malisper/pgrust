@@ -445,6 +445,7 @@ backend-utils-adt-formatting = { path = "../backend-utils-adt-formatting" }
 backend-utils-adt-xml = { path = "../backend-utils-adt-xml" }
 backend-utils-adt-geo-ops = { path = "../backend-utils-adt-geo-ops" }
 backend-utils-adt-json = { path = "../backend-utils-adt-json" }
+backend-utils-adt-jsonb = { path = "../backend-utils-adt-jsonb" }
 backend-utils-adt-jsonb-gin = { path = "../backend-utils-adt-jsonb-gin" }
 backend-utils-adt-jsonfuncs = { path = "../backend-utils-adt-jsonfuncs" }
 backend-utils-adt-jsonbsubs = { path = "../backend-utils-adt-jsonbsubs" }

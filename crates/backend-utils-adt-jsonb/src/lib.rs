@@ -103,6 +103,41 @@ const PROVOLATILE_IMMUTABLE: u8 = b'i';
 /// the jsonapi parser).
 pub fn init_seams() {
     fmgr_builtins::register_jsonb_builtins();
+
+    // `OidFunctionCall1(outfuncoid, val)` (JSONTYPE_CAST arm) — `fmgr.c`
+    // resolves an `FmgrInfo` from `outfuncoid` and runs the cast under the
+    // default (invalid) collation. Delegate to the fmgr-core
+    // `function_call1_coll_datum` seam (the real `fmgr.c` owner) over the
+    // canonical `Datum` lane.
+    jsonb_seam::oid_function_call1::set(seam_oid_function_call1);
+
+    // `DatumGetJsonbP(val)` = `PG_DETOAST_DATUM(val)` (JSONTYPE_JSONB arm) —
+    // detoast the on-disk `jsonb` varlena via the `detoast_attr` seam.
+    jsonb_seam::jsonb_datum_bytes::set(seam_jsonb_datum_bytes);
+}
+
+/// `OidFunctionCall1(outfuncoid, val)` (fmgr.c): resolve the cast function and
+/// invoke it under `InvalidOid` collation, returning its resulting `Datum`.
+fn seam_oid_function_call1<'mcx>(
+    mcx: Mcx<'mcx>,
+    outfuncoid: Oid,
+    val: &Datum<'mcx>,
+) -> PgResult<Datum<'mcx>> {
+    backend_utils_fmgr_fmgr_seams::function_call1_coll_datum::call(
+        mcx,
+        outfuncoid,
+        types_core::InvalidOid,
+        val.clone_in(mcx)?,
+    )
+}
+
+/// `DatumGetJsonbP(val)` = `PG_DETOAST_DATUM(val)`: return a de-TOASTed copy of
+/// the `jsonb` varlena image (length header + root container) in `mcx`.
+fn seam_jsonb_datum_bytes<'mcx>(
+    mcx: Mcx<'mcx>,
+    val: &Datum<'mcx>,
+) -> PgResult<PgVec<'mcx, u8>> {
+    backend_access_common_detoast_seams::detoast_attr::call(mcx, val.as_ref_bytes())
 }
 
 pub mod fmgr_builtins;
@@ -956,7 +991,7 @@ pub fn datum_to_jsonb_internal<'mcx>(
                 splice_jsonb_tokens(result, &parsed)?;
             }
             JSONTYPE_JSONB => {
-                let jsonb = jsonb_seam::jsonb_datum_bytes::call(val)?;
+                let jsonb = jsonb_seam::jsonb_datum_bytes::call(mcx, val)?;
                 let root = &jsonb[VARHDRSZ..];
                 let mut it = JsonbIteratorInit(root);
                 if json_container_is_scalar(container_header(root)) {
