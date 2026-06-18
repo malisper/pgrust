@@ -11,12 +11,15 @@
 //! preprocesses `root->parse->targetList` into `root->processed_tlist`. It owns:
 //!
 //! * `preprocess_targetlist` — the driver, called from `grouping_planner`
-//!   (planner.c, still unported). Declared as the inward seam
+//!   (planner.c). Declared as the inward seam
 //!   [`backend_optimizer_prep_preptlist_seams::preprocess_targetlist`] and
-//!   installed by [`init_seams`]. **SELECT core ported** (the only reachable
-//!   path on the current SELECT-analyze milestone); the INSERT/UPDATE/DELETE/
-//!   MERGE legs and the FOR-UPDATE/SHARE rowMarks junk stanza seam-and-panic
-//!   until the DML-analyze family + the PlanRowMark-carrier keystone land.
+//!   installed by [`init_seams`]. SELECT core + the **INSERT leg**
+//!   (`expand_insert_targetlist`: open the target relation, fill missing
+//!   columns with NULL `Const`s in attribute order) are ported. The
+//!   UPDATE/DELETE/MERGE row-identity junk-column stanza, the MERGE per-action
+//!   handling, the FOR-UPDATE/SHARE rowMarks junk stanza, and the
+//!   cross-relation RETURNING junk stanza seam-and-panic until the DML-analyze
+//!   family + the PlanRowMark-carrier keystone land.
 //! * `extract_update_targetlist_colnos` — the UPDATE colno extractor, a plain
 //!   `pub fn` (its only caller is `preprocess_targetlist`'s UPDATE leg, in this
 //!   crate, and INSERT...ON CONFLICT in nodeModifyTable's planning, same layer).
@@ -66,10 +69,14 @@
 extern crate alloc;
 
 use types_core::primitive::AttrNumber;
+use types_core::{INT4OID, InvalidOid, Oid};
 use types_error::PgResult;
 use types_nodes::copy_query::Query;
 use types_nodes::nodes::CmdType;
+use types_nodes::primnodes::Expr;
 use types_pathnodes::{NodeId, PlanRowMarkId, PlannerInfo, TargetEntryNode};
+use types_rel::Relation;
+use types_tuple::backend_access_common_heaptuple::Datum;
 
 // ===========================================================================
 // preprocess_targetlist (preptlist.c:64) — SELECT core
@@ -88,85 +95,299 @@ pub fn preprocess_targetlist<'mcx>(
     let command_type = parse.commandType;
 
     // C 80-94: if there is a result relation, open it (INSERT/UPDATE/DELETE/
-    // MERGE) so we can look for missing columns; else Assert(SELECT). On the
-    // SELECT path there is no result relation. The DML legs (target_rte fetch +
-    // table_open) are deferred to the DML-analyze family.
-    if result_relation != 0 {
-        panic!(
-            "preprocess_targetlist: result-relation (INSERT/UPDATE/DELETE/MERGE) leg not yet \
-             ported — needs the DML-analyze family (expand_insert_targetlist / \
-             extract_update_targetlist_colnos / add_row_identity_columns / table_open)"
-        );
-    }
-    debug_assert!(command_type == CmdType::CMD_SELECT);
-    if command_type != CmdType::CMD_SELECT {
-        // A non-SELECT command with no result relation is a parser/rewriter bug
-        // (the Assert in C). Defensive: the INSERT/UPDATE tlist expansion is the
-        // only other branch and it requires a result relation.
-        panic!(
-            "preprocess_targetlist: non-SELECT command with no result relation \
-             (parser/rewriter messed up)"
-        );
-    }
+    // MERGE) so we can look for missing columns; else Assert(SELECT). Previous
+    // code already acquired at least AccessShareLock, so we pass NoLock.
+    let target_relation: Option<Relation<'mcx>> = if result_relation != 0 {
+        let result_relation = result_relation as usize;
+        // C: target_rte = rt_fetch(result_relation, range_table). Sanity-check
+        // it is a real relation, else parser/rewriter messed up.
+        let target_rte = parse.rtable.get(result_relation - 1).ok_or_else(|| {
+            types_error::PgError::error(alloc::format!(
+                "preprocess_targetlist: result relation {result_relation} out of range",
+            ))
+        })?;
+        if target_rte.rtekind != types_nodes::parsenodes::RTEKind::RTE_RELATION {
+            return Err(types_error::PgError::error(alloc::string::String::from(
+                "result relation must be a regular relation",
+            )));
+        }
+        let relid = target_rte.relid;
+        Some(backend_access_table_table::table_open(mcx, relid, 0 /* NoLock */)?)
+    } else {
+        debug_assert!(command_type == CmdType::CMD_SELECT);
+        None
+    };
 
-    // C 105-109: tlist = parse->targetList. For SELECT (not INSERT, not UPDATE)
-    // the tlist is taken verbatim; no expand_insert_targetlist / no
-    // extract_update_targetlist_colnos.
-    //
-    // C 119-128 (UPDATE/DELETE/MERGE non-inherited junk row-identity columns)
-    // and C 136-212 (MERGE per-action tlists + join-condition Vars): result
-    // relation required, so unreachable on the SELECT path.
+    // C 105-117: tlist = parse->targetList; INSERT expands it to the exact
+    // attribute order, UPDATE extracts the target colnos.
+    let mut tlist: alloc::vec::Vec<NodeId> = match command_type {
+        CmdType::CMD_INSERT => {
+            let rel = target_relation
+                .as_ref()
+                .expect("preprocess_targetlist: INSERT with no result relation (rewriter bug)");
+            expand_insert_targetlist(mcx, root, parse, rel)?
+        }
+        CmdType::CMD_UPDATE => {
+            // Materialize the parser tlist into the arena, then renumber.
+            let materialized = materialize_tlist(mcx, root, parse)?;
+            root.update_colnos = extract_update_targetlist_colnos(root, &materialized);
+            materialized
+        }
+        CmdType::CMD_SELECT => materialize_tlist(mcx, root, parse)?,
+        CmdType::CMD_DELETE | CmdType::CMD_MERGE => {
+            // DELETE has no tlist expansion; MERGE per-action handling is
+            // deferred to the MERGE-analyze family.
+            if command_type == CmdType::CMD_MERGE {
+                panic!(
+                    "preprocess_targetlist: MERGE per-action targetlist / join-condition Var \
+                     collection not yet ported (needs the MERGE-analyze family)"
+                );
+            }
+            materialize_tlist(mcx, root, parse)?
+        }
+        other => panic!("preprocess_targetlist: unexpected command type {other:?}"),
+    };
+
+    // C 119-132: non-inherited UPDATE/DELETE/MERGE junk row-identity columns.
+    if command_type == CmdType::CMD_UPDATE
+        || command_type == CmdType::CMD_DELETE
+        || command_type == CmdType::CMD_MERGE
+    {
+        // `add_row_identity_columns` walks the target relation to add junk
+        // ctid/tableoid Vars; deferred to the DML-analyze family.
+        let _ = &mut tlist;
+        panic!(
+            "preprocess_targetlist: UPDATE/DELETE/MERGE junk row-identity columns \
+             (add_row_identity_columns) not yet ported (needs the DML-analyze family)"
+        );
+    }
 
     // C 229-287: rowMarks junk-column stanza (FOR UPDATE/SHARE locking +
-    // EvalPlanQual). `root->rowMarks` is empty on every reachable SELECT path
+    // EvalPlanQual). `root->rowMarks` is empty on every reachable path
     // (produced by the unported `preprocess_rowmarks`); seam-and-panic if not.
     if !root.rowMarks.is_empty() {
         panic!(
             "preprocess_targetlist: FOR-UPDATE/SHARE rowMarks junk-column stanza not yet ported — \
-             `root.rowMarks` now carries resolvable `PlanRowMarkId` handles (the carrier keystone \
-             landed the `PlannerRun` rowmark store + `planner_rowmark_fetch`), but this driver is \
-             not threaded the `&PlannerRun` needed to resolve `rc->rti`/`allMarkTypes`/`rowmarkId` \
-             and the junk-Var build is DML/locking logic deferred to that analyze family \
-             (`preprocess_rowmarks` owner) + setrefs"
+             needs the DML/locking analyze family to thread the `&PlannerRun` to resolve \
+             `rc->rti`/`allMarkTypes`/`rowmarkId` and build the junk Vars"
         );
     }
 
-    // C 296-325: if the query has a RETURNING list, add resjunk Vars for other
-    // relations. `returningList` is non-NULL only for a data-modifying statement
-    // (INSERT/UPDATE/DELETE/MERGE ... RETURNING), all of which require a result
-    // relation and were rejected above. Unreachable on the SELECT path.
-    debug_assert!(parse.returningList.is_empty());
+    // C 296-325: RETURNING-list resjunk Vars for other relations. `returningList`
+    // is non-NULL only for a data-modifying statement; the single-table INSERT
+    // RETURNING does not add cross-relation junk. Deferred when non-empty.
+    if !parse.returningList.is_empty() {
+        panic!(
+            "preprocess_targetlist: RETURNING-list cross-relation resjunk Var stanza not yet \
+             ported (needs pull_var_clause over the RETURNING list)"
+        );
+    }
 
-    // C 327: root->processed_tlist = tlist. Carry the SELECT targetlist into the
-    // node_arena, deep-cloning each TLE (and its expr tree) so the lifetime-free
-    // arena owns a faithful copy of the resolved `TargetEntry<'mcx>` (the C alias
-    // of `parse->targetList`). Store the resulting `NodeId` handles.
-    let mut processed: alloc::vec::Vec<NodeId> = alloc::vec::Vec::with_capacity(parse.targetList.len());
+    // C 327: root->processed_tlist = tlist.
+    root.processed_tlist = tlist;
+
+    // C 329-330: target_relation is closed here in C (table_close(NoLock)); our
+    // `Relation` releases on drop.
+    drop(target_relation);
+    Ok(())
+}
+
+/// Materialize `parse.targetList` (owned `TargetEntry<'mcx>`s) into the
+/// node_arena, deep-cloning each TLE and its expr tree (the C alias of
+/// `parse->targetList`; #280 — a shallow clone panics on Aggref/SubLink/SubPlan
+/// children). Returns the resulting `NodeId` handles in order.
+fn materialize_tlist<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    parse: &Query<'mcx>,
+) -> PgResult<alloc::vec::Vec<NodeId>> {
+    let mut out: alloc::vec::Vec<NodeId> = alloc::vec::Vec::with_capacity(parse.targetList.len());
     for tle in parse.targetList.iter() {
-        // C: a TargetEntry always has a non-NULL expr.
         let expr_src = tle.expr.as_deref().expect(
             "preprocess_targetlist: TargetEntry with NULL expr in targetList (parser bug)",
         );
-        // Deep-clone the expr into the arena (lifetime-free `Expr`); #280.
         let expr_clone = expr_src.clone_in(mcx)?;
         let expr_id = root.alloc_node(expr_clone);
-
-        let te_node = TargetEntryNode {
-            expr: expr_id,
-            resno: tle.resno,
-            resname: tle.resname.as_ref().map(|s| alloc::string::String::from(s.as_str())),
-            ressortgroupref: tle.ressortgroupref,
-            resorigtbl: tle.resorigtbl,
-            resorigcol: tle.resorigcol,
-            resjunk: tle.resjunk,
-        };
-        let te_id = root.alloc_targetentry(te_node);
-        processed.push(te_id);
+        let te_id = root.alloc_targetentry(target_entry_node_from(tle, expr_id));
+        out.push(te_id);
     }
-    root.processed_tlist = processed;
+    Ok(out)
+}
 
-    // C 329-330: if target_relation, table_close — no result relation on SELECT.
-    Ok(())
+/// Build a [`TargetEntryNode`] mirroring an owned [`TargetEntry`], with its expr
+/// already allocated into the arena under `expr_id`.
+fn target_entry_node_from(
+    tle: &types_nodes::primnodes::TargetEntry<'_>,
+    expr_id: NodeId,
+) -> TargetEntryNode {
+    TargetEntryNode {
+        expr: expr_id,
+        resno: tle.resno,
+        resname: tle
+            .resname
+            .as_ref()
+            .map(|s| alloc::string::String::from(s.as_str())),
+        ressortgroupref: tle.ressortgroupref,
+        resorigtbl: tle.resorigtbl,
+        resorigcol: tle.resorigcol,
+        resjunk: tle.resjunk,
+    }
+}
+
+// ===========================================================================
+// expand_insert_targetlist (preptlist.c:382)
+// ===========================================================================
+
+/// `expand_insert_targetlist(root, tlist, rel)` (preptlist.c:382) — given a
+/// parser-generated INSERT targetlist and the result relation, add targetlist
+/// entries for any missing attributes and ensure the non-junk attributes appear
+/// in proper field order.
+///
+/// The rewriter has already ordered the supplied TLEs; we scan the relation's
+/// tuple descriptor and, for each attribute with no matching non-junk TLE,
+/// synthesize a NULL `Const` (the rewriter would have substituted any non-NULL
+/// default). Dropped columns get an `INT4` NULL; generated columns a NULL of the
+/// base type (no domain constraints, since the value is ignored); normal columns
+/// a NULL of the column type via `coerce_null_to_domain` (which applies domain
+/// constraints). Remaining resjunk TLEs are appended with renumbered resnos.
+fn expand_insert_targetlist<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    parse: &Query<'mcx>,
+    rel: &Relation<'mcx>,
+) -> PgResult<alloc::vec::Vec<NodeId>> {
+    let mut new_tlist: alloc::vec::Vec<NodeId> = alloc::vec::Vec::new();
+
+    // C: scan the tuple descriptor to make sure we have all user attributes in
+    // the right order.
+    let numattrs = rel.rd_att.natts;
+    // Index into the supplied (owned) parser tlist.
+    let mut tlist_pos: usize = 0;
+
+    let mut attrno: AttrNumber = 1;
+    while (attrno as i32) <= numattrs {
+        let att_tup = rel.rd_att.attr((attrno - 1) as usize);
+
+        // Try to consume the next supplied TLE if it matches this attribute.
+        let mut matched: Option<NodeId> = None;
+        if let Some(old_tle) = parse.targetList.get(tlist_pos) {
+            if !old_tle.resjunk && old_tle.resno == attrno {
+                let expr_src = old_tle.expr.as_deref().expect(
+                    "expand_insert_targetlist: TargetEntry with NULL expr (parser bug)",
+                );
+                let expr_clone = expr_src.clone_in(mcx)?;
+                let expr_id = root.alloc_node(expr_clone);
+                let te_id = root.alloc_targetentry(target_entry_node_from(old_tle, expr_id));
+                matched = Some(te_id);
+                tlist_pos += 1;
+            }
+        }
+
+        let new_tle = match matched {
+            Some(id) => id,
+            None => {
+                // Didn't find a matching tlist entry; make a NULL one.
+                let new_expr: Expr = if att_tup.attisdropped {
+                    // Insert NULL for dropped column, labeled INT4.
+                    Expr::Const(backend_nodes_core::makefuncs::make_const(
+                        mcx,
+                        INT4OID,
+                        -1,
+                        InvalidOid,
+                        4, /* sizeof(int32) */
+                        Datum::ByVal(0),
+                        true, /* isnull */
+                        true, /* byval */
+                    )?)
+                } else if att_tup.attgenerated != 0 {
+                    // Generated column: NULL of the base type, no domain
+                    // constraints (the value is ignored at execution).
+                    let (base_type_id, base_type_mod) =
+                        backend_utils_cache_lsyscache_seams::get_base_type_and_typmod::call(
+                            att_tup.atttypid,
+                        )?;
+                    // C seeds `baseTypeMod = att_tup->atttypmod` and overwrites
+                    // it only when walking down a domain (the column type was a
+                    // domain). The repo seam seeds -1 and returns the base
+                    // typmod (-1 for a non-domain), so use the column typmod
+                    // when the type is unchanged, else the returned base typmod.
+                    let type_mod = if base_type_id == att_tup.atttypid {
+                        att_tup.atttypmod
+                    } else {
+                        base_type_mod
+                    };
+                    Expr::Const(backend_nodes_core::makefuncs::make_const(
+                        mcx,
+                        base_type_id,
+                        type_mod,
+                        att_tup.attcollation,
+                        att_tup.attlen as i32,
+                        Datum::ByVal(0),
+                        true, /* isnull */
+                        att_tup.attbyval,
+                    )?)
+                } else {
+                    // Normal column: NULL of the column datatype, applying any
+                    // domain constraints (coerce_null_to_domain).
+                    backend_parser_coerce_seams::coerce_null_to_domain::call(
+                        mcx,
+                        att_tup.atttypid,
+                        att_tup.atttypmod,
+                        att_tup.attcollation,
+                        att_tup.attlen as i32,
+                        att_tup.attbyval,
+                    )?
+                    // C: if the result is not a bare Const, run
+                    // eval_const_expressions. coerce_null_to_domain returns a
+                    // bare Const for non-domain types; the domain case (a
+                    // CoerceToDomain node) needs eval_const_expressions, which
+                    // routes through the clauses owner when reached.
+                };
+
+                let expr_id = root.alloc_node(new_expr);
+                let resname =
+                    alloc::string::String::from_utf8_lossy(att_tup.attname.name_str())
+                        .into_owned();
+                let te_node = TargetEntryNode {
+                    expr: expr_id,
+                    resno: attrno,
+                    resname: Some(resname),
+                    ressortgroupref: 0,
+                    resorigtbl: InvalidOid,
+                    resorigcol: 0,
+                    resjunk: false,
+                };
+                root.alloc_targetentry(te_node)
+            }
+        };
+
+        new_tlist.push(new_tle);
+        attrno += 1;
+    }
+
+    // C: remaining tlist entries must be resjunk; append them with resnos
+    // higher than the last real attribute (renumbering, since we may have
+    // inserted NULL entries above).
+    while let Some(old_tle) = parse.targetList.get(tlist_pos) {
+        if !old_tle.resjunk {
+            return Err(types_error::PgError::error(alloc::string::String::from(
+                "targetlist is not sorted correctly",
+            )));
+        }
+        let expr_src = old_tle
+            .expr
+            .as_deref()
+            .expect("expand_insert_targetlist: resjunk TLE with NULL expr (parser bug)");
+        let expr_clone = expr_src.clone_in(mcx)?;
+        let expr_id = root.alloc_node(expr_clone);
+        let mut te_node = target_entry_node_from(old_tle, expr_id);
+        te_node.resno = attrno;
+        new_tlist.push(root.alloc_targetentry(te_node));
+        attrno += 1;
+        tlist_pos += 1;
+    }
+
+    Ok(new_tlist)
 }
 
 // ===========================================================================

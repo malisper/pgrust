@@ -2704,6 +2704,7 @@ pub fn init_seams() {
     s::coerce_type::set(seam_coerce_type);
     s::find_coercion_pathway_explicit::set(seam_find_coercion_pathway_explicit);
     s::select_common_typmod::set(select_common_typmod);
+    s::coerce_null_to_domain::set(coerce_null_to_domain);
 }
 
 /// `coerce_type(pstate, node, ...)` (parse_coerce.c) for the parse_func.c

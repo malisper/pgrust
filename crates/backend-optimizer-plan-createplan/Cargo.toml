@@ -13,6 +13,7 @@ mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
+types-tuple = { path = "../types-tuple" }
 types-pathnodes = { path = "../types-pathnodes" }
 # expression_tree_mutator over the arena Expr tree (replace_nestloop_params).
 backend-nodes-core = { path = "../backend-nodes-core" }

@@ -11796,6 +11796,7 @@ dependencies = [
  "types-nodes",
  "types-pathnodes",
  "types-scan",
+ "types-tuple",
 ]
 
 [[package]]
@@ -12133,14 +12134,20 @@ dependencies = [
 name = "backend-optimizer-prep-preptlist"
 version = "0.0.0"
 dependencies = [
+ "backend-access-table-table",
+ "backend-nodes-core",
  "backend-optimizer-prep-preptlist-seams",
  "backend-optimizer-util-restrictinfo-seams",
+ "backend-parser-coerce-seams",
+ "backend-utils-cache-lsyscache-seams",
  "mcx",
  "seam-core",
  "types-core",
  "types-error",
  "types-nodes",
  "types-pathnodes",
+ "types-rel",
+ "types-tuple",
 ]
 
 [[package]]
@@ -12713,6 +12720,7 @@ dependencies = [
 name = "backend-parser-coerce-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
