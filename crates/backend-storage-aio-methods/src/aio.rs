@@ -177,7 +177,7 @@ pub fn pgaio_io_release_resowner(ioh_node: u64, on_error: bool) {
 
     let owner = h.data().resowner.expect("resowner set");
     backend_storage_aio_completion_seams::resource_owner_forget_aio_handle::call(
-        owner.0,
+        owner,
         ioh_index as u32,
     )
     .expect("ResourceOwnerForgetAioHandle");
@@ -282,7 +282,7 @@ fn pgaio_io_resowner_register(ioh_index: usize, resowner: ResourceOwnerId) -> Pg
     debug_assert!(h.data().resowner.is_none());
 
     backend_storage_aio_completion_seams::resource_owner_remember_aio_handle::call(
-        resowner.0,
+        resowner,
         ioh_index as u32,
     )?;
     h.data().resowner = Some(resowner);
@@ -534,7 +534,7 @@ fn pgaio_io_reclaim(ioh_index: usize) -> PgResult<()> {
         let owner = h.data().resowner;
         if let Some(owner) = owner {
             backend_storage_aio_completion_seams::resource_owner_forget_aio_handle::call(
-                owner.0,
+                owner,
                 ioh_index as u32,
             )?;
             h.data().resowner = None;
