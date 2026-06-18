@@ -401,7 +401,7 @@ pub(crate) fn replace_nestloop_params_mutator(
         return node;
     }
     // if (IsA(node, Var))
-    if let Expr::Var(var) = &node {
+    if let Some(var) = node.as_var() {
         // Upper-level Vars should be long gone at this point.
         debug_assert_eq!(var.varlevelsup, 0);
         // If not to be replaced, we can just return the Var unmodified.
@@ -420,7 +420,7 @@ pub(crate) fn replace_nestloop_params_mutator(
         }
     }
     // if (IsA(node, PlaceHolderVar))
-    if let Expr::PlaceHolderVar(phv) = &node {
+    if let Some(phv) = node.as_placeholdervar() {
         // Upper-level PlaceHolderVars should be long gone at this point.
         debug_assert_eq!(phv.phlevelsup, 0);
 
@@ -644,7 +644,7 @@ fn use_physical_tlist(root: &PlannerInfo, path: PathId, flags: i32) -> bool {
             let mut sortgroupatts: types_pathnodes::Relids = None;
             for (i, &expr_id) in target.exprs.iter().enumerate() {
                 if target.sortgrouprefs[i] != 0 {
-                    if let Expr::Var(var) = root.node(expr_id) {
+                    if let Some(var) = root.node(expr_id).as_var() {
                         let attno = var.varattno as i32 - FIRST_LOW_INVALID_HEAP_ATTRIBUTE_NUMBER;
                         if relnode::relids_is_member::call(attno, &sortgroupatts) {
                             return false;
@@ -4747,14 +4747,14 @@ fn create_hashjoin_plan<'mcx>(
     let mut skew_column: AttrNumber = 0;
     let mut skew_inherit = false;
     if hashclauses.len() == 1 {
-        if let Expr::OpExpr(clause) = &hashclauses[0] {
+        if let Some(clause) = hashclauses[0].as_opexpr() {
             // node = (Node *) linitial(clause->args);
             if let Some(arg0) = clause.args.first() {
                 let node = match arg0 {
                     Expr::RelabelType(rt) => rt.arg.as_deref().unwrap_or(arg0),
                     other => other,
                 };
-                if let Expr::Var(var) = node {
+                if let Some(var) = node.as_var() {
                     let rte = planner_rt_fetch(run, root, var.varno as u32);
                     if rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_RELATION {
                         skew_table = rte.relid;
