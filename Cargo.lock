@@ -20409,6 +20409,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-fmgr",
+ "types-format-type",
  "types-hash",
  "types-namespace",
  "types-nodes",

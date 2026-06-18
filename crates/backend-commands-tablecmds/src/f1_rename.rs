@@ -88,7 +88,7 @@ pub fn range_var_callback_owns_relation(
 
     let relnamespace = lsyscache_seam::get_rel_namespace::call(rel_id)?;
     if !ts_globals_seam::allowSystemTableMods::call()?
-        && seam::is_system_class_relid::call(rel_id, relkind, relnamespace)?
+        && backend_catalog_catalog::IsSystemClassByNamespace(rel_id, relnamespace)
     {
         return ereport(ERROR)
             .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)

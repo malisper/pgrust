@@ -486,13 +486,10 @@ seam_core::seam!(
     /// `SearchSysCache1(RELOID, relid)` projection of the fields the DROP /
     /// TRUNCATE callbacks read; `Ok(None)` for a concurrently-dropped relation
     /// (`!HeapTupleIsValid`). `Err` carries any cache `ereport(ERROR)`.
-    pub fn get_pg_class_drop_info(relid: Oid) -> PgResult<Option<PgClassDropInfo>>
-);
-
-seam_core::seam!(
-    /// `IsSystemClass(relid, classform)` (catalog.c): is this relation a system
-    /// catalog (incl. toast, shared, information_schema)?
-    pub fn is_system_class_relid(relid: Oid, relkind: u8, relnamespace: Oid) -> PgResult<bool>
+    pub fn get_pg_class_drop_info(
+        mcx: mcx::Mcx<'_>,
+        relid: Oid,
+    ) -> PgResult<Option<PgClassDropInfo>>
 );
 
 seam_core::seam!(

@@ -58,6 +58,7 @@ pub fn init_seams() {
     seam::get_attribute_compression::set(create::get_attribute_compression);
 
     seam::remove_relations::set(drop::remove_relations);
+    seam::get_pg_class_drop_info::set(drop::get_pg_class_drop_info);
 
     seam::execute_truncate::set(truncate::execute_truncate);
 
