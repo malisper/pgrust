@@ -1438,6 +1438,7 @@ fn put_index_desc<'mcx>(estate: &mut EStateData<'mcx>, rri: RriId, i: usize, rel
 /// it).
 pub fn init_seams() {
     inward::get_relation_identity_or_pk::set(seam_get_relation_identity_or_pk);
+    inward::check_cmd_replica_identity::set(CheckCmdReplicaIdentity);
 }
 
 fn seam_get_relation_identity_or_pk(rel: &Relation<'_>) -> PgResult<Oid> {

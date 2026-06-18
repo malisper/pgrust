@@ -79,6 +79,7 @@ use backend_nodes_core_seams as bms_seams;
 use backend_utils_cache_relcache_seams as relcache;
 use backend_executor_execJunk as execJunk;
 use backend_executor_execMain_seams as seams;
+use backend_executor_execReplication_seams as execReplication_seams;
 use backend_executor_execProcnode_seams as procnode;
 use backend_executor_execUtils as execUtils;
 use backend_executor_execUtils_seams as execUtils_seams;
@@ -1150,8 +1151,188 @@ fn lsyscache_get_rel_name(relid: Oid) -> PgResult<Option<alloc::string::String>>
 /// setup, …) stays uninstalled (mirror-and-panic) until the matching #166/#167
 /// family lands; the unit is CATALOG `needs-decomp`, so the recurrence guard
 /// exempts the unfinished surface.
+/// `InitResultRelInfo(resultRelInfo, resultRelationDesc, resultRelationIndex,
+/// partition_root_rri, instrument_options)` (execMain.c) — fill in a
+/// `ResultRelInfo` for the given target relation.
+///
+/// The owned model passes the caller-allocated `ResultRelInfo` (already in the
+/// EState pool) by `&mut`, and the relation as an alias handle stored into
+/// `ri_RelationDesc`. The C `MemSet(0)` is mirrored by overwriting every
+/// modeled field (the trimmed `ResultRelInfo` only carries the subset the
+/// ports consume).
+/// `ereport(ERROR)` for an unported neighbor/field on the result-relation
+/// init path.
+fn unported(what: &str) -> types_error::PgError {
+    types_error::PgError::error(alloc::format!(
+        "backend-executor-execMain: unported neighbor/field: {what}"
+    ))
+}
+
+#[allow(non_snake_case)]
+fn InitResultRelInfo<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    result_rel_info: &mut types_nodes::ResultRelInfo<'mcx>,
+    relation: types_rel::Relation<'mcx>,
+    result_relation_index: types_core::primitive::Index,
+    partition_root_rri: Option<types_nodes::RriId>,
+    instrument_options: i32,
+) -> PgResult<()> {
+    let _ = (mcx, instrument_options);
+
+    // MemSet(resultRelInfo, 0, sizeof(ResultRelInfo)); — start from the
+    // zero-initialized shape, then set the fields below.
+    *result_rel_info = types_nodes::ResultRelInfo::default();
+
+    // resultRelInfo->ri_RangeTableIndex = resultRelationIndex;
+    result_rel_info.ri_RangeTableIndex = result_relation_index;
+
+    // resultRelInfo->ri_needLockTagTuple = IsInplaceUpdateRelation(resultRelationDesc);
+    result_rel_info.ri_needLockTagTuple =
+        backend_catalog_catalog::IsInplaceUpdateRelation(&relation);
+
+    // resultRelInfo->ri_TrigDesc = CopyTriggerDesc(resultRelationDesc->trigdesc);
+    // and (if non-NULL) palloc0 the per-trigger FmgrInfo / ExprState / Instr
+    // arrays. The relation has no triggers on the INSERT-into-plain-table path
+    // (rd_trigdesc == NULL); the trigger-carrying case needs CopyTriggerDesc
+    // (trigger.c) plus the trimmed-away ri_TrigFunctions/ri_TrigWhenExprs/
+    // ri_TrigInstrument arrays, which are not modeled here.
+    if relation.rd_trigdesc.is_some() {
+        return Err(unported(
+            "InitResultRelInfo: ResultRelInfo for a relation with triggers \
+             (CopyTriggerDesc + ri_TrigFunctions/ri_TrigWhenExprs are not \
+             carried on the trimmed ResultRelInfo)",
+        ));
+    }
+    // else: ri_TrigDesc / ri_has_trigdesc / ri_trig_* stay at their default
+    // (None / false) — the C NULL trigger desc.
+
+    // if (relkind == RELKIND_FOREIGN_TABLE) ri_FdwRoutine = GetFdwRoutineForRelation(...);
+    // The FDW routine vtable is not carried on the trimmed ResultRelInfo;
+    // ri_has_fdw_routine stays false. A foreign-table target is rejected in
+    // CheckValidResultRel below, so this only matters there.
+
+    // resultRelInfo->ri_RootResultRelInfo = partition_root_rri;
+    result_rel_info.ri_RootResultRelInfo = partition_root_rri;
+
+    // The remaining "set later if needed" fields (ri_RowIdAttNo, ri_projectNew,
+    // ri_onConflict, ri_MergeActions[*], …) are already at their default
+    // (zero / None / NIL) from the MemSet above.
+
+    // ri_RelationDesc holds an alias of the relation es_relations owns (no
+    // release authority).
+    result_rel_info.ri_RelationDesc = Some(relation.alias());
+    // The Relation `relation` is itself an alias handed in by the caller
+    // (ExecGetRangeTableRelation / partition routing); drop it here, the alias
+    // stored above keeps the shared data reachable.
+    drop(relation);
+
+    Ok(())
+}
+
+/// `CheckValidResultRel(resultRelInfo, operation, onConflictAction,
+/// mergeActions)` (execMain.c) — verify the result relation is a valid target
+/// for the command.
+///
+/// The seam drops `mergeActions` (the partition-routing / nodeModifyTable
+/// callers pass NIL on the live paths). MERGE-action validation and the
+/// view / materialized-view / foreign-table arms are gated as unported (they
+/// need owners — `view_has_instead_trigger`, the FDW vtable — that are off the
+/// INSERT-into-table path).
+#[allow(non_snake_case)]
+fn CheckValidResultRel<'mcx>(
+    estate: &mut types_nodes::EStateData<'mcx>,
+    result_rel_info: types_nodes::RriId,
+    operation: CmdType,
+    on_conflict_action: types_nodes::nodes::OnConflictAction,
+) -> PgResult<()> {
+    use types_tuple::access::{
+        RELKIND_FOREIGN_TABLE, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
+        RELKIND_SEQUENCE, RELKIND_TOASTVALUE, RELKIND_VIEW,
+    };
+
+    let mcx = estate.es_query_cxt;
+    let rri = estate.result_rel(result_rel_info);
+    let result_rel = rri
+        .ri_RelationDesc
+        .as_ref()
+        .expect("CheckValidResultRel: ResultRelInfo has no relation")
+        .alias();
+
+    // Assert(ri_needLockTagTuple == IsInplaceUpdateRelation(resultRel)); —
+    // InitResultRelInfo set it, so this is an internal consistency check only.
+    debug_assert_eq!(
+        rri.ri_needLockTagTuple,
+        backend_catalog_catalog::IsInplaceUpdateRelation(&result_rel)
+    );
+
+    let relname = result_rel.name().to_string();
+    let relkind = result_rel.rd_rel.relkind;
+
+    if relkind == RELKIND_RELATION || relkind == RELKIND_PARTITIONED_TABLE {
+        // For MERGE, check each action; for others, check the operation itself.
+        if operation == CmdType::CMD_MERGE {
+            // mergeActions is always NIL at the live call sites (the seam drops
+            // it). A non-empty list would require iterating MergeAction nodes.
+            return Err(unported(
+                "CheckValidResultRel: CMD_MERGE replica-identity check \
+                 (mergeActions are not carried on the seam)",
+            ));
+        } else {
+            execReplication_seams::check_cmd_replica_identity::call(mcx, &result_rel, operation)?;
+        }
+
+        // INSERT ON CONFLICT DO UPDATE additionally requires UPDATE support.
+        if on_conflict_action == types_nodes::nodes::ONCONFLICT_UPDATE {
+            execReplication_seams::check_cmd_replica_identity::call(
+                mcx,
+                &result_rel,
+                CmdType::CMD_UPDATE,
+            )?;
+        }
+        Ok(())
+    } else if relkind == RELKIND_SEQUENCE {
+        Err(types_error::PgError::error(alloc::format!(
+            "cannot change sequence \"{relname}\""
+        ))
+        .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE))
+    } else if relkind == RELKIND_TOASTVALUE {
+        Err(types_error::PgError::error(alloc::format!(
+            "cannot change TOAST relation \"{relname}\""
+        ))
+        .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE))
+    } else if relkind == RELKIND_VIEW {
+        // Okay only with a suitable INSTEAD OF trigger (view_has_instead_trigger,
+        // rewriteHandler.c); else error_view_not_updatable. Both owners are off
+        // the INSERT-into-table path.
+        Err(unported(
+            "CheckValidResultRel: writable-view target \
+             (view_has_instead_trigger is not wired here)",
+        ))
+    } else if relkind == RELKIND_MATVIEW {
+        // Okay only when MatViewIncrementalMaintenanceIsEnabled().
+        Err(unported(
+            "CheckValidResultRel: materialized-view target \
+             (MatViewIncrementalMaintenanceIsEnabled is not wired here)",
+        ))
+    } else if relkind == RELKIND_FOREIGN_TABLE {
+        // Okay only if the FDW supports the operation; the FDW routine vtable is
+        // not carried on the trimmed ResultRelInfo.
+        Err(unported(
+            "CheckValidResultRel: foreign-table target \
+             (FdwRoutine vtable is not carried on ResultRelInfo)",
+        ))
+    } else {
+        Err(types_error::PgError::error(alloc::format!(
+            "cannot change relation \"{relname}\""
+        ))
+        .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE))
+    }
+}
+
 pub fn init_seams() {
     seams::exec_check_permissions_select::set(exec_check_permissions_select);
+    seams::init_result_rel_info::set(InitResultRelInfo);
+    seams::check_valid_result_rel::set(CheckValidResultRel);
     seams::executor_run::set(ExecutorRun);
     seams::executor_finish::set(ExecutorFinish);
     seams::executor_end::set(ExecutorEnd);

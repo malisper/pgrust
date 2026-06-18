@@ -8772,6 +8772,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-transam-xact-seams",
  "backend-catalog-aclchk-seams",
+ "backend-catalog-catalog",
  "backend-catalog-objectaddress-seams",
  "backend-executor-execAmi",
  "backend-executor-execAmi-seams",
@@ -8779,6 +8780,7 @@ dependencies = [
  "backend-executor-execMain-seams",
  "backend-executor-execParallel-support-seams",
  "backend-executor-execProcnode-seams",
+ "backend-executor-execReplication-seams",
  "backend-executor-execUtils",
  "backend-executor-execUtils-seams",
  "backend-nodes-core-seams",
@@ -8793,6 +8795,7 @@ dependencies = [
  "types-error",
  "types-execparallel",
  "types-nodes",
+ "types-rel",
  "types-scan",
  "types-snapshot",
  "types-tableam",
@@ -9054,9 +9057,11 @@ dependencies = [
 name = "backend-executor-execReplication-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
+ "types-nodes",
  "types-rel",
 ]
 

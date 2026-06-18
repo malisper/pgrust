@@ -244,6 +244,14 @@ pub fn init_seams() {
     backend_executor_execUtils_seams::exec_assign_scan_projection_info_with_varno::set(
         ExecAssignScanProjectionInfoWithVarno,
     );
+
+    // `ExecInitResultRelation(estate, resultRelInfo, rti)` (execUtils.c). The
+    // body lives here; `is_parallel_worker` resolves the C `IsParallelWorker()`
+    // global — false in the single-backend / non-parallel-leader case (matching
+    // the `exec_open_scan_relation` install above).
+    execMain_seams::exec_init_result_relation::set(|estate, result_rel_info, rti| {
+        ExecInitResultRelation(estate, result_rel_info, rti, false)
+    });
 }
 
 // ===========================================================================
@@ -1109,18 +1117,21 @@ pub fn ExecGetRangeTableRelation<'mcx>(
 /// `estate->es_result_relations` array such that it can be accessed later
 /// using the RT index.
 ///
-/// The C takes a caller-allocated `ResultRelInfo *`; the owned model
-/// allocates the node in the EState's pool and returns its id.
+/// The C takes a caller-allocated `ResultRelInfo *`; the owned model passes
+/// the caller-allocated pool id (`result_rel_info`) and fills it in place,
+/// matching how `ExecInitModifyTable` first `makeNode(ResultRelInfo)`s
+/// (`add_result_rel`) and then calls `ExecInitResultRelation`.
 pub fn ExecInitResultRelation(
     estate: &mut EStateData<'_>,
+    result_rel_info: RriId,
     rti: Index,
     is_parallel_worker: bool,
-) -> PgResult<RriId> {
+) -> PgResult<()> {
     let result_relation_desc = ExecGetRangeTableRelation(estate, rti, true, is_parallel_worker)?;
 
     // InitResultRelInfo(resultRelInfo, resultRelationDesc, rti, NULL,
     //                   estate->es_instrument);
-    let rri = estate.add_result_rel(Default::default())?;
+    let rri = result_rel_info;
     let mcx = estate.es_query_cxt;
     let instrument = estate.es_instrument;
     execMain_seams::init_result_rel_info::call(
@@ -1149,7 +1160,7 @@ pub fn ExecInitResultRelation(
         .map_err(|_| mcx.oom(core::mem::size_of::<RriId>()))?;
     estate.es_opened_result_relations.push(rri);
 
-    Ok(rri)
+    Ok(())
 }
 
 /// `UpdateChangedParamSet` — add changed parameters to a plan node's

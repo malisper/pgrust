@@ -15,6 +15,7 @@ types-core = { path = "../types-core" }
 types-execparallel = { path = "../types-execparallel" }
 backend-executor-execParallel-support-seams = { path = "../backend-executor-execParallel-support-seams" }
 types-nodes = { path = "../types-nodes" }
+types-rel = { path = "../types-rel" }
 types-acl = { path = "../types-acl" }
 types-tuple = { path = "../types-tuple" }
 types-snapshot = { path = "../types-snapshot" }
@@ -59,3 +60,8 @@ backend-executor-execAmi = { path = "../backend-executor-execAmi" }
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
 # ExecGetAllUpdatedCols / bms_overlap for ExecUpdateLockMode.
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
+# InitResultRelInfo: IsInplaceUpdateRelation (catalog.c). catalog-catalog
+# depends on no exec(-Main/-Utils/-Replication) crate, so this is acyclic.
+backend-catalog-catalog = { path = "../backend-catalog-catalog" }
+# CheckValidResultRel: CheckCmdReplicaIdentity (execReplication.c) via its seam.
+backend-executor-execReplication-seams = { path = "../backend-executor-execReplication-seams" }

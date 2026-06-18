@@ -13,3 +13,17 @@ seam_core::seam!(
         rel: &types_rel::Relation<'_>,
     ) -> types_error::PgResult<types_core::Oid>
 );
+
+seam_core::seam!(
+    /// `CheckCmdReplicaIdentity(rel, cmd)` (execReplication.c): verify the
+    /// relation has a suitable replica identity for the command (the publication
+    /// row-filter / column-list / REPLICA IDENTITY checks for `UPDATE`/`DELETE`;
+    /// a no-op for `INSERT` and for partitioned tables). Consumed by
+    /// `CheckValidResultRel` (execMain.c). The relcache publication-desc build
+    /// can `ereport(ERROR)`, carried on `Err`.
+    pub fn check_cmd_replica_identity<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        cmd: types_nodes::nodes::CmdType,
+    ) -> types_error::PgResult<()>
+);
