@@ -48,6 +48,9 @@ use backend_optimizer_util_relnode_seams as bms;
 use seam::{BMS_Comparison, PathKeysComparison};
 
 pub mod create;
+pub mod import;
+
+pub use import::import_path_from_subroot;
 
 /// `STD_FUZZ_FACTOR` (pathnode.c:50) — the normal fuzz factor for
 /// [`compare_path_costs_fuzzily`]: `1.0 + delta`, `delta` = 1% considered

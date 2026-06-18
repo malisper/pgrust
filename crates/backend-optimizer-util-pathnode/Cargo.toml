@@ -22,3 +22,6 @@ backend-optimizer-path-costsize-seams = { path = "../backend-optimizer-path-cost
 # apply_projection_to_path (pathnode.c) compares two PathTarget tlists with
 # equal() (equalfuncs.c). Leaf seam crate — no cycle.
 backend-nodes-equalfuncs-seams = { path = "../backend-nodes-equalfuncs-seams" }
+
+[dev-dependencies]
+types-tuple = { path = "../types-tuple" }

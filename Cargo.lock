@@ -12578,6 +12578,7 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-pathnodes",
+ "types-tuple",
 ]
 
 [[package]]
