@@ -50,7 +50,6 @@ use types_error::{
 use types_nodes::bitmapset::Bitmapset;
 use types_nodes::parsenodes::DropBehavior;
 use types_nodes::nodes::{Node, NodePtr};
-use types_nodes::primnodes::Expr;
 use types_rel::RelationData;
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_storage::lock::{AccessExclusiveLock, AccessShareLock, NoLock, RowExclusiveLock};
@@ -1959,7 +1958,7 @@ pub fn check_functional_grouping(
     /* Identify all the rel's columns that appear in grouping_columns */
     let mut groupbyattnos: Option<PgBox<Bitmapset>> = None;
     for gvar in grouping_columns {
-        if let Node::Expr(Expr::Var(gvar)) = gvar {
+        if let Some(gvar) = gvar.as_var() {
             if gvar.varno == varno as i32 && gvar.varlevelsup == varlevelsup {
                 groupbyattnos = Some(bms_add_member(
                     mcx,
