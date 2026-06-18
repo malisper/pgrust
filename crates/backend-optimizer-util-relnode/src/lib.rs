@@ -2548,6 +2548,12 @@ pub fn init_seams() {
 
     eq_ext::find_childrel_parents::set(seam_find_childrel_parents);
 
+    // relnode OWNS find_base_rel_ignore_join; install it into the joininfo-ext
+    // seam the joininfo unit consumes (get_relation_foreign_keys's FK matching).
+    backend_optimizer_util_joininfo_ext_seams::find_base_rel_ignore_join::set(
+        find_base_rel_ignore_join,
+    );
+
     /* relnode-seams bitmapset ops relnode owns but does not itself consume. */
     bms::relids_next_member::set(bms_next_member);
     bms::relids_get_singleton_member::set(bms_get_singleton_member);
