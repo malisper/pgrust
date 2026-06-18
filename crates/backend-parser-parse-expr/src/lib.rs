@@ -277,6 +277,14 @@ pub fn transformExprRecurse<'mcx>(
         // children; we transform+coerce each and rebuild a cooked BoolExpr.
         Node::BoolExpr(a) => transformBoolExpr(pstate, a)?,
 
+        // T_NullTest → transform n->arg, set argisrow, return the cooked node.
+        // The raw grammar emits a `Node::NullTest` carrying an untransformed
+        // `NodePtr` arg (distinct from an already-analyzed `Expr::NullTest`).
+        Node::NullTest(n) => transformNullTestRaw(pstate, n)?,
+
+        // T_BooleanTest → transformBooleanTest(pstate, (BooleanTest *) expr).
+        Node::BooleanTest(b) => transformBooleanTestRaw(pstate, b)?,
+
         Node::FuncCall(f) => transformFuncCall(pstate, f)?,
         Node::MultiAssignRef(m) => transformMultiAssignRef(pstate, m)?,
 
@@ -1173,6 +1181,57 @@ fn transformBooleanTest<'mcx>(
     let arg = coerce::coerce_to_boolean::call(pstate, arg, clausename)?;
     b.arg = Some(Box::new(arg));
     Ok(Expr::BooleanTest(b))
+}
+
+/// `case T_BooleanTest:` in `transformExprRecurse` (parse_expr.c:297). The raw
+/// grammar emits a `Node::BooleanTest` carrying an untransformed `NodePtr` arg
+/// (`rawexprnodes::BooleanTest`); transform/coerce the arg and rebuild the
+/// cooked `primnodes::BooleanTest`. Same body as [`transformBooleanTest`], over
+/// the raw node shape.
+fn transformBooleanTestRaw<'mcx>(
+    pstate: &mut ParseState<'mcx>,
+    b: types_nodes::rawexprnodes::BooleanTest<'mcx>,
+) -> PgResult<Expr> {
+    let clausename = match b.booltesttype {
+        BoolTestType::IS_TRUE => "IS TRUE",
+        BoolTestType::IS_NOT_TRUE => "IS NOT TRUE",
+        BoolTestType::IS_FALSE => "IS FALSE",
+        BoolTestType::IS_NOT_FALSE => "IS NOT FALSE",
+        BoolTestType::IS_UNKNOWN => "IS UNKNOWN",
+        BoolTestType::IS_NOT_UNKNOWN => "IS NOT UNKNOWN",
+    };
+
+    // b->arg = (Expr *) transformExprRecurse(pstate, (Node *) b->arg);
+    let arg = transformExprRecurse(pstate, boxed_node(b.arg))?
+        .ok_or_else(|| PgError::error("transformBooleanTest: BooleanTest argument is NULL"))?;
+    // b->arg = (Expr *) coerce_to_boolean(pstate, (Node *) b->arg, clausename);
+    let arg = coerce::coerce_to_boolean::call(pstate, arg, clausename)?;
+    Ok(Expr::BooleanTest(BooleanTest {
+        arg: Some(Box::new(arg)),
+        booltesttype: b.booltesttype,
+        location: b.location,
+    }))
+}
+
+/// `case T_NullTest:` in `transformExprRecurse` (parse_expr.c:286). The raw
+/// grammar emits a `Node::NullTest` carrying an untransformed `NodePtr` arg
+/// (`rawexprnodes::NullTest`); transform the arg (no coercion — the argument can
+/// be any type), set `argisrow` from the arg's type, and rebuild the cooked
+/// `primnodes::NullTest`.
+fn transformNullTestRaw<'mcx>(
+    pstate: &mut ParseState<'mcx>,
+    n: types_nodes::rawexprnodes::NullTest<'mcx>,
+) -> PgResult<Expr> {
+    // n->arg = (Expr *) transformExprRecurse(pstate, (Node *) n->arg);
+    let arg = transformExprRecurse(pstate, boxed_node(n.arg))?;
+    // n->argisrow = type_is_rowtype(exprType((Node *) n->arg));
+    let argisrow = lsyscache::type_is_rowtype::call(expr_type(arg.as_ref())?)?;
+    Ok(Expr::NullTest(NullTest {
+        arg: arg.map(Box::new),
+        nulltesttype: n.nulltesttype,
+        argisrow,
+        location: n.location,
+    }))
 }
 
 // ===========================================================================
