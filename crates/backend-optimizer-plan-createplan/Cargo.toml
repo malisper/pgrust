@@ -52,3 +52,7 @@ backend-optimizer-path-costsize-seams = { path = "../backend-optimizer-path-cost
 # make_partition_pruneinfo (partprune.c) — ordered/partitioned Append run-time
 # pruning; keystone-blocked owner, reached only for partitioned rels w/ prunequal.
 backend-partitioning-partprune-seams = { path = "../backend-partitioning-partprune-seams" }
+# predicate_implied_by (predtest.c) — create_indexscan_plan qpqual proof.
+backend-optimizer-util-predtest-seams = { path = "../backend-optimizer-util-predtest-seams" }
+# ScanDirection enum (IndexScan/IndexOnlyScan indexorderdir plan-node field).
+types-scan = { path = "../types-scan" }

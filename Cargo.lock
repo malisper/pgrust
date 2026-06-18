@@ -11712,6 +11712,7 @@ dependencies = [
  "backend-optimizer-util-pathnode-seams",
  "backend-optimizer-util-placeholder-seams",
  "backend-optimizer-util-plancat",
+ "backend-optimizer-util-predtest-seams",
  "backend-optimizer-util-relnode-seams",
  "backend-optimizer-util-vars",
  "backend-partitioning-partprune-seams",
@@ -11723,6 +11724,7 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-pathnodes",
+ "types-scan",
 ]
 
 [[package]]

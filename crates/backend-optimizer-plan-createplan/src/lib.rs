@@ -76,6 +76,8 @@ use types_nodes::nodeindexscan::{SubqueryScan, SubqueryScanStatus, TidScan};
 use types_nodes::nodenamedtuplestorescan::NamedTuplestoreScan;
 use types_nodes::nodesamplescan::{SampleScan, TableSampleClause};
 use types_nodes::nodeseqscan::SeqScan;
+use types_nodes::nodeindexscan::IndexScan;
+use types_nodes::nodeindexonlyscan::IndexOnlyScan;
 use types_nodes::nodetidrangescan::TidRangeScan;
 use types_nodes::nodevaluesscan::ValuesScan;
 use types_nodes::nodeworktablescan::WorkTableScan;
@@ -98,7 +100,7 @@ use types_nodes::rawnodes::RangeTblFunction;
 use mcx::PgString;
 use types_pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
 use types_pathnodes::{
-    NodeId, Path, PathId, PathKey, PathNode, PathTarget, PlannerInfo, Relids, RinfoId,
+    IndexOptInfo, NodeId, Path, PathId, PathKey, PathNode, PathTarget, PlannerInfo, Relids, RinfoId,
     RELOPT_BASEREL, RELOPT_OTHER_MEMBER_REL, RTE_RELATION,
 };
 use types_core::primitive::{AttrNumber, InvalidOid, Oid};
@@ -126,6 +128,15 @@ use backend_partitioning_partprune_seams as partprune;
 use backend_optimizer_path_equivclass::{find_computable_ec_member, find_ec_member_matching_expr};
 use backend_utils_cache_lsyscache_seams as lsyscache;
 use backend_utils_misc_guc_tables::vars;
+// fix_indexqual_operand (createplan.c, homed in var.c crate) — index-column Var
+// substitution for index quals.
+use backend_optimizer_util_vars::fix_indexqual_operand;
+// is_redundant_with_indexclauses (equivclass.c) — the real impl, over &[IndexClause].
+use backend_optimizer_path_equivclass::is_redundant_with_indexclauses;
+// predicate_implied_by (predtest.c) — prove a scan clause is implied by indexquals.
+use backend_optimizer_util_predtest_seams as predtest;
+// contain_mutable_functions (clauses.c) — guard the predicate_implied_by check.
+use backend_optimizer_util_clauses::grounded::contain_mutable_functions;
 
 // ---------------------------------------------------------------------------
 // RTEKind dispatch keys used by use_physical_tlist (parsenodes.h enum values).
@@ -1235,6 +1246,493 @@ fn create_seqscan_plan<'mcx>(
     copy_generic_path_info(&mut scan_plan.scan.plan, root.path(best_path).base());
 
     Ok(Node::SeqScan(scan_plan))
+}
+
+// ---------------------------------------------------------------------------
+// fix_indexqual_clause / fix_indexqual_references / fix_indexorderby_references
+// (createplan.c ~5121-5260)
+// ---------------------------------------------------------------------------
+
+/// `fix_indexqual_clause(root, index, indexcol, clause, indexcolnos)`
+/// (createplan.c) — convert a single indexqual clause to the form needed by the
+/// executor: replace nestloop params (which also copies the clause, so it's safe
+/// to mutate in place) and replace the index key variable(s)/expression(s) with
+/// index `Var` nodes.
+///
+/// `clause` is an owned `Expr` (the C `Node *`; here resolved from the
+/// `RestrictInfo->clause` arena handle before the call). The mutation matches
+/// each handled node shape (`OpExpr`/`RowCompareExpr`/`ScalarArrayOpExpr`/
+/// `NullTest`).
+fn fix_indexqual_clause(
+    mcx: Mcx<'_>,
+    root: &mut PlannerInfo,
+    index: &IndexOptInfo,
+    indexcol: i32,
+    clause: Expr,
+    indexcolnos: &[AttrNumber],
+) -> PgResult<Expr> {
+    // Replace any outer-relation variables with nestloop params. This also
+    // makes a copy of the clause, so it's safe to modify it in place below.
+    let mut err: Option<PgError> = None;
+    let mut clause = replace_nestloop_params_expr(mcx, root, clause, &mut err);
+    if let Some(e) = err {
+        return Err(e);
+    }
+
+    match &mut clause {
+        Expr::OpExpr(op) => {
+            // Replace the indexkey expression with an index Var.
+            let arg0 = op.args.remove(0);
+            let fixed = fix_indexqual_operand(root, arg0, index, indexcol)?;
+            op.args.insert(0, fixed);
+        }
+        Expr::RowCompareExpr(rc) => {
+            // Replace the indexkey expressions with index Vars.
+            debug_assert_eq!(rc.largs.len(), indexcolnos.len());
+            let largs = core::mem::take(&mut rc.largs);
+            let mut new_largs = Vec::with_capacity(largs.len());
+            for (arg, &col) in largs.into_iter().zip(indexcolnos.iter()) {
+                new_largs.push(fix_indexqual_operand(root, arg, index, col as i32)?);
+            }
+            rc.largs = new_largs;
+        }
+        Expr::ScalarArrayOpExpr(saop) => {
+            // Replace the indexkey expression with an index Var.
+            let arg0 = saop.args.remove(0);
+            let fixed = fix_indexqual_operand(root, arg0, index, indexcol)?;
+            saop.args.insert(0, fixed);
+        }
+        Expr::NullTest(nt) => {
+            // Replace the indexkey expression with an index Var.
+            let arg = *nt
+                .arg
+                .take()
+                .expect("fix_indexqual_clause: NullTest.arg must be set");
+            let fixed = fix_indexqual_operand(root, arg, index, indexcol)?;
+            nt.arg = Some(alloc::boxed::Box::new(fixed));
+        }
+        _ => return Err(PgError::error("unsupported indexqual type")),
+    }
+
+    Ok(clause)
+}
+
+/// `fix_indexqual_references(root, index_path, &stripped, &fixed)` (createplan.c)
+/// — extract the index qual expressions (stripped of RestrictInfos) from the
+/// `IndexClauses` list, and prepare a copy with index Vars substituted for table
+/// Vars. Returns `(stripped_indexquals, fixed_indexquals)`.
+///
+/// `stripped_indexquals` are kept as arena [`NodeId`] handles (the bare
+/// `RestrictInfo->clause`), so they can drive `predicate_implied_by` and
+/// `replace_nestloop_params` later; `fixed_indexquals` are owned `Expr`.
+fn fix_indexqual_references(
+    mcx: Mcx<'_>,
+    root: &mut PlannerInfo,
+    best_path: PathId,
+) -> PgResult<(Vec<NodeId>, Vec<Expr>)> {
+    // index = index_path->indexinfo (cloned out so we can mutate `root`).
+    let index = match root.path(best_path) {
+        PathNode::IndexPath(p) => p
+            .indexinfo
+            .as_deref()
+            .expect("fix_indexqual_references: IndexPath has no indexinfo")
+            .clone(),
+        _ => {
+            return Err(PgError::error(
+                "fix_indexqual_references: best_path is not an IndexPath",
+            ))
+        }
+    };
+    let indexclauses = match root.path(best_path) {
+        PathNode::IndexPath(p) => p.indexclauses.clone(),
+        _ => unreachable!(),
+    };
+
+    let mut stripped_indexquals: Vec<NodeId> = Vec::new();
+    let mut fixed_indexquals: Vec<Expr> = Vec::new();
+
+    for iclause in &indexclauses {
+        let indexcol = iclause.indexcol as i32;
+        for &rinfo in &iclause.indexquals {
+            let clause_id = root.rinfo(rinfo).clause;
+            stripped_indexquals.push(clause_id);
+            let clause = root.node(clause_id).clone();
+            let fixed = fix_indexqual_clause(
+                mcx,
+                root,
+                &index,
+                indexcol,
+                clause,
+                &iclause.indexcols,
+            )?;
+            fixed_indexquals.push(fixed);
+        }
+    }
+
+    Ok((stripped_indexquals, fixed_indexquals))
+}
+
+/// `fix_indexorderby_references(root, index_path)` (createplan.c) — adjust
+/// indexorderby clauses to the executor form. A simplified version of
+/// `fix_indexqual_references`: the input is bare clauses (the path's
+/// `indexorderbys`) plus a separate `indexorderbycols` list.
+fn fix_indexorderby_references(
+    mcx: Mcx<'_>,
+    root: &mut PlannerInfo,
+    best_path: PathId,
+) -> PgResult<Vec<Expr>> {
+    let index = match root.path(best_path) {
+        PathNode::IndexPath(p) => p
+            .indexinfo
+            .as_deref()
+            .expect("fix_indexorderby_references: IndexPath has no indexinfo")
+            .clone(),
+        _ => {
+            return Err(PgError::error(
+                "fix_indexorderby_references: best_path is not an IndexPath",
+            ))
+        }
+    };
+    let (indexorderbys, indexorderbycols) = match root.path(best_path) {
+        PathNode::IndexPath(p) => (p.indexorderbys.clone(), p.indexorderbycols.clone()),
+        _ => unreachable!(),
+    };
+
+    let mut fixed_indexorderbys: Vec<Expr> = Vec::new();
+    for (&clause_id, &indexcol) in indexorderbys.iter().zip(indexorderbycols.iter()) {
+        let clause = root.node(clause_id).clone();
+        // fix_indexqual_clause with indexcolnos = NIL.
+        let fixed = fix_indexqual_clause(mcx, root, &index, indexcol, clause, &[])?;
+        fixed_indexorderbys.push(fixed);
+    }
+
+    Ok(fixed_indexorderbys)
+}
+
+/// `make_indexscan(...)` (createplan.c) — build an `IndexScan` plan node.
+fn make_indexscan<'mcx>(
+    qptlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
+    qpqual: Option<PgVec<'mcx, Expr>>,
+    scanrelid: u32,
+    indexid: Oid,
+    indexqual: Option<PgVec<'mcx, Expr>>,
+    indexqualorig: Option<PgVec<'mcx, Expr>>,
+    indexorderby: Option<PgVec<'mcx, Expr>>,
+    indexorderbyorig: Option<PgVec<'mcx, Expr>>,
+    indexorderbyops: Option<PgVec<'mcx, Oid>>,
+    indexscandir: types_scan::sdir::ScanDirection,
+) -> IndexScan<'mcx> {
+    let mut node = IndexScan {
+        scan: Scan::default(),
+        indexid,
+        indexqual,
+        indexqualorig,
+        indexorderby,
+        indexorderbyorig,
+        indexorderbyops,
+        indexorderdir: indexscandir,
+    };
+    let plan: &mut Plan = &mut node.scan.plan;
+    plan.targetlist = qptlist;
+    plan.qual = qpqual;
+    plan.lefttree = None;
+    plan.righttree = None;
+    node.scan.scanrelid = scanrelid;
+    node
+}
+
+/// `make_indexonlyscan(...)` (createplan.c) — build an `IndexOnlyScan` plan node.
+fn make_indexonlyscan<'mcx>(
+    qptlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
+    qpqual: Option<PgVec<'mcx, Expr>>,
+    scanrelid: u32,
+    indexid: Oid,
+    indexqual: Option<PgVec<'mcx, Expr>>,
+    recheckqual: Option<PgVec<'mcx, Expr>>,
+    indexorderby: Option<PgVec<'mcx, Expr>>,
+    indextlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
+    indexscandir: types_scan::sdir::ScanDirection,
+) -> IndexOnlyScan<'mcx> {
+    let mut node = IndexOnlyScan {
+        scan: Scan::default(),
+        indexid,
+        indexqual,
+        recheckqual,
+        indexorderby,
+        indextlist,
+        indexorderdir: indexscandir,
+    };
+    let plan: &mut Plan = &mut node.scan.plan;
+    plan.targetlist = qptlist;
+    plan.qual = qpqual;
+    plan.lefttree = None;
+    plan.righttree = None;
+    node.scan.scanrelid = scanrelid;
+    node
+}
+
+/// Convert the path's `indexscandir` (`i32`, types-pathnodes) into the
+/// `ScanDirection` enum the plan node carries.
+fn scan_direction_from_i32(dir: i32) -> types_scan::sdir::ScanDirection {
+    use types_scan::sdir::ScanDirection;
+    match dir {
+        -1 => ScanDirection::BackwardScanDirection,
+        1 => ScanDirection::ForwardScanDirection,
+        _ => ScanDirection::NoMovementScanDirection,
+    }
+}
+
+/// Move an owned `Vec<Expr>` into the plan-node `Option<PgVec<Expr>>` field
+/// (empty list = `None`, the C `NIL`).
+fn expr_vec_to_field<'mcx>(
+    mcx: Mcx<'mcx>,
+    v: Vec<Expr>,
+) -> PgResult<Option<PgVec<'mcx, Expr>>> {
+    if v.is_empty() {
+        return Ok(None);
+    }
+    let mut out = vec_with_capacity_in(mcx, v.len())?;
+    for e in v {
+        out.push(e);
+    }
+    Ok(Some(out))
+}
+
+// ---------------------------------------------------------------------------
+// create_indexscan_plan (createplan.c ~2999)
+// ---------------------------------------------------------------------------
+
+/// `create_indexscan_plan(root, best_path, tlist, scan_clauses, indexonly)`
+/// (createplan.c) — return an indexscan plan for the base relation scanned by
+/// `best_path` with restriction clauses `scan_clauses` and targetlist `tlist`.
+/// Covers both `IndexScan` (`indexonly = false`) and `IndexOnlyScan`
+/// (`indexonly = true`); the `BitmapIndexScan` path is a separate converter.
+fn create_indexscan_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+    tlist: Vec<TargetEntry<'mcx>>,
+    scan_clauses: Vec<RinfoId>,
+    indexonly: bool,
+) -> PgResult<Node<'mcx>> {
+    // Snapshot the immutable path fields we need (the IndexPath / IndexOptInfo)
+    // before we start mutating `root` (arena rewrites in the fixups).
+    let (indexclauses, indexoid, indexscandir, has_param_info, baserelid) =
+        match root.path(best_path) {
+            PathNode::IndexPath(p) => {
+                let indexinfo = p
+                    .indexinfo
+                    .as_deref()
+                    .expect("create_indexscan_plan: IndexPath has no indexinfo");
+                (
+                    p.indexclauses.clone(),
+                    indexinfo.indexoid,
+                    p.indexscandir,
+                    p.path.param_info.is_some(),
+                    p.path.parent,
+                )
+            }
+            _ => {
+                return Err(PgError::error(
+                    "create_indexscan_plan: best_path is not an IndexPath",
+                ))
+            }
+        };
+
+    let scan_relid = root.rel(baserelid).relid;
+
+    // it should be a base rel...
+    debug_assert!(scan_relid > 0);
+    debug_assert_eq!(
+        planner_rt_fetch(run, root, scan_relid).rtekind,
+        types_nodes::parsenodes::RTEKind::RTE_RELATION
+    );
+    // check the scan direction is valid
+    debug_assert!(indexscandir == 1 || indexscandir == -1);
+
+    // Extract the index qual expressions (stripped of RestrictInfos) from the
+    // IndexClauses list, and prepare a copy with index Vars substituted for
+    // table Vars. (This step also does replace_nestloop_params on the
+    // fixed_indexquals.)
+    let (mut stripped_indexquals, fixed_indexquals) =
+        fix_indexqual_references(mcx, root, best_path)?;
+
+    // Likewise fix up index attr references in the ORDER BY expressions.
+    let fixed_indexorderbys = fix_indexorderby_references(mcx, root, best_path)?;
+
+    // The qpqual list must contain all restrictions not automatically handled
+    // by the index, other than pseudoconstant clauses which will be handled by
+    // a separate gating plan node, and clauses that are redundant with or
+    // provably implied by the indexquals.
+    let mut qpqual: Vec<RinfoId> = Vec::new();
+    for &rinfo in &scan_clauses {
+        if root.rinfo(rinfo).pseudoconstant {
+            continue; // we may drop pseudoconstants here
+        }
+        if is_redundant_with_indexclauses(root, rinfo, &indexclauses) {
+            continue; // dup or derived from same EquivalenceClass
+        }
+        // !contain_mutable_functions(rinfo->clause) &&
+        //     predicate_implied_by(list_make1(rinfo->clause),
+        //                          stripped_indexquals, false)
+        let clause_id = root.rinfo(rinfo).clause;
+        let clause_expr = root.node(clause_id).clone();
+        if !contain_mutable_functions(Some(&clause_expr))? {
+            let single = [clause_id];
+            if predtest::predicate_implied_by::call(root, &single, &stripped_indexquals, false) {
+                continue; // provably implied by indexquals
+            }
+        }
+        qpqual.push(rinfo);
+    }
+
+    // Sort clauses into best execution order.
+    let qpqual = order_qual_clauses_rinfo(root, &qpqual);
+    // Reduce RestrictInfo list to bare expressions; ignore pseudoconstants.
+    let qpqual = extract_actual_clauses(root, &qpqual, false);
+
+    // We have to replace any outer-relation variables with nestloop params in
+    // the indexqualorig, qpqual, and indexorderbyorig expressions. (A bit
+    // annoying to have to do this separately from fix_indexqual_references.)
+    //
+    // `indexorderbys` is the path's original (unfixed) ORDER BY clause list
+    // (bare node handles), used for `indexorderbyorig` on the plan node.
+    let indexorderbys_orig: Vec<NodeId> = match root.path(best_path) {
+        PathNode::IndexPath(p) => p.indexorderbys.clone(),
+        _ => unreachable!(),
+    };
+    let (qpqual_nodes, indexorderbys_orig) = if has_param_info {
+        stripped_indexquals = replace_nestloop_params_list(mcx, root, &stripped_indexquals)?;
+        let qpqual_nodes = replace_nestloop_params_list(mcx, root, &qpqual)?;
+        let indexorderbys_orig =
+            replace_nestloop_params_list(mcx, root, &indexorderbys_orig)?;
+        (qpqual_nodes, indexorderbys_orig)
+    } else {
+        (qpqual, indexorderbys_orig)
+    };
+
+    // If there are ORDER BY expressions, look up the sort operators for their
+    // result datatypes.
+    let mut indexorderbyops: Vec<Oid> = Vec::new();
+    if !indexorderbys_orig.is_empty() {
+        let pathkeys = match root.path(best_path) {
+            PathNode::IndexPath(p) => p.path.pathkeys.clone(),
+            _ => unreachable!(),
+        };
+        // Assert(list_length(pathkeys) == list_length(indexorderbys)).
+        debug_assert_eq!(pathkeys.len(), indexorderbys_orig.len());
+        for (pathkey, &expr_id) in pathkeys.iter().zip(indexorderbys_orig.iter()) {
+            let expr = root.node(expr_id).clone();
+            let exprtype = backend_nodes_core::nodefuncs::expr_type(Some(&expr))?;
+            // Get sort operator from opfamily.
+            let sortop = lsyscache::get_opfamily_member_for_cmptype::call(
+                pathkey.pk_opfamily,
+                exprtype,
+                exprtype,
+                pathkey.pk_cmptype,
+            )?;
+            if sortop == InvalidOid {
+                return Err(PgError::error(alloc::format!(
+                    "missing operator {}({},{}) in opfamily {}",
+                    pathkey.pk_cmptype, exprtype, exprtype, pathkey.pk_opfamily
+                )));
+            }
+            indexorderbyops.push(sortop);
+        }
+    }
+
+    // For an index-only scan, mark indextlist entries as resjunk if they are
+    // columns the index AM can't return. The owned indextlist for the plan node
+    // is rebuilt from the IndexOptInfo with that resjunk applied.
+    let indextlist_field: Option<PgVec<'mcx, TargetEntry<'mcx>>> = if indexonly {
+        let (indextlist_ids, canreturn) = match root.path(best_path) {
+            PathNode::IndexPath(p) => {
+                let ii = p
+                    .indexinfo
+                    .as_deref()
+                    .expect("create_indexscan_plan: IndexPath has no indexinfo");
+                (ii.indextlist.clone(), ii.canreturn.clone())
+            }
+            _ => unreachable!(),
+        };
+        let mut tlist = resolve_targetentry_list(mcx, root, &indextlist_ids)?;
+        for (i, tle) in tlist.iter_mut().enumerate() {
+            tle.resjunk = !canreturn[i];
+        }
+        if tlist.is_empty() {
+            None
+        } else {
+            let mut out = vec_with_capacity_in(mcx, tlist.len())?;
+            for tle in tlist {
+                out.push(tle);
+            }
+            Some(out)
+        }
+    } else {
+        None
+    };
+
+    // Resolve owned-Expr field carriers.
+    let tlist_field = tlist_to_plan_field(mcx, tlist)?;
+    let qpqual_field = build_node_list_to_expr_field(mcx, root, &qpqual_nodes)?;
+    let fixed_indexquals_field = expr_vec_to_field(mcx, fixed_indexquals)?;
+    let stripped_field = build_node_list_to_expr_field(mcx, root, &stripped_indexquals)?;
+    let fixed_indexorderbys_field = expr_vec_to_field(mcx, fixed_indexorderbys)?;
+    let dir = scan_direction_from_i32(indexscandir);
+
+    let plan: Node<'mcx> = if indexonly {
+        let mut scan_plan = make_indexonlyscan(
+            tlist_field,
+            qpqual_field,
+            scan_relid,
+            indexoid,
+            fixed_indexquals_field,
+            stripped_field, // recheckqual
+            fixed_indexorderbys_field,
+            indextlist_field,
+            dir,
+        );
+        copy_generic_path_info(&mut scan_plan.scan.plan, root.path(best_path).base());
+        Node::IndexOnlyScan(scan_plan)
+    } else {
+        let indexorderbyorig_field =
+            build_node_list_to_expr_field(mcx, root, &indexorderbys_orig)?;
+        let indexorderbyops_field = oid_vec_opt(mcx, indexorderbyops)?;
+        let mut scan_plan = make_indexscan(
+            tlist_field,
+            qpqual_field,
+            scan_relid,
+            indexoid,
+            fixed_indexquals_field,
+            stripped_field, // indexqualorig
+            fixed_indexorderbys_field,
+            indexorderbyorig_field,
+            indexorderbyops_field,
+            dir,
+        );
+        copy_generic_path_info(&mut scan_plan.scan.plan, root.path(best_path).base());
+        Node::IndexScan(scan_plan)
+    };
+
+    Ok(plan)
+}
+
+/// Resolve a list of bare clause arena handles into an owned plan-node
+/// `Option<PgVec<Expr>>` field (empty = `None`, the C `NIL`).
+fn build_node_list_to_expr_field<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &PlannerInfo,
+    nodes: &[NodeId],
+) -> PgResult<Option<PgVec<'mcx, Expr>>> {
+    if nodes.is_empty() {
+        return Ok(None);
+    }
+    let mut out = vec_with_capacity_in(mcx, nodes.len())?;
+    for &nid in nodes {
+        out.push(root.node(nid).clone());
+    }
+    Ok(Some(out))
 }
 
 // ---------------------------------------------------------------------------
@@ -5303,6 +5801,11 @@ pub fn init_seams() {
     // `is_projection_capable_path` is owned here but consumed by pathnode/other
     // optimizer crates, so it stays a real (cross-crate) seam install.
     pathnode::is_projection_capable_path::set(is_projection_capable_path);
+
+    // `create_indexscan_plan` is reached from create_scan_plan's dispatch via the
+    // `cp_seam` indirection (declared in this unit's -seams crate). Install it now
+    // that the converter is ported (covers both T_IndexScan and T_IndexOnlyScan).
+    cp_seam::create_indexscan_plan::set(create_indexscan_plan);
 
     // The per-family `create_*_plan` converters are NO LONGER seams: createplan.c
     // is a single translation unit, so create_plan_recurse / create_scan_plan
