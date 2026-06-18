@@ -93,8 +93,8 @@ pub use manip_rule::{adjustJoinTreeList, AddInvertedQual, AddQual, CombineRangeT
 pub use nulling::{add_nulling_relids, remove_nulling_relids, remove_nulling_relids_in_query};
 pub use offset::OffsetVarNodes;
 pub use replace::{
-    map_variable_attnos, replace_rte_variables, ReplaceVarFromTargetList, ReplaceVarsFromTargetList,
-    ReplaceVarsNoMatchOption,
+    map_variable_attnos, map_variable_attnos_expr_list, replace_rte_variables,
+    ReplaceVarFromTargetList, ReplaceVarsFromTargetList, ReplaceVarsNoMatchOption,
 };
 pub use support::{get_rewrite_oid, IsDefinedRewriteRule, SetRelationRuleStatus};
 pub use walkers::{
@@ -105,13 +105,27 @@ pub use walkers::{
 /// Install the rewriteManip.c- and rewriteSupport.c-owned seams.
 pub fn init_seams() {
     use backend_rewrite_rewritemanip_seams as s;
+    use mcx::MemoryContext;
     s::contain_aggs_of_level::set(|node, levelsup| walkers::contain_aggs_of_level(node, levelsup));
     s::contain_windowfuncs::set(|node| walkers::contain_windowfuncs(node));
     s::locate_windowfunc::set(|node| walkers::locate_windowfunc(node));
     s::locate_agg_of_level::set(|node, levelsup| walkers::locate_agg_of_level(node, levelsup));
 
+    s::map_variable_attnos_expr_list::set(|mcx, exprs, attmap| {
+        replace::map_variable_attnos_expr_list(mcx, exprs, attmap)
+    });
+
     // rewriteSupport.c
     backend_rewrite_rewritesupport_seams::get_rewrite_oid::set(support::get_rewrite_oid);
+    backend_rewrite_rewritesupport_seams::SetRelationRuleStatus::set(support::SetRelationRuleStatus);
+    // The C `IsDefinedRewriteRule(Oid, char*)` is infallible and allocates in
+    // `CurrentMemoryContext`; the owner body threads an `Mcx` into the catcache
+    // existence probe, so wrap it in a scratch context (the result is a bare
+    // bool — nothing is returned through the arena).
+    backend_rewrite_rewritesupport_seams::IsDefinedRewriteRule::set(|owning_rel, rule_name| {
+        let ctx = MemoryContext::new("IsDefinedRewriteRule");
+        support::IsDefinedRewriteRule(ctx.mcx(), owning_rel, rule_name)
+    });
 
     // `ChangeVarNodes((Node *) exprs, 1, varno, 0)` (rewriteManip.c) — consumed by
     // `optimizer/util/plancat.c`'s index-expression / predicate / constraint-

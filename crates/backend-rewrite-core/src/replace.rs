@@ -434,6 +434,43 @@ pub fn map_variable_attnos(
     Ok(())
 }
 
+/// `map_variable_attnos((Node *) exprs, 1, 0, attmap, InvalidOid,
+/// &found_whole_row)` over a `List*` of expressions, as `catalog/index.c`
+/// `CompareIndexInfo` calls it on `info2->ii_Expressions` / `info2->ii_Predicate`
+/// (a `List *`). `target_varno = 1`, `sublevels_up = 0`, `to_rowtype = InvalidOid`
+/// are pinned to that single call site.
+///
+/// In C `map_variable_attnos((Node *) list, ...)` recurses into the `T_List`
+/// arm of the mutator, applying the per-Var rewrite to every list element and
+/// OR-ing `found_whole_row` across them. Over the owned model the list is a
+/// `PgVec<Expr>`; we map each element in place (wrapping it as a `Node::Expr`
+/// for the per-node mutator, mirroring the C in-place rewrite) and accumulate
+/// `found_whole_row`. The input vector is consumed and returned mutated.
+pub fn map_variable_attnos_expr_list<'mcx>(
+    mcx: Mcx<'mcx>,
+    exprs: PgVec<'mcx, Expr>,
+    attmap: &[i16],
+) -> PgResult<(PgVec<'mcx, Expr>, bool)> {
+    let mut out: PgVec<'mcx, Expr> = mcx::vec_with_capacity_in(mcx, exprs.len())?;
+    let mut found_whole_row = false;
+    for owned in exprs.into_iter() {
+        // Wrap each list element as a Node::Expr, map it in place (mirroring the
+        // C in-place per-element rewrite under the `T_List` mutator arm), and
+        // collect it back. found_whole_row is OR-accumulated across the list.
+        let mut node = Node::Expr(owned);
+        let mut one_fwr = false;
+        map_variable_attnos(&mut node, 1, 0, attmap, INVALID_OID, &mut one_fwr)?;
+        found_whole_row |= one_fwr;
+        match node {
+            Node::Expr(mapped) => out.push(mapped),
+            // map_variable_attnos never changes the top-level node kind for an
+            // Expr input.
+            _ => unreachable!("map_variable_attnos returned a non-Expr for an Expr input"),
+        }
+    }
+    Ok((out, found_whole_row))
+}
+
 // ===========================================================================
 // ReplaceVarsFromTargetList (rewriteManip.c:1728)
 // ===========================================================================
