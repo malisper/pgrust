@@ -1567,6 +1567,90 @@ pub fn tablespace_databases(tablespace_oid: types_core::Oid) -> PgResult<Option<
     Ok(Some(result))
 }
 
+/// `LOG_METAINFO_DATAFILE` (`postmaster/syslogger.h`) — the relative path of
+/// the file the syslogger writes the current log filename(s) to.
+const LOG_METAINFO_DATAFILE: &str = "current_logfiles";
+
+/// `pg_current_logfile()` file scan (misc.c:1022-1079) — scan
+/// `LOG_METAINFO_DATAFILE` (`current_logfiles`) for the entry whose log format
+/// matches `logfmt` (or the first entry when `logfmt` is `None`), returning that
+/// entry's file-path bytes. fd-coupled (it is the `AllocateFile`/`fgets` walk),
+/// so the fd owner installs it alongside [`tablespace_location`]. `Ok(None)`
+/// reproduces every `PG_RETURN_NULL` (the file is absent — `errno == ENOENT` —
+/// or no line's format matched). The format-name validation is done by the
+/// misc.c caller; this seam owns only the file walk.
+pub fn current_logfile<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    logfmt: Option<&[u8]>,
+) -> PgResult<Option<mcx::PgVec<'mcx, u8>>> {
+    // fd = AllocateFile(LOG_METAINFO_DATAFILE, "r"); if (fd == NULL) { if (errno
+    // != ENOENT) ereport(ERROR); PG_RETURN_NULL(); }. allocate_file_read maps the
+    // ENOENT case to Ok(None) and any other open/read failure to the same
+    // errcode_for_file_access ERROR.
+    let contents = match allocate_file_read(LOG_METAINFO_DATAFILE)? {
+        Some(bytes) => bytes,
+        None => return Ok(None),
+    };
+
+    // while (fgets(lbuffer, sizeof(lbuffer), fd) != NULL) { ... }
+    //
+    // fgets reads one line at a time, truncating it to sizeof(lbuffer)-1 bytes
+    // (MAXPGPATH-1) and stopping at (and keeping) the newline. Mirror that by
+    // walking the buffer one fgets-window at a time: each chunk is the bytes up
+    // to and including the next '\n', capped at MAXPGPATH-1 bytes.
+    let mut pos = 0usize;
+    while pos < contents.len() {
+        // One fgets() window: up to MAXPGPATH-1 bytes, ending at the first '\n'.
+        let window = &contents[pos..];
+        let cap = window.len().min(MAXPGPATH - 1);
+        let line_len = window[..cap]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|nl| nl + 1)
+            .unwrap_or(cap);
+        let line = &window[..line_len];
+        pos += line_len;
+
+        // log_format = lbuffer; log_filepath = strchr(lbuffer, ' ');
+        // if (log_filepath == NULL) elog(ERROR, "missing space character ...");
+        let sp = match line.iter().position(|&b| b == b' ') {
+            Some(i) => i,
+            None => {
+                return Err(PgError::error(format!(
+                    "missing space character in \"{LOG_METAINFO_DATAFILE}\""
+                )));
+            }
+        };
+        // *log_filepath = '\0'; log_filepath++;
+        let log_format = &line[..sp];
+        let rest = &line[sp + 1..];
+
+        // nlpos = strchr(log_filepath, '\n');
+        // if (nlpos == NULL) elog(ERROR, "missing newline character ...");
+        let nl = match rest.iter().position(|&b| b == b'\n') {
+            Some(i) => i,
+            None => {
+                return Err(PgError::error(format!(
+                    "missing newline character in \"{LOG_METAINFO_DATAFILE}\""
+                )));
+            }
+        };
+        // *nlpos = '\0';
+        let log_filepath = &rest[..nl];
+
+        // if (logfmt == NULL || strcmp(logfmt, log_format) == 0)
+        //     PG_RETURN_TEXT_P(cstring_to_text(log_filepath));
+        if logfmt.map(|f| f == log_format).unwrap_or(true) {
+            let mut out = mcx::vec_with_capacity_in(mcx, log_filepath.len())?;
+            out.extend_from_slice(log_filepath);
+            return Ok(Some(out));
+        }
+    }
+
+    // PG_RETURN_NULL();
+    Ok(None)
+}
+
 /// `rmtree(path, rmtopdir)` (common/rmtree.c) — recursively remove a directory
 /// tree. Returns `true` on full success; any failure is logged at WARNING (here
 /// via the elog seam) and yields `false`, matching C.

@@ -192,6 +192,10 @@ pub fn init_seams() {
     // walk over `pg_tblspc/<oid>/<version>`; also fd-coupled.
     backend_utils_adt_misc_seams::tablespace_databases::set(seams::tablespace_databases);
 
+    // misc.c `pg_current_logfile()` — AllocateFile/fgets walk over
+    // `current_logfiles` (LOG_METAINFO_DATAFILE); fd-coupled.
+    backend_utils_adt_misc_seams::current_logfile::set(seams::current_logfile);
+
     // basebackup.c `readlink(pg_tblspc/<oid>)` — fd-coupled OS readlink, always
     // erroring (the caller has already confirmed S_ISLNK).
     backend_backup_basebackup_seams::read_link::set(seams::basebackup_read_link);
