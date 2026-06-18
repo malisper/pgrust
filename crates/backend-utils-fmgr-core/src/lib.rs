@@ -2994,6 +2994,504 @@ fn convert_via_proc_counted_seam<'mcx>(
     Ok((result.as_i32(), mcx::slice_in(mcx, converted)?))
 }
 
+// ===========================================================================
+// Frame-widening seams (`PG_GETARG_*` / `PG_RETURN_*` / `PG_NARGS` /
+// `PG_ARGISNULL` / call mcx / fn_expr readers) over the executor's
+// `types_nodes::fmgr::FunctionCallInfoBaseData<'mcx>` frame. The frame's
+// `args[i].value` is a bare-word `types_datum::Datum`; only by-value scalar
+// arguments can be decoded here (the by-reference `PG_GETARG_{NAME,TEXT_PP,
+// VARLENA_PP,CSTRING}` readers need a by-reference channel the trimmed nodes
+// frame does not carry — see DESIGN_DEBT TD-FMGR-GETARG-BYREF).
+// ===========================================================================
+
+/// `PG_NARGS()` (fmgr.h): `fcinfo->nargs`.
+fn pg_nargs_seam(fcinfo: &types_nodes::fmgr::FunctionCallInfoBaseData<'_>) -> i32 {
+    fcinfo.nargs as i32
+}
+
+/// `PG_ARGISNULL(n)` (fmgr.h): `fcinfo->args[n].isnull`. A read past `nargs` is
+/// C undefined behaviour; the safe port treats a missing slot as NULL.
+fn pg_argisnull_seam(
+    fcinfo: &types_nodes::fmgr::FunctionCallInfoBaseData<'_>,
+    n: usize,
+) -> bool {
+    fcinfo.args.get(n).map_or(true, |a| a.isnull)
+}
+
+/// `PG_GETARG_OID(n)` (fmgr.h): `DatumGetObjectId(fcinfo->args[n].value)`.
+fn pg_getarg_oid_seam(
+    fcinfo: &mut types_nodes::fmgr::FunctionCallInfoBaseData<'_>,
+    n: usize,
+) -> Oid {
+    fcinfo.args[n].value.as_oid()
+}
+
+/// `PG_GETARG_INT16(n)` (fmgr.h): `DatumGetInt16(fcinfo->args[n].value)`.
+fn pg_getarg_int16_seam(
+    fcinfo: &mut types_nodes::fmgr::FunctionCallInfoBaseData<'_>,
+    n: usize,
+) -> types_core::AttrNumber {
+    fcinfo.args[n].value.as_i16()
+}
+
+/// `PG_GETARG_INT64(n)` (fmgr.h): `DatumGetInt64(fcinfo->args[n].value)`.
+fn pg_getarg_int64_seam(
+    fcinfo: &mut types_nodes::fmgr::FunctionCallInfoBaseData<'_>,
+    n: usize,
+) -> i64 {
+    fcinfo.args[n].value.as_i64()
+}
+
+/// `PG_GETARG_BOOL(n)` (fmgr.h): `DatumGetBool(fcinfo->args[n].value)`.
+fn pg_getarg_bool_seam(
+    fcinfo: &mut types_nodes::fmgr::FunctionCallInfoBaseData<'_>,
+    n: usize,
+) -> bool {
+    fcinfo.args[n].value.as_bool()
+}
+
+/// `PG_GETARG_DATUM(n)` (fmgr.h): the raw argument word `fcinfo->args[n].value`,
+/// taken as given with no detoasting.
+fn pg_getarg_datum_seam(
+    fcinfo: &types_nodes::fmgr::FunctionCallInfoBaseData<'_>,
+    n: usize,
+) -> Datum {
+    fcinfo.args[n].value
+}
+
+/// `PG_RETURN_INT64(v)` (fmgr.h): `fcinfo->isnull = false; return Int64GetDatum(v);`.
+fn pg_return_int64_seam(
+    fcinfo: &mut types_nodes::fmgr::FunctionCallInfoBaseData<'_>,
+    v: i64,
+) -> Datum {
+    fcinfo.isnull = false;
+    Datum::from_i64(v)
+}
+
+/// `PG_RETURN_DATUM(v)` (fmgr.h): `fcinfo->isnull = false; return v;`.
+fn pg_return_datum_seam(
+    fcinfo: &mut types_nodes::fmgr::FunctionCallInfoBaseData<'_>,
+    v: Datum,
+) -> Datum {
+    fcinfo.isnull = false;
+    v
+}
+
+/// `PG_RETURN_BOOL(b)` (fmgr.h): `fcinfo->isnull = false; return BoolGetDatum(b);`.
+fn pg_return_bool_seam(
+    fcinfo: &mut types_nodes::fmgr::FunctionCallInfoBaseData<'_>,
+    b: bool,
+) -> Datum {
+    fcinfo.isnull = false;
+    Datum::from_bool(b)
+}
+
+/// `PG_RETURN_NULL()` (fmgr.h): `fcinfo->isnull = true; return (Datum) 0;`.
+fn pg_return_null_seam(
+    fcinfo: &mut types_nodes::fmgr::FunctionCallInfoBaseData<'_>,
+) -> Datum {
+    fcinfo.isnull = true;
+    Datum::null()
+}
+
+/// The call's current memory context (C: `CurrentMemoryContext` at fmgr
+/// dispatch). The executor frame carries it on the `fn_mcxt` channel; a missing
+/// context is a caller-contract violation (the dispatcher must seed it before a
+/// call whose callee allocates), so this is an invariant panic, not an error.
+fn pg_call_mcx_seam<'mcx>(
+    fcinfo: &types_nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
+) -> Mcx<'mcx> {
+    fcinfo
+        .fn_mcxt
+        .expect("pg_call_mcx: fcinfo->fn_mcxt not seeded by the dispatcher")
+}
+
+/// `get_fn_expr_variadic(fcinfo->flinfo)` (fmgr.h): `IsA(fn_expr, FuncExpr) ?
+/// funcvariadic : false` over the frame's stamped `fn_expr` (`None` → C's
+/// `flinfo == NULL || fn_expr == NULL` fall-through, `false`).
+fn get_fn_expr_variadic_seam(
+    fcinfo: &types_nodes::fmgr::FunctionCallInfoBaseData<'_>,
+) -> bool {
+    match fcinfo_fn_expr(fcinfo) {
+        None => false,
+        Some(expr) => backend_nodes_nodeFuncs_seams::expr_variadic_expr::call(expr),
+    }
+}
+
+/// `get_fn_expr_arg_stable(fcinfo->flinfo, argnum)` (fmgr.h): true iff the
+/// indexed call-expression argument is a `Const` or external `Param` (`None`
+/// `fn_expr` → C's `false` fall-through).
+fn get_fn_expr_arg_stable_seam(
+    fcinfo: &types_nodes::fmgr::FunctionCallInfoBaseData<'_>,
+    argnum: i32,
+) -> bool {
+    match fcinfo_fn_expr(fcinfo) {
+        None => false,
+        Some(expr) => {
+            backend_nodes_nodeFuncs_seams::call_expr_arg_stable_expr::call(expr, argnum)
+        }
+    }
+}
+
+/// `(fcinfo->flinfo->fn_oid, fcinfo->flinfo->fn_expr)` — the function OID and
+/// call-expression node `get_call_result_type` (funcapi.c) hands to
+/// `internal_get_result_type`. The OID reads off the frame's `flinfo`; the
+/// `fn_expr` node is NOT recoverable as a borrowed `&Node` here (the erased
+/// carrier holds an owned `primnodes::Expr`, not a frame-borrowed `Node`), so it
+/// is reported as `None` — faithful for non-polymorphic SRFs (the common case),
+/// degrading only polymorphic result-type resolution. See DESIGN_DEBT
+/// TD-FMGR-FN-OID-AND-EXPR-NODE.
+fn fn_oid_and_expr_seam<'mcx>(
+    fcinfo: &'mcx types_nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
+) -> (Oid, Option<&'mcx types_nodes::nodes::Node<'mcx>>) {
+    let fn_oid = fcinfo.flinfo.as_ref().map_or(InvalidOid, |f| f.fn_oid);
+    (fn_oid, None)
+}
+
+// ===========================================================================
+// Re-resolve I/O seams driven by typed (non-frame) inputs.
+// (`input_is_valid_by_type_seam` is defined above and already installed.)
+// ===========================================================================
+
+/// Map a typed [`FmgrOut`] to the canonical per-attribute [`Datum`] (the
+/// `record_in`/`record_recv` column result lane): a by-value scalar stays
+/// `ByVal`; a by-reference result materializes its flattened payload into `mcx`.
+fn fmgr_out_to_canon<'mcx>(
+    mcx: Mcx<'mcx>,
+    out: FmgrOut<'mcx>,
+) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
+    use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
+    match out {
+        FmgrOut::ByVal(d) => Ok(d),
+        FmgrOut::Ref(payload) => {
+            let bytes: Vec<u8> = payload.flatten();
+            Ok(CanonDatum::ByRef(mcx::slice_in(mcx, &bytes)?))
+        }
+    }
+}
+
+/// `record_in` per-column conversion: `getTypeInputInfo` + `fmgr_info_cxt` +
+/// `InputFunctionCallSafe(column_data, typioparam, atttypmod, escontext)`.
+/// `Ok(None)` is C's soft-error `goto fail`; `Ok(Some(v))` is the column value
+/// in `mcx`.
+fn record_column_input_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    coltype: Oid,
+    column_data: Option<&str>,
+    atttypmod: i32,
+    escontext: Option<&mut types_error::SoftErrorContext>,
+) -> PgResult<Option<types_tuple::backend_access_common_heaptuple::Datum<'mcx>>> {
+    let (typinput, typioparam) =
+        backend_utils_cache_lsyscache_seams::get_type_input_info::call(coltype)?;
+    let resolved = fmgr_info(mcx, typinput)?;
+    match input_function_call_safe_typed(
+        mcx,
+        &resolved.resolution,
+        resolved.finfo,
+        column_data,
+        typioparam,
+        atttypmod,
+        escontext,
+    )? {
+        None => Ok(None),
+        Some(out) => Ok(Some(fmgr_out_to_canon(mcx, out)?)),
+    }
+}
+
+/// `record_recv` per-column conversion: `getTypeBinaryInputInfo` +
+/// `fmgr_info_cxt` + `ReceiveFunctionCall(buf, typioparam, atttypmod)`. `item` is
+/// the column's binary payload (`None` for a -1-length NULL field).
+fn record_column_receive_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    coltype: Oid,
+    item: Option<&[u8]>,
+    atttypmod: i32,
+    colno: i32,
+) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
+    let _ = colno; // The whole-buffer cursor check lives inside the receive call
+                   // (the typed helper does not surface bytes-consumed); see
+                   // DESIGN_DEBT TD-FMGR-RECORD-RECV-CURSOR.
+    let (typreceive, typioparam) =
+        backend_utils_cache_lsyscache_seams::get_type_binary_input_info::call(coltype)?;
+    let resolved = fmgr_info(mcx, typreceive)?;
+    let out = receive_function_call_typed(
+        mcx,
+        &resolved.resolution,
+        resolved.finfo,
+        item,
+        typioparam,
+        atttypmod,
+    )?;
+    fmgr_out_to_canon(mcx, out)
+}
+
+/// `record_out` per-column conversion: `getTypeOutputInfo` + `fmgr_info_cxt` +
+/// `OutputFunctionCall(attr)`. Returns the output cstring's bytes (no NUL) in `mcx`.
+fn record_column_output_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    coltype: Oid,
+    val: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let (typoutput, _typisvarlena) =
+        backend_utils_cache_lsyscache_seams::get_type_output_info::call(coltype)?;
+    let (datum, ref_arg) = tuple_value_to_arg(val);
+    let resolved = fmgr_info(mcx, typoutput)?;
+    let arg = match &ref_arg {
+        Some(p) => FmgrArg::Ref(p),
+        None => FmgrArg::ByVal(canon_byval(datum)),
+    };
+    let s = output_function_call_typed(mcx, &resolved.resolution, resolved.finfo, arg)?;
+    bytes_into(mcx, s.as_bytes())
+}
+
+/// `record_send` per-column conversion: `getTypeBinaryOutputInfo` +
+/// `fmgr_info_cxt` + `SendFunctionCall(attr)`. Returns the `bytea` PAYLOAD bytes
+/// (varlena header stripped) in `mcx`.
+fn record_column_send_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    coltype: Oid,
+    val: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let (typsend, _typisvarlena) =
+        backend_utils_cache_lsyscache_seams::get_type_binary_output_info::call(coltype)?;
+    let (datum, ref_arg) = tuple_value_to_arg(val);
+    let resolved = fmgr_info(mcx, typsend)?;
+    let arg = match &ref_arg {
+        Some(p) => FmgrArg::Ref(p),
+        None => FmgrArg::ByVal(canon_byval(datum)),
+    };
+    let image = send_function_call_typed(mcx, &resolved.resolution, resolved.finfo, arg)?;
+    let payload = image.get(types_datum::varlena::VARHDRSZ..).unwrap_or(&[]);
+    bytes_into(mcx, payload)
+}
+
+/// `DatumGetCString(OidFunctionCall1(typmodout, Int32GetDatum(typmod)))`
+/// (format_type.c `printTypmod`): call a type's `typmodout` proc on a single
+/// `int4` typmod and return the resulting cstring in `mcx`.
+fn typmod_out_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    typmodout: Oid,
+    typmod: i32,
+) -> PgResult<PgString<'mcx>> {
+    let resolved = fmgr_info(mcx, typmodout)?;
+    // OidFunctionCall1: a single by-value int4 argument; the result is a cstring
+    // (by-reference) read back off the call frame's ref_result.
+    let (_word, ref_result) = function_call_coll_ref_args_out(
+        mcx,
+        &resolved.resolution,
+        resolved.finfo,
+        InvalidOid,
+        vec![NullableDatum::value(int32_get_datum(typmod))],
+        vec![None],
+    )?;
+    match ref_result {
+        Some(RefPayload::Cstring(s)) => PgString::from_str_in(&s, mcx),
+        _ => Err(PgError::error(format!(
+            "function {typmodout} did not return a cstring"
+        ))),
+    }
+}
+
+// ===========================================================================
+// Element-type I/O and comparison/hash seams (arrayfuncs.c). Each element value
+// crosses as a safe `ArrayElementDatum` (by-value Datum or on-disk bytes); the
+// owner builds the real call frame without aliasing the array buffer.
+// ===========================================================================
+
+/// Marshal an [`ArrayElementDatum`] into the `(arg-word, ref-arg)` pair the
+/// `function_call_coll_ref_args` frame expects: a by-value element is the bare
+/// word with no referent; a by-reference element is the null word plus its
+/// on-disk bytes as a `Varlena` referent.
+fn elem_to_arg(e: types_array::ArrayElementDatum<'_>) -> (NullableDatum, Option<RefPayload>) {
+    match e {
+        types_array::ArrayElementDatum::ByValue(d) => (NullableDatum::value(d), None),
+        types_array::ArrayElementDatum::ByRef(bytes) => (
+            NullableDatum::value(Datum::null()),
+            Some(RefPayload::Varlena(bytes.to_vec())),
+        ),
+    }
+}
+
+/// `FunctionCall2Coll(eq_opr_finfo, collation, a, b)` — the cached element
+/// equality operator (`array_eq` / `arrayoverlap` / `array_contain_compare`).
+fn element_eq_seam(
+    function_id: Oid,
+    collation: Oid,
+    a: types_array::ArrayElementDatum<'_>,
+    b: types_array::ArrayElementDatum<'_>,
+) -> PgResult<bool> {
+    let ctx = MemoryContext::new("element_eq");
+    let mcx = ctx.mcx();
+    let resolved = fmgr_info(mcx, function_id)?;
+    let (a1, r1) = elem_to_arg(a);
+    let (a2, r2) = elem_to_arg(b);
+    let d = function_call_coll_ref_args(
+        mcx,
+        &resolved.resolution,
+        resolved.finfo,
+        collation,
+        vec![a1, a2],
+        vec![r1, r2],
+    )?;
+    Ok(d.as_bool())
+}
+
+/// `FunctionCall2Coll(cmp_proc_finfo, collation, a, b)` — the cached element
+/// btree comparison proc (`array_cmp` / `btarraycmp`). Returns the 3-way `int32`.
+fn element_cmp_seam(
+    function_id: Oid,
+    collation: Oid,
+    a: types_array::ArrayElementDatum<'_>,
+    b: types_array::ArrayElementDatum<'_>,
+) -> PgResult<i32> {
+    let ctx = MemoryContext::new("element_cmp");
+    let mcx = ctx.mcx();
+    let resolved = fmgr_info(mcx, function_id)?;
+    let (a1, r1) = elem_to_arg(a);
+    let (a2, r2) = elem_to_arg(b);
+    let d = function_call_coll_ref_args(
+        mcx,
+        &resolved.resolution,
+        resolved.finfo,
+        collation,
+        vec![a1, a2],
+        vec![r1, r2],
+    )?;
+    Ok(d.as_i32())
+}
+
+/// `FunctionCall1Coll(hash_proc_finfo, collation, elt)` — the cached element
+/// hash proc (`hash_array`). Returns the `uint32` hash.
+fn element_hash_seam(
+    function_id: Oid,
+    collation: Oid,
+    value: types_array::ArrayElementDatum<'_>,
+) -> PgResult<u32> {
+    let ctx = MemoryContext::new("element_hash");
+    let mcx = ctx.mcx();
+    let resolved = fmgr_info(mcx, function_id)?;
+    let (a1, r1) = elem_to_arg(value);
+    let d = function_call_coll_ref_args(
+        mcx,
+        &resolved.resolution,
+        resolved.finfo,
+        collation,
+        vec![a1],
+        vec![r1],
+    )?;
+    Ok(d.as_u32())
+}
+
+/// `FunctionCall2Coll(hash_extended_proc_finfo, collation, elt, seed)` — the
+/// cached element extended hash proc (`hash_array_extended`). Returns the
+/// `uint64` hash.
+fn element_hash_extended_seam(
+    function_id: Oid,
+    collation: Oid,
+    value: types_array::ArrayElementDatum<'_>,
+    seed: u64,
+) -> PgResult<u64> {
+    let ctx = MemoryContext::new("element_hash_extended");
+    let mcx = ctx.mcx();
+    let resolved = fmgr_info(mcx, function_id)?;
+    let (a1, r1) = elem_to_arg(value);
+    let d = function_call_coll_ref_args(
+        mcx,
+        &resolved.resolution,
+        resolved.finfo,
+        collation,
+        vec![a1, NullableDatum::value(Datum::from_u64(seed))],
+        vec![r1, None],
+    )?;
+    Ok(d.as_u64())
+}
+
+/// `OutputFunctionCall(outputproc, value)` as `array_out` drives it: the
+/// element type's text output function on a materialized element value, returning
+/// the printable bytes (NUL excluded) in `mcx`.
+fn array_output_function_call_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    function_id: Oid,
+    value: types_array::ArrayElementDatum<'_>,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let resolved = fmgr_info(mcx, function_id)?;
+    let s = match value {
+        types_array::ArrayElementDatum::ByValue(d) => {
+            output_function_call_typed(
+                mcx,
+                &resolved.resolution,
+                resolved.finfo,
+                FmgrArg::ByVal(canon_byval(d)),
+            )?
+        }
+        types_array::ArrayElementDatum::ByRef(bytes) => {
+            let payload = RefPayload::Varlena(bytes.to_vec());
+            output_function_call_typed(
+                mcx,
+                &resolved.resolution,
+                resolved.finfo,
+                FmgrArg::Ref(&payload),
+            )?
+        }
+    };
+    bytes_into(mcx, s.as_bytes())
+}
+
+/// `ReceiveFunctionCall(receiveproc, buf, typioparam, typmod)` as `array_recv`
+/// drives it. The result crosses as a bare `Datum` word (the arrayfuncs binary
+/// reader stores `PgVec<Datum>`); a by-reference element result has no bare-word
+/// home here and is reported loudly (`fmgr_out_word`), the correct frontier
+/// behaviour until the array reader carries by-reference element values.
+fn array_receive_function_call_seam(
+    function_id: Oid,
+    buf: &[u8],
+    typioparam: Oid,
+    typmod: i32,
+) -> PgResult<Datum> {
+    let ctx = MemoryContext::new("array_receive_function_call");
+    let mcx = ctx.mcx();
+    let resolved = fmgr_info(mcx, function_id)?;
+    let out = receive_function_call_typed(
+        mcx,
+        &resolved.resolution,
+        resolved.finfo,
+        Some(buf),
+        typioparam,
+        typmod,
+    )?;
+    Ok(fmgr_out_word(out))
+}
+
+/// `SendFunctionCall(sendproc, value)` as `array_send` drives it: the element
+/// type's binary send function on a materialized element value, returning the
+/// `bytea` PAYLOAD bytes (varlena header stripped) in `mcx`.
+fn array_send_function_call_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    function_id: Oid,
+    value: types_array::ArrayElementDatum<'_>,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let resolved = fmgr_info(mcx, function_id)?;
+    let image = match value {
+        types_array::ArrayElementDatum::ByValue(d) => send_function_call_typed(
+            mcx,
+            &resolved.resolution,
+            resolved.finfo,
+            FmgrArg::ByVal(canon_byval(d)),
+        )?,
+        types_array::ArrayElementDatum::ByRef(bytes) => {
+            let payload = RefPayload::Varlena(bytes.to_vec());
+            send_function_call_typed(
+                mcx,
+                &resolved.resolution,
+                resolved.finfo,
+                FmgrArg::Ref(&payload),
+            )?
+        }
+    };
+    let payload = image.get(types_datum::varlena::VARHDRSZ..).unwrap_or(&[]);
+    bytes_into(mcx, payload)
+}
+
 /// Install every seam in `backend-utils-fmgr-fmgr-seams` whose implementation is
 /// `fmgr.c`'s own logic.
 ///
@@ -3002,6 +3500,14 @@ fn convert_via_proc_counted_seam<'mcx>(
 /// declared in this seam crate but are NOT `fmgr.c` logic; they are installed by
 /// their real owners (`backend-utils-adt-ri-triggers` / loader) and panic until
 /// those land, which is the correct frontier state.
+///
+/// The by-reference `PG_GETARG_{NAME,TEXT_PP,VARLENA_PP,CSTRING}` readers and
+/// `typmodin` stay UNINSTALLED: the executor `types_nodes` frame carries
+/// arguments as bare-word `Datum`s with no by-reference channel, so a
+/// varlena/name/cstring argument (or a constructed cstring array for `typmodin`)
+/// cannot be recovered here. See DESIGN_DEBT TD-FMGR-GETARG-BYREF (same keystone
+/// class as TD-JSONFUNCS-FMGR-ARG-DETOAST). The 4 `fastpath_*` text/binary I/O
+/// seams are Phase 2 (tcop/fastpath.c).
 pub fn init_seams() {
     backend_utils_fmgr_fmgr_seams::fmgr_info_check::set(fmgr_info_check);
     backend_utils_fmgr_fmgr_seams::fmgr_info::set(fmgr_info_resolve);
@@ -3041,4 +3547,40 @@ pub fn init_seams() {
     );
     backend_utils_fmgr_fmgr_seams::convert_via_proc::set(convert_via_proc_seam);
     backend_utils_fmgr_fmgr_seams::convert_via_proc_counted::set(convert_via_proc_counted_seam);
+
+    // Frame-widening (PG_GETARG_* / PG_RETURN_* / PG_NARGS / PG_ARGISNULL /
+    // call-mcx / fn_expr readers) over the executor `types_nodes` frame.
+    backend_utils_fmgr_fmgr_seams::pg_nargs::set(pg_nargs_seam);
+    backend_utils_fmgr_fmgr_seams::pg_argisnull::set(pg_argisnull_seam);
+    backend_utils_fmgr_fmgr_seams::pg_getarg_oid::set(pg_getarg_oid_seam);
+    backend_utils_fmgr_fmgr_seams::pg_getarg_int16::set(pg_getarg_int16_seam);
+    backend_utils_fmgr_fmgr_seams::pg_getarg_int64::set(pg_getarg_int64_seam);
+    backend_utils_fmgr_fmgr_seams::pg_getarg_bool::set(pg_getarg_bool_seam);
+    backend_utils_fmgr_fmgr_seams::pg_getarg_datum::set(pg_getarg_datum_seam);
+    backend_utils_fmgr_fmgr_seams::pg_return_int64::set(pg_return_int64_seam);
+    backend_utils_fmgr_fmgr_seams::pg_return_datum::set(pg_return_datum_seam);
+    backend_utils_fmgr_fmgr_seams::pg_return_bool::set(pg_return_bool_seam);
+    backend_utils_fmgr_fmgr_seams::pg_return_null::set(pg_return_null_seam);
+    backend_utils_fmgr_fmgr_seams::pg_call_mcx::set(pg_call_mcx_seam);
+    backend_utils_fmgr_fmgr_seams::get_fn_expr_variadic::set(get_fn_expr_variadic_seam);
+    backend_utils_fmgr_fmgr_seams::get_fn_expr_arg_stable::set(get_fn_expr_arg_stable_seam);
+    backend_utils_fmgr_fmgr_seams::fn_oid_and_expr::set(fn_oid_and_expr_seam);
+
+    // Re-resolve I/O over typed inputs (`input_is_valid_by_type` installed above).
+    backend_utils_fmgr_fmgr_seams::record_column_input::set(record_column_input_seam);
+    backend_utils_fmgr_fmgr_seams::record_column_receive::set(record_column_receive_seam);
+    backend_utils_fmgr_fmgr_seams::record_column_output::set(record_column_output_seam);
+    backend_utils_fmgr_fmgr_seams::record_column_send::set(record_column_send_seam);
+    backend_utils_fmgr_fmgr_seams::typmod_out::set(typmod_out_seam);
+
+    // Element-type dispatch (arrayfuncs.c).
+    backend_utils_fmgr_fmgr_seams::element_eq::set(element_eq_seam);
+    backend_utils_fmgr_fmgr_seams::element_cmp::set(element_cmp_seam);
+    backend_utils_fmgr_fmgr_seams::element_hash::set(element_hash_seam);
+    backend_utils_fmgr_fmgr_seams::element_hash_extended::set(element_hash_extended_seam);
+    backend_utils_fmgr_fmgr_seams::array_output_function_call::set(array_output_function_call_seam);
+    backend_utils_fmgr_fmgr_seams::array_receive_function_call::set(
+        array_receive_function_call_seam,
+    );
+    backend_utils_fmgr_fmgr_seams::array_send_function_call::set(array_send_function_call_seam);
 }

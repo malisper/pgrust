@@ -19,6 +19,7 @@ types-acl = { path = "../types-acl" }
 types-nodes = { path = "../types-nodes" }
 types-cache = { path = "../types-cache" }
 types-fmgr = { path = "../types-fmgr" }
+types-array = { path = "../types-array" }
 
 # inward seam crate (this unit installs these)
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
