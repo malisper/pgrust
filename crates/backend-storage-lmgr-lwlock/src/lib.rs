@@ -471,8 +471,16 @@ impl Drop for MainLWLockGuard {
         if let Some(lock) = self.lock.take() {
             // Unwind-path release. If something already swept the lock away
             // (LWLockReleaseAll during shmem exit), the not-held error is
-            // exactly the situation; ignore it.
-            let _ = LWLockRelease(lock);
+            // exactly the situation; ignore it. If this Drop is running while
+            // the backend's `HELD_LWLOCKS` TLS is mid-destruction (an unwind out
+            // of a process entry point without a clean proc_exit), touching the
+            // TLS would AccessError, and a panic from a Drop during an unwind
+            // aborts the process — turning a recoverable death into a cluster
+            // abort. Skip the release in that case; the lock lives in shared
+            // memory and is reclaimed by crash-recovery reinit.
+            if held_lwlocks_tls_alive() {
+                let _ = LWLockRelease(lock);
+            }
         }
     }
 }
@@ -1600,6 +1608,15 @@ fn record_held_lock(lock: &LWLock, mode: LWLockMode) {
 
 fn last_held_lock() -> Option<*const LWLock> {
     HELD_LWLOCKS.with(|held| held.borrow().last())
+}
+
+/// True while the per-backend `HELD_LWLOCKS` TLS is still accessible. Used by
+/// the guard `Drop` to avoid touching the TLS during an unwind that races its
+/// destruction: a panic out of a `Drop` running mid-unwind `abort()`s the
+/// process (the double-panic crash mode), so a destroyed TLS must be a no-op
+/// release rather than an `AccessError`.
+fn held_lwlocks_tls_alive() -> bool {
+    HELD_LWLOCKS.try_with(|_| ()).is_ok()
 }
 
 /// `LWLockRelease(held_lwlocks[num_held_lwlocks - 1].lock)` for the
