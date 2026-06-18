@@ -65,9 +65,11 @@ pub fn ExecEvalSubPlan<'mcx>(
         }
     }
 
-    state
-        .result_cells
-        .set(resvalue_id, ResultCell { value, isnull });
+    // *op->resvalue = ...; *op->resnull = ...  — route through write_cell so the
+    // well-known STATE_RESULT_CELL aliases the ExprState's own resvalue/resnull
+    // fields (which EEOP_ASSIGN_TMP / EEOP_DONE_RETURN read); a direct
+    // result_cells.set(0, ..) would write the arena slot the assign never reads.
+    crate::interp_loop::write_cell(state, resvalue_id, value, isnull);
     Ok(())
 }
 

@@ -1814,14 +1814,19 @@ pub struct SubPlanState<'mcx> {
     pub tab_collations: Option<PgVec<'mcx, Oid>>,
     /// `FmgrInfo *tab_hash_funcs` — hash functions for table datatype(s).
     pub tab_hash_funcs: Option<PgVec<'mcx, FmgrInfo>>,
-    /// `ExprState *lhs_hash_expr` — hash expr for lefthand datatype(s)
-    /// (execExpr-owned).
-    pub lhs_hash_expr: Opaque,
+    /// `ExprState *lhs_hash_expr` — hash expr for lefthand datatype(s). The
+    /// compiled execExpr `ExprState` (built by `ExecBuildHash32FromAttrs`),
+    /// carried directly (same shape as the hash table's `tab_*` exprs) so the
+    /// cross-type `FindTupleHashEntry` probe can lend it across the
+    /// execGrouping seam.
+    pub lhs_hash_expr: Option<PgBox<'mcx, ExprState<'mcx>>>,
     /// `FmgrInfo *cur_eq_funcs` — equality functions for LHS vs. table.
     pub cur_eq_funcs: Option<PgVec<'mcx, FmgrInfo>>,
-    /// `ExprState *cur_eq_comp` — equality comparator for LHS vs. table
-    /// (execExpr-owned).
-    pub cur_eq_comp: Opaque,
+    /// `ExprState *cur_eq_comp` — equality comparator for LHS vs. table. The
+    /// compiled execExpr `ExprState` (built by `ExecBuildGroupingEqual`),
+    /// carried directly so the cross-type `FindTupleHashEntry` probe can lend
+    /// it across the execGrouping seam.
+    pub cur_eq_comp: Option<PgBox<'mcx, ExprState<'mcx>>>,
 }
 
 impl Default for SubPlanState<'_> {
@@ -1850,9 +1855,9 @@ impl Default for SubPlanState<'_> {
             tab_eq_funcoids: None,
             tab_collations: None,
             tab_hash_funcs: None,
-            lhs_hash_expr: Default::default(),
+            lhs_hash_expr: None,
             cur_eq_funcs: None,
-            cur_eq_comp: Default::default(),
+            cur_eq_comp: None,
         }
     }
 }

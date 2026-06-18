@@ -8,7 +8,7 @@
 //! `build_hash_projections_and_exprs`) is built on the grouping-equal + hash
 //! builders, so its seams land here.
 
-use mcx::{Mcx, PgBox, PgVec};
+use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
 use types_core::catalog::PROCEDURE_RELATION_ID;
 use types_core::fmgr::FmgrInfo;
 use types_core::{AttrNumber, Oid};
@@ -1950,25 +1950,136 @@ pub fn build_hash_projections_and_exprs<'mcx>(
     lhs_hash_funcs: &[FmgrInfo],
     cross_eq_funcoids: &[Oid],
 ) -> PgResult<()> {
-    let _ = (&node, &estate, lhs_hash_funcs, cross_eq_funcoids);
-    // The hash/equality leaf builders this assembles are now landed
-    // (ExecBuildHash32FromAttrs / ExecBuildGroupingEqual above;
-    // ExecBuildProjectionInfo in execExpr_core). What remains is the
-    // nodeSubplan-owned glue: per-OpExpr lefttlist/righttlist assembly via
-    // makeTargetEntry (backend-nodes makeFuncs), ExecTypeFromTL +
-    // ExecInitExtraTupleSlot with &TTSOpsVirtual / &TTSOpsMinimalTuple
-    // (execTuples), and writing the results into the SubPlanState fields
-    // (projLeft/projRight, descRight, lhs_hash_expr, cur_eq_comp,
-    // tab_eq_funcoids/keyColIdx/tab_collations/cur_eq_funcs/tab_hash_funcs) plus
-    // its innerecontext — all owned by nodeSubplan / execTuples, not this hash
-    // family. Mirror PG and panic until that owner glue lands rather than emit
-    // an approximate program.
-    panic!(
-        "build_hash_projections_and_exprs: the leaf builders are landed \
-         (ExecBuildHash32FromAttrs / ExecBuildGroupingEqual / ExecBuildProjectionInfo); the \
-         remaining wiring is nodeSubplan/execTuples-owned: makeTargetEntry (backend-nodes), \
-         ExecTypeFromTL + ExecInitExtraTupleSlot with TTSOpsVirtual/TTSOpsMinimalTuple \
-         (execTuples), and populating the SubPlanState proj/desc/expr/funcoid fields + \
-         innerecontext — outside this family's module"
-    )
+    let mcx = estate.es_query_cxt;
+    let ncols = node.numCols;
+
+    // Build the lefthand / righthand tlists from each combining OpExpr's two
+    // args (C nodeSubplan.c:959-978): makeTargetEntry(expr, i, NULL, false).
+    // The raw `subplan->testexpr` Expr tree is read through `oplist_op`.
+    let subplan = node
+        .subplan
+        .as_ref()
+        .expect("build_hash_projections_and_exprs: SubPlanState.subplan is NULL");
+    let testexpr = subplan
+        .testexpr
+        .as_ref()
+        .expect("build_hash_projections_and_exprs: hashable subplan->testexpr is NULL")
+        .clone_in(mcx)?;
+
+    let mut lefttlist: PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>> =
+        vec_with_capacity_in(mcx, ncols as usize)?;
+    let mut righttlist: PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>> =
+        vec_with_capacity_in(mcx, ncols as usize)?;
+
+    for i in 1..=ncols {
+        let opexpr = oplist_op(&testexpr, (i - 1) as usize);
+        debug_assert!(opexpr.args.len() == 2);
+
+        // expr = (Expr *) linitial(opexpr->args);
+        let lexpr = opexpr.args[0].clone_in(mcx)?;
+        lefttlist.push(backend_nodes_core::makefuncs::make_target_entry(
+            mcx,
+            lexpr,
+            i as AttrNumber,
+            None,
+            false,
+        )?);
+
+        // expr = (Expr *) lsecond(opexpr->args);
+        let rexpr = opexpr.args[1].clone_in(mcx)?;
+        righttlist.push(backend_nodes_core::makefuncs::make_target_entry(
+            mcx,
+            rexpr,
+            i as AttrNumber,
+            None,
+            false,
+        )?);
+    }
+
+    let key_col_idx = node
+        .keyColIdx
+        .as_deref()
+        .expect("build_hash_projections_and_exprs: keyColIdx not set")
+        .to_vec();
+    let tab_collations = node
+        .tab_collations
+        .as_deref()
+        .expect("build_hash_projections_and_exprs: tab_collations not set")
+        .to_vec();
+
+    // tupDescLeft = ExecTypeFromTL(lefttlist);
+    let tup_desc_left = backend_executor_execTuples_seams::exec_type_from_tl::call(mcx, &lefttlist)?
+        .expect("ExecTypeFromTL returned NULL descriptor for lefttlist");
+    // slot = ExecInitExtraTupleSlot(estate, tupDescLeft, &TTSOpsVirtual);
+    let slot_left = backend_executor_execTuples_seams::exec_init_extra_tuple_slot::call(
+        estate,
+        Some(mcx::alloc_in(mcx, tup_desc_left.clone_in(mcx)?)?),
+        TupleSlotKind::Virtual,
+    )?;
+    // sstate->projLeft = ExecBuildProjectionInfo(lefttlist, NULL, slot, parent, NULL);
+    // The lefthand projection's exprcontext is filled in later (the C "hack
+    // alert!" — `sub_exec_project` retargets `pi_exprContext` at run time);
+    // build with the innerecontext as a placeholder, then null it back out.
+    let inner_ec = node
+        .innerecontext
+        .expect("build_hash_projections_and_exprs: innerecontext not set");
+    let mut proj_left =
+        core::exec_build_projection_info_impl(estate, &lefttlist, inner_ec, Some(slot_left), None)?;
+    proj_left.pi_exprContext = None;
+    crate::execExpr_func_subscript::store_proj_carrier(
+        &mut node.projLeft,
+        crate::execExpr_func_subscript::ProjCarrier { proj: proj_left, resultslot: slot_left },
+    );
+
+    // sstate->descRight = tupDescRight = ExecTypeFromTL(righttlist);
+    let tup_desc_right = backend_executor_execTuples_seams::exec_type_from_tl::call(mcx, &righttlist)?
+        .expect("ExecTypeFromTL returned NULL descriptor for righttlist");
+    // slot = ExecInitExtraTupleSlot(estate, tupDescRight, &TTSOpsVirtual);
+    let slot_right = backend_executor_execTuples_seams::exec_init_extra_tuple_slot::call(
+        estate,
+        Some(mcx::alloc_in(mcx, tup_desc_right.clone_in(mcx)?)?),
+        TupleSlotKind::Virtual,
+    )?;
+    // sstate->projRight = ExecBuildProjectionInfo(righttlist, sstate->innerecontext,
+    //                                             slot, sstate->planstate, NULL);
+    let proj_right =
+        core::exec_build_projection_info_impl(estate, &righttlist, inner_ec, Some(slot_right), None)?;
+    crate::execExpr_func_subscript::store_proj_carrier(
+        &mut node.projRight,
+        crate::execExpr_func_subscript::ProjCarrier { proj: proj_right, resultslot: slot_right },
+    );
+    node.descRight = Some(tup_desc_right);
+
+    // sstate->lhs_hash_expr = ExecBuildHash32FromAttrs(tupDescLeft, &TTSOpsVirtual,
+    //     lhs_hash_funcs, sstate->tab_collations, sstate->numCols,
+    //     sstate->keyColIdx, parent, 0);
+    let lhs_hash_expr = exec_build_hash32_from_attrs(
+        mcx,
+        &tup_desc_left,
+        TupleSlotKind::Virtual,
+        lhs_hash_funcs,
+        &tab_collations,
+        ncols,
+        &key_col_idx,
+        0,
+    )?;
+    node.lhs_hash_expr = Some(lhs_hash_expr);
+
+    // sstate->cur_eq_comp = ExecBuildGroupingEqual(tupDescLeft, tupDescRight,
+    //     &TTSOpsVirtual, &TTSOpsMinimalTuple, ncols, sstate->keyColIdx,
+    //     cross_eq_funcoids, sstate->tab_collations, parent);
+    let cur_eq_comp = exec_build_grouping_equal(
+        mcx,
+        &tup_desc_left,
+        node.descRight.as_deref().unwrap(),
+        TupleSlotKind::Virtual,
+        TupleSlotKind::MinimalTuple,
+        ncols,
+        &key_col_idx,
+        cross_eq_funcoids,
+        &tab_collations,
+    )?;
+    node.cur_eq_comp = cur_eq_comp;
+
+    Ok(())
 }

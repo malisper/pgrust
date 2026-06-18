@@ -38,7 +38,7 @@ use types_core::fmgr::FmgrInfo;
 use types_core::primitive::{AttrNumber, Oid};
 use types_error::{PgError, PgResult};
 use types_nodes::execexpr::ExprState;
-use types_nodes::execnodes::{EcxtId, Opaque, SlotId};
+use types_nodes::execnodes::{EcxtId, SlotId};
 use types_nodes::planstate::PlanStateNode;
 use types_nodes::nodeagg::{TupleHashEntryData, TupleHashIterator, TupleHashTable, TuplehashHash};
 use types_nodes::tuptable::TupleSlotKind;
@@ -466,6 +466,40 @@ fn with_search<'mcx, R>(
     body(hashtab, &mut ops, estate)
 }
 
+/// Like [`with_search`] but with the search adapter's hash/equality expressions
+/// supplied by the caller (the C `FindTupleHashEntry` overrides
+/// `hashtable->in_hash_expr` / `cur_eq_func` with its `hashexpr` / `eqcomp`
+/// arguments for the duration of the probe). Used only by
+/// [`find_tuple_hash_entry`].
+fn with_search_using<'mcx, R>(
+    hashtable: &mut TupleHashTable<'mcx>,
+    eqcomp: &mut ExprState<'mcx>,
+    hashexpr: &mut ExprState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    body: impl FnOnce(
+        &mut TuplehashHash<'mcx>,
+        &mut GroupingHashOps<'_, 'mcx>,
+        &mut EStateData<'mcx>,
+    ) -> PgResult<R>,
+) -> PgResult<R> {
+    let TupleHashTable {
+        hashtab,
+        inputslot,
+        tableslot,
+        exprcontext,
+        ..
+    } = hashtable;
+    let hashtab = hashtab.as_mut().expect("with_search_using: hashtab set");
+    let mut ops = GroupingHashOps {
+        hash_expr: hashexpr,
+        eq_func: eqcomp,
+        inputslot: *inputslot,
+        tableslot: tableslot.expect("with_search_using: tableslot materialized"),
+        exprcontext: exprcontext.expect("with_search_using: exprcontext materialized"),
+    };
+    body(hashtab, &mut ops, estate)
+}
+
 /// `ResetTupleHashTable(hashtable)` (execGrouping.c) — empty the table,
 /// keeping its allocated structure.
 pub fn reset_tuple_hash_table<'mcx>(hashtable: &mut TupleHashTable<'mcx>) -> PgResult<()> {
@@ -550,35 +584,29 @@ pub fn lookup_tuple_hash_entry_hash<'mcx>(
 pub fn find_tuple_hash_entry<'mcx>(
     hashtable: &mut TupleHashTable<'mcx>,
     slot: SlotId,
-    eqcomp: &Opaque,
-    hashexpr: &Opaque,
+    eqcomp: &mut ExprState<'mcx>,
+    hashexpr: &mut ExprState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     ensure_materialized(hashtable, estate)?;
+
+    // C: hashtable->inputslot = slot;
+    //    hashtable->in_hash_expr = hashexpr;  hashtable->cur_eq_func = eqcomp;
+    // these are the caller's (possibly cross-type) compiled ExprStates — here
+    // the driving SubPlanState's `lhs_hash_expr` / `cur_eq_comp`, lent `&mut`.
     set_input_slot(hashtable, slot);
 
-    // C: hashtable->in_hash_expr = hashexpr; hashtable->cur_eq_func = eqcomp;
-    // these are the caller's (possibly cross-type) compiled ExprStates, held in
-    // the SubPlanState's `lhs_hash_expr` / `cur_eq_comp` fields.
-    //
-    // Those fields are `Opaque` (`Box<dyn Any>`), which is `'static` and so
-    // cannot carry an `ExprState<'mcx>`. The hashed-subplan setup that would
-    // populate them (`build_hash_projections_and_exprs`) is itself an
-    // unported-owner panic, so this path is unreachable in the current tree;
-    // when that owner lands it must re-home these fields onto a real
-    // `Option<PgBox<'mcx, ExprState<'mcx>>>` (the same shape as the table's
-    // `tab_*` exprs) so the ExprStates can cross. Mirror PG and panic on the
-    // genuinely-unmodeled `Opaque` → `ExprState<'mcx>` extraction rather than
-    // emit an approximate probe.
-    let _ = (eqcomp, hashexpr);
-    panic!(
-        "FindTupleHashEntry: the caller's cross-type eqcomp/hashexpr cross the \
-         seam as `Opaque` (`'static` `Box<dyn Any>`), which cannot carry an \
-         `ExprState<'mcx>`; the only driver (nodeSubplan hashed testexpr via \
-         build_hash_projections_and_exprs) is itself an unported-owner panic. \
-         Re-home SubPlanState.lhs_hash_expr / cur_eq_comp to \
-         Option<PgBox<'mcx, ExprState<'mcx>>> when that owner lands."
-    );
+    // key = NULL  =>  tuplehash_lookup references the inputslot. Compute the
+    // hash with the caller's hashexpr, then probe (no creation).
+    let local_hash = with_search_using(hashtable, eqcomp, hashexpr, estate, |_hashtab, ops, estate| {
+        ops.hash_internal(estate)
+    })?;
+
+    let index = with_search_using(hashtable, eqcomp, hashexpr, estate, |hashtab, ops, estate| {
+        tuplehash::lookup_hash(hashtab, ops, local_hash, estate)
+    })?;
+
+    Ok(index.is_some())
 }
 
 /// `InitTupleHashIterator(hashtable, &iter)` (execnodes.h macro).

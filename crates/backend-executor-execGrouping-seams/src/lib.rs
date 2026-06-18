@@ -32,7 +32,7 @@ use types_core::fmgr::FmgrInfo;
 use types_core::primitive::{AttrNumber, Oid};
 use types_error::PgResult;
 use types_nodes::execexpr::ExprState;
-use types_nodes::execnodes::{Opaque, PlanStateData, SlotId};
+use types_nodes::execnodes::{PlanStateData, SlotId};
 use types_nodes::nodeagg::{TupleHashEntryData, TupleHashIterator, TupleHashTable};
 use types_nodes::planstate::PlanStateNode;
 use types_nodes::{EStateData, TupleSlotKind};
@@ -129,12 +129,13 @@ seam_core::seam!(
     /// comparison via the caller-provided equality (`eqcomp`) and hash
     /// (`hashexpr`) `ExprState`s. Returns whether a match was found. Fallible
     /// (the comparator/hash expr can `ereport`). The two `ExprState`s are the
-    /// caller's compiled execExpr states (held opaquely by the driving node).
+    /// caller's compiled execExpr states (the driving node's `cur_eq_comp` /
+    /// `lhs_hash_expr` fields, lent `&mut` for the duration of the probe).
     pub fn find_tuple_hash_entry<'mcx>(
         hashtable: &mut TupleHashTable<'mcx>,
         slot: SlotId,
-        eqcomp: &Opaque,
-        hashexpr: &Opaque,
+        eqcomp: &mut ExprState<'mcx>,
+        hashexpr: &mut ExprState<'mcx>,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<bool>
 );

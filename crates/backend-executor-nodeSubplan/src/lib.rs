@@ -757,7 +757,9 @@ fn find_tuple_hash_entry_main<'mcx>(
     // disjoint fields, so destructure to take simultaneous disjoint borrows.
     let SubPlanState { hashtable, cur_eq_comp, lhs_hash_expr, .. } = node;
     let ht = hashtable.as_mut().unwrap();
-    exec_grouping::find_tuple_hash_entry::call(ht, slot, cur_eq_comp, lhs_hash_expr, estate)
+    let eqcomp = cur_eq_comp.as_deref_mut().expect("SubPlanState cur_eq_comp not built");
+    let hashexpr = lhs_hash_expr.as_deref_mut().expect("SubPlanState lhs_hash_expr not built");
+    exec_grouping::find_tuple_hash_entry::call(ht, slot, eqcomp, hashexpr, estate)
 }
 
 /// `&mut *node->hashtable` or `&mut *node->hashnulls`, selected by `is_nulls`.

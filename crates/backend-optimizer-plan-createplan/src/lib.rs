@@ -100,7 +100,8 @@ use types_nodes::rawnodes::RangeTblFunction;
 use mcx::PgString;
 use types_pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
 use types_pathnodes::{
-    IndexOptInfo, NodeId, Path, PathId, PathKey, PathNode, PathTarget, PlannerInfo, Relids, RinfoId,
+    IndexOptInfo, MaterialPath, NodeId, Path, PathId, PathKey, PathNode, PathTarget, PlannerInfo,
+    RelId, Relids, RinfoId,
     RELOPT_BASEREL, RELOPT_OTHER_MEMBER_REL, RTE_RELATION,
     UNIQUE_PATH_HASH, UNIQUE_PATH_NOOP, UNIQUE_PATH_SORT,
 };
@@ -2755,6 +2756,110 @@ fn make_material<'mcx>(
     }
     node.plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
     Ok(node)
+}
+
+/// `materialize_finished_plan(subplan)` (createplan.c) — wrap a finished `Plan`
+/// in a `Material` node. Used by `build_subplan` for an uncorrelated non-init
+/// subplan when `enable_material` and the top node does not already
+/// materialize its output. Moves the subplan's initPlans up to the Material
+/// node and recomputes cost data.
+fn materialize_finished_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    mut subplan: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    // Read the cost inputs off the subplan before it is moved into the Material.
+    let (
+        sub_disabled_nodes,
+        sub_startup_cost_in,
+        sub_total_cost_in,
+        sub_plan_rows,
+        sub_plan_width,
+        sub_parallel_safe,
+    ) = {
+        let p = subplan.plan_head();
+        (
+            p.disabled_nodes,
+            p.startup_cost,
+            p.total_cost,
+            p.plan_rows,
+            p.plan_width,
+            p.parallel_safe,
+        )
+    };
+
+    // XXX horrid kluge (per C): if there are any initPlans attached to the
+    // subplan, move them up to the Material node, which is now effectively the
+    // top plan node in its query level. This prevents failure in
+    // SS_finalize_plan().
+    let moved_init = subplan.plan_head_mut().initPlan.take();
+
+    // Move the initplans' cost delta, as well. C: SS_compute_initplan_cost(
+    // matplan->initPlan, &initplan_cost, &unsafe_initplans); the per-plan cost
+    // of each init SubPlan is startup_cost + per_call_cost.
+    let mut initplan_cost = 0.0_f64;
+    if let Some(ref ips) = moved_init {
+        for sp in ips.iter() {
+            initplan_cost += sp.startup_cost + sp.per_call_cost;
+        }
+    }
+
+    // subplan->startup_cost -= initplan_cost; subplan->total_cost -= initplan_cost;
+    let sub_startup_cost = sub_startup_cost_in - initplan_cost;
+    let sub_total_cost = sub_total_cost_in - initplan_cost;
+
+    // matplan = (Plan *) make_material(subplan);
+    let mut matnode = make_material(mcx, subplan)?;
+    matnode.plan.initPlan = moved_init;
+
+    // Set cost data via a throwaway path arena entry (the C `Path matpath` is a
+    // stack-local scratch buffer; cost_material writes rows/disabled_nodes/
+    // startup_cost/total_cost into it and never reads `parent`).
+    let dummy = Path {
+        type_: NodeTag(293),    // T_MaterialPath
+        pathtype: NodeTag(360), // T_Material
+        parent: RelId(0),
+        pathtarget: None,
+        param_info: None,
+        parallel_aware: false,
+        parallel_safe: false,
+        parallel_workers: 0,
+        rows: 0.0,
+        disabled_nodes: 0,
+        startup_cost: 0.0,
+        total_cost: 0.0,
+        pathkeys: Vec::new(),
+    };
+    let dummy_id = root.alloc_path(PathNode::MaterialPath(MaterialPath {
+        path: dummy,
+        subpath: None,
+    }));
+    pathnode::cost_material::call(
+        root,
+        dummy_id,
+        sub_disabled_nodes,
+        sub_startup_cost,
+        sub_total_cost,
+        sub_plan_rows,
+        sub_plan_width,
+    );
+    let (mat_startup, mat_total) = {
+        let p = root.path(dummy_id).base();
+        (p.startup_cost, p.total_cost)
+    };
+
+    {
+        let plan: &mut Plan = &mut matnode.plan;
+        plan.disabled_nodes = sub_disabled_nodes;
+        plan.startup_cost = mat_startup + initplan_cost;
+        plan.total_cost = mat_total + initplan_cost;
+        plan.plan_rows = sub_plan_rows;
+        plan.plan_width = sub_plan_width;
+        plan.parallel_aware = false;
+        plan.parallel_safe = sub_parallel_safe;
+    }
+
+    Ok(Node::Material(matnode))
 }
 
 /// `make_project_set(tlist, subplan)` — build a `ProjectSet` plan node.
@@ -6919,6 +7024,14 @@ pub fn init_seams() {
     // `is_projection_capable_path` is owned here but consumed by pathnode/other
     // optimizer crates, so it stays a real (cross-crate) seam install.
     pathnode::is_projection_capable_path::set(is_projection_capable_path);
+
+    // `materialize_finished_plan` is owned here (createplan.c) but consumed by
+    // the subselect cohort (`build_subplan` wraps an uncorrelated non-init
+    // ANY/ALL subplan in a Material node). Cross-crate install through the
+    // init-subselect-ext seam crate.
+    backend_optimizer_plan_init_subselect_ext_seams::materialize_finished_plan::set(
+        materialize_finished_plan,
+    );
 
     // `create_indexscan_plan` is reached from create_scan_plan's dispatch via the
     // `cp_seam` indirection (declared in this unit's -seams crate). Install it now

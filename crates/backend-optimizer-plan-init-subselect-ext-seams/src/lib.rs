@@ -203,9 +203,14 @@ seam_core::seam!(
     /// `Plan` in a `Material` node (used by `build_subplan` for an
     /// uncorrelated non-init subplan when `enable_material` and the top node
     /// does not already materialize). Returns the new owned plan tree (a
-    /// `Material` node whose `lefttree` is the input). Owner createplan.c does
-    /// not yet expose this over the owned `Node` model.
-    pub fn materialize_finished_plan<'mcx>(plan: Node<'mcx>) -> PgResult<Node<'mcx>>
+    /// `Material` node whose `lefttree` is the input). `root` is threaded so the
+    /// owner can run `cost_material` through a throwaway path arena entry (the C
+    /// uses a stack-local `Path matpath` purely as a cost scratch buffer).
+    pub fn materialize_finished_plan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        root: &mut PlannerInfo,
+        plan: Node<'mcx>,
+    ) -> PgResult<Node<'mcx>>
 );
 
 seam_core::seam!(

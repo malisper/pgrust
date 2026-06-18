@@ -481,7 +481,7 @@ fn build_subplan<'mcx>(
             && enable_material()
             && !initext::exec_materializes_output::call(plan.node_tag())
         {
-            plan = initext::materialize_finished_plan::call(plan)?;
+            plan = initext::materialize_finished_plan::call(mcx, root, plan)?;
         }
 
         is_init_plan = false;
