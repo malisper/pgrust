@@ -275,7 +275,16 @@ impl<'a> PathImporter<'a> {
             PathNode::BitmapHeapPath(p) => one!(&mut p.bitmapqual),
             PathNode::BitmapAndPath(p) => many!(p.bitmapquals),
             PathNode::BitmapOrPath(p) => many!(p.bitmapquals),
-            PathNode::SubqueryScanPath(p) => one!(&mut p.subpath),
+            PathNode::SubqueryScanPath(p) => {
+                one!(&mut p.subpath);
+                // The imported copy is a cost-only clone in the destination
+                // root; its `subpath` was remapped above. The `subroot_subpath`
+                // (an id into the *source* subroot's arena) is meaningless here
+                // and must never be plan-built through this copy — drop it so a
+                // stray dereference fails loudly rather than indexing the wrong
+                // arena.
+                p.subroot_subpath = None;
+            }
             PathNode::NestPath(p) => {
                 one!(&mut p.jpath.outerjoinpath);
                 one!(&mut p.jpath.innerjoinpath);
@@ -471,6 +480,7 @@ mod tests {
         let sqs_path = sub.alloc_path(PathNode::SubqueryScanPath(SubqueryScanPath {
             path: sqs_base,
             subpath: Some(leaf_path),
+            subroot_subpath: None,
         }));
 
         let sub_n_paths = sub.path_arena.len();

@@ -949,8 +949,13 @@ fn build_setop_child_paths<'mcx>(
         let pathkeys_outer =
             pathkeys::convert_subquery_pathkeys(root, rel, &sub_pathkeys, &imported_tlist);
 
+        // `imported_id` is the in-root cost copy; `sub_id` is the original
+        // subroot-arena path, which `create_subqueryscan_plan` must rebuild in
+        // the subroot context so the leaf scans' `scanrelid` resolves against
+        // the subroot's range table (mirrors C's
+        // `create_plan(rel->subroot, best_path->subpath)`).
         let sqs = pathnode::create::create_subqueryscan_path(
-            root, run, rel, imported_id, trivial_tlist, pathkeys_outer, &None,
+            root, run, rel, imported_id, Some(sub_id), trivial_tlist, pathkeys_outer, &None,
         )?;
         pathnode::add_path(root, rel, sqs)?;
     }
@@ -973,7 +978,7 @@ fn build_setop_child_paths<'mcx>(
             id
         };
         let partial_path = pathnode::create::create_subqueryscan_path(
-            root, run, rel, imported, trivial_tlist, Vec::new(), &None,
+            root, run, rel, imported, Some(partial_sub_id), trivial_tlist, Vec::new(), &None,
         )?;
         pathnode::add_partial_path(root, rel, partial_path)?;
     }

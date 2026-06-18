@@ -2677,12 +2677,20 @@ fn relids_to_bms_node<'mcx>(
 
 /// `set_subqueryscan_references(root, plan, rtoffset)` (setrefs.c:1406).
 ///
-/// In this port the subquery's path subtree was deep-imported into THIS root's
-/// arena (set-op `import_path_from_subroot`), and `create_subqueryscan_plan`
-/// built the subplan in-root. So the subplan's Vars already reference the flat
-/// range table; we recurse with `set_plan_refs(root, subplan, rtoffset)` rather
-/// than into a separate subroot. Then triviality-strip or keep+fix the
-/// SubqueryScan, exactly as C.
+/// C looks up `rel->subroot` for the scanned subquery and recurses with a fresh
+/// top-level `set_plan_references(rel->subroot, plan->subplan)`. That entry
+/// computes its own `rtoffset = list_length(glob->finalrtable)`, appends the
+/// SUBROOT's range table to the flat `finalrtable`, and offsets every Var in the
+/// subplan by it. This is what lets a set-op leg's relation scan — whose
+/// `scanrelid` is subroot-relative (`= 1`) — resolve correctly: it ends up at
+/// `1 + sub_rtoffset` in the flat table, distinct from the outer subquery RTE.
+///
+/// In this port the subplan was built in the subroot context
+/// (`create_subqueryscan_subplan_inroot`), and `glob` is single-valued (it was
+/// moved out of the subroot back to the outer root after planning). So we
+/// temporarily lend the outer root's `glob` to the subroot for the duration of
+/// the recursive `set_plan_references`, mirroring C's shared
+/// `rel->subroot->glob == root->glob` pointer, then move it back.
 fn set_subqueryscan_references<'mcx>(
     mcx: Mcx<'mcx>,
     run: &mut types_pathnodes::planner_run::PlannerRun<'mcx>,
@@ -2694,13 +2702,36 @@ fn set_subqueryscan_references<'mcx>(
         .into_subqueryscan()
         .unwrap_or_else(|| panic!("set_subqueryscan_references: plan is not a SubqueryScan"));
 
-    // Recursively process the subplan (set_plan_references(rel->subroot,
-    // subplan); here in-root).
+    // Look up the subquery's RelOptInfo (we need its subroot). C:
+    // `rel = find_base_rel(root, plan->scan.scanrelid)`.
+    let scanrelid = sqs.scan.scanrelid as usize;
+    let rel_id = root
+        .simple_rel_array
+        .get(scanrelid)
+        .copied()
+        .flatten()
+        .expect("set_subqueryscan_references: no simple_rel for SubqueryScan scanrelid");
+
+    // Recursively process the subplan: `set_plan_references(rel->subroot,
+    // subplan)`. Take the subroot out, lend it the (single) glob, run the full
+    // top-level entry (which flattens the subroot's rtable with its own
+    // rtoffset), then restore both glob and subroot.
     let subplan = sqs
         .subplan
         .take()
         .expect("set_subqueryscan_references: SubqueryScan has no subplan");
-    let processed = set_plan_refs(mcx, run, root, PgBox::into_inner(subplan), rtoffset)?;
+
+    let mut subroot = root
+        .rel_mut(rel_id)
+        .subroot
+        .0
+        .take()
+        .expect("set_subqueryscan_references: SubqueryScan rel has no subroot");
+    subroot.glob = root.glob.take();
+    let processed_res = set_plan_references(mcx, run, &mut subroot, PgBox::into_inner(subplan));
+    root.glob = subroot.glob.take();
+    root.rel_mut(rel_id).subroot.0 = Some(subroot);
+    let processed = processed_res?;
     sqs.subplan = Some(mcx::alloc_in(mcx, processed)?);
 
     if trivial_subqueryscan(&mut sqs) {

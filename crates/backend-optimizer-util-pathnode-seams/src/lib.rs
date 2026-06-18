@@ -219,6 +219,7 @@ seam_core::seam!(
         run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         subpath: PathId,
+        subroot_subpath: Option<PathId>,
         trivial_pathtarget: bool,
         pathkeys: Vec<PathKey>,
         required_outer: &Relids,

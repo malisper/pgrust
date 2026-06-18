@@ -2654,23 +2654,56 @@ fn create_worktablescan_plan<'mcx>(
 // ordering / nestloop params / make_subqueryscan) is ported.
 // ---------------------------------------------------------------------------
 
-/// `create_subqueryscan_subplan` seam impl for the in-root (set-operation
-/// imported) case: the `SubqueryScanPath`'s `subpath` resolves in `root`'s
-/// arena (it was deep-imported by `import_path_from_subroot`), so build its plan
-/// with `create_plan_recurse(root, subpath)` directly.
+/// `create_subqueryscan_subplan` seam impl: build the subquery's child Plan by
+/// recursing into the **subroot** planner context, exactly as C's
+/// `create_plan(rel->subroot, best_path->subpath)`.
+///
+/// The `SubqueryScanPath`'s in-root `subpath` is a cost-only copy that was
+/// deep-imported by `import_path_from_subroot`; building the subplan from it
+/// in-root would resolve every leaf scan's `scanrelid` against the OUTER root's
+/// range table, where a set-op leg's relation index (subroot-relative `= 1`)
+/// collides with the SUBQUERY RTE the outer query holds at that slot — tripping
+/// the `RTE_RELATION` assertion in `create_seqscan_plan`. Instead recurse into
+/// the parent rel's `subroot` with the original subroot-arena path
+/// (`subroot_subpath`): the subroot's `simple_rte_array` resolves the leg's
+/// relation RTE at index 1 correctly. `set_subqueryscan_references` then
+/// flattens the subroot's range table into `glob->finalrtable` with the right
+/// rtoffset.
 fn create_subqueryscan_subplan_inroot<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     run: &PlannerRun<'mcx>,
     best_path: PathId,
 ) -> PgResult<Node<'mcx>> {
-    let subpath = match root.path(best_path) {
-        types_pathnodes::PathNode::SubqueryScanPath(p) => p
-            .subpath
-            .expect("create_subqueryscan_subplan: SubqueryScanPath has no subpath"),
+    let (subpath_inroot, subroot_subpath) = match root.path(best_path) {
+        types_pathnodes::PathNode::SubqueryScanPath(p) => (
+            p.subpath
+                .expect("create_subqueryscan_subplan: SubqueryScanPath has no subpath"),
+            p.subroot_subpath,
+        ),
         _ => panic!("create_subqueryscan_subplan: best_path is not a SubqueryScanPath"),
     };
-    create_plan_recurse(mcx, root, run, subpath, CP_EXACT_TLIST)
+
+    match subroot_subpath {
+        // Set-op leg: the child path lives in a distinct subroot. Recurse with
+        // `create_plan(rel->subroot, subroot_subpath)` (C createplan.c:3712).
+        Some(sub_id) => {
+            let rel_id = root.path(best_path).base().parent;
+            let mut subroot = root
+                .rel_mut(rel_id)
+                .subroot
+                .0
+                .take()
+                .expect("create_subqueryscan_subplan: set-op child rel has no subroot");
+            let result = create_plan(mcx, &mut subroot, run, sub_id);
+            // Restore the subroot so a later level (e.g. set_subqueryscan_references)
+            // can still reach it, even on the error path.
+            root.rel_mut(rel_id).subroot.0 = Some(subroot);
+            result
+        }
+        // Non-set-op subquery scan whose `subpath` already lives in this root.
+        None => create_plan_recurse(mcx, root, run, subpath_inroot, CP_EXACT_TLIST),
+    }
 }
 
 /// `create_subqueryscan_plan(root, best_path, tlist, scan_clauses)` — return a

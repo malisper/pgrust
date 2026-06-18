@@ -1078,7 +1078,24 @@ pub struct SubqueryScanPath {
     pub path: Path,
     /// `Path *subpath` — path representing subquery execution (handle into
     /// `path_arena`).
+    ///
+    /// For a set-op child, this is the *imported* copy of the subroot path in
+    /// THIS root's `path_arena` (deep-copied by `import_path_from_subroot`). It
+    /// exists so `create_subqueryscan_path`/`cost_subqueryscan` can read the
+    /// child's cost while composing the outer Append/Sort/Unique/SetOp paths in
+    /// the outer root's arena.
     pub subpath: Option<PathId>,
+    /// The *original* subroot-arena [`PathId`] that `subpath` was imported from,
+    /// plus the parent rel's `subroot` together identify the subquery planner
+    /// context. C never needs this — `create_subqueryscan_plan` recurses with
+    /// `create_plan(rel->subroot, best_path->subpath)`, where `best_path->subpath`
+    /// is the subroot `Path *` directly (pointers are arena-independent in C).
+    /// In this port the path arenas are per-`PlannerInfo`, so the subplan must be
+    /// built in the SUBROOT context (its range table resolves the leaf scans'
+    /// `scanrelid`), which means remembering the subroot-arena id distinct from
+    /// the imported in-root `subpath`. `None` for a non-set-op subquery scan
+    /// whose `subpath` already lives in the same root (regular subquery-in-FROM).
+    pub subroot_subpath: Option<PathId>,
 }
 
 /// `ForeignPath` — a scan of a foreign table/join/upper-relation.

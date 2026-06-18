@@ -788,6 +788,7 @@ pub fn create_subqueryscan_path<'mcx>(
     run: &PlannerRun<'mcx>,
     rel: RelId,
     subpath: PathId,
+    subroot_subpath: Option<PathId>,
     trivial_pathtarget: bool,
     pathkeys: Vec<PathKey>,
     required_outer: &Relids,
@@ -802,6 +803,7 @@ pub fn create_subqueryscan_path<'mcx>(
     let id = root.alloc_path(PathNode::SubqueryScanPath(SubqueryScanPath {
         path,
         subpath: Some(subpath),
+        subroot_subpath,
     }));
     seam::cost_subqueryscan::call(run, root, id, rel, subpath, trivial_pathtarget);
     Ok(id)
