@@ -192,6 +192,20 @@ pub fn init_seams() {
     geqo_seam::have_relevant_joinclause::set(|root, rel1, rel2| {
         have_relevant_joinclause(root, rel1, rel2)
     });
+
+    // relnode.c reaches `add_placeholders_to_joinrel` (placeholder.c, owned here)
+    // and `join_clause_is_movable_into` over a transient relid set
+    // (restrictinfo.c, owned here) through its no-owner consumer-side ext seam
+    // crate. These owners live in this unit; install them.
+    use backend_optimizer_util_relnode_ext_seams as relnode_ext;
+    relnode_ext::add_placeholders_to_joinrel::set(|root, joinrel, outer_rel, inner_rel, sjinfo| {
+        placeholder::add_placeholders_to_joinrel(root, joinrel, outer_rel, inner_rel, sjinfo)
+    });
+    relnode_ext::join_clause_is_movable_into_relids::set(
+        |root, rinfo, current_relids, join_and_required| {
+            join_clause_is_movable_into(root, rinfo, current_relids, join_and_required)
+        },
+    );
 }
 
 /// Shorthand for the `Relids` set-algebra seams (relnode.c owner).

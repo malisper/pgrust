@@ -368,7 +368,7 @@ pub fn build_simple_rel<'mcx>(
              * Note: 0 is included in range to support whole-row Vars.
              */
             rel.min_attr = 0;
-            rel.max_attr = ext::rte_eref_colnames_len::call(root, relid as u32) as i16;
+            rel.max_attr = ext::rte_eref_colnames_len::call(run, root, relid as u32) as i16;
             let n = (rel.max_attr - rel.min_attr + 1) as usize;
             rel.attr_needed = alloc::vec![None; n];
             rel.attr_widths = alloc::vec![0i32; n];
@@ -411,7 +411,7 @@ pub fn build_simple_rel<'mcx>(
             .expect("appinfo != NULL");
         if !ext::apply_child_basequals::call(root, p, id, relid as u32, &appinfo)? {
             /* Restriction clause reduced to constant FALSE or NULL. */
-            ext::mark_dummy_rel::call(root, id)?;
+            ext::mark_dummy_rel::call(root, run, id)?;
         }
     }
 

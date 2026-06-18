@@ -22,6 +22,7 @@ backend-optimizer-path-costsize-seams = { path = "../backend-optimizer-path-cost
 backend-optimizer-util-clauses-seams = { path = "../backend-optimizer-util-clauses-seams" }
 backend-optimizer-plan-init-subselect-ext-seams = { path = "../backend-optimizer-plan-init-subselect-ext-seams" }
 backend-optimizer-path-equivclass-ext-seams = { path = "../backend-optimizer-path-equivclass-ext-seams" }
+backend-optimizer-util-joininfo-ext-seams = { path = "../backend-optimizer-util-joininfo-ext-seams" }
 backend-optimizer-util-var-seams = { path = "../backend-optimizer-util-var-seams" }
 backend-optimizer-prep-prepqual-seams = { path = "../backend-optimizer-prep-prepqual-seams" }
 backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }

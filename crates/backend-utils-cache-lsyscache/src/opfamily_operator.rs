@@ -443,6 +443,32 @@ pub fn get_mergejoin_opfamilies<'mcx>(mcx: Mcx<'mcx>, opno: Oid) -> PgResult<PgV
     pgvec_from(mcx, &result)
 }
 
+/// `linitial_oid(get_mergejoin_opfamilies(opno))` (lsyscache.c) — the first
+/// btree opfamily `opno` represents equality in, or `None` when
+/// `get_mergejoin_opfamilies` returns NIL. relnode.c's
+/// `set_joinrel_partition_key_exprs` reaches this through its no-owner ext seam
+/// without carrying an `Mcx`; the C builds the whole list then takes `linitial`,
+/// so we stop at the first match.
+pub fn get_mergejoin_opfamilies_first(opno: Oid) -> PgResult<Option<Oid>> {
+    let scratch = MemoryContext::new("get_mergejoin_opfamilies_first");
+    let catlist = syscache::amop_list_by_opr::call(scratch.mcx(), opno)?;
+
+    for aform in &catlist {
+        if get_opmethod_canorder(aform.amopmethod)?
+            && amapi::index_am_translate_strategy::call(
+                aform.amopstrategy as i32,
+                aform.amopmethod,
+                aform.amopfamily,
+                true,
+            )? == COMPARE_EQ
+        {
+            return Ok(Some(aform.amopfamily));
+        }
+    }
+
+    Ok(None)
+}
+
 /// `get_compatible_hash_operators(opno, &lhs_opno, &rhs_opno)` (lsyscache.c).
 /// This seam always requests both LHS and RHS, so the C branches gated on a
 /// NULL `lhs_opno`/`rhs_opno` do not apply.

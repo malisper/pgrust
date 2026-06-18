@@ -895,6 +895,9 @@ pub fn init_seams() {
     // Same `root`-threading shape as the equivclass-ext seam; var.c is the owner.
     use backend_optimizer_util_joininfo_ext_seams as joinext;
     joinext::pull_varnos_expr::set(seam_eqext_pull_varnos);
+    // `pull_var_clause((Node *) expr, flags)` over a rootless `&Expr` — same
+    // var.c owner, same shape as the equivclass-ext leg above.
+    joinext::pull_var_clause_expr::set(seam_eqext_pull_var_clause);
 
     // clauses.c's root-aware `NumRelids(root, clause)` (path-small.c's
     // mark_index_clause_usable / clauselist_selectivity ride this). The rootless

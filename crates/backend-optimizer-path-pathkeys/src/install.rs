@@ -83,4 +83,11 @@ pub fn init_seams() {
     // NOTE: `ec_must_be_redundant_left`/`_right` are EquivalenceClass macro
     // helpers (EC_MUST_BE_REDUNDANT, equivclass.c), NOT pathkeys.c functions —
     // left for the equivclass owner to install.
+
+    // relnode.c reaches `has_useful_pathkeys(root, rel)` (pathkeys.c, owned here)
+    // through its no-owner consumer-side ext seam crate. The ext seam keys the
+    // rel by `RelId`; resolve it to the `RelOptInfo` the owner body takes.
+    backend_optimizer_util_relnode_ext_seams::has_useful_pathkeys::set(|root, rel| {
+        crate::has_useful_pathkeys(root, root.rel(rel))
+    });
 }

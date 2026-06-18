@@ -23,6 +23,7 @@ backend-optimizer-path-joinpath-seams = { path = "../backend-optimizer-path-join
 
 # Outward seams this crate calls.
 backend-optimizer-util-relnode-seams = { path = "../backend-optimizer-util-relnode-seams" }
+backend-optimizer-util-relnode-ext-seams = { path = "../backend-optimizer-util-relnode-ext-seams" }
 backend-optimizer-path-equivclass-seams = { path = "../backend-optimizer-path-equivclass-seams" }
 backend-optimizer-path-equivclass = { path = "../backend-optimizer-path-equivclass" }
 backend-optimizer-path-indxpath-seams = { path = "../backend-optimizer-path-indxpath-seams" }

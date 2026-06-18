@@ -110,6 +110,14 @@ pub fn init_seams() {
             .expect("contain_volatile_functions")
     });
 
+    // joininfo.c / restrictinfo.c reach `contain_leaked_vars((Node *) clause)`
+    // (clauses.c) over a rootless `&Expr` through the joininfo-ext consumer-side
+    // seam crate (no owner directory). clauses.c owns it; the grounded impl
+    // takes `Option<&Expr>` (the C `Node *clause`), so `Some(clause)`.
+    backend_optimizer_util_joininfo_ext_seams::contain_leaked_vars::set(|clause| {
+        grounded::contain_leaked_vars(Some(clause))
+    });
+
     // clauses.c's clause-classification predicates declared in path-small-seams
     // (path-small.c's clauselist_selectivity / restriction analysis ride them).
     // The grounded impls take `Option<&Expr>` (the C `Node *clause`, possibly

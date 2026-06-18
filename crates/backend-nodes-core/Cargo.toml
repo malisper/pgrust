@@ -45,3 +45,5 @@ backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type
 # (this owner). Leaf seam crate — no cycle.
 backend-optimizer-path-costsize-seams = { path = "../backend-optimizer-path-costsize-seams" }
 backend-optimizer-path-equivclass-ext-seams = { path = "../backend-optimizer-path-equivclass-ext-seams" }
+backend-optimizer-util-joininfo-ext-seams = { path = "../backend-optimizer-util-joininfo-ext-seams" }
+backend-optimizer-util-relnode-ext-seams = { path = "../backend-optimizer-util-relnode-ext-seams" }

@@ -49,8 +49,14 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `list_length(rte->eref->colnames)` — number of column aliases of the RTE
-    /// at the given RT index (relnode.c uses this to size attr arrays).
-    pub fn rte_eref_colnames_len(root: &PlannerInfo, rti: u32) -> i32
+    /// at the given RT index (relnode.c uses this to size attr arrays). Threads
+    /// the planner-run resolver so the RTE is reached through `planner_rt_fetch`
+    /// like the rest of the `rte_*` projections (owner: rte-seams).
+    pub fn rte_eref_colnames_len<'mcx>(
+        run: &PlannerRun<'mcx>,
+        root: &PlannerInfo,
+        rti: u32,
+    ) -> i32
 );
 
 /* ---- initsplan.c / inherit.c / allpaths.c (child-rel quals) ------------ */
@@ -68,8 +74,14 @@ seam_core::seam!(
     ) -> PgResult<bool>
 );
 seam_core::seam!(
-    /// `mark_dummy_rel(rel)` (allpaths.c) — mark a relation as proven empty.
-    pub fn mark_dummy_rel(root: &mut PlannerInfo, rel: RelId) -> PgResult<()>
+    /// `mark_dummy_rel(rel)` (joinrels.c) — mark a relation as proven empty.
+    /// Threads the planner-run resolver (`run`): the joinrels.c body adds a dummy
+    /// path which reaches `add_path`/cost helpers keyed on `&PlannerRun<'mcx>`.
+    pub fn mark_dummy_rel<'mcx>(
+        root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
+        rel: RelId,
+    ) -> PgResult<()>
 );
 
 /* ---- placeholder.c ----------------------------------------------------- */
