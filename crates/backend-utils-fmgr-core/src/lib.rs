@@ -2336,13 +2336,14 @@ fn ref_out_to_datum<'mcx>(
 ) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
     use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
     match ref_result {
-        // A by-reference result: materialize the (flattened, for an expanded
-        // object) referent bytes into `mcx`. A cstring crosses NUL-terminated.
-        Some(RefPayload::Cstring(s)) => {
-            let mut bytes = s.into_bytes();
-            bytes.push(0);
-            Ok(CanonDatum::ByRef(mcx::slice_in(mcx, &bytes)?))
-        }
+        // A `cstring`-typed result (e.g. a type's output function) stays a
+        // canonical `Cstring` so a downstream consumer that reads its arg via the
+        // `cstring` lane (`PG_GETARG_CSTRING` → `RefPayload::Cstring`) sees it —
+        // notably the input function in an I/O coercion (`text::bool` =
+        // textout→boolin). Flattening it to `ByRef` here would re-marshal it as a
+        // `Varlena` arg (`datum_to_ref_arg`) and the input function's
+        // `as_cstring()` would miss it.
+        Some(RefPayload::Cstring(s)) => Ok(CanonDatum::Cstring(s)),
         // A composite result reconstructs into the canonical `Composite` arm
         // (C: the `HeapTupleHeader` Datum is a fully-formed tuple, not raw
         // varlena bytes) so downstream consumers see the row, not bytes.

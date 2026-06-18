@@ -803,38 +803,49 @@ fn iocoerce_core<'mcx>(
     state: &mut ExprState<'mcx>,
     op: usize,
     safe: bool,
+    mcx: mcx::Mcx<'mcx>,
 ) -> PgResult<()> {
     let (out_oid, out_coll, in_oid, in_coll, in_strict, in_args) =
         iocoerce_step_inputs(state, op);
     let (resvalue_id, _resnull_id) = res_cells(state, op);
-    let cur = state.result_cells.get(resvalue_id);
+    let cur = state.result_cells.get(resvalue_id).clone();
 
     // /* call output function (similar to OutputFunctionCall) */
     // if (*op->resnull) str = NULL; else { args[0]=*resvalue; str = invoke(out); }
-    let str_word: Datum = if cur.isnull {
-        Datum::from_usize(0) // NULL cstring
+    //
+    // The output function returns a `cstring` on the by-reference lane; dispatch
+    // through the canonical-Datum lane so the cstring referent is materialized
+    // into `mcx` and can be handed to the input function's by-reference arg slot
+    // (the bare-word lane would drop it — WALL: "bool fn: cstring arg missing
+    // from by-ref lane").
+    let str_datum: Option<DatumV<'mcx>> = if cur.isnull {
+        None // str = NULL
     } else {
-        let out_call_args = [types_datum::NullableDatum {
-            value: word_of(&cur.value),
-            isnull: false,
-        }];
-        let (word, _isnull) = function_call_invoke::call(out_oid, out_coll, &out_call_args)?;
+        let out_call_args = [cur.value.clone()];
+        let (val, _isnull) =
+            function_call_invoke_datum::call(mcx, out_oid, out_coll, &out_call_args)?;
         // Assert(!fcinfo_out->isnull) — output functions never return NULL.
-        word
+        Some(val)
     };
 
     // /* call input function (similar to InputFunctionCall[Safe]) */
     // if (!finfo_in->fn_strict || str != NULL) { args[0]={str, *resnull}; ... }
-    let str_is_null = str_word.as_usize() == 0;
+    let str_is_null = str_datum.is_none();
     if !in_strict || !str_is_null {
         // fcinfo_in->args[0].value = PointerGetDatum(str);
         // fcinfo_in->args[0].isnull = *op->resnull;
         // (args[1] = typioparam, args[2] = -1 are already preloaded.)
-        let mut in_call_args = in_args;
-        in_call_args[0] = types_datum::NullableDatum {
-            value: str_word,
-            isnull: cur.isnull,
-        };
+        // Build the input call frame on the canonical-Datum lane: the cstring
+        // referent in args[0], the preloaded by-value constants (typioparam, -1)
+        // re-wrapped as by-value Datums.
+        let mut in_datum_args: Vec<DatumV<'mcx>> = Vec::with_capacity(in_args.len());
+        in_datum_args.push(match &str_datum {
+            Some(d) => d.clone(),
+            None => DatumV::null(),
+        });
+        for nd in in_args.iter().skip(1) {
+            in_datum_args.push(DatumV::from_usize(nd.value.as_usize()));
+        }
 
         if safe {
             // EEOP_IOCOERCE_SAFE reads SOFT_ERROR_OCCURRED(fcinfo_in->context)
@@ -843,7 +854,7 @@ fn iocoerce_core<'mcx>(
             // the not-yet-ported elog/ErrorSaveContext layer (the IoCoerce
             // frame's context stays None until that lands), so this safe variant
             // cannot observe the soft error.
-            let _ = (in_oid, in_coll, in_call_args);
+            let _ = (in_oid, in_coll, in_datum_args);
             panic!(
                 "ExecEvalCoerceViaIOSafe: the input function runs under a soft-error \
                  ErrorSaveContext (fcinfo_in->context) and the arm reads \
@@ -854,14 +865,12 @@ fn iocoerce_core<'mcx>(
             );
         }
 
-        let (word, isnull) = function_call_invoke::call(in_oid, in_coll, &in_call_args)?;
+        let (value, isnull) =
+            function_call_invoke_datum::call(mcx, in_oid, in_coll, &in_datum_args)?;
         // *op->resvalue = d;  (resnull is unchanged: null iff str was NULL).
         state.result_cells.set(
             resvalue_id,
-            ResultCell {
-                value: DatumV::from_usize(word.as_usize()),
-                isnull,
-            },
+            ResultCell { value, isnull },
         );
     }
     Ok(())
@@ -872,9 +881,9 @@ fn iocoerce_core<'mcx>(
 pub fn ExecEvalCoerceViaIO<'mcx>(
     state: &mut ExprState<'mcx>,
     op: usize,
-    _estate: &mut EStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    iocoerce_core(state, op, false)
+    iocoerce_core(state, op, false, estate.es_query_cxt)
 }
 
 /// `ExecEvalCoerceViaIOSafe(ExprState *state, ExprEvalStep *op)` — output-then-
@@ -884,8 +893,7 @@ pub fn ExecEvalCoerceViaIOSafe<'mcx>(
     op: usize,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    let _ = estate;
-    iocoerce_core(state, op, true)
+    iocoerce_core(state, op, true, estate.es_query_cxt)
 }
 
 /// `ExecEvalSQLValueFunction(ExprState *state, ExprEvalStep *op)` — evaluate
