@@ -3530,6 +3530,15 @@ fn create_modifytable_plan<'mcx>(
         panic!("create_modifytable_plan: MERGE action/join-condition lists not yet ported");
     }
 
+    // Resolve the ON CONFLICT clause (carried as a presence marker in the path)
+    // into the executor-shaped plan data. infer_arbiter_indexes needs &mut root,
+    // so do it here before recursing into the subplan. (createplan.c:7220)
+    let onconflict_data: Option<OnConflictPlanData<'mcx>> = if onconflict.is_some() {
+        Some(resolve_onconflict_plan_data(mcx, root, run)?)
+    } else {
+        None
+    };
+
     // Subplan must produce exactly the specified tlist.
     let mut subplan = create_plan_recurse(mcx, root, run, subpath, CP_EXACT_TLIST)?;
 
@@ -3552,7 +3561,7 @@ fn create_modifytable_plan<'mcx>(
         update_colnos_lists,
         returning_lists,
         row_marks,
-        onconflict,
+        onconflict_data,
         epq_param,
     )?;
 
@@ -3579,7 +3588,7 @@ fn make_modifytable<'mcx>(
     update_colnos_lists: Vec<Vec<AttrNumber>>,
     returning_lists: Vec<Vec<NodeId>>,
     row_marks: Vec<NodeId>,
-    onconflict: Option<NodeId>,
+    onconflict: Option<OnConflictPlanData<'mcx>>,
     epq_param: i32,
 ) -> PgResult<types_nodes::modifytable::ModifyTable<'mcx>> {
     use types_nodes::modifytable::ModifyTable;
@@ -3595,14 +3604,6 @@ fn make_modifytable<'mcx>(
                 update_colnos_lists.is_empty()
             }
     );
-
-    if onconflict.is_some() {
-        panic!(
-            "make_modifytable: INSERT ... ON CONFLICT not yet ported (needs OnConflictExpr \
-             resolution, extract_update_targetlist_colnos over onConflictSet, and \
-             infer_arbiter_indexes)"
-        );
-    }
 
     // resultRelations -> integer List of RT indexes.
     let result_relations_field: Option<PgVec<'mcx, Index>> = if result_relations.is_empty() {
@@ -3713,6 +3714,37 @@ fn make_modifytable<'mcx>(
         p
     };
 
+    // Project the resolved ON CONFLICT data into the node fields, or the empty
+    // !onconflict defaults (createplan.c:7211).
+    let (
+        oc_action,
+        oc_arbiter_indexes,
+        oc_set,
+        oc_cols,
+        oc_where,
+        oc_excl_rel_rti,
+        oc_excl_rel_tlist,
+    ) = match onconflict {
+        None => (
+            types_nodes::nodes::OnConflictAction::ONCONFLICT_NONE,
+            None,
+            None,
+            None,
+            None,
+            0,
+            None,
+        ),
+        Some(d) => (
+            d.action,
+            Some(d.arbiter_indexes),
+            Some(d.on_conflict_set),
+            Some(d.on_conflict_cols),
+            Some(d.on_conflict_where),
+            d.excl_rel_rti,
+            Some(d.excl_rel_tlist),
+        ),
+    };
+
     let node = ModifyTable {
         plan: plan_base,
         operation: cmdtype_path_to_node(operation),
@@ -3730,18 +3762,123 @@ fn make_modifytable<'mcx>(
         fdwDirectModifyPlans: None,
         rowMarks: None,
         epqParam: epq_param,
-        // !onconflict branch: ON CONFLICT fields are all empty/none.
-        onConflictAction: types_nodes::nodes::OnConflictAction::ONCONFLICT_NONE,
-        arbiterIndexes: None,
-        onConflictSet: None,
-        onConflictCols: None,
-        onConflictWhere: None,
-        exclRelRTI: 0,
-        exclRelTlist: None,
+        // ON CONFLICT fields. !onconflict => all empty/none (createplan.c:7211).
+        onConflictAction: oc_action,
+        arbiterIndexes: oc_arbiter_indexes,
+        onConflictSet: oc_set,
+        onConflictCols: oc_cols,
+        onConflictWhere: oc_where,
+        exclRelRTI: oc_excl_rel_rti,
+        exclRelTlist: oc_excl_rel_tlist,
         mergeActionLists: None,
         mergeJoinConditions: None,
     };
     Ok(node)
+}
+
+/// Resolved, executor-shaped ON CONFLICT data, mirroring the
+/// `createplan.c:7220` else-branch field assignments. Built by
+/// [`resolve_onconflict_plan_data`] (which needs `&mut PlannerInfo` for
+/// `infer_arbiter_indexes`) and consumed by `make_modifytable`.
+struct OnConflictPlanData<'mcx> {
+    action: types_nodes::nodes::OnConflictAction,
+    arbiter_indexes: PgVec<'mcx, Oid>,
+    on_conflict_set: PgVec<'mcx, TargetEntry<'mcx>>,
+    on_conflict_cols: PgVec<'mcx, i32>,
+    on_conflict_where: PgVec<'mcx, Expr>,
+    excl_rel_rti: Index,
+    excl_rel_tlist: PgVec<'mcx, TargetEntry<'mcx>>,
+}
+
+/// Resolve `root->parse->onConflict` (an owned `OnConflictExpr`) into the
+/// executor-shaped `OnConflictPlanData`, mirroring `make_modifytable`'s
+/// else-branch (createplan.c:7220-7245):
+///   * onConflictSet TLEs are renumbered to consecutive resnos; the original
+///     target column numbers become `onConflictCols`
+///     (`extract_update_targetlist_colnos`);
+///   * onConflictWhere is the implicit-AND list of qual `Expr`s;
+///   * arbiterIndexes come from `infer_arbiter_indexes(root)`;
+///   * exclRelRTI / exclRelTlist are copied straight through.
+fn resolve_onconflict_plan_data<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+) -> PgResult<OnConflictPlanData<'mcx>> {
+    // Snapshot the owned OnConflictExpr out of parse (deep copy) so we can drop
+    // the borrow on root and still call infer_arbiter_indexes(&mut root).
+    let oc = {
+        let parse = run.resolve(root.parse);
+        let oc = parse
+            .onConflict
+            .as_deref()
+            .expect("resolve_onconflict_plan_data: parse->onConflict is None");
+        oc.clone_in(mcx)?
+    };
+
+    let action = oc.action;
+
+    // onConflictSet: list of TargetEntry nodes -> owned TLE vec, renumbered to
+    // consecutive resnos with the original resnos captured as onConflictCols.
+    let mut on_conflict_set: PgVec<'mcx, TargetEntry<'mcx>> =
+        vec_with_capacity_in(mcx, oc.onConflictSet.len())?;
+    let mut on_conflict_cols: PgVec<'mcx, i32> = vec_with_capacity_in(mcx, oc.onConflictSet.len())?;
+    let mut nextresno: AttrNumber = 1;
+    for n in oc.onConflictSet.iter() {
+        let tle = match n.as_ref() {
+            Node::TargetEntry(te) => te,
+            other => panic!("onConflictSet element is not a TargetEntry (got {:?})", other.tag()),
+        };
+        let mut tle = tle.clone_in(mcx)?;
+        if !tle.resjunk {
+            on_conflict_cols.push(tle.resno as i32);
+        }
+        tle.resno = nextresno;
+        nextresno += 1;
+        on_conflict_set.push(tle);
+    }
+
+    // onConflictWhere: modeled as the implicit-AND list of Expr fed to
+    // ExecInitQual. Flatten an AND tree / single qual into a Vec<Expr>.
+    let mut on_conflict_where: PgVec<'mcx, Expr> = PgVec::new_in(mcx);
+    if let Some(np) = oc.onConflictWhere.as_deref() {
+        let e = match np {
+            Node::Expr(e) => e.clone_in(mcx)?,
+            other => panic!("onConflictWhere is not an Expr (got {:?})", other.tag()),
+        };
+        for q in backend_nodes_core::makefuncs::make_ands_implicit(Some(e)) {
+            on_conflict_where.push(q);
+        }
+    }
+
+    // exclRelRTI / exclRelTlist (only meaningful for DO UPDATE; 0 / empty for
+    // DO NOTHING, which carries no EXCLUDED relation).
+    let excl_rel_rti = oc.exclRelIndex as Index;
+    let mut excl_rel_tlist: PgVec<'mcx, TargetEntry<'mcx>> =
+        vec_with_capacity_in(mcx, oc.exclRelTlist.len())?;
+    for n in oc.exclRelTlist.iter() {
+        let tle = match n.as_ref() {
+            Node::TargetEntry(te) => te,
+            other => panic!("exclRelTlist element is not a TargetEntry (got {:?})", other.tag()),
+        };
+        excl_rel_tlist.push(tle.clone_in(mcx)?);
+    }
+
+    // arbiterIndexes = infer_arbiter_indexes(root) (createplan.c:7242).
+    let arbiter_oids = backend_optimizer_util_plancat::infer_arbiter_indexes(run, root)?;
+    let mut arbiter_indexes: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, arbiter_oids.len())?;
+    for oid in arbiter_oids {
+        arbiter_indexes.push(oid);
+    }
+
+    Ok(OnConflictPlanData {
+        action,
+        arbiter_indexes,
+        on_conflict_set,
+        on_conflict_cols,
+        on_conflict_where,
+        excl_rel_rti,
+        excl_rel_tlist,
+    })
 }
 
 /// Map the path-layer `CmdType` (raw `u32`) to the plan-node `CmdType`.
