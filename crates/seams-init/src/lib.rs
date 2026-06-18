@@ -1369,16 +1369,15 @@ mod recurrence_guard {
         // installs it — the death-watch fd (`postmaster_alive_fds`) is
         // postmaster.c's own, so the `fcntl(.., F_SETFD, FD_CLOEXEC)` runs in the
         // postmaster crate and is consumed by miscinit's InitPostmasterChild.)
-        // DESIGN_DEBT: `initialize_fast_path_locks` is declared + consumed but the
-        // owner (backend-storage-lmgr-proc, audited) has no impl yet — it needs the
-        // lock.c fast-path lock table (per-PGPROC fpLockBits/fpRelId group layout)
-        // which has not landed. Pay down when lock.c fast-path locks land. See
-        // DESIGN_DEBT.md. (The clog.c group XID-status update set —
+        // (`initialize_fast_path_locks` RESOLVED: the C `InitializeFastPathLocks()`
+        // lives in postinit.c — declared in miscadmin.h, not proc.c — and is fully
+        // ported + installed by the postinit unit. The mis-homed
+        // backend-storage-lmgr-proc-seams duplicate decl was removed and ipci.c now
+        // calls the real postinit seam. The clog.c group XID-status update set —
         // clog_group_first_* / *_clog_group_* — was retired once clog.c
         // TransactionGroupUpdateXidStatus + procarray's InitProcGlobal arena landed;
         // those 13 seams are now installed by inward_seams over ProcGlobal->
         // clogGroupFirst + the per-PGPROC clogGroup* fields.)
-        ("backend_storage_lmgr_proc", "initialize_fast_path_locks"),
         // (has_bypassrls_privilege RESOLVED: the acl owner now installs it — a
         // superuser_arg short-circuit + AUTHOID-syscache `rolbypassrls` read, after
         // widening the AuthIdRow projection to carry rolbypassrls.)

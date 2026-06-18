@@ -15568,6 +15568,7 @@ dependencies = [
  "backend-utils-activity-waitevent-seams",
  "backend-utils-error",
  "backend-utils-hash-dynahash-seams",
+ "backend-utils-init-postinit-seams",
  "backend-utils-init-small-seams",
  "backend-utils-misc-guc-seams",
  "seam-core",

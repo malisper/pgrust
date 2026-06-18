@@ -32,6 +32,7 @@ backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-s
 backend-storage-ipc-dsm-registry-seams = { path = "../backend-storage-ipc-dsm-registry-seams" }
 backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }
 backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
+backend-utils-init-postinit-seams = { path = "../backend-utils-init-postinit-seams" }
 
 # ipci-seams-storage-access owners
 backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }

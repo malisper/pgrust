@@ -261,7 +261,9 @@ pub fn attach_shared_memory_structs() -> PgResult<()> {
 
     // In EXEC_BACKEND mode, backends don't inherit the number of fast-path
     // groups we calculated before setting the shmem up, so recalculate it.
-    proc::initialize_fast_path_locks::call();
+    // (C `InitializeFastPathLocks()` lives in postinit.c, declared in
+    // miscadmin.h — owned by the postinit unit, not proc.c.)
+    backend_utils_init_postinit_seams::initialize_fast_path_locks::call();
 
     create_or_attach_shmem_structs()?;
 

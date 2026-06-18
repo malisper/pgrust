@@ -1206,4 +1206,5 @@ pub fn init_seams() {
     backend_storage_freespace_seams::free_space_map_vacuum_range::set(|rel, start, end| {
         FreeSpaceMapVacuumRange(rel, start, end)
     });
+    backend_storage_freespace_seams::free_space_map_vacuum::set(|rel| FreeSpaceMapVacuum(rel));
 }

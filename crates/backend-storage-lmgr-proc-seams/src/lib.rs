@@ -510,13 +510,6 @@ seam_core::seam!(
     pub fn init_proc_global() -> types_error::PgResult<()>
 );
 
-seam_core::seam!(
-    /// `InitializeFastPathLocks()` (proc.c) — recompute the number of
-    /// fast-path lock groups; called from the EXEC_BACKEND attach path
-    /// (`AttachSharedMemoryStructs`). Owner unported; scaffolded slot.
-    pub fn initialize_fast_path_locks()
-);
-
 // --- clog group-commit PGPROC / ProcGlobal accessors (proc.h) ---------------
 //
 // The clog group-status-update optimization (`TransactionGroupUpdateXidStatus`
