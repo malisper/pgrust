@@ -529,6 +529,17 @@ fn format_type(type_id: Oid) -> PgResult<String> {
  * lookup_type_cache
  * ======================================================================== */
 
+/// `type_cache_syshash` — hash function compatible with the one-arg system
+/// cache hash function. In C this is the `HASHCTL.hash` callback for the
+/// `TypeCacheHash` table; its body is
+/// `GetSysCacheHashValue1(TYPEOID, ObjectIdGetDatum(type_id))`. The owned-value
+/// port keys `TypeCacheHash` by `Oid` directly, but the same per-`Oid`
+/// syscache hashvalue is recorded on each entry (`type_id_hash`) so the
+/// `TypeCacheTypCallback` invalidation can match on hashvalue exactly as C does.
+fn type_cache_syshash(type_id: Oid) -> PgResult<u32> {
+    lsyscache_seams::syscache_hash_value_typeoid::call(type_id)
+}
+
 /// `lookup_type_cache` — fetch/build the `TypeCacheEntry` for `type_id`,
 /// ensuring the fields requested by `flags` are computed. Returns nothing
 /// directly usable (the entry stays in the cache); callers read what they need
@@ -604,7 +615,7 @@ pub fn lookup_type_cache(type_id: Oid, flags: i32) -> PgResult<()> {
             );
         }
 
-        let type_id_hash = lsyscache_seams::syscache_hash_value_typeoid::call(type_id)?;
+        let type_id_hash = type_cache_syshash(type_id)?;
 
         with_state(|st| {
             let mut e = TypeCacheEntry::zeroed(type_id);
