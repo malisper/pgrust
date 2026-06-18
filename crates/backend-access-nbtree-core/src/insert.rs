@@ -1099,8 +1099,15 @@ fn _bt_check_unique<'mcx>(
             }
         }
 
-        let curhdr = index_tuple_header(&curitup);
-        if inposting && curposti < BTreeTupleGetNPosting(&curhdr) as i32 - 1 {
+        // C: `if (inposting && curposti < BTreeTupleGetNPosting(curitup) - 1)`.
+        // `curitup` is only valid (non-NULL) once we have read a page item this
+        // iteration; when `offset > maxoff` and we are not inside a posting
+        // list, `curitup` is still empty, so the C `&&` short-circuit never
+        // dereferences it. Mirror that: only read the header in the posting
+        // branch.
+        if inposting
+            && curposti < BTreeTupleGetNPosting(&index_tuple_header(&curitup)) as i32 - 1
+        {
             /* Advance to next TID in same posting list */
             curposti += 1;
             continue;
