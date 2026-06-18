@@ -633,6 +633,20 @@ fn seam_exec_copy_slot_heap_tuple<'mcx>(
     crate::slot_store_fetch::ExecCopySlotHeapTuple(mcx, estate.slot_data_mut(slot))
 }
 
+/// Seam `exec_force_store_formed_heap_tuple` (tuptable.h `ExecForceStoreHeapTuple`):
+/// store a full `FormedTuple` (header + user-data) into the slot regardless of
+/// its native format. The copy is consumed by value; `should_free` is a no-op
+/// in the owned model (the carrier drops here when not stored).
+fn seam_exec_force_store_formed_heap_tuple<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    slot: SlotId,
+    tuple: FormedTuple<'mcx>,
+    should_free: bool,
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    crate::slot_store_fetch::ExecForceStoreHeapTuple(mcx, tuple, estate.slot_data_mut(slot), should_free)
+}
+
 /// Seam `replace_cur_tuple_from_slot` (nodeSubplan.c):
 ///   `if (node->curTuple) heap_freetuple(node->curTuple);`
 ///   `node->curTuple = ExecCopySlotHeapTuple(slot);`
@@ -957,6 +971,7 @@ pub fn init_seams() {
     seams::exec_store_first_datum::set(seam_exec_store_first_datum);
     seams::store_virtual_values::set(seam_store_virtual_values);
     seams::exec_copy_slot_heap_tuple::set(seam_exec_copy_slot_heap_tuple);
+    seams::exec_force_store_formed_heap_tuple::set(seam_exec_force_store_formed_heap_tuple);
     // nodeSubplan curTuple copy + read (SubPlanState.curTuple is the owned
     // FormedTuple carrier produced by ExecCopySlotHeapTuple and deformed by
     // heap_getattr).

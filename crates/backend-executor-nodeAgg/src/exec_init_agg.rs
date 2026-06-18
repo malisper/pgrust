@@ -78,6 +78,7 @@ pub fn erase_agg_state<'mcx>(
 /// phase and grouping-set layout, hash-table and context creation.
 pub fn ExecInitAgg<'mcx>(
     node: &'mcx Agg<'mcx>,
+    plan_node: &'mcx types_nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     mut eflags: i32,
     mcx: Mcx<'mcx>,
@@ -92,10 +93,12 @@ pub fn ExecInitAgg<'mcx>(
 
     // create state structure
     let mut aggstate = alloc_in(mcx, AggStateData::new_in(mcx)?)?;
-    aggstate.ss.ps.plan = None; // C: aggstate->ss.ps.plan = (Plan *) node — the
-                                // owned PlanStateData.plan back-link is a Plan
-                                // handle the executor sets elsewhere; the Agg
-                                // node is reached via the Node enum.
+    // C: aggstate->ss.ps.plan = (Plan *) node — the plan back-link aliases the
+    // shared, read-only plan tree (the wrapping `Node::Agg`). The result
+    // projection (ExecAssignProjectionInfo -> ExecBuildProjectionInfo) reads its
+    // targetlist off this back-link via `Node::plan_head().targetlist`.
+    debug_assert!(matches!(plan_node, types_nodes::nodes::Node::Agg(_)));
+    aggstate.ss.ps.plan = Some(plan_node);
     // C: aggstate->ss.ps.ExecProcNode = ExecAgg;
     aggstate.ss.ps.ExecProcNode = Some(crate::node_lifecycle::exec_agg_node);
     aggstate.ss.ps.ExecProcNodeReal = Some(crate::node_lifecycle::exec_agg_node);

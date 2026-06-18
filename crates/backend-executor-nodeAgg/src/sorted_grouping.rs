@@ -19,17 +19,9 @@ fn tup_is_null(slot: Option<SlotId>, estate: &EStateData<'_>) -> bool {
 }
 
 /// `ReScanExprContext(econtext)` (execUtils.c) — reset the context's per-tuple
-/// memory and run any registered shutdown callbacks. Owned by
-/// `backend-executor-execUtils`; not yet wired through a seam (the scaffold
-/// carries the Agg econtexts as owned `ExprContext`, while execUtils's existing
-/// seams address contexts by `EcxtId`), so this is an unported callee.
-#[inline]
-fn rescan_expr_context_owned(_econtext_idx: i32) -> PgResult<()> {
-    panic!(
-        "ReScanExprContext (executor/execUtils.c) is not yet wired: \
-         backend-executor-execUtils owns it"
-    )
-}
+// ReScanExprContext is provided by backend-executor-execUtils via the installed
+// `re_scan_expr_context` seam (addresses the econtext by its EState-pool
+// EcxtId); the Agg driver calls it directly in `agg_retrieve_direct`.
 
 /// `ResetExprContext(econtext)` (executor/executor.h) — reset the context's
 /// per-tuple memory. Owned by `backend-executor-execUtils`; not yet wired (see
@@ -138,11 +130,17 @@ pub fn agg_retrieve_direct<'mcx>(
     let has_grouping_sets = cur_phase_numsets > 0;
     let mut num_grouping_sets = core::cmp::max(cur_phase_numsets, 1);
 
+    // econtext = aggstate->ss.ps.ps_ExprContext (the per-output-tuple context).
+    let econtext_id = aggstate
+        .ss
+        .ps
+        .ps_ExprContext
+        .expect("agg_retrieve_direct: ps_ExprContext not set");
+
     // We loop retrieving groups until we find one matching aggstate->ss.ps.qual.
     while !aggstate.agg_done {
         // ReScanExprContext(econtext);
-        let econtext_idx = -1; // ps_ExprContext, addressed by the owner
-        rescan_expr_context_owned(econtext_idx)?;
+        backend_executor_execUtils_seams::re_scan_expr_context::call(estate, econtext_id)?;
 
         // Determine how many grouping sets need to be reset at this boundary.
         let mut num_reset = if aggstate.projected_set >= 0
@@ -155,7 +153,12 @@ pub fn agg_retrieve_direct<'mcx>(
 
         // for (i = 0; i < numReset; i++) ReScanExprContext(aggstate->aggcontexts[i]);
         for i in 0..num_reset {
-            rescan_expr_context_owned(i)?;
+            let aggctx_id = aggstate
+                .aggcontexts
+                .as_ref()
+                .and_then(|v| v.get(i as usize).copied())
+                .expect("agg_retrieve_direct: aggcontexts[i] not set");
+            backend_executor_execUtils_seams::re_scan_expr_context::call(estate, aggctx_id)?;
         }
 
         // Check if input is complete and there are no more groups to project in
@@ -235,7 +238,11 @@ pub fn agg_retrieve_direct<'mcx>(
                     // Make a copy of the first input tuple; we will use this for
                     // comparisons (in group mode) and for projection.
                     // aggstate->grp_firstTuple = ExecCopySlotHeapTuple(outerslot);
-                    exec_copy_slot_heap_tuple(outerslot.unwrap())?;
+                    let copied = backend_executor_execTuples_seams::exec_copy_slot_heap_tuple::call(
+                        estate,
+                        outerslot.unwrap(),
+                    )?;
+                    aggstate.grp_first_tuple = Some(copied);
                 } else {
                     // outer plan produced no tuples at all
                     if has_grouping_sets {
@@ -273,7 +280,10 @@ pub fn agg_retrieve_direct<'mcx>(
             if aggstate.grp_first_tuple.is_some() {
                 // Store the copied first input tuple in the slot reserved for it.
                 // ExecForceStoreHeapTuple(aggstate->grp_firstTuple, firstSlot, true);
-                exec_force_store_heap_tuple(first_slot)?;
+                let first = aggstate.grp_first_tuple.take().unwrap();
+                backend_executor_execTuples_seams::exec_force_store_formed_heap_tuple::call(
+                    estate, first_slot, first, true,
+                )?;
                 aggstate.grp_first_tuple = None; // don't keep two pointers
 
                 // set up for first advance_aggregates call

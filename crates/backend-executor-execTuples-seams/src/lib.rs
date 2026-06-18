@@ -623,6 +623,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecForceStoreHeapTuple(tuple, slot, shouldFree)` (execTuples.c) taking
+    /// the full [`FormedTuple`](types_tuple::backend_access_common_heaptuple::FormedTuple)
+    /// carrier (header + user-data area) by value — the correct contract for a
+    /// copied tuple, since a bare `HeapTupleData` header does not carry the
+    /// tuple's data bytes. Targets the slot by pool id. Fallible on OOM.
+    pub fn exec_force_store_formed_heap_tuple<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        slot: types_nodes::SlotId,
+        tuple: types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+        should_free: bool,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ExecForceStoreMinimalTuple(mtup, slot, shouldFree)` (execTuples.c):
     /// store a `MinimalTuple` into the slot (forcing it through the slot's ops),
     /// taking ownership when `should_free`. Fallible on OOM.

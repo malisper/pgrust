@@ -11995,6 +11995,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-plan-planagg"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "backend-optimizer-util-clauses",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
 name = "backend-optimizer-plan-planner"
 version = "0.0.0"
 dependencies = [
@@ -12009,6 +12024,7 @@ dependencies = [
  "backend-optimizer-plan-createplan-seams",
  "backend-optimizer-plan-init-subselect",
  "backend-optimizer-plan-init-subselect-ext-seams",
+ "backend-optimizer-plan-planagg",
  "backend-optimizer-plan-planner-pc-seams",
  "backend-optimizer-plan-planner-seams",
  "backend-optimizer-plan-setrefs",
@@ -20390,7 +20406,9 @@ dependencies = [
  "backend-commands-collationcmds-seams",
  "backend-commands-dbcommands-seams",
  "backend-nodes-read-seams",
+ "backend-optimizer-prep-prepagg-seams",
  "backend-optimizer-util-clauses-seams",
+ "backend-parser-parse-agg-seams",
  "backend-storage-lmgr-lock-seams",
  "backend-utils-adt-amutils-seams",
  "backend-utils-adt-arrayfuncs-seams",
@@ -20402,6 +20420,7 @@ dependencies = [
  "backend-utils-cache-syscache-pc-seams",
  "backend-utils-cache-syscache-seams",
  "backend-utils-error",
+ "backend-utils-fmgr-fmgr-seams",
  "backend-utils-init-small-seams",
  "backend-utils-misc-guc-seams",
  "mcx",

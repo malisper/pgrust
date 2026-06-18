@@ -320,7 +320,10 @@ pub fn exec_init_node<'mcx>(
         // tag-checked erased `AggStateLive` carrier (#324/#165 keystone). The
         // `ExecInitAgg` result is unsized into that trait object here.
         Node::Agg(agg) => {
-            let s = backend_executor_nodeAgg::ExecInitAgg(agg, estate, eflags, mcx)?;
+            // Pass the wrapping `&Node` too so ExecInitAgg can set
+            // `aggstate->ss.ps.plan = (Plan *) node` (the plan back-link the
+            // result projection reads its targetlist from).
+            let s = backend_executor_nodeAgg::ExecInitAgg(agg, node, estate, eflags, mcx)?;
             let live = backend_executor_nodeAgg::erase_agg_state(s);
             alloc_in(mcx, PlanStateNode::Agg(live))?
         }

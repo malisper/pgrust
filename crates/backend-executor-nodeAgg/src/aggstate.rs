@@ -18,7 +18,7 @@ use types_core::fmgr::FmgrInfo;
 use types_core::primitive::{AttrNumber, Oid};
 use types_error::PgResult;
 use types_tuple::backend_access_common_heaptuple::Datum;
-use types_tuple::heaptuple::{HeapTupleData, TupleDescData};
+use types_tuple::heaptuple::TupleDescData;
 
 use types_nodes::bitmapset::Bitmapset;
 use types_nodes::execexpr::ExprState;
@@ -376,8 +376,12 @@ pub struct AggStateData<'mcx> {
     pub sort_slot: Option<SlotId>,
     /// `AggStatePerGroup *pergroups` — grouping-set-indexed per-group arrays.
     pub pergroups: Option<PgVec<'mcx, Option<PgVec<'mcx, AggStatePerGroupData<'mcx>>>>>,
-    /// `HeapTuple grp_firstTuple` — copy of first tuple of current group.
-    pub grp_first_tuple: Option<PgBox<'mcx, HeapTupleData<'mcx>>>,
+    /// `HeapTuple grp_firstTuple` — copy of first tuple of current group. The
+    /// owned model carries the full `FormedTuple` (header + user-data area, the
+    /// `ExecCopySlotHeapTuple` result), since a bare `HeapTupleData` header does
+    /// not hold the tuple's data bytes.
+    pub grp_first_tuple:
+        Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>,
     /// `bool table_filled`.
     pub table_filled: bool,
     /// `int num_hashes`.

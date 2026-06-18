@@ -451,12 +451,12 @@ pub fn build_pertrans_for_aggref<'mcx>(
             num_sort_cols = 0;
             num_distinct_cols = 0;
             pertrans.aggsortrequired = false;
-        } else if aggref.aggpresorted && aggref.aggdistinct.is_none() {
+        } else if aggref.aggpresorted && !aggdistinct_is_present(aggref) {
             sortlist = None;
             num_sort_cols = 0;
             num_distinct_cols = 0;
             pertrans.aggsortrequired = false;
-        } else if aggref.aggdistinct.is_some() {
+        } else if aggdistinct_is_present(aggref) {
             let dl = aggref.aggdistinct.as_deref();
             sortlist = dl;
             num_sort_cols = dl.map_or(0, |s| s.len()) as i32;
@@ -573,7 +573,7 @@ pub fn build_pertrans_for_aggref<'mcx>(
             pertrans.sort_nulls_first = Some(sort_nulls_first);
         }
 
-        if aggref.aggdistinct.is_some() {
+        if aggdistinct_is_present(aggref) {
             // Assert(numArguments > 0);
             // Assert(list_length(aggref->aggdistinct) == numDistinctCols);
             debug_assert!(num_arguments > 0);
@@ -617,6 +617,18 @@ pub fn build_pertrans_for_aggref<'mcx>(
 /// aggregate is a normal (`'n'`) aggregate.
 fn aggkind_is_ordered_set_lc(aggkind: i8) -> bool {
     aggkind != b'n' as i8
+}
+
+/// C's `if (aggref->aggdistinct)` truthiness: a `List *` is `NIL` (falsy) when
+/// empty. The owned model carries `aggdistinct` as `Option<PgVec<..>>` and a
+/// node converted from the planner wraps even the empty DISTINCT list as
+/// `Some([])`, so `is_some()` is NOT the right test — a plain `count(*)` (no
+/// DISTINCT) has an empty list. Present ⇔ `Some` and non-empty.
+fn aggdistinct_is_present(aggref: &Aggref<'_>) -> bool {
+    aggref
+        .aggdistinct
+        .as_deref()
+        .is_some_and(|d| !d.is_empty())
 }
 
 /// `list_length(list)` — element count of an optional `PgVec`-backed List.
