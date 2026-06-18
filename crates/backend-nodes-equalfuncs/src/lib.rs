@@ -1150,6 +1150,203 @@ pub fn equal_expr(a: &Expr, b: &Expr) -> bool {
     }
 }
 
+// ===========================================================================
+// Raw-grammar parse nodes (equalfuncs.funcs.c). Reached by `equal()` over the
+// untransformed parse tree — e.g. transformWindowFuncCall's de-duplication of
+// inline window specifications compares the WindowDef's partition/order clauses
+// (lists of SortBy carrying ColumnRef/A_Const/... expressions).
+// ===========================================================================
+
+/// `_equalColumnRef` (equalfuncs.funcs.c).
+fn equal_column_ref(
+    a: &types_nodes::rawnodes::ColumnRef<'_>,
+    b: &types_nodes::rawnodes::ColumnRef<'_>,
+) -> bool {
+    equal_node_list(&a.fields, &b.fields)
+    // location is COMPARE_LOCATION_FIELD (no-op).
+}
+
+/// `_equalParamRef` (equalfuncs.funcs.c).
+fn equal_param_ref(
+    a: &types_nodes::rawnodes::ParamRef,
+    b: &types_nodes::rawnodes::ParamRef,
+) -> bool {
+    a.number == b.number
+    // location is COMPARE_LOCATION_FIELD (no-op).
+}
+
+/// `_equalA_Expr` (equalfuncs.funcs.c).
+fn equal_a_expr(
+    a: &types_nodes::rawnodes::A_Expr<'_>,
+    b: &types_nodes::rawnodes::A_Expr<'_>,
+) -> bool {
+    a.kind == b.kind
+        && equal_node_list(&a.name, &b.name)
+        && equal_opt_node(a.lexpr.as_ref(), b.lexpr.as_ref())
+        && equal_opt_node(a.rexpr.as_ref(), b.rexpr.as_ref())
+    // rexpr_list_start/rexpr_list_end/location are COMPARE_LOCATION_FIELD (no-op).
+}
+
+/// `_equalA_Const` (equalfuncs.c). `val` is the in-line value node, valid only
+/// when `!isnull`.
+fn equal_a_const(
+    a: &types_nodes::rawnodes::A_Const<'_>,
+    b: &types_nodes::rawnodes::A_Const<'_>,
+) -> bool {
+    if a.isnull != b.isnull {
+        return false;
+    }
+    if !a.isnull && !equal_opt_node(a.val.as_ref(), b.val.as_ref()) {
+        return false;
+    }
+    true
+    // location is COMPARE_LOCATION_FIELD (no-op).
+}
+
+/// `_equalFuncCall` (equalfuncs.funcs.c).
+fn equal_func_call(
+    a: &types_nodes::rawnodes::FuncCall<'_>,
+    b: &types_nodes::rawnodes::FuncCall<'_>,
+) -> bool {
+    equal_node_list(&a.funcname, &b.funcname)
+        && equal_node_list(&a.args, &b.args)
+        && equal_node_list(&a.agg_order, &b.agg_order)
+        && equal_opt_node(a.agg_filter.as_ref(), b.agg_filter.as_ref())
+        && match (a.over.as_ref(), b.over.as_ref()) {
+            (None, None) => true,
+            (Some(x), Some(y)) => equal_window_def(x, y),
+            _ => false,
+        }
+        && a.agg_within_group == b.agg_within_group
+        && a.agg_star == b.agg_star
+        && a.agg_distinct == b.agg_distinct
+        && a.func_variadic == b.func_variadic
+    // funcformat is COMPARE_COERCIONFORM_FIELD (no-op); location no-op.
+}
+
+/// `_equalA_Star` (equalfuncs.funcs.c) — no fields.
+fn equal_a_star(
+    _a: &types_nodes::rawnodes::A_Star,
+    _b: &types_nodes::rawnodes::A_Star,
+) -> bool {
+    true
+}
+
+/// `_equalA_Indices` (equalfuncs.funcs.c).
+fn equal_a_indices(
+    a: &types_nodes::rawnodes::A_Indices<'_>,
+    b: &types_nodes::rawnodes::A_Indices<'_>,
+) -> bool {
+    a.is_slice == b.is_slice
+        && equal_opt_node(a.lidx.as_ref(), b.lidx.as_ref())
+        && equal_opt_node(a.uidx.as_ref(), b.uidx.as_ref())
+}
+
+/// `_equalA_Indirection` (equalfuncs.funcs.c).
+fn equal_a_indirection(
+    a: &types_nodes::rawnodes::A_Indirection<'_>,
+    b: &types_nodes::rawnodes::A_Indirection<'_>,
+) -> bool {
+    equal_opt_node(a.arg.as_ref(), b.arg.as_ref())
+        && equal_node_list(&a.indirection, &b.indirection)
+}
+
+/// `_equalA_ArrayExpr` (equalfuncs.funcs.c).
+fn equal_a_array_expr(
+    a: &types_nodes::rawnodes::A_ArrayExpr<'_>,
+    b: &types_nodes::rawnodes::A_ArrayExpr<'_>,
+) -> bool {
+    equal_node_list(&a.elements, &b.elements)
+    // list_start/list_end/location are COMPARE_LOCATION_FIELD (no-op).
+}
+
+/// `_equalTypeName` (equalfuncs.funcs.c).
+fn equal_type_name(
+    a: &types_nodes::rawnodes::TypeName<'_>,
+    b: &types_nodes::rawnodes::TypeName<'_>,
+) -> bool {
+    equal_node_list(&a.names, &b.names)
+        && a.typeOid == b.typeOid
+        && a.setof == b.setof
+        && a.pct_type == b.pct_type
+        && equal_node_list(&a.typmods, &b.typmods)
+        && a.typemod == b.typemod
+        && equal_node_list(&a.arrayBounds, &b.arrayBounds)
+    // location is COMPARE_LOCATION_FIELD (no-op).
+}
+
+/// `_equalTypeCast` (equalfuncs.funcs.c).
+fn equal_type_cast(
+    a: &types_nodes::rawnodes::TypeCast<'_>,
+    b: &types_nodes::rawnodes::TypeCast<'_>,
+) -> bool {
+    equal_opt_node(a.arg.as_ref(), b.arg.as_ref())
+        && match (a.typeName.as_ref(), b.typeName.as_ref()) {
+            (None, None) => true,
+            (Some(x), Some(y)) => equal_type_name(x, y),
+            _ => false,
+        }
+    // location is COMPARE_LOCATION_FIELD (no-op).
+}
+
+/// `_equalCollateClause` (equalfuncs.funcs.c).
+fn equal_collate_clause(
+    a: &types_nodes::rawnodes::CollateClause<'_>,
+    b: &types_nodes::rawnodes::CollateClause<'_>,
+) -> bool {
+    equal_opt_node(a.arg.as_ref(), b.arg.as_ref())
+        && equal_node_list(&a.collname, &b.collname)
+    // location is COMPARE_LOCATION_FIELD (no-op).
+}
+
+/// `_equalResTarget` (equalfuncs.funcs.c).
+fn equal_res_target(
+    a: &types_nodes::rawnodes::ResTarget<'_>,
+    b: &types_nodes::rawnodes::ResTarget<'_>,
+) -> bool {
+    equalstr(a.name.as_deref(), b.name.as_deref())
+        && equal_node_list(&a.indirection, &b.indirection)
+        && equal_opt_node(a.val.as_ref(), b.val.as_ref())
+    // location is COMPARE_LOCATION_FIELD (no-op).
+}
+
+/// `_equalMultiAssignRef` (equalfuncs.funcs.c).
+fn equal_multi_assign_ref(
+    a: &types_nodes::rawnodes::MultiAssignRef<'_>,
+    b: &types_nodes::rawnodes::MultiAssignRef<'_>,
+) -> bool {
+    equal_opt_node(a.source.as_ref(), b.source.as_ref())
+        && a.colno == b.colno
+        && a.ncolumns == b.ncolumns
+}
+
+/// `_equalSortBy` (equalfuncs.funcs.c).
+fn equal_sort_by(
+    a: &types_nodes::rawnodes::SortBy<'_>,
+    b: &types_nodes::rawnodes::SortBy<'_>,
+) -> bool {
+    equal_opt_node(a.node.as_ref(), b.node.as_ref())
+        && a.sortby_dir == b.sortby_dir
+        && a.sortby_nulls == b.sortby_nulls
+        && equal_node_list(&a.useOp, &b.useOp)
+    // location is COMPARE_LOCATION_FIELD (no-op).
+}
+
+/// `_equalWindowDef` (equalfuncs.funcs.c).
+fn equal_window_def(
+    a: &types_nodes::rawnodes::WindowDef<'_>,
+    b: &types_nodes::rawnodes::WindowDef<'_>,
+) -> bool {
+    equalstr(a.name.as_deref(), b.name.as_deref())
+        && equalstr(a.refname.as_deref(), b.refname.as_deref())
+        && equal_node_list(&a.partitionClause, &b.partitionClause)
+        && equal_node_list(&a.orderClause, &b.orderClause)
+        && a.frameOptions == b.frameOptions
+        && equal_opt_node(a.startOffset.as_ref(), b.startOffset.as_ref())
+        && equal_opt_node(a.endOffset.as_ref(), b.endOffset.as_ref())
+    // location is COMPARE_LOCATION_FIELD (no-op).
+}
+
 /// `equal(a, b)` over two general `Node *`: the full `equalfuncs.c` switch. The
 /// `a == b` / one-NULL early returns are the caller's concern (Rust references
 /// are always non-null); the `nodeTag(a) != nodeTag(b)` rule is the
@@ -1194,6 +1391,24 @@ pub fn equal_node(a: &Node<'_>, b: &Node<'_>) -> bool {
         (Node::CommonTableExpr(x), Node::CommonTableExpr(y)) => equal_common_table_expr(x, y),
         (Node::SetOperationStmt(x), Node::SetOperationStmt(y)) => equal_set_operation_stmt(x, y),
         (Node::Alias(x), Node::Alias(y)) => equal_alias(x, y),
+        // Raw-grammar parse nodes (equalfuncs.funcs.c). Reached by `equal()` over
+        // an untransformed parse tree (e.g. transformWindowFuncCall window dedup).
+        (Node::ColumnRef(x), Node::ColumnRef(y)) => equal_column_ref(x, y),
+        (Node::ParamRef(x), Node::ParamRef(y)) => equal_param_ref(x, y),
+        (Node::A_Expr(x), Node::A_Expr(y)) => equal_a_expr(x, y),
+        (Node::A_Const(x), Node::A_Const(y)) => equal_a_const(x, y),
+        (Node::FuncCall(x), Node::FuncCall(y)) => equal_func_call(x, y),
+        (Node::A_Star(x), Node::A_Star(y)) => equal_a_star(x, y),
+        (Node::A_Indices(x), Node::A_Indices(y)) => equal_a_indices(x, y),
+        (Node::A_Indirection(x), Node::A_Indirection(y)) => equal_a_indirection(x, y),
+        (Node::A_ArrayExpr(x), Node::A_ArrayExpr(y)) => equal_a_array_expr(x, y),
+        (Node::TypeName(x), Node::TypeName(y)) => equal_type_name(x, y),
+        (Node::TypeCast(x), Node::TypeCast(y)) => equal_type_cast(x, y),
+        (Node::CollateClause(x), Node::CollateClause(y)) => equal_collate_clause(x, y),
+        (Node::ResTarget(x), Node::ResTarget(y)) => equal_res_target(x, y),
+        (Node::MultiAssignRef(x), Node::MultiAssignRef(y)) => equal_multi_assign_ref(x, y),
+        (Node::SortBy(x), Node::SortBy(y)) => equal_sort_by(x, y),
+        (Node::WindowDef(x), Node::WindowDef(y)) => equal_window_def(x, y),
         // Different tags are never equal.
         (a, b) if a.node_tag() != b.node_tag() => false,
         // Same-tag node family not yet reachable through equal() in the ported
