@@ -709,7 +709,15 @@ seam_core::seam!(
     /// `Ok(Some(datum))` on success, `Ok(None)` when the soft-error context
     /// caught a conversion error (C: returns `false`), or `Err` for a hard
     /// `ereport(ERROR)`.
-    pub fn input_function_call_safe(
+    ///
+    /// The returned `DatumWord` is C's bare `Datum`: for a by-value element it
+    /// is the machine word; for a by-reference element (text/name/numeric/…)
+    /// it is a pointer to the input function's flattened result, which the
+    /// owner allocates into the caller-supplied `mcx` (C's
+    /// `CurrentMemoryContext`, here `array_in`'s build arena) so the pointer
+    /// stays valid until `CopyArrayEls` copies the on-disk bytes out.
+    pub fn input_function_call_safe<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         function_id: Oid,
         str_: &str,
         typioparam: Oid,
@@ -740,10 +748,19 @@ seam_core::seam!(
     /// `Err` carries the strict-null `elog` and whatever the output function
     /// raises. (Array-element form; distinct from the `Datum`-based
     /// `output_function_call` above.)
+    ///
+    /// `typlen` is the element type's `typlen` (`array_out`'s `my_extra->typlen`):
+    /// the by-reference [`ArrayElementDatum::ByRef`] bytes are the element's
+    /// verbatim on-disk image, but the fmgr by-reference boundary carries a
+    /// varlena (`typlen == -1`) *header-stripped*; the owner uses `typlen` to
+    /// strip the varlena length word before handing the payload to the output
+    /// function (a `cstring`, `typlen == -2`, or fixed-length by-ref element is
+    /// passed verbatim).
     pub fn array_output_function_call<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         function_id: Oid,
         value: ArrayElementDatum<'_>,
+        typlen: i32,
     ) -> PgResult<mcx::PgVec<'mcx, u8>>
 );
 
@@ -752,7 +769,14 @@ seam_core::seam!(
     /// `array_recv` drives it: call the element type's binary receive function
     /// on the element's wire bytes, returning the element `Datum`. `Err`
     /// carries whatever the receive function raises.
-    pub fn array_receive_function_call(
+    ///
+    /// As with `input_function_call_safe`, the returned `DatumWord` is C's bare
+    /// `Datum`: by-value elements travel as the word, by-reference elements as a
+    /// pointer to the receive function's flattened result, which the owner
+    /// allocates into the caller-supplied `mcx` (`array_recv`'s build arena) so
+    /// it stays valid until `CopyArrayEls` copies the on-disk bytes out.
+    pub fn array_receive_function_call<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         function_id: Oid,
         buf: &[u8],
         typioparam: Oid,

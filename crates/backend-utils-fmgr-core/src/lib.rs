@@ -2770,6 +2770,62 @@ fn fmgr_out_word(out: FmgrOut<'_>) -> Datum {
     }
 }
 
+/// The on-disk byte image of a by-reference element value, as the array build
+/// path (`arrayfuncs.c`'s `att_addlength_datum` / `ArrayCastAndSet`) expects to
+/// find behind the element `Datum` pointer: a real `struct varlena` (4-byte
+/// length header + payload) for a varlena type, the NUL-terminated bytes for a
+/// `cstring` type, or the already-header-ful image for a composite/expanded
+/// value.
+///
+/// The fmgr by-reference carriers (`RefPayload::Varlena`/`Cstring`) hold the
+/// *header-less* payload (this codebase's varlena convention — `cstring_to_text`
+/// returns the bytes only); the array on-disk format needs the C `text *` /
+/// `cstring` memory the input function would have palloc'd, so we re-stamp the
+/// varlena length word here. Composite/expanded payloads are already a flat
+/// Datum image (their first word is the `datum_len_` varlena header), so they
+/// flatten verbatim.
+fn byref_element_ondisk_image(payload: RefPayload) -> Vec<u8> {
+    match payload {
+        // varlena type: prepend the 4-byte SET_VARSIZE header over the payload.
+        RefPayload::Varlena(body) => {
+            let mut image = Vec::with_capacity(types_datum::varlena::VARHDRSZ + body.len());
+            image.resize(types_datum::varlena::VARHDRSZ, 0);
+            image.extend_from_slice(&body);
+            let total = image.len();
+            image[..types_datum::varlena::VARHDRSZ]
+                .copy_from_slice(&types_datum::varlena::set_varsize_4b(total));
+            image
+        }
+        // cstring type (typlen == -2): the element bytes are the C `char *`
+        // string with its terminating NUL, which `att_addlength_datum`/
+        // `ArrayCastAndSet` size with `strlen + 1`.
+        RefPayload::Cstring(s) => {
+            let mut bytes = s.into_bytes();
+            bytes.push(0);
+            bytes
+        }
+        // composite / expanded: already a flat, header-ful Datum image.
+        other => other.flatten(),
+    }
+}
+
+/// Materialize a by-reference [`FmgrOut`] element into `mcx` as its on-disk
+/// image and return a bare-word `Datum` pointing at those bytes — the C
+/// `InputFunctionCallSafe`/`ReceiveFunctionCall` bare-`Datum` return (a pointer
+/// into `CurrentMemoryContext`) the array build path dereferences. By-value
+/// results travel as the machine word. The leaked allocation stays alive in
+/// `mcx` for the rest of the caller's (`array_in`/`array_recv`) build.
+fn fmgr_out_element_word<'mcx>(mcx: Mcx<'mcx>, out: FmgrOut<'_>) -> PgResult<Datum> {
+    match out {
+        FmgrOut::ByVal(d) => Ok(canon_word(&d)),
+        FmgrOut::Ref(payload) => {
+            let image = byref_element_ondisk_image(payload);
+            let stored: &'mcx mut [u8] = mcx::slice_in(mcx, &image)?.leak();
+            Ok(Datum::from_usize(stored.as_ptr() as usize))
+        }
+    }
+}
+
 /// `InputFunctionCall(flinfo, str, typioparam, typmod)` seam (fmgr.c) for a
 /// hard-error caller: one-shot lookup by `function_id` + call of the text input
 /// function on `str` (`None` is C's NULL cstring). Returns the result as the
@@ -2823,14 +2879,13 @@ fn receive_function_call_seam(
 /// input function on the element substring `str_` under an internal soft-error
 /// context. `Ok(Some(word))` on success, `Ok(None)` when the conversion raised
 /// a soft error (C: `array_in` returns `Ok(None)`), `Err` on a hard error.
-fn input_function_call_safe_seam(
+fn input_function_call_safe_seam<'mcx>(
+    mcx: Mcx<'mcx>,
     function_id: Oid,
     str_: &str,
     typioparam: Oid,
     typmod: i32,
 ) -> PgResult<Option<Datum>> {
-    let ctx = MemoryContext::new("input_function_call_safe");
-    let mcx = ctx.mcx();
     let resolved = fmgr_info(mcx, function_id)?;
     // C drives the element input function with a soft-error context so a bad
     // element is caught rather than aborting; the caller only needs Some/None.
@@ -2844,7 +2899,19 @@ fn input_function_call_safe_seam(
         typmod,
         Some(&mut escontext),
     )?;
-    Ok(out.map(fmgr_out_word))
+    // C's `InputFunctionCallSafe` yields a bare `Datum`: a by-value scalar is
+    // the machine word; a by-reference element (text/name/numeric/…) is a
+    // pointer to the input function's palloc'd flattened result in
+    // `CurrentMemoryContext`. The caller (`array_in`) is the build context's
+    // owner, so materialize the by-reference payload's on-disk image into `mcx`
+    // (the caller's build arena) and return a `Datum` whose word is the pointer
+    // to those bytes — exactly what `att_addlength_datum`/`ArrayCastAndSet`
+    // dereference. The whole arena is reclaimed when the build context is
+    // dropped, mirroring C's per-context teardown.
+    match out {
+        None => Ok(None),
+        Some(o) => Ok(Some(fmgr_out_element_word(mcx, o)?)),
+    }
 }
 
 /// `pg_input_is_valid_common()` post-parse work (misc.c:804-814): given the
@@ -3586,6 +3653,7 @@ fn array_output_function_call_seam<'mcx>(
     mcx: Mcx<'mcx>,
     function_id: Oid,
     value: types_array::ArrayElementDatum<'_>,
+    typlen: i32,
 ) -> PgResult<PgVec<'mcx, u8>> {
     let resolved = fmgr_info(mcx, function_id)?;
     let s = match value {
@@ -3598,7 +3666,18 @@ fn array_output_function_call_seam<'mcx>(
             )?
         }
         types_array::ArrayElementDatum::ByRef(bytes) => {
-            let payload = RefPayload::Varlena(bytes.to_vec());
+            // `bytes` is the element's verbatim on-disk image. The fmgr
+            // by-reference boundary carries a varlena (`typlen == -1`) with its
+            // length header stripped (this codebase's `RefPayload::Varlena`
+            // convention — output functions read the header-less payload); a
+            // `cstring` (`typlen == -2`) or fixed-length by-ref element passes
+            // verbatim.
+            let payload = if typlen == -1 {
+                let off = types_datum::varlena::varhdrsz_of(bytes);
+                RefPayload::Varlena(bytes[off..].to_vec())
+            } else {
+                RefPayload::Varlena(bytes.to_vec())
+            };
             output_function_call_typed(
                 mcx,
                 &resolved.resolution,
@@ -3615,14 +3694,13 @@ fn array_output_function_call_seam<'mcx>(
 /// reader stores `PgVec<Datum>`); a by-reference element result has no bare-word
 /// home here and is reported loudly (`fmgr_out_word`), the correct frontier
 /// behaviour until the array reader carries by-reference element values.
-fn array_receive_function_call_seam(
+fn array_receive_function_call_seam<'mcx>(
+    mcx: Mcx<'mcx>,
     function_id: Oid,
     buf: &[u8],
     typioparam: Oid,
     typmod: i32,
 ) -> PgResult<Datum> {
-    let ctx = MemoryContext::new("array_receive_function_call");
-    let mcx = ctx.mcx();
     let resolved = fmgr_info(mcx, function_id)?;
     let out = receive_function_call_typed(
         mcx,
@@ -3632,7 +3710,12 @@ fn array_receive_function_call_seam(
         typioparam,
         typmod,
     )?;
-    Ok(fmgr_out_word(out))
+    // C's `ReceiveFunctionCall` yields a bare `Datum`: by-value the machine
+    // word, by-reference a pointer to the palloc'd flattened result. Mirror the
+    // input path — materialize a by-reference element's on-disk image into the
+    // caller's `mcx` (`array_recv`'s build arena) and return the pointer word
+    // `CopyArrayEls` dereferences.
+    fmgr_out_element_word(mcx, out)
 }
 
 /// `SendFunctionCall(sendproc, value)` as `array_send` drives it: the element

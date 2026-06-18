@@ -20,7 +20,7 @@ const VARLENA_SIZE_MASK: u32 = 0x3FFF_FFFF;
 /// `uint32` C stores in `va_header`. Big-endian builds store the length with
 /// the two tag bits on top (`(len) & 0x3FFFFFFF`); little-endian builds keep
 /// the tag bits in the low byte (`((uint32) (len)) << 2`).
-fn set_varsize_4b(len: usize) -> [u8; VARHDRSZ] {
+pub fn set_varsize_4b(len: usize) -> [u8; VARHDRSZ] {
     debug_assert!(len as u64 <= VARLENA_SIZE_MASK as u64);
     #[cfg(target_endian = "big")]
     let header = (len as u32) & VARLENA_SIZE_MASK;
@@ -38,6 +38,20 @@ fn varsize_4b(header: [u8; VARHDRSZ]) -> usize {
     #[cfg(target_endian = "little")]
     let len = (word >> 2) & VARLENA_SIZE_MASK;
     len as usize
+}
+
+/// The size of the length header in front of a `struct varlena` image (`bytes`
+/// addresses the start of the varlena): `VARHDRSZ_SHORT` (1) for the 1-byte
+/// short header (`VARATT_IS_1B`), else `VARHDRSZ` (4) for the standard 4-byte
+/// header. (Toast pointers / `VARATT_IS_1B_E` are not produced by the in-memory
+/// input functions whose results this trims, so they fall to the 1-byte case.)
+pub fn varhdrsz_of(bytes: &[u8]) -> usize {
+    if bytes.first().is_some_and(|b| b & 0x01 == 0x01) {
+        // VARATT_IS_1B: 1-byte short header (`varatt.h` `VARHDRSZ_SHORT`).
+        1
+    } else {
+        VARHDRSZ
+    }
 }
 
 /// An owned `struct varlena` image (`c.h`): the 4-byte length word followed by

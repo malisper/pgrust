@@ -650,13 +650,13 @@ fn read_array_str<'mcx>(
 
                 // Read the element's value, or check that NULL is allowed.
                 let value = if is_null {
-                    input_function_call_safe(meta, None, typmod)?
+                    input_function_call_safe(mcx, meta, None, typmod)?
                 } else {
                     let s = core::str::from_utf8(&elembuf).map_err(|_| {
                         PgError::error("invalid byte sequence for encoding")
                             .with_sqlstate(ERRCODE_INVALID_TEXT_REPRESENTATION)
                     })?;
-                    input_function_call_safe(meta, Some(s), typmod)?
+                    input_function_call_safe(mcx, meta, Some(s), typmod)?
                 };
                 let value = match value {
                     Some(v) => v,
@@ -871,7 +871,8 @@ fn ending_error(orig_str: &str) -> PgResult<Option<ArrayTok>> {
 /// &result)` (fmgr.c): convert one element's text (or NULL) to a `Datum` using
 /// the element type's input function, routed through the fmgr owner's seam.
 /// Returns `None` on a saved soft error (the C `false` return).
-fn input_function_call_safe(
+fn input_function_call_safe<'mcx>(
+    mcx: Mcx<'mcx>,
     meta: &ArrayElementIoData,
     value: Option<&str>,
     typmod: i32,
@@ -879,9 +880,12 @@ fn input_function_call_safe(
     // C calls `InputFunctionCallSafe(proc, NULL, ...)` for a NULL element; the
     // fmgr seam takes `&str`, and a NULL element's returned value is discarded
     // (the null is recorded in the bitmap, never stored), so the empty string
-    // stands in for the C NULL pointer here.
+    // stands in for the C NULL pointer here. `mcx` is `array_in`'s build arena
+    // (C's `CurrentMemoryContext`): a by-reference element's bytes are
+    // materialized there so the returned `Datum` pointer stays valid until
+    // `CopyArrayEls` copies them into the array image.
     let s = value.unwrap_or("");
-    fmgr::input_function_call_safe::call(meta.typiofunc, s, meta.typioparam, typmod)
+    fmgr::input_function_call_safe::call(mcx, meta.typiofunc, s, meta.typioparam, typmod)
 }
 
 // ---------------------------------------------------------------------------
@@ -959,7 +963,8 @@ pub fn array_out<'mcx>(mcx: Mcx<'mcx>, array: &[u8]) -> PgResult<PgVec<'mcx, u8>
             );
             data_ptr = new_off;
 
-            let rendered = fmgr::array_output_function_call::call(mcx, meta.typiofunc, itemvalue)?;
+            let rendered =
+                fmgr::array_output_function_call::call(mcx, meta.typiofunc, itemvalue, typlen)?;
             valstr = rendered;
 
             // count data plus backslashes; detect chars needing quotes.
@@ -1123,7 +1128,8 @@ pub fn array_to_text_elements<'mcx>(
             data_ptr = new_off;
 
             // value = OutputFunctionCall(&my_extra->proc, itemvalue);
-            let value = fmgr::array_output_function_call::call(mcx, meta.typiofunc, itemvalue)?;
+            let value =
+                fmgr::array_output_function_call::call(mcx, meta.typiofunc, itemvalue, typlen)?;
             out.push(Some(value));
         }
     }
@@ -1371,6 +1377,7 @@ fn read_array_binary<'mcx>(
             // element NULLs are recorded in the null bitmap, so the resulting
             // value is unused.)
             let value = fmgr::array_receive_function_call::call(
+                mcx,
                 meta.typiofunc,
                 &[],
                 meta.typioparam,
@@ -1389,6 +1396,7 @@ fn read_array_binary<'mcx>(
 
         // Now call the element's receiveproc.
         let value = fmgr::array_receive_function_call::call(
+            mcx,
             meta.typiofunc,
             elem,
             meta.typioparam,
