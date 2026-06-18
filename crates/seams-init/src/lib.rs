@@ -1608,46 +1608,33 @@ mod recurrence_guard {
         //
         // -- backend-commands-trigger (F1 firing/DDL leg still todo) --
         // DESIGN_DEBT (TD-TRIGGER-F1): trigger.c is CATALOG `merged` only for
-        // its F0 value-type keystone (the trigger value structs landed); F1 —
-        // the trigger firing logic + DDL (RemoveTriggerById / renametrig) — is
-        // still todo. The 23 accessor seams are keyed by the OPAQUE foreign
-        // handles `types_ri_triggers::{TriggerDataRef, TriggerRef,
-        // TupleTableSlotRef}` (u64 newtypes), which ri_triggers.c treats as
-        // never-deref'd foreign tokens (sanctioned semantic-opacity per the F0
-        // keystone note); the trigger manager's real value-typed TriggerData /
-        // Trigger / TupleTableSlot do not back these tokens, and inventing a
-        // token->value registry is forbidden. `RemoveTriggerById` / `renametrig`
-        // are the unported DDL legs (no body in the owner). `slot_getattr` here
-        // is the trigger-manager (handle) flavor ri_triggers.c calls — a
-        // distinct seam crate from execTuples::slot_getattr; it stays uninstalled
-        // until trigger F1 lands. Install + DELETE each as trigger F1 lands.
-        ("backend_commands_trigger", "called_as_trigger"),
-        ("backend_commands_trigger", "tg_event"),
-        ("backend_commands_trigger", "tg_relation_oid"),
-        ("backend_commands_trigger", "tg_relation_name"),
-        ("backend_commands_trigger", "tg_relation_namespace"),
-        ("backend_commands_trigger", "tg_relation_owner"),
-        ("backend_commands_trigger", "tg_relation_is_partitioned"),
-        ("backend_commands_trigger", "tg_relation_att_name"),
-        ("backend_commands_trigger", "tg_relation_att_type"),
-        ("backend_commands_trigger", "tg_relation_att_collation"),
+        // its F0 value-type keystone (the trigger value structs landed). The
+        // scalar `TriggerData` / `Trigger` field accessors ri_triggers.c reads
+        // (tg_event, tg_relation_{oid,name,namespace,owner,is_partitioned},
+        // RIAtt{Name,Type,Collation}, tg_trigger, tg_trig/newslot, trigger_*,
+        // called_as_trigger) are now installed: they resolve their handle to the
+        // live TriggerData on the current-trigger side-channel and read the field
+        // (crates/backend-commands-trigger/src/ri_accessors.rs) — the owned
+        // analogue of dereferencing fcinfo->context.
+        //
+        // What remains uninstalled below needs the per-row AFTER-trigger firing
+        // substrate (EState-owned slot materialization + heap-scan family) or the
+        // trigger-DDL family, both separate campaigns:
+        //   * tg_trigtuple / tg_newtuple — the OLD/NEW HeapTuple copies the
+        //     firing path leaves NULL (per-row fetch substrate).
+        //   * tg_relation_tuple_satisfies_snapshot_self, tg_relation (the live
+        //     heap Relation), slot_tid / slot_attisnull / slot_is_current_xact_tuple
+        //     / slot_getattr / pk_datum_image_eq — drive the table-AM / slot value
+        //     deform against the OLD/NEW TupleTableSlots, which AfterTriggerExecute
+        //     does not yet materialize (tg_trigslot/tg_newslot left NULL, per-row
+        //     fetch loud-panics).
+        //   * RemoveTriggerById / renametrig — the unported catalog-write DDL leg
+        //     (CreateTrigger family: systable scans over pg_trigger, renametrig
+        //     partition recursion, RangeVarGetRelidExtended callbacks).
+        // Install + DELETE each as that substrate / DDL family lands.
         ("backend_commands_trigger", "tg_relation_tuple_satisfies_snapshot_self"),
-        ("backend_commands_trigger", "tg_trigger"),
-        ("backend_commands_trigger", "tg_trigslot"),
-        ("backend_commands_trigger", "tg_newslot"),
         ("backend_commands_trigger", "tg_trigtuple"),
         ("backend_commands_trigger", "tg_newtuple"),
-        ("backend_commands_trigger", "trigger_constraint"),
-        ("backend_commands_trigger", "trigger_constrrelid"),
-        ("backend_commands_trigger", "trigger_constrindid"),
-        ("backend_commands_trigger", "trigger_name"),
-        // The live trigger carriers `commands/constraint.c`'s unique_key_recheck
-        // drives (the heap Relation + the OLD/NEW slot TID). Owned by the per-row
-        // AFTER-trigger firing substrate (AfterTriggerExecute re-resolves the
-        // Relation / materializes the slots), which is not yet ported — the
-        // firing engine builds the TriggerData with tg_relation/tg_trigslot/
-        // tg_newslot NULL and loud-panics on the per-row fetch. Install + DELETE
-        // when that substrate lands.
         ("backend_commands_trigger", "tg_relation"),
         ("backend_commands_trigger", "slot_tid"),
         ("backend_commands_trigger", "slot_attisnull"),
