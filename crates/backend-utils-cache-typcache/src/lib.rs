@@ -1290,7 +1290,7 @@ fn load_domaintype_info(type_id: Oid) -> PgResult<()> {
                 // Sort the items for this domain, so that CHECKs are applied in
                 // a deterministic order (dcs_cmp == strcmp on name).
                 if nccons.len() > 1 {
-                    nccons.sort_by(|a, b| a.name.cmp(&b.name));
+                    nccons.sort_by(dcs_cmp);
                 }
                 // Attach them to the overall list. Use lcons() semantics here
                 // because constraints of parent domains should be applied
@@ -1342,6 +1342,12 @@ fn load_domaintype_info(type_id: Oid) -> PgResult<()> {
     // Either way, the typcache entry's domain data is now valid.
     with_state(|st| st.entry_mut(type_id).flags |= TCFLAGS_CHECKED_DOMAIN_CONSTRAINTS);
     Ok(())
+}
+
+/// `dcs_cmp` — qsort comparison function for `DomainConstraintState`s, ordering
+/// by constraint name (`strcmp((*ca)->name, (*cb)->name)`).
+fn dcs_cmp(a: &DomainConstraintState, b: &DomainConstraintState) -> core::cmp::Ordering {
+    a.name.cmp(&b.name)
 }
 
 /// `decr_dcc_refcount` — decrement and free when no references remain. The
