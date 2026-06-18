@@ -11306,6 +11306,7 @@ dependencies = [
 name = "backend-nodes-copyfuncs"
 version = "0.0.0"
 dependencies = [
+ "backend-nodes-copyfuncs-pc-seams",
  "backend-nodes-copyfuncs-seams",
  "backend-nodes-macros",
  "backend-nodes-node-support",

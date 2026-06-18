@@ -13,6 +13,7 @@ mcx = { path = "../mcx" }
 types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
 backend-nodes-copyfuncs-seams = { path = "../backend-nodes-copyfuncs-seams" }
+backend-nodes-copyfuncs-pc-seams = { path = "../backend-nodes-copyfuncs-pc-seams" }
 
 [dev-dependencies]
 # The node-tree runtime traits + the `#[derive(PgNode)]` proc-macro, so the

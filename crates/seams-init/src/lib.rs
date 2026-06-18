@@ -1579,9 +1579,10 @@ mod recurrence_guard {
         // Query/PlannedStmt/RawStmt/Expr::clone_in into private MemoryContexts and
         // calls the value seams extract_query_dependencies_value /
         // expression_planner_with_deps_value instead of the opaque-token handle forms.)
-        // list_member_oid stays: still declared+called+uninstalled (a separate
-        // list.c primitive, not part of the plancache de-handle slice).
-        ("backend_nodes_copyfuncs", "list_member_oid"),
+        // (list_member_oid — now INSTALLED by backend-nodes-copyfuncs from its
+        //  init_seams(): the bare list.c:722 primitive is a linear OID-membership
+        //  scan over the caller-supplied `&[Oid]` slice, with no cross-crate
+        //  dependency, so the owner installs it directly. Entry DELETED.)
         //
         // -- backend-commands-trigger (F1 firing/DDL leg still todo) --
         // DESIGN_DEBT (TD-TRIGGER-F1): trigger.c is CATALOG `merged` only for

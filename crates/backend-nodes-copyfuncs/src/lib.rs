@@ -65,6 +65,12 @@ pub fn copyObject<'dst>(obj: &Node<'_>, dst: Mcx<'dst>) -> PgResult<Node<'dst>> 
 /// central [`Node::copy_node_in`] dispatch.
 pub fn init_seams() {
     backend_nodes_copyfuncs_seams::copy_object::set(|dst, n| n.copy_node_in(dst));
+    // `list_member_oid(list, datum)` (nodes/list.c:722): linear OID membership
+    // test over an OID `List`. The caller hands the OID list as a `&[Oid]`
+    // slice, so the `foreach` reduces to a slice scan.
+    backend_nodes_copyfuncs_pc_seams::list_member_oid::set(|list, oid| {
+        Ok(list.iter().any(|&x| x == oid))
+    });
 }
 
 // The tests need `std` (memory-context construction, `MemoryContext`, the seam
