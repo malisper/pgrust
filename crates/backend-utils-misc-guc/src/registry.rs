@@ -847,14 +847,22 @@ pub fn set_config_option(
         }
         None => {
             // RESET: newval = conf->reset_val (no re-validation), adopting the
-            // reset provenance. The reset_extra is not re-derived (C reuses
-            // reset_extra; here a None hook-extra is supplied to the assign).
+            // reset provenance. C reuses the stored `reset_extra` pointer; the
+            // model's `GucHookExtra` is a non-Clone `Box<dyn Any>` with no
+            // identity, so we re-derive an equivalent extra by running the check
+            // hook on the reset value (the check hooks are pure functions of the
+            // value — e.g. `check_datestyle`/`check_timezone` recompute the same
+            // `int myextra[2]`). This is what lets `RESET datestyle` fire its
+            // assign hook, which requires a non-NULL extra.
             let record = &reg.vars[idx];
             let gen = record.gen();
             source = gen.reset_source;
             context = gen.reset_scontext;
             srole = gen.reset_srole;
-            (reset_value(record), None)
+            match reset_value_and_extra(record, source) {
+                Ok(nv) => nv,
+                Err(e) => return reject(elevel, e),
+            }
         }
     };
 
@@ -947,6 +955,45 @@ fn reset_value(record: &GucVariable) -> config_var_val {
         GucVariable::Real(c) => config_var_val::Realval(c.reset_val),
         GucVariable::String(c) => config_var_val::Stringval(c.reset_val.clone()),
         GucVariable::Enum(c) => config_var_val::Enumval(c.reset_val),
+    }
+}
+
+/// The NULL-value RESET arm with a re-derived `extra`: `newval = conf->reset_val`
+/// plus the extra produced by running the variable's check hook on that value (C
+/// reuses the stored `conf->reset_extra`; we recompute an equivalent one because
+/// `GucHookExtra` is not `Clone`). The reset value is the already-canonicalized
+/// boot/SET value, so the check hook accepts it; on the off chance a hook rejects
+/// it the error is surfaced exactly like the SET path.
+fn reset_value_and_extra(
+    record: &GucVariable,
+    source: GucSource,
+) -> PgResult<(config_var_val, Option<GucHookExtra>)> {
+    match record {
+        GucVariable::Bool(c) => {
+            let mut v = c.reset_val;
+            let extra = call_bool_check_hook(c, &mut v, source)?;
+            Ok((config_var_val::Boolval(v), extra))
+        }
+        GucVariable::Int(c) => {
+            let mut v = c.reset_val;
+            let extra = call_int_check_hook(c, &mut v, source)?;
+            Ok((config_var_val::Intval(v), extra))
+        }
+        GucVariable::Real(c) => {
+            let mut v = c.reset_val;
+            let extra = call_real_check_hook(c, &mut v, source)?;
+            Ok((config_var_val::Realval(v), extra))
+        }
+        GucVariable::String(c) => {
+            let mut v = c.reset_val.clone();
+            let extra = call_string_check_hook(c, &mut v, source)?;
+            Ok((config_var_val::Stringval(v), extra))
+        }
+        GucVariable::Enum(c) => {
+            let mut v = c.reset_val;
+            let extra = call_enum_check_hook(c, &mut v, source)?;
+            Ok((config_var_val::Enumval(v), extra))
+        }
     }
 }
 
