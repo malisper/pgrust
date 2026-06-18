@@ -40,14 +40,33 @@ use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
 // Argument readers / result writers.
 // ---------------------------------------------------------------------------
 
-/// `PG_GETARG_NUMERIC(i)`: a `numeric` arg's full varlena byte image, read from
-/// the by-reference side channel (the boundary carries it un-stripped).
+/// `PG_GETARG_NUMERIC(i)`: a `numeric` arg's full varlena byte image.
+///
+/// By this codebase's varlena convention the fmgr by-reference lane carries only
+/// the header-LESS payload (`VARDATA_ANY`), but every `types_numeric` /
+/// `io`/`convert` accessor reads the on-disk `Numeric` starting at the 4-byte
+/// varlena length header (`NUMERIC_HEADER_SIZE` is measured from VARHDRSZ, like
+/// C). Re-stamp the 4-byte length header over the lane payload to reconstruct the
+/// header-ful image the cores expect (the inverse of [`ret_numeric`]'s strip).
 #[inline]
-fn arg_numeric<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    fcinfo
+fn arg_numeric(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Vec<u8> {
+    let payload = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
-        .expect("numeric fn: by-ref `numeric` arg missing from by-ref lane")
+        .expect("numeric fn: by-ref `numeric` arg missing from by-ref lane");
+    headerful_numeric(payload)
+}
+
+/// Prepend the 4-byte varlena length header over a header-LESS numeric lane
+/// payload, yielding the header-ful on-disk `Numeric` image the cores read.
+#[inline]
+fn headerful_numeric(payload: &[u8]) -> Vec<u8> {
+    use types_datum::varlena::{set_varsize_4b, VARHDRSZ};
+    let total = payload.len() + VARHDRSZ;
+    let mut image = Vec::with_capacity(total);
+    image.extend_from_slice(&set_varsize_4b(total));
+    image.extend_from_slice(payload);
+    image
 }
 
 /// `PG_GETARG_CSTRING(i)`: the input cstring on the by-ref lane.
@@ -75,7 +94,14 @@ fn arg_int64(fcinfo: &FunctionCallInfoBaseData, i: usize) -> i64 {
 /// by-value word. The bytes are the full numeric varlena image (with header).
 #[inline]
 fn ret_numeric(fcinfo: &mut FunctionCallInfoBaseData, image: Vec<u8>) -> Datum {
-    fcinfo.set_ref_result(RefPayload::Varlena(image));
+    // `make_result` produced a header-FUL on-disk image (4-byte VARSIZE +
+    // n_header + digits). The fmgr by-reference lane carries only the header-LESS
+    // payload by this codebase's varlena convention (`ref_out_to_datum`/the array
+    // on-disk path re-stamp the 4-byte length word). Strip the header here — the
+    // inverse of [`arg_numeric`]'s re-stamp.
+    use types_datum::varlena::VARHDRSZ;
+    let payload = image.get(VARHDRSZ..).unwrap_or(&[]).to_vec();
+    fcinfo.set_ref_result(RefPayload::Varlena(payload));
     Datum::from_usize(0)
 }
 
@@ -141,7 +167,7 @@ fn fc_numeric_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 fn fc_numeric_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let num = arg_numeric(fcinfo, 0);
     let m = scratch_mcx();
-    let s = ok(crate::io::numeric_out(m.mcx(), num));
+    let s = ok(crate::io::numeric_out(m.mcx(), &num));
     ret_cstring(fcinfo, s)
 }
 
@@ -152,7 +178,7 @@ macro_rules! fc_unary_numeric {
         fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
             let num = arg_numeric(fcinfo, 0);
             let m = scratch_mcx();
-            let image = ok($core(m.mcx(), num));
+            let image = ok($core(m.mcx(), &num));
             ret_numeric(fcinfo, image.as_slice().to_vec())
         }
     };
@@ -170,7 +196,7 @@ macro_rules! fc_binary_numeric {
             let a = arg_numeric(fcinfo, 0);
             let b = arg_numeric(fcinfo, 1);
             let m = scratch_mcx();
-            let image = ok($core(m.mcx(), a, b));
+            let image = ok($core(m.mcx(), &a, &b));
             ret_numeric(fcinfo, image.as_slice().to_vec())
         }
     };
@@ -188,7 +214,7 @@ macro_rules! fc_cmp_bool {
         fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
             let a = arg_numeric(fcinfo, 0);
             let b = arg_numeric(fcinfo, 1);
-            ret_bool($core(a, b))
+            ret_bool($core(&a, &b))
         }
     };
 }
@@ -204,7 +230,7 @@ fc_cmp_bool!(fc_numeric_ge, crate::ops_sql::numeric_ge);
 fn fc_numeric_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let a = arg_numeric(fcinfo, 0);
     let b = arg_numeric(fcinfo, 1);
-    let c = match crate::ops_sql::numeric_cmp(a, b) {
+    let c = match crate::ops_sql::numeric_cmp(&a, &b) {
         Ordering::Less => -1,
         Ordering::Equal => 0,
         Ordering::Greater => 1,
@@ -216,14 +242,14 @@ fn fc_numeric_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 fn fc_hash_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let num = arg_numeric(fcinfo, 0);
     // C: PG_RETURN_INT32 of a uint32 hash word (reinterpret, not numeric range).
-    ret_i32(crate::aggregate::hash_numeric(num) as i32)
+    ret_i32(crate::aggregate::hash_numeric(&num) as i32)
 }
 
 /// `hash_numeric_extended(numeric, int8) -> int8` (oid 780).
 fn fc_hash_numeric_extended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let num = arg_numeric(fcinfo, 0);
     let seed = arg_int64(fcinfo, 1) as u64;
-    ret_i64(crate::aggregate::hash_numeric_extended(num, seed) as i64)
+    ret_i64(crate::aggregate::hash_numeric_extended(&num, seed) as i64)
 }
 
 /// A `bytea`/`internal StringInfo` arg's raw byte payload, read from the by-ref
@@ -271,7 +297,7 @@ macro_rules! fc_numeric_scale_arg {
             let num = arg_numeric(fcinfo, 0);
             let scale = arg_int32(fcinfo, 1);
             let m = scratch_mcx();
-            let image = ok($core(m.mcx(), num, scale));
+            let image = ok($core(m.mcx(), &num, scale));
             ret_numeric(fcinfo, image.as_slice().to_vec())
         }
     };
@@ -286,11 +312,11 @@ fc_numeric_scale_arg!(fc_numeric, crate::ops_sql::numeric);
 /// SQL NULL for special (NaN/Inf) inputs.
 fn fc_numeric_scale(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let num = arg_numeric(fcinfo, 0);
-    if types_numeric::numeric_is_special(num) {
+    if types_numeric::numeric_is_special(&num) {
         fcinfo.set_result_null(true);
         return Datum::from_usize(0);
     }
-    ret_i32(ok(crate::ops_sql::numeric_scale(num)))
+    ret_i32(ok(crate::ops_sql::numeric_scale(&num)))
 }
 
 /// `width_bucket_numeric(numeric, numeric, numeric, int4) -> int4` (oid 2170).
@@ -304,9 +330,9 @@ fn fc_width_bucket_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let m = scratch_mcx();
     let count_num = ok(crate::convert::int64_to_numeric(m.mcx(), count as i64));
     ret_i32(ok(crate::ops_sql::width_bucket_numeric(
-        operand,
-        bound1,
-        bound2,
+        &operand,
+        &bound1,
+        &bound2,
         count_num.as_slice(),
     )))
 }
@@ -320,7 +346,7 @@ fn fc_in_range_numeric_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let sub = fcinfo.arg(3).expect("missing arg").value.as_bool();
     let less = fcinfo.arg(4).expect("missing arg").value.as_bool();
     ret_bool(ok(crate::ops_sql::in_range_numeric_numeric(
-        val, base, offset, sub, less,
+        &val, &base, &offset, sub, less,
     )))
 }
 
@@ -339,7 +365,7 @@ fn fc_numeric_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 fn fc_numeric_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let num = arg_numeric(fcinfo, 0);
     let m = scratch_mcx();
-    let bytes = ok(crate::io::numeric_send(m.mcx(), num));
+    let bytes = ok(crate::io::numeric_send(m.mcx(), &num));
     ret_varlena(fcinfo, bytes.as_slice().to_vec())
 }
 
@@ -378,19 +404,19 @@ fn fc_int8_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 /// `numeric_int4(numeric) -> int4` (oid 1744): round to nearest, range-checked.
 fn fc_numeric_int4(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let num = arg_numeric(fcinfo, 0);
-    ret_i32(ok(crate::ops_sql::seam_numeric_int4(num)))
+    ret_i32(ok(crate::ops_sql::seam_numeric_int4(&num)))
 }
 
 /// `numeric_int2(numeric) -> int2` (oid 1783).
 fn fc_numeric_int2(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let num = arg_numeric(fcinfo, 0);
-    Datum::from_i16(ok(crate::ops_sql::seam_numeric_int2(num)))
+    Datum::from_i16(ok(crate::ops_sql::seam_numeric_int2(&num)))
 }
 
 /// `numeric_int8(numeric) -> int8` (oid 1779).
 fn fc_numeric_int8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let num = arg_numeric(fcinfo, 0);
-    ret_i64(ok(crate::ops_sql::seam_numeric_int8(num)))
+    ret_i64(ok(crate::ops_sql::seam_numeric_int8(&num)))
 }
 
 /// `float8_numeric(float8) -> numeric` (oid 1743).
@@ -413,13 +439,13 @@ fn fc_float4_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 /// `numeric_float8(numeric) -> float8` (oid 1746).
 fn fc_numeric_float8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let num = arg_numeric(fcinfo, 0);
-    Datum::from_f64(ok(crate::convert::numeric_to_float8(num)))
+    Datum::from_f64(ok(crate::convert::numeric_to_float8(&num)))
 }
 
 /// `numeric_float4(numeric) -> float4` (oid 1745).
 fn fc_numeric_float4(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let num = arg_numeric(fcinfo, 0);
-    Datum::from_f32(ok(crate::convert::numeric_to_float4(num)))
+    Datum::from_f32(ok(crate::convert::numeric_to_float4(&num)))
 }
 
 /// `numeric_fac(int8) -> numeric` (oid 1376): `factorial(int8)`.
@@ -435,11 +461,11 @@ fn fc_numeric_fac(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 /// scale.
 fn fc_numeric_min_scale(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let num = arg_numeric(fcinfo, 0);
-    if types_numeric::numeric_is_special(num) {
+    if types_numeric::numeric_is_special(&num) {
         fcinfo.set_result_null(true);
         return Datum::from_usize(0);
     }
-    ret_i32(crate::ops_sql::get_min_scale(num))
+    ret_i32(crate::ops_sql::get_min_scale(&num))
 }
 
 // ---------------------------------------------------------------------------
