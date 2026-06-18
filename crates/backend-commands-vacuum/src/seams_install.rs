@@ -36,6 +36,17 @@ pub fn init_seams() {
     vacuum::set_vacuum_cost_balance_local::set(crate::set_vacuum_cost_balance_local_impl);
     vacuum::add_vacuum_cost_balance_local::set(crate::add_vacuum_cost_balance_local_impl);
 
+    // vacuumparallel.c's index-vacuum bridges. The parallel coordinator (leader
+    // and re-opened-by-OID workers) drives each index through these same vacuum.c
+    // wrappers; they pass an explicit lock mode (workers use RowExclusiveLock).
+    // The Oid-keyed `vac_open_indexes`/`vac_close_indexes` are the established
+    // vacuum index model (index_open returns the index Oid handle), so the
+    // lockmode-parameterized seams delegate straight to the real functions.
+    vacuum::vac_open_indexes_lock::set(crate::vac_open_indexes);
+    vacuum::vac_close_indexes_lock::set(vac_close_indexes_lock_impl);
+    vacuum::vac_bulkdel_one_index::set(crate::vac_bulkdel_one_index);
+    vacuum::vac_cleanup_one_index::set(crate::vac_cleanup_one_index);
+
     // --- backend-access-heap-vacuumlazy-seams (lazy-vacuum command layer) ---
     vacuumlazy::vacuum_get_cutoffs::set(crate::vacuum_get_cutoffs);
     vacuumlazy::vacuum_xid_failsafe_check::set(crate::vacuum_xid_failsafe_check);
@@ -124,6 +135,20 @@ pub fn init_seams() {
         });
         vacuum::track_cost_delay_timing::set(|| Ok(vars::track_cost_delay_timing.read()));
         vacuum::vacuum_truncate::set(|| Ok(vars::vacuum_truncate.read()));
+
+        // vacuumparallel.c GUC reads. `maintenance_work_mem` (read by both the
+        // leader sizing and the worker) and `max_parallel_maintenance_workers`
+        // are not vacuum.c's own slots — they are owned by other GUC owners —
+        // but the slot read/write API resolves once that owner installs the
+        // accessor, so the seam getters/setter read/write the shared slot.
+        vacuum::max_parallel_maintenance_workers::set(|| {
+            Ok(vars::max_parallel_maintenance_workers.read())
+        });
+        vacuum::pv_maintenance_work_mem::set(|| Ok(vars::maintenance_work_mem.read()));
+        vacuum::set_pv_maintenance_work_mem::set(|v| {
+            vars::maintenance_work_mem.write(v);
+            Ok(())
+        });
     }
 }
 
@@ -162,6 +187,15 @@ fn vac_open_indexes_rowexcl(rel: Oid) -> PgResult<alloc::vec::Vec<Oid>> {
 /// `vac_close_indexes(nindexes, indrels, NoLock)`.
 fn vac_close_indexes_nolock(indrels: alloc::vec::Vec<Oid>) -> PgResult<()> {
     crate::vac_close_indexes(&indrels, NoLock)
+}
+
+/// `vac_close_indexes(nindexes, indrels, lockmode)` — the vacuumparallel worker
+/// releases its re-opened indexes with the same lock mode it opened them under.
+fn vac_close_indexes_lock_impl(
+    indrels: alloc::vec::Vec<Oid>,
+    lockmode: types_storage::lock::LOCKMODE,
+) -> PgResult<()> {
+    crate::vac_close_indexes(&indrels, lockmode)
 }
 
 /// `vac_update_relstats(...)` driven from the packed `UpdateRelStatsArgs`,

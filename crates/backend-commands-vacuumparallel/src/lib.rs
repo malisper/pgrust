@@ -82,6 +82,12 @@ use backend_access_heap_vacuumlazy_seams as vl;
 use backend_access_transam_parallel as p;
 use backend_access_transam_parallel_rt_seams as prt;
 
+use backend_access_common_tidstore as tidstore;
+use backend_tcop_postgres::globals as tcop;
+use backend_utils_init_small::globals as initglobals;
+use backend_utils_activity_status as activity_status;
+use backend_utils_activity_small::backend_progress as activity_progress;
+
 // =======================================================================
 // vacuumparallel.c constants.
 // =======================================================================
@@ -1368,7 +1374,74 @@ pub fn init_seams() {
     vl::parallel_vacuum_bulkdel_all_indexes::set(parallel_vacuum_bulkdel_all_indexes);
     vl::parallel_vacuum_cleanup_all_indexes::set(parallel_vacuum_cleanup_all_indexes);
 
+    install_pv_outward_seams();
+
     // `parallel_vacuum_error_callback` is referenced by the error-context path;
     // keep it live for the linker until that wiring lands.
     let _ = parallel_vacuum_error_callback as fn(&ParallelVacuumState) -> Option<String>;
+}
+
+/// Install the vacuumparallel.c `*_pv` outward seams (declared in the shared
+/// `backend-commands-vacuum-seams` hub, `::call`ed only by this crate) whose
+/// owning subsystem has a real value-typed provider. Each wrapper is a thin
+/// marshal + delegate. The remaining `*_pv` seams stay seam-and-panic until
+/// their keystone lands (StrategyHandle↔BufferAccessStrategy bridge, the
+/// VacuumSharedCostBalance/VacuumActiveNWorkers DSM atomics, the parallel
+/// error-context callback model, MyProc->statusFlags, the per-worker DSM
+/// instrument usage slots, and the #4 by-OID heap relation reopen); see the
+/// allowlist note in seams-init.
+fn install_pv_outward_seams() {
+    // --- tidstore.c shared TID store (radixtree-backed) ---------------------
+    vac::tid_store_create_shared_pv::set(tidstore::TidStoreCreateShared);
+    vac::tid_store_get_handle_pv::set(|ts| tidstore::TidStoreGetHandle(&ts));
+    vac::tid_store_get_dsa_handle_pv::set(|ts| tidstore::TidStoreGetDSA(&ts));
+    vac::tid_store_attach_pv::set(tidstore::TidStoreAttach);
+    vac::tid_store_destroy_pv::set(|ts| tidstore::TidStoreDestroy(&ts));
+    vac::tid_store_detach_pv::set(|ts| tidstore::TidStoreDetach(&ts));
+
+    // --- tcop debug_query_string -------------------------------------------
+    vac::debug_query_string_pv::set(|| Ok(tcop::debug_query_string().map(String::from)));
+    vac::set_debug_query_string_pv::set(set_debug_query_string_pv_impl);
+
+    // --- miscinit IsUnderPostmaster ----------------------------------------
+    vac::is_under_postmaster_pv::set(|| Ok(initglobals::IsUnderPostmaster()));
+
+    // --- pgstat / backend_status -------------------------------------------
+    vac::pgstat_get_my_query_id::set(|| Ok(activity_status::pgstat_get_my_query_id()));
+    vac::pgstat_report_query_id_pv::set(|queryid, force| {
+        activity_status::pgstat_report_query_id(queryid, force);
+        Ok(())
+    });
+    vac::pgstat_report_activity_running_pv::set(pgstat_report_activity_running_pv_impl);
+    vac::pgstat_progress_parallel_incr_param::set(pgstat_progress_parallel_incr_param_impl);
+}
+
+/// `debug_query_string = sharedquery` (vacuumparallel.c:1015). The worker copies
+/// the leader's query text into a backend-lifetime allocation; C points
+/// `debug_query_string` at the DSM-resident string for the worker's life. Mirror
+/// that backend-lifetime ownership with a leak — the worker process exits when
+/// the query ends, so this is freed at process teardown exactly as in C.
+fn set_debug_query_string_pv_impl(s: Option<String>) -> PgResult<()> {
+    let leaked: Option<&'static str> = s.map(|q| &*alloc::boxed::Box::leak(q.into_boxed_str()));
+    tcop::set_debug_query_string(leaked);
+    Ok(())
+}
+
+/// `pgstat_report_activity(STATE_RUNNING, query)` (vacuumparallel.c:1016).
+fn pgstat_report_activity_running_pv_impl(query: String) -> PgResult<()> {
+    activity_status::pgstat_report_activity(
+        activity_status::STATE_RUNNING,
+        Some(query.as_bytes()),
+    );
+    Ok(())
+}
+
+/// `pgstat_progress_parallel_incr_param(index, incr)` (vacuumparallel.c:943,1099).
+/// The owner builds the worker→leader libpq Progress message in the caller's
+/// memory context; the inward seam contract carries no `Mcx`, so use a private
+/// crate context for the duration of the call (the same idiom this crate uses in
+/// `parallel_vacuum_init`).
+fn pgstat_progress_parallel_incr_param_impl(index: i32, incr: i64) -> PgResult<()> {
+    let ctx = mcx::MemoryContext::new("pgstat_progress_parallel_incr_param");
+    activity_progress::pgstat_progress_parallel_incr_param(ctx.mcx(), index, incr)
 }

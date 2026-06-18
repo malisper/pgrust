@@ -1854,53 +1854,68 @@ mod recurrence_guard {
         // [PlannedStmt::plan_total_cost] directly off the owned stmts, and mirrors
         // UtilityContainsQuery as a local value recursion.)
 
-        // DESIGN_DEBT (TD-VACUUMPARALLEL-OUTWARD): the ~39 `*_pv`/`*_basvac`/
-        // `vacuum_*_nworkers`/`tid_store_*_pv`/`pgstat_*_pv` seams live in
-        // `backend-commands-vacuum-seams` (the shared declaration home) but are
-        // `::call`ed ONLY by vacuumparallel.c and represent vacuumparallel's
-        // OUTWARD dependencies on still-unported subsystems (freelist.c access
-        // strategy, tidstore.c shared TID store, pgstat/instrument, namespace.c,
-        // guc, miscinit globals) plus vacuumparallel's own DSM cost-balance /
-        // active-nworkers shared atomics (no shared-memory backing in the
-        // backend-local vacuum owner). The vacuum owner has NO provider for any
-        // of them. DELETE each as its real subsystem lands + reconciles to the
-        // handle model. (Catalog note on backend-commands-vacuumparallel records
-        // these as left seam-and-panic until owners reconcile.)
+        // DESIGN_DEBT (TD-VACUUMPARALLEL-OUTWARD): the `*_pv`/`*_basvac`/
+        // `vacuum_*_nworkers` seams live in `backend-commands-vacuum-seams` (the
+        // shared declaration home) but are `::call`ed only by vacuumparallel.c.
+        // The value-typed-clean tranche (tidstore shared store, tcop
+        // debug_query_string, miscinit IsUnderPostmaster, pgstat query-id /
+        // activity / parallel progress, the maintenance_work_mem /
+        // max_parallel_maintenance_workers GUC reads, and the Oid-keyed
+        // vac_{open,close}_indexes_lock index path) is now INSTALLED — by
+        // backend-commands-vacuumparallel::init_seams (the outward subsystems)
+        // and backend-commands-vacuum::init_seams (the GUC + index path). The
+        // entries below are the genuinely-keystone-blocked remainder; DELETE
+        // each as its blocker lands:
+        //
+        //  * StrategyHandle↔BufferAccessStrategy bridge (UNPORTED): the opaque
+        //    vacuum `StrategyHandle(u64)` has no bridge to freelist.c's real
+        //    `BufferAccessStrategyData`, so the access-strategy seams can't be
+        //    installed without inventing a handle registry (forbidden). Also
+        //    blocks vacuum.c's own get_access_strategy_with_size (excluded as an
+        //    outward call there). → free_access_strategy_pv,
+        //    get_access_strategy_with_size_basvac, get_access_strategy_buffer_count.
+        //  * VacuumSharedCostBalance / VacuumActiveNWorkers DSM atomics: these
+        //    are `pg_atomic_uint32*` pointers into the PVShared DSM struct, set by
+        //    vacuumparallel and read by both vacuumparallel and vacuum.c's
+        //    compute_parallel_delay. No shared-memory owner installs the pointer
+        //    yet. → set_vacuum_shared_cost_balance_enable,
+        //    set_vacuum_active_nworkers_enable, vacuum_active_nworkers_{is_set,add,sub},
+        //    vacuum_shared_cost_balance_read.
+        //  * #4 by-OID heap relation reopen (rides the vacuumlazy-mcx work): the
+        //    worker reopens the heap + indexes BY OID and the seams model the
+        //    relation as an opaque Oid handle; there is no provider returning the
+        //    Oid handle for table_open / RelationGetNumberOfBlocks / the index-AM
+        //    options / get_namespace_name in this shape. → table_open_lock,
+        //    table_close_lock, am_parallel_vacuum_options, am_use_maintenance_work_mem,
+        //    relation_get_number_of_blocks_pv, relation_get_namespace_name_pv.
+        //  * parallel error-context callback model (UNPORTED): push/pop of
+        //    parallel_vacuum_error_callback onto error_context_stack has no owner.
+        //    → push_parallel_vacuum_error_context, pop_parallel_vacuum_error_context.
+        //  * MyProc->statusFlags / PROC_IN_VACUUM accessor (UNPORTED).
+        //    → my_proc_in_vacuum_only.
+        //  * per-worker DSM instrument usage slots: backend-executor-instrument
+        //    uses an owned-snapshot model (InstrStartParallelQuery returns a
+        //    snapshot the caller holds), not vacuumparallel's per-worker
+        //    buffer_usage[]/wal_usage[] DSM arrays; the start/end/accum seams drop
+        //    the snapshot/usage and can't be faithfully installed without
+        //    re-signing them to carry it. → instr_{start,accum,end}_parallel_query_pv.
         ("backend_commands_vacuum", "am_parallel_vacuum_options"),
         ("backend_commands_vacuum", "am_use_maintenance_work_mem"),
-        ("backend_commands_vacuum", "debug_query_string_pv"),
         ("backend_commands_vacuum", "free_access_strategy_pv"),
         ("backend_commands_vacuum", "get_access_strategy_buffer_count"),
         ("backend_commands_vacuum", "get_access_strategy_with_size_basvac"),
         ("backend_commands_vacuum", "instr_accum_parallel_query_pv"),
         ("backend_commands_vacuum", "instr_end_parallel_query_pv"),
         ("backend_commands_vacuum", "instr_start_parallel_query_pv"),
-        ("backend_commands_vacuum", "is_under_postmaster_pv"),
-        ("backend_commands_vacuum", "max_parallel_maintenance_workers"),
         ("backend_commands_vacuum", "my_proc_in_vacuum_only"),
-        ("backend_commands_vacuum", "pgstat_get_my_query_id"),
-        ("backend_commands_vacuum", "pgstat_progress_parallel_incr_param"),
-        ("backend_commands_vacuum", "pgstat_report_activity_running_pv"),
-        ("backend_commands_vacuum", "pgstat_report_query_id_pv"),
         ("backend_commands_vacuum", "pop_parallel_vacuum_error_context"),
         ("backend_commands_vacuum", "push_parallel_vacuum_error_context"),
-        ("backend_commands_vacuum", "pv_maintenance_work_mem"),
         ("backend_commands_vacuum", "relation_get_namespace_name_pv"),
         ("backend_commands_vacuum", "relation_get_number_of_blocks_pv"),
-        ("backend_commands_vacuum", "set_debug_query_string_pv"),
-        ("backend_commands_vacuum", "set_pv_maintenance_work_mem"),
         ("backend_commands_vacuum", "set_vacuum_active_nworkers_enable"),
         ("backend_commands_vacuum", "set_vacuum_shared_cost_balance_enable"),
         ("backend_commands_vacuum", "table_close_lock"),
         ("backend_commands_vacuum", "table_open_lock"),
-        ("backend_commands_vacuum", "tid_store_attach_pv"),
-        ("backend_commands_vacuum", "tid_store_create_shared_pv"),
-        ("backend_commands_vacuum", "tid_store_destroy_pv"),
-        ("backend_commands_vacuum", "tid_store_detach_pv"),
-        ("backend_commands_vacuum", "tid_store_get_dsa_handle_pv"),
-        ("backend_commands_vacuum", "tid_store_get_handle_pv"),
-        ("backend_commands_vacuum", "vac_close_indexes_lock"),
-        ("backend_commands_vacuum", "vac_open_indexes_lock"),
         ("backend_commands_vacuum", "vacuum_active_nworkers_add"),
         ("backend_commands_vacuum", "vacuum_active_nworkers_is_set"),
         ("backend_commands_vacuum", "vacuum_active_nworkers_sub"),
