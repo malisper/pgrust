@@ -1155,6 +1155,55 @@ pub fn clean_ipv6_addr(addr_family: i32, addr: &mut Vec<u8>) {
 }
 
 // ---------------------------------------------------------------------------
+// DatumGetInetPP — varlena detoast of an inet/cidr value (selfuncs edge)
+// ---------------------------------------------------------------------------
+
+/// `VARHDRSZ` (`varatt.h`): the 4-byte length word of a long-header varlena.
+const VARHDRSZ: usize = 4;
+/// `VARHDRSZ_SHORT` (`varatt.h`): a short (1-byte header) varlena's header.
+const VARHDRSZ_SHORT: usize = 1;
+
+/// `VARATT_IS_1B(PTR)` (`varatt.h`): any short (1-byte-header) form — the low
+/// bit of `va_header` is set.
+#[inline]
+fn varatt_is_1b(b: &[u8]) -> bool {
+    (b[0] & 0x01) == 0x01
+}
+
+/// `VARDATA_ANY(PTR)` (`varatt.h`): the payload bytes of a varlena, after either
+/// the 1-byte short header or the 4-byte long header. `pg_detoast_datum_packed`
+/// preserves a short header, so the inet accessor must use `VARDATA_ANY` (the
+/// short/4-byte branch), exactly as `network.c`'s `ip_family`/`ip_bits`/`ip_addr`
+/// macros do.
+#[inline]
+fn vardata_any(b: &[u8]) -> &[u8] {
+    if varatt_is_1b(b) {
+        &b[VARHDRSZ_SHORT..]
+    } else {
+        &b[VARHDRSZ..]
+    }
+}
+
+/// `DatumGetInetPP(X)` (utils/inet.h): `(inet *) PG_DETOAST_DATUM_PACKED(X)` then
+/// `ip_family`/`ip_bits`/`ip_addr` off `VARDATA_ANY`. The canonical [`Datum`]
+/// carries the inet/cidr varlena image (`Datum::ByRef`, header included) the
+/// selectivity estimators pull from `pg_statistic` / the query `Const`; this
+/// detoasts it (possibly short-header / toasted) and decodes the `inet_struct`
+/// payload at `VARDATA_ANY` ([`inet_struct::from_datum_bytes`]).
+fn datum_get_inet_pp<'mcx>(
+    mcx: Mcx<'mcx>,
+    value: &types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+) -> PgResult<inet_struct> {
+    // PG_DETOAST_DATUM_PACKED(value): the on-disk varlena image rides the
+    // by-reference arm; detoast only compressed/external (leaving a short header
+    // packed), exactly as the fmgr `PG_GETARG_INET_PP` macro does.
+    let bytes = value.as_ref_bytes();
+    let detoasted = backend_access_common_detoast::pg_detoast_datum_packed(mcx, bytes)?;
+    // (inet_struct *) VARDATA_ANY(detoasted): family, bits, then ipaddr.
+    Ok(inet_struct::from_datum_bytes(vardata_any(&detoasted)))
+}
+
+// ---------------------------------------------------------------------------
 // seam wiring
 // ---------------------------------------------------------------------------
 
@@ -1169,4 +1218,8 @@ pub fn clean_ipv6_addr(addr_family: i32, addr: &mut Vec<u8>) {
 /// them.
 pub fn init_seams() {
     fmgr_builtins::register_network_builtins();
+    // The `DatumGetInetPP` varlena-detoast edge the inet selectivity estimators
+    // reach: `network.c` owns the `inet_struct` decode, and (depending on the
+    // detoast owner without a cycle) it owns this slot too.
+    backend_utils_adt_network_seams::inet::datum_get_inet_pp::set(datum_get_inet_pp);
 }

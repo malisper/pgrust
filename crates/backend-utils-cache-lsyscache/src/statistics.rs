@@ -16,6 +16,9 @@
 use mcx::{Mcx, PgVec};
 use types_core::{AttrNumber, InvalidOid, Oid};
 use types_datum::Datum;
+// Canonical unified value (the Datum-unification keystone) for the value-form
+// `get_attstatsslot_value_datums` path (by-reference stats elements by value).
+use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 use types_error::PgResult;
 use types_selfuncs::{
     AttStatsSlot, StatsTuple, ATTSTATSSLOT_NUMBERS, ATTSTATSSLOT_VALUES,
@@ -179,6 +182,68 @@ pub fn get_attstatsslot<'mcx>(
         values,
         numbers,
     }))
+}
+
+/// `get_attstatsslot(&sslot, statstuple, reqkind, reqop, ATTSTATSSLOT_VALUES)`
+/// yielding the matched slot's value array as canonical value-carrying
+/// [`DatumV`]s.
+///
+/// Identical slot-matching to [`get_attstatsslot`], but the `stavaluesN` array
+/// is deconstructed via the value-form `deconstruct_array_values_bytes` (each
+/// by-reference element captured by value as `Datum::ByRef`) instead of the
+/// bare-word `deconstruct_array_bytes` whose by-reference element is a
+/// non-dereferenceable in-buffer offset. Consumers that must decode a
+/// by-reference element type (the inet/cidr selectivity estimators) read here
+/// until the shared `AttStatsSlot.values` field re-type campaign lands.
+pub fn get_attstatsslot_value_datums<'mcx>(
+    mcx: Mcx<'mcx>,
+    stats_tuple: StatsTuple,
+    reqkind: i32,
+    reqop: Oid,
+) -> PgResult<Option<PgVec<'mcx, DatumV<'mcx>>>> {
+    // for (i = 0; i < STATISTIC_NUM_SLOTS; i++) match (stakind, staop) — the
+    // same slot-selection get_attstatsslot performs.
+    let stats = syscache_seams::pg_statistic_slot_meta::call(stats_tuple)?;
+    let mut i = STATISTIC_NUM_SLOTS;
+    for slot in 0..STATISTIC_NUM_SLOTS {
+        if stats.stakind[slot] as i32 == reqkind
+            && (reqop == InvalidOid || stats.staop[slot] == reqop)
+        {
+            i = slot;
+            break;
+        }
+    }
+    if i >= STATISTIC_NUM_SLOTS {
+        return Ok(None);
+    }
+
+    // val = SysCacheGetAttrNotNull(STATRELATTINH, statstuple,
+    //                              Anum_pg_statistic_stavalues1 + i);
+    let val = syscache_seams::syscache_get_attr_not_null_statistic::call(
+        stats_tuple,
+        ANUM_PG_STATISTIC_STAVALUES1 + i as AttrNumber,
+    )?;
+
+    // arrayelemtype = ARR_ELEMTYPE(DatumGetArrayTypeP(val)); deconstruct with
+    // the element type's storage attributes — but yield canonical values.
+    let array_bytes = val.as_ref_bytes();
+    let arrayelemtype = arrayfuncs_seams::array_get_elemtype_bytes::call(mcx, array_bytes)?;
+    let type_form = own_seams::get_typlenbyvalalign::call(arrayelemtype)?;
+
+    let elems = arrayfuncs_seams::deconstruct_array_values_bytes::call(
+        mcx,
+        array_bytes,
+        arrayelemtype,
+        type_form.typlen,
+        type_form.typbyval,
+        type_form.typalign as core::ffi::c_char,
+    )?;
+    let mut out: PgVec<'mcx, DatumV<'mcx>> = mcx::vec_with_capacity_in(mcx, elems.len())?;
+    // NULLs not expected in a stavalues array (C ignores the per-element isnull).
+    for (datum, _isnull) in elems.iter() {
+        out.push(datum.clone_in(mcx)?);
+    }
+    Ok(Some(out))
 }
 
 /// `SearchSysCache3(STATRELATTINH, ...)` + MCV-slot probe

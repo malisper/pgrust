@@ -68,10 +68,17 @@
 
 extern crate alloc;
 
-use mcx::Mcx;
+use mcx::{Mcx, PgVec};
 use types_core::primitive::{InvalidOid, Selectivity};
 use types_core::Oid;
+// The query `Const.constvalue` rides the bare-word lane only at the
+// `mcv_selectivity` fmgr edge below; the inet varlena detoast + the MCV/histogram
+// element comparisons ride the canonical unified `Datum`.
 use types_datum::datum::Datum;
+// Canonical unified value (the Datum-unification keystone): the inet/cidr varlena
+// image (`Datum::ByRef`, header included) the detoast edge and the element
+// comparisons operate on.
+use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 use types_error::{PgError, PgResult, ERROR};
 use types_network::inet_struct;
 use types_nodes::primnodes::Expr;
@@ -89,8 +96,10 @@ use backend_utils_adt_selfuncs_seams::{
     get_join_variables, get_restriction_variable, mcv_selectivity, release_variable_stats,
     stats_tuple_stanullfrac,
 };
-use backend_utils_cache_lsyscache_seams::{get_attstatsslot, get_commutator, get_opcode};
-use backend_utils_fmgr_fmgr_seams::function_call2_coll;
+use backend_utils_cache_lsyscache_seams::{
+    get_attstatsslot, get_attstatsslot_value_datums, get_commutator, get_opcode,
+};
+use backend_utils_fmgr_fmgr_seams::function_call2_coll_datum;
 
 /// Install every seam this crate owns. This crate owns no inward seams (its
 /// fmgr entry points are reached through fmgr dispatch, not a cross-cycle seam),
@@ -215,11 +224,12 @@ fn ip_addr(p: &inet_struct) -> &[u8] {
     &p.ipaddr
 }
 
-/// `DatumGetInetPP(X)` — detoast the Datum word and return its `inet_struct`
-/// payload (crosses the network varlena-detoast seam).
+/// `DatumGetInetPP(X)` — detoast the canonical inet/cidr `Datum` (its `ByRef`
+/// varlena image) and return its `inet_struct` payload (crosses the network
+/// varlena-detoast seam).
 #[inline]
-fn datum_get_inet_pp_word(value: Datum) -> PgResult<inet_struct> {
-    datum_get_inet_pp::call(value)
+fn datum_get_inet_pp_word(mcx: Mcx<'_>, value: &DatumV) -> PgResult<inet_struct> {
+    datum_get_inet_pp::call(mcx, value)
 }
 
 /* ---------------------------------------------------------------------------
@@ -282,7 +292,6 @@ pub fn networksel<'mcx>(
     let mut selec: Selectivity;
     let mcv_selec: f64;
     let non_mcv_selec: f64;
-    let constvalue: Datum;
     let sumcommon: f64;
 
     /*
@@ -316,9 +325,12 @@ pub fn networksel<'mcx>(
     if other.constisnull {
         return Ok(0.0);
     }
-    /* The Const's value is the canonical Datum; pull out the bare word for the
-     * inet varlena detoast / fmgr lane (mirrors range-selfuncs). */
-    constvalue = Datum::from_usize(other.constvalue.as_usize());
+    /* The Const's value is the canonical Datum (a by-reference inet varlena
+     * image): carry it directly into the inet-detoast histogram lane. The MCV
+     * lane (`mcv_selectivity`) is still the bare-word fmgr edge of the unported
+     * `selfuncs.c` examine/estimate family, so it takes the bare word. */
+    let constvalue_v: &DatumV = &other.constvalue;
+    let constvalue_word = Datum::from_usize(other.constvalue.as_usize());
 
     /* Otherwise, we need stats in order to produce a non-default estimate. */
     let stats_tuple = match vardata.data().stats_tuple {
@@ -340,7 +352,7 @@ pub fn networksel<'mcx>(
         vardata.data(),
         opcode,
         InvalidOid,
-        constvalue,
+        constvalue_word,
         varonleft,
     )?;
 
@@ -349,17 +361,16 @@ pub fn networksel<'mcx>(
      * population that satisfies the clause.  If we don't, apply the default
      * selectivity to that population.
      */
-    if let Some(hslot) = get_attstatsslot::call(
+    if let Some(hist_values) = get_attstatsslot_value_datums::call(
         mcx,
         stats_tuple,
         STATISTIC_KIND_HISTOGRAM,
         InvalidOid,
-        ATTSTATSSLOT_VALUES,
     )? {
         /* Commute if needed, so we can consider histogram to be on the left */
         let h_codenum = if varonleft { opr_codenum } else { -opr_codenum };
-        non_mcv_selec = inet_hist_value_sel(&hslot.values, constvalue, h_codenum)?;
-        /* hslot frees on drop (C: free_attstatsslot) */
+        non_mcv_selec = inet_hist_value_sel(mcx, &hist_values, constvalue_v, h_codenum)?;
+        /* hist_values frees on drop (C: free_attstatsslot) */
     } else {
         non_mcv_selec = default_sel(operator);
     }
@@ -469,11 +480,17 @@ fn networkjoinsel_inner(
     let mut mcv1_length: i32 = 0;
     let mut mcv2_length: i32 = 0;
 
-    /* `memset(&slot, 0, ...)` — an empty (absent) slot. */
+    /* `memset(&slot, 0, ...)` — an empty (absent) slot. The `_slot` carries the
+     * MCV `numbers` (and existence); the `_vals` carries the value array as
+     * canonical by-reference `Datum`s (via `get_attstatsslot_value_datums`), the
+     * inet-detoastable form the bare-word `AttStatsSlot.values` cannot provide
+     * until the stats-detoast campaign re-types it. */
     let mut mcv1_slot: Option<AttStatsSlot> = None;
     let mut mcv2_slot: Option<AttStatsSlot> = None;
-    let mut hist1_slot: Option<AttStatsSlot> = None;
-    let mut hist2_slot: Option<AttStatsSlot> = None;
+    let mut mcv1_vals: Option<PgVec<DatumV>> = None;
+    let mut mcv2_vals: Option<PgVec<DatumV>> = None;
+    let mut hist1_vals: Option<PgVec<DatumV>> = None;
+    let mut hist2_vals: Option<PgVec<DatumV>> = None;
 
     if let Some(stats_tuple) = vardata1.stats_tuple {
         nullfrac1 = stats_tuple_stanullfrac::call(stats_tuple) as f64;
@@ -485,12 +502,13 @@ fn networkjoinsel_inner(
             InvalidOid,
             ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS,
         )?;
-        hist1_slot = get_attstatsslot::call(
+        mcv1_vals =
+            get_attstatsslot_value_datums::call(mcx, stats_tuple, STATISTIC_KIND_MCV, InvalidOid)?;
+        hist1_vals = get_attstatsslot_value_datums::call(
             mcx,
             stats_tuple,
             STATISTIC_KIND_HISTOGRAM,
             InvalidOid,
-            ATTSTATSSLOT_VALUES,
         )?;
         /* Arbitrarily limit number of MCVs considered */
         if let Some(ref s) = mcv1_slot {
@@ -509,12 +527,13 @@ fn networkjoinsel_inner(
             InvalidOid,
             ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS,
         )?;
-        hist2_slot = get_attstatsslot::call(
+        mcv2_vals =
+            get_attstatsslot_value_datums::call(mcx, stats_tuple, STATISTIC_KIND_MCV, InvalidOid)?;
+        hist2_vals = get_attstatsslot_value_datums::call(
             mcx,
             stats_tuple,
             STATISTIC_KIND_HISTOGRAM,
             InvalidOid,
-            ATTSTATSSLOT_VALUES,
         )?;
         /* Arbitrarily limit number of MCVs considered */
         if let Some(ref s) = mcv2_slot {
@@ -525,18 +544,21 @@ fn networkjoinsel_inner(
 
     let mcv1_exists = mcv1_slot.is_some();
     let mcv2_exists = mcv2_slot.is_some();
-    let hist1_exists = hist1_slot.is_some();
-    let hist2_exists = hist2_slot.is_some();
+    let hist1_exists = hist1_vals.is_some();
+    let hist2_exists = hist2_vals.is_some();
 
     /*
      * Calculate selectivity for MCV vs MCV matches.
      */
-    if let (Some(m1), Some(m2)) = (&mcv1_slot, &mcv2_slot) {
+    if let (Some(m1), Some(m2), Some(m1v), Some(m2v)) =
+        (&mcv1_slot, &mcv2_slot, &mcv1_vals, &mcv2_vals)
+    {
         selec += inet_mcv_join_sel(
-            &m1.values,
+            mcx,
+            m1v,
             &m1.numbers,
             mcv1_length,
-            &m2.values,
+            m2v,
             &m2.numbers,
             mcv2_length,
             operator,
@@ -548,23 +570,23 @@ fn networkjoinsel_inner(
      * the fractions of the populations represented by the histograms.  Note
      * that the second case needs to commute the operator.
      */
-    if let (Some(m1), Some(h2)) = (&mcv1_slot, &hist2_slot) {
+    if let (Some(m1), Some(m1v), Some(h2v)) = (&mcv1_slot, &mcv1_vals, &hist2_vals) {
         selec += (1.0 - nullfrac2 - sumcommon2)
-            * inet_mcv_hist_sel(&m1.values, &m1.numbers, mcv1_length, &h2.values, opr_codenum)?;
+            * inet_mcv_hist_sel(mcx, m1v, &m1.numbers, mcv1_length, h2v, opr_codenum)?;
     }
-    if let (Some(m2), Some(h1)) = (&mcv2_slot, &hist1_slot) {
+    if let (Some(m2), Some(m2v), Some(h1v)) = (&mcv2_slot, &mcv2_vals, &hist1_vals) {
         selec += (1.0 - nullfrac1 - sumcommon1)
-            * inet_mcv_hist_sel(&m2.values, &m2.numbers, mcv2_length, &h1.values, -opr_codenum)?;
+            * inet_mcv_hist_sel(mcx, m2v, &m2.numbers, mcv2_length, h1v, -opr_codenum)?;
     }
 
     /*
      * Add in selectivity for histogram vs histogram matches, again scaling
      * appropriately.
      */
-    if let (Some(h1), Some(h2)) = (&hist1_slot, &hist2_slot) {
+    if let (Some(h1v), Some(h2v)) = (&hist1_vals, &hist2_vals) {
         selec += (1.0 - nullfrac1 - sumcommon1)
             * (1.0 - nullfrac2 - sumcommon2)
-            * inet_hist_inclusion_join_sel(&h1.values, &h2.values, opr_codenum)?;
+            * inet_hist_inclusion_join_sel(mcx, h1v, h2v, opr_codenum)?;
     }
 
     /*
@@ -604,8 +626,10 @@ fn networkjoinsel_semi(
 
     let mut mcv1_slot: Option<AttStatsSlot> = None;
     let mut mcv2_slot: Option<AttStatsSlot> = None;
-    let mut hist1_slot: Option<AttStatsSlot> = None;
-    let mut hist2_slot: Option<AttStatsSlot> = None;
+    let mut mcv1_vals: Option<PgVec<DatumV>> = None;
+    let mut mcv2_vals: Option<PgVec<DatumV>> = None;
+    let mut hist1_vals: Option<PgVec<DatumV>> = None;
+    let mut hist2_vals: Option<PgVec<DatumV>> = None;
 
     if let Some(stats_tuple) = vardata1.stats_tuple {
         nullfrac1 = stats_tuple_stanullfrac::call(stats_tuple) as f64;
@@ -617,12 +641,13 @@ fn networkjoinsel_semi(
             InvalidOid,
             ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS,
         )?;
-        hist1_slot = get_attstatsslot::call(
+        mcv1_vals =
+            get_attstatsslot_value_datums::call(mcx, stats_tuple, STATISTIC_KIND_MCV, InvalidOid)?;
+        hist1_vals = get_attstatsslot_value_datums::call(
             mcx,
             stats_tuple,
             STATISTIC_KIND_HISTOGRAM,
             InvalidOid,
-            ATTSTATSSLOT_VALUES,
         )?;
         if let Some(ref s) = mcv1_slot {
             mcv1_length = min_i32(s.values.len() as i32, MAX_CONSIDERED_ELEMS);
@@ -640,12 +665,13 @@ fn networkjoinsel_semi(
             InvalidOid,
             ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS,
         )?;
-        hist2_slot = get_attstatsslot::call(
+        mcv2_vals =
+            get_attstatsslot_value_datums::call(mcx, stats_tuple, STATISTIC_KIND_MCV, InvalidOid)?;
+        hist2_vals = get_attstatsslot_value_datums::call(
             mcx,
             stats_tuple,
             STATISTIC_KIND_HISTOGRAM,
             InvalidOid,
-            ATTSTATSSLOT_VALUES,
         )?;
         if let Some(ref s) = mcv2_slot {
             mcv2_length = min_i32(s.values.len() as i32, MAX_CONSIDERED_ELEMS);
@@ -655,8 +681,8 @@ fn networkjoinsel_semi(
 
     let mcv1_exists = mcv1_slot.is_some();
     let mcv2_exists = mcv2_slot.is_some();
-    let hist1_exists = hist1_slot.is_some();
-    let hist2_exists = hist2_slot.is_some();
+    let hist1_exists = hist1_vals.is_some();
+    let hist2_exists = hist2_vals.is_some();
 
     let opcode = get_opcode::call(operator)?;
 
@@ -675,13 +701,17 @@ fn networkjoinsel_semi(
         let m1 = mcv1_slot
             .as_ref()
             .expect("mcv1_exists implies mcv1_slot present");
-        let mcv2_values = mcv2_slot.as_ref().map(|s| &s.values[..]);
-        let hist2_values = hist2_slot.as_ref().map(|s| &s.values[..]);
+        let m1v = mcv1_vals
+            .as_ref()
+            .expect("mcv1_exists implies mcv1_vals present");
+        let mcv2_values = mcv2_vals.as_ref().map(|s| &s[..]);
+        let hist2_values = hist2_vals.as_ref().map(|s| &s[..]);
         let mut i: i32 = 0;
         while i < mcv1_length {
             selec += (m1.numbers[i as usize] as f64)
                 * inet_semi_join_sel(
-                    m1.values[i as usize],
+                    mcx,
+                    &m1v[i as usize],
                     mcv2_exists,
                     mcv2_values,
                     mcv2_length,
@@ -703,13 +733,13 @@ fn networkjoinsel_semi(
      *
      * If there are too many histogram elements, decimate to limit runtime.
      */
-    let hist1_nvalues = hist1_slot.as_ref().map_or(0, |s| s.values.len() as i32);
+    let hist1_nvalues = hist1_vals.as_ref().map_or(0, |s| s.len() as i32);
     if hist1_exists && hist1_nvalues > 2 && (mcv2_exists || hist2_exists) {
-        let h1 = hist1_slot
+        let h1v = hist1_vals
             .as_ref()
-            .expect("hist1_exists implies hist1_slot present");
-        let mcv2_values = mcv2_slot.as_ref().map(|s| &s.values[..]);
-        let hist2_values = hist2_slot.as_ref().map(|s| &s.values[..]);
+            .expect("hist1_exists implies hist1_vals present");
+        let mcv2_values = mcv2_vals.as_ref().map(|s| &s[..]);
+        let hist2_values = hist2_vals.as_ref().map(|s| &s[..]);
 
         let mut hist_selec_sum: f64 = 0.0;
 
@@ -719,7 +749,8 @@ fn networkjoinsel_semi(
         let mut i: i32 = 1;
         while i < hist1_nvalues - 1 {
             hist_selec_sum += inet_semi_join_sel(
-                h1.values[i as usize],
+                mcx,
+                &h1v[i as usize],
                 mcv2_exists,
                 mcv2_values,
                 mcv2_length,
@@ -755,8 +786,9 @@ fn networkjoinsel_semi(
 /// `inet_hist_value_sel` — fraction of the histogram population that satisfies
 /// "value OPR CONST".
 fn inet_hist_value_sel(
-    values: &[Datum],
-    constvalue: Datum,
+    mcx: Mcx<'_>,
+    values: &[DatumV],
+    constvalue: &DatumV,
     opr_codenum: i32,
 ) -> PgResult<f64> {
     let nvalues = values.len() as i32;
@@ -770,17 +802,17 @@ fn inet_hist_value_sel(
     /* if there are too many histogram elements, decimate to limit runtime */
     let k = (nvalues - 2) / MAX_CONSIDERED_ELEMS + 1;
 
-    let query = datum_get_inet_pp_word(constvalue)?;
+    let query = datum_get_inet_pp_word(mcx, constvalue)?;
 
     /* "left" is the left boundary value of the current bucket ... */
-    let mut left = datum_get_inet_pp_word(values[0])?;
+    let mut left = datum_get_inet_pp_word(mcx, &values[0])?;
     let mut left_order = inet_inclusion_cmp(&left, &query, opr_codenum);
 
     let mut n: i32 = 0;
     let mut i: i32 = k;
     while i < nvalues {
         /* ... and "right" is the right boundary value */
-        let right = datum_get_inet_pp_word(values[i as usize])?;
+        let right = datum_get_inet_pp_word(mcx, &values[i as usize])?;
         let right_order = inet_inclusion_cmp(&right, &query, opr_codenum);
 
         if left_order == 0 && right_order == 0 {
@@ -815,10 +847,11 @@ fn inet_hist_value_sel(
 
 /// `inet_mcv_join_sel` — MCV vs MCV join selectivity.
 fn inet_mcv_join_sel(
-    mcv1_values: &[Datum],
+    mcx: Mcx<'_>,
+    mcv1_values: &[DatumV],
     mcv1_numbers: &[f32],
     mcv1_nvalues: i32,
-    mcv2_values: &[Datum],
+    mcv2_values: &[DatumV],
     mcv2_numbers: &[f32],
     mcv2_nvalues: i32,
     operator: Oid,
@@ -831,11 +864,15 @@ fn inet_mcv_join_sel(
     while i < mcv1_nvalues {
         let mut j: i32 = 0;
         while j < mcv2_nvalues {
-            if function_call2_coll::call(
+            /* FunctionCall2Coll(proc, ..., mcv1[i], mcv2[j]) — the inet
+             * inclusion/overlap operator on two by-reference inet values, over
+             * the canonical fmgr edge. */
+            if function_call2_coll_datum::call(
+                mcx,
                 opcode,
                 InvalidOid,
-                mcv1_values[i as usize],
-                mcv2_values[j as usize],
+                mcv1_values[i as usize].clone_in(mcx)?,
+                mcv2_values[j as usize].clone_in(mcx)?,
             )?
             .as_bool()
             {
@@ -854,10 +891,11 @@ fn inet_mcv_join_sel(
 
 /// `inet_mcv_hist_sel` — MCV vs histogram join selectivity.
 fn inet_mcv_hist_sel(
-    mcv_values: &[Datum],
+    mcx: Mcx<'_>,
+    mcv_values: &[DatumV],
     mcv_numbers: &[f32],
     mcv_nvalues: i32,
-    hist_values: &[Datum],
+    hist_values: &[DatumV],
     mut opr_codenum: i32,
 ) -> PgResult<f64> {
     let mut selec: f64 = 0.0;
@@ -871,7 +909,7 @@ fn inet_mcv_hist_sel(
     let mut i: i32 = 0;
     while i < mcv_nvalues {
         selec += (mcv_numbers[i as usize] as f64)
-            * inet_hist_value_sel(hist_values, mcv_values[i as usize], opr_codenum)?;
+            * inet_hist_value_sel(mcx, hist_values, &mcv_values[i as usize], opr_codenum)?;
         i += 1;
     }
     Ok(selec)
@@ -883,8 +921,9 @@ fn inet_mcv_hist_sel(
 
 /// `inet_hist_inclusion_join_sel` — histogram vs histogram join selectivity.
 fn inet_hist_inclusion_join_sel(
-    hist1_values: &[Datum],
-    hist2_values: &[Datum],
+    mcx: Mcx<'_>,
+    hist1_values: &[DatumV],
+    hist2_values: &[DatumV],
     opr_codenum: i32,
 ) -> PgResult<f64> {
     let hist2_nvalues = hist2_values.len() as i32;
@@ -900,7 +939,7 @@ fn inet_hist_inclusion_join_sel(
     let mut n: i32 = 0;
     let mut i: i32 = 1;
     while i < hist2_nvalues - 1 {
-        match_ += inet_hist_value_sel(hist1_values, hist2_values[i as usize], opr_codenum)?;
+        match_ += inet_hist_value_sel(mcx, hist1_values, &hist2_values[i as usize], opr_codenum)?;
         n += 1;
         i += k;
     }
@@ -918,12 +957,13 @@ fn inet_hist_inclusion_join_sel(
 /// (`opcode`); the fmgr seam re-resolves it per call (behavior identical to the
 /// cached `FmgrInfo`).
 fn inet_semi_join_sel(
-    lhs_value: Datum,
+    mcx: Mcx<'_>,
+    lhs_value: &DatumV,
     mcv_exists: bool,
-    mcv_values: Option<&[Datum]>,
+    mcv_values: Option<&[DatumV]>,
     mcv_nvalues: i32,
     hist_exists: bool,
-    hist_values: Option<&[Datum]>,
+    hist_values: Option<&[DatumV]>,
     hist_weight: f64,
     opcode: Oid,
     opr_codenum: i32,
@@ -932,8 +972,14 @@ fn inet_semi_join_sel(
         let mcv_values = mcv_values.expect("mcv_exists implies mcv_values present");
         let mut i: i32 = 0;
         while i < mcv_nvalues {
-            if function_call2_coll::call(opcode, InvalidOid, lhs_value, mcv_values[i as usize])?
-                .as_bool()
+            if function_call2_coll_datum::call(
+                mcx,
+                opcode,
+                InvalidOid,
+                lhs_value.clone_in(mcx)?,
+                mcv_values[i as usize].clone_in(mcx)?,
+            )?
+            .as_bool()
             {
                 return Ok(1.0);
             }
@@ -944,7 +990,7 @@ fn inet_semi_join_sel(
     if hist_exists && hist_weight > 0.0 {
         let hist_values = hist_values.expect("hist_exists implies hist_values present");
         /* Commute operator, since we're passing lhs_value on the right */
-        let hist_selec = inet_hist_value_sel(hist_values, lhs_value, -opr_codenum)?;
+        let hist_selec = inet_hist_value_sel(mcx, hist_values, lhs_value, -opr_codenum)?;
 
         if hist_selec > 0.0 {
             return Ok(min_f64(1.0, hist_weight * hist_selec));

@@ -194,6 +194,7 @@ pub fn init_seams() {
 
     // -- statistics ---------------------------------------------------------
     seams::get_attstatsslot::set(statistics::get_attstatsslot);
+    seams::get_attstatsslot_value_datums::set(statistics::get_attstatsslot_value_datums);
     seams::get_attstatsslot_mcv::set(statistics::get_attstatsslot_mcv);
     seams::get_attavgwidth::set(statistics::get_attavgwidth);
     seams::free_attstatsslot::set(statistics::free_attstatsslot);

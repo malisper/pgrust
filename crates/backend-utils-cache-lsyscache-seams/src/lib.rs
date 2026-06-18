@@ -67,6 +67,35 @@ seam_core::seam!(
     ) -> PgResult<Option<AttStatsSlot<'mcx>>>
 );
 
+seam_core::seam!(
+    /// `get_attstatsslot(&sslot, statstuple, reqkind, reqop, ATTSTATSSLOT_VALUES)`
+    /// (lsyscache.c), but yielding the matched slot's value array as canonical
+    /// *value-carrying* [`DatumV`]s (`ByVal` word / `ByRef` bytes copied into
+    /// `mcx`) rather than the bare-word [`Datum`] surrogate
+    /// [`AttStatsSlot::values`] carries.
+    ///
+    /// The shared `AttStatsSlot.values` (`types_selfuncs`, still
+    /// `PgVec<types_datum::Datum>`) holds a by-reference element as an in-buffer
+    /// offset that is not dereferenceable by a consumer; re-typing it (and
+    /// migrating its ~6-crate / 47-site consumer set) is the deferred
+    /// "stats argument-detoast" campaign. Until then, consumers that must decode
+    /// a by-reference element type — the inet/cidr selectivity estimators
+    /// (`network_selfuncs.c`), whose `DatumGetInetPP` needs the real varlena
+    /// bytes — read the value array here, by value, via the same value-form
+    /// `deconstruct_array` (`deconstruct_array_values_bytes`) the campaign would
+    /// fold into `get_attstatsslot` itself.
+    ///
+    /// Returns `Some(values)` (possibly empty) when the requested slot exists,
+    /// else `None` (C: `get_attstatsslot` returns `false`). `Err` carries the
+    /// syscache / detoast `ereport(ERROR)`s and OOM.
+    pub fn get_attstatsslot_value_datums<'mcx>(
+        mcx: Mcx<'mcx>,
+        stats_tuple: StatsTuple,
+        reqkind: i32,
+        reqop: Oid,
+    ) -> PgResult<Option<PgVec<'mcx, DatumV<'mcx>>>>
+);
+
 /// The `(typlen, typbyval, typalign)` triple `get_typlenbyvalalign` reports.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TypLenByValAlign {

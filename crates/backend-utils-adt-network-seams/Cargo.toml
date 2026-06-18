@@ -10,6 +10,9 @@ path = "src/lib.rs"
 
 [dependencies]
 seam-core = { path = "../seam-core" }
+mcx = { path = "../mcx" }
 types-network = { path = "../types-network" }
-types-datum = { path = "../types-datum" }
+# Canonical unified `Datum` (the by-reference inet varlena image) for the
+# `datum_get_inet_pp` detoast edge.
+types-tuple = { path = "../types-tuple" }
 types-error = { path = "../types-error" }

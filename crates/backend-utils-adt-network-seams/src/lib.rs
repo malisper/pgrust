@@ -21,25 +21,31 @@
 use types_network::{ResolvedName, SessionEndpoint};
 
 pub mod inet {
-    use types_datum::datum::Datum;
+    use mcx::Mcx;
     use types_error::PgResult;
     use types_network::inet_struct;
+    // Canonical unified value (the Datum-unification keystone). The inet varlena
+    // image rides the `Datum::ByRef` arm verbatim (header included), so the owner
+    // can `PG_DETOAST_DATUM_PACKED` the bytes and decode the `inet_struct`.
+    use types_tuple::backend_access_common_heaptuple::Datum;
 
     seam_core::seam!(
         /// `DatumGetInetPP(X)` (utils/inet.h): detoast the `inet`/`cidr` varlena
-        /// the bare-word [`Datum`] points at and return its
-        /// [`inet_struct`] payload (`family` / `bits` / `ipaddr`). The selectivity
-        /// estimators apply this to the `pg_statistic` MCV / histogram value
-        /// arrays and the query `Const`, whose words point at inet varlenas in
-        /// detoasted (syscache / `mcx`) memory. The fmgr/varlena envelope —
-        /// `PG_DETOAST_DATUM` plus the `inet_struct` byte decode
-        /// ([`inet_struct::from_datum_bytes`]) — is the deferred edge
-        /// `backend-utils-adt-network` itself does not own (its functions take
-        /// already-decoded `inet_struct` values), so this slot stays uninstalled
-        /// (a loud panic) until the varlena-detoast owner lands. That is
-        /// mirror-PG-and-panic, not a regression. `Err` carries any detoast
-        /// `ereport(ERROR)`.
-        pub fn datum_get_inet_pp(value: Datum) -> PgResult<inet_struct>
+        /// the canonical [`Datum`] carries (`Datum::ByRef`, the on-disk varlena
+        /// image with its short/4-byte header) and return its [`inet_struct`]
+        /// payload (`family` / `bits` / `ipaddr`). The selectivity estimators
+        /// apply this to the query `Const` (whose `constvalue` is a canonical
+        /// by-reference `Datum`) and to the `pg_statistic` MCV / histogram value
+        /// arrays. The fmgr/varlena envelope — `PG_DETOAST_DATUM_PACKED` of a
+        /// possibly-short-header/toasted varlena plus the `inet_struct` byte
+        /// decode at `VARDATA_ANY` ([`inet_struct::from_datum_bytes`]) — is
+        /// owned by `backend-utils-adt-network`, which installs this slot from its
+        /// `init_seams()` (it can depend on the detoast owner without a cycle).
+        /// `Err` carries any detoast `ereport(ERROR)`.
+        pub fn datum_get_inet_pp<'mcx>(
+            mcx: Mcx<'mcx>,
+            value: &Datum<'mcx>,
+        ) -> PgResult<inet_struct>
     );
 }
 

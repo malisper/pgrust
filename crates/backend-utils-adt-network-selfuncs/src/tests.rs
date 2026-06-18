@@ -4,14 +4,15 @@
 //! `inet_masklen_inclusion_cmp`, `inet_hist_match_divider`, `mcv_population`,
 //! `clamp_probability`, `default_sel`) take no seam and are exercised directly
 //! against hand-built [`inet_struct`]s. The histogram kernel `inet_hist_value_sel`
-//! installs the inet-detoast seam (a process-global slot, so the seam-installing
-//! tests share a mutex) so the decision arithmetic can be checked end-to-end.
-//! `networksel`'s operator guard errors before any seam is consulted, so it is
-//! exercised with a real (empty) `MemoryContext`.
+//! installs the *production* inet-detoast owner (`backend-utils-adt-network`'s
+//! `datum_get_inet_pp`, a process-global slot, so the seam-installing tests share
+//! a mutex) and feeds it real inet varlena byte images, so the production
+//! `PG_DETOAST_DATUM_PACKED` → `VARDATA_ANY` → `inet_struct::from_datum_bytes`
+//! decode is exercised end-to-end. `networksel`'s operator guard errors before
+//! any seam is consulted, so it is exercised with a real (empty) `MemoryContext`.
 
 use super::*;
 
-use std::cell::RefCell;
 use std::sync::{Mutex, MutexGuard, Once};
 
 use mcx::MemoryContext;
@@ -220,35 +221,36 @@ fn hist_match_divider_counts_noncommon_bits() {
  * inet_hist_value_sel (network_selfuncs.c:618-679) — with the detoast seam.
  * ====================================================================== */
 
-// A toy "inet datum registry": tests pack an index into the Datum word and the
-// detoast seam recovers the inet_struct from a thread-local table.
-thread_local! {
-    static INET_TABLE: RefCell<Vec<inet_struct>> = const { RefCell::new(Vec::new()) };
+/// Build a real `inet`/`cidr` varlena byte image as the production code stores
+/// it: a 4-byte (long-header) varlena whose payload is the `inet_struct` image
+/// (`family`, `bits`, then the 16 address bytes — `inet_struct::to_datum_bytes`).
+/// `SET_VARSIZE(p, VARHDRSZ + 18)` stamps the length word `(len << 2)` (the
+/// little-endian build's `SET_VARSIZE_4B`). The detoast owner's
+/// `PG_DETOAST_DATUM_PACKED` returns this verbatim and `VARDATA_ANY` skips the
+/// 4-byte header back to the `inet_struct` payload.
+fn inet_varlena(s: inet_struct) -> Vec<u8> {
+    let payload = s.to_datum_bytes(); // 18 bytes
+    let total = 4 + payload.len(); // VARHDRSZ + 18 == 22
+    let mut out = Vec::with_capacity(total);
+    // SET_VARSIZE_4B: low two bits 0b00, length in the high 30 bits.
+    out.extend_from_slice(&((total as u32) << 2).to_ne_bytes());
+    out.extend_from_slice(&payload);
+    out
 }
 
-fn intern_inet(s: inet_struct) -> Datum {
-    INET_TABLE.with(|t| {
-        let mut v = t.borrow_mut();
-        let idx = v.len();
-        v.push(s);
-        // store idx+1 so a 0 word is never a valid handle (mirrors a non-null ptr)
-        Datum::from_usize(idx + 1)
-    })
+/// A canonical by-reference inet `Datum` carrying the real varlena image, built
+/// in `mcx` (mirrors a `pg_statistic` element / query `Const` value).
+fn inet_datum<'mcx>(mcx: Mcx<'mcx>, s: inet_struct) -> DatumV<'mcx> {
+    DatumV::ByRef(mcx::slice_in(mcx, &inet_varlena(s)).unwrap())
 }
 
-fn test_detoast(value: Datum) -> PgResult<inet_struct> {
-    INET_TABLE.with(|t| {
-        let v = t.borrow();
-        let idx = value.as_usize();
-        assert!(idx >= 1 && idx <= v.len(), "bad inet handle in test");
-        Ok(v[idx - 1])
-    })
-}
-
+/// Install the *production* inet-detoast owner (the slot
+/// `backend-utils-adt-network` owns) so the histogram kernel exercises the real
+/// `PG_DETOAST_DATUM_PACKED` → `inet_struct::from_datum_bytes` decode.
 fn install_detoast() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        datum_get_inet_pp::set(test_detoast);
+        backend_utils_adt_network::init_seams();
     });
 }
 
@@ -256,25 +258,28 @@ fn install_detoast() {
 fn hist_value_sel_too_few_values_is_zero() {
     let _g = seam_lock();
     install_detoast();
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
     // nvalues <= 1 -> 0.0 (guard against zero divide), without touching values.
-    let q = intern_inet(v4(32, &[10, 0, 0, 1]));
-    assert_eq!(inet_hist_value_sel(&[], q, 0).unwrap(), 0.0);
-    assert_eq!(inet_hist_value_sel(&[Datum::null()], q, 0).unwrap(), 0.0);
+    let q = inet_datum(mcx, v4(32, &[10, 0, 0, 1]));
+    assert_eq!(inet_hist_value_sel(mcx, &[], &q, 0).unwrap(), 0.0);
+    let one = [inet_datum(mcx, v4(32, &[10, 0, 0, 2]))];
+    assert_eq!(inet_hist_value_sel(mcx, &one, &q, 0).unwrap(), 0.0);
 }
 
 #[test]
 fn hist_value_sel_full_bucket_match() {
     let _g = seam_lock();
     install_detoast();
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
     // A 2-endpoint (1-bucket) histogram whose endpoints both compare == 0 to the
     // query under the overlap operator -> the whole bucket matches: match_/n = 1.
     let same = v4(16, &[10, 0, 0, 0]);
-    let v0 = intern_inet(same);
-    let v1 = intern_inet(same);
-    let q = intern_inet(v4(16, &[10, 0, 0, 0]));
-    let values = [v0, v1];
+    let values = [inet_datum(mcx, same), inet_datum(mcx, same)];
+    let q = inet_datum(mcx, v4(16, &[10, 0, 0, 0]));
     // one bucket (k=1, n=1), both endpoints order 0 -> whole bucket match.
-    let sel = inet_hist_value_sel(&values, q, 0).unwrap();
+    let sel = inet_hist_value_sel(mcx, &values, &q, 0).unwrap();
     assert!((sel - 1.0).abs() < 1e-9, "sel = {sel}");
 }
 
@@ -282,15 +287,18 @@ fn hist_value_sel_full_bucket_match() {
 fn hist_value_sel_no_match_is_zero() {
     let _g = seam_lock();
     install_detoast();
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
     // Histogram values in a different family than the query: the family-difference
     // orders are both positive (never bracket the query), so no bucket matches.
-    let v0 = intern_inet(v6(128, &[0x20, 0x01]));
-    let v1 = intern_inet(v6(128, &[0x20, 0x02]));
-    let q = intern_inet(v4(32, &[10, 0, 0, 1]));
-    let values = [v0, v1];
+    let values = [
+        inet_datum(mcx, v6(128, &[0x20, 0x01])),
+        inet_datum(mcx, v6(128, &[0x20, 0x02])),
+    ];
+    let q = inet_datum(mcx, v4(32, &[10, 0, 0, 1]));
     // left_order = family(v6=3) - family(v4=2) = 1 > 0; right_order likewise 1.
     // Both positive: not both 0, and the bracketing clause needs (<=0 && >=0).
-    let sel = inet_hist_value_sel(&values, q, 2).unwrap();
+    let sel = inet_hist_value_sel(mcx, &values, &q, 2).unwrap();
     assert_eq!(sel, 0.0);
 }
 

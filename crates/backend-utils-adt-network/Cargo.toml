@@ -25,3 +25,9 @@ backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 # hash_any / hash_any_extended for hashinet (network.c hashes VARDATA_ANY);
 # owner ported, depend directly.
 common-hashfn = { path = "../common-hashfn" }
+# PG_DETOAST_DATUM_PACKED for the `datum_get_inet_pp` selectivity detoast edge;
+# owner ported, depend directly (no cycle).
+backend-access-common-detoast = { path = "../backend-access-common-detoast" }
+# Canonical unified `Datum` (the by-reference inet varlena image) the
+# `datum_get_inet_pp` seam carries.
+types-tuple = { path = "../types-tuple" }

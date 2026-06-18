@@ -18630,6 +18630,7 @@ dependencies = [
 name = "backend-utils-adt-network"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-detoast",
  "backend-utils-adt-network-seams",
  "backend-utils-adt-numutils",
  "backend-utils-fmgr-core",
@@ -18639,6 +18640,7 @@ dependencies = [
  "types-error",
  "types-fmgr",
  "types-network",
+ "types-tuple",
 ]
 
 [[package]]
@@ -18666,10 +18668,11 @@ dependencies = [
 name = "backend-utils-adt-network-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
- "types-datum",
  "types-error",
  "types-network",
+ "types-tuple",
 ]
 
 [[package]]
@@ -18689,6 +18692,7 @@ dependencies = [
  "types-nodes",
  "types-pathnodes",
  "types-selfuncs",
+ "types-tuple",
 ]
 
 [[package]]
