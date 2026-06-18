@@ -10,5 +10,6 @@ path = "src/lib.rs"
 
 [dependencies]
 types-core = { path = "../types-core" }
+types-bgworker = { path = "../types-bgworker" }
 types-tuple = { path = "../types-tuple" }
 mcx = { path = "../mcx" }

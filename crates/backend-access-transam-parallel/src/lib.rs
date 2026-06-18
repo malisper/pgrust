@@ -47,7 +47,8 @@ use std::cell::RefCell;
 use std::ptr::NonNull;
 
 use backend_storage_ipc_dsm_core::dsm::{
-    dsm_create, dsm_segment_address, DsmSegment, DsmSegmentId, DSM_CREATE_NULL_IF_MAXSEGMENTS,
+    dsm_create, dsm_segment_address, dsm_segment_handle as dsm_seg_handle, DsmSegment, DsmSegmentId,
+    DSM_CREATE_NULL_IF_MAXSEGMENTS,
 };
 use backend_storage_ipc_shm_toc::{shm_toc_estimate, ShmToc};
 use backend_utils_error::{elog, ereport, PgResult};
@@ -64,7 +65,7 @@ use types_execparallel::{
     ShmMqAttachHandle, ShmTocEstimatorHandle, ShmTocHandle as ExecShmToc,
 };
 use types_parallel::{
-    dsm_handle, BgwHandle, BgwHandleStatus, DsmSegmentHandle, FixedParallelState, ShmMqHandleHandle,
+    dsm_handle, BgwHandleStatus, DsmSegmentHandle, FixedParallelState, ShmMqHandleHandle,
     ShmMqResult,
 };
 
@@ -164,8 +165,10 @@ fn error_mqh_is_null(h: ShmMqAttachHandle) -> bool {
 /// Per-worker leader-side state (`ParallelWorkerInfo`, access/parallel.h:24-28).
 #[derive(Clone, Copy, Debug)]
 struct ParallelWorkerInfo {
-    /// `BackgroundWorkerHandle *bgwhandle`.
-    bgwhandle: BgwHandle,
+    /// `BackgroundWorkerHandle *bgwhandle` — the REAL value handle
+    /// (`{slot, generation}`); `None` is the C `NULL` pointer (no live worker
+    /// registered for this slot).
+    bgwhandle: Option<BackgroundWorkerHandle>,
     /// `shm_mq_handle *error_mqh`.
     error_mqh: ShmMqAttachHandle,
 }
@@ -173,7 +176,7 @@ struct ParallelWorkerInfo {
 impl ParallelWorkerInfo {
     const fn new() -> Self {
         Self {
-            bgwhandle: BgwHandle::NULL,
+            bgwhandle: None,
             error_mqh: ERROR_MQH_NULL,
         }
     }
@@ -756,8 +759,16 @@ pub fn pcxt_seg(pcxt: ParallelContextHandle) -> Option<ExecDsmSeg> {
         }
     })
 }
+/// `pcxt->worker[i].bgwhandle` for a *launched* worker (`i <
+/// nworkers_launched`), which always has a live handle (C reads it
+/// unconditionally in `ExecParallelCreateReaders`). Returns the real value
+/// handle.
 pub fn pcxt_worker_bgwhandle(pcxt: ParallelContextHandle, i: i32) -> BackgroundWorkerHandle {
-    with_globals(|g| BackgroundWorkerHandle(g.get(pcxt).worker[i as usize].bgwhandle.0))
+    with_globals(|g| {
+        g.get(pcxt).worker[i as usize]
+            .bgwhandle
+            .expect("launched parallel worker has a live bgwhandle")
+    })
 }
 pub fn make_parallel_worker_context(seg: ExecDsmSeg, toc: ExecShmToc) -> ParallelWorkerContextHandle {
     // {seg, toc} pair handed to per-node Exec*InitializeWorker hooks; encode the
@@ -1195,12 +1206,6 @@ pub fn initialize_parallel_dsm<'mcx>(mcx: Mcx<'mcx>, pcxt: ParallelContextHandle
     Ok(())
 }
 
-/// Convert the leader-side execParallel DSM-seg handle to the parallel-subsystem
-/// handle the rt seams use.
-fn seg_to_parallel(seg: DsmSegmentHandle) -> DsmSegmentHandle {
-    seg
-}
-
 /// The `pcxt.seg` handle as the execParallel `DsmSegmentHandle` the `shm-mq`
 /// seam consumes (both carry the real `DsmSegmentId`; `NULL`/`0` -> `None`, so
 /// the error queue gets no `on_dsm_detach` auto-detach in the private-memory
@@ -1211,14 +1216,6 @@ fn seg_to_exec(seg: DsmSegmentHandle) -> Option<ExecDsmSeg> {
     } else {
         Some(ExecDsmSeg(seg.0))
     }
-}
-
-/// The `bgwhandle` as the execParallel `BackgroundWorkerHandle` the `shm-mq`
-/// seam consumes (same id value; the `shm-mq` owner resolves it to the real
-/// `BackgroundWorkerHandle` via the bgworker owner's
-/// `background_worker_handle_from_token`).
-fn bgw_to_exec(h: BgwHandle) -> BackgroundWorkerHandle {
-    BackgroundWorkerHandle(h.0)
 }
 
 // ===========================================================================
@@ -1310,28 +1307,29 @@ pub fn launch_parallel_workers(pcxt: ParallelContextHandle) -> PgResult<()> {
     // We might be running in a short-lived memory context.
     let oldcontext = rt::switch_to_top_transaction_context::call()?;
 
-    // (The BackgroundWorker struct assembly — memset/snprintf, bgw_extra memcpy
-    // of `i`, bgw_main_arg = dsm_segment_handle(seg) — is performed by the
-    // runtime in register_dynamic_background_worker.)
+    // The BackgroundWorker struct assembly — memset/snprintf, bgw_extra memcpy
+    // of `i`, `bgw_main_arg = UInt32GetDatum(dsm_segment_handle(seg))` — is
+    // performed by the bgworker owner inside `register_dynamic_background_worker`;
+    // we resolve the DSM segment's machine name (`dsm_segment_handle(pcxt->seg)`)
+    // here, since only the parallel subsystem can resolve its private segment id.
     let seg = with_globals(|g| g.get(pcxt).seg);
+    let seg_handle = dsm_seg_handle(seg_id_of(seg));
     let mut i = 0;
     while i < nworkers_to_launch {
-        let mut bgwhandle = BgwHandle::NULL;
-        let registered = if !any_registrations_failed {
-            bgwhandle = rt::register_dynamic_background_worker::call(seg_to_parallel(seg), i)?;
-            !bgwhandle.is_null()
+        let bgwhandle = if !any_registrations_failed {
+            rt::register_dynamic_background_worker::call(seg_handle, i)?
         } else {
-            false
+            None
         };
 
-        if registered {
+        if let Some(bgwhandle) = bgwhandle {
             let error_mqh = with_globals(|g| {
                 let c = g.get_mut(pcxt);
-                c.worker[i as usize].bgwhandle = bgwhandle;
+                c.worker[i as usize].bgwhandle = Some(bgwhandle);
                 c.worker[i as usize].error_mqh
             });
             // C: shm_mq_set_handle(pcxt->worker[i].error_mqh, bgwhandle);
-            shmmq::shm_mq_set_handle::call(error_mqh, bgw_to_exec(bgwhandle));
+            shmmq::shm_mq_set_handle::call(error_mqh, bgwhandle);
             with_globals(|g| g.get_mut(pcxt).nworkers_launched += 1);
         } else {
             // We've hit the max_worker_processes limit; future registrations
@@ -1340,7 +1338,7 @@ pub fn launch_parallel_workers(pcxt: ParallelContextHandle) -> PgResult<()> {
             any_registrations_failed = true;
             let error_mqh = with_globals(|g| {
                 let c = g.get_mut(pcxt);
-                c.worker[i as usize].bgwhandle = BgwHandle::NULL;
+                c.worker[i as usize].bgwhandle = None;
                 c.worker[i as usize].error_mqh
             });
             shmmq::shm_mq_detach::call(error_mqh);
@@ -1398,7 +1396,10 @@ pub fn wait_for_parallel_workers_to_attach(pcxt: ParallelContextHandle) -> PgRes
                 continue;
             }
 
-            let bgwhandle = with_globals(|g| g.get(pcxt).worker[i as usize].bgwhandle);
+            // The worker has a live error queue here, so it was launched and its
+            // `bgwhandle` is set (C reads the non-NULL handle directly).
+            let bgwhandle = with_globals(|g| g.get(pcxt).worker[i as usize].bgwhandle)
+                .expect("attached parallel worker has a live bgwhandle");
             let (status, _pid) = rt::get_background_worker_pid::call(bgwhandle)?;
             if status == BgwHandleStatus::Started {
                 // Has the worker attached to the error queue?
@@ -1496,10 +1497,16 @@ pub fn wait_for_parallel_workers_to_finish(pcxt: ParallelContextHandle) -> PgRes
                     let c = g.get(pcxt);
                     (c.worker[i as usize].error_mqh, c.worker[i as usize].bgwhandle)
                 });
-                if error_mqh_is_null(error_mqh)
-                    || bgwhandle.is_null()
-                    || rt::get_background_worker_pid::call(bgwhandle)?.0 != BgwHandleStatus::Stopped
-                {
+                // C: error_mqh == NULL || bgwhandle == NULL ||
+                //    GetBackgroundWorkerPid(bgwhandle, &pid) != BGWH_STOPPED
+                // (short-circuits before the pid call when there is no handle).
+                let stopped = match bgwhandle {
+                    Some(h) => {
+                        rt::get_background_worker_pid::call(h)?.0 == BgwHandleStatus::Stopped
+                    }
+                    None => false,
+                };
+                if error_mqh_is_null(error_mqh) || !stopped {
                     i += 1;
                     continue;
                 }
@@ -1549,10 +1556,11 @@ fn wait_for_parallel_workers_to_exit(pcxt: ParallelContextHandle) -> PgResult<()
             let c = g.get(pcxt);
             (c.worker_is_null(), c.worker[i as usize].bgwhandle)
         });
-        if worker_null || bgwhandle.is_null() {
+        // C: pcxt->worker == NULL || pcxt->worker[i].bgwhandle == NULL
+        let Some(bgwhandle) = bgwhandle.filter(|_| !worker_null) else {
             i += 1;
             continue;
-        }
+        };
 
         let status = rt::wait_for_background_worker_shutdown::call(bgwhandle)?;
 
@@ -1566,7 +1574,7 @@ fn wait_for_parallel_workers_to_exit(pcxt: ParallelContextHandle) -> PgResult<()
 
         // Release memory (pfree(bgwhandle)).
         rt::terminate_background_worker_handle_free::call(bgwhandle)?;
-        with_globals(|g| g.get_mut(pcxt).worker[i as usize].bgwhandle = BgwHandle::NULL);
+        with_globals(|g| g.get_mut(pcxt).worker[i as usize].bgwhandle = None);
         i += 1;
     }
     Ok(())
@@ -1596,6 +1604,10 @@ pub fn destroy_parallel_context(pcxt: ParallelContextHandle) -> PgResult<()> {
                 (c.worker[i as usize].error_mqh, c.worker[i as usize].bgwhandle)
             });
             if !error_mqh_is_null(error_mqh) {
+                // A live error queue means the worker was launched, so its
+                // `bgwhandle` is set (C passes the non-NULL handle directly).
+                let bgwhandle =
+                    bgwhandle.expect("launched parallel worker has a live bgwhandle");
                 rt::terminate_background_worker::call(bgwhandle)?;
                 shmmq::shm_mq_detach::call(error_mqh);
                 with_globals(|g| g.get_mut(pcxt).worker[i as usize].error_mqh = ERROR_MQH_NULL);

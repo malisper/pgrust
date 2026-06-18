@@ -1608,9 +1608,9 @@ mod seam_layer {
     }
 
     fn shm_mq_set_handle(mqh: ShmMqAttachHandle, handle: ExecBgwHandle) {
-        let real =
-            backend_postmaster_bgworker_seams::background_worker_handle_from_token::call(handle);
-        with_registry(|r| real_set_handle(r.get_mut(mqh), real));
+        // `handle` is the REAL `BackgroundWorkerHandle` value (`{slot, generation}`),
+        // the same type the queue records internally — no token resolution needed.
+        with_registry(|r| real_set_handle(r.get_mut(mqh), handle));
     }
 
     fn shm_mq_get_queue(mqh: ShmMqAttachHandle) -> ExecShmMq {

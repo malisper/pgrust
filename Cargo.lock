@@ -3077,6 +3077,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-bgworker",
  "types-core",
  "types-error",
  "types-parallel",
@@ -13339,7 +13340,6 @@ dependencies = [
  "types-bgworker",
  "types-core",
  "types-error",
- "types-execparallel",
  "types-startup",
 ]
 
@@ -22870,6 +22870,7 @@ name = "types-execparallel"
 version = "0.0.0"
 dependencies = [
  "mcx",
+ "types-bgworker",
  "types-core",
  "types-tuple",
 ]

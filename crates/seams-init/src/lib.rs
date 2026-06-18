@@ -1331,7 +1331,6 @@ mod recurrence_guard {
         ("backend_nodes_extensible", "rescan_custom_scan"),
         ("backend_nodes_extensible", "restr_pos_custom_scan"),
         ("backend_nodes_extensible", "shutdown_custom_scan"),
-        ("backend_postmaster_bgworker", "background_worker_handle_from_token"),
         // DESIGN_DEBT (TD-BUFMGR-AIO-GUC): one bufmgr-seam `::call`ed in a live
         // consumer (backend-storage-aio-read-stream) whose value comes from the
         // unported aio.c machinery, not this owner:

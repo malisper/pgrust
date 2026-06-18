@@ -21,8 +21,9 @@ use types_core::{pid_t, Oid, ProcNumber, Size, TimestampTz, XLogRecPtr};
 use types_tuple::Datum;
 use types_snapshot::SnapshotData;
 use types_error::PgResult;
+use types_bgworker::BackgroundWorkerHandle;
 use types_parallel::{
-    dsm_handle, BgwHandle, BgwHandleStatus, DsmSegmentHandle, FixedParallelState,
+    dsm_handle, BgwHandleStatus, DsmSegmentHandle, FixedParallelState,
     ParallelWorkerMainFn, ParsedErrorNotice, ShmMqHandleHandle,
 };
 
@@ -84,11 +85,27 @@ seam_core::seam!(pub fn dsm_segment_from_datum(arg: Datum<'static>) -> PgResult<
 // gone (`ShmMqHandle`/`ShmMqHandleHandle` carriers retired with them).
 
 // --- background workers (postmaster/bgworker.c) ----------------------------
-seam_core::seam!(pub fn register_dynamic_background_worker(seg: DsmSegmentHandle, worker_index: i32) -> PgResult<BgwHandle>);
-seam_core::seam!(pub fn get_background_worker_pid(handle: BgwHandle) -> PgResult<(BgwHandleStatus, pid_t)>);
-seam_core::seam!(pub fn wait_for_background_worker_shutdown(handle: BgwHandle) -> PgResult<BgwHandleStatus>);
-seam_core::seam!(pub fn terminate_background_worker(handle: BgwHandle) -> PgResult<()>);
-seam_core::seam!(pub fn terminate_background_worker_handle_free(handle: BgwHandle) -> PgResult<()>);
+// These carry the REAL value handle `types_bgworker::BackgroundWorkerHandle`
+// (`{slot, generation}`), not an opaque token: parallel.c stores the real
+// `BackgroundWorkerHandle` in `pcxt->worker[i].bgwhandle` (modeled as an
+// `Option`, the C `NULL`-pointer-or-handle).
+//
+// `register_dynamic_background_worker` assembles the `BackgroundWorker`
+// registration record (memset/snprintf, `bgw_extra` = worker index,
+// `bgw_main_arg = UInt32GetDatum(dsm_segment_handle(seg))`) and calls the
+// owner's `RegisterDynamicBackgroundWorker`. The leader passes the resolved
+// DSM-segment handle (`dsm_segment_handle(pcxt->seg)`, the `dsm_handle` machine
+// name) so the bgworker owner — which cannot resolve the parallel subsystem's
+// private `DsmSegmentHandle` registry — can stamp `bgw_main_arg` directly.
+// Returns `None` on C `false` (out of bgworker slots), mirroring the owner's
+// `RegisterDynamicBackgroundWorker`.
+seam_core::seam!(pub fn register_dynamic_background_worker(seg_handle: dsm_handle, worker_index: i32) -> PgResult<Option<BackgroundWorkerHandle>>);
+seam_core::seam!(pub fn get_background_worker_pid(handle: BackgroundWorkerHandle) -> PgResult<(BgwHandleStatus, pid_t)>);
+seam_core::seam!(pub fn wait_for_background_worker_shutdown(handle: BackgroundWorkerHandle) -> PgResult<BgwHandleStatus>);
+seam_core::seam!(pub fn terminate_background_worker(handle: BackgroundWorkerHandle) -> PgResult<()>);
+// `pfree(bgwhandle)` in C; with a value handle there is nothing to free, so the
+// owner's install is a no-op acknowledging the consumer dropped its copy.
+seam_core::seam!(pub fn terminate_background_worker_handle_free(handle: BackgroundWorkerHandle) -> PgResult<()>);
 seam_core::seam!(pub fn register_parallel_worker_shutdown(seg: DsmSegmentHandle) -> PgResult<()>);
 
 // --- lock groups / latches (storage/lmgr/proc.c, storage/ipc/latch.c) ------

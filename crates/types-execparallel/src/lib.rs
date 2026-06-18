@@ -202,9 +202,13 @@ handle!(
 handle!(
     /// Live `TupleQueueReader *` (`executor/tqueue.h`).
     TupleQueueReaderHandle);
-handle!(
-    /// Live `BackgroundWorkerHandle *` (`postmaster/bgworker.h`).
-    BackgroundWorkerHandle);
+/// `BackgroundWorkerHandle` (`postmaster/bgworker.h`) — the REAL value handle
+/// `{slot, generation}`, re-exported from its `types_bgworker` home. The leader
+/// holds this by value (not an opaque token): `execParallel` / parallel.c store
+/// it in their per-worker bookkeeping and pass it across the shm-mq / bgworker
+/// seams unchanged. (Formerly a `usize` `handle!` token resolved through a
+/// bgworker registry; that lossy bridge is retired.)
+pub use types_bgworker::BackgroundWorkerHandle;
 handle!(
     /// Live `DestReceiver *` (`tcop/dest.h`).
     DestReceiverHandle);

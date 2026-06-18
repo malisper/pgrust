@@ -16,3 +16,4 @@ types-error = { path = "../types-error" }
 types-tuple = { path = "../types-tuple" }
 types-parallel = { path = "../types-parallel" }
 types-snapshot = { path = "../types-snapshot" }
+types-bgworker = { path = "../types-bgworker" }

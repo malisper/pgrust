@@ -1643,6 +1643,29 @@ pub fn init_seams() {
         Ok(worker_number_from_bgw_extra())
     });
 
+    // Parallel-worker launch/poll/teardown (parallel.c LaunchParallelWorkers,
+    // WaitFor*To{Attach,Finish,Exit}, DestroyParallelContext). These carry the
+    // REAL `BackgroundWorkerHandle` value; the bodies are this owner's
+    // (Register/Get/WaitForShutdown/Terminate). `register_dynamic_background_worker`
+    // additionally assembles the `BackgroundWorker` registration record.
+    backend_access_transam_parallel_rt_seams::register_dynamic_background_worker::set(
+        |seg_handle, worker_index| register_dynamic_parallel_worker_seam(seg_handle, worker_index),
+    );
+    backend_access_transam_parallel_rt_seams::get_background_worker_pid::set(|handle| {
+        Ok(GetBackgroundWorkerPid(&handle))
+    });
+    backend_access_transam_parallel_rt_seams::wait_for_background_worker_shutdown::set(|handle| {
+        WaitForBackgroundWorkerShutdown(&handle)
+    });
+    backend_access_transam_parallel_rt_seams::terminate_background_worker::set(|handle| {
+        TerminateBackgroundWorker(&handle)
+    });
+    // `pfree(bgwhandle)` in C; the handle is a by-value `{slot, generation}` here,
+    // so the consumer drops its copy and there is nothing to free.
+    backend_access_transam_parallel_rt_seams::terminate_background_worker_handle_free::set(
+        |_handle| Ok(()),
+    );
+
     pm_registry_init_seams();
 }
 
@@ -1744,6 +1767,47 @@ fn register_dynamic_background_worker_seam(
     worker: &BackgroundWorker,
 ) -> PgResult<Option<BackgroundWorkerHandle>> {
     RegisterDynamicBackgroundWorker(worker)
+}
+
+/// Marshal for the parallel-rt `register_dynamic_background_worker` seam:
+/// assemble the `BackgroundWorker` registration record exactly as
+/// `LaunchParallelWorkers` does (parallel.c:600-628 — memset/snprintf,
+/// `bgw_extra` = worker index, `bgw_main_arg = UInt32GetDatum(seg_handle)`),
+/// then register it. parallel.c resolves `dsm_segment_handle(pcxt->seg)` and
+/// passes that `dsm_handle` (the segment's machine name) so this owner — which
+/// cannot reach the parallel subsystem's private DSM-segment registry — can
+/// stamp `bgw_main_arg` directly. The `bgw_library_name`/`bgw_function_name`
+/// name the in-`postgres` `ParallelWorkerMain` entry point.
+fn register_dynamic_parallel_worker_seam(
+    seg_handle: u32,
+    worker_index: i32,
+) -> PgResult<Option<BackgroundWorkerHandle>> {
+    let my_pid = backend_utils_init_small_seams::my_proc_pid::call();
+
+    let mut worker = BackgroundWorker::zeroed();
+    {
+        // snprintf(worker.bgw_name, BGW_MAXLEN, "parallel worker for PID %d", MyProcPid)
+        let mut name = std::string::String::new();
+        use std::fmt::Write as _;
+        let _ = write!(name, "parallel worker for PID {}", my_pid);
+        types_bgworker::snprintf_cstr(&mut worker.bgw_name, &name);
+    }
+    types_bgworker::snprintf_cstr(&mut worker.bgw_type, "parallel worker");
+    worker.bgw_flags =
+        BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION | BGWORKER_CLASS_PARALLEL;
+    worker.bgw_start_time = BgWorkerStartTime::ConsistentState;
+    worker.bgw_restart_time = BGW_NEVER_RESTART;
+    types_bgworker::snprintf_cstr(&mut worker.bgw_library_name, "postgres");
+    types_bgworker::snprintf_cstr(&mut worker.bgw_function_name, "ParallelWorkerMain");
+    // bgw_main_arg = UInt32GetDatum(dsm_segment_handle(seg)): the 32-bit DSM
+    // handle in the by-value Datum machine word (types-bgworker stores it as
+    // `usize`).
+    worker.bgw_main_arg = types_datum::Datum::from_u32(seg_handle).as_usize();
+    // memcpy(worker.bgw_extra, &i, sizeof(int)) — the worker index, native-endian.
+    worker.bgw_extra[..4].copy_from_slice(&worker_index.to_ne_bytes());
+    worker.bgw_notify_pid = my_pid;
+
+    RegisterDynamicBackgroundWorker(&worker)
 }
 
 /// Marshal for the `background_worker_initialize_connection` inward seam.
