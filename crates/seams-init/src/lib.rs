@@ -1148,25 +1148,27 @@ mod recurrence_guard {
         // (HeapTupleHeaderGetDatum) is now installed by heaptoast's init_seams().
         // The composite/record-Datum carrier bridge landed.
         // DESIGN_DEBT (TOWER-B): the index-AM owner (backend-access-index-amapi,
-        // amapi.c) installs the 11 GetIndexAmRoutine-derived seams, but
-        // `am_adjust_members` and `am_reloptions` are NOT amapi.c functions and
-        // cannot be installed by it: am_adjust_members is opclasscmds.c's
-        // `amroutine->amadjustmembers(...)` dispatch and am_reloptions is
-        // reloptions.c's `index_reloptions` -> `amoptions(reloptions, validate)`
-        // dispatch. Both reach by-name AM callbacks (`amadjustmembers` /
-        // `amoptions`) that the unified `IndexAmRoutine` vtable deliberately
-        // DROPPED in TOWER-A (the AM validate crate's `amadjustmembers` returns a
-        // soft-error result that cannot be a raw fn-ptr; `amoptions` is reached
-        // by name). am_adjust_members additionally needs a conversion between the
-        // seam's `types_opclass::OpFamilyMember` and the trimmed per-AM
-        // `OpFamilyMember` the bt/hash adjustmembers callbacks mutate. Installing
-        // these is a by-amoid AM-callback dispatch table + carrier reconcile in
-        // the right owner (opclasscmds / reloptions), not amapi.c logic.
-        // (am_adjust_members is consumed only via a brace-grouped `use ...::{...}`
-        // import that the recurrence guard's call-site scanner does not resolve
-        // to its seam crate, so it is not seen as "called" and needs no allowlist
-        // entry; it remains uninstalled for the same contract reason.)
-        ("backend_access_index_amapi", "am_reloptions"),
+        // amapi.c) installs the 11 GetIndexAmRoutine-derived seams. It now also
+        // installs `am_reloptions` (reloptions.c's `index_reloptions` ->
+        // `amoptions(reloptions, validate)` dispatch): although `amoptions` is a
+        // by-name AM callback the unified `IndexAmRoutine` vtable DROPPED in
+        // TOWER-A, amapi sits above all the AM *core* crates in the dep graph and
+        // reaches their `*options` bodies directly (`nbtree-core::utils::btoptions`,
+        // `hash-core::hashutil::hashoptions`, `gist-core::gistutil::gistoptions`,
+        // `gin-ginutil::ginoptions`, `spgist-core::spgoptions`), dispatched on the
+        // index's `rd_amhandler` exactly like `GetIndexAmRoutine` (#341). BRIN's
+        // `brinoptions` is itself unported, so a BRIN index with reloptions
+        // seam-and-panics (mirror PG and panic), same as the dynamic-AM leg.
+        // `am_adjust_members` is NOT amapi.c logic and remains uninstalled:
+        // it is opclasscmds.c's `amroutine->amadjustmembers(...)` dispatch, and
+        // additionally needs a conversion between the seam's
+        // `types_opclass::OpFamilyMember` and the trimmed per-AM `OpFamilyMember`
+        // the bt/hash adjustmembers callbacks mutate (a by-amoid AM-callback
+        // dispatch table + carrier reconcile in opclasscmds). (am_adjust_members
+        // is consumed only via a brace-grouped `use ...::{...}` import that the
+        // recurrence guard's call-site scanner does not resolve to its seam crate,
+        // so it is not seen as "called" and needs no allowlist entry; it remains
+        // uninstalled for the same contract reason.)
         // RESOLVED (TOWER-C): the 16 index_* scan-lifecycle / retrieval seams
         // (index_beginscan{,_bitmap,_parallel}, index_rescan{,_is,_bis},
         // index_endscan, index_markpos, index_restrpos, index_getnext_tid,

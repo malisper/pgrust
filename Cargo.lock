@@ -1902,6 +1902,7 @@ dependencies = [
  "backend-access-gin-ginutil",
  "backend-access-gist-core",
  "backend-access-gist-validate",
+ "backend-access-hash-core",
  "backend-access-hash-entry",
  "backend-access-hashvalidate",
  "backend-access-index-amapi-seams",

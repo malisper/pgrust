@@ -96,6 +96,7 @@ pub fn init_seams() {
     sx::index_am_searcharray::set(index_am_searcharray);
     sx::index_am_has_gettuple::set(index_am_has_gettuple);
     sx::am_adjust_members::set(am_adjust_members);
+    sx::am_reloptions::set(am_reloptions);
 
     // amutils.c SQL-level property reporting: the AM-routine projection, the
     // per-AM `amproperty` / `ambuildphasename` callbacks (which the unified
@@ -178,6 +179,69 @@ pub fn GetIndexAmRoutineByAmId(amoid: Oid) -> PgResult<IndexAmRoutine> {
 
     // return GetIndexAmRoutine(amhandler);
     GetIndexAmRoutine(amhandler)
+}
+
+// ===========================================================================
+// am_reloptions — reloptions.c `index_reloptions`'s `amoptions(...)` dispatch
+// ===========================================================================
+
+/// `amoptions(reloptions, validate)` (the `IndexAmRoutine.amoptions` callback,
+/// dispatched by `index_reloptions`, reloptions.c). In C this calls the AM's
+/// option-parser function pointer; the unified `IndexAmRoutine` vtable cannot
+/// carry that pointer (the AM `*options` bodies live in the AM *core* crates,
+/// above the AM `*handler` crates in the dep graph — `nbtree-core::btoptions`
+/// is not reachable from `nbtree-nbtree::bthandler`, hence its `*_am` adapter
+/// panics). amapi sits above all the AM core crates and reaches them directly,
+/// so this is the same well-known-handler-OID dispatch as `GetIndexAmRoutine`
+/// (#341), keyed on the index relation's `rd_amhandler` (the relcache passes
+/// it as the `amoptions` arg). The `reloptions` is the verbatim `text[]`
+/// catalog bytes (the C `Datum reloptions`); the result is the AM-defined
+/// option `bytea` payload allocated in `mcx`, or `None` for the AM's NULL.
+fn am_reloptions<'mcx>(
+    mcx: Mcx<'mcx>,
+    amoptions: Oid,
+    reloptions: &[u8],
+    validate: bool,
+) -> PgResult<Option<mcx::PgVec<'mcx, u8>>> {
+    // The relcache hands us `rd_amhandler` as the dispatch OID; match it to the
+    // built-in AM whose `*options` parser the C function pointer would reach.
+    let opts: Option<std::vec::Vec<u8>> = match amoptions {
+        F_BTHANDLER => {
+            backend_access_nbtree_core::utils::btoptions(Some(reloptions), validate)?
+        }
+        F_HASHHANDLER => {
+            backend_access_hash_core::hashutil::hashoptions(Some(reloptions), validate)?
+        }
+        F_GISTHANDLER => {
+            backend_access_gist_core::gistutil::gistoptions(Some(reloptions), validate)?
+        }
+        F_GINHANDLER => {
+            backend_access_gin_ginutil::ginoptions(Some(reloptions), validate, mcx)?
+        }
+        F_SPGHANDLER => {
+            backend_access_spgist_core::spgoptions(Some(reloptions), validate)?
+        }
+        // BRIN's `brinoptions` (brin.c) is itself unported (its `*_am` adapter
+        // panics); a built-in BRIN index with reloptions set seam-and-panics
+        // here, the same `mirror PG and panic` as the dynamic-AM leg above.
+        F_BRINHANDLER => panic!(
+            "am_reloptions: BRIN reloptions parse (brin.c `brinoptions`) is not \
+             yet ported"
+        ),
+        // Any other handler OID is a dynamically loaded extension AM, whose
+        // `amoptions` would be reached through the (unported) dynamic-fmgr
+        // dispatch. `mirror PG and panic`; a built-in catalog never gets here.
+        other => panic!(
+            "index access method handler function {other} is not a built-in \
+             handler (dynamic AM amoptions dispatch is not yet ported)"
+        ),
+    };
+
+    // Copy the AM's `alloc::Vec` bytea payload into the seam's `mcx` arena.
+    match opts {
+        Some(bytes) => Ok(Some(mcx::slice_in(mcx, &bytes)?)),
+        None => Ok(None),
+    }
 }
 
 // ===========================================================================
