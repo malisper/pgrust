@@ -2143,22 +2143,28 @@ pub fn tuplesort_skiptuples<'mcx>(
 /// `tuplesort_merge_order(allowedMem)` (tuplesort.c): the number of input tapes
 /// to merge in each pass, given `allowedMem` bytes. Exported for the planner.
 pub fn tuplesort_merge_order(allowed_mem: i64) -> i32 {
-    // We need one tape for each merge input, plus another one for the output,
-    // and each of these tapes needs buffer space. In addition we want
-    // MERGE_BUFFER_SIZE workspace per input tape (but the output tape doesn't
-    // count).
+    // In the merge phase, we need buffer space for each input and output tape.
+    // Each pass reads from M input tapes and writes to N output tapes; each tape
+    // consumes TAPE_BUFFER_OVERHEAD bytes, plus we want MERGE_BUFFER_SIZE
+    // workspace per input tape. Except for the last passes, M = N, so we choose
+    // M giving each input tape (TAPE_BUFFER_OVERHEAD + MERGE_BUFFER_SIZE) of the
+    // available memory:
     //
-    // mergeorder = (allowedMem - TAPE_BUFFER_OVERHEAD) /
-    //              (TAPE_BUFFER_OVERHEAD + MERGE_BUFFER_SIZE)
-    let mut mergeorder =
-        (allowed_mem - TAPE_BUFFER_OVERHEAD) / (MERGE_BUFFER_SIZE + TAPE_BUFFER_OVERHEAD);
+    //   mOrder = allowedMem / (2 * TAPE_BUFFER_OVERHEAD + MERGE_BUFFER_SIZE)
+    let mut m_order = allowed_mem / (2 * TAPE_BUFFER_OVERHEAD + MERGE_BUFFER_SIZE);
 
-    // Even in minimum memory, use at least a MINORDER merge.
-    mergeorder = mergeorder.max(MINORDER as i64);
-    // Cap to MAXORDER.
-    mergeorder = mergeorder.min(MAXORDER as i64);
+    // Even in minimum memory, use at least a MINORDER merge; even with lots of
+    // memory, never more than a MAXORDER merge.
+    m_order = m_order.max(MINORDER as i64);
+    m_order = m_order.min(MAXORDER as i64);
 
-    mergeorder as i32
+    m_order as i32
+}
+
+/// Marshal slot for the planner's `tuplesort_merge_order` cost-model seam.
+/// C returns `int`; the planner consumes it as a `double`.
+fn seam_tuplesort_merge_order(allowed_mem: i64) -> f64 {
+    tuplesort_merge_order(allowed_mem) as f64
 }
 
 // ===========================================================================
@@ -3934,6 +3940,12 @@ pub fn init_seams() {
     sx::tuplesort_begin_index_gist::set(seam_begin_index_gist);
     sx::tuplesort_putindextuplevalues::set(seam_putindextuplevalues);
     sx::tuplesort_getindextuple::set(seam_getindextuple);
+
+    // Exported to the planner's cost model (cost_tuplesort in costsize.c). C
+    // returns `int`; the planner uses it as a `double`, so the seam carries f64.
+    backend_optimizer_path_costsize_seams::tuplesort_merge_order::set(
+        seam_tuplesort_merge_order,
+    );
 
     // The two `bool` GUC variables tuplesort.c owns. C reads them from the
     // variable itself (no ControlFile, no check/assign/show hooks); each lives

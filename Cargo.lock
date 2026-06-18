@@ -21709,6 +21709,7 @@ dependencies = [
  "backend-access-common-indextuple-seams",
  "backend-access-index-genam-seams",
  "backend-access-nbtree-core-seams",
+ "backend-optimizer-path-costsize-seams",
  "backend-storage-file-buffile-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-misc-guc-tables",

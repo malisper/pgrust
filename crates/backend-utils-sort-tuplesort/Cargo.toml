@@ -35,6 +35,9 @@ backend-utils-sort-sortsupport-seams = { path = "../backend-utils-sort-sortsuppo
 # heap_deform_minimal_tuple_flat for the readtup_heap datum1 re-extraction).
 # This crate does NOT depend on sort-storage/tuplesort, so the edge is acyclic.
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+# `tuplesort_merge_order` is also exported to the planner's cost model
+# (cost_tuplesort) through the costsize seam crate, installed from init_seams().
+backend-optimizer-path-costsize-seams = { path = "../backend-optimizer-path-costsize-seams" }
 # This unit's inward seams (the `tuplesort_*` access method): begin_heap/datum,
 # set_bound, put*/get*, performsort, end, rescan/markpos/restorepos, get_stats.
 # Installed from `init_seams()`.
