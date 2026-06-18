@@ -7730,6 +7730,7 @@ dependencies = [
  "backend-utils-cache-lsyscache",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-syscache",
+ "backend-utils-cache-syscache-seams",
  "backend-utils-error",
  "backend-utils-init-miscinit",
  "backend-utils-init-miscinit-seams",

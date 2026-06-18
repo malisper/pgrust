@@ -61,6 +61,8 @@ pub fn init_seams() {
 
     seam::execute_truncate::set(truncate::execute_truncate);
 
+    seam::get_pg_class_drop_info::set(smallfns::get_pg_class_drop_info);
+    seam::is_system_class_relid::set(smallfns::is_system_class_relid);
     seam::check_table_not_in_use::set(smallfns::check_table_not_in_use);
     seam::set_relation_has_subclass::set(smallfns::set_relation_has_subclass);
     seam::check_relation_tablespace_move::set(smallfns::check_relation_tablespace_move);

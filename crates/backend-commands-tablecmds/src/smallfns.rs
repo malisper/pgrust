@@ -134,3 +134,62 @@ pub fn set_relation_tablespace<'mcx>(
         new_relfilenumber,
     )
 }
+
+/// `SearchSysCache1(RELOID, relid)` projection of the `pg_class` fields the DROP
+/// / TRUNCATE `RangeVarGetRelidExtended` callbacks read
+/// (`RangeVarCallbackForDropRelation` / `RangeVarCallbackForTruncate`,
+/// tablecmds.c). `Ok(None)` mirrors the C `!HeapTupleIsValid` (the relation was
+/// concurrently dropped). Installed as the inward `get_pg_class_drop_info` seam.
+///
+/// C does one `SearchSysCache1(RELOID)` and reads every field off that tuple;
+/// here the same `RELOID`-keyed syscache projections are read in turn. They all
+/// resolve against the one cached pg_class tuple, so the cache-miss behavior is
+/// consistent: the first read decides `None` (concurrently dropped) before any
+/// field is consumed.
+pub fn get_pg_class_drop_info(
+    relid: Oid,
+) -> PgResult<Option<seam::PgClassDropInfo>> {
+    use backend_utils_cache_syscache_seams as sc;
+
+    // First read gates the whole projection on the tuple's presence (the C
+    // `!HeapTupleIsValid(tuple)` early return).
+    let Some(relkind) = sc::rel_relkind::call(relid)? else {
+        return Ok(None);
+    };
+    let relpersistence = sc::pg_class_extra::call(relid)?
+        .map(|e| e.relpersistence)
+        .ok_or_else(|| {
+            types_error::PgError::error("get_pg_class_drop_info: pg_class tuple vanished mid-read")
+        })?;
+    let relispartition = sc::rel_relispartition::call(relid)?.ok_or_else(|| {
+        types_error::PgError::error("get_pg_class_drop_info: pg_class tuple vanished mid-read")
+    })?;
+    let relnamespace = sc::rel_namespace::call(relid)?.ok_or_else(|| {
+        types_error::PgError::error("get_pg_class_drop_info: pg_class tuple vanished mid-read")
+    })?;
+
+    let scratch = mcx::MemoryContext::new("get_pg_class_drop_info relname");
+    let relname = sc::rel_name::call(scratch.mcx(), relid)?
+        .map(|s| s.as_str().to_string())
+        .ok_or_else(|| {
+            types_error::PgError::error("get_pg_class_drop_info: pg_class tuple vanished mid-read")
+        })?;
+
+    Ok(Some(seam::PgClassDropInfo {
+        relkind,
+        relpersistence,
+        relispartition,
+        relnamespace,
+        relname,
+    }))
+}
+
+/// `IsSystemClass(relid, classform)` (catalog.c) for the DROP / TRUNCATE / RENAME
+/// `RangeVarGetRelidExtended` callbacks, which hold only a `Form_pg_class`
+/// projection (no open relation). `IsSystemClass` reads the form solely for its
+/// `relnamespace` (via `IsToastClass`), so this is exactly
+/// `IsSystemClassByNamespace(relid, relnamespace)`; `relkind` is part of the C
+/// signature but unread. Installed as the inward `is_system_class_relid` seam.
+pub fn is_system_class_relid(relid: Oid, _relkind: u8, relnamespace: Oid) -> PgResult<bool> {
+    Ok(backend_catalog_catalog::IsSystemClassByNamespace(relid, relnamespace))
+}
