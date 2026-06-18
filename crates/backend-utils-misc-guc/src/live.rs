@@ -207,11 +207,79 @@ pub fn try_initialize_guc_options() -> PgResult<()> {
     let mut reg = GucRegistry::new();
     for setting in all_settings() {
         if let Some(var) = build_variable(setting) {
+            // `InitializeOneGUCOption` (guc.c): after seeding `*conf->variable =
+            // conf->reset_val = boot_val`, C fires the variable's `assign_hook`
+            // with the boot value so hook-side global state derived from a GUC
+            // (e.g. `SyncRepWaitMode` from `assign_synchronous_commit`, which
+            // commit-time sync-rep indexes `WalSndCtl->lsn[mode]` with — a stale
+            // `-1` sentinel otherwise crashes the commit path) is initialized to
+            // agree with the boot value. C runs this for every variable that has
+            // an `assign_hook`.
+            //
+            // We fire each installed boot assign hook the same way, but guard the
+            // call: a number of assign hooks have only partially-ported bodies
+            // that `panic!("… not yet ported")` (client_encoding, DateStyle,
+            // TimeZone, role, seed, log_destination, io_combine_limit, …). Those
+            // same stubs already panic on a runtime `SET`, so their *boot-time*
+            // side effect is deferred for exactly the same reason their SET side
+            // effect is. Catching the panic here defers the unported hook's boot
+            // effect (no worse than today, where it never ran at all) while still
+            // running every fully-ported hook — which is what the sync-rep commit
+            // invariant needs. The boot `extra` is `None`: the boot value is the
+            // compiled-in default, for which the `extra`-producing check hooks are
+            // not run at this stage.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                fire_boot_assign_hook(&var)
+            }));
             reg.define(var)?;
         }
     }
     *GUC_STORE.lock().unwrap() = Some(reg);
     Ok(())
+}
+
+/// `InitializeOneGUCOption`'s `if (conf->assign_hook) conf->assign_hook(newval,
+/// extra)` step at boot, fired with `newval = boot_val` and `extra = NULL`. Only
+/// invokes hooks whose owner slot is installed (skipping owners absent from this
+/// binary), mirroring C's guard that the hook function pointer is non-NULL.
+fn fire_boot_assign_hook(var: &GucVariable) {
+    match var {
+        GucVariable::Bool(c) => {
+            if let Some(slot) = c.assign_hook {
+                if slot.installed() {
+                    (slot.get())(c.boot_val, None);
+                }
+            }
+        }
+        GucVariable::Int(c) => {
+            if let Some(slot) = c.assign_hook {
+                if slot.installed() {
+                    (slot.get())(c.boot_val, None);
+                }
+            }
+        }
+        GucVariable::Real(c) => {
+            if let Some(slot) = c.assign_hook {
+                if slot.installed() {
+                    (slot.get())(c.boot_val, None);
+                }
+            }
+        }
+        GucVariable::String(c) => {
+            if let Some(slot) = c.assign_hook {
+                if slot.installed() {
+                    (slot.get())(c.boot_val.as_deref(), None);
+                }
+            }
+        }
+        GucVariable::Enum(c) => {
+            if let Some(slot) = c.assign_hook {
+                if slot.installed() {
+                    (slot.get())(c.boot_val, None);
+                }
+            }
+        }
+    }
 }
 
 /// True once [`initialize_guc_options`] has built the store.
