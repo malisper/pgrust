@@ -449,11 +449,14 @@ pub(crate) fn exec_init_func<'mcx>(
     // re-dispatches by fn_oid at call time (the fmgr-seam contract), so the
     // step's typed `fn_addr: Option<PGFunction>` stays None — the Func step
     // carries `finfo` (with fn_oid) for the interpreter to re-resolve.
-    // `fmgr_info_set_expr` would stash the call node on flinfo->fn_expr (used by
-    // polymorphic-type resolution at call time); the trimmed FmgrInfo has no
-    // fn_expr field, so that store is dropped here (inherited trim).
-    let _ = node;
-    let flinfo = backend_utils_fmgr_fmgr_seams::fmgr_info::call(mcx, funcid)?;
+    // `fmgr_info_set_expr` stashes the call node on flinfo->fn_expr (carried
+    // erased on the FmgrInfo); polymorphic-type resolution reads it back at call
+    // time through `get_fn_expr_rettype`/`get_fn_expr_argtype`. The by-OID fmgr
+    // dispatch re-resolves the FmgrInfo and so would drop this; the interpreter
+    // re-threads the step's fn_expr to the callee at call time (see
+    // `func_step_fn_expr`).
+    let mut flinfo = backend_utils_fmgr_fmgr_seams::fmgr_info::call(mcx, funcid)?;
+    backend_utils_fmgr_fmgr_seams::fmgr_info_set_expr::call(&mut flinfo, node);
 
     // C: InitFunctionCallInfoData(*fcinfo, flinfo, nargs, inputcollid, NULL, NULL);
     //    scratch->d.func.fn_addr = flinfo->fn_addr;  scratch->d.func.nargs = nargs;

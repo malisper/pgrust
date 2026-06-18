@@ -1363,6 +1363,18 @@ fn evaluate_function(
         let c = a.expect_const();
         pairs.push((c.constvalue.clone(), c.constisnull, c.consttype));
     }
+    // C: newexpr = makeNode(FuncExpr); ... fmgr_info_set_expr((Node*)newexpr,
+    // &finfo). Synthesize the call node so a polymorphic function (e.g.
+    // `int4range`'s `range_constructor2`) can read `funcresulttype` /
+    // declared arg types out of it (`get_fn_expr_rettype/argtype`).
+    let newexpr = backend_nodes_core::makefuncs::make_func_expr(
+        funcid,
+        result_type,
+        args.to_vec(),
+        result_collid,
+        input_collid,
+        CoercionForm::COERCE_EXPLICIT_CALL,
+    );
     Ok(Some(fmgr_fold(
         ctx.mcx,
         funcid,
@@ -1371,6 +1383,7 @@ fn evaluate_function(
         result_type,
         result_typmod,
         result_collid,
+        Some(&newexpr),
     )?))
 }
 
@@ -1441,6 +1454,7 @@ pub fn evaluate_expr<'mcx>(
                     result_type,
                     result_typmod,
                     result_collation,
+                    Some(&expr),
                 ),
                 None => clauses_seam::evaluate_expr_fallback::call(
                     expr,
@@ -1464,6 +1478,7 @@ pub fn evaluate_expr<'mcx>(
                     result_type,
                     result_typmod,
                     result_collation,
+                    Some(&expr),
                 ),
                 None => clauses_seam::evaluate_expr_fallback::call(
                     expr,
@@ -1491,8 +1506,14 @@ pub fn evaluate_expr<'mcx>(
                         bool,
                         Oid,
                     )> = pairs;
-                    let (eq, eq_isnull) =
-                        clauses_seam::fmgr_call::call(mcx, opfuncid, inputcollid, pairs, BOOLOID)?;
+                    let (eq, eq_isnull) = clauses_seam::fmgr_call::call(
+                        mcx,
+                        opfuncid,
+                        inputcollid,
+                        pairs,
+                        BOOLOID,
+                        Some(&expr),
+                    )?;
                     if !eq_isnull && datum_get_bool(&eq) {
                         Ok(Expr::Const(make_null_const(
                             mcx,
@@ -1556,8 +1577,14 @@ fn fmgr_fold<'mcx>(
     result_type: Oid,
     result_typmod: i32,
     result_collation: Oid,
+    // C `evaluate_function` runs `fmgr_info_set_expr((Node *) newexpr, &finfo)`
+    // so a const-folded polymorphic function reads its declared types; thread the
+    // synthesized call node (`None` for the cast/coerce-fold sites that have no
+    // FuncExpr/OpExpr, matching C's NULL fn_expr there).
+    fn_expr: Option<&Expr>,
 ) -> PgResult<Expr> {
-    let (value, isnull) = clauses_seam::fmgr_call::call(mcx, funcid, inputcollid, args, result_type)?;
+    let (value, isnull) =
+        clauses_seam::fmgr_call::call(mcx, funcid, inputcollid, args, result_type, fn_expr)?;
     let (typlen, typbyval) = lsyscache::get_typlenbyval::call(result_type)?;
     Ok(Expr::Const(make_const(
         mcx,

@@ -109,6 +109,26 @@ fn func_step_inputs<'mcx>(
     }
 }
 
+/// Recover the call-expression node `ExecInitFunc` stamped onto the step's
+/// `op->d.func.finfo->fn_expr` (`fmgr_info_set_expr`). The by-OID fmgr dispatch
+/// re-resolves the `FmgrInfo` and so drops the step's `fn_expr`; threading it
+/// back to the callee lets a polymorphic function read its declared
+/// result/argument types (`get_fn_expr_rettype`/`get_fn_expr_argtype`). `None`
+/// is C's "`flinfo->fn_expr == NULL`" (no call node — non-polymorphic call).
+fn func_step_fn_expr<'a, 'mcx>(
+    state: &'a ExprState<'mcx>,
+    op: usize,
+) -> Option<&'a types_nodes::primnodes::Expr> {
+    match step_data(state, op) {
+        ExprEvalStepData::Func { finfo, .. } => finfo
+            .as_ref()?
+            .fn_expr
+            .as_ref()?
+            .downcast_ref::<types_nodes::primnodes::Expr>(),
+        _ => None,
+    }
+}
+
 /// `ExecInterpExecuteFuncStep` core — the shared body for the `EEOP_FUNCEXPR`
 /// (and strict / fusage) opcodes:
 ///
@@ -154,7 +174,8 @@ pub fn exec_func_step<'mcx>(
     // Datum image — a by-ref text/name column survives the gather (WALL 1aq). The
     // result is materialized into the per-query context.
     let mcx = estate.es_query_cxt;
-    let (value, isnull) = function_call_invoke_datum::call(mcx, fn_oid, collation, &args)?;
+    let fn_expr = func_step_fn_expr(state, op);
+    let (value, isnull) = function_call_invoke_datum::call(mcx, fn_oid, collation, &args, fn_expr)?;
 
     // *op->resvalue = d;  *op->resnull = fcinfo->isnull;
     crate::interp_loop::write_cell(state, resvalue_id, value, isnull);
@@ -246,7 +267,9 @@ pub fn exec_distinct_step<'mcx>(
         // eqresult = op->d.func.fn_addr(fcinfo). The canonical (by-ref-capable)
         // call frame: the compared values keep their full Datum image.
         let mcx = estate.es_query_cxt;
-        let (eqval, isnull) = function_call_invoke_datum::call(mcx, fn_oid, collation, &args)?;
+        let fn_expr = func_step_fn_expr(state, op);
+        let (eqval, isnull) =
+            function_call_invoke_datum::call(mcx, fn_oid, collation, &args, fn_expr)?;
         // DISTINCT inverts "=" (BoolGetDatum(!DatumGetBool(eqresult))); NOT
         // DISTINCT returns the raw "=" result.
         let value = if not_distinct {
@@ -302,8 +325,9 @@ pub fn exec_nullif_step<'mcx>(
 
         // fcinfo->isnull = false; result = op->d.func.fn_addr(fcinfo).
         let mcx = estate.es_query_cxt;
+        let fn_expr = func_step_fn_expr(state, op);
         let (result_val, isnull) =
-            function_call_invoke_datum::call(mcx, fn_oid, collation, &args)?;
+            function_call_invoke_datum::call(mcx, fn_oid, collation, &args, fn_expr)?;
 
         // if (!fcinfo->isnull && DatumGetBool(result)) -> equal -> return NULL.
         // Write through `write_cell` so a STATE_RESULT_CELL target reaches
@@ -812,7 +836,7 @@ fn iocoerce_core<'mcx>(
     } else {
         let out_call_args = [cur.value.clone()];
         let (val, _isnull) =
-            function_call_invoke_datum::call(mcx, out_oid, out_coll, &out_call_args)?;
+            function_call_invoke_datum::call(mcx, out_oid, out_coll, &out_call_args, None)?;
         // Assert(!fcinfo_out->isnull) — output functions never return NULL.
         Some(val)
     };
@@ -855,7 +879,7 @@ fn iocoerce_core<'mcx>(
         }
 
         let (value, isnull) =
-            function_call_invoke_datum::call(mcx, in_oid, in_coll, &in_datum_args)?;
+            function_call_invoke_datum::call(mcx, in_oid, in_coll, &in_datum_args, None)?;
         // *op->resvalue = d;  (resnull is unchanged: null iff str was NULL).
         state.result_cells.set(
             resvalue_id,

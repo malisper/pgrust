@@ -404,11 +404,22 @@ fn invoke_transfn<'mcx>(
     for a in input_args {
         args.push(a.clone());
     }
+    // C: `pertrans->transfn_fcinfo->flinfo` is `&pertrans->transfn`, onto which
+    // `build_pertrans_for_aggref` ran `fmgr_info_set_expr((Node*) transfnexpr,
+    // ...)`. Thread that call node so a polymorphic transition function reads its
+    // declared arg/result types (`get_fn_expr_*`). The by-OID re-resolution drops
+    // it otherwise.
+    let fn_expr = pertrans
+        .transfn
+        .fn_expr
+        .as_ref()
+        .and_then(|e| e.downcast_ref::<types_nodes::primnodes::Expr>());
     backend_utils_fmgr_fmgr_seams::function_call_invoke_datum::call(
         mcx,
         pertrans.transfn.fn_oid,
         pertrans.agg_collation,
         &args,
+        fn_expr,
     )
 }
 

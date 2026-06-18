@@ -595,15 +595,38 @@ pub fn make_range<'mcx>(
     if OidIsValid(typcache.rng_canonical_finfo.fn_oid) && !range_is_empty(range) {
         // C invokes typcache->rng_canonical_finfo via FunctionCallInvoke with
         // the range as its single argument, under the range's collation, then
-        // re-detoasts the result. Routed through the fmgr owner seam (which
-        // dispatches by fn_oid). The strict-null `function %u returned NULL`
-        // error is raised by the seam, mirroring C.
-        let result = fmgr::function_call1_coll::call(
+        // re-detoasts the result. The canonical function is a range-in/range-out
+        // builtin (`int4range_canonical` etc.): its by-reference RangeType
+        // argument and result cross the owned fmgr boundary through the canonical
+        // `Datum` lane (`RefPayload::Varlena`), NOT the bare-word `FunctionCall1`
+        // path — the latter would drop the by-ref referent and hand back a null
+        // word. Marshal the serialized range as a `ByRef` arg and read the
+        // canonicalized range back from the `ByRef` result.
+        use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
+        let arg = CanonDatum::ByRef(mcx::slice_in(mcx, &range_to_varlena_bytes(range))?);
+        let (result, isnull) = fmgr::function_call_invoke_datum::call(
+            mcx,
             typcache.rng_canonical_finfo.fn_oid,
             typcache.rng_collation,
-            Datum::from_usize(range.ptr as usize),
+            &[arg],
+            None,
         )?;
-        range = datum_get_range_type_p(mcx, result)?;
+        if isnull {
+            // C: strict-null `function %u returned NULL` (canonical fns are strict
+            // and never return NULL for a non-empty range).
+            return Err(PgError::error(format!(
+                "function {} returned NULL",
+                typcache.rng_canonical_finfo.fn_oid
+            )));
+        }
+        let CanonDatum::ByRef(bytes) = result else {
+            // A range result is always a by-reference varlena; any other shape is
+            // a contract violation.
+            return Err(PgError::error(
+                "range canonical function returned a non-by-reference result",
+            ));
+        };
+        range = range_p_from_varlena_bytes(mcx, bytes.as_slice())?;
     }
 
     Ok(range)
@@ -820,4 +843,49 @@ pub fn datum_write(
     }
 
     cur + data_length
+}
+
+/// Read the verbatim varlena image of a (plain, already-detoasted) `RangeType`
+/// as owned bytes — `memcpy(palloc(VARSIZE(range)), range, VARSIZE(range))`.
+///
+/// `RangeTypeGetDatum(range)` is C's `PointerGetDatum(range)`: a bare pointer to
+/// the range's flattened 4B varlena. The owned fmgr boundary cannot return a raw
+/// pointer word (the referent would dangle past the call's context), so a
+/// by-reference range result crosses through the `RefPayload::Varlena` side
+/// channel; this distills the bytes that payload carries. The `RangeType` a
+/// constructor / `make_range` produces is always a plain 4B varlena, so this is
+/// the `varsize_any` 4B path.
+pub fn range_to_varlena_bytes(range: RangeTypeP<'_>) -> std::vec::Vec<u8> {
+    let p = range.ptr as *const u8;
+    // SAFETY: `range.ptr` is a valid, 'mcx-lived, fully-detoasted plain varlena
+    // (RangeTypeP's construction invariant); `VARSIZE_ANY` reads its length from
+    // the header, and the whole image is contiguous and readable.
+    unsafe {
+        let len = varsize_any(p);
+        core::slice::from_raw_parts(p, len).to_vec()
+    }
+}
+
+/// `DatumGetRangeTypeP` over a by-reference range argument that crossed the fmgr
+/// boundary as `RefPayload::Varlena` bytes (the owned-boundary lane for a by-ref
+/// argument; C reads it straight off the pointer `Datum`). Copies the verbatim
+/// varlena image into `mcx` (MAXALIGN(8)-aligned, matching `range_serialize`'s
+/// invariant so the in-image absolute-address reads stay aligned) and returns a
+/// handle pointing at it. The bytes are already a plain 4B varlena (the producer
+/// serialized them via `range_to_varlena_bytes`), so no detoast is needed.
+pub fn range_p_from_varlena_bytes<'mcx>(
+    mcx: Mcx<'mcx>,
+    bytes: &[u8],
+) -> PgResult<RangeTypeP<'mcx>> {
+    let base = palloc0_maxaligned(mcx, bytes.len())?;
+    // SAFETY: `base` heads a freshly allocated, zero-filled, `bytes.len()`-byte
+    // MAXALIGN'd image; copying the verbatim varlena bytes into it yields a valid
+    // plain `RangeType` varlena that lives for `'mcx`.
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), base, bytes.len());
+    }
+    Ok(RangeTypeP {
+        ptr: base as *const RangeType,
+        _marker: core::marker::PhantomData,
+    })
 }

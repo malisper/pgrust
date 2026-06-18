@@ -1838,6 +1838,18 @@ fn oid_input_function_call_out<'mcx>(
 // fn_expr parse-tree extraction (get_fn_expr_* / get_call_expr_*).
 // ===========================================================================
 
+/// Recover the field-bearing owned `Expr` an `ExternalFnExpr` carrier holds
+/// erased (`fmgr_info_set_expr` stamped it via the
+/// [`function_call_invoke_datum`] dispatch). `None` is the tag-only carrier (no
+/// node available — the readers then fall through to the tag-only seams). The
+/// downcast targets the one concrete type the setter ever boxes; a mismatch
+/// maps to the same `None` fall-through.
+fn external_expr(ext: &types_fmgr::ExternalFnExpr) -> Option<&types_nodes::primnodes::Expr> {
+    ext.node
+        .as_ref()?
+        .downcast_ref::<types_nodes::primnodes::Expr>()
+}
+
 /// Port of `get_fn_expr_rettype` (C: `if (!flinfo || !flinfo->fn_expr) return
 /// InvalidOid; return exprType(flinfo->fn_expr);`). The opclass-options
 /// `ByteaConst` fn_expr has result type `BYTEAOID`; an external node's result
@@ -1848,9 +1860,18 @@ pub fn get_fn_expr_rettype(flinfo: Option<&FmgrInfo>) -> Oid {
             None => InvalidOid,
             Some(node) => match node.as_ref() {
                 FnExpr::ByteaConst(_) => BYTEAOID,
-                FnExpr::External(ext) => {
-                    backend_nodes_nodeFuncs_seams::expr_type::call(ext.clone())
-                }
+                // C: `return exprType(flinfo->fn_expr)`. When the field-bearing
+                // call node is carried (`fmgr_info_set_expr` stamped a real
+                // `Expr`), read its result type through the field-bearing
+                // `expr_type_info` seam; otherwise fall through to the tag-only
+                // seam (InvalidOid).
+                FnExpr::External(ext) => match external_expr(ext) {
+                    Some(expr) => {
+                        backend_nodes_nodeFuncs_seams::expr_type_info::call(expr)
+                            .map_or(InvalidOid, |t| t.typid)
+                    }
+                    None => backend_nodes_nodeFuncs_seams::expr_type::call(ext.clone()),
+                },
             },
         },
         None => InvalidOid,
@@ -1876,9 +1897,14 @@ pub fn get_call_expr_argtype(expr: Option<&FnExpr>, argnum: i32) -> Oid {
     match expr {
         None => InvalidOid,
         Some(FnExpr::ByteaConst(_)) => InvalidOid,
-        Some(FnExpr::External(ext)) => {
-            backend_nodes_nodeFuncs_seams::call_expr_argtype::call(ext.clone(), argnum)
-        }
+        // When the field-bearing call node is carried, read the declared
+        // argument type through the field-bearing `get_call_expr_argtype_expr`
+        // seam; otherwise fall through to the tag-only seam (InvalidOid).
+        Some(FnExpr::External(ext)) => match external_expr(ext) {
+            Some(e) => backend_nodes_nodeFuncs_seams::get_call_expr_argtype_expr::call(e, argnum)
+                .unwrap_or(InvalidOid),
+            None => backend_nodes_nodeFuncs_seams::call_expr_argtype::call(ext.clone(), argnum),
+        },
     }
 }
 
@@ -1897,9 +1923,10 @@ pub fn get_call_expr_arg_stable(expr: Option<&FnExpr>, argnum: i32) -> bool {
     match expr {
         None => false,
         Some(FnExpr::ByteaConst(_)) => false,
-        Some(FnExpr::External(ext)) => {
-            backend_nodes_nodeFuncs_seams::call_expr_arg_stable::call(ext.clone(), argnum)
-        }
+        Some(FnExpr::External(ext)) => match external_expr(ext) {
+            Some(e) => backend_nodes_nodeFuncs_seams::call_expr_arg_stable_expr::call(e, argnum),
+            None => backend_nodes_nodeFuncs_seams::call_expr_arg_stable::call(ext.clone(), argnum),
+        },
     }
 }
 
@@ -1912,9 +1939,10 @@ pub fn get_fn_expr_variadic(flinfo: Option<&FmgrInfo>) -> bool {
             // C: a `Const` is not a `FuncExpr`, so `false`.
             Some(node) => match node.as_ref() {
                 FnExpr::ByteaConst(_) => false,
-                FnExpr::External(ext) => {
-                    backend_nodes_nodeFuncs_seams::expr_variadic::call(ext.clone())
-                }
+                FnExpr::External(ext) => match external_expr(ext) {
+                    Some(e) => backend_nodes_nodeFuncs_seams::expr_variadic_expr::call(e),
+                    None => backend_nodes_nodeFuncs_seams::expr_variadic::call(ext.clone()),
+                },
             },
         },
         None => false,
@@ -2404,9 +2432,23 @@ fn fmgr_call_seam<'mcx>(
     inputcollid: Oid,
     args: Vec<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool, Oid)>,
     rettype: Oid,
+    fn_expr: Option<&types_nodes::primnodes::Expr>,
 ) -> PgResult<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)> {
     let _ = rettype; // result classification rides the callee's `ref_result` arm.
-    let resolved = fmgr_info(mcx, funcid)?;
+    let mut resolved = fmgr_info(mcx, funcid)?;
+
+    // C `evaluate_function` runs `fmgr_info_set_expr((Node *) newexpr, &finfo)`
+    // before the call, so a polymorphic function const-folded at plan time can
+    // read its declared result/argument types (`get_fn_expr_rettype/argtype`,
+    // e.g. `int4range(1,5)`'s `range_constructor2`). The by-OID re-resolution
+    // above produced `fn_expr == None`; stamp the call node (carried erased
+    // through the tag-only `FnExpr::External`).
+    if let Some(expr) = fn_expr {
+        resolved.finfo.fn_expr = Some(Box::new(FnExpr::External(types_fmgr::ExternalFnExpr {
+            tag: 0,
+            node: Some(types_core::fmgr::FnExprErased::new(expr.clone())),
+        })));
+    }
 
     // C: the `_STRICT` opcode's arg loop — a strict function with any NULL input
     // returns NULL without being called. `fn_strict` is `proisstrict`.
@@ -2833,8 +2875,23 @@ fn function_call_invoke_datum_seam<'mcx>(
     fn_oid: Oid,
     collation: Oid,
     args: &[types_tuple::backend_access_common_heaptuple::Datum<'mcx>],
+    fn_expr: Option<&types_nodes::primnodes::Expr>,
 ) -> PgResult<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)> {
-    let resolved = fmgr_info(mcx, fn_oid)?;
+    let mut resolved = fmgr_info(mcx, fn_oid)?;
+
+    // C: ExecInitFunc does `fmgr_info_set_expr((Node *) node, flinfo)`, so the
+    // FmgrInfo `EEOP_FUNCEXPR` dispatches with carries the call expression on
+    // `flinfo->fn_expr`; the callee's `get_fn_expr_rettype/argtype` read it for
+    // polymorphic-type resolution. The owned by-OID re-resolution above produced
+    // a fresh `FmgrInfo` with `fn_expr == None`, so stamp the executor's call
+    // node onto it (carried erased through the tag-only `FnExpr::External`). This
+    // is the only divergence-bridge: the rest of the call frame is unchanged.
+    if let Some(expr) = fn_expr {
+        resolved.finfo.fn_expr = Some(Box::new(FnExpr::External(types_fmgr::ExternalFnExpr {
+            tag: 0,
+            node: Some(types_core::fmgr::FnExprErased::new(expr.clone())),
+        })));
+    }
 
     // Build the `fcinfo->args[]` frame: by-value word lane + by-reference side
     // channel. The canonical arg's own NULL state rides its variant; the

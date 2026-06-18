@@ -80,6 +80,15 @@ fn getarg_range_p<'mcx>(
     fcinfo: &FunctionCallInfoBaseData,
     n: usize,
 ) -> PgResult<RangeTypeP<'mcx>> {
+    // A by-reference range argument crosses the owned fmgr boundary through the
+    // `ref_args` side channel (the way `range_constructor*` / const-folding hand
+    // back a `RangeType` — `RefPayload::Varlena`), so the bare `args[n].value`
+    // word is just a placeholder. Read the referent bytes when present; otherwise
+    // fall back to the bare-word `Datum` (an on-disk / already-pointer datum the
+    // detoast path resolves).
+    if let Some(bytes) = fcinfo.ref_arg(n).and_then(|p| p.as_varlena()) {
+        return crate::range_repr_serialize::range_p_from_varlena_bytes(mcx, bytes);
+    }
     crate::range_repr_serialize::datum_get_range_type_p(mcx, getarg_datum(fcinfo, n))
 }
 
@@ -93,9 +102,20 @@ fn range_type_get_oid(r: RangeTypeP<'_>) -> types_core::primitive::Oid {
     r.rangetypid()
 }
 
-/// `PG_RETURN_RANGE_P(range)` — the pointer word (`PointerGetDatum`).
-fn return_range_p(range: RangeTypeP<'_>) -> Datum {
-    Datum::from_usize(range.ptr as usize)
+/// `PG_RETURN_RANGE_P(range)` — `PG_RETURN_POINTER(range)`.
+///
+/// C returns the bare `RangeType *` pointer word; the owned fmgr boundary cannot
+/// hand back a raw pointer (its referent lives in the call's transient context
+/// and would dangle past the call), so a by-reference range result crosses
+/// through the `RefPayload::Varlena` side channel (the same lane `range_out` /
+/// `range_send` and every other by-ref-returning builtin use). The returned
+/// `Datum` is the null placeholder word; the caller reads the referent from
+/// `fcinfo->ref_result`.
+fn return_range_p(fcinfo: &mut FunctionCallInfoBaseData, range: RangeTypeP<'_>) -> Datum {
+    fcinfo.set_ref_result(types_fmgr::RefPayload::Varlena(
+        crate::range_repr_serialize::range_to_varlena_bytes(range),
+    ));
+    Datum::null()
 }
 
 /// `PG_RETURN_NULL()` — set `fcinfo->isnull` and hand back the zero word.
@@ -129,7 +149,7 @@ pub fn range_in<'mcx>(
     // get_range_io_data + element-input parsing + make_range live in the kernel,
     // which returns NULL (soft error) as the SQL NULL the entry surfaces.
     let range = range_in_kernel(mcx, &cache, input_str, typmod)?;
-    Ok(return_range_p(range))
+    Ok(return_range_p(fcinfo, range))
 }
 
 /// `range_out(PG_FUNCTION_ARGS)` (rangetypes.c:139).
@@ -161,7 +181,7 @@ pub fn range_recv<'mcx>(
 
     let cache = get_range_io_data(rngtypoid, IOFuncSelector::Receive)?;
     let range = range_recv_kernel(mcx, &cache, buf, typmod)?;
-    Ok(return_range_p(range))
+    Ok(return_range_p(fcinfo, range))
 }
 
 /// `range_send(PG_FUNCTION_ARGS)` (rangetypes.c:263).
@@ -206,7 +226,7 @@ pub fn range_constructor2<'mcx>(
     };
 
     let range = make_range(mcx, &typcache, &lower, &upper, false)?;
-    Ok(return_range_p(range))
+    Ok(return_range_p(fcinfo, range))
 }
 
 /// `range_constructor3(PG_FUNCTION_ARGS)` (rangetypes.c:407).
@@ -246,7 +266,7 @@ pub fn range_constructor3<'mcx>(
     };
 
     let range = make_range(mcx, &typcache, &lower, &upper, false)?;
-    Ok(return_range_p(range))
+    Ok(return_range_p(fcinfo, range))
 }
 
 /// `range_lower(PG_FUNCTION_ARGS)` (rangetypes.c:448).
@@ -491,7 +511,7 @@ pub fn range_minus<'mcx>(
     if ret.ptr.is_null() {
         Ok(return_null(fcinfo))
     } else {
-        Ok(return_range_p(ret))
+        Ok(return_range_p(fcinfo, ret))
     }
 }
 
@@ -504,7 +524,7 @@ pub fn range_union<'mcx>(
     let r2 = getarg_range_p(mcx, fcinfo, 1)?;
     let typcache = range_get_typcache(range_type_get_oid(r1))?;
     let ret = range_union_internal(mcx, &typcache, r1, r2, true)?;
-    Ok(return_range_p(ret))
+    Ok(return_range_p(fcinfo, ret))
 }
 
 /// `range_merge(PG_FUNCTION_ARGS)` (rangetypes.c:1116).
@@ -517,7 +537,7 @@ pub fn range_merge<'mcx>(
     let typcache = range_get_typcache(range_type_get_oid(r1))?;
     // C: range_merge == range_union_internal(..., strict = false).
     let ret = range_union_internal(mcx, &typcache, r1, r2, false)?;
-    Ok(return_range_p(ret))
+    Ok(return_range_p(fcinfo, ret))
 }
 
 /// `range_intersect(PG_FUNCTION_ARGS)` (rangetypes.c:1129).
@@ -535,7 +555,7 @@ pub fn range_intersect<'mcx>(
 
     let typcache = range_get_typcache(range_type_get_oid(r1))?;
     let ret = range_intersect_internal(mcx, &typcache, r1, r2)?;
-    Ok(return_range_p(ret))
+    Ok(return_range_p(fcinfo, ret))
 }
 
 /// `range_intersect_agg_transfn(PG_FUNCTION_ARGS)` (rangetypes.c:1221).
@@ -571,7 +591,7 @@ pub fn range_intersect_agg_transfn<'mcx>(
     // operands are present (Some).
     let out = range_intersect_agg_transfn_kernel(mcx, &typcache, Some(result), Some(current))?;
     match out {
-        Some(range) => Ok(return_range_p(range)),
+        Some(range) => Ok(return_range_p(fcinfo, range)),
         None => Ok(return_null(fcinfo)),
     }
 }
@@ -706,7 +726,7 @@ pub fn int4range_canonical_v1<'mcx>(
     // boundary +1/inclusivity normalization with the integer-out-of-range
     // overflow check, and range_serialize.
     let out = int4range_canonical(mcx, &typcache, r)?;
-    Ok(return_range_p(out))
+    Ok(return_range_p(fcinfo, out))
 }
 
 /// `int8range_canonical(PG_FUNCTION_ARGS)` (rangetypes.c:1574).
@@ -717,7 +737,7 @@ pub fn int8range_canonical_v1<'mcx>(
     let r = getarg_range_p(mcx, fcinfo, 0)?;
     let typcache = range_get_typcache(range_type_get_oid(r))?;
     let out = int8range_canonical(mcx, &typcache, r)?;
-    Ok(return_range_p(out))
+    Ok(return_range_p(fcinfo, out))
 }
 
 /// `daterange_canonical(PG_FUNCTION_ARGS)` (rangetypes.c:1622).
@@ -728,7 +748,7 @@ pub fn daterange_canonical_v1<'mcx>(
     let r = getarg_range_p(mcx, fcinfo, 0)?;
     let typcache = range_get_typcache(range_type_get_oid(r))?;
     let out = daterange_canonical(mcx, &typcache, r)?;
-    Ok(return_range_p(out))
+    Ok(return_range_p(fcinfo, out))
 }
 
 /// `int4range_subdiff(PG_FUNCTION_ARGS)` (rangetypes.c:1685).

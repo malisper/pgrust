@@ -75,13 +75,46 @@ pub enum FnExpr {
     External(ExternalFnExpr),
 }
 
-/// An opaque externally-supplied fn_expr node — the not-yet-ported planner
-/// expression node `FmgrInfo.fn_expr` points at when a caller installs one.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// An opaque externally-supplied fn_expr node — the planner expression node
+/// `FmgrInfo.fn_expr` points at when a caller installs one.
+///
+/// C's `fn_expr` is a bare `Node *` pointing at the call's `FuncExpr`/`OpExpr`/…
+/// in the plan tree; the `get_fn_expr_*` accessors read its result/argument
+/// types out of the node's struct fields (`FuncExpr.funcresulttype`,
+/// `exprType((Node*) list_nth(args, n))`, …). For a faithful polymorphic-type
+/// resolution the carrier therefore holds the real expression node, carried
+/// *erased* ([`types_core::fmgr::FnExprErased`]) so `types-fmgr` (a leaf on
+/// `types-core`) need not name the `types-nodes` `Expr`. The fmgr owner (which
+/// depends on `types-nodes`) downcasts it back and routes the field reads
+/// through the `nodeFuncs` seams. `node == None` is the legacy tag-only carrier
+/// (no field-bearing node available): the accessors then fall through to
+/// `InvalidOid`, exactly as before.
+#[derive(Clone)]
 pub struct ExternalFnExpr {
     /// `nodeTag(expr)` — the C node tag (e.g. `T_FuncExpr`).
     pub tag: u32,
+    /// The erased field-bearing call-expression node (`fmgr_info_set_expr`'s
+    /// `Node *`), `None` when only the tag is known.
+    pub node: Option<types_core::fmgr::FnExprErased>,
 }
+
+impl core::fmt::Debug for ExternalFnExpr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ExternalFnExpr")
+            .field("tag", &self.tag)
+            .field("has_node", &self.node.is_some())
+            .finish()
+    }
+}
+
+// `FnExprErased` is an `Rc<dyn Any>` (no `PartialEq`/`Eq`); the carrier compares
+// by tag only (its prior contract). `node` is identity-shared, never compared.
+impl PartialEq for ExternalFnExpr {
+    fn eq(&self, other: &Self) -> bool {
+        self.tag == other.tag
+    }
+}
+impl Eq for ExternalFnExpr {}
 
 /// `FunctionCallInfoBaseData` (fmgr.h) — the call frame every fmgr-called
 /// function receives. The flexible trailing `args[]` array is `Vec`; the

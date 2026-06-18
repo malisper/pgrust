@@ -92,6 +92,7 @@ seam_core::seam!(
         inputcollid: Oid,
         args: alloc::vec::Vec<(Datum<'mcx>, bool, Oid)>,
         rettype: Oid,
+        fn_expr: Option<&Expr>,
     ) -> PgResult<(Datum<'mcx>, bool)>
 );
 

@@ -355,6 +355,10 @@ fn node_to_external(call_expr: Option<&Node<'_>>) -> types_fmgr::ExternalFnExpr 
             Some(node) => node.tag().0,
             None => 0,
         },
+        // This adapter only has the plan `Node` (a tag), not the field-bearing
+        // owned `Expr`, so no erased node is available — the accessors fall
+        // through to `InvalidOid` (the tag-only contract).
+        node: None,
     }
 }
 

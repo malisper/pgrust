@@ -953,6 +953,7 @@ seam_core::seam!(
         fn_oid: Oid,
         collation: Oid,
         args: &[Datum<'mcx>],
+        fn_expr: Option<&types_nodes::primnodes::Expr>,
     ) -> PgResult<(Datum<'mcx>, bool)>
 );
 
