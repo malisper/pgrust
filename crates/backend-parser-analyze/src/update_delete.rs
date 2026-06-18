@@ -14,7 +14,7 @@ use mcx::{Mcx, PgVec};
 use types_acl::acl::{ACL_DELETE, ACL_UPDATE};
 use types_error::PgResult;
 use types_nodes::copy_query::Query;
-use types_nodes::nodes::{CmdType, Node};
+use types_nodes::nodes::CmdType;
 use types_nodes::parsestmt::{ParseExprKind, ParseState};
 use types_nodes::primnodes::VarReturningType;
 use types_nodes::rawnodes::{DeleteStmt, ResTarget, UpdateStmt};
@@ -204,9 +204,9 @@ pub(crate) fn transformUpdateTargetList<'mcx>(
         .try_reserve(orig_tlist.len())
         .map_err(|_| mcx.oom(orig_tlist.len()))?;
     for n in orig_tlist.iter() {
-        match n.as_ref() {
-            Node::ResTarget(rt) => orig_targets.push(rt.clone_in(mcx)?),
-            _ => return Err(elog_error("UPDATE SET item is not a ResTarget")),
+        match n.as_ref().as_restarget() {
+            Some(rt) => orig_targets.push(rt.clone_in(mcx)?),
+            None => return Err(elog_error("UPDATE SET item is not a ResTarget")),
         }
     }
 
@@ -494,9 +494,9 @@ pub(crate) fn transformReturningClause<'mcx>(
     // grammar makes returningClause->exprs a target_list (list of ResTarget).
     let mut res_targets = mcx::vec_with_capacity_in(mcx, rc.exprs.len())?;
     for n in rc.exprs.iter() {
-        match n.as_ref() {
-            Node::ResTarget(rt) => res_targets.push(rt.clone_in(mcx)?),
-            _ => return Err(elog_error("RETURNING list item is not a ResTarget")),
+        match n.as_ref().as_restarget() {
+            Some(rt) => res_targets.push(rt.clone_in(mcx)?),
+            None => return Err(elog_error("RETURNING list item is not a ResTarget")),
         }
     }
     let mut returning_list =

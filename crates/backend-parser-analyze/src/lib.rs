@@ -23,7 +23,7 @@ use backend_utils_error::ereport;
 use mcx::{Mcx, PgBox, PgVec};
 use types_error::{PgResult, ERROR};
 use types_nodes::copy_query::{Query, QuerySource};
-use types_nodes::nodes::{CmdType, Node, NodePtr};
+use types_nodes::nodes::{ntag, CmdType, Node, NodePtr};
 use types_nodes::parsestmt::{ParseState, RawStmt};
 use types_nodes::rawnodes::SelectStmt;
 
@@ -198,7 +198,7 @@ fn transformOptionalSelectInto<'mcx>(
     pstate: &mut ParseState<'mcx>,
     parse_tree: &Node<'mcx>,
 ) -> PgResult<Query<'mcx>> {
-    if let Node::SelectStmt(stmt) = parse_tree {
+    if let Some(stmt) = parse_tree.as_selectstmt() {
         /* drill down to leftmost SelectStmt of a set-op tree */
         let mut leaf = stmt;
         while leaf.op != types_nodes::rawnodes::SETOP_NONE {
@@ -255,7 +255,7 @@ fn transformExplainStmt<'mcx>(
     // GENERIC_PLAN is requested with no paramref hook.
     if pstate.p_paramref_hook.is_none() {
         for opt in stmt.options.iter() {
-            if let Node::DefElem(d) = &**opt {
+            if let Some(d) = opt.as_defelem() {
                 if d.defname.as_ref().map(|s| s.as_str()) == Some("generic_plan") {
                     panic!(
                         "transformExplainStmt: EXPLAIN (GENERIC_PLAN) needs \
@@ -309,8 +309,9 @@ pub fn transformStmt<'mcx>(
     pstate: &mut ParseState<'mcx>,
     parse_tree: &Node<'mcx>,
 ) -> PgResult<Query<'mcx>> {
-    let mut result: Query<'mcx> = match parse_tree {
-        Node::SelectStmt(n) => {
+    let mut result: Query<'mcx> = match parse_tree.node_tag() {
+        ntag::T_SelectStmt => {
+            let n = parse_tree.expect_selectstmt();
             if !n.valuesLists.is_empty() {
                 select::transformValuesClause(mcx, pstate, n)?
             } else if n.op == types_nodes::rawnodes::SETOP_NONE {
@@ -319,16 +320,16 @@ pub fn transformStmt<'mcx>(
                 setop::transformSetOperationStmt(mcx, pstate, n)?
             }
         }
-        Node::InsertStmt(n) => insert::transformInsertStmt(mcx, pstate, n)?,
-        Node::ExplainStmt(n) => transformExplainStmt(mcx, pstate, n)?,
-        Node::DeleteStmt(n) => update_delete::transformDeleteStmt(mcx, pstate, n)?,
-        Node::UpdateStmt(n) => update_delete::transformUpdateStmt(mcx, pstate, n)?,
-        Node::MergeStmt(_)
-        | Node::ReturnStmt(_)
-        | Node::PLAssignStmt(_)
-        | Node::DeclareCursorStmt(_)
-        | Node::CreateTableAsStmt(_)
-        | Node::CallStmt(_) => {
+        ntag::T_InsertStmt => insert::transformInsertStmt(mcx, pstate, parse_tree.expect_insertstmt())?,
+        ntag::T_ExplainStmt => transformExplainStmt(mcx, pstate, parse_tree.expect_explainstmt())?,
+        ntag::T_DeleteStmt => update_delete::transformDeleteStmt(mcx, pstate, parse_tree.expect_deletestmt())?,
+        ntag::T_UpdateStmt => update_delete::transformUpdateStmt(mcx, pstate, parse_tree.expect_updatestmt())?,
+        ntag::T_MergeStmt
+        | ntag::T_ReturnStmt
+        | ntag::T_PLAssignStmt
+        | ntag::T_DeclareCursorStmt
+        | ntag::T_CreateTableAsStmt
+        | ntag::T_CallStmt => {
             // The remaining DML / special-statement transforms are a follow-on
             // family; they are not reachable on the SELECT/INSERT-milestone path.
             // Mirror the C dispatch and panic loudly until the family lands.
@@ -340,12 +341,12 @@ pub fn transformStmt<'mcx>(
                 parse_tree.tag()
             );
         }
-        other => {
+        _ => {
             // Other statements don't require transformation: wrap a CMD_UTILITY
             // Query around the original parse tree.
             let mut q = Query::new(mcx);
             q.commandType = CmdType::CMD_UTILITY;
-            q.utilityStmt = Some(mcx::alloc_in(mcx, other.clone_in(mcx)?)?);
+            q.utilityStmt = Some(mcx::alloc_in(mcx, parse_tree.clone_in(mcx)?)?);
             q
         }
     };
@@ -365,18 +366,18 @@ pub fn transformStmt<'mcx>(
 /// `stmt_requires_parse_analysis(parseTree)` — true if parse analysis does
 /// anything non-trivial (more than wrapping a CMD_UTILITY Query).
 pub fn stmt_requires_parse_analysis(parse_tree: &RawStmt<'_>) -> bool {
-    match parse_tree.stmt.as_ref() {
-        Node::InsertStmt(_)
-        | Node::DeleteStmt(_)
-        | Node::UpdateStmt(_)
-        | Node::MergeStmt(_)
-        | Node::SelectStmt(_)
-        | Node::ReturnStmt(_)
-        | Node::PLAssignStmt(_)
-        | Node::DeclareCursorStmt(_)
-        | Node::ExplainStmt(_)
-        | Node::CreateTableAsStmt(_)
-        | Node::CallStmt(_) => true,
+    match parse_tree.stmt.as_ref().node_tag() {
+        ntag::T_InsertStmt
+        | ntag::T_DeleteStmt
+        | ntag::T_UpdateStmt
+        | ntag::T_MergeStmt
+        | ntag::T_SelectStmt
+        | ntag::T_ReturnStmt
+        | ntag::T_PLAssignStmt
+        | ntag::T_DeclareCursorStmt
+        | ntag::T_ExplainStmt
+        | ntag::T_CreateTableAsStmt
+        | ntag::T_CallStmt => true,
         _ => false,
     }
 }
@@ -394,13 +395,13 @@ pub fn analyze_requires_snapshot(parse_tree: &RawStmt<'_>) -> bool {
 /// CMD_UTILITY that the rewriter/planner ignore.
 pub fn query_requires_rewrite_plan(query: &Query<'_>) -> bool {
     if query.commandType == CmdType::CMD_UTILITY {
-        match query.utilityStmt.as_deref() {
+        match query.utilityStmt.as_deref().map(|n| n.node_tag()) {
             // These utility statements are optimizable through the
             // rewriter/planner (they embed an optimizable query).
-            Some(Node::CreateTableAsStmt(_))
-            | Some(Node::DeclareCursorStmt(_))
-            | Some(Node::ExplainStmt(_))
-            | Some(Node::CallStmt(_)) => true,
+            Some(ntag::T_CreateTableAsStmt)
+            | Some(ntag::T_DeclareCursorStmt)
+            | Some(ntag::T_ExplainStmt)
+            | Some(ntag::T_CallStmt) => true,
             _ => false,
         }
     } else {
@@ -546,7 +547,7 @@ pub(crate) fn sync_cte_refcounts<'mcx>(
     cte_list: &mut [NodePtr<'mcx>],
 ) {
     for node in cte_list.iter_mut() {
-        if let Node::CommonTableExpr(cte) = &mut **node {
+        if let Some(cte) = node.as_commontableexpr_mut() {
             let name = match cte.ctename.as_deref() {
                 Some(n) => n,
                 None => continue,

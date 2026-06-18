@@ -25,9 +25,9 @@ fn sortby_list<'mcx>(
     let mut out = Vec::new();
     out.try_reserve(list.len()).map_err(|_| mcx.oom(list.len()))?;
     for n in list {
-        match n.as_ref() {
-            Node::SortBy(s) => out.push(s.clone_in(mcx)?),
-            _ => return Err(elog_error("transformSortClause: ORDER BY item is not a SortBy")),
+        match n.as_ref().as_sortby() {
+            Some(s) => out.push(s.clone_in(mcx)?),
+            None => return Err(elog_error("transformSortClause: ORDER BY item is not a SortBy")),
         }
     }
     Ok(out)
@@ -70,9 +70,9 @@ pub fn transformSelectStmt<'mcx>(
     pstate.p_windowdefs = {
         let mut v = mcx::vec_with_capacity_in(mcx, stmt.windowClause.len())?;
         for n in stmt.windowClause.iter() {
-            match n.as_ref() {
-                Node::WindowDef(w) => v.push(w.clone_in(mcx)?),
-                _ => return Err(elog_error("WINDOW clause item is not a WindowDef")),
+            match n.as_ref().as_windowdef() {
+                Some(w) => v.push(w.clone_in(mcx)?),
+                None => return Err(elog_error("WINDOW clause item is not a WindowDef")),
             }
         }
         v
@@ -85,9 +85,9 @@ pub fn transformSelectStmt<'mcx>(
     let target_list = {
         let mut tl = mcx::vec_with_capacity_in(mcx, stmt.targetList.len())?;
         for n in stmt.targetList.iter() {
-            match n.as_ref() {
-                Node::ResTarget(rt) => tl.push(rt.clone_in(mcx)?),
-                _ => return Err(elog_error("SELECT target list item is not a ResTarget")),
+            match n.as_ref().as_restarget() {
+                Some(rt) => tl.push(rt.clone_in(mcx)?),
+                None => return Err(elog_error("SELECT target list item is not a ResTarget")),
             }
         }
         tl
@@ -270,11 +270,11 @@ pub fn transformSelectStmt<'mcx>(
     /* FOR UPDATE/SHARE */
     let locking = core::mem::replace(&mut pstate.p_locking_clause, mcx::PgVec::new_in(mcx));
     for lc_node in locking.iter() {
-        match lc_node.as_ref() {
-            Node::LockingClause(lc) => {
+        match lc_node.as_ref().as_lockingclause() {
+            Some(lc) => {
                 crate::locking::transformLockingClause(mcx, pstate, &mut qry, lc, false)?;
             }
-            _ => return Err(elog_error("locking clause item is not a LockingClause")),
+            None => return Err(elog_error("locking clause item is not a LockingClause")),
         }
     }
 
@@ -324,9 +324,9 @@ pub fn transformValuesClause<'mcx>(
     let mut sublist_length: i32 = -1;
 
     for lc in stmt.valuesLists.iter() {
-        let sublist = match lc.as_ref() {
-            Node::List(items) => items,
-            _ => return Err(elog_error("VALUES sublist is not a List")),
+        let sublist = match lc.as_ref().as_list() {
+            Some(items) => items,
+            None => return Err(elog_error("VALUES sublist is not a List")),
         };
         let mut sublist_owned = mcx::vec_with_capacity_in(mcx, sublist.len())?;
         for item in sublist.iter() {
@@ -489,9 +489,9 @@ pub fn transformValuesClause<'mcx>(
     qry.limitOption = stmt.limitOption;
 
     if !stmt.lockingClause.is_empty() {
-        let strength = match stmt.lockingClause[0].as_ref() {
-            Node::LockingClause(lc) => lc.strength,
-            _ => return Err(elog_error("locking clause item is not a LockingClause")),
+        let strength = match stmt.lockingClause[0].as_ref().as_lockingclause() {
+            Some(lc) => lc.strength,
+            None => return Err(elog_error("locking clause item is not a LockingClause")),
         };
         return Err(elog_error(alloc::format!(
             "{} cannot be applied to VALUES",
@@ -523,7 +523,7 @@ pub fn transformValuesClause<'mcx>(
 /// `Node::List`. A real DISTINCT ON list never starts with a NULL/empty marker
 /// (its elements are column expressions).
 fn distinct_all_marker(distinct: &[NodePtr<'_>]) -> bool {
-    distinct.len() == 1 && matches!(distinct[0].as_ref(), Node::List(l) if l.is_empty())
+    distinct.len() == 1 && distinct[0].as_ref().as_list().is_some_and(|l| l.is_empty())
 }
 
 /// Convert an `Option<NodePtr>` (a raw `Node *` clause input) into the owned

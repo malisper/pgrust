@@ -67,8 +67,10 @@ pub fn transformInsertStmt<'mcx>(
     // a general SELECT. We special-case VALUES, both for efficiency and so we
     // can handle DEFAULT specifications.
     let select_stmt: Option<&SelectStmt<'mcx>> = match stmt.selectStmt.as_deref() {
-        Some(Node::SelectStmt(s)) => Some(s),
-        Some(_) => return Err(elog_error("INSERT selectStmt is not a SelectStmt")),
+        Some(n) => match n.as_selectstmt() {
+            Some(s) => Some(s),
+            None => return Err(elog_error("INSERT selectStmt is not a SelectStmt")),
+        },
         None => None,
     };
 
@@ -148,9 +150,9 @@ pub fn transformInsertStmt<'mcx>(
             // with no FROM — the sublist becomes the targetlist directly, no
             // VALUES RTE.
             debug_assert!(s.intoClause.is_none());
-            let sublist = match s.valuesLists.first().map(|n| n.as_ref()) {
-                Some(Node::List(items)) => items,
-                _ => return Err(elog_error("INSERT single VALUES sublist is not a List")),
+            let sublist = match s.valuesLists.first().map(|n| n.as_ref()).and_then(|n| n.as_list()) {
+                Some(items) => items,
+                None => return Err(elog_error("INSERT single VALUES sublist is not a List")),
             };
             let mut sublist_owned = mcx::vec_with_capacity_in(mcx, sublist.len())?;
             for item in sublist.iter() {
@@ -378,9 +380,9 @@ fn transformInsertMultiRowValues<'mcx>(
     let mut sublist_length: i32 = -1;
 
     for row_node in select_stmt.valuesLists.iter() {
-        let sublist = match row_node.as_ref() {
-            Node::List(items) => items,
-            _ => return Err(elog_error("INSERT VALUES sublist is not a List")),
+        let sublist = match row_node.as_ref().as_list() {
+            Some(items) => items,
+            None => return Err(elog_error("INSERT VALUES sublist is not a List")),
         };
         let mut sublist_owned = mcx::vec_with_capacity_in(mcx, sublist.len())?;
         for item in sublist.iter() {
@@ -582,9 +584,9 @@ fn copy_cols<'mcx>(
 ) -> PgResult<PgVec<'mcx, ResTarget<'mcx>>> {
     let mut out: PgVec<'mcx, ResTarget<'mcx>> = mcx::vec_with_capacity_in(mcx, cols.len())?;
     for c in cols.iter() {
-        match c.as_ref() {
-            Node::ResTarget(rt) => out.push(rt.clone_in(mcx)?),
-            _ => return Err(elog_error("INSERT cols entry is not a ResTarget")),
+        match c.as_ref().as_restarget() {
+            Some(rt) => out.push(rt.clone_in(mcx)?),
+            None => return Err(elog_error("INSERT cols entry is not a ResTarget")),
         }
     }
     Ok(out)

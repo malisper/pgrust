@@ -9,7 +9,7 @@ use mcx::{Mcx, PgVec};
 use types_core::primitive::Oid;
 use types_error::PgResult;
 use types_nodes::copy_query::Query;
-use types_nodes::nodes::{CmdType, Node, NodePtr};
+use types_nodes::nodes::{ntag, CmdType, Node, NodePtr};
 use types_nodes::parsestmt::{ParseExprKind, ParseNamespaceColumn, ParseState};
 use types_nodes::primnodes::{Expr, SetToDefault, TargetEntry};
 use types_nodes::rawnodes::{
@@ -94,9 +94,9 @@ pub fn transformSetOperationStmt<'mcx>(
     stmt_inner.withClause = None;
 
     if !locking_clause.is_empty() {
-        let strength = match locking_clause[0].as_ref() {
-            Node::LockingClause(lc) => lc.strength,
-            _ => return Err(elog_error("locking clause item is not a LockingClause")),
+        let strength = match locking_clause[0].as_ref().as_lockingclause() {
+            Some(lc) => lc.strength,
+            None => return Err(elog_error("locking clause item is not a LockingClause")),
         };
         return Err(elog_error(format!(
             "{} is not allowed with UNION/INTERSECT/EXCEPT",
@@ -115,9 +115,9 @@ pub fn transformSetOperationStmt<'mcx>(
 
     // Recursively transform the components of the tree.
     let sostmt_node = transformSetOperationTree(mcx, pstate, &stmt_inner, true, None)?;
-    let sostmt = match sostmt_node.as_ref() {
-        Node::SetOperationStmt(s) => s,
-        _ => return Err(elog_error("transformSetOperationTree did not return a SetOperationStmt")),
+    let sostmt = match sostmt_node.as_ref().as_setoperationstmt() {
+        Some(s) => s,
+        None => return Err(elog_error("transformSetOperationTree did not return a SetOperationStmt")),
     };
 
     // Re-find leftmost SELECT (now a sub-query in the rangetable).
@@ -126,13 +126,14 @@ pub fn transformSetOperationStmt<'mcx>(
             elog_error("set-op tree has no left child")
         })?;
         loop {
-            match node {
-                Node::SetOperationStmt(s) => {
+            match node.node_tag() {
+                ntag::T_SetOperationStmt => {
+                    let s = node.expect_setoperationstmt();
                     node = s.larg.as_deref().ok_or_else(|| {
                         elog_error("set-op tree has no left child")
                     })?;
                 }
-                Node::RangeTblRef(r) => break r.rtindex,
+                ntag::T_RangeTblRef => break node.expect_rangetblref().rtindex,
                 _ => return Err(elog_error("set-op leftmost is not a RangeTblRef")),
             }
         }
@@ -359,9 +360,9 @@ fn transformSetOperationTree<'mcx>(
         ));
     }
     if !stmt.lockingClause.is_empty() {
-        let strength = match stmt.lockingClause[0].as_ref() {
-            Node::LockingClause(lc) => lc.strength,
-            _ => return Err(elog_error("locking clause item is not a LockingClause")),
+        let strength = match stmt.lockingClause[0].as_ref().as_lockingclause() {
+            Some(lc) => lc.strength,
+            None => return Err(elog_error("locking clause item is not a LockingClause")),
         };
         return Err(elog_error(format!(
             "{} is not allowed with UNION/INTERSECT/EXCEPT",
@@ -387,8 +388,9 @@ fn transformSetOperationTree<'mcx>(
         let stmt_node = Node::SelectStmt(stmt.clone_in(mcx)?);
         let select_query_node =
             crate::parse_sub_analyze(mcx, &stmt_node, pstate, None, false, false)?;
-        let select_query = match select_query_node.as_ref() {
-            Node::Query(q) => q,
+        let select_query_ref = select_query_node.as_ref();
+        let select_query = match select_query_ref.node_tag() {
+            ntag::T_Query => select_query_ref.expect_query(),
             _ => return Err(elog_error("parse_sub_analyze did not return a Query")),
         };
 
@@ -573,11 +575,12 @@ fn determineRecursiveColTypes<'mcx>(
     let leftmost_rti = {
         let mut node: &Node = larg.as_ref();
         loop {
-            match node {
-                Node::SetOperationStmt(s) => {
+            match node.node_tag() {
+                ntag::T_SetOperationStmt => {
+                    let s = node.expect_setoperationstmt();
                     node = s.larg.as_deref().ok_or_else(|| elog_error("set-op tree has no left child"))?;
                 }
-                Node::RangeTblRef(r) => break r.rtindex,
+                ntag::T_RangeTblRef => break node.expect_rangetblref().rtindex,
                 _ => return Err(elog_error("set-op leftmost is not a RangeTblRef")),
             }
         }
@@ -638,9 +641,9 @@ fn sortby_list<'mcx>(
     let mut out = Vec::new();
     out.try_reserve(list.len()).map_err(|_| mcx.oom(list.len()))?;
     for n in list {
-        match n.as_ref() {
-            Node::SortBy(s) => out.push(s.clone_in(mcx)?),
-            _ => return Err(elog_error("ORDER BY item is not a SortBy")),
+        match n.as_ref().as_sortby() {
+            Some(s) => out.push(s.clone_in(mcx)?),
+            None => return Err(elog_error("ORDER BY item is not a SortBy")),
         }
     }
     Ok(out)

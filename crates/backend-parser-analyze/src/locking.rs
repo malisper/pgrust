@@ -131,9 +131,9 @@ pub fn transformLockingClause<'mcx>(
     } else {
         // Lock just the named tables.
         for thisrel_node in lc.lockedRels.iter() {
-            let thisrel = match thisrel_node.as_ref() {
-                Node::RangeVar(rv) => rv,
-                _ => return Err(elog_error("locked relation is not a RangeVar")),
+            let thisrel = match thisrel_node.as_ref().as_rangevar() {
+                Some(rv) => rv,
+                None => return Err(elog_error("locked relation is not a RangeVar")),
             };
 
             if thisrel.catalogname.is_some() || thisrel.schemaname.is_some() {
