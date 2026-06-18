@@ -44,7 +44,6 @@ use alloc::vec::Vec;
 
 use mcx::Mcx;
 use types_error::PgResult;
-use types_nodes::nodes::Node;
 use types_pathnodes::{NodeId, PlannerInfo, RelId, RTEKind};
 use types_pathnodes::planner_run::PlannerRun;
 
@@ -488,9 +487,9 @@ fn trivial_path_varno(jointree: &types_nodes::rawnodes::FromExpr) -> Option<i32>
     assert!(!fromlist.is_empty(), "parse->jointree->fromlist != NIL");
 
     if fromlist.len() == 1 {
-        match &*fromlist[0] {
-            Node::RangeTblRef(rtr) => Some(rtr.rtindex),
-            _ => None,
+        match fromlist[0].as_rangetblref() {
+            Some(rtr) => Some(rtr.rtindex),
+            None => None,
         }
     } else {
         None
