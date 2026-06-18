@@ -102,7 +102,9 @@ use types_pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
 use types_pathnodes::{
     IndexOptInfo, NodeId, Path, PathId, PathKey, PathNode, PathTarget, PlannerInfo, Relids, RinfoId,
     RELOPT_BASEREL, RELOPT_OTHER_MEMBER_REL, RTE_RELATION,
+    UNIQUE_PATH_HASH, UNIQUE_PATH_NOOP, UNIQUE_PATH_SORT,
 };
+use types_nodes::nodeagg::AGGSPLIT_SIMPLE;
 use types_core::primitive::{AttrNumber, Index, InvalidOid, Oid};
 use types_tuple::access::RELKIND_FOREIGN_TABLE;
 
@@ -2972,6 +2974,37 @@ fn make_sort<'mcx>(
     })
 }
 
+/// `make_sort_from_sortclauses(sortcls, lefttree)` (createplan.c:6551) — create
+/// a `Sort` plan that sorts according to the given `SortGroupClause` list,
+/// locating the sort columns by `tleSortGroupRef` in the child's targetlist.
+fn make_sort_from_sortclauses<'mcx>(
+    mcx: Mcx<'mcx>,
+    sortcls: &[types_nodes::rawnodes::SortGroupClause],
+    lefttree: Node<'mcx>,
+) -> PgResult<Sort<'mcx>> {
+    // Convert list-ish representation to arrays wanted by executor, reading the
+    // child's targetlist (the C `lefttree->targetlist`).
+    let numsortkeys = sortcls.len();
+    let mut sort_col_idx: PgVec<'mcx, AttrNumber> = vec_with_capacity_in(mcx, numsortkeys)?;
+    let mut sort_operators: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, numsortkeys)?;
+    let mut collations: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, numsortkeys)?;
+    let mut nulls_first: PgVec<'mcx, bool> = vec_with_capacity_in(mcx, numsortkeys)?;
+
+    {
+        let sub_tlist: &[TargetEntry<'mcx>] =
+            lefttree.plan_head().targetlist.as_deref().unwrap_or(&[]);
+        for sortcl in sortcls {
+            let tle = util_tlist::get_sortgroupclause_tle(sortcl, sub_tlist)?;
+            sort_col_idx.push(tle.resno);
+            sort_operators.push(sortcl.sortop);
+            collations.push(expr_collation_of_tle(tle)?);
+            nulls_first.push(sortcl.nulls_first);
+        }
+    }
+
+    make_sort(mcx, lefttree, sort_col_idx, sort_operators, collations, nulls_first)
+}
+
 /// `prepare_sort_from_pathkeys(lefttree, pathkeys, relids, reqColIdx,
 /// adjust_tlist_in_place, ...)` (createplan.c ~6300) — convert the pathkey list
 /// into executor sort-key arrays, adjusting the input plan's targetlist (adding
@@ -5466,6 +5499,49 @@ fn create_group_plan<'mcx>(
     Ok(Node::Group(plan))
 }
 
+/// `make_unique_from_sortclauses(lefttree, distinctList)` (createplan.c:6835) —
+/// build a `Unique` plan over `lefttree`, with the dedup columns/operators
+/// taken from the `SortGroupClause` list, locating each column by
+/// `tleSortGroupRef` in the child's targetlist.
+fn make_unique_from_sortclauses<'mcx>(
+    mcx: Mcx<'mcx>,
+    lefttree: Node<'mcx>,
+    distinct_list: &[types_nodes::rawnodes::SortGroupClause],
+) -> PgResult<UniqueNode<'mcx>> {
+    let num_cols = distinct_list.len() as i32;
+    debug_assert!(num_cols > 0);
+
+    let tlist = clone_plan_tlist(mcx, &lefttree)?;
+
+    let mut uniq_col_idx: Vec<AttrNumber> = Vec::with_capacity(num_cols as usize);
+    let mut uniq_operators: Vec<Oid> = Vec::with_capacity(num_cols as usize);
+    let mut uniq_collations: Vec<Oid> = Vec::with_capacity(num_cols as usize);
+
+    {
+        let plan_tlist: &[TargetEntry<'mcx>] = tlist.as_deref().unwrap_or(&[]);
+        for sortcl in distinct_list {
+            let tle = util_tlist::get_sortgroupclause_tle(sortcl, plan_tlist)?;
+            uniq_col_idx.push(tle.resno);
+            uniq_operators.push(sortcl.eqop);
+            uniq_collations.push(expr_collation_of_tle(tle)?);
+            debug_assert!(sortcl.eqop != InvalidOid);
+        }
+    }
+
+    let mut plan = Plan::default();
+    plan.targetlist = tlist;
+    plan.qual = None;
+    plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
+    plan.righttree = None;
+    Ok(UniqueNode {
+        plan,
+        numCols: num_cols,
+        uniqColIdx: oid_attr_vec_opt(mcx, uniq_col_idx)?,
+        uniqOperators: oid_vec_opt(mcx, uniq_operators)?,
+        uniqCollations: oid_vec_opt(mcx, uniq_collations)?,
+    })
+}
+
 /// `make_unique_from_pathkeys(lefttree, pathkeys, numCols)` (createplan.c:6884).
 fn make_unique_from_pathkeys<'mcx>(
     mcx: Mcx<'mcx>,
@@ -5558,12 +5634,212 @@ fn create_unique_dispatch_plan<'mcx>(
 ) -> PgResult<Node<'mcx>> {
     match root.path(best_path) {
         PathNode::UpperUniquePath(_) => create_upper_unique_plan(mcx, root, run, best_path, flags),
-        PathNode::UniquePath(_) => Err(PgError::error(
-            "create_unique_plan (createplan.c:1721) is not ported — the JOIN_UNIQUE \
-             UniquePath de-duplication path has no plan converter yet",
-        )),
+        PathNode::UniquePath(_) => create_unique_plan(mcx, root, run, best_path, flags),
         _ => unreachable!("create_unique_dispatch_plan on non-Unique pathtype"),
     }
+}
+
+/// `create_unique_plan(root, (UniquePath *) best_path, flags)`
+/// (createplan.c:1721) — convert a `UniquePath` (the JOIN_UNIQUE de-dup, also
+/// the `UNION`/`DISTINCT`-via-unique path) into a `Unique`, hashed `Agg`, or
+/// `Sort`+`Unique` plan over the subpath.
+fn create_unique_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+    flags: i32,
+) -> PgResult<Node<'mcx>> {
+    let (subpath, umethod, in_operators, uniq_expr_ids) = match root.path(best_path) {
+        PathNode::UniquePath(p) => (
+            p.subpath,
+            p.umethod,
+            p.in_operators.clone(),
+            p.uniq_exprs.clone(),
+        ),
+        _ => unreachable!("create_unique_plan on non-UniquePath"),
+    };
+    let subpath = subpath.expect("create_unique_plan: UniquePath has no subpath");
+
+    // Unique doesn't project, so tlist requirements pass through.
+    let mut subplan = create_plan_recurse(mcx, root, run, subpath, flags)?;
+
+    // Done if we don't need to do any actual unique-ifying.
+    if umethod == UNIQUE_PATH_NOOP {
+        return Ok(subplan);
+    }
+
+    // Resolve the uniq_exprs (arena handles → owned exprs); the values we are
+    // supposed to unique-ify may be expressions over the subplan's Vars.
+    let uniq_exprs: Vec<Expr> = uniq_expr_ids
+        .iter()
+        .map(|&id| root.node(id).clone_in(mcx))
+        .collect::<PgResult<Vec<_>>>()?;
+
+    // Initialize modified subplan tlist as just the "required" vars. newtlist
+    // starts from build_path_tlist() not just a copy of the subplan's tlist; we
+    // don't install it into the subplan unless we are sorting or stuff has to be
+    // added.
+    let mut newtlist = build_path_tlist(mcx, root, best_path)?;
+    let mut nextresno = newtlist.len() as i32 + 1;
+    let mut newitems = false;
+
+    for uniqexpr in uniq_exprs.iter() {
+        if util_tlist::tlist_member(uniqexpr, &newtlist).is_none() {
+            let tle = make_target_entry(mcx, uniqexpr.clone(), nextresno as i16, None, false)?;
+            newtlist.push(tle);
+            nextresno += 1;
+            newitems = true;
+        }
+    }
+
+    // Use change_plan_targetlist in case we need to insert a Result node.
+    if newitems || umethod == UNIQUE_PATH_SORT {
+        let parallel_safe = root.path(best_path).base().parallel_safe;
+        let newtlist_field = tlist_to_plan_field(mcx, newtlist)?
+            .expect("create_unique_plan: newtlist is non-empty");
+        subplan = change_plan_targetlist(mcx, subplan, newtlist_field, parallel_safe)?;
+    }
+
+    // Build control information showing which subplan output columns are to be
+    // examined by the grouping step. Read off the (possibly replaced) subplan
+    // tlist.
+    let num_group_cols = uniq_exprs.len();
+    let mut group_col_idx: Vec<AttrNumber> = Vec::with_capacity(num_group_cols);
+    let mut group_collations: Vec<Oid> = Vec::with_capacity(num_group_cols);
+
+    {
+        let sub_tlist: &[TargetEntry<'mcx>] =
+            subplan.plan_head().targetlist.as_deref().unwrap_or(&[]);
+        for uniqexpr in uniq_exprs.iter() {
+            let tle = util_tlist::tlist_member(uniqexpr, sub_tlist).ok_or_else(|| {
+                PgError::error("failed to find unique expression in subplan tlist")
+            })?;
+            group_col_idx.push(tle.resno);
+            group_collations.push(expr_collation_of_tle(tle)?);
+        }
+    }
+
+    let plan: Node<'mcx> = if umethod == UNIQUE_PATH_HASH {
+        // Get the hashable equality operators for the Agg node to use. Normally
+        // these are the same as the IN clause operators, but if those are
+        // cross-type operators then the equality operators are the ones for the
+        // IN clause operators' RHS datatype.
+        let mut group_operators: Vec<Oid> = Vec::with_capacity(num_group_cols);
+        for &in_oper in in_operators.iter() {
+            let eq_oper = lsyscache::get_compatible_hash_operators::call(in_oper)?
+                .map(|(_lhs, rhs)| rhs)
+                .ok_or_else(|| {
+                    PgError::error(alloc::format!(
+                        "could not find compatible hash operator for operator {}",
+                        in_oper
+                    ))
+                })?;
+            group_operators.push(eq_oper);
+        }
+
+        // Since the Agg node is going to project anyway, give it the minimum
+        // output tlist (build_path_tlist), without anything we added to the
+        // subplan tlist.
+        let agg_tlist = build_path_tlist(mcx, root, best_path)?;
+        let agg_tlist = tlist_to_plan_field(mcx, agg_tlist)?;
+        let rows = root.path(best_path).base().rows;
+
+        let agg = make_agg(
+            mcx,
+            agg_tlist,
+            None, // qual = NIL
+            types_nodes::nodeagg::AggStrategy::AggHashed,
+            AGGSPLIT_SIMPLE,
+            num_group_cols as i32,
+            group_col_idx,
+            group_operators,
+            group_collations,
+            None, // groupingSets = NIL
+            None, // chain = NIL
+            rows,
+            0, // transitionSpace
+            subplan,
+        )?;
+        Node::Agg(agg)
+    } else {
+        // Create an ORDER BY list to sort the input compatibly, deriving the
+        // SortGroupClause for each IN-clause operator.
+        let mut sort_list: Vec<types_nodes::rawnodes::SortGroupClause> =
+            Vec::with_capacity(in_operators.len());
+        for (group_col_pos, &in_oper) in in_operators.iter().enumerate() {
+            let sortop = lsyscache::get_ordering_op_for_equality_op::call(in_oper, false)?;
+            if sortop == InvalidOid {
+                return Err(PgError::error(alloc::format!(
+                    "could not find ordering operator for equality operator {}",
+                    in_oper
+                )));
+            }
+            // The Unique node will need equality operators. Normally these are
+            // the same as the IN clause operators, but if those are cross-type
+            // operators then the equality operators are the ones for the IN
+            // clause operators' RHS datatype.
+            let eqop = lsyscache::get_equality_op_for_ordering_op::call(sortop)?
+                .map(|(op, _reverse)| op)
+                .unwrap_or(InvalidOid);
+            if eqop == InvalidOid {
+                return Err(PgError::error(alloc::format!(
+                    "could not find equality operator for ordering operator {}",
+                    sortop
+                )));
+            }
+
+            // Locate the tle in the subplan tlist by groupColIdx[group_col_pos]
+            // and assign it a sortgroupref so make_sort_from_sortclauses can
+            // find it. This mutates the subplan's targetlist in place.
+            let resno = group_col_idx[group_col_pos];
+            let sortref = {
+                let sub_tlist: &mut [TargetEntry<'mcx>] =
+                    subplan.plan_head_mut().targetlist.as_deref_mut().unwrap_or(&mut []);
+                let tle_idx = sub_tlist
+                    .iter()
+                    .position(|tle| tle.resno == resno)
+                    .expect("create_unique_plan: groupColIdx tle not in subplan tlist");
+                assign_sort_group_ref(tle_idx, sub_tlist)
+            };
+
+            sort_list.push(types_nodes::rawnodes::SortGroupClause {
+                tleSortGroupRef: sortref,
+                eqop,
+                sortop,
+                reverse_sort: false,
+                nulls_first: false,
+                hashable: false, // no need to make this accurate
+            });
+        }
+
+        let mut sort = make_sort_from_sortclauses(mcx, &sort_list, subplan)?;
+        label_sort_with_costsize(root, &mut sort, -1.0);
+        let unique = make_unique_from_sortclauses(mcx, Node::Sort(sort), &sort_list)?;
+        Node::Unique(unique)
+    };
+
+    // Copy cost data from Path to Plan.
+    let mut plan = plan;
+    copy_generic_path_info(plan.plan_head_mut(), root.path(best_path).base());
+
+    Ok(plan)
+}
+
+/// `assignSortGroupRef(tle, tlist)` (parse_clause.c) — ensure the targetlist
+/// entry at `tle_idx` has a `ressortgroupref`, picking max-used+1 if unset.
+fn assign_sort_group_ref(tle_idx: usize, tlist: &mut [TargetEntry<'_>]) -> Index {
+    if tlist[tle_idx].ressortgroupref != 0 {
+        return tlist[tle_idx].ressortgroupref;
+    }
+    let mut max_ref: Index = 0;
+    for tle in tlist.iter() {
+        if tle.ressortgroupref > max_ref {
+            max_ref = tle.ressortgroupref;
+        }
+    }
+    tlist[tle_idx].ressortgroupref = max_ref + 1;
+    tlist[tle_idx].ressortgroupref
 }
 
 fn create_upper_unique_plan<'mcx>(
