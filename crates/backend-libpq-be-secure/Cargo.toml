@@ -20,6 +20,10 @@ backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 # This unit owns the secure_*/ssl_*/be_tls_get_* inward seam contract.
 backend-libpq-be-secure-seams = { path = "../backend-libpq-be-secure-seams" }
 
+# auth.c reads `secure_loaded_verify_locations()` (be-secure.c) across this
+# seam; be-secure.c owns that function, so it installs the seam here.
+backend-libpq-auth-seams = { path = "../backend-libpq-auth-seams" }
+
 # The #ifdef USE_SSL TLS backend (be-secure-openssl.c). be-secure.c calls its
 # be_tls_init/open_server/read/write/close/destroy directly. Acyclic: the
 # openssl crate does not depend on this one.

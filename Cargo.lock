@@ -10898,6 +10898,7 @@ dependencies = [
 name = "backend-libpq-be-secure"
 version = "0.0.0"
 dependencies = [
+ "backend-libpq-auth-seams",
  "backend-libpq-be-secure-openssl",
  "backend-libpq-be-secure-seams",
  "backend-libpq-pqcomm-seams",

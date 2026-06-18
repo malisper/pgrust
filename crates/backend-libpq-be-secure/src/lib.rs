@@ -575,6 +575,10 @@ pub fn init_seams() {
     s::gss_negotiation_disabled::set(gss_negotiation_disabled);
     s::secure_open_server::set(|port| secure_open_server(port).expect("secure_open_server"));
 
+    // auth.c (`CheckPWChallengeAuth`) reads `secure_loaded_verify_locations()`
+    // across `backend-libpq-auth-seams`; be-secure.c owns the function.
+    backend_libpq_auth_seams::secure_loaded_verify_locations::set(secure_loaded_verify_locations);
+
     // The SSL GUC variables declared in be-secure.c — `conf->variable` targets
     // that guc_tables.c points into this translation unit. Each reads from the
     // GUC slot (none come from the ControlFile); install the backend-local
