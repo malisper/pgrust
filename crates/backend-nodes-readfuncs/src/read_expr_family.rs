@@ -83,12 +83,16 @@ fn read_owned_string_field() -> PgResult<Option<String>> {
 fn node_to_opt_box_expr(read: Option<PgBox<'_, Node<'_>>>) -> PgResult<Option<Box<Expr>>> {
     match read {
         None => Ok(None),
-        Some(n) => match PgBox::into_inner(n) {
-            Node::Expr(e) => Ok(Some(Box::new(e))),
-            other => Err(elog_error(alloc::format!(
+        Some(n) => {
+            let __n = PgBox::into_inner(n);
+            let __tag = __n.node_tag();
+            match __n.into_expr() {
+                Some(e) => Ok(Some(Box::new(e))),
+                None => Err(elog_error(alloc::format!(
                 "expected Expr child, got {:?}",
-                other.node_tag()
+                __tag
             ))),
+            }
         },
     }
 }
@@ -105,26 +109,34 @@ fn read_expr_list_field<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Vec<Expr>> {
     let _label = next_token()?;
     match read::node_read(mcx, None)? {
         None => Ok(Vec::new()),
-        Some(n) => match PgBox::into_inner(n) {
-            Node::List(elements) => {
+        Some(n) => {
+            let __n = PgBox::into_inner(n);
+            let __tag = __n.node_tag();
+            match __n.into_list() {
+                Some(elements) => {
                 let mut out = Vec::with_capacity(elements.len());
                 for cell in elements {
-                    match PgBox::into_inner(cell) {
-                        Node::Expr(e) => out.push(e),
-                        other => {
+                    {
+            let __n = PgBox::into_inner(cell);
+            let __tag = __n.node_tag();
+            match __n.into_expr() {
+                Some(e) => out.push(e),
+                None => {
                             return Err(elog_error(alloc::format!(
                                 "expected Expr in list, got {:?}",
-                                other.node_tag()
+                                __tag
                             )))
-                        }
-                    }
+                        },
+            }
+        }
                 }
                 Ok(out)
-            }
-            other => Err(elog_error(alloc::format!(
+            },
+                None => Err(elog_error(alloc::format!(
                 "expected List, got {:?}",
-                other.node_tag()
+                __tag
             ))),
+            }
         },
     }
 }
@@ -158,15 +170,19 @@ fn read_opt_expr_list_field<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Vec<Option<Expr>>>
         let child = read::node_read(mcx, Some(t))?;
         match child {
             None => out.push(None),
-            Some(n) => match PgBox::into_inner(n) {
-                Node::Expr(e) => out.push(Some(e)),
-                other => {
+            Some(n) => {
+            let __n = PgBox::into_inner(n);
+            let __tag = __n.node_tag();
+            match __n.into_expr() {
+                Some(e) => out.push(Some(e)),
+                None => {
                     return Err(elog_error(alloc::format!(
                         "expected Expr in opt-expr list, got {:?}",
-                        other.node_tag()
+                        __tag
                     )))
-                }
-            },
+                },
+            }
+        },
         }
     }
     Ok(out)
@@ -1143,13 +1159,13 @@ fn read_sublink<'mcx>(mcx: Mcx<'mcx>) -> PgResult<types_nodes::primnodes::SubLin
     let sub = read::node_read(mcx, None)?;
     let subselect = match sub {
         None => None,
-        Some(boxed) => match PgBox::into_inner(boxed) {
-            Node::Query(q) => {
+        Some(boxed) => match PgBox::into_inner(boxed).into_query() {
+            Some(q) => {
                 // Erase to the Expr tree's 'static notional lifetime via the
                 // types-nodes helper (this crate is `#![forbid(unsafe_code)]`).
                 Some(types_nodes::primnodes::query_box_into_static(q, mcx)?)
             }
-            _ => {
+            None => {
                 return Err(elog_error(
                     "_readSubLink: expected a QUERY node for SubLink.subselect",
                 ))

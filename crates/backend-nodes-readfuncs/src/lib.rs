@@ -213,27 +213,35 @@ fn read_expr_list_field<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Vec<Expr>> {
         None => return Ok(Vec::new()), // `<>` — empty arg list
         Some(n) => n,
     };
-    match PgBox::into_inner(node) {
-        Node::List(elements) => {
+    {
+            let __n = PgBox::into_inner(node);
+            let __tag = __n.node_tag();
+            match __n.into_list() {
+                Some(elements) => {
             let mut out: Vec<Expr> = Vec::with_capacity(elements.len());
             for cell in elements {
-                match PgBox::into_inner(cell) {
-                    Node::Expr(e) => out.push(e),
-                    other => {
+                {
+            let __n = PgBox::into_inner(cell);
+            let __tag = __n.node_tag();
+            match __n.into_expr() {
+                Some(e) => out.push(e),
+                None => {
                         return Err(elog_error(alloc::format!(
                             "expected Expr element in arg list, got {:?}",
-                            other.node_tag()
+                            __tag
                         )))
-                    }
-                }
+                    },
+            }
+        }
             }
             Ok(out)
-        }
-        other => Err(elog_error(alloc::format!(
+        },
+                None => Err(elog_error(alloc::format!(
             "expected List for arg field, got {:?}",
-            other.node_tag()
+            __tag
         ))),
-    }
+            }
+        }
 }
 
 /// Read a single optional child `Expr` (`READ_NODE_FIELD` of an `Expr *`): skip
@@ -243,13 +251,14 @@ fn read_opt_expr_field<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Option<Box<Expr>>> {
     let read = read::node_read(mcx, None)?;
     match read {
         None => Ok(None),
-        Some(n) => match PgBox::into_inner(n) {
-            Node::Expr(e) => Ok(Some(Box::new(e))),
-            other => Err(elog_error(alloc::format!(
-                "expected Expr child, got {:?}",
-                other.node_tag()
-            ))),
-        },
+        Some(n) => {
+            let node = PgBox::into_inner(n);
+            let tag = node.node_tag();
+            match node.into_expr() {
+                Some(e) => Ok(Some(Box::new(e))),
+                None => Err(elog_error(alloc::format!("expected Expr child, got {:?}", tag))),
+            }
+        }
     }
 }
 
@@ -322,13 +331,17 @@ pub(crate) fn read_node_list_field<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Vec<PgBox<'
     let _label = next_token()?;
     match read::node_read(mcx, None)? {
         None => Ok(Vec::new()),
-        Some(n) => match PgBox::into_inner(n) {
-            Node::List(elements) => Ok(elements.into_iter().collect()),
-            other => Err(elog_error(alloc::format!(
-                "expected List for node-list field, got {:?}",
-                other.node_tag()
-            ))),
-        },
+        Some(n) => {
+            let node = PgBox::into_inner(n);
+            let tag = node.node_tag();
+            match node.into_list() {
+                Some(elements) => Ok(elements.into_iter().collect()),
+                None => Err(elog_error(alloc::format!(
+                    "expected List for node-list field, got {:?}",
+                    tag
+                ))),
+            }
+        }
     }
 }
 
@@ -337,27 +350,33 @@ pub(crate) fn read_int_list_field<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Vec<i32>> {
     let _label = next_token()?;
     match read::node_read(mcx, None)? {
         None => Ok(Vec::new()),
-        Some(n) => match PgBox::into_inner(n) {
-            Node::List(elements) => {
+        Some(n) => {
+            let node = PgBox::into_inner(n);
+            let tag = node.node_tag();
+            match node.into_list() {
+            Some(elements) => {
                 let mut out = Vec::with_capacity(elements.len());
                 for c in elements {
-                    match PgBox::into_inner(c) {
-                        Node::Integer(i) => out.push(i.ival),
-                        other => {
+                    let cell = PgBox::into_inner(c);
+                    let ctag = cell.node_tag();
+                    match cell.into_integer() {
+                        Some(i) => out.push(i.ival),
+                        None => {
                             return Err(elog_error(alloc::format!(
                                 "expected Integer in IntList, got {:?}",
-                                other.node_tag()
+                                ctag
                             )))
                         }
                     }
                 }
                 Ok(out)
             }
-            other => Err(elog_error(alloc::format!(
+            None => Err(elog_error(alloc::format!(
                 "expected IntList, got {:?}",
-                other.node_tag()
+                tag
             ))),
-        },
+            }
+        }
     }
 }
 

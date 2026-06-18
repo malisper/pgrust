@@ -2042,9 +2042,13 @@ fn read_publication_obj_spec<'mcx>(mcx: Mcx<'mcx>) -> PgResult<dn::PublicationOb
     skip_label()?; // skip :pubtable
     let pubtable = match read::node_read(mcx, None)? {
         None => None,
-        Some(n) => match PgBox::into_inner(n) {
-            Node::PublicationTable(t) => Some(mcx::alloc_in(mcx, t)?),
-            other => return Err(elog_error(alloc::format!("expected PublicationTable, got {:?}", other.node_tag()))),
+        Some(n) => {
+            let __n = PgBox::into_inner(n);
+            let __tag = __n.node_tag();
+            match __n.into_publicationtable() {
+                Some(t) => Some(mcx::alloc_in(mcx, t)?),
+                None => return Err(elog_error(alloc::format!("expected PublicationTable, got {:?}", __tag))),
+            }
         },
     };
     let location = read_location_field()?;

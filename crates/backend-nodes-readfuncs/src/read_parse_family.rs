@@ -151,26 +151,34 @@ fn read_expr_list<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Vec<Expr>> {
     let _label = next_token()?;
     match read::node_read(mcx, None)? {
         None => Ok(Vec::new()),
-        Some(n) => match PgBox::into_inner(n) {
-            Node::List(elements) => {
+        Some(n) => {
+            let __n = PgBox::into_inner(n);
+            let __tag = __n.node_tag();
+            match __n.into_list() {
+                Some(elements) => {
                 let mut out = Vec::with_capacity(elements.len());
                 for cell in elements {
-                    match PgBox::into_inner(cell) {
-                        Node::Expr(e) => out.push(e),
-                        other => {
+                    {
+            let __n = PgBox::into_inner(cell);
+            let __tag = __n.node_tag();
+            match __n.into_expr() {
+                Some(e) => out.push(e),
+                None => {
                             return Err(elog_error(alloc::format!(
                                 "expected Expr element in arg list, got {:?}",
-                                other.node_tag()
+                                __tag
                             )))
-                        }
-                    }
+                        },
+            }
+        }
                 }
                 Ok(out)
-            }
-            other => Err(elog_error(alloc::format!(
+            },
+                None => Err(elog_error(alloc::format!(
                 "expected List for expr-list field, got {:?}",
-                other.node_tag()
+                __tag
             ))),
+            }
         },
     }
 }
@@ -180,12 +188,16 @@ fn read_opt_expr_boxed<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Option<Box<Expr>>> {
     let _label = next_token()?;
     match read::node_read(mcx, None)? {
         None => Ok(None),
-        Some(n) => match PgBox::into_inner(n) {
-            Node::Expr(e) => Ok(Some(Box::new(e))),
-            other => Err(elog_error(alloc::format!(
+        Some(n) => {
+            let __n = PgBox::into_inner(n);
+            let __tag = __n.node_tag();
+            match __n.into_expr() {
+                Some(e) => Ok(Some(Box::new(e))),
+                None => Err(elog_error(alloc::format!(
                 "expected Expr child, got {:?}",
-                other.node_tag()
+                __tag
             ))),
+            }
         },
     }
 }
@@ -198,12 +210,16 @@ fn read_opt_expr_box<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Option<PgBox<'mcx, Expr>>
     let _label = next_token()?;
     match read::node_read(mcx, None)? {
         None => Ok(None),
-        Some(n) => match PgBox::into_inner(n) {
-            Node::Expr(e) => Ok(Some(mcx::alloc_in(mcx, e)?)),
-            other => Err(elog_error(alloc::format!(
+        Some(n) => {
+            let __n = PgBox::into_inner(n);
+            let __tag = __n.node_tag();
+            match __n.into_expr() {
+                Some(e) => Ok(Some(mcx::alloc_in(mcx, e)?)),
+                None => Err(elog_error(alloc::format!(
                 "expected Expr child, got {:?}",
-                other.node_tag()
+                __tag
             ))),
+            }
         },
     }
 }
@@ -229,15 +245,19 @@ fn read_box_expr_list_opt<'mcx>(
         }
         let child = read::node_read(mcx, Some(cur))?;
         match child {
-            Some(n) => match PgBox::into_inner(n) {
-                Node::Expr(e) => out.push(mcx::alloc_in(mcx, e)?),
-                other => {
+            Some(n) => {
+            let __n = PgBox::into_inner(n);
+            let __tag = __n.node_tag();
+            match __n.into_expr() {
+                Some(e) => out.push(mcx::alloc_in(mcx, e)?),
+                None => {
                     return Err(elog_error(alloc::format!(
                         "expected Expr in list, got {:?}",
-                        other.node_tag()
+                        __tag
                     )))
-                }
-            },
+                },
+            }
+        },
             None => return Err(elog_error("unexpected null in non-nullable expr list")),
         }
         cur = next_token()?;
@@ -269,15 +289,19 @@ fn read_opt_box_expr_list_opt<'mcx>(
         let child = read::node_read(mcx, Some(cur))?;
         match child {
             None => out.push(None),
-            Some(n) => match PgBox::into_inner(n) {
-                Node::Expr(e) => out.push(Some(mcx::alloc_in(mcx, e)?)),
-                other => {
+            Some(n) => {
+            let __n = PgBox::into_inner(n);
+            let __tag = __n.node_tag();
+            match __n.into_expr() {
+                Some(e) => out.push(Some(mcx::alloc_in(mcx, e)?)),
+                None => {
                     return Err(elog_error(alloc::format!(
                         "expected Expr in nullable list, got {:?}",
-                        other.node_tag()
+                        __tag
                     )))
-                }
-            },
+                },
+            }
+        },
         }
         cur = next_token()?;
     }
@@ -396,13 +420,17 @@ fn read_rte_vec<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, RangeTblEntry<'mcx
     let items = read_node_list_field(mcx)?;
     let mut v = mcx::vec_with_capacity_in(mcx, items.len())?;
     for it in items {
-        match PgBox::into_inner(it) {
-            Node::RangeTblEntry(r) => v.push(r),
-            other => {
+        {
+            let __n = PgBox::into_inner(it);
+            let __tag = __n.node_tag();
+            match __n.into_rangetblentry() {
+                Some(r) => v.push(r),
+                None => {
                 return Err(elog_error(alloc::format!(
                     "expected RangeTblEntry in rtable, got {:?}",
-                    other.node_tag()
+                    __tag
                 )))
+            },
             }
         }
     }
@@ -413,13 +441,17 @@ fn read_rteperminfo_vec<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, RTEPermiss
     let items = read_node_list_field(mcx)?;
     let mut v = mcx::vec_with_capacity_in(mcx, items.len())?;
     for it in items {
-        match PgBox::into_inner(it) {
-            Node::RTEPermissionInfo(p) => v.push(p),
-            other => {
+        {
+            let __n = PgBox::into_inner(it);
+            let __tag = __n.node_tag();
+            match __n.into_rtepermissioninfo() {
+                Some(p) => v.push(p),
+                None => {
                 return Err(elog_error(alloc::format!(
                     "expected RTEPermissionInfo in rteperminfos, got {:?}",
-                    other.node_tag()
+                    __tag
                 )))
+            },
             }
         }
     }
@@ -432,13 +464,17 @@ fn read_te_vec<'mcx>(
     let items = read_node_list_field(mcx)?;
     let mut v = mcx::vec_with_capacity_in(mcx, items.len())?;
     for it in items {
-        match PgBox::into_inner(it) {
-            Node::TargetEntry(t) => v.push(t),
-            other => {
+        {
+            let __n = PgBox::into_inner(it);
+            let __tag = __n.node_tag();
+            match __n.into_targetentry() {
+                Some(t) => v.push(t),
+                None => {
                 return Err(elog_error(alloc::format!(
                     "expected TargetEntry in targetList, got {:?}",
-                    other.node_tag()
+                    __tag
                 )))
+            },
             }
         }
     }
@@ -618,19 +654,13 @@ fn read_query<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Query<'mcx>> {
     q.cteList = read_node_vec_field(mcx)?;
     q.rtable = read_rte_vec(mcx)?;
     q.rteperminfos = read_rteperminfo_vec(mcx)?;
-    q.jointree = read_opt_box(mcx, |n| match n {
-        Node::FromExpr(f) => Some(f),
-        _ => None,
-    })?;
+    q.jointree = read_opt_box(mcx, |n| n.into_fromexpr())?;
     q.mergeActionList = read_node_vec_field(mcx)?;
     q.mergeTargetRelation = read_int_field()?;
     q.mergeJoinCondition = read_opt_expr_box(mcx)?;
     q.targetList = read_te_vec(mcx)?;
     q.r#override = overriding_from(read_enum_field()?);
-    q.onConflict = read_opt_box(mcx, |n| match n {
-        Node::OnConflictExpr(o) => Some(o),
-        _ => None,
-    })?;
+    q.onConflict = read_opt_box(mcx, |n| n.into_onconflictexpr())?;
     q.returningOldAlias = read_string_field(mcx)?;
     q.returningNewAlias = read_string_field(mcx)?;
     q.returningList = read_te_vec(mcx)?;
@@ -660,14 +690,8 @@ fn read_query<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Query<'mcx>> {
 
 fn read_range_tbl_entry<'mcx>(mcx: Mcx<'mcx>) -> PgResult<RangeTblEntry<'mcx>> {
     let mut r = RangeTblEntry::new_in(mcx);
-    r.alias = read_opt_box(mcx, |n| match n {
-        Node::Alias(a) => Some(a),
-        _ => None,
-    })?;
-    r.eref = read_opt_box(mcx, |n| match n {
-        Node::Alias(a) => Some(a),
-        _ => None,
-    })?;
+    r.alias = read_opt_box(mcx, |n| n.into_alias())?;
+    r.eref = read_opt_box(mcx, |n| n.into_alias())?;
     r.rtekind = rtekind_from(read_enum_field()?);
 
     match r.rtekind {
@@ -680,10 +704,7 @@ fn read_range_tbl_entry<'mcx>(mcx: Mcx<'mcx>) -> PgResult<RangeTblEntry<'mcx>> {
             r.tablesample = read_opt_node(mcx)?;
         }
         RTEKind::RTE_SUBQUERY => {
-            r.subquery = read_opt_box(mcx, |n| match n {
-                Node::Query(q) => Some(q),
-                _ => None,
-            })?;
+            r.subquery = read_opt_box(mcx, |n| n.into_query())?;
             r.security_barrier = read_bool_field()?;
             r.relid = read_oid_field()?;
             r.inh = read_bool_field()?;
@@ -697,10 +718,7 @@ fn read_range_tbl_entry<'mcx>(mcx: Mcx<'mcx>) -> PgResult<RangeTblEntry<'mcx>> {
             r.joinaliasvars = read_node_vec_field(mcx)?;
             r.joinleftcols = read_int_scalar_list_field(mcx)?;
             r.joinrightcols = read_int_scalar_list_field(mcx)?;
-            r.join_using_alias = read_opt_box(mcx, |n| match n {
-                Node::Alias(a) => Some(a),
-                _ => None,
-            })?;
+            r.join_using_alias = read_opt_box(mcx, |n| n.into_alias())?;
         }
         RTEKind::RTE_FUNCTION => {
             r.functions = read_node_vec_field(mcx)?;
@@ -1105,10 +1123,7 @@ fn read_range_var<'mcx>(mcx: Mcx<'mcx>) -> PgResult<RangeVar<'mcx>> {
     let relname = read_string_field(mcx)?;
     let inh = read_bool_field()?;
     let relpersistence = read_char_field()? as i8;
-    let alias = read_opt_box(mcx, |n| match n {
-        Node::Alias(a) => Some(a),
-        _ => None,
-    })?;
+    let alias = read_opt_box(mcx, |n| n.into_alias())?;
     let location = read_location_field()?;
     Ok(RangeVar {
         catalogname,
@@ -1144,10 +1159,7 @@ fn read_type_name<'mcx>(mcx: Mcx<'mcx>) -> PgResult<TypeName<'mcx>> {
 
 fn read_column_def<'mcx>(mcx: Mcx<'mcx>) -> PgResult<ColumnDef<'mcx>> {
     let colname = read_string_field(mcx)?;
-    let typeName = read_opt_box(mcx, |n| match n {
-        Node::TypeName(t) => Some(t),
-        _ => None,
-    })?;
+    let typeName = read_opt_box(mcx, |n| n.into_typename())?;
     let compression = read_string_field(mcx)?;
     let inhcount = read_int_field()? as i16;
     let is_local = read_bool_field()?;
@@ -1158,15 +1170,9 @@ fn read_column_def<'mcx>(mcx: Mcx<'mcx>) -> PgResult<ColumnDef<'mcx>> {
     let raw_default = read_opt_node(mcx)?;
     let cooked_default = read_opt_node(mcx)?;
     let identity = read_char_field()? as i8;
-    let identitySequence = read_opt_box(mcx, |n| match n {
-        Node::RangeVar(r) => Some(r),
-        _ => None,
-    })?;
+    let identitySequence = read_opt_box(mcx, |n| n.into_rangevar())?;
     let generated = read_char_field()? as i8;
-    let collClause = read_opt_box(mcx, |n| match n {
-        Node::CollateClause(c) => Some(c),
-        _ => None,
-    })?;
+    let collClause = read_opt_box(mcx, |n| n.into_collateclause())?;
     let collOid = read_oid_field()?;
     let constraints = read_node_vec_field(mcx)?;
     let fdwoptions = read_node_vec_field(mcx)?;
@@ -1209,15 +1215,9 @@ fn read_join_expr<'mcx>(mcx: Mcx<'mcx>) -> PgResult<JoinExpr<'mcx>> {
     let larg = read_opt_node(mcx)?;
     let rarg = read_opt_node(mcx)?;
     let usingClause = read_node_vec_field(mcx)?;
-    let join_using_alias = read_opt_box(mcx, |n| match n {
-        Node::Alias(a) => Some(a),
-        _ => None,
-    })?;
+    let join_using_alias = read_opt_box(mcx, |n| n.into_alias())?;
     let quals = read_opt_node(mcx)?;
-    let alias = read_opt_box(mcx, |n| match n {
-        Node::Alias(a) => Some(a),
-        _ => None,
-    })?;
+    let alias = read_opt_box(mcx, |n| n.into_alias())?;
     let rtindex = read_int_field()?;
     Ok(JoinExpr {
         jointype,
@@ -1331,19 +1331,21 @@ fn read_a_expr<'mcx>(mcx: Mcx<'mcx>) -> PgResult<A_Expr<'mcx>> {
             // (a `(...)` list of String nodes) directly via node_read.
             let name = match read::node_read(mcx, None)? {
                 None => PgVec::new_in(mcx),
-                Some(n) => match PgBox::into_inner(n) {
-                    Node::List(elements) => {
+                Some(n) => {
+                    let node = PgBox::into_inner(n);
+                    if node.is_list() {
+                        let elements = node.into_list().unwrap();
                         let mut v = mcx::vec_with_capacity_in(mcx, elements.len())?;
                         for c in elements {
                             v.push(c);
                         }
                         v
-                    }
-                    other => mcx::vec_with_capacity_in(mcx, 1).map(|mut v| {
-                        v.push(mcx::alloc_in(mcx, other).unwrap());
+                    } else {
+                        let mut v = mcx::vec_with_capacity_in(mcx, 1)?;
+                        v.push(mcx::alloc_in(mcx, node)?);
                         v
-                    })?,
-                },
+                    }
+                }
             };
             (A_Expr_Kind::AEXPR_OP, name)
         }
@@ -1375,10 +1377,7 @@ fn read_func_call<'mcx>(mcx: Mcx<'mcx>) -> PgResult<FuncCall<'mcx>> {
     let args = read_node_vec_field(mcx)?;
     let agg_order = read_node_vec_field(mcx)?;
     let agg_filter = read_opt_node(mcx)?;
-    let over = read_opt_box(mcx, |n| match n {
-        Node::WindowDef(w) => Some(w),
-        _ => None,
-    })?;
+    let over = read_opt_box(mcx, |n| n.into_windowdef())?;
     let agg_within_group = read_bool_field()?;
     let agg_star = read_bool_field()?;
     let agg_distinct = read_bool_field()?;
@@ -1468,10 +1467,7 @@ fn read_multi_assign_ref<'mcx>(mcx: Mcx<'mcx>) -> PgResult<MultiAssignRef<'mcx>>
 
 fn read_type_cast<'mcx>(mcx: Mcx<'mcx>) -> PgResult<TypeCast<'mcx>> {
     let arg = read_opt_node(mcx)?;
-    let typeName = read_opt_box(mcx, |n| match n {
-        Node::TypeName(t) => Some(t),
-        _ => None,
-    })?;
+    let typeName = read_opt_box(mcx, |n| n.into_typename())?;
     let location = read_location_field()?;
     Ok(TypeCast {
         arg,
@@ -1538,10 +1534,7 @@ fn read_window_def<'mcx>(mcx: Mcx<'mcx>) -> PgResult<WindowDef<'mcx>> {
 fn read_range_subselect<'mcx>(mcx: Mcx<'mcx>) -> PgResult<RangeSubselect<'mcx>> {
     let lateral = read_bool_field()?;
     let subquery = read_opt_node(mcx)?;
-    let alias = read_opt_box(mcx, |n| match n {
-        Node::Alias(a) => Some(a),
-        _ => None,
-    })?;
+    let alias = read_opt_box(mcx, |n| n.into_alias())?;
     Ok(RangeSubselect {
         lateral,
         subquery,
@@ -1554,10 +1547,7 @@ fn read_range_function<'mcx>(mcx: Mcx<'mcx>) -> PgResult<RangeFunction<'mcx>> {
     let ordinality = read_bool_field()?;
     let is_rowsfrom = read_bool_field()?;
     let functions = read_node_vec_field(mcx)?;
-    let alias = read_opt_box(mcx, |n| match n {
-        Node::Alias(a) => Some(a),
-        _ => None,
-    })?;
+    let alias = read_opt_box(mcx, |n| n.into_alias())?;
     let coldeflist = read_node_vec_field(mcx)?;
     Ok(RangeFunction {
         lateral,
@@ -1614,10 +1604,7 @@ fn read_infer_clause<'mcx>(mcx: Mcx<'mcx>) -> PgResult<InferClause<'mcx>> {
 
 fn read_on_conflict_clause<'mcx>(mcx: Mcx<'mcx>) -> PgResult<OnConflictClause<'mcx>> {
     let action = on_conflict_action_from(read_enum_field()?);
-    let infer = read_opt_box(mcx, |n| match n {
-        Node::InferClause(i) => Some(i),
-        _ => None,
-    })?;
+    let infer = read_opt_box(mcx, |n| n.into_inferclause())?;
     let targetList = read_node_vec_field(mcx)?;
     let whereClause = read_opt_node(mcx)?;
     let location = read_location_field()?;
@@ -1662,24 +1649,12 @@ fn read_returning_clause<'mcx>(mcx: Mcx<'mcx>) -> PgResult<ReturningClause<'mcx>
 // ===========================================================================
 
 fn read_insert_stmt<'mcx>(mcx: Mcx<'mcx>) -> PgResult<InsertStmt<'mcx>> {
-    let relation = read_opt_box(mcx, |n| match n {
-        Node::RangeVar(r) => Some(r),
-        _ => None,
-    })?;
+    let relation = read_opt_box(mcx, |n| n.into_rangevar())?;
     let cols = read_node_vec_field(mcx)?;
     let selectStmt = read_opt_node(mcx)?;
-    let onConflictClause = read_opt_box(mcx, |n| match n {
-        Node::OnConflictClause(o) => Some(o),
-        _ => None,
-    })?;
-    let returningClause = read_opt_box(mcx, |n| match n {
-        Node::ReturningClause(r) => Some(r),
-        _ => None,
-    })?;
-    let withClause = read_opt_box(mcx, |n| match n {
-        Node::WithClause(w) => Some(w),
-        _ => None,
-    })?;
+    let onConflictClause = read_opt_box(mcx, |n| n.into_onconflictclause())?;
+    let returningClause = read_opt_box(mcx, |n| n.into_returningclause())?;
+    let withClause = read_opt_box(mcx, |n| n.into_withclause())?;
     let r#override = overriding_from(read_enum_field()?);
     Ok(InsertStmt {
         relation,
@@ -1693,20 +1668,11 @@ fn read_insert_stmt<'mcx>(mcx: Mcx<'mcx>) -> PgResult<InsertStmt<'mcx>> {
 }
 
 fn read_delete_stmt<'mcx>(mcx: Mcx<'mcx>) -> PgResult<DeleteStmt<'mcx>> {
-    let relation = read_opt_box(mcx, |n| match n {
-        Node::RangeVar(r) => Some(r),
-        _ => None,
-    })?;
+    let relation = read_opt_box(mcx, |n| n.into_rangevar())?;
     let usingClause = read_node_vec_field(mcx)?;
     let whereClause = read_opt_node(mcx)?;
-    let returningClause = read_opt_box(mcx, |n| match n {
-        Node::ReturningClause(r) => Some(r),
-        _ => None,
-    })?;
-    let withClause = read_opt_box(mcx, |n| match n {
-        Node::WithClause(w) => Some(w),
-        _ => None,
-    })?;
+    let returningClause = read_opt_box(mcx, |n| n.into_returningclause())?;
+    let withClause = read_opt_box(mcx, |n| n.into_withclause())?;
     Ok(DeleteStmt {
         relation,
         usingClause,
@@ -1717,21 +1683,12 @@ fn read_delete_stmt<'mcx>(mcx: Mcx<'mcx>) -> PgResult<DeleteStmt<'mcx>> {
 }
 
 fn read_update_stmt<'mcx>(mcx: Mcx<'mcx>) -> PgResult<UpdateStmt<'mcx>> {
-    let relation = read_opt_box(mcx, |n| match n {
-        Node::RangeVar(r) => Some(r),
-        _ => None,
-    })?;
+    let relation = read_opt_box(mcx, |n| n.into_rangevar())?;
     let targetList = read_node_vec_field(mcx)?;
     let whereClause = read_opt_node(mcx)?;
     let fromClause = read_node_vec_field(mcx)?;
-    let returningClause = read_opt_box(mcx, |n| match n {
-        Node::ReturningClause(r) => Some(r),
-        _ => None,
-    })?;
-    let withClause = read_opt_box(mcx, |n| match n {
-        Node::WithClause(w) => Some(w),
-        _ => None,
-    })?;
+    let returningClause = read_opt_box(mcx, |n| n.into_returningclause())?;
+    let withClause = read_opt_box(mcx, |n| n.into_withclause())?;
     Ok(UpdateStmt {
         relation,
         targetList,
@@ -1743,21 +1700,12 @@ fn read_update_stmt<'mcx>(mcx: Mcx<'mcx>) -> PgResult<UpdateStmt<'mcx>> {
 }
 
 fn read_merge_stmt<'mcx>(mcx: Mcx<'mcx>) -> PgResult<MergeStmt<'mcx>> {
-    let relation = read_opt_box(mcx, |n| match n {
-        Node::RangeVar(r) => Some(r),
-        _ => None,
-    })?;
+    let relation = read_opt_box(mcx, |n| n.into_rangevar())?;
     let sourceRelation = read_opt_node(mcx)?;
     let joinCondition = read_opt_node(mcx)?;
     let mergeWhenClauses = read_node_vec_field(mcx)?;
-    let returningClause = read_opt_box(mcx, |n| match n {
-        Node::ReturningClause(r) => Some(r),
-        _ => None,
-    })?;
-    let withClause = read_opt_box(mcx, |n| match n {
-        Node::WithClause(w) => Some(w),
-        _ => None,
-    })?;
+    let returningClause = read_opt_box(mcx, |n| n.into_returningclause())?;
+    let withClause = read_opt_box(mcx, |n| n.into_withclause())?;
     Ok(MergeStmt {
         relation,
         sourceRelation,
@@ -1788,20 +1736,11 @@ fn read_select_stmt<'mcx>(mcx: Mcx<'mcx>) -> PgResult<SelectStmt<'mcx>> {
     let limitCount = read_opt_node(mcx)?;
     let limitOption = limit_option_from(read_enum_field()?);
     let lockingClause = read_node_vec_field(mcx)?;
-    let withClause = read_opt_box(mcx, |n| match n {
-        Node::WithClause(w) => Some(w),
-        _ => None,
-    })?;
+    let withClause = read_opt_box(mcx, |n| n.into_withclause())?;
     let op = set_operation_from(read_enum_field()?);
     let all = read_bool_field()?;
-    let larg = read_opt_box(mcx, |n| match n {
-        Node::SelectStmt(s) => Some(s),
-        _ => None,
-    })?;
-    let rarg = read_opt_box(mcx, |n| match n {
-        Node::SelectStmt(s) => Some(s),
-        _ => None,
-    })?;
+    let larg = read_opt_box(mcx, |n| n.into_selectstmt())?;
+    let rarg = read_opt_box(mcx, |n| n.into_selectstmt())?;
     Ok(SelectStmt {
         distinctClause,
         intoClause,
@@ -2102,16 +2041,20 @@ mod tests {
 
         // Read it back and confirm the search_clause survived.
         let parsed = string_to_node(mcx, &text).expect("read");
-        match PgBox::into_inner(parsed) {
-            Node::CommonTableExpr(c) => {
+        {
+            let __n = PgBox::into_inner(parsed);
+            let __tag = __n.node_tag();
+            match __n.into_commontableexpr() {
+                Some(c) => {
                 let sc = c.search_clause.expect("search_clause lost");
                 assert!(sc.search_breadth_first);
                 assert_eq!(sc.search_seq_column.as_ref().map(|s| s.as_str()), Some("seq"));
                 assert_eq!(c.ctecoltypes.len(), 1);
                 assert_eq!(c.ctecoltypes[0], 23);
                 assert!(c.cterecursive);
+            },
+                None => panic!("expected CommonTableExpr, got {:?}", __tag),
             }
-            other => panic!("expected CommonTableExpr, got {:?}", other.node_tag()),
         }
     }
 }
