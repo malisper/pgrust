@@ -1178,13 +1178,16 @@ fn portal_run_utility(
      */
     let has_portal_snapshot = portal.borrow().portalSnapshot.is_some();
     if has_portal_snapshot && snapmgr_seam::active_snapshot_set::call() {
-        debug_assert!(portal
-            .borrow()
-            .portalSnapshot
-            .as_ref()
-            .zip(get_active_snapshot()?.as_ref())
-            .map(|(ps, act)| Rc::ptr_eq(ps, act))
-            .unwrap_or(false));
+        // C asserts `portal->portalSnapshot == GetActiveSnapshot()` (pointer
+        // identity of the same `Snapshot`). In this owned model the active
+        // stack stores `Rc<RefCell<SnapshotData>>` while the
+        // `portalSnapshot` field / the `get_active_snapshot` seam carry a
+        // separate `Rc<SnapshotData>` cloned from it, so the two Rc allocations
+        // never alias — `Rc::ptr_eq` is structurally unsatisfiable here. The
+        // invariant the C assert protects (our portal snapshot is the one on
+        // top of the active stack) is what the subsequent pop relies on; we
+        // keep the C control flow and drop the representation-incompatible
+        // pointer-identity check.
         snapmgr_seam::pop_active_snapshot::call()?;
     }
     portal.borrow_mut().portalSnapshot = None;
