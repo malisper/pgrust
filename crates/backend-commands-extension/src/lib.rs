@@ -2158,8 +2158,8 @@ pub fn CreateExtension<'mcx>(
 fn as_defelem<'a, 'mcx>(
     node: &'a types_nodes::nodes::NodePtr<'mcx>,
 ) -> &'a types_nodes::ddlnodes::DefElem<'mcx> {
-    match &**node {
-        types_nodes::nodes::Node::DefElem(d) => d,
+    match (**node).node_tag() {
+        types_nodes::nodes::ntag::T_DefElem => (**node).expect_defelem(),
         _ => panic!("extension.c: CREATE EXTENSION option is not a DefElem node"),
     }
 }
@@ -2176,12 +2176,19 @@ fn def_get_string(def: &types_nodes::ddlnodes::DefElem<'_>) -> PgResult<String> 
             ))
             .into_error()
     })?;
-    match arg {
-        types_nodes::nodes::Node::Integer(i) => Ok(i.ival.to_string()),
-        types_nodes::nodes::Node::Boolean(b) => {
+    match arg.node_tag() {
+        types_nodes::nodes::ntag::T_Integer => {
+            let i = arg.expect_integer();
+            Ok(i.ival.to_string())
+        }
+        types_nodes::nodes::ntag::T_Boolean => {
+            let b = arg.expect_boolean();
             Ok(if b.boolval { "true" } else { "false" }.to_string())
         }
-        types_nodes::nodes::Node::String(s) => Ok(s.sval.as_str().to_string()),
+        types_nodes::nodes::ntag::T_String => {
+            let s = arg.expect_string();
+            Ok(s.sval.as_str().to_string())
+        }
         _ => Err(PgError::error(format!(
             "unrecognized node type: {}",
             arg.node_tag().0
@@ -2196,13 +2203,14 @@ fn def_get_boolean(def: &types_nodes::ddlnodes::DefElem<'_>) -> PgResult<bool> {
         return Ok(true);
     };
 
-    match arg {
-        types_nodes::nodes::Node::Integer(i) => match i.ival {
+    match arg.node_tag() {
+        types_nodes::nodes::ntag::T_Integer => match arg.expect_integer().ival {
             0 => return Ok(false),
             1 => return Ok(true),
             _ => {}
         },
-        types_nodes::nodes::Node::String(s) => {
+        types_nodes::nodes::ntag::T_String => {
+            let s = arg.expect_string();
             let sval = s.sval.as_str();
             if sval.eq_ignore_ascii_case("true") || sval.eq_ignore_ascii_case("on") {
                 return Ok(true);
