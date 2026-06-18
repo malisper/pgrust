@@ -152,6 +152,8 @@ pub const DESCRIPTION_OBJ_INDEX_ID: Oid = 2675;
 pub const SHARED_DESCRIPTION_RELATION_ID: Oid = 2396;
 /// `SharedSecLabelRelationId` — `pg_shseclabel` (`pg_shseclabel_d.h`).
 pub const SHARED_SEC_LABEL_RELATION_ID: Oid = 3592;
+/// `SecLabelRelationId` — `pg_seclabel` (`pg_seclabel_d.h`).
+pub const SEC_LABEL_RELATION_ID: Oid = 3596;
 
 /* Shared-catalog indexes. */
 /// `AuthIdRolnameIndexId` — `pg_authid_rolname_index` (`pg_authid_d.h`).

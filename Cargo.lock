@@ -7501,11 +7501,18 @@ dependencies = [
 name = "backend-commands-seclabel"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-scankey",
+ "backend-access-index-genam-seams",
+ "backend-access-table-table",
  "backend-catalog-catalog",
+ "backend-catalog-indexing",
  "backend-catalog-objectaddress-seams",
  "backend-catalog-pg-class",
  "backend-commands-seclabel-seams",
+ "backend-utils-cache-relcache-seams",
  "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
  "mcx",
  "types-catalog",
  "types-core",
@@ -7513,6 +7520,7 @@ dependencies = [
  "types-nodes",
  "types-parsenodes",
  "types-rel",
+ "types-scan",
  "types-storage",
  "types-tuple",
 ]
@@ -7524,10 +7532,7 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-catalog",
- "types-core",
  "types-error",
- "types-rel",
- "types-storage",
  "types-tuple",
 ]
 

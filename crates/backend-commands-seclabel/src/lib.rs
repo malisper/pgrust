@@ -2,36 +2,70 @@
 #![allow(non_camel_case_types)]
 #![allow(non_upper_case_globals)]
 // `check_object_ownership` faithfully takes the same parameter set as the C
-// callee (roleid, objtype, address, object, relation).
+// callee (roleid, objtype, address, object, relation); `PgError` is a large
+// error type shared across the whole tree, so boxing it would diverge from
+// every sibling crate's Result shape.
 #![allow(clippy::too_many_arguments)]
+#![allow(clippy::result_large_err)]
 
 //! `backend/commands/seclabel.c` — SECURITY LABEL.
 //!
 //! Applies, replaces, or removes the `pg_seclabel` / `pg_shseclabel` tuple that
 //! holds an object's security label for a given label provider, and maintains
-//! the in-process list of registered label providers. The in-crate control
-//! flow mirrors the C exactly: the provider-default logic, the support-check,
-//! the OBJECT_COLUMN relkind whitelist, the provider relabel-hook invocation,
-//! the `label == NULL` → delete branch, the found-vs-not-found upsert decision,
-//! the `values`/`nulls`/`replaces` array setup, the `DeleteSecurityLabel`
-//! 3-vs-2 scan-key choice, and the `IsSharedRelation` routing for shared vs.
-//! database catalogs. The object-address / ownership resolution and the
-//! `pg_seclabel` / `pg_shseclabel` catalog primitives cross seams to their
-//! owners; `IsSharedRelation` and `errdetail_relkind_not_supported` are real
-//! ported functions called directly.
+//! the in-process list of registered label providers. Every C function is
+//! ported here branch-for-branch:
+//!
+//!  * [`SecLabelSupportsObjectType`] — the per-`ObjectType` whitelist;
+//!  * [`ExecSecLabelStmt`] — the SECURITY LABEL driver: provider-default logic,
+//!    the support check, `get_object_address` + ownership check, the
+//!    `OBJECT_COLUMN` relkind whitelist, the provider relabel-hook invocation,
+//!    `SetSecurityLabel`, finishing with `relation_close`;
+//!  * [`GetSecurityLabel`] / [`GetSharedSecurityLabel`] — fetch an object's
+//!    label, or `None`;
+//!  * [`SetSecurityLabel`] / [`SetSharedSecurityLabel`] — upsert/delete a label;
+//!  * [`DeleteSecurityLabel`] / [`DeleteSharedSecurityLabel`] — remove all
+//!    labels for an object (fired unconditionally by dependency.c on DROP);
+//!  * [`register_label_provider`] — append a provider to the in-process list.
+//!
+//! The control flow is identical to the C, including the real catalog reads and
+//! writes: `table_open(SecLabelRelationId / SharedSecLabelRelationId, …)` over a
+//! real [`types_rel::Relation`], the `systable` index scans
+//! (`systable_beginscan`/`getnext`/`endscan` on
+//! `SecLabelObjectIndexId`/`SharedSecLabelObjectIndexId`), and the
+//! `CatalogTupleDelete` / `heap_modify_tuple`+`CatalogTupleUpdate` /
+//! `heap_form_tuple`+`CatalogTupleInsert` mutations.
+//!
+//! `get_object_address` / `check_object_ownership` (objectaddress.c) are called
+//! through the canonical [`backend_catalog_objectaddress_seams`].
+//! `IsSharedRelation` (`backend-catalog-catalog`) and
+//! `errdetail_relkind_not_supported` (`backend-catalog-pg-class`) are real
+//! ported functions called directly. `GetUserId` is the canonical miscinit
+//! seam. Only the project-wide varlena/`Datum` conversions
+//! (`CStringGetTextDatum`/`TextDatumGetCString`) cross the
+//! [`backend_commands_seclabel_seams`] boundary.
 
 use std::sync::Mutex;
 
+use backend_access_common_heaptuple::{heap_form_tuple, heap_getattr, heap_modify_tuple};
+use backend_access_common_scankey::ScanKeyInit;
+use backend_access_index_genam_seams as genam;
+use backend_access_table_table::{table_close, table_open};
 use backend_catalog_catalog::IsSharedRelation;
+use backend_catalog_indexing::keystone::{CatalogTupleDelete, CatalogTupleInsert, CatalogTupleUpdate};
 use backend_catalog_objectaddress_seams::{
     check_object_ownership, get_object_address, ResolvedObjectAddress,
 };
 use backend_commands_seclabel_seams as seam;
 use backend_utils_error::ereport;
+use backend_utils_init_miscinit_seams::get_user_id;
 use mcx::Mcx;
+use types_catalog::catalog::{
+    SEC_LABEL_OBJECT_INDEX_ID, SEC_LABEL_RELATION_ID, SHARED_SEC_LABEL_OBJECT_INDEX_ID,
+    SHARED_SEC_LABEL_RELATION_ID,
+};
 use types_catalog::catalog_dependency::ObjectAddress;
+use types_core::fmgr::{F_INT4EQ, F_OIDEQ, F_TEXTEQ};
 use types_core::primitive::Oid;
-use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_WRONG_OBJECT_TYPE,
     ERROR,
@@ -50,11 +84,13 @@ use types_nodes::parsenodes::{
     OBJECT_TYPE, OBJECT_USER_MAPPING, OBJECT_VIEW,
 };
 use types_parsenodes::{Node, SecLabelStmt};
+use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock, ShareUpdateExclusiveLock};
 use types_tuple::access::{
     RELKIND_COMPOSITE_TYPE, RELKIND_FOREIGN_TABLE, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE,
     RELKIND_RELATION, RELKIND_VIEW,
 };
+use types_tuple::backend_access_common_heaptuple::Datum;
 
 /*
  * pg_seclabel / pg_shseclabel column counts and 1-based attribute numbers
@@ -108,6 +144,45 @@ static LABEL_PROVIDER_LIST: Mutex<Vec<LabelProvider>> = Mutex::new(Vec::new());
 /// `src/backend/commands/seclabel.c`.
 fn errloc(lineno: i32, funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new("../src/backend/commands/seclabel.c", lineno, funcname)
+}
+
+/// `ScanKeyInit(&key, attno, BTEqualStrategyNumber, F_OIDEQ,
+/// ObjectIdGetDatum(value))`.
+fn oid_key<'mcx>(attno: i16, value: Oid) -> PgResult<ScanKeyData<'mcx>> {
+    let mut key = ScanKeyData::empty();
+    ScanKeyInit(
+        &mut key,
+        attno,
+        BTEqualStrategyNumber,
+        F_OIDEQ,
+        Datum::from_oid(value),
+    )?;
+    Ok(key)
+}
+
+/// `ScanKeyInit(&key, attno, BTEqualStrategyNumber, F_INT4EQ,
+/// Int32GetDatum(value))`.
+fn int4_key<'mcx>(attno: i16, value: i32) -> PgResult<ScanKeyData<'mcx>> {
+    let mut key = ScanKeyData::empty();
+    ScanKeyInit(
+        &mut key,
+        attno,
+        BTEqualStrategyNumber,
+        F_INT4EQ,
+        Datum::from_i32(value),
+    )?;
+    Ok(key)
+}
+
+/// `ScanKeyInit(&key, attno, BTEqualStrategyNumber, F_TEXTEQ,
+/// CStringGetTextDatum(value))`. The provider column is `text`, so the key
+/// argument is a `text` Datum built by the project-wide varlena conversion
+/// (`CStringGetTextDatum`).
+fn text_key<'mcx>(mcx: Mcx<'mcx>, attno: i16, value: &str) -> PgResult<ScanKeyData<'mcx>> {
+    let datum = seam::cstring_get_text_datum::call(mcx, value)?;
+    let mut key = ScanKeyData::empty();
+    ScanKeyInit(&mut key, attno, BTEqualStrategyNumber, F_TEXTEQ, datum)?;
+    Ok(key)
 }
 
 /// `SecLabelSupportsObjectType` — return whether security labels are supported
@@ -244,7 +319,7 @@ pub fn ExecSecLabelStmt<'mcx>(mcx: Mcx<'mcx>, stmt: &SecLabelStmt) -> PgResult<O
 
     /* Require ownership of the target object (seclabel.c:171-173). */
     check_object_ownership::call(
-        seam::get_user_id::call()?,
+        get_user_id::call(),
         stmt.objtype,
         address,
         object,
@@ -314,23 +389,45 @@ fn GetSharedSecurityLabel<'mcx>(
     object: &ObjectAddress,
     provider: &str,
 ) -> PgResult<Option<String>> {
-    let pg_shseclabel = seam::shseclabel_open::call(mcx, AccessShareLock)?;
+    let skey = [
+        oid_key(ANUM_PG_SHSECLABEL_OBJOID as i16, object.objectId)?,
+        oid_key(ANUM_PG_SHSECLABEL_CLASSOID as i16, object.classId)?,
+        text_key(mcx, ANUM_PG_SHSECLABEL_PROVIDER as i16, provider)?,
+    ];
+
+    let pg_shseclabel = table_open(mcx, SHARED_SEC_LABEL_RELATION_ID, AccessShareLock)?;
+    // RelationGetDescr(pg_shseclabel)
+    let tupdesc = &pg_shseclabel.rd_att;
+
+    /*
+     * systable_beginscan(pg_shseclabel, SharedSecLabelObjectIndexId,
+     *                    criticalSharedRelcachesBuilt, NULL, 3, keys);
+     * The shared catalog's index may not be usable during early startup before
+     * the critical shared relcaches are built (seclabel.c:248-249).
+     */
+    let index_ok = backend_utils_cache_relcache_seams::critical_shared_relcaches_built::call();
+    let mut scan = genam::systable_beginscan::call(
+        &pg_shseclabel,
+        SHARED_SEC_LABEL_OBJECT_INDEX_ID,
+        index_ok,
+        None,
+        &skey,
+    )?;
 
     /* char *seclabel = NULL; (seclabel.c:232) */
     let mut seclabel: Option<String> = None;
 
-    if let Some(col) = seam::shseclabel_get_label::call(
-        &pg_shseclabel,
-        object.objectId,
-        object.classId,
-        provider,
-    )? {
-        if !col.isnull {
-            seclabel = Some(seam::text_datum_get_cstring::call(col.value)?);
+    if let Some(tuple) = genam::systable_getnext::call(mcx, scan.desc_mut())? {
+        // datum = heap_getattr(tuple, Anum_pg_shseclabel_label, tupdesc, &isnull);
+        let (value, isnull) = heap_getattr(mcx, &tuple, ANUM_PG_SHSECLABEL_LABEL as i32, tupdesc)?;
+        if !isnull {
+            seclabel = Some(seam::text_datum_get_cstring::call(value)?);
         }
     }
 
-    pg_shseclabel.close(AccessShareLock)?;
+    scan.end()?;
+
+    table_close(pg_shseclabel, AccessShareLock)?;
 
     Ok(seclabel)
 }
@@ -350,24 +447,34 @@ pub fn GetSecurityLabel<'mcx>(
     }
 
     /* Must be an unshared object, so examine pg_seclabel (seclabel.c:286-319). */
-    let pg_seclabel = seam::seclabel_open::call(mcx, AccessShareLock)?;
+    let skey = [
+        oid_key(ANUM_PG_SECLABEL_OBJOID as i16, object.objectId)?,
+        oid_key(ANUM_PG_SECLABEL_CLASSOID as i16, object.classId)?,
+        int4_key(ANUM_PG_SECLABEL_OBJSUBID as i16, object.objectSubId)?,
+        text_key(mcx, ANUM_PG_SECLABEL_PROVIDER as i16, provider)?,
+    ];
+
+    let pg_seclabel = table_open(mcx, SEC_LABEL_RELATION_ID, AccessShareLock)?;
+    // RelationGetDescr(pg_seclabel)
+    let tupdesc = &pg_seclabel.rd_att;
+
+    let mut scan =
+        genam::systable_beginscan::call(&pg_seclabel, SEC_LABEL_OBJECT_INDEX_ID, true, None, &skey)?;
 
     /* char *seclabel = NULL; (seclabel.c:280) */
     let mut seclabel: Option<String> = None;
 
-    if let Some(col) = seam::seclabel_get_label::call(
-        &pg_seclabel,
-        object.objectId,
-        object.classId,
-        object.objectSubId,
-        provider,
-    )? {
-        if !col.isnull {
-            seclabel = Some(seam::text_datum_get_cstring::call(col.value)?);
+    if let Some(tuple) = genam::systable_getnext::call(mcx, scan.desc_mut())? {
+        // datum = heap_getattr(tuple, Anum_pg_seclabel_label, tupdesc, &isnull);
+        let (value, isnull) = heap_getattr(mcx, &tuple, ANUM_PG_SECLABEL_LABEL as i32, tupdesc)?;
+        if !isnull {
+            seclabel = Some(seam::text_datum_get_cstring::call(value)?);
         }
     }
 
-    pg_seclabel.close(AccessShareLock)?;
+    scan.end()?;
+
+    table_close(pg_seclabel, AccessShareLock)?;
 
     Ok(seclabel)
 }
@@ -383,7 +490,7 @@ fn SetSharedSecurityLabel<'mcx>(
     label: Option<&str>,
 ) -> PgResult<()> {
     /* Prepare to form or update a tuple, if necessary (seclabel.c:341-348). */
-    let mut values: [Datum; NATTS_PG_SHSECLABEL] = std::array::from_fn(|_| Datum::null());
+    let mut values: [Datum<'mcx>; NATTS_PG_SHSECLABEL] = core::array::from_fn(|_| Datum::null());
     let nulls = [false; NATTS_PG_SHSECLABEL];
     let mut replaces = [false; NATTS_PG_SHSECLABEL];
     values[ANUM_PG_SHSECLABEL_OBJOID - 1] = Datum::from_oid(object.objectId);
@@ -394,39 +501,55 @@ fn SetSharedSecurityLabel<'mcx>(
     }
 
     /* Use the index to search for a matching old tuple (seclabel.c:350-367). */
-    let pg_shseclabel = seam::shseclabel_open::call(mcx, RowExclusiveLock)?;
-    let oldtup = seam::shseclabel_find_one::call(
+    let skey = [
+        oid_key(ANUM_PG_SHSECLABEL_OBJOID as i16, object.objectId)?,
+        oid_key(ANUM_PG_SHSECLABEL_CLASSOID as i16, object.classId)?,
+        text_key(mcx, ANUM_PG_SHSECLABEL_PROVIDER as i16, provider)?,
+    ];
+
+    let pg_shseclabel = table_open(mcx, SHARED_SEC_LABEL_RELATION_ID, RowExclusiveLock)?;
+
+    let mut scan = genam::systable_beginscan::call(
         &pg_shseclabel,
-        object.objectId,
-        object.classId,
-        provider,
+        SHARED_SEC_LABEL_OBJECT_INDEX_ID,
+        true,
+        None,
+        &skey,
     )?;
 
     /*
-     * Found: delete or update it; else, with a label, insert a new one
-     * (seclabel.c:369-390). The C `newtup != NULL` guard is "we updated or
-     * inserted"; here the equivalent is "we found a tuple to update" vs "no
-     * match, so insert".
+     * Found: delete or update it (seclabel.c:369-381). The C `newtup != NULL`
+     * guard at the bottom is "we updated or inserted"; here the equivalent is
+     * "we found a tuple to update" vs "no match, so insert".
      */
-    let found = match oldtup {
-        Some(tuple) => {
-            if label.is_none() {
-                seam::shseclabel_delete::call(&pg_shseclabel, tuple)?;
-            } else {
-                replaces[ANUM_PG_SHSECLABEL_LABEL - 1] = true;
-                seam::shseclabel_update::call(&pg_shseclabel, tuple, &values, &nulls, &replaces)?;
-            }
-            true
+    let mut inserted_or_updated = false;
+    if let Some(oldtup) = genam::systable_getnext::call(mcx, scan.desc_mut())? {
+        if label.is_none() {
+            CatalogTupleDelete(mcx, &pg_shseclabel, oldtup.tuple.t_self)?;
+        } else {
+            replaces[ANUM_PG_SHSECLABEL_LABEL - 1] = true;
+            let mut newtup = heap_modify_tuple(
+                mcx,
+                &oldtup,
+                &pg_shseclabel.rd_att,
+                &values,
+                &nulls,
+                &replaces,
+            )?;
+            CatalogTupleUpdate(mcx, &pg_shseclabel, oldtup.tuple.t_self, &mut newtup)?;
+            inserted_or_updated = true;
         }
-        None => false,
-    };
-
-    /* If we didn't find an old tuple, insert a new one (seclabel.c:384-390). */
-    if !found && label.is_some() {
-        seam::shseclabel_insert::call(&pg_shseclabel, &values, &nulls)?;
     }
 
-    pg_shseclabel.close(RowExclusiveLock)
+    scan.end()?;
+
+    /* If we didn't find an old tuple, insert a new one (seclabel.c:384-390). */
+    if !inserted_or_updated && label.is_some() {
+        let mut newtup = heap_form_tuple(mcx, &pg_shseclabel.rd_att, &values, &nulls)?;
+        CatalogTupleInsert(mcx, &pg_shseclabel, &mut newtup)?;
+    }
+
+    table_close(pg_shseclabel, RowExclusiveLock)
 }
 
 /// `SetSecurityLabel` — set the security label for `provider` on `object` to
@@ -445,7 +568,7 @@ pub fn SetSecurityLabel<'mcx>(
     }
 
     /* Prepare to form or update a tuple, if necessary (seclabel.c:423-431). */
-    let mut values: [Datum; NATTS_PG_SECLABEL] = std::array::from_fn(|_| Datum::null());
+    let mut values: [Datum<'mcx>; NATTS_PG_SECLABEL] = core::array::from_fn(|_| Datum::null());
     let nulls = [false; NATTS_PG_SECLABEL];
     let mut replaces = [false; NATTS_PG_SECLABEL];
     values[ANUM_PG_SECLABEL_OBJOID - 1] = Datum::from_oid(object.objectId);
@@ -457,50 +580,77 @@ pub fn SetSecurityLabel<'mcx>(
     }
 
     /* Use the index to search for a matching old tuple (seclabel.c:433-454). */
-    let pg_seclabel = seam::seclabel_open::call(mcx, RowExclusiveLock)?;
-    let oldtup = seam::seclabel_find_one::call(
-        &pg_seclabel,
-        object.objectId,
-        object.classId,
-        object.objectSubId,
-        provider,
-    )?;
+    let skey = [
+        oid_key(ANUM_PG_SECLABEL_OBJOID as i16, object.objectId)?,
+        oid_key(ANUM_PG_SECLABEL_CLASSOID as i16, object.classId)?,
+        int4_key(ANUM_PG_SECLABEL_OBJSUBID as i16, object.objectSubId)?,
+        text_key(mcx, ANUM_PG_SECLABEL_PROVIDER as i16, provider)?,
+    ];
 
-    /* Found: delete or update it; else, with a label, insert (seclabel.c:456-477). */
-    let found = match oldtup {
-        Some(tuple) => {
-            if label.is_none() {
-                seam::seclabel_delete::call(&pg_seclabel, tuple)?;
-            } else {
-                replaces[ANUM_PG_SECLABEL_LABEL - 1] = true;
-                seam::seclabel_update::call(&pg_seclabel, tuple, &values, &nulls, &replaces)?;
-            }
-            true
+    let pg_seclabel = table_open(mcx, SEC_LABEL_RELATION_ID, RowExclusiveLock)?;
+
+    let mut scan =
+        genam::systable_beginscan::call(&pg_seclabel, SEC_LABEL_OBJECT_INDEX_ID, true, None, &skey)?;
+
+    /* Found: delete or update it (seclabel.c:456-468). */
+    let mut inserted_or_updated = false;
+    if let Some(oldtup) = genam::systable_getnext::call(mcx, scan.desc_mut())? {
+        if label.is_none() {
+            CatalogTupleDelete(mcx, &pg_seclabel, oldtup.tuple.t_self)?;
+        } else {
+            replaces[ANUM_PG_SECLABEL_LABEL - 1] = true;
+            let mut newtup = heap_modify_tuple(
+                mcx,
+                &oldtup,
+                &pg_seclabel.rd_att,
+                &values,
+                &nulls,
+                &replaces,
+            )?;
+            CatalogTupleUpdate(mcx, &pg_seclabel, oldtup.tuple.t_self, &mut newtup)?;
+            inserted_or_updated = true;
         }
-        None => false,
-    };
-
-    /* If we didn't find an old tuple, insert a new one (seclabel.c:471-477). */
-    if !found && label.is_some() {
-        seam::seclabel_insert::call(&pg_seclabel, &values, &nulls)?;
     }
 
-    pg_seclabel.close(RowExclusiveLock)
+    scan.end()?;
+
+    /* If we didn't find an old tuple, insert a new one (seclabel.c:471-477). */
+    if !inserted_or_updated && label.is_some() {
+        let mut newtup = heap_form_tuple(mcx, &pg_seclabel.rd_att, &values, &nulls)?;
+        CatalogTupleInsert(mcx, &pg_seclabel, &mut newtup)?;
+    }
+
+    table_close(pg_seclabel, RowExclusiveLock)
 }
 
 /// `DeleteSharedSecurityLabel` — helper of [`DeleteSecurityLabel`] for shared
 /// database objects: remove all pg_shseclabel labels for the object.
 ///
 /// seclabel.c:490-516. Always two scan keys `{objoid, classoid}`.
-pub fn DeleteSharedSecurityLabel<'mcx>(
-    mcx: Mcx<'mcx>,
-    objectId: Oid,
-    classId: Oid,
-) -> PgResult<()> {
-    let pg_shseclabel = seam::shseclabel_open::call(mcx, RowExclusiveLock)?;
-    seam::shseclabel_delete_all::call(&pg_shseclabel, objectId, classId)?;
+pub fn DeleteSharedSecurityLabel<'mcx>(mcx: Mcx<'mcx>, objectId: Oid, classId: Oid) -> PgResult<()> {
+    let skey = [
+        oid_key(ANUM_PG_SHSECLABEL_OBJOID as i16, objectId)?,
+        oid_key(ANUM_PG_SHSECLABEL_CLASSOID as i16, classId)?,
+    ];
+
+    let pg_shseclabel = table_open(mcx, SHARED_SEC_LABEL_RELATION_ID, RowExclusiveLock)?;
+
+    let mut scan = genam::systable_beginscan::call(
+        &pg_shseclabel,
+        SHARED_SEC_LABEL_OBJECT_INDEX_ID,
+        true,
+        None,
+        &skey,
+    )?;
+
+    while let Some(oldtup) = genam::systable_getnext::call(mcx, scan.desc_mut())? {
+        CatalogTupleDelete(mcx, &pg_shseclabel, oldtup.tuple.t_self)?;
+    }
+
+    scan.end()?;
+
     /* Done (seclabel.c:515) — closes holding RowExclusiveLock. */
-    pg_shseclabel.close(RowExclusiveLock)
+    table_close(pg_shseclabel, RowExclusiveLock)
 }
 
 /// `DeleteSecurityLabel` — remove all security labels for an object (and any
@@ -518,16 +668,28 @@ pub fn DeleteSecurityLabel<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress) -> PgRe
      * Build the scan keys: always {objoid, classoid}; add the objsubid key only
      * when `objectSubId != 0` (seclabel.c:547-556, where nkeys becomes 3).
      */
-    let objsubid = if object.objectSubId != 0 {
-        Some(object.objectSubId)
+    let key_objoid = oid_key(ANUM_PG_SECLABEL_OBJOID as i16, object.objectId)?;
+    let key_classoid = oid_key(ANUM_PG_SECLABEL_CLASSOID as i16, object.classId)?;
+    let key_objsubid = int4_key(ANUM_PG_SECLABEL_OBJSUBID as i16, object.objectSubId)?;
+
+    let pg_seclabel = table_open(mcx, SEC_LABEL_RELATION_ID, RowExclusiveLock)?;
+
+    let mut scan = if object.objectSubId != 0 {
+        let skey = [key_objoid, key_classoid, key_objsubid];
+        genam::systable_beginscan::call(&pg_seclabel, SEC_LABEL_OBJECT_INDEX_ID, true, None, &skey)?
     } else {
-        None
+        let skey = [key_objoid, key_classoid];
+        genam::systable_beginscan::call(&pg_seclabel, SEC_LABEL_OBJECT_INDEX_ID, true, None, &skey)?
     };
 
-    let pg_seclabel = seam::seclabel_open::call(mcx, RowExclusiveLock)?;
-    seam::seclabel_delete_all::call(&pg_seclabel, object.objectId, object.classId, objsubid)?;
+    while let Some(oldtup) = genam::systable_getnext::call(mcx, scan.desc_mut())? {
+        CatalogTupleDelete(mcx, &pg_seclabel, oldtup.tuple.t_self)?;
+    }
+
+    scan.end()?;
+
     /* Done (seclabel.c:566) — closes holding RowExclusiveLock. */
-    pg_seclabel.close(RowExclusiveLock)
+    table_close(pg_seclabel, RowExclusiveLock)
 }
 
 /// `register_label_provider` — append a provider to the in-process list.
@@ -557,10 +719,13 @@ fn object_node(stmt: &SecLabelStmt) -> &Node {
         .expect("SecLabelStmt::object must be a valid parser node")
 }
 
-/// This crate owns no inward-facing seams: nothing in the tree calls into
-/// seclabel across a cycle yet. The outward seams it consumes are installed by
-/// their owners (objectaddress, varlena, the pg_seclabel/pg_shseclabel catalog
-/// owner), not here.
+/// Install this crate's seams.
+///
+/// The catalog read/write control flow runs entirely in-crate over real
+/// relations, so the only outward seams are the project-wide varlena/`Datum`
+/// conversions (installed by their owners). Here we install the inward
+/// [`DeleteSecurityLabel`] boundary, which dependency.c fires unconditionally
+/// for every dropped object to clean up its `pg_seclabel`/`pg_shseclabel` rows.
 pub fn init_seams() {
     backend_commands_seclabel_seams::DeleteSecurityLabel::set(DeleteSecurityLabel);
 }

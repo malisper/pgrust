@@ -12,10 +12,17 @@ crate-type = ["rlib"]
 [dependencies]
 mcx = { path = "../mcx" }
 backend-utils-error = { path = "../backend-utils-error" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
 backend-catalog-catalog = { path = "../backend-catalog-catalog" }
 backend-catalog-pg-class = { path = "../backend-catalog-pg-class" }
 backend-catalog-objectaddress-seams = { path = "../backend-catalog-objectaddress-seams" }
+backend-catalog-indexing = { path = "../backend-catalog-indexing" }
 backend-commands-seclabel-seams = { path = "../backend-commands-seclabel-seams" }
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-access-common-scankey = { path = "../backend-access-common-scankey" }
+backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }
+backend-access-table-table = { path = "../backend-access-table-table" }
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
@@ -24,3 +31,4 @@ types-catalog = { path = "../types-catalog" }
 types-rel = { path = "../types-rel" }
 types-tuple = { path = "../types-tuple" }
 types-storage = { path = "../types-storage" }
+types-scan = { path = "../types-scan" }

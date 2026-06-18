@@ -211,6 +211,9 @@ pub const F_INT4GE: crate::primitive::RegProcedure = 150;
 /// `F_OIDEQ` (`catalog/fmgroids.h`) — `oideq`, pg_proc OID 184
 /// (`pg_proc.dat`).
 pub const F_OIDEQ: crate::primitive::RegProcedure = 184;
+/// `F_TEXTEQ` (`catalog/fmgroids.h`) — `texteq`, pg_proc OID 67
+/// (`pg_proc.dat`).
+pub const F_TEXTEQ: crate::primitive::RegProcedure = 67;
 /// `F_INT2EQ` (`catalog/fmgroids.h`) — `int2eq`, pg_proc OID 63
 /// (`pg_proc.dat`).
 pub const F_INT2EQ: crate::primitive::RegProcedure = 63;
