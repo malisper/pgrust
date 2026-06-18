@@ -19,6 +19,7 @@ types-autovacuum = { path = "../types-autovacuum" }
 types-pgstat = { path = "../types-pgstat" }
 backend-utils-activity-pgstat = { path = "../backend-utils-activity-pgstat" }
 backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat-seams" }
+backend-utils-activity-pgstat-database-seams = { path = "../backend-utils-activity-pgstat-database-seams" }
 backend-utils-activity-stat-seams = { path = "../backend-utils-activity-stat-seams" }
 backend-utils-activity-xact = { path = "../backend-utils-activity-xact" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }

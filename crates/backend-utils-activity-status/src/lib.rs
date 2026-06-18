@@ -1274,6 +1274,10 @@ pub fn init_seams() {
     seams::backend_status_shmem_size::set(seam_impls::backend_status_shmem_size);
     seams::backend_status_shmem_init::set(seam_impls::backend_status_shmem_init);
     seams::my_be_entry_present::set(seam_impls::my_be_entry_present);
+    seams::beentry_backend_type_and_pid::set(|proc_number| {
+        pgstat_get_beentry_by_proc_number(proc_number)
+            .map(|f| (f.st_backend_type, f.st_procpid))
+    });
     seams::track_activities::set(pgstat_track_activities);
     seams::with_my_beentry::set(seam_impls::with_my_beentry);
     seams::backend_current_activity::set(seam_impls::backend_current_activity);

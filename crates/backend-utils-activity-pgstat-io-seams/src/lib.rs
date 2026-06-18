@@ -34,12 +34,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `pgstat_report_wait_end()` (wait_event) — clear this backend's reported
-    /// wait event (used in `WalSndErrorCleanup`). Infallible.
-    pub fn pgstat_report_wait_end()
-);
-
-seam_core::seam!(
     /// `pgstat_count_backend_io_op(io_object, io_context, io_op, cnt, bytes)`
     /// (`pgstat_backend.c`) — accumulate one I/O into this backend's per-backend
     /// pending stats (PGSTAT_KIND_BACKEND). Owned by `pgstat_backend.c`, which is

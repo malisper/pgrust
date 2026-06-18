@@ -1886,14 +1886,6 @@ mod recurrence_guard {
         // lockcmds caller seam-and-panics. DELETE when the RIR engine lands.
         ("backend_rewrite_rewritehandler", "relation_has_security_invoker"),
 
-        // DESIGN_DEBT (TD-PGSTAT-CORE-UNPORTED): pgstat backend-snapshot
-        // accessors. pgstat_fetch_entry_backend needs the not-yet-ported
-        // pgstat.c snapshot core (pgstat_build_snapshot); pgstat_backend_pid_lookup
-        // needs the unported beentry accessor (pgstat_get_beentry_by_proc_number).
-        // No provider in backend-utils-activity-pgstat. DELETE when pgstat.c core
-        // + the beentry accessor land.
-        ("backend_utils_activity_pgstat", "pgstat_backend_pid_lookup"),
-        ("backend_utils_activity_pgstat", "pgstat_fetch_entry_backend"),
     ];
 
     /// CATALOG.tsv unit statuses that mean the owner crate is COMPLETE — its
