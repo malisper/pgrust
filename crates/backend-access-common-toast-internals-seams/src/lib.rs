@@ -9,7 +9,7 @@
 
 use mcx::PgVec;
 use types_error::PgResult;
-use types_rel::RelationData;
+use types_rel::{Relation, RelationData};
 use types_storage::lock::LOCKMODE;
 
 seam_core::seam!(
@@ -51,7 +51,7 @@ seam_core::seam!(
     /// (`close()` or `Drop`); consumers never call it directly. `Err`
     /// carries the index-close error surface.
     pub fn toast_close_indexes<'mcx>(
-        toastidxs: mcx::PgVec<'mcx, types_rel::RelationData<'mcx>>,
+        toastidxs: mcx::PgVec<'mcx, types_rel::Relation<'mcx>>,
         lock: types_storage::lock::LOCKMODE,
     ) -> types_error::PgResult<()>
 );
@@ -132,22 +132,29 @@ seam_core::seam!(
 );
 
 /// The held-resource token returned by [`toast_open_indexes`]: the open
-/// (locked) toast indexes plus the position of the valid one. `Drop` closes
-/// the indexes silently (the abort path); [`Self::close`] is the explicit
-/// C `toast_close_indexes(toastidxs, num_indexes, lock)` call site,
-/// surfacing its error.
+/// (locked) toast index relations plus the position of the valid one.
+///
+/// The indexes are held as their RAII [`Relation`] handles — exactly the
+/// carriers `index_open` returns — so closing (`index_close`) is the handle's
+/// `Drop`, matching the repo's relation-open/auto-close pattern. C's separate
+/// `toast_close_indexes(toastidxs, num_indexes, lock)` reduces to dropping the
+/// vector; [`Self::close`] is the explicit C call site (surfacing the
+/// close-error surface, currently infallible), `Drop` is the abort path. The
+/// `indexes()` / `valid_index()` accessors deref to `&RelationData`, which is
+/// what `systable_beginscan_ordered` and the consumers consume.
 #[derive(Debug)]
 pub struct ToastIndexesGuard<'mcx> {
-    indexes: Option<PgVec<'mcx, RelationData<'mcx>>>,
+    indexes: Option<PgVec<'mcx, Relation<'mcx>>>,
     lock: LOCKMODE,
     valid_index: usize,
 }
 
 impl<'mcx> ToastIndexesGuard<'mcx> {
-    /// Wrap just-opened toast indexes. Called by the owner's installed
-    /// implementation (and test fixtures); consumers only ever receive one.
+    /// Wrap just-opened toast indexes (the `index_open` handles). Called by the
+    /// owner's installed implementation (and test fixtures); consumers only
+    /// ever receive one.
     pub fn new(
-        indexes: PgVec<'mcx, RelationData<'mcx>>,
+        indexes: PgVec<'mcx, Relation<'mcx>>,
         valid_index: usize,
         lock: LOCKMODE,
     ) -> Self {
@@ -159,20 +166,21 @@ impl<'mcx> ToastIndexesGuard<'mcx> {
         }
     }
 
-    /// The open toast indexes (`*toastidxs`, length `*num_indexes`).
-    pub fn indexes(&self) -> &[RelationData<'mcx>] {
+    /// The open toast index relations (`*toastidxs`, length `*num_indexes`).
+    pub fn indexes(&self) -> &[Relation<'mcx>] {
         self.indexes
             .as_deref()
             .expect("ToastIndexesGuard already closed")
     }
 
-    /// `(*toastidxs)[validIndex]` — the valid index found at open.
+    /// `(*toastidxs)[validIndex]` — the valid index found at open, as its
+    /// `RelationData` (via the handle's `Deref`).
     pub fn valid_index(&self) -> &RelationData<'mcx> {
         &self.indexes()[self.valid_index]
     }
 
-    /// `toast_close_indexes(toastidxs, num_indexes, lock)` at the C call
-    /// site, consuming the guard.
+    /// `toast_close_indexes(toastidxs, num_indexes, lock)` at the C call site,
+    /// consuming the guard. The handles' `Drop` is the `index_close`.
     pub fn close(mut self) -> PgResult<()> {
         let indexes = self
             .indexes

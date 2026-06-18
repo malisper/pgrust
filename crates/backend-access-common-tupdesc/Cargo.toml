@@ -17,6 +17,7 @@ types-nodes = { path = "../types-nodes" }
 types-tuple = { path = "../types-tuple" }
 
 backend-access-common-tupdesc-seams = { path = "../backend-access-common-tupdesc-seams" }
+backend-access-common-toastdesc-seams = { path = "../backend-access-common-toastdesc-seams" }
 backend-catalog-catalog-seams = { path = "../backend-catalog-catalog-seams" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-nodes-read-seams = { path = "../backend-nodes-read-seams" }

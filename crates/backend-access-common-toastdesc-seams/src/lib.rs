@@ -57,8 +57,11 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `toast_get_valid_index(toastoid, lockmode)` (toast_internals.c).
-    pub fn toast_get_valid_index(
+    /// `toast_get_valid_index(toastoid, lockmode)` (toast_internals.c). The
+    /// owner needs an `mcx` for the `table_open`/`index_open` it performs
+    /// internally (all closed before return).
+    pub fn toast_get_valid_index<'mcx>(
+        mcx: Mcx<'mcx>,
         toastoid: Oid,
         lockmode: types_storage::lock::LOCKMODE,
     ) -> PgResult<Oid>

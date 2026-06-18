@@ -314,6 +314,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-common-bufmask"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-bufmask-seams",
+ "backend-storage-page",
+ "types-core",
+ "types-error",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-common-bufmask-seams"
 version = "0.0.0"
 dependencies = [
@@ -608,6 +620,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-common-toast-internals"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-toast-compression",
+ "backend-access-common-toast-internals-seams",
+ "backend-access-common-toastdesc-seams",
+ "backend-access-index-indexam-seams",
+ "backend-access-table-table-seams",
+ "backend-optimizer-util-plancat-ext-seams",
+ "backend-utils-misc-guc-tables",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-snapshot",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-common-toast-internals-seams"
 version = "0.0.0"
 dependencies = [
@@ -647,6 +679,7 @@ dependencies = [
 name = "backend-access-common-tupdesc"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-toastdesc-seams",
  "backend-access-common-tupdesc-seams",
  "backend-catalog-catalog-seams",
  "backend-nodes-read-seams",
@@ -22143,6 +22176,7 @@ dependencies = [
  "backend-access-brin-insert-vacuum",
  "backend-access-brin-minmax",
  "backend-access-brin-xlog",
+ "backend-access-common-bufmask",
  "backend-access-common-detoast",
  "backend-access-common-heaptuple",
  "backend-access-common-indextuple",
@@ -22153,6 +22187,7 @@ dependencies = [
  "backend-access-common-session",
  "backend-access-common-tidstore",
  "backend-access-common-toast-compression",
+ "backend-access-common-toast-internals",
  "backend-access-common-tupdesc",
  "backend-access-gin-core-probe",
  "backend-access-gin-ginfast",
