@@ -883,6 +883,52 @@ pub fn heap_deform_tuple<'mcx>(
     Ok(out)
 }
 
+/// `heap_getattr(tup, attnum, tupleDesc, isnull)` (access/htup_details.h) — read
+/// a single attribute's `(Datum, isnull)` from a materialized heap tuple.
+///
+/// `tuple` is the [`FormedTuple`] (header + user-data area) the SPI tuptable /
+/// trigger paths hand around (C's `HeapTuple`, a contiguous on-disk image);
+/// `tuple_desc` is its descriptor.
+///
+/// Faithful to the C macro:
+///
+///   * `attnum > 0` is a user column. C tests `attnum > HeapTupleHeaderGetNatts`
+///     and returns the descriptor's missing value (or NULL) for trailing columns
+///     the stored tuple does not carry; otherwise `fastgetattr` reads it. Here
+///     the single deform pass already fills trailing columns via
+///     [`getmissingattr`], so we deform and index — identical observable values.
+///   * `attnum <= 0` is a system column, read with [`heap_getsysattr`].
+///
+/// Out-of-range `attnum` (0 or `< FirstLowInvalidHeapAttributeNumber`) is a
+/// caller bug (C's macro has no bounds check; callers like SPI validate first),
+/// so the index is taken as given.
+pub fn heap_getattr<'mcx>(
+    mcx: Mcx<'mcx>,
+    tuple: &FormedTuple<'_>,
+    attnum: i32,
+    tuple_desc: &TupleDescData<'_>,
+) -> PgResult<DeformedColumn<'mcx>> {
+    if attnum > 0 {
+        // fastgetattr: a single deform pass yields the per-column values; the
+        // requested user column is the (attnum-1)-th (0-based). heap_deform_tuple
+        // already fills trailing columns beyond the stored natts with the
+        // descriptor's missing value (or NULL), matching the C macro's
+        // `attnum > HeapTupleHeaderGetNatts(tup) ? getmissingattr(...) : ...`.
+        let deformed = heap_deform_tuple(mcx, &tuple.tuple, tuple_desc, &tuple.data)?;
+        let idx = (attnum - 1) as usize;
+        match deformed.get(idx) {
+            Some((val, isnull)) => Ok((val.clone(), *isnull)),
+            // Past tupdesc->natts: the caller validated attnum <= natts, so this
+            // is unreachable for a well-formed call; mirror C's "missing trailing
+            // column reads NULL" rather than panic.
+            None => Ok((Datum::null(), true)),
+        }
+    } else {
+        // heap_getsysattr(tup, attnum, tupleDesc, isnull): a system column.
+        heap_getsysattr(mcx, &tuple.tuple, attnum)
+    }
+}
+
 /// `fetchatt(A, T)` (tupmacs.h): for a by-value att read the scalar from
 /// `data[off..]`; for a by-reference att return its on-disk bytes (C returns a
 /// pointer into the tuple — here we copy the exact field span into `mcx`).

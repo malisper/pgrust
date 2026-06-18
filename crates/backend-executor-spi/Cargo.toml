@@ -18,4 +18,6 @@ types-snapshot = { path = "../types-snapshot" }
 types-ri-triggers = { path = "../types-ri-triggers" }
 backend-executor-spi-seams = { path = "../backend-executor-spi-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-catalog-heap = { path = "../backend-catalog-heap" }
 backend-utils-error = { path = "../backend-utils-error" }

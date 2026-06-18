@@ -108,6 +108,18 @@ fn loc(funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new("../src/backend/executor/spi.c", 0, funcname)
 }
 
+/// Set the public `SPI_result` global (C's `SPI_result = code;`). The tuple
+/// accessors ([`crate::accessors`]) report `SPI_ERROR_NOATTRIBUTE` /
+/// `SPI_ERROR_TYPUNKNOWN` / a cleared `0` through here.
+pub(crate) fn set_spi_result(code: i32) {
+    SPI_RESULT.with(|r| *r.borrow_mut() = code);
+}
+
+/// Read the public `SPI_result` global (C's `SPI_result`).
+pub fn SPI_result() -> i32 {
+    SPI_RESULT.with(|r| *r.borrow())
+}
+
 /// True when `_SPI_connected >= 0` (we are inside some SPI context).
 fn is_connected() -> bool {
     SPI_CONNECTED.with(|c| *c.borrow() >= 0)

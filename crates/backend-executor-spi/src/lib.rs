@@ -41,10 +41,12 @@
 #![allow(non_upper_case_globals)]
 #![allow(clippy::result_large_err)]
 
+mod accessors;
 mod backbone;
 mod exec;
 mod result_code;
 
+pub use accessors::*;
 pub use backbone::*;
 pub use result_code::*;
 

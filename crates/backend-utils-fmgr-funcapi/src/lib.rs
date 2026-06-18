@@ -10,13 +10,17 @@
 //! ported 1:1 against the C, as does the materialize-mode SRF path
 //! (`InitMaterializedSRF`).
 //!
-//! The **multi-call (value-per-call) SRF protocol** is deferred: it needs the
-//! fmgr call frame to carry a typed `FuncCallContext` (a `FmgrInfo.fn_extra`
-//! slot) and the widened `FunctionCallInfoBaseData` / `ReturnSetInfo` carriers,
-//! which are not yet modeled. So `init_MultiFuncCall`, `per_MultiFuncCall`,
-//! `end_MultiFuncCall`, `shutdown_MultiFuncCall`, and the value-SRF entry
-//! mirror the C entry point and panic loudly (per Mirror-PG-and-panic) until
-//! that machinery lands.
+//! The **multi-call (value-per-call) SRF protocol** is implemented and wired
+//! (#349): the fmgr call frame now carries a typed `FuncCallContext` via the
+//! `fn_extra` / `fn_mcxt` channels on the owned `FunctionCallInfoBaseData`, and
+//! the `ReturnSetInfo.{econtext,isDone}` carriers are modeled. So
+//! `init_MultiFuncCall`, `per_MultiFuncCall`, `end_MultiFuncCall`, and the
+//! file-static `shutdown_MultiFuncCall` have real bodies (see [`srf_support`])
+//! and are installed by [`init_seams`]. The lone remaining `value_srf_unported`
+//! stub exists only for a handful of legacy consumers whose *owners* still lack
+//! the executor leg (`ExecMakeFunctionResultSet` / execSRF.c) that builds the
+//! call frame and drives the per-call series; each is rewired onto
+//! `init/per/end_MultiFuncCall` as its owner lands.
 //!
 //! Families (one module per cluster of `funcapi.c`):
 //!
