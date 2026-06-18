@@ -139,6 +139,12 @@ pub fn init_seams() {
     // that canonical getter (delegation, not a duplicate value here).
     ps::work_mem::set(|| backend_utils_init_small_seams::work_mem::call());
 
+    // `get_foreign_key_join_selectivity` (costsize.c) — costsize.c owns it;
+    // `calc_joinrel_size_estimate` reaches it through the self seam crate. The
+    // seam passes the two rels by `RelId`; the owner body works in `Relids`, so
+    // the adapter projects `rel->relids` for each side.
+    cz::get_foreign_key_join_selectivity::set(get_foreign_key_join_selectivity_seam);
+
     /* ---- costsize-seams: the cost_qual_eval per-node recursion --------- */
     // `cost_qual_eval` (in-crate) routes the whole walk through this single-node
     // walker (costsize.c:4796). This unit owns it.
@@ -190,6 +196,24 @@ pub fn init_seams() {
  * Thin adapters where the seam signature differs cosmetically from the crate
  * function (slice vs trailing args), so the installed `fn` pointer matches.
  * ------------------------------------------------------------------------ */
+
+fn get_foreign_key_join_selectivity_seam(
+    root: &PlannerInfo,
+    outer_rel: RelId,
+    inner_rel: RelId,
+    sjinfo: &types_pathnodes::SpecialJoinInfo,
+    restrictlist: &[types_pathnodes::RinfoId],
+) -> (types_core::primitive::Selectivity, Vec<types_pathnodes::RinfoId>) {
+    let outer_relids = root.rel(outer_rel).relids.clone();
+    let inner_relids = root.rel(inner_rel).relids.clone();
+    crate::joins::get_foreign_key_join_selectivity(
+        root,
+        &outer_relids,
+        &inner_relids,
+        sjinfo,
+        restrictlist,
+    )
+}
 
 fn cost_qual_eval_seam(root: &PlannerInfo, quals: &[NodeId]) -> QualCost {
     crate::cost_qual_eval(root, quals)

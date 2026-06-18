@@ -12,6 +12,7 @@ path = "src/lib.rs"
 backend-access-index-amapi-seams = { path = "../backend-access-index-amapi-seams" }
 backend-executor-execAmi-seams = { path = "../backend-executor-execAmi-seams" }
 backend-optimizer-plan-init-subselect-ext-seams = { path = "../backend-optimizer-plan-init-subselect-ext-seams" }
+backend-optimizer-path-joinpath-seams = { path = "../backend-optimizer-path-joinpath-seams" }
 backend-executor-execUtils = { path = "../backend-executor-execUtils" }
 backend-executor-instrument-seams = { path = "../backend-executor-instrument-seams" }
 backend-executor-nodeLimit = { path = "../backend-executor-nodeLimit" }

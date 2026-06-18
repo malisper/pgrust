@@ -2318,9 +2318,57 @@ fn set_join_pathlist_hook(
 /// What joinpath.c owns are its two trailing hook dispatch sites — the FDW
 /// join-pushdown callback and the `set_join_pathlist_hook` extension hook — both
 /// of which default to no-op (no FDW routine / NULL hook) in C.
+/* --------------------------------------------------------------------------
+ * RestrictInfo clause-payload accessors (joinpath-seams). The clause node lives
+ * in this crate's planner arena and is reached only by `RinfoId` handle, so
+ * joinpath owns these thin reads and installs them itself.
+ * ------------------------------------------------------------------------ */
+
+/// `restrictinfo->clause && IsA(restrictinfo->clause, Const)`.
+fn clause_is_const(root: &PlannerInfo, rinfo: RinfoId) -> bool {
+    let clause = root.rinfo(rinfo).clause;
+    matches!(root.node(clause), types_nodes::primnodes::Expr::Const(_))
+}
+
+/// `castNode(OpExpr, restrictinfo->clause)->opno` — the operator OID of a
+/// hash/merge-joinable clause (known to be an `OpExpr`).
+fn clause_opexpr_opno(root: &PlannerInfo, rinfo: RinfoId) -> Oid {
+    let clause = root.rinfo(rinfo).clause;
+    match root.node(clause) {
+        types_nodes::primnodes::Expr::OpExpr(o) => o.opno,
+        _ => panic!(
+            "backend-optimizer-path-joinpath::clause_opexpr_opno: clause is not an OpExpr (the \
+             caller restricts this to mergejoinable clauses)"
+        ),
+    }
+}
+
+/// `IsA(rinfo->clause, OpExpr) && list_length(opexpr->args) == 2`.
+fn clause_is_opexpr_with_two_args(root: &PlannerInfo, rinfo: RinfoId) -> bool {
+    let clause = root.rinfo(rinfo).clause;
+    match root.node(clause) {
+        types_nodes::primnodes::Expr::OpExpr(o) => o.args.len() == 2,
+        _ => false,
+    }
+}
+
+// NOTE: `opexpr_arg` (joinpath-seams) is intentionally NOT installed here. Its
+// seam signature is `(&PlannerInfo, RinfoId, i32) -> NodeId`, but in this arena
+// model an `OpExpr`'s args are inline `Expr` values, so returning a node handle
+// requires interning the arg into the node arena — which needs `&mut PlannerInfo`
+// the seam does not provide. It is reached only on the Memoize path
+// (`paraminfo_get_equal_hashops`); until the seam is re-signed to thread `&mut`,
+// that path correctly panics with "seam not installed" rather than fabricating a
+// handle.
+
 pub fn init_seams() {
     jp::fdw_get_foreign_join_paths::set(fdw_get_foreign_join_paths);
     jp::set_join_pathlist_hook::set(set_join_pathlist_hook);
+
+    // RestrictInfo clause-payload reads over this crate's arena.
+    jp::clause_is_const::set(clause_is_const);
+    jp::clause_opexpr_opno::set(clause_opexpr_opno);
+    jp::clause_is_opexpr_with_two_args::set(clause_is_opexpr_with_two_args);
 }
 
 #[cfg(test)]

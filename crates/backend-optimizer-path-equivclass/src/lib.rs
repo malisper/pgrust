@@ -65,6 +65,7 @@ pub use relevance::{
 
 use backend_optimizer_path_costsize_seams as cz_seam;
 use backend_optimizer_path_equivclass_seams as ec_seam;
+use backend_optimizer_path_joinpath_seams as jp_seam;
 use backend_optimizer_path_small_seams as ps_seam;
 use types_error::PgResult;
 use types_pathnodes::{
@@ -116,6 +117,23 @@ pub fn init_seams() {
     });
     ec_seam::add_child_rel_equivalences::set(|root, appinfo, parent_rel, child_rel| {
         add_child_rel_equivalences(root, appinfo, parent_rel, child_rel)
+    });
+
+    // `EC_MUST_BE_REDUNDANT(eclass)` == `eclass->ec_has_const` (pathnodes.h
+    // macro, equivclass-owned vocabulary). joinpath.c reads it on a mergejoinable
+    // clause's `left_ec`/`right_ec`, which `update_mergeclause_eclasses` has
+    // already filled; equivclass owns the EC arena, so install the bodies here.
+    jp_seam::ec_must_be_redundant_left::set(|root, restrictinfo| {
+        let ec = root.rinfo(restrictinfo).left_ec.expect(
+            "ec_must_be_redundant_left: left_ec must be set (update_mergeclause_eclasses)",
+        );
+        root.ec(ec).ec_has_const
+    });
+    jp_seam::ec_must_be_redundant_right::set(|root, restrictinfo| {
+        let ec = root.rinfo(restrictinfo).right_ec.expect(
+            "ec_must_be_redundant_right: right_ec must be set (update_mergeclause_eclasses)",
+        );
+        root.ec(ec).ec_has_const
     });
     // `is_redundant_with_indexclauses` lives in equivclass.c (real impl in
     // `relevance.rs`) but its public seam is declared on costsize-seams (the

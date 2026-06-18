@@ -1601,6 +1601,21 @@ pub fn init_seams() {
     // `mark_dummy_rel(rel)` (joinrels.c, owned here) through its no-owner ext
     // seam crate; install the real body.
     backend_optimizer_util_relnode_ext_seams::mark_dummy_rel::set(mark_dummy_rel);
+
+    // `init_dummy_sjinfo(left_relids, right_relids)` (joinrels.c, owned here) is
+    // read by costsize.c (`calc_joinrel_size_estimate`, the no-clause path, and
+    // `get_parameterized_joinrel_size`) through the costsize self-seam crate. The
+    // seam keys the two rels by `RelId`; resolve each to `rel->relids` and fill a
+    // fresh dummy `SpecialJoinInfo`.
+    backend_optimizer_path_costsize_seams::init_dummy_sjinfo::set(
+        |root: &PlannerInfo, outer_rel, inner_rel| {
+            let left_relids = root.rel(outer_rel).relids.clone();
+            let right_relids = root.rel(inner_rel).relids.clone();
+            let mut sjinfo = make_dummy_sjinfo();
+            init_dummy_sjinfo(&mut sjinfo, left_relids, right_relids);
+            sjinfo
+        },
+    );
 }
 
 #[cfg(test)]

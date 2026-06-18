@@ -2561,6 +2561,9 @@ pub fn init_seams() {
     bms::relids_singleton_member::set(bms_singleton_member);
     bms::relids_membership::set(bms_membership);
     bms::relids_difference::set(bms_difference);
+    // joinpath.c reaches `bms_difference(a, b)` over the owned-`Relids` model
+    // through joinpath-seams; same body as the relnode-seams `relids_difference`.
+    joinpath::bms_difference::set(bms_difference);
     bms::relids_add_range::set(bms_add_range);
     bms::relids_copy::set(bms_copy);
     bms::relids_equal::set(bms_equal);

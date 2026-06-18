@@ -35,7 +35,7 @@ pub use placeholder::{
     rebuild_placeholder_attr_needed,
 };
 pub use restrictinfo::{
-    commute_restrictinfo, extract_actual_clauses, extract_actual_join_clauses,
+    clause_sides_match_join, commute_restrictinfo, extract_actual_clauses, extract_actual_join_clauses,
     get_actual_clauses, join_clause_is_movable_into, join_clause_is_movable_to,
     make_plain_restrictinfo, make_restrictinfo, restriction_is_or_clause,
     restriction_is_securely_promotable,
@@ -65,6 +65,13 @@ pub fn init_seams() {
     });
     small_seam::join_clause_is_movable_to::set(|root, rinfo, rel| {
         join_clause_is_movable_to(root, rinfo, rel)
+    });
+
+    // restrictinfo.h — joinpath-seams (the `clause_sides_match_join` static
+    // inline, consumed by joinpath.c and analyzejoins.c). restrictinfo is the
+    // header owner; install the real body here.
+    joinpath_seam::clause_sides_match_join::set(|root, rinfo, outerrelids, innerrelids| {
+        clause_sides_match_join(root, rinfo, outerrelids, innerrelids)
     });
 
     // restrictinfo.c — costsize-seams (consumed by costsize.c joins).

@@ -119,6 +119,11 @@ pub fn init_seams() {
             mergejoin::estimate_hash_bucket_stats(cx.mcx(), run, root, hashkey, nbuckets)
         },
     );
+    backend_optimizer_path_costsize_seams::estimate_multivariate_bucketsize::set(
+        |root, inner_rel, hashclauses| {
+            misc::estimate_multivariate_bucketsize(root, inner_rel, hashclauses)
+        },
+    );
 }
 
 /* ---------------------------------------------------------------------------

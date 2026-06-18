@@ -140,6 +140,70 @@ fn add_unique_group_var(
     varinfos
 }
 
+/// `estimate_multivariate_bucketsize(root, inner, hashclauses, &innerbucketsize)`
+/// (selfuncs.c:3801) — try to refine the inner hash-bucket-size estimate using
+/// multivariate ndistinct extended statistics on the inner relation, returning
+/// the (possibly improved) `*innerbucketsize` and the list of clauses that could
+/// NOT be estimated here (the caller estimates those one at a time).
+///
+/// Seam-contract note: the costsize self-seam carries only `(root: &PlannerInfo,
+/// inner_rel, hashclauses)` — it does NOT thread the `&PlannerRun` resolver or a
+/// mutable `PlannerInfo`. The full extended-statistics estimation path needs both
+/// (`estimate_multivariate_ndistinct` takes `run` + `&mut root`, and the
+/// per-clause varinfo construction reads `simple_rte_array` through the run). But
+/// that path is reachable ONLY when an inner-side base relation actually carries
+/// `CREATE STATISTICS` ndistinct objects (`rel->statlist != NIL`). When no
+/// referenced inner relation has extended statistics — the universal case absent
+/// an explicit statistics object — every clause is classified "can't be estimated
+/// here" and pushed to `otherclauses`, `ndistinct` stays 1.0, and
+/// `*innerbucketsize` is left UNCHANGED (the caller's prior 1.0). So this seam
+/// faithfully returns `(1.0, all_hashclauses)` in that case. If an inner relation
+/// does carry extended statistics, the seam must be re-signed to thread `run` +
+/// `&mut` before the multivariate path is expressible; we panic loudly there
+/// rather than silently dropping the refinement.
+pub(crate) fn estimate_multivariate_bucketsize(
+    root: &PlannerInfo,
+    _inner: RelId,
+    hashclauses: &[types_pathnodes::RinfoId],
+) -> (f64, alloc::vec::Vec<types_pathnodes::RinfoId>) {
+    let rinfos = hashclauses;
+    // Nothing to do for a single clause (or none).
+    if rinfos.len() <= 1 {
+        return (1.0, rinfos.to_vec());
+    }
+
+    // The multivariate refinement only fires when an inner-side base relation
+    // carries ndistinct extended statistics. Probe each clause's inner-side
+    // singleton relation; if any has a non-empty statlist, the full path (which
+    // needs the run resolver + &mut root) is required and the stripped seam
+    // can't express it.
+    for &rid in rinfos.iter() {
+        let ri = root.rinfo(rid);
+        let relids = if ri.outer_is_left {
+            &ri.right_relids
+        } else {
+            &ri.left_relids
+        };
+        if let Some(relid) = rel_seams::relids_get_singleton_member::call(relids) {
+            if let Some(Some(rel_id)) = root.simple_rel_array.get(relid as usize) {
+                if !root.rel(*rel_id).statlist.is_empty() {
+                    panic!(
+                        "selfuncs::estimate_multivariate_bucketsize: inner relation carries \
+                         extended (ndistinct) statistics, but the costsize seam strips the \
+                         PlannerRun resolver and mutable PlannerInfo the multivariate path \
+                         needs; re-sign estimate_multivariate_bucketsize to thread (run, &mut \
+                         root) before this is reachable"
+                    );
+                }
+            }
+        }
+    }
+
+    // No referenced inner relation has extended statistics: every clause is an
+    // "otherclause", innerbucketsize unchanged.
+    (1.0, rinfos.to_vec())
+}
+
 /// `estimate_num_groups(root, groupExprs, input_rows, NULL, estinfo)`
 /// (selfuncs.c) — estimate the number of distinct groups the grouping
 /// expressions take over `input_rows` rows. 1:1 with the C body.

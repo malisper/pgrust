@@ -90,6 +90,12 @@ pub fn init_seams() {
     backend_optimizer_plan_init_subselect_ext_seams::exec_materializes_output::set(
         exec_materializes_output,
     );
+    // The same classifier is also read by joinpath.c (`try_nestloop_path` /
+    // `match_unsorted_outer`, deciding whether the inner path already
+    // materializes) through joinpath-seams; install the owner body there too.
+    backend_optimizer_path_joinpath_seams::exec_materializes_output::set(
+        exec_materializes_output,
+    );
 }
 
 /// `elog(ERROR, "unrecognized node type: %d", (int) nodeTag(node))` — carries

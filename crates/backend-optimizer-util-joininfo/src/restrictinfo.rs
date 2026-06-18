@@ -513,6 +513,40 @@ fn rinfo_is_pushed_down(rinfo: &RestrictInfo, joinrelids: &Relids) -> bool {
     rinfo.is_pushed_down || !bms::relids_is_subset::call(&rinfo.required_relids, joinrelids)
 }
 
+/// `clause_sides_match_join(rinfo, outerrelids, innerrelids)` (restrictinfo.h
+/// static inline) — the clause is a binary opclause referencing only the rels in
+/// the current join; check whether it has the form
+/// "outerrel_expr op innerrel_expr" or "innerrel_expr op outerrel_expr" rather
+/// than mixing outer and inner vars on either side. On a match, set the transient
+/// `outer_is_left` flag to identify which side is which and return true.
+pub fn clause_sides_match_join(
+    root: &mut PlannerInfo,
+    rinfo: RinfoId,
+    outerrelids: &Relids,
+    innerrelids: &Relids,
+) -> bool {
+    let (left_relids, right_relids) = {
+        let ri = root.rinfo(rinfo);
+        (ri.left_relids.clone(), ri.right_relids.clone())
+    };
+
+    if bms::relids_is_subset::call(&left_relids, outerrelids)
+        && bms::relids_is_subset::call(&right_relids, innerrelids)
+    {
+        // lefthand side is outer
+        root.rinfo_mut(rinfo).outer_is_left = true;
+        true
+    } else if bms::relids_is_subset::call(&left_relids, innerrelids)
+        && bms::relids_is_subset::call(&right_relids, outerrelids)
+    {
+        // righthand side is outer
+        root.rinfo_mut(rinfo).outer_is_left = false;
+        true
+    } else {
+        false // no good for these input relations
+    }
+}
+
 /// `join_clause_is_movable_to`: whether a join clause is a safe candidate for
 /// parameterization of a scan on the specified base relation.
 pub fn join_clause_is_movable_to(root: &PlannerInfo, rinfo: RinfoId, baserel: RelId) -> bool {

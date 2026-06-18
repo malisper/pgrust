@@ -595,6 +595,33 @@ pub fn init_seams() {
     s::parallel_set_curbatch_invalid::set(adapters::parallel_set_curbatch_invalid);
     s::parallel_has_curbatch::set(adapters::parallel_has_curbatch);
     s::get_hash_memory_limit::set(adapters::get_hash_memory_limit);
+
+    // `ExecChooseHashTableSize` (nodeHash.c, owned here) is also read by
+    // costsize.c's hashjoin sizing (`final_cost_hashjoin`) through the costsize
+    // self-seam crate. The seam's `HashTableSize` carries only the
+    // numbuckets/numbatches the cost model needs; map from the full owned result.
+    backend_optimizer_path_costsize_seams::exec_choose_hash_table_size::set(
+        |ntuples, tupwidth, useskew, try_combined_hash_mem, parallel_workers| {
+            let r = hash_table::ExecChooseHashTableSize(
+                ntuples,
+                tupwidth,
+                useskew,
+                try_combined_hash_mem,
+                parallel_workers,
+            );
+            backend_optimizer_path_costsize_seams::HashTableSize {
+                numbuckets: r.numbuckets,
+                numbatches: r.numbatches,
+            }
+        },
+    );
+
+    // `get_hash_memory_limit()` (nodeHash.c, owned here) is also read by the
+    // hashjoin/memoize cost model through pathnode-seams as a bare `f64`; install
+    // the owner body (costsize.c explicitly defers this to nodeHash).
+    backend_optimizer_util_pathnode_seams::get_hash_memory_limit::set(|| {
+        adapters::get_hash_memory_limit().expect("get_hash_memory_limit") as f64
+    });
 }
 
 /// Silence the unused-`Size` import warning in the scaffold.
