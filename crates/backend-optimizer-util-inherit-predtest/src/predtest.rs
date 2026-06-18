@@ -1579,7 +1579,11 @@ thread_local! {
 /// `InvalidateOprProofCacheCallBack` (predtest.c) — flush every entry's
 /// computed-flag on a `pg_amop` invalidation.  We just reset all entries; hard
 /// to be smarter.
-fn invalidate_opr_proof_cache_callback(_cacheid: i32, _hashvalue: u32) {
+fn invalidate_opr_proof_cache_callback(
+    _arg: types_datum::Datum,
+    _cacheid: i32,
+    _hashvalue: u32,
+) {
     OPR_PROOF_CACHE.with(|cache| {
         if let Some(map) = cache.borrow_mut().as_mut() {
             for entry in map.values_mut() {
@@ -1609,9 +1613,10 @@ fn lookup_proof_cache<'mcx>(
         OPR_PROOF_CACHE.with(|cache| {
             *cache.borrow_mut() = Some(HashMap::new());
         });
-        own_seam::register_oprproof_syscache_callback::call(
+        backend_utils_cache_inval_seams::cache_register_syscache_callback::call(
             AMOPOPID,
             invalidate_opr_proof_cache_callback,
+            types_datum::Datum::null(),
         )?;
     }
 

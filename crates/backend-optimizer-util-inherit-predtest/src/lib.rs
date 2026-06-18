@@ -29,11 +29,12 @@ pub use predtest::{predicate_implied_by, predicate_refuted_by};
 /// `backend-optimizer-path-indxpath` across the optimizer cycle and declared in
 /// `backend-optimizer-util-predtest-seams`.
 ///
-/// The two OUTWARD seams the unit declares (`eval_const_test`,
-/// `register_oprproof_syscache_callback`, in
-/// `backend-optimizer-util-inherit-predtest-seams`) are installed by their real
-/// owners (executor / inval) when those land; tracked in `seams-init`'s
-/// `CONTRACT_RECONCILE_PENDING` until then.
+/// The remaining OUTWARD seam the unit declares (`eval_const_test`, in
+/// `backend-optimizer-util-inherit-predtest-seams`) is installed by its real
+/// owner (executor / execExpr). The `pg_amop` proof-cache invalidation callback
+/// is registered directly through the real inval.c owner seam
+/// (`backend_utils_cache_inval_seams::cache_register_syscache_callback`), so it
+/// needs no consumer-owned seam.
 pub fn init_seams() {
     backend_optimizer_util_predtest_seams::predicate_implied_by::set(predicate_implied_by);
 }
