@@ -854,6 +854,7 @@ pub fn init_seams() {
     s::typename_to_string_node::set(seam_typename_to_string_node);
     s::lookup_type_name_oid::set(seam_lookup_type_name_oid);
     s::typename_type_id_node::set(seam_typename_type_id_node);
+    s::typename_type_id_raw::set(seam_typename_type_id_raw);
     s::type_name_list_to_string::set(seam_type_name_list_to_string);
     s::lookup_type_name_oid_owa::set(seam_lookup_type_name_oid_owa);
     s::func_name_as_type::set(seam_func_name_as_type);
@@ -1123,6 +1124,14 @@ fn seam_lookup_type_name_oid(type_name: &TypeName, missing_ok: bool) -> PgResult
 fn seam_typename_type_id_node(type_name: &TypeName) -> PgResult<Oid> {
     let scratch = mcx::MemoryContext::new("typenameTypeId");
     typenameTypeId(scratch.mcx(), None, type_name)
+}
+
+/// `typenameTypeId(NULL, typeName)` over the owned-tree `rawnodes::TypeName`
+/// (PREPARE's `argtypes`); bridges through `raw_typename_to_parse`.
+fn seam_typename_type_id_raw(type_name: &types_nodes::rawnodes::TypeName<'_>) -> PgResult<Oid> {
+    let tn = raw_typename_to_parse(type_name)?;
+    let scratch = mcx::MemoryContext::new("typenameTypeId");
+    typenameTypeId(scratch.mcx(), None, &tn)
 }
 
 /// `TypeNameListToString(typenames)` over a list of raw-parser nodes.

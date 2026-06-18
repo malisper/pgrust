@@ -2351,6 +2351,11 @@ fn seam_plansource_result_desc<'mcx>(
     }
 }
 
+/// `plansource_has_result_desc(plansource)` — `resultDesc != NULL`, no copy.
+fn seam_plansource_has_result_desc(plansource: SeamSourceHandle) -> PgResult<bool> {
+    Ok(get_source(plansource.0).borrow().result_desc.is_some())
+}
+
 /// `plansource_num_generic_plans(plansource)`.
 fn seam_plansource_num_generic_plans(plansource: SeamSourceHandle) -> PgResult<i64> {
     Ok(get_source(plansource.0).borrow().num_generic_plans)
@@ -2398,6 +2403,7 @@ pub fn init_seams() {
     inward::plansource_query_string::set(seam_plansource_query_string);
     inward::plansource_command_tag::set(seam_plansource_command_tag);
     inward::plansource_result_desc::set(seam_plansource_result_desc);
+    inward::plansource_has_result_desc::set(seam_plansource_has_result_desc);
     inward::plansource_num_generic_plans::set(seam_plansource_num_generic_plans);
     inward::plansource_num_custom_plans::set(seam_plansource_num_custom_plans);
     inward::cached_plan_stmt_list::set(seam_cached_plan_stmt_list);

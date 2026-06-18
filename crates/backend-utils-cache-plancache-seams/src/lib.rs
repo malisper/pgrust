@@ -133,6 +133,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `plansource->resultDesc != NULL` — whether the prepared statement
+    /// produces a result tuple descriptor, without copying it. Used by
+    /// `ExecuteStmtHasResult` (prepare.c).
+    pub fn plansource_has_result_desc(plansource: CachedPlanSourceHandle) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `plansource->num_generic_plans`.
     pub fn plansource_num_generic_plans(plansource: CachedPlanSourceHandle) -> PgResult<i64>
 );

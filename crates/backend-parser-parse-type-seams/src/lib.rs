@@ -95,6 +95,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `typenameTypeId(NULL, typeName)` (parse_type.c), over the owned-tree
+    /// `rawnodes::TypeName<'mcx>` the grammar produces (carried in PREPARE's
+    /// `argtypes`). The owner bridges it to the resolver-facing `TypeName`.
+    /// Raises if the type does not exist or is only a shell.
+    pub fn typename_type_id_raw(type_name: &types_nodes::rawnodes::TypeName<'_>) -> PgResult<Oid>
+);
+
+seam_core::seam!(
     /// `TypeNameListToString(typenames)` (parse_func.c): render a comma-
     /// separated list of raw-parser `TypeName` nodes (a function/aggregate
     /// argument-type list) for an error message, palloc'd in the caller's

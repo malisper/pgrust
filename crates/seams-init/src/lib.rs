@@ -148,6 +148,7 @@ pub fn init_all() {
     backend_commands_amcmds::init_seams();
     backend_commands_analyze::init_seams();
     backend_commands_cluster::init_seams();
+    backend_commands_prepare::init_seams();
     backend_commands_tablecmds::init_seams();
     backend_commands_user::init_seams();
     backend_commands_vacuum::init_seams();

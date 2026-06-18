@@ -7349,6 +7349,7 @@ dependencies = [
  "backend-parser-parse-expr-seams",
  "backend-parser-parse-type-seams",
  "backend-tcop-pquery-pre-seams",
+ "backend-tcop-utility-out-seams",
  "backend-tcop-utility-seams",
  "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-adt-format-type-seams",
@@ -7365,6 +7366,7 @@ dependencies = [
  "types-error",
  "types-explain",
  "types-nodes",
+ "types-portal",
  "types-scan",
  "types-tuple",
 ]
@@ -22863,6 +22865,7 @@ dependencies = [
  "backend-commands-operatorcmds",
  "backend-commands-policy",
  "backend-commands-portalcmds",
+ "backend-commands-prepare",
  "backend-commands-proclang",
  "backend-commands-publicationcmds",
  "backend-commands-schemacmds",

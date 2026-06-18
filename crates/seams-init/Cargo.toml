@@ -157,6 +157,7 @@ backend-catalog-toasting = { path = "../backend-catalog-toasting" }
 backend-commands-amcmds = { path = "../backend-commands-amcmds" }
 backend-commands-analyze = { path = "../backend-commands-analyze" }
 backend-commands-cluster = { path = "../backend-commands-cluster" }
+backend-commands-prepare = { path = "../backend-commands-prepare" }
 backend-commands-tablecmds = { path = "../backend-commands-tablecmds" }
 backend-commands-user = { path = "../backend-commands-user" }
 backend-commands-vacuum = { path = "../backend-commands-vacuum" }

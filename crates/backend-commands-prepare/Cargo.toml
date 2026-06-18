@@ -17,6 +17,10 @@ types-tuple = { path = "../types-tuple" }
 types-nodes = { path = "../types-nodes" }
 types-explain = { path = "../types-explain" }
 types-scan = { path = "../types-scan" }
+types-portal = { path = "../types-portal" }
+
+# ProcessUtility dispatch out-seams (PREPARE / EXECUTE / DEALLOCATE arms).
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 
 # Owner seam crates (calls into not-yet-ported owners panic until they land).
 backend-tcop-utility-seams = { path = "../backend-tcop-utility-seams" }

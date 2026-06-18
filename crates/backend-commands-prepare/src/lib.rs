@@ -59,11 +59,15 @@ use types_nodes::EStateData;
 use types_explain::ExplainState;
 use types_nodes::params::ParamListInfo;
 use types_nodes::parsestmt::{
-    CachedPlanHandle, CachedPlanSourceHandle, CommandTag, DeallocateStmt, DestReceiverHandle,
-    ExecuteStmt, IntoClause, ParseState,
-    PortalHandle, PrepareStmt, PreparedStatement, QueryCompletionHandle, RawStmt,
+    CachedPlanHandle, CachedPlanSourceHandle, CommandTag, DestReceiverHandle,
+    IntoClause, ParseState,
+    PortalHandle, PreparedStatement, QueryCompletionHandle, RawStmt,
     ResourceOwnerHandle,
 };
+// PREPARE/EXECUTE/DEALLOCATE statement nodes: the live raw-grammar shapes the
+// `Node` enum carries (raw `NodePtr` argtypes / params / query), which the
+// ProcessUtility dispatch hands us as `&Node`.
+use types_nodes::ddlnodes::{DeallocateStmt, ExecuteStmt, PrepareStmt};
 
 use backend_access_common_tupdesc_seams as tupdesc_seam;
 use backend_access_transam_xact_seams as xact_seam;
@@ -137,7 +141,7 @@ fn hash_key(stmt_name: &str) -> String {
 pub fn PrepareQuery<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &ParseState<'mcx>,
-    stmt: PrepareStmt<'mcx>,
+    stmt: &PrepareStmt<'mcx>,
     stmt_location: i32,
     stmt_len: i32,
 ) -> PgResult<()> {
@@ -159,7 +163,7 @@ pub fn PrepareQuery<'mcx>(
     //   rawstmt = makeNode(RawStmt);
     //   rawstmt->stmt = stmt->query; rawstmt->stmt_location/len = ...;
     let query: &Node<'mcx> = match &stmt.query {
-        Some(q) => q,
+        Some(q) => &**q,
         // C dereferences stmt->query unconditionally; a missing query is a
         // grammar bug.
         None => panic!("PrepareQuery: PrepareStmt::query is missing"),
@@ -189,11 +193,14 @@ pub fn PrepareQuery<'mcx>(
     let mut argtypes: mcx::PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, nargs)?;
     if nargs != 0 {
         for tn in stmt.argtypes.iter() {
-            // C: typenameTypeId(pstate, tn). main's seam mirrors PostgreSQL's
-            // own typenameTypeId(NULL, typeName) entry point: it reads only the
-            // TypeName, so pstate (its sole field here, p_sourcetext) is not
-            // threaded across the seam.
-            let toid = parsetype_seam::typename_type_id::call(tn)?;
+            // C: typenameTypeId(pstate, tn). The grammar carries each argtype as
+            // a `Node::TypeName(rawnodes::TypeName)`; the seam mirrors
+            // PostgreSQL's own typenameTypeId(NULL, typeName) entry point (it
+            // reads only the TypeName, so pstate is not threaded across).
+            let Node::TypeName(raw_tn) = &**tn else {
+                panic!("PrepareQuery: argtype element is not a TypeName node");
+            };
+            let toid = parsetype_seam::typename_type_id_raw::call(raw_tn)?;
             argtypes.push(toid);
         }
     }
@@ -237,7 +244,7 @@ pub fn PrepareQuery<'mcx>(
 pub fn ExecuteQuery<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &ParseState<'mcx>,
-    stmt: ExecuteStmt<'mcx>,
+    stmt: &ExecuteStmt<'mcx>,
     into_clause: Option<&IntoClause<'mcx>>,
     params: ParamListInfo,
     dest: DestReceiverHandle,
@@ -594,6 +601,27 @@ pub fn FetchPreparedStatementResultDesc<'mcx>(
         )?)),
         None => Ok(None),
     }
+}
+
+// ===========================================================================
+// ExecuteStmtHasResult — utility.c (UtilityReturnsTuples helper)
+// ===========================================================================
+
+/// `case T_ExecuteStmt:` arm of `UtilityReturnsTuples` (utility.c). Returns
+/// whether running this prepared statement produces a result tuple descriptor.
+///
+///   entry = FetchPreparedStatement(stmt->name, false);
+///   if (!entry) return false;            /* not prepared */
+///   if (entry->plansource->resultDesc) return true;
+///   return false;
+pub fn ExecuteStmtHasResult<'mcx>(stmt: &ExecuteStmt<'mcx>) -> PgResult<bool> {
+    let name: &str = stmt.name.as_ref().map(|s| s.as_str()).unwrap_or("");
+    // throwError = false: an unknown name is "no result", not an error.
+    let entry = match FetchPreparedStatement(name, false)? {
+        Some(e) => e,
+        None => return Ok(false),
+    };
+    plancache_seam::plansource_has_result_desc::call(entry.plansource)
 }
 
 // ===========================================================================
@@ -962,4 +990,82 @@ fn make_raw_stmt<'mcx>(
         stmt_location,
         stmt_len,
     })
+}
+
+// ===========================================================================
+// Seam installation (ProcessUtility dispatch arms, utility.c PREPARE / EXECUTE
+// / DEALLOCATE)
+// ===========================================================================
+
+use types_nodes::nodes::Node as DispatchNode;
+use types_portal::QueryCompletion;
+
+/// `case T_PrepareStmt: PrepareQuery(pstate, stmt, stmt_location, stmt_len)`
+/// (utility.c). The dispatch carries the parse tree as `&Node`; extract the
+/// `PrepareStmt` variant and forward.
+fn prepare_query_arm<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'mcx>,
+    stmt: &DispatchNode<'mcx>,
+    stmt_location: i32,
+    stmt_len: i32,
+) -> PgResult<()> {
+    let DispatchNode::PrepareStmt(s) = stmt else {
+        panic!("prepare_query: parse tree is not a PrepareStmt");
+    };
+    PrepareQuery(mcx, pstate, s, stmt_location, stmt_len)
+}
+
+/// `case T_ExecuteStmt: ExecuteQuery(pstate, stmt, NULL, params, dest, qc)`
+/// (utility.c). The standalone EXECUTE path passes `intoClause = NULL`. The
+/// dispatch carries a real `QueryCompletion`; the EXECUTE tail drives the
+/// portal through the handle-typed `pquery`/`portalmem` pre-seams, which cannot
+/// thread the owned `QueryCompletion` (the portal/snapshot-handle keystone), so
+/// a NULL handle is forwarded — the portal seams are themselves uninstalled and
+/// panic loudly, so this never returns a filled `qc`.
+fn execute_query_arm<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'mcx>,
+    stmt: &DispatchNode<'mcx>,
+    params: ParamListInfo,
+    dest: DestReceiverHandle,
+    _qc: Option<&mut QueryCompletion>,
+) -> PgResult<()> {
+    let DispatchNode::ExecuteStmt(s) = stmt else {
+        panic!("execute_query: parse tree is not an ExecuteStmt");
+    };
+    ExecuteQuery(mcx, pstate, s, None, params, dest, QueryCompletionHandle::NULL)
+}
+
+/// `case T_ExecuteStmt:` arm of `UtilityReturnsTuples` (utility.c). The C
+/// predicate is infallible (it only reads prepared-statement state); an `Err`
+/// here is an internal-invariant violation, surfaced as a panic.
+fn execute_stmt_has_result_arm<'mcx>(stmt: &DispatchNode<'mcx>) -> bool {
+    let DispatchNode::ExecuteStmt(s) = stmt else {
+        panic!("execute_stmt_has_result: parse tree is not an ExecuteStmt");
+    };
+    ExecuteStmtHasResult(s).expect("ExecuteStmtHasResult reads only prepared-statement state")
+}
+
+/// `case T_DeallocateStmt: DeallocateQuery(stmt)` (utility.c).
+fn deallocate_query_arm<'mcx>(stmt: &DispatchNode<'mcx>) -> PgResult<()> {
+    let DispatchNode::DeallocateStmt(s) = stmt else {
+        panic!("deallocate_query: parse tree is not a DeallocateStmt");
+    };
+    DeallocateQuery(s)
+}
+
+/// Install this crate's inward seams. Wired into `seams-init`.
+///
+/// PREPARE and DEALLOCATE install fully (every callee seam — cmdtag /
+/// plancache / analyze-varparams / parse-type — is already real). EXECUTE
+/// installs its real body too, but its portal-driving tail bottoms out on the
+/// uninstalled `pquery`/`portalmem` pre-seams (the `PortalHandle` /
+/// `QueryCompletionHandle` / `SnapshotHandle` opaque-`u64` keystone); a call
+/// panics loudly there rather than silently no-op'ing.
+pub fn init_seams() {
+    backend_tcop_utility_out_seams::prepare_query::set(prepare_query_arm);
+    backend_tcop_utility_out_seams::execute_query::set(execute_query_arm);
+    backend_tcop_utility_out_seams::deallocate_query::set(deallocate_query_arm);
+    backend_tcop_utility_out_seams::execute_stmt_has_result::set(execute_stmt_has_result_arm);
 }
