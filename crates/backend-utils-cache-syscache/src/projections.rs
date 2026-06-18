@@ -64,7 +64,7 @@ use types_tuple::backend_access_common_tupdesc::PgTypeInfo;
 use backend_utils_cache_syscache_seams::CastRow;
 use types_cache::syscache::{ForeignDataWrapperFormRow, ForeignServerFormRow};
 use types_namespace::OperRow;
-use types_namespace::{OidArrayDatum, ProcRow};
+use types_namespace::{CharArrayDatum, FuncProcAttrs, OidArrayDatum, ProcRow, TextArrayDatum};
 use backend_nodes_read_seams as nodes_read_seams;
 use backend_utils_adt_varlena_seams as varlena_seams;
 use backend_optimizer_prep_prepagg_seams as prepagg_seams;
@@ -2220,6 +2220,184 @@ pub(crate) fn proc_row_by_oid<'mcx>(
     let row = project_proc_row(mcx, PROCOID, &tup)?;
     ReleaseSysCache(tup);
     Ok(Some(row))
+}
+
+/// `Anum_pg_proc_proargmodes` / `..._proargnames` / `..._protrftypes`
+/// (`pg_proc_d.h`).
+const Anum_pg_proc_proargmodes: i32 = 22;
+const Anum_pg_proc_proargnames: i32 = 23;
+const Anum_pg_proc_protrftypes: i32 = 25;
+
+/// `CHAROID` / `TEXTOID` (`pg_type_d.h`) — element-type OIDs for the array
+/// shape checks the funcapi consumers run; spelled here as the C constants.
+const SYS_CHAROID: Oid = 18;
+const SYS_TEXTOID: Oid = 25;
+
+/// Project a held tuple's `oid[]` attribute into an [`OidArrayDatum`], or `None`
+/// for a SQL-NULL column. Mirrors `project_proc_row`'s inline `proallargtypes`
+/// decode (`detoast_array_header` + read the 1-D non-null OID elements; a
+/// malformed-shape header yields the header fields with an empty `values`, which
+/// the consumer's shape check rejects with the C `elog`).
+fn getattr_oid_array<'mcx>(
+    mcx: Mcx<'mcx>,
+    cache_id: i32,
+    tup: &FormedTuple<'mcx>,
+    attnum: i32,
+) -> PgResult<Option<OidArrayDatum<'mcx>>> {
+    let (value, is_null) = SysCacheGetAttr(mcx, cache_id, tup, attnum)?;
+    if is_null {
+        return Ok(None);
+    }
+    let Datum::ByRef(b) = &value else {
+        return Err(PgError::error(
+            "syscache proc_arg_attrs: oid[] column is by-value",
+        ));
+    };
+    let (arr, ndim, hasnull, elemtype, dim0, data_off) = detoast_array_header(mcx, &b[..])?;
+    let mut values = vec_with_capacity_in(mcx, dim0.max(0) as usize)?;
+    if ndim == 1 && !hasnull {
+        for i in 0..dim0.max(0) as usize {
+            let off = data_off + i * 4;
+            values.push(u32::from_ne_bytes([
+                arr[off],
+                arr[off + 1],
+                arr[off + 2],
+                arr[off + 3],
+            ]));
+        }
+    }
+    Ok(Some(OidArrayDatum {
+        ndim,
+        dim0,
+        hasnull,
+        elemtype,
+        values,
+    }))
+}
+
+/// Project a held tuple's `"char"[]` attribute into a [`CharArrayDatum`], or
+/// `None` for a SQL-NULL column. `"char"` is a 1-byte pass-by-value type, so the
+/// element data is `dim0` raw bytes at `ARR_DATA_PTR`.
+fn getattr_char_array<'mcx>(
+    mcx: Mcx<'mcx>,
+    cache_id: i32,
+    tup: &FormedTuple<'mcx>,
+    attnum: i32,
+) -> PgResult<Option<CharArrayDatum<'mcx>>> {
+    let (value, is_null) = SysCacheGetAttr(mcx, cache_id, tup, attnum)?;
+    if is_null {
+        return Ok(None);
+    }
+    let Datum::ByRef(b) = &value else {
+        return Err(PgError::error(
+            "syscache proc_arg_attrs: char[] column is by-value",
+        ));
+    };
+    let (arr, ndim, hasnull, elemtype, dim0, data_off) = detoast_array_header(mcx, &b[..])?;
+    let mut values = vec_with_capacity_in(mcx, dim0.max(0) as usize)?;
+    if ndim == 1 && !hasnull && elemtype == SYS_CHAROID {
+        for i in 0..dim0.max(0) as usize {
+            values.push(*arr.get(data_off + i).ok_or_else(|| {
+                PgError::error("syscache proc_arg_attrs: truncated char[] array data")
+            })?);
+        }
+    }
+    Ok(Some(CharArrayDatum {
+        ndim,
+        dim0,
+        hasnull,
+        elemtype,
+        values,
+    }))
+}
+
+/// Project a held tuple's `text[]` attribute into a [`TextArrayDatum`], or
+/// `None` for a SQL-NULL column. The element strings come from the arrayfuncs
+/// owner's `text_array_to_strings_bytes` deconstructor over the detoasted image
+/// (`deconstruct_array_builtin(arr, TEXTOID, ...)` + `TextDatumGetCString`); the
+/// header fields drive the consumer's shape check.
+fn getattr_text_array<'mcx>(
+    mcx: Mcx<'mcx>,
+    cache_id: i32,
+    tup: &FormedTuple<'mcx>,
+    attnum: i32,
+) -> PgResult<Option<TextArrayDatum<'mcx>>> {
+    let (value, is_null) = SysCacheGetAttr(mcx, cache_id, tup, attnum)?;
+    if is_null {
+        return Ok(None);
+    }
+    let Datum::ByRef(b) = &value else {
+        return Err(PgError::error(
+            "syscache proc_arg_attrs: text[] column is by-value",
+        ));
+    };
+    let (_arr, ndim, hasnull, elemtype, dim0, _data_off) = detoast_array_header(mcx, &b[..])?;
+    let values = if ndim == 1 && !hasnull && elemtype == SYS_TEXTOID {
+        arrayfuncs_seams::text_array_to_strings_bytes::call(mcx, &b[..])?
+    } else {
+        vec_with_capacity_in(mcx, 0)?
+    };
+    Ok(Some(TextArrayDatum {
+        ndim,
+        dim0,
+        hasnull,
+        elemtype,
+        values,
+    }))
+}
+
+/// `SearchSysCache1(PROCOID, funcid)` projected to the [`FuncProcAttrs`] the
+/// `funcapi.c` `pg_proc`-row helpers read: the `Form_pg_proc` `GETSTRUCT`
+/// scalars (`prorettype`/`prokind`/`pronargs`/`proargtypes`) plus the
+/// `SysCacheGetAttr` array columns (`proallargtypes`/`proargmodes`/
+/// `proargnames`/`protrftypes`), each detoasted and projected. `Ok(None)` on a
+/// cache miss; the funcapi consumer raises its own `cache lookup failed`
+/// `elog(ERROR)`.
+pub(crate) fn proc_arg_attrs<'mcx>(
+    mcx: Mcx<'mcx>,
+    funcid: Oid,
+) -> PgResult<Option<FuncProcAttrs<'mcx>>> {
+    let tuple = SearchSysCache1(mcx, PROCOID, SysCacheKey::Value(KeyDatum::from_oid(funcid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+
+    let prorettype = getattr_oid(mcx, PROCOID, &tup, Anum_pg_proc_prorettype)?;
+    let prokind = getattr_char(mcx, PROCOID, &tup, Anum_pg_proc_prokind)? as u8;
+    let pronargs = getattr_i16(mcx, PROCOID, &tup, Anum_pg_proc_pronargs)? as i32;
+
+    // proargtypes is an oidvector (BKI_FORCE_NOT_NULL).
+    let proargtypes_datum = SysCacheGetAttrNotNull(mcx, PROCOID, &tup, Anum_pg_proc_proargtypes)?;
+    let proargtypes_bytes = match &proargtypes_datum {
+        Datum::ByRef(b) => &b[..],
+        _ => {
+            return Err(PgError::error(
+                "syscache proc_arg_attrs: proargtypes attribute is by-value",
+            ))
+        }
+    };
+    let proargtypes_vec = arrayfuncs_seams::oidvector_to_oids_bytes::call(mcx, proargtypes_bytes)?;
+    let mut proargtypes = vec_with_capacity_in(mcx, proargtypes_vec.len())?;
+    for &t in proargtypes_vec.iter() {
+        proargtypes.push(t);
+    }
+
+    let proallargtypes = getattr_oid_array(mcx, PROCOID, &tup, Anum_pg_proc_proallargtypes)?;
+    let proargmodes = getattr_char_array(mcx, PROCOID, &tup, Anum_pg_proc_proargmodes)?;
+    let proargnames = getattr_text_array(mcx, PROCOID, &tup, Anum_pg_proc_proargnames)?;
+    let protrftypes = getattr_oid_array(mcx, PROCOID, &tup, Anum_pg_proc_protrftypes)?;
+
+    ReleaseSysCache(tup);
+    Ok(Some(FuncProcAttrs {
+        prorettype,
+        prokind,
+        pronargs,
+        proargtypes,
+        proallargtypes,
+        proargmodes,
+        proargnames,
+        protrftypes,
+    }))
 }
 
 /// Project a held `pg_proc` tuple onto a [`ProcRow`] — the `GETSTRUCT` scalar
