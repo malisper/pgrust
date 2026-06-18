@@ -364,6 +364,16 @@ pub fn RelationRebuildRelation(relation: Oid) -> PgResult<()> {
     // `remember_tupdesc` deferred-free is unnecessary (no shared tupdesc), so we
     // just drop the returned box.
     RelationDestroyRelation(to_destroy, false);
+
+    // Deferred opclass-options parse (see build.rs rebuild branch): the in-place
+    // swap above has made the OID-resident entry hold the freshly-built contents
+    // (full `rd_indam`/`rd_support` arrays), so the OID-keyed
+    // `index_opclass_options` parse now resolves them correctly. Forcing it here
+    // matches the C, where `RelationInitIndexAccessInfo` populates
+    // `rd_opcoptions` on the live (post-rebuild) entry.
+    if is_index {
+        crate::derived::force_index_att_options(save_relid)?;
+    }
     Ok(())
 }
 

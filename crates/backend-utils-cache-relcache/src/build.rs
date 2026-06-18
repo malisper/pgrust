@@ -519,16 +519,15 @@ pub fn RelationBuildDesc(targetRelId: Oid, insertIt: bool) -> PgResult<Oid> {
         }
         Ok(relid)
     } else {
-        // The rebuild (`RelationRebuildRelation`) path: the OLD entry for this
-        // OID is still cache-resident (the in-place swap happens only after this
-        // returns), so the OID-keyed opclass-options parse resolves it and
-        // terminates. Prime the NEWREL's `rd_opcoptions` on the Box directly
-        // before parking it.
-        if is_index {
-            crate::derived::RelationGetIndexAttOptions(&mut relation, false)?;
-        }
-        // C keeps `newrel` OUT of the hash for RelationRebuildRelation's
-        // in-place swap; park it in the scratch slot and return its OID.
+        // The rebuild (`RelationRebuildRelation`) path. The OID-keyed opclass-
+        // options parse (`index_opclass_options` resolving `rd_indam`/`rd_support`
+        // by OID) would resolve the OLD entry, which is still cache-resident
+        // until the swap — and on a freshly-created index that OLD entry is the
+        // pre-`pg_index` `index_open` build with empty access-info arrays. So the
+        // parse is DEFERRED to after `RelationRebuildRelation`'s in-place swap
+        // (invalidate.rs), where the OID resolves to the freshly-built contents.
+        // C keeps `newrel` OUT of the hash for the swap; park it in the scratch
+        // slot and return its OID.
         finish_uninserted(relation)
     }
 }
