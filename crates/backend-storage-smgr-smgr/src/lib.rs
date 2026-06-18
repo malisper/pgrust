@@ -529,6 +529,18 @@ pub fn init_seams() {
     });
     smgr_seam::drop_relation_files::set(drop_relation_files);
     smgr_seam::smgrexists::set(|rlocator, backend, forknum| {
+        // The seam contract is `smgrexists(smgropen(rlocator, backend),
+        // forknum)` — the caller hands the physical id and expects
+        // `RelationGetSmgr` semantics (the C `fsm_readbuf` /
+        // `FreeSpaceMapPrepareTruncateRel` callers all do
+        // `smgrexists(RelationGetSmgr(rel), ...)`). `smgropen`
+        // (`md::cache_open`) is idempotent — it opens+caches the SMgrRelation
+        // on first touch and is a plain lookup thereafter — so this makes the
+        // existence probe work for a relation whose smgr was not opened by a
+        // prior buffer op (e.g. the FSM-fork probe during the first index
+        // insert under a fresh backend). Mirrors the `smgrnblocks` /
+        // `smgrsettargblock` seams above.
+        smgropen(rlocator, backend)?;
         smgrexists(RelFileLocatorBackend { locator: rlocator, backend }, forknum)
     });
     smgr_seam::smgrdestroyall::set(smgrdestroyall);
