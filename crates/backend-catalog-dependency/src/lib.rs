@@ -242,10 +242,18 @@ fn scan_depend_rows(
     keys: &[ScanKeyData],
 ) -> PgResult<Vec<DependRow>> {
     let mut out: Vec<DependRow> = Vec::new();
+    // The scan slot stores each fetched heap tuple (cloned by the AM's
+    // getnextslot) in this context, and that tuple lives until the next
+    // getnext replaces it or `systable_endscan` drops the slot. The scratch
+    // context must therefore outlive the whole scan, not be recreated per row
+    // (a per-row context, dropped while the slot still holds its tuple, would
+    // leave the slot's tuple uncharged and the next store would double-free).
+    // Each `DependRow` we keep is fully owned (fixed-width OIDs), so nothing in
+    // `out` references this context after the loop.
+    let scratch = MemoryContext::new("scan_depend_rows");
+    let smcx = scratch.mcx();
     let mut scan = genam_seams::systable_beginscan::call(rel, index_id, true, None, keys)?;
     loop {
-        let scratch = MemoryContext::new("scan_depend_rows row");
-        let smcx = scratch.mcx();
         let Some(tup) = genam_seams::systable_getnext::call(smcx, scan.desc_mut())? else {
             break;
         };
@@ -715,13 +723,14 @@ fn findDependentObjects(
 /// the C recheck logically performs (visibility recheck after lock).
 fn recheck_pg_depend(depRel: &RelationData<'_>, row: &DependRow) -> PgResult<bool> {
     let f = &row.form;
+    // The depender index (DependDependerIndexId) only covers the
+    // classid/objid/objsubid columns, so only those three can be index scan
+    // keys; the reference columns and deptype are confirmed by the predicate
+    // below (the C `systable_recheck_tuple` likewise rechecks the exact row).
     let keys = [
         oid_key(Anum_pg_depend_classid, f.classid)?,
         oid_key(Anum_pg_depend_objid, f.objid)?,
         int4_key(Anum_pg_depend_objsubid, f.objsubid)?,
-        oid_key(Anum_pg_depend_refclassid, f.refclassid)?,
-        oid_key(Anum_pg_depend_refobjid, f.refobjid)?,
-        int4_key(Anum_pg_depend_refobjsubid, f.refobjsubid)?,
     ];
     let found = scan_depend_rows(depRel, DependDependerIndexId, &keys)?;
     Ok(found.iter().any(|r| {
