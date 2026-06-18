@@ -17,7 +17,7 @@ use types_core::{
     ProcNumber, TransactionId, TransactionIdIsValid, INVALID_PROC_NUMBER,
 };
 use types_error::PgResult;
-use types_storage::storage::PROC_VACUUM_STATE_MASK;
+use types_storage::storage::{PROC_AFFECTS_ALL_HORIZONS, PROC_VACUUM_STATE_MASK};
 use types_storage::LWLockMode::LW_EXCLUSIVE;
 
 use backend_access_transam_transam_seams as transam;
@@ -511,6 +511,30 @@ fn read_next_full_transaction_id() -> FullTransactionId {
     varsup::read_next_full_transaction_id::call()
 }
 
+/// `MyProc->xmin` (walsender.c `InitWalSender` assertion) — the backend's
+/// advertised xmin in the proc array. The procarray owner reads it through the
+/// PGPROC accessor seam.
+pub fn MyProcXmin() -> TransactionId {
+    proc::proc_xmin::call(proc::my_proc_number::call())
+}
+
+/// `MyProc->statusFlags |= PROC_AFFECTS_ALL_HORIZONS;
+/// ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;` under
+/// `ProcArrayLock` (walsender.c `InitWalSender`) — a database-less (physical)
+/// walsender's xmin must hold back vacuum in all databases.
+pub fn SetProcAffectsAllHorizons() {
+    let pgprocno = proc::my_proc_number::call();
+
+    lwlock::lwlock_acquire_proc_array::call(LW_EXCLUSIVE)
+        .expect("SetProcAffectsAllHorizons: ProcArrayLock acquire");
+    let new_flags = proc::proc_status_flags::call(pgprocno) | PROC_AFFECTS_ALL_HORIZONS;
+    proc::set_proc_status_flags::call(pgprocno, new_flags);
+    let pgxactoff = proc::proc_pgxactoff::call(pgprocno);
+    proc::set_proc_array_status_flags::call(pgxactoff, new_flags);
+    lwlock::lwlock_release_proc_array::call()
+        .expect("SetProcAffectsAllHorizons: ProcArrayLock release");
+}
+
 /// Install the F1-owned inward seams: the membership + end-of-xact seams
 /// consumed by twophase / xact.
 pub fn init_seams() {
@@ -520,4 +544,6 @@ pub fn init_seams() {
     seams::proc_array_remove::set(ProcArrayRemove);
     seams::proc_array_end_transaction::set(ProcArrayEndTransaction);
     seams::proc_array_clear_transaction::set(ProcArrayClearTransaction);
+    seams::my_proc_xmin::set(MyProcXmin);
+    seams::set_proc_affects_all_horizons::set(SetProcAffectsAllHorizons);
 }
