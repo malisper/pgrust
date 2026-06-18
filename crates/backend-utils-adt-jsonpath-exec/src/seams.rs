@@ -33,5 +33,10 @@
 //!    `TableFunc`/`JsonExpr` `ExecEvalExpr` executor substrate respectively — a
 //!    call panics loudly until those land, which is correct.
 //!
-//! This unit owns no INWARD seam, so `init_seams()` is empty.
-pub fn init_seams() {}
+//! This unit also owns the `JsonbTable` half of the `TableFuncRoutine` vtable
+//! dispatch (jsonpath_exec.c's `JsonbTableRoutine`); `init_seams()` installs
+//! those `routine_*` seams (see [`crate::routine_install`]). Its own jsonpath_exec
+//! seams have no inward contract.
+pub fn init_seams() {
+    crate::routine_install::install_routines();
+}

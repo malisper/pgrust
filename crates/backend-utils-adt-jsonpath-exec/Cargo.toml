@@ -53,6 +53,12 @@ backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
 backend-utils-adt-json-seams = { path = "../backend-utils-adt-json-seams" }
 # This unit's own jsonpath_exec-specific seams + JSON_TABLE node boundary.
 backend-utils-adt-jsonpath-exec-seams = { path = "../backend-utils-adt-jsonpath-exec-seams" }
+# The TableFuncRoutine vtable seams: JsonbTableRoutine lives in this unit
+# (jsonpath_exec.c), so this unit installs the JSON_TABLE half of the dispatch
+# (XmlTableRoutine's half belongs to the unported xml.c owner). `types-nodes`
+# supplies TableFuncScanState / TableFuncRoutineKind / Opaque.
+backend-executor-tablefuncRoutine-seams = { path = "../backend-executor-tablefuncRoutine-seams" }
+types-nodes = { path = "../types-nodes" }
 # The recursion / interrupt guards are genuine cross-subsystem externals owned
 # by tcop/postgres.c (CHECK_FOR_INTERRUPTS) and utils/misc/stack_depth.c
 # (check_stack_depth) — reached through their canonical owner-seams, not

@@ -653,6 +653,149 @@ pub struct JsonArgTypeCache {
     pub outfuncid: Oid,
 }
 
+/// `JsonPathVariable` (jsonpath.h / execnodes.h) — one PASSING argument's
+/// compiled state, an entry of `JsonExprState.args`.
+///
+/// In C `var->value`/`var->isnull` are written by `ExecInitExprRec`'s recursion
+/// (raw `Datum *`/`bool *` aliases). The owned model has the recursion write a
+/// [`ResultCellId`] arena cell instead (mirroring the `Func` step's
+/// `arg_cells`), so `value_cell` records which cell the argument expression
+/// evaluates into; `ExecEvalJsonExprPath` gathers it before calling the
+/// JsonPath* worker.
+#[derive(Clone, Debug)]
+pub struct JsonPathVariableState {
+    /// `char *name` — variable name (no leading `$`). The C `var->name` aliases
+    /// the parse node's `argname->sval`; carried as an owned string here.
+    pub name: alloc::string::String,
+    /// `Oid typid` — argument expression's type.
+    pub typid: Oid,
+    /// `int32 typmod` — argument expression's typmod.
+    pub typmod: i32,
+    /// Arena cell the argument expression writes (`&var->value`/`&var->isnull`).
+    pub value_cell: ResultCellId,
+}
+
+/// `JsonExprState` (execnodes.h:1058) — the runtime state for one SQL/JSON
+/// `JsonExpr` (`JSON_VALUE`/`JSON_QUERY`/`JSON_EXISTS`), pointed at by the
+/// `EEOP_JSONEXPR_PATH` and `EEOP_JSONEXPR_COERCION_FINISH` steps.
+///
+/// In C the step's `op->d.jsonexpr.jsestate` is a `JsonExprState *` shared by
+/// the PATH and COERCION_FINISH steps; the runtime both reads and mutates it
+/// (resets `error`/`empty`/`escontext` each row, then sets them on the
+/// error/empty/coercion-error paths). The owned model stores `JsonExprState`
+/// values in a [`JsonExprStateArena`] hung off the owning [`ExprState`], and the
+/// step carries a [`JsonExprStateId`] into it — exactly the de-handle precedent
+/// of [`ResultCellId`]/[`SlotId`]/[`EcxtId`] (replacing the parked `usize`).
+///
+/// The C `formatted_expr`/`pathspec`/`error`/`empty` `NullableDatum`s are aliased
+/// targets the compiler recurses into / the runtime writes; in the owned model
+/// they are [`ResultCellId`]s into the [`ExprState`]'s result-cell arena (the
+/// JUMP_IF_NULL / JUMP_IF_NOT_TRUE steps read those same cells).
+#[derive(Debug)]
+pub struct JsonExprState<'mcx> {
+    /// `JsonExpr *jsexpr` — original expression node (owned clone).
+    pub jsexpr: crate::primnodes::JsonExpr,
+    /// `NullableDatum formatted_expr` — the cell `formatted_expr` evaluates
+    /// into; `ExecEvalJsonExprPath` reads its value as the document item.
+    pub formatted_expr_cell: ResultCellId,
+    /// `NullableDatum pathspec` — the cell `path_spec` evaluates into; read as
+    /// the jsonpath at runtime.
+    pub pathspec_cell: ResultCellId,
+    /// `List *args` — JsonPathVariable entries for `passing_values`.
+    pub args: PgVec<'mcx, JsonPathVariableState>,
+    /// `NullableDatum error` — the cell whose `value` the runtime sets to TRUE
+    /// when jsonpath/coercion errors softly; the ON ERROR `EEOP_JUMP_IF_NOT_TRUE`
+    /// step reads it.
+    pub error_cell: ResultCellId,
+    /// `NullableDatum empty` — the cell whose `value` the runtime sets to TRUE
+    /// when the jsonpath returned no items; the ON EMPTY `EEOP_JUMP_IF_NOT_TRUE`
+    /// step reads it.
+    pub empty_cell: ResultCellId,
+    /// `int jump_empty` — address of the ON EMPTY behavior steps, or -1.
+    pub jump_empty: i32,
+    /// `int jump_error` — address of the ON ERROR behavior steps, or -1.
+    pub jump_error: i32,
+    /// `int jump_eval_coercion` — address of the RETURNING-type coercion step,
+    /// or -1.
+    pub jump_eval_coercion: i32,
+    /// `int jump_end` — address to jump to to return the JsonPath* result as-is.
+    pub jump_end: i32,
+    /// `FunctionCallInfo input_fcinfo` — RETURNING type input-function call
+    /// frame when `jsexpr.use_io_coercion` (else `None`).
+    pub input_fcinfo: Option<PgBox<'mcx, FunctionCallInfoBaseData<'mcx>>>,
+    /// `ErrorSaveContext escontext` — soft-error sink for coercions; reset each
+    /// row.
+    pub escontext: types_error::SoftErrorContext,
+}
+
+/// Index of a [`JsonExprState`] in an [`ExprState`]'s [`JsonExprStateArena`].
+/// Replaces the parked `op->d.jsonexpr.jsestate: usize` opaque address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct JsonExprStateId(pub u32);
+
+/// Arena of [`JsonExprState`]s owned by an [`ExprState`] — the owned-model
+/// replacement for the shared `JsonExprState *` that the PATH and
+/// COERCION_FINISH steps both point at in C.
+#[derive(Debug, Default)]
+pub struct JsonExprStateArena<'mcx> {
+    /// The states, indexed by [`JsonExprStateId`].
+    pub states: Option<PgVec<'mcx, JsonExprState<'mcx>>>,
+}
+
+impl<'mcx> JsonExprStateArena<'mcx> {
+    /// Number of states currently allocated.
+    pub fn len(&self) -> usize {
+        self.states.as_ref().map(|s| s.len()).unwrap_or(0)
+    }
+
+    /// Whether the arena has no states.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// Index of a [`JsonCoercionCache`] in an [`ExprState`]'s
+/// [`JsonCoercionCacheArena`]. De-parks the C `void *json_coercion_cache` on
+/// the `EEOP_JSONEXPR_COERCION` step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct JsonCoercionCacheId(pub u32);
+
+/// One `EEOP_JSONEXPR_COERCION` step's persistent `json_coercion_cache` — the
+/// `ColumnIOData` that `json_populate_type` lazily builds and reuses across
+/// rows (C `JsonCoercionCache`).
+pub type JsonCoercionCache<'mcx> = types_jsonfuncs::ColumnIOData<'mcx>;
+
+/// Arena of per-coercion-step [`JsonCoercionCache`]s owned by an [`ExprState`].
+/// `ColumnIOData` carries `FmgrInfo` / `TupleDesc` cache state that is not
+/// `Debug`, so this carrier supplies a manual `Debug` (it has nothing a debug
+/// dump needs) — keeping [`ExprState`]'s and [`ExprEvalStepData`]'s derived
+/// `Debug` intact.
+#[derive(Default)]
+pub struct JsonCoercionCacheArena<'mcx> {
+    /// The caches, indexed by [`JsonCoercionCacheId`].
+    pub caches: Option<PgVec<'mcx, JsonCoercionCache<'mcx>>>,
+}
+
+impl core::fmt::Debug for JsonCoercionCacheArena<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("JsonCoercionCacheArena")
+            .field("len", &self.len())
+            .finish()
+    }
+}
+
+impl<'mcx> JsonCoercionCacheArena<'mcx> {
+    /// Number of caches currently allocated.
+    pub fn len(&self) -> usize {
+        self.caches.as_ref().map(|c| c.len()).unwrap_or(0)
+    }
+
+    /// Whether the arena has no caches.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// Inline payload of an [`ExprEvalStep`] — the C `union d`, modeled as a tagged
 /// enum. Each variant mirrors one C union member (the member name is the
 /// variant name); the active variant is selected by the step's [`ExprEvalOp`]
@@ -1110,10 +1253,13 @@ pub enum ExprEvalStepData<'mcx> {
         /// `JsonIsPredicate *pred` — original node; parked (opaque address).
         pred: usize,
     },
-    /// `jsonexpr` — for EEOP_JSONEXPR_PATH.
+    /// `jsonexpr` — for EEOP_JSONEXPR_PATH / EEOP_JSONEXPR_COERCION_FINISH.
     JsonExpr {
-        /// `struct JsonExprState *jsestate` — parked (opaque address).
-        jsestate: usize,
+        /// `struct JsonExprState *jsestate` — the shared per-`JsonExpr` runtime
+        /// state, identified by its [`JsonExprStateId`] in the owning
+        /// [`ExprState`]'s [`JsonExprStateArena`] (de-parked from the C opaque
+        /// `JsonExprState *`).
+        jsestate: JsonExprStateId,
     },
     /// `jsonexpr_coercion` — for EEOP_JSONEXPR_COERCION.
     JsonExprCoercion {
@@ -1124,10 +1270,19 @@ pub enum ExprEvalStepData<'mcx> {
         exists_coerce: bool,
         exists_cast_to_int: bool,
         exists_check_domain: bool,
-        /// `void *json_coercion_cache` — opaque address.
-        json_coercion_cache: usize,
-        /// `ErrorSaveContext *escontext` — opaque address.
-        escontext: usize,
+        /// `void *json_coercion_cache` — the C `JsonCoercionCache`
+        /// (a `ColumnIOData`), lazily built by `json_populate_type` on first use
+        /// and reused across rows (the C `NULL`-initialized, then persistent,
+        /// cache). De-parked to a [`JsonCoercionCacheId`] into the owning
+        /// [`ExprState`]'s [`JsonCoercionCacheArena`], mirroring the
+        /// [`JsonExprStateId`] / [`ResultCellId`] arena precedent.
+        json_coercion_cache: JsonCoercionCacheId,
+        /// `ErrorSaveContext *escontext` — the soft-error sink. In C this is
+        /// `&jsestate->escontext` (when ON ERROR is not ERROR) or `NULL`; the
+        /// owned model reaches the shared sink through the owning
+        /// [`JsonExprState`], so the step carries its [`JsonExprStateId`]
+        /// (`None` is the C `NULL` escontext = throw hard).
+        jsestate: Option<JsonExprStateId>,
     },
 }
 
@@ -1318,9 +1473,21 @@ pub struct ExprState<'mcx> {
     /// cell holding the innermost domain value while compiling a `CoerceToDomain`
     /// (`None` outside any enclosing domain coercion).
     pub innermost_domainval: Option<ResultCellId>,
-    /// `ErrorSaveContext *escontext` — soft-error sink; NULL means throw
-    /// (opaque address until the sink is threaded here).
-    pub escontext: usize,
+    /// `ErrorSaveContext *escontext` — soft-error sink threaded while compiling
+    /// the ON ERROR / ON EMPTY behavior sub-expressions of a `JsonExpr`. In C
+    /// `state->escontext` is set to `&jsestate->escontext` around those
+    /// `ExecInitExprRec` calls so IOCOERCE_SAFE / domain sub-steps capture
+    /// errors softly. The owned model reaches the shared sink through the
+    /// owning `JsonExpr`'s [`JsonExprState`], so this carries its
+    /// [`JsonExprStateId`] (`None` is the C `NULL` = throw hard, the default).
+    pub escontext: Option<JsonExprStateId>,
+    /// Per-`JsonExpr` runtime-state arena (the owned-model replacement for the
+    /// shared `JsonExprState *` carried on the EEOP_JSONEXPR_* steps).
+    pub json_states: JsonExprStateArena<'mcx>,
+    /// Per-`EEOP_JSONEXPR_COERCION`-step `json_coercion_cache` arena (the
+    /// `ColumnIOData` caches `json_populate_type` builds lazily and reuses
+    /// across rows).
+    pub json_coercion_caches: JsonCoercionCacheArena<'mcx>,
     /// Aggref-discovery channel (compile-time only). C's `ExecInitExprRec`
     /// `T_Aggref` arm does `aggstate->aggs = lappend(aggstate->aggs, astate)` —
     /// it mutates the parent `AggState` directly while compiling the Agg's
@@ -1365,6 +1532,8 @@ impl<'mcx> Clone for ExprState<'mcx> {
             innermost_caseval: None,
             innermost_domainval: None,
             escontext: self.escontext,
+            json_states: JsonExprStateArena::default(),
+            json_coercion_caches: JsonCoercionCacheArena::default(),
             found_aggs: None,
         }
     }
@@ -1391,7 +1560,9 @@ impl Default for ExprState<'_> {
             ext_params: 0,
             innermost_caseval: None,
             innermost_domainval: None,
-            escontext: 0,
+            escontext: None,
+            json_states: JsonExprStateArena::default(),
+            json_coercion_caches: JsonCoercionCacheArena::default(),
             found_aggs: None,
         }
     }

@@ -3174,6 +3174,7 @@ pub fn init_seams() {
     );
     backend_utils_cache_typcache_seams::compare_values_of_enum::set(compare_values_of_enum);
     backend_utils_cache_typcache_seams::type_cache_typtype::set(type_cache_typtype_seam);
+    backend_utils_cache_typcache_seams::domain_has_constraints::set(domain_has_constraints);
     backend_utils_cache_typcache_seams::sort_group_operators::set(sort_group_operators);
     backend_utils_cache_typcache_seams::lookup_rowtype_tupdesc::set(lookup_rowtype_tupdesc);
     backend_utils_cache_typcache_seams::assign_record_type_typmod::set(assign_record_type_typmod);

@@ -468,3 +468,15 @@ seam_core::seam!(
     /// vs. multirange emptiness check. `Err` carries the cache-load surface.
     pub fn type_cache_typtype(atttypid: types_core::primitive::Oid) -> types_error::PgResult<i8>
 );
+
+seam_core::seam!(
+    /// `DomainHasConstraints(type_id)` (typcache.c): does the domain type
+    /// `type_id` have any CHECK / NOT NULL constraints? Loads the typcache entry
+    /// (`TYPECACHE_DOMAIN_CONSTRAINT_INFO`) and reports whether the constraint
+    /// list is non-empty. `ExecInitJsonCoercion` uses it to decide whether a
+    /// JSON_EXISTS coercion to a domain over integer must run domain checks.
+    /// `Err` carries the cache-load surface.
+    pub fn domain_has_constraints(
+        type_id: types_core::primitive::Oid,
+    ) -> types_error::PgResult<bool>
+);
