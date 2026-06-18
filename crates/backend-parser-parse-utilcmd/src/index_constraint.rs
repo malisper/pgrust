@@ -237,11 +237,6 @@ fn transformIndexConstraint<'mcx>(
     };
     let index = mcx::alloc_in(mcx, Node::IndexStmt(index))?;
 
-    if primary {
-        // cxt->pkey = index; record a clone so finalindexlist owns the live copy.
-        cxt.pkey = Some(mcx::alloc_in(mcx, index.clone_in(mcx)?)?);
-    }
-
     // The remaining work — USING INDEX validity checks, breaking apart the
     // EXCLUDE pairs, resolving UNIQUE/PRIMARY key column names against
     // cxt.columns / system attributes / inherited relations, the WITHOUT
@@ -263,6 +258,16 @@ fn transformIndexConstraint<'mcx>(
         inh_relations,
     )?;
     cxt.nnconstraints.extend(extra_nn);
+
+    // C sets `cxt->pkey = index;` by pointer before the column-resolution work,
+    // so the resolved indexParams stay visible through cxt->pkey. We model pkey
+    // as a separate owned node, so the clone must be taken *after* the catalog
+    // seam has filled the index's indexParams (taking it before — as the
+    // skeleton — would record an empty-keyed pkey, which then wins the
+    // redundancy dedup and reaches DefineIndex with no columns).
+    if primary {
+        cxt.pkey = Some(mcx::alloc_in(mcx, index.clone_in(mcx)?)?);
+    }
 
     Ok(index)
 }
