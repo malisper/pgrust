@@ -506,6 +506,22 @@ pub fn init_seams() {
     smgr_seam::smgr_cached_nblocks::set(|rlocator, backend, forknum| {
         smgrnblocks_cached(RelFileLocatorBackend { locator: rlocator, backend }, forknum)
     });
+    smgr_seam::smgrgettargblock::set(|rlocator, backend| {
+        // `RelationGetTargetBlock(rel)` == `rd_smgr ? rd_smgr->smgr_targblock :
+        // InvalidBlockNumber`. `smgrgettargblock` reads the cached hint and
+        // already yields `InvalidBlockNumber` when no SMgrRelation was opened
+        // (the C `rd_smgr == NULL` case) — so no `smgropen` here.
+        smgrgettargblock(RelFileLocatorBackend { locator: rlocator, backend })
+    });
+    smgr_seam::smgrsettargblock::set(|rlocator, backend, targblock| {
+        // `RelationSetTargetBlock(rel, blkno)` writes
+        // `RelationGetSmgr(rel)->smgr_targblock`; `RelationGetSmgr` opens the
+        // SMgrRelation if needed, so `smgropen` first (idempotent), then store
+        // the hint on the now-resident md state.
+        smgropen(rlocator, backend)?;
+        smgrsettargblock(RelFileLocatorBackend { locator: rlocator, backend }, targblock);
+        Ok(())
+    });
     smgr_seam::at_eoxact_smgr::set(|| {
         // C's AtEOXact_SMgr is void; smgrdestroyall's md close failures are
         // not ERROR in C. Mirror the void contract by absorbing the result.

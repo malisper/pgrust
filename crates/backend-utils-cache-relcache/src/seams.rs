@@ -173,6 +173,34 @@ pub fn init_seams() {
     // --- hio.c heap-insertion target-page free-space lookup ---
     use backend_access_heap_hio_seams as hx;
     hx::relation_get_target_page_free_space::set(relation_get_target_page_free_space);
+    // `RelationGetTargetBlock(rel)` == `rd_smgr ? rd_smgr->smgr_targblock :
+    // InvalidBlockNumber` — the backend-local insertion-target hint. The
+    // relation's (locator, backend) come off the owned entry; the cached hint
+    // lives in smgr-owned state.
+    hx::relation_get_target_block::set(relation_get_target_block);
+    hx::relation_set_target_block::set(relation_set_target_block);
+}
+
+/// `RelationGetTargetBlock(relation)` (utils/rel.h) ==
+/// `RelationGetSmgr(relation)->smgr_targblock` (or `InvalidBlockNumber` when
+/// `rd_smgr` is NULL). A cached insertion hint; reads smgr-owned state keyed by
+/// the relation's `(rd_locator, rd_backend)`.
+fn relation_get_target_block(rel: Oid) -> PgResult<types_core::primitive::BlockNumber> {
+    let (locator, backend) =
+        crate::core_entry_store::with_relation(rel, |rd| (rd.rd_locator, rd.rd_backend))?;
+    Ok(backend_storage_smgr_seams::smgrgettargblock::call(locator, backend))
+}
+
+/// `RelationSetTargetBlock(relation, target_block)` (utils/rel.h) — writes
+/// `RelationGetSmgr(relation)->smgr_targblock`. The relation's `(rd_locator,
+/// rd_backend)` come off the owned entry; the hint lives in smgr-owned state.
+fn relation_set_target_block(
+    rel: Oid,
+    target_block: types_core::primitive::BlockNumber,
+) -> PgResult<()> {
+    let (locator, backend) =
+        crate::core_entry_store::with_relation(rel, |rd| (rd.rd_locator, rd.rd_backend))?;
+    backend_storage_smgr_seams::smgrsettargblock::call(locator, backend, target_block)
 }
 
 /// `RelationGetTargetPageFreeSpace(relation, defaultff)` (utils/rel.h) ==

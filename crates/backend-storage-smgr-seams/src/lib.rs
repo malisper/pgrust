@@ -48,6 +48,30 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `smgrgettargblock(smgropen(rlocator, backend))` (smgr.c): the relation's
+    /// current insertion target block, or `InvalidBlockNumber` when none is
+    /// cached. This is what `RelationGetTargetBlock(rel)` reads off
+    /// `rd_smgr->smgr_targblock`; an unopened smgr (C `rd_smgr == NULL`) yields
+    /// `InvalidBlockNumber`. Pure read of smgr-owned state.
+    pub fn smgrgettargblock(
+        rlocator: types_storage::RelFileLocator,
+        backend: types_core::primitive::ProcNumber,
+    ) -> types_core::primitive::BlockNumber
+);
+
+seam_core::seam!(
+    /// `smgrsettargblock(smgropen(rlocator, backend), targblock)` (smgr.c):
+    /// record the relation's insertion target block hint. This is what
+    /// `RelationSetTargetBlock(rel, blkno)` writes through
+    /// `RelationGetSmgr(rel)->smgr_targblock`.
+    pub fn smgrsettargblock(
+        rlocator: types_storage::RelFileLocator,
+        backend: types_core::primitive::ProcNumber,
+        targblock: types_core::primitive::BlockNumber,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `AtEOXact_SMgr()` — close transient SMgrRelation objects.
     pub fn at_eoxact_smgr()
 );
