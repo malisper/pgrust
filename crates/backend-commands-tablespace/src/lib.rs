@@ -55,6 +55,8 @@ use types_nodes::ddlnodes::{
 use types_nodes::nodes::Node;
 use types_nodes::parsenodes::OBJECT_TABLESPACE;
 
+use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+
 use backend_catalog_pg_tablespace_seams as cat;
 use backend_commands_tablespace_globals_seams as glob;
 use backend_storage_file_tblspc_fs_seams as fs;
@@ -1719,6 +1721,54 @@ fn truncate_identifier(name: &mut String) {
 /// Install the outward seams this unit owns (`commands/tablespace.h` callees
 /// consumed by rmgr / acl / pg_shdepend). The fine-grained catalog/FS/globals
 /// primitives this crate *consumes* are installed by their own owners.
+/// Process-global backing for the GUC `conf->variable` C globals owned by this
+/// unit (tablespace.c:83-85).
+///
+/// C: `char *default_tablespace = NULL;`, `char *temp_tablespaces = NULL;`,
+/// `bool allow_in_place_tablespaces = false;`. The guc_tables.c boot_val for the
+/// two strings is `""` (an empty string, not NULL), so the accessors seed `""`
+/// while still unset — matching the GUC engine assigning boot_val at startup.
+/// The bool boots to `false`.
+mod gucs {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::RwLock;
+
+    static DEFAULT_TABLESPACE: RwLock<Option<String>> = RwLock::new(None);
+    static TEMP_TABLESPACES: RwLock<Option<String>> = RwLock::new(None);
+    static ALLOW_IN_PLACE: AtomicBool = AtomicBool::new(false);
+
+    pub fn default_tablespace() -> Option<String> {
+        // boot_val is "" (guc_tables.c), applied while the slot is unset.
+        match &*DEFAULT_TABLESPACE.read().unwrap() {
+            Some(s) => Some(s.clone()),
+            None => Some(String::new()),
+        }
+    }
+
+    pub fn set_default_tablespace(v: Option<String>) {
+        *DEFAULT_TABLESPACE.write().unwrap() = v;
+    }
+
+    pub fn temp_tablespaces() -> Option<String> {
+        match &*TEMP_TABLESPACES.read().unwrap() {
+            Some(s) => Some(s.clone()),
+            None => Some(String::new()),
+        }
+    }
+
+    pub fn set_temp_tablespaces(v: Option<String>) {
+        *TEMP_TABLESPACES.write().unwrap() = v;
+    }
+
+    pub fn allow_in_place_tablespaces() -> bool {
+        ALLOW_IN_PLACE.load(Ordering::Relaxed)
+    }
+
+    pub fn set_allow_in_place_tablespaces(v: bool) {
+        ALLOW_IN_PLACE.store(v, Ordering::Relaxed);
+    }
+}
+
 pub fn init_seams() {
     backend_commands_tablespace_seams::tblspc_redo::set(tblspc_redo);
     backend_commands_tablespace_seams::get_tablespace_name::set(get_tablespace_name);
@@ -1743,6 +1793,28 @@ pub fn init_seams() {
     backend_commands_tablecmds_seams::get_default_tablespace::set(|relpersistence, partitioned| {
         let ctx = MemoryContext::new("GetDefaultTablespace");
         GetDefaultTablespace(ctx.mcx(), relpersistence as i8, partitioned)
+    });
+
+    // --- GUC variable accessors (guc_tables) ---------------------------------
+    // The three GUC `conf->variable` C globals — `char *default_tablespace`,
+    // `char *temp_tablespaces`, `bool allow_in_place_tablespaces`
+    // (tablespace.c:83-85) — are owned by this unit. Install their accessors
+    // over our backing store (`gucs`) into the GUC engine's `vars::*` slots so
+    // the engine's `.read()`/`.write()` reach them. This mirrors C's
+    // build_guc_variables pass at startup wiring `&default_tablespace` etc.
+    // before any statement runs; seams-init calls every unit's init_seams() at
+    // boot, so these are registered before CREATE TABLE reads the GUC.
+    vars::default_tablespace.install(GucVarAccessors {
+        get: gucs::default_tablespace,
+        set: gucs::set_default_tablespace,
+    });
+    vars::temp_tablespaces.install(GucVarAccessors {
+        get: gucs::temp_tablespaces,
+        set: gucs::set_temp_tablespaces,
+    });
+    vars::allow_in_place_tablespaces.install(GucVarAccessors {
+        get: gucs::allow_in_place_tablespaces,
+        set: gucs::set_allow_in_place_tablespaces,
     });
 
     // --- GUC string/bool variable readers (guc_tables) -----------------------
