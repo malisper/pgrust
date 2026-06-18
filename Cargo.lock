@@ -20141,6 +20141,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-common-reloptions-seams",
  "backend-access-common-tupdesc",
+ "backend-access-heap-hio-seams",
  "backend-access-heap-vacuumlazy-seams",
  "backend-access-index-amapi-seams",
  "backend-access-index-genam-seams",

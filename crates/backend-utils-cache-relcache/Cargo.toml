@@ -17,6 +17,10 @@ backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-s
 # RelationUsesLocalBuffers / RelationGetNumberOfBlocks) home in vacuumlazy-seams
 # (re-signed off `&Relation<'mcx>`); the relcache is their real owner.
 backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
+# hio.c's RelationGetTargetPageFreeSpace (heap insertion target-page free-space
+# lookup) reads the relcache entry's rd_options fillfactor; the relcache is its
+# real owner. Re-signed off the relation OID.
+backend-access-heap-hio-seams = { path = "../backend-access-heap-hio-seams" }
 
 # The RelationIdCache is a real dynahash table (merged C-faithful raw-pointer
 # dynahash) — the substrate, not a stand-in. Acyclic: dynahash depends only on

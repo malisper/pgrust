@@ -169,6 +169,19 @@ pub fn init_seams() {
     vx::relation_get_reltuples::set(vac_relation_get_reltuples);
     vx::relation_needs_wal::set(vac_relation_needs_wal);
     vx::relation_uses_local_buffers::set(vac_relation_uses_local_buffers);
+
+    // --- hio.c heap-insertion target-page free-space lookup ---
+    use backend_access_heap_hio_seams as hx;
+    hx::relation_get_target_page_free_space::set(relation_get_target_page_free_space);
+}
+
+/// `RelationGetTargetPageFreeSpace(relation, defaultff)` (utils/rel.h) ==
+/// `BLCKSZ * (100 - RelationGetFillFactor(relation, defaultff)) / 100`. The
+/// fillfactor comes off the relcache entry's `rd_options` (defaulting to
+/// `defaultff` when unset).
+fn relation_get_target_page_free_space(rel: Oid, defaultff: i32) -> PgResult<usize> {
+    let fillfactor = with_entry(rel, |rd| rd.get_fillfactor(defaultff))?;
+    Ok(types_core::primitive::BLCKSZ * (100 - fillfactor as usize) / 100)
 }
 
 // --- vacuumlazy.c inline relcache reads ---
