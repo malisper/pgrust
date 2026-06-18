@@ -75,6 +75,7 @@ backend-access-spgist-core = { path = "../backend-access-spgist-core" }
 backend-access-brin-insert-vacuum = { path = "../backend-access-brin-insert-vacuum" }
 backend-access-brin-minmax = { path = "../backend-access-brin-minmax" }
 backend-access-hash-xlog = { path = "../backend-access-hash-xlog" }
+backend-access-sequence = { path = "../backend-access-sequence" }
 backend-access-table-table = { path = "../backend-access-table-table" }
 backend-access-table-tableam = { path = "../backend-access-table-tableam" }
 backend-access-transam-clog = { path = "../backend-access-transam-clog" }
