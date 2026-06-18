@@ -912,29 +912,98 @@ fn subquery_planner<'mcx>(
         // (no TABLESAMPLE, no function/values/group RTEs, no securityQuals); scan
         // and panic precisely if any present.
         {
+            use types_nodes::nodes::Node;
             use types_nodes::parsenodes::RTEKind;
             let n = run.resolve(root.parse).rtable.len();
             for i in 0..n {
-                let parse = run.resolve(root.parse);
-                let rte = &parse.rtable[i];
-                let needs = match rte.rtekind {
-                    RTEKind::RTE_RELATION => rte.tablesample.is_some(),
-                    RTEKind::RTE_SUBQUERY => rte.lateral && root.hasJoinRTEs,
-                    RTEKind::RTE_FUNCTION
-                    | RTEKind::RTE_TABLEFUNC
-                    | RTEKind::RTE_VALUES
-                    | RTEKind::RTE_GROUP => true,
-                    _ => false,
-                };
-                let has_secquals = !rte.securityQuals.is_empty();
-                if needs || has_secquals {
+                let rtekind = run.resolve(root.parse).rtable[i].rtekind;
+                let lateral = run.resolve(root.parse).rtable[i].lateral;
+
+                match rtekind {
+                    RTEKind::RTE_RELATION => {
+                        if run.resolve(root.parse).rtable[i].tablesample.is_some() {
+                            panic!(
+                                "subquery_planner: TABLESAMPLE expression preprocessing \
+                                 (planner.c:993-998) is not wired over the owned RTE model"
+                            );
+                        }
+                    }
+                    RTEKind::RTE_SUBQUERY => {
+                        if lateral && root.hasJoinRTEs {
+                            panic!(
+                                "subquery_planner: LATERAL subquery join-alias flattening \
+                                 (planner.c:1009-1012) is not wired over the owned RTE model"
+                            );
+                        }
+                    }
+                    RTEKind::RTE_VALUES => {
+                        // Preprocess the values lists fully (planner.c:1029-1034):
+                        // const-fold each row's each column expression. EXPRKIND_VALUES
+                        // skips flatten_join_alias_vars/canonicalize. LATERAL VALUES
+                        // (CREATE RULE only) panics in preprocess_expression if any
+                        // join RTEs are present, matching the C gate.
+                        let kind = if lateral {
+                            EXPRKIND_VALUES_LATERAL
+                        } else {
+                            EXPRKIND_VALUES
+                        };
+                        let nrows = run.resolve(root.parse).rtable[i].values_lists.len();
+                        for r in 0..nrows {
+                            // Take the row's column expressions out, process, put back.
+                            let row_exprs: mcx::PgVec<'mcx, Expr> = {
+                                let parse = run.resolve(root.parse);
+                                let row_node = &parse.rtable[i].values_lists[r];
+                                let cols = match &**row_node {
+                                    Node::List(items) => items,
+                                    _ => {
+                                        return Err(types_error::PgError::error(
+                                            "subquery_planner: VALUES row is not a List",
+                                        ))
+                                    }
+                                };
+                                let mut v = mcx::vec_with_capacity_in(mcx, cols.len())?;
+                                for c in cols.iter() {
+                                    match &**c {
+                                        Node::Expr(e) => v.push(e.clone()),
+                                        _ => {
+                                            return Err(types_error::PgError::error(
+                                                "subquery_planner: VALUES column is not an Expr",
+                                            ))
+                                        }
+                                    }
+                                }
+                                v
+                            };
+                            let mut new_cols: mcx::PgVec<'mcx, types_nodes::nodes::NodePtr<'mcx>> =
+                                mcx::vec_with_capacity_in(mcx, row_exprs.len())?;
+                            for e in row_exprs.into_iter() {
+                                let pe = preprocess_expression(mcx, &root, Some(e), kind)?;
+                                let pe = pe.ok_or_else(|| {
+                                    types_error::PgError::error(
+                                        "subquery_planner: VALUES column folded to NULL",
+                                    )
+                                })?;
+                                new_cols.push(mcx::alloc_in(mcx, Node::Expr(pe))?);
+                            }
+                            let new_row = mcx::alloc_in(mcx, Node::List(new_cols))?;
+                            run.resolve_mut(root.parse).rtable[i].values_lists[r] = new_row;
+                        }
+                    }
+                    RTEKind::RTE_FUNCTION | RTEKind::RTE_TABLEFUNC | RTEKind::RTE_GROUP => {
+                        panic!(
+                            "subquery_planner: per-RTE expression preprocessing \
+                             (planner.c:987-1054) for rtekind {:?} (function/tablefunc/\
+                             groupexprs) is not wired over the owned RTE model",
+                            rtekind
+                        );
+                    }
+                    _ => {}
+                }
+
+                if !run.resolve(root.parse).rtable[i].securityQuals.is_empty() {
                     panic!(
-                        "subquery_planner: per-RTE expression preprocessing \
-                         (planner.c:987-1054) for rtekind {:?} (tablesample/\
-                         function/tablefunc/values/groupexprs/securityQuals/\
-                         lateral-subquery alias flattening) is not wired over the \
-                         owned RTE model",
-                        rte.rtekind
+                        "subquery_planner: securityQuals expression preprocessing \
+                         (planner.c:1050-1054) is not wired over the owned RTE model"
                     );
                 }
             }
