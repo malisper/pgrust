@@ -308,18 +308,28 @@ fn pop_frame(id: u64) -> PgResult<PgError> {
 }
 
 fn try_pop_frame(id: u64) -> PgResult<Option<PgError>> {
-    ERROR_STACK.with(|stack| {
-        let mut stack = stack.borrow_mut();
-        let Some(frame) = stack.frames.last() else {
-            return Ok(None);
-        };
-        if frame.id != id {
-            return Ok(None);
-        }
-        let frame = stack.frames.pop().expect("last frame was checked");
-        stack.recursion_depth = stack.recursion_depth.saturating_sub(1);
-        Ok(Some(frame.error))
-    })
+    // `try_with`, not `with`: this is the only access reached from
+    // `ErrorStackFrame::drop`, which can fire while the stack is unwinding a
+    // process entry point WITHOUT a clean exit. By that point the thread's
+    // `ERROR_STACK` TLS may already be mid- or post-destruction, and a plain
+    // `with` would raise an `AccessError`. A panic out of a `Drop` that runs
+    // during an unwind `abort()`s the process (the double-panic crash mode), so
+    // probe with `try_with` and treat a destroyed TLS as "no frame to pop"
+    // (mirrors the dsm-core atexit guard, 06181ad9f).
+    ERROR_STACK
+        .try_with(|stack| {
+            let mut stack = stack.borrow_mut();
+            let Some(frame) = stack.frames.last() else {
+                return Ok(None);
+            };
+            if frame.id != id {
+                return Ok(None);
+            }
+            let frame = stack.frames.pop().expect("last frame was checked");
+            stack.recursion_depth = stack.recursion_depth.saturating_sub(1);
+            Ok(Some(frame.error))
+        })
+        .unwrap_or(Ok(None))
 }
 
 fn errstart_not_called() -> PgError {
