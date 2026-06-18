@@ -24,7 +24,7 @@ _Last updated: 2026-06-18 · origin/main ≈ `5f57e550a`_
 ## The 10 categories (status)
 1. **pg_regress + correctness bugs** [DRIVER] — boolean workflow active; open diffs: boolin ws, error-position, pg_input_is_valid, func-in-FROM.
 2. **Wiring seams** — fmgr dispatch **56/67 installed** (floor: 6 blocked on the fmgr frame-carrier by-ref keystone + 5 fastpath/bgworker); seam-install floor ~163 keystone/FDW-gated.
-3. **Finishing partial ports — 176 gaps / 47 crates** — firing: planner(35), arrayfuncs(19), misc2(16), EXPLAIN(63 structural); ✅ done: typcache(7), lmgr-lock(15→6), createplan(3→0); pending: relcache(14, needs policy `a3b93c9f`), xlog(6); deferred off-path: walsender(20), reorderbuffer(9).
+3. **Finishing partial ports — 176 gaps / 47 crates** — firing: arrayfuncs(19), EXPLAIN(63 structural), planner priorities 2-5; ✅ done: typcache(7), lmgr-lock(15→6), createplan(3→0), misc2(15/16), planner GROUP BY (priority-1); pending: relcache(14, needs policy `a3b93c9f`), xlog(6); deferred off-path: walsender(20), reorderbuffer(9).
 4. **Keystones** — see register below.
 5. **Entirely-unported units** — datetime registration `a58be86c`; JSON node-model (queued); array_expanded.c (queued); 76 adt crates unregistered (driving to 0).
 6. **Registry-completeness** — GUC ✅ **402/404** (floor 2) · fmgr seams 🔨 · fmgr builtins 🔨 · syscache 85/85 ✅. ⚠️ installing a GUC activates its assign-hook → boot panic if unported.
@@ -74,7 +74,7 @@ _Last updated: 2026-06-18 · origin/main ≈ `5f57e550a`_
 ---
 
 ## Active lanes
-`abe15b79` planner (GROUP BY) · `a85f618f` boolean→PASS · `ae2d175a` arrayfuncs · `ac327c72` misc2 · `a3b93c9f` policy/RLS · `a870e34d` EXPLAIN structural · `a59005ae` column-agg ecxt_scantuple · `a9b78cc5` joins (set_joinrel_size_estimates)
+`a85f618f` boolean→PASS · `ae2d175a` arrayfuncs · `a3b93c9f` policy/RLS · `a870e34d` EXPLAIN structural · `a59005ae` column-agg ecxt_scantuple (= GROUP BY's blocker too) · `a9b78cc5` joins · `a125389c` planner DISTINCT/FOR-UPDATE
 
 ## Build/infra notes
 - Artifacts ~6 GB/build (was ~10–14): `713252a14` (line-tables-only) + `c794aeac6` (**`incremental=false` now on `[profile.dev]`** — the lanes' default build; was only on the unused fast-check profile). Cap **~8**, keep ~20 GB buffer.
@@ -82,7 +82,7 @@ _Last updated: 2026-06-18 · origin/main ≈ `5f57e550a`_
 - Reaper = shm + `git worktree prune` ONLY (idle-based auto-rm disrupted live lanes twice; lanes self-clean + orchestrator reaps on pressure).
 
 ## Recently landed
-count(\*) exec (#165) · **count(\*) FROM pg_class = 415** (setrefs varno + IndexOnlyScan) · fmgr builtin registry 2003→1574 (0 mismatches) · cargo dev incremental=0 · min/max planner fall-through · createplan (unique/groupingsets/async, 3→0) · GUC registry 402/404 · typcache complete · lmgr-lock (15→6) · fmgr Phase-1 seams (56/67) · bool.c 100% (type correct e2e) + boolean parser/func-RTE fixes · io_combine_limit boot fix · Datum by-ref bridge (+saophash) · crash-reinit (TLS-unwind) · seclabel→DROP · comment→DROP · multi-row VALUES · parse_expr XML · t_bits crash · setrefs Aggref fixup · smaller build artifacts · plancache F0
+count(\*) exec (#165) · **GROUP BY planning** (+ real parser p_rtable bug fix) · misc2 (15/16) · **count(\*) FROM pg_class = 415** (setrefs varno + IndexOnlyScan) · fmgr builtin registry 2003→1574 (0 mismatches) · cargo dev incremental=0 · min/max planner fall-through · createplan (unique/groupingsets/async, 3→0) · GUC registry 402/404 · typcache complete · lmgr-lock (15→6) · fmgr Phase-1 seams (56/67) · bool.c 100% (type correct e2e) + boolean parser/func-RTE fixes · io_combine_limit boot fix · Datum by-ref bridge (+saophash) · crash-reinit (TLS-unwind) · seclabel→DROP · comment→DROP · multi-row VALUES · parse_expr XML · t_bits crash · setrefs Aggref fixup · smaller build artifacts · plancache F0
 
 ## DROP status
 CREATE→INSERT→SELECT ✓ · DROP: comment ✓ → seclabel ✓ → **next wall `relation_is_nailed`** (tablecmds seam).
