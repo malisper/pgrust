@@ -102,4 +102,24 @@ pub fn init_seams() {
     backend_access_transam_parallel_rt_seams::become_lock_group_member::set(
         proc_misc::BecomeLockGroupMemberByNumber,
     );
+
+    // `pid_get_proc(pid)` of mcxtfuncs.c's `pg_log_backend_memory_contexts`:
+    //
+    //   proc = BackendPidGetProc(pid);
+    //   if (proc == NULL) proc = AuxiliaryPidGetProc(pid);
+    //   if (proc == NULL) return NULL;
+    //   procNumber = GetNumberFromPGProc(proc);
+    //
+    // `GetNumberFromPGProc(proc)` is `proc->procNumber` — the slot's own
+    // `ProcNumber`, which is exactly the value `BackendPidGetProc` /
+    // `AuxiliaryPidGetProc` resolve a pid to here. The backend scan crosses into
+    // procarray (`backend_pid_get_proc_role`, installed by procarray); the
+    // auxiliary scan is `proc_lifecycle::AuxiliaryPidGetProc`, owned here.
+    backend_utils_adt_mcxtfuncs_seams::pid_get_proc::set(|pid| {
+        use backend_utils_adt_mcxtfuncs_seams::McxtSignalTarget;
+        let proc_number = backend_storage_ipc_procarray_seams::backend_pid_get_proc_role::call(pid)
+            .map(|(_role_id, procno)| procno)
+            .or_else(|| proc_lifecycle::AuxiliaryPidGetProc(pid));
+        Ok(proc_number.map(|proc_number| McxtSignalTarget { proc_number }))
+    });
 }

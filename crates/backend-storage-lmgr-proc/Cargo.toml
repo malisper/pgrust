@@ -53,6 +53,10 @@ backend-postmaster-autovacuum-ext-seams = { path = "../backend-postmaster-autova
 backend-storage-ipc-pmsignal-seams = { path = "../backend-storage-ipc-pmsignal-seams" }
 backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
 backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
+# Outward install: pid_get_proc of mcxtfuncs.c's pg_log_backend_memory_contexts
+# resolves to BackendPidGetProc/AuxiliaryPidGetProc + GetNumberFromPGProc, all
+# owned here / by procarray. Cross-crate install (mcxtfuncs is the consumer).
+backend-utils-adt-mcxtfuncs-seams = { path = "../backend-utils-adt-mcxtfuncs-seams" }
 backend-storage-lmgr-condition-variable-seams = { path = "../backend-storage-lmgr-condition-variable-seams" }
 backend-replication-syncrep-seams = { path = "../backend-replication-syncrep-seams" }
 backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat-seams" }
