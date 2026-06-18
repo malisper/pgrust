@@ -909,12 +909,29 @@ mod guc_vars {
         };
     }
 
+    macro_rules! bool_guc {
+        ($cell:ident, $get:ident, $set:ident, $default:expr) => {
+            thread_local! {
+                static $cell: Cell<bool> = const { Cell::new($default) };
+            }
+            fn $get() -> bool {
+                $cell.with(Cell::get)
+            }
+            fn $set(value: bool) {
+                $cell.with(|c| c.set(value));
+            }
+        };
+    }
+
     int_guc!(EFFECTIVE_IO_CONCURRENCY, eff_get, eff_set, 16);
     int_guc!(MAINTENANCE_IO_CONCURRENCY, maint_get, maint_set, 16);
     int_guc!(IO_COMBINE_LIMIT, iocl_get, iocl_set, 16);
     int_guc!(BGWRITER_LRU_MAXPAGES, blm_get, blm_set, 100);
     int_guc!(CHECKPOINT_FLUSH_AFTER, cfa_get, cfa_set, 0);
     int_guc!(BGWRITER_FLUSH_AFTER, bfa_get, bfa_set, 0);
+    // bufmgr.c: `bool track_io_timing = false`, `bool zero_damaged_pages = false`.
+    bool_guc!(TRACK_IO_TIMING, tit_get, tit_set, false);
+    bool_guc!(ZERO_DAMAGED_PAGES, zdp_get, zdp_set, false);
 
     thread_local! {
         static BGWRITER_LRU_MULTIPLIER: Cell<f64> = const { Cell::new(2.0) };
@@ -954,6 +971,14 @@ mod guc_vars {
         vars::bgwriter_lru_multiplier.install(GucVarAccessors {
             get: blmul_get,
             set: blmul_set,
+        });
+        vars::track_io_timing.install(GucVarAccessors {
+            get: tit_get,
+            set: tit_set,
+        });
+        vars::zero_damaged_pages.install(GucVarAccessors {
+            get: zdp_get,
+            set: zdp_set,
         });
     }
 }

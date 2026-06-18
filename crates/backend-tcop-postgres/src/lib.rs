@@ -88,7 +88,24 @@ fn quickdie_handler(signo: i32) {
 /// Installs the F3/F5/F6 seams that `postgres.c` owns and that other (already
 /// merged) units consume — retiring the latent panics they carried while
 /// `tcop/postgres.c` was CATALOG `todo`.
+std::thread_local! {
+    /// `int client_connection_check_interval = 0` (postgres.c:102) — backing
+    /// store for the guc-table slot; PGC_USERSET, boot value 0 (disabled).
+    static CLIENT_CONNECTION_CHECK_INTERVAL: core::cell::Cell<i32> =
+        const { core::cell::Cell::new(0) };
+}
+
 pub fn init_seams() {
+    // postgres.c owns the `client_connection_check_interval` GUC global
+    // (read by the interrupt machinery). Install the guc-table slot accessors
+    // over our backing cell so the GUC engine can read/write it.
+    backend_utils_misc_guc_tables::vars::client_connection_check_interval.install(
+        backend_utils_misc_guc_tables::GucVarAccessors {
+            get: || CLIENT_CONNECTION_CHECK_INTERVAL.with(core::cell::Cell::get),
+            set: |v| CLIENT_CONNECTION_CHECK_INTERVAL.with(|c| c.set(v)),
+        },
+    );
+
     // --- F3: interrupt / signal machinery ---
     s::check_for_interrupts::set(interrupt::check_for_interrupts);
     // pathnode.c (the optimizer) calls the same `CHECK_FOR_INTERRUPTS()` macro

@@ -1665,7 +1665,22 @@ fn maxalign(size: Size) -> Size {
 /// in other units (e.g. `bufmgr.c`'s `StartReadBuffersImpl`, which promotes the
 /// value to the `READ_BUFFERS_IGNORE_CHECKSUM_FAILURES` flag) call it across
 /// the dependency cycle via `backend-storage-page-seams`.
+std::thread_local! {
+    /// `bool ignore_checksum_failure = false` (bufpage.c) — backing store for
+    /// the guc-table slot; PGC_SUSET, boot value `false`.
+    static IGNORE_CHECKSUM_FAILURE: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
 pub fn init_seams() {
+    // bufpage.c owns the `ignore_checksum_failure` GUC global; install the
+    // guc-table slot accessors over our backing cell so the GUC engine can
+    // read/write it.
+    backend_utils_misc_guc_tables::vars::ignore_checksum_failure.install(
+        backend_utils_misc_guc_tables::GucVarAccessors {
+            get: || IGNORE_CHECKSUM_FAILURE.with(core::cell::Cell::get),
+            set: |v| IGNORE_CHECKSUM_FAILURE.with(|c| c.set(v)),
+        },
+    );
     backend_storage_page_seams::ignore_checksum_failure::set(|| {
         backend_utils_misc_guc_tables::vars::ignore_checksum_failure.read()
     });

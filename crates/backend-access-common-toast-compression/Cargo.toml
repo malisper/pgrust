@@ -15,3 +15,4 @@ types-datum = { path = "../types-datum" }
 mcx = { path = "../mcx" }
 common-pglz = { path = "../common-pglz" }
 backend-access-common-toast-compression-seams = { path = "../backend-access-common-toast-compression-seams" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }

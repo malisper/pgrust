@@ -178,6 +178,23 @@ fn lo_compat_privileges() -> bool {
     backend_utils_misc_guc_tables::vars::lo_compat_privileges.read()
 }
 
+std::thread_local! {
+    /// `bool lo_compat_privileges` (inv_api.c:56) — backing store for the
+    /// guc-table slot; PGC_SUSET, boot value `false`.
+    static LO_COMPAT_PRIVILEGES: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+/// Install the `lo_compat_privileges` guc-table slot accessors over the
+/// inv_api.c-owned backing cell. Called once from `init_seams()`.
+pub(crate) fn install_lo_compat_privileges_guc() {
+    backend_utils_misc_guc_tables::vars::lo_compat_privileges.install(
+        backend_utils_misc_guc_tables::GucVarAccessors {
+            get: || LO_COMPAT_PRIVILEGES.with(core::cell::Cell::get),
+            set: |v| LO_COMPAT_PRIVILEGES.with(|c| c.set(v)),
+        },
+    );
+}
+
 /// Allocate the `LOBLKSIZE`-byte scratch "page" the C declares as the
 /// `workbuf.data[LOBLKSIZE + VARHDRSZ]` union, zero-initialised. The size is the
 /// fixed `LOBLKSIZE`, never data-derived.
@@ -1112,6 +1129,8 @@ pub fn inv_truncate(obj_desc: &mut LargeObjectDesc, len: int64) -> PgResult<()> 
 /// into `seams-init`'s `init_all`.
 pub fn init_seams() {
     use backend_storage_large_object_seams as seams;
+    // inv_api.c owns the `lo_compat_privileges` GUC global.
+    install_lo_compat_privileges_guc();
     seams::close_lo_relation::set(close_lo_relation);
     seams::inv_create::set(inv_create);
     seams::inv_open::set(inv_open);

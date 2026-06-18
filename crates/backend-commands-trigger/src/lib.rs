@@ -29,10 +29,25 @@ pub mod ri_accessors;
 
 /// Install every implementation in `backend-commands-trigger-seams` (and the
 /// trigger-firing seams `nodeModifyTable` consumes through that crate).
+std::thread_local! {
+    /// `int SessionReplicationRole = SESSION_REPLICATION_ROLE_ORIGIN` (trigger.c:64)
+    /// — backing store for the guc-table slot; PGC_SUSET, boot value 0 (ORIGIN).
+    static SESSION_REPLICATION_ROLE: core::cell::Cell<i32> = const { core::cell::Cell::new(0) };
+}
+
 pub fn init_seams() {
     firing::init_seams();
     ri_accessors::init_seams();
     fmgr_builtins::register_trigger_builtins();
+
+    // trigger.c owns the `SessionReplicationRole` GUC global (read by
+    // rewriteHandler.c). Install the guc-table slot accessors over our cell.
+    backend_utils_misc_guc_tables::vars::SessionReplicationRole.install(
+        backend_utils_misc_guc_tables::GucVarAccessors {
+            get: || SESSION_REPLICATION_ROLE.with(core::cell::Cell::get),
+            set: |v| SESSION_REPLICATION_ROLE.with(|c| c.set(v)),
+        },
+    );
 
     // Cross-crate install: `AfterTriggerPendingOnRel` (trigger.c, body in
     // `queue`) is consumed by tablecmds `ExecuteTruncate`; its decl lives on

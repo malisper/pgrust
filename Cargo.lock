@@ -603,6 +603,7 @@ name = "backend-access-common-toast-compression"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-toast-compression-seams",
+ "backend-utils-misc-guc-tables",
  "common-pglz",
  "mcx",
  "seam-core",
@@ -7852,6 +7853,7 @@ dependencies = [
  "backend-utils-cache-relcache-seams",
  "backend-utils-fmgr-core",
  "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-misc-guc-tables",
  "mcx",
  "seam-core",
  "types-core",

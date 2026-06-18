@@ -165,6 +165,23 @@ fn OidIsValid(oid: Oid) -> bool {
     oid != InvalidOid
 }
 
+std::thread_local! {
+    /// `int default_statistics_target = 100` (analyze.c) — backing store for
+    /// the guc-table slot; PGC_USERSET, boot value 100.
+    static DEFAULT_STATISTICS_TARGET: core::cell::Cell<i32> = const { core::cell::Cell::new(100) };
+}
+
+/// Install the `default_statistics_target` guc-table slot accessors over the
+/// analyze.c-owned backing cell. Called once from `init_seams()`.
+pub(crate) fn install_default_statistics_target_guc() {
+    backend_utils_misc_guc_tables::vars::default_statistics_target.install(
+        backend_utils_misc_guc_tables::GucVarAccessors {
+            get: || DEFAULT_STATISTICS_TARGET.with(core::cell::Cell::get),
+            set: |v| DEFAULT_STATISTICS_TARGET.with(|c| c.set(v)),
+        },
+    );
+}
+
 /// `default_statistics_target` GUC (guc_tables.c) — the per-backend default,
 /// read from the real GUC slot (as `rangetypes_typanalyze` does).
 fn default_statistics_target() -> i32 {

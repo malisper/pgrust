@@ -68,6 +68,12 @@ pub mod io;
 pub mod ops;
 pub mod sql;
 
+std::thread_local! {
+    /// `bool Array_nulls = true` (arrayfuncs.c) — backing store for the
+    /// guc-table slot; PGC_USERSET, boot value `true`.
+    static ARRAY_NULLS: core::cell::Cell<bool> = const { core::cell::Cell::new(true) };
+}
+
 /// Install every inward seam this crate owns.
 ///
 /// The `backend-utils-adt-arrayfuncs-seams` crate declares the polymorphic
@@ -78,9 +84,17 @@ pub mod sql;
 pub fn init_seams() {
     use backend_utils_adt_arrayfuncs_seams as seams;
 
-    // `Array_nulls` GUC: `array_in` reads the live value from the GUC slot
-    // (`guc_tables::vars::Array_nulls`), exactly as C reads the `Array_nulls`
-    // global. PGC_USERSET, boot value `true`.
+    // `Array_nulls` GUC: arrayfuncs.c owns the `bool Array_nulls = true`
+    // global (PGC_USERSET, boot value `true`). Install the guc-table slot
+    // accessors over our backing cell so the GUC engine can read/write it, and
+    // `array_in` reads the live value through the slot, exactly as C reads the
+    // global.
+    backend_utils_misc_guc_tables::vars::Array_nulls.install(
+        backend_utils_misc_guc_tables::GucVarAccessors {
+            get: || ARRAY_NULLS.with(core::cell::Cell::get),
+            set: |v| ARRAY_NULLS.with(|c| c.set(v)),
+        },
+    );
     seams::array_nulls::set(|| backend_utils_misc_guc_tables::vars::Array_nulls.read());
 
     seams::init_array_result_any::set(construct::init_array_result_any);

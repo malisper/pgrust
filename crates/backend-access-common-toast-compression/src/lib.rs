@@ -420,7 +420,24 @@ pub fn get_compression_method_name(method: u8) -> PgResult<&'static str> {
 
 /// Install this crate's seams. Contains only `set()` calls; `init_all()` in
 /// `seams-init` invokes it at startup.
+std::thread_local! {
+    /// `int default_toast_compression = TOAST_PGLZ_COMPRESSION` ('p' = 112)
+    /// (toast_compression.c:26) — backing store for the guc-table enum slot;
+    /// PGC_USERSET, boot value 112.
+    static DEFAULT_TOAST_COMPRESSION: core::cell::Cell<i32> = const { core::cell::Cell::new(112) };
+}
+
 pub fn init_seams() {
     seams::lz4_decompress_datum::set(lz4_decompress_datum);
     seams::lz4_decompress_datum_slice::set(lz4_decompress_datum_slice);
+
+    // toast_compression.c owns the `default_toast_compression` GUC global
+    // (read by toast_internals.c). Install the guc-table slot accessors over
+    // our backing cell so the GUC engine can read/write it.
+    backend_utils_misc_guc_tables::vars::default_toast_compression.install(
+        backend_utils_misc_guc_tables::GucVarAccessors {
+            get: || DEFAULT_TOAST_COMPRESSION.with(core::cell::Cell::get),
+            set: |v| DEFAULT_TOAST_COMPRESSION.with(|c| c.set(v)),
+        },
+    );
 }

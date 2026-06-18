@@ -17,4 +17,6 @@ pub fn init_seams() {
     analyze::analyze_rel::set(crate::analyze_rel);
     analyze::std_typanalyze::set(crate::std_typanalyze);
     analyze::std_compute_stats::set(crate::std_compute_stats);
+    // analyze.c owns the `default_statistics_target` GUC global.
+    crate::install_default_statistics_target_guc();
 }

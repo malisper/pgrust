@@ -30,3 +30,4 @@ backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-s
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-access-heap-heapam-seams = { path = "../backend-access-heap-heapam-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }

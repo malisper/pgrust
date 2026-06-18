@@ -2408,8 +2408,21 @@ pub fn init_seams() {
     inward::cached_plan_stmt_list::set(seam_cached_plan_stmt_list);
 
     // `plan_cache_mode` (plancache.c:138 `int plan_cache_mode`) — USERSET enum
-    // GUC owned by this unit. Read straight from the guc-tables slot.
+    // GUC owned by this unit. Install the guc-table slot accessors over the
+    // backing cell so the GUC engine can read/write it, then read the slot.
+    backend_utils_misc_guc_tables::vars::plan_cache_mode.install(
+        backend_utils_misc_guc_tables::GucVarAccessors {
+            get: || PLAN_CACHE_MODE.with(core::cell::Cell::get),
+            set: |v| PLAN_CACHE_MODE.with(|c| c.set(v)),
+        },
+    );
     backend_seams::plan_cache_mode::set(|| {
         Ok(backend_utils_misc_guc_tables::vars::plan_cache_mode.read())
     });
+}
+
+std::thread_local! {
+    /// `int plan_cache_mode = PLAN_CACHE_MODE_AUTO` (plancache.c:138) — backing
+    /// store for the guc-table slot; PGC_USERSET, boot value 0 (AUTO).
+    static PLAN_CACHE_MODE: core::cell::Cell<i32> = const { core::cell::Cell::new(0) };
 }

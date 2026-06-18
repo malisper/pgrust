@@ -98,11 +98,11 @@ fn cursor_tuple_fraction() -> f64 {
 }
 
 // `debug_parallel_query` GUC. The parallel-Gather test path of
-// `standard_planner` only runs when this != OFF. It is not threaded into this
-// crate, so we evaluate it as OFF (the production default), which faithfully
-// skips the debug-only Gather injection.
-const fn debug_parallel_query() -> i32 {
-    DEBUG_PARALLEL_OFF
+// `standard_planner` only runs when this != OFF. planner.c owns the `int
+// debug_parallel_query` global; we read its runtime-mutable backing cell (boot
+// value `DEBUG_PARALLEL_OFF`), so a SET takes effect exactly as in C.
+fn debug_parallel_query() -> i32 {
+    DEBUG_PARALLEL_QUERY.with(core::cell::Cell::get)
 }
 
 // ===========================================================================
@@ -135,6 +135,19 @@ std::thread_local! { // expanded via the std prelude macro
     // `bool parallel_leader_participation = true;`
     static PARALLEL_LEADER_PARTICIPATION: core::cell::Cell<bool> =
         const { core::cell::Cell::new(true) };
+    // `int debug_parallel_query = DEBUG_PARALLEL_OFF;` (planner.c)
+    static DEBUG_PARALLEL_QUERY: core::cell::Cell<i32> =
+        const { core::cell::Cell::new(DEBUG_PARALLEL_OFF) };
+}
+
+#[inline]
+fn get_debug_parallel_query() -> i32 {
+    DEBUG_PARALLEL_QUERY.with(core::cell::Cell::get)
+}
+
+#[inline]
+fn set_debug_parallel_query(value: i32) {
+    DEBUG_PARALLEL_QUERY.with(|c| c.set(value));
 }
 
 #[inline]
@@ -3443,6 +3456,11 @@ pub fn init_seams() {
     vars::parallel_leader_participation.install(GucVarAccessors {
         get: get_parallel_leader_participation,
         set: set_parallel_leader_participation,
+    });
+    // planner.c owns `int debug_parallel_query`.
+    vars::debug_parallel_query.install(GucVarAccessors {
+        get: get_debug_parallel_query,
+        set: set_debug_parallel_query,
     });
 }
 
