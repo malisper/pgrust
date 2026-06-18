@@ -22610,6 +22610,7 @@ dependencies = [
  "backend-utils-adt-skipsupport",
  "backend-utils-adt-tsvector-core",
  "backend-utils-adt-uuid",
+ "backend-utils-adt-varchar",
  "backend-utils-adt-varlena",
  "backend-utils-adt-version",
  "backend-utils-adt-xml",

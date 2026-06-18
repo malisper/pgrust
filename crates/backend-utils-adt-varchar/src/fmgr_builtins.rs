@@ -386,9 +386,9 @@ fn builtin(
 pub fn register_varchar_builtins() {
     backend_utils_fmgr_core::register_builtins([
         // ---- conversions ----
-        builtin(408, "bpchar", 1, fc_name_bpchar),
-        builtin(409, "name", 1, fc_bpchar_name),
-        builtin(860, "bpchar", 1, fc_char_bpchar),
+        builtin(408, "name_bpchar", 1, fc_name_bpchar),
+        builtin(409, "bpchar_name", 1, fc_bpchar_name),
+        builtin(860, "char_bpchar", 1, fc_char_bpchar),
         // ---- length-coercion casts ----
         builtin(668, "bpchar", 3, fc_bpchar),
         builtin(669, "varchar", 3, fc_varchar),
@@ -415,10 +415,10 @@ pub fn register_varchar_builtins() {
         builtin(1080, "hashbpchar", 1, fc_hashbpchar),
         builtin(972, "hashbpcharextended", 2, fc_hashbpcharextended),
         // ---- length helpers ----
-        builtin(1318, "length", 1, fc_bpcharlen),
-        builtin(1367, "character_length", 1, fc_bpcharlen),
-        builtin(1372, "char_length", 1, fc_bpcharlen),
-        builtin(1375, "octet_length", 1, fc_bpcharoctetlen),
+        builtin(1318, "bpcharlen", 1, fc_bpcharlen),
+        builtin(1367, "bpcharlen", 1, fc_bpcharlen),
+        builtin(1372, "bpcharlen", 1, fc_bpcharlen),
+        builtin(1375, "bpcharoctetlen", 1, fc_bpcharoctetlen),
         // ---- bpchar pattern_ops ordering ----
         builtin(2174, "bpchar_pattern_lt", 2, fc_bpchar_pattern_lt),
         builtin(2175, "bpchar_pattern_le", 2, fc_bpchar_pattern_le),
