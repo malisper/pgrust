@@ -280,9 +280,9 @@ pub fn DefineRule<'mcx>(
         .relation
         .as_ref()
         .ok_or_else(|| PgError::error("DefineRule: RuleStmt has no relation"))?;
-    let range_var = match &**relation_node {
-        Node::RangeVar(rv) => to_access_range_var(rv),
-        _ => return Err(PgError::error("DefineRule: RuleStmt relation is not a RangeVar")),
+    let range_var = match relation_node.as_rangevar() {
+        Some(rv) => to_access_range_var(rv),
+        None => return Err(PgError::error("DefineRule: RuleStmt relation is not a RangeVar")),
     };
     let rel_id = backend_catalog_namespace::RangeVarGetRelid(
         mcx,
