@@ -1524,7 +1524,23 @@ fn with_portal_globals(
     let saved_active = ACTIVE_PORTAL.with(|c| c.borrow_mut().replace(portal.clone()));
     let saved_ctx = PORTAL_CONTEXT_OWNER.with(|c| c.borrow_mut().replace(portal.clone()));
 
-    let result = f();
+    // C's PG_TRY/PG_CATCH restores ActivePortal/PortalContext on ANY non-local
+    // exit. In this port an unported path can leave the body via a `panic!`
+    // rather than a `PgResult::Err`; a bare `let result = f();` would skip the
+    // restore on that panic, leaving ActivePortal dangling (and, in the caller's
+    // run_protected, MarkPortalFailed unrun) so the portal is stuck PORTAL_ACTIVE
+    // and every later statement in the session fails with "cannot drop active
+    // portal". Catch the unwind, restore the globals like the Err arm, then
+    // resume the panic so the main-loop catch_unwind still turns it into the
+    // proper recoverable ERROR.
+    let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f())) {
+        Ok(r) => r,
+        Err(payload) => {
+            ACTIVE_PORTAL.with(|c| *c.borrow_mut() = saved_active);
+            PORTAL_CONTEXT_OWNER.with(|c| *c.borrow_mut() = saved_ctx);
+            std::panic::resume_unwind(payload);
+        }
+    };
 
     ACTIVE_PORTAL.with(|c| *c.borrow_mut() = saved_active);
     PORTAL_CONTEXT_OWNER.with(|c| *c.borrow_mut() = saved_ctx);

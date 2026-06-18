@@ -616,7 +616,24 @@ fn run_protected(
     portal: &Portal,
     mut body: impl FnMut() -> PgResult<()>,
 ) -> PgResult<()> {
-    let result = portalmem_seam::with_portal_globals::call(portal, &mut body);
+    // C's PG_CATCH runs MarkPortalFailed on ANY non-local exit out of the body.
+    // An unported path may leave `body` via a `panic!` rather than a
+    // `PgResult::Err`; without catching it the portal would stay PORTAL_ACTIVE
+    // and poison every later statement in the session ("cannot drop active
+    // portal"). Catch the unwind, mark the portal failed like the Err arm, then
+    // resume the panic so the main-loop catch_unwind turns it into the proper
+    // recoverable ERROR. (with_portal_globals has already restored the portal
+    // globals before re-raising.)
+    let result =
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            portalmem_seam::with_portal_globals::call(portal, &mut body)
+        })) {
+            Ok(r) => r,
+            Err(payload) => {
+                let _ = portalmem::MarkPortalFailed(portal);
+                std::panic::resume_unwind(payload);
+            }
+        };
     if result.is_err() {
         /* Uncaught error while executing portal: mark it dead */
         portalmem::MarkPortalFailed(portal)?;
