@@ -1082,3 +1082,17 @@ seam_core::seam!(
         rel: types_core::primitive::Oid,
     ) -> types_error::PgResult<types_storage::lock::LockRelId>
 );
+
+seam_core::seam!(
+    /// `TupleDescCompactAttr(RelationGetDescr(rel), attnum - 1)->attnullability
+    /// = attnullability` (set_attnotnull, commands/tablecmds.c): poke the live
+    /// relcache entry's compact-attribute nullability state for one column. The
+    /// in-place mutation of the cached `RelationData` C performs through the
+    /// relation pointer; expressed here as a by-OID mutator over the relcache
+    /// owner's `with_relation_mut`. `Err` if the entry is absent.
+    pub fn set_relcache_attnullability(
+        relid: types_core::primitive::Oid,
+        attnum: types_core::primitive::AttrNumber,
+        attnullability: i8,
+    ) -> types_error::PgResult<()>
+);

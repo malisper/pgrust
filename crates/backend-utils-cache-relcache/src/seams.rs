@@ -144,6 +144,16 @@ pub fn init_seams() {
         .and_then(|r| r)
     });
 
+    // --- set_attnotnull (tablecmds.c) live-entry compact-attr nullability poke.
+    //     C mutates TupleDescCompactAttr(RelationGetDescr(rel), attnum-1)
+    //     ->attnullability in place through the cached relation pointer; the
+    //     owned descriptor carries attnullability on the per-attr row. ---
+    sx::set_relcache_attnullability::set(|relid, attnum, attnullability| {
+        crate::core_entry_store::with_relation_mut(relid, |rd| {
+            rd.rd_att.attrs[(attnum - 1) as usize].attnullability = attnullability;
+        })
+    });
+
     // --- rewriteHandler.c per-query rule reader (rd_rules re-projection) ---
     sx::relation_rules::set(relation_rules);
 

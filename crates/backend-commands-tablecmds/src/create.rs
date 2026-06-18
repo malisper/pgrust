@@ -26,7 +26,16 @@ use types_tuple::access::{
 };
 use types_tuple::heaptuple::TupleDescData;
 
+use types_catalog::pg_attribute::{AttributeRelationId, PgAttributeUpdateRow};
+use types_rel::Relation;
+use types_storage::lock::RowExclusiveLock;
+
+use types_tuple::heaptuple::ATTNULLABLE_VALID;
+
 use backend_access_common_relation::relation_open;
+use backend_catalog_indexing_seams as indexing_seam;
+use backend_utils_cache_relcache_seams as relcache_seam;
+use backend_utils_cache_syscache::SearchSysCacheAttNum;
 use backend_access_common_tupdesc::{
     populate_compact_attribute, CreateTemplateTupleDesc, TupleDescInitEntry,
     TupleDescInitEntryCollation,
@@ -751,6 +760,96 @@ pub fn define_relation<'mcx>(
     rel.close(types_storage::lock::NoLock)?;
 
     Ok(address)
+}
+
+/// `set_attnotnull(wqueue, rel, attnum, is_valid, queue_validation)`
+/// (tablecmds.c:8534) — set the `attnotnull` flag on a column of a relation.
+///
+/// Used by `DefineRelation` (and `ATExecSetNotNull`) to mark the columns that
+/// a PRIMARY KEY / NOT NULL constraint covers. The `DefineRelation` caller
+/// passes `wqueue == NULL`, `is_valid == true`, `queue_validation == false`,
+/// so the ALTER-TABLE phase-3 validation-queue block (`ATGetQueueEntry`) is not
+/// reached here.
+///
+/// On the not-yet-set path it writes `pg_attribute.attnotnull = true`, stamps
+/// the live relcache entry's compact attribute `attnullability = ATTNULLABLE_VALID`
+/// (the in-place descriptor poke C does through the relation pointer, expressed
+/// via the `set_relcache_attnullability` relcache seam), and bumps the command
+/// counter. `is_valid` is carried but unused by the PG 18.3 body (the stamp is
+/// unconditionally `ATTNULLABLE_VALID`). If `attnotnull` was already set, it only
+/// registers a relcache invalidation.
+pub fn set_attnotnull<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    attnum: AttrNumber,
+    _is_valid: bool,
+    _queue_validation: bool,
+) -> PgResult<()> {
+    // Assert(!queue_validation || wqueue): the only caller passes
+    // queue_validation == false, so there is no wqueue to require.
+
+    // CheckAlterTableIsSafe(rel);
+    crate::at_phase::CheckAlterTableIsSafe(rel)?;
+
+    // Exit quickly by testing attnotnull from the tupledesc's copy of the
+    // attribute.
+    // attr = TupleDescAttr(RelationGetDescr(rel), attnum - 1);
+    let attr = rel.rd_att.attr((attnum - 1) as usize);
+    if attr.attisdropped {
+        return Ok(());
+    }
+
+    if !attr.attnotnull {
+        // attr_rel = table_open(AttributeRelationId, RowExclusiveLock);
+        let attr_rel = relation_open(mcx, AttributeRelationId, RowExclusiveLock)?;
+
+        // tuple = SearchSysCacheCopyAttNum(RelationGetRelid(rel), attnum);
+        let tuple = match SearchSysCacheAttNum(mcx, rel.rd_id, attnum)? {
+            Some(t) => t,
+            None => {
+                // elog(ERROR, "cache lookup failed for attribute %d of relation %u")
+                return ereport(ERROR)
+                    .errmsg(format!(
+                        "cache lookup failed for attribute {} of relation {}",
+                        attnum, rel.rd_id
+                    ))
+                    .finish(here("set_attnotnull"))
+                    .map(|()| unreachable!());
+            }
+        };
+
+        // thisatt = TupleDescCompactAttr(RelationGetDescr(rel), attnum - 1);
+        // thisatt->attnullability = ATTNULLABLE_VALID;
+        // Poke the live relcache entry's compact-attr nullability in place (the
+        // cached descriptor mutation C performs through the relation pointer).
+        relcache_seam::set_relcache_attnullability::call(rel.rd_id, attnum, ATTNULLABLE_VALID)?;
+
+        // ((Form_pg_attribute) GETSTRUCT(tuple))->attnotnull = true;
+        // CatalogTupleUpdate(attr_rel, &tuple->t_self, tuple);
+        let row = PgAttributeUpdateRow {
+            attnotnull: Some(true),
+            ..Default::default()
+        };
+        indexing_seam::catalog_tuple_update_pg_attribute::call(mcx, &attr_rel, &tuple, &row)?;
+
+        // The queue_validation block (NotNullImpliedByRelConstraints +
+        // ATGetQueueEntry) is unreachable here: the DefineRelation caller passes
+        // queue_validation == false (and no wqueue).
+
+        // CommandCounterIncrement();
+        CommandCounterIncrement()?;
+
+        // table_close(attr_rel, RowExclusiveLock): RAII drop (lmgr lock is
+        // transaction-scoped).
+        drop(attr_rel);
+
+        // heap_freetuple(tuple): owned by the mcx arena; dropped at scope end.
+    } else {
+        // CacheInvalidateRelcache(rel);
+        backend_utils_cache_inval_seams::cache_invalidate_relcache::call(rel.rd_id)?;
+    }
+
+    Ok(())
 }
 
 /// `RELKIND_HAS_TABLE_AM(relkind)` (pg_class.h): does this relkind carry a table

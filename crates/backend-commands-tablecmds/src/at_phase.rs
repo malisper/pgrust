@@ -241,7 +241,7 @@ pub struct AlterTableUtilityContext<'a> {
 // ===========================================================================
 
 /// `CheckAlterTableIsSafe(Relation rel)` (tablecmds.c:4449).
-fn CheckAlterTableIsSafe(rel: &Relation<'_>) -> PgResult<()> {
+pub(crate) fn CheckAlterTableIsSafe(rel: &Relation<'_>) -> PgResult<()> {
     // if (RELATION_IS_OTHER_TEMP(rel)) ereport(...).
     if seam::relation_is_other_temp::call(rel)? {
         return backend_utils_error::ereport(ERROR)

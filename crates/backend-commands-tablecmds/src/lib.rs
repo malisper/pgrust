@@ -58,6 +58,9 @@ pub fn init_seams() {
     seam::transform_and_check_reloptions::set(create::transform_and_check_reloptions);
     seam::merge_attributes::set(mergeattr::merge_attributes);
     seam::get_attribute_compression::set(create::get_attribute_compression);
+    // set_attnotnull (tablecmds.c:8534) — the PK/NOT-NULL-implied attnotnull
+    // catalog poke, called from DefineRelation's not-null merge tail.
+    seam::set_attnotnull::set(create::set_attnotnull);
 
     seam::remove_relations::set(drop::remove_relations);
 
