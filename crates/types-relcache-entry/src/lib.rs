@@ -553,6 +553,15 @@ pub struct RelationData {
 
     /// `bool pgstat_enabled` — relation stats should be counted.
     pub pgstat_enabled: bool,
+
+    /// `FdwRoutine *rd_fdwroutine` (`utils/rel.h`) — the cached FDW
+    /// callback-presence table for a foreign table, memoized by
+    /// `GetFdwRoutineForRelation` (foreign.c) in `CacheMemoryContext` and reused
+    /// across queries; `None` is the C NULL (not yet resolved). Cleared on
+    /// relcache invalidation / rebuild so the next access refetches. Only the
+    /// presence-flag rendering ([`types_nodes::FdwRoutine`]) is cached here; the
+    /// extension-owned function pointers live behind the FDW-provider seam.
+    pub rd_fdwroutine: Option<types_nodes::FdwRoutine>,
 }
 
 impl RelationData {
