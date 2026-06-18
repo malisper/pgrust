@@ -29,6 +29,7 @@ backend-utils-activity-pgstat-backend = { path = "../backend-utils-activity-pgst
 
 # Inward seams (this crate installs them).
 backend-utils-activity-status-seams = { path = "../backend-utils-activity-status-seams" }
+backend-executor-execParallel-support-seams = { path = "../backend-executor-execParallel-support-seams" }
 
 # Outward seams into owners that would cycle or are not yet ported.
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }

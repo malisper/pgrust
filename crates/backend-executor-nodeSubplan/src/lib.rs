@@ -1459,4 +1459,12 @@ fn elog_unrecognized_testexpr(tag: i32) -> PgError {
 pub fn init_seams() {
     backend_executor_nodeSubplan_seams::exec_re_scan_set_param_plan::set(ExecReScanSetParamPlan);
     backend_executor_nodeSubplan_seams::exec_sub_plan::set(ExecSubPlan);
+
+    // `ExecSetParamPlanMulti(params, econtext)` (nodeSubplan.c) on the parallel
+    // executor's `execParallel-support` surface. The support seam carries a
+    // present `params` set (`bms_next_member` over it); adapt to the body's
+    // `Option<&Bitmapset>` C-nullability.
+    backend_executor_execParallel_support_seams::exec_set_param_plan_multi::set(
+        |params, econtext, estate| ExecSetParamPlanMulti(Some(params), econtext, estate),
+    );
 }

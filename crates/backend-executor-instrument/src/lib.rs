@@ -283,6 +283,80 @@ pub fn InstrAccumParallelQuery(bufusage: &BufferUsage, walusage: &WalUsage) {
     with_pgWalUsage(|global| WalUsageAdd(global, walusage));
 }
 
+// ===========================================================================
+// `execParallel-support` surface: the parallel executor calls the
+// `Instr*ParallelQuery` family in C's file-static-global form (the snapshot is
+// NOT threaded through the call chain; instead `InstrStartParallelQuery` stashes
+// `pgBufferUsage`/`pgWalUsage` into `save_pgBufferUsage`/`save_pgWalUsage`).
+// These shapes mirror that contract over a raw DSM cursor (the per-worker
+// `BufferUsage`/`WalUsage`/`Instrumentation` arrays the leader laid out in the
+// segment as plain `sizeof`-strided POD).
+// ===========================================================================
+
+thread_local! {
+    /// `static BufferUsage save_pgBufferUsage;` (instrument.c) — noted at
+    /// `InstrStartParallelQuery`.
+    static SAVE_PG_BUFFER_USAGE: RefCell<BufferUsage> = RefCell::new(BufferUsage::default());
+    /// `static WalUsage save_pgWalUsage;` (instrument.c).
+    static SAVE_PG_WAL_USAGE: RefCell<WalUsage> = RefCell::new(WalUsage::default());
+}
+
+/// `InstrStartParallelQuery()` in the file-static-global form: save the running
+/// counters (C: `save_pgBufferUsage = pgBufferUsage; save_pgWalUsage = pgWalUsage`).
+pub fn instr_start_parallel_query_global() {
+    SAVE_PG_BUFFER_USAGE.with(|c| *c.borrow_mut() = pgBufferUsage());
+    SAVE_PG_WAL_USAGE.with(|c| *c.borrow_mut() = pgWalUsage());
+}
+
+/// `InstrEndParallelQuery(&bufusage[worker], &walusage[worker])` — compute the
+/// deltas since `InstrStartParallelQuery` and write them into the worker's DSM
+/// `BufferUsage`/`WalUsage` slot. `buf_base`/`wal_base` are the array bases the
+/// leader allocated (`sizeof`-strided POD); `worker` indexes into them.
+///
+/// SAFETY: `buf_base`/`wal_base` address `BufferUsage`/`WalUsage` arrays in the
+/// mapped DSM segment with at least `worker + 1` elements.
+pub unsafe fn instr_end_parallel_query_slot(buf_base: usize, wal_base: usize, worker: i32) {
+    let save_buf = SAVE_PG_BUFFER_USAGE.with(|c| *c.borrow());
+    let save_wal = SAVE_PG_WAL_USAGE.with(|c| *c.borrow());
+
+    let mut bufusage = BufferUsage::default();
+    BufferUsageAccumDiff(&mut bufusage, &pgBufferUsage(), &save_buf);
+    let mut walusage = WalUsage::default();
+    WalUsageAccumDiff(&mut walusage, &pgWalUsage(), &save_wal);
+
+    let buf_slot = (buf_base as *mut BufferUsage).add(worker as usize);
+    let wal_slot = (wal_base as *mut WalUsage).add(worker as usize);
+    core::ptr::write(buf_slot, bufusage);
+    core::ptr::write(wal_slot, walusage);
+}
+
+/// `InstrAccumParallelQuery(&bufusage[worker], &walusage[worker])` — add a
+/// worker's DSM slot into the leader's running `pgBufferUsage`/`pgWalUsage`.
+///
+/// SAFETY: as `instr_end_parallel_query_slot`.
+pub unsafe fn instr_accum_parallel_query_slot(buf_base: usize, wal_base: usize, worker: i32) {
+    let bufusage = core::ptr::read((buf_base as *const BufferUsage).add(worker as usize));
+    let walusage = core::ptr::read((wal_base as *const WalUsage).add(worker as usize));
+    InstrAccumParallelQuery(&bufusage, &walusage);
+}
+
+/// `InstrInit(&GetInstrumentationArray(sei)[i], instrument_options)` — initialize
+/// the `i`th `Instrumentation` slot in the leader's DSM
+/// `SharedExecutorInstrumentation` array. `array_base` is the address of
+/// `GetInstrumentationArray(sei)` (the `Instrumentation[]` right after the fixed
+/// header); the slots are plain `sizeof(Instrumentation)`-strided POD.
+///
+/// SAFETY: `array_base` addresses an `Instrumentation` array in the mapped DSM
+/// segment with at least `i + 1` elements (the leader reserved
+/// `num_workers * num_plan_nodes` of them).
+pub unsafe fn instr_init_slot_at(array_base: usize, i: i32, instrument_options: i32) {
+    let slot = (array_base as *mut Instrumentation).add(i as usize);
+    // The leader's `palloc0`'d DSM chunk leaves the slot zeroed; `InstrInit`
+    // mutates a live struct, so start from a zeroed value then init in place.
+    core::ptr::write(slot, Instrumentation::default());
+    InstrInit(&mut *slot, instrument_options as InstrumentOption);
+}
+
 /// `dst += add` (`static BufferUsageAdd`).
 fn BufferUsageAdd(dst: &mut BufferUsage, add: &BufferUsage) {
     dst.shared_blks_hit += add.shared_blks_hit;
@@ -356,6 +430,29 @@ pub fn init_seams() {
     backend_executor_instrument_seams::instr_stop_node::set(InstrStopNode);
     backend_executor_instrument_seams::instr_end_loop::set(InstrEndLoop);
     backend_executor_instrument_seams::instr_update_tuple_count::set(InstrUpdateTupleCount);
+
+    install_execparallel_support_instr_seams();
+}
+
+/// Install the `Instr*ParallelQuery` family on the parallel executor's
+/// `execParallel-support` surface, in C's file-static-global form (the snapshot
+/// is stashed in `save_pgBufferUsage`/`save_pgWalUsage`, not threaded). The
+/// `buffer_usage`/`wal_usage` cursors are the leader's per-worker
+/// `BufferUsage`/`WalUsage` DSM arrays. `instr_init_slot` (which needs the
+/// `SharedExecutorInstrumentation` `instrument_offset`) is installed by the
+/// parallel crate, which owns that DSM header.
+fn install_execparallel_support_instr_seams() {
+    use backend_executor_execParallel_support_seams as sup;
+    sup::instr_start_parallel_query::set(instr_start_parallel_query_global);
+    sup::instr_end_parallel_query::set(|buffer_usage, wal_usage, worker| {
+        // SAFETY: the cursors are the DSM `BufferUsage`/`WalUsage` array bases the
+        // leader sized for `num_workers` elements; `worker < num_workers`.
+        unsafe { instr_end_parallel_query_slot(buffer_usage.0, wal_usage.0, worker) }
+    });
+    sup::instr_accum_parallel_query::set(|buffer_usage, wal_usage, worker| {
+        // SAFETY: as above.
+        unsafe { instr_accum_parallel_query_slot(buffer_usage.0, wal_usage.0, worker) }
+    });
 }
 
 #[cfg(test)]

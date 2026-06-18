@@ -177,6 +177,13 @@ pub fn init_seams() {
     // use.
     backend_executor_execUtils_seams::get_per_tuple_expr_context::set(MakePerTupleExprContext);
 
+    // Same body for the parallel executor's `execParallel-support` surface
+    // (execParallel.c `GetPerTupleExprContext(estate)`): both return the owned
+    // `EcxtId` into the EState's `es_exprcontexts` pool.
+    backend_executor_execParallel_support_seams::get_per_tuple_expr_context_owned::set(
+        MakePerTupleExprContext,
+    );
+
     // `UpdateChangedParamSet(node, newchg)` (execUtils.c): the seam always
     // passes a present `newchg` set; the body takes an `Option`.
     backend_executor_execUtils_seams::update_changed_param_set::set(|mcx, node, newchg| {

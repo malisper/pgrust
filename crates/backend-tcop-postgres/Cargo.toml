@@ -69,6 +69,7 @@ allocator-api2 = { version = "0.2", default-features = false, features = ["alloc
 
 # Seam crates (leaf; never create cycles).
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+backend-executor-execParallel-support-seams = { path = "../backend-executor-execParallel-support-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-misc-guc-tables-seams = { path = "../backend-utils-misc-guc-tables-seams" }
 backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }

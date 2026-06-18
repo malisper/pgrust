@@ -29,8 +29,8 @@
 
 use types_error::PgResult;
 use types_execparallel::{
-    ExprContextHandle, InstrumentationHandle, ParallelContextHandle, ParamExecValue,
-    RestoredParam, SerializeCursor, Size,
+    InstrumentationHandle, ParallelContextHandle, ParamExecValue, RestoredParam, SerializeCursor,
+    Size,
 };
 use types_nodes::bitmapset::Bitmapset;
 use types_nodes::querydesc::QueryDesc;
@@ -79,18 +79,23 @@ seam_core::seam!(pub fn query_desc_estate_has_jit_owned(query_desc: &QueryDesc) 
 // ===========================================================================
 
 /// `GetPerTupleExprContext(estate)` — fetch (creating on first use) the
-/// per-output-tuple `ExprContext`. Owned by execUtils; panics until it lands.
-seam_core::seam!(pub fn get_per_tuple_expr_context_owned(estate: &mut EStateData<'_>) -> PgResult<ExprContextHandle>);
+/// per-output-tuple `ExprContext`, identified by its owned-model `EcxtId` into
+/// the `EState`'s `es_exprcontexts` pool (the real per-context identity the
+/// executor threads, not an opaque handle). Owned by execUtils.
+seam_core::seam!(pub fn get_per_tuple_expr_context_owned(estate: &mut EStateData<'_>) -> PgResult<types_nodes::execnodes::EcxtId>);
 
 // ===========================================================================
 // Init-plan forcing (nodeSubplan.c).
 // ===========================================================================
 
 /// `ExecSetParamPlanMulti(params, econtext)`. Owned by nodeSubplan; reached as a
-/// seam to avoid the execParallel→nodeSubplan cycle.
-seam_core::seam!(pub fn exec_set_param_plan_multi(
-    params: &Bitmapset,
-    econtext: ExprContextHandle,
+/// seam to avoid the execParallel→nodeSubplan cycle. The owned model threads the
+/// `EState` (the param array `es_param_exec_vals` lives there) and addresses the
+/// per-tuple `ExprContext` by its `EcxtId`.
+seam_core::seam!(pub fn exec_set_param_plan_multi<'mcx>(
+    params: &Bitmapset<'mcx>,
+    econtext: types_nodes::execnodes::EcxtId,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<()>);
 
 // ===========================================================================
@@ -113,7 +118,7 @@ seam_core::seam!(pub fn restore_param_list(chunk: SerializeCursor) -> types_node
 // contract.
 seam_core::seam!(pub fn param_exec_value_owned(estate: &mut EStateData<'_>, paramid: i32) -> ParamExecValue<'static>);
 /// Write `{value, isnull}` back into `es_param_exec_vals[paramid]`, clearing `execPlan`.
-seam_core::seam!(pub fn set_param_exec_value_owned<'mcx>(estate: &mut EStateData<'_>, paramid: i32, restored: RestoredParam<'mcx>));
+seam_core::seam!(pub fn set_param_exec_value_owned<'mcx>(estate: &mut EStateData<'mcx>, paramid: i32, restored: RestoredParam<'mcx>));
 /// `datumEstimateSpace(value, isnull, typByVal, typLen)`.
 seam_core::seam!(pub fn datum_estimate_space<'mcx>(prm: ParamExecValue<'mcx>) -> Size);
 /// `datumSerialize(value, isnull, typByVal, typLen, &start_address)`.

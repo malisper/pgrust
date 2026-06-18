@@ -24,6 +24,8 @@ backend-storage-lmgr-s-lock = { path = "../backend-storage-lmgr-s-lock" }
 backend-storage-ipc-shm-mq-seams = { path = "../backend-storage-ipc-shm-mq-seams" }
 backend-access-transam-parallel-seams = { path = "../backend-access-transam-parallel-seams" }
 backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }
+backend-executor-execParallel-support-seams = { path = "../backend-executor-execParallel-support-seams" }
+backend-executor-instrument = { path = "../backend-executor-instrument" }
 
 [dev-dependencies]
 backend-storage-ipc-dsm-core = { path = "../backend-storage-ipc-dsm-core", features = ["test-bringup"] }

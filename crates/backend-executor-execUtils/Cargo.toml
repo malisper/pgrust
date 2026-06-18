@@ -19,6 +19,7 @@ types-rel = { path = "../types-rel" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
+backend-executor-execParallel-support-seams = { path = "../backend-executor-execParallel-support-seams" }
 backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
 backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }
 backend-executor-execMain-seams = { path = "../backend-executor-execMain-seams" }

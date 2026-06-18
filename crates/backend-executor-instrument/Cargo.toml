@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 backend-executor-instrument-seams = { path = "../backend-executor-instrument-seams" }
+backend-executor-execParallel-support-seams = { path = "../backend-executor-execParallel-support-seams" }
 mcx = { path = "../mcx" }
 portability-instr-time = { path = "../portability-instr-time" }
 types-core = { path = "../types-core" }

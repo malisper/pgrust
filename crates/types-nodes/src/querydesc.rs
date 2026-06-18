@@ -196,6 +196,24 @@ impl QueryDesc {
         self.work.with_mut(|w| f(&mut w.estate))
     }
 
+    /// `queryDesc->sourceText` (execdesc.h) — the query source text the parallel
+    /// worker copies into `debug_query_string`/`pgstat_report_activity`.
+    pub fn source_text_owned(&self) -> alloc::string::String {
+        self.work.with(|w| w.source_text.as_str().into())
+    }
+
+    /// `queryDesc->plannedstmt->jitFlags = jit_flags` (execParallel.c worker
+    /// setup): inherit the leader's JIT decision into the worker plan.
+    pub fn set_jit_flags(&mut self, jit_flags: i32) {
+        self.work.with_mut(|w| w.plannedstmt.jitFlags = jit_flags);
+    }
+
+    /// `queryDesc->estate->es_jit != NULL` — whether a JIT context was created
+    /// for this query (false while JIT is unported, as `es_jit` is never set).
+    pub fn estate_has_jit(&self) -> bool {
+        self.work.with(|w| w.estate.es_jit.0.is_some())
+    }
+
     /// Mutable access to the owned top plan-state tree
     /// (`queryDesc->planstate`) through the bundle. `None` before
     /// `ExecutorStart` builds it. `execParallel` reaches the plan-state interior

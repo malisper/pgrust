@@ -117,4 +117,47 @@ pub fn init_seams() {
     seams::print_rt::set(print::print_rt);
     seams::print_expr::set(print::print_expr);
     seams::print_tl::set(print::print_tl);
+
+    install_execparallel_support_bms_seams();
+}
+
+/// Install the bitmapset-membership accessors the parallel executor reaches
+/// over the `execParallel-support` seam (`bms_next_member`/`bms_num_members`/
+/// `bms_is_empty`). These are the same `bitmapset.c` bodies this crate owns;
+/// the support seam carries a non-`Option` `&Bitmapset` (the parallel param
+/// set is always present when these are called), so adapt to the owner's
+/// `Option<&Bitmapset>` C-nullability surface.
+fn install_execparallel_support_bms_seams() {
+    use backend_executor_execParallel_support_seams as sup;
+    sup::bms_next_member::set(|a, prevbit| bitmapset::bms_next_member(Some(a), prevbit));
+    sup::bms_num_members::set(|a| bitmapset::bms_num_members(Some(a)));
+    sup::bms_is_empty::set(|a| bitmapset::bms_is_empty(Some(a)));
+
+    // `params.c` (de)serialization the parallel executor reaches over the
+    // `execParallel-support` seam. `SerializeCursor` is a real address into the
+    // mapped DSM segment (== C's `char *start_address`); convert to/from the raw
+    // pointer the body threads.
+    sup::estimate_param_list_space::set(|param_li| {
+        // C's `EstimateParamListSpace` returns `Size` with no error path; its
+        // `get_typlenbyval` lookups are over already-resolved param types, so
+        // an error is a programming error (matches the seam's infallible
+        // contract).
+        params::EstimateParamListSpace(param_li).expect("EstimateParamListSpace")
+    });
+    sup::serialize_param_list::set(|param_li, chunk| {
+        // SAFETY: `chunk` addresses a leader-reserved chunk of at least
+        // `EstimateParamListSpace(param_li)` bytes (execParallel allocated it).
+        let advanced =
+            unsafe { params::SerializeParamList(param_li, chunk.0 as *mut u8) }?;
+        Ok(types_execparallel::SerializeCursor(advanced as usize))
+    });
+    sup::restore_param_list::set(|chunk| {
+        // SAFETY: `chunk` addresses a `SerializeParamList` image in the worker's
+        // mapped DSM segment. C discards the advanced cursor here (the chunk is
+        // looked up by key), so only the rebuilt handle is returned.
+        let (handle, _advanced) =
+            unsafe { params::RestoreParamList(chunk.0 as *mut u8) }
+                .expect("RestoreParamList");
+        handle
+    });
 }
