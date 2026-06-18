@@ -60,6 +60,23 @@ pub fn varsize_4b_of(bytes: &[u8]) -> Option<usize> {
     Some(varsize_4b(header))
 }
 
+/// `VARSIZE_1B(PTR)` of a 1-byte ("short") varlena header at the start of
+/// `bytes` (`varatt.h`: `(b[0] >> 1) & 0x7F`, the total size INCLUDING the 1-byte
+/// header), or `None` if `bytes` is not a short-header varlena (`VARATT_IS_1B`
+/// requires the low header bit set; an external `VARATT_IS_1B_E` has the next bit
+/// set and is excluded — those forms are not produced by the in-memory input
+/// functions whose results this serves).
+pub fn varsize_1b_of(bytes: &[u8]) -> Option<usize> {
+    let h = *bytes.first()?;
+    // VARATT_IS_1B: low bit set; VARATT_IS_1B_E: 0x01 (whole byte) — exclude the
+    // external pointer form (header byte exactly 0x01).
+    if h & 0x01 == 0x01 && h != 0x01 {
+        Some(((h >> 1) & 0x7F) as usize)
+    } else {
+        None
+    }
+}
+
 /// The size of the length header in front of a `struct varlena` image (`bytes`
 /// addresses the start of the varlena): `VARHDRSZ_SHORT` (1) for the 1-byte
 /// short header (`VARATT_IS_1B`), else `VARHDRSZ` (4) for the standard 4-byte

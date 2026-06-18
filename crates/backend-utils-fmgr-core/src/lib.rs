@@ -2297,12 +2297,23 @@ fn typmodin_seam(typmodin: Oid, cstrings: &[String], location: i32) -> PgResult<
 /// strip, `textout` over a header-ful column value rendered the 4-byte length
 /// word as leading garbage, e.g. `"$\0\0\0boolX"`.)
 fn byref_to_headerless_payload(bytes: &[u8]) -> Vec<u8> {
-    match types_datum::varlena::varsize_4b_of(bytes) {
-        Some(total) if total == bytes.len() && total >= types_datum::varlena::VARHDRSZ => {
-            bytes[types_datum::varlena::VARHDRSZ..].to_vec()
+    // A self-consistent 4-byte-header varlena (`VARSIZE == len`).
+    if let Some(total) = types_datum::varlena::varsize_4b_of(bytes) {
+        if total == bytes.len() && total >= types_datum::varlena::VARHDRSZ {
+            return bytes[types_datum::varlena::VARHDRSZ..].to_vec();
         }
-        _ => bytes.to_vec(),
     }
+    // A self-consistent 1-byte ("short") header varlena (`VARSIZE_1B == len`):
+    // the packed form `heap_form_tuple`/`heap_deform_tuple` produce for a short
+    // (`<= 126`-byte) inline varlena. The same `VARSIZE == len` guard keeps a
+    // fixed-length-by-ref image (`name`'s NUL-padded buffer, whose first byte's
+    // low bit is data, not a header) verbatim.
+    if let Some(total) = types_datum::varlena::varsize_1b_of(bytes) {
+        if total == bytes.len() && total >= 1 {
+            return bytes[1..].to_vec();
+        }
+    }
+    bytes.to_vec()
 }
 
 /// Marshal a tuple-attribute [`Datum`] into the boundary [`FmgrArg`] an
