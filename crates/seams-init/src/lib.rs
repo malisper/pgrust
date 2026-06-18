@@ -1167,14 +1167,25 @@ mod recurrence_guard {
         // estate.slot_mut(); the payload-erased TIDBitmap round-trip; and the
         // parallel-descriptor PgBox<->value bridge.
         //
-        // STILL PENDING (parallel-scan DSM infrastructure unported): the two
-        // remaining seams resolve pointers into the DSM-resident parallel scan
-        // blob, which the parallel index-scan infrastructure (the AM-specific
-        // `BTParallelScanDescData` / `ps_offset_ins` arithmetic in shared memory)
-        // owns and has not landed. A serial scan never reaches them; they
-        // seam-and-panic (mirror-pg-and-panic). See DESIGN_DEBT.md.
+        // `index_scan_resolve_shared_info` is now INSTALLED by the indexam owner:
+        // the owned `ParallelIndexScanDescData` carries the
+        // `SharedIndexScanInstrumentation` region (the C `ps_offset_ins` blob) as
+        // the value field `shared_instrument`, so the worker-side resolution is a
+        // clone of that owned region rather than DSM `OffsetToPointer` arithmetic.
+        //
+        // STILL PENDING (parallel-scan DSM infrastructure unported):
+        // `bt_resolve_parallel_scan` resolves a `*mut BTParallelScanDescData` into
+        // the DSM-resident parallel scan blob at `ps_offset_am`, which the nbtree
+        // state machine dereferences under the descriptor's embedded `btps_lock`
+        // LWLock. The owned model stores the AM-specific region as a serialized
+        // `Vec<u8>` (`am_specific`), with no live shared `BTParallelScanDescData`
+        // value to hand a `*mut` to across leader/worker. Wiring it faithfully
+        // needs the cross-process DSM shared-memory substrate (a real
+        // `BTParallelScanDescData` in DSM with a working `btps_lock`) — a
+        // tree-wide parallel-scan-infrastructure campaign, not index-AM wiring. A
+        // serial scan never reaches it; it seam-and-panics (mirror-pg-and-panic).
+        // See DESIGN_DEBT.md.
         ("backend_access_index_indexam", "bt_resolve_parallel_scan"),
-        ("backend_access_index_indexam", "index_scan_resolve_shared_info"),
         // (get_table_am_routine / table_relation_toast_am /
         // table_relation_needs_toast_table / table_parallelscan_reinitialize
         // retired: heapam_handler.c (core stage) + tableamapi.c::GetTableAmRoutine

@@ -85,6 +85,7 @@ pub fn init_seams() {
     seams::index_parallelscan_estimate::set(seam_index_parallelscan_estimate);
     seams::index_parallelscan_initialize::set(seam_index_parallelscan_initialize);
     seams::index_parallelrescan::set(seam_index_parallelrescan);
+    seams::index_scan_resolve_shared_info::set(seam_index_scan_resolve_shared_info);
 }
 
 // ===========================================================================
@@ -340,6 +341,29 @@ fn seam_index_parallelrescan<'mcx>(
     scan: &mut IndexScanDescData<'mcx>,
 ) -> PgResult<()> {
     index_parallelrescan(mcx, scan)
+}
+
+/// `index_scan_resolve_shared_info` seam wrapper —
+/// `(SharedIndexScanInstrumentation *) OffsetToPointer(piscan, piscan->ps_offset_ins)`
+/// (nodeIndexscan.c / nodeIndexonlyscan.c `Exec*ScanInitializeWorker`).
+///
+/// In C the worker resolves the `SharedIndexScanInstrumentation` that the
+/// leader's `index_parallelscan_initialize` memset/initialized inside the
+/// DSM-resident `ParallelIndexScanDesc` blob at byte offset `ps_offset_ins`.
+/// The owned `ParallelIndexScanDescData` carries that region as the value field
+/// `shared_instrument` (populated exactly when `ps_offset_ins != 0`, i.e. the
+/// `instrument` branch the consumer guards this call with), so the resolution is
+/// a clone of that owned region rather than DSM pointer arithmetic.
+fn seam_index_scan_resolve_shared_info(
+    piscan: &ParallelIndexScanDescData,
+) -> PgResult<SharedIndexScanInstrumentation> {
+    piscan
+        .shared_instrument
+        .clone()
+        .ok_or_else(|| {
+            PgError::error("index parallel scan has no shared instrumentation region".to_string())
+                .with_sqlstate(ERRCODE_INTERNAL_ERROR)
+        })
 }
 
 // ===========================================================================
