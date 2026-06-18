@@ -22,11 +22,16 @@
 //! `backend_utils_adt_{numeric,jsonb,jsonb_util,jsonpath}` crates.
 //!
 //! Genuinely-external operations — the regex matcher (`regexp.c`),
-//! `parse_datetime`/`JsonEncodeDateTime` (`json.c`), the datetime cast/compare
-//! `DirectFunctionCall`s, the fmgr type-input functions, `format_type_be`, and
-//! the JSON_TABLE executor/`ExprState` machinery — are funneled through the
-//! per-owner seam crate [`backend_utils_adt_jsonpath_exec_seams`]. There is zero
-//! `extern "C"`, no raw pointers, no `c_void`.
+//! `JsonEncodeDateTime` (`json.c`), the fmgr type-input functions,
+//! `format_type_be`, and the JSON_TABLE executor/`ExprState` machinery — are
+//! funneled through the per-owner seam crate
+//! [`backend_utils_adt_jsonpath_exec_seams`]. The datetime substrate
+//! (`parse_datetime` from `formatting.c`, the `executeDateTimeMethod` cast
+//! switch, and `compareDatetime`) is implemented in-crate (see the [`datetime`]
+//! module) against the real ported `backend-utils-adt-formatting` /
+//! `backend-utils-adt-datetime` leaf units, exactly as C reaches them through
+//! `DirectFunctionCall*`. There is zero `extern "C"`, no raw pointers, no
+//! `c_void`.
 //!
 //! # Memory-context threading
 //!
@@ -70,6 +75,7 @@ pub(crate) use backend_utils_adt_jsonpath_exec_seams as seam;
 
 use JsonPathItemType::*;
 
+mod datetime;
 mod json_table;
 mod seams;
 #[cfg(test)]
@@ -1915,9 +1921,10 @@ fn executeDateTimeMethod(
         }
         let template = jspGetString(&elem).to_vec();
 
-        match seam::parse_datetime::call(
-            datetime.clone(),
-            Some(template),
+        match datetime::parse_datetime(
+            cxt.mcx,
+            &datetime,
+            &template,
             collid,
             jspThrowErrors(cxt),
         )? {
@@ -1971,12 +1978,9 @@ fn executeDateTimeMethod(
             tz: 0,
         };
         for fmt in DATETIME_FORMATS.iter() {
-            if let Some(v) = seam::parse_datetime::call(
-                datetime.clone(),
-                Some(fmt.as_bytes().to_vec()),
-                collid,
-                false,
-            )? {
+            if let Some(v) =
+                datetime::parse_datetime(cxt.mcx, &datetime, fmt.as_bytes(), collid, false)?
+            {
                 parsed = v;
                 res = jperOk;
                 break;
@@ -2016,12 +2020,12 @@ fn executeDateTimeMethod(
     // applying time precision and useTz checks. This is seamed (fmgr/date-time).
     if jsp.typ != jpiDatetime && res != jperError {
         let dt_cstr = String::from_utf8_lossy(&datetime).into_owned();
-        match seam::datetime_method_cast::call(
-            jsp.typ as i32,
+        match datetime::datetime_method_cast(
+            jsp.typ,
             parsed,
             time_precision,
             cxt.useTz,
-            dt_cstr,
+            &dt_cstr,
             jspThrowErrors(cxt),
         )? {
             Some(v) => parsed = v,
@@ -2561,13 +2565,20 @@ fn compareItems(
         jbvType::jbvDatetime => {
             let d1 = datetime_of(jb1);
             let d2 = datetime_of(jb2);
-            match seam::compare_datetime::call(
-                Datum::from_usize(d1.value),
-                d1.typid,
-                Datum::from_usize(d2.value),
-                d2.typid,
-                useTz,
-            )? {
+            // C: `compareDatetime(jb1->val.datetime.value, ...typid..., useTz)`.
+            // The datetime word is stored as a `usize`; `timetz` carries its
+            // zone in the separate `tz` field (the lossless by-value split).
+            let op1 = datetime::DtOperand {
+                value: Datum::from_usize(d1.value),
+                typid: d1.typid,
+                tz: d1.tz,
+            };
+            let op2 = datetime::DtOperand {
+                value: Datum::from_usize(d2.value),
+                typid: d2.typid,
+                tz: d2.tz,
+            };
+            match datetime::compare_datetime(op1, op2, useTz)? {
                 Some(c) => cmp = c,
                 None => return Ok(jpbUnknown),
             }
@@ -3703,12 +3714,12 @@ fn execute_string_func(
 // ===========================================================================
 
 /// `jspOperationName` wrapper returning an owned message-safe string.
-fn op_name(typ: JsonPathItemType) -> PgResult<&'static str> {
+pub(crate) fn op_name(typ: JsonPathItemType) -> PgResult<&'static str> {
     backend_utils_adt_jsonpath::jspOperationName(typ)
 }
 
 /// Build a `PgError` for an internal `elog(ERROR, ...)` (XX000) invariant.
-fn elog_error(msg: &str) -> PgError {
+pub(crate) fn elog_error(msg: &str) -> PgError {
     ereport(ERROR).errmsg_internal(msg.to_string()).into_error()
 }
 

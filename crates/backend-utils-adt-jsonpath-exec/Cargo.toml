@@ -17,6 +17,16 @@ types-tuple = { path = "../types-tuple" }
 types-datum = { path = "../types-datum" }
 types-jsonb = { path = "../types-jsonb" }
 types-jsonpath = { path = "../types-jsonpath" }
+types-datetime = { path = "../types-datetime" }
+types-pgtime = { path = "../types-pgtime" }
+state-pgtz = { path = "../state-pgtz" }
+# date/time/timestamp cast + compare core (date.c/time.c/timetz.c/timestamp.c):
+# the `executeDateTimeMethod` cast switch and `compareDatetime` call these
+# directly (leaf adt deps, no cycle), exactly like the numeric helpers.
+backend-utils-adt-datetime = { path = "../backend-utils-adt-datetime" }
+# `parse_datetime` (formatting.c) — the jsonpath datetime methods parse the
+# input text through the real formatting engine (leaf adt dep, no cycle).
+backend-utils-adt-formatting = { path = "../backend-utils-adt-formatting" }
 # jsonpath TYPE + reader API (JsonPathItem, jsp* readers) — direct dep.
 backend-utils-adt-jsonpath = { path = "../backend-utils-adt-jsonpath" }
 # jsonb substrate (iterators, container search, JsonbValue<->Jsonb) — direct dep.

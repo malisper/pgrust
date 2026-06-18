@@ -14,19 +14,24 @@
 //!    soft-parse helpers (`int4in`/`int8in`/`numeric_in`/`float8in_internal`/
 //!    `parse_bool` → their owning int/int8/numeric/float/bool units).
 //!
+//!  * The jsonpath_exec.c datetime substrate (`parse_datetime` text parsing,
+//!    `compareDatetime` cross-type comparison, the `executeDateTimeMethod` cast
+//!    switch) is implemented in-crate (the `datetime` module) against the real
+//!    ported `backend-utils-adt-formatting` / `backend-utils-adt-datetime` leaf
+//!    units — no seam (mirroring the `numeric_*` / `int4in` helpers).
+//!
 //!  * Genuine cross-subsystem externals declared in
 //!    `backend-utils-adt-jsonpath-exec-seams` and installed by their OWNING
-//!    unit's `init_seams()` (regexp.c for `re_compile_and_execute`; formatting.c
-//!    for `parse_datetime`; json.c for `json_encode_datetime`; `format_type_be`;
-//!    mbutils for `server_to_utf8` / `get_database_encoding`).
+//!    unit's `init_seams()` (regexp.c for `re_compile_and_execute`; json.c for
+//!    `json_encode_datetime`; `format_type_be`; mbutils for `server_to_utf8` /
+//!    `get_database_encoding`).
 //!
-//!  * The remaining jsonpath_exec.c-private datetime / `Datum`->`JsonbValue`
-//!    coercions (`compare_datetime` / `datetime_method_cast` /
-//!    `json_item_from_datum`) and the JSON_TABLE executor/`ExprState` boundary
-//!    (`init_table_func` / `eval_column`), which still bottom out on the
-//!    date/time-`Datum` fmgr substrate and the `TableFunc`/`JsonExpr`
-//!    `ExecEvalExpr` executor substrate respectively — a call panics loudly
-//!    until those land, which is correct.
+//!  * The remaining jsonpath_exec.c-private `Datum`->`JsonbValue` coercion
+//!    (`json_item_from_datum`, the varlena/by-ref arms) and the JSON_TABLE
+//!    executor/`ExprState` boundary (`init_table_func` / `eval_column`), which
+//!    still bottom out on the by-ref-`Datum` detoast lane and the
+//!    `TableFunc`/`JsonExpr` `ExecEvalExpr` executor substrate respectively — a
+//!    call panics loudly until those land, which is correct.
 //!
 //! This unit owns no INWARD seam, so `init_seams()` is empty.
 pub fn init_seams() {}

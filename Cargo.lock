@@ -18224,8 +18224,10 @@ name = "backend-utils-adt-jsonpath-exec"
 version = "0.0.0"
 dependencies = [
  "backend-tcop-postgres-seams",
+ "backend-utils-adt-datetime",
  "backend-utils-adt-float",
  "backend-utils-adt-format-type-seams",
+ "backend-utils-adt-formatting",
  "backend-utils-adt-int",
  "backend-utils-adt-int8",
  "backend-utils-adt-json-seams",
@@ -18243,11 +18245,14 @@ dependencies = [
  "backend-utils-misc-stack-depth-seams",
  "mcx",
  "probe-adt-scalar-bool",
+ "state-pgtz",
  "types-core",
+ "types-datetime",
  "types-datum",
  "types-error",
  "types-jsonb",
  "types-jsonpath",
+ "types-pgtime",
  "types-tuple",
 ]
 

@@ -1,12 +1,15 @@
 //! Seam declarations for the `backend-utils-adt-jsonpath-exec` unit
 //! (`utils/adt/jsonpath_exec.c`): the jsonpath_exec-specific externals whose
-//! signatures carry this unit's local node/value types or that are
-//! jsonpath_exec-private soft-parse wrappers — `parse_datetime`,
-//! `datetime_method_cast`, `compare_datetime`, the fmgr type-input soft-parse
-//! helpers (`int4in`/`int8in`/`float8in_internal`/`parse_bool`/
-//! `numeric_in_with_typmod`), the `JsonItemFromDatum` `Datum`→`JsonbValue`
-//! coercions, the recursion/interrupt guards, and the JSON_TABLE
-//! executor/`ExprState`/node boundary (`init_table_func`/`eval_column`).
+//! signatures carry this unit's local node/value types — the `JsonItemFromDatum`
+//! `Datum`→`JsonbValue` coercions and the JSON_TABLE executor/`ExprState`/node
+//! boundary (`init_table_func`/`eval_column`).
+//!
+//! The datetime substrate (`parse_datetime` / `compareDatetime` / the
+//! `executeDateTimeMethod` cast switch) is NOT seamed — jsonpath_exec.c is a
+//! leaf adt unit, so it calls the real ported `backend-utils-adt-formatting`
+//! and `backend-utils-adt-datetime` casts/comparators in-crate, exactly as C
+//! reaches them through `DirectFunctionCall*`. Only the shared
+//! [`DateTimeValue`] carrier remains here.
 //!
 //! Genuine externals owned by other subsystems are reached through their own
 //! owner-seams crates, not declared here: `RE_compile_and_execute`
@@ -14,11 +17,10 @@
 //! `GetDatabaseEncoding` (mbutils-seams), `JsonEncodeDateTime` (json-seams),
 //! and `jspConvertRegexFlags` (the jsonpath type crate, a direct dep).
 //!
-//! Each defaults to a loud panic until its owning unit installs it. The three
-//! seams whose signatures carry this module's local node-tree types
-//! (`DateTimeValue` / `JsonTablePlan` / `JsonTableVariable`) — `parse_datetime`,
-//! `datetime_method_cast`, `init_table_func` — are declared here because those
-//! types are not in the layered `types-*` stack.
+//! Each remaining seam defaults to a loud panic until its owning unit installs
+//! it. The seams whose signatures carry this module's local node-tree types
+//! (`JsonTablePlan` / `JsonTableVariable`) — `init_table_func` — are declared
+//! here because those types are not in the layered `types-*` stack.
 
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
@@ -26,7 +28,6 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
-use alloc::string::String;
 use alloc::vec::Vec;
 
 use types_core::Oid;
@@ -34,19 +35,13 @@ use types_datum::Datum;
 use types_error::PgResult;
 use types_jsonb::backend_utils_adt_jsonb_util::JsonbValue;
 
-seam_core::seam!(
-    /// C: `compareDatetime(Datum val1, Oid typid1, Datum val2, Oid typid2,
-    /// bool useTz, bool *cast_error)` (jsonpath_exec.c) — cross-type comparison
-    /// of two datetime SQL/JSON items. Returns `Ok(None)` when the items are
-    /// uncomparable (`*cast_error = true`), else `Ok(Some(cmp))`.
-    pub fn compare_datetime(
-        val1: Datum,
-        typid1: Oid,
-        val2: Datum,
-        typid2: Oid,
-        use_tz: bool
-    ) -> PgResult<core::option::Option<i32>>
-);
+// The `compareDatetime` cross-type comparison, the `parse_datetime` text
+// parser, and the `executeDateTimeMethod` cast switch are no longer seamed:
+// they are implemented in-crate (jsonpath_exec.c is a leaf adt unit) against
+// the real ported `backend-utils-adt-formatting` (`parse_datetime`) and
+// `backend-utils-adt-datetime` (date/time/timestamp casts + comparators),
+// exactly as C reaches them through `DirectFunctionCall*`. Only the shared
+// [`DateTimeValue`] carrier remains here.
 
 // The `DirectInputFunctionCallSafe(int4in/int8in/numeric_in, ...)` /
 // `float8in_internal` / `parse_bool` soft-parse calls of the item methods are
@@ -69,7 +64,12 @@ seam_core::seam!(
 // `backend-tcop-postgres-seams`), not a private re-declaration here.
 
 /// A datetime SQL/JSON value as carried by `jbvDatetime`: a `Datum`, its type
-/// OID, the typmod, and the numeric timezone (seconds) for `timestamptz`.
+/// OID, the typmod, and the numeric timezone (seconds).
+///
+/// The datetime `Datum` is a by-value machine word (date = `int32`,
+/// time/timestamp/timestamptz = `int64`); a `timetz`'s by-reference
+/// `{ TimeADT time, int32 zone }` is carried losslessly as `value = time`,
+/// `tz = zone`.
 #[derive(Clone, Copy, Debug)]
 pub struct DateTimeValue {
     pub value: Datum,
@@ -77,39 +77,6 @@ pub struct DateTimeValue {
     pub typmod: i32,
     pub tz: i32,
 }
-
-seam_core::seam!(
-    /// C: `parse_datetime(text *date_txt, text *fmt, Oid collid, bool strict,
-    /// Oid *typid, int32 *typmod, int *tz, struct Node *escontext)` (json.c).
-    ///
-    /// On a soft error (`throw_error == false`), returns `Ok(None)`; on success
-    /// returns the parsed value/typid/typmod/tz.
-    pub fn parse_datetime(
-        datetime: Vec<u8>,
-        template: core::option::Option<Vec<u8>>,
-        collid: Oid,
-        throw_error: bool
-    ) -> PgResult<core::option::Option<DateTimeValue>>
-);
-
-seam_core::seam!(
-    /// The `.date()/.time()/.time_tz()/.timestamp()/.timestamp_tz()` cast switch
-    /// of `executeDateTimeMethod`: convert the parsed datetime to the method's
-    /// target type, applying the optional time-precision typmod and the `useTz`
-    /// checks. Returns the converted value, or `Ok(None)` to signal a soft
-    /// (suppressed) error.
-    ///
-    /// `target` is the method's `JsonPathItemType` discriminant; `datetime_cstr`
-    /// is the source text used in "format is not recognized" messages.
-    pub fn datetime_method_cast(
-        target: i32,
-        parsed: DateTimeValue,
-        time_precision: i32,
-        use_tz: bool,
-        datetime_cstr: String,
-        throw_error: bool
-    ) -> PgResult<core::option::Option<DateTimeValue>>
-);
 
 // ---------------------------------------------------------------------------
 // JSON_TABLE executor/nodes boundary (jsonpath_exec.c:4082-4493).
