@@ -39,6 +39,7 @@ use backend_executor_tablefuncRoutine_seams as routine;
 use backend_nodes_core_seams as nodes_core;
 use backend_tcop_postgres_seams as tcop_postgres;
 use backend_utils_adt_varlena_seams as varlena;
+use backend_utils_adt_xml as xml;
 use backend_utils_cache_lsyscache_seams as lsyscache;
 use backend_utils_fmgr_fmgr_seams as fmgr;
 use backend_utils_init_small_seams as globals;
@@ -47,7 +48,7 @@ use backend_utils_sort_storage_seams as tuplestore;
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
 use types_core::fmgr::FmgrInfo;
 use types_tuple::backend_access_common_heaptuple::Datum;
-use types_error::error::ERRCODE_NULL_VALUE_NOT_ALLOWED;
+use types_error::error::{ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_NULL_VALUE_NOT_ALLOWED};
 use types_error::{PgError, PgResult};
 use types_nodes::{
     EStateData, EcxtId, SlotId, TableFuncRoutineKind, TableFuncScan, TableFuncScanState,
@@ -63,7 +64,192 @@ use types_nodes::executor::EXEC_FLAG_MARK;
 /// these functions (execProcnode's dispatch tables) can depend on this crate
 /// directly without a cycle, since this crate reaches outward only through
 /// per-owner seam crates.
-pub fn init_seams() {}
+///
+/// This crate also hosts the `TableFuncRoutine` vtable dispatch: C reaches the
+/// table-builder methods through a `const TableFuncRoutine *routine`
+/// function-pointer table on the node, of which only two instances exist —
+/// `XmlTableRoutine` (`xml.c`) and `JsonbTableRoutine` (`jsonpath_exec.c`). The
+/// owned model carries that identity as [`TableFuncRoutineKind`]; here each of
+/// the nine [`routine`] seams dispatches on the kind to the concrete builder.
+///
+/// The `XmlTable` arm forwards to the [`xml`] crate's `XmlTable*` entry points,
+/// which route to the libxml provider when installed and otherwise raise the
+/// `--without-libxml` `unsupported XML feature` error — exactly the C
+/// `XmlTableRoutine` behaviour. (These methods carry no per-call `state`: the
+/// libxml parser-context lifecycle is wholly internal to the provider, so the
+/// `&mut TableFuncScanState` / document `Datum` are unused on this arm.)
+///
+/// The `JsonbTable` arm is gated behind the JSON_TABLE executor-integration
+/// keystone — see [`json_table_not_wired`].
+pub fn init_seams() {
+    routine::routine_init_opaque::set(routine_init_opaque);
+    routine::routine_set_document::set(routine_set_document);
+    routine::routine_set_namespace::set(routine_set_namespace);
+    routine::routine_has_set_row_filter::set(routine_has_set_row_filter);
+    routine::routine_set_row_filter::set(routine_set_row_filter);
+    routine::routine_set_column_filter::set(routine_set_column_filter);
+    routine::routine_fetch_row::set(routine_fetch_row);
+    routine::routine_get_value::set(routine_get_value);
+    routine::routine_destroy_opaque::set(routine_destroy_opaque);
+}
+
+// ===========================================================================
+//                  TableFuncRoutine vtable dispatch (tablefunc.h)
+//
+// C dispatches every builder call through `routine->Method(state, ...)`, where
+// `routine` is one of the two `const TableFuncRoutine` instances. The owned
+// model keys that dispatch on `TableFuncRoutineKind`. The two providers live in
+// unported `utils/adt` owners; the XML half is reachable today (the `xml` crate
+// hosts its `--without-libxml` entry points), the JSON_TABLE half awaits its
+// executor-integration keystone.
+// ===========================================================================
+
+/// The `JsonbTableRoutine` arm is not yet wired: the JSON_TABLE row-pattern
+/// builder lives in `backend-utils-adt-jsonpath-exec` (`JsonTable*`) and is
+/// fully ported, but reaching it from here needs the JSON_TABLE
+/// executor-integration substrate that is a separate campaign — the
+/// `jsonpath-exec` `init_table_func` / `eval_column` seams (which build the
+/// `JsonTablePlan` from `TableFunc.plan` and evaluate each `JsonExpr` column via
+/// `ExecEvalExpr`) are uninstalled, the document `Datum` must be detoasted to
+/// jsonb varlena bytes, and the seam's `types_tuple` `Datum` must bridge to the
+/// owner's `types_datum` `Datum`. Until that lands, JSON_TABLE errors cleanly
+/// here rather than executing.
+fn json_table_not_wired(what: &str) -> PgError {
+    PgError::error(alloc::format!("JSON_TABLE is not yet supported ({what})"))
+        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+}
+
+/// `routine->InitOpaque(state, natts)`.
+fn routine_init_opaque(
+    _state: &mut TableFuncScanState<'_>,
+    kind: TableFuncRoutineKind,
+    natts: i32,
+) -> PgResult<()> {
+    match kind {
+        TableFuncRoutineKind::XmlTable => xml::XmlTableInitOpaque(natts),
+        TableFuncRoutineKind::JsonbTable => Err(json_table_not_wired("InitOpaque")),
+    }
+}
+
+/// `routine->SetDocument(state, value)`.
+fn routine_set_document<'mcx>(
+    _state: &mut TableFuncScanState<'mcx>,
+    kind: TableFuncRoutineKind,
+    _value: Datum<'mcx>,
+) -> PgResult<()> {
+    match kind {
+        // The XML provider errors before reading the document, so the seam's
+        // `Datum` (a `types_tuple` value) is not forwarded; a future libxml
+        // provider takes the value through its own internal context.
+        TableFuncRoutineKind::XmlTable => xml::XmlTableSetDocument(types_datum::Datum::null()),
+        TableFuncRoutineKind::JsonbTable => Err(json_table_not_wired("SetDocument")),
+    }
+}
+
+/// `routine->SetNamespace(state, name, uri)`.
+fn routine_set_namespace(
+    _state: &mut TableFuncScanState<'_>,
+    kind: TableFuncRoutineKind,
+    name: Option<&str>,
+    uri: &str,
+) -> PgResult<()> {
+    match kind {
+        TableFuncRoutineKind::XmlTable => xml::XmlTableSetNamespace(name, uri),
+        // C: `JsonbTableRoutine.SetNamespace == NULL`; the caller only reaches
+        // this for XMLTABLE (driven by `ns_uris`/`ns_names`), so JSON_TABLE
+        // never lands here. Guard defensively.
+        TableFuncRoutineKind::JsonbTable => Err(json_table_not_wired("SetNamespace")),
+    }
+}
+
+/// `routine->SetRowFilter != NULL`.
+fn routine_has_set_row_filter(kind: TableFuncRoutineKind) -> bool {
+    match kind {
+        // `XmlTableRoutine.SetRowFilter` is non-NULL.
+        TableFuncRoutineKind::XmlTable => true,
+        // `JsonbTableRoutine.SetRowFilter == NULL`.
+        TableFuncRoutineKind::JsonbTable => false,
+    }
+}
+
+/// `routine->SetRowFilter(state, path)`.
+fn routine_set_row_filter(
+    _state: &mut TableFuncScanState<'_>,
+    kind: TableFuncRoutineKind,
+    path: &str,
+) -> PgResult<()> {
+    match kind {
+        TableFuncRoutineKind::XmlTable => xml::XmlTableSetRowFilter(path),
+        // `JsonbTableRoutine.SetRowFilter == NULL`: only called when
+        // `routine_has_set_row_filter`, which is `false` for JSON_TABLE.
+        TableFuncRoutineKind::JsonbTable => Err(json_table_not_wired("SetRowFilter")),
+    }
+}
+
+/// `routine->SetColumnFilter(state, path, colnum)`.
+fn routine_set_column_filter(
+    _state: &mut TableFuncScanState<'_>,
+    kind: TableFuncRoutineKind,
+    path: &str,
+    colnum: i32,
+) -> PgResult<()> {
+    match kind {
+        TableFuncRoutineKind::XmlTable => xml::XmlTableSetColumnFilter(path, colnum),
+        // `JsonbTableRoutine.SetColumnFilter == NULL`; reached only for XMLTABLE.
+        TableFuncRoutineKind::JsonbTable => Err(json_table_not_wired("SetColumnFilter")),
+    }
+}
+
+/// `routine->FetchRow(state)`.
+fn routine_fetch_row(
+    _state: &mut TableFuncScanState<'_>,
+    kind: TableFuncRoutineKind,
+) -> PgResult<bool> {
+    match kind {
+        TableFuncRoutineKind::XmlTable => xml::XmlTableFetchRow(),
+        TableFuncRoutineKind::JsonbTable => Err(json_table_not_wired("FetchRow")),
+    }
+}
+
+/// `routine->GetValue(state, colnum, typid, typmod, &isnull)`.
+fn routine_get_value<'mcx>(
+    _state: &mut TableFuncScanState<'mcx>,
+    kind: TableFuncRoutineKind,
+    colnum: i32,
+    typid: types_core::primitive::Oid,
+    typmod: i32,
+) -> PgResult<(Datum<'mcx>, bool)> {
+    match kind {
+        // The XML provider errors before producing a value, so its
+        // `types_datum::Datum` return never needs bridging to the seam's
+        // `types_tuple` `Datum`.
+        TableFuncRoutineKind::XmlTable => {
+            xml::XmlTableGetValue(colnum, typid, typmod).map(|(_d, isnull)| (Datum::null(), isnull))
+        }
+        TableFuncRoutineKind::JsonbTable => Err(json_table_not_wired("GetValue")),
+    }
+}
+
+/// `routine->DestroyOpaque(state)`.
+fn routine_destroy_opaque(
+    state: &mut TableFuncScanState<'_>,
+    kind: TableFuncRoutineKind,
+) -> PgResult<()> {
+    match kind {
+        TableFuncRoutineKind::XmlTable => {
+            let r = xml::XmlTableDestroyOpaque();
+            // C clears `state->opaque` after DestroyOpaque; mirror that even on
+            // the error/no-libxml path so the caller's `opaque != NULL` cleanup
+            // guard sees the slot emptied.
+            state.opaque.0 = None;
+            r
+        }
+        TableFuncRoutineKind::JsonbTable => {
+            state.opaque.0 = None;
+            Err(json_table_not_wired("DestroyOpaque"))
+        }
+    }
+}
 
 // ===========================================================================
 //                              Scan Support

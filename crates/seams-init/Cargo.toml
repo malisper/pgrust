@@ -245,6 +245,7 @@ backend-executor-nodeSubqueryscan = { path = "../backend-executor-nodeSubquerysc
 backend-executor-nodeSort = { path = "../backend-executor-nodeSort" }
 backend-executor-nodeIncrementalSort = { path = "../backend-executor-nodeIncrementalSort" }
 backend-executor-nodeSubplan = { path = "../backend-executor-nodeSubplan" }
+backend-executor-nodeTableFuncscan = { path = "../backend-executor-nodeTableFuncscan" }
 backend-executor-tqueue = { path = "../backend-executor-tqueue" }
 backend-executor-nodeUnique = { path = "../backend-executor-nodeUnique" }
 backend-executor-nodeValuesscan = { path = "../backend-executor-nodeValuesscan" }
