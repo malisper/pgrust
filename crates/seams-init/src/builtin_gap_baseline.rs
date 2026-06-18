@@ -25,7 +25,7 @@
 //! test that runs `crate::init_all()` then formats `missing_builtins()` (sorted
 //! by `foid`) as the `(oid, "prosrc", BuiltinGapKind::...)` rows below.
 //!
-//! Current gap: 1318 of 3102 canonical built-ins (1318 not registered,
+//! Current gap: 1305 of 3102 canonical built-ins (1305 not registered,
 //! 0 registered with diverging metadata).
 
 use backend_utils_fmgr_core::BuiltinGapKind;
@@ -187,7 +187,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (1349, "oidvectortypes", BuiltinGapKind::NotRegistered),
     (1364, "textregexeq_support", BuiltinGapKind::NotRegistered),
     (1371, "pg_lock_status", BuiltinGapKind::NotRegistered),
-    (1376, "numeric_fac", BuiltinGapKind::NotRegistered),
     (1391, "pg_stat_get_backend_start", BuiltinGapKind::NotRegistered),
     (1392, "pg_stat_get_backend_client_addr", BuiltinGapKind::NotRegistered),
     (1393, "pg_stat_get_backend_client_port", BuiltinGapKind::NotRegistered),
@@ -218,12 +217,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (1686, "pg_get_keywords", BuiltinGapKind::NotRegistered),
     (1689, "aclexplode", BuiltinGapKind::NotRegistered),
     (1703, "numeric", BuiltinGapKind::NotRegistered),
-    (1740, "int4_numeric", BuiltinGapKind::NotRegistered),
-    (1742, "float4_numeric", BuiltinGapKind::NotRegistered),
-    (1743, "float8_numeric", BuiltinGapKind::NotRegistered),
-    (1744, "numeric_int4", BuiltinGapKind::NotRegistered),
-    (1745, "numeric_float4", BuiltinGapKind::NotRegistered),
-    (1746, "numeric_float8", BuiltinGapKind::NotRegistered),
     (1765, "setval3_oid", BuiltinGapKind::NotRegistered),
     (1766, "numeric_smaller", BuiltinGapKind::NotRegistered),
     (1767, "numeric_larger", BuiltinGapKind::NotRegistered),
@@ -232,11 +225,7 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (1772, "numeric_to_char", BuiltinGapKind::NotRegistered),
     (1777, "numeric_to_number", BuiltinGapKind::NotRegistered),
     (1778, "to_timestamp", BuiltinGapKind::NotRegistered),
-    (1779, "numeric_int8", BuiltinGapKind::NotRegistered),
     (1780, "to_date", BuiltinGapKind::NotRegistered),
-    (1781, "int8_numeric", BuiltinGapKind::NotRegistered),
-    (1782, "int2_numeric", BuiltinGapKind::NotRegistered),
-    (1783, "numeric_int2", BuiltinGapKind::NotRegistered),
     (1814, "iclikesel", BuiltinGapKind::NotRegistered),
     (1815, "icnlikesel", BuiltinGapKind::NotRegistered),
     (1816, "iclikejoinsel", BuiltinGapKind::NotRegistered),
@@ -1175,7 +1164,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (5037, "xid8ge", BuiltinGapKind::NotRegistered),
     (5040, "matchingsel", BuiltinGapKind::NotRegistered),
     (5041, "matchingjoinsel", BuiltinGapKind::NotRegistered),
-    (5042, "numeric_min_scale", BuiltinGapKind::NotRegistered),
     (5052, "pg_get_shmem_allocations", BuiltinGapKind::NotRegistered),
     (5053, "pg_stat_get_ins_since_vacuum", BuiltinGapKind::NotRegistered),
     (5054, "jsonb_set_lax", BuiltinGapKind::NotRegistered),

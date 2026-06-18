@@ -344,6 +344,105 @@ fn fc_numeric_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 
 // ---------------------------------------------------------------------------
+// Cross-type casts: int{2,4,8} <-> numeric and float{4,8} <-> numeric.
+// (numeric.c int4_numeric/numeric_int4/int8_numeric/numeric_int8/
+//  int2_numeric/numeric_int2/float8_numeric/numeric_float8/
+//  float4_numeric/numeric_float4.)
+// ---------------------------------------------------------------------------
+
+/// `int4_numeric(int4) -> numeric` (oid 1740). C widens to int64 then calls
+/// `int64_to_numeric`.
+fn fc_int4_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let val = arg_int32(fcinfo, 0) as i64;
+    let m = scratch_mcx();
+    let image = ok(crate::convert::int64_to_numeric(m.mcx(), val));
+    ret_numeric(fcinfo, image.as_slice().to_vec())
+}
+
+/// `int2_numeric(int2) -> numeric` (oid 1782).
+fn fc_int2_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let val = fcinfo.arg(0).expect("missing arg").value.as_i16() as i64;
+    let m = scratch_mcx();
+    let image = ok(crate::convert::int64_to_numeric(m.mcx(), val));
+    ret_numeric(fcinfo, image.as_slice().to_vec())
+}
+
+/// `int8_numeric(int8) -> numeric` (oid 1781).
+fn fc_int8_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let val = arg_int64(fcinfo, 0);
+    let m = scratch_mcx();
+    let image = ok(crate::convert::int64_to_numeric(m.mcx(), val));
+    ret_numeric(fcinfo, image.as_slice().to_vec())
+}
+
+/// `numeric_int4(numeric) -> int4` (oid 1744): round to nearest, range-checked.
+fn fc_numeric_int4(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let num = arg_numeric(fcinfo, 0);
+    ret_i32(ok(crate::ops_sql::seam_numeric_int4(num)))
+}
+
+/// `numeric_int2(numeric) -> int2` (oid 1783).
+fn fc_numeric_int2(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let num = arg_numeric(fcinfo, 0);
+    Datum::from_i16(ok(crate::ops_sql::seam_numeric_int2(num)))
+}
+
+/// `numeric_int8(numeric) -> int8` (oid 1779).
+fn fc_numeric_int8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let num = arg_numeric(fcinfo, 0);
+    ret_i64(ok(crate::ops_sql::seam_numeric_int8(num)))
+}
+
+/// `float8_numeric(float8) -> numeric` (oid 1743).
+fn fc_float8_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let val = fcinfo.arg(0).expect("missing arg").value.as_f64();
+    let m = scratch_mcx();
+    let image = ok(crate::convert::float8_to_numeric(m.mcx(), val));
+    ret_numeric(fcinfo, image.as_slice().to_vec())
+}
+
+/// `float4_numeric(float4) -> numeric` (oid 1742). C widens `float4` to
+/// `float8` before the decimal rendering (`float4_numeric` -> `(float8) val`).
+fn fc_float4_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let val = fcinfo.arg(0).expect("missing arg").value.as_f32() as f64;
+    let m = scratch_mcx();
+    let image = ok(crate::convert::float8_to_numeric(m.mcx(), val));
+    ret_numeric(fcinfo, image.as_slice().to_vec())
+}
+
+/// `numeric_float8(numeric) -> float8` (oid 1746).
+fn fc_numeric_float8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let num = arg_numeric(fcinfo, 0);
+    Datum::from_f64(ok(crate::convert::numeric_to_float8(num)))
+}
+
+/// `numeric_float4(numeric) -> float4` (oid 1745).
+fn fc_numeric_float4(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let num = arg_numeric(fcinfo, 0);
+    Datum::from_f32(ok(crate::convert::numeric_to_float4(num)))
+}
+
+/// `numeric_fac(int8) -> numeric` (oid 1376): `factorial(int8)`.
+fn fc_numeric_fac(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let n = arg_int64(fcinfo, 0);
+    let m = scratch_mcx();
+    let image = ok(crate::ops_sql::numeric_factorial(m.mcx(), n));
+    ret_numeric(fcinfo, image.as_slice().to_vec())
+}
+
+/// `numeric_min_scale(numeric) -> int4` (oid 5042). C returns SQL NULL for a
+/// special (NaN/Inf) input; a finite value yields its minimum representable
+/// scale.
+fn fc_numeric_min_scale(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let num = arg_numeric(fcinfo, 0);
+    if types_numeric::numeric_is_special(num) {
+        fcinfo.set_result_null(true);
+        return Datum::from_usize(0);
+    }
+    ret_i32(crate::ops_sql::get_min_scale(num))
+}
+
+// ---------------------------------------------------------------------------
 // Aggregate transition functions for sum(int2)/sum(int4)/sum(int8).
 //
 // These are NON-STRICT (`proisstrict => 'f'`): they receive the running
@@ -638,6 +737,21 @@ pub fn register_numeric_builtins() {
         builtin(3571, "int4_avg_accum_inv", 2, true, false, fc_int4_avg_accum_inv),
         builtin(1964, "int8_avg", 1, true, false, fc_int8_avg),
         builtin(3572, "int2int4_sum", 1, true, false, fc_int2int4_sum),
+        // Cross-type casts int{2,4,8} <-> numeric.
+        builtin(1740, "int4_numeric", 1, true, false, fc_int4_numeric),
+        builtin(1782, "int2_numeric", 1, true, false, fc_int2_numeric),
+        builtin(1781, "int8_numeric", 1, true, false, fc_int8_numeric),
+        builtin(1744, "numeric_int4", 1, true, false, fc_numeric_int4),
+        builtin(1783, "numeric_int2", 1, true, false, fc_numeric_int2),
+        builtin(1779, "numeric_int8", 1, true, false, fc_numeric_int8),
+        // Cross-type casts float{4,8} <-> numeric.
+        builtin(1743, "float8_numeric", 1, true, false, fc_float8_numeric),
+        builtin(1742, "float4_numeric", 1, true, false, fc_float4_numeric),
+        builtin(1746, "numeric_float8", 1, true, false, fc_numeric_float8),
+        builtin(1745, "numeric_float4", 1, true, false, fc_numeric_float4),
+        // factorial(int8) and min_scale(numeric).
+        builtin(1376, "numeric_fac", 1, true, false, fc_numeric_fac),
+        builtin(5042, "numeric_min_scale", 1, true, false, fc_numeric_min_scale),
     ]);
 }
 
