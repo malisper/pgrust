@@ -7715,6 +7715,7 @@ dependencies = [
  "types-fmgr",
  "types-nodes",
  "types-rel",
+ "types-ri-triggers",
  "types-snapshot",
  "types-tableam",
  "types-trigger",

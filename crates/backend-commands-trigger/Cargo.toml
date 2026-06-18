@@ -20,6 +20,7 @@ types-rel = { path = "../types-rel" }
 types-snapshot = { path = "../types-snapshot" }
 types-tuple = { path = "../types-tuple" }
 types-trigger = { path = "../types-trigger" }
+types-ri-triggers = { path = "../types-ri-triggers" }
 types-nodes = { path = "../types-nodes" }
 types-tableam = { path = "../types-tableam" }
 backend-commands-trigger-seams = { path = "../backend-commands-trigger-seams" }
