@@ -328,10 +328,7 @@ pub fn ExplainQuery<'mcx>(
     let query = explain
         .query
         .as_deref()
-        .and_then(|n| match n {
-            Node::Query(q) => Some(q),
-            _ => None,
-        })
+        .and_then(|n| n.as_query())
         .expect("ExplainQuery: ExplainStmt->query is not an analyzed Query node");
 
     // IsQueryIdEnabled() jumble + post_parse_analyze_hook: query-id jumbling is
