@@ -419,8 +419,10 @@ pub fn rewriteTargetListIU<'mcx>(
             let mut values_attrno = 0i32;
             // Source attribute number for VALUES-RTE values.
             if values_rte.is_some() {
-                if let Some(Expr::Var(var)) =
-                    new_tle.as_ref().and_then(|t| t.expr.as_deref())
+                if let Some(var) = new_tle
+                    .as_ref()
+                    .and_then(|t| t.expr.as_deref())
+                    .and_then(|e| e.as_var())
                 {
                     if var.varno == values_rte_index {
                         values_attrno = var.varattno as i32;
@@ -615,7 +617,7 @@ pub fn rewriteValuesRTE<'mcx>(
     };
     let mut attrnos = vec![0i16; numattrs];
     for tle in parsetree.targetList.iter() {
-        if let Some(Expr::Var(var)) = tle.expr.as_deref() {
+        if let Some(var) = tle.expr.as_deref().and_then(|e| e.as_var()) {
             if var.varno == rti {
                 let attrno = var.varattno;
                 if attrno >= 1 && (attrno as usize) <= numattrs {
@@ -956,13 +958,9 @@ pub fn AcquireRewriteLocks<'mcx>(
 /// then `IsA(.., Var)`). Returns `None` for a NULL slot, a merged USING column,
 /// or any non-Var.
 fn strip_to_var<'a>(node: &'a NodePtr<'_>) -> Option<&'a Var> {
-    match &**node {
-        Node::Expr(e) => match backend_nodes_core::nodefuncs::strip_implicit_coercions(e) {
-            Expr::Var(v) => Some(v),
-            _ => None,
-        },
-        _ => None,
-    }
+    (**node)
+        .as_expr()
+        .and_then(|e| backend_nodes_core::nodefuncs::strip_implicit_coercions(e).as_var())
 }
 
 // ===========================================================================
