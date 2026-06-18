@@ -53,6 +53,7 @@ backend-optimizer-prep-prepjointree-seams = { path = "../backend-optimizer-prep-
 backend-optimizer-prep-preptlist = { path = "../backend-optimizer-prep-preptlist" }
 # preprocess_aggrefs.
 backend-optimizer-prep-prepagg = { path = "../backend-optimizer-prep-prepagg" }
+backend-optimizer-plan-planagg = { path = "../backend-optimizer-plan-planagg" }
 # canonicalize_qual / make_ands_implicit live in prepqual / nodes-core.
 backend-optimizer-prep-prepqual = { path = "../backend-optimizer-prep-prepqual" }
 # fetch_upper_rel.

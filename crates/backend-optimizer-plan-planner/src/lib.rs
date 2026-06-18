@@ -1441,23 +1441,32 @@ fn grouping_planner<'mcx>(
     {
         let has_aggs = run.resolve(root.parse).hasAggs;
         if has_aggs {
-            // processed_tlist: clone each TargetEntry's expr, then walk it.
+            // processed_tlist: for each TargetEntry expr, take the live arena
+            // node out, run preprocess_aggrefs (which catalogs the aggs into
+            // `root` AND writes aggno/aggtransno/aggtranstype onto the node in
+            // place — the plan's tlist Aggrefs must carry these for ExecInitAgg),
+            // then put the mutated node back. Taking it out resolves the
+            // borrow conflict between `&mut root` (the arena) and the live node.
             let tlist_exprs: Vec<types_pathnodes::NodeId> =
                 root.processed_tlist.iter().map(|te| root.targetentry(*te).expr).collect();
             for expr_id in tlist_exprs {
-                let cloned = root.node(expr_id).clone_in(mcx)?;
-                backend_optimizer_prep_prepagg::preprocess_aggrefs(mcx, root, &cloned)?;
+                // Deep-clone the live node out (a shallow Expr::clone panics on
+                // an Aggref), process+number it, then write it back.
+                let mut live = root.node(expr_id).clone_in(mcx)?;
+                backend_optimizer_prep_prepagg::preprocess_aggrefs(mcx, root, &mut live)?;
+                *root.node_mut(expr_id) = live;
             }
             // preprocess_aggrefs(root, (Node *) parse->havingQual) (C:1580).
             // `havingQual` is the concretely-typed `Option<PgBox<Expr>>` view;
-            // clone the owned `Expr` and walk it, mirroring the processed_tlist
-            // handling above.
+            // clone the owned `Expr` and walk it (HAVING Aggrefs are also
+            // cataloged + numbered; HAVING is not re-read off this clone, so a
+            // write-back to the source tree is not needed here).
             let having: Option<Expr> = match run.resolve(root.parse).havingQual.as_deref() {
                 Some(e) => Some(e.clone_in(mcx)?),
                 None => None,
             };
-            if let Some(having) = having {
-                backend_optimizer_prep_prepagg::preprocess_aggrefs(mcx, root, &having)?;
+            if let Some(mut having) = having {
+                backend_optimizer_prep_prepagg::preprocess_aggrefs(mcx, root, &mut having)?;
             }
         }
     }
@@ -1478,10 +1487,14 @@ fn grouping_planner<'mcx>(
     {
         let has_aggs = run.resolve(root.parse).hasAggs;
         if has_aggs {
-            panic!(
-                "grouping_planner: preprocess_minmax_aggregates (planagg.c) has no \
-                 ported owner"
-            );
+            // Clone the parse Query out of the arena to release the run borrow
+            // while planagg mutably borrows root.
+            let parse_owned = run.resolve(root.parse).clone_in(mcx)?;
+            backend_optimizer_plan_planagg::preprocess_minmax_aggregates(
+                mcx,
+                root,
+                &parse_owned,
+            )?;
         }
     }
 
@@ -1983,7 +1996,11 @@ fn make_group_input_target<'mcx>(
     let mut non_group_var_ids: Vec<types_pathnodes::NodeId> = Vec::new();
     let flags = PVC_RECURSE_AGGREGATES | PVC_RECURSE_WINDOWFUNCS | PVC_INCLUDE_PLACEHOLDERS;
     for &nid in &non_group_cols {
-        let node = Node::Expr(root.node(nid).clone());
+        // node_expr_wrapper deep-copies the input Expr into a scratch context
+        // (a shallow Expr::clone panics on an Aggref); PVC_RECURSE_AGGREGATES
+        // recurses into the agg's args rather than pushing the agg itself.
+        let scratch = mcx::MemoryContext::new("make_group_input_target pull_var_clause");
+        let node = backend_nodes_core::node_walker::node_expr_wrapper(root.node(nid), scratch.mcx());
         let vars = pull_var_clause(&node, flags);
         for v in vars {
             non_group_var_ids.push(root.alloc_node(v));
