@@ -410,6 +410,22 @@ impl<'mcx> PlanStateNode<'mcx> {
         }
     }
 
+    /// `castNode(WindowAggState, node)` — the concrete `WindowAggState` a
+    /// window-function-owned `ExprState`'s `parent` points at (read by
+    /// `EEOP_WINDOW_FUNC` for `winstate->funcs[funcidx]->wfuncno`). `None` for
+    /// any non-WindowAgg node. The `WindowAggState` lives in `types-nodes`
+    /// (every field is here), so it is carried directly by value, like the
+    /// `ModifyTableState`/`FunctionScanState` carriers — no tag-checked erased
+    /// recovery is needed.
+    pub fn as_window_agg_state(
+        &self,
+    ) -> Option<&crate::nodewindowagg::WindowAggState<'mcx>> {
+        match self {
+            PlanStateNode::WindowAgg(w) => Some(&**w),
+            _ => None,
+        }
+    }
+
     /// `castNode(ModifyTableState, node)` — the `ModifyTableState` a
     /// MERGE-owned `ExprState`'s `parent` points at (read by
     /// `EEOP_MERGE_SUPPORT_FUNC` for `mtstate->mt_merge_action`). `None` until

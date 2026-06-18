@@ -1429,10 +1429,92 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             "execExpr-core: AlternativeSubPlan must be replaced by a concrete SubPlan before \
              execution (planner: select cheapest alternative)"
         ),
-        Expr::WindowFunc(_) => panic!(
-            "execExpr-core: WindowFunc setup is owned by nodeWindowAgg (WindowFuncExprState); the \
-             parent WindowAggState must be threaded"
-        ),
+        Expr::WindowFunc(wfunc) => {
+            // C (execExpr.c ExecInitExprRec T_WindowFunc):
+            //   WindowFuncExprState *wfstate = makeNode(WindowFuncExprState);
+            //   wfstate->wfunc = wfunc;
+            //   if (state->parent && IsA(state->parent, WindowAggState)) {
+            //       winstate->funcs = lappend(winstate->funcs, wfstate);
+            //       nfuncs = ++winstate->numfuncs;
+            //       if (wfunc->winagg) winstate->numaggs++;
+            //       wfstate->args = ExecInitExprList(wfunc->args, state->parent);
+            //       wfstate->aggfilter = ExecInitExpr(wfunc->aggfilter, state->parent);
+            //   } else elog(ERROR, "WindowFunc found in non-WindowAgg plan node");
+            //   scratch.opcode = EEOP_WINDOW_FUNC;
+            //   scratch.d.window_func.wfstate = wfstate;
+            //
+            // The C `state->parent` IS the in-flight WindowAggState; the owned
+            // model has not stamped `state.parent` yet (deferred to
+            // `stamp_expr_parents`), so the `WindowFuncExprState`s are collected
+            // on the ExprState's `found_window_funcs` channel and drained into
+            // `winstate.funcs` by `ExecInitWindowAgg` after this projection
+            // compile (the window analogue of the `found_aggs` channel). The
+            // "WindowFunc found in non-WindowAgg plan node" guard becomes the
+            // `es_link.is_none()` test: a parentless `ExecInitExpr` leaves it
+            // None, exactly C's `!state->parent` arm. The args/aggfilter are
+            // compiled with their own EState back-link (reached through
+            // `es_link`, as the SubPlan compile does).
+            if state.es_link.is_none() {
+                return Err(types_error::PgError::error(
+                    "WindowFunc found in non-WindowAgg plan node",
+                ));
+            }
+
+            // Compile args + aggfilter against the EState (reached through the
+            // compile-entry-stamped `es_link`). The args are independent
+            // ExprStates owned by the WindowFuncExprState, exactly like C's
+            // `ExecInitExprList(wfunc->args, state->parent)`.
+            let mut es_link =
+                state.es_link.expect("WindowFunc: es_link present (guarded above)");
+            let estate = es_link.get_mut();
+
+            let arg_refs: PgVec<'mcx, Option<&Expr>> = {
+                let mut v: PgVec<'mcx, Option<&Expr>> =
+                    mcx::vec_with_capacity_in(mcx, wfunc.args.len())?;
+                for a in &wfunc.args {
+                    v.push(Some(a));
+                }
+                v
+            };
+            let arg_states = crate::execExpr_core::exec_init_expr_list_for_window(
+                arg_refs.as_slice(),
+                estate,
+            )?;
+            let aggfilter_state = match wfunc.aggfilter.as_deref() {
+                None => None,
+                Some(f) => Some(crate::execExpr_core::exec_init_expr_no_parent_box(f, estate)?),
+            };
+
+            // makeNode(WindowFuncExprState); wfstate->wfunc = wfunc.
+            let wfstate = types_nodes::nodewindowagg::WindowFuncExprState {
+                wfunc: Some(mcx::alloc_in(mcx, wfunc.clone())?),
+                args: arg_states,
+                aggfilter: aggfilter_state,
+                // wfuncno is assigned by ExecInitWindowAgg's dedup loop.
+                wfuncno: 0,
+            };
+
+            // winstate->funcs = lappend(winstate->funcs, wfstate) — collected on
+            // the discovery channel; funcidx is the append position.
+            if state.found_window_funcs.is_none() {
+                state.found_window_funcs = Some(mcx::vec_with_capacity_in(mcx, 1)?);
+            }
+            let funcs = state
+                .found_window_funcs
+                .as_mut()
+                .expect("found_window_funcs just initialized");
+            let funcidx = funcs.len() as i32;
+            funcs.push(mcx::alloc_in(mcx, wfstate)?);
+
+            let scratch = ExprEvalStep {
+                opcode: ExprEvalOp::EEOP_WINDOW_FUNC,
+                resvalue: resv,
+                resnull: resv,
+                d: ExprEvalStepData::WindowFunc { funcidx },
+            };
+            expr_eval_push_step(mcx, state, scratch)?;
+            Ok(())
+        }
         // ----- T_JsonExpr (JSON_VALUE / JSON_QUERY / JSON_EXISTS) -----
         Expr::JsonExpr(jsexpr) => {
             crate::execExpr_json::exec_init_json_expr(mcx, jsexpr, state, resv)
@@ -1787,6 +1869,46 @@ pub fn exec_init_expr_no_parent<'mcx>(
     exec_ready_expr(&mut state)?;
 
     mcx::alloc_in(mcx, state)
+}
+
+/// `ExecInitExpr(node, state->parent)` for a window function argument /
+/// aggfilter sub-expression — compiles `node` into its own `ExprState` and
+/// stamps the EState back-link (`es_link`) so a nested SubPlan / param eval can
+/// reach the EState synchronously, exactly as [`exec_init_expr`] does. The
+/// `WindowAggState` parent's enum address is not yet stable (the back-link is
+/// stamped by `ExecInitWindowAgg`/`stamp_expr_parents` afterward), so the
+/// `parent` head pointer is not threaded; only `es_link` is set, which is all
+/// the window-API argument evaluators (`WinGetFuncArg*`) need.
+pub fn exec_init_expr_no_parent_box<'mcx>(
+    node: &Expr,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
+    let es_link = EStateLink::from_ref(estate);
+    let mut state = exec_init_expr_no_parent(node, estate)?;
+    state.es_link = Some(es_link);
+    Ok(state)
+}
+
+/// `ExecInitExprList(wfunc->args, state->parent)` for a window function's
+/// argument list — compiles each argument into its own EState-linked
+/// `ExprState` and returns them in the `WindowFuncExprState.args` shape
+/// (`Option<PgVec<PgBox<ExprState>>>`). `None` for an empty list (the C NIL).
+pub fn exec_init_expr_list_for_window<'mcx>(
+    nodes: &[Option<&Expr>],
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>>> {
+    if nodes.is_empty() {
+        return Ok(None);
+    }
+    let mcx = estate.es_query_cxt;
+    let mut out: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>> =
+        mcx::vec_with_capacity_in(mcx, nodes.len())?;
+    for e in nodes {
+        // Window function args are never NULL list elements.
+        let node = e.expect("window function argument list element is NULL");
+        out.push(exec_init_expr_no_parent_box(node, estate)?);
+    }
+    Ok(Some(out))
 }
 
 /// `ExecPrepareExprList(exprList, estate)` (execExpr.c).

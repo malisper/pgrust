@@ -963,19 +963,37 @@ pub fn ExecInterpExpr<'mcx>(
                 //    *op->resvalue = econtext->ecxt_aggvalues[wfunc->wfuncno];
                 //    *op->resnull  = econtext->ecxt_aggnulls[wfunc->wfuncno];
                 //
-                // op->d.window_func.wfstate is a WindowFuncExprState* parked as an
-                // opaque usize (nodeWindowAgg-owned; not threaded into the F0 step
-                // model yet), so wfunc->wfuncno — the index into ecxt_aggvalues —
-                // is unreachable. Blocked until nodeWindowAgg threads the real
-                // WindowFuncExprState (with wfuncno) into the step payload.
-                let _ = (op, econtext, estate);
-                panic!(
-                    "EEOP_WINDOW_FUNC: indexes econtext->ecxt_aggvalues/ecxt_aggnulls by \
-                     op->d.window_func.wfstate->wfuncno, but wfstate is a \
-                     nodeWindowAgg-owned WindowFuncExprState* parked as an opaque usize \
-                     (no wfuncno); blocked until nodeWindowAgg threads the real \
-                     WindowFuncExprState into the step payload"
-                );
+                // The owned model parks the WindowFuncExprState list on the parent
+                // WindowAggState.funcs (drained there from the ExprState's
+                // found_window_funcs channel by ExecInitWindowAgg); the step
+                // carries `funcidx`, the position of this window function's state
+                // in that list. The `wfuncno` (the index into
+                // ecxt_aggvalues/ecxt_aggnulls, assigned by ExecInitWindowAgg's
+                // dedup loop) is read through the ExprState.parent back-link — the
+                // same parent-reach the EEOP_AGG_* steps use — exactly C's
+                // `wfunc->wfuncno`.
+                let funcidx = match &state.steps.as_ref().unwrap()[op].d {
+                    ExprEvalStepData::WindowFunc { funcidx } => *funcidx as usize,
+                    _ => unreachable!("EEOP_WINDOW_FUNC: payload is not WindowFunc"),
+                };
+                let link = state
+                    .parent
+                    .expect("EEOP_WINDOW_FUNC: window-owned ExprState has no parent WindowAggState back-link");
+                let winstate = link
+                    .get()
+                    .as_window_agg_state()
+                    .expect("EEOP_WINDOW_FUNC: castNode(WindowAggState, state->parent) — parent is not a WindowAggState");
+                let wfuncno = winstate
+                    .funcs
+                    .as_ref()
+                    .expect("EEOP_WINDOW_FUNC: winstate->funcs not populated")
+                    [funcidx]
+                    .wfuncno as usize;
+                let ecxt = estate.ecxt(econtext);
+                let value = ecxt.ecxt_aggvalues[wfuncno].clone();
+                let isnull = ecxt.ecxt_aggnulls[wfuncno];
+                write_cell(state, resv, value, isnull);
+                op += 1;
             }
 
             EEOP_MERGE_SUPPORT_FUNC => {

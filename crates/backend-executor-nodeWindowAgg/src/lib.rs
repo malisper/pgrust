@@ -729,23 +729,145 @@ fn eval_windowfunction<'mcx>(
     perfuncno: usize,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<(Datum<'mcx>, bool)> {
-    let _ = (winstate, perfuncno, estate);
-    // oldContext = MemoryContextSwitchTo(ps_ExprContext->ecxt_per_tuple_memory);
-    // InitFunctionCallInfoData(*fcinfo, &flinfo, numArguments, winCollation,
-    //                          (Node *) winobj, NULL);
-    // for (argno..) fcinfo->args[argno].isnull = true;
-    // winstate->curaggcontext = NULL;
-    // *result = FunctionCallInvoke(fcinfo);
-    // *isnull = fcinfo->isnull;
-    // ... copy if byref and numfuncs > 1 ...
+    // C:
+    //   InitFunctionCallInfoData(*fcinfo, &flinfo, numArguments, winCollation,
+    //                            (Node *) winobj, NULL);
+    //   winstate->curaggcontext = NULL;
+    //   *result = FunctionCallInvoke(fcinfo);
+    //   *isnull = fcinfo->isnull;
     //
-    // The window-function dispatch (FunctionCallInvoke), which reads its real
-    // arguments back through the WindowObject API, has no fmgr-invoke seam.
-    panic!(
-        "backend-executor-nodeWindowAgg::eval_windowfunction: \
-         the window function invocation (FunctionCallInvoke) is owned by the \
-         not-yet-ported fmgr/execExpr units; no windowfunc-invoke seam exists yet"
-    );
+    // C passes the WindowObject as fcinfo->context and dispatches the window
+    // function by OID through FunctionCallInvoke; the called function (e.g.
+    // window_row_number) reads its real input back through the WindowObject API
+    // (WinGetCurrentPosition / WinSetMarkPosition / WinGetPartitionLocalMemory /
+    // WinRowsArePeers / WinGetFuncArg*). Those API functions are ported in THIS
+    // crate and take `&mut WindowAggState` + `perfuncno` + `&mut EState` directly
+    // — state that a generic `PGFunction(&mut fcinfo)` callback cannot carry. So
+    // the window-function call is dispatched here by `winfnoid` straight to the
+    // ported body, threading the executor state, rather than through the bare-
+    // Datum fmgr frame. (Recorded in DESIGN_DEBT: window-function dispatch is a
+    // closed builtin set, special-cased out of generic FunctionCallInvoke because
+    // every window function needs executor state the fmgr frame cannot thread.)
+    let winfnoid = perfunc_ref(winstate, perfuncno)
+        .wfunc
+        .as_ref()
+        .expect("eval_windowfunction: perfunc.wfunc not set")
+        .winfnoid;
+
+    let result: i64 = match winfnoid {
+        // window_row_number (windowfuncs.c): increment up from 1.
+        3100 => window_row_number(winstate, perfuncno, estate)?,
+        // window_rank (windowfuncs.c).
+        3101 => window_rank(winstate, perfuncno, estate)?,
+        // window_dense_rank (windowfuncs.c).
+        3102 => window_dense_rank(winstate, perfuncno, estate)?,
+        other => panic!(
+            "eval_windowfunction: window function OID {other} not ported \
+             (only row_number/rank/dense_rank are implemented in this crate)"
+        ),
+    };
+
+    // The implemented window functions all return a by-value int8, never NULL,
+    // so the pass-by-ref datumCopy guard (numfuncs > 1) does not apply.
+    Ok((Datum::from_i64(result), false))
+}
+
+/// `window_row_number(fcinfo)` (windowfuncs.c) — just increment up from 1 until
+/// the current partition finishes.
+fn window_row_number<'mcx>(
+    winstate: &mut WindowAggState<'mcx>,
+    perfuncno: usize,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<i64> {
+    let curpos = WinGetCurrentPosition(winstate);
+    WinSetMarkPosition(winstate, perfuncno, curpos, estate)?;
+    Ok(curpos + 1)
+}
+
+/// `rank_up(winobj)` (windowfuncs.c) — advance the shared rank state when the
+/// peer group changes. Returns whether the rank should increase.
+fn rank_up<'mcx>(
+    winstate: &mut WindowAggState<'mcx>,
+    perfuncno: usize,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    let mut up = false;
+    let curpos = WinGetCurrentPosition(winstate);
+
+    // context = WinGetPartitionLocalMemory(winobj, sizeof(rank_context));
+    // rank_context is a single int64 `rank`.
+    let rank = read_rank_context(winstate, perfuncno)?;
+
+    if rank == 0 {
+        debug_assert!(curpos == 0);
+        write_rank_context(winstate, perfuncno, 1)?;
+    } else {
+        debug_assert!(curpos > 0);
+        // do current and prior tuples match by ORDER BY clause?
+        if !WinRowsArePeers(winstate, perfuncno, curpos - 1, curpos, estate)? {
+            up = true;
+        }
+    }
+
+    // We can advance the mark, but only *after* access to prior row.
+    WinSetMarkPosition(winstate, perfuncno, curpos, estate)?;
+
+    Ok(up)
+}
+
+/// `window_rank(fcinfo)` (windowfuncs.c) — rank changes when key columns
+/// change; the new rank is the current row number.
+fn window_rank<'mcx>(
+    winstate: &mut WindowAggState<'mcx>,
+    perfuncno: usize,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<i64> {
+    let up = rank_up(winstate, perfuncno, estate)?;
+    if up {
+        let new_rank = WinGetCurrentPosition(winstate) + 1;
+        write_rank_context(winstate, perfuncno, new_rank)?;
+    }
+    read_rank_context(winstate, perfuncno)
+}
+
+/// `window_dense_rank(fcinfo)` (windowfuncs.c) — rank increases by 1 when key
+/// columns change.
+fn window_dense_rank<'mcx>(
+    winstate: &mut WindowAggState<'mcx>,
+    perfuncno: usize,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<i64> {
+    let up = rank_up(winstate, perfuncno, estate)?;
+    if up {
+        let cur = read_rank_context(winstate, perfuncno)?;
+        write_rank_context(winstate, perfuncno, cur + 1)?;
+    }
+    read_rank_context(winstate, perfuncno)
+}
+
+/// Read the `int64 rank` of the `rank_context` from the perfunc's
+/// partition-local memory (allocating it zeroed on first access, matching C's
+/// `WinGetPartitionLocalMemory`).
+fn read_rank_context<'mcx>(
+    winstate: &mut WindowAggState<'mcx>,
+    perfuncno: usize,
+) -> PgResult<i64> {
+    let buf = WinGetPartitionLocalMemory(winstate, perfuncno, core::mem::size_of::<i64>())?;
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&buf[..8]);
+    Ok(i64::from_ne_bytes(bytes))
+}
+
+/// Write the `int64 rank` of the `rank_context` into the perfunc's
+/// partition-local memory.
+fn write_rank_context<'mcx>(
+    winstate: &mut WindowAggState<'mcx>,
+    perfuncno: usize,
+    rank: i64,
+) -> PgResult<()> {
+    let buf = WinGetPartitionLocalMemory(winstate, perfuncno, core::mem::size_of::<i64>())?;
+    buf[..8].copy_from_slice(&rank.to_ne_bytes());
+    Ok(())
 }
 
 // ===========================================================================
@@ -2042,6 +2164,37 @@ pub fn ExecInitWindowAgg<'mcx>(
     )?;
     execUtils::exec_assign_projection_info::call(&mut winstate.ss.ps, estate, None)?;
 
+    // Drain the WindowFuncExprStates the projection compile discovered.
+    //
+    // C builds the result projection with parent = (PlanState *) winstate, so
+    // execExpr.c's T_WindowFunc arm appends each WindowFuncExprState directly to
+    // winstate->funcs and bumps winstate->numfuncs / numaggs. In the owned model
+    // the in-flight WindowAggState is not yet a PlanStateNode (its parent
+    // back-link is stamped only after ExecInitWindowAgg returns), so the compiler
+    // collects them on the projection ExprState's found_window_funcs channel; we
+    // move them onto winstate.funcs here, matching the C discovery point and
+    // preserving order (so each EEOP_WINDOW_FUNC step's funcidx stays valid).
+    if let Some(proj) = winstate.ss.ps.ps_ProjInfo.as_mut() {
+        if let Some(found) = proj.pi_state.found_window_funcs.take() {
+            for wfstate in found.into_iter() {
+                // nfuncs = ++winstate->numfuncs; if (wfunc->winagg) numaggs++;
+                winstate.numfuncs += 1;
+                let winagg = wfstate
+                    .wfunc
+                    .as_ref()
+                    .expect("WindowFuncExprState.wfunc not set")
+                    .winagg;
+                if winagg {
+                    winstate.numaggs += 1;
+                }
+                if winstate.funcs.is_none() {
+                    winstate.funcs = Some(mcx::vec_with_capacity_in(mcx, 1)?);
+                }
+                winstate.funcs.as_mut().unwrap().push(wfstate);
+            }
+        }
+    }
+
     // Set up data for comparing tuples.
     if wnode.partNumCols > 0 {
         // winstate->partEqfunction =
@@ -2084,23 +2237,142 @@ pub fn ExecInitWindowAgg<'mcx>(
     }
 
     // allocate per-wfunc/per-agg state information.
-    // The unique-function-discovery loop over winstate->funcs and per-aggregate
-    // setup (initialize_peragg, object_aclcheck, fmgr_info, makeNode(winobj),
-    // ...) reads the WindowFuncExprState list the planner/ExecInitExpr produced.
-    // Those WindowFuncExprState nodes (with compiled args/aggfilter) are built
-    // by execExpr.c's expression-init walk over the targetlist, which has no
-    // window-function-state-building seam in this repo yet; winstate->funcs is
-    // therefore empty here and the per-func setup loop cannot run.
+    //   perfunc = palloc0(sizeof(WindowStatePerFuncData) * numfuncs);
+    //   peragg  = palloc0(sizeof(WindowStatePerAggData) * numaggs);
+    {
+        let mut perfunc: PgVec<'mcx, WindowStatePerFuncData<'mcx>> =
+            mcx::vec_with_capacity_in(mcx, numfuncs)?;
+        for _ in 0..numfuncs {
+            perfunc.push(WindowStatePerFuncData::default());
+        }
+        winstate.perfunc = Some(perfunc);
+        let numaggs0 = winstate.numaggs as usize;
+        let mut peragg: PgVec<'mcx, WindowStatePerAggData<'mcx>> =
+            mcx::vec_with_capacity_in(mcx, numaggs0)?;
+        for _ in 0..numaggs0 {
+            peragg.push(WindowStatePerAggData::default());
+        }
+        winstate.peragg = Some(peragg);
+    }
+
+    // wfuncno = -1; aggno = -1; foreach(l, winstate->funcs) { ... }
     //
-    // We mirror the C structure: had funcs been populated, the loop below would
-    // run; with the unported list it is empty. (numfuncs/numaggs were set by the
-    // same unported ExecInitExpr walk, so both are 0 here.)
-    debug_assert!(winstate.funcs.is_none());
+    // The dedup loop: each WindowFuncExprState is matched against the
+    // already-assigned perfuncs (a previous duplicate window function shares its
+    // result slot); a fresh one gets the next perfunc index. The C `equal(wfunc,
+    // perfunc[i].wfunc) && !contain_volatile_functions(...)` dedup is conservative
+    // — assigning every func a fresh perfunc is always correct (it only forgoes
+    // sharing), so without an `equal`/volatile seam we assign fresh entries (the
+    // common single-occurrence case is exact).
+    let node_winref = wnode.winref;
+    let mut wfuncno: i32 = -1;
+    let mut aggno: i32 = -1;
+    let num_states = winstate.funcs.as_ref().map_or(0, |f| f.len());
+    for fi in 0..num_states {
+        // wfunc = wfuncstate->wfunc; check winref matches the node.
+        let (winref, winfnoid, winagg, wintype, inputcollid, numargs) = {
+            let wfs = &winstate.funcs.as_ref().unwrap()[fi];
+            let w = wfs.wfunc.as_ref().expect("WindowFuncExprState.wfunc not set");
+            (
+                w.winref,
+                w.winfnoid,
+                w.winagg,
+                w.wintype,
+                w.inputcollid,
+                wfs.args.as_ref().map_or(0, |a| a.len()) as i32,
+            )
+        };
+        if winref != node_winref {
+            return Err(types_error::PgError::error(format!(
+                "WindowFunc with winref {winref} assigned to WindowAgg with winref {node_winref}"
+            )));
+        }
+
+        // Assign a new perfunc record (no dedup; see comment above).
+        wfuncno += 1;
+        let perfuncno = wfuncno as usize;
+
+        // Mark the WindowFuncExprState with its assigned result-array index.
+        winstate.funcs.as_mut().unwrap()[fi].wfuncno = wfuncno;
+
+        // Permission check (object_aclcheck ACL_EXECUTE) +
+        // InvokeFunctionExecuteHook: the aclchk/hook owners are not threaded into
+        // this crate (see the module-head note); the builtin window functions are
+        // public-EXECUTE, so the check is a no-op for them.
+
+        // Fill in the perfuncstate scalar data.
+        // perfuncstate->wfunc = wfunc; — clone the plan node out of the
+        // discovery-list WindowFuncExprState before borrowing perfunc (disjoint
+        // fields, but the clone must precede the &mut perfunc borrow).
+        let (resulttype_len, resulttype_byval) = lsyscache::get_typlenbyval::call(wintype)?;
+        let wfunc_clone: PgBox<'mcx, types_nodes::primnodes::WindowFunc> = {
+            let w = winstate.funcs.as_ref().unwrap()[fi]
+                .wfunc
+                .as_ref()
+                .expect("WindowFuncExprState.wfunc not set");
+            mcx::alloc_in(mcx, (**w).clone())?
+        };
+        let pf = perfunc_mut(&mut winstate, perfuncno);
+        pf.wfunc = Some(wfunc_clone);
+        pf.numArguments = numargs;
+        pf.winCollation = inputcollid;
+        pf.resulttypeLen = resulttype_len;
+        pf.resulttypeByVal = resulttype_byval;
+        pf.plain_agg = winagg;
+
+        if winagg {
+            // Plain aggregate used as a window function.
+            aggno += 1;
+            perfunc_mut(&mut winstate, perfuncno).aggno = aggno;
+            let peraggno = aggno as usize;
+            initialize_peragg(&mut winstate, peraggno, winfnoid)?;
+            peragg_mut(&mut winstate, peraggno).wfuncno = wfuncno;
+        } else {
+            // A real window function — set up its WindowObject and fmgr lookup.
+            let mut winobj = WindowObjectData {
+                argstates: None,
+                localmem: None,
+                markptr: -1,
+                readptr: -1,
+                markpos: 0,
+                seekpos: 0,
+            };
+            // winobj->argstates = wfuncstate->args; — the arg ExprStates are owned
+            // by the discovery-list WindowFuncExprState (winstate.funcs[fi].args);
+            // the window-API argument evaluators reach them there, so argstates is
+            // left None on the winobj satellite and resolved through funcs[fi].
+            winobj.argstates = None;
+            perfunc_mut(&mut winstate, perfuncno).winobj =
+                Some(mcx::alloc_in(mcx, winobj)?);
+
+            // C: fmgr_info_cxt(wfunc->winfnoid, &flinfo, ecxt_per_query_memory);
+            //    fmgr_info_set_expr((Node *) wfunc, &flinfo);
+            // The flinfo feeds C's eval_windowfunction FunctionCallInvoke. The
+            // owned model dispatches the window function by `winfnoid` directly
+            // (eval_windowfunction), threading the executor state the bare-Datum
+            // fmgr frame cannot carry, so the flinfo lookup is not needed here
+            // (and the window-function builtins are not registered as callable
+            // PGFunctions, so fmgr_info would fail the internal-lookup probe).
+            let _ = winfnoid;
+        }
+    }
 
     // Update numfuncs, numaggs to match number of unique functions found.
-    // (With an empty funcs list these stay as the initialized 0.)
+    winstate.numfuncs = wfuncno + 1;
+    winstate.numaggs = aggno + 1;
 
-    // Set up WindowObject for aggregates, if needed (numaggs is 0 here).
+    // Set up WindowObject for aggregates, if needed.
+    if winstate.numaggs > 0 {
+        let agg_winobj = WindowObjectData {
+            argstates: None,
+            localmem: None,
+            markptr: -1,
+            readptr: -1,
+            markpos: 0,
+            seekpos: 0,
+        };
+        winstate.agg_winobj = Some(mcx::alloc_in(mcx, agg_winobj)?);
+    }
 
     // Set the status to running.
     winstate.status = WINDOWAGG_RUN;
@@ -2873,34 +3145,40 @@ fn perfunc_winobj_argstate_mut<'a, 'mcx>(
     perfuncno: usize,
     argno: usize,
 ) -> &'a mut types_nodes::execexpr::ExprState<'mcx> {
-    perfunc_mut(winstate, perfuncno)
-        .winobj
-        .as_deref_mut()
-        .expect("perfunc winobj not set")
-        .argstates
+    // C: winobj->argstates == wfuncstate->args (the same arg-ExprState list).
+    // The owned model keeps it on `winstate.funcs[perfuncno].args` (the single
+    // owner; perfuncno == funcs index, no dedup), so resolve it there.
+    perfunc_wfuncstate_mut(winstate, perfuncno)
+        .args
         .as_mut()
         .expect("winobj argstates not set")[argno]
         .as_mut()
 }
 
+// The per-perfunc WindowFuncExprState (`perfuncstate->wfuncstate` in C) is the
+// same node held on `winstate.funcs`. The owned model keeps `winstate.funcs` as
+// the single owner (the EEOP_WINDOW_FUNC step indexes it by `funcidx`); since the
+// setup loop assigns a fresh perfunc per function (no dedup), `perfuncno` equals
+// the function's `winstate.funcs` index, so the wfuncstate is reached there
+// rather than aliased onto the perfunc satellite.
 fn perfunc_wfuncstate<'a, 'mcx>(
     winstate: &'a WindowAggState<'mcx>,
     i: usize,
 ) -> &'a types_nodes::nodewindowagg::WindowFuncExprState<'mcx> {
-    perfunc_ref(winstate, i)
-        .wfuncstate
-        .as_deref()
-        .expect("perfunc wfuncstate not set")
+    &winstate
+        .funcs
+        .as_ref()
+        .expect("winstate.funcs not populated")[i]
 }
 
 fn perfunc_wfuncstate_mut<'a, 'mcx>(
     winstate: &'a mut WindowAggState<'mcx>,
     i: usize,
 ) -> &'a mut types_nodes::nodewindowagg::WindowFuncExprState<'mcx> {
-    perfunc_mut(winstate, i)
-        .wfuncstate
-        .as_deref_mut()
-        .expect("perfunc wfuncstate not set")
+    &mut winstate
+        .funcs
+        .as_mut()
+        .expect("winstate.funcs not populated")[i]
 }
 
 fn wfuncstate_nargs(winstate: &WindowAggState<'_>, i: usize) -> usize {

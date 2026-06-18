@@ -1204,10 +1204,21 @@ pub enum ExprEvalStepData<'mcx> {
         clauses: Option<PgVec<'mcx, i32>>,
     },
     /// `window_func` — for EEOP_WINDOW_FUNC.
+    ///
+    /// C carries `WindowFuncExprState *wfstate` and reads `wfstate->wfuncno` at
+    /// run time. In the owned model the `WindowFuncExprState`s live on the
+    /// parent `WindowAggState.funcs` list (drained there from this `ExprState`'s
+    /// `found_window_funcs` channel by `ExecInitWindowAgg`); the step carries
+    /// `funcidx`, the position of this window function's state in that list, and
+    /// the interpreter reads `winstate.funcs[funcidx].wfuncno` through the
+    /// `ExprState.parent` back-link (the same parent-reach the `EEOP_AGG_*`
+    /// steps use). Collection order on `found_window_funcs` and on
+    /// `winstate.funcs` is identical (both append in compile order), so the
+    /// index is stable across the drain.
     WindowFunc {
-        /// `WindowFuncExprState *wfstate` — out-of-line state owned by
-        /// nodeWindowAgg; parked (opaque address) until threaded here.
-        wfstate: usize,
+        /// Index of this window function's `WindowFuncExprState` in the parent
+        /// `WindowAggState.funcs` list.
+        funcidx: i32,
     },
     /// `subplan` — for EEOP_SUBPLAN.
     SubPlan {
@@ -1558,6 +1569,20 @@ pub struct ExprState<'mcx> {
     /// (the C NIL `aggstate->aggs` before any discovery) for every non-Agg
     /// expression.
     pub found_aggs: Option<PgVec<'mcx, crate::primnodes::Aggref>>,
+
+    /// `winstate->funcs = lappend(winstate->funcs, wfstate)` (execExpr.c
+    /// T_WindowFunc) — the discovery channel for `WindowFuncExprState`s, the
+    /// window analogue of [`Self::found_aggs`]. C appends each compiled
+    /// `WindowFuncExprState` directly onto the parent `WindowAggState.funcs`
+    /// while walking the targetlist; in the owned model the in-flight
+    /// `WindowAggState` is not yet a `PlanStateNode` (its `parent` back-link is
+    /// stamped only after `ExecInitWindowAgg` returns), so the compiler collects
+    /// the states here and `ExecInitWindowAgg` drains them into
+    /// `winstate.funcs` right after `ExecAssignProjectionInfo`. Collection order
+    /// is preserved, so each step's `funcidx` stays valid after the drain.
+    /// `None` (the C NIL `winstate->funcs`) for every non-WindowAgg expression.
+    pub found_window_funcs:
+        Option<PgVec<'mcx, PgBox<'mcx, crate::nodewindowagg::WindowFuncExprState<'mcx>>>>,
 }
 
 impl<'mcx> Clone for ExprState<'mcx> {
@@ -1592,6 +1617,7 @@ impl<'mcx> Clone for ExprState<'mcx> {
             json_states: JsonExprStateArena::default(),
             json_coercion_caches: JsonCoercionCacheArena::default(),
             found_aggs: None,
+            found_window_funcs: None,
         }
     }
 }
@@ -1622,6 +1648,7 @@ impl Default for ExprState<'_> {
             json_states: JsonExprStateArena::default(),
             json_coercion_caches: JsonCoercionCacheArena::default(),
             found_aggs: None,
+            found_window_funcs: None,
         }
     }
 }
