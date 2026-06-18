@@ -1,7 +1,7 @@
 //! Finalize family: running final functions to produce aggregate results
 //! (full and partial) and projecting the group's output tuple.
 
-use types_core::primitive::OidIsValid;
+use types_core::primitive::{Oid, OidIsValid};
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::PgResult;
 use types_nodes::execexpr::ExprState;
@@ -73,6 +73,7 @@ pub fn finalize_aggregate<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
     peragg: &AggStatePerAggData<'mcx>,
     pergroupstate: &mut AggStatePerGroupData<'mcx>,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<(Datum<'mcx>, bool)> {
     // LOCAL_FCINFO(fcinfo, FUNC_MAX_ARGS);
     // bool anynull = false;
@@ -80,11 +81,25 @@ pub fn finalize_aggregate<'mcx>(
     let mut anynull = false;
     let pertrans = pertrans_for(aggstate, peragg.transno);
     let transtype_len = pertrans.transtype_len;
+    let agg_collation = pertrans.agg_collation;
 
     // oldContext = MemoryContextSwitchTo(
     //     aggstate->ss.ps.ps_ExprContext->ecxt_per_tuple_memory);
     // (the per-tuple context switch is the ExprContext owner's; the finalfn /
     // direct-arg eval below allocates there.)
+
+    // The finalfn call frame is built as an `args[]` vector dispatched by OID
+    // through the fmgr `function_call_invoke_datum` seam (the same by-OID
+    // dispatch the transition path uses). `args[0]` is the transition value;
+    // `args[1..]` are the ordered-set direct args; the tail is NULL-padded to
+    // `numFinalArgs`. The `(void *) aggstate` fcinfo context is the deferred K2
+    // re-sign (only AggCheckCallContext/AggGetAggref finalfns need it; the
+    // count/min/max/sum/avg finalfns do not).
+    let mut final_args: alloc::vec::Vec<Datum<'mcx>> = alloc::vec::Vec::new();
+    let mut final_arg_isnull: alloc::vec::Vec<bool> = alloc::vec::Vec::new();
+    // placeholder for args[0] (the transition value), filled in below.
+    final_args.push(Datum::null());
+    final_arg_isnull.push(false);
 
     // i = 1;
     // foreach(lc, peragg->aggdirectargs) {
@@ -98,7 +113,8 @@ pub fn finalize_aggregate<'mcx>(
     if let Some(directargs) = peragg.aggdirectargs.as_ref() {
         for expr in directargs.iter() {
             let (value, isnull) = exec_eval_expr_direct_arg(aggstate, expr);
-            local_fcinfo_set_arg(i, value, isnull);
+            final_args.push(value);
+            final_arg_isnull.push(isnull);
             anynull |= isnull;
             i += 1;
         }
@@ -115,7 +131,6 @@ pub fn finalize_aggregate<'mcx>(
         // aggstate->curperagg = peragg; (model: index; set for AggGetAggref)
         // InitFunctionCallInfoData(*fcinfo, &peragg->finalfn, numFinalArgs,
         //                          pertrans->aggCollation, (void *) aggstate, NULL);
-        init_finalfn_fcinfo(aggstate, peragg, num_final_args);
 
         // fcinfo->args[0].value = MakeExpandedObjectReadOnly(
         //     pergroupstate->transValue, pergroupstate->transValueIsNull,
@@ -127,7 +142,8 @@ pub fn finalize_aggregate<'mcx>(
             pergroupstate.trans_value_is_null,
             transtype_len,
         );
-        local_fcinfo_set_arg(0, arg0, pergroupstate.trans_value_is_null);
+        final_args[0] = arg0;
+        final_arg_isnull[0] = pergroupstate.trans_value_is_null;
         anynull |= pergroupstate.trans_value_is_null;
 
         // for (; i < numFinalArgs; i++) {
@@ -136,13 +152,14 @@ pub fn finalize_aggregate<'mcx>(
         //     anynull = true;
         // }
         while i < num_final_args {
-            local_fcinfo_set_arg(i, Datum::null(), true);
+            final_args.push(Datum::null());
+            final_arg_isnull.push(true);
             anynull = true;
             i += 1;
         }
 
         // if (fcinfo->flinfo->fn_strict && anynull)
-        if finalfn_is_strict(peragg) && anynull {
+        if finalfn_is_strict(peragg)? && anynull {
             // *resultVal = (Datum) 0; *resultIsNull = true;
             result_val = Datum::null();
             result_is_null = true;
@@ -151,7 +168,13 @@ pub fn finalize_aggregate<'mcx>(
             // *resultIsNull = fcinfo->isnull;
             // *resultVal = MakeExpandedObjectReadOnly(result, fcinfo->isnull,
             //                                         peragg->resulttypeLen);
-            let (result, isnull) = invoke_finalfn(aggstate, peragg);
+            let (result, isnull) = invoke_finalfn(
+                peragg.finalfn_oid,
+                agg_collation,
+                &final_args,
+                &final_arg_isnull,
+                estate,
+            )?;
             result_is_null = isnull;
             result_val =
                 make_expanded_object_read_only(result, isnull, peragg.resulttype_len);
@@ -293,60 +316,35 @@ fn exec_eval_expr_direct_arg<'mcx>(
 }
 
 /// `fcinfo->args[i].value = v; fcinfo->args[i].isnull = isnull;` on the
-/// `LOCAL_FCINFO` finalfn call frame. The shared call frame carries `args[]`
-/// (#296); this helper has no built LOCAL_FCINFO to write into because the
-/// finalfn call frame is set up by the unblocked finalize path (init_finalfn_fcinfo
-/// below), which is itself blocked on the execExpr/AggState boundary.
-fn local_fcinfo_set_arg(_i: i32, _value: Datum<'_>, _isnull: bool) {
-    panic!(
-        "backend-executor-nodeAgg::finalize_aggregate: the shared call frame carries \
-         args[] (#296), but no LOCAL_FCINFO finalfn frame is built here — \
-         init_finalfn_fcinfo is blocked on the execExpr eval boundary + \
-         AggState-as-Node (#200), so there is nothing to write into"
-    );
+/// `peragg->finalfn.fn_strict` — the finalfn's strictness. Read from the
+/// catalog (`proisstrict`) through the lsyscache `func_strict` seam, the same
+/// value `fmgr_info` stamps onto `peragg->finalfn.fn_strict`.
+fn finalfn_is_strict(peragg: &AggStatePerAggData<'_>) -> PgResult<bool> {
+    backend_utils_cache_lsyscache_seams::func_strict::call(peragg.finalfn_oid)
 }
 
-/// `InitFunctionCallInfoData(*fcinfo, &peragg->finalfn, numFinalArgs,
-/// pertrans->aggCollation, (void *) aggstate, NULL)` — initialize the finalfn
-/// call frame. Owned by the fmgr unit; no seam yet.
-fn init_finalfn_fcinfo<'mcx>(
-    _aggstate: &AggStateData<'mcx>,
-    _peragg: &AggStatePerAggData<'mcx>,
-    _num_final_args: i32,
-) {
-    panic!(
-        "backend-executor-nodeAgg::finalize_aggregate: InitFunctionCallInfoData for the finalfn \
-         is owned by the not-yet-ported fmgr unit; no seam yet"
-    );
-}
-
-/// `peragg->finalfn.fn_strict` — the finalfn's strictness, read off the resolved
-/// `FmgrInfo`. `FmgrInfo.fn_strict` IS modeled (fmgr #52); the blocker is reaching
-/// the resolved per-agg finalfn FmgrInfo, which lives on the nodeAgg-owned
-/// `AggStatePerAggData.finalfn` set up by the unported `ExecInitAgg`/build path.
-fn finalfn_is_strict(_peragg: &AggStatePerAggData<'_>) -> bool {
-    panic!(
-        "backend-executor-nodeAgg::finalize_aggregate: FmgrInfo.fn_strict is modeled \
-         (fmgr #52), but the per-agg finalfn FmgrInfo (AggStatePerAggData.finalfn) is \
-         not yet populated by the unported ExecInitAgg/build_peragg path"
-    );
-}
-
-/// `FunctionCallInvoke(fcinfo)` for the finalfn; returns `(result, fcinfo->isnull)`.
-/// `FunctionCallInvoke` is ported (fmgr-core #52) and the shared call frame carries
-/// args[] (#296); the block is the execExpr eval boundary + AggState-as-Node (#200)
-/// — the LOCAL_FCINFO finalfn frame (with its `(void*) aggstate` context) is never
-/// built here (init_finalfn_fcinfo panics).
+/// `result = FunctionCallInvoke(fcinfo)` for the finalfn; returns `(result,
+/// fcinfo->isnull)`. The finalfn is re-resolved and dispatched by OID through
+/// the fmgr `function_call_invoke_datum` seam (the same by-OID call frame the
+/// transition path uses), under the aggregate's input collation. The `(void *)
+/// aggstate` fcinfo context is the deferred K2 re-sign (the count/min/max/sum/avg
+/// finalfns do not read it). A null arg rides the canonical NULL `Datum`; the
+/// strict short-circuit is applied by the caller.
 fn invoke_finalfn<'mcx>(
-    _aggstate: &mut AggStateData<'mcx>,
-    _peragg: &AggStatePerAggData<'mcx>,
-) -> (Datum<'mcx>, bool) {
-    panic!(
-        "backend-executor-nodeAgg::finalize_aggregate: FunctionCallInvoke is ported \
-         (fmgr-core #52) and the shared call frame carries args[] (#296), but no \
-         finalfn LOCAL_FCINFO frame is built here — blocked on the execExpr eval \
-         boundary + AggState-as-Node (#200)"
-    );
+    finalfn_oid: Oid,
+    collation: Oid,
+    args: &[Datum<'mcx>],
+    _arg_isnull: &[bool],
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<(Datum<'mcx>, bool)> {
+    let mcx = estate.es_query_cxt;
+    backend_utils_fmgr_fmgr_seams::function_call_invoke_datum::call(
+        mcx,
+        finalfn_oid,
+        collation,
+        args,
+        None,
+    )
 }
 
 /// `pertrans->serialfn.fn_strict` — the serialfn's strictness from its resolved
@@ -400,30 +398,29 @@ fn invoke_serialfn<'mcx>(_aggstate: &mut AggStateData<'mcx>, _transno: i32) -> (
 /// not yet ported and carries no seam, so only the trivial cases are handled
 /// here and the expanded-pointer case panics until that owner lands.
 fn make_expanded_object_read_only<'mcx>(d: Datum<'mcx>, isnull: bool, typlen: i16) -> Datum<'mcx> {
-    // if (isnull || typlen != -1 || !VARATT_IS_EXTERNAL_EXPANDED_RW(d)) return d;
-    // A NULL or a fixed-length (typlen != -1) datum is never an expanded
-    // object, so it passes through unchanged.
+    // C: `if (isnull || typlen != -1 || !VARATT_IS_EXTERNAL_EXPANDED_RW(d))
+    //     return d;` — only a read-write *expanded* varlena is copied to a
+    // read-only pointer; a NULL, a fixed-length datum, or an ordinary (flat)
+    // varlena passes through unchanged.
     if isnull || typlen != -1 {
         return d;
     }
-    // The varlena case marshals through the now-installed
-    // `backend_utils_adt_misc2_seams::make_expanded_object_read_only_internal_v`
-    // seam (expandeddatum.c is ported in backend-utils-adt-misc2). That seam
-    // allocates the read-only pointer copy in a target `Mcx` — in C the
-    // per-tuple context `ps_ExprContext->ecxt_per_tuple_memory` switched to just
-    // above the finalfn call. The owned `AggStateData` does NOT carry that
-    // per-tuple `Mcx`/`EcxtId` on its facet here (the same ExprContext storage-
-    // model carrier gap `ExecInitAgg`/`hash_create_memory` hit: AggState models
-    // ExprContext as `PgBox<ExprContext>` while execUtils owns an `EcxtId` pool),
-    // so the correct allocation context cannot be named at this call site.
-    // Loud panic until the per-tuple ExprContext `Mcx` reaches this facet; the
-    // owner seam itself is wired and ready.
-    panic!(
-        "backend-executor-nodeAgg::finalize: MakeExpandedObjectReadOnly varlena case is ready to \
-         call make_expanded_object_read_only_internal_v (misc2 owner installed), but the per-tuple \
-         ExprContext Mcx (ps_ExprContext->ecxt_per_tuple_memory) is not on the AggState facet — \
-         same ExprContext EcxtId carrier gap as ExecInitAgg/hash_create_memory"
-    );
+    // The owned `Datum` model only produces a read-write expanded object via
+    // the `Expanded` arm (`VARATT_IS_EXTERNAL_EXPANDED_RW`). A plain `ByRef`
+    // varlena is a flat value — never an expanded RW object — so it returns
+    // unchanged, exactly as C's `MakeExpandedObjectReadOnly` does for a
+    // non-expanded varlena. Only a genuine `Expanded` datum would need the
+    // expandeddatum.c read-only copy (its target context is the per-tuple
+    // ExprContext, the EcxtId carrier gap shared with ExecInitAgg); the
+    // aggregate transition/final functions ported so far never produce one.
+    match &d {
+        Datum::Expanded(_) => panic!(
+            "backend-executor-nodeAgg::finalize: MakeExpandedObjectReadOnly on a read-write \
+             expanded datum needs the per-tuple ExprContext Mcx (the EcxtId carrier gap \
+             shared with ExecInitAgg); no agg-supplied transfn/finalfn produces one yet"
+        ),
+        _ => d,
+    }
 }
 
 /// `prepare_projection_slot(aggstate, slot, currentSet)` — fill the result
@@ -614,7 +611,7 @@ pub fn finalize_aggregates<'mcx>(
         let (value, isnull) = if do_aggsplit_skipfinal(aggsplit) {
             finalize_partialaggregate(aggstate, peragg, pergroupstate)?
         } else {
-            finalize_aggregate(aggstate, peragg, pergroupstate)?
+            finalize_aggregate(aggstate, peragg, pergroupstate, estate)?
         };
 
         // aggvalues[aggno] = value; aggnulls[aggno] = isnull;

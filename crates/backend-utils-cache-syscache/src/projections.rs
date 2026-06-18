@@ -1248,11 +1248,24 @@ pub(crate) fn get_agg_catalog_info<'mcx>(
             let init = fmgr_seams::oid_input_function_call::call(
                 mcx, typinput, text, typioparam, -1,
             )?;
-            // The planner carries the init value as the canonical machine word
-            // (its `Datum` is the by-value arm). A by-reference transition init
-            // value (e.g. numeric `sum`/`avg`) can't be represented as a bare
-            // word here — `as_usize` panics, the honest by-ref-Datum boundary.
-            (KeyDatum::from_usize(init.as_usize()), false)
+            // The planner's `AggTransInfo.initValue` is a deliberately
+            // lifetime-free bare `Datum` word, used ONLY by `find_compatible_*`'s
+            // `datumIsEqual` transition-state-sharing dedup (the executor
+            // re-fetches the real value through `GetAggInitVal` at apply time).
+            // A by-value init value rides the word verbatim; a by-reference one
+            // (e.g. avg(int4)'s `{0,0}` int8[] array, sum/avg(numeric)) has no
+            // bare-word representation at this layer, so we carry a `0`
+            // placeholder and `find_compatible_*` declines to dedup by-ref init
+            // values (conservative: it never wrongly merges two transition
+            // states). Mirrors the C `Datum initValue` carrier, where the by-ref
+            // word is a pointer the planner only feeds to `datumIsEqual`.
+            let word = match &init {
+                types_tuple::backend_access_common_heaptuple::Datum::ByVal(w) => {
+                    KeyDatum::from_usize(*w)
+                }
+                _ => KeyDatum::null(),
+            };
+            (word, false)
         }
     };
 

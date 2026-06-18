@@ -823,6 +823,161 @@ fn int128_to_numericvar<'mcx>(mcx: Mcx<'mcx>, val: i128) -> PgResult<NumericVar<
 }
 
 // ---------------------------------------------------------------------------
+// avg(int2)/avg(int4) and the moving-aggregate sum(int2)/sum(int4) (numeric.c
+// Int8TransTypeData). The transition datatype is a two-element int8 array
+// holding {count, sum}; finals int8_avg / int2int4_sum read it back.
+//
+// C reads the array image with `ARR_DATA_PTR` (validating it is a 1-D,
+// non-null, exactly-2-element int8 array) and, inside an aggregate transition,
+// scribbles on it in place (`AggCheckCallContext`) to save a palloc. This repo
+// has no ambient context: each transition / combine takes the detoasted array
+// image (`&[u8]`) and a target `Mcx<'mcx>`, and ALWAYS returns a freshly
+// constructed array image. That is behavior-identical to C — the in-place leg
+// is purely an allocation optimization over the same final {count, sum}
+// values, which the executor's by-ref transValue reparent reintroduces when it
+// owns the buffer. Mirrors the float8[] aggregate model in
+// backend-utils-adt-float::aggregates.
+// ---------------------------------------------------------------------------
+
+use backend_utils_adt_arrayfuncs::construct::construct_array;
+use backend_utils_adt_arrayfuncs::foundation::{
+    self, arr_dim, arr_elemtype, arr_hasnull, arr_ndim, fetch_att, INT8OID,
+};
+use types_datum::Datum as ByValDatum;
+
+/// INT8 array element storage attributes (`pg_type`): 8-byte, pass-by-value,
+/// `'d'` alignment — matching `construct_array`'s INT8OID switch arm.
+const INT8_ELMLEN: i32 = 8;
+const INT8_ELMBYVAL: bool = foundation::FLOAT8PASSBYVAL;
+const INT8_ELMALIGN: u8 = b'd';
+
+/// The `Int8TransTypeData` two-element `{count, sum}` decoded from a transition
+/// array image. C validates `ARR_HASNULL(transarray) || ARR_SIZE(transarray) !=
+/// ARR_OVERHEAD_NONULLS(1) + sizeof(Int8TransTypeData)` and otherwise
+/// `elog(ERROR, "expected 2-element int8 array")`.
+fn check_int8_trans_array(transarray: &[u8]) -> PgResult<(i64, i64)> {
+    use types_error::PgError;
+    // ARR_HASNULL || ARR_SIZE != ARR_OVERHEAD_NONULLS(1) + sizeof(Int8TransTypeData)
+    // is equivalent (for a well-formed non-null array) to: 1-D, no nulls,
+    // INT8OID element type, exactly 2 elements.
+    if arr_ndim(transarray) != 1
+        || arr_dim(transarray, 0) != 2
+        || arr_hasnull(transarray)
+        || arr_elemtype(transarray) != INT8OID
+    {
+        return Err(PgError::error("expected 2-element int8 array"));
+    }
+
+    let mut p = foundation::arr_data_ptr_off(transarray);
+    let count = fetch_att(transarray, p, INT8_ELMBYVAL, INT8_ELMLEN).as_i64();
+    p = foundation::att_addlength_pointer(p, INT8_ELMLEN, transarray, p);
+    p = foundation::att_align_nominal(p, INT8_ELMALIGN);
+    let sum = fetch_att(transarray, p, INT8_ELMBYVAL, INT8_ELMLEN).as_i64();
+    Ok((count, sum))
+}
+
+/// Build a fresh `{count, sum}` int8[2] transition array image, charged to
+/// `mcx` (the shared `PG_RETURN_ARRAYTYPE_P` tail —
+/// `construct_array_builtin(transdatums, 2, INT8OID)`).
+fn return_int8_trans_array<'mcx>(
+    mcx: Mcx<'mcx>,
+    count: i64,
+    sum: i64,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let elems = [ByValDatum::from_i64(count), ByValDatum::from_i64(sum)];
+    construct_array(mcx, &elems, INT8OID, INT8_ELMLEN, INT8_ELMBYVAL, INT8_ELMALIGN)
+}
+
+/// `int2_avg_accum(transarray, int2)` (numeric.c:6776): AVG(int2) / moving
+/// SUM(int2) transition. `count++; sum += newval`.
+pub fn int2_avg_accum<'mcx>(
+    mcx: Mcx<'mcx>,
+    transarray: &[u8],
+    newval: i16,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let (count, sum) = check_int8_trans_array(transarray)?;
+    return_int8_trans_array(mcx, count + 1, sum + i64::from(newval))
+}
+
+/// `int4_avg_accum(transarray, int4)` (numeric.c:6804): AVG(int4) / moving
+/// SUM(int4) transition. `count++; sum += newval`.
+pub fn int4_avg_accum<'mcx>(
+    mcx: Mcx<'mcx>,
+    transarray: &[u8],
+    newval: i32,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let (count, sum) = check_int8_trans_array(transarray)?;
+    return_int8_trans_array(mcx, count + 1, sum + i64::from(newval))
+}
+
+/// `int4_avg_combine(transarray1, transarray2)` (numeric.c:6833): combine two
+/// `{count, sum}` transition states. Shared by avg(int2)/avg(int4).
+pub fn int4_avg_combine<'mcx>(
+    mcx: Mcx<'mcx>,
+    transarray1: &[u8],
+    transarray2: &[u8],
+) -> PgResult<PgVec<'mcx, u8>> {
+    let (count1, sum1) = check_int8_trans_array(transarray1)?;
+    let (count2, sum2) = check_int8_trans_array(transarray2)?;
+    return_int8_trans_array(mcx, count1 + count2, sum1 + sum2)
+}
+
+/// `int2_avg_accum_inv(transarray, int2)` (numeric.c:6863): moving-aggregate
+/// inverse transition for AVG(int2)/SUM(int2). `count--; sum -= newval`.
+pub fn int2_avg_accum_inv<'mcx>(
+    mcx: Mcx<'mcx>,
+    transarray: &[u8],
+    newval: i16,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let (count, sum) = check_int8_trans_array(transarray)?;
+    return_int8_trans_array(mcx, count - 1, sum - i64::from(newval))
+}
+
+/// `int4_avg_accum_inv(transarray, int4)` (numeric.c:6891): moving-aggregate
+/// inverse transition for AVG(int4)/SUM(int4). `count--; sum -= newval`.
+pub fn int4_avg_accum_inv<'mcx>(
+    mcx: Mcx<'mcx>,
+    transarray: &[u8],
+    newval: i32,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let (count, sum) = check_int8_trans_array(transarray)?;
+    return_int8_trans_array(mcx, count - 1, sum - i64::from(newval))
+}
+
+/// `int8_avg(transarray)` (numeric.c:6919): AVG(int2)/AVG(int4) final.
+/// `Ok(None)` is `PG_RETURN_NULL()` (SQL AVG of no values is NULL).
+pub fn int8_avg<'mcx>(
+    mcx: Mcx<'mcx>,
+    transarray: &[u8],
+) -> PgResult<Option<PgVec<'mcx, u8>>> {
+    let (count, sum) = check_int8_trans_array(transarray)?;
+
+    // SQL defines AVG of no values to be NULL.
+    if count == 0 {
+        return Ok(None);
+    }
+
+    // DirectFunctionCall2(numeric_div, int64_to_numeric(sum), int64_to_numeric(count))
+    let countd = convert::int64_to_numeric(mcx, count)?;
+    let sumd = convert::int64_to_numeric(mcx, sum)?;
+    Ok(Some(ops_sql::numeric_div(mcx, sumd.as_slice(), countd.as_slice())?))
+}
+
+/// `int2int4_sum(transarray)` (numeric.c:6946): SUM(int2)/SUM(int4) final in
+/// moving-aggregate mode (both return int8). `Ok(None)` is `PG_RETURN_NULL()`.
+/// Returns the by-value `int8` sum.
+pub fn int2int4_sum(transarray: &[u8]) -> PgResult<Option<i64>> {
+    let (count, sum) = check_int8_trans_array(transarray)?;
+
+    // SQL defines SUM of no values to be NULL.
+    if count == 0 {
+        return Ok(None);
+    }
+
+    Ok(Some(sum))
+}
+
+// ---------------------------------------------------------------------------
 // Sort-support (numeric.c numeric_sortsupport/abbrev_*). Node registration +
 // HyperLogLog estimator are genuine externals behind sort-support seams.
 // ---------------------------------------------------------------------------

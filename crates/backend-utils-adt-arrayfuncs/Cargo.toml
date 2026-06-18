@@ -22,6 +22,11 @@ types-namespace = { path = "../types-namespace" }
 backend-utils-error = { path = "../backend-utils-error" }
 types-typcache = { path = "../types-typcache" }
 
+# fmgr registration of the polymorphic array I/O builtins (array_in/out/recv/
+# send) so they are dispatchable by OID through the fmgr registry.
+types-fmgr = { path = "../types-fmgr" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
+
 # Inward seams this crate OWNS and installs from init_seams().
 backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
 # The `array-more` array<->element bridges (deconstruct_array_builtin /

@@ -64,6 +64,7 @@ pub mod arraysubs;
 pub mod foundation;
 pub mod construct;
 pub mod element_slice;
+pub mod fmgr_builtins;
 pub mod io;
 pub mod ops;
 pub mod sql;
@@ -83,6 +84,12 @@ std::thread_local! {
 /// startup.
 pub fn init_seams() {
     use backend_utils_adt_arrayfuncs_seams as seams;
+
+    // Register the polymorphic array I/O builtins (array_in/out/recv/send) into
+    // the fmgr registry so they dispatch by OID — array_in is what
+    // getTypeInputInfo resolves for every `_T` array type (e.g. nodeAgg's
+    // GetAggInitVal materializing an aggregate's `{0,0}` agginitval).
+    fmgr_builtins::register_arrayfuncs_builtins();
 
     // `Array_nulls` GUC: arrayfuncs.c owns the `bool Array_nulls = true`
     // global (PGC_USERSET, boot value `true`). Install the guc-table slot

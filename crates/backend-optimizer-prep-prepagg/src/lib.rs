@@ -706,8 +706,15 @@ fn find_compatible_trans(
             return Ok(transno);
         }
 
+        // C compares the two init values with `datumIsEqual`. For a by-reference
+        // transtype the planner's bare-word `initValue` is a `0` placeholder (the
+        // lifetime-free `AggTransInfo` cannot carry the by-ref image; see
+        // `get_agg_catalog_info`), so we cannot run `datumIsEqual` — decline to
+        // share, which is always safe (it never merges two distinct transition
+        // states; the worst case is a missed sharing optimization).
         if !initValueIsNull
             && !pertrans.initValueIsNull
+            && transtypeByVal
             && seam::datum_is_equal::call(
                 initValue,
                 pertrans.initValue,

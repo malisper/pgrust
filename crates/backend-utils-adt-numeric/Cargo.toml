@@ -27,6 +27,11 @@ common-hashfn = { path = "../common-hashfn" }
 # init/add/estimate ops are called directly on it (mirrors varlena's sort state).
 backend-lib-hyperloglog = { path = "../backend-lib-hyperloglog" }
 
+# The int8[2] {count,sum} transition array of avg(int2)/avg(int4) is built and
+# read back with construct_array / ARR_* over the real arrayfuncs foundation
+# (mirrors backend-utils-adt-float's float8[] aggregate model).
+backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
+
 # Inward seams this crate OWNS and installs from init_seams().
 backend-utils-adt-numeric-seams = { path = "../backend-utils-adt-numeric-seams" }
 

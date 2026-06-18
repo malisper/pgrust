@@ -452,6 +452,81 @@ fn fc_int8_sum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 
 // ---------------------------------------------------------------------------
+// avg(int2)/avg(int4) array transition + final functions (Int8TransTypeData).
+// The transition value is an int8[2] {count, sum} array crossing the fmgr
+// boundary on the by-reference (Varlena) lane; the input is by-value int2/int4.
+// These are STRICT (no `proisstrict => 'f'` in pg_proc.dat), so the strict-shim
+// short-circuits NULL args upstream — each adapter sees both args present.
+// ---------------------------------------------------------------------------
+
+/// `int2_avg_accum(_int8, int2) -> _int8` (oid 1962).
+fn fc_int2_avg_accum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let transarray = arg_varlena(fcinfo, 0).to_vec();
+    let newval = fcinfo.arg(1).expect("missing arg").value.as_i16();
+    let m = scratch_mcx();
+    let out = ok(crate::aggregate::int2_avg_accum(m.mcx(), &transarray, newval));
+    ret_varlena(fcinfo, out.as_slice().to_vec())
+}
+
+/// `int4_avg_accum(_int8, int4) -> _int8` (oid 1963).
+fn fc_int4_avg_accum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let transarray = arg_varlena(fcinfo, 0).to_vec();
+    let newval = arg_int32(fcinfo, 1);
+    let m = scratch_mcx();
+    let out = ok(crate::aggregate::int4_avg_accum(m.mcx(), &transarray, newval));
+    ret_varlena(fcinfo, out.as_slice().to_vec())
+}
+
+/// `int4_avg_combine(_int8, _int8) -> _int8` (oid 3324). Shared by
+/// avg(int2)/avg(int4).
+fn fc_int4_avg_combine(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let t1 = arg_varlena(fcinfo, 0).to_vec();
+    let t2 = arg_varlena(fcinfo, 1).to_vec();
+    let m = scratch_mcx();
+    let out = ok(crate::aggregate::int4_avg_combine(m.mcx(), &t1, &t2));
+    ret_varlena(fcinfo, out.as_slice().to_vec())
+}
+
+/// `int2_avg_accum_inv(_int8, int2) -> _int8` (oid 3570).
+fn fc_int2_avg_accum_inv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let transarray = arg_varlena(fcinfo, 0).to_vec();
+    let newval = fcinfo.arg(1).expect("missing arg").value.as_i16();
+    let m = scratch_mcx();
+    let out = ok(crate::aggregate::int2_avg_accum_inv(m.mcx(), &transarray, newval));
+    ret_varlena(fcinfo, out.as_slice().to_vec())
+}
+
+/// `int4_avg_accum_inv(_int8, int4) -> _int8` (oid 3571).
+fn fc_int4_avg_accum_inv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let transarray = arg_varlena(fcinfo, 0).to_vec();
+    let newval = arg_int32(fcinfo, 1);
+    let m = scratch_mcx();
+    let out = ok(crate::aggregate::int4_avg_accum_inv(m.mcx(), &transarray, newval));
+    ret_varlena(fcinfo, out.as_slice().to_vec())
+}
+
+/// `int8_avg(_int8) -> numeric` (oid 1964): AVG(int2)/AVG(int4) final.
+fn fc_int8_avg(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let transarray = arg_varlena(fcinfo, 0).to_vec();
+    let m = scratch_mcx();
+    let image = ok(crate::aggregate::int8_avg(m.mcx(), &transarray)).map(|v| v.as_slice().to_vec());
+    match image {
+        Some(image) => ret_numeric(fcinfo, image),
+        None => ret_null(fcinfo),
+    }
+}
+
+/// `int2int4_sum(_int8) -> int8` (oid 3572): SUM(int2)/SUM(int4) final in
+/// moving-aggregate mode (both return int8).
+fn fc_int2int4_sum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let transarray = arg_varlena(fcinfo, 0).to_vec();
+    match ok(crate::aggregate::int2int4_sum(&transarray)) {
+        Some(sum) => ret_i64(sum),
+        None => ret_null(fcinfo),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
 
@@ -554,6 +629,15 @@ pub fn register_numeric_builtins() {
         builtin(1840, "int2_sum", 2, false, false, fc_int2_sum),
         builtin(1841, "int4_sum", 2, false, false, fc_int4_sum),
         builtin(1842, "int8_sum", 2, false, false, fc_int8_sum),
+        // avg(int2)/avg(int4) int8[2] {count,sum} array transition + finals.
+        // STRICT (per pg_proc.dat).
+        builtin(1962, "int2_avg_accum", 2, true, false, fc_int2_avg_accum),
+        builtin(1963, "int4_avg_accum", 2, true, false, fc_int4_avg_accum),
+        builtin(3324, "int4_avg_combine", 2, true, false, fc_int4_avg_combine),
+        builtin(3570, "int2_avg_accum_inv", 2, true, false, fc_int2_avg_accum_inv),
+        builtin(3571, "int4_avg_accum_inv", 2, true, false, fc_int4_avg_accum_inv),
+        builtin(1964, "int8_avg", 1, true, false, fc_int8_avg),
+        builtin(3572, "int2int4_sum", 1, true, false, fc_int2int4_sum),
     ]);
 }
 
