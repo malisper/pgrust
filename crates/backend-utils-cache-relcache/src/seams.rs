@@ -53,6 +53,8 @@ pub fn init_seams() {
     sx::relation_get_index_list::set(relation_get_index_list);
     sx::relation_get_index_expressions::set(relation_get_index_expressions);
     sx::relation_get_index_predicate::set(relation_get_index_predicate);
+    sx::relation_get_exclusion_info::set(relation_get_exclusion_info);
+    sx::relation_get_dummy_index_expressions::set(relation_get_dummy_index_expressions);
 
     // --- partition cache read/write (owned per-entry state; build via partcache) ---
     sx::relation_get_partkey::set(relation_get_partkey);
@@ -683,6 +685,96 @@ fn relation_get_index_predicate<'mcx>(
     crate::derived::RelationGetIndexPredicate(rel.rd_id)?;
     // Unreachable until the node-tree decode lands (the call above panics).
     Ok(None)
+}
+
+/// `RelationGetDummyIndexExpressions(relation)` (relcache.c:5156): like
+/// `RelationGetIndexExpressions`, but returns null `Const`s of the right
+/// type/typmod/collation in place of the real index expressions (used by
+/// `BuildDummyIndexInfo` to avoid running user code on TRUNCATE of an
+/// expression index). The C quick-exits to `NIL` when `rd_indextuple == NULL ||
+/// heap_attisnull(rd_indextuple, Anum_pg_index_indexprs)` — i.e. not an index,
+/// or the index has no expression columns. The owned entry observes "has an
+/// expression column" exactly as `RelationGetIndexExpressions` does: an index
+/// with a stored expression has at least one `indkey[i] == InvalidAttrNumber`
+/// (the on-disk marker; `pg_index.indexprs` is non-NULL iff such a column
+/// exists). So a non-index relation (`rd_index == None`) or one with no zero
+/// `indkey` entry returns `Ok(None)` (== NIL) — the path every system-catalog
+/// index (all simple-column) takes. When an expression column IS present, the
+/// `indexprs` node-tree decode (`stringToNode`) + `makeConst`/`exprType`/
+/// `exprTypmod`/`exprCollation` are node vocabulary owned cross-unit and
+/// unported, so it routes through the node-tree owner seam (mirror-PG-and-panic
+/// until `stringToNode` lands).
+fn relation_get_dummy_index_expressions<'mcx>(
+    mcx: Mcx<'mcx>,
+    index: &types_rel::Relation<'mcx>,
+) -> PgResult<Option<PgVec<'mcx, types_nodes::primnodes::Expr>>> {
+    let has_expression_col = crate::core_entry_store::with_relation(index.rd_id, |rd| {
+        match &rd.rd_index {
+            None => false,
+            Some(idx) => idx
+                .indkey
+                .iter()
+                .any(|&k| k == types_core::primitive::InvalidAttrNumber),
+        }
+    })?;
+    if !has_expression_col {
+        // NIL — not an index, or no expression columns.
+        return Ok(None);
+    }
+    // An expression column is present: defer to the still-unported node-tree
+    // decode owner (mirror-PG-and-panic).
+    crate::derived::RelationGetDummyIndexExpressions(index.rd_id)?;
+    // Unreachable until the node-tree decode lands (the call above panics).
+    Ok(None)
+}
+
+/// `RelationGetExclusionInfo(indexRelation, &operators, &procs, &strategies)`
+/// (relcache.c:5653): the exclusion operator/proc/strategy arrays for an
+/// exclusion-constraint (or WITHOUT OVERLAPS PK/unique) index. The C body
+/// quick-exits from `rd_exclstrats` when cached, else scans `pg_constraint`
+/// (on `conrelid`), decodes the `conexclop` 1-D Oid array, then per key column
+/// resolves `get_opcode` (proc) and `get_op_opfamily_strategy` (strategy) and
+/// caches the three arrays on the entry. The catalog scan + `conexclop` decode
+/// + lsyscache lookups are cross-unit primitives, owned by the genam owner and
+/// reached via the `derived` family's `exclusion_info_seam`
+/// (`genam::relcache_exclusion_info`, a real ported body — NOT a node-tree
+/// `stringToNode` decode; `conexclop` is a plain Oid array). The owned
+/// `RelationGetExclusionInfo` runs the scan + caches into the entry; this
+/// adapter then reads the cached arrays back and copies them into the caller's
+/// `mcx` as the three parallel per-key `PgVec`s that `BuildIndexInfo` stores in
+/// `ii_ExclusionOps`/`ii_ExclusionProcs`/`ii_ExclusionStrats`.
+fn relation_get_exclusion_info<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+) -> PgResult<(PgVec<'mcx, Oid>, PgVec<'mcx, Oid>, PgVec<'mcx, u16>)> {
+    // Run the scan + cache the results on the owned entry (own logic + genam
+    // seam). This is the C `RelationGetExclusionInfo` body; the quick-exit when
+    // `rd_exclstrats` is already populated is handled inside.
+    crate::derived::RelationGetExclusionInfo(rel.rd_id)?;
+
+    // Copy the cached arrays into the caller's context (C palloc's the result in
+    // the caller's context and memcpy's from the cached copies).
+    let (cops, cprocs, cstrats) = crate::core_entry_store::with_relation(rel.rd_id, |rd| {
+        (
+            rd.rd_exclops.clone(),
+            rd.rd_exclprocs.clone(),
+            rd.rd_exclstrats.clone(),
+        )
+    })?;
+
+    let mut ops = PgVec::new_in(mcx);
+    for o in cops {
+        ops.push(o);
+    }
+    let mut procs = PgVec::new_in(mcx);
+    for p in cprocs {
+        procs.push(p);
+    }
+    let mut strats = PgVec::new_in(mcx);
+    for s in cstrats {
+        strats.push(s);
+    }
+    Ok((ops, procs, strats))
 }
 
 /// `AssertCouldGetRelation()` (relcache.c) — an assertion-build-only check;

@@ -1654,41 +1654,23 @@ mod recurrence_guard {
         // install + DELETE when the genam unit ports its render body.
         ("backend_access_index_genam", "build_index_value_description"),
         //
-        // -- backend-utils-cache-relcache (pg_node_tree decode unported) --
-        // DESIGN_DEBT (TD-RELCACHE-INDEX-NODETREE): `BuildIndexInfo` (#334,
-        // catalog/index.c) calls `RelationGetIndexExpressions` /
-        // `RelationGetIndexPredicate` (and, for exclusion indexes,
-        // `RelationGetExclusionInfo`) unconditionally, mirroring the C
-        // `makeIndexInfo(... RelationGetIndexExpressions(index),
-        // RelationGetIndexPredicate(index) ...)`. The relcache owner's bodies for
-        // these delegate the `pg_index.indexprs`/`indpred` `stringToNode` +
-        // eval_const_expressions + fix_opfuncids node-tree transform to
-        // `nodexform_seam::index_{expressions,predicate}` (the node-tree string
-        // reader), which is unported — so the relcache owner cannot install them
-        // and they loud-panic (mirror-PG-and-panic) when reached. The live
-        // `BuildIndexInfo` consumers (bootstrap catalogs, brin, amcheck) index
-        // simple columns, where the C returns NIL without decoding; the panic
-        // only fires on a real expression / predicate / exclusion index. Install
-        // + DELETE these three when the node-tree decode (`stringToNode`) lands.
-        // (`relation_get_index_expressions` and `relation_get_index_predicate`
-        // are now installed: their NIL quick-exits — `rd_index == None`, no zero
-        // `indkey` entry (expressions), or `heap_attisnull(indpred)` (predicate,
-        // read faithfully via the `pg_index_has_predicate` syscache owner) — are
-        // computable without the node-tree decode, which every system-catalog
-        // index takes. The decode-bearing path still mirror-PG-and-panics until
-        // `stringToNode` lands.)
-        ("backend_utils_cache_relcache", "relation_get_exclusion_info"),
-        // DESIGN_DEBT (TD-RELCACHE-INDEX-NODETREE, cont.):
-        // `RelationGetDummyIndexExpressions` (relcache.c) is `BuildDummyIndexInfo`'s
-        // (#334, catalog/index.c) expression source — same `pg_index.indexprs`
-        // `stringToNode` node-tree decode as `RelationGetIndexExpressions`, then
-        // replaces every leaf with a null `Const` of the right type/typmod/coll.
-        // It rides on the SAME unported node-tree string reader, so the relcache
-        // owner cannot install it and it loud-panics until `stringToNode` lands.
-        // The live `BuildDummyIndexInfo` consumer (TRUNCATE of an index) only
-        // reaches the decode on an expression index; simple-column indexes return
-        // NIL. Install + DELETE alongside the three entries above.
-        ("backend_utils_cache_relcache", "relation_get_dummy_index_expressions"),
+        // (TD-RELCACHE-INDEX-NODETREE RETIRED for the relcache owner's four
+        // `BuildIndexInfo`/`BuildDummyIndexInfo` accessors: all of
+        // `relation_get_index_expressions`, `relation_get_index_predicate`,
+        // `relation_get_dummy_index_expressions`, and `relation_get_exclusion_info`
+        // are now installed from `backend-utils-cache-relcache::init_seams`.
+        // The three expression/predicate/dummy accessors compute their NIL
+        // quick-exit faithfully off the owned entry — `rd_index == None`, no zero
+        // `indkey` entry (the on-disk `InvalidAttrNumber` marker = an expression
+        // column), or `heap_attisnull(indpred)` via the `pg_index_has_predicate`
+        // syscache owner — which is the path every system-catalog index (all
+        // simple-column, none partial) takes; only a real expression / predicate
+        // / dummy-Const index reaches the still-unported `stringToNode` node-tree
+        // decode, which mirror-PG-and-panics. `relation_get_exclusion_info` is NOT
+        // a node-tree decode at all: `conexclop` is a plain 1-D Oid array, decoded
+        // by the real ported `genam::relcache_exclusion_info` body (pg_constraint
+        // scan + `get_opcode`/`get_op_opfamily_strategy`), so the relcache owner
+        // runs it + caches the three arrays + returns them — fully installed.)
         //
         // -- backend-utils-cache-relcache-nodexform (#159 planner-arena keystone) --
         // The nodexform owner (sanctioned relcache.c sibling-split) installs its
