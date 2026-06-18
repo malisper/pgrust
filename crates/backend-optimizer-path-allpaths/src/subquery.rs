@@ -22,7 +22,6 @@ use alloc::format;
 
 use types_core::primitive::Index;
 use types_error::{PgError, PgResult};
-use types_nodes::nodes::Node;
 use types_pathnodes::planner_run::{planner_subplan_get_plan, PlannerRun};
 use types_pathnodes::{PlannerInfo, RelId, TargetEntryNode};
 
@@ -76,9 +75,9 @@ pub fn set_cte_pathlist<'mcx>(
     {
         let parse = run.resolve(cteroot.parse);
         for cte_node in parse.cteList.iter() {
-            let this_name = match &**cte_node {
-                Node::CommonTableExpr(c) => c.ctename.as_ref().map(|s| s.as_str()).unwrap_or(""),
-                _ => return Err(PgError::error("cteList element is not a CommonTableExpr")),
+            let this_name = match cte_node.as_commontableexpr() {
+                Some(c) => c.ctename.as_ref().map(|s| s.as_str()).unwrap_or(""),
+                None => return Err(PgError::error("cteList element is not a CommonTableExpr")),
             };
             if this_name == ctename {
                 found = true;
