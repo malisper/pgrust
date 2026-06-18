@@ -34,7 +34,13 @@ fn arg_oid(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Oid {
 /// `PG_RETURN_TEXT_P(cstring_to_text(...))`.
 #[inline]
 fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, s: String) -> Datum {
-    fcinfo.set_ref_result(RefPayload::Varlena(s.into_bytes()));
+    // `cstring_to_text`: build a header-ful `text` image (4-byte length word).
+    let payload = s.into_bytes();
+    let total = payload.len() + 4;
+    let mut img = Vec::with_capacity(total);
+    img.extend_from_slice(&((total as u32) << 2).to_ne_bytes());
+    img.extend_from_slice(&payload);
+    fcinfo.set_ref_result(RefPayload::Varlena(img));
     Datum::from_usize(0)
 }
 

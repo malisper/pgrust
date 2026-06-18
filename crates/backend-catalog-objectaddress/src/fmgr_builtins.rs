@@ -43,7 +43,12 @@ fn arg_i32(fcinfo: &FunctionCallInfoBaseData, i: usize) -> i32 {
 /// is the boundary, so the payload is the bare text bytes). C: `PG_RETURN_TEXT_P`.
 #[inline]
 fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
-    fcinfo.set_ref_result(RefPayload::Varlena(bytes));
+    // `cstring_to_text`: build a header-ful `text` image (4-byte length word).
+    let total = bytes.len() + 4;
+    let mut img = Vec::with_capacity(total);
+    img.extend_from_slice(&((total as u32) << 2).to_ne_bytes());
+    img.extend_from_slice(&bytes);
+    fcinfo.set_ref_result(RefPayload::Varlena(img));
     Datum::from_usize(0)
 }
 

@@ -363,6 +363,18 @@ fn arg_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
         .expect("hash fn: by-reference argument missing from the by-ref lane")
 }
 
+/// `VARDATA_ANY` of a header-ful text/bytea varlena argument: skip the 4-byte
+/// length header so the core hashes `VARSIZE_ANY_EXHDR` payload bytes.
+#[inline]
+fn arg_varlena_payload<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    let image = arg_bytes(fcinfo, i);
+    if image.len() >= 4 {
+        &image[4..]
+    } else {
+        &[]
+    }
+}
+
 /// `PG_RETURN_UINT32` — box a 32-bit hash into the fmgr-ABI result word.
 #[inline]
 fn ret_u32(v: u32) -> Datum {
@@ -459,7 +471,7 @@ fn fc_hashnameextended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 fn fc_hashtext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let collid = fcinfo.fncollation;
-    match hashtext(arg_bytes(fcinfo, 0), collid) {
+    match hashtext(arg_varlena_payload(fcinfo, 0), collid) {
         Ok(v) => ret_u32(v),
         Err(e) => raise(e),
     }
@@ -467,24 +479,24 @@ fn fc_hashtext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 fn fc_hashtextextended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let collid = fcinfo.fncollation;
     let seed = arg_word(fcinfo, 1) as u64;
-    match hashtextextended(arg_bytes(fcinfo, 0), collid, seed) {
+    match hashtextextended(arg_varlena_payload(fcinfo, 0), collid, seed) {
         Ok(v) => ret_u64(v),
         Err(e) => raise(e),
     }
 }
 fn fc_hashvarlena(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u32(hashvarlena(arg_bytes(fcinfo, 0)))
+    ret_u32(hashvarlena(arg_varlena_payload(fcinfo, 0)))
 }
 fn fc_hashvarlenaextended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let seed = arg_word(fcinfo, 1) as u64;
-    ret_u64(hashvarlenaextended(arg_bytes(fcinfo, 0), seed))
+    ret_u64(hashvarlenaextended(arg_varlena_payload(fcinfo, 0), seed))
 }
 fn fc_hashbytea(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u32(hashbytea(arg_bytes(fcinfo, 0)))
+    ret_u32(hashbytea(arg_varlena_payload(fcinfo, 0)))
 }
 fn fc_hashbyteaextended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let seed = arg_word(fcinfo, 1) as u64;
-    ret_u64(hashbyteaextended(arg_bytes(fcinfo, 0), seed))
+    ret_u64(hashbyteaextended(arg_varlena_payload(fcinfo, 0), seed))
 }
 
 // pg_proc OIDs (pg_proc.dat).

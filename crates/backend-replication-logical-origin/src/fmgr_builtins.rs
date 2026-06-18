@@ -38,10 +38,12 @@ use types_core::Oid;
 /// origin functions all immediately `text_to_cstring` the name).
 #[inline]
 fn arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
-    let bytes = fcinfo
+    let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("origin fn: text arg missing from by-ref lane");
+    // `VARDATA_ANY`: skip the 4-byte header on the header-ful image.
+    let bytes = if image.len() >= 4 { &image[4..] } else { &[][..] };
     core::str::from_utf8(bytes).expect("origin fn: text arg not valid UTF-8")
 }
 

@@ -26,6 +26,9 @@ use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
 // Argument readers / result writers.
 // ---------------------------------------------------------------------------
 
+/// `VARHDRSZ` — the 4-byte uncompressed varlena length word.
+const VARHDRSZ: usize = 4;
+
 /// `PG_GETARG_OID(i)` → `DatumGetObjectId`: the low 32 bits of arg `i`'s word.
 #[inline]
 fn arg_oid(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Oid {
@@ -48,10 +51,16 @@ fn arg_i64(fcinfo: &FunctionCallInfoBaseData, i: usize) -> int64 {
 /// by-ref lane (the `text` filename / `bytea` content's `VARDATA_ANY`).
 #[inline]
 fn arg_varlena<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    fcinfo
+    let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
-        .expect("lo fn: varlena arg missing from by-ref lane")
+        .expect("lo fn: varlena arg missing from by-ref lane");
+    // `VARDATA_ANY`: skip the 4-byte header on the header-ful image.
+    if image.len() >= VARHDRSZ {
+        &image[VARHDRSZ..]
+    } else {
+        &[]
+    }
 }
 
 #[inline]
@@ -70,7 +79,12 @@ fn ret_i64(v: int64) -> Datum {
 /// Set a `bytea` result on the by-ref lane and return the dummy word.
 #[inline]
 fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
-    fcinfo.set_ref_result(RefPayload::Varlena(bytes));
+    // `palloc(VARHDRSZ + len)` + `SET_VARSIZE`: build the header-ful image.
+    let total = bytes.len() + VARHDRSZ;
+    let mut img = Vec::with_capacity(total);
+    img.extend_from_slice(&((total as u32) << 2).to_ne_bytes());
+    img.extend_from_slice(&bytes);
+    fcinfo.set_ref_result(RefPayload::Varlena(img));
     Datum::from_usize(0)
 }
 

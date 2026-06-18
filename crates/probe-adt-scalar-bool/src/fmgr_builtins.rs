@@ -53,10 +53,16 @@ fn arg_cstring<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
 /// `StringInfo`.
 #[inline]
 fn arg_varlena<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    fcinfo
+    let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
-        .expect("bool fn: by-ref arg missing from by-ref lane")
+        .expect("bool fn: by-ref arg missing from by-ref lane");
+    // `VARDATA_ANY`: skip the 4-byte header on the header-ful image.
+    if image.len() >= 4 {
+        &image[4..]
+    } else {
+        &[]
+    }
 }
 
 #[inline]
@@ -76,7 +82,12 @@ fn ret_cstring(fcinfo: &mut FunctionCallInfoBaseData, s: alloc::string::String) 
 /// the header-less payload (the boundary owns the `VARHDRSZ` framing).
 #[inline]
 fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: alloc::vec::Vec<u8>) -> Datum {
-    fcinfo.set_ref_result(RefPayload::Varlena(bytes));
+    // `palloc(VARHDRSZ + len)` + `SET_VARSIZE`: build the header-ful image.
+    let total = bytes.len() + 4;
+    let mut img = alloc::vec::Vec::with_capacity(total);
+    img.extend_from_slice(&((total as u32) << 2).to_ne_bytes());
+    img.extend_from_slice(&bytes);
+    fcinfo.set_ref_result(RefPayload::Varlena(img));
     Datum::from_usize(0)
 }
 

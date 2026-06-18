@@ -43,10 +43,16 @@ pub(crate) fn register_pg_input_error_info() {
 /// `pg_input_is_valid` fmgr-builtin reads. These are exactly the `str` bytes the
 /// misc value core wants (C: `text_to_cstring(PG_GETARG_TEXT_PP(i))`).
 fn arg_text_payload<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    fcinfo
+    let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
-        .expect("pg_input_error_info: text arg missing from the by-ref lane")
+        .expect("pg_input_error_info: text arg missing from the by-ref lane");
+    // `VARDATA_ANY`: skip the 4-byte header on the header-ful image.
+    if image.len() >= 4 {
+        &image[4..]
+    } else {
+        &[]
+    }
 }
 
 /// `pg_input_error_info(PG_FUNCTION_ARGS)` (misc.c:716) over the executor frame.
