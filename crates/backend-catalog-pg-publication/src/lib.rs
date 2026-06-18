@@ -63,7 +63,7 @@ use types_error::{
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_UNDEFINED_COLUMN,
 };
 use types_nodes::bitmapset::Bitmapset;
-use types_nodes::nodes::Node;
+use types_nodes::nodes::{ntag, Node};
 use types_rel::Relation;
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock};
@@ -358,8 +358,8 @@ fn pub_collist_validate<'mcx>(
 
     for col in columns {
         // colname = strVal(lfirst(lc));
-        let colname = match &**col {
-            Node::String(s) => s.sval.as_str(),
+        let colname = match (&**col).node_tag() {
+            ntag::T_String => (&**col).expect_string().sval.as_str(),
             _ => {
                 return Err(PgError::error(
                     "pub_collist_validate: column list entry is not a String node",
