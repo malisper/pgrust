@@ -481,6 +481,11 @@ pub fn init_seams() {
     // table (bytea get/set byte/bit, text substring/overlay, unknown I/O).
     fmgr_builtins::register_varlena_text_bytea_byref_builtins();
 
+    // The string_to_array / array_to_string text<->text[] bridge builtins
+    // (text_to_array{,_null} / array_to_text{,_null}); the array de/construction
+    // is the already-installed arrayfuncs owner seam.
+    fmgr_builtins::register_varlena_array_string_builtins();
+
     // The `bytea_output` GUC variable accessor (varlena.c owns the storage;
     // guc_tables.c binds the config_enum's `variable` pointer here). The GUC
     // machinery reads/writes through these accessors and `byteaout` reads the

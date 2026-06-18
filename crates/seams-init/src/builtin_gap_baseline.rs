@@ -25,7 +25,7 @@
 //! test that runs `crate::init_all()` then formats `missing_builtins()` (sorted
 //! by `foid`) as the `(oid, "prosrc", BuiltinGapKind::...)` rows below.
 //!
-//! Current gap: 1353 of 3102 canonical built-ins (1353 not registered,
+//! Current gap: 1349 of 3102 canonical built-ins (1349 not registered,
 //! 0 registered with diverging metadata).
 
 use backend_utils_fmgr_core::BuiltinGapKind;
@@ -87,20 +87,16 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (336, "scalarlesel", BuiltinGapKind::NotRegistered),
     (337, "scalargesel", BuiltinGapKind::NotRegistered),
     (373, "inter_sb", BuiltinGapKind::NotRegistered),
-    (376, "text_to_array_null", BuiltinGapKind::NotRegistered),
     (377, "cash_cmp", BuiltinGapKind::NotRegistered),
     (378, "array_append", BuiltinGapKind::NotRegistered),
     (379, "array_prepend", BuiltinGapKind::NotRegistered),
     (382, "btarraycmp", BuiltinGapKind::NotRegistered),
     (383, "array_cat", BuiltinGapKind::NotRegistered),
-    (384, "array_to_text_null", BuiltinGapKind::NotRegistered),
     (386, "scalarlejoinsel", BuiltinGapKind::NotRegistered),
     (390, "array_ne", BuiltinGapKind::NotRegistered),
     (391, "array_lt", BuiltinGapKind::NotRegistered),
     (392, "array_gt", BuiltinGapKind::NotRegistered),
     (393, "array_le", BuiltinGapKind::NotRegistered),
-    (394, "text_to_array", BuiltinGapKind::NotRegistered),
-    (395, "array_to_text", BuiltinGapKind::NotRegistered),
     (396, "array_ge", BuiltinGapKind::NotRegistered),
     (398, "scalargejoinsel", BuiltinGapKind::NotRegistered),
     (404, "btoidvectorcmp", BuiltinGapKind::NotRegistered),

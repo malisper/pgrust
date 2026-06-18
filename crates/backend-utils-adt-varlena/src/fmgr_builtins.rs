@@ -696,6 +696,101 @@ fn cstring_lane(bytes: &[u8]) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// fc_ adapters — string_to_array / array_to_string (split_format.rs). These are
+// the `text`<->`text[]` bridge functions. Both are `proisstrict => 'f'` for the
+// variants that take a `null_string` (and `string_to_array` itself), so the
+// adapters read each arg's null flag off the frame and pass `Option<&[u8]>` to
+// the cores; a NULL `inputstring`/`fldsep` propagates per the C `PG_ARGISNULL`
+// checks. The array argument/result rides the by-ref `Varlena` lane as the flat
+// `ArrayType` image (C `DatumGetArrayTypeP` / `PG_RETURN_ARRAYTYPE_P`); the
+// element type for `array_to_text` is read from the array header (C
+// `ARR_ELEMTYPE`), at byte offset 12 of the flat image.
+// ---------------------------------------------------------------------------
+
+/// `text` arg `i` as `Option<&[u8]>`: `None` when the frame marks it SQL NULL
+/// (C: `PG_ARGISNULL(i)`), else its by-ref `Varlena` payload.
+#[inline]
+fn opt_arg_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> Option<&'a [u8]> {
+    if fcinfo.arg(i).map(|d| d.isnull).unwrap_or(false) {
+        return None;
+    }
+    Some(arg_bytes(fcinfo, i))
+}
+
+/// Wrap the flat array image carried on the by-ref lane into the canonical
+/// by-reference `Datum` the `split_format` cores consume (C `DatumGetArrayTypeP`
+/// reads the same contiguous block). Copies the bytes into `mcx`.
+fn arg_array_datum<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    fcinfo: &FunctionCallInfoBaseData,
+    i: usize,
+) -> types_tuple::backend_access_common_heaptuple::Datum<'mcx> {
+    let bytes = arg_bytes(fcinfo, i);
+    let v = ok(mcx::slice_in(mcx, bytes));
+    types_tuple::backend_access_common_heaptuple::Datum::ByRef(v)
+}
+
+/// `ARR_ELEMTYPE(array)` — the element type Oid stored in the flat `ArrayType`
+/// header at byte offset 12 (`int32 vl_len_; int ndim; int32 dataoffset; Oid
+/// elemtype`).
+#[inline]
+fn arr_elemtype(array: &[u8]) -> Oid {
+    u32::from_ne_bytes([array[12], array[13], array[14], array[15]])
+}
+
+fn fc_text_to_array(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let c = collation(fcinfo);
+    let m = scratch_mcx();
+    let inputstring = opt_arg_bytes(fcinfo, 0);
+    let fldsep = opt_arg_bytes(fcinfo, 1);
+    let out = ok(crate::split_format::text_to_array(m.mcx(), inputstring, fldsep, None, c));
+    match out {
+        Some(d) => ret_varlena(fcinfo, d.as_ref_bytes().to_vec()),
+        None => {
+            fcinfo.set_result_null(true);
+            Datum::from_usize(0)
+        }
+    }
+}
+fn fc_text_to_array_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let c = collation(fcinfo);
+    let m = scratch_mcx();
+    let inputstring = opt_arg_bytes(fcinfo, 0);
+    let fldsep = opt_arg_bytes(fcinfo, 1);
+    let null_string = opt_arg_bytes(fcinfo, 2);
+    let out =
+        ok(crate::split_format::text_to_array_null(m.mcx(), inputstring, fldsep, null_string, c));
+    match out {
+        Some(d) => ret_varlena(fcinfo, d.as_ref_bytes().to_vec()),
+        None => {
+            fcinfo.set_result_null(true);
+            Datum::from_usize(0)
+        }
+    }
+}
+fn fc_array_to_text(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let elemtype = arr_elemtype(arg_bytes(fcinfo, 0));
+    let v = arg_array_datum(m.mcx(), fcinfo, 0);
+    let fldsep = arg_bytes(fcinfo, 1);
+    let out = ok(crate::split_format::array_to_text(m.mcx(), v, elemtype, fldsep)).to_vec();
+    ret_varlena(fcinfo, out)
+}
+fn fc_array_to_text_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    // C `array_to_text_null` is `proisstrict => 'f'`: the array (arg0) and
+    // `fldsep` (arg1) are still required (C reads them unconditionally), only
+    // `null_string` (arg2) may be NULL.
+    let m = scratch_mcx();
+    let elemtype = arr_elemtype(arg_bytes(fcinfo, 0));
+    let v = arg_array_datum(m.mcx(), fcinfo, 0);
+    let fldsep = arg_bytes(fcinfo, 1);
+    let null_string = opt_arg_bytes(fcinfo, 2);
+    let out =
+        ok(crate::split_format::array_to_text_null(m.mcx(), v, elemtype, fldsep, null_string)).to_vec();
+    ret_varlena(fcinfo, out)
+}
+
+// ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
 
@@ -710,6 +805,24 @@ fn builtin(
         name: name.to_string(),
         nargs,
         strict: true,
+        retset: false,
+        func: Some(func),
+    }
+}
+
+/// Like [`builtin`] but `proisstrict => 'f'` (the function must run even when an
+/// argument is SQL NULL; the adapter handles the null itself).
+fn builtin_ns(
+    foid: u32,
+    name: &str,
+    nargs: i16,
+    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
+) -> BuiltinFunction {
+    BuiltinFunction {
+        foid,
+        name: name.to_string(),
+        nargs,
+        strict: false,
         retset: false,
         func: Some(func),
     }
@@ -876,6 +989,26 @@ pub fn register_varlena_text_bytea_byref_builtins() {
         // ---- unknown I/O (wire_io.rs) ----
         builtin(109, "unknownin", 1, fc_unknownin),
         builtin(110, "unknownout", 1, fc_unknownout),
+    ]);
+}
+
+/// Register the `string_to_array` / `array_to_string` `text`<->`text[]` bridge
+/// builtins (varlena.c `text_to_array{,_null}` / `array_to_text{,_null}`). The
+/// array argument/result crosses the by-ref lane as the flat `ArrayType` image;
+/// the element-deconstruction / array-construction logic is the already-installed
+/// `backend-utils-adt-arrayfuncs` owner seam. OIDs / nargs / strict transcribed
+/// from `pg_proc.dat`: `string_to_array` and the `_null` variants are
+/// `proisstrict => 'f'`; `array_to_text` (395) is strict.
+///
+/// NOT registered here: `string_to_table` / `array`-SRF variants (6160/6161,
+/// `proretset => 't'` — need the SRF tuplestore boundary) and the variadic
+/// `concat`/`concat_ws`/`format` (no typed-variadic frame at this boundary).
+pub fn register_varlena_array_string_builtins() {
+    backend_utils_fmgr_core::register_builtins([
+        builtin_ns(394, "text_to_array", 2, fc_text_to_array),
+        builtin_ns(376, "text_to_array_null", 3, fc_text_to_array_null),
+        builtin(395, "array_to_text", 2, fc_array_to_text),
+        builtin_ns(384, "array_to_text_null", 3, fc_array_to_text_null),
     ]);
 }
 
