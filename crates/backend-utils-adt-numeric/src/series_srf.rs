@@ -22,19 +22,30 @@
 //!    over a [`SrfCallFrame`] opacity token, exactly as funcapi will once the
 //!    fmgr/ExprContext owners widen those shapes.
 //!
-//!  * the planner `Node` vocabulary — `SupportRequestSimplify` /
-//!    `SupportRequestRows`, `FuncExpr`/`Const` inspection, `exprTypmod`,
-//!    `estimate_expression_value`, `relabel_to_typmod` — is owned by the
-//!    optimizer / nodeFuncs / makefuncs neighbors (genuinely unported, inherited
-//!    opacity per docs/types.md rules 6-7). Reached through the seams below over
-//!    a [`PlannerNode`] token, the same pattern the ported
-//!    `backend-utils-adt-rangetypes` planner-support family uses.
+//!  * the planner-support *dispatch* — the `SupportRequestSimplify` /
+//!    `SupportRequestRows` request nodes the fmgr machinery hands a support
+//!    function — is owned by the optimizer's support-call sites
+//!    (`clauses.c:simplify_function` and `plancat.c:get_function_rows`). This
+//!    codebase models those request nodes *decomposed* (the dispatcher passes
+//!    the function call's argument list and per-call scalars and reads back the
+//!    simplified `Expr` / estimated row count), mirroring the
+//!    `clauses_seam::call_support_simplify` contract. So both support fns run
+//!    over the real [`Expr`] / [`PlannerInfo`] node vocabulary and call the real
+//!    `exprTypmod` / `relabel_to_typmod` / `estimate_expression_value` owners
+//!    directly; only the dispatch entry that routes a `prosupport` OID to the
+//!    right support fn is still unported (the `SupportRequestRows` leg in
+//!    particular — `get_function_rows` panics workspace-wide).
 
 extern crate alloc;
 
 use mcx::Mcx;
 use types_tuple::Datum;
 use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
+
+use types_nodes::primnodes::Expr;
+use types_pathnodes::PlannerInfo;
+use backend_nodes_core::nodefuncs::{expr_typmod, relabel_to_typmod};
+use backend_optimizer_util_clauses::estimate_expression_value;
 
 use types_numeric::var::{GenerateSeriesNumericFctx, NumericSign};
 use types_numeric::{
@@ -227,138 +238,43 @@ pub fn generate_series_step_numeric<'mcx>(
 }
 
 // ===========================================================================
-// Planner support functions — inherited planner Node opacity (owner: the
-// optimizer / nodeFuncs / makefuncs neighbors, genuinely unported).
+// Planner support functions — re-signed onto the real node vocabulary.
+//
+// C's `numeric_support` / `generate_series_numeric_support` each receive a
+// `SupportRequest*` node via fmgr and read the wrapped `FuncExpr`'s argument
+// list. This codebase models that request *decomposed* (the dispatch site
+// passes the argument `Expr`s and per-call scalars and reads the result back),
+// the same shape as `clauses_seam::call_support_simplify`. So both fns run over
+// the real `Expr` / `PlannerInfo` and call the real `exprTypmod`,
+// `relabel_to_typmod` (nodeFuncs.c) and `estimate_expression_value` (clauses.c)
+// owners directly.
 // ===========================================================================
-
-/// A planner `Node *` (`nodes.h`). Inherited opacity (docs/types.md rules 6-7);
-/// `0` models C's `NULL`. Resolves to the real node type when the optimizer's
-/// node vocabulary lands.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-pub struct PlannerNode(pub u64);
-
-impl PlannerNode {
-    /// C's `NULL` node.
-    pub const NULL: PlannerNode = PlannerNode(0);
-
-    fn is_null(self) -> bool {
-        self.0 == 0
-    }
-}
-
-seam_core::seam!(
-    /// `IsA(rawreq, SupportRequestSimplify)` (nodes.h).
-    pub fn is_support_request_simplify(node: PlannerNode) -> bool
-);
-
-seam_core::seam!(
-    /// `IsA(rawreq, SupportRequestRows)` (nodes.h).
-    pub fn is_support_request_rows(node: PlannerNode) -> bool
-);
-
-seam_core::seam!(
-    /// `((SupportRequestSimplify *) req)->fcall` (supportnodes.h): the
-    /// `FuncExpr *` of the call to be simplified.
-    pub fn support_request_simplify_fcall(req: PlannerNode) -> PlannerNode
-);
-
-seam_core::seam!(
-    /// `((SupportRequestRows *) req)->root` (supportnodes.h): the `PlannerInfo *`
-    /// (may be `NULL`).
-    pub fn support_request_rows_root(req: PlannerNode) -> PlannerNode
-);
-
-seam_core::seam!(
-    /// `((SupportRequestRows *) req)->node` (supportnodes.h): the parse node
-    /// invoking the function.
-    pub fn support_request_rows_node(req: PlannerNode) -> PlannerNode
-);
-
-seam_core::seam!(
-    /// `((SupportRequestRows *) req)->rows = rows; ret = (Node *) req;`
-    /// (supportnodes.h): store the estimated row count into the request and
-    /// return it as the result node.
-    pub fn support_request_rows_set(req: PlannerNode, rows: f64) -> PlannerNode
-);
-
-seam_core::seam!(
-    /// `is_funcclause(node)` (clauses.c): is the node a `FuncExpr`.
-    pub fn is_funcclause(node: PlannerNode) -> bool
-);
-
-seam_core::seam!(
-    /// `list_length(((FuncExpr *) node)->args)` (pg_list.h): the call's argument
-    /// count.
-    pub fn func_expr_nargs(node: PlannerNode) -> i32
-);
-
-seam_core::seam!(
-    /// `linitial/lsecond/lthird(((FuncExpr *) node)->args)` (pg_list.h): the
-    /// `n`-th (0-based) argument `Expr *` of the function call.
-    pub fn func_expr_arg(node: PlannerNode, n: i32) -> PlannerNode
-);
-
-seam_core::seam!(
-    /// `estimate_expression_value(root, node)` (clauses.c): pre-evaluate the
-    /// argument, folding it to a `Const` where possible.
-    pub fn estimate_expression_value(root: PlannerNode, node: PlannerNode) -> PlannerNode
-);
-
-seam_core::seam!(
-    /// `IsA(expr, Const)` (nodes.h).
-    pub fn is_const(expr: PlannerNode) -> bool
-);
-
-seam_core::seam!(
-    /// `((Const *) expr)->constisnull` (primnodes.h).
-    pub fn const_is_null(expr: PlannerNode) -> bool
-);
-
-seam_core::seam!(
-    /// `((Const *) expr)->constvalue` (primnodes.h): the `Const`'s payload
-    /// `Datum` (a `numeric` pointer Datum here).
-    pub fn const_value(expr: PlannerNode) -> Datum<'static>
-);
-
-seam_core::seam!(
-    /// `exprTypmod(source)` (nodeFuncs.c): the typmod of the coercion source
-    /// expression.
-    pub fn expr_typmod(source: PlannerNode) -> i32
-);
-
-seam_core::seam!(
-    /// `relabel_to_typmod(source, new_typmod)` (nodeFuncs.c): wrap `source` in a
-    /// `RelabelType` carrying the new typmod (the length-coercion no-op result).
-    pub fn relabel_to_typmod<'mcx>(
-        mcx: Mcx<'mcx>,
-        source: PlannerNode,
-        new_typmod: i32,
-    ) -> PlannerNode
-);
 
 /// `numeric_support(PG_FUNCTION_ARGS)` (numeric.c:1195): planner support for the
 /// `numeric()` length-coercion function. Flattens calls that only widen the
 /// allowable precision (scale unchanged, precision non-decreasing, or the
 /// destination unconstrained).
-pub fn numeric_support<'mcx>(mcx: Mcx<'mcx>, rawreq: PlannerNode) -> PgResult<PlannerNode> {
-    let mut ret = PlannerNode::NULL;
+///
+/// The C `SupportRequestSimplify` is decomposed: `args` is the call's argument
+/// list (`req->fcall->args`). `Ok(Some(expr))` is the simplified clause (C's
+/// `ret`); `Ok(None)` is "no simplification" (C's `NULL`). Reached from the
+/// `simplify_function` support-call site once the `prosupport`-OID dispatch
+/// lands.
+pub fn numeric_support<'mcx>(args: &[Expr]) -> PgResult<Option<Expr>> {
+    // FuncExpr *expr = req->fcall; Assert(list_length(expr->args) >= 2);
+    debug_assert!(args.len() >= 2);
 
-    if is_support_request_simplify::call(rawreq) {
-        // FuncExpr *expr = req->fcall;
-        let expr = support_request_simplify_fcall::call(rawreq);
+    // typmod = (Node *) lsecond(expr->args);
+    let typmod = &args[1];
 
-        // Assert(list_length(expr->args) >= 2);
-        debug_assert!(func_expr_nargs::call(expr) >= 2);
-
-        // typmod = (Node *) lsecond(expr->args);
-        let typmod = func_expr_arg::call(expr, 1);
-
-        if is_const::call(typmod) && !const_is_null::call(typmod) {
+    // if (IsA(typmod, Const) && !((Const *) typmod)->constisnull)
+    if let Expr::Const(typmod_const) = typmod {
+        if !typmod_const.constisnull {
             // source = (Node *) linitial(expr->args);
-            let source = func_expr_arg::call(expr, 0);
-            let old_typmod = expr_typmod::call(source);
+            let source = &args[0];
+            let old_typmod = expr_typmod(Some(source))?;
             // new_typmod = DatumGetInt32(((Const *) typmod)->constvalue);
-            let new_typmod = const_value::call(typmod).as_usize() as i32;
+            let new_typmod = typmod_const.constvalue.as_usize() as i32;
             let old_scale = numeric_typmod_scale(old_typmod);
             let new_scale = numeric_typmod_scale(new_typmod);
             let old_precision = numeric_typmod_precision(old_typmod);
@@ -373,103 +289,140 @@ pub fn numeric_support<'mcx>(mcx: Mcx<'mcx>, rawreq: PlannerNode) -> PgResult<Pl
                     && new_scale == old_scale
                     && new_precision >= old_precision)
             {
-                ret = relabel_to_typmod::call(mcx, source, new_typmod);
+                return Ok(Some(relabel_to_typmod(source.clone(), new_typmod)?));
             }
         }
     }
 
-    Ok(ret)
+    Ok(None)
 }
 
 /// `generate_series_numeric_support(PG_FUNCTION_ARGS)` (numeric.c:1834): planner
 /// support for `generate_series(numeric, numeric [, numeric])` — estimate the
 /// number of rows returned via `floor((stop - start) / step) + 1`.
+///
+/// The C `SupportRequestRows` is decomposed: `args` is the invoked call's
+/// argument list (`req->node`'s `FuncExpr->args`, already known a funcclause by
+/// the dispatcher) and `root` is `req->root`. `Ok(Some(rows))` stores the
+/// estimate into the request (C's `req->rows = rows`); `Ok(None)` declines (C's
+/// `NULL`).
+///
+/// The argument folding routes through the real `estimate_expression_value`
+/// (clauses.c) and the row arithmetic runs over real `NumericVar`s. The only
+/// piece still unported is the `SupportRequestRows` *dispatch* itself
+/// (`get_function_rows`, plancat.c, panics workspace-wide) — when it lands it
+/// calls this fn with the decomposed request.
 pub fn generate_series_numeric_support<'mcx>(
     mcx: Mcx<'mcx>,
-    rawreq: PlannerNode,
-) -> PgResult<PlannerNode> {
-    let mut ret = PlannerNode::NULL;
+    _root: &PlannerInfo,
+    args: &[Expr],
+) -> PgResult<Option<f64>> {
+    let nargs = args.len();
 
-    if is_support_request_rows::call(rawreq) {
-        let node = support_request_rows_node::call(rawreq);
-        let root = support_request_rows_root::call(rawreq);
+    // We can use estimated argument values here. estimate_expression_value
+    // folds each arg to a Const where possible; it consumes its argument, so
+    // pass owned clones (C copies into the SupportRequest's working node).
+    let arg1 = estimate_expression_value(mcx, args[0].clone())?;
+    let arg2 = estimate_expression_value(mcx, args[1].clone())?;
+    let arg3: Option<Expr> = if nargs >= 3 {
+        Some(estimate_expression_value(mcx, args[2].clone())?)
+    } else {
+        None
+    };
 
-        if is_funcclause::call(node) {
-            // be paranoid
-            let nargs = func_expr_nargs::call(node);
+    // const_of(e): the e as a non-null Const's value bytes, or a null/non-Const
+    // classification. Returns (is_const, is_null, bytes-if-const-non-null).
+    let arg1c = as_const(&arg1);
+    let arg2c = as_const(&arg2);
+    let arg3c = arg3.as_ref().map(as_const);
 
-            // We can use estimated argument values here.
-            let arg1 = estimate_expression_value::call(root, func_expr_arg::call(node, 0));
-            let arg2 = estimate_expression_value::call(root, func_expr_arg::call(node, 1));
-            let arg3 = if nargs >= 3 {
-                estimate_expression_value::call(root, func_expr_arg::call(node, 2))
+    // If any argument is constant NULL, zero rows are returned. Otherwise, if
+    // they're all non-NULL constants, we can compute the row count.
+    if matches!(arg1c, ConstArg::Null)
+        || matches!(arg2c, ConstArg::Null)
+        || matches!(arg3c, Some(ConstArg::Null))
+    {
+        return Ok(Some(0.0));
+    }
+
+    if let (ConstArg::Value(start_dat), ConstArg::Value(stop_dat)) = (&arg1c, &arg2c) {
+        // arg3 absent, or a (possibly-null already handled) Const.
+        let step_dat: Option<&Datum<'static>> = match &arg3c {
+            None => None,
+            Some(ConstArg::Value(d)) => Some(d),
+            // arg3 present but not a plain Const -> can't estimate.
+            Some(_) => return Ok(None),
+        };
+        let have_step = step_dat.is_some();
+
+        // If any argument is NaN or infinity, generate_series() will error out,
+        // so we needn't produce an estimate.
+        let start_bytes = unsafe { numeric_bytes_from_datum(start_dat.clone()) };
+        let stop_bytes = unsafe { numeric_bytes_from_datum(stop_dat.clone()) };
+
+        if numeric_is_special(start_bytes) || numeric_is_special(stop_bytes) {
+            return Ok(None);
+        }
+
+        // step defaults to const_one.
+        let step = if let Some(d) = step_dat {
+            let step_bytes = unsafe { numeric_bytes_from_datum(d.clone()) };
+            if numeric_is_special(step_bytes) {
+                return Ok(None);
+            }
+            set_var_from_num(mcx, step_bytes)?
+        } else {
+            const_one(mcx)
+        };
+
+        // The number of rows returned is floor((stop - start) / step) + 1, if
+        // the sign of step matches the sign of stop - start; otherwise no rows
+        // are returned. (cmp_var(&step,&const_zero)!=0 i.e. step has digits.)
+        if step.ndigits() != 0 {
+            let start = set_var_from_num(mcx, start_bytes)?;
+            let stop = set_var_from_num(mcx, stop_bytes)?;
+
+            let mut res = sub_var(mcx, &stop, &start)?;
+
+            if step.sign != res.sign {
+                // no rows will be returned
+                return Ok(Some(0.0));
             } else {
-                PlannerNode::NULL
-            };
-
-            // If any argument is constant NULL, zero rows are returned.
-            // Otherwise, if they're all non-NULL constants, we can compute the
-            // row count.
-            if (is_const::call(arg1) && const_is_null::call(arg1))
-                || (is_const::call(arg2) && const_is_null::call(arg2))
-                || (!arg3.is_null() && is_const::call(arg3) && const_is_null::call(arg3))
-            {
-                ret = support_request_rows_set::call(rawreq, 0.0);
-            } else if is_const::call(arg1)
-                && is_const::call(arg2)
-                && (arg3.is_null() || is_const::call(arg3))
-            {
-                // If any argument is NaN or infinity, generate_series() will
-                // error out, so we needn't produce an estimate.
-                let start_bytes = unsafe { numeric_bytes_from_datum(const_value::call(arg1)) };
-                let stop_bytes = unsafe { numeric_bytes_from_datum(const_value::call(arg2)) };
-
-                if numeric_is_special(start_bytes) || numeric_is_special(stop_bytes) {
-                    return Ok(PlannerNode::NULL);
-                }
-
-                // step defaults to const_one.
-                let step = if !arg3.is_null() {
-                    let step_bytes = unsafe { numeric_bytes_from_datum(const_value::call(arg3)) };
-                    if numeric_is_special(step_bytes) {
-                        return Ok(PlannerNode::NULL);
-                    }
-                    set_var_from_num(mcx, step_bytes)?
+                if have_step {
+                    // div_var(&res, &step, &res, 0, false, false);
+                    res = crate::kernel_var::div_var(mcx, &res, &step, 0, false, false)?;
                 } else {
-                    const_one(mcx)
-                };
-
-                // The number of rows returned is floor((stop - start) / step)
-                // + 1, if the sign of step matches the sign of stop - start;
-                // otherwise no rows are returned. (cmp_var(&step,&const_zero)!=0
-                // i.e. step has digits.)
-                if step.ndigits() != 0 {
-                    let start = set_var_from_num(mcx, start_bytes)?;
-                    let stop = set_var_from_num(mcx, stop_bytes)?;
-
-                    let mut res = sub_var(mcx, &stop, &start)?;
-
-                    if step.sign != res.sign {
-                        // no rows will be returned
-                        ret = support_request_rows_set::call(rawreq, 0.0);
-                    } else {
-                        if !arg3.is_null() {
-                            // div_var(&res, &step, &res, 0, false, false);
-                            res = crate::kernel_var::div_var(mcx, &res, &step, 0, false, false)?;
-                        } else {
-                            // trunc_var(&res, 0); /* step = 1 */
-                            trunc_var(&mut res, 0);
-                        }
-
-                        let rows = numericvar_to_double_no_overflow(&res) + 1.0;
-                        ret = support_request_rows_set::call(rawreq, rows);
-                    }
+                    // trunc_var(&res, 0); /* step = 1 */
+                    trunc_var(&mut res, 0);
                 }
+
+                let rows = numericvar_to_double_no_overflow(&res) + 1.0;
+                return Ok(Some(rows));
             }
         }
     }
 
-    Ok(ret)
+    Ok(None)
+}
+
+/// One folded `generate_series` argument, classified as C's
+/// `IsA(arg, Const)` / `constisnull` triple needs.
+enum ConstArg {
+    /// `IsA(arg, Const)` and `constisnull` — zero rows.
+    Null,
+    /// `IsA(arg, Const)` and not null — the payload `Datum`.
+    Value(Datum<'static>),
+    /// not a `Const` — can't estimate.
+    NotConst,
+}
+
+/// `IsA(expr, Const)` + null/value split (primnodes.h).
+fn as_const(expr: &Expr) -> ConstArg {
+    match expr {
+        Expr::Const(c) if c.constisnull => ConstArg::Null,
+        Expr::Const(c) => ConstArg::Value(c.constvalue.clone()),
+        _ => ConstArg::NotConst,
+    }
 }
 
 /// Recover the on-disk `numeric` byte image a pointer-bearing `Const` `Datum`

@@ -48,3 +48,12 @@ types-sortsupport = { path = "../types-sortsupport" }
 # SQL-callable numeric.c function is registered here as a `fc_<name>` adapter.
 types-fmgr = { path = "../types-fmgr" }
 backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
+
+# The real planner node vocabulary the numeric()/generate_series() planner
+# support fns run over (Expr/Const/PlannerInfo) + the real exprTypmod /
+# relabel_to_typmod (nodeFuncs.c) and estimate_expression_value (clauses.c)
+# owners they call directly (acyclic: none of these depend on numeric).
+types-nodes = { path = "../types-nodes" }
+types-pathnodes = { path = "../types-pathnodes" }
+backend-nodes-core = { path = "../backend-nodes-core" }
+backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }

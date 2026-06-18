@@ -18702,6 +18702,8 @@ dependencies = [
 name = "backend-utils-adt-numeric"
 version = "0.0.0"
 dependencies = [
+ "backend-nodes-core",
+ "backend-optimizer-util-clauses",
  "backend-utils-adt-jsonb-seams",
  "backend-utils-adt-numeric-seams",
  "backend-utils-fmgr-core",
@@ -18712,7 +18714,9 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-fmgr",
+ "types-nodes",
  "types-numeric",
+ "types-pathnodes",
  "types-sortsupport",
  "types-tuple",
 ]
