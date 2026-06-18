@@ -16,19 +16,23 @@
 //! and the numeric float casts go straight to the landed
 //! `backend-utils-adt-numeric` crate.
 //!
-//! This crate declares only the boundaries that have NO existing seam and
-//! reach genuinely-external / not-yet-ported subsystems:
+//! This crate declares the remaining boundaries. Most are now resolved by an
+//! installed body:
 //!
 //!   * `parse_to_jsonb` — the JSON lexer/parser (jsonapi subsystem) driving the
-//!     `jsonb_in_*` semantic actions to assemble on-disk bytes,
-//!   * `oid_function_call1` — `OidFunctionCall1` for the `JSONTYPE_CAST` arm,
-//!   * `jsonb_datum_bytes` — detoast a `jsonb` `Datum` to its varlena bytes,
+//!     `jsonb_in_*` semantic actions to assemble on-disk bytes. The jsonapi
+//!     parser (`pg_parse_json`) is not yet ported (only `common-jsonapi-seams`
+//!     exists, with no provider), so this seam stays unresolved until that
+//!     subsystem lands.
+//!   * `oid_function_call1` — `OidFunctionCall1` for the `JSONTYPE_CAST` arm.
+//!     Installed by the `jsonb` owner's `init_seams()` by delegating to the
+//!     fmgr-core `function_call1_coll_datum` seam (the real `fmgr.c` owner).
+//!   * `jsonb_datum_bytes` — detoast a `jsonb` `Datum` to its varlena bytes
+//!     (`DatumGetJsonbP` = `PG_DETOAST_DATUM`). Installed by the `jsonb` owner
+//!     via the `detoast_attr` seam.
 //!   * `numeric_int2` / `numeric_int4` / `numeric_int8` — the `numeric`→integer
-//!     casts (`DirectFunctionCall1(numeric_intN, ...)`), not yet ported in
-//!     `backend-utils-adt-numeric`.
-//!
-//! The owning unit installs all of these from its `init_seams()` once it lands;
-//! until then a call panics loudly.
+//!     casts (`DirectFunctionCall1(numeric_intN, ...)`). Installed by
+//!     `backend-utils-adt-numeric::init_seams()` (the real `numeric.c` owner).
 
 #![allow(non_snake_case)]
 
@@ -67,8 +71,12 @@ seam_core::seam!(
 seam_core::seam!(
     /// `PG_GETARG_JSONB_P(val)` / `DatumGetJsonbP(val)` — detoast a `jsonb`
     /// `Datum` to its on-disk varlena bytes (length header + root container)
-    /// for the `JSONTYPE_JSONB` arm of `datum_to_jsonb_internal`.
-    pub fn jsonb_datum_bytes<'mcx>(val: &Datum<'mcx>) -> PgResult<alloc::vec::Vec<u8>>
+    /// for the `JSONTYPE_JSONB` arm of `datum_to_jsonb_internal`. The detoasted
+    /// copy is allocated in `mcx` (`DatumGetJsonbP` = `PG_DETOAST_DATUM`).
+    pub fn jsonb_datum_bytes<'mcx>(
+        mcx: Mcx<'mcx>,
+        val: &Datum<'mcx>,
+    ) -> PgResult<PgVec<'mcx, u8>>
 );
 
 seam_core::seam!(

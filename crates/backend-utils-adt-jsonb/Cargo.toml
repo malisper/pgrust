@@ -24,6 +24,8 @@ backend-utils-adt-jsonb-op = { path = "../backend-utils-adt-jsonb-op" }
 backend-utils-adt-numeric = { path = "../backend-utils-adt-numeric" }
 backend-utils-adt-jsonb-seams = { path = "../backend-utils-adt-jsonb-seams" }
 backend-utils-adt-jsonfuncs-seams = { path = "../backend-utils-adt-jsonfuncs-seams" }
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
 backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }
 backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-depth-seams" }
 
