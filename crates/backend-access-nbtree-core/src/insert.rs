@@ -33,11 +33,12 @@
 //! # Genuinely-unported callees (honest seam-and-panic, never `todo!`)
 //!
 //!   * `table_index_fetch_tuple_check` (tableam dispatch) — `_bt_check_unique`'s
-//!     heap-visibility probe. This crate does not depend on any tableam crate and
-//!     no nbtree-core seam exposes the dispatch, so the single probe point
-//!     panics. All of the uniqueness logic *around* the probe (the `_bt_compare`
-//!     equality scan, LP_DEAD garbage marking, the speculative / partial-check
-//!     handling, the right-sibling walk, the conflict ereport) is ported.
+//!     heap-visibility probe, reached through `backend-access-table-tableam-seams`
+//!     (calling it directly would cycle, as the dispatch reaches the heap AM,
+//!     which transitively depends on nbtree). All of the uniqueness logic
+//!     *around* the probe (the `_bt_compare` equality scan, LP_DEAD garbage
+//!     marking, the speculative / partial-check handling, the right-sibling
+//!     walk, the conflict ereport) is ported.
 //!   * `_bt_allocbuf` / `_bt_conditionallockbuf` (nbtpage.c) — no FSM /
 //!     ConditionalLockBuffer / ExtendBufferedRel seam exists yet (the page.rs
 //!     copies already panic at these exact boundaries). The split / new-root /
@@ -87,6 +88,7 @@ use backend_storage_page::{
 };
 
 use backend_access_nbt_dedup as dedup;
+use backend_access_table_tableam_seams as tableam_seams;
 use backend_access_transam_xloginsert_seams as xloginsert;
 use backend_storage_buffer_bufmgr_seams as bufmgr;
 use backend_utils_cache_relcache_seams as relcache;
@@ -516,9 +518,9 @@ fn bt_get_deduplicate_items(_rel: &Relation) -> bool {
 
 /// The conflict info `_bt_check_unique` reads back from the `SnapshotDirty`
 /// that `table_index_fetch_tuple_check` populates (C reads `SnapshotDirty.xmin`,
-/// `.xmax`, `.speculativeToken` after the probe). Modelled as out-params on the
-/// probe helper so the in-crate xwait derivation is faithful without depending
-/// on the full snapshot vocabulary.
+/// `.xmax`, `.speculativeToken` after the probe). Mirrors the three fields the
+/// caller consumes; the probe helper copies them out of the dirty snapshot the
+/// tableam dispatch updated in place.
 #[derive(Default)]
 struct DirtyConflict {
     xmin: TransactionId,
@@ -527,19 +529,57 @@ struct DirtyConflict {
 }
 
 /// `table_index_fetch_tuple_check(heapRel, &htid, snapshot, &all_dead)`
-/// (tableam dispatch). No tableam crate is a dependency of nbtree-core and no
-/// nbtree-core seam exposes the dispatch, so `_bt_check_unique`'s single heap
-/// visibility probe is the genuine boundary. When probing with the dirty
-/// snapshot, the conflict info (xmin/xmax/speculativeToken) is filled into
-/// `dirty`; when probing with `SnapshotSelf`, `dirty` is `None`.
+/// (access/table/tableam.c) — `_bt_check_unique`'s single heap-visibility probe,
+/// reached through the tableam-seams dispatch (the heap AM's
+/// `heapam_index_fetch_tuple`). `snapshot_self` selects which static snapshot to
+/// probe with: `SnapshotSelf` (effects of the current command visible, the
+/// "is the tuple we want to insert still live" probe) vs `SnapshotDirty`
+/// (in-progress changes visible, the "is there a conflicting tuple" probe).
+///
+/// C passes a fresh `SnapshotDirtyData` whose `xmin`/`xmax`/`speculativeToken`
+/// the `HeapTupleSatisfiesDirty` visibility routine writes back; we build that
+/// dirty snapshot here, hand it to the dispatch by `&mut`, and copy the conflict
+/// info into `dirty` afterwards (the `SnapshotSelf` probe writes nothing, so its
+/// caller passes `dirty = None`).
 fn table_index_fetch_tuple_check<'mcx>(
-    _heap_rel: &Relation<'mcx>,
-    _tid: &ItemPointerData,
-    _snapshot_self: bool,
-    _all_dead: Option<&mut bool>,
-    _dirty: Option<&mut DirtyConflict>,
-) -> bool {
-    panic!("_bt_check_unique: table_index_fetch_tuple (tableam dispatch) not yet ported")
+    mcx: Mcx<'mcx>,
+    heap_rel: &Relation<'mcx>,
+    tid: &ItemPointerData,
+    snapshot_self: bool,
+    all_dead: Option<&mut bool>,
+    dirty: Option<&mut DirtyConflict>,
+) -> PgResult<bool> {
+    use types_snapshot::snapshot::{SnapshotData, SnapshotType};
+
+    let snap_type = if snapshot_self {
+        SnapshotType::SNAPSHOT_SELF
+    } else {
+        SnapshotType::SNAPSHOT_DIRTY
+    };
+    let mut snapshot: types_tableam::tableam::Snapshot =
+        Some(SnapshotData::sentinel(snap_type));
+
+    // C may rewrite `tid` to a live HOT child's TID on a true return; thread it
+    // by value and ignore the rewrite (the caller passes the index entry's TID
+    // both times, exactly as C does — the rewrite is read out of the slot the
+    // executor scan owns, which this convenience wrapper discards).
+    let mut tmptid = *tid;
+
+    let found = tableam_seams::table_index_fetch_tuple_check::call(
+        mcx,
+        heap_rel,
+        &mut tmptid,
+        &mut snapshot,
+        all_dead,
+    )?;
+
+    if let (Some(out), Some(snap)) = (dirty, snapshot.as_ref()) {
+        out.xmin = snap.xmin;
+        out.xmax = snap.xmax;
+        out.speculative_token = snap.speculativeToken;
+    }
+
+    Ok(found)
 }
 
 /// `index_deform_tuple(itup, RelationGetDescr(rel), values, isnull)` +
@@ -958,12 +998,13 @@ fn _bt_check_unique<'mcx>(
                 else if {
                     let mut dirty = DirtyConflict::default();
                     let dup = table_index_fetch_tuple_check(
+                        mcx,
                         heap_rel,
                         &htid,
                         /*snapshot_self=*/ false,
                         Some(&mut all_dead),
                         Some(&mut dirty),
-                    );
+                    )?;
                     dirty_conflict = dirty;
                     dup
                 } {
@@ -1011,12 +1052,13 @@ fn _bt_check_unique<'mcx>(
                      * is a unique key conflict.
                      */
                     if table_index_fetch_tuple_check(
+                        mcx,
                         heap_rel,
                         &itup_t_tid,
                         /*snapshot_self=*/ true,
                         None,
                         None,
-                    ) {
+                    )? {
                         /* Normal case --- it's still live */
                     } else {
                         /*

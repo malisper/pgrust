@@ -2179,6 +2179,7 @@ dependencies = [
  "backend-access-nbtree-build-seams",
  "backend-access-nbtree-core-seams",
  "backend-access-nbtree-seams",
+ "backend-access-table-tableam-seams",
  "backend-access-transam-varsup-seams",
  "backend-access-transam-xlog-seams",
  "backend-access-transam-xloginsert-seams",
@@ -2211,7 +2212,9 @@ dependencies = [
  "types-nbtree",
  "types-rel",
  "types-scan",
+ "types-snapshot",
  "types-storage",
+ "types-tableam",
  "types-tuple",
  "types-wal",
 ]
