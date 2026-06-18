@@ -1668,21 +1668,6 @@ mod recurrence_guard {
         // install + DELETE when the genam unit ports its render body.
         ("backend_access_index_genam", "build_index_value_description"),
         //
-        // -- backend-utils-cache-relcache (FDW-routine cache slot not modeled) --
-        // DESIGN_DEBT (TD-RELCACHE-FDWROUTINE): `relation_fdwroutine` /
-        // `set_relation_fdwroutine` read/write the relcache entry's
-        // `rd_fdwroutine` cache slot (foreign.c `GetFdwRoutineForRelation`
-        // memoizes the resolved `FdwRoutine` there). `types_rel::RelationData`
-        // does NOT model an `rd_fdwroutine` field yet, so the relcache owner has
-        // no slot to read/cache into. The other 6 newly-surfaced relcache seams
-        // (critical_relcaches_built / critical_shared_relcaches_built /
-        // assert_could_get_relation / rd_indcollation / index_getprocid /
-        // relation_set_new_relfilenumber) WERE installed in this lane — they back
-        // onto existing owned state. Install + DELETE these two when the relcache
-        // entry gains the `rd_fdwroutine` cache slot.
-        ("backend_utils_cache_relcache", "relation_fdwroutine"),
-        ("backend_utils_cache_relcache", "set_relation_fdwroutine"),
-        //
         // -- backend-utils-cache-relcache (pg_node_tree decode unported) --
         // DESIGN_DEBT (TD-RELCACHE-INDEX-NODETREE): `BuildIndexInfo` (#334,
         // catalog/index.c) calls `RelationGetIndexExpressions` /

@@ -112,6 +112,10 @@ pub fn init_seams() {
     sx::rd_amcache_spgist::set(rd_amcache_spgist);
     sx::set_rd_amcache_spgist::set(set_rd_amcache_spgist);
 
+    // --- rd_fdwroutine: cached FDW callback-presence table (foreign.c) ---
+    sx::relation_fdwroutine::set(relation_fdwroutine);
+    sx::set_relation_fdwroutine::set(set_relation_fdwroutine);
+
     // --- relcache-build global flags + index field reads + relfilenumber ---
     sx::critical_relcaches_built::set(critical_relcaches_built);
     sx::critical_shared_relcaches_built::set(critical_shared_relcaches_built);
@@ -1152,4 +1156,28 @@ fn set_rd_amcache_spgist(index_oid: Oid, cache: types_spgist::SpGistCache) -> Pg
     // `index->rd_amcache = MemoryContextAlloc(index->rd_indexcxt, ...); memcpy(...)`
     // — install/refresh the cached SpGistCache on the entry's rd_amcache slot.
     crate::core_entry_store::set_rd_amcache(index_oid, Box::new(SpGistCacheAmcache(cache)))
+}
+
+/// `relation->rd_fdwroutine` (relcache.c / foreign.c
+/// `GetFdwRoutineForRelation`) — read the cached FDW callback-presence table,
+/// or `None` (the C `rd_fdwroutine == NULL`) before it has been resolved. The
+/// relation is held open by the caller, so a missing entry is a contract
+/// violation (errors, mirroring the C dereference of a live `Relation`).
+fn relation_fdwroutine(relation_id: Oid) -> PgResult<Option<types_nodes::FdwRoutine>> {
+    crate::core_entry_store::with_relation(relation_id, |rd| rd.rd_fdwroutine)
+}
+
+/// `cfdwroutine = MemoryContextAlloc(CacheMemoryContext, sizeof(FdwRoutine));
+/// memcpy(...); relation->rd_fdwroutine = cfdwroutine`
+/// (foreign.c `GetFdwRoutineForRelation`) — memoize the resolved FDW
+/// callback-presence table on the relcache entry's `rd_fdwroutine` slot. The
+/// cached copy lives for the entry's (CacheMemoryContext) lifetime and is
+/// cleared on relcache invalidation / rebuild.
+fn set_relation_fdwroutine(
+    relation_id: Oid,
+    fdwroutine: types_nodes::FdwRoutine,
+) -> PgResult<()> {
+    crate::core_entry_store::with_relation_mut(relation_id, |rd| {
+        rd.rd_fdwroutine = Some(fdwroutine);
+    })
 }
