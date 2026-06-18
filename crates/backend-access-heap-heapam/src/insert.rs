@@ -372,7 +372,7 @@ pub fn heap_insert<'mcx>(
      * If tuple is cachable, mark it for invalidation from the caches in case
      * we abort.
      */
-    cache_invalidate_heap_tuple(relation, &heaptup.tuple)?;
+    cache_invalidate_heap_tuple(relation, &heaptup.tuple, &heaptup.data)?;
 
     /* Note: speculative insertions are counted too, even if aborted later */
     pgstat_seam::pgstat_count_heap_insert::call(
@@ -820,7 +820,7 @@ pub fn heap_multi_insert<'mcx>(
      */
     if catalog_seam::is_catalog_relation::call(relation) {
         for tuple in heaptuples.iter() {
-            cache_invalidate_heap_tuple(relation, &tuple.tuple)?;
+            cache_invalidate_heap_tuple(relation, &tuple.tuple, &tuple.data)?;
         }
     }
 
@@ -978,8 +978,11 @@ fn visibilitymap_clear(
 fn cache_invalidate_heap_tuple(
     relation: &RelationData<'_>,
     tuple: &types_tuple::heaptuple::HeapTupleData<'_>,
+    data: &[u8],
 ) -> PgResult<()> {
-    backend_utils_cache_inval::cache_invalidate::CacheInvalidateHeapTuple(relation, tuple, None)
+    backend_utils_cache_inval::cache_invalidate::CacheInvalidateHeapTuple(
+        relation, tuple, data, None, None,
+    )
 }
 
 

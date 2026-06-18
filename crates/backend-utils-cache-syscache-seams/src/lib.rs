@@ -668,28 +668,42 @@ seam_core::seam!(
 seam_core::seam!(
     /// `((Form_pg_class) GETSTRUCT(tuple))` projected to `{ oid, relisshared }`
     /// — the `pg_class` fields inval.c reads to route a relcache invalidation.
+    /// `data` is the tuple's user-data area (`(char *) t_data + t_hoff`),
+    /// threaded alongside the header-only [`HeapTupleData`] so `GETSTRUCT` can
+    /// read the fixed-width `Form_pg_class` columns.
     pub fn pg_class_shape(
         tuple: &types_tuple::HeapTupleData<'_>,
+        data: &[u8],
     ) -> types_storage::PgClassShape
 );
 
 seam_core::seam!(
     /// `((Form_pg_attribute) GETSTRUCT(tuple))->attrelid` — the table a
-    /// `pg_attribute` tuple belongs to.
-    pub fn pg_attribute_attrelid(tuple: &types_tuple::HeapTupleData<'_>) -> Oid
+    /// `pg_attribute` tuple belongs to. `data` is the tuple's user-data area.
+    pub fn pg_attribute_attrelid(
+        tuple: &types_tuple::HeapTupleData<'_>,
+        data: &[u8],
+    ) -> Oid
 );
 
 seam_core::seam!(
     /// `((Form_pg_index) GETSTRUCT(tuple))->indexrelid` — the index OID of a
-    /// `pg_index` tuple.
-    pub fn pg_index_indexrelid(tuple: &types_tuple::HeapTupleData<'_>) -> Oid
+    /// `pg_index` tuple. `data` is the tuple's user-data area.
+    pub fn pg_index_indexrelid(
+        tuple: &types_tuple::HeapTupleData<'_>,
+        data: &[u8],
+    ) -> Oid
 );
 
 seam_core::seam!(
     /// The FK target table of a `pg_constraint` tuple: for a foreign-key
     /// constraint (`contype == CONSTRAINT_FOREIGN`), `Form_pg_constraint.confrelid`;
-    /// `None` for any other constraint type (inval.c skips those).
-    pub fn pg_constraint_fk_target(tuple: &types_tuple::HeapTupleData<'_>) -> Option<Oid>
+    /// `None` for any other constraint type (inval.c skips those). `data` is the
+    /// tuple's user-data area.
+    pub fn pg_constraint_fk_target(
+        tuple: &types_tuple::HeapTupleData<'_>,
+        data: &[u8],
+    ) -> Option<Oid>
 );
 
 seam_core::seam!(

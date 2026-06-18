@@ -1237,6 +1237,11 @@ pub fn init_seams() {
     // follow-on simple projections.
     s::collation_name::set(projections::collation_name);
     s::lookup_pg_class_by_relid::set(projections::lookup_pg_class_by_relid);
+    // inval.c GETSTRUCT projections over a caller-supplied catalog tuple.
+    s::pg_class_shape::set(projections::pg_class_shape);
+    s::pg_attribute_attrelid::set(projections::pg_attribute_attrelid);
+    s::pg_index_indexrelid::set(projections::pg_index_indexrelid);
+    s::pg_constraint_fk_target::set(projections::pg_constraint_fk_target);
     s::search_am_by_name::set(projections::search_am_by_name);
     s::auth_members_of_member::set(projections::auth_members_of_member);
 

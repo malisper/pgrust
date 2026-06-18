@@ -971,7 +971,9 @@ pub fn heap_update<'mcx>(
         backend_utils_cache_inval::cache_invalidate::CacheInvalidateHeapTuple(
             relation,
             &oldtup.tuple,
+            tuple_user_data(&oldtup),
             Some(&heaptup_ref.tuple),
+            Some(&heaptup_ref.data),
         )?;
     }
 
@@ -1404,6 +1406,16 @@ fn log_heap_update<'mcx>(
 // ===========================================================================
 // Small helpers.
 // ===========================================================================
+
+/// The tuple's user-data area (`(char *) t_data + t_hoff`) for the cache-key
+/// deform in `CacheInvalidateHeapTuple`. `read_on_page_tuple` captures `tp.data`
+/// as `item[SizeofHeapTupleHeader..]`, which still spans any null bitmap before
+/// `t_hoff`; skip those bytes to reach the user-data area the deform expects.
+fn tuple_user_data<'a, 'mcx>(tp: &'a FormedTuple<'mcx>) -> &'a [u8] {
+    let t_hoff = data_ref(tp).t_hoff as usize;
+    let skip = t_hoff.saturating_sub(SizeofHeapTupleHeader);
+    &tp.data[skip.min(tp.data.len())..]
+}
 
 /// Materialize the on-page tuple at `(buffer, tid)` into `mcx` (header + user
 /// data + length). Same as `delete.rs::read_on_page_tuple`.

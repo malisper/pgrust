@@ -575,7 +575,13 @@ pub fn heap_delete<'mcx>(
     /*
      * Mark tuple for invalidation from system caches at next command boundary.
      */
-    backend_utils_cache_inval::cache_invalidate::CacheInvalidateHeapTuple(relation, &tp.tuple, None)?;
+    backend_utils_cache_inval::cache_invalidate::CacheInvalidateHeapTuple(
+        relation,
+        &tp.tuple,
+        tuple_user_data(&tp),
+        None,
+        None,
+    )?;
 
     /* Now we can release the buffer */
     backend_storage_buffer_bufmgr_seams::release_buffer::call(buffer);
@@ -1028,6 +1034,17 @@ fn read_on_page_tuple<'mcx>(
         },
     )?;
     Ok(FormedTuple { tuple, data })
+}
+
+/// The tuple's user-data area (`(char *) t_data + t_hoff`) for the cache-key
+/// deform in `CacheInvalidateHeapTuple`. This file's `read_on_page_tuple`
+/// captures `tp.data` as `item[SizeofHeapTupleHeader..]` (header-end onward,
+/// which still spans any null bitmap between the fixed header and `t_hoff`), so
+/// skip the bitmap bytes to reach the user-data area the deform expects.
+fn tuple_user_data<'a, 'mcx>(tp: &'a FormedTuple<'mcx>) -> &'a [u8] {
+    let t_hoff = data_ref(tp).t_hoff as usize;
+    let skip = t_hoff.saturating_sub(SizeofHeapTupleHeader);
+    &tp.data[skip.min(tp.data.len())..]
 }
 
 /// `data_ref(tp)` — `tp->t_data` as a shared header reference.

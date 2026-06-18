@@ -44,7 +44,9 @@ use backend_utils_init_small_seams as init_small_seams;
 pub(crate) fn cache_invalidate_heap_tuple_common(
     relation: &RelationData<'_>,
     tuple: &HeapTupleData<'_>,
+    tuple_data: &[u8],
     newtuple: Option<&HeapTupleData<'_>>,
+    newtuple_data: Option<&[u8]>,
     use_inplace: bool,
 ) -> PgResult<()> {
     /* PrepareToInvalidateCacheTuple() needs relcache */
@@ -101,8 +103,14 @@ pub(crate) fn cache_invalidate_heap_tuple_common(
              * The owned model returns one request per callback invocation in
              * the same order; replay each through RegisterCatcacheInvalidation.
              */
-            let reqs =
-                catcache_seams::prepare_to_invalidate_cache_tuple::call(mcx, relation, tuple, newtuple)?;
+            let reqs = catcache_seams::prepare_to_invalidate_cache_tuple::call(
+                mcx,
+                relation,
+                tuple,
+                tuple_data,
+                newtuple,
+                newtuple_data,
+            )?;
             for req in reqs.iter() {
                 register_catcache_invalidation(
                     mcx,
@@ -123,7 +131,7 @@ pub(crate) fn cache_invalidate_heap_tuple_common(
          */
         let (relation_id, database_id) = if tuple_rel_id == types_core::catalog::RELATION_RELATION_ID
         {
-            let classtup = syscache_seams::pg_class_shape::call(tuple);
+            let classtup = syscache_seams::pg_class_shape::call(tuple, tuple_data);
             let database_id = if classtup.relisshared {
                 InvalidOid
             } else {
@@ -131,7 +139,7 @@ pub(crate) fn cache_invalidate_heap_tuple_common(
             };
             (classtup.oid, database_id)
         } else if tuple_rel_id == types_core::catalog::ATTRIBUTE_RELATION_ID {
-            let relation_id = syscache_seams::pg_attribute_attrelid::call(tuple);
+            let relation_id = syscache_seams::pg_attribute_attrelid::call(tuple, tuple_data);
             /*
              * KLUGE ALERT: we always send the relcache event with MyDatabaseId,
              * even if the rel in question is shared (which we can't easily tell).
@@ -142,14 +150,14 @@ pub(crate) fn cache_invalidate_heap_tuple_common(
              * When a pg_index row is updated, we should send out a relcache inval
              * for the index relation.
              */
-            let relation_id = syscache_seams::pg_index_indexrelid::call(tuple);
+            let relation_id = syscache_seams::pg_index_indexrelid::call(tuple, tuple_data);
             (relation_id, init_small_seams::my_database_id::call())
         } else if tuple_rel_id == types_core::catalog::CONSTRAINT_RELATION_ID {
             /*
              * Foreign keys are part of relcache entries, too, so send out an
              * inval for the table that the FK applies to.
              */
-            match syscache_seams::pg_constraint_fk_target::call(tuple) {
+            match syscache_seams::pg_constraint_fk_target::call(tuple, tuple_data) {
                 Some(conrelid) if OidIsValid(conrelid) => {
                     (conrelid, init_small_seams::my_database_id::call())
                 }
@@ -167,12 +175,25 @@ pub(crate) fn cache_invalidate_heap_tuple_common(
 }
 
 /// `CacheInvalidateHeapTuple`.
+///
+/// `tuple_data` / `newtuple_data` are the respective tuples' user-data areas
+/// (`(char *) t_data + t_hoff`), i.e. the caller's `FormedTuple.data`, threaded
+/// through so the cache-key columns can be deformed during invalidation.
 pub fn CacheInvalidateHeapTuple(
     relation: &RelationData<'_>,
     tuple: &HeapTupleData<'_>,
+    tuple_data: &[u8],
     newtuple: Option<&HeapTupleData<'_>>,
+    newtuple_data: Option<&[u8]>,
 ) -> PgResult<()> {
-    cache_invalidate_heap_tuple_common(relation, tuple, newtuple, false)
+    cache_invalidate_heap_tuple_common(
+        relation,
+        tuple,
+        tuple_data,
+        newtuple,
+        newtuple_data,
+        false,
+    )
 }
 
 /// `CacheInvalidateHeapTuple(rel, tuple, NULL)` reduced to the
@@ -229,9 +250,14 @@ pub fn CacheInvalidateHeapTupleByOid(class_id: Oid, object_id: Oid) -> PgResult<
         let key = types_cache::SysCacheKey::Value(ScalarWord::from_oid(object_id));
         let formed = catcache_seams::search_cat_cache_1::call(mcx, cache_id, key)?;
         match formed {
-            Some(tuple) => {
-                cache_invalidate_heap_tuple_common(&relation, &tuple.tuple, None, false)
-            }
+            Some(tuple) => cache_invalidate_heap_tuple_common(
+                &relation,
+                &tuple.tuple,
+                &tuple.data,
+                None,
+                None,
+                false,
+            ),
             None => Err(PgError::error(format!(
                 "cache lookup failed for object {object_id} in catalog {class_id}"
             ))),
@@ -247,8 +273,16 @@ pub fn CacheInvalidateHeapTupleByOid(class_id: Oid, object_id: Oid) -> PgResult<
 pub fn CacheInvalidateHeapTupleInplace(
     relation: &RelationData<'_>,
     key_equivalent_tuple: &HeapTupleData<'_>,
+    key_equivalent_data: &[u8],
 ) -> PgResult<()> {
-    cache_invalidate_heap_tuple_common(relation, key_equivalent_tuple, None, true)
+    cache_invalidate_heap_tuple_common(
+        relation,
+        key_equivalent_tuple,
+        key_equivalent_data,
+        None,
+        None,
+        true,
+    )
 }
 
 /// `CacheInvalidateCatalog`.
@@ -296,9 +330,13 @@ pub fn CacheInvalidateRelcacheAll() -> PgResult<()> {
     })
 }
 
-/// `CacheInvalidateRelcacheByTuple`.
-pub fn CacheInvalidateRelcacheByTuple(classTuple: &HeapTupleData<'_>) -> PgResult<()> {
-    let classtup = syscache_seams::pg_class_shape::call(classTuple);
+/// `CacheInvalidateRelcacheByTuple`. `class_data` is the tuple's user-data
+/// area (`(char *) t_data + t_hoff`) for the `GETSTRUCT` deform.
+pub fn CacheInvalidateRelcacheByTuple(
+    classTuple: &HeapTupleData<'_>,
+    class_data: &[u8],
+) -> PgResult<()> {
+    let classtup = syscache_seams::pg_class_shape::call(classTuple, class_data);
     let relation_id = classtup.oid;
     let database_id = if classtup.relisshared {
         InvalidOid

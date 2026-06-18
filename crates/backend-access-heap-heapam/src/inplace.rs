@@ -342,7 +342,16 @@ pub fn heap_inplace_lock<'mcx>(
      * CatalogCacheInitializeCache reachable from registration might lock
      * "buffer", which would hang after our own LockBuffer).
      */
-    backend_utils_cache_inval::cache_invalidate::CacheInvalidateHeapTupleInplace(relation, oldtup)?;
+    // The cache-key deform needs the tuple's user-data area. In C `oldtup->t_data`
+    // aliases the page-resident tuple, which the inval reads directly; here the
+    // caller's `oldtup` carries only its header, so read the on-page user-data
+    // area (`item[t_hoff..]`, an ordinary shared read of the same page bytes).
+    let inval_data = read_on_page_user_data(mcx, buffer, oldtup.t_self)?;
+    backend_utils_cache_inval::cache_invalidate::CacheInvalidateHeapTupleInplace(
+        relation,
+        oldtup,
+        &inval_data,
+    )?;
 
     lmgr_seam::lock_tuple::call(relation.rd_id, oldtup.t_self, InplaceUpdateTupleLock)?;
     bufmgr_seam::lock_buffer_exclusive::call(buffer)?;
@@ -592,7 +601,9 @@ pub fn heap_inplace_update_and_unlock<'mcx>(
      * code.
      */
     if !backend_utils_init_miscinit_seams::is_bootstrap_processing_mode::call() {
-        backend_utils_cache_inval::cache_invalidate::CacheInvalidateHeapTuple(relation, tuple, None)?;
+        backend_utils_cache_inval::cache_invalidate::CacheInvalidateHeapTuple(
+            relation, tuple, new_data, None, None,
+        )?;
     }
     Ok(())
 }
@@ -761,6 +772,34 @@ fn read_on_page_tuple<'mcx>(
         t_tableOid: rel_id,
         t_data: Some(mcx::alloc_in(mcx, hdr)?),
     })
+}
+
+/// The on-page tuple's user-data area (`PageGetItem(...)[t_hoff..]`) at
+/// `(buffer, tid)`, copied into `mcx`. Used to supply the cache-key deform in
+/// `CacheInvalidateHeapTupleInplace` with the bytes C reaches via the
+/// page-aliasing `t_data` pointer.
+fn read_on_page_user_data<'mcx>(
+    mcx: Mcx<'mcx>,
+    buffer: Buffer,
+    tid: ItemPointerData,
+) -> PgResult<mcx::PgVec<'mcx, u8>> {
+    let offnum = ItemPointerGetOffsetNumber(&tid);
+    let mut out: Option<mcx::PgVec<'mcx, u8>> = None;
+    bufmgr_seam::with_buffer_page::call(buffer, &mut |page_bytes| {
+        let page = PageRef::new(page_bytes)?;
+        let item_id = PageGetItemId(&page, offnum)?;
+        debug_assert!(item_id.has_storage());
+        let item = PageGetItem(&page, &item_id)?;
+        let hdr = HeapTupleHeaderData::read_on_page(mcx, item)?;
+        let t_hoff = (hdr.t_hoff as usize).min(item.len());
+        let mut data = mcx::PgVec::new_in(mcx);
+        for &b in &item[t_hoff..] {
+            data.push(b);
+        }
+        out = Some(data);
+        Ok(())
+    })?;
+    Ok(out.expect("with_buffer_page closure must have run"))
 }
 
 /// `tp->t_data` (shared) for a `FormedTuple`.

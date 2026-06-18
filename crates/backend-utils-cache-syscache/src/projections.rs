@@ -4861,6 +4861,98 @@ pub(crate) fn collation_name<'mcx>(
     lookup_name1(mcx, COLLOID, SysCacheKey::Value(KeyDatum::from_oid(colloid)), Anum_pg_collation_collname_b2)
 }
 
+// ---------------------------------------------------------------------------
+//  inval.c GETSTRUCT projections over a caller-supplied catalog tuple.
+//
+//  C reaches the fixed-width `Form_*` columns by casting `(char *) t_data +
+//  t_hoff` to the struct pointer (`GETSTRUCT`). The safe byte model deforms the
+//  column against the catalog's tupdesc; the caller threads in the tuple's
+//  user-data area (`tuple_data`) alongside the header-only `HeapTupleData`, so
+//  reassemble a transient `FormedTuple` and run `SysCacheGetAttr` (which resolves
+//  the catalog tupdesc by cache id) over it.
+// ---------------------------------------------------------------------------
+
+/// Reassemble the header-only `tuple` + its user-data area `tuple_data` into a
+/// transient `FormedTuple` in `mcx` so the column deform can run.
+fn formed_for_inval<'mcx>(
+    mcx: Mcx<'mcx>,
+    tuple: &types_tuple::HeapTupleData<'_>,
+    tuple_data: &[u8],
+) -> PgResult<FormedTuple<'mcx>> {
+    Ok(FormedTuple {
+        tuple: mcx::alloc_in(mcx, tuple.clone_in(mcx)?)?,
+        data: mcx::slice_in(mcx, tuple_data)?,
+    })
+}
+
+/// `((Form_pg_class) GETSTRUCT(tuple))` projected to `{ oid, relisshared }`.
+pub(crate) fn pg_class_shape(
+    tuple: &types_tuple::HeapTupleData<'_>,
+    tuple_data: &[u8],
+) -> types_storage::PgClassShape {
+    const Anum_pg_class_oid: i32 = 1;
+    let scratch = MemoryContext::new("inval pg_class_shape");
+    let mcx = scratch.mcx();
+    let run = || -> PgResult<types_storage::PgClassShape> {
+        let tup = formed_for_inval(mcx, tuple, tuple_data)?;
+        let oid = getattr_oid(mcx, RELOID, &tup, Anum_pg_class_oid)?;
+        let relisshared = getattr_bool(mcx, RELOID, &tup, Anum_pg_class_relisshared)?;
+        Ok(types_storage::PgClassShape { oid, relisshared })
+    };
+    run().expect("inval pg_class_shape deform failed")
+}
+
+/// `((Form_pg_attribute) GETSTRUCT(tuple))->attrelid`.
+pub(crate) fn pg_attribute_attrelid(
+    tuple: &types_tuple::HeapTupleData<'_>,
+    tuple_data: &[u8],
+) -> Oid {
+    let scratch = MemoryContext::new("inval pg_attribute_attrelid");
+    let mcx = scratch.mcx();
+    let run = || -> PgResult<Oid> {
+        let tup = formed_for_inval(mcx, tuple, tuple_data)?;
+        getattr_oid(mcx, ATTNUM, &tup, Anum_pg_attribute_attrelid)
+    };
+    run().expect("inval pg_attribute_attrelid deform failed")
+}
+
+/// `((Form_pg_index) GETSTRUCT(tuple))->indexrelid`.
+pub(crate) fn pg_index_indexrelid(
+    tuple: &types_tuple::HeapTupleData<'_>,
+    tuple_data: &[u8],
+) -> Oid {
+    let scratch = MemoryContext::new("inval pg_index_indexrelid");
+    let mcx = scratch.mcx();
+    let run = || -> PgResult<Oid> {
+        let tup = formed_for_inval(mcx, tuple, tuple_data)?;
+        getattr_oid(mcx, INDEXRELID, &tup, Anum_pg_index_indexrelid)
+    };
+    run().expect("inval pg_index_indexrelid deform failed")
+}
+
+/// The FK target table of a `pg_constraint` tuple: `confrelid` when
+/// `contype == CONSTRAINT_FOREIGN`, else `None`.
+pub(crate) fn pg_constraint_fk_target(
+    tuple: &types_tuple::HeapTupleData<'_>,
+    tuple_data: &[u8],
+) -> Option<Oid> {
+    use types_catalog::pg_constraint::{
+        Anum_pg_constraint_confrelid, Anum_pg_constraint_contype, CONSTRAINT_FOREIGN,
+    };
+    let scratch = MemoryContext::new("inval pg_constraint_fk_target");
+    let mcx = scratch.mcx();
+    let run = || -> PgResult<Option<Oid>> {
+        let tup = formed_for_inval(mcx, tuple, tuple_data)?;
+        let contype = getattr_char(mcx, CONSTROID, &tup, Anum_pg_constraint_contype as i32)?;
+        if contype != CONSTRAINT_FOREIGN {
+            return Ok(None);
+        }
+        let confrelid = getattr_oid(mcx, CONSTROID, &tup, Anum_pg_constraint_confrelid as i32)?;
+        Ok(Some(confrelid))
+    };
+    run().expect("inval pg_constraint_fk_target deform failed")
+}
+
 pub(crate) fn lookup_pg_class_by_relid(relid: Oid) -> PgResult<Option<types_storage::PgClassShape>> {
     // Anum_pg_class_oid == 1; Anum_pg_class_relisshared == 16 (pg_class.h).
     const Anum_pg_class_oid_b2: i32 = 1;

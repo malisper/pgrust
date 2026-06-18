@@ -91,6 +91,7 @@ fn catalog_cache_compute_tuple_hash_value(
     cache_id: i32,
     probe: &CacheProbe,
     tuple: &HeapTupleData<'_>,
+    tuple_data: &[u8],
 ) -> PgResult<u32> {
     let nkeys = probe.cc_nkeys;
     let cc_keyno = &probe.cc_keyno;
@@ -106,8 +107,8 @@ fn catalog_cache_compute_tuple_hash_value(
     let mut deform: PgResult<()> = Ok(());
     init_meta::with_cache_tupdesc(cache_id, &mut |tupdesc| {
         // `tp = (char *) tup->t_data + tup->t_data->t_hoff;` — the tuple's
-        // user-data area.
-        let data = tuple_data_area(tuple);
+        // user-data area, threaded in from the caller's `FormedTuple.data`.
+        let data = tuple_data;
 
         // Now extract key fields from tuple, insert into scankey
         // (the C `switch (nkeys) { case 4: ... case 1: ... }` cascade).
@@ -140,29 +141,18 @@ fn catalog_cache_compute_tuple_hash_value(
     CatalogCacheComputeHashValue(kinds, nkeys, &v)
 }
 
-/// The user-data area of `tuple` (`(char *) tup->t_data + tup->t_data->t_hoff`).
-///
-/// In C the data area is part of the tuple's single contiguous `palloc` block,
-/// reached by pointer arithmetic off `t_data`. The safe byte model carries it
-/// alongside the header ([`FormedTuple::data`]); the inval-side seam currently
-/// hands `PrepareToInvalidateCacheTuple` a bare [`HeapTupleData`] whose
-/// data-bearing carrier is owned by the heaptuple/syscache substrate and has not
-/// landed yet, so reaching the user-data area panics loudly here (the unported
-/// neighbor surface) until it does.
-fn tuple_data_area<'a>(_tuple: &'a HeapTupleData<'_>) -> &'a [u8] {
-    panic!(
-        "catcache::inval_support: deforming a bare HeapTupleData needs its \
-         user-data area (`(char *) t_data + t_hoff`), owned by the \
-         heaptuple/syscache tuple-carrier substrate that has not landed yet"
-    )
-}
-
 /// `PrepareToInvalidateCacheTuple(relation, tuple, newtuple, function, context)`.
+///
+/// `tuple_data` / `newtuple_data` are the respective tuples' user-data areas
+/// (`(char *) t_data + t_hoff`), threaded in from the caller's
+/// [`FormedTuple::data`] so the cache-key columns can be deformed.
 pub fn prepare_to_invalidate_cache_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     relation: &RelationData<'_>,
     tuple: &HeapTupleData<'_>,
+    tuple_data: &[u8],
     newtuple: Option<&HeapTupleData<'_>>,
+    newtuple_data: Option<&[u8]>,
 ) -> PgResult<PgVec<'mcx, PrepareToInvalidateCacheTuple>> {
     // CACHE_elog(DEBUG2, "PrepareToInvalidateCacheTuple: called");
     //
@@ -230,7 +220,8 @@ pub fn prepare_to_invalidate_cache_tuple<'mcx>(
         vec_with_capacity_in(mcx, probes.len() * 2)?;
 
     for (_cache_idx, probe) in &probes {
-        let hashvalue = catalog_cache_compute_tuple_hash_value(mcx, probe.id, probe, tuple)?;
+        let hashvalue =
+            catalog_cache_compute_tuple_hash_value(mcx, probe.id, probe, tuple, tuple_data)?;
         let dbid: Oid = if probe.cc_relisshared {
             InvalidOid
         } else {
@@ -245,8 +236,15 @@ pub fn prepare_to_invalidate_cache_tuple<'mcx>(
         });
 
         if let Some(newtuple) = newtuple {
-            let newhashvalue =
-                catalog_cache_compute_tuple_hash_value(mcx, probe.id, probe, newtuple)?;
+            let newtuple_data = newtuple_data
+                .expect("PrepareToInvalidateCacheTuple: newtuple present without its data area");
+            let newhashvalue = catalog_cache_compute_tuple_hash_value(
+                mcx,
+                probe.id,
+                probe,
+                newtuple,
+                newtuple_data,
+            )?;
             if newhashvalue != hashvalue {
                 requests.push(PrepareToInvalidateCacheTuple {
                     cache_id: probe.id,

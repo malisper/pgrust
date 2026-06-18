@@ -192,10 +192,16 @@ seam_core::seam!(
     /// [`PrepareToInvalidateCacheTuple`] request per invocation, in the same
     /// order, allocated in `mcx`. `Err` carries OOM / the C `elog(ERROR,
     /// "bogus call to PrepareToInvalidateCacheTuple")`.
+    /// `tuple_data` / `newtuple_data` are the respective tuples' user-data
+    /// areas (`(char *) t_data + t_hoff`), threaded alongside the header-only
+    /// [`HeapTupleData`] so the cache-key columns can be deformed (the bytes
+    /// live in `FormedTuple.data` at every caller).
     pub fn prepare_to_invalidate_cache_tuple<'mcx>(
         mcx: Mcx<'mcx>,
         relation: &types_rel::RelationData<'_>,
         tuple: &types_tuple::HeapTupleData<'_>,
+        tuple_data: &[u8],
         newtuple: Option<&types_tuple::HeapTupleData<'_>>,
+        newtuple_data: Option<&[u8]>,
     ) -> PgResult<PgVec<'mcx, types_storage::PrepareToInvalidateCacheTuple>>
 );
