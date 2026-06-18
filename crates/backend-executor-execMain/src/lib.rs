@@ -754,6 +754,48 @@ pub fn CreateQueryDescAndStartExplain(
     Ok(query_desc)
 }
 
+/// The COPY-(query)-TO executor setup (copyto.c:838-850): `CreateQueryDesc(plan,
+/// sourceText, GetActiveSnapshot(), InvalidSnapshot, dest, NULL, NULL, 0)` then
+/// `ExecutorStart(queryDesc, 0)`. The COPY-OUT `DestReceiver` is the handle the
+/// caller built; the active snapshot is the copied one it has just pushed
+/// (copyto.c:830-831). Installed for `create_query_desc_and_start`.
+pub fn CreateQueryDescAndStartCopy(
+    parent: &MemoryContext,
+    plan: &PlannedStmt<'_>,
+    source_text: &str,
+    copy_receiver: u64,
+) -> PgResult<QueryDesc> {
+    // GetActiveSnapshot() — the caller pushed PushCopiedSnapshot just before.
+    let snapshot = backend_utils_time_snapmgr_seams::get_active_snapshot::call()?;
+    let mut query_desc = CreateQueryDesc(
+        parent,
+        plan,
+        source_text,
+        snapshot,
+        None,                                     // InvalidSnapshot crosscheck_snapshot
+        DestReceiverHandle(copy_receiver),        // COPY-OUT receiver
+        ParamListInfoHandle::NULL,                // NULL params
+        0,                                        // instrument_options
+    )?;
+    // ExecutorStart(queryDesc, 0);
+    ExecutorStart(&mut query_desc, 0)?;
+    Ok(query_desc)
+}
+
+/// `ExecutorRun(queryDesc, ForwardScanDirection, 0)` (copyto.c:1104) for the
+/// COPY-(query)-TO path. Installed for `executor_run_copy`.
+pub fn ExecutorRunCopy(query_desc: &mut QueryDesc) -> PgResult<()> {
+    standard_ExecutorRun(query_desc, ScanDirection::ForwardScanDirection, 0)
+}
+
+/// The COPY-(query)-TO teardown (copyto.c:1010-1012): `ExecutorFinish` +
+/// `ExecutorEnd` + `FreeQueryDesc`. Installed for `end_copy_query`.
+pub fn EndCopyQuery(mut query_desc: QueryDesc) -> PgResult<()> {
+    ExecutorFinish(&mut query_desc)?;
+    ExecutorEnd(&mut query_desc)?;
+    FreeQueryDesc(query_desc)
+}
+
 // ===========================================================================
 // Result tupdesc helper (queryDesc->tupDesc)
 // ===========================================================================
@@ -1418,8 +1460,150 @@ fn eval_plan_qual_set_plan_with_row_marks<'mcx>(
     Ok(())
 }
 
+/// `ExecBuildSlotValueDescription(reloid, slot, tupdesc, modifiedCols,
+/// maxfieldlen)` (execMain.c) — build a "(col, ...) = (val, ...)" description of
+/// the slot's contents, limited to columns the current user may SELECT (plus any
+/// the caller supplied data for). `Ok(None)` when RLS is active or the user may
+/// see no column (the C `NULL`).
+///
+/// The slot is passed by shared reference, so it is assumed already
+/// deconstructed (every repo call site deforms first — logical-replication apply
+/// materializes a virtual slot, `ExecConstraints`/`ExecPartitionCheck` evaluate
+/// against a materialized scan tuple); the C `slot_getallattrs(slot)` is the
+/// idempotent no-op for an already-deformed slot.
+fn ExecBuildSlotValueDescription<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    reloid: Oid,
+    slot: &types_nodes::TupleTableSlot,
+    tupdesc: &types_tuple::heaptuple::TupleDescData<'_>,
+    modified_cols: Option<&Bitmapset<'_>>,
+    maxfieldlen: i32,
+) -> PgResult<Option<mcx::PgString<'mcx>>> {
+    use types_acl::acl::CheckEnableRlsResult;
+
+    // If RLS is enabled and active for the relation, return nothing.
+    if backend_utils_misc_more_seams::check_enable_rls::call(reloid, types_core::InvalidOid, true)?
+        == CheckEnableRlsResult::RlsEnabled
+    {
+        return Ok(None);
+    }
+
+    let mut buf = mcx::PgString::new_in(mcx);
+    let mut collist = mcx::PgString::new_in(mcx);
+    let mut write_comma = false;
+    let mut write_comma_collist = false;
+    let mut any_perm = false;
+
+    buf.try_push_str("(")?;
+
+    // Table-level SELECT allows all columns; otherwise check each.
+    let aclresult = aclchk::pg_class_aclcheck::call(reloid, miscinit::get_user_id::call(), ACL_SELECT)?;
+    let table_perm = aclresult == AclResult::AclcheckOk;
+    if table_perm {
+        any_perm = true;
+    } else {
+        collist.try_push_str("(")?;
+    }
+
+    let natts = tupdesc.natts;
+    let mut i: i32 = 0;
+    while i < natts {
+        let att = tupdesc.attr(i as usize);
+
+        // Ignore dropped columns.
+        if att.attisdropped {
+            i += 1;
+            continue;
+        }
+
+        let mut column_perm = false;
+        if !table_perm {
+            // No table-level SELECT: include the column only if the user has
+            // SELECT on it or provided its data.
+            let aclresult = aclchk::pg_attribute_aclcheck::call(
+                reloid,
+                att.attnum,
+                miscinit::get_user_id::call(),
+                ACL_SELECT,
+            )?;
+            if bms_seams::bms_is_member::call(
+                att.attnum as i32 - FirstLowInvalidHeapAttributeNumber as i32,
+                modified_cols,
+            ) || aclresult == AclResult::AclcheckOk
+            {
+                column_perm = true;
+                any_perm = true;
+                if write_comma_collist {
+                    collist.try_push_str(", ")?;
+                } else {
+                    write_comma_collist = true;
+                }
+                collist.try_push_str(&alloc::string::String::from_utf8_lossy(att.attname.name_str()))?;
+            }
+        }
+
+        if table_perm || column_perm {
+            // The value text (a `String`-shaped owned bytes in `mcx`).
+            let val: alloc::vec::Vec<u8> = if att.attgenerated == types_tuple::access::ATTRIBUTE_GENERATED_VIRTUAL {
+                alloc::vec::Vec::from(&b"virtual"[..])
+            } else if slot.tts_isnull.get(i as usize).copied().unwrap_or(true) {
+                alloc::vec::Vec::from(&b"null"[..])
+            } else {
+                let (foutoid, _typisvarlena) =
+                    lsyscache::get_type_output_info::call(att.atttypid)?;
+                let datum = slot
+                    .tts_values
+                    .get(i as usize)
+                    .ok_or_else(|| unported("ExecBuildSlotValueDescription: slot not deformed"))?;
+                let out = backend_utils_fmgr_fmgr_seams::oid_output_function_call::call(mcx, foutoid, datum)?;
+                // PgVec<u8> NUL-terminated cstring; strip the trailing NUL if any.
+                let mut v: alloc::vec::Vec<u8> = out.iter().copied().collect();
+                if v.last() == Some(&0) {
+                    v.pop();
+                }
+                v
+            };
+
+            if write_comma {
+                buf.try_push_str(", ")?;
+            } else {
+                write_comma = true;
+            }
+
+            // Truncate if needed (by bytes, respecting multibyte boundaries).
+            let vallen = val.len() as i32;
+            if vallen <= maxfieldlen {
+                buf.try_push_str(&alloc::string::String::from_utf8_lossy(&val))?;
+            } else {
+                let clip = backend_utils_mb_mbutils_seams::pg_mbcliplen::call(&val, vallen, maxfieldlen);
+                buf.try_push_str(&alloc::string::String::from_utf8_lossy(&val[..clip as usize]))?;
+                buf.try_push_str("...")?;
+            }
+        }
+        i += 1;
+    }
+
+    // If we end up with zero columns being returned, return NULL.
+    if !any_perm {
+        return Ok(None);
+    }
+
+    buf.try_push_str(")")?;
+
+    if !table_perm {
+        collist.try_push_str(") = ")?;
+        // Append buf into collist (copy buf out first to avoid a double borrow).
+        let buf_str = buf.as_str().to_string();
+        collist.try_push_str(&buf_str)?;
+        return Ok(Some(collist));
+    }
+
+    Ok(Some(buf))
+}
+
 pub fn init_seams() {
     seams::exec_check_permissions_select::set(exec_check_permissions_select);
+    seams::exec_build_slot_value_description::set(ExecBuildSlotValueDescription);
     seams::init_result_rel_info::set(InitResultRelInfo);
     seams::check_valid_result_rel::set(CheckValidResultRel);
     seams::eval_plan_qual_init::set(EvalPlanQualInit);
@@ -1430,6 +1614,11 @@ pub fn init_seams() {
     seams::executor_rewind::set(ExecutorRewind);
     seams::free_query_desc::set(FreeQueryDesc);
     seams::create_query_desc_and_start_explain::set(CreateQueryDescAndStartExplain);
+
+    // COPY-(query)-TO executor lifecycle (copyto.c).
+    seams::create_query_desc_and_start::set(CreateQueryDescAndStartCopy);
+    seams::executor_run_copy::set(ExecutorRunCopy);
+    seams::end_copy_query::set(EndCopyQuery);
 
     // ExecSupportsBackwardScan (body in execAmi) + ExecUpdateLockMode.
     seams::exec_supports_backward_scan::set(exec_supports_backward_scan);

@@ -65,3 +65,11 @@ backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 backend-catalog-catalog = { path = "../backend-catalog-catalog" }
 # CheckValidResultRel: CheckCmdReplicaIdentity (execReplication.c) via its seam.
 backend-executor-execReplication-seams = { path = "../backend-executor-execReplication-seams" }
+# COPY-(query)-TO start: GetActiveSnapshot() for CreateQueryDesc.
+backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
+# ExecBuildSlotValueDescription: check_enable_rls (rls.c), getTypeOutputInfo's
+# OidOutputFunctionCall (fmgr), pg_mbcliplen (mb), GetUserId (miscinit — already
+# present). All landed owners; none depend on execMain(-seams), so acyclic.
+backend-utils-misc-more-seams = { path = "../backend-utils-misc-more-seams" }
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
