@@ -517,18 +517,18 @@ fn stmt_authrole<'mcx>(
 ) -> PgResult<Option<types_nodes::parsenodes::RoleSpec<'mcx>>> {
     match stmt.authrole.as_ref() {
         None => Ok(None),
-        Some(node) => match &**node {
-            Node::RoleSpec(rs) => Ok(Some(types_nodes::parsenodes::RoleSpec {
+        Some(node) => match node.as_rolespec() {
+            Some(rs) => Ok(Some(types_nodes::parsenodes::RoleSpec {
                 roletype: rs.roletype,
                 rolename: match &rs.rolename {
                     Some(s) => Some(mcx::PgString::from_str_in(s.as_str(), mcx)?),
                     None => None,
                 },
             })),
-            other => Err(ereport(ERROR)
+            None => Err(ereport(ERROR)
                 .errmsg_internal(format!(
                     "CreateSchemaStmt.authrole is not a RoleSpec (got {:?})",
-                    other.tag()
+                    node.tag()
                 ))
                 .into_error()),
         },
