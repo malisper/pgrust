@@ -307,8 +307,17 @@ fn heapam_index_fetch_tuple<'mcx>(
         let mut tuple = res
             .heap_tuple
             .expect("heap_hot_search_buffer: found==true with no tuple");
-        // bslot->base.tupdata.t_self = *tid;
-        tuple.tuple.t_self = *tid;
+        // C does `bslot->base.tupdata.t_self = *tid`, resetting t_self to the
+        // index TID (the HOT-chain root). C can do that because catalog catcache
+        // entries are normally warmed with the resolved (live) TID by an earlier
+        // seqscan-based lookup, so a later CatalogTupleUpdate through the syscache
+        // still targets the live tuple rather than a persisting LP_REDIRECT root.
+        // We lack that warming, so keep the resolved TID found by
+        // heap_hot_search_buffer: t_self must name where the live tuple is, or an
+        // UPDATE through the syscache would hit an LP_REDIRECT root and fail with
+        // "tuple concurrently deleted". For a non-HOT row res.tid == *tid, so this
+        // only differs when the index entry points at a HOT-chain root.
+        tuple.tuple.t_self = res.tid;
         tuple.tuple.t_tableOid = rel.rd_id;
         slot.base_mut().tts_tableOid = rel.rd_id;
         slot_seam::exec_store_buffer_heap_tuple::call(tuple, slot, cbuf)?;
