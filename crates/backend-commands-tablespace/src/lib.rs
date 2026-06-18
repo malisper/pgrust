@@ -205,8 +205,8 @@ pub fn CreateTableSpace<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateTableSpaceStmt<'mcx>)
         Some(owner) => {
             // get_rolespec_oid(stmt->owner, false): the parser only ever fills
             // `owner` with a RoleSpec; any other node kind is a malformed tree.
-            match owner {
-                Node::RoleSpec(rs) => {
+            match owner.as_rolespec() {
+                Some(rs) => {
                     // The acl seam takes the analyze-side `parsenodes::RoleSpec`;
                     // the grammar DDL family carries `ddlnodes::RoleSpec` (same
                     // RoleSpecType + fields). Rebuild it field-for-field in `mcx`.
@@ -219,7 +219,7 @@ pub fn CreateTableSpace<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateTableSpaceStmt<'mcx>)
                     };
                     backend_utils_adt_acl_seams::get_rolespec_oid::call(&role, false)?
                 }
-                _ => {
+                None => {
                     return Err(ereport(ERROR)
                         .errmsg_internal("CreateTableSpace: owner is not a RoleSpec")
                         .into_error())
@@ -1439,9 +1439,9 @@ fn materialize_def_elems<'mcx>(
     out.try_reserve(options.len())
         .map_err(|_| out_of_memory("materialize_def_elems"))?;
     for node in options {
-        match &**node {
-            Node::DefElem(de) => out.push(de.clone_in(_mcx)?),
-            _ => {
+        match node.as_defelem() {
+            Some(de) => out.push(de.clone_in(_mcx)?),
+            None => {
                 return Err(ereport(ERROR)
                     .errmsg_internal("tablespace options list element is not a DefElem")
                     .into_error())
@@ -1856,7 +1856,7 @@ pub fn init_seams() {
 /// variant from the dispatch's `&Node` and forward (the created Oid is unused by
 /// the dispatch, exactly as in C).
 fn create_table_space_arm<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<()> {
-    let Node::CreateTableSpaceStmt(s) = stmt else {
+    let Some(s) = stmt.as_createtablespacestmt() else {
         panic!("create_table_space: parse tree is not a CreateTableSpaceStmt");
     };
     CreateTableSpace(mcx, s)?;
@@ -1865,7 +1865,7 @@ fn create_table_space_arm<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<(
 
 /// `case T_DropTableSpaceStmt: DropTableSpace(stmt)` (utility.c).
 fn drop_table_space_arm<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<()> {
-    let Node::DropTableSpaceStmt(s) = stmt else {
+    let Some(s) = stmt.as_droptablespacestmt() else {
         panic!("drop_table_space: parse tree is not a DropTableSpaceStmt");
     };
     DropTableSpace(mcx, s)
@@ -1873,7 +1873,7 @@ fn drop_table_space_arm<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<()>
 
 /// `case T_AlterTableSpaceOptionsStmt: AlterTableSpaceOptions(stmt)` (utility.c).
 fn alter_table_space_options_arm<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<()> {
-    let Node::AlterTableSpaceOptionsStmt(s) = stmt else {
+    let Some(s) = stmt.as_altertablespaceoptionsstmt() else {
         panic!("alter_table_space_options: parse tree is not an AlterTableSpaceOptionsStmt");
     };
     AlterTableSpaceOptions(mcx, s)?;
