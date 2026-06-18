@@ -136,7 +136,7 @@ pub fn find_expr_references_walker(
     context: &mut FindExprReferencesContext<'_>,
 ) -> PgResult<bool> {
     // Expr-leaf nodes (Var/Const/.../NextValueExpr) live under `Node::Expr`.
-    if let Node::Expr(expr) = node {
+    if let Some(expr) = node.as_expr() {
         return find_expr_references_expr(node, expr, context);
     }
 
