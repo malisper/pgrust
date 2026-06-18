@@ -24,6 +24,10 @@ types-typcache = { path = "../types-typcache" }
 
 # Inward seams this crate OWNS and installs from init_seams().
 backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
+# The `array-more` array<->element bridges (deconstruct_array_builtin /
+# construct_array_builtin over text[]/"char"[]/int2[]) that tsvector_op.c and
+# jsonb drive; arrayfuncs owns those primitives and so installs these seams.
+backend-utils-adt-array-more-seams = { path = "../backend-utils-adt-array-more-seams" }
 
 # GUC slots: `array_in` reads the live `Array_nulls` GUC value from its slot.
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }

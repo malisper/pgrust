@@ -17562,6 +17562,7 @@ name = "backend-utils-adt-arrayfuncs"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-detoast-seams",
+ "backend-utils-adt-array-more-seams",
  "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-adt-arrayutils-seams",
  "backend-utils-adt-format-type-seams",

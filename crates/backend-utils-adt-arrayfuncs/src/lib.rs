@@ -113,6 +113,18 @@ pub fn init_seams() {
     seams::int2vector_to_i16s_bytes::set(construct::int2vector_to_i16s_bytes);
     seams::text_array_to_strings_bytes::set(construct::text_array_to_strings_bytes);
 
+    // The `array-more` array<->element bridges driven by tsvector_op.c / jsonb:
+    // deconstruct_array_builtin / construct_array_builtin over text[]/"char"[]/
+    // int2[], reading/building the on-disk byte image directly. arrayfuncs owns
+    // those primitives, so it installs these cross-crate seams.
+    {
+        use backend_utils_adt_array_more_seams as more;
+        more::deconstruct_text_array::set(construct::deconstruct_text_array_elems);
+        more::deconstruct_char_array::set(construct::deconstruct_char_array_elems);
+        more::construct_text_array::set(construct::construct_text_array_bytes);
+        more::construct_int2_array::set(construct::construct_int2_array_bytes);
+    }
+
     // arraysubs.c — array subscripting exec callbacks.
     seams::array_subscript_fetch::set(arraysubs::array_subscript_fetch);
     seams::array_subscript_fetch_slice::set(arraysubs::array_subscript_fetch_slice);

@@ -108,29 +108,14 @@ pub const SPI_ERROR_NOATTRIBUTE: i32 = -9;
 
 // ===========================================================================
 // Array element I/O (utils/array.h) — the array<->tsvector bridges.
+//
+// The four `deconstruct_array_builtin` / `construct_array_builtin` bridges
+// (`deconstruct_text_array` / `deconstruct_char_array` / `construct_text_array`
+// / `construct_int2_array`) are homed on the `backend-utils-adt-array-more`
+// seams crate (the array varlena subsystem, `arrayfuncs.c`, which owns those
+// primitives and now installs them); the `tsvector_op.c` consumer calls them
+// through that crate. Only the shared [`ArrayElem`] carrier lives here.
 // ===========================================================================
-
-seam_core::seam!(
-    /// `deconstruct_array_builtin(arr, TEXTOID, ...)` — explode a 1-D text
-    /// array datum into its elements (with NULL flags).
-    pub fn deconstruct_text_array(arr: &[u8]) -> PgResult<Vec<ArrayElem>>
-);
-
-seam_core::seam!(
-    /// `deconstruct_array_builtin(arr, CHAROID, ...)` — explode a 1-D `"char"`
-    /// array datum into its elements (each a single byte, with NULL flags).
-    pub fn deconstruct_char_array(arr: &[u8]) -> PgResult<Vec<ArrayElem>>
-);
-
-seam_core::seam!(
-    /// `construct_array_builtin(elems, n, TEXTOID)` — build a `text[]` datum.
-    pub fn construct_text_array(elems: &[Vec<u8>]) -> PgResult<Vec<u8>>
-);
-
-seam_core::seam!(
-    /// `construct_array_builtin(elems, n, INT2OID)` — build an `int2[]` datum.
-    pub fn construct_int2_array(elems: &[i16]) -> PgResult<Vec<u8>>
-);
 
 // ===========================================================================
 // funcapi.h — set-returning-function row emission.

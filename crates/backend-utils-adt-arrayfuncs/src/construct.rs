@@ -7,6 +7,8 @@
 //! source of the functions [`crate::init_seams`] installs. The public function
 //! signatures below match those seam signatures exactly.
 
+extern crate alloc;
+
 use mcx::{Mcx, PgString, PgVec};
 use types_array::{ArrayType, ARRAYTYPE_HDRSZ, MAXDIM};
 use types_core::Oid;
@@ -2615,6 +2617,225 @@ fn text_element_to_pgstring<'mcx>(
     let mut s = PgString::new_in(mcx);
     s.try_push_str(text)?;
     Ok(s)
+}
+
+// ---------------------------------------------------------------------------
+// tsvector_op.c array<->element bridges (the `backend-utils-adt-array-more`
+// seams). These read/build the on-disk array byte image directly — no global
+// address space and no per-element Datum pointer round-trip — so they are the
+// faithful owner-side bodies for the `text[]` / `"char"[]` / `int2[]` bridges
+// that `tsvector_op.c` (and `jsonb`) drive through `deconstruct_array_builtin`
+// / `construct_array_builtin`.
+// ---------------------------------------------------------------------------
+
+use backend_utils_adt_array_more_seams::ArrayElem;
+
+/// Seam `deconstruct_text_array` — `deconstruct_array_builtin(arr, TEXTOID,
+/// &dlexemes, &nulls, &nlexemes)` (tsvector_op.c:315). Explode the on-disk
+/// `text[]` byte image into per-element `{ VARDATA(dlexemes[i]) for
+/// VARSIZE(dlexemes[i]) - VARHDRSZ bytes, nulls[i] }`. The element bytes are the
+/// raw `text` payload (no varlena header, may contain embedded NULs — `text` is
+/// not NUL-terminated), captured as an owned `Vec<u8>` so no `mcx` lifetime
+/// escapes. NULL elements carry an empty `value` with `is_null == true`.
+pub fn deconstruct_text_array_elems(arr: &[u8]) -> PgResult<alloc::vec::Vec<ArrayElem>> {
+    // The seam returns fully-owned data; run the element walk in a private
+    // transient context (the C `deconstruct_array_builtin` palloc'd workspace),
+    // copying each element's payload out before the context drops.
+    let cx = mcx::MemoryContext::new("tsvector deconstruct_text_array");
+    let mcx = cx.mcx();
+
+    // DatumGetArrayTypeP(arr) — detoast the array varlena image.
+    let array = detoast_seam::detoast_attr::call(mcx, arr)?;
+
+    let ndim = foundation::arr_ndim(&array);
+    let dims = foundation::arr_dims(mcx, &array)?;
+    let nelems = arrayutils_seam::array_get_n_items::call(ndim, &dims)?;
+
+    let mut out: alloc::vec::Vec<ArrayElem> = alloc::vec::Vec::with_capacity(nelems as usize);
+
+    // p = ARR_DATA_PTR(array); bitmap = ARR_NULLBITMAP(array); bitmask = 1;
+    // (TEXT: typlen == -1, typbyval == false, typalign == 'i'.)
+    let mut p = foundation::arr_data_ptr_off(&array);
+    let bitmap = foundation::arr_nullbitmap_off(&array);
+    let mut bitmap_byte = bitmap;
+    let mut bitmask: i32 = 1;
+
+    for _ in 0..nelems {
+        let is_null_here = match bitmap_byte {
+            Some(b) => (array[b] as i32 & bitmask) == 0,
+            None => false,
+        };
+        if is_null_here {
+            out.push(ArrayElem { value: alloc::vec::Vec::new(), is_null: true });
+        } else {
+            // lex = VARDATA(dlexemes[i]); lex_len = VARSIZE(dlexemes[i]) - VARHDRSZ.
+            // The element is an inline text varlena at `array[p..]` (natural
+            // short / 4-byte header, never externally toasted in array data).
+            let (data_off, data_len) = text_element_payload_span(&array, p)?;
+            let payload = array.get(data_off..data_off + data_len).ok_or_else(|| {
+                PgError::error("malformed array (truncated element data)")
+                    .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR)
+            })?;
+            out.push(ArrayElem { value: payload.to_vec(), is_null: false });
+            // p = att_addlength_pointer(p, -1, p); p = att_align_nominal(p, 'i').
+            p = foundation::att_addlength_pointer(p, -1, &array, p);
+            p = foundation::att_align_nominal(p, TYPALIGN_INT);
+        }
+
+        if let Some(b) = bitmap_byte.as_mut() {
+            bitmask <<= 1;
+            if bitmask == 0x100 {
+                *b += 1;
+                bitmask = 1;
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Seam `deconstruct_char_array` — `deconstruct_array_builtin(weights, CHAROID,
+/// &dweights, &nulls, &nweights)` (tsvector_op.c:836). Explode the on-disk
+/// `"char"[]` byte image into per-element `{ DatumGetChar(dweights[i]) as one
+/// byte, nulls[i] }`. `"char"` is a 1-byte pass-by-value type (typlen == 1,
+/// typbyval == true, typalign == 'c'), so each non-null element is exactly one
+/// data byte. NULL elements carry an empty `value` with `is_null == true`.
+pub fn deconstruct_char_array_elems(arr: &[u8]) -> PgResult<alloc::vec::Vec<ArrayElem>> {
+    let cx = mcx::MemoryContext::new("tsvector deconstruct_char_array");
+    let mcx = cx.mcx();
+
+    // DatumGetArrayTypeP(weights) — detoast the array varlena image.
+    let array = detoast_seam::detoast_attr::call(mcx, arr)?;
+
+    let ndim = foundation::arr_ndim(&array);
+    let dims = foundation::arr_dims(mcx, &array)?;
+    let nelems = arrayutils_seam::array_get_n_items::call(ndim, &dims)?;
+
+    let mut out: alloc::vec::Vec<ArrayElem> = alloc::vec::Vec::with_capacity(nelems as usize);
+
+    // p = ARR_DATA_PTR(array); bitmap = ARR_NULLBITMAP(array); bitmask = 1.
+    let mut p = foundation::arr_data_ptr_off(&array);
+    let bitmap = foundation::arr_nullbitmap_off(&array);
+    let mut bitmap_byte = bitmap;
+    let mut bitmask: i32 = 1;
+
+    for _ in 0..nelems {
+        let is_null_here = match bitmap_byte {
+            Some(b) => (array[b] as i32 & bitmask) == 0,
+            None => false,
+        };
+        if is_null_here {
+            out.push(ArrayElem { value: alloc::vec::Vec::new(), is_null: true });
+        } else {
+            // fetch_att(p, true, 1) — a single by-value `"char"` byte.
+            let b = *array.get(p).ok_or_else(|| {
+                PgError::error("malformed array (truncated element data)")
+                    .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR)
+            })?;
+            out.push(ArrayElem { value: alloc::vec![b], is_null: false });
+            // p = att_addlength_pointer(p, 1, p); p = att_align_nominal(p, 'c').
+            p = foundation::att_addlength_pointer(p, 1, &array, p);
+            p = foundation::att_align_nominal(p, TYPALIGN_CHAR);
+        }
+
+        if let Some(b) = bitmap_byte.as_mut() {
+            bitmask <<= 1;
+            if bitmask == 0x100 {
+                *b += 1;
+                bitmask = 1;
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Seam `construct_text_array` — `construct_array_builtin(elements, n, TEXTOID)`
+/// (tsvector_op.c:736, where each `elements[i]` is
+/// `cstring_to_text_with_len(...)`). Build a 1-D, no-NULL `text[]` byte image
+/// from the per-element raw text payload bytes. Returns the owned array varlena
+/// image bytes (the C result of `PointerGetDatum(construct_array_builtin(...))`,
+/// captured by value).
+pub fn construct_text_array_bytes(elems: &[alloc::vec::Vec<u8>]) -> PgResult<alloc::vec::Vec<u8>> {
+    use types_tuple::backend_access_common_heaptuple::Datum as TDatum;
+
+    let cx = mcx::MemoryContext::new("tsvector construct_text_array");
+    let mcx = cx.mcx();
+
+    // Each element is cstring_to_text_with_len(bytes, len): a text varlena
+    // (4-byte natural header + payload) carried as a ByRef value.
+    let mut values: alloc::vec::Vec<TDatum> = alloc::vec::Vec::with_capacity(elems.len());
+    for e in elems {
+        values.push(TDatum::ByRef(text_varlena_pgvec(mcx, e)?));
+    }
+    let nulls = alloc::vec![false; elems.len()];
+
+    // construct_array_builtin(elements, n, TEXTOID): 1-D, no multidims.
+    let (elmlen, elmbyval, elmalign) = construct_builtin_meta(foundation::TEXTOID)?;
+    let buf = construct_array_expr(
+        mcx,
+        &values,
+        &nulls,
+        foundation::TEXTOID,
+        elmlen as i16,
+        elmbyval,
+        elmalign,
+        false,
+    )?;
+    Ok(buf.as_slice().to_vec())
+}
+
+/// Seam `construct_int2_array` — `construct_array_builtin(positions, npos,
+/// INT2OID)` (tsvector_op.c:699). Build a 1-D, no-NULL `int2[]` byte image from
+/// the per-element `int16` values. Returns the owned array varlena image bytes.
+pub fn construct_int2_array_bytes(elems: &[i16]) -> PgResult<alloc::vec::Vec<u8>> {
+    use types_tuple::backend_access_common_heaptuple::Datum as TDatum;
+
+    let cx = mcx::MemoryContext::new("tsvector construct_int2_array");
+    let mcx = cx.mcx();
+
+    // INT2OID is 2-byte pass-by-value: each element's scalar word is the i16,
+    // matching `Int16GetDatum`.
+    let values: alloc::vec::Vec<TDatum> =
+        elems.iter().map(|&v| TDatum::ByVal((v as u16) as usize)).collect();
+    let nulls = alloc::vec![false; elems.len()];
+
+    let (elmlen, elmbyval, elmalign) = construct_builtin_meta(foundation::INT2OID)?;
+    let buf = construct_array_expr(
+        mcx,
+        &values,
+        &nulls,
+        foundation::INT2OID,
+        elmlen as i16,
+        elmbyval,
+        elmalign,
+        false,
+    )?;
+    Ok(buf.as_slice().to_vec())
+}
+
+/// `VARDATA_ANY` / `VARSIZE_ANY_EXHDR` over an inline `text` element at offset
+/// `off`: return its `(payload_offset, payload_len)` span (the natural short /
+/// 4-byte header form; array text elements are never externally toasted).
+fn text_element_payload_span(arr: &[u8], off: usize) -> PgResult<(usize, usize)> {
+    if foundation::varatt_is_1b(arr, off) {
+        const VARHDRSZ_SHORT: usize = 1;
+        Ok((off + VARHDRSZ_SHORT, foundation::varsize_1b(arr, off) - VARHDRSZ_SHORT))
+    } else {
+        use types_datum::varlena::VARHDRSZ;
+        Ok((off + VARHDRSZ, foundation::varsize_4b(arr, off) - VARHDRSZ))
+    }
+}
+
+/// `cstring_to_text_with_len(bytes, len)` — build a natural (4-byte header)
+/// text varlena image in `mcx` from raw payload bytes (may contain embedded
+/// NULs), returned as the ByRef payload `PgVec`.
+fn text_varlena_pgvec<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+    use types_datum::varlena::VARHDRSZ;
+    let total = VARHDRSZ + bytes.len();
+    let mut buf = mcx::vec_with_capacity_in::<u8>(mcx, total)?;
+    buf.resize(total, 0);
+    foundation::set_varsize(&mut buf, total);
+    buf[VARHDRSZ..].copy_from_slice(bytes);
+    Ok(buf)
 }
 
 // ---------------------------------------------------------------------------
