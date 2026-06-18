@@ -18,6 +18,10 @@ types-pathnodes = { path = "../types-pathnodes" }
 types-tuple = { path = "../types-tuple" }
 types-parsenodes = { path = "../types-parsenodes" }
 backend-nodes-core = { path = "../backend-nodes-core" }
+# Bipartite matching (extract_rollup_sets) + discrete knapsack
+# (consider_groupingsets_paths) for GROUPING SETS.
+backend-lib-bipartite-match = { path = "../backend-lib-bipartite-match" }
+backend-lib-knapsack = { path = "../backend-lib-knapsack" }
 # equal() over PathTarget expr handles (scanjoin_target_same_exprs test).
 backend-nodes-equalfuncs-seams = { path = "../backend-nodes-equalfuncs-seams" }
 # This unit's own inward seams (pg_plan_query / plan_cluster_use_sort).

@@ -2016,16 +2016,12 @@ fn grouping_planner<'mcx>(
     debug_assert!(!root.hasRecursion);
 
     // Preprocess grouping sets / GROUP BY (C:1549-1558).
+    let mut gset_data: Option<GroupingSetsData<'mcx>> = None;
     {
         let has_grouping_sets = !run.resolve(root.parse).groupingSets.is_empty();
         let has_group_clause = !run.resolve(root.parse).groupClause.is_empty();
         if has_grouping_sets {
-            // preprocess_grouping_sets(root) — needs expand_grouping_sets /
-            // remap_to_groupclause_idx machinery (no ported owner).
-            panic!(
-                "grouping_planner: preprocess_grouping_sets (planner.c:2900+) for \
-                 GROUPING SETS has no ported owner"
-            );
+            gset_data = Some(preprocess_grouping_sets(mcx, run, root)?);
         } else if has_group_clause {
             root.processed_groupClause = preprocess_groupclause(run, root, &[])?;
         }
@@ -2210,8 +2206,24 @@ fn grouping_planner<'mcx>(
     };
     // We consider only the first (bottom) window in pathkeys logic (C:3545).
     let first_active_window = active_windows.first().copied();
+    // With grouping sets, standard_qp_callback uses the first RollupData's
+    // groupClause for group_pathkeys (C:3464-3500). The qp_callback closure can't
+    // reach `gset_data`, so capture the (already-arena) handle list here. `None`
+    // means "no grouping sets" (take the plain processed_groupClause branch).
+    let gset_group_clause: Option<Vec<types_pathnodes::NodeId>> = gset_data.as_ref().map(|gd| {
+        gd.rollups
+            .first()
+            .map(|r| r.groupClause.clone())
+            .unwrap_or_default()
+    });
     let mut qp_callback = move |root: &mut PlannerInfo| -> PgResult<()> {
-        standard_qp_callback(root, &sort_clause_ids, &distinct_clause_ids, first_active_window)
+        standard_qp_callback(
+            root,
+            &sort_clause_ids,
+            &distinct_clause_ids,
+            first_active_window,
+            gset_group_clause.as_deref(),
+        )
     };
     let mut current_rel =
         backend_optimizer_plan_small::query_planner(mcx, run, root, &mut qp_callback)?;
@@ -2350,6 +2362,7 @@ fn grouping_planner<'mcx>(
             current_rel,
             grouping_target.clone(),
             grouping_target_parallel_safe,
+            gset_data.as_mut(),
         )?;
         // adjust_paths_for_srfs when grouping_target contains SRFs (C:1804-1808)
         // is gated out: hasTargetSRFs loud-panics above before this point.
@@ -3689,6 +3702,458 @@ fn sortgrouplist_exprs_arena(
 }
 
 // ===========================================================================
+// GROUPING SETS preprocessing (planner.c:2181) — preprocess_grouping_sets,
+// extract_rollup_sets, reorder_grouping_sets, remap_to_groupclause_idx.
+// ===========================================================================
+
+use backend_nodes_core::bitmapset as bms;
+use types_nodes::bitmapset::Bitmapset;
+use mcx::PgBox;
+use types_pathnodes::{GroupingSetData, RollupData};
+
+/// `grouping_sets_data` (planner.c:99) — data specific to grouping sets, carried
+/// through grouping-path generation. `tleref_to_colnum_map` is the scratch array
+/// `remap_to_groupclause_idx` rewrites on each call; `unsortable_refs` /
+/// `unhashable_refs` are sortgroupref bitmapsets.
+struct GroupingSetsData<'mcx> {
+    rollups: Vec<RollupData>,
+    hash_sets_idx: Vec<Vec<i32>>,
+    #[allow(non_snake_case)]
+    dNumHashGroups: f64,
+    any_hashable: bool,
+    unsortable_refs: Option<PgBox<'mcx, Bitmapset<'mcx>>>,
+    unhashable_refs: Option<PgBox<'mcx, Bitmapset<'mcx>>>,
+    unsortable_sets: Vec<GroupingSetData>,
+    tleref_to_colnum_map: Vec<i32>,
+}
+
+/// `remap_to_groupclause_idx(groupClause, gsets, tleref_to_colnum_map)`
+/// (planner.c:2362). Given a groupClause (arena SortGroupClause handles) and a
+/// list of GroupingSetData, return equivalent sets mapped to 0-based indexes
+/// into the groupClause. The scratch `tleref_to_colnum_map` is rewritten here.
+fn remap_to_groupclause_idx(
+    root: &PlannerInfo,
+    group_clause: &[types_pathnodes::NodeId],
+    gsets: &[GroupingSetData],
+    tleref_to_colnum_map: &mut [i32],
+) -> Vec<Vec<i32>> {
+    let mut refn: i32 = 0;
+    for &gid in group_clause {
+        let sgr = root.sortgroupclause(gid).tleSortGroupRef as usize;
+        tleref_to_colnum_map[sgr] = refn;
+        refn += 1;
+    }
+
+    let mut result: Vec<Vec<i32>> = Vec::with_capacity(gsets.len());
+    for gs in gsets {
+        let mut set: Vec<i32> = Vec::with_capacity(gs.set.len());
+        for &gref in &gs.set {
+            set.push(tleref_to_colnum_map[gref as usize]);
+        }
+        result.push(set);
+    }
+    result
+}
+
+/// `reorder_grouping_sets(groupingSets, sortclause)` (planner.c:3136). Reorder
+/// the elements of a list of grouping sets so they have correct prefix
+/// relationships, inserting the GroupingSetData annotations. Input ordered with
+/// smallest sets first; result returned with largest sets first. The result
+/// shares no list substructure with the input. `sortclause` is a slice of
+/// SortGroupClause values (parse->sortClause) used to follow column order where
+/// possible.
+fn reorder_grouping_sets(
+    grouping_sets: &[Vec<i32>],
+    sortclause: &[types_nodes::rawnodes::SortGroupClause],
+) -> Vec<GroupingSetData> {
+    let mut previous: Vec<i32> = Vec::new();
+    let mut result: Vec<GroupingSetData> = Vec::new();
+    // The sortclause is "given up on" (treated as NIL) once we diverge.
+    let mut sortclause_len = sortclause.len();
+
+    for candidate in grouping_sets {
+        // new_elems = list_difference_int(candidate, previous).
+        let mut new_elems: Vec<i32> = candidate
+            .iter()
+            .copied()
+            .filter(|e| !previous.contains(e))
+            .collect();
+
+        while sortclause_len > previous.len() && !new_elems.is_empty() {
+            let sc = &sortclause[previous.len()];
+            let r = sc.tleSortGroupRef as i32;
+
+            if let Some(pos) = new_elems.iter().position(|&e| e == r) {
+                previous.push(r);
+                new_elems.remove(pos);
+            } else {
+                // diverged from the sortclause; give up on it.
+                sortclause_len = 0;
+                break;
+            }
+        }
+
+        previous.extend_from_slice(&new_elems);
+
+        let gs = GroupingSetData {
+            set: previous.iter().map(|&i| i as types_core::Index).collect(),
+            numGroups: 0.0,
+        };
+        // lcons(gs, result) — prepend.
+        result.insert(0, gs);
+    }
+
+    result
+}
+
+/// `extract_rollup_sets(groupingSets)` (planner.c:2924). Extract lists of
+/// grouping sets that can each be implemented using a single rollup-type
+/// aggregate pass. Returns a list of lists of grouping sets. Input must be
+/// sorted with smallest sets first; each result sublist is sorted likewise.
+///
+/// Uses bipartite matching to find the minimal partition of the grouping-set
+/// poset (ordered by set inclusion) into chains.
+fn extract_rollup_sets<'mcx>(
+    mcx: Mcx<'mcx>,
+    grouping_sets: &[Vec<i32>],
+) -> PgResult<Vec<Vec<Vec<i32>>>> {
+    let num_sets_raw = grouping_sets.len();
+    let mut num_empty = 0usize;
+
+    // Strip out leading empty sets (the planner needs them all in the first
+    // list; they are added back after).
+    let mut lc1 = 0usize;
+    while lc1 < grouping_sets.len() && grouping_sets[lc1].is_empty() {
+        num_empty += 1;
+        lc1 += 1;
+    }
+
+    // Bail out now if all we had were empty sets.
+    if lc1 >= grouping_sets.len() {
+        return Ok(alloc::vec![grouping_sets.to_vec()]);
+    }
+
+    // orig_sets[i], set_masks[i], adjacency[i] are 1-indexed (0 left free for
+    // the NIL node in the graph algorithm).
+    let mut orig_sets: Vec<Vec<Vec<i32>>> = (0..=num_sets_raw).map(|_| Vec::new()).collect();
+    let mut set_masks: Vec<Option<PgBox<Bitmapset>>> =
+        (0..=num_sets_raw).map(|_| None).collect();
+    let mut adjacency: Vec<Vec<i16>> = (0..=num_sets_raw).map(|_| Vec::new()).collect();
+    let mut adjacency_buf: Vec<i16> = alloc::vec![0i16; num_sets_raw + 1];
+
+    let mut j_size: usize = 0;
+    let mut j: usize = 0;
+    let mut i: usize = 1;
+
+    for candidate in &grouping_sets[lc1..] {
+        // candidate_set = bms of candidate's members.
+        let mut candidate_set: Option<PgBox<Bitmapset>> = None;
+        for &m in candidate {
+            candidate_set = Some(bms::bms_add_member(mcx, candidate_set, m)?);
+        }
+
+        let mut dup_of: usize = 0;
+        // we can only be a dup if we're the same length as a previous set.
+        if j_size == candidate.len() {
+            for k in j..i {
+                if bms::bms_equal(
+                    set_masks[k].as_deref(),
+                    candidate_set.as_deref(),
+                ) {
+                    dup_of = k;
+                    break;
+                }
+            }
+        } else if j_size < candidate.len() {
+            j_size = candidate.len();
+            j = i;
+        }
+
+        if dup_of > 0 {
+            orig_sets[dup_of].push(candidate.clone());
+            // bms_free(candidate_set) — drop.
+        } else {
+            let mut n_adj: usize = 0;
+            orig_sets[i].push(candidate.clone());
+
+            // fill in adjacency list; no need to compare equal-size sets.
+            let mut k = j;
+            while k > 1 {
+                k -= 1;
+                if bms::bms_is_subset(set_masks[k].as_deref(), candidate_set.as_deref()) {
+                    n_adj += 1;
+                    adjacency_buf[n_adj] = k as i16;
+                }
+            }
+
+            set_masks[i] = candidate_set;
+
+            if n_adj > 0 {
+                adjacency_buf[0] = n_adj as i16;
+                adjacency[i] = adjacency_buf[0..=n_adj].to_vec();
+            } else {
+                adjacency[i] = Vec::new();
+            }
+
+            i += 1;
+        }
+    }
+
+    let num_sets = i - 1;
+
+    // Apply the graph matching algorithm.
+    let adj_slices: Vec<&[i16]> = adjacency.iter().map(|v| v.as_slice()).collect();
+    let state = backend_lib_bipartite_match::BipartiteMatch(
+        num_sets as i32,
+        num_sets as i32,
+        &adj_slices,
+    )?;
+
+    // Assign sets to chains. Two sets (u,v) belong to the same chain if
+    // pair_uv[u] = v or pair_vu[v] = u.
+    let mut chains: Vec<i32> = alloc::vec![0i32; num_sets + 1];
+    let mut num_chains: i32 = 0;
+    for idx in 1..=num_sets {
+        let u = state.pair_vu[idx] as i32;
+        let v = state.pair_uv[idx] as i32;
+
+        if u > 0 && (u as usize) < idx {
+            chains[idx] = chains[u as usize];
+        } else if v > 0 && (v as usize) < idx {
+            chains[idx] = chains[v as usize];
+        } else {
+            num_chains += 1;
+            chains[idx] = num_chains;
+        }
+    }
+
+    // build result lists.
+    let mut results: Vec<Vec<Vec<i32>>> = (0..=num_chains as usize).map(|_| Vec::new()).collect();
+    for idx in 1..=num_sets {
+        let c = chains[idx] as usize;
+        debug_assert!(c > 0);
+        let taken = core::mem::take(&mut orig_sets[idx]);
+        results[c].extend(taken);
+    }
+
+    // push any empty sets back on the first list.
+    let mut ne = num_empty;
+    while ne > 0 {
+        ne -= 1;
+        results[1].insert(0, Vec::new());
+    }
+
+    // make result list.
+    let mut result: Vec<Vec<Vec<i32>>> = Vec::with_capacity(num_chains as usize);
+    for idx in 1..=num_chains as usize {
+        result.push(core::mem::take(&mut results[idx]));
+    }
+
+    backend_lib_bipartite_match::BipartiteMatchFree(state);
+
+    Ok(result)
+}
+
+/// `preprocess_grouping_sets(root)` (planner.c:2181). Build the
+/// `grouping_sets_data` from `parse->groupingSets` (already expanded into a list
+/// of `T_IntList` sortgroupref sets by subquery_planner). Also duplicates
+/// `parse->groupClause` into `root->processed_groupClause`.
+fn preprocess_grouping_sets<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &mut PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+) -> PgResult<GroupingSetsData<'mcx>> {
+    // We don't optimize the groupClause with grouping sets; just duplicate it
+    // into processed_groupClause (C:2191). Intern parse->groupClause to stable
+    // arena handles, mirroring preprocess_groupclause's identity contract.
+    let processed_group_clause: Vec<types_pathnodes::NodeId> = {
+        let group_clauses: Vec<types_nodes::rawnodes::SortGroupClause> = run
+            .resolve(root.parse)
+            .groupClause
+            .iter()
+            .map(|np| sortgroupclause_from_node(np))
+            .collect::<PgResult<Vec<_>>>()?;
+        group_clauses
+            .into_iter()
+            .map(|sgc| root.alloc_sortgroupclause(sgc))
+            .collect()
+    };
+    root.processed_groupClause = processed_group_clause.clone();
+
+    let mut any_hashable = false;
+    let mut unhashable_refs: Option<PgBox<Bitmapset>> = None;
+    let mut unsortable_refs: Option<PgBox<Bitmapset>> = None;
+    let mut unsortable_sets: Vec<GroupingSetData> = Vec::new();
+
+    // Detect unhashable and unsortable grouping expressions (C:2211).
+    let mut maxref: i32 = 0;
+    {
+        let group_clauses: Vec<types_nodes::rawnodes::SortGroupClause> = run
+            .resolve(root.parse)
+            .groupClause
+            .iter()
+            .map(|np| sortgroupclause_from_node(np))
+            .collect::<PgResult<Vec<_>>>()?;
+        for gc in &group_clauses {
+            let refn = gc.tleSortGroupRef as i32;
+            if refn > maxref {
+                maxref = refn;
+            }
+            if !gc.hashable {
+                unhashable_refs = Some(bms::bms_add_member(mcx, unhashable_refs, refn)?);
+            }
+            if gc.sortop == 0 {
+                unsortable_refs = Some(bms::bms_add_member(mcx, unsortable_refs, refn)?);
+            }
+        }
+    }
+
+    // Allocate workspace array for remapping (C:2222).
+    let mut tleref_to_colnum_map: Vec<i32> = alloc::vec![0i32; (maxref + 1) as usize];
+
+    // Read the expanded grouping sets (each a T_IntList of sortgrouprefs).
+    let grouping_sets: Vec<Vec<i32>> = {
+        let parse = run.resolve(root.parse);
+        let mut out: Vec<Vec<i32>> = Vec::with_capacity(parse.groupingSets.len());
+        for np in parse.groupingSets.iter() {
+            match np.as_ref() {
+                Node::IntList(l) => out.push(l.iter().copied().collect()),
+                other => {
+                    return Err(PgError::error(alloc::format!(
+                        "preprocess_grouping_sets: groupingSets element is not a T_IntList (tag {:?})",
+                        other.node_tag()
+                    )));
+                }
+            }
+        }
+        out
+    };
+
+    // If we have any unsortable sets, extract them before preparing rollups.
+    // Unsortable sets don't go through reorder_grouping_sets, so the
+    // GroupingSetData annotation is applied here (C:2231).
+    let sets: Vec<Vec<Vec<i32>>>;
+    if !bms::bms_is_empty(unsortable_refs.as_deref()) {
+        let mut sortable_sets: Vec<Vec<i32>> = Vec::new();
+        for gset in &grouping_sets {
+            if bms::bms_overlap_list(unsortable_refs.as_deref(), gset) {
+                let gs = GroupingSetData {
+                    set: gset.iter().map(|&i| i as types_core::Index).collect(),
+                    numGroups: 0.0,
+                };
+                unsortable_sets.push(gs);
+
+                // An unsortable set must be hashable; later code assumes this.
+                if bms::bms_overlap_list(unhashable_refs.as_deref(), gset) {
+                    return Err(PgError::error(
+                        "could not implement GROUP BY: some of the datatypes only \
+                         support hashing, while others only support sorting",
+                    ));
+                }
+            } else {
+                sortable_sets.push(gset.clone());
+            }
+        }
+
+        sets = if !sortable_sets.is_empty() {
+            extract_rollup_sets(mcx, &sortable_sets)?
+        } else {
+            Vec::new()
+        };
+    } else {
+        sets = extract_rollup_sets(mcx, &grouping_sets)?;
+    }
+
+    // parse->sortClause as SortGroupClause values, for reorder_grouping_sets.
+    let sort_clause_vals: Vec<types_nodes::rawnodes::SortGroupClause> = run
+        .resolve(root.parse)
+        .sortClause
+        .iter()
+        .map(|np| sortgroupclause_from_node(np))
+        .collect::<PgResult<Vec<_>>>()?;
+
+    let mut rollups: Vec<RollupData> = Vec::new();
+    let sets_len = sets.len();
+    for current_sets_raw in sets {
+        // Reorder the current list of grouping sets into correct prefix order.
+        // If only one aggregation pass is needed, try to match the ORDER BY
+        // clause; otherwise don't bother. This reorders from smallest-first to
+        // largest-first and applies GroupingSetData annotations (C:2289).
+        let sortclause: &[types_nodes::rawnodes::SortGroupClause] = if sets_len == 1 {
+            &sort_clause_vals
+        } else {
+            &[]
+        };
+        let current_sets = reorder_grouping_sets(&current_sets_raw, sortclause);
+
+        // Get the initial (largest) grouping set (C:2298).
+        let gs0_set: Vec<types_core::Index> = current_sets[0].set.clone();
+
+        // Order the groupClause appropriately. If the first grouping set is
+        // empty, the groupClause is empty too; otherwise force it to match the
+        // grouping set's order (C:2308).
+        let group_clause: Vec<types_pathnodes::NodeId> = if !gs0_set.is_empty() {
+            preprocess_groupclause(run, root, &gs0_set)?
+        } else {
+            Vec::new()
+        };
+
+        // Hashable? Pretend empty sets are hashable (forced not-hashed later),
+        // but not if there's nothing but empty sets (C:2322).
+        let hashable = !gs0_set.is_empty()
+            && !bms::bms_overlap_list(
+                unhashable_refs.as_deref(),
+                &gs0_set.iter().map(|&i| i as i32).collect::<Vec<_>>(),
+            );
+        if hashable {
+            any_hashable = true;
+        }
+
+        // Remap the grouping sets from sortgrouprefs to plain groupClause
+        // indices (C:2333).
+        let gsets = remap_to_groupclause_idx(
+            root,
+            &group_clause,
+            &current_sets,
+            &mut tleref_to_colnum_map,
+        );
+
+        rollups.push(RollupData {
+            groupClause: group_clause,
+            gsets,
+            gsets_data: current_sets,
+            numGroups: 0.0,
+            hashable,
+            is_hashed: false,
+        });
+    }
+
+    // If we have unsortable sets, build index-based hash_sets_idx based on the
+    // entire original groupClause for estimation (C:2344).
+    let mut hash_sets_idx: Vec<Vec<i32>> = Vec::new();
+    if !unsortable_sets.is_empty() {
+        hash_sets_idx = remap_to_groupclause_idx(
+            root,
+            &processed_group_clause,
+            &unsortable_sets,
+            &mut tleref_to_colnum_map,
+        );
+        any_hashable = true;
+    }
+
+    Ok(GroupingSetsData {
+        rollups,
+        hash_sets_idx,
+        dNumHashGroups: 0.0,
+        any_hashable,
+        unsortable_refs,
+        unhashable_refs,
+        unsortable_sets,
+        tleref_to_colnum_map,
+    })
+}
+
+// ===========================================================================
 // create_grouping_paths + helpers (planner.c:3779)
 // ===========================================================================
 
@@ -3700,39 +4165,100 @@ fn get_number_of_groups<'mcx>(
     run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     path_rows: f64,
+    gd: Option<&mut GroupingSetsData<'mcx>>,
 ) -> PgResult<f64> {
-    let parse = run.resolve(root.parse);
-    let has_group_clause = !parse.groupClause.is_empty();
-    let has_grouping_sets = !parse.groupingSets.is_empty();
-    let has_aggs = parse.hasAggs;
-    if has_group_clause {
-        // Plain GROUP BY — estimate based on the optimized groupClause (C:3735).
-        // groupExprs = get_sortgrouplist_exprs(root->processed_groupClause,
-        // target_list); dNumGroups = estimate_num_groups(root, groupExprs,
-        // path_rows, NULL, NULL). The grouping-sets leg is gated out upstream.
-        debug_assert!(!has_grouping_sets);
-        // groupExprs = get_sortgrouplist_exprs(processed_groupClause, target_list).
-        // get_number_of_groups is passed `extra->targetList` (the grouping rel's
-        // target); the SortGroupClause tleSortGroupRefs resolve against
-        // processed_tlist, which the grouped target derives from.
-        let group_clause = root.processed_groupClause.clone();
-        let tlist = root.processed_tlist.clone();
-        let group_exprs: Vec<types_pathnodes::NodeId> = group_clause
-            .iter()
-            .map(|&sgc| {
-                backend_nodes_nodeFuncs_seams::get_sortgroupclause_expr::call(root, sgc, &tlist)
-            })
-            .collect();
-        backend_utils_adt_selfuncs_seams::estimate_num_groups::call(
-            run,
-            root,
-            &group_exprs,
-            path_rows,
-            None,
+    let (has_group_clause, has_grouping_sets, has_aggs, num_grouping_sets) = {
+        let parse = run.resolve(root.parse);
+        (
+            !parse.groupClause.is_empty(),
+            !parse.groupingSets.is_empty(),
+            parse.hasAggs,
+            parse.groupingSets.len(),
         )
+    };
+    let tlist = root.processed_tlist.clone();
+
+    if has_group_clause {
+        if has_grouping_sets {
+            // GROUPING SETS — add up the estimates for each grouping set (C:3670).
+            let gd = gd.expect("get_number_of_groups: grouping sets without GroupingSetsData");
+            let mut d_num_groups = 0.0;
+
+            for rollup in gd.rollups.iter_mut() {
+                // groupExprs = get_sortgrouplist_exprs(rollup->groupClause, tlist).
+                let group_exprs: Vec<types_pathnodes::NodeId> = rollup
+                    .groupClause
+                    .iter()
+                    .map(|&sgc| {
+                        backend_nodes_nodeFuncs_seams::get_sortgroupclause_expr::call(
+                            root, sgc, &tlist,
+                        )
+                    })
+                    .collect();
+
+                rollup.numGroups = 0.0;
+                for (gset, gs) in rollup.gsets.iter().zip(rollup.gsets_data.iter_mut()) {
+                    // estimate_num_groups(root, groupExprs, path_rows, &gset, NULL):
+                    // the pgset selects, by 0-based index, which groupExprs are in
+                    // this grouping set. Build that restricted sublist and estimate
+                    // over it (an empty sublist yields exactly one group).
+                    let restricted: Vec<types_pathnodes::NodeId> = gset
+                        .iter()
+                        .filter_map(|&idx| group_exprs.get(idx as usize).copied())
+                        .collect();
+                    let num_groups = estimate_num_groups_for_gset(run, root, &restricted, path_rows)?;
+                    gs.numGroups = num_groups;
+                    rollup.numGroups += num_groups;
+                }
+                d_num_groups += rollup.numGroups;
+            }
+
+            if !gd.hash_sets_idx.is_empty() {
+                gd.dNumHashGroups = 0.0;
+                // groupExprs = get_sortgrouplist_exprs(parse->groupClause, tlist).
+                let full_group_clause = root.processed_groupClause.clone();
+                let group_exprs: Vec<types_pathnodes::NodeId> = full_group_clause
+                    .iter()
+                    .map(|&sgc| {
+                        backend_nodes_nodeFuncs_seams::get_sortgroupclause_expr::call(
+                            root, sgc, &tlist,
+                        )
+                    })
+                    .collect();
+
+                for (gset, gs) in gd.hash_sets_idx.iter().zip(gd.unsortable_sets.iter_mut()) {
+                    let restricted: Vec<types_pathnodes::NodeId> = gset
+                        .iter()
+                        .filter_map(|&idx| group_exprs.get(idx as usize).copied())
+                        .collect();
+                    let num_groups = estimate_num_groups_for_gset(run, root, &restricted, path_rows)?;
+                    gs.numGroups = num_groups;
+                    gd.dNumHashGroups += num_groups;
+                }
+                d_num_groups += gd.dNumHashGroups;
+            }
+
+            Ok(d_num_groups)
+        } else {
+            // Plain GROUP BY — estimate based on the optimized groupClause (C:3735).
+            let group_clause = root.processed_groupClause.clone();
+            let group_exprs: Vec<types_pathnodes::NodeId> = group_clause
+                .iter()
+                .map(|&sgc| {
+                    backend_nodes_nodeFuncs_seams::get_sortgroupclause_expr::call(root, sgc, &tlist)
+                })
+                .collect();
+            backend_utils_adt_selfuncs_seams::estimate_num_groups::call(
+                run,
+                root,
+                &group_exprs,
+                path_rows,
+                None,
+            )
+        }
     } else if has_grouping_sets {
-        // Empty grouping sets — gated out upstream.
-        panic!("get_number_of_groups: GROUPING SETS gated out upstream");
+        // Empty grouping sets — one result row for each (C:3743).
+        Ok(num_grouping_sets as f64)
     } else if has_aggs || root.hasHavingQual {
         // Plain aggregation, one result row.
         Ok(1.0)
@@ -3740,6 +4266,26 @@ fn get_number_of_groups<'mcx>(
         // Not grouping.
         Ok(1.0)
     }
+}
+
+/// `estimate_num_groups(root, groupExprs, input_rows, &gset, NULL)` for one
+/// grouping set, where the caller has already restricted `group_exprs` to the
+/// members of the set (the `pgset` filter in selfuncs.c selects which groupExprs
+/// participate; building the restricted sublist and estimating over it is
+/// equivalent, and an empty sublist yields exactly one group). This avoids
+/// extending the by-ref-owned `estimate_num_groups` seam with the `pgset` arg.
+fn estimate_num_groups_for_gset<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    group_exprs: &[types_pathnodes::NodeId],
+    input_rows: f64,
+) -> PgResult<f64> {
+    if group_exprs.is_empty() {
+        return Ok(1.0);
+    }
+    backend_utils_adt_selfuncs_seams::estimate_num_groups::call(
+        run, root, group_exprs, input_rows, None,
+    )
 }
 
 /// `create_grouping_paths(root, input_rel, target, target_parallel_safe, gd)`
@@ -3755,6 +4301,7 @@ fn create_grouping_paths<'mcx>(
     input_rel: RelId,
     target: PathTarget,
     target_parallel_safe: bool,
+    gd: Option<&mut GroupingSetsData<'mcx>>,
 ) -> PgResult<RelId> {
     // MemSet(&agg_costs, 0); get_agg_clause_costs(root, AGGSPLIT_SIMPLE, &agg_costs).
     let mut agg_costs = types_pathnodes::AggClauseCosts::default();
@@ -3791,10 +4338,9 @@ fn create_grouping_paths<'mcx>(
     }
 
     // is_degenerate_grouping(root): (hasHavingQual || groupingSets) && !hasAggs
-    // && groupClause == NIL. The groupingSets leg is gated out; a HAVING-only
-    // query with no aggregates and no GROUP BY would be degenerate, but that
-    // needs create_group_result_path (unported here). Mirror PG and panic only
-    // when actually degenerate.
+    // && groupClause == NIL. A HAVING-only query with no aggregates and no
+    // GROUP BY would be degenerate, but that needs create_group_result_path
+    // (unported here). Mirror PG and panic only when actually degenerate.
     let (has_aggs, has_group_clause, has_grouping_sets) = {
         let parse = run.resolve(root.parse);
         (
@@ -3812,7 +4358,7 @@ fn create_grouping_paths<'mcx>(
     }
 
     // create_ordinary_grouping_paths(root, input_rel, grouped_rel, &agg_costs,
-    // gd=NULL, &extra, &partially_grouped_rel) (C:3875). The partitionwise /
+    // gd, &extra, &partially_grouped_rel) (C:3875). The partitionwise /
     // partial-agg / parallel legs require IS_PARTITIONED_REL(input_rel) or
     // consider_parallel, both false here; they are skipped exactly as in C.
     create_ordinary_grouping_paths(
@@ -3824,6 +4370,7 @@ fn create_grouping_paths<'mcx>(
         agg_costs_lite,
         has_group_clause,
         has_aggs,
+        gd,
     )?;
 
     // set_cheapest(grouped_rel) (C:3880).
@@ -3845,7 +4392,29 @@ fn create_ordinary_grouping_paths<'mcx>(
     agg_costs: Option<backend_optimizer_util_pathnode_seams::AggClauseCostsLite>,
     has_group_clause: bool,
     has_aggs: bool,
+    mut gd: Option<&mut GroupingSetsData<'mcx>>,
 ) -> PgResult<()> {
+    // Compute the GROUPING_CAN_USE_{SORT,HASH} flags (C create_grouping_paths
+    // 3812-3845). can_sort if any rollup is sortable or the processed_groupClause
+    // is sortable; can_hash if there's a GROUP BY, no ordered aggs, and the
+    // grouping is hashable (gd->any_hashable with grouping sets).
+    let processed_group_clauses: Vec<types_nodes::rawnodes::SortGroupClause> = root
+        .processed_groupClause
+        .iter()
+        .map(|&id| *root.sortgroupclause(id))
+        .collect();
+    let gd_has_rollups = gd.as_ref().is_some_and(|g| !g.rollups.is_empty());
+    let gd_any_hashable = gd.as_ref().is_some_and(|g| g.any_hashable);
+    let can_sort = gd_has_rollups
+        || backend_optimizer_util_vars::tlist::grouping_is_sortable(&processed_group_clauses);
+    let can_hash = has_group_clause
+        && root.numOrderedAggs == 0
+        && (if gd.is_some() {
+            gd_any_hashable
+        } else {
+            backend_optimizer_util_vars::tlist::grouping_is_hashable(&processed_group_clauses)
+        });
+
     // cheapest_path = input_rel->cheapest_total_path.
     let cheapest_path = root
         .rel(input_rel)
@@ -3853,8 +4422,9 @@ fn create_ordinary_grouping_paths<'mcx>(
         .ok_or_else(|| PgError::error("create_ordinary_grouping_paths: input rel has no cheapest_total_path"))?;
     let cheapest_rows = root.path(cheapest_path).base().rows;
 
-    // Estimate number of groups (C:4130).
-    let d_num_groups = get_number_of_groups(run, root, cheapest_rows)?;
+    // Estimate number of groups (C:4130). For grouping sets this also fills
+    // rollup->numGroups, gs->numGroups, and gd->dNumHashGroups in place.
+    let d_num_groups = get_number_of_groups(run, root, cheapest_rows, gd.as_deref_mut())?;
 
     // Build final grouping paths (C:4136).
     add_paths_to_grouping_rel(
@@ -3867,6 +4437,9 @@ fn create_ordinary_grouping_paths<'mcx>(
         d_num_groups,
         has_group_clause,
         has_aggs,
+        can_sort,
+        can_hash,
+        gd.as_deref_mut(),
     )?;
 
     // Give a helpful error if we failed to find any implementation (C:4141).
@@ -3897,23 +4470,15 @@ fn add_paths_to_grouping_rel<'mcx>(
     d_num_groups: f64,
     has_group_clause: bool,
     has_aggs: bool,
+    can_sort: bool,
+    can_hash: bool,
+    mut gd: Option<&mut GroupingSetsData<'mcx>>,
 ) -> PgResult<()> {
-    // can_sort = grouping_is_sortable(processed_groupClause); for the empty
-    // clause this is trivially true. can_hash needs a GROUP BY (false for plain
-    // aggregation); the hash leg requires grouping_is_hashable and is not on the
-    // count(*) path, so reject it precisely if reached.
-    let group_clauses: Vec<types_nodes::rawnodes::SortGroupClause> = root
-        .processed_groupClause
-        .iter()
-        .map(|&id| *root.sortgroupclause(id))
-        .collect();
-    let can_sort = backend_optimizer_util_vars::tlist::grouping_is_sortable(&group_clauses);
-    if !can_sort {
-        // GROUPING_CAN_USE_SORT not set without a sortable clause; the hash-only
-        // leg is the only alternative and is unported on this path.
+    let has_grouping_sets = gd.is_some();
+
+    if !can_sort && !can_hash {
         return Err(PgError::error(
-            "add_paths_to_grouping_rel: non-sortable grouping needs the hashed-only \
-             aggregation path (not ported)",
+            "add_paths_to_grouping_rel: non-sortable, non-hashable grouping",
         ));
     }
 
@@ -3936,44 +4501,101 @@ fn add_paths_to_grouping_rel<'mcx>(
         .clone()
         .ok_or_else(|| PgError::error("add_paths_to_grouping_rel: grouped rel has no reltarget"))?;
 
-    // foreach(input_rel->pathlist) — consider each input path. For the empty
-    // group clause get_useful_group_keys_orderings yields a single ordering with
-    // empty pathkeys/clauses, and make_ordered_path returns the path unchanged
-    // (empty pathkeys are contained in any path). Reordering with a real GROUP BY
-    // is a cost optimization; we mirror the always-present original ordering and
-    // skip the (optional) reordered alternative.
-    let input_paths: Vec<PathId> = root.rel(input_rel).pathlist.clone();
-    for path in input_paths {
-        // make_ordered_path with the group_pathkeys ordering. group_pathkeys is
-        // empty here (no GROUP BY produces no pathkeys; a GROUP BY's pathkeys were
-        // computed by standard_qp_callback). pathkeys_count_contained_in(empty, _)
-        // is true, so the path is used as-is for the no-sort case. For a real
-        // GROUP BY the same make_ordered_path used elsewhere applies, but
-        // create_sort_path over group_pathkeys is the same machinery as ORDER BY;
-        // reuse it via make_ordered_path.
-        let group_pathkeys = root.group_pathkeys.clone();
-        let ordered =
-            make_ordered_path(root, run, grouped_rel, path, path, group_pathkeys, -1.0)?;
-        let ordered = match ordered {
-            Some(p) => p,
-            None => continue,
-        };
-
-        if has_aggs {
-            // We have aggregation, possibly with plain GROUP BY. Make an AggPath
-            // (AGG_SORTED with GROUP BY, AGG_PLAIN otherwise) (C:7177).
-            let aggstrategy = if has_group_clause {
-                types_pathnodes::AGG_SORTED
-            } else {
-                types_pathnodes::AGG_PLAIN
+    if can_sort {
+        // foreach(input_rel->pathlist) — consider each input path. For the empty
+        // group clause / a plain GROUP BY, get_useful_group_keys_orderings yields a
+        // single ordering with the group_pathkeys; make_ordered_path sorts/returns
+        // the path. The reordered alternatives (a cost optimization) are skipped.
+        let input_paths: Vec<PathId> = root.rel(input_rel).pathlist.clone();
+        for path in input_paths {
+            let group_pathkeys = root.group_pathkeys.clone();
+            let ordered =
+                make_ordered_path(root, run, grouped_rel, path, path, group_pathkeys, -1.0)?;
+            let ordered = match ordered {
+                Some(p) => p,
+                None => continue,
             };
+
+            if has_grouping_sets {
+                // consider_groupingsets_paths(root, grouped_rel, path, true,
+                // can_hash, gd, agg_costs, dNumGroups) (C:7164).
+                consider_groupingsets_paths(
+                    run,
+                    root,
+                    grouped_rel,
+                    ordered,
+                    true, // is_sorted
+                    can_hash,
+                    gd.as_deref_mut().unwrap(),
+                    agg_costs,
+                    d_num_groups,
+                    &having_quals,
+                )?;
+            } else if has_aggs {
+                // We have aggregation, possibly with plain GROUP BY (C:7177).
+                let aggstrategy = if has_group_clause {
+                    types_pathnodes::AGG_SORTED
+                } else {
+                    types_pathnodes::AGG_PLAIN
+                };
+                let agg_path = backend_optimizer_util_pathnode::create::create_agg_path(
+                    run,
+                    root,
+                    grouped_rel,
+                    ordered,
+                    target.clone(),
+                    aggstrategy,
+                    types_pathnodes::AGGSPLIT_SIMPLE,
+                    root.processed_groupClause.clone(),
+                    having_quals.clone(),
+                    agg_costs,
+                    d_num_groups,
+                )?;
+                backend_optimizer_util_pathnode::add_path(root, grouped_rel, agg_path)?;
+            } else if has_group_clause {
+                // GROUP BY without aggregation — make a GroupPath (C:7195).
+                return Err(PgError::error(
+                    "add_paths_to_grouping_rel: GROUP BY without aggregation needs \
+                     create_group_path (not ported)",
+                ));
+            } else {
+                unreachable!("add_paths_to_grouping_rel: no agg and no group clause");
+            }
+        }
+    }
+
+    if can_hash {
+        if has_grouping_sets {
+            // Try for a hash-only groupingsets path over unsorted input (C:7280).
+            let cheapest_path = root
+                .rel(input_rel)
+                .cheapest_total_path
+                .ok_or_else(|| PgError::error("add_paths_to_grouping_rel: no cheapest_total_path"))?;
+            consider_groupingsets_paths(
+                run,
+                root,
+                grouped_rel,
+                cheapest_path,
+                false, // is_sorted
+                true,  // can_hash
+                gd.as_deref_mut().unwrap(),
+                agg_costs,
+                d_num_groups,
+                &having_quals,
+            )?;
+        } else {
+            // Generate a HashAgg Path over the cheapest-total input (C:7289).
+            let cheapest_path = root
+                .rel(input_rel)
+                .cheapest_total_path
+                .ok_or_else(|| PgError::error("add_paths_to_grouping_rel: no cheapest_total_path"))?;
             let agg_path = backend_optimizer_util_pathnode::create::create_agg_path(
                 run,
                 root,
                 grouped_rel,
-                ordered,
+                cheapest_path,
                 target.clone(),
-                aggstrategy,
+                types_pathnodes::AGG_HASHED,
                 types_pathnodes::AGGSPLIT_SIMPLE,
                 root.processed_groupClause.clone(),
                 having_quals.clone(),
@@ -3981,20 +4603,301 @@ fn add_paths_to_grouping_rel<'mcx>(
                 d_num_groups,
             )?;
             backend_optimizer_util_pathnode::add_path(root, grouped_rel, agg_path)?;
-        } else if has_group_clause {
-            // GROUP BY without aggregation — make a GroupPath (C:7195).
-            return Err(PgError::error(
-                "add_paths_to_grouping_rel: GROUP BY without aggregation needs \
-                 create_group_path (not ported)",
-            ));
-        } else {
-            // Other cases handled above (Assert(false)).
-            unreachable!("add_paths_to_grouping_rel: no agg and no group clause");
         }
     }
 
-    // The hashed-aggregation leg (can_hash) and the partially-grouped
-    // finalization / gather legs are not on this path.
+    // The partially-grouped finalization / gather legs are not on this path
+    // (no partial rel; input is neither partitioned nor parallel-safe here).
+    Ok(())
+}
+
+/// `estimate_hashagg_tablesize(root, path, agg_costs, dNumGroups)`
+/// (selfuncs.c:4179). Estimate the bytes a hash-aggregate hashtable requires,
+/// based on the agg_costs, path width, and number of groups. Ported locally (the
+/// selfuncs.c owner is the adt by-ref campaign's; this is a small leaf helper
+/// over `hash_agg_entry_size`, which is wired through the costsize seam).
+fn estimate_hashagg_tablesize(
+    root: &PlannerInfo,
+    path: PathId,
+    agg_costs: Option<backend_optimizer_util_pathnode_seams::AggClauseCostsLite>,
+    d_num_groups: f64,
+) -> f64 {
+    let width = root
+        .path(path)
+        .base()
+        .pathtarget
+        .as_ref()
+        .map(|t| t.width)
+        .unwrap_or(0) as f64;
+    let transition_space = agg_costs.map(|a| a.transition_space as u64).unwrap_or(0);
+    let hashentrysize = backend_optimizer_path_costsize_seams::hash_agg_entry_size::call(
+        root.aggtransinfos.len() as i32,
+        width,
+        transition_space,
+    );
+    hashentrysize * d_num_groups
+}
+
+/// `consider_groupingsets_paths(root, grouped_rel, path, is_sorted, can_hash, gd,
+/// agg_costs, dNumGroups)` (planner.c:4171). Generate GroupingSetsPaths for the
+/// given input `path`. When `is_sorted` is false, only hash-only plans are
+/// considered; otherwise both a sorted plan and a mixed sort/hash plan are tried.
+#[allow(clippy::too_many_arguments)]
+fn consider_groupingsets_paths<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    grouped_rel: RelId,
+    path: PathId,
+    is_sorted: bool,
+    can_hash: bool,
+    gd: &mut GroupingSetsData<'mcx>,
+    agg_costs: Option<backend_optimizer_util_pathnode_seams::AggClauseCostsLite>,
+    d_num_groups: f64,
+    having_qual: &[types_pathnodes::NodeId],
+) -> PgResult<()> {
+    let hash_mem_limit = backend_optimizer_util_pathnode_seams::get_hash_memory_limit::call();
+
+    if !is_sorted {
+        // Only consider plans that can be done entirely by hashing (C:4193).
+        debug_assert!(can_hash);
+
+        let mut new_rollups: Vec<RollupData> = Vec::new();
+        let mut unhashed_rollup: Option<RollupData> = None;
+        let mut empty_sets_data: Vec<GroupingSetData> = Vec::new();
+        let mut empty_sets_count: usize = 0; // empty_sets (list of NILs) length
+        let mut strat = types_pathnodes::AGG_HASHED;
+        let mut exclude_groups = 0.0f64;
+
+        // l_start = list_head(gd->rollups); start index into gd->rollups.
+        let mut l_start: usize = 0;
+
+        // If the input is coincidentally sorted usefully, save hashtable space by
+        // making use of it (C:4228).
+        if !gd.rollups.is_empty() {
+            let group_pathkeys = root.group_pathkeys.clone();
+            let path_pathkeys = root.path(path).base().pathkeys.clone();
+            if backend_optimizer_path_pathkeys::pathkeys_contained_in(
+                &group_pathkeys,
+                &path_pathkeys,
+            ) {
+                let r = gd.rollups[0].clone();
+                exclude_groups = r.numGroups;
+                unhashed_rollup = Some(r);
+                l_start = 1;
+            }
+        }
+
+        let hashsize = estimate_hashagg_tablesize(root, path, agg_costs, d_num_groups - exclude_groups);
+
+        // gd->rollups is empty only if we have unsortable columns; override the
+        // hash_mem limit in that case (C:4240).
+        if hashsize > hash_mem_limit && !gd.rollups.is_empty() {
+            return Ok(()); // nope, won't fit
+        }
+
+        // Burst the existing rollups into individual grouping sets and recompute
+        // a groupClause for each set (C:4248).
+        let mut sets_data: Vec<GroupingSetData> = gd.unsortable_sets.clone();
+
+        for rollup in gd.rollups.iter().skip(l_start) {
+            // An unhashable rollup not skipped by the "actually sorted" check
+            // means we'd need differently-sorted input; bail (C:4264).
+            if !rollup.hashable {
+                return Ok(());
+            }
+            sets_data.extend(rollup.gsets_data.iter().cloned());
+        }
+
+        for gs in &sets_data {
+            if gs.set.is_empty() {
+                // Empty grouping sets can't be hashed (C:4280).
+                empty_sets_data.push(gs.clone());
+                empty_sets_count += 1;
+            } else {
+                let gset: Vec<types_core::Index> = gs.set.clone();
+                let group_clause = preprocess_groupclause(run, root, &gset)?;
+                let gsets_data = alloc::vec![gs.clone()];
+                let gsets = remap_to_groupclause_idx(
+                    root,
+                    &group_clause,
+                    &gsets_data,
+                    &mut gd.tleref_to_colnum_map,
+                );
+                new_rollups.push(RollupData {
+                    groupClause: group_clause,
+                    gsets,
+                    gsets_data,
+                    numGroups: gs.numGroups,
+                    hashable: true,
+                    is_hashed: true,
+                });
+            }
+        }
+
+        // If we didn't find anything nonempty to hash, bail (C:4302).
+        if new_rollups.is_empty() {
+            return Ok(());
+        }
+
+        // If there were empty grouping sets they should have been in the first
+        // rollup (C:4310).
+        debug_assert!(unhashed_rollup.is_none() || empty_sets_count == 0);
+
+        if let Some(unhashed) = unhashed_rollup {
+            new_rollups.push(unhashed);
+            strat = types_pathnodes::AGG_MIXED;
+        } else if empty_sets_count > 0 {
+            new_rollups.push(RollupData {
+                groupClause: Vec::new(),
+                gsets: alloc::vec![Vec::new(); empty_sets_count],
+                gsets_data: empty_sets_data,
+                numGroups: empty_sets_count as f64,
+                hashable: false,
+                is_hashed: false,
+            });
+            strat = types_pathnodes::AGG_MIXED;
+        }
+
+        let gsp = backend_optimizer_util_pathnode::create::create_groupingsets_path(
+            run,
+            root,
+            grouped_rel,
+            path,
+            having_qual.to_vec(),
+            strat,
+            new_rollups,
+            agg_costs,
+        )?;
+        backend_optimizer_util_pathnode::add_path(root, grouped_rel, gsp)?;
+        return Ok(());
+    }
+
+    // Sorted input but nothing we can do with it (C:4339).
+    if gd.rollups.is_empty() {
+        return Ok(());
+    }
+
+    // Given sorted input, try two paths: one sorted and one mixed sort/hash
+    // (C:4350).
+    if can_hash && gd.any_hashable {
+        let mut rollups: Vec<RollupData> = Vec::new();
+        let mut hash_sets: Vec<GroupingSetData> = gd.unsortable_sets.clone();
+        let mut availspace = hash_mem_limit;
+
+        // Account first for space needed for groups we can't sort at all (C:4368).
+        availspace -= estimate_hashagg_tablesize(root, path, agg_costs, gd.dNumHashGroups);
+
+        if availspace > 0.0 && gd.rollups.len() > 1 {
+            // Knapsack: capacity = hash_mem, item weights = hashtable memory per
+            // rollup, equal item values (C:4378).
+            let num_rollups = gd.rollups.len();
+            let scale = (availspace / (20.0 * num_rollups as f64)).max(1.0);
+            let k_capacity = (availspace / scale).floor() as i32;
+
+            // Leave the first rollup out (matches the input sort order). Assign
+            // indexes "i" to only those entries considered for hashing (C:4408).
+            let mut k_weights: Vec<i32> = Vec::new();
+            for rollup in gd.rollups.iter().skip(1) {
+                if rollup.hashable {
+                    let sz = estimate_hashagg_tablesize(root, path, agg_costs, rollup.numGroups);
+                    let w = (sz / scale).floor().min(k_capacity as f64 + 1.0) as i32;
+                    k_weights.push(w);
+                }
+            }
+
+            // Apply knapsack (C:4438).
+            let hash_items = if !k_weights.is_empty() {
+                backend_lib_knapsack::DiscreteKnapsack(
+                    run.mcx(),
+                    k_capacity,
+                    k_weights.len() as i32,
+                    &k_weights,
+                    None,
+                )?
+            } else {
+                None
+            };
+
+            if !backend_nodes_core::bitmapset::bms_is_empty(hash_items.as_deref()) {
+                // rollups = list_make1(linitial(gd->rollups)) (C:4444).
+                rollups.push(gd.rollups[0].clone());
+
+                let mut i: i32 = 0;
+                for rollup in gd.rollups.iter().skip(1) {
+                    if rollup.hashable {
+                        if backend_nodes_core::bitmapset::bms_is_member(i, hash_items.as_deref()) {
+                            hash_sets.extend(rollup.gsets_data.iter().cloned());
+                        } else {
+                            rollups.push(rollup.clone());
+                        }
+                        i += 1;
+                    } else {
+                        rollups.push(rollup.clone());
+                    }
+                }
+            }
+        }
+
+        // if (!rollups && hash_sets) rollups = list_copy(gd->rollups) (C:4470).
+        if rollups.is_empty() && !hash_sets.is_empty() {
+            rollups = gd.rollups.clone();
+        }
+
+        for gs in &hash_sets {
+            debug_assert!(!gs.set.is_empty());
+            let gset: Vec<types_core::Index> = gs.set.clone();
+            let group_clause = preprocess_groupclause(run, root, &gset)?;
+            let gsets_data = alloc::vec![gs.clone()];
+            let gsets = remap_to_groupclause_idx(
+                root,
+                &group_clause,
+                &gsets_data,
+                &mut gd.tleref_to_colnum_map,
+            );
+            // lcons(rollup, rollups) — prepend.
+            rollups.insert(
+                0,
+                RollupData {
+                    groupClause: group_clause,
+                    gsets,
+                    gsets_data,
+                    numGroups: gs.numGroups,
+                    hashable: true,
+                    is_hashed: true,
+                },
+            );
+        }
+
+        if !rollups.is_empty() {
+            let gsp = backend_optimizer_util_pathnode::create::create_groupingsets_path(
+                run,
+                root,
+                grouped_rel,
+                path,
+                having_qual.to_vec(),
+                types_pathnodes::AGG_MIXED,
+                rollups,
+                agg_costs,
+            )?;
+            backend_optimizer_util_pathnode::add_path(root, grouped_rel, gsp)?;
+        }
+    }
+
+    // Now try the simple sorted case (C:4503).
+    if gd.unsortable_sets.is_empty() {
+        let gsp = backend_optimizer_util_pathnode::create::create_groupingsets_path(
+            run,
+            root,
+            grouped_rel,
+            path,
+            having_qual.to_vec(),
+            types_pathnodes::AGG_SORTED,
+            gd.rollups.clone(),
+            agg_costs,
+        )?;
+        backend_optimizer_util_pathnode::add_path(root, grouped_rel, gsp)?;
+    }
+
     Ok(())
 }
 
@@ -4546,16 +5449,40 @@ fn standard_qp_callback(
     sort_clause_ids: &[types_pathnodes::NodeId],
     distinct_clause_ids: &[types_pathnodes::NodeId],
     first_active_window: Option<types_pathnodes::NodeId>,
+    gset_group_clause: Option<&[types_pathnodes::NodeId]>,
 ) -> PgResult<()> {
     // tlist = root->processed_tlist (C:3457).
     let tlist = root.processed_tlist.clone();
+    // parse->hasGroupRTE == (root->group_rtindex != 0).
+    let has_group_rte = root.group_rtindex != 0;
 
-    // Grouping pathkeys (C:3501). With a plain GROUP BY list (no grouping sets),
-    // convert the optimized groupClause into pathkeys, removing items proven
-    // redundant by EquivalenceClass processing and setting ec_sortref. Grouping
-    // sets are gated out upstream (qp_callback is only reached on the non-gset
-    // path), so we take the plain `parse->groupClause || numOrderedAggs > 0` arm.
-    if !root.processed_groupClause.is_empty() || root.numOrderedAggs > 0 {
+    // Grouping pathkeys (C:3463). With grouping sets, just use the first
+    // RollupData's groupClause; we don't optimize grouping clauses nor combine
+    // aggregate ordering keys with grouping (C:3464-3500).
+    if let Some(gc_handles) = gset_group_clause {
+        let group_clauses: Vec<types_nodes::rawnodes::SortGroupClause> = gc_handles
+            .iter()
+            .map(|&id| *root.sortgroupclause(id))
+            .collect();
+        if backend_optimizer_util_vars::tlist::grouping_is_sortable(&group_clauses) {
+            let mut processed = gc_handles.to_vec();
+            let (pathkeys, _sortable) =
+                backend_optimizer_path_pathkeys::make_pathkeys_for_sortclauses_extended(
+                    root,
+                    &mut processed,
+                    &tlist,
+                    false,          // remove_redundant
+                    has_group_rte,  // remove_group_rtindex
+                    false,          // set_ec_sortref
+                );
+            // Assert(sortable) in C — grouping_is_sortable just verified it.
+            root.num_groupby_pathkeys = pathkeys.len() as i32;
+            root.group_pathkeys = pathkeys;
+        } else {
+            root.group_pathkeys = Vec::new();
+            root.num_groupby_pathkeys = 0;
+        }
+    } else if !root.processed_groupClause.is_empty() || root.numOrderedAggs > 0 {
         let mut processed = root.processed_groupClause.clone();
         let (pathkeys, sortable) =
             backend_optimizer_path_pathkeys::make_pathkeys_for_sortclauses_extended(

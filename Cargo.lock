@@ -12113,6 +12113,8 @@ dependencies = [
  "backend-catalog-index-seams",
  "backend-catalog-pg-inherits",
  "backend-foreign-foreign",
+ "backend-lib-bipartite-match",
+ "backend-lib-knapsack",
  "backend-nodes-core",
  "backend-nodes-equalfuncs-seams",
  "backend-nodes-nodeFuncs-seams",
