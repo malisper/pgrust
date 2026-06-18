@@ -69,9 +69,9 @@ fn install_seams() {
         // `parse` seam returns the hand-built tree.
         backend_utils_adt_jsonpath_gram_seams::parse::set(test_parse);
 
-        // Executor recursion / interrupt guards (no-op in unit context).
-        crate::seam::check_stack_depth::set(|| Ok(()));
-        crate::seam::check_for_interrupts::set(|| Ok(()));
+        // Executor interrupt guard (no-op in unit context); the recursion guard
+        // is installed below via its canonical owner-seams crate.
+        backend_tcop_postgres_seams::check_for_interrupts::set(|| Ok(()));
 
         // The jsonb / jsonb-util serialization path (JsonbValueToJsonb,
         // pushJsonbValue, the iterator, jsonb_out) routes its recursion guard

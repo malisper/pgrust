@@ -725,8 +725,8 @@ fn executeItemOptUnwrapTarget(
 ) -> PgResult<JsonPathExecResult> {
     let mut res = jperNotFound;
 
-    seam::check_stack_depth::call()?;
-    seam::check_for_interrupts::call()?;
+    backend_utils_misc_stack_depth_seams::check_stack_depth::call()?;
+    backend_tcop_postgres_seams::check_for_interrupts::call()?;
 
     match jsp.typ {
         jpiNull | jpiBool | jpiNumeric | jpiString | jpiVariable => {
@@ -1249,7 +1249,7 @@ fn executeBoolItem(
     canHaveNext: bool,
 ) -> PgResult<JsonPathBool> {
     // since this function recurses, it could be driven to stack overflow
-    seam::check_stack_depth::call()?;
+    backend_utils_misc_stack_depth_seams::check_stack_depth::call()?;
 
     if !canHaveNext && jspHasNext(jsp) {
         return Err(elog_error("boolean jsonpath item cannot have next item"));
@@ -1395,7 +1395,7 @@ fn executeAnyItem(
 ) -> PgResult<JsonPathExecResult> {
     let mut res = jperNotFound;
 
-    seam::check_stack_depth::call()?;
+    backend_utils_misc_stack_depth_seams::check_stack_depth::call()?;
 
     if level > last {
         return Ok(res);
@@ -3141,7 +3141,7 @@ fn execute_double(
 
     if jb.typ == jbvType::jbvNumeric {
         let tmp = numeric_out(cxt.mcx, numeric_bytes_of(jb))?;
-        match seam::float8in_internal::call(tmp.clone())? {
+        match soft_float8in_internal(&tmp)? {
             Some(val) => {
                 if val.is_infinite() || val.is_nan() {
                     return return_error(
@@ -3175,7 +3175,7 @@ fn execute_double(
     } else if jb.typ == jbvType::jbvString {
         // cast string as double
         let tmp = String::from_utf8_lossy(string_bytes(jb)).into_owned();
-        match seam::float8in_internal::call(tmp.clone())? {
+        match soft_float8in_internal(&tmp)? {
             Some(val) => {
                 if val.is_infinite() || val.is_nan() {
                     return return_error(
@@ -3266,7 +3266,7 @@ fn execute_bigint(
         }
     } else if jb.typ == jbvType::jbvString {
         let tmp = String::from_utf8_lossy(string_bytes(jb)).into_owned();
-        match seam::int8in::call(tmp.clone())? {
+        match soft_int8in(&tmp)? {
             Some(v) => {
                 datum = v;
                 res = jperOk;
@@ -3331,7 +3331,7 @@ fn execute_boolean(
         res = jperOk;
     } else if jb.typ == jbvType::jbvNumeric {
         let tmp = numeric_out(cxt.mcx, numeric_bytes_of(jb))?;
-        match seam::int4in::call(tmp.clone())? {
+        match soft_int4in(&tmp)? {
             Some(ival) => {
                 bval = ival != 0;
                 res = jperOk;
@@ -3353,7 +3353,7 @@ fn execute_boolean(
         }
     } else if jb.typ == jbvType::jbvString {
         let tmp = String::from_utf8_lossy(string_bytes(jb)).into_owned();
-        match seam::parse_bool::call(tmp.clone())? {
+        match soft_parse_bool(&tmp) {
             Some(b) => {
                 bval = b;
                 res = jperOk;
@@ -3432,7 +3432,7 @@ fn execute_decimal_number(
         res = jperOk;
     } else if jb.typ == jbvType::jbvString {
         let s = String::from_utf8_lossy(string_bytes(jb)).into_owned();
-        match seam::numeric_in_with_typmod::call(s.clone(), -1, 0)? {
+        match soft_numeric_in_with_typmod(cxt.mcx, &s, -1, 0)? {
             Some(bytes) => {
                 num = bytes;
                 if numeric_is_nan_or_inf(&num) {
@@ -3533,7 +3533,7 @@ fn execute_decimal_number(
 
         // Convert numstr to Numeric with typmod (numeric_in with typmod).
         let numstr = numstr.expect("numstr is set when reaching the .decimal() typmod path");
-        match seam::numeric_in_with_typmod::call(numstr.clone(), precision, scale)? {
+        match soft_numeric_in_with_typmod(cxt.mcx, &numstr, precision, scale)? {
             Some(bytes) => num = bytes,
             None => {
                 return return_error(
@@ -3598,7 +3598,7 @@ fn execute_integer(
         }
     } else if jb.typ == jbvType::jbvString {
         let tmp = String::from_utf8_lossy(string_bytes(jb)).into_owned();
-        match seam::int4in::call(tmp.clone())? {
+        match soft_int4in(&tmp)? {
             Some(v) => {
                 datum = v;
                 res = jperOk;
@@ -3911,6 +3911,80 @@ fn numeric_is_nan_or_inf(num: &[u8]) -> bool {
 /// C: `numeric_out(num)` -> canonical decimal text.
 fn numeric_out(mcx: Mcx<'_>, num: &[u8]) -> PgResult<String> {
     backend_utils_adt_numeric::io::numeric_out(mcx, num)
+}
+
+// ---------------------------------------------------------------------------
+// `DirectInputFunctionCallSafe(...)` soft-parse wrappers (jsonpath_exec.c).
+//
+// Each is the executor's call into the owning type's input function with an
+// `ErrorSaveContext`: a soft (recoverable) parse failure becomes `None` (the C
+// `!noerr || escontext.error_occurred` branch), a hard error propagates. The
+// owning adt unit's real input function is called directly (a leaf adt dep, no
+// seam, mirroring the `numeric_*` helpers above).
+// ---------------------------------------------------------------------------
+
+/// The error classes an `ErrorSaveContext` soft-suppresses for a type-input
+/// function: an invalid textual representation (`22P02`) and an out-of-range
+/// value (`22003`) — exactly the errors the int/float/numeric input functions
+/// raise on a bad input string. Any other error is hard and propagates.
+fn is_soft_input_error(e: &PgError) -> bool {
+    use types_error::{ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE};
+    let s = e.sqlstate();
+    s == ERRCODE_INVALID_TEXT_REPRESENTATION || s == ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE
+}
+
+/// Run a type-input function under `ErrorSaveContext` semantics: a soft
+/// (invalid-input / out-of-range) failure becomes `None`; any other error
+/// propagates.
+fn soft_input<T>(r: PgResult<T>) -> PgResult<Option<T>> {
+    match r {
+        Ok(v) => Ok(Some(v)),
+        Err(e) if is_soft_input_error(&e) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// C: `DirectInputFunctionCallSafe(int4in, str, ..., &escontext, ...)`.
+fn soft_int4in(s: &str) -> PgResult<Option<i32>> {
+    soft_input(backend_utils_adt_int::int4in(s, None))
+}
+
+/// C: `DirectInputFunctionCallSafe(int8in, str, ..., &escontext, ...)`.
+fn soft_int8in(s: &str) -> PgResult<Option<i64>> {
+    soft_input(backend_utils_adt_int8::int8in(s, None))
+}
+
+/// C: `float8in_internal(str, NULL, "double precision", str, escontext)`.
+fn soft_float8in_internal(s: &str) -> PgResult<Option<f64>> {
+    soft_input(backend_utils_adt_float::io::float8in_internal(
+        s,
+        None,
+        "double precision",
+        s,
+    ))
+}
+
+/// C: `parse_bool(str, &bval)` (bool.c).
+fn soft_parse_bool(s: &str) -> Option<bool> {
+    probe_adt_scalar_bool::parse_bool(s)
+}
+
+/// C: `DirectInputFunctionCallSafe(numeric_in, numstr, InvalidOid, dtypmod,
+/// &escontext, &datum)` with the typmod built from `(precision, scale)` via
+/// `numerictypmodin` (precision `-1` selects the bare `-1` typmod). Returns the
+/// on-disk `numeric` varlena bytes, or `None` on a soft error.
+fn soft_numeric_in_with_typmod(
+    mcx: Mcx<'_>,
+    numstr: &str,
+    precision: i32,
+    scale: i32,
+) -> PgResult<Option<Vec<u8>>> {
+    let typmod = if precision == -1 {
+        -1
+    } else {
+        backend_utils_adt_numeric::ops_sql::numerictypmodin(&[precision, scale])?
+    };
+    Ok(soft_input(backend_utils_adt_numeric::io::numeric_in(mcx, numstr, typmod))?.map(|b| b.to_vec()))
 }
 
 /// The 13 ISO datetime template strings (jsonpath_exec.c:2408-2423).

@@ -48,41 +48,11 @@ seam_core::seam!(
     ) -> PgResult<core::option::Option<i32>>
 );
 
-seam_core::seam!(
-    /// C: `DirectInputFunctionCallSafe(int4in, str, ...)` — parse `str` as
-    /// `int4`, returning `Ok(None)` on a soft error.
-    pub fn int4in(str: String) -> PgResult<core::option::Option<i32>>
-);
-
-seam_core::seam!(
-    /// C: `DirectInputFunctionCallSafe(int8in, str, ...)` — parse `str` as
-    /// `int8`, returning `Ok(None)` on a soft error.
-    pub fn int8in(str: String) -> PgResult<core::option::Option<i64>>
-);
-
-seam_core::seam!(
-    /// C: `float8in_internal(str, NULL, "double precision", str, escontext)` —
-    /// parse `str` as `float8`, returning `Ok(None)` on a soft error.
-    pub fn float8in_internal(str: String) -> PgResult<core::option::Option<f64>>
-);
-
-seam_core::seam!(
-    /// C: `parse_bool(str, &bval)` (bool.c) — parse a textual boolean; returns
-    /// `Ok(None)` when the text is not a recognizable boolean.
-    pub fn parse_bool(str: String) -> PgResult<core::option::Option<bool>>
-);
-
-seam_core::seam!(
-    /// C: `DirectInputFunctionCallSafe(numeric_in, numstr, InvalidOid, typmod,
-    /// escontext, &datum)` — parse `numstr` as `numeric` with the typmod built
-    /// from `(precision, scale)`. Returns the on-disk `numeric` varlena bytes,
-    /// or `Ok(None)` on a soft error.
-    pub fn numeric_in_with_typmod(
-        numstr: String,
-        precision: i32,
-        scale: i32
-    ) -> PgResult<core::option::Option<Vec<u8>>>
-);
+// The `DirectInputFunctionCallSafe(int4in/int8in/numeric_in, ...)` /
+// `float8in_internal` / `parse_bool` soft-parse calls of the item methods are
+// jsonpath_exec.c-internal: each calls its owning adt unit's real input
+// function directly (a leaf adt dep, no seam, mirroring `numeric_*`), so they
+// are not declared as seams here.
 
 seam_core::seam!(
     /// C: `JsonItemFromDatum(Datum val, Oid typid, int32 typmod, JsonbValue *res)`
@@ -92,17 +62,11 @@ seam_core::seam!(
     pub fn json_item_from_datum(val: Datum, typid: Oid, typmod: i32) -> PgResult<JsonbValue>
 );
 
-seam_core::seam!(
-    /// C: `check_stack_depth()` (tcop/postgres.c) — guard against unbounded
-    /// recursion. Returns the soft error the C function raises on overflow.
-    pub fn check_stack_depth() -> PgResult<()>
-);
-
-seam_core::seam!(
-    /// C: `CHECK_FOR_INTERRUPTS()` (miscadmin.h) — process any pending
-    /// query-cancel / die interrupt; `Err` if one fires.
-    pub fn check_for_interrupts() -> PgResult<()>
-);
+// `check_stack_depth()` (utils/misc/stack_depth.c) and `CHECK_FOR_INTERRUPTS()`
+// (miscadmin.h, serviced via tcop/postgres.c) are genuine cross-subsystem
+// externals owned elsewhere; jsonpath_exec.c reaches them through their
+// canonical owner-seams (`backend-utils-misc-stack-depth-seams` /
+// `backend-tcop-postgres-seams`), not a private re-declaration here.
 
 /// A datetime SQL/JSON value as carried by `jbvDatetime`: a `Datum`, its type
 /// OID, the typmod, and the numeric timezone (seconds) for `timestamptz`.

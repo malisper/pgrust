@@ -25,6 +25,14 @@ backend-utils-adt-jsonb-util = { path = "../backend-utils-adt-jsonb-util" }
 backend-utils-adt-jsonb = { path = "../backend-utils-adt-jsonb" }
 # numeric ops (add/sub/mul/div/mod, abs/ceil/floor/trunc/uminus, in/out, casts).
 backend-utils-adt-numeric = { path = "../backend-utils-adt-numeric" }
+# The fmgr type-input soft-parse helpers reached by the item methods
+# (`DirectInputFunctionCallSafe(int4in/int8in/numeric_in, ...)`,
+# `float8in_internal`, `parse_bool`) call their owning adt unit's real input
+# function directly (a leaf adt dep, no cycle), exactly like the numeric helpers.
+backend-utils-adt-int = { path = "../backend-utils-adt-int" }
+backend-utils-adt-int8 = { path = "../backend-utils-adt-int8" }
+backend-utils-adt-float = { path = "../backend-utils-adt-float" }
+probe-adt-scalar-bool = { path = "../probe-adt-scalar-bool" }
 # Owner-seams for genuine cross-subsystem externals (route through the owner,
 # not this unit's own seams): RE_compile_and_execute (regexp.c), format_type_be
 # (format_type.c), pg_server_to_any/GetDatabaseEncoding (mbutils.c),
@@ -35,9 +43,14 @@ backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
 backend-utils-adt-json-seams = { path = "../backend-utils-adt-json-seams" }
 # This unit's own jsonpath_exec-specific seams + JSON_TABLE node boundary.
 backend-utils-adt-jsonpath-exec-seams = { path = "../backend-utils-adt-jsonpath-exec-seams" }
+# The recursion / interrupt guards are genuine cross-subsystem externals owned
+# by tcop/postgres.c (CHECK_FOR_INTERRUPTS) and utils/misc/stack_depth.c
+# (check_stack_depth) — reached through their canonical owner-seams, not
+# re-declared on this unit's own seams crate.
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-depth-seams" }
 
 [dev-dependencies]
 backend-utils-adt-jsonpath-gram-seams = { path = "../backend-utils-adt-jsonpath-gram-seams" }
-backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-depth-seams" }
 backend-utils-adt-numeric-seams = { path = "../backend-utils-adt-numeric-seams" }
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
