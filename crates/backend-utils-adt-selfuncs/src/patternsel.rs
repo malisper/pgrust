@@ -346,8 +346,8 @@ fn string_to_bytea_const<'mcx>(mcx: Mcx<'mcx>, payload: &[u8]) -> PgResult<Prefi
 
 /// Build a `Datum::ByRef` varlena image (4-byte length header + payload) charged
 /// to `mcx`, mirroring `SET_VARSIZE(p, VARHDRSZ + len)` + `memcpy(VARDATA, ...)`.
-/// The canonical value model carries the header-ful image; the fmgr boundary
-/// (`byref_to_headerless_payload`) strips the header back to the payload.
+/// The canonical value model carries the self-describing header-ful image (the
+/// `VARATT_IS_4B_U` uncompressed form), which crosses the fmgr boundary verbatim.
 fn make_varlena_datum<'mcx>(mcx: Mcx<'mcx>, payload: &[u8]) -> PgResult<Datum<'mcx>> {
     let total = VARHDRSZ + payload.len();
     let mut image = alloc::vec::Vec::with_capacity(total);
@@ -366,23 +366,12 @@ fn const_text_payload<'a>(constvalue: &'a Datum<'a>) -> &'a [u8] {
     }
 }
 
-/// `VARDATA_ANY(b)` — the payload of a detoasted, self-consistent varlena image,
-/// stripping the 4-byte or 1-byte ("short") length header. Mirrors the
-/// `byref_to_headerless_payload` disambiguation at the fmgr boundary: only a
-/// `VARSIZE == len` header is stripped, so an already-header-less or
-/// fixed-length-by-ref image passes verbatim.
+/// `VARDATA(b)` / `VARSIZE - VARHDRSZ` — the payload of a detoasted varlena
+/// image. The canonical by-reference value model is header-ful everywhere (the
+/// uncompressed `VARATT_IS_4B_U` form: a 4-byte length word followed by the
+/// payload), so the payload is the image past the 4-byte header.
 fn varlena_payload(b: &[u8]) -> &[u8] {
-    if let Some(total) = types_datum::varlena::varsize_4b_of(b) {
-        if total == b.len() && total >= VARHDRSZ {
-            return &b[VARHDRSZ..];
-        }
-    }
-    if let Some(total) = types_datum::varlena::varsize_1b_of(b) {
-        if total == b.len() && total >= 1 {
-            return &b[1..];
-        }
-    }
-    b
+    b.get(VARHDRSZ..).unwrap_or(&[])
 }
 
 /// `like_fixed_prefix(patt_const, case_insensitive, collation, &prefix,
