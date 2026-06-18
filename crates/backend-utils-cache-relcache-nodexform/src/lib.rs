@@ -30,7 +30,6 @@ use mcx::{Mcx, MemoryContext};
 use types_catalog::pg_publication::{PublicationDesc, PublishGencolsType};
 use types_core::primitive::Oid;
 use types_error::{PgResult, ERROR};
-use types_nodes::nodes::Node;
 use types_rel::Relation;
 
 use backend_utils_error::ereport;
@@ -80,23 +79,19 @@ fn pull_attrs_from_node_text<'mcx>(
 ) -> PgResult<alloc::vec::Vec<i32>> {
     let node = read_seam::string_to_node::call(mcx, text)?;
     let mut out = alloc::vec::Vec::new();
-    match &*node {
-        // A `List*` of expressions (the normal `indexprs` shape and the
-        // implicit-AND `indpred` list).
-        Node::List(elems) => {
-            for elem in elems.iter() {
-                if let Some(e) = elem.as_expr() {
-                    let bms = var_seam::pull_varattnos::call(mcx, e, 1)?;
-                    out.extend(bms_members(bms.as_deref()));
-                }
+    // A `List*` of expressions (the normal `indexprs` shape and the
+    // implicit-AND `indpred` list).
+    if let Some(elems) = node.as_list() {
+        for elem in elems.iter() {
+            if let Some(e) = elem.as_expr() {
+                let bms = var_seam::pull_varattnos::call(mcx, e, 1)?;
+                out.extend(bms_members(bms.as_deref()));
             }
         }
+    } else if let Some(e) = node.as_expr() {
         // A bare expression (defensive — `pull_varattnos` over the single node).
-        Node::Expr(e) => {
-            let bms = var_seam::pull_varattnos::call(mcx, e, 1)?;
-            out.extend(bms_members(bms.as_deref()));
-        }
-        _ => {}
+        let bms = var_seam::pull_varattnos::call(mcx, e, 1)?;
+        out.extend(bms_members(bms.as_deref()));
     }
     Ok(out)
 }
