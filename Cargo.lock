@@ -9226,7 +9226,9 @@ dependencies = [
  "backend-executor-execProcnode-seams",
  "backend-executor-execTuples-seams",
  "backend-executor-execUtils-seams",
+ "backend-executor-instrument-seams",
  "backend-executor-nodeAppend-seams",
+ "backend-executor-nodeForeignscan-seams",
  "backend-nodes-core-seams",
  "backend-storage-ipc-latch-seams",
  "backend-storage-ipc-shmem-seams",
@@ -9449,6 +9451,7 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-execparallel",
+ "types-nodes",
 ]
 
 [[package]]

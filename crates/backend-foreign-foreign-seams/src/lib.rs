@@ -27,7 +27,8 @@ use types_foreigncmds::{
     ImportRawStmt, RawStmtHandle, ServerOwnerRow, ServerUpdateRow,
 };
 use types_nodes::{
-    AsyncRequest, EStateData, FdwRoutine, ForeignScanState, ParallelContext, ParallelWorkerContext,
+    AsyncRequestData, EStateData, FdwRoutine, ForeignScanState, ParallelContext,
+    ParallelWorkerContext,
 };
 
 /* ---- read accessors (foreign/foreign.c) ---- */
@@ -535,23 +536,38 @@ seam_core::seam!(
 
 // --- async-execution callbacks ---
 //
-// The three async entry points take `AsyncRequest *areq` and reach the
-// requestee's `fdwroutine` via `node = (ForeignScanState *) areq->requestee`.
-// In the owned tree the requestee is reached inside the seam.
+// The three async entry points run `node->fdwroutine->ForeignAsync{Request,
+// ConfigureWait,Notify}(areq)` where `node = (ForeignScanState *)
+// areq->requestee`. The owned tree never reconstructs the `areq->requestee`
+// raw back-pointer (the dispatch resolves the requestee `ForeignScanState`
+// before reaching here), so the requestee node is passed by reference (value
+// carrier, replacing the opaque `requestee`) alongside the `AsyncRequest`
+// payload. The `fdwroutine` callbacks are FDW-extension-owned, so these stay
+// uninstalled until such an extension lands (sanctioned FLOOR).
 
 seam_core::seam!(
-    /// `((ForeignScanState *) areq->requestee)->fdwroutine->ForeignAsyncRequest(areq)`.
-    pub fn foreign_async_request(areq: &mut AsyncRequest) -> PgResult<()>
+    /// `node->fdwroutine->ForeignAsyncRequest(areq)` — `node` is the requestee
+    /// `ForeignScanState`; `areq` is the request record it fills.
+    pub fn foreign_async_request<'mcx>(
+        node: &mut ForeignScanState<'mcx>,
+        areq: &mut AsyncRequestData,
+    ) -> PgResult<()>
 );
 
 seam_core::seam!(
-    /// `...->fdwroutine->ForeignAsyncConfigureWait(areq)`.
-    pub fn foreign_async_configure_wait(areq: &mut AsyncRequest) -> PgResult<()>
+    /// `node->fdwroutine->ForeignAsyncConfigureWait(areq)`.
+    pub fn foreign_async_configure_wait<'mcx>(
+        node: &mut ForeignScanState<'mcx>,
+        areq: &mut AsyncRequestData,
+    ) -> PgResult<()>
 );
 
 seam_core::seam!(
-    /// `...->fdwroutine->ForeignAsyncNotify(areq)`.
-    pub fn foreign_async_notify(areq: &mut AsyncRequest) -> PgResult<()>
+    /// `node->fdwroutine->ForeignAsyncNotify(areq)`.
+    pub fn foreign_async_notify<'mcx>(
+        node: &mut ForeignScanState<'mcx>,
+        areq: &mut AsyncRequestData,
+    ) -> PgResult<()>
 );
 
 seam_core::seam!(

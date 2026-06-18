@@ -185,8 +185,8 @@ pub use tuptable::{
 };
 pub use funcapi::Tuplestorestate;
 pub use nodeforeigncustom::{
-    AsyncRequest, CustomExecMethods, CustomScan, CustomScanState, FdwRoutine, ForeignScan,
-    ForeignScanState, Material, MaterialState, ParallelContext, ParallelWorkerContext,
+    CustomExecMethods, CustomScan, CustomScanState, FdwRoutine, ForeignScan, ForeignScanState,
+    Material, MaterialState, ParallelContext, ParallelWorkerContext,
 };
 pub use nodememoize::{
     CacheEntry, CachedTuple, MemoStatus, Memoize, MemoizeCache, MemoizeInstrumentation,

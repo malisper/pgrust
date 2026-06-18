@@ -40,6 +40,8 @@ use backend_executor_execPartition_seams as execPartition;
 use backend_executor_execProcnode_seams as execProcnode;
 use backend_executor_execTuples_seams as execTuples;
 use backend_executor_execUtils_seams as execUtils;
+use backend_executor_instrument_seams as instrument;
+use backend_executor_nodeForeignscan_seams as nodeForeignscan;
 use backend_nodes_core_seams as bms;
 use backend_storage_ipc_latch_seams as latch;
 use backend_storage_ipc_shmem_seams as shmem;
@@ -100,6 +102,14 @@ pub fn init_seams() {
     backend_executor_nodeAppend_seams::exec_append_initialize_worker::set(
         exec_append_initialize_worker_shim,
     );
+
+    // execAsync.c is re-homed here (the Append node is its sole caller). The C
+    // dispatch reaches the requestee/requestor through `areq`'s raw
+    // back-pointers; the owned versions reach them through the `AppendStateData`
+    // and the request's `request_index`.
+    execAsync::exec_async_request::set(ExecAsyncRequest);
+    execAsync::exec_async_configure_wait::set(ExecAsyncConfigureWait);
+    execAsync::exec_async_notify::set(ExecAsyncNotify);
 }
 
 // ---------------------------------------------------------------------------
@@ -1015,14 +1025,16 @@ fn ExecAppendAsyncBegin<'mcx>(
         if i < 0 {
             break;
         }
-        let areq = node
-            .as_asyncrequests
-            .get_mut(i as usize)
-            .and_then(|slot| slot.as_deref_mut())
-            .ok_or_else(|| elog_error("Append async request is missing"))?;
-        debug_assert!(areq.request_index == i);
-        debug_assert!(!areq.callback_pending);
-        execAsync::exec_async_request::call(areq, estate)?;
+        {
+            let areq = node
+                .as_asyncrequests
+                .get(i as usize)
+                .and_then(|slot| slot.as_deref())
+                .ok_or_else(|| elog_error("Append async request is missing"))?;
+            debug_assert!(areq.request_index == i);
+            debug_assert!(!areq.callback_pending);
+        }
+        execAsync::exec_async_request::call(node, i, estate)?;
     }
     Ok(())
 }
@@ -1104,12 +1116,7 @@ fn ExecAppendAsyncRequest<'mcx>(
         if i < 0 {
             break;
         }
-        let areq = node
-            .as_asyncrequests
-            .get_mut(i as usize)
-            .and_then(|slot| slot.as_deref_mut())
-            .ok_or_else(|| elog_error("Append async request is missing"))?;
-        execAsync::exec_async_request::call(areq, estate)?;
+        execAsync::exec_async_request::call(node, i, estate)?;
     }
     bms::bms_free::call(needrequest);
 
@@ -1160,12 +1167,7 @@ fn ExecAppendAsyncEventWait<'mcx>(
             .map(|areq| areq.callback_pending)
             .unwrap_or(false);
         if pending {
-            let areq = node
-                .as_asyncrequests
-                .get_mut(i as usize)
-                .and_then(|slot| slot.as_deref_mut())
-                .ok_or_else(|| elog_error("Append async request is missing"))?;
-            execAsync::exec_async_configure_wait::call(areq, estate)?;
+            execAsync::exec_async_configure_wait::call(node, i, estate)?;
         }
     }
 
@@ -1219,15 +1221,16 @@ fn ExecAppendAsyncEventWait<'mcx>(
                 // Mark it as no longer needing a callback. We must do this
                 // before dispatching the callback in case the callback resets
                 // the flag.
-                let areq = node
+                if let Some(areq) = node
                     .as_asyncrequests
                     .get_mut(request_index as usize)
                     .and_then(|slot| slot.as_deref_mut())
-                    .ok_or_else(|| elog_error("Append async request is missing"))?;
-                areq.callback_pending = false;
+                {
+                    areq.callback_pending = false;
+                }
 
                 // Do the actual work.
-                execAsync::exec_async_notify::call(areq, estate)?;
+                execAsync::exec_async_notify::call(node, request_index, estate)?;
             }
         }
 
@@ -1238,6 +1241,210 @@ fn ExecAppendAsyncEventWait<'mcx>(
         }
     }
     Ok(())
+}
+
+// ===========================================================================
+// `execAsync.c` — re-homed onto the Append node (its sole caller). The C
+// dispatch switches on `nodeTag(areq->requestee)` and reaches the requestee
+// `PlanState` / requestor `AppendState` through `areq`'s raw back-pointers; the
+// owned versions reach them through the `AppendStateData` and the request's
+// `request_index` (== the requestee's index in `appendplans`/`as_asyncrequests`,
+// see `ExecAppendAsyncBegin`). Only `ForeignScanState` is async-capable.
+// ===========================================================================
+
+/// Detach the request record at `request_index` from the node so the requestee
+/// (`appendplans[request_index]`) and the requestor (`node`) can be borrowed
+/// alongside it. The C `AsyncRequest *areq` is a separately-`palloc`ed struct,
+/// so detaching is borrow-only bookkeeping (the slot is restored before return).
+fn take_async_request<'mcx>(
+    node: &mut AppendStateData<'mcx>,
+    request_index: i32,
+) -> PgResult<PgBox<'mcx, AsyncRequestData>> {
+    node.as_asyncrequests
+        .get_mut(request_index as usize)
+        .and_then(Option::take)
+        .ok_or_else(|| elog_error("Append async request is missing"))
+}
+
+/// `n` for the C `InstrStopNode(instr, TupIsNull(areq->result) ? 0.0 : 1.0)`.
+fn tuples_for_result(areq: &AsyncRequestData) -> f64 {
+    if areq.result.is_none() {
+        0.0
+    } else {
+        1.0
+    }
+}
+
+/// Run the requestee `ForeignScanState`'s async callback, or `elog(ERROR)` for a
+/// non-async-capable requestee (the C `switch (nodeTag(areq->requestee))`
+/// default). `dispatch` selects which of the three `ExecAsyncForeignScan*`
+/// entry points runs.
+fn dispatch_requestee<'mcx>(
+    requestee: &mut types_nodes::PlanStateNode<'mcx>,
+    areq: &mut AsyncRequestData,
+    which: AsyncDispatch,
+) -> PgResult<()> {
+    match requestee {
+        types_nodes::PlanStateNode::ForeignScan(fss) => match which {
+            AsyncDispatch::Request => {
+                nodeForeignscan::exec_async_foreignscan_request::call(fss, areq)
+            }
+            AsyncDispatch::ConfigureWait => {
+                nodeForeignscan::exec_async_foreignscan_configure_wait::call(fss, areq)
+            }
+            AsyncDispatch::Notify => {
+                nodeForeignscan::exec_async_foreignscan_notify::call(fss, areq)
+            }
+        },
+        other => Err(PgError::error(alloc::format!(
+            "unrecognized node type: {}",
+            other.tag().0
+        ))
+        .with_sqlstate(ERRCODE_INTERNAL_ERROR)),
+    }
+}
+
+/// Which `ExecAsyncForeignScan*` callback [`dispatch_requestee`] runs.
+#[derive(Clone, Copy)]
+enum AsyncDispatch {
+    Request,
+    ConfigureWait,
+    Notify,
+}
+
+/// `ExecAsyncRequest(areq)` (execAsync.c) — asynchronously request a tuple from
+/// the requestee `node.appendplans[request_index]`.
+pub fn ExecAsyncRequest<'mcx>(
+    node: &mut AppendStateData<'mcx>,
+    request_index: i32,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    let mut areq = take_async_request(node, request_index)?;
+    let res = (|| {
+        let requestee = node
+            .appendplans
+            .get_mut(request_index as usize)
+            .and_then(Option::as_deref_mut)
+            .ok_or_else(|| elog_error("Append async requestee is missing"))?;
+
+        // if (areq->requestee->chgParam != NULL) ExecReScan(areq->requestee);
+        if requestee.ps_head().chgParam.is_some() {
+            execAmi::exec_re_scan::call(requestee, estate)?;
+        }
+
+        // must provide our own instrumentation support
+        if let Some(instr) = requestee.ps_head_mut().instrument.as_deref_mut() {
+            instrument::instr_start_node::call(instr)?;
+        }
+
+        dispatch_requestee(requestee, &mut areq, AsyncDispatch::Request)?;
+
+        // ExecAsyncResponse(areq) -> ExecAsyncAppendResponse(areq). C reads
+        // `TupIsNull(areq->result)` for the instrumentation tuple count *after*
+        // the response (which never clears `areq->result`); the owned response
+        // moves the result out, so the count is captured here beforehand.
+        let n = tuples_for_result(&areq);
+        ExecAsyncAppendResponse(mcx, node, &mut areq)?;
+
+        // must provide our own instrumentation support
+        if let Some(requestee) = node
+            .appendplans
+            .get_mut(request_index as usize)
+            .and_then(Option::as_deref_mut)
+        {
+            if let Some(instr) = requestee.ps_head_mut().instrument.as_deref_mut() {
+                instrument::instr_stop_node::call(instr, n)?;
+            }
+        }
+        Ok(())
+    })();
+    *node
+        .as_asyncrequests
+        .get_mut(request_index as usize)
+        .ok_or_else(|| elog_error("Append async request index out of range"))? = Some(areq);
+    res
+}
+
+/// `ExecAsyncConfigureWait(areq)` (execAsync.c) — give the requestee a chance to
+/// register its file descriptor in the caller's wait-event set.
+pub fn ExecAsyncConfigureWait<'mcx>(
+    node: &mut AppendStateData<'mcx>,
+    request_index: i32,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let _ = estate;
+    let mut areq = take_async_request(node, request_index)?;
+    let res = (|| {
+        let requestee = node
+            .appendplans
+            .get_mut(request_index as usize)
+            .and_then(Option::as_deref_mut)
+            .ok_or_else(|| elog_error("Append async requestee is missing"))?;
+
+        if let Some(instr) = requestee.ps_head_mut().instrument.as_deref_mut() {
+            instrument::instr_start_node::call(instr)?;
+        }
+
+        dispatch_requestee(requestee, &mut areq, AsyncDispatch::ConfigureWait)?;
+
+        if let Some(instr) = requestee.ps_head_mut().instrument.as_deref_mut() {
+            instrument::instr_stop_node::call(instr, 0.0)?;
+        }
+        Ok(())
+    })();
+    *node
+        .as_asyncrequests
+        .get_mut(request_index as usize)
+        .ok_or_else(|| elog_error("Append async request index out of range"))? = Some(areq);
+    res
+}
+
+/// `ExecAsyncNotify(areq)` (execAsync.c) — notify the requestee that the file
+/// descriptor it was waiting on has become ready.
+pub fn ExecAsyncNotify<'mcx>(
+    node: &mut AppendStateData<'mcx>,
+    request_index: i32,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    let mut areq = take_async_request(node, request_index)?;
+    let res = (|| {
+        let requestee = node
+            .appendplans
+            .get_mut(request_index as usize)
+            .and_then(Option::as_deref_mut)
+            .ok_or_else(|| elog_error("Append async requestee is missing"))?;
+
+        if let Some(instr) = requestee.ps_head_mut().instrument.as_deref_mut() {
+            instrument::instr_start_node::call(instr)?;
+        }
+
+        dispatch_requestee(requestee, &mut areq, AsyncDispatch::Notify)?;
+
+        // ExecAsyncResponse(areq) -> ExecAsyncAppendResponse(areq); capture the
+        // instrumentation tuple count before the response moves the result out
+        // (C reads `TupIsNull(areq->result)` afterward — the response never
+        // clears it).
+        let n = tuples_for_result(&areq);
+        ExecAsyncAppendResponse(mcx, node, &mut areq)?;
+
+        if let Some(requestee) = node
+            .appendplans
+            .get_mut(request_index as usize)
+            .and_then(Option::as_deref_mut)
+        {
+            if let Some(instr) = requestee.ps_head_mut().instrument.as_deref_mut() {
+                instrument::instr_stop_node::call(instr, n)?;
+            }
+        }
+        Ok(())
+    })();
+    *node
+        .as_asyncrequests
+        .get_mut(request_index as usize)
+        .ok_or_else(|| elog_error("Append async request index out of range"))? = Some(areq);
+    res
 }
 
 /// `ExecAsyncAppendResponse(areq)` — receive a response from an asynchronous

@@ -10,7 +10,7 @@ use types_core::primitive::{Index, Oid};
 use types_error::PgResult;
 
 use crate::bitmapset::Bitmapset;
-use crate::execnodes::{Opaque, PlanStateData, RriId, ScanStateData, SlotId};
+use crate::execnodes::{Opaque, PlanStateData, RriId, ScanStateData};
 use crate::funcapi::Tuplestorestate;
 use crate::nodeindexscan::Scan;
 use crate::nodes::CmdType;
@@ -316,26 +316,11 @@ pub struct ParallelWorkerContext {
     pub toc: Opaque,
 }
 
-/// `AsyncRequest` (executor/execnodes.h), trimmed to the fields the async
-/// foreign-scan entry points consume. `requestee` is a `PlanState *` into the
-/// executor tree (resolved to a `ForeignScanState` in C); in the owned model
-/// the requestee node and its `fdwroutine` are reached through the FDW seam,
-/// so it is carried opaquely.
-#[derive(Debug, Default)]
-pub struct AsyncRequest {
-    /// `struct PlanState *requestee` — node from which a tuple is wanted
-    /// (the `ForeignScanState` whose `fdwroutine` async callbacks are run).
-    pub requestee: Opaque,
-    /// `int request_index` — scratch space for the requestor.
-    pub request_index: i32,
-    /// `bool callback_pending` — callback is needed.
-    pub callback_pending: bool,
-    /// `bool request_complete` — request complete, result valid.
-    pub request_complete: bool,
-    /// `TupleTableSlot *result` — result (`None` / an empty slot = no more
-    /// tuples).
-    pub result: Option<SlotId>,
-}
+// `AsyncRequest` (executor/execnodes.h) is modeled by
+// [`crate::nodeappend::AsyncRequestData`]: the owned tree never reconstructs the
+// `requestor`/`requestee` raw back-pointers, so the requestee `ForeignScanState`
+// is passed by reference to the async dispatch (see the execAsync seam) rather
+// than carried opaquely on the request record.
 
 // ===========================================================================
 // Custom-scan vocabulary (nodes/plannodes.h, executor/execnodes.h,
