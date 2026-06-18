@@ -1697,15 +1697,34 @@ pub fn fireRIRrules<'mcx>(
         }
     }
 
-    // Recurse into sub-link subqueries (the '\''static keystone).
+    // Recurse into sublink subqueries, too.  But we already did the ones in
+    // the rtable and cteList (QTW_IGNORE_RC_SUBQUERIES).
     if parsetree.hasSubLinks {
-        return Err(elog(
-            "fireRIRrules: sub-link sub-query RIR descent (fireRIRonSubLink) is blocked \
-             on the '\\''static SubLink.subselect keystone (the lifetime-free Expr embeds \
-             a SubLink's sub-Query at '\\''static, which cannot be reopened/rebound with the \
-             engine's Mcx<'\\''mcx>); the sub-link-free SELECT-from-view spine is supported \
-             (owner: backend-rewrite-rewritehandler)",
-        ));
+        let mut sublink_row_security = false;
+        let mut err: Option<types_error::PgError> = None;
+        {
+            let mut walker = |node: &mut Node| {
+                fireRIRonSubLink(
+                    mcx,
+                    node,
+                    active_rirs,
+                    &mut sublink_row_security,
+                    &mut err,
+                )
+            };
+            backend_nodes_core::node_walker::query_tree_mutator(
+                &mut parsetree,
+                &mut walker,
+                backend_nodes_core::node_walker::QTW_IGNORE_RT_SUBQUERIES
+                    | backend_nodes_core::node_walker::QTW_IGNORE_CTE_SUBQUERIES,
+            );
+        }
+        if let Some(e) = err {
+            return Err(e);
+        }
+        // Make sure the query is marked as having row security if any of its
+        // sublinks do.
+        parsetree.hasRowSecurity |= sublink_row_security;
     }
 
     // Apply RLS policies (the row-security pass).
@@ -1718,6 +1737,62 @@ pub fn fireRIRrules<'mcx>(
     }
 
     Ok(parsetree)
+}
+
+/// `fireRIRonSubLink(node, context)` (rewriteHandler.c:1957) — apply
+/// [`fireRIRrules`] to each `SubLink` (subselect in expression) found in the
+/// given tree. Although this has the form of a walker, we cheat and modify the
+/// `SubLink` nodes in-place. We must take control at the `SubLink` node in order
+/// to replace its `subselect` link with the possibly-rewritten subquery. We do
+/// NOT recurse into `Query` nodes, because [`fireRIRrules`] already processed
+/// subselects of subselects (the `expression_tree_walker_mut` `Query` arm
+/// returns false). The C walker's `bool` return becomes the early-abort signal
+/// carried alongside an `err` out-param (the `bool` shape can't return
+/// `PgResult`).
+fn fireRIRonSubLink<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: &mut Node,
+    active_rirs: &mut Vec<Oid>,
+    has_row_security: &mut bool,
+    err: &mut Option<types_error::PgError>,
+) -> bool {
+    if err.is_some() {
+        return true;
+    }
+    if let Node::Expr(Expr::SubLink(sub)) = node {
+        // Do what we came for: take the embedded 'static subselect, rebind it
+        // to 'mcx (the data is mcx-owned — same lifetime-only relabel used by
+        // make_subplan / query_box_into_static), rewrite, and re-embed.
+        if let Some(sub_static) = sub.subselect.take() {
+            // 'static -> 'mcx: lifetime-parameter-only erase of mcx-owned data.
+            let sub_mcx: PgBox<'mcx, Query<'mcx>> =
+                unsafe { core::mem::transmute(sub_static) };
+            let subquery: Query<'mcx> = PgBox::into_inner(sub_mcx);
+            match fireRIRrules(mcx, subquery, active_rirs) {
+                Ok(rewritten) => {
+                    *has_row_security |= rewritten.hasRowSecurity;
+                    match types_nodes::primnodes::query_box_into_static(rewritten, mcx) {
+                        Ok(boxed) => sub.subselect = Some(boxed),
+                        Err(e) => {
+                            *err = Some(e);
+                            return true;
+                        }
+                    }
+                }
+                Err(e) => {
+                    *err = Some(e);
+                    return true;
+                }
+            }
+        }
+        // Fall through to process lefthand args of SubLink (testexpr).
+    }
+
+    // Do NOT recurse into Query nodes; expression_tree_walker_mut's Query arm
+    // returns false, matching the C QTW behavior.
+    backend_nodes_core::node_walker::expression_tree_walker_mut(node, &mut |n| {
+        fireRIRonSubLink(mcx, n, active_rirs, has_row_security, err)
+    })
 }
 
 /// Whether the query has already been flagged as needing row-security handling.
