@@ -16,6 +16,8 @@ types-fmgr = { path = "../types-fmgr" }
 backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 types-error = { path = "../types-error" }
 types-tuple = { path = "../types-tuple" }
+types-execparallel = { path = "../types-execparallel" }
+backend-executor-execParallel-support-seams = { path = "../backend-executor-execParallel-support-seams" }
 common-hashfn = { path = "../common-hashfn" }
 backend-utils-adt-scalar-seams = { path = "../backend-utils-adt-scalar-seams" }
 backend-utils-adt-datum-seams = { path = "../backend-utils-adt-datum-seams" }

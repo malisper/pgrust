@@ -126,6 +126,16 @@ pub fn init_seams() {
     });
     s::reset_debug_query_string::set(|| globals::set_debug_query_string(None));
 
+    // `debug_query_string = queryDesc->sourceText` on the parallel executor's
+    // `execParallel-support` surface (execParallel.c `ParallelQueryMain`). C
+    // assigns the long-lived worker `sourceText` pointer; the owned model carries
+    // the text by value, so leak it for process lifetime to obtain the matching
+    // `&'static str` (the worker's query text outlives the assignment, as C's
+    // does).
+    backend_executor_execParallel_support_seams::set_debug_query_string::set(|s| {
+        globals::set_debug_query_string(Some(alloc::boxed::Box::leak(s.into_boxed_str())));
+    });
+
     // --- F6: command-line switches + GUC reads ---
     s::process_postgres_switches::set(|argv, ctx| {
         // The seam contract returns `PgResult<()>`; the captured dbname is only

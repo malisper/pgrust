@@ -456,6 +456,26 @@ pub fn shm_toc_estimate_keys(e: ShmTocEstimatorHandle, nkeys: i32) {
     });
 }
 
+/// `shm_toc_estimate_chunk(&pcxt->estimator, size)` keyed directly by the
+/// live `ParallelContext` — the execParallel-support contract surface used by
+/// the per-node `Exec*Estimate` hooks. Fallible (`add_size` overflow
+/// `ereport(ERROR)`s in C).
+pub fn pcxt_estimate_chunk(pcxt: ParallelContextHandle, size: Size) -> PgResult<()> {
+    with_globals(|g| {
+        let c = g.get_mut(pcxt);
+        backend_storage_ipc_shm_toc::shm_toc_estimate_chunk(&mut c.estimator, size)
+    })
+}
+
+/// `shm_toc_estimate_keys(&pcxt->estimator, keys)` keyed directly by the live
+/// `ParallelContext`.
+pub fn pcxt_estimate_keys(pcxt: ParallelContextHandle, keys: Size) -> PgResult<()> {
+    with_globals(|g| {
+        let c = g.get_mut(pcxt);
+        backend_storage_ipc_shm_toc::shm_toc_estimate_keys(&mut c.estimator, keys)
+    })
+}
+
 /// Run `f` on the live real `ShmToc` and segment base for the context owning
 /// `toc`. Panics on a `toc` for a context whose DSM has not been created
 /// (a programming error — `shm_toc_*` is never called before the segment is
@@ -2183,6 +2203,31 @@ fn lookup_parallel_worker_function(libraryname: &str, funcname: &str) -> PgResul
 pub fn init_seams() {
     install_dsm_helper_seams();
     install_fps_driver_seams();
+    install_execparallel_support_pcxt_seams();
+}
+
+/// Install the orthogonal `ParallelContext`/`shm_toc` estimator accessors that
+/// the parallel-aware executor nodes' `Exec*Estimate` hooks reach across the
+/// `execParallel-support` seam. These address the DSM-owned live
+/// `ParallelContext` this crate owns.
+fn install_execparallel_support_pcxt_seams() {
+    use backend_executor_execParallel_support_seams as sup;
+    sup::pcxt_nworkers::set(pcxt_nworkers);
+    sup::pcxt_estimate_chunk::set(pcxt_estimate_chunk);
+    sup::pcxt_estimate_keys::set(pcxt_estimate_keys);
+
+    // `InstrInit(&GetInstrumentationArray(sei)[i], opts)`: this crate owns the
+    // `SharedExecutorInstrumentation` DSM header (and thus `instrument_offset`),
+    // so it resolves the array base; `InstrInit` itself is the instrument crate's
+    // body. `GetInstrumentationArray(sei) == (char*)sei + sei->instrument_offset`.
+    sup::instr_init_slot::set(|sei, i, instrument_options| {
+        let array_base = sei.0 + read_sei_header(sei).instrument_offset as usize;
+        // SAFETY: the leader sized the chunk for `num_workers * num_plan_nodes`
+        // `Instrumentation` slots starting at `instrument_offset`; `i` is in range.
+        unsafe {
+            backend_executor_instrument::instr_init_slot_at(array_base, i, instrument_options)
+        }
+    });
 }
 
 /// Install the thin DSM helpers that bridge the `DsmSegmentHandle` carrier (its

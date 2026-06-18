@@ -564,6 +564,69 @@ pub fn datum_restore(cursor: *mut u8) -> (ScalarWord, bool, *mut u8) {
     }
 }
 
+/// `datumRestore(&cursor, &isnull)` over the unified value enum: read one datum
+/// from `cursor`, returning the value-model [`Datum`] (`ByVal` for NULL/by-value,
+/// `ByRef` for a by-reference payload) and the advanced cursor.
+///
+/// C palloc's the by-reference copy in `CurrentMemoryContext` (the parallel
+/// worker's per-query context). Here the restored bytes land in a leaked
+/// process-lifetime context (`restore_top_mcx`), mirroring the DSA wire path's
+/// `dsa_top_mcx` long-lived owner — sound `'static` because the restored param
+/// outlives any single call and is read back through a re-shortened lifetime.
+///
+/// SAFETY: `cursor` points at a `datumSerialize`/`datum_serialize_v` image with
+/// at least the indicated bytes remaining.
+pub unsafe fn datum_restore_v(cursor: *mut u8) -> (Datum<'static>, bool, *mut u8) {
+    // memcpy(&header, *start_address, sizeof(int)); *start_address += sizeof(int);
+    let mut hbytes = [0u8; 4];
+    core::ptr::copy_nonoverlapping(cursor as *const u8, hbytes.as_mut_ptr(), 4);
+    let header = i32::from_ne_bytes(hbytes);
+    let mut cur = cursor.add(4);
+
+    if header == -2 {
+        // NULL.
+        return (Datum::null(), true, cur);
+    }
+
+    if header == -1 {
+        // Pass-by-value: sizeof(Datum) bytes follow.
+        let mut wbytes = [0u8; core::mem::size_of::<usize>()];
+        core::ptr::copy_nonoverlapping(cur as *const u8, wbytes.as_mut_ptr(), wbytes.len());
+        cur = cur.add(wbytes.len());
+        return (Datum::ByVal(usize::from_ne_bytes(wbytes)), false, cur);
+    }
+
+    // Pass-by-reference: copy `header` bytes (Assert header > 0) into the
+    // long-lived restore context as the canonical `ByRef` payload.
+    debug_assert!(header > 0);
+    let n = header as usize;
+    let src = core::slice::from_raw_parts(cur as *const u8, n);
+    let bytes = slice_in(restore_top_mcx(), src).expect("datumRestore palloc");
+    cur = cur.add(n);
+    (Datum::ByRef(bytes), false, cur)
+}
+
+/// The process-lifetime context backing `datum_restore_v`'s by-reference copies
+/// (C: `palloc` in the worker's per-query `CurrentMemoryContext`). Leaked for
+/// process lifetime so the `'static` payloads outlive any call; mirrors the DSA
+/// wire path's `dsa_top_mcx`.
+fn restore_top_mcx() -> Mcx<'static> {
+    use core::cell::Cell;
+    use mcx::MemoryContext;
+    thread_local! {
+        static TOP: Cell<Option<&'static MemoryContext>> = const { Cell::new(None) };
+    }
+    TOP.with(|t| {
+        if let Some(cx) = t.get() {
+            return cx.mcx();
+        }
+        let cx: &'static MemoryContext =
+            alloc::boxed::Box::leak(alloc::boxed::Box::new(MemoryContext::new("datum restore")));
+        t.set(Some(cx));
+        cx.mcx()
+    })
+}
+
 // ===========================================================================
 // The `*_v` value-model lane (backend-utils-adt-datum-seams `*_v` variants).
 //
@@ -736,8 +799,70 @@ pub fn init_seams() {
     backend_utils_adt_datum_seams::datum_serialize::set(datum_serialize);
     backend_utils_adt_datum_seams::datum_restore::set(datum_restore);
 
+    install_execparallel_support_datum_seams();
+
     // Register this crate's SQL-callable fmgr builtins (C: `fmgr_builtins[]`).
     fmgr_builtins::register_datum_core_builtins();
+}
+
+/// Install the `datum.c` (de)serialization the parallel executor reaches over
+/// the `execParallel-support` seam, all over the canonical value-model `Datum`
+/// enum. `SerializeCursor` is a real address into the mapped DSM segment (==
+/// C's `char *start_address`); the seams thread it as they read/write.
+fn install_execparallel_support_datum_seams() {
+    use backend_executor_execParallel_support_seams as sup;
+    use types_execparallel::SerializeCursor;
+
+    // `datumEstimateSpace(prm->value, prm->isnull, typByVal, typLen)`.
+    sup::datum_estimate_space::set(|prm| {
+        datum_estimate_space_v(&prm.value, prm.isnull, prm.typ_byval, prm.typ_len as i32)
+    });
+    // `datumSerialize(prm->value, prm->isnull, typByVal, typLen, &cursor)`.
+    sup::datum_serialize::set(|prm, cursor| {
+        // SAFETY: `cursor` has at least `datum_estimate_space_v(prm)` writable
+        // bytes (the leader reserved the chunk).
+        let advanced =
+            datum_serialize_v(&prm.value, prm.isnull, prm.typ_byval, prm.typ_len as i32, cursor.0 as *mut u8);
+        SerializeCursor(advanced as usize)
+    });
+    // `memcpy(cursor, &v, sizeof(int)); cursor += sizeof(int)`.
+    sup::datum_serialize_i32::set(|cursor, v| {
+        // SAFETY: 4 writable bytes remain at `cursor` (the chunk was sized to
+        // include the per-param/count int).
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                v.to_ne_bytes().as_ptr(),
+                cursor.0 as *mut u8,
+                core::mem::size_of::<i32>(),
+            );
+        }
+        SerializeCursor(cursor.0 + core::mem::size_of::<i32>())
+    });
+    // `memcpy(&v, cursor, sizeof(int)); cursor += sizeof(int)`.
+    sup::datum_restore_i32::set(|cursor| {
+        let mut buf = [0u8; core::mem::size_of::<i32>()];
+        // SAFETY: `cursor` addresses a `datum_serialize_i32` image with 4 bytes.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                cursor.0 as *const u8,
+                buf.as_mut_ptr(),
+                core::mem::size_of::<i32>(),
+            );
+        }
+        (
+            i32::from_ne_bytes(buf),
+            SerializeCursor(cursor.0 + core::mem::size_of::<i32>()),
+        )
+    });
+    // `datumRestore(&cursor, &isnull)` over the value-model enum.
+    sup::datum_restore::set(|cursor| {
+        // SAFETY: `cursor` addresses a `datum_serialize_v` image.
+        let (value, isnull, advanced) = unsafe { datum_restore_v(cursor.0 as *mut u8) };
+        (
+            types_execparallel::RestoredParam { value, isnull },
+            SerializeCursor(advanced as usize),
+        )
+    });
 }
 
 mod fmgr_builtins;

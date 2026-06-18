@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 backend-executor-nodeSubplan-seams = { path = "../backend-executor-nodeSubplan-seams" }
+backend-executor-execParallel-support-seams = { path = "../backend-executor-execParallel-support-seams" }
 backend-executor-execAmi-seams = { path = "../backend-executor-execAmi-seams" }
 backend-executor-execProcnode-seams = { path = "../backend-executor-execProcnode-seams" }
 backend-executor-execMain-seams = { path = "../backend-executor-execMain-seams" }

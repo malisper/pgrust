@@ -3044,6 +3044,8 @@ version = "0.0.0"
 dependencies = [
  "backend-access-transam-parallel-rt-seams",
  "backend-access-transam-parallel-seams",
+ "backend-executor-execParallel-support-seams",
+ "backend-executor-instrument",
  "backend-postmaster-bgworker-seams",
  "backend-storage-ipc-dsm-core",
  "backend-storage-ipc-latch-seams",
@@ -8702,6 +8704,7 @@ dependencies = [
  "backend-executor-execAmi-seams",
  "backend-executor-execJunk",
  "backend-executor-execMain-seams",
+ "backend-executor-execParallel-support-seams",
  "backend-executor-execProcnode-seams",
  "backend-executor-execUtils",
  "backend-executor-execUtils-seams",
@@ -8715,6 +8718,7 @@ dependencies = [
  "types-acl",
  "types-core",
  "types-error",
+ "types-execparallel",
  "types-nodes",
  "types-scan",
  "types-snapshot",
@@ -9097,6 +9101,7 @@ dependencies = [
  "backend-access-table-tableam",
  "backend-executor-execExpr-seams",
  "backend-executor-execMain-seams",
+ "backend-executor-execParallel-support-seams",
  "backend-executor-execTuples-seams",
  "backend-executor-execUtils-seams",
  "backend-executor-nodeModifyTable-seams",
@@ -9149,6 +9154,7 @@ dependencies = [
 name = "backend-executor-instrument"
 version = "0.0.0"
 dependencies = [
+ "backend-executor-execParallel-support-seams",
  "backend-executor-instrument-seams",
  "mcx",
  "portability-instr-time",
@@ -10193,6 +10199,7 @@ dependencies = [
  "backend-executor-execExpr-seams",
  "backend-executor-execGrouping-seams",
  "backend-executor-execMain-seams",
+ "backend-executor-execParallel-support-seams",
  "backend-executor-execProcnode-seams",
  "backend-executor-execTuples-seams",
  "backend-executor-execUtils-seams",
@@ -11271,6 +11278,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-common-detoast-seams",
  "backend-access-transam-xact-seams",
+ "backend-executor-execParallel-support-seams",
  "backend-nodes-core-seams",
  "backend-nodes-core-tidbitmap-seams",
  "backend-nodes-makefuncs-seams",
@@ -16767,6 +16775,7 @@ dependencies = [
  "backend-access-transam-xact-seams",
  "backend-commands-async",
  "backend-commands-user-seams",
+ "backend-executor-execParallel-support-seams",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
  "backend-libpq-pqsignal",
@@ -17442,6 +17451,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-transam-xact-seams",
  "backend-commands-variable-seams",
+ "backend-executor-execParallel-support-seams",
  "backend-libpq-be-secure-seams",
  "backend-postmaster-postmaster-seams",
  "backend-storage-ipc-dsm-core-seams",
@@ -19280,6 +19290,7 @@ dependencies = [
 name = "backend-utils-adt-scalar-datum-core"
 version = "0.0.0"
 dependencies = [
+ "backend-executor-execParallel-support-seams",
  "backend-utils-adt-datum-seams",
  "backend-utils-adt-misc2-seams",
  "backend-utils-adt-scalar-seams",
@@ -19289,6 +19300,7 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
+ "types-execparallel",
  "types-fmgr",
  "types-tuple",
 ]

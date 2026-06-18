@@ -27,6 +27,7 @@ types-pathnodes = { path = "../types-pathnodes" }
 types-fmgr = { path = "../types-fmgr" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
+backend-executor-execParallel-support-seams = { path = "../backend-executor-execParallel-support-seams" }
 backend-nodes-makefuncs-seams = { path = "../backend-nodes-makefuncs-seams" }
 backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
 backend-nodes-core-tidbitmap-seams = { path = "../backend-nodes-core-tidbitmap-seams" }

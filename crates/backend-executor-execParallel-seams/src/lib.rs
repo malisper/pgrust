@@ -49,7 +49,7 @@ seam_core::seam!(pub fn exec_init_parallel_plan_owned<'mcx>(
     mcx: Mcx<'mcx>,
     planstate: &mut types_nodes::PlanStateNode<'mcx>,
     estate: &mut types_nodes::EStateData<'mcx>,
-    send_params: Option<&Bitmapset>,
+    send_params: Option<&Bitmapset<'mcx>>,
     nworkers: i32,
     tuples_needed: TuplesNeeded,
 ) -> PgResult<ParallelExecutorInfo<'mcx>>);
@@ -62,5 +62,5 @@ seam_core::seam!(pub fn exec_parallel_reinitialize_owned<'mcx>(
     planstate: &mut types_nodes::PlanStateNode<'mcx>,
     estate: &mut types_nodes::EStateData<'mcx>,
     pei: &mut ParallelExecutorInfo<'mcx>,
-    send_params: Option<&Bitmapset>,
+    send_params: Option<&Bitmapset<'mcx>>,
 ) -> PgResult<()>);

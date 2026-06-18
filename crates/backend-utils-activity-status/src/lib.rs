@@ -1283,6 +1283,11 @@ pub fn init_seams() {
     seams::pgstat_bestart_final::set(pgstat_bestart_final);
     seams::pgstat_report_activity_idle::set(seam_impls::pgstat_report_activity_idle);
     seams::pgstat_report_activity_running::set(seam_impls::pgstat_report_activity_running);
+    // Same body on the parallel executor's `execParallel-support` surface
+    // (execParallel.c `pgstat_report_activity(STATE_RUNNING, query)`).
+    backend_executor_execParallel_support_seams::pgstat_report_activity_running::set(
+        seam_impls::pgstat_report_activity_running,
+    );
     seams::pgstat_report_query_id::set(|query_id, force| pgstat_report_query_id(query_id as i64, force));
     seams::pgstat_report_plan_id::set(|plan_id, force| pgstat_report_plan_id(plan_id as i64, force));
     seams::pgstat_report_xact_timestamp::set(pgstat_report_xact_timestamp);

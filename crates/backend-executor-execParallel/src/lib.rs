@@ -507,12 +507,12 @@ pub fn ExecInitParallelPlan<'mcx>(
     mcx: Mcx<'mcx>,
     planstate: &mut PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
-    send_params: Option<&Bitmapset>,
+    send_params: Option<&Bitmapset<'mcx>>,
     nworkers: i32,
     tuples_needed: TuplesNeeded,
 ) -> PgResult<ParallelExecutorInfo<'mcx>> {
     let empty_bms;
-    let send_params: &Bitmapset = match send_params {
+    let send_params: &Bitmapset<'mcx> = match send_params {
         Some(b) => b,
         None => {
             empty_bms = Bitmapset { words: PgVec::new_in(mcx) };
@@ -527,7 +527,7 @@ pub fn ExecInitParallelPlan<'mcx>(
 
     // Force any initplan outputs to be evaluated, if they weren't already.
     let per_tuple_econtext = sup::get_per_tuple_expr_context_owned::call(estate)?;
-    sup::exec_set_param_plan_multi::call(send_params, per_tuple_econtext)?;
+    sup::exec_set_param_plan_multi::call(send_params, per_tuple_econtext, estate)?;
 
     // Allocate object for return value (palloc0 defaults).
     let mut pei = ParallelExecutorInfo {
@@ -787,10 +787,10 @@ pub fn ExecParallelReinitialize<'mcx>(
     planstate: &mut PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
     pei: &mut ParallelExecutorInfo<'mcx>,
-    send_params: Option<&Bitmapset>,
+    send_params: Option<&Bitmapset<'mcx>>,
 ) -> PgResult<()> {
     let empty_bms;
-    let send_params: &Bitmapset = match send_params {
+    let send_params: &Bitmapset<'mcx> = match send_params {
         Some(b) => b,
         None => {
             empty_bms = Bitmapset { words: PgVec::new_in(mcx) };
@@ -808,7 +808,7 @@ pub fn ExecParallelReinitialize<'mcx>(
     // Force any initplan outputs to be evaluated, if they weren't already.
     //   EState *estate = planstate->state;  (threaded in by the caller)
     let per_tuple_econtext = sup::get_per_tuple_expr_context_owned::call(estate)?;
-    sup::exec_set_param_plan_multi::call(send_params, per_tuple_econtext)?;
+    sup::exec_set_param_plan_multi::call(send_params, per_tuple_econtext, estate)?;
 
     parallel::reinitialize_parallel_dsm(pcxt)?;
     pei.tqueue = ExecParallelSetupTupleQueues(mcx, pcxt, true)?;

@@ -1166,6 +1166,16 @@ pub fn init_seams() {
     seams::mark_param_execplan_pending::set(mark_param_execplan_pending);
     seams::clear_param_execplan::set(clear_param_execplan);
     seams::param_execplan_pending::set(param_execplan_pending);
+
+    // The parallel executor's `execParallel-support` PARAM_EXEC reads/writes and
+    // `QueryDesc` lifecycle accessors — all over the owned `EState`/`QueryDesc`
+    // this crate drives.
+    use backend_executor_execParallel_support_seams as sup;
+    sup::param_exec_value_owned::set(param_exec_value_owned);
+    sup::set_param_exec_value_owned::set(set_param_exec_value_owned);
+    sup::query_desc_source_text_owned::set(|qd| Ok(qd.source_text_owned()));
+    sup::set_query_desc_jit_flags_owned::set(|qd, jit_flags| qd.set_jit_flags(jit_flags));
+    sup::query_desc_estate_has_jit_owned::set(|qd| qd.estate_has_jit());
 }
 
 // ===========================================================================
@@ -1217,4 +1227,86 @@ fn param_execplan_pending(estate: &types_nodes::EStateData<'_>, paramid: i32) ->
         .es_param_exec_vals
         .get(paramid as usize)
         .is_some_and(|prm| prm.execPlan.is_some())
+}
+
+/// The process-lifetime context backing the `'static` `ParamExecValue` /
+/// restored-param the parallel executor's `execParallel-support` seams carry
+/// (the serialized value is read out, copied through the DSM chunk, and dropped;
+/// its lifetime is unconstrained at the seam boundary). Mirrors the DSA wire
+/// path's `dsa_top_mcx`.
+fn param_exec_top_mcx() -> mcx::Mcx<'static> {
+    use core::sync::atomic::{AtomicPtr, Ordering};
+    // Process-lifetime leaked context (no_std: a lazily-initialized atomic
+    // pointer in place of a `thread_local!`; PG backends are single-threaded so
+    // the init race is benign — a loser leaks one extra context).
+    static TOP: AtomicPtr<mcx::MemoryContext> = AtomicPtr::new(core::ptr::null_mut());
+    let mut p = TOP.load(Ordering::Acquire);
+    if p.is_null() {
+        let leaked: &'static mut mcx::MemoryContext = alloc::boxed::Box::leak(
+            alloc::boxed::Box::new(mcx::MemoryContext::new("execParallel param_exec")),
+        );
+        let new = leaked as *mut mcx::MemoryContext;
+        match TOP.compare_exchange(core::ptr::null_mut(), new, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => p = new,
+            Err(existing) => p = existing,
+        }
+    }
+    // SAFETY: `p` is a non-null pointer to a leaked, never-freed `MemoryContext`.
+    unsafe { (*p).mcx() }
+}
+
+/// `&estate->es_param_exec_vals[paramid]` value/isnull + the resolved
+/// `(typByVal, typLen)` for `list_nth_oid(paramExecTypes, paramid)`
+/// (execParallel.c `EstimateParamExecSpace`/`SerializeParamExecParams`). With no
+/// type OID, C assumes by-value (`typLen = sizeof(Datum)`, `typByVal = true`),
+/// like `copyParamList`.
+fn param_exec_value_owned(
+    estate: &mut types_nodes::EStateData<'_>,
+    paramid: i32,
+) -> types_execparallel::ParamExecValue<'static> {
+    let prm = estate
+        .es_param_exec_vals
+        .get(paramid as usize)
+        .expect("PARAM_EXEC id in range");
+    let value = prm
+        .value
+        .clone_in(param_exec_top_mcx())
+        .expect("clone PARAM_EXEC value");
+    let isnull = prm.isnull;
+
+    // typeOid = list_nth_oid(estate->es_plannedstmt->paramExecTypes, paramid);
+    let type_oid = estate
+        .es_plannedstmt
+        .as_ref()
+        .and_then(|p| p.paramExecTypes.as_ref())
+        .and_then(|types| types.get(paramid as usize).copied())
+        .unwrap_or(types_core::InvalidOid);
+
+    let (typ_len, typ_byval) = if type_oid != types_core::InvalidOid {
+        backend_utils_cache_lsyscache_seams::get_typlenbyval::call(type_oid)
+            .expect("get_typlenbyval")
+    } else {
+        // No type OID: assume by-value, like copyParamList does.
+        (core::mem::size_of::<usize>() as i16, true)
+    };
+
+    types_execparallel::ParamExecValue {
+        value,
+        isnull,
+        typ_byval,
+        typ_len,
+    }
+}
+
+/// `prm = &es_param_exec_vals[paramid]; prm->value = ...; prm->isnull = ...;
+/// prm->execPlan = NULL;` (execParallel.c `RestoreParamExecParams`).
+fn set_param_exec_value_owned<'mcx>(
+    estate: &mut types_nodes::EStateData<'mcx>,
+    paramid: i32,
+    restored: types_execparallel::RestoredParam<'mcx>,
+) {
+    let prm = exec_param_mut(estate, paramid).expect("PARAM_EXEC id in range");
+    prm.value = restored.value;
+    prm.isnull = restored.isnull;
+    prm.execPlan = None;
 }
