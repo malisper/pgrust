@@ -1359,7 +1359,7 @@ fn get_into_pool<'mcx>(
     slot: SlotId,
 ) -> PgResult<bool> {
     let ts = sort_state_mut(node, state)?;
-    tuplesort::tuplesort_gettupleslot::call(ts, forward, copy, estate.slot_mut(slot))
+    tuplesort::tuplesort_gettupleslot::call(ts, forward, copy, estate.slot_data_mut(slot))
 }
 
 /// `ExecCopySlot(group_pivot, transfer_tuple)` — both standalone.

@@ -1159,10 +1159,10 @@ fn exec_clear_tuple_slot(_slot: types_nodes::SlotId) -> PgResult<()> {
 /// these per-trans slots at ExecInitAgg is not threaded into this path yet).
 fn resolve_slot_mut<'a, 'mcx>(
     _slot: types_nodes::SlotId,
-) -> &'a mut types_nodes::TupleTableSlot<'mcx> {
+) -> &'a mut types_nodes::SlotData<'mcx> {
     panic!(
         "backend-executor-nodeAgg::process_ordered_aggregate_multi: tuplesort_gettupleslot \
-         needs the EState slot-pool lookup to resolve the sortslot id to a TupleTableSlot; \
+         needs the EState slot-pool lookup to resolve the sortslot id to a SlotData; \
          that pool is owned by the not-yet-ported execTuples/EState surface"
     );
 }

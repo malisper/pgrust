@@ -3776,7 +3776,7 @@ fn tuplesort_gettupleslot_impl<'mcx>(
     state: &mut TuplesortStateImpl<'mcx>,
     forward: bool,
     _copy: bool,
-    slot: &mut TupleTableSlot<'mcx>,
+    slot: &mut SlotData<'mcx>,
 ) -> PgResult<bool> {
     let mcx = state.mcx();
     let stup = tuplesort_gettuple_common(state, forward)?;
@@ -3786,16 +3786,14 @@ fn tuplesort_gettupleslot_impl<'mcx>(
             tuple: Some(TupleBody::Minimal(mtup)),
             ..
         }) => {
-            // ExecStoreMinimalTuple(mtup, slot, copy): deform into the slot's
-            // value arrays (the owned virtual-slot representation). `copy` is a
-            // no-op here — the fetched tuple is already an owned copy out of the
-            // engine arena.
-            store_minimal_into_slot(mcx, slot, &mtup)?;
+            // ExecStoreMinimalTuple(mtup, slot, copy). `copy` is a no-op here —
+            // the fetched tuple is already an owned copy out of the engine arena.
+            store_minimal_into_slot(mcx, slot, mtup)?;
             Ok(true)
         }
         // Non-minimal body / no body at end of sort: clear the slot.
         _ => {
-            clear_slot(slot);
+            clear_slot(slot.base_mut());
             Ok(false)
         }
     }
@@ -3836,29 +3834,57 @@ fn tuplesort_getdatum_impl<'mcx>(
 /// descriptor governs the column count.
 fn store_minimal_into_slot<'mcx>(
     mcx: Mcx<'mcx>,
-    slot: &mut TupleTableSlot<'mcx>,
-    mtup: &FormedMinimalTuple<'mcx>,
+    slot: &mut SlotData<'mcx>,
+    mtup: FormedMinimalTuple<'mcx>,
 ) -> PgResult<()> {
-    let tup_desc = slot
-        .tts_tupleDescriptor
-        .as_ref()
-        .ok_or_else(|| PgError::error("tuplesort gettupleslot: slot has no descriptor"))?;
-    let blob = heaptuple::flat::minimal_tuple_to_flat(mcx, mtup).map_err(flat_err)?;
-    let cols = heaptuple::flat::heap_deform_minimal_tuple_flat(mcx, &blob, tup_desc)
-        .map_err(flat_err)?;
+    match slot {
+        // `ExecStoreMinimalTuple` into a minimal-tuple slot (the Sort node's
+        // result slot, created with &TTSOpsMinimalTuple): store the MinimalTuple
+        // into mslot->mintuple + set up the minhdr/tuple heap-tuple view and clear
+        // tts_nvalid (lazy deform). This is what makes a later
+        // ExecCopySlotHeapTuple / get_minimal_tuple read the *current* tuple — a
+        // virtual-style deform-into-tts_values leaves mintuple stale.
+        SlotData::Minimal(mslot) => {
+            mslot.base.mark_not_empty();
+            mslot.base.tts_nvalid = 0;
+            mslot.off = 0;
+            mslot.mintuple = Some(mtup);
+            // mslot->minhdr / mslot->tuple = heap-tuple-shaped view over the body.
+            let view = heaptuple::heap_tuple_from_minimal_tuple(
+                mcx,
+                mslot.mintuple.as_ref().unwrap(),
+            )?;
+            mslot.minhdr = view.tuple.as_ref().clone();
+            mslot.tuple = Some(view);
+            Ok(())
+        }
+        // Other slot kinds (e.g. a standalone virtual slot): deform the
+        // MinimalTuple into the slot's value/null arrays (the owned virtual-slot
+        // representation, ExecStoreVirtualTuple-equivalent).
+        other => {
+            let base = other.base_mut();
+            let tup_desc = base
+                .tts_tupleDescriptor
+                .as_ref()
+                .ok_or_else(|| PgError::error("tuplesort gettupleslot: slot has no descriptor"))?;
+            let blob = heaptuple::flat::minimal_tuple_to_flat(mcx, &mtup).map_err(flat_err)?;
+            let cols = heaptuple::flat::heap_deform_minimal_tuple_flat(mcx, &blob, tup_desc)
+                .map_err(flat_err)?;
 
-    let natts = tup_desc.natts as usize;
-    let mut values: PgVec<'mcx, Datum<'mcx>> = vec_with_capacity_in(mcx, natts)?;
-    let mut isnull: PgVec<'mcx, bool> = vec_with_capacity_in(mcx, natts)?;
-    for (d, n) in cols.iter() {
-        values.push(d.clone_in(mcx)?);
-        isnull.push(*n);
+            let natts = tup_desc.natts as usize;
+            let mut values: PgVec<'mcx, Datum<'mcx>> = vec_with_capacity_in(mcx, natts)?;
+            let mut isnull: PgVec<'mcx, bool> = vec_with_capacity_in(mcx, natts)?;
+            for (d, n) in cols.iter() {
+                values.push(d.clone_in(mcx)?);
+                isnull.push(*n);
+            }
+            base.tts_values = values;
+            base.tts_isnull = isnull;
+            base.tts_nvalid = tup_desc.natts as AttrNumber;
+            base.mark_not_empty();
+            Ok(())
+        }
     }
-    slot.tts_values = values;
-    slot.tts_isnull = isnull;
-    slot.tts_nvalid = tup_desc.natts as AttrNumber;
-    slot.mark_not_empty();
-    Ok(())
 }
 
 /// `ExecClearTuple(slot)` over the owned slot: empty the payload arrays + mark
@@ -4103,13 +4129,13 @@ fn seam_gettupleslot<'mcx>(
     state: &mut Tuplesortstate<'mcx>,
     forward: bool,
     copy: bool,
-    slot: &mut TupleTableSlot,
+    slot: &mut SlotData<'mcx>,
 ) -> PgResult<bool> {
     with_sort_mut(state, |s| {
         // SAFETY: re-tie the slot's lifetime to the engine's universal `'mcx`;
         // the engine writes freshly-allocated (engine-arena) values into the
         // slot, which lives at least as long as the carrier. Mirrors C aliasing.
-        let slot: &mut TupleTableSlot = unsafe { core::mem::transmute(slot) };
+        let slot: &mut SlotData = unsafe { core::mem::transmute(slot) };
         tuplesort_gettupleslot_impl(s, forward, copy, slot)
     })
 }
@@ -4197,8 +4223,8 @@ fn seam_gettupleslot_standalone<'mcx>(
         // SAFETY: re-tie the slot's lifetime to the engine's universal `'mcx`;
         // the engine writes freshly-allocated values into the slot, which lives
         // at least as long as the carrier. Mirrors the pool `seam_gettupleslot`.
-        let base: &mut TupleTableSlot = unsafe { core::mem::transmute(slot.base_mut()) };
-        tuplesort_gettupleslot_impl(s, forward, copy, base)
+        let slot: &mut SlotData = unsafe { core::mem::transmute(slot) };
+        tuplesort_gettupleslot_impl(s, forward, copy, slot)
     })
 }
 

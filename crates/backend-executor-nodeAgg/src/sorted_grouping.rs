@@ -39,49 +39,68 @@ fn reset_expr_context_tmp<'mcx>(
     Ok(())
 }
 
-/// `ExecQual(state, econtext)` (executor/executor.h) over the Agg's owned
-/// `tmpcontext`. Owned by `backend-executor-execExpr`; the existing
-/// `exec_qual` seam addresses the context by `EcxtId`, but the scaffold carries
-/// `tmpcontext` as an owned `ExprContext`, so this path is not yet wired.
-#[inline]
-fn exec_qual_tmpcontext(_state: &ExprState) -> PgResult<bool> {
-    panic!(
-        "ExecQual over the Agg tmpcontext (executor/execExpr.c) is not yet \
-         wired: backend-executor-execExpr owns it"
-    )
+/// `ExecQual(aggstate->phase->eqfunctions[eqidx], tmpcontext)` over the Agg's
+/// per-input-tuple `tmpcontext` (an `EcxtId`). Delegates to the installed
+/// `exec_qual` seam owned by `backend-executor-execExpr`.
+fn exec_qual_eqfunction<'mcx>(
+    aggstate: &mut AggStateData<'mcx>,
+    eqidx: usize,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    let tmpcontext = aggstate
+        .tmpcontext
+        .expect("exec_qual_eqfunction: tmpcontext not set");
+    with_phase_eqfunction(aggstate, eqidx, |state| {
+        backend_executor_execExpr_seams::exec_qual::call(state, tmpcontext, estate)
+    })
 }
 
-/// `ExecQualAndReset(state, econtext)` (executor/executor.h): like `ExecQual`
-/// but resets the per-tuple memory afterwards. Owned by
-/// `backend-executor-execExpr`; not yet wired (see `exec_qual_tmpcontext`).
-#[inline]
-fn exec_qual_and_reset_tmpcontext(_state: &ExprState) -> PgResult<bool> {
-    panic!(
-        "ExecQualAndReset over the Agg tmpcontext (executor/execExpr.c) is not \
-         yet wired: backend-executor-execExpr owns it"
-    )
+/// `ExecQualAndReset(aggstate->phase->eqfunctions[eqidx], tmpcontext)`: like
+/// `exec_qual_eqfunction` but resets the per-tuple memory afterwards.
+fn exec_qual_and_reset_eqfunction<'mcx>(
+    aggstate: &mut AggStateData<'mcx>,
+    eqidx: usize,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    let tmpcontext = aggstate
+        .tmpcontext
+        .expect("exec_qual_and_reset_eqfunction: tmpcontext not set");
+    with_phase_eqfunction(aggstate, eqidx, |state| {
+        backend_executor_execExpr_seams::exec_qual_and_reset::call(state, tmpcontext, estate)
+    })
 }
 
-/// `ExecCopySlotHeapTuple(slot)` (executor/tuptable.h): materialize the slot's
-/// tuple as a freshly palloc'd `HeapTuple`. Owned by
-/// `backend-executor-execTuples`; not yet wired through a seam.
-#[inline]
-fn exec_copy_slot_heap_tuple(_slot: SlotId) -> PgResult<()> {
-    panic!(
-        "ExecCopySlotHeapTuple (executor/tuptable.h) is not yet wired: \
-         backend-executor-execTuples owns it"
-    )
-}
-
-/// `ExecForceStoreHeapTuple(tuple, slot, shouldFree)` (executor/tuptable.h):
-/// store a heap tuple into a slot, converting if necessary. Owned by
-/// `backend-executor-execTuples`; not yet wired through a seam.
-#[inline]
-fn exec_force_store_heap_tuple(_slot: SlotId) -> PgResult<()> {
-    panic!(
-        "ExecForceStoreHeapTuple (executor/tuptable.h) is not yet wired: \
-         backend-executor-execTuples owns it"
-    )
+/// Take the phase's compiled `eqfunctions[eqidx]` `ExprState` out of the node,
+/// run `f` against it (mutably, as the seam requires), then put it back. The
+/// temporary take avoids a long borrow of `aggstate` across the seam call.
+fn with_phase_eqfunction<'mcx, R>(
+    aggstate: &mut AggStateData<'mcx>,
+    eqidx: usize,
+    f: impl FnOnce(&mut ExprState<'mcx>) -> R,
+) -> R {
+    let phase = aggstate.phase as usize;
+    let mut state = {
+        let phases = aggstate
+            .phases
+            .as_mut()
+            .expect("with_phase_eqfunction: phases not built");
+        phases[phase]
+            .eqfunctions
+            .as_mut()
+            .expect("with_phase_eqfunction: phase eqfunctions not built")[eqidx]
+            .take()
+            .expect("with_phase_eqfunction: phase eqfunction not compiled")
+    };
+    let r = f(&mut state);
+    let phases = aggstate
+        .phases
+        .as_mut()
+        .expect("with_phase_eqfunction: phases not built");
+    phases[phase]
+        .eqfunctions
+        .as_mut()
+        .expect("with_phase_eqfunction: phase eqfunctions not built")[eqidx] = Some(state);
+    r
 }
 
 /// `ResetTupleHashIterator(htable, iter)` (executor/execGrouping.c): reset the
@@ -203,7 +222,7 @@ pub fn agg_retrieve_direct<'mcx>(
         };
 
         // tmpcontext->ecxt_innertuple = econtext->ecxt_outertuple;
-        let econtext_outertuple = econtext_outertuple_slot(aggstate, estate);
+        let econtext_outertuple = econtext_outertuple_slot(econtext_id, estate);
         set_tmpcontext_innertuple(aggstate, estate, econtext_outertuple);
 
         // node->aggstrategy of the current phase.
@@ -215,10 +234,11 @@ pub fn agg_retrieve_direct<'mcx>(
                 && aggstate.projected_set != -1
                 && aggstate.projected_set < (num_grouping_sets - 1)
                 && next_set_size > 0
-                && !exec_qual_and_reset_tmpcontext(phase_eqfunction(
+                && !exec_qual_and_reset_eqfunction(
                     aggstate,
                     (next_set_size - 1) as usize,
-                ))?);
+                    estate,
+                )?);
 
         if take_new_group_branch {
             aggstate.projected_set += 1;
@@ -333,12 +353,14 @@ pub fn agg_retrieve_direct<'mcx>(
                     if node_aggstrategy != AGG_PLAIN && node_numcols > 0 {
                         // tmpcontext->ecxt_innertuple = firstSlot;
                         set_tmpcontext_innertuple(aggstate, estate, Some(first_slot));
-                        if !exec_qual_tmpcontext(phase_eqfunction(
-                            aggstate,
-                            (node_numcols - 1) as usize,
-                        ))? {
+                        if !exec_qual_eqfunction(aggstate, (node_numcols - 1) as usize, estate)? {
                             // aggstate->grp_firstTuple = ExecCopySlotHeapTuple(outerslot);
-                            exec_copy_slot_heap_tuple(outerslot.unwrap())?;
+                            let copied =
+                                backend_executor_execTuples_seams::exec_copy_slot_heap_tuple::call(
+                                    estate,
+                                    outerslot.unwrap(),
+                                )?;
+                            aggstate.grp_first_tuple = Some(copied);
                             break;
                         }
                     }
@@ -347,7 +369,7 @@ pub fn agg_retrieve_direct<'mcx>(
 
             // Use the representative input tuple for any references to
             // non-aggregated input columns. econtext->ecxt_outertuple = firstSlot;
-            set_econtext_outertuple(aggstate, estate, Some(first_slot));
+            set_econtext_outertuple(econtext_id, estate, Some(first_slot));
         }
 
         debug_assert!(aggstate.projected_set >= 0);
@@ -355,7 +377,7 @@ pub fn agg_retrieve_direct<'mcx>(
         let current_set = aggstate.projected_set;
 
         // prepare_projection_slot(aggstate, econtext->ecxt_outertuple, currentSet);
-        let proj_input = econtext_outertuple_slot(aggstate, estate)
+        let proj_input = econtext_outertuple_slot(econtext_id, estate)
             .expect("agg_retrieve_direct: econtext->ecxt_outertuple not set");
         crate::finalize::prepare_projection_slot(aggstate, proj_input, current_set, estate)?;
 
@@ -435,38 +457,13 @@ fn phase_gset_length(aggstate: &AggStateData<'_>, idx: usize) -> i32 {
     }
 }
 
-/// `aggstate->phase->eqfunctions[idx]`.
-fn phase_eqfunction<'a, 'mcx>(
-    aggstate: &'a AggStateData<'mcx>,
-    idx: usize,
-) -> &'a ExprState<'mcx> {
-    let phases = aggstate
-        .phases
-        .as_ref()
-        .expect("agg_retrieve_direct: phases not built");
-    phases[aggstate.phase as usize]
-        .eqfunctions
-        .as_ref()
-        .expect("agg_retrieve_direct: phase eqfunctions not built")[idx]
-        .as_deref()
-        .expect("agg_retrieve_direct: phase eqfunction not compiled")
-}
-
 /// `econtext->ecxt_outertuple` where econtext is the node's per-output-tuple
-/// context (`aggstate->ss.ps.ps_ExprContext`).
+/// context (`aggstate->ss.ps.ps_ExprContext`, addressed by `econtext_id`).
 fn econtext_outertuple_slot<'mcx>(
-    aggstate: &AggStateData<'mcx>,
+    econtext_id: types_nodes::EcxtId,
     estate: &EStateData<'mcx>,
 ) -> Option<SlotId> {
-    // The per-output econtext is carried through the EState pool by id
-    // (`ps_ExprContext`); its outertuple link is reached by resolving the id.
-    // We model `econtext->ecxt_outertuple` as the outer tuple last linked into
-    // the tmpcontext, matching the C data flow in this function (the value
-    // originates from econtext and is mirrored into tmpcontext->ecxt_innertuple
-    // at the top of each loop).
-    aggstate
-        .tmpcontext
-        .and_then(|id| estate.ecxt(id).ecxt_outertuple)
+    estate.ecxt(econtext_id).ecxt_outertuple
 }
 
 /// `tmpcontext->ecxt_innertuple = slot`.
@@ -491,18 +488,15 @@ fn set_tmpcontext_outertuple<'mcx>(
     }
 }
 
-/// `econtext->ecxt_outertuple = slot` for the per-output-tuple context. The
-/// per-output econtext is owned by the EState pool (`ps_ExprContext`); the local
-/// mirror onto the tmpcontext keeps the in-function data flow faithful (the
-/// value is consumed by `prepare_projection_slot`).
+/// `econtext->ecxt_outertuple = slot` for the per-output-tuple context
+/// (`ps_ExprContext`, addressed by `econtext_id`). The value is consumed by
+/// `prepare_projection_slot`.
 fn set_econtext_outertuple<'mcx>(
-    aggstate: &mut AggStateData<'mcx>,
+    econtext_id: types_nodes::EcxtId,
     estate: &mut EStateData<'mcx>,
     slot: Option<SlotId>,
 ) {
-    if let Some(id) = aggstate.tmpcontext {
-        estate.ecxt_mut(id).ecxt_outertuple = slot;
-    }
+    estate.ecxt_mut(econtext_id).ecxt_outertuple = slot;
 }
 
 /// `initialize_aggregates(aggstate, pergroups, numReset)` over the node's

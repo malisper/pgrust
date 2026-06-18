@@ -201,6 +201,11 @@ pub fn ExecSort<'mcx>(
                     Some(id) => id,
                 };
                 //   tuplesort_puttupleslot(tuplesortstate, slot);
+                // C's tuplesort_puttupleslot does ExecCopySlotMinimalTuple(slot),
+                // which slot_getallattrs(slot) first; the owned puttupleslot seam
+                // forms the MinimalTuple from the slot's deformed value/null arrays,
+                // so the slot must be fully deconstructed before the put.
+                let _ = execTuples::slot_getallattrs_by_id::call(estate, slot_id)?;
                 tuplesort::tuplesort_puttupleslot::call(
                     &mut tuplesortstate,
                     estate.slot(slot_id),
@@ -281,7 +286,7 @@ pub fn ExecSort<'mcx>(
             ts,
             forward,
             false,
-            estate.slot_mut(slot),
+            estate.slot_data_mut(slot),
         )?;
         Ok(produced)
     }

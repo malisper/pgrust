@@ -232,18 +232,15 @@ pub fn exec_distinct_step<'mcx>(
     let a0_null = nulls[0];
     let a1_null = nulls[1];
 
+    // Write through `write_cell`, which routes `STATE_RESULT_CELL` (== id 0) to
+    // `state.resvalue`/`state.resnull` (read by EEOP_DONE_RETURN); the raw
+    // `result_cells.set` would land in the dead `cells[0]` slot.
     if a0_null && a1_null {
         // Both NULL: DISTINCT -> false, NOT DISTINCT -> true.
-        state.result_cells.set(
-            resvalue_id,
-            ResultCell { value: DatumV::from_bool(not_distinct), isnull: false },
-        );
+        crate::interp_loop::write_cell(state, resvalue_id, DatumV::from_bool(not_distinct), false);
     } else if a0_null || a1_null {
         // Only one NULL: DISTINCT -> true, NOT DISTINCT -> false.
-        state.result_cells.set(
-            resvalue_id,
-            ResultCell { value: DatumV::from_bool(!not_distinct), isnull: false },
-        );
+        crate::interp_loop::write_cell(state, resvalue_id, DatumV::from_bool(!not_distinct), false);
     } else {
         // Neither null: apply the equality function. fcinfo->isnull = false;
         // eqresult = op->d.func.fn_addr(fcinfo). The canonical (by-ref-capable)
@@ -257,9 +254,7 @@ pub fn exec_distinct_step<'mcx>(
         } else {
             DatumV::from_bool(!eqval.as_bool())
         };
-        state
-            .result_cells
-            .set(resvalue_id, ResultCell { value, isnull });
+        crate::interp_loop::write_cell(state, resvalue_id, value, isnull);
     }
     Ok(())
 }
@@ -311,20 +306,17 @@ pub fn exec_nullif_step<'mcx>(
             function_call_invoke_datum::call(mcx, fn_oid, collation, &args)?;
 
         // if (!fcinfo->isnull && DatumGetBool(result)) -> equal -> return NULL.
+        // Write through `write_cell` so a STATE_RESULT_CELL target reaches
+        // `state.resvalue`/`state.resnull` (read by EEOP_DONE_RETURN).
         if !isnull && result_val.as_bool() {
-            state
-                .result_cells
-                .set(resvalue_id, ResultCell { value: DatumV::null(), isnull: true });
+            crate::interp_loop::write_cell(state, resvalue_id, DatumV::null(), true);
             return Ok(());
         }
     }
 
     // Arguments aren't equal (or one was NULL): return the first one.
     // *op->resvalue = save_arg0; *op->resnull = fcinfo->args[0].isnull;
-    state.result_cells.set(
-        resvalue_id,
-        ResultCell { value: save_arg0, isnull: nulls[0] },
-    );
+    crate::interp_loop::write_cell(state, resvalue_id, save_arg0, nulls[0]);
     Ok(())
 }
 

@@ -149,7 +149,7 @@ seam_core::seam!(
         state: &mut Tuplesortstate<'mcx>,
         forward: bool,
         copy: bool,
-        slot: &mut TupleTableSlot,
+        slot: &mut SlotData<'mcx>,
     ) -> PgResult<bool>
 );
 

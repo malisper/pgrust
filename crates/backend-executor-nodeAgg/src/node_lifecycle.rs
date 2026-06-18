@@ -146,7 +146,7 @@ pub fn fetch_input_tuple<'mcx>(
             sort_in,
             true,
             false,
-            estate.slot_mut(sort_slot),
+            estate.slot_data_mut(sort_slot),
         )?;
         if !found {
             return Ok(None);
