@@ -19,6 +19,8 @@ types-tuple = { path = "../types-tuple" }
 
 # inward seams installed by this crate
 backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
+# clauses.c outward seams this crate owns (typcache reads)
+backend-optimizer-util-clauses-seams = { path = "../backend-optimizer-util-clauses-seams" }
 
 # outward owner seams (mirror-PG-and-panic until the owners land)
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }

@@ -249,28 +249,6 @@ seam_core::seam!(
 
 /* ---- syscache: pg_proc cost/rows support (selfuncs.c surface) ------- */
 
-seam_core::seam!(
-    /// `add_function_cost(root, funcid, node, &cost)` (plancat.c body): consults
-    /// `pg_proc.procost` / a `SupportRequestCost` support function; returns the
-    /// `(startup, per_tuple)` to *add* to the caller's QualCost. The owner is the
-    /// fmgr-support layer (support-function dispatch). `Err` carries the catalog
-    /// lookup ereport.
-    pub fn add_function_cost_impl(
-        root: &PlannerInfo,
-        funcid: Oid,
-        node: Option<NodeId>,
-    ) -> PgResult<(f64, f64)>
-);
-seam_core::seam!(
-    /// `get_function_rows(root, funcid, node)` (plancat.c body): consults
-    /// `pg_proc.prorows` / a `SupportRequestRows` support function.
-    pub fn get_function_rows_impl(
-        root: &PlannerInfo,
-        funcid: Oid,
-        node: Option<NodeId>,
-    ) -> PgResult<f64>
-);
-
 /* ---- selectivity fmgr dispatch (plancat.c bodies) ------------------- */
 
 seam_core::seam!(
@@ -498,10 +476,6 @@ seam_core::seam!(
 
 /* ---- transaction / recovery / catalog state ------------------------ */
 
-seam_core::seam!(
-    /// `RecoveryInProgress()` (xlog.c).
-    pub fn recovery_in_progress() -> bool
-);
 seam_core::seam!(
     /// `IgnoreSystemIndexes` (guc) `&& IsSystemRelation(relation)` (catalog.c)
     /// for the relation — whether to ignore its indexes.

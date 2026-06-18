@@ -241,7 +241,8 @@ pub fn get_relation_info<'mcx>(
     }
 
     // Temporary and unlogged relations are inaccessible during recovery.
-    if relation.rd_rel.relpersistence != RELPERSISTENCE_PERMANENT && ext::recovery_in_progress::call()
+    if relation.rd_rel.relpersistence != RELPERSISTENCE_PERMANENT
+        && backend_access_transam_xlog_seams::recovery_in_progress::call()
     {
         return Err(types_error::PgError::error(
             "cannot access temporary or unlogged relations during recovery",
@@ -1622,6 +1623,11 @@ pub fn init_seams() {
     });
 
     backend_optimizer_util_clauses_seams::get_function_rows::set(seam_get_function_rows);
+    // `get_function_rows` over a by-value SRF node (the clauses-seams contract:
+    // no `root`, no arena handle). plancat's `get_function_rows` body consults
+    // `pg_proc.prorows` / a `SupportRequestRows` support function; this is the
+    // node-by-value shape `seam_get_function_rows` delegates to.
+    ext::get_function_rows_by_node::set(seam_get_function_rows_by_node);
     backend_optimizer_path_costsize_seams::add_function_cost::set(seam_add_function_cost);
     backend_optimizer_path_costsize_seams::get_relation_data_width::set(
         seam_get_relation_data_width,
@@ -1685,6 +1691,24 @@ fn seam_get_function_rows(funcid: Oid, node: &Expr) -> PgResult<f64> {
     // and a `SupportRequestRows` support function; with no `root` and no arena
     // handle, dispatch goes through the support layer keyed on the by-value node.
     ext::get_function_rows_by_node::call(funcid, node)
+}
+
+/// `get_function_rows(root, funcid, node)` (plancat.c) over a by-value SRF node.
+/// C: read `pg_proc.prorows`, asserting `proretset`; the `prosupport` path runs
+/// a `SupportRequestRows` support function (unported tree-wide; mirror-and-panic
+/// — unreachable for current query paths where `prosupport == InvalidOid`).
+fn seam_get_function_rows_by_node(funcid: Oid, _node: &Expr) -> PgResult<f64> {
+    let form = syscache_seams::proc_cost_rows::call(funcid)?;
+    debug_assert!(form.proretset);
+    if form.prosupport != InvalidOid {
+        panic!(
+            "get_function_rows: prosupport={} rows-support path needs the \
+             SupportRequestRows planner-support fmgr machinery (unported \
+             workspace-wide)",
+            form.prosupport
+        );
+    }
+    Ok(form.prorows as f64)
 }
 
 fn seam_add_function_cost(

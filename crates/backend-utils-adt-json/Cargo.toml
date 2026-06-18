@@ -15,6 +15,7 @@ types-error = { path = "../types-error" }
 types-tuple = { path = "../types-tuple" }
 types-json = { path = "../types-json" }
 backend-utils-adt-json-seams = { path = "../backend-utils-adt-json-seams" }
+backend-optimizer-util-clauses-seams = { path = "../backend-optimizer-util-clauses-seams" }
 backend-utils-adt-jsonfuncs-seams = { path = "../backend-utils-adt-jsonfuncs-seams" }
 backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }
 common-jsonapi-seams = { path = "../common-jsonapi-seams" }

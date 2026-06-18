@@ -1341,6 +1341,14 @@ fn import_set_schemaname(_raw: RawStmtHandle, _local_schema: &str) -> PgResult<(
 /// `backend-foreign-foreign-seams`). The catalog-DML / FDW-provider / IMPORT
 /// parser seams that crate also declares are installed by their own owners.
 pub fn init_seams() {
+    // plancat.c outward seams owned by foreign.c (FDW catalog/GUC reads).
+    backend_optimizer_util_plancat_ext_seams::get_foreign_server_id_by_rel_id::set(
+        GetForeignServerIdByRelId,
+    );
+    backend_optimizer_util_plancat_ext_seams::foreign_table_access_restricted::set(|| {
+        (guc::restrict_nonsystem_relation_kind::call() & RESTRICT_RELKIND_FOREIGN_TABLE) != 0
+    });
+
     inward::get_foreign_data_wrapper::set(|mcx, fdwid| {
         // GetForeignDataWrapper raises (Err) on a missing FDW (flags = 0); the
         // inward seam returns the descriptor by value, so unwrap the `Some`.

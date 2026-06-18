@@ -36,6 +36,122 @@ pub fn init_seams() {
     px::index_number_of_blocks::set(index_number_of_blocks);
     px::index_get_tree_height::set(index_get_tree_height);
     px::get_stat_ext_list::set(get_stat_ext_list);
+    px::relation_is_partition::set(relation_is_partition);
+    px::relation_has_not_null::set(relation_has_not_null);
+    px::relation_has_stored_generated_columns::set(relation_has_stored_generated_columns);
+    px::not_null_attnums::set(not_null_attnums);
+    px::get_check_constraints::set(get_check_constraints);
+    px::relation_has_row_triggers::set(relation_has_row_triggers);
+    px::relation_has_transition_tables::set(relation_has_transition_tables);
+}
+
+/// `has_row_triggers` (plancat.c): whether the relation has any row-level
+/// trigger for `event`, read off the owned entry's `trigdesc`.
+fn relation_has_row_triggers(
+    relid: Oid,
+    event: types_pathnodes::CmdType,
+) -> PgResult<bool> {
+    with_relation(relid, |rd| {
+        let td = match rd.rd_trigdesc.as_ref() {
+            Some(td) => td,
+            None => return false,
+        };
+        match event {
+            types_pathnodes::CMD_INSERT => {
+                td.trig_insert_after_row || td.trig_insert_before_row
+            }
+            types_pathnodes::CMD_UPDATE => {
+                td.trig_update_after_row || td.trig_update_before_row
+            }
+            types_pathnodes::CMD_DELETE => {
+                td.trig_delete_after_row || td.trig_delete_before_row
+            }
+            _ => false, // CMD_MERGE has no separate event.
+        }
+    })
+}
+
+/// `has_transition_tables` (plancat.c): whether the relation has any transition
+/// table for `event`. Foreign tables cannot have transition tables.
+fn relation_has_transition_tables(
+    relid: Oid,
+    event: types_pathnodes::CmdType,
+) -> PgResult<bool> {
+    with_relation(relid, |rd| {
+        if rd.rd_rel.relkind == (b'f' as i8) {
+            return false; // RELKIND_FOREIGN_TABLE
+        }
+        let td = match rd.rd_trigdesc.as_ref() {
+            Some(td) => td,
+            None => return false,
+        };
+        match event {
+            types_pathnodes::CMD_INSERT => td.trig_insert_new_table,
+            types_pathnodes::CMD_UPDATE => {
+                td.trig_update_old_table || td.trig_update_new_table
+            }
+            types_pathnodes::CMD_DELETE => td.trig_delete_old_table,
+            _ => false,
+        }
+    })
+}
+
+/// `relation->rd_rel->relispartition` (`plancat.c`'s `include_partition` test).
+fn relation_is_partition(relid: Oid) -> PgResult<bool> {
+    with_relation(relid, |rd| rd.rd_rel.relispartition)
+}
+
+/// `relation->rd_att->constr->has_not_null` (`get_relation_constraints`).
+fn relation_has_not_null(relid: Oid) -> PgResult<bool> {
+    with_relation(relid, |rd| {
+        rd.rd_att.constr().map(|c| c.has_not_null).unwrap_or(false)
+    })
+}
+
+/// `tupdesc->constr && tupdesc->constr->has_generated_stored`
+/// (`has_stored_generated_columns`).
+fn relation_has_stored_generated_columns(relid: Oid) -> PgResult<bool> {
+    with_relation(relid, |rd| {
+        rd.rd_att.constr().map(|c| c.has_generated_stored).unwrap_or(false)
+    })
+}
+
+/// The relation's valid not-null columns as `(attno, atttypid, atttypmod,
+/// attcollation)`, in attno order — the `IS NOT NULL` NullTest data
+/// `get_relation_constraints` builds: per-column `att->attnullability ==
+/// ATTNULLABLE_VALID && !att->attisdropped`.
+fn not_null_attnums(relid: Oid) -> PgResult<Vec<(types_core::primitive::AttrNumber, Oid, i32, Oid)>> {
+    with_relation(relid, |rd| {
+        let mut out = Vec::new();
+        for att in rd.rd_att.attrs.iter() {
+            if att.attnullability == types_tuple::heaptuple::ATTNULLABLE_VALID && !att.attisdropped {
+                out.push((att.attnum, att.atttypid, att.atttypmod, att.attcollation));
+            }
+        }
+        out
+    })
+}
+
+/// The relation's fully-validated check constraints (`rd_att->constr->check[i]`
+/// where `ccvalid`), in catalog order — `(ccbin, ccnoinherit)`. NOT ENFORCED
+/// constraints are always invalid, so the `ccvalid` filter subsumes the C
+/// `Assert(ccenforced)`.
+fn get_check_constraints(relid: Oid) -> PgResult<Vec<px::CheckConstraintInfo>> {
+    with_relation(relid, |rd| {
+        let mut out = Vec::new();
+        if let Some(constr) = rd.rd_att.constr() {
+            for c in constr.check.iter() {
+                if !c.ccvalid {
+                    continue;
+                }
+                out.push(px::CheckConstraintInfo {
+                    ccbin: c.ccbin.clone(),
+                    ccnoinherit: c.ccnoinherit,
+                });
+            }
+        }
+        out
+    })
 }
 
 /// `RelationGetParallelWorkers(relation, -1)` (rel.h): the macro is
