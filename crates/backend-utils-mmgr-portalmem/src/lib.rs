@@ -1147,19 +1147,20 @@ pub fn AtAbort_Portals() -> PgResult<()> {
         release_cached_plan(&portal);
 
         // Resources will be released in the upcoming transaction-wide cleanup.
-        let status = {
+        {
             let mut p = portal.borrow_mut();
             p.resowner = ResourceOwner::default();
-            p.status
-        };
+        }
 
         // Release any memory in subsidiary contexts, but leave active alone.
-        if status != PORTAL_ACTIVE {
-            let mut p = portal.borrow_mut();
-            if let Some(ctx) = &mut p.portalContext {
-                ctx.reset();
-            }
-        }
+        // C: `if (portal->status != PORTAL_ACTIVE)
+        //        MemoryContextDeleteChildren(portal->portalContext)`
+        // (portalmem.c:849) — delete the *child* contexts only, leaving
+        // portalContext's own direct allocations intact. In the owned RAII
+        // model the child contexts are owned/dropped by their creators (already
+        // gone here), so this is a no-op; it must NOT `reset()` portalContext
+        // (that would free the interned portal->stmts and trip the accounting
+        // assertion). See `memory_context_delete_children`.
     }
     Ok(())
 }
@@ -1313,12 +1314,14 @@ pub fn AtSubAbort_Portals(
         release_cached_plan(&portal);
 
         // Resources will be released in the upcoming transaction-wide cleanup.
-        let mut p = portal.borrow_mut();
-        p.resowner = ResourceOwner::default();
+        portal.borrow_mut().resowner = ResourceOwner::default();
         // Release any memory in subsidiary contexts, such as executor state.
-        if let Some(ctx) = &mut p.portalContext {
-            ctx.reset();
-        }
+        // C: `MemoryContextDeleteChildren(portal->portalContext)` (portalmem.c:1081)
+        // — child contexts only, preserving portalContext's own direct
+        // allocations (the interned portal->stmts). The owned RAII child
+        // contexts are already dropped by their creators, so this is a no-op;
+        // it must NOT `reset()` portalContext. See
+        // `memory_context_delete_children`.
     }
     Ok(())
 }
@@ -1480,14 +1483,34 @@ pub fn ForgetPortalSnapshots() -> PgResult<()> {
 // The portal crosses as the shared `types_portal::Portal` open handle.
 // ===========================================================================
 
-/// `MemoryContextDeleteChildren(portal->portalContext)` — release subsidiary
-/// memory of the portal's context (the portalmem-owned arena), modeled as
-/// `MemoryContext::reset()`.
+/// `MemoryContextDeleteChildren(portal->portalContext)` (mcxt.c:542) — delete
+/// the portal context's *child* contexts to recover temporary memory between
+/// the statements of a multi-statement portal (`PortalRunMulti`). C's
+/// `MemoryContextDeleteChildren` `MemoryContextDelete`s each child of
+/// `portalContext` and **does NOT touch `portalContext`'s own direct
+/// allocations** — in particular it must leave the interned `portal->stmts`
+/// (the `copyObject(plantree_list)` copied directly into `portalContext` by
+/// `PortalDefineQuery`) intact, since the loop reads `portal->stmts` again on
+/// the next iteration.
+///
+/// This is NOT `portalContext.reset()`: `reset()` frees `portalContext`'s own
+/// direct allocations, which would (a) diverge from C by discarding
+/// `portal->stmts`, and (b) trip the accounting assertion, because the
+/// interned-stmt bytes are still charged to a live owned value that `reset()`
+/// cannot actually reclaim ("PortalContext reset with N bytes still charged").
+///
+/// In the owned RAII memory model the portal context's child contexts are
+/// owned by their creators (e.g. the per-utility `ProcessUtility` scratch
+/// context), not by `portalContext`, and are dropped when those owners go out
+/// of scope — by the time control returns here they are already gone. So there
+/// are no surviving child contexts for `portalContext` to delete, and the
+/// faithful rendering of `MemoryContextDeleteChildren(portalContext)` is a
+/// no-op (the temporary memory it would reclaim is already reclaimed by RAII,
+/// and `portalContext`'s own direct allocations are deliberately preserved).
 fn memory_context_delete_children(portal: &Portal) -> PgResult<()> {
-    let mut p = portal.borrow_mut();
-    if let Some(ctx) = &mut p.portalContext {
-        ctx.reset();
-    }
+    // No-op: child contexts are RAII-owned and already dropped; portalContext's
+    // own direct allocations (the interned portal->stmts) must be preserved.
+    let _ = portal;
     Ok(())
 }
 
