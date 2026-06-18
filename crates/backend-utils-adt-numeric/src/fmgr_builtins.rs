@@ -344,6 +344,114 @@ fn fc_numeric_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 
 // ---------------------------------------------------------------------------
+// Aggregate transition functions for sum(int2)/sum(int4)/sum(int8).
+//
+// These are NON-STRICT (`proisstrict => 'f'`): they receive the running
+// transition value in arg 0 (which is NULL until the first non-null input) and
+// the new input in arg 1 (which may be NULL). The strict-shim is therefore NOT
+// applied; each adapter inspects `PG_ARGISNULL` itself.
+//
+// This is the 64-bit (`USE_FLOAT8_BYVAL`) build, so the `AggCheckCallContext`
+// in-place leg of `int2_sum`/`int4_sum` in `numeric.c` is `#ifndef`'d out: int8
+// is pass-by-value, the running sum cannot be modified through a pointer, and
+// the function simply returns the new transition value.
+// ---------------------------------------------------------------------------
+
+/// `PG_ARGISNULL(i)`: whether arg `i` carries a NULL on the call frame.
+#[inline]
+fn arg_is_null(fcinfo: &FunctionCallInfoBaseData, i: usize) -> bool {
+    fcinfo
+        .arg(i)
+        .map(|d| d.isnull)
+        .unwrap_or(true)
+}
+
+/// `PG_RETURN_NULL()`: set the result-null flag and return a dummy word.
+#[inline]
+fn ret_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    fcinfo.set_result_null(true);
+    Datum::from_usize(0)
+}
+
+/// `int2_sum(int8, int2) -> int8` (oid 1840). NON-STRICT aggregate transition
+/// function for `sum(int2)`. The transtype is `int8`; arg 0 is the running sum
+/// (NULL until the first non-null input), arg 1 the new `int2` input.
+fn fc_int2_sum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    if arg_is_null(fcinfo, 0) {
+        // No non-null input seen so far...
+        if arg_is_null(fcinfo, 1) {
+            return ret_null(fcinfo); // still no non-null
+        }
+        // This is the first non-null input.
+        let newval = arg_int32(fcinfo, 1) as i64; // PG_GETARG_INT16 widened
+        return ret_i64(newval);
+    }
+
+    let oldsum = arg_int64(fcinfo, 0);
+
+    // Leave sum unchanged if new input is null.
+    if arg_is_null(fcinfo, 1) {
+        return ret_i64(oldsum);
+    }
+
+    // OK to do the addition. (int2 arg is delivered on the by-val word, low
+    // bits sign-extended; read it as i32 and widen, matching PG_GETARG_INT16.)
+    let newval = oldsum + arg_int32(fcinfo, 1) as i64;
+    ret_i64(newval)
+}
+
+/// `int4_sum(int8, int4) -> int8` (oid 1841). NON-STRICT aggregate transition
+/// function for `sum(int4)`. Same shape as `int2_sum` with an `int4` input.
+fn fc_int4_sum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    if arg_is_null(fcinfo, 0) {
+        if arg_is_null(fcinfo, 1) {
+            return ret_null(fcinfo);
+        }
+        let newval = arg_int32(fcinfo, 1) as i64;
+        return ret_i64(newval);
+    }
+
+    let oldsum = arg_int64(fcinfo, 0);
+
+    if arg_is_null(fcinfo, 1) {
+        return ret_i64(oldsum);
+    }
+
+    let newval = oldsum + arg_int32(fcinfo, 1) as i64;
+    ret_i64(newval)
+}
+
+/// `int8_sum(numeric, int8) -> numeric` (oid 1842). NON-STRICT aggregate
+/// transition function. (Obsolete; no longer used for `sum(int8)`, but still a
+/// registered builtin.) The transtype is `numeric`; arg 0 is the running sum
+/// (NULL until the first non-null input), arg 1 the new `int8` input.
+fn fc_int8_sum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    if arg_is_null(fcinfo, 0) {
+        if arg_is_null(fcinfo, 1) {
+            return ret_null(fcinfo);
+        }
+        // First non-null input: int64_to_numeric(PG_GETARG_INT64(1)).
+        let m = scratch_mcx();
+        let image = ok(crate::convert::int64_to_numeric(m.mcx(), arg_int64(fcinfo, 1)));
+        return ret_numeric(fcinfo, image.as_slice().to_vec());
+    }
+
+    let oldsum = arg_numeric(fcinfo, 0).to_vec();
+
+    // Leave sum unchanged if new input is null.
+    if arg_is_null(fcinfo, 1) {
+        return ret_numeric(fcinfo, oldsum);
+    }
+
+    // numeric_add(oldsum, int64_to_numeric(PG_GETARG_INT64(1))).
+    let m = scratch_mcx();
+    let addend = ok(crate::convert::int64_to_numeric(m.mcx(), arg_int64(fcinfo, 1)));
+    let sum = ok(crate::ops_sql::numeric_add(m.mcx(), &oldsum, addend.as_slice()));
+    let image = sum.as_slice().to_vec();
+    ret_numeric(fcinfo, image)
+}
+
+// ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
 
@@ -442,6 +550,10 @@ pub fn register_numeric_builtins() {
         // recv/send.
         builtin(2460, "numeric_recv", 3, true, false, fc_numeric_recv),
         builtin(2461, "numeric_send", 1, true, false, fc_numeric_send),
+        // NON-STRICT aggregate transition functions (sum(int2/int4/int8)).
+        builtin(1840, "int2_sum", 2, false, false, fc_int2_sum),
+        builtin(1841, "int4_sum", 2, false, false, fc_int4_sum),
+        builtin(1842, "int8_sum", 2, false, false, fc_int8_sum),
     ]);
 }
 
