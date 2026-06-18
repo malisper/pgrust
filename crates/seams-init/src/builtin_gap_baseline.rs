@@ -25,7 +25,7 @@
 //! test that runs `crate::init_all()` then formats `missing_builtins()` (sorted
 //! by `foid`) as the `(oid, "prosrc", BuiltinGapKind::...)` rows below.
 //!
-//! Current gap: 1603 of 3102 canonical built-ins (1603 not registered,
+//! Current gap: 1585 of 3102 canonical built-ins (1585 not registered,
 //! 0 registered with diverging metadata).
 
 use backend_utils_fmgr_core::BuiltinGapKind;
@@ -299,17 +299,8 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (1655, "RI_FKey_noaction_upd", BuiltinGapKind::NotRegistered),
     (1662, "pg_get_triggerdef", BuiltinGapKind::NotRegistered),
     (1665, "pg_get_serial_sequence", BuiltinGapKind::NotRegistered),
-    (1680, "bitsubstr", BuiltinGapKind::NotRegistered),
-    (1681, "bitlength", BuiltinGapKind::NotRegistered),
-    (1682, "bitoctetlength", BuiltinGapKind::NotRegistered),
-    (1683, "bitfromint4", BuiltinGapKind::NotRegistered),
-    (1684, "bittoint4", BuiltinGapKind::NotRegistered),
-    (1685, "bit", BuiltinGapKind::NotRegistered),
     (1686, "pg_get_keywords", BuiltinGapKind::NotRegistered),
-    (1687, "varbit", BuiltinGapKind::NotRegistered),
     (1689, "aclexplode", BuiltinGapKind::NotRegistered),
-    (1698, "bitposition", BuiltinGapKind::NotRegistered),
-    (1699, "bitsubstr_no_len", BuiltinGapKind::NotRegistered),
     (1703, "numeric", BuiltinGapKind::NotRegistered),
     (1740, "int4_numeric", BuiltinGapKind::NotRegistered),
     (1742, "float4_numeric", BuiltinGapKind::NotRegistered),
@@ -397,8 +388,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (2030, "jsonb_path_match_tz", BuiltinGapKind::NotRegistered),
     (2034, "pg_conf_load_time", BuiltinGapKind::NotRegistered),
     (2049, "timestamp_to_char", BuiltinGapKind::NotRegistered),
-    (2075, "bitfromint8", BuiltinGapKind::NotRegistered),
-    (2076, "bittoint8", BuiltinGapKind::NotRegistered),
     (2084, "show_all_settings", BuiltinGapKind::NotRegistered),
     (2091, "array_lower", BuiltinGapKind::NotRegistered),
     (2092, "array_upper", BuiltinGapKind::NotRegistered),
@@ -508,8 +497,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (2453, "regclasssend", BuiltinGapKind::NotRegistered),
     (2454, "regtyperecv", BuiltinGapKind::NotRegistered),
     (2455, "regtypesend", BuiltinGapKind::NotRegistered),
-    (2456, "bit_recv", BuiltinGapKind::NotRegistered),
-    (2458, "varbit_recv", BuiltinGapKind::NotRegistered),
     (2480, "lseg_recv", BuiltinGapKind::NotRegistered),
     (2482, "path_recv", BuiltinGapKind::NotRegistered),
     (2484, "box_recv", BuiltinGapKind::NotRegistered),
@@ -718,10 +705,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (3027, "has_any_column_privilege_id_id", BuiltinGapKind::NotRegistered),
     (3028, "has_any_column_privilege_name", BuiltinGapKind::NotRegistered),
     (3029, "has_any_column_privilege_id", BuiltinGapKind::NotRegistered),
-    (3030, "bitoverlay", BuiltinGapKind::NotRegistered),
-    (3031, "bitoverlay_no_len", BuiltinGapKind::NotRegistered),
-    (3032, "bitgetbit", BuiltinGapKind::NotRegistered),
-    (3033, "bitsetbit", BuiltinGapKind::NotRegistered),
     (3035, "pg_listening_channels", BuiltinGapKind::NotRegistered),
     (3036, "pg_notify", BuiltinGapKind::NotRegistered),
     (3037, "pg_stat_get_xact_numscans", BuiltinGapKind::NotRegistered),
@@ -1498,7 +1481,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (6159, "pg_get_catalog_foreign_keys", BuiltinGapKind::NotRegistered),
     (6160, "text_to_table", BuiltinGapKind::NotRegistered),
     (6161, "text_to_table_null", BuiltinGapKind::NotRegistered),
-    (6162, "bit_bit_count", BuiltinGapKind::NotRegistered),
     (6168, "pg_xact_commit_timestamp_origin", BuiltinGapKind::NotRegistered),
     (6169, "pg_stat_get_replication_slot", BuiltinGapKind::NotRegistered),
     (6170, "pg_stat_reset_replication_slot", BuiltinGapKind::NotRegistered),
