@@ -90,7 +90,7 @@ use types_tuple::heaptuple::MaxTupleAttributeNumber;
 
 use backend_optimizer_util_vars::var::contain_vars_of_level;
 
-use types_nodes::nodes::{self, Node};
+use types_nodes::nodes::{self, ntag, Node};
 use types_nodes::parsestmt::{ParseExprKind, ParseState};
 use types_nodes::primnodes::{
     ArrayExpr, BoolTestType, BooleanTest, CaseExpr, CaseTestExpr, CaseWhen, CoalesceExpr,
@@ -238,23 +238,24 @@ pub fn transformExprRecurse<'mcx>(
     // check_stack_depth() — the recursion guard is the host stack; no explicit
     // depth counter is modeled (matching the other parser ports).
 
-    let result: Expr = match expr {
-        Node::ColumnRef(c) => transformColumnRef(pstate, c)?,
-        Node::ParamRef(pref) => transformParamRef(pstate, &pref)?,
+    let result: Expr = match expr.node_tag() {
+        ntag::T_ColumnRef => transformColumnRef(pstate, expr.into_columnref().unwrap())?,
+        ntag::T_ParamRef => transformParamRef(pstate, &expr.into_paramref().unwrap())?,
 
         // T_A_Const → make_const(pstate, (A_Const *) expr).
-        Node::A_Const(a) => transform_a_const(pstate, a)?,
+        ntag::T_A_Const => transform_a_const(pstate, expr.into_a_const().unwrap())?,
 
-        Node::A_Indirection(ind) => transformIndirection(pstate, ind)?,
+        ntag::T_A_Indirection => transformIndirection(pstate, expr.into_a_indirection().unwrap())?,
 
         // transformArrayExpr(pstate, a, InvalidOid, InvalidOid, -1).
-        Node::A_ArrayExpr(a) => transformArrayExpr(pstate, a, InvalidOid, InvalidOid, -1)?,
+        ntag::T_A_ArrayExpr => transformArrayExpr(pstate, expr.into_a_arrayexpr().unwrap(), InvalidOid, InvalidOid, -1)?,
 
-        Node::TypeCast(_) => transformTypeCast(pstate, expr)?,
+        ntag::T_TypeCast => transformTypeCast(pstate, expr)?,
 
-        Node::CollateClause(c) => transformCollateClause(pstate, c)?,
+        ntag::T_CollateClause => transformCollateClause(pstate, expr.into_collateclause().unwrap())?,
 
-        Node::A_Expr(a) => {
+        ntag::T_A_Expr => {
+            let a = expr.into_a_expr().unwrap();
             // Nested switch on a->kind (parse_expr.c:175-216).
             match a.kind {
                 A_Expr_Kind::AEXPR_OP => transformAExprOp(pstate, a)?,
@@ -279,51 +280,52 @@ pub fn transformExprRecurse<'mcx>(
         // T_BoolExpr → transformBoolExpr(pstate, (BoolExpr *) expr). The raw
         // grammar emits a `Node::BoolExpr` carrying untransformed `NodePtr`
         // children; we transform+coerce each and rebuild a cooked BoolExpr.
-        Node::BoolExpr(a) => transformBoolExpr(pstate, a)?,
+        ntag::T_BoolExpr => transformBoolExpr(pstate, expr.into_boolexpr().unwrap())?,
 
         // T_NullTest → transform n->arg, set argisrow, return the cooked node.
         // The raw grammar emits a `Node::NullTest` carrying an untransformed
         // `NodePtr` arg (distinct from an already-analyzed `Expr::NullTest`).
-        Node::NullTest(n) => transformNullTestRaw(pstate, n)?,
+        ntag::T_NullTest => transformNullTestRaw(pstate, expr.into_nulltest().unwrap())?,
 
         // T_BooleanTest → transformBooleanTest(pstate, (BooleanTest *) expr).
-        Node::BooleanTest(b) => transformBooleanTestRaw(pstate, b)?,
+        ntag::T_BooleanTest => transformBooleanTestRaw(pstate, expr.into_booleantest().unwrap())?,
 
         // T_XmlExpr → transformXmlExpr(pstate, (XmlExpr *) expr).
-        Node::XmlExpr(x) => transformXmlExpr(pstate, x)?,
+        ntag::T_XmlExpr => transformXmlExpr(pstate, expr.into_xmlexpr().unwrap())?,
 
         // T_XmlSerialize → transformXmlSerialize(pstate, (XmlSerialize *) expr).
-        Node::XmlSerialize(xs) => transformXmlSerialize(pstate, xs)?,
+        ntag::T_XmlSerialize => transformXmlSerialize(pstate, expr.into_xmlserialize().unwrap())?,
 
-        Node::FuncCall(f) => transformFuncCall(pstate, f)?,
-        Node::MultiAssignRef(m) => transformMultiAssignRef(pstate, m)?,
+        ntag::T_FuncCall => transformFuncCall(pstate, expr.into_funccall().unwrap())?,
+        ntag::T_MultiAssignRef => transformMultiAssignRef(pstate, expr.into_multiassignref().unwrap())?,
 
         // T_SubLink → transformSubLink(pstate, (SubLink *) expr).
-        Node::SubLink(s) => transformSubLink(pstate, s)?,
+        ntag::T_SubLink => transformSubLink(pstate, expr.into_sublink().unwrap())?,
 
         // T_RowExpr → transformRowExpr(pstate, (RowExpr *) expr, false). The raw
         // grammar emits ROW(...) as `Node::RowExpr` carrying raw field nodes.
-        Node::RowExpr(r) => transformRowExpr(pstate, r, false)?,
+        ntag::T_RowExpr => transformRowExpr(pstate, expr.into_rowexpr().unwrap(), false)?,
 
         // T_CaseExpr / T_CoalesceExpr / T_MinMaxExpr — the raw-grammar nodes
         // (rawexprnodes, NodePtr children) the parser emits for CASE / COALESCE /
         // GREATEST / LEAST.
-        Node::CaseExpr(c) => transformCaseExpr(pstate, c)?,
-        Node::CoalesceExpr(c) => transformCoalesceExpr(pstate, c)?,
-        Node::MinMaxExpr(m) => transformMinMaxExpr(pstate, m)?,
+        ntag::T_CaseExpr => transformCaseExpr(pstate, expr.into_caseexpr().unwrap())?,
+        ntag::T_CoalesceExpr => transformCoalesceExpr(pstate, expr.into_coalesceexpr().unwrap())?,
+        ntag::T_MinMaxExpr => transformMinMaxExpr(pstate, expr.into_minmaxexpr().unwrap())?,
 
         // Expr-carried nodes that reach the dispatcher untransformed-or-recursed.
-        Node::Expr(e) => transform_expr_node(pstate, e)?,
-
         // DEFAULT must have been processed by the caller (handled in the
         // `Node::Expr(SetToDefault)` arm of `transform_expr_node`).
-
-        _ => {
-            // The C default raises elog(ERROR, "unrecognized node type: %d").
-            return Err(ereport(ERROR)
-                .errcode(ERRCODE_INTERNAL_ERROR)
-                .errmsg(alloc::format!("unrecognized node type: {}", expr.node_tag().0))
-                .into_error());
+        other => {
+            if expr.is_expr() {
+                transform_expr_node(pstate, expr.into_expr().unwrap())?
+            } else {
+                // The C default raises elog(ERROR, "unrecognized node type: %d").
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_INTERNAL_ERROR)
+                    .errmsg(alloc::format!("unrecognized node type: {}", other.0))
+                    .into_error());
+            }
         }
     };
 
@@ -514,10 +516,10 @@ fn transformAExprOp<'mcx>(
     // "row op subselect" → ROWCOMPARE sublink: rewrites the SubLink and
     // recurses (parse_expr.c:953-973).
     if is_rowexpr(lexpr.as_ref()) && is_expr_sublink(rexpr.as_ref()) {
-        let mut s = match rexpr.unwrap() {
-            Node::SubLink(s) => s,
-            _ => unreachable!("is_expr_sublink guard"),
-        };
+        let mut s = rexpr
+            .unwrap()
+            .into_sublink()
+            .unwrap_or_else(|| unreachable!("is_expr_sublink guard"));
         // s->subLinkType = ROWCOMPARE_SUBLINK; s->testexpr = lexpr;
         // s->operName = a->name; s->location = a->location;
         s.sub_link_type = types_nodes::primnodes::SubLinkType::RowCompare;
@@ -1404,12 +1406,14 @@ fn transformCaseExpr<'mcx>(
     for w_ptr in c.args {
         // Each list element is a raw `Node::CaseWhen` (the grammar's
         // `makeNode(CaseWhen)`); pull out its raw `expr`/`result` children.
-        let w = match mcx::PgBox::into_inner(w_ptr) {
-            Node::CaseWhen(w) => w,
-            other => {
+        let w_node = mcx::PgBox::into_inner(w_ptr);
+        let w_tag = w_node.node_tag();
+        let w = match w_node.into_casewhen() {
+            Some(w) => w,
+            None => {
                 return Err(PgError::error(alloc::format!(
                     "transformCaseExpr: CASE arm is not a CaseWhen: {}",
-                    other.node_tag().0
+                    w_tag.0
                 )))
             }
         };
@@ -2231,10 +2235,7 @@ fn is_rowexpr_expr_opt(e: Option<&Expr>) -> bool {
 
 /// `(Node *) e` for a typed `Expr` consumed by the SubLink-rewrite path.
 fn node_into_expr(n: Node<'_>) -> Option<Expr> {
-    match n {
-        Node::Expr(e) => Some(e),
-        _ => None,
-    }
+    n.into_expr()
 }
 
 // ===========================================================================
@@ -2786,16 +2787,18 @@ fn transformIndirection<'mcx>(
 
     for n in indirection.into_iter() {
         let n = mcx::PgBox::into_inner(n);
-        match n {
-            Node::A_Indices(ai) => subscripts.push(ai),
-            Node::A_Star(_) => {
+        let n_tag = n.node_tag();
+        match n_tag {
+            ntag::T_A_Indices => subscripts.push(n.into_a_indices().unwrap()),
+            ntag::T_A_Star => {
                 return Err(ereport(ERROR)
                     .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
                     .errmsg("row expansion via \"*\" is not supported here")
                     .errposition(parser_errposition(pstate, location))
                     .into_error());
             }
-            Node::String(s) => {
+            ntag::T_String => {
+                let s = n.expect_string();
                 // Process subscripts before this field selection.
                 if !subscripts.is_empty() {
                     let ctype = expr_type(Some(&result))?;
@@ -2832,10 +2835,10 @@ fn transformIndirection<'mcx>(
                     }
                 }
             }
-            other => {
+            _ => {
                 return Err(PgError::error(alloc::format!(
                     "transformIndirection: unexpected indirection node (tag {})",
-                    other.node_tag().0
+                    n_tag.0
                 )))
             }
         }
@@ -3053,10 +3056,9 @@ fn transformMultiAssignRef<'mcx>(
         let is_rowexpr = matches!(&src, Node::RowExpr(_));
 
         if is_expr_sublink {
-            let mut sublink = match src {
-                Node::SubLink(s) => s,
-                _ => unreachable!("is_expr_sublink guard"),
-            };
+            let mut sublink = src
+                .into_sublink()
+                .unwrap_or_else(|| unreachable!("is_expr_sublink guard"));
             // Relabel it as a MULTIEXPR_SUBLINK, and transform it.
             sublink.sub_link_type = SubLinkType::MultiExpr;
             let transformed = transformSubLink(pstate, sublink)?;
@@ -3903,11 +3905,13 @@ fn analyze_one_exec_param_impl<'mcx>(
 /// raw-node locations; the A_Const literal carries one, and an already-typed
 /// `Node::Expr` defers to `exprLocation`. Other raw nodes report -1 (cursor 0).
 fn node_location(n: &Node<'_>) -> i32 {
-    match n {
-        Node::A_Const(a) => a.location,
-        Node::A_Expr(a) => a.location,
-        Node::Expr(e) => expr_location(Some(e)).unwrap_or(-1),
-        _ => -1,
+    match n.node_tag() {
+        ntag::T_A_Const => n.expect_a_const().location,
+        ntag::T_A_Expr => n.expect_a_expr().location,
+        _ => match n.as_expr() {
+            Some(e) => expr_location(Some(e)).unwrap_or(-1),
+            None => -1,
+        },
     }
 }
 
