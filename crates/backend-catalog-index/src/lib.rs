@@ -779,7 +779,11 @@ fn UpdateIndexRelation<'mcx>(
     let pg_index = table_am::table_open::call(mcx, INDEX_RELATION_ID, ROW_EXCLUSIVE_LOCK)?;
     indexing::catalog_tuple_insert_pg_index::call(mcx, &pg_index, &row)?;
     // table_close(pg_index, RowExclusiveLock) — `table_close` is `relation_close`.
-    table_am::relation_close::call(pg_index.rd_id, ROW_EXCLUSIVE_LOCK)?;
+    // Consume the owned handle via `.close()` so it releases the relcache ref
+    // exactly once; a raw `relation_close::call(pg_index.rd_id, ...)` leaves the
+    // `Relation` armed and its `Drop` would decrement the refcount a second time
+    // (rd_refcnt underflow → panic).
+    pg_index.close(ROW_EXCLUSIVE_LOCK)?;
 
     Ok(())
 }
@@ -1016,7 +1020,7 @@ pub fn index_create<'mcx>(
     if OidIsValid(lsyscache::get_relname_relid::call(&index_relation_name, namespace_id)?) {
         if (flags & INDEX_CREATE_IF_NOT_EXISTS) != 0 {
             // ereport(NOTICE, "relation already exists, skipping")
-            table_am::relation_close::call(pg_class.rd_id, ROW_EXCLUSIVE_LOCK)?;
+            pg_class.close(ROW_EXCLUSIVE_LOCK)?;
             return Ok((InvalidOid, InvalidOid));
         }
         return Err(PgError::error(alloc::format!(
@@ -1137,7 +1141,7 @@ pub fn index_create<'mcx>(
     )?;
 
     /* done with pg_class */
-    table_am::relation_close::call(pg_class.rd_id, ROW_EXCLUSIVE_LOCK)?;
+    pg_class.close(ROW_EXCLUSIVE_LOCK)?;
 
     /*
      * now update the object id's of all the attribute tuple forms in the index
@@ -1408,7 +1412,7 @@ pub fn index_create<'mcx>(
      * Close the index; keep the lock acquired above until end of transaction.
      * Closing the heap is the caller's responsibility.
      */
-    table_am::relation_close::call(index_relation.rd_id, NO_LOCK)?;
+    index_relation.close(NO_LOCK)?;
 
     Ok((index_relation_id, created_constraint_id))
 }
@@ -1665,7 +1669,7 @@ pub fn index_constraint_create<'mcx>(
             )?;
         }
 
-        table_am::relation_close::call(pg_index.rd_id, ROW_EXCLUSIVE_LOCK)?;
+        pg_index.close(ROW_EXCLUSIVE_LOCK)?;
     }
 
     Ok(myself)
@@ -1744,7 +1748,7 @@ pub fn index_set_state_flags<'mcx>(
     /* ... and update it */
     indexing::catalog_tuple_update_pg_index::call(mcx, &pg_index, tid, &form)?;
 
-    table_am::relation_close::call(pg_index.rd_id, ROW_EXCLUSIVE_LOCK)?;
+    pg_index.close(ROW_EXCLUSIVE_LOCK)?;
     Ok(())
 }
 

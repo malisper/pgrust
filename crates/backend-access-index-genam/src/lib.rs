@@ -691,10 +691,17 @@ fn systable_inplace_update<'mcx>(
             }
         };
 
-        // Alias the heap relation out of the live state so the inplace lock can
-        // borrow it while the release callback ends (drops) the scan — C passes
-        // `scan->heap_rel` and `systable_endscan` as separate args.
-        let heap_rel = live_of(guard.desc_mut()).heap_rel.alias();
+        // Open a heap-relation handle the inplace lock can borrow while the
+        // release callback ends (drops) the scan — C passes `scan->heap_rel` and
+        // `systable_endscan` as separate args. This MUST NOT alias the scan's
+        // internal `heap_rel`: that value-slice (incl. its `relname` PgString)
+        // lives in the scan's private `scan_cx` memory context, and the release
+        // callback / `systable_endscan` tears `scan_cx` down — an alias would
+        // outlive its backing storage and deallocate into a freed context on
+        // drop (use-after-free). Re-acquiring into the caller's `mcx` (which
+        // outlives the scan) gives a handle whose storage is independent of the
+        // scan context. NoLock: the caller already holds the relation lock.
+        let heap_rel = relation_seams::relation_open::call(mcx, relation.rd_id, NoLock)?;
 
         // while (!heap_inplace_lock(scan->heap_rel, bslot->base.tuple,
         //                           bslot->buffer, systable_endscan, scan))
@@ -766,6 +773,13 @@ fn systable_inplace_update<'mcx>(
                 buffer,
             )?;
         }
+
+        // Release the caller-`mcx` heap handle (table_close(heap_rel, NoLock));
+        // it took a refcount pin in `relation_open` above. Done before
+        // `guard.end()` for tidiness — its storage is independent of `scan_cx`,
+        // so the order is not load-bearing here (unlike the old scan-context
+        // alias it replaces).
+        heap_rel.close(NoLock)?;
 
         // systable_endscan(scan) — both finish and cancel end with it.
         guard.end()?;
