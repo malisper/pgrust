@@ -25,6 +25,8 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+mod grant_exec;
+
 use std::rc::Rc;
 
 use mcx::{Mcx, MemoryContext};
@@ -1314,6 +1316,12 @@ pub fn init_seams() {
         aclcheck_error_type(ctx.mcx(), aclerr, type_oid)
     });
     seam::error_conflicting_def_elem::set(errorConflictingDefElem);
+
+    // ExecuteGrantStmt (F2): the GRANT/REVOKE executor, bounded to the
+    // OBJECT_SCHEMA path. Installed onto the utility slow-path out-seam.
+    backend_tcop_utility_out_seams::execute_grant_stmt_slow::set(|mcx, stmt| {
+        grant_exec::execute_grant_stmt(mcx, stmt)
+    });
 
     // NOTE (F1 STOP): get_user_default_acl, record_dependency_on_new_acl
     // (ArrayType-payload + DEFACLROLENSPOBJ blocked) and the three F2/F3

@@ -53,7 +53,9 @@ use types_nodes::ddlnodes::TransactionStmtKind;
 use types_nodes::nodeindexscan::PlannedStmt;
 use types_nodes::nodes::Node;
 use types_nodes::parsenodes::{
-    OBJECT_FOREIGN_TABLE, OBJECT_INDEX, OBJECT_MATVIEW, OBJECT_SEQUENCE, OBJECT_TABLE, OBJECT_VIEW,
+    ObjectType, OBJECT_DATABASE, OBJECT_EVENT_TRIGGER, OBJECT_FOREIGN_TABLE, OBJECT_INDEX,
+    OBJECT_MATVIEW, OBJECT_PARAMETER_ACL, OBJECT_ROLE, OBJECT_SEQUENCE, OBJECT_TABLE,
+    OBJECT_TABLESPACE, OBJECT_VIEW,
 };
 use types_nodes::parsestmt::{
     DestReceiverHandle, ParseState, ProcessUtilityContext, PROCESS_UTILITY_QUERY_NONATOMIC,
@@ -697,4 +699,23 @@ pub fn ExecDropStmt<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>, is_top_level: bool)
         }
     }
     Ok(())
+}
+
+/// `EventTriggerSupportsObjectType(obtype)` (commands/event_trigger.c) — whether
+/// DDL on the given object type can be captured by an event trigger. Global
+/// objects (database/tablespace/role/parameter ACL) and event triggers
+/// themselves are not supported; everything else is. The dispatch fast-path
+/// arms above use it to decide between the direct executor and the
+/// event-trigger-fenced `ProcessUtilitySlow`. (Owned by the still-unported
+/// event_trigger.c; this pure predicate is installed here, alongside the
+/// dispatch logic that consumes it, like `process_utility_slow`.)
+pub fn EventTriggerSupportsObjectType(obtype: ObjectType) -> bool {
+    !matches!(
+        obtype,
+        OBJECT_DATABASE
+            | OBJECT_TABLESPACE
+            | OBJECT_ROLE
+            | OBJECT_PARAMETER_ACL
+            | OBJECT_EVENT_TRIGGER
+    )
 }

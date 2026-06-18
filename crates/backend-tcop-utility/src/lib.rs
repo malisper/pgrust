@@ -101,4 +101,12 @@ pub fn init_seams() {
     // `_ =>` arm reach it through the `process_utility_slow` outward seam; install
     // it here so CREATE TABLE → `DefineRelation` becomes reachable.
     backend_tcop_utility_out_seams::process_utility_slow::set(slow::process_utility_slow);
+
+    // EventTriggerSupportsObjectType (commands/event_trigger.c): a pure dispatch
+    // predicate the GRANT/DROP/RENAME/ALTER…/COMMENT/SECURITY LABEL fast-path
+    // arms consult. event_trigger.c is unported; install the faithful predicate
+    // here next to the dispatch logic that consumes it.
+    backend_tcop_utility_out_seams::event_trigger_supports_object_type::set(
+        dispatch::EventTriggerSupportsObjectType,
+    );
 }
