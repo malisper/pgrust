@@ -19,3 +19,7 @@ backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
 backend-utils-adt-arrayutils = { path = "../backend-utils-adt-arrayutils" }
 backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
+# make_const's T_BitString arm reaches bit_in via a seam slot declared in
+# parser-small1-seams (parse_node.c is the consumer); varbit.c owns and installs
+# it cross-crate from init_seams().
+backend-parser-small1-seams = { path = "../backend-parser-small1-seams" }

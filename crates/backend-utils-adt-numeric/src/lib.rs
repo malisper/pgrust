@@ -101,6 +101,11 @@ pub fn init_seams() {
     backend_utils_adt_jsonb_seams::numeric_int4::set(ops_sql::seam_numeric_int4);
     backend_utils_adt_jsonb_seams::numeric_int8::set(ops_sql::seam_numeric_int8);
 
+    // make_const's T_Float (numeric) arm: DirectFunctionCall3(numeric_in, str,
+    // InvalidOid, -1). Slot declared in backend-parser-small1-seams (parse_node.c
+    // is the consumer), owned and installed here.
+    backend_parser_small1_seams::numeric_in::set(|mcx, s| io::numeric_in(mcx, s, -1));
+
     // Register this unit's SQL-callable functions into the fmgr-core builtin
     // table (C: fmgr_builtins[]), so by-OID dispatch resolves them.
     fmgr_builtins::register_numeric_builtins();

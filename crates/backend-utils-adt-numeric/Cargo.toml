@@ -35,6 +35,11 @@ backend-utils-adt-numeric-seams = { path = "../backend-utils-adt-numeric-seams" 
 # their true owner, so this crate installs them cross-crate from init_seams().
 backend-utils-adt-jsonb-seams = { path = "../backend-utils-adt-jsonb-seams" }
 
+# make_const's numeric (T_Float oversize) arm reaches numeric_in via a seam slot
+# declared in parser-small1-seams (parse_node.c is the consumer); numeric.c owns
+# and installs it cross-crate from init_seams().
+backend-parser-small1-seams = { path = "../backend-parser-small1-seams" }
+
 # The real backend PRNG (xoroshiro128**) for random_numeric/random_var. The
 # `pg_prng_state` threaded in by the SQL random() setup is `pg_prng::PgPrng`.
 pg-prng = { path = "../pg-prng" }

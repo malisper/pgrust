@@ -7,7 +7,7 @@
 
 extern crate alloc;
 
-use mcx::Mcx;
+use mcx::{Mcx, PgVec};
 use types_cluster::ParseState;
 use types_error::PgResult;
 use types_nodes::primnodes::SubscriptingRef;
@@ -44,4 +44,24 @@ seam_core::seam!(
         is_slice: bool,
         is_assignment: bool,
     ) -> PgResult<SubscriptingRef>
+);
+
+seam_core::seam!(
+    /// `DirectFunctionCall3(numeric_in, CStringGetDatum(str), InvalidOid, -1)`
+    /// (parse_node.c `make_const`, `T_Float` oversize/non-integer arm): parse a
+    /// decimal/scientific literal into a `numeric` value, returning the full
+    /// on-disk `Numeric` varlena byte image (with the varlena length header).
+    /// The owner is `backend-utils-adt-numeric` (`numeric_in`); `make_const`
+    /// wraps the result into a by-reference `Datum::ByRef` for the `Const` node.
+    pub fn numeric_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
+    /// `DirectFunctionCall3(bit_in, CStringGetDatum(str), InvalidOid, -1)`
+    /// (parse_node.c `make_const`, `T_BitString` arm): parse a bit-string literal
+    /// (`B'101'` / `X'1F'`) into a `bit` value, returning the full on-disk
+    /// `VarBit` varlena byte image (`[varsize_le | bit_len_le | data]`). The owner
+    /// is `backend-utils-adt-varbit` (`bit_in`); `make_const` wraps the result
+    /// into a by-reference `Datum::ByRef` for the `Const` node.
+    pub fn bit_in<'mcx>(mcx: Mcx<'mcx>, s: &[u8]) -> PgResult<PgVec<'mcx, u8>>
 );

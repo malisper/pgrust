@@ -67,6 +67,11 @@ pub mod fmgr_builtins;
 /// dispatch / `fmgr_isbuiltin` resolves them. Called by `seams-init::init_all`.
 pub fn init_seams() {
     fmgr_builtins::register_varbit_builtins();
+
+    // make_const's T_BitString arm: DirectFunctionCall3(bit_in, str, InvalidOid,
+    // -1). Slot declared in backend-parser-small1-seams (parse_node.c is the
+    // consumer), owned and installed here.
+    backend_parser_small1_seams::bit_in::set(bit_in_to_varlena);
 }
 
 // ===========================================================================
@@ -366,6 +371,22 @@ pub fn bit_in<'mcx>(
         bit_len: atttypmod,
         data,
     }))
+}
+
+/// `DirectFunctionCall3(bit_in, str, InvalidOid, -1)` as a by-reference `Datum`:
+/// parse a `bit` literal (hard error, typmod -1) and serialise the result into
+/// the full on-disk `VarBit` varlena byte image `[varsize_le | bit_len_le | data]`
+/// (mirror of `fmgr_builtins::encode_varbit`). Installed into
+/// `backend-parser-small1-seams::bit_in` for `make_const`'s `T_BitString` arm.
+pub fn bit_in_to_varlena<'mcx>(mcx: Mcx<'mcx>, s: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+    let v = bit_in(mcx, s, -1, None)?
+        .expect("bit_in with no soft-error context returns Some or errors");
+    let total = 8 + v.data.len();
+    let mut out: PgVec<'mcx, u8> = vec_with_capacity_in(mcx, total)?;
+    out.extend_from_slice(&(total as u32).to_le_bytes());
+    out.extend_from_slice(&v.bit_len.to_le_bytes());
+    out.extend_from_slice(&v.data);
+    Ok(out)
 }
 
 /// `varbit_in` (varbit.c:451) — cstring -> `varbit`. `atttypmod` is the

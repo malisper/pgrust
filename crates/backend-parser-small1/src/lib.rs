@@ -527,12 +527,16 @@ pub fn make_const<'mcx>(
                     }
                 }
                 None => {
-                    // numeric_in() via DirectFunctionCall3 returns a by-ref Datum.
-                    panic!(
-                        "make_const: T_Float numeric arm calls DirectFunctionCall3(numeric_in) \
-                         returning a by-reference Datum (numeric varlena); the by-reference \
-                         Datum bridge is unported workspace-wide (parse_node.c:418)"
-                    );
+                    // val = DirectFunctionCall3(numeric_in,
+                    //         CStringGetDatum(aconst->val.fval.fval),
+                    //         ObjectIdGetDatum(InvalidOid), Int32GetDatum(-1));
+                    // numeric_in returns the on-disk Numeric varlena byte image;
+                    // it is a by-reference Datum.
+                    let bytes = backend_parser_small1_seams::numeric_in::call(
+                        mcx,
+                        f.fval.as_str(),
+                    )?;
+                    (Datum::ByRef(bytes), NUMERICOID, -1, false)
                 }
             }
         }
@@ -550,13 +554,17 @@ pub fn make_const<'mcx>(
             // here the canonical `Datum::Cstring` arm carries the owned text.
             (Datum::from_cstring(alloc::string::String::from(s.sval.as_str())), UNKNOWNOID, -2, false)
         }
-        Node::BitString(_b) => {
-            // bit_in() via DirectFunctionCall3 returns a by-ref Datum.
-            panic!(
-                "make_const: T_BitString arm calls DirectFunctionCall3(bit_in) \
-                 returning a by-reference Datum (bit varlena); the by-reference \
-                 Datum bridge is unported workspace-wide (parse_node.c:455)"
-            );
+        Node::BitString(b) => {
+            // val = DirectFunctionCall3(bit_in,
+            //         CStringGetDatum(aconst->val.bsval.bsval),
+            //         ObjectIdGetDatum(InvalidOid), Int32GetDatum(-1));
+            // bit_in returns the on-disk VarBit varlena byte image; it is a
+            // by-reference Datum.
+            let bytes = backend_parser_small1_seams::bit_in::call(
+                mcx,
+                b.bsval.as_str().as_bytes(),
+            )?;
+            (Datum::ByRef(bytes), BITOID, -1, false)
         }
         other => {
             // elog(ERROR, "unrecognized node type: %d", nodeTag)
@@ -569,10 +577,6 @@ pub fn make_const<'mcx>(
                 .into_error());
         }
     };
-
-    // Reference the OID constants only the (currently-panicking) by-ref arms
-    // would use, so the unused-import lint stays quiet without dead `use`s.
-    let _ = (BITOID, NUMERICOID);
 
     // con = makeConst(typeid, -1, InvalidOid, typelen, val, false, typebyval);
     // con->location = aconst->location;
