@@ -151,4 +151,43 @@ pub fn init_seams() {
             nodes.to_vec()
         },
     );
+
+    // `add_nulling_relids((Node *) quals, target, added)` (rewriteManip.c) over a
+    // single owned-arena `Expr` conjunct — consumed by `deconstruct_distribute_
+    // oj_quals` in init-subselect. The owner walker works over `&mut Node`; wrap
+    // the input `Expr` as `Node::Expr`, run the in-place mutator, and unwrap. The
+    // `Relids` carriers (pathnodes `Option<Box<Bitmapset>>`) map word-for-word to
+    // the `ExprRelids` the walker reads; `target = None` is the C NULL "modify all
+    // level-zero Vars" case.
+    backend_optimizer_plan_init_subselect_ext_seams::add_nulling_relids_expr::set(
+        |expr, target, added| {
+            let target_er = target.map(|b| types_nodes::primnodes::ExprRelids { words: b.words });
+            let added_er = added
+                .map(|b| types_nodes::primnodes::ExprRelids { words: b.words })
+                .unwrap_or_default();
+            let mut node = types_nodes::nodes::Node::Expr(expr);
+            nulling::add_nulling_relids(&mut node, target_er.as_ref(), &added_er);
+            match node {
+                types_nodes::nodes::Node::Expr(e) => e,
+                _ => unreachable!("add_nulling_relids returned a non-Expr for an Expr input"),
+            }
+        },
+    );
+
+    // `IncrementVarSublevelsUp((Node *) expr, delta, min)` (rewriteManip.c) over a
+    // single owned-arena `Expr` — consumed by `extract_lateral_references` in
+    // init-subselect for upper-level LATERAL PlaceHolderVars. Same `&mut Node`
+    // wrap/unwrap as above; the walker is fallible (catalog lookups), propagated.
+    backend_optimizer_plan_init_subselect_ext_seams::increment_var_sublevels_up_expr::set(
+        |expr, delta_sublevels_up, min_sublevels_up| {
+            let mut node = types_nodes::nodes::Node::Expr(expr);
+            increment::IncrementVarSublevelsUp(&mut node, delta_sublevels_up, min_sublevels_up)?;
+            Ok(match node {
+                types_nodes::nodes::Node::Expr(e) => e,
+                _ => unreachable!(
+                    "IncrementVarSublevelsUp returned a non-Expr for an Expr input"
+                ),
+            })
+        },
+    );
 }

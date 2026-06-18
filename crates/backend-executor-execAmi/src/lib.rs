@@ -83,6 +83,13 @@ pub fn init_seams() {
     backend_executor_execAmi_seams::exec_re_scan::set(exec_re_scan);
     backend_executor_execAmi_seams::exec_mark_pos::set(exec_mark_pos);
     backend_executor_execAmi_seams::exec_restr_pos::set(exec_restr_pos);
+
+    // `ExecMaterializesOutput(nodeTag(plan))` (execAmi.c) — pure node-tag
+    // classification consumed by `build_subplan` in init-subselect to decide
+    // whether to add a `Material`. The owner body lives here.
+    backend_optimizer_plan_init_subselect_ext_seams::exec_materializes_output::set(
+        exec_materializes_output,
+    );
 }
 
 /// `elog(ERROR, "unrecognized node type: %d", (int) nodeTag(node))` — carries

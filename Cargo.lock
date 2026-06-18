@@ -5392,6 +5392,7 @@ dependencies = [
  "backend-catalog-pg-depend",
  "backend-catalog-pg-operator-seams",
  "backend-catalog-pg-shdepend",
+ "backend-optimizer-plan-init-subselect-ext-seams",
  "backend-parser-parse-oper",
  "backend-utils-cache-lsyscache",
  "backend-utils-error",
@@ -8458,6 +8459,7 @@ dependencies = [
  "backend-executor-nodeWindowAgg",
  "backend-executor-nodeWorktablescan",
  "backend-nodes-core-seams",
+ "backend-optimizer-plan-init-subselect-ext-seams",
  "backend-utils-cache-syscache-seams",
  "backend-utils-error",
  "mcx",
@@ -11861,6 +11863,7 @@ dependencies = [
 name = "backend-optimizer-plan-init-subselect-ext-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -11962,6 +11965,7 @@ version = "0.0.0"
 dependencies = [
  "backend-nodes-core",
  "backend-nodes-equalfuncs",
+ "backend-optimizer-plan-init-subselect-ext-seams",
  "backend-optimizer-plan-setrefs-seams",
  "backend-utils-cache-syscache-seams",
  "mcx",
@@ -12325,6 +12329,7 @@ dependencies = [
  "backend-optimizer-path-equivclass-seams",
  "backend-optimizer-path-joinpath-seams",
  "backend-optimizer-path-small-seams",
+ "backend-optimizer-plan-init-subselect-ext-seams",
  "backend-optimizer-util-joininfo-ext-seams",
  "backend-optimizer-util-pathnode-seams",
  "backend-optimizer-util-placeholder-seams",
@@ -14924,6 +14929,7 @@ dependencies = [
  "backend-access-table-table",
  "backend-catalog-indexing-seams",
  "backend-nodes-core",
+ "backend-optimizer-plan-init-subselect-ext-seams",
  "backend-optimizer-util-plancat-ext-seams",
  "backend-parser-coerce",
  "backend-parser-relation",
@@ -20276,6 +20282,7 @@ dependencies = [
  "backend-access-common-session-seams",
  "backend-access-common-tupdesc-seams",
  "backend-catalog-pg-enum-seams",
+ "backend-optimizer-plan-init-subselect-ext-seams",
  "backend-optimizer-util-clauses-seams",
  "backend-utils-adt-domains-seams",
  "backend-utils-adt-format-type-seams",

@@ -2757,6 +2757,19 @@ fn lookup_type_cache_eq_opr(type_id: Oid) -> PgResult<Oid> {
     Ok(with_state(|st| st.entry(type_id).eq_opr))
 }
 
+/// `lookup_type_cache(typid, TYPECACHE_HASH_PROC | TYPECACHE_EQ_OPR)` projected
+/// to `(hash_proc, eq_opr)` — `check_memoizable` (optimizer/plan/subselect.c,
+/// in init-subselect). Infallible seam (the C `check_memoizable` does not error),
+/// so the lookup's catalog-miss panics, mirroring a hard `elog`.
+fn lookup_type_cache_hasheq_seam(typid: Oid) -> (Oid, Oid) {
+    lookup_type_cache(typid, TYPECACHE_HASH_PROC | TYPECACHE_EQ_OPR)
+        .expect("lookup_type_cache(TYPECACHE_HASH_PROC | TYPECACHE_EQ_OPR)");
+    with_state(|st| {
+        let e = st.entry(typid);
+        (e.hash_proc, e.eq_opr)
+    })
+}
+
 /// `lookup_type_cache(type_id, TYPECACHE_LT_OPR)->lt_opr` — the "less than"
 /// btree operator oid of a type. `CreateStatistics` (statscmds.c) uses it to
 /// reject types with no default btree operator class.
@@ -2895,6 +2908,10 @@ pub fn init_seams() {
     // OID read). The array/range ADTs call these across the dep cycle.
     backend_utils_cache_typcache_seams::lookup_element_eq_opr::set(lookup_element_eq_opr);
     backend_utils_cache_typcache_seams::lookup_type_cache_eq_opr::set(lookup_type_cache_eq_opr);
+    // `(hash_proc, eq_opr)` for `check_memoizable` (subselect.c, in init-subselect).
+    backend_optimizer_plan_init_subselect_ext_seams::lookup_type_cache_hasheq::set(
+        lookup_type_cache_hasheq_seam,
+    );
     backend_utils_cache_typcache_seams::lookup_type_cache_lt_opr::set(lookup_type_cache_lt_opr);
     backend_utils_cache_typcache_seams::lookup_element_cmp_proc::set(lookup_element_cmp_proc);
     backend_utils_cache_typcache_seams::lookup_element_hash_proc::set(lookup_element_hash_proc);

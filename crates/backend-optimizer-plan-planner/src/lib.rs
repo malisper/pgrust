@@ -3151,6 +3151,18 @@ pub fn init_seams() {
     );
     backend_optimizer_plan_planner_pc_seams::expression_planner_value::set(expression_planner);
 
+    // `preprocess_phv_expression(root, expr)` = `preprocess_expression(root, expr,
+    // EXPRKIND_PHV)` (planner.c) — consumed by `extract_lateral_references`
+    // (initsplan.c, in init-subselect) for upper-level LATERAL PlaceHolderVars.
+    // The planner owns `preprocess_expression`; a non-NULL input always yields a
+    // non-NULL result (the only NULL fall-out is the empty-input fast path).
+    backend_optimizer_plan_init_subselect_ext_seams::preprocess_phv_expression::set(
+        |mcx, root, expr| {
+            Ok(preprocess_expression(mcx, root, Some(expr), EXPRKIND_PHV)?
+                .expect("preprocess_expression of a non-NULL PHV expr is non-NULL"))
+        },
+    );
+
     // create_plan-tail: apply_tlist_labeling(plan->targetlist,
     // root->processed_tlist) (createplan.c create_plan, tlist.c:327). The
     // generic two-tlist label-copy leaf lives in the tlist unit

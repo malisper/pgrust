@@ -192,6 +192,14 @@ pub fn init_seams() {
     geqo_seam::have_relevant_joinclause::set(|root, rel1, rel2| {
         have_relevant_joinclause(root, rel1, rel2)
     });
+
+    // placeholder.c / initsplan.c — `phinfo_add_needed` (init-subselect-ext-seams):
+    // `find_placeholder_info(root, phv); phinfo->ph_needed = bms_add_members(...)`.
+    // Homed here because this unit ports `find_placeholder_info`; consumed by
+    // `add_vars_to_targetlist` / `add_vars_to_attr_needed` in init-subselect.
+    backend_optimizer_plan_init_subselect_ext_seams::phinfo_add_needed::set(
+        |root, phv, where_needed| placeholder::phinfo_add_needed(root, phv, where_needed),
+    );
 }
 
 /// Shorthand for the `Relids` set-algebra seams (relnode.c owner).

@@ -1360,6 +1360,19 @@ fn fetch_operator_form_seam(oper_oid: Oid) -> PgResult<Option<FormPgOperator>> {
     Ok(result)
 }
 
+/// `(oprcanhash, oprcode)` of `pg_operator` row `opno` — the
+/// `SearchSysCache1(OPEROID, opno)` projection `hash_ok_operator`
+/// (optimizer/plan/subselect.c) reads. C `elog(ERROR)`s on a cache miss; we
+/// surface the absent row as an error, mirroring that.
+fn oper_canhash_code_seam(opno: Oid) -> PgResult<(bool, Oid)> {
+    match fetch_operator_form_seam(opno)? {
+        Some(form) => Ok((form.oprcanhash, form.oprcode)),
+        None => Err(ereport(ERROR)
+            .errmsg_internal(format!("cache lookup failed for operator {opno}"))
+            .into_error()),
+    }
+}
+
 /// `invoke_object_post_alter_hook` seam:
 /// `InvokeObjectPostAlterHook(OperatorRelationId, operOid, 0)`.
 fn invoke_object_post_alter_hook_seam(oper_oid: Oid) -> PgResult<()> {
@@ -1379,4 +1392,12 @@ pub fn init_seams() {
     seams::remove_operator_tuple::set(remove_operator_tuple);
     seams::alter_operator_apply::set(alter_operator_apply);
     seams::invoke_object_post_alter_hook::set(invoke_object_post_alter_hook_seam);
+
+    // `(oprcanhash, oprcode)` projection of `pg_operator` consumed by
+    // `hash_ok_operator` (optimizer/plan/subselect.c, in init-subselect). Homed
+    // here because `OperRow` does not project `oprcanhash`; pg_operator is owned
+    // by this crate.
+    backend_optimizer_plan_init_subselect_ext_seams::oper_canhash_code::set(
+        oper_canhash_code_seam,
+    );
 }

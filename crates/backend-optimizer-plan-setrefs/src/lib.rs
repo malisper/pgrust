@@ -3192,4 +3192,17 @@ fn set_returning_clause_references<'mcx>(
 /// outward seams this crate consumes are installed by their respective owners.
 pub fn init_seams() {
     ext::extract_query_dependencies_value::set(extract_query_dependencies_value);
+
+    // `find_minmax_agg_replacement_param(root, aggref)->paramid` (setrefs.c, via
+    // planagg.c's minmax_aggs) consumed by `finalize_primnode`'s Aggref arm
+    // (subselect.c, in init-subselect). The owner returns the whole `Param`; the
+    // seam projects its `paramid`. C `finalize_primnode` is infallible here, so a
+    // catalog miss in the equality probe panics (mirrors a hard `elog`).
+    backend_optimizer_plan_init_subselect_ext_seams::find_minmax_agg_replacement_param::set(
+        |root, aggref| {
+            find_minmax_agg_replacement_param(root, aggref)
+                .expect("find_minmax_agg_replacement_param")
+                .map(|p| p.paramid)
+        },
+    );
 }
