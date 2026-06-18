@@ -2341,6 +2341,29 @@ pub(crate) fn pg_type_form(
     Ok(Some(form))
 }
 
+/// `SearchSysCache1(TYPEOID, ...)` projection of the `Form_pg_type` columns
+/// `format_type_extended` reads (`format_type.c`). The result's `typname`
+/// `PgString` is allocated in the caller's `mcx`; `Ok(None)` on a cache miss.
+pub(crate) fn type_form<'mcx>(
+    mcx: Mcx<'mcx>,
+    typid: Oid,
+) -> PgResult<Option<types_format_type::TypeFormInfo<'mcx>>> {
+    let tuple = SearchSysCache1(mcx, TYPEOID, SysCacheKey::Value(KeyDatum::from_oid(typid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let info = types_format_type::TypeFormInfo {
+        typelem: getattr_oid(mcx, TYPEOID, &tup, Anum_pg_type_typelem)?,
+        typsubscript: getattr_oid(mcx, TYPEOID, &tup, Anum_pg_type_typsubscript)?,
+        typstorage: getattr_char(mcx, TYPEOID, &tup, Anum_pg_type_typstorage)?,
+        typmodout: getattr_oid(mcx, TYPEOID, &tup, Anum_pg_type_typmodout)?,
+        typnamespace: getattr_oid(mcx, TYPEOID, &tup, Anum_pg_type_typnamespace)?,
+        typname: getattr_name(mcx, TYPEOID, &tup, Anum_pg_type_typname)?,
+    };
+    ReleaseSysCache(tup);
+    Ok(Some(info))
+}
+
 /// `GetSysCacheOid3(CLAAMNAMENSP, Anum_pg_opclass_oid, amid, opcname, nsp)`.
 pub(crate) fn get_opclass_oid(amid: Oid, opcname: &str, namespace_id: Oid) -> PgResult<Oid> {
     let scratch = MemoryContext::new("syscache get_opclass_oid");
