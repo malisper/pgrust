@@ -4141,6 +4141,13 @@ fn apply_scanjoin_target_to_paths<'mcx>(
     // create_append_path see the right pathtarget.
     root.rel_mut(rel).reltarget = Some(Box::new(scanjoin_target.clone()));
 
+    // We may have added paths (replacing existing ones with projection paths),
+    // so recompute the rel's cheapest-path info (C:8043). Without this, the
+    // rel's cheapest_total_path still points at a path that is no longer in the
+    // pathlist, breaking later steps (create_ordered_paths / create_distinct_paths)
+    // that key off cheapest_total_path.
+    backend_optimizer_util_pathnode::set_cheapest(root, rel)?;
+
     Ok(())
 }
 
