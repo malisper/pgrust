@@ -2344,6 +2344,23 @@ fn tuple_value_to_arg(
     }
 }
 
+/// [`tuple_value_to_arg`] for a by-reference type whose adt core reads the FRAMED
+/// (header-ful) varlena image — the `ByRef` referent crosses VERBATIM, with its
+/// 4-byte length header intact (array_out / record_out / range_out read the
+/// framed `struct varlena *`). See [`type_adt_core_is_header_ful`].
+fn tuple_value_to_arg_verbatim(
+    val: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
+) -> (Datum, Option<RefPayload>) {
+    use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
+    match val {
+        CanonDatum::ByRef(b) => (
+            Datum::null(),
+            Some(RefPayload::Varlena(b.as_slice().to_vec())),
+        ),
+        other => tuple_value_to_arg(other),
+    }
+}
+
 /// Copy a `&[u8]` into a fresh `mcx`-charged `PgVec<u8>` (the seam returns its
 /// result allocated in the caller's context, as C `pstrdup`/`palloc` would).
 fn bytes_into<'mcx>(mcx: Mcx<'mcx>, src: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
@@ -2363,7 +2380,12 @@ fn oid_send_function_call_seam<'mcx>(
     function_id: Oid,
     val: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
 ) -> PgResult<PgVec<'mcx, u8>> {
-    let (datum, ref_arg) = tuple_value_to_arg(val);
+    let raw = arg0_consumes_header_ful_varlena(mcx, function_id)?;
+    let (datum, ref_arg) = if raw {
+        tuple_value_to_arg_verbatim(val)
+    } else {
+        tuple_value_to_arg(val)
+    };
     let resolved = fmgr_info(mcx, function_id)?;
     let arg = match &ref_arg {
         Some(p) => FmgrArg::Ref(p),
@@ -2386,7 +2408,16 @@ fn oid_output_function_call_seam<'mcx>(
     function_id: Oid,
     val: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
 ) -> PgResult<PgVec<'mcx, u8>> {
-    let (datum, ref_arg) = tuple_value_to_arg(val);
+    // The container I/O cores (array_out / record_out / range_out) read the
+    // framed (header-ful) varlena directly, so their argument must NOT have its
+    // 4-byte length header stripped (which `tuple_value_to_arg` does for every
+    // by-ref value). Detect that from the output function's first argument type.
+    let raw = arg0_consumes_header_ful_varlena(mcx, function_id)?;
+    let (datum, ref_arg) = if raw {
+        tuple_value_to_arg_verbatim(val)
+    } else {
+        tuple_value_to_arg(val)
+    };
     let resolved = fmgr_info(mcx, function_id)?;
     let arg = match &ref_arg {
         Some(p) => FmgrArg::Ref(p),
@@ -2485,7 +2516,11 @@ pub fn datum_to_ref_arg_owned(
 /// (this codebase's varlena convention), so a varlena ByRef is stripped here and
 /// a fixed-by-ref ByRef passes verbatim.
 fn byref_payload_for_typlen(bytes: &[u8], typlen: i32) -> Vec<u8> {
-    if typlen == -1 {
+    if typlen == HEADERFUL_VERBATIM_TYPLEN {
+        // A container varlena (array / composite / range) whose adt core reads the
+        // framed image — pass verbatim (header-ful), no strip.
+        bytes.to_vec()
+    } else if typlen == -1 {
         // Strip only a self-consistent header-ful varlena (header-detection), so
         // an already-header-less varlena image (a parser Const not yet restamped)
         // is not over-stripped.
@@ -2536,6 +2571,68 @@ fn datum_to_ref_arg_owned_typed(
 /// A polymorphic / unresolvable argument type yields `typlen == 0` (the
 /// "pass verbatim" sentinel — its referent is already in whatever shape the
 /// caller produced).
+/// Whether the type `argtype`'s in-memory adt core reads a HEADER-FUL varlena
+/// image (the standard on-disk `struct varlena *` layout with its 4-byte
+/// `VARSIZE` length word at byte 0), rather than the header-LESS `VARDATA`
+/// payload the string/numeric cores were ported to consume.
+///
+/// The container types — array (`array_out`/`array_send`/…), composite/record
+/// (`record_out`), and range / multirange (`range_out` / `multirange_out`) —
+/// read their argument as a fully-framed varlena (e.g. `array_out` reads
+/// `ARR_ELEMTYPE` at byte 12 of the framed `ArrayType`). Stripping the 4-byte
+/// header off such a value (as the string cores require) shifts the whole image
+/// left by `VARHDRSZ` and corrupts every field. So a by-reference argument of
+/// one of these types must cross the fmgr boundary VERBATIM (header-ful), never
+/// stripped. (This runs on the output / arg path, after the catalogs exist, so
+/// the type lookup is safe — unlike the bootstrap-time type input path the
+/// header heuristic was chosen to avoid.)
+fn type_adt_core_is_header_ful(mcx: Mcx<'_>, argtype: Oid) -> PgResult<bool> {
+    use types_tuple::heaptuple::{
+        ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLERANGEOID,
+        ANYMULTIRANGEOID, ANYRANGEOID, RECORDOID,
+    };
+    if argtype == 0 {
+        return Ok(false);
+    }
+    // The container pseudotypes whose I/O cores read a framed varlena.
+    if matches!(
+        argtype,
+        ANYARRAYOID
+            | ANYCOMPATIBLEARRAYOID
+            | ANYRANGEOID
+            | ANYCOMPATIBLERANGEOID
+            | ANYMULTIRANGEOID
+            | ANYCOMPATIBLEMULTIRANGEOID
+            | RECORDOID
+    ) {
+        return Ok(true);
+    }
+    // A concrete array type has a valid element type.
+    if types_core::OidIsValid(
+        backend_utils_cache_lsyscache_seams::get_element_type::call(argtype)?
+            .unwrap_or(InvalidOid),
+    ) {
+        return Ok(true);
+    }
+    // A concrete composite / range / multirange type (`pg_type.typtype` c / r / m).
+    let typtype = backend_utils_cache_lsyscache_seams::get_typtype::call(argtype)?;
+    Ok(typtype == b'c' || typtype == b'r' || typtype == b'm')
+}
+
+/// Whether `fn_oid`'s first argument is a by-reference type whose adt core reads
+/// a header-FUL varlena (see [`type_adt_core_is_header_ful`]). Used to suppress
+/// the arg-boundary header strip for the container I/O functions.
+fn arg0_consumes_header_ful_varlena(mcx: Mcx<'_>, fn_oid: Oid) -> PgResult<bool> {
+    let proc = match backend_utils_cache_syscache_seams::proc_row_by_oid::call(mcx, fn_oid)? {
+        Some(p) => p,
+        None => return Ok(false),
+    };
+    match proc.proargtypes.first() {
+        Some(&argtype) => type_adt_core_is_header_ful(mcx, argtype),
+        None => Ok(false),
+    }
+}
+
 fn proc_arg_typlens(mcx: Mcx<'_>, fn_oid: Oid, nargs: usize) -> PgResult<Vec<i32>> {
     let mut out = vec![0i32; nargs];
     let proc = match backend_utils_cache_syscache_seams::proc_row_by_oid::call(mcx, fn_oid)? {
@@ -2545,6 +2642,14 @@ fn proc_arg_typlens(mcx: Mcx<'_>, fn_oid: Oid, nargs: usize) -> PgResult<Vec<i32
     for (i, slot) in out.iter_mut().enumerate() {
         if let Some(&argtype) = proc.proargtypes.get(i) {
             if argtype != 0 {
+                // A by-reference container type (array / composite / range /
+                // multirange / record) has a varlena `typlen == -1` but its adt
+                // core reads the FRAMED (header-ful) image — it must cross
+                // verbatim, never stripped (see `type_adt_core_is_header_ful`).
+                if type_adt_core_is_header_ful(mcx, argtype)? {
+                    *slot = HEADERFUL_VERBATIM_TYPLEN;
+                    continue;
+                }
                 // A varlena (`typlen == -1`) carries a strippable header; a
                 // fixed-length-by-ref type (`typlen > 0`, e.g. `name`) does not.
                 // A pseudo/polymorphic declared type reports its own `pg_type`
@@ -2557,6 +2662,13 @@ fn proc_arg_typlens(mcx: Mcx<'_>, fn_oid: Oid, nargs: usize) -> PgResult<Vec<i32
     }
     Ok(out)
 }
+
+/// Sentinel `typlen` meaning "by-reference container varlena whose adt core
+/// reads the framed (header-ful) image" — pass its `ByRef` referent VERBATIM
+/// across the fmgr boundary (no header strip). Distinct from `0` (the
+/// polymorphic-unresolved sentinel, which still strips through
+/// [`datum_to_ref_arg`]).
+const HEADERFUL_VERBATIM_TYPLEN: i32 = i32::MIN;
 
 /// Map a `function_call_coll_ref_args_out` `(word, ref_result)` pair back onto a
 /// canonical [`Datum`]: a by-reference result materializes its referent bytes
@@ -2866,10 +2978,16 @@ fn oid_output_function_call_datum_seam<'mcx>(
         CanonDatum::ByRef(bytes) => {
             // Strip a header-FUL varlena image to the header-less payload the
             // output function's `VARDATA` reader expects (header-detection;
-            // a fixed-by-ref / header-less image passes verbatim).
-            let payload = types_fmgr::boundary::RefPayload::Varlena(
-                byref_to_headerless_payload(bytes.as_slice()),
-            );
+            // a fixed-by-ref / header-less image passes verbatim). The container
+            // I/O cores (array_out / record_out / range_out) instead read the
+            // framed varlena directly, so their argument must NOT be stripped.
+            let raw = arg0_consumes_header_ful_varlena(mcx, function_id)?;
+            let bytes_out = if raw {
+                bytes.as_slice().to_vec()
+            } else {
+                byref_to_headerless_payload(bytes.as_slice())
+            };
+            let payload = types_fmgr::boundary::RefPayload::Varlena(bytes_out);
             output_function_call_typed(
                 mcx,
                 &resolved.resolution,
