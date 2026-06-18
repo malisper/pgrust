@@ -675,6 +675,78 @@ pub fn ProcessUtilityForAlterTable<'mcx>(
     Ok(())
 }
 
+/// `process_utility_wrapper` (utility.c:1239-1255) — build the subcommand
+/// wrapper `PlannedStmt` and re-enter `ProcessUtility`.
+///
+/// ```c
+/// PlannedStmt *wrapper = makeNode(PlannedStmt);
+/// wrapper->commandType = CMD_UTILITY;
+/// wrapper->canSetTag = false;
+/// wrapper->utilityStmt = stmt;
+/// wrapper->stmt_location = pstmt->stmt_location;
+/// wrapper->stmt_len = pstmt->stmt_len;
+/// ProcessUtility(wrapper, queryString, false, PROCESS_UTILITY_SUBCOMMAND,
+///                params, NULL, None_Receiver, NULL);
+/// ```
+///
+/// `ProcessUtilitySlow`'s CREATE-TABLE fan-out (the implied `IndexStmt` /
+/// `AlterTableStmt` from PRIMARY KEY / UNIQUE / FOREIGN KEY, and any other
+/// sub-statement `transformCreateStmt` produced) and `ProcessUtilityForAlterTable`
+/// reach this. The C wrapper aliases the sub-statement `stmt` by pointer; the
+/// owned model deep-copies it into `mcx` (the wrapper outlives the borrowed
+/// node, `copyObject`-shape). `params` is the original `ParamListInfo` (the C
+/// re-entry threads the outer `params` through); the recursive re-entry's
+/// sub-statements never read params, so `None` is faithful where the dispatch
+/// has no `params` in scope — this owner-installed body receives no params and
+/// passes `None`, matching the `NULL`-receiver / `NULL`-qc subcommand contract.
+pub fn process_utility_wrapper<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &Node<'mcx>,
+    query_string: &str,
+    stmt_location: i32,
+    stmt_len: i32,
+) -> PgResult<()> {
+    let utility_stmt = mcx::alloc_in(mcx, stmt.clone_in(mcx)?)?;
+    let wrapper = PlannedStmt {
+        commandType: types_nodes::nodes::CmdType::CMD_UTILITY,
+        queryId: 0,
+        utilityStmt: Some(utility_stmt),
+        resultRelations: None,
+        relationOids: None,
+        planTree: None,
+        rowMarks: None,
+        canSetTag: false,
+        hasReturning: false,
+        hasModifyingCTE: false,
+        parallelModeNeeded: false,
+        jitFlags: 0,
+        permInfos: None,
+        paramExecTypes: None,
+        rtable: None,
+        unprunableRelids: None,
+        subplans: None,
+        stmt_location,
+        stmt_len,
+        transientPlan: false,
+        dependsOnRole: false,
+        invalItems: None,
+    };
+
+    // qc == NULL in C: a throwaway completion the subcommand never reports.
+    let mut qc = QueryCompletion::default();
+
+    ProcessUtility(
+        mcx,
+        &wrapper,
+        query_string,
+        false,
+        types_nodes::parsestmt::PROCESS_UTILITY_SUBCOMMAND,
+        None,
+        backend_tcop_dest::none_receiver(),
+        &mut qc,
+    )
+}
+
 /// `ExecDropStmt` (utility.c:1958-1990, static) — dispatch a `DropStmt` to the
 /// relation-removal (`RemoveRelations`) or general object-removal
 /// (`RemoveObjects`) executor.

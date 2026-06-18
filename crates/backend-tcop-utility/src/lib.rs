@@ -71,7 +71,8 @@ pub use classify::{
 };
 pub use commandtag::{AlterObjectTypeCommandTag, CreateCommandTag};
 pub use dispatch::{
-    ExecDropStmt, ProcessUtility, ProcessUtilityForAlterTable, standard_ProcessUtility,
+    ExecDropStmt, ProcessUtility, ProcessUtilityForAlterTable, process_utility_wrapper,
+    standard_ProcessUtility,
 };
 pub use consts::{
     LogStmtLevel, COMMAND_IS_NOT_READ_ONLY, COMMAND_IS_STRICTLY_READ_ONLY,
@@ -103,6 +104,13 @@ pub fn init_seams() {
     // `_ =>` arm reach it through the `process_utility_slow` outward seam; install
     // it here so CREATE TABLE → `DefineRelation` becomes reachable.
     backend_tcop_utility_out_seams::process_utility_slow::set(slow::process_utility_slow);
+
+    // The recursive `ProcessUtility` re-entry the CREATE-TABLE sub-statement
+    // fan-out (implied IndexStmt / AlterTableStmt from PRIMARY KEY / UNIQUE /
+    // FOREIGN KEY) and `ProcessUtilityForAlterTable` dispatch through. The body
+    // is `ProcessUtility` itself (owned here); it builds the subcommand wrapper
+    // `PlannedStmt` + `None` receiver and re-enters the dispatch.
+    backend_tcop_utility_out_seams::process_utility_wrapper::set(dispatch::process_utility_wrapper);
 
     // EventTriggerSupportsObjectType (commands/event_trigger.c): a pure dispatch
     // predicate the GRANT/DROP/RENAME/ALTER…/COMMENT/SECURITY LABEL fast-path

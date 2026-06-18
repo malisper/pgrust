@@ -13,6 +13,7 @@ crate-type = ["rlib"]
 backend-tcop-utility-seams = { path = "../backend-tcop-utility-seams" }
 backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 backend-tcop-cmdtag = { path = "../backend-tcop-cmdtag" }
+backend-tcop-dest = { path = "../backend-tcop-dest" }
 backend-parser-analyze-seams = { path = "../backend-parser-analyze-seams" }
 backend-utils-error = { path = "../backend-utils-error" }
 mcx = { path = "../mcx" }
