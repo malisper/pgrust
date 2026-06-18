@@ -18660,6 +18660,7 @@ dependencies = [
 name = "backend-utils-adt-numeric"
 version = "0.0.0"
 dependencies = [
+ "backend-lib-hyperloglog",
  "backend-nodes-core",
  "backend-optimizer-util-clauses",
  "backend-utils-adt-jsonb-seams",

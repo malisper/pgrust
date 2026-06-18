@@ -21,8 +21,13 @@ types-error = { path = "../types-error" }
 # hash_numeric/hash_numeric_extended.
 common-hashfn = { path = "../common-hashfn" }
 
-# Inward seams this crate OWNS and installs from init_seams(); also carries the
-# outbound numeric_abbrev_add_sample seam reached from the sort-support abbrev.
+# The HyperLogLog cardinality estimator (hyperloglog.c). numeric_sortsupport's
+# abbreviated-key state (NumericSortSupport.abbr_card) holds the counter by
+# value, exactly as C holds `hyperLogLogState abbr_card` inline; the
+# init/add/estimate ops are called directly on it (mirrors varlena's sort state).
+backend-lib-hyperloglog = { path = "../backend-lib-hyperloglog" }
+
+# Inward seams this crate OWNS and installs from init_seams().
 backend-utils-adt-numeric-seams = { path = "../backend-utils-adt-numeric-seams" }
 
 # The numeric->integer cast boundary (numeric_int2/4/8) is a numeric.c function

@@ -61,27 +61,8 @@ seam_core::seam!(
     ) -> types_error::PgResult<f64>
 );
 
-seam_core::seam!(
-    /// `addHyperLogLog(&nss->abbr_card, DatumGetUInt32(hash_uint32(tmp)))`
-    /// (numeric.c:5173, the `estimating` branch of `numeric_abbrev_convert_var`).
-    /// `tmp` is the folded 32-bit abbreviation (`(uint32) result ^ (uint32)
-    /// ((uint64) result >> 32)`), already computed in the numeric unit; the
-    /// `hash_uint32` mix + HyperLogLog accumulation against the sort's
-    /// `hyperLogLogState` (attached to `SortSupport.ssup_extra` by the
-    /// genuinely-unported `numeric_sortsupport` setup) live behind this seam.
-    /// Pure side-effect on the HLL counter; never ereports. OUTBOUND: this unit
-    /// only calls it; the sort-support/HLL owner installs it.
-    pub fn numeric_abbrev_add_sample(tmp: u32)
-);
-
-seam_core::seam!(
-    /// `estimateHyperLogLog(&nss->abbr_card)` (numeric.c:2241, the body of
-    /// `numeric_abbrev_abort`). Reads the running cardinality estimate off the
-    /// sort's `hyperLogLogState` (attached to `SortSupport.ssup_extra` by the
-    /// genuinely-unported `numeric_sortsupport` setup). The abort *decision*
-    /// (the 10k/100k thresholds + `estimating` toggle) lives in the numeric
-    /// unit; only the HLL counter read is behind this seam. Pure read; never
-    /// ereports. OUTBOUND: this unit only calls it; the sort-support/HLL owner
-    /// installs it.
-    pub fn numeric_abbrev_estimate() -> f64
-);
+// The `addHyperLogLog`/`estimateHyperLogLog` calls of `numeric_abbrev_convert_var`
+// / `numeric_abbrev_abort` (numeric.c) are NOT seams: the HyperLogLog counter
+// (`NumericSortSupport.abbr_card`) is the numeric unit's own state, held by value
+// in the abbreviated-key sort state and operated on directly via
+// `backend-lib-hyperloglog` (mirroring varlena's `VarStringSortSupport`).
