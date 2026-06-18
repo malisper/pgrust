@@ -9,7 +9,7 @@ use backend_optimizer_path_costsize_seams as cz;
 
 use crate::{
     clamp_row_est, clamp_width_est, cost_qual_eval, cost_qual_eval_node, rinfo_clause_nodes,
-    recursive_worktable_factor, SizeofHeapTupleHeader, RTE_FUNCTION, RTE_VALUES,
+    recursive_worktable_factor, SizeofHeapTupleHeader, RTE_FUNCTION, RTE_SUBQUERY, RTE_VALUES,
 };
 
 /// `MAXALIGN(LEN)` — round up to the platform max alignment (8).
@@ -102,6 +102,96 @@ pub fn set_namedtuplestore_size_estimates<'mcx>(run: &PlannerRun<'mcx>, root: &m
 pub fn set_result_size_estimates<'mcx>(run: &PlannerRun<'mcx>, root: &mut PlannerInfo, rel: RelId) {
     debug_assert!(root.rel(rel).relid > 0);
     root.rel_mut(rel).tuples = 1.0;
+    set_baserel_size_estimates(run, root, rel);
+}
+
+/// `set_subquery_size_estimates` (costsize.c:5902).
+///
+/// Set the size estimates for a base relation that is a subquery. The rel's
+/// targetlist and restrictinfo list must already be built and the subquery's
+/// Paths completed; we read the subquery's `PlannerInfo` (`rel.subroot`) for the
+/// raw output rowcount and per-column width estimates, then defer to
+/// `set_baserel_size_estimates`.
+pub fn set_subquery_size_estimates<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    rel: RelId,
+) {
+    debug_assert!(root.rel(rel).relid > 0);
+    debug_assert!(rt_rtekind(root, rel) == RTE_SUBQUERY);
+
+    // The subroot lives inside the rel; move it out so we can borrow it while
+    // mutating `root` (fetch_upper_rel needs `&mut subroot`). Restored below.
+    let mut subroot: alloc::boxed::Box<PlannerInfo> = root
+        .rel_mut(rel)
+        .subroot
+        .0
+        .take()
+        .expect("set_subquery_size_estimates: rel.subroot is NULL");
+
+    // Copy raw number of output rows from subquery: all of its paths share the
+    // same rowcount, so look at cheapest-total of the subroot's FINAL rel. The
+    // FINAL upper rel was created while the subquery was planned, so read it
+    // directly off `subroot.upper_rels` (a costsize->relnode dep would cycle
+    // through rte-seams).
+    let sub_final_rel = subroot.upper_rels[types_pathnodes::UPPERREL_FINAL as usize]
+        .first()
+        .copied()
+        .expect("set_subquery_size_estimates: subroot has no UPPERREL_FINAL rel");
+    let cheapest = subroot
+        .rel(sub_final_rel)
+        .cheapest_total_path
+        .expect("set_subquery_size_estimates: subroot FINAL rel has no cheapest_total_path");
+    root.rel_mut(rel).tuples = subroot.path(cheapest).base().rows;
+
+    // Per-output-column width estimates from the subquery's targetlist. For a
+    // plain Var (and only when the subquery is not itself a setop), use the
+    // width estimate made while planning the subquery; otherwise leave it to
+    // set_rel_width to fill a datatype-based default.
+    let min_attr = root.rel(rel).min_attr;
+    let max_attr = root.rel(rel).max_attr;
+    let sub_has_setops = run.resolve(subroot.parse).setOperations.is_some();
+
+    // Snapshot the (resjunk, resno, item_width) for each tlist entry; the Var
+    // width read borrows `subroot` immutably, disjoint from `root`.
+    let mut updates: alloc::vec::Vec<(i16, i32)> = alloc::vec::Vec::new();
+    {
+        let parse = run.resolve(subroot.parse);
+        for te in parse.targetList.iter() {
+            // junk columns aren't visible to upper query
+            if te.resjunk {
+                continue;
+            }
+            // ignore tlist columns not visible at our query level
+            if te.resno < min_attr || te.resno > max_attr {
+                continue;
+            }
+            let mut item_width: i32 = 0;
+            if !sub_has_setops {
+                if let Some(texpr) = te.expr.as_deref() {
+                    if let types_nodes::primnodes::Expr::Var(var) = texpr {
+                        let subrel = backend_optimizer_util_relnode_seams::find_base_rel::call(
+                            &subroot,
+                            var.varno,
+                        );
+                        let sr = subroot.rel(subrel);
+                        let ndx = (var.varattno - sr.min_attr) as usize;
+                        item_width = sr.attr_widths[ndx];
+                    }
+                }
+            }
+            updates.push((te.resno, item_width));
+        }
+    }
+    for (resno, item_width) in updates {
+        let ndx = (resno - min_attr) as usize;
+        root.rel_mut(rel).attr_widths[ndx] = item_width;
+    }
+
+    // Restore the subroot into the rel.
+    root.rel_mut(rel).subroot.0 = Some(subroot);
+
+    // Now estimate number of output rows, etc.
     set_baserel_size_estimates(run, root, rel);
 }
 
