@@ -35,12 +35,12 @@
 //! so the table stays free of any direct fmgr dependency. They are fallible
 //! because the dispatched function can `ereport(ERROR)`.
 
-// The bare-word newtype: the transitional key form the owner (`eval_scalar`)
-// and the hash/equal callbacks operate on (a scalar array-element word).
-use types_datum::Datum;
 // The canonical unified value type (Datum-unification keystone) — what the
-// keystone-owned `ScalarArrayOpExprHashEntry.key` carries. Stored keys are
-// scalar words, so they cross into its by-value arm.
+// keystone-owned `ScalarArrayOpExprHashEntry.key` carries and what the
+// hash/equal callbacks operate on. Array elements (the SAOP keys) may be
+// by-reference values (text/varchar/numeric array elements), so they flow as
+// full canonical Datums through the table and the fmgr-dispatched callbacks
+// (the `_datum` lane), NOT downgraded to a bare word.
 use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 // The table data structs live in the keystone (types-nodes) so the step payload
 // can carry the real typed table; this crate owns the simplehash algorithms.
@@ -233,27 +233,29 @@ fn saophash_grow<'mcx>(tb: &mut SaophashHash<'mcx>, newsize: u64) {
 /// dispatch the operator's hash / equality function through the fmgr seam, so
 /// the table stays free of the fmgr dependency. They are fallible because the
 /// dispatched function can `ereport(ERROR)`.
-type HashFn<'a> = dyn FnMut(Datum) -> types_error::PgResult<u32> + 'a;
-type EqualFn<'a> = dyn FnMut(Datum, Datum) -> types_error::PgResult<bool> + 'a;
+type HashFn<'a> = dyn FnMut(&DatumV<'_>) -> types_error::PgResult<u32> + 'a;
+type EqualFn<'a> = dyn FnMut(&DatumV<'_>, &DatumV<'_>) -> types_error::PgResult<bool> + 'a;
 
 /// `saophash_insert(tb, key, &found)` — insert `key`, returning whether it was
 /// already present. Robin-Hood placement with the macro's anti-clustering
 /// forced-grow guards. `hash_key` / `equal` are the `SH_HASH_KEY` / `SH_EQUAL`
-/// callbacks (operator hash / equality, dispatched via fmgr by the owner).
+/// callbacks (operator hash / equality, dispatched via fmgr by the owner). The
+/// `key` is a canonical [`DatumV`]: a by-reference array element (text/numeric)
+/// keeps its full image through the table and the fmgr-dispatched callbacks.
 pub fn saophash_insert<'mcx>(
     tb: &mut SaophashHash<'mcx>,
-    key: Datum,
+    key: DatumV<'mcx>,
     hash_key: &mut HashFn<'_>,
     equal: &mut EqualFn<'_>,
 ) -> types_error::PgResult<bool> {
-    let hash = hash_key(key)?;
+    let hash = hash_key(&key)?;
     saophash_insert_hash_internal(tb, key, hash, equal)
 }
 
 /// `saophash_insert_hash_internal(tb, key, hash, &found)` — the Robin-Hood core.
 fn saophash_insert_hash_internal<'mcx>(
     tb: &mut SaophashHash<'mcx>,
-    key: Datum,
+    key: DatumV<'mcx>,
     hash: u32,
     equal: &mut EqualFn<'_>,
 ) -> types_error::PgResult<bool> {
@@ -276,18 +278,16 @@ fn saophash_insert_hash_internal<'mcx>(
                 if entry.status == SH_STATUS_EMPTY {
                     tb.members += 1;
                     let e = &mut tb.data[curelem as usize];
-                    // Stored key crosses into the canonical by-value arm.
-                    e.key = DatumV::ByVal(key.as_usize());
+                    // Store the canonical key (by-value word or by-reference image).
+                    e.key = key;
                     e.hash = hash;
                     e.status = SH_STATUS_IN_USE;
                     return Ok(false);
                 }
             }
             let entry_hash = tb.data[curelem as usize].hash;
-            // The callbacks operate on the bare scalar word; recover it from the
-            // stored canonical by-value arm.
-            let entry_key = Datum::from_usize(tb.data[curelem as usize].key.as_usize());
-            if hash == entry_hash && equal(entry_key, key)? {
+            // The callbacks operate on the canonical key (by-ref-capable).
+            if hash == entry_hash && equal(&tb.data[curelem as usize].key, &key)? {
                 return Ok(true); // key already present
             }
 
@@ -341,8 +341,8 @@ fn saophash_insert_hash_internal<'mcx>(
         }
         tb.members += 1;
         let e = &mut tb.data[curelem as usize];
-        // Stored key crosses into the canonical by-value arm.
-        e.key = DatumV::ByVal(key.as_usize());
+        // Store the canonical key (by-value word or by-reference image).
+        e.key = key;
         e.hash = hash;
         e.status = SH_STATUS_IN_USE;
         return Ok(false);
@@ -355,7 +355,7 @@ fn saophash_insert_hash_internal<'mcx>(
 /// callbacks.
 pub fn saophash_lookup(
     tb: &SaophashHash<'_>,
-    key: Datum,
+    key: &DatumV<'_>,
     hash_key: &mut HashFn<'_>,
     equal: &mut EqualFn<'_>,
 ) -> types_error::PgResult<bool> {
@@ -367,10 +367,8 @@ pub fn saophash_lookup(
         if entry.status == SH_STATUS_EMPTY {
             return Ok(false);
         }
-        // The callbacks operate on the bare scalar word; recover it from the
-        // stored canonical by-value arm.
-        let entry_key = Datum::from_usize(entry.key.as_usize());
-        if hash == entry.hash && equal(entry_key, key)? {
+        // The callbacks operate on the canonical key (by-ref-capable).
+        if hash == entry.hash && equal(&entry.key, key)? {
             return Ok(true);
         }
         curelem = tb.next(curelem);
@@ -384,10 +382,10 @@ mod tests {
     // Deterministic SH_HASH_KEY / SH_EQUAL standing in for the fmgr-dispatched
     // callbacks (these tests exercise the *structural* simplehash, not fmgr):
     // hash the low 32 bits of the Datum word, compare for exact equality.
-    fn hk(k: Datum) -> types_error::PgResult<u32> {
+    fn hk(k: &DatumV<'_>) -> types_error::PgResult<u32> {
         Ok(k.as_usize() as u32)
     }
-    fn eq(a: Datum, b: Datum) -> types_error::PgResult<bool> {
+    fn eq(a: &DatumV<'_>, b: &DatumV<'_>) -> types_error::PgResult<bool> {
         Ok(a.as_usize() == b.as_usize())
     }
 
@@ -400,7 +398,7 @@ mod tests {
         let mut tb = saophash_create(4);
         let n: usize = 1000;
         for i in 0..n {
-            let key = Datum::from_usize(i * 2 + 1); // odd keys
+            let key = DatumV::from_usize(i * 2 + 1); // odd keys
             let found = saophash_insert(&mut tb, key, &mut hk, &mut eq).unwrap();
             assert!(!found, "fresh key {i} reported as already present");
         }
@@ -408,16 +406,16 @@ mod tests {
 
         // Re-inserting an existing key reports found and does not grow members.
         let again =
-            saophash_insert(&mut tb, Datum::from_usize(1), &mut hk, &mut eq).unwrap();
+            saophash_insert(&mut tb, DatumV::from_usize(1), &mut hk, &mut eq).unwrap();
         assert!(again);
         assert_eq!(tb.members as usize, n);
 
         for i in 0..n {
-            let present = saophash_lookup(&tb, Datum::from_usize(i * 2 + 1), &mut hk, &mut eq)
-                .unwrap();
+            let present =
+                saophash_lookup(&tb, &DatumV::from_usize(i * 2 + 1), &mut hk, &mut eq).unwrap();
             assert!(present, "inserted key {i} not found after grows");
             let absent =
-                saophash_lookup(&tb, Datum::from_usize(i * 2), &mut hk, &mut eq).unwrap();
+                saophash_lookup(&tb, &DatumV::from_usize(i * 2), &mut hk, &mut eq).unwrap();
             assert!(!absent, "never-inserted even key {} found", i * 2);
         }
         // size is a power of two and large enough to hold n under the fillfactor.

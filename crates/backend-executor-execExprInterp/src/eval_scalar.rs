@@ -31,10 +31,7 @@
 //! step-payload reads and control flow that the owned model can already express
 //! are written out faithfully.
 
-use backend_utils_fmgr_fmgr_seams::{
-    function_call1_coll, function_call2_coll, function_call_invoke,
-    function_call_invoke_datum,
-};
+use backend_utils_fmgr_fmgr_seams::{function_call_invoke, function_call_invoke_datum};
 // The bare-word newtype: the scalar form the fmgr/arrayfuncs seams and the
 // step-payload eval helpers operate on.
 use types_datum::Datum;
@@ -1283,25 +1280,35 @@ pub fn ExecEvalScalarArrayOp<'mcx>(
 /// 1-arg `hash_fcinfo_data`, dispatches `hash_finfo.fn_addr(fcinfo)`, and
 /// returns `DatumGetUInt32`. The owned `FmgrInfo` carries only `fn_oid` (the F0
 /// contract — see [`crate::justs`]), so the dispatch goes through the fmgr seam
-/// `function_call1_coll`, which re-resolves by OID. `hashfuncid` is
-/// `saop->hashfuncid` (`tb->private_data->hash_finfo`); `collation` is
-/// `saop->inputcollid` (the collation `InitFunctionCallInfoData` stamped onto
-/// `hash_fcinfo_data`).
-pub fn saop_element_hash(
+/// `function_call1_coll_datum` (the canonical by-reference-capable lane), which
+/// re-resolves by OID and lets a by-ref array element reach the hash function as
+/// its full image. `hashfuncid` is `saop->hashfuncid`
+/// (`tb->private_data->hash_finfo`); `collation` is `saop->inputcollid` (the
+/// collation `InitFunctionCallInfoData` stamped onto `hash_fcinfo_data`).
+pub fn saop_element_hash<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
     hashfuncid: types_core::primitive::Oid,
     collation: types_core::primitive::Oid,
-    key: Datum,
+    key: &DatumV<'mcx>,
 ) -> PgResult<u32> {
     // fcinfo->args[0].value = key; fcinfo->args[0].isnull = false;
     // hash = elements_tab->hash_finfo.fn_addr(fcinfo);
     // return DatumGetUInt32(hash);
-    let hash = function_call1_coll::call(hashfuncid, collation, key)?;
+    //
+    // Dispatch on the canonical by-reference-capable lane: a by-ref array
+    // element (text/numeric) reaches the hash function as its full image, not a
+    // downgraded word (which would panic in `word_of`). The hash result is a
+    // by-value int4.
+    let hash =
+        backend_utils_fmgr_fmgr_seams::function_call1_coll_datum::call(
+            mcx, hashfuncid, collation, key.clone(),
+        )?;
     Ok(hash.as_u32())
 }
 
 /// `saop_hash_element_match(struct saophash_hash *tb, Datum key1, Datum key2)`
 /// — the `SH_EQUAL` callback: compare two elements via the SAOP's comparison
-/// (equality) operator.
+/// (equality) operator, dispatched on the canonical by-reference-capable lane.
 ///
 /// Faithful to `execExprInterp.c:4194-4209`: the C loads `key1`/`key2` into the
 /// step's 2-arg comparison `fcinfo_data`, dispatches `finfo->fn_addr(fcinfo)`,
@@ -1309,20 +1316,27 @@ pub fn saop_element_hash(
 /// `op->d.hashedscalararrayop.finfo` (the equality function the compiler stamped
 /// — `opfuncid` for hashed IN, `negfuncid` for hashed NOT IN); `collation` is
 /// `saop->inputcollid`. The dispatch goes through the fmgr seam
-/// `function_call2_coll` (re-resolve by OID), the same pattern `eval_agg` uses
-/// for its equality probe. Both keys are non-null here (hashtable build/probe
-/// never stores NULLs), matching `FunctionCall2Coll`'s non-null-arg contract.
-pub fn saop_hash_element_match(
+/// `function_call2_coll_datum` (re-resolve by OID, canonical by-ref-capable
+/// lane). Both keys are non-null here (hashtable build/probe never stores
+/// NULLs), matching `FunctionCall2Coll`'s non-null-arg contract.
+pub fn saop_hash_element_match<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
     matchfuncid: types_core::primitive::Oid,
     collation: types_core::primitive::Oid,
-    key1: Datum,
-    key2: Datum,
+    key1: &DatumV<'mcx>,
+    key2: &DatumV<'mcx>,
 ) -> PgResult<bool> {
     // fcinfo->args[0].value = key1; fcinfo->args[0].isnull = false;
     // fcinfo->args[1].value = key2; fcinfo->args[1].isnull = false;
     // result = elements_tab->op->d.hashedscalararrayop.finfo->fn_addr(fcinfo);
     // return DatumGetBool(result);
-    let result = function_call2_coll::call(matchfuncid, collation, key1, key2)?;
+    //
+    // Dispatch on the canonical by-reference-capable lane so by-ref array
+    // elements (text/varchar/numeric) reach the equality function intact.
+    let result =
+        backend_utils_fmgr_fmgr_seams::function_call2_coll_datum::call(
+            mcx, matchfuncid, collation, key1.clone(), key2.clone(),
+        )?;
     Ok(result.as_bool())
 }
 
@@ -1419,7 +1433,8 @@ pub fn ExecEvalHashedScalarArrayOp<'mcx>(
         // arr = DatumGetArrayTypeP(*op->resvalue);
         // nitems = ArrayGetNItems(ARR_NDIM(arr), ARR_DIMS(arr));
         // get_typlenbyvalalign(ARR_ELEMTYPE(arr), &typlen, &typbyval, &typalign);
-        let arraydatum = word_of(&state.result_cells.get(resvalue_id).value);
+        let arraydatum_v = state.result_cells.get(resvalue_id).value.clone();
+        let arraydatum = word_of(&arraydatum_v);
         let mcx = estate.es_query_cxt;
 
         let elemtype =
@@ -1427,12 +1442,15 @@ pub fn ExecEvalHashedScalarArrayOp<'mcx>(
         let tlba =
             backend_utils_cache_lsyscache_seams::get_typlenbyvalalign::call(elemtype)?;
 
-        // Deconstruct the array into its per-element (Datum, isnull) pairs. This
-        // seam subsumes C's ARR_DATA_PTR + ARR_NULLBITMAP + fetch_att +
-        // att_addlength_pointer + att_align_nominal bitmap walk over `nitems`.
-        let elements = backend_utils_adt_arrayfuncs_seams::deconstruct_array::call(
+        // Deconstruct the array into its per-element canonical (Datum, isnull)
+        // pairs. The `_v` lane keeps by-reference elements (text/numeric) as
+        // their full image so they survive into the hash table and the
+        // fmgr-dispatched hash/equal callbacks. This seam subsumes C's
+        // ARR_DATA_PTR + ARR_NULLBITMAP + fetch_att + att_addlength_pointer +
+        // att_align_nominal bitmap walk over `nitems`.
+        let elements = backend_utils_adt_arrayfuncs_seams::deconstruct_array_v::call(
             mcx,
-            arraydatum,
+            arraydatum_v,
             elemtype,
             tlba.typlen,
             tlba.typbyval,
@@ -1453,18 +1471,18 @@ pub fn ExecEvalHashedScalarArrayOp<'mcx>(
         // are inserted. The closures are the SH_HASH_KEY / SH_EQUAL callbacks,
         // dispatching the hash / equality functions through the fmgr seams.
         let mut has_nulls = false;
-        for (element, isnull) in elements.iter().copied() {
-            if isnull {
+        for (element, isnull) in elements.iter() {
+            if *isnull {
                 has_nulls = true;
             } else {
                 let mut hash_key =
-                    |k: Datum| saop_element_hash(hashfuncid, collation, k);
-                let mut equal = |a: Datum, b: Datum| {
-                    saop_hash_element_match(matchfuncid, collation, a, b)
+                    |k: &DatumV<'_>| saop_element_hash(mcx, hashfuncid, collation, k);
+                let mut equal = |a: &DatumV<'_>, b: &DatumV<'_>| {
+                    saop_hash_element_match(mcx, matchfuncid, collation, a, b)
                 };
                 crate::saophash::saophash_insert(
                     &mut table.hashtab,
-                    element,
+                    element.clone(),
                     &mut hash_key,
                     &mut equal,
                 )?;
@@ -1488,16 +1506,19 @@ pub fn ExecEvalHashedScalarArrayOp<'mcx>(
     // Probe the hash table.
     //   hashfound = NULL != saophash_lookup(elements_tab->hashtab, scalar);
     let hashfound = {
-        let mut hash_key = |k: Datum| saop_element_hash(hashfuncid, collation, k);
-        let mut equal =
-            |a: Datum, b: Datum| saop_hash_element_match(matchfuncid, collation, a, b);
+        let mcx = estate.es_query_cxt;
+        let mut hash_key = |k: &DatumV<'_>| saop_element_hash(mcx, hashfuncid, collation, k);
+        let mut equal = |a: &DatumV<'_>, b: &DatumV<'_>| {
+            saop_hash_element_match(mcx, matchfuncid, collation, a, b)
+        };
         let table = match step_data(state, op) {
             ExprEvalStepData::HashedScalarArrayOp { elements_tab, .. } => elements_tab
                 .as_ref()
                 .expect("ExecEvalHashedScalarArrayOp: elements_tab just built"),
             _ => unreachable!(),
         };
-        crate::saophash::saophash_lookup(&table.hashtab, word_of(&scalar_value), &mut hash_key, &mut equal)?
+        // The scalar key keeps its canonical (by-ref-capable) image through the probe.
+        crate::saophash::saophash_lookup(&table.hashtab, &scalar_value, &mut hash_key, &mut equal)?
     };
 
     // result = inclause ? BoolGetDatum(hashfound) : BoolGetDatum(!hashfound);
