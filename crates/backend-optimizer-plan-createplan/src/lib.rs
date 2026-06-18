@@ -2464,7 +2464,7 @@ fn create_functionscan_plan<'mcx>(
         for func in functions.iter_mut() {
             if let Some(fe) = func.funcexpr.as_deref_mut() {
                 // funcexpr is a Node *; replace nestloop params within its Expr.
-                if let Node::Expr(e) = fe {
+                if let Some(e) = fe.as_expr_mut() {
                     let old = e.clone();
                     *e = replace_nestloop_params_expr(mcx, root, old, &mut err);
                 }
@@ -3824,10 +3824,9 @@ fn resolve_onconflict_plan_data<'mcx>(
     let mut on_conflict_cols: PgVec<'mcx, i32> = vec_with_capacity_in(mcx, oc.onConflictSet.len())?;
     let mut nextresno: AttrNumber = 1;
     for n in oc.onConflictSet.iter() {
-        let tle = match n.as_ref() {
-            Node::TargetEntry(te) => te,
-            other => panic!("onConflictSet element is not a TargetEntry (got {:?})", other.tag()),
-        };
+        let tle = n.as_ref().as_targetentry().unwrap_or_else(|| {
+            panic!("onConflictSet element is not a TargetEntry (got {:?})", n.as_ref().tag())
+        });
         let mut tle = tle.clone_in(mcx)?;
         if !tle.resjunk {
             on_conflict_cols.push(tle.resno as i32);
@@ -3841,10 +3840,10 @@ fn resolve_onconflict_plan_data<'mcx>(
     // ExecInitQual. Flatten an AND tree / single qual into a Vec<Expr>.
     let mut on_conflict_where: PgVec<'mcx, Expr> = PgVec::new_in(mcx);
     if let Some(np) = oc.onConflictWhere.as_deref() {
-        let e = match np {
-            Node::Expr(e) => e.clone_in(mcx)?,
-            other => panic!("onConflictWhere is not an Expr (got {:?})", other.tag()),
-        };
+        let e = np
+            .as_expr()
+            .unwrap_or_else(|| panic!("onConflictWhere is not an Expr (got {:?})", np.tag()))
+            .clone_in(mcx)?;
         for q in backend_nodes_core::makefuncs::make_ands_implicit(Some(e)) {
             on_conflict_where.push(q);
         }
@@ -3856,10 +3855,9 @@ fn resolve_onconflict_plan_data<'mcx>(
     let mut excl_rel_tlist: PgVec<'mcx, TargetEntry<'mcx>> =
         vec_with_capacity_in(mcx, oc.exclRelTlist.len())?;
     for n in oc.exclRelTlist.iter() {
-        let tle = match n.as_ref() {
-            Node::TargetEntry(te) => te,
-            other => panic!("exclRelTlist element is not a TargetEntry (got {:?})", other.tag()),
-        };
+        let tle = n.as_ref().as_targetentry().unwrap_or_else(|| {
+            panic!("exclRelTlist element is not a TargetEntry (got {:?})", n.as_ref().tag())
+        });
         excl_rel_tlist.push(tle.clone_in(mcx)?);
     }
 
