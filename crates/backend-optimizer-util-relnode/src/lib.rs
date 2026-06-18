@@ -2252,6 +2252,30 @@ fn bms_equal(a: &Relids, b: &Relids) -> bool {
     }
 }
 
+/// `bms_compare(a, b)` (bitmapset.c:183) — qsort-style comparator. Reports equal
+/// iff `bms_equal` would; otherwise the highest-numbered differing bit wins. NULL
+/// is the empty set and sorts least. The owned `Relids` keeps its `words` Vec
+/// trailing-zero-free (same invariant `bms_equal`'s direct `words` comparison
+/// relies on), so `words.len()` plays the role of C's `nwords`.
+fn bms_compare(a: &Relids, b: &Relids) -> i32 {
+    let (a, b) = match (a, b) {
+        (None, None) => return 0,
+        (None, Some(_)) => return -1,
+        (Some(_), None) => return 1,
+        (Some(a), Some(b)) => (a, b),
+    };
+    if a.words.len() != b.words.len() {
+        return if a.words.len() > b.words.len() { 1 } else { -1 };
+    }
+    for i in (0..a.words.len()).rev() {
+        let (aw, bw) = (a.words[i], b.words[i]);
+        if aw != bw {
+            return if aw > bw { 1 } else { -1 };
+        }
+    }
+    0
+}
+
 /// `bms_make_singleton(x)` (bitmapset.c) — a fresh set `{x}`.
 fn bms_make_singleton(x: i32) -> Relids {
     if x < 0 {
@@ -2558,6 +2582,12 @@ pub fn init_seams() {
     pathnode::relids_add_members::set(bms_add_members);
     pathnode::relids_del_members::set(|a, b| bms_difference(&a, b));
     pathnode::relids_equal::set(bms_equal);
+    // `relids_equal_set` is `bms_equal` against the query-rels set (create_append_path
+    // LIMIT applicability); `relids_compare` is the qsort comparator the append
+    // child-path sort drives. relnode owns the bitmapset algebra, so install both
+    // here from the local impls (mirrors `relids_subset_compare`/`relids_equal`).
+    pathnode::relids_equal_set::set(bms_equal);
+    pathnode::relids_compare::set(bms_compare);
 }
 
 fn seam_find_base_rel(root: &PlannerInfo, relid: i32) -> RelId {

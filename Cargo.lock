@@ -12251,6 +12251,7 @@ dependencies = [
  "backend-optimizer-plan-init-subselect-ext-seams",
  "backend-optimizer-prep-prepqual-seams",
  "backend-optimizer-util-clauses-seams",
+ "backend-optimizer-util-pathnode-seams",
  "backend-optimizer-util-var-seams",
  "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-cache-lsyscache-seams",
