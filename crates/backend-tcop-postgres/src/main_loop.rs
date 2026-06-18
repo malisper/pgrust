@@ -922,7 +922,39 @@ fn postgres_main_inner(dbname: Option<&str>, username: Option<&str>) -> PgResult
         // Run one full iteration; on Err, run the recovery block and continue.
         // This is the `sigsetjmp` outer handler expressed over PgResult.
         let message_context = backend_top.new_child("MessageContext");
-        let iter = run_one_iteration(message_context.mcx(), &mut state);
+        // Wrap the iteration in catch_unwind so an unported-path panic (a
+        // seam-miss or a `panic!`-shaped hard error) is converted into a
+        // recoverable structured ERROR rather than aborting the backend — the
+        // Rust expression of C's sigsetjmp outer handler. AssertUnwindSafe is
+        // sound here because the recovery path (AbortCurrentTransaction etc.)
+        // resets all backend state regardless of where the panic landed.
+        let iter = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_one_iteration(message_context.mcx(), &mut state)
+        })) {
+            Ok(r) => r,
+            Err(payload) => {
+                // Mirror invoke_pgfunction (backend-utils-fmgr-core:415-432):
+                // honor a `PGRUST-SQLSTATE:` prefix, else default XX000.
+                let msg = payload
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()));
+                let pgerr = match msg {
+                    Some(m) => match m.strip_prefix("PGRUST-SQLSTATE:") {
+                        Some(rest) if rest.len() > 6 && rest.as_bytes()[5] == b':' => {
+                            let (code, msg) = rest.split_at(5);
+                            let mut chars = [0u8; 5];
+                            chars.copy_from_slice(code.as_bytes());
+                            types_error::PgError::error(msg[1..].to_string())
+                                .with_sqlstate(types_error::make_sqlstate(chars))
+                        }
+                        _ => types_error::PgError::error(m),
+                    },
+                    None => types_error::PgError::error("unported path panicked"),
+                };
+                Err(pgerr)
+            }
+        };
         if let Err(err) = iter {
             // The C switches into MessageContext before FlushErrorState; we pass
             // the (about-to-be-reset) per-iteration context.
