@@ -62,6 +62,15 @@ fn buf_id_to_buffer(buf_id: i32) -> Buffer {
     buf_id + 1
 }
 
+/// `relpath(BufTagGetRelFileLocator(tag), fork).str` — a human-readable physical
+/// path for the `AbortBufferIO` write-error notice (the canonical formatter
+/// lives in the common path subsystem; this renders the same identifying
+/// fields, matching `crate::read`/`crate::extend`).
+fn relpath_str(rlocator: RelFileLocatorBackend, fork: ForkNumber) -> String {
+    let loc = rlocator.locator;
+    format!("{}/{}/{} (fork {:?})", loc.spcOid, loc.dbOid, loc.relNumber, fork)
+}
+
 /// `INIT_FORKNUM` (common/relpath.h) — the init fork is always WAL-logged.
 const INIT_FORKNUM: ForkNumber = ForkNumber::INIT_FORKNUM;
 
@@ -436,6 +445,52 @@ impl BufferManager {
             self.wake_pin_count_waiter(buf_id);
         }
         Ok(())
+    }
+
+    /// `AbortBufferIO(buffer)` (bufmgr.c:6154) — clean up an active buffer I/O
+    /// after an error. All LWLocks have been released, but the buffer is still
+    /// pinned. If I/O was in progress we always set `BM_IO_ERROR`, even if the
+    /// error wasn't I/O-related. Note: this does NOT remove the buffer I/O from
+    /// the resource owner (correct when releasing the whole resource owner; the
+    /// `forget_owner` arg to `TerminateBufferIO` is `false`).
+    pub(crate) fn abort_buffer_io(&self, buffer: Buffer) -> PgResult<()> {
+        let buf_id = (buffer - 1) as usize;
+
+        let buf_state = self.lock_buf_hdr(buf_id);
+        debug_assert!(buf_state & (BM_IO_IN_PROGRESS | BM_TAG_VALID) != 0);
+
+        if buf_state & BM_VALID == 0 {
+            debug_assert!(buf_state & BM_DIRTY == 0);
+            self.unlock_buf_hdr(buf_id, buf_state);
+        } else {
+            debug_assert!(buf_state & BM_DIRTY != 0);
+            self.unlock_buf_hdr(buf_id, buf_state);
+
+            // Issue notice if this is not the first failure. Buffer is pinned,
+            // so we can read the tag without the spinlock.
+            if buf_state & BM_IO_ERROR != 0 {
+                let tag = self.desc_tag(buf_id);
+                let rlocator = RelFileLocatorBackend {
+                    locator: types_storage::RelFileLocator {
+                        spcOid: tag.spcOid,
+                        dbOid: tag.dbOid,
+                        relNumber: tag.relNumber,
+                    },
+                    backend: types_core::primitive::INVALID_PROC_NUMBER,
+                };
+                let path = relpath_str(rlocator, tag.forkNum);
+                let block = tag.blockNum;
+                backend_utils_error::emit_error_report_for(
+                    &backend_utils_error::ereport(types_error::error::WARNING)
+                        .errcode(types_error::error::ERRCODE_IO_ERROR)
+                        .errmsg_internal(format!("could not write block {block} of {path}"))
+                        .errdetail("Multiple failures --- write error might be permanent.")
+                        .into_error(),
+                );
+            }
+        }
+
+        self.terminate_buffer_io(buf_id, false, BM_IO_ERROR, false, false)
     }
 
     /// `WaitIO(buf)` (bufmgr.c:5959) — wait for the in-progress I/O on a buffer

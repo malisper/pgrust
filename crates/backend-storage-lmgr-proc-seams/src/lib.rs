@@ -118,6 +118,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SetStartupBufferPinWaitBufId(int bufid)` (proc.c) — publish, into the
+    /// `ProcGlobal->startupBufferPinWaitBufId` shared cell, the 0-based buffer id
+    /// the Startup process is waiting on (or `-1` to clear). Read back by
+    /// `HoldingBufferPinThatDelaysRecovery` via the bufmgr-side
+    /// `startup_buffer_pin_wait_buf_id` getter. Called from the
+    /// `LockBufferForCleanup` InHotStandby park leg.
+    pub fn set_startup_buffer_pin_wait_buf_id(bufid: i32)
+);
+
+seam_core::seam!(
     /// `pg_atomic_read_u64(&MyProc->waitStart)`.
     pub fn my_proc_wait_start() -> TimestampTz
 );

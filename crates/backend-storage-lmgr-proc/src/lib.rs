@@ -102,4 +102,16 @@ pub fn init_seams() {
     backend_access_transam_parallel_rt_seams::become_lock_group_member::set(
         proc_misc::BecomeLockGroupMemberByNumber,
     );
+
+    // Startup-process buffer-pin-wait bufid (proc.c
+    // Get/SetStartupBufferPinWaitBufId, backed by ProcGlobal). The getter is the
+    // bufmgr-side outward seam read by HoldingBufferPinThatDelaysRecovery; the
+    // setter is published by the LockBufferForCleanup InHotStandby park leg
+    // (installed by the standby/recovery owner).
+    backend_storage_buffer_bufmgr_seams::startup_buffer_pin_wait_buf_id::set(
+        proc_lifecycle::GetStartupBufferPinWaitBufId,
+    );
+    backend_storage_lmgr_proc_seams::set_startup_buffer_pin_wait_buf_id::set(
+        proc_lifecycle::SetStartupBufferPinWaitBufId,
+    );
 }

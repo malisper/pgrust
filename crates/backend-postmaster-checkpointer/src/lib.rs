@@ -1443,6 +1443,10 @@ pub fn init_seams() {
     backend_postmaster_checkpointer_seams::checkpointer_shmem_size::set(checkpointer_shmem_size_seam);
     backend_postmaster_checkpointer_seams::checkpointer_shmem_init::set(checkpointer_shmem_init_seam);
 
+    // --- bufmgr BufferSync write-rate throttle (bufmgr.c BufferSync →
+    //     CheckpointWriteDelay, checkpointer.c) ---
+    backend_storage_buffer_bufmgr_seams::checkpoint_write_delay::set(CheckpointWriteDelay);
+
     // --- ProcessUtility dispatch arm (utility.c CHECKPOINT → RequestCheckpoint) ---
     backend_tcop_utility_out_seams::request_checkpoint::set(RequestCheckpoint);
 
