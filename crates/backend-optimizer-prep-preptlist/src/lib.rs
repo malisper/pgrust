@@ -153,17 +153,35 @@ pub fn preprocess_targetlist<'mcx>(
     };
 
     // C 119-132: non-inherited UPDATE/DELETE/MERGE junk row-identity columns.
+    // add_row_identity_columns reads root->processed_tlist, so it must be the
+    // current tlist; stash it onto root, call, and take it back. (For the
+    // non-inherited target the new ctid junk TLE is appended directly.)
     if command_type == CmdType::CMD_UPDATE
         || command_type == CmdType::CMD_DELETE
         || command_type == CmdType::CMD_MERGE
     {
-        // `add_row_identity_columns` walks the target relation to add junk
-        // ctid/tableoid Vars; deferred to the DML-analyze family.
-        let _ = &mut tlist;
-        panic!(
-            "preprocess_targetlist: UPDATE/DELETE/MERGE junk row-identity columns \
-             (add_row_identity_columns) not yet ported (needs the DML-analyze family)"
-        );
+        let rel = target_relation
+            .as_ref()
+            .expect("preprocess_targetlist: DML with no result relation (rewriter bug)");
+        let relkind = rel.rd_rel.relkind;
+        let relid = rel.rd_id;
+        let has_delete_row_trigger = rel
+            .rd_trigdesc
+            .as_deref()
+            .map(|td| td.trig_delete_after_row || td.trig_delete_before_row)
+            .unwrap_or(false);
+
+        root.processed_tlist = core::mem::take(&mut tlist);
+        backend_optimizer_util_appendinfo_seams::add_row_identity_columns::call(
+            root,
+            result_relation as u32,
+            command_type,
+            relid,
+            relkind,
+            has_delete_row_trigger,
+            result_relation as u32,
+        )?;
+        tlist = core::mem::take(&mut root.processed_tlist);
     }
 
     // C 229-287: rowMarks junk-column stanza (FOR UPDATE/SHARE locking +

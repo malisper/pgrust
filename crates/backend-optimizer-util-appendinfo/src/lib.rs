@@ -1209,6 +1209,7 @@ pub fn init_seams() {
     ai::adjust_child_relids::set(adjust_child_relids);
     ai::adjust_appendrel_attrs_restrictlist::set(seam_adjust_appendrel_attrs_restrictlist);
     ai::distribute_row_identity_vars::set(distribute_row_identity_vars);
+    ai::add_row_identity_columns::set(add_row_identity_columns);
 
     // relnode-ext-homed appendinfo seams (this unit is their C-source owner).
     relnode_ext::adjust_appendrel_attrs_node::set(seam_adjust_appendrel_attrs_node);

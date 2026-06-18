@@ -62,3 +62,23 @@ seam_core::seam!(
         root: &mut PlannerInfo,
     ) -> PgResult<()>
 );
+seam_core::seam!(
+    /// `add_row_identity_columns(root, rtindex, target_rte, target_relation)`
+    /// (appendinfo.c) — add the core row-identity junk columns (CTID for a
+    /// regular table; the FDW whole-row Var for a foreign table) to
+    /// `root->processed_tlist` for an UPDATE/DELETE/MERGE target relation.
+    /// `preprocess_targetlist` (preptlist.c) drives it. The caller passes the
+    /// resolved relation fields (`relkind`/`relid`) plus the resolved
+    /// `command_type`/`result_relation` (the opaque [`types_pathnodes::QueryId`]
+    /// resolves only through the caller's run). `has_delete_row_trigger` is the
+    /// foreign-table delete-trigger predicate.
+    pub fn add_row_identity_columns(
+        root: &mut PlannerInfo,
+        rtindex: types_core::primitive::Index,
+        command_type: types_nodes::nodes::CmdType,
+        relid: types_core::Oid,
+        relkind: u8,
+        has_delete_row_trigger: bool,
+        result_relation: types_core::primitive::Index,
+    ) -> PgResult<()>
+);
