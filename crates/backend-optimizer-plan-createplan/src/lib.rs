@@ -4917,11 +4917,83 @@ fn relids_to_apprelids<'mcx>(
 /// `mark_async_capable_plan(plan, path)` (createplan.c:1140) — whether a child
 /// `plan` built from `path` is async-capable, marking it if so. Only foreign
 /// scans over an async-capable FDW (plus trivial SubqueryScan / Projection atop
-/// such) are ever async-capable; the FDW async callback is part of the unported
-/// FDW floor, so no path is async-capable here and this returns `false`.
-/// Faithful: `IsForeignPathAsyncCapable` returning false is a valid C outcome.
-fn mark_async_capable_plan(_plan: &mut Node<'_>, _path: &PathNode) -> bool {
-    false
+/// such) are ever async-capable.
+fn trivial_subqueryscan(scan: &SubqueryScan<'_>) -> bool {
+    // `trivial_subqueryscan(plan)` (setrefs.c): whether a `SubqueryScan` is a
+    // no-op. The expensive recompute lives in the (unported) setrefs.c floor;
+    // here we honour the cached `scanstatus` flag the planner stamps. An
+    // un-cached node is treated as non-trivial (the conservative answer).
+    scan.scanstatus == SubqueryScanStatus::Trivial
+}
+
+/// `mark_async_capable_plan(plan, path)` (createplan.c:1140) — whether a child
+/// `plan` built from `path` is async-capable, marking it (`plan->async_capable
+/// = true`) if so. Only a foreign scan over an async-capable FDW — plus a
+/// trivial `SubqueryScan` or a pulled-up `Projection` atop such — is
+/// async-capable.
+///
+/// The owned model resolves `path` through `root` (the C up-cast
+/// `(SubqueryScanPath *) path` / `(ProjectionPath *) path` plus the subpath
+/// deref). `IsForeignPathAsyncCapable` is an FDW callback not modeled at this
+/// layer, so the `T_ForeignPath` arm always returns `false`; the recursive
+/// `T_SubqueryScanPath` / `T_ProjectionPath` arms are ported faithfully.
+fn mark_async_capable_plan(root: &PlannerInfo, plan: &mut Node<'_>, path: PathId) -> bool {
+    match root.path(path) {
+        PathNode::SubqueryScanPath(p) => {
+            let subpath = p.subpath;
+            // If the generated plan node includes a gating Result node, we
+            // can't execute it asynchronously.
+            if matches!(plan, Node::Result(_)) {
+                return false;
+            }
+            // If a SubqueryScan node atop of an async-capable plan node is
+            // deletable, consider it as async-capable.
+            let Node::SubqueryScan(scan_plan) = plan else {
+                return false;
+            };
+            if !trivial_subqueryscan(scan_plan) {
+                return false;
+            }
+            let Some(subpath) = subpath else {
+                return false;
+            };
+            let Some(inner) = scan_plan.subplan.as_deref_mut() else {
+                return false;
+            };
+            if !mark_async_capable_plan(root, inner, subpath) {
+                return false;
+            }
+        }
+        PathNode::ForeignPath(_) => {
+            // If the generated plan node includes a gating Result node, we
+            // can't execute it asynchronously.
+            if matches!(plan, Node::Result(_)) {
+                return false;
+            }
+            // fdwroutine->IsForeignPathAsyncCapable is an FDW callback not
+            // modeled at this layer; no FDW advertises async capability here, so
+            // this is always the C `false` branch.
+            return false;
+        }
+        PathNode::ProjectionPath(p) => {
+            let subpath = p.subpath;
+            // If the generated plan node includes a Result node for the
+            // projection, we can't execute it asynchronously.
+            if matches!(plan, Node::Result(_)) {
+                return false;
+            }
+            // create_projection_plan() would have pulled up the subplan, so
+            // check the capability using the subpath.
+            return match subpath {
+                Some(subpath) => mark_async_capable_plan(root, plan, subpath),
+                None => false,
+            };
+        }
+        _ => return false,
+    }
+
+    plan.plan_head_mut().async_capable = true;
+    true
 }
 
 /// `create_append_plan(root, (AppendPath *) best_path, flags)` (createplan.c:1216).
@@ -5029,11 +5101,8 @@ fn create_append_plan<'mcx>(
         }
 
         // If needed, check whether the subplan can run asynchronously.
-        if consider_async {
-            let sub_path_node = root.path(subpath).clone();
-            if mark_async_capable_plan(&mut subplan, &sub_path_node) {
-                nasyncplans += 1;
-            }
+        if consider_async && mark_async_capable_plan(root, &mut subplan, subpath) {
+            nasyncplans += 1;
         }
 
         subplans.push(subplan);

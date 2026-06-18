@@ -355,8 +355,10 @@ fn relids_to_apprelids_roundtrips_word_storage() {
 
 #[test]
 fn mark_async_capable_plan_returns_false_without_async_fdw() {
-    // No path is async-capable in the port (the FDW async callback is the
-    // unported FDW floor), so this is always false.
+    // A plain SeqScan path falls into the default `_ => false` arm
+    // (mark_async_capable_plan only ever returns true for an async-capable
+    // ForeignPath, which is the unported FDW floor — plus trivial SubqueryScan
+    // / Projection atop one).
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let (mut root, run, path_id) =
@@ -370,6 +372,5 @@ fn mark_async_capable_plan_returns_false_without_async_fdw() {
         alloc::vec::Vec::new(),
     )
     .expect("create_seqscan_plan");
-    let path_node = root.path(path_id).clone();
-    assert!(!crate::mark_async_capable_plan(&mut plan, &path_node));
+    assert!(!crate::mark_async_capable_plan(&root, &mut plan, path_id));
 }
