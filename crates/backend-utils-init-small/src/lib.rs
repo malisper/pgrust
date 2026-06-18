@@ -135,6 +135,12 @@ pub fn init_seams() {
     backend_commands_tablespace_globals_seams::IsBinaryUpgrade::set(|| {
         Ok(globals::IsBinaryUpgrade())
     });
+    // The tablespace ambient-globals bundle reads the same per-backend session
+    // globals init-small owns; forward them to the real globals.
+    backend_commands_tablespace_globals_seams::MyDatabaseId::set(|| Ok(globals::MyDatabaseId()));
+    backend_commands_tablespace_globals_seams::MyDatabaseTableSpace::set(|| {
+        Ok(globals::MyDatabaseTableSpace())
+    });
     backend_utils_init_small_seams::set_my_database_id::set(globals::SetMyDatabaseId);
     backend_utils_init_small_seams::set_my_database_table_space::set(globals::SetMyDatabaseTableSpace);
     backend_utils_init_small_seams::set_my_database_has_login_event_triggers::set(
