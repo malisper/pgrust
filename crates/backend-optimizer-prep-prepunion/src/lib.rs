@@ -20,7 +20,7 @@ use alloc::vec::Vec;
 use mcx::Mcx;
 use types_core::primitive::{AttrNumber, Index, Oid};
 use types_error::{PgError, PgResult};
-use types_nodes::nodes::Node;
+use types_nodes::nodes::{ntag, Node};
 use types_nodes::primnodes::Expr;
 use types_nodes::rawnodes::{SetOperation, SetOperationStmt, SortGroupClause};
 use types_pathnodes::planner_run::PlannerRun;
@@ -143,12 +143,14 @@ enum SetOpNode<'mcx> {
 /// Decode a `Node*` (`larg`/`rarg`) into a [`SetOpNode`], deep-cloning the
 /// `SetOperationStmt` into `mcx` (the owned tree the caller can keep).
 fn decode_setop_node<'mcx>(mcx: Mcx<'mcx>, node: &Node<'mcx>) -> PgResult<SetOpNode<'mcx>> {
-    match node {
-        Node::RangeTblRef(rtr) => Ok(SetOpNode::Leaf(rtr.rtindex)),
-        Node::SetOperationStmt(op) => Ok(SetOpNode::Stmt(op.clone_in(mcx)?)),
-        other => Err(PgError::error(alloc::format!(
+    match node.node_tag() {
+        ntag::T_RangeTblRef => Ok(SetOpNode::Leaf(node.expect_rangetblref().rtindex)),
+        ntag::T_SetOperationStmt => {
+            Ok(SetOpNode::Stmt(node.expect_setoperationstmt().clone_in(mcx)?))
+        }
+        _ => Err(PgError::error(alloc::format!(
             "unrecognized node type: {}",
-            other.node_tag().0
+            node.node_tag().0
         ))),
     }
 }
@@ -160,8 +162,8 @@ fn clone_setop_top<'mcx>(
 ) -> PgResult<SetOperationStmt<'mcx>> {
     let parse = run.resolve(root.parse);
     let mcx = run.mcx();
-    match node_ref(&parse.setOperations) {
-        Some(Node::SetOperationStmt(op)) => op.clone_in(mcx),
+    match node_ref(&parse.setOperations).and_then(|n| n.as_setoperationstmt()) {
+        Some(op) => op.clone_in(mcx),
         _ => Err(PgError::error(String::from(
             "plan_set_operations: parse->setOperations is not a SetOperationStmt",
         ))),
@@ -173,9 +175,11 @@ fn clone_setop_top<'mcx>(
 fn leftmost_rtindex(topop: &SetOperationStmt<'_>) -> i32 {
     let mut node = node_ref(&topop.larg);
     loop {
-        match node {
-            Some(Node::SetOperationStmt(op)) => node = node_ref(&op.larg),
-            Some(Node::RangeTblRef(rtr)) => return rtr.rtindex,
+        match node.map(|n| n.node_tag()) {
+            Some(ntag::T_SetOperationStmt) => {
+                node = node_ref(&node.unwrap().expect_setoperationstmt().larg)
+            }
+            Some(ntag::T_RangeTblRef) => return node.unwrap().expect_rangetblref().rtindex,
             _ => panic!("plan_set_operations: leftmost node is not a RangeTblRef"),
         }
     }
@@ -1206,8 +1210,8 @@ fn generate_setop_grouplist<'mcx>(
     // grouplist = copyObject(op->groupClauses); each element is SortGroupClause.
     let mut grouplist: Vec<SortGroupClause> = Vec::with_capacity(op.groupClauses.len());
     for n in op.groupClauses.iter() {
-        match &**n {
-            Node::SortGroupClause(sgc) => grouplist.push(sgc.clone_in(mcx)?),
+        match (&**n).node_tag() {
+            ntag::T_SortGroupClause => grouplist.push((&**n).expect_sortgroupclause().clone_in(mcx)?),
             _ => return Err(PgError::error(String::from(
                 "generate_setop_grouplist: groupClauses element is not a SortGroupClause",
             ))),
