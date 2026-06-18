@@ -446,6 +446,11 @@ pub struct ResultRelInfo<'mcx> {
     /// `ProjectionInfo *ri_projectReturning` — the compiled RETURNING
     /// projection (built by `ExecBuildProjectionInfo`). `None` is the C `NULL`.
     pub ri_projectReturning: Option<PgBox<'mcx, ProjectionInfo<'mcx>>>,
+    /// `ProjectionInfo *ri_projectNew` — the compiled INSERT/UPDATE "new tuple"
+    /// junk-filter projection (built by `ExecInitInsertProjection` /
+    /// `ExecInitUpdateProjection`). `None` is the C `NULL`. The `ri_has_project_new`
+    /// flag mirrors `!= NULL` for cross-crate readers that can't name the type.
+    pub ri_projectNew: Option<PgBox<'mcx, ProjectionInfo<'mcx>>>,
     /// `ri_TrigDesc->trig_update_before_row` — BEFORE ROW UPDATE triggers
     /// exist.
     pub ri_trig_update_before_row: bool,

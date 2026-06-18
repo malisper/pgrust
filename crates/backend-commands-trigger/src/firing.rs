@@ -674,13 +674,43 @@ fn exec_br_delete_triggers_impl<'mcx>(
     front_half("ExecBRDeleteTriggers", 2702)
 }
 fn exec_ar_delete_triggers_impl<'mcx>(
-    _estate: &mut EStateData<'mcx>,
-    _relinfo: types_nodes::RriId,
+    estate: &mut EStateData<'mcx>,
+    relinfo: types_nodes::RriId,
     _tupleid: Option<&ItemPointerData>,
     _fdw_trigtuple: Option<&HeapTupleData<'mcx>>,
-    _tc: Option<&types_nodes::TransitionCaptureState>,
+    tc: Option<&types_nodes::TransitionCaptureState>,
     _is_crosspart_update: bool,
 ) -> PgResult<()> {
+    // TriggerDesc *trigdesc = relinfo->ri_TrigDesc;
+    let rri = estate.result_rel(relinfo);
+
+    // if (relinfo->ri_FdwRoutine && transition_capture &&
+    //     transition_capture->tcs_delete_old_table)
+    //     ereport(ERROR, "cannot collect transition tuples from child foreign tables");
+    if rri.ri_has_fdw_routine && tc.map(|t| t.tcs_delete_old_table).unwrap_or(false) {
+        return Err(PgError::error(
+            "cannot collect transition tuples from child foreign tables",
+        )
+        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+    }
+
+    // if ((trigdesc && trigdesc->trig_delete_after_row) ||
+    //     (transition_capture && transition_capture->tcs_delete_old_table)) { ... fire ... }
+    let after_row = rri
+        .ri_TrigDesc
+        .as_ref()
+        .map(|td| td.trig_delete_after_row)
+        .unwrap_or(false);
+    let cap_old = tc.map(|t| t.tcs_delete_old_table).unwrap_or(false);
+    if !(after_row || cap_old) {
+        // No AFTER ROW DELETE trigger and no transition capture: nothing to do.
+        return Ok(());
+    }
+
+    // The actual event save (ExecGetTriggerOldSlot / GetTupleForTrigger /
+    // ExecForceStoreHeapTuple / AfterTriggerSaveEvent) needs the trigger
+    // firing-front substrate (OLD-slot materialization + EvalPlanQual fetch +
+    // the after-trigger queue/tuplestore) — not yet ported.
     front_half("ExecARDeleteTriggers", 2802)
 }
 fn exec_ir_delete_triggers_impl<'mcx>(
@@ -715,17 +745,46 @@ fn exec_ir_update_triggers_impl<'mcx>(
     front_half("ExecIRUpdateTriggers", 3215)
 }
 fn exec_ar_update_triggers_impl<'mcx>(
-    _estate: &mut EStateData<'mcx>,
-    _relinfo: types_nodes::RriId,
+    estate: &mut EStateData<'mcx>,
+    relinfo: types_nodes::RriId,
     _src_partinfo: Option<types_nodes::RriId>,
     _dst_partinfo: Option<types_nodes::RriId>,
     _tupleid: Option<&ItemPointerData>,
     _fdw_trigtuple: Option<&HeapTupleData<'mcx>>,
     _newslot: Option<types_nodes::SlotId>,
     _recheck_indexes: &[Oid],
-    _tc: Option<&mut types_nodes::modifytable::TransitionCaptureState>,
+    tc: Option<&mut types_nodes::modifytable::TransitionCaptureState>,
     _is_crosspart_update: bool,
 ) -> PgResult<()> {
+    let rri = estate.result_rel(relinfo);
+
+    // if (relinfo->ri_FdwRoutine && transition_capture &&
+    //     (tcs_update_old_table || tcs_update_new_table))
+    //     ereport(ERROR, "cannot collect transition tuples from child foreign tables");
+    let cap_old = tc.as_ref().map(|t| t.tcs_update_old_table).unwrap_or(false);
+    let cap_new = tc.as_ref().map(|t| t.tcs_update_new_table).unwrap_or(false);
+    if rri.ri_has_fdw_routine && (cap_old || cap_new) {
+        return Err(PgError::error(
+            "cannot collect transition tuples from child foreign tables",
+        )
+        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+    }
+
+    // if ((trigdesc && trigdesc->trig_update_after_row) ||
+    //     (transition_capture && (tcs_update_old_table || tcs_update_new_table))) { ... fire ... }
+    let after_row = rri
+        .ri_TrigDesc
+        .as_ref()
+        .map(|td| td.trig_update_after_row)
+        .unwrap_or(false);
+    if !(after_row || cap_old || cap_new) {
+        // No AFTER ROW UPDATE trigger and no transition capture: nothing to do.
+        return Ok(());
+    }
+
+    // The actual event save (ExecGetTriggerOldSlot / GetTupleForTrigger /
+    // AfterTriggerSaveEvent + cross-partition routing) needs the trigger
+    // firing-front substrate — not yet ported.
     front_half("ExecARUpdateTriggers", 3145)
 }
 

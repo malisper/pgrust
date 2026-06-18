@@ -339,16 +339,37 @@ pub fn partition_init_merge_actions<'mcx>(
 /// to evaluate. The in-unit `execExpr_core::exec_project_info` (`ExecProject`)
 /// is landed; this is blocked on that not-yet-modeled `ri_projectNew` field.
 pub fn exec_project_new_tuple<'mcx>(
-    _estate: &mut EStateData<'mcx>,
-    _result_rel_info: RriId,
-    _plan_slot: SlotId,
-    _old_slot: Option<SlotId>,
+    estate: &mut EStateData<'mcx>,
+    result_rel_info: RriId,
+    plan_slot: SlotId,
+    old_slot: Option<SlotId>,
 ) -> PgResult<SlotId> {
-    panic!(
-        "execExpr-modify::exec_project_new_tuple: ExecProject(ri_projectNew) routes to the \
-         not-yet-modeled ResultRelInfo.ri_projectNew field in types-nodes; the execExpr_core \
-         ExecProject it would evaluate is landed"
-    )
+    // ProjectionInfo *newProj = relinfo->ri_projectNew; (take it out to satisfy
+    // the &mut estate borrow during evaluation; restore it after).
+    let mut new_proj = estate
+        .result_rel_mut(result_rel_info)
+        .ri_projectNew
+        .take()
+        .expect("exec_project_new_tuple: ri_projectNew is NULL");
+
+    // econtext = newProj->pi_exprContext;
+    // econtext->ecxt_outertuple = planSlot;  (the source for ASSIGN_OUTER_VAR)
+    // econtext->ecxt_scantuple  = oldSlot;   (the source for ASSIGN_SCAN_VAR)
+    let econtext = new_proj
+        .pi_exprContext
+        .expect("exec_project_new_tuple: ri_projectNew has no pi_exprContext");
+    {
+        let ecxt = estate.ecxt_mut(econtext);
+        ecxt.ecxt_outertuple = Some(plan_slot);
+        ecxt.ecxt_scantuple = old_slot;
+    }
+
+    // return ExecProject(newProj);
+    let slot = crate::execExpr_core::exec_project_info(&mut new_proj, estate);
+
+    // Restore the projection on the ResultRelInfo.
+    estate.result_rel_mut(result_rel_info).ri_projectNew = Some(new_proj);
+    slot
 }
 
 /// Compile every WITH CHECK OPTION qual for a result relation

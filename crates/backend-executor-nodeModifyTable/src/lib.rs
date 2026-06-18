@@ -206,4 +206,94 @@ pub fn init_seams() {
         backend_executor_execTuples_seams::exec_copy_slot::call(estate, new_slot, plan_slot)?;
         Ok(new_slot)
     });
+
+    install_delete_seams();
+}
+
+/// Install the `ExecDelete` (`delete_exec`) within-crate seams — the trimmed
+/// `ResultRelInfo`/`EState` field reads and the slot/snapshot/isolation
+/// delegations the DELETE driver reaches. Concurrency (EPQ / `table_tuple_lock`)
+/// and FDW/cross-partition seams that bottom out on the unported execMain owner
+/// stay uninstalled (loud-panic on their genuinely-unreachable paths).
+fn install_delete_seams() {
+    use delete_exec as de;
+
+    // `resultRelInfo->ri_TrigDesc && ...->trig_delete_instead_row` (reltrigger.h).
+    de::ri_has_instead_delete_row::set(|estate, rri| {
+        estate
+            .result_rel(rri)
+            .ri_TrigDesc
+            .as_ref()
+            .map(|td| td.trig_delete_instead_row)
+            .unwrap_or(false)
+    });
+
+    // `resultRelInfo->ri_FdwRoutine != NULL` (execnodes.h).
+    de::ri_has_fdw_routine::set(|estate, rri| estate.result_rel(rri).ri_has_fdw_routine);
+
+    // `resultRelInfo->ri_projectReturning != NULL` (execnodes.h).
+    de::ri_has_project_returning::set(|estate, rri| {
+        estate.result_rel(rri).ri_has_project_returning
+    });
+
+    // `resultRelInfo->ri_projectReturning->pi_state.flags & EEO_FLAG_HAS_OLD`.
+    de::ri_returning_has_old::set(|estate, rri| {
+        estate
+            .result_rel(rri)
+            .ri_projectReturning
+            .as_ref()
+            .map(|p| {
+                (p.pi_state.flags & types_nodes::execexpr::EEO_FLAG_HAS_OLD) != 0
+            })
+            .unwrap_or(false)
+    });
+
+    // `RelationGetRelid(resultRelInfo->ri_RelationDesc)` (rel.h).
+    de::ri_relation_relid::set(|estate, rri| {
+        estate
+            .result_rel(rri)
+            .ri_RelationDesc
+            .as_ref()
+            .expect("ri_relation_relid: ri_RelationDesc must be open")
+            .rd_id
+    });
+
+    // `IsolationUsesXactSnapshot()` (xact.h).
+    de::isolation_uses_xact_snapshot::set(|| {
+        backend_access_transam_xact_seams::isolation_uses_xact_snapshot::call()
+    });
+
+    // `context->estate->es_snapshot` (execnodes.h).
+    de::es_snapshot::set(|estate| estate.es_snapshot.as_deref().cloned());
+
+    // `TTS_EMPTY(slot)` (tuptable.h).
+    de::slot_is_empty::set(|estate, slot| estate.slot_data(slot).base().is_empty());
+
+    // `TupIsNull(slot)` — true when the slot is empty/NULL (tuptable.h).
+    de::slot_is_null::set(|estate, slot| estate.slot_data(slot).base().is_empty());
+
+    // `ExecStoreAllNullTuple(slot)` (execTuples.c).
+    de::exec_store_all_null_tuple::set(|estate, slot| {
+        backend_executor_execTuples_seams::exec_store_all_null_tuple::call(estate, slot)
+    });
+
+    // `slot->tts_tableOid = relid` (tuptable.h).
+    de::slot_set_table_oid::set(|estate, slot, relid| {
+        estate.slot_mut(slot).tts_tableOid = relid;
+    });
+
+    // `ExecMaterializeSlot(slot)` (execTuples.c).
+    de::exec_materialize_slot::set(|estate, slot| {
+        backend_executor_execTuples_seams::exec_materialize_slot::call(estate, slot)
+    });
+
+    // `ExecClearTuple(slot)` (execTuples.c).
+    de::exec_clear_tuple::set(|estate, slot| {
+        backend_executor_execTuples_seams::exec_clear_tuple::call(estate, slot)
+    });
+
+    // `ExecGetReturningSlot(estate, relinfo)` (execMain.c).
+    de::exec_get_returning_slot::set(|estate, rri| {
+        backend_executor_execMain_seams::exec_get_returning_slot::call(estate, rri)
+    });
 }

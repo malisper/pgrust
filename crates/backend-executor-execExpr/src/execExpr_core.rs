@@ -2372,14 +2372,60 @@ pub fn exec_build_update_projection<'mcx>(
     result_rel_info: types_nodes::RriId,
     update_colnos: &[i32],
 ) -> PgResult<()> {
-    let _ = (mtstate, estate, result_rel_info, update_colnos);
-    panic!(
-        "execExpr-core: ExecBuildUpdateProjection(resultRelInfo) needs the pooled \
-         ResultRelInfo.ri_projectNew / ri_RootResultRelInfo fields (not yet modeled in \
-         types-nodes) for the relation-descriptor source and projection store; the full \
-         step-emission body is implemented in exec_build_update_projection_impl and reached \
-         by callers with an explicit target list / relDesc"
-    );
+    let mcx = estate.es_query_cxt;
+
+    // subplan->targetlist — the UPDATE subplan's (already-evaluated) target list.
+    // Borrowed off the plan tree, which outlives this call independently of the
+    // `&mut estate` borrow.
+    let target_list: &[types_nodes::TargetEntry<'mcx>] = mtstate
+        .ps
+        .plan
+        .as_deref()
+        .expect("ExecBuildUpdateProjection: mtstate->ps.plan is NULL")
+        .outer_plan()
+        .expect("ExecBuildUpdateProjection: outerPlan(node) is NULL")
+        .plan_head()
+        .targetlist
+        .as_deref()
+        .unwrap_or(&[]);
+
+    // relDesc = RelationGetDescr(resultRelInfo->ri_RelationDesc). The impl reads
+    // it by reference; clone into `mcx` so it does not alias the `&mut estate`.
+    let rel_desc: TupleDescData<'mcx> = {
+        let rel = estate
+            .result_rel(result_rel_info)
+            .ri_RelationDesc
+            .as_ref()
+            .expect("ExecBuildUpdateProjection: result relation must be open");
+        rel.rd_att.clone_in(mcx)?
+    };
+
+    // mtstate->ps.ps_ExprContext — the projection's expression context.
+    let econtext = mtstate
+        .ps
+        .ps_ExprContext
+        .expect("ExecBuildUpdateProjection: mtstate->ps has no ps_ExprContext");
+
+    // resultRelInfo->ri_newTupleSlot — the projection's output slot.
+    let new_tuple_slot = estate.result_rel(result_rel_info).ri_newTupleSlot;
+
+    // resultRelInfo->ri_projectNew = ExecBuildUpdateProjection(subplan->targetlist,
+    //     false /* subplan did the evaluation */, updateColnos, relDesc, econtext,
+    //     ri_newTupleSlot, &mtstate->ps);
+    let proj = exec_build_update_projection_impl(
+        estate,
+        target_list,
+        false,
+        update_colnos,
+        &rel_desc,
+        econtext,
+        new_tuple_slot,
+    )?;
+
+    let rri = estate.result_rel_mut(result_rel_info);
+    rri.ri_projectNew = Some(proj);
+    rri.ri_has_project_new = true;
+    Ok(())
 }
 
 // ===========================================================================
