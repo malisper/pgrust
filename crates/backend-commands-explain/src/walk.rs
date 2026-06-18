@@ -19,7 +19,7 @@ use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
 use types_error::PgResult;
 use types_explain::{ExplainFormat, ExplainState};
 use types_nodes::nodeindexscan::{Plan, PlannedStmt};
-use types_nodes::nodes::{CmdType, Node};
+use types_nodes::nodes::{ntag, CmdType, Node};
 use types_nodes::parsenodes::RTEKind;
 use types_nodes::planstate::PlanStateNode;
 
@@ -163,16 +163,17 @@ pub fn ExplainNode<'es, 'p>(
     let mut operation: Option<&str> = None;
     let custom_name: Option<&str> = None;
 
-    match plan_node {
-        Node::Result(_) => {
+    match plan_node.node_tag() {
+        ntag::T_Result => {
             sname = "Result";
             pname = sname.into();
         }
-        Node::ProjectSet(_) => {
+        ntag::T_ProjectSet => {
             sname = "ProjectSet";
             pname = sname.into();
         }
-        Node::ModifyTable(m) => {
+        ntag::T_ModifyTable => {
+            let m = plan_node.expect_modifytable();
             sname = "ModifyTable";
             let op = match m.operation {
                 CmdType::CMD_INSERT => "Insert",
@@ -186,106 +187,106 @@ pub fn ExplainNode<'es, 'p>(
             }
             pname = op.into();
         }
-        Node::Append(_) => {
+        ntag::T_Append => {
             sname = "Append";
             pname = sname.into();
         }
-        Node::MergeAppend(_) => {
+        ntag::T_MergeAppend => {
             sname = "Merge Append";
             pname = sname.into();
         }
-        Node::RecursiveUnion(_) => {
+        ntag::T_RecursiveUnion => {
             sname = "Recursive Union";
             pname = sname.into();
         }
-        Node::BitmapAnd(_) => {
+        ntag::T_BitmapAnd => {
             sname = "BitmapAnd";
             pname = sname.into();
         }
-        Node::NestLoop(_) => {
+        ntag::T_NestLoop => {
             sname = "Nested Loop";
             pname = sname.into();
         }
-        Node::MergeJoin(_) => {
+        ntag::T_MergeJoin => {
             // pname "Merge"; "Join" added by jointype switch (gated detail).
             sname = "Merge Join";
             pname = "Merge".into();
         }
-        Node::HashJoin(_) => {
+        ntag::T_HashJoin => {
             sname = "Hash Join";
             pname = "Hash".into();
         }
-        Node::SeqScan(_) => {
+        ntag::T_SeqScan => {
             sname = "Seq Scan";
             pname = sname.into();
         }
-        Node::Gather(_) => {
+        ntag::T_Gather => {
             sname = "Gather";
             pname = sname.into();
         }
-        Node::GatherMerge(_) => {
+        ntag::T_GatherMerge => {
             sname = "Gather Merge";
             pname = sname.into();
         }
-        Node::IndexScan(_) => {
+        ntag::T_IndexScan => {
             sname = "Index Scan";
             pname = sname.into();
         }
-        Node::IndexOnlyScan(_) => {
+        ntag::T_IndexOnlyScan => {
             sname = "Index Only Scan";
             pname = sname.into();
         }
-        Node::BitmapIndexScan(_) => {
+        ntag::T_BitmapIndexScan => {
             sname = "Bitmap Index Scan";
             pname = sname.into();
         }
-        Node::TidRangeScan(_) => {
+        ntag::T_TidRangeScan => {
             sname = "Tid Range Scan";
             pname = sname.into();
         }
-        Node::SubqueryScan(_) => {
+        ntag::T_SubqueryScan => {
             sname = "Subquery Scan";
             pname = sname.into();
         }
-        Node::TableFuncScan(_) => {
+        ntag::T_TableFuncScan => {
             sname = "Table Function Scan";
             pname = sname.into();
         }
-        Node::ValuesScan(_) => {
+        ntag::T_ValuesScan => {
             sname = "Values Scan";
             pname = sname.into();
         }
-        Node::CteScan(_) => {
+        ntag::T_CteScan => {
             sname = "CTE Scan";
             pname = sname.into();
         }
-        Node::NamedTuplestoreScan(_) => {
+        ntag::T_NamedTuplestoreScan => {
             sname = "Named Tuplestore Scan";
             pname = sname.into();
         }
-        Node::ForeignScan(_) => {
+        ntag::T_ForeignScan => {
             // ForeignScan operation switch (Select/Insert/...) reaches into
             // unported FDW detail; structural Select is "Foreign Scan".
             sname = "Foreign Scan";
             pname = sname.into();
         }
-        Node::CustomScan(_) => {
+        ntag::T_CustomScan => {
             sname = "Custom Scan";
             pname = sname.into();
         }
-        Node::Material(_) => {
+        ntag::T_Material => {
             sname = "Materialize";
             pname = sname.into();
         }
-        Node::Memoize(_) => {
+        ntag::T_Memoize => {
             sname = "Memoize";
             pname = sname.into();
         }
-        Node::Sort(_) => {
+        ntag::T_Sort => {
             sname = "Sort";
             pname = sname.into();
         }
-        Node::Group(_) => {
+        ntag::T_Group => {
             sname = "Group";
             pname = sname.into();
         }
@@ -294,11 +295,12 @@ pub fn ExplainNode<'es, 'p>(
         // here; their explain.c name cases (Aggregate strategy/partialmode,
         // WindowAgg, ...) land when those plan-node variants do. Anything not
         // matched below falls through to the C default "???".
-        Node::Unique(_) => {
+        ntag::T_Unique => {
             sname = "Unique";
             pname = sname.into();
         }
-        Node::SetOp(s) => {
+        ntag::T_SetOp => {
+            let s = plan_node.expect_setop();
             sname = "SetOp";
             let (pn, st) = match s.strategy {
                 types_nodes::nodesetop::SETOP_SORTED => ("SetOp", "Sorted"),
@@ -308,18 +310,17 @@ pub fn ExplainNode<'es, 'p>(
             strategy = Some(st);
             pname = pn.into();
         }
-        Node::Limit(_) => {
+        ntag::T_Limit => {
             sname = "Limit";
             pname = sname.into();
         }
-        Node::Hash(_) => {
+        ntag::T_Hash => {
             sname = "Hash";
             pname = sname.into();
         }
-        other => {
+        _ => {
             // C default: pname = sname = "???". A node type the enum models but
             // explain has no name for would land here; mirror C exactly.
-            let _ = other;
             sname = "???";
             pname = sname.into();
         }
@@ -558,8 +559,8 @@ pub fn ExplainNode<'es, 'p>(
     // member-bearing node reaches no children here. Guard loudly if such a node
     // appears with children to display.
     if matches!(
-        plan_node,
-        Node::Append(_) | Node::MergeAppend(_) | Node::BitmapAnd(_)
+        plan_node.node_tag(),
+        ntag::T_Append | ntag::T_MergeAppend | ntag::T_BitmapAnd
     ) {
         panic!(
             "ExplainNode: Append/MergeAppend/BitmapAnd member-node recursion needs the \
@@ -602,41 +603,80 @@ fn explain_scan_target_switch<'es, 'p>(
 ) -> PgResult<()> {
     use crate::scantarget;
 
-    match plan_node {
-        Node::SeqScan(s) => scantarget::ExplainScanTarget(es, plan_node, s.scan.scanrelid),
-        Node::SampleScan(s) => scantarget::ExplainScanTarget(es, plan_node, s.scan.scanrelid),
-        Node::TidScan(s) => scantarget::ExplainScanTarget(es, plan_node, s.scan.scanrelid),
-        Node::TidRangeScan(s) => scantarget::ExplainScanTarget(es, plan_node, s.scan.scanrelid),
-        Node::SubqueryScan(s) => scantarget::ExplainScanTarget(es, plan_node, s.scan.scanrelid),
-        Node::FunctionScan(s) => scantarget::ExplainScanTarget(es, plan_node, s.scan.scanrelid),
-        Node::TableFuncScan(s) => scantarget::ExplainScanTarget(es, plan_node, s.scan.scanrelid),
-        Node::ValuesScan(s) => scantarget::ExplainScanTarget(es, plan_node, s.scan.scanrelid),
-        Node::CteScan(s) => scantarget::ExplainScanTarget(es, plan_node, s.scan.scanrelid),
-        Node::WorkTableScan(s) => scantarget::ExplainScanTarget(es, plan_node, s.scan.scanrelid),
-        Node::ForeignScan(s) => {
+    match plan_node.node_tag() {
+        ntag::T_SeqScan => {
+            scantarget::ExplainScanTarget(es, plan_node, plan_node.expect_seqscan().scan.scanrelid)
+        }
+        ntag::T_SampleScan => scantarget::ExplainScanTarget(
+            es,
+            plan_node,
+            plan_node.expect_samplescan().scan.scanrelid,
+        ),
+        ntag::T_TidScan => {
+            scantarget::ExplainScanTarget(es, plan_node, plan_node.expect_tidscan().scan.scanrelid)
+        }
+        ntag::T_TidRangeScan => scantarget::ExplainScanTarget(
+            es,
+            plan_node,
+            plan_node.expect_tidrangescan().scan.scanrelid,
+        ),
+        ntag::T_SubqueryScan => scantarget::ExplainScanTarget(
+            es,
+            plan_node,
+            plan_node.expect_subqueryscan().scan.scanrelid,
+        ),
+        ntag::T_FunctionScan => scantarget::ExplainScanTarget(
+            es,
+            plan_node,
+            plan_node.expect_functionscan().scan.scanrelid,
+        ),
+        ntag::T_TableFuncScan => scantarget::ExplainScanTarget(
+            es,
+            plan_node,
+            plan_node.expect_tablefuncscan().scan.scanrelid,
+        ),
+        ntag::T_ValuesScan => scantarget::ExplainScanTarget(
+            es,
+            plan_node,
+            plan_node.expect_valuesscan().scan.scanrelid,
+        ),
+        ntag::T_CteScan => {
+            scantarget::ExplainScanTarget(es, plan_node, plan_node.expect_ctescan().scan.scanrelid)
+        }
+        ntag::T_WorkTableScan => scantarget::ExplainScanTarget(
+            es,
+            plan_node,
+            plan_node.expect_worktablescan().scan.scanrelid,
+        ),
+        ntag::T_ForeignScan => {
             // if (((Scan *) plan)->scanrelid > 0) ExplainScanTarget(...)
+            let s = plan_node.expect_foreignscan();
             if s.scan.scanrelid > 0 {
                 scantarget::ExplainScanTarget(es, plan_node, s.scan.scanrelid)
             } else {
                 Ok(())
             }
         }
-        Node::CustomScan(s) => {
+        ntag::T_CustomScan => {
+            let s = plan_node.expect_customscan();
             if s.scan.scanrelid > 0 {
                 scantarget::ExplainScanTarget(es, plan_node, s.scan.scanrelid)
             } else {
                 Ok(())
             }
         }
-        Node::IndexScan(s) => {
+        ntag::T_IndexScan => {
+            let s = plan_node.expect_indexscan();
             scantarget::ExplainIndexScanDetails(es, s.indexid, s.indexorderdir)?;
             scantarget::ExplainScanTarget(es, plan_node, s.scan.scanrelid)
         }
-        Node::IndexOnlyScan(s) => {
+        ntag::T_IndexOnlyScan => {
+            let s = plan_node.expect_indexonlyscan();
             scantarget::ExplainIndexScanDetails(es, s.indexid, s.indexorderdir)?;
             scantarget::ExplainScanTarget(es, plan_node, s.scan.scanrelid)
         }
-        Node::BitmapIndexScan(s) => {
+        ntag::T_BitmapIndexScan => {
+            let s = plan_node.expect_bitmapindexscan();
             // explain_get_index_name + quote_identifier — no ExplainTargetRel.
             let mcx = es.str.allocator();
             let indexname = scantarget::explain_get_index_name(mcx, s.indexid)?;
@@ -650,9 +690,11 @@ fn explain_scan_target_switch<'es, 'p>(
             }
             Ok(())
         }
-        Node::ModifyTable(m) => {
-            scantarget::ExplainModifyTarget(es, plan_node, m.nominalRelation)
-        }
+        ntag::T_ModifyTable => scantarget::ExplainModifyTarget(
+            es,
+            plan_node,
+            plan_node.expect_modifytable().nominalRelation,
+        ),
         _ => Ok(()),
     }
 }

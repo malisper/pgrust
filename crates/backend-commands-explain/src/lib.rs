@@ -24,7 +24,7 @@ use types_core::instrument::{instr_time, BufferUsage};
 use types_error::{PgError, PgResult};
 use types_explain::{ExplainFormat, ExplainState};
 use types_nodes::nodeindexscan::PlannedStmt;
-use types_nodes::nodes::Node;
+use types_nodes::nodes::{ntag, Node};
 use types_nodes::params::ParamListInfo;
 use types_nodes::parsestmt::IntoClause;
 use types_nodes::queryenvironment::QueryEnvironment;
@@ -476,7 +476,7 @@ fn explain_print_plan<'es>(
         //     ((Gather *) ps->plan)->invisible) { ps = outerPlanState(ps);
         //     es->hide_workers = true; }
         let (top, skipped) = match planstate.ps_head().plan {
-            Some(Node::Gather(g)) if g.invisible => (
+            Some(p) if p.node_tag() == ntag::T_Gather && p.expect_gather().invisible => (
                 planstate
                     .outer_plan_state()
                     .expect("invisible Gather without outer plan state"),

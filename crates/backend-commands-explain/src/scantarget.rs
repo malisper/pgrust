@@ -18,7 +18,7 @@ use types_core::primitive::Index;
 use types_core::Oid;
 use types_error::{PgError, PgResult};
 use types_explain::{ExplainFormat, ExplainState};
-use types_nodes::nodes::Node;
+use types_nodes::nodes::{ntag, Node};
 use types_nodes::parsenodes::{RTEKind, RangeTblEntry};
 use types_scan::sdir::{ScanDirection, BackwardScanDirection, ForwardScanDirection};
 
@@ -162,16 +162,16 @@ pub fn ExplainTargetRel<'mcx>(
     // The borrow of `es.rtable` ends here; subsequent catalog calls and string
     // appends can take `&mut es` / `mcx`.
 
-    match plan_node {
-        Node::SeqScan(_)
-        | Node::SampleScan(_)
-        | Node::IndexScan(_)
-        | Node::IndexOnlyScan(_)
-        | Node::TidScan(_)
-        | Node::TidRangeScan(_)
-        | Node::ForeignScan(_)
-        | Node::CustomScan(_)
-        | Node::ModifyTable(_) => {
+    match plan_node.node_tag() {
+        ntag::T_SeqScan
+        | ntag::T_SampleScan
+        | ntag::T_IndexScan
+        | ntag::T_IndexOnlyScan
+        | ntag::T_TidScan
+        | ntag::T_TidRangeScan
+        | ntag::T_ForeignScan
+        | ntag::T_CustomScan
+        | ntag::T_ModifyTable => {
             // Assert(rte->rtekind == RTE_RELATION);  (C also covers
             // BitmapHeapScan, which the Node enum does not yet model.)
             objectname = lsyscache::relation::get_rel_name(mcx, relid)?;
@@ -182,7 +182,7 @@ pub fn ExplainTargetRel<'mcx>(
             }
             objecttag = Some("Relation Name");
         }
-        Node::FunctionScan(_) => {
+        ntag::T_FunctionScan => {
             // Assert(rte->rtekind == RTE_FUNCTION);
             // If the expression is still a single FuncExpr, get the real name.
             // The trimmed RangeTblEntry holds `functions` as opaque NodePtr; the
@@ -191,7 +191,7 @@ pub fn ExplainTargetRel<'mcx>(
             // to no objectname (C's "Otherwise, punt") rather than guess.
             objecttag = Some("Function Name");
         }
-        Node::TableFuncScan(_) => {
+        ntag::T_TableFuncScan => {
             // Assert(rte->rtekind == RTE_TABLEFUNC);
             // tablefunc->functype is on the TableFunc node carried by the
             // TableFuncScan plan; it is not modelled in the trimmed plan node, so
@@ -199,20 +199,20 @@ pub fn ExplainTargetRel<'mcx>(
             // the objecttag (alias still printed).
             objecttag = Some("Table Function Name");
         }
-        Node::ValuesScan(_) => {
+        ntag::T_ValuesScan => {
             // Assert(rte->rtekind == RTE_VALUES);  (no objectname)
         }
-        Node::CteScan(_) => {
+        ntag::T_CteScan => {
             // Assert(rte->rtekind == RTE_CTE); Assert(!rte->self_reference);
             objectname = ctename;
             objecttag = Some("CTE Name");
         }
-        Node::NamedTuplestoreScan(_) => {
+        ntag::T_NamedTuplestoreScan => {
             // Assert(rte->rtekind == RTE_NAMEDTUPLESTORE);
             objectname = enrname;
             objecttag = Some("Tuplestore Name");
         }
-        Node::WorkTableScan(_) => {
+        ntag::T_WorkTableScan => {
             // Assert(rte->rtekind == RTE_CTE); Assert(rte->self_reference);
             let _ = self_reference;
             objectname = ctename;

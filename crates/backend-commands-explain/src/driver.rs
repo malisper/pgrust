@@ -22,7 +22,7 @@ use types_error::{
 use types_explain::{ExplainFormat, ExplainSerializeOption, ExplainState};
 use types_nodes::copy_query::{Query, CURSOR_OPT_PARALLEL_OK};
 use types_nodes::ddlnodes::DefElem;
-use types_nodes::nodes::{CmdType, Node};
+use types_nodes::nodes::{ntag, CmdType, Node};
 use types_nodes::parsestmt::{DestReceiverHandle, ParseState};
 use types_nodes::portalcmds::ParamListInfo;
 use types_nodes::parsestmt::IntoClause;
@@ -43,13 +43,13 @@ const JSONOID: Oid = 114;
 /// `defGetString`'s value projection: map a `ddlnodes::DefElem` arg `Node` to
 /// the `DefElemArg` the `def_get_string`/`def_get_boolean` seams consume.
 fn def_elem_arg(node: &Node<'_>) -> DefElemArg {
-    match node {
-        Node::Integer(i) => DefElemArg::Integer(i.ival as i64),
-        Node::Float(f) => DefElemArg::Float(String::from(f.fval.as_str())),
-        Node::Boolean(b) => DefElemArg::Boolean(b.boolval),
-        Node::String(s) => DefElemArg::String(String::from(s.sval.as_str())),
-        Node::A_Star(_) => DefElemArg::AStar,
-        other => panic!("EXPLAIN def_elem_arg: unsupported option arg node {other:?}"),
+    match node.node_tag() {
+        ntag::T_Integer => DefElemArg::Integer(node.expect_integer().ival as i64),
+        ntag::T_Float => DefElemArg::Float(String::from(node.expect_float().fval.as_str())),
+        ntag::T_Boolean => DefElemArg::Boolean(node.expect_boolean().boolval),
+        ntag::T_String => DefElemArg::String(String::from(node.expect_string().sval.as_str())),
+        ntag::T_A_Star => DefElemArg::AStar,
+        _ => panic!("EXPLAIN def_elem_arg: unsupported option arg node {node:?}"),
     }
 }
 
@@ -88,9 +88,12 @@ pub(crate) fn ParseExplainOptionList<'mcx>(
     let mcx = es.str.allocator();
 
     for opt_node in options {
-        let opt = match &**opt_node {
-            Node::DefElem(d) => d,
-            other => panic!("ParseExplainOptionList: option is not a DefElem: {other:?}"),
+        let opt = match (**opt_node).node_tag() {
+            ntag::T_DefElem => (**opt_node).expect_defelem(),
+            _ => panic!(
+                "ParseExplainOptionList: option is not a DefElem: {:?}",
+                **opt_node
+            ),
         };
         let defname = defname_str(opt);
         if defname == "analyze" {
@@ -314,9 +317,9 @@ pub fn ExplainQuery<'mcx>(
     params: ParamListInfo,
     dest: DestReceiverHandle,
 ) -> PgResult<()> {
-    let explain = match stmt {
-        Node::ExplainStmt(e) => e,
-        other => panic!("ExplainQuery: not an ExplainStmt: {other:?}"),
+    let explain = match stmt.node_tag() {
+        ntag::T_ExplainStmt => stmt.expect_explainstmt(),
+        _ => panic!("ExplainQuery: not an ExplainStmt: {stmt:?}"),
     };
 
     let mut es = state::NewExplainState(mcx);
@@ -410,15 +413,16 @@ fn do_text_output_oneline<'mcx>(
 /// result tuple descriptor. Its column type is TEXT / XML / JSON per the last
 /// `format` option (the C "don't break, last value wins").
 pub fn ExplainResultDesc<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<TupleDesc<'mcx>> {
-    let explain = match stmt {
-        Node::ExplainStmt(e) => e,
-        other => panic!("ExplainResultDesc: not an ExplainStmt: {other:?}"),
+    let explain = match stmt.node_tag() {
+        ntag::T_ExplainStmt => stmt.expect_explainstmt(),
+        _ => panic!("ExplainResultDesc: not an ExplainStmt: {stmt:?}"),
     };
 
     // Check for XML/JSON format option (last value wins).
     let mut result_type = TEXTOID;
     for opt in explain.options.iter() {
-        if let Node::DefElem(d) = &**opt {
+        if (**opt).node_tag() == ntag::T_DefElem {
+            let d = (**opt).expect_defelem();
             if d.defname.as_ref().map(|s| s.as_str()) == Some("format") {
                 let p = def_get_string(mcx, d)?;
                 result_type = match p.as_str() {
