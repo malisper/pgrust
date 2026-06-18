@@ -52,6 +52,7 @@ pub fn init_seams() {
     sx::relation_get_index_attr_bitmap::set(relation_get_index_attr_bitmap);
     sx::relation_get_index_list::set(relation_get_index_list);
     sx::relation_get_index_expressions::set(relation_get_index_expressions);
+    sx::relation_get_index_predicate::set(relation_get_index_predicate);
 
     // --- partition cache read/write (owned per-entry state; build via partcache) ---
     sx::relation_get_partkey::set(relation_get_partkey);
@@ -387,6 +388,47 @@ fn relation_get_index_expressions<'mcx>(
     // decode owner (mirror-PG-and-panic). The existing `derived` path keeps the
     // by-OID caching shell; here we go straight to the node-tree seam.
     crate::derived::RelationGetIndexExpressions(rel.rd_id)?;
+    // Unreachable until the node-tree decode lands (the call above panics).
+    Ok(None)
+}
+
+/// `RelationGetIndexPredicate(index)` (relcache.c:5210): the index's partial
+/// predicate tree. The C quick-exits to `NIL` when `rd_indextuple == NULL ||
+/// heap_attisnull(rd_indextuple, Anum_pg_index_indpred)` — i.e. the relation is
+/// not an index, or the index has no partial predicate. `indpred`-nullity is
+/// observable faithfully off the cached `pg_index` tuple via the syscache owner
+/// (`pg_index_has_predicate` == `!heap_attisnull(rd_indextuple,
+/// Anum_pg_index_indpred)`), exactly the C test (no node tree materialized). A
+/// non-index relation (`rd_index == None`) or a non-partial index returns
+/// `Ok(None)` (== NIL) — the path every system-catalog index (none are partial)
+/// takes. When a real predicate IS present, the `indpred` node-tree decode
+/// (`stringToNode`/`eval_const_expressions`/`canonicalize_qual`/
+/// `make_ands_implicit`/`fix_opfuncids`) is node vocabulary owned cross-unit and
+/// unported, so it routes through the node-tree owner seam (mirror-PG-and-panic
+/// until `stringToNode` lands).
+fn relation_get_index_predicate<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+) -> PgResult<Option<PgVec<'mcx, types_nodes::Expr>>> {
+    // Quick exit when the relation is not an index (C `rd_indextuple == NULL`).
+    let is_index = crate::core_entry_store::with_relation(rel.rd_id, |rd| rd.rd_index.is_some())?;
+    if !is_index {
+        return Ok(None);
+    }
+    // Quick exit when the index has no partial predicate
+    // (`heap_attisnull(rd_indextuple, Anum_pg_index_indpred)`), read faithfully
+    // off the cached pg_index tuple via the syscache owner. A cache miss maps to
+    // "no predicate" (NIL).
+    let has_predicate =
+        backend_utils_cache_syscache_seams::pg_index_has_predicate::call(rel.rd_id)?
+            .unwrap_or(false);
+    if !has_predicate {
+        // NIL — not a partial index.
+        return Ok(None);
+    }
+    // A real predicate is present: defer to the still-unported node-tree decode
+    // owner (mirror-PG-and-panic).
+    crate::derived::RelationGetIndexPredicate(rel.rd_id)?;
     // Unreachable until the node-tree decode lands (the call above panics).
     Ok(None)
 }
