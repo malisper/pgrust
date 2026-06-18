@@ -39,6 +39,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// Like [`deconstruct_text_array`], but also returns `ARR_NDIM(arr)`
+    /// alongside the flattened elements. The jsonfuncs path operators
+    /// (`jsonb_set` / `jsonb_insert` / `jsonb_delete` over `text[]` /
+    /// `jsonb_extract_path`) need the dimension count to reproduce the C
+    /// `ARR_NDIM(path) > 1` "wrong number of array subscripts" guard before
+    /// consuming the flat element list. `(ndim, elems)`.
+    pub fn deconstruct_text_array_with_ndim(arr: &[u8]) -> PgResult<(i32, Vec<ArrayElem>)>
+);
+
+seam_core::seam!(
     /// `construct_array_builtin(elems, n, TEXTOID)` (tsvector_op.c) — build a
     /// `text[]` datum from owned element byte strings.
     pub fn construct_text_array(elems: &[Vec<u8>]) -> PgResult<Vec<u8>>

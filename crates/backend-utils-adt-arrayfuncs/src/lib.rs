@@ -143,6 +143,9 @@ pub fn init_seams() {
     {
         use backend_utils_adt_array_more_seams as more;
         more::deconstruct_text_array::set(construct::deconstruct_text_array_elems);
+        more::deconstruct_text_array_with_ndim::set(
+            construct::deconstruct_text_array_with_ndim_bytes,
+        );
         more::deconstruct_char_array::set(construct::deconstruct_char_array_elems);
         more::construct_text_array::set(construct::construct_text_array_bytes);
         more::construct_int2_array::set(construct::construct_int2_array_bytes);

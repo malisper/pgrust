@@ -2853,6 +2853,16 @@ use backend_utils_adt_array_more_seams::ArrayElem;
 /// not NUL-terminated), captured as an owned `Vec<u8>` so no `mcx` lifetime
 /// escapes. NULL elements carry an empty `value` with `is_null == true`.
 pub fn deconstruct_text_array_elems(arr: &[u8]) -> PgResult<alloc::vec::Vec<ArrayElem>> {
+    Ok(deconstruct_text_array_with_ndim_bytes(arr)?.1)
+}
+
+/// Seam `deconstruct_text_array_with_ndim` — like
+/// [`deconstruct_text_array_elems`] but also returns `ARR_NDIM(arr)`, for the
+/// jsonfuncs `text[]`-path operators that reproduce the C
+/// `ARR_NDIM(path) > 1` guard.
+pub fn deconstruct_text_array_with_ndim_bytes(
+    arr: &[u8],
+) -> PgResult<(i32, alloc::vec::Vec<ArrayElem>)> {
     // The seam returns fully-owned data; run the element walk in a private
     // transient context (the C `deconstruct_array_builtin` palloc'd workspace),
     // copying each element's payload out before the context drops.
@@ -2905,7 +2915,7 @@ pub fn deconstruct_text_array_elems(arr: &[u8]) -> PgResult<alloc::vec::Vec<Arra
             }
         }
     }
-    Ok(out)
+    Ok((ndim, out))
 }
 
 /// Seam `deconstruct_char_array` — `deconstruct_array_builtin(weights, CHAROID,
