@@ -1451,6 +1451,10 @@ fn getattr_i32(mcx: Mcx<'_>, cache_id: i32, tup: &FormedTuple<'_>, attnum: i32) 
     Ok(byval(SysCacheGetAttrNotNull(mcx, cache_id, tup, attnum)?)?.as_i32())
 }
 
+fn getattr_i64(mcx: Mcx<'_>, cache_id: i32, tup: &FormedTuple<'_>, attnum: i32) -> PgResult<i64> {
+    Ok(byval(SysCacheGetAttrNotNull(mcx, cache_id, tup, attnum)?)?.as_i64())
+}
+
 fn getattr_u32(mcx: Mcx<'_>, cache_id: i32, tup: &FormedTuple<'_>, attnum: i32) -> PgResult<u32> {
     Ok(byval(SysCacheGetAttrNotNull(mcx, cache_id, tup, attnum)?)?.as_u32())
 }
@@ -4810,9 +4814,8 @@ pub(crate) fn proc_proargnames_isnull(funcid: Oid) -> PgResult<bool> {
     Ok(is_null)
 }
 
-// NOTE: `search_pg_proc_fastpath` deferred — `FastpathProcRow.proargtypes`
-// needs faithful `oidvector`-into-`PgVec` decode; left to the same lane that
-// ports `proc_row_by_oid`'s proargtypes path.
+// `search_pg_proc_fastpath` is implemented in the cache-syscache lane batch
+// below (reusing `arrayfuncs_seams::oidvector_to_oids_bytes`).
 
 // ---------------------------------------------------------------------------
 // follow-on simple projections (batch 2026-06-17).
@@ -4880,4 +4883,212 @@ pub(crate) fn auth_members_of_member(
         });
     }
     Ok(rows)
+}
+
+// ---------------------------------------------------------------------------
+// cache-syscache lane batch (2026-06-17): SearchSysCache + GETSTRUCT
+// projections wired into the syscache owner.
+// ---------------------------------------------------------------------------
+
+// `catalog/pg_sequence.h` attribute numbers (1-based; PG 18 struct order).
+const Anum_pg_sequence_seqrelid: i32 = 1;
+const Anum_pg_sequence_seqtypid: i32 = 2;
+const Anum_pg_sequence_seqstart: i32 = 3;
+const Anum_pg_sequence_seqincrement: i32 = 4;
+const Anum_pg_sequence_seqmax: i32 = 5;
+const Anum_pg_sequence_seqmin: i32 = 6;
+const Anum_pg_sequence_seqcache: i32 = 7;
+const Anum_pg_sequence_seqcycle: i32 = 8;
+
+/// `SearchSysCache1(SEQRELID, ObjectIdGetDatum(seqid))` + `GETSTRUCT`
+/// (sequence.c). The whole fixed-width `pg_sequence` row by value; `Ok(None)`
+/// on a cache miss (the caller raises `cache lookup failed for sequence %u`).
+pub(crate) fn search_seqrelid(
+    seqid: Oid,
+) -> PgResult<Option<types_catalog::pg_sequence::FormData_pg_sequence>> {
+    let scratch = MemoryContext::new("syscache pg_sequence projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, SEQRELID, SysCacheKey::Value(KeyDatum::from_oid(seqid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let form = types_catalog::pg_sequence::FormData_pg_sequence {
+        seqrelid: getattr_oid(mcx, SEQRELID, &tup, Anum_pg_sequence_seqrelid)?,
+        seqtypid: getattr_oid(mcx, SEQRELID, &tup, Anum_pg_sequence_seqtypid)?,
+        seqstart: getattr_i64(mcx, SEQRELID, &tup, Anum_pg_sequence_seqstart)?,
+        seqincrement: getattr_i64(mcx, SEQRELID, &tup, Anum_pg_sequence_seqincrement)?,
+        seqmax: getattr_i64(mcx, SEQRELID, &tup, Anum_pg_sequence_seqmax)?,
+        seqmin: getattr_i64(mcx, SEQRELID, &tup, Anum_pg_sequence_seqmin)?,
+        seqcache: getattr_i64(mcx, SEQRELID, &tup, Anum_pg_sequence_seqcache)?,
+        seqcycle: getattr_bool(mcx, SEQRELID, &tup, Anum_pg_sequence_seqcycle)?,
+    };
+    ReleaseSysCache(tup);
+    Ok(Some(form))
+}
+
+// `catalog/pg_type.h` attribute numbers used by `pg_type_default`.
+const Anum_pg_type_oid_pd: i32 = 1;
+const Anum_pg_type_typdefaultbin: i32 = 30;
+const Anum_pg_type_typdefault: i32 = 31;
+
+/// `SearchSysCache1(TYPEOID, typid)` + `SysCacheGetAttr(typdefaultbin/typdefault)`
+/// + `getTypeIOParam`, projected for `get_typdefault` (parse_coerce.c). `Ok(None)`
+/// on a cache miss; the caller raises `cache lookup failed for type %u`.
+pub(crate) fn pg_type_default<'mcx>(
+    mcx: Mcx<'mcx>,
+    typid: Oid,
+) -> PgResult<Option<backend_utils_cache_syscache_seams::PgTypeDefault>> {
+    let tuple = SearchSysCache1(mcx, TYPEOID, SysCacheKey::Value(KeyDatum::from_oid(typid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let oid = getattr_oid(mcx, TYPEOID, &tup, Anum_pg_type_oid_pd)?;
+    let typelem = getattr_oid(mcx, TYPEOID, &tup, Anum_pg_type_typelem)?;
+    // getTypeIOParam(typeTuple): array types use their element type, else self.
+    let typioparam = if OidIsValid(typelem) { typelem } else { oid };
+    let row = backend_utils_cache_syscache_seams::PgTypeDefault {
+        typdefaultbin: getattr_option_text(mcx, TYPEOID, &tup, Anum_pg_type_typdefaultbin)?,
+        typdefault: getattr_option_text(mcx, TYPEOID, &tup, Anum_pg_type_typdefault)?,
+        typinput: getattr_oid(mcx, TYPEOID, &tup, Anum_pg_type_typinput)?,
+        typioparam,
+        typcollation: getattr_oid(mcx, TYPEOID, &tup, Anum_pg_type_typcollation)?,
+        typlen: getattr_i16(mcx, TYPEOID, &tup, Anum_pg_type_typlen)?,
+        typbyval: getattr_bool(mcx, TYPEOID, &tup, Anum_pg_type_typbyval)?,
+    };
+    ReleaseSysCache(tup);
+    Ok(Some(row))
+}
+
+/// `SearchSysCache1(PROCOID, func_id)` + `GETSTRUCT` projected to the
+/// `fetch_fp_info` (`tcop/fastpath.c`) fields, including the `proargtypes`
+/// oidvector. `Ok(None)` on a cache miss (the caller raises
+/// `"function with OID %u does not exist"`).
+pub(crate) fn search_pg_proc_fastpath<'mcx>(
+    mcx: Mcx<'mcx>,
+    func_id: Oid,
+) -> PgResult<Option<types_namespace::FastpathProcRow<'mcx>>> {
+    let tuple = SearchSysCache1(mcx, PROCOID, SysCacheKey::Value(KeyDatum::from_oid(func_id)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let prokind = getattr_char(mcx, PROCOID, &tup, Anum_pg_proc_prokind)?;
+    let proretset = getattr_bool(mcx, PROCOID, &tup, Anum_pg_proc_proretset)?;
+    let pronargs = getattr_i16(mcx, PROCOID, &tup, Anum_pg_proc_pronargs)?;
+    let pronamespace = getattr_oid(mcx, PROCOID, &tup, Anum_pg_proc_pronamespace)?;
+    let prorettype = getattr_oid(mcx, PROCOID, &tup, Anum_pg_proc_prorettype)?;
+    let proname = getattr_name(mcx, PROCOID, &tup, Anum_pg_proc_proname)?;
+
+    // proargtypes is an oidvector (BKI_FORCE_NOT_NULL).
+    let proargtypes_datum = SysCacheGetAttrNotNull(mcx, PROCOID, &tup, Anum_pg_proc_proargtypes)?;
+    let proargtypes_bytes = match &proargtypes_datum {
+        Datum::ByRef(b) => &b[..],
+        Datum::ByVal(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => {
+            return Err(PgError::error(
+                "search_pg_proc_fastpath: proargtypes attribute is by-value",
+            ))
+        }
+    };
+    let proargtypes_vec = arrayfuncs_seams::oidvector_to_oids_bytes::call(mcx, proargtypes_bytes)?;
+    let mut proargtypes = vec_with_capacity_in(mcx, proargtypes_vec.len())?;
+    for &t in proargtypes_vec.iter() {
+        proargtypes.push(t);
+    }
+
+    let row = types_namespace::FastpathProcRow {
+        prokind,
+        proretset,
+        pronargs,
+        pronamespace,
+        prorettype,
+        proargtypes,
+        proname,
+    };
+    ReleaseSysCache(tup);
+    Ok(Some(row))
+}
+
+// `catalog/pg_class.h` reloptions attribute number (PG 18 column order).
+const Anum_pg_class_reloptions_fcr: i32 = 33;
+
+/// `SearchSysCache1(RELOID, relid)` + `SysCacheGetAttr(reloptions)` (the
+/// make_new_heap reloptions fetch). The raw varlena token (NULL when unset);
+/// `Err` "cache lookup failed for relation %u" when the tuple is missing.
+pub(crate) fn fetch_class_reloptions<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+) -> PgResult<types_cluster::RelOptionsToken> {
+    let tuple = SearchSysCache1(mcx, RELOID, SysCacheKey::Value(KeyDatum::from_oid(relid)))?;
+    let Some(tup) = tuple else {
+        return Err(PgError::error(format!(
+            "cache lookup failed for relation {relid}"
+        )));
+    };
+    let (value, is_null) = SysCacheGetAttr(mcx, RELOID, &tup, Anum_pg_class_reloptions_fcr)?;
+    let token = if is_null {
+        types_cluster::RelOptionsToken {
+            is_null: true,
+            bytes: Vec::new(),
+        }
+    } else {
+        let bytes = match &value {
+            Datum::ByRef(b) => b.to_vec(),
+            Datum::ByVal(_)
+            | Datum::Cstring(_)
+            | Datum::Composite(_)
+            | Datum::Expanded(_)
+            | Datum::Internal(_) => {
+                return Err(PgError::error(
+                    "fetch_class_reloptions: reloptions attribute is by-value",
+                ))
+            }
+        };
+        types_cluster::RelOptionsToken {
+            is_null: false,
+            bytes,
+        }
+    };
+    ReleaseSysCache(tup);
+    Ok(token)
+}
+
+/// `SearchSysCache1(STATEXTOID, statsOid)` returned as the owned `FormedTuple`
+/// copy (statscmds.c needs the held tuple for `heap_modify_tuple` /
+/// `CatalogTupleDelete` of its `t_self`). `Ok(None)` on a cache miss.
+pub(crate) fn statext_search_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    stats_oid: Oid,
+) -> PgResult<Option<FormedTuple<'mcx>>> {
+    let tuple = SearchSysCache1(mcx, STATEXTOID, SysCacheKey::Value(KeyDatum::from_oid(stats_oid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let copy = tup.clone_in(mcx)?;
+    ReleaseSysCache(tup);
+    Ok(Some(copy))
+}
+
+/// `SearchSysCache2(STATEXTDATASTXOID, statsOid, inh)` returned as the owned
+/// `FormedTuple` copy (RemoveStatisticsDataById's `CatalogTupleDelete`).
+/// `Ok(None)` when no such data row exists.
+pub(crate) fn statext_data_search_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    stats_oid: Oid,
+    inh: bool,
+) -> PgResult<Option<FormedTuple<'mcx>>> {
+    let tuple = SearchSysCache2(
+        mcx,
+        STATEXTDATASTXOID,
+        SysCacheKey::Value(KeyDatum::from_oid(stats_oid)),
+        SysCacheKey::Value(KeyDatum::from_bool(inh)),
+    )?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let copy = tup.clone_in(mcx)?;
+    ReleaseSysCache(tup);
+    Ok(Some(copy))
 }
