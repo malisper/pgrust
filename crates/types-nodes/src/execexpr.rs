@@ -19,8 +19,7 @@ use mcx::{MemoryContext, PgBox, PgString, PgVec};
 use types_core::fmgr::FmgrInfo;
 use types_core::primitive::{AttrNumber, Oid};
 use types_datum::datum::NullableDatum;
-use types_tuple::backend_access_common_heaptuple::Datum;
-use types_tuple::heaptuple::HeapTuple;
+use types_tuple::backend_access_common_heaptuple::{Datum, FormedTuple};
 use types_tuple::heaptuple::TupleDescData;
 
 use crate::execnodes::{EcxtId, Opaque, SlotId};
@@ -1535,7 +1534,14 @@ pub struct SubPlanState<'mcx> {
     /// `ExprState *testexpr` — state of combining expression (execExpr-owned).
     pub testexpr: Opaque,
     /// `HeapTuple curTuple` — copy of most recent tuple from subplan.
-    pub curTuple: HeapTuple<'mcx>,
+    ///
+    /// In C this is a `HeapTuple` (header pointer whose user-data area trails
+    /// in the same `palloc` chunk). The owned model carries the whole tuple as
+    /// a [`FormedTuple`] (header + user-data area) so the copy made by
+    /// `ExecCopySlotHeapTuple` (`replace_cur_tuple_from_slot`) is deformable by
+    /// the subsequent `heap_getattr` (`cur_tuple_getattr`); a bare
+    /// `HeapTupleData` cannot reach the column bytes `heap_deform_tuple` needs.
+    pub curTuple: Option<FormedTuple<'mcx>>,
     /// `Datum curArray` — most recent array from `ARRAY()` subplan.
     pub curArray: Datum<'mcx>,
     /// `TupleDesc descRight` — subselect desc after projection.

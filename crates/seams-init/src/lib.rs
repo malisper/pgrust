@@ -1267,9 +1267,29 @@ mod recurrence_guard {
         // addressable from the param array yet) — but execMain is CATALOG
         // `needs-decomp`, so the seam-install guard already exempts its unfinished
         // surface; no allowlist entry is required.
-        ("backend_executor_execTuples", "cur_tuple_getattr"),
+        // (`cur_tuple_getattr` + `replace_cur_tuple_from_slot` RESOLVED: the
+        // nodeSubplan `SubPlanState.curTuple` carrier was widened from the
+        // data-less `HeapTuple` (`HeapTupleData`, which cannot reach the
+        // user-data area `heap_deform_tuple` needs) to the owned `FormedTuple`
+        // (header + user-data area). `replace_cur_tuple_from_slot` now stores
+        // `ExecCopySlotHeapTuple(slot)` into it and `cur_tuple_getattr`
+        // `heap_getattr`s it against the producing slot's descriptor — both
+        // installed by backend-executor-execTuples::init_seams.)
+        //
+        // DESIGN_DEBT (TD-FORCESTORE-HEAPTUPLE-DATALESS): `exec_force_store_heap_tuple`
+        // (`ExecForceStoreHeapTuple`) stays uninstalled. The seam carries
+        // `tuple: &HeapTupleData`, but the C body's non-heap-slot branch deforms
+        // the tuple (`heap_deform_tuple(tuple, slot->tts_tupleDescriptor,
+        // slot->tts_values, slot->tts_isnull)`) which needs the user-data area —
+        // and the owned `HeapTupleData` / its callers' `xs_hitup`
+        // (`tableam::IndexScanDesc.xs_hitup: HeapTuple`) carrier carry NO data
+        // area in this model (it lives only in `FormedTuple.data`). Installing a
+        // body that synthesizes an empty data area would silently mis-deform
+        // virtual/minimal target slots. Faithful install needs the tree-wide
+        // carrier-widen of `xs_hitup` (and the seam arg) from data-less
+        // `HeapTuple` to data-bearing `FormedTuple` — same class as the curTuple
+        // widen above, but it crosses the tableam relscan carrier (out of lane).
         ("backend_executor_execTuples", "exec_force_store_heap_tuple"),
-        ("backend_executor_execTuples", "replace_cur_tuple_from_slot"),
         // backend-foreign-foreign owns foreign/foreign.c's READ accessors + the
         // FDW-routine resolution AND now the pg_foreign_* catalog-write/DDL seams
         // commands/foreigncmds.c issues (insert/update/set_owner/lookup/options

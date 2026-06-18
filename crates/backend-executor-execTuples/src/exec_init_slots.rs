@@ -633,6 +633,58 @@ fn seam_exec_copy_slot_heap_tuple<'mcx>(
     crate::slot_store_fetch::ExecCopySlotHeapTuple(mcx, estate.slot_data_mut(slot))
 }
 
+/// Seam `replace_cur_tuple_from_slot` (nodeSubplan.c):
+///   `if (node->curTuple) heap_freetuple(node->curTuple);`
+///   `node->curTuple = ExecCopySlotHeapTuple(slot);`
+/// Copy the slot's current tuple into the node's `curTuple` (the owned
+/// [`FormedTuple`] carrier in `SubPlanState`), dropping any previous copy
+/// (`heap_freetuple` = drop in the owned model). The copy is made in the
+/// per-query context by `ExecCopySlotHeapTuple`.
+fn seam_replace_cur_tuple_from_slot<'mcx>(
+    node: &mut types_nodes::execexpr::SubPlanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    slot: SlotId,
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    // node->curTuple = ExecCopySlotHeapTuple(slot); -- the previous owned copy
+    // (if any) is dropped by the assignment, mirroring the `heap_freetuple`.
+    let copied = crate::slot_store_fetch::ExecCopySlotHeapTuple(mcx, estate.slot_data_mut(slot))?;
+    node.curTuple = Some(copied);
+    Ok(())
+}
+
+/// Seam `cur_tuple_getattr` (nodeSubplan.c):
+///   `heap_getattr(node->curTuple, attnum, tdesc, &isNull)`
+/// where `tdesc` is the producing slot's descriptor. Read column `attnum` of
+/// the node's owned `curTuple` ([`FormedTuple`]), deforming against the slot's
+/// `tts_tupleDescriptor` (the descriptor of the slot the tuple was copied from).
+fn seam_cur_tuple_getattr<'mcx>(
+    node: &types_nodes::execexpr::SubPlanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    slot: SlotId,
+    attnum: AttrNumber,
+) -> PgResult<backend_executor_execTuples_seams::SlotAttr<'mcx>> {
+    let mcx = estate.es_query_cxt;
+    // tdesc = the producing slot's tuple descriptor.
+    let tdesc = estate
+        .slot_data(slot)
+        .base()
+        .tts_tupleDescriptor
+        .as_ref()
+        .expect("cur_tuple_getattr: producing slot has no tuple descriptor");
+    // node->curTuple must have been set by a prior replace_cur_tuple_from_slot
+    // (C dereferences node->curTuple directly).
+    let cur = node
+        .curTuple
+        .as_ref()
+        .expect("cur_tuple_getattr: node->curTuple is NULL");
+    // result = heap_getattr(node->curTuple, attnum, tdesc, &isNull);
+    let (value, isnull) =
+        backend_access_common_heaptuple::heap_getattr(mcx, cur, attnum as i32, tdesc)?;
+    Ok(backend_executor_execTuples_seams::SlotAttr { value, isnull })
+}
+
+
 /// Seam `slot_getattr_by_id` — `slot_getattr` resolving the pool `SlotId` to its
 /// live payload-bearing `&mut SlotData`.
 fn seam_slot_getattr_by_id<'mcx>(
@@ -905,6 +957,11 @@ pub fn init_seams() {
     seams::exec_store_first_datum::set(seam_exec_store_first_datum);
     seams::store_virtual_values::set(seam_store_virtual_values);
     seams::exec_copy_slot_heap_tuple::set(seam_exec_copy_slot_heap_tuple);
+    // nodeSubplan curTuple copy + read (SubPlanState.curTuple is the owned
+    // FormedTuple carrier produced by ExecCopySlotHeapTuple and deformed by
+    // heap_getattr).
+    seams::replace_cur_tuple_from_slot::set(seam_replace_cur_tuple_from_slot);
+    seams::cur_tuple_getattr::set(seam_cur_tuple_getattr);
     seams::slot_getattr_by_id::set(seam_slot_getattr_by_id);
     seams::slot_getattr::set(seam_slot_getattr);
     seams::slot_getsomeattr::set(seam_slot_getsomeattr);
