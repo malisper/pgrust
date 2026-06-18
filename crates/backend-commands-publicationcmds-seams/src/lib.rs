@@ -6,8 +6,10 @@
 
 #![allow(non_snake_case)]
 
+use mcx::Mcx;
 use types_core::Oid;
 use types_error::PgResult;
+use types_rel::Relation;
 
 seam_core::seam!(
     /// `AlterPublicationOwner_oid(pubid, newOwnerId)` (publicationcmds.c):
@@ -47,6 +49,39 @@ seam_core::seam!(
         name: &str,
         new_owner_id: Oid,
     ) -> PgResult<types_catalog::catalog_dependency::ObjectAddress>
+);
+
+seam_core::seam!(
+    /// `pub_rf_contains_invalid_column(pubid, relation, ancestors, pubviaroot)`
+    /// (publicationcmds.c): whether the publication's row-filter expression
+    /// references any column not part of the relation's REPLICA IDENTITY.
+    /// `RelationBuildPublicationDesc` calls this per publishing publication. Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn pub_rf_contains_invalid_column<'mcx>(
+        mcx: Mcx<'mcx>,
+        pubid: Oid,
+        relation: &Relation<'mcx>,
+        ancestors: &[Oid],
+        pubviaroot: bool,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `pub_contains_invalid_column(pubid, relation, ancestors, pubviaroot,
+    /// pubgencols_type, &invalid_column_list, &invalid_gen_col)`
+    /// (publicationcmds.c): returns `(found, invalid_column_list,
+    /// invalid_gen_col)` — whether the publication's column list / published
+    /// generated columns fail to cover the relation's REPLICA IDENTITY.
+    /// `RelationBuildPublicationDesc` calls this per publishing publication. Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn pub_contains_invalid_column<'mcx>(
+        mcx: Mcx<'mcx>,
+        pubid: Oid,
+        relation: &Relation<'mcx>,
+        ancestors: &[Oid],
+        pubviaroot: bool,
+        pubgencols_type: i8,
+    ) -> PgResult<(bool, bool, bool)>
 );
 
 seam_core::seam!(

@@ -516,6 +516,7 @@ pub fn init_all() {
     backend_utils_cache_partcache::init_seams();
     backend_utils_cache_plancache::init_seams();
     backend_utils_cache_relcache::init_seams();
+    backend_utils_cache_relcache_nodexform::init_seams();
     backend_utils_cache_relfilenumbermap::init_seams();
     backend_utils_cache_relmapper::init_seams();
     backend_utils_cache_spccache::init_seams();
@@ -1698,6 +1699,23 @@ mod recurrence_guard {
         // reaches the decode on an expression index; simple-column indexes return
         // NIL. Install + DELETE alongside the three entries above.
         ("backend_utils_cache_relcache", "relation_get_dummy_index_expressions"),
+        //
+        // -- backend-utils-cache-relcache-nodexform (#159 planner-arena keystone) --
+        // The nodexform owner (sanctioned relcache.c sibling-split) installs its
+        // three live seams (open_index_attrs, relation_build_publication_desc,
+        // publication_desc). The three index node-tree CACHING seams below stay
+        // uninstalled: they cache a built `stringToNode` + eval/canonicalize node
+        // tree into the relcache entry's `rd_indexprs`/`rd_indpred`/dummy-Const
+        // fields, which the TRIMMED owned entry does not carry, AND their only
+        // consumers (`get_index_expressions`/`get_index_predicate` in the
+        // planner-catalog read path) panic on the unmodeled planner-arena node
+        // projection regardless (#159 planner-values keystone); the dummy seam has
+        // no live consumer. Faithful mirror-pg-and-panic until the relcache
+        // node-tree cache fields + the planner-arena projection land. Install +
+        // DELETE these three then.
+        ("backend_utils_cache_relcache_nodexform", "index_expressions"),
+        ("backend_utils_cache_relcache_nodexform", "index_predicate"),
+        ("backend_utils_cache_relcache_nodexform", "dummy_index_expressions"),
         //
         // -- backend-catalog-indexing (pg_attribute insert substrate unported) --
         // DESIGN_DEBT (TD-INDEXING-APPEND-ATTRIBUTE-TUPLES): `AppendAttributeTuples`

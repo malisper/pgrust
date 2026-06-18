@@ -1700,6 +1700,30 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCache1(INDEXRELID, index_oid)` then
+    /// `heap_getattr(rd_indextuple, Anum_pg_index_indexprs, GetPgIndexDescriptor,
+    /// &isnull)` + `TextDatumGetCString` — the raw `pg_index.indexprs`
+    /// `pg_node_tree` text the relcache index-expression transform
+    /// (`RelationGetIndexExpressions` / `RelationGetIndexAttrBitmap`) feeds to
+    /// `stringToNode`. `Ok(None)` when the index has no expression columns
+    /// (`heap_attisnull`) or on a cache miss; `Ok(Some(text))` otherwise. `Err`
+    /// carries the catcache error surface.
+    pub fn pg_index_exprs_text(index_oid: Oid) -> PgResult<Option<String>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(INDEXRELID, index_oid)` then
+    /// `heap_getattr(rd_indextuple, Anum_pg_index_indpred, GetPgIndexDescriptor,
+    /// &isnull)` + `TextDatumGetCString` — the raw `pg_index.indpred`
+    /// `pg_node_tree` text the relcache index-predicate transform
+    /// (`RelationGetIndexPredicate` / `RelationGetIndexAttrBitmap`) feeds to
+    /// `stringToNode`. `Ok(None)` when the index is not partial
+    /// (`heap_attisnull`) or on a cache miss; `Ok(Some(text))` otherwise. `Err`
+    /// carries the catcache error surface.
+    pub fn pg_index_pred_text(index_oid: Oid) -> PgResult<Option<String>>
+);
+
+seam_core::seam!(
     /// `GetSysCacheOid1(PUBLICATIONNAME, Anum_pg_publication_oid,
     /// CStringGetDatum(pubname))` (`get_publication_oid`). `InvalidOid` (0) when
     /// not found; the caller turns that into the "publication does not exist"

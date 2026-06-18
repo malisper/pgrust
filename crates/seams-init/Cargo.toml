@@ -509,6 +509,7 @@ backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }
 backend-utils-cache-partcache = { path = "../backend-utils-cache-partcache" }
 backend-utils-cache-plancache = { path = "../backend-utils-cache-plancache" }
 backend-utils-cache-relcache = { path = "../backend-utils-cache-relcache" }
+backend-utils-cache-relcache-nodexform = { path = "../backend-utils-cache-relcache-nodexform" }
 backend-utils-cache-relfilenumbermap = { path = "../backend-utils-cache-relfilenumbermap" }
 backend-utils-cache-relmapper = { path = "../backend-utils-cache-relmapper" }
 backend-utils-cache-spccache = { path = "../backend-utils-cache-spccache" }

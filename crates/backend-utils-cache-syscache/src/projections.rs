@@ -1356,6 +1356,7 @@ const Anum_pg_index_indkey: i32 = 16;
 const Anum_pg_index_indcollation: i32 = 17;
 const Anum_pg_index_indclass: i32 = 18;
 const Anum_pg_index_indoption: i32 = 19;
+const Anum_pg_index_indexprs: i32 = 20;
 const Anum_pg_index_indpred: i32 = 21;
 
 // `catalog/pg_attribute.h` attribute numbers.
@@ -2551,6 +2552,38 @@ pub(crate) fn pg_index_has_predicate(index_oid: Oid) -> PgResult<Option<bool>> {
     let (_value, is_null) = SysCacheGetAttr(mcx, INDEXRELID, &tup, Anum_pg_index_indpred)?;
     ReleaseSysCache(tup);
     Ok(Some(!is_null))
+}
+
+/// `SearchSysCache1(INDEXRELID, index_oid)` then `heap_getattr(rd_indextuple,
+/// Anum_pg_index_indexprs, ...)` + `TextDatumGetCString` — the raw
+/// `pg_index.indexprs` `pg_node_tree` text, or `None` when the column is null
+/// (no expression columns) or on a cache miss.
+pub(crate) fn pg_index_exprs_text(index_oid: Oid) -> PgResult<Option<String>> {
+    let scratch = MemoryContext::new("syscache indexprs projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, INDEXRELID, SysCacheKey::Value(KeyDatum::from_oid(index_oid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let text = getattr_option_text(mcx, INDEXRELID, &tup, Anum_pg_index_indexprs)?;
+    ReleaseSysCache(tup);
+    Ok(text)
+}
+
+/// `SearchSysCache1(INDEXRELID, index_oid)` then `heap_getattr(rd_indextuple,
+/// Anum_pg_index_indpred, ...)` + `TextDatumGetCString` — the raw
+/// `pg_index.indpred` `pg_node_tree` text, or `None` when the column is null
+/// (not a partial index) or on a cache miss.
+pub(crate) fn pg_index_pred_text(index_oid: Oid) -> PgResult<Option<String>> {
+    let scratch = MemoryContext::new("syscache indpred projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, INDEXRELID, SysCacheKey::Value(KeyDatum::from_oid(index_oid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let text = getattr_option_text(mcx, INDEXRELID, &tup, Anum_pg_index_indpred)?;
+    ReleaseSysCache(tup);
+    Ok(text)
 }
 
 /// `ParseLongOption` + skip-with-WARNING over the deconstructed `proconfig`

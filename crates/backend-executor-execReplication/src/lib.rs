@@ -885,7 +885,7 @@ pub fn ExecSimpleRelationInsert<'mcx>(
     debug_assert_eq!(rel.rd_rel.relkind, RELKIND_RELATION);
 
     // CheckCmdReplicaIdentity(rel, CMD_INSERT);
-    CheckCmdReplicaIdentity(&rel, CmdType::CMD_INSERT)?;
+    CheckCmdReplicaIdentity(mcx, &rel, CmdType::CMD_INSERT)?;
 
     // BEFORE ROW INSERT Triggers
     if trig_insert_before_row(estate, relinfo) {
@@ -1001,7 +1001,7 @@ pub fn ExecSimpleRelationUpdate<'mcx>(
     debug_assert!(!catalog_seams::is_catalog_relation::call(&rel));
 
     // CheckCmdReplicaIdentity(rel, CMD_UPDATE);
-    CheckCmdReplicaIdentity(&rel, CmdType::CMD_UPDATE)?;
+    CheckCmdReplicaIdentity(mcx, &rel, CmdType::CMD_UPDATE)?;
 
     // BEFORE ROW UPDATE Triggers
     if trig_update_before_row(estate, relinfo) {
@@ -1138,7 +1138,7 @@ pub fn ExecSimpleRelationDelete<'mcx>(
     let tid = estate.slot(searchslot).tts_tid;
 
     // CheckCmdReplicaIdentity(rel, CMD_DELETE);
-    CheckCmdReplicaIdentity(&rel, CmdType::CMD_DELETE)?;
+    CheckCmdReplicaIdentity(mcx, &rel, CmdType::CMD_DELETE)?;
 
     // BEFORE ROW DELETE Triggers
     if trig_delete_before_row(estate, relinfo) {
@@ -1184,7 +1184,11 @@ pub fn ExecSimpleRelationDelete<'mcx>(
 // ===========================================================================
 
 /// Check if `cmd` can be executed with `rel`'s current replica identity.
-pub fn CheckCmdReplicaIdentity<'mcx>(rel: &Relation<'mcx>, cmd: CmdType) -> PgResult<()> {
+pub fn CheckCmdReplicaIdentity<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    cmd: CmdType,
+) -> PgResult<()> {
     // Skip checking the replica identity for partitioned tables.
     //   if (rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE) return;
     if rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
@@ -1198,7 +1202,7 @@ pub fn CheckCmdReplicaIdentity<'mcx>(rel: &Relation<'mcx>, cmd: CmdType) -> PgRe
     }
 
     // RelationBuildPublicationDesc(rel, &pubdesc);
-    let pubdesc = relcache_nodexform_seams::relation_build_publication_desc::call(rel)?;
+    let pubdesc = relcache_nodexform_seams::relation_build_publication_desc::call(mcx, rel)?;
 
     let relname = rel.name().to_string();
 
