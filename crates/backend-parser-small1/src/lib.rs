@@ -946,10 +946,7 @@ fn node_as_param<'a>(node: &'a Node<'_>) -> Option<&'a Param> {
 
 /// `IsA(node, Query)` projection over the `Node` universe.
 fn node_as_query<'a, 'mcx>(node: &'a Node<'mcx>) -> Option<&'a Query<'mcx>> {
-    match node {
-        Node::Query(q) => Some(q),
-        _ => None,
-    }
+    node.as_query()
 }
 
 // ===========================================================================
