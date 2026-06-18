@@ -161,16 +161,37 @@ fn unported(tag: u32, name: &str) -> ! {
 // Top-level dispatch.
 // ===========================================================================
 
-/// Convert a `*mut RawStmt` (the raw list element) into the owned [`RawStmt`].
+/// Convert a raw list element into the owned [`RawStmt`].
+///
+/// In `RAW_PARSE_DEFAULT` mode the grammar wraps each statement in a `RawStmt`
+/// (`stmtmulti`), so the cell is a `*mut RawStmt`. But the non-default
+/// `RawParseMode`s build `parsetree = list_make1($n)` over a *bare* node:
+/// `MODE_TYPE_NAME Typename` yields a `TypeName *` cell (gram.y:920), and the
+/// PL/pgSQL expression/assignment modes yield bare expression cells. Those cells
+/// are NOT `RawStmt`s. We dispatch on the cell's leading `NodeTag`: a real
+/// `T_RawStmt` is converted field-by-field; any other tag is a bare node, which
+/// we convert directly and wrap in a synthetic `RawStmt` (mirroring how callers
+/// like `typeStringToTypeName` do `linitial_node(TypeName, list)` on the bare
+/// element — the wrapper is transparent because the consumer reads `.stmt`).
 pub fn convert_raw_stmt<'mcx>(
     mcx: Mcx<'mcx>,
     rs: *mut cs::RawStmt,
 ) -> PgResult<RawStmt<'mcx>> {
-    let rs = unsafe { &*rs };
+    let node: *mut RawNode = rs.cast();
+    let tag = unsafe { (*node).type_ };
+    if tag == tags::T_RawStmt {
+        let rs = unsafe { &*rs };
+        return Ok(RawStmt {
+            stmt: node_req(mcx, rs.stmt)?,
+            stmt_location: rs.stmt_location,
+            stmt_len: rs.stmt_len,
+        });
+    }
+    // Bare node (RAW_PARSE_TYPE_NAME / RAW_PARSE_PLPGSQL_*): wrap it.
     Ok(RawStmt {
-        stmt: node_req(mcx, rs.stmt)?,
-        stmt_location: rs.stmt_location,
-        stmt_len: rs.stmt_len,
+        stmt: node_req(mcx, node)?,
+        stmt_location: 0,
+        stmt_len: 0,
     })
 }
 
