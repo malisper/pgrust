@@ -168,6 +168,28 @@ static SHARED_PROC_PIDS: AtomicPtr<i32> = AtomicPtr::new(core::ptr::null_mut());
 /// checks. Set alongside the array.
 static SHARED_PROC_PID_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+/// Stable base of the per-process `allProcs` `PGPROC` array (the same buffer
+/// owned by `ProcGlobal->allProcs` in the [`PROC_GLOBAL`] `RefCell`), recorded
+/// by [`InitProcGlobal`] once the array is built. NULL until then.
+///
+/// In C `&proc->procLatch` is plain pointer arithmetic into the stable
+/// `ProcGlobal->allProcs` block: no lock, async-signal-safe, reachable from a
+/// `SIGALRM` handler. The Rust port stores the `PGPROC` array inside the
+/// [`PROC_GLOBAL`] `RefCell`, so reaching `&proc->procLatch` through
+/// [`with_proc_global`] takes a `borrow_mut()` — which is *not* reentrant: a
+/// timer (`SIGALRM`) firing while the main thread already holds that borrow
+/// would make the handler's `SetLatch -> with_proc_latch` path re-borrow and
+/// abort with "RefCell already borrowed". The latch fields are all atomics
+/// (`Latch` in types-storage), and the array buffer is allocated once with the
+/// final capacity and never reallocated after `InitProcGlobal`, so its address
+/// is stable for the process lifetime. Recording that stable base here lets
+/// [`with_proc_latch`] reach `&proc->procLatch` through a raw pointer with no
+/// `RefCell` borrow — the faithful async-signal-safe `&proc->procLatch`.
+static SHARED_ALL_PROCS: AtomicPtr<PGPROC> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Length of the [`SHARED_ALL_PROCS`] array (`total_procs`), for bounds checks.
+static SHARED_ALL_PROCS_COUNT: AtomicUsize = AtomicUsize::new(0);
+
 /// Pointer to the genuinely-shared `ProcStructLock` spinlock word. Set by
 /// [`InitProcGlobal`], NULL until then. C: `slock_t *ProcStructLock` placed by
 /// `ShmemInitStruct`.
@@ -1045,6 +1067,16 @@ pub fn InitProcGlobal() -> PgResult<()> {
 
     PROC_GLOBAL.with(|cell| {
         *cell.borrow_mut() = Some(proc_global);
+        // Record the stable base of the now-stored `allProcs` array so
+        // `with_proc_latch` can reach `&proc->procLatch` (all-atomic `Latch`)
+        // from a signal handler without taking the `PROC_GLOBAL` RefCell
+        // borrow. The array was built with the final capacity and is never
+        // grown again, so the buffer address is fixed for the process
+        // lifetime (the faithful stable `ProcGlobal->allProcs`).
+        let pg = cell.borrow();
+        let all = &pg.as_ref().expect("just stored").allProcs;
+        SHARED_ALL_PROCS.store(all.as_ptr() as *mut PGPROC, AtomicOrdering::Relaxed);
+        SHARED_ALL_PROCS_COUNT.store(all.len(), AtomicOrdering::Relaxed);
     });
 
     Ok(())
@@ -1075,5 +1107,28 @@ pub(crate) fn proc_latch_handle(procNumber: ProcNumber) -> LatchHandle {
 /// array; the latch unit applies its own `SetLatch`/`OwnLatch`/`DisownLatch`
 /// algorithm inside the callback.
 pub(crate) fn with_proc_latch(procno: ProcNumber, f: &mut dyn FnMut(&types_storage::latch::Latch)) {
-    with_proc_global(|pg| f(&pg.allProcs[procno as usize].procLatch));
+    // Reach `&proc->procLatch` through the stable `allProcs` base recorded by
+    // InitProcGlobal, NOT through the `PROC_GLOBAL` RefCell borrow. The `Latch`
+    // is all-atomic and the array buffer never moves after InitProcGlobal, so
+    // this is the faithful async-signal-safe `&proc->procLatch`: `SetLatch`
+    // from a `SIGALRM` handler no longer re-borrows the RefCell (the source of
+    // the "RefCell already borrowed" aborts under statement_timeout workloads).
+    let base = SHARED_ALL_PROCS.load(AtomicOrdering::Relaxed);
+    let count = SHARED_ALL_PROCS_COUNT.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "with_proc_latch: allProcs base uninitialized (InitProcGlobal not run)"
+    );
+    let idx = procno as usize;
+    assert!(
+        procno >= 0 && idx < count,
+        "with_proc_latch: ProcNumber {procno} out of range (0..{count})"
+    );
+    // SAFETY: `base` addresses the stable, process-lifetime `allProcs` buffer
+    // placed by InitProcGlobal; `idx` is bounds-checked against its length.
+    // We only read the all-atomic embedded `Latch` through a shared reference,
+    // never aliasing the RefCell's `&mut` (the `Latch` fields are atomics,
+    // mutated concurrently/cross-process exactly as C's `volatile` latch is).
+    let latch: &types_storage::latch::Latch = unsafe { &(*base.add(idx)).procLatch };
+    f(latch);
 }
