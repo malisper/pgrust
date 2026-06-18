@@ -26,6 +26,8 @@ backend-nodes-core = { path = "../backend-nodes-core" }
 # Domain / generated-column legs route through the owners' seams.
 backend-parser-coerce-seams = { path = "../backend-parser-coerce-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
+backend-nodes-equalfuncs-seams = { path = "../backend-nodes-equalfuncs-seams" }
 
 # Inward seam this unit owns + installs (preprocess_targetlist).
 backend-optimizer-prep-preptlist-seams = { path = "../backend-optimizer-prep-preptlist-seams" }

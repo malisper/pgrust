@@ -241,14 +241,59 @@ pub fn preprocess_targetlist<'mcx>(
         }
     }
 
-    // C 296-325: RETURNING-list resjunk Vars for other relations. `returningList`
-    // is non-NULL only for a data-modifying statement; the single-table INSERT
-    // RETURNING does not add cross-relation junk. Deferred when non-empty.
-    if !parse.returningList.is_empty() {
-        panic!(
-            "preprocess_targetlist: RETURNING-list cross-relation resjunk Var stanza not yet \
-             ported (needs pull_var_clause over the RETURNING list)"
-        );
+    // C 296-325: if the query has a RETURNING list, add resjunk entries for any
+    // Vars used in RETURNING that belong to other relations, so they are
+    // available for the RETURNING calculation. Vars of the result rel don't need
+    // adding (they refer to the actual heap tuple). The whole stanza is skipped
+    // unless there is more than one rtable entry, exactly as C.
+    if !parse.returningList.is_empty() && parse.rtable.len() > 1 {
+        let flags = backend_optimizer_util_vars::PVC_RECURSE_AGGREGATES
+            | backend_optimizer_util_vars::PVC_RECURSE_WINDOWFUNCS
+            | backend_optimizer_util_vars::PVC_INCLUDE_PLACEHOLDERS;
+
+        // pull_var_clause((Node *) parse->returningList, ...) — run over each
+        // RETURNING TargetEntry's expr (equivalent to walking the C List).
+        let mut vars: alloc::vec::Vec<types_nodes::primnodes::Expr> = alloc::vec::Vec::new();
+        for tle in parse.returningList.iter() {
+            if let Some(expr) = tle.expr.as_deref() {
+                let node = types_nodes::nodes::Node::Expr(expr.clone_in(mcx)?);
+                for v in backend_optimizer_util_vars::pull_var_clause(&node, flags) {
+                    vars.push(v);
+                }
+            }
+        }
+
+        for var in vars.into_iter() {
+            // if (IsA(var, Var) && var->varno == result_relation) continue;
+            if let types_nodes::primnodes::Expr::Var(v) = &var {
+                if v.varno == result_relation {
+                    continue; // don't need it
+                }
+            }
+
+            // if (tlist_member((Expr *) var, tlist)) continue;
+            let already = tlist.iter().any(|&id| {
+                let expr_id = root.targetentry(id).expr;
+                backend_nodes_equalfuncs_seams::equal_expr::call(&var, root.node(expr_id))
+            });
+            if already {
+                continue; // already got it
+            }
+
+            // tle = makeTargetEntry(var, list_length(tlist)+1, NULL, true);
+            let expr_id = root.alloc_node(var);
+            let resno = (tlist.len() + 1) as AttrNumber;
+            let te = TargetEntryNode {
+                expr: expr_id,
+                resno,
+                resname: None,
+                ressortgroupref: 0,
+                resorigtbl: InvalidOid,
+                resorigcol: 0,
+                resjunk: true,
+            };
+            tlist.push(root.alloc_targetentry(te));
+        }
     }
 
     // C 327: root->processed_tlist = tlist.
