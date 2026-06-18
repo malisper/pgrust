@@ -160,7 +160,7 @@ mod tests {
             copied.equal_node(&reference),
             "the copy must survive dropping the source context (it lives in B)"
         );
-        if let Node::Float(f) = &copied {
+        if let Some(f) = copied.as_float() {
             assert_eq!(f.fval.as_str(), "12345");
         } else {
             panic!("expected a T_Float node");
