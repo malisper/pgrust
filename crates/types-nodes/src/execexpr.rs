@@ -1157,18 +1157,21 @@ pub enum ExprEvalStepData<'mcx> {
         scalar_cell: ResultCellId,
     },
     /// `xmlexpr` — for EEOP_XMLEXPR.
+    ///
+    /// C parks `Datum *argvalue` / `bool *argnull` scratch buffers that the
+    /// per-row evaluation fills from `ExecInitExprRec`'d sub-steps. In the
+    /// result-cell model the sub-steps write their own [`ResultCellId`]s, so we
+    /// carry the cell ids the evaluator reads (named args first, then positional
+    /// args) plus the original [`XmlExpr`] node it dispatches on.
     XmlExpr {
-        /// `XmlExpr *xexpr` — original node; parked until primnodes carries
-        /// `XmlExpr` (opaque address).
-        xexpr: usize,
-        /// `Datum *named_argvalue`.
-        named_argvalue: Option<PgVec<'mcx, Datum<'mcx>>>,
-        /// `bool *named_argnull`.
-        named_argnull: Option<PgVec<'mcx, bool>>,
-        /// `Datum *argvalue`.
-        argvalue: Option<PgVec<'mcx, Datum<'mcx>>>,
-        /// `bool *argnull`.
-        argnull: Option<PgVec<'mcx, bool>>,
+        /// `XmlExpr *xexpr` — original node, cloned into the step arena.
+        xexpr: crate::primnodes::XmlExpr,
+        /// Result cells the named-arg (`xexpr.named_args`) sub-steps write.
+        named_arg_cells: Option<PgVec<'mcx, ResultCellId>>,
+        /// `exprType()` of each named-arg expression (for XMLFOREST/XMLELEMENT).
+        named_arg_types: Option<PgVec<'mcx, Oid>>,
+        /// Result cells the positional-arg (`xexpr.args`) sub-steps write.
+        arg_cells: Option<PgVec<'mcx, ResultCellId>>,
     },
     /// `json_constructor` — for EEOP_JSON_CONSTRUCTOR.
     JsonConstructor {

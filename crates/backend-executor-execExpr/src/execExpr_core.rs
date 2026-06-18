@@ -1315,10 +1315,14 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
         Expr::JsonExpr(jsexpr) => {
             crate::execExpr_json::exec_init_json_expr(mcx, jsexpr, state, resv)
         }
-        Expr::XmlExpr(_) | Expr::JsonValueExpr(_) | Expr::JsonConstructorExpr(_)
+        // ----- T_XmlExpr (XMLELEMENT / XMLFOREST / XMLCONCAT / ...) -----
+        Expr::XmlExpr(xexpr) => {
+            crate::execExpr_json::exec_init_xml_expr(mcx, xexpr, state, resv)
+        }
+        Expr::JsonValueExpr(_) | Expr::JsonConstructorExpr(_)
         | Expr::JsonIsPredicate(_) => panic!(
-            "execExpr-core: XML/JSON-constructor expression compilation is owned by execExpr_json \
-             (ExecInitJsonConstructor / xml)"
+            "execExpr-core: JSON-constructor expression compilation is owned by execExpr_json \
+             (ExecInitJsonConstructor)"
         ),
         Expr::SetToDefault(_) => panic!(
             "execExpr-core: SetToDefault must have been replaced before execution (planner); \

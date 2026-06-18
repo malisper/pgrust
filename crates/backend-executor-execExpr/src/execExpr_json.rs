@@ -13,7 +13,7 @@ use types_nodes::execexpr::{
     JsonPathVariableState, ResultCellId,
 };
 use types_nodes::primnodes::{
-    Expr, JsonBehaviorType, JsonExpr, JsonExprOp, JsonReturning,
+    Expr, JsonBehaviorType, JsonExpr, JsonExprOp, JsonReturning, XmlExpr,
 };
 use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 
@@ -484,4 +484,64 @@ fn is_coerce_via_io(expr: &Expr) -> bool {
 
 fn is_coerce_to_domain(expr: &Expr) -> bool {
     matches!(expr, Expr::CoerceToDomain(_))
+}
+
+/// `ExecInitExprRec` `T_XmlExpr` arm (execExpr.c:2640) — push the steps to
+/// evaluate an `XmlExpr` (XMLCONCAT / XMLELEMENT / XMLFOREST / XMLPARSE / XMLPI /
+/// XMLROOT / XMLSERIALIZE / IS DOCUMENT) and its subsidiary expressions.
+///
+/// C parks `Datum*`/`bool*` scratch buffers and `ExecInitExprRec`'s each
+/// named/positional argument into them; here each sub-step writes its own
+/// result cell, and the step carries the cell ids the evaluator reads.
+pub(crate) fn exec_init_xml_expr<'mcx>(
+    mcx: Mcx<'mcx>,
+    xexpr: &XmlExpr,
+    state: &mut ExprState<'mcx>,
+    resv: ResultCellId,
+) -> PgResult<()> {
+    let nnamed = xexpr.named_args.len();
+    let nargs = xexpr.args.len();
+
+    // Compile each named arg into a fresh cell, recording its cell id and its
+    // exprType (needed for the XMLFOREST/XMLELEMENT value mapping).
+    let (named_arg_cells, named_arg_types) = if nnamed != 0 {
+        let mut cells = mcx::vec_with_capacity_in(mcx, nnamed)?;
+        let mut types = mcx::vec_with_capacity_in(mcx, nnamed)?;
+        for e in &xexpr.named_args {
+            let cell = new_result_cell(mcx, state)?;
+            let ti = backend_nodes_nodeFuncs_seams::expr_type_info::call(e)?;
+            exec_init_expr_rec(mcx, e, state, cell)?;
+            cells.push(cell);
+            types.push(ti.typid);
+        }
+        (Some(cells), Some(types))
+    } else {
+        (None, None)
+    };
+
+    // Compile each positional arg into a fresh cell.
+    let arg_cells = if nargs != 0 {
+        let mut cells = mcx::vec_with_capacity_in(mcx, nargs)?;
+        for e in &xexpr.args {
+            let cell = new_result_cell(mcx, state)?;
+            exec_init_expr_rec(mcx, e, state, cell)?;
+            cells.push(cell);
+        }
+        Some(cells)
+    } else {
+        None
+    };
+
+    let scratch = ExprEvalStep {
+        opcode: ExprEvalOp::EEOP_XMLEXPR,
+        resvalue: resv,
+        resnull: resv,
+        d: ExprEvalStepData::XmlExpr {
+            xexpr: xexpr.clone(),
+            named_arg_cells,
+            named_arg_types,
+            arg_cells,
+        },
+    };
+    expr_eval_push_step(mcx, state, scratch)
 }

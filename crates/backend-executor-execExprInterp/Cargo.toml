@@ -50,4 +50,9 @@ backend-utils-adt-jsonb-util = { path = "../backend-utils-adt-jsonb-util" }
 backend-utils-adt-jsonb = { path = "../backend-utils-adt-jsonb" }
 backend-utils-adt-numeric = { path = "../backend-utils-adt-numeric" }
 backend-utils-adt-jsonfuncs = { path = "../backend-utils-adt-jsonfuncs" }
+# xml.c value workers (xmlconcat/xmlserialize/xmlparse/xmlpi/xmlroot/
+# xml_is_document) for EEOP_XMLEXPR. A leaf adt unit (types-* only deps).
+backend-utils-adt-xml = { path = "../backend-utils-adt-xml" }
+# exprType() of XMLELEMENT content args (seam crate; acyclic).
+backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
 types-jsonb = { path = "../types-jsonb" }

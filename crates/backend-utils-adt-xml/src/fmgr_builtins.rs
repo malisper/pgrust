@@ -78,6 +78,66 @@ fn fc_xml_is_well_formed_content(fcinfo: &mut FunctionCallInfoBaseData) -> Datum
     ret_bool(ok(crate::xml_is_well_formed_content(data)))
 }
 
+/// A `cstring` arg's owned text (C: `PG_GETARG_CSTRING`).
+#[inline]
+fn arg_cstring<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
+    fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_cstring())
+        .expect("xml fn: cstring arg missing from by-ref lane")
+}
+
+/// `PG_RETURN_XML_P(x)` / `PG_RETURN_TEXT_P` — a by-ref varlena result word.
+#[inline]
+fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
+    fcinfo.set_ref_result(types_fmgr::RefPayload::Varlena(bytes));
+    Datum::from_usize(0)
+}
+
+/// `PG_RETURN_CSTRING(s)` — a by-ref cstring result word.
+#[inline]
+fn ret_cstring(fcinfo: &mut FunctionCallInfoBaseData, s: Vec<u8>) -> Datum {
+    fcinfo.set_ref_result(types_fmgr::RefPayload::Cstring(
+        String::from_utf8_lossy(&s).into_owned(),
+    ));
+    Datum::from_usize(0)
+}
+
+/// `xml_in(cstring)` (OID 2893) — parse a `cstring` to the `xml` type.
+fn fc_xml_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let s = arg_cstring(fcinfo, 0);
+    let out = ok(crate::xml_in(s));
+    ret_varlena(fcinfo, out)
+}
+
+/// `xml_out(xml)` (OID 2894) — render an `xml` value to its `cstring` image.
+fn fc_xml_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let x = arg_text_bytes(fcinfo, 0);
+    let out = ok(crate::xml_out(x));
+    ret_cstring(fcinfo, out)
+}
+
+/// `xmlcomment(text)` (OID 2895) — `<!--text-->`.
+fn fc_xmlcomment(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let arg = arg_text_bytes(fcinfo, 0);
+    let out = ok(crate::xmlcomment(arg));
+    ret_varlena(fcinfo, out)
+}
+
+/// `texttoxml(text)` (OID 2896, `xml(text)`) — the `text::xml` cast.
+fn fc_texttoxml(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let data = arg_text_bytes(fcinfo, 0);
+    let out = ok(crate::texttoxml(data));
+    ret_varlena(fcinfo, out)
+}
+
+/// `xmltotext(xml)` — the `xml::text` cast (binary-compatible passthrough).
+fn fc_xmltotext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let data = arg_text_bytes(fcinfo, 0);
+    let out = ok(crate::xmltotext(data));
+    ret_varlena(fcinfo, out)
+}
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -123,5 +183,12 @@ pub fn register_xml_builtins() {
             false,
             fc_xml_is_well_formed_content,
         ),
+        // Type I/O + casts: the `xml` type's input/output functions and the
+        // text<->xml casts, so xml values parse, print, and round-trip.
+        builtin(2893, "xml_in", 1, true, false, fc_xml_in),
+        builtin(2894, "xml_out", 1, true, false, fc_xml_out),
+        builtin(2895, "xmlcomment", 1, true, false, fc_xmlcomment),
+        builtin(2896, "texttoxml", 1, true, false, fc_texttoxml),
+        builtin(2922, "xmltotext", 1, true, false, fc_xmltotext),
     ]);
 }

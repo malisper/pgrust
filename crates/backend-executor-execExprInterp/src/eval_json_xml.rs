@@ -24,26 +24,278 @@ use backend_utils_adt_jsonpath_exec::{
     JsonWrapper as PathJsonWrapper,
 };
 use types_jsonb::backend_utils_adt_jsonb_util::{JsonbValue, JsonbValueData};
-use types_nodes::primnodes::{JsonBehaviorType, JsonExprOp, JsonWrapper};
+use types_nodes::primnodes::{JsonBehaviorType, JsonExprOp, JsonWrapper, XmlExprOp};
 
 use crate::interp_loop::{read_cell, write_cell};
 
-/// `ExecEvalXmlExpr(ExprState *state, ExprEvalStep *op)` — evaluate an
-/// XMLELEMENT / XMLFOREST / XMLPARSE / etc. expression. Still parked (the
-/// `XmlExpr` primnode and xml.c workers are unported).
+/// `ExecEvalXmlExpr(ExprState *state, ExprEvalStep *op)` (execExprInterp.c:4000)
+/// — evaluate an XMLCONCAT / XMLFOREST / XMLELEMENT / XMLPARSE / XMLPI / XMLROOT
+/// / XMLSERIALIZE / IS DOCUMENT expression. The arguments were compiled into
+/// result cells by `exec_init_xml_expr`; this gathers them and dispatches to the
+/// xml.c value workers in `backend_utils_adt_xml`.
 pub fn ExecEvalXmlExpr<'mcx>(
     state: &mut ExprState<'mcx>,
     op: usize,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    let _ = (state, op, estate);
-    panic!(
-        "execExprInterp: EEOP_XMLEXPR — the XmlExpr primnode (op->d.xmlexpr.xexpr, \
-         parked as ExprEvalStepData::XmlExpr {{ xexpr: usize }}) and the xml.c \
-         workers it dispatches to (xmlconcat/xmlelement/xmlparse/xmlpi/xmlroot/\
-         xmltotext_with_options/xml_is_document/map_sql_value_to_xml_value) are \
-         not yet ported — no executor-facing xml seam exists"
-    )
+    let mcx = estate.es_query_cxt;
+
+    // Snapshot the step payload (the node + arg cell ids) so the per-arg
+    // read_cell()s do not alias the &mut state borrow.
+    let (xexpr, named_arg_cells, named_arg_types, arg_cells) =
+        match &state.steps.as_ref().unwrap()[op].d {
+            ExprEvalStepData::XmlExpr {
+                xexpr,
+                named_arg_cells,
+                named_arg_types,
+                arg_cells,
+            } => (
+                xexpr.clone(),
+                named_arg_cells
+                    .as_ref()
+                    .map(|v| v.iter().copied().collect::<Vec<_>>())
+                    .unwrap_or_default(),
+                named_arg_types
+                    .as_ref()
+                    .map(|v| v.iter().copied().collect::<Vec<_>>())
+                    .unwrap_or_default(),
+                arg_cells
+                    .as_ref()
+                    .map(|v| v.iter().copied().collect::<Vec<_>>())
+                    .unwrap_or_default(),
+            ),
+            _ => unreachable!("EEOP_XMLEXPR: payload is not XmlExpr"),
+        };
+    let resv = state.steps.as_ref().unwrap()[op].resvalue;
+    let resnull = state.steps.as_ref().unwrap()[op].resnull;
+
+    // *op->resnull = true; *op->resvalue = (Datum) 0;
+    write_cell(state, resv, Datum::null(), true);
+    if resnull != resv {
+        write_cell(state, resnull, Datum::from_bool(true), false);
+    }
+
+    match xexpr.op {
+        XmlExprOp::IS_XMLCONCAT => {
+            // values = list of non-null arg payloads (all xml-typed).
+            let mut values: Vec<Vec<u8>> = Vec::new();
+            for &cell in &arg_cells {
+                let (v, isnull) = read_cell(state, cell);
+                if !isnull {
+                    values.push(v.as_ref_bytes().to_vec());
+                }
+            }
+            if !values.is_empty() {
+                let out = backend_utils_adt_xml::xmlconcat(&values)?;
+                write_xmltype(state, resv, resnull, mcx, &out)?;
+            }
+        }
+        XmlExprOp::IS_XMLFOREST => {
+            // forboth(named_args, arg_names): <name>map_sql_value_to_xml_value(...)</name>
+            let mut buf: Vec<u8> = Vec::new();
+            let mut any = false;
+            for i in 0..named_arg_cells.len() {
+                let (v, isnull) = read_cell(state, named_arg_cells[i]);
+                if !isnull {
+                    let argname = &xexpr.arg_names[i];
+                    let mapped = map_named_value(v, named_arg_types[i])?;
+                    buf.extend_from_slice(b"<");
+                    buf.extend_from_slice(argname.as_bytes());
+                    buf.extend_from_slice(b">");
+                    buf.extend_from_slice(mapped.as_bytes());
+                    buf.extend_from_slice(b"</");
+                    buf.extend_from_slice(argname.as_bytes());
+                    buf.extend_from_slice(b">");
+                    any = true;
+                }
+            }
+            if any {
+                // cstring_to_text_with_len — store as a plain text/xml varlena.
+                write_xmltype(state, resv, resnull, mcx, &buf)?;
+            }
+        }
+        XmlExprOp::IS_XMLELEMENT => {
+            // named_args -> (attr-name, mapped-value-or-NULL); args -> content.
+            let mut named: Vec<(String, Option<String>)> = Vec::new();
+            for i in 0..named_arg_cells.len() {
+                let (v, isnull) = read_cell(state, named_arg_cells[i]);
+                let mapped = if isnull {
+                    None
+                } else {
+                    Some(map_named_value(v, named_arg_types[i])?)
+                };
+                named.push((xexpr.arg_names[i].clone(), mapped));
+            }
+            // The C xmlelement walks xexpr->args and maps each via
+            // map_sql_value_to_xml_value(argvalue[i], exprType(e), true) into
+            // content; a NULL arg is skipped.
+            let mut content: Vec<String> = Vec::new();
+            for i in 0..arg_cells.len() {
+                let (v, isnull) = read_cell(state, arg_cells[i]);
+                if !isnull {
+                    let typid = expr_type_of_arg(&xexpr, i)?;
+                    content.push(map_named_value(v, typid)?);
+                }
+            }
+            let name = xexpr.name.as_deref().unwrap_or("");
+            let out = backend_utils_adt_xml::xmlelement(name, &named, &content)?;
+            write_xmltype(state, resv, resnull, mcx, &out)?;
+        }
+        XmlExprOp::IS_XMLPARSE => {
+            // args known to be (text, bool).
+            let (v0, n0) = read_cell(state, arg_cells[0]);
+            if n0 {
+                return Ok(());
+            }
+            let data = v0.as_ref_bytes().to_vec();
+            let (v1, n1) = read_cell(state, arg_cells[1]);
+            if n1 {
+                return Ok(());
+            }
+            let preserve_whitespace = v1.as_bool();
+            let out = backend_utils_adt_xml::xmlparse(&data, xexpr.xmloption, preserve_whitespace)?;
+            write_xmltype(state, resv, resnull, mcx, &out)?;
+        }
+        XmlExprOp::IS_XMLPI => {
+            // optional argument known to be text.
+            let (arg, isnull): (Option<Vec<u8>>, bool) = if !arg_cells.is_empty() {
+                let (v, n) = read_cell(state, arg_cells[0]);
+                if n {
+                    (None, true)
+                } else {
+                    (Some(v.as_ref_bytes().to_vec()), false)
+                }
+            } else {
+                (None, false)
+            };
+            let target = xexpr.name.as_deref().unwrap_or("");
+            let (out, is_null) =
+                backend_utils_adt_xml::xmlpi(target, arg.as_deref(), isnull)?;
+            match out {
+                Some(bytes) if !is_null => write_xmltype(state, resv, resnull, mcx, &bytes)?,
+                _ => { /* result stays NULL */ }
+            }
+        }
+        XmlExprOp::IS_XMLROOT => {
+            // args known to be (xml, text, int).
+            let (v0, n0) = read_cell(state, arg_cells[0]);
+            if n0 {
+                return Ok(());
+            }
+            let data = v0.as_ref_bytes().to_vec();
+            let (v1, n1) = read_cell(state, arg_cells[1]);
+            let version = if n1 { None } else { Some(v1.as_ref_bytes().to_vec()) };
+            let (v2, _n2) = read_cell(state, arg_cells[2]); // always present
+            let standalone = xml_standalone_from_i32(v2.as_usize() as i32);
+            let out =
+                backend_utils_adt_xml::xmlroot(&data, version.as_deref(), standalone)?;
+            write_xmltype(state, resv, resnull, mcx, &out)?;
+        }
+        XmlExprOp::IS_XMLSERIALIZE => {
+            // argument type known to be xml.
+            let (v0, n0) = read_cell(state, arg_cells[0]);
+            if n0 {
+                return Ok(());
+            }
+            let data = v0.as_ref_bytes().to_vec();
+            let out = backend_utils_adt_xml::xmltotext_with_options(
+                &data,
+                xexpr.xmloption,
+                xexpr.indent,
+            )?;
+            write_xmltype(state, resv, resnull, mcx, &out)?;
+        }
+        XmlExprOp::IS_DOCUMENT => {
+            // optional argument known to be xml.
+            let (v0, n0) = read_cell(state, arg_cells[0]);
+            if n0 {
+                return Ok(());
+            }
+            let data = v0.as_ref_bytes().to_vec();
+            let is_doc = backend_utils_adt_xml::xml_is_document(&data)?;
+            write_cell(state, resv, Datum::from_bool(is_doc), false);
+            if resnull != resv {
+                write_cell(state, resnull, Datum::from_bool(false), false);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Write a freshly built xml/text payload into the result cell as a
+/// by-reference Datum (the C `PointerGetDatum(result)` of a `cstring_to_text` /
+/// `stringinfo_to_xmltype` value), clearing the NULL flag.
+///
+/// In this model `Datum::ByRef` carries the *header-less* detoasted payload (see
+/// `cstring_to_text_with_len`, which returns the bare bytes via `slice_in`), so
+/// the xml.c worker's payload is stored verbatim.
+fn write_xmltype<'mcx>(
+    state: &mut ExprState<'mcx>,
+    resv: ResultCellId,
+    resnull: ResultCellId,
+    mcx: Mcx<'mcx>,
+    bytes: &[u8],
+) -> PgResult<()> {
+    let payload = mcx::slice_in(mcx, bytes)?;
+    write_cell(state, resv, Datum::ByRef(payload), false);
+    if resnull != resv {
+        write_cell(state, resnull, Datum::from_bool(false), false);
+    }
+    Ok(())
+}
+
+/// Map a SQL value Datum (read out of a result cell) through xml.c's
+/// `map_sql_value_to_xml_value(value, typid, true)`.
+///
+/// The xml.c worker takes a bare-word `types_datum::Datum` and, for the native
+/// text path, calls `OidOutputFunctionCall(typeOut, value)` through a seam that
+/// receives the machine-word Datum bits. A by-value SQL value (bool / int /
+/// date / timestamp) maps directly. A by-reference (varlena) value cannot be
+/// carried by the bare machine word — that is the genuine by-ref-Datum substrate
+/// gap (the same one ExecEvalJsonExprPath PASSING vars hit): the output-function
+/// seam needs a stable pointer the inline-bytes `Datum::ByRef` model does not
+/// supply. Such a value loud-panics rather than passing a bogus pointer.
+fn map_named_value<'mcx>(
+    value: Datum<'mcx>,
+    typid: types_core::primitive::Oid,
+) -> PgResult<String> {
+    match value {
+        Datum::ByVal(word) => backend_utils_adt_xml::map_sql_value_to_xml_value(
+            types_datum::Datum::from_usize(word),
+            typid,
+            true,
+        ),
+        _ => panic!(
+            "execExprInterp: ExecEvalXmlExpr — XMLELEMENT/XMLFOREST mapping of a by-reference \
+             (varlena) value of type oid {} needs map_sql_value_to_xml_value to reach the \
+             OidOutputFunctionCall / detoast seam, but the inline-bytes Datum::ByRef carrier \
+             cannot supply the stable machine-word pointer those seams consume — the by-ref \
+             Datum substrate for XML value mapping is not yet landed",
+            typid
+        ),
+    }
+}
+
+/// `exprType(xexpr->args[i])` for an XMLELEMENT content argument. Recovered from
+/// the compiled named-arg-type list is not available for positional args, so we
+/// re-derive from the node via the nodeFuncs seam.
+fn expr_type_of_arg(
+    xexpr: &types_nodes::primnodes::XmlExpr,
+    i: usize,
+) -> PgResult<types_core::primitive::Oid> {
+    let e = &xexpr.args[i];
+    Ok(backend_nodes_nodeFuncs_seams::expr_type_info::call(e)?.typid)
+}
+
+/// Decode the `int` standalone argument of IS_XMLROOT (a `XmlStandaloneType`).
+fn xml_standalone_from_i32(v: i32) -> backend_utils_adt_xml::XmlStandaloneType {
+    use backend_utils_adt_xml::XmlStandaloneType as X;
+    match v {
+        0 => X::XML_STANDALONE_YES,
+        1 => X::XML_STANDALONE_NO,
+        2 => X::XML_STANDALONE_NO_VALUE,
+        _ => X::XML_STANDALONE_OMITTED,
+    }
 }
 
 /// `ExecEvalJsonConstructor` — JSON / JSONB object/array constructor. Still

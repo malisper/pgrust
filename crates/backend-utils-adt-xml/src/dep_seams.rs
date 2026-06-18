@@ -144,5 +144,30 @@ pub fn install() {
         Ok(backend_utils_mb_mbutils::pg_mblen(bytes))
     });
 
+    // C: `sqlchar_to_unicode(s)` (xml.c:2336, static) — the Unicode codepoint of
+    // the first server-encoding character of `s`: convert the leading char to
+    // UTF-8, then decode that UTF-8 to a single wide char (codepoint).
+    seam::sqlchar_to_unicode::set(|s: &[u8]| -> PgResult<u32> {
+        use types_wchar::encoding::PG_UTF8;
+        with_scratch(|mcx| {
+            // pg_server_to_any(s, pg_mblen_cstr(s), PG_UTF8)
+            let len = backend_utils_mb_mbutils::pg_mblen(s) as usize;
+            let leading = &s[..len.min(s.len())];
+            let utf8: Vec<u8> =
+                match backend_utils_mb_mbutils::pg_server_to_any(mcx, leading, PG_UTF8 as i32)? {
+                    Some(v) => v.as_slice().to_vec(),
+                    None => leading.to_vec(),
+                };
+            // pg_encoding_mb2wchar_with_len(PG_UTF8, utf8string,
+            //     ret, pg_encoding_mblen(PG_UTF8, utf8string)); return ret[0].
+            // `utf8` is exactly the one converted character, so its byte length
+            // is `pg_encoding_mblen(PG_UTF8, utf8string)`.
+            let ret = backend_utils_mb_mbutils::pg_encoding_mb2wchar_with_len(
+                mcx, PG_UTF8, &utf8, utf8.len() as i32,
+            )?;
+            Ok(ret.first().copied().unwrap_or(0) as u32)
+        })
+    });
+
     let _ = ERRCODE_UNDEFINED_OBJECT; // reserved for cache-miss SQLSTATE refinement
 }
