@@ -317,6 +317,7 @@ backend-parser-relation = { path = "../backend-parser-relation" }
 backend-parser-analyze = { path = "../backend-parser-analyze" }
 backend-parser-parse-utilcmd = { path = "../backend-parser-parse-utilcmd" }
 backend-parser-small1 = { path = "../backend-parser-small1" }
+backend-parser-driver = { path = "../backend-parser-driver" }
 backend-parser-gram-core = { path = "../backend-parser-gram-core" }
 backend-port-atomics = { path = "../backend-port-atomics" }
 backend-port-sysv-sema = { path = "../backend-port-sysv-sema" }

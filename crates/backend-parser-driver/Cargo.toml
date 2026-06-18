@@ -19,3 +19,4 @@ backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
 backend-parser-scan-seams = { path = "../backend-parser-scan-seams" }
 backend-parser-gram-seams = { path = "../backend-parser-gram-seams" }
 backend-parser-scansup-seams = { path = "../backend-parser-scansup-seams" }
+backend-parser-driver-seams = { path = "../backend-parser-driver-seams" }

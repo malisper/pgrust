@@ -27,16 +27,20 @@ seam_core::seam!(
     /// `SubscriptingRef`. Mutates the node in place in C; here it takes the
     /// partially-built `SubscriptingRef` by value and returns the filled one.
     ///
-    /// OUTWARD seam: the real owners are the per-type subscript handlers
-    /// (`array_subscript_handler` / `jsonb_subscript_handler`, utils/adt) reached
-    /// through the fmgr `OidFunctionCall0` result kept opaque by
-    /// `lsyscache::getSubscriptingRoutines`; none is ported, so this panics
-    /// (mirror-PG-and-panic) until a subscript-support owner lands.
+    /// The transform method's C body (`array_subscript_transform` in arraysubs.c,
+    /// `jsonb_subscript_transform` in jsonbsubs.c) transforms the raw subscript
+    /// expressions via `transformExpr` + `coerce_to_target_type`/`coerce_type`,
+    /// which are parser-layer entry points above the `utils/adt` handler files;
+    /// the install therefore lives in `backend-parser-parse-expr` (which owns
+    /// `transformExpr` and reaches the coerce seams) and dispatches on the
+    /// container type's `SubscriptHandler`. `pstate` is `&mut` because
+    /// `transformExpr` mutates it (`p_expr_kind`, `p_last_srf`), matching C's
+    /// `ParseState *`.
     pub fn subscripting_transform<'mcx>(
         mcx: Mcx<'mcx>,
         sbsref: SubscriptingRef,
         indirection: &[A_Indices<'mcx>],
-        pstate: &ParseState<'mcx>,
+        pstate: &mut ParseState<'mcx>,
         is_slice: bool,
         is_assignment: bool,
     ) -> PgResult<SubscriptingRef>

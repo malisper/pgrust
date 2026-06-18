@@ -2213,11 +2213,32 @@ fn figure_colname_seam<'mcx>(
     mcx::PgString::from_str_in(&name, mcx)
 }
 
+/// Seam adapter for `expand_record_variable` (declared in
+/// `backend-parser-relation-seams` because it is `::call`ed by
+/// `ParseComplexProjection` in parse_func.c, but the C body
+/// `expandRecordVariable` lives in parse_target.c, this crate). Adapts the
+/// owner's bare-`TupleDescData` return to the seam's `TupleDesc`
+/// (= `Option<PgBox<TupleDescData>>`) shape: the C function never returns NULL
+/// (`get_expr_result_tupdesc(..., false)` raises instead), so this always yields
+/// `Some`.
+fn expand_record_variable_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'mcx>,
+    var: &Var,
+    levelsup: i32,
+) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>> {
+    let td = expandRecordVariable(mcx, pstate, var, levelsup)?;
+    Ok(Some(mcx::alloc_in(mcx, td)?))
+}
+
 /// Install this crate's inward seams (owner of `backend-parser-target-seams`,
 /// which maps to `parse_target.c`).
 pub fn init_seams() {
     backend_parser_target_seams::transform_target_entry::set(transform_target_entry_seam);
     backend_parser_target_seams::FigureColname::set(figure_colname_seam);
+    // expandRecordVariable's C body lives here (parse_target.c); the seam is
+    // declared in relation-seams only because parse_func.c is its caller.
+    backend_parser_relation_seams::expand_record_variable::set(expand_record_variable_seam);
 }
 
 #[cfg(test)]

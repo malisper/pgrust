@@ -35,6 +35,9 @@ backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
 
 # Owner of the inward seams this crate installs.
 backend-parser-target-seams = { path = "../backend-parser-target-seams" }
+# expandRecordVariable's C body lives in parse_target.c (this crate); the seam
+# is declared in relation-seams because parse_func.c is its caller.
+backend-parser-relation-seams = { path = "../backend-parser-relation-seams" }
 
 # Outward dependency seams.
 backend-parser-parse-expr-seams = { path = "../backend-parser-parse-expr-seams" }

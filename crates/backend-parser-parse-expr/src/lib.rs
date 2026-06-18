@@ -60,8 +60,8 @@ use mcx::MemoryContext;
 use types_core::{InvalidOid, Oid, OidIsValid};
 use types_error::{
     PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_FEATURE_NOT_SUPPORTED,
-    ERRCODE_INDETERMINATE_DATATYPE, ERRCODE_INTERNAL_ERROR, ERRCODE_SYNTAX_ERROR,
-    ERRCODE_UNDEFINED_OBJECT, ERROR,
+    ERRCODE_INDETERMINATE_DATATYPE, ERRCODE_INTERNAL_ERROR, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+    ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
 use types_sortsupport::COMPARE_EQ;
 
@@ -81,8 +81,8 @@ fn cmptype_to_enum(c: i32) -> types_nodes::primnodes::CompareType {
     }
 }
 use types_tuple::heaptuple::{
-    BOOLOID, DATEOID, INT2VECTOROID, NAMEOID, OIDVECTOROID, RECORDOID, TEXTOID, TIMEOID,
-    TIMESTAMPOID, TIMESTAMPTZOID, TIMETZOID, UNKNOWNOID,
+    BOOLOID, DATEOID, INT2VECTOROID, INT4OID, JSONBOID, NAMEOID, OIDVECTOROID, RECORDOID, TEXTOID,
+    TIMEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMETZOID, UNKNOWNOID,
 };
 use types_tuple::heaptuple::MaxTupleAttributeNumber;
 
@@ -94,7 +94,7 @@ use types_nodes::primnodes::{
     ArrayExpr, BoolTestType, BooleanTest, CaseExpr, CaseTestExpr, CaseWhen, CoalesceExpr,
     CoercionForm, CollateExpr, CurrentOfExpr, Expr, MergeSupportFunc, MinMaxExpr, MinMaxOp,
     NullTest, NullTestType, OpExpr, RowCompareExpr, RowExpr, SQLValueFunction, SQLValueFunctionOp,
-    AND_EXPR, NOT_EXPR, OR_EXPR,
+    SubscriptingRef, AND_EXPR, NOT_EXPR, OR_EXPR,
 };
 use types_nodes::rawnodes::{
     A_Const, A_Expr, A_Expr_Kind, A_ArrayExpr, A_Indices, A_Indirection, ColumnRef, CollateClause,
@@ -103,7 +103,7 @@ use types_nodes::rawnodes::{
 use types_parsenodes::CoercionContext;
 
 use backend_utils_error::ereport;
-use backend_nodes_core::makefuncs::{make_bool_const, make_bool_expr, make_target_entry};
+use backend_nodes_core::makefuncs::{make_bool_const, make_bool_expr, make_const, make_target_entry};
 use backend_nodes_core::nodefuncs::{
     expr_collation, expr_location, expr_type, expr_typmod, expression_returns_set,
 };
@@ -3589,11 +3589,274 @@ fn parser_errposition_impl(source_text: &str, location: i32) -> PgResult<i32> {
 }
 
 /// Install this crate's inward seams (owner of `backend-parser-parse-expr-seams`).
+// ===========================================================================
+// subscripting_transform (array_subscript_transform / jsonb_subscript_transform)
+// ===========================================================================
+//
+// The transform method (`sbsroutines->transform`) is dispatched by
+// `transformContainerSubscripts` (parse_node.c, small1). Its C bodies live in
+// the `utils/adt` handler files (arraysubs.c `array_subscript_transform`,
+// jsonbsubs.c `jsonb_subscript_transform`), but they call `transformExpr` +
+// `coerce_to_target_type` / `coerce_type` / `can_coerce_type` — parser-layer
+// entry points above `utils/adt`. The install therefore lives here (this crate
+// owns `transformExpr` and reaches the coerce seams) and dispatches on the
+// container type's `SubscriptHandler`, re-derived from `refcontainertype`
+// exactly as `getSubscriptingRoutines` does for the executor side.
+
+/// `MAXDIM` (`utils/array.h`) — the maximum number of array dimensions.
+const MAXDIM: usize = 6;
+
+/// `array_subscript_transform(sbsref, indirection, pstate, isSlice, isAssignment)`
+/// (arraysubs.c): transform the subscript expressions, splitting upper/lower
+/// bounds, coercing each to int4, and computing the result type.
+fn array_subscript_transform<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    mut sbsref: SubscriptingRef,
+    indirection: &[A_Indices<'mcx>],
+    pstate: &mut ParseState<'mcx>,
+    is_slice: bool,
+) -> PgResult<SubscriptingRef> {
+    let mut upper_indexpr: Vec<Option<Expr>> = Vec::new();
+    let mut lower_indexpr: Vec<Option<Expr>> = Vec::new();
+
+    for ai in indirection.iter() {
+        if is_slice {
+            let subexpr: Option<Expr> = if let Some(lidx) = ai.lidx.as_deref() {
+                let se = transformExpr(pstate, Some(lidx.clone_in(mcx)?), pstate.p_expr_kind)?
+                    .expect("array_subscript_transform: lidx transformed to NULL");
+                let setype = expr_type(Some(&se))?;
+                match coerce::coerce_to_target_type::call(
+                    pstate,
+                    se,
+                    setype,
+                    INT4OID,
+                    -1,
+                    CoercionContext::COERCION_ASSIGNMENT,
+                    CoercionForm::COERCE_IMPLICIT_CAST,
+                    -1,
+                )? {
+                    Some(c) => Some(c),
+                    None => {
+                        return Err(ereport(ERROR)
+                            .errcode(ERRCODE_DATATYPE_MISMATCH)
+                            .errmsg("array subscript must have type integer")
+                            .errposition(parser_errposition(pstate, ai.lidx.as_deref().map(node_location).unwrap_or(-1)))
+                            .into_error());
+                    }
+                }
+            } else if !ai.is_slice {
+                // Make a constant 1.
+                Some(Expr::Const(make_const(
+                    mcx,
+                    INT4OID,
+                    -1,
+                    InvalidOid,
+                    4,
+                    types_tuple::Datum::from_i32(1),
+                    false,
+                    true,
+                )?))
+            } else {
+                // Slice with omitted lower bound: put NULL into the list.
+                None
+            };
+            lower_indexpr.push(subexpr);
+        } else {
+            debug_assert!(ai.lidx.is_none() && !ai.is_slice);
+        }
+
+        let subexpr: Option<Expr> = if let Some(uidx) = ai.uidx.as_deref() {
+            let se = transformExpr(pstate, Some(uidx.clone_in(mcx)?), pstate.p_expr_kind)?
+                .expect("array_subscript_transform: uidx transformed to NULL");
+            let setype = expr_type(Some(&se))?;
+            match coerce::coerce_to_target_type::call(
+                pstate,
+                se,
+                setype,
+                INT4OID,
+                -1,
+                CoercionContext::COERCION_ASSIGNMENT,
+                CoercionForm::COERCE_IMPLICIT_CAST,
+                -1,
+            )? {
+                Some(c) => Some(c),
+                None => {
+                    return Err(ereport(ERROR)
+                        .errcode(ERRCODE_DATATYPE_MISMATCH)
+                        .errmsg("array subscript must have type integer")
+                        .errposition(parser_errposition(pstate, ai.uidx.as_deref().map(node_location).unwrap_or(-1)))
+                        .into_error());
+                }
+            }
+        } else {
+            // Slice with omitted upper bound: put NULL into the list.
+            debug_assert!(is_slice && ai.is_slice);
+            None
+        };
+        upper_indexpr.push(subexpr);
+    }
+
+    // Verify subscript list lengths are within the implementation limit.
+    if upper_indexpr.len() > MAXDIM {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+            .errmsg(alloc::format!(
+                "number of array dimensions ({}) exceeds the maximum allowed ({})",
+                upper_indexpr.len(),
+                MAXDIM
+            ))
+            .into_error());
+    }
+
+    // Result type is the array type if slicing, else the element type. The
+    // typmod is unchanged in either case (reftypmod already set by the caller).
+    sbsref.refrestype = if is_slice {
+        sbsref.refcontainertype
+    } else {
+        sbsref.refelemtype
+    };
+
+    sbsref.refupperindexpr = upper_indexpr;
+    sbsref.reflowerindexpr = lower_indexpr;
+    Ok(sbsref)
+}
+
+/// `jsonb_subscript_transform(sbsref, indirection, pstate, isSlice, isAssignment)`
+/// (jsonbsubs.c): transform the subscript expressions, coercing each to int4 or
+/// text (exactly one must be reachable), with no slice support.
+fn jsonb_subscript_transform<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    mut sbsref: SubscriptingRef,
+    indirection: &[A_Indices<'mcx>],
+    pstate: &mut ParseState<'mcx>,
+    is_slice: bool,
+) -> PgResult<SubscriptingRef> {
+    let mut upper_indexpr: Vec<Option<Expr>> = Vec::new();
+
+    for ai in indirection.iter() {
+        if is_slice {
+            let loc = if ai.uidx.is_some() {
+                ai.uidx.as_deref().map(node_location).unwrap_or(-1)
+            } else {
+                ai.lidx.as_deref().map(node_location).unwrap_or(-1)
+            };
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_DATATYPE_MISMATCH)
+                .errmsg("jsonb subscript does not support slices")
+                .errposition(parser_errposition(pstate, loc))
+                .into_error());
+        }
+
+        if let Some(uidx) = ai.uidx.as_deref() {
+            let mut target_type = UNKNOWNOID;
+            let sub_expr = transformExpr(pstate, Some(uidx.clone_in(mcx)?), pstate.p_expr_kind)?
+                .expect("jsonb_subscript_transform: uidx transformed to NULL");
+            let sub_expr_type = expr_type(Some(&sub_expr))?;
+
+            if sub_expr_type != UNKNOWNOID {
+                let targets = [INT4OID, TEXTOID];
+                for t in targets.iter() {
+                    if coerce::can_coerce_type::call(
+                        1,
+                        &[sub_expr_type],
+                        &[*t],
+                        CoercionContext::COERCION_IMPLICIT,
+                    )? {
+                        // Two coercion targets possible => ambiguous, failure.
+                        if target_type != UNKNOWNOID {
+                            return Err(ereport(ERROR)
+                                .errcode(ERRCODE_DATATYPE_MISMATCH)
+                                .errmsg(alloc::format!(
+                                    "subscript type {} is not supported",
+                                    format_type_be(sub_expr_type)?
+                                ))
+                                .errhint(
+                                    "jsonb subscript must be coercible to only one type, integer or text.",
+                                )
+                                .errposition(parser_errposition(pstate, expr_location(Some(&sub_expr))?))
+                                .into_error());
+                        }
+                        target_type = *t;
+                    }
+                }
+                // No suitable types found, failure.
+                if target_type == UNKNOWNOID {
+                    return Err(ereport(ERROR)
+                        .errcode(ERRCODE_DATATYPE_MISMATCH)
+                        .errmsg(alloc::format!(
+                            "subscript type {} is not supported",
+                            format_type_be(sub_expr_type)?
+                        ))
+                        .errhint(
+                            "jsonb subscript must be coercible to either integer or text.",
+                        )
+                        .errposition(parser_errposition(pstate, expr_location(Some(&sub_expr))?))
+                        .into_error());
+                }
+            } else {
+                target_type = TEXTOID;
+            }
+
+            // can_coerce_type guarantees success; coerce_type performs the cast.
+            let coerced = coerce::coerce_type::call(
+                Some(pstate),
+                sub_expr,
+                sub_expr_type,
+                target_type,
+                -1,
+                CoercionContext::COERCION_IMPLICIT,
+                CoercionForm::COERCE_IMPLICIT_CAST,
+                -1,
+            )?;
+            upper_indexpr.push(Some(coerced));
+        } else {
+            // Slice with omitted upper bound: cannot happen (errored above).
+            debug_assert!(is_slice && ai.is_slice);
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_DATATYPE_MISMATCH)
+                .errmsg("jsonb subscript does not support slices")
+                .errposition(parser_errposition(pstate, ai.uidx.as_deref().map(node_location).unwrap_or(-1)))
+                .into_error());
+        }
+    }
+
+    sbsref.refupperindexpr = upper_indexpr;
+    sbsref.reflowerindexpr = Vec::new();
+    sbsref.refrestype = JSONBOID;
+    sbsref.reftypmod = -1;
+    Ok(sbsref)
+}
+
+/// Install of `subscripting_transform`: dispatch on the container type's
+/// `SubscriptHandler` (re-derived from `refcontainertype`) to the matching
+/// transform method body.
+fn subscripting_transform_impl<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    sbsref: SubscriptingRef,
+    indirection: &[A_Indices<'mcx>],
+    pstate: &mut ParseState<'mcx>,
+    is_slice: bool,
+    _is_assignment: bool,
+) -> PgResult<SubscriptingRef> {
+    use types_nodes::execexpr::SubscriptHandler;
+    let routines = lsyscache::get_subscripting_routines::call(sbsref.refcontainertype)?
+        .expect("subscripting_transform: refcontainertype is not subscriptable");
+    match routines.0.handler {
+        SubscriptHandler::Array | SubscriptHandler::RawArray => {
+            array_subscript_transform(mcx, sbsref, indirection, pstate, is_slice)
+        }
+        SubscriptHandler::Jsonb => {
+            jsonb_subscript_transform(mcx, sbsref, indirection, pstate, is_slice)
+        }
+    }
+}
+
 pub fn init_seams() {
     me::analyze_one_exec_param::set(analyze_one_exec_param_impl);
     me::parser_errposition::set(parser_errposition_impl);
     me::parse_expr_kind_name::set(ParseExprKindName);
     me::transformExpr::set(transformExpr);
+    backend_parser_small1_seams::subscripting_transform::set(subscripting_transform_impl);
 
     // Install the GUC engine's variable accessors for `transform_null_equals`
     // (guc_tables.c points its `&Transform_null_equals` slot at the C global

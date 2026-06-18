@@ -317,6 +317,7 @@ pub fn init_all() {
     backend_parser_analyze::init_seams();
     backend_parser_parse_utilcmd::init_seams();
     backend_parser_small1::init_seams();
+    backend_parser_driver::init_seams();
     backend_parser_gram_core::init_seams();
     backend_port_atomics::init_seams();
     backend_port_sysv_sema::init_seams();
@@ -1508,17 +1509,13 @@ mod recurrence_guard {
         // stmt_requires_parse_analysis_value / analyze_requires_snapshot_value /
         // query_requires_rewrite_plan_value / pg_analyze_and_rewrite_fixedparams_params,
         // reads Query fields directly, and walks sublinks via node_walker.)
-        // DESIGN_DEBT (TD-PARSETYPE-TYPENAME-CARRIER, narrowed): parse_type.c's
-        // `typeStringToTypeName` drives `raw_parser(str, RAW_PARSE_TYPE_NAME)` and
-        // extracts the single `TypeName` node. The grammar IS now ported
-        // (backend-parser-gram merged; `base_yyparse` real + installed, handles
-        // MODE_TYPE_NAME) — the original "gram.y unported" blocker is gone. What
-        // remains is a TypeName carrier divergence: the seam returns an owned
-        // `types_parsenodes::TypeName` (no lifetime) while the grammar produces an
-        // arena `types_nodes::rawnodes::TypeName<'mcx>` (PgVec<'mcx, NodePtr>).
-        // Installing needs an arena->owned TypeName bridge (a contract reconcile),
-        // not a bare `::set`. See DESIGN_DEBT.md.
-        ("backend_parser_driver", "raw_parse_type_name"),
+        // (TD-PARSETYPE-TYPENAME-CARRIER RETIRED: backend-parser-driver now
+        // installs `raw_parse_type_name` from its init_seams(). It drives
+        // `raw_parser(str, RAW_PARSE_TYPE_NAME)` in a private MemoryContext,
+        // pulls the single `TypeName` node out of the RawStmt wrapper, and
+        // bridges the arena `types_nodes::rawnodes::TypeName<'mcx>` into the owned
+        // `types_parsenodes::TypeName` (the arena->owned reconcile mirrors
+        // parse_type.c's `raw_typename_to_parse`) before the context drops.)
         // (TD-TUPLESORT-INDEX-VARIANTS retired by F3b: the tuplesort unit now
         // installs tuplesort_begin_index_btree/hash/gist + putindextuplevalues +
         // getindextuple from its init_seams(), with real comparetup_index_* /

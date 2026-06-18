@@ -33,6 +33,8 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+extern crate alloc;
+
 use mcx::{Mcx, PgVec};
 use types_core::PgWChar;
 use types_error::PgResult;
@@ -412,14 +414,141 @@ pub fn mode_seed(mcx: Mcx<'_>, mode: RawParseMode) -> Option<CoreToken<'_>> {
 // Seam installation.
 // ===========================================================================
 
-/// Install this crate's owned inward seams. The driver owns no inward seam
-/// crate of its own (it declares no `*-driver-seams`): `base_yylex`/
-/// `str_udeescape`/`raw_parser` are called by the (unported) scanner/grammar
-/// owners across direct dependencies once those land, not across a cycle into
-/// this crate. So there is nothing to install here; this is provided for
-/// symmetry with the seams-init wiring and is verified empty by the
-/// `recurrence_guard`.
-pub fn init_seams() {}
+/// `raw_parser(str, RAW_PARSE_TYPE_NAME)` + `linitial_node(TypeName, ...)`
+/// (parse_type.c `typeStringToTypeName`'s inner drive): parse a type-name string
+/// and return the single `TypeName` node it produces.
+///
+/// The seam contract is `String -> PgResult<types_parsenodes::TypeName>` (owned,
+/// no arena lifetime). The grammar drive needs an arena, so a private
+/// `MemoryContext` is created for the parse; the decoded arena
+/// `types_nodes::rawnodes::TypeName<'mcx>` is bridged into the owned
+/// `types_parsenodes::TypeName` before the context drops (the owned node carries
+/// no `'mcx`, so it outlives the arena soundly). A grammar/syntax error is
+/// raised inside `raw_parser` (with the parser's error position) and propagates
+/// on `Err`; this never returns on a malformed string.
+fn raw_parse_type_name(
+    str_: alloc::string::String,
+) -> PgResult<types_parsenodes::TypeName> {
+    let ctx = mcx::MemoryContext::new("raw_parse_type_name");
+    let mcx = ctx.mcx();
+
+    // C: `raw_parser(str, RAW_PARSE_TYPE_NAME)`.
+    let list = raw_parser(mcx, str_.as_str(), RawParseMode::RAW_PARSE_TYPE_NAME)?;
+
+    // C: `Assert(list_length(raw_parsetree_list) == 1)` then
+    // `linitial_node(TypeName, raw_parsetree_list)`. The grammar wraps the sole
+    // `TypeName` in a `RawStmt`; pull it back out.
+    let first = list
+        .first()
+        .expect("raw_parse_type_name: empty parse-tree list");
+    let tn = match &*first.stmt {
+        types_nodes::nodes::Node::TypeName(tn) => tn,
+        other => panic!(
+            "raw_parse_type_name: expected TypeName node, got tag {}",
+            other.node_tag().0
+        ),
+    };
+
+    raw_typename_to_parse(tn)
+}
+
+/// Bridge the arena raw-grammar `types_nodes::rawnodes::TypeName<'mcx>` into the
+/// owned resolver-facing `types_parsenodes::TypeName`. Mirrors parse_type.c's
+/// `raw_typename_to_parse`: the qualified `names` are `String` nodes; `typmods`
+/// carry the simple `A_Const`/identifier values through (else `A_Star`, so the
+/// resolver raises the C "must be simple constants or identifiers" error);
+/// `arrayBounds` carry the integer bounds through.
+fn raw_typename_to_parse(
+    tn: &types_nodes::rawnodes::TypeName<'_>,
+) -> PgResult<types_parsenodes::TypeName> {
+    use alloc::string::ToString;
+    use types_nodes::nodes::Node as RawNode;
+
+    let mut names: alloc::vec::Vec<types_parsenodes::Node> =
+        alloc::vec::Vec::with_capacity(tn.names.len());
+    for n in tn.names.iter() {
+        match &**n {
+            RawNode::String(s) => names.push(types_parsenodes::Node::String(
+                types_parsenodes::StringNode { sval: Some(s.sval.as_str().to_string()) },
+            )),
+            other => {
+                return Err(types_error::PgError::error(alloc::format!(
+                    "raw_parse_type_name: TypeName.names element is not a String node (tag {})",
+                    other.node_tag().0
+                )));
+            }
+        }
+    }
+
+    let mut typmods: alloc::vec::Vec<types_parsenodes::Node> =
+        alloc::vec::Vec::with_capacity(tn.typmods.len());
+    for tm in tn.typmods.iter() {
+        let bridged: types_parsenodes::Node = match &**tm {
+            RawNode::A_Const(ac) => match ac.val.as_deref() {
+                Some(RawNode::Integer(i)) => {
+                    types_parsenodes::Node::Integer(types_parsenodes::Integer { ival: i.ival })
+                }
+                Some(RawNode::Float(f)) => types_parsenodes::Node::Float(types_parsenodes::Float {
+                    fval: Some(f.fval.as_str().to_string()),
+                }),
+                Some(RawNode::String(s)) => types_parsenodes::Node::String(
+                    types_parsenodes::StringNode { sval: Some(s.sval.as_str().to_string()) },
+                ),
+                Some(RawNode::Boolean(b)) => {
+                    types_parsenodes::Node::Boolean(types_parsenodes::Boolean { boolval: b.boolval })
+                }
+                Some(RawNode::BitString(b)) => types_parsenodes::Node::BitString(
+                    types_parsenodes::BitString { bsval: Some(b.bsval.as_str().to_string()) },
+                ),
+                _ => types_parsenodes::Node::A_Star,
+            },
+            RawNode::ColumnRef(cr) => {
+                if cr.fields.len() == 1 {
+                    if let RawNode::String(s) = &*cr.fields[0] {
+                        types_parsenodes::Node::String(types_parsenodes::StringNode {
+                            sval: Some(s.sval.as_str().to_string()),
+                        })
+                    } else {
+                        types_parsenodes::Node::A_Star
+                    }
+                } else {
+                    types_parsenodes::Node::A_Star
+                }
+            }
+            _ => types_parsenodes::Node::A_Star,
+        };
+        typmods.push(bridged);
+    }
+
+    let mut array_bounds: alloc::vec::Vec<types_parsenodes::Node> =
+        alloc::vec::Vec::with_capacity(tn.arrayBounds.len());
+    for n in tn.arrayBounds.iter() {
+        match &**n {
+            RawNode::Integer(i) => array_bounds
+                .push(types_parsenodes::Node::Integer(types_parsenodes::Integer { ival: i.ival })),
+            _ => array_bounds
+                .push(types_parsenodes::Node::Integer(types_parsenodes::Integer { ival: -1 })),
+        }
+    }
+
+    Ok(types_parsenodes::TypeName {
+        names,
+        typeOid: tn.typeOid,
+        setof: tn.setof,
+        pct_type: tn.pct_type,
+        typmods,
+        typemod: tn.typemod,
+        arrayBounds: array_bounds,
+        location: tn.location,
+    })
+}
+
+/// Install this crate's owned inward seams. `raw_parse_type_name` (the
+/// `parse_type.c` inner drive) is installed here: the driver owns `raw_parser`
+/// and bridges its arena `TypeName` into the owned carrier the resolver reads.
+pub fn init_seams() {
+    backend_parser_driver_seams::raw_parse_type_name::set(raw_parse_type_name);
+}
 
 /// Error helper for the `base_yylex` UESCAPE checks (parser.c:273/278): a
 /// syntax error whose cursor is the already-converted 1-based character cursor.

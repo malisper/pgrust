@@ -3272,7 +3272,66 @@ fn clone_nsitem<'mcx>(
 // Seam installation.
 // ===========================================================================
 
+/// `GetNSItemByRangeTablePosn(pstate, varno, sublevels_up)` followed by
+/// `scanNSItemForColumn(pstate, nsitem, sublevels_up, colname, location)`
+/// (parse_relation.c), as used by `ParseComplexProjection` (parse_func.c) for
+/// the whole-row-Var fast path `(foo.*).bar`. The seam crosses the resolved
+/// `ParseNamespaceItem *` by its `(varno, sublevels_up)` identity (exactly the
+/// key `GetNSItemByRangeTablePosn` looks up); the owner re-resolves the nsitem
+/// at depth `sublevels_up` and performs the column scan. `Ok(None)` is the C
+/// `NULL` (column name does not match).
+fn scan_ns_item_for_column_by_posn<'mcx>(
+    pstate: &mut ParseState<'mcx>,
+    varno: i32,
+    sublevels_up: i32,
+    colname: &str,
+    location: i32,
+) -> PgResult<Option<types_nodes::primnodes::Expr>> {
+    // Recover the ambient query Mcx from an existing mcx-allocated pstate field
+    // (p_rtable's allocator is the query context), as parse_func.c's pstate_mcx.
+    let mcx = *pstate.p_rtable.allocator();
+    let depth = sublevels_up as usize;
+
+    // GetNSItemByRangeTablePosn: at the given nesting depth, find the nsitem
+    // whose p_rtindex matches varno (there must be one).
+    let ns_idx = {
+        let ps = pstate_at_depth(pstate, depth);
+        ps.p_namespace
+            .iter()
+            .position(|nsitem| nsitem.p_rtindex == varno)
+            .ok_or_else(|| {
+                ereport(ERROR)
+                    .errmsg_internal(format!("nsitem not found (internal error)"))
+                    .into_error()
+            })?
+    };
+
+    // scanNSItemForColumn against the resolved nsitem at that depth.
+    let node = scan_nsitem_for_column_at_depth(
+        mcx,
+        pstate,
+        depth,
+        ns_idx,
+        sublevels_up,
+        colname,
+        location,
+    )?;
+
+    // The C returns a Node* that is a Var; unwrap to the Expr the caller wants.
+    Ok(match node {
+        Some(Node::Expr(expr)) => Some(expr),
+        Some(other) => panic!(
+            "scan_ns_item_for_column_by_posn: scanNSItemForColumn returned non-Expr node (tag {})",
+            other.node_tag().0
+        ),
+        None => None,
+    })
+}
+
 /// Install this unit's inward seams.
 pub fn init_seams() {
     backend_parser_relation_seams::get_rte_permission_info::set(getRTEPermissionInfo);
+    backend_parser_relation_seams::scan_ns_item_for_column_by_posn::set(
+        scan_ns_item_for_column_by_posn,
+    );
 }

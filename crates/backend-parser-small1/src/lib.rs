@@ -389,7 +389,7 @@ pub fn transformContainerType(
 /// container (array, etc) subscripting into a `SubscriptingRef`.
 pub fn transformContainerSubscripts<'mcx>(
     mcx: Mcx<'mcx>,
-    pstate: &ParseState<'mcx>,
+    pstate: &mut ParseState<'mcx>,
     container_base: Expr,
     mut container_type: Oid,
     mut container_typmod: i32,

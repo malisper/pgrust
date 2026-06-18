@@ -12721,6 +12721,7 @@ dependencies = [
 name = "backend-parser-driver"
 version = "0.0.0"
 dependencies = [
+ "backend-parser-driver-seams",
  "backend-parser-gram-seams",
  "backend-parser-scan-seams",
  "backend-parser-scansup-seams",
@@ -12950,6 +12951,7 @@ dependencies = [
  "backend-parser-parse-expr-seams",
  "backend-parser-parse-type",
  "backend-parser-relation",
+ "backend-parser-relation-seams",
  "backend-parser-small1",
  "backend-parser-small1-seams",
  "backend-parser-target-seams",
@@ -22468,6 +22470,7 @@ dependencies = [
  "backend-parser-analyze",
  "backend-parser-clause",
  "backend-parser-coerce",
+ "backend-parser-driver",
  "backend-parser-func",
  "backend-parser-gram-core",
  "backend-parser-parse-expr",
