@@ -13,7 +13,7 @@ use types_core::{InvalidOid, Oid};
 use types_error::{PgError, PgResult};
 use types_nodes::bitmapset::Bitmapset;
 use types_nodes::primnodes::{
-    BoolExprType, BoolTestType, Expr, NullTestType, OpExpr, ParamKind, ScalarArrayOpExpr,
+    etag, BoolExprType, BoolTestType, Expr, NullTestType, OpExpr, ParamKind, ScalarArrayOpExpr,
     SubLinkType,
 };
 
@@ -646,11 +646,12 @@ fn contain_nonstrict_functions_checker(func_id: Oid) -> PgResult<bool> {
 fn contain_nonstrict_functions_walker(node: Option<&Expr>) -> PgResult<bool> {
     let Some(node) = node else { return Ok(false) };
 
-    match node {
-        Expr::Aggref(_) => return Ok(true),
-        Expr::GroupingFunc(_) => return Ok(true),
-        Expr::WindowFunc(_) => return Ok(true),
-        Expr::SubscriptingRef(sbsref) => {
+    match node.expr_tag() {
+        etag::T_Aggref => return Ok(true),
+        etag::T_GroupingFunc => return Ok(true),
+        etag::T_WindowFunc => return Ok(true),
+        etag::T_SubscriptingRef => {
+            let sbsref = node.as_subscriptingref().unwrap();
             // Subscripting assignment is always presumed nonstrict.
             if sbsref.refassgnexpr.is_some() {
                 return Ok(true);
@@ -660,29 +661,36 @@ fn contain_nonstrict_functions_walker(node: Option<&Expr>) -> PgResult<bool> {
                 _ => return Ok(true),
             }
         }
-        Expr::DistinctExpr(_) => return Ok(true),
-        Expr::NullIfExpr(_) => return Ok(true),
-        Expr::BoolExpr(expr) => {
+        etag::T_DistinctExpr => return Ok(true),
+        etag::T_NullIfExpr => return Ok(true),
+        etag::T_BoolExpr => {
+            let expr = node.as_boolexpr().unwrap();
             if expr.boolop == BoolExprType::AND_EXPR || expr.boolop == BoolExprType::OR_EXPR {
                 return Ok(true);
             }
         }
-        Expr::SubLink(_) => return Ok(true),
-        Expr::SubPlan(_) => return Ok(true),
-        Expr::AlternativeSubPlan(_) => return Ok(true),
-        Expr::FieldStore(_) => return Ok(true),
-        Expr::CoerceViaIO(c) => return contain_nonstrict_functions_walker(c.arg.as_deref()),
-        Expr::ArrayCoerceExpr(c) => return contain_nonstrict_functions_walker(c.arg.as_deref()),
-        Expr::CaseExpr(_) => return Ok(true),
-        Expr::ArrayExpr(_) => return Ok(true),
-        Expr::RowExpr(_) => return Ok(true),
-        Expr::RowCompareExpr(_) => return Ok(true),
-        Expr::CoalesceExpr(_) => return Ok(true),
-        Expr::MinMaxExpr(_) => return Ok(true),
-        Expr::XmlExpr(_) => return Ok(true),
-        Expr::NullTest(_) => return Ok(true),
-        Expr::BooleanTest(_) => return Ok(true),
-        Expr::JsonConstructorExpr(_) => return Ok(true),
+        etag::T_SubLink => return Ok(true),
+        etag::T_SubPlan => return Ok(true),
+        etag::T_AlternativeSubPlan => return Ok(true),
+        etag::T_FieldStore => return Ok(true),
+        etag::T_CoerceViaIO => {
+            let c = node.as_coerceviaio().unwrap();
+            return contain_nonstrict_functions_walker(c.arg.as_deref());
+        }
+        etag::T_ArrayCoerceExpr => {
+            let c = node.as_arraycoerceexpr().unwrap();
+            return contain_nonstrict_functions_walker(c.arg.as_deref());
+        }
+        etag::T_CaseExpr => return Ok(true),
+        etag::T_ArrayExpr => return Ok(true),
+        etag::T_RowExpr => return Ok(true),
+        etag::T_RowCompareExpr => return Ok(true),
+        etag::T_CoalesceExpr => return Ok(true),
+        etag::T_MinMaxExpr => return Ok(true),
+        etag::T_XmlExpr => return Ok(true),
+        etag::T_NullTest => return Ok(true),
+        etag::T_BooleanTest => return Ok(true),
+        etag::T_JsonConstructorExpr => return Ok(true),
         _ => {}
     }
 
@@ -783,35 +791,35 @@ fn contain_leaked_vars_checker(func_id: Oid) -> PgResult<bool> {
 fn contain_leaked_vars_walker(node: Option<&Expr>) -> PgResult<bool> {
     let Some(node) = node else { return Ok(false) };
 
-    match node {
+    match node.expr_tag() {
         // These node types don't contain function calls directly; but something
         // further down might (fall through to recurse).
-        Expr::Var(_)
-        | Expr::Const(_)
-        | Expr::Param(_)
-        | Expr::ArrayExpr(_)
-        | Expr::FieldSelect(_)
-        | Expr::FieldStore(_)
-        | Expr::NamedArgExpr(_)
-        | Expr::BoolExpr(_)
-        | Expr::RelabelType(_)
-        | Expr::CollateExpr(_)
-        | Expr::CaseExpr(_)
-        | Expr::CaseTestExpr(_)
-        | Expr::RowExpr(_)
-        | Expr::SQLValueFunction(_)
-        | Expr::NullTest(_)
-        | Expr::BooleanTest(_)
-        | Expr::NextValueExpr(_)
-        | Expr::ReturningExpr(_) => {}
+        etag::T_Var
+        | etag::T_Const
+        | etag::T_Param
+        | etag::T_ArrayExpr
+        | etag::T_FieldSelect
+        | etag::T_FieldStore
+        | etag::T_NamedArgExpr
+        | etag::T_BoolExpr
+        | etag::T_RelabelType
+        | etag::T_CollateExpr
+        | etag::T_CaseExpr
+        | etag::T_CaseTestExpr
+        | etag::T_RowExpr
+        | etag::T_SQLValueFunction
+        | etag::T_NullTest
+        | etag::T_BooleanTest
+        | etag::T_NextValueExpr
+        | etag::T_ReturningExpr => {}
 
-        Expr::FuncExpr(_)
-        | Expr::OpExpr(_)
-        | Expr::DistinctExpr(_)
-        | Expr::NullIfExpr(_)
-        | Expr::ScalarArrayOpExpr(_)
-        | Expr::CoerceViaIO(_)
-        | Expr::ArrayCoerceExpr(_) => {
+        etag::T_FuncExpr
+        | etag::T_OpExpr
+        | etag::T_DistinctExpr
+        | etag::T_NullIfExpr
+        | etag::T_ScalarArrayOpExpr
+        | etag::T_CoerceViaIO
+        | etag::T_ArrayCoerceExpr => {
             let mut checker_err: Option<PgError> = None;
             let found = check_functions_in_node_const(node, &mut |id| {
                 match contain_leaked_vars_checker(id) {
@@ -830,7 +838,8 @@ fn contain_leaked_vars_walker(node: Option<&Expr>) -> PgResult<bool> {
             }
         }
 
-        Expr::SubscriptingRef(sbsref) => {
+        etag::T_SubscriptingRef => {
+            let sbsref = node.as_subscriptingref().unwrap();
             let leakproof =
                 match clauses_seam::subscripting_leakproof::call(sbsref.refcontainertype)? {
                     Some((fetch_leakproof, store_leakproof)) => {
@@ -847,7 +856,8 @@ fn contain_leaked_vars_walker(node: Option<&Expr>) -> PgResult<bool> {
             }
         }
 
-        Expr::RowCompareExpr(rcexpr) => {
+        etag::T_RowCompareExpr => {
+            let rcexpr = node.as_rowcompareexpr().unwrap();
             // forthree(opid in opnos, larg in largs, rarg in rargs)
             let n = rcexpr
                 .opnos
@@ -865,7 +875,8 @@ fn contain_leaked_vars_walker(node: Option<&Expr>) -> PgResult<bool> {
             }
         }
 
-        Expr::MinMaxExpr(minmaxexpr) => {
+        etag::T_MinMaxExpr => {
+            let minmaxexpr = node.as_minmaxexpr().unwrap();
             // MinMaxExpr is leakproof if the comparison function it calls is.
             let cmp_proc = clauses_seam::type_cmp_proc::call(minmaxexpr.minmaxtype)?;
             let leakproof = if cmp_proc != InvalidOid {
@@ -882,7 +893,7 @@ fn contain_leaked_vars_walker(node: Option<&Expr>) -> PgResult<bool> {
             }
         }
 
-        Expr::CurrentOfExpr(_) => {
+        etag::T_CurrentOfExpr => {
             // WHERE CURRENT OF doesn't contain leaky function calls.
             return Ok(false);
         }

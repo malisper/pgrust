@@ -33,7 +33,7 @@ use mcx::Mcx;
 use types_core::{InvalidOid, Oid};
 use types_error::{PgError, PgResult};
 use types_nodes::primnodes::{
-    ArrayExpr, BoolExprType, CaseWhen, CoercionForm, Const, Expr, NullTest, NullTestType,
+    etag, ArrayExpr, BoolExprType, CaseWhen, CoercionForm, Const, Expr, NullTest, NullTestType,
     ScalarArrayOpExpr,
 };
 
@@ -227,24 +227,24 @@ fn mutate(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
 }
 
 fn mutate_inner(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
-    match &node {
+    match node.expr_tag() {
         // T_Param (clauses.c:2447): with no bound ParamListInfo there is never
         // a value to substitute; C copies the Param. We own the node, return it.
-        Expr::Param(_) => Ok(node),
+        etag::T_Param => Ok(node),
 
-        Expr::WindowFunc(_) => arm_windowfunc(node, ctx),
-        Expr::FuncExpr(_) => arm_funcexpr(node, ctx),
-        Expr::OpExpr(_) => arm_opexpr(node, ctx),
-        Expr::DistinctExpr(_) => arm_distinctexpr(node, ctx),
-        Expr::NullIfExpr(_) => arm_nullifexpr(node, ctx),
-        Expr::ScalarArrayOpExpr(_) => arm_saop(node, ctx),
-        Expr::BoolExpr(_) => arm_boolexpr(node, ctx),
-        Expr::JsonValueExpr(_) => arm_jsonvalueexpr(node, ctx),
+        etag::T_WindowFunc => arm_windowfunc(node, ctx),
+        etag::T_FuncExpr => arm_funcexpr(node, ctx),
+        etag::T_OpExpr => arm_opexpr(node, ctx),
+        etag::T_DistinctExpr => arm_distinctexpr(node, ctx),
+        etag::T_NullIfExpr => arm_nullifexpr(node, ctx),
+        etag::T_ScalarArrayOpExpr => arm_saop(node, ctx),
+        etag::T_BoolExpr => arm_boolexpr(node, ctx),
+        etag::T_JsonValueExpr => arm_jsonvalueexpr(node, ctx),
 
         // Return a SubPlan unchanged --- too late to do anything with it.
-        Expr::SubPlan(_) | Expr::AlternativeSubPlan(_) => Ok(node),
+        etag::T_SubPlan | etag::T_AlternativeSubPlan => Ok(node),
 
-        Expr::RelabelType(_) => {
+        etag::T_RelabelType => {
             let r = node.expect_into_relabeltype();
             let arg = mutate(req(r.arg, "RelabelType.arg")?, ctx)?;
             apply_relabel_type(
@@ -256,9 +256,9 @@ fn mutate_inner(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
                 true,
             )
         }
-        Expr::CoerceViaIO(_) => arm_coerceviaio(node, ctx),
-        Expr::ArrayCoerceExpr(_) => arm_arraycoerce(node, ctx),
-        Expr::CollateExpr(_) => {
+        etag::T_CoerceViaIO => arm_coerceviaio(node, ctx),
+        etag::T_ArrayCoerceExpr => arm_arraycoerce(node, ctx),
+        etag::T_CollateExpr => {
             // We replace CollateExpr with RelabelType.
             let c = node.expect_into_collateexpr();
             let arg = mutate(req(c.arg, "CollateExpr.arg")?, ctx)?;
@@ -273,8 +273,8 @@ fn mutate_inner(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
                 true,
             )
         }
-        Expr::CaseExpr(_) => arm_case(node, ctx),
-        Expr::CaseTestExpr(_) => {
+        etag::T_CaseExpr => arm_case(node, ctx),
+        etag::T_CaseTestExpr => {
             // If we know a constant test value for the current CASE construct,
             // substitute it for the placeholder.
             match &ctx.case_val {
@@ -284,15 +284,15 @@ fn mutate_inner(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
         }
         // Generic handling for node types whose own processing is immutable and
         // which need only "simplify if all inputs are constants".
-        Expr::SubscriptingRef(_) | Expr::ArrayExpr(_) | Expr::RowExpr(_) | Expr::MinMaxExpr(_) => {
+        etag::T_SubscriptingRef | etag::T_ArrayExpr | etag::T_RowExpr | etag::T_MinMaxExpr => {
             let node = ece_generic_processing(node, ctx)?;
             if ece_all_arguments_const(&node) {
                 return ece_evaluate_expr(node, ctx);
             }
             Ok(node)
         }
-        Expr::CoalesceExpr(_) => arm_coalesce(node, ctx),
-        Expr::SQLValueFunction(_) => {
+        etag::T_CoalesceExpr => arm_coalesce(node, ctx),
+        etag::T_SQLValueFunction => {
             // All variants of SQLValueFunction are stable: fold in estimate mode.
             if ctx.estimate {
                 let (t, tm) = {
@@ -304,11 +304,11 @@ fn mutate_inner(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
                 Ok(node)
             }
         }
-        Expr::FieldSelect(_) => arm_fieldselect(node, ctx),
-        Expr::NullTest(_) => arm_nulltest(node, ctx),
-        Expr::BooleanTest(_) => arm_booleantest(node, ctx),
-        Expr::CoerceToDomain(_) => arm_coercetodomain(node, ctx),
-        Expr::PlaceHolderVar(_) if ctx.estimate => {
+        etag::T_FieldSelect => arm_fieldselect(node, ctx),
+        etag::T_NullTest => arm_nulltest(node, ctx),
+        etag::T_BooleanTest => arm_booleantest(node, ctx),
+        etag::T_CoerceToDomain => arm_coercetodomain(node, ctx),
+        etag::T_PlaceHolderVar if ctx.estimate => {
             // In estimation mode, strip the PlaceHolderVar node altogether.
             let phv = node.expect_into_placeholdervar();
             let phexpr = phv.phexpr.map(|b| *b).ok_or_else(|| {
@@ -316,7 +316,7 @@ fn mutate_inner(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
             })?;
             mutate(phexpr, ctx)
         }
-        Expr::ConvertRowtypeExpr(_) => arm_convertrowtype(node, ctx),
+        etag::T_ConvertRowtypeExpr => arm_convertrowtype(node, ctx),
         // For any node type not handled above, copy the node unchanged but
         // const-simplify its subexpressions.
         _ => ece_generic_processing(node, ctx),
@@ -1438,9 +1438,9 @@ pub fn evaluate_expr<'mcx>(
     // Make sure any opfuncids are filled in.
     fix_opfuncids(&mut expr)?;
 
-    match &expr {
-        Expr::Const(_) => Ok(expr),
-        Expr::FuncExpr(_) => {
+    match expr.expr_tag() {
+        etag::T_Const => Ok(expr),
+        etag::T_FuncExpr => {
             let call = {
                 let f = expr.as_funcexpr().expect("FuncExpr");
                 const_datum_args(&f.args).map(|pairs| (f.funcid, f.inputcollid, pairs))
@@ -1464,7 +1464,7 @@ pub fn evaluate_expr<'mcx>(
                 ),
             }
         }
-        Expr::OpExpr(_) => {
+        etag::T_OpExpr => {
             let call = {
                 let o = expr.as_opexpr().expect("OpExpr");
                 const_datum_args(&o.args).map(|pairs| (o.opfuncid, o.inputcollid, pairs))
@@ -1488,7 +1488,7 @@ pub fn evaluate_expr<'mcx>(
                 ),
             }
         }
-        Expr::NullIfExpr(_) => {
+        etag::T_NullIfExpr => {
             // NULLIF(a, b): evaluate `a = b`; if true the result is NULL, else
             // a. (The mutator only sends two non-NULL Const args here.)
             let call = {
