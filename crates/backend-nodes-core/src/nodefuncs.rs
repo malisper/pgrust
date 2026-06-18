@@ -977,6 +977,52 @@ where
     Ok(found)
 }
 
+/// Read-only variant of [`check_functions_in_node`] over a `&Expr`.
+///
+/// The C `check_functions_in_node` takes a mutable `Node*` only so the
+/// `OpExpr`/`ScalarArrayOpExpr` arms can `set_opfuncid` (lazily fill `opfuncid`
+/// from `opno`) in place. Read-only callers (e.g. `contain_volatile_functions`,
+/// which the C invokes on the live tree) do not need that node mutated: the
+/// `opfuncid` derived from `opno` is the same OID either way. So this variant
+/// resolves it by lookup (`get_opcode` when `opfuncid == InvalidOid`) without
+/// touching the node, avoiding a deep node clone (which would panic on an
+/// `Aggref`, whose args are a context-allocated `TargetEntry` list).
+pub fn check_functions_in_node_ref<F>(node: &Expr, checker: &mut F) -> PgResult<bool>
+where
+    F: FnMut(Oid) -> bool,
+{
+    // set_opfuncid(o) lazily fills opfuncid from opno; read it without mutating.
+    fn opfuncid_of(opfuncid: Oid, opno: Oid) -> PgResult<Oid> {
+        if opfuncid == InvalidOid {
+            lsyscache::get_opcode::call(opno)
+        } else {
+            Ok(opfuncid)
+        }
+    }
+    let found = match node {
+        Expr::Aggref(a) => checker(a.aggfnoid),
+        Expr::WindowFunc(w) => checker(w.winfnoid),
+        Expr::FuncExpr(f) => checker(f.funcid),
+        Expr::OpExpr(o) | Expr::DistinctExpr(o) | Expr::NullIfExpr(o) => {
+            checker(opfuncid_of(o.opfuncid, o.opno)?)
+        }
+        Expr::ScalarArrayOpExpr(s) => checker(opfuncid_of(s.opfuncid, s.opno)?),
+        Expr::RowCompareExpr(rc) => {
+            let mut hit = false;
+            for &opno in &rc.opnos {
+                let opfuncid = lsyscache::get_opcode::call(opno)?;
+                if checker(opfuncid) {
+                    hit = true;
+                    break;
+                }
+            }
+            hit
+        }
+        _ => false,
+    };
+    Ok(found)
+}
+
 // ===========================================================================
 // expression_tree_walker (nodeFuncs.c:2088)
 // ===========================================================================

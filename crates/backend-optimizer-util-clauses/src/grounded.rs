@@ -22,8 +22,8 @@ use backend_nodes_core::bitmapset::BMS_Membership;
 use backend_nodes_core::multibitmapset as mbms;
 use backend_nodes_core::multibitmapset::MultiBitmapset;
 use backend_nodes_core::nodefuncs::{
-    check_functions_in_node, expression_tree_walker, expression_tree_walker as etw, set_opfuncid,
-    set_sa_opfuncid,
+    check_functions_in_node_ref, expression_tree_walker, expression_tree_walker as etw,
+    set_opfuncid, set_sa_opfuncid,
 };
 
 use backend_optimizer_util_clauses_seams as clauses_seam;
@@ -87,15 +87,19 @@ fn walk_default(
     }
 }
 
-/// `check_functions_in_node(node, checker, ctx)` over a `&Expr` (the engine
-/// takes `&mut Expr` to resolve opfuncids in place; read-only callers clone the
-/// node first, the same recompute-and-discard the C does on each call).
+/// `check_functions_in_node(node, checker, ctx)` over a `&Expr`.
+///
+/// The engine's `check_functions_in_node` takes `&mut Expr` only to lazily fill
+/// `opfuncid` from `opno` on `OpExpr`/`ScalarArrayOpExpr` in place. Read-only
+/// callers (the C invokes `contain_volatile_functions` etc. on the live tree)
+/// use the non-mutating [`check_functions_in_node_ref`], which resolves the
+/// same `opfuncid` by lookup without cloning the node — a shallow `Expr::clone`
+/// panics on an `Aggref` (its args are a context-allocated `TargetEntry` list).
 fn check_functions_in_node_const<F: FnMut(Oid) -> bool>(
     node: &Expr,
     checker: &mut F,
 ) -> PgResult<bool> {
-    let mut tmp = node.clone();
-    check_functions_in_node(&mut tmp, checker)
+    check_functions_in_node_ref(node, checker)
 }
 
 // ===========================================================================
@@ -512,10 +516,11 @@ fn max_parallel_hazard_walker(
 ) -> bool {
     let Some(node) = node else { return false };
 
-    // Check for hazardous functions in node itself.
+    // Check for hazardous functions in node itself. Read-only: the by-ref
+    // checker resolves opfuncids without mutating (a shallow node clone panics
+    // on an Aggref's context-allocated TargetEntry args).
     {
-        let mut node_mut = node.clone();
-        let aborted = match check_functions_in_node(&mut node_mut, &mut |id| {
+        let aborted = match check_functions_in_node_ref(node, &mut |id| {
             max_parallel_hazard_checker(id, context, err)
         }) {
             Ok(b) => b,

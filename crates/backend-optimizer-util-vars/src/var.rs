@@ -34,7 +34,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use backend_nodes_core::node_walker::{
-    expression_tree_walker, query_or_expression_tree_walker, query_tree_walker,
+    expression_tree_walker, node_expr_wrapper, query_or_expression_tree_walker, query_tree_walker,
 };
 use types_error::PgResult;
 use types_nodes::nodes::Node;
@@ -710,8 +710,8 @@ fn node_expr_clone(node: &Node) -> Expr {
 /// arena `NodeId` to `&Expr`, wraps as `Node::Expr`, and walks. The C `root` is
 /// always passed here (the join-path caller has a real `PlannerInfo`).
 fn seam_pull_varnos(root: &PlannerInfo, node: NodeId) -> Relids {
-    let expr = root.node(node).clone();
-    let wrapped = Node::Expr(expr);
+    let scratch = mcx::MemoryContext::new("pull_varnos seam wrapper");
+    let wrapped = node_expr_wrapper(root.node(node), scratch.mcx());
     pull_varnos(Some(root), &wrapped)
 }
 
@@ -722,8 +722,8 @@ fn seam_pull_vars_of_level(
     node: NodeId,
     levelsup: i32,
 ) -> PgResult<Vec<NodeId>> {
-    let expr = root.node(node).clone();
-    let wrapped = Node::Expr(expr);
+    let scratch = mcx::MemoryContext::new("pull_vars_of_level seam wrapper");
+    let wrapped = node_expr_wrapper(root.node(node), scratch.mcx());
     let vars = pull_vars_of_level(&wrapped, levelsup);
     let mut out = Vec::with_capacity(vars.len());
     for v in vars {
@@ -755,7 +755,7 @@ fn seam_pull_varattnos<'mcx>(
     node: &Expr,
     varno: u32,
 ) -> PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>> {
-    let wrapped = Node::Expr(node.clone());
+    let wrapped = node_expr_wrapper(node, mcx);
     let relids = pull_varattnos(&wrapped, varno as i32, None);
     match relids {
         None => Ok(None),
@@ -820,7 +820,8 @@ fn relids_to_mcx_bitmapset<'mcx>(
 /// `contain_var_clause(node)` (var.c) — installed seam. Pure predicate; clauses.c
 /// (`contain_leaked_vars`/`is_pseudo_constant_clause`) consumes it.
 fn seam_contain_var_clause(node: &Expr) -> bool {
-    let wrapped = Node::Expr(node.clone());
+    let scratch = mcx::MemoryContext::new("contain_var_clause wrapper");
+    let wrapped = node_expr_wrapper(node, scratch.mcx());
     contain_var_clause(&wrapped)
 }
 
@@ -831,7 +832,7 @@ fn seam_pull_varnos_expr<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     node: &Expr,
 ) -> PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>> {
-    let wrapped = Node::Expr(node.clone());
+    let wrapped = node_expr_wrapper(node, mcx);
     let relids = pull_varnos(None, &wrapped);
     relids_to_mcx_bitmapset(mcx, relids)
 }
@@ -841,7 +842,8 @@ fn seam_pull_varnos_expr<'mcx>(
 /// thread `root->outer_join_rels`, so this returns `bms_num_members(pull_varnos
 /// (NULL, clause))` (the documented limitation of the rootless ride).
 fn seam_num_relids(node: &Expr) -> PgResult<i32> {
-    let wrapped = Node::Expr(node.clone());
+    let scratch = mcx::MemoryContext::new("num_relids wrapper");
+    let wrapped = node_expr_wrapper(node, scratch.mcx());
     let relids = pull_varnos(None, &wrapped);
     let n = match relids {
         None => 0,
@@ -856,7 +858,8 @@ fn seam_num_relids(node: &Expr) -> PgResult<i32> {
 /// root->outer_join_rels))`. Unlike `seam_num_relids` (the rootless ride), this
 /// threads `root` so `outer_join_rels` is subtracted exactly as C does.
 fn seam_num_relids_root(root: &mut PlannerInfo, clause: &Expr) -> PgResult<i32> {
-    let wrapped = Node::Expr(clause.clone());
+    let scratch = mcx::MemoryContext::new("num_relids_root wrapper");
+    let wrapped = node_expr_wrapper(clause, scratch.mcx());
     let varnos = pull_varnos(Some(root), &wrapped);
     let varnos = bms_difference(&varnos, &root.outer_join_rels);
     let n = match varnos {
@@ -910,7 +913,12 @@ pub fn init_seams() {
 /// `pull_var_clause((Node *) node, flags)` (var.c) — the equivclass-ext seam
 /// over a single rootless `&Expr`.
 fn seam_eqext_pull_var_clause(node: &Expr, flags: i32) -> Vec<Expr> {
-    let wrapped = Node::Expr(node.clone());
+    // Wrap the `&Expr` as a `Node` for the Node-based walker. A bare
+    // `Expr::clone` panics on an `Aggref` (context-allocated `TargetEntry`
+    // args); `node_expr_wrapper` deep-copies into a scratch context via the
+    // non-panicking `clone_in`, observationally identical to C's borrowed ptr.
+    let scratch = mcx::MemoryContext::new("pull_var_clause wrapper");
+    let wrapped = node_expr_wrapper(node, scratch.mcx());
     pull_var_clause(&wrapped, flags)
 }
 
@@ -920,7 +928,8 @@ fn seam_eqext_pull_var_clause(node: &Expr, flags: i32) -> Vec<Expr> {
 fn seam_eqext_pull_var_clause_list(nodes: Vec<Expr>, flags: i32) -> Vec<Expr> {
     let mut out: Vec<Expr> = Vec::new();
     for node in nodes.iter() {
-        let wrapped = Node::Expr(node.clone());
+        let scratch = mcx::MemoryContext::new("pull_var_clause_list wrapper");
+        let wrapped = node_expr_wrapper(node, scratch.mcx());
         out.extend(pull_var_clause(&wrapped, flags));
     }
     out
@@ -929,6 +938,7 @@ fn seam_eqext_pull_var_clause_list(nodes: Vec<Expr>, flags: i32) -> Vec<Expr> {
 /// `pull_varnos(root, (Node *) expr)` (var.c) — the equivclass-ext seam,
 /// threading `root` so PlaceHolderVars are processed (the `root != NULL` path).
 fn seam_eqext_pull_varnos(root: &PlannerInfo, expr: &Expr) -> Relids {
-    let wrapped = Node::Expr(expr.clone());
+    let scratch = mcx::MemoryContext::new("pull_varnos wrapper");
+    let wrapped = node_expr_wrapper(expr, scratch.mcx());
     pull_varnos(Some(root), &wrapped)
 }

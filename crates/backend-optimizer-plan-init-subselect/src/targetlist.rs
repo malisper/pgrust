@@ -37,18 +37,25 @@ fn find_base_rel(root: &PlannerInfo, relid: i32) -> RelId {
 pub fn build_base_rel_tlists(root: &mut PlannerInfo, run: &PlannerRun<'_>) -> PgResult<()> {
     // pull_var_clause((Node *) final_tlist, PVC_RECURSE_AGGREGATES |
     //                 PVC_RECURSE_WINDOWFUNCS | PVC_INCLUDE_PLACEHOLDERS)
-    let tlist_exprs: Vec<Expr> = root
+    //
+    // The C runs one pull_var_clause over the whole tlist; the per-element
+    // (`_list`) seam concatenates the same way. Borrow each TargetEntry's expr
+    // straight from the arena and call the by-ref `pull_var_clause` — avoids a
+    // deep node copy (a shallow `Expr::clone` panics on an `Aggref`, whose args
+    // are a context-allocated `TargetEntry` list).
+    let expr_ids: Vec<types_pathnodes::NodeId> = root
         .processed_tlist
         .iter()
-        .map(|&te| {
-            let expr_id = root.targetentry(te).expr;
-            root.node(expr_id).clone()
-        })
+        .map(|&te| root.targetentry(te).expr)
         .collect();
-    let tlist_vars = eqext::pull_var_clause_list::call(
-        tlist_exprs,
-        PVC_RECURSE_AGGREGATES | PVC_RECURSE_WINDOWFUNCS | PVC_INCLUDE_PLACEHOLDERS,
-    );
+    let mut tlist_vars: Vec<Expr> = Vec::new();
+    for expr_id in expr_ids {
+        let expr_ref = root.node(expr_id);
+        tlist_vars.extend(eqext::pull_var_clause::call(
+            expr_ref,
+            PVC_RECURSE_AGGREGATES | PVC_RECURSE_WINDOWFUNCS | PVC_INCLUDE_PLACEHOLDERS,
+        ));
+    }
 
     if !tlist_vars.is_empty() {
         let where_needed = bms::relids_make_singleton::call(0);

@@ -261,7 +261,7 @@ fn walk_expr_children(
 /// here (the read-only walker contract returns a plain `bool`), so it is a loud
 /// `expect` — mirror-PG-and-fail, not a silent skip.
 #[inline]
-fn node_expr_wrapper(e: &Expr, mcx: mcx::Mcx<'_>) -> Node<'static> {
+pub fn node_expr_wrapper(e: &Expr, mcx: mcx::Mcx<'_>) -> Node<'static> {
     // `Node::Expr` carries the lifetime-free `primnodes::Expr`, so the wrapper
     // type does not borrow `mcx` (the deep-copied arena children live in `mcx`,
     // but the `Expr` enum erases that lifetime — the same `'static` marker the
