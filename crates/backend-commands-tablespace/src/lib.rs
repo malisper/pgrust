@@ -1842,6 +1842,14 @@ pub fn init_seams() {
     backend_tcop_utility_out_seams::create_table_space::set(create_table_space_arm);
     backend_tcop_utility_out_seams::drop_table_space::set(drop_table_space_arm);
     backend_tcop_utility_out_seams::alter_table_space_options::set(alter_table_space_options_arm);
+
+    // matview.c reaches GetDefaultTablespace(relpersistence, false) through its
+    // outward frontier seam crate; tablespace owns the body. matview always
+    // passes partitioned=false.
+    backend_commands_matview_deps_seams::get_default_tablespace::set(|relpersistence| {
+        let ctx = mcx::MemoryContext::new("GetDefaultTablespace");
+        GetDefaultTablespace(ctx.mcx(), relpersistence, false)
+    });
 }
 
 /// `case T_CreateTableSpaceStmt: CreateTableSpace(stmt)` (utility.c). Extract the

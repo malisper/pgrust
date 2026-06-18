@@ -113,4 +113,13 @@ pub fn init_seams() {
     seams::spi_execute_snapshot::set(exec::spi_execute_snapshot_seam);
     seams::spi_first_row_columns::set(exec::spi_first_row_columns_seam);
     seams::tsquery_rewrite_run::set(exec::tsquery_rewrite_run_seam);
+
+    // matview.c's refresh_by_match_merge drives SPI through its own outward
+    // frontier seam crate; spi.c owns the bodies. The execute/exec/getvalue/
+    // processed legs stay on the SPI executor-driver keystone (exec.rs panics).
+    {
+        use backend_commands_matview_deps_seams as m;
+        m::spi_connect::set(backbone::spi_connect_seam);
+        m::spi_finish::set(backbone::spi_finish_seam);
+    }
 }

@@ -12,6 +12,7 @@ crate-type = ["rlib"]
 [dependencies]
 mcx = { path = "../mcx" }
 seam-core = { path = "../seam-core" }
+backend-commands-matview-deps-seams = { path = "../backend-commands-matview-deps-seams" }
 backend-utils-error = { path = "../backend-utils-error" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }

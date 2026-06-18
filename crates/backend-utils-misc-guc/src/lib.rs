@@ -714,6 +714,17 @@ pub fn init_seams() {
     vx::autovacuum_work_mem::set(|| Ok(get_int("autovacuum_work_mem").unwrap_or(-1)));
     vx::track_io_timing::set(|| Ok(get_bool("track_io_timing").unwrap_or(false)));
     vx::track_cost_delay_timing::set(|| Ok(get_bool("track_cost_delay_timing").unwrap_or(false)));
+    // matview.c reaches NewGUCNestLevel / AtEOXact_GUC (both guc.c) through its
+    // outward frontier seam crate; guc owns the bodies. Both can ereport via
+    // GUC assign hooks, so the seams carry PgResult.
+    {
+        use backend_commands_matview_deps_seams as m;
+        m::new_guc_nest_level::set(|| Ok(NewGUCNestLevel()));
+        m::at_eoxact_guc::set(|is_commit, nest_level| {
+            at_eoxact_guc(is_commit, nest_level);
+            Ok(())
+        });
+    }
 }
 
 /// Install the parallel-worker GUC-state transfer seams declared in

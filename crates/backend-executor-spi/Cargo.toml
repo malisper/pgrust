@@ -12,6 +12,7 @@ path = "src/lib.rs"
 mcx = { path = "../mcx" }
 seam-core = { path = "../seam-core" }
 allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
+backend-commands-matview-deps-seams = { path = "../backend-commands-matview-deps-seams" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-tuple = { path = "../types-tuple" }

@@ -98,6 +98,11 @@ pub fn init_seams() {
     backend_optimizer_util_pathnode_seams::check_for_interrupts::set(|| {
         interrupt::check_for_interrupts().expect("CHECK_FOR_INTERRUPTS")
     });
+    // matview.c's CHECK_FOR_INTERRUPTS() reaches the same body via its outward
+    // frontier seam crate (fallible variant).
+    backend_commands_matview_deps_seams::check_for_interrupts::set(
+        interrupt::check_for_interrupts,
+    );
     s::process_client_read_interrupt::set(interrupt::ProcessClientReadInterrupt);
     s::process_client_write_interrupt::set(interrupt::ProcessClientWriteInterrupt);
     s::handle_recovery_conflict_interrupt::set(interrupt::HandleRecoveryConflictInterrupt);

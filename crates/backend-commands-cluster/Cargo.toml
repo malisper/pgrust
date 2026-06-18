@@ -11,6 +11,9 @@ path = "src/lib.rs"
 [dependencies]
 mcx = { path = "../mcx" }
 seam-core = { path = "../seam-core" }
+backend-commands-matview-deps-seams = { path = "../backend-commands-matview-deps-seams" }
+backend-utils-time-snapmgr = { path = "../backend-utils-time-snapmgr" }
+backend-access-transam-multixact-seams = { path = "../backend-access-transam-multixact-seams" }
 
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }

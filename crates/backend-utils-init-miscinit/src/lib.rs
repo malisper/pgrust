@@ -1169,6 +1169,17 @@ pub fn init_seams() {
             RestoreClientConnectionInfo(buf)
         });
     }
+
+    // matview.c reaches Get/SetUserIdAndSecContext (miscinit.c) through its
+    // outward frontier seam crate; miscinit owns the bodies. Infallible in C.
+    {
+        use backend_commands_matview_deps_seams as m;
+        m::get_user_id_and_sec_context::set(|| Ok(GetUserIdAndSecContext()));
+        m::set_user_id_and_sec_context::set(|userid, sec_context| {
+            SetUserIdAndSecContext(userid, sec_context);
+            Ok(())
+        });
+    }
 }
 
 #[cfg(test)]
