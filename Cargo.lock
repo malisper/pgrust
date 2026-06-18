@@ -15329,6 +15329,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-transam-xact-seams",
  "backend-access-transam-xlog-seams",
+ "backend-backup-basebackup-seams",
  "backend-postmaster-postmaster-seams",
  "backend-postmaster-startup-seams",
  "backend-storage-aio-aio-seams",

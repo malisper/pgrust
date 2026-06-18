@@ -153,9 +153,23 @@ pub fn init_seams() {
     fd_seams::lstat_mtime::set(seams::lstat_mtime);
     fd_seams::read_link::set(seams::read_link);
 
+    // genfile.c `pg_stat_file` / `pg_ls_dir` — `stat`/`lstat`/`AllocateDir`
+    // walk (the OS-coupled half consumed by misc2/dbcommands/extension).
+    fd_seams::stat_file::set(seams::seam_stat_file);
+    fd_seams::lstat_file::set(seams::seam_lstat_file);
+    fd_seams::list_dir::set(seams::seam_list_dir);
+
     // misc.c `pg_tablespace_location` resolution (lstat S_ISLNK + readlink +
     // tablespace-OID guards) — fd-coupled, so installed here.
     backend_utils_adt_misc_seams::tablespace_location::set(seams::tablespace_location);
+
+    // misc.c `pg_tablespace_databases` — AllocateDir/ReadDir/directory_is_empty
+    // walk over `pg_tblspc/<oid>/<version>`; also fd-coupled.
+    backend_utils_adt_misc_seams::tablespace_databases::set(seams::tablespace_databases);
+
+    // basebackup.c `readlink(pg_tblspc/<oid>)` — fd-coupled OS readlink, always
+    // erroring (the caller has already confirmed S_ISLNK).
+    backend_backup_basebackup_seams::read_link::set(seams::basebackup_read_link);
 
     // -- backend-storage-file-seams -----------------------------------------
     file_seams::with_allocated_dir::set(allocated_desc::with_allocated_dir);

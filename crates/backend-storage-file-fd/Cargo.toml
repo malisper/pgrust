@@ -44,3 +44,6 @@ backend-utils-error-seams = { path = "../backend-utils-error-seams" }
 # misc.c `pg_tablespace_location` resolution seam (lstat S_ISLNK + readlink +
 # tablespace-OID guards) — installed here because the body is fd-coupled.
 backend-utils-adt-misc-seams = { path = "../backend-utils-adt-misc-seams" }
+# basebackup.c `readlink(pg_tblspc/<oid>)` — the fd-coupled OS readlink primitive
+# (always-erroring contract: PgResult<String>, no missing-ok).
+backend-backup-basebackup-seams = { path = "../backend-backup-basebackup-seams" }

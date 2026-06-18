@@ -16,7 +16,8 @@ use types_error::{ErrorLevel, PgError, PgResult, ERROR, FATAL, LOG};
 use types_storage::file::File;
 
 use backend_storage_file_fd_seams::{
-    CreateEmptyFileOutcome, PgFileStream, PipeReadLine, RelmapReadOutcome, RelmapWriteOutcome,
+    CreateEmptyFileOutcome, DirEntryInfo, PgFileStream, PipeReadLine, RelmapReadOutcome,
+    RelmapWriteOutcome, StatInfo,
 };
 
 use crate::{allocated_desc, sync_cleanup, vfd_core, vfd_io};
@@ -963,6 +964,218 @@ pub fn read_link(path: &str) -> PgResult<Option<String>> {
     Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
 }
 
+/// `readlink(path, linkpath, sizeof(linkpath))` behind basebackup.c's
+/// `pg_tblspc` symlink walk (basebackup.c:1415). Unlike the misc.c
+/// [`read_link`] primitive this never returns `None`: the caller has already
+/// confirmed the entry is a symlink (`S_ISLNK`), so any `readlink` failure is
+/// the C `ereport(ERROR, errcode_for_file_access, "could not read symbolic
+/// link: %m")`, and an over-long target is the `ERRCODE_PROGRAM_LIMIT_EXCEEDED`
+/// "symbolic link target is too long" `ereport(ERROR)`.
+pub fn basebackup_read_link(path: &str) -> PgResult<String> {
+    let cpath = match std::ffi::CString::new(path) {
+        Ok(c) => c,
+        Err(_) => {
+            return Err(file_access_error(
+                ERROR,
+                libc::ENOENT,
+                format!("could not read symbolic link \"{path}\": %m"),
+            ));
+        }
+    };
+    // char linkpath[MAXPGPATH]; rllen = readlink(pathbuf, linkpath, sizeof);
+    let mut buf = [0i8; MAXPGPATH];
+    // SAFETY: cpath is NUL-terminated; buf is a valid writable region.
+    let rllen =
+        unsafe { libc::readlink(cpath.as_ptr(), buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
+    if rllen < 0 {
+        return Err(file_access_error(
+            ERROR,
+            errno_now(),
+            format!("could not read symbolic link \"{path}\": %m"),
+        ));
+    }
+    // if (rllen >= sizeof(linkpath)) ereport(ERROR, ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+    if rllen as usize >= MAXPGPATH {
+        return Err(PgError::error(format!(
+            "symbolic link \"{path}\" target is too long"
+        ))
+        .with_sqlstate(types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED));
+    }
+    // linkpath[rllen] = '\0';
+    let bytes: Vec<u8> = buf[..rllen as usize].iter().map(|&b| b as u8).collect();
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+// ===========================================================================
+// genfile.c `pg_stat_file` / `pg_ls_dir` — `stat`/`lstat`/`AllocateDir` walk.
+// ===========================================================================
+
+/// `time_t_to_timestamptz(tm)` (`utils/adt/timestamp.c`) — convert a
+/// `pg_time_t` (seconds since the Unix epoch) to a `TimestampTz` (microseconds
+/// since the Postgres 2000-01-01 epoch). Pure arithmetic, inlined here so the
+/// `stat`/`lstat`/`ReadDir` adapters can hand back the already-converted value
+/// the seam contract promises.
+fn time_t_to_timestamptz(tm: i64) -> types_core::TimestampTz {
+    // POSTGRES_EPOCH_JDATE 2451545, UNIX_EPOCH_JDATE 2440588, SECS_PER_DAY
+    // 86400, USECS_PER_SEC 1000000.
+    const POSTGRES_EPOCH_JDATE: i64 = 2451545;
+    const UNIX_EPOCH_JDATE: i64 = 2440588;
+    const SECS_PER_DAY: i64 = 86400;
+    const USECS_PER_SEC: i64 = 1_000_000;
+    let result = tm - ((POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * SECS_PER_DAY);
+    result * USECS_PER_SEC
+}
+
+/// Build a [`StatInfo`] from a populated `libc::stat`, converting the `time_t`
+/// fields exactly as `pg_stat_file` (genfile.c:462-472) does.
+fn stat_info_from(st: &libc::stat) -> StatInfo {
+    StatInfo {
+        size: st.st_size as i64,
+        access: time_t_to_timestamptz(st.st_atime as i64),
+        modification: time_t_to_timestamptz(st.st_mtime as i64),
+        change: time_t_to_timestamptz(st.st_ctime as i64),
+        isdir: (st.st_mode as u32 & libc::S_IFMT as u32) == libc::S_IFDIR as u32,
+    }
+}
+
+/// `stat(filename, &fst)` behind genfile.c's `pg_stat_file` (genfile.c:430).
+/// `Ok(None)` mirrors C's `missing_ok && errno == ENOENT`; any other failure is
+/// the `ereport(ERROR, errcode_for_file_access, "could not stat file")`.
+pub fn seam_stat_file(filename: &str, missing_ok: bool) -> PgResult<Option<StatInfo>> {
+    let cpath = match std::ffi::CString::new(filename) {
+        Ok(c) => c,
+        Err(_) => {
+            return Err(file_access_error(
+                ERROR,
+                libc::ENOENT,
+                format!("could not stat file \"{filename}\": %m"),
+            ));
+        }
+    };
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: cpath is NUL-terminated; st is a valid out-param.
+    let sret = unsafe { libc::stat(cpath.as_ptr(), &mut st) };
+    if sret < 0 {
+        let errno = errno_now();
+        if missing_ok && errno == libc::ENOENT {
+            return Ok(None);
+        }
+        return Err(file_access_error(
+            ERROR,
+            errno,
+            format!("could not stat file \"{filename}\": %m"),
+        ));
+    }
+    Ok(Some(stat_info_from(&st)))
+}
+
+/// `lstat(filename, &st)` behind dbcommands.c's `remove_dbtablespaces` /
+/// `check_db_file_conflict`: like [`seam_stat_file`] but does not follow a
+/// symlink. `Ok(None)` mirrors C's `missing_ok && errno == ENOENT`.
+pub fn seam_lstat_file(filename: &str, missing_ok: bool) -> PgResult<Option<StatInfo>> {
+    let cpath = match std::ffi::CString::new(filename) {
+        Ok(c) => c,
+        Err(_) => {
+            return Err(file_access_error(
+                ERROR,
+                libc::ENOENT,
+                format!("could not stat file \"{filename}\": %m"),
+            ));
+        }
+    };
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: cpath is NUL-terminated; st is a valid out-param.
+    let sret = unsafe { libc::lstat(cpath.as_ptr(), &mut st) };
+    if sret < 0 {
+        let errno = errno_now();
+        if missing_ok && errno == libc::ENOENT {
+            return Ok(None);
+        }
+        return Err(file_access_error(
+            ERROR,
+            errno,
+            format!("could not stat file \"{filename}\": %m"),
+        ));
+    }
+    Ok(Some(stat_info_from(&st)))
+}
+
+/// `AllocateDir(dirname)` + the full `ReadDir` walk + per-entry `stat` +
+/// `FreeDir` (genfile.c `pg_ls_dir`). Returns one [`DirEntryInfo`] per entry
+/// (including `.`/`..`; the caller applies the dot-dir / hidden-file / regular-
+/// file filters). `Ok(None)` mirrors `missing_ok && errno == ENOENT` (the
+/// directory is absent). A concurrently-deleted entry (`stat` -> `ENOENT`) is
+/// skipped exactly as genfile.c:606-614 does; any other `stat` failure is the
+/// `ereport(ERROR, "could not stat file")`.
+pub fn seam_list_dir<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    dirname: &str,
+    missing_ok: bool,
+) -> PgResult<Option<mcx::PgVec<'mcx, DirEntryInfo<'mcx>>>> {
+    // AllocateDir + ReadDir loop: collect the names first (the with_allocated_dir
+    // walk owns the AllocateDir/FreeDir lifecycle and the could-not-open ERROR).
+    // When missing_ok, probe the directory up front so an ENOENT short-circuits
+    // to Ok(None) the way the C `AllocateDir` -> `errno == ENOENT` guard does;
+    // the deferred ReadDir errno report inside with_allocated_dir can be clobbered
+    // by the intervening fd-reservation calls, so we don't rely on it here.
+    if missing_ok {
+        if let Ok(cpath) = std::ffi::CString::new(dirname) {
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            // SAFETY: cpath is NUL-terminated; st is a valid out-param.
+            let sret = unsafe { libc::stat(cpath.as_ptr(), &mut st) };
+            if sret < 0 && errno_now() == libc::ENOENT {
+                return Ok(None);
+            }
+        }
+    }
+    let mut names: Vec<String> = Vec::new();
+    allocated_desc::with_allocated_dir(dirname, &mut |name: &str| {
+        names.push(name.to_owned());
+        Ok(false)
+    })?;
+
+    let mut out = mcx::vec_with_capacity_in(mcx, names.len())?;
+    for name in names {
+        // snprintf(path, "%s/%s", dir, de->d_name); stat(path, &attrib);
+        let path = format!("{dirname}/{name}");
+        let cpath = match std::ffi::CString::new(path.as_str()) {
+            Ok(c) => c,
+            Err(_) => {
+                return Err(file_access_error(
+                    ERROR,
+                    libc::ENOENT,
+                    format!("could not stat file \"{path}\": %m"),
+                ));
+            }
+        };
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: cpath is NUL-terminated; st is a valid out-param.
+        let sret = unsafe { libc::stat(cpath.as_ptr(), &mut st) };
+        if sret < 0 {
+            let errno = errno_now();
+            // Ignore concurrently-deleted files, else complain.
+            if errno == libc::ENOENT {
+                continue;
+            }
+            return Err(file_access_error(
+                ERROR,
+                errno,
+                format!("could not stat file \"{path}\": %m"),
+            ));
+        }
+        let mode = st.st_mode as u32 & libc::S_IFMT as u32;
+        let name_str = mcx::PgString::from_str_in(&name, mcx)?;
+        out.push(DirEntryInfo {
+            name: name_str,
+            size: st.st_size as i64,
+            modification: time_t_to_timestamptz(st.st_mtime as i64),
+            isdir: mode == libc::S_IFDIR as u32,
+            isreg: mode == libc::S_IFREG as u32,
+        });
+    }
+    Ok(Some(out))
+}
+
 /// `DEFAULTTABLESPACE_OID` (`catalog/pg_tablespace_d.h`).
 const DEFAULTTABLESPACE_OID: types_core::Oid = 1663;
 /// `GLOBALTABLESPACE_OID` (`catalog/pg_tablespace_d.h`).
@@ -1052,6 +1265,108 @@ pub fn tablespace_location<'mcx>(
     let mut out = mcx::vec_with_capacity_in(mcx, target.len())?;
     out.extend_from_slice(&target);
     Ok(out)
+}
+
+/// `directory_is_empty(path)` (tablespace.c:853) — `AllocateDir` + `ReadDir`
+/// loop; `true` iff the directory contains no entries other than `.`/`..`. A
+/// failed `AllocateDir` (the directory cannot be opened) is treated as empty,
+/// matching C's `ReadDir(NULL, ..)`-returns-NULL behaviour (it logs at ERROR
+/// then yields no entries).
+fn directory_is_empty(path: &str) -> PgResult<bool> {
+    let mut empty = true;
+    allocated_desc::with_allocated_dir(path, &mut |name: &str| {
+        if name == "." || name == ".." {
+            return Ok(false); // keep scanning
+        }
+        empty = false;
+        Ok(true) // found a real entry; stop
+    })?;
+    Ok(empty)
+}
+
+/// `atooid(s)` (`postgres_ext.h`) — `(Oid) strtoul(s, NULL, 10)`. A
+/// non-numeric / leading-non-digit name yields `0` (which the caller skips,
+/// covering `.`/`..`).
+fn atooid(s: &str) -> types_core::Oid {
+    // strtoul stops at the first non-digit; mirror that by taking the leading
+    // run of ASCII digits.
+    let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse::<u32>().unwrap_or(0)
+}
+
+/// `pg_tablespace_databases(tablespaceOid)` (misc.c:223) — the OIDs of the
+/// databases whose subdirectory under the tablespace is non-empty. fd-coupled
+/// (the `AllocateDir`/`ReadDir`/`directory_is_empty` walk), so installed by the
+/// fd owner alongside [`tablespace_location`]. `Ok(None)` reproduces the empty
+/// tuplestore for the `GLOBALTABLESPACE_OID` and "not a tablespace OID"
+/// WARNING cases.
+pub fn tablespace_databases(tablespace_oid: types_core::Oid) -> PgResult<Option<Vec<types_core::Oid>>> {
+    use types_storage::file::{PG_TBLSPC_DIR, TABLESPACE_VERSION_DIRECTORY};
+
+    // if (tablespaceOid == GLOBALTABLESPACE_OID) { WARNING; return empty; }
+    if tablespace_oid == GLOBALTABLESPACE_OID {
+        let _ = backend_utils_error_seams::ereport::call(PgError::warning(
+            "global tablespace never has databases",
+        ));
+        return Ok(None);
+    }
+
+    // location = (tablespaceOid == DEFAULTTABLESPACE_OID) ? "base"
+    //            : psprintf("%s/%u/%s", PG_TBLSPC_DIR, oid, TABLESPACE_VERSION_DIRECTORY)
+    let location = if tablespace_oid == DEFAULTTABLESPACE_OID {
+        String::from("base")
+    } else {
+        format!("{PG_TBLSPC_DIR}/{tablespace_oid}/{TABLESPACE_VERSION_DIRECTORY}")
+    };
+
+    // dirdesc = AllocateDir(location); if (!dirdesc) { ENOENT -> WARNING + empty;
+    // else ERROR }. The directory walk below is driven by with_allocated_dir,
+    // which surfaces an unreadable directory as a ReadDir ERROR. Probe ENOENT up
+    // front so a missing tablespace dir becomes the "not a tablespace OID"
+    // WARNING, exactly as misc.c does.
+    if let Ok(cpath) = std::ffi::CString::new(location.as_str()) {
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: cpath is NUL-terminated; st is a valid out-param.
+        let sret = unsafe { libc::stat(cpath.as_ptr(), &mut st) };
+        if sret < 0 {
+            let errno = errno_now();
+            // the only expected error is ENOENT
+            if errno != libc::ENOENT {
+                return Err(file_access_error(
+                    ERROR,
+                    errno,
+                    format!("could not open directory \"{location}\": %m"),
+                ));
+            }
+            let _ = backend_utils_error_seams::ereport::call(PgError::warning(format!(
+                "{tablespace_oid} is not a tablespace OID"
+            )));
+            return Ok(None);
+        }
+    }
+
+    // Collect the directory entry names, then test each db subdir for emptiness.
+    let mut names: Vec<String> = Vec::new();
+    allocated_desc::with_allocated_dir(location.as_str(), &mut |name: &str| {
+        names.push(name.to_owned());
+        Ok(false)
+    })?;
+
+    let mut result: Vec<types_core::Oid> = Vec::new();
+    for name in names {
+        // datOid = atooid(de->d_name); skips . and .. (and any non-numeric name).
+        let dat_oid = atooid(&name);
+        if dat_oid == 0 {
+            continue;
+        }
+        // subdir = psprintf("%s/%s", location, de->d_name);
+        let subdir = format!("{location}/{name}");
+        if directory_is_empty(&subdir)? {
+            continue; // indeed, nothing in it
+        }
+        result.push(dat_oid);
+    }
+    Ok(Some(result))
 }
 
 /// `rmtree(path, rmtopdir)` (common/rmtree.c) — recursively remove a directory
