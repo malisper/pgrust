@@ -863,35 +863,53 @@ pub fn InitializeShmemGUCs() -> PgResult<()> {
 /// / `flatten_set_variable_args` consume. Mirrors the per-arg arm of
 /// `variable_set_stmt_from_nodes`.
 fn set_arg_from_nodes(arg: &types_nodes::nodes::Node<'_>) -> PgResult<Node> {
-    use types_nodes::nodes::Node as TnNode;
+    use types_nodes::nodes::{ntag, Node as TnNode};
 
     // The DefElem arg is an `A_Const` (a SET literal); read its inner value.
-    let val_node: &TnNode = match arg {
-        TnNode::A_Const(c) => match &c.val {
-            Some(v) => &**v,
-            None => {
-                return Err(ereport(ERROR)
-                    .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
-                    .errmsg("SET argument is NULL".to_string())
-                    .into_error());
+    let val_node: &TnNode = match arg.node_tag() {
+        ntag::T_A_Const => {
+            let c = arg.expect_a_const();
+            match &c.val {
+                Some(v) => &**v,
+                None => {
+                    return Err(ereport(ERROR)
+                        .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                        .errmsg("SET argument is NULL".to_string())
+                        .into_error());
+                }
             }
-        },
+        }
         // The parse model may carry the value node directly (no A_Const wrapper).
-        other => other,
+        _ => arg,
     };
-    match val_node {
-        TnNode::Integer(i) => Ok(Node::Integer(types_parsenodes::Integer { ival: i.ival })),
-        TnNode::Float(f) => Ok(Node::Float(types_parsenodes::Float {
-            fval: Some(f.fval.to_string()),
-        })),
-        TnNode::Boolean(b) => Ok(Node::Boolean(types_parsenodes::Boolean { boolval: b.boolval })),
-        TnNode::String(st) => Ok(Node::String(types_parsenodes::StringNode {
-            sval: Some(st.sval.to_string()),
-        })),
-        other => Err(types_error::PgError::error(format!(
-            "set_pg_variable: unexpected SET argument node {:?}",
-            other.node_tag()
-        ))),
+    match val_node.node_tag() {
+        ntag::T_Integer => {
+            let i = val_node.expect_integer();
+            Ok(Node::Integer(types_parsenodes::Integer { ival: i.ival }))
+        }
+        ntag::T_Float => {
+            let f = val_node.expect_float();
+            Ok(Node::Float(types_parsenodes::Float {
+                fval: Some(f.fval.to_string()),
+            }))
+        }
+        ntag::T_Boolean => {
+            let b = val_node.expect_boolean();
+            Ok(Node::Boolean(types_parsenodes::Boolean { boolval: b.boolval }))
+        }
+        ntag::T_String => {
+            let st = val_node.expect_string();
+            Ok(Node::String(types_parsenodes::StringNode {
+                sval: Some(st.sval.to_string()),
+            }))
+        }
+        _ => {
+            let other = val_node;
+            Err(types_error::PgError::error(format!(
+                "set_pg_variable: unexpected SET argument node {:?}",
+                other.node_tag()
+            )))
+        }
     }
 }
 
@@ -899,7 +917,7 @@ fn variable_set_stmt_from_nodes(
     s: &types_nodes::ddlnodes::VariableSetStmt<'_>,
 ) -> PgResult<VariableSetStmt> {
     use types_nodes::ddlnodes::VariableSetKind as TnKind;
-    use types_nodes::nodes::Node as TnNode;
+    use types_nodes::nodes::{ntag, Node as TnNode};
 
     let kind = match s.kind {
         TnKind::VAR_SET_VALUE => VariableSetKind::SetValue,
@@ -915,36 +933,52 @@ fn variable_set_stmt_from_nodes(
     let mut args: Vec<Node> = Vec::with_capacity(s.args.len());
     for arg in s.args.iter() {
         // Each member is an `A_Const` (a SET literal). Read its inner value node.
-        let val_node: &TnNode = match &**arg {
-            TnNode::A_Const(c) => match &c.val {
-                Some(v) => &**v,
-                // `A_Const` with no `val` is a NULL constant; SET literals are
-                // never NULL, so this is unreachable in practice.
-                None => {
-                    return Err(ereport(ERROR)
-                        .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
-                        .errmsg("SET argument is NULL".to_string())
-                        .into_error());
+        let val_node: &TnNode = match (&**arg).node_tag() {
+            ntag::T_A_Const => {
+                let c = (&**arg).expect_a_const();
+                match &c.val {
+                    Some(v) => &**v,
+                    // `A_Const` with no `val` is a NULL constant; SET literals are
+                    // never NULL, so this is unreachable in practice.
+                    None => {
+                        return Err(ereport(ERROR)
+                            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                            .errmsg("SET argument is NULL".to_string())
+                            .into_error());
+                    }
                 }
-            },
+            }
             // The K1 parse model may carry the value node directly (no A_Const
             // wrapper) — handle both, mirroring the flattener's switch.
-            other => other,
+            _ => &**arg,
         };
-        let projected = match val_node {
-            TnNode::Integer(i) => Node::Integer(types_parsenodes::Integer { ival: i.ival }),
-            TnNode::Float(f) => Node::Float(types_parsenodes::Float {
-                fval: Some(f.fval.to_string()),
-            }),
-            TnNode::Boolean(b) => Node::Boolean(types_parsenodes::Boolean { boolval: b.boolval }),
-            TnNode::String(st) => Node::String(types_parsenodes::StringNode {
-                sval: Some(st.sval.to_string()),
-            }),
-            other => {
+        let projected = match val_node.node_tag() {
+            ntag::T_Integer => {
+                let i = val_node.expect_integer();
+                Node::Integer(types_parsenodes::Integer { ival: i.ival })
+            }
+            ntag::T_Float => {
+                let f = val_node.expect_float();
+                Node::Float(types_parsenodes::Float {
+                    fval: Some(f.fval.to_string()),
+                })
+            }
+            ntag::T_Boolean => {
+                let b = val_node.expect_boolean();
+                Node::Boolean(types_parsenodes::Boolean { boolval: b.boolval })
+            }
+            ntag::T_String => {
+                let st = val_node.expect_string();
+                Node::String(types_parsenodes::StringNode {
+                    sval: Some(st.sval.to_string()),
+                })
+            }
+            _ => {
+                let other = val_node;
                 return Err(types_error::PgError::error(format!(
                     "exec_set_variable_stmt: unexpected SET argument node {:?}",
                     other.node_tag()
-                )))
+                )));
             }
         };
         args.push(projected);
@@ -968,15 +1002,19 @@ pub fn init_seams() {
     // the `types_nodes` parse-tree node universe into the trimmed
     // `types_parsenodes::VariableSetStmt` that `ExecSetVariableStmt` consumes.
     backend_tcop_utility_out_seams::exec_set_variable_stmt::set(|stmt, is_top_level| {
-        match stmt {
-            types_nodes::nodes::Node::VariableSetStmt(s) => {
+        match stmt.node_tag() {
+            types_nodes::nodes::ntag::T_VariableSetStmt => {
+                let s = stmt.expect_variablesetstmt();
                 let projected = variable_set_stmt_from_nodes(s)?;
                 ExecSetVariableStmt(&projected, is_top_level)
             }
-            other => Err(types_error::PgError::error(format!(
-                "exec_set_variable_stmt: expected VariableSetStmt, got {:?}",
-                other.node_tag()
-            ))),
+            _ => {
+                let other = stmt;
+                Err(types_error::PgError::error(format!(
+                    "exec_set_variable_stmt: expected VariableSetStmt, got {:?}",
+                    other.node_tag()
+                )))
+            }
         }
     });
     backend_utils_misc_guc_funcs_seams::extract_set_variable_args::set(|sstmt| {
