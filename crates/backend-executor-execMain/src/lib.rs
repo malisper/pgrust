@@ -338,25 +338,13 @@ fn InitPlan(query_desc: &mut QueryDesc, eflags: i32) -> PgResult<()> {
                 // "plan freed with its context"), exactly like the main planTree.
                 let subnode: Option<&types_nodes::nodes::Node<'_>> =
                     subplan.map(|tree| &*mcx::leak_in(tree));
+                // subplanstate = ExecInitNode(subplan, estate, sp_eflags);
+                // es_subplanstates = lappend(es_subplanstates, subplanstate).
+                // A NULL subplan slot (pruned/unused) lappends a NULL, preserving
+                // the 1-based plan_id index.
                 let subplanstate =
                     procnode::exec_init_node::call(mcx, subnode, estate, sp_eflags)?;
-                match subplanstate {
-                    Some(ps) => estate.es_subplanstates.push(ps),
-                    None => {
-                        // ExecInitNode(NULL, ...) → NULL: C lappends the NULL onto
-                        // es_subplanstates (preserving the 1-based plan_id index).
-                        // The owned `es_subplanstates` is a vec of owning boxes
-                        // with no NULL element; a degenerate NULL subplan would
-                        // break the plan_id → slot indexing the link seam relies
-                        // on. The planner never emits a NULL subplan slot on the
-                        // ported frontier, so this is a guard-and-panic.
-                        panic!(
-                            "execMain InitPlan: NULL subplan in plannedstmt->subplans (lappend of \
-                             a NULL PlanState into es_subplanstates) — the owned es_subplanstates \
-                             has no NULL slot for plan_id indexing — #166 F0d"
-                        );
-                    }
-                }
+                estate.es_subplanstates.push(subplanstate);
             }
         }
 
@@ -650,6 +638,22 @@ pub fn standard_ExecutorEnd(query_desc: &mut QueryDesc) -> PgResult<()> {
 }
 
 /// `ExecEndPlan(planstate, estate)` (execMain.c) — close files / drop pins.
+/// The "subplan was not initialized" check (nodeSubplan.c:818-827). The
+/// `SubPlanState` reaches its child plan state by the subplan's 1-based
+/// `plan_id` index into `es_subplanstates`; this verifies that slot exists.
+fn link_subplan_planstate(
+    estate: &types_nodes::EStateData<'_>,
+    plan_id: i32,
+) -> PgResult<()> {
+    let idx = (plan_id as usize)
+        .checked_sub(1)
+        .filter(|&i| i < estate.es_subplanstates.len());
+    match idx {
+        Some(_) => Ok(()),
+        None => Err(types_error::PgError::error("subplan was not initialized")),
+    }
+}
+
 fn ExecEndPlan(query_desc: &mut QueryDesc) -> PgResult<()> {
     query_desc.with_estate_and_planstate_mut(|estate, planstate| {
         // shut down the node-type-specific query processing.
@@ -668,7 +672,11 @@ fn ExecEndPlan(query_desc: &mut QueryDesc) -> PgResult<()> {
             &mut estate.es_subplanstates,
             mcx::PgVec::new_in(estate.es_query_cxt),
         );
-        for mut subplanstate in subplanstates {
+        for subplanstate in subplanstates {
+            // ExecEndNode(NULL) is a no-op; only end real (non-pruned) slots.
+            let Some(mut subplanstate) = subplanstate else {
+                continue;
+            };
             procnode::exec_end_node::call(&mut subplanstate, estate)?;
         }
         Ok::<(), types_error::PgError>(())
@@ -1609,6 +1617,7 @@ pub fn init_seams() {
     seams::check_valid_result_rel::set(CheckValidResultRel);
     seams::eval_plan_qual_init::set(EvalPlanQualInit);
     seams::eval_plan_qual_set_plan_with_row_marks::set(eval_plan_qual_set_plan_with_row_marks);
+    seams::link_subplan_planstate::set(link_subplan_planstate);
     seams::executor_run::set(ExecutorRun);
     seams::executor_finish::set(ExecutorFinish);
     seams::executor_end::set(ExecutorEnd);

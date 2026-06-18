@@ -23,6 +23,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecSetParamPlan(node, econtext)` (nodeSubplan.c): run an InitPlan
+    /// subselect and store its output into the estate's PARAM_EXEC slots,
+    /// clearing each param's `execPlan` link. Reached lazily from
+    /// `ExecEvalParamExec` when a PARAM_EXEC's value is not yet valid. Errors on
+    /// the C sanity checks (ANY/ALL/CTE/correlated as initplan) and on
+    /// sub-execution `ereport(ERROR)`.
+    pub fn exec_set_param_plan<'mcx>(
+        node: &mut types_nodes::SubPlanState<'mcx>,
+        econtext: types_nodes::EcxtId,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ExecSubPlan(node, econtext, isNull)` (nodeSubplan.c): process a
     /// sub-select and return its result `Datum`. The C `bool *isNull`
     /// out-parameter is returned alongside the result as `(Datum, bool)`. This

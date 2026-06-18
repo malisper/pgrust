@@ -663,19 +663,53 @@ pub fn ExecEvalParamExec<'mcx>(
     // not directly addressable from the param array yet). So for a PARAM_EXEC
     // whose value is already valid (`execPlan == None`) this reads straight
     // through; a pending one would need that unported re-entry.
-    let _ = econtext;
     let paramid = match &step_data(state, op) {
         ExprEvalStepData::Param { paramid, .. } => *paramid,
         _ => unreachable!("ExecEvalParamExec: step is not an EEOP_PARAM_EXEC"),
     };
 
-    let prm = &estate.es_param_exec_vals[paramid as usize];
+    // if (unlikely(prm->execPlan != NULL)) { ExecSetParamPlan(prm->execPlan,
+    // econtext); Assert(prm->execPlan == NULL); }
+    let pending = estate.es_param_exec_vals[paramid as usize]
+        .execPlan
+        .map(|link| link.plan_id);
+    if let Some(plan_id) = pending {
+        // Resolve the subplan's identity back to its InitPlan SubPlanState (the
+        // es_initplan registry, keyed by the 1-based plan_id) and run it; it
+        // writes the param value(s) and clears execPlan. Take the SubPlanState
+        // out for the call (it lives in estate, which the call also borrows
+        // mutably) and put it back afterwards.
+        let idx = (plan_id as usize).saturating_sub(1);
+        let mut sstate = estate
+            .es_initplan
+            .get_mut(idx)
+            .and_then(|slot| slot.take())
+            .ok_or_else(|| {
+                types_error::PgError::error(
+                    "ExecEvalParamExec: initplan not found for pending PARAM_EXEC",
+                )
+            })?;
+        let r = backend_executor_nodeSubplan_seams::exec_set_param_plan::call(
+            &mut sstate, econtext, estate,
+        );
+        estate.es_initplan[idx] = Some(sstate);
+        r?;
+        debug_assert!(estate.es_param_exec_vals[paramid as usize].execPlan.is_none());
+    }
 
+    let prm = &estate.es_param_exec_vals[paramid as usize];
+    let value = prm.value.clone();
+    let isnull = prm.isnull;
+
+    // *op->resvalue = prm->value; *op->resnull = prm->isnull. Write through
+    // `write_cell`, which routes the ExprState's own result cell (id 0) to
+    // `state.resvalue`/`state.resnull` rather than the dead `result_cells[0]` —
+    // a top-level Param whose result slot IS the ExprState cell (e.g.
+    // `SELECT (SELECT ...)`) otherwise wrote to the wrong location and the
+    // EEOP_ASSIGN_TMP reader saw zero.
     let (resvalue_id, resnull_id) = res_cells(state, op);
-    state
-        .result_cells
-        .set(resvalue_id, ResultCell { value: prm.value.clone(), isnull: prm.isnull });
     let _ = resnull_id; // value/is-null share one cell
+    crate::interp_loop::write_cell(state, resvalue_id, value, isnull);
     Ok(())
 }
 

@@ -439,18 +439,24 @@ pub fn exec_init_node<'mcx>(
     // `ExecInitSubPlan` takes ownership of an owned `SubPlan`) and built into a
     // `SubPlanState`, gathered into `result->initPlan`.
     if let Some(init) = node.plan_head().initPlan.as_ref() {
-        if !init.is_empty() {
-            let mut subps: PgVec<'mcx, SubPlanState<'mcx>> =
-                mcx::vec_with_capacity_in(mcx, init.len())?;
-            for subplan in init.iter() {
-                // Assert(IsA(subplan, SubPlan)); Assert(subplan->args == NIL);
-                debug_assert!(subplan.args.is_empty());
-                let owned: PgBox<'mcx, types_nodes::primnodes::SubPlan<'mcx>> =
-                    alloc_in(mcx, subplan.clone_in(mcx)?)?;
-                let sstate = backend_executor_nodeSubplan::ExecInitSubPlan(owned, estate)?;
-                subps.push(sstate);
+        for i in 0..init.len() {
+            // Assert(IsA(subplan, SubPlan)); Assert(subplan->args == NIL);
+            let subplan = &init[i];
+            debug_assert!(subplan.args.is_empty());
+            let plan_id = subplan.plan_id;
+            let owned: PgBox<'mcx, types_nodes::primnodes::SubPlan<'mcx>> =
+                alloc_in(mcx, subplan.clone_in(mcx)?)?;
+            let sstate = backend_executor_nodeSubplan::ExecInitSubPlan(owned, estate)?;
+            // The InitPlan SubPlanState is reached lazily by `plan_id` from the
+            // param-eval path (ExecEvalParamExec -> ExecSetParamPlan), so it
+            // lives in the estate registry keyed by the 1-based plan_id, not on
+            // the parent PlanState's owning `initPlan` list (which the owned
+            // model can't co-own with the lazy-eval reachability).
+            let idx = (plan_id as usize).saturating_sub(1);
+            while estate.es_initplan.len() <= idx {
+                estate.es_initplan.push(None);
             }
-            result.ps_head_mut().initPlan = Some(subps);
+            estate.es_initplan[idx] = Some(sstate);
         }
     }
 

@@ -91,16 +91,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `sstate->planstate = (PlanState *) list_nth(estate->es_subplanstates,
-    /// subplan->plan_id - 1)` then the "subplan was not initialized" check
-    /// (nodeSubplan.c:818-827). The executor owns `es_subplanstates`, so it
-    /// resolves and installs the link from the already-initialized child plan
-    /// state into the node, given the subplan's 1-based `plan_id`. `Err` carries
-    /// the C `elog(ERROR, "subplan \"%s\" was not initialized")` when the slot
-    /// is NULL (the owner reads `node->subplan->plan_name` for the message).
+    /// The "subplan was not initialized" check (nodeSubplan.c:818-827). The
+    /// executor owns `es_subplanstates`; in the owned model the `SubPlanState`
+    /// reaches its child plan state by the subplan's 1-based `plan_id` index
+    /// (`list_nth(es_subplanstates, plan_id - 1)`) rather than holding an
+    /// aliasing box, so this seam only verifies the slot was initialized.
+    /// `Err` carries the C `elog(ERROR, "subplan was not initialized")` when the
+    /// slot is missing.
     pub fn link_subplan_planstate<'mcx>(
-        node: &mut types_nodes::execexpr::SubPlanState<'mcx>,
-        estate: &mut types_nodes::EStateData<'mcx>,
+        estate: &types_nodes::EStateData<'mcx>,
         plan_id: i32,
     ) -> types_error::PgResult<()>
 );

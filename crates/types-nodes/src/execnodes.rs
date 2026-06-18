@@ -865,8 +865,19 @@ pub struct EStateData<'mcx> {
     /// `FreeExecutorState` is reverse creation order (highest index first),
     /// matching the C `lcons` + front-to-back walk.
     pub es_exprcontexts: PgVec<'mcx, Option<ExprContext<'mcx>>>,
-    /// `List *es_subplanstates` — exec state of each init plan.
-    pub es_subplanstates: PgVec<'mcx, PgBox<'mcx, PlanStateNode<'mcx>>>,
+    /// `List *es_subplanstates` — exec state of each init plan (one per
+    /// `PlannedStmt.subplans` entry, 1-based `plan_id` index). `None` is the C
+    /// `NULL` slot a pruned/unused subplan lappends (and lets the owned model
+    /// move a child state out for execution without an aliasing placeholder).
+    pub es_subplanstates: PgVec<'mcx, Option<PgBox<'mcx, PlanStateNode<'mcx>>>>,
+    /// InitPlan `SubPlanState`s, keyed by the subplan's 1-based `plan_id`
+    /// (`plan_id - 1` index). In C an InitPlan's `SubPlanState` is reached by the
+    /// `ParamExecData.execPlan` pointer; the owned model renders `execPlan` as
+    /// the subplan's `plan_id` identity (see [`ExecPlanLink`]) and resolves it
+    /// here when [`ExecEvalParamExec`] must lazily run the initplan
+    /// (`ExecSetParamPlan`). Populated by `ExecInitNode`'s initPlan loop. `None`
+    /// is an absent slot (a non-initplan plan_id, or a slot not yet filled).
+    pub es_initplan: PgVec<'mcx, Option<SubPlanState<'mcx>>>,
     /// `List *es_auxmodifytables` — not-canSetTag ModifyTableStates.
     pub es_auxmodifytables: PgVec<'mcx, Opaque>,
     /// `ExprContext *es_per_tuple_exprcontext` — for per-output-tuple work.
@@ -963,6 +974,7 @@ impl<'mcx> EStateData<'mcx> {
             // es_exprcontexts = NIL; es_subplanstates = NIL;
             es_exprcontexts: PgVec::new_in(mcx),
             es_subplanstates: PgVec::new_in(mcx),
+            es_initplan: PgVec::new_in(mcx),
             // es_auxmodifytables = NIL;
             es_auxmodifytables: PgVec::new_in(mcx),
             // es_per_tuple_exprcontext = NULL;

@@ -183,7 +183,7 @@ fn ExecHashSubPlan<'mcx>(
 
     // If first time through or we need to rescan the subplan, build the hash
     // table.  (node->hashtable == NULL || planstate->chgParam != NULL)
-    let need_build = node.hashtable.is_none() || planstate_chgparam_set(node);
+    let need_build = node.hashtable.is_none() || planstate_chgparam_set(node, estate);
     if need_build {
         buildSubPlanHash(node, econtext, estate)?;
     }
@@ -283,7 +283,7 @@ fn ExecScanSubPlan<'mcx>(
     //       planstate->chgParam = bms_add_member(planstate->chgParam, paramid);
     let parParam = clone_int_list(estate.es_query_cxt, &subplan_ref(node)?.parParam)?;
     for paramid in parParam {
-        let ps = planstate_head_mut(node)?;
+        let ps = planstate_head_mut(node, estate)?;
         let old = ps.chgParam.take();
         ps.chgParam = Some(bms::bms_add_member::call(per_query, old, paramid)?);
     }
@@ -462,7 +462,7 @@ fn buildSubPlanHash<'mcx>(
     node.havenullrows = false;
 
     // nbuckets = clamp_cardinality_to_long(planstate->plan->plan_rows);
-    let plan_rows = planstate_plan_rows(node)?;
+    let plan_rows = planstate_plan_rows(node, estate)?;
     let mut nbuckets = costsize::clamp_cardinality_to_long::call(plan_rows);
     if nbuckets < 1 {
         nbuckets = 1;
@@ -844,10 +844,10 @@ pub fn ExecInitSubPlan<'mcx>(
     let setParam = clone_int_list(estate.es_query_cxt, &subplan.setParam)?;
     sstate.subplan = Some(subplan);
 
-    // Link the SubPlanState to the already-initialized subplan state tree
-    // (es_subplanstates[plan_id - 1]) and check it is non-NULL; the executor
-    // owns that list, so it installs the link.
-    exec_main::link_subplan_planstate::call(&mut sstate, estate, plan_id)?;
+    // Verify the subplan state tree (es_subplanstates[plan_id - 1]) was
+    // initialized; the SubPlanState reaches it by index at exec time (the
+    // executor owns that list).
+    exec_main::link_subplan_planstate::call(estate, plan_id)?;
 
     // sstate->testexpr = ExecInitExpr((Expr *) subplan->testexpr, parent);
     exec_expr::sub_init_testexpr::call(&mut sstate, estate)?;
@@ -1192,7 +1192,7 @@ pub fn ExecReScanSetParamPlan<'mcx>(
         return Err(elog_internal("setParam list of initplan is empty"));
     }
     // if (bms_is_empty(planstate->plan->extParam)) elog(ERROR, ...)
-    if planstate_extparam_is_empty(node)? {
+    if planstate_extparam_is_empty(node, estate)? {
         return Err(elog_internal("extParam set of initplan is empty"));
     }
 
@@ -1246,32 +1246,72 @@ fn subplan_ref<'a, 'mcx>(
 
 /// `node->planstate` head, mutably (the C dereferences it unconditionally).
 #[inline]
-fn planstate_head_mut<'a, 'mcx>(
-    node: &'a mut SubPlanState<'mcx>,
-) -> PgResult<&'a mut types_nodes::execnodes::PlanStateData<'mcx>> {
-    node.planstate
-        .as_deref_mut()
-        .map(|ps| ps.ps_head_mut())
+/// `node->planstate` — the subselect plan's state tree, owned by
+/// `EState.es_subplanstates` and addressed by the subplan's 1-based `plan_id`
+/// (`list_nth(es_subplanstates, plan_id - 1)`). The owned model keeps ownership
+/// in `es_subplanstates` (teardown owner `ExecEndPlan`), so the `SubPlanState`
+/// reaches its child state by index rather than holding an aliasing box.
+#[inline]
+fn child_plan_id(node: &SubPlanState<'_>) -> PgResult<i32> {
+    node.subplan
+        .as_deref()
+        .map(|sp| sp.plan_id)
+        .ok_or_else(|| elog_internal("SubPlanState has no subplan"))
+}
+
+#[inline]
+fn child_planstate_idx(node: &SubPlanState<'_>) -> PgResult<usize> {
+    (child_plan_id(node)? as usize)
+        .checked_sub(1)
         .ok_or_else(|| elog_internal("SubPlanState has no planstate"))
+}
+
+#[inline]
+fn child_planstate<'a, 'mcx>(
+    node: &SubPlanState<'mcx>,
+    estate: &'a EStateData<'mcx>,
+) -> PgResult<&'a types_nodes::planstate::PlanStateNode<'mcx>> {
+    let idx = child_planstate_idx(node)?;
+    estate
+        .es_subplanstates
+        .get(idx)
+        .and_then(|b| b.as_deref())
+        .ok_or_else(|| elog_internal("SubPlanState has no planstate"))
+}
+
+#[inline]
+fn child_planstate_mut<'a, 'mcx>(
+    node: &SubPlanState<'mcx>,
+    estate: &'a mut EStateData<'mcx>,
+) -> PgResult<&'a mut types_nodes::planstate::PlanStateNode<'mcx>> {
+    let idx = child_planstate_idx(node)?;
+    estate
+        .es_subplanstates
+        .get_mut(idx)
+        .and_then(|b| b.as_deref_mut())
+        .ok_or_else(|| elog_internal("SubPlanState has no planstate"))
+}
+
+fn planstate_head_mut<'a, 'mcx>(
+    node: &SubPlanState<'mcx>,
+    estate: &'a mut EStateData<'mcx>,
+) -> PgResult<&'a mut types_nodes::execnodes::PlanStateData<'mcx>> {
+    Ok(child_planstate_mut(node, estate)?.ps_head_mut())
 }
 
 /// `planstate->chgParam != NULL` — used to decide whether to rebuild the hash
 /// table.
 #[inline]
-fn planstate_chgparam_set(node: &SubPlanState<'_>) -> bool {
-    node.planstate
-        .as_deref()
+fn planstate_chgparam_set<'mcx>(node: &SubPlanState<'mcx>, estate: &EStateData<'mcx>) -> bool {
+    child_planstate(node, estate)
         .map(|ps| ps.ps_head().chgParam.is_some())
         .unwrap_or(false)
 }
 
 /// `planstate->plan->plan_rows` (`buildSubPlanHash`).
 #[inline]
-fn planstate_plan_rows(node: &SubPlanState<'_>) -> PgResult<f64> {
-    let ps = node
-        .planstate
-        .as_deref()
-        .ok_or_else(|| elog_internal("SubPlanState has no planstate"))?;
+fn planstate_plan_rows<'mcx>(node: &SubPlanState<'mcx>, estate: &EStateData<'mcx>) -> PgResult<f64> {
+    let ps = child_planstate(node, estate)?;
     let plan = ps
         .ps_head()
         .plan
@@ -1281,11 +1321,8 @@ fn planstate_plan_rows(node: &SubPlanState<'_>) -> PgResult<f64> {
 
 /// `bms_is_empty(planstate->plan->extParam)` (`ExecReScanSetParamPlan`).
 #[inline]
-fn planstate_extparam_is_empty(node: &SubPlanState<'_>) -> PgResult<bool> {
-    let ps = node
-        .planstate
-        .as_deref()
-        .ok_or_else(|| elog_internal("SubPlanState has no planstate"))?;
+fn planstate_extparam_is_empty<'mcx>(node: &SubPlanState<'mcx>, estate: &EStateData<'mcx>) -> PgResult<bool> {
+    let ps = child_planstate(node, estate)?;
     let plan = ps
         .ps_head()
         .plan
@@ -1294,17 +1331,41 @@ fn planstate_extparam_is_empty(node: &SubPlanState<'_>) -> PgResult<bool> {
     Ok(bms::bms_is_empty::call(ext))
 }
 
+/// Move the child subplan's owned plan-state box out of `es_subplanstates`
+/// (leaving the slot `None`), so it can be run with a live `&mut estate` (no
+/// self-alias). Pair with [`put_subplanstate`].
+#[inline]
+fn take_subplanstate<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    idx: usize,
+) -> PgResult<mcx::PgBox<'mcx, types_nodes::planstate::PlanStateNode<'mcx>>> {
+    estate
+        .es_subplanstates
+        .get_mut(idx)
+        .and_then(|slot| slot.take())
+        .ok_or_else(|| elog_internal("SubPlanState has no planstate"))
+}
+
+#[inline]
+fn put_subplanstate<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    idx: usize,
+    ps: mcx::PgBox<'mcx, types_nodes::planstate::PlanStateNode<'mcx>>,
+) {
+    estate.es_subplanstates[idx] = Some(ps);
+}
+
 /// `ExecReScan(node->planstate)` over the child subselect tree.
 #[inline]
 fn exec_re_scan_child<'mcx>(
     node: &mut SubPlanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    let ps = node
-        .planstate
-        .as_deref_mut()
-        .ok_or_else(|| elog_internal("SubPlanState has no planstate"))?;
-    exec_ami::exec_re_scan::call(ps, estate)
+    let idx = child_planstate_idx(node)?;
+    let mut ps = take_subplanstate(estate, idx)?;
+    let r = exec_ami::exec_re_scan::call(&mut ps, estate);
+    put_subplanstate(estate, idx, ps);
+    r
 }
 
 /// `slot = ExecProcNode(node->planstate)` over the child subselect tree;
@@ -1314,11 +1375,11 @@ fn exec_proc_node_child<'mcx>(
     node: &mut SubPlanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<types_nodes::SlotId>> {
-    let ps = node
-        .planstate
-        .as_deref_mut()
-        .ok_or_else(|| elog_internal("SubPlanState has no planstate"))?;
-    exec_procnode::exec_proc_node::call(ps, estate)
+    let idx = child_planstate_idx(node)?;
+    let mut ps = take_subplanstate(estate, idx)?;
+    let r = exec_procnode::exec_proc_node::call(&mut ps, estate);
+    put_subplanstate(estate, idx, ps);
+    r
 }
 
 /// `ResetExprContext(node->innerecontext)` — reset the inner exprcontext's
@@ -1458,6 +1519,7 @@ fn elog_unrecognized_testexpr(tag: i32) -> PgError {
 /// `backend-executor-nodeSubplan-seams`).
 pub fn init_seams() {
     backend_executor_nodeSubplan_seams::exec_re_scan_set_param_plan::set(ExecReScanSetParamPlan);
+    backend_executor_nodeSubplan_seams::exec_set_param_plan::set(ExecSetParamPlan);
     backend_executor_nodeSubplan_seams::exec_sub_plan::set(ExecSubPlan);
 
     // `ExecSetParamPlanMulti(params, econtext)` (nodeSubplan.c) on the parallel
