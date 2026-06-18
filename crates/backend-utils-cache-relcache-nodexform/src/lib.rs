@@ -85,7 +85,7 @@ fn pull_attrs_from_node_text<'mcx>(
         // implicit-AND `indpred` list).
         Node::List(elems) => {
             for elem in elems.iter() {
-                if let Node::Expr(e) = &**elem {
+                if let Some(e) = elem.as_expr() {
                     let bms = var_seam::pull_varattnos::call(mcx, e, 1)?;
                     out.extend(bms_members(bms.as_deref()));
                 }
