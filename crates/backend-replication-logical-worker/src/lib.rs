@@ -26,9 +26,15 @@
 
 #![allow(non_snake_case)]
 
+extern crate alloc;
+use alloc::string::String;
+
+use types_core::{Oid, XLogRecPtr};
 use types_error::PgResult;
+use types_replication_launcher::LogicalRepWorkerType;
 use types_storage::LWLockMode;
 
+use backend_replication_logical_launcher::with_my_logical_rep_worker;
 use backend_storage_lmgr_lwlock_seams as lwlock;
 
 /// `LogicalRepWorkerLock` — individual built-in LWLock #43 (lwlocklist.h).
@@ -52,6 +58,84 @@ thread_local! {
     /// `static List *on_commit_wakeup_workers_subids = NIL;` (worker.c:295).
     static ON_COMMIT_WAKEUP_WORKERS_SUBIDS: core::cell::RefCell<Vec<types_core::Oid>> =
         const { core::cell::RefCell::new(Vec::new()) };
+}
+
+// ===========================================================================
+// worker.c backend-global apply-worker identity state.
+// ===========================================================================
+//
+// These mirror the worker.c globals that the apply main loop sets when it
+// attaches and (re-)reads its subscription. The apply engine itself stays
+// unported under #351, but its identity-state globals are owned here and read
+// across the worker/launcher/parallel-apply cycle through the worker seams.
+//
+//   `Subscription *MySubscription = NULL;`            (worker.c:292)
+//   `bool InitializingApplyWorker = false;`           (worker.c:312)
+//   `WalReceiverConn *LogRepWorkerWalRcvConn = NULL;` (worker.c:290)
+//
+// Each is a per-backend global, so it is modeled with the established backend-
+// global thread-local pattern. `MySubscription` is carried as the value-typed
+// subset the cross-cycle seam consumers read (`oid`, `name`, `skiplsn`); the
+// rest of the C `Subscription` fields are read only inside the unported apply
+// engine and are populated alongside it when it lands. `None` mirrors the C
+// `NULL` (a read of `MySubscription->field` against `NULL` is a bug in C, so
+// the infallible accessors panic, mirroring that NULL-deref).
+
+/// Value-typed subset of `MySubscription` (`catalog/pg_subscription.h`
+/// `Subscription`) reached across the worker/launcher/parallel-apply seam
+/// cycle. The full struct is read only inside the unported apply engine.
+#[derive(Clone, Debug, Default)]
+pub struct MySubscriptionState {
+    /// `MySubscription->oid`.
+    pub oid: Oid,
+    /// `MySubscription->name`.
+    pub name: String,
+    /// `MySubscription->skiplsn`.
+    pub skiplsn: XLogRecPtr,
+}
+
+thread_local! {
+    /// `Subscription *MySubscription = NULL;` (worker.c:292).
+    static MY_SUBSCRIPTION: core::cell::RefCell<Option<MySubscriptionState>> =
+        const { core::cell::RefCell::new(None) };
+
+    /// `bool InitializingApplyWorker = false;` (worker.c:312).
+    static INITIALIZING_APPLY_WORKER: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+
+    /// `WalReceiverConn *LogRepWorkerWalRcvConn = NULL;` (worker.c:290) —
+    /// modeled as the "is a connection held?" predicate the cross-cycle path
+    /// reads (`LogRepWorkerWalRcvConn != NULL`). The connection object itself
+    /// is owned by the unported apply engine / walreceiver dispatch.
+    static HAVE_WALRCV_CONN: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+/// Set/clear `MySubscription` (worker.c). Called by the apply engine's
+/// `InitializeLogRepWorker` / `maybe_reread_subscription` when it lands; `None`
+/// resets it to the C `NULL`.
+pub fn set_my_subscription(sub: Option<MySubscriptionState>) {
+    MY_SUBSCRIPTION.with(|c| *c.borrow_mut() = sub);
+}
+
+/// Set `InitializingApplyWorker` (worker.c).
+pub fn set_initializing_apply_worker(v: bool) {
+    INITIALIZING_APPLY_WORKER.with(|c| c.set(v));
+}
+
+/// Set whether `LogRepWorkerWalRcvConn` is currently non-NULL (worker.c).
+pub fn set_have_walrcv_conn(v: bool) {
+    HAVE_WALRCV_CONN.with(|c| c.set(v));
+}
+
+/// Read a field of `*MySubscription`. Panics if `MySubscription == NULL`,
+/// mirroring the C NULL-deref (only reachable inside an attached apply worker).
+fn with_my_subscription<R>(f: impl FnOnce(&MySubscriptionState) -> R) -> R {
+    MY_SUBSCRIPTION.with(|c| {
+        let b = c.borrow();
+        let sub = b
+            .as_ref()
+            .expect("MySubscription is NULL (read outside an apply worker)");
+        f(sub)
+    })
 }
 
 // ===========================================================================
@@ -159,4 +243,86 @@ pub fn init_seams() {
     });
 
     s::LogicalRepWorkersWakeupAtCommit::set(LogicalRepWorkersWakeupAtCommit);
+
+    // -------------------------------------------------------------------
+    // Apply-worker / subscription identity + state accessors.
+    //
+    // The `MyLogicalRepWorker->field` reads resolve against the launcher-owned
+    // shared worker slot (`with_my_logical_rep_worker`); the `MySubscription`
+    // and worker.c-global reads resolve against this crate's backend-global
+    // state. The infallible seams panic on a NULL-deref (read outside an
+    // attached apply worker), mirroring the C inline accessors.
+    // -------------------------------------------------------------------
+
+    // `am_leader_apply_worker()` (worker_internal.h:341):
+    //   Assert(MyLogicalRepWorker->in_use);
+    //   return (MyLogicalRepWorker->type == WORKERTYPE_APPLY);
+    s::am_leader_apply_worker::set(|| {
+        with_my_logical_rep_worker(|w| {
+            debug_assert!(w.in_use);
+            w.wtype == LogicalRepWorkerType::Apply
+        })
+    });
+
+    // `am_parallel_apply_worker()` (worker_internal.h:348):
+    //   Assert(MyLogicalRepWorker->in_use);
+    //   return isParallelApplyWorker(MyLogicalRepWorker);
+    s::am_parallel_apply_worker::set(|| {
+        with_my_logical_rep_worker(|w| {
+            debug_assert!(w.in_use);
+            w.is_parallel_apply_worker()
+        })
+        .expect("am_parallel_apply_worker read outside an apply worker")
+    });
+
+    // `MyLogicalRepWorker->parallel_apply`.
+    s::my_worker_parallel_apply::set(|| {
+        with_my_logical_rep_worker(|w| w.parallel_apply)
+            .expect("MyLogicalRepWorker->parallel_apply read outside an apply worker")
+    });
+
+    // `MyLogicalRepWorker->dbid`.
+    s::my_worker_dbid::set(|| {
+        with_my_logical_rep_worker(|w| w.dbid)
+            .expect("MyLogicalRepWorker->dbid read outside an apply worker")
+    });
+
+    // `MyLogicalRepWorker->userid`.
+    s::my_worker_userid::set(|| {
+        with_my_logical_rep_worker(|w| w.userid)
+            .expect("MyLogicalRepWorker->userid read outside an apply worker")
+    });
+
+    // `MyLogicalRepWorker->subid`.
+    s::my_worker_subid::set(|| {
+        with_my_logical_rep_worker(|w| w.subid)
+            .expect("MyLogicalRepWorker->subid read outside an apply worker")
+    });
+
+    // `MyLogicalRepWorker->leader_pid`.
+    s::my_worker_leader_pid::set(|| {
+        with_my_logical_rep_worker(|w| w.leader_pid)
+            .expect("MyLogicalRepWorker->leader_pid read outside an apply worker")
+    });
+
+    // `MyLogicalRepWorker->generation`.
+    s::my_worker_generation::set(|| {
+        with_my_logical_rep_worker(|w| w.generation)
+            .expect("MyLogicalRepWorker->generation read outside an apply worker")
+    });
+
+    // `MySubscription->skiplsn`.
+    s::my_subscription_skiplsn::set(|| with_my_subscription(|s| s.skiplsn));
+
+    // `MySubscription->oid`.
+    s::my_subscription_oid::set(|| with_my_subscription(|s| s.oid));
+
+    // `MySubscription->name`.
+    s::my_subscription_name::set(|| with_my_subscription(|s| s.name.clone()));
+
+    // `InitializingApplyWorker` (worker.c global).
+    s::initializing_apply_worker::set(|| INITIALIZING_APPLY_WORKER.with(|c| c.get()));
+
+    // `LogRepWorkerWalRcvConn != NULL` (worker.c global).
+    s::have_walrcv_conn::set(|| HAVE_WALRCV_CONN.with(|c| c.get()));
 }

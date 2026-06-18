@@ -930,6 +930,18 @@ fn my_worker_subid() -> PgResult<Oid> {
     Ok(with_workers(|ws| ws[slot as usize].subid))
 }
 
+/// Read a field of `*MyLogicalRepWorker` — the launcher-owned shared slot this
+/// backend attached to. Mirrors the worker.c inline accessors that dereference
+/// the `MyLogicalRepWorker` global pointer. Errors (rather than NULL-derefs)
+/// when no slot is attached, which in C would be a bug.
+///
+/// The `LogicalRepWorker` slot is `Copy`, so the closure is handed a copy of
+/// the slot under `LogicalRepWorkerLock`-equivalent (`with_workers`) access.
+pub fn with_my_logical_rep_worker<R>(f: impl FnOnce(&LogicalRepWorker) -> R) -> PgResult<R> {
+    let slot = my_worker_slot()?;
+    Ok(with_workers(|ws| f(&ws[slot as usize])))
+}
+
 // ===========================================================================
 // logicalrep_launcher_onexit / logicalrep_worker_onexit (static).
 // ===========================================================================

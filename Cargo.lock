@@ -14447,6 +14447,7 @@ dependencies = [
  "backend-storage-lmgr-lwlock-seams",
  "types-core",
  "types-error",
+ "types-replication-launcher",
  "types-storage",
 ]
 
