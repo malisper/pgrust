@@ -7755,6 +7755,7 @@ dependencies = [
  "backend-catalog-pg-tablespace-seams",
  "backend-commands-comment",
  "backend-commands-seclabel",
+ "backend-commands-tablecmds-seams",
  "backend-commands-tablespace-globals-seams",
  "backend-commands-tablespace-seams",
  "backend-common-relpath",

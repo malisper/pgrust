@@ -1734,6 +1734,17 @@ pub fn init_seams() {
     });
     backend_commands_tablespace_seams::tablespace_create_dbspace::set(TablespaceCreateDbspace);
 
+    // tablecmds DefineRelation reads the default tablespace through the
+    // tablecmds-seams `get_default_tablespace` seam; the body
+    // (GetDefaultTablespace) is owned here. The outward seam carries no mcx, so
+    // open a transient context (mirrors C's use of CurrentMemoryContext for the
+    // short-lived GUC read / catalog scan). relpersistence crosses as `u8`
+    // (C `char`).
+    backend_commands_tablecmds_seams::get_default_tablespace::set(|relpersistence, partitioned| {
+        let ctx = MemoryContext::new("GetDefaultTablespace");
+        GetDefaultTablespace(ctx.mcx(), relpersistence as i8, partitioned)
+    });
+
     // --- GUC string/bool variable readers (guc_tables) -----------------------
     // These three are ordinary GUC-slot variables in C (guc_tables.c declares
     // them with `&default_tablespace` / `&temp_tablespaces` /

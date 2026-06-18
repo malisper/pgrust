@@ -40,6 +40,9 @@ backend-utils-init-small = { path = "../backend-utils-init-small" }
 
 # Owner's own seam crate.
 backend-commands-tablespace-seams = { path = "../backend-commands-tablespace-seams" }
+# tablecmds DefineRelation reads the default tablespace through this seam; the
+# body (GetDefaultTablespace) is owned here, so we install it here.
+backend-commands-tablecmds-seams = { path = "../backend-commands-tablecmds-seams" }
 
 # ProcessUtility dispatch arms (installs the tablespace forwarding seams).
 backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
