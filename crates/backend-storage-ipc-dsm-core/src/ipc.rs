@@ -253,6 +253,18 @@ extern "C" fn atexit_callback() {
     if PROC_EXIT_DONE.load(Ordering::SeqCst) {
         return;
     }
+    // If a panic unwound the process entry point WITHOUT a clean proc_exit
+    // (PROC_EXIT_DONE still false), the thread's TLS may already be mid- or
+    // post-destruction by the time libc invokes this handler. Touching the
+    // on-exit lists then raises an AccessError; because this is an `extern "C"`
+    // (cannot-unwind) function, that panic aborts the process (SIGABRT) — the
+    // double-panic crash mode. Probe the TLS with try_with first: if it is gone,
+    // there is nothing safe to clean up, so return as a no-op instead of
+    // aborting. (When the TLS is still alive — a bare exit() that bypassed
+    // proc_exit — the backstop still fires, exactly as C intends.)
+    if ON_PROC_EXIT_LIST.try_with(|_| ()).is_err() {
+        return;
+    }
     // Clean up everything that must be cleaned up.
     // ... too bad we don't know the real exit code ...
     proc_exit_prepare(-1);
