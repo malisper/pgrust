@@ -155,7 +155,7 @@ pub fn GetCommandLogLevel(parsetree: &Node) -> PgResult<LogStmtLevel> {
             let mut analyze = false;
             // Look through an EXPLAIN ANALYZE to the contained stmt.
             for opt in &stmt.options {
-                if let Node::DefElem(de) = &**opt {
+                if let Some(de) = (**opt).as_defelem() {
                     if de.defname.as_deref() == Some("analyze") {
                         analyze = rt::def_get_boolean::call(opt);
                     }

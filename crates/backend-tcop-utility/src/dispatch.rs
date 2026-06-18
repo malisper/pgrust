@@ -679,9 +679,9 @@ pub fn ProcessUtilityForAlterTable<'mcx>(
 /// relation-removal (`RemoveRelations`) or general object-removal
 /// (`RemoveObjects`) executor.
 pub fn ExecDropStmt<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>, is_top_level: bool) -> PgResult<()> {
-    let dstmt = match stmt {
-        Node::DropStmt(d) => d,
-        _ => panic!("ExecDropStmt: not a DropStmt"),
+    let dstmt = match stmt.as_dropstmt() {
+        Some(d) => d,
+        None => panic!("ExecDropStmt: not a DropStmt"),
     };
     match dstmt.removeType {
         OBJECT_INDEX => {

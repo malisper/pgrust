@@ -8,6 +8,7 @@
 
 use backend_tcop_utility_out_seams as rt;
 use types_error::PgResult;
+use types_nodes::nodes::ntag;
 use types_nodes::nodes::Node;
 use types_nodes::nodes::{CMD_DELETE, CMD_INSERT, CMD_MERGE, CMD_SELECT, CMD_UTILITY};
 use types_tuple::heaptuple::TupleDesc;
@@ -22,9 +23,10 @@ use crate::consts::RECORDOID;
 /// Pure classification over a well-formed node; cannot `ereport` (matches the
 /// `utility_returns_tuples` inward-seam contract of `PgResult<bool>`).
 pub fn UtilityReturnsTuples(parsetree: &Node) -> PgResult<bool> {
-    let result = match parsetree {
+    let result = match parsetree.node_tag() {
         // case T_CallStmt: return (stmt->funcexpr->funcresulttype == RECORDOID);
-        Node::CallStmt(stmt) => {
+        ntag::T_CallStmt => {
+            let stmt = parsetree.expect_callstmt();
             // stmt->funcexpr is a FuncExpr once analyzed; reach it through the
             // Node::Expr(Expr::FuncExpr) arm. Any other shape is not a
             // record-returning CALL.
@@ -37,7 +39,8 @@ pub fn UtilityReturnsTuples(parsetree: &Node) -> PgResult<bool> {
             }
         }
         // case T_FetchStmt:
-        Node::FetchStmt(stmt) => {
+        ntag::T_FetchStmt => {
+            let stmt = parsetree.expect_fetchstmt();
             if stmt.ismove {
                 return Ok(false);
             }
@@ -57,11 +60,11 @@ pub fn UtilityReturnsTuples(parsetree: &Node) -> PgResult<bool> {
         //   if (!entry) return false;
         //   if (entry->plansource->resultDesc) return true;
         //   return false;
-        Node::ExecuteStmt(_) => rt::execute_stmt_has_result::call(parsetree),
+        ntag::T_ExecuteStmt => rt::execute_stmt_has_result::call(parsetree),
         // case T_ExplainStmt: return true;
-        Node::ExplainStmt(_) => true,
+        ntag::T_ExplainStmt => true,
         // case T_VariableShowStmt: return true;
-        Node::VariableShowStmt(_) => true,
+        ntag::T_VariableShowStmt => true,
         // default: return false;
         _ => false,
     };
@@ -82,11 +85,12 @@ pub fn UtilityTupleDescriptor<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     parsetree: &Node<'mcx>,
 ) -> PgResult<TupleDesc<'mcx>> {
-    let desc: TupleDesc<'mcx> = match parsetree {
+    let desc: TupleDesc<'mcx> = match parsetree.node_tag() {
         // case T_CallStmt: return CallStmtResultDesc((CallStmt *) parsetree);
-        Node::CallStmt(_) => rt::call_stmt_result_desc::call(mcx, parsetree),
+        ntag::T_CallStmt => rt::call_stmt_result_desc::call(mcx, parsetree),
         // case T_FetchStmt:
-        Node::FetchStmt(stmt) => {
+        ntag::T_FetchStmt => {
+            let stmt = parsetree.expect_fetchstmt();
             if stmt.ismove {
                 return Ok(None);
             }
@@ -102,11 +106,12 @@ pub fn UtilityTupleDescriptor<'mcx>(
         //   entry = FetchPreparedStatement(stmt->name, false);
         //   if (!entry) return NULL;
         //   return FetchPreparedStatementResultDesc(entry);
-        Node::ExecuteStmt(_) => rt::execute_stmt_result_desc::call(mcx, parsetree),
+        ntag::T_ExecuteStmt => rt::execute_stmt_result_desc::call(mcx, parsetree),
         // case T_ExplainStmt: return ExplainResultDesc((ExplainStmt *) parsetree);
-        Node::ExplainStmt(_) => rt::explain_result_desc::call(mcx, parsetree),
+        ntag::T_ExplainStmt => rt::explain_result_desc::call(mcx, parsetree),
         // case T_VariableShowStmt: return GetPGVariableResultDesc(n->name);
-        Node::VariableShowStmt(n) => {
+        ntag::T_VariableShowStmt => {
+            let n = parsetree.expect_variableshowstmt();
             rt::get_pg_variable_result_desc::call(mcx, n.name.as_deref())?
         }
         // default: return NULL;
@@ -149,10 +154,10 @@ pub fn QueryReturnsTuples<'mcx>(
 /// `castNode(Query, …)` recursion.
 pub fn UtilityContainsQuery<'a, 'mcx>(parsetree: &'a Node<'mcx>) -> Option<&'a Node<'mcx>> {
     // switch (nodeTag(parsetree)): each of the three arms pulls out `->query`.
-    let qry = match parsetree {
-        Node::DeclareCursorStmt(stmt) => stmt.query.as_deref(),
-        Node::ExplainStmt(stmt) => stmt.query.as_deref(),
-        Node::CreateTableAsStmt(stmt) => stmt.query.as_deref(),
+    let qry = match parsetree.node_tag() {
+        ntag::T_DeclareCursorStmt => parsetree.expect_declarecursorstmt().query.as_deref(),
+        ntag::T_ExplainStmt => parsetree.expect_explainstmt().query.as_deref(),
+        ntag::T_CreateTableAsStmt => parsetree.expect_createtableasstmt().query.as_deref(),
         // default: return NULL;
         _ => return None,
     };
