@@ -638,6 +638,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `readlink(path, buf, sizeof(buf))` (`unistd`, reached via misc.c
+    /// `pg_tablespace_location`) — read the target of the symbolic link at
+    /// `path`. `Ok(Some(target))` carries the link target as a byte string;
+    /// `Ok(None)` mirrors C's `errno == ENOENT` (the path does not exist); any
+    /// other `readlink` failure is the C `ereport(ERROR, errcode_for_file_access,
+    /// "could not read symbolic link")`, carried on `Err`. The target is returned
+    /// as `String` (paths are valid UTF-8 in practice).
+    pub fn read_link(path: &str) -> types_error::PgResult<Option<String>>
+);
+
+seam_core::seam!(
     /// `pg_mkdir_p(path, pg_dir_create_mode)` (`port/pgmkdirp.c`, reached via
     /// fd.c's directory helpers) — create the directory `path` and any missing
     /// parent directories. Returns `Ok(())` on success; on failure returns the

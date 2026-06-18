@@ -15382,6 +15382,7 @@ dependencies = [
  "backend-tcop-postgres-seams",
  "backend-utils-activity-stat-seams",
  "backend-utils-activity-waitevent-seams",
+ "backend-utils-adt-misc-seams",
  "backend-utils-error",
  "backend-utils-error-seams",
  "backend-utils-init-small-seams",

@@ -41,3 +41,6 @@ backend-utils-activity-stat-seams = { path = "../backend-utils-activity-stat-sea
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-storage-aio-core-seams = { path = "../backend-storage-aio-core-seams" }
 backend-utils-error-seams = { path = "../backend-utils-error-seams" }
+# misc.c `pg_tablespace_location` resolution seam (lstat S_ISLNK + readlink +
+# tablespace-OID guards) — installed here because the body is fd-coupled.
+backend-utils-adt-misc-seams = { path = "../backend-utils-adt-misc-seams" }

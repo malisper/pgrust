@@ -928,6 +928,132 @@ pub fn lstat_mtime(path: &str) -> PgResult<Option<i64>> {
     Ok(Some(st.st_mtime as i64))
 }
 
+/// `readlink(path, buf, sizeof(buf))` (misc.c `pg_tablespace_location`). Mirrors
+/// C: `Ok(None)` on `errno == ENOENT`, `Err(ereport(ERROR,
+/// errcode_for_file_access, "could not read symbolic link"))` on any other
+/// failure, and the link target (truncated to the returned length) on success.
+pub fn read_link(path: &str) -> PgResult<Option<String>> {
+    let cpath = match std::ffi::CString::new(path) {
+        Ok(c) => c,
+        Err(_) => {
+            return Err(file_access_error(
+                ERROR,
+                libc::ENOENT,
+                format!("could not read symbolic link \"{path}\": %m"),
+            ));
+        }
+    };
+    // readlink does not NUL-terminate; size the buffer generously (MAXPGPATH).
+    let mut buf = [0i8; 1024];
+    // SAFETY: cpath is NUL-terminated; buf is a valid writable region of len 1024.
+    let rllen =
+        unsafe { libc::readlink(cpath.as_ptr(), buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
+    if rllen < 0 {
+        let errno = errno_now();
+        if errno == libc::ENOENT {
+            return Ok(None);
+        }
+        return Err(file_access_error(
+            ERROR,
+            errno,
+            format!("could not read symbolic link \"{path}\": %m"),
+        ));
+    }
+    let bytes: Vec<u8> = buf[..rllen as usize].iter().map(|&b| b as u8).collect();
+    Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
+}
+
+/// `DEFAULTTABLESPACE_OID` (`catalog/pg_tablespace_d.h`).
+const DEFAULTTABLESPACE_OID: types_core::Oid = 1663;
+/// `GLOBALTABLESPACE_OID` (`catalog/pg_tablespace_d.h`).
+const GLOBALTABLESPACE_OID: types_core::Oid = 1664;
+/// `MAXPGPATH` (`pg_config_manual.h`) — `sizeof(targetpath)` in misc.c.
+const MAXPGPATH: usize = 1024;
+
+/// `pg_tablespace_location(tablespaceOid)` (misc.c:300) — the on-disk location
+/// of a tablespace, resolved by `lstat`/`readlink`-ing `pg_tblspc/<oid>`. The
+/// fd owner installs this seam (it is fd-coupled: it does a raw `lstat` for the
+/// `S_ISLNK` classification and `readlink` for the link target, exactly like the
+/// fd-level `lstat_mtime`/`read_link` primitives in this file). The
+/// `InvalidOid`→`MyDatabaseTableSpace` and default/global-tablespace guards are
+/// reproduced 1:1; the resolved path bytes are returned allocated in `mcx`.
+pub fn tablespace_location<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    tablespace_oid: types_core::Oid,
+) -> PgResult<mcx::PgVec<'mcx, u8>> {
+    use types_storage::file::PG_TBLSPC_DIR;
+
+    // if (tablespaceOid == InvalidOid) tablespaceOid = MyDatabaseTableSpace;
+    let mut tablespace_oid = tablespace_oid;
+    if tablespace_oid == types_core::primitive::InvalidOid {
+        tablespace_oid = backend_utils_init_small_seams::my_database_table_space::call();
+    }
+
+    // Return empty string for the cluster's default tablespaces.
+    if tablespace_oid == DEFAULTTABLESPACE_OID || tablespace_oid == GLOBALTABLESPACE_OID {
+        return mcx::vec_with_capacity_in(mcx, 0);
+    }
+
+    // snprintf(sourcepath, "%s/%u", PG_TBLSPC_DIR, tablespaceOid);
+    let sourcepath = format!("{PG_TBLSPC_DIR}/{tablespace_oid}");
+
+    // Before reading the link, lstat to check if the source is a symlink (a
+    // directory is possible for an in-place tablespace).
+    let cpath = match std::ffi::CString::new(sourcepath.as_str()) {
+        Ok(c) => c,
+        Err(_) => {
+            return Err(file_access_error(
+                ERROR,
+                libc::ENOENT,
+                format!("could not stat file \"{sourcepath}\": %m"),
+            ));
+        }
+    };
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: cpath is NUL-terminated; st is a valid out-param.
+    let sret = unsafe { libc::lstat(cpath.as_ptr(), &mut st) };
+    if sret < 0 {
+        return Err(file_access_error(
+            ERROR,
+            errno_now(),
+            format!("could not stat file \"{sourcepath}\": %m"),
+        ));
+    }
+
+    // if (!S_ISLNK(st.st_mode)) return sourcepath;
+    if (st.st_mode & libc::S_IFMT) != libc::S_IFLNK {
+        let bytes = sourcepath.as_bytes();
+        let mut out = mcx::vec_with_capacity_in(mcx, bytes.len())?;
+        out.extend_from_slice(bytes);
+        return Ok(out);
+    }
+
+    // rllen = readlink(sourcepath, targetpath, sizeof(targetpath));
+    let mut buf = [0i8; MAXPGPATH];
+    // SAFETY: cpath is NUL-terminated; buf is a valid writable region.
+    let rllen =
+        unsafe { libc::readlink(cpath.as_ptr(), buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
+    if rllen < 0 {
+        return Err(file_access_error(
+            ERROR,
+            errno_now(),
+            format!("could not read symbolic link \"{sourcepath}\": %m"),
+        ));
+    }
+    // if (rllen >= sizeof(targetpath)) ereport(ERROR, ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+    if rllen as usize >= MAXPGPATH {
+        return Err(PgError::error(format!(
+            "symbolic link \"{sourcepath}\" target is too long"
+        ))
+        .with_sqlstate(types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED));
+    }
+    // targetpath[rllen] = '\0'; PG_RETURN_TEXT_P(cstring_to_text(targetpath));
+    let target: Vec<u8> = buf[..rllen as usize].iter().map(|&b| b as u8).collect();
+    let mut out = mcx::vec_with_capacity_in(mcx, target.len())?;
+    out.extend_from_slice(&target);
+    Ok(out)
+}
+
 /// `rmtree(path, rmtopdir)` (common/rmtree.c) — recursively remove a directory
 /// tree. Returns `true` on full success; any failure is logged at WARNING (here
 /// via the elog seam) and yields `false`, matching C.
