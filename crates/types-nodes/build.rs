@@ -103,6 +103,332 @@ fn main() {
     .join("node_tree.rs");
     fs::write(&out_path, code)
         .unwrap_or_else(|e| panic!("cannot write {}: {e}", out_path.display()));
+
+    // ---- ADDITIVE: ntag consts + enum accessors over the hand-written enum --
+    // Node-opaque migration Phase 1 (docs/proposals/node-opaque-migration.md §3
+    // P1 + §5). This is 100% additive: it generates a `ntag` module of `T_*`
+    // consts and the full `as_/as_*_mut/expect_/is_/into_` accessor set, emitted
+    // as ENUM MATCHES over the CURRENT hand-written `enum Node`/`enum Expr`. The
+    // enum, `tag()`, `clone_in()`, and all consumers stay byte-identical; this
+    // establishes the stable accessor API that Phase 2 migrates onto.
+    let nodes_rs = manifest_dir.join("src/nodes.rs");
+    let primnodes_rs = manifest_dir.join("src/primnodes.rs");
+    println!("cargo:rerun-if-changed={}", nodes_rs.display());
+    println!("cargo:rerun-if-changed={}", primnodes_rs.display());
+    let nodes_src = fs::read_to_string(&nodes_rs)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", nodes_rs.display()));
+    let primnodes_src = fs::read_to_string(&primnodes_rs)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", primnodes_rs.display()));
+
+    let node_enum = parse_node_enum(&nodes_src);
+    assert!(!node_enum.is_empty(), "parsed zero Node enum variants");
+    let expr_enum = parse_expr_enum(&primnodes_src);
+    assert!(!expr_enum.is_empty(), "parsed zero Expr enum variants");
+    let existing = parse_existing_node_methods(&nodes_src);
+
+    let (ntag_code, acc_code) =
+        emit_node_accessors(&node_enum, &expr_enum, &tag_values, &existing);
+    let out_dir = PathBuf::from(
+        env::var_os("OUT_DIR").unwrap_or_else(|| panic!("build.rs main: OUT_DIR is not set")),
+    );
+    // The `ntag` module is module-scoped; the accessor methods are impl-scoped.
+    // Two files so each can be `include!`d at the right scope.
+    let ntag_path = out_dir.join("node_ntag.rs");
+    fs::write(&ntag_path, ntag_code)
+        .unwrap_or_else(|e| panic!("cannot write {}: {e}", ntag_path.display()));
+    let acc_path = out_dir.join("node_accessors.rs");
+    fs::write(&acc_path, acc_code)
+        .unwrap_or_else(|e| panic!("cannot write {}: {e}", acc_path.display()));
+}
+
+/// One variant of a parsed Rust enum: `Ident(<payload type text>)`.
+struct EnumVariant {
+    /// Variant name as it appears in the enum.
+    ident: String,
+    /// The full payload type text inside the parens, e.g.
+    /// `crate::nodeindexscan::TidScan<'mcx>` or `OpExpr` or
+    /// `PgVec<'mcx, NodePtr<'mcx>>`.
+    payload: String,
+}
+
+/// Parse `pub enum Node<'mcx> { Ident(Payload), ... }` from `src/nodes.rs` into
+/// (ident, payload-type-text) pairs. Mirrors `parse_nodes_list` in spirit; the
+/// single source of truth is the hand-written enum body. Skips doc/line/block
+/// comments and the routing `Expr` arm's children (handled separately).
+fn parse_node_enum(src: &str) -> Vec<EnumVariant> {
+    parse_rust_enum_body(src, "pub enum Node<'mcx> {")
+}
+
+/// Parse `pub enum Expr { Ident(Payload), ... }` from `src/primnodes.rs`.
+fn parse_expr_enum(src: &str) -> Vec<EnumVariant> {
+    parse_rust_enum_body(src, "pub enum Expr {")
+}
+
+/// Shared one-variant-per-line enum-body parser. Finds the opening header line,
+/// then reads single-line `Ident(Payload),` entries up to the matching closing
+/// `}` at column 0. Tolerant of doc-comments and `// ...` / `/* ... */` lines.
+fn parse_rust_enum_body(src: &str, header: &str) -> Vec<EnumVariant> {
+    let start = src
+        .find(header)
+        .unwrap_or_else(|| panic!("could not find enum header `{header}`"));
+    // Body begins after the header line's newline.
+    let after = &src[start + header.len()..];
+    let mut out = Vec::new();
+    for raw in after.lines() {
+        let line = raw.trim();
+        // The enum body terminates at the first `}` flush at the line start.
+        if raw.starts_with('}') {
+            break;
+        }
+        if line.is_empty()
+            || line.starts_with("//")
+            || line.starts_with("/*")
+            || line.starts_with('*')
+        {
+            continue;
+        }
+        // Expect `Ident(Payload),` — Payload may itself contain balanced parens
+        // / angle brackets; take everything between the FIRST `(` and the LAST
+        // `)` before the trailing comma.
+        let Some(open) = line.find('(') else {
+            continue;
+        };
+        let ident = line[..open].trim();
+        if ident.is_empty() || !ident.chars().next().unwrap().is_ascii_alphabetic() && !ident.starts_with('_') {
+            continue;
+        }
+        if !ident.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            continue;
+        }
+        let rest = &line[open + 1..];
+        let Some(close) = rest.rfind(')') else {
+            continue;
+        };
+        let payload = rest[..close].trim().to_string();
+        out.push(EnumVariant {
+            ident: ident.to_string(),
+            payload,
+        });
+    }
+    out
+}
+
+/// Collect the set of `pub fn <name>(` method names already defined in
+/// `src/nodes.rs` (hand-written accessors such as `as_var`, `as_table_func`),
+/// so the generator skips emitting a colliding name. Reconcile, don't collide.
+fn parse_existing_node_methods(src: &str) -> std::collections::BTreeSet<String> {
+    let mut set = std::collections::BTreeSet::new();
+    for raw in src.lines() {
+        let line = raw.trim();
+        if let Some(rest) = line.strip_prefix("pub fn ") {
+            if let Some(paren) = rest.find('(') {
+                let name = rest[..paren].trim();
+                if !name.is_empty() {
+                    set.insert(name.to_string());
+                }
+            }
+        }
+    }
+    set
+}
+
+/// Emit the additive `ntag` module + the enum-match accessor set into
+/// `$OUT_DIR/node_accessors.rs`, `include!`d inside `impl<'mcx> Node<'mcx>` (and
+/// the `ntag` module at file scope). `tag_values` is the nodetags.h tag->value
+/// map; every Node/Expr variant ident resolves through `T_<ident>` (verified
+/// 1:1 against the existing `tag()` match at port time).
+fn emit_node_accessors(
+    node: &[EnumVariant],
+    expr: &[EnumVariant],
+    tag_values: &BTreeMap<String, u32>,
+    existing: &std::collections::BTreeSet<String>,
+) -> (String, String) {
+    let mut s = String::new();
+    s.push_str(
+        "// @generated by types-nodes/build.rs (node-opaque migration P1).\n\
+         // DO NOT EDIT. Regenerated on every build. 100% ADDITIVE: `ntag` consts\n\
+         // (module scope) for every Node/Expr variant.\n\n",
+    );
+
+    // ---- ntag module: T_<Variant> consts for ALL Node + Expr variants -------
+    // The O(1) jump-table enabler Phase 2 migrates onto. Sourced from nodetags.h
+    // keyed by `T_<variant_ident>` (1:1 with the existing `tag()`/`expr_tag()`
+    // match values, verified at port time). The `Expr` routing arm of `Node` is
+    // not a real node and has no tag, so it is skipped.
+    s.push_str(
+        "/// `T_*` NodeTag constants for every `Node`/`Expr` variant — the\n\
+         /// O(1) tag-keyed dispatch surface for the node-opaque migration. Each\n\
+         /// const equals the `nodetags.h` value (and the existing `tag()` arm).\n\
+         /// Generated, additive.\n\
+         pub mod ntag {\n    \
+         use crate::nodes::NodeTag;\n",
+    );
+    let mut seen_tags: BTreeMap<String, u32> = BTreeMap::new();
+    let mut ntag_count = 0usize;
+    for v in node.iter().chain(expr.iter()) {
+        if v.ident == "Expr" {
+            continue;
+        }
+        let key = format!("T_{}", v.ident);
+        let Some(&val) = tag_values.get(&key) else {
+            panic!(
+                "node-opaque P1: enum variant `{}` has no `{}` in nodetags.h",
+                v.ident, key
+            );
+        };
+        match seen_tags.insert(key.clone(), val) {
+            Some(prev) => assert_eq!(
+                prev, val,
+                "node-opaque P1: tag `{key}` resolves to two values ({prev}, {val})"
+            ),
+            None => {
+                s.push_str(&format!(
+                    "    /// `{key}` = {val}\n    pub const {key}: NodeTag = NodeTag({val});\n",
+                ));
+                ntag_count += 1;
+            }
+        }
+    }
+    s.push_str("}\n\n");
+
+    // The generator itself asserts tag uniqueness above (distinct idents may
+    // legitimately share a tag — DistinctExpr / NullIfExpr alias OpExpr's
+    // payload but have their OWN tags, so no clash).
+    let _ = ntag_count;
+    let ntag_code = s;
+
+    // ---- accessor set, emitted inside `impl<'mcx> Node<'mcx>` ---------------
+    // For each Node-direct variant: as_<v>/as_<v>_mut/expect_<v>/is_<v>/into_<v>
+    // matching `Node::<V>(..)`. For each Expr-family variant: the same set
+    // routed through `Node::Expr(Expr::<V>(..))`. Node-direct wins on a name
+    // collision; any name already hand-written in nodes.rs is skipped.
+    let mut s = String::new();
+    s.push_str(
+        "// @generated by types-nodes/build.rs (node-opaque migration P1).\n\
+         // DO NOT EDIT. Regenerated on every build. 100% ADDITIVE accessor set\n\
+         // in its own `impl<'mcx> Node<'mcx>` block. Each method is an enum match\n\
+         // against the CURRENT enum — additive, behavior-preserving.\n\
+         impl<'mcx> crate::nodes::Node<'mcx> {\n",
+    );
+
+    let mut emitted_names: std::collections::BTreeSet<String> = existing.clone();
+    let mut method_count = 0usize;
+
+    // Node-direct variants first (they win collisions with Expr-routed names).
+    for v in node {
+        if v.ident == "Expr" {
+            continue; // the routing arm; its own as_expr is hand-written.
+        }
+        let lc = v.ident.to_ascii_lowercase();
+        let pat = format!("Node::{}(x)", v.ident);
+        let ty = ret_ty(&v.payload);
+        method_count += emit_accessor_block(
+            &mut s,
+            &lc,
+            &pat,
+            &ty,
+            &v.payload,
+            &v.ident,
+            &mut emitted_names,
+        );
+    }
+
+    // Expr-family variants, routed through `Node::Expr(Expr::<V>(..))`.
+    for v in expr {
+        let lc = v.ident.to_ascii_lowercase();
+        let pat = format!("Node::Expr(crate::primnodes::Expr::{}(x))", v.ident);
+        // Expr payloads are lifetime-free; qualify under crate::primnodes.
+        let ty = format!("crate::primnodes::{}", v.payload);
+        method_count += emit_accessor_block(
+            &mut s,
+            &lc,
+            &pat,
+            &ty,
+            &format!("crate::primnodes::{}", v.payload),
+            &v.ident,
+            &mut emitted_names,
+        );
+    }
+
+    s.push_str("}\n");
+    let _ = method_count;
+    (ntag_code, s)
+}
+
+/// Normalize a Node payload type-text into the accessor return type, leaving
+/// fully-qualified `crate::...` paths and `PgVec<...>` as-is (they already name
+/// the borrowed type). Returns the borrow target type text.
+fn ret_ty(payload: &str) -> String {
+    payload.to_string()
+}
+
+/// Emit the five accessors for one variant, skipping any whose name already
+/// exists. Returns the number of methods actually emitted.
+fn emit_accessor_block(
+    s: &mut String,
+    lc: &str,
+    pat: &str,
+    ret: &str,
+    owned: &str,
+    ident: &str,
+    emitted: &mut std::collections::BTreeSet<String>,
+) -> usize {
+    // The bound name in the pattern is `x`; the `is_` test wants a wildcard so
+    // it never binds (avoids unused-binding lints).
+    let pat_mut = pat.to_string();
+    let pat_wild = pat.replacen("(x)", "(_)", 1);
+    let mut n = 0;
+    let methods: [(String, String); 5] = [
+        (
+            format!("as_{lc}"),
+            format!(
+                "    /// `castNode({ident}, node)` (borrow) — `Some` iff this node is `{ident}`.\n    \
+                 pub fn as_{lc}(&self) -> Option<&{ret}> {{\n        \
+                 match self {{ {pat} => Some(x), _ => None }}\n    }}\n",
+            ),
+        ),
+        (
+            format!("as_{lc}_mut"),
+            format!(
+                "    /// `castNode({ident}, node)` (mutable borrow).\n    \
+                 pub fn as_{lc}_mut(&mut self) -> Option<&mut {ret}> {{\n        \
+                 match self {{ {pat_mut} => Some(x), _ => None }}\n    }}\n",
+            ),
+        ),
+        (
+            format!("expect_{lc}"),
+            format!(
+                "    /// `castNode({ident}, node)` (borrow, asserting) — panics if not `{ident}`.\n    \
+                 pub fn expect_{lc}(&self) -> &{ret} {{\n        \
+                 match self {{ {pat} => x, _ => ::core::panic!(\"expect_{lc}: not a {ident} node\") }}\n    }}\n",
+            ),
+        ),
+        (
+            format!("is_{lc}"),
+            format!(
+                "    /// `IsA(node, {ident})`.\n    \
+                 pub fn is_{lc}(&self) -> bool {{\n        \
+                 matches!(self, {pat_wild})\n    }}\n",
+            ),
+        ),
+        (
+            format!("into_{lc}"),
+            format!(
+                "    /// Consume into the `{ident}` payload, or `None` if not `{ident}`.\n    \
+                 pub fn into_{lc}(self) -> Option<{owned}> {{\n        \
+                 match self {{ {pat} => Some(x), _ => None }}\n    }}\n",
+            ),
+        ),
+    ];
+    for (name, body) in methods {
+        if emitted.contains(&name) {
+            continue;
+        }
+        emitted.insert(name);
+        s.push_str(&body);
+        n += 1;
+    }
+    n
 }
 
 /// How a variant participates in the central `out_node` / `read_node`
