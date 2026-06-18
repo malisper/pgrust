@@ -28,6 +28,9 @@ backend-access-nbtree-nbtree-seams = { path = "../backend-access-nbtree-nbtree-s
 
 # Outward seam crates (callees not yet ported).
 backend-access-nbtree-core-seams = { path = "../backend-access-nbtree-core-seams" }
+# btbuild (the AM ambuild) lives in nbtsort, ABOVE this crate; the vtable's
+# ambuild adapter bridges to it through this build-dispatch seam (#341).
+backend-access-nbtree-build-seams = { path = "../backend-access-nbtree-build-seams" }
 backend-access-common-indextuple-seams = { path = "../backend-access-common-indextuple-seams" }
 backend-access-index-indexam-seams = { path = "../backend-access-index-indexam-seams" }
 backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }

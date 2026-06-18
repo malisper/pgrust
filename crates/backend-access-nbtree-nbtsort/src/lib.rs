@@ -90,16 +90,32 @@ use backend_utils_sort_tuplesort_seams as tuplesort;
 pub mod deferred;
 
 // ===========================================================================
-// init_seams — nbtsort owns no inward seam.
+// init_seams — nbtsort owns the `btbuild` build-dispatch seam.
 //
-// `btbuild` (the AM ambuild) is deferred and is reached by name from the
-// `bthandler` AM-callback name list (not through a seam), so this crate
-// declares no `*-seams` crate of its own. Mirrors the `functioncmds` /
-// `nbtdedup` convention of an empty (or absent) inward-seam set.
+// `btbuild` (the btree AM `ambuild`) lives here, ABOVE the AM-vtable crate
+// (`backend-access-nbtree-nbtree`) in the dep graph, so the vtable's `ambuild`
+// adapter (`btbuild_am`) cannot call it directly. The cross-crate edge is
+// bridged through the `backend-access-nbtree-build-seams::btbuild` seam, which
+// nbtsort installs here: the adapter passes the `IndexInfoCarrier` (#342)
+// through, and this installer downcasts it back to the real
+// `types_nodes::execnodes::IndexInfo<'mcx>` before invoking the serial build.
 // ===========================================================================
 
-/// Install this crate's inward seams. nbtsort has none.
-pub fn init_seams() {}
+/// Install this crate's inward seams.
+pub fn init_seams() {
+    buildhelp::btbuild::set(|mcx, heap, index, index_info| {
+        // The dispatch layer (index.c) wraps the caller's owned
+        // `&mut IndexInfo<'mcx>` in the carrier; recover the concrete struct
+        // (tag-checked downcast — a NULL/wrong-type carrier is the C
+        // NULL-pointer programming error).
+        let info = index_info
+            .downcast_mut::<types_nodes::execnodes::IndexInfo<'_>>()
+            .unwrap_or_else(|| {
+                panic!("btbuild: IndexInfoCarrier did not carry the expected IndexInfo")
+            });
+        deferred::btbuild(mcx, heap, index, info)
+    });
+}
 
 // ===========================================================================
 // Page-layout constants and helpers (re-ported from nbtree.h / off.h).

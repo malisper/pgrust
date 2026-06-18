@@ -1038,6 +1038,14 @@ pub fn init_seams() {
             SetUserIdAndSecContext(id, sec_context);
             Ok(())
         });
+        // `CHECK_FOR_INTERRUPTS()` — the parallel-rt seam crate collects this
+        // decl (alongside ~15 other not-yet-ported owners) so the parallel
+        // orchestration can call it; the real body is postgres.c's
+        // `ProcessInterrupts`. Delegate to the interrupt owner's seam exactly as
+        // the miscinit-homed `s::check_for_interrupts` below does. Reached on the
+        // serial index-build / catalog paths (genam, catalog/index, namespace),
+        // not just parallel.c.
+        rt::check_for_interrupts::set(|| backend_tcop_postgres_seams::check_for_interrupts::call());
     }
 
     // ---- mis-homed slot-sync worker bootstrap group -----------------------

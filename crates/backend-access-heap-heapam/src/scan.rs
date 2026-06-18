@@ -1143,13 +1143,17 @@ pub fn heap_beginscan<'mcx>(
 
     // For seqscan and sample scans in a serializable transaction, acquire a
     // predicate lock on the entire relation.
+    //
+    // C calls `PredicateLockRelation(relation, snapshot)` unconditionally here;
+    // that function is a no-op for a NULL snapshot (`SerializationNeededForRead`
+    // returns false when `snapshot == NULL`). A NULL `rs_snapshot` ==
+    // `SnapshotAny` is the normal serial CREATE INDEX heap-scan case, so skip
+    // the predicate-lock seam (whose owner keys on a live snapshot) when there
+    // is no snapshot, matching C's early no-op return.
     if (flags & (SO_TYPE_SEQSCAN | SO_TYPE_SAMPLESCAN)) != 0 {
-        // Ensure a missing snapshot is noticed reliably.
-        let sn = sscan
-            .rs_snapshot
-            .as_ref()
-            .expect("heap_beginscan: seq/sample scan requires a snapshot");
-        predicate_seam::predicate_lock_relation::call(relid, sn)?;
+        if let Some(sn) = sscan.rs_snapshot.as_ref() {
+            predicate_seam::predicate_lock_relation::call(relid, sn)?;
+        }
     }
 
     // Allocate per-worker page-allocation state for a parallel scan.

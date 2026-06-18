@@ -14,6 +14,30 @@ use mcx::{Mcx, PgVec};
 use types_error::PgResult;
 use types_nbtree::BTScanInsert;
 use types_rel::Relation;
+use types_tableam::amapi::IndexBuildResult;
+use types_tableam::index_info_carrier::IndexInfoCarrier;
+
+seam_core::seam!(
+    /// `btbuild(heap, index, indexInfo)` (nbtsort.c): the btree AM's `ambuild`
+    /// entry — drive the serial CREATE INDEX build (create the spool(s), scan
+    /// the heap once feeding the per-tuple callback, then sort + leaf-load the
+    /// btree pages) and return the heap/index tuple counts.
+    ///
+    /// `btbuild`'s real body lives in `backend-access-nbtree-nbtsort`, which
+    /// sits ABOVE the AM-vtable crate (`backend-access-nbtree-nbtree`) in the
+    /// dep graph, so the vtable's `ambuild` adapter cannot call it directly.
+    /// This seam bridges that edge (owner = nbtsort, installed from its
+    /// `init_seams`): the adapter passes the `IndexInfoCarrier` (#342) through,
+    /// and nbtsort downcasts it back to the real
+    /// `types_nodes::execnodes::IndexInfo<'mcx>`. `Err` carries the build's
+    /// `ereport(ERROR)` surface.
+    pub fn btbuild<'mcx, 'a>(
+        mcx: Mcx<'mcx>,
+        heap: &Relation<'mcx>,
+        index: &Relation<'mcx>,
+        index_info: &mut IndexInfoCarrier<'a, 'mcx>,
+    ) -> PgResult<IndexBuildResult>
+);
 
 seam_core::seam!(
     /// `_bt_truncate(rel, lastleft, firstright, itup_key)` (nbtutils.c):

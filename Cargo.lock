@@ -2166,6 +2166,7 @@ dependencies = [
  "types-error",
  "types-nbtree",
  "types-rel",
+ "types-tableam",
 ]
 
 [[package]]
@@ -2240,6 +2241,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-common-indextuple-seams",
  "backend-access-index-indexam-seams",
+ "backend-access-nbtree-build-seams",
  "backend-access-nbtree-core-seams",
  "backend-access-nbtree-nbtree-seams",
  "backend-commands-vacuum-seams",

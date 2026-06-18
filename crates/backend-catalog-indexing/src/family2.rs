@@ -769,8 +769,13 @@ fn index_update_stats(rel: &Relation<'_>, hasindex: bool, reltuples: f64) -> PgR
      * Always update via a non-transactional, overwrite-in-place update (see
      * the three reasons in catalog/index.c: bootstrap, reindexing pg_class
      * itself, and the share-lock concurrent-CREATE-INDEX race).
+     *
+     * C: `pg_class = table_open(RelationRelationId, RowExclusiveLock)`. The row
+     * being updated belongs to `rel`, but the relation we open and poke in
+     * place is `pg_class` itself — so the column byte offsets must be computed
+     * from pg_class's descriptor, not from `rel`'s.
      */
-    let r = reopen(mcx, rel)?;
+    let r = table_open(mcx, cat::catalog::RELATION_RELATION_ID, RowExclusiveLock)?;
 
     // Compute the fixed data-area byte offsets of every column we touch.
     let tupdesc = r.rd_att_clone_in(mcx)?;

@@ -64,6 +64,7 @@ use types_tuple::backend_access_common_heaptuple::Datum;
 
 use backend_access_common_indextuple_seams::index_form_tuple;
 use backend_access_index_indexam_seams as parallel;
+use backend_access_nbtree_build_seams as buildhelp;
 use backend_access_nbtree_core_seams as core;
 use backend_storage_lmgr_condition_variable_seams as condvar;
 use backend_storage_lmgr_lwlock_seams as lwlock;
@@ -498,19 +499,16 @@ fn btparallelrescan_am<'mcx>(_mcx: Mcx<'mcx>, scan: &mut IndexScanDescData<'mcx>
 // `btbuildempty`/`btgettreeheight` ARE this crate's own fns, wired directly.
 
 /// `ambuild` adapter — `btbuild` (nbtsort.c) is above this crate in the dep
-/// graph; reached via the index.c build dispatch (#334/#341), which downcasts
-/// the `IndexInfoCarrier` back to the real `IndexInfo<'mcx>`.
+/// graph, so it is reached through the `btbuild` build-dispatch seam (#341,
+/// owned/installed by nbtsort), which downcasts the `IndexInfoCarrier` back to
+/// the real `IndexInfo<'mcx>` and drives the serial heap-scan build.
 fn btbuild_am<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _heap_relation: &Relation<'mcx>,
-    _index_relation: &Relation<'mcx>,
-    _index_info: &mut IndexInfoCarrier<'_, 'mcx>,
+    mcx: Mcx<'mcx>,
+    heap_relation: &Relation<'mcx>,
+    index_relation: &Relation<'mcx>,
+    index_info: &mut IndexInfoCarrier<'_, 'mcx>,
 ) -> PgResult<IndexBuildResult> {
-    panic!(
-        "btbuild: index.c build dispatch (#341) not yet ported — \
-         btbuild lives in backend-access-nbtree-nbtsort and needs the real \
-         types_nodes::execnodes::IndexInfo"
-    )
+    buildhelp::btbuild::call(mcx, heap_relation, index_relation, index_info)
 }
 
 /// `ambuildempty` adapter — wires this crate's `btbuildempty`.

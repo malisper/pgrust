@@ -1691,6 +1691,25 @@ pub fn init_seams() {
     backend_access_heap_vacuumlazy_seams::log_newpage_buffer::set(|buffer, page_std| {
         log_newpage_buffer(buffer, page_std).map(|_| ())
     });
+
+    // `log_newpages` (xloginsert.c) — WAL-log a batch of full-page images.
+    // Consumed by `smgr_bulk_flush` (bulk_write.c), reached on the index-AM
+    // build paths (nbtsort `_bt_load` / btree page write-out). xloginsert OWNS
+    // the C function. The seam hands the pages in as borrowed slices and wants
+    // nothing back; the owner takes/returns the pages by value (it stamps LSNs
+    // into non-new pages), so adapt: copy in, drop the returned images.
+    s::log_newpages::set(|rlocator, forknum, blknos, pages, page_std| {
+        let owned: Vec<Vec<u8>> = pages.iter().map(|p| p.to_vec()).collect();
+        log_newpages(
+            &rlocator,
+            forknum,
+            blknos.len() as i32,
+            blknos,
+            owned,
+            page_std,
+        )
+        .map(|_| ())
+    });
 }
 
 #[cfg(test)]
