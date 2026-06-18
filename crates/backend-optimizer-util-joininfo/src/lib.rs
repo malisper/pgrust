@@ -47,6 +47,7 @@ use backend_optimizer_path_equivclass_ext_seams as ec_ext_seam;
 use backend_optimizer_path_joinpath_seams as joinpath_seam;
 use backend_optimizer_path_small_seams as small_seam;
 use backend_optimizer_util_placeholder_seams as placeholder_seam;
+use backend_optimizer_util_restrictinfo_seams as rinfo_seam;
 pub(crate) use backend_optimizer_util_joininfo_ext_seams as ext_seam;
 use types_nodes::primnodes::Expr;
 
@@ -102,6 +103,62 @@ pub fn init_seams() {
                 incompatible_relids,
                 outer_relids,
             )
+        },
+    );
+
+    // restrictinfo.c — restrictinfo-seams (consumed by indxpath.c OR-clause
+    // index path building). `make_simple_restrictinfo(root, clause)` is the
+    // restrictinfo.h macro `make_restrictinfo(root, clause, true, false, false,
+    // false, 0, NULL, NULL, NULL)`. The seam identifies the clause by `NodeId`;
+    // the body resolves it to the arena `Expr` and forwards the macro defaults.
+    rinfo_seam::make_simple_restrictinfo::set(|root, clause| {
+        let clause_expr = root.node(clause).clone();
+        make_restrictinfo(
+            root,
+            clause_expr,
+            true,  // is_pushed_down
+            false, // has_clone
+            false, // is_clone
+            false, // pseudoconstant
+            0,     // security_level
+            None,  // required_relids
+            None,  // incompatible_relids
+            None,  // outer_relids
+        )
+        .expect("make_simple_restrictinfo")
+    });
+
+    // restrictinfo.c — `make_plain_restrictinfo(root, clause, orclause, ...)`
+    // (restrictinfo-seams), used by `group_similar_or_args` to build nested OR
+    // sub-restrictinfos. The seam carries clause+orclause as arena `NodeId`s.
+    rinfo_seam::make_plain_restrictinfo::set(
+        |root,
+         clause,
+         orclause,
+         is_pushed_down,
+         has_clone,
+         is_clone,
+         pseudoconstant,
+         security_level,
+         required_relids,
+         incompatible_relids,
+         outer_relids| {
+            let clause_expr = root.node(clause).clone();
+            let orclause_expr = Some(root.node(orclause).clone());
+            make_plain_restrictinfo(
+                root,
+                clause_expr,
+                orclause_expr,
+                is_pushed_down,
+                has_clone,
+                is_clone,
+                pseudoconstant,
+                security_level,
+                required_relids.clone(),
+                incompatible_relids.clone(),
+                outer_relids.clone(),
+            )
+            .expect("make_plain_restrictinfo")
         },
     );
 
