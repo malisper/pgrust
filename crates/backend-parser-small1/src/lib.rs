@@ -56,7 +56,7 @@ use types_error::error::{
 use types_error::{ErrorLocation, PgError, PgResult, SoftErrorContext, ERROR, NOTICE};
 use types_tuple::Datum;
 
-use types_nodes::nodes::Node;
+use types_nodes::nodes::{ntag, Node};
 use types_nodes::params::ParamRef;
 use types_nodes::parsestmt::{ParseExprKind, ParseRefHookState, ParseState, VarParamState};
 use types_nodes::primnodes::{Const, Expr, Param, SubscriptingRef, PARAM_EXTERN};
@@ -508,12 +508,14 @@ pub fn make_const<'mcx>(
         .as_deref()
         .expect("A_Const.val present when !isnull");
 
-    let (val, typeid, typelen, typebyval): (Datum<'mcx>, Oid, i32, bool) = match val_node {
-        Node::Integer(i) => {
+    let (val, typeid, typelen, typebyval): (Datum<'mcx>, Oid, i32, bool) = match val_node.node_tag() {
+        ntag::T_Integer => {
+            let i = val_node.expect_integer();
             // val = Int32GetDatum(intVal(&aconst->val));
             (Datum::from_i32(i.ival), INT4OID, 4, true)
         }
-        Node::Float(f) => {
+        ntag::T_Float => {
+            let f = val_node.expect_float();
             // could be an oversize integer as well as a float ...
             // val64 = pg_strtoint64_safe(fval, &escontext);
             match pg_strtoint64_safe(f.fval.as_str()) {
@@ -540,11 +542,13 @@ pub fn make_const<'mcx>(
                 }
             }
         }
-        Node::Boolean(b) => {
+        ntag::T_Boolean => {
+            let b = val_node.expect_boolean();
             // val = BoolGetDatum(boolVal(&aconst->val));
             (Datum::from_bool(b.boolval), BOOLOID, 1, true)
         }
-        Node::String(s) => {
+        ntag::T_String => {
+            let s = val_node.expect_string();
             // C (parse_node.c make_const, T_String arm):
             //   val = CStringGetDatum(strVal(&aconst->val));
             //   typeid = UNKNOWNOID; /* will be coerced later */
@@ -554,7 +558,8 @@ pub fn make_const<'mcx>(
             // here the canonical `Datum::Cstring` arm carries the owned text.
             (Datum::from_cstring(alloc::string::String::from(s.sval.as_str())), UNKNOWNOID, -2, false)
         }
-        Node::BitString(b) => {
+        ntag::T_BitString => {
+            let b = val_node.expect_bitstring();
             // val = DirectFunctionCall3(bit_in,
             //         CStringGetDatum(aconst->val.bsval.bsval),
             //         ObjectIdGetDatum(InvalidOid), Int32GetDatum(-1));
@@ -566,13 +571,13 @@ pub fn make_const<'mcx>(
             )?;
             (Datum::ByRef(bytes), BITOID, -1, false)
         }
-        other => {
+        _ => {
             // elog(ERROR, "unrecognized node type: %d", nodeTag)
             return Err(ereport(ERROR)
                 .errcode(ERRCODE_INTERNAL_ERROR)
                 .errmsg_internal(alloc::format!(
                     "unrecognized node type: {}",
-                    other.node_tag().0
+                    val_node.node_tag().0
                 ))
                 .into_error());
         }
@@ -938,10 +943,7 @@ fn query_contains_extern_params_walker_query(query: &Query<'_>) -> bool {
 
 /// `IsA(node, Param)` projection over the `Node` universe.
 fn node_as_param<'a>(node: &'a Node<'_>) -> Option<&'a Param> {
-    match node {
-        Node::Expr(Expr::Param(p)) => Some(p),
-        _ => None,
-    }
+    node.as_param()
 }
 
 /// `IsA(node, Query)` projection over the `Node` universe.
