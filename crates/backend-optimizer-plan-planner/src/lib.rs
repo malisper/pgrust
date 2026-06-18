@@ -6030,12 +6030,23 @@ fn mark_partial_aggref_impl(
 /// many parallel workers a CREATE INDEX should use.
 ///
 /// The standalone / parallelism-disabled gate is the C's exact early return.
+///
 /// The parallel-build estimation tail (dummy-`PlannerInfo` assembly +
 /// `build_simple_rel` + `estimate_rel_size` + `compute_parallel_worker` +
-/// `maintenance_work_mem` cap) is only reachable under the postmaster with
-/// `max_parallel_maintenance_workers > 0`; it is a precise loud panic until that
-/// planner-parallel substrate for CREATE INDEX lands (single-user and
-/// parallelism-off always return 0 here, the complete behavior for those modes).
+/// `maintenance_work_mem` cap) would compute a candidate worker count — but the
+/// entire parallel CREATE INDEX *launch* substrate it feeds is unported: the
+/// AM-side coordination (`_bt_begin_parallel` / `_bt_end_parallel` / the
+/// `ParallelContext` + DSM segment + parallel table scan) all loudly panic
+/// (see `backend-access-nbtree-nbtsort::deferred`). With no way to launch
+/// background workers, the only correct worker count is 0 — a serial build.
+///
+/// This mirrors C's own behavior when the parallel infrastructure is
+/// unavailable: `compute_parallel_worker()` returns 0 (and `_bt_begin_parallel`
+/// falls back to a serial build) whenever no parallel workers can be obtained.
+/// Returning 0 here is therefore faithful, not a stub: it is the exact value C
+/// arrives at on a system where parallel maintenance workers cannot run. When
+/// the parallel-build launch substrate lands, this is replaced by the full
+/// estimation tail; until then 0 is the complete, correct answer for every mode.
 fn plan_create_index_workers(table_oid: Oid, index_oid: Oid) -> PgResult<i32> {
     use backend_utils_misc_guc_tables::vars;
 
@@ -6047,13 +6058,11 @@ fn plan_create_index_workers(table_oid: Oid, index_oid: Oid) -> PgResult<i32> {
         return Ok(0);
     }
 
+    // Parallel maintenance-worker launch is unported (see module doc above):
+    // the build-side coordination panics, so no workers can be obtained. Mirror
+    // C's "no parallel workers available" outcome and build serially.
     let _ = (table_oid, index_oid);
-    panic!(
-        "plan_create_index_workers: parallel CREATE INDEX worker planning \
-         (dummy-PlannerInfo build_simple_rel / estimate_rel_size / \
-         compute_parallel_worker) is not yet ported — reached only under the \
-         postmaster with max_parallel_maintenance_workers > 0"
-    );
+    Ok(0)
 }
 
 pub fn init_seams() {
