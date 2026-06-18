@@ -985,6 +985,21 @@ pub(crate) fn get_relids_for_join<'mcx>(
     Ok(relids_to_expr_relids(relids.as_deref()))
 }
 
+/// `get_relids_in_jointree((Node *) query->jointree, true, false)`
+/// (prepjointree.c, reached from optimizer/util/var.c `mark_nullable_by_grouping`):
+/// the set of base+OJ relids present in the whole query jointree. Returned as the
+/// lifetime-free [`ExprRelids`].
+pub(crate) fn get_relids_in_query_jointree<'mcx>(
+    mcx: Mcx<'mcx>,
+    query: &Query<'mcx>,
+) -> PgResult<ExprRelids> {
+    let relids = match query.jointree.as_deref() {
+        None => None,
+        Some(f) => get_relids_in_fromexpr(mcx, f, true, false)?,
+    };
+    Ok(relids_to_expr_relids(relids.as_deref()))
+}
+
 // ===========================================================================
 // get_nullingrels (prepjointree.c:4361)
 // ===========================================================================

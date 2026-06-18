@@ -31,6 +31,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use backend_nodes_core::node_walker::{expression_tree_walker_mut, query_tree_mutator};
+use backend_optimizer_path_equivclass_ext_seams as equivclass_ext_seam;
+use backend_rewrite_core::add_nulling_relids;
 use backend_rewrite_core::increment::IncrementVarSublevelsUp;
 use backend_rewrite_core::relids as expr_relids;
 use backend_rewrite_core::walkers::checkExprHasSubLink;
@@ -496,7 +498,7 @@ use types_pathnodes::PlannerInfo;
 /// (for `mark_nullable_by_grouping`) plus the `query` whose range table holds
 /// the RTE_GROUP entry.
 struct FlattenGroupCtx<'a, 'mcx> {
-    root: &'a PlannerInfo,
+    root: &'a mut PlannerInfo,
     query: &'a Query<'mcx>,
     sublevels_up: i32,
     possible_sublink: bool,
@@ -511,7 +513,7 @@ struct FlattenGroupCtx<'a, 'mcx> {
 /// is the targetList/havingQual (an expression or list of expressions).
 pub fn flatten_group_exprs<'mcx>(
     mcx: Mcx<'mcx>,
-    root: &PlannerInfo,
+    root: &mut PlannerInfo,
     query: &Query<'mcx>,
     mut node: Node<'mcx>,
 ) -> PgResult<Node<'mcx>> {
@@ -583,7 +585,7 @@ fn flatten_group_exprs_mutator<'mcx>(
             }
 
             // Lastly, add any varnullingrels to the replacement expression.
-            *node = mark_nullable_by_grouping(context.root, newvar, &var)?;
+            *node = mark_nullable_by_grouping(mcx, context.root, context.query, newvar, &var)?;
             Ok(())
         }
         Node::Expr(Expr::Aggref(_)) => {
@@ -690,27 +692,113 @@ fn generic_recurse<'mcx>(
     }
 }
 
-/// `mark_nullable_by_grouping(root, newnode, oldvar)` (var.c:1107). Preserves the
-/// original Var's `varnullingrels` on the replacement expression. For the common
-/// case (no nullingrels — no GROUPING SETS and no grouping under an outer join)
-/// the replacement is returned unchanged.
-fn mark_nullable_by_grouping<'mcx>(
-    _root: &PlannerInfo,
-    newnode: Node<'mcx>,
+/// `mark_nullable_by_grouping(root, newnode, oldvar)` (var.c:1107). Add
+/// `oldvar`'s `varnullingrels`, if any, to the flattened grouping expression
+/// `newnode` (already copied, so freely mutable). For the common case (no
+/// nullingrels — no GROUPING SETS and no grouping under an outer join) the
+/// replacement is returned unchanged.
+fn mark_nullable_by_grouping<'n, 'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    query: &Query<'mcx>,
+    mut newnode: Node<'n>,
     oldvar: &Var,
-) -> PgResult<Node<'mcx>> {
+) -> PgResult<Node<'n>> {
     // C: if (root == NULL) return newnode; — root is always non-NULL here.
     if expr_relids::is_empty(&oldvar.varnullingrels) {
         return Ok(newnode); // nothing to do
     }
-    // The nullingrels-present path (grouping sets / grouping under an outer
-    // join) needs pull_varnos_of_level + add_nulling_relids / a PlaceHolderVar
-    // wrapper (make_placeholder_expr); none reachable on the plain GROUP BY path
-    // and gated out upstream (grouping sets loud-panic).
-    Err(PgError::error(
-        "mark_nullable_by_grouping: GROUP Var carries varnullingrels (grouping \
-         sets / outer-join nulling); the nullingrels-preserving path \
-         (pull_varnos_of_level + add_nulling_relids / make_placeholder_expr) is \
-         not ported",
-    ))
+
+    // Assert(bms_equal(oldvar->varnullingrels,
+    //                  bms_make_singleton(root->group_rtindex)));
+    debug_assert!({
+        let singleton = expr_relids::add_member(
+            ExprRelids { words: Vec::new() },
+            root.group_rtindex,
+        );
+        expr_relids::is_empty(&expr_relids::difference(&oldvar.varnullingrels, &singleton))
+            && expr_relids::is_empty(&expr_relids::difference(&singleton, &oldvar.varnullingrels))
+    });
+
+    // relids = pull_varnos_of_level(root, newnode, oldvar->varlevelsup);
+    let relids_bms = crate::var::pull_varnos_of_level(
+        Some(root),
+        &newnode,
+        oldvar.varlevelsup as i32,
+    );
+    let relids = bms_to_expr_relids(relids_bms.as_deref());
+
+    if !expr_relids::is_empty(&relids) {
+        // If the newnode is not variable-free, set the nullingrels of the Vars /
+        // PHVs contained in the expression.
+        add_nulling_relids(&mut newnode, Some(&relids), &oldvar.varnullingrels);
+    } else {
+        // Variable-free: if it contains neither volatile functions nor
+        // set-returning functions, wrap it in a new PlaceHolderVar carrying the
+        // nullingrels. Aggregate / window functions are not allowed in grouping
+        // expressions (the C asserts this).
+        let expr_ref = newnode.as_expr();
+        debug_assert!(!equivclass_ext_seam::contain_agg_clause::call(
+            expr_ref.expect("mark_nullable_by_grouping: grouping expr is not an Expr")
+        ));
+        debug_assert!(!equivclass_ext_seam::contain_window_function::call(
+            expr_ref.expect("mark_nullable_by_grouping: grouping expr is not an Expr")
+        ));
+
+        let expr = newnode
+            .as_expr()
+            .ok_or_else(|| PgError::error("mark_nullable_by_grouping: grouping expr is not an Expr"))?;
+        if !equivclass_ext_seam::contain_volatile_functions::call(expr)
+            && !equivclass_ext_seam::expression_returns_set::call(expr)
+        {
+            // phrels = get_relids_in_jointree((Node *) root->parse->jointree,
+            //                                 true, false);
+            let phrels_expr =
+                backend_optimizer_prep_prepjointree_seams::get_relids_in_query_jointree::call(
+                    mcx, query,
+                )?;
+            debug_assert!(!expr_relids::is_empty(&phrels_expr));
+            let phrels = expr_relids_to_relids(&phrels_expr);
+
+            let expr_val = match newnode {
+                Node::Expr(e) => e,
+                _ => unreachable!(),
+            };
+            let mut newphv =
+                backend_optimizer_util_placeholder_seams::make_placeholder_expr::call(
+                    root, expr_val, phrels,
+                );
+            // newphv has zero phlevelsup and NULL phnullingrels; fix it.
+            newphv.phlevelsup = oldvar.varlevelsup;
+            newphv.phnullingrels = expr_relids::copy(&oldvar.varnullingrels);
+            newnode = Node::Expr(Expr::PlaceHolderVar(newphv));
+        }
+    }
+
+    Ok(newnode)
+}
+
+/// `expr_relids_to_relids(er)` — the [`ExprRelids`] word-vector form (carried on
+/// Var/PHV fields) viewed as the `'mcx`-free [`Relids`] (`Bitmapset`) the
+/// PlannerInfo-facing seams (`make_placeholder_expr`) accept. Empty word vector
+/// maps to the empty (NULL) set.
+fn expr_relids_to_relids(er: &ExprRelids) -> types_pathnodes::Relids {
+    if er.words.iter().all(|&w| w == 0) {
+        None
+    } else {
+        Some(alloc::boxed::Box::new(types_pathnodes::Bitmapset {
+            words: er.words.clone(),
+        }))
+    }
+}
+
+/// Convert an `'mcx` [`Bitmapset`] to the lifetime-free [`ExprRelids`] word
+/// vector (Var/PHV relids fields carry [`ExprRelids`]).
+fn bms_to_expr_relids(a: Option<&types_pathnodes::Bitmapset>) -> ExprRelids {
+    match a {
+        None => ExprRelids { words: Vec::new() },
+        Some(bms) => ExprRelids {
+            words: bms.words.clone(),
+        },
+    }
 }

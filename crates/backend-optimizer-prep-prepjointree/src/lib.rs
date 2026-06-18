@@ -768,4 +768,7 @@ pub fn init_seams() {
     backend_optimizer_prep_prepjointree_seams::get_relids_for_join::set(
         result_rtes::get_relids_for_join,
     );
+    backend_optimizer_prep_prepjointree_seams::get_relids_in_query_jointree::set(
+        result_rtes::get_relids_in_query_jointree,
+    );
 }

@@ -12856,6 +12856,7 @@ dependencies = [
  "backend-optimizer-path-small-seams",
  "backend-optimizer-prep-prepjointree-seams",
  "backend-optimizer-util-joininfo-ext-seams",
+ "backend-optimizer-util-placeholder-seams",
  "backend-optimizer-util-relnode-ext-seams",
  "backend-optimizer-util-var-seams",
  "backend-rewrite-core",

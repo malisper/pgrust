@@ -42,3 +42,7 @@ backend-optimizer-prep-prepjointree-seams = { path = "../backend-optimizer-prep-
 # tlist.c owns create_empty_pathtarget(); relnode.c reaches it through the
 # relnode-ext consumer-side seam crate (no owner dir). This is its real owner.
 backend-optimizer-util-relnode-ext-seams = { path = "../backend-optimizer-util-relnode-ext-seams" }
+# mark_nullable_by_grouping (this owner) wraps a variable-free flattened grouping
+# expression in a PlaceHolderVar via placeholder.c's make_placeholder_expr
+# (declared in placeholder-seams — a seams crate, no cycle).
+backend-optimizer-util-placeholder-seams = { path = "../backend-optimizer-util-placeholder-seams" }

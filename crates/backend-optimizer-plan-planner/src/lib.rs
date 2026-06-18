@@ -1302,7 +1302,7 @@ fn subquery_planner<'mcx>(
                 if let Some(e) = expr_opt {
                     let node = Node::Expr(e);
                     let flattened = backend_optimizer_util_vars::flatten::flatten_group_exprs(
-                        mcx, &root, &ctx_query, node,
+                        mcx, &mut root, &ctx_query, node,
                     )?;
                     if let Node::Expr(ne) = flattened {
                         run.resolve_mut(root.parse).targetList[t].expr =
@@ -1319,7 +1319,7 @@ fn subquery_planner<'mcx>(
             if let Some(e) = having_opt {
                 let node = Node::Expr(e);
                 let flattened = backend_optimizer_util_vars::flatten::flatten_group_exprs(
-                    mcx, &root, &ctx_query, node,
+                    mcx, &mut root, &ctx_query, node,
                 )?;
                 if let Node::Expr(ne) = flattened {
                     run.resolve_mut(root.parse).havingQual = Some(mcx::alloc_in(mcx, ne)?);

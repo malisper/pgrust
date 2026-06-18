@@ -179,3 +179,17 @@ seam_core::seam!(
         joinrelid: i32,
     ) -> types_error::PgResult<types_nodes::primnodes::ExprRelids>
 );
+
+seam_core::seam!(
+    /// `get_relids_in_jointree((Node *) query->jointree, true, false)`
+    /// (prepjointree.c:4234), applied to the whole query jointree: the set of
+    /// base+OJ RT indexes present in the query. Consumed by
+    /// `mark_nullable_by_grouping` (optimizer/util/var.c) to compute the
+    /// syntactic `phrels` of a PlaceHolderVar wrapping a variable-free grouping
+    /// expression. Returned as the lifetime-free [`ExprRelids`] word storage.
+    /// Installed by the owner's `init_seams`.
+    pub fn get_relids_in_query_jointree<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        query: &types_nodes::copy_query::Query<'mcx>,
+    ) -> types_error::PgResult<types_nodes::primnodes::ExprRelids>
+);
