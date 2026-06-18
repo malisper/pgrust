@@ -20359,6 +20359,7 @@ dependencies = [
  "backend-tcop-pquery-seams",
  "backend-tcop-utility-seams",
  "backend-utils-cache-inval-pc-seams",
+ "backend-utils-cache-plancache-portal-seams",
  "backend-utils-cache-plancache-seams",
  "backend-utils-cache-syscache-pc-seams",
  "backend-utils-misc-backendstate-pc-seams",

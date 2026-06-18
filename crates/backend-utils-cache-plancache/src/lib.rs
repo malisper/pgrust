@@ -86,6 +86,7 @@ use backend_utils_resowner_pc_seams as resowner_seams;
 use backend_utils_time_snapmgr_pc_seams as snapmgr_seams;
 
 use backend_utils_cache_plancache_seams as inward;
+use backend_utils_cache_plancache_portal_seams as portal_inward;
 
 #[cfg(test)]
 mod tests;
@@ -1131,6 +1132,10 @@ fn BuildCachedPlan(
         // Own the planned stmts in plan_context (already allocated there).
         clone_plan_list_into(&plan_context, planned.as_slice())?
     };
+
+    // qlist's nodes were allocated in `transient`; drop them before that arena
+    // is freed so their deallocators uncharge against a live context.
+    drop(qlist);
 
     if snapshot_set {
         snapmgr_seams::pop_active_snapshot::call()?;
@@ -2292,6 +2297,15 @@ fn seam_release_cached_plan(cplan: SeamPlanHandle, owner: ResourceOwnerHandle) -
     ReleaseCachedPlan(cplan.0, owner)
 }
 
+/// Portal-release seam: `PortalReleaseCachedPlan` calls
+/// `ReleaseCachedPlan(portal->cplan, NULL)` (portalmem.c:314). With a NULL
+/// owner `ReleaseCachedPlan` only drops the refcount (the sole fallible path —
+/// `resource_owner_forget_plan` — is skipped), so this is infallible.
+fn seam_portal_release_cached_plan(plan: types_portal::CachedPlanHandle) {
+    ReleaseCachedPlan(plan.0, ResourceOwnerHandle::NULL)
+        .expect("ReleaseCachedPlan(plan, NULL) cannot fail");
+}
+
 /// `cached_plan_get_target_list(mcx, plansource)` — owned `Node` list.
 fn seam_cached_plan_get_target_list<'mcx>(
     mcx: Mcx<'mcx>,
@@ -2402,6 +2416,7 @@ pub fn init_seams() {
     inward::drop_cached_plan::set(seam_drop_cached_plan);
     inward::get_cached_plan::set(seam_get_cached_plan);
     inward::release_cached_plan::set(seam_release_cached_plan);
+    portal_inward::release_cached_plan::set(seam_portal_release_cached_plan);
     inward::cached_plan_get_target_list::set(seam_cached_plan_get_target_list);
     inward::plansource_fixed_result::set(seam_plansource_fixed_result);
     inward::plansource_num_params::set(seam_plansource_num_params);
