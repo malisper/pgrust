@@ -32,10 +32,12 @@ use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
 /// framing). `gin_cmp_tslexeme`'s core consumes exactly these header-less bytes.
 #[inline]
 fn arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    fcinfo
+    let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
-        .expect("tsginidx fn: text arg missing from by-ref lane")
+        .expect("tsginidx fn: text arg missing from by-ref lane");
+    // VARDATA_ANY: skip the 4-byte varlena header on the now header-ful image.
+    &image[types_datum::varlena::VARHDRSZ..]
 }
 
 #[inline]

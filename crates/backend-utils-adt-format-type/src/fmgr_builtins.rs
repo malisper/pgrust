@@ -58,7 +58,16 @@ fn arg_int32_opt(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Option<i32> {
 #[inline]
 fn ret_text_opt(fcinfo: &mut FunctionCallInfoBaseData, s: Option<String>) -> Datum {
     match s {
-        Some(s) => fcinfo.set_ref_result(RefPayload::Varlena(s.into_bytes())),
+        Some(s) => {
+            // cstring_to_text: prepend the 4-byte varlena header (header-ful).
+            let payload = s.into_bytes();
+            let mut img = Vec::with_capacity(types_datum::varlena::VARHDRSZ + payload.len());
+            img.extend_from_slice(&types_datum::varlena::set_varsize_4b(
+                types_datum::varlena::VARHDRSZ + payload.len(),
+            ));
+            img.extend_from_slice(&payload);
+            fcinfo.set_ref_result(RefPayload::Varlena(img));
+        }
         None => fcinfo.set_result_null(true),
     }
     Datum::from_usize(0)

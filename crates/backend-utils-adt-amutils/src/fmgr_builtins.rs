@@ -53,10 +53,12 @@ fn arg_int32(fcinfo: &FunctionCallInfoBaseData, i: usize) -> i32 {
 /// decoded as a `&str` (C: `text_to_cstring(PG_GETARG_TEXT_PP(i))`).
 #[inline]
 fn arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
-    let bytes = fcinfo
+    let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("amutils fn: text arg missing from by-ref lane");
+    // VARDATA_ANY: skip the 4-byte varlena header on the header-ful image.
+    let bytes = &image[types_datum::varlena::VARHDRSZ..];
     core::str::from_utf8(bytes).expect("amutils fn: text arg not valid UTF-8")
 }
 
@@ -81,7 +83,14 @@ fn ret_bool_opt(fcinfo: &mut FunctionCallInfoBaseData, v: Option<bool>) -> Datum
 fn ret_text_opt(fcinfo: &mut FunctionCallInfoBaseData, v: Option<String>) -> Datum {
     match v {
         Some(s) => {
-            fcinfo.set_ref_result(RefPayload::Varlena(s.into_bytes()));
+            // CStringGetTextDatum: prepend the 4-byte varlena header.
+            let payload = s.into_bytes();
+            let mut img = Vec::with_capacity(types_datum::varlena::VARHDRSZ + payload.len());
+            img.extend_from_slice(&types_datum::varlena::set_varsize_4b(
+                types_datum::varlena::VARHDRSZ + payload.len(),
+            ));
+            img.extend_from_slice(&payload);
+            fcinfo.set_ref_result(RefPayload::Varlena(img));
             Datum::from_usize(0)
         }
         None => {

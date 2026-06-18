@@ -70,10 +70,12 @@ fn arg_cstring<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
 /// trim any trailing NULs.
 #[inline]
 fn arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
-    let bytes = fcinfo
+    let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("misc2 fn: text arg missing from by-ref lane");
+    // VARDATA_ANY: skip the 4-byte varlena header on the header-ful image.
+    let bytes = &image[types_datum::varlena::VARHDRSZ..];
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     core::str::from_utf8(&bytes[..end]).expect("misc2 fn: text arg not valid UTF-8")
 }
@@ -125,12 +127,9 @@ fn ret_cstring(fcinfo: &mut FunctionCallInfoBaseData, s: String) -> Datum {
 fn ret_value_datum(fcinfo: &mut FunctionCallInfoBaseData, d: types_tuple::Datum<'_>) -> Datum {
     match d {
         types_tuple::Datum::ByRef(bytes) => {
-            let image = bytes.as_slice();
-            let payload = image
-                .get(types_datum::varlena::VARHDRSZ..)
-                .unwrap_or(&[])
-                .to_vec();
-            fcinfo.set_ref_result(RefPayload::Varlena(payload));
+            // Header-ful everywhere: the by-ref image (full varlena, header
+            // included) crosses verbatim onto the by-ref lane.
+            fcinfo.set_ref_result(RefPayload::Varlena(bytes.as_slice().to_vec()));
             Datum::from_usize(0)
         }
         types_tuple::Datum::ByVal(0) => ret_null(fcinfo),
@@ -693,16 +692,12 @@ fn ret_record(fcinfo: &mut FunctionCallInfoBaseData, t: &FormedTuple<'_>) -> Dat
     Datum::from_usize(0)
 }
 
-/// Set a `bytea` result (`record_send`) on the by-ref lane. The boundary's
-/// `RefPayload::Varlena` for a result carries the header-less payload; the core
-/// returns the full varlena image, so strip `VARHDRSZ`.
+/// Set a `bytea` result (`record_send`) on the by-ref lane. Header-ful
+/// everywhere: the core returns the full varlena image, carried verbatim (the
+/// protocol-level `VARHDRSZ` strip stays in fmgr-core's send path).
 #[inline]
 fn ret_bytea_image(fcinfo: &mut FunctionCallInfoBaseData, image: &[u8]) -> Datum {
-    let payload = image
-        .get(types_datum::varlena::VARHDRSZ..)
-        .unwrap_or(&[])
-        .to_vec();
-    fcinfo.set_ref_result(RefPayload::Varlena(payload));
+    fcinfo.set_ref_result(RefPayload::Varlena(image.to_vec()));
     Datum::from_usize(0)
 }
 

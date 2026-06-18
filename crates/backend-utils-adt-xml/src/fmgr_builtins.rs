@@ -27,10 +27,12 @@ use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
 /// (C: `VARDATA_ANY(data)` / `VARSIZE_ANY_EXHDR(data)`).
 #[inline]
 fn arg_text_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    fcinfo
+    let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
-        .expect("xml fn: text arg missing from by-ref lane")
+        .expect("xml fn: text arg missing from by-ref lane");
+    // VARDATA_ANY: skip the 4-byte varlena header on the header-ful image.
+    &image[types_datum::varlena::VARHDRSZ..]
 }
 
 /// `PG_RETURN_BOOL(b)`: the boolean result word.
@@ -88,7 +90,13 @@ fn arg_cstring<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
 /// `PG_RETURN_XML_P(x)` / `PG_RETURN_TEXT_P` — a by-ref varlena result word.
 #[inline]
 fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
-    fcinfo.set_ref_result(types_fmgr::RefPayload::Varlena(bytes));
+    // cstring_to_text: prepend the 4-byte varlena header (header-ful image).
+    let mut img = Vec::with_capacity(types_datum::varlena::VARHDRSZ + bytes.len());
+    img.extend_from_slice(&types_datum::varlena::set_varsize_4b(
+        types_datum::varlena::VARHDRSZ + bytes.len(),
+    ));
+    img.extend_from_slice(&bytes);
+    fcinfo.set_ref_result(types_fmgr::RefPayload::Varlena(img));
     Datum::from_usize(0)
 }
 

@@ -41,10 +41,12 @@ use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
 /// `nodeToString` rendering, always valid UTF-8 / ASCII).
 #[inline]
 fn arg_text_str<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
-    let bytes = fcinfo
+    let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("ruleutils fn: by-ref `text` arg missing from by-ref lane");
+    // VARDATA_ANY: skip the 4-byte varlena header on the header-ful image.
+    let bytes = &image[types_datum::varlena::VARHDRSZ..];
     core::str::from_utf8(bytes).expect("ruleutils fn: `text` arg not valid UTF-8")
 }
 
@@ -71,7 +73,13 @@ fn arg_int32(fcinfo: &FunctionCallInfoBaseData, i: usize) -> i32 {
 /// by-value word.
 #[inline]
 fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
-    fcinfo.set_ref_result(RefPayload::Varlena(bytes));
+    // string_to_text: prepend the 4-byte varlena header (header-ful image).
+    let mut img = Vec::with_capacity(types_datum::varlena::VARHDRSZ + bytes.len());
+    img.extend_from_slice(&types_datum::varlena::set_varsize_4b(
+        types_datum::varlena::VARHDRSZ + bytes.len(),
+    ));
+    img.extend_from_slice(&bytes);
+    fcinfo.set_ref_result(RefPayload::Varlena(img));
     Datum::from_usize(0)
 }
 
@@ -319,10 +327,15 @@ mod tests {
         ];
         // The encoded node text rides the by-ref lane header-stripped; our test
         // stringToNode ignores the bytes and yields a CURRENT_USER node.
-        fcinfo.ref_args = vec![
-            Some(RefPayload::Varlena(b"{SQLVALUEFUNCTION}".to_vec())),
-            None,
-        ];
+        // Header-ful everywhere: frame the encoded node text with a 4-byte
+        // varlena header (the boundary's `arg_text_str` strips VARDATA_ANY).
+        let payload = b"{SQLVALUEFUNCTION}";
+        let mut img = types_datum::varlena::set_varsize_4b(
+            types_datum::varlena::VARHDRSZ + payload.len(),
+        )
+        .to_vec();
+        img.extend_from_slice(payload);
+        fcinfo.ref_args = vec![Some(RefPayload::Varlena(img)), None];
 
         let entry =
             backend_utils_fmgr_core::fmgr_isbuiltin(1716).expect("pg_get_expr registered");
@@ -333,7 +346,9 @@ mod tests {
         let out = fcinfo.take_ref_result().expect("pg_get_expr produced a result");
         match out {
             RefPayload::Varlena(b) => {
-                assert_eq!(String::from_utf8(b).unwrap(), "CURRENT_USER");
+                // Header-ful result: skip the 4-byte varlena header.
+                let payload = &b[types_datum::varlena::VARHDRSZ..];
+                assert_eq!(core::str::from_utf8(payload).unwrap(), "CURRENT_USER");
             }
             other => panic!("pg_get_expr: unexpected result lane {other:?}"),
         }

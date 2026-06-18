@@ -66,10 +66,12 @@ fn arg_bool(fcinfo: &FunctionCallInfoBaseData, i: usize) -> bool {
 /// (C: `text_to_cstring(PG_GETARG_TEXT_PP(i))` reads exactly these bytes).
 #[inline]
 fn arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    fcinfo
+    let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
-        .expect("acl fn: text arg missing from by-ref lane")
+        .expect("acl fn: text arg missing from by-ref lane");
+    // VARDATA_ANY: skip the 4-byte varlena header on the header-ful image.
+    &image[types_datum::varlena::VARHDRSZ..]
 }
 
 /// A `name` arg's fixed `NAMEDATALEN` buffer on the by-ref lane, NUL-trimmed

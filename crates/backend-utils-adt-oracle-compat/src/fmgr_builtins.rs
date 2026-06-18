@@ -29,10 +29,12 @@ use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
 /// header).
 #[inline]
 fn arg_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    fcinfo
+    let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
-        .expect("oracle_compat fn: by-ref arg missing from by-ref lane")
+        .expect("oracle_compat fn: by-ref arg missing from by-ref lane");
+    // VARDATA_ANY: skip the 4-byte varlena header on the header-ful image.
+    &image[types_datum::varlena::VARHDRSZ..]
 }
 
 /// `PG_GETARG_INT32(i)`: the low 32 bits of arg `i`'s word.
@@ -51,7 +53,13 @@ fn collation(fcinfo: &FunctionCallInfoBaseData) -> Oid {
 /// by-ref lane and return the dummy word.
 #[inline]
 fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
-    fcinfo.set_ref_result(RefPayload::Varlena(bytes));
+    // PG_RETURN_TEXT_P: prepend the 4-byte varlena header (header-ful image).
+    let mut img = Vec::with_capacity(types_datum::varlena::VARHDRSZ + bytes.len());
+    img.extend_from_slice(&types_datum::varlena::set_varsize_4b(
+        types_datum::varlena::VARHDRSZ + bytes.len(),
+    ));
+    img.extend_from_slice(&bytes);
+    fcinfo.set_ref_result(RefPayload::Varlena(img));
     Datum::from_usize(0)
 }
 
