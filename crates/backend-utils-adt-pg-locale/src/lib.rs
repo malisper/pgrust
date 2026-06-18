@@ -190,7 +190,34 @@ pub fn init_seams() {
     seams::regex_wc_toupper::set(regex_locale::regex_wc_toupper);
     seams::regex_wc_tolower::set(regex_locale::regex_wc_tolower);
 
+    install_collationcmds_locale_seams();
+
     install_guc_hooks();
+}
+
+/// Install the locale-machinery seams that collationcmds.c reaches into
+/// pg_locale.c for (CREATE COLLATION). These are pg_locale.c-owned functions
+/// re-declared in `backend-commands-collationcmds-seams`; pg_locale (their real
+/// owner) is the installer.
+fn install_collationcmds_locale_seams() {
+    use backend_commands_collationcmds_seams as cc;
+
+    cc::builtin_locale_encoding::set(builtin_locale_encoding);
+    cc::builtin_validate_locale::set(builtin_validate_locale);
+    cc::icu_validate_locale::set(icu_validate_locale);
+    cc::icu_validation_level::set(|| Ok(setup::icu_validation_level()));
+
+    // `pg_get_encoding_from_locale(locale, false)` — chklocale.c (write_message
+    // is always false at collationcmds' call sites).
+    cc::pg_get_encoding_from_locale::set(|locale| chklocale::pg_get_encoding_from_locale(locale));
+
+    // `icu_language_tag(loc_str, elevel)` — in the ICU-disabled build this
+    // unconditionally `ereport(ERROR, FEATURE_NOT_SUPPORTED)`. The seam variant
+    // would return `Ok(None)` only where ICU is built; here it can only Err.
+    cc::icu_language_tag::set(|mcx, loc_str, _strength| {
+        icu_language_tag(mcx, loc_str).map(Some)
+    });
+    cc::icu_language_tag_error::set(|mcx, name| icu_language_tag(mcx, name));
 }
 
 /// Install the `lc_messages`/`lc_monetary`/`lc_numeric`/`lc_time` GUC

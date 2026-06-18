@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 mcx = { path = "../mcx" }
+backend-commands-typecmds-seams = { path = "../backend-commands-typecmds-seams" }
 types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
 types-tuple = { path = "../types-tuple" }

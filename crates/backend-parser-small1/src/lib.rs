@@ -981,6 +981,16 @@ fn parser_errposition_seam(pstate: &ParseState<'_>, location: i32) -> PgResult<i
 /// Install this unit's inward seams.
 pub fn init_seams() {
     backend_parser_small1_seams::parser_errposition::set(parser_errposition_seam);
+    // collationcmds.c (DefineCollation) re-declares `parser_errposition`
+    // (parse_node.c) without a `ParseState` (its port drops the pstate arg); with
+    // no source text reachable the C reduces to `location < 0 ? 0 : location`.
+    backend_commands_collationcmds_seams::parser_errposition::set(|location| {
+        if location < 0 {
+            0
+        } else {
+            location
+        }
+    });
     backend_parser_scansup_seams::truncate_identifier::set(truncate_identifier);
     backend_parser_scansup_seams::downcase_truncate_identifier::set(downcase_truncate_identifier);
     backend_parser_analyze_seams::make_parsestate::set(make_parsestate);

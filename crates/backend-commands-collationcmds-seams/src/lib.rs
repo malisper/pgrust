@@ -65,13 +65,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `defGetQualifiedName(def)` (define.c): the option value as a qualified
-    /// name list (used for the `FROM` source collation). `Err(syntax error)` when
-    /// the value isn't a name.
-    pub fn def_get_qualified_name(defname: String, arg_text: Option<String>) -> PgResult<Vec<String>>
-);
-
-seam_core::seam!(
     /// `SearchSysCache1(COLLOID, ObjectIdGetDatum(collid))` (syscache.c): the
     /// `pg_collation` row for `collid`, or `None` when no such tuple exists.
     /// `Err` carries any catalog-read failure.

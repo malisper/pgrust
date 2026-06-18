@@ -65,6 +65,12 @@ pub fn init_seams() {
             .expect("quote_identifier failed")
     });
 
+    // typecmds.c (ALTER DOMAIN constraint storage) deparses the cooked
+    // constraint with `deparse_expression(expr, NIL, false, false)`.
+    backend_commands_typecmds_seams::deparse_expression::set(|mcx, expr| {
+        crate::deparse_expression(mcx, &expr, mcx::PgVec::new_in(mcx), false, false)
+    });
+
     // Register the SQL-callable deparser builtins (C: their `fmgr_builtins[]`
     // rows) so by-OID fmgr dispatch resolves them.
     crate::register_ruleutils_builtins();

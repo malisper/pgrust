@@ -715,4 +715,7 @@ pub fn nodeToStringWithLocations<'mcx>(
 /// and installed here.
 pub fn init_seams() {
     backend_nodes_core_seams::node_to_string_with_locations::set(nodeToStringWithLocations);
+    // typecmds.c serializes a cooked default/check expression with
+    // `nodeToString(expr)` for `typdefaultbin` / `conbin`.
+    backend_commands_typecmds_seams::node_to_string::set(|mcx, node| nodeToString(mcx, &node));
 }

@@ -1245,6 +1245,22 @@ pub fn init_seams() {
     s::search_am_by_name::set(projections::search_am_by_name);
     s::auth_members_of_member::set(projections::auth_members_of_member);
 
+    // collationcmds.c (CREATE/ALTER COLLATION) syscache reads — pg_collation /
+    // pg_database / pg_namespace projections, installed into its seam crate here.
+    {
+        use backend_commands_collationcmds_seams as cc;
+        cc::collation_row_by_oid::set(projections::collation_row_by_oid);
+        cc::collation_name_enc_nsp_exists::set(projections::collation_name_enc_nsp_exists);
+        cc::namespace_exists::set(projections::namespace_exists);
+        cc::database_locale_for_default_collation::set(
+            projections::database_locale_for_default_collation,
+        );
+    }
+    // dbcommands.c `have_createdb_privilege` reads pg_authid.rolcreatedb.
+    backend_commands_dbcommands_seams::user_rolcreatedb::set(|_mcx, roleid| {
+        projections::search_authid_rolcreatedb(roleid)
+    });
+
     // plancache's InitPlanCache resolves the integer SysCacheIdentifier for the
     // caches it hooks; map its small enum to the genbki cache ids.
     backend_utils_cache_syscache_pc_seams::syscache_id::set(syscache_id_for);

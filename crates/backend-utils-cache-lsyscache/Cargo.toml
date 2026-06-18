@@ -15,6 +15,7 @@ backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumla
 seam-core = { path = "../seam-core" }
 backend-commands-functioncmds-seams = { path = "../backend-commands-functioncmds-seams" }
 mcx = { path = "../mcx" }
+backend-commands-collationcmds-seams = { path = "../backend-commands-collationcmds-seams" }
 types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
