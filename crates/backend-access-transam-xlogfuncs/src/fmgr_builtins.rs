@@ -157,29 +157,30 @@ fn builtin(
 /// Register the six expressible `xlogfuncs.c` recovery-control fmgr builtins
 /// (C: their `fmgr_builtins[]` rows). Called from this crate's `init_seams()`.
 ///
-/// OIDs / nargs / strict / retset transcribed from `pg_proc.dat`: all six are
-/// `provolatile => 'v'`, none is marked `proisstrict` (so `strict = false`), and
-/// none is `proretset` (so `retset = false`).
+/// OIDs / nargs / strict / retset transcribed from the generated
+/// `fmgrtab.c` (Gen_fmgrtab over `pg_proc.dat`): all six are `provolatile => 'v'`
+/// and inherit `proisstrict BKI_DEFAULT(t)` (none overrides it, so `strict =
+/// true`), and none is `proretset` (so `retset = false`).
 pub fn register_xlogfuncs_builtins() {
     backend_utils_fmgr_core::register_builtins([
         // pg_wal_replay_pause() -> void
-        builtin(3071, "pg_wal_replay_pause", 0, false, false, fc_pg_wal_replay_pause),
+        builtin(3071, "pg_wal_replay_pause", 0, true, false, fc_pg_wal_replay_pause),
         // pg_wal_replay_resume() -> void
-        builtin(3072, "pg_wal_replay_resume", 0, false, false, fc_pg_wal_replay_resume),
+        builtin(3072, "pg_wal_replay_resume", 0, true, false, fc_pg_wal_replay_resume),
         // pg_is_wal_replay_paused() -> bool
-        builtin(3073, "pg_is_wal_replay_paused", 0, false, false, fc_pg_is_wal_replay_paused),
+        builtin(3073, "pg_is_wal_replay_paused", 0, true, false, fc_pg_is_wal_replay_paused),
         // pg_get_wal_replay_pause_state() -> text
         builtin(
             1137,
             "pg_get_wal_replay_pause_state",
             0,
-            false,
+            true,
             false,
             fc_pg_get_wal_replay_pause_state,
         ),
         // pg_is_in_recovery() -> bool
-        builtin(3810, "pg_is_in_recovery", 0, false, false, fc_pg_is_in_recovery),
+        builtin(3810, "pg_is_in_recovery", 0, true, false, fc_pg_is_in_recovery),
         // pg_promote(bool, int4) -> bool
-        builtin(3436, "pg_promote", 2, false, false, fc_pg_promote),
+        builtin(3436, "pg_promote", 2, true, false, fc_pg_promote),
     ]);
 }
