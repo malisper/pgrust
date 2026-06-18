@@ -49,7 +49,7 @@ use types_error::{
     ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_COLUMN, ERROR, WARNING,
 };
 use types_nodes::ddlnodes::AlterTableType;
-use types_nodes::nodes::Node;
+use types_nodes::nodes::{ntag, Node};
 use types_rel::Relation;
 use types_storage::lock::{RowExclusiveLock, LOCKMODE};
 use types_nodes::parsenodes::DROP_RESTRICT;
@@ -259,8 +259,8 @@ pub fn ATExecSetStatistics<'mcx>(
     let newtarget_default;
     match newValue {
         Some(node) => {
-            let ival = match node {
-                Node::Integer(i) => i.ival,
+            let ival = match node.node_tag() {
+                ntag::T_Integer => node.expect_integer().ival,
                 _ => {
                     return Err(types_error::PgError::error(
                         "ATExecSetStatistics: SET STATISTICS value is not an Integer node",

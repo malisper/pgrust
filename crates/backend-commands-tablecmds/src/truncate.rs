@@ -47,9 +47,9 @@ pub fn execute_truncate<'mcx>(mcx: Mcx<'mcx>, stmt: &TruncateStmt<'mcx>) -> PgRe
      * Open, exclusive-lock, and check all the explicitly-specified relations.
      */
     for rv_node in stmt.relations.iter() {
-        let rv = match &**rv_node {
-            Node::RangeVar(rv) => rv,
-            _ => unreachable!("TruncateStmt relation is a Node::RangeVar"),
+        let rv = match rv_node.as_rangevar() {
+            Some(rv) => rv,
+            None => unreachable!("TruncateStmt relation is a Node::RangeVar"),
         };
         let recurse = rv.inh;
         let lockmode: LOCKMODE = AccessExclusiveLock;

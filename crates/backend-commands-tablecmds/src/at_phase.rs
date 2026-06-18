@@ -79,9 +79,9 @@ fn errdetail_relkind_not_supported(relkind: u8) -> PgResult<String> {
 /// `(AlterTableCmd *) lfirst(lcmd)` — project an `AlterTableCmd` out of a
 /// `Node::AlterTableCmd` work-list element.
 fn as_alter_table_cmd<'a, 'mcx>(node: &'a NodePtr<'mcx>) -> &'a AlterTableCmd<'mcx> {
-    match &**node {
-        Node::AlterTableCmd(c) => c,
-        _ => unreachable!("Node::AlterTableCmd expected"),
+    match node.as_altertablecmd() {
+        Some(c) => c,
+        None => unreachable!("Node::AlterTableCmd expected"),
     }
 }
 
@@ -97,9 +97,9 @@ fn cmd_def_elem_list<'mcx>(
 ) -> Vec<backend_access_common_reloptions::DefElem> {
     let mut out = Vec::new();
     if let Some(def) = &cmd.def {
-        if let Node::List(items) = &**def {
+        if let Some(items) = def.as_list() {
             for it in items.iter() {
-                if let Node::DefElem(de) = &**it {
+                if let Some(de) = it.as_defelem() {
                     out.push(backend_access_common_reloptions::DefElem::new(
                         de.defnamespace.as_ref().map(|s| s.as_str()),
                         de.defname.as_ref().map(|s| s.as_str()).unwrap_or(""),
@@ -276,9 +276,9 @@ pub fn AlterTable<'mcx>(
     let inh = stmt
         .relation
         .as_ref()
-        .map(|rv| match &**rv {
-            Node::RangeVar(rv) => rv.inh,
-            _ => false,
+        .map(|rv| match rv.as_rangevar() {
+            Some(rv) => rv.inh,
+            None => false,
         })
         .unwrap_or(false);
 
@@ -325,9 +325,9 @@ pub fn AlterTableLookupRelation<'mcx>(
         .relation
         .as_ref()
         .expect("AlterTableStmt.relation is non-NULL");
-    let rv = match &**rv_node {
-        Node::RangeVar(rv) => rv,
-        _ => unreachable!("AlterTableStmt.relation is a Node::RangeVar"),
+    let rv = match rv_node.as_rangevar() {
+        Some(rv) => rv,
+        None => unreachable!("AlterTableStmt.relation is a Node::RangeVar"),
     };
     let access_rv = crate::helpers::to_access_range_var(rv);
     let flags = if stmt.missing_ok {
@@ -497,7 +497,7 @@ pub fn AlterTableGetLockLevel(cmds: &PgVec<'_, NodePtr<'_>>) -> PgResult<LOCKMOD
             AT_AddConstraint | AT_ReAddConstraint | AT_ReAddDomainConstraint => {
                 // if (IsA(cmd->def, Constraint))
                 if let Some(def) = &cmd.def {
-                    if let Node::Constraint(con) = &**def {
+                    if let Some(con) = def.as_constraint() {
                         use types_nodes::ddlnodes::ConstrType::*;
                         cmd_lockmode = match con.contype {
                             CONSTR_EXCLUSION | CONSTR_PRIMARY | CONSTR_UNIQUE => AccessExclusiveLock,
@@ -552,9 +552,9 @@ pub fn AlterTableGetLockLevel(cmds: &PgVec<'_, NodePtr<'_>>) -> PgResult<LOCKMOD
                 let concurrent = cmd
                     .def
                     .as_ref()
-                    .map(|d| match &**d {
-                        Node::PartitionCmd(pc) => pc.concurrent,
-                        _ => false,
+                    .map(|d| match d.as_partitioncmd() {
+                        Some(pc) => pc.concurrent,
+                        None => false,
                     })
                     .unwrap_or(false);
                 cmd_lockmode = if concurrent {
@@ -1031,9 +1031,9 @@ fn ATRewriteCatalogs<'mcx>(
             // `ATExecCmd` likewise scribbles only on its own `cmd` copy.
             let n = wqueue[ti].subcmds[pass as usize].len();
             for si in 0..n {
-                let cmd = match &*wqueue[ti].subcmds[pass as usize][si] {
-                    Node::AlterTableCmd(c) => c.clone_in(mcx)?,
-                    _ => unreachable!("subcmds hold Node::AlterTableCmd"),
+                let cmd = match wqueue[ti].subcmds[pass as usize][si].as_altertablecmd() {
+                    Some(c) => c.clone_in(mcx)?,
+                    None => unreachable!("subcmds hold Node::AlterTableCmd"),
                 };
                 ATExecCmd(mcx, wqueue, ti, &cmd, lockmode, pass, context)?;
             }
@@ -1193,8 +1193,8 @@ fn ATExecCmd<'mcx>(
                 .newowner
                 .as_ref()
                 .expect("ALTER OWNER requires a RoleSpec");
-            let new_owner_id = match &**newowner {
-                Node::RoleSpec(rs) => {
+            let new_owner_id = match newowner.as_rolespec() {
+                Some(rs) => {
                     // The Node enum carries `ddlnodes::RoleSpec`; the acl seam
                     // consumes the structurally-identical `parsenodes::RoleSpec`.
                     let role = types_nodes::parsenodes::RoleSpec {
@@ -1206,7 +1206,7 @@ fn ATExecCmd<'mcx>(
                     };
                     backend_utils_adt_acl_seams::get_rolespec_oid::call(&role, false)?
                 }
-                _ => unreachable!("AlterTableCmd.newowner must be a Node::RoleSpec"),
+                None => unreachable!("AlterTableCmd.newowner must be a Node::RoleSpec"),
             };
             seam::at_exec_change_owner::call(rel.rd_id, new_owner_id, false, lockmode)?;
             // ATExecChangeOwner returns void; address stays Invalid.

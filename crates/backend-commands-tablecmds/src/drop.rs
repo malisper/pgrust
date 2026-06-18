@@ -100,15 +100,15 @@ pub fn remove_relations<'mcx>(mcx: Mcx<'mcx>, drop: &DropStmt<'mcx>) -> PgResult
 
     for cell in drop.objects.iter() {
         /* makeRangeVarFromNameList((List *) lfirst(cell)) */
-        let names = match &**cell {
-            Node::List(list) => {
+        let names = match cell.as_list() {
+            Some(list) => {
                 let nodes: Vec<Node> = list
                     .iter()
                     .map(|n| (**n).clone_in(mcx))
                     .collect::<PgResult<Vec<_>>>()?;
                 namelist_of_nodes(&nodes)
             }
-            _ => unreachable!("DropStmt object is a Node::List namelist"),
+            None => unreachable!("DropStmt object is a Node::List namelist"),
         };
         let rel = makeRangeVarFromNameList(&names)?;
 

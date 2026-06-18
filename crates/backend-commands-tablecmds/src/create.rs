@@ -17,7 +17,7 @@ use types_error::{
     ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR,
 };
 use types_nodes::ddlnodes::CreateStmt;
-use types_nodes::nodes::{Node, NodePtr};
+use types_nodes::nodes::{ntag, Node, NodePtr};
 use types_nodes::primnodes::OnCommitAction;
 use types_nodes::rawnodes::{ColumnDef, RangeVar, TypeName};
 use types_tuple::access::{
@@ -58,25 +58,25 @@ use crate::helpers::{
 
 /// `castNode(RangeVar, node)` for an owned `Node::RangeVar`.
 fn as_range_var<'a, 'mcx>(node: &'a Node<'mcx>) -> &'a RangeVar<'mcx> {
-    match node {
-        Node::RangeVar(rv) => rv,
-        _ => unreachable!("Node::RangeVar expected"),
+    match node.as_rangevar() {
+        Some(rv) => rv,
+        None => unreachable!("Node::RangeVar expected"),
     }
 }
 
 /// `castNode(ColumnDef, node)` for an owned `Node::ColumnDef`.
 fn as_column_def<'a, 'mcx>(node: &'a Node<'mcx>) -> &'a ColumnDef<'mcx> {
-    match node {
-        Node::ColumnDef(cd) => cd,
-        _ => unreachable!("Node::ColumnDef expected"),
+    match node.as_columndef() {
+        Some(cd) => cd,
+        None => unreachable!("Node::ColumnDef expected"),
     }
 }
 
 /// `castNode(TypeName, node)`.
 fn as_typename<'a, 'mcx>(node: &'a Node<'mcx>) -> &'a TypeName<'mcx> {
-    match node {
-        Node::TypeName(tn) => tn,
-        _ => unreachable!("Node::TypeName expected"),
+    match node.as_typename() {
+        Some(tn) => tn,
+        None => unreachable!("Node::TypeName expected"),
     }
 }
 
@@ -91,11 +91,11 @@ const HEAP_RELOPT_NAMESPACES: &[&str] = &["toast"];
 fn defel_arg(def: &types_nodes::ddlnodes::DefElem<'_>) -> Option<backend_commands_define_seams::DefElemArg> {
     use backend_commands_define_seams::DefElemArg;
     let node = def.arg.as_deref()?;
-    Some(match node {
-        Node::Integer(i) => DefElemArg::Integer(i.ival as i64),
-        Node::Float(f) => DefElemArg::Float(f.fval.as_str().to_string()),
-        Node::Boolean(b) => DefElemArg::Boolean(b.boolval),
-        Node::String(s) => DefElemArg::String(s.sval.as_str().to_string()),
+    Some(match node.node_tag() {
+        ntag::T_Integer => DefElemArg::Integer(node.expect_integer().ival as i64),
+        ntag::T_Float => DefElemArg::Float(node.expect_float().fval.as_str().to_string()),
+        ntag::T_Boolean => DefElemArg::Boolean(node.expect_boolean().boolval),
+        ntag::T_String => DefElemArg::String(node.expect_string().sval.as_str().to_string()),
         _ => DefElemArg::AStar,
     })
 }
@@ -432,7 +432,7 @@ pub fn define_relation<'mcx>(
     )?;
     /* propagate the (possibly temp-promoted) persistence back to the node */
     let relpersistence = access_rv.relpersistence;
-    if let Some(Node::RangeVar(rv)) = stmt.relation.as_deref_mut() {
+    if let Some(rv) = stmt.relation.as_deref_mut().and_then(|n| n.as_rangevar_mut()) {
         rv.relpersistence = relpersistence as i8;
     }
 
@@ -1083,8 +1083,8 @@ fn list_concat<'mcx>(
 /// `AddRelationNewConstraints`. The owned model carries the constraint name (if
 /// any) in the node; extracted via the node's constraint-name accessor.
 fn cooked_constraint_name(node: &Node<'_>) -> Option<String> {
-    match node {
-        Node::Constraint(c) => c.conname.as_ref().map(|s| s.as_str().to_string()),
-        _ => None,
+    match node.as_constraint() {
+        Some(c) => c.conname.as_ref().map(|s| s.as_str().to_string()),
+        None => None,
     }
 }

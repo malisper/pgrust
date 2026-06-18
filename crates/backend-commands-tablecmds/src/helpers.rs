@@ -79,9 +79,9 @@ pub fn strlcpy_namedatalen(name: &str) -> String {
 pub fn namelist_of_nodes(cells: &[Node]) -> Vec<Option<String>> {
     cells
         .iter()
-        .map(|cell| match cell {
-            Node::String(s) => Some(s.sval.as_str().to_string()),
-            _ => unreachable!("Node::String expected in name list"),
+        .map(|cell| match cell.as_string() {
+            Some(s) => Some(s.sval.as_str().to_string()),
+            None => unreachable!("Node::String expected in name list"),
         })
         .collect()
 }

@@ -147,12 +147,12 @@ fn alter_table_slow_arm<'mcx>(
 
     // Disallow ALTER TABLE ... DETACH CONCURRENTLY in a transaction block.
     for cmd_node in atstmt.cmds.iter() {
-        let Node::AlterTableCmd(cmd) = &**cmd_node else {
+        let Some(cmd) = cmd_node.as_altertablecmd() else {
             unreachable!("AlterTableStmt.cmds element is a Node::AlterTableCmd");
         };
         if cmd.subtype == AT_DetachPartition {
             if let Some(def) = cmd.def.as_ref() {
-                if let Node::PartitionCmd(pc) = &**def {
+                if let Some(pc) = def.as_partitioncmd() {
                     if pc.concurrent {
                         backend_access_transam_xact::PreventInTransactionBlock(
                             is_top_level,
@@ -190,9 +190,9 @@ fn alter_table_slow_arm<'mcx>(
         let relname: String = atstmt
             .relation
             .as_ref()
-            .and_then(|rv| match &**rv {
-                Node::RangeVar(rv) => rv.relname.as_ref().map(|s| s.as_str().to_string()),
-                _ => None,
+            .and_then(|rv| match rv.as_rangevar() {
+                Some(rv) => rv.relname.as_ref().map(|s| s.as_str().to_string()),
+                None => None,
             })
             .unwrap_or_default();
         backend_utils_error::ereport(types_error::NOTICE)
