@@ -15,4 +15,5 @@ fast-check = "check --profile fast-check"
 # not already set in the environment, so an explicit
 # `PGRUST_PGSHAREDIR=/somewhere cargo build` still overrides them.
 [env]
+CARGO_INCREMENTAL = "0"
 PGRUST_PGSHAREDIR = "/tmp/pgrust_share"
