@@ -16,7 +16,7 @@ _Last updated: 2026-06-18 · origin/main ≈ `5f57e550a`_
 ## 🔥 Critical path (fastest route to test-wins)
 1. **Aggregates:** `count(*)`/`min`/`max`/`count(col)` ✅ **execute** (setrefs varno fix resolved the agg var-mapping; no extra exec change needed). `count(*) FROM pg_class`=415 ✅. **Now firing:** `sum`/`avg` (int_sum transfns in numeric.c, `a40748ae`) · **GROUP BY execution** (nodeAgg grouped per-group loop, `a048453e`). `avg(numeric)`/numeric-literal aggs also need the by-ref const-fold (K4 cluster).
 2. **GROUP BY / DISTINCT / FOR UPDATE** — planner.c completion *(firing `abe15b79`)*.
-3. **boolean.sql** — bool TYPE correct ✅ (I/O, ops, seqscans, error text verbatim). **Forcing-function gaps in its 2nd half (hit the whole suite):** error-position LINE/caret (~10 hunks) · text-cast literal truncation bug · **`set_joinrel_size_estimates` seam (JOINS — highest fan-out)** · `relation_is_nailed` (DROP) · INSERT slice-range · `proc_arg_attrs`. Owned by `a85f618f`; broad ones (joins first) queued.
+3. **boolean.sql — 13→5 hunks.** ✅ Fixed: error-position (LINE/caret), cstring-NUL/whitespace, `set_joinrel_size_estimates`, `proc_arg_attrs`. **Remaining 5 = keystones:** DDL/DML cluster (CREATE-lockmode / INSERT heap-range / DROP `relation_is_nailed`) *(firing `ac81ca4b`)* · FK-join selectivity (ForeignKeyOptInfo arena) · shared-typcache (K10).
 4. **fmgr completeness** — core seams *(re-fired `a6d5c9d6`)* + adt registration *(`a58be86c`)*.
 
 ---
@@ -68,13 +68,15 @@ _Last updated: 2026-06-18 · origin/main ≈ `5f57e550a`_
 - **prepunion subroot / cross-root PathId** — set-op child path import (relates to K8).
 - **fmgr frame-carrier by-ref widening** (TD-FMGR-GETARG-BYREF) — trimmed `types_nodes` FunctionCallInfoBaseData carries bare-word args, no by-ref channel → blocks `pg_getarg_{name,text_pp,varlena_pp,cstring}` + `typmodin`. Cousin of K4.
 - **numeric by-ref Datum const-fold** (`make_const`, parse_node.c:418) — `abs(x::numeric)` + numeric-literal const-folding wall here; part of the K4 Datum-by-ref cluster. Also blocks the ~619 unregistered numeric/by-ref builtins from const-folding.
+- **tablecmds `alter_table_slow`** — the ALTER TABLE engine (ADD/ALTER COLUMN, constraints, ENABLE RLS). Gates most `ALTER TABLE` across the suite; ~22k LOC campaign.
+- **FK-join selectivity / ForeignKeyOptInfo arena** (`get_foreign_key_join_selectivity`, `root->fkey_list`) — unmodeled arena-handle; gates FK-aware join selectivity.
 
 > Legend: K1–K3 done · K4–K6 committed/sequenced · K7–K10 deferred · 📡 longer-term, feature-area-gated.
 
 ---
 
 ## Active lanes
-`a85f618f` boolean→PASS · `ae2d175a` arrayfuncs · `a3b93c9f` policy/RLS · `a870e34d` EXPLAIN structural · `a9b78cc5` joins · `a125389c` planner DISTINCT/FOR-UPDATE · `a40748ae` sum transfns · `a048453e` GROUP BY exec
+`ae2d175a` arrayfuncs · `a870e34d` EXPLAIN structural · `a9b78cc5` joins · `a125389c` planner DISTINCT/FOR-UPDATE · `a40748ae` sum transfns · `a048453e` GROUP BY exec · `ac81ca4b` DDL/DML (CREATE/INSERT/DROP)
 
 ## Build/infra notes
 - Artifacts ~6 GB/build (was ~10–14): `713252a14` (line-tables-only) + `c794aeac6` (**`incremental=false` now on `[profile.dev]`** — the lanes' default build; was only on the unused fast-check profile). Cap **~8**, keep ~20 GB buffer.
@@ -82,7 +84,7 @@ _Last updated: 2026-06-18 · origin/main ≈ `5f57e550a`_
 - Reaper = shm + `git worktree prune` ONLY (idle-based auto-rm disrupted live lanes twice; lanes self-clean + orchestrator reaps on pressure).
 
 ## Recently landed
-**column aggs min/max/count(col)** ✅ · count(\*) exec (#165) · **GROUP BY planning** (+ real parser p_rtable bug fix) · misc2 (15/16) · **count(\*) FROM pg_class = 415** (setrefs varno + IndexOnlyScan) · fmgr builtin registry 2003→1574 (0 mismatches) · cargo dev incremental=0 · min/max planner fall-through · createplan (unique/groupingsets/async, 3→0) · GUC registry 402/404 · typcache complete · lmgr-lock (15→6) · fmgr Phase-1 seams (56/67) · bool.c 100% (type correct e2e) + boolean parser/func-RTE fixes · io_combine_limit boot fix · Datum by-ref bridge (+saophash) · crash-reinit (TLS-unwind) · seclabel→DROP · comment→DROP · multi-row VALUES · parse_expr XML · t_bits crash · setrefs Aggref fixup · smaller build artifacts · plancache F0
+**column aggs min/max/count(col)** ✅ · **boolean error-position (LINE/caret) + varlena cstring-NUL** · policy/RLS (CREATE POLICY + RelationBuildRowSecurity) · proc_arg_attrs · count(\*) exec (#165) · **GROUP BY planning** (+ real parser p_rtable bug fix) · misc2 (15/16) · **count(\*) FROM pg_class = 415** (setrefs varno + IndexOnlyScan) · fmgr builtin registry 2003→1574 (0 mismatches) · cargo dev incremental=0 · min/max planner fall-through · createplan (unique/groupingsets/async, 3→0) · GUC registry 402/404 · typcache complete · lmgr-lock (15→6) · fmgr Phase-1 seams (56/67) · bool.c 100% (type correct e2e) + boolean parser/func-RTE fixes · io_combine_limit boot fix · Datum by-ref bridge (+saophash) · crash-reinit (TLS-unwind) · seclabel→DROP · comment→DROP · multi-row VALUES · parse_expr XML · t_bits crash · setrefs Aggref fixup · smaller build artifacts · plancache F0
 
 ## DROP status
 CREATE→INSERT→SELECT ✓ · DROP: comment ✓ → seclabel ✓ → **next wall `relation_is_nailed`** (tablecmds seam).
