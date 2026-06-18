@@ -114,13 +114,13 @@ pub fn get_expr_result_type<'mcx>(
 
     // C: if (expr && IsA(expr, FuncExpr))
     //        result = internal_get_result_type(((FuncExpr *) expr)->funcid, expr, NULL, ...)
-    if let Some(Node::Expr(Expr::FuncExpr(fe))) = expr {
+    if let Some(fe) = expr.and_then(|n| n.as_funcexpr()) {
         return internal_get_result_type(mcx, fe.funcid, expr, None);
     }
 
     // C: else if (expr && IsA(expr, OpExpr))
     //        result = internal_get_result_type(get_opcode(((OpExpr *) expr)->opno), expr, NULL, ...)
-    if let Some(Node::Expr(Expr::OpExpr(op))) = expr {
+    if let Some(op) = expr.and_then(|n| n.as_opexpr()) {
         let funcid = backend_utils_cache_lsyscache_seams::get_opcode::call(op.opno)?;
         return internal_get_result_type(mcx, funcid, expr, None);
     }
@@ -170,7 +170,7 @@ pub fn get_expr_result_type<'mcx>(
     // C: else if (expr && IsA(expr, Const) && ((Const *) expr)->consttype == RECORDOID
     //             && !((Const *) expr)->constisnull)
     //        /* resolve field names of a RECORD-type Const from its datum's typmod */
-    if let Some(Node::Expr(Expr::Const(c))) = expr {
+    if let Some(c) = expr.and_then(|n| n.as_const()) {
         if c.consttype == RECORDOID && !c.constisnull {
             // The RECORD-type Const path inspects the rowtype datum header
             // (DatumGetHeapTupleHeader / HeapTupleHeaderGetTypeId /
@@ -188,7 +188,9 @@ pub fn get_expr_result_type<'mcx>(
     let mut out = ResolvedResultType::default();
     // Oid typid = exprType(expr);
     let typid = match expr {
-        Some(Node::Expr(e)) => backend_nodes_nodeFuncs_seams::expr_type_info::call(e)?.typid,
+        Some(n) if n.as_expr().is_some() => {
+            backend_nodes_nodeFuncs_seams::expr_type_info::call(n.as_expr().unwrap())?.typid
+        }
         // exprType(NULL) yields InvalidOid; a non-Expr Node is not a valid
         // expression here (C casts to (Node *) and exprType would elog), but the
         // function-in-FROM callers always pass an Expr.
