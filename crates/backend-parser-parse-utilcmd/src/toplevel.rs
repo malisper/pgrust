@@ -6,12 +6,16 @@
 //! in-crate over the owned node tree; only the creation-namespace lookup, type
 //! validation, and the catalog/relcache leaves cross the outward seams.
 //!
-//! [`transformAlterTableStmt`] / [`transformIndexStmt`] / [`transformStatsStmt`]
-//! open the target relation through the relcache and walk USING / index / stats
-//! expressions; that machinery is not reachable from this crate, so they route
-//! through the outward seams. [`transformRuleStmt`] (the inward seam this crate
-//! owns) ports the entry point and delegates the relcache OLD/NEW fake-RTE +
-//! analyze.c-driven action transform to the outward seam.
+//! [`transformIndexStmt`] / [`transformStatsStmt`] (in [`crate::index_stats`])
+//! open the target relation by OID through the relcache (an owned
+//! [`types_rel::Relation`] carrier, RAII-closed) and transform the WHERE
+//! predicate / index-element / stat expressions in-crate. The creation-namespace
+//! lookup ([`range_var_get_and_check_creation_namespace`]) is likewise grounded.
+//! [`transformAlterTableStmt`] still routes through the outward seam (its
+//! per-subcommand relcache dispatch + generateSerialExtraStmts are not yet
+//! reachable). [`transformRuleStmt`] (the inward seam this crate owns) ports the
+//! entry point and delegates the relcache OLD/NEW fake-RTE + analyze.c-driven
+//! action transform to the outward seam.
 
 use mcx::{Mcx, PgBox, PgString, PgVec};
 
@@ -28,6 +32,7 @@ use types_nodes::nodes::Node;
 
 use backend_parser_parse_utilcmd_outward_seams as sx;
 use backend_parser_small1::make_parsestate;
+use types_storage::lock::NoLock;
 
 use crate::column::transformColumnDefinition;
 use crate::constraint::{transformCheckConstraints, transformTableConstraint};
@@ -75,7 +80,7 @@ pub fn transformCreateStmt<'mcx>(
         None => unreachable!("CreateStmt.relation must be a RangeVar"),
     };
     let (relation, existing_relid, namespace_name) =
-        sx::RangeVarGetAndCheckCreationNamespace::call(mcx, relation, stmt.if_not_exists)?;
+        range_var_get_and_check_creation_namespace(mcx, relation)?;
     stmt.relation = Some(relation);
 
     // Pull the (possibly-mutated) relation's schemaname / relpersistence / name.
@@ -265,39 +270,57 @@ pub fn transformAlterTableStmt<'mcx>(
     sx::transformAlterTableStmt::call(mcx, relid, stmt, query_string)
 }
 
-/// `transformIndexStmt` — parse analysis for CREATE INDEX / ALTER TABLE. Opens
-/// the parent relation by OID, adds it to the rtable, and transforms the WHERE
-/// predicate and any index-element expressions; routed through the outward seam.
-pub fn transformIndexStmt<'mcx>(
+pub use crate::index_stats::{transformIndexStmt, transformStatsStmt};
+
+/// The `RangeVarGetAndCheckCreationNamespace(stmt->relation, NoLock,
+/// &existing_relid)` + `get_namespace_name(namespaceid)` pair from
+/// `transformCreateStmt`. Looks up (and permission-checks / locks) the creation
+/// namespace, finds any preexisting relation of the same name, and resolves the
+/// namespace name used to schema-qualify the relation. The (possibly-mutated)
+/// `RangeVar` node is threaded in/out. Returns `(relation, existing_relid,
+/// namespace_name)`.
+fn range_var_get_and_check_creation_namespace<'mcx>(
     mcx: Mcx<'mcx>,
-    relid: Oid,
-    stmt: NodePtr<'mcx>,
-    query_string: &str,
-) -> PgResult<NodePtr<'mcx>> {
-    // Nothing to do if the statement is already transformed.
-    if let Node::IndexStmt(s) = stmt.as_ref() {
-        if s.transformed {
-            return Ok(stmt);
-        }
+    mut relation: NodePtr<'mcx>,
+) -> PgResult<(NodePtr<'mcx>, Oid, Option<PgString<'mcx>>)> {
+    let mut existing_relid: Oid = INVALID_OID;
+
+    // The catalog-namespace function operates on the value-typed
+    // `types_tuple::access::RangeVar` (no `'mcx`); bridge the node's
+    // `rawnodes::RangeVar` across, then propagate the (possibly temp-promoted)
+    // `relpersistence` back onto the node.
+    let mut access_rv = match relation.as_ref() {
+        Node::RangeVar(rv) => to_access_range_var(rv),
+        other => unreachable!(
+            "RangeVarGetAndCheckCreationNamespace: not a RangeVar node: {}",
+            other.node_tag()
+        ),
+    };
+    let namespaceid = backend_catalog_namespace::RangeVarGetAndCheckCreationNamespace(
+        mcx,
+        &mut access_rv,
+        NoLock,
+        Some(&mut existing_relid),
+    )?;
+    if let Node::RangeVar(rv) = relation.as_mut() {
+        rv.relpersistence = access_rv.relpersistence as i8;
     }
-    sx::transformIndexStmt::call(mcx, relid, stmt, query_string)
+
+    let namespace_name = backend_utils_cache_lsyscache::namespace_range_index_pubsub::get_namespace_name(mcx, namespaceid)?;
+    Ok((relation, existing_relid, namespace_name))
 }
 
-/// `transformStatsStmt` — parse analysis for CREATE STATISTICS. Walks the stat
-/// expressions over the parent relation's columns; routed through the seam.
-pub fn transformStatsStmt<'mcx>(
-    mcx: Mcx<'mcx>,
-    relid: Oid,
-    stmt: NodePtr<'mcx>,
-    query_string: &str,
-) -> PgResult<NodePtr<'mcx>> {
-    // Nothing to do if the statement is already transformed.
-    if let Node::CreateStatsStmt(s) = stmt.as_ref() {
-        if s.transformed {
-            return Ok(stmt);
-        }
+/// Bridge a node `rawnodes::RangeVar` to the value-typed
+/// `types_tuple::access::RangeVar` the catalog-namespace API consumes.
+fn to_access_range_var(rv: &types_nodes::rawnodes::RangeVar<'_>) -> types_tuple::access::RangeVar {
+    types_tuple::access::RangeVar {
+        catalogname: rv.catalogname.as_ref().map(|s| s.as_str().into()),
+        schemaname: rv.schemaname.as_ref().map(|s| s.as_str().into()),
+        relname: rv.relname.as_ref().map_or_else(alloc::string::String::new, |s| s.as_str().into()),
+        inh: rv.inh,
+        relpersistence: rv.relpersistence as u8,
+        location: rv.location,
     }
-    sx::transformStatsStmt::call(mcx, relid, stmt, query_string)
 }
 
 /// `transformRuleStmt` — parse analysis for CREATE RULE. Builds the OLD/NEW

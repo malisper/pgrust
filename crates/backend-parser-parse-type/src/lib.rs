@@ -869,7 +869,7 @@ pub fn init_seams() {
 /// through (simple `A_Const`/identifier values, else `A_Star` so the owner
 /// raises the C "must be simple constants or identifiers" error); `arrayBounds`
 /// only need to be non-empty for `LookupTypeName` to resolve the array type.
-fn raw_typename_to_parse(
+pub fn raw_typename_to_parse(
     tn: &types_nodes::rawnodes::TypeName<'_>,
 ) -> PgResult<types_parsenodes::TypeName> {
     use types_nodes::nodes::Node as RawNode;

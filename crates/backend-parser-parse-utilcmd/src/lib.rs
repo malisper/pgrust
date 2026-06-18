@@ -38,6 +38,7 @@ pub mod column;
 pub mod constraint;
 pub mod fk_check_attrs;
 pub mod index_constraint;
+pub mod index_stats;
 pub mod like;
 pub mod partition;
 pub mod schema;

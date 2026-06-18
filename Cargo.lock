@@ -13009,18 +13009,33 @@ dependencies = [
 name = "backend-parser-parse-utilcmd"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-relation",
+ "backend-access-table-table",
+ "backend-catalog-namespace",
  "backend-nodes-core",
  "backend-nodes-equalfuncs",
+ "backend-parser-clause",
+ "backend-parser-parse-collate",
+ "backend-parser-parse-expr",
+ "backend-parser-parse-target",
+ "backend-parser-parse-type",
  "backend-parser-parse-utilcmd-outward-seams",
  "backend-parser-parse-utilcmd-seams",
+ "backend-parser-relation",
  "backend-parser-small1",
  "backend-tcop-utility-out-seams",
+ "backend-utils-adt-format-type",
+ "backend-utils-cache-lsyscache",
+ "backend-utils-cache-typcache",
  "backend-utils-error",
  "mcx",
  "seam-core",
  "types-core",
  "types-error",
  "types-nodes",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]

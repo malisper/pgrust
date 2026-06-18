@@ -20,22 +20,6 @@ use types_nodes::parsestmt::ParseState;
 type NodeBox<'mcx> = PgBox<'mcx, Node<'mcx>>;
 
 seam_core::seam!(
-    /// `RangeVarGetAndCheckCreationNamespace(relation, NoLock, &existing_relid)`
-    /// (catalog/namespace.c): look up the creation namespace, permission-check &
-    /// lock it, check for a preexisting relation of the same name, and update
-    /// `relation->relpersistence` if the namespace is temporary. Returns
-    /// `(existing_relid, namespace_name)`: `existing_relid` is `InvalidOid` if
-    /// no preexisting relation, and `namespace_name` is the resolved namespace
-    /// name (C `get_namespace_name(namespaceid)`), used to schema-qualify the
-    /// relation. The (mutated) `RangeVar` node is threaded in/out.
-    pub fn RangeVarGetAndCheckCreationNamespace<'mcx>(
-        mcx: Mcx<'mcx>,
-        relation: NodeBox<'mcx>,
-        if_not_exists: bool,
-    ) -> PgResult<(NodeBox<'mcx>, Oid, Option<PgString<'mcx>>)>
-);
-
-seam_core::seam!(
     /// `generateSerialExtraStmts(cxt, column, seqtypid, seqoptions, for_identity,
     /// col_exists, &snamespace, &sname)` (parse_utilcmd.c): generate the CREATE
     /// SEQUENCE + ALTER SEQUENCE ... OWNED BY statements for a serial/identity
@@ -114,18 +98,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `transformOfType(cxt, ofTypename)` (parse_utilcmd.c): expand an
-    /// `OF typename` clause into inherited column definitions, reading the
-    /// composite type's rowtype `TupleDesc` (`typenameType` /
-    /// `lookup_rowtype_tupdesc`). Returns the generated `ColumnDef`s.
-    pub fn transformOfType<'mcx>(
-        mcx: Mcx<'mcx>,
-        pstate: &ParseState<'mcx>,
-        of_typename: NodeBox<'mcx>,
-    ) -> PgResult<PgVec<'mcx, NodeBox<'mcx>>>
-);
-
-seam_core::seam!(
     /// The catalog-resident leaf of `transformIndexConstraint` (parse_utilcmd.c):
     /// the ALTER TABLE ADD CONSTRAINT USING INDEX path (`get_relname_relid` /
     /// `index_open` / opclass+collation checks), the inherited-table column
@@ -147,32 +119,6 @@ seam_core::seam!(
         columns: PgVec<'mcx, NodeBox<'mcx>>,
         inh_relations: PgVec<'mcx, NodeBox<'mcx>>,
     ) -> PgResult<(NodeBox<'mcx>, PgVec<'mcx, NodeBox<'mcx>>)>
-);
-
-seam_core::seam!(
-    /// `transformIndexStmt(relid, stmt, queryString)` (parse_utilcmd.c): open the
-    /// parent relation by OID, add it to the rtable, transform the WHERE
-    /// predicate and any index-element expressions, then check that only the
-    /// base rel is mentioned. Relcache-bound (`relation_open` /
-    /// `addRangeTableEntryForRelation`).
-    pub fn transformIndexStmt<'mcx>(
-        mcx: Mcx<'mcx>,
-        relid: Oid,
-        stmt: NodeBox<'mcx>,
-        query_string: &str,
-    ) -> PgResult<NodeBox<'mcx>>
-);
-
-seam_core::seam!(
-    /// `transformStatsStmt(relid, stmt, queryString)` (parse_utilcmd.c): open the
-    /// parent relation by OID, add it to the rtable, and transform the stat
-    /// expressions. Relcache-bound.
-    pub fn transformStatsStmt<'mcx>(
-        mcx: Mcx<'mcx>,
-        relid: Oid,
-        stmt: NodeBox<'mcx>,
-        query_string: &str,
-    ) -> PgResult<NodeBox<'mcx>>
 );
 
 seam_core::seam!(

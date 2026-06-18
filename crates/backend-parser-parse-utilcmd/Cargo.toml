@@ -35,4 +35,28 @@ backend-nodes-equalfuncs = { path = "../backend-nodes-equalfuncs" }
 # ParseState setup (make_parsestate) — reachable owner.
 backend-parser-small1 = { path = "../backend-parser-small1" }
 
+# Relation-threading + parse-analysis substrate for the relation-carrying
+# transforms (transformIndexStmt / transformStatsStmt / transformOfType /
+# transformPartitionBound). Cycle-free: none of these depend on parse-utilcmd.
+types-rel = { path = "../types-rel" }
+types-storage = { path = "../types-storage" }
+types-tuple = { path = "../types-tuple" }
+backend-access-common-relation = { path = "../backend-access-common-relation" }
+backend-access-table-table = { path = "../backend-access-table-table" }
+backend-parser-relation = { path = "../backend-parser-relation" }
+backend-parser-clause = { path = "../backend-parser-clause" }
+backend-parser-parse-expr = { path = "../backend-parser-parse-expr" }
+backend-parser-parse-collate = { path = "../backend-parser-parse-collate" }
+backend-parser-parse-target = { path = "../backend-parser-parse-target" }
+backend-parser-parse-type = { path = "../backend-parser-parse-type" }
+
+# Creation-namespace lookup (RangeVarGetAndCheckCreationNamespace) +
+# get_namespace_name. Cycle-free leaves.
+backend-catalog-namespace = { path = "../backend-catalog-namespace" }
+backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }
+
+# transformOfType: composite-type rowtype read + error formatting.
+backend-utils-cache-typcache = { path = "../backend-utils-cache-typcache" }
+backend-utils-adt-format-type = { path = "../backend-utils-adt-format-type" }
+
 [dev-dependencies]
