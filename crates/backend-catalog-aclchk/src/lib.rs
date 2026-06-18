@@ -36,7 +36,8 @@ use types_acl::{
     ACL_EXECUTE, ACL_INSERT, ACL_MAINTAIN, ACL_NO_RIGHTS, ACL_REFERENCES, ACL_SELECT, ACL_SET,
     ACL_TRIGGER, ACL_TRUNCATE, ACL_UPDATE, ACL_USAGE,
 };
-use types_core::primitive::{AttrNumber, Oid, OidIsValid};
+use types_array::ArrayType;
+use types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
 use types_error::{
     PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_SYNTAX_ERROR,
     ERRCODE_UNDEFINED_COLUMN, ERRCODE_UNDEFINED_OBJECT, ERRCODE_UNDEFINED_SCHEMA,
@@ -1067,25 +1068,110 @@ fn scan_owner_for_catalog(mcx: Mcx<'_>, classid: Oid, objectid: Oid) -> PgResult
 }
 
 /* ===========================================================================
- * get_user_default_acl / recordDependencyOnNewAcl / has_createrole_privilege /
- * has_bypassrls_privilege: NOT ported here (F1 STOP — see crate doc + the
- * aclchk-keystone memory note).
+ * get_default_acl_internal / get_user_default_acl (aclchk.c)
  *
- *   - has_createrole_privilege / has_bypassrls_privilege are already ported and
- *     installed by `backend-utils-adt-acl` (role_membership.rs), over the
- *     AUTHOID `lookup_authid_by_oid` projection. Re-porting them here would
- *     duplicate/diverge from that merged owner.
+ * Bounded to the EMPTY pg_default_acl case (a fresh cluster with no
+ * `ALTER DEFAULT PRIVILEGES`): both `DEFACLROLENSPOBJ` lookups MISS, so
+ * `get_user_default_acl` returns `None` and the caller falls back to the
+ * owner's hard-wired implicit default. The non-empty path (decode the
+ * `defaclacl` aclitem[] + merge hard-wired defaults) stays a loud panic until
+ * a real `Acl` (aclitem[]) carrier crosses the seam — unreached until
+ * `ALTER DEFAULT PRIVILEGES` is run.
  *
- *   - get_user_default_acl + recordDependencyOnNewAcl are blocked on two
- *     prerequisites the F0 keystone did not deliver: (1) a `DEFACLROLENSPOBJ`
- *     3-key default-ACL syscache projection (no `default_acl_by_role_nsp_obj`
- *     seam exists — only the by-OID `default_acl_*` projections), and (2) the
- *     declared seam payload is the *header-only* `types_array::ArrayType` (no
- *     `aclitem[]` data area), so a freshly merged ACL cannot actually cross the
- *     seam as a value, and `aclmembers` cannot read it back. Reconciling needs
- *     the F0 default-acl projection + a real `Acl` (aclitem[]) carrier; left as
- *     mirror-and-panic (CATALOG `scaffold`) until then.
+ * `recordDependencyOnNewAcl` is reachable only when `get_user_default_acl`
+ * returns a non-NULL ACL, so it stays NOT-installed for now (the empty case
+ * never records dependencies).
+ *
+ * has_createrole_privilege / has_bypassrls_privilege are already ported and
+ * installed by `backend-utils-adt-acl` (role_membership.rs); not re-ported here.
  * ========================================================================= */
+
+/// `get_default_acl_internal(roleId, nsp_oid, objtype)` (aclchk.c): fetch the
+/// `pg_default_acl` entry for the given role, namespace and object type.
+/// Returns `None` when no such entry exists.
+///
+/// Bounded to the cache-MISS (empty-catalog) case: a hit decodes the
+/// `defaclacl` aclitem[] column, which has no value-shaped carrier across the
+/// seam yet, so a hit panics loudly.
+fn get_default_acl_internal<'mcx>(
+    mcx: Mcx<'mcx>,
+    role_id: Oid,
+    nsp_oid: Oid,
+    objtype: i8,
+) -> PgResult<Option<ArrayType>> {
+    use backend_utils_cache_syscache::{SearchSysCache3, DEFACLROLENSPOBJ};
+    use types_cache::SysCacheKey;
+    use types_datum::Datum as KeyDatum;
+
+    let tuple = SearchSysCache3(
+        mcx,
+        DEFACLROLENSPOBJ,
+        SysCacheKey::Value(KeyDatum::from_oid(role_id)),
+        SysCacheKey::Value(KeyDatum::from_oid(nsp_oid)),
+        SysCacheKey::Value(KeyDatum::from_char(objtype)),
+    )?;
+
+    match tuple {
+        None => Ok(None),
+        Some(_) => panic!(
+            "get_default_acl_internal: non-empty pg_default_acl entry \
+             (role={role_id:?} nsp={nsp_oid:?} objtype={objtype}) — decoding the \
+             defaclacl aclitem[] column is not yet supported (run only without \
+             ALTER DEFAULT PRIVILEGES)"
+        ),
+    }
+}
+
+/// `get_user_default_acl(objtype, ownerId, nsp_oid)` (aclchk.c): default
+/// permissions for a newly-created object in a schema. Returns `None` when the
+/// built-in system defaults should be used (the common case on a fresh
+/// cluster).
+pub fn get_user_default_acl<'mcx>(
+    mcx: Mcx<'mcx>,
+    objtype: ObjectType,
+    owner_id: Oid,
+    nsp_oid: Oid,
+) -> PgResult<Option<ArrayType>> {
+    use backend_catalog_objectaddress::consts::{
+        DEFACLOBJ_FUNCTION, DEFACLOBJ_LARGEOBJECT, DEFACLOBJ_NAMESPACE, DEFACLOBJ_RELATION,
+        DEFACLOBJ_SEQUENCE, DEFACLOBJ_TYPE,
+    };
+
+    // Use NULL during bootstrap, since pg_default_acl probably isn't there yet.
+    if backend_utils_init_miscinit_seams::is_bootstrap_processing_mode::call() {
+        return Ok(None);
+    }
+
+    // Check if object type is supported in pg_default_acl.
+    let defaclobjtype: i8 = match objtype {
+        ObjectType::Table => DEFACLOBJ_RELATION,
+        ObjectType::Sequence => DEFACLOBJ_SEQUENCE,
+        ObjectType::Function => DEFACLOBJ_FUNCTION,
+        ObjectType::Type => DEFACLOBJ_TYPE,
+        ObjectType::Schema => DEFACLOBJ_NAMESPACE,
+        ObjectType::Largeobject => DEFACLOBJ_LARGEOBJECT,
+        _ => return Ok(None),
+    };
+
+    // Look up the relevant pg_default_acl entries.
+    let glob_acl = get_default_acl_internal(mcx, owner_id, InvalidOid, defaclobjtype)?;
+    let schema_acl = get_default_acl_internal(mcx, owner_id, nsp_oid, defaclobjtype)?;
+
+    // Quick out if neither entry exists — the empty-catalog fast path.
+    if glob_acl.is_none() && schema_acl.is_none() {
+        return Ok(None);
+    }
+
+    // The merge path (substitute hard-wired default, aclmerge, aclitemsort,
+    // aclequal-vs-default quick-out) requires a real Acl (aclitem[]) carrier
+    // across the seam; unreached on a fresh cluster.
+    panic!(
+        "get_user_default_acl: a pg_default_acl entry exists \
+         (objtype={objtype:?} owner={owner_id:?} nsp={nsp_oid:?}) — merging \
+         per-schema/global default ACLs is not yet supported (run only without \
+         ALTER DEFAULT PRIVILEGES)"
+    );
+}
 
 /* ===========================================================================
  * aclcheck_error{,_col,_type} reporters (aclchk.c)
@@ -1323,8 +1409,16 @@ pub fn init_seams() {
         grant_exec::execute_grant_stmt(mcx, stmt)
     });
 
-    // NOTE (F1 STOP): get_user_default_acl, record_dependency_on_new_acl
-    // (ArrayType-payload + DEFACLROLENSPOBJ blocked) and the three F2/F3
+    // get_user_default_acl: bounded to the empty pg_default_acl fast path
+    // (returns None on a fresh cluster; a non-empty entry panics until a real
+    // Acl carrier crosses the seam).
+    seam::get_user_default_acl::set(|objtype, owner_id, nsp_oid| {
+        let ctx = MemoryContext::new("get_user_default_acl");
+        get_user_default_acl(ctx.mcx(), objtype, owner_id, nsp_oid)
+    });
+
+    // NOTE (F1 STOP): record_dependency_on_new_acl (reachable only when
+    // get_user_default_acl returns a non-NULL ACL) and the three F2/F3
     // executor/init-privs seams (remove_role_from_object_acl,
     // remove_role_from_init_priv, replace_role_in_init_priv) are deliberately
     // NOT installed; the CATALOG row is held at `scaffold` so the seam-install
