@@ -200,11 +200,11 @@ fn normalize(mut bms: Box<Bitmapset>) -> Relids {
 /// member, replace it with `newrelid` (added only when `newrelid` is also a
 /// normal varno; a negative/special `newrelid` means "just delete").
 pub fn adjust_relid_set(set: &Relids, oldrelid: i32, newrelid: i32) -> Relids {
-    // IS_SPECIAL_VARNO: anything `>= INNER_VAR`. In analyzejoins the new_index can
-    // also be a negative sentinel (-1) meaning "delete only" (left-join removal).
-    const INNER_VAR: i32 = 65000;
-    let old_is_special = oldrelid >= INNER_VAR;
-    let new_is_special = newrelid < 0 || newrelid >= INNER_VAR;
+    // IS_SPECIAL_VARNO(varno) == ((int) varno < 0): the special varnos
+    // (INNER_VAR/OUTER_VAR/INDEX_VAR/ROWID_VAR == -1..-4) are negative, as is the
+    // left-join removal "delete only" sentinel; real RT indices are >= 1.
+    let old_is_special = oldrelid < 0;
+    let new_is_special = newrelid < 0;
     if !old_is_special && is_member(oldrelid, set) {
         let mut out = copy(set);
         out = del_member(out, oldrelid);

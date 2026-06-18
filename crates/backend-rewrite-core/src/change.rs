@@ -25,12 +25,12 @@ use types_nodes::primnodes::{Expr, ExprRelids};
 
 use crate::relids;
 
-/// `IS_SPECIAL_VARNO(varno)` (primnodes.h) — INNER_VAR(65000)/OUTER_VAR/INDEX_VAR/
-/// ROWID_VAR, i.e. anything `>= INNER_VAR`.
-const INNER_VAR: i32 = 65000;
+/// `IS_SPECIAL_VARNO(varno)` (primnodes.h) — `((int) (varno) < 0)`. The special
+/// varnos (INNER_VAR/OUTER_VAR/INDEX_VAR/ROWID_VAR) are the C negative sentinels
+/// (-1..-4); real range-table indices are >= 1.
 #[inline]
 fn is_special_varno(varno: i32) -> bool {
-    varno >= INNER_VAR
+    varno < 0
 }
 
 /// `adjust_relid_set(relids, oldrelid, newrelid)` (rewriteManip.c:760).

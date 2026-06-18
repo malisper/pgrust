@@ -18,11 +18,11 @@ fn maxalign(len: i64) -> i64 {
     (len + 7) & !7
 }
 
-/// `IS_SPECIAL_VARNO` (primnodes.h) — varno >= INNER_VAR (65000).
+/// `IS_SPECIAL_VARNO` (primnodes.h) — `((int) (varno) < 0)`. The special varnos
+/// are the C negative sentinels (-1..-4); real range-table indices are >= 1.
 #[inline]
 fn is_special_varno(varno: i32) -> bool {
-    const INNER_VAR: i32 = 65000;
-    varno >= INNER_VAR
+    varno < 0
 }
 
 /// `set_baserel_size_estimates` (costsize.c:5328).

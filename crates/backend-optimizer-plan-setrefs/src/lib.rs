@@ -48,21 +48,25 @@ use backend_optimizer_plan_setrefs_seams as ext;
 // Constants transcribed locally (primnodes.h / catalog OIDs / syscache IDs).
 // ===========================================================================
 
-/// `INNER_VAR` (primnodes.h) — reference to inner subplan. The optimizer
-/// convention in this repo (createplan/costsize/analyzejoins) is the C
-/// `primnodes.h` 65000-series, *not* the executor's negative sentinels.
-const INNER_VAR: i32 = 65000;
-/// `OUTER_VAR` — reference to outer subplan.
-const OUTER_VAR: i32 = 65001;
-/// `INDEX_VAR` — reference to index column.
-const INDEX_VAR: i32 = 65002;
-/// `ROWID_VAR` — row identity column during planning.
-const ROWID_VAR: i32 = 65003;
+/// `#define INNER_VAR (-1)` (primnodes.h) — reference to inner subplan.
+///
+/// These are the verbatim C sentinel values. setrefs is the planner/executor
+/// boundary: the Vars it produces (with `varno` set to these constants) are
+/// read back by the executor (execExpr / execUtils / nodeIndexonlyscan), which
+/// switches on the C negative values. They MUST agree, so we use the real C
+/// values here — and `IS_SPECIAL_VARNO` is the C `(int) varno < 0`.
+const INNER_VAR: i32 = -1;
+/// `#define OUTER_VAR (-2)` — reference to outer subplan.
+const OUTER_VAR: i32 = -2;
+/// `#define INDEX_VAR (-3)` — reference to index column.
+const INDEX_VAR: i32 = -3;
+/// `#define ROWID_VAR (-4)` — row identity column during planning.
+const ROWID_VAR: i32 = -4;
 
-/// `IS_SPECIAL_VARNO(varno)` (primnodes.h) — any of the above special varnos.
+/// `IS_SPECIAL_VARNO(varno)` (primnodes.h) — `((int) (varno) < 0)`.
 #[inline]
 fn is_special_varno(varno: i32) -> bool {
-    varno >= INNER_VAR
+    varno < 0
 }
 
 /// `REGCLASSOID` / `OIDOID` for `ISREGCLASSCONST`; `PROCOID` / `TYPEOID` are the

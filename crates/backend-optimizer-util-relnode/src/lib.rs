@@ -993,8 +993,9 @@ fn build_joinrel_tlist(
     Ok(())
 }
 
-/// `ROWID_VAR` (primnodes.h) — the special varno for row identity Vars.
-const ROWID_VAR: i32 = -2;
+/// `#define ROWID_VAR (-4)` (primnodes.h) — the special varno for row identity
+/// Vars used during planning.
+const ROWID_VAR: i32 = -4;
 
 /* ==========================================================================
  * build_joinrel_restrictlist / build_joinrel_joinlist + subbuild helpers

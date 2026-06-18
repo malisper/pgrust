@@ -456,9 +456,11 @@ fn adjust_expr_relids(
     oldrelid: i32,
     newrelid: i32,
 ) -> types_nodes::primnodes::ExprRelids {
-    const INNER_VAR: i32 = 65000;
-    let old_is_special = oldrelid >= INNER_VAR;
-    let new_is_special = newrelid < 0 || newrelid >= INNER_VAR;
+    // IS_SPECIAL_VARNO(varno) == ((int) varno < 0): the special varnos
+    // (INNER_VAR/OUTER_VAR/INDEX_VAR/ROWID_VAR == -1..-4) and the left-join
+    // removal "delete only" sentinel are all negative; real RT indices are >= 1.
+    let old_is_special = oldrelid < 0;
+    let new_is_special = newrelid < 0;
     let is_member = |x: i32| -> bool {
         if x < 0 {
             return false;
