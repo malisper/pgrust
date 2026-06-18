@@ -41,7 +41,7 @@ use types_error::{
 };
 use types_tuple::heaptuple::{RECORDOID, TEXTOID, UNKNOWNOID};
 
-use types_nodes::nodes::{Node, NodePtr};
+use types_nodes::nodes::{ntag, Node, NodePtr};
 use types_nodes::parsenodes::{
     RangeTblEntry, RTE_CTE, RTE_FUNCTION, RTE_GROUP, RTE_JOIN, RTE_NAMEDTUPLESTORE, RTE_RELATION,
     RTE_RESULT, RTE_SUBQUERY, RTE_TABLEFUNC, RTE_VALUES,
@@ -76,15 +76,15 @@ use backend_utils_init_small_seams as globals;
 
 /// `strVal(node)` — the string contents of a `String` value node.
 fn str_val<'a>(node: &'a Node<'_>) -> &'a str {
-    match node {
-        Node::String(s) => s.sval.as_str(),
+    match node.node_tag() {
+        ntag::T_String => node.expect_string().sval.as_str(),
         _ => "",
     }
 }
 
 /// `IsA(node, String)`.
 fn is_string(node: &Node<'_>) -> bool {
-    matches!(node, Node::String(_))
+    node.is_string()
 }
 
 /// Convert a raw-grammar `SetToDefault` node into the typed primnode form (the
@@ -127,10 +127,11 @@ fn rel_name<'a>(rd: &'a types_rel::RelationData<'_>) -> &'a str {
 fn get_cte_target_list<'a, 'mcx>(
     cte: &'a types_nodes::rawnodes::CommonTableExpr<'mcx>,
 ) -> &'a [types_nodes::primnodes::TargetEntry<'mcx>] {
-    let q = match cte.ctequery.as_deref() {
-        Some(Node::Query(q)) => q,
-        _ => panic!("GetCTETargetList: cte->ctequery is not a Query"),
-    };
+    let q = cte
+        .ctequery
+        .as_deref()
+        .and_then(|n| n.as_query())
+        .unwrap_or_else(|| panic!("GetCTETargetList: cte->ctequery is not a Query"));
     if q.commandType == types_nodes::nodes::CmdType::CMD_SELECT {
         &q.targetList
     } else {
@@ -160,12 +161,11 @@ pub fn transformTargetEntry<'mcx>(
             // If it's a SetToDefault node and we should allow that, pass it
             // through unmodified.
             if expr_kind == ParseExprKind::EXPR_KIND_UPDATE_SOURCE
-                && matches!(node.as_ref(), Some(Node::SetToDefault(_)))
+                && node.as_ref().is_some_and(|n| n.is_settodefault())
             {
-                match node.as_ref() {
-                    Some(Node::SetToDefault(d)) => Some(Expr::SetToDefault(raw_settodefault_to_prim(d))),
-                    _ => unreachable!(),
-                }
+                node.as_ref()
+                    .and_then(|n| n.as_settodefault())
+                    .map(|d| Expr::SetToDefault(raw_settodefault_to_prim(d)))
             } else {
                 parse_expr::transformExpr::call(pstate, clone_opt_node(&node, mcx)?, expr_kind)?
             }
@@ -226,19 +226,18 @@ pub fn transformTargetList<'mcx>(
     for res in targetlist.into_iter() {
         // Check for "something.*".
         if expand_star {
-            match res.val.as_deref() {
-                Some(Node::ColumnRef(cref)) => {
-                    if matches!(cref.fields.last().map(|n| &**n), Some(Node::A_Star(_))) {
+            match res.val.as_deref().map(|n| n.node_tag()) {
+                Some(ntag::T_ColumnRef) => {
+                    let cref = res.val.as_deref().unwrap().expect_columnref();
+                    if cref.fields.last().map(|n| &**n).is_some_and(|n| n.is_a_star()) {
                         let expanded = ExpandColumnRefStar(mcx, pstate, cref, true)?;
                         push_te_list(mcx, &mut p_target, expanded.into_targets())?;
                         continue;
                     }
                 }
-                Some(Node::A_Indirection(ind)) => {
-                    if matches!(
-                        ind.indirection.last().map(|n| &**n),
-                        Some(Node::A_Star(_))
-                    ) {
+                Some(ntag::T_A_Indirection) => {
+                    let ind = res.val.as_deref().unwrap().expect_a_indirection();
+                    if ind.indirection.last().map(|n| &**n).is_some_and(|n| n.is_a_star()) {
                         let expanded = ExpandIndirectionStar(mcx, pstate, ind, true, expr_kind)?;
                         push_te_list(mcx, &mut p_target, expanded.into_targets())?;
                         continue;
@@ -330,16 +329,18 @@ pub fn transformExpressionList<'mcx>(
         let e = PgBox::into_inner(e);
 
         // Check for "something.*".
-        match &e {
-            Node::ColumnRef(cref) => {
-                if matches!(cref.fields.last().map(|n| &**n), Some(Node::A_Star(_))) {
+        match e.node_tag() {
+            ntag::T_ColumnRef => {
+                let cref = e.expect_columnref();
+                if cref.fields.last().map(|n| &**n).is_some_and(|n| n.is_a_star()) {
                     let expanded = ExpandColumnRefStar(mcx, pstate, cref, false)?;
                     push_expr_list(mcx, &mut result, expanded.into_exprs())?;
                     continue;
                 }
             }
-            Node::A_Indirection(ind) => {
-                if matches!(ind.indirection.last().map(|n| &**n), Some(Node::A_Star(_))) {
+            ntag::T_A_Indirection => {
+                let ind = e.expect_a_indirection();
+                if ind.indirection.last().map(|n| &**n).is_some_and(|n| n.is_a_star()) {
                     let expanded =
                         ExpandIndirectionStar(mcx, pstate, ind, false, expr_kind)?;
                     push_expr_list(mcx, &mut result, expanded.into_exprs())?;
@@ -351,11 +352,8 @@ pub fn transformExpressionList<'mcx>(
 
         // Not "something.*", so transform as a single expression.  If it's a
         // SetToDefault node and we should allow that, pass it through unmodified.
-        let transformed = if allow_default && matches!(e, Node::SetToDefault(_)) {
-            match &e {
-                Node::SetToDefault(d) => Expr::SetToDefault(raw_settodefault_to_prim(d)),
-                _ => unreachable!(),
-            }
+        let transformed = if allow_default && e.is_settodefault() {
+            Expr::SetToDefault(raw_settodefault_to_prim(e.expect_settodefault()))
         } else {
             parse_expr::transformExpr::call(pstate, Some(e), expr_kind)?
                 .expect("transformExpressionList: NULL expr")
@@ -596,7 +594,10 @@ pub fn transformAssignedExpr<'mcx>(
         def.typeMod = attrtypmod;
         def.collation = attrcollation;
         if !indirection.is_empty() {
-            let is_indices = matches!(indirection.first().map(|n| &**n), Some(Node::A_Indices(_)));
+            let is_indices = indirection
+                .first()
+                .map(|n| &**n)
+                .is_some_and(|n| n.is_a_indices());
             pstate.p_expr_kind = sv_expr_kind;
             if is_indices {
                 return Err(ereport(ERROR)
@@ -787,10 +788,10 @@ pub fn transformAssignmentIndirection<'mcx>(
     while i < indirection.len() {
         let n = &indirection[i];
 
-        if matches!(&**n, Node::A_Indices(_)) {
+        if n.is_a_indices() {
             subscripts.try_reserve(1).map_err(|_| mcx.oom(1))?;
             subscripts.push(alloc_in(mcx, n.clone_in(mcx)?)?);
-        } else if matches!(&**n, Node::A_Star(_)) {
+        } else if n.is_a_star() {
             return Err(ereport(ERROR)
                 .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
                 .errmsg("row expansion via \"*\" is not supported here")
@@ -1010,9 +1011,9 @@ fn transformAssignmentSubscripts<'mcx>(
     let mut indices: alloc::vec::Vec<types_nodes::rawnodes::A_Indices<'mcx>> =
         alloc::vec::Vec::with_capacity(subscripts.len());
     for n in subscripts.into_iter() {
-        match PgBox::into_inner(n) {
-            Node::A_Indices(a) => indices.push(a),
-            _ => panic!("transformAssignmentSubscripts: non-A_Indices subscript"),
+        match PgBox::into_inner(n).into_a_indices() {
+            Some(a) => indices.push(a),
+            None => panic!("transformAssignmentSubscripts: non-A_Indices subscript"),
         }
     }
 
@@ -1388,9 +1389,9 @@ fn name_list_to_string(fields: &PgVec<'_, NodePtr<'_>>) -> String {
         if idx > 0 {
             s.push('.');
         }
-        match &**n {
-            Node::String(sv) => s.push_str(sv.sval.as_str()),
-            Node::A_Star(_) => s.push('*'),
+        match n.node_tag() {
+            ntag::T_String => s.push_str(n.expect_string().sval.as_str()),
+            ntag::T_A_Star => s.push('*'),
             _ => {}
         }
     }
@@ -1551,7 +1552,7 @@ fn ExpandRowReference<'mcx>(
 ) -> PgResult<ExpandResult<'mcx>> {
     // If the rowtype expression is a whole-row Var, expand the fields as simple
     // Vars.
-    if let Node::Expr(Expr::Var(var)) = &expr {
+    if let Some(var) = expr.as_var() {
         if var.varattno == InvalidAttrNumber {
             let (varno, varlevelsup, location) = (var.varno, var.varlevelsup as i32, var.location);
             let nsitem_index = nsitem_index_for_var(pstate, varno, varlevelsup)?;
@@ -1569,7 +1570,7 @@ fn ExpandRowReference<'mcx>(
     // Otherwise: generate multiple copies of the expression and do
     // FieldSelects.  Verify it's a composite type and get the tupdesc.
     // get_expr_result_tupdesc(no_error=false) never returns NULL; Assert(tupleDesc).
-    let tuple_desc = if let Node::Expr(Expr::Var(var)) = &expr {
+    let tuple_desc = if let Some(var) = expr.as_var() {
         if var.vartype == RECORDOID {
             expandRecordVariable(mcx, pstate, var, 0)?
         } else {
@@ -1787,9 +1788,9 @@ pub fn expandRecordVariable<'mcx>(
                     for _ in 0..total {
                         ps = ps.parentParseState.as_deref().expect("parentParseState set");
                     }
-                    let ctequery_rtable = match cte.ctequery.as_deref() {
-                        Some(Node::Query(q)) => clone_rtable(&q.rtable, mcx)?,
-                        _ => panic!("expandRecordVariable: cte->ctequery is not a Query"),
+                    let ctequery_rtable = match cte.ctequery.as_deref().and_then(|n| n.as_query()) {
+                        Some(q) => clone_rtable(&q.rtable, mcx)?,
+                        None => panic!("expandRecordVariable: cte->ctequery is not a Query"),
                     };
                     let mypstate = make_fake_pstate_owned(mcx, ps, ctequery_rtable)?;
                     return expandRecordVariable(mcx, &mypstate, &inner_var, 0);
@@ -1911,8 +1912,9 @@ fn FigureColnameInternal(node: Option<&Node<'_>>, name: &mut Option<String>) -> 
         return strength;
     };
 
-    match node {
-        Node::ColumnRef(cref) => {
+    match node.node_tag() {
+        ntag::T_ColumnRef => {
+            let cref = node.expect_columnref();
             // find last field name, if any, ignoring "*".
             let mut fname: Option<String> = None;
             for f in cref.fields.iter() {
@@ -1925,7 +1927,8 @@ fn FigureColnameInternal(node: Option<&Node<'_>>, name: &mut Option<String>) -> 
                 return 2;
             }
         }
-        Node::A_Indirection(ind) => {
+        ntag::T_A_Indirection => {
+            let ind = node.expect_a_indirection();
             // find last field name, if any, ignoring "*" and subscripts.
             let mut fname: Option<String> = None;
             for f in ind.indirection.iter() {
@@ -1939,21 +1942,24 @@ fn FigureColnameInternal(node: Option<&Node<'_>>, name: &mut Option<String>) -> 
             }
             return FigureColnameInternal(ind.arg.as_deref(), name);
         }
-        Node::FuncCall(fc) => {
+        ntag::T_FuncCall => {
+            let fc = node.expect_funccall();
             // strVal(llast(funcname)).
             if let Some(last) = fc.funcname.last() {
                 *name = Some(String::from(str_val(last)));
             }
             return 2;
         }
-        Node::A_Expr(ae) => {
+        ntag::T_A_Expr => {
+            let ae = node.expect_a_expr();
             if ae.kind == types_nodes::rawnodes::A_Expr_Kind::AEXPR_NULLIF {
                 // make nullif() act like a regular function.
                 *name = Some(String::from("nullif"));
                 return 2;
             }
         }
-        Node::TypeCast(tc) => {
+        ntag::T_TypeCast => {
+            let tc = node.expect_typecast();
             strength = FigureColnameInternal(tc.arg.as_deref(), name);
             if strength <= 1 {
                 if let Some(tn) = tc.typeName.as_deref() {
@@ -1964,15 +1970,17 @@ fn FigureColnameInternal(node: Option<&Node<'_>>, name: &mut Option<String>) -> 
                 }
             }
         }
-        Node::CollateClause(cc) => {
+        ntag::T_CollateClause => {
+            let cc = node.expect_collateclause();
             return FigureColnameInternal(cc.arg.as_deref(), name);
         }
-        Node::GroupingFunc(_) => {
+        ntag::T_GroupingFunc => {
             // make GROUPING() act like a regular function.
             *name = Some(String::from("grouping"));
             return 2;
         }
-        Node::SubLink(sublink) => {
+        ntag::T_SubLink => {
+            let sublink = node.expect_sublink();
             match sublink.sub_link_type {
                 SubLinkType::Exists => {
                     *name = Some(String::from("exists"));
@@ -1985,7 +1993,7 @@ fn FigureColnameInternal(node: Option<&Node<'_>>, name: &mut Option<String>) -> 
                 SubLinkType::Expr => {
                     // Get column name of the subquery's single target.  The
                     // subquery has probably already been transformed; check.
-                    if let Some(Node::Query(query)) = sublink.subselect.as_deref() {
+                    if let Some(query) = sublink.subselect.as_deref().and_then(|n| n.as_query()) {
                         if let Some(te) = query.targetList.first() {
                             if let Some(resname) = te.resname.as_deref() {
                                 *name = Some(String::from(resname));
@@ -2003,28 +2011,30 @@ fn FigureColnameInternal(node: Option<&Node<'_>>, name: &mut Option<String>) -> 
                 }
             }
         }
-        Node::CaseExpr(ce) => {
+        ntag::T_CaseExpr => {
+            let ce = node.expect_caseexpr();
             strength = FigureColnameInternal(ce.defresult.as_deref(), name);
             if strength <= 1 {
                 *name = Some(String::from("case"));
                 return 1;
             }
         }
-        Node::A_ArrayExpr(_) => {
+        ntag::T_A_ArrayExpr => {
             // make ARRAY[] act like a function.
             *name = Some(String::from("array"));
             return 2;
         }
-        Node::RowExpr(_) => {
+        ntag::T_RowExpr => {
             // make ROW() act like a function.
             *name = Some(String::from("row"));
             return 2;
         }
-        Node::CoalesceExpr(_) => {
+        ntag::T_CoalesceExpr => {
             *name = Some(String::from("coalesce"));
             return 2;
         }
-        Node::MinMaxExpr(mm) => {
+        ntag::T_MinMaxExpr => {
+            let mm = node.expect_minmaxexpr();
             match mm.op {
                 MinMaxOp::IS_GREATEST => {
                     *name = Some(String::from("greatest"));
@@ -2036,7 +2046,8 @@ fn FigureColnameInternal(node: Option<&Node<'_>>, name: &mut Option<String>) -> 
                 }
             }
         }
-        Node::SQLValueFunction(svf) => {
+        ntag::T_SQLValueFunction => {
+            let svf = node.expect_sqlvaluefunction();
             match svf.op {
                 SQLValueFunctionOp::SVFOP_CURRENT_DATE => {
                     *name = Some(String::from("current_date"));
@@ -2088,7 +2099,8 @@ fn FigureColnameInternal(node: Option<&Node<'_>>, name: &mut Option<String>) -> 
                 }
             }
         }
-        Node::XmlExpr(xe) => {
+        ntag::T_XmlExpr => {
+            let xe = node.expect_xmlexpr();
             match xe.op {
                 XmlExprOp::IS_XMLCONCAT => {
                     *name = Some(String::from("xmlconcat"));
@@ -2164,10 +2176,7 @@ fn node_expr_ref<'a, 'mcx>(n: &'a Node<'mcx>) -> &'a Expr {
 
 /// Extract a `Var` from a `Node::Expr(Expr::Var)`.
 fn node_to_var(n: Node<'_>) -> Option<Var> {
-    match n {
-        Node::Expr(Expr::Var(v)) => Some(v),
-        _ => None,
-    }
+    n.into_var()
 }
 
 // ===========================================================================
