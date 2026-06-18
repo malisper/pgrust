@@ -1374,6 +1374,16 @@ pub fn init_seams() {
     me::check_srf_call_placement::set(check_srf_call_placement);
     me::set_last_srf::set(seam_set_last_srf);
     me::func_get_detail::set(seam_func_get_detail);
+
+    // Cross-crate install: `funcname_signature_string` (parse_func.c, body here)
+    // is consumed by functioncmds for `ereport` argument-signature text; its
+    // decl lives on `backend-commands-functioncmds-seams` (owned `String`
+    // proname, `Vec<Oid>` argtypes, no named-arg list — pass an empty slice).
+    backend_commands_functioncmds_seams::funcname_signature_string::set(
+        |proname, pronargs, arg_types| {
+            funcname_signature_string(&proname, pronargs, &[], &arg_types)
+        },
+    );
 }
 
 /// Seam entry for `func_get_detail`. The sole cross-crate caller is

@@ -13,3 +13,4 @@ types-core = { path = "../types-core" }
 types-catalog = { path = "../types-catalog" }
 types-error = { path = "../types-error" }
 backend-catalog-objectaccess-seams = { path = "../backend-catalog-objectaccess-seams" }
+backend-commands-tablecmds-seams = { path = "../backend-commands-tablecmds-seams" }

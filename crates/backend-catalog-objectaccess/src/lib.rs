@@ -495,6 +495,13 @@ pub fn init_seams() {
     s::invoke_object_post_alter_hook_arg::set(invoke_object_post_alter_hook);
     s::invoke_function_execute_hook::set(invoke_function_execute_hook);
     s::InvokeObjectDropHookArg::set(invoke_object_drop_hook);
+
+    // Cross-crate install: `InvokeObjectTruncateHook` (objectaccess.h macro,
+    // body here) is consumed by tablecmds `ExecuteTruncate`; its decl lives on
+    // `backend-commands-tablecmds-seams`. Signature is an exact match.
+    backend_commands_tablecmds_seams::invoke_object_truncate_hook::set(
+        invoke_object_truncate_hook,
+    );
 }
 
 use types_core::primitive::InvalidOid;

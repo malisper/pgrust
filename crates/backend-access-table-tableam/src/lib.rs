@@ -124,6 +124,13 @@ pub fn init_seams() {
     backend_access_table_tableam_seams::table_scan_analyze_next_tuple::set(
         table_scan_analyze_next_tuple,
     );
+
+    // Cross-crate install: `default_table_access_method` (the GUC string, owned
+    // here) is consumed by tablecmds `DefineRelation`; its decl lives on
+    // `backend-commands-tablecmds-seams` and returns an mcx-allocated PgString.
+    backend_commands_tablecmds_seams::default_table_access_method::set(|mcx| {
+        mcx::PgString::from_str_in(&default_table_access_method(), mcx)
+    });
 }
 
 /// Adapter for `backend-access-table-tableam-bm-seams::table_endscan` — the
