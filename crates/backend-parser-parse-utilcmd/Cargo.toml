@@ -60,4 +60,8 @@ backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }
 backend-utils-cache-typcache = { path = "../backend-utils-cache-typcache" }
 backend-utils-adt-format-type = { path = "../backend-utils-adt-format-type" }
 
+# quote_qualified_identifier for the SERIAL nextval('...') default text —
+# cycle-free leaf.
+backend-utils-adt-ruleutils = { path = "../backend-utils-adt-ruleutils" }
+
 [dev-dependencies]

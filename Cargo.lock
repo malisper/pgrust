@@ -13180,6 +13180,7 @@ dependencies = [
  "backend-parser-small1",
  "backend-tcop-utility-out-seams",
  "backend-utils-adt-format-type",
+ "backend-utils-adt-ruleutils",
  "backend-utils-cache-lsyscache",
  "backend-utils-cache-typcache",
  "backend-utils-error",

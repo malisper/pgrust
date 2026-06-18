@@ -6,6 +6,13 @@
 //! seam panics by default; a future owner port installs the real body via
 //! `::set(...)`. No `todo!()`/`unimplemented!()` — every unported leaf is a
 //! loud declared seam-and-panic.
+//!
+//! `transformColumnType` and `quote_qualified_identifier` formerly lived here
+//! but are now real bodies in the owning crate (their substrate —
+//! `typenameType`/`LookupCollation`/`format_type_be` and `ruleutils` — is a
+//! cycle-free direct dependency). The remaining seams bottom out on the live
+//! relcache `Relation` carrier that `CreateStmtContext` deliberately omits
+//! (and, for the rule/partition legs, analyze.c / planner substrate).
 
 #![allow(non_snake_case)]
 #![allow(clippy::result_large_err)]
@@ -51,29 +58,6 @@ seam_core::seam!(
         PgVec<'mcx, NodeBox<'mcx>>,
         PgVec<'mcx, NodeBox<'mcx>>,
     )>
-);
-
-seam_core::seam!(
-    /// `quote_qualified_identifier(namespace, ident)` (utils/adt/ruleutils.c):
-    /// build the dotted, quoted-as-needed identifier text used to construct the
-    /// `nextval('...')` argument for a SERIAL column's DEFAULT.
-    pub fn quote_qualified_identifier<'mcx>(
-        mcx: Mcx<'mcx>,
-        qualifier: Option<&str>,
-        ident: &str,
-    ) -> PgResult<PgString<'mcx>>
-);
-
-seam_core::seam!(
-    /// `transformColumnType(cxt, column)` (parse_utilcmd.c): verify the column's
-    /// declared type (and any COLLATE) via `typenameType` / `LookupCollation`.
-    /// For the IDENTITY path the caller also needs the resolved type OID, so
-    /// this returns `((Form_pg_type) GETSTRUCT(ctype))->oid`. Catalog/syscache.
-    pub fn transformColumnType<'mcx>(
-        mcx: Mcx<'mcx>,
-        pstate: &ParseState<'mcx>,
-        column: &Node<'mcx>,
-    ) -> PgResult<Oid>
 );
 
 seam_core::seam!(
