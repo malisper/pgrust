@@ -929,6 +929,10 @@ mod guc_vars {
     int_guc!(BGWRITER_LRU_MAXPAGES, blm_get, blm_set, 100);
     int_guc!(CHECKPOINT_FLUSH_AFTER, cfa_get, cfa_set, 0);
     int_guc!(BGWRITER_FLUSH_AFTER, bfa_get, bfa_set, 0);
+    // bufmgr.c: `int backend_flush_after = DEFAULT_BACKEND_FLUSH_AFTER` (0),
+    // `int io_max_combine_limit = DEFAULT_IO_COMBINE_LIMIT` (128KB/BLCKSZ = 16).
+    int_guc!(BACKEND_FLUSH_AFTER, bkfa_get, bkfa_set, 0);
+    int_guc!(IO_MAX_COMBINE_LIMIT, iomcl_get, iomcl_set, 16);
     // bufmgr.c: `bool track_io_timing = false`, `bool zero_damaged_pages = false`.
     bool_guc!(TRACK_IO_TIMING, tit_get, tit_set, false);
     bool_guc!(ZERO_DAMAGED_PAGES, zdp_get, zdp_set, false);
@@ -979,6 +983,14 @@ mod guc_vars {
         vars::zero_damaged_pages.install(GucVarAccessors {
             get: zdp_get,
             set: zdp_set,
+        });
+        vars::backend_flush_after.install(GucVarAccessors {
+            get: bkfa_get,
+            set: bkfa_set,
+        });
+        vars::io_max_combine_limit.install(GucVarAccessors {
+            get: iomcl_get,
+            set: iomcl_set,
         });
     }
 }

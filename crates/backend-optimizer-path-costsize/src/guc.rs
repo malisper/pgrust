@@ -46,8 +46,13 @@ enable_guc!(GATHERMERGE, get_gathermerge, set_gathermerge, true);
 // Parallel GUCs.
 enable_guc!(PARALLEL_APPEND, get_parallel_append, set_parallel_append, true);
 enable_guc!(PARALLEL_HASH, get_parallel_hash, set_parallel_hash, true);
-// Partitionwise GUCs (default OFF, costsize.c).
+// Partitionwise GUCs (costsize.c).
 enable_guc!(PARTITIONWISE_JOIN, get_partitionwise_join, set_partitionwise_join, false);
+enable_guc!(PARTITIONWISE_AGGREGATE, get_partitionwise_aggregate, set_partitionwise_aggregate, false);
+// Other costsize.c enable_* GUCs (default ON unless noted).
+enable_guc!(PARTITION_PRUNING, get_partition_pruning, set_partition_pruning, true);
+enable_guc!(PRESORTED_AGGREGATE, get_presorted_aggregate, set_presorted_aggregate, true);
+enable_guc!(ASYNC_APPEND, get_async_append, set_async_append, true);
 
 /// Install every costsize.c-owned `enable_*` GUC slot. Called once from
 /// `init_seams()` at single-threaded startup.
@@ -75,6 +80,16 @@ pub(crate) fn install_enable_gucs() {
         .install(GucVarAccessors { get: get_parallel_hash, set: set_parallel_hash });
     vars::enable_partitionwise_join
         .install(GucVarAccessors { get: get_partitionwise_join, set: set_partitionwise_join });
+    vars::enable_partitionwise_aggregate.install(GucVarAccessors {
+        get: get_partitionwise_aggregate,
+        set: set_partitionwise_aggregate,
+    });
+    vars::enable_partition_pruning
+        .install(GucVarAccessors { get: get_partition_pruning, set: set_partition_pruning });
+    vars::enable_presorted_aggregate
+        .install(GucVarAccessors { get: get_presorted_aggregate, set: set_presorted_aggregate });
+    vars::enable_async_append
+        .install(GucVarAccessors { get: get_async_append, set: set_async_append });
 }
 
 /// Install costsize.c's cost / sizing GUC slots (`seq_page_cost`,

@@ -1678,6 +1678,25 @@ fn seam_set_xact_iso_level_repeatable_read() {
 /// Install this crate's implementations into `backend-access-transam-xact-seams`.
 pub fn init_seams() {
     use backend_access_transam_xact_seams as seams;
+
+    // xact.c owns the transaction-isolation GUC globals (xact.c:78-87); install
+    // the guc-table slot accessors over the existing getter/setter functions so
+    // the GUC engine reads/writes them. (XactIsoLevel/DefaultXactIsoLevel are
+    // enum GUCs carried as i32; the rest are bools.)
+    {
+        use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+        vars::XactIsoLevel.install(GucVarAccessors { get: XactIsoLevel, set: SetXactIsoLevel });
+        vars::DefaultXactIsoLevel
+            .install(GucVarAccessors { get: DefaultXactIsoLevel, set: SetDefaultXactIsoLevel });
+        vars::XactReadOnly.install(GucVarAccessors { get: XactReadOnly, set: SetXactReadOnly });
+        vars::DefaultXactReadOnly
+            .install(GucVarAccessors { get: DefaultXactReadOnly, set: SetDefaultXactReadOnly });
+        vars::XactDeferrable
+            .install(GucVarAccessors { get: XactDeferrable, set: SetXactDeferrable });
+        vars::DefaultXactDeferrable
+            .install(GucVarAccessors { get: DefaultXactDeferrable, set: SetDefaultXactDeferrable });
+    }
+
     seams::command_counter_increment::set(CommandCounterIncrement);
     seams::prevent_command_if_read_only::set(PreventCommandIfReadOnly);
     seams::get_current_transaction_nest_level::set(GetCurrentTransactionNestLevel);
