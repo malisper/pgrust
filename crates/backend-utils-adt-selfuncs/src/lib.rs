@@ -52,6 +52,7 @@ pub mod join;
 pub mod mergejoin;
 pub mod misc;
 pub mod node_sel;
+pub mod patternsel;
 pub mod scalar;
 
 /// `DEFAULT_INEQ_SEL` (selfuncs.h), re-exported from [`types_selfuncs`] for the
@@ -78,6 +79,11 @@ pub fn init_seams() {
     // `join_selectivity` / `function_selectivity` reach these): map the
     // operator's `oprrest`/`oprjoin` OID to the ported estimator.
     dispatch::init_dispatch_seams();
+
+    // The like_support.c planner-support index-condition function
+    // (`textlike_support` et al. -> `match_pattern_prefix`), reached through
+    // indxpath.c's `get_index_clause_from_support` fmgr-support dispatch.
+    patternsel::init_support_seam();
 
     // The clausesel-owned per-clause-node estimators (boolvarsel / booltestsel /
     // nulltestsel / nulltestsel_var / rowcomparesel) that selfuncs.c owns the

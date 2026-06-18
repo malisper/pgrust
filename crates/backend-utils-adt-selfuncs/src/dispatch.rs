@@ -57,6 +57,18 @@ const F_POSITIONJOINSEL: Oid = 1301;
 const F_CONTSEL: Oid = 1302;
 const F_CONTJOINSEL: Oid = 1303;
 
+/* like_support.c — the LIKE / regex / prefix restriction-selectivity estimators
+ * (fmgroids.h OIDs). */
+const F_LIKESEL: Oid = 1819;
+const F_ICLIKESEL: Oid = 1814;
+const F_REGEXEQSEL: Oid = 1818;
+const F_ICREGEXEQSEL: Oid = 1820;
+const F_NLIKESEL: Oid = 1822;
+const F_ICNLIKESEL: Oid = 1815;
+const F_REGEXNESEL: Oid = 1821;
+const F_ICREGEXNESEL: Oid = 1823;
+const F_PREFIXSEL: Oid = 3437;
+
 /// `OidFunctionCall4Coll(oprrest, inputcollid, root, operatorid, args,
 /// varRelid)` (plancat.c `restriction_selectivity` body) — dispatch a
 /// restriction-selectivity estimator by its `oprrest` OID.
@@ -110,6 +122,37 @@ pub fn call_oprrest<'mcx>(
             args,
             var_relid,
             DEFAULT_MATCHING_SEL,
+        ),
+        // like_support.c — the LIKE / regex / ILIKE / prefix restriction
+        // estimators (`oprrest` of the `~~`/`~`/`~~*`/`~*` and negated families
+        // plus the `^@` prefix operator). The `inputcollid` is the operator's
+        // collation `patternsel` works with.
+        F_LIKESEL => crate::patternsel::likesel(
+            mcx, run, root, operatorid, args, var_relid, inputcollid,
+        ),
+        F_ICLIKESEL => crate::patternsel::iclikesel(
+            mcx, run, root, operatorid, args, var_relid, inputcollid,
+        ),
+        F_REGEXEQSEL => crate::patternsel::regexeqsel(
+            mcx, run, root, operatorid, args, var_relid, inputcollid,
+        ),
+        F_ICREGEXEQSEL => crate::patternsel::icregexeqsel(
+            mcx, run, root, operatorid, args, var_relid, inputcollid,
+        ),
+        F_NLIKESEL => crate::patternsel::nlikesel(
+            mcx, run, root, operatorid, args, var_relid, inputcollid,
+        ),
+        F_ICNLIKESEL => crate::patternsel::icnlikesel(
+            mcx, run, root, operatorid, args, var_relid, inputcollid,
+        ),
+        F_REGEXNESEL => crate::patternsel::regexnesel(
+            mcx, run, root, operatorid, args, var_relid, inputcollid,
+        ),
+        F_ICREGEXNESEL => crate::patternsel::icregexnesel(
+            mcx, run, root, operatorid, args, var_relid, inputcollid,
+        ),
+        F_PREFIXSEL => crate::patternsel::prefixsel(
+            mcx, run, root, operatorid, args, var_relid, inputcollid,
         ),
         other => panic!(
             "selfuncs: call_oprrest dispatch has no ported estimator for oprrest OID {other} \

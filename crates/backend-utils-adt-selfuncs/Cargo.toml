@@ -48,3 +48,11 @@ backend-utils-adt-range-selfuncs = { path = "../backend-utils-adt-range-selfuncs
 backend-utils-adt-network-selfuncs = { path = "../backend-utils-adt-network-selfuncs" }
 backend-utils-adt-array-selfuncs = { path = "../backend-utils-adt-array-selfuncs" }
 backend-utils-adt-geo-selfuncs = { path = "../backend-utils-adt-geo-selfuncs" }
+backend-utils-adt-regexp-seams = { path = "../backend-utils-adt-regexp-seams" }
+backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
+backend-utils-adt-pg-locale-seams = { path = "../backend-utils-adt-pg-locale-seams" }
+backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
+backend-utils-mb-mbutils = { path = "../backend-utils-mb-mbutils" }
+backend-utils-misc-stack-depth = { path = "../backend-utils-misc-stack-depth" }
+backend-utils-fmgr-support-seams = { path = "../backend-utils-fmgr-support-seams" }
+types-locale = { path = "../types-locale" }
