@@ -43,7 +43,7 @@ use types_error::{
     ERROR,
 };
 use types_nodes::ddlnodes::{CoercionContext, ConstrType, Constraint};
-use types_nodes::nodes::{Node, NodePtr};
+use types_nodes::nodes::{ntag, Node, NodePtr};
 use types_nodes::parsestmt::ParseExprKind;
 use types_nodes::primnodes::{CoercionForm, Expr};
 use types_rel::Relation;
@@ -236,8 +236,9 @@ fn check_nested_generated_walker(
     pstate: &types_nodes::parsestmt::ParseState<'_>,
     err: &RefCell<Option<PgError>>,
 ) -> bool {
-    match node {
-        Node::Expr(Expr::Var(var)) => {
+    match node.node_tag() {
+        ntag::T_Var => {
+            let var = node.expect_var();
             // relid = rt_fetch(var->varno, pstate->p_rtable)->relid;
             let idx = var.varno as usize;
             if idx == 0 || idx > pstate.p_rtable.len() {
@@ -332,8 +333,8 @@ fn check_virtual_generated_security_walker(
     pstate: &types_nodes::parsestmt::ParseState<'_>,
     err: &RefCell<Option<PgError>>,
 ) -> bool {
-    if !matches!(node, Node::List(_)) {
-        if let Node::Expr(expr) = node {
+    if !node.is_list() {
+        if let Some(expr) = node.as_expr() {
             let mut e_owned = match expr.clone_in(mcx) {
                 Ok(v) => v,
                 Err(e) => {
@@ -623,7 +624,7 @@ pub fn StoreConstraints<'mcx>(
     let mut numchecks = 0;
 
     for con_node in cooked_constraints.iter() {
-        let Node::Constraint(con) = &**con_node else {
+        let Some(con) = (&**con_node).as_constraint() else {
             return Err(ereport(ERROR)
                 .errmsg_internal("StoreConstraints: expected cooked CookedConstraint node")
                 .into_error());
@@ -897,7 +898,7 @@ pub fn AddRelationNewConstraints<'mcx>(
     let mut nnnames: Vec<String> = Vec::new();
 
     for cdef_node in new_constraints.iter() {
-        let Node::Constraint(cdef) = &**cdef_node else {
+        let Some(cdef) = (&**cdef_node).as_constraint() else {
             continue;
         };
 
@@ -1152,8 +1153,8 @@ fn key_strval(cdef: &Constraint<'_>) -> PgResult<String> {
             .errmsg_internal("not-null constraint with empty key list")
             .into_error()
     })?;
-    match &**first {
-        Node::String(s) => Ok(s.sval.as_str().to_string()),
+    match first.node_tag() {
+        ntag::T_String => Ok(first.expect_string().sval.as_str().to_string()),
         _ => Err(ereport(ERROR)
             .errmsg_internal("not-null constraint key is not a String value")
             .into_error()),
@@ -1190,7 +1191,7 @@ pub fn AddRelationNotNullConstraints<'mcx>(
     }
     let mut work: Vec<WorkConstr> = Vec::with_capacity(constraints.len());
     for c in constraints.iter() {
-        let Node::Constraint(cdef) = &**c else {
+        let Some(cdef) = (&**c).as_constraint() else {
             return Err(ereport(ERROR)
                 .errmsg_internal("AddRelationNotNullConstraints: expected Constraint node")
                 .into_error());
@@ -1206,7 +1207,7 @@ pub fn AddRelationNotNullConstraints<'mcx>(
     // old_notnulls working list of (attnum, name).
     let mut old: Vec<(AttrNumber, Option<String>)> = Vec::with_capacity(old_notnulls.len());
     for c in old_notnulls.iter() {
-        let Node::Constraint(cooked) = &**c else {
+        let Some(cooked) = (&**c).as_constraint() else {
             return Err(ereport(ERROR)
                 .errmsg_internal("AddRelationNotNullConstraints: expected cooked node")
                 .into_error());
