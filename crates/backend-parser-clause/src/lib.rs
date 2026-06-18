@@ -494,12 +494,14 @@ fn flatten_grouping_sets<'mcx>(
 ) -> PgResult<Flattened<'mcx>> {
     /* check_stack_depth handled by the host runtime */
 
-    match expr {
-        Node::RowExpr(r) if r.row_format == COERCE_IMPLICIT_CAST => {
+    match expr.node_tag() {
+        ntag::T_RowExpr if expr.expect_rowexpr().row_format == COERCE_IMPLICIT_CAST => {
+            let r = expr.expect_rowexpr();
             /* Recurse into the implicit RowExpr's arguments (a `T_List`). */
             return flatten_grouping_sets_list(mcx, &r.args, false, None);
         }
-        Node::GroupingSet(gset) => {
+        ntag::T_GroupingSet => {
+            let gset = expr.expect_groupingset();
             let mut result_set: Vec<NodePtr<'mcx>> = Vec::new();
 
             if let Some(flag) = hasGroupingSets {
@@ -517,10 +519,9 @@ fn flatten_grouping_sets<'mcx>(
             for n1 in gset.content.iter() {
                 let n2 = flatten_grouping_sets(mcx, n1, false, None)?;
 
-                let n1_is_sets = matches!(
-                    &**n1,
-                    Node::GroupingSet(g) if g.kind == GroupingSetKind::GROUPING_SET_SETS
-                );
+                let n1_is_sets = n1
+                    .as_groupingset()
+                    .is_some_and(|g| g.kind == GroupingSetKind::GROUPING_SET_SETS);
                 if n1_is_sets {
                     /* n2 is a `List *` (the flattened nested SETS content) */
                     match n2 {
