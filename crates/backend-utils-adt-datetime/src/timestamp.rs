@@ -574,6 +574,21 @@ pub fn anytimestamp_typmodin(istz: bool, tl: &[i32]) -> DtResult<i32> {
     anytimestamp_typmod_check(istz, tl[0])
 }
 
+/// `anytimestamp_typmodout(istz, typmod)` (timestamp.c) — render a
+/// `timestamp`/`timestamptz` typmod as its printable suffix.
+pub fn anytimestamp_typmodout(istz: bool, typmod: i32) -> String {
+    let tz = if istz {
+        " with time zone"
+    } else {
+        " without time zone"
+    };
+    if typmod >= 0 {
+        format!("({typmod}){tz}")
+    } else {
+        tz.to_string()
+    }
+}
+
 /// `anytimestamp_typmod_check(istz, typmod)` (timestamp.c:124) — validate + clamp
 /// a TIMESTAMP / TIMESTAMPTZ typmod.  Negative is an error; over-max clamps to
 /// MAX_TIMESTAMP_PRECISION (C also emits a WARNING there).

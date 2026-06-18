@@ -487,6 +487,85 @@ fn fc_time_scale(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     crate::time::AdjustTimeForTypmod(&mut t, typmod);
     ret_i64(t)
 }
+// --- typmodin/typmodout (cstring[] array argument decoded via the
+// arrayutils-seams ArrayGetIntegerTypmods seam) ---
+fn anytime_typmodin_wrapper(fcinfo: &mut FunctionCallInfoBaseData, istz: bool) -> Datum {
+    let ta = arg_varlena(fcinfo, 0);
+    let m = scratch_mcx();
+    let tl = match backend_utils_adt_arrayutils_seams::array_get_integer_typmods::call(m.mcx(), ta)
+    {
+        Ok(tl) => tl,
+        Err(e) => raise(e),
+    };
+    match crate::time::anytime_typmodin(istz, &tl) {
+        Ok(t) => ret_i32(t),
+        Err(e) => raise(e),
+    }
+}
+fn fc_timetypmodin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    anytime_typmodin_wrapper(fcinfo, false)
+}
+fn fc_timetztypmodin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    anytime_typmodin_wrapper(fcinfo, true)
+}
+fn fc_timetypmodout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let typmod = arg_i32(fcinfo, 0);
+    ret_cstring(fcinfo, crate::time::anytime_typmodout(false, typmod))
+}
+fn fc_timetztypmodout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let typmod = arg_i32(fcinfo, 0);
+    ret_cstring(fcinfo, crate::time::anytime_typmodout(true, typmod))
+}
+
+fn anytimestamp_typmodin_wrapper(fcinfo: &mut FunctionCallInfoBaseData, istz: bool) -> Datum {
+    let ta = arg_varlena(fcinfo, 0);
+    let m = scratch_mcx();
+    let tl = match backend_utils_adt_arrayutils_seams::array_get_integer_typmods::call(m.mcx(), ta)
+    {
+        Ok(tl) => tl,
+        Err(e) => raise(e),
+    };
+    match crate::timestamp::anytimestamp_typmodin(istz, &tl) {
+        Ok(t) => ret_i32(t),
+        Err(e) => raise(e),
+    }
+}
+fn fc_timestamptypmodin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    anytimestamp_typmodin_wrapper(fcinfo, false)
+}
+fn fc_timestamptztypmodin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    anytimestamp_typmodin_wrapper(fcinfo, true)
+}
+fn fc_timestamptypmodout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let typmod = arg_i32(fcinfo, 0);
+    ret_cstring(fcinfo, crate::timestamp::anytimestamp_typmodout(false, typmod))
+}
+fn fc_timestamptztypmodout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let typmod = arg_i32(fcinfo, 0);
+    ret_cstring(fcinfo, crate::timestamp::anytimestamp_typmodout(true, typmod))
+}
+
+fn fc_intervaltypmodin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let ta = arg_varlena(fcinfo, 0);
+    let m = scratch_mcx();
+    let tl = match backend_utils_adt_arrayutils_seams::array_get_integer_typmods::call(m.mcx(), ta)
+    {
+        Ok(tl) => tl,
+        Err(e) => raise(e),
+    };
+    match crate::interval::intervaltypmodin(&tl) {
+        Ok(t) => ret_i32(t),
+        Err(e) => raise(e),
+    }
+}
+fn fc_intervaltypmodout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let typmod = arg_i32(fcinfo, 0);
+    match crate::interval::intervaltypmodout(typmod) {
+        Ok(s) => ret_cstring(fcinfo, s),
+        Err(e) => raise(e),
+    }
+}
+
 fn fc_time_eq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     ret_bool(crate::time::time_eq(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
 }
@@ -1545,12 +1624,6 @@ fn builtin(
 /// Genuinely-blocked functions NOT registered here (each needs an unported
 /// neighbor's infrastructure, and registering a panicking shim would be a
 /// misleading stub — they are filled when the owner lands):
-///  * the *typmodin/*typmodout pairs (timetypmodin/out, timetztypmodin/out,
-///    timestamptypmodin/out, timestamptztypmodin/out, intervaltypmodin/out):
-///    need the `cstring[]` array argument decode (ArrayType → Vec<i32>) which
-///    is owned by arrayfuncs' deconstruct_array — the core
-///    `anytime_typmodin`/`intervaltypmodin` take `&[i32]`, but the boundary has
-///    no cstring[] → &[i32] marshaling yet.
 ///  * the planner-support functions (date_sortsupport, date_skipsupport,
 ///    time_support, timestamp_support, timestamp_sortsupport,
 ///    timestamp_skipsupport, interval_support, generate_series_timestamp_support):
@@ -1641,6 +1714,17 @@ pub fn register_datetime_builtins() {
         builtin(1104, "time_gt", 2, true, false, fc_time_gt),
         builtin(1105, "time_ge", 2, true, false, fc_time_ge),
         builtin(1107, "time_cmp", 2, true, false, fc_time_cmp),
+        // typmodin/typmodout pairs (cstring[] in / int4 out).
+        builtin(2909, "timetypmodin", 1, true, false, fc_timetypmodin),
+        builtin(2910, "timetypmodout", 1, true, false, fc_timetypmodout),
+        builtin(2911, "timetztypmodin", 1, true, false, fc_timetztypmodin),
+        builtin(2912, "timetztypmodout", 1, true, false, fc_timetztypmodout),
+        builtin(2905, "timestamptypmodin", 1, true, false, fc_timestamptypmodin),
+        builtin(2906, "timestamptypmodout", 1, true, false, fc_timestamptypmodout),
+        builtin(2907, "timestamptztypmodin", 1, true, false, fc_timestamptztypmodin),
+        builtin(2908, "timestamptztypmodout", 1, true, false, fc_timestamptztypmodout),
+        builtin(2903, "intervaltypmodin", 1, true, false, fc_intervaltypmodin),
+        builtin(2904, "intervaltypmodout", 1, true, false, fc_intervaltypmodout),
         builtin(1688, "time_hash", 1, true, false, fc_time_hash),
         builtin(3409, "time_hash_extended", 2, true, false, fc_time_hash_extended),
         builtin(1377, "time_larger", 2, true, false, fc_time_larger),

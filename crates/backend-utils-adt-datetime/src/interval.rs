@@ -353,6 +353,64 @@ pub fn intervaltypmodin(tl: &[i32]) -> DtResult<i32> {
     }
 }
 
+/// `intervaltypmodout(int4)` (timestamp.c) core — render an interval typmod as
+/// its printable suffix (e.g. `" day to second"`, `" hour(3)"`, or `""`).
+pub fn intervaltypmodout(typmod: i32) -> DtResult<String> {
+    use types_datetime::{INTERVAL_PRECISION, INTERVAL_RANGE};
+
+    if typmod < 0 {
+        return Ok(String::new());
+    }
+
+    let fields = INTERVAL_RANGE(typmod);
+    let precision = INTERVAL_PRECISION(typmod);
+
+    let fieldstr: &str = if fields == INTERVAL_MASK(YEAR) {
+        " year"
+    } else if fields == INTERVAL_MASK(MONTH) {
+        " month"
+    } else if fields == INTERVAL_MASK(DAY) {
+        " day"
+    } else if fields == INTERVAL_MASK(HOUR) {
+        " hour"
+    } else if fields == INTERVAL_MASK(MINUTE) {
+        " minute"
+    } else if fields == INTERVAL_MASK(SECOND) {
+        " second"
+    } else if fields == (INTERVAL_MASK(YEAR) | INTERVAL_MASK(MONTH)) {
+        " year to month"
+    } else if fields == (INTERVAL_MASK(DAY) | INTERVAL_MASK(HOUR)) {
+        " day to hour"
+    } else if fields == (INTERVAL_MASK(DAY) | INTERVAL_MASK(HOUR) | INTERVAL_MASK(MINUTE)) {
+        " day to minute"
+    } else if fields
+        == (INTERVAL_MASK(DAY)
+            | INTERVAL_MASK(HOUR)
+            | INTERVAL_MASK(MINUTE)
+            | INTERVAL_MASK(SECOND))
+    {
+        " day to second"
+    } else if fields == (INTERVAL_MASK(HOUR) | INTERVAL_MASK(MINUTE)) {
+        " hour to minute"
+    } else if fields == (INTERVAL_MASK(HOUR) | INTERVAL_MASK(MINUTE) | INTERVAL_MASK(SECOND)) {
+        " hour to second"
+    } else if fields == (INTERVAL_MASK(MINUTE) | INTERVAL_MASK(SECOND)) {
+        " minute to second"
+    } else if fields == INTERVAL_FULL_RANGE {
+        ""
+    } else {
+        return Err(crate::timestamp::internal_error(format!(
+            "invalid INTERVAL typmod: 0x{typmod:x}"
+        )));
+    };
+
+    if precision != INTERVAL_FULL_PRECISION {
+        Ok(format!("{fieldstr}({precision})"))
+    } else {
+        Ok(fieldstr.to_string())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // AdjustIntervalForTypmod
 // ---------------------------------------------------------------------------

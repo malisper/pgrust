@@ -166,6 +166,21 @@ pub fn anytime_typmodin(istz: bool, tl: &[i32]) -> PgResult<i32> {
     anytime_typmod_check(istz, tl[0])
 }
 
+/// `anytime_typmodout(istz, typmod)` (date.c) — render a `time`/`timetz` typmod
+/// as its printable suffix (e.g. `"(2) without time zone"`).
+pub fn anytime_typmodout(istz: bool, typmod: i32) -> String {
+    let tz = if istz {
+        " with time zone"
+    } else {
+        " without time zone"
+    };
+    if typmod >= 0 {
+        format!("({typmod}){tz}")
+    } else {
+        tz.to_string()
+    }
+}
+
 /// `time_in()` CORE -- parse a TIME text string at the given typmod.
 pub fn time_in(str: &str, typmod: i32) -> PgResult<TimeADT> {
     let mut field: Vec<String> = Vec::new();

@@ -378,6 +378,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `construct_array_builtin(cstring_datums, n, CSTRINGOID)` (arrayfuncs.c):
+    /// build a one-dimensional `cstring[]` array varlena from element strings
+    /// (the typmodin path's cstring array — fmgr/parse_type.c). Elements are
+    /// pass-by-reference NUL-terminated cstrings; an empty input yields a
+    /// zero-element array (not NULL). The result is the array varlena's raw
+    /// bytes allocated in `mcx`, carried on the canonical by-reference `Datum`.
+    /// `Err` carries the `MaxAllocSize` / OOM `ereport(ERROR)` surface.
+    pub fn build_cstring_array<'mcx>(
+        mcx: Mcx<'mcx>,
+        elems: &[&str],
+    ) -> PgResult<PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
     /// The element-deconstruct + per-element `OutputFunctionCall` walk of
     /// `array_to_text_internal` (arrayfuncs.c / varlena.c:5130-5178): given the
     /// already-detoasted array varlena bytes (`DatumGetArrayTypeP(v)` — the

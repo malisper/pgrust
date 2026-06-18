@@ -119,6 +119,7 @@ pub fn init_seams() {
     seams::text_array_out::set(construct::text_array_out);
     seams::build_text_array_nullable::set(construct::build_text_array_nullable);
     seams::build_name_array::set(construct::build_name_array);
+    seams::build_cstring_array::set(construct::build_cstring_array);
     seams::array_to_text_elements::set(io::array_to_text_elements);
     seams::construct_int4_array::set(construct::construct_int4_array);
     seams::array_const_nitems::set(construct::array_const_nitems);

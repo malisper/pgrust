@@ -11,6 +11,7 @@
 //! out-of-range, so they return [`PgResult`]; `ArrayGetOffset` and the `mda_*`
 //! helpers are pure and infallible.
 
+use mcx::{Mcx, PgVec};
 use types_error::PgResult;
 
 seam_core::seam!(
@@ -55,4 +56,16 @@ seam_core::seam!(
     /// cursor `curr` to the next tuple within `span`; returns the highest
     /// changed dimension, or `-1` when the iteration is exhausted.
     pub fn mda_next_tuple(n: i32, curr: &mut [i32], span: &[i32]) -> i32
+);
+
+seam_core::seam!(
+    /// `ArrayGetIntegerTypmods(arr, &n)` (arrayutils.c): decode a `cstring[]`
+    /// typmod array varlena into its integer typmod list (each element parsed via
+    /// `pg_strtoint32`). `ereport(ERROR)` if the array is not 1-D `cstring[]` or
+    /// contains nulls. The element strings are deconstructed and parsed; the
+    /// result is allocated in `mcx`.
+    pub fn array_get_integer_typmods<'mcx>(
+        mcx: Mcx<'mcx>,
+        arr: &[u8],
+    ) -> PgResult<PgVec<'mcx, i32>>
 );

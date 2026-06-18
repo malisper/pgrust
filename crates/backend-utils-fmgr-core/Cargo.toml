@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 mcx = { path = "../mcx" }
+backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
 types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
 types-tuple = { path = "../types-tuple" }

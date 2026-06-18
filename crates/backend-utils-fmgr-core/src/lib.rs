@@ -2229,6 +2229,50 @@ fn oid_function_call_1_deflist(
     null_check(&fcinfo, result, &oid.to_string())
 }
 
+/// `typenameTypeMod`'s typmod-resolution tail (parse_type.c): build the
+/// `cstring[]` array from the raw typmod expressions distilled to strings, then
+/// `DatumGetInt32(OidFunctionCall1(typmodin, PointerGetDatum(arrtypmod)))`. The C
+/// wraps the call in a `setup_parser_errposition_callback`, so a typmodin failure
+/// that carries no cursor position of its own is tagged with the `TypeName`'s
+/// parse `location`. Only the fmgr owner can synthesize the `cstring[]` Datum
+/// argument (a by-reference array varlena image, built via the arrayfuncs
+/// `construct_array_builtin(CSTRINGOID)` port) and dispatch the OID call.
+fn typmodin_seam(typmodin: Oid, cstrings: &[String], location: i32) -> PgResult<i32> {
+    let ctx = MemoryContext::new("typmodin");
+    let mcx = ctx.mcx();
+    let resolved = fmgr_info(mcx, typmodin)?;
+
+    // construct_array_builtin(datums, n, CSTRINGOID): the cstring[] array varlena
+    // image, carried on the by-reference side channel as a single arg.
+    let elem_refs: Vec<&str> = cstrings.iter().map(|s| s.as_str()).collect();
+    let arr = backend_utils_adt_arrayfuncs_seams::build_cstring_array::call(mcx, &elem_refs)?;
+
+    let args = vec![NullableDatum::value(Datum::null())];
+    let ref_args = vec![Some(RefPayload::Varlena(arr.as_slice().to_vec()))];
+
+    let result = function_call_coll_ref_args(
+        mcx,
+        &resolved.resolution,
+        resolved.finfo,
+        InvalidOid,
+        args,
+        ref_args,
+    );
+
+    // setup_parser_errposition_callback: tag a typmodin failure with the parse
+    // location iff it has no cursor position of its own.
+    match result {
+        Ok(d) => Ok(d.as_i32()),
+        Err(e) => {
+            if location >= 0 && e.cursor_position().is_none() {
+                Err(e.with_cursor_position(location))
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
 /// Marshal a tuple-attribute [`Datum`] into the boundary [`FmgrArg`] an
 /// output/send function expects: a by-value scalar stays a `Datum` word; a
 /// by-reference attribute's owned byte image is its `Varlena` referent (the
@@ -3583,6 +3627,7 @@ pub fn init_seams() {
     backend_utils_fmgr_fmgr_seams::get_fn_expr_argtype::set(get_fn_expr_argtype_seam);
     backend_utils_fmgr_fmgr_seams::get_fn_expr_rettype::set(get_fn_expr_rettype_seam);
     backend_utils_fmgr_fmgr_seams::oid_function_call_1_deflist::set(oid_function_call_1_deflist);
+    backend_utils_fmgr_fmgr_seams::typmodin::set(typmodin_seam);
     backend_utils_fmgr_fmgr_seams::oid_send_function_call::set(oid_send_function_call_seam);
     backend_utils_fmgr_fmgr_seams::oid_output_function_call::set(oid_output_function_call_seam);
     backend_utils_fmgr_fmgr_seams::function_call1_coll::set(function_call1_coll_seam);

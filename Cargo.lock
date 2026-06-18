@@ -17945,6 +17945,7 @@ dependencies = [
 name = "backend-utils-adt-arrayutils-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-error",
 ]
@@ -18025,6 +18026,7 @@ dependencies = [
  "backend-timezone-localtime",
  "backend-timezone-pgtz",
  "backend-timezone-strftime-seams",
+ "backend-utils-adt-arrayutils-seams",
  "backend-utils-adt-isoweek-seams",
  "backend-utils-adt-numeric",
  "backend-utils-adt-numutils",
@@ -20698,6 +20700,7 @@ dependencies = [
  "backend-executor-functions-seams",
  "backend-nodes-nodeFuncs-seams",
  "backend-optimizer-util-clauses-seams",
+ "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-syscache-seams",
  "backend-utils-fmgr-dfmgr-seams",

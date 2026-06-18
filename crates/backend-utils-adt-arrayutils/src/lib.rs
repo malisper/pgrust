@@ -262,6 +262,17 @@ pub fn init_seams() {
     seams::mda_get_prod::set(mda_get_prod);
     seams::mda_get_offset_values::set(mda_get_offset_values);
     seams::mda_next_tuple::set(mda_next_tuple);
+    seams::array_get_integer_typmods::set(array_get_integer_typmods_seam);
+}
+
+/// Seam adapter for [`array_get_integer_typmods`]: copy the typmod list into an
+/// `mcx`-charged [`PgVec`] (the seam returns its result in the caller's context).
+fn array_get_integer_typmods_seam<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    arr: &[u8],
+) -> PgResult<mcx::PgVec<'mcx, i32>> {
+    let v = array_get_integer_typmods(mcx, arr)?;
+    mcx::slice_in(mcx, &v)
 }
 
 #[cfg(test)]

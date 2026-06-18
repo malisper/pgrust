@@ -1666,6 +1666,76 @@ pub fn build_text_array<'mcx>(mcx: Mcx<'mcx>, elems: &[&str]) -> PgResult<PgVec<
     Ok(result)
 }
 
+/// `construct_array_builtin(cstring_datums, n, CSTRINGOID)` (arrayfuncs.c) over
+/// `cstring`-typed elements, taking each element's string directly rather than a
+/// pointer-word `Datum` that `datum_as_byte_window` would have to resolve.
+/// `CSTRINGOID` is C-string-length (`elmlen = -2`), pass-by-reference,
+/// char-aligned, and these arrays never contain NULLs (the typmodin cstring[]
+/// build path in parse_type.c / fmgr). Mirrors `construct_md_array` for the 1-D,
+/// no-null, cstring case: each element is its NUL-terminated string image
+/// (`strlen + 1` bytes), char-aligned (no padding).
+pub fn build_cstring_array<'mcx>(mcx: Mcx<'mcx>, elems: &[&str]) -> PgResult<PgVec<'mcx, u8>> {
+    let (_elmlen, _elmbyval, elmalign) = construct_builtin_meta(foundation::CSTRINGOID)?;
+    let nelems = elems.len() as i32;
+
+    if nelems <= 0 {
+        return construct_empty_array(mcx, foundation::CSTRINGOID);
+    }
+
+    // Each cstring element contributes strlen+1 bytes (att_addlength for
+    // elmlen == -2), char-aligned (no padding) before each element after the
+    // first.
+    let mut nbytes: i32 = 0;
+    for (i, s) in elems.iter().enumerate() {
+        let img_len = (s.len() + 1) as i32; // payload + NUL
+        if i != 0 {
+            nbytes = foundation::att_align_nominal(nbytes as usize, elmalign) as i32;
+        }
+        nbytes = nbytes
+            .checked_add(img_len)
+            .filter(|n| alloc_size_is_valid(*n))
+            .ok_or_else(|| {
+                PgError::error(format!(
+                    "array size exceeds the maximum allowed ({MAX_ALLOC_SIZE})"
+                ))
+                .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+            })?;
+    }
+
+    let dataoffset = 0;
+    nbytes += foundation::arr_overhead_nonulls(1) as i32;
+    if !alloc_size_is_valid(nbytes) {
+        return Err(PgError::error(format!(
+            "array size exceeds the maximum allowed ({MAX_ALLOC_SIZE})"
+        ))
+        .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED));
+    }
+
+    let total = nbytes as usize;
+    let mut result = mcx::vec_with_capacity_in::<u8>(mcx, total)?;
+    result.resize(total, 0); // palloc0
+
+    let dims = [nelems];
+    let lbs = [1];
+    foundation::set_header(&mut result, total, 1, dataoffset, foundation::CSTRINGOID);
+    foundation::write_dims(&mut result, &dims);
+    foundation::write_lbounds(&mut result, 1, &lbs);
+
+    // CopyArrayEls for cstring, no nulls: write each NUL-terminated string image
+    // at the char-aligned data offset.
+    let mut p = foundation::arr_data_ptr_off(&result);
+    for s in elems {
+        p = foundation::att_align_nominal(p, elmalign);
+        let payload = s.as_bytes();
+        let img_len = payload.len() + 1;
+        result[p..p + payload.len()].copy_from_slice(payload);
+        // trailing NUL already zero from palloc0
+        p += img_len;
+    }
+
+    Ok(result)
+}
+
 // ---------------------------------------------------------------------------
 // 6-arm value-lane construct path (`types_tuple::Datum<'mcx>`).
 //
