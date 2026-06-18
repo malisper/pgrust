@@ -852,7 +852,7 @@ fn build_joinrel_tlist(
         let node = root.node(var_id).clone();
 
         /* For a PlaceHolderVar, look up the PlaceHolderInfo. */
-        if let Expr::PlaceHolderVar(_) = node {
+        if node.is_placeholdervar() {
             let phinfo = joinpath::find_placeholder_info::call(root, var_id);
 
             /* Is it still needed above this joinrel? */
@@ -912,9 +912,9 @@ fn build_joinrel_tlist(
         /*
          * Otherwise, anything here ought to be a Var.
          */
-        let var = match &node {
-            Expr::Var(v) => v.clone(),
-            other => panic!("unexpected node type in rel targetlist: {:?}", other),
+        let var = match node.as_var() {
+            Some(v) => v.clone(),
+            None => panic!("unexpected node type in rel targetlist: {:?}", node),
         };
 
         if var.varno == ROWID_VAR {
