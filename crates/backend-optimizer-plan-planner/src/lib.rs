@@ -2004,6 +2004,8 @@ fn grouping_planner<'mcx>(
             has_sort,
             false,
             limit_tuples,
+            offset_est,
+            count_est,
         );
     }
 
@@ -2401,6 +2403,8 @@ fn grouping_planner<'mcx>(
         has_sort,
         have_postponed_srfs,
         limit_tuples,
+        offset_est,
+        count_est,
     )
 }
 
@@ -2418,6 +2422,8 @@ fn build_final_paths<'mcx>(
     has_sort: bool,
     have_postponed_srfs: bool,
     limit_tuples: f64,
+    offset_est: i64,
+    count_est: i64,
 ) -> PgResult<()> {
     let _ = mcx;
     // If ORDER BY was given, generate a new upperrel of paths that emit the
@@ -2472,11 +2478,10 @@ fn build_final_paths<'mcx>(
     // LockRows / Limit / ModifyTable added if needed (C:1891-2131). On the
     // simple SELECT path (no rowMarks, no LIMIT/OFFSET, CMD_SELECT) each path is
     // inserted verbatim.
-    let (has_rowmarks, has_limit_clause, command_type) = {
+    let (has_rowmarks, command_type) = {
         let parse = run.resolve(root.parse);
         (
             !parse.rowMarks.is_empty(),
-            parse.limitCount.is_some() || parse.limitOffset.is_some(),
             parse.commandType,
         )
     };
@@ -2505,18 +2510,48 @@ fn build_final_paths<'mcx>(
              the EvalPlanQual executor (planner.c:1905)"
         );
     }
-    if has_limit_clause {
-        panic!(
-            "grouping_planner: LIMIT/OFFSET adds create_limit_path \
-             (planner.c:1917) — the limit upper path is not ported"
-        );
-    }
+    // If there is a LIMIT/OFFSET clause, each surviving path gets a LimitPath
+    // wrapper (create_limit_path, planner.c:1915-1922). limit_needed() is the
+    // exact gate (a constant-NULL/zero OFFSET or constant-NULL LIMIT adds no
+    // node). The limitOffset / limitCount Expr nodes were const-folded into
+    // parse during the EXPRKIND_LIMIT preprocess pass above; clone each into the
+    // node arena to get the NodeId create_limit_path expects.
+    let (limit_needed_flag, limit_option) = {
+        let parse = run.resolve(root.parse);
+        (limit_needed(parse), parse.limitOption as types_pathnodes::LimitOption)
+    };
+    let limit_offset_id: Option<types_pathnodes::NodeId> = if limit_needed_flag {
+        let off = run.resolve(root.parse).limitOffset.as_deref().map(|e| e.clone());
+        off.map(|e| root.alloc_node(e))
+    } else {
+        None
+    };
+    let limit_count_id: Option<types_pathnodes::NodeId> = if limit_needed_flag {
+        let cnt = run.resolve(root.parse).limitCount.as_deref().map(|e| e.clone());
+        cnt.map(|e| root.alloc_node(e))
+    } else {
+        None
+    };
 
-    // For each surviving path of current_rel, optionally wrap it in a
-    // ModifyTable node (INSERT/UPDATE/DELETE/MERGE), then shove it into
-    // final_rel (C:1891-2131). LockRows / Limit wrappers are guarded out above.
+    // For each surviving path of current_rel, optionally wrap it in a Limit node,
+    // then (for INSERT/UPDATE/DELETE/MERGE) a ModifyTable node, then shove it into
+    // final_rel (C:1891-2131). LockRows wrappers are guarded out above.
     let surviving: Vec<PathId> = root.rel(current_rel).pathlist.clone();
     for path in surviving {
+        let path = if limit_needed_flag {
+            backend_optimizer_util_pathnode::create::create_limit_path(
+                root,
+                final_rel,
+                path,
+                limit_offset_id,
+                limit_count_id,
+                limit_option,
+                offset_est,
+                count_est,
+            )?
+        } else {
+            path
+        };
         let final_path = if command_type != CmdType::CMD_SELECT {
             add_modifytable_to_path(root, run, final_rel, path)?
         } else {
