@@ -859,6 +859,62 @@ pub fn init_seams() {
     s::func_name_as_type::set(seam_func_name_as_type);
     s::typename_type_id_from_defelem::set(seam_typename_type_id_from_defelem);
     s::type_string_to_type_name::set(seam_type_string_to_type_name);
+
+    // tablecmds BuildDescForRelation column type/collation resolution.
+    use backend_commands_tablecmds_seams as tc;
+    tc::typename_type_id_and_mod::set(seam_tc_typename_type_id_and_mod);
+    tc::get_column_def_collation::set(seam_tc_get_column_def_collation);
+}
+
+/// `typenameTypeIdAndMod(NULL, typeName, &typid, &typmod)` — tablecmds seam.
+/// Bridges the owned `rawnodes::TypeName<'mcx>` to the resolver-facing
+/// `types_parsenodes::TypeName`.
+fn seam_tc_typename_type_id_and_mod(
+    mcx: Mcx<'_>,
+    type_name: &types_nodes::rawnodes::TypeName<'_>,
+) -> PgResult<(Oid, i32)> {
+    let tn = raw_typename_to_parse(type_name)?;
+    typenameTypeIdAndMod(mcx, None, &tn)
+}
+
+/// `GetColumnDefCollation(NULL, coldef, typeOid)` — tablecmds seam. Projects the
+/// owned `rawnodes::ColumnDef` into the trimmed `ColumnDefInput` the owner reads.
+fn seam_tc_get_column_def_collation(
+    mcx: Mcx<'_>,
+    coldef: &types_nodes::rawnodes::ColumnDef<'_>,
+    type_oid: Oid,
+) -> PgResult<Oid> {
+    use types_nodes::nodes::Node as RawNode;
+
+    let collClause_collname = match &coldef.collClause {
+        Some(cc) => {
+            let mut names: Vec<Node> = Vec::with_capacity(cc.collname.len());
+            for n in cc.collname.iter() {
+                match &**n {
+                    RawNode::String(s) => names.push(Node::String(types_parsenodes::StringNode {
+                        sval: Some(s.sval.as_str().to_string()),
+                    })),
+                    other => {
+                        return Err(PgError::error(format!(
+                            "GetColumnDefCollation: COLLATE name element is not a String node (tag {})",
+                            other.node_tag().0
+                        )));
+                    }
+                }
+            }
+            Some(names)
+        }
+        None => None,
+    };
+    let collClause_location = coldef.collClause.as_ref().map(|cc| cc.location).unwrap_or(-1);
+
+    let input = ColumnDefInput {
+        collClause_collname,
+        collClause_location,
+        collOid: coldef.collOid,
+        location: coldef.location,
+    };
+    GetColumnDefCollation(mcx, None, &input, type_oid)
 }
 
 /// Bridge the K1 owned-tree `types_nodes::rawnodes::TypeName<'mcx>` (carried in

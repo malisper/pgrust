@@ -29,3 +29,7 @@ backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-s
 backend-parser-small1-seams = { path = "../backend-parser-small1-seams" }
 backend-parser-driver-seams = { path = "../backend-parser-driver-seams" }
 backend-parser-parse-type-seams = { path = "../backend-parser-parse-type-seams" }
+# tablecmds (BuildDescForRelation) resolves each column's TypeName to (typid,
+# typmod) via parse_type.c's typenameTypeIdAndMod / GetColumnDefCollation; this
+# crate is their real owner. Seam crate -> no cycle.
+backend-commands-tablecmds-seams = { path = "../backend-commands-tablecmds-seams" }
