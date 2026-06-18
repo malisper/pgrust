@@ -9,7 +9,7 @@ _Last updated: 2026-06-18 · origin/main ≈ `5f57e550a`_
 
 ## Where we are
 - **Passing:** `smoke` (SELECT 1; `pg_class` seqscan 415/68 rows) — verified live.
-- **Just unlocked:** **numeric/bit literals** (`1.5`, `B'101'`) · **polymorphic fns** (`int4range(1,5)`) · **aggregates + GROUP BY execute** (count/min/max/sum + grouped rows; `avg` pending) · **joins** (comma + INNER/LEFT/FULL). `count(*) FROM pg_class`=415.
+- **Just unlocked:** **numeric/bit literals** (`1.5`, `B'101'`) · **polymorphic fns** (`int4range(1,5)`) · **aggregates + GROUP BY execute** (count/min/max/sum + grouped rows; `avg` firing) · **DISTINCT** (de-dups) · **joins** (comma + INNER/LEFT/FULL + non-equi/cross). `count(*) FROM pg_class`=415.
 - **Closest test wins:** `boolean` (~5 bounded fixes); int/text suite (VALUES ✓; needs agg follow-ons + GROUP BY).
 - **Infra:** persistent harness ✓ · shm-leak fixed ✓ · crash-survival ✓ · live boot restored ✓ · artifacts ~6 GB → **~8 build lanes** · reaper shm+prune-only (idle-rm disrupted live lanes, removed).
 
@@ -49,9 +49,9 @@ _Last updated: 2026-06-18 · origin/main ≈ `5f57e550a`_
 
 ### ⛔ Blocked / deferred (gate *later* test classes — do NOT block correct results now)
 - **K7 · planagg MinMaxAggPath subroot** — `min`/`max` *index* optimization. Correctness unblocked via fall-through (`a4ba09d6`); only speed deferred.
-- **K8 · set-op subquery_planner cross-root path-arena** — UNION/INTERSECT/EXCEPT.
-- **K9 · Executor #167/#169 EState/PlanState de-handle** — PREPARE / cursors / extended-query protocol.
-- **K10 · DshashKeyKind `Custom{compare,hash,copy}`** — parallel-worker shared record typmod registry.
+- **K8 · set-op subquery_planner cross-root path-arena** — UNION/INTERSECT/EXCEPT. **COMMITTED → firing `af2fd0ce`**.
+- **K9 · Executor #167/#169 EState/PlanState de-handle** — PREPARE / cursors / extended-query protocol. **COMMITTED → firing `a16c5cf6` (deep slot)**.
+- **K10 · DshashKeyKind `Custom{compare,hash,copy}`** — parallel-worker shared record typmod registry. Single-backend **SIDESTEPPED** (`44ad03cf1` uses local registry); only parallel-query needs it.
 
 ### 📡 Known longer-term keystones (each gates a specific feature/test area; re-validate when reached)
 - **FormedTuple carrier** — header-only tuple vs full content; being chipped. Gates trigger slots, MERGE, inval.
@@ -79,7 +79,7 @@ _Last updated: 2026-06-18 · origin/main ≈ `5f57e550a`_
 ---
 
 ## Active lanes
-`ac81ca4b` DDL/DML · `a3e10fdd` build-size · `a0555cff` reparameterize (cross/non-equi join → boolean)
+`ac81ca4b` DDL/DML · `a3e10fdd` build-size · `aadeb37f` HAVING · `a9119f58` avg · `a9b92e9f` multirange · `aef8d875` type-test sweep · `a091e9e9` window fns · `a772bbe8` ALTER TABLE · `af2fd0ce` **K8 set-ops** · `a16c5cf6` **K9 PREPARE (deep slot)**
 
 ## Build/infra notes
 - Artifacts ~6 GB/build (was ~10–14): `713252a14` (line-tables-only) + `c794aeac6` (**`incremental=false` now on `[profile.dev]`** — the lanes' default build; was only on the unused fast-check profile). Cap **~8**, keep ~20 GB buffer.
@@ -87,7 +87,7 @@ _Last updated: 2026-06-18 · origin/main ≈ `5f57e550a`_
 - Reaper = shm + `git worktree prune` ONLY (idle-based auto-rm disrupted live lanes twice; lanes self-clean + orchestrator reaps on pressure).
 
 ## Recently landed
-**numeric/bit literals (make_const) ✅** · **polymorphic fns (fn_expr) ✅** · **GROUP BY exec (returns rows) ✅** · geo (74 OIDs) · **INNER/LEFT/FULL JOIN ✅** · **2-table joins** ✅ · **DISTINCT + FOR-UPDATE planning** · **count/min/max/sum aggregates** ✅ · type-adt registration: inet/enum/cash/range/acl/bit · arrayfuncs (sort/shuffle/sample) · EXPLAIN structural · **boolean error-position (LINE/caret) + varlena cstring-NUL** · policy/RLS (CREATE POLICY + RelationBuildRowSecurity) · proc_arg_attrs · count(\*) exec (#165) · **GROUP BY planning** (+ real parser p_rtable bug fix) · misc2 (15/16) · **count(\*) FROM pg_class = 415** (setrefs varno + IndexOnlyScan) · fmgr builtin registry 2003→1574 (0 mismatches) · cargo dev incremental=0 · min/max planner fall-through · createplan (unique/groupingsets/async, 3→0) · GUC registry 402/404 · typcache complete · lmgr-lock (15→6) · fmgr Phase-1 seams (56/67) · bool.c 100% (type correct e2e) + boolean parser/func-RTE fixes · io_combine_limit boot fix · Datum by-ref bridge (+saophash) · crash-reinit (TLS-unwind) · seclabel→DROP · comment→DROP · multi-row VALUES · parse_expr XML · t_bits crash · setrefs Aggref fixup · smaller build artifacts · plancache F0
+**numeric/bit literals (make_const) ✅** · **polymorphic fns (fn_expr) ✅** · **GROUP BY exec ✅** · **DISTINCT de-dup ✅** · cross/non-equi joins ✅ · record-typmod (local registry) · geo (74 OIDs) · **INNER/LEFT/FULL JOIN ✅** · **2-table joins** ✅ · **DISTINCT + FOR-UPDATE planning** · **count/min/max/sum aggregates** ✅ · type-adt registration: inet/enum/cash/range/acl/bit · arrayfuncs (sort/shuffle/sample) · EXPLAIN structural · **boolean error-position (LINE/caret) + varlena cstring-NUL** · policy/RLS (CREATE POLICY + RelationBuildRowSecurity) · proc_arg_attrs · count(\*) exec (#165) · **GROUP BY planning** (+ real parser p_rtable bug fix) · misc2 (15/16) · **count(\*) FROM pg_class = 415** (setrefs varno + IndexOnlyScan) · fmgr builtin registry 2003→1574 (0 mismatches) · cargo dev incremental=0 · min/max planner fall-through · createplan (unique/groupingsets/async, 3→0) · GUC registry 402/404 · typcache complete · lmgr-lock (15→6) · fmgr Phase-1 seams (56/67) · bool.c 100% (type correct e2e) + boolean parser/func-RTE fixes · io_combine_limit boot fix · Datum by-ref bridge (+saophash) · crash-reinit (TLS-unwind) · seclabel→DROP · comment→DROP · multi-row VALUES · parse_expr XML · t_bits crash · setrefs Aggref fixup · smaller build artifacts · plancache F0
 
 ## DROP status
 CREATE→INSERT→SELECT ✓ · DROP: comment ✓ → seclabel ✓ → **next wall `relation_is_nailed`** (tablecmds seam).
