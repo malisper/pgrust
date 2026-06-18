@@ -35,11 +35,16 @@ pub fn cost_qual_eval_walker(root: &PlannerInfo, node: types_pathnodes::NodeId) 
         startup: 0.0,
         per_tuple: 0.0,
     };
+    // Scratch context for the `estimate_array_length` detoast
+    // (`DatumGetArrayTypeP` over an IN-list array Const). The C walker allocates
+    // any detoasted image in `CurrentMemoryContext` and discards it; the owned
+    // model roots that scratch here and drops it at return.
+    let cx = mcx::MemoryContext::new("cost_qual_eval_walker scratch");
     // The top node carries a real `NodeId`; estimate_array_length / the prosupport
     // callback only ever fire at identifiable top-level call sites in practice,
     // and inline children are walked by-value, so recursion uses the by-`&Expr`
     // forms uniformly.
-    walk(root, root.node(node), &mut total);
+    walk(cx.mcx(), root, root.node(node), &mut total);
     (total.startup, total.per_tuple)
 }
 
@@ -54,13 +59,14 @@ pub fn cost_qual_eval_expr(root: &PlannerInfo, node: &Expr) -> (f64, f64) {
         startup: 0.0,
         per_tuple: 0.0,
     };
-    walk(root, node, &mut total);
+    let cx = mcx::MemoryContext::new("cost_qual_eval_expr scratch");
+    walk(cx.mcx(), root, node, &mut total);
     (total.startup, total.per_tuple)
 }
 
 /// `cost_qual_eval_walker` over an in-memory `&Expr` (the recursion form). Mirrors
 /// the C `IsA` dispatch; `expression_tree_walker` drives the default recursion.
-fn walk(root: &PlannerInfo, node: &Expr, total: &mut QualCost) {
+fn walk<'mcx>(mcx: mcx::Mcx<'mcx>, root: &PlannerInfo, node: &Expr, total: &mut QualCost) {
     let cpu_operator_cost = crate::cpu_operator_cost();
 
     match node {
@@ -85,7 +91,8 @@ fn walk(root: &PlannerInfo, node: &Expr, total: &mut QualCost) {
         Expr::ScalarArrayOpExpr(saop) => {
             // arraynode = lsecond(saop->args)
             let arraynode = &saop.args[1];
-            let estarraylen = clauses::estimate_array_length(arraynode).expect("estimate_array_length");
+            let estarraylen =
+                clauses::estimate_array_length(mcx, arraynode).expect("estimate_array_length");
             let opfuncid = resolve_opfuncid(saop.opfuncid, saop.opno);
 
             let mut sacost = QualCost {
@@ -146,13 +153,13 @@ fn walk(root: &PlannerInfo, node: &Expr, total: &mut QualCost) {
                 per_tuple: 0.0,
             };
             if let Some(elemexpr) = acoerce.elemexpr.as_deref() {
-                walk(root, elemexpr, &mut perelemcost);
+                walk(mcx, root, elemexpr, &mut perelemcost);
             }
             total.startup += perelemcost.startup;
             if perelemcost.per_tuple > 0.0 {
                 let arrlen = match acoerce.arg.as_deref() {
                     Some(arg) => {
-                        clauses::estimate_array_length(arg).expect("estimate_array_length")
+                        clauses::estimate_array_length(mcx, arg).expect("estimate_array_length")
                     }
                     None => 0.0,
                 };
@@ -209,7 +216,7 @@ fn walk(root: &PlannerInfo, node: &Expr, total: &mut QualCost) {
 
     // recurse into children (default `expression_tree_walker(node, walker)`)
     let mut child_walker = |child: &Expr| -> bool {
-        walk(root, child, total);
+        walk(mcx, root, child, total);
         false
     };
     backend_nodes_core::nodefuncs::expression_tree_walker(Some(node), &mut child_walker);

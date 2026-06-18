@@ -2268,6 +2268,21 @@ pub fn array_get_ndim<'mcx>(mcx: Mcx<'mcx>, arraydatum: Datum) -> PgResult<i32> 
     Ok(foundation::arr_ndim(&arr))
 }
 
+/// Seam `array_const_nitems` —
+/// `ArrayGetNItems(ARR_NDIM(arrayval), ARR_DIMS(arrayval))` (array.h /
+/// arrayfuncs.c) over a non-NULL `Const`'s `constvalue` array bytes. Detoast
+/// the array varlena (`DatumGetArrayTypeP`), read the `ndim`/`dims` header,
+/// and total the element count. `Err` carries the `ArrayGetNItems` overflow
+/// `ereport(ERROR, ERRCODE_PROGRAM_LIMIT_EXCEEDED)` and detoast surface.
+pub fn array_const_nitems<'mcx>(mcx: Mcx<'mcx>, arraybytes: &[u8]) -> PgResult<i32> {
+    // arrayval = DatumGetArrayTypeP(constvalue) — detoast the array varlena.
+    let arr = detoast_seam::detoast_attr::call(mcx, arraybytes)?;
+    let ndim = foundation::arr_ndim(&arr);
+    // ArrayGetNItems(ARR_NDIM(arrayval), ARR_DIMS(arrayval)).
+    let dims = foundation::arr_dims(mcx, &arr)?;
+    arrayutils_seam::array_get_n_items::call(ndim, &dims)
+}
+
 /// Seam `array_get_elemtype` — `ARR_ELEMTYPE(DatumGetArrayTypeP(arraydatum))`
 /// (array.h). Detoast the array varlena, then read the `elemtype` header field.
 pub fn array_get_elemtype<'mcx>(mcx: Mcx<'mcx>, arraydatum: Datum) -> PgResult<Oid> {

@@ -333,15 +333,15 @@ seam_core::seam!(
     /// overflow `ereport(ERROR, ERRCODE_PROGRAM_LIMIT_EXCEEDED)` and the
     /// detoast surface.
     ///
-    /// NOTE (Datum-unification keystone): this still speaks the bare-word
-    /// `Datum` shim. The faithful resolution is to re-sign to the unified
-    /// `&DatumV` (`Const.constvalue` already carries the verbatim array bytes)
-    /// and detoast off it — but the two consumers (`clauses::estimate_array_length`
-    /// and `predtest::predicate_classify`) reach it through the deliberately
-    /// lifetime-free `PlannerInfo` cost/predicate walkers, which carry no `Mcx`.
-    /// Threading an `Mcx` (PlannerRun precedent) through those walkers is the
-    /// tree-wide campaign that unblocks a real body here.
-    pub fn array_const_nitems(constvalue: Datum) -> PgResult<i32>
+    /// The seam carries the `Const.constvalue` array bytes by reference
+    /// (`arraybytes` is the constvalue's `ByRef` payload — the verbatim
+    /// on-disk array varlena image) plus a scratch `Mcx<'mcx>` to detoast off
+    /// (`DatumGetArrayTypeP`). The two consumers
+    /// (`clauses::estimate_array_length` and `predtest::predicate_classify`)
+    /// reach it through the deliberately lifetime-free `PlannerInfo`
+    /// cost/predicate walkers, which thread an `Mcx` down to the call site
+    /// (PlannerRun precedent) for exactly this detoast.
+    pub fn array_const_nitems<'mcx>(mcx: Mcx<'mcx>, arraybytes: &[u8]) -> PgResult<i32>
 );
 
 seam_core::seam!(
