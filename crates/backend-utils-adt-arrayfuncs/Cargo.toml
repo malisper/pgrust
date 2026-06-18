@@ -40,3 +40,4 @@ backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
 backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
 backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
 pg-prng-seams = { path = "../pg-prng-seams" }
+backend-utils-sort-tuplesort-seams = { path = "../backend-utils-sort-tuplesort-seams" }

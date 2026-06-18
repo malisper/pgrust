@@ -1022,6 +1022,184 @@ fn make_array_result_arr<'mcx>(
 }
 
 // ---------------------------------------------------------------------------
+// Bare-mcx `*ArrayResultAny` over `CurrentMemoryContext` (array_sort's
+// `accumArrayResultAny(..., CurrentMemoryContext)` path). The executor-bound
+// `*_any` seam wrappers above force an EState/EcxtId frame; these take the
+// bare `'mcx` arena directly (the byte-model image of `CurrentMemoryContext`),
+// and feed the array case from already-detoasted sub-array bytes (value-lane
+// `Datum::ByRef`), bypassing the global-address-space detoast resolution the
+// pointer-word `accum_array_result_arr` would need.
+// ---------------------------------------------------------------------------
+
+/// `initArrayResultAny(input_type, CurrentMemoryContext, subcontext)` body
+/// (arrayfuncs.c) over the bare `'mcx` arena.
+pub fn init_array_result_any_mcx(
+    input_type: Oid,
+    subcontext: bool,
+) -> PgResult<types_datum::array_build::ArrayBuildStateAny> {
+    init_array_result_any_inner(input_type, subcontext)
+}
+
+/// `accumArrayResultAny(astate, dvalue, disnull, input_type, CurrentMemoryContext)`
+/// (arrayfuncs.c) over the bare `'mcx` arena.
+///
+/// `scalar_value` is the value-lane element Datum for the scalar
+/// (`get_array_type(input_type) == InvalidOid`) case; `subarray_bytes` is the
+/// already-detoasted sub-array buffer for the array case. Exactly one is
+/// supplied by the caller depending on `astate`'s shape (mirroring C's single
+/// `dvalue` Datum, which is the element word in the scalar case and a pointer to
+/// the sub-array in the array case).
+pub fn accum_array_result_any_mcx<'mcx>(
+    mcx: Mcx<'mcx>,
+    astate: Option<types_datum::array_build::ArrayBuildStateAny>,
+    scalar_value: Datum,
+    subarray_bytes: Option<&[u8]>,
+    disnull: bool,
+    input_type: Oid,
+) -> PgResult<types_datum::array_build::ArrayBuildStateAny> {
+    let mut state = match astate {
+        Some(s) => s,
+        None => init_array_result_any_inner(input_type, true)?,
+    };
+    if state.scalarstate.is_some() {
+        let scalar = state.scalarstate.take().unwrap();
+        let scalar = accum_array_result(mcx, Some(scalar), scalar_value, disnull, input_type)?;
+        state.scalarstate = Some(scalar);
+    } else {
+        let arr = state.arraystate.take();
+        let bytes = subarray_bytes
+            .expect("accum_array_result_any_mcx: array case requires sub-array bytes");
+        let arr = accum_array_result_arr_bytes(mcx, arr, bytes, disnull, input_type)?;
+        state.arraystate = Some(arr);
+    }
+    Ok(state)
+}
+
+/// `makeArrayResultAny(astate, CurrentMemoryContext, true)` (arrayfuncs.c) over
+/// the bare `'mcx` arena. Returns the flat array buffer.
+pub fn make_array_result_any_mcx<'mcx>(
+    mcx: Mcx<'mcx>,
+    astate: &types_datum::array_build::ArrayBuildStateAny,
+) -> PgResult<PgVec<'mcx, u8>> {
+    if let Some(scalar) = astate.scalarstate.as_ref() {
+        let ndims = if scalar.nelems > 0 { 1 } else { 0 };
+        let dims = [scalar.nelems];
+        let lbs = [1];
+        make_md_array_result(mcx, scalar, ndims, &dims, &lbs)
+    } else {
+        let arr = astate.arraystate.as_ref().expect("arraystate or scalarstate");
+        make_array_result_arr(mcx, arr)
+    }
+}
+
+/// `accumArrayResultArr` body taking the **already-detoasted** sub-array bytes
+/// directly (the value-lane `Datum::ByRef` image), rather than resolving a
+/// pointer word through the detoast seam. Identical accumulation logic to
+/// [`accum_array_result_arr`] otherwise.
+fn accum_array_result_arr_bytes<'mcx>(
+    mcx: Mcx<'mcx>,
+    astate: Option<ArrayBuildStateArr>,
+    arg: &[u8],
+    disnull: bool,
+    array_type: Oid,
+) -> PgResult<ArrayBuildStateArr> {
+    if disnull {
+        return Err(
+            PgError::error("cannot accumulate null arrays").with_sqlstate(ERRCODE_NULL_VALUE_NOT_ALLOWED)
+        );
+    }
+    let _ = mcx;
+
+    let mut astate = match astate {
+        None => init_array_result_arr(array_type, 0, true)?,
+        Some(s) => {
+            debug_assert_eq!(s.array_type, array_type);
+            s
+        }
+    };
+
+    let ndims = foundation::arr_ndim(arg);
+    let nitems = arrayutils_seam::array_get_n_items::call(ndims, &arr_dims_vec(arg))?;
+    let ndatabytes = (foundation::arr_size(arg) - foundation::arr_data_offset(arg)) as i32;
+    let data_off = foundation::arr_data_ptr_off(arg);
+
+    if astate.ndims == 0 {
+        if ndims == 0 {
+            return Err(PgError::error("cannot accumulate empty arrays")
+                .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR));
+        }
+        if ndims + 1 > MAXDIM {
+            return Err(PgError::error(format!(
+                "number of array dimensions ({}) exceeds the maximum allowed ({MAXDIM})",
+                ndims + 1
+            ))
+            .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED));
+        }
+        astate.ndims = ndims + 1;
+        astate.dims[0] = 0;
+        for i in 0..ndims as usize {
+            astate.dims[i + 1] = foundation::arr_dim(arg, i);
+        }
+        astate.lbs[0] = 1;
+        for i in 0..ndims as usize {
+            astate.lbs[i + 1] = foundation::arr_lbound(arg, i);
+        }
+        let abytes = pg_nextpower2_32(core::cmp::max(1024, ndatabytes + 1));
+        astate.data = Vec::with_capacity(abytes as usize);
+    } else {
+        if astate.ndims != ndims + 1 {
+            return Err(
+                PgError::error("cannot accumulate arrays of different dimensionality")
+                    .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR),
+            );
+        }
+        for i in 0..ndims as usize {
+            if astate.dims[i + 1] != foundation::arr_dim(arg, i)
+                || astate.lbs[i + 1] != foundation::arr_lbound(arg, i)
+            {
+                return Err(
+                    PgError::error("cannot accumulate arrays of different dimensionality")
+                        .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR),
+                );
+            }
+        }
+    }
+
+    astate
+        .data
+        .extend_from_slice(&arg[data_off..data_off + ndatabytes as usize]);
+    astate.nbytes += ndatabytes;
+
+    if astate.nullbitmap.is_some() || foundation::arr_hasnull(arg) {
+        let newnitems = astate.nitems + nitems;
+        if astate.nullbitmap.is_none() {
+            let aitems = pg_nextpower2_32(core::cmp::max(256, newnitems + 1));
+            let mut bm = Vec::new();
+            bm.resize(((aitems + 7) / 8) as usize, 0u8);
+            astate.nullbitmap = Some(bm);
+            let prev = astate.nitems;
+            let bm = astate.nullbitmap.as_mut().unwrap();
+            array_bitmap_copy_local(bm, 0, None, &[], 0, prev);
+        } else {
+            let needed = ((newnitems + 7) / 8) as usize;
+            let bm = astate.nullbitmap.as_mut().unwrap();
+            if bm.len() < needed {
+                bm.resize(needed, 0u8);
+            }
+        }
+        let dest_off = astate.nitems;
+        let src_bm = foundation::arr_nullbitmap_off(arg);
+        let bm = astate.nullbitmap.as_mut().unwrap();
+        array_bitmap_copy_local(bm, dest_off, src_bm, arg, 0, nitems);
+    }
+
+    astate.nitems += nitems;
+    astate.dims[0] += 1;
+
+    Ok(astate)
+}
+
+// ---------------------------------------------------------------------------
 // Small helpers shared by the Arr accumulator.
 // ---------------------------------------------------------------------------
 

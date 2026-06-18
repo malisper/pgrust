@@ -66,7 +66,11 @@ use backend_utils_adt_arrayutils_seams as arrayutils;
 use backend_utils_cache_lsyscache_seams as lsyscache;
 use backend_utils_cache_typcache_seams as typcache;
 use backend_utils_fmgr_fmgr_seams as fmgr;
+use backend_utils_sort_tuplesort_seams as tuplesort;
 use pg_prng_seams as prng;
+
+use crate::sql;
+use types_error::PgError;
 
 /// `format_type_be(element_type)`-style identifier for the "could not identify"
 /// error message; the real `format_type_be` lives in a not-yet-reachable owner,
@@ -706,6 +710,229 @@ pub fn array_reverse<'mcx>(mcx: Mcx<'mcx>, array: &[u8]) -> PgResult<PgVec<'mcx,
         te.typbyval,
         te.typalign as u8,
     )
+}
+
+/// `ARRAY_LT_OP` / `ARRAY_GT_OP` (pg_operator.dat) — the array `<` / `>`
+/// operators used to sort the sub-arrays of a multi-dimensional input.
+const ARRAY_LT_OP: Oid = 1072;
+const ARRAY_GT_OP: Oid = 1073;
+
+/// `array_sort_internal(array, descending, nulls_first, fcinfo)`
+/// (array_userfuncs.c:1882): sort the first dimension of `array`.
+///
+/// `collation` is the C `PG_GET_COLLATION()` threaded in. For a 1-D input the
+/// element type is sorted (operator = element `<`/`>`); for an nD input the
+/// sub-arrays are sorted (operator = `ARRAY_LT_OP`/`ARRAY_GT_OP`). The owned
+/// model sources the things-to-be-sorted losslessly — 1-D from
+/// `deconstruct_array_values` (the iterator's by-reference scalar arm hands back
+/// only a byte offset, so the value-lane deconstruct is used to keep each
+/// element's real bytes), nD from `array_create_iterator(ndim-1)`'s slice arm
+/// (already a freshly built sub-array buffer) — then feeds them through
+/// `tuplesort_begin_datum` and accumulates the sorted output via the bare-mcx
+/// `accumArrayResultAny` over `CurrentMemoryContext`.
+fn array_sort_internal<'mcx>(
+    mcx: Mcx<'mcx>,
+    array: &'mcx [u8],
+    descending: bool,
+    nulls_first: bool,
+    collation: Oid,
+) -> PgResult<PgVec<'mcx, u8>> {
+    use types_tuple::backend_access_common_heaptuple::Datum as TDatum;
+
+    let ndim = foundation::arr_ndim(array);
+    let lbs = foundation::arr_lbounds(mcx, array)?;
+
+    // Quick exit if we don't need to sort.
+    if ndim < 1 || foundation::arr_dim(array, 0) < 2 {
+        return Ok(mcx::slice_in(mcx, array)?);
+    }
+
+    let elmtyp = foundation::arr_elemtype(array);
+    let te = typcache::lookup_type_cache::call(elmtyp, 0)?;
+    let typlen = te.typlen as i32;
+    let typbyval = te.typbyval;
+    let typalign = te.typalign as u8;
+
+    // Identify the sort type and operator.
+    let sort_typ: Oid;
+    let sort_opr: Oid;
+    if ndim == 1 {
+        sort_typ = elmtyp;
+        let (lt_opr, _eq_opr, gt_opr, _) = typcache::sort_group_operators::call(elmtyp, false)?;
+        sort_opr = if descending { gt_opr } else { lt_opr };
+    } else {
+        let typarray = lsyscache::get_array_type::call(elmtyp)?.unwrap_or(0);
+        if typarray == 0 {
+            return Err(ereport(ERROR)
+                .errcode(types_error::ERRCODE_UNDEFINED_OBJECT)
+                .errmsg(format!(
+                    "could not find array type for data type {}",
+                    format_type_be(elmtyp)
+                ))
+                .into_error());
+        }
+        sort_typ = typarray;
+        sort_opr = if descending { ARRAY_GT_OP } else { ARRAY_LT_OP };
+    }
+
+    if sort_opr == 0 {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!(
+                "could not identify a comparison function for type {}",
+                format_type_be(elmtyp)
+            ))
+            .into_error());
+    }
+
+    // Put the things to be sorted (elements or sub-arrays) into a tuplesort.
+    let work_mem = backend_utils_misc_guc_tables::vars::work_mem.read();
+    let mut tss = tuplesort::tuplesort_begin_datum::call(
+        mcx,
+        sort_typ,
+        sort_opr,
+        collation,
+        nulls_first,
+        work_mem,
+        0, // TUPLESORT_NONE
+    )?;
+
+    if ndim == 1 {
+        // C: array_create_iterator(array, 0, &mstate) — element walk. Sourced
+        // here from the value-lane deconstruct to keep by-reference element bytes.
+        let elems =
+            construct::deconstruct_array_values(mcx, array, elmtyp, typlen, typbyval, typalign)?;
+        for (value, isnull) in elems.iter() {
+            tuplesort::tuplesort_putdatum::call(&mut tss, value.clone(), *isnull)?;
+        }
+    } else {
+        // C: array_create_iterator(array, ndim-1, &mstate) — slice walk.
+        let mstate = lsyscache::TypLenByValAlign {
+            typlen: typlen as i16,
+            typbyval,
+            typalign: typalign as i8,
+        };
+        let mut iter = sql::array_create_iterator(mcx, array, ndim - 1, Some(mstate))?;
+        while let Some(item) = sql::array_iterate(mcx, &mut iter)? {
+            match item {
+                sql::ArrayIterateItem::Slice(buf) => {
+                    let d = TDatum::ByRef(buf);
+                    tuplesort::tuplesort_putdatum::call(&mut tss, d, false)?;
+                }
+                sql::ArrayIterateItem::Scalar { .. } => {
+                    // Unreachable for slice_ndim > 0, but mirror the C: a slice
+                    // iterator never yields a scalar.
+                    return Err(PgError::error("array_sort: slice iterator yielded a scalar")
+                        .with_sqlstate(types_error::ERRCODE_INTERNAL_ERROR));
+                }
+            }
+        }
+    }
+
+    // Do the sort.
+    tuplesort::tuplesort_performsort::call(&mut tss)?;
+
+    // Extract the sorted things into a new array.
+    let mut newarray: PgVec<'mcx, u8>;
+    if ndim == 1 {
+        // makeArrayResultAny over the scalar (element) state, collected directly
+        // into the value lane so by-reference elements keep their real bytes
+        // (the scalar accumArrayResult's pointer-word by-ref copy bottoms out on
+        // the global-address-space detoast resolution the owned model lacks).
+        let mut values: PgVec<'mcx, TDatum<'mcx>> = PgVec::new_in(mcx);
+        let mut nulls: PgVec<'mcx, bool> = PgVec::new_in(mcx);
+        loop {
+            let (found, value, isnull) =
+                tuplesort::tuplesort_getdatum::call(&mut tss, true, false)?;
+            if !found {
+                break;
+            }
+            values.push(value);
+            nulls.push(isnull);
+        }
+        tuplesort::tuplesort_end::call(mcx::alloc_in(mcx, tss)?)?;
+
+        let nelems = values.len() as i32;
+        let nd = if nelems > 0 { 1 } else { 0 };
+        newarray = construct::construct_md_array_values(
+            mcx,
+            &values,
+            Some(&nulls),
+            nd,
+            &[nelems],
+            &[lbs[0]],
+            sort_typ,
+            typlen,
+            typbyval,
+            typalign,
+        )?;
+    } else {
+        // Multi-dimensional: the sorted things are sub-arrays; rebuild the nD
+        // array via accumArrayResultAny (the array case).
+        let mut astate: Option<types_datum::array_build::ArrayBuildStateAny> = None;
+        loop {
+            let (found, value, _isnull) =
+                tuplesort::tuplesort_getdatum::call(&mut tss, true, false)?;
+            if !found {
+                break;
+            }
+            let bytes: &[u8] = match &value {
+                TDatum::ByRef(b) => &b[..],
+                _ => {
+                    return Err(PgError::error(
+                        "array_sort: sub-array sort output is not a by-ref array",
+                    )
+                    .with_sqlstate(types_error::ERRCODE_INTERNAL_ERROR))
+                }
+            };
+            astate = Some(construct::accum_array_result_any_mcx(
+                mcx,
+                astate.take(),
+                Datum::null(),
+                Some(bytes),
+                false,
+                sort_typ,
+            )?);
+        }
+        tuplesort::tuplesort_end::call(mcx::alloc_in(mcx, tss)?)?;
+
+        let astate =
+            astate.unwrap_or(construct::init_array_result_any_mcx(sort_typ, true)?);
+        newarray = construct::make_array_result_any_mcx(mcx, &astate)?;
+        // Adjust lower bound to match the input.
+        let nd = foundation::arr_ndim(&newarray);
+        foundation::write_lbounds(&mut newarray, nd, &[lbs[0]]);
+    }
+
+    Ok(newarray)
+}
+
+/// `array_sort(array)` (array_userfuncs.c:2004): sort the first dimension in
+/// ascending order, NULLs last.
+pub fn array_sort<'mcx>(mcx: Mcx<'mcx>, array: &'mcx [u8], collation: Oid) -> PgResult<PgVec<'mcx, u8>> {
+    array_sort_internal(mcx, array, false, false, collation)
+}
+
+/// `array_sort_order(array, descending)` (array_userfuncs.c:2015).
+pub fn array_sort_order<'mcx>(
+    mcx: Mcx<'mcx>,
+    array: &'mcx [u8],
+    descending: bool,
+    collation: Oid,
+) -> PgResult<PgVec<'mcx, u8>> {
+    array_sort_internal(mcx, array, descending, descending, collation)
+}
+
+/// `array_sort_order_nulls_first(array, descending, nulls_first)`
+/// (array_userfuncs.c:2027).
+pub fn array_sort_order_nulls_first<'mcx>(
+    mcx: Mcx<'mcx>,
+    array: &'mcx [u8],
+    descending: bool,
+    nulls_first: bool,
+    collation: Oid,
+) -> PgResult<PgVec<'mcx, u8>> {
+    array_sort_internal(mcx, array, descending, nulls_first, collation)
 }
 
 /// `array_positions(array, element)` (array_userfuncs.c:1475): an int4 array of
