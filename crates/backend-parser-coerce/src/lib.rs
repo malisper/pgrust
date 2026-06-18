@@ -598,10 +598,13 @@ fn coerce_unknown_const<'mcx>(
     // `DatumGetCString(con->constvalue)` reads the UNKNOWN literal's text out of
     // the (now `Datum::Cstring`-carrying) Const; a SQL-NULL literal passes
     // `NULL` through (a non-strict input function may accept it). The
-    // setup/cancel_parser_errposition_callback pair is the retired
-    // error_context_stack propagation model (documented in small1); the
-    // location rides through `con.location` / the input-function error surface.
-    let _ = (pstate, location, ccontext, cformat);
+    // The setup/cancel_parser_errposition_callback pair becomes an explicit
+    // `map_err` over the input-function call: on a parse error from the type's
+    // input function (e.g. `bool 'test'`), attach `con->location` (converted to
+    // a character position via `parser_errposition`) as the cursor position,
+    // exactly as C's callback does — but only when the error has no position of
+    // its own yet (C: `if (edata->cursorpos == 0) edata->cursorpos = pos`).
+    let _ = (location, ccontext, cformat);
     let string: Option<&str> = if constisnull {
         None
     } else {
@@ -616,7 +619,21 @@ fn coerce_unknown_const<'mcx>(
     // (text/name/varchar/numeric) as an owned `ByRef` over the flattened
     // payload bytes (C's `Datum stringTypeDatum(...)` pointing into the palloc'd
     // result).
-    let datum = parse_type::stringTypeDatum(mcx, baseType, string, inputTypeMod)?;
+    let datum = match parse_type::stringTypeDatum(mcx, baseType, string, inputTypeMod) {
+        Ok(d) => d,
+        Err(mut e) => {
+            // C's setup_parser_errposition_callback no-ops when pstate is NULL.
+            if e.cursor_position().is_none() {
+                if let Some(ps) = pstate.as_deref() {
+                    let pos = parser_errposition::call(ps, conloc)?;
+                    if pos > 0 {
+                        e = e.with_cursor_position(pos);
+                    }
+                }
+            }
+            return Err(e);
+        }
+    };
 
     // The new Const lives in its plan node's long-lived context, so its value
     // carries `'static` (the `Const.constvalue` field type). A by-value target
