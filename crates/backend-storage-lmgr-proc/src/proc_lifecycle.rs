@@ -44,7 +44,7 @@ use crate::seam;
 /// `clogGroupMemberLsn`.
 const INVALID_XLOG_REC_PTR: u64 = 0;
 /// `SYNC_REP_NOT_WAITING` (`replication/syncrep.h`).
-const SYNC_REP_NOT_WAITING: i32 = -1;
+const SYNC_REP_NOT_WAITING: i32 = 0;
 /// `TRANSACTION_STATUS_IN_PROGRESS` (`access/clog.h`).
 const TRANSACTION_STATUS_IN_PROGRESS: XidStatus = 0x00;
 
