@@ -123,6 +123,19 @@ impl LOCKTAG {
         }
     }
 
+    /// `SET_LOCKTAG_TRANSACTION(locktag, xid)` (`storage/lock.h`): the tag for
+    /// a transaction-completion lock. `field1` is the xid; the rest are zero.
+    pub fn transaction(xid: uint32) -> Self {
+        LOCKTAG {
+            locktag_field1: xid,
+            locktag_field2: 0,
+            locktag_field3: 0,
+            locktag_field4: 0,
+            locktag_type: LOCKTAG_TRANSACTION,
+            locktag_lockmethodid: DEFAULT_LOCKMETHOD,
+        }
+    }
+
     /// `SET_LOCKTAG_VIRTUALTRANSACTION(locktag, vxid)` (`storage/lock.h`): the
     /// tag for a virtual-transaction lock. `field1` is the vxid's procNumber and
     /// `field2` its localTransactionId.
@@ -158,6 +171,24 @@ pub struct LockInstanceData {
     pub leaderPid: i32,
     /// `bool fastpath` — taken via fastpath?
     pub fastpath: bool,
+}
+
+/// The outcome of lock.c's `VirtualXactLock` examination of a target backend's
+/// `MyProc->fpInfoLock`-guarded fast-path VXID state (the cross-proc critical
+/// section owned by proc.c). lock.c uses this to decide its next step.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VirtualXactExamineOutcome {
+    /// The target's `vxid.procNumber` / `fpLocalTransactionId` no longer match
+    /// the awaited vxid: the VXID has ended. The caller falls through to
+    /// `XactLockForVirtualXact(vxid, InvalidTransactionId, wait)`.
+    Ended,
+    /// `wait == false` and the VXID is still running: return `false` directly,
+    /// no lock-table entry set up.
+    StillRunningNoWait,
+    /// The VXID is still running and `wait == true`: any fast-path VXID lock has
+    /// been transferred to the main lock table; `xid` is the target proc's `xid`
+    /// (possibly `InvalidTransactionId`). The caller sleeps on the VXID lock.
+    Proceed { xid: types_core::TransactionId },
 }
 
 /// `enum LockAcquireResult` (`storage/lock.h`).

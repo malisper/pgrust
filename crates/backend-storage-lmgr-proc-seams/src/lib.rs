@@ -193,6 +193,45 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// The cross-backend `MyProc->fpInfoLock`-guarded critical section inside
+    /// `VirtualXactLock(vxid, wait)` (lock.c): examine `target`'s fast-path VXID
+    /// state and, if still running and `wait`, transfer any fast-path VXID lock
+    /// into the main lock table. proc.c owns the section because `fpInfoLock` and
+    /// the `fp*` / `vxid` / `xid` fields are PGPROC-private storage.
+    ///
+    /// Under `&target->fpInfoLock` (LW_EXCLUSIVE), faithful to the C body:
+    /// * if `target->vxid.procNumber != vxid.procNumber ||
+    ///   target->fpLocalTransactionId != vxid.localTransactionId` → return
+    ///   [`VirtualXactExamineOutcome::Ended`];
+    /// * else if `!wait` → return [`VirtualXactExamineOutcome::StillRunningNoWait`];
+    /// * else: if `target->fpVXIDLock`, call `transfer` (which sets up the
+    ///   primary lock-table entry and `GrantLock`s it — lock.c's work, run with
+    ///   `fpInfoLock` held) then clear `fpVXIDLock`; read `xid = target->xid`;
+    ///   return [`VirtualXactExamineOutcome::Proceed { xid }`].
+    ///
+    /// `transfer`'s `Err` (out-of-shared-memory from `SetupLockInTable`)
+    /// propagates with the lock released. The caller passes `target` =
+    /// `ProcNumberGetProc(vxid.procNumber)`; this seam is only reached when that
+    /// proc is present.
+    pub fn virtual_xact_examine_proc(
+        target: ProcNumber,
+        vxid: VirtualTransactionId,
+        wait: bool,
+        transfer: &mut dyn FnMut() -> types_error::PgResult<()>,
+    ) -> types_error::PgResult<types_storage::lock::VirtualXactExamineOutcome>
+);
+
+seam_core::seam!(
+    /// `ProcNumberGetProc(procNumber) != NULL` — whether the proc array slot
+    /// `procno` currently holds an in-use backend whose `vxid.procNumber`
+    /// matches `procno` (`ProcNumberGetProc` returns `NULL` when the slot's
+    /// advertised proc number no longer matches, i.e. the backend exited).
+    /// Read by lock.c's `VirtualXactLock` to decide whether to examine the proc
+    /// or fall straight through to the 2PC search. Plain shared-memory read.
+    pub fn proc_number_get_proc_is_present(procno: ProcNumber) -> bool
+);
+
+seam_core::seam!(
     /// Read the `transaction_timeout` GUC (`int TransactionTimeout`, proc.c).
     pub fn transaction_timeout() -> i32
 );

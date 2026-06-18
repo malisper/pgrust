@@ -351,6 +351,14 @@ impl VirtualTransactionId {
     pub const fn is_valid(self) -> bool {
         self.localTransactionId != 0
     }
+
+    /// `VirtualTransactionIdIsRecoveredPreparedXact(vxid)` —
+    /// `((vxid).procNumber == INVALID_PROC_NUMBER)`. For a recovered prepared
+    /// xact the vxid carries no real proc; `localTransactionId` is a normal,
+    /// locked XID instead.
+    pub const fn is_recovered_prepared_xact(self) -> bool {
+        self.procNumber == crate::primitive::INVALID_PROC_NUMBER
+    }
 }
 
 /// `SavedTransactionCharacteristics` (`access/xact.h`).

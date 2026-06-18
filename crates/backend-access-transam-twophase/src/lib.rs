@@ -2614,6 +2614,14 @@ pub fn init_seams() {
         with_twophase_state(|state| two_phase_get_dummy_proc_number(state, xid, lock_held))
     });
 
+    seams::two_phase_get_xid_by_virtual_xid::set(|vxid| {
+        with_twophase_state(|state| {
+            let mut have_more = false;
+            let xid = two_phase_get_xid_by_virtual_xid(state, vxid, &mut have_more)?;
+            Ok((xid, have_more))
+        })
+    });
+
     // `PostPrepare_Twophase` / `AtAbort_Twophase` — void cleanup in C (no
     // ereport); the PgResult is from the lock seams / Assert-equivalent
     // RemoveGXact, surfaced as a panic on the impossible-error path.

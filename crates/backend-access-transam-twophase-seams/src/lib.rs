@@ -32,6 +32,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `TwoPhaseGetXidByVirtualXID(vxid, *have_more)` — find a prepared xact by
+    /// its dummy proc's virtual transaction id `(procNumber, localTransactionId)`,
+    /// returning `(xid, have_more)`. `xid` is `InvalidTransactionId` when no
+    /// prepared xact matches; `have_more` is set when more than one prepared
+    /// xact shares the vxid (caller re-invokes to lock them all). Consumed by
+    /// lock.c's `XactLockForVirtualXact`.
+    pub fn two_phase_get_xid_by_virtual_xid(
+        vxid: (types_core::ProcNumber, u32),
+    ) -> PgResult<(TransactionId, bool)>
+);
+
+seam_core::seam!(
     /// `MarkAsPreparing(xid, gid, prepared_at, owner, databaseid)` — reserve
     /// the GID; fails if invalid or already in use.
     pub fn mark_as_preparing(

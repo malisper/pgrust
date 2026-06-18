@@ -24,7 +24,8 @@ use types_storage::storage::{
 };
 use types_storage::{proclist_node, LWLockMode};
 
-use crate::proc_shmem::{with_my_proc, with_my_proc_ref, with_proc_by_number};
+use crate::proc_shmem::{with_my_proc, with_my_proc_ref, with_proc_by_number, with_proc_global};
+use types_storage::lock::VirtualXactExamineOutcome;
 
 // `lwWaiting`/`lwWaitMode` are stored as the raw `uint8` C fields; these map
 // them to/from the typed seam values.
@@ -205,6 +206,77 @@ fn vxid_lock_table_cleanup_my_proc() -> PgResult<(bool, LocalTransactionId)> {
         p.fpLocalTransactionId = InvalidLocalTransactionId;
 
         Ok((fastpath, lxid))
+    })
+}
+
+/// The cross-backend `&target->fpInfoLock`-guarded critical section of lock.c's
+/// `VirtualXactLock(vxid, wait)`. proc.c owns the section because `fpInfoLock` /
+/// `fpVXIDLock` / `fpLocalTransactionId` / `vxid` / `xid` are PGPROC-private
+/// storage. Faithful to the C body's examine-and-(optionally)-transfer steps;
+/// the lock-table transfer itself is lock.c's work, run via `transfer` while
+/// `fpInfoLock` is held.
+fn virtual_xact_examine_proc(
+    target: ProcNumber,
+    vxid: VirtualTransactionId,
+    wait: bool,
+    transfer: &mut dyn FnMut() -> PgResult<()>,
+) -> PgResult<VirtualXactExamineOutcome> {
+    let my_procno = crate::proc_shmem::my_proc_number();
+    with_proc_by_number(target, |p| {
+        // We must acquire this lock before checking the procNumber and lxid
+        // against the ones we're waiting for. The target backend will only set
+        // or clear lxid while holding this lock.
+        let _guard = lwlock::lwlock_acquire::call(
+            &p.fpInfoLock,
+            LWLockMode::LW_EXCLUSIVE,
+            my_procno,
+        )?;
+
+        if p.vxid.procNumber != vxid.procNumber
+            || p.fpLocalTransactionId != vxid.localTransactionId
+        {
+            // VXID ended.
+            return Ok(VirtualXactExamineOutcome::Ended);
+        }
+
+        // If we aren't asked to wait, there's no need to set up a lock table
+        // entry. The transaction is still in progress, so just return false.
+        if !wait {
+            return Ok(VirtualXactExamineOutcome::StillRunningNoWait);
+        }
+
+        // OK, we're going to need to sleep on the VXID. But first, we must set
+        // up the primary lock table entry, if needed (ie, convert the proc's
+        // fast-path lock on its VXID to a regular lock).
+        if p.fpVXIDLock {
+            // `transfer` runs lock.c's SetupLockInTable + GrantLock under the
+            // partition lock (nested inside fpInfoLock, exactly as in C). On
+            // out-of-shared-memory it returns Err with fpInfoLock released by
+            // the guard drop.
+            transfer()?;
+            p.fpVXIDLock = false;
+        }
+
+        // If the proc has an XID now, we'll avoid a TwoPhaseGetXidByVirtualXID()
+        // search. The proc might have assigned this XID but not yet locked it,
+        // in which case the proc will lock this XID before releasing the VXID.
+        // The fpInfoLock critical section excludes VirtualXactLockTableCleanup(),
+        // so we won't save an XID of a different VXID.
+        let xid = p.xid;
+
+        Ok(VirtualXactExamineOutcome::Proceed { xid })
+    })
+}
+
+/// `ProcNumberGetProc(procno) != NULL` (procarray.c) — whether the proc array
+/// slot is a bounds-valid, in-use backend (`result->pid != 0`). Plain
+/// shared-memory read over the owned `allProcs` arena.
+fn proc_number_get_proc_is_present(procno: ProcNumber) -> bool {
+    with_proc_global(|pg| {
+        if procno < 0 || procno >= pg.allProcCount as ProcNumber {
+            return false;
+        }
+        pg.allProcs[procno as usize].pid != 0
     })
 }
 
@@ -983,6 +1055,8 @@ pub(crate) fn install() {
     seams::set_my_proc_vxid_proc_number::set(set_my_proc_vxid_proc_number);
     seams::vxid_lock_table_insert_my_proc::set(vxid_lock_table_insert_my_proc);
     seams::vxid_lock_table_cleanup_my_proc::set(vxid_lock_table_cleanup_my_proc);
+    seams::virtual_xact_examine_proc::set(virtual_xact_examine_proc);
+    seams::proc_number_get_proc_is_present::set(proc_number_get_proc_is_present);
     seams::set_my_proc_temp_namespace_id::set(set_my_proc_temp_namespace_id);
     seams::my_proc_lxid::set(my_proc_lxid);
     seams::set_my_proc_lxid::set(set_my_proc_lxid);
