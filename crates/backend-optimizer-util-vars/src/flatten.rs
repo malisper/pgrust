@@ -154,7 +154,7 @@ fn flatten_join_alias_vars_mutator<'mcx>(
                         IncrementVarSublevelsUp(&mut newvar, context.sublevels_up, 0)?;
                     }
                     // Preserve original Var's location, if possible.
-                    if let Node::Expr(Expr::Var(nv)) = &mut newvar {
+                    if let Some(nv) = newvar.as_var_mut() {
                         nv.location = var.location;
                     }
                     // Recurse in case join input is itself a join.
@@ -225,7 +225,7 @@ fn flatten_join_alias_vars_mutator<'mcx>(
             }
 
             // Preserve original Var's location, if possible.
-            if let Node::Expr(Expr::Var(nv)) = &mut newvar {
+            if let Some(nv) = newvar.as_var_mut() {
                 nv.location = var.location;
             }
 
@@ -573,7 +573,7 @@ fn flatten_group_exprs_mutator<'mcx>(
             }
 
             // Preserve original Var's location, if possible.
-            if let Node::Expr(Expr::Var(nv)) = &mut newvar {
+            if let Some(nv) = newvar.as_var_mut() {
                 nv.location = var.location;
             }
 

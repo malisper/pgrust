@@ -60,7 +60,7 @@ pub fn fix_indexqual_operand(
                 .expect("fix_indexqual_operand: IndexOptInfo.rel must be set");
             root.rel_arena[relid.index()].relid as i32
         };
-        if let Expr::Var(var) = &node {
+        if let Some(var) = node.as_var() {
             if var.varno == index_relid && var.varattno as i32 == index.indexkeys[indexcol as usize]
             {
                 let mut result = var.clone();
