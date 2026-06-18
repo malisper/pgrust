@@ -96,6 +96,10 @@ use backend_optimizer_util_plancat_ext_seams as plancat_ext;
 /// `MAX_FUZZY_DISTANCE` (parse_relation.c).
 const MAX_FUZZY_DISTANCE: i32 = 3;
 
+/// `CHKATYPE_ANYRECORD` (`catalog/heap.h`) — allow RECORD and RECORD[] in the
+/// coldeflist attribute-type check.
+const CHKATYPE_ANYRECORD: i32 = 1 << 1;
+
 /// `MaxAttrNumber` (`access/attnum.h`).
 const MaxAttrNumber: i32 = 32767;
 
@@ -1378,27 +1382,29 @@ fn buildRelationAliases<'mcx>(
 }
 
 /// `chooseScalarFunctionAlias` — select the column alias for a scalar function in
-/// a function RTE. (Faithful static-fn port; its only caller is the function-RTE
-/// adder's scalar arm, which is deferred — see `addRangeTableEntryForFunction`.)
-#[allow(dead_code)]
+/// a function RTE.
 fn chooseScalarFunctionAlias<'mcx>(
     mcx: Mcx<'mcx>,
-    _funcexpr: Option<&Node<'mcx>>,
+    funcexpr: Option<&Node<'mcx>>,
     funcname: &str,
     alias: Option<&Alias<'mcx>>,
     nfuncs: i32,
 ) -> PgResult<PgString<'mcx>> {
     // If the expression is a simple function call, and the function has a single
-    // OUT parameter that is named, use the parameter's name. That branch needs
-    // get_func_result_name(funcid), which is unported funcapi here.
-    if let Some(Node::Expr(types_nodes::primnodes::Expr::FuncExpr(_))) = _funcexpr {
-        panic!(
-            "chooseScalarFunctionAlias: the FuncExpr OUT-parameter-name branch needs \
-             get_func_result_name(funcid) (funcapi), unported here (parse_relation.c:1280)"
-        );
+    // OUT parameter that is named, use the parameter's name.
+    // C: if (funcexpr && IsA(funcexpr, FuncExpr)) {
+    //        pname = get_func_result_name(((FuncExpr *) funcexpr)->funcid);
+    //        if (pname) return pname; }
+    if let Some(Node::Expr(types_nodes::primnodes::Expr::FuncExpr(fe))) = funcexpr {
+        if let Some(pname) =
+            backend_utils_fmgr_funcapi::proc_info::get_func_result_name(mcx, fe.funcid)?
+        {
+            return Ok(pname);
+        }
     }
 
     // If there's just one function and the user gave an RTE alias name, use it.
+    // C: if (nfuncs == 1 && alias) return alias->aliasname;
     if nfuncs == 1 {
         if let Some(a) = alias {
             if let Some(name) = a.aliasname.as_deref() {
@@ -1408,6 +1414,7 @@ fn chooseScalarFunctionAlias<'mcx>(
     }
 
     // Otherwise use the function name.
+    // C: return funcname;
     PgString::from_str_in(funcname, mcx)
 }
 
@@ -1752,30 +1759,366 @@ pub fn addRangeTableEntryForSubquery<'mcx>(
     Ok(nsitem)
 }
 
-/// `addRangeTableEntryForFunction` — make a function RTE.
-///
-/// The composite/RECORD/scalar tupdesc machinery needs `get_expr_result_type`,
-/// `CreateTemplateTupleDesc`, `TupleDescInitEntry`, `typenameTypeIdAndMod`,
-/// `GetColumnDefCollation`, `CheckAttributeNamesTypes`, `format_type_be` — all
-/// unported funcapi/parse_type here. Mirror-PG-and-panic (matching
-/// src-idiomatic) once we reach the per-function type resolution.
+/// `addRangeTableEntryForFunction` — make a function RTE for a set-returning or
+/// scalar function in FROM (parse_relation.c:1751).
 pub fn addRangeTableEntryForFunction<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _pstate: &mut ParseState<'mcx>,
-    _funcnames: &[PgString<'mcx>],
-    _funcexprs: &[NodePtr<'mcx>],
-    _coldeflists: &[PgVec<'mcx, NodePtr<'mcx>>],
-    _rangefunc: &RangeFunction<'mcx>,
-    _lateral: bool,
-    _in_from_cl: bool,
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'mcx>,
+    funcnames: &[PgString<'mcx>],
+    funcexprs: &[NodePtr<'mcx>],
+    coldeflists: &[PgVec<'mcx, NodePtr<'mcx>>],
+    rangefunc: &RangeFunction<'mcx>,
+    lateral: bool,
+    in_from_cl: bool,
 ) -> PgResult<ParseNamespaceItem<'mcx>> {
-    panic!(
-        "addRangeTableEntryForFunction: the per-function type resolution \
-         (get_expr_result_type / CreateTemplateTupleDesc / TupleDescInitEntry / \
-         typenameTypeIdAndMod / GetColumnDefCollation / CheckAttributeNamesTypes / \
-         format_type_be) needs the unported funcapi + parse_type owners \
-         (parse_relation.c:1751)"
-    )
+    use types_nodes::funcapi::TypeFuncClass;
+    use types_nodes::primnodes::Expr;
+    use types_tuple::heaptuple::{INT8OID, MaxHeapAttributeNumber, MaxTupleAttributeNumber};
+
+    let mut rte = RangeTblEntry::new_in(mcx);
+    let nfuncs = funcexprs.len() as i32;
+
+    // C: rte->rtekind = RTE_FUNCTION; rte->relid = InvalidOid; rte->subquery = NULL;
+    //    rte->functions = NIL; rte->funcordinality = rangefunc->ordinality;
+    //    rte->alias = alias;
+    rte.rtekind = RTE_FUNCTION;
+    rte.funcordinality = rangefunc.ordinality;
+
+    // Choose the RTE alias name. We default to the first function's name.
+    // C: if (alias) aliasname = alias->aliasname; else aliasname = linitial(funcnames);
+    let aliasname: PgString<'mcx> = match &rangefunc.alias {
+        Some(a) => PgString::from_str_in(a.aliasname.as_deref().unwrap_or(""), mcx)?,
+        None => PgString::from_str_in(funcnames[0].as_str(), mcx)?,
+    };
+
+    // C: eref = makeAlias(aliasname, NIL); rte->eref = eref;
+    let mut eref = make_alias(mcx, aliasname.as_str(), PgVec::new_in(mcx))?;
+
+    // C: functupdescs = (TupleDesc *) palloc(nfuncs * sizeof(TupleDesc));
+    let mut functupdescs: alloc::vec::Vec<TupleDescData<'mcx>> =
+        alloc::vec::Vec::with_capacity(nfuncs as usize);
+
+    let mut totalatts: i32 = 0;
+
+    // forthree(lc1, funcexprs, lc2, funcnames, lc3, coldeflists)
+    for funcno in 0..nfuncs as usize {
+        let funcexpr_node = &funcexprs[funcno];
+        let funcname = &funcnames[funcno];
+        let coldeflist = &coldeflists[funcno];
+
+        // C: RangeTblFunction *rtfunc = makeNode(RangeTblFunction);
+        //    rtfunc->funcexpr = funcexpr; (lists initialized NIL; funcparams NULL)
+        let mut rtfunc = types_nodes::rawnodes::RangeTblFunction {
+            funcexpr: Some(mcx::alloc_in(mcx, (**funcexpr_node).clone_in(mcx)?)?),
+            funccolcount: 0,
+            funccolnames: PgVec::new_in(mcx),
+            funccoltypes: PgVec::new_in(mcx),
+            funccoltypmods: PgVec::new_in(mcx),
+            funccolcollations: PgVec::new_in(mcx),
+            funcparams: None,
+        };
+
+        // The funcexpr is carried as a Node::Expr; extract the inner Expr for
+        // the nodeFuncs accessors.
+        let funcexpr_expr: Option<&Expr> = match &**funcexpr_node {
+            Node::Expr(e) => Some(e),
+            _ => None,
+        };
+
+        // C: functypclass = get_expr_result_type(funcexpr, &funcrettype, &tupdesc);
+        let resolved =
+            backend_utils_fmgr_funcapi::result_type::get_expr_result_type(mcx, Some(funcexpr_node))?;
+        let functypclass = resolved.class;
+        let funcrettype = resolved.result_type_id.unwrap_or(InvalidOid);
+        let mut tupdesc: Option<TupleDescData<'mcx>> = match resolved.result_tuple_desc {
+            Some(td) => Some((*td).clone_in(mcx)?),
+            None => None,
+        };
+
+        // A coldeflist is required if the function returns RECORD and hasn't got
+        // a predetermined record type, and is prohibited otherwise.
+        if !coldeflist.is_empty() {
+            // C: switch (functypclass) { ... }
+            match functypclass {
+                Some(TypeFuncClass::Record) => { /* ok */ }
+                Some(TypeFuncClass::Composite) | Some(TypeFuncClass::CompositeDomain) => {
+                    // If the function's raw result type is RECORD, we resolved
+                    // it using OUT parameters. Otherwise it's a named composite.
+                    let loc = expr_location_of_list(coldeflist)?;
+                    if backend_nodes_core::nodefuncs::expr_type(funcexpr_expr)? == RECORDOID {
+                        return Err(ereport(ERROR)
+                            .errcode(types_error::error::ERRCODE_SYNTAX_ERROR)
+                            .errmsg("a column definition list is redundant for a function with OUT parameters")
+                            .errposition(parser_errposition(pstate, loc))
+                            .into_error());
+                    } else {
+                        return Err(ereport(ERROR)
+                            .errcode(types_error::error::ERRCODE_SYNTAX_ERROR)
+                            .errmsg("a column definition list is redundant for a function returning a named composite type")
+                            .errposition(parser_errposition(pstate, loc))
+                            .into_error());
+                    }
+                }
+                _ => {
+                    let loc = expr_location_of_list(coldeflist)?;
+                    return Err(ereport(ERROR)
+                        .errcode(types_error::error::ERRCODE_SYNTAX_ERROR)
+                        .errmsg("a column definition list is only allowed for functions returning \"record\"")
+                        .errposition(parser_errposition(pstate, loc))
+                        .into_error());
+                }
+            }
+        } else if functypclass == Some(TypeFuncClass::Record) {
+            return Err(ereport(ERROR)
+                .errcode(types_error::error::ERRCODE_SYNTAX_ERROR)
+                .errmsg("a column definition list is required for functions returning \"record\"")
+                .errposition(parser_errposition(
+                    pstate,
+                    backend_nodes_core::nodefuncs::expr_location(funcexpr_expr)?,
+                ))
+                .into_error());
+        }
+
+        let final_tupdesc: TupleDescData<'mcx> = match functypclass {
+            Some(TypeFuncClass::Composite) | Some(TypeFuncClass::CompositeDomain) => {
+                // Composite data type, e.g. a table's row type.
+                // C: Assert(tupdesc);
+                tupdesc.take().expect("composite result has a tupdesc")
+            }
+            Some(TypeFuncClass::Scalar) => {
+                // Base data type, i.e. scalar.
+                // C: tupdesc = CreateTemplateTupleDesc(1);
+                let mut td = backend_access_common_tupdesc::CreateTemplateTupleDesc(mcx, 1)?;
+                // C: TupleDescInitEntry(tupdesc, 1,
+                //        chooseScalarFunctionAlias(funcexpr, funcname, alias, nfuncs),
+                //        funcrettype, exprTypmod(funcexpr), 0);
+                let colname = chooseScalarFunctionAlias(
+                    mcx,
+                    Some(funcexpr_node),
+                    funcname.as_str(),
+                    rangefunc.alias.as_deref(),
+                    nfuncs,
+                )?;
+                backend_access_common_tupdesc::TupleDescInitEntry(
+                    &mut td,
+                    1,
+                    Some(colname.as_str()),
+                    funcrettype,
+                    backend_nodes_core::nodefuncs::expr_typmod(funcexpr_expr)?,
+                    0,
+                )?;
+                // C: TupleDescInitEntryCollation(tupdesc, 1, exprCollation(funcexpr));
+                backend_access_common_tupdesc::TupleDescInitEntryCollation(
+                    &mut td,
+                    1,
+                    backend_nodes_core::nodefuncs::expr_collation(funcexpr_expr)?,
+                )?;
+                td
+            }
+            Some(TypeFuncClass::Record) => {
+                // Use the column definition list to construct a tupdesc and fill
+                // in the RangeTblFunction's lists.
+                // C: if (list_length(coldeflist) > MaxHeapAttributeNumber) ereport(...)
+                if coldeflist.len() as i32 > MaxHeapAttributeNumber {
+                    let loc = expr_location_of_list(coldeflist)?;
+                    return Err(ereport(ERROR)
+                        .errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+                        .errmsg(format!(
+                            "column definition lists can have at most {MaxHeapAttributeNumber} entries"
+                        ))
+                        .errposition(parser_errposition(pstate, loc))
+                        .into_error());
+                }
+                // C: tupdesc = CreateTemplateTupleDesc(list_length(coldeflist));
+                let mut td =
+                    backend_access_common_tupdesc::CreateTemplateTupleDesc(mcx, coldeflist.len() as i32)?;
+                // C: i = 1; foreach(col, coldeflist) { ColumnDef *n = ...; }
+                let mut i: AttrNumber = 1;
+                for col in coldeflist.iter() {
+                    let n = match &**col {
+                        Node::ColumnDef(cd) => cd,
+                        _ => {
+                            return Err(ereport(ERROR)
+                                .errmsg("addRangeTableEntryForFunction: coldeflist element is not a ColumnDef")
+                                .into_error())
+                        }
+                    };
+                    let attrname = n.colname.as_deref().unwrap_or("");
+                    let type_name = n
+                        .typeName
+                        .as_deref()
+                        .ok_or_else(|| {
+                            ereport(ERROR)
+                                .errmsg("ColumnDef without typeName")
+                                .into_error()
+                        })?;
+                    // C: if (n->typeName->setof) ereport(ERROR, INVALID_TABLE_DEFINITION, ...)
+                    if type_name.setof {
+                        return Err(ereport(ERROR)
+                            .errcode(types_error::error::ERRCODE_INVALID_TABLE_DEFINITION)
+                            .errmsg(format!("column \"{attrname}\" cannot be declared SETOF"))
+                            .errposition(parser_errposition(pstate, n.location))
+                            .into_error());
+                    }
+                    // C: typenameTypeIdAndMod(pstate, n->typeName, &attrtype, &attrtypmod);
+                    let (attrtype, attrtypmod) =
+                        backend_commands_tablecmds_seams::typename_type_id_and_mod::call(
+                            mcx, type_name,
+                        )?;
+                    // C: attrcollation = GetColumnDefCollation(pstate, n, attrtype);
+                    let attrcollation =
+                        backend_commands_tablecmds_seams::get_column_def_collation::call(
+                            mcx, n, attrtype,
+                        )?;
+                    // C: TupleDescInitEntry(tupdesc, i, attrname, attrtype, attrtypmod, 0);
+                    backend_access_common_tupdesc::TupleDescInitEntry(
+                        &mut td,
+                        i,
+                        Some(attrname),
+                        attrtype,
+                        attrtypmod,
+                        0,
+                    )?;
+                    // C: TupleDescInitEntryCollation(tupdesc, i, attrcollation);
+                    backend_access_common_tupdesc::TupleDescInitEntryCollation(
+                        &mut td,
+                        i,
+                        attrcollation,
+                    )?;
+                    // C: rtfunc->funccolnames = lappend(..., makeString(pstrdup(attrname)));
+                    rtfunc.funccolnames.push(make_string_node(mcx, attrname)?);
+                    rtfunc.funccoltypes.push(attrtype);
+                    rtfunc.funccoltypmods.push(attrtypmod);
+                    rtfunc.funccolcollations.push(attrcollation);
+                    i += 1;
+                }
+                // C: CheckAttributeNamesTypes(tupdesc, RELKIND_COMPOSITE_TYPE, CHKATYPE_ANYRECORD);
+                backend_catalog_heap_seams::check_attribute_names_types::call(
+                    mcx,
+                    &td,
+                    RELKIND_COMPOSITE_TYPE,
+                    CHKATYPE_ANYRECORD,
+                )?;
+                td
+            }
+            _ => {
+                // C: ereport(ERROR, DATATYPE_MISMATCH, "function ... has unsupported return type ...")
+                return Err(ereport(ERROR)
+                    .errcode(types_error::error::ERRCODE_DATATYPE_MISMATCH)
+                    .errmsg(format!(
+                        "function \"{}\" in FROM has unsupported return type {}",
+                        funcname.as_str(),
+                        backend_utils_adt_format_type_seams::format_type_be_str::call(funcrettype)?
+                    ))
+                    .errposition(parser_errposition(
+                        pstate,
+                        backend_nodes_core::nodefuncs::expr_location(funcexpr_expr)?,
+                    ))
+                    .into_error());
+            }
+        };
+
+        // C: rtfunc->funccolcount = tupdesc->natts;
+        rtfunc.funccolcount = final_tupdesc.natts;
+        // C: rte->functions = lappend(rte->functions, rtfunc);
+        rte.functions
+            .push(mcx::alloc_in(mcx, Node::RangeTblFunction(rtfunc))?);
+
+        // C: functupdescs[funcno] = tupdesc; totalatts += tupdesc->natts;
+        totalatts += final_tupdesc.natts;
+        functupdescs.push(final_tupdesc);
+    }
+
+    // If there's more than one function, or we want an ordinality column, we
+    // have to produce a merged tupdesc.
+    let tupdesc: TupleDescData<'mcx> = if nfuncs > 1 || rangefunc.ordinality {
+        // C: if (rangefunc->ordinality) totalatts++;
+        if rangefunc.ordinality {
+            totalatts += 1;
+        }
+        // C: if (totalatts > MaxTupleAttributeNumber) ereport(...)
+        if totalatts > MaxTupleAttributeNumber {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+                .errmsg(format!(
+                    "functions in FROM can return at most {MaxTupleAttributeNumber} columns"
+                ))
+                .into_error());
+        }
+        // C: tupdesc = CreateTemplateTupleDesc(totalatts);
+        let mut merged = backend_access_common_tupdesc::CreateTemplateTupleDesc(mcx, totalatts)?;
+        let mut natts: AttrNumber = 0;
+        for ftd in functupdescs.iter() {
+            for j in 1..=ftd.natts {
+                natts += 1;
+                backend_access_common_tupdesc::TupleDescCopyEntry(
+                    &mut merged,
+                    natts,
+                    ftd,
+                    j as AttrNumber,
+                )?;
+            }
+        }
+        // C: if (rangefunc->ordinality) { TupleDescInitEntry(tupdesc, ++natts,
+        //        "ordinality", INT8OID, -1, 0); }
+        if rangefunc.ordinality {
+            natts += 1;
+            backend_access_common_tupdesc::TupleDescInitEntry(
+                &mut merged,
+                natts,
+                Some("ordinality"),
+                INT8OID,
+                -1,
+                0,
+            )?;
+        }
+        debug_assert!(natts as i32 == totalatts);
+        merged
+    } else {
+        // C: tupdesc = functupdescs[0];
+        functupdescs.into_iter().next().expect("single function tupdesc")
+    };
+
+    // C: buildRelationAliases(tupdesc, alias, eref);
+    let mut alias_for_build = match &rangefunc.alias {
+        Some(a) => Some(a.clone_in(mcx)?),
+        None => None,
+    };
+    buildRelationAliases(mcx, &tupdesc, alias_for_build.as_mut(), &mut eref)?;
+    // C: rte->alias = alias (the rangefunc alias, with colnames as rebuilt by
+    // buildRelationAliases so they are 1-to-1 with physical columns).
+    rte.alias = match alias_for_build {
+        Some(a) => Some(mcx::alloc_in(mcx, a)?),
+        None => None,
+    };
+
+    rte.eref = Some(mcx::alloc_in(mcx, eref)?);
+
+    // C: rte->lateral = lateral; rte->inFromCl = inFromCl;
+    rte.lateral = lateral;
+    rte.inFromCl = in_from_cl;
+
+    // C: pstate->p_rtable = lappend(pstate->p_rtable, rte);
+    pstate.p_rtable.push(rte);
+    let rtindex = pstate.p_rtable.len() as Index;
+    let rte_ref = &pstate.p_rtable[(rtindex - 1) as usize];
+
+    // C: return buildNSItemFromTupleDesc(rte, list_length(pstate->p_rtable), NULL, tupdesc);
+    buildNSItemFromTupleDesc(mcx, rte_ref, rtindex, None, &tupdesc)
+}
+
+/// `exprLocation((Node *) coldeflist)` for a `List` of `ColumnDef` nodes — the
+/// location of the first list element (matching `exprLocation`'s List case),
+/// or -1 for an empty list.
+fn expr_location_of_list<'mcx>(list: &PgVec<'mcx, NodePtr<'mcx>>) -> PgResult<i32> {
+    match list.first() {
+        Some(first) => match &**first {
+            Node::ColumnDef(cd) => Ok(cd.location),
+            Node::Expr(e) => backend_nodes_core::nodefuncs::expr_location(Some(e)),
+            _ => Ok(-1),
+        },
+        None => Ok(-1),
+    }
 }
 
 /// `addRangeTableEntryForTableFunc` — make a tablefunc RTE.

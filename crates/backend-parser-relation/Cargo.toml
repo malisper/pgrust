@@ -38,3 +38,9 @@ backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-access-common-relation-seams = { path = "../backend-access-common-relation-seams" }
 backend-optimizer-util-plancat-ext-seams = { path = "../backend-optimizer-util-plancat-ext-seams" }
+backend-utils-fmgr-funcapi = { path = "../backend-utils-fmgr-funcapi" }
+backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
+backend-commands-tablecmds-seams = { path = "../backend-commands-tablecmds-seams" }
+backend-catalog-heap-seams = { path = "../backend-catalog-heap-seams" }
+backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
+backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
