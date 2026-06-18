@@ -17872,6 +17872,7 @@ dependencies = [
  "backend-utils-fmgr-fmgr-seams",
  "backend-utils-misc-guc-tables",
  "mcx",
+ "pg-prng-seams",
  "types-array",
  "types-core",
  "types-datum",

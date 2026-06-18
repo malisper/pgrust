@@ -66,6 +66,7 @@ use backend_utils_adt_arrayutils_seams as arrayutils;
 use backend_utils_cache_lsyscache_seams as lsyscache;
 use backend_utils_cache_typcache_seams as typcache;
 use backend_utils_fmgr_fmgr_seams as fmgr;
+use pg_prng_seams as prng;
 
 /// `format_type_be(element_type)`-style identifier for the "could not identify"
 /// error message; the real `format_type_be` lives in a not-yet-reachable owner,
@@ -490,6 +491,221 @@ pub fn array_position_start(
             .into_error());
     }
     array_position_common(mcx, array, searched_element, start, collation)
+}
+
+// ---------------------------------------------------------------------------
+// array_shuffle / array_sample / array_reverse / array_sort
+//
+// All four are by-reference `anyarray` body ports: the input is the canonical
+// flat array byte buffer, the result is a freshly built flat array buffer. They
+// `deconstruct_array` the input into per-element value-lane Datums (so a
+// by-reference element keeps its real stored bytes, NOT the bare-word offset
+// surrogate), rearrange whole first-dimension *items* (`nelm` elements each),
+// then `construct_md_array_values` the rearranged elements back into a buffer.
+// The element storage triple comes from `lookup_type_cache(elmtyp, 0)`, exactly
+// as the C `fcinfo->flinfo->fn_extra` `TypeCacheEntry` cache supplies it (the
+// owned model re-looks-up each call rather than caching on the flinfo).
+// ---------------------------------------------------------------------------
+
+/// Helper: split a `Vec<(Datum, bool)>` (the value-lane `deconstruct_array`
+/// output) into parallel `values`/`nulls` slices for `construct_md_array_values`.
+fn split_values_nulls<'mcx>(
+    mcx: Mcx<'mcx>,
+    elems: &[(types_tuple::Datum<'mcx>, bool)],
+) -> PgResult<(PgVec<'mcx, types_tuple::Datum<'mcx>>, PgVec<'mcx, bool>)> {
+    let mut values = vec_with_capacity_in::<types_tuple::Datum<'mcx>>(mcx, elems.len())?;
+    let mut nulls = vec_with_capacity_in::<bool>(mcx, elems.len())?;
+    for (d, n) in elems {
+        values.push(d.clone());
+        nulls.push(*n);
+    }
+    Ok((values, nulls))
+}
+
+/// `array_shuffle_n(array, n, keep_lb, elmtyp, typentry)` (array_userfuncs.c:1612):
+/// return a copy of `array` with `n` randomly chosen first-dimension items
+/// (Fisher-Yates partial shuffle). The first dimension's lower bound is preserved
+/// if `keep_lb`, else set to 1; lower-order dimensions are preserved.
+fn array_shuffle_n<'mcx>(
+    mcx: Mcx<'mcx>,
+    array: &[u8],
+    n: i32,
+    keep_lb: bool,
+    elmtyp: Oid,
+    typlen: i32,
+    elmbyval: bool,
+    elmalign: u8,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let ndim = foundation::arr_ndim(array);
+    let dims = foundation::arr_dims(mcx, array)?;
+    let lbs = foundation::arr_lbounds(mcx, array)?;
+
+    // If the target array is empty, exit fast.
+    if ndim < 1 || dims[0] < 1 || n < 1 {
+        return construct::construct_empty_array(mcx, elmtyp);
+    }
+
+    let mut elems =
+        construct::deconstruct_array_values(mcx, array, elmtyp, typlen, elmbyval, elmalign)?;
+    let nelm_total = elems.len() as i32;
+
+    let nitem = dims[0]; // total number of items
+    let nelm = nelm_total / nitem; // number of elements per item
+
+    debug_assert!(n <= nitem);
+
+    // Shuffle using Fisher-Yates; swap item i (nelm datums at i*nelm) with a
+    // randomly chosen later item j. Stop after n iterations.
+    for i in 0..n as usize {
+        let j = prng::pg_global_prng_uint64_range::call(i as u64, (nitem - 1) as u64) as i32
+            * nelm;
+        let j = j as usize;
+        let ibase = i * nelm as usize;
+        for k in 0..nelm as usize {
+            elems.swap(ibase + k, j + k);
+        }
+    }
+
+    // Set up dimensions of the result.
+    let mut rdims = dims;
+    let mut rlbs = lbs;
+    rdims[0] = n;
+    if !keep_lb {
+        rlbs[0] = 1;
+    }
+
+    let (values, nulls) = split_values_nulls(mcx, &elems[..(n * nelm) as usize])?;
+    construct::construct_md_array_values(
+        mcx,
+        &values,
+        Some(&nulls),
+        ndim,
+        &rdims[..ndim as usize],
+        &rlbs[..ndim as usize],
+        elmtyp,
+        typlen,
+        elmbyval,
+        elmalign,
+    )
+}
+
+/// `array_shuffle(array)` (array_userfuncs.c:1701): an array with the same
+/// dimensions as the input, with its first-dimension items in random order.
+pub fn array_shuffle<'mcx>(mcx: Mcx<'mcx>, array: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+    // There is no point in shuffling empty arrays or arrays with < 2 items.
+    if foundation::arr_ndim(array) < 1 || foundation::arr_dim(array, 0) < 2 {
+        return Ok(mcx::slice_in(mcx, array)?);
+    }
+    let elmtyp = foundation::arr_elemtype(array);
+    let te = typcache::lookup_type_cache::call(elmtyp, 0)?;
+    array_shuffle_n(
+        mcx,
+        array,
+        foundation::arr_dim(array, 0),
+        true,
+        elmtyp,
+        te.typlen as i32,
+        te.typbyval,
+        te.typalign as u8,
+    )
+}
+
+/// `array_sample(array, n)` (array_userfuncs.c:1736): an array of `n` randomly
+/// chosen first-dimension items from the input.
+pub fn array_sample<'mcx>(mcx: Mcx<'mcx>, array: &[u8], n: i32) -> PgResult<PgVec<'mcx, u8>> {
+    let nitem = if foundation::arr_ndim(array) < 1 {
+        0
+    } else {
+        foundation::arr_dim(array, 0)
+    };
+
+    if n < 0 || n > nitem {
+        return Err(ereport(ERROR)
+            .errcode(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+            .errmsg(format!("sample size must be between 0 and {nitem}"))
+            .into_error());
+    }
+
+    let elmtyp = foundation::arr_elemtype(array);
+    let te = typcache::lookup_type_cache::call(elmtyp, 0)?;
+    array_shuffle_n(
+        mcx,
+        array,
+        n,
+        false,
+        elmtyp,
+        te.typlen as i32,
+        te.typbyval,
+        te.typalign as u8,
+    )
+}
+
+/// `array_reverse_n(array, elmtyp, typentry)` (array_userfuncs.c:1774): a copy of
+/// `array` with reversed first-dimension items.
+fn array_reverse_n<'mcx>(
+    mcx: Mcx<'mcx>,
+    array: &[u8],
+    elmtyp: Oid,
+    typlen: i32,
+    elmbyval: bool,
+    elmalign: u8,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let ndim = foundation::arr_ndim(array);
+    let dims = foundation::arr_dims(mcx, array)?;
+    let lbs = foundation::arr_lbounds(mcx, array)?;
+
+    let mut elems =
+        construct::deconstruct_array_values(mcx, array, elmtyp, typlen, elmbyval, elmalign)?;
+    let nelm_total = elems.len() as i32;
+
+    let nitem = dims[0];
+    let nelm = nelm_total / nitem;
+
+    // Reverse the array: swap item i with item (nitem-i-1).
+    for i in 0..(nitem / 2) as usize {
+        let j = ((nitem - i as i32 - 1) * nelm) as usize;
+        let ibase = i * nelm as usize;
+        for k in 0..nelm as usize {
+            elems.swap(ibase + k, j + k);
+        }
+    }
+
+    let mut rdims = dims;
+    let mut rlbs = lbs;
+    rdims[0] = nitem;
+
+    let (values, nulls) = split_values_nulls(mcx, &elems)?;
+    construct::construct_md_array_values(
+        mcx,
+        &values,
+        Some(&nulls),
+        ndim,
+        &rdims[..ndim as usize],
+        &rlbs[..ndim as usize],
+        elmtyp,
+        typlen,
+        elmbyval,
+        elmalign,
+    )
+}
+
+/// `array_reverse(array)` (array_userfuncs.c:1849): an array with the same
+/// dimensions as the input, with its first-dimension items in reverse order.
+pub fn array_reverse<'mcx>(mcx: Mcx<'mcx>, array: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+    // There is no point in reversing empty arrays or arrays with < 2 items.
+    if foundation::arr_ndim(array) < 1 || foundation::arr_dim(array, 0) < 2 {
+        return Ok(mcx::slice_in(mcx, array)?);
+    }
+    let elmtyp = foundation::arr_elemtype(array);
+    let te = typcache::lookup_type_cache::call(elmtyp, 0)?;
+    array_reverse_n(
+        mcx,
+        array,
+        elmtyp,
+        te.typlen as i32,
+        te.typbyval,
+        te.typalign as u8,
+    )
 }
 
 /// `array_positions(array, element)` (array_userfuncs.c:1475): an int4 array of
