@@ -1329,10 +1329,101 @@ fn CheckValidResultRel<'mcx>(
     }
 }
 
+/// `EvalPlanQualInit(epqstate, parentestate, subplan, auxrowmarks, epqParam,
+/// resultRelations)` (execMain.c) — initialize an `EPQState` with the data that
+/// does not change over its lifetime, leaving the EPQ machinery inactive.
+///
+/// The owned `EPQState` trims `parentestate` / `plan` / `arowMarks` /
+/// `origslot` / `recheckestate` / `recheckplanstate` (the executor threads the
+/// EState explicitly and the recheck-exec sub-tree is not built until
+/// `EvalPlanQualBegin`). So this records `epqParam` / `resultRelations`,
+/// pre-allocates the `relsubs_slot` array (`rtsize` NULL entries), and marks
+/// the state inactive (all dynamic arrays `None`).
+#[allow(non_snake_case)]
+fn EvalPlanQualInit<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    epqstate: &mut types_nodes::modifytable::EPQState<'mcx>,
+    parentestate: &mut types_nodes::EStateData<'mcx>,
+    epq_param: i32,
+    result_relations: &[types_core::primitive::Index],
+) -> PgResult<()> {
+    // Index rtsize = parentestate->es_range_table_size;
+    let rtsize = parentestate.es_range_table_size;
+
+    // epqstate->epqParam = epqParam;
+    epqstate.epqParam = epq_param;
+
+    // epqstate->resultRelations = resultRelations; (integer list of RT indexes)
+    if result_relations.is_empty() {
+        epqstate.resultRelations = None;
+    } else {
+        let mut rr = mcx::vec_with_capacity_in(mcx, result_relations.len())?;
+        for &rti in result_relations {
+            rr.push(rti as i32);
+        }
+        epqstate.resultRelations = Some(rr);
+    }
+
+    // epqstate->tuple_table = NIL; (trimmed)
+    // epqstate->relsubs_slot = palloc0(rtsize * sizeof(TupleTableSlot *));
+    let mut slots = mcx::vec_with_capacity_in(mcx, rtsize)?;
+    slots.resize(rtsize, None);
+    epqstate.relsubs_slot = Some(slots);
+
+    // epqstate->plan = subplan;            (trimmed — set by EvalPlanQualSetPlan)
+    // epqstate->arowMarks = auxrowmarks;   (trimmed)
+
+    // Mark the EPQ state inactive:
+    //   origslot/recheckestate/recheckplanstate = NULL; (trimmed)
+    //   relsubs_rowmark/relsubs_done/relsubs_blocked = NULL;
+    epqstate.relsubs_rowmark = None;
+    epqstate.relsubs_done = None;
+    epqstate.relsubs_blocked = None;
+
+    Ok(())
+}
+
+/// The `arowmarks` build loop + `EvalPlanQualSetPlan(epqstate, subplan,
+/// arowmarks)` of `ExecInitModifyTable` (execMain.c).
+///
+/// `EvalPlanQualSetPlan` shuts down any live EPQ query (`EvalPlanQualEnd` — a
+/// no-op on the trimmed `EPQState`, whose `recheckestate`/`tuple_table` are not
+/// modeled) and records the recheck plan + aux-rowmark list. The owned
+/// `EPQState` trims `plan` and `arowMarks` (rebuilt from the plan in
+/// `EvalPlanQualBegin`), so the recording is a no-op residue. Building the
+/// aux-rowmark list from a non-empty `rowMarks` needs the `PlanRowMark` plan
+/// node and `ExecFindRowMark` / `ExecBuildAuxRowMark` (execMain's EPQ
+/// aux-rowmark machinery), gated until that lands; an empty / parent-only /
+/// pruned `rowMarks` list is the live INSERT/UPDATE/DELETE path (NIL arowmarks).
+#[allow(non_snake_case)]
+fn eval_plan_qual_set_plan_with_row_marks<'mcx>(
+    _mcx: mcx::Mcx<'mcx>,
+    _epqstate: &mut types_nodes::modifytable::EPQState<'mcx>,
+    _estate: &mut types_nodes::EStateData<'mcx>,
+    row_marks: &[mcx::PgBox<'mcx, types_nodes::nodes::Node<'mcx>>],
+    _subplan: Option<&'mcx types_nodes::nodes::Node<'mcx>>,
+) -> PgResult<()> {
+    // foreach(l, node->rowMarks) { ...ExecFindRowMark / ExecBuildAuxRowMark... }
+    if !row_marks.is_empty() {
+        return Err(unported(
+            "ExecInitModifyTable arowmarks loop: PlanRowMark / ExecFindRowMark / \
+             ExecBuildAuxRowMark (EPQ aux-rowmark machinery)",
+        ));
+    }
+
+    // EvalPlanQualSetPlan(epqstate, subplan, NIL):
+    //   EvalPlanQualEnd(epqstate);   — no-op on the trimmed EPQState
+    //   epqstate->plan = subplan;    — `plan` is trimmed
+    //   epqstate->arowMarks = NIL;   — `arowMarks` is trimmed
+    Ok(())
+}
+
 pub fn init_seams() {
     seams::exec_check_permissions_select::set(exec_check_permissions_select);
     seams::init_result_rel_info::set(InitResultRelInfo);
     seams::check_valid_result_rel::set(CheckValidResultRel);
+    seams::eval_plan_qual_init::set(EvalPlanQualInit);
+    seams::eval_plan_qual_set_plan_with_row_marks::set(eval_plan_qual_set_plan_with_row_marks);
     seams::executor_run::set(ExecutorRun);
     seams::executor_finish::set(ExecutorFinish);
     seams::executor_end::set(ExecutorEnd);

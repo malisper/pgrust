@@ -681,11 +681,52 @@ fn exec_ar_update_triggers_impl<'mcx>(
 
 fn make_transition_capture_state_impl<'mcx>(
     _mcx: Mcx<'mcx>,
-    _estate: &mut EStateData<'mcx>,
-    _relinfo: types_nodes::RriId,
-    _cmd_type: types_nodes::nodes::CmdType,
+    estate: &mut EStateData<'mcx>,
+    relinfo: types_nodes::RriId,
+    cmd_type: types_nodes::nodes::CmdType,
 ) -> PgResult<Option<mcx::PgBox<'mcx, types_nodes::modifytable::TransitionCaptureState>>> {
-    front_half("MakeTransitionCaptureState", 4958)
+    use types_nodes::nodes::CmdType;
+
+    // if (trigdesc == NULL) return NULL;
+    let trigdesc = match estate.result_rel(relinfo).ri_TrigDesc.as_ref() {
+        Some(td) => td,
+        None => return Ok(None),
+    };
+
+    // Detect which table(s) we need.
+    let (need_old_upd, need_new_upd, need_old_del, need_new_ins) = match cmd_type {
+        CmdType::CMD_INSERT => (false, false, false, trigdesc.trig_insert_new_table),
+        CmdType::CMD_UPDATE => (
+            trigdesc.trig_update_old_table,
+            trigdesc.trig_update_new_table,
+            false,
+            false,
+        ),
+        CmdType::CMD_DELETE => (false, false, trigdesc.trig_delete_old_table, false),
+        CmdType::CMD_MERGE => (
+            trigdesc.trig_update_old_table,
+            trigdesc.trig_update_new_table,
+            trigdesc.trig_delete_old_table,
+            trigdesc.trig_insert_new_table,
+        ),
+        _ => {
+            return Err(PgError::error(format!(
+                "unexpected CmdType: {}",
+                cmd_type as i32
+            )));
+        }
+    };
+
+    // if (!need_old_upd && !need_new_upd && !need_new_ins && !need_old_del) return NULL;
+    if !need_old_upd && !need_new_upd && !need_new_ins && !need_old_del {
+        return Ok(None);
+    }
+
+    // A relation with transition-table triggers needs the after-trigger
+    // query-state / tuplestore substrate (afterTriggers.query_depth,
+    // AfterTriggersTableData, the (sub)transaction resource owner). That
+    // firing-front substrate is not yet ported.
+    front_half("MakeTransitionCaptureState (transition-table allocation)", 4958)
 }
 
 fn has_noncloned_pk_fkey_trigger_impl<'mcx>(
