@@ -1067,7 +1067,7 @@ mod tests {
         let text2 = nodeToString(mcx, &parsed).unwrap();
         assert_eq!(text.as_str(), text2.as_str());
         // Confirm the reconstructed word survives the byte round-trip.
-        if let Node::Expr(Expr::Const(c)) = &*parsed {
+        if let Some(c) = parsed.as_const() {
             assert_eq!(c.constvalue, Datum::ByVal(42));
             assert!(!c.constisnull);
             assert!(c.constbyval);
