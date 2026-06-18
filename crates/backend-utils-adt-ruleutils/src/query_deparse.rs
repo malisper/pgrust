@@ -487,15 +487,12 @@ fn get_values_def<'mcx>(
 
         ch_(context, b'(')?;
         // each element of values_lists is a List of column expressions.
-        let sublist = match &**vtl {
-            Node::List(l) => l,
-            other => {
-                return Err(elog_error(format!(
-                    "VALUES sublist is not a List (tag {})",
-                    other.tag().0
-                )))
-            }
-        };
+        let sublist = (**vtl).as_list().ok_or_else(|| {
+            elog_error(format!(
+                "VALUES sublist is not a List (tag {})",
+                vtl.tag().0
+            ))
+        })?;
         let mut first_col = true;
         for col in sublist.iter() {
             if first_col {
@@ -532,15 +529,12 @@ fn get_with_clause<'mcx>(
     };
 
     for l in query.cteList.iter() {
-        let cte = match &**l {
-            Node::CommonTableExpr(c) => c,
-            other => {
-                return Err(elog_error(format!(
-                    "cteList element is not a CommonTableExpr (tag {})",
-                    other.tag().0
-                )))
-            }
-        };
+        let cte = (**l).as_commontableexpr().ok_or_else(|| {
+            elog_error(format!(
+                "cteList element is not a CommonTableExpr (tag {})",
+                l.tag().0
+            ))
+        })?;
 
         str_(context, sep)?;
         let ctename = cte.ctename.as_deref().ok_or_else(|| missing_field("CommonTableExpr.ctename"))?;
@@ -572,12 +566,12 @@ fn get_with_clause<'mcx>(
         }
         // recurse into the CTE's Query
         let ctequery = cte.ctequery.as_deref().ok_or_else(|| missing_field("CommonTableExpr.ctequery"))?;
-        let subq = match ctequery {
-            Node::Query(q) => q,
-            other => {
+        let subq = match ctequery.node_tag() {
+            types_nodes::nodes::ntag::T_Query => ctequery.expect_query(),
+            _ => {
                 return Err(elog_error(format!(
                     "CTE query is not a Query (tag {})",
-                    other.tag().0
+                    ctequery.tag().0
                 )))
             }
         };
@@ -607,15 +601,12 @@ fn get_with_clause<'mcx>(
         }
 
         if let Some(cyc_node) = cte.cycle_clause.as_deref() {
-            let cc = match cyc_node {
-                Node::CTECycleClause(c) => c,
-                other => {
-                    return Err(elog_error(format!(
-                        "cycle_clause is not a CTECycleClause (tag {})",
-                        other.tag().0
-                    )))
-                }
-            };
+            let cc = cyc_node.as_ctecycleclause().ok_or_else(|| {
+                elog_error(format!(
+                    "cycle_clause is not a CTECycleClause (tag {})",
+                    cyc_node.tag().0
+                ))
+            })?;
             str_(context, " CYCLE ")?;
             let mut first = true;
             for lc in cc.cycle_col_list.iter() {
@@ -733,15 +724,12 @@ fn get_select_query_def<'mcx>(
     // FOR [KEY] UPDATE/SHARE
     if query.hasForUpdate {
         for l in query.rowMarks.iter() {
-            let rc = match &**l {
-                Node::RowMarkClause(r) => *r,
-                other => {
-                    return Err(elog_error(format!(
-                        "rowMarks element is not a RowMarkClause (tag {})",
-                        other.tag().0
-                    )))
-                }
-            };
+            let rc = *(**l).as_rowmarkclause().ok_or_else(|| {
+                elog_error(format!(
+                    "rowMarks element is not a RowMarkClause (tag {})",
+                    l.tag().0
+                ))
+            })?;
             if rc.pushedDown {
                 continue;
             }
@@ -1072,8 +1060,9 @@ fn get_setop_query<'mcx>(
     query: &Query<'mcx>,
     context: &mut DeparseContext<'mcx>,
 ) -> PgResult<()> {
-    match set_op {
-        Node::RangeTblRef(rtr) => {
+    match set_op.node_tag() {
+        types_nodes::nodes::ntag::T_RangeTblRef => {
+            let rtr = set_op.expect_rangetblref();
             let rte = rt_fetch(rtr.rtindex, &query.rtable)?;
             let subquery = rte.subquery.as_deref().ok_or_else(|| missing_field("setop leaf subquery"))?;
             let need_paren = !subquery.cteList.is_empty()
@@ -1092,8 +1081,10 @@ fn get_setop_query<'mcx>(
             }
             Ok(())
         }
-        Node::SetOperationStmt(op) => get_setop_stmt(mcx, op, query, context),
-        other => Err(elog_error(format!("unrecognized node type: {}", other.tag().0))),
+        types_nodes::nodes::ntag::T_SetOperationStmt => {
+            get_setop_stmt(mcx, set_op.expect_setoperationstmt(), query, context)
+        }
+        _ => Err(elog_error(format!("unrecognized node type: {}", set_op.tag().0))),
     }
 }
 
@@ -1143,7 +1134,7 @@ fn get_setop_stmt<'mcx>(
     }
 
     // RHS parens.
-    need_paren = matches!(rarg, Node::SetOperationStmt(_));
+    need_paren = rarg.is_setoperationstmt();
     if need_paren {
         ch_(context, b'(')?;
         subindent = PRETTYINDENT_STD;
@@ -1878,8 +1869,9 @@ fn get_utility_query_def<'mcx>(
     query: &Query<'mcx>,
     context: &mut DeparseContext<'mcx>,
 ) -> PgResult<()> {
-    match query.utilityStmt.as_deref() {
-        Some(Node::NotifyStmt(stmt)) => {
+    match query.utilityStmt.as_deref().map(|n| (n.node_tag(), n)) {
+        Some((types_nodes::nodes::ntag::T_NotifyStmt, n)) => {
+            let stmt = n.expect_notifystmt();
             append_context_keyword(context, "", 0, PRETTYINDENT_STD, 1)?;
             str_(context, "NOTIFY ")?;
             let cn = stmt.conditionname.as_deref().ok_or_else(|| missing_field("NotifyStmt.conditionname"))?;
@@ -1951,8 +1943,9 @@ fn get_from_clause_item<'mcx>(
     query: &Query<'mcx>,
     context: &mut DeparseContext<'mcx>,
 ) -> PgResult<()> {
-    match jtnode {
-        Node::RangeTblRef(rtr) => {
+    match jtnode.node_tag() {
+        types_nodes::nodes::ntag::T_RangeTblRef => {
+            let rtr = jtnode.expect_rangetblref();
             let varno = rtr.rtindex;
             let rte = rt_fetch(varno, &query.rtable)?.clone_in(mcx)?;
             let mut rtfunc1_present = false;
@@ -2026,12 +2019,13 @@ fn get_from_clause_item<'mcx>(
             }
             Ok(())
         }
-        Node::JoinExpr(j) => {
+        types_nodes::nodes::ntag::T_JoinExpr => {
+            let j = jtnode.expect_joinexpr();
             let colinfo = deparse_columns_fetch(j.rtindex, &context.namespaces[0]).clone_columns(mcx)?;
 
             let need_paren_on_right = pretty_paren(context)
-                && !matches!(j.rarg.as_deref(), Some(Node::RangeTblRef(_)))
-                && !matches!(j.rarg.as_deref(), Some(Node::JoinExpr(jr)) if jr.alias.is_some());
+                && !j.rarg.as_deref().is_some_and(|r| r.is_rangetblref())
+                && !j.rarg.as_deref().is_some_and(|r| r.as_joinexpr().is_some_and(|jr| jr.alias.is_some()));
 
             if !pretty_paren(context) || j.alias.is_some() {
                 ch_(context, b'(')?;
@@ -2117,7 +2111,7 @@ fn get_from_clause_item<'mcx>(
             }
             Ok(())
         }
-        other => Err(elog_error(format!("unrecognized node type: {}", other.tag().0))),
+        _ => Err(elog_error(format!("unrecognized node type: {}", jtnode.tag().0))),
     }
 }
 
@@ -2139,8 +2133,8 @@ fn get_function_rte<'mcx>(
         let mut all_unnest = true;
         for lc in rte.functions.iter() {
             let rtfunc = as_rtfunc(lc)?;
-            let is_unnest = match rtfunc.funcexpr.as_deref() {
-                Some(Node::Expr(Expr::FuncExpr(f))) => f.funcid == F_UNNEST_ANYARRAY,
+            let is_unnest = match rtfunc.funcexpr.as_deref().and_then(|n| n.as_expr()) {
+                Some(Expr::FuncExpr(f)) => f.funcid == F_UNNEST_ANYARRAY,
                 _ => false,
             };
             if !is_unnest || !rtfunc.funccolnames.is_empty() {
@@ -2421,52 +2415,41 @@ fn node_vec_to_sgc<'mcx>(
 }
 
 fn as_sortgroupclause<'a>(node: &'a Node<'_>) -> PgResult<&'a SortGroupClause> {
-    match node {
-        Node::SortGroupClause(s) => Ok(s),
-        other => Err(elog_error(format!("expected SortGroupClause, got tag {}", other.tag().0))),
-    }
+    node.as_sortgroupclause()
+        .ok_or_else(|| elog_error(format!("expected SortGroupClause, got tag {}", node.tag().0)))
 }
 
 fn as_groupingset<'a, 'mcx>(node: &'a Node<'mcx>) -> PgResult<&'a GroupingSet<'mcx>> {
-    match node {
-        Node::GroupingSet(g) => Ok(g),
-        other => Err(elog_error(format!("expected GroupingSet, got tag {}", other.tag().0))),
-    }
+    node.as_groupingset()
+        .ok_or_else(|| elog_error(format!("expected GroupingSet, got tag {}", node.tag().0)))
 }
 
 fn as_windowclause<'a, 'mcx>(node: &'a Node<'mcx>) -> PgResult<&'a WindowClause<'mcx>> {
-    match node {
-        Node::WindowClause(w) => Ok(w),
-        other => Err(elog_error(format!("expected WindowClause, got tag {}", other.tag().0))),
-    }
+    node.as_windowclause()
+        .ok_or_else(|| elog_error(format!("expected WindowClause, got tag {}", node.tag().0)))
 }
 
 fn as_targetentry<'a, 'mcx>(node: &'a Node<'mcx>) -> PgResult<&'a types_nodes::primnodes::TargetEntry<'mcx>> {
-    match node {
-        Node::TargetEntry(t) => Ok(t),
-        other => Err(elog_error(format!("expected TargetEntry, got tag {}", other.tag().0))),
+    match node.node_tag() {
+        types_nodes::nodes::ntag::T_TargetEntry => Ok(node.expect_targetentry()),
+        _ => Err(elog_error(format!("expected TargetEntry, got tag {}", node.tag().0))),
     }
 }
 
 fn as_mergeaction<'a, 'mcx>(node: &'a Node<'mcx>) -> PgResult<&'a types_nodes::rawnodes::MergeAction<'mcx>> {
-    match node {
-        Node::MergeAction(m) => Ok(m),
-        other => Err(elog_error(format!("expected MergeAction, got tag {}", other.tag().0))),
-    }
+    node.as_mergeaction()
+        .ok_or_else(|| elog_error(format!("expected MergeAction, got tag {}", node.tag().0)))
 }
 
 fn as_rtfunc<'a, 'mcx>(node: &'a Node<'mcx>) -> PgResult<&'a RangeTblFunction<'mcx>> {
-    match node {
-        Node::RangeTblFunction(r) => Ok(r),
-        other => Err(elog_error(format!("expected RangeTblFunction, got tag {}", other.tag().0))),
-    }
+    node.as_rangetblfunction()
+        .ok_or_else(|| elog_error(format!("expected RangeTblFunction, got tag {}", node.tag().0)))
 }
 
 fn node_as_int(node: &Node<'_>) -> PgResult<i32> {
-    match node {
-        Node::Integer(i) => Ok(i.ival),
-        other => Err(elog_error(format!("expected Integer, got tag {}", other.tag().0))),
-    }
+    node.as_integer()
+        .map(|i| i.ival)
+        .ok_or_else(|| elog_error(format!("expected Integer, got tag {}", node.tag().0)))
 }
 
 fn first_rtfunc<'a, 'mcx>(rte: &'a RangeTblEntry<'mcx>) -> PgResult<Option<&'a RangeTblFunction<'mcx>>> {
@@ -2625,8 +2608,8 @@ fn expr_is_multiexpr_param(expr: Option<&Expr>) -> bool {
 /// (ruleutils.c 7307) — the number of result columns of the multiassignment's
 /// source SubLink.
 fn multiexpr_remaining(sublink_node: Option<&Node<'_>>) -> PgResult<i32> {
-    let sl = match sublink_node {
-        Some(Node::Expr(Expr::SubLink(s))) => s,
+    let sl = match sublink_node.and_then(|n| n.as_expr()) {
+        Some(Expr::SubLink(s)) => s,
         _ => return Err(elog_error("multiassignment cur_ma_sublink is not a SubLink".into())),
     };
     let subq = sl.subselect.as_deref().ok_or_else(|| missing_field("MULTIEXPR sublink subselect"))?;

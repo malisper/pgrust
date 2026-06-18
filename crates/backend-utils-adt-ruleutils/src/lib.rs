@@ -232,13 +232,12 @@ fn elog_error(msg: alloc::string::String) -> PgError {
 /// error if the node is not a `String` (which cannot happen for these lists
 /// after parse analysis).
 fn str_val<'a>(node: &'a Node<'_>) -> PgResult<&'a str> {
-    match node {
-        Node::String(s) => Ok(s.sval.as_str()),
-        other => Err(elog_error(format!(
+    node.as_string().map(|s| s.sval.as_str()).ok_or_else(|| {
+        elog_error(format!(
             "expected String value node, got tag {}",
-            other.tag().0
-        ))),
-    }
+            node.tag().0
+        ))
+    })
 }
 
 /// `list_nth(list, n)` for a list of `String` value nodes (`char *` list) — the
@@ -929,12 +928,13 @@ pub fn has_dangerous_join_using<'mcx>(
     dpns: &DeparseNamespace<'mcx>,
     jtnode: &Node<'mcx>,
 ) -> PgResult<bool> {
-    match jtnode {
-        Node::RangeTblRef(_) => {
+    match jtnode.node_tag() {
+        types_nodes::nodes::ntag::T_RangeTblRef => {
             // nothing to do here
             Ok(false)
         }
-        Node::FromExpr(f) => {
+        types_nodes::nodes::ntag::T_FromExpr => {
+            let f = jtnode.expect_fromexpr();
             for child in f.fromlist.iter() {
                 if has_dangerous_join_using(mcx, dpns, child)? {
                     return Ok(true);
@@ -942,7 +942,8 @@ pub fn has_dangerous_join_using<'mcx>(
             }
             Ok(false)
         }
-        Node::JoinExpr(j) => {
+        types_nodes::nodes::ntag::T_JoinExpr => {
+            let j = jtnode.expect_joinexpr();
             // Is it an unnamed JOIN with USING?
             if j.alias.is_none() && !j.usingClause.is_empty() {
                 // Check each join alias var; if any merged col isn't a simple
@@ -971,9 +972,9 @@ pub fn has_dangerous_join_using<'mcx>(
             }
             Ok(false)
         }
-        other => Err(elog_error(format!(
+        _ => Err(elog_error(format!(
             "unrecognized node type: {}",
-            other.tag().0
+            jtnode.tag().0
         ))),
     }
 }
@@ -987,18 +988,20 @@ pub fn set_using_names<'mcx>(
     jtnode: &Node<'mcx>,
     parent_using: &PgVec<'mcx, PgString<'mcx>>,
 ) -> PgResult<()> {
-    match jtnode {
-        Node::RangeTblRef(_) => {
+    match jtnode.node_tag() {
+        types_nodes::nodes::ntag::T_RangeTblRef => {
             // nothing to do now
             Ok(())
         }
-        Node::FromExpr(f) => {
+        types_nodes::nodes::ntag::T_FromExpr => {
+            let f = jtnode.expect_fromexpr();
             for child in f.fromlist.iter() {
                 set_using_names(mcx, dpns, child, parent_using)?;
             }
             Ok(())
         }
-        Node::JoinExpr(j) => {
+        types_nodes::nodes::ntag::T_JoinExpr => {
+            let j = jtnode.expect_joinexpr();
             let rtindex = j.rtindex;
             let rte = rt_fetch(rtindex, &dpns.rtable)?.clone_in(mcx)?;
 
@@ -1162,9 +1165,9 @@ pub fn set_using_names<'mcx>(
             set_using_names(mcx, dpns, &rarg, &child_parent_using)?;
             Ok(())
         }
-        other => Err(elog_error(format!(
+        _ => Err(elog_error(format!(
             "unrecognized node type: {}",
-            other.tag().0
+            jtnode.tag().0
         ))),
     }
 }
@@ -1747,25 +1750,29 @@ fn identify_join_columns<'mcx>(
 ) -> PgResult<()> {
     // Extract left/right child RT indexes.
     colinfo.leftrti = match j.larg.as_ref().map(|n| &**n) {
-        Some(Node::RangeTblRef(r)) => r.rtindex,
-        Some(Node::JoinExpr(jj)) => jj.rtindex,
-        Some(other) => {
-            return Err(elog_error(format!(
-                "unrecognized node type in jointree: {}",
-                other.tag().0
-            )))
-        }
+        Some(n) => match n.node_tag() {
+            types_nodes::nodes::ntag::T_RangeTblRef => n.expect_rangetblref().rtindex,
+            types_nodes::nodes::ntag::T_JoinExpr => n.expect_joinexpr().rtindex,
+            _ => {
+                return Err(elog_error(format!(
+                    "unrecognized node type in jointree: {}",
+                    n.tag().0
+                )))
+            }
+        },
         None => return Err(elog_error("JoinExpr larg is NULL".into())),
     };
     colinfo.rightrti = match j.rarg.as_ref().map(|n| &**n) {
-        Some(Node::RangeTblRef(r)) => r.rtindex,
-        Some(Node::JoinExpr(jj)) => jj.rtindex,
-        Some(other) => {
-            return Err(elog_error(format!(
-                "unrecognized node type in jointree: {}",
-                other.tag().0
-            )))
-        }
+        Some(n) => match n.node_tag() {
+            types_nodes::nodes::ntag::T_RangeTblRef => n.expect_rangetblref().rtindex,
+            types_nodes::nodes::ntag::T_JoinExpr => n.expect_joinexpr().rtindex,
+            _ => {
+                return Err(elog_error(format!(
+                    "unrecognized node type in jointree: {}",
+                    n.tag().0
+                )))
+            }
+        },
         None => return Err(elog_error("JoinExpr rarg is NULL".into())),
     };
 
@@ -2180,12 +2187,12 @@ fn oid_is_valid(oid: Oid) -> bool {
 fn drill_past_lists<'a, 'mcx>(node: &'a Node<'mcx>) -> Option<&'a Node<'mcx>> {
     let mut tst = node;
     loop {
-        match tst {
-            Node::List(items) => match items.first() {
+        match tst.as_list() {
+            Some(items) => match items.first() {
                 Some(first) => tst = first.as_ref(),
                 None => return None, // empty List -> linitial would be NULL
             },
-            other => return Some(other),
+            None => return Some(tst),
         }
     }
 }
@@ -2222,14 +2229,13 @@ fn pull_varnos_node<'mcx>(
     node: &Node<'mcx>,
     acc: &mut Option<PgBox<'mcx, types_nodes::bitmapset::Bitmapset<'mcx>>>,
 ) -> PgResult<()> {
-    match node {
-        Node::List(items) => {
-            for it in items.iter() {
-                pull_varnos_node(mcx, it.as_ref(), acc)?;
-            }
-            Ok(())
+    if let Some(items) = node.as_list() {
+        for it in items.iter() {
+            pull_varnos_node(mcx, it.as_ref(), acc)?;
         }
-        Node::Expr(expr) => {
+        Ok(())
+    } else if let Some(expr) = node.as_expr() {
+        {
             let r = backend_optimizer_util_var_seams::pull_varnos::call(mcx, expr)?;
             if let Some(more) = r {
                 match acc {
@@ -2253,11 +2259,12 @@ fn pull_varnos_node<'mcx>(
                     }
                 }
             }
-            Ok(())
         }
+        Ok(())
+    } else {
         // A non-List/non-Expr top node carries no Vars to pull (matches the C
         // walk, which only follows Var-bearing expression nodes).
-        _ => Ok(()),
+        Ok(())
     }
 }
 
@@ -2280,7 +2287,7 @@ pub fn pg_get_expr_worker<'mcx>(
     // Throw error if the input is a querytree rather than an expression tree.
     // Drill past surrounding Lists, then check for a Query.
     if let Some(tst) = drill_past_lists(&node) {
-        if matches!(tst, Node::Query(_)) {
+        if tst.node_tag() == types_nodes::nodes::ntag::T_Query {
             return Err(PgError::error("input is a query, not an expression")
                 .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE));
         }

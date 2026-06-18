@@ -276,14 +276,8 @@ pub fn get_rule_expr_paren(
     showimplicit: bool,
     parent_node: Option<&Node<'_>>,
 ) -> PgResult<()> {
-    let parent_expr = parent_node.and_then(|p| match p {
-        Node::Expr(e) => Some(e),
-        _ => None,
-    });
-    let node_expr = match node {
-        Node::Expr(e) => Some(e),
-        _ => None,
-    };
+    let parent_expr = parent_node.and_then(|p| p.as_expr());
+    let node_expr = node.as_expr();
     let need_paren =
         pretty_paren(context) && !isSimpleNode_inner_opt(node_expr, parent_expr, context.prettyFlags);
 
@@ -338,23 +332,21 @@ pub fn get_rule_expr(
 ) -> PgResult<()> {
     // The C arm dispatches on nodeTag(node); a List arrives as a Node::List,
     // every Expr-derived node as Node::Expr(Expr::*).
-    match node {
-        Node::List(list) => {
-            // "emit the component items comma-separated with no surrounding
-            // decoration" — C reaches this by passing a List* as a Node*.
-            get_rule_expr_list(list, context, showimplicit)?;
-        }
-        Node::Expr(expr) => get_rule_expr_e(expr, context, showimplicit)?,
+    if let Some(list) = node.as_list() {
+        // "emit the component items comma-separated with no surrounding
+        // decoration" — C reaches this by passing a List* as a Node*.
+        get_rule_expr_list(list, context, showimplicit)?;
+    } else if let Some(expr) = node.as_expr() {
+        get_rule_expr_e(expr, context, showimplicit)?;
+    } else {
         // get_rule_expr is also (rarely) handed a few non-Expr value nodes by
         // the query deparsers (e.g. a bare String/Integer in some clauses); but
         // F1's in-scope callers only pass Expr / List. Anything else is the C
         // `default: elog(ERROR, "unrecognized node type")`.
-        other => {
-            return Err(elog_error(format!(
-                "unrecognized node type: {}",
-                other.tag().0
-            )))
-        }
+        return Err(elog_error(format!(
+            "unrecognized node type: {}",
+            node.tag().0
+        )));
     }
     Ok(())
 }
@@ -1034,9 +1026,9 @@ pub fn get_rule_expr_funccall(
         str_(context, "CAST(")?;
         // no point in showing any top-level implicit cast
         get_rule_expr(node, context, false)?;
-        let (typid, typmod) = match node {
-            Node::Expr(e) => (expr_type(e)?, expr_typmod(e)?),
-            _ => (0, -1),
+        let (typid, typmod) = match node.as_expr() {
+            Some(e) => (expr_type(e)?, expr_typmod(e)?),
+            None => (0, -1),
         };
         let ty = format_type_with_typemod(mcx, typid, typmod)?;
         str_(context, " AS ")?;
@@ -1048,9 +1040,9 @@ pub fn get_rule_expr_funccall(
 
 /// `static bool looks_like_function(Node *node)` — C 10705-10733.
 fn looks_like_function(node: &Node<'_>) -> bool {
-    let expr = match node {
-        Node::Expr(e) => e,
-        _ => return false,
+    let expr = match node.as_expr() {
+        Some(e) => e,
+        None => return false,
     };
     match expr {
         Expr::FuncExpr(f) => {
@@ -1627,14 +1619,11 @@ pub fn get_coercion_expr(
     resulttypmod: i32,
     parent_node: &Node<'_>,
 ) -> PgResult<()> {
-    let expr = match arg {
-        Node::Expr(e) => e,
-        _ => return Err(elog_error("get_coercion_expr: arg is not an expression".to_string())),
+    let expr = match arg.as_expr() {
+        Some(e) => e,
+        None => return Err(elog_error("get_coercion_expr: arg is not an expression".to_string())),
     };
-    let parent_expr = match parent_node {
-        Node::Expr(e) => Some(e),
-        _ => None,
-    };
+    let parent_expr = parent_node.as_expr();
     get_coercion_expr_e(expr, context, resulttype, resulttypmod, parent_expr)
 }
 
@@ -1683,8 +1672,8 @@ pub fn get_const_expr(
     context: &mut DeparseContext<'_>,
     showtype: i32,
 ) -> PgResult<()> {
-    let c = match constval {
-        Node::Expr(Expr::Const(c)) => c,
+    let c = match constval.as_expr() {
+        Some(Expr::Const(c)) => c,
         _ => return Err(elog_error("get_const_expr: not a Const".to_string())),
     };
     get_const_expr_inner(c, context, showtype)
@@ -2108,9 +2097,9 @@ pub fn get_variable<'mcx>(
                 ));
             }
             if attnum > 0 {
-                match rte.joinaliasvars.get((attnum - 1) as usize).map(|b| &**b) {
+                match rte.joinaliasvars.get((attnum - 1) as usize).and_then(|b| b.as_expr()) {
                     // we intentionally don't strip implicit coercions here
-                    Some(Node::Expr(Expr::Var(v))) => Some(v.clone()),
+                    Some(Expr::Var(v)) => Some(v.clone()),
                     _ => None,
                 }
             } else {
@@ -2240,15 +2229,9 @@ fn form_attname(attr: &types_tuple::heaptuple::FormData_pg_attribute) -> String 
 /// elides redundant parentheses exactly as C does.
 #[allow(non_snake_case)]
 pub fn isSimpleNode(node: Option<&Node<'_>>, parent_node: Option<&Node<'_>>, pretty_flags: i32) -> bool {
-    let node_expr = node.and_then(|n| match n {
-        Node::Expr(e) => Some(e),
-        // Non-Expr nodes (List, etc.) are "those we don't know: in dubio complexo".
-        _ => None,
-    });
-    let parent_expr = parent_node.and_then(|p| match p {
-        Node::Expr(e) => Some(e),
-        _ => None,
-    });
+    // Non-Expr nodes (List, etc.) are "those we don't know: in dubio complexo".
+    let node_expr = node.and_then(|n| n.as_expr());
+    let parent_expr = parent_node.and_then(|p| p.as_expr());
     isSimpleNode_inner_opt(node_expr, parent_expr, pretty_flags)
 }
 
