@@ -257,7 +257,14 @@ fn get_snapshot_data_into(which: StaticWhich) -> PgResult<SnapHandle> {
             d.suboverflowed = fetched.suboverflowed;
             d.takenDuringRecovery = fetched.takenDuringRecovery;
             d.copied = false;
-            d.curcid = 0;
+            // procarray.c GetSnapshotData ends with
+            //   snapshot->curcid = GetCurrentCommandId(false);
+            // so a freshly-fetched snapshot sees tuples written by earlier
+            // commands of the current transaction. The procarray seam already
+            // computes this into `fetched.curcid`; carry it through rather than
+            // zeroing it (zeroing diverged from C and could hide own-transaction
+            // rows on any path that does not subsequently bump the command id).
+            d.curcid = fetched.curcid;
             d.snapXactCompletionCount = fetched.snapXactCompletionCount;
         }
         h
