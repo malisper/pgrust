@@ -3005,6 +3005,40 @@ fn make_sort_from_sortclauses<'mcx>(
     make_sort(mcx, lefttree, sort_col_idx, sort_operators, collations, nulls_first)
 }
 
+/// `make_sort_from_groupcols(groupcls, grpColIdx, lefttree)` (createplan.c:6599)
+/// — create a `Sort` plan that sorts based on grouping columns. The sort
+/// columns are located by the `grpColIdx[]` array (the child tlist is not
+/// marked with sortgroupref labels appropriate to the grouping node); only the
+/// sort ordering info is taken from the `SortGroupClause` entries.
+fn make_sort_from_groupcols<'mcx>(
+    mcx: Mcx<'mcx>,
+    groupcls: &[types_nodes::rawnodes::SortGroupClause],
+    grp_col_idx: &[AttrNumber],
+    lefttree: Node<'mcx>,
+) -> PgResult<Sort<'mcx>> {
+    let numsortkeys = groupcls.len();
+    let mut sort_col_idx: PgVec<'mcx, AttrNumber> = vec_with_capacity_in(mcx, numsortkeys)?;
+    let mut sort_operators: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, numsortkeys)?;
+    let mut collations: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, numsortkeys)?;
+    let mut nulls_first: PgVec<'mcx, bool> = vec_with_capacity_in(mcx, numsortkeys)?;
+
+    {
+        let sub_tlist: &[TargetEntry<'mcx>] =
+            lefttree.plan_head().targetlist.as_deref().unwrap_or(&[]);
+        for (i, grpcl) in groupcls.iter().enumerate() {
+            let tle = get_tle_by_resno(sub_tlist, grp_col_idx[i]).ok_or_else(|| {
+                PgError::error("could not retrieve tle for sort-from-groupcols")
+            })?;
+            sort_col_idx.push(tle.resno);
+            sort_operators.push(grpcl.sortop);
+            collations.push(expr_collation_of_tle(tle)?);
+            nulls_first.push(grpcl.nulls_first);
+        }
+    }
+
+    make_sort(mcx, lefttree, sort_col_idx, sort_operators, collations, nulls_first)
+}
+
 /// `prepare_sort_from_pathkeys(lefttree, pathkeys, relids, reqColIdx,
 /// adjust_tlist_in_place, ...)` (createplan.c ~6300) — convert the pathkey list
 /// into executor sort-key arrays, adjusting the input plan's targetlist (adding
@@ -3782,12 +3816,265 @@ fn create_agg_dispatch_plan<'mcx>(
 ) -> PgResult<Node<'mcx>> {
     match root.path(best_path) {
         PathNode::AggPath(_) => create_agg_plan(mcx, root, run, best_path),
-        PathNode::GroupingSetsPath(_) => Err(PgError::error(
-            "create_groupingsets_plan (createplan.c:2398) is not ported — GROUPING SETS \
-             produces a GroupingSetsPath which has no plan converter yet",
-        )),
+        PathNode::GroupingSetsPath(_) => create_groupingsets_plan(mcx, root, run, best_path),
         _ => unreachable!("create_agg_dispatch_plan on non-Agg pathtype"),
     }
+}
+
+/// `remap_groupColIdx(root, groupClause)` (createplan.c:2351) — translate a
+/// rollup's groupClause sortgrouprefs into child-tlist column indexes via
+/// `root->grouping_map`.
+fn remap_group_col_idx(
+    root: &PlannerInfo,
+    group_clause: &[types_nodes::rawnodes::SortGroupClause],
+) -> Vec<AttrNumber> {
+    let grouping_map = &root.grouping_map;
+    debug_assert!(!grouping_map.is_empty());
+    group_clause
+        .iter()
+        .map(|clause| grouping_map[clause.tleSortGroupRef as usize])
+        .collect()
+}
+
+/// `create_groupingsets_plan(root, (GroupingSetsPath *) best_path)`
+/// (createplan.c:2389) — convert a `GroupingSetsPath` into the chained `Agg`
+/// (with vestigial side `Agg`/`Sort` nodes) that implements GROUPING SETS.
+fn create_groupingsets_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+) -> PgResult<Node<'mcx>> {
+    let (subpath, aggstrategy, rollups, qual_ids, transition_space) = match root.path(best_path) {
+        PathNode::GroupingSetsPath(p) => (
+            p.subpath,
+            p.aggstrategy,
+            p.rollups.clone(),
+            p.qual.clone(),
+            p.transitionSpace,
+        ),
+        _ => unreachable!("create_groupingsets_plan on non-GroupingSetsPath"),
+    };
+    let subpath = subpath.expect("create_groupingsets_plan: GroupingSetsPath has no subpath");
+
+    // Shouldn't get here without grouping sets.
+    debug_assert!(!rollups.is_empty());
+
+    // Agg can project, so no need to be terribly picky about child tlist, but we
+    // do need grouping columns to be available.
+    let subplan = create_plan_recurse(mcx, root, run, subpath, CP_LABEL_TLIST)?;
+
+    // Compute the mapping from tleSortGroupRef to column index in the child's
+    // tlist. First, identify max SortGroupRef in groupClause, for array sizing.
+    let processed_group_clause: Vec<types_nodes::rawnodes::SortGroupClause> = root
+        .processed_groupClause
+        .iter()
+        .map(|&id| *root.sortgroupclause(id))
+        .collect();
+    let mut maxref: Index = 0;
+    for gc in processed_group_clause.iter() {
+        if gc.tleSortGroupRef > maxref {
+            maxref = gc.tleSortGroupRef;
+        }
+    }
+
+    // grouping_map = palloc0((maxref + 1) * sizeof(AttrNumber)); then look up the
+    // column numbers in the child's tlist.
+    let mut grouping_map: Vec<AttrNumber> = alloc::vec![0; (maxref as usize) + 1];
+    {
+        let sub_tlist: &[TargetEntry<'mcx>] =
+            subplan.plan_head().targetlist.as_deref().unwrap_or(&[]);
+        for gc in processed_group_clause.iter() {
+            let tle = util_tlist::get_sortgroupclause_tle(gc, sub_tlist)?;
+            grouping_map[gc.tleSortGroupRef as usize] = tle.resno;
+        }
+    }
+
+    // During setrefs.c, we'll need the grouping_map to fix up the cols lists in
+    // GroupingFunc nodes. Save it for setrefs.c to use.
+    debug_assert!(root.grouping_map.is_empty());
+    root.grouping_map = grouping_map;
+
+    // Resolve each rollup's groupClause handles into owned SortGroupClause lists
+    // up front (the C `rollup->groupClause` Lists).
+    let rollup_group_clauses: Vec<Vec<types_nodes::rawnodes::SortGroupClause>> = rollups
+        .iter()
+        .map(|r| r.groupClause.iter().map(|&id| *root.sortgroupclause(id)).collect())
+        .collect();
+
+    // Generate the side nodes that describe the other sort and group operations
+    // besides the top one. We don't worry about accurate cost estimates in the
+    // side nodes; only the topmost Agg node's costs will be shown by EXPLAIN.
+    let mut chain: Vec<PgBox<'mcx, types_nodes::nodeagg::Agg<'mcx>>> = Vec::new();
+    if rollups.len() > 1 {
+        let mut is_first_sort = rollups[0].is_hashed;
+
+        for idx in 1..rollups.len() {
+            let rollup = &rollups[idx];
+            let group_clause = &rollup_group_clauses[idx];
+            let new_grp_col_idx = remap_group_col_idx(root, group_clause);
+
+            let sort_plan: Option<Node<'mcx>> = if !rollup.is_hashed && !is_first_sort {
+                // C builds the Sort over `subplan` (shared pointer). In the
+                // owned model subplan is consumed by the top Agg, so the side
+                // Sort gets a placeholder lefttree carrying a clone of subplan's
+                // targetlist (all make_sort_from_groupcols needs to resolve sort
+                // columns); the tlist/lefttree are then stripped below, matching
+                // C's `sort_plan->targetlist = NIL; sort_plan->lefttree = NULL`.
+                let placeholder = dummy_plan_with_tlist(mcx, &subplan)?;
+                let sort =
+                    make_sort_from_groupcols(mcx, group_clause, &new_grp_col_idx, placeholder)?;
+                Some(Node::Sort(sort))
+            } else {
+                None
+            };
+
+            if !rollup.is_hashed {
+                is_first_sort = false;
+            }
+
+            let strat = if rollup.is_hashed {
+                types_nodes::nodeagg::AggStrategy::AggHashed
+            } else if rollup.gsets.first().map(|g| g.is_empty()).unwrap_or(true) {
+                types_nodes::nodeagg::AggStrategy::AggPlain
+            } else {
+                types_nodes::nodeagg::AggStrategy::AggSorted
+            };
+
+            let num_group_cols = rollup.gsets.first().map(|g| g.len()).unwrap_or(0) as i32;
+            let grp_operators = util_tlist::extract_grouping_ops(group_clause);
+            let grp_collations = {
+                let sub_tlist: &[TargetEntry<'mcx>] =
+                    subplan.plan_head().targetlist.as_deref().unwrap_or(&[]);
+                util_tlist::extract_grouping_collations(group_clause, sub_tlist)?
+            };
+            let gsets = gsets_to_field(mcx, &rollup.gsets)?;
+
+            // The C side-Agg lefttree is the Sort (or NULL). We give it the Sort
+            // (or a dummy placeholder), then immediately strip the Sort's
+            // tlist/lefttree, matching C's "Remove stuff we don't need to avoid
+            // bloating debug output".
+            let lefttree = match sort_plan {
+                Some(mut sp) => {
+                    let p = sp.plan_head_mut();
+                    p.targetlist = None;
+                    p.lefttree = None;
+                    sp
+                }
+                None => dummy_plan(mcx)?,
+            };
+
+            let agg_plan = make_agg(
+                mcx,
+                None, // tlist = NIL
+                None, // qual = NIL
+                strat,
+                AGGSPLIT_SIMPLE,
+                num_group_cols,
+                new_grp_col_idx,
+                grp_operators,
+                grp_collations,
+                gsets,
+                None, // chain = NIL
+                rollup.numGroups,
+                transition_space,
+                lefttree,
+            )?;
+            chain.push(mcx::alloc_in(mcx, agg_plan)?);
+        }
+    }
+
+    // Now make the real Agg node.
+    let rollup = &rollups[0];
+    let group_clause = &rollup_group_clauses[0];
+    let top_grp_col_idx = remap_group_col_idx(root, group_clause);
+    let num_group_cols = rollup.gsets.first().map(|g| g.len()).unwrap_or(0) as i32;
+
+    let tlist = build_path_tlist(mcx, root, best_path)?;
+    let tlist = tlist_to_plan_field(mcx, tlist)?;
+
+    let quals = order_qual_clauses(root, &qual_ids);
+    let quals = nodes_to_expr_qual(mcx, root, &quals)?;
+
+    let grp_operators = util_tlist::extract_grouping_ops(group_clause);
+    let grp_collations = {
+        let sub_tlist: &[TargetEntry<'mcx>] =
+            subplan.plan_head().targetlist.as_deref().unwrap_or(&[]);
+        util_tlist::extract_grouping_collations(group_clause, sub_tlist)?
+    };
+    let gsets = gsets_to_field(mcx, &rollup.gsets)?;
+    let chain_field = if chain.is_empty() {
+        None
+    } else {
+        let mut out = vec_with_capacity_in(mcx, chain.len())?;
+        for c in chain {
+            out.push(c);
+        }
+        Some(out)
+    };
+
+    let aggstrategy = aggstrategy_path_to_node(aggstrategy);
+
+    let mut plan = make_agg(
+        mcx,
+        tlist,
+        quals,
+        aggstrategy,
+        AGGSPLIT_SIMPLE,
+        num_group_cols,
+        top_grp_col_idx,
+        grp_operators,
+        grp_collations,
+        gsets,
+        chain_field,
+        rollup.numGroups,
+        transition_space,
+        subplan,
+    )?;
+
+    copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
+
+    Ok(Node::Agg(plan))
+}
+
+/// Convert a `&[Vec<i32>]` (the C `rollup->gsets`, a `List` of integer lists)
+/// into the owned grouping-sets plan field (`Option<PgVec<PgVec<i32>>>`); an
+/// empty outer list is `None`.
+fn gsets_to_field<'mcx>(
+    mcx: Mcx<'mcx>,
+    gsets: &[Vec<i32>],
+) -> PgResult<Option<PgVec<'mcx, PgVec<'mcx, i32>>>> {
+    if gsets.is_empty() {
+        return Ok(None);
+    }
+    let mut out = vec_with_capacity_in(mcx, gsets.len())?;
+    for inner in gsets {
+        let mut iv = vec_with_capacity_in(mcx, inner.len())?;
+        for &x in inner {
+            iv.push(x);
+        }
+        out.push(iv);
+    }
+    Ok(Some(out))
+}
+
+/// A throwaway empty `Result` plan node used as a placeholder lefttree for the
+/// vestigial side `Agg`/`Sort` nodes that hang off a grouping-sets plan's
+/// `chain`. These nodes never execute (the C side nodes carry `lefttree =
+/// NULL`); the placeholder exists only because the owned plan model requires
+/// every node to own its child.
+fn dummy_plan<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Node<'mcx>> {
+    let _ = mcx;
+    Ok(Node::Result(ResultNode::default()))
+}
+
+/// As [`dummy_plan`], but the placeholder carries a clone of `src`'s
+/// targetlist, so a `make_sort_from_groupcols` over it can resolve its sort
+/// columns out of the (subplan's) tlist before the tlist is stripped.
+fn dummy_plan_with_tlist<'mcx>(mcx: Mcx<'mcx>, src: &Node<'mcx>) -> PgResult<Node<'mcx>> {
+    let mut node = ResultNode::default();
+    node.plan.targetlist = clone_plan_tlist(mcx, src)?;
+    Ok(Node::Result(node))
 }
 
 // ---------------------------------------------------------------------------
@@ -6303,6 +6590,15 @@ fn apply_cost_snapshot(dest: &mut Plan, src: &PlanCostSnapshot) {
 /// `exprCollation((Node *) tle->expr)` over a `TargetEntry`.
 fn expr_collation_of_tle(tle: &TargetEntry<'_>) -> PgResult<Oid> {
     backend_nodes_core::nodefuncs::expr_collation(tle.expr.as_deref())
+}
+
+/// `get_tle_by_resno(tlist, resno)` (parse_relation.c / tlist helpers) — the
+/// (first) targetlist entry with the given `resno`, or `None`.
+fn get_tle_by_resno<'a, 'mcx>(
+    tlist: &'a [TargetEntry<'mcx>],
+    resno: AttrNumber,
+) -> Option<&'a TargetEntry<'mcx>> {
+    tlist.iter().find(|tle| tle.resno == resno)
 }
 
 /// Replace nestloop params over a list of clause `NodeId`s (the C
