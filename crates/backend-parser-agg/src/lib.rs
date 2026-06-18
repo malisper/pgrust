@@ -949,7 +949,7 @@ fn check_agg_arguments_walker(node: &Node, context: &mut CheckAggArgumentsContex
         return false; // allow range_table_walker to continue
     }
 
-    if let Node::Query(query) = node {
+    if let Some(query) = node.as_query() {
         // Recurse into subselects.
         context.sublevels_up += 1;
         let aborted = query_tree_walker(
@@ -1365,7 +1365,7 @@ pub fn parseCheckAggregates<'mcx>(
     // Detect non-Var grouping; track common Vars separately.
     let mut have_non_var_grouping = false;
     for tle in group_clauses.iter() {
-        let is_var = matches!(tle.expr.as_deref(), Some(Expr::Var(_)));
+        let is_var = tle.expr.as_deref().and_then(|e| e.as_var()).is_some();
         if !is_var {
             have_non_var_grouping = true;
         } else if !have_groupingsets
@@ -1746,7 +1746,7 @@ fn substitute_grouped_columns_mutator(node: &mut Node, context: &mut SubstituteC
             let mut attnum: i32 = 0;
             for tle in context.group_clauses {
                 attnum += 1;
-                if let Some(Expr::Var(gvar)) = tle.expr.as_deref() {
+                if let Some(gvar) = tle.expr.as_deref().and_then(|e| e.as_var()) {
                     if gvar.varno == var.varno
                         && gvar.varattno == var.varattno
                         && gvar.varlevelsup == 0
@@ -1849,7 +1849,7 @@ fn substitute_grouped_columns_mutator(node: &mut Node, context: &mut SubstituteC
         return;
     }
 
-    if let Node::Query(query) = node {
+    if let Some(query) = node.as_query_mut() {
         // Recurse into subselects.
         context.sublevels_up += 1;
         query_tree_mutator(
@@ -2133,10 +2133,10 @@ fn compute_grouping_refs(
             }
         };
 
-        if let Expr::Var(var) = cur_expr {
+        if let Some(var) = cur_expr.as_var() {
             if var.varlevelsup as i32 == context.sublevels_up {
                 for tle in context.group_clauses {
-                    if let Some(Expr::Var(gvar)) = tle.expr.as_deref() {
+                    if let Some(gvar) = tle.expr.as_deref().and_then(|e| e.as_var()) {
                         if gvar.varno == var.varno
                             && gvar.varattno == var.varattno
                             && gvar.varlevelsup == 0
