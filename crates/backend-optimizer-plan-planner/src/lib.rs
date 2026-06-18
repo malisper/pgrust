@@ -276,19 +276,48 @@ fn standard_planner<'mcx>(
     debug_assert!(debug_parallel_query() == DEBUG_PARALLEL_OFF);
 
     // SS_finalize_plan over subplans + top plan (C:526-537).
+    //
+    // C: `if (glob->paramExecTypes != NIL) { forboth(subplans, subroots)
+    //        SS_finalize_plan(subroot, subplan); SS_finalize_plan(root, top_plan); }`
+    //
+    // The `forboth` over `glob->subplans`/`subroots` finalizes each child
+    // subplan *before* the main plan. The per-subplan finalize is not expressible
+    // over the PlannerRun subplan/subroot store (it would need a simultaneous
+    // `&mut subroot` from `run` plus the `&run` deref that
+    // `planner_subplan_get_plan` performs inside `SS_finalize_plan`), so that leg
+    // STAYS behind the keystone panic — but only when subplans actually exist.
+    //
+    // For the no-subplan case (the simple INSERT/SELECT and the type tests),
+    // `glob->subplans` is empty so the `forboth` is a pure no-op, and the only
+    // work is `SS_finalize_plan(root, top_plan)`: a plain recursive walk of the
+    // top plan tree that sets each node's extParam/allParam from its direct Param
+    // references (the owner's `finalize.rs` reaches the empty subplan store
+    // harmlessly — `planner_subplan_get_plan` is only called for initPlan/SubPlan
+    // children, of which there are none here). This is the bounded path.
     if !root.glob.as_ref().map(|g| g.param_exec_types.is_empty()).unwrap_or(true) {
-        // forboth(lp, glob->subplans, lr, glob->subroots): SS_finalize_plan on
-        // each subplan, then the top plan. SS_finalize_plan's owner
-        // (init-subselect finalize.rs) takes a per-subplan orig_tlist + grouping
-        // flag that the value-model subplan store does not carry alongside the
-        // plan node, so this paramExec-bearing finalize loop is not expressible
-        // over the current store. Mirror PG and panic precisely.
-        panic!(
-            "planner: SS_finalize_plan loop (subselect.c) over glob->subplans/\
-             subroots is not expressible over the PlannerRun subplan store \
-             (needs per-subplan orig_tlist + grouping-set flag); reached because \
-             paramExecTypes is non-empty"
-        );
+        let n_subplans = root.glob.as_ref().map(|g| g.subplans.len()).unwrap_or(0);
+        if n_subplans != 0 {
+            // forboth(lp, glob->subplans, lr, glob->subroots): SS_finalize_plan on
+            // each subplan before the top plan. The subroot lives in the run store
+            // beside the subplan, so finalizing it requires a `&mut`/`&` borrow of
+            // `run` that is not expressible alongside `SS_finalize_plan`'s own
+            // `&run` deref. Mirror PG and panic precisely on this subplan-bearing
+            // path; the no-subplan path below is the supported bounded case.
+            panic!(
+                "planner: SS_finalize_plan loop (subselect.c) over \
+                 glob->subplans/subroots is not expressible over the PlannerRun \
+                 subplan store (needs per-subplan subroot retrieval); reached with \
+                 a paramExec-bearing subplan present"
+            );
+        }
+        // No subplans: SS_finalize_plan(root, top_plan) only (the forboth is a
+        // no-op). Walk the top plan tree to populate extParam/allParam.
+        backend_optimizer_plan_init_subselect::finalize::SS_finalize_plan(
+            mcx,
+            &root,
+            &run,
+            &mut top_plan,
+        )?;
     }
 
     // set_plan_references on the top plan (C:540-545).
