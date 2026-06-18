@@ -76,15 +76,15 @@ seam_core::seam!(
     /// `ExecutorFinish/End + FreeQueryDesc + PopActiveSnapshot`. The output flows
     /// into the `DR_intorel` receiver named by `dest`.
     ///
-    /// Bundled into one seam because `QueryRewrite` / `pg_plan_query` take the
-    /// trimmed handle-style `portalcmds::Query`, while the CTAS `Query` is the
-    /// canonical arena-lifetimed `copy_query::Query<'mcx>` — the two are
-    /// incompatible models (see types-nodes::portalcmds). The rewriter/planner
-    /// own that reconciliation; this is the prompt's sanctioned `pg_plan_query`
-    /// panic until they land with a real-`Query` contract. The receiver itself
-    /// is fully real (registered in the tcop-dest router); only the
-    /// rewrite/plan/run pipeline is deferred. Returns the (possibly filled)
-    /// `QueryCompletion`.
+    /// Bundled into one seam because the whole rewrite→plan→run pipeline shares
+    /// the active snapshot and the `DR_intorel` receiver and has no
+    /// createas-observable intermediate state. INSTALLED by `backend-tcop-pquery`
+    /// (the executor-driving layer that owns `CreateQueryDesc` /
+    /// `ExecutorStart`..`End` and reaches the rewriter/planner/active-snapshot
+    /// machinery): `query_rewrite_canonical` and `pg_plan_query` both take the
+    /// value-typed `copy_query::Query<'mcx>` — the same model CTAS carries — so
+    /// the prior `portalcmds::Query` reconciliation keystone no longer applies.
+    /// Returns the (possibly filled) `QueryCompletion`.
     pub fn run_ctas_executor<'mcx>(
         mcx: Mcx<'mcx>,
         query: types_nodes::copy_query::Query<'mcx>,
@@ -141,11 +141,12 @@ seam_core::seam!(
 seam_core::seam!(
     /// `table_finish_bulk_insert(rel, options)` (tableam.h inline) — flush any
     /// remaining buffered tuples and, for `TABLE_INSERT_SKIP_WAL`, fsync the
-    /// relation. Called by `createas.c`'s `intorel_shutdown`. The tableam AM
-    /// routine's `finish_bulk_insert` vtable slot is not yet ported (the heap AM
-    /// handler is unported), so this is declared on the createas (consumer) side
-    /// and panics until the AM slot lands. `Err` carries the AM's
-    /// `ereport(ERROR)`.
+    /// relation. Called by `createas.c`'s `intorel_shutdown`. INSTALLED by
+    /// `backend-access-table-tableam` (the owner of the tableam.h inline
+    /// dispatch wrappers): the C inline only calls the *optional*
+    /// `rd_tableam->finish_bulk_insert` slot, which the heap AM
+    /// (`heapam_methods`) leaves NULL, so for the only AM in the tree this is a
+    /// faithful no-op. `Err` carries the AM's `ereport(ERROR)`.
     pub fn table_finish_bulk_insert<'mcx>(
         rel: &types_rel::Relation<'mcx>,
         options: i32,

@@ -121,6 +121,14 @@ pub fn init_seams() {
         },
     );
 
+    // `table_finish_bulk_insert` (tableam.h inline) — this unit owns the inline
+    // dispatch wrapper, so it installs the consumer-side decls the CTAS
+    // (`createas.c`) and matview (`matview.c`) bulk-insert receivers carry. The
+    // heap AM leaves the `finish_bulk_insert` slot NULL, so the wrapper is a
+    // faithful no-op for the only AM in the tree (see `table_finish_bulk_insert`).
+    backend_commands_createas_seams::table_finish_bulk_insert::set(table_finish_bulk_insert);
+    backend_commands_matview_deps_seams::table_finish_bulk_insert::set(table_finish_bulk_insert);
+
     // ANALYZE-sampling scan dispatch (acquire_sample_rows in commands/analyze.c).
     backend_access_table_tableam_seams::table_beginscan_analyze::set(table_beginscan_analyze);
     backend_access_table_tableam_seams::table_scan_analyze_next_block::set(
@@ -743,6 +751,23 @@ pub fn table_tuple_insert<'mcx>(
     bistate: Option<&mut BulkInsertStateData>,
 ) -> PgResult<()> {
     (am(rel).tuple_insert)(mcx, rel, slot, cid, options, bistate)
+}
+
+/// `table_finish_bulk_insert(rel, options)` (tableam.h inline) — complete
+/// insertions made via `tuple_insert`/`multi_insert` with a `BulkInsertState`.
+///
+/// C dispatches through the *optional* `rd_tableam->finish_bulk_insert` slot
+/// (`if (rel->rd_tableam && rel->rd_tableam->finish_bulk_insert) ...`). The
+/// heap AM (`heapam_methods` in `heapam_handler.c`) never sets that slot, so
+/// for the only AM in the tree the call is a no-op; [`TableAmRoutine`] does not
+/// carry the never-installed slot, matching that NULL callback. Mirrors the C
+/// inline exactly: no callback → nothing to do.
+pub fn table_finish_bulk_insert<'mcx>(rel: &Relation<'mcx>, _options: i32) -> PgResult<()> {
+    // Touch the relation's AM vtable to mirror the C `rel->rd_tableam` probe
+    // (and to surface the same NULL-`rd_tableam` crash if the relation has no
+    // installed access method, exactly as C would dereference it).
+    let _ = am(rel);
+    Ok(())
 }
 
 /// `table_tuple_delete(rel, tid, cid, snapshot, crosscheck, wait, tmfd,

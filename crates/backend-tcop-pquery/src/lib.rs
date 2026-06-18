@@ -218,6 +218,123 @@ fn process_query(
 }
 
 // ===========================================================================
+// `run_ctas_executor` — the createas.c executor-driven leg (createas.c 300-361)
+// ===========================================================================
+
+/// The CTAS executor-driven leg (`ExecCreateTableAs` else-branch, createas.c
+/// 300-361): run the rule rewriter, plan the query, and execute it with output
+/// redirected to the `DR_intorel` receiver named by `dest`.
+///
+/// This is the `run_ctas_executor` seam, owned by `backend-commands-createas`
+/// (which carries the receiver) but installed here: this is the executor-driving
+/// layer (`pquery.c`) that already owns `CreateQueryDesc` /
+/// `ExecutorStart`/`Run`/`Finish`/`End`, and only here can it reach the
+/// rewriter (`QueryRewrite`), planner (`pg_plan_query`) and active-snapshot
+/// management. The keystone the seam doc cited (`portalcmds::Query` vs the
+/// canonical `copy_query::Query`) is resolved: `query_rewrite_canonical` and
+/// `pg_plan_query` both take the value-typed `copy_query::Query<'mcx>`, the same
+/// model CTAS carries, so no model reconciliation is needed.
+///
+/// `GetIntoRelEFlags(into)` is computed inline (createas.c 374-383): the trivial
+/// `into->skipData ? EXEC_FLAG_WITH_NO_DATA : 0`. The `ddlnodes::IntoClause`
+/// carried here is the value-typed clause, so there is no need to cross the
+/// `parsestmt::IntoClause`-shaped `get_into_rel_eflags` seam.
+fn run_ctas_executor<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    query: Query<'mcx>,
+    into: types_nodes::ddlnodes::IntoClause<'mcx>,
+    query_string: &str,
+    params: types_nodes::parsestmt::ParamListInfoHandle,
+    dest: DestReceiverHandle,
+    qc: Option<QueryCompletion>,
+) -> PgResult<Option<QueryCompletion>> {
+    let mut qc = qc;
+
+    /*
+     * Parse analysis was done already, but we still have to run the rule
+     * rewriter.  We do not do AcquireRewriteLocks: we assume the query either
+     * came straight from the parser, or suitable locks were acquired by
+     * plancache.c.
+     *
+     *   rewritten = QueryRewrite(query);
+     */
+    let mut rewritten =
+        backend_rewrite_rewritehandler_seams::query_rewrite_canonical::call(mcx, query)?;
+
+    /* SELECT should never rewrite to more or less than one SELECT query */
+    if rewritten.len() != 1 {
+        return Err(elog_error(
+            "unexpected rewrite result for CREATE TABLE AS SELECT",
+        ));
+    }
+    let query = rewritten.remove(0);
+    debug_assert_eq!(query.commandType, CMD_SELECT);
+
+    /*
+     * plan the query
+     *
+     *   plan = pg_plan_query(query, pstate->p_sourcetext,
+     *                        CURSOR_OPT_PARALLEL_OK, params);
+     */
+    let plan = backend_optimizer_plan_planner_seams::pg_plan_query::call(
+        mcx,
+        &query,
+        query_string,
+        types_nodes::copy_query::CURSOR_OPT_PARALLEL_OK,
+    )?;
+    let _ = params; // bound params are not threaded through the planner seam (COPY/CTAS-SELECT path has none)
+
+    /*
+     * Use a snapshot with an updated command ID to ensure this query sees
+     * results of any previously executed queries.
+     *
+     *   PushCopiedSnapshot(GetActiveSnapshot());
+     *   UpdateActiveSnapshotCommandId();
+     */
+    snapmgr_seam::push_copied_snapshot_and_bump::call()?;
+
+    /* Create a QueryDesc, redirecting output to our tuple receiver */
+    let mut query_desc = create_query_desc(
+        mcx.context(),
+        &plan,
+        query_string,
+        get_active_snapshot()?,
+        None, /* InvalidSnapshot */
+        dest,
+        params,
+        0,
+    )?;
+
+    /* call ExecutorStart to prepare the plan for execution
+     *   ExecutorStart(queryDesc, GetIntoRelEFlags(into)); */
+    let eflags: i32 = if into.skipData {
+        types_nodes::executor::EXEC_FLAG_WITH_NO_DATA
+    } else {
+        0
+    };
+    execMain::ExecutorStart(&mut query_desc, eflags)?;
+
+    /* run the plan to completion */
+    execMain::ExecutorRun(&mut query_desc, ForwardScanDirection, 0)?;
+
+    /* save the rowcount if we're given a qc to fill
+     *   SetQueryCompletion(qc, CMDTAG_SELECT, queryDesc->estate->es_processed); */
+    if let Some(qc) = qc.as_mut() {
+        set_query_completion(qc, CMDTAG_SELECT, query_desc.es_processed());
+    }
+
+    /* and clean up */
+    execMain::ExecutorFinish(&mut query_desc)?;
+    execMain::ExecutorEnd(&mut query_desc)?;
+
+    free_query_desc(query_desc);
+
+    snapmgr_seam::pop_active_snapshot::call()?;
+
+    Ok(qc)
+}
+
+// ===========================================================================
 // `ChoosePortalStrategy`
 // ===========================================================================
 
@@ -1738,4 +1855,10 @@ pub fn init_seams() {
         portal_run_fetch(portal, fdirection, count, dest)
     });
     backend_tcop_pquery_seams::choose_portal_strategy_queries::set(choose_portal_strategy_queries);
+
+    // The CTAS executor-driven leg (createas.c 300-361). Owned-decl by
+    // backend-commands-createas (it carries the DR_intorel receiver); installed
+    // here because this is the executor-driving layer with the
+    // QueryRewrite/pg_plan_query/CreateQueryDesc/ExecutorStart..End substrate.
+    backend_commands_createas_seams::run_ctas_executor::set(run_ctas_executor);
 }
