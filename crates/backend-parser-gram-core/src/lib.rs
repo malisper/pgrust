@@ -84,7 +84,8 @@ pub fn base_yyparse<'mcx>(
     if raw.is_null() {
         // NIL: either a parse error (longjmp'd to NIL) or genuinely empty input.
         if let Some((msg, state, cursor)) = mech::last_error() {
-            return Err(parse_error(&msg, state, cursor));
+            let (hint, detail) = mech::last_error_hint_detail();
+            return Err(parse_error(&msg, state, cursor, &hint, &detail));
         }
         return Ok(PgVec::new_in(mcx));
     }
@@ -119,11 +120,19 @@ fn raw_parse_mode_to_mech(mode: RawParseMode) -> mech::RawParseMode {
 /// Build the `PgError` for a recorded grammar/lexer error: message, the 5-char
 /// SQLSTATE, and (when set) the 1-based cursor position
 /// (`scanner_yyerror`/`errposition`).
-fn parse_error(msg: &str, state: [u8; 5], cursor: i32) -> PgError {
+fn parse_error(msg: &str, state: [u8; 5], cursor: i32, hint: &str, detail: &str) -> PgError {
     let sqlstate: SqlState = make_sqlstate(state);
     let mut e = PgError::error(msg.to_string()).with_sqlstate(sqlstate);
     if cursor > 0 {
         e = e.with_cursor_position(cursor);
+    }
+    // The grammar's Unicode-escape errors carry errdetail/errhint (`gram.y`);
+    // forward them so the client sees the same DETAIL/HINT lines C emits.
+    if !detail.is_empty() {
+        e = e.with_detail(detail.to_string());
+    }
+    if !hint.is_empty() {
+        e = e.with_hint(hint.to_string());
     }
     e
 }
@@ -188,9 +197,22 @@ fn scan_lex_error(scanner: &Scanner<'_>, e: backend_parser_scan_mech::LexError) 
         None => (e.message.to_string(), e.sqlstate.0),
     };
     let cursor = e.location.max(scanner.yylloc()).max(0) + 1;
-    PgError::error(message)
+    let mut err = PgError::error(message)
         .with_sqlstate(SqlState(mech_state))
-        .with_cursor_position(cursor)
+        .with_cursor_position(cursor);
+    // When this lexer error simply propagates a called-out routine's error
+    // (`source`), that source already carries its own detail/hint; otherwise the
+    // scanner's own `errdetail`/`errhint` (scan.l) must be forwarded so the
+    // client sees e.g. "HINT: Unicode escapes must be \uXXXX or \UXXXXXXXX."
+    if e.source.is_none() {
+        if let Some(detail) = e.detail {
+            err = err.with_detail(detail);
+        }
+        if let Some(hint) = e.hint {
+            err = err.with_hint(hint);
+        }
+    }
+    err
 }
 
 // ===========================================================================

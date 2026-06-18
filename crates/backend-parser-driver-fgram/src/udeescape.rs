@@ -13,6 +13,10 @@ use backend_parser_scansup::scanner_isspace;
 pub struct DeError {
     pub message: String,
     pub location: i32,
+    /// `errhint` text (C: the `"invalid Unicode escape"` error carries
+    /// `errhint("Unicode escapes must be \\XXXX or \\+XXXXXX.")`; the value- and
+    /// surrogate-pair errors carry none).
+    pub hint: Option<&'static str>,
 }
 
 /// `hexval()` (parser.c:327) -- value of a hex digit (caller verified).
@@ -36,6 +40,7 @@ fn check_unicode_value(c: PgWchar, position: i32) -> Result<(), DeError> {
         Err(DeError {
             message: "invalid Unicode escape value".to_string(),
             location: position,
+            hint: None,
         })
     } else {
         Ok(())
@@ -123,6 +128,7 @@ pub fn str_udeescape(
                 return Err(DeError {
                     message: "invalid Unicode escape".to_string(),
                     location: escpos,
+                    hint: Some("Unicode escapes must be \\XXXX or \\+XXXXXX."),
                 });
             }
         } else {
@@ -180,6 +186,7 @@ fn append_codepoint(
     let bytes = seam.pg_unicode_to_server(c).map_err(|_| DeError {
         message: "invalid Unicode escape value".to_string(),
         location: escpos,
+        hint: None,
     })?;
     out.extend_from_slice(&bytes);
     Ok(())
@@ -189,5 +196,6 @@ fn invalid_pair(location: i32) -> DeError {
     DeError {
         message: "invalid Unicode surrogate pair".to_string(),
         location,
+        hint: None,
     }
 }

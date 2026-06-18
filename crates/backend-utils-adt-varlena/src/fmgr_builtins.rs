@@ -804,6 +804,173 @@ fn fc_array_to_text_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 
 // ---------------------------------------------------------------------------
+// fc_ adapters — concat() / concat_ws() / format() (split_format.rs).
+//
+// These are `provariadic => 'any'`, `proisstrict => 'f'` SQL functions. The
+// executor expands an un-keyworded variadic call (`concat(a,b,c)`) into N
+// separate fmgr args; an explicit `VARIADIC arr` call arrives as a single array
+// arg, detected via `get_fn_expr_variadic(flinfo)` (C: the same check inside
+// `concat_internal`/`text_format`). Each per-argument view (`FormatArg`) carries
+// the argument's canonical `Datum`, its SQL-NULL flag, and its actual type OID
+// (`get_fn_expr_argtype(flinfo, i)`, C: `get_fn_expr_argtype`). A by-reference
+// (varlena/cstring) arg crosses on the by-ref lane as its header-ful image and
+// is wrapped verbatim into the canonical `Datum::ByRef`/`Datum::Cstring`
+// (header-ful everywhere — `concat_internal`'s `output_function_call` reads the
+// same framed image); a by-value arg is the bare word as `Datum::ByVal`.
+// ---------------------------------------------------------------------------
+
+use crate::split_format::FormatArg;
+use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
+
+/// Build one `FormatArg` for fmgr arg `i`: its canonical value, SQL-NULL flag,
+/// and actual type OID. NULL args carry a placeholder value (`concat_internal`
+/// /`text_format` only consult `value` when `!is_null`).
+fn format_arg<'mcx>(mcx: mcx::Mcx<'mcx>, fcinfo: &FunctionCallInfoBaseData, i: usize) -> FormatArg<'mcx> {
+    let is_null = fcinfo.arg(i).map(|d| d.isnull).unwrap_or(true);
+    let typid = backend_utils_fmgr_core::get_fn_expr_argtype(fcinfo.flinfo.as_deref(), i as i32);
+    let value = if is_null {
+        CanonDatum::null()
+    } else if let Some(p) = fcinfo.ref_arg(i) {
+        // By-reference arg: the header-ful image crosses verbatim.
+        match p {
+            RefPayload::Varlena(b) => CanonDatum::ByRef(ok(mcx::slice_in(mcx, b))),
+            RefPayload::Cstring(s) => CanonDatum::Cstring(s.clone()),
+            _ => CanonDatum::ByRef(ok(mcx::slice_in(mcx, p.as_varlena().unwrap_or(&[])))),
+        }
+    } else {
+        // By-value arg: the bare machine word.
+        CanonDatum::ByVal(fcinfo.arg(i).map(|d| d.value.as_usize()).unwrap_or(0))
+    };
+    FormatArg { value, is_null, typid }
+}
+
+/// Collect all fmgr args (from `start`) into a `FormatArg` vector.
+fn collect_format_args<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    fcinfo: &FunctionCallInfoBaseData,
+    start: usize,
+) -> Vec<FormatArg<'mcx>> {
+    (start..fcinfo.nargs()).map(|i| format_arg(mcx, fcinfo, i)).collect()
+}
+
+/// The `VARIADIC arr` fast path: `(array_datum, element_type)` when this call
+/// passed exactly one trailing array argument with the VARIADIC keyword (C:
+/// `PG_NARGS() == argidx + 1 && get_fn_expr_variadic(fcinfo->flinfo)`). `None`
+/// (the array arg is SQL NULL) makes the whole result NULL upstream.
+fn variadic_array<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    fcinfo: &FunctionCallInfoBaseData,
+    argidx: usize,
+) -> Option<Option<(CanonDatum<'mcx>, Oid)>> {
+    if fcinfo.nargs() != argidx + 1 {
+        return None;
+    }
+    if !backend_utils_fmgr_core::get_fn_expr_variadic(fcinfo.flinfo.as_deref()) {
+        return None;
+    }
+    // The single trailing arg is the variadic array.
+    if fcinfo.arg(argidx).map(|d| d.isnull).unwrap_or(true) {
+        // concat(VARIADIC NULL) / format(..., VARIADIC NULL) -> NULL.
+        return Some(None);
+    }
+    let arrtype = backend_utils_fmgr_core::get_fn_expr_argtype(fcinfo.flinfo.as_deref(), argidx as i32);
+    let elemtype = ok(backend_utils_cache_lsyscache_seams::get_base_element_type::call(arrtype));
+    // The array image rides the by-ref lane; wrap it the same way the
+    // `array_to_text` adapter does (header-less payload, the convention
+    // `array_to_text_internal` reads).
+    let v = arg_array_datum(mcx, fcinfo, argidx);
+    Some(Some((v, elemtype)))
+}
+
+/// Write an `Option<Vec<u8>>` text result back onto the by-ref lane: `Some` is a
+/// non-NULL `text` payload (framed by `ret_varlena`), `None` is the SQL-NULL
+/// result a non-strict builder returns (e.g. a NULL format string / separator).
+#[inline]
+fn ret_opt_text(fcinfo: &mut FunctionCallInfoBaseData, result: Option<Vec<u8>>) -> Datum {
+    match result {
+        Some(bytes) => ret_varlena(fcinfo, bytes),
+        None => {
+            fcinfo.set_result_null(true);
+            Datum::from_usize(0)
+        }
+    }
+}
+
+fn fc_text_concat(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let mcx = m.mcx();
+    let result: Option<Vec<u8>> = match variadic_array(mcx, fcinfo, 0) {
+        Some(None) => None, // VARIADIC NULL -> NULL
+        Some(Some(arr)) => {
+            ok(crate::split_format::text_concat(mcx, &[], Some(arr))).map(|b| b.as_slice().to_vec())
+        }
+        None => {
+            let args = collect_format_args(mcx, fcinfo, 0);
+            ok(crate::split_format::text_concat(mcx, &args, None)).map(|b| b.as_slice().to_vec())
+        }
+    };
+    ret_opt_text(fcinfo, result)
+}
+
+fn fc_text_concat_ws(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let mcx = m.mcx();
+    // arg0 is the separator (text, may be NULL -> whole result NULL).
+    let sep = opt_arg_bytes(fcinfo, 0).map(|b| b.to_vec());
+    let result: Option<Vec<u8>> = match variadic_array(mcx, fcinfo, 1) {
+        Some(None) => None,
+        Some(Some(arr)) => ok(crate::split_format::text_concat_ws(mcx, sep.as_deref(), &[], Some(arr)))
+            .map(|b| b.as_slice().to_vec()),
+        None => {
+            let args = collect_format_args(mcx, fcinfo, 0);
+            ok(crate::split_format::text_concat_ws(mcx, sep.as_deref(), &args, None))
+                .map(|b| b.as_slice().to_vec())
+        }
+    };
+    ret_opt_text(fcinfo, result)
+}
+
+fn fc_text_format(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let mcx = m.mcx();
+    // arg0 is the format string (text, may be NULL -> NULL result).
+    let fmt = opt_arg_bytes(fcinfo, 0).map(|b| b.to_vec());
+    // The value args start at index 1; a VARIADIC array expands them.
+    let result: Option<Vec<u8>> = if backend_utils_fmgr_core::get_fn_expr_variadic(fcinfo.flinfo.as_deref())
+        && fcinfo.nargs() == 2
+    {
+        // format(fmt, VARIADIC arr): expand the array into the value list.
+        if fcinfo.arg(1).map(|d| d.isnull).unwrap_or(true) {
+            // format(fmt, VARIADIC NULL): an all-NULL/empty value list.
+            ok(crate::split_format::text_format(mcx, fmt.as_deref(), &[])).map(|b| b.as_slice().to_vec())
+        } else {
+            let arrtype = backend_utils_fmgr_core::get_fn_expr_argtype(fcinfo.flinfo.as_deref(), 1);
+            let elemtype = ok(backend_utils_cache_lsyscache_seams::get_base_element_type::call(arrtype));
+            let v = arg_array_datum(mcx, fcinfo, 1);
+            let elems = ok(crate::split_format::array_to_format_args(mcx, v, elemtype));
+            ok(crate::split_format::text_format(mcx, fmt.as_deref(), &elems))
+                .map(|b| b.as_slice().to_vec())
+        }
+    } else {
+        let args = collect_format_args(mcx, fcinfo, 1);
+        ok(crate::split_format::text_format(mcx, fmt.as_deref(), &args)).map(|b| b.as_slice().to_vec())
+    };
+    ret_opt_text(fcinfo, result)
+}
+
+fn fc_text_format_nv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    // C: text_format_nv is a thin nonvariadic wrapper (it exists only for
+    // opr_sanity); it never sees the VARIADIC keyword.
+    let m = scratch_mcx();
+    let mcx = m.mcx();
+    let fmt = opt_arg_bytes(fcinfo, 0).map(|b| b.to_vec());
+    let args = collect_format_args(mcx, fcinfo, 1);
+    let result: Option<Vec<u8>> =
+        ok(crate::split_format::text_format_nv(mcx, fmt.as_deref(), &args)).map(|b| b.as_slice().to_vec());
+    ret_opt_text(fcinfo, result)
+}
+
+// ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
 
@@ -1022,6 +1189,19 @@ pub fn register_varlena_array_string_builtins() {
         builtin_ns(376, "text_to_array_null", 3, fc_text_to_array_null),
         builtin(395, "array_to_text", 2, fc_array_to_text),
         builtin_ns(384, "array_to_text_null", 3, fc_array_to_text_null),
+    ]);
+}
+
+/// Register the variadic-`any` text builders (C: their `fmgr_builtins[]` rows).
+/// Called from this crate's `init_seams()`. OIDs / nargs from `pg_proc.dat`; all
+/// are `provariadic => 'any'`, `proisstrict => 'f'` and not retset
+/// (`text_format_nv` is the nonvariadic opr_sanity wrapper, still non-strict).
+pub fn register_varlena_format_builtins() {
+    backend_utils_fmgr_core::register_builtins([
+        builtin_ns(3058, "text_concat", 1, fc_text_concat),
+        builtin_ns(3059, "text_concat_ws", 2, fc_text_concat_ws),
+        builtin_ns(3539, "text_format", 2, fc_text_format),
+        builtin_ns(3540, "text_format_nv", 1, fc_text_format_nv),
     ]);
 }
 

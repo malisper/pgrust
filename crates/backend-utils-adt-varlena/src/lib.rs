@@ -487,6 +487,12 @@ pub fn init_seams() {
     // is the already-installed arrayfuncs owner seam.
     fmgr_builtins::register_varlena_array_string_builtins();
 
+    // The variadic-`any` text builders concat/concat_ws/format/format_nv
+    // (varlena.c text_concat/text_concat_ws/text_format/text_format_nv). Each
+    // stringifies its arguments through their type output functions and the
+    // arrayfuncs deconstruct seam for the `VARIADIC array` form.
+    fmgr_builtins::register_varlena_format_builtins();
+
     // The `internal`-transtype `string_agg` aggregate transition/final functions
     // (varlena.c) so `SELECT string_agg(x::text, ',') FROM t` resolves them by
     // OID. setup_peragg_finalfn resolves the finalfn via `fmgr_info` at

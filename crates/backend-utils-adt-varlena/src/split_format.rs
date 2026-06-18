@@ -1751,6 +1751,35 @@ pub fn text_concat_ws<'mcx>(
     concat_internal(mcx, sep_bytes, 1, args, variadic_array)
 }
 
+/// C: the `text_format` VARIADIC-array expansion (varlena.c:5921-5959) —
+/// `deconstruct_array` the labeled array argument into its per-element
+/// `(value, isnull, element_type)` `FormatArg`s, so the main `text_format` loop
+/// indexes them exactly like the non-variadic per-argument case. The element
+/// type's storage attributes come from `get_typlenbyvalalign` (C:
+/// `get_typlenbyvalalign(element_type, ...)`).
+pub fn array_to_format_args<'mcx>(
+    mcx: Mcx<'mcx>,
+    arr: Datum<'mcx>,
+    element_type: Oid,
+) -> PgResult<PgVec<'mcx, FormatArg<'mcx>>> {
+    // C:5953 get_typlenbyvalalign(element_type, &elmlen, &elmbyval, &elmalign).
+    let lba = backend_utils_cache_lsyscache_seams::get_typlenbyvalalign::call(element_type)?;
+    // C:5956-5957 deconstruct_array(arr, element_type, ...).
+    let elems = backend_utils_adt_arrayfuncs_seams::deconstruct_array_v::call(
+        mcx,
+        arr,
+        element_type,
+        lba.typlen,
+        lba.typbyval,
+        lba.typalign as core::ffi::c_char,
+    )?;
+    let mut out = mcx::vec_with_capacity_in(mcx, elems.len())?;
+    for (value, isnull) in elems {
+        out.push(FormatArg { value, is_null: isnull, typid: element_type });
+    }
+    Ok(out)
+}
+
 // ===========================================================================
 // format() (varlena.c:5884-6406).
 // ===========================================================================

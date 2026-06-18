@@ -30,4 +30,7 @@ mod tests;
 
 pub use gram::{base_yy_extra_type, base_yyparse, parser_init, YYSTYPE};
 pub use pgrust_pg_ffi::spi::RawParseMode;
-pub use support::{last_error, last_error_message, raw_parser, raw_parser_bytes, ParserAbort};
+pub use support::{
+    last_error, last_error_hint_detail, last_error_message, raw_parser, raw_parser_bytes,
+    ParserAbort,
+};

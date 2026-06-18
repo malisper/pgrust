@@ -93,6 +93,11 @@ pub struct ParseError {
     /// `"%s at or near \"%s\""` via `scanner_yyerror`; false for the direct
     /// `ereport(...)` lexer errors, which C reports verbatim.
     pub yyerror: bool,
+    /// `errdetail` text for the direct-`ereport` lexer errors (empty = none).
+    pub detail: Option<String>,
+    /// `errhint` text for the direct-`ereport` lexer errors (empty = none) —
+    /// e.g. the Unicode-escape "Unicode escapes must be \\XXXX or \\+XXXXXX.".
+    pub hint: Option<String>,
 }
 
 impl From<LexError> for ParseError {
@@ -108,11 +113,23 @@ impl From<LexError> for ParseError {
             && e.detail.is_none()
             && e.hint.is_none()
             && e.sqlstate == pgrust_pg_ffi::ERRCODE_SYNTAX_ERROR;
+        // The source-propagated errors carry their own detail/hint; otherwise
+        // forward the scanner's own errdetail/errhint (scan.l).
+        let (detail, hint) = if e.source.is_some() {
+            (None, None)
+        } else {
+            (
+                e.detail.map(|d| d.to_string()),
+                e.hint.map(|h| h.to_string()),
+            )
+        };
         ParseError {
             message,
             location: e.location,
             sqlstate: pgrust_pg_ffi::error::unpack_sqlstate(e.sqlstate),
             yyerror,
+            detail,
+            hint,
         }
     }
 }
@@ -269,6 +286,8 @@ impl<'a> BaseLexer<'a> {
             location,
             sqlstate: *b"XX000",
             yyerror: false,
+            detail: None,
+            hint: None,
         })?;
 
         let mut escape = b'\\';
@@ -281,6 +300,8 @@ impl<'a> BaseLexer<'a> {
                     location: self.errpos(third.location),
                     sqlstate: *b"42601",
                     yyerror: true,
+                    detail: None,
+                    hint: None,
                 });
             }
             let escstr = match &third.value {
@@ -295,6 +316,8 @@ impl<'a> BaseLexer<'a> {
                     location: self.errpos(third.location),
                     sqlstate: *b"42601",
                     yyerror: true,
+                    detail: None,
+                    hint: None,
                 });
             }
             escape = escstr[0];
@@ -318,6 +341,10 @@ impl<'a> BaseLexer<'a> {
                 // calls in C (no "at or near" rendering).
                 sqlstate: *b"42601",
                 yyerror: false,
+                detail: None,
+                // The "invalid Unicode escape" error carries the
+                // "\\XXXX or \\+XXXXXX." hint (C: errhint); forward it.
+                hint: e.hint.map(|h| h.to_string()),
             })?;
 
         if cur.token == tokens::UIDENT {

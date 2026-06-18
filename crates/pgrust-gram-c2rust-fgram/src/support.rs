@@ -151,15 +151,26 @@ macro_rules! pg_errmsg {
 }
 pub(crate) use pg_errmsg;
 
-/// `errdetail(fmt, ...)` — detail text is not part of the returned parse tree.
+/// `errdetail(fmt, ...)` — record the detail text for the in-flight `ereport`
+/// (replaces csupport.c's `errdetail`).
 macro_rules! pg_errdetail {
-    ($fmt:expr $(, $arg:expr)* $(,)?) => {{ let _ = $fmt; 0 }};
+    ($fmt:expr $(, $arg:expr)* $(,)?) => {{
+        let __bytes = unsafe { $crate::support::cprintf_fmt($fmt, &[$($crate::support::CFmtArg::from($arg)),*]) };
+        $crate::support::record_errdetail(&__bytes);
+        0
+    }};
 }
 pub(crate) use pg_errdetail;
 
-/// `errhint(fmt, ...)` — hint text is not part of the returned parse tree.
+/// `errhint(fmt, ...)` — record the hint text for the in-flight `ereport`
+/// (replaces csupport.c's `errhint`). The grammar's Unicode-escape errors carry
+/// hints the client must see.
 macro_rules! pg_errhint {
-    ($fmt:expr $(, $arg:expr)* $(,)?) => {{ let _ = $fmt; 0 }};
+    ($fmt:expr $(, $arg:expr)* $(,)?) => {{
+        let __bytes = unsafe { $crate::support::cprintf_fmt($fmt, &[$($crate::support::CFmtArg::from($arg)),*]) };
+        $crate::support::record_errhint(&__bytes);
+        0
+    }};
 }
 pub(crate) use pg_errhint;
 
@@ -173,6 +184,28 @@ pub fn arena_cstr_pub(bytes: &[u8]) -> *mut c_char {
 pub fn record_errmsg(bytes: &[u8]) {
     let msg = String::from_utf8_lossy(bytes).into_owned();
     CUR_ERRMSG.with(|m| *m.borrow_mut() = msg);
+}
+
+/// Record the `errhint` text for the in-flight error (used by the `pg_errhint!`
+/// macro).
+pub fn record_errhint(bytes: &[u8]) {
+    let hint = String::from_utf8_lossy(bytes).into_owned();
+    CUR_ERRHINT.with(|h| *h.borrow_mut() = hint);
+}
+
+/// Record the `errdetail` text for the in-flight error (used by the
+/// `pg_errdetail!` macro).
+pub fn record_errdetail(bytes: &[u8]) {
+    let detail = String::from_utf8_lossy(bytes).into_owned();
+    CUR_ERRDETAIL.with(|d| *d.borrow_mut() = detail);
+}
+
+/// The `errhint`/`errdetail` recorded by the most recent grammar error (empty
+/// `String` = none), for the caller that surfaces the final `ereport`.
+pub fn last_error_hint_detail() -> (String, String) {
+    let hint = CUR_ERRHINT.with(|h| h.borrow().clone());
+    let detail = CUR_ERRDETAIL.with(|d| d.borrow().clone());
+    (hint, detail)
 }
 
 // ===========================================================================
@@ -348,6 +381,12 @@ thread_local! {
     /// Byte location of the token most recently handed to the grammar (the C
     /// `*yyllocp` that `scanner_yyerror` reads for "at or near").
     static LAST_TOK_LOC: RefCell<c_int> = const { RefCell::new(0) };
+    /// `errhint()` text of the in-flight `ereport` (empty = none). The grammar's
+    /// Unicode-escape errors carry hints (`gram.y` `errhint("Unicode escapes
+    /// must be \\XXXX or \\+XXXXXX.")`); these must reach the client.
+    static CUR_ERRHINT: RefCell<String> = const { RefCell::new(String::new()) };
+    /// `errdetail()` text of the in-flight `ereport` (empty = none).
+    static CUR_ERRDETAIL: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
 /// `ERROR` elevel (utils/elog.h).  Matches `gram.rs`'s `ERROR` constant.
@@ -385,6 +424,8 @@ fn clear_last_error() {
     CUR_ERRSTATE.with(|s| *s.borrow_mut() = *b"XX000");
     CUR_ERRPOS.with(|p| *p.borrow_mut() = 0);
     LAST_TOK_LOC.with(|l| *l.borrow_mut() = 0);
+    CUR_ERRHINT.with(|h| h.borrow_mut().clear());
+    CUR_ERRDETAIL.with(|d| d.borrow_mut().clear());
 }
 
 pub unsafe fn errstart(elevel: c_int, _domain: *const c_char) -> bool {
@@ -393,6 +434,9 @@ pub unsafe fn errstart(elevel: c_int, _domain: *const c_char) -> bool {
     // ereport defaults (elog.h): ERRCODE_INTERNAL_ERROR unless errcode() runs.
     CUR_ERRSTATE.with(|s| *s.borrow_mut() = *b"XX000");
     CUR_ERRPOS.with(|p| *p.borrow_mut() = 0);
+    // Each ereport starts with no hint/detail until errhint()/errdetail() run.
+    CUR_ERRHINT.with(|h| h.borrow_mut().clear());
+    CUR_ERRDETAIL.with(|d| d.borrow_mut().clear());
     // Returning true enters the ereport body so errmsg/errcode/errfinish run.
     true
 }
@@ -535,6 +579,10 @@ pub unsafe fn base_yylex(
                 CUR_ERRMSG.with(|m| *m.borrow_mut() = e.message);
                 CUR_ERRSTATE.with(|s| *s.borrow_mut() = e.sqlstate);
                 CUR_ERRPOS.with(|p| *p.borrow_mut() = e.location);
+                // A direct-ereport lexer error (e.g. a Unicode-escape error)
+                // may carry an errdetail/errhint the client must see.
+                CUR_ERRDETAIL.with(|d| *d.borrow_mut() = e.detail.unwrap_or_default());
+                CUR_ERRHINT.with(|h| *h.borrow_mut() = e.hint.unwrap_or_default());
             }
             pgrust_gram_error_jump();
         }
