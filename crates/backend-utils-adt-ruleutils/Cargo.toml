@@ -20,6 +20,7 @@ types-storage = { path = "../types-storage" }
 types-datum = { path = "../types-datum" }
 types-fmgr = { path = "../types-fmgr" }
 types-stringinfo = { path = "../types-stringinfo" }
+common-keywords = { path = "../common-keywords" }
 
 backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 backend-nodes-read-seams = { path = "../backend-nodes-read-seams" }

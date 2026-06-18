@@ -204,9 +204,9 @@ fn rt_fetch<'a, 'mcx>(
     })
 }
 
-/// `quote_identifier(ident)` — ruleutils-owned seam.
+/// `quote_identifier(ident)` — ruleutils-owned, ported in this crate.
 fn quote_identifier<'mcx>(mcx: Mcx<'mcx>, ident: &str) -> PgResult<PgString<'mcx>> {
-    backend_utils_adt_ruleutils_seams::quote_identifier::call(mcx, ident)
+    crate::quote_identifier(mcx, ident)
 }
 
 /// `generate_collation_name(collid)` — ruleutils-owned seam.

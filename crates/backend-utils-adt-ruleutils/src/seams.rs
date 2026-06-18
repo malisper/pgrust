@@ -46,6 +46,14 @@ pub fn init_seams() {
         crate::select_rtable_names_for_explain,
     );
 
+    // The identifier-quoting helpers are now ported in this crate (lib.rs):
+    // `quote.c`'s `quote_ident` and `format_type`'s qualified-name builder reach
+    // them through these ruleutils-owned seams.
+    backend_utils_adt_ruleutils_seams::quote_identifier::set(crate::quote_identifier);
+    backend_utils_adt_ruleutils_seams::quote_qualified_identifier::set(
+        crate::quote_qualified_identifier,
+    );
+
     // Register the SQL-callable deparser builtins (C: their `fmgr_builtins[]`
     // rows) so by-OID fmgr dispatch resolves them.
     crate::register_ruleutils_builtins();

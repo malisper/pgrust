@@ -19124,6 +19124,7 @@ dependencies = [
  "backend-utils-mb-mbutils-seams",
  "backend-utils-misc-guc-seams",
  "backend-utils-misc-guc-tables",
+ "common-keywords",
  "mcx",
  "seam-core",
  "types-core",

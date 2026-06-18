@@ -211,9 +211,9 @@ fn generate_collation_name<'mcx>(mcx: Mcx<'mcx>, collid: Oid) -> PgResult<PgStri
     backend_utils_adt_ruleutils_seams::generate_collation_name::call(mcx, collid)
 }
 
-/// `quote_identifier(ident)` — ruleutils-owned seam.
+/// `quote_identifier(ident)` — ruleutils-owned, ported in this crate.
 fn quote_identifier<'mcx>(mcx: Mcx<'mcx>, ident: &str) -> PgResult<PgString<'mcx>> {
-    backend_utils_adt_ruleutils_seams::quote_identifier::call(mcx, ident)
+    crate::quote_identifier(mcx, ident)
 }
 
 /// Clone a `Vec<TargetEntry<'static>>` (Aggref.args) into `mcx`, re-homing it at

@@ -61,6 +61,95 @@ use types_nodes::parsenodes::{
 };
 use types_nodes::rawnodes::{Alias, FromExpr, JoinExpr};
 
+/// `quote_identifier(ident)` (ruleutils.c 13028-13104) — quote an identifier
+/// only if needed for re-parse safety. Faithful port: an identifier is "safe"
+/// (no quoting) iff it begins with a lowercase letter or underscore, contains
+/// only lowercase letters, digits and underscores, is not a reserved/typish
+/// keyword, and `quote_all_identifiers` is off. Otherwise it is wrapped in
+/// double quotes with any embedded `"` doubled. The result is always copied
+/// into `mcx` (C returns the input pointer in the safe case; the owned image
+/// copies either way).
+pub fn quote_identifier<'mcx>(mcx: Mcx<'mcx>, ident: &str) -> PgResult<PgString<'mcx>> {
+    let bytes = ident.as_bytes();
+
+    // safe = ((ident[0] >= 'a' && ident[0] <= 'z') || ident[0] == '_')
+    let mut safe = matches!(bytes.first(), Some(&c) if (c.is_ascii_lowercase() || c == b'_'));
+    let mut nquotes = 0usize;
+
+    for &ch in bytes {
+        if ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == b'_' {
+            // okay
+        } else {
+            safe = false;
+            if ch == b'"' {
+                nquotes += 1;
+            }
+        }
+    }
+
+    if seams::quote_all_identifiers() {
+        safe = false;
+    }
+
+    if safe {
+        // Check for keyword. We quote keywords except for unreserved ones.
+        let kwnum =
+            common_keywords::ScanKeywordLookup(ident, &common_keywords::ScanKeywords);
+        if kwnum >= 0
+            && common_keywords::keyword_category(kwnum as usize)
+                != Some(common_keywords::KeywordCategory::Unreserved)
+        {
+            safe = false;
+        }
+    }
+
+    if safe {
+        // no change needed
+        return PgString::from_str_in(ident, mcx);
+    }
+
+    // result = palloc(strlen(ident) + nquotes + 2 + 1); fill with doubled quotes.
+    let mut out: PgVec<u8> = PgVec::new_in(mcx);
+    out.try_reserve(bytes.len() + nquotes + 2)
+        .map_err(|_| mcx.oom(0))?;
+    out.push(b'"');
+    for &ch in bytes {
+        if ch == b'"' {
+            out.push(b'"');
+        }
+        out.push(ch);
+    }
+    out.push(b'"');
+
+    // The bytes are ASCII-quoted around an arbitrary identifier; the identifier
+    // text came in as a `&str` so the whole image is valid UTF-8.
+    let s = core::str::from_utf8(out.as_slice())
+        .map_err(|_| PgError::error(alloc::string::String::from("quote_identifier: non-UTF-8 identifier")))?;
+    PgString::from_str_in(s, mcx)
+}
+
+/// `quote_qualified_identifier(qualifier, ident)` (ruleutils.c 13112-13123) —
+/// build `qualifier.ident`, or just `ident` when `qualifier` is `None`, quoting
+/// each component with [`quote_identifier`] as needed. The result is allocated
+/// in `mcx` (C pallocs via `StringInfo`).
+pub fn quote_qualified_identifier<'mcx>(
+    mcx: Mcx<'mcx>,
+    qualifier: Option<&str>,
+    ident: &str,
+) -> PgResult<PgString<'mcx>> {
+    use alloc::string::String;
+
+    let mut buf = String::new();
+    if let Some(q) = qualifier {
+        let q_quoted = quote_identifier(mcx, q)?;
+        buf.push_str(q_quoted.as_str());
+        buf.push('.');
+    }
+    let ident_quoted = quote_identifier(mcx, ident)?;
+    buf.push_str(ident_quoted.as_str());
+    PgString::from_str_in(&buf, mcx)
+}
+
 mod seams;
 pub use seams::init_seams;
 
