@@ -201,7 +201,7 @@ fn ExecInitTableFunctionResult<'mcx>(
     // C: state->expr = expr;
     state.expr = Some(mcx::alloc_in(per_query, expr.clone_in(per_query)?)?);
 
-    if let Expr::FuncExpr(func) = expr {
+    if let Some(func) = expr.as_funcexpr() {
         // C: state->funcReturnsSet = func->funcretset;
         //    state->args = ExecInitExprList(func->args, parent);
         //    init_sexpr(func->funcid, func->inputcollid, expr, state, parent,
@@ -601,25 +601,21 @@ fn ExecInitFunctionResultSet<'mcx>(
     state.func.fn_oid = Oid::default();
     state.expr = Some(mcx::alloc_in(per_query, expr.clone_in(per_query)?)?);
 
-    match expr {
-        Expr::FuncExpr(func) => {
-            // C: state->args = ExecInitExprList(func->args, parent);
-            //    init_sexpr(func->funcid, func->inputcollid, ..., true, true);
-            state.args = Some(init_expr_list(&func.args, parent, estate)?);
-            init_sexpr(func.funcid, func.inputcollid, &mut state, true, true, estate)?;
-        }
-        Expr::OpExpr(op) => {
-            // C: state->args = ExecInitExprList(op->args, parent);
-            //    init_sexpr(op->opfuncid, op->inputcollid, ..., true, true);
-            state.args = Some(init_expr_list(&op.args, parent, estate)?);
-            init_sexpr(op.opfuncid, op.inputcollid, &mut state, true, true, estate)?;
-        }
-        other => {
-            return Err(ereport(ERROR)
-                .errcode(ERRCODE_INTERNAL_ERROR)
-                .errmsg(alloc::format!("unrecognized node type: {other:?}"))
-                .into_error());
-        }
+    if let Some(func) = expr.as_funcexpr() {
+        // C: state->args = ExecInitExprList(func->args, parent);
+        //    init_sexpr(func->funcid, func->inputcollid, ..., true, true);
+        state.args = Some(init_expr_list(&func.args, parent, estate)?);
+        init_sexpr(func.funcid, func.inputcollid, &mut state, true, true, estate)?;
+    } else if let Some(op) = expr.as_opexpr() {
+        // C: state->args = ExecInitExprList(op->args, parent);
+        //    init_sexpr(op->opfuncid, op->inputcollid, ..., true, true);
+        state.args = Some(init_expr_list(&op.args, parent, estate)?);
+        init_sexpr(op.opfuncid, op.inputcollid, &mut state, true, true, estate)?;
+    } else {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_INTERNAL_ERROR)
+            .errmsg(alloc::format!("unrecognized node type: {expr:?}"))
+            .into_error());
     }
 
     // C: Assert(state->func.fn_retset);  (the selected function returns a set.)
