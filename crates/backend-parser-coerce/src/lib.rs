@@ -2704,6 +2704,20 @@ pub fn init_seams() {
     s::coerce_type::set(seam_coerce_type);
     s::find_coercion_pathway_explicit::set(seam_find_coercion_pathway_explicit);
     s::select_common_typmod::set(select_common_typmod);
+    s::check_valid_polymorphic_signature::set(check_valid_polymorphic_signature);
+    s::check_valid_internal_signature::set(seam_check_valid_internal_signature);
+}
+
+/// Seam adapter for `check_valid_internal_signature`: the direct body is
+/// infallible (`Option<String>`), but the seam contract is `PgResult` so the
+/// `AggregateCreate` consumer can `?`-propagate uniformly with the polymorphic
+/// check. Wrap the infallible result in `Ok`.
+fn seam_check_valid_internal_signature(
+    ret_type: Oid,
+    declared_arg_types: &[Oid],
+    nargs: i32,
+) -> PgResult<Option<String>> {
+    Ok(check_valid_internal_signature(ret_type, declared_arg_types, nargs))
 }
 
 /// `coerce_type(pstate, node, ...)` (parse_coerce.c) for the parse_func.c
