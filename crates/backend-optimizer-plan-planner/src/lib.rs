@@ -1243,10 +1243,12 @@ fn subquery_planner_carried<'mcx>(
                                 let parse = run.resolve(root.parse);
                                 let fn_node = &*parse.rtable[i].functions[f];
                                 match fn_node.node_tag() {
-                                    ntag::T_RangeTblFunction => match fn_node.expect_rangetblfunction().funcexpr.as_deref() {
-                                        Some(Node::Expr(e)) => Some(e.clone()),
-                                        _ => None,
-                                    },
+                                    ntag::T_RangeTblFunction => fn_node
+                                        .expect_rangetblfunction()
+                                        .funcexpr
+                                        .as_deref()
+                                        .and_then(|n| n.as_expr())
+                                        .cloned(),
                                     _ => {
                                         return Err(types_error::PgError::error(
                                             "subquery_planner: RTE_FUNCTION functions entry is not a RangeTblFunction",
@@ -3022,10 +3024,10 @@ fn optimize_window_clauses<'mcx>(
         // WindowClause's frame options unchanged. This is a correctness-neutral
         // skipped optimization, not a hollow stub.
         for &wfunc_id in &wfa.window_funcs[winref as usize] {
-            let winfnoid = match root.node(wfunc_id) {
-                Expr::WindowFunc(w) => w.winfnoid,
-                _ => panic!("optimize_window_clauses: windowFuncs entry is not a WindowFunc"),
+            let Some(w) = root.node(wfunc_id).as_windowfunc() else {
+                panic!("optimize_window_clauses: windowFuncs entry is not a WindowFunc");
             };
+            let winfnoid = w.winfnoid;
             let prosupport =
                 backend_utils_cache_lsyscache::function::get_func_support(winfnoid)?;
             if prosupport == types_core::primitive::InvalidOid {
@@ -3445,10 +3447,10 @@ fn create_one_window_path<'mcx>(
             let mut tuple_width: i64 = wt.width as i64;
             for &wfn in &func_ids {
                 backend_optimizer_util_vars::tlist::add_column_to_pathtarget(&mut wt, wfn, 0);
-                let wintype = match root.node(wfn) {
-                    Expr::WindowFunc(w) => w.wintype,
-                    _ => panic!("create_one_window_path: windowFuncs entry is not a WindowFunc"),
+                let Some(w) = root.node(wfn).as_windowfunc() else {
+                    panic!("create_one_window_path: windowFuncs entry is not a WindowFunc");
                 };
+                let wintype = w.wintype;
                 tuple_width +=
                     backend_utils_cache_lsyscache::type_::get_typavgwidth(wintype, -1)? as i64;
             }
@@ -3469,10 +3471,10 @@ fn create_one_window_path<'mcx>(
         // common path is the empty list; a non-empty list loud-panics.
         let runcondition: Vec<types_pathnodes::NodeId> = Vec::new();
         for &wfn in &func_ids {
-            let has_run_cond = match root.node(wfn) {
-                Expr::WindowFunc(w) => !w.runCondition.is_empty(),
-                _ => panic!("create_one_window_path: windowFuncs entry is not a WindowFunc"),
+            let Some(w) = root.node(wfn).as_windowfunc() else {
+                panic!("create_one_window_path: windowFuncs entry is not a WindowFunc");
             };
+            let has_run_cond = !w.runCondition.is_empty();
             if has_run_cond {
                 panic!(
                     "create_one_window_path: WindowFunc runConditions need the \
@@ -3508,10 +3510,10 @@ fn windowfunc_cost_impl(
     root: &mut PlannerInfo,
     wfunc: types_pathnodes::NodeId,
 ) -> (types_core::primitive::Cost, types_core::primitive::Cost) {
-    let (winfnoid, args, aggfilter) = match root.node(wfunc) {
-        Expr::WindowFunc(w) => (w.winfnoid, w.args.clone(), w.aggfilter.clone()),
-        _ => panic!("windowfunc_cost: node is not a WindowFunc"),
+    let Some(w) = root.node(wfunc).as_windowfunc() else {
+        panic!("windowfunc_cost: node is not a WindowFunc");
     };
+    let (winfnoid, args, aggfilter) = (w.winfnoid, w.args.clone(), w.aggfilter.clone());
 
     // add_function_cost(root, winfnoid, (Node *) wfunc): startup + per_tuple.
     let (mut startup, mut per_tuple) =
@@ -3630,22 +3632,22 @@ fn get_windowclause_startup_tuples<'mcx>(
         const INT2OID: types_core::primitive::Oid = 21;
         const DEFAULT_INEQ_SEL: f64 = 0.3333333333333333;
         // try and figure out the value specified in the endOffset.
-        let end_offset_value = match end_off_id.map(|id| root.node(id).clone()) {
-            Some(Expr::Const(c)) => {
-                if c.constisnull {
-                    // NULLs aren't allowed; pretend just the first row is needed.
-                    1.0
-                } else {
-                    match c.consttype {
-                        x if x == INT2OID => c.constvalue.as_i16() as f64,
-                        x if x == types_core::catalog::INT4OID => c.constvalue.as_i32() as f64,
-                        x if x == types_core::catalog::INT8OID => c.constvalue.as_i64() as f64,
-                        _ => partition_tuples / peer_tuples * DEFAULT_INEQ_SEL,
-                    }
+        let end_off_node = end_off_id.map(|id| root.node(id).clone());
+        let end_offset_value = if let Some(c) = end_off_node.as_ref().and_then(|e| e.as_const()) {
+            if c.constisnull {
+                // NULLs aren't allowed; pretend just the first row is needed.
+                1.0
+            } else {
+                match c.consttype {
+                    x if x == INT2OID => c.constvalue.as_i16() as f64,
+                    x if x == types_core::catalog::INT4OID => c.constvalue.as_i32() as f64,
+                    x if x == types_core::catalog::INT8OID => c.constvalue.as_i64() as f64,
+                    _ => partition_tuples / peer_tuples * DEFAULT_INEQ_SEL,
                 }
             }
+        } else {
             // Non-Const end bound: guess via DEFAULT_INEQ_SEL.
-            _ => partition_tuples / peer_tuples * DEFAULT_INEQ_SEL,
+            partition_tuples / peer_tuples * DEFAULT_INEQ_SEL
         };
         if frame_options & FRAMEOPTION_ROWS != 0 {
             // include the N FOLLOWING and the current row.
@@ -4080,7 +4082,7 @@ fn is_target_exprs_parallel_safe(root: &PlannerInfo, exprs: &[types_pathnodes::N
     // (parent_root chain is not modeled on the value root; this level only.)
     let mut safe_param_ids: Vec<i32> = Vec::new();
     for &ipl in &root.init_plans {
-        if let Expr::SubPlan(sp) = root.node(ipl) {
+        if let Some(sp) = root.node(ipl).as_subplan() {
             for &p in sp.0.setParam.iter() {
                 safe_param_ids.push(p);
             }
@@ -5747,18 +5749,17 @@ fn preprocess_limit<'mcx>(
     let limit_count_expr = expr_from_nodeptr(run, root, |q| q.limitCount.as_ref())?;
     if let Some(e) = limit_count_expr {
         let est = backend_optimizer_util_clauses::estimate_expression_value(mcx, e)?;
-        match &est {
-            Expr::Const(c) => {
-                if c.constisnull {
-                    *count_est = 0; // LIMIT ALL
-                } else {
-                    *count_est = datum_get_int64(c);
-                    if *count_est <= 0 {
-                        *count_est = 1;
-                    }
+        if let Some(c) = est.as_const() {
+            if c.constisnull {
+                *count_est = 0; // LIMIT ALL
+            } else {
+                *count_est = datum_get_int64(c);
+                if *count_est <= 0 {
+                    *count_est = 1;
                 }
             }
-            _ => *count_est = -1, // can't estimate
+        } else {
+            *count_est = -1; // can't estimate
         }
     } else {
         *count_est = 0; // not present
@@ -5768,18 +5769,17 @@ fn preprocess_limit<'mcx>(
     let limit_offset_expr = expr_from_nodeptr(run, root, |q| q.limitOffset.as_ref())?;
     if let Some(e) = limit_offset_expr {
         let est = backend_optimizer_util_clauses::estimate_expression_value(mcx, e)?;
-        match &est {
-            Expr::Const(c) => {
-                if c.constisnull {
+        if let Some(c) = est.as_const() {
+            if c.constisnull {
+                *offset_est = 0;
+            } else {
+                *offset_est = datum_get_int64(c);
+                if *offset_est < 0 {
                     *offset_est = 0;
-                } else {
-                    *offset_est = datum_get_int64(c);
-                    if *offset_est < 0 {
-                        *offset_est = 0;
-                    }
                 }
             }
-            _ => *offset_est = -1,
+        } else {
+            *offset_est = -1;
         }
     } else {
         *offset_est = 0;
@@ -6072,10 +6072,8 @@ where
 /// offset `Expr` that may be a `Const`. Returns `Some((isnull, value))` if the
 /// expression is a `Const`, else `None` (non-constant).
 fn nodeptr_as_const_isnull_value(expr: &Expr) -> Option<(bool, i64)> {
-    match expr {
-        Expr::Const(c) => Some((c.constisnull, datum_get_int64(c))),
-        _ => None,
-    }
+    expr.as_const()
+        .map(|c| (c.constisnull, datum_get_int64(c)))
 }
 
 /// `DatumGetInt64(((Const *) est)->constvalue)` — read an `int8` from a `Const`'s
