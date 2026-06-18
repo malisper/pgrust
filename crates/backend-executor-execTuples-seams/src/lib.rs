@@ -703,29 +703,12 @@ seam_core::seam!(
     ) -> types_error::PgResult<types_nodes::SlotId>
 );
 
-seam_core::seam!(
-    /// The per-attribute stored-generated-column compute loop of
-    /// `ExecComputeStoredGenerated` (nodeModifyTable.c) that touches the slot
-    /// payload: in the per-tuple memory context, `slot_getallattrs(slot)`, then
-    /// for every column with a non-NULL generated `ExprState`
-    /// (`ri_GeneratedExprsI`/`ri_GeneratedExprsU` per `cmdtype`) set
-    /// `econtext->ecxt_scantuple = slot`, `ExecEvalExpr` it, `datumCopy` a
-    /// non-null pass-by-reference result, and for the remaining columns
-    /// `datumCopy` the existing slot value; finally `ExecClearTuple` /
-    /// `memcpy` the values+nulls back / `ExecStoreVirtualTuple` /
-    /// `ExecMaterializeSlot`. The slot's `tts_values`/`tts_isnull` payload and
-    /// the expression interpreter are owned by execTuples/execExpr; the
-    /// generated `ExprState`s are read off the `ResultRelInfo` (pool id).
-    /// Fallible on `ereport(ERROR)` from a generation expression and on OOM.
-    pub fn exec_store_generated_columns<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        estate: &mut types_nodes::EStateData<'mcx>,
-        result_rel_info: types_nodes::RriId,
-        slot: types_nodes::SlotId,
-        econtext: types_nodes::EcxtId,
-        cmdtype: types_nodes::nodes::CmdType,
-    ) -> types_error::PgResult<()>
-);
+// `ExecComputeStoredGenerated`'s per-attribute compute loop (nodeModifyTable.c)
+// is implemented inline in `backend-executor-nodeModifyTable` (its C home),
+// driving the slot-payload (`slot_getallattrs_by_id` / `store_virtual_values` /
+// `exec_materialize_slot`), the `exec_eval_expr_switch_context` interpreter
+// seam, and the `datum_copy_v` seam directly — so no `exec_store_generated_columns`
+// seam is needed.
 
 seam_core::seam!(
     /// `execute_attr_map_slot(attrMap, in_slot, out_slot)` (tupconvert.c) with

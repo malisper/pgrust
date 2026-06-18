@@ -10043,6 +10043,7 @@ dependencies = [
  "backend-rewrite-rewritehandler-seams",
  "backend-storage-lmgr-lmgr-seams",
  "backend-tcop-postgres-seams",
+ "backend-utils-adt-datum-seams",
  "backend-utils-cache-relcache-seams",
  "backend-utils-fmgr-fmgr-seams",
  "backend-utils-init-miscinit-seams",

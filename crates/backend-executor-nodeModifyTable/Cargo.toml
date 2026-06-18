@@ -14,6 +14,7 @@ backend-executor-execMain-seams = { path = "../backend-executor-execMain-seams" 
 backend-executor-execJunk = { path = "../backend-executor-execJunk" }
 backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }
 backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
+backend-utils-adt-datum-seams = { path = "../backend-utils-adt-datum-seams" }
 backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
 backend-executor-execProcnode-seams = { path = "../backend-executor-execProcnode-seams" }
 backend-executor-execAmi-seams = { path = "../backend-executor-execAmi-seams" }

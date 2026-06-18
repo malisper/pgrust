@@ -412,10 +412,9 @@ pub fn ExecInitGenerated<'mcx>(
 /// [`ExecInitGenerated`]), evaluates each with `ExecEvalExpr` in the per-tuple
 /// context, `datumCopy`s pass-by-reference results, and rebuilds the slot via
 /// `ExecStoreVirtualTuple` / `ExecMaterializeSlot`. The generated-expression
-/// state lives on fields not carried by the trimmed
-/// [`types_nodes::ResultRelInfo`], and `ExecEvalExpr` over that stored state /
-/// the slot-store helpers are unported owners with no seam for this form; this
-/// is an unported callee.
+/// state lives on the `ResultRelInfo`'s `ri_GeneratedExprs*` fields;
+/// `ExecEvalExpr` over that stored state and the slot-store helpers are reached
+/// through the execExpr / execTuples / datum seams.
 pub fn ExecComputeStoredGenerated<'mcx>(
     mcx: Mcx<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -460,21 +459,114 @@ pub fn ExecComputeStoredGenerated<'mcx>(
         debug_assert!(estate.result_rel(result_rel_info).ri_NumGeneratedNeededI > 0);
     }
 
-    // The per-attribute compute loop touches the slot's tts_values/tts_isnull
-    // payload (slot_getallattrs, datumCopy, ExecClearTuple/memcpy/
-    // ExecStoreVirtualTuple/ExecMaterializeSlot) and runs ExecEvalExpr over the
-    // generated ExprStates in the per-tuple memory context — all slot-payload /
-    // expression-interpreter work owned by execTuples/execExpr. It reads the
-    // generated ExprStates off the ResultRelInfo (ri_GeneratedExprs*) selected
-    // by cmdtype.
-    backend_executor_execTuples_seams::exec_store_generated_columns::call(
-        mcx,
-        estate,
-        result_rel_info,
-        slot,
-        econtext,
-        cmdtype,
-    )
+    // The per-attribute compute loop (C: the tail of ExecComputeStoredGenerated,
+    // nodeModifyTable.c). It runs in the per-tuple memory context: deform the
+    // slot, then for every column with a non-NULL generated ExprState evaluate it
+    // (datumCopy a non-null pass-by-reference result), datumCopy the remaining
+    // existing slot values, and rebuild the slot via store-virtual + materialize.
+    //
+    //   oldContext = MemoryContextSwitchTo(GetPerTupleMemoryContext(estate));
+    // The per-tuple context is the allocation domain the seam shims allocate in
+    // (slot_getallattrs_by_id / datum_copy_v / store_virtual_values allocate in
+    // the EState's per-tuple/per-query context); we drive that explicitly rather
+    // than via a current-context switch.
+
+    // Snapshot the per-attribute (attbyval, attlen) the datumCopy calls need, plus
+    // natts, off the result relation's descriptor (TupleDescCompactAttr in C).
+    let (natts, attmeta): (usize, mcx::PgVec<'mcx, (bool, i16)>) = {
+        let rel = estate
+            .result_rel(result_rel_info)
+            .ri_RelationDesc
+            .as_ref()
+            .expect("result relation must be open");
+        let tupdesc = &rel.rd_att;
+        let n = tupdesc.natts as usize;
+        let mut meta = mcx::PgVec::new_in(mcx);
+        for i in 0..n {
+            let att = tupdesc.attr(i);
+            meta.push((att.attbyval, att.attlen));
+        }
+        (n, meta)
+    };
+
+    // values = palloc(...); nulls = palloc(...);
+    // slot_getallattrs(slot); memcpy(nulls, slot->tts_isnull, ...);
+    let deformed = backend_executor_execTuples_seams::slot_getallattrs_by_id::call(estate, slot)?;
+    debug_assert_eq!(deformed.len(), natts);
+    let mut values: mcx::PgVec<'mcx, types_tuple::Datum<'mcx>> = mcx::PgVec::new_in(mcx);
+    let mut nulls: mcx::PgVec<'mcx, bool> = mcx::PgVec::new_in(mcx);
+    for (v, n) in deformed.iter() {
+        values.push(v.clone_in(mcx)?);
+        nulls.push(*n);
+    }
+
+    for i in 0..natts {
+        let (attbyval, attlen) = attmeta[i];
+
+        // if (ri_GeneratedExprs[i]) { ... } — select the array by cmdtype and take
+        // out element i (an owned ExprState), leaving the slot for write-back.
+        let gen_state: Option<mcx::PgBox<'mcx, ExprState<'mcx>>> = {
+            let rri = estate.result_rel_mut(result_rel_info);
+            let arr = if cmdtype == CmdType::CMD_UPDATE {
+                rri.ri_GeneratedExprsU.as_mut()
+            } else {
+                rri.ri_GeneratedExprsI.as_mut()
+            }
+            .expect("ri_GeneratedExprs* initialized above");
+            arr[i].take()
+        };
+
+        if let Some(mut state) = gen_state {
+            // econtext->ecxt_scantuple = slot;
+            estate.ecxt_mut(econtext).ecxt_scantuple = Some(slot);
+            // val = ExecEvalExpr(ri_GeneratedExprs[i], econtext, &isnull);
+            let (mut val, isnull) =
+                backend_executor_execExpr_seams::exec_eval_expr_switch_context::call(
+                    &mut state, econtext, estate,
+                )?;
+            // We must make a copy of val as we have no guarantees about where
+            // memory for a pass-by-reference Datum is located.
+            //   if (!isnull) val = datumCopy(val, attr->attbyval, attr->attlen);
+            if !isnull {
+                val = backend_utils_adt_datum_seams::datum_copy_v::call(
+                    mcx,
+                    &val,
+                    attbyval,
+                    attlen as i32,
+                )?;
+            }
+            values[i] = val;
+            nulls[i] = isnull;
+
+            // Write the (untouched) ExprState back into its pool slot.
+            let rri = estate.result_rel_mut(result_rel_info);
+            let arr = if cmdtype == CmdType::CMD_UPDATE {
+                rri.ri_GeneratedExprsU.as_mut()
+            } else {
+                rri.ri_GeneratedExprsI.as_mut()
+            }
+            .expect("ri_GeneratedExprs* initialized above");
+            arr[i] = Some(state);
+        } else {
+            // else { if (!nulls[i]) values[i] = datumCopy(slot->tts_values[i], ...); }
+            if !nulls[i] {
+                values[i] = backend_utils_adt_datum_seams::datum_copy_v::call(
+                    mcx,
+                    &values[i],
+                    attbyval,
+                    attlen as i32,
+                )?;
+            }
+        }
+    }
+
+    // ExecClearTuple(slot); memcpy values/nulls into the slot;
+    // ExecStoreVirtualTuple(slot);  (store_virtual_values does all three)
+    backend_executor_execTuples_seams::store_virtual_values::call(estate, slot, &values, &nulls)?;
+    // ExecMaterializeSlot(slot);
+    backend_executor_execTuples_seams::exec_materialize_slot::call(estate, slot)?;
+
+    Ok(())
 }
 
 /// `ExecSetupTransitionCaptureState(mtstate, estate)` — set up the
