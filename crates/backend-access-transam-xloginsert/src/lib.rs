@@ -1642,6 +1642,17 @@ pub fn init_seams() {
     s::xlog_register_data::set(XLogRegisterData);
     s::xlog_register_buffer::set(XLogRegisterBuffer);
     xlog_seam::xlog_ensure_record_space::set(XLogEnsureRecordSpace);
+    // `EndPrepare` (twophase.c) emits the 2PC PREPARE WAL record via the
+    // standard XLogInsert path. The chunk-assembly + crit-section/DELAY_CHKPT
+    // bracket stay in twophase's `end_prepare`; this seam is the
+    // `XLogBeginInsert(); XLogRegisterData(body); XLogSetRecordFlags(
+    // XLOG_INCLUDE_ORIGIN); XLogInsert(RM_XACT_ID, XLOG_XACT_PREPARE)` tail.
+    xlog_seam::xlog_insert_prepare::set(|body: &[u8]| -> PgResult<XLogRecPtr> {
+        XLogBeginInsert()?;
+        XLogRegisterData(body)?;
+        XLogSetRecordFlags(XLOG_INCLUDE_ORIGIN);
+        XLogInsert(types_wal::RM_XACT_ID, types_wal::XLOG_XACT_PREPARE)
+    });
     s::xlog_register_block::set(|block_id, rlocator, forknum, blknum, page, flags| {
         XLogRegisterBlock(block_id, &rlocator, forknum, blknum, page, flags)
     });
