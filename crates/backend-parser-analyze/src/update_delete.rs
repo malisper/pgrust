@@ -193,7 +193,7 @@ pub fn transformUpdateStmt<'mcx>(
 
 /// `transformUpdateTargetList(pstate, origTlist)` (analyze.c:2469) — transform
 /// the SET-list of an UPDATE into a `Vec<TargetEntry>`.
-fn transformUpdateTargetList<'mcx>(
+pub(crate) fn transformUpdateTargetList<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
     orig_tlist: &PgVec<'mcx, types_nodes::nodes::NodePtr<'mcx>>,

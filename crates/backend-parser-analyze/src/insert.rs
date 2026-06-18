@@ -8,8 +8,8 @@
 //! with no VALUES RTE), so it does not depend on the still-blocked
 //! `addRangeTableEntryForValues` (which needs the List-carrier RTE keystone).
 //!
-//! The multi-row VALUES branch, INSERT/SELECT (general select), ON CONFLICT, and
-//! RETURNING are follow-on work and panic loudly until their substrate lands.
+//! The multi-row VALUES, INSERT/SELECT, ON CONFLICT (DO NOTHING / DO UPDATE),
+//! and RETURNING branches are all transformed here.
 
 use mcx::{Mcx, PgVec};
 use types_core::{InvalidOid, Oid};
@@ -205,12 +205,6 @@ pub fn transformInsertStmt<'mcx>(
     }
     qry.targetList = target_list;
 
-    if stmt.onConflictClause.is_some() {
-        return Err(elog_error(
-            "INSERT ... ON CONFLICT is not yet ported (analyze.c:1010)",
-        ));
-    }
-
     // If we have any clauses yet to process, set the query namespace to contain
     // only the target relation, removing any entries added in a sub-SELECT or
     // VALUES list. (analyze.c:1010)
@@ -218,6 +212,14 @@ pub fn transformInsertStmt<'mcx>(
         pstate.p_namespace = PgVec::new_in(mcx);
         let target = crate::update_delete::clone_target_nsitem(mcx, pstate)?;
         backend_parser_relation::addNSItemToQuery(mcx, pstate, target, false, true, true)?;
+    }
+
+    // Process ON CONFLICT, if any. (analyze.c:1019)
+    if let Some(occ) = stmt.onConflictClause.as_deref() {
+        qry.onConflict = Some(mcx::alloc_in(
+            mcx,
+            transformOnConflictClause(mcx, pstate, occ)?,
+        )?);
     }
 
     // Process RETURNING, if any.
@@ -586,4 +588,220 @@ fn copy_cols<'mcx>(
         }
     }
     Ok(out)
+}
+
+/// `transformOnConflictClause(pstate, onConflictClause)` (analyze.c:1162) —
+/// transform an `OnConflictClause` into an `OnConflictExpr`.
+fn transformOnConflictClause<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'mcx>,
+    on_conflict_clause: &types_nodes::rawnodes::OnConflictClause<'mcx>,
+) -> PgResult<types_nodes::rawnodes::OnConflictExpr<'mcx>> {
+    use types_nodes::nodes::OnConflictAction;
+
+    let mut excl_rel_index: i32 = 0;
+    let mut excl_rel_tlist: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
+    let mut on_conflict_set: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
+    let mut on_conflict_where: Option<NodePtr<'mcx>> = None;
+    // The EXCLUDED nsitem, created during the UPDATE prelude but only added to
+    // the namespace (and later popped) once the arbiter clause is processed.
+    let mut stashed_excl_nsitem: Option<types_nodes::parsestmt::ParseNamespaceItem<'mcx>> = None;
+
+    // If this is ON CONFLICT ... UPDATE, first create the range table entry for
+    // the EXCLUDED pseudo relation, so that that will be present while
+    // processing arbiter expressions. (analyze.c:1177)
+    if on_conflict_clause.action == OnConflictAction::ONCONFLICT_UPDATE {
+        let alias = backend_nodes_core::makefuncs::make_alias(mcx, "excluded", PgVec::new_in(mcx))?;
+
+        // Clone the cheap Rc-backed relcache handle so the borrow checker lets
+        // us mutate pstate inside addRangeTableEntryForRelation.
+        let targetrel = pstate
+            .p_target_relation
+            .as_ref()
+            .ok_or_else(|| elog_error("transformOnConflictClause: no target relation"))?
+            .alias();
+
+        let mut excl_nsitem = backend_parser_relation::addRangeTableEntryForRelation(
+            mcx,
+            pstate,
+            &targetrel,
+            types_storage::lock::RowExclusiveLock,
+            Some(alias),
+            false,
+            false,
+        )?;
+        excl_rel_index = excl_nsitem.p_rtindex;
+
+        // relkind is set to composite to signal that we're not dealing with an
+        // actual relation, and no permission checks are required on it. (We'll
+        // check the actual target relation, instead.) (analyze.c:1192)
+        let composite = types_tuple::access::RELKIND_COMPOSITE_TYPE as i8;
+        pstate.p_rtable[(excl_rel_index - 1) as usize].relkind = composite;
+        if let Some(rte) = excl_nsitem.p_rte.as_deref_mut() {
+            rte.relkind = composite;
+        }
+
+        // Create EXCLUDED rel's targetlist for use by EXPLAIN. (analyze.c:1195)
+        excl_rel_tlist = build_on_conflict_excluded_targetlist(mcx, &targetrel, excl_rel_index)?;
+
+        // Hold the EXCLUDED nsitem; it is added to the namespace only in the DO
+        // UPDATE block below, AFTER the arbiter clause is processed (analyze.c).
+        stashed_excl_nsitem = Some(excl_nsitem);
+    }
+
+    // Process the arbiter clause, ON CONFLICT ON (...). (analyze.c:1202)
+    let (arbiter_exprs, arbiter_where_expr, arbiter_constraint) =
+        backend_parser_clause::transformOnConflictArbiter(
+            mcx,
+            pstate,
+            on_conflict_clause,
+        )?;
+
+    // Convert the arbiter element Exprs into the node-pointer list the
+    // OnConflictExpr carries.
+    let mut arbiter_elems: PgVec<'mcx, NodePtr<'mcx>> =
+        mcx::vec_with_capacity_in(mcx, arbiter_exprs.len())?;
+    for e in arbiter_exprs.into_iter() {
+        arbiter_elems.push(mcx::alloc_in(mcx, Node::Expr(e))?);
+    }
+    let arbiter_where: Option<NodePtr<'mcx>> = match arbiter_where_expr {
+        Some(e) => Some(mcx::alloc_in(mcx, Node::Expr(e))?),
+        None => None,
+    };
+
+    // Process DO UPDATE. (analyze.c:1205)
+    if on_conflict_clause.action == OnConflictAction::ONCONFLICT_UPDATE {
+        // Expressions in the UPDATE targetlist need to be handled like UPDATE
+        // not INSERT. We don't need to save/restore this because all INSERT
+        // expressions have been parsed already. (analyze.c:1212)
+        pstate.p_is_insert = false;
+
+        // Add the EXCLUDED pseudo relation to the query namespace, making it
+        // available in the UPDATE subexpressions. (analyze.c:1216)
+        let excl_nsitem = stashed_excl_nsitem
+            .take()
+            .ok_or_else(|| elog_error("transformOnConflictClause: missing EXCLUDED nsitem"))?;
+        backend_parser_relation::addNSItemToQuery(mcx, pstate, excl_nsitem, false, true, true)?;
+
+        // Now transform the UPDATE subexpressions. (analyze.c:1221)
+        let set_tles = crate::update_delete::transformUpdateTargetList(
+            mcx,
+            pstate,
+            &on_conflict_clause.targetList,
+        )?;
+        on_conflict_set = mcx::vec_with_capacity_in(mcx, set_tles.len())?;
+        for tle in set_tles.into_iter() {
+            on_conflict_set.push(mcx::alloc_in(
+                mcx,
+                Node::TargetEntry(tle),
+            )?);
+        }
+
+        // WHERE clause. (analyze.c:1224)
+        let where_clause: Option<Node<'mcx>> = match &on_conflict_clause.whereClause {
+            Some(n) => Some(n.as_ref().clone_in(mcx)?),
+            None => None,
+        };
+        let where_expr = backend_parser_clause::transformWhereClause(
+            mcx,
+            pstate,
+            where_clause,
+            ParseExprKind::EXPR_KIND_WHERE,
+            "WHERE",
+        )?;
+        on_conflict_where = match where_expr {
+            Some(e) => Some(mcx::alloc_in(mcx, Node::Expr(e))?),
+            None => None,
+        };
+
+        // Remove the EXCLUDED pseudo relation from the query namespace, since
+        // it's not supposed to be available in RETURNING. (analyze.c:1231)
+        debug_assert_eq!(
+            pstate.p_namespace.last().map(|n| n.p_rtindex),
+            Some(excl_rel_index)
+        );
+        pstate.p_namespace.pop();
+    }
+
+    Ok(types_nodes::rawnodes::OnConflictExpr {
+        action: on_conflict_clause.action,
+        arbiterElems: arbiter_elems,
+        arbiterWhere: arbiter_where,
+        constraint: arbiter_constraint,
+        onConflictSet: on_conflict_set,
+        onConflictWhere: on_conflict_where,
+        exclRelIndex: excl_rel_index,
+        exclRelTlist: excl_rel_tlist,
+    })
+}
+
+/// `BuildOnConflictExcludedTargetlist(targetrel, exclRelIndex)` (analyze.c:1265)
+/// — build the EXCLUDED pseudo-relation targetlist, one `TargetEntry` per
+/// attribute (including dropped columns), plus a trailing whole-row Var.
+fn build_on_conflict_excluded_targetlist<'mcx>(
+    mcx: Mcx<'mcx>,
+    targetrel: &types_rel::RelationData<'mcx>,
+    excl_rel_index: i32,
+) -> PgResult<PgVec<'mcx, NodePtr<'mcx>>> {
+    let natts = targetrel.rd_att.attrs.len();
+    let mut result: PgVec<'mcx, NodePtr<'mcx>> = mcx::vec_with_capacity_in(mcx, natts + 1)?;
+
+    // Note that resnos of the tlist must correspond to attnos of the underlying
+    // relation, hence we need entries for dropped columns too.
+    for attno in 0..natts {
+        let attr = targetrel.rd_att.attr(attno);
+        let attname = core::str::from_utf8(attr.attname.name_str())
+            .map_err(|_| elog_error("EXCLUDED tlist: attname is not valid UTF-8"))?;
+        let (var, name): (Expr, Option<&str>) = if attr.attisdropped {
+            // can't use atttypid here, but it doesn't really matter what type
+            // the Const claims to be. (analyze.c:1289)
+            let c = backend_nodes_core::makefuncs::make_null_const(
+                mcx,
+                types_tuple::heaptuple::INT4OID,
+                -1,
+                InvalidOid,
+            )?;
+            (Expr::Const(c), None)
+        } else {
+            let v = backend_nodes_core::makefuncs::make_var(
+                excl_rel_index,
+                (attno + 1) as i16,
+                attr.atttypid,
+                attr.atttypmod,
+                attr.attcollation,
+                0,
+            );
+            (Expr::Var(v), Some(attname))
+        };
+
+        let te = backend_nodes_core::makefuncs::make_target_entry(
+            mcx,
+            var,
+            (attno + 1) as i16,
+            name,
+            false,
+        )?;
+        result.push(mcx::alloc_in(mcx, Node::TargetEntry(te))?);
+    }
+
+    // Add a whole-row-Var entry to support references to "EXCLUDED.*". Its resno
+    // must match the Var's varattno (InvalidAttrNumber). (analyze.c:1316)
+    let whole_row = backend_nodes_core::makefuncs::make_var(
+        excl_rel_index,
+        types_core::primitive::InvalidAttrNumber,
+        targetrel.rd_rel.reltype,
+        -1,
+        InvalidOid,
+        0,
+    );
+    let te = backend_nodes_core::makefuncs::make_target_entry(
+        mcx,
+        Expr::Var(whole_row),
+        types_core::primitive::InvalidAttrNumber,
+        None,
+        true,
+    )?;
+    result.push(mcx::alloc_in(mcx, Node::TargetEntry(te))?);
+
+    Ok(result)
 }

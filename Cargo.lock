@@ -12909,6 +12909,8 @@ dependencies = [
  "types-nodes",
  "types-parsenodes",
  "types-rel",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
