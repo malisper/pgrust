@@ -1257,13 +1257,53 @@ fn fix_upper_expr_mutator<'mcx>(
             }
             match other {
                 Expr::Param(p) => fix_param_node(root, &p),
-                Expr::Aggref(aggref) => {
+                Expr::Aggref(mut aggref) => {
                     if let Some(aggparam) = find_minmax_agg_replacement_param(root, &aggref)? {
                         return Ok(Expr::Param(aggparam));
                     }
+                    // C (nodeFuncs.c expression_tree_mutator T_Aggref) MUTATEs the
+                    // aggdirectargs / args / aggfilter so the aggregated-argument
+                    // Vars get fixed to OUTER_VAR (the Agg reads its inputs from
+                    // the outer subplan; setrefs.c:1427 asserts varno == OUTER_VAR
+                    // for the agg's input vars). The generic
+                    // `expression_tree_mutator` copies an Aggref verbatim (its
+                    // `args` TargetEntry list has context-allocated `PgBox<'static>`
+                    // children the mcx-less mutator cannot re-allocate), so fix the
+                    // children explicitly with mcx in hand. `aggorder`/`aggdistinct`
+                    // are SortGroupClause index lists with no Expr children (no-op);
+                    // `aggargtypes` is unchanged (mutation must not change types).
+                    let old_directargs = core::mem::take(&mut aggref.aggdirectargs);
+                    let mut new_directargs = alloc::vec::Vec::with_capacity(old_directargs.len());
+                    for e in old_directargs {
+                        new_directargs.push(fix_upper_expr_mutator(mcx, root, e, ctx)?);
+                    }
+                    aggref.aggdirectargs = new_directargs;
+
+                    let old_args = core::mem::take(&mut aggref.args);
+                    let mut new_args = alloc::vec::Vec::with_capacity(old_args.len());
+                    for mut te in old_args {
+                        if let Some(b) = te.expr.take() {
+                            let fixed = fix_upper_expr_mutator(mcx, root, (*b).clone(), ctx)?;
+                            // Re-box into the plan arena and re-tag as 'static (the
+                            // backing alloc lives in `mcx`); same lifetime-only
+                            // transmute the combining-aggref split path uses.
+                            let boxed: mcx::PgBox<'mcx, Expr> = mcx::alloc_in(mcx, fixed)?;
+                            let boxed_static: mcx::PgBox<'static, Expr> =
+                                unsafe { core::mem::transmute(boxed) };
+                            te.expr = Some(boxed_static);
+                        }
+                        new_args.push(te);
+                    }
+                    aggref.args = new_args;
+
+                    if let Some(f) = aggref.aggfilter.take() {
+                        let fixed = fix_upper_expr_mutator(mcx, root, *f, ctx)?;
+                        aggref.aggfilter = Some(alloc::boxed::Box::new(fixed));
+                    }
+
                     let mut e = Expr::Aggref(aggref);
                     fix_expr_common(root, &mut e)?;
-                    fix_upper_expr_recurse(mcx, root, e, ctx)
+                    Ok(e)
                 }
                 Expr::AlternativeSubPlan(asp) => {
                     let chosen = fix_alternative_subplan(mcx, root, *asp.0, ctx.num_exec)?;
