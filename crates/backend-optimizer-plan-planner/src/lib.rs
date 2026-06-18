@@ -1099,7 +1099,7 @@ pub fn preprocess_expression<'mcx>(
 
     // convert_saop_to_hashed_saop (C:1321-1324).
     if kind == EXPRKIND_QUAL || kind == EXPRKIND_TARGET {
-        backend_optimizer_util_clauses::convert_saop_to_hashed_saop(&mut expr)?;
+        backend_optimizer_util_clauses::convert_saop_to_hashed_saop(mcx, &mut expr)?;
     }
 
     // SS_process_sublinks (C:1326-1328).

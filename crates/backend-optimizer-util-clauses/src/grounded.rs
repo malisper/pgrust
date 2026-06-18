@@ -915,7 +915,7 @@ fn find_nonnullable_rels_walker<'mcx>(
             result = find_nonnullable_rels_list(mcx, &args, false)?;
         }
     } else if let Some(expr) = node.as_scalararrayopexpr() {
-        if is_strict_saop(expr, true)? {
+        if is_strict_saop(mcx, expr, true)? {
             result = find_nonnullable_rels_list(mcx, &expr.args, false)?;
         }
     } else if let Some(expr) = node.as_relabeltype() {
@@ -1072,7 +1072,7 @@ fn find_nonnullable_vars_walker<'mcx>(
             result = find_nonnullable_vars_list(mcx, &args, false)?;
         }
     } else if let Some(expr) = node.as_scalararrayopexpr() {
-        if is_strict_saop(expr, true)? {
+        if is_strict_saop(mcx, expr, true)? {
             result = find_nonnullable_vars_list(mcx, &expr.args, false)?;
         }
     } else if let Some(expr) = node.as_boolexpr() {
@@ -1245,7 +1245,11 @@ pub fn find_forced_null_var(node: Option<&Expr>) -> Option<&Expr> {
 // ===========================================================================
 
 /// `is_strict_saop(expr, falseOK)` (clauses.c:2026).
-pub(crate) fn is_strict_saop(expr: &ScalarArrayOpExpr, false_ok: bool) -> PgResult<bool> {
+pub(crate) fn is_strict_saop<'mcx>(
+    mcx: Mcx<'mcx>,
+    expr: &ScalarArrayOpExpr,
+    false_ok: bool,
+) -> PgResult<bool> {
     // The contained operator must be strict. set_sa_opfuncid needs &mut.
     let opfuncid = {
         let mut tmp = expr.clone();
@@ -1266,8 +1270,10 @@ pub(crate) fn is_strict_saop(expr: &ScalarArrayOpExpr, false_ok: bool) -> PgResu
         if c.constisnull {
             return Ok(false);
         }
-        let nitems =
-            backend_utils_adt_arrayfuncs_seams::array_const_nitems::call(const_value_bare(c))?;
+        let nitems = backend_utils_adt_arrayfuncs_seams::array_const_nitems::call(
+            mcx,
+            c.constvalue.as_ref_bytes(),
+        )?;
         if nitems > 0 {
             return Ok(true);
         }
@@ -1277,15 +1283,6 @@ pub(crate) fn is_strict_saop(expr: &ScalarArrayOpExpr, false_ok: bool) -> PgResu
         }
     }
     Ok(false)
-}
-
-/// Bridge the canonical `Const.constvalue` (`types_tuple` `Datum<'static>`) to
-/// the bare-word `Datum` the arrayfuncs seam takes (the varlena array pointer
-/// word). Only the by-value (pointer-word) arm is meaningful for a varlena
-/// array Const; a by-reference value would already be flat bytes (the seam
-/// would detoast nothing).
-fn const_value_bare(c: &types_nodes::primnodes::Const) -> types_datum::datum::Datum {
-    types_datum::datum::Datum::from_usize(c.constvalue.as_usize())
 }
 
 // ===========================================================================
@@ -1362,12 +1359,12 @@ pub fn CommuteOpExpr(clause: &mut OpExpr) -> PgResult<()> {
 /// `node` for `ScalarArrayOpExpr`s and fill in the hash function for any that
 /// would be useful to evaluate using a hash table. Destructively modifies
 /// `node` in place.
-pub fn convert_saop_to_hashed_saop(node: &mut Expr) -> PgResult<()> {
+pub fn convert_saop_to_hashed_saop<'mcx>(mcx: Mcx<'mcx>, node: &mut Expr) -> PgResult<()> {
     // The Expr model exposes only the consume/rebuild `expression_tree_mutator`
     // for in-place rewrites; take the node out, transform it, and put it back.
     let taken = core::mem::replace(node, Expr::Const(types_nodes::primnodes::Const::default()));
     let mut err: Option<PgError> = None;
-    *node = convert_saop_to_hashed_saop_walker(taken, &mut err);
+    *node = convert_saop_to_hashed_saop_walker(mcx, taken, &mut err);
     match err {
         Some(e) => Err(e),
         None => Ok(()),
@@ -1377,14 +1374,18 @@ pub fn convert_saop_to_hashed_saop(node: &mut Expr) -> PgResult<()> {
 /// Visit `node`: if it is a `ScalarArrayOpExpr`, fill in the hash function as
 /// per clauses.c, then recurse into its children (via the mutator). Returns the
 /// (possibly modified) node.
-fn convert_saop_to_hashed_saop_walker(mut node: Expr, err: &mut Option<PgError>) -> Expr {
+fn convert_saop_to_hashed_saop_walker<'mcx>(
+    mcx: Mcx<'mcx>,
+    mut node: Expr,
+    err: &mut Option<PgError>,
+) -> Expr {
     if err.is_some() {
         return node;
     }
     // If this node is a SAOP, fill in the hash function (no recursion into a
     // matched SAOP, mirroring the C `return false` after handling it).
     if let Some(saop) = node.as_scalararrayopexpr_mut() {
-        match try_hash_saop(saop) {
+        match try_hash_saop(mcx, saop) {
             Ok(true) => return node, // handled; don't recurse into the SAOP
             Ok(false) => {}          // not handled; fall through to recurse
             Err(e) => {
@@ -1397,7 +1398,7 @@ fn convert_saop_to_hashed_saop_walker(mut node: Expr, err: &mut Option<PgError>)
     // Recurse into children (the mutator rebuilds the node with each child
     // transformed — equivalent to C's expression_tree_walker recursion).
     backend_nodes_core::nodefuncs::expression_tree_mutator(node, &mut |child| {
-        convert_saop_to_hashed_saop_walker(child, err)
+        convert_saop_to_hashed_saop_walker(mcx, child, err)
     })
 }
 
@@ -1405,7 +1406,7 @@ fn convert_saop_to_hashed_saop_walker(mut node: Expr, err: &mut Option<PgError>)
 /// `Ok(true)` if this was a hashable SAOP whose handling is complete (the C
 /// `return false` — don't recurse), `Ok(false)` if not a hashable SAOP (fall
 /// through to recurse), or `Err` on a catalog lookup failure.
-fn try_hash_saop(saop: &mut ScalarArrayOpExpr) -> PgResult<bool> {
+fn try_hash_saop<'mcx>(mcx: Mcx<'mcx>, saop: &mut ScalarArrayOpExpr) -> PgResult<bool> {
     // arrayarg = (Expr *) lsecond(saop->args); must be a non-null array Const.
     let arrconst = match saop.args.get(1).and_then(|n| n.as_const()) {
         Some(c) if !c.constisnull => c.clone(),
@@ -1417,7 +1418,8 @@ fn try_hash_saop(saop: &mut ScalarArrayOpExpr) -> PgResult<bool> {
         {
             if lefthashfunc == righthashfunc {
                 let nitems = backend_utils_adt_arrayfuncs_seams::array_const_nitems::call(
-                    const_value_bare(&arrconst),
+                    mcx,
+                    arrconst.constvalue.as_ref_bytes(),
                 )?;
                 if nitems >= MIN_ARRAY_SIZE_FOR_HASHED_SAOP {
                     saop.hashfuncid = lefthashfunc;
@@ -1434,7 +1436,8 @@ fn try_hash_saop(saop: &mut ScalarArrayOpExpr) -> PgResult<bool> {
             {
                 if lefthashfunc == righthashfunc {
                     let nitems = backend_utils_adt_arrayfuncs_seams::array_const_nitems::call(
-                        const_value_bare(&arrconst),
+                        mcx,
+                        arrconst.constvalue.as_ref_bytes(),
                     )?;
                     if nitems >= MIN_ARRAY_SIZE_FOR_HASHED_SAOP {
                         saop.hashfuncid = lefthashfunc;

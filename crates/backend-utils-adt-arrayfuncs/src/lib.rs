@@ -100,6 +100,7 @@ pub fn init_seams() {
     seams::build_name_array::set(construct::build_name_array);
     seams::array_to_text_elements::set(io::array_to_text_elements);
     seams::construct_int4_array::set(construct::construct_int4_array);
+    seams::array_const_nitems::set(construct::array_const_nitems);
     seams::array_get_ndim::set(construct::array_get_ndim);
     seams::array_get_elemtype::set(construct::array_get_elemtype);
     seams::array_get_elemtype_bytes::set(construct::array_get_elemtype_bytes);

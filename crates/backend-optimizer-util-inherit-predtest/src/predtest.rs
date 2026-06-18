@@ -244,9 +244,11 @@ fn make_dummy_const(
     })
 }
 
+
 /// `DatumGetArrayTypeP(const->constvalue)` argument: the array Const's value as
-/// the bare machine word the arrayfuncs seams take (mirrors clauses.c's
-/// `const_value_bare`; the `as_usize` word lane for folded array Consts).
+/// the bare machine word the (still bare-word) `array_get_elemtype` /
+/// `deconstruct_array` seams take (the `as_usize` word lane for folded array
+/// Consts).
 #[inline]
 fn const_value_bare(c: &Const) -> types_datum::datum::Datum {
     types_datum::datum::Datum::from_usize(c.constvalue.as_usize())
@@ -472,10 +474,10 @@ fn predicate_implied_by_recurse<'mcx>(
     let mut result: bool;
 
     let mut pred_info = PredIterInfo::atom();
-    let pclass = predicate_classify(predicate, &mut pred_info)?;
+    let pclass = predicate_classify(mcx, predicate, &mut pred_info)?;
 
     let mut clause_info = PredIterInfo::atom();
-    match predicate_classify(clause, &mut clause_info)? {
+    match predicate_classify(mcx, clause, &mut clause_info)? {
         PredClass::And => match pclass {
             PredClass::And => {
                 /* AND-clause => AND-clause if A implies each of B's items */
@@ -618,10 +620,10 @@ fn predicate_refuted_by_recurse<'mcx>(
     let mut result: bool;
 
     let mut pred_info = PredIterInfo::atom();
-    let pclass = predicate_classify(predicate, &mut pred_info)?;
+    let pclass = predicate_classify(mcx, predicate, &mut pred_info)?;
 
     let mut clause_info = PredIterInfo::atom();
-    match predicate_classify(clause, &mut clause_info)? {
+    match predicate_classify(mcx, clause, &mut clause_info)? {
         PredClass::And => match pclass {
             PredClass::And => {
                 /*
@@ -805,7 +807,11 @@ fn predicate_refuted_by_recurse<'mcx>(
  * Enforces MAX_SAOP_ARRAY_SIZE: an over-large ScalarArrayOpExpr is classified
  * as an atom (and passed as-is to the simple_clause functions).
  */
-fn predicate_classify(clause: &Expr, info: &mut PredIterInfo) -> PgResult<PredClass> {
+fn predicate_classify<'mcx>(
+    mcx: Mcx<'mcx>,
+    clause: &Expr,
+    info: &mut PredIterInfo,
+) -> PgResult<PredClass> {
     /* Handle normal AND and OR boolean clauses */
     if is_andclause(clause) {
         info.kind = PredIterKind::List;
@@ -831,8 +837,10 @@ fn predicate_classify(clause: &Expr, info: &mut PredIterInfo) -> PgResult<PredCl
         if let Some(arraynode) = arraynode {
             if let Some(arrayconst) = arraynode.as_const() {
                 if !arrayconst.constisnull {
-                    let nelems =
-                        arrayfuncs::array_const_nitems::call(const_value_bare(arrayconst))?;
+                    let nelems = arrayfuncs::array_const_nitems::call(
+                        mcx,
+                        arrayconst.constvalue.as_ref_bytes(),
+                    )?;
                     if nelems <= MAX_SAOP_ARRAY_SIZE {
                         info.kind = PredIterKind::ArrayConst;
                         return Ok(if saop.useOr {
@@ -927,7 +935,7 @@ fn predicate_implied_by_simple_clause<'mcx>(
              */
             if !weak && !predntest.argisrow {
                 if let Some(arg) = predntest.arg.as_deref() {
-                    if clause_is_strict_for(clause, arg, true)? {
+                    if clause_is_strict_for(mcx, clause, arg, true)? {
                         return Ok(true);
                     }
                 }
@@ -1002,7 +1010,7 @@ fn predicate_refuted_by_simple_clause<'mcx>(
              */
             if weak {
                 if let Some(carg) = clausentest.arg.as_deref() {
-                    if clause_is_strict_for(predicate, carg, true)? {
+                    if clause_is_strict_for(mcx, predicate, carg, true)? {
                         return Ok(true);
                     }
                 }
@@ -1043,7 +1051,7 @@ fn predicate_refuted_by_simple_clause<'mcx>(
              * that the predicate is refuted if the clause is strict for "foo".
              */
             if let Some(parg) = predntest.arg.as_deref() {
-                if clause_is_strict_for(clause, parg, true)? {
+                if clause_is_strict_for(mcx, clause, parg, true)? {
                     return Ok(true);
                 }
             }
@@ -1112,7 +1120,12 @@ fn extract_strong_not_arg(clause: &Expr) -> Option<&Expr> {
  * assumed to yield NULL?  See predtest.c for the full set of proof rules and
  * the allow_false semantics.
  */
-fn clause_is_strict_for(mut clause: &Expr, mut subexpr: &Expr, allow_false: bool) -> PgResult<bool> {
+fn clause_is_strict_for<'mcx>(
+    mcx: Mcx<'mcx>,
+    mut clause: &Expr,
+    mut subexpr: &Expr,
+    allow_false: bool,
+) -> PgResult<bool> {
     /*
      * Look through any RelabelType nodes, so that we can match, say,
      * varcharcol with lower(varcharcol::text).  We should not see stacked
@@ -1142,7 +1155,7 @@ fn clause_is_strict_for(mut clause: &Expr, mut subexpr: &Expr, allow_false: bool
         let op = clause.as_opexpr().unwrap();
         if lsyscache::op_strict::call(op.opno)? {
             for arg in &op.args {
-                if clause_is_strict_for(arg, subexpr, false)? {
+                if clause_is_strict_for(mcx, arg, subexpr, false)? {
                     return Ok(true);
                 }
             }
@@ -1153,7 +1166,7 @@ fn clause_is_strict_for(mut clause: &Expr, mut subexpr: &Expr, allow_false: bool
         let f = clause.as_funcexpr().unwrap();
         if lsyscache::func_strict::call(f.funcid)? {
             for arg in &f.args {
-                if clause_is_strict_for(arg, subexpr, false)? {
+                if clause_is_strict_for(mcx, arg, subexpr, false)? {
                     return Ok(true);
                 }
             }
@@ -1167,25 +1180,25 @@ fn clause_is_strict_for(mut clause: &Expr, mut subexpr: &Expr, allow_false: bool
      */
     if let Some(c) = clause.as_coerceviaio() {
         return match c.arg.as_deref() {
-            Some(a) => clause_is_strict_for(a, subexpr, false),
+            Some(a) => clause_is_strict_for(mcx, a, subexpr, false),
             None => Ok(false),
         };
     }
     if let Some(c) = clause.as_arraycoerceexpr() {
         return match c.arg.as_deref() {
-            Some(a) => clause_is_strict_for(a, subexpr, false),
+            Some(a) => clause_is_strict_for(mcx, a, subexpr, false),
             None => Ok(false),
         };
     }
     if let Some(c) = clause.as_convertrowtypeexpr() {
         return match c.arg.as_deref() {
-            Some(a) => clause_is_strict_for(a, subexpr, false),
+            Some(a) => clause_is_strict_for(mcx, a, subexpr, false),
             None => Ok(false),
         };
     }
     if let Some(c) = clause.as_coercetodomain() {
         return match c.arg.as_deref() {
-            Some(a) => clause_is_strict_for(a, subexpr, false),
+            Some(a) => clause_is_strict_for(mcx, a, subexpr, false),
             None => Ok(false),
         };
     }
@@ -1205,7 +1218,7 @@ fn clause_is_strict_for(mut clause: &Expr, mut subexpr: &Expr, allow_false: bool
          * empty.
          */
         let scalar_strict = match scalarnode {
-            Some(s) => clause_is_strict_for(s, subexpr, false)?,
+            Some(s) => clause_is_strict_for(mcx, s, subexpr, false)?,
             None => false,
         };
         if scalar_strict && lsyscache::op_strict::call(saop.opno)? {
@@ -1222,7 +1235,10 @@ fn clause_is_strict_for(mut clause: &Expr, mut subexpr: &Expr, allow_false: bool
                         return Ok(true);
                     }
                     /* Otherwise, we can compute the number of elements. */
-                    nelems = arrayfuncs::array_const_nitems::call(const_value_bare(arrayconst))?;
+                    nelems = arrayfuncs::array_const_nitems::call(
+                        mcx,
+                        arrayconst.constvalue.as_ref_bytes(),
+                    )?;
                 } else if let Some(arrayexpr) = an.as_arrayexpr() {
                     /*
                      * We can also reliably count the number of array elements
@@ -1245,7 +1261,7 @@ fn clause_is_strict_for(mut clause: &Expr, mut subexpr: &Expr, allow_false: bool
          * cases, since ScalarArrayOpExpr always returns NULL for a NULL array.
          */
         return match arraynode {
-            Some(a) => clause_is_strict_for(a, subexpr, false),
+            Some(a) => clause_is_strict_for(mcx, a, subexpr, false),
             None => Ok(false),
         };
     }

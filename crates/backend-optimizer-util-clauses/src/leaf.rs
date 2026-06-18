@@ -37,7 +37,10 @@ pub(crate) fn clamp_row_est(nrows: f64) -> f64 {
 /// is C's no-stats fall-through — the default guess of 10.
 ///
 /// `Err` carries the `array_const_nitems` overflow / detoast surface.
-pub fn estimate_array_length(arrayexpr: &Expr) -> types_error::PgResult<f64> {
+pub fn estimate_array_length<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    arrayexpr: &Expr,
+) -> types_error::PgResult<f64> {
     // look through any binary-compatible relabeling of arrayexpr
     let arrayexpr = strip_array_coercion(arrayexpr);
 
@@ -45,10 +48,10 @@ pub fn estimate_array_length(arrayexpr: &Expr) -> types_error::PgResult<f64> {
         if c.constisnull {
             return Ok(0.0);
         }
-        // ArrayGetNItems(ARR_NDIM(arrayval), ARR_DIMS(arrayval)).
-        let nitems = arrayfuncs_seam::array_const_nitems::call(types_datum::datum::Datum::from_usize(
-            c.constvalue.as_usize(),
-        ))?;
+        // ArrayGetNItems(ARR_NDIM(arrayval), ARR_DIMS(arrayval)) — the seam
+        // detoasts off the constvalue's verbatim array bytes.
+        let nitems =
+            arrayfuncs_seam::array_const_nitems::call(mcx, c.constvalue.as_ref_bytes())?;
         return Ok(nitems as f64);
     }
     if let Some(ae) = arrayexpr.as_arrayexpr() {
