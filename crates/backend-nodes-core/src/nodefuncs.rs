@@ -190,22 +190,45 @@ pub fn expr_type(expr: Option<&Expr>) -> PgResult<Oid> {
     Ok(type_)
 }
 
+/// `linitial_node(TargetEntry, qtree->targetList)` over the embedded sub-Query:
+/// the first target entry's expr. C asserts the embedded subselect IsA Query
+/// and the first target entry is not resjunk; we surface the missing-Query case
+/// as the C "untransformed sublink" elog.
+fn sublink_first_target_expr<'a>(
+    sublink: &'a SubLink,
+    what: &str,
+) -> PgResult<&'a Expr> {
+    let qtree = sublink
+        .subselect
+        .as_ref()
+        .ok_or_else(|| untransformed_sublink_error_t(what))?;
+    let tent = qtree
+        .targetList
+        .first()
+        .ok_or_else(|| untransformed_sublink_error_t(what))?;
+    debug_assert!(!tent.resjunk);
+    tent.expr
+        .as_deref()
+        .ok_or_else(|| untransformed_sublink_error_t(what))
+}
+
 /// The `EXPR_SUBLINK`/`ARRAY_SUBLINK`/`MULTIEXPR_SUBLINK`/boolean dispatch of
-/// `exprType` over a `SubLink`. `SubLink.subselect` is now the embedded owned
-/// sub-`Query` (mirroring `RangeTblEntry.subquery`), reached by deref. Until
-/// `transformSubLink` (parse_expr.c) is ported the analyzed-SubLink producer
-/// leaves `subselect` `None`, so the `EXPR/ARRAY` arms that would read the
-/// subselect's first target column surface as the C "cannot get type for
-/// untransformed sublink" error — exactly what C raises when the subselect is
-/// not a transformed `Query`. (When the producer lands, these arms read
-/// `qtree->targetList`'s first non-junk `TargetEntry` like C.)
+/// `exprType` over a `SubLink`. For EXPR/ARRAY the result type is that of the
+/// subselect's first target column (ARRAY promotes it to its array type);
+/// MULTIEXPR is RECORD; everything else is BOOLEAN.
 fn sublink_result_type(sublink: &SubLink) -> PgResult<Oid> {
     if sublink.subLinkType == SubLinkType::Expr
         || sublink.subLinkType == SubLinkType::Array
     {
-        // subselect is None until transformSubLink lands; matches C's
-        // untransformed path.
-        Err(untransformed_sublink_error("type")?)
+        let tent_expr = sublink_first_target_expr(sublink, "type")?;
+        let mut type_ = expr_type(Some(tent_expr))?;
+        if sublink.subLinkType == SubLinkType::Array {
+            type_ = lsyscache::get_promoted_array_type::call(type_)?;
+            if !oid_is_valid(type_) {
+                return Err(no_array_type_error(expr_type(Some(tent_expr))?)?);
+            }
+        }
+        Ok(type_)
     } else if sublink.subLinkType == SubLinkType::MultiExpr {
         Ok(RECORDOID)
     } else {
@@ -260,7 +283,10 @@ pub fn expr_typmod(expr: Option<&Expr>) -> PgResult<i32> {
             if sublink.subLinkType == SubLinkType::Expr
                 || sublink.subLinkType == SubLinkType::Array
             {
-                return Err(untransformed_sublink_error("type")?);
+                // typmod of the subselect's first target column (we don't need
+                // to care whether it's an array).
+                let tent_expr = sublink_first_target_expr(sublink, "type")?;
+                return expr_typmod(Some(tent_expr));
             }
             -1
         }
@@ -626,7 +652,10 @@ pub fn expr_collation(expr: Option<&Expr>) -> PgResult<Oid> {
             if sublink.subLinkType == SubLinkType::Expr
                 || sublink.subLinkType == SubLinkType::Array
             {
-                return Err(untransformed_sublink_error("collation")?);
+                // collation of the subselect's first target column (unchanged
+                // by array conversion).
+                let tent_expr = sublink_first_target_expr(sublink, "collation")?;
+                return expr_collation(Some(tent_expr));
             }
             InvalidOid
         }
@@ -1515,11 +1544,11 @@ where
 // Error constructors (the C elog/ereport surface)
 // ===========================================================================
 
-fn untransformed_sublink_error(what: &str) -> PgResult<types_error::PgError> {
+fn untransformed_sublink_error_t(what: &str) -> types_error::PgError {
     // C: elog(ERROR, "cannot get %s for untransformed sublink")
-    Ok(types_error::PgError::error(format!(
+    types_error::PgError::error(format!(
         "cannot get {what} for untransformed sublink"
-    )))
+    ))
 }
 
 fn unrecognized_node_type_error(name: &str) -> PgResult<types_error::PgError> {
