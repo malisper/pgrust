@@ -97,7 +97,11 @@ pub fn AddQual<'mcx>(
          * If it's a NOTIFY, silently ignore the qual; extra NOTIFY events are
          * harmless. If it isn't a NOTIFY, error out.
          */
-        if matches!(parsetree.utilityStmt.as_deref(), Some(Node::NotifyStmt(_))) {
+        if parsetree
+            .utilityStmt
+            .as_deref()
+            .is_some_and(|n| n.is_notifystmt())
+        {
             return Ok(());
         } else {
             return Err(ereport(ERROR)
@@ -121,11 +125,11 @@ pub fn AddQual<'mcx>(
     // copy = copyObject(qual);
     let copy: Node<'mcx> = qual.clone_in(mcx)?;
     // The qual is an ordinary boolean expression node (`Node::Expr`).
-    let copy_expr: Expr = match copy {
-        Node::Expr(e) => e,
+    let copy_expr: Expr = match copy.into_expr() {
+        Some(e) => e,
         // Faithful AddQual is only ever handed an expression qual; anything else
         // is an internal error (C would mishandle a non-expr Node likewise).
-        _ => return Err(PgError::error("AddQual: qual is not an expression")),
+        None => return Err(PgError::error("AddQual: qual is not an expression")),
     };
 
     // parsetree->jointree->quals =
@@ -138,9 +142,9 @@ pub fn AddQual<'mcx>(
     // Existing quals are carried as Node::Expr; pull out the Expr (or None).
     let existing: Option<Expr> = match jointree.quals.take() {
         None => None,
-        Some(n) => match &*n {
-            Node::Expr(e) => Some(e.clone()),
-            _ => return Err(PgError::error("AddQual: existing quals are not an expression")),
+        Some(n) => match n.as_expr() {
+            Some(e) => Some(e.clone()),
+            None => return Err(PgError::error("AddQual: existing quals are not an expression")),
         },
     };
 
@@ -195,9 +199,9 @@ pub fn AddInvertedQual<'mcx>(
     // arg must be an owned Expr inside the BooleanTest. C aliases the caller's
     // node and relies on AddQual's copyObject; over the owned model we clone the
     // arg expression into the BooleanTest now.
-    let arg_expr: Expr = match qual.clone_in(mcx)? {
-        Node::Expr(e) => e,
-        _ => return Err(PgError::error("AddInvertedQual: qual is not an expression")),
+    let arg_expr: Expr = match qual.clone_in(mcx)?.into_expr() {
+        Some(e) => e,
+        None => return Err(PgError::error("AddInvertedQual: qual is not an expression")),
     };
 
     // invqual = makeNode(BooleanTest);
@@ -245,7 +249,7 @@ pub fn adjustJoinTreeList<'mcx>(
         //   rt_index: foreach_delete_current(newjointree, l); break;
         let mut found: Option<usize> = None;
         for (i, item) in newjointree.iter().enumerate() {
-            if let Node::RangeTblRef(rtr) = &**item {
+            if let Some(rtr) = item.as_rangetblref() {
                 if rtr.rtindex == rt_index {
                     found = Some(i);
                     break;

@@ -123,7 +123,7 @@ pub fn contain_windowfuncs(node: &Node) -> bool {
 }
 
 fn contain_windowfuncs_walker(node: &Node) -> bool {
-    if let Node::Expr(Expr::WindowFunc(_)) = node {
+    if node.is_windowfunc() {
         return true;
     }
     // Mustn't recurse into subselects (no Query arm here).
@@ -147,7 +147,7 @@ pub fn locate_windowfunc(node: &Node) -> i32 {
 }
 
 fn locate_windowfunc_walker(node: &Node, win_location: &mut i32) -> bool {
-    if let Node::Expr(Expr::WindowFunc(wfunc)) = node {
+    if let Some(wfunc) = node.as_windowfunc() {
         if wfunc.location >= 0 {
             *win_location = wfunc.location;
             return true;
@@ -188,7 +188,7 @@ fn checkExprHasSubLink_walker(node: &Node) -> bool {
 /// `PARAM_MULTIEXPR` Param? Intentionally does NOT descend into SubLinks: only
 /// Params at the current query level are of interest.
 pub fn contains_multiexpr_param(node: &Node) -> bool {
-    if let Node::Expr(Expr::Param(p)) = node {
+    if let Some(p) = node.as_param() {
         if p.paramkind == ParamKind::PARAM_MULTIEXPR {
             return true;
         }

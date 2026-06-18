@@ -21,7 +21,7 @@ use backend_nodes_core::node_walker::{
 use backend_utils_error::ereport;
 use types_error::{PgError, PgResult, ERROR};
 use types_nodes::copy_query::Query;
-use types_nodes::nodes::Node;
+use types_nodes::nodes::{ntag, Node};
 use types_nodes::parsenodes::{RangeTblEntry, RTEKind};
 use types_nodes::primnodes::{Expr, VarReturningType};
 
@@ -140,7 +140,7 @@ pub fn IncrementVarSublevelsUp(
     // C uses query_or_expression_tree_walker(..., QTW_EXAMINE_RTES_BEFORE).
     // Starting at a Query does NOT increment min_sublevels_up, so we bump the
     // top Query's own RTE_CTE entries at the current level before descending.
-    if let Node::Query(q) = node {
+    if let Some(q) = node.as_query_mut() {
         increment_query_ctes(q, &ctx);
     }
     query_or_expression_tree_mutator(
@@ -193,14 +193,16 @@ struct SetReturnCtx {
 }
 
 fn SetVarReturningType_walker(node: &mut Node, ctx: &mut SetReturnCtx) -> bool {
-    match node {
-        Node::Expr(Expr::Var(var)) => {
+    match node.node_tag() {
+        ntag::T_Var => {
+            let var = node.as_var_mut().unwrap();
             if var.varno == ctx.result_relation && var.varlevelsup as i32 == ctx.sublevels_up {
                 var.varreturningtype = ctx.returning_type;
             }
             false
         }
-        Node::Query(q) => {
+        ntag::T_Query => {
+            let q = node.as_query_mut().unwrap();
             ctx.sublevels_up += 1;
             let result =
                 query_tree_mutator(q, &mut |n| SetVarReturningType_walker(n, ctx), 0);

@@ -5,7 +5,7 @@
 
 use types_error::{PgError, PgResult};
 use types_nodes::copy_query::Query;
-use types_nodes::nodes::{CmdType, Node};
+use types_nodes::nodes::CmdType;
 use types_nodes::parsenodes::RTEKind;
 
 /// `PRS2_OLD_VARNO` / `PRS2_NEW_VARNO` (primnodes.h) — the rangetable indexes
@@ -58,9 +58,9 @@ pub fn getInsertSelectQuery<'a, 'mcx>(parsetree: &'a Query<'mcx>) -> PgResult<&'
     }
     // rtr = (RangeTblRef *) linitial(parsetree->jointree->fromlist);
     // if (!IsA(rtr, RangeTblRef)) elog(ERROR, ...);
-    let rtr = match &*jointree.fromlist[0] {
-        Node::RangeTblRef(rtr) => rtr,
-        _ => return Err(PgError::error("expected to find SELECT subquery")),
+    let rtr = match jointree.fromlist[0].as_rangetblref() {
+        Some(rtr) => rtr,
+        None => return Err(PgError::error("expected to find SELECT subquery")),
     };
     // selectrte = rt_fetch(rtr->rtindex, parsetree->rtable);
     let selectrte = parsetree
@@ -129,9 +129,9 @@ pub fn getInsertSelectQueryIndex(parsetree: &Query<'_>) -> PgResult<Option<usize
     if jointree.fromlist.len() != 1 {
         return Err(PgError::error("expected to find SELECT subquery"));
     }
-    let rtr = match &*jointree.fromlist[0] {
-        Node::RangeTblRef(rtr) => rtr,
-        _ => return Err(PgError::error("expected to find SELECT subquery")),
+    let rtr = match jointree.fromlist[0].as_rangetblref() {
+        Some(rtr) => rtr,
+        None => return Err(PgError::error("expected to find SELECT subquery")),
     };
     let rtindex = rtr.rtindex as usize;
     let selectrte = parsetree

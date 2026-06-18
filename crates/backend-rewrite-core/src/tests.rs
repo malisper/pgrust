@@ -58,7 +58,7 @@ fn var(varno: i32, levelsup: u32) -> Node<'static> {
 fn offset_var_nodes_bumps_varno() {
     let mut n = var(3, 0);
     crate::offset::OffsetVarNodes(&mut n, 10, 0);
-    if let Node::Expr(Expr::Var(v)) = &n {
+    if let Some(v) = n.as_var() {
         assert_eq!(v.varno, 13);
     } else {
         panic!("not a var");
@@ -69,7 +69,7 @@ fn offset_var_nodes_bumps_varno() {
 fn change_var_nodes_remaps_varno() {
     let mut n = var(2, 0);
     crate::change::ChangeVarNodes(&mut n, 2, 9, 0);
-    if let Node::Expr(Expr::Var(v)) = &n {
+    if let Some(v) = n.as_var() {
         assert_eq!(v.varno, 9);
     } else {
         panic!("not a var");
@@ -77,7 +77,7 @@ fn change_var_nodes_remaps_varno() {
     // sublevels_up mismatch: no change.
     let mut n2 = var(2, 1);
     crate::change::ChangeVarNodes(&mut n2, 2, 9, 0);
-    if let Node::Expr(Expr::Var(v)) = &n2 {
+    if let Some(v) = n2.as_var() {
         assert_eq!(v.varno, 2);
     } else {
         panic!("not a var");
@@ -88,7 +88,7 @@ fn change_var_nodes_remaps_varno() {
 fn increment_var_sublevels_up_bumps() {
     let mut n = var(1, 0);
     crate::increment::IncrementVarSublevelsUp(&mut n, 2, 0).unwrap();
-    if let Node::Expr(Expr::Var(v)) = &n {
+    if let Some(v) = n.as_var() {
         assert_eq!(v.varlevelsup, 2);
     } else {
         panic!("not a var");
@@ -100,7 +100,7 @@ fn add_nulling_relids_adds_to_var() {
     let mut n = var(4, 0);
     let added = rel(&[7]);
     crate::nulling::add_nulling_relids(&mut n, None, &added);
-    if let Node::Expr(Expr::Var(v)) = &n {
+    if let Some(v) = n.as_var() {
         assert!(relids::is_member(7, &v.varnullingrels));
     } else {
         panic!("not a var");
@@ -143,9 +143,10 @@ fn add_qual_into_empty_where() {
 
     // The single qual becomes the WHERE clause directly (make_and_qual: q2 alone).
     let quals = q.jointree.as_deref().unwrap().quals.as_deref().unwrap();
-    match quals {
-        Node::Expr(Expr::Var(v)) => assert_eq!(v.varno, 5),
-        other => panic!("unexpected quals: {other:?}"),
+    if let Some(v) = quals.as_var() {
+        assert_eq!(v.varno, 5)
+    } else {
+        panic!("unexpected quals: {quals:?}")
     }
 }
 
@@ -266,9 +267,9 @@ fn adjust_join_tree_list_removes_matching_rtr() {
     let out = crate::manip_rule::adjustJoinTreeList(&q, true, 2, mcx).unwrap();
     let remaining: alloc::vec::Vec<i32> = out
         .iter()
-        .map(|n| match &**n {
-            Node::RangeTblRef(r) => r.rtindex,
-            _ => panic!("not an rtr"),
+        .map(|n| match n.as_rangetblref() {
+            Some(r) => r.rtindex,
+            None => panic!("not an rtr"),
         })
         .collect();
     assert_eq!(remaining, alloc::vec![1, 3]);

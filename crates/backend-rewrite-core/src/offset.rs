@@ -101,7 +101,7 @@ pub fn OffsetVarNodes(node: &mut Node, offset: i32, sublevels_up: i32) {
     // Must be prepared to start with a Query or a bare expression tree; if it's a
     // Query, go straight to query_tree_walker so sublevels_up doesn't increment
     // prematurely.
-    if let Node::Query(qry) = node {
+    if let Some(qry) = node.as_query_mut() {
         offset_query_self(qry, offset, sublevels_up);
         query_tree_mutator(qry, &mut |n| OffsetVarNodes_walker(n, &mut ctx), 0);
     } else {
@@ -127,7 +127,7 @@ fn offset_query_self(qry: &mut Query, offset: i32, sublevels_up: i32) {
         }
     }
     for rm in qry.rowMarks.iter_mut() {
-        if let Node::RowMarkClause(rc) = &mut **rm {
+        if let Some(rc) = rm.as_rowmarkclause_mut() {
             rc.rti = (rc.rti as i32 + offset) as u32;
         }
     }

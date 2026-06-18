@@ -14,8 +14,8 @@
 use backend_nodes_core::node_walker::{
     expression_tree_walker_mut, query_or_expression_tree_mutator, query_tree_mutator,
 };
-use types_nodes::nodes::Node;
-use types_nodes::primnodes::{Expr, ExprRelids};
+use types_nodes::nodes::{ntag, Node};
+use types_nodes::primnodes::ExprRelids;
 
 use crate::relids;
 
@@ -31,8 +31,9 @@ struct AddNullingCtx<'a> {
 }
 
 fn add_nulling_relids_mutator(node: &mut Node, ctx: &mut AddNullingCtx) -> bool {
-    match node {
-        Node::Expr(Expr::Var(var)) => {
+    match node.node_tag() {
+        ntag::T_Var => {
+            let var = node.as_var_mut().unwrap();
             if var.varlevelsup as i32 == ctx.sublevels_up
                 && (ctx.target_relids.is_none()
                     || relids::is_member(var.varno, ctx.target_relids.unwrap()))
@@ -41,22 +42,22 @@ fn add_nulling_relids_mutator(node: &mut Node, ctx: &mut AddNullingCtx) -> bool 
             }
             false
         }
-        Node::Expr(Expr::PlaceHolderVar(_)) => {
-            if let Node::Expr(Expr::PlaceHolderVar(phv)) = node {
-                if phv.phlevelsup as i32 == ctx.sublevels_up
-                    && (ctx.target_relids.is_none()
-                        || relids::overlap(&phv.phrels, ctx.target_relids.unwrap()))
-                {
-                    // We don't modify the PHV's expression, only add to
-                    // phnullingrels.
-                    phv.phnullingrels = relids::union(&phv.phnullingrels, ctx.added_relids);
-                    return false;
-                }
+        ntag::T_PlaceHolderVar => {
+            let phv = node.as_placeholdervar_mut().unwrap();
+            if phv.phlevelsup as i32 == ctx.sublevels_up
+                && (ctx.target_relids.is_none()
+                    || relids::overlap(&phv.phrels, ctx.target_relids.unwrap()))
+            {
+                // We don't modify the PHV's expression, only add to
+                // phnullingrels.
+                phv.phnullingrels = relids::union(&phv.phnullingrels, ctx.added_relids);
+                return false;
             }
             // Otherwise fall through to copy the PlaceHolderVar normally
             expression_tree_walker_mut(node, &mut |n| add_nulling_relids_mutator(n, ctx))
         }
-        Node::Query(q) => {
+        ntag::T_Query => {
+            let q = node.as_query_mut().unwrap();
             ctx.sublevels_up += 1;
             let result = query_tree_mutator(q, &mut |n| add_nulling_relids_mutator(n, ctx), 0);
             ctx.sublevels_up -= 1;
@@ -96,8 +97,9 @@ struct RemoveNullingCtx<'a> {
 }
 
 fn remove_nulling_relids_mutator(node: &mut Node, ctx: &mut RemoveNullingCtx) -> bool {
-    match node {
-        Node::Expr(Expr::Var(var)) => {
+    match node.node_tag() {
+        ntag::T_Var => {
+            let var = node.as_var_mut().unwrap();
             if var.varlevelsup as i32 == ctx.sublevels_up
                 && !relids::is_member(var.varno, ctx.except_relids)
                 && relids::overlap(&var.varnullingrels, ctx.removable_relids)
@@ -107,32 +109,31 @@ fn remove_nulling_relids_mutator(node: &mut Node, ctx: &mut RemoveNullingCtx) ->
             }
             false
         }
-        Node::Expr(Expr::PlaceHolderVar(_)) => {
-            let matched = if let Node::Expr(Expr::PlaceHolderVar(phv)) = node {
+        ntag::T_PlaceHolderVar => {
+            let matched = {
+                let phv = node.as_placeholdervar().unwrap();
                 phv.phlevelsup as i32 == ctx.sublevels_up
                     && !relids::overlap(&phv.phrels, ctx.except_relids)
-            } else {
-                false
             };
             if matched {
                 // Copy the PlaceHolderVar and mutate what's below ...
                 expression_tree_walker_mut(node, &mut |n| {
                     remove_nulling_relids_mutator(n, ctx)
                 });
-                if let Node::Expr(Expr::PlaceHolderVar(phv)) = node {
-                    phv.phnullingrels =
-                        relids::difference(&phv.phnullingrels, ctx.removable_relids);
-                    // We must also update phrels, if it contains a removable RTI.
-                    phv.phrels = relids::difference(&phv.phrels, ctx.removable_relids);
-                    debug_assert!(!relids::is_empty(&phv.phrels));
-                }
+                let phv = node.as_placeholdervar_mut().unwrap();
+                phv.phnullingrels =
+                    relids::difference(&phv.phnullingrels, ctx.removable_relids);
+                // We must also update phrels, if it contains a removable RTI.
+                phv.phrels = relids::difference(&phv.phrels, ctx.removable_relids);
+                debug_assert!(!relids::is_empty(&phv.phrels));
                 false
             } else {
                 // Otherwise fall through to copy the PlaceHolderVar normally
                 expression_tree_walker_mut(node, &mut |n| remove_nulling_relids_mutator(n, ctx))
             }
         }
-        Node::Query(q) => {
+        ntag::T_Query => {
+            let q = node.as_query_mut().unwrap();
             ctx.sublevels_up += 1;
             let result =
                 query_tree_mutator(q, &mut |n| remove_nulling_relids_mutator(n, ctx), 0);

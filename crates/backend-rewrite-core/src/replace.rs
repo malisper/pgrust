@@ -29,7 +29,7 @@ use backend_utils_error::ereport;
 use mcx::{Mcx, PgVec};
 use types_core::primitive::Oid;
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
-use types_nodes::nodes::{Node, NodePtr};
+use types_nodes::nodes::{ntag, Node, NodePtr};
 use types_nodes::parsenodes::RangeTblEntry;
 use types_nodes::primnodes::{
     CoercionForm, ConvertRowtypeExpr, Expr, ReturningExpr, RowExpr, Var, VarReturningType,
@@ -186,7 +186,7 @@ pub fn replace_rte_variables(
         inserted_sublink: false,
     };
 
-    if let Node::Query(q) = node {
+    if let Some(q) = node.as_query() {
         context.inserted_sublink = q.hasSubLinks;
     } else if let Some(flag) = outer_has_sublinks {
         context.inserted_sublink = *flag;
@@ -194,36 +194,33 @@ pub fn replace_rte_variables(
         context.inserted_sublink = false;
     }
 
-    match &mut *node {
-        Node::Query(q) => {
-            let mut err: Option<PgError> = None;
-            query_tree_mutator(
-                q,
-                &mut |n| {
-                    if err.is_some() {
-                        return true;
+    if let Some(q) = node.as_query_mut() {
+        let mut err: Option<PgError> = None;
+        query_tree_mutator(
+            q,
+            &mut |n| {
+                if err.is_some() {
+                    return true;
+                }
+                match replace_rte_variables_mutator(n, &mut context, &mut *callback) {
+                    Ok(abort) => abort,
+                    Err(e) => {
+                        err = Some(e);
+                        true
                     }
-                    match replace_rte_variables_mutator(n, &mut context, &mut *callback) {
-                        Ok(abort) => abort,
-                        Err(e) => {
-                            err = Some(e);
-                            true
-                        }
-                    }
-                },
-                0,
-            );
-            if let Some(e) = err {
-                return Err(e);
-            }
+                }
+            },
+            0,
+        );
+        if let Some(e) = err {
+            return Err(e);
         }
-        other => {
-            replace_rte_variables_mutator(other, &mut context, &mut *callback)?;
-        }
+    } else {
+        replace_rte_variables_mutator(node, &mut context, &mut *callback)?;
     }
 
     if context.inserted_sublink {
-        if let Node::Query(q) = node {
+        if let Some(q) = node.as_query_mut() {
             q.hasSubLinks = true;
         } else if let Some(flag) = outer_has_sublinks {
             *flag = true;
@@ -250,19 +247,14 @@ struct MapAttnosCtx<'a> {
 }
 
 fn map_variable_attnos_mutator(node: &mut Node, ctx: &mut MapAttnosCtx<'_>) -> PgResult<bool> {
-    match node {
-        Node::Expr(Expr::Var(_)) => {
-            let matched = if let Node::Expr(Expr::Var(var)) = node {
+    match node.node_tag() {
+        ntag::T_Var => {
+            let matched = {
+                let var = node.as_var().unwrap();
                 var.varno == ctx.target_varno && var.varlevelsup as i32 == ctx.sublevels_up
-            } else {
-                false
             };
             if matched {
-                let var = if let Node::Expr(Expr::Var(var)) = node {
-                    var
-                } else {
-                    unreachable!()
-                };
+                let var = node.as_var_mut().unwrap();
                 let attno = var.varattno;
                 if attno > 0 {
                     // user-defined column, replace attno
@@ -304,10 +296,11 @@ fn map_variable_attnos_mutator(node: &mut Node, ctx: &mut MapAttnosCtx<'_>) -> P
             }
             Ok(false)
         }
-        Node::Expr(Expr::ConvertRowtypeExpr(_)) => {
+        ntag::T_ConvertRowtypeExpr => {
             // Simplify var::parenttype::grandparenttype into var::grandparenttype
             // when coercing a whole-row Var we need to convert.
-            let do_simplify = if let Node::Expr(Expr::ConvertRowtypeExpr(r)) = node {
+            let do_simplify = {
+                let r = node.as_convertrowtypeexpr().unwrap();
                 match r.arg.as_deref() {
                     Some(Expr::Var(var)) => {
                         var.varno == ctx.target_varno
@@ -318,25 +311,23 @@ fn map_variable_attnos_mutator(node: &mut Node, ctx: &mut MapAttnosCtx<'_>) -> P
                     }
                     _ => false,
                 }
-            } else {
-                false
             };
             if do_simplify {
                 *ctx.found_whole_row = true;
-                if let Node::Expr(Expr::ConvertRowtypeExpr(r)) = node {
-                    if let Some(Expr::Var(var)) = r.arg.as_deref_mut() {
-                        // This certainly won't work for a RECORD variable.
-                        debug_assert!(var.vartype != RECORDOID);
-                        // Var itself is changed to the requested type.
-                        var.vartype = ctx.to_rowtype;
-                    }
+                let r = node.as_convertrowtypeexpr_mut().unwrap();
+                if let Some(Expr::Var(var)) = r.arg.as_deref_mut() {
+                    // This certainly won't work for a RECORD variable.
+                    debug_assert!(var.vartype != RECORDOID);
+                    // Var itself is changed to the requested type.
+                    var.vartype = ctx.to_rowtype;
                 }
                 return Ok(false);
             }
             // otherwise process the expression normally
             recurse_map_attnos(node, ctx)
         }
-        Node::Query(q) => {
+        ntag::T_Query => {
+            let q = node.as_query_mut().unwrap();
             ctx.sublevels_up += 1;
             let mut err: Option<PgError> = None;
             let r = query_tree_mutator(
@@ -404,32 +395,29 @@ pub fn map_variable_attnos(
         to_rowtype,
         found_whole_row,
     };
-    match &mut *node {
-        Node::Query(q) => {
-            let mut err: Option<PgError> = None;
-            query_tree_mutator(
-                q,
-                &mut |n| {
-                    if err.is_some() {
-                        return true;
+    if let Some(q) = node.as_query_mut() {
+        let mut err: Option<PgError> = None;
+        query_tree_mutator(
+            q,
+            &mut |n| {
+                if err.is_some() {
+                    return true;
+                }
+                match map_variable_attnos_mutator(n, &mut ctx) {
+                    Ok(abort) => abort,
+                    Err(e) => {
+                        err = Some(e);
+                        true
                     }
-                    match map_variable_attnos_mutator(n, &mut ctx) {
-                        Ok(abort) => abort,
-                        Err(e) => {
-                            err = Some(e);
-                            true
-                        }
-                    }
-                },
-                0,
-            );
-            if let Some(e) = err {
-                return Err(e);
-            }
+                }
+            },
+            0,
+        );
+        if let Some(e) = err {
+            return Err(e);
         }
-        other => {
-            map_variable_attnos_mutator(other, &mut ctx)?;
-        }
+    } else {
+        map_variable_attnos_mutator(node, &mut ctx)?;
     }
     Ok(())
 }
@@ -461,11 +449,11 @@ pub fn map_variable_attnos_expr_list<'mcx>(
         let mut one_fwr = false;
         map_variable_attnos(&mut node, 1, 0, attmap, INVALID_OID, &mut one_fwr)?;
         found_whole_row |= one_fwr;
-        match node {
-            Node::Expr(mapped) => out.push(mapped),
+        match node.into_expr() {
+            Some(mapped) => out.push(mapped),
             // map_variable_attnos never changes the top-level node kind for an
             // Expr input.
-            _ => unreachable!("map_variable_attnos returned a non-Expr for an Expr input"),
+            None => unreachable!("map_variable_attnos returned a non-Expr for an Expr input"),
         }
     }
     Ok((out, found_whole_row))
@@ -522,9 +510,9 @@ pub fn ReplaceVarFromTargetList<'mcx>(
             colnames: if var.vartype == RECORDOID {
                 colnames
                     .iter()
-                    .map(|n| match &**n {
-                        Node::String(s) => String::from(s.sval.as_str()),
-                        _ => String::new(),
+                    .map(|n| match n.as_string() {
+                        Some(s) => String::from(s.sval.as_str()),
+                        None => String::new(),
                     })
                     .collect()
             } else {
@@ -535,8 +523,8 @@ pub fn ReplaceVarFromTargetList<'mcx>(
 
         // Adjust the generated per-field Vars...
         for field_node in fields.iter() {
-            let field_expr: Expr = match &**field_node {
-                Node::Expr(Expr::Var(field_var)) => ReplaceVarFromTargetList(
+            let field_expr: Expr = if let Some(field_var) = field_node.as_var() {
+                ReplaceVarFromTargetList(
                     field_var,
                     target_rte,
                     targetlist,
@@ -544,9 +532,11 @@ pub fn ReplaceVarFromTargetList<'mcx>(
                     nomatch_option,
                     nomatch_varno,
                     mcx,
-                )?,
-                Node::Expr(e) => e.clone(),
-                _ => continue,
+                )?
+            } else if let Some(e) = field_node.as_expr() {
+                e.clone()
+            } else {
+                continue;
             };
             rowexpr.args.push(field_expr);
         }
@@ -652,9 +642,9 @@ fn no_match<'mcx>(
 }
 
 fn node_into_expr(node: Node) -> PgResult<Expr> {
-    match node {
-        Node::Expr(e) => Ok(e),
-        _ => Err(elog_error(
+    match node.into_expr() {
+        Some(e) => Ok(e),
+        None => Err(elog_error(
             "ReplaceVarFromTargetList: expected an expression node",
         )),
     }

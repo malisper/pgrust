@@ -141,11 +141,11 @@ pub fn init_seams() {
             for &id in nodes {
                 let mut node = types_nodes::nodes::Node::Expr(root.node(id).clone());
                 change::ChangeVarNodes(&mut node, rt_index, new_index, 0);
-                let walked = match node {
-                    types_nodes::nodes::Node::Expr(e) => e,
+                let walked = match node.into_expr() {
+                    Some(e) => e,
                     // ChangeVarNodes never changes the top-level node kind for an
                     // Expr input.
-                    _ => unreachable!("ChangeVarNodes returned a non-Expr for an Expr input"),
+                    None => unreachable!("ChangeVarNodes returned a non-Expr for an Expr input"),
                 };
                 *root.node_mut(id) = walked;
             }
@@ -168,9 +168,9 @@ pub fn init_seams() {
                 .unwrap_or_default();
             let mut node = types_nodes::nodes::Node::Expr(expr);
             nulling::add_nulling_relids(&mut node, target_er.as_ref(), &added_er);
-            match node {
-                types_nodes::nodes::Node::Expr(e) => e,
-                _ => unreachable!("add_nulling_relids returned a non-Expr for an Expr input"),
+            match node.into_expr() {
+                Some(e) => e,
+                None => unreachable!("add_nulling_relids returned a non-Expr for an Expr input"),
             }
         },
     );
@@ -183,9 +183,9 @@ pub fn init_seams() {
         |expr, delta_sublevels_up, min_sublevels_up| {
             let mut node = types_nodes::nodes::Node::Expr(expr);
             increment::IncrementVarSublevelsUp(&mut node, delta_sublevels_up, min_sublevels_up)?;
-            Ok(match node {
-                types_nodes::nodes::Node::Expr(e) => e,
-                _ => unreachable!(
+            Ok(match node.into_expr() {
+                Some(e) => e,
+                None => unreachable!(
                     "IncrementVarSublevelsUp returned a non-Expr for an Expr input"
                 ),
             })
@@ -208,9 +208,9 @@ pub fn init_seams() {
                 .unwrap_or_default();
             let mut node = types_nodes::nodes::Node::Expr(expr.clone());
             nulling::remove_nulling_relids(&mut node, &removable_er, &except_er);
-            match node {
-                types_nodes::nodes::Node::Expr(e) => e,
-                _ => unreachable!("remove_nulling_relids returned a non-Expr for an Expr input"),
+            match node.into_expr() {
+                Some(e) => e,
+                None => unreachable!("remove_nulling_relids returned a non-Expr for an Expr input"),
             }
         },
     );

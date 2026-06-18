@@ -149,7 +149,7 @@ pub fn ChangeVarNodesExtended(
     };
     let mut callback = callback;
 
-    if let Node::Query(qry) = node {
+    if let Some(qry) = node.as_query_mut() {
         change_query_self(qry, rt_index, new_index, sublevels_up);
         query_tree_mutator(
             qry,
@@ -191,7 +191,7 @@ fn change_query_self(qry: &mut Query, rt_index: i32, new_index: i32, sublevels_u
         }
     }
     for rm in qry.rowMarks.iter_mut() {
-        if let Node::RowMarkClause(rc) = &mut **rm {
+        if let Some(rc) = rm.as_rowmarkclause_mut() {
             if rc.rti as i32 == rt_index {
                 rc.rti = new_index as u32;
             }
