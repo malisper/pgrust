@@ -94,7 +94,7 @@ use types_tuple::heaptuple::{DEFAULT_COLLATION_OID, TEXTOID, UNKNOWNOID};
 
 use types_nodes::copy_query::Query;
 use types_nodes::jointype::JoinType;
-use types_nodes::nodes::{CmdType, Node};
+use types_nodes::nodes::{ntag, CmdType, Node};
 use types_nodes::parsestmt::{ParseExprKind, ParseState};
 use types_nodes::primnodes::{Expr, TargetEntry};
 use types_nodes::rawnodes::{
@@ -290,55 +290,51 @@ fn make_string_node<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<PgBox<'mcx, Node<
 
 /// `strVal(node)` — read a `String` node's contents (`""` for a non-String).
 fn str_val<'a>(node: &'a Node<'_>) -> &'a str {
-    match node {
-        Node::String(s) => s.sval.as_str(),
+    match node.node_tag() {
+        ntag::T_String => node.expect_string().sval.as_str(),
         _ => "",
     }
 }
 
 /// Is this `Node` a `Query`?
 fn is_query(node: Option<&Node<'_>>) -> bool {
-    matches!(node, Some(Node::Query(_)))
+    node.is_some_and(|n| n.is_query())
 }
 
 /// Borrow a node as a `Query` if it is one.
 fn query_of<'a, 'mcx>(node: Option<&'a Node<'mcx>>) -> Option<&'a Query<'mcx>> {
-    match node {
-        Some(Node::Query(q)) => Some(q),
-        _ => None,
-    }
+    node.and_then(|n| n.as_query())
 }
 
 /// Is the node a raw `SelectStmt`?
 fn is_select_stmt(node: Option<&Node<'_>>) -> bool {
-    matches!(node, Some(Node::SelectStmt(_)))
+    node.is_some_and(|n| n.is_selectstmt())
 }
 
 /// Is the node a data-modifying raw statement (Insert/Update/Delete/Merge)?
 fn is_data_modifying_stmt(node: Option<&Node<'_>>) -> bool {
-    matches!(
-        node,
-        Some(Node::InsertStmt(_))
-            | Some(Node::UpdateStmt(_))
-            | Some(Node::DeleteStmt(_))
-            | Some(Node::MergeStmt(_))
-    )
+    node.is_some_and(|n| {
+        matches!(
+            n.node_tag(),
+            ntag::T_InsertStmt | ntag::T_UpdateStmt | ntag::T_DeleteStmt | ntag::T_MergeStmt
+        )
+    })
 }
 
 /// Is the node a `RangeTblRef`?
 fn is_range_tbl_ref(node: Option<&Node<'_>>) -> bool {
-    matches!(node, Some(Node::RangeTblRef(_)))
+    node.is_some_and(|n| n.is_rangetblref())
 }
 
 /// The `withClause` of a raw DML/SELECT statement node — `None` if the node is
 /// not such a statement or has no WITH clause.
 fn stmt_with_clause<'a, 'mcx>(node: &'a Node<'mcx>) -> Option<&'a WithClause<'mcx>> {
-    match node {
-        Node::SelectStmt(s) => s.withClause.as_deref(),
-        Node::InsertStmt(s) => s.withClause.as_deref(),
-        Node::UpdateStmt(s) => s.withClause.as_deref(),
-        Node::DeleteStmt(s) => s.withClause.as_deref(),
-        Node::MergeStmt(s) => s.withClause.as_deref(),
+    match node.node_tag() {
+        ntag::T_SelectStmt => node.expect_selectstmt().withClause.as_deref(),
+        ntag::T_InsertStmt => node.expect_insertstmt().withClause.as_deref(),
+        ntag::T_UpdateStmt => node.expect_updatestmt().withClause.as_deref(),
+        ntag::T_DeleteStmt => node.expect_deletestmt().withClause.as_deref(),
+        ntag::T_MergeStmt => node.expect_mergestmt().withClause.as_deref(),
         _ => None,
     }
 }
@@ -347,10 +343,7 @@ fn stmt_with_clause<'a, 'mcx>(node: &'a Node<'mcx>) -> Option<&'a WithClause<'mc
 fn cte_names_of(wc: &WithClause<'_>) -> Vec<String> {
     wc.ctes
         .iter()
-        .filter_map(|c| match &**c {
-            Node::CommonTableExpr(cte) => Some(cte_name(cte).to_string()),
-            _ => None,
-        })
+        .filter_map(|c| c.as_commontableexpr().map(|cte| cte_name(cte).to_string()))
         .collect()
 }
 
@@ -397,9 +390,9 @@ fn expr_location_of_list(list: &PgVec<'_, PgBox<'_, Node<'_>>>) -> PgResult<i32>
 /// expression location where present and otherwise -1 (the trimmed-location
 /// fallback used repo-wide).
 fn expr_location_of_node(node: &Node<'_>) -> PgResult<i32> {
-    match node {
-        Node::Expr(e) => expr_location(Some(e)),
-        _ => Ok(-1),
+    match node.as_expr() {
+        Some(e) => expr_location(Some(e)),
+        None => Ok(-1),
     }
 }
 
@@ -430,12 +423,14 @@ pub fn transformWithClause<'mcx>(
     ctes.try_reserve(withClause.ctes.len())
         .map_err(|_| out_of_memory())?;
     for node in withClause.ctes {
-        match PgBox::into_inner(node) {
-            Node::CommonTableExpr(cte) => ctes.push(cte),
-            other => {
+        let other = PgBox::into_inner(node);
+        let other_tag = other.node_tag();
+        match other.into_commontableexpr() {
+            Some(cte) => ctes.push(cte),
+            None => {
                 return Err(elog_error(format!(
                     "WITH clause element is not a CommonTableExpr (node tag {:?})",
-                    other.node_tag()
+                    other_tag
                 )));
             }
         }
@@ -719,7 +714,7 @@ fn analyzeCTE<'mcx>(
     // CTE queries are always marked not canSetTag.  (Currently this only
     // matters for data-modifying statements, for which the flag will be
     // propagated to the ModifyTable plan node.)
-    if let Some(Node::Query(q)) = cte.ctequery.as_deref_mut() {
+    if let Some(q) = cte.ctequery.as_deref_mut().and_then(|n| n.as_query_mut()) {
         q.canSetTag = false;
     }
 
@@ -819,9 +814,9 @@ fn analyzeCTE<'mcx>(
         // and that the recursive query is not itself a set operation.
         let q = query_of(cte.ctequery.as_deref())
             .ok_or_else(|| elog_error("CTE query is not a Query"))?;
-        let sos = match q.setOperations.as_deref() {
-            Some(Node::SetOperationStmt(s)) => s,
-            _ => return Err(elog_error("CTE has no set operations")),
+        let sos = match q.setOperations.as_deref().and_then(|n| n.as_setoperationstmt()) {
+            Some(s) => s,
+            None => return Err(elog_error("CTE has no set operations")),
         };
 
         // This left side check is not required for expandability, but
@@ -1247,8 +1242,9 @@ fn makeDependencyGraphWalker<'mcx>(
     node: &Node<'mcx>,
     cstate: &mut CteState<'mcx>,
 ) -> PgResult<bool> {
-    match node {
-        Node::RangeVar(rv) => {
+    match node.node_tag() {
+        ntag::T_RangeVar => {
+            let rv = node.expect_rangevar();
             // If unqualified name, might be a CTE reference
             if rv.schemaname.is_none() {
                 let relname = rv.relname.as_ref().map(|s| s.as_str()).unwrap_or("");
@@ -1281,7 +1277,8 @@ fn makeDependencyGraphWalker<'mcx>(
             }
             Ok(false)
         }
-        Node::SelectStmt(stmt) => {
+        ntag::T_SelectStmt => {
+            let stmt = node.expect_selectstmt();
             if stmt.withClause.is_some() {
                 // Examine the WITH clause and the SelectStmt
                 WalkInnerWith(mcx, node, cstate, WalkerKind::Dependency)?;
@@ -1291,35 +1288,39 @@ fn makeDependencyGraphWalker<'mcx>(
             // if no WITH clause, just fall through for normal processing
             raw_walk_children_dep(mcx, node, cstate)
         }
-        Node::InsertStmt(stmt) => {
+        ntag::T_InsertStmt => {
+            let stmt = node.expect_insertstmt();
             if stmt.withClause.is_some() {
                 WalkInnerWith(mcx, node, cstate, WalkerKind::Dependency)?;
                 return Ok(false);
             }
             raw_walk_children_dep(mcx, node, cstate)
         }
-        Node::DeleteStmt(stmt) => {
+        ntag::T_DeleteStmt => {
+            let stmt = node.expect_deletestmt();
             if stmt.withClause.is_some() {
                 WalkInnerWith(mcx, node, cstate, WalkerKind::Dependency)?;
                 return Ok(false);
             }
             raw_walk_children_dep(mcx, node, cstate)
         }
-        Node::UpdateStmt(stmt) => {
+        ntag::T_UpdateStmt => {
+            let stmt = node.expect_updatestmt();
             if stmt.withClause.is_some() {
                 WalkInnerWith(mcx, node, cstate, WalkerKind::Dependency)?;
                 return Ok(false);
             }
             raw_walk_children_dep(mcx, node, cstate)
         }
-        Node::MergeStmt(stmt) => {
+        ntag::T_MergeStmt => {
+            let stmt = node.expect_mergestmt();
             if stmt.withClause.is_some() {
                 WalkInnerWith(mcx, node, cstate, WalkerKind::Dependency)?;
                 return Ok(false);
             }
             raw_walk_children_dep(mcx, node, cstate)
         }
-        Node::WithClause(_) => {
+        ntag::T_WithClause => {
             // Prevent raw_expression_tree_walker from recursing directly into a
             // WITH clause.  We need that to happen only under the control of the
             // code above.
@@ -1360,12 +1361,12 @@ fn WalkInnerWith<'mcx>(
         .try_reserve(wc.ctes.len())
         .map_err(|_| out_of_memory())?;
     for c in wc.ctes.iter() {
-        let q = match &**c {
-            Node::CommonTableExpr(cte) => match cte.ctequery.as_deref() {
+        let q = match c.as_commontableexpr() {
+            Some(cte) => match cte.ctequery.as_deref() {
                 Some(n) => Some(n.clone_in(mcx)?),
                 None => None,
             },
-            _ => None,
+            None => None,
         };
         inner_queries.push(q);
     }
@@ -1480,8 +1481,8 @@ fn checkWellFormedRecursion<'mcx>(
                 return Err(elog_error("recursive CTE has no query"));
             }
         };
-        let stmt: SelectStmt<'mcx> = match &ctequery {
-            Node::SelectStmt(s) => s.clone_in(mcx)?,
+        let stmt: SelectStmt<'mcx> = match ctequery.node_tag() {
+            ntag::T_SelectStmt => ctequery.expect_selectstmt().clone_in(mcx)?,
             _ => {
                 let name = cte_name(cstate.item_cte(i)).to_string();
                 let location = cstate.item_cte(i).location;
@@ -1604,8 +1605,9 @@ fn checkWellFormedRecursionWalker<'mcx>(
 ) -> PgResult<bool> {
     let save_context = cstate.context;
 
-    match node {
-        Node::RangeVar(rv) => {
+    match node.node_tag() {
+        ntag::T_RangeVar => {
+            let rv = node.expect_rangevar();
             // If unqualified name, might be a CTE reference
             if rv.schemaname.is_none() {
                 let relname = rv.relname.as_ref().map(|s| s.as_str()).unwrap_or("");
@@ -1645,7 +1647,8 @@ fn checkWellFormedRecursionWalker<'mcx>(
             }
             Ok(false)
         }
-        Node::SelectStmt(stmt) => {
+        ntag::T_SelectStmt => {
+            let stmt = node.expect_selectstmt();
             if let Some(w) = stmt.withClause.as_deref() {
                 let inner_names: Vec<String> = cte_names_of(w);
                 let mut inner_queries: Vec<Option<Node<'mcx>>> = Vec::new();
@@ -1653,12 +1656,12 @@ fn checkWellFormedRecursionWalker<'mcx>(
                     .try_reserve(w.ctes.len())
                     .map_err(|_| out_of_memory())?;
                 for c in w.ctes.iter() {
-                    let q = match &**c {
-                        Node::CommonTableExpr(cte) => match cte.ctequery.as_deref() {
+                    let q = match c.as_commontableexpr() {
+                        Some(cte) => match cte.ctequery.as_deref() {
                             Some(n) => Some(n.clone_in(mcx)?),
                             None => None,
                         },
-                        _ => None,
+                        None => None,
                     };
                     inner_queries.push(q);
                 }
@@ -1694,13 +1697,14 @@ fn checkWellFormedRecursionWalker<'mcx>(
             // We're done examining the SelectStmt
             Ok(false)
         }
-        Node::WithClause(_) => {
+        ntag::T_WithClause => {
             // Prevent raw_expression_tree_walker from recursing directly into a
             // WITH clause.  We need that to happen only under the control of the
             // code above.
             Ok(false)
         }
-        Node::JoinExpr(j) => {
+        ntag::T_JoinExpr => {
+            let j = node.expect_joinexpr();
             match j.jointype {
                 JoinType::JOIN_INNER => {
                     walk_opt(mcx, pstate, j.larg.as_deref(), cstate)?;
@@ -1740,7 +1744,8 @@ fn checkWellFormedRecursionWalker<'mcx>(
             }
             Ok(false)
         }
-        Node::SubLink(sl) => {
+        ntag::T_SubLink => {
+            let sl = node.expect_sublink();
             // we intentionally override outer context, since subquery is
             // independent
             cstate.context = RecursionContext::Sublink;
