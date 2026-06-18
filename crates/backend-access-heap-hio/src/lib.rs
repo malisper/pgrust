@@ -830,9 +830,138 @@ pub fn RelationGetBufferForTuple(
     }
 }
 
-/// Install this crate's seams. `hio.c` owns no inward seam (nothing calls
-/// `RelationGetBufferForTuple` / `RelationPutHeapTuple` across a dependency
-/// cycle yet); its `-seams` crate holds only OUTWARD declarations installed by
-/// their real owners (bufmgr / bufpage / freespace / lmgr / visibilitymap /
-/// relcache). There is nothing for this crate to install.
-pub fn init_seams() {}
+// ---------------------------------------------------------------------------
+// Buffer / page seam installs
+// ---------------------------------------------------------------------------
+//
+// The `hio.c` buffer/page seams declared in `backend-access-heap-hio-seams`
+// are OUTWARD: their real bodies live in the buffer manager (`bufmgr.c`) and
+// the opaque-`Page` predicates (`bufpage.c`). The buffer-KEYED slots (those
+// crossing only a `Buffer` id, no relation handle) carry no contract
+// divergence — they map 1:1 onto either the canonical `bufmgr-seams` body
+// (`lock_buffer` / `MarkBufferDirty` / `ReleaseBuffer` / ...) or a `Page`
+// predicate read over `with_buffer_page` (`PageGetMaxOffsetNumber` /
+// `PageGetHeapFreeSpace` / `PageIsAllVisible` / `BufferGetPageSize`), so this
+// crate installs them directly. The bufmgr delegates are wrapped to the
+// hio-seam `PgResult` shape (the canonical buffer mutators are infallible).
+//
+// NOT installed here (genuine keystones, see the lane note / DESIGN_DEBT):
+//   * the relation-KEYED slots (`read_buffer` / `read_buffer_extended` /
+//     `extend_buffered_rel_by` / the four freespace slots /
+//     `relation_extension_lock_waiter_count`) cross the relation as a bare
+//     `Oid` with no `Mcx`, but every canonical owner takes `&Relation<'mcx>`
+//     resolved from the relcache — there is no `Mcx`-free by-Oid resolver, so
+//     installing them needs the hio-seams Oid->&Relation re-sign campaign.
+//   * `page_add_item` takes a header-only `HeapTupleData`, which cannot carry
+//     the tuple's user-data area (that lives in a `FormedTuple`); serializing
+//     a full on-page item from it is impossible — the FormedTuple-carrier
+//     re-sign keystone.
+
+mod wire {
+    use backend_storage_buffer_bufmgr_seams as bufmgr_seam;
+    use backend_storage_page::{
+        PageGetHeapFreeSpace, PageGetMaxOffsetNumber, PageGetPageSize, PageIsAllVisible, PageRef,
+    };
+    use types_core::{BlockNumber, OffsetNumber, Size};
+    use types_error::PgResult;
+    use types_storage::storage::Buffer;
+
+    pub fn lock_buffer(buffer: Buffer, mode: i32) -> PgResult<()> {
+        bufmgr_seam::lock_buffer::call(buffer, mode)
+    }
+
+    pub fn conditional_lock_buffer(buffer: Buffer) -> PgResult<bool> {
+        bufmgr_seam::conditional_lock_buffer::call(buffer)
+    }
+
+    pub fn mark_buffer_dirty(buffer: Buffer) -> PgResult<()> {
+        bufmgr_seam::mark_buffer_dirty::call(buffer);
+        Ok(())
+    }
+
+    pub fn release_buffer(buffer: Buffer) -> PgResult<()> {
+        bufmgr_seam::release_buffer::call(buffer);
+        Ok(())
+    }
+
+    pub fn unlock_release_buffer(buffer: Buffer) -> PgResult<()> {
+        bufmgr_seam::unlock_release_buffer::call(buffer);
+        Ok(())
+    }
+
+    pub fn incr_buffer_ref_count(buffer: Buffer) -> PgResult<()> {
+        bufmgr_seam::incr_buffer_ref_count::call(buffer);
+        Ok(())
+    }
+
+    pub fn buffer_get_block_number(buffer: Buffer) -> PgResult<BlockNumber> {
+        Ok(bufmgr_seam::buffer_get_block_number::call(buffer))
+    }
+
+    pub fn page_init(buffer: Buffer) -> PgResult<()> {
+        bufmgr_seam::page_init::call(buffer)
+    }
+
+    pub fn page_is_new(buffer: Buffer) -> PgResult<bool> {
+        bufmgr_seam::page_is_new::call(buffer)
+    }
+
+    // The `Page` predicate reads: `BufferGetPage(buffer)` then the pure
+    // page-format read. `with_buffer_page` hands the live page image; the
+    // predicate never mutates it.
+    pub fn buffer_get_page_size(buffer: Buffer) -> PgResult<Size> {
+        let mut out: Size = 0;
+        bufmgr_seam::with_buffer_page::call(buffer, &mut |bytes| {
+            out = PageGetPageSize(&PageRef::new(bytes)?);
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    pub fn page_get_max_offset_number(buffer: Buffer) -> PgResult<OffsetNumber> {
+        let mut out: OffsetNumber = 0;
+        bufmgr_seam::with_buffer_page::call(buffer, &mut |bytes| {
+            out = PageGetMaxOffsetNumber(&PageRef::new(bytes)?);
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    pub fn page_get_heap_free_space(buffer: Buffer) -> PgResult<Size> {
+        let mut out: Size = 0;
+        bufmgr_seam::with_buffer_page::call(buffer, &mut |bytes| {
+            out = PageGetHeapFreeSpace(&PageRef::new(bytes)?);
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    pub fn page_is_all_visible(buffer: Buffer) -> PgResult<bool> {
+        let mut out = false;
+        bufmgr_seam::with_buffer_page::call(buffer, &mut |bytes| {
+            out = PageIsAllVisible(&PageRef::new(bytes)?);
+            Ok(())
+        })?;
+        Ok(out)
+    }
+}
+
+/// Install the buffer/page-keyed `hio.c` outward seams whose contract matches
+/// their real owner with no divergence (the buffer-manager delegates and the
+/// opaque-`Page` predicate reads). The relation-keyed slots and `page_add_item`
+/// stay declared-and-panicking pending their re-sign keystones (see `mod wire`).
+pub fn init_seams() {
+    hio_seam::lock_buffer::set(wire::lock_buffer);
+    hio_seam::conditional_lock_buffer::set(wire::conditional_lock_buffer);
+    hio_seam::mark_buffer_dirty::set(wire::mark_buffer_dirty);
+    hio_seam::release_buffer::set(wire::release_buffer);
+    hio_seam::unlock_release_buffer::set(wire::unlock_release_buffer);
+    hio_seam::incr_buffer_ref_count::set(wire::incr_buffer_ref_count);
+    hio_seam::buffer_get_block_number::set(wire::buffer_get_block_number);
+    hio_seam::page_init::set(wire::page_init);
+    hio_seam::page_is_new::set(wire::page_is_new);
+    hio_seam::buffer_get_page_size::set(wire::buffer_get_page_size);
+    hio_seam::page_get_max_offset_number::set(wire::page_get_max_offset_number);
+    hio_seam::page_get_heap_free_space::set(wire::page_get_heap_free_space);
+    hio_seam::page_is_all_visible::set(wire::page_is_all_visible);
+}
