@@ -1286,11 +1286,21 @@ fn portal_run_utility(
         // is the owned analogue of the per-message reset / `free_parsestate`.
         let scratch = mcx::MemoryContext::new_bump("ProcessUtility");
         let mcx = scratch.mcx();
-        let p = portal.borrow();
-        let stmts = p.stmts.as_deref().unwrap_or(&[]);
+        // C passes `pstmt` (a stable `PlannedStmt *` into the portal's stmt
+        // list) and holds no lock across `ProcessUtility`. Here a borrow of the
+        // portal cannot span the call: a tuple-returning utility (`SHOW`)
+        // routes its rows to the portal's own hold-store receiver, which takes
+        // `portal.borrow_mut()`. So copy the statement into the per-utility
+        // scratch context (the owned analogue of C's stable pointer) and drop
+        // the portal borrow before dispatching.
+        let pstmt = {
+            let p = portal.borrow();
+            let stmts = p.stmts.as_deref().unwrap_or(&[]);
+            stmts[pstmt_idx].clone_in(mcx)?
+        };
         utility_seam::process_utility::call(
             mcx,
-            &stmts[pstmt_idx],
+            &pstmt,
             &source_text,
             read_only_tree,
             context,
