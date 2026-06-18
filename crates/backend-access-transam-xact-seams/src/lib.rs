@@ -309,6 +309,11 @@ seam_core::seam!(
     pub fn prevent_in_transaction_block(is_top_level: bool, stmt_type: &str) -> PgResult<()>
 );
 
+seam_core::seam!(
+    /// `IsInTransactionBlock(isTopLevel)` (xact.c).
+    pub fn is_in_transaction_block(is_top_level: bool) -> PgResult<bool>
+);
+
 // --- backend-utils-init-postinit consumers (xact.c) ---
 
 seam_core::seam!(

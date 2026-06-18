@@ -774,7 +774,7 @@ pub fn vacuum<'mcx>(
         xact::prevent_in_transaction_block::call(isTopLevel, stmttype)?;
         in_outer_xact = false;
     } else {
-        in_outer_xact = rt::is_in_transaction_block::call(isTopLevel)?;
+        in_outer_xact = xact::is_in_transaction_block::call(isTopLevel)?;
     }
 
     /*

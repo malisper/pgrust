@@ -136,9 +136,6 @@ seam_core::seam!(
     pub fn parse_int_kb(value: String) -> PgResult<(bool, i32, Option<String>)>
 );
 
-// ---- access/xact.h -----------------------------------------------------
-seam_core::seam!(pub fn is_in_transaction_block(is_top_level: bool) -> PgResult<bool>);
-
 // ---- utils/snapmgr.h ---------------------------------------------------
 // `active_snapshot_set` / `pop_active_snapshot` / `push_active_snapshot_transaction`
 // are owned by snapmgr.c and called through `backend-utils-time-snapmgr-seams`

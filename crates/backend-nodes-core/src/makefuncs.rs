@@ -70,7 +70,7 @@ use types_nodes::nodes::Node;
 use types_nodes::primnodes::{
     BoolExpr, BoolExprType, CoercionForm, Const, Expr, FuncExpr, JsonBehavior, JsonBehaviorType,
     JsonFormat, JsonFormatType, JsonEncoding, JsonIsPredicate, JsonValueExpr, JsonValueType,
-    OpExpr, RelabelType, TargetEntry, Var, AND_EXPR, NOT_EXPR, OR_EXPR,
+    NullTest, NullTestType, OpExpr, RelabelType, TargetEntry, Var, AND_EXPR, NOT_EXPR, OR_EXPR,
 };
 use types_nodes::execnodes::IndexInfo;
 use types_nodes::nodes::NodePtr;
@@ -237,6 +237,18 @@ pub fn make_bool_const(value: bool, isnull: bool) -> Const {
         // makeConst sets location = -1.
         location: -1,
     }
+}
+
+/// Build the `arg IS NOT NULL` `NullTest` node used by `process_equivalence`
+/// (equivclass.c): `argisrow=false` (correct even for a composite arg),
+/// `location=-1`.
+pub fn make_is_not_null(arg: Expr) -> Expr {
+    Expr::NullTest(NullTest {
+        arg: Some(Box::new(arg)),
+        nulltesttype: NullTestType::IS_NOT_NULL,
+        argisrow: false,
+        location: -1,
+    })
 }
 
 /// `makeBoolExpr(boolop, args, location)` (makefuncs.c) — a `BoolExpr` node.

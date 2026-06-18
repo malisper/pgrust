@@ -1789,6 +1789,9 @@ pub fn init_seams() {
     // `PreventInTransactionBlock(isTopLevel, stmtType)` — signature matches the
     // owner body exactly.
     seams::prevent_in_transaction_block::set(PreventInTransactionBlock);
+    // `IsInTransactionBlock(isTopLevel)` — owner body is infallible; the seam
+    // mirrors PreventInTransactionBlock's fallible surface, so wrap in Ok.
+    seams::is_in_transaction_block::set(|is_top_level| Ok(IsInTransactionBlock(is_top_level)));
     // Reconciled adapters: seam contract differs slightly from the owner body.
     seams::define_savepoint::set(seam_define_savepoint);
     seams::set_xact_iso_level_read_committed::set(seam_set_xact_iso_level_read_committed);

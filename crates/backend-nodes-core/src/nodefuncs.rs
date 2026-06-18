@@ -1666,6 +1666,13 @@ pub fn init_seams() {
         // `add_child_eq_member` (equivclass.c) calls `expression_returns_set`
         // (nodeFuncs.c) over the new member's expression; nodeFuncs.c owns it.
         eqext::expression_returns_set::set(|expr| expression_returns_set(Some(expr)));
+        // `process_equivalence` (equivclass.c) builds a `makeBoolConst` and an
+        // `IS NOT NULL` `NullTest` over equivalence members; these are makefuncs.c
+        // node builders, which this unit owns.
+        eqext::make_bool_const::set(|value, isnull| {
+            Expr::Const(crate::makefuncs::make_bool_const(value, isnull))
+        });
+        eqext::make_is_not_null::set(crate::makefuncs::make_is_not_null);
     }
 
     // joininfo.c / restrictinfo.c reach the same nodeFuncs.c accessors
