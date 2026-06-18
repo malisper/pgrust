@@ -155,6 +155,42 @@ fn fc_cidr_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     ret_cstring(fcinfo, s)
 }
 
+/// Read the raw external binary message body off the by-ref lane. C's
+/// `recv(internal)` arg is a `StringInfo`; here the message bytes ride the by-ref
+/// `Varlena` lane (as `macaddr_recv`/`oidrecv`/`uuid_recv` do) and the core reads
+/// the `family`/`bits`/`is_cidr`/`length`/address octets off them.
+#[inline]
+fn arg_recv_msg<'a>(fcinfo: &'a FunctionCallInfoBaseData) -> &'a [u8] {
+    fcinfo
+        .ref_arg(0)
+        .and_then(|p| p.as_varlena())
+        .expect("inet/cidr recv: by-ref message arg missing from by-ref lane")
+}
+
+fn fc_inet_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let addr = ok(crate::inet_recv(arg_recv_msg(fcinfo)));
+    ret_inet(fcinfo, addr)
+}
+
+fn fc_cidr_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let addr = ok(crate::cidr_recv(arg_recv_msg(fcinfo)));
+    ret_inet(fcinfo, addr)
+}
+
+fn fc_inet_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let addr = arg_inet(fcinfo, 0);
+    let m = scratch_mcx();
+    let bytes = ok(crate::inet_send(m.mcx(), &addr));
+    ret_text(fcinfo, bytes)
+}
+
+fn fc_cidr_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let addr = arg_inet(fcinfo, 0);
+    let m = scratch_mcx();
+    let bytes = ok(crate::cidr_send(m.mcx(), &addr));
+    ret_text(fcinfo, bytes)
+}
+
 // ---------------------------------------------------------------------------
 // Comparison (inet, inet -> bool / int4).
 // ---------------------------------------------------------------------------
@@ -407,6 +443,10 @@ pub fn register_network_builtins() {
         builtin(911, "inet_out", 1, true, false, fc_inet_out),
         builtin(1267, "cidr_in", 1, true, false, fc_cidr_in),
         builtin(1427, "cidr_out", 1, true, false, fc_cidr_out),
+        builtin(2496, "inet_recv", 1, true, false, fc_inet_recv),
+        builtin(2497, "inet_send", 1, true, false, fc_inet_send),
+        builtin(2498, "cidr_recv", 1, true, false, fc_cidr_recv),
+        builtin(2499, "cidr_send", 1, true, false, fc_cidr_send),
         // Comparison -> bool.
         builtin(920, "network_eq", 2, true, false, fc_network_eq),
         builtin(925, "network_ne", 2, true, false, fc_network_ne),
