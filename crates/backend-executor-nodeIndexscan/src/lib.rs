@@ -1290,14 +1290,17 @@ fn exec_index_eval_array_keys_into<'mcx>(
             break;
         }
 
-        // Compute and deconstruct the array. The arrayfuncs seam works on the
-        // bare-word Datum; bridge to/from the canonical value at the boundary.
-        let arraydatum_word = canonical_to_shim_datum(&arraydatum);
-        let elmtype = arrayfuncs::array_get_elemtype::call(mcx, arraydatum_word)?;
+        // Compute and deconstruct the array on the canonical by-reference Datum
+        // lane. The array expression yields a varlena (text[]/name[]/...) carried
+        // as `Datum::ByRef` bytes; the byte-image seams detoast and split it into
+        // real per-element `(Datum<'mcx>, isnull)` values (the ByRef arm carries a
+        // by-reference text element by value, so sk_argument is sound).
+        let array_bytes = arraydatum.as_ref_bytes();
+        let elmtype = arrayfuncs::array_get_elemtype_bytes::call(mcx, array_bytes)?;
         let tla = lsyscache::get_typlenbyvalalign::call(elmtype)?;
-        let pairs = arrayfuncs::deconstruct_array::call(
+        let pairs = arrayfuncs::deconstruct_array_values_bytes::call(
             mcx,
-            arraydatum_word,
+            array_bytes,
             elmtype,
             tla.typlen,
             tla.typbyval,
@@ -1309,16 +1312,16 @@ fn exec_index_eval_array_keys_into<'mcx>(
             break;
         }
 
-        // elem_values holds the bare-word (shim) Datums deconstruct_array
-        // produced; sk_argument is the canonical value (bridged below).
-        let mut elem_values: PgVec<types_datum::datum::Datum> =
+        // elem_values holds the canonical per-element Datums deconstructed from
+        // the array; sk_argument takes the first element directly (canonical).
+        let mut elem_values: PgVec<Datum<'mcx>> =
             mcx::vec_with_capacity_in(mcx, num_elems)?;
         let mut elem_nulls: PgVec<bool> = mcx::vec_with_capacity_in(mcx, num_elems)?;
         for (d, n) in pairs.iter() {
-            elem_values.push(*d);
+            elem_values.push(d.clone_in(mcx)?);
             elem_nulls.push(*n);
         }
-        let first_val = elem_values[0];
+        let first_val = elem_values[0].clone_in(mcx)?;
         let first_null = elem_nulls[0];
 
         {
@@ -1329,7 +1332,7 @@ fn exec_index_eval_array_keys_into<'mcx>(
             ak.next_elem = 1;
         }
         let scan_key = target_scankey(scan_keys, target)?;
-        scan_key.sk_argument = shim_to_canonical_datum(first_val);
+        scan_key.sk_argument = first_val;
         if first_null {
             scan_key.sk_flags |= SK_ISNULL;
         } else {
@@ -1345,6 +1348,7 @@ fn exec_index_advance_array_keys_into<'mcx>(
     scan_keys: &mut PgVec<'mcx, ScanKeyData<'mcx>>,
     array_keys: &mut PgVec<'mcx, IndexArrayKeyInfo<'mcx>>,
     num_array_keys: i32,
+    mcx: Mcx<'mcx>,
 ) -> PgResult<bool> {
     let mut found = false;
     // Advance the rightmost array key most quickly.
@@ -1361,17 +1365,16 @@ fn exec_index_advance_array_keys_into<'mcx>(
             } else {
                 found = true;
             }
-            let value = ak
-                .elem_values
-                .get(next_elem as usize)
-                .copied()
-                .unwrap_or_else(types_datum::datum::Datum::null);
+            let value = match ak.elem_values.get(next_elem as usize) {
+                Some(d) => d.clone_in(mcx)?,
+                None => Datum::null(),
+            };
             let isnull = ak.elem_nulls.get(next_elem as usize).copied().unwrap_or(true);
             ak.next_elem = next_elem + 1;
             (ak.scan_key, value, isnull)
         };
         let scan_key = target_scankey(scan_keys, target)?;
-        scan_key.sk_argument = shim_to_canonical_datum(value);
+        scan_key.sk_argument = value;
         if isnull {
             scan_key.sk_flags |= SK_ISNULL;
         } else {
@@ -1884,25 +1887,6 @@ fn exec_init_expr_in<'mcx>(
     execExpr::exec_init_expr::call(expr, planstate, estate)
 }
 
-/// Bridge a canonical by-value `Datum` to the bare-word shim `Datum` the
-/// arrayfuncs seam consumes (`DatumGetArrayTypeP` reads the word). A by-ref
-/// canonical Datum has no machine-word identity in the owned model; the array
-/// expression always yields a varlena `Datum`, which the eval produced as
-/// `ByRef` bytes — that path is the Datum-unification frontier (see
-/// DESIGN_DEBT). We forward the by-value word, the case the array-key path
-/// exercises for the common in-line array constant.
-fn canonical_to_shim_datum(d: &Datum<'_>) -> types_datum::datum::Datum {
-    types_datum::datum::Datum::from_usize(d.as_usize())
-}
-
-/// Bridge a bare-word shim `Datum` (a deconstructed array element) to the
-/// canonical by-value `Datum`. By-value elements carry their word directly;
-/// by-ref elements' words are pointers into the per-tuple array image (the AM
-/// consumes them as the same machine word the C does).
-fn shim_to_canonical_datum<'mcx>(d: types_datum::datum::Datum) -> Datum<'mcx> {
-    Datum::from_usize(d.as_usize())
-}
-
 /// Encode a "subsidiary-key" runtime-key target reference (row header `header`,
 /// subkey `sub`) into the `usize` scan_key index. The high bit flags a subkey
 /// reference; the rest packs the header index and subkey index.
@@ -2090,8 +2074,9 @@ fn seam_eval_array_keys_bis<'mcx>(
 
 fn seam_advance_array_keys_bis<'mcx>(
     node: &mut types_nodes::nodebitmapindexscan::BitmapIndexScanState<'mcx>,
-    _estate: &mut EStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
+    let mcx: Mcx<'mcx> = estate.es_query_cxt;
     let types_nodes::nodebitmapindexscan::BitmapIndexScanState {
         biss_ScanKeys,
         biss_ArrayKeys,
@@ -2099,7 +2084,7 @@ fn seam_advance_array_keys_bis<'mcx>(
         ..
     } = node;
     let num = *biss_NumArrayKeys;
-    exec_index_advance_array_keys_into(biss_ScanKeys, biss_ArrayKeys, num)
+    exec_index_advance_array_keys_into(biss_ScanKeys, biss_ArrayKeys, num, mcx)
 }
 
 // --- parallel-executor handle bridges (execParallel frontier) --------------

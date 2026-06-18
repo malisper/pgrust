@@ -10,7 +10,7 @@
 
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
 use types_core::primitive::Oid;
-use types_datum::datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::PgResult;
 use types_rel::Relation;
 use types_scan::scankey::ScanKeyData;
@@ -46,7 +46,7 @@ pub struct IndexArrayKeyInfo<'mcx> {
     /// `int num_elems` — number of elems in current array value.
     pub num_elems: i32,
     /// `Datum *elem_values` — array of `num_elems` Datums.
-    pub elem_values: PgVec<'mcx, Datum>,
+    pub elem_values: PgVec<'mcx, Datum<'mcx>>,
     /// `bool *elem_nulls` — array of `num_elems` is-null flags.
     pub elem_nulls: PgVec<'mcx, bool>,
 }
