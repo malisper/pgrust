@@ -36,6 +36,10 @@ pub fn InitWalSender() {
     // affect vacuum horizons in all databases (for physical hot-standby
     // feedback).
     if miscinit::my_database_id::call() == InvalidOid {
+        debug_assert_eq!(
+            procarray::my_proc_xmin::call(),
+            types_core::InvalidTransactionId
+        );
         procarray::set_proc_affects_all_horizons::call();
     }
 
