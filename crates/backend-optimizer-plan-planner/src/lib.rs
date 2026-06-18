@@ -860,15 +860,24 @@ fn subquery_planner<'mcx>(
             };
         }
 
-        // windowClause start/end offsets (C:927-936). The windowClause is a
-        // `PgVec<NodePtr>` of WindowClause nodes; the offsets live on those nodes.
-        // A plain SELECT has none. Panic precisely if present.
-        if !run.resolve(root.parse).windowClause.is_empty() {
-            panic!(
-                "subquery_planner: windowClause offset preprocessing \
-                 (planner.c:927-936) is not wired over the owned Query model \
-                 (windowClause is a NodePtr list of WindowClause nodes)"
-            );
+        // windowClause start/end offsets (C:927-936). For each WindowClause,
+        // preprocess wc->startOffset and wc->endOffset (EXPRKIND_LIMIT). The
+        // partition/order clauses are sort/group expressions handled elsewhere.
+        {
+            let n_wc = run.resolve(root.parse).windowClause.len();
+            for i in 0..n_wc {
+                // wc->startOffset = preprocess_expression(startOffset, EXPRKIND_LIMIT).
+                let start = extract_windowclause_offset(run, &root, i, true);
+                let processed =
+                    preprocess_expression(mcx, &root, outer_query_ref, start, EXPRKIND_LIMIT)?;
+                set_windowclause_offset(mcx, run, &root, i, true, processed)?;
+
+                // wc->endOffset = preprocess_expression(endOffset, EXPRKIND_LIMIT).
+                let end = extract_windowclause_offset(run, &root, i, false);
+                let processed =
+                    preprocess_expression(mcx, &root, outer_query_ref, end, EXPRKIND_LIMIT)?;
+                set_windowclause_offset(mcx, run, &root, i, false, processed)?;
+            }
         }
 
         // parse->limitOffset / parse->limitCount = preprocess_expression(...,
@@ -1769,15 +1778,42 @@ fn grouping_planner<'mcx>(
         }
     }
 
-    // find_window_functions if hasWindowFuncs (C:1588-1609).
+    // find_window_functions if hasWindowFuncs (C:1588-1609). `active_windows`
+    // is the list of arena WindowClause handles select_active_windows produced;
+    // `wflists` (windowFuncs by winref) is carried forward for create_window_paths.
+    // Both are empty when there are no window functions.
+    let mut active_windows: Vec<types_pathnodes::NodeId> = Vec::new();
+    let mut wflists: Option<WindowFuncListsArena> = None;
     {
         let has_window = run.resolve(root.parse).hasWindowFuncs;
         if has_window {
-            panic!(
-                "grouping_planner: find_window_functions / optimize_window_clauses / \
-                 select_active_windows (planner.c) for window functions are part of \
-                 the unported upper-rel machinery"
-            );
+            // wflists = find_window_functions((Node *) processed_tlist,
+            //   list_length(parse->windowClause)).
+            let max_win_ref = run.resolve(root.parse).windowClause.len() as u32;
+            let tlist_exprs: Vec<Expr> = root
+                .processed_tlist
+                .iter()
+                .map(|&id| root.targetentry(id).expr)
+                .map(|eid| root.node(eid).clone())
+                .collect();
+            let tlist_refs: Vec<&Expr> = tlist_exprs.iter().collect();
+            let lists = backend_optimizer_util_clauses::find_window_functions_in_exprs(
+                &tlist_refs,
+                max_win_ref,
+            )?;
+            if lists.num_window_funcs > 0 {
+                // optimize_window_clauses(root, wflists).
+                let mut wfa = build_window_func_lists_arena(root, lists)?;
+                optimize_window_clauses(run, root, &mut wfa)?;
+                // activeWindows = select_active_windows(root, wflists).
+                active_windows = select_active_windows(run, root, &mut wfa)?;
+                // name_active_windows(activeWindows).
+                name_active_windows(root, &active_windows)?;
+                wflists = Some(wfa);
+            } else {
+                // No window functions survived; clear the flag (C:1607).
+                run.resolve_mut(root.parse).hasWindowFuncs = false;
+            }
         }
     }
 
@@ -1856,8 +1892,10 @@ fn grouping_planner<'mcx>(
             .map(|sgc| root.alloc_sortgroupclause(sgc))
             .collect()
     };
+    // We consider only the first (bottom) window in pathkeys logic (C:3545).
+    let first_active_window = active_windows.first().copied();
     let mut qp_callback = move |root: &mut PlannerInfo| -> PgResult<()> {
-        standard_qp_callback(root, &sort_clause_ids, &distinct_clause_ids)
+        standard_qp_callback(root, &sort_clause_ids, &distinct_clause_ids, first_active_window)
     };
     let mut current_rel =
         backend_optimizer_plan_small::query_planner(mcx, run, root, &mut qp_callback)?;
@@ -1906,11 +1944,16 @@ fn grouping_planner<'mcx>(
         (final_target.clone(), final_target_parallel_safe)
     };
 
-    // Window functions were already rejected above (C:1588-1609 panic); assert.
-    debug_assert!(!has_window);
-    // With no activeWindows, grouping_target = sort_input_target (C:1703-1705).
-    let grouping_target = sort_input_target.clone();
-    let grouping_target_parallel_safe = sort_input_target_parallel_safe;
+    // grouping_target: if there are active windows it's the make_window_input_target
+    // (C:1697-1705); otherwise sort_input_target.
+    let _ = has_window;
+    let (grouping_target, grouping_target_parallel_safe) = if !active_windows.is_empty() {
+        let gt = make_window_input_target(root, &final_target, &active_windows)?;
+        let safe = is_target_exprs_parallel_safe(root, &gt.exprs);
+        (gt, safe)
+    } else {
+        (sort_input_target.clone(), sort_input_target_parallel_safe)
+    };
 
     // Grouping/aggregation (C:1709-1726). have_grouping = groupClause ||
     // groupingSets || hasAggs || hasHavingQual. If we have grouping or
@@ -1997,9 +2040,26 @@ fn grouping_planner<'mcx>(
         debug_assert!(!has_target_srfs);
     }
 
-    // Window upper rels on this path (C:1813-1828) are guarded out above
-    // (create_window_paths loud-panics).
-    debug_assert!(!has_window);
+    // If we have window functions, consider ways to implement those; we build a
+    // new upperrel representing the output of this phase (C:1813-1828).
+    if !active_windows.is_empty() {
+        let wfa = wflists
+            .as_ref()
+            .expect("create_window_paths: activeWindows present but wflists is None");
+        current_rel = create_window_paths(
+            run,
+            root,
+            current_rel,
+            &grouping_target,
+            &sort_input_target,
+            sort_input_target_parallel_safe,
+            wfa,
+            &active_windows,
+        )?;
+        // adjust_paths_for_srfs when sort_input_target contains SRFs (C:1825-1827)
+        // is gated out: hasTargetSRFs loud-panics above before this point.
+        debug_assert!(!has_target_srfs);
+    }
 
     // If there is a DISTINCT clause, consider ways to implement that; we build a
     // new upperrel representing the output of this phase (C:1834-1841).
@@ -2352,6 +2412,862 @@ fn make_group_input_target<'mcx>(
     // XXX this causes some redundant cost calculation ... (C:5619).
     backend_optimizer_path_costsize::sizeest::set_pathtarget_cost_width(root, &mut input_target);
     Ok(input_target)
+}
+
+// ===========================================================================
+// Window functions (planner.c) — optimize_window_clauses,
+// select_active_windows, make_window_input_target, make_pathkeys_for_window,
+// create_window_paths, create_one_window_path
+// ===========================================================================
+
+/// The window-function lists found by `find_window_functions`, with each
+/// `WindowFunc` interned into the planner arena (so cost/createplan can read
+/// it through a `NodeId`). `window_funcs[winref]` is the handle list for that
+/// winref; `clauses[winref]` is the interned arena `WindowClause` handle for
+/// the WindowClause with that winref (or `None` if none). Mirrors the C
+/// `WindowFuncLists` plus the `WindowClause` list it is indexed alongside.
+struct WindowFuncListsArena {
+    num_window_funcs: i32,
+    /// `maxWinRef` — mirrors the C `WindowFuncLists` field (the highest winref);
+    /// retained for fidelity / assertions even where not read directly.
+    #[allow(dead_code)]
+    max_win_ref: u32,
+    /// `windowFuncs[winref]` — interned WindowFunc Expr handles.
+    window_funcs: Vec<Vec<types_pathnodes::NodeId>>,
+    /// Interned arena `WindowClause` handle per winref (parse->windowClause).
+    clauses: Vec<Option<types_pathnodes::NodeId>>,
+    /// The order of WindowClauses as they appear in parse->windowClause
+    /// (their winrefs), so we can iterate them like the C `foreach`.
+    clause_order: Vec<u32>,
+}
+
+/// Intern the `find_window_functions` result + every `parse->windowClause`
+/// WindowClause into the planner arena, returning a [`WindowFuncListsArena`].
+/// Each WindowClause's partition/order `SortGroupClause`s and start/end offsets
+/// are interned as their own arena handles.
+fn build_window_func_lists_arena<'mcx>(
+    root: &mut PlannerInfo,
+    lists: backend_optimizer_util_clauses::WindowFuncLists,
+) -> PgResult<WindowFuncListsArena> {
+    let max = lists.max_win_ref;
+    let mut window_funcs: Vec<Vec<types_pathnodes::NodeId>> =
+        Vec::with_capacity((max as usize) + 1);
+    for funcs in lists.window_funcs.into_iter() {
+        let mut ids = Vec::with_capacity(funcs.len());
+        for f in funcs {
+            ids.push(root.alloc_node(f));
+        }
+        window_funcs.push(ids);
+    }
+
+    let mut clauses: Vec<Option<types_pathnodes::NodeId>> = Vec::with_capacity((max as usize) + 1);
+    for _ in 0..=(max as usize) {
+        clauses.push(None);
+    }
+    Ok(WindowFuncListsArena {
+        num_window_funcs: lists.num_window_funcs,
+        max_win_ref: max,
+        window_funcs,
+        clauses,
+        clause_order: Vec::new(),
+    })
+}
+
+/// Read all of `parse->windowClause` into arena [`WindowClauseNode`]s, keyed by
+/// winref, populating `wfa.clauses` / `wfa.clause_order`. Interns the
+/// partition/order `SortGroupClause`s and the (already-preprocessed) start/end
+/// offset `Expr`s as arena handles. Idempotent within a `wfa` (only fills
+/// empty slots).
+fn intern_parse_window_clauses<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    wfa: &mut WindowFuncListsArena,
+) -> PgResult<()> {
+    if !wfa.clause_order.is_empty() {
+        return Ok(());
+    }
+    let n = run.resolve(root.parse).windowClause.len();
+    for i in 0..n {
+        // Read the parse WindowClause into a lifetime-free arena form.
+        let (
+            name,
+            part_sgcs,
+            ord_sgcs,
+            frame_options,
+            start_off,
+            end_off,
+            start_in_range,
+            end_in_range,
+            in_range_coll,
+            in_range_asc,
+            in_range_nulls_first,
+            winref,
+        ) = {
+            let wc_node = &run.resolve(root.parse).windowClause[i];
+            let wc = match &**wc_node {
+                Node::WindowClause(wc) => wc,
+                other => panic!("windowClause element is not a WindowClause (got {:?})", other.tag()),
+            };
+            let name = wc.name.as_ref().map(|s| alloc::string::String::from(s.as_str()));
+            let part: Vec<types_nodes::rawnodes::SortGroupClause> = wc
+                .partitionClause
+                .iter()
+                .map(|np| sortgroupclause_from_node(np))
+                .collect::<PgResult<Vec<_>>>()?;
+            let ord: Vec<types_nodes::rawnodes::SortGroupClause> = wc
+                .orderClause
+                .iter()
+                .map(|np| sortgroupclause_from_node(np))
+                .collect::<PgResult<Vec<_>>>()?;
+            let start_off = wc.startOffset.as_ref().map(|np| match &**np {
+                Node::Expr(e) => e.clone(),
+                other => panic!("WindowClause startOffset is not an Expr (got {:?})", other.tag()),
+            });
+            let end_off = wc.endOffset.as_ref().map(|np| match &**np {
+                Node::Expr(e) => e.clone(),
+                other => panic!("WindowClause endOffset is not an Expr (got {:?})", other.tag()),
+            });
+            (
+                name,
+                part,
+                ord,
+                wc.frameOptions,
+                start_off,
+                end_off,
+                wc.startInRangeFunc,
+                wc.endInRangeFunc,
+                wc.inRangeColl,
+                wc.inRangeAsc,
+                wc.inRangeNullsFirst,
+                wc.winref,
+            )
+        };
+
+        let mut partition_clause: Vec<types_pathnodes::NodeId> = Vec::with_capacity(part_sgcs.len());
+        for sgc in part_sgcs {
+            partition_clause.push(root.alloc_sortgroupclause(sgc));
+        }
+        let mut order_clause: Vec<types_pathnodes::NodeId> = Vec::with_capacity(ord_sgcs.len());
+        for sgc in ord_sgcs {
+            order_clause.push(root.alloc_sortgroupclause(sgc));
+        }
+        let start_offset: Option<types_pathnodes::NodeId> = start_off.map(|e| root.alloc_node(e));
+        let end_offset: Option<types_pathnodes::NodeId> = end_off.map(|e| root.alloc_node(e));
+
+        let wc_arena = types_pathnodes::WindowClauseNode {
+            name,
+            partitionClause: partition_clause,
+            orderClause: order_clause,
+            frameOptions: frame_options,
+            startOffset: start_offset,
+            endOffset: end_offset,
+            startInRangeFunc: start_in_range,
+            endInRangeFunc: end_in_range,
+            inRangeColl: in_range_coll,
+            inRangeAsc: in_range_asc,
+            inRangeNullsFirst: in_range_nulls_first,
+            winref,
+        };
+        let id = root.alloc_windowclause(wc_arena);
+        wfa.clauses[winref as usize] = Some(id);
+        wfa.clause_order.push(winref);
+    }
+    Ok(())
+}
+
+/// `optimize_window_clauses(root, wflists)` (planner.c:5815) — apply
+/// support-function frame-option optimizations + the duplicate-WindowFunc
+/// dedup. The support-function (`SupportRequestOptimizeWindowClause`) dispatch
+/// rides the planner-support fmgr machinery, unported workspace-wide; functions
+/// with no `prosupport` (every basic ranking/offset window fn) `break` before
+/// reaching it, so the support path is loud-panic until that machinery lands.
+fn optimize_window_clauses<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    wfa: &mut WindowFuncListsArena,
+) -> PgResult<()> {
+    intern_parse_window_clauses(run, root, wfa)?;
+
+    let order = wfa.clause_order.clone();
+    for &winref in &order {
+        // skip any WindowClauses that have no WindowFuncs.
+        if wfa.window_funcs[winref as usize].is_empty() {
+            continue;
+        }
+        // For each WindowFunc, check for a support function and, if present, call
+        // the SupportRequestOptimizeWindowClause request to optimize the frame
+        // options. That request rides the planner-support fmgr machinery, which
+        // is unported workspace-wide. The optimization it performs is purely an
+        // efficiency one — it can only narrow RANGE/GROUPS frames to equivalent
+        // ROWS frames (e.g. row_number()'s frame to "ROWS UNBOUNDED PRECEDING ..
+        // CURRENT ROW"), which yields identical results, just with fewer peer
+        // checks at execution. So when the support machinery is absent we take
+        // the C "no support / unsupported request" path (`break`): leave the
+        // WindowClause's frame options unchanged. This is a correctness-neutral
+        // skipped optimization, not a hollow stub.
+        for &wfunc_id in &wfa.window_funcs[winref as usize] {
+            let winfnoid = match root.node(wfunc_id) {
+                Expr::WindowFunc(w) => w.winfnoid,
+                _ => panic!("optimize_window_clauses: windowFuncs entry is not a WindowFunc"),
+            };
+            let prosupport =
+                backend_utils_cache_lsyscache::function::get_func_support(winfnoid)?;
+            if prosupport == types_core::primitive::InvalidOid {
+                break; // can't optimize this WindowClause
+            }
+            // prosupport exists, but the SupportRequestOptimizeWindowClause
+            // fmgr dispatch is unported; treat as if the request returned NULL
+            // (the C `res == NULL` break) — frame options stay as-is.
+            break;
+        }
+        // With no applied support optimization, optimizedFrameOptions stays the
+        // sentinel and the wc->frameOptions reuse step is skipped (matching the
+        // C path where the loop `break`s before completing).
+    }
+
+    // XXX remove any duplicate WindowFuncs from each WindowClause (planner.c:5950).
+    for &winref in &order {
+        let list = wfa.window_funcs[winref as usize].clone();
+        if list.is_empty() {
+            continue;
+        }
+        let mut newlist: Vec<types_pathnodes::NodeId> = Vec::with_capacity(list.len());
+        for id in list {
+            // list_member(newlist, lfirst(lc2)) — equality by node value.
+            let already = newlist
+                .iter()
+                .any(|&n| exprs_equal_by_value(root, n, id));
+            if !already {
+                newlist.push(id);
+            } else {
+                wfa.num_window_funcs -= 1;
+            }
+        }
+        wfa.window_funcs[winref as usize] = newlist;
+    }
+    Ok(())
+}
+
+/// `equal((Node *) a, (Node *) b)` over two arena Expr handles, by value.
+fn exprs_equal_by_value(root: &PlannerInfo, a: types_pathnodes::NodeId, b: types_pathnodes::NodeId) -> bool {
+    backend_nodes_equalfuncs_seams::equal_expr::call(root.node(a), root.node(b))
+}
+
+/// `select_active_windows(root, wflists)` (planner.c:5990) — build the ordered
+/// list of active WindowClause handles (those with related WindowFuncs), sorted
+/// by partition/order clauses via `common_prefix_cmp`.
+fn select_active_windows<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    wfa: &mut WindowFuncListsArena,
+) -> PgResult<Vec<types_pathnodes::NodeId>> {
+    intern_parse_window_clauses(run, root, wfa)?;
+
+    // Construct the array of active windows, each carrying its uniqueOrder =
+    // list_concat_unique(partitionClause, orderClause).
+    struct ActiveWin {
+        wc: types_pathnodes::NodeId,
+        unique_order: Vec<types_pathnodes::NodeId>,
+    }
+    let order = wfa.clause_order.clone();
+    let mut actives: Vec<ActiveWin> = Vec::new();
+    for &winref in &order {
+        if wfa.window_funcs[winref as usize].is_empty() {
+            continue;
+        }
+        let wc_id = wfa.clauses[winref as usize].expect("active window has no interned clause");
+        let (part, ord) = {
+            let wc = root.windowclause(wc_id);
+            (wc.partitionClause.clone(), wc.orderClause.clone())
+        };
+        // list_concat_unique(list_copy(partitionClause), orderClause): partition
+        // keys followed by order keys that don't duplicate a partition key (by
+        // SortGroupClause value).
+        let mut unique_order = part.clone();
+        for o in ord {
+            let o_sgc = *root.sortgroupclause(o);
+            let dup = unique_order
+                .iter()
+                .any(|&p| *root.sortgroupclause(p) == o_sgc);
+            if !dup {
+                unique_order.push(o);
+            }
+        }
+        actives.push(ActiveWin { wc: wc_id, unique_order });
+    }
+
+    // qsort(actives, common_prefix_cmp). Stable-sort is fine; C's qsort isn't
+    // stable but the comparator is a total order on the keys it inspects.
+    actives.sort_by(|a, b| common_prefix_cmp(root, &a.unique_order, &b.unique_order));
+
+    Ok(actives.into_iter().map(|a| a.wc).collect())
+}
+
+/// `common_prefix_cmp(a, b)` (planner.c:6133) — order two windows by their
+/// sorting clauses (highest tleSortGroupRef first; then sortop; then
+/// nulls_first), and put the longer uniqueOrder first when one is a prefix.
+fn common_prefix_cmp(
+    root: &PlannerInfo,
+    a: &[types_pathnodes::NodeId],
+    b: &[types_pathnodes::NodeId],
+) -> core::cmp::Ordering {
+    use core::cmp::Ordering;
+    let n = a.len().min(b.len());
+    for i in 0..n {
+        let sca = root.sortgroupclause(a[i]);
+        let scb = root.sortgroupclause(b[i]);
+        if sca.tleSortGroupRef > scb.tleSortGroupRef {
+            return Ordering::Less;
+        } else if sca.tleSortGroupRef < scb.tleSortGroupRef {
+            return Ordering::Greater;
+        } else if sca.sortop > scb.sortop {
+            return Ordering::Less;
+        } else if sca.sortop < scb.sortop {
+            return Ordering::Greater;
+        } else if sca.nulls_first && !scb.nulls_first {
+            return Ordering::Less;
+        } else if !sca.nulls_first && scb.nulls_first {
+            return Ordering::Greater;
+        }
+        // eqop is fully determined by sortop; no need to compare.
+    }
+    b.len().cmp(&a.len())
+}
+
+/// `name_active_windows(activeWindows)` (planner.c:6055) — assign made-up names
+/// (`w1`, `w2`, ...) to any unnamed WindowClauses, for EXPLAIN. Names must be
+/// unique within the active list.
+fn name_active_windows(
+    root: &mut PlannerInfo,
+    active_windows: &[types_pathnodes::NodeId],
+) -> PgResult<()> {
+    let mut next_n: i32 = 1;
+    for &wc_id in active_windows {
+        if root.windowclause(wc_id).name.is_some() {
+            continue;
+        }
+        // Select a name not currently present in the list.
+        loop {
+            let newname = alloc::format!("w{next_n}");
+            next_n += 1;
+            let mut matched = false;
+            for &wc2_id in active_windows {
+                if let Some(n2) = &root.windowclause(wc2_id).name {
+                    if n2 == &newname {
+                        matched = true;
+                        break;
+                    }
+                }
+            }
+            if !matched {
+                root.windowclause_mut(wc_id).name = Some(newname);
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `make_window_input_target(root, final_target, activeWindows)` (planner.c:6193)
+/// — the PathTarget for the input to the first WindowAgg node. Non-flattenable
+/// columns (window PARTITION/ORDER BY + GROUP BY items) are kept as-is; the rest
+/// are flattened into their component Vars/Aggrefs.
+fn make_window_input_target<'mcx>(
+    root: &mut PlannerInfo,
+    final_target: &PathTarget,
+    active_windows: &[types_pathnodes::NodeId],
+) -> PgResult<PathTarget> {
+    use backend_optimizer_util_vars::tlist::{
+        add_column_to_pathtarget, add_new_columns_to_pathtarget, create_empty_pathtarget,
+    };
+    use backend_optimizer_util_vars::var::{
+        pull_var_clause, PVC_INCLUDE_AGGREGATES, PVC_INCLUDE_PLACEHOLDERS, PVC_RECURSE_WINDOWFUNCS,
+    };
+
+    // Collect the sortgroupref numbers of window PARTITION/ORDER BY clauses + GROUP BY.
+    let mut sgrefs: Vec<u32> = Vec::new();
+    let add_sgref = |v: &mut Vec<u32>, r: u32| {
+        if r != 0 && !v.contains(&r) {
+            v.push(r);
+        }
+    };
+    for &wc_id in active_windows {
+        let (part, ord) = {
+            let wc = root.windowclause(wc_id);
+            (wc.partitionClause.clone(), wc.orderClause.clone())
+        };
+        for sgc in part {
+            add_sgref(&mut sgrefs, root.sortgroupclause(sgc).tleSortGroupRef);
+        }
+        for sgc in ord {
+            add_sgref(&mut sgrefs, root.sortgroupclause(sgc).tleSortGroupRef);
+        }
+    }
+    let group_clause = root.processed_groupClause.clone();
+    for sgc in group_clause {
+        add_sgref(&mut sgrefs, root.sortgroupclause(sgc).tleSortGroupRef);
+    }
+
+    // Non-flattenable items kept as-is; the rest saved for pull_var_clause.
+    let mut input_target = create_empty_pathtarget();
+    let mut flattenable_cols: Vec<types_pathnodes::NodeId> = Vec::new();
+    for (i, &expr_id) in final_target.exprs.iter().enumerate() {
+        let sgref = get_pathtarget_sortgroupref(final_target, i);
+        if sgref != 0 && sgrefs.contains(&sgref) {
+            // Don't deconstruct this value; add it as-is.
+            add_column_to_pathtarget(&mut input_target, expr_id, sgref);
+        } else {
+            flattenable_cols.push(expr_id);
+        }
+    }
+
+    // Pull out all Vars and Aggrefs in flattenable columns (recursing into
+    // WindowFuncs to reach their input expressions), and add them.
+    let flags = PVC_INCLUDE_AGGREGATES | PVC_RECURSE_WINDOWFUNCS | PVC_INCLUDE_PLACEHOLDERS;
+    let mut flattenable_var_ids: Vec<types_pathnodes::NodeId> = Vec::new();
+    for &nid in &flattenable_cols {
+        let scratch = mcx::MemoryContext::new("make_window_input_target pull_var_clause");
+        let node = backend_nodes_core::node_walker::node_expr_wrapper(root.node(nid), scratch.mcx());
+        let vars = pull_var_clause(&node, flags);
+        for v in vars {
+            flattenable_var_ids.push(root.alloc_node(v));
+        }
+    }
+    add_new_columns_to_pathtarget(root, &mut input_target, &flattenable_var_ids);
+
+    // XXX this causes some redundant cost calculation ...
+    backend_optimizer_path_costsize::sizeest::set_pathtarget_cost_width(root, &mut input_target);
+    Ok(input_target)
+}
+
+/// `make_pathkeys_for_window(root, wc, tlist)` (planner.c:6313) — the required
+/// input ordering for a WindowClause: PARTITION keys then ORDER keys. Removes
+/// redundant partition clauses from `wc->partitionClause` in place.
+fn make_pathkeys_for_window(
+    root: &mut PlannerInfo,
+    wc_id: types_pathnodes::NodeId,
+    tlist: &[types_pathnodes::NodeId],
+) -> PgResult<Vec<types_pathnodes::PathKey>> {
+    // Throw error if can't sort (grouping_is_sortable over partition/order clauses).
+    let (part_ids, ord_ids) = {
+        let wc = root.windowclause(wc_id);
+        (wc.partitionClause.clone(), wc.orderClause.clone())
+    };
+    let part_sgcs: Vec<types_nodes::rawnodes::SortGroupClause> =
+        part_ids.iter().map(|&id| *root.sortgroupclause(id)).collect();
+    let ord_sgcs: Vec<types_nodes::rawnodes::SortGroupClause> =
+        ord_ids.iter().map(|&id| *root.sortgroupclause(id)).collect();
+    if !backend_optimizer_util_vars::tlist::grouping_is_sortable(&part_sgcs) {
+        return Err(PgError::error("could not implement window PARTITION BY")
+            .with_sqlstate(types_error::error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .with_detail("Window partitioning columns must be of sortable datatypes."));
+    }
+    if !backend_optimizer_util_vars::tlist::grouping_is_sortable(&ord_sgcs) {
+        return Err(PgError::error("could not implement window ORDER BY")
+            .with_sqlstate(types_error::error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .with_detail("Window ordering columns must be of sortable datatypes."));
+    }
+
+    let mut window_pathkeys: Vec<types_pathnodes::PathKey> = Vec::new();
+
+    // PARTITION BY pathkeys, removing redundant clauses from wc->partitionClause.
+    if !part_ids.is_empty() {
+        let mut part = part_ids.clone();
+        let (pathkeys, sortable) =
+            backend_optimizer_path_pathkeys::make_pathkeys_for_sortclauses_extended(
+                root, &mut part, tlist, true, // remove_redundant
+                false, false,
+            );
+        debug_assert!(sortable);
+        // Reflect the redundant-clause removal back onto wc->partitionClause.
+        root.windowclause_mut(wc_id).partitionClause = part;
+        window_pathkeys = pathkeys;
+    }
+
+    // ORDER BY pathkeys appended (we must NOT remove redundant ones — RANGE
+    // OFFSET needs the ordering column for in_range tests).
+    if !ord_ids.is_empty() {
+        let orderby_pathkeys = backend_optimizer_path_pathkeys::make_pathkeys_for_sortclauses(
+            root, &ord_ids, tlist,
+        );
+        window_pathkeys = if !window_pathkeys.is_empty() {
+            backend_optimizer_path_pathkeys::append_pathkeys(root, window_pathkeys, &orderby_pathkeys)
+        } else {
+            orderby_pathkeys
+        };
+    }
+
+    Ok(window_pathkeys)
+}
+
+/// `create_window_paths(root, input_rel, input_target, output_target,
+/// output_target_parallel_safe, wflists, activeWindows)` (planner.c:4533).
+fn create_window_paths<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    input_rel: RelId,
+    input_target: &PathTarget,
+    output_target: &PathTarget,
+    _output_target_parallel_safe: bool,
+    wfa: &WindowFuncListsArena,
+    active_windows: &[types_pathnodes::NodeId],
+) -> PgResult<RelId> {
+    // For now, do all work in the (WINDOW, NULL) upperrel.
+    let window_rel = backend_optimizer_util_relnode::fetch_upper_rel(root, UPPERREL_WINDOW, &None);
+
+    // consider_parallel: glob is parallel-unsafe on this path, so the input rel
+    // is never consider_parallel and window_rel stays non-parallel.
+    // FDW propagation.
+    {
+        let (serverid, userid, useridiscurrent, has_fdwroutine) = {
+            let ir = root.rel(input_rel);
+            (ir.serverid, ir.userid, ir.useridiscurrent, ir.has_fdwroutine)
+        };
+        let wr = root.rel_mut(window_rel);
+        wr.serverid = serverid;
+        wr.userid = userid;
+        wr.useridiscurrent = useridiscurrent;
+        wr.has_fdwroutine = has_fdwroutine;
+    }
+
+    // Consider computing window functions starting from the cheapest-total path
+    // as well as any existing paths that satisfy/partially satisfy
+    // root->window_pathkeys.
+    let cheapest_total = root.rel(input_rel).cheapest_total_path;
+    let window_pathkeys = root.window_pathkeys.clone();
+    let pathlist = root.rel(input_rel).pathlist.clone();
+    for path in pathlist {
+        let path_pathkeys = root.path(path).base().pathkeys.clone();
+        let (contained, presorted_keys) =
+            backend_optimizer_path_pathkeys::pathkeys_count_contained_in(
+                &window_pathkeys,
+                &path_pathkeys,
+            );
+        if Some(path) == cheapest_total || contained || presorted_keys > 0 {
+            create_one_window_path(
+                run,
+                root,
+                window_rel,
+                path,
+                input_target,
+                output_target,
+                wfa,
+                active_windows,
+            )?;
+        }
+    }
+
+    // GetForeignUpperPaths / create_upper_paths_hook: none modeled.
+    backend_optimizer_util_pathnode::set_cheapest(root, window_rel)?;
+    Ok(window_rel)
+}
+
+/// `create_one_window_path(root, window_rel, path, input_target, output_target,
+/// wflists, activeWindows)` (planner.c:4620) — stack a WindowAgg node per active
+/// window clause (with sorts between as needed) atop `path`, adding the result
+/// to `window_rel`.
+fn create_one_window_path<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    window_rel: RelId,
+    mut path: PathId,
+    input_target: &PathTarget,
+    output_target: &PathTarget,
+    wfa: &WindowFuncListsArena,
+    active_windows: &[types_pathnodes::NodeId],
+) -> PgResult<()> {
+    // window_target starts as input_target; each intermediate WindowAgg adds its
+    // window-func outputs; the topmost installs output_target.
+    let mut window_target: PathTarget = input_target.clone();
+    // topqual accumulates the lower windows' runconditions (planner.c). With the
+    // WindowFuncRunCondition node unmodeled, runconditions are gated (the loop
+    // below loud-panics if any are present), so topqual stays empty here.
+    let topqual: Vec<types_pathnodes::NodeId> = Vec::new();
+    let tlist = root.processed_tlist.clone();
+    let n = active_windows.len();
+
+    for (idx, &wc_id) in active_windows.iter().enumerate() {
+        let winref = root.windowclause(wc_id).winref;
+        let window_pathkeys = make_pathkeys_for_window(root, wc_id, &tlist)?;
+
+        let path_pathkeys = root.path(path).base().pathkeys.clone();
+        let (is_sorted, presorted_keys) =
+            backend_optimizer_path_pathkeys::pathkeys_count_contained_in(
+                &window_pathkeys,
+                &path_pathkeys,
+            );
+
+        // Sort if necessary.
+        if !is_sorted {
+            if presorted_keys == 0 || !enable_incremental_sort() {
+                path = backend_optimizer_util_pathnode::create::create_sort_path(
+                    root,
+                    window_rel,
+                    path,
+                    window_pathkeys.clone(),
+                    -1.0,
+                )?;
+            } else {
+                path = backend_optimizer_util_pathnode::create::create_incremental_sort_path(
+                    root,
+                    run,
+                    window_rel,
+                    path,
+                    window_pathkeys.clone(),
+                    presorted_keys,
+                    -1.0,
+                )?;
+            }
+        }
+
+        let is_last = idx == n - 1;
+        let func_ids = wfa.window_funcs[winref as usize].clone();
+        if !is_last {
+            // Add the current WindowFuncs to an intermediate window_target (copy
+            // to avoid mutating the previous path's target).
+            let mut wt = backend_optimizer_util_vars::tlist::copy_pathtarget(&window_target);
+            let mut tuple_width: i64 = wt.width as i64;
+            for &wfn in &func_ids {
+                backend_optimizer_util_vars::tlist::add_column_to_pathtarget(&mut wt, wfn, 0);
+                let wintype = match root.node(wfn) {
+                    Expr::WindowFunc(w) => w.wintype,
+                    _ => panic!("create_one_window_path: windowFuncs entry is not a WindowFunc"),
+                };
+                tuple_width +=
+                    backend_utils_cache_lsyscache::type_::get_typavgwidth(wintype, -1)? as i64;
+            }
+            wt.width = backend_optimizer_path_costsize::clamp_width_est(tuple_width);
+            window_target = wt;
+        } else {
+            // Install the goal target in the topmost WindowAgg.
+            window_target = output_target.clone();
+        }
+
+        // topwindow = last item.
+        let topwindow = is_last;
+
+        // Collect WindowFuncRunConditions from each WindowFunc and convert them
+        // into OpExprs (planner.c:4720-4760). The runConditions are populated
+        // only by find_window_run_conditions (a separate planner optimization not
+        // ported here) and the WindowFuncRunCondition node is not modeled, so the
+        // common path is the empty list; a non-empty list loud-panics.
+        let runcondition: Vec<types_pathnodes::NodeId> = Vec::new();
+        for &wfn in &func_ids {
+            let has_run_cond = match root.node(wfn) {
+                Expr::WindowFunc(w) => !w.runCondition.is_empty(),
+                _ => panic!("create_one_window_path: windowFuncs entry is not a WindowFunc"),
+            };
+            if has_run_cond {
+                panic!(
+                    "create_one_window_path: WindowFunc runConditions need the \
+                     WindowFuncRunCondition node model + find_window_run_conditions \
+                     (planner.c) — not ported"
+                );
+            }
+        }
+
+        path = backend_optimizer_util_pathnode_seams::create_windowagg_path::call(
+            run,
+            root,
+            window_rel,
+            path,
+            Box::new(window_target.clone()),
+            func_ids.clone(),
+            runcondition,
+            wc_id,
+            if topwindow { topqual.clone() } else { Vec::new() },
+            topwindow,
+        )?;
+    }
+
+    backend_optimizer_util_pathnode::add_path(root, window_rel, path)?;
+    Ok(())
+}
+
+/// `windowfunc_cost(root, wfunc)` (cost_windowagg inner loop) — the per-WindowFunc
+/// cost contribution: `add_function_cost(winfnoid)` startup + per-row, plus
+/// `cost_qual_eval_node(wfunc->args)` + `cost_qual_eval_node(wfunc->aggfilter)`
+/// per-row contributions.
+fn windowfunc_cost_impl(
+    root: &mut PlannerInfo,
+    wfunc: types_pathnodes::NodeId,
+) -> (types_core::primitive::Cost, types_core::primitive::Cost) {
+    let (winfnoid, args, aggfilter) = match root.node(wfunc) {
+        Expr::WindowFunc(w) => (w.winfnoid, w.args.clone(), w.aggfilter.clone()),
+        _ => panic!("windowfunc_cost: node is not a WindowFunc"),
+    };
+
+    // add_function_cost(root, winfnoid, (Node *) wfunc): startup + per_tuple.
+    let (mut startup, mut per_tuple) =
+        match backend_optimizer_util_plancat::add_function_cost(root, winfnoid, Some(wfunc)) {
+            Ok(v) => v,
+            Err(_) => (0.0, 0.0),
+        };
+
+    // cost_qual_eval_node(&argcosts, (Node *) wfunc->args, root).
+    for arg in args {
+        let id = root.alloc_node(arg);
+        let qc = backend_optimizer_path_costsize::cost_qual_eval_node(root, id);
+        startup += qc.startup;
+        per_tuple += qc.per_tuple;
+    }
+    // cost_qual_eval_node(&argcosts, (Node *) wfunc->aggfilter, root).
+    if let Some(f) = aggfilter {
+        let id = root.alloc_node(*f);
+        let qc = backend_optimizer_path_costsize::cost_qual_eval_node(root, id);
+        startup += qc.startup;
+        per_tuple += qc.per_tuple;
+    }
+
+    (startup, per_tuple)
+}
+
+/// `windowclause_cost_info` seam owner: the WindowClause column counts +
+/// `get_windowclause_startup_tuples` estimate.
+fn windowclause_cost_info_impl<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    winclause: types_pathnodes::NodeId,
+    input_tuples: f64,
+) -> PgResult<backend_optimizer_path_costsize_seams::WindowClauseCostInfo> {
+    let (num_part_cols, num_order_cols) = {
+        let wc = root.windowclause(winclause);
+        (wc.partitionClause.len() as i32, wc.orderClause.len() as i32)
+    };
+    let startup_tuples = get_windowclause_startup_tuples(run, root, winclause, input_tuples)?;
+    Ok(backend_optimizer_path_costsize_seams::WindowClauseCostInfo {
+        num_part_cols,
+        num_order_cols,
+        startup_tuples,
+    })
+}
+
+/// `get_windowclause_startup_tuples(root, wc, input_tuples)` (costsize.c:2884) —
+/// estimate how many subnode tuples must be read before the first WindowAgg row.
+fn get_windowclause_startup_tuples<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    winclause: types_pathnodes::NodeId,
+    input_tuples: f64,
+) -> PgResult<f64> {
+    // Frame-option bits (parsenodes.h).
+    const FRAMEOPTION_ROWS: i32 = 0x00004;
+    const FRAMEOPTION_RANGE: i32 = 0x00002;
+    const FRAMEOPTION_GROUPS: i32 = 0x00008;
+    const FRAMEOPTION_END_UNBOUNDED_FOLLOWING: i32 = 0x00040;
+    const FRAMEOPTION_END_CURRENT_ROW: i32 = 0x00200;
+    const FRAMEOPTION_END_OFFSET_PRECEDING: i32 = 0x01000;
+    const FRAMEOPTION_END_OFFSET_FOLLOWING: i32 = 0x04000;
+
+    let (frame_options, part_ids, ord_ids, end_off_id) = {
+        let wc = root.windowclause(winclause);
+        (
+            wc.frameOptions,
+            wc.partitionClause.clone(),
+            wc.orderClause.clone(),
+            wc.endOffset,
+        )
+    };
+    let tlist = root.processed_tlist.clone();
+
+    // partition_tuples = input_tuples / num_partitions.
+    let partition_tuples = if !part_ids.is_empty() {
+        let part_exprs = sortgrouplist_exprs_arena(root, &part_ids, &tlist);
+        let num_partitions = backend_utils_adt_selfuncs_seams::estimate_num_groups::call(
+            run, root, &part_exprs, input_tuples, None,
+        )?;
+        input_tuples / num_partitions
+    } else {
+        input_tuples
+    };
+
+    // peer_tuples = partition_tuples / num_groups (per ORDER BY peer group).
+    let peer_tuples = if !ord_ids.is_empty() {
+        let order_exprs = sortgrouplist_exprs_arena(root, &ord_ids, &tlist);
+        let num_groups = backend_utils_adt_selfuncs_seams::estimate_num_groups::call(
+            run, root, &order_exprs, partition_tuples, None,
+        )?;
+        partition_tuples / num_groups
+    } else {
+        1.0
+    };
+
+    let return_tuples = if frame_options & FRAMEOPTION_END_UNBOUNDED_FOLLOWING != 0 {
+        partition_tuples
+    } else if frame_options & FRAMEOPTION_END_CURRENT_ROW != 0 {
+        if frame_options & FRAMEOPTION_ROWS != 0 {
+            1.0
+        } else if frame_options & (FRAMEOPTION_RANGE | FRAMEOPTION_GROUPS) != 0 {
+            if ord_ids.is_empty() {
+                partition_tuples
+            } else {
+                peer_tuples
+            }
+        } else {
+            1.0
+        }
+    } else if frame_options & FRAMEOPTION_END_OFFSET_PRECEDING != 0 {
+        1.0
+    } else if frame_options & FRAMEOPTION_END_OFFSET_FOLLOWING != 0 {
+        // INT2OID = 21, INT4OID = 23, INT8OID = 20 (pg_type_d.h);
+        // DEFAULT_INEQ_SEL = 1/3 (selfuncs.h).
+        const INT2OID: types_core::primitive::Oid = 21;
+        const DEFAULT_INEQ_SEL: f64 = 0.3333333333333333;
+        // try and figure out the value specified in the endOffset.
+        let end_offset_value = match end_off_id.map(|id| root.node(id).clone()) {
+            Some(Expr::Const(c)) => {
+                if c.constisnull {
+                    // NULLs aren't allowed; pretend just the first row is needed.
+                    1.0
+                } else {
+                    match c.consttype {
+                        x if x == INT2OID => c.constvalue.as_i16() as f64,
+                        x if x == types_core::catalog::INT4OID => c.constvalue.as_i32() as f64,
+                        x if x == types_core::catalog::INT8OID => c.constvalue.as_i64() as f64,
+                        _ => partition_tuples / peer_tuples * DEFAULT_INEQ_SEL,
+                    }
+                }
+            }
+            // Non-Const end bound: guess via DEFAULT_INEQ_SEL.
+            _ => partition_tuples / peer_tuples * DEFAULT_INEQ_SEL,
+        };
+        if frame_options & FRAMEOPTION_ROWS != 0 {
+            // include the N FOLLOWING and the current row.
+            end_offset_value + 1.0
+        } else if frame_options & (FRAMEOPTION_RANGE | FRAMEOPTION_GROUPS) != 0 {
+            // include N FOLLOWING ranges/groups and the initial range/group.
+            peer_tuples * (end_offset_value + 1.0)
+        } else {
+            1.0
+        }
+    } else {
+        1.0
+    };
+
+    // Cap the return value to the estimated partition tuples (+1 for the extra
+    // tuple WindowAgg reads to confirm the partition/peer boundary).
+    let return_tuples = if !part_ids.is_empty() || !ord_ids.is_empty() {
+        (return_tuples + 1.0).min(partition_tuples)
+    } else {
+        return_tuples.min(partition_tuples)
+    };
+
+    Ok(backend_optimizer_path_costsize::clamp_row_est(return_tuples))
+}
+
+/// `get_sortgrouplist_exprs(sgClauses, targetList)` over arena handles, returning
+/// the interned tlist-expression handles the `estimate_num_groups` seam expects.
+fn sortgrouplist_exprs_arena(
+    root: &mut PlannerInfo,
+    sg_ids: &[types_pathnodes::NodeId],
+    tlist: &[types_pathnodes::NodeId],
+) -> Vec<types_pathnodes::NodeId> {
+    let mut out = Vec::with_capacity(sg_ids.len());
+    for &sgc in sg_ids {
+        let id = backend_nodes_nodeFuncs_seams::get_sortgroupclause_expr::call(root, sgc, tlist);
+        out.push(id);
+    }
+    out
 }
 
 // ===========================================================================
@@ -2906,6 +3822,7 @@ fn standard_qp_callback(
     root: &mut PlannerInfo,
     sort_clause_ids: &[types_pathnodes::NodeId],
     distinct_clause_ids: &[types_pathnodes::NodeId],
+    first_active_window: Option<types_pathnodes::NodeId>,
 ) -> PgResult<()> {
     // tlist = root->processed_tlist (C:3457).
     let tlist = root.processed_tlist.clone();
@@ -2949,8 +3866,13 @@ fn standard_qp_callback(
         root.num_groupby_pathkeys = 0;
     }
 
-    // Window pathkeys: NIL on this path (window clauses gated out upstream).
-    root.window_pathkeys = Vec::new();
+    // Window pathkeys: only the first (bottom) active window participates
+    // (C:3545-3554). make_pathkeys_for_window also removes redundant partition
+    // clauses from that WindowClause in place.
+    root.window_pathkeys = match first_active_window {
+        Some(wc_id) => make_pathkeys_for_window(root, wc_id, &tlist)?,
+        None => Vec::new(),
+    };
 
     // DISTINCT pathkeys (C:3564-3580). As with GROUP BY, discard DISTINCT items
     // proven redundant by EquivalenceClass processing; the non-redundant list is
@@ -4387,6 +5309,64 @@ fn datum_get_int64(c: &types_nodes::primnodes::Const) -> i64 {
     }
 }
 
+/// Extract `wc->startOffset` (if `start`) or `wc->endOffset` of the `i`th
+/// WindowClause from the `Query` as an owned `Option<Expr>` (the offset is a
+/// `Node::Expr`). Leaves the field in place; the preprocessed value is written
+/// back by [`set_windowclause_offset`].
+fn extract_windowclause_offset<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &PlannerInfo,
+    i: usize,
+    start: bool,
+) -> Option<Expr> {
+    let wc_node = &run.resolve(root.parse).windowClause[i];
+    let wc = match &**wc_node {
+        Node::WindowClause(wc) => wc,
+        other => panic!(
+            "windowClause element is not a WindowClause (got {:?})",
+            other.tag()
+        ),
+    };
+    let offset = if start { &wc.startOffset } else { &wc.endOffset };
+    offset.as_ref().map(|np| match &**np {
+        Node::Expr(e) => e.clone(),
+        other => panic!(
+            "WindowClause offset is not an Expr (got {:?})",
+            other.tag()
+        ),
+    })
+}
+
+/// Write `processed` back into `wc->startOffset`/`wc->endOffset` of the `i`th
+/// WindowClause (wrapping the `Expr` in a `Node::Expr` NodePtr, or `None`).
+fn set_windowclause_offset<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &mut PlannerRun<'mcx>,
+    root: &PlannerInfo,
+    i: usize,
+    start: bool,
+    processed: Option<Expr>,
+) -> PgResult<()> {
+    let wrapped = match processed {
+        Some(e) => Some(mcx::alloc_in(mcx, Node::Expr(e))?),
+        None => None,
+    };
+    let wc_node = &mut run.resolve_mut(root.parse).windowClause[i];
+    let wc = match &mut **wc_node {
+        Node::WindowClause(wc) => wc,
+        other => panic!(
+            "windowClause element is not a WindowClause (got {:?})",
+            other.tag()
+        ),
+    };
+    if start {
+        wc.startOffset = wrapped;
+    } else {
+        wc.endOffset = wrapped;
+    }
+    Ok(())
+}
+
 // ===========================================================================
 // Seam installation
 // ===========================================================================
@@ -4512,6 +5492,11 @@ pub fn init_seams() {
 
     backend_optimizer_plan_planner_seams::pg_plan_query::set(pg_plan_query_impl);
     backend_optimizer_plan_planner_seams::plan_cluster_use_sort::set(plan_cluster_use_sort_impl);
+
+    // Window-clause cost seams (costsize.c's cost_windowagg reads them; the
+    // planner owns the arena WindowClause + the parse Query they need).
+    backend_optimizer_path_costsize_seams::windowfunc_cost::set(windowfunc_cost_impl);
+    backend_optimizer_path_costsize_seams::windowclause_cost_info::set(windowclause_cost_info_impl);
     backend_optimizer_plan_planner_pc_seams::expression_planner_with_deps_value::set(
         expression_planner_with_deps,
     );

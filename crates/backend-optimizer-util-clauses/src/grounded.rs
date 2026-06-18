@@ -167,6 +167,38 @@ pub fn find_window_functions(clause: Option<&Expr>, max_win_ref: u32) -> PgResul
     Ok(lists)
 }
 
+/// `find_window_functions((Node *) tlist, maxWinRef)` for a targetlist — runs
+/// the window-func walker over each targetlist expression, accumulating into a
+/// single [`WindowFuncLists`]. The C passes the whole `List *` to the walker
+/// (which descends List nodes); here the planner's `processed_tlist` is a list
+/// of `TargetEntry` handles, so the caller resolves each entry's expression and
+/// passes the slice.
+pub fn find_window_functions_in_exprs(
+    exprs: &[&Expr],
+    max_win_ref: u32,
+) -> PgResult<WindowFuncLists> {
+    let mut window_funcs: Vec<Vec<Expr>> = Vec::with_capacity((max_win_ref as usize) + 1);
+    for _ in 0..=(max_win_ref as usize) {
+        window_funcs.push(Vec::new());
+    }
+    let mut lists = WindowFuncLists {
+        num_window_funcs: 0,
+        max_win_ref,
+        window_funcs,
+    };
+    let mut err: Option<PgError> = None;
+    for expr in exprs {
+        find_window_functions_walker(Some(expr), &mut lists, &mut err);
+        if err.is_some() {
+            break;
+        }
+    }
+    if let Some(e) = err {
+        return Err(e);
+    }
+    Ok(lists)
+}
+
 fn find_window_functions_walker(
     node: Option<&Expr>,
     lists: &mut WindowFuncLists,

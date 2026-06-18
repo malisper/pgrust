@@ -1886,7 +1886,8 @@ pub fn create_minmaxagg_path(
 }
 
 /// `create_windowagg_path(...)` (pathnode.c:3715).
-pub fn create_windowagg_path(
+pub fn create_windowagg_path<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     rel: RelId,
     subpath: PathId,
@@ -1917,6 +1918,7 @@ pub fn create_windowagg_path(
         topwindow,
     }));
     seam::cost_windowagg::call(
+        run,
         root,
         id,
         &window_funcs,
@@ -1925,7 +1927,7 @@ pub fn create_windowagg_path(
         sp.startup_cost,
         sp.total_cost,
         sp.rows,
-    );
+    )?;
 
     {
         let p = root.path_mut(id).base_mut();

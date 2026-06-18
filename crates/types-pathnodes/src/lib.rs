@@ -2460,6 +2460,57 @@ pub enum ArenaNode {
     /// these as `Node *` handles in the same id-space (appendinfo.c
     /// `add_row_identity_var`).
     RowIdentityVar(RowIdentityVarInfo),
+    /// A `WindowClause` node — `WindowAggPath::winclause` carries one as a
+    /// `Node *` handle in the same id-space. The lifetime-bearing parse-tree
+    /// [`types_nodes::rawnodes::WindowClause`] cannot live in the arena, so the
+    /// planner interns this lifetime-free [`WindowClauseNode`] (its
+    /// partition/order `SortGroupClause` lists and start/end offset expressions
+    /// re-interned as their own arena handles) when it builds a WindowAggPath.
+    WindowClause(WindowClauseNode),
+}
+
+/// `WindowClause` (nodes/parsenodes.h) as carried in `WindowAggPath::winclause`
+/// — the lifetime-free planner-arena form. The PARTITION BY / ORDER BY clauses
+/// are interned `SortGroupClause` handles (`ArenaNode::SortGroupClause`); the
+/// frame start/end offsets are interned `Expr` handles (`ArenaNode::Expr`).
+/// Mirrors [`types_nodes::rawnodes::WindowClause`] field-for-field for the
+/// members the planner / createplan / costsize read.
+#[derive(Clone, Debug, Default)]
+pub struct WindowClauseNode {
+    /// `char *name` — window name (NULL in an OVER clause).
+    pub name: Option<alloc::string::String>,
+    /// `List *partitionClause` — PARTITION BY (SortGroupClause handles).
+    #[allow(non_snake_case)]
+    pub partitionClause: Vec<NodeId>,
+    /// `List *orderClause` — ORDER BY (SortGroupClause handles).
+    #[allow(non_snake_case)]
+    pub orderClause: Vec<NodeId>,
+    /// `int frameOptions` — frame_clause options (see `WindowDef`).
+    #[allow(non_snake_case)]
+    pub frameOptions: i32,
+    /// `Node *startOffset` — expression for starting bound, if any.
+    #[allow(non_snake_case)]
+    pub startOffset: Option<NodeId>,
+    /// `Node *endOffset` — expression for ending bound, if any.
+    #[allow(non_snake_case)]
+    pub endOffset: Option<NodeId>,
+    /// `Oid startInRangeFunc` — in_range function for startOffset.
+    #[allow(non_snake_case)]
+    pub startInRangeFunc: Oid,
+    /// `Oid endInRangeFunc` — in_range function for endOffset.
+    #[allow(non_snake_case)]
+    pub endInRangeFunc: Oid,
+    /// `Oid inRangeColl` — collation for in_range tests.
+    #[allow(non_snake_case)]
+    pub inRangeColl: Oid,
+    /// `bool inRangeAsc` — use ASC sort order for in_range tests?
+    #[allow(non_snake_case)]
+    pub inRangeAsc: bool,
+    /// `bool inRangeNullsFirst` — nulls sort first for in_range tests?
+    #[allow(non_snake_case)]
+    pub inRangeNullsFirst: bool,
+    /// `Index winref` — ID referenced by window functions.
+    pub winref: Index,
 }
 
 /// `NestLoopParam` (nodes/plannodes.h) as carried in `root->curOuterParams`
@@ -2813,6 +2864,34 @@ impl PlannerInfo {
         }
     }
 
+    /// Resolve a [`NodeId`] to its [`WindowClauseNode`] (the
+    /// `WindowAggPath::winclause` handle). Panics if the handle does not resolve
+    /// to a `WindowClause`.
+    #[inline]
+    pub fn windowclause(&self, id: NodeId) -> &WindowClauseNode {
+        match &self.node_arena[id.index()] {
+            ArenaNode::WindowClause(wc) => wc,
+            _ => panic!(
+                "PlannerInfo::windowclause: NodeId {} does not resolve to a WindowClause",
+                id.0
+            ),
+        }
+    }
+
+    /// Resolve a [`NodeId`] to its [`WindowClauseNode`] for mutation
+    /// (`make_pathkeys_for_window` removes redundant partition clauses;
+    /// `optimize_window_clauses` rewrites frame options / winref).
+    #[inline]
+    pub fn windowclause_mut(&mut self, id: NodeId) -> &mut WindowClauseNode {
+        match &mut self.node_arena[id.index()] {
+            ArenaNode::WindowClause(wc) => wc,
+            _ => panic!(
+                "PlannerInfo::windowclause_mut: NodeId {} does not resolve to a WindowClause",
+                id.0
+            ),
+        }
+    }
+
     /// Resolve a [`NodeId`] to its [`RowIdentityVarInfo`] (a
     /// `root->row_identity_vars` element).
     #[inline]
@@ -3016,6 +3095,15 @@ impl PlannerInfo {
     ) -> NodeId {
         let id = NodeId(self.node_arena.len() as u32);
         self.node_arena.push(ArenaNode::SortGroupClause(sgc));
+        id
+    }
+    /// Intern a [`WindowClauseNode`] into the node store, returning its
+    /// [`NodeId`] handle (the `WindowAggPath::winclause` element). Producer:
+    /// `create_window_paths` (planner.c) when stacking WindowAgg paths.
+    #[inline]
+    pub fn alloc_windowclause(&mut self, wc: WindowClauseNode) -> NodeId {
+        let id = NodeId(self.node_arena.len() as u32);
+        self.node_arena.push(ArenaNode::WindowClause(wc));
         id
     }
     /// Intern a [`RowIdentityVarInfo`] into the node store, returning its

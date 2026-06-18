@@ -457,18 +457,26 @@ seam_core::seam!(
     /// `add_function_cost(winfnoid)` + `cost_qual_eval_node(wfunc->args)` +
     /// `cost_qual_eval_node(wfunc->aggfilter)`. The args/aggfilter are inline
     /// `Expr` values on the WindowFunc (no `NodeId`), so the per-func cost is
-    /// computed by the owner from the WindowFunc node handle.
-    pub fn windowfunc_cost(root: &PlannerInfo, wfunc: NodeId) -> (Cost, Cost)
+    /// computed by the owner from the WindowFunc node handle. `&mut root`
+    /// because the owner re-interns the WindowFunc's args/aggfilter into the
+    /// arena to run `cost_qual_eval_node`.
+    pub fn windowfunc_cost(root: &mut PlannerInfo, wfunc: NodeId) -> (Cost, Cost)
 );
 seam_core::seam!(
     /// The WindowClause column counts + startup-tuples estimate — needs the
     /// WindowClause fields + `root->parse->targetList`, neither reachable in the
     /// fabled arena (winclause carried as a `NodeId`; `parse` is opaque).
-    pub fn windowclause_cost_info(
-        root: &PlannerInfo,
+    ///
+    /// `run` + `&mut root` thread `get_windowclause_startup_tuples`'s
+    /// `estimate_num_groups` call (examines `pg_statistic` through the
+    /// [`PlannerRun`] and re-interns stripped grouping expressions into the
+    /// arena), so the seam is fallible.
+    pub fn windowclause_cost_info<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+        root: &mut PlannerInfo,
         winclause: NodeId,
         input_tuples: f64,
-    ) -> WindowClauseCostInfo
+    ) -> PgResult<WindowClauseCostInfo>
 );
 
 seam_core::seam!(

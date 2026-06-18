@@ -357,7 +357,8 @@ fn cost_agg_seam<'mcx>(
     );
 }
 
-fn cost_windowagg_seam(
+fn cost_windowagg_seam<'mcx>(
+    run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     path: PathId,
     window_funcs: &[NodeId],
@@ -366,8 +367,9 @@ fn cost_windowagg_seam(
     input_startup_cost: types_core::primitive::Cost,
     input_total_cost: types_core::primitive::Cost,
     input_tuples: f64,
-) {
+) -> types_error::PgResult<()> {
     crate::exprcost::cost_windowagg(
+        run,
         root,
         path,
         window_funcs,
@@ -376,5 +378,5 @@ fn cost_windowagg_seam(
         input_startup_cost,
         input_total_cost,
         input_tuples,
-    );
+    )
 }

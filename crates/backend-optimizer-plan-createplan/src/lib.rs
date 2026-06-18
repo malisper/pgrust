@@ -1083,8 +1083,7 @@ pub fn create_plan_recurse<'mcx>(
         // IsA(best_path, GroupingSetsPath) vs AggPath — internal to the Agg
         // family; route the whole T_Agg pathtype.
         T_Agg => create_agg_dispatch_plan(mcx, root, run, best_path),
-        // create_windowagg_plan is not yet ported; stays a forward seam-panic.
-        T_WindowAgg => cp_seam::create_windowagg_plan::call(mcx, root, run, best_path),
+        T_WindowAgg => create_windowagg_plan(mcx, root, run, best_path),
         T_SetOp => create_setop_plan(mcx, root, run, best_path, flags),
         T_RecursiveUnion => create_recursiveunion_plan(mcx, root, run, best_path),
         // create_lockrows_plan is not yet ported (PlanRowMark carrier gap); seam.
@@ -5790,6 +5789,193 @@ fn create_group_plan<'mcx>(
     copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
 
     Ok(Node::Group(plan))
+}
+
+/// `make_windowagg(tlist, wc, partNumCols, partColIdx, partOperators,
+/// partCollations, ordNumCols, ordColIdx, ordOperators, ordCollations,
+/// runCondition, qual, topWindow, lefttree)` (createplan.c:6765).
+fn make_windowagg<'mcx>(
+    mcx: Mcx<'mcx>,
+    tlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
+    wc: &types_pathnodes::WindowClauseNode,
+    win_name: Option<PgString<'mcx>>,
+    start_offset: Option<Expr>,
+    end_offset: Option<Expr>,
+    part_num_cols: i32,
+    part_col_idx: Vec<AttrNumber>,
+    part_operators: Vec<Oid>,
+    part_collations: Vec<Oid>,
+    ord_num_cols: i32,
+    ord_col_idx: Vec<AttrNumber>,
+    ord_operators: Vec<Oid>,
+    ord_collations: Vec<Oid>,
+    run_condition: Option<PgVec<'mcx, Expr>>,
+    qual: Option<PgVec<'mcx, Expr>>,
+    top_window: bool,
+    lefttree: Node<'mcx>,
+) -> PgResult<types_nodes::nodewindowagg::WindowAgg<'mcx>> {
+    // node->runConditionOrig is a duplicate of runCondition for EXPLAIN.
+    let run_condition_orig = match &run_condition {
+        Some(v) => {
+            let mut out = vec_with_capacity_in(mcx, v.len())?;
+            for e in v.iter() {
+                out.push(e.clone());
+            }
+            Some(out)
+        }
+        None => None,
+    };
+
+    let mut plan = Plan::default();
+    plan.targetlist = tlist;
+    plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
+    plan.righttree = None;
+    plan.qual = qual;
+
+    Ok(types_nodes::nodewindowagg::WindowAgg {
+        plan,
+        winname: win_name,
+        winref: wc.winref,
+        partNumCols: part_num_cols,
+        partColIdx: oid_attr_vec_opt(mcx, part_col_idx)?,
+        partOperators: oid_vec_opt(mcx, part_operators)?,
+        partCollations: oid_vec_opt(mcx, part_collations)?,
+        ordNumCols: ord_num_cols,
+        ordColIdx: oid_attr_vec_opt(mcx, ord_col_idx)?,
+        ordOperators: oid_vec_opt(mcx, ord_operators)?,
+        ordCollations: oid_vec_opt(mcx, ord_collations)?,
+        frameOptions: wc.frameOptions,
+        startOffset: match start_offset {
+            Some(e) => Some(mcx::alloc_in(mcx, e)?),
+            None => None,
+        },
+        endOffset: match end_offset {
+            Some(e) => Some(mcx::alloc_in(mcx, e)?),
+            None => None,
+        },
+        runCondition: run_condition,
+        runConditionOrig: run_condition_orig,
+        startInRangeFunc: wc.startInRangeFunc,
+        endInRangeFunc: wc.endInRangeFunc,
+        inRangeColl: wc.inRangeColl,
+        inRangeAsc: wc.inRangeAsc,
+        inRangeNullsFirst: wc.inRangeNullsFirst,
+        topWindow: top_window,
+    })
+}
+
+/// `create_windowagg_plan(root, (WindowAggPath *) best_path)` (createplan.c:2614).
+fn create_windowagg_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+) -> PgResult<Node<'mcx>> {
+    let (subpath, winclause_id, run_cond_ids, qual_ids, topwindow) = match root.path(best_path) {
+        PathNode::WindowAggPath(p) => (
+            p.subpath,
+            p.winclause,
+            p.runCondition.clone(),
+            p.qual.clone(),
+            p.topwindow,
+        ),
+        _ => unreachable!("create_windowagg_plan on non-WindowAggPath"),
+    };
+    let subpath = subpath.expect("create_windowagg_plan: WindowAggPath has no subpath");
+
+    // Read the WindowClause fields we need before recursing (the arena borrow
+    // must be released before create_plan_recurse takes &mut root).
+    let (win_name, part_ids, ord_ids, start_off_id, end_off_id) = {
+        let wc = root.windowclause(winclause_id);
+        (
+            wc.name.clone(),
+            wc.partitionClause.clone(),
+            wc.orderClause.clone(),
+            wc.startOffset,
+            wc.endOffset,
+        )
+    };
+
+    // WindowAgg stores input rows in a tuplestore, so request a small tlist;
+    // grouping columns must remain available (CP_LABEL_TLIST | CP_SMALL_TLIST).
+    let subplan = create_plan_recurse(mcx, root, run, subpath, CP_LABEL_TLIST | CP_SMALL_TLIST)?;
+
+    let tlist = build_path_tlist(mcx, root, best_path)?;
+    let tlist = tlist_to_plan_field(mcx, tlist)?;
+
+    // Convert the PARTITION BY / ORDER BY SortGroupClause lists into the
+    // executor's attr-index / operator / collation arrays.
+    let part_clauses = resolve_sort_group_clauses(root, &part_ids);
+    let ord_clauses = resolve_sort_group_clauses(root, &ord_ids);
+
+    let subplan_tlist: &[TargetEntry<'mcx>] = match subplan.plan_head().targetlist {
+        Some(ref tl) => tl.as_slice(),
+        None => &[],
+    };
+
+    let mut part_col_idx: Vec<AttrNumber> = Vec::with_capacity(part_clauses.len());
+    let mut part_operators: Vec<Oid> = Vec::with_capacity(part_clauses.len());
+    let mut part_collations: Vec<Oid> = Vec::with_capacity(part_clauses.len());
+    for sgc in &part_clauses {
+        let tle = util_tlist::get_sortgroupclause_tle(sgc, subplan_tlist)?;
+        debug_assert!(sgc.eqop != InvalidOid);
+        part_col_idx.push(tle.resno);
+        part_operators.push(sgc.eqop);
+        part_collations.push(expr_collation_of_tle(tle)?);
+    }
+    let part_num_cols = part_col_idx.len() as i32;
+
+    let mut ord_col_idx: Vec<AttrNumber> = Vec::with_capacity(ord_clauses.len());
+    let mut ord_operators: Vec<Oid> = Vec::with_capacity(ord_clauses.len());
+    let mut ord_collations: Vec<Oid> = Vec::with_capacity(ord_clauses.len());
+    for sgc in &ord_clauses {
+        let tle = util_tlist::get_sortgroupclause_tle(sgc, subplan_tlist)?;
+        debug_assert!(sgc.eqop != InvalidOid);
+        ord_col_idx.push(tle.resno);
+        ord_operators.push(sgc.eqop);
+        ord_collations.push(expr_collation_of_tle(tle)?);
+    }
+    let ord_num_cols = ord_col_idx.len() as i32;
+
+    // runCondition / qual are bare Expr (OpExpr) clause handles in the arena.
+    let run_condition = nodes_to_expr_qual(mcx, root, &run_cond_ids)?;
+    let qual = nodes_to_expr_qual(mcx, root, &qual_ids)?;
+
+    // The frame start/end offset expressions are arena Expr handles.
+    let start_offset = start_off_id.map(|id| root.node(id).clone());
+    let end_offset = end_off_id.map(|id| root.node(id).clone());
+
+    // wc->name -> owned PgString.
+    let win_name: Option<PgString<'mcx>> = match win_name {
+        Some(s) => Some(PgString::from_str_in(&s, mcx)?),
+        None => None,
+    };
+
+    let wc = root.windowclause(winclause_id).clone();
+    let mut plan = make_windowagg(
+        mcx,
+        tlist,
+        &wc,
+        win_name,
+        start_offset,
+        end_offset,
+        part_num_cols,
+        part_col_idx,
+        part_operators,
+        part_collations,
+        ord_num_cols,
+        ord_col_idx,
+        ord_operators,
+        ord_collations,
+        run_condition,
+        qual,
+        topwindow,
+        subplan,
+    )?;
+
+    copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
+
+    Ok(Node::WindowAgg(plan))
 }
 
 /// `make_unique_from_sortclauses(lefttree, distinctList)` (createplan.c:6835) —

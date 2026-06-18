@@ -213,7 +213,8 @@ pub fn cost_group<'mcx>(
 
 /// `cost_windowagg` — fills a WindowAgg path (by `PathId`). `window_funcs` are
 /// the WindowFunc node handles; `winclause` is the WindowClause node handle.
-pub fn cost_windowagg(
+pub fn cost_windowagg<'mcx>(
+    run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     path_id: PathId,
     window_funcs: &[NodeId],
@@ -222,13 +223,13 @@ pub fn cost_windowagg(
     input_startup_cost: Cost,
     input_total_cost: Cost,
     input_tuples: f64,
-) {
+) -> types_error::PgResult<()> {
     // The WindowClause column counts + startup-tuples estimate (the C reads
     // winclause->partitionClause/orderClause + get_windowclause_startup_tuples,
     // which also touches root->parse->targetList) are unreachable in the fabled
     // arena, so they cross a focused seam. The window-function eval costs (over
     // the reachable WindowFunc node handles) and all arithmetic stay in-crate.
-    let wc = cz::windowclause_cost_info::call(root, winclause, input_tuples);
+    let wc = cz::windowclause_cost_info::call(run, root, winclause, input_tuples)?;
     let num_part_cols = wc.num_part_cols;
     let num_order_cols = wc.num_order_cols;
 
@@ -262,6 +263,8 @@ pub fn cost_windowagg(
         let p = root.path_mut(path_id).base_mut();
         p.startup_cost += (total_cost - startup_cost) / input_tuples * (startup_tuples - 1.0);
     }
+
+    Ok(())
 }
 
 /* ==========================================================================

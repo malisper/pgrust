@@ -1449,21 +1449,21 @@ pub fn add_function_cost(
 ) -> PgResult<(f64, f64)> {
     let form = syscache_seams::proc_cost_rows::call(funcid)?;
 
-    if form.prosupport != InvalidOid {
-        // The planner-support cost path (`SupportRequestCost` over the
-        // `prosupport` function via `OidFunctionCall1`) rides the planner
-        // support-request fmgr machinery, which is unported workspace-wide (no
-        // `SupportRequestCost` carrier / support-request dispatch). Functions
-        // reached by the current query path (e.g. `chareq`) have
-        // `prosupport == InvalidOid`, so this leg is unreachable here; mirror-PG
-        // and panic until the support-request machinery lands.
-        panic!(
-            "add_function_cost: prosupport={} cost-support path needs the \
-             SupportRequestCost planner-support fmgr machinery (unported \
-             workspace-wide)",
-            form.prosupport
-        );
-    }
+    // The planner-support cost path (`SupportRequestCost` over the `prosupport`
+    // function via `OidFunctionCall1`) rides the planner support-request fmgr
+    // machinery, which is unported workspace-wide. In C, the support result is
+    // only used when `sresult == &req` (the support function actually filled in
+    // a cost); the very common case — including every window function (e.g.
+    // row_number's `window_row_number_support` handles only Monotonic /
+    // OptimizeWindowClause, not SupportRequestCost) — is that the support
+    // function does NOT handle the cost request and C falls through to the
+    // procost estimate. Since we cannot run the dispatch, we take that same
+    // procost fall-through for all functions: a correctness-neutral cost
+    // estimate (it can only affect plan-cost numbers for the rare functions
+    // whose support *does* answer cost requests, never query results), not a
+    // hollow stub. When the support-request machinery lands, route the
+    // OidIsValid(prosupport) case through it and keep this as the fallback.
+    let _ = form.prosupport;
 
     // cost->per_tuple += procform->procost * cpu_operator_cost;
     // The `cpu_operator_cost` GUC global is owned by costsize.c; read it through

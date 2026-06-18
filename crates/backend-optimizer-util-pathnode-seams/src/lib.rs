@@ -563,7 +563,8 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `create_windowagg_path(...)` (pathnode.c:3715).
-    pub fn create_windowagg_path(
+    pub fn create_windowagg_path<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         rel: RelId,
         subpath: PathId,
@@ -1036,7 +1037,14 @@ seam_core::seam!(
 seam_core::seam!(
     /// `cost_windowagg(path, root, windowFuncs, winclause, input_disabled_nodes,
     /// input_startup_cost, input_total_cost, input_tuples)`.
-    pub fn cost_windowagg(
+    ///
+    /// `run` + `&mut root` thread the `get_windowclause_startup_tuples`
+    /// estimate (which calls `estimate_num_groups`, examining `pg_statistic`
+    /// through the [`PlannerRun`] RTE store and re-interning stripped grouping
+    /// expressions into the arena), so the seam is fallible (OOM + the examine
+    /// path's `ereport`s).
+    pub fn cost_windowagg<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         path: PathId,
         window_funcs: &[NodeId],
@@ -1045,7 +1053,7 @@ seam_core::seam!(
         input_startup_cost: Cost,
         input_total_cost: Cost,
         input_tuples: f64,
-    )
+    ) -> types_error::PgResult<()>
 );
 seam_core::seam!(
     /// `cost_recursive_union(runion, nrterm, rterm)` — fills the RecursiveUnion

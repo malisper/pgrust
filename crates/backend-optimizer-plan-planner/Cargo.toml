@@ -78,6 +78,12 @@ backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
 backend-rewrite-rewritemanip-seams = { path = "../backend-rewrite-rewritemanip-seams" }
 # set_pathtarget_cost_width (the create_pathtarget macro tail).
 backend-optimizer-path-costsize = { path = "../backend-optimizer-path-costsize" }
+# windowfunc_cost / windowclause_cost_info install (cost_windowagg).
+backend-optimizer-path-costsize-seams = { path = "../backend-optimizer-path-costsize-seams" }
+# get_func_support (optimize_window_clauses) + get_typavgwidth (create_one_window_path).
+backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }
+# add_function_cost (windowfunc_cost).
+backend-optimizer-util-plancat = { path = "../backend-optimizer-util-plancat" }
 # get_sortgroupclause_expr (get_number_of_groups GROUP BY estimate).
 backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
 # estimate_num_groups (get_number_of_groups GROUP BY estimate).
