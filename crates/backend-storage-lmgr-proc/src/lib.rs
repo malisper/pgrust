@@ -102,4 +102,16 @@ pub fn init_seams() {
     backend_access_transam_parallel_rt_seams::become_lock_group_member::set(
         proc_misc::BecomeLockGroupMemberByNumber,
     );
+
+    // `ProcSleep`'s lock-wait progress / autovac-cancel diagnostics
+    // (proc.c:1523/1531/1590). These `ereport(...)` + `kill(SIGINT)` bodies are
+    // proc.c's own logic; they were homed on `backend-tcop-postgres-seams`
+    // (the `postgres::` alias proc_waitqueue calls through) only because the
+    // wait-queue and its message text live here while the seam crate names the
+    // file `postgres.c` historically owned. Install them from the real owner
+    // with faithful bodies (the message text is already formatted at the call
+    // sites; these only emit the report / send the signal).
+    backend_tcop_postgres_seams::report_autovac_cancel::set(seam::report_autovac_cancel);
+    backend_tcop_postgres_seams::signal_autovacuum_worker::set(seam::signal_autovacuum_worker);
+    backend_tcop_postgres_seams::report_lock_wait_log::set(seam::report_lock_wait_log);
 }

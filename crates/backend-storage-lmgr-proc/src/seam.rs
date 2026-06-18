@@ -554,3 +554,51 @@ pub(crate) fn ereport_fatal_too_many_wal_senders(max_wal_senders: i32) -> PgResu
         ))
         .finish(types_error::ErrorLocation::new(SRC, 453, "InitProcess"))
 }
+
+/// `ProcSleep`'s autovac-cancel diagnostic (proc.c:1523):
+/// `ereport(DEBUG1, errmsg_internal("sending cancel to blocking autovacuum PID
+/// %d", pid), errdetail_log("%s", logbuf.data))`. The caller has already
+/// formatted `detail_log` (the lock-tag description) under the
+/// `message_level_is_interesting(DEBUG1)` guard.
+pub(crate) fn report_autovac_cancel(pid: i32, detail_log: String) -> PgResult<()> {
+    backend_utils_error::ereport(types_error::DEBUG1)
+        .errmsg_internal(format!("sending cancel to blocking autovacuum PID {pid}"))
+        .errdetail_log(detail_log)
+        .finish(types_error::ErrorLocation::new(SRC, 1523, "ProcSleep"))
+}
+
+/// `ProcSleep`'s `kill(pid, SIGINT)` against a blocking autovacuum worker
+/// (proc.c:1531). The race where the worker exits before the kill is benign, so
+/// `ESRCH` is ignored; any other errno warns (`ereport(WARNING, errmsg("could
+/// not send signal to process %d: %m", pid))`).
+pub(crate) fn signal_autovacuum_worker(pid: i32) -> PgResult<()> {
+    // SAFETY: kill(2) is async-signal-safe and takes a pid + signal number.
+    let rc = unsafe { libc::kill(pid, libc::SIGINT) };
+    if rc < 0 {
+        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        if errno != libc::ESRCH {
+            return backend_utils_error::ereport(types_error::WARNING)
+                .with_saved_errno(errno)
+                .errmsg(format!("could not send signal to process {pid}: %m"))
+                .finish(types_error::ErrorLocation::new(SRC, 1546, "ProcSleep"));
+        }
+    }
+    Ok(())
+}
+
+/// `ProcSleep`'s lock-wait progress `ereport(LOG, ...)` (proc.c:1590ff). The
+/// caller formats `message` (the per-state `errmsg`); the seam attaches the
+/// `errdetail_log_plural(detail_singular, detail_plural, holders_num)`. The
+/// "acquired" case passes `None` for the details (a bare `errmsg`).
+pub(crate) fn report_lock_wait_log(
+    message: String,
+    detail_singular: Option<String>,
+    detail_plural: Option<String>,
+    holders_num: i32,
+) -> PgResult<()> {
+    let mut b = backend_utils_error::ereport(types_error::LOG).errmsg(message);
+    if let (Some(s), Some(p)) = (detail_singular, detail_plural) {
+        b = b.errdetail_log_plural(s, p, holders_num as u64);
+    }
+    b.finish(types_error::ErrorLocation::new(SRC, 1590, "ProcSleep"))
+}
