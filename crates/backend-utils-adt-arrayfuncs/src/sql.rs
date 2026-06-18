@@ -17,7 +17,7 @@ use backend_utils_error::ereport;
 
 use crate::construct;
 use crate::element_slice;
-use crate::foundation::{self, FLOAT8OID, MAX_ALLOC_SIZE, MAX_DIM};
+use crate::foundation::{self, FLOAT8OID, MAX_DIM};
 use crate::ops;
 
 use backend_utils_adt_arrayutils_seams as arrayutils;
@@ -1199,34 +1199,14 @@ pub fn array_free_iterator(iterator: ArrayIteratorData<'_>) {
 }
 
 // ---------------------------------------------------------------------------
-// array_map (arrayfuncs.c).
+// array_map (arrayfuncs.c) is split at the per-element ExecEvalExpr boundary:
+// its front half (deconstruct the source array) and back half (assemble the
+// coerced result reusing the source dims) live in `construct.rs`
+// (`array_map_deconstruct` / `array_map_build`) and are installed as the
+// `array_map_*` seams; the interpreter (execExprInterp's ExecEvalArrayCoerce)
+// runs the per-element transform loop between them, since `ExecEvalExpr` /
+// `ExprState` / `ExprContext` live in the executor.
 // ---------------------------------------------------------------------------
-
-/// `array_map(arrayd, exprstate, econtext, retType, amstate)` (arrayfuncs.c):
-/// apply a per-element expression to produce a new array. The element
-/// expression evaluation crosses the executor boundary.
-///
-/// C (arrayfuncs.c:3200) iterates the input array, writes each element into the
-/// `ExprState`'s `innermost_caseval` / `innermost_casenull`, calls
-/// `ExecEvalExpr(exprstate, econtext, ...)` to transform it, and assembles the
-/// result. The transform is the heart of the function — but this crate's
-/// signature omits `exprstate` and `econtext` entirely (only `mcx`, the input
-/// `array`, and `ret_type` remain), so there is no expression to apply. The
-/// executor `ExecEvalExpr` callee also has no seam wired into this crate.
-/// Implementing anything here would be inventing own logic; mirror the C entry
-/// point and panic loudly until the executor seam + full signature land.
-pub fn array_map<'mcx>(
-    mcx: Mcx<'mcx>,
-    array: &[u8],
-    ret_type: Oid,
-) -> PgResult<PgVec<'mcx, u8>> {
-    let _ = (mcx, array, ret_type, MAX_ALLOC_SIZE);
-    panic!(
-        "array_map: the per-element transform needs the ExprState/ExprContext arguments this \
-         crate's signature omits, and the executor ExecEvalExpr seam (not wired into this \
-         crate); lands with the executor boundary (mirror-and-panic per Mirror-PG-and-panic)"
-    )
-}
 
 // ---------------------------------------------------------------------------
 // Local helpers.

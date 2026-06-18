@@ -25,7 +25,9 @@
 //! the resnull/resvalue default, and the NULL-array short-circuit) is rendered
 //! faithfully here.
 
+use crate::dispatch;
 use backend_utils_adt_arrayfuncs_seams as arrayfuncs_seam;
+use backend_utils_cache_lsyscache_seams as lsyscache_seam;
 use types_error::PgResult;
 use types_nodes::execexpr::{
     ExprEvalStepData, ExprState, ResultCell, ResultCellId, STATE_RESULT_CELL,
@@ -156,7 +158,7 @@ pub fn ExecEvalArrayCoerce<'mcx>(
     state: &mut ExprState<'mcx>,
     op: usize,
     econtext: EcxtId,
-    _estate: &mut EStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     let step = &state.steps.as_ref().expect("ExecEvalArrayCoerce: steps not ready")[op];
     let resnull_id = step.resnull;
@@ -181,46 +183,135 @@ pub fn ExecEvalArrayCoerce<'mcx>(
     // arraydatum = *op->resvalue;
     let arraydatum = state.result_cells.get(resvalue_id).value;
 
+    // The per-query memory context the coerced result varlena is allocated in.
+    let mcx = estate.ecxt(econtext).ecxt_per_query_memory;
+
     if !has_elemexpr {
         // If it's binary-compatible, modify the element type in the array
         // header, but otherwise leave the array as we received it.
-        //
         //   ArrayType *array = DatumGetArrayTypePCopy(arraydatum);
         //   ARR_ELEMTYPE(array) = op->d.arraycoerce.resultelemtype;
         //   *op->resvalue = PointerGetDatum(array);
-        //
-        // DatumGetArrayTypePCopy (detoast + copy) and the ARR_ELEMTYPE header
-        // write over the varlena are owned by the unported
-        // backend-utils-adt-arrayfuncs unit, and the copied varlena's pointer
-        // becomes the new result Datum. Panic at the owner boundary.
-        let _ = (arraydatum, resultelemtype, resvalue_id);
-        panic!(
-            "ExecEvalArrayCoerce (binary-compatible): DatumGetArrayTypePCopy + \
-             the ARR_ELEMTYPE header rewrite are owned by the unported \
-             backend-utils-adt-arrayfuncs unit (copy the varlena, then mint its \
-             pointer as the result Datum); not reachable as a seam from this \
-             crate yet (mirror-PG-and-panic)"
+        let image =
+            arrayfuncs_seam::array_coerce_relabel::call(mcx, arraydatum, resultelemtype)?;
+        write_result(state, resvalue_id, resnull_id, Datum::ByRef(image));
+        return Ok(());
+    }
+
+    // Use array_map to apply the sub-expression to each array element.
+    //   *op->resvalue = array_map(arraydatum, op->d.arraycoerce.elemexprstate,
+    //                             econtext, op->d.arraycoerce.resultelemtype,
+    //                             op->d.arraycoerce.amstate);
+    //
+    // array_map's body is split at the per-element ExecEvalExpr boundary: the
+    // arrayfuncs owner deconstructs the source (front half) and assembles the
+    // result reusing the source dims (back half); the loop in between writes
+    // each source element into the element sub-expression's innermost_caseval /
+    // innermost_casenull and runs ExecEvalExpr, exactly as array_map does.
+
+    // retType: the result element type's storage attrs (array_map's ret_extra).
+    let ret = lsyscache_seam::get_typlenbyvalalign::call(resultelemtype)?;
+
+    // Front half: detoast + deconstruct the whole source array (the input
+    // element type's storage attrs are looked up inside the owner).
+    let src = arrayfuncs_seam::array_map_deconstruct::call(mcx, arraydatum)?;
+    let nitems = src.elems.len();
+
+    // Take the element sub-expression state out of the step so it can be run
+    // mutably while `state` is otherwise borrowed; restore it afterwards. The
+    // C `op->d.arraycoerce.elemexprstate` is a persistent ExprState* reused
+    // across rows — moving it out and back preserves that identity.
+    let mut elemstate = match &mut state.steps.as_mut().unwrap()[op].d {
+        ExprEvalStepData::ArrayCoerce { elemexprstate, .. } => elemexprstate
+            .take()
+            .expect("ExecEvalArrayCoerce: elemexprstate present"),
+        _ => unreachable!(),
+    };
+
+    // The cell the sub-expression's CaseTestExpr reads the source element from
+    // (exprstate->innermost_caseval / innermost_casenull in C).
+    let source_cell = elemstate
+        .innermost_caseval
+        .expect("ExecEvalArrayCoerce: elemstate.innermost_caseval set");
+
+    let mut values: Vec<Datum<'mcx>> = Vec::with_capacity(nitems);
+    let mut nulls: Vec<bool> = Vec::with_capacity(nitems);
+    let mut run_err: PgResult<()> = Ok(());
+    for (elem, elemnull) in src.elems.iter() {
+        // *transform_source = element; *transform_source_isnull = isnull;
+        elemstate.result_cells.set(
+            source_cell,
+            ResultCell {
+                value: elem.clone(),
+                isnull: *elemnull,
+            },
         );
+        // values[i] = ExecEvalExpr(exprstate, econtext, &nulls[i]);
+        match dispatch::ExecInterpExprStillValid(&mut elemstate, econtext, estate) {
+            Ok((v, n)) => {
+                values.push(v);
+                nulls.push(n);
+            }
+            Err(e) => {
+                run_err = Err(e);
+                break;
+            }
+        }
+    }
+
+    // Restore the persistent element sub-expression state into the step.
+    match &mut state.steps.as_mut().unwrap()[op].d {
+        ExprEvalStepData::ArrayCoerce { elemexprstate, .. } => {
+            *elemexprstate = Some(elemstate);
+        }
+        _ => unreachable!(),
+    }
+    run_err?;
+
+    // Back half: assemble the coerced result array, reusing the source dims.
+    let image = arrayfuncs_seam::array_map_build::call(
+        mcx,
+        src.ndim,
+        &src.dims,
+        &src.lbs,
+        &values,
+        &nulls,
+        resultelemtype,
+        ret.typlen,
+        ret.typbyval,
+        ret.typalign as core::ffi::c_char,
+    )?;
+    write_result(state, resvalue_id, resnull_id, Datum::ByRef(image));
+    Ok(())
+}
+
+/// Write a non-null by-reference result into the step's resvalue/resnull cells
+/// (`*op->resvalue = value; *op->resnull = false;`). [`STATE_RESULT_CELL`]
+/// aliases `state.resvalue`/`state.resnull` (the C `&state->resvalue` default
+/// target); any other id is a per-step arena cell.
+fn write_result<'mcx>(
+    state: &mut ExprState<'mcx>,
+    resvalue_id: ResultCellId,
+    resnull_id: ResultCellId,
+    value: Datum<'mcx>,
+) {
+    if resnull_id == STATE_RESULT_CELL {
+        state.resnull = false;
     } else {
-        // Use array_map to apply the sub-expression to each array element.
-        //
-        //   *op->resvalue = array_map(arraydatum,
-        //                             op->d.arraycoerce.elemexprstate,
-        //                             econtext,
-        //                             op->d.arraycoerce.resultelemtype,
-        //                             op->d.arraycoerce.amstate);
-        //
-        // array_map is owned by the unported backend-utils-adt-arrayfuncs unit
-        // (its own port is not yet complete — it needs exactly this
-        // ExprState/ExprContext element-transform boundary) and mints a fresh
-        // result varlena Datum. Panic at the owner boundary.
-        let _ = (arraydatum, resultelemtype, econtext, resvalue_id);
-        panic!(
-            "ExecEvalArrayCoerce (array_map): array_map is owned by the \
-             unported backend-utils-adt-arrayfuncs unit (it applies the \
-             per-element ExprState transform via this ExprContext and mints the \
-             coerced result varlena Datum); not reachable as a seam from this \
-             crate yet (mirror-PG-and-panic)"
+        let mut cell = state.result_cells.get(resnull_id);
+        cell.isnull = false;
+        state.result_cells.set(resnull_id, cell);
+    }
+    if resvalue_id == STATE_RESULT_CELL {
+        state.resvalue = value;
+        state.resnull = false;
+    } else {
+        state.result_cells.set(
+            resvalue_id,
+            ResultCell {
+                value,
+                isnull: false,
+            },
         );
     }
 }

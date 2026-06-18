@@ -643,6 +643,78 @@ seam_core::seam!(
     ) -> PgResult<(DatumV<'mcx>, bool)>
 );
 
+/// The source-array shape `array_map` (arrayfuncs.c) reads off the input array
+/// before the per-element transform loop: the input array's dimensionality
+/// (`AARR_NDIM` / `AARR_DIMS` / `AARR_LBOUND`) and its flat element list
+/// (`array_iter` over the detoasted input, each as the canonical value `Datum`).
+/// The result array reuses these dims/lbounds verbatim; the caller (the
+/// interpreter) runs the per-element `ExecEvalExpr` transform over `elems`, then
+/// calls [`array_map_build`] to assemble the result.
+pub struct ArrayMapSource<'mcx> {
+    /// `AARR_NDIM(v)`.
+    pub ndim: i32,
+    /// `AARR_DIMS(v)` — `ndim` dimension lengths.
+    pub dims: PgVec<'mcx, i32>,
+    /// `AARR_LBOUND(v)` — `ndim` lower bounds.
+    pub lbs: PgVec<'mcx, i32>,
+    /// The flat source elements, in order, with their null flags
+    /// (`array_iter_next` over the whole array).
+    pub elems: PgVec<'mcx, (DatumV<'mcx>, bool)>,
+}
+
+seam_core::seam!(
+    /// `array_map`'s front half (arrayfuncs.c:3200): `DatumGetAnyArrayP(arrayd)`
+    /// (detoast), read the input array's `AARR_NDIM`/`AARR_DIMS`/`AARR_LBOUND`,
+    /// look up the input element type's storage attributes
+    /// (`get_typlenbyvalalign(inpType)`, where `inpType = AARR_ELEMTYPE(v)`), and
+    /// deconstruct the whole array into its flat per-element
+    /// `(Datum<'mcx>, isnull)` list (`array_iter`). The caller then applies the
+    /// per-element expression transform and calls [`array_map_build`]. `Err`
+    /// carries the detoast / malformed-array / cache-lookup surface.
+    pub fn array_map_deconstruct<'mcx>(
+        mcx: Mcx<'mcx>,
+        arraydatum: DatumV<'mcx>,
+    ) -> PgResult<ArrayMapSource<'mcx>>
+);
+
+seam_core::seam!(
+    /// `array_map`'s back half (arrayfuncs.c:3200): assemble the coerced result
+    /// array from the transformed element values, reusing the source array's
+    /// `ndim`/`dims`/`lbs` (`construct_md_array`, copying `AARR_DIMS`/
+    /// `AARR_LBOUND`). For an empty source (`nitems <= 0`) this returns
+    /// `construct_empty_array(retType)`. `retType` is the result element type and
+    /// the `(typlen, typbyval, typalign)` triple is `get_typlenbyvalalign(retType)`
+    /// (the per-element transform already produced detoasted values; this
+    /// re-detoasts varlena results as `construct_md_array` does). `Err` carries
+    /// the array-size-overflow `ereport(ERROR)` surface.
+    pub fn array_map_build<'mcx>(
+        mcx: Mcx<'mcx>,
+        ndim: i32,
+        dims: &[i32],
+        lbs: &[i32],
+        values: &[DatumV<'mcx>],
+        nulls: &[bool],
+        ret_type: Oid,
+        ret_typlen: i16,
+        ret_typbyval: bool,
+        ret_typalign: core::ffi::c_char,
+    ) -> PgResult<PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
+    /// The binary-compatible `ExecEvalArrayCoerce` branch (execExprInterp.c):
+    /// `array = DatumGetArrayTypePCopy(arraydatum); ARR_ELEMTYPE(array) =
+    /// resultelemtype;`. Detoast + copy the source array varlena and rewrite its
+    /// `elemtype` header field to the new element type, leaving the data
+    /// untouched (the element types are binary-coercible). The copied varlena
+    /// image becomes the new result `Datum`. `Err` carries the detoast surface.
+    pub fn array_coerce_relabel<'mcx>(
+        mcx: Mcx<'mcx>,
+        arraydatum: DatumV<'mcx>,
+        resultelemtype: Oid,
+    ) -> PgResult<PgVec<'mcx, u8>>
+);
+
 seam_core::seam!(
     /// `ExecEvalArrayExpr`'s array fabrication (execExprInterp.c): build an
     /// `ARRAY[...]` constructor result from the 6-arm element values the

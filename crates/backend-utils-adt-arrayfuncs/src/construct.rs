@@ -408,6 +408,95 @@ pub fn deconstruct_array_seam<'mcx>(
     )
 }
 
+/// `array_map`'s front half (arrayfuncs.c:3200): `DatumGetAnyArrayP(arrayd)`
+/// (detoast), read the input array's `AARR_NDIM`/`AARR_DIMS`/`AARR_LBOUND`, and
+/// deconstruct the whole array into its flat per-element `(Datum, isnull)` list.
+/// The interpreter applies the per-element transform over the returned `elems`
+/// and assembles the result with [`array_map_build`].
+pub fn array_map_deconstruct<'mcx>(
+    mcx: Mcx<'mcx>,
+    arraydatum: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+) -> PgResult<backend_utils_adt_arrayfuncs_seams::ArrayMapSource<'mcx>> {
+    // AnyArrayType *v = DatumGetAnyArrayP(arrayd);  (detoast the flat array).
+    let arr = detoast_seam::detoast_attr::call(mcx, arraydatum.as_ref_bytes())?;
+
+    // ndim = AARR_NDIM(v); dim = AARR_DIMS(v); lbound = AARR_LBOUND(v).
+    let ndim = foundation::arr_ndim(&arr);
+    let dims = foundation::arr_dims(mcx, &arr)?;
+    let lbs = foundation::arr_lbounds(mcx, &arr)?;
+
+    // inpType = AARR_ELEMTYPE(v); get_typlenbyvalalign(inpType, ...) — the input
+    // element type's storage attrs (array_map's inp_extra refresh).
+    let inp_type = foundation::arr_elemtype(&arr);
+    let inp = lsyscache_seam::get_typlenbyvalalign::call(inp_type)?;
+    let elems = deconstruct_array_values(
+        mcx,
+        &arr,
+        inp_type,
+        inp.typlen as i32,
+        inp.typbyval,
+        inp.typalign as u8,
+    )?;
+
+    Ok(backend_utils_adt_arrayfuncs_seams::ArrayMapSource {
+        ndim,
+        dims,
+        lbs,
+        elems,
+    })
+}
+
+/// `array_map`'s back half (arrayfuncs.c:3200): assemble the coerced result
+/// array from the transformed element values, reusing the source array's
+/// `ndim`/`dims`/`lbs` (C `memcpy(ARR_DIMS(result), AARR_DIMS(v), ...)` /
+/// `ARR_LBOUND`). An empty source (`nitems <= 0`) yields
+/// `construct_empty_array(retType)` — exactly what `construct_md_array_values`
+/// returns when `ArrayGetNItems(ndim, dims) <= 0`.
+pub fn array_map_build<'mcx>(
+    mcx: Mcx<'mcx>,
+    ndim: i32,
+    dims: &[i32],
+    lbs: &[i32],
+    values: &[types_tuple::backend_access_common_heaptuple::Datum<'mcx>],
+    nulls: &[bool],
+    ret_type: Oid,
+    ret_typlen: i16,
+    ret_typbyval: bool,
+    ret_typalign: core::ffi::c_char,
+) -> PgResult<PgVec<'mcx, u8>> {
+    construct_md_array_values(
+        mcx,
+        values,
+        Some(nulls),
+        ndim,
+        dims,
+        lbs,
+        ret_type,
+        ret_typlen as i32,
+        ret_typbyval,
+        ret_typalign as u8,
+    )
+}
+
+/// The binary-compatible `ExecEvalArrayCoerce` branch (execExprInterp.c):
+/// `array = DatumGetArrayTypePCopy(arraydatum); ARR_ELEMTYPE(array) =
+/// resultelemtype;`. Detoast + copy the array varlena and rewrite only its
+/// `elemtype` header field; the element data is left untouched (the types are
+/// binary-coercible). The copied image becomes the result `Datum`.
+pub fn array_coerce_relabel<'mcx>(
+    mcx: Mcx<'mcx>,
+    arraydatum: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+    resultelemtype: Oid,
+) -> PgResult<PgVec<'mcx, u8>> {
+    // DatumGetArrayTypePCopy(arraydatum): detoast, then take a private copy.
+    let arr = detoast_seam::detoast_attr::call(mcx, arraydatum.as_ref_bytes())?;
+    let mut result = slice_to_pgvec(mcx, &arr)?;
+    // ARR_ELEMTYPE(array) = resultelemtype; — rewrite the elemtype header field
+    // (offset 12) in place, leaving size/ndim/dataoffset/dims/data untouched.
+    result[12..16].copy_from_slice(&resultelemtype.to_ne_bytes());
+    Ok(result)
+}
+
 /// `deconstruct_array_builtin(array, elmtype, &elemsp, &nullsp, &nelemsp)`
 /// (arrayfuncs.c:3697): the convenience wrapper over [`deconstruct_array`] for
 /// the handful of built-in element types whose `(typlen, typbyval, typalign)`

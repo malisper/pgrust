@@ -110,6 +110,9 @@ pub fn init_seams() {
     seams::pfree_array_datum::set(construct::pfree_array_datum);
     seams::construct_array_builtin::set(construct::construct_array_builtin);
     seams::construct_array_expr::set(construct::construct_array_expr);
+    seams::array_map_deconstruct::set(construct::array_map_deconstruct);
+    seams::array_map_build::set(construct::array_map_build);
+    seams::array_coerce_relabel::set(construct::array_coerce_relabel);
     seams::deconstruct_array::set(construct::deconstruct_array_seam);
     seams::deconstruct_text_array::set(construct::deconstruct_text_array);
     seams::deconstruct_text_array_nullable::set(construct::deconstruct_text_array_nullable);
