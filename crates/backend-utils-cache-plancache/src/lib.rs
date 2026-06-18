@@ -49,7 +49,7 @@ use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
 use types_namespace::namespace::SearchPathMatcher;
 use types_nodes::copy_query::{Query, CURSOR_OPT_PARALLEL_OK};
 use types_nodes::nodeindexscan::PlannedStmt;
-use types_nodes::nodes::{CmdType, Node};
+use types_nodes::nodes::{ntag, CmdType, Node};
 use types_nodes::params::ParamListInfo;
 use types_nodes::parsestmt::{
     CachedPlanHandle as SeamPlanHandle, CachedPlanSourceHandle as SeamSourceHandle, CommandTag,
@@ -1771,10 +1771,10 @@ fn AcquirePlannerLocks(src: &SourceRc, acquire: bool) -> PgResult<()> {
 /// through nested utility-`Query` wrappers to a non-utility `Query`. Returns
 /// `None` for utilities that do not contain a query.
 fn utility_contains_query_value<'a>(util: &'a Node<'_>) -> Option<&'a Query<'a>> {
-    let qry: Option<&Node<'_>> = match util {
-        Node::DeclareCursorStmt(s) => s.query.as_deref(),
-        Node::ExplainStmt(s) => s.query.as_deref(),
-        Node::CreateTableAsStmt(s) => s.query.as_deref(),
+    let qry: Option<&Node<'_>> = match util.node_tag() {
+        ntag::T_DeclareCursorStmt => util.expect_declarecursorstmt().query.as_deref(),
+        ntag::T_ExplainStmt => util.expect_explainstmt().query.as_deref(),
+        ntag::T_CreateTableAsStmt => util.expect_createtableasstmt().query.as_deref(),
         _ => return None,
     };
     match qry {
@@ -1846,7 +1846,7 @@ fn ScanQueryForLocks(parsetree: &Query<'_>, acquire: bool) -> PgResult<()> {
 /// `castNode(Query, cte->ctequery)` — the embedded `Query` of a
 /// `CommonTableExpr` node (post-analysis).
 fn cte_query<'a>(cte: &'a Node<'_>) -> Option<&'a Query<'a>> {
-    if let Node::CommonTableExpr(c) = cte {
+    if let Some(c) = cte.as_commontableexpr() {
         c.ctequery
             .as_deref()
             .and_then(|n| n.as_query())
@@ -1869,7 +1869,7 @@ fn scan_query_sublinks(parsetree: &Query<'_>, acquire: bool) -> PgResult<()> {
     let mut subs: Vec<*const ()> = Vec::new();
     {
         let mut walker = |node: &Node<'_>| -> bool {
-            if let Node::SubLink(sl) = node {
+            if let Some(sl) = node.as_sublink() {
                 // castNode(Query, sub->subselect).
                 if let Some(q) = sl.subselect.as_deref().and_then(|n| n.as_query()) {
                     subs.push(q as *const Query<'_> as *const ());
