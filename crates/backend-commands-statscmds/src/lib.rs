@@ -53,7 +53,7 @@ use types_catalog::pg_statistic_ext::{
     STATS_EXT_DEPENDENCIES, STATS_EXT_EXPRESSIONS, STATS_EXT_MCV, STATS_EXT_NDISTINCT,
 };
 use types_core::{AttrNumber, Oid};
-use types_nodes::nodes::Node;
+use types_nodes::nodes::{ntag, Node};
 use types_nodes::parsenodes::ObjectType;
 use types_nodes::ddlnodes::{AlterStatsStmt, CreateStatsStmt};
 use types_storage::lock::{NoLock, RowExclusiveLock, ShareUpdateExclusiveLock};
@@ -129,8 +129,8 @@ fn errloc(lineno: i32, funcname: &'static str) -> ErrorLocation {
 
 /// `strVal(lfirst(cell))` for a `String` value node (nodes/value.h).
 fn str_val<'a>(n: &'a Node<'a>) -> &'a str {
-    match n {
-        Node::String(s) => s.sval.as_str(),
+    match n.node_tag() {
+        ntag::T_String => n.expect_string().sval.as_str(),
         // A non-String here would be a grammar bug; the empty string mirrors a
         // NULL `char *` (which `strcmp`/`pg_char_to_encoding` handle).
         _ => "",
@@ -140,8 +140,8 @@ fn str_val<'a>(n: &'a Node<'a>) -> &'a str {
 /// `intVal(node)` for an `Integer` value node (nodes/value.h). `None` when the
 /// node is absent (the C `stmt->stxstattarget == NULL`).
 fn int_val_opt(node: Option<&Node>) -> Option<i32> {
-    match node {
-        Some(Node::Integer(i)) => Some(i.ival),
+    match node.and_then(|n| n.as_integer()) {
+        Some(i) => Some(i.ival),
         _ => None,
     }
 }
@@ -205,8 +205,8 @@ pub fn CreateStatistics<'mcx>(
     }
 
     for rln in stmt.relations.iter() {
-        let rangevar = match &**rln {
-            Node::RangeVar(rv) => rv,
+        let rangevar = match (&**rln).node_tag() {
+            ntag::T_RangeVar => (&**rln).expect_rangevar(),
             _ => {
                 return Err(ereport(ERROR)
                     .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
@@ -350,8 +350,8 @@ pub fn CreateStatistics<'mcx>(
      * virtual-generated-column / less-than-operator constraints.
      */
     for selem_node in stmt.exprs.iter() {
-        let selem = match &**selem_node {
-            Node::StatsElem(se) => se,
+        let selem = match (&**selem_node).node_tag() {
+            ntag::T_StatsElem => (&**selem_node).expect_statselem(),
             // The grammar guarantees these are StatsElem; mirror lfirst_node.
             _ => unreachable!("CreateStatsStmt.exprs element is not a StatsElem"),
         };
@@ -1011,8 +1011,8 @@ fn ChooseExtendedStatisticNameAddition(exprs: &[types_nodes::nodes::NodePtr<'_>]
 
     for selem_node in exprs {
         /* It should be one of these, but just skip if it happens not to be */
-        let selem = match &**selem_node {
-            Node::StatsElem(se) => se,
+        let selem = match (&**selem_node).node_tag() {
+            ntag::T_StatsElem => (&**selem_node).expect_statselem(),
             _ => continue,
         };
 
