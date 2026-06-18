@@ -713,9 +713,9 @@ pub fn ExecInitIndexScan<'mcx>(
     let mcx: Mcx<'mcx> = estate.es_query_cxt;
 
     // IndexScan *node — castNode.
-    let is: &'mcx IndexScan<'mcx> = match node {
-        types_nodes::nodes::Node::IndexScan(n) => n,
-        other => panic!("castNode(IndexScan, node) failed: {other:?}"),
+    let is: &'mcx IndexScan<'mcx> = match node.node_tag() {
+        types_nodes::nodes::ntag::T_IndexScan => node.expect_indexscan(),
+        _ => panic!("castNode(IndexScan, node) failed: {node:?}"),
     };
 
     // create state structure (makeNode(IndexScanState))
@@ -1723,17 +1723,17 @@ fn instr_count_filtered2(node: &mut IndexScanState<'_>, delta: u64) {
 
 /// `((IndexScan *) node->ss.ps.plan)->indexorderdir`.
 fn plan_indexorderdir(node: &IndexScanState<'_>) -> PgResult<ScanDirection> {
-    match node.ss.ps.plan {
-        Some(types_nodes::nodes::Node::IndexScan(is)) => Ok(is.indexorderdir),
-        _ => Err(elog("IndexScan node has wrong plan type")),
+    match node.ss.ps.plan.and_then(|p| p.as_indexscan()) {
+        Some(is) => Ok(is.indexorderdir),
+        None => Err(elog("IndexScan node has wrong plan type")),
     }
 }
 
 /// `((Scan *) node->ss.ps.plan)->scanrelid`.
 fn scan_scanrelid(node: &IndexScanState<'_>) -> PgResult<u32> {
-    match node.ss.ps.plan {
-        Some(types_nodes::nodes::Node::IndexScan(is)) => Ok(is.scan.scanrelid),
-        _ => Err(elog("IndexScan node has wrong plan type")),
+    match node.ss.ps.plan.and_then(|p| p.as_indexscan()) {
+        Some(is) => Ok(is.scan.scanrelid),
+        None => Err(elog("IndexScan node has wrong plan type")),
     }
 }
 
