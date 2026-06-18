@@ -83,11 +83,13 @@ pub use returns::{QueryReturnsTuples, UtilityContainsQuery, UtilityReturnsTuples
 
 /// Install this unit's inward seams (`backend-tcop-utility-seams`).
 ///
-/// Installs the four classifier seams that this crate fully grounds and that are
-/// already consumed (pquery / prepare / async / xid8funcs). The fifth declared
-/// inward seam, `process_utility`, is the dispatch entrypoint and is **not**
-/// installed here — see the crate-level docs (keystone-blocked on threading an
-/// `Mcx` through the inward seam + pquery).
+/// Installs all of this crate's inward seams: the classifier seams it fully
+/// grounds and that are already consumed (`create_command_tag` /
+/// `get_command_log_level` / `utility_returns_tuples` /
+/// `utility_tuple_descriptor` by pquery / prepare / async / xid8funcs), the
+/// `prevent_command_during_recovery` guard, and the `process_utility` dispatch
+/// entrypoint (the `Mcx`-carrying per-utility working-context seam landed with
+/// the dispatch spine; see [`crate::dispatch::ProcessUtility`]).
 pub fn init_seams() {
     backend_tcop_utility_seams::create_command_tag::set(CreateCommandTag);
     backend_tcop_utility_seams::get_command_log_level::set(GetCommandLogLevel);
