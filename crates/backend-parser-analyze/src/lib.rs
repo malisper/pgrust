@@ -166,9 +166,58 @@ pub fn parse_sub_analyze<'mcx>(
 
     let query = transformStmt(mcx, &mut pstate, parse_tree)?;
 
+    // The owned model holds `parentParseState` by value (a deep copy of the
+    // parent's spine), so SELECT-privilege marks a LATERAL/correlated subquery
+    // applies to outer-query RTEs (via markVarForSelectPriv walking up
+    // `varlevelsup` levels) land on the *clone*. Merge the immediate parent
+    // level's permission marks back into the live `parent_pstate` before the
+    // child state is freed. Deeper levels are merged when their own
+    // `parse_sub_analyze` frame returns (each level's clone is the next level's
+    // `parent_pstate`). C needs no such step because `parentParseState` is a
+    // live back-pointer.
+    if let Some(cloned_parent) = pstate.parentParseState.as_deref() {
+        merge_perminfo_marks(mcx, parent_pstate, cloned_parent)?;
+    }
+
     backend_parser_small1::free_parsestate(pstate)?;
 
     mcx::alloc_in(mcx, Node::Query(query))
+}
+
+/// Merge SELECT/INSERT/UPDATE permission marks recorded on a cloned parent
+/// `ParseState` (`src`) back into the live parent (`dst`). The two
+/// `p_rteperminfos` lists are positionally identical (the clone was made by
+/// `clone_read_spine`), so a same-index OR of `requiredPerms` and a copy of the
+/// (superset) clone's column sets transfers the marks: the clone started as a
+/// copy of the live parent's lists and only added members.
+fn merge_perminfo_marks<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    dst: &mut ParseState<'mcx>,
+    src: &ParseState<'mcx>,
+) -> PgResult<()> {
+    debug_assert!(dst.p_rteperminfos.len() == src.p_rteperminfos.len());
+    let n = dst.p_rteperminfos.len().min(src.p_rteperminfos.len());
+    for i in 0..n {
+        let s = &src.p_rteperminfos[i];
+        if s.requiredPerms == 0
+            && s.selectedCols.is_none()
+            && s.insertedCols.is_none()
+            && s.updatedCols.is_none()
+        {
+            continue;
+        }
+        dst.p_rteperminfos[i].requiredPerms |= s.requiredPerms;
+        if let Some(c) = s.selectedCols.as_deref() {
+            dst.p_rteperminfos[i].selectedCols = Some(mcx::alloc_in(mcx, c.clone_in(mcx)?)?);
+        }
+        if let Some(c) = s.insertedCols.as_deref() {
+            dst.p_rteperminfos[i].insertedCols = Some(mcx::alloc_in(mcx, c.clone_in(mcx)?)?);
+        }
+        if let Some(c) = s.updatedCols.as_deref() {
+            dst.p_rteperminfos[i].updatedCols = Some(mcx::alloc_in(mcx, c.clone_in(mcx)?)?);
+        }
+    }
+    Ok(())
 }
 
 /* ===========================================================================

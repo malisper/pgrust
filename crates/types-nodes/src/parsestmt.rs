@@ -542,6 +542,23 @@ impl<'mcx> ParseState<'mcx> {
             out.p_ctenamespace.push(cte.clone_in(mcx)?);
         }
 
+        // The permission-info list is part of the spine an upper-level reference
+        // reads/marks: a LATERAL or correlated subquery resolves an outer-query
+        // Var via `parentParseState` and then marks SELECT privilege on the
+        // outer RTE's `RTEPermissionInfo` (markVarForSelectPriv walks up
+        // `varlevelsup` levels). Without this copy the cloned ancestor's
+        // `p_rteperminfos` is empty and getRTEPermissionInfo raises "invalid
+        // perminfoindex". `parse_sub_analyze` merges these marks back into the
+        // live parent after sub-analysis (the owned model holds the parent by
+        // value, so the marks land on the clone here).
+        out.p_rteperminfos = PgVec::new_in(mcx);
+        out.p_rteperminfos
+            .try_reserve(self.p_rteperminfos.len())
+            .map_err(|_| mcx.oom(self.p_rteperminfos.len()))?;
+        for pi in self.p_rteperminfos.iter() {
+            out.p_rteperminfos.push(pi.clone_in(mcx)?);
+        }
+
         out.p_lateral_active = self.p_lateral_active;
 
         out.p_parent_cte = match self.p_parent_cte.as_deref() {

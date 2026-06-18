@@ -2562,9 +2562,12 @@ fn transformWholeRowRef<'mcx>(
 ) -> PgResult<Node<'mcx>> {
     let mcx = aexpr_clone_ctx(pstate);
 
-    // Read the nsitem fields we need (cloning the RTE and names).
+    // Read the nsitem fields we need (cloning the RTE and names). The index is
+    // relative to the ParseState `sublevels_up` levels up the parent chain (see
+    // scanNSItemForColumn), so resolve the owning ParseState first.
     let (rte, p_rtindex, p_returning_type, names_is_eref, colnames_len, colnames) = {
-        let nsitem = &pstate.p_namespace[nsitem_index];
+        let owner = backend_parser_relation::nsitem_level(pstate, sublevels_up);
+        let nsitem = &owner.p_namespace[nsitem_index];
         let rte = nsitem
             .p_rte
             .as_deref()

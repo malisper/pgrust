@@ -783,6 +783,22 @@ fn scanRTEForColumn<'mcx>(
     Ok(result)
 }
 
+/// Resolve the `ParseState` that owns a namespace item found `levelsup` levels
+/// up the parent chain. `refnameNamespaceItem` / `scanNameSpace*` return a
+/// `(levelsup, index)` pair where the index is into the ancestor's
+/// `p_namespace`; this walks the owned `parentParseState` snapshots to reach it.
+/// Mirrors C's direct `ParseNamespaceItem *` from the matching level.
+pub fn nsitem_level<'a, 'mcx>(pstate: &'a ParseState<'mcx>, levelsup: i32) -> &'a ParseState<'mcx> {
+    let mut cur = pstate;
+    for _ in 0..levelsup {
+        cur = cur
+            .parentParseState
+            .as_deref()
+            .expect("nsitem_level: parent ParseState missing for an uplevel reference");
+    }
+    cur
+}
+
 /// `scanNSItemForColumn` — search the column names of the namespace item at
 /// `nsitem_index` for `colname`. If found, build and return the appropriate `Var`
 /// (wrapped in `Node`), else `None`. Side effect: marks the RTE for SELECT.
@@ -794,9 +810,15 @@ pub fn scanNSItemForColumn<'mcx>(
     colname: &str,
     location: i32,
 ) -> PgResult<Option<Node<'mcx>>> {
-    // Read what we need out of the nsitem (cloning the RTE / names).
+    // Read what we need out of the nsitem (cloning the RTE / names). The nsitem
+    // index is relative to the ParseState `sublevels_up` levels up the parent
+    // chain (C passes the resolved `ParseNamespaceItem *` directly; here
+    // `refnameNamespaceItem` returns the matching level + index), so resolve the
+    // owning ParseState first. The current `pstate` is still used below for
+    // p_expr_kind / markNullableIfNeeded / markVarForSelectPriv, exactly as C.
     let (rte, p_names, p_nscolumns, p_rtindex, p_returning_type, aliasname) = {
-        let nsitem = &pstate.p_namespace[nsitem_index];
+        let owner = nsitem_level(pstate, sublevels_up);
+        let nsitem = &owner.p_namespace[nsitem_index];
         (
             nsitem_rte(nsitem).clone_in(mcx)?,
             nsitem.p_names.as_deref().expect("p_names set").clone_in(mcx)?,
