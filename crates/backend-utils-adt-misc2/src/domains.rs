@@ -36,8 +36,10 @@
 
 use backend_utils_cache_typcache_seams as typcache_seams;
 use backend_utils_fmgr_fmgr_seams as fmgr_seams;
-use mcx::Mcx;
-use types_error::PgResult;
+use mcx::{Mcx, MemoryContext};
+use types_cache::typcache::DomainCtxHandle;
+use types_error::{PgError, PgResult};
+use types_nodes::primnodes::Expr;
 use types_tuple::backend_access_common_heaptuple::Datum;
 
 /// `domain_in(string, typioparam, typmod)` — FmgrInfo entrypoint.
@@ -162,4 +164,54 @@ pub fn errdatatype(_datatype_oid: u32) -> PgResult<()> {
 /// for the family's surface.
 pub fn errdomainconstraint(_datatype_oid: u32, _conname: &str) -> PgResult<()> {
     errdatatype(_datatype_oid)
+}
+
+/* ==========================================================================
+ * Domain constraint planning seam (typcache -> domains.c -> planner).
+ *
+ * `load_domaintype_info` (typcache.c) plans each domain CHECK constraint's
+ * `conbin` node-string with `stringToNode(conbin)` + `expression_planner()`.
+ * The typcache owns the orchestration (stack crawl, name sort, parent-first
+ * `lcons`); this seam is the single per-constraint plan step, installed here
+ * because `domains.c` is the natural home of the domain-constraint machinery
+ * and can reach the (value-typed) planner + node reader through their thin
+ * seam crates without forming a cycle.
+ * ======================================================================== */
+
+/// `stringToNode(conbin)` + `expression_planner()` for one domain CHECK
+/// constraint (the `plan_check_expr` seam). Returns the planned expression as
+/// the real owned [`Expr`] value.
+///
+/// C plans into the domain's "Domain constraints" `MemoryContext` (`ctx`) so the
+/// node lives at cache lifetime; here the planned [`Expr`] is a lifetime-free
+/// owned value (its child `Box`/`Vec` are the global allocator), so it escapes
+/// any context safely. The reader's transient arena needs a context to allocate
+/// the intermediate `Node` graph in; we use a private scratch context that is
+/// dropped on return (the cloned `Expr` is independent of it). `ctx` is
+/// therefore unused — the owned `Expr` makes the C "plan into ctx" detail moot.
+pub fn plan_check_expr(conbin: &str, _ctx: DomainCtxHandle) -> PgResult<Expr> {
+    // The node reader / const-folder allocate their intermediate graph in this
+    // scratch context; the returned owned `Expr` is cloned out and survives the
+    // drop. (C does this work in the dccContext; the owned model needs no such
+    // long-lived arena because `Expr` is global-heap owned.)
+    let scratch = MemoryContext::new("Domain check expr");
+    let mcx: Mcx = scratch.mcx();
+
+    // expr = stringToNode(conbin);
+    let node = backend_nodes_read_seams::string_to_node::call(mcx, conbin)?;
+
+    // The stored `conbin` of a domain CHECK is always an expression node. Clone
+    // it out as an owned `Expr` (deep copy into the global heap, independent of
+    // `scratch`).
+    let expr: Expr = node
+        .as_expr()
+        .ok_or_else(|| {
+            PgError::error("domain CHECK constraint conbin did not parse to an expression node")
+        })?
+        .clone();
+
+    // expr = expression_planner(expr);  (eval_const_expressions + fix_opfuncids)
+    let planned = backend_optimizer_plan_planner_pc_seams::expression_planner_value::call(mcx, expr)?;
+
+    Ok(planned)
 }

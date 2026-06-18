@@ -13,6 +13,7 @@ use alloc::string::String;
 
 use types_core::fmgr::FmgrInfo;
 use types_core::primitive::Oid;
+use types_nodes::primnodes::Expr;
 
 /// `TypeCacheEntry` (`typcache.h`), trimmed. For a range type
 /// `rng_cmp_proc_finfo` / `rng_subdiff_finfo` are the subtype's `cmp` /
@@ -62,25 +63,6 @@ pub const TYPECACHE_HASH_PROC_FINFO: i32 = 0x00080;
 /// extended hash support function be resolved into `hash_extended_proc_finfo`.
 pub const TYPECACHE_HASH_EXTENDED_PROC_FINFO: i32 = 0x08000;
 
-/// Opaque handle to a planned domain CHECK `Expr *` (the output of
-/// `stringToNode(conbin)` + `expression_planner()`). The planner is a
-/// genuinely-external neighbor (inherited opacity); the typcache stores and
-/// hands these handles to `ExecInitExpr` without inspecting them. `0` models a
-/// NULL expr (NOT NULL constraints carry no `check_expr`).
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-pub struct ExprHandle(pub u64);
-
-impl ExprHandle {
-    /// No expression (the NOT NULL constraint case).
-    pub const NULL: ExprHandle = ExprHandle(0);
-
-    /// Whether this is the null expr.
-    #[inline]
-    pub fn is_null(self) -> bool {
-        self.0 == 0
-    }
-}
-
 /// Opaque handle to a compiled `ExprState *` (the output of `ExecInitExpr`).
 /// The executor is a genuinely-external neighbor (inherited opacity). `0`
 /// models a NULL exprstate.
@@ -99,16 +81,22 @@ impl ExprStateHandle {
 pub struct DomainCtxHandle(pub u64);
 
 /// `DomainConstraintState` (execnodes.h) — one compiled domain constraint, in
-/// the typcache's in-crate form. `check_expr`/`check_exprstate` are opaque
-/// planner/executor handles (inherited opacity); `constrainttype` and `name`
-/// are the typcache's own data.
+/// the typcache's in-crate form. `check_expr` is the planned CHECK expression as
+/// the real owned [`Expr`] value (the output of `stringToNode(conbin)` +
+/// `expression_planner()`); `None` for NOT NULL constraints. `check_exprstate`
+/// remains an opaque executor handle (the `ExecInitExpr` compile step is not yet
+/// reachable from a domain-constraint ref — it needs `EState` substrate the ref
+/// carrier does not hold). `constrainttype` and `name` are the typcache's own
+/// data.
 #[derive(Clone, Debug)]
 pub struct DomainConstraintState {
     /// `DOM_CONSTRAINT_CHECK` or `DOM_CONSTRAINT_NOTNULL`.
     pub constrainttype: i32,
     pub name: String,
-    /// Planned CHECK `Expr *` (NULL for NOT NULL constraints).
-    pub check_expr: ExprHandle,
+    /// Planned CHECK `Expr *` (`None` for NOT NULL constraints) — the real owned
+    /// expression value, ready for the executor's `EEOP_DOMAIN_CHECK` to
+    /// `ExecInitExprRec` over.
+    pub check_expr: Option<Expr>,
     /// Compiled `ExprState *` (only set by `prep_domain_constraints`).
     pub check_exprstate: ExprStateHandle,
 }

@@ -32,6 +32,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `expression_planner(expr)` (planner.c:6779) over the OWNED value
+    /// [`types_nodes::primnodes::Expr`] — prepare a standalone expression for
+    /// execution (`eval_const_expressions(NULL, expr)` + `fix_opfuncids`),
+    /// returning the planned expression allocated in `mcx`. This is the deps-less
+    /// VALUE counterpart of [`expression_planner_with_deps_value`]; the typcache's
+    /// domain-constraint loader (`load_domaintype_info`, via the
+    /// `backend-utils-adt-domains-seams::plan_check_expr` seam) is the caller —
+    /// it discards the dependency lists C's typcache does not track. The owning
+    /// planner unit installs this.
+    pub fn expression_planner_value<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        expr: types_nodes::primnodes::Expr,
+    ) -> PgResult<types_nodes::primnodes::Expr>
+);
+
+seam_core::seam!(
     /// `pg_plan_queries(querytree_list, query_string, cursor_options, boundParams)`.
     pub fn plan_queries(
         querytree_list: QueryListHandle,

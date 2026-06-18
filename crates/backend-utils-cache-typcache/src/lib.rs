@@ -1270,7 +1270,7 @@ fn load_domaintype_info(type_id: Oid) -> PgResult<()> {
                 nccons.push(DomainConstraintState {
                     constrainttype: DOM_CONSTRAINT_CHECK,
                     name: row.conname,
-                    check_expr,
+                    check_expr: Some(check_expr),
                     check_exprstate: types_cache::typcache::ExprStateHandle::NULL,
                 });
             }
@@ -1308,7 +1308,7 @@ fn load_domaintype_info(type_id: Oid) -> PgResult<()> {
         let node = DomainConstraintState {
             constrainttype: DOM_CONSTRAINT_NOTNULL,
             name: "NOT NULL".to_string(),
-            check_expr: types_cache::typcache::ExprHandle::NULL,
+            check_expr: None,
             check_exprstate: types_cache::typcache::ExprStateHandle::NULL,
         };
         // lcons to apply the nullness check FIRST.
@@ -2489,11 +2489,18 @@ fn prep_domain_constraints(
 ) -> PgResult<Vec<DomainConstraintState>> {
     let mut result = Vec::new();
     for r in constraints {
-        let check_exprstate = domains_seams::exec_init_expr::call(r.check_expr, execctx)?;
+        // C: `pojo->check_exprstate = ExecInitExpr(domainval->check_expr, NULL)`
+        // for CHECK constraints; a NOT NULL constraint has no `check_expr` and
+        // keeps a NULL exprstate. The CHECK compile crosses the (still
+        // uninstalled, EState-substrate-blocked) `exec_init_expr` seam.
+        let check_exprstate = match &r.check_expr {
+            Some(expr) => domains_seams::exec_init_expr::call(expr, execctx)?,
+            None => types_cache::typcache::ExprStateHandle::NULL,
+        };
         result.push(DomainConstraintState {
             constrainttype: r.constrainttype,
             name: r.name.clone(),
-            check_expr: r.check_expr,
+            check_expr: r.check_expr.clone(),
             check_exprstate,
         });
     }

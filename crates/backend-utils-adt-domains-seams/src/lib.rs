@@ -9,9 +9,10 @@
 //! The owning units install these from their `init_seams()` when they land;
 //! until then a call panics loudly.
 
-use types_cache::typcache::{DomainCheckConstraintRow, DomainCtxHandle, DomainLevelScan, ExprHandle, ExprStateHandle};
+use types_cache::typcache::{DomainCheckConstraintRow, DomainCtxHandle, DomainLevelScan, ExprStateHandle};
 use types_core::Oid;
 use types_error::PgResult;
+use types_nodes::primnodes::Expr;
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -43,9 +44,11 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `stringToNode(conbin)` + `expression_planner()` for one CHECK
-    /// constraint, building the planned `Expr` in `ctx`. Returns the planned
-    /// expression handle.
-    pub fn plan_check_expr(conbin: &str, ctx: DomainCtxHandle) -> PgResult<ExprHandle>
+    /// constraint. Returns the planned expression as the real owned [`Expr`]
+    /// value (the typcache stores it at cache lifetime; `Expr` is lifetime-free).
+    /// `ctx` is the "Domain constraints" memory context C plans into; the owner
+    /// uses it only as scratch (the returned `Expr` is owned, not arena-bound).
+    pub fn plan_check_expr(conbin: &str, ctx: DomainCtxHandle) -> PgResult<Expr>
 );
 
 seam_core::seam!(
@@ -75,8 +78,17 @@ seam_core::seam!(
     /// expression into an `ExprState`. (`prep_domain_constraints` calls this
     /// per constraint; the list copy + `MemoryContextSwitchTo` ordering lives
     /// in the typcache.)
+    ///
+    /// GENUINELY UNINSTALLED / blocked: the real `ExecInitExpr`
+    /// (`backend-executor-execExpr`) compiles into an `EStateData<'mcx>`
+    /// per-query arena, but a `DomainConstraintRef`'s `refctx` is a plain
+    /// memory context with no associated `EState`. Until the executor exposes an
+    /// `EState`-less `ExecInitExpr(expr, NULL)` over a bare context, this seam
+    /// has no owner and a call panics. The planned `check_expr` itself is the
+    /// real owned [`Expr`] value, ready for that compile when the substrate
+    /// lands.
     pub fn exec_init_expr(
-        check_expr: ExprHandle,
+        check_expr: &Expr,
         execctx: DomainCtxHandle,
     ) -> PgResult<ExprStateHandle>
 );

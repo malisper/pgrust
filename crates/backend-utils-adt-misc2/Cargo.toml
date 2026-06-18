@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 # Carrier types.
 types-core = { path = "../types-core" }
+types-cache = { path = "../types-cache" }
 types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
 types-tuple = { path = "../types-tuple" }
@@ -40,6 +41,13 @@ backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
 common-hashfn = { path = "../common-hashfn" }
 backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+# `domains` family: the typcache->domains.c outward seams this unit OWNS and
+# installs (catalog scan / planner / context lifecycle for domain CHECK
+# constraints), plus the string_to_node + value-typed expression_planner seams
+# `plan_check_expr` composes (thin seam crates, no cycle).
+backend-utils-adt-domains-seams = { path = "../backend-utils-adt-domains-seams" }
+backend-nodes-read-seams = { path = "../backend-nodes-read-seams" }
+backend-optimizer-plan-planner-pc-seams = { path = "../backend-optimizer-plan-planner-pc-seams" }
 backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
 backend-utils-adt-datum-seams = { path = "../backend-utils-adt-datum-seams" }
 backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-depth-seams" }

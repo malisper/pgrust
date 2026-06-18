@@ -17819,6 +17819,7 @@ dependencies = [
  "types-cache",
  "types-core",
  "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -18510,6 +18511,8 @@ dependencies = [
  "backend-common-path-seams",
  "backend-libpq-hba-seams",
  "backend-libpq-pqformat",
+ "backend-nodes-read-seams",
+ "backend-optimizer-plan-planner-pc-seams",
  "backend-parser-parse-type-seams",
  "backend-replication-slot-seams",
  "backend-storage-file-fd-seams",
@@ -18517,6 +18520,7 @@ dependencies = [
  "backend-utils-adt-acl-seams",
  "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-adt-datum-seams",
+ "backend-utils-adt-domains-seams",
  "backend-utils-adt-expanded-methods-seams",
  "backend-utils-adt-format-type-seams",
  "backend-utils-adt-misc2-seams",
@@ -18537,6 +18541,7 @@ dependencies = [
  "common-hashfn",
  "mcx",
  "port-pgstrcasecmp",
+ "types-cache",
  "types-core",
  "types-datum",
  "types-error",
@@ -22845,6 +22850,7 @@ dependencies = [
  "types-acl",
  "types-core",
  "types-datum",
+ "types-nodes",
  "types-scan",
 ]
 

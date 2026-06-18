@@ -56,6 +56,18 @@ pub fn init_seams() {
         expandeddatum::make_expanded_object_read_only_internal_v,
     );
 
+    // domains.c: the typcache->domains.c domain-constraint planning seam. The
+    // typcache's `load_domaintype_info` plans each CHECK constraint's conbin via
+    // `stringToNode` + `expression_planner`; the value-typed body lives here
+    // (domains.c is the natural domain-constraint home and can reach the node
+    // reader + value-typed planner through their thin seam crates). The other
+    // domain-constraint seams (catalog scan, syscache type-level lookup, the
+    // "Domain constraints" memory-context lifecycle, and `exec_init_expr`) have
+    // distinct real owners (pg_constraint / syscache / mmgr / executor) and are
+    // installed by those owners; `exec_init_expr` in particular is still blocked
+    // on EState-less `ExecInitExpr` substrate.
+    backend_utils_adt_domains_seams::plan_check_expr::set(domains::plan_check_expr);
+
     // regproc.c printable-name / name-parsing helpers (owned seam crate
     // `backend-utils-adt-regproc-seams`). `format_procedure`/`format_operator`
     // match the owner signature exactly; the `reg*in` / name-list seams need a

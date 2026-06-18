@@ -3117,6 +3117,7 @@ pub fn init_seams() {
     backend_optimizer_plan_planner_pc_seams::expression_planner_with_deps_value::set(
         expression_planner_with_deps,
     );
+    backend_optimizer_plan_planner_pc_seams::expression_planner_value::set(expression_planner);
 
     // create_plan-tail: apply_tlist_labeling(plan->targetlist,
     // root->processed_tlist) (createplan.c create_plan, tlist.c:327). The
