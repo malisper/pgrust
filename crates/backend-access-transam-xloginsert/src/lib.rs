@@ -1665,6 +1665,14 @@ pub fn init_seams() {
             Ok(recptr)
         },
     );
+
+    // --- lazy-vacuum driver's log_newpage_buffer (vacuumlazy.c
+    //     lazy_vacuum_heap_page WAL-logging of a no-longer-all-visible page).
+    //     Homes in vacuumlazy-seams; xloginsert.c owns it. The driver discards
+    //     the returned record LSN. ---
+    backend_access_heap_vacuumlazy_seams::log_newpage_buffer::set(|buffer, page_std| {
+        log_newpage_buffer(buffer, page_std).map(|_| ())
+    });
 }
 
 #[cfg(test)]

@@ -9,6 +9,9 @@ name = "backend_utils_activity_small"
 path = "src/lib.rs"
 
 [dependencies]
+# Lazy-vacuum driver progress seams (start/update/end/multi/read-param) home in
+# vacuumlazy-seams; backend_progress.c owns the bodies.
+backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
 mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }

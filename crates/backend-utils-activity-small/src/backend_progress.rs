@@ -82,6 +82,24 @@ pub fn pgstat_progress_update_param(index: i32, val: int64) {
     });
 }
 
+/// Read `index`'th member of `st_progress_param[]` from own backend entry — the
+/// C `MyBEEntry->st_progress_param[index]` direct read (vacuumlazy.c reads
+/// `PROGRESS_VACUUM_DELAY_TIME` for its cost-delay logging). Returns 0 when no
+/// backend status entry is present (boot / standalone).
+pub fn pgstat_read_progress_param(index: i32) -> int64 {
+    debug_assert!(index >= 0 && (index as usize) < PGSTAT_NUM_PROGRESS_PARAM);
+
+    if !my_be_entry_present::call() {
+        return 0;
+    }
+
+    let mut out: int64 = 0;
+    with_my_beentry::call(&mut |beentry: &mut PgBackendStatus| {
+        out = beentry.st_progress_param[index as usize];
+    });
+    out
+}
+
 /// `pgstat_progress_incr_param()` —
 ///
 /// Increment `index`'th member in `st_progress_param[]` of own backend entry.

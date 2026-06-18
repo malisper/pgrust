@@ -3334,6 +3334,7 @@ dependencies = [
 name = "backend-access-transam-varsup"
 version = "0.0.0"
 dependencies = [
+ "backend-access-heap-vacuumlazy-seams",
  "backend-access-transam-clog-seams",
  "backend-access-transam-commit-ts-seams",
  "backend-access-transam-subtrans-seams",
@@ -3607,6 +3608,7 @@ dependencies = [
 name = "backend-access-transam-xloginsert"
 version = "0.0.0"
 dependencies = [
+ "backend-access-heap-vacuumlazy-seams",
  "backend-access-transam-xact-seams",
  "backend-access-transam-xlog-seams",
  "backend-access-transam-xloginsert-seams",
@@ -5746,6 +5748,7 @@ dependencies = [
 name = "backend-catalog-storage"
 version = "0.0.0"
 dependencies = [
+ "backend-access-heap-vacuumlazy-seams",
  "backend-access-heap-visibilitymap",
  "backend-access-table-table",
  "backend-access-transam-parallel-rt-seams",
@@ -6439,6 +6442,7 @@ dependencies = [
 name = "backend-commands-dbcommands"
 version = "0.0.0"
 dependencies = [
+ "backend-access-heap-vacuumlazy-seams",
  "backend-access-table-table",
  "backend-access-transam-xact",
  "backend-access-transam-xlog",
@@ -9156,6 +9160,7 @@ dependencies = [
 name = "backend-executor-instrument"
 version = "0.0.0"
 dependencies = [
+ "backend-access-heap-vacuumlazy-seams",
  "backend-executor-execParallel-support-seams",
  "backend-executor-instrument-seams",
  "mcx",
@@ -15326,6 +15331,7 @@ dependencies = [
 name = "backend-storage-buffer-bufmgr"
 version = "0.0.0"
 dependencies = [
+ "backend-access-heap-vacuumlazy-seams",
  "backend-access-transam-xlog-seams",
  "backend-access-transam-xloginsert-seams",
  "backend-catalog-storage-seams",
@@ -15352,6 +15358,7 @@ dependencies = [
  "types-rel",
  "types-storage",
  "types-tuple",
+ "types-vacuum",
 ]
 
 [[package]]
@@ -15578,6 +15585,7 @@ dependencies = [
 name = "backend-storage-freespace"
 version = "0.0.0"
 dependencies = [
+ "backend-access-heap-vacuumlazy-seams",
  "backend-access-transam-xlog-seams",
  "backend-access-transam-xloginsert-seams",
  "backend-access-transam-xlogutils-seams",
@@ -15771,6 +15779,7 @@ dependencies = [
 name = "backend-storage-ipc-latch"
 version = "0.0.0"
 dependencies = [
+ "backend-access-heap-vacuumlazy-seams",
  "backend-access-transam-parallel-rt-seams",
  "backend-storage-ipc-latch-seams",
  "backend-storage-ipc-procarray-seams",
@@ -16265,6 +16274,7 @@ dependencies = [
 name = "backend-storage-lmgr-lmgr"
 version = "0.0.0"
 dependencies = [
+ "backend-access-heap-vacuumlazy-seams",
  "backend-access-transam-subtrans-seams",
  "backend-catalog-catalog-seams",
  "backend-storage-ipc-procarray-seams",
@@ -16274,6 +16284,7 @@ dependencies = [
  "backend-tcop-postgres-seams",
  "backend-utils-activity-small",
  "backend-utils-cache-inval-seams",
+ "backend-utils-cache-relcache-seams",
  "backend-utils-init-small-seams",
  "mcx",
  "port-pgsleep-seams",
@@ -17209,6 +17220,7 @@ dependencies = [
 name = "backend-utils-activity-pgstat-database"
 version = "0.0.0"
 dependencies = [
+ "backend-access-heap-vacuumlazy-seams",
  "backend-postmaster-autovacuum-ext-seams",
  "backend-tcop-postgres-seams",
  "backend-utils-activity-pgstat",
@@ -17282,6 +17294,7 @@ dependencies = [
 name = "backend-utils-activity-pgstat-relation"
 version = "0.0.0"
 dependencies = [
+ "backend-access-heap-vacuumlazy-seams",
  "backend-access-transam-twophase-rmgr",
  "backend-access-transam-twophase-seams",
  "backend-access-transam-xact-seams",
@@ -17409,6 +17422,7 @@ dependencies = [
 name = "backend-utils-activity-small"
 version = "0.0.0"
 dependencies = [
+ "backend-access-heap-vacuumlazy-seams",
  "backend-access-transam-parallel",
  "backend-access-transam-parallel-rt-seams",
  "backend-libpq-pqcomm-seams",
@@ -17813,6 +17827,7 @@ dependencies = [
 name = "backend-utils-adt-datetime"
 version = "0.0.0"
 dependencies = [
+ "backend-access-heap-vacuumlazy-seams",
  "backend-access-transam-parallel",
  "backend-access-transam-xact",
  "backend-timezone-localtime",
@@ -19907,6 +19922,7 @@ dependencies = [
 name = "backend-utils-cache-lsyscache"
 version = "0.0.0"
 dependencies = [
+ "backend-access-heap-vacuumlazy-seams",
  "backend-access-index-amapi-seams",
  "backend-bootstrap-bootstrap-seams",
  "backend-catalog-namespace-seams",
@@ -20049,6 +20065,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-common-reloptions-seams",
  "backend-access-common-tupdesc",
+ "backend-access-heap-vacuumlazy-seams",
  "backend-access-index-amapi-seams",
  "backend-access-index-genam-seams",
  "backend-access-index-indexam-seams",
@@ -20729,6 +20746,7 @@ dependencies = [
 name = "backend-utils-init-small"
 version = "0.0.0"
 dependencies = [
+ "backend-access-heap-vacuumlazy-seams",
  "backend-postmaster-postmaster-seams",
  "backend-tcop-postgres-seams",
  "backend-utils-adt-acl-seams",
@@ -20866,6 +20884,7 @@ dependencies = [
 name = "backend-utils-misc-guc"
 version = "0.0.0"
 dependencies = [
+ "backend-access-heap-vacuumlazy-seams",
  "backend-access-transam-parallel-rt-seams",
  "backend-access-transam-xact-seams",
  "backend-catalog-aclchk-seams",

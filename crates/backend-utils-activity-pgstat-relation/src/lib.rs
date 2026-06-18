@@ -1353,4 +1353,12 @@ pub fn init_seams() {
     statseam::post_prepare_pgstat_relations::set(PostPrepare_PgStat_Relations);
     statseam::pgstat_twophase_postcommit::set(pgstat_twophase_postcommit);
     statseam::pgstat_twophase_postabort::set(pgstat_twophase_postabort);
+
+    // --- lazy-vacuum driver's pgstat_report_vacuum (vacuumlazy.c end-of-vacuum
+    //     stats report). Homes in vacuumlazy-seams; pgstat_relation.c owns it. ---
+    backend_access_heap_vacuumlazy_seams::pgstat_report_vacuum::set(
+        |tableoid, shared, livetuples, deadtuples, starttime| {
+            pgstat_report_vacuum(tableoid, shared, livetuples, deadtuples, starttime)
+        },
+    );
 }

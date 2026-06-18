@@ -234,4 +234,20 @@ pub fn init_seams() {
         opfamily_operator::get_mergejoin_opfamilies_first(opno)
             .expect("get_mergejoin_opfamilies_first")
     });
+
+    // --- lazy-vacuum driver schema-name read (vacuumlazy.c logging;
+    //     get_namespace_name(nspoid) -> char*. Home in vacuumlazy-seams,
+    //     lsyscache.c is its owner). The seam returns an owned String, so the
+    //     projection runs in a short-lived scratch context (mirroring the other
+    //     lsyscache String getters). A cache miss yields the empty string (the C
+    //     `char *` NULL the logging `%s` would render as "(null)"). ---
+    backend_access_heap_vacuumlazy_seams::get_namespace_name::set(|nspoid| {
+        let scratch = mcx::MemoryContext::new("vac_get_namespace_name");
+        let name =
+            match namespace_range_index_pubsub::get_namespace_name(scratch.mcx(), nspoid)? {
+                Some(name) => name.to_string(),
+                None => String::new(),
+            };
+        Ok(name)
+    });
 }

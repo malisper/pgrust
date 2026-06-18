@@ -97,4 +97,41 @@ pub fn init_seams() {
     backend_commands_vacuum_seams::table_relation_vacuum::set(|mcx, rel, params, bstrategy| {
         heap_vacuum_rel(mcx, rel, &params, bstrategy)
     });
+
+    // read_stream_begin_relation / read_stream_end — in the owned model the C
+    // read stream (which ran `heap_vac_scan_next_block` / `vacuum_reap_lp_read_
+    // stream_next` inside the stream over a `void *vacrel`) is replaced by the
+    // in-crate block-selection state machines in `scan_block`, and the chosen
+    // block's buffer is read directly through the bufmgr `read_buffer_extended`
+    // seam (see `scan::lazy_scan_heap` and `heap_vacuum::lazy_vacuum_heap_rel`).
+    // The phase-III stream object therefore carries no driver state and drives
+    // no I/O of its own — it is a lifecycle token only. Its owner is this model:
+    // begin issues a fresh opaque id, end discards it. (Real read-ahead would
+    // need the engine to call the driver's per-block callback, which lives here
+    // and would cycle; the owned model deliberately bypasses it.)
+    backend_access_heap_vacuumlazy_seams::read_stream_begin_relation::set(
+        |_flags, _bstrategy, _rel, _fork, _callback, _reap_iter| {
+            std::thread_local! {
+                static NEXT_READ_STREAM_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+            }
+            let id = NEXT_READ_STREAM_ID.with(|c| {
+                let v = c.get();
+                c.set(v + 1);
+                v
+            });
+            Ok(types_vacuum::vacuumlazy::ReadStreamHandle::new(id))
+        },
+    );
+    backend_access_heap_vacuumlazy_seams::read_stream_end::set(|_stream| Ok(()));
+
+    // push_error_context / pop_error_context — C pushes `vacuum_error_callback`
+    // (errcb.rs) onto `error_context_stack` so a vacuum `ereport(ERROR)` is
+    // annotated with the current phase/block/offset. This repo RETIRES the
+    // ambient `error_context_stack` callback chain (docs/query-lifecycle-raii.md;
+    // backend-utils-error: "there is no ambient callback mechanism"), exactly as
+    // vacuumparallel.c's `push/pop_parallel_vacuum_error_context` are no-ops. The
+    // `vacuum_error_callback` message builder stays ported (errcb.rs) for any
+    // future direct attach; the push/pop are sanctioned no-ops.
+    backend_access_heap_vacuumlazy_seams::push_error_context::set(|| Ok(()));
+    backend_access_heap_vacuumlazy_seams::pop_error_context::set(|| Ok(()));
 }

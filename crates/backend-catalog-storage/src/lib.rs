@@ -1340,4 +1340,10 @@ pub fn init_seams() {
             set: set_wal_skip_threshold,
         });
     }
+
+    // --- lazy-vacuum driver relation truncation (vacuumlazy.c; homes in
+    //     vacuumlazy-seams, catalog/storage.c is its owner) ---
+    backend_access_heap_vacuumlazy_seams::relation_truncate::set(|rel, nblocks| {
+        RelationTruncate(rel, nblocks)
+    });
 }

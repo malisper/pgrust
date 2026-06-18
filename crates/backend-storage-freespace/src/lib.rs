@@ -1206,4 +1206,15 @@ pub fn init_seams() {
     backend_storage_freespace_seams::free_space_map_vacuum_range::set(|rel, start, end| {
         FreeSpaceMapVacuumRange(rel, start, end)
     });
+
+    // --- lazy-vacuum driver FSM calls (vacuumlazy.c; home in vacuumlazy-seams,
+    //     freespace.c is their real owner) ---
+    use backend_access_heap_vacuumlazy_seams as vx;
+    vx::record_page_with_free_space::set(|rel, heap_blk, space_avail| {
+        RecordPageWithFreeSpace(rel, heap_blk, space_avail)
+    });
+    vx::get_recorded_free_space::set(|rel, heap_blk| GetRecordedFreeSpace(rel, heap_blk));
+    vx::free_space_map_vacuum_range::set(|rel, start, end| {
+        FreeSpaceMapVacuumRange(rel, start, end)
+    });
 }

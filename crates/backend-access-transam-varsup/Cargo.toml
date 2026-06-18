@@ -9,6 +9,9 @@ name = "backend_access_transam_varsup"
 path = "src/lib.rs"
 
 [dependencies]
+# Lazy-vacuum driver's ReadNextTransactionId seam homes in vacuumlazy-seams;
+# varsup.c/transam.h is its owner.
+backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
 seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }

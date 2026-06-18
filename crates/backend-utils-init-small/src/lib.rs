@@ -289,6 +289,19 @@ pub fn init_seams() {
         get: globals::enableFsync,
         set: globals::set_enableFsync,
     });
+
+    // --- lazy-vacuum driver process-global reads (vacuumlazy.c). MyDatabaseId
+    //     and MyBackendType are globals.c globals this crate owns;
+    //     AmAutoVacuumWorkerProcess() == (MyBackendType == B_AUTOVAC_WORKER).
+    //     The seams home in vacuumlazy-seams. ---
+    {
+        use backend_access_heap_vacuumlazy_seams as vx;
+        vx::my_database_id::set(|| Ok(globals::MyDatabaseId()));
+        vx::am_autovacuum_worker_process::set(|| {
+            Ok(globals::MyBackendType()
+                == types_core::init::BackendType::AutovacWorker)
+        });
+    }
 }
 
 #[cfg(test)]

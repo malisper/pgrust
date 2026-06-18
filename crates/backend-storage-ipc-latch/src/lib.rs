@@ -626,6 +626,20 @@ pub fn init_seams() {
     backend_storage_ipc_latch_seams::latch_owner_pid::set(latch_owner_pid);
 
     install_parallel_rt_latch_seams();
+
+    // --- lazy-vacuum cost-delay sleep (vacuumlazy.c via vacuum_delay_point;
+    //     WaitLatch/ResetLatch on MyLatch). Home in vacuumlazy-seams,
+    //     latch.c is their owner. ---
+    {
+        use backend_access_heap_vacuumlazy_seams as vx;
+        vx::wait_latch::set(|wake_events, timeout_ms, wait_event_info| {
+            wait_latch_my_latch(wake_events as u32, timeout_ms, wait_event_info).map(|_| ())
+        });
+        vx::reset_latch::set(|| {
+            reset_latch_my_latch();
+            Ok(())
+        });
+    }
 }
 
 /// Install the `MyLatch` operations `access/transam/parallel.c` reaches outward

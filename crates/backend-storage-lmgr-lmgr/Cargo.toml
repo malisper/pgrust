@@ -20,6 +20,11 @@ types-tuple = { path = "../types-tuple" }
 # Inward seams this crate owns and installs.
 backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
 backend-storage-lmgr-lmgr-pc-seams = { path = "../backend-storage-lmgr-lmgr-pc-seams" }
+# Lazy-vacuum driver's relation-lock seams (UnlockRelation / ConditionalLockRelation
+# / LockHasWaitersRelation, re-signed off `&Relation`) home in vacuumlazy-seams;
+# the LockRelId is resolved off the relcache entry by OID.
+backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
 
 # Outward seams (owners not yet ported, or cyclic).
 backend-storage-lmgr-lock-seams = { path = "../backend-storage-lmgr-lock-seams" }

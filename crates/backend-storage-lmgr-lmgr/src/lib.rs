@@ -1255,4 +1255,23 @@ pub fn init_seams() {
     // bare-OID LockRelationOid/UnlockRelationOid for revalidation locking.
     inward_pc::lock_relation_oid::set(LockRelationOid);
     inward_pc::unlock_relation_oid::set(UnlockRelationOid);
+
+    // --- lazy-vacuum driver's relation-lock seams (vacuumlazy.c's truncation
+    //     interlock). In C these are macros that take `relation` and derive
+    //     `&relation->rd_lockInfo.lockRelId`; here the LockRelId is resolved off
+    //     the relcache entry (by `rel.rd_id`) before calling the LockRelId-keyed
+    //     lmgr.c primitives this crate owns. They home in vacuumlazy-seams. ---
+    use backend_access_heap_vacuumlazy_seams as vx;
+    vx::unlock_relation::set(|rel, lockmode| {
+        let lri = backend_utils_cache_relcache_seams::rel_lock_relid::call(rel.rd_id)?;
+        UnlockRelation(&lri, lockmode)
+    });
+    vx::conditional_lock_relation::set(|rel, lockmode| {
+        let lri = backend_utils_cache_relcache_seams::rel_lock_relid::call(rel.rd_id)?;
+        ConditionalLockRelation(&lri, lockmode)
+    });
+    vx::lock_has_waiters_relation::set(|rel, lockmode| {
+        let lri = backend_utils_cache_relcache_seams::rel_lock_relid::call(rel.rd_id)?;
+        LockHasWaitersRelation(&lri, lockmode)
+    });
 }

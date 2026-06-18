@@ -9,6 +9,9 @@ name = "backend_utils_adt_datetime"
 path = "src/lib.rs"
 
 [dependencies]
+# Lazy-vacuum driver timestamp seams (GetCurrentTimestamp / TimestampDifference /
+# TimestampDifferenceExceeds) home in vacuumlazy-seams; timestamp.c is their owner.
+backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
 types-core = { path = "../types-core" }
 types-datetime = { path = "../types-datetime" }
 types-error = { path = "../types-error" }

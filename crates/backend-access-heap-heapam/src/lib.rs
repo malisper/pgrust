@@ -437,6 +437,41 @@ pub fn init_seams() {
         },
     );
 
+    // VACUUM: `HeapTupleSatisfiesVacuum(tuple, OldestXmin, buffer)` for the
+    // page-resident tuple at `(buffer, offnum)` (vacuumlazy.c
+    // heap_page_is_all_visible second-pass recheck). Builds the HeapTupleData
+    // off the page, runs HTSV (heapam_visibility.c), returns the HTSV_Result
+    // integer.
+    backend_access_heap_vacuumlazy_seams::heap_tuple_satisfies_vacuum::set(
+        |rel, buffer, offnum, oldest_xmin| {
+            let ctx = mcx::MemoryContext::new("heap_tuple_satisfies_vacuum");
+            let mcx = ctx.mcx();
+            let mut tuple = read_on_page_tuple(mcx, rel, buffer, offnum)?;
+            let res = backend_access_heap_heapam_visibility::HeapTupleSatisfiesVacuum(
+                &mut tuple,
+                oldest_xmin,
+                buffer,
+            )?;
+            Ok(res as i32)
+        },
+    );
+
+    // VACUUM header reads (vacuumlazy.c heap_page_is_all_visible): the on-page
+    // `HeapTupleHeaderXminCommitted` / `HeapTupleHeaderGetXmin` for the tuple at
+    // `(buffer, offnum)`.
+    backend_access_heap_vacuumlazy_seams::header_xmin_committed::set(|buffer, offnum| {
+        let ctx = mcx::MemoryContext::new("header_xmin_committed");
+        let tuple = read_on_page_header(ctx.mcx(), buffer, offnum)?;
+        // HeapTupleHeaderXminCommitted(htup) (htup_details.h): t_infomask &
+        // HEAP_XMIN_COMMITTED.
+        Ok((tuple.t_infomask & types_tuple::heaptuple::HEAP_XMIN_COMMITTED) != 0)
+    });
+    backend_access_heap_vacuumlazy_seams::header_get_xmin::set(|buffer, offnum| {
+        let ctx = mcx::MemoryContext::new("header_get_xmin");
+        let tuple = read_on_page_header(ctx.mcx(), buffer, offnum)?;
+        Ok(backend_access_heap_heapam_visibility::htup::HeapTupleHeaderGetXmin(&tuple))
+    });
+
     // F6 — the heapam tableam `index_delete_tuples` implementation.
     heapam_seam::heap_index_delete_tuples::set(|mcx, rel, delstate| {
         index_delete::heap_index_delete_tuples(mcx, rel, delstate)
@@ -550,6 +585,39 @@ fn read_on_page_header<'mcx>(
         let item_id = backend_storage_page::PageGetItemId(&page, offnum)?;
         let item = backend_storage_page::PageGetItem(&page, &item_id)?;
         out = Some(HeapTupleHeaderData::read_on_page(mcx, item)?);
+        Ok(())
+    })?;
+    Ok(out.expect("with_buffer_page closure must have run"))
+}
+
+/// Build a `HeapTupleData` for the normal tuple at `(buffer, offnum)` of `rel`
+/// — the C `ItemPointerSet(&tuple.t_self, ...); tuple.t_data = (HeapTupleHeader)
+/// PageGetItem(...); tuple.t_len = ItemIdGetLength(...); tuple.t_tableOid =
+/// RelationGetRelid(rel)` shape `heap_page_is_all_visible` sets up before
+/// `HeapTupleSatisfiesVacuum`.
+fn read_on_page_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &RelationData<'_>,
+    buffer: Buffer,
+    offnum: OffsetNumber,
+) -> PgResult<HeapTupleData<'mcx>> {
+    use types_tuple::heaptuple::ItemPointerData;
+    let blockno = bufmgr_seam::buffer_get_block_number::call(buffer);
+    let reltableoid = rel.rd_id;
+    let mut out: Option<HeapTupleData<'mcx>> = None;
+    bufmgr_seam::with_buffer_page::call(buffer, &mut |page_bytes| {
+        let page = backend_storage_page::PageRef::new(page_bytes)?;
+        let item_id = backend_storage_page::PageGetItemId(&page, offnum)?;
+        let item = backend_storage_page::PageGetItem(&page, &item_id)?;
+        let htup = HeapTupleHeaderData::read_on_page(mcx, item)?;
+        let mut tup = HeapTupleData {
+            t_len: backend_storage_page::ItemIdGetLength(&item_id) as u32,
+            t_self: ItemPointerData::default(),
+            t_tableOid: reltableoid,
+            t_data: Some(mcx::alloc_in(mcx, htup)?),
+        };
+        backend_storage_page::ItemPointerSet(&mut tup.t_self, blockno, offnum);
+        out = Some(tup);
         Ok(())
     })?;
     Ok(out.expect("with_buffer_page closure must have run"))

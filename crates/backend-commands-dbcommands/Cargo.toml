@@ -12,6 +12,9 @@ crate-type = ["rlib"]
 [dependencies]
 # Inward seams this unit owns + installs.
 backend-commands-dbcommands-seams = { path = "../backend-commands-dbcommands-seams" }
+# Lazy-vacuum driver's get_database_name seam homes in vacuumlazy-seams;
+# dbcommands.c is its owner.
+backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
 
 # pg_database read/mutate substrate (the landed keystone owner's seams).
 backend-catalog-pg-database-seams = { path = "../backend-catalog-pg-database-seams" }

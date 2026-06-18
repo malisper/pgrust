@@ -15,6 +15,11 @@ types-storage = { path = "../types-storage" }
 types-condvar = { path = "../types-condvar" }
 # The FSM page round-trip seam materialises the page body as an owned FSMPageData.
 types-fsm = { path = "../types-fsm" }
+# The lazy-vacuum page-read seam returns LinePointerState (vacuumlazy.rs).
+types-vacuum = { path = "../types-vacuum" }
+# Lazy-vacuum driver's BufferGetPage(buffer)-over-page seams home in
+# vacuumlazy-seams (re-signed off `Buffer`); the buffer manager is their owner.
+backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
 # F2a `BufferAlloc` tests relpersistence against RELPERSISTENCE_PERMANENT;
 # F2b extend reads `rd_rel->relpersistence` (RELPERSISTENCE_TEMP/PERMANENT).
 types-tuple = { path = "../types-tuple" }

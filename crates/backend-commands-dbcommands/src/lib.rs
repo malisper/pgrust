@@ -544,6 +544,20 @@ pub fn init_seams() {
     backend_tcop_utility_out_seams::alter_database_refresh_coll::set(alter_database_refresh_coll_arm);
     backend_tcop_utility_out_seams::alter_database_set::set(alter_database_set_arm);
     backend_tcop_utility_out_seams::drop_database::set(drop_database_arm);
+
+    // --- lazy-vacuum driver database-name read (vacuumlazy.c logging;
+    //     get_database_name(MyDatabaseId) -> char*. Home in vacuumlazy-seams,
+    //     dbcommands.c is its owner). The seam returns an owned String, so the
+    //     projection runs in a short-lived scratch context; a cache miss yields
+    //     the empty string (the C `char *` NULL). ---
+    backend_access_heap_vacuumlazy_seams::get_database_name::set(|dboid| {
+        let ctx = mcx::MemoryContext::new("vac_get_database_name");
+        let name = match get_database_name(ctx.mcx(), dboid)? {
+            Some(name) => name.to_string(),
+            None => String::new(),
+        };
+        Ok(name)
+    });
 }
 
 use types_nodes::nodes::Node as UtilNode;

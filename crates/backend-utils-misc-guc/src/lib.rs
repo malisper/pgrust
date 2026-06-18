@@ -703,6 +703,14 @@ pub fn init_seams() {
     // reset) is installed by the seam's owner, guc_funcs.c
     // (backend-utils-misc-guc-funcs), which owns `SetPGVariable` and depends on
     // this crate's seam crate (acyclic). See its `init_seams`.
+
+    // --- lazy-vacuum driver GUC reads (vacuumlazy.c reads these process-global
+    //     GUCs directly; they home in vacuumlazy-seams, guc.c is their owner) ---
+    use backend_access_heap_vacuumlazy_seams as vx;
+    vx::maintenance_work_mem::set(|| Ok(get_int("maintenance_work_mem").unwrap_or(0)));
+    vx::autovacuum_work_mem::set(|| Ok(get_int("autovacuum_work_mem").unwrap_or(-1)));
+    vx::track_io_timing::set(|| Ok(get_bool("track_io_timing").unwrap_or(false)));
+    vx::track_cost_delay_timing::set(|| Ok(get_bool("track_cost_delay_timing").unwrap_or(false)));
 }
 
 /// Install the parallel-worker GUC-state transfer seams declared in
