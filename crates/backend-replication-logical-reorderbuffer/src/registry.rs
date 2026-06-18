@@ -486,33 +486,27 @@ fn seam_abort_old(rb: ReorderBufferHandle, oldest_running_xid: TransactionId) {
 
 #[allow(clippy::too_many_arguments)]
 fn seam_finish_prepared(
-    _rb: ReorderBufferHandle,
-    _xid: TransactionId,
-    _commit_lsn: XLogRecPtr,
-    _end_lsn: XLogRecPtr,
-    _two_phase_at: XLogRecPtr,
-    _commit_time: types_core::primitive::TimestampTz,
-    _origin_id: types_core::primitive::RepOriginId,
-    _origin_lsn: XLogRecPtr,
-    _gid: alloc::vec::Vec<u8>,
-    _is_commit: bool,
+    rb: ReorderBufferHandle,
+    xid: TransactionId,
+    commit_lsn: XLogRecPtr,
+    end_lsn: XLogRecPtr,
+    two_phase_at: XLogRecPtr,
+    commit_time: types_core::primitive::TimestampTz,
+    origin_id: types_core::primitive::RepOriginId,
+    origin_lsn: XLogRecPtr,
+    gid: alloc::vec::Vec<u8>,
+    is_commit: bool,
 ) {
-    // FinishPrepared replays the prepared txn's commit/abort through the
-    // output-plugin commit_prepared/rollback_prepared callbacks (ProcessTXN
-    // commit tail). Blocked on the logical.c output-plugin dispatch keystone.
-    panic!(
-        "ReorderBufferFinishPrepared: output-plugin commit_prepared/rollback_prepared \
-         dispatch (logical.c handle facade) not yet modeled"
-    );
+    with_buffer(rb, |b| {
+        b.finish_prepared(
+            xid, commit_lsn, end_lsn, two_phase_at, commit_time, origin_id, origin_lsn, gid,
+            is_commit,
+        )
+    });
 }
 
-fn seam_prepare(_rb: ReorderBufferHandle, _xid: TransactionId, _gid: alloc::vec::Vec<u8>) {
-    // Prepare drives ReorderBufferReplay then rb->prepare(); the replay tail
-    // and the prepare callback both go through the output-plugin dispatch.
-    panic!(
-        "ReorderBufferPrepare: ReorderBufferReplay output-plugin dispatch + rb->prepare \
-         callback (logical.c handle facade) not yet modeled"
-    );
+fn seam_prepare(rb: ReorderBufferHandle, xid: TransactionId, gid: alloc::vec::Vec<u8>) {
+    with_buffer(rb, |b| b.prepare(xid, gid));
 }
 
 fn seam_skip_prepare(rb: ReorderBufferHandle, xid: TransactionId) {

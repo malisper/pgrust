@@ -50,7 +50,8 @@ use types_core::primitive::RepOriginId;
 
 use crate::{
     ReorderBuffer, ReorderBufferChange, ReorderBufferChangeData, ReorderBufferChangeType,
-    RBTXN_IS_SERIALIZED, RBTXN_IS_SERIALIZED_CLEAR, RBTXN_IS_STREAMED, RBTXN_IS_SUBXACT,
+    RBTXN_IS_PREPARED, RBTXN_IS_SERIALIZED, RBTXN_IS_SERIALIZED_CLEAR, RBTXN_IS_STREAMED,
+    RBTXN_IS_SUBXACT, RBTXN_PREPARE_STATUS_MASK, RBTXN_SENT_PREPARE, RBTXN_SKIPPED_PREPARE,
 };
 
 /// `CHANGES_THRESHOLD` (reorderbuffer.c) — emit a keepalive
@@ -1144,6 +1145,44 @@ impl ReorderBuffer {
         backend_replication_logical_logical_seams::dispatch_reorderbuffer_callback::call(cb)
     }
 
+    /// `rb->commit_prepared(rb, txn, commit_lsn)`.
+    fn commit_prepared_output(
+        &mut self,
+        xid: TransactionId,
+        commit_lsn: XLogRecPtr,
+    ) -> Result<(), types_error::PgError> {
+        let (txn_final_lsn, txn_end_lsn) =
+            self.with_txn_pub(xid, |t| (t.final_lsn, t.end_lsn));
+        let cb = types_logical::ReorderBufferCallback::CommitPrepared {
+            txn: crate::registry::txn_handle_for_xid(xid),
+            txn_xid: xid,
+            txn_final_lsn,
+            txn_end_lsn,
+            commit_lsn,
+        };
+        backend_replication_logical_logical_seams::dispatch_reorderbuffer_callback::call(cb)
+    }
+
+    /// `rb->rollback_prepared(rb, txn, prepare_end_lsn, prepare_time)`.
+    fn rollback_prepared_output(
+        &mut self,
+        xid: TransactionId,
+        prepare_end_lsn: XLogRecPtr,
+        prepare_time: TimestampTz,
+    ) -> Result<(), types_error::PgError> {
+        let (txn_final_lsn, txn_end_lsn) =
+            self.with_txn_pub(xid, |t| (t.final_lsn, t.end_lsn));
+        let cb = types_logical::ReorderBufferCallback::RollbackPrepared {
+            txn: crate::registry::txn_handle_for_xid(xid),
+            txn_xid: xid,
+            txn_final_lsn,
+            txn_end_lsn,
+            prepare_end_lsn,
+            prepare_time,
+        };
+        backend_replication_logical_logical_seams::dispatch_reorderbuffer_callback::call(cb)
+    }
+
     // -----------------------------------------------------------------------
     // ReorderBufferReplay / ReorderBufferCommit
     // -----------------------------------------------------------------------
@@ -1207,6 +1246,110 @@ impl ReorderBuffer {
             Some(x) => x,
         };
         self.replay(txn_xid, commit_lsn, end_lsn, commit_time, origin_id, origin_lsn);
+    }
+
+    /// `ReorderBufferPrepare(rb, xid, gid)` — replay a PREPARE TRANSACTION and
+    /// dispatch the output-plugin `prepare` callback if not already sent.
+    pub fn prepare(&mut self, xid: TransactionId, gid: alloc::vec::Vec<u8>) {
+        let txn_xid = match self.txn_by_xid_pub(xid, false, &mut None, InvalidXLogRecPtr, false) {
+            None => return, // unknown transaction, nothing to replay
+            Some(x) => x,
+        };
+
+        // txn must have been marked prepared, neither skipped nor sent, and the
+        // prepare info must already be recorded.
+        debug_assert!(
+            self.with_txn_pub(txn_xid, |t| t.txn_flags & RBTXN_PREPARE_STATUS_MASK)
+                == RBTXN_IS_PREPARED
+        );
+        debug_assert!(self.with_txn_pub(txn_xid, |t| t.final_lsn != InvalidXLogRecPtr));
+
+        self.with_txn_pub(txn_xid, |t| t.gid = Some(gid));
+
+        let (final_lsn, end_lsn, prepare_time, origin_id, origin_lsn) = self.with_txn_pub(
+            txn_xid,
+            |t| (t.final_lsn, t.end_lsn, t.xact_time, t.origin_id, t.origin_lsn),
+        );
+        self.replay(txn_xid, final_lsn, end_lsn, prepare_time, origin_id, origin_lsn);
+
+        // Send a prepare if not already done so. This might occur if we have
+        // detected a concurrent abort while replaying the non-streaming txn.
+        if !self.with_txn_pub(txn_xid, |t| t.sent_prepare()) {
+            self.prepare_output(txn_xid, final_lsn)
+                .expect("rb->prepare output-plugin callback");
+            self.with_txn_pub(txn_xid, |t| t.txn_flags |= RBTXN_SENT_PREPARE);
+        }
+    }
+
+    /// `ReorderBufferFinishPrepared(rb, xid, commit_lsn, end_lsn, two_phase_at,
+    /// commit_time, origin_id, origin_lsn, gid, is_commit)` — handle
+    /// COMMIT/ROLLBACK PREPARED.
+    #[allow(clippy::too_many_arguments)]
+    pub fn finish_prepared(
+        &mut self,
+        xid: TransactionId,
+        commit_lsn: XLogRecPtr,
+        end_lsn: XLogRecPtr,
+        two_phase_at: XLogRecPtr,
+        commit_time: TimestampTz,
+        origin_id: RepOriginId,
+        origin_lsn: XLogRecPtr,
+        gid: alloc::vec::Vec<u8>,
+        is_commit: bool,
+    ) {
+        let txn_xid = match self.txn_by_xid_pub(xid, false, &mut None, commit_lsn, false) {
+            None => return, // unknown transaction, nothing to do
+            Some(x) => x,
+        };
+
+        // By this time the txn has the prepare record info; remember it to be
+        // later used for rollback.
+        let (prepare_end_lsn, prepare_time) =
+            self.with_txn_pub(txn_xid, |t| (t.end_lsn, t.xact_time));
+
+        self.with_txn_pub(txn_xid, |t| t.gid = Some(gid));
+
+        // It is possible this txn was not decoded at prepare time (no consistent
+        // snapshot, two_phase disabled, or decoded earlier then restarted). We
+        // only need to send the prepare if it was not decoded earlier, and we
+        // don't decode for aborts if not already done.
+        let final_lsn = self.with_txn_pub(txn_xid, |t| t.final_lsn);
+        if final_lsn < two_phase_at && is_commit {
+            debug_assert!(
+                self.with_txn_pub(txn_xid, |t| t.txn_flags & RBTXN_PREPARE_STATUS_MASK)
+                    == (RBTXN_IS_PREPARED | RBTXN_SKIPPED_PREPARE)
+            );
+            debug_assert!(self.with_txn_pub(txn_xid, |t| t.final_lsn != InvalidXLogRecPtr));
+
+            // Use the prepare record info (not commit info) so downstream gets
+            // accurate information.
+            let (f_lsn, e_lsn, p_time, o_id, o_lsn) = self.with_txn_pub(
+                txn_xid,
+                |t| (t.final_lsn, t.end_lsn, t.xact_time, t.origin_id, t.origin_lsn),
+            );
+            self.replay(txn_xid, f_lsn, e_lsn, p_time, o_id, o_lsn);
+        }
+
+        self.with_txn_pub(txn_xid, |t| {
+            t.final_lsn = commit_lsn;
+            t.end_lsn = end_lsn;
+            t.xact_time = commit_time;
+            t.origin_id = origin_id;
+            t.origin_lsn = origin_lsn;
+        });
+
+        if is_commit {
+            self.commit_prepared_output(txn_xid, commit_lsn)
+                .expect("rb->commit_prepared output-plugin callback");
+        } else {
+            self.rollback_prepared_output(txn_xid, prepare_end_lsn, prepare_time)
+                .expect("rb->rollback_prepared output-plugin callback");
+        }
+
+        // cleanup: make sure there's no cache pollution.
+        let invals = self.with_txn_pub(txn_xid, |t| t.invalidations.clone());
+        self.execute_invalidations(&invals);
+        self.cleanup_txn(txn_xid);
     }
 
     // -----------------------------------------------------------------------
