@@ -58,14 +58,16 @@
 //!   * `SetRelationNumChecks`'s disk-store branch (the trimmed `PgClassForm`
 //!     carries no `relchecks`; `set_relation_num_checks` seam) — the
 //!     `relchecks == numchecks` `CacheInvalidate` branch is real;
-//!   * `RemoveAttributeById` / `RelationClearMissing` / `StoreAttrMissingVal`
-//!     need a writable full-row `ATTNUM` syscache copy + a `pg_attribute`
-//!     `CatalogTupleUpdate` carrier (and `construct_array`-of-missingval)
-//!     (`remove_attribute_by_id_update` / `relation_clear_missing_update` /
-//!     `store_attr_missing_val` seams). The inward `RemoveAttributeById` /
-//!     `relation_clear_missing` entry seams are INSTALLED; `RemoveAttributeById`
-//!     runs the real `RemoveStatistics` half in-crate. `SetAttrMissing`
-//!     (binary-upgrade only, no in-tree caller) is deferred.
+//!   * `RelationClearMissing` is REAL in-crate (systable scan on pg_attribute
+//!     by `attrelid` + `heap_modify_tuple` clearing `atthasmissing` / nulling
+//!     `attmissingval` + `CatalogTupleUpdate`); the inward
+//!     `relation_clear_missing` entry seam is INSTALLED.
+//!   * `RemoveAttributeById` / `StoreAttrMissingVal` need a writable full-row
+//!     `ATTNUM` syscache copy + a `pg_attribute` `CatalogTupleUpdate` carrier
+//!     (and `construct_array`-of-missingval) (`remove_attribute_by_id_update` /
+//!     `store_attr_missing_val` seams). The inward `RemoveAttributeById` entry
+//!     seam is INSTALLED and runs the real `RemoveStatistics` half in-crate.
+//!     `SetAttrMissing` (binary-upgrade only, no in-tree caller) is deferred.
 //!
 //! ## STOP — partition-store / truncate families are carrier-blocked
 //!

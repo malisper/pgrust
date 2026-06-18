@@ -186,16 +186,10 @@ seam_core::seam!(
     ) -> PgResult<()>
 );
 
-seam_core::seam!(
-    /// `RelationClearMissing`'s pg_attribute mutation (heap.c): `table_open(
-    /// AttributeRelationId, RowExclusiveLock)` + for each of the `natts`
-    /// columns `SearchSysCache2(ATTNUM)`, and where `atthasmissing` is set,
-    /// `heap_modify_tuple` clearing `atthasmissing` + nulling `attmissingval`
-    /// + `CatalogTupleUpdate` + `table_close`. Blocked on the writable full-row
-    /// `ATTNUM` syscache copy + `pg_attribute` `CatalogTupleUpdate` carrier.
-    /// `Err` carries the heap-mutation `ereport(ERROR)`s.
-    pub fn relation_clear_missing_update(relid: Oid, natts: i32) -> PgResult<()>
-);
+// `RelationClearMissing`'s pg_attribute mutation is now REAL in-crate
+// (`backend-catalog-heap` constraints.rs: systable scan on pg_attribute by
+// `attrelid` + `heap_modify_tuple` + `CatalogTupleUpdate`), so the former
+// `relation_clear_missing_update` mirror-and-panic sub-seam is gone.
 
 seam_core::seam!(
     /// `StoreAttrMissingVal`'s pg_attribute mutation (heap.c): `table_open(

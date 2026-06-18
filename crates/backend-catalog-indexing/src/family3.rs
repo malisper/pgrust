@@ -351,6 +351,16 @@ fn catalog_tuple_update_pg_attribute<'mcx>(
             None => isnull[i] = true,
         }
     }
+    // attmissingval — Some(None) stores SQL NULL (RelationClearMissing),
+    // Some(Some(image)) stores the anyarray varlena (StoreAttrMissingVal).
+    if let Some(missing) = &row.attmissingval {
+        let i = pa::Anum_pg_attribute_attmissingval as usize - 1;
+        replaces[i] = true;
+        match missing {
+            Some(image) => values[i] = bytes_datum(mcx, image)?,
+            None => isnull[i] = true,
+        }
+    }
 
     // new_tuple = heap_modify_tuple(attr_tuple, RelationGetDescr(pg_attribute_rel),
     //                               values, isnull, replaces);
