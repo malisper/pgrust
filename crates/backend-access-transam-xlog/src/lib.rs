@@ -813,6 +813,7 @@ pub fn init_seams() {
     s::get_wal_insertion_timeline_if_set::set(shmem::GetWALInsertionTimeLineIfSet);
     s::get_system_identifier::set(shmem::GetSystemIdentifier);
     s::data_checksums_enabled::set(shmem::DataChecksumsEnabled);
+    s::xlog_hint_bit_is_needed::set(shmem::XLogHintBitIsNeeded);
 
     // `InRecovery` (declared in xlog.h, but the storage is the file-static global
     // in xlogrecovery.c — xlogrecovery.c:642 et al set it). The

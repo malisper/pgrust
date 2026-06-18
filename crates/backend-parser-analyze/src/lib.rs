@@ -27,6 +27,7 @@ use types_nodes::nodes::{CmdType, Node, NodePtr};
 use types_nodes::parsestmt::{ParseState, RawStmt};
 use types_nodes::rawnodes::SelectStmt;
 
+mod insert;
 mod locking;
 mod select;
 mod setop;
@@ -269,8 +270,8 @@ pub fn transformStmt<'mcx>(
                 setop::transformSetOperationStmt(mcx, pstate, n)?
             }
         }
-        Node::InsertStmt(_)
-        | Node::DeleteStmt(_)
+        Node::InsertStmt(n) => insert::transformInsertStmt(mcx, pstate, n)?,
+        Node::DeleteStmt(_)
         | Node::UpdateStmt(_)
         | Node::MergeStmt(_)
         | Node::ReturnStmt(_)
@@ -279,12 +280,12 @@ pub fn transformStmt<'mcx>(
         | Node::ExplainStmt(_)
         | Node::CreateTableAsStmt(_)
         | Node::CallStmt(_) => {
-            // The DML / special-statement transforms are a follow-on family;
-            // they are not reachable on the SELECT-milestone path. Mirror the C
-            // dispatch and panic loudly until the family lands.
+            // The remaining DML / special-statement transforms are a follow-on
+            // family; they are not reachable on the SELECT/INSERT-milestone path.
+            // Mirror the C dispatch and panic loudly until the family lands.
             panic!(
                 "transformStmt: DML/special statement (tag {:?}) is in the \
-                 follow-on family (transformInsert/Update/Delete/Merge/Return/\
+                 follow-on family (transformUpdate/Delete/Merge/Return/\
                  PLAssign/DeclareCursor/Explain/CreateTableAs/Call) — not yet \
                  ported (analyze.c:312)",
                 parse_tree.tag()

@@ -626,6 +626,11 @@ pub fn init_seams() {
     backend_storage_buffer_bufmgr_seams::conditional_lock_buffer::set(conditional_lock_buffer);
     backend_storage_buffer_bufmgr_seams::is_buffer_cleanup_ok::set(is_buffer_cleanup_ok);
     backend_storage_buffer_bufmgr_seams::mark_buffer_dirty_hint::set(mark_buffer_dirty_hint);
+    // `pgBufferUsage.shared_blks_dirtied++` (bufmgr.c:2989 / :5555), fired from
+    // MarkBufferDirty / MarkBufferDirtyHint when a previously-clean shared buffer
+    // is first dirtied. Stats-only; no-op install (same posture as the F2b
+    // `count_buffer_write` / `count_io_op_extend` stubs below) until pgstat ports.
+    backend_storage_buffer_bufmgr_seams::count_buffer_dirtied::set(|| {});
     // F1d
     backend_storage_buffer_bufmgr_seams::mark_buffer_dirty::set(mark_buffer_dirty);
     backend_storage_buffer_bufmgr_seams::with_buffer_page::set(with_buffer_page);

@@ -613,6 +613,12 @@ pub fn DataChecksumsEnabled() -> bool {
     unsafe { (*cf).data_checksum_version > 0 }
 }
 
+/// `XLogHintBitIsNeeded()` (xlog.h:120) — `(DataChecksumsEnabled() ||
+/// wal_log_hints)`: whether hint-bit-style page changes must be WAL-logged.
+pub fn XLogHintBitIsNeeded() -> bool {
+    DataChecksumsEnabled() || backend_utils_misc_guc_tables::vars::wal_log_hints.read()
+}
+
 /// `ControlFile->checkPointCopy.{redo,ThisTimeLineID}` — the redo pointer + TLI
 /// of the last checkpoint/restartpoint recorded in the control file. The caller
 /// (`GetOldestRestartPoint`) holds `ControlFileLock`; this is the bare read.
