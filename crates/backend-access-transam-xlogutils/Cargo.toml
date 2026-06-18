@@ -10,6 +10,7 @@ path = "src/lib.rs"
 crate-type = ["rlib"]
 
 [dependencies]
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 seam-core = { path = "../seam-core" }
 mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }

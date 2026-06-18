@@ -93,6 +93,9 @@ std::thread_local! {
     /// store for the guc-table slot; PGC_USERSET, boot value 0 (disabled).
     static CLIENT_CONNECTION_CHECK_INTERVAL: core::cell::Cell<i32> =
         const { core::cell::Cell::new(0) };
+    /// `bool Log_disconnections = false` (postgres.c) — backing store for the
+    /// `log_disconnections` guc-table slot; PGC_SU_BACKEND, boot value false.
+    static LOG_DISCONNECTIONS: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
 }
 
 pub fn init_seams() {
@@ -103,6 +106,14 @@ pub fn init_seams() {
         backend_utils_misc_guc_tables::GucVarAccessors {
             get: || CLIENT_CONNECTION_CHECK_INTERVAL.with(core::cell::Cell::get),
             set: |v| CLIENT_CONNECTION_CHECK_INTERVAL.with(|c| c.set(v)),
+        },
+    );
+    // postgres.c also owns the `log_disconnections` GUC global (read by
+    // `log_disconnections` at backend exit). Install its slot over the cell.
+    backend_utils_misc_guc_tables::vars::Log_disconnections.install(
+        backend_utils_misc_guc_tables::GucVarAccessors {
+            get: || LOG_DISCONNECTIONS.with(core::cell::Cell::get),
+            set: |v| LOG_DISCONNECTIONS.with(|c| c.set(v)),
         },
     );
 

@@ -10,6 +10,7 @@ path = "src/lib.rs"
 crate-type = ["rlib"]
 
 [dependencies]
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-datum = { path = "../types-datum" }

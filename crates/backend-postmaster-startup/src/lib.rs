@@ -449,4 +449,12 @@ pub fn init_seams() {
         set_log_startup_progress_interval,
     );
     backend_postmaster_startup_seams::startup_process_main::set(startup_process_main_entry);
+    // `int log_startup_progress_interval` (startup.c GUC, boot 10000) — install
+    // the guc-tables slot over this crate's backing accessors.
+    backend_utils_misc_guc_tables::vars::log_startup_progress_interval.install(
+        backend_utils_misc_guc_tables::GucVarAccessors {
+            get: log_startup_progress_interval,
+            set: set_log_startup_progress_interval,
+        },
+    );
 }

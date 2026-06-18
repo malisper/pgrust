@@ -9,6 +9,7 @@ name = "backend_postmaster_startup"
 path = "src/lib.rs"
 
 [dependencies]
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
 backend-access-transam-xlogrecovery-seams = { path = "../backend-access-transam-xlogrecovery-seams" }
 backend-access-transam-xlogutils-seams = { path = "../backend-access-transam-xlogutils-seams" }

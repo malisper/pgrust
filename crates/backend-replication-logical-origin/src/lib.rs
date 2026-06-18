@@ -1358,6 +1358,14 @@ pub fn init_seams() {
     // StartupReplicationOrigin).
     sx::checkpoint_write::set(checkpoint_file::checkpoint_write);
     sx::checkpoint_read::set(checkpoint_file::checkpoint_read);
+    // `int max_active_replication_origins` (origin.c GUC, boot 10) — install the
+    // guc-tables slot over this crate's backing mirror accessors.
+    backend_utils_misc_guc_tables::vars::max_active_replication_origins.install(
+        backend_utils_misc_guc_tables::GucVarAccessors {
+            get: max_active_replication_origins,
+            set: set_max_active_replication_origins,
+        },
+    );
 }
 
 #[cfg(test)]

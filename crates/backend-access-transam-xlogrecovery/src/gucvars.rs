@@ -83,6 +83,12 @@ string_guc!(
     set_primary_slot_name,
     "`PrimarySlotName` (`primary_slot_name` GUC; xlogrecovery.c:99)."
 );
+string_guc!(
+    RECOVERY_TARGET_TIME_STRING,
+    recovery_target_time_string,
+    set_recovery_target_time_string,
+    "`recovery_target_time_string` (`recovery_target_time` GUC; xlogrecovery.c:91)."
+);
 
 // ---------------------------------------------------------------------------
 // Scalar GUC globals.

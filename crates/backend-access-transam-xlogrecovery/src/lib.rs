@@ -186,8 +186,8 @@ pub fn init_seams() {
     // the ControlFile). The owner holds the backing in [`gucvars`]; here we point
     // the matching `guc_tables::vars` slot at its get/set pair so the GUC engine's
     // `.read()` / `.write()` resolve. `recovery_target_time`'s `conf->variable`
-    // is guc_tables.c's own file-static `recovery_target_time_string`, not an
-    // xlogrecovery.c global, so it is not installed here.
+    // is `char *recovery_target_time_string` (xlogrecovery.c:91), an
+    // xlogrecovery.c global, so it is installed here too.
     use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
     vars::recoveryRestoreCommand.install(GucVarAccessors {
         get: gucvars::recovery_restore_command,
@@ -224,5 +224,9 @@ pub fn init_seams() {
     vars::wal_receiver_create_temp_slot.install(GucVarAccessors {
         get: gucvars::wal_receiver_create_temp_slot,
         set: gucvars::set_wal_receiver_create_temp_slot,
+    });
+    vars::recovery_target_time_string.install(GucVarAccessors {
+        get: gucvars::recovery_target_time_string,
+        set: gucvars::set_recovery_target_time_string,
     });
 }

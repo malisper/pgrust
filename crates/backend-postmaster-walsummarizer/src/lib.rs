@@ -1652,4 +1652,13 @@ pub fn init_seams() {
         WaitForWalSummarization,
     );
     backend_postmaster_walsummarizer_seams::summarize_wal::set(summarize_wal_enabled);
+    // `int wal_summary_keep_time` (walsummarizer.c GUC, boot
+    // 10 * HOURS_PER_DAY * MINS_PER_HOUR) — install the guc-tables slot over
+    // this crate's backing accessors.
+    backend_utils_misc_guc_tables::vars::wal_summary_keep_time.install(
+        backend_utils_misc_guc_tables::GucVarAccessors {
+            get: wal_summary_keep_time,
+            set: set_wal_summary_keep_time,
+        },
+    );
 }

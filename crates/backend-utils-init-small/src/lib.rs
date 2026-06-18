@@ -304,6 +304,13 @@ pub fn init_seams() {
         get: globals::enableFsync,
         set: globals::set_enableFsync,
     });
+    // `bool allowSystemTableMods = false;` (globals.c) — the
+    // `allow_system_table_mods` GUC's `conf->variable`. Read by the DDL paths
+    // (tablecmds.c, policy.c, rewriteDefine.c, ...) via the ts-globals seam.
+    vars::allowSystemTableMods.install(GucVarAccessors {
+        get: globals::allowSystemTableMods,
+        set: globals::set_allowSystemTableMods,
+    });
 
     // --- lazy-vacuum driver process-global reads (vacuumlazy.c). MyDatabaseId
     //     and MyBackendType are globals.c globals this crate owns;
