@@ -907,9 +907,9 @@ fn sort_group_list(
 ) -> alloc::vec::Vec<types_nodes::rawnodes::SortGroupClause> {
     nodes
         .iter()
-        .map(|n| match &**n {
-            types_nodes::nodes::Node::SortGroupClause(s) => *s,
-            other => panic!("expected SortGroupClause in group/distinct clause, got {other:?}"),
+        .map(|n| match n.as_sortgroupclause() {
+            Some(s) => *s,
+            None => panic!("expected SortGroupClause in group/distinct clause, got {n:?}"),
         })
         .collect()
 }
