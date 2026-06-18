@@ -1417,10 +1417,48 @@ pub fn init_seams() {
         get_user_default_acl(ctx.mcx(), objtype, owner_id, nsp_oid)
     });
 
-    // NOTE (F1 STOP): record_dependency_on_new_acl (reachable only when
-    // get_user_default_acl returns a non-NULL ACL) and the three F2/F3
-    // executor/init-privs seams (remove_role_from_object_acl,
-    // remove_role_from_init_priv, replace_role_in_init_priv) are deliberately
-    // NOT installed; the CATALOG row is held at `scaffold` so the seam-install
-    // guard exempts this unfinished surface.
+    // `recordDependencyOnNewAcl(classId, objectId, objsubId, ownerId, acl)`
+    // (aclchk.c): record pg_shdepend dependencies on every role mentioned in a
+    // freshly-created object's ACL. The C body is:
+    //
+    //   if (acl == NULL) return;            /* defaulted ACL: nothing to do */
+    //   nmembers = aclmembers(acl, &members);
+    //   updateAclDependencies(classId, objectId, objsubId, ownerId,
+    //                         0, NULL, nmembers, members);
+    //
+    // The `acl == NULL` fast path is the common case (a plain CREATE TABLE /
+    // CREATE TYPE with no `ALTER DEFAULT PRIVILEGES` in force): the object is
+    // created with a defaulted (NULL stored) ACL, so there is nothing to record.
+    // That path is ported faithfully and is what CREATE TABLE exercises.
+    //
+    // The non-NULL branch needs to walk the `aclitem[]` payload via
+    // `aclmembers`, but the model's `ArrayType` carrier (types-array) is the
+    // fixed varlena *header* only and carries no inline aclitem payload — the
+    // same Acl-carrier gap that holds `get_user_default_acl`'s non-empty path at
+    // a loud panic. No ACL with a payload can currently cross this seam (the
+    // sole producer, `get_user_default_acl`, only ever yields `None`), so the
+    // branch is unreachable; it surfaces a precise error rather than silently
+    // skipping the dependency bookkeeping if a payload-bearing Acl is ever wired.
+    seam::record_dependency_on_new_acl::set(
+        |_class_id, _object_id, _objsub_id, _owner_id, acl| {
+            match acl {
+                // C: `if (acl == NULL) return;`
+                None => Ok(()),
+                Some(_acl) => Err(ereport(types_error::error::ERROR)
+                    .errmsg_internal(
+                        "recordDependencyOnNewAcl: non-defaulted ACL needs the \
+                         aclitem[] payload carrier (Acl-array keystone, shared \
+                         with get_user_default_acl's non-empty path)"
+                            .to_string(),
+                    )
+                    .into_error()),
+            }
+        },
+    );
+
+    // NOTE (F2/F3 STOP): the three init-privs/executor seams
+    // (remove_role_from_object_acl, remove_role_from_init_priv,
+    // replace_role_in_init_priv) remain deliberately NOT installed; the CATALOG
+    // row is held at `scaffold` so the seam-install guard exempts that
+    // unfinished surface.
 }
