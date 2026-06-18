@@ -63,6 +63,10 @@ backend-nodes-core = { path = "../backend-nodes-core" }
 # The predtest unit's OUTWARD seam crate: eval_const_test is declared there and
 # installed from this executor owner's init_seams() (the executor backs the test).
 backend-optimizer-util-inherit-predtest-seams = { path = "../backend-optimizer-util-inherit-predtest-seams" }
+# The clauses unit's OUTWARD evaluate_expr_fallback seam is declared there and
+# installed from this executor owner's init_seams() (evaluate_expr runs the expr
+# through the executor: CreateExecutorState → ExecInitExpr → ExecEvalExpr).
+backend-optimizer-util-clauses-seams = { path = "../backend-optimizer-util-clauses-seams" }
 # ExecInitFunc's permission check: object_aclcheck(ProcedureRelationId, funcid,
 # GetUserId(), ACL_EXECUTE) + aclcheck_error (catalog ACL owner), GetUserId
 # (miscinit owner), InvokeFunctionExecuteHook (objectaccess owner). The same

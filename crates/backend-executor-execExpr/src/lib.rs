@@ -160,4 +160,13 @@ pub fn init_seams() {
     backend_optimizer_util_inherit_predtest_seams::eval_const_test::set(
         execExpr_core::eval_const_test,
     );
+
+    // OUTWARD seam owned by clauses.c (optimizer) but BACKED by the executor:
+    // evaluate_expr's fallback evaluator runs the constant expression through a
+    // throwaway ExecInitExpr/ExecEvalExpr (CreateExecutorState → fix_opfuncids →
+    // ExecInitExpr → ExecEvalExprSwitchContext → makeConst → FreeExecutorState).
+    // Its real owner is the executor (execExpr), so install it here.
+    backend_optimizer_util_clauses_seams::evaluate_expr_fallback::set(
+        execExpr_core::evaluate_expr_fallback,
+    );
 }

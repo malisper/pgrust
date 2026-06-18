@@ -8648,6 +8648,7 @@ dependencies = [
  "backend-nodes-core",
  "backend-nodes-core-seams",
  "backend-nodes-nodeFuncs-seams",
+ "backend-optimizer-util-clauses-seams",
  "backend-optimizer-util-inherit-predtest-seams",
  "backend-utils-adt-format-type-seams",
  "backend-utils-cache-lsyscache-seams",

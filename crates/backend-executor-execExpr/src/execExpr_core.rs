@@ -2380,6 +2380,114 @@ pub fn eval_const_test(
     Ok(result)
 }
 
+/// `evaluate_expr(expr, result_type, result_typmod, result_collation)`
+/// (optimizer/util/clauses.c:4975) — the executor-backed const-evaluator the
+/// planner's `eval_const_expressions` falls back on for the expression shapes
+/// the in-crate fmgr fast path does not handle (SAOP / MinMax / Row /
+/// SubscriptingRef / FieldSelect-on-Const / ConvertRowtype / ArrayCoerce /
+/// estimate-mode SQLValueFunction / multidim ArrayExpr — and any all-Const
+/// FuncExpr/OpExpr/NullIfExpr the fast path declines).
+///
+/// Faithful to C:
+///
+/// ```c
+/// estate = CreateExecutorState();
+/// oldcontext = MemoryContextSwitchTo(estate->es_query_cxt);
+/// fix_opfuncids((Node *) expr);
+/// exprstate = ExecInitExpr(expr, NULL);
+/// const_val = ExecEvalExprSwitchContext(exprstate,
+///                                       GetPerTupleExprContext(estate),
+///                                       &const_is_null);
+/// get_typlenbyval(result_type, &resultTypLen, &resultTypByVal);
+/// MemoryContextSwitchTo(oldcontext);
+/// if (!const_is_null) { ... detoast / datumCopy out of sub-context ... }
+/// FreeExecutorState(estate);
+/// return (Expr *) makeConst(result_type, result_typmod, result_collation,
+///                           resultTypLen, const_val, const_is_null,
+///                           resultTypByVal);
+/// ```
+///
+/// The "copy result out of sub-context + forcibly detoast varlena" tail is
+/// performed by `makeConst` itself in the owned model: `make_const`
+/// (backend-nodes-core) detoasts a `constlen == -1` value and copies a
+/// by-reference image into the backend-lifetime const-value context, yielding a
+/// `Datum<'static>` that outlives the throwaway EState — exactly the C
+/// `PG_DETOAST_DATUM_COPY` / `datumCopy` step. We therefore build the Const
+/// *before* the EState (and its per-query context) drop, since the result Datum
+/// borrows `es_query_cxt`.
+///
+/// **Owner:** the executor (execExpr); the seam declaration lives on
+/// `backend-optimizer-util-clauses-seams` (clauses.c is the C home), installed
+/// here from `init_seams`, exactly as `eval_const_test` is installed onto the
+/// predtest seam crate.
+pub fn evaluate_expr_fallback(
+    mut expr: Expr,
+    result_type: types_core::Oid,
+    result_typmod: i32,
+    result_collation: types_core::Oid,
+) -> PgResult<Expr> {
+    // estate = CreateExecutorState();  — a throwaway executor state with its own
+    // per-query memory context (the owned-model equivalent of CreateExecutorState
+    // rooting an "ExecutorState" context under CurrentMemoryContext). The seam
+    // has no ambient Mcx, so root a fresh standalone context here.
+    let cx = mcx::MemoryContext::new("ExecutorState");
+    let mcx = cx.mcx();
+    let mut estate = EStateData::new_in(mcx);
+
+    // fix_opfuncids((Node *) expr);  — make sure any opfuncids are filled in.
+    backend_nodes_core::nodefuncs::fix_opfuncids(&mut expr)?;
+
+    // exprstate = ExecInitExpr(expr, NULL);  — prepare for execution. (We can't
+    // use ExecPrepareExpr because it'd recursively invoke eval_const_expressions.)
+    let mut exprstate = exec_init_expr_no_parent(&expr, &mut estate)?;
+
+    // const_val = ExecEvalExprSwitchContext(exprstate,
+    //                                       GetPerTupleExprContext(estate),
+    //                                       &const_is_null);
+    let econtext =
+        backend_executor_execUtils_seams::get_per_tuple_expr_context::call(&mut estate)?;
+    let (const_val, const_is_null) =
+        exec_eval_expr_switch_context(&mut exprstate, econtext, &mut estate)?;
+
+    // get_typlenbyval(result_type, &resultTypLen, &resultTypByVal);
+    let (result_typlen, result_typbyval) =
+        backend_utils_cache_lsyscache_seams::get_typlenbyval::call(result_type)?;
+
+    // return (Expr *) makeConst(...);
+    //
+    // make_const performs C's "copy result out of sub-context + forcibly detoast
+    // varlena" tail: a `constlen == -1` value is detoasted, and a by-reference
+    // image is copied into the backend-lifetime const-value context (yielding a
+    // `Datum<'static>` that survives the EState teardown below). Build it *before*
+    // dropping the EState, since `const_val` borrows `es_query_cxt`.
+    let result = backend_nodes_core::makefuncs::make_const(
+        // make_const re-homes any by-reference image into its own
+        // backend-lifetime const-value context (`const_value_mcx`) and leaves
+        // by-value/cstring values as `'static`, so the returned `Const` (which
+        // carries `Datum<'static>`) outlives this throwaway EState. The Mcx
+        // handed in is only the staging arena for the (rare) detoast scratch,
+        // so the EState's own per-query context is correct and alive here.
+        estate.es_query_cxt,
+        result_type,
+        result_typmod,
+        result_collation,
+        result_typlen as i32,
+        const_val,
+        const_is_null,
+        result_typbyval,
+    )?;
+
+    // FreeExecutorState(estate);  — release the compiled program, the EState, and
+    // finally the private per-query context (the owned-model equivalent; this
+    // throwaway EState holds no ExprContext shutdown callbacks / JIT context /
+    // partition directory to run down). `cx` drops last at end of scope, after
+    // both borrowers, freeing the per-query arena.
+    drop(exprstate);
+    drop(estate);
+
+    Ok(Expr::Const(result))
+}
+
 /// `EvaluateParams` leaf (prepare.c).
 pub fn eval_exec_param_into_list<'mcx>(
     param_li: ParamListInfoHandle,
