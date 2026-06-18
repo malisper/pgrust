@@ -17,7 +17,7 @@ use types_error::{PgError, PgResult};
 use types_error::{
     ERRCODE_INDETERMINATE_COLLATION, ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_SYNTAX_ERROR,
 };
-use types_locale::{PgLocale, PgLocaleStruct};
+use types_locale::PgLocale;
 use types_core::{InvalidOid, Oid};
 use types_wchar::encoding::PG_UTF8;
 
@@ -166,8 +166,10 @@ fn indeterminate_collation(func: &str) -> PgError {
     .with_hint("Use the COLLATE clause to set the collation explicitly.")
 }
 
-/// The locale-aware provider transform: one of the `pg_str*` seams.
-type ProviderFn = for<'mcx> fn(Mcx<'mcx>, &[u8], &PgLocaleStruct) -> PgResult<PgVec<'mcx, u8>>;
+/// The locale-aware provider transform: one of the `pg_str*` seams. Keyed by
+/// collation OID (symmetric with the comparison family); the pg_locale owner
+/// re-resolves the locale's `info` union from `collid`.
+type ProviderFn = for<'mcx> fn(Mcx<'mcx>, Oid, &[u8]) -> PgResult<PgVec<'mcx, u8>>;
 
 /// Copy an ASCII fast-path `Vec<u8>` result into a `PgVec` allocated in `mcx`,
 /// mirroring the palloc'd C result the locale path also produces.
@@ -202,37 +204,21 @@ fn case_via_locale<'mcx>(
     if mylocale.ctype_is_c {
         asc_into_mcx(mcx, asc(buff))
     } else {
-        provider(mcx, buff, &mylocale)
+        provider(mcx, collid, buff)
     }
 }
 
-fn pg_strlower<'mcx>(
-    mcx: Mcx<'mcx>,
-    src: &[u8],
-    locale: &PgLocaleStruct,
-) -> PgResult<PgVec<'mcx, u8>> {
-    backend_utils_adt_pg_locale_seams::pg_strlower::call(mcx, src, locale)
+fn pg_strlower<'mcx>(mcx: Mcx<'mcx>, collid: Oid, src: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+    backend_utils_adt_pg_locale_seams::pg_strlower::call(mcx, collid, src)
 }
-fn pg_strupper<'mcx>(
-    mcx: Mcx<'mcx>,
-    src: &[u8],
-    locale: &PgLocaleStruct,
-) -> PgResult<PgVec<'mcx, u8>> {
-    backend_utils_adt_pg_locale_seams::pg_strupper::call(mcx, src, locale)
+fn pg_strupper<'mcx>(mcx: Mcx<'mcx>, collid: Oid, src: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+    backend_utils_adt_pg_locale_seams::pg_strupper::call(mcx, collid, src)
 }
-fn pg_strtitle<'mcx>(
-    mcx: Mcx<'mcx>,
-    src: &[u8],
-    locale: &PgLocaleStruct,
-) -> PgResult<PgVec<'mcx, u8>> {
-    backend_utils_adt_pg_locale_seams::pg_strtitle::call(mcx, src, locale)
+fn pg_strtitle<'mcx>(mcx: Mcx<'mcx>, collid: Oid, src: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+    backend_utils_adt_pg_locale_seams::pg_strtitle::call(mcx, collid, src)
 }
-fn pg_strfold<'mcx>(
-    mcx: Mcx<'mcx>,
-    src: &[u8],
-    locale: &PgLocaleStruct,
-) -> PgResult<PgVec<'mcx, u8>> {
-    backend_utils_adt_pg_locale_seams::pg_strfold::call(mcx, src, locale)
+fn pg_strfold<'mcx>(mcx: Mcx<'mcx>, collid: Oid, src: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+    backend_utils_adt_pg_locale_seams::pg_strfold::call(mcx, collid, src)
 }
 
 /// C: `pg_newlocale_from_collation` via the pg_locale seam.
@@ -277,7 +263,7 @@ pub fn str_casefold<'mcx>(mcx: Mcx<'mcx>, buff: &[u8], collid: Oid) -> PgResult<
     if mylocale.ctype_is_c {
         asc_into_mcx(mcx, asc_tolower(buff))
     } else {
-        pg_strfold(mcx, buff, &mylocale)
+        pg_strfold(mcx, collid, buff)
     }
 }
 

@@ -7,7 +7,7 @@ use mcx::{Mcx, PgString, PgVec};
 use types_cash::CashLconv;
 use types_core::{Oid, PgWChar};
 use types_error::PgResult;
-use types_locale::{PgLocale, PgLocaleStruct};
+use types_locale::PgLocale;
 
 seam_core::seam!(
     /// `PGLC_localeconv()` (pg_locale.c): snapshot the monetary subset of
@@ -111,7 +111,7 @@ seam_core::seam!(
     /// (`provider`/`deterministic`/`ctype_is_c`/`is_default`) it needs to pick a
     /// classification strategy. `Err` carries its catalog-read / `ereport(ERROR)`
     /// failure surface (e.g. a dropped collation). The returned value is the flag
-    /// core ([`PgLocaleStruct`]) copied into `mcx`; the provider-specific `info`
+    /// core ([`types_locale::PgLocaleStruct`]) copied into `mcx`; the provider-specific `info`
     /// union stays inside pg_locale.c's permanent cache, reached later by OID via
     /// the probe seams below. C returns a pointer into that permanent cache.
     pub fn pg_newlocale_from_collation<'mcx>(
@@ -244,45 +244,48 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `pg_strlower(dst, dstsize, src, srclen, locale)` (pg_locale.c): lowercase
-    /// `src` under `locale`'s provider (libc/ICU/builtin). C fills a caller
-    /// buffer and returns the full result length (grow-and-retry on overflow);
-    /// the owned surface returns the complete folded bytes (no trailing NUL),
-    /// charged to `mcx`. `Err` carries the provider's `ereport(ERROR)` / OOM.
+    /// `src` under the provider of the locale resolved from `collid`
+    /// (libc/ICU/builtin). C fills a caller buffer and returns the full result
+    /// length (grow-and-retry on overflow); the owned surface returns the
+    /// complete folded bytes (no trailing NUL), charged to `mcx`. `Err` carries
+    /// the provider's `ereport(ERROR)` / OOM. Keyed by `collid` (symmetric with
+    /// the comparison family) so the owner re-resolves the `info` union.
     pub fn pg_strlower<'mcx>(
         mcx: Mcx<'mcx>,
+        collid: Oid,
         src: &[u8],
-        locale: &PgLocaleStruct,
     ) -> PgResult<PgVec<'mcx, u8>>
 );
 
 seam_core::seam!(
     /// `pg_strupper(dst, dstsize, src, srclen, locale)` (pg_locale.c): uppercase
-    /// `src` under `locale`'s provider. See [`pg_strlower`].
+    /// `src` under the provider resolved from `collid`. See [`pg_strlower`].
     pub fn pg_strupper<'mcx>(
         mcx: Mcx<'mcx>,
+        collid: Oid,
         src: &[u8],
-        locale: &PgLocaleStruct,
     ) -> PgResult<PgVec<'mcx, u8>>
 );
 
 seam_core::seam!(
     /// `pg_strtitle(dst, dstsize, src, srclen, locale)` (pg_locale.c): titlecase
-    /// `src` (initcap) under `locale`'s provider. See [`pg_strlower`].
+    /// `src` (initcap) under the provider resolved from `collid`. See
+    /// [`pg_strlower`].
     pub fn pg_strtitle<'mcx>(
         mcx: Mcx<'mcx>,
+        collid: Oid,
         src: &[u8],
-        locale: &PgLocaleStruct,
     ) -> PgResult<PgVec<'mcx, u8>>
 );
 
 seam_core::seam!(
     /// `pg_strfold(dst, dstsize, src, srclen, locale)` (pg_locale.c): Unicode
-    /// case-fold `src` under `locale`'s provider (UTF-8 server only). See
-    /// [`pg_strlower`].
+    /// case-fold `src` under the provider resolved from `collid` (UTF-8 server
+    /// only). See [`pg_strlower`].
     pub fn pg_strfold<'mcx>(
         mcx: Mcx<'mcx>,
+        collid: Oid,
         src: &[u8],
-        locale: &PgLocaleStruct,
     ) -> PgResult<PgVec<'mcx, u8>>
 );
 
@@ -323,7 +326,7 @@ seam_core::seam!(
     /// `tolower_l(c, locale->info.lt)` (pg_locale_libc.c, via `SB_lower_char` in
     /// like.c): single-byte lower-case fold of `c` through the libc `locale_t`
     /// (`info.lt`) of the resolved locale identified by `collid`. The flag-core
-    /// [`PgLocaleStruct`] does not carry the provider-specific `info` union (the
+    /// [`types_locale::PgLocaleStruct`] does not carry the provider-specific `info` union (the
     /// libc `locale_t` lives inside pg_locale.c's permanent cache), so this seam
     /// re-keys by `collid`; the owner re-resolves the same cache entry and calls
     /// `tolower_l`. Reached only on `SB_lower_char`'s third leg (locale is neither

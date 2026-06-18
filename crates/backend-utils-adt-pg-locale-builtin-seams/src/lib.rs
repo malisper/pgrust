@@ -10,7 +10,7 @@
 use mcx::{Mcx, PgVec};
 use types_core::primitive::{Oid, PgWChar};
 use types_error::PgResult;
-use types_locale::{PgLocale, PgLocaleStruct};
+use types_locale::PgLocale;
 
 pub use backend_utils_adt_pg_locale_seams::RegexWcClass;
 
@@ -36,42 +36,47 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `strlower_builtin(dst, dstsize, src, srclen, locale)`
-    /// (`pg_locale_builtin.c`): lowercase `src` using the builtin Unicode case
-    /// tables for `locale`. Returns the folded bytes (no trailing NUL), in `mcx`.
+    /// (`pg_locale_builtin.c:81`): lowercase `src` using the builtin Unicode
+    /// case tables, dispatched on `info.builtin.casemap_full` of the locale
+    /// resolved from `collid`. Returns the folded bytes (no trailing NUL), in
+    /// `mcx`.
     pub fn strlower_builtin<'mcx>(
         mcx: Mcx<'mcx>,
         src: &[u8],
-        locale: &PgLocaleStruct,
+        collid: Oid,
     ) -> PgResult<PgVec<'mcx, u8>>
 );
 
 seam_core::seam!(
-    /// `strtitle_builtin(...)` (`pg_locale_builtin.c`): titlecase `src` using
-    /// the builtin Unicode case tables. See [`strlower_builtin`].
+    /// `strtitle_builtin(...)` (`pg_locale_builtin.c:89`): titlecase `src` using
+    /// the builtin Unicode case tables (resolved from `collid`). See
+    /// [`strlower_builtin`].
     pub fn strtitle_builtin<'mcx>(
         mcx: Mcx<'mcx>,
         src: &[u8],
-        locale: &PgLocaleStruct,
+        collid: Oid,
     ) -> PgResult<PgVec<'mcx, u8>>
 );
 
 seam_core::seam!(
-    /// `strupper_builtin(...)` (`pg_locale_builtin.c`): uppercase `src` using
-    /// the builtin Unicode case tables. See [`strlower_builtin`].
+    /// `strupper_builtin(...)` (`pg_locale_builtin.c:107`): uppercase `src`
+    /// using the builtin Unicode case tables (resolved from `collid`). See
+    /// [`strlower_builtin`].
     pub fn strupper_builtin<'mcx>(
         mcx: Mcx<'mcx>,
         src: &[u8],
-        locale: &PgLocaleStruct,
+        collid: Oid,
     ) -> PgResult<PgVec<'mcx, u8>>
 );
 
 seam_core::seam!(
-    /// `strfold_builtin(...)` (`pg_locale_builtin.c`): Unicode case-fold `src`
-    /// using the builtin tables. See [`strlower_builtin`].
+    /// `strfold_builtin(...)` (`pg_locale_builtin.c:115`): Unicode case-fold
+    /// `src` using the builtin tables (resolved from `collid`). See
+    /// [`strlower_builtin`].
     pub fn strfold_builtin<'mcx>(
         mcx: Mcx<'mcx>,
         src: &[u8],
-        locale: &PgLocaleStruct,
+        collid: Oid,
     ) -> PgResult<PgVec<'mcx, u8>>
 );
 

@@ -4,11 +4,13 @@
 //! `pg_strxfrm`/`pg_strnxfrm`/the prefix variants) indirects through the
 //! `collate_methods` vtable (non-NULL only for non-C libc/ICU).
 //!
-//! The repo seam contract keys the collation family by collation OID (the C
-//! `pg_locale_t` is re-resolved here through the permanent cache); the
-//! case-mapping family takes the flag-core [`PgLocaleStruct`]. The per-provider
-//! workers live in the provider units: the libc collation primitives are bound
-//! in [`crate::libc_provider`] (OS FFI), the libc case-mapping workers and the
+//! Both families key by collation OID (the C `pg_locale_t` is re-resolved here
+//! through the permanent cache): the case-mapping family resolves the entry,
+//! dispatches on `entry.view.provider`, and hands the per-provider seam the same
+//! `collid` so its owner re-resolves the `info` union it needs (the flag-core
+//! [`PgLocaleStruct`] carries no `info`). The per-provider workers live in the
+//! provider units: the libc collation primitives are bound in
+//! [`crate::libc_provider`] (OS FFI), the libc case-mapping workers and the
 //! builtin workers are in their (not-yet-ported) owner units, reached through
 //! their seams.
 
@@ -124,56 +126,50 @@ pub fn pg_strxfrm_prefix<'mcx>(
 }
 
 // =============================================================================
-// Case mapping (pg_locale.c:1270-1345) — flag-core-keyed seams, dispatch on the
-// provider discriminant; per-provider workers live in the provider units.
+// Case mapping (pg_locale.c:1270-1345) — collid-keyed seams (symmetric with the
+// comparison family): resolve the entry, dispatch on the resolved provider, and
+// hand the per-provider seam the `collid` so its owner re-resolves the `info`
+// union (libc `info.lt`, builtin `info.builtin.casemap_full`). The flag core
+// [`PgLocaleStruct`] carries no `info`, so collid-keying is required here.
 // =============================================================================
 
 /// `pg_strlower(dst, dstsize, src, srclen, locale)` (`pg_locale.c:1271`).
-pub fn pg_strlower<'mcx>(
-    mcx: Mcx<'mcx>,
-    src: &[u8],
-    locale: &PgLocaleStruct,
-) -> PgResult<PgVec<'mcx, u8>> {
-    match locale.provider {
+pub fn pg_strlower<'mcx>(mcx: Mcx<'mcx>, collid: Oid, src: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+    let entry = resolve(collid)?;
+    match entry.view.provider {
         CollProvider::Builtin => {
-            backend_utils_adt_pg_locale_builtin_seams::strlower_builtin::call(mcx, src, locale)
+            backend_utils_adt_pg_locale_builtin_seams::strlower_builtin::call(mcx, src, collid)
         }
         CollProvider::Libc => {
-            backend_utils_adt_pg_locale_libc_seams::strlower_libc::call(mcx, src, locale)
+            backend_utils_adt_pg_locale_libc_seams::strlower_libc::call(mcx, src, collid)
         }
         p => Err(support_error("pg_strlower", p)),
     }
 }
 
 /// `pg_strtitle(...)` (`pg_locale.c:1290`).
-pub fn pg_strtitle<'mcx>(
-    mcx: Mcx<'mcx>,
-    src: &[u8],
-    locale: &PgLocaleStruct,
-) -> PgResult<PgVec<'mcx, u8>> {
-    match locale.provider {
+pub fn pg_strtitle<'mcx>(mcx: Mcx<'mcx>, collid: Oid, src: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+    let entry = resolve(collid)?;
+    match entry.view.provider {
         CollProvider::Builtin => {
-            backend_utils_adt_pg_locale_builtin_seams::strtitle_builtin::call(mcx, src, locale)
+            backend_utils_adt_pg_locale_builtin_seams::strtitle_builtin::call(mcx, src, collid)
         }
         CollProvider::Libc => {
-            backend_utils_adt_pg_locale_libc_seams::strtitle_libc::call(mcx, src, locale)
+            backend_utils_adt_pg_locale_libc_seams::strtitle_libc::call(mcx, src, collid)
         }
         p => Err(support_error("pg_strtitle", p)),
     }
 }
 
 /// `pg_strupper(...)` (`pg_locale.c:1309`).
-pub fn pg_strupper<'mcx>(
-    mcx: Mcx<'mcx>,
-    src: &[u8],
-    locale: &PgLocaleStruct,
-) -> PgResult<PgVec<'mcx, u8>> {
-    match locale.provider {
+pub fn pg_strupper<'mcx>(mcx: Mcx<'mcx>, collid: Oid, src: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+    let entry = resolve(collid)?;
+    match entry.view.provider {
         CollProvider::Builtin => {
-            backend_utils_adt_pg_locale_builtin_seams::strupper_builtin::call(mcx, src, locale)
+            backend_utils_adt_pg_locale_builtin_seams::strupper_builtin::call(mcx, src, collid)
         }
         CollProvider::Libc => {
-            backend_utils_adt_pg_locale_libc_seams::strupper_libc::call(mcx, src, locale)
+            backend_utils_adt_pg_locale_libc_seams::strupper_libc::call(mcx, src, collid)
         }
         p => Err(support_error("pg_strupper", p)),
     }
@@ -181,17 +177,14 @@ pub fn pg_strupper<'mcx>(
 
 /// `pg_strfold(...)` (`pg_locale.c:1328`). For libc, C "just uses strlower"
 /// (`pg_locale.c:1337-1339`); builtin has its own fold.
-pub fn pg_strfold<'mcx>(
-    mcx: Mcx<'mcx>,
-    src: &[u8],
-    locale: &PgLocaleStruct,
-) -> PgResult<PgVec<'mcx, u8>> {
-    match locale.provider {
+pub fn pg_strfold<'mcx>(mcx: Mcx<'mcx>, collid: Oid, src: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+    let entry = resolve(collid)?;
+    match entry.view.provider {
         CollProvider::Builtin => {
-            backend_utils_adt_pg_locale_builtin_seams::strfold_builtin::call(mcx, src, locale)
+            backend_utils_adt_pg_locale_builtin_seams::strfold_builtin::call(mcx, src, collid)
         }
         CollProvider::Libc => {
-            backend_utils_adt_pg_locale_libc_seams::strlower_libc::call(mcx, src, locale)
+            backend_utils_adt_pg_locale_libc_seams::strlower_libc::call(mcx, src, collid)
         }
         p => Err(support_error("pg_strfold", p)),
     }
