@@ -409,12 +409,12 @@ fn policy_role_list_to_array<'mcx>(
     // foreach(cell, roles)
     for cell in roles.iter() {
         // RoleSpec *spec = lfirst(cell);
-        let spec: &RoleSpec = match &**cell {
-            Node::RoleSpec(s) => s,
-            other => {
+        let spec: &RoleSpec = match cell.as_rolespec() {
+            Some(s) => s,
+            None => {
                 return Err(PgError::error(format!(
                     "policy_role_list_to_array: expected RoleSpec, got node tag {}",
-                    other.node_tag().0
+                    cell.node_tag().0
                 )))
             }
         };
@@ -1303,9 +1303,9 @@ fn boxed_callback() -> RangeVarGetRelidCallbackBox {
 /// the owned-tree `rawnodes::RangeVar` to the resolved-form
 /// `types_tuple::access::RangeVar` that `RangeVarGetRelidExtended` consumes.
 fn expect_range_var(node: Option<&Node<'_>>, funcname: &'static str) -> PgResult<RangeVar> {
-    match node {
-        Some(Node::RangeVar(rv)) => Ok(to_access_range_var(rv)),
-        _ => Err(PgError::error(format!(
+    match node.and_then(|n| n.as_rangevar()) {
+        Some(rv) => Ok(to_access_range_var(rv)),
+        None => Err(PgError::error(format!(
             "{funcname}: expected RangeVar in table/relation slot"
         ))),
     }
@@ -1391,7 +1391,6 @@ fn node_to_string_opt<'mcx>(
 pub fn init_seams() {
     use backend_commands_policy_seams as seams;
     use backend_tcop_utility_out_seams as rt;
-    use types_nodes::nodes::Node;
 
     seams::RemovePolicyById::set(RemovePolicyById);
     seams::remove_role_from_object_policy::set(RemoveRoleFromObjectPolicy);
@@ -1400,15 +1399,15 @@ pub fn init_seams() {
 
     // ProcessUtilitySlow dispatch (utility.c): CREATE/ALTER POLICY. The C
     // `castNode(CreatePolicyStmt, parsetree)` is the runtime tag assert.
-    rt::create_policy::set(|mcx, parsetree| match parsetree {
-        Node::CreatePolicyStmt(stmt) => CreatePolicy(mcx, stmt),
-        _ => Err(types_error::PgError::error(
+    rt::create_policy::set(|mcx, parsetree| match parsetree.as_createpolicystmt() {
+        Some(stmt) => CreatePolicy(mcx, stmt),
+        None => Err(types_error::PgError::error(
             "create_policy: parse tree is not a CreatePolicyStmt",
         )),
     });
-    rt::alter_policy::set(|mcx, parsetree| match parsetree {
-        Node::AlterPolicyStmt(stmt) => AlterPolicy(mcx, stmt),
-        _ => Err(types_error::PgError::error(
+    rt::alter_policy::set(|mcx, parsetree| match parsetree.as_alterpolicystmt() {
+        Some(stmt) => AlterPolicy(mcx, stmt),
+        None => Err(types_error::PgError::error(
             "alter_policy: parse tree is not an AlterPolicyStmt",
         )),
     });
