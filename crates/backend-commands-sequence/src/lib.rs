@@ -27,6 +27,8 @@
 //! ported `backend-storage-page` / `backend-access-common-heaptuple` / bufmgr /
 //! xloginsert primitives, exactly as the C.
 
+pub mod fmgr_builtins;
+
 use backend_utils_error::ereport;
 use types_error::{ErrorLocation, PgResult, ERROR, NOTICE, PANIC};
 
@@ -1027,6 +1029,12 @@ fn write_seq_data_into_buffer<'mcx>(
 pub fn currval_oid<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<ValueDatum<'mcx>> {
     let mcx = pg_call_mcx::call(fcinfo);
     let relid = backend_utils_fmgr_fmgr_seams::pg_getarg_oid::call(fcinfo, 0);
+    Ok(ValueDatum::from_i64(currval_internal(mcx, relid)?))
+}
+
+/// The `currval_oid(PG_FUNCTION_ARGS)` body, factored out so both the fmgr
+/// frame entry point and the by-OID builtin adapter can drive it.
+pub fn currval_internal<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<i64> {
     let result: i64;
 
     /* open and lock sequence */
@@ -1042,7 +1050,7 @@ pub fn currval_oid<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResul
             .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
             .errmsg(format!("permission denied for sequence {}", rel_name(&seqrel)))
             .finish(here("currval_oid"))
-            .map(|()| ValueDatum::null());
+            .map(|()| 0i64);
     }
 
     if !seqtable_get(relid, |e| e.last_valid) {
@@ -1053,14 +1061,14 @@ pub fn currval_oid<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResul
                 rel_name(&seqrel)
             ))
             .finish(here("currval_oid"))
-            .map(|()| ValueDatum::null());
+            .map(|()| 0i64);
     }
 
     result = seqtable_get(relid, |e| e.last);
 
     backend_access_sequence_seams::sequence_close::call(relid, NoLock)?;
 
-    Ok(ValueDatum::from_i64(result))
+    Ok(result)
 }
 
 // ===========================================================================
@@ -1070,6 +1078,12 @@ pub fn currval_oid<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResul
 /// `lastval(PG_FUNCTION_ARGS)` — SQL `lastval()`.
 pub fn lastval<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<ValueDatum<'mcx>> {
     let mcx = pg_call_mcx::call(fcinfo);
+    Ok(ValueDatum::from_i64(lastval_internal(mcx)?))
+}
+
+/// The `lastval(PG_FUNCTION_ARGS)` body, factored out so both the fmgr frame
+/// entry point and the by-OID builtin adapter can drive it.
+pub fn lastval_internal<'mcx>(mcx: Mcx<'mcx>) -> PgResult<i64> {
     let result: i64;
 
     let last_relid = match LAST_USED_SEQ.with(|s| *s.borrow()) {
@@ -1079,7 +1093,7 @@ pub fn lastval<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Va
                 .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
                 .errmsg("lastval is not yet defined in this session")
                 .finish(here("lastval"))
-                .map(|()| ValueDatum::null());
+                .map(|()| 0i64);
         }
     };
 
@@ -1089,7 +1103,7 @@ pub fn lastval<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Va
             .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
             .errmsg("lastval is not yet defined in this session")
             .finish(here("lastval"))
-            .map(|()| ValueDatum::null());
+            .map(|()| 0i64);
     }
 
     let seqrel = lock_and_open_sequence(mcx, last_relid)?;
@@ -1107,13 +1121,13 @@ pub fn lastval<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Va
             .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
             .errmsg(format!("permission denied for sequence {}", rel_name(&seqrel)))
             .finish(here("lastval"))
-            .map(|()| ValueDatum::null());
+            .map(|()| 0i64);
     }
 
     result = seqtable_get(last_relid, |e| e.last);
     backend_access_sequence_seams::sequence_close::call(last_relid, NoLock)?;
 
-    Ok(ValueDatum::from_i64(result))
+    Ok(result)
 }
 
 // ===========================================================================
@@ -2312,10 +2326,43 @@ fn text_to_str(t: &types_datum::varlena::Bytea<'_>) -> String {
 // init_seams
 // ===========================================================================
 
-/// Install this crate's four owned seams.
+/// `case T_CreateSeqStmt: DefineSequence(pstate, stmt)` (utility.c). The
+/// ProcessUtilitySlow dispatch carries the parse tree as `&Node`; extract the
+/// `CreateSeqStmt` variant and forward.
+fn define_sequence_arm<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'mcx>,
+    stmt: &Node<'mcx>,
+) -> PgResult<ObjectAddress> {
+    let Node::CreateSeqStmt(s) = stmt else {
+        panic!("define_sequence: parse tree is not a CreateSeqStmt");
+    };
+    DefineSequence(mcx, pstate, s)
+}
+
+/// `case T_AlterSeqStmt: AlterSequence(pstate, stmt)` (utility.c).
+fn alter_sequence_arm<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'mcx>,
+    stmt: &Node<'mcx>,
+) -> PgResult<ObjectAddress> {
+    let Node::AlterSeqStmt(s) = stmt else {
+        panic!("alter_sequence: parse tree is not an AlterSeqStmt");
+    };
+    AlterSequence(mcx, pstate, s)
+}
+
+/// Install this crate's owned seams.
 pub fn init_seams() {
     backend_commands_sequence_seams::seq_redo::set(seq_redo);
     backend_commands_sequence_seams::seq_mask::set(seq_mask);
     backend_commands_sequence_seams::reset_sequence_caches::set(ResetSequenceCaches);
     backend_commands_sequence_seams::DeleteSequenceTuple::set(DeleteSequenceTuple);
+
+    // ProcessUtilitySlow dispatch arms (utility.c CREATE/ALTER SEQUENCE).
+    backend_tcop_utility_out_seams::define_sequence::set(define_sequence_arm);
+    backend_tcop_utility_out_seams::alter_sequence::set(alter_sequence_arm);
+
+    // fmgr builtin table: nextval/currval/lastval/setval by-OID dispatch.
+    fmgr_builtins::register_sequence_builtins();
 }
