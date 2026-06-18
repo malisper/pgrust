@@ -93,7 +93,7 @@ seam_core::seam!(
     /// `FmgrInfo` (its `fn_oid` may be `InvalidOid`, which `initGinState` turns
     /// into the `could not identify a comparison function` ereport). `Err`
     /// carries the catalog-lookup surface.
-    pub fn gin_lookup_cmp_proc_finfo(atttypid: Oid) -> PgResult<FmgrInfo>
+    pub fn gin_lookup_cmp_proc_finfo<'mcx>(mcx: Mcx<'mcx>, atttypid: Oid) -> PgResult<FmgrInfo>
 );
 
 // ===========================================================================

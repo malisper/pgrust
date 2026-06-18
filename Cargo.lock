@@ -943,6 +943,7 @@ dependencies = [
 name = "backend-access-gin-ginutil"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-indextuple",
  "backend-access-common-reloptions",
  "backend-access-common-tupdesc",
  "backend-access-gin-ginutil-seams",
@@ -950,7 +951,9 @@ dependencies = [
  "backend-storage-page",
  "backend-utils-adt-format-type-seams",
  "backend-utils-cache-relcache-seams",
+ "backend-utils-cache-typcache-seams",
  "backend-utils-error",
+ "backend-utils-fmgr-fmgr-seams",
  "mcx",
  "seam-core",
  "types-core",
@@ -22159,6 +22162,7 @@ dependencies = [
  "backend-access-gin-ginget",
  "backend-access-gin-gininsert",
  "backend-access-gin-ginscan",
+ "backend-access-gin-ginutil",
  "backend-access-gin-ginvacuum",
  "backend-access-gin-ginxlog",
  "backend-access-gist-core",
