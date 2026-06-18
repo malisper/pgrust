@@ -784,9 +784,9 @@ pub fn SS_process_ctes<'mcx>(
         let (cterefcount, ctematerialized, cterecursive, cmd_type, ctename) = {
             let parse = run.resolve(root.parse);
             let cte_node = &parse.cteList[cte_idx];
-            let cte = match &**cte_node {
-                Node::CommonTableExpr(c) => c,
-                _ => return Err(elog_error("cteList element is not a CommonTableExpr")),
+            let cte = match cte_node.as_commontableexpr() {
+                Some(c) => c,
+                None => return Err(elog_error("cteList element is not a CommonTableExpr")),
             };
             let ctequery = cte
                 .ctequery
@@ -831,9 +831,9 @@ pub fn SS_process_ctes<'mcx>(
             // over the ctequery Query.
             let cte_query_node: Node<'mcx> = {
                 let parse = run.resolve(root.parse);
-                let cte = match &*parse.cteList[cte_idx] {
-                    Node::CommonTableExpr(c) => c,
-                    _ => unreachable!(),
+                let cte = match parse.cteList[cte_idx].as_commontableexpr() {
+                    Some(c) => c,
+                    None => unreachable!(),
                 };
                 let cq = cte.ctequery.as_deref().unwrap().as_query().unwrap();
                 Node::Query(cq.clone_in(mcx)?)
@@ -868,9 +868,9 @@ pub fn SS_process_ctes<'mcx>(
         // Copy the source Query node.
         let subquery = {
             let parse = run.resolve(root.parse);
-            let cte = match &*parse.cteList[cte_idx] {
-                Node::CommonTableExpr(c) => c,
-                _ => unreachable!(),
+            let cte = match parse.cteList[cte_idx].as_commontableexpr() {
+                Some(c) => c,
+                None => unreachable!(),
             };
             cte.ctequery
                 .as_deref()
@@ -985,12 +985,12 @@ fn query_contains_volatile(node: &Node<'_>) -> PgResult<bool> {
         }
         false
     };
-    match node {
-        Node::Query(q) => {
+    match node.as_query() {
+        Some(q) => {
             backend_nodes_core::node_walker::query_tree_walker(q, &mut visit, 0);
         }
-        other => {
-            visit(other);
+        None => {
+            visit(node);
         }
     }
     if let Some(e) = err {
@@ -1010,72 +1010,73 @@ fn contain_dml(node: &Node<'_>) -> bool {
 
 /// `contain_dml_walker(node, context)` (subselect.c).
 fn contain_dml_walker(node: &Node<'_>) -> bool {
-    match node {
-        Node::Query(query) => {
-            if query.commandType != types_nodes::nodes::CmdType::CMD_SELECT
-                || !query.rowMarks.is_empty()
-            {
+    if let Some(query) = node.as_query() {
+        if query.commandType != types_nodes::nodes::CmdType::CMD_SELECT
+            || !query.rowMarks.is_empty()
+        {
+            return true;
+        }
+        // query_tree_walker(query, contain_dml_walker, context, 0)
+        let mut aborted = false;
+        let mut visit = |n: &Node| -> bool {
+            if aborted {
                 return true;
             }
-            // query_tree_walker(query, contain_dml_walker, context, 0)
-            let mut aborted = false;
-            let mut visit = |n: &Node| -> bool {
-                if aborted {
-                    return true;
-                }
-                if contain_dml_walker(n) {
-                    aborted = true;
-                    return true;
-                }
-                false
-            };
-            backend_nodes_core::node_walker::query_tree_walker(query, &mut visit, 0);
-            aborted
-        }
-        Node::Expr(e) => {
-            // expression_tree_walker(node, contain_dml_walker, context):
-            // visit children only (a bare Expr can embed a SubLink whose
-            // subselect is a Query). Walk via the Node-level engine, which
-            // recurses Expr children (and into SubLink subqueries as Query).
-            let mut aborted = false;
-            let mut visit = |n: &Node| -> bool {
-                if aborted {
-                    return true;
-                }
-                if contain_dml_walker(n) {
-                    aborted = true;
-                    return true;
-                }
-                false
-            };
-            backend_nodes_core::node_walker::expression_tree_walker(&Node::Expr(e.clone()), &mut visit)
-        }
-        _ => false,
+            if contain_dml_walker(n) {
+                aborted = true;
+                return true;
+            }
+            false
+        };
+        backend_nodes_core::node_walker::query_tree_walker(query, &mut visit, 0);
+        return aborted;
     }
+    if let Some(e) = node.as_expr() {
+        // expression_tree_walker(node, contain_dml_walker, context):
+        // visit children only (a bare Expr can embed a SubLink whose
+        // subselect is a Query). Walk via the Node-level engine, which
+        // recurses Expr children (and into SubLink subqueries as Query).
+        let mut aborted = false;
+        let mut visit = |n: &Node| -> bool {
+            if aborted {
+                return true;
+            }
+            if contain_dml_walker(n) {
+                aborted = true;
+                return true;
+            }
+            false
+        };
+        return backend_nodes_core::node_walker::expression_tree_walker(
+            &Node::Expr(e.clone()),
+            &mut visit,
+        );
+    }
+    false
 }
 
 /// `contain_outer_selfref(node)` (subselect.c): is there an external recursive
 /// self-reference?
 fn contain_outer_selfref(node: &Node<'_>) -> bool {
-    debug_assert!(matches!(node, Node::Query(_)));
+    debug_assert!(node.node_tag() == types_nodes::nodes::ntag::T_Query);
     let mut depth: u32 = 0;
     contain_outer_selfref_walker(node, &mut depth)
 }
 
 /// `contain_outer_selfref_walker(node, depth)` (subselect.c).
 fn contain_outer_selfref_walker(node: &Node<'_>, depth: &mut u32) -> bool {
-    match node {
-        Node::RangeTblEntry(rte) => {
-            // Check for a self-reference to a CTE above the search start.
-            if rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_CTE
-                && rte.self_reference
-                && rte.ctelevelsup >= *depth
-            {
-                return true;
-            }
-            false
+    if let Some(rte) = node.as_rangetblentry() {
+        // Check for a self-reference to a CTE above the search start.
+        if rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_CTE
+            && rte.self_reference
+            && rte.ctelevelsup >= *depth
+        {
+            return true;
         }
-        Node::Query(query) => {
+        return false;
+    }
+    if let Some(query) = node.as_query() {
+        {
             *depth += 1;
             // query_tree_walker(query, ..., QTW_EXAMINE_RTES_BEFORE). The repo's
             // query_tree_walker does not surface RTE nodes for the EXAMINE flag,
@@ -1112,25 +1113,25 @@ fn contain_outer_selfref_walker(node: &Node<'_>, depth: &mut u32) -> bool {
                 );
             }
             *depth -= 1;
-            result
+            return result;
         }
-        Node::Expr(e) => {
-            let mut result = false;
-            let mut visit = |n: &Node| -> bool {
-                if result {
-                    return true;
-                }
-                if contain_outer_selfref_walker(n, depth) {
-                    result = true;
-                    return true;
-                }
-                false
-            };
-            backend_nodes_core::node_walker::expression_tree_walker(&Node::Expr(e.clone()), &mut visit);
-            result
-        }
-        _ => false,
     }
+    if let Some(e) = node.as_expr() {
+        let mut result = false;
+        let mut visit = |n: &Node| -> bool {
+            if result {
+                return true;
+            }
+            if contain_outer_selfref_walker(n, depth) {
+                result = true;
+                return true;
+            }
+            false
+        };
+        backend_nodes_core::node_walker::expression_tree_walker(&Node::Expr(e.clone()), &mut visit);
+        return result;
+    }
+    false
 }
 
 /// `inline_cte_walker_context` (subselect.c).
@@ -1152,9 +1153,9 @@ fn inline_cte<'mcx>(
     // substitute), then walk root->parse replacing matching RTEs.
     let (ctename, ctequery) = {
         let parse = run.resolve(root.parse);
-        let cte = match &*parse.cteList[cte_idx] {
-            Node::CommonTableExpr(c) => c,
-            _ => return Err(elog_error("cteList element is not a CommonTableExpr")),
+        let cte = match parse.cteList[cte_idx].as_commontableexpr() {
+            Some(c) => c,
+            None => return Err(elog_error("cteList element is not a CommonTableExpr")),
         };
         let name = cte
             .ctename
@@ -1232,10 +1233,7 @@ fn inline_cte_walker_query<'mcx>(
                     ctx.levelsup as i32,
                     1,
                 )?;
-                newquery = match nq_node {
-                    Node::Query(q) => q,
-                    _ => unreachable!(),
-                };
+                newquery = nq_node.into_query().expect("expected Query node");
             }
             // Convert the RTE_CTE RTE into an RTE_SUBQUERY.
             rte.rtekind = types_nodes::parsenodes::RTEKind::RTE_SUBQUERY;
@@ -1413,9 +1411,9 @@ fn convert_EXISTS_to_ANY<'mcx>(
         .quals
         .take();
     let where_clause: Option<Expr> = match where_clause_node {
-        Some(n) => match PgBox::into_inner(n) {
-            Node::Expr(e) => Some(e),
-            _ => return Err(elog_error("convert_EXISTS_to_ANY: WHERE is not an Expr")),
+        Some(n) => match PgBox::into_inner(n).into_expr() {
+            Some(e) => Some(e),
+            None => return Err(elog_error("convert_EXISTS_to_ANY: WHERE is not an Expr")),
         },
         None => None,
     };
@@ -1543,10 +1541,7 @@ fn convert_EXISTS_to_ANY<'mcx>(
         for l in leftargs.drain(..) {
             let mut n = Node::Expr(l);
             backend_rewrite_core::increment::IncrementVarSublevelsUp(&mut n, -1, 1)?;
-            adjusted.push(match n {
-                Node::Expr(e) => e,
-                _ => unreachable!(),
-            });
+            adjusted.push(n.into_expr().expect("expected Expr node"));
         }
         leftargs = adjusted;
     }
@@ -1732,9 +1727,9 @@ pub fn resolve_cte_subplan<'mcx>(
     {
         let parse = run.resolve(cteroot.parse);
         for cte_node in parse.cteList.iter() {
-            let cte = match &**cte_node {
-                Node::CommonTableExpr(c) => c,
-                _ => return Err(elog_error("cteList element is not a CommonTableExpr")),
+            let cte = match cte_node.as_commontableexpr() {
+                Some(c) => c,
+                None => return Err(elog_error("cteList element is not a CommonTableExpr")),
             };
             let this_name = cte.ctename.as_ref().map(|s| s.as_str()).unwrap_or("");
             if this_name == ctename {

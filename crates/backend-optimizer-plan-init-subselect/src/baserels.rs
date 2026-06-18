@@ -36,17 +36,20 @@ fn add_base_rels_to_query_node<'mcx>(
     run: &PlannerRun<'mcx>,
     jtnode: &Node<'_>,
 ) -> PgResult<()> {
-    match jtnode {
-        Node::RangeTblRef(rtr) => {
+    match jtnode.node_tag() {
+        types_nodes::nodes::ntag::T_RangeTblRef => {
+            let rtr = jtnode.expect_rangetblref();
             let varno = rtr.rtindex;
             build_simple_rel(run, root, varno, None)?;
         }
-        Node::FromExpr(f) => {
+        types_nodes::nodes::ntag::T_FromExpr => {
+            let f = jtnode.expect_fromexpr();
             for item in f.fromlist.iter() {
                 add_base_rels_to_query_node(root, run, item)?;
             }
         }
-        Node::JoinExpr(j) => {
+        types_nodes::nodes::ntag::T_JoinExpr => {
+            let j = jtnode.expect_joinexpr();
             if let Some(larg) = j.larg.as_deref() {
                 add_base_rels_to_query_node(root, run, larg)?;
             }
@@ -54,10 +57,10 @@ fn add_base_rels_to_query_node<'mcx>(
                 add_base_rels_to_query_node(root, run, rarg)?;
             }
         }
-        other => {
+        _ => {
             panic!(
                 "unrecognized node type: {:?}",
-                core::mem::discriminant(other)
+                jtnode.node_tag()
             );
         }
     }

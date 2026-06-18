@@ -321,16 +321,18 @@ fn finalize_node_specific<'mcx>(
         }};
     }
 
-    match plan {
-        Node::Result(r) => {
+    match plan.node_tag() {
+        types_nodes::nodes::ntag::T_Result => {
+            let r = plan.as_result_mut().unwrap();
             if let Some(rcq) = r.resconstantqual.as_ref() {
                 fin_exprs!(rcq);
             }
         }
-        Node::SeqScan(_) => {
+        types_nodes::nodes::ntag::T_SeqScan => {
             add_scan_params!();
         }
-        Node::SampleScan(s) => {
+        types_nodes::nodes::ntag::T_SampleScan => {
+            let s = plan.as_samplescan_mut().unwrap();
             if let Some(ts) = s.tablesample.as_ref() {
                 // finalize_primnode((Node *) sampleScan->tablesample): walk the
                 // TableSampleClause's `args` + `repeatable` expression children.
@@ -343,7 +345,8 @@ fn finalize_node_specific<'mcx>(
             }
             add_scan_params!();
         }
-        Node::IndexScan(s) => {
+        types_nodes::nodes::ntag::T_IndexScan => {
+            let s = plan.as_indexscan_mut().unwrap();
             if let Some(iq) = s.indexqual.as_ref() {
                 fin_exprs!(iq);
             }
@@ -352,7 +355,8 @@ fn finalize_node_specific<'mcx>(
             }
             add_scan_params!();
         }
-        Node::IndexOnlyScan(s) => {
+        types_nodes::nodes::ntag::T_IndexOnlyScan => {
+            let s = plan.as_indexonlyscan_mut().unwrap();
             if let Some(iq) = s.indexqual.as_ref() {
                 fin_exprs!(iq);
             }
@@ -364,24 +368,28 @@ fn finalize_node_specific<'mcx>(
             }
             add_scan_params!();
         }
-        Node::BitmapIndexScan(s) => {
+        types_nodes::nodes::ntag::T_BitmapIndexScan => {
+            let s = plan.as_bitmapindexscan_mut().unwrap();
             if let Some(iq) = s.indexqual.as_ref() {
                 fin_exprs!(iq);
             }
         }
-        Node::TidScan(s) => {
+        types_nodes::nodes::ntag::T_TidScan => {
+            let s = plan.as_tidscan_mut().unwrap();
             if let Some(tq) = s.tidquals.as_ref() {
                 fin_exprs!(tq);
             }
             add_scan_params!();
         }
-        Node::TidRangeScan(s) => {
+        types_nodes::nodes::ntag::T_TidRangeScan => {
+            let s = plan.as_tidrangescan_mut().unwrap();
             if let Some(tq) = s.tidrangequals.as_ref() {
                 fin_exprs!(tq);
             }
             add_scan_params!();
         }
-        Node::SubqueryScan(sscan) => {
+        types_nodes::nodes::ntag::T_SubqueryScan => {
+            let sscan = plan.as_subqueryscan_mut().unwrap();
             // Recurse finalize_plan on the subquery with its subroot's
             // outer_params. The subroot PlannerInfo is not readily reachable per
             // SubqueryScan in this model; the subquery_params come from the
@@ -419,7 +427,8 @@ fn finalize_node_specific<'mcx>(
             context.paramids = bms::bms_add_members(mcx, context.paramids.take(), sub_ext)?;
             add_scan_params!();
         }
-        Node::FunctionScan(fscan) => {
+        types_nodes::nodes::ntag::T_FunctionScan => {
+            let fscan = plan.as_functionscan_mut().unwrap();
             if let Some(functions) = fscan.functions.as_mut() {
                 for rtfunc in functions.iter_mut() {
                     let mut funccontext = FinalizeCtx { paramids: None };
@@ -440,18 +449,21 @@ fn finalize_node_specific<'mcx>(
             }
             add_scan_params!();
         }
-        Node::TableFuncScan(tfs) => {
+        types_nodes::nodes::ntag::T_TableFuncScan => {
+            let tfs = plan.as_tablefuncscan_mut().unwrap();
             // tablefunc carries expression children; finalize them.
             finalize_tablefunc(mcx, root, run, &tfs.tablefunc, context)?;
             add_scan_params!();
         }
-        Node::ValuesScan(vs) => {
+        types_nodes::nodes::ntag::T_ValuesScan => {
+            let vs = plan.as_valuesscan_mut().unwrap();
             for row in vs.values_lists.iter() {
                 fin_exprs!(row);
             }
             add_scan_params!();
         }
-        Node::CteScan(cte) => {
+        types_nodes::nodes::ntag::T_CteScan => {
+            let cte = plan.as_ctescan_mut().unwrap();
             // Find the referenced CTE plan and incorporate its external paramids.
             let plan_id = cte.ctePlanId;
             let glob = root
@@ -468,14 +480,16 @@ fn finalize_node_specific<'mcx>(
             context.paramids = bms::bms_add_members(mcx, context.paramids.take(), ext)?;
             add_scan_params!();
         }
-        Node::WorkTableScan(wts) => {
+        types_nodes::nodes::ntag::T_WorkTableScan => {
+            let wts = plan.as_worktablescan_mut().unwrap();
             context.paramids = Some(bms::bms_add_member(mcx, context.paramids.take(), wts.wtParam)?);
             add_scan_params!();
         }
-        Node::NamedTuplestoreScan(_) => {
+        types_nodes::nodes::ntag::T_NamedTuplestoreScan => {
             add_scan_params!();
         }
-        Node::ForeignScan(fscan) => {
+        types_nodes::nodes::ntag::T_ForeignScan => {
+            let fscan = plan.as_foreignscan_mut().unwrap();
             if let Some(fe) = fscan.fdw_exprs.as_ref() {
                 fin_exprs!(fe);
             }
@@ -484,7 +498,8 @@ fn finalize_node_specific<'mcx>(
             }
             add_scan_params!();
         }
-        Node::CustomScan(cscan) => {
+        types_nodes::nodes::ntag::T_CustomScan => {
+            let cscan = plan.as_customscan_mut().unwrap();
             if let Some(ce) = cscan.custom_exprs.as_ref() {
                 fin_exprs!(ce);
             }
@@ -508,7 +523,8 @@ fn finalize_node_specific<'mcx>(
                 }
             }
         }
-        Node::ModifyTable(mt) => {
+        types_nodes::nodes::ntag::T_ModifyTable => {
+            let mt = plan.as_modifytable_mut().unwrap();
             *locally_added_param = mt.epqParam;
             *valid_params_owned =
                 Some(bms::bms_add_member(mcx, valid_params_owned.take(), *locally_added_param)?);
@@ -534,7 +550,8 @@ fn finalize_node_specific<'mcx>(
                 fin_exprs!(ocw);
             }
         }
-        Node::Append(a) => {
+        types_nodes::nodes::ntag::T_Append => {
+            let a = plan.as_append_mut().unwrap();
             for child in a.appendplans.iter_mut() {
                 let cp = finalize_plan(
                     mcx,
@@ -549,7 +566,8 @@ fn finalize_node_specific<'mcx>(
                     bms::bms_add_members(mcx, context.paramids.take(), cp.as_deref())?;
             }
         }
-        Node::MergeAppend(ma) => {
+        types_nodes::nodes::ntag::T_MergeAppend => {
+            let ma = plan.as_mergeappend_mut().unwrap();
             for child in ma.mergeplans.iter_mut() {
                 let cp = finalize_plan(
                     mcx,
@@ -564,7 +582,8 @@ fn finalize_node_specific<'mcx>(
                     bms::bms_add_members(mcx, context.paramids.take(), cp.as_deref())?;
             }
         }
-        Node::BitmapAnd(ba) => {
+        types_nodes::nodes::ntag::T_BitmapAnd => {
+            let ba = plan.as_bitmapand_mut().unwrap();
             for child in ba.bitmapplans.iter_mut() {
                 let cp = finalize_plan(
                     mcx,
@@ -579,7 +598,8 @@ fn finalize_node_specific<'mcx>(
                     bms::bms_add_members(mcx, context.paramids.take(), cp.as_deref())?;
             }
         }
-        Node::NestLoop(nl) => {
+        types_nodes::nodes::ntag::T_NestLoop => {
+            let nl = plan.as_nestloop_mut().unwrap();
             if let Some(jq) = nl.join.joinqual.as_ref() {
                 fin_exprs!(jq);
             }
@@ -588,13 +608,15 @@ fn finalize_node_specific<'mcx>(
                     Some(bms::bms_add_member(mcx, nestloop_params.take(), nlp.paramno)?);
             }
         }
-        Node::MergeJoin(mj) => {
+        types_nodes::nodes::ntag::T_MergeJoin => {
+            let mj = plan.as_mergejoin_mut().unwrap();
             if let Some(jq) = mj.join.joinqual.as_ref() {
                 fin_exprs!(jq);
             }
             fin_exprs!(mj.mergeclauses);
         }
-        Node::HashJoin(hj) => {
+        types_nodes::nodes::ntag::T_HashJoin => {
+            let hj = plan.as_hashjoin_mut().unwrap();
             if let Some(jq) = hj.join.joinqual.as_ref() {
                 fin_exprs!(jq);
             }
@@ -606,7 +628,8 @@ fn finalize_node_specific<'mcx>(
                 }
             }
         }
-        Node::Hash(h) => {
+        types_nodes::nodes::ntag::T_Hash => {
+            let h = plan.as_hash_mut().unwrap();
             if let Some(hk) = h.hashkeys.as_ref() {
                 for n in hk.iter() {
                     if let Some(e) = n.as_expr() {
@@ -615,7 +638,8 @@ fn finalize_node_specific<'mcx>(
                 }
             }
         }
-        Node::Limit(l) => {
+        types_nodes::nodes::ntag::T_Limit => {
+            let l = plan.as_limit_mut().unwrap();
             if let Some(o) = l.limitOffset.as_deref() {
                 finalize_primnode(mcx, root, run, Some(o), context)?;
             }
@@ -623,13 +647,15 @@ fn finalize_node_specific<'mcx>(
                 finalize_primnode(mcx, root, run, Some(c), context)?;
             }
         }
-        Node::RecursiveUnion(ru) => {
+        types_nodes::nodes::ntag::T_RecursiveUnion => {
+            let ru = plan.as_recursiveunion_mut().unwrap();
             *locally_added_param = ru.wtParam;
             *valid_params_owned =
                 Some(bms::bms_add_member(mcx, valid_params_owned.take(), *locally_added_param)?);
             // wtParam does *not* get added to scan_params.
         }
-        Node::Agg(agg) => {
+        types_nodes::nodes::ntag::T_Agg => {
+            let agg = plan.as_agg_mut().unwrap();
             // AGG_HASHED plans need to know which Params are referenced in
             // aggregate calls.
             if agg.aggstrategy == types_nodes::nodeagg::AGG_HASHED {
@@ -649,7 +675,8 @@ fn finalize_node_specific<'mcx>(
                 agg.agg_params = aggcontext.paramids;
             }
         }
-        Node::WindowAgg(wa) => {
+        types_nodes::nodes::ntag::T_WindowAgg => {
+            let wa = plan.as_windowagg_mut().unwrap();
             if let Some(so) = wa.startOffset.as_deref() {
                 finalize_primnode(mcx, root, run, Some(so), context)?;
             }
@@ -657,7 +684,8 @@ fn finalize_node_specific<'mcx>(
                 finalize_primnode(mcx, root, run, Some(eo), context)?;
             }
         }
-        Node::Gather(g) => {
+        types_nodes::nodes::ntag::T_Gather => {
+            let g = plan.as_gather_mut().unwrap();
             *locally_added_param = g.rescan_param;
             if *locally_added_param >= 0 {
                 *valid_params_owned =
@@ -666,7 +694,8 @@ fn finalize_node_specific<'mcx>(
                 *gather_param = *locally_added_param;
             }
         }
-        Node::GatherMerge(gm) => {
+        types_nodes::nodes::ntag::T_GatherMerge => {
+            let gm = plan.as_gathermerge_mut().unwrap();
             *locally_added_param = gm.rescan_param;
             if *locally_added_param >= 0 {
                 *valid_params_owned =
@@ -675,21 +704,22 @@ fn finalize_node_specific<'mcx>(
                 *gather_param = *locally_added_param;
             }
         }
-        Node::Memoize(m) => {
+        types_nodes::nodes::ntag::T_Memoize => {
+            let m = plan.as_memoize_mut().unwrap();
             fin_exprs!(m.param_exprs);
         }
         // No node-type-specific fields need fixing.
-        Node::ProjectSet(_)
-        | Node::Material(_)
-        | Node::Sort(_)
-        | Node::IncrementalSort(_)
-        | Node::Unique(_)
-        | Node::SetOp(_)
-        | Node::Group(_) => {}
-        other => {
+        types_nodes::nodes::ntag::T_ProjectSet
+        | types_nodes::nodes::ntag::T_Material
+        | types_nodes::nodes::ntag::T_Sort
+        | types_nodes::nodes::ntag::T_IncrementalSort
+        | types_nodes::nodes::ntag::T_Unique
+        | types_nodes::nodes::ntag::T_SetOp
+        | types_nodes::nodes::ntag::T_Group => {}
+        _ => {
             return Err(elog_error(alloc::format!(
                 "unrecognized node type: {:?}",
-                other.node_tag()
+                plan.node_tag()
             )));
         }
     }
