@@ -642,6 +642,7 @@ pub fn init_seams() {
     // Register the by-reference fmgr-ABI builtin wrappers (C: fmgr_builtins[]).
     crate::fmgr_builtins::register_geo_ops_builtins();
     crate::fmgr_builtins::register_geo_ops_path_poly_builtins();
+    crate::fmgr_builtins::register_geo_ops_cross_builtins();
 }
 
 /// Shared one-time test-seam setup (used by this crate's `mod tests` and by

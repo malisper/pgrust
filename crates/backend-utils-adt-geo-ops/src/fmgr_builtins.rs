@@ -514,6 +514,351 @@ fc_arith_circle!(fc_circle_mul_pt, crate::circle::circle_mul_pt);
 fc_arith_circle!(fc_circle_div_pt, crate::circle::circle_div_pt);
 
 // ---------------------------------------------------------------------------
+// Cross-type / mixed-arg adapters (the second fan-out leg over the fixed-size
+// `point`/`box`/`lseg`/`line`/`circle` types): the `dist_*` distance family,
+// the `on_*` containment predicates, the `close_*` closest-point family, the
+// line/lseg/circle constructors + conversions, and the duplicate-OID type
+// coercions (`box_center`/`circle_center`/etc. each have two `pg_proc` rows).
+//
+// The `point`/`lseg`/`box`/`circle`/`path`/`polygon` cores live across all the
+// per-shape modules; the `dist_*`/`on_*`/`close_*` cores live in `proximity`.
+// Argument readers / result writers reuse the by-ref-lane helpers above; the
+// `float8`/`int4` scalar args/results cross by-value on the `args` word lane.
+// ---------------------------------------------------------------------------
+
+/// `PG_GETARG_FLOAT8(i)`: a by-value float8 arg (its bit pattern in the word).
+#[inline]
+fn arg_f64(fcinfo: &FunctionCallInfoBaseData, i: usize) -> f64 {
+    fcinfo.args[i].value.as_f64()
+}
+
+/// `PG_GETARG_INT32(i)`: a by-value int4 arg.
+#[inline]
+fn arg_i32(fcinfo: &FunctionCallInfoBaseData, i: usize) -> i32 {
+    fcinfo.args[i].value.as_i32()
+}
+
+/// `PG_RETURN_LSEG_P(ls)`: the lseg's native by-ref image on the by-ref lane.
+#[inline]
+fn ret_lseg(fcinfo: &mut FunctionCallInfoBaseData, ls: LSEG) -> Datum {
+    ret_ref(fcinfo, lseg_bytes(&ls))
+}
+
+/// `PG_RETURN_LINE_P(l)`: the line's native by-ref image on the by-ref lane.
+#[inline]
+fn ret_line(fcinfo: &mut FunctionCallInfoBaseData, l: LINE) -> Datum {
+    ret_ref(fcinfo, line_bytes(&l))
+}
+
+/// Set an `Option<Point>` result: `Some(p)` -> the point image, `None` ->
+/// `PG_RETURN_NULL()` (the `close_*`/`*_interpt` "no intersection" case).
+#[inline]
+fn ret_opt_point(fcinfo: &mut FunctionCallInfoBaseData, p: Option<Point>) -> Datum {
+    match p {
+        Some(p) => ret_point(fcinfo, p),
+        None => ret_null(fcinfo),
+    }
+}
+
+// --- point: vert/horiz/slope + the float8 constructor + point->box coercion ---
+
+fn fc_point_vert(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let (a, b) = (arg_point(fcinfo, 0), arg_point(fcinfo, 1));
+    ret_bool(crate::point::point_vert(&a, &b))
+}
+fn fc_point_horiz(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let (a, b) = (arg_point(fcinfo, 0), arg_point(fcinfo, 1));
+    ret_bool(crate::point::point_horiz(&a, &b))
+}
+fn fc_point_slope(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let (a, b) = (arg_point(fcinfo, 0), arg_point(fcinfo, 1));
+    ret_f64(ok(crate::point::point_slope(&a, &b)))
+}
+fn fc_construct_point(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let p = crate::point::construct_point(arg_f64(fcinfo, 0), arg_f64(fcinfo, 1));
+    ret_point(fcinfo, p)
+}
+fn fc_point_box(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let b = crate::boxes::point_box(&arg_point(fcinfo, 0));
+    ret_box(fcinfo, b)
+}
+
+// --- box: overleft/overright/overbelow/overabove + contain_pt + diagonal +
+//     box<->circle conversions ---
+
+fc_pred_box!(fc_box_overleft, crate::boxes::box_overleft, pure);
+fc_pred_box!(fc_box_overright, crate::boxes::box_overright, pure);
+fc_pred_box!(fc_box_overbelow, crate::boxes::box_overbelow, pure);
+fc_pred_box!(fc_box_overabove, crate::boxes::box_overabove, pure);
+
+fn fc_box_contain_pt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let b = arg_box(fcinfo, 0);
+    let p = arg_point(fcinfo, 1);
+    ret_bool(crate::proximity::box_contain_pt(&b, &p))
+}
+fn fc_box_diagonal(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let ls = crate::boxes::box_diagonal(&arg_box(fcinfo, 0));
+    ret_lseg(fcinfo, ls)
+}
+fn fc_points_box(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let (a, b) = (arg_point(fcinfo, 0), arg_point(fcinfo, 1));
+    ret_box(fcinfo, crate::boxes::points_box(&a, &b))
+}
+fn fc_box_circle(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let c = ok(crate::boxes::box_circle(&arg_box(fcinfo, 0)));
+    ret_circle(fcinfo, c)
+}
+fn fc_circle_box(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let b = ok(crate::boxes::circle_box(&arg_circle(fcinfo, 0)));
+    ret_box(fcinfo, b)
+}
+
+// --- lseg: construct / intersect / interpt ---
+
+fn fc_lseg_construct(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let (a, b) = (arg_point(fcinfo, 0), arg_point(fcinfo, 1));
+    ret_lseg(fcinfo, crate::lseg::lseg_construct(&a, &b))
+}
+fn fc_lseg_intersect(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let (a, b) = (arg_lseg(fcinfo, 0), arg_lseg(fcinfo, 1));
+    ret_bool(ok(crate::lseg::lseg_intersect(&a, &b)))
+}
+fn fc_lseg_interpt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let (a, b) = (arg_lseg(fcinfo, 0), arg_lseg(fcinfo, 1));
+    ret_opt_point(fcinfo, ok(crate::lseg::lseg_interpt(&a, &b)))
+}
+
+// --- line: eq / construct_pp / interpt / intersect / distance + isparallel etc.
+//     (the duplicate `line_*` OIDs 1412-1415 share the already-defined adapters) ---
+
+fn fc_line_eq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let (a, b) = (arg_line(fcinfo, 0), arg_line(fcinfo, 1));
+    ret_bool(ok(crate::line::line_eq(&a, &b)))
+}
+fn fc_line_construct_pp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let (a, b) = (arg_point(fcinfo, 0), arg_point(fcinfo, 1));
+    ret_line(fcinfo, ok(crate::line::line_construct_pp(&a, &b)))
+}
+fn fc_line_interpt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let (a, b) = (arg_line(fcinfo, 0), arg_line(fcinfo, 1));
+    ret_opt_point(fcinfo, ok(crate::line::line_interpt(&a, &b)))
+}
+fn fc_line_intersect(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let (a, b) = (arg_line(fcinfo, 0), arg_line(fcinfo, 1));
+    ret_bool(ok(crate::line::line_intersect(&a, &b)))
+}
+fn fc_line_distance(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let (a, b) = (arg_line(fcinfo, 0), arg_line(fcinfo, 1));
+    ret_f64(ok(crate::line::line_distance(&a, &b)))
+}
+
+// --- circle: overleft/overright/overbelow/overabove + cr_circle + circle_poly ---
+
+fc_pred_circle!(fc_circle_overleft, crate::circle::circle_overleft, res);
+fc_pred_circle!(fc_circle_overright, crate::circle::circle_overright, res);
+fc_pred_circle!(fc_circle_overbelow, crate::circle::circle_overbelow, res);
+fc_pred_circle!(fc_circle_overabove, crate::circle::circle_overabove, res);
+
+fn fc_cr_circle(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let center = arg_point(fcinfo, 0);
+    let radius = arg_f64(fcinfo, 1);
+    ret_circle(fcinfo, crate::circle::cr_circle(&center, radius))
+}
+fn fc_circle_poly(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let npts = arg_i32(fcinfo, 0);
+    let circle = arg_circle(fcinfo, 1);
+    let poly = ok(crate::circle::circle_poly(npts, &circle));
+    ret_poly(fcinfo, poly)
+}
+
+// --- `on_*` containment predicates (point/lseg on line/lseg/box/path) ---
+
+fn fc_on_pl(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let (p, l) = (arg_point(fcinfo, 0), arg_line(fcinfo, 1));
+    ret_bool(ok(crate::proximity::on_pl(&p, &l)))
+}
+fn fc_on_ps(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let (p, ls) = (arg_point(fcinfo, 0), arg_lseg(fcinfo, 1));
+    ret_bool(ok(crate::proximity::on_ps(&p, &ls)))
+}
+fn fc_on_pb(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let (p, b) = (arg_point(fcinfo, 0), arg_box(fcinfo, 1));
+    ret_bool(crate::proximity::on_pb(&p, &b))
+}
+fn fc_on_ppath(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let (p, path) = (arg_point(fcinfo, 0), arg_path(fcinfo, 1));
+    ret_bool(ok(crate::proximity::on_ppath(&p, &path)))
+}
+fn fc_on_sl(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let (ls, l) = (arg_lseg(fcinfo, 0), arg_line(fcinfo, 1));
+    ret_bool(ok(crate::proximity::on_sl(&ls, &l)))
+}
+fn fc_on_sb(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let (ls, b) = (arg_lseg(fcinfo, 0), arg_box(fcinfo, 1));
+    ret_bool(crate::proximity::on_sb(&ls, &b))
+}
+
+// --- `close_*` closest-point family (-> point, may be NULL) ---
+
+fn fc_close_pl(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let (p, l) = (arg_point(fcinfo, 0), arg_line(fcinfo, 1));
+    ret_opt_point(fcinfo, ok(crate::proximity::close_pl(&p, &l)))
+}
+fn fc_close_ps(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let (p, ls) = (arg_point(fcinfo, 0), arg_lseg(fcinfo, 1));
+    ret_opt_point(fcinfo, ok(crate::proximity::close_ps(&p, &ls)))
+}
+fn fc_close_pb(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let (p, b) = (arg_point(fcinfo, 0), arg_box(fcinfo, 1));
+    ret_opt_point(fcinfo, ok(crate::proximity::close_pb(&p, &b)))
+}
+fn fc_close_lseg(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let (a, b) = (arg_lseg(fcinfo, 0), arg_lseg(fcinfo, 1));
+    ret_opt_point(fcinfo, ok(crate::proximity::close_lseg(&a, &b)))
+}
+fn fc_close_ls(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let (l, ls) = (arg_line(fcinfo, 0), arg_lseg(fcinfo, 1));
+    ret_opt_point(fcinfo, ok(crate::proximity::close_ls(&l, &ls)))
+}
+fn fc_close_sb(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let (ls, b) = (arg_lseg(fcinfo, 0), arg_box(fcinfo, 1));
+    ret_opt_point(fcinfo, ok(crate::proximity::close_sb(&ls, &b)))
+}
+
+// --- `dist_*` distance family (-> float8) ---
+
+macro_rules! fc_dist {
+    ($fc:ident, $core:path, $ra:ident, $rb:ident) => {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+            let a = $ra(fcinfo, 0);
+            let b = $rb(fcinfo, 1);
+            ret_f64(ok($core(&a, &b)))
+        }
+    };
+}
+fc_dist!(fc_dist_pl, crate::proximity::dist_pl, arg_point, arg_line);
+fc_dist!(fc_dist_lp, crate::proximity::dist_lp, arg_line, arg_point);
+fc_dist!(fc_dist_ps, crate::proximity::dist_ps, arg_point, arg_lseg);
+fc_dist!(fc_dist_sp, crate::proximity::dist_sp, arg_lseg, arg_point);
+fc_dist!(fc_dist_pb, crate::proximity::dist_pb, arg_point, arg_box);
+fc_dist!(fc_dist_bp, crate::proximity::dist_bp, arg_box, arg_point);
+fc_dist!(fc_dist_sl, crate::proximity::dist_sl, arg_lseg, arg_line);
+fc_dist!(fc_dist_ls, crate::proximity::dist_ls, arg_line, arg_lseg);
+fc_dist!(fc_dist_sb, crate::proximity::dist_sb, arg_lseg, arg_box);
+fc_dist!(fc_dist_bs, crate::proximity::dist_bs, arg_box, arg_lseg);
+fc_dist!(fc_dist_pc, crate::proximity::dist_pc, arg_point, arg_circle);
+fc_dist!(fc_dist_cpoint, crate::proximity::dist_cpoint, arg_circle, arg_point);
+fc_dist!(fc_dist_ppath, crate::proximity::dist_ppath, arg_point, arg_path);
+fc_dist!(fc_dist_pathp, crate::proximity::dist_pathp, arg_path, arg_point);
+fc_dist!(fc_dist_cpoly, crate::proximity::dist_cpoly, arg_circle, arg_poly);
+fc_dist!(fc_dist_polyc, crate::proximity::dist_polyc, arg_poly, arg_circle);
+fc_dist!(fc_dist_ppoly, crate::proximity::dist_ppoly, arg_point, arg_poly);
+fc_dist!(fc_dist_polyp, crate::proximity::dist_polyp, arg_poly, arg_point);
+
+// --- duplicate-OID type-coercion accessors that reuse existing cores ---
+//     (these share a `prosrc` with an already-registered OID; the registry
+//     keys by OID so each duplicate OID needs its own row, reusing the adapter.)
+
+/// Register the cross-type `geo_ops.c` builtins (the `dist_*`/`on_*`/`close_*`
+/// families, the line/lseg/circle constructors & conversions, and the
+/// duplicate-OID type coercions). Called from this crate's `init_seams()`.
+/// OIDs/nargs/strict/retset transcribed exactly from `pg_proc.dat`; all strict,
+/// none retset. The `name` is the `prosrc` C symbol. The `*_recv` functions take
+/// `internal` (a `StringInfo`) which is not expressible at this fmgr boundary,
+/// so they remain deferred (as for every other type's `*_recv`).
+pub fn register_geo_ops_cross_builtins() {
+    backend_utils_fmgr_core::register_builtins([
+        // point: vert/horiz/slope (two OIDs each for the named SQL fns).
+        builtin(989, "point_vert", 2, true, false, fc_point_vert),
+        builtin(1406, "point_vert", 2, true, false, fc_point_vert),
+        builtin(990, "point_horiz", 2, true, false, fc_point_horiz),
+        builtin(1407, "point_horiz", 2, true, false, fc_point_horiz),
+        builtin(992, "point_slope", 2, true, false, fc_point_slope),
+        // point constructor / point->box coercion.
+        builtin(1440, "construct_point", 2, true, false, fc_construct_point),
+        builtin(4091, "point_box", 1, true, false, fc_point_box),
+        // box: over* predicates + contain_pt + diagonal + duplicate center OID +
+        // box<->circle + box<->points.
+        builtin(189, "box_overleft", 2, true, false, fc_box_overleft),
+        builtin(190, "box_overright", 2, true, false, fc_box_overright),
+        builtin(2563, "box_overbelow", 2, true, false, fc_box_overbelow),
+        builtin(2564, "box_overabove", 2, true, false, fc_box_overabove),
+        builtin(193, "box_contain_pt", 2, true, false, fc_box_contain_pt),
+        builtin(138, "box_center", 1, true, false, fc_box_center),
+        builtin(1534, "box_center", 1, true, false, fc_box_center),
+        builtin(981, "box_diagonal", 1, true, false, fc_box_diagonal),
+        builtin(1541, "box_diagonal", 1, true, false, fc_box_diagonal),
+        builtin(1421, "points_box", 2, true, false, fc_points_box),
+        builtin(1479, "box_circle", 1, true, false, fc_box_circle),
+        builtin(1480, "circle_box", 1, true, false, fc_circle_box),
+        // lseg: construct / intersect / interpt + duplicate center/length OIDs.
+        builtin(993, "lseg_construct", 2, true, false, fc_lseg_construct),
+        builtin(994, "lseg_intersect", 2, true, false, fc_lseg_intersect),
+        builtin(362, "lseg_interpt", 2, true, false, fc_lseg_interpt),
+        builtin(225, "lseg_center", 1, true, false, fc_lseg_center),
+        // line: eq / construct_pp / interpt / intersect / distance + duplicate
+        // isparallel/isperp/isvertical/ishorizontal OIDs.
+        builtin(1492, "line_eq", 2, true, false, fc_line_eq),
+        builtin(1493, "line_construct_pp", 2, true, false, fc_line_construct_pp),
+        builtin(1494, "line_interpt", 2, true, false, fc_line_interpt),
+        builtin(1495, "line_intersect", 2, true, false, fc_line_intersect),
+        builtin(239, "line_distance", 2, true, false, fc_line_distance),
+        builtin(1412, "line_parallel", 2, true, false, fc_line_parallel),
+        builtin(1413, "line_perp", 2, true, false, fc_line_perp),
+        builtin(1414, "line_vertical", 1, true, false, fc_line_vertical),
+        builtin(1415, "line_horizontal", 1, true, false, fc_line_horizontal),
+        // circle: over* predicates + cr_circle + circle_poly + duplicate center OID.
+        builtin(1455, "circle_overleft", 2, true, false, fc_circle_overleft),
+        builtin(1456, "circle_overright", 2, true, false, fc_circle_overright),
+        builtin(2587, "circle_overbelow", 2, true, false, fc_circle_overbelow),
+        builtin(2588, "circle_overabove", 2, true, false, fc_circle_overabove),
+        builtin(1473, "cr_circle", 2, true, false, fc_cr_circle),
+        builtin(1475, "circle_poly", 2, true, false, fc_circle_poly),
+        builtin(1416, "circle_center", 1, true, false, fc_circle_center),
+        builtin(1472, "circle_center", 1, true, false, fc_circle_center),
+        // poly: duplicate center/npoints OIDs.
+        builtin(1540, "poly_center", 1, true, false, fc_poly_center),
+        builtin(1556, "poly_npoints", 1, true, false, fc_poly_npoints),
+        // path: duplicate length/npoints OIDs.
+        builtin(1531, "path_length", 1, true, false, fc_path_length),
+        builtin(1545, "path_npoints", 1, true, false, fc_path_npoints),
+        // on_* containment predicates.
+        builtin(959, "on_pl", 2, true, false, fc_on_pl),
+        builtin(369, "on_ps", 2, true, false, fc_on_ps),
+        builtin(136, "on_pb", 2, true, false, fc_on_pb),
+        builtin(137, "on_ppath", 2, true, false, fc_on_ppath),
+        builtin(960, "on_sl", 2, true, false, fc_on_sl),
+        builtin(372, "on_sb", 2, true, false, fc_on_sb),
+        // close_* closest-point family.
+        builtin(961, "close_pl", 2, true, false, fc_close_pl),
+        builtin(366, "close_ps", 2, true, false, fc_close_ps),
+        builtin(367, "close_pb", 2, true, false, fc_close_pb),
+        builtin(1489, "close_lseg", 2, true, false, fc_close_lseg),
+        builtin(1488, "close_ls", 2, true, false, fc_close_ls),
+        builtin(368, "close_sb", 2, true, false, fc_close_sb),
+        // dist_* distance family.
+        builtin(725, "dist_pl", 2, true, false, fc_dist_pl),
+        builtin(702, "dist_lp", 2, true, false, fc_dist_lp),
+        builtin(363, "dist_ps", 2, true, false, fc_dist_ps),
+        builtin(380, "dist_sp", 2, true, false, fc_dist_sp),
+        builtin(364, "dist_pb", 2, true, false, fc_dist_pb),
+        builtin(357, "dist_bp", 2, true, false, fc_dist_bp),
+        builtin(727, "dist_sl", 2, true, false, fc_dist_sl),
+        builtin(704, "dist_ls", 2, true, false, fc_dist_ls),
+        builtin(365, "dist_sb", 2, true, false, fc_dist_sb),
+        builtin(381, "dist_bs", 2, true, false, fc_dist_bs),
+        builtin(1476, "dist_pc", 2, true, false, fc_dist_pc),
+        builtin(3290, "dist_cpoint", 2, true, false, fc_dist_cpoint),
+        builtin(371, "dist_ppath", 2, true, false, fc_dist_ppath),
+        builtin(421, "dist_pathp", 2, true, false, fc_dist_pathp),
+        builtin(728, "dist_cpoly", 2, true, false, fc_dist_cpoly),
+        builtin(785, "dist_polyc", 2, true, false, fc_dist_polyc),
+        builtin(3275, "dist_ppoly", 2, true, false, fc_dist_ppoly),
+        builtin(3292, "dist_polyp", 2, true, false, fc_dist_polyp),
+    ]);
+}
+
+// ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
 
@@ -1009,6 +1354,7 @@ mod tests {
         // (the global one-time `test_setup` only ran on one thread).
         register_geo_ops_builtins();
         register_geo_ops_path_poly_builtins();
+        register_geo_ops_cross_builtins();
     }
 
     /// Build a fresh by-ref struct image from text via the registered `*_in`.
