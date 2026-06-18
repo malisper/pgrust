@@ -287,6 +287,7 @@ pub fn init_all() {
     backend_access_nbtree_nbtsort::init_seams();
     backend_common_relpath::init_seams();
     backend_optimizer_path_costsize::init_seams();
+    backend_optimizer_path_joinpath::init_seams();
     backend_optimizer_path_equivclass::init_seams();
     backend_optimizer_plan_init_subselect::init_seams();
     backend_optimizer_path_small::init_seams();
