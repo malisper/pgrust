@@ -114,9 +114,13 @@ pub fn set_var_from_num<'mcx>(mcx: Mcx<'mcx>, num: &[u8]) -> PgResult<NumericVar
 
     let ndigits = numeric_ndigits(num, num.len());
     let digit_bytes = numeric_digits(num);
-    let mut digits = crate::alloc_digits(mcx, ndigits)?;
-    for (i, slot) in digits.iter_mut().enumerate() {
-        *slot = numeric_digit_at(digit_bytes, i);
+    // C's set_var_from_num calls alloc_var(var, ndigits), which reserves one
+    // leading spare digit (buf[0]; digits = buf + 1) so round_var can carry out
+    // into a new leading digit in place. Reserve that spare (headroom = 1) and
+    // write the logical digits starting at index 1.
+    let mut digits = crate::alloc_digits(mcx, ndigits + 1)?;
+    for i in 0..ndigits {
+        digits[i + 1] = numeric_digit_at(digit_bytes, i);
     }
 
     Ok(NumericVar {
@@ -124,7 +128,7 @@ pub fn set_var_from_num<'mcx>(mcx: Mcx<'mcx>, num: &[u8]) -> PgResult<NumericVar
         weight: numeric_weight(num),
         dscale: numeric_dscale(num) as i32,
         digits,
-        headroom: 0,
+        headroom: 1,
     })
 }
 
