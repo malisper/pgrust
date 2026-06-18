@@ -832,7 +832,7 @@ pub(crate) fn fix_append_rel_relids<'mcx>(
     for id in to_fix {
         let mut node = Node::Expr(root.node(id).clone());
         substitute_phv_relids_in_node(&mut node, varno, subrelids);
-        if let Node::Expr(e) = node {
+        if let Some(e) = node.into_expr() {
             *root.node_mut(id) = e;
         }
     }
@@ -1135,7 +1135,7 @@ fn remove_nulling_relids_in_append_rel_list(
     for id in ids {
         let mut node = Node::Expr(root.node(id).clone());
         backend_rewrite_core::remove_nulling_relids(&mut node, removable, except);
-        if let Node::Expr(e) = node {
+        if let Some(e) = node.into_expr() {
             *root.node_mut(id) = e;
         }
     }
@@ -1164,22 +1164,23 @@ fn concat_quals<'mcx>(
      -> PgResult<()> {
         match q {
             None => Ok(()),
-            Some(n) => match PgBox::into_inner(n) {
-                Node::List(items) => {
+            Some(n) => {
+                let node = PgBox::into_inner(n);
+                if node.is_list() {
+                    let items = node.into_list().unwrap();
                     out.try_reserve(items.len()).map_err(|_| mcx.oom(items.len()))?;
                     for it in items {
                         out.push(it);
                     }
                     Ok(())
-                }
-                other => {
+                } else {
                     // Defensive: a non-List qual (C asserts implicit-AND List by
                     // now) is treated as a one-element list.
                     out.try_reserve(1).map_err(|_| mcx.oom(1))?;
-                    out.push(mcx::alloc_in(mcx, other)?);
+                    out.push(mcx::alloc_in(mcx, node)?);
                     Ok(())
                 }
-            },
+            }
         }
     };
     push_list(child, &mut out)?;

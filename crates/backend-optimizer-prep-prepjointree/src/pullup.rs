@@ -54,7 +54,7 @@ use types_core::primitive::AttrNumber;
 use types_error::PgResult;
 use types_nodes::copy_query::Query;
 use types_nodes::jointype::JoinType;
-use types_nodes::nodes::{Node, NodePtr};
+use types_nodes::nodes::{ntag, Node, NodePtr};
 use types_nodes::parsenodes::{RTEKind, RangeTblEntry};
 use types_nodes::primnodes::{Expr, ExprRelids, Var};
 use types_nodes::rawnodes::FromExpr;
@@ -386,10 +386,9 @@ fn jt_fromexpr_at<'a, 'mcx>(
             .jointree
             .as_deref_mut()
             .expect("pull_up_subqueries: top jointree must be a FromExpr"),
-        _ => match jt_node_at(parse, path) {
-            Node::FromExpr(f) => f,
-            _ => unreachable!("jt_fromexpr_at: node is not a FromExpr"),
-        },
+        _ => jt_node_at(parse, path)
+            .as_fromexpr_mut()
+            .unwrap_or_else(|| unreachable!("jt_fromexpr_at: node is not a FromExpr")),
     }
 }
 
@@ -398,10 +397,9 @@ fn jt_joinexpr_at<'a, 'mcx>(
     parse: &'a mut Query<'mcx>,
     path: &JtPath<'_, 'mcx>,
 ) -> &'a mut types_nodes::rawnodes::JoinExpr<'mcx> {
-    match jt_node_at(parse, path) {
-        Node::JoinExpr(j) => j,
-        _ => unreachable!("jt_joinexpr_at: node is not a JoinExpr"),
-    }
+    jt_node_at(parse, path)
+        .as_joinexpr_mut()
+        .unwrap_or_else(|| unreachable!("jt_joinexpr_at: node is not a JoinExpr"))
 }
 
 // ===========================================================================
@@ -442,18 +440,24 @@ fn pull_up_subqueries_recurse<'mcx>(
     }
     let kind = match path {
         JtPath::Top => Kind::FromExpr(jt_fromexpr_at(parse, path).fromlist.len()),
-        JtPath::Detached(cell) => match &*cell.borrow() {
-            Node::RangeTblRef(r) => Kind::RangeTblRef(r.rtindex),
-            Node::FromExpr(f) => Kind::FromExpr(f.fromlist.len()),
-            Node::JoinExpr(_) => Kind::Join,
-            _ => Kind::Other,
-        },
-        _ => match jt_node_at(parse, path) {
-            Node::RangeTblRef(r) => Kind::RangeTblRef(r.rtindex),
-            Node::FromExpr(f) => Kind::FromExpr(f.fromlist.len()),
-            Node::JoinExpr(_) => Kind::Join,
-            _ => Kind::Other,
-        },
+        JtPath::Detached(cell) => {
+            let node = &*cell.borrow();
+            match node.node_tag() {
+                ntag::T_RangeTblRef => Kind::RangeTblRef(node.expect_rangetblref().rtindex),
+                ntag::T_FromExpr => Kind::FromExpr(node.expect_fromexpr().fromlist.len()),
+                ntag::T_JoinExpr => Kind::Join,
+                _ => Kind::Other,
+            }
+        }
+        _ => {
+            let node = jt_node_at(parse, path);
+            match node.node_tag() {
+                ntag::T_RangeTblRef => Kind::RangeTblRef(node.expect_rangetblref().rtindex),
+                ntag::T_FromExpr => Kind::FromExpr(node.expect_fromexpr().fromlist.len()),
+                ntag::T_JoinExpr => Kind::Join,
+                _ => Kind::Other,
+            }
+        }
     };
 
     match kind {
@@ -653,12 +657,13 @@ fn clone_joinexpr_shape<'mcx>(
 /// Clone the shape of an arbitrary jointree `Node` (RangeTblRef/FromExpr/
 /// JoinExpr), enough for `get_relids_in_jointree`.
 fn clone_jointree_shape<'mcx>(mcx: Mcx<'mcx>, n: &Node<'mcx>) -> PgResult<Node<'mcx>> {
-    match n {
-        Node::RangeTblRef(r) => Ok(Node::RangeTblRef(types_nodes::rawnodes::RangeTblRef {
-            rtindex: r.rtindex,
+    match n.node_tag() {
+        ntag::T_RangeTblRef => Ok(Node::RangeTblRef(types_nodes::rawnodes::RangeTblRef {
+            rtindex: n.expect_rangetblref().rtindex,
         })),
-        Node::JoinExpr(j) => Ok(Node::JoinExpr(clone_joinexpr_shape(mcx, j)?)),
-        Node::FromExpr(f) => {
+        ntag::T_JoinExpr => Ok(Node::JoinExpr(clone_joinexpr_shape(mcx, n.expect_joinexpr())?)),
+        ntag::T_FromExpr => {
+            let f = n.expect_fromexpr();
             let mut fromlist: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
             for l in f.fromlist.iter() {
                 fromlist.push(alloc_in(mcx, clone_jointree_shape(mcx, l)?)?);
@@ -973,10 +978,7 @@ fn rte_shallow_clone<'mcx>(
     rte: &RangeTblEntry<'mcx>,
 ) -> PgResult<RangeTblEntry<'mcx>> {
     let node = Node::RangeTblEntry(rte.clone_in(mcx)?);
-    match node {
-        Node::RangeTblEntry(r) => Ok(r),
-        _ => unreachable!(),
-    }
+    Ok(node.into_rangetblentry().unwrap_or_else(|| unreachable!()))
 }
 
 /// Deep-clone a targetlist (owned `TargetEntry` values) into `mcx`.
@@ -1125,8 +1127,9 @@ fn pull_up_union_leaf_queries<'mcx>(
     set_op_query: &Query<'mcx>,
     child_rt_offset: i32,
 ) -> PgResult<()> {
-    match set_op {
-        Node::RangeTblRef(rtr) => {
+    match set_op.node_tag() {
+        ntag::T_RangeTblRef => {
+            let rtr = set_op.expect_rangetblref();
             // Calculate the index in the parent's range table.
             let child_rt_index = child_rt_offset + rtr.rtindex;
 
@@ -1170,7 +1173,8 @@ fn pull_up_union_leaf_queries<'mcx>(
             )?;
             Ok(())
         }
-        Node::SetOperationStmt(op) => {
+        ntag::T_SetOperationStmt => {
+            let op = set_op.expect_setoperationstmt();
             // Recurse to reach leaf queries.
             let larg = op
                 .larg
@@ -1202,7 +1206,7 @@ fn pull_up_union_leaf_queries<'mcx>(
         }
         other => Err(types_error::PgError::error(alloc::format!(
             "unrecognized node type: {:?}",
-            other.node_tag()
+            other
         ))),
     }
 }
@@ -1254,11 +1258,10 @@ fn is_simple_union_all(subquery: &Query) -> PgResult<bool> {
         Some(n) => &**n,
         None => return Ok(false),
     };
-    let topop = match topop_node {
-        Node::SetOperationStmt(op) => op,
-        // castNode would error on a wrong tag; setOperations is always a
-        // SetOperationStmt when present.
-        _ => return Ok(false),
+    // castNode would error on a wrong tag; setOperations is always a
+    // SetOperationStmt when present.
+    let Some(topop) = topop_node.as_setoperationstmt() else {
+        return Ok(false);
     };
 
     // Can't handle ORDER BY, LIMIT/OFFSET, locking, or WITH.
@@ -1285,8 +1288,9 @@ fn is_simple_union_all_recurse(
     // Since this function recurses, it could be driven to stack overflow.
     backend_tcop_postgres_seams::check_stack_depth::call()?;
 
-    match set_op {
-        Node::RangeTblRef(rtr) => {
+    match set_op.node_tag() {
+        ntag::T_RangeTblRef => {
+            let rtr = set_op.expect_rangetblref();
             // rt_fetch(rtr->rtindex, setOpQuery->rtable)
             let rte = &set_op_query.rtable[(rtr.rtindex - 1) as usize];
             let subquery = rte
@@ -1301,7 +1305,8 @@ fn is_simple_union_all_recurse(
                 true,
             )
         }
-        Node::SetOperationStmt(op) => {
+        ntag::T_SetOperationStmt => {
+            let op = set_op.expect_setoperationstmt();
             // Must be UNION ALL.
             if op.op != types_nodes::rawnodes::SetOperation::SETOP_UNION || !op.all {
                 return Ok(false);
@@ -1316,7 +1321,7 @@ fn is_simple_union_all_recurse(
         }
         other => Err(types_error::PgError::error(alloc::format!(
             "unrecognized node type: {:?}",
-            other.node_tag()
+            other
         ))),
     }
 }
@@ -1346,9 +1351,8 @@ pub fn flatten_simple_union_all<'mcx>(
             .setOperations
             .as_ref()
             .expect("flatten_simple_union_all: no setOperations");
-        let topop = match topop_node {
-            Node::SetOperationStmt(op) => op,
-            _ => return Ok(()),
+        let Some(topop) = topop_node.as_setoperationstmt() else {
+            return Ok(());
         };
         if !is_simple_union_all_recurse(topop_node, parse, &topop.colTypes)? {
             return Ok(());
@@ -1363,11 +1367,15 @@ pub fn flatten_simple_union_all<'mcx>(
             .as_ref()
             .expect("flatten_simple_union_all: no setOperations");
         loop {
-            match node {
-                Node::SetOperationStmt(op) => {
-                    node = &**op.larg.as_ref().expect("setop NULL larg");
+            match node.node_tag() {
+                ntag::T_SetOperationStmt => {
+                    node = &**node
+                        .expect_setoperationstmt()
+                        .larg
+                        .as_ref()
+                        .expect("setop NULL larg");
                 }
-                Node::RangeTblRef(rtr) => break rtr.rtindex,
+                ntag::T_RangeTblRef => break node.expect_rangetblref().rtindex,
                 _ => panic!("flatten_simple_union_all: leftmost jtnode is not a RangeTblRef"),
             }
         }
@@ -1393,15 +1401,18 @@ pub fn flatten_simple_union_all<'mcx>(
             .as_mut()
             .expect("flatten_simple_union_all: no setOperations");
         loop {
-            match node {
-                Node::SetOperationStmt(op) => {
-                    node = &mut **op.larg.as_mut().expect("setop NULL larg");
-                }
-                Node::RangeTblRef(rtr) => {
-                    rtr.rtindex = child_rti;
-                    break;
-                }
-                _ => unreachable!(),
+            if node.is_setoperationstmt() {
+                node = &mut **node
+                    .as_setoperationstmt_mut()
+                    .unwrap()
+                    .larg
+                    .as_mut()
+                    .expect("setop NULL larg");
+            } else if let Some(rtr) = node.as_rangetblref_mut() {
+                rtr.rtindex = child_rti;
+                break;
+            } else {
+                unreachable!();
             }
         }
     }
@@ -1707,21 +1718,18 @@ fn pull_up_simple_values<'mcx>(
     // expressions; copy it.
     let values_list: PgVec<'mcx, NodePtr<'mcx>> = {
         let first = &parse.rtable[(varno - 1) as usize].values_lists[0];
-        match &**first {
-            Node::List(items) => {
-                let mut out: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
-                out.try_reserve(items.len()).map_err(|_| mcx.oom(items.len()))?;
-                for it in items.iter() {
-                    out.push(alloc_in(mcx, it.clone_in(mcx)?)?);
-                }
-                out
+        if let Some(items) = first.as_list() {
+            let mut out: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
+            out.try_reserve(items.len()).map_err(|_| mcx.oom(items.len()))?;
+            for it in items.iter() {
+                out.push(alloc_in(mcx, it.clone_in(mcx)?)?);
             }
-            other => {
-                // Single-expression VALUES row carried as a bare node.
-                let mut out: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
-                out.push(alloc_in(mcx, other.clone_in(mcx)?)?);
-                out
-            }
+            out
+        } else {
+            // Single-expression VALUES row carried as a bare node.
+            let mut out: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
+            out.push(alloc_in(mcx, (**first).clone_in(mcx)?)?);
+            out
         }
     };
 
@@ -1735,9 +1743,9 @@ fn pull_up_simple_values<'mcx>(
     tlist.try_reserve(values_list.len()).map_err(|_| mcx.oom(values_list.len()))?;
     let mut attrno: i32 = 1;
     for item in values_list.iter() {
-        let expr = match &**item {
-            Node::Expr(e) => e.clone_in(mcx)?,
-            _ => {
+        let expr = match item.as_expr() {
+            Some(e) => e.clone_in(mcx)?,
+            None => {
                 return Err(types_error::PgError::error(
                     "pull_up_simple_values: VALUES item is not an expression",
                 ));
@@ -1869,22 +1877,18 @@ fn pull_up_constant_function<'mcx>(
     // `rtf = linitial_node(RangeTblFunction, rte->functions)`; read its fields.
     let (funcexpr, funccolcount, has_colnames): (Expr, i32, bool) = {
         let func0 = &parse.rtable[(varno - 1) as usize].functions[0];
-        let rtf = match &**func0 {
-            Node::RangeTblFunction(rtf) => rtf,
-            _ => {
-                return Err(types_error::PgError::error(
-                    "pull_up_constant_function: RTE function is not a RangeTblFunction",
-                ));
-            }
+        let Some(rtf) = func0.as_rangetblfunction() else {
+            return Err(types_error::PgError::error(
+                "pull_up_constant_function: RTE function is not a RangeTblFunction",
+            ));
         };
         // `if (!IsA(rtf->funcexpr, Const)) return jtnode;`
         let fe_node = match rtf.funcexpr.as_deref() {
             Some(n) => n,
             None => return Ok(jtnode),
         };
-        let fe = match fe_node {
-            Node::Expr(e) => e,
-            _ => return Ok(jtnode),
+        let Some(fe) = fe_node.as_expr() else {
+            return Ok(jtnode);
         };
         if !matches!(fe, Expr::Const(_)) {
             return Ok(jtnode);
@@ -2018,17 +2022,17 @@ fn nodelist_expression_returns_set(list: &PgVec<NodePtr>) -> bool {
 }
 
 fn node_expression_returns_set(node: &Node) -> bool {
-    match node {
-        Node::List(items) => {
-            for it in items.iter() {
-                if node_expression_returns_set(it) {
-                    return true;
-                }
+    if let Some(items) = node.as_list() {
+        for it in items.iter() {
+            if node_expression_returns_set(it) {
+                return true;
             }
-            false
         }
-        Node::Expr(e) => backend_nodes_core::nodefuncs::expression_returns_set(Some(e)),
-        _ => false,
+        false
+    } else if let Some(e) = node.as_expr() {
+        backend_nodes_core::nodefuncs::expression_returns_set(Some(e))
+    } else {
+        false
     }
 }
 
@@ -2054,16 +2058,15 @@ fn nodelist_contains_vars_of_level(list: &PgVec<NodePtr>, level: i32) -> bool {
 }
 
 fn node_contains_vars_of_level(node: &Node, level: i32) -> bool {
-    match node {
-        Node::List(items) => {
-            for it in items.iter() {
-                if node_contains_vars_of_level(it, level) {
-                    return true;
-                }
+    if let Some(items) = node.as_list() {
+        for it in items.iter() {
+            if node_contains_vars_of_level(it, level) {
+                return true;
             }
-            false
         }
-        other => contain_vars_of_level(other, level),
+        false
+    } else {
+        contain_vars_of_level(node, level)
     }
 }
 
@@ -2184,17 +2187,17 @@ fn targetlist_as_node<'mcx>(
 
 /// `contain_volatile_functions` over a `Node` that may be a `List`.
 fn contain_volatile_functions_node(node: &Node) -> PgResult<bool> {
-    match node {
-        Node::List(items) => {
-            for it in items.iter() {
-                if contain_volatile_functions_node(it)? {
-                    return Ok(true);
-                }
+    if let Some(items) = node.as_list() {
+        for it in items.iter() {
+            if contain_volatile_functions_node(it)? {
+                return Ok(true);
             }
-            Ok(false)
         }
-        Node::Expr(e) => contain_volatile_functions(Some(e)),
-        _ => Ok(false),
+        Ok(false)
+    } else if let Some(e) = node.as_expr() {
+        contain_volatile_functions(Some(e))
+    } else {
+        Ok(false)
     }
 }
 
@@ -2226,8 +2229,9 @@ fn is_safe_append_member(subquery: &Query) -> bool {
         &jt.fromlist[0]
     };
     loop {
-        match node {
-            Node::FromExpr(f) => {
+        match node.node_tag() {
+            ntag::T_FromExpr => {
+                let f = node.expect_fromexpr();
                 if f.quals.is_some() {
                     return false;
                 }
@@ -2236,7 +2240,7 @@ fn is_safe_append_member(subquery: &Query) -> bool {
                 }
                 node = &f.fromlist[0];
             }
-            Node::RangeTblRef(_) => return true,
+            ntag::T_RangeTblRef => return true,
             _ => return false,
         }
     }
@@ -2255,9 +2259,10 @@ fn jointree_contains_lateral_outer_refs<'mcx>(
     restricted: bool,
     safe_upper_varnos: Option<&Bitmapset>,
 ) -> PgResult<bool> {
-    match jtnode {
-        Node::RangeTblRef(_) => Ok(false),
-        Node::FromExpr(f) => {
+    match jtnode.node_tag() {
+        ntag::T_RangeTblRef => Ok(false),
+        ntag::T_FromExpr => {
+            let f = jtnode.expect_fromexpr();
             // First, recurse to check child joins.
             for l in f.fromlist.iter() {
                 if jointree_contains_lateral_outer_refs(
@@ -2279,7 +2284,8 @@ fn jointree_contains_lateral_outer_refs<'mcx>(
             }
             Ok(false)
         }
-        Node::JoinExpr(j) => {
+        ntag::T_JoinExpr => {
+            let j = jtnode.expect_joinexpr();
             // If this is an outer join, disallow any upper lateral references in
             // or below it.
             let (restricted, safe_upper_varnos): (bool, Option<&Bitmapset>) =
@@ -2539,9 +2545,9 @@ fn pullup_replace_vars_opt_expr<'mcx>(
                 rvcontext,
                 outer_has_sublinks,
             )?;
-            match newnode {
-                Node::Expr(e) => Ok(Some(alloc_in(mcx, e)?)),
-                _ => Err(types_error::PgError::error(
+            match newnode.into_expr() {
+                Some(e) => Ok(Some(alloc_in(mcx, e)?)),
+                None => Err(types_error::PgError::error(
                     "pullup_replace_vars: expression-only Query field lowered to a non-Expr node",
                 )),
             }
@@ -2557,8 +2563,8 @@ fn pullup_replace_vars_merge_action<'mcx>(
     rvcontext: &mut PullupReplaceVarsContext<'mcx>,
     outer_has_sublinks: &mut Option<bool>,
 ) -> PgResult<Node<'mcx>> {
-    match node {
-        Node::MergeAction(mut a) => {
+    match node.into_mergeaction() {
+        Some(mut a) => {
             if a.qual.is_some() {
                 let q = a.qual.take();
                 a.qual = pullup_replace_vars_opt(mcx, root, q, rvcontext, outer_has_sublinks)?;
@@ -2566,13 +2572,9 @@ fn pullup_replace_vars_merge_action<'mcx>(
             pullup_replace_vars_nodelist(mcx, root, &mut a.targetList, rvcontext, outer_has_sublinks)?;
             Ok(Node::MergeAction(a))
         }
-        other => Err(types_error::PgError::error(
+        None => Err(types_error::PgError::error(
             "pullup_replace_vars: mergeActionList element is not a MergeAction",
-        ))
-        .map_err(|e| {
-            let _ = other;
-            e
-        }),
+        )),
     }
 }
 
@@ -2623,8 +2625,8 @@ fn replace_vars_in_jointree<'mcx>(
     rvcontext: &mut PullupReplaceVarsContext<'mcx>,
     outer_has_sublinks: &mut Option<bool>,
 ) -> PgResult<()> {
-    match jtnode {
-        Node::RangeTblRef(rtr) => {
+    if let Some(rtr) = jtnode.as_rangetblref_mut() {
+        {
             // A LATERAL RTE other than the target subquery may contain references
             // to the target subquery, which we must replace. We drive this from
             // the jointree scan so we skip no-longer-referenced RTEs.
@@ -2703,7 +2705,8 @@ fn replace_vars_in_jointree<'mcx>(
             }
             Ok(())
         }
-        Node::FromExpr(f) => {
+    } else if let Some(f) = jtnode.as_fromexpr_mut() {
+        {
             let n = f.fromlist.len();
             for i in 0..n {
                 replace_vars_in_jointree(
@@ -2721,7 +2724,8 @@ fn replace_vars_in_jointree<'mcx>(
             }
             Ok(())
         }
-        Node::JoinExpr(j) => {
+    } else if let Some(j) = jtnode.as_joinexpr_mut() {
+        {
             let save_wrap_option = rvcontext.wrap_option;
             if let Some(larg) = j.larg.as_deref_mut() {
                 replace_vars_in_jointree(mcx, root, parse, larg, rvcontext, outer_has_sublinks)?;
@@ -2741,7 +2745,8 @@ fn replace_vars_in_jointree<'mcx>(
             rvcontext.wrap_option = save_wrap_option;
             Ok(())
         }
-        _ => Err(types_error::PgError::error("unrecognized node type")),
+    } else {
+        Err(types_error::PgError::error("unrecognized node type"))
     }
 }
 
@@ -2792,9 +2797,9 @@ fn pullup_replace_vars_subquery<'mcx>(
         };
         replace_rte_variables(&mut node, varno, 1, &mut cb, &mut none_outer)?;
     }
-    match node {
-        Node::Query(q) => *query = q,
-        _ => unreachable!("pullup_replace_vars_subquery: node is no longer a Query"),
+    match node.into_query() {
+        Some(q) => *query = q,
+        None => unreachable!("pullup_replace_vars_subquery: node is no longer a Query"),
     }
     Ok(())
 }
@@ -2855,10 +2860,7 @@ fn pullup_replace_vars_callback<'mcx>(
         if need_phv {
             let wrap = compute_wrap(mcx, root, rcon, var, &newnode)?;
             if wrap {
-                let inner = match newnode {
-                    Node::Expr(e) => e,
-                    _ => unreachable!(),
-                };
+                let inner = newnode.into_expr().unwrap_or_else(|| unreachable!());
                 let phv = placeholder::make_placeholder_expr::call(
                     root,
                     inner,
@@ -2877,16 +2879,24 @@ fn pullup_replace_vars_callback<'mcx>(
 
     // Propagate any varnullingrels into the replacement expression.
     if var_has_nullingrels {
-        match &mut newnode {
-            Node::Expr(Expr::Var(newvar)) => {
+        // Peel the `Node::Expr` wrapper first (structural), then dispatch the
+        // inner `Expr` enum: a bare Var/PHV is handled directly, anything else
+        // falls through to the general walk below.
+        let handled_directly = match newnode.as_expr_mut() {
+            Some(Expr::Var(newvar)) => {
                 debug_assert_eq!(newvar.varlevelsup, 0);
                 expr_relids_add_in_place(&mut newvar.varnullingrels, &var.varnullingrels);
+                true
             }
-            Node::Expr(Expr::PlaceHolderVar(newphv)) => {
+            Some(Expr::PlaceHolderVar(newphv)) => {
                 debug_assert_eq!(newphv.phlevelsup, 0);
                 expr_relids_add_in_place(&mut newphv.phnullingrels, &var.varnullingrels);
+                true
             }
-            _ => {
+            _ => false,
+        };
+        if !handled_directly {
+            {
                 // There should be Vars/PHVs within the expression that we can
                 // modify. Subquery Vars/PHVs get the full var->varnullingrels;
                 // lateral references get only the nullingrels that apply to them.
@@ -2937,9 +2947,9 @@ fn pullup_replace_vars_callback<'mcx>(
         IncrementVarSublevelsUp(&mut newnode, varlevelsup as i32, 0)?;
     }
 
-    match newnode {
-        Node::Expr(e) => Ok(e),
-        _ => Err(types_error::PgError::error(
+    match newnode.into_expr() {
+        Some(e) => Ok(e),
+        None => Err(types_error::PgError::error(
             "pullup_replace_vars: replacement is not an expression",
         )),
     }
@@ -3052,10 +3062,7 @@ fn compute_wrap<'mcx>(
         }
     }
 
-    let newexpr = match newnode {
-        Node::Expr(e) => Some(e),
-        _ => None,
-    };
+    let newexpr = newnode.as_expr();
     if contain_nullable_vars && !contain_nonstrict_functions(newexpr)? {
         let _ = mcx;
         Ok(false)

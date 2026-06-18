@@ -463,7 +463,7 @@ fn pull_up_sublinks_qual_recurse<'mcx>(
 
     // IsA(node, SubLink)? — in the analyzed tree, a SubLink qual is
     // Node::Expr(Expr::SubLink(..)).
-    if let Node::Expr(Expr::SubLink(sublink)) = &*node {
+    if let Some(Expr::SubLink(sublink)) = node.as_expr() {
         // Is it a convertible ANY or EXISTS clause?
         if sublink.subLinkType == SubLinkType::Any {
             // Try the VALUES-sequence simplification first. (C extracts
@@ -568,13 +568,13 @@ fn pull_up_sublinks_qual_recurse<'mcx>(
 
     // is_andclause(node)?
     let is_and = matches!(
-        &*node,
-        Node::Expr(Expr::BoolExpr(b)) if b.boolop == types_nodes::primnodes::BoolExprType::AND_EXPR
+        node.as_expr(),
+        Some(Expr::BoolExpr(b)) if b.boolop == types_nodes::primnodes::BoolExprType::AND_EXPR
     );
     if is_and {
         // Recurse into AND clause.
-        let args = match PgBox::into_inner(node) {
-            Node::Expr(Expr::BoolExpr(b)) => b.args,
+        let args = match PgBox::into_inner(node).into_expr() {
+            Some(Expr::BoolExpr(b)) => b.args,
             _ => unreachable!(),
         };
         let mut newclauses: alloc::vec::Vec<Expr> = alloc::vec::Vec::new();
@@ -592,14 +592,13 @@ fn pull_up_sublinks_qual_recurse<'mcx>(
             )?;
             if let Some(nc) = newclause {
                 // The walk hands back a Node; an AND arg is always an Expr.
-                match PgBox::into_inner(nc) {
-                    Node::Expr(e) => newclauses.push(e),
-                    other => {
+                match PgBox::into_inner(nc).into_expr() {
+                    Some(e) => newclauses.push(e),
+                    None => {
                         // Shouldn't happen (a qual subtree is an expression);
                         // keep it faithful by re-wrapping is impossible since
                         // newclauses is Vec<Expr>. Treat any non-Expr as a hard
                         // error mirroring C's type expectations.
-                        let _ = other;
                         return Err(types_error::PgError::error(
                             "pull_up_sublinks: non-expression AND clause",
                         ));
