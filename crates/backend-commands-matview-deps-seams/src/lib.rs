@@ -201,9 +201,11 @@ seam_core::seam!(
     /// `table_finish_bulk_insert(rel, options)` (tableam.h inline) — flush any
     /// remaining buffered tuples for a bulk insert and, for
     /// `TABLE_INSERT_SKIP_WAL`, fsync the relation. Called by
-    /// `transientrel_shutdown`. The heap AM's `finish_bulk_insert` vtable slot is
-    /// not yet ported, so this stays on the frontier and panics until it lands
-    /// (mirror-PG-and-panic), matching `backend-commands-createas`.
+    /// `transientrel_shutdown`. INSTALLED by `backend-access-table-tableam` (the
+    /// tableam.h inline owner): the heap AM (`heapam_methods`) leaves the
+    /// optional `finish_bulk_insert` vtable slot NULL, so the inline is a
+    /// faithful no-op for the only AM in the tree, matching
+    /// `backend-commands-createas`.
     pub fn table_finish_bulk_insert<'mcx>(
         rel: &types_rel::Relation<'mcx>,
         options: i32,

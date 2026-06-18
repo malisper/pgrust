@@ -32,6 +32,9 @@ backend-tcop-cmdtag = { path = "../backend-tcop-cmdtag" }
 backend-utils-mmgr-portalmem = { path = "../backend-utils-mmgr-portalmem" }
 
 # outward seam crates (cyclic owners)
+backend-commands-createas-seams = { path = "../backend-commands-createas-seams" }
+backend-rewrite-rewritehandler-seams = { path = "../backend-rewrite-rewritehandler-seams" }
+backend-optimizer-plan-planner-seams = { path = "../backend-optimizer-plan-planner-seams" }
 backend-utils-mmgr-portalmem-seams = { path = "../backend-utils-mmgr-portalmem-seams" }
 backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
 backend-tcop-dest-seams = { path = "../backend-tcop-dest-seams" }

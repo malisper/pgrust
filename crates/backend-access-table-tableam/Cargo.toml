@@ -21,6 +21,8 @@ types-storage = { path = "../types-storage" }
 types-tableam = { path = "../types-tableam" }
 backend-access-table-tableam-seams = { path = "../backend-access-table-tableam-seams" }
 backend-access-table-tableam-bm-seams = { path = "../backend-access-table-tableam-bm-seams" }
+backend-commands-createas-seams = { path = "../backend-commands-createas-seams" }
+backend-commands-matview-deps-seams = { path = "../backend-commands-matview-deps-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-access-common-syncscan-seams = { path = "../backend-access-common-syncscan-seams" }
 backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }

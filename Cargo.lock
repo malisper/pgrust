@@ -2786,6 +2786,8 @@ dependencies = [
  "backend-access-table-tableam-bm-seams",
  "backend-access-table-tableam-seams",
  "backend-access-transam-xact-seams",
+ "backend-commands-createas-seams",
+ "backend-commands-matview-deps-seams",
  "backend-executor-execTuples-seams",
  "backend-optimizer-path-costsize-seams",
  "backend-optimizer-util-plancat-seams",
@@ -16770,9 +16772,12 @@ name = "backend-tcop-pquery"
 version = "0.0.0"
 dependencies = [
  "backend-access-transam-xact-seams",
+ "backend-commands-createas-seams",
  "backend-executor-execMain",
  "backend-executor-execTuples-seams",
  "backend-executor-tstorereceiver-seams",
+ "backend-optimizer-plan-planner-seams",
+ "backend-rewrite-rewritehandler-seams",
  "backend-tcop-cmdtag",
  "backend-tcop-dest",
  "backend-tcop-dest-seams",
