@@ -1867,13 +1867,16 @@ mod recurrence_guard {
         // entries below are the genuinely-keystone-blocked remainder; DELETE
         // each as its blocker lands:
         //
-        //  * StrategyHandle↔BufferAccessStrategy bridge (UNPORTED): the opaque
-        //    vacuum `StrategyHandle(u64)` has no bridge to freelist.c's real
-        //    `BufferAccessStrategyData`, so the access-strategy seams can't be
-        //    installed without inventing a handle registry (forbidden). Also
-        //    blocks vacuum.c's own get_access_strategy_with_size (excluded as an
-        //    outward call there). → free_access_strategy_pv,
-        //    get_access_strategy_with_size_basvac, get_access_strategy_buffer_count.
+        //  * StrategyHandle↔BufferAccessStrategy bridge (UNPORTED, leader side):
+        //    the leader's inherited vacuum `StrategyHandle(u64)` still has no
+        //    bridge to freelist.c's real `BufferAccessStrategyData` (the broad
+        //    vacuum/vacuumlazy/analyze `StrategyHandle` keystone), so the leader's
+        //    `get_access_strategy_buffer_count(StrategyHandle)` read stays blocked.
+        //    (The WORKER-side `get_access_strategy_with_size_basvac` /
+        //    `free_access_strategy_pv` are now re-signed to the real
+        //    `BufferAccessStrategy` and INSTALLED by vacuumparallel::init_seams
+        //    over backend-storage-buffer-support — each worker creates/frees its
+        //    own ring; entries removed below.) → get_access_strategy_buffer_count.
         //  * #4 by-OID heap relation reopen (rides the vacuumlazy-mcx work): the
         //    worker reopens the heap + indexes BY OID and the seams model the
         //    relation as an opaque Oid handle; there is no provider returning the
@@ -1881,11 +1884,6 @@ mod recurrence_guard {
         //    options / get_namespace_name in this shape. → table_open_lock,
         //    table_close_lock, am_parallel_vacuum_options, am_use_maintenance_work_mem,
         //    relation_get_number_of_blocks_pv, relation_get_namespace_name_pv.
-        //  * parallel error-context callback model (UNPORTED): push/pop of
-        //    parallel_vacuum_error_callback onto error_context_stack has no owner.
-        //    → push_parallel_vacuum_error_context, pop_parallel_vacuum_error_context.
-        //  * MyProc->statusFlags / PROC_IN_VACUUM accessor (UNPORTED).
-        //    → my_proc_in_vacuum_only.
         //
         // RESOLVED (vp-dsm lane): the VacuumSharedCostBalance/VacuumActiveNWorkers
         // DSM atomics and the per-worker DSM instrument usage slots are now
@@ -1894,14 +1892,17 @@ mod recurrence_guard {
         // enable seams point vacuum.c's globals at it, both atomic-mutate the same
         // cell. The instrument slots live in vacuumparallel's DSM side-table and
         // delegate the buffer/WAL math to backend-executor-instrument.
+        //
+        // RESOLVED (vp-small lane): the worker buffer-access strategy
+        // (get_access_strategy_with_size_basvac / free_access_strategy_pv,
+        // re-signed to the real BufferAccessStrategy), the MyProc->statusFlags
+        // PROC_IN_VACUUM accessor (set_proc_in_vacuum_flags / my_proc_in_vacuum_only,
+        // over backend-storage-lmgr-proc), and the parallel error-context callback
+        // (push/pop_parallel_vacuum_error_context, faithful no-ops since the
+        // ambient error_context_stack chain is retired) are now installed.
         ("backend_commands_vacuum", "am_parallel_vacuum_options"),
         ("backend_commands_vacuum", "am_use_maintenance_work_mem"),
-        ("backend_commands_vacuum", "free_access_strategy_pv"),
         ("backend_commands_vacuum", "get_access_strategy_buffer_count"),
-        ("backend_commands_vacuum", "get_access_strategy_with_size_basvac"),
-        ("backend_commands_vacuum", "my_proc_in_vacuum_only"),
-        ("backend_commands_vacuum", "pop_parallel_vacuum_error_context"),
-        ("backend_commands_vacuum", "push_parallel_vacuum_error_context"),
         ("backend_commands_vacuum", "relation_get_namespace_name_pv"),
         ("backend_commands_vacuum", "relation_get_number_of_blocks_pv"),
         ("backend_commands_vacuum", "table_close_lock"),

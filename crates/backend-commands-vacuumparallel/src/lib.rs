@@ -68,10 +68,11 @@ use types_core::instrument::{BufferUsage, WalUsage};
 use types_core::Oid;
 use types_dsa::{DsaHandle, DsaPointer};
 use types_execparallel::ParallelContextHandle;
+use types_storage::buf::BufferAccessStrategy;
 use types_storage::lock::{RowExclusiveLock, ShareUpdateExclusiveLock};
 use types_storage::storage::LWTRANCHE_PARALLEL_VACUUM_DSA;
 use types_vacuum::vacuumlazy::{
-    ParallelVacuumInit, ParallelVacuumInitArgs, ParallelVacuumStateHandle, StrategyHandle, TidStore,
+    ParallelVacuumInit, ParallelVacuumInitArgs, ParallelVacuumStateHandle, TidStore,
 };
 use types_vacuum::vacuumparallel::{
     BufferAccessStrategyHandle, IndexBulkDeleteResult, IndexVacuumInfo, VacDeadItemsInfo,
@@ -86,6 +87,8 @@ use backend_access_transam_parallel_rt_seams as prt;
 
 use backend_access_common_tidstore as tidstore;
 use backend_executor_instrument as instrument;
+use backend_storage_buffer_support as buffer_support;
+use backend_storage_lmgr_proc::proc_misc;
 use backend_tcop_postgres::globals as tcop;
 use backend_utils_init_small::globals as initglobals;
 use backend_utils_activity_status as activity_status;
@@ -213,7 +216,13 @@ struct ParallelVacuumState {
     nindexes_parallel_bulkdel: i32,
     nindexes_parallel_cleanup: i32,
     nindexes_parallel_condcleanup: i32,
-    bstrategy: StrategyHandle,
+    /// `BufferAccessStrategy bstrategy` — the worker's OWN VACUUM ring, the real
+    /// `freelist.c` object (`Rc<RefCell<BufferAccessStrategyData>>`, `None` for
+    /// the C `NULL` strategy). Each parallel worker creates its own ring sized
+    /// from the DSM-shared `ring_nbuffers`; the leader never populates this field
+    /// (its inherited `StrategyHandle` is consumed only for `ring_nbuffers` in
+    /// `parallel_vacuum_init`).
+    bstrategy: BufferAccessStrategy,
     relnamespace: Option<String>,
     relname: Option<String>,
     indname: Option<String>,
@@ -236,7 +245,7 @@ impl Default for ParallelVacuumState {
             nindexes_parallel_bulkdel: 0,
             nindexes_parallel_cleanup: 0,
             nindexes_parallel_condcleanup: 0,
-            bstrategy: StrategyHandle::none(),
+            bstrategy: None,
             relnamespace: None,
             relname: None,
             indname: None,
@@ -434,9 +443,21 @@ fn dsm_load_worker_usage(worker: usize) -> (BufferUsage, WalUsage) {
 // Conversions between the two strategy-handle newtypes.
 // =======================================================================
 
+/// Bridge the worker's real `BufferAccessStrategy` to the opaque
+/// `BufferAccessStrategyHandle` carried by `types_vacuum`'s `IndexVacuumInfo`.
+///
+/// `IndexVacuumInfo.strategy` is an opaque carrier on the still-keystone-blocked
+/// vacuumparallel index path (`vac_bulkdel_one_index` /
+/// `vac_cleanup_one_index`), which is never dereferenced back to a real ring
+/// (the broad `StrategyHandle↔BufferAccessStrategy` bridge keystone). We name
+/// the strategy by its backing-object identity (the `Rc` allocation address),
+/// `0` for the C `NULL` strategy.
 #[inline]
-fn strategy_to_buffer_access(s: StrategyHandle) -> BufferAccessStrategyHandle {
-    BufferAccessStrategyHandle(s.id)
+fn strategy_to_buffer_access(s: &BufferAccessStrategy) -> BufferAccessStrategyHandle {
+    match s {
+        None => BufferAccessStrategyHandle(0),
+        Some(rc) => BufferAccessStrategyHandle(alloc::rc::Rc::as_ptr(rc) as u64),
+    }
 }
 
 // =======================================================================
@@ -484,7 +505,9 @@ fn parallel_vacuum_init(args: ParallelVacuumInitArgs) -> PgResult<ParallelVacuum
         indrels: indrels.clone(),
         nindexes,
         will_parallel_vacuum,
-        bstrategy,
+        // The leader's inherited `bstrategy` (a `StrategyHandle`) is consumed
+        // only for `ring_nbuffers` below; `pvs.bstrategy` (the real worker ring)
+        // stays `None` on the leader — each worker creates its own.
         heaprel: rel,
         ..Default::default()
     };
@@ -1180,7 +1203,7 @@ fn parallel_vacuum_process_one_index(
         estimated_count: pvs.shared.estimated_count,
         message_level: MESSAGE_LEVEL_DEBUG2,
         num_heap_tuples: pvs.shared.reltuples,
-        strategy: strategy_to_buffer_access(pvs.bstrategy),
+        strategy: strategy_to_buffer_access(&pvs.bstrategy),
     };
     debug_assert_eq!(ivinfo.message_level, DEBUG2.0);
 
@@ -1371,9 +1394,8 @@ pub fn parallel_vacuum_main() -> PgResult<()> {
     };
 
     /* Each parallel VACUUM worker gets its own access strategy. */
-    let bstrategy =
+    pvs.bstrategy =
         vac::get_access_strategy_with_size_basvac::call(pvs.shared.ring_nbuffers * (BLCKSZ / 1024))?;
-    pvs.bstrategy = bstrategy;
 
     /* Setup error traceback support for ereport() */
     vac::push_parallel_vacuum_error_context::call()?;
@@ -1403,7 +1425,7 @@ pub fn parallel_vacuum_main() -> PgResult<()> {
 
     vac::vac_close_indexes_lock::call(pvs.indrels.clone(), RowExclusiveLock)?;
     vac::table_close_lock::call(rel, ShareUpdateExclusiveLock)?;
-    vac::free_access_strategy_pv::call(bstrategy)?;
+    vac::free_access_strategy_pv::call(core::mem::take(&mut pvs.bstrategy))?;
 
     Ok(())
 }
@@ -1524,6 +1546,40 @@ fn install_pv_outward_seams() {
     });
     vac::pgstat_report_activity_running_pv::set(pgstat_report_activity_running_pv_impl);
     vac::pgstat_progress_parallel_incr_param::set(pgstat_progress_parallel_incr_param_impl);
+
+    // --- freelist.c worker buffer-access strategy --------------------------
+    // `GetAccessStrategyWithSize(BAS_VACUUM, ring_size_kb)` — each parallel
+    // worker creates its OWN ring sized from the DSM-shared `ring_nbuffers`.
+    vac::get_access_strategy_with_size_basvac::set(|ring_size_kb| {
+        buffer_support::get_access_strategy_with_size(
+            types_storage::buf::BufferAccessStrategyType::BasVacuum,
+            ring_size_kb,
+        )
+    });
+    // `FreeAccessStrategy(strategy)` — drop the worker's ring (NULL is a no-op).
+    vac::free_access_strategy_pv::set(|strategy| {
+        buffer_support::free_access_strategy(strategy);
+        Ok(())
+    });
+
+    // --- proc.c MyProc->statusFlags PROC_IN_VACUUM -------------------------
+    // `MyProc->statusFlags |= PROC_IN_VACUUM [| PROC_VACUUM_FOR_WRAPAROUND]`
+    // (vacuum.c:2066) and the `MyProc->statusFlags == PROC_IN_VACUUM` worker
+    // assert (vacuumparallel.c:1007).
+    vac::set_proc_in_vacuum_flags::set(proc_misc::set_my_proc_in_vacuum_flags);
+    vac::my_proc_in_vacuum_only::set(|| Ok(proc_misc::my_proc_status_flags_is_in_vacuum_only()));
+
+    // --- parallel-vacuum error-context callback ----------------------------
+    // C pushes `parallel_vacuum_error_callback` onto `error_context_stack` for
+    // the duration of `parallel_vacuum_process_safe_indexes`. This tree retires
+    // the ambient `error_context_stack` chain (docs/query-lifecycle-raii.md):
+    // error context attaches on propagation rather than via an ambient callback
+    // walk, so installing/removing the callback is a faithful no-op. The
+    // callback body itself is `parallel_vacuum_error_callback` (below), driven
+    // off `pvs.{status,indname,relnamespace,relname}` which the index loop keeps
+    // current exactly as C does.
+    vac::push_parallel_vacuum_error_context::set(|| Ok(()));
+    vac::pop_parallel_vacuum_error_context::set(|| Ok(()));
 }
 
 /// `debug_query_string = sharedquery` (vacuumparallel.c:1015). The worker copies

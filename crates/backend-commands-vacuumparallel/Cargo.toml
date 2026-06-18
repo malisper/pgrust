@@ -39,3 +39,9 @@ backend-tcop-postgres = { path = "../backend-tcop-postgres" }
 backend-utils-init-small = { path = "../backend-utils-init-small" }
 backend-utils-activity-status = { path = "../backend-utils-activity-status" }
 backend-utils-activity-small = { path = "../backend-utils-activity-small" }
+
+# `GetAccessStrategyWithSize`/`FreeAccessStrategy` (freelist.c) — the worker's
+# own VACUUM ring.
+backend-storage-buffer-support = { path = "../backend-storage-buffer-support" }
+# `MyProc->statusFlags` PROC_IN_VACUUM accessor (proc.c).
+backend-storage-lmgr-proc = { path = "../backend-storage-lmgr-proc" }

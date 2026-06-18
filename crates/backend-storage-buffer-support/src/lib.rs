@@ -92,6 +92,30 @@ pub fn get_access_strategy(btype: BufferAccessStrategyType) -> PgResult<BufferAc
     Ok(ring.map(|ring| Rc::new(RefCell::new(ring))))
 }
 
+/// `GetAccessStrategyWithSize(btype, ring_size_kb)` (freelist.c) — create a
+/// `BufferAccessStrategy` whose ring holds `ring_size_kb / (BLCKSZ/1024)`
+/// buffers. Returns the C `NULL` (`None`) strategy when `ring_size_kb` rounds
+/// down to zero buffers. Used directly by `vacuum.c` / `vacuumparallel.c` to
+/// size the VACUUM ring from `vacuum_buffer_usage_limit`.
+pub fn get_access_strategy_with_size(
+    btype: BufferAccessStrategyType,
+    ring_size_kb: i32,
+) -> PgResult<BufferAccessStrategy> {
+    let nbuffers_total = backend_utils_init_small_seams::nbuffers::call();
+    let ring = strategy::get_access_strategy_with_size_ring(btype, ring_size_kb, nbuffers_total)?;
+    Ok(ring.map(|ring| Rc::new(RefCell::new(ring))))
+}
+
+/// `GetAccessStrategyBufferCount(strategy)` (freelist.c) — the number of buffers
+/// in the ring; `0` for the C `NULL` (`None`) strategy, matching
+/// `GetAccessStrategyWithSize` returning `NULL` at 0 size.
+pub fn get_access_strategy_buffer_count(strategy: &BufferAccessStrategy) -> i32 {
+    match strategy {
+        None => 0,
+        Some(s) => s.borrow().nbuffers,
+    }
+}
+
 /// `FreeAccessStrategy(strategy)` (freelist.c) installed inward seam. A NULL
 /// (`None`) strategy is a no-op (C's guard); otherwise dropping the handle frees
 /// the ring once the last reference is gone (C's `pfree`).

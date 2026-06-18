@@ -34,6 +34,44 @@ pub fn set_my_proc_recovery_conflict_pending(value: bool) {
     proc_shmem::with_my_proc(|p| p.recoveryConflictPending = value);
 }
 
+/// `MyProc->statusFlags |= PROC_IN_VACUUM [| PROC_VACUUM_FOR_WRAPAROUND]`
+/// (commands/vacuum.c:2066-2070) — the lazy-VACUUM `vacuum_rel` path setting the
+/// PROC flags so concurrent VACUUMs may ignore this backend when computing their
+/// `OldestXmin`. Done under `ProcArrayLock` (exclusive), and the dense
+/// `ProcGlobal->statusFlags[MyProc->pgxactoff]` mirror is kept in sync, exactly
+/// as C does.
+pub fn set_my_proc_in_vacuum_flags(is_wraparound: bool) -> PgResult<()> {
+    use types_storage::storage::{PROC_IN_VACUUM, PROC_VACUUM_FOR_WRAPAROUND};
+
+    // LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
+    lwlock_seams::lwlock_acquire_proc_array::call(LWLockMode::LW_EXCLUSIVE)?;
+
+    let (flags, pgxactoff) = proc_shmem::with_my_proc(|p| {
+        // MyProc->statusFlags |= PROC_IN_VACUUM;
+        p.statusFlags |= PROC_IN_VACUUM;
+        // if (params->is_wraparound) MyProc->statusFlags |= PROC_VACUUM_FOR_WRAPAROUND;
+        if is_wraparound {
+            p.statusFlags |= PROC_VACUUM_FOR_WRAPAROUND;
+        }
+        (p.statusFlags, p.pgxactoff)
+    });
+
+    // ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
+    proc_shmem::set_proc_array_status_flags(pgxactoff, flags);
+
+    // LWLockRelease(ProcArrayLock);
+    lwlock_seams::lwlock_release_proc_array::call()?;
+    Ok(())
+}
+
+/// `MyProc->statusFlags == PROC_IN_VACUUM` (commands/vacuumparallel.c:1007) — a
+/// parallel-vacuum worker must carry ONLY the `PROC_IN_VACUUM` flag (we don't
+/// support parallel vacuum for autovacuum). Used in the worker entry `Assert`.
+pub fn my_proc_status_flags_is_in_vacuum_only() -> bool {
+    use types_storage::storage::PROC_IN_VACUUM;
+    proc_shmem::with_my_proc(|p| p.statusFlags == PROC_IN_VACUUM)
+}
+
 /// `MyProc->recoveryConflictPending` (proc.c / postgres.c) — read this
 /// backend's recovery-conflict-pending flag. `errdetail_abort`
 /// (tcop/postgres.c) reads it to phrase the abort reason.

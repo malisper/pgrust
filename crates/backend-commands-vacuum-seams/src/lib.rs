@@ -404,15 +404,18 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `FreeAccessStrategy(strategy)`.
-    pub fn free_access_strategy_pv(strategy: StrategyHandle) -> PgResult<()>
+    pub fn free_access_strategy_pv(strategy: types_storage::buf::BufferAccessStrategy) -> PgResult<()>
 );
 seam_core::seam!(
     /// `GetAccessStrategyWithSize(BAS_VACUUM, ring_size)` — worker's own ring.
-    pub fn get_access_strategy_with_size_basvac(ring_size: i32) -> PgResult<StrategyHandle>
+    pub fn get_access_strategy_with_size_basvac(ring_size: i32) -> PgResult<types_storage::buf::BufferAccessStrategy>
 );
 seam_core::seam!(
     /// `GetAccessStrategyBufferCount(bstrategy)` — number of buffers in the
-    /// strategy ring (`freelist.c`); `0` for the NULL strategy.
+    /// strategy ring (`freelist.c`); `0` for the NULL strategy. Keyed on the
+    /// leader's inherited `StrategyHandle` (the broad
+    /// `StrategyHandle↔BufferAccessStrategy` bridge keystone), not the worker's
+    /// own real strategy.
     pub fn get_access_strategy_buffer_count(strategy: StrategyHandle) -> PgResult<i32>
 );
 seam_core::seam!(

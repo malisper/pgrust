@@ -7916,6 +7916,7 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-rel",
+ "types-storage",
  "types-tuple",
  "types-vacuum",
 ]
@@ -7930,6 +7931,8 @@ dependencies = [
  "backend-access-transam-parallel-rt-seams",
  "backend-commands-vacuum-seams",
  "backend-executor-instrument",
+ "backend-storage-buffer-support",
+ "backend-storage-lmgr-proc",
  "backend-tcop-postgres",
  "backend-utils-activity-small",
  "backend-utils-activity-status",
