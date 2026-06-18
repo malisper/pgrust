@@ -1829,6 +1829,20 @@ pub fn lookup_rowtype_tupdesc_domain<'mcx>(
     }
 }
 
+/// `record_type_typmod_hash` — hash function for the `RecordCacheHash` table of
+/// `RecordCacheEntry`. The C body is `hashRowType(entry->tupdesc)`.
+fn record_type_typmod_hash(tupdesc: &TupleDescData<'_>) -> u32 {
+    tupdesc_seams::hash_row_type::call(tupdesc)
+}
+
+/// `record_type_typmod_compare` — match function for the `RecordCacheHash`
+/// table of `RecordCacheEntry`. The C body is
+/// `equalRowTypes(left->tupdesc, right->tupdesc) ? 0 : 1`; we return a `bool`
+/// (`true` == equal == C return value 0).
+fn record_type_typmod_compare(left: &TupleDescData<'_>, right: &TupleDescData<'_>) -> bool {
+    tupdesc_seams::equal_row_types::call(left, right)
+}
+
 /// `assign_record_type_typmod` — assign/look up the typmod for a record
 /// tupdesc, writing the assigned typmod into `tup_desc->tdtypmod`.
 pub fn assign_record_type_typmod(tup_desc: &mut TupleDescData<'_>) -> PgResult<()> {
@@ -1891,7 +1905,7 @@ pub fn assign_record_type_typmod(tup_desc: &mut TupleDescData<'_>) -> PgResult<(
 
 /// Find the typmod whose stored descriptor structurally matches `tup_desc`.
 fn record_cache_find(tup_desc: &TupleDescData<'_>) -> PgResult<Option<i32>> {
-    let hash = tupdesc_seams::hash_row_type::call(tup_desc);
+    let hash = record_type_typmod_hash(tup_desc);
     // Snapshot the candidate descriptor ids for the bucket; compare each
     // outside the borrow (the seam may itself touch the cache).
     let ids: Vec<u64> = with_state(|st| st.record_cache.get(&hash).map(|b| b.to_vec()).unwrap_or_default());
@@ -1903,7 +1917,7 @@ fn record_cache_find(tup_desc: &TupleDescData<'_>) -> PgResult<Option<i32>> {
                 .map(|slot| {
                     slot.tupdesc
                         .as_ref()
-                        .map(|td| (td.tdtypmod, tupdesc_seams::equal_row_types::call(tup_desc, td)))
+                        .map(|td| (td.tdtypmod, record_type_typmod_compare(tup_desc, td)))
                 })
         });
         if let Some(Some((typmod, eq))) = matched {
@@ -1918,7 +1932,7 @@ fn record_cache_find(tup_desc: &TupleDescData<'_>) -> PgResult<Option<i32>> {
 /// Insert (or overwrite) a `RecordCacheEntry` mapping the structural row type of
 /// `key_desc` to the stored descriptor id at `typmod`.
 fn record_cache_insert(key_desc: &TupleDescData<'_>, typmod: i32) -> PgResult<()> {
-    let hash = tupdesc_seams::hash_row_type::call(key_desc);
+    let hash = record_type_typmod_hash(key_desc);
     let new_id = with_state(|st| st.record_cache_array[typmod as usize].id);
     // Find an existing structural match in the bucket to overwrite.
     let ids: Vec<u64> = with_state(|st| st.record_cache.get(&hash).map(|b| b.to_vec()).unwrap_or_default());
@@ -1928,7 +1942,7 @@ fn record_cache_insert(key_desc: &TupleDescData<'_>, typmod: i32) -> PgResult<()
             st.record_cache_array
                 .iter()
                 .find(|slot| slot.id == *id)
-                .and_then(|slot| slot.tupdesc.as_ref().map(|td| tupdesc_seams::equal_row_types::call(key_desc, td)))
+                .and_then(|slot| slot.tupdesc.as_ref().map(|td| record_type_typmod_compare(key_desc, td)))
                 .unwrap_or(false)
         });
         if eq {
