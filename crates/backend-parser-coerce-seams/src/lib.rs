@@ -231,3 +231,20 @@ seam_core::seam!(
     /// `pstate` argument is unused by the computation, so it is dropped.
     pub fn select_common_typmod(exprs: &[Expr], common_type: Oid) -> PgResult<i32>
 );
+
+seam_core::seam!(
+    /// `coerce_null_to_domain(typid, typmod, collation, typlen, typbyval)`
+    /// (parse_coerce.c): build a NULL `Const` of the domain's base type and, if
+    /// `typid` is a domain, wrap it in the domain coercion so domain
+    /// constraints (e.g. NOT NULL) are applied. Used by the planner's
+    /// `expand_insert_targetlist` to fill a missing INSERT column with a NULL of
+    /// the column's (possibly domain) type.
+    pub fn coerce_null_to_domain<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        typid: Oid,
+        typmod: i32,
+        collation: Oid,
+        typlen: i32,
+        typbyval: bool,
+    ) -> PgResult<types_nodes::primnodes::Expr>
+);

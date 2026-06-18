@@ -103,7 +103,8 @@ use types_pathnodes::{
     IndexOptInfo, NodeId, Path, PathId, PathKey, PathNode, PathTarget, PlannerInfo, Relids, RinfoId,
     RELOPT_BASEREL, RELOPT_OTHER_MEMBER_REL, RTE_RELATION,
 };
-use types_core::primitive::{AttrNumber, InvalidOid, Oid};
+use types_core::primitive::{AttrNumber, Index, InvalidOid, Oid};
+use types_tuple::access::RELKIND_FOREIGN_TABLE;
 
 use backend_nodes_core::makefuncs::{make_bool_const, make_orclause, make_target_entry};
 use backend_nodes_core::nodefuncs::expression_tree_mutator;
@@ -1083,8 +1084,7 @@ pub fn create_plan_recurse<'mcx>(
         T_RecursiveUnion => create_recursiveunion_plan(mcx, root, run, best_path),
         // create_lockrows_plan is not yet ported (PlanRowMark carrier gap); seam.
         T_LockRows => cp_seam::create_lockrows_plan::call(mcx, root, run, best_path, flags),
-        // create_modifytable_plan is not yet ported; stays a forward seam-panic.
-        T_ModifyTable => cp_seam::create_modifytable_plan::call(mcx, root, run, best_path),
+        T_ModifyTable => create_modifytable_plan(mcx, root, run, best_path),
         T_Limit => create_limit_plan(mcx, root, run, best_path, flags),
         T_GatherMerge => create_gather_merge_plan(mcx, root, run, best_path),
         other => Err(PgError::error(alloc::format!(
@@ -3294,6 +3294,253 @@ fn create_limit_plan<'mcx>(
     copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
 
     Ok(Node::Limit(plan))
+}
+
+// ===========================================================================
+// ModifyTable: create_modifytable_plan + make_modifytable (createplan.c:2808).
+// ===========================================================================
+
+/// `create_modifytable_plan(root, best_path)` (createplan.c:2808) — create a
+/// `ModifyTable` plan and (recursively) the plan for its subpath.
+fn create_modifytable_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+) -> PgResult<Node<'mcx>> {
+    let p = match root.path(best_path) {
+        PathNode::ModifyTablePath(p) => p,
+        _ => unreachable!("create_modifytable_plan on non-ModifyTablePath"),
+    };
+    let subpath = p.subpath.expect("create_modifytable_plan: ModifyTablePath has no subpath");
+    let operation = p.operation;
+    let can_set_tag = p.canSetTag;
+    let nominal_relation = p.nominalRelation;
+    let root_relation = p.rootRelation;
+    let part_cols_updated = p.partColsUpdated;
+    let result_relations: Vec<i32> = p.resultRelations.clone();
+    let update_colnos_lists: Vec<Vec<AttrNumber>> = p.updateColnosLists.clone();
+    let row_marks: Vec<NodeId> = p.rowMarks.clone();
+    let onconflict = p.onconflict;
+    let epq_param = p.epqParam;
+    // INSERT-spine bound: WCO/RETURNING/MERGE legs need their node lists
+    // resolved out of the arena into owned plan structures, which the executor
+    // ModifyTable does not yet consume; defer them loudly when present.
+    if !p.withCheckOptionLists.is_empty() {
+        panic!("create_modifytable_plan: WITH CHECK OPTION lists not yet ported");
+    }
+    if !p.returningLists.is_empty() {
+        panic!("create_modifytable_plan: RETURNING lists not yet ported");
+    }
+    if !p.mergeActionLists.is_empty() || !p.mergeJoinConditions.is_empty() {
+        panic!("create_modifytable_plan: MERGE action/join-condition lists not yet ported");
+    }
+
+    // Subplan must produce exactly the specified tlist.
+    let mut subplan = create_plan_recurse(mcx, root, run, subpath, CP_EXACT_TLIST)?;
+
+    // Transfer resname/resjunk labeling, too, to keep executor happy. C calls
+    // apply_tlist_labeling(subplan->targetlist, root->processed_tlist); the
+    // installed seam labels the plan's top tlist from root->processed_tlist.
+    cp_seam::apply_tlist_labeling::call(mcx, root, &mut subplan)?;
+
+    let mut plan = make_modifytable(
+        mcx,
+        root,
+        run,
+        subplan,
+        operation,
+        can_set_tag,
+        nominal_relation,
+        root_relation,
+        part_cols_updated,
+        result_relations,
+        update_colnos_lists,
+        row_marks,
+        onconflict,
+        epq_param,
+    )?;
+
+    copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
+
+    Ok(Node::ModifyTable(plan))
+}
+
+/// `make_modifytable(...)` (createplan.c:7169) — build a `ModifyTable` plan node
+/// atop `subplan`. The plain-table INSERT/UPDATE/DELETE spine: no ON CONFLICT
+/// (arbiter inference), no foreign-table FDW plans.
+#[allow(clippy::too_many_arguments)]
+fn make_modifytable<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    subplan: Node<'mcx>,
+    operation: types_pathnodes::CmdType,
+    can_set_tag: bool,
+    nominal_relation: Index,
+    root_relation: Index,
+    part_cols_updated: bool,
+    result_relations: Vec<i32>,
+    update_colnos_lists: Vec<Vec<AttrNumber>>,
+    row_marks: Vec<NodeId>,
+    onconflict: Option<NodeId>,
+    epq_param: i32,
+) -> PgResult<types_nodes::modifytable::ModifyTable<'mcx>> {
+    use types_nodes::modifytable::ModifyTable;
+
+    // Assert(operation == CMD_MERGE || (operation == CMD_UPDATE ?
+    //   list_length(resultRelations) == list_length(updateColnosLists) :
+    //   updateColnosLists == NIL));
+    debug_assert!(
+        operation == types_pathnodes::CMD_MERGE
+            || if operation == types_pathnodes::CMD_UPDATE {
+                result_relations.len() == update_colnos_lists.len()
+            } else {
+                update_colnos_lists.is_empty()
+            }
+    );
+
+    if onconflict.is_some() {
+        panic!(
+            "make_modifytable: INSERT ... ON CONFLICT not yet ported (needs OnConflictExpr \
+             resolution, extract_update_targetlist_colnos over onConflictSet, and \
+             infer_arbiter_indexes)"
+        );
+    }
+
+    // resultRelations -> integer List of RT indexes.
+    let result_relations_field: Option<PgVec<'mcx, Index>> = if result_relations.is_empty() {
+        None
+    } else {
+        let mut v = vec_with_capacity_in(mcx, result_relations.len())?;
+        for &r in &result_relations {
+            v.push(r as Index);
+        }
+        Some(v)
+    };
+
+    // updateColnosLists -> List of integer Lists.
+    let update_colnos_lists_field: Option<PgVec<'mcx, PgVec<'mcx, i32>>> =
+        if update_colnos_lists.is_empty() {
+            None
+        } else {
+            let mut outer = vec_with_capacity_in(mcx, update_colnos_lists.len())?;
+            for sub in &update_colnos_lists {
+                let mut inner = vec_with_capacity_in(mcx, sub.len())?;
+                for &c in sub {
+                    inner.push(c as i32);
+                }
+                outer.push(inner);
+            }
+            Some(outer)
+        };
+
+    // rowMarks -> List of PlanRowMark nodes. Empty on the INSERT spine; a
+    // non-empty list is a locking/EvalPlanQual path deferred to that family.
+    if !row_marks.is_empty() {
+        panic!(
+            "make_modifytable: rowMarks (PlanRowMark list) resolution not yet ported \
+             (needs the PlanRowMark carrier)"
+        );
+    }
+
+    // returningOldAlias / returningNewAlias come off root->parse.
+    let parse = run.resolve(root.parse);
+    let returning_old_alias = match &parse.returningOldAlias {
+        Some(s) => Some(mcx::slice_in(mcx, s.as_bytes())?.into_boxed_slice()),
+        None => None,
+    };
+    let returning_new_alias = match &parse.returningNewAlias {
+        Some(s) => Some(mcx::slice_in(mcx, s.as_bytes())?.into_boxed_slice()),
+        None => None,
+    };
+
+    // FDW per-result-relation private data. For each result relation that is a
+    // foreign table, the FDW would construct private plan data; plain tables
+    // have no FdwRoutine, so fdw_private is NIL (None) for each. A foreign
+    // result relation is deferred to the FDW campaign.
+    let mut fdw_priv_lists: PgVec<'mcx, Option<PgBox<'mcx, Node<'mcx>>>> =
+        vec_with_capacity_in(mcx, result_relations.len())?;
+    for &rti_i in &result_relations {
+        let rti = rti_i as Index;
+        // If possible, get the FdwRoutine from our RelOptInfo; else the hard way.
+        // (INSERT targets aren't scanned, so they're usually not baserels.)
+        let rel_slot = root
+            .simple_rel_array
+            .get(rti as usize)
+            .copied()
+            .flatten();
+        let is_foreign = match rel_slot {
+            Some(rel_id) => root.rel(rel_id).fdwroutine.is_some(),
+            None => {
+                let rte = planner_rt_fetch(run, root, rti);
+                rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_RELATION
+                    && rte.relkind == RELKIND_FOREIGN_TABLE as i8
+            }
+        };
+        if is_foreign {
+            panic!(
+                "make_modifytable: foreign-table result relation (FDW PlanForeignModify / \
+                 PlanDirectModify) not yet ported (FDW campaign)"
+            );
+        }
+        // Plain table: fdwroutine == NULL, fdw_private = NIL.
+        fdw_priv_lists.push(None);
+    }
+
+    let plan_base = {
+        let mut p = Plan::default();
+        // setrefs.c will fill in the targetlist, if needed.
+        p.targetlist = None;
+        p.qual = None;
+        p.lefttree = Some(mcx::alloc_in(mcx, subplan)?);
+        p.righttree = None;
+        p
+    };
+
+    let node = ModifyTable {
+        plan: plan_base,
+        operation: cmdtype_path_to_node(operation),
+        canSetTag: can_set_tag,
+        nominalRelation: nominal_relation,
+        rootRelation: root_relation,
+        partColsUpdated: part_cols_updated,
+        resultRelations: result_relations_field,
+        updateColnosLists: update_colnos_lists_field,
+        withCheckOptionLists: None,
+        returningOldAlias: returning_old_alias,
+        returningNewAlias: returning_new_alias,
+        returningLists: None,
+        fdwPrivLists: Some(fdw_priv_lists),
+        fdwDirectModifyPlans: None,
+        rowMarks: None,
+        epqParam: epq_param,
+        // !onconflict branch: ON CONFLICT fields are all empty/none.
+        onConflictAction: types_nodes::nodes::OnConflictAction::ONCONFLICT_NONE,
+        arbiterIndexes: None,
+        onConflictSet: None,
+        onConflictCols: None,
+        onConflictWhere: None,
+        exclRelRTI: 0,
+        exclRelTlist: None,
+        mergeActionLists: None,
+        mergeJoinConditions: None,
+    };
+    Ok(node)
+}
+
+/// Map the path-layer `CmdType` (raw `u32`) to the plan-node `CmdType`.
+fn cmdtype_path_to_node(op: types_pathnodes::CmdType) -> types_nodes::nodes::CmdType {
+    use types_nodes::nodes::CmdType as N;
+    match op {
+        types_pathnodes::CMD_UNKNOWN => N::CMD_UNKNOWN,
+        types_pathnodes::CMD_SELECT => N::CMD_SELECT,
+        types_pathnodes::CMD_UPDATE => N::CMD_UPDATE,
+        types_pathnodes::CMD_INSERT => N::CMD_INSERT,
+        types_pathnodes::CMD_DELETE => N::CMD_DELETE,
+        types_pathnodes::CMD_MERGE => N::CMD_MERGE,
+        _ => N::CMD_UTILITY,
+    }
 }
 
 /// Map the path-layer `LimitOption` (types-pathnodes) to the plan-node

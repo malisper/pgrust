@@ -18,7 +18,7 @@
 //!   `create_customscan_plan` (custom-scan floor));
 //! * upper converters not yet ported (`create_minmaxagg_plan`,
 //!   `create_memoize_plan`, `create_windowagg_plan`, `create_lockrows_plan`
-//!   (PlanRowMark carrier gap), `create_modifytable_plan`);
+//!   (PlanRowMark carrier gap));
 //! * the `create_plan` tail steps owned by the tlist / subselect / planner
 //!   keystones (`apply_tlist_labeling`, `ss_attach_initplans`) — installed by
 //!   those crates; and
@@ -169,16 +169,6 @@ seam_core::seam!(
         run: &PlannerRun<'mcx>,
         best_path: PathId,
         flags: i32,
-    ) -> types_error::PgResult<Node<'mcx>>
-);
-
-seam_core::seam!(
-    /// `create_modifytable_plan(root, (ModifyTablePath *) best_path)`.
-    pub fn create_modifytable_plan<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        root: &mut PlannerInfo,
-        run: &PlannerRun<'mcx>,
-        best_path: PathId,
     ) -> types_error::PgResult<Node<'mcx>>
 );
 
