@@ -816,6 +816,7 @@ fn scan_scanrelid(ps: &PlanStateData<'_>) -> u32 {
     match ps.plan {
         Some(Node::SeqScan(s)) => s.scan.scanrelid,
         Some(Node::TidRangeScan(s)) => s.scan.scanrelid,
+        Some(Node::IndexScan(s)) => s.scan.scanrelid,
         Some(Node::IndexOnlyScan(s)) => s.scan.scanrelid,
         Some(Node::TableFuncScan(s)) => s.scan.scanrelid,
         Some(Node::ValuesScan(s)) => s.scan.scanrelid,
