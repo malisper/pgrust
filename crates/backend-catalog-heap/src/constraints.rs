@@ -104,7 +104,7 @@ pub fn cookDefault<'mcx>(
         /* Disallow refs to other generated columns */
         let expr_node = Node::Expr(expr);
         check_nested_generated(mcx, pstate, &expr_node)?;
-        let Node::Expr(e) = expr_node else {
+        let Some(e) = expr_node.into_expr() else {
             unreachable!("wrapped Expr node");
         };
         expr = e;
@@ -124,7 +124,7 @@ pub fn cookDefault<'mcx>(
         if attgenerated == ATTRIBUTE_GENERATED_VIRTUAL as i8 {
             let expr_node = Node::Expr(expr);
             check_virtual_generated_security(mcx, pstate, &expr_node)?;
-            let Node::Expr(e) = expr_node else {
+            let Some(e) = expr_node.into_expr() else {
                 unreachable!("wrapped Expr node");
             };
             expr = e;
@@ -441,7 +441,7 @@ fn StoreRelCheck<'mcx>(
     let attnos: Vec<i16> = {
         let mut out: Vec<i16> = Vec::with_capacity(var_list.len());
         for v in var_list.iter() {
-            if let Expr::Var(var) = v {
+            if let Some(var) = v.as_var() {
                 let va = var.varattno;
                 if !out.iter().any(|&a| a == va) {
                     out.push(va);
@@ -860,10 +860,10 @@ pub fn AddRelationNewConstraints<'mcx>(
          * an explicit pg_attrdef entry (column defaults only, not generation
          * expressions).
          */
-        let is_null_const = matches!(
-            expr.as_ref(),
-            Some(Expr::Const(c)) if c.constisnull
-        );
+        let is_null_const = expr
+            .as_ref()
+            .and_then(|e| e.as_const())
+            .is_some_and(|c| c.constisnull);
         let expr = match expr {
             None => continue,
             Some(_) if generated == 0 && is_null_const => continue,
@@ -973,7 +973,7 @@ pub fn AddRelationNewConstraints<'mcx>(
                 /* eliminate duplicates */
                 let mut uniq_attnos: Vec<AttrNumber> = Vec::new();
                 for v in vars.iter() {
-                    if let Expr::Var(var) = v {
+                    if let Some(var) = v.as_var() {
                         if !uniq_attnos.iter().any(|&a| a == var.varattno) {
                             uniq_attnos.push(var.varattno);
                         }
