@@ -94,4 +94,9 @@ pub fn init_seams() {
     backend_utils_fmgr_funcapi_seams::get_expr_result_tupdesc::set(
         result_type::get_expr_result_tupdesc,
     );
+    // `get_expr_result_type(expr)` — ExecInitFunctionScan (nodeFunctionscan.c)
+    // resolves the SRF's result class / type / tupdesc through this.
+    backend_utils_fmgr_funcapi_seams::get_expr_result_type::set(
+        result_type::get_expr_result_type,
+    );
 }

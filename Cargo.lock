@@ -9602,6 +9602,7 @@ dependencies = [
  "backend-executor-execUtils-seams",
  "backend-nodes-core-seams",
  "backend-nodes-nodeFuncs-seams",
+ "backend-utils-fmgr-funcapi-seams",
  "backend-utils-sort-storage-seams",
  "mcx",
  "seam-core",
@@ -12361,13 +12362,16 @@ dependencies = [
 name = "backend-optimizer-rte-seams"
 version = "0.0.0"
 dependencies = [
+ "backend-optimizer-path-costsize",
  "backend-optimizer-path-costsize-seams",
  "backend-optimizer-plan-init-subselect-ext-seams",
+ "backend-optimizer-util-clauses",
  "backend-optimizer-util-plancat-ext-seams",
  "backend-optimizer-util-relnode-ext-seams",
  "mcx",
  "seam-core",
  "types-core",
+ "types-nodes",
  "types-pathnodes",
 ]
 
@@ -12422,6 +12426,7 @@ dependencies = [
 name = "backend-optimizer-util-clauses"
 version = "0.0.0"
 dependencies = [
+ "backend-catalog-aclchk-seams",
  "backend-nodes-core",
  "backend-optimizer-path-costsize-seams",
  "backend-optimizer-path-equivclass-ext-seams",
@@ -12434,7 +12439,10 @@ dependencies = [
  "backend-optimizer-util-var-seams",
  "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-cache-lsyscache-seams",
+ "backend-utils-init-miscinit-seams",
  "mcx",
+ "types-acl",
+ "types-catalog",
  "types-core",
  "types-datum",
  "types-error",

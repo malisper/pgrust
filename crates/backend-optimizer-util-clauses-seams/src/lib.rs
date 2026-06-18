@@ -142,6 +142,59 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// The SQL-language body parse/rewrite/validate core of
+    /// `inline_set_returning_function` (clauses.c:5185 onward), reached only once
+    /// the gate ladder (run in-crate) has confirmed the RTE wraps a single
+    /// inlinable SQL-language SRF. Parses `prosrc`/`prosqlbody`, rewrites, and
+    /// validates the single-SELECT querytree, returning the inlined `Query`
+    /// (`Ok(Some)`) to substitute as the RTE's subquery, or `Ok(None)` to
+    /// decline. `Err` carries the parse/analyze `ereport(ERROR)`. Owner:
+    /// clauses.c SRF-inliner leg (gated on the SQL-function parse/rewrite path).
+    pub fn inline_set_returning_function_sql_body<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        root: &mut types_pathnodes::PlannerInfo,
+        rte: &types_nodes::parsenodes::RangeTblEntry<'mcx>,
+        funcid: Oid,
+    ) -> PgResult<Option<types_nodes::copy_query::Query<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `FmgrHookIsNeeded(functionId)` (fmgr.c): whether a loadable module has
+    /// installed an fmgr entry/exit hook for `function_id` (the
+    /// `needs_fmgr_hook` plugin). Default (no plugin) is `false`. Owner: fmgr
+    /// (`backend-utils-fmgr-core`).
+    pub fn fmgr_hook_is_needed(function_id: Oid) -> bool
+);
+
+seam_core::seam!(
+    /// `SupportRequestRows` dispatch (plancat.c:2200): call the function's
+    /// planner support function `prosupport` to estimate a set-returning
+    /// function's rowcount. `node` is the (const-folded) `FuncExpr`. `Ok(Some)`
+    /// is the estimate (C's `req->rows`); `Ok(None)` declines (no support
+    /// function or no constant arguments — the caller falls back on
+    /// `pg_proc.prorows`). `Err` carries the support function's
+    /// `ereport(ERROR)`. Owner: `backend-optimizer-util-clauses` (the
+    /// support-rows registry; per-function kernels register from their crates).
+    pub fn call_support_rows(prosupport: Oid, funcid: Oid, node: &Expr) -> PgResult<Option<f64>>
+);
+
+seam_core::seam!(
+    /// `SupportRequestCost` dispatch (plancat.c:2137): call the function's
+    /// planner support function `prosupport` to refine a `(startup, per_tuple)`
+    /// cost. `node` is the call's `FuncExpr`/`OpExpr` (or `None`). `Ok(Some)` is
+    /// the refined cost (C's `req.startup`/`req.per_tuple`); `Ok(None)` declines
+    /// (no support function, or it does not handle the cost request — the caller
+    /// falls back on `pg_proc.procost`). `Err` carries the support function's
+    /// `ereport(ERROR)`. Owner: `backend-optimizer-util-clauses` (the
+    /// support-cost registry; per-function kernels register from their crates).
+    pub fn call_support_cost(
+        prosupport: Oid,
+        funcid: Oid,
+        node: Option<&Expr>,
+    ) -> PgResult<Option<(f64, f64)>>
+);
+
+seam_core::seam!(
     /// `inline_set_returning_function(root, rte)` (clauses.c:5134) — the full
     /// set-returning-function inliner: inspect the FUNCTION RTE's single
     /// `RangeTblFunction`/`FuncExpr`, run the gate ladder (LANGUAGE SQL, no

@@ -43,12 +43,14 @@ pub fn set_baserel_size_estimates<'mcx>(run: &PlannerRun<'mcx>, root: &mut Plann
     set_rel_width(run, root, rel);
 }
 
-/// `set_function_size_estimates` (costsize.c:6066).
+/// `set_function_size_estimates` (costsize.c:6066). The rel's rowcount is the
+/// largest `expression_returns_set_rows` over the FUNCTION RTE's `functions`
+/// list. `cost_functionscan` (no `run`) cannot reach the RTE's funcexprs, so
+/// the max-rows reduction rides the `rte_function_max_set_rows` seam (installed
+/// by `backend-optimizer-rte-seams`, which has the `PlannerRun` RTE store).
 pub fn set_function_size_estimates<'mcx>(run: &PlannerRun<'mcx>, root: &mut PlannerInfo, rel: RelId) {
     debug_assert!(root.rel(rel).relid > 0);
-    // rte->functions are unreachable in the fabled arena → the largest
-    // expression_returns_set_rows over them is read through a focused seam.
-    let tuples = cz::rte_function_max_set_rows::call(root, rel);
+    let tuples = cz::rte_function_max_set_rows::call(run, root, rel);
     debug_assert!(rt_rtekind(root, rel) == RTE_FUNCTION);
     root.rel_mut(rel).tuples = tuples;
     set_baserel_size_estimates(run, root, rel);

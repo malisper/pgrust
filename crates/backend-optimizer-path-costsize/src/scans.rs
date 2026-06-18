@@ -800,7 +800,7 @@ pub fn cost_subqueryscan<'mcx>(
  * ========================================================================== */
 
 /// `cost_functionscan` (costsize.c:1537).
-pub fn cost_functionscan(root: &mut PlannerInfo, path_id: PathId, rel: RelId) {
+pub fn cost_functionscan<'mcx>(run: &PlannerRun<'mcx>, root: &mut PlannerInfo, path_id: PathId, rel: RelId) {
     let mut startup_cost: Cost = 0.0;
     let mut run_cost: Cost = 0.0;
 
@@ -817,8 +817,9 @@ pub fn cost_functionscan(root: &mut PlannerInfo, path_id: PathId, rel: RelId) {
         None => base_rows,
     };
 
-    // cost_qual_eval_node over (Node *) rte->functions — RTE unreachable → seam.
-    let (e_startup, e_per_tuple) = cz::rte_functions_exprcost::call(root, rel);
+    // cost_qual_eval_node over (Node *) rte->functions — the RTE's owned
+    // funcexprs are reached by the seam owner through `planner_rt_fetch`.
+    let (e_startup, e_per_tuple) = cz::rte_functions_exprcost::call(run, root, rel);
     startup_cost += e_startup + e_per_tuple;
 
     let qpqual_cost = get_restriction_qual_cost_ext(root, rel, baserestrictcost, param_info.as_ref());
@@ -838,7 +839,7 @@ pub fn cost_functionscan(root: &mut PlannerInfo, path_id: PathId, rel: RelId) {
 }
 
 /// `cost_tablefuncscan` (costsize.c:1599).
-pub fn cost_tablefuncscan(root: &mut PlannerInfo, path_id: PathId, rel: RelId) {
+pub fn cost_tablefuncscan<'mcx>(run: &PlannerRun<'mcx>, root: &mut PlannerInfo, path_id: PathId, rel: RelId) {
     let mut startup_cost: Cost = 0.0;
     let mut run_cost: Cost = 0.0;
 
@@ -855,7 +856,7 @@ pub fn cost_tablefuncscan(root: &mut PlannerInfo, path_id: PathId, rel: RelId) {
         None => base_rows,
     };
 
-    let (e_startup, e_per_tuple) = cz::rte_tablefunc_exprcost::call(root, rel);
+    let (e_startup, e_per_tuple) = cz::rte_tablefunc_exprcost::call(run, root, rel);
     startup_cost += e_startup + e_per_tuple;
 
     let qpqual_cost = get_restriction_qual_cost_ext(root, rel, baserestrictcost, param_info.as_ref());

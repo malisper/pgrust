@@ -988,19 +988,16 @@ mod recurrence_guard {
         // (the owner isn't `complete`) — no allowlist entry is needed here (adding
         // one is flagged stale). The debt is recorded in DESIGN_DEBT.md; install
         // when the dynamic-cacheId SearchSysCache1 primitive lands.
-        // DESIGN_DEBT (TD-SRF-INLINE-QUERY): `inline_set_returning_function` is the
-        // full SET-returning-function inliner (clauses.c:5134) that
-        // `preprocess_function_rtes` (prepjointree.c:931) calls to turn a FUNCTION
-        // RTE into a subquery RTE. The owner is clauses.c, but the inline leg
-        // (LANGUAGE SQL prosrc parse + rewrite + single-SELECT querytree
-        // validation, returning an owned `Query`) is gated on the SQL-function
-        // parse/rewrite path, which is unported — the same gap as the sibling
-        // `inline_set_returning_function_core` (the scalar-SQL inline leg, also
-        // uninstalled). The FuncExpr node universe + SQL-function querytree are not
-        // reachable as a walkable `Query` here, so the seam loud-panics (a wrong-
-        // plan-class change, never a silent skip) until the inliner leg lands.
-        // DELETE this entry when clauses.c's SRF-inliner is ported.
-        ("backend_optimizer_util_clauses", "inline_set_returning_function"),
+        // NOTE: the `inline_set_returning_function` GATE LADDER (clauses.c:5067)
+        // is now ported and INSTALLED by `backend-optimizer-util-clauses`; it
+        // declines (`Ok(None)`) every non-inlinable SRF, including every
+        // C-language SRF (e.g. generate_series, which fails the LANGUAGE-SQL
+        // gate). The remaining unported leg — the SQL body parse/rewrite/
+        // single-SELECT validation that returns the inlined `Query` — rides the
+        // `inline_set_returning_function_sql_body` OUTWARD seam, which clauses
+        // calls itself; the guard's outward-seam exclusion covers it, so no
+        // allowlist entry is needed (its real owner is the unported SQL-function
+        // parse/rewrite path). DESIGN_DEBT TD-SRF-INLINE-QUERY.
         // DESIGN_DEBT (TD-INITSPLAN-REBUILD-JOINCLAUSE): analyzejoins.c's
         // `remove_leftjoinrel_from_query` (left-join removal) calls
         // `rebuild_joinclause_attr_needed` (initsplan.c:3559) to re-add the

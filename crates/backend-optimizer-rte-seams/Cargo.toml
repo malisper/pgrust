@@ -35,6 +35,14 @@ backend-optimizer-util-plancat-ext-seams = { path = "../backend-optimizer-util-p
 # through the same `planner_rt_fetch` RTE store (the relnode-ext seam declares it
 # with no ported owner directory).
 backend-optimizer-util-relnode-ext-seams = { path = "../backend-optimizer-util-relnode-ext-seams" }
+# costsize.c set_function_size_estimates / cost_functionscan / cost_tablefuncscan
+# read the FUNCTION/TABLEFUNC RTE's funcexprs (rte->functions / rte->tablefunc) —
+# only reachable through this resolver's planner_rt_fetch RTE store. The row /
+# qual-cost reductions over those owned funcexprs are computed here via
+# clauses.c's expression_returns_set_rows and costsize.c's cost_qual_eval_expr.
+backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
+backend-optimizer-path-costsize = { path = "../backend-optimizer-path-costsize" }
+types-nodes = { path = "../types-nodes" }
 
 [dev-dependencies]
 # Needed by the synthetic fixture's tests to build an (empty) PlannerRun in an

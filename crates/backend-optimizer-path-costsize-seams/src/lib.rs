@@ -405,17 +405,32 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `cost_qual_eval_node((Node *) rte->functions, root)` for the baserel's
-    /// RTE (cost_functionscan) — the eval cost of the function exprs.
-    pub fn rte_functions_exprcost(root: &PlannerInfo, rel: RelId) -> (Cost, Cost)
+    /// RTE (cost_functionscan) — the eval cost of the function exprs. `run` is
+    /// threaded so the owner can `planner_rt_fetch` the RTE's owned funcexprs
+    /// (the same RTE-projection contract as `rte_relid`).
+    pub fn rte_functions_exprcost<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+        root: &PlannerInfo,
+        rel: RelId,
+    ) -> (Cost, Cost)
 );
 seam_core::seam!(
     /// `cost_qual_eval_node((Node *) rte->tablefunc, root)` (cost_tablefuncscan).
-    pub fn rte_tablefunc_exprcost(root: &PlannerInfo, rel: RelId) -> (Cost, Cost)
+    pub fn rte_tablefunc_exprcost<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+        root: &PlannerInfo,
+        rel: RelId,
+    ) -> (Cost, Cost)
 );
 seam_core::seam!(
     /// `set_function_size_estimates`: the largest `expression_returns_set_rows`
-    /// over `rte->functions` (the rte funcexprs are unreachable in-arena).
-    pub fn rte_function_max_set_rows(root: &PlannerInfo, rel: RelId) -> f64
+    /// over `rte->functions`. `run` is threaded so the owner can
+    /// `planner_rt_fetch` the RTE's owned funcexprs.
+    pub fn rte_function_max_set_rows<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+        root: &PlannerInfo,
+        rel: RelId,
+    ) -> f64
 );
 seam_core::seam!(
     /// `rte->self_reference` (set_cte_size_estimates).

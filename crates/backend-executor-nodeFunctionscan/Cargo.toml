@@ -25,6 +25,7 @@ backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-sea
 backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
+backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }
 backend-utils-sort-storage-seams = { path = "../backend-utils-sort-storage-seams" }
 
 # Shared type stack + allocator + error.

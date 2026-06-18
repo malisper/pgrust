@@ -249,6 +249,7 @@ fn scan_scanrelid(ss: &ScanStateData<'_>) -> u32 {
         Some(Node::TidRangeScan(s)) => s.scan.scanrelid,
         Some(Node::IndexScan(s)) => s.scan.scanrelid,
         Some(Node::IndexOnlyScan(s)) => s.scan.scanrelid,
+        Some(Node::FunctionScan(s)) => s.scan.scanrelid,
         Some(Node::TableFuncScan(s)) => s.scan.scanrelid,
         Some(Node::ValuesScan(s)) => s.scan.scanrelid,
         Some(Node::ForeignScan(s)) => s.scan.scanrelid,

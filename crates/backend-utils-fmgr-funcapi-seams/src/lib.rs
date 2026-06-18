@@ -215,3 +215,16 @@ seam_core::seam!(
         no_error: bool,
     ) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>>
 );
+
+seam_core::seam!(
+    /// `get_expr_result_type(expr, &resultTypeId, &resultTupleDesc)`
+    /// (funcapi.c:262): classify an expression's result type, returning the
+    /// `TypeFuncClass` plus (for a composite) the result type OID and tuple
+    /// descriptor. Used by `ExecInitFunctionScan` (nodeFunctionscan.c) to build
+    /// the scan's tuple descriptor from the SRF's result type. Owner:
+    /// `backend-utils-fmgr-funcapi`.
+    pub fn get_expr_result_type<'mcx>(
+        mcx: Mcx<'mcx>,
+        expr: Option<&types_nodes::nodes::Node<'mcx>>,
+    ) -> PgResult<types_nodes::funcapi::ResolvedResultType<'mcx>>
+);

@@ -1060,12 +1060,69 @@ fn subquery_planner<'mcx>(
                                 mcx::alloc_in(mcx, Node::Expr(pe))?;
                         }
                     }
-                    RTEKind::RTE_FUNCTION | RTEKind::RTE_TABLEFUNC => {
+                    RTEKind::RTE_FUNCTION => {
+                        // Preprocess the function expression(s) fully (planner.c:
+                        // 1015-1021): rte->functions = preprocess_expression(root,
+                        // (Node *) rte->functions, EXPRKIND_RTFUNC[_LATERAL]). C folds
+                        // the whole `functions` list as one node; here the typed list
+                        // is a flat PgVec<NodePtr> of RangeTblFunction nodes, so
+                        // preprocess each RangeTblFunction's funcexpr (the only
+                        // expression subtree it carries).
+                        let kind = if lateral {
+                            EXPRKIND_RTFUNC_LATERAL
+                        } else {
+                            EXPRKIND_RTFUNC
+                        };
+                        let nfuncs = run.resolve(root.parse).rtable[i].functions.len();
+                        for f in 0..nfuncs {
+                            // Take the RangeTblFunction's funcexpr Expr out, preprocess,
+                            // put it back. A funcexpr that is not a Node::Expr (or is
+                            // absent) is left untouched.
+                            let fe: Option<Expr> = {
+                                let parse = run.resolve(root.parse);
+                                match &*parse.rtable[i].functions[f] {
+                                    Node::RangeTblFunction(rtf) => match rtf.funcexpr.as_deref() {
+                                        Some(Node::Expr(e)) => Some(e.clone()),
+                                        _ => None,
+                                    },
+                                    _ => {
+                                        return Err(types_error::PgError::error(
+                                            "subquery_planner: RTE_FUNCTION functions entry is not a RangeTblFunction",
+                                        ))
+                                    }
+                                }
+                            };
+                            if let Some(e) = fe {
+                                let pe = preprocess_expression(
+                                    mcx,
+                                    &root,
+                                    outer_query_ref,
+                                    Some(e),
+                                    kind,
+                                )?;
+                                let pe = pe.ok_or_else(|| {
+                                    types_error::PgError::error(
+                                        "subquery_planner: RTE_FUNCTION funcexpr folded to NULL",
+                                    )
+                                })?;
+                                if let Node::RangeTblFunction(rtf) =
+                                    &mut *run.resolve_mut(root.parse).rtable[i].functions[f]
+                                {
+                                    rtf.funcexpr = Some(mcx::alloc_in(mcx, Node::Expr(pe))?);
+                                }
+                            }
+                        }
+                    }
+                    RTEKind::RTE_TABLEFUNC => {
+                        // planner.c:1022-1027 preprocesses rte->tablefunc; the owned
+                        // TableFunc node universe (XMLTABLE / JSON_TABLE) is not
+                        // reachable as a walkable Expr here, so this leg loud-panics
+                        // until the tablefunc node model lands. No generate_series /
+                        // unnest path reaches this arm.
                         panic!(
                             "subquery_planner: per-RTE expression preprocessing \
-                             (planner.c:987-1054) for rtekind {:?} (function/tablefunc) \
-                             is not wired over the owned RTE model",
-                            rtekind
+                             (planner.c:1022-1027) for RTE_TABLEFUNC is not wired over \
+                             the owned RTE model"
                         );
                     }
                     _ => {}
@@ -1146,13 +1203,19 @@ fn subquery_planner<'mcx>(
         }
 
         // hasTargetSRFs re-check (C:1098-1099). Constant-folding can remove all
-        // SRFs; recompute via expression_returns_set over the targetList. Only
-        // relevant when hasTargetSRFs is set; a plain scalar SELECT has none.
+        // SRFs; recompute via expression_returns_set over the targetList. C folds
+        // the whole list as one node; here OR `expression_returns_set` over each
+        // TargetEntry's expr.
         if run.resolve(root.parse).hasTargetSRFs {
-            panic!(
-                "subquery_planner: hasTargetSRFs re-check via expression_returns_set \
-                 (planner.c:1098-1099) over the targetList is not wired"
-            );
+            let parse = run.resolve(root.parse);
+            let mut any_srf = false;
+            for te in parse.targetList.iter() {
+                if backend_nodes_core::nodefuncs::expression_returns_set(te.expr.as_deref()) {
+                    any_srf = true;
+                    break;
+                }
+            }
+            run.resolve_mut(root.parse).hasTargetSRFs = any_srf;
         }
 
         // expand_grouping_sets (C:1107-1110). GROUPING SETS only.

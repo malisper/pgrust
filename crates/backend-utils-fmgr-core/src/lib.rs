@@ -3684,6 +3684,9 @@ fn array_send_function_call_seam<'mcx>(
 pub fn init_seams() {
     backend_utils_fmgr_fmgr_seams::fmgr_info_check::set(fmgr_info_check);
     backend_utils_fmgr_fmgr_seams::fmgr_info::set(fmgr_info_resolve);
+    // `FmgrHookIsNeeded(functionId)` (fmgr.c) — the fmgr entry/exit hook gate
+    // read by `inline_set_returning_function` (clauses.c).
+    backend_optimizer_util_clauses_seams::fmgr_hook_is_needed::set(fmgr_hook_is_needed);
     backend_utils_fmgr_fmgr_seams::fmgr_info_set_expr::set(fmgr_info_set_expr_seam);
     backend_utils_fmgr_fmgr_seams::get_fn_expr_argtype::set(get_fn_expr_argtype_seam);
     backend_utils_fmgr_fmgr_seams::get_fn_expr_rettype::set(get_fn_expr_rettype_seam);

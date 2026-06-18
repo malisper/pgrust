@@ -910,8 +910,8 @@ seam_core::seam!(
     pub fn cost_tidrangescan<'mcx>(run: &types_pathnodes::planner_run::PlannerRun<'mcx>, root: &mut PlannerInfo, path: PathId, rel: RelId, tidrangequals: &[NodeId])
 );
 seam_core::seam!(pub fn cost_subqueryscan<'mcx>(run: &types_pathnodes::planner_run::PlannerRun<'mcx>, root: &mut PlannerInfo, path: PathId, rel: RelId, subpath: PathId, trivial_pathtarget: bool));
-seam_core::seam!(pub fn cost_functionscan(root: &mut PlannerInfo, path: PathId, rel: RelId));
-seam_core::seam!(pub fn cost_tablefuncscan(root: &mut PlannerInfo, path: PathId, rel: RelId));
+seam_core::seam!(pub fn cost_functionscan<'mcx>(run: &types_pathnodes::planner_run::PlannerRun<'mcx>, root: &mut PlannerInfo, path: PathId, rel: RelId));
+seam_core::seam!(pub fn cost_tablefuncscan<'mcx>(run: &types_pathnodes::planner_run::PlannerRun<'mcx>, root: &mut PlannerInfo, path: PathId, rel: RelId));
 seam_core::seam!(pub fn cost_valuesscan(root: &mut PlannerInfo, path: PathId, rel: RelId));
 seam_core::seam!(pub fn cost_ctescan(root: &mut PlannerInfo, path: PathId, rel: RelId));
 seam_core::seam!(pub fn cost_namedtuplestorescan(root: &mut PlannerInfo, path: PathId, rel: RelId));

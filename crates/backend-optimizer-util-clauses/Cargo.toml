@@ -32,3 +32,9 @@ backend-optimizer-path-small-seams = { path = "../backend-optimizer-path-small-s
 # clauses.c's is_parallel_safe(root, node) — declared in pathnode-seams (the
 # pathnode create_*_path/gather parallel-safety checks ride it), owned here.
 backend-optimizer-util-pathnode-seams = { path = "../backend-optimizer-util-pathnode-seams" }
+# inline_set_returning_function's EXECUTE-privilege / current-user / fmgr-hook
+# gates (clauses.c:5135-5141).
+types-acl = { path = "../types-acl" }
+types-catalog = { path = "../types-catalog" }
+backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }

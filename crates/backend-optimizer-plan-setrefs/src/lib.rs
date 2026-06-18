@@ -1984,19 +1984,32 @@ fn set_scan_node_refs<'mcx>(
         }
         Node::FunctionScan(s) => {
             fix_scan_common(root, &mut s.scan, rtoffset, mcx)?;
-            // functions: a list of RangeTblFunction whose funcexpr needs fixing.
-            // RangeTblFunction is a Node, not an Expr; its funcexpr fix-up is
-            // reached through the node walker. The setrefs C does
-            // `fix_scan_list(root, functions, rtoffset, 1)`, which walks each
-            // RangeTblFunction's funcexpr. That cross-node walk is owned by the
-            // createplan/node-walker cohort and not reachable from the Expr
-            // mutator here.
-            if s.functions.as_ref().map(|f| !f.is_empty()).unwrap_or(false) {
-                return Err(PgError::error(
-                    "set_plan_refs(T_FunctionScan): fixing the RangeTblFunction \
-                     list (fix_scan_list over functions: a Node list, not Expr) \
-                     requires the node-tree walker and is not ported",
-                ));
+            // C: scan->functions = fix_scan_list(root, scan->functions, rtoffset,
+            //    1); — fix_scan_list walks each RangeTblFunction node's funcexpr
+            //    through fix_scan_expr. Each RangeTblFunction's funcexpr is a
+            //    Node::Expr, so apply the Expr mutator to it in place (num_exec=1,
+            //    matching the C `fix_scan_list(..., 1)`).
+            if let Some(functions) = s.functions.as_mut() {
+                let nfuncs = functions.len();
+                for f in 0..nfuncs {
+                    let funcexpr: Option<Expr> = match functions[f].funcexpr.take() {
+                        Some(node) => match PgBox::into_inner(node) {
+                            Node::Expr(e) => Some(e),
+                            other => {
+                                // Non-Expr funcexpr: put it back untouched.
+                                functions[f].funcexpr =
+                                    Some(mcx::alloc_in(mcx, other)?);
+                                None
+                            }
+                        },
+                        None => None,
+                    };
+                    if let Some(e) = funcexpr {
+                        let fixed = fix_scan_expr(mcx, root, e, rtoffset, 1.0)?;
+                        functions[f].funcexpr =
+                            Some(mcx::alloc_in(mcx, Node::Expr(fixed))?);
+                    }
+                }
             }
         }
         Node::TableFuncScan(s) => {

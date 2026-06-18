@@ -61,6 +61,9 @@ pub mod fold;
 pub mod grounded;
 pub mod leaf;
 pub mod srf_inline;
+pub mod support_cost;
+pub mod support_rows;
+pub mod support_simplify;
 
 #[cfg(test)]
 mod tests;
@@ -179,6 +182,49 @@ pub fn init_seams() {
     // and qual) share the identical walk (C wraps the whole `List` as one Node).
     backend_optimizer_util_pathnode_seams::is_parallel_safe::set(is_parallel_safe_nodes);
     backend_optimizer_util_pathnode_seams::is_parallel_safe_quals::set(is_parallel_safe_nodes);
+
+    // `simplify_function`'s `SupportRequestSimplify` dispatch (clauses.c:4108).
+    // C calls `pg_proc.prosupport` through fmgr by OID; the owned model
+    // dispatches through the `support_simplify` table, where support-bearing
+    // crates register their decomposed simplify kernel. An OID with no
+    // registered kernel declines (`Ok(None)`), the faithful counterpart of a
+    // support function that does not handle `SupportRequestSimplify` (e.g.
+    // `generate_series_int{4,8}_support`, which serve only `SupportRequestRows`)
+    // returning NULL.
+    backend_optimizer_util_clauses_seams::call_support_simplify::set(
+        support_simplify::call_support_simplify,
+    );
+
+    // `inline_set_returning_function(root, rte)` (clauses.c:5067) — the SRF-
+    // inline gate ladder, owned here. `preprocess_function_rtes`
+    // (prepjointree.c) calls it for each FUNCTION RTE; it declines (`Ok(None)`)
+    // every non-inlinable SRF (including every C-language SRF, which fails the
+    // LANGUAGE-SQL gate) and only enters the SQL body parse/rewrite core (a
+    // separate seam) for an inlinable SQL-language SRF.
+    backend_optimizer_util_clauses_seams::inline_set_returning_function::set(
+        srf_inline::inline_set_returning_function,
+    );
+
+    // `SupportRequestRows` dispatch (plancat.c:2200), used by `get_function_rows`
+    // to estimate a set-returning function's rowcount through its `prosupport`
+    // support function. Dispatched through the `support_rows` table; the
+    // built-in `generate_series_int{4,8}_support` row kernels are registered
+    // here. An OID with no kernel (or one that declines) returns `Ok(None)`, so
+    // the caller falls back on `pg_proc.prorows`.
+    support_rows::register_builtin_support_rows();
+    backend_optimizer_util_clauses_seams::call_support_rows::set(
+        support_rows::call_support_rows,
+    );
+
+    // `SupportRequestCost` dispatch (plancat.c:2137), used by `add_function_cost`
+    // to refine a function's cost through its `prosupport` support function.
+    // Dispatched through the `support_cost` table; an OID with no kernel (or one
+    // that declines, as `generate_series_int{4,8}_support` do — they serve only
+    // SupportRequestRows) returns `Ok(None)`, so the caller falls back on
+    // `pg_proc.procost`.
+    backend_optimizer_util_clauses_seams::call_support_cost::set(
+        support_cost::call_support_cost,
+    );
 }
 
 /// `is_parallel_safe(root, (Node *) nodes)` (clauses.c:751) over a list of

@@ -47,6 +47,7 @@ use backend_executor_execSRF_seams as execSRF;
 use backend_executor_execTuples_seams as execTuples;
 use backend_executor_execUtils_seams as execUtils;
 use backend_nodes_core_seams as nodes_core;
+use backend_utils_fmgr_funcapi_seams as funcapi;
 use backend_nodes_nodeFuncs_seams as nodeFuncs;
 use backend_utils_sort_storage_seams as tuplestore;
 
@@ -500,7 +501,7 @@ pub fn ExecInitFunctionScan<'mcx>(
             execTuples::bless_tuple_desc::call(mcx, td)?
         } else {
             //   functypclass = get_expr_result_type(funcexpr, &funcrettype, &tupdesc);
-            let resolved = nodes_core::get_expr_result_type_node::call(mcx, funcexpr)?;
+            let resolved = funcapi::get_expr_result_type::call(mcx, funcexpr)?;
             let functypclass = resolved.class;
             let funcrettype = resolved.result_type_id.unwrap_or(0);
 

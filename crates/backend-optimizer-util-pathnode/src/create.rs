@@ -822,7 +822,7 @@ pub fn create_functionscan_path<'mcx>(
     path.parallel_workers = 0;
     path.pathkeys = pathkeys;
     let id = root.alloc_path(PathNode::Path(path));
-    seam::cost_functionscan::call(root, id, rel);
+    seam::cost_functionscan::call(run, root, id, rel);
     Ok(id)
 }
 
@@ -840,7 +840,7 @@ pub fn create_tablefuncscan_path<'mcx>(
     path.parallel_workers = 0;
     path.pathkeys = Vec::new();
     let id = root.alloc_path(PathNode::Path(path));
-    seam::cost_tablefuncscan::call(root, id, rel);
+    seam::cost_tablefuncscan::call(run, root, id, rel);
     Ok(id)
 }
 

@@ -1449,21 +1449,24 @@ pub fn add_function_cost(
 ) -> PgResult<(f64, f64)> {
     let form = syscache_seams::proc_cost_rows::call(funcid)?;
 
-    // The planner-support cost path (`SupportRequestCost` over the `prosupport`
-    // function via `OidFunctionCall1`) rides the planner support-request fmgr
-    // machinery, which is unported workspace-wide. In C, the support result is
-    // only used when `sresult == &req` (the support function actually filled in
-    // a cost); the very common case — including every window function (e.g.
-    // row_number's `window_row_number_support` handles only Monotonic /
-    // OptimizeWindowClause, not SupportRequestCost) — is that the support
-    // function does NOT handle the cost request and C falls through to the
-    // procost estimate. Since we cannot run the dispatch, we take that same
-    // procost fall-through for all functions: a correctness-neutral cost
-    // estimate (it can only affect plan-cost numbers for the rare functions
-    // whose support *does* answer cost requests, never query results), not a
-    // hollow stub. When the support-request machinery lands, route the
-    // OidIsValid(prosupport) case through it and keep this as the fallback.
-    let _ = form.prosupport;
+    if form.prosupport != InvalidOid {
+        // OidFunctionCall1(prosupport, SupportRequestCost{root, funcid, node}).
+        // The decomposed dispatch rides the clauses support-cost table. This
+        // `(root, funcid, NodeId)` entry has only the arena-handle node, not a
+        // resolvable by-value Expr, so the dispatch passes `None`; a cost kernel
+        // that needs the node declines, falling back on `procost` (the C "no
+        // support function, or it failed" outcome). The by-node entry
+        // `seam_add_function_cost_by_node` carries the real node.
+        if let Some((startup, per_tuple)) =
+            backend_optimizer_util_clauses_seams::call_support_cost::call(
+                form.prosupport,
+                funcid,
+                None,
+            )?
+        {
+            return Ok((startup, per_tuple));
+        }
+    }
 
     // cost->per_tuple += procform->procost * cpu_operator_cost;
     // The `cpu_operator_cost` GUC global is owned by costsize.c; read it through
@@ -1491,17 +1494,13 @@ pub fn get_function_rows(
     // Assert(procform->proretset);
     debug_assert!(form.proretset);
 
-    if form.prosupport != InvalidOid {
-        // The `SupportRequestRows` planner-support path is unported (same
-        // machinery as add_function_cost's support leg). Unreachable for the
-        // current query path; mirror-PG and panic until it lands.
-        panic!(
-            "get_function_rows: prosupport={} rows-support path needs the \
-             SupportRequestRows planner-support fmgr machinery (unported \
-             workspace-wide)",
-            form.prosupport
-        );
-    }
+    // OidFunctionCall1(prosupport, SupportRequestRows{...}) when prosupport is
+    // valid. This `(root, funcid, NodeId)` entry has only the arena-handle node,
+    // not a resolvable by-value FuncExpr, so it cannot run a node-reading
+    // support kernel; it falls back on `pg_proc.prorows` (the C "no support
+    // function, or it failed" outcome). The by-value `seam_get_function_rows_by_node`
+    // entry carries the real node and runs the support-rows dispatch.
+    let _ = _node;
 
     // result = procform->prorows;
     Ok(form.prorows as f64)
@@ -1697,17 +1696,22 @@ fn seam_get_function_rows(funcid: Oid, node: &Expr) -> PgResult<f64> {
 /// C: read `pg_proc.prorows`, asserting `proretset`; the `prosupport` path runs
 /// a `SupportRequestRows` support function (unported tree-wide; mirror-and-panic
 /// — unreachable for current query paths where `prosupport == InvalidOid`).
-fn seam_get_function_rows_by_node(funcid: Oid, _node: &Expr) -> PgResult<f64> {
+fn seam_get_function_rows_by_node(funcid: Oid, node: &Expr) -> PgResult<f64> {
     let form = syscache_seams::proc_cost_rows::call(funcid)?;
     debug_assert!(form.proretset);
     if form.prosupport != InvalidOid {
-        panic!(
-            "get_function_rows: prosupport={} rows-support path needs the \
-             SupportRequestRows planner-support fmgr machinery (unported \
-             workspace-wide)",
-            form.prosupport
-        );
+        // OidFunctionCall1(prosupport, SupportRequestRows{root, funcid, node}).
+        // The decomposed dispatch rides the clauses support-rows table over the
+        // by-value (const-folded) FuncExpr `node`. On a successful estimate,
+        // return it; otherwise (no kernel / non-constant args) fall back on
+        // `pg_proc.prorows`.
+        if let Some(rows) =
+            backend_optimizer_util_clauses_seams::call_support_rows::call(form.prosupport, funcid, node)?
+        {
+            return Ok(rows);
+        }
     }
+    // No support function, or it declined, so rely on prorows.
     Ok(form.prorows as f64)
 }
 

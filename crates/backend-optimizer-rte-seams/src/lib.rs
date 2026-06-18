@@ -294,6 +294,71 @@ pub fn init_seams() {
         planner_rt_fetch(run, root, rti).relid
     });
 
+    // costsize.c `set_function_size_estimates` (6066): rel->tuples is the largest
+    // `expression_returns_set_rows(root, rtfunc->funcexpr)` over the FUNCTION
+    // RTE's `functions`. Reached through this resolver because cost_functionscan
+    // has no PlannerRun; here `planner_rt_fetch` reaches the owned funcexprs.
+    backend_optimizer_path_costsize_seams::rte_function_max_set_rows::set(|run, root, rel| {
+        use types_nodes::nodes::Node;
+        let rti = root.rel(rel).relid;
+        let rte = planner_rt_fetch(run, root, rti);
+        let mut tuples = 0.0_f64;
+        for f in rte.functions.iter() {
+            if let Node::RangeTblFunction(rtf) = &**f {
+                let funcexpr = match rtf.funcexpr.as_deref() {
+                    Some(Node::Expr(e)) => Some(e),
+                    _ => None,
+                };
+                let ntup =
+                    backend_optimizer_util_clauses::expression_returns_set_rows(funcexpr)
+                        .expect("rte_function_max_set_rows: expression_returns_set_rows");
+                if ntup > tuples {
+                    tuples = ntup;
+                }
+            }
+        }
+        tuples
+    });
+
+    // costsize.c `cost_functionscan` (1537): the per-function eval cost is
+    // `cost_qual_eval_node((Node *) rte->functions, root)` accumulated over the
+    // FUNCTION RTE's funcexprs.
+    backend_optimizer_path_costsize_seams::rte_functions_exprcost::set(|run, root, rel| {
+        use types_nodes::nodes::Node;
+        let rti = root.rel(rel).relid;
+        let rte = planner_rt_fetch(run, root, rti);
+        let mut startup = 0.0_f64;
+        let mut per_tuple = 0.0_f64;
+        for f in rte.functions.iter() {
+            if let Node::RangeTblFunction(rtf) = &**f {
+                if let Some(Node::Expr(e)) = rtf.funcexpr.as_deref() {
+                    let (s, pt) =
+                        backend_optimizer_path_costsize::qualcost::cost_qual_eval_expr(root, e);
+                    startup += s;
+                    per_tuple += pt;
+                }
+            }
+        }
+        (startup, per_tuple)
+    });
+
+    // costsize.c `cost_tablefuncscan` (1599): `cost_qual_eval_node((Node *)
+    // rte->tablefunc, root)`. The owned TableFunc node universe is not reachable
+    // as a walkable Expr here, so this leg loud-panics until the tablefunc node
+    // model lands (no generate_series / unnest path reaches it).
+    backend_optimizer_path_costsize_seams::rte_tablefunc_exprcost::set(|run, root, rel| {
+        let rti = root.rel(rel).relid;
+        let rte = planner_rt_fetch(run, root, rti);
+        if rte.tablefunc.is_some() {
+            panic!(
+                "rte_tablefunc_exprcost: cost_qual_eval over rte->tablefunc needs \
+                 the TableFunc node model (unported); no generate_series/unnest \
+                 path reaches this arm"
+            );
+        }
+        (0.0, 0.0)
+    });
+
     // Query-level projections — `root->parse->...`.
     parse_rtable_len::set(|run, root| run.rtable(root.parse).len() as i32);
     parse_rteperminfos_len::set(|run, root| run.resolve(root.parse).rteperminfos.len() as i32);
