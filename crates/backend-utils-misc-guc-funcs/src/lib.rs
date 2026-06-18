@@ -824,8 +824,98 @@ pub fn InitializeShmemGUCs() -> PgResult<()> {
 /// guc_funcs.c's own function; its seam decl now lives on this crate's own
 /// `-seams` crate (`backend-utils-misc-guc-funcs-seams`), so the install is
 /// dir-owner-attributable and the guard re-asserts the contract. The
+/// Project a post-analyze `types_nodes::ddlnodes::VariableSetStmt` into the
+/// trimmed `types_parsenodes::VariableSetStmt` that `ExecSetVariableStmt` /
+/// `flatten_set_variable_args` consume. `kind` maps 1:1 across the two enums;
+/// `name` is copied; each `args` member is an `A_Const` literal whose inner
+/// value node (`Integer`/`Float`/`Boolean`/`String`) becomes the corresponding
+/// `types_parsenodes::Node` value (the SET-args flattener only inspects these
+/// four value-node tags). This mirrors C's `castNode(VariableSetStmt,
+/// parsetree)` — the same node, viewed through the trimmed projection.
+fn variable_set_stmt_from_nodes(
+    s: &types_nodes::ddlnodes::VariableSetStmt<'_>,
+) -> PgResult<VariableSetStmt> {
+    use types_nodes::ddlnodes::VariableSetKind as TnKind;
+    use types_nodes::nodes::Node as TnNode;
+
+    let kind = match s.kind {
+        TnKind::VAR_SET_VALUE => VariableSetKind::SetValue,
+        TnKind::VAR_SET_DEFAULT => VariableSetKind::SetDefault,
+        TnKind::VAR_SET_CURRENT => VariableSetKind::SetCurrent,
+        TnKind::VAR_SET_MULTI => VariableSetKind::SetMulti,
+        TnKind::VAR_RESET => VariableSetKind::Reset,
+        TnKind::VAR_RESET_ALL => VariableSetKind::ResetAll,
+    };
+
+    let name = s.name.as_ref().map(|n| n.to_string());
+
+    let mut args: Vec<Node> = Vec::with_capacity(s.args.len());
+    for arg in s.args.iter() {
+        // Each member is an `A_Const` (a SET literal). Read its inner value node.
+        let val_node: &TnNode = match &**arg {
+            TnNode::A_Const(c) => match &c.val {
+                Some(v) => &**v,
+                // `A_Const` with no `val` is a NULL constant; SET literals are
+                // never NULL, so this is unreachable in practice.
+                None => {
+                    return Err(ereport(ERROR)
+                        .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                        .errmsg("SET argument is NULL".to_string())
+                        .into_error());
+                }
+            },
+            // The K1 parse model may carry the value node directly (no A_Const
+            // wrapper) — handle both, mirroring the flattener's switch.
+            other => other,
+        };
+        let projected = match val_node {
+            TnNode::Integer(i) => Node::Integer(types_parsenodes::Integer { ival: i.ival }),
+            TnNode::Float(f) => Node::Float(types_parsenodes::Float {
+                fval: Some(f.fval.to_string()),
+            }),
+            TnNode::Boolean(b) => Node::Boolean(types_parsenodes::Boolean { boolval: b.boolval }),
+            TnNode::String(st) => Node::String(types_parsenodes::StringNode {
+                sval: Some(st.sval.to_string()),
+            }),
+            other => {
+                return Err(types_error::PgError::error(format!(
+                    "exec_set_variable_stmt: unexpected SET argument node {:?}",
+                    other.node_tag()
+                )))
+            }
+        };
+        args.push(projected);
+    }
+
+    Ok(VariableSetStmt {
+        kind,
+        name,
+        args,
+        is_local: s.is_local,
+        location: s.location,
+    })
+}
+
 /// value-typed `VariableSetStmt` crosses the seam, so the body borrows it.
 pub fn init_seams() {
+    // `case T_VariableSetStmt: ExecSetVariableStmt(castNode(VariableSetStmt,
+    // parsetree), isTopLevel)` (utility.c standard-processing arm). The
+    // dispatcher crosses the post-analyze `types_nodes::Node`; this body is the
+    // castNode-equivalent (`Node::VariableSetStmt(s)`) plus a projection from
+    // the `types_nodes` parse-tree node universe into the trimmed
+    // `types_parsenodes::VariableSetStmt` that `ExecSetVariableStmt` consumes.
+    backend_tcop_utility_out_seams::exec_set_variable_stmt::set(|stmt, is_top_level| {
+        match stmt {
+            types_nodes::nodes::Node::VariableSetStmt(s) => {
+                let projected = variable_set_stmt_from_nodes(s)?;
+                ExecSetVariableStmt(&projected, is_top_level)
+            }
+            other => Err(types_error::PgError::error(format!(
+                "exec_set_variable_stmt: expected VariableSetStmt, got {:?}",
+                other.node_tag()
+            ))),
+        }
+    });
     backend_utils_misc_guc_funcs_seams::extract_set_variable_args::set(|sstmt| {
         ExtractSetVariableArgs(&sstmt)
     });
