@@ -3299,6 +3299,112 @@ fn pg_getarg_datum_seam(
     fcinfo.args[n].value
 }
 
+// ---------------------------------------------------------------------------
+// By-reference PG_GETARG readers (TD-FMGR-GETARG-BYREF). These read the
+// executor frame's by-reference argument side channel (`ref_args`, the no_std
+// mirror of the `types_fmgr` ABI frame's `ref_args`): a by-reference `text` /
+// varlena / `Name` / `cstring` argument arrives as `ref_args[n] == Some(...)`
+// (the dispatcher fills it from the canonical `Datum::ByRef`/`Cstring`, exactly
+// as `datum_to_ref_arg` does for the `types_fmgr` frame). The `'mcx` allocation
+// context is the frame's seeded `fn_mcxt` (as `pg_call_mcx`).
+// ---------------------------------------------------------------------------
+
+/// The frame's by-reference referent for arg `n`, or a loud panic when the slot
+/// is by-value/empty (C: dereferencing a non-pointer `Datum` — a wiring bug, not
+/// a data path). Shared by the four by-ref readers below.
+fn getarg_ref<'a>(
+    fcinfo: &'a types_nodes::fmgr::FunctionCallInfoBaseData<'_>,
+    n: usize,
+    macro_name: &str,
+) -> &'a types_nodes::fmgr::FmgrArgRef {
+    fcinfo.ref_arg(n).unwrap_or_else(|| {
+        panic!(
+            "{macro_name}: arg {n} has no by-reference payload on the executor \
+             frame (the dispatcher did not seed ref_args[{n}] for a by-ref arg)"
+        )
+    })
+}
+
+/// `PG_GETARG_TEXT_PP(n)` (fmgr.h): the (possibly-detoasted) `text` image of arg
+/// `n`. The referent already carries the full varlena image; copy it into the
+/// call's context (`fn_mcxt`) as the `Bytea` C's `PG_DETOAST_DATUM_PACKED`
+/// returns.
+fn pg_getarg_text_pp_seam<'mcx>(
+    fcinfo: &mut types_nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
+    n: usize,
+) -> PgResult<types_datum::varlena::Bytea<'mcx>> {
+    let mcx = pg_call_mcx_seam(fcinfo);
+    let bytes = match getarg_ref(fcinfo, n, "PG_GETARG_TEXT_PP") {
+        types_nodes::fmgr::FmgrArgRef::Varlena(b) => b.as_slice(),
+        types_nodes::fmgr::FmgrArgRef::Cstring(_) => panic!(
+            "PG_GETARG_TEXT_PP: arg {n} is a cstring, not a varlena (a wiring bug)"
+        ),
+    };
+    // The referent is the full 4-byte-header uncompressed varlena image (its
+    // `image.len()` already equals the stored varsize), so `from_image` simply
+    // re-stamps the identical length word.
+    Ok(types_datum::varlena::Bytea::from_image(mcx::slice_in(
+        mcx, bytes,
+    )?))
+}
+
+/// `PG_GETARG_VARLENA_PP(n)` / `PG_GETARG_ARRAYTYPE_P(n)` (fmgr.h): the
+/// (possibly-detoasted) full varlena image of arg `n` (array / `text[]` /
+/// `bytea`). Identical marshalling to [`pg_getarg_text_pp_seam`].
+fn pg_getarg_varlena_pp_seam<'mcx>(
+    fcinfo: &mut types_nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
+    n: usize,
+) -> PgResult<types_datum::varlena::Bytea<'mcx>> {
+    pg_getarg_text_pp_seam(fcinfo, n)
+}
+
+/// `PG_GETARG_NAME(n)` (fmgr.h): arg `n` as a `Name`, returning its NUL-trimmed
+/// text. A `name` value crosses as its `ByRef` varlena image (the 64-byte
+/// NUL-padded buffer) or, for an `unknown`-literal coerced in, a `cstring`; both
+/// resolve to the NUL-trimmed text.
+fn pg_getarg_name_seam(
+    fcinfo: &mut types_nodes::fmgr::FunctionCallInfoBaseData<'_>,
+    n: usize,
+) -> String {
+    match getarg_ref(fcinfo, n, "PG_GETARG_NAME") {
+        types_nodes::fmgr::FmgrArgRef::Cstring(s) => s.clone(),
+        types_nodes::fmgr::FmgrArgRef::Varlena(b) => {
+            // C: a `Name` is the (up to) NAMEDATALEN-byte buffer, NUL-trimmed.
+            let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+            String::from_utf8_lossy(&b[..end]).into_owned()
+        }
+    }
+}
+
+/// `PG_GETARG_CSTRING(n)` / `PG_GETARG_POINTER(n)` read as the `cstring` an
+/// `unknown`-typed literal arrives as (fmgr.h): the NUL-terminated C string of
+/// arg `n`, returned as a `&'mcx str` allocated in the call's context.
+fn pg_getarg_cstring_seam<'mcx>(
+    fcinfo: &types_nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
+    n: usize,
+) -> &'mcx str {
+    let mcx = pg_call_mcx_seam(fcinfo);
+    let s = match getarg_ref(fcinfo, n, "PG_GETARG_CSTRING") {
+        types_nodes::fmgr::FmgrArgRef::Cstring(s) => s.clone(),
+        // A varlena-imaged arg read as a cstring: its NUL-excluded text (the
+        // `unknown`-literal path can present either shape).
+        types_nodes::fmgr::FmgrArgRef::Varlena(b) => {
+            let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+            String::from_utf8_lossy(&b[..end]).into_owned()
+        }
+    };
+    // Allocate the text in `mcx` and leak the box to obtain the `&'mcx str` the
+    // seam returns (the referent itself lives on the borrowed frame; the C
+    // `char *` points into the call's context, which `fn_mcxt` models).
+    let ps = PgString::from_str_in(&s, mcx)
+        .unwrap_or_else(|_| panic!("PG_GETARG_CSTRING: OOM allocating cstring into call context"));
+    let leaked: &'mcx mut PgString<'mcx> = mcx::leak_in(
+        mcx::alloc_in(mcx, ps)
+            .unwrap_or_else(|_| panic!("PG_GETARG_CSTRING: OOM boxing cstring into call context")),
+    );
+    leaked.as_str()
+}
+
 /// `PG_RETURN_INT64(v)` (fmgr.h): `fcinfo->isnull = false; return Int64GetDatum(v);`.
 fn pg_return_int64_seam(
     fcinfo: &mut types_nodes::fmgr::FunctionCallInfoBaseData<'_>,
@@ -3820,6 +3926,12 @@ pub fn init_seams() {
     backend_utils_fmgr_fmgr_seams::pg_getarg_int64::set(pg_getarg_int64_seam);
     backend_utils_fmgr_fmgr_seams::pg_getarg_bool::set(pg_getarg_bool_seam);
     backend_utils_fmgr_fmgr_seams::pg_getarg_datum::set(pg_getarg_datum_seam);
+    // By-reference PG_GETARG readers over the executor frame's `ref_args` side
+    // channel (TD-FMGR-GETARG-BYREF — the by-ref-arg widen on the nodes frame).
+    backend_utils_fmgr_fmgr_seams::pg_getarg_text_pp::set(pg_getarg_text_pp_seam);
+    backend_utils_fmgr_fmgr_seams::pg_getarg_varlena_pp::set(pg_getarg_varlena_pp_seam);
+    backend_utils_fmgr_fmgr_seams::pg_getarg_name::set(pg_getarg_name_seam);
+    backend_utils_fmgr_fmgr_seams::pg_getarg_cstring::set(pg_getarg_cstring_seam);
     backend_utils_fmgr_fmgr_seams::pg_return_int64::set(pg_return_int64_seam);
     backend_utils_fmgr_fmgr_seams::pg_return_datum::set(pg_return_datum_seam);
     backend_utils_fmgr_fmgr_seams::pg_return_bool::set(pg_return_bool_seam);
