@@ -88,10 +88,3 @@ seam_core::seam!(
     /// `add_vars_to_attr_needed(root, vars, where_needed)` (var.c).
     pub fn add_vars_to_attr_needed(root: &mut PlannerInfo, vars: Vec<Expr>, where_needed: Relids) -> PgResult<()>
 );
-seam_core::seam!(
-    /// `find_placeholders_in_jointree(root)` (placeholder.c) — the jointree walk
-    /// over `root->parse->jointree`. The Query/jointree is not reachable in the
-    /// arena model (`PlannerInfo::parse` is an opaque `QueryId`), so this is
-    /// homed as a panic until the parse-tree-aware owner can drive it.
-    pub fn find_placeholders_in_jointree_walk(root: &mut PlannerInfo) -> PgResult<()>
-);

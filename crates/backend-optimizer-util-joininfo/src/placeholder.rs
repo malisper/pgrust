@@ -4,6 +4,7 @@ use alloc::vec::Vec;
 
 use types_error::{PgError, PgResult};
 use types_nodes::primnodes::{Expr, ExprRelids, PlaceHolderVar};
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{
     NodeId, PhInfoId, PlaceHolderInfo, PlannerInfo, Relids, SpecialJoinInfo,
 };
@@ -174,17 +175,82 @@ pub fn phinfo_add_needed(
 /// `find_placeholders_in_jointree`
 ///		Search the jointree for PlaceHolderVars, and build PlaceHolderInfos.
 ///
-/// The jointree (`root->parse->jointree`) is not reachable in the arena model
-/// (`PlannerInfo::parse` is an opaque `QueryId`), so the walk is delegated to a
-/// seam that panics until the parse-tree-aware owner can drive it.
-pub fn find_placeholders_in_jointree(root: &mut PlannerInfo) -> PgResult<()> {
+/// Walks `root->parse->jointree` (resolved through [`PlannerRun`] from the
+/// opaque `PlannerInfo::parse` handle) collecting every PlaceHolderVar that
+/// appears in a FROM/JOIN qual, creating a PlaceHolderInfo for each.
+pub fn find_placeholders_in_jointree<'mcx>(
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+) -> PgResult<()> {
     // This must be done before freezing the set of PHIs.
     debug_assert!(!root.placeholdersFrozen);
 
     // We need do nothing if the query contains no PlaceHolderVars.
     let last_ph_id = root.glob.as_ref().map(|g| g.last_ph_id).unwrap_or(0);
     if last_ph_id != 0 {
-        crate::ext_seam::find_placeholders_in_jointree_walk::call(root)?;
+        // Start recursion at top of jointree.
+        let jointree = run
+            .jointree(root.parse)
+            .expect("find_placeholders_in_jointree: root->parse->jointree != NULL");
+        find_placeholders_in_from_expr(root, jointree)?;
+    }
+    Ok(())
+}
+
+/// `find_placeholders_recurse` — the `FromExpr` arm (top-level jointree entry).
+fn find_placeholders_in_from_expr<'mcx>(
+    root: &mut PlannerInfo,
+    f: &types_nodes::rawnodes::FromExpr<'mcx>,
+) -> PgResult<()> {
+    // First, recurse to handle child joins.
+    for item in f.fromlist.iter() {
+        find_placeholders_recurse(root, item)?;
+    }
+    // Now process the top-level quals.
+    if let Some(quals) = f.quals.as_deref().and_then(|n| n.as_expr()) {
+        find_placeholders_in_expr(root, quals)?;
+    }
+    Ok(())
+}
+
+/// `find_placeholders_recurse`
+///		Recursively scan a jointree node for PlaceHolderVars in its quals.
+fn find_placeholders_recurse<'mcx>(
+    root: &mut PlannerInfo,
+    jtnode: &types_nodes::nodes::Node<'mcx>,
+) -> PgResult<()> {
+    match jtnode {
+        // No quals to deal with here.
+        types_nodes::nodes::Node::RangeTblRef(_) => {}
+        types_nodes::nodes::Node::FromExpr(f) => {
+            // First, recurse to handle child joins.
+            for item in f.fromlist.iter() {
+                find_placeholders_recurse(root, item)?;
+            }
+            // Now process the top-level quals.
+            if let Some(quals) = f.quals.as_deref().and_then(|n| n.as_expr()) {
+                find_placeholders_in_expr(root, quals)?;
+            }
+        }
+        types_nodes::nodes::Node::JoinExpr(j) => {
+            // First, recurse to handle child joins.
+            if let Some(larg) = j.larg.as_deref() {
+                find_placeholders_recurse(root, larg)?;
+            }
+            if let Some(rarg) = j.rarg.as_deref() {
+                find_placeholders_recurse(root, rarg)?;
+            }
+            // Process the qual clauses.
+            if let Some(quals) = j.quals.as_deref().and_then(|n| n.as_expr()) {
+                find_placeholders_in_expr(root, quals)?;
+            }
+        }
+        other => {
+            panic!(
+                "find_placeholders_recurse: unrecognized node type: {:?}",
+                core::mem::discriminant(other)
+            );
+        }
     }
     Ok(())
 }
