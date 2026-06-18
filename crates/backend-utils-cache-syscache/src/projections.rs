@@ -5055,6 +5055,28 @@ pub(crate) fn fetch_class_reloptions<'mcx>(
     Ok(token)
 }
 
+/// `SearchSysCache1(AGGFNOID, funcid)` returning the held `pg_aggregate` tuple
+/// copy (AggregateCreate's REPLACE path) together with the projected
+/// `(aggkind, aggnumdirectargs)` the caller validates before the update.
+/// `Ok(None)` on a cache miss (the C fresh-insert fall-through).
+pub(crate) fn aggregate_tuple_by_fnoid<'mcx>(
+    mcx: Mcx<'mcx>,
+    funcid: Oid,
+) -> PgResult<Option<(FormedTuple<'mcx>, AggRow)>> {
+    let tuple = SearchSysCache1(mcx, AGGFNOID, SysCacheKey::Value(KeyDatum::from_oid(funcid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let row = AggRow {
+        aggkind: getattr_char(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggkind)?,
+        aggnumdirectargs: getattr_i16(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggnumdirectargs)?
+            as i32,
+    };
+    let copy = tup.clone_in(mcx)?;
+    ReleaseSysCache(tup);
+    Ok(Some((copy, row)))
+}
+
 /// `SearchSysCache1(STATEXTOID, statsOid)` returned as the owned `FormedTuple`
 /// copy (statscmds.c needs the held tuple for `heap_modify_tuple` /
 /// `CatalogTupleDelete` of its `t_self`). `Ok(None)` on a cache miss.

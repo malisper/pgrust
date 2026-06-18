@@ -1204,6 +1204,7 @@ pub fn init_seams() {
     s::pg_type_default::set(projections::pg_type_default);
     s::search_pg_proc_fastpath::set(projections::search_pg_proc_fastpath);
     s::fetch_class_reloptions::set(projections::fetch_class_reloptions);
+    s::aggregate_tuple_by_fnoid::set(projections::aggregate_tuple_by_fnoid);
     s::publication_rel_pub_rel::set(projections::publication_rel_pub_rel);
     s::publication_rel_ids::set(projections::publication_rel_ids);
     s::publication_namespace_pub_nsp::set(projections::publication_namespace_pub_nsp);
