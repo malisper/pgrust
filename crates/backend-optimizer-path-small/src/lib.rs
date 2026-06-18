@@ -108,34 +108,34 @@ fn is_opclause(node: &Expr) -> bool {
 /// `is_andclause(node)` (clauses.h).
 #[inline]
 fn is_andclause(node: &Expr) -> bool {
-    matches!(node, Expr::BoolExpr(b) if b.boolop == AND_EXPR)
+    node.as_boolexpr().is_some_and(|b| b.boolop == AND_EXPR)
 }
 
 /// `is_orclause(node)` (clauses.h).
 #[inline]
 fn is_orclause(node: &Expr) -> bool {
-    matches!(node, Expr::BoolExpr(b) if b.boolop == OR_EXPR)
+    node.as_boolexpr().is_some_and(|b| b.boolop == OR_EXPR)
 }
 
 /// `is_notclause(node)` (clauses.h).
 #[inline]
 fn is_notclause(node: &Expr) -> bool {
-    matches!(node, Expr::BoolExpr(b) if b.boolop == NOT_EXPR)
+    node.as_boolexpr().is_some_and(|b| b.boolop == NOT_EXPR)
 }
 
 /// `is_funcclause(node)` (clauses.h).
 #[inline]
 fn is_funcclause(node: &Expr) -> bool {
-    matches!(node, Expr::FuncExpr(_))
+    node.is_funcexpr()
 }
 
 /// `get_notclausearg(notclause)` (clauses.h): the lone arg of a NOT clause.
 #[inline]
 fn get_notclausearg(notclause: &Expr) -> &Expr {
-    match notclause {
-        Expr::BoolExpr(b) => &b.args[0],
-        _ => unreachable!("get_notclausearg on non-BoolExpr"),
-    }
+    let Some(b) = notclause.as_boolexpr() else {
+        unreachable!("get_notclausearg on non-BoolExpr");
+    };
+    &b.args[0]
 }
 
 /// `get_leftop((Expr *) clause)` (nodeFuncs.h): first arg of a binary OpExpr.
@@ -792,15 +792,14 @@ fn boolexpr_args_as_entries<'mcx>(
     clause: &Expr,
     mcx: mcx::Mcx<'mcx>,
 ) -> PgResult<Vec<ListEntry>> {
-    match clause {
-        Expr::BoolExpr(b) => {
-            let mut out = Vec::with_capacity(b.args.len());
-            for a in &b.args {
-                out.push(ListEntry::Bare(a.clone_in(mcx)?));
-            }
-            Ok(out)
+    if let Some(b) = clause.as_boolexpr() {
+        let mut out = Vec::with_capacity(b.args.len());
+        for a in &b.args {
+            out.push(ListEntry::Bare(a.clone_in(mcx)?));
         }
-        _ => Ok(Vec::new()),
+        Ok(out)
+    } else {
+        Ok(Vec::new())
     }
 }
 
@@ -951,14 +950,14 @@ fn clause_selectivity_ext<'mcx>(
 
     let clause = &working_clause;
 
-    if let Expr::Var(var) = clause {
+    if let Some(var) = clause.as_var() {
         // We probably shouldn't ever see an uplevel Var here, but if we do,
         // return the default selectivity...
         if var.varlevelsup == 0 && (var_relid == 0 || var_relid == var.varno) {
             // Use the restriction selectivity function for a bool Var
             s1 = seam::boolvarsel::call(run, root, clause, var_relid)?;
         }
-    } else if let Expr::Const(con) = clause {
+    } else if let Some(con) = clause.as_const() {
         // bool constant is pretty easy...
         s1 = if con.constisnull {
             0.0
@@ -967,10 +966,10 @@ fn clause_selectivity_ext<'mcx>(
         } else {
             0.0
         };
-    } else if let Expr::Param(_) = clause {
+    } else if clause.is_param() {
         // see if we can replace the Param
         let subst = seam::estimate_expression_value::call(run, root, clause)?;
-        if let Expr::Const(con) = &subst {
+        if let Some(con) = subst.as_const() {
             s1 = if con.constisnull {
                 0.0
             } else if con.constvalue.as_bool() {
@@ -1051,11 +1050,11 @@ fn clause_selectivity_ext<'mcx>(
 
         // DistinctExpr has the same representation as OpExpr, but the contained
         // operator is "=" not "<>", so we must negate the result.
-        if matches!(clause, Expr::DistinctExpr(_)) {
+        if clause.is_distinctexpr() {
             s1 = 1.0 - s1;
         }
     } else if is_funcclause(clause) {
-        if let Expr::FuncExpr(funcclause) = clause {
+        if let Some(funcclause) = clause.as_funcexpr() {
             // Try to get an estimate from the support function, if any
             let is_join = treat_as_join_clause(root, clause, cref, var_relid, sjinfo)?;
             s1 = seam::function_selectivity::call(
@@ -1070,14 +1069,14 @@ fn clause_selectivity_ext<'mcx>(
                 sjinfo,
             )?;
         }
-    } else if let Expr::ScalarArrayOpExpr(_) = clause {
+    } else if clause.is_scalararrayopexpr() {
         // Use node specific selectivity calculation function
         let is_join = treat_as_join_clause(root, clause, cref, var_relid, sjinfo)?;
         s1 = seam::scalararraysel::call(run, root, clause, is_join, var_relid, jointype, sjinfo)?;
-    } else if let Expr::RowCompareExpr(_) = clause {
+    } else if clause.is_rowcompareexpr() {
         // Use node specific selectivity calculation function
         s1 = seam::rowcomparesel::call(run, root, clause, var_relid, jointype, sjinfo)?;
-    } else if let Expr::NullTest(nulltest) = clause {
+    } else if let Some(nulltest) = clause.as_nulltest() {
         // Use node specific selectivity calculation function. C reads
         // `((NullTest *) clause)->arg` directly (never NULL for a valid node).
         if let Some(arg) = nulltest.arg.as_deref().cloned() {
@@ -1091,7 +1090,7 @@ fn clause_selectivity_ext<'mcx>(
                 sjinfo,
             )?;
         }
-    } else if let Expr::BooleanTest(booltest) = clause {
+    } else if let Some(booltest) = clause.as_booleantest() {
         // Use node specific selectivity calculation function
         if let Some(arg) = booltest.arg.as_deref().cloned() {
             s1 = seam::booltestsel::call(
@@ -1104,14 +1103,14 @@ fn clause_selectivity_ext<'mcx>(
                 sjinfo,
             )?;
         }
-    } else if let Expr::CurrentOfExpr(cexpr) = clause {
+    } else if let Some(cexpr) = clause.as_currentofexpr() {
         // CURRENT OF selects at most one row of its table
         let crel = find_base_rel(root, cexpr.cvarno);
         let tuples = root.rel(crel).tuples;
         if tuples > 0.0 {
             s1 = 1.0 / tuples;
         }
-    } else if let Expr::RelabelType(rt) = clause {
+    } else if let Some(rt) = clause.as_relabeltype() {
         // Not sure this case is needed, but it can't hurt
         if let Some(arg) = rt.arg.as_deref().cloned() {
             s1 = clause_selectivity_ext(
@@ -1125,7 +1124,7 @@ fn clause_selectivity_ext<'mcx>(
                 use_extended_stats,
             )?;
         }
-    } else if let Expr::CoerceToDomain(cd) = clause {
+    } else if let Some(cd) = clause.as_coercetodomain() {
         // Not sure this case is needed, but it can't hurt
         if let Some(arg) = cd.arg.as_deref().cloned() {
             s1 = clause_selectivity_ext(
@@ -1316,10 +1315,10 @@ fn IsBinaryTidClause(root: &mut PlannerInfo, rinfo: RinfoId, rel: RelId) -> bool
     // Look for CTID as either argument
     let other: &Expr;
     let other_relids: Relids;
-    if matches!(arg1, Expr::Var(v) if IsCTIDVar(v, rel_relid)) {
+    if arg1.as_var().is_some_and(|v| IsCTIDVar(v, rel_relid)) {
         other = arg2;
         other_relids = clone_relids(&root.rinfo(rinfo).right_relids);
-    } else if matches!(arg2, Expr::Var(v) if IsCTIDVar(v, rel_relid)) {
+    } else if arg2.as_var().is_some_and(|v| IsCTIDVar(v, rel_relid)) {
         other = arg1;
         other_relids = clone_relids(&root.rinfo(rinfo).left_relids);
     } else {
@@ -1365,9 +1364,8 @@ fn IsTidEqualAnyClause(root: &mut PlannerInfo, rinfo: RinfoId, rel: RelId) -> bo
     let clause = root.node(root.rinfo(rinfo).clause).clone();
 
     // Must be a ScalarArrayOpExpr
-    let node = match &clause {
-        Expr::ScalarArrayOpExpr(n) => n,
-        _ => return false,
+    let Some(node) = clause.as_scalararrayopexpr() else {
+        return false;
     };
 
     // Operator must be tideq
@@ -1382,7 +1380,7 @@ fn IsTidEqualAnyClause(root: &mut PlannerInfo, rinfo: RinfoId, rel: RelId) -> bo
     let arg2 = &node.args[1];
 
     // CTID must be first argument
-    if matches!(arg1, Expr::Var(v) if IsCTIDVar(v, rel_relid)) {
+    if arg1.as_var().is_some_and(|v| IsCTIDVar(v, rel_relid)) {
         // The other argument must be a pseudoconstant
         let varnos = seam::pull_varnos_expr::call(root, arg2);
         if bms::relids_is_member::call(rel_relid as i32, &varnos)
@@ -1401,10 +1399,9 @@ fn IsTidEqualAnyClause(root: &mut PlannerInfo, rinfo: RinfoId, rel: RelId) -> bo
 fn IsCurrentOfClause(root: &PlannerInfo, rinfo: RinfoId, rel: RelId) -> bool {
     let rel_relid = root.rel(rel).relid;
     let clause = root.node(root.rinfo(rinfo).clause);
-    match clause {
-        Expr::CurrentOfExpr(node) => node.cvarno == rel_relid,
-        _ => false,
-    }
+    clause
+        .as_currentofexpr()
+        .is_some_and(|node| node.cvarno == rel_relid)
 }
 
 /// `RestrictInfoIsTidQual(root, rinfo, rel)` (tidpath.c): usable as a CTID qual
@@ -1451,20 +1448,21 @@ fn TidQualFromRestrictInfoList(
                 .rinfo(rinfo)
                 .orclause
                 .expect("restriction_is_or_clause but orclause is None");
-            let orargs: Vec<Expr> = match root.node(orclause) {
-                Expr::BoolExpr(b) => b.args.clone(),
-                _ => Vec::new(),
-            };
+            let orargs: Vec<Expr> = root
+                .node(orclause)
+                .as_boolexpr()
+                .map(|b| b.args.clone())
+                .unwrap_or_default();
 
             for orarg in &orargs {
                 let sublist: Vec<RinfoId>;
 
                 // OR arguments should be ANDs or sub-RestrictInfos
                 if is_andclause(orarg) {
-                    let andargs = match orarg {
-                        Expr::BoolExpr(b) => b.args.clone(),
-                        _ => Vec::new(),
-                    };
+                    let andargs = orarg
+                        .as_boolexpr()
+                        .map(|b| b.args.clone())
+                        .unwrap_or_default();
                     // Recurse in case there are sub-ORs. The C passes the AND's
                     // arg List (RestrictInfos); we materialise each arg as a
                     // transient rinfo to address it by handle.
@@ -1597,7 +1595,7 @@ fn BuildParameterizedTidPaths<'mcx>(
 fn ec_member_matches_ctid(root: &PlannerInfo, rel: RelId, _ec: EcId, em: EmId) -> bool {
     let rel_relid = root.rel(rel).relid;
     let em_expr = root.node(root.em(em).em_expr);
-    matches!(em_expr, Expr::Var(v) if IsCTIDVar(v, rel_relid))
+    em_expr.as_var().is_some_and(|v| IsCTIDVar(v, rel_relid))
 }
 
 /// `create_tidscan_paths(root, rel)` (tidpath.c): create direct-TID-scan paths
