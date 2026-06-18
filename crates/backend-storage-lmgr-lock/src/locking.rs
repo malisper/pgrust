@@ -60,6 +60,7 @@ use crate::state;
 use crate::tables;
 use crate::LockTagHashCode;
 
+use backend_access_transam_twophase_seams as twophase;
 use backend_storage_lmgr_lwlock_seams as lwlock;
 use backend_storage_lmgr_proc as proc_owner;
 use backend_storage_lmgr_proc_seams as proc;
@@ -1869,4 +1870,154 @@ pub(crate) fn conflicts_with_relation_fast_path_pub(locktag: &LOCKTAG, mode: LOC
 pub(crate) fn remove_local_lock_for(locktag: &LOCKTAG, mode: LOCKMODE) {
     let localtag = make_localtag(locktag, mode);
     remove_local_lock(&localtag)
+}
+
+// ===========================================================================
+// DoLockModesConflict / virtual-transaction wait (XactLockForVirtualXact /
+// VirtualXactLock).
+// ===========================================================================
+
+/// `DoLockModesConflict(mode1, mode2)` (lock.c) — whether two lock modes would
+/// conflict, i.e. `lockMethodTable->conflictTab[mode1] & LOCKBIT_ON(mode2)` for
+/// the default (heavyweight) lock method.
+pub fn DoLockModesConflict(mode1: LOCKMODE, mode2: LOCKMODE) -> bool {
+    let conflict_tab = tables::conflict_tab_for(DEFAULT_LOCKMETHOD as u16, mode1);
+    (conflict_tab & LOCKBIT_ON(mode2)) != 0
+}
+
+/// `XactLockForVirtualXact(vxid, xid, wait)` (lock.c) — if `xid` is valid this
+/// is essentially `(Conditional)XactLockTableWait(xid)`; if not, it locks every
+/// prepared XID that was known as `vxid` before its `PREPARE TRANSACTION`.
+/// Returns false only when `wait == false` and the xid is still running.
+fn XactLockForVirtualXact(
+    vxid: types_storage::VirtualTransactionId,
+    mut xid: types_core::TransactionId,
+    wait: bool,
+) -> PgResult<bool> {
+    use types_core::xact::TransactionIdIsValid;
+    use types_storage::lock::ShareLock;
+
+    // There is no point to wait for 2PCs if you have no 2PCs.
+    if backend_utils_init_small_seams::max_prepared_xacts::call() == 0 {
+        return Ok(true);
+    }
+
+    let mut more = false;
+    loop {
+        // Clear state from previous iterations.
+        if more {
+            xid = types_core::xact::InvalidTransactionId;
+            more = false;
+        }
+
+        // If we have no xid, try to find one.
+        if !TransactionIdIsValid(xid) {
+            let (found, have_more) =
+                twophase::two_phase_get_xid_by_virtual_xid::call((vxid.procNumber, vxid.localTransactionId))?;
+            xid = found;
+            more = have_more;
+        }
+        if !TransactionIdIsValid(xid) {
+            debug_assert!(!more);
+            return Ok(true);
+        }
+
+        // Check or wait for XID completion.
+        let tag = LOCKTAG::transaction(xid);
+        let lar = LockAcquire(&tag, ShareLock, false, !wait)?;
+        if lar == LOCKACQUIRE_NOT_AVAIL {
+            return Ok(false);
+        }
+        LockRelease(&tag, ShareLock, false)?;
+
+        if !more {
+            break;
+        }
+    }
+
+    Ok(true)
+}
+
+/// `VirtualXactLock(vxid, wait)` (lock.c) — with `wait == true`, wait until the
+/// given VXID (or any XID acquired by the same transaction) is no longer running
+/// and return true; with `wait == false`, just check and return whether it is
+/// still running.
+///
+/// The `&proc->fpInfoLock`-guarded cross-backend examination (and, when needed,
+/// the conversion of the proc's fast-path VXID lock into a primary lock-table
+/// entry) is performed by proc.c's `virtual_xact_examine_proc` seam, which owns
+/// that PGPROC-private critical section. The lock-table transfer itself
+/// (`SetupLockInTable` + `GrantLock`) is this unit's work, threaded into the
+/// critical section through the `transfer` callback.
+pub fn VirtualXactLock(
+    vxid: types_storage::VirtualTransactionId,
+    wait: bool,
+) -> PgResult<bool> {
+    use types_storage::lock::{ExclusiveLock, ShareLock, VirtualXactExamineOutcome};
+
+    debug_assert!(vxid.is_valid());
+
+    if vxid.is_recovered_prepared_xact() {
+        // No vxid lock; localTransactionId is a normal, locked XID.
+        return XactLockForVirtualXact(vxid, vxid.localTransactionId, wait);
+    }
+
+    let tag = LOCKTAG::virtualtransaction(vxid.procNumber as u32, vxid.localTransactionId);
+
+    // If a lock table entry must be made, this is the PGPROC on whose behalf it
+    // must be done. Note that the transaction might end or the PGPROC might be
+    // reassigned to a new backend before we get around to examining it, but it
+    // doesn't matter.
+    if !proc::proc_number_get_proc_is_present::call(vxid.procNumber) {
+        return XactLockForVirtualXact(vxid, types_core::xact::InvalidTransactionId, wait);
+    }
+
+    // `transfer`: convert the target proc's fast-path VXID lock into a regular
+    // primary lock-table entry, run under the target's fpInfoLock by proc.c.
+    let target = vxid.procNumber;
+    let mut transfer = |target: ProcNumber, tag: &LOCKTAG| -> PgResult<()> {
+        let hashcode = LockTagHashCode(tag);
+        let partition_guard = lwlock::lwlock_acquire_main::call(
+            lock_partition_lock_offset(hashcode),
+            LWLockMode::LW_EXCLUSIVE,
+        )?;
+        let res = setup_lock_in_table(target, tag, ExclusiveLock);
+        match res {
+            Ok(Some(_)) => {
+                grant_lock(tag, target, ExclusiveLock);
+                partition_guard.release()?;
+                Ok(())
+            }
+            Ok(None) => {
+                partition_guard.release()?;
+                Err(out_of_shared_memory())
+            }
+            Err(e) => {
+                partition_guard.release()?;
+                Err(e)
+            }
+        }
+    };
+
+    let outcome = proc::virtual_xact_examine_proc::call(
+        target,
+        vxid,
+        wait,
+        &mut || transfer(target, &tag),
+    )?;
+
+    let xid = match outcome {
+        VirtualXactExamineOutcome::Ended => {
+            return XactLockForVirtualXact(vxid, types_core::xact::InvalidTransactionId, wait);
+        }
+        VirtualXactExamineOutcome::StillRunningNoWait => {
+            return Ok(false);
+        }
+        VirtualXactExamineOutcome::Proceed { xid } => xid,
+    };
+
+    // Time to wait.
+    let _ = LockAcquire(&tag, ShareLock, false, false)?;
+    LockRelease(&tag, ShareLock, false)?;
+    XactLockForVirtualXact(vxid, xid, wait)
 }

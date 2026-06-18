@@ -245,6 +245,7 @@ pub fn init_seams() {
     seams::lock_tag_hash_code::set(|tag| LockTagHashCode(&tag));
     seams::get_lockmode_name::set(get_lockmode_name);
     seams::conflict_tab::set(conflict_tab);
+    seams::do_lock_modes_conflict::set(locking::DoLockModesConflict);
     seams::get_lock_method_table::set(get_lock_method_table);
 
     // F1 LockAcquire / LockRelease pair.
@@ -308,6 +309,7 @@ pub fn init_seams() {
     seams::get_lock_holders_and_waiters::set(locking::get_lock_holders_and_waiters_seam);
     seams::get_running_transaction_locks::set(locking::GetRunningTransactionLocks);
 
+    seams::virtual_xact_lock::set(locking::VirtualXactLock);
     seams::virtual_xact_lock_table_insert::set(locking::VirtualXactLockTableInsert);
     seams::virtual_xact_lock_table_cleanup::set(locking::VirtualXactLockTableCleanup);
 

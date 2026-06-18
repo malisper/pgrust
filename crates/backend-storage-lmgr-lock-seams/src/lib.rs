@@ -358,6 +358,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `DoLockModesConflict(mode1, mode2)` (lock.c) — whether two lock modes
+    /// would conflict, i.e. `conflictTab[mode1] & LOCKBIT_ON(mode2)` for the
+    /// default (heavyweight) lock method. Pure conflict-table read, infallible.
+    pub fn do_lock_modes_conflict(
+        mode1: types_storage::lock::LOCKMODE,
+        mode2: types_storage::lock::LOCKMODE,
+    ) -> bool
+);
+
+seam_core::seam!(
     /// `LockCheckConflicts(lockMethodTable, lockmode, lock, proclock)` — does
     /// the requested mode conflict with already-granted locks (excluding the
     /// requester's own holdings)?

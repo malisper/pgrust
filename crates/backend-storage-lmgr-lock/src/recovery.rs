@@ -9,8 +9,9 @@
 //! * `GetLockConflicts` / `GetLockStatusData` — read-only snapshots of the lock
 //!   tables for snapshot logging / `pg_lock_status`.
 //! * `VirtualXactLockTableCleanup` — release this backend's VXID lock at xact
-//!   end (the `VirtualXactLock` waiter path needs cross-backend fast-path PGPROC
-//!   accessors not yet exposed and is deferred; see `lib.rs`).
+//!   end. The `VirtualXactLock` waiter path (in `locking.rs`) is now ported: the
+//!   cross-backend `fpInfoLock`-guarded examination + fast-path→main-table
+//!   transfer is performed through proc.c's `virtual_xact_examine_proc` seam.
 //! * `proc_locks_hold_masks` — proc.c's per-partition `myProcLocks` hold-mask
 //!   walk, served from the ambient PROCLOCK table.
 //!
