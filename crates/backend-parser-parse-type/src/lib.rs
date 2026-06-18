@@ -885,17 +885,21 @@ fn seam_tc_get_column_def_collation(
     coldef: &types_nodes::rawnodes::ColumnDef<'_>,
     type_oid: Oid,
 ) -> PgResult<Oid> {
-    use types_nodes::nodes::Node as RawNode;
+    use types_nodes::nodes::ntag;
 
     let collClause_collname = match &coldef.collClause {
         Some(cc) => {
             let mut names: Vec<Node> = Vec::with_capacity(cc.collname.len());
             for n in cc.collname.iter() {
-                match &**n {
-                    RawNode::String(s) => names.push(Node::String(types_parsenodes::StringNode {
-                        sval: Some(s.sval.as_str().to_string()),
-                    })),
-                    other => {
+                match (&**n).node_tag() {
+                    ntag::T_String => {
+                        let s = (&**n).expect_string();
+                        names.push(Node::String(types_parsenodes::StringNode {
+                            sval: Some(s.sval.as_str().to_string()),
+                        }))
+                    }
+                    _ => {
+                        let other = &**n;
                         return Err(PgError::error(format!(
                             "GetColumnDefCollation: COLLATE name element is not a String node (tag {})",
                             other.node_tag().0
@@ -929,15 +933,19 @@ fn seam_tc_get_column_def_collation(
 pub fn raw_typename_to_parse(
     tn: &types_nodes::rawnodes::TypeName<'_>,
 ) -> PgResult<types_parsenodes::TypeName> {
-    use types_nodes::nodes::Node as RawNode;
+    use types_nodes::nodes::ntag;
 
     let mut names: Vec<types_parsenodes::Node> = Vec::with_capacity(tn.names.len());
     for n in tn.names.iter() {
-        match &**n {
-            RawNode::String(s) => names.push(types_parsenodes::Node::String(
-                types_parsenodes::StringNode { sval: Some(s.sval.as_str().to_string()) },
-            )),
-            other => {
+        match (&**n).node_tag() {
+            ntag::T_String => {
+                let s = (&**n).expect_string();
+                names.push(types_parsenodes::Node::String(types_parsenodes::StringNode {
+                    sval: Some(s.sval.as_str().to_string()),
+                }))
+            }
+            _ => {
+                let other = &**n;
                 return Err(PgError::error(format!(
                     "defGetTypeName: TypeName.names element is not a String node (tag {})",
                     other.node_tag().0
@@ -948,28 +956,44 @@ pub fn raw_typename_to_parse(
 
     let mut typmods: Vec<types_parsenodes::Node> = Vec::with_capacity(tn.typmods.len());
     for tm in tn.typmods.iter() {
-        let bridged: types_parsenodes::Node = match &**tm {
-            RawNode::A_Const(ac) => match ac.val.as_deref() {
-                Some(RawNode::Integer(i)) => {
-                    types_parsenodes::Node::Integer(types_parsenodes::Integer { ival: i.ival })
+        let bridged: types_parsenodes::Node = match (&**tm).node_tag() {
+            ntag::T_A_Const => {
+                let ac = (&**tm).expect_a_const();
+                let val = ac.val.as_deref();
+                match val.map(|n| n.node_tag()) {
+                    Some(ntag::T_Integer) => {
+                        let i = val.unwrap().expect_integer();
+                        types_parsenodes::Node::Integer(types_parsenodes::Integer { ival: i.ival })
+                    }
+                    Some(ntag::T_Float) => {
+                        let f = val.unwrap().expect_float();
+                        types_parsenodes::Node::Float(types_parsenodes::Float {
+                            fval: Some(f.fval.as_str().to_string()),
+                        })
+                    }
+                    Some(ntag::T_String) => {
+                        let s = val.unwrap().expect_string();
+                        types_parsenodes::Node::String(types_parsenodes::StringNode {
+                            sval: Some(s.sval.as_str().to_string()),
+                        })
+                    }
+                    Some(ntag::T_Boolean) => {
+                        let b = val.unwrap().expect_boolean();
+                        types_parsenodes::Node::Boolean(types_parsenodes::Boolean { boolval: b.boolval })
+                    }
+                    Some(ntag::T_BitString) => {
+                        let b = val.unwrap().expect_bitstring();
+                        types_parsenodes::Node::BitString(types_parsenodes::BitString {
+                            bsval: Some(b.bsval.as_str().to_string()),
+                        })
+                    }
+                    _ => types_parsenodes::Node::A_Star,
                 }
-                Some(RawNode::Float(f)) => types_parsenodes::Node::Float(types_parsenodes::Float {
-                    fval: Some(f.fval.as_str().to_string()),
-                }),
-                Some(RawNode::String(s)) => types_parsenodes::Node::String(
-                    types_parsenodes::StringNode { sval: Some(s.sval.as_str().to_string()) },
-                ),
-                Some(RawNode::Boolean(b)) => {
-                    types_parsenodes::Node::Boolean(types_parsenodes::Boolean { boolval: b.boolval })
-                }
-                Some(RawNode::BitString(b)) => types_parsenodes::Node::BitString(
-                    types_parsenodes::BitString { bsval: Some(b.bsval.as_str().to_string()) },
-                ),
-                _ => types_parsenodes::Node::A_Star,
-            },
-            RawNode::ColumnRef(cr) => {
+            }
+            ntag::T_ColumnRef => {
+                let cr = (&**tm).expect_columnref();
                 if cr.fields.len() == 1 {
-                    if let RawNode::String(s) = &*cr.fields[0] {
+                    if let Some(s) = cr.fields[0].as_string() {
                         types_parsenodes::Node::String(types_parsenodes::StringNode {
                             sval: Some(s.sval.as_str().to_string()),
                         })
@@ -987,9 +1011,13 @@ pub fn raw_typename_to_parse(
 
     let mut array_bounds: Vec<types_parsenodes::Node> = Vec::with_capacity(tn.arrayBounds.len());
     for n in tn.arrayBounds.iter() {
-        match &**n {
-            RawNode::Integer(i) => array_bounds
-                .push(types_parsenodes::Node::Integer(types_parsenodes::Integer { ival: i.ival })),
+        match (&**n).node_tag() {
+            ntag::T_Integer => {
+                let i = (&**n).expect_integer();
+                array_bounds.push(types_parsenodes::Node::Integer(types_parsenodes::Integer {
+                    ival: i.ival,
+                }))
+            }
             _ => array_bounds
                 .push(types_parsenodes::Node::Integer(types_parsenodes::Integer { ival: -1 })),
         }
@@ -1014,11 +1042,9 @@ pub fn raw_typename_to_parse(
 fn seam_typename_type_id_from_defelem(
     def: &types_nodes::ddlnodes::DefElem<'_>,
 ) -> PgResult<Oid> {
-    use types_nodes::nodes::Node as RawNode;
-
     // defGetTypeName: the value must be an IsA(arg, TypeName) node.
-    let tn = match def.arg.as_deref() {
-        Some(RawNode::TypeName(tn)) => tn,
+    let tn = match def.arg.as_deref().and_then(|n| n.as_typename()) {
+        Some(tn) => tn,
         _ => {
             let name = def.defname.as_ref().map(|s| s.as_str()).unwrap_or("");
             return Err(PgError::error(format!(
