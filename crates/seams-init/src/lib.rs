@@ -1426,16 +1426,6 @@ mod recurrence_guard {
         // pattern), so the seams cross owned `'mcx` values instead of registry handles.
         // The handle REGISTRY is kept ONLY for plan/source u64 IDENTITY + refcount +
         // gplan sharing (faithful to C's shared CachedPlan*).)
-        // DESIGN_DEBT: `domain_check_input` (domains.c) checks a domain's
-        // constraints. Its NOT NULL arm is trivial, but the DOM_CONSTRAINT_CHECK
-        // arm requires `ExecCheck(con->check_exprstate, econtext)` — executor
-        // expression evaluation (`ExecEvalExprSwitchContext` over a compiled
-        // `ExprState`) in a standalone `ExprContext`. In this repo `check_exprstate`
-        // is an opaque `ExprStateHandle` built only via the unported domains.c
-        // executor bridge, `ExecCheck` has no seam, and the standalone-ExprContext
-        // machinery is absent. Blocked on the execExpr/execExprInterp executor-eval
-        // keystone. (The sibling `domain_get_base_input_info` IS installed.)
-        ("backend_utils_cache_typcache", "domain_check_input"),
         // DESIGN_DEBT (TD-DFMGR-DYNLOADER): the dynamic-library / extension-hook
         // surface of dfmgr.c + miscinit.c. `load_archive_module_init` is
         // `load_external_function(filename, "_PG_archive_module_init", ...)` — it
