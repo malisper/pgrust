@@ -101,4 +101,11 @@ pub fn init_seams() {
     // `_ =>` arm reach it through the `process_utility_slow` outward seam; install
     // it here so CREATE TABLE → `DefineRelation` becomes reachable.
     backend_tcop_utility_out_seams::process_utility_slow::set(slow::process_utility_slow);
+
+    // EventTriggerSupportsObjectType (commands/event_trigger.c): a pure dispatch
+    // predicate the GRANT/DROP/RENAME/ALTER…/COMMENT/SECURITY LABEL fast-path
+    // arms consult. The real owner `backend-commands-event-trigger` (the
+    // `commands/event_trigger.c` port) now installs this seam, so the stopgap
+    // install that used to live here is gone — `dispatch::EventTriggerSupportsObjectType`
+    // is retained only as the in-crate reference predicate.
 }
