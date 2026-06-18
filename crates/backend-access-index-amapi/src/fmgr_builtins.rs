@@ -84,6 +84,6 @@ pub fn register_amapi_builtins() {
     backend_utils_fmgr_core::register_builtins([
         // amvalidate(oid) -> bool. pg_proc.dat oid 338: proargtypes 'oid'
         // (nargs 1), no proisstrict (strict false), no proretset (retset false).
-        builtin(338, "amvalidate", 1, false, false, fc_amvalidate),
+        builtin(338, "amvalidate", 1, true, false, fc_amvalidate),
     ]);
 }

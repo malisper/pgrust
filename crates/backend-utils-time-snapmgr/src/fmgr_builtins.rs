@@ -78,6 +78,6 @@ pub fn register_snapmgr_builtins() {
     backend_utils_fmgr_core::register_builtins([
         // pg_export_snapshot: proargtypes => '' (0 args), prorettype => 'text';
         // no proisstrict (=> not strict), no proretset (=> not set-returning).
-        builtin(3809, "pg_export_snapshot", 0, false, false, fc_pg_export_snapshot),
+        builtin(3809, "pg_export_snapshot", 0, true, false, fc_pg_export_snapshot),
     ]);
 }

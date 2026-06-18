@@ -119,8 +119,8 @@ fn builtin(
 /// `proisstrict`, none `proretset`; all take a single `oid` argument).
 pub fn register_pg_proc_builtins() {
     backend_utils_fmgr_core::register_builtins([
-        builtin(2246, "fmgr_internal_validator", 1, false, false, fc_fmgr_internal_validator),
-        builtin(2247, "fmgr_c_validator", 1, false, false, fc_fmgr_c_validator),
-        builtin(2248, "fmgr_sql_validator", 1, false, false, fc_fmgr_sql_validator),
+        builtin(2246, "fmgr_internal_validator", 1, true, false, fc_fmgr_internal_validator),
+        builtin(2247, "fmgr_c_validator", 1, true, false, fc_fmgr_c_validator),
+        builtin(2248, "fmgr_sql_validator", 1, true, false, fc_fmgr_sql_validator),
     ]);
 }

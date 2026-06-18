@@ -197,7 +197,7 @@ pub fn register_pseudotypes_builtins() {
         builtin(2299, "void_out", 1, true, false, fc_void_out),
         builtin(3121, "void_send", 1, true, false, fc_void_send),
         // ---- shell type dummies ----
-        builtin(2398, "shell_in", 1, true, false, fc_shell_in),
+        builtin(2398, "shell_in", 1, false, false, fc_shell_in),
         builtin(2399, "shell_out", 1, true, false, fc_shell_out),
     ]);
 }

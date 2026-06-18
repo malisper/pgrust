@@ -66,6 +66,6 @@ pub fn register_backend_storage_ipc_shmem_builtins() {
     backend_utils_fmgr_core::register_builtins([
         // pg_numa_available: proargtypes='' (0 args), prorettype=bool,
         // no proisstrict (=> not strict), no proretset (=> not set-returning).
-        builtin(4099, "pg_numa_available", 0, false, false, fc_pg_numa_available),
+        builtin(4099, "pg_numa_available", 0, true, false, fc_pg_numa_available),
     ]);
 }

@@ -65,6 +65,6 @@ fn builtin(
 /// scalar (not retset).
 pub fn register_jit_builtins() {
     backend_utils_fmgr_core::register_builtins([
-        builtin(315, "pg_jit_available", 0, false, false, fc_pg_jit_available),
+        builtin(315, "pg_jit_available", 0, true, false, fc_pg_jit_available),
     ]);
 }
