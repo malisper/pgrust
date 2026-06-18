@@ -2438,6 +2438,86 @@ pub fn datum_to_ref_arg_owned(
     }
 }
 
+/// The varlena length header (if any) in front of a canonical `ByRef` image of a
+/// type with `typlen`, given the value's own bytes. The canonical `Datum::ByRef`
+/// is the verbatim on-disk image: a varlena (`typlen == -1`) carries a 1-/4-byte
+/// length header; a fixed-length-by-ref type (`typlen > 0`, e.g. `name`) carries
+/// the raw fixed buffer with no header; `typlen == -2` (`cstring`) is not a
+/// `ByRef`. The fmgr `RefPayload::Varlena` lane delivers the header-LESS payload
+/// (this codebase's varlena convention), so a varlena ByRef is stripped here and
+/// a fixed-by-ref ByRef passes verbatim.
+fn byref_payload_for_typlen(bytes: &[u8], typlen: i32) -> Vec<u8> {
+    if typlen == -1 {
+        let off = types_datum::varlena::varhdrsz_of(bytes);
+        bytes[off..].to_vec()
+    } else {
+        bytes.to_vec()
+    }
+}
+
+/// [`datum_to_ref_arg`] with the argument's declared `typlen`, so a by-reference
+/// varlena argument's length header is stripped to the payload the adt cores read
+/// (the inverse of [`ref_out_to_datum`]'s re-stamp). A fixed-length-by-ref
+/// argument (`typlen > 0`, e.g. `name`) passes its buffer verbatim. `typlen == 0`
+/// (unknown / polymorphic-unresolved) falls back to the verbatim (untyped) form.
+fn datum_to_ref_arg_typed(
+    val: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
+    typlen: i32,
+) -> (NullableDatum, Option<RefPayload>) {
+    use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
+    match val {
+        CanonDatum::ByRef(b) if typlen != 0 => (
+            NullableDatum::value(Datum::null()),
+            Some(RefPayload::Varlena(byref_payload_for_typlen(b.as_slice(), typlen))),
+        ),
+        other => datum_to_ref_arg(other),
+    }
+}
+
+/// By-value (`internal`-moving) form of [`datum_to_ref_arg_typed`].
+fn datum_to_ref_arg_owned_typed(
+    val: types_tuple::backend_access_common_heaptuple::Datum<'_>,
+    typlen: i32,
+) -> (NullableDatum, Option<RefPayload>) {
+    use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
+    match val {
+        CanonDatum::ByRef(b) if typlen != 0 => (
+            NullableDatum::value(Datum::null()),
+            Some(RefPayload::Varlena(byref_payload_for_typlen(b.as_slice(), typlen))),
+        ),
+        other => datum_to_ref_arg_owned(other),
+    }
+}
+
+/// The declared `typlen` of each of `fn_oid`'s first `nargs` arguments, read from
+/// `pg_proc.proargtypes` (the catalog the C `fcinfo->flinfo` argument-type
+/// machinery consults). Used by the canonical-`Datum` invoke seams to decide
+/// whether a by-reference argument carries a strippable varlena length header.
+/// A polymorphic / unresolvable argument type yields `typlen == 0` (the
+/// "pass verbatim" sentinel — its referent is already in whatever shape the
+/// caller produced).
+fn proc_arg_typlens(mcx: Mcx<'_>, fn_oid: Oid, nargs: usize) -> PgResult<Vec<i32>> {
+    let mut out = vec![0i32; nargs];
+    let proc = match backend_utils_cache_syscache_seams::proc_row_by_oid::call(mcx, fn_oid)? {
+        Some(p) => p,
+        None => return Ok(out),
+    };
+    for (i, slot) in out.iter_mut().enumerate() {
+        if let Some(&argtype) = proc.proargtypes.get(i) {
+            if argtype != 0 {
+                // A varlena (`typlen == -1`) carries a strippable header; a
+                // fixed-length-by-ref type (`typlen > 0`, e.g. `name`) does not.
+                // A pseudo/polymorphic declared type reports its own `pg_type`
+                // typlen here (e.g. `anyarray`/`anyrange` == -1, themselves
+                // varlena); the rare polymorphic-`anyelement`-holding-a-varlena
+                // case is left verbatim, the conservative choice.
+                *slot = backend_utils_cache_lsyscache_seams::get_typlen::call(argtype)? as i32;
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Map a `function_call_coll_ref_args_out` `(word, ref_result)` pair back onto a
 /// canonical [`Datum`]: a by-reference result materializes its referent bytes
 /// into `mcx` (`ByRef`); otherwise the bare word is the by-value scalar (`ByVal`).
@@ -2468,8 +2548,19 @@ fn ref_out_to_datum<'mcx>(
         // live state box; carry it on the canonical `Internal` arm.
         Some(RefPayload::Internal(state)) => Ok(CanonDatum::Internal(state)),
         Some(payload) => {
-            let bytes: Vec<u8> = payload.flatten();
-            Ok(CanonDatum::ByRef(mcx::slice_in(mcx, &bytes)?))
+            // C: a by-reference function result is a pointer to a header-ful
+            // `struct varlena *`; the canonical `ByRef` image is likewise header-ful
+            // (`heap_deform`/array on-disk layout read the 4-byte length word). The
+            // fmgr `RefPayload::Varlena` lane, by this codebase's varlena convention,
+            // carries only the header-LESS payload (the adt cores build/consume
+            // `VARDATA`). Re-stamp the 4-byte length header here — the same restamp
+            // `byref_element_ondisk_image` does for the array on-disk path — so a
+            // function-produced varlena stored into a tuple (`heap_form_tuple`) has
+            // a valid length word. (Composite/Expanded already flatten to a
+            // header-ful image; Cstring/Internal are handled in their own arms
+            // above.)
+            let image = byref_element_ondisk_image(payload);
+            Ok(CanonDatum::ByRef(mcx::slice_in(mcx, &image)?))
         }
         None => Ok(CanonDatum::ByVal(canon_word(&canon_byval(word)).as_usize())),
     }
@@ -3090,10 +3181,11 @@ fn function_call_invoke_datum_seam<'mcx>(
     // Build the `fcinfo->args[]` frame: by-value word lane + by-reference side
     // channel. The canonical arg's own NULL state rides its variant; the
     // interpreter has already applied the strict-null short-circuit upstream.
+    let arg_typlens = proc_arg_typlens(mcx, fn_oid, args.len())?;
     let mut nargs: Vec<NullableDatum> = Vec::with_capacity(args.len());
     let mut ref_args: Vec<Option<RefPayload>> = Vec::with_capacity(args.len());
-    for val in args {
-        let (nd, refp) = datum_to_ref_arg(val);
+    for (i, val) in args.iter().enumerate() {
+        let (nd, refp) = datum_to_ref_arg_typed(val, arg_typlens[i]);
         nargs.push(nd);
         ref_args.push(refp);
     }
@@ -3111,10 +3203,11 @@ fn function_call_invoke_datum_owned_seam<'mcx>(
     args: Vec<types_tuple::backend_access_common_heaptuple::Datum<'mcx>>,
     fn_expr: Option<&types_nodes::primnodes::Expr>,
 ) -> PgResult<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)> {
+    let arg_typlens = proc_arg_typlens(mcx, fn_oid, args.len())?;
     let mut nargs: Vec<NullableDatum> = Vec::with_capacity(args.len());
     let mut ref_args: Vec<Option<RefPayload>> = Vec::with_capacity(args.len());
-    for val in args {
-        let (nd, refp) = datum_to_ref_arg_owned(val);
+    for (i, val) in args.into_iter().enumerate() {
+        let (nd, refp) = datum_to_ref_arg_owned_typed(val, arg_typlens[i]);
         nargs.push(nd);
         ref_args.push(refp);
     }
