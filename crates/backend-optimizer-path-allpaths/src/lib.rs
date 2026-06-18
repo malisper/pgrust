@@ -340,7 +340,7 @@ pub fn set_rel_size<'mcx>(
             RTE_TABLEFUNC => {
                 backend_optimizer_path_costsize::sizeest::set_tablefunc_size_estimates(run, root, rel)
             }
-            RTE_VALUES => seams::set_values_size_estimates::call(root, rel),
+            RTE_VALUES => backend_optimizer_path_costsize::sizeest::set_values_size_estimates(run, root, rel),
             RTE_CTE => {
                 if rte::rte_self_reference::call(run, root, rti) {
                     subquery::set_worktable_pathlist(root, rel, rti)?;

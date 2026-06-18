@@ -9,7 +9,7 @@ use backend_optimizer_path_costsize_seams as cz;
 
 use crate::{
     clamp_row_est, clamp_width_est, cost_qual_eval, cost_qual_eval_node, rinfo_clause_nodes,
-    recursive_worktable_factor, SizeofHeapTupleHeader, RTE_FUNCTION,
+    recursive_worktable_factor, SizeofHeapTupleHeader, RTE_FUNCTION, RTE_VALUES,
 };
 
 /// `MAXALIGN(LEN)` — round up to the platform max alignment (8).
@@ -50,6 +50,18 @@ pub fn set_function_size_estimates<'mcx>(run: &PlannerRun<'mcx>, root: &mut Plan
     // expression_returns_set_rows over them is read through a focused seam.
     let tuples = cz::rte_function_max_set_rows::call(root, rel);
     debug_assert!(rt_rtekind(root, rel) == RTE_FUNCTION);
+    root.rel_mut(rel).tuples = tuples;
+    set_baserel_size_estimates(run, root, rel);
+}
+
+/// `set_values_size_estimates` (costsize.c:6043). The row count is exactly the
+/// length of the VALUES RTE's `values_lists`.
+pub fn set_values_size_estimates<'mcx>(run: &PlannerRun<'mcx>, root: &mut PlannerInfo, rel: RelId) {
+    debug_assert!(root.rel(rel).relid > 0);
+    let relid = root.rel(rel).relid as types_core::primitive::Index;
+    let rte = types_pathnodes::planner_run::planner_rt_fetch(run, root, relid);
+    debug_assert!(rte.rtekind as u32 == RTE_VALUES);
+    let tuples = rte.values_lists.len() as f64;
     root.rel_mut(rel).tuples = tuples;
     set_baserel_size_estimates(run, root, rel);
 }
