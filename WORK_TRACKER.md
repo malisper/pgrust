@@ -9,12 +9,12 @@ _Last updated: 2026-06-18 · origin/main ≈ `5f57e550a`_
 
 ## Where we are
 - **Passing:** `smoke` (SELECT 1; `pg_class` seqscan 415/68 rows) — verified live.
-- **Just unlocked:** **`count(*)` executes** (#165). **GUC registry complete** (402/404). **typcache** + **lmgr-lock** complete.
+- **Just unlocked:** **column aggregates work** — `min`/`max`/`count(col)` return values (the setrefs varno fix covered the agg var-mapping). `count(*) FROM pg_class`=415. GROUP BY *plans*. GUC registry complete.
 - **Closest test wins:** `boolean` (~5 bounded fixes); int/text suite (VALUES ✓; needs agg follow-ons + GROUP BY).
 - **Infra:** persistent harness ✓ · shm-leak fixed ✓ · crash-survival ✓ · live boot restored ✓ · artifacts ~6 GB → **~8 build lanes** · reaper shm+prune-only (idle-rm disrupted live lanes, removed).
 
 ## 🔥 Critical path (fastest route to test-wins)
-1. **Aggregate follow-ons:** `min`/`max` fall-through ✅. **SHARED BLOCKER → column-agg `ecxt_scantuple` NULL / SCAN_VAR** — `min`/`max`/`count(col)`/`sum` all reach exec then wall in agg result-projection (the Agg references a scan Var but `ecxt_scantuple` is NULL). Gates *every column aggregate*; fire after `a2abe0c1` (setrefs) lands. `count(*) FROM pg_class` setrefs INDEX_VAR *(firing `a2abe0c1`)*. `sum`/`avg` also need **Datum tail (K4)** + numeric transfns.
+1. **Aggregates:** `count(*)`/`min`/`max`/`count(col)` ✅ **execute** (setrefs varno fix resolved the agg var-mapping; no extra exec change needed). `count(*) FROM pg_class`=415 ✅. **Now firing:** `sum`/`avg` (int_sum transfns in numeric.c, `a40748ae`) · **GROUP BY execution** (nodeAgg grouped per-group loop, `a048453e`). `avg(numeric)`/numeric-literal aggs also need the by-ref const-fold (K4 cluster).
 2. **GROUP BY / DISTINCT / FOR UPDATE** — planner.c completion *(firing `abe15b79`)*.
 3. **boolean.sql** — bool TYPE correct ✅ (I/O, ops, seqscans, error text verbatim). **Forcing-function gaps in its 2nd half (hit the whole suite):** error-position LINE/caret (~10 hunks) · text-cast literal truncation bug · **`set_joinrel_size_estimates` seam (JOINS — highest fan-out)** · `relation_is_nailed` (DROP) · INSERT slice-range · `proc_arg_attrs`. Owned by `a85f618f`; broad ones (joins first) queued.
 4. **fmgr completeness** — core seams *(re-fired `a6d5c9d6`)* + adt registration *(`a58be86c`)*.
@@ -74,7 +74,7 @@ _Last updated: 2026-06-18 · origin/main ≈ `5f57e550a`_
 ---
 
 ## Active lanes
-`a85f618f` boolean→PASS · `ae2d175a` arrayfuncs · `a3b93c9f` policy/RLS · `a870e34d` EXPLAIN structural · `a59005ae` column-agg ecxt_scantuple (= GROUP BY's blocker too) · `a9b78cc5` joins · `a125389c` planner DISTINCT/FOR-UPDATE
+`a85f618f` boolean→PASS · `ae2d175a` arrayfuncs · `a3b93c9f` policy/RLS · `a870e34d` EXPLAIN structural · `a9b78cc5` joins · `a125389c` planner DISTINCT/FOR-UPDATE · `a40748ae` sum transfns · `a048453e` GROUP BY exec
 
 ## Build/infra notes
 - Artifacts ~6 GB/build (was ~10–14): `713252a14` (line-tables-only) + `c794aeac6` (**`incremental=false` now on `[profile.dev]`** — the lanes' default build; was only on the unused fast-check profile). Cap **~8**, keep ~20 GB buffer.
@@ -82,7 +82,7 @@ _Last updated: 2026-06-18 · origin/main ≈ `5f57e550a`_
 - Reaper = shm + `git worktree prune` ONLY (idle-based auto-rm disrupted live lanes twice; lanes self-clean + orchestrator reaps on pressure).
 
 ## Recently landed
-count(\*) exec (#165) · **GROUP BY planning** (+ real parser p_rtable bug fix) · misc2 (15/16) · **count(\*) FROM pg_class = 415** (setrefs varno + IndexOnlyScan) · fmgr builtin registry 2003→1574 (0 mismatches) · cargo dev incremental=0 · min/max planner fall-through · createplan (unique/groupingsets/async, 3→0) · GUC registry 402/404 · typcache complete · lmgr-lock (15→6) · fmgr Phase-1 seams (56/67) · bool.c 100% (type correct e2e) + boolean parser/func-RTE fixes · io_combine_limit boot fix · Datum by-ref bridge (+saophash) · crash-reinit (TLS-unwind) · seclabel→DROP · comment→DROP · multi-row VALUES · parse_expr XML · t_bits crash · setrefs Aggref fixup · smaller build artifacts · plancache F0
+**column aggs min/max/count(col)** ✅ · count(\*) exec (#165) · **GROUP BY planning** (+ real parser p_rtable bug fix) · misc2 (15/16) · **count(\*) FROM pg_class = 415** (setrefs varno + IndexOnlyScan) · fmgr builtin registry 2003→1574 (0 mismatches) · cargo dev incremental=0 · min/max planner fall-through · createplan (unique/groupingsets/async, 3→0) · GUC registry 402/404 · typcache complete · lmgr-lock (15→6) · fmgr Phase-1 seams (56/67) · bool.c 100% (type correct e2e) + boolean parser/func-RTE fixes · io_combine_limit boot fix · Datum by-ref bridge (+saophash) · crash-reinit (TLS-unwind) · seclabel→DROP · comment→DROP · multi-row VALUES · parse_expr XML · t_bits crash · setrefs Aggref fixup · smaller build artifacts · plancache F0
 
 ## DROP status
 CREATE→INSERT→SELECT ✓ · DROP: comment ✓ → seclabel ✓ → **next wall `relation_is_nailed`** (tablecmds seam).
