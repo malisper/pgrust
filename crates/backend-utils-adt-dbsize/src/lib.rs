@@ -1272,6 +1272,22 @@ pub fn pg_relation_filepath(relid: Oid) -> PgResult<Option<String>> {
 /// Invoked by `seams-init::init_all`.
 pub fn init_seams() {
     fmgr_builtins::register_dbsize_builtins();
+
+    // Install the value-typed, acyclic outbound seams to their real owners.
+    // (The remaining outbound seams — read_dir/stat/database_exists/relation_open
+    // and friends — require either the runtime filesystem dir-walk substrate or
+    // an `Mcx` thread the seam contract does not carry; they stay uninstalled.)
+    my_database_id::set(backend_utils_init_small::globals::MyDatabaseId);
+    my_database_tablespace::set(backend_utils_init_small::globals::MyDatabaseTableSpace);
+    get_user_id::set(|| Ok(backend_utils_init_miscinit::GetUserId()));
+    has_privs_of_role::set(backend_utils_adt_acl::role_membership::has_privs_of_role);
+    is_temp_or_temp_toast_namespace::set(
+        backend_catalog_namespace::isTempOrTempToastNamespace,
+    );
+    proc_number_for_temp_relations::set(
+        backend_catalog_storage::proc_number_for_temp_relations,
+    );
+    check_for_interrupts::set(backend_tcop_postgres::interrupt::check_for_interrupts);
 }
 
 #[cfg(test)]

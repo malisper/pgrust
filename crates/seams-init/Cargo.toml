@@ -431,6 +431,7 @@ backend-utils-adt-geo-selfuncs = { path = "../backend-utils-adt-geo-selfuncs" }
 backend-utils-adt-array-typanalyze = { path = "../backend-utils-adt-array-typanalyze" }
 backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
 backend-utils-adt-arrayutils = { path = "../backend-utils-adt-arrayutils" }
+backend-utils-adt-dbsize = { path = "../backend-utils-adt-dbsize" }
 backend-utils-adt-char = { path = "../backend-utils-adt-char" }
 backend-utils-adt-oid = { path = "../backend-utils-adt-oid" }
 backend-utils-adt-int = { path = "../backend-utils-adt-int" }

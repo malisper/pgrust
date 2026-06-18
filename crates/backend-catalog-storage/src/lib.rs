@@ -296,7 +296,7 @@ fn xlog_is_needed() -> PgResult<bool> {
 
 /// `ProcNumberForTempRelations()` (storage/procnumber.h): our own proc number
 /// normally, but parallel workers use their leader's.
-fn proc_number_for_temp_relations() -> ProcNumber {
+pub fn proc_number_for_temp_relations() -> ProcNumber {
     let leader = backend_access_transam_parallel_rt_seams::parallel_leader_proc_number::call();
     if leader == INVALID_PROC_NUMBER {
         backend_utils_init_small_seams::my_proc_number::call()

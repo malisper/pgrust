@@ -38,8 +38,16 @@ backend-utils-adt-numeric = { path = "../backend-utils-adt-numeric" }
 
 # seam_core::seam! for the OUTBOUND backend services this file reaches but whose
 # owners are not directly callable here (the runtime filesystem dir-walk + stat,
-# query-cancel CHECK_FOR_INTERRUPTS, and the catalog/acl/syscache/relcache/
-# relmapper/namespace touchpoints). Declared inline; NOT installed here (no owned
-# X-seams crate -> they do not trip the recurrence guard; they panic until each
-# owner lands).
+# the syscache/relcache/relmapper field-extraction touchpoints). Declared inline;
+# the value-typed, acyclic owners below are installed from `init_seams()`.
 seam-core = { path = "../seam-core" }
+
+# Directly-callable seam owners (acyclic): the backend-global accessors
+# (MyDatabaseId / MyDatabaseTableSpace), GetUserId, has_privs_of_role, the
+# temp-namespace predicate, ProcNumberForTempRelations, and CHECK_FOR_INTERRUPTS.
+backend-utils-init-small = { path = "../backend-utils-init-small" }
+backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
+backend-utils-adt-acl = { path = "../backend-utils-adt-acl" }
+backend-catalog-namespace = { path = "../backend-catalog-namespace" }
+backend-catalog-storage = { path = "../backend-catalog-storage" }
+backend-tcop-postgres = { path = "../backend-tcop-postgres" }

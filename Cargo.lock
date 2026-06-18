@@ -17771,10 +17771,16 @@ dependencies = [
 name = "backend-utils-adt-dbsize"
 version = "0.0.0"
 dependencies = [
+ "backend-catalog-namespace",
+ "backend-catalog-storage",
  "backend-common-relpath",
+ "backend-tcop-postgres",
+ "backend-utils-adt-acl",
  "backend-utils-adt-numeric",
  "backend-utils-error",
  "backend-utils-fmgr-core",
+ "backend-utils-init-miscinit",
+ "backend-utils-init-small",
  "mcx",
  "seam-core",
  "types-catalog",
@@ -22566,6 +22572,7 @@ dependencies = [
  "backend-utils-adt-char",
  "backend-utils-adt-cryptohashfuncs",
  "backend-utils-adt-datetime",
+ "backend-utils-adt-dbsize",
  "backend-utils-adt-encode",
  "backend-utils-adt-float",
  "backend-utils-adt-float-libm-ffi",

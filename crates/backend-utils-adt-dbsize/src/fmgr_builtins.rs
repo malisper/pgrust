@@ -271,13 +271,13 @@ fn builtin(
 pub fn register_dbsize_builtins() {
     backend_utils_fmgr_core::register_builtins([
         // pg_database_size(oid) -> int8
-        builtin(2324, "pg_database_size", 1, true, false, fc_pg_database_size_oid),
+        builtin(2324, "pg_database_size_oid", 1, true, false, fc_pg_database_size_oid),
         // pg_database_size(name) -> int8
-        builtin(2168, "pg_database_size", 1, true, false, fc_pg_database_size_name),
+        builtin(2168, "pg_database_size_name", 1, true, false, fc_pg_database_size_name),
         // pg_tablespace_size(oid) -> int8
-        builtin(2322, "pg_tablespace_size", 1, true, false, fc_pg_tablespace_size_oid),
+        builtin(2322, "pg_tablespace_size_oid", 1, true, false, fc_pg_tablespace_size_oid),
         // pg_tablespace_size(name) -> int8
-        builtin(2323, "pg_tablespace_size", 1, true, false, fc_pg_tablespace_size_name),
+        builtin(2323, "pg_tablespace_size_name", 1, true, false, fc_pg_tablespace_size_name),
         // pg_size_pretty(int8) -> text
         builtin(2288, "pg_size_pretty", 1, true, false, fc_pg_size_pretty),
         // pg_size_bytes(text) -> int8
