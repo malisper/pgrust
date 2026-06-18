@@ -222,12 +222,12 @@ pub fn register_mbutils_builtins() {
     backend_utils_fmgr_core::register_builtins([
         builtin(810, "pg_client_encoding", 0, true, false, fc_pg_client_encoding),
         builtin(1039, "getdatabaseencoding", 0, true, false, fc_getdatabaseencoding),
-        builtin(1264, "pg_char_to_encoding", 1, true, false, fc_pg_char_to_encoding),
-        builtin(1597, "pg_encoding_to_char", 1, true, false, fc_pg_encoding_to_char),
-        builtin(1713, "length", 2, true, false, fc_length),
-        builtin(1714, "convert_from", 2, true, false, fc_convert_from),
-        builtin(1717, "convert_to", 2, true, false, fc_convert_to),
-        builtin(1813, "convert", 3, true, false, fc_convert),
-        builtin(2319, "pg_encoding_max_length", 1, true, false, fc_pg_encoding_max_length),
+        builtin(1264, "PG_char_to_encoding", 1, true, false, fc_pg_char_to_encoding),
+        builtin(1597, "PG_encoding_to_char", 1, true, false, fc_pg_encoding_to_char),
+        builtin(1713, "length_in_encoding", 2, true, false, fc_length),
+        builtin(1714, "pg_convert_from", 2, true, false, fc_convert_from),
+        builtin(1717, "pg_convert_to", 2, true, false, fc_convert_to),
+        builtin(1813, "pg_convert", 3, true, false, fc_convert),
+        builtin(2319, "pg_encoding_max_length_sql", 1, true, false, fc_pg_encoding_max_length),
     ]);
 }

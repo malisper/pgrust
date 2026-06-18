@@ -196,10 +196,10 @@ pub fn register_like_builtins() {
         builtin(851, "textnlike", 2, true, false, fc_textnlike),
         builtin(858, "namelike", 2, true, false, fc_namelike),
         builtin(859, "namenlike", 2, true, false, fc_namenlike),
-        builtin(1569, "like", 2, true, false, fc_textlike),
-        builtin(1570, "notlike", 2, true, false, fc_textnlike),
-        builtin(1571, "like", 2, true, false, fc_namelike),
-        builtin(1572, "notlike", 2, true, false, fc_namenlike),
+        builtin(1569, "textlike", 2, true, false, fc_textlike),
+        builtin(1570, "textnlike", 2, true, false, fc_textnlike),
+        builtin(1571, "namelike", 2, true, false, fc_namelike),
+        builtin(1572, "namenlike", 2, true, false, fc_namenlike),
         // ---- text/name ILIKE ----
         builtin(1633, "texticlike", 2, true, false, fc_texticlike),
         builtin(1634, "texticnlike", 2, true, false, fc_texticnlike),
@@ -208,18 +208,18 @@ pub fn register_like_builtins() {
         // ---- bpchar LIKE/ILIKE (prosrc = textlike/textnlike/texticlike/
         //      texticnlike; bpchar is binary-compatible with text as a varlena,
         //      so the same value cores apply to the detoasted by-ref payload) ----
-        builtin(1631, "bpcharlike", 2, true, false, fc_textlike),
-        builtin(1632, "bpcharnlike", 2, true, false, fc_textnlike),
-        builtin(1660, "bpchariclike", 2, true, false, fc_texticlike),
-        builtin(1661, "bpcharicnlike", 2, true, false, fc_texticnlike),
+        builtin(1631, "textlike", 2, true, false, fc_textlike),
+        builtin(1632, "textnlike", 2, true, false, fc_textnlike),
+        builtin(1660, "texticlike", 2, true, false, fc_texticlike),
+        builtin(1661, "texticnlike", 2, true, false, fc_texticnlike),
         // ---- like_escape (text) ----
         builtin(1637, "like_escape", 2, true, false, fc_like_escape),
         // ---- bytea LIKE ----
         builtin(2005, "bytealike", 2, true, false, fc_bytealike),
         builtin(2006, "byteanlike", 2, true, false, fc_byteanlike),
-        builtin(2007, "like", 2, true, false, fc_bytealike),
-        builtin(2008, "notlike", 2, true, false, fc_byteanlike),
+        builtin(2007, "bytealike", 2, true, false, fc_bytealike),
+        builtin(2008, "byteanlike", 2, true, false, fc_byteanlike),
         // ---- like_escape (bytea) ----
-        builtin(2009, "like_escape", 2, true, false, fc_like_escape_bytea),
+        builtin(2009, "like_escape_bytea", 2, true, false, fc_like_escape_bytea),
     ]);
 }

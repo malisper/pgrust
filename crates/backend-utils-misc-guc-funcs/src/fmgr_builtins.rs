@@ -204,7 +204,7 @@ fn builtin(
 pub fn register_guc_funcs_builtins() {
     backend_utils_fmgr_core::register_builtins([
         // current_setting(text) -> text  (prosrc show_config_by_name)
-        builtin(2077, "current_setting", 1, true, false, fc_show_config_by_name),
+        builtin(2077, "show_config_by_name", 1, true, false, fc_show_config_by_name),
         // current_setting(text, bool) -> text  (prosrc show_config_by_name_missing_ok)
         builtin(
             3294,
@@ -215,6 +215,6 @@ pub fn register_guc_funcs_builtins() {
             fc_show_config_by_name_missing_ok,
         ),
         // set_config(text, text, bool) -> text  (prosrc set_config_by_name, proisstrict='f')
-        builtin(2078, "set_config", 3, false, false, fc_set_config_by_name),
+        builtin(2078, "set_config_by_name", 3, false, false, fc_set_config_by_name),
     ]);
 }

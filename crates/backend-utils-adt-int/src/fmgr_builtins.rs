@@ -545,10 +545,10 @@ pub fn register_int_builtins() {
         builtin(1897, "int2shr", 2, fc_int2shr),
         // ---- mod / abs SQL aliases (share the int2mod/int4mod/int4abs/int2abs
         //      value cores; distinct pg_proc OIDs `mod`/`abs`) ----
-        builtin(940, "mod", 2, fc_int2mod),
-        builtin(941, "mod", 2, fc_int4mod),
-        builtin(1397, "abs", 1, fc_int4abs),
-        builtin(1398, "abs", 1, fc_int2abs),
+        builtin(940, "int2mod", 2, fc_int2mod),
+        builtin(941, "int4mod", 2, fc_int4mod),
+        builtin(1397, "int4abs", 1, fc_int4abs),
+        builtin(1398, "int2abs", 1, fc_int2abs),
         // ---- in_range ----
         builtin(4128, "in_range_int4_int4", 5, fc_in_range_int4_int4),
         builtin(4129, "in_range_int4_int2", 5, fc_in_range_int4_int2),

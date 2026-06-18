@@ -176,9 +176,9 @@ fn builtin(
 /// each takes 2 args).
 pub fn register_formatting_builtins() {
     backend_utils_fmgr_core::register_builtins([
-        builtin(1773, "to_char", 2, true, false, fc_int4_to_char),
-        builtin(1774, "to_char", 2, true, false, fc_int8_to_char),
-        builtin(1775, "to_char", 2, true, false, fc_float4_to_char),
-        builtin(1776, "to_char", 2, true, false, fc_float8_to_char),
+        builtin(1773, "int4_to_char", 2, true, false, fc_int4_to_char),
+        builtin(1774, "int8_to_char", 2, true, false, fc_int8_to_char),
+        builtin(1775, "float4_to_char", 2, true, false, fc_float4_to_char),
+        builtin(1776, "float8_to_char", 2, true, false, fc_float8_to_char),
     ]);
 }

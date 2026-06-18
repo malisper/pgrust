@@ -230,7 +230,7 @@ pub fn register_probe_adt_scalar_bool_builtins() {
         builtin(1243, "boolout", 1, fc_boolout),
         builtin(2436, "boolrecv", 1, fc_boolrecv),
         builtin(2437, "boolsend", 1, fc_boolsend),
-        builtin(2971, "text", 1, fc_booltext),
+        builtin(2971, "booltext", 1, fc_booltext),
         // ---- comparison operators ----
         builtin(60, "booleq", 2, fc_booleq),
         builtin(84, "boolne", 2, fc_boolne),
