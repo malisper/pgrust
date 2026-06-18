@@ -466,7 +466,7 @@ fn transform_a_const<'mcx>(
 
 /// `exprIsNullConstant(arg)` — true if `arg` is an undecorated NULL `A_Const`.
 fn exprIsNullConstant(arg: Option<&Node<'_>>) -> bool {
-    matches!(arg, Some(Node::A_Const(con)) if con.isnull)
+    arg.and_then(|n| n.as_a_const()).is_some_and(|con| con.isnull)
 }
 
 // ===========================================================================
@@ -627,14 +627,18 @@ fn transformAExprIn<'mcx>(
     // First step: transform all the inputs, detecting whether any contain Vars.
     let lexpr_t = transformExprRecurse(pstate, boxed_node(lexpr))?;
 
-    let rexpr_list = match boxed_node(rexpr) {
-        Some(Node::List(items)) => items,
-        // The grammar always wraps the IN value-list as a List node.
-        other => {
-            return Err(PgError::error(alloc::format!(
-                "transformAExprIn: expected a List rexpr, got {:?}",
-                other.as_ref().map(|n| n.node_tag().0)
-            )))
+    let rexpr_list = {
+        let other = boxed_node(rexpr);
+        let other_tag = other.as_ref().map(|n| n.node_tag().0);
+        match other.and_then(|n| n.into_list()) {
+            Some(items) => items,
+            // The grammar always wraps the IN value-list as a List node.
+            None => {
+                return Err(PgError::error(alloc::format!(
+                    "transformAExprIn: expected a List rexpr, got {:?}",
+                    other_tag
+                )))
+            }
         }
     };
 
@@ -810,13 +814,17 @@ fn transformAExprBetween<'mcx>(
     // Deconstruct A_Expr into three subexprs.
     let aexpr = boxed_node(lexpr)
         .ok_or_else(|| PgError::error("transformAExprBetween: missing lefthand"))?;
-    let mut args = match boxed_node(rexpr) {
-        Some(Node::List(items)) => items,
-        other => {
-            return Err(PgError::error(alloc::format!(
-                "transformAExprBetween: expected a 2-element List rexpr, got {:?}",
-                other.as_ref().map(|n| n.node_tag().0)
-            )))
+    let mut args = {
+        let other = boxed_node(rexpr);
+        let other_tag = other.as_ref().map(|n| n.node_tag().0);
+        match other.and_then(|n| n.into_list()) {
+            Some(items) => items,
+            None => {
+                return Err(PgError::error(alloc::format!(
+                    "transformAExprBetween: expected a 2-element List rexpr, got {:?}",
+                    other_tag
+                )))
+            }
         }
     };
     if args.len() != 2 {
@@ -1336,16 +1344,18 @@ fn transformCollateClause<'mcx>(
     // a collation name list ever contains).
     let mut collname_pn: Vec<types_parsenodes::Node> = Vec::with_capacity(collname.len());
     for n in collname.into_iter() {
-        match mcx::PgBox::into_inner(n) {
-            Node::String(s) => collname_pn.push(types_parsenodes::Node::String(
+        let other = mcx::PgBox::into_inner(n);
+        let other_tag = other.node_tag().0;
+        match other.into_string() {
+            Some(s) => collname_pn.push(types_parsenodes::Node::String(
                 types_parsenodes::StringNode {
                     sval: Some(String::from(s.sval.as_str())),
                 },
             )),
-            other => {
+            None => {
                 return Err(PgError::error(alloc::format!(
                     "transformCollateClause: collname element is not a String value node (tag {})",
-                    other.node_tag().0
+                    other_tag
                 )))
             }
         }
@@ -1793,7 +1803,7 @@ fn transformTypeCast<'mcx>(
     pstate: &mut ParseState<'mcx>,
     tc: Node<'mcx>,
 ) -> PgResult<Expr> {
-    let Node::TypeCast(tc) = tc else {
+    let Some(tc) = tc.into_typecast() else {
         return Err(PgError::error("transformTypeCast: expected TypeCast"));
     };
     let TypeCast {
@@ -1810,7 +1820,7 @@ fn transformTypeCast<'mcx>(
 
     // If the subject is an ARRAY[] construct and the target is an array type,
     // invoke transformArrayExpr directly to pass down type information.
-    let expr = if matches!(arg, Node::A_ArrayExpr(_)) {
+    let expr = if arg.is_a_arrayexpr() {
         // getBaseTypeAndTypmod(targetType, &targetTypmod) — resolve a domain
         // over array to its base array type/typmod (identity for non-domains).
         let (target_base_type, target_base_typmod) =
@@ -1818,7 +1828,7 @@ fn transformTypeCast<'mcx>(
         let element_type =
             lsyscache::get_element_type::call(target_base_type)?.unwrap_or(InvalidOid);
         if OidIsValid(element_type) {
-            let Node::A_ArrayExpr(a) = arg else {
+            let Some(a) = arg.into_a_arrayexpr() else {
                 unreachable!()
             };
             transformArrayExpr(pstate, a, target_base_type, element_type, target_base_typmod)?
@@ -2014,7 +2024,8 @@ fn transformArrayExpr<'mcx>(
     let mut newelems: Vec<Expr> = Vec::with_capacity(elements.len());
     for e in elements.into_iter() {
         let e = mcx::PgBox::into_inner(e);
-        let newe = if let Node::A_ArrayExpr(sub) = e {
+        let newe = if e.is_a_arrayexpr() {
+            let sub = e.into_a_arrayexpr().unwrap();
             // Sub-array: recurse directly, passing down the target type.
             let newe = transformArrayExpr(pstate, sub, array_type, element_type, typmod)?;
             debug_assert!(!OidIsValid(array_type) || array_type == expr_type(Some(&newe))?);
@@ -2211,23 +2222,20 @@ fn last_srf_expr(pstate: &ParseState<'_>) -> Option<Expr> {
 // ===========================================================================
 
 fn is_casetestexpr(n: Option<&Node<'_>>) -> bool {
-    matches!(n, Some(Node::Expr(Expr::CaseTestExpr(_))))
+    n.is_some_and(|n| n.is_casetestexpr())
 }
 /// `IsA(node, RowExpr)` over a *raw-grammar* node — the grammar emits a raw
 /// ROW(...) as [`Node::RowExpr`]. The transformAExprOp arms inspect the
 /// untransformed `a->lexpr`/`a->rexpr`.
 fn is_rowexpr(n: Option<&Node<'_>>) -> bool {
-    matches!(n, Some(Node::RowExpr(_)))
+    n.is_some_and(|n| n.is_rowexpr())
 }
 /// `rexpr IsA SubLink && ((SubLink *) rexpr)->subLinkType == EXPR_SUBLINK`
 /// (parse_expr.c:954-955): only a plain expression sublink may be rewritten
 /// into a ROWCOMPARE sublink. The raw-grammar SubLink is [`Node::SubLink`].
 fn is_expr_sublink(n: Option<&Node<'_>>) -> bool {
-    matches!(
-        n,
-        Some(Node::SubLink(s))
-            if s.sub_link_type == types_nodes::primnodes::SubLinkType::Expr
-    )
+    n.and_then(|n| n.as_sublink())
+        .is_some_and(|s| s.sub_link_type == types_nodes::primnodes::SubLinkType::Expr)
 }
 fn is_rowexpr_expr_opt(e: Option<&Expr>) -> bool {
     matches!(e, Some(Expr::RowExpr(_)))
@@ -2359,7 +2367,7 @@ fn transformColumnRef<'mcx>(
                 };
 
                 // Whole-row reference?
-                if matches!(&*cref.fields[1], Node::A_Star(_)) {
+                if cref.fields[1].is_a_star() {
                     node = Some(transformWholeRowRef(pstate, ns_idx, levels_up, location)?);
                 } else {
                     let cname = str_val(&cref.fields[1]).ok_or_else(|| {
@@ -2388,7 +2396,7 @@ fn transformColumnRef<'mcx>(
                     break 'sw;
                 };
 
-                if matches!(&*cref.fields[2], Node::A_Star(_)) {
+                if cref.fields[2].is_a_star() {
                     node = Some(transformWholeRowRef(pstate, ns_idx, levels_up, location)?);
                 } else {
                     let cname = str_val(&cref.fields[2]).ok_or_else(|| {
@@ -2424,7 +2432,7 @@ fn transformColumnRef<'mcx>(
                     break 'sw;
                 };
 
-                if matches!(&*cref.fields[3], Node::A_Star(_)) {
+                if cref.fields[3].is_a_star() {
                     node = Some(transformWholeRowRef(pstate, ns_idx, levels_up, location)?);
                 } else {
                     let cname = str_val(&cref.fields[3]).ok_or_else(|| {
@@ -3048,12 +3056,10 @@ fn transformMultiAssignRef<'mcx>(
         // multiassignment. The raw-grammar SubLink is `Node::SubLink`; the
         // raw-grammar RowExpr is `Node::RowExpr` (transformRowExpr consumes the
         // raw RowExpr, whose `args` are the raw field expressions).
-        let is_expr_sublink = matches!(
-            &src,
-            Node::SubLink(s)
-                if s.sub_link_type == SubLinkType::Expr
-        );
-        let is_rowexpr = matches!(&src, Node::RowExpr(_));
+        let is_expr_sublink = src
+            .as_sublink()
+            .is_some_and(|s| s.sub_link_type == SubLinkType::Expr);
+        let is_rowexpr = src.is_rowexpr();
 
         if is_expr_sublink {
             let mut sublink = src
@@ -3572,7 +3578,7 @@ fn transformXmlExpr<'mcx>(
         // Keep a reference to the raw val for the ColumnRef/FigureColname path
         // before it is moved into the recursion.
         let val_node: Option<Node<'mcx>> = boxed_node(r_val);
-        let is_columnref = matches!(val_node, Some(Node::ColumnRef(_)));
+        let is_columnref = val_node.as_ref().is_some_and(|n| n.is_columnref());
         // FigureColname needs the raw node; compute the colname before recursing.
         let figured = if is_columnref {
             FigureColname(val_node.as_ref())
