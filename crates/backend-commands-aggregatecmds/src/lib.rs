@@ -619,9 +619,9 @@ fn intVal(node: &Node) -> i32 {
 /// `linitial_node(List, args)` — the inner `FunctionParameter` list carried by
 /// the first cell of the new-style `aggr_args` pair.
 fn nodeAsList(node: &Node) -> &[Node] {
-    match node {
-        Node::List(cells) => cells.as_slice(),
-        _ => panic!("aggregatecmds: aggr_args pair first element is not a List node"),
+    match node.as_list() {
+        Some(cells) => cells,
+        None => panic!("aggregatecmds: aggr_args pair first element is not a List node"),
     }
 }
 
