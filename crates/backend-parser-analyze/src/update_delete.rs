@@ -3,9 +3,10 @@
 //! and `transformReturningClause`.
 //!
 //! Simple (non-inheritance, non-partition, no-trigger) UPDATE/DELETE are
-//! transformed end-to-end. RETURNING depends on `addNSItemForReturning`
-//! (parse_relation OLD/NEW namespace), which is not yet ported; a present
-//! RETURNING clause errors loudly until that follow-on lands.
+//! transformed end-to-end. `transformReturningClause`/`addNSItemForReturning`
+//! handle RETURNING for INSERT/UPDATE/DELETE; the OLD/NEW `WITH (...)` alias
+//! options (which need a typed `ReturningOption` node the grammar conversion
+//! does not yet produce) are rejected loudly.
 
 use alloc::vec::Vec;
 
@@ -15,6 +16,7 @@ use types_error::PgResult;
 use types_nodes::copy_query::Query;
 use types_nodes::nodes::{CmdType, Node};
 use types_nodes::parsestmt::{ParseExprKind, ParseState};
+use types_nodes::primnodes::VarReturningType;
 use types_nodes::rawnodes::{DeleteStmt, ResTarget, UpdateStmt};
 
 use crate::select::opt_node_to_owned;
@@ -79,7 +81,7 @@ pub fn transformDeleteStmt<'mcx>(
         "WHERE",
     )?;
 
-    transformReturningClause(mcx, pstate, &mut qry, stmt.returningClause.as_deref())?;
+    transformReturningClause(mcx, pstate, &mut qry, stmt.returningClause.as_deref(), ParseExprKind::EXPR_KIND_RETURNING)?;
 
     /* done building the range table and jointree */
     qry.rtable = core::mem::replace(&mut pstate.p_rtable, PgVec::new_in(mcx));
@@ -161,7 +163,7 @@ pub fn transformUpdateStmt<'mcx>(
         "WHERE",
     )?;
 
-    transformReturningClause(mcx, pstate, &mut qry, stmt.returningClause.as_deref())?;
+    transformReturningClause(mcx, pstate, &mut qry, stmt.returningClause.as_deref(), ParseExprKind::EXPR_KIND_RETURNING)?;
 
     /*
      * Now we are done with SELECT-like processing, and can get on with
@@ -328,23 +330,199 @@ fn transformUpdateTargetList<'mcx>(
     Ok(out)
 }
 
-/// `transformReturningClause(pstate, qry, returningClause, exprKind)`
-/// (analyze.c:2541). A `None` clause is a no-op; a present clause needs the
-/// OLD/NEW returning namespace (`addNSItemForReturning`), a parse_relation
-/// follow-on not yet ported.
-fn transformReturningClause<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _pstate: &mut ParseState<'mcx>,
-    _qry: &mut Query<'mcx>,
-    returning_clause: Option<&types_nodes::rawnodes::ReturningClause<'mcx>>,
-) -> PgResult<()> {
-    if returning_clause.is_none() {
-        return Ok(()); /* nothing to do */
+/// Deep-copy `pstate->p_target_nsitem` into a fresh owned `ParseNamespaceItem`.
+/// The C code re-adds the same target nsitem pointer to the namespace; here we
+/// clone it (the boxed RTE/perminfo/names and the per-column data).
+pub(crate) fn clone_target_nsitem<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &ParseState<'mcx>,
+) -> PgResult<types_nodes::parsestmt::ParseNamespaceItem<'mcx>> {
+    let target = pstate
+        .p_target_nsitem
+        .as_deref()
+        .ok_or_else(|| elog_error("clone_target_nsitem: p_target_nsitem must be set"))?;
+
+    let p_names = match target.p_names.as_deref() {
+        Some(a) => Some(mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
+        None => None,
+    };
+    let p_rte = match target.p_rte.as_deref() {
+        Some(rte) => Some(mcx::alloc_in(mcx, rte.clone_in(mcx)?)?),
+        None => None,
+    };
+    let p_perminfo = match target.p_perminfo.as_deref() {
+        Some(pi) => Some(mcx::alloc_in(mcx, pi.clone_in(mcx)?)?),
+        None => None,
+    };
+    let mut p_nscolumns = mcx::vec_with_capacity_in(mcx, target.p_nscolumns.len())?;
+    for c in target.p_nscolumns.iter() {
+        p_nscolumns.push(*c);
     }
-    Err(elog_error(
-        "UPDATE/DELETE ... RETURNING is not yet ported (analyze.c:2541; \
-         needs addNSItemForReturning OLD/NEW namespace)",
-    ))
+
+    Ok(types_nodes::parsestmt::ParseNamespaceItem {
+        p_names,
+        p_rte,
+        p_rtindex: target.p_rtindex,
+        p_perminfo,
+        p_nscolumns,
+        p_rel_visible: target.p_rel_visible,
+        p_cols_visible: target.p_cols_visible,
+        p_lateral_only: target.p_lateral_only,
+        p_lateral_ok: target.p_lateral_ok,
+        p_returning_type: target.p_returning_type,
+    })
+}
+
+/// `addNSItemForReturning(pstate, aliasname, returning_type)` (analyze.c:2605)
+/// — add a `ParseNamespaceItem` for the OLD or NEW alias in RETURNING, copying
+/// most fields from the target relation's nsitem and marking every column with
+/// the given `VarReturningType`.
+fn addNSItemForReturning<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'mcx>,
+    aliasname: &str,
+    returning_type: VarReturningType,
+) -> PgResult<()> {
+    // Snapshot the data we need out of the target nsitem (copy so we can hold
+    // pstate mutably for addNSItemToQuery below).
+    let (colnames, mut nscolumns, rte_box, rtindex, perminfo_box) = {
+        let target = pstate
+            .p_target_nsitem
+            .as_deref()
+            .ok_or_else(|| elog_error("addNSItemForReturning: p_target_nsitem must be set"))?;
+
+        // copy per-column data from the target relation: colnames come from the
+        // target RTE's eref.
+        let target_rte = target
+            .p_rte
+            .as_deref()
+            .ok_or_else(|| elog_error("addNSItemForReturning: target nsitem has no RTE"))?;
+        let eref = target_rte
+            .eref
+            .as_deref()
+            .ok_or_else(|| elog_error("addNSItemForReturning: target RTE has no eref Alias"))?
+            .clone_in(mcx)?;
+        let colnames = eref.colnames;
+
+        let mut nscolumns = mcx::vec_with_capacity_in(mcx, target.p_nscolumns.len())?;
+        for c in target.p_nscolumns.iter() {
+            nscolumns.push(*c);
+        }
+
+        let rte_box = match target.p_rte.as_deref() {
+            Some(rte) => Some(mcx::alloc_in(mcx, rte.clone_in(mcx)?)?),
+            None => None,
+        };
+        let perminfo_box = match target.p_perminfo.as_deref() {
+            Some(pi) => Some(mcx::alloc_in(mcx, pi.clone_in(mcx)?)?),
+            None => None,
+        };
+
+        (colnames, nscolumns, rte_box, target.p_rtindex, perminfo_box)
+    };
+
+    // mark all columns as returning OLD/NEW
+    for nscol in nscolumns.iter_mut() {
+        nscol.p_varreturningtype = returning_type;
+    }
+
+    // build the nsitem, copying most fields from the target relation
+    let names = backend_nodes_core::makefuncs::make_alias(mcx, aliasname, colnames)?;
+    let nsitem = types_nodes::parsestmt::ParseNamespaceItem {
+        p_names: Some(mcx::alloc_in(mcx, names)?),
+        p_rte: rte_box,
+        p_rtindex: rtindex,
+        p_perminfo: perminfo_box,
+        p_nscolumns: nscolumns,
+        p_returning_type: returning_type,
+        // palloc0 default; overwritten by addNSItemToQuery per the add_to_* args.
+        p_rel_visible: false,
+        p_cols_visible: false,
+        p_lateral_only: false,
+        p_lateral_ok: false,
+    };
+
+    // add it to the query namespace as a table-only item
+    backend_parser_relation::addNSItemToQuery(mcx, pstate, nsitem, false, true, false)
+}
+
+/// `transformReturningClause(pstate, qry, returningClause, exprKind)`
+/// (analyze.c:2645) — handle a RETURNING clause in INSERT/UPDATE/DELETE/MERGE.
+pub(crate) fn transformReturningClause<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'mcx>,
+    qry: &mut Query<'mcx>,
+    returning_clause: Option<&types_nodes::rawnodes::ReturningClause<'mcx>>,
+    expr_kind: ParseExprKind,
+) -> PgResult<()> {
+    let Some(rc) = returning_clause else {
+        return Ok(()); /* nothing to do */
+    };
+
+    let save_nslen = pstate.p_namespace.len();
+
+    // Scan RETURNING WITH(...) options for OLD/NEW alias names. A present
+    // ReturningOption requires a typed node that the grammar conversion does
+    // not yet produce; loudly reject rather than silently ignore.
+    if !rc.options.is_empty() {
+        return Err(elog_error(
+            "RETURNING WITH (OLD/NEW AS ...) is not yet ported (analyze.c:2659)",
+        ));
+    }
+
+    // If OLD/NEW alias names weren't explicitly specified, use "old"/"new"
+    // unless masked by existing relations.
+    if qry.returningOldAlias.is_none()
+        && backend_parser_relation::refnameNamespaceItem(pstate, None, "old", -1, false)?.is_none()
+    {
+        qry.returningOldAlias = Some(mcx::PgString::from_str_in("old", mcx)?);
+        addNSItemForReturning(mcx, pstate, "old", VarReturningType::VAR_RETURNING_OLD)?;
+    }
+    if qry.returningNewAlias.is_none()
+        && backend_parser_relation::refnameNamespaceItem(pstate, None, "new", -1, false)?.is_none()
+    {
+        qry.returningNewAlias = Some(mcx::PgString::from_str_in("new", mcx)?);
+        addNSItemForReturning(mcx, pstate, "new", VarReturningType::VAR_RETURNING_NEW)?;
+    }
+
+    // We need to assign resnos starting at one in the RETURNING list. Save and
+    // restore the main tlist's value of p_next_resno.
+    let save_next_resno = pstate.p_next_resno;
+    pstate.p_next_resno = 1;
+
+    // transform RETURNING expressions identically to a SELECT targetlist. The
+    // grammar makes returningClause->exprs a target_list (list of ResTarget).
+    let mut res_targets = mcx::vec_with_capacity_in(mcx, rc.exprs.len())?;
+    for n in rc.exprs.iter() {
+        match n.as_ref() {
+            Node::ResTarget(rt) => res_targets.push(rt.clone_in(mcx)?),
+            _ => return Err(elog_error("RETURNING list item is not a ResTarget")),
+        }
+    }
+    let mut returning_list =
+        backend_parser_parse_target::transformTargetList(mcx, pstate, res_targets, expr_kind)?;
+
+    // Complain if the nonempty tlist expanded to nothing (possible for a
+    // star-expansion of a zero-column table).
+    if returning_list.is_empty() {
+        return Err(elog_error("RETURNING must have at least one column"));
+    }
+
+    // mark column origins
+    backend_parser_parse_target::markTargetListOrigins(mcx, pstate, &mut returning_list)?;
+
+    // resolve any still-unresolved output columns as being type text
+    if pstate.p_resolve_unknowns {
+        backend_parser_parse_target::resolveTargetListUnknowns(mcx, pstate, &mut returning_list)?;
+    }
+
+    qry.returningList = returning_list;
+
+    // restore state
+    pstate.p_namespace.truncate(save_nslen);
+    pstate.p_next_resno = save_next_resno;
+
+    Ok(())
 }
 
 /// Set the target NSItem's `p_lateral_only`/`p_lateral_ok` flags (the C code

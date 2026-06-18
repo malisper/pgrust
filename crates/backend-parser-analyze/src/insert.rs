@@ -180,17 +180,29 @@ pub fn transformInsertStmt<'mcx>(
     }
     qry.targetList = target_list;
 
-    // ON CONFLICT / RETURNING are follow-on work.
     if stmt.onConflictClause.is_some() {
         return Err(elog_error(
             "INSERT ... ON CONFLICT is not yet ported (analyze.c:1010)",
         ));
     }
-    if stmt.returningClause.is_some() {
-        return Err(elog_error(
-            "INSERT ... RETURNING is not yet ported (analyze.c:1015)",
-        ));
+
+    // If we have any clauses yet to process, set the query namespace to contain
+    // only the target relation, removing any entries added in a sub-SELECT or
+    // VALUES list. (analyze.c:1010)
+    if stmt.onConflictClause.is_some() || stmt.returningClause.is_some() {
+        pstate.p_namespace = PgVec::new_in(mcx);
+        let target = crate::update_delete::clone_target_nsitem(mcx, pstate)?;
+        backend_parser_relation::addNSItemToQuery(mcx, pstate, target, false, true, true)?;
     }
+
+    // Process RETURNING, if any.
+    crate::update_delete::transformReturningClause(
+        mcx,
+        pstate,
+        &mut qry,
+        stmt.returningClause.as_deref(),
+        ParseExprKind::EXPR_KIND_RETURNING,
+    )?;
 
     // Done building the range table and jointree.
     qry.rtable = core::mem::replace(&mut pstate.p_rtable, PgVec::new_in(mcx));
