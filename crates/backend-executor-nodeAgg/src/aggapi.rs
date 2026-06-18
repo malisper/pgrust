@@ -443,6 +443,35 @@ pub fn init_seams() {
     backend_executor_nodeAgg_pq_seams::exec_agg_retrieve_instrumentation::set(
         exec_agg_retrieve_instrumentation_shim,
     );
+    backend_optimizer_path_costsize_seams::hash_agg_entry_size::set(hash_agg_entry_size_shim);
+    backend_optimizer_path_costsize_seams::hash_agg_set_limits::set(hash_agg_set_limits_shim);
+}
+
+/// Seam adapter for `cost_agg`: marshals the cost model's `(f64, u64)` widths to
+/// the executor's `usize` `hash_agg_entry_size` and back (nodeAgg.c:1701).
+fn hash_agg_entry_size_shim(num_trans: i32, tuple_width: f64, transition_space: u64) -> f64 {
+    crate::hash_grouping::hash_agg_entry_size(
+        num_trans,
+        tuple_width as usize,
+        transition_space as usize,
+    ) as f64
+}
+
+/// Seam adapter for `cost_agg`: `hash_agg_set_limits(hashentrysize, numGroups,
+/// used_bits)` (nodeAgg.c:1620), packing the `(mem_limit, ngroups_limit,
+/// num_partitions)` tuple into `HashAggLimits`.
+fn hash_agg_set_limits_shim(
+    hashentrysize: f64,
+    num_groups: f64,
+    used_bits: i32,
+) -> backend_optimizer_path_costsize_seams::HashAggLimits {
+    let (mem_limit, ngroups_limit, num_partitions) =
+        crate::spill::hash_agg_set_limits(hashentrysize, num_groups, used_bits);
+    backend_optimizer_path_costsize_seams::HashAggLimits {
+        mem_limit,
+        ngroups_limit,
+        num_partitions,
+    }
 }
 
 #[cfg(test)]

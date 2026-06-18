@@ -645,20 +645,37 @@ pub fn hash_agg_entry_size(num_trans: i32, tuple_width: usize, transition_space:
     //     ? CHUNKHDRSZ + pg_nextpower2_size_t(transitionSpace) : 0;
     // return TupleHashEntrySize() + tupleChunkSize + pergroupChunkSize + transitionChunkSize;
     //
-    // TupleHashEntrySize() is an execGrouping inline (sizeof TupleHashEntryData)
-    // with no seam and no real type to size; the rest is faithful arithmetic.
-    // Loud panic until execGrouping lands.
-    let _pergroup_size = num_trans as usize * core::mem::size_of::<AggStatePerGroupData<'_>>();
-    let _transition_chunk = if transition_space > 0 {
+    // tupleSize = MAXALIGN(SizeofMinimalTupleHeader) + tupleWidth.
+    let tuple_size = SizeofMinimalTupleHeader + tuple_width;
+    let pergroup_size = num_trans as usize * core::mem::size_of::<AggStatePerGroupData<'_>>();
+
+    // Entries use the Bump allocator, so chunk sizes equal requested sizes.
+    let tuple_chunk_size = maxalign(tuple_size);
+    let pergroup_chunk_size = pergroup_size;
+
+    // Transition values use AllocSet: chunk header + power-of-two allocation.
+    let transition_chunk_size = if transition_space > 0 {
         CHUNKHDRSZ + pg_nextpower2_size_t(transition_space)
     } else {
         0
     };
-    let _ = tuple_width;
-    panic!(
-        "backend-executor-execGrouping: TupleHashEntrySize not yet a real type \
-         (hash_agg_entry_size)"
-    );
+
+    // TupleHashEntrySize() == sizeof(TupleHashEntryData) (executor.h:165).
+    core::mem::size_of::<TupleHashEntryData>()
+        + tuple_chunk_size
+        + pergroup_chunk_size
+        + transition_chunk_size
+}
+
+/// `SizeofMinimalTupleHeader` == `offsetof(MinimalTupleData, t_bits)`
+/// (`access/htup_details.h`) == `SizeofHeapTupleHeader - MINIMAL_TUPLE_OFFSET`.
+const SizeofMinimalTupleHeader: usize =
+    types_tuple::heap::SizeofHeapTupleHeader - types_tuple::heaptuple::MINIMAL_TUPLE_OFFSET;
+
+/// `MAXALIGN(len)` — round up to the platform max alignment (8).
+#[inline]
+const fn maxalign(len: usize) -> usize {
+    (len + 7) & !7
 }
 
 // ---------------------------------------------------------------------------
