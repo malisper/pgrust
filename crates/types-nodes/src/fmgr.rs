@@ -2,12 +2,60 @@
 
 use alloc::vec::Vec;
 
+use alloc::string::String;
+
 use types_core::fmgr::FmgrInfo;
 use types_core::Oid;
 use types_datum::NullableDatum;
 
 use crate::funcapi::ReturnSetInfo;
 use crate::nodes::Node;
+
+/// The owned referent of a pass-by-reference argument on the executor call
+/// frame — the `no_std` mirror of `types_fmgr::boundary::RefPayload`'s by-ref
+/// byte arms.
+///
+/// The executor `FunctionCallInfoBaseData<'mcx>` lives in this `no_std` crate and
+/// so cannot name the `std`-only `types_fmgr::RefPayload` (its `Box<dyn Any>`
+/// internal lane / `Box<dyn ExpandedObject>` require `std`; the WONTFIX dual-home
+/// — see DESIGN_DEBT.md). The by-reference *argument* readers
+/// (`PG_GETARG_TEXT_PP` / `PG_GETARG_VARLENA_PP` / `PG_GETARG_NAME` /
+/// `PG_GETARG_CSTRING`) only ever need a `cstring`'s owned text or a varlena's
+/// owned byte image, both of which `no_std` `alloc` expresses. So this enum
+/// carries exactly those arms — the `ref_args[i] == Some(payload)` side channel
+/// parallel to the `types_fmgr` frame's `ref_args`.
+///
+/// `ref_args[i] == Some(payload)` is C's "`args[i].value` is a pointer to
+/// `payload`"; `None` is "pass-by-value, read `args[i].value`".
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FmgrArgRef {
+    /// A C `cstring` (`char *`): owned text, no terminating NUL stored
+    /// (`PG_GETARG_CSTRING`; also a `Name`'s NUL-trimmed text for
+    /// `PG_GETARG_NAME`).
+    Cstring(String),
+    /// A C varlena (the possibly-detoasted `text`/`bytea`/array image): the owned
+    /// byte image, full varlena header included (`PG_GETARG_TEXT_PP` /
+    /// `PG_GETARG_VARLENA_PP`).
+    Varlena(alloc::vec::Vec<u8>),
+}
+
+impl FmgrArgRef {
+    /// Borrow the payload as a `cstring`, if it is one.
+    pub fn as_cstring(&self) -> Option<&str> {
+        match self {
+            FmgrArgRef::Cstring(s) => Some(s.as_str()),
+            FmgrArgRef::Varlena(_) => None,
+        }
+    }
+
+    /// Borrow the payload as a varlena byte image, if it is one.
+    pub fn as_varlena(&self) -> Option<&[u8]> {
+        match self {
+            FmgrArgRef::Varlena(b) => Some(b.as_slice()),
+            FmgrArgRef::Cstring(_) => None,
+        }
+    }
+}
 
 /// `FunctionCallInfoBaseData` (fmgr.h) — the call frame every fmgr-called
 /// function receives (`FunctionCallInfo` is `FunctionCallInfoBaseData *`).
@@ -69,6 +117,14 @@ pub struct FunctionCallInfoBaseData<'mcx> {
     /// executor gathers its per-argument result cells into this vector
     /// immediately before dispatching the call.
     pub args: Vec<NullableDatum>,
+    /// By-reference argument side channel (parallel to `args`), mirroring the
+    /// `types_fmgr` ABI frame's `ref_args`. `ref_args[i] == Some(payload)` is C's
+    /// "`args[i].value` is a pointer to `payload`" (a `text`/varlena/`cstring`/
+    /// `Name` argument); `None` is "pass-by-value, read `args[i].value`". Empty
+    /// (not `nargs`-sized) for an all-by-value call, exactly as the `types_fmgr`
+    /// frame leaves it. The `PG_GETARG_TEXT_PP` / `PG_GETARG_VARLENA_PP` /
+    /// `PG_GETARG_NAME` / `PG_GETARG_CSTRING` readers consult this.
+    pub ref_args: Vec<Option<FmgrArgRef>>,
     /// CHANNEL for C's `flinfo->fn_extra` (the value-per-call SRF keystone,
     /// #349). C holds the cross-call [`FuncCallContext`] on the *caller's*
     /// `FmgrInfo` (`flinfo->fn_extra`, a `void *`); the owned `flinfo`
@@ -93,6 +149,24 @@ pub struct FunctionCallInfoBaseData<'mcx> {
     /// supplied" (the caller sets it before a `fn_retset` call, exactly as
     /// `fmgr_info` stamps `fn_mcxt`).
     pub fn_mcxt: Option<mcx::Mcx<'mcx>>,
+}
+
+impl<'mcx> FunctionCallInfoBaseData<'mcx> {
+    /// Borrow the by-reference payload for argument `index` (the executor frame's
+    /// `ref_args[index]`), `None` for a by-value / absent arg.
+    #[inline]
+    pub fn ref_arg(&self, index: usize) -> Option<&FmgrArgRef> {
+        self.ref_args.get(index).and_then(|slot| slot.as_ref())
+    }
+
+    /// Install a by-reference payload for argument `index`, growing `ref_args`
+    /// with empty slots as needed (C: `args[index].value = PointerGetDatum(p)`).
+    pub fn set_ref_arg(&mut self, index: usize, payload: FmgrArgRef) {
+        if self.ref_args.len() <= index {
+            self.ref_args.resize_with(index + 1, || None);
+        }
+        self.ref_args[index] = Some(payload);
+    }
 }
 
 /// The C `fcinfo->context` payload — `fmNodePtr context`, a `Node *` whose

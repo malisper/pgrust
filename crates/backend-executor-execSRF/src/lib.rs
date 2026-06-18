@@ -153,6 +153,7 @@ fn init_sexpr<'mcx>(
         isnull: false,
         nargs: numargs as i16,
         args,
+        ref_args: Vec::new(),
         fn_extra: None,
         fn_mcxt: None,
     };
