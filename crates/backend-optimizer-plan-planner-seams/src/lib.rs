@@ -12,6 +12,8 @@ use types_core::Oid;
 use types_error::PgResult;
 use types_nodes::copy_query::Query;
 use types_nodes::nodeindexscan::PlannedStmt;
+use types_pathnodes::planner_run::PlannerRun;
+use types_pathnodes::{PlannerGlobal, PlannerInfo, QueryId};
 
 seam_core::seam!(
     /// `pg_plan_query(querytree, query_string, cursorOptions, boundParams)`
@@ -31,4 +33,25 @@ seam_core::seam!(
     /// `plan_cluster_use_sort(tableOid, indexOid)` (planner.c): whether a
     /// seqscan+sort beats an indexscan for the cluster copy.
     pub fn plan_cluster_use_sort(table_oid: Oid, index_oid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `subquery_planner(glob, subquery, parent_root, hasRecursion,
+    /// tuple_fraction, setops)` (planner.c) — plan one leaf subquery of a set-op
+    /// tree, used by `prepunion.c`'s `recurse_set_operations`.
+    ///
+    /// The caller hands ownership of the (shared) [`PlannerGlobal`] in and
+    /// receives the leaf's [`PlannerInfo`] (`subroot`) back; the mutated glob is
+    /// carried inside `subroot.glob` so the caller can move it back out and
+    /// thread it into the next leaf, mirroring C's single shared `glob` pointer.
+    /// `subquery_id` is the interned leaf Query; the subroot's `parse` resolves
+    /// in the same [`PlannerRun`].
+    pub fn subquery_planner_for_setop<'mcx>(
+        mcx: Mcx<'mcx>,
+        run: &mut PlannerRun<'mcx>,
+        glob: PlannerGlobal,
+        subquery_id: QueryId,
+        has_recursion: bool,
+        tuple_fraction: f64,
+    ) -> PgResult<PlannerInfo>
 );

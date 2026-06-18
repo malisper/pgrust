@@ -573,6 +573,32 @@ fn standard_planner<'mcx>(
 // subquery_planner()  (planner.c:650)
 // ===========================================================================
 
+/// Seam wrapper installed as
+/// `backend_optimizer_plan_planner_seams::subquery_planner_for_setop`, letting
+/// `prepunion.c`'s `recurse_set_operations` plan one leaf subquery of a set-op
+/// tree. Delegates to the private [`subquery_planner`]; `parent_root` and the
+/// `setops` parentOp are passed as `None` (the cheapest-path leg of
+/// `build_setop_child_paths`, which does not request per-child sorted paths).
+fn subquery_planner_for_setop_impl<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &mut PlannerRun<'mcx>,
+    glob: PlannerGlobal,
+    subquery_id: types_pathnodes::QueryId,
+    has_recursion: bool,
+    tuple_fraction: f64,
+) -> PgResult<PlannerInfo> {
+    subquery_planner(
+        mcx,
+        run,
+        glob,
+        subquery_id,
+        None,
+        has_recursion,
+        tuple_fraction,
+        None,
+    )
+}
+
 /// `subquery_planner(glob, parse, parent_root, hasRecursion, tuple_fraction, setops)`
 /// (planner.c:650). Returns the owned `PlannerInfo` ("root") with its glob
 /// attached and `final_rel`'s cheapest path set.
@@ -5560,6 +5586,9 @@ pub fn init_seams() {
     // planner owns the arena WindowClause + the parse Query they need).
     backend_optimizer_path_costsize_seams::windowfunc_cost::set(windowfunc_cost_impl);
     backend_optimizer_path_costsize_seams::windowclause_cost_info::set(windowclause_cost_info_impl);
+    backend_optimizer_plan_planner_seams::subquery_planner_for_setop::set(
+        subquery_planner_for_setop_impl,
+    );
     backend_optimizer_plan_planner_pc_seams::expression_planner_with_deps_value::set(
         expression_planner_with_deps,
     );
