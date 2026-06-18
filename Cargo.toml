@@ -10,6 +10,7 @@ publish = false
 [profile.dev]
 debug = "line-tables-only"
 split-debuginfo = "unpacked"
+incremental = false
 
 [profile.dev.build-override]
 debug = 0
