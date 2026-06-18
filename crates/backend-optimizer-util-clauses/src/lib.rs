@@ -146,6 +146,17 @@ pub fn init_seams() {
             .expect("contain_volatile_functions")
     });
 
+    // get_eclass_for_sort_expr (equivclass.c) rejects an EC sort expression that
+    // contains an aggregate or window function; clauses.c owns both predicates.
+    // The grounded impls are fallible only on a catalog miss; a propagated error
+    // is a loud panic (mirrors C's elog/ereport).
+    backend_optimizer_path_equivclass_ext_seams::contain_agg_clause::set(|clause| {
+        grounded::contain_agg_clause(Some(clause)).expect("contain_agg_clause")
+    });
+    backend_optimizer_path_equivclass_ext_seams::contain_window_function::set(|clause| {
+        grounded::contain_window_function(Some(clause)).expect("contain_window_function")
+    });
+
     // joininfo.c / restrictinfo.c reach `contain_leaked_vars((Node *) clause)`
     // (clauses.c) over a rootless `&Expr` through the joininfo-ext consumer-side
     // seam crate (no owner directory). clauses.c owns it; the grounded impl

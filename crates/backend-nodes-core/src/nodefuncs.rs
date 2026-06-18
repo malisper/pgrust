@@ -1653,6 +1653,19 @@ pub fn init_seams() {
         eqext::expr_type::set(|expr| expr_type(Some(expr)).expect("exprType"));
         eqext::expr_typmod::set(|expr| expr_typmod(Some(expr)).expect("exprTypmod"));
         eqext::expr_collation::set(|expr| expr_collation(Some(expr)).expect("exprCollation"));
+        // `add_setop_child_rel_equivalences` (equivclass.c) inspects each setop
+        // child `TargetEntry` by `NodeId` in the planner arena: read its
+        // `resjunk` flag and clone its `expr` node. These are plain arena field
+        // reads (mirror C `tle->resjunk` / `tle->expr`); nodeFuncs.c owns the
+        // TargetEntry-inspection leg of this ext-seam crate.
+        eqext::target_entry_resjunk::set(|root, tle| root.targetentry(tle).resjunk);
+        eqext::target_entry_expr::set(|root, tle| {
+            let expr_id = root.targetentry(tle).expr;
+            root.node(expr_id).clone()
+        });
+        // `add_child_eq_member` (equivclass.c) calls `expression_returns_set`
+        // (nodeFuncs.c) over the new member's expression; nodeFuncs.c owns it.
+        eqext::expression_returns_set::set(|expr| expression_returns_set(Some(expr)));
     }
 
     // joininfo.c / restrictinfo.c reach the same nodeFuncs.c accessors
