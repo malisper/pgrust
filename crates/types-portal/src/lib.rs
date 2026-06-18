@@ -240,7 +240,18 @@ pub struct PortalData {
     pub prepStmtName: Option<String>,
     /// `MemoryContext portalContext` — subsidiary memory for portal
     /// (`None` = C NULL until `CreatePortal` assigns it).
-    pub portalContext: Option<MemoryContext>,
+    ///
+    /// Boxed so the `MemoryContext`'s address is **stable across moves of this
+    /// `Option`** (the heap allocation stays put). The interned `stmts`/
+    /// `tupDesc` payloads carry an `Mcx<'static>` *marker* that is a raw
+    /// `&MemoryContext` into this context; `PortalRunMulti` moves the context
+    /// out of the `Option` and back (to drop the `RefCell` borrow across the
+    /// executor run), which without the `Box` would relocate the `MemoryContext`
+    /// value and dangle every payload's `Mcx` reference (EXC_BAD_ACCESS at the
+    /// next `PgVec`/`PgBox` deallocation, e.g. an UPDATE plan's
+    /// `resultRelations`). The `Box` makes those moves pointer-only, exactly the
+    /// stable-heap-address rationale `McxOwned::try_new` relies on.
+    pub portalContext: Option<alloc::boxed::Box<MemoryContext>>,
     /// `ResourceOwner resowner` — resources owned by portal.
     pub resowner: ResourceOwner,
     /// `void (*cleanup)(Portal portal)` — cleanup hook.
@@ -303,8 +314,9 @@ pub struct PortalData {
     /// (`None` = C NULL). The store outlives the transaction, so `'static`.
     pub holdStore: Option<Tuplestorestate<'static>>,
     /// `MemoryContext holdContext` — memory containing holdStore
-    /// (`None` = C NULL).
-    pub holdContext: Option<MemoryContext>,
+    /// (`None` = C NULL). Boxed for the same address-stability reason as
+    /// `portalContext`: `holdStore` carries an `Mcx<'static>` marker into it.
+    pub holdContext: Option<alloc::boxed::Box<MemoryContext>>,
     /// `Snapshot holdSnapshot` — registered snapshot for held tuples
     /// (`None` = C NULL).
     pub holdSnapshot: Option<Rc<SnapshotData>>,

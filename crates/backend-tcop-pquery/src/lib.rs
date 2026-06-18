@@ -1449,6 +1449,13 @@ fn portal_run_multi(
             // Move the (stable, unmutated) portalContext + stmts out, run, and
             // restore — mirroring C's stable `portal->portalContext`/`->stmts`
             // pointers that the executor never touches.
+            // `portalContext` is a `Box<MemoryContext>`, so this `take()` and the
+            // restore below move only the box pointer — the heap `MemoryContext`
+            // stays put. That keeps the `Mcx<'static>` markers the interned
+            // `stmts` carry (raw `&MemoryContext` into this context) valid across
+            // the move; relocating the `MemoryContext` value would dangle them and
+            // fault at the next deallocation (e.g. an UPDATE plan's
+            // `resultRelations` PgVec in `uncharge`).
             let portal_context = portal
                 .borrow_mut()
                 .portalContext

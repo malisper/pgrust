@@ -325,7 +325,7 @@ pub fn CreatePortal(name: &str, allowDup: bool, dupSilent: bool) -> PgResult<Por
             )
             .into_error()
     })?;
-    data.portalContext = Some(portal_context);
+    data.portalContext = Some(Box::new(portal_context));
 
     // create a resource owner for the portal
     data.resowner = resowner_seam::resource_owner_create_portal::call();
@@ -606,7 +606,7 @@ pub fn PortalCreateHoldStore(portal: &Portal) -> PgResult<()> {
                 .as_ref()
                 .map(|top| top.new_child("PortalHoldContext"))
         });
-        p.holdContext = hold_context;
+        p.holdContext = hold_context.map(Box::new);
         (p.cursorOptions & CURSOR_OPT_SCROLL) != 0
     };
 
@@ -697,7 +697,7 @@ pub fn set_result_tup_desc_with(
     // allocated in `ctx` (the portalContext), which this `PortalData` owns and
     // drops with the `tupDesc` field — so extending the result to the field's
     // `'static` marker is sound, exactly as `portal_set_tup_desc` argues.
-    let ctx_ptr: *const mcx::MemoryContext = ctx;
+    let ctx_ptr: *const mcx::MemoryContext = &**ctx;
     let mcx = unsafe { (*ctx_ptr).mcx() };
     let stmts: &[types_nodes::nodeindexscan::PlannedStmt<'static>] =
         p.stmts.as_deref().unwrap_or(&[]);
