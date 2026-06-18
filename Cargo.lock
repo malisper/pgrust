@@ -7350,7 +7350,7 @@ dependencies = [
  "backend-parser-analyze-seams",
  "backend-parser-parse-expr-seams",
  "backend-parser-parse-type-seams",
- "backend-tcop-pquery-pre-seams",
+ "backend-tcop-pquery-seams",
  "backend-tcop-utility-out-seams",
  "backend-tcop-utility-seams",
  "backend-utils-adt-arrayfuncs-seams",
@@ -7358,10 +7358,9 @@ dependencies = [
  "backend-utils-adt-varlena-seams",
  "backend-utils-cache-plancache-seams",
  "backend-utils-fmgr-funcapi-seams",
- "backend-utils-mmgr-mcxt-seams",
- "backend-utils-mmgr-portalmem-pre-seams",
+ "backend-utils-mmgr-portalmem-seams",
  "backend-utils-resowner-resowner-seams",
- "backend-utils-time-snapmgr-pre-seams",
+ "backend-utils-time-snapmgr-seams",
  "mcx",
  "types-core",
  "types-datum",
@@ -17178,7 +17177,6 @@ dependencies = [
  "backend-tcop-dest",
  "backend-tcop-dest-seams",
  "backend-tcop-postgres-seams",
- "backend-tcop-pquery-pre-seams",
  "backend-tcop-pquery-seams",
  "backend-tcop-utility-seams",
  "backend-utils-mmgr-portalmem",
@@ -17196,16 +17194,6 @@ dependencies = [
  "types-slot",
  "types-snapshot",
  "types-tuple",
-]
-
-[[package]]
-name = "backend-tcop-pquery-pre-seams"
-version = "0.0.0"
-dependencies = [
- "seam-core",
- "types-error",
- "types-execparallel",
- "types-nodes",
 ]
 
 [[package]]
@@ -20999,6 +20987,7 @@ dependencies = [
  "backend-storage-ipc-waiteventset-seams",
  "backend-storage-lmgr-proc-seams",
  "backend-tcop-postgres-seams",
+ "backend-tcop-utility-out-seams",
  "backend-utils-adt-varlena-seams",
  "backend-utils-cache-inval-seams",
  "backend-utils-cache-syscache-seams",
@@ -21009,6 +20998,7 @@ dependencies = [
  "backend-utils-init-postinit-seams",
  "backend-utils-init-small",
  "backend-utils-init-small-seams",
+ "backend-utils-misc-backendstate-pc-seams",
  "backend-utils-misc-guc-funcs-seams",
  "backend-utils-misc-guc-seams",
  "backend-utils-misc-guc-tables",
@@ -21651,15 +21641,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "backend-utils-mmgr-portalmem-pre-seams"
-version = "0.0.0"
-dependencies = [
- "seam-core",
- "types-error",
- "types-nodes",
-]
-
-[[package]]
 name = "backend-utils-mmgr-portalmem-seams"
 version = "0.0.0"
 dependencies = [
@@ -21930,14 +21911,6 @@ dependencies = [
  "types-core",
  "types-error",
  "types-plancache",
-]
-
-[[package]]
-name = "backend-utils-time-snapmgr-pre-seams"
-version = "0.0.0"
-dependencies = [
- "seam-core",
- "types-execparallel",
 ]
 
 [[package]]

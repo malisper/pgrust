@@ -8,7 +8,7 @@ use types_error::PgResult;
 use types_nodes::copy_query::Query;
 use types_nodes::parsestmt::DestReceiverHandle;
 use types_nodes::portalcmds::ParamListInfo;
-use types_portal::{FetchDirection, Portal, PortalStrategy};
+use types_portal::{FetchDirection, Portal, PortalStrategy, QueryCompletion};
 use types_snapshot::SnapshotData;
 
 seam_core::seam!(
@@ -22,6 +22,22 @@ seam_core::seam!(
         eflags: i32,
         snapshot: Option<std::rc::Rc<SnapshotData>>,
     ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `PortalRun(portal, count, isTopLevel=false, dest, altdest=dest, qc)`
+    /// (pquery.c) — run a portal to completion (the non-cursor EXECUTE/simple
+    /// path). Returns whether the portal ran to completion (C `bool`); fills
+    /// `qc` with the command tag / rows processed when provided. Runs the
+    /// executor; can `ereport(ERROR)`.
+    pub fn portal_run(
+        portal: &Portal,
+        count: i64,
+        is_top_level: bool,
+        dest: DestReceiverHandle,
+        altdest: DestReceiverHandle,
+        qc: Option<&mut QueryCompletion>,
+    ) -> PgResult<bool>
 );
 
 seam_core::seam!(

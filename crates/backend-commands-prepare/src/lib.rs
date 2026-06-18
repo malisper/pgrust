@@ -61,7 +61,7 @@ use types_nodes::params::ParamListInfo;
 use types_nodes::parsestmt::{
     CachedPlanHandle, CachedPlanSourceHandle, CommandTag, DestReceiverHandle,
     IntoClause, ParseState,
-    PortalHandle, PreparedStatement, QueryCompletionHandle, RawStmt,
+    PreparedStatement, RawStmt,
     ResourceOwnerHandle,
 };
 // PREPARE/EXECUTE/DEALLOCATE statement nodes: the live raw-grammar shapes the
@@ -78,17 +78,16 @@ use backend_nodes_params_seams as params_seam;
 use backend_parser_analyze_seams as analyze_seam;
 use backend_parser_parse_expr_seams as parseexpr_seam;
 use backend_parser_parse_type_seams as parsetype_seam;
-use backend_tcop_pquery_pre_seams as pquery_seam;
+use backend_tcop_pquery_seams as pquery_seam;
 use backend_tcop_utility_seams as utility_seam;
 use backend_utils_adt_arrayfuncs_seams as arrayfuncs_seam;
 use backend_utils_adt_format_type_seams as formattype_seam;
 use backend_utils_adt_varlena_seams as varlena_seam;
 use backend_utils_cache_plancache_seams as plancache_seam;
 use backend_utils_fmgr_funcapi_seams as funcapi_seam;
-use backend_utils_mmgr_mcxt_seams as mcxt_seam;
-use backend_utils_mmgr_portalmem_pre_seams as portal_seam;
+use backend_utils_mmgr_portalmem_seams as portal_seam;
 use backend_utils_resowner_resowner_seams as resowner_seam;
-use backend_utils_time_snapmgr_pre_seams as snapmgr_seam;
+use backend_utils_time_snapmgr_seams as snapmgr_seam;
 
 /// `#define NAMEDATALEN 64` (`c.h`) — the dynahash key width.
 const NAMEDATALEN: usize = 64;
@@ -248,7 +247,7 @@ pub fn ExecuteQuery<'mcx>(
     into_clause: Option<&IntoClause<'mcx>>,
     params: ParamListInfo,
     dest: DestReceiverHandle,
-    qc: QueryCompletionHandle,
+    qc: Option<&mut QueryCompletion>,
 ) -> PgResult<()> {
     // ParamListInfo paramLI = NULL; EState *estate = NULL;
     let mut param_li: ParamListInfo = None;
@@ -280,15 +279,13 @@ pub fn ExecuteQuery<'mcx>(
     }
 
     // portal = CreateNewPortal(); portal->visible = false;
-    let portal: PortalHandle = portal_seam::create_new_portal::call()?;
+    let portal = portal_seam::create_new_portal::call()?;
     portal_seam::portal_set_visible::call(&portal, false)?;
 
-    // query_string = MemoryContextStrdup(portal->portalContext,
-    //                                    entry->plansource->query_string);
-    let portal_context = portal_seam::portal_get_portal_context::call(&portal)?;
-    let plan_query_string = plancache_seam::plansource_query_string::call(mcx, entry.plansource)?;
-    let query_string =
-        mcxt_seam::memory_context_strdup::call(portal_context, plan_query_string.as_str())?;
+    // query_string = entry->plansource->query_string; (the portalmem
+    // `portal_define_query_list` seam does the `pstrdup` into the portal's own
+    // `portalContext`, mirroring C's `MemoryContextStrdup`).
+    let query_string = plancache_seam::plansource_query_string::call(mcx, entry.plansource)?;
 
     // cplan = GetCachedPlan(entry->plansource, paramLI, NULL, NULL);
     // plan_list = cplan->stmt_list;
@@ -306,12 +303,17 @@ pub fn ExecuteQuery<'mcx>(
     //   PortalDefineQuery(portal, NULL, query_string, entry->plansource->commandTag,
     //                     plan_list, cplan);
     let command_tag = plancache_seam::plansource_command_tag::call(entry.plansource)?;
-    portal_seam::portal_define_query::call(
+    // Bridge the two views of the C `CommandTag` enumerator / `CachedPlan *`
+    // token (`types_core`/`types_nodes` -> `types_portal`); same underlying
+    // value, distinct newtypes (cf. `portal_tag` in postgres.c's simple-query
+    // path).
+    portal_seam::portal_define_query_list::call(
         &portal,
+        None,
         query_string.as_str(),
-        command_tag,
+        command_tag.0,
         plan_list.as_slice(),
-        cplan,
+        types_portal::CachedPlanHandle(cplan.0),
     )?;
 
     // For CREATE TABLE ... AS EXECUTE, verify the statement produces tuples
@@ -346,14 +348,14 @@ pub fn ExecuteQuery<'mcx>(
     }
 
     // PortalStart(portal, paramLI, eflags, GetActiveSnapshot());
-    let active_snapshot = snapmgr_seam::get_active_snapshot::call();
+    let active_snapshot = snapmgr_seam::get_active_snapshot::call()?;
     pquery_seam::portal_start::call(&portal, param_li, eflags, active_snapshot)?;
 
     // (void) PortalRun(portal, count, false, dest, dest, qc);
-    pquery_seam::portal_run::call(&portal, count, dest, qc)?;
+    pquery_seam::portal_run::call(&portal, count, false, dest, dest, qc)?;
 
     // PortalDrop(portal, false);
-    portal_seam::portal_drop::call(&portal)?;
+    portal_seam::portal_drop::call(&portal, false)?;
 
     // if (estate) FreeExecutorState(estate);
     if let Some(es) = estate {
@@ -599,6 +601,28 @@ pub fn FetchPreparedStatementResultDesc<'mcx>(
             mcx,
             &result_desc,
         )?)),
+        None => Ok(None),
+    }
+}
+
+/// `case T_ExecuteStmt:` arm of `UtilityTupleDescriptor` (utility.c:2104) —
+/// the result tuple descriptor `EXECUTE` produces (or the C NULL when the name
+/// is unknown / produces no tuples).
+///
+///   entry = FetchPreparedStatement(stmt->name, false);
+///   if (!entry) return NULL;            /* not our business to raise error */
+///   return FetchPreparedStatementResultDesc(entry);
+pub fn ExecuteStmtResultDesc<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &ExecuteStmt<'mcx>,
+) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>> {
+    let name: &str = stmt.name.as_ref().map(|s| s.as_str()).unwrap_or("");
+    let entry = match FetchPreparedStatement(name, false)? {
+        Some(e) => e,
+        None => return Ok(None),
+    };
+    match FetchPreparedStatementResultDesc(mcx, &entry)? {
+        Some(desc) => Ok(Some(mcx::alloc_in(mcx, desc)?)),
         None => Ok(None),
     }
 }
@@ -1018,23 +1042,22 @@ fn prepare_query_arm<'mcx>(
 
 /// `case T_ExecuteStmt: ExecuteQuery(pstate, stmt, NULL, params, dest, qc)`
 /// (utility.c). The standalone EXECUTE path passes `intoClause = NULL`. The
-/// dispatch carries a real `QueryCompletion`; the EXECUTE tail drives the
-/// portal through the handle-typed `pquery`/`portalmem` pre-seams, which cannot
-/// thread the owned `QueryCompletion` (the portal/snapshot-handle keystone), so
-/// a NULL handle is forwarded — the portal seams are themselves uninstalled and
-/// panic loudly, so this never returns a filled `qc`.
+/// dispatch carries a real `QueryCompletion`, threaded through to `PortalRun`
+/// (the portal/snapshot/QueryCompletion handles were de-handled onto the owned
+/// `Portal`/`Rc<SnapshotData>`/`QueryCompletion` values), so the command
+/// completion (`EXECUTE`/rows) is filled.
 fn execute_query_arm<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
     stmt: &DispatchNode<'mcx>,
     params: ParamListInfo,
     dest: DestReceiverHandle,
-    _qc: Option<&mut QueryCompletion>,
+    qc: Option<&mut QueryCompletion>,
 ) -> PgResult<()> {
     let DispatchNode::ExecuteStmt(s) = stmt else {
         panic!("execute_query: parse tree is not an ExecuteStmt");
     };
-    ExecuteQuery(mcx, pstate, s, None, params, dest, QueryCompletionHandle::NULL)
+    ExecuteQuery(mcx, pstate, s, None, params, dest, qc)
 }
 
 /// `case T_ExecuteStmt:` arm of `UtilityReturnsTuples` (utility.c). The C
@@ -1047,6 +1070,20 @@ fn execute_stmt_has_result_arm<'mcx>(stmt: &DispatchNode<'mcx>) -> bool {
     ExecuteStmtHasResult(s).expect("ExecuteStmtHasResult reads only prepared-statement state")
 }
 
+/// `case T_ExecuteStmt:` arm of `UtilityTupleDescriptor` (utility.c). The
+/// out-seam is infallible (`-> TupleDesc`, the C error paths longjmp); the
+/// owned port returns `PgResult` (only allocation can fail). Surface a failure
+/// loudly, mirroring the `explain_result_desc` adapter.
+fn execute_stmt_result_desc_arm<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &DispatchNode<'mcx>,
+) -> types_tuple::heaptuple::TupleDesc<'mcx> {
+    let DispatchNode::ExecuteStmt(s) = stmt else {
+        panic!("execute_stmt_result_desc: parse tree is not an ExecuteStmt");
+    };
+    ExecuteStmtResultDesc(mcx, s).expect("ExecuteStmtResultDesc failed")
+}
+
 /// `case T_DeallocateStmt: DeallocateQuery(stmt)` (utility.c).
 fn deallocate_query_arm<'mcx>(stmt: &DispatchNode<'mcx>) -> PgResult<()> {
     let DispatchNode::DeallocateStmt(s) = stmt else {
@@ -1057,15 +1094,15 @@ fn deallocate_query_arm<'mcx>(stmt: &DispatchNode<'mcx>) -> PgResult<()> {
 
 /// Install this crate's inward seams. Wired into `seams-init`.
 ///
-/// PREPARE and DEALLOCATE install fully (every callee seam — cmdtag /
-/// plancache / analyze-varparams / parse-type — is already real). EXECUTE
-/// installs its real body too, but its portal-driving tail bottoms out on the
-/// uninstalled `pquery`/`portalmem` pre-seams (the `PortalHandle` /
-/// `QueryCompletionHandle` / `SnapshotHandle` opaque-`u64` keystone); a call
-/// panics loudly there rather than silently no-op'ing.
+/// PREPARE, DEALLOCATE, and EXECUTE install fully: the portal-driving tail now
+/// threads the owned `Portal` / `Rc<SnapshotData>` / `QueryCompletion` values
+/// through the installed `pquery` / `portalmem` / `snapmgr` seams (the
+/// `PortalHandle` / `QueryCompletionHandle` / `SnapshotHandle` opaque-`u64`
+/// keystone was de-handled). The cursor/EPQ leg (#167/#169) is out of scope.
 pub fn init_seams() {
     backend_tcop_utility_out_seams::prepare_query::set(prepare_query_arm);
     backend_tcop_utility_out_seams::execute_query::set(execute_query_arm);
     backend_tcop_utility_out_seams::deallocate_query::set(deallocate_query_arm);
     backend_tcop_utility_out_seams::execute_stmt_has_result::set(execute_stmt_has_result_arm);
+    backend_tcop_utility_out_seams::execute_stmt_result_desc::set(execute_stmt_result_desc_arm);
 }

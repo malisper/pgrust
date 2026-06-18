@@ -85,6 +85,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `CreateNewPortal()` (portalmem.c:235) — create an unnamed portal with a
+    /// generated nonconflicting name. Allocates / can `ereport(ERROR)`.
+    pub fn create_new_portal() -> types_error::PgResult<types_portal::Portal>
+);
+
+seam_core::seam!(
+    /// `portal->visible = value` (portalmem.c). A plain field store on the
+    /// shared portal; portalmem owns the `Portal` interior.
+    pub fn portal_set_visible(
+        portal: &types_portal::Portal,
+        value: bool,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `oldContext = MemoryContextSwitchTo(portal->portalContext);
     /// plan = copyObject(plan); queryString = pstrdup(sourceText);
     /// PortalDefineQuery(portal, NULL, queryString, CMDTAG_SELECT,

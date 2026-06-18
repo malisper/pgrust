@@ -37,6 +37,11 @@ pub fn init_seams() {
     seams::create_portal::set(|name, allow_dup, dup_silent| {
         crate::CreatePortal(name, allow_dup, dup_silent)
     });
+    seams::create_new_portal::set(crate::CreateNewPortal);
+    seams::portal_set_visible::set(|portal, value| {
+        portal.borrow_mut().visible = value;
+        Ok(())
+    });
     seams::get_portal_by_name::set(|name| Ok(crate::GetPortalByName(Some(name))));
     seams::portal_hash_table_delete_all::set(crate::PortalHashTableDeleteAll);
     seams::portal_drop::set(|portal, is_top_commit| crate::PortalDrop(portal, is_top_commit));

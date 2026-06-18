@@ -1480,21 +1480,16 @@ mod recurrence_guard {
         // RETIRED: `init_process_globals` is now installed by init-small's
         // init_seams() (the InitProcessGlobals body landed there, homed next to
         // the MyStartTime[stamp] setters until postmaster.c lands).
-        // DESIGN_DEBT (TD-PORTAL-HANDLE): PREPARE/EXECUTE's `-pre-seams` slice of
-        // portalmem.c is written against the parsestmt opaque handle newtypes
-        // (`PortalHandle(String)`, `MemoryContextHandle(u64)`), while the owner's
-        // real bodies (CreateNewPortal / PortalDefineQuery / PortalSetVisible /
-        // GetPortalContext) work on the value-typed `types_portal::Portal`
-        // (`Rc<RefCell<PortalData>>`) and a real `MemoryContext`. Installing the
-        // handle seams needs a PortalHandle/MemoryContextHandle -> value registry
-        // (forbidden token-registry hack / opacity-introduced) or migrating
-        // PREPARE/EXECUTE off the opaque parsestmt handles onto owned portal
-        // values (the K1 de-handle work, #159/#169). Handle-divergent.
-        ("backend_utils_mmgr_portalmem", "create_new_portal"),
-        ("backend_utils_mmgr_portalmem", "portal_define_query"),
-        // TD-PORTAL-HANDLE, see the handle-divergent note above.
-        ("backend_utils_mmgr_portalmem", "portal_get_portal_context"),
-        ("backend_utils_mmgr_portalmem", "portal_set_visible"),
+        // RETIRED (TD-PORTAL-HANDLE de-handle): PREPARE/EXECUTE's portal-run tail
+        // was migrated off the parsestmt opaque handle newtypes
+        // (`PortalHandle`/`QueryCompletionHandle`/`SnapshotHandle`) onto the
+        // value-typed `types_portal::Portal` (`Rc<RefCell<PortalData>>`),
+        // `Rc<SnapshotData>`, and `QueryCompletion`. prepare now calls the base
+        // `portalmem`/`pquery`/`snapmgr` seams (create_new_portal /
+        // portal_set_visible / portal_define_query_list / portal_drop /
+        // portal_start / portal_run / get_active_snapshot), all installed by
+        // their owners. The `-pre-seams` slice crates and their allowlist
+        // entries are gone.
         // DESIGN_DEBT (TD-PORTAL-CURSOR): `with_running_cursor` lends borrows of
         // the running `EStateData`/`PlanStateNode` tree (RunningCursorState) for
         // execCurrentOf. Those carrier types are the executor de-handle keystone

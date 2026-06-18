@@ -1861,18 +1861,17 @@ fn handle_query_env(_portal: &Portal) -> u64 {
 
 /// Install this crate's inward seams. Wired into `seams-init`.
 ///
-/// The `backend-tcop-pquery-seams` (portalcmds' owned slice) install cleanly.
-/// The `backend-tcop-pquery-pre-seams` (PREPARE/EXECUTE's slice) carry the now
-/// value-typed `ParamListInfo` (param-list de-handle landed), but still cannot
-/// be installed: they carry `PortalHandle`/`QueryCompletionHandle`/
-/// `SnapshotHandle` opaque `u64` newtypes with no resolver to the owned
-/// `Portal`/`QueryCompletion`/`Rc<SnapshotData>` the owned core requires.
-/// They install once those handles are de-handled (the portal/snapshot-handle
-/// keystone). Leaving them uninstalled is faithful (a fake `u64`->owned cast is
-/// forbidden); a call panics loudly with the seam path.
+/// The `backend-tcop-pquery-seams` (the portal-execution slice) install
+/// cleanly against the owned `Portal`/`QueryCompletion`/`Rc<SnapshotData>`
+/// values. The PREPARE/EXECUTE portal-run tail now threads those same values
+/// (the portal/snapshot/QueryCompletion handles were de-handled), so
+/// `portal_start`/`portal_run` are the EXECUTE path's installed seams too.
 pub fn init_seams() {
     backend_tcop_pquery_seams::portal_start::set(|portal, params, eflags, snapshot| {
         portal_start(portal, params, eflags, snapshot)
+    });
+    backend_tcop_pquery_seams::portal_run::set(|portal, count, is_top_level, dest, altdest, qc| {
+        portal_run(portal, count, is_top_level, dest, altdest, qc)
     });
     backend_tcop_pquery_seams::portal_run_fetch::set(|portal, fdirection, count, dest| {
         portal_run_fetch(portal, fdirection, count, dest)

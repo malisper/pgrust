@@ -23,7 +23,6 @@ mcx = { path = "../mcx" }
 
 # own inward seam crates (installed from init_seams)
 backend-tcop-pquery-seams = { path = "../backend-tcop-pquery-seams" }
-backend-tcop-pquery-pre-seams = { path = "../backend-tcop-pquery-pre-seams" }
 
 # direct deps (no cycle)
 backend-executor-execMain = { path = "../backend-executor-execMain" }
