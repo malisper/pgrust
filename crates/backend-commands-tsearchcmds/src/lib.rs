@@ -46,7 +46,7 @@ use types_error::{
     ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERROR,
     ERRCODE_UNDEFINED_OBJECT, ERROR, NOTICE,
 };
-use types_nodes::nodes::{Node, NodePtr};
+use types_nodes::nodes::{ntag, Node, NodePtr};
 use types_nodes::value::{Boolean, Float, Integer, StringNode};
 use types_nodes::ddlnodes::{
     AlterTSConfigurationStmt, AlterTSDictionaryStmt, DefElem, DEFELEM_UNSPEC,
@@ -1105,7 +1105,7 @@ pub fn serialize_deflist<'mcx>(mcx: Mcx<'mcx>, deflist: &[&DefElem<'mcx>]) -> Pg
         if defel
             .arg
             .as_deref()
-            .is_some_and(|n| matches!(n, Node::Integer(_) | Node::Float(_)))
+            .is_some_and(|n| n.is_integer() || n.is_float())
         {
             buf.push_str(&val);
         } else {
@@ -1386,11 +1386,12 @@ fn def_name<'a>(defel: &'a DefElem<'_>) -> &'a str {
 /// `(DefElem *) lfirst(pl)` — the cell must be a `Node::DefElem` (the grammar
 /// guarantees it).
 fn expect_defelem<'a, 'mcx>(node: &'a NodePtr<'mcx>) -> PgResult<&'a DefElem<'mcx>> {
-    match &**node {
-        Node::DefElem(d) => Ok(d),
-        other => Err(PgError::error(format!(
+    let node = &**node;
+    match node.node_tag() {
+        ntag::T_DefElem => Ok(node.expect_defelem()),
+        _ => Err(PgError::error(format!(
             "unexpected node type in option list: {}",
-            other.node_tag()
+            node.node_tag()
         ))),
     }
 }
@@ -1400,12 +1401,15 @@ fn def_get_string<'mcx>(mcx: Mcx<'mcx>, defel: &DefElem<'mcx>) -> PgResult<Strin
     let arg = defel.arg.as_deref().ok_or_else(|| {
         syntax_error(format!("{} requires a parameter", def_name(defel)))
     })?;
-    let s = match arg {
-        Node::Integer(i) => i.ival.to_string(),
-        Node::Float(f) => f.fval.as_str().to_string(),
-        Node::Boolean(b) => if b.boolval { "true" } else { "false" }.to_string(),
-        Node::String(s) => s.sval.as_str().to_string(),
-        Node::TypeName(_) | Node::List(_) | Node::A_Star(_) => {
+    let s = match arg.node_tag() {
+        ntag::T_Integer => arg.expect_integer().ival.to_string(),
+        ntag::T_Float => arg.expect_float().fval.as_str().to_string(),
+        ntag::T_Boolean => {
+            let b = arg.expect_boolean();
+            if b.boolval { "true" } else { "false" }.to_string()
+        }
+        ntag::T_String => arg.expect_string().sval.as_str().to_string(),
+        ntag::T_TypeName | ntag::T_List | ntag::T_A_Star => {
             /*
              * defGetString also renders TypeName / List / A_Star; those forms
              * never reach serialize_deflist (options always carry a scalar
@@ -1419,9 +1423,9 @@ fn def_get_string<'mcx>(mcx: Mcx<'mcx>, defel: &DefElem<'mcx>) -> PgResult<Strin
                 ))
                 .into_error());
         }
-        other => {
+        _ => {
             return Err(ereport(ERROR)
-                .errmsg_internal(format!("unrecognized node type: {}", other.node_tag()))
+                .errmsg_internal(format!("unrecognized node type: {}", arg.node_tag()))
                 .into_error())
         }
     };
@@ -1435,13 +1439,13 @@ fn def_qualified_namelist(defel: &DefElem) -> PgResult<Vec<Option<String>>> {
     let arg = defel.arg.as_deref().ok_or_else(|| {
         syntax_error(format!("{} requires a parameter", def_name(defel)))
     })?;
-    match arg {
+    match arg.node_tag() {
         // case T_TypeName: return ((TypeName *) def->arg)->names;
-        Node::TypeName(tn) => nodes_to_namelist(&tn.names),
+        ntag::T_TypeName => nodes_to_namelist(&arg.expect_typename().names),
         // case T_String: /* quoted name */ return list_make1(def->arg);
-        Node::String(s) => Ok(alloc::vec![Some(s.sval.as_str().to_string())]),
+        ntag::T_String => Ok(alloc::vec![Some(arg.expect_string().sval.as_str().to_string())]),
         // case T_List: return (List *) def->arg;
-        Node::List(_) => {
+        ntag::T_List => {
             /*
              * The TS grammar never produces a bare `List` for these args
              * (function names arrive as func_type/TypeName, quoted names as
@@ -1482,10 +1486,11 @@ fn func_name_components<'mcx>(mcx: Mcx<'mcx>, defel: &DefElem) -> PgResult<Vec<P
 fn nodes_to_namelist(nodes: &[NodePtr]) -> PgResult<Vec<Option<String>>> {
     let mut out: Vec<Option<String>> = Vec::with_capacity(nodes.len());
     for node in nodes {
-        match &**node {
-            Node::String(s) => out.push(Some(s.sval.as_str().to_string())),
+        let node = &**node;
+        match node.node_tag() {
+            ntag::T_String => out.push(Some(node.expect_string().sval.as_str().to_string())),
             // `*` markers (A_Star) become `None` in a name list.
-            Node::A_Star(_) => out.push(None),
+            ntag::T_A_Star => out.push(None),
             _ => return Err(unexpected_node_in_name_list()),
         }
     }
@@ -1502,8 +1507,9 @@ fn namelist(names: &[NodePtr]) -> PgResult<Vec<Option<String>>> {
 /// One element of `stmt->dicts` (a `List *` of `List *` of String) — convert a
 /// single inner name list (a `Node::List`) to a NameList.
 fn name_sublist(node: &NodePtr) -> PgResult<Vec<Option<String>>> {
-    match &**node {
-        Node::List(cells) => nodes_to_namelist(cells),
+    let node = &**node;
+    match node.node_tag() {
+        ntag::T_List => nodes_to_namelist(node.expect_list()),
         _ => Err(unexpected_node_in_name_list()),
     }
 }
@@ -1513,12 +1519,13 @@ fn name_sublist(node: &NodePtr) -> PgResult<Vec<Option<String>>> {
 fn string_list(list: &[NodePtr]) -> PgResult<Vec<String>> {
     let mut out: Vec<String> = Vec::with_capacity(list.len());
     for node in list {
-        match &**node {
-            Node::String(s) => out.push(s.sval.as_str().to_string()),
-            other => {
+        let node = &**node;
+        match node.node_tag() {
+            ntag::T_String => out.push(node.expect_string().sval.as_str().to_string()),
+            _ => {
                 return Err(PgError::error(format!(
                     "unexpected node type in token list: {}",
-                    other.node_tag()
+                    node.node_tag()
                 )))
             }
         }
