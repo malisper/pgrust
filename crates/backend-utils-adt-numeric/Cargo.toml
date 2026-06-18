@@ -32,6 +32,10 @@ backend-lib-hyperloglog = { path = "../backend-lib-hyperloglog" }
 # (mirrors backend-utils-adt-float's float8[] aggregate model).
 backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
 
+# numerictypmodin's cstring[] arg is decoded via ArrayGetIntegerTypmods, which
+# lives in arrayutils; reached through its seam to avoid a dependency cycle.
+backend-utils-adt-arrayutils-seams = { path = "../backend-utils-adt-arrayutils-seams" }
+
 # Inward seams this crate OWNS and installs from init_seams().
 backend-utils-adt-numeric-seams = { path = "../backend-utils-adt-numeric-seams" }
 

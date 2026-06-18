@@ -19059,6 +19059,7 @@ dependencies = [
  "backend-optimizer-util-clauses",
  "backend-parser-small1-seams",
  "backend-utils-adt-arrayfuncs",
+ "backend-utils-adt-arrayutils-seams",
  "backend-utils-adt-jsonb-seams",
  "backend-utils-adt-numeric-seams",
  "backend-utils-fmgr-core",

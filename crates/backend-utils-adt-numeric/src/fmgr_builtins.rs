@@ -684,7 +684,8 @@ pub fn register_numeric_builtins() {
             false,
             fc_hash_numeric_extended,
         ),
-        // The pre-existing typmod-output (kept).
+        // typmod in/out.
+        builtin(2917, "numerictypmodin", 1, true, false, fc_numerictypmodin),
         builtin(2918, "numerictypmodout", 1, true, false, fc_numerictypmodout),
         // Additional unary numeric -> numeric (each distinct pg_proc OID).
         builtin(1705, "numeric_abs", 1, true, false, fc_numeric_abs),
@@ -753,6 +754,22 @@ pub fn register_numeric_builtins() {
         builtin(1376, "numeric_fac", 1, true, false, fc_numeric_fac),
         builtin(5042, "numeric_min_scale", 1, true, false, fc_numeric_min_scale),
     ]);
+}
+
+/// `numerictypmodin(cstring[]) -> int4` (oid 2917): arg 0 is the typmod array's
+/// varlena image on the by-reference lane, decoded via ArrayGetIntegerTypmods.
+fn fc_numerictypmodin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let ta = arg_varlena(fcinfo, 0);
+    let m = scratch_mcx();
+    let tl = match backend_utils_adt_arrayutils_seams::array_get_integer_typmods::call(m.mcx(), ta)
+    {
+        Ok(tl) => tl,
+        Err(e) => raise(e),
+    };
+    match crate::ops_sql::numerictypmodin(&tl) {
+        Ok(t) => ret_i32(t),
+        Err(e) => raise(e),
+    }
 }
 
 /// `numerictypmodout(int4) -> cstring` (oid 2918): the typmod output function,

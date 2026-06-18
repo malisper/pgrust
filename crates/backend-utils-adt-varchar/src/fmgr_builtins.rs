@@ -177,6 +177,14 @@ fn fc_bpchartypmodout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     ret_cstring(fcinfo, &out)
 }
 
+/// `bpchartypmodin(cstring[])` — arg 0 is the typmod array's varlena image on
+/// the by-reference lane.
+fn fc_bpchartypmodin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let out = ok(crate::bpchartypmodin(m.mcx(), arg_bytes(fcinfo, 0)));
+    ret_i32(out)
+}
+
 // ---------------------------------------------------------------------------
 // fc_ adapters — varchar I/O.
 // ---------------------------------------------------------------------------
@@ -209,6 +217,14 @@ fn fc_varchartypmodout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let m = scratch_mcx();
     let out = ok(crate::varchartypmodout(m.mcx(), arg_i32(fcinfo, 0)));
     ret_cstring(fcinfo, &out)
+}
+
+/// `varchartypmodin(cstring[])` — arg 0 is the typmod array's varlena image on
+/// the by-reference lane.
+fn fc_varchartypmodin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let out = ok(crate::varchartypmodin(m.mcx(), arg_bytes(fcinfo, 0)));
+    ret_i32(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -399,7 +415,9 @@ pub fn register_varchar_builtins() {
         builtin(1047, "varcharout", 1, fc_varcharout),
         builtin(2431, "bpcharsend", 1, fc_bpcharsend),
         builtin(2433, "varcharsend", 1, fc_varcharsend),
+        builtin(2913, "bpchartypmodin", 1, fc_bpchartypmodin),
         builtin(2914, "bpchartypmodout", 1, fc_bpchartypmodout),
+        builtin(2915, "varchartypmodin", 1, fc_varchartypmodin),
         builtin(2916, "varchartypmodout", 1, fc_varchartypmodout),
         // ---- comparison operators ----
         builtin(1048, "bpchareq", 2, fc_bpchareq),
