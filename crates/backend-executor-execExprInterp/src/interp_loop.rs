@@ -354,7 +354,7 @@ pub fn ExecInterpExpr<'mcx>(
                     // keep FALSE
                 } else {
                     let anynull = boolexpr_anynull(state, op);
-                    if read_cell(state, anynull).1 {
+                    if read_cell(state, anynull).0.as_bool() {
                         write_cell(state, resv, Datum::null(), true);
                     }
                     // else keep TRUE
@@ -385,7 +385,7 @@ pub fn ExecInterpExpr<'mcx>(
                     // keep TRUE
                 } else {
                     let anynull = boolexpr_anynull(state, op);
-                    if read_cell(state, anynull).1 {
+                    if read_cell(state, anynull).0.as_bool() {
                         write_cell(state, resv, Datum::null(), true);
                     }
                     // else keep FALSE
