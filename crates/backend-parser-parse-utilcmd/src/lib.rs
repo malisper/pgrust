@@ -73,9 +73,4 @@ pub fn init_seams() {
     backend_tcop_utility_out_seams::transform_create_stmt::set(transformCreateStmt);
     backend_tcop_utility_out_seams::transform_index_stmt::set(transformIndexStmt);
     backend_tcop_utility_out_seams::transform_stats_stmt::set(transformStatsStmt);
-
-    // transformColumnType (parse_utilcmd.c's own column-type/COLLATE validation)
-    // — owned by this crate; the seam exists only to bridge the post-analyze
-    // node universe at the column.rs call site.
-    column::init_column_seams();
 }
