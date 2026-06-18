@@ -25,7 +25,7 @@
 //! test that runs `crate::init_all()` then formats `missing_builtins()` (sorted
 //! by `foid`) as the `(oid, "prosrc", BuiltinGapKind::...)` rows below.
 //!
-//! Current gap: 1656 of 3102 canonical built-ins (1656 not registered,
+//! Current gap: 1634 of 3102 canonical built-ins (1634 not registered,
 //! 0 registered with diverging metadata).
 
 use backend_utils_fmgr_core::BuiltinGapKind;
@@ -75,15 +75,7 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (196, "pg_node_tree_out", BuiltinGapKind::NotRegistered),
     (197, "pg_node_tree_recv", BuiltinGapKind::NotRegistered),
     (198, "pg_node_tree_send", BuiltinGapKind::NotRegistered),
-    (202, "float4mul", BuiltinGapKind::NotRegistered),
-    (203, "float4div", BuiltinGapKind::NotRegistered),
-    (204, "float4pl", BuiltinGapKind::NotRegistered),
-    (205, "float4mi", BuiltinGapKind::NotRegistered),
     (208, "float4_accum", BuiltinGapKind::NotRegistered),
-    (216, "float8mul", BuiltinGapKind::NotRegistered),
-    (217, "float8div", BuiltinGapKind::NotRegistered),
-    (218, "float8pl", BuiltinGapKind::NotRegistered),
-    (219, "float8mi", BuiltinGapKind::NotRegistered),
     (222, "float8_accum", BuiltinGapKind::NotRegistered),
     (225, "lseg_center", BuiltinGapKind::NotRegistered),
     (239, "line_distance", BuiltinGapKind::NotRegistered),
@@ -92,18 +84,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (276, "float8_combine", BuiltinGapKind::NotRegistered),
     (277, "inter_sl", BuiltinGapKind::NotRegistered),
     (278, "inter_lb", BuiltinGapKind::NotRegistered),
-    (287, "float4eq", BuiltinGapKind::NotRegistered),
-    (288, "float4ne", BuiltinGapKind::NotRegistered),
-    (289, "float4lt", BuiltinGapKind::NotRegistered),
-    (290, "float4le", BuiltinGapKind::NotRegistered),
-    (291, "float4gt", BuiltinGapKind::NotRegistered),
-    (292, "float4ge", BuiltinGapKind::NotRegistered),
-    (293, "float8eq", BuiltinGapKind::NotRegistered),
-    (294, "float8ne", BuiltinGapKind::NotRegistered),
-    (295, "float8lt", BuiltinGapKind::NotRegistered),
-    (296, "float8le", BuiltinGapKind::NotRegistered),
-    (297, "float8gt", BuiltinGapKind::NotRegistered),
-    (298, "float8ge", BuiltinGapKind::NotRegistered),
     (321, "json_in", BuiltinGapKind::NotRegistered),
     (322, "json_out", BuiltinGapKind::NotRegistered),
     (323, "json_recv", BuiltinGapKind::NotRegistered),
@@ -531,8 +511,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (2417, "unknownsend", BuiltinGapKind::NotRegistered),
     (2420, "oidvectorrecv", BuiltinGapKind::NotRegistered),
     (2421, "oidvectorsend", BuiltinGapKind::NotRegistered),
-    (2424, "float4recv", BuiltinGapKind::NotRegistered),
-    (2426, "float8recv", BuiltinGapKind::NotRegistered),
     (2428, "point_recv", BuiltinGapKind::NotRegistered),
     (2430, "bpcharrecv", BuiltinGapKind::NotRegistered),
     (2432, "varcharrecv", BuiltinGapKind::NotRegistered),

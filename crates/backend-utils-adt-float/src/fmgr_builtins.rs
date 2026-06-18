@@ -60,6 +60,16 @@ fn arg_cstring<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
         .expect("float fn: cstring arg missing from by-ref lane")
 }
 
+/// `PG_GETARG_POINTER(i)` as a `StringInfo` wire buffer: the `recv` byte image
+/// on the by-ref lane.
+#[inline]
+fn arg_varlena<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("float fn: by-ref buffer arg missing from by-ref lane")
+}
+
 #[inline]
 fn ret_f32(v: f32) -> Datum {
     Datum::from_f32(v)
@@ -140,6 +150,106 @@ fn fc_float4send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 fn fc_float8send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let v = arg_f64(fcinfo, 0);
     ret_varlena(fcinfo, crate::float8send(v))
+}
+fn fc_float4recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let buf = arg_varlena(fcinfo, 0);
+    ret_f32(unwrap_or_raise(crate::float4recv(buf)))
+}
+fn fc_float8recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let buf = arg_varlena(fcinfo, 0);
+    ret_f64(unwrap_or_raise(crate::float8recv(buf)))
+}
+
+// ---- same-type arithmetic (float4) ----
+fn fc_float4pl(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_f32(unwrap_or_raise(crate::float4_pl(
+        arg_f32(fcinfo, 0),
+        arg_f32(fcinfo, 1),
+    )))
+}
+fn fc_float4mi(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_f32(unwrap_or_raise(crate::float4_mi(
+        arg_f32(fcinfo, 0),
+        arg_f32(fcinfo, 1),
+    )))
+}
+fn fc_float4mul(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_f32(unwrap_or_raise(crate::float4_mul(
+        arg_f32(fcinfo, 0),
+        arg_f32(fcinfo, 1),
+    )))
+}
+fn fc_float4div(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_f32(unwrap_or_raise(crate::float4_div(
+        arg_f32(fcinfo, 0),
+        arg_f32(fcinfo, 1),
+    )))
+}
+
+// ---- same-type arithmetic (float8) ----
+fn fc_float8pl(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_f64(unwrap_or_raise(crate::float8_pl(
+        arg_f64(fcinfo, 0),
+        arg_f64(fcinfo, 1),
+    )))
+}
+fn fc_float8mi(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_f64(unwrap_or_raise(crate::float8_mi(
+        arg_f64(fcinfo, 0),
+        arg_f64(fcinfo, 1),
+    )))
+}
+fn fc_float8mul(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_f64(unwrap_or_raise(crate::float8_mul(
+        arg_f64(fcinfo, 0),
+        arg_f64(fcinfo, 1),
+    )))
+}
+fn fc_float8div(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_f64(unwrap_or_raise(crate::float8_div(
+        arg_f64(fcinfo, 0),
+        arg_f64(fcinfo, 1),
+    )))
+}
+
+// ---- same-type comparisons (float4) ----
+fn fc_float4eq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_bool(crate::float4_eq(arg_f32(fcinfo, 0), arg_f32(fcinfo, 1)))
+}
+fn fc_float4ne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_bool(crate::float4_ne(arg_f32(fcinfo, 0), arg_f32(fcinfo, 1)))
+}
+fn fc_float4lt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_bool(crate::float4_lt(arg_f32(fcinfo, 0), arg_f32(fcinfo, 1)))
+}
+fn fc_float4le(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_bool(crate::float4_le(arg_f32(fcinfo, 0), arg_f32(fcinfo, 1)))
+}
+fn fc_float4gt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_bool(crate::float4_gt(arg_f32(fcinfo, 0), arg_f32(fcinfo, 1)))
+}
+fn fc_float4ge(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_bool(crate::float4_ge(arg_f32(fcinfo, 0), arg_f32(fcinfo, 1)))
+}
+
+// ---- same-type comparisons (float8) ----
+fn fc_float8eq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_bool(crate::float8_eq(arg_f64(fcinfo, 0), arg_f64(fcinfo, 1)))
+}
+fn fc_float8ne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_bool(crate::float8_ne(arg_f64(fcinfo, 0), arg_f64(fcinfo, 1)))
+}
+fn fc_float8lt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_bool(crate::float8_lt(arg_f64(fcinfo, 0), arg_f64(fcinfo, 1)))
+}
+fn fc_float8le(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_bool(crate::float8_le(arg_f64(fcinfo, 0), arg_f64(fcinfo, 1)))
+}
+fn fc_float8gt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_bool(crate::float8_gt(arg_f64(fcinfo, 0), arg_f64(fcinfo, 1)))
+}
+fn fc_float8ge(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_bool(crate::float8_ge(arg_f64(fcinfo, 0), arg_f64(fcinfo, 1)))
 }
 
 // ---- unary float4 ----
@@ -516,6 +626,30 @@ pub fn register_float_builtins() {
         builtin(215, "float8out", 1, true, false, fc_float8out),
         builtin(2425, "float4send", 1, true, false, fc_float4send),
         builtin(2427, "float8send", 1, true, false, fc_float8send),
+        builtin(2424, "float4recv", 1, true, false, fc_float4recv),
+        builtin(2426, "float8recv", 1, true, false, fc_float8recv),
+        // ---- same-type arithmetic ----
+        builtin(202, "float4mul", 2, true, false, fc_float4mul),
+        builtin(203, "float4div", 2, true, false, fc_float4div),
+        builtin(204, "float4pl", 2, true, false, fc_float4pl),
+        builtin(205, "float4mi", 2, true, false, fc_float4mi),
+        builtin(216, "float8mul", 2, true, false, fc_float8mul),
+        builtin(217, "float8div", 2, true, false, fc_float8div),
+        builtin(218, "float8pl", 2, true, false, fc_float8pl),
+        builtin(219, "float8mi", 2, true, false, fc_float8mi),
+        // ---- same-type comparisons ----
+        builtin(287, "float4eq", 2, true, false, fc_float4eq),
+        builtin(288, "float4ne", 2, true, false, fc_float4ne),
+        builtin(289, "float4lt", 2, true, false, fc_float4lt),
+        builtin(290, "float4le", 2, true, false, fc_float4le),
+        builtin(291, "float4gt", 2, true, false, fc_float4gt),
+        builtin(292, "float4ge", 2, true, false, fc_float4ge),
+        builtin(293, "float8eq", 2, true, false, fc_float8eq),
+        builtin(294, "float8ne", 2, true, false, fc_float8ne),
+        builtin(295, "float8lt", 2, true, false, fc_float8lt),
+        builtin(296, "float8le", 2, true, false, fc_float8le),
+        builtin(297, "float8gt", 2, true, false, fc_float8gt),
+        builtin(298, "float8ge", 2, true, false, fc_float8ge),
         // ---- unary float4 ----
         builtin(206, "float4um", 1, true, false, fc_float4um),
         builtin(207, "float4abs", 1, true, false, fc_float4abs),
