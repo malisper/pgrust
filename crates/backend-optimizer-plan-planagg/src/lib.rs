@@ -20,19 +20,25 @@
 //!
 //! The *index-path* construction (`build_minmax_path`, the `MinMaxAggInfo`
 //! arena/`MinMaxAggPath` machinery, the per-aggregate subroot) is the
-//! cross-root subquery-planner / path-arena keystone (the same one
-//! `prepunion`/`planagg`'s subroot logic bottoms out on): `MinMaxAggInfo` is
-//! not yet an arena node here, and there is no per-aggregate `subquery_planner`
-//! path subroot. So once an aggregate is identified as a genuine MIN/MAX
-//! candidate, building its path is a faithful loud panic. MIN/MAX queries
-//! therefore do not (yet) get the indexscan optimization; that is a planner
-//! keystone, not part of this bounded unit.
+//! cross-root subquery-planner / path-arena keystone (the #6 planagg subroot
+//! keystone, the same one `prepunion`'s subroot logic bottoms out on):
+//! `MinMaxAggInfo` is not yet an arena node here, and there is no per-aggregate
+//! `subquery_planner` path subroot. So no `MinMaxAggPath` can be built.
+//!
+//! This is *not* a wall: in C, when no suitable index path can be formed,
+//! `preprocess_minmax_aggregates` returns having added no `MinMaxAggPath`, and
+//! the query simply falls through to the regular Agg plan. We mirror that
+//! contract exactly — once a genuine all-MIN/MAX query reaches the path-build
+//! step we return early (no optimization), and `grouping_planner` plans it as a
+//! regular Agg over the scan (executed via the `EEOP_AGG_PLAIN_TRANS` opcodes).
+//! The result is identical; only the index-scan optimization is skipped. So
+//! `MIN(x)`/`MAX(x)` now return correct values. The indexscan shortcut is
+//! deferred to the #6 planagg subroot keystone.
 
 #![allow(non_snake_case)]
 
 extern crate alloc;
 
-use alloc::string::String;
 use mcx::Mcx;
 use types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_error::PgResult;
@@ -139,13 +145,24 @@ pub fn preprocess_minmax_aggregates<'mcx>(
 
     /*
      * OK, there is at least the possibility of performing the optimization.
-     * Building an access path for each aggregate (build_minmax_path) and the
-     * MinMaxAggPath construction is the cross-root subquery-planner / path-arena
-     * keystone — not modeled here. A genuine all-MIN/MAX query reaches this
-     * point; faithfully fail so the regular aggregate plan is not silently
-     * skipped.
+     * In C we would now build an access path for each aggregate
+     * (build_minmax_path) and, if all aggregates prove indexable, construct a
+     * MinMaxAggPath that competes with the regular Agg plan. That path
+     * construction is the cross-root subquery-planner / path-arena keystone
+     * (the #6 planagg subroot keystone): MinMaxAggInfo is not yet an arena node
+     * here and there is no per-aggregate subquery_planner subroot, so no
+     * MinMaxAggPath can be built.
+     *
+     * C's own contract for this case is a plain early return: when no suitable
+     * index path can be formed (build_minmax_path returns false for some
+     * aggregate), preprocess_minmax_aggregates returns having added no
+     * MinMaxAggPath, and grouping_planner falls through to the regular Agg plan
+     * (which now executes via the EEOP_AGG_PLAIN_TRANS opcodes). The result is
+     * identical; only the index-scan MIN/MAX optimization is skipped. We mirror
+     * that fall-through here. When the #6 planagg subroot keystone lands, the
+     * build_minmax_path / MinMaxAggPath optimization can be added at this point.
      */
-    Err(minmax_path_keystone())
+    Ok(())
 }
 
 /// `can_minmax_aggs(root, &context)` (planagg.c:237) — examine the `AggInfo`
@@ -235,18 +252,4 @@ fn fetch_agg_sort_op<'mcx>(mcx: Mcx<'mcx>, aggfnoid: Oid) -> PgResult<Oid> {
         Some(form) => Ok(form.aggsortop),
         None => Ok(InvalidOid),
     }
-}
-
-/// The cross-root subquery-planner / path-arena keystone the MIN/MAX
-/// index-path optimization bottoms out on (`build_minmax_path` +
-/// `MinMaxAggInfo` arena node + `MinMaxAggPath`). Reached only when every
-/// aggregate in a plain single-table query is a genuine MIN/MAX aggregate.
-fn minmax_path_keystone() -> types_error::PgError {
-    types_error::PgError::error(String::from(
-        "preprocess_minmax_aggregates: build_minmax_path / MinMaxAggPath \
-         index-path construction (planagg.c) is the cross-root subquery-planner \
-         path-arena keystone — MinMaxAggInfo is not yet an arena node and there \
-         is no per-aggregate subroot. MIN/MAX over an indexable single-table \
-         query cannot yet use the indexscan shortcut.",
-    ))
 }
