@@ -448,6 +448,63 @@ pub fn end_tup_output<'mcx>(mcx: Mcx<'mcx>, tstate: TupOutputState<'mcx>) -> PgR
     Ok(())
 }
 
+/// `do_text_output_oneline(tstate, str_to_emit)` (execTuples.c) — emit `txt` as
+/// a single single-text-column row (the whole string, including any embedded
+/// newlines, is one value). The `SHOW <var>` path uses this.
+pub fn do_text_output_oneline_text<'mcx>(
+    mcx: Mcx<'mcx>,
+    tstate: &mut TupOutputState<'mcx>,
+    txt: &str,
+) -> PgResult<()> {
+    // values[0] = PointerGetDatum(cstring_to_text(txt)); isnull[0] = false;
+    let datum = backend_utils_adt_varlena_seams::cstring_to_text_v::call(mcx, txt)?;
+    let values = [datum];
+    let isnull = [false];
+    do_tup_output(mcx, tstate, &values, &isnull)
+}
+
+/// Install the `SHOW` / `SHOW ALL` tuple-output seams declared in
+/// `backend-utils-misc-guc-funcs-seams`. The funcs crate builds the all-TEXT
+/// result `TupleDesc` and hands rows across as rendered text; this owner
+/// converts each column to a `text` `Datum`, stores it into a live slot, and
+/// routes it through the `DestReceiver`.
+pub fn install_guc_funcs_show_seams() {
+    use backend_utils_misc_guc_funcs_seams as gseams;
+
+    // begin_tup_output_tupdesc(dest, tupdesc, &TTSOpsVirtual).
+    gseams::begin_tup_output_tupdesc::set(|mcx, dest, tupdesc| {
+        begin_tup_output_tupdesc(mcx, dest, tupdesc, types_nodes::TupleSlotKind::Virtual)
+    });
+
+    // do_text_output_oneline(tstate, value).
+    gseams::do_text_output_oneline::set(|mcx, tstate, value| {
+        do_text_output_oneline_text(mcx, tstate, &value)
+    });
+
+    // do_tup_output(tstate, values, isnull): each column is a rendered text
+    // value or `None` (the C `isnull` flag).
+    gseams::do_tup_output::set(|mcx, tstate, values| {
+        let mut datums: Vec<Datum<'_>> = Vec::with_capacity(values.len());
+        let mut isnull: Vec<bool> = Vec::with_capacity(values.len());
+        for v in values {
+            match v {
+                Some(s) => {
+                    datums.push(backend_utils_adt_varlena_seams::cstring_to_text_v::call(mcx, &s)?);
+                    isnull.push(false);
+                }
+                None => {
+                    datums.push(Datum::null());
+                    isnull.push(true);
+                }
+            }
+        }
+        do_tup_output(mcx, tstate, &datums, &isnull)
+    });
+
+    // end_tup_output(tstate).
+    gseams::end_tup_output::set(|mcx, tstate| end_tup_output(mcx, tstate));
+}
+
 /// `&Slot` use marker — keeps the live-slot type referenced from the output
 /// family's documented surface (the output slot is a [`SlotData`]).
 #[allow(dead_code)]

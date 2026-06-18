@@ -9226,6 +9226,7 @@ dependencies = [
  "backend-utils-cache-typcache-seams",
  "backend-utils-error",
  "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-misc-guc-funcs-seams",
  "mcx",
  "pgrust-trace",
  "types-core",
@@ -21306,11 +21307,13 @@ dependencies = [
 name = "backend-utils-misc-guc-funcs-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
  "types-nodes",
  "types-parsenodes",
+ "types-tuple",
 ]
 
 [[package]]

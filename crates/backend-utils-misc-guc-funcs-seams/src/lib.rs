@@ -11,12 +11,13 @@
 //! `ruleutils.c`) installs it from its own `init_seams()`. Until that owner
 //! lands a call panics loudly with the C symbol name — never a silent no-op.
 //!
-//! The executor tuple-output trio (`begin/do/end_tup_output`) crosses the
-//! `DestReceiver` boundary, which in this tree is the still-unbuilt
-//! receiver-value router keystone (the executor `dest_*` router seams have no
-//! installer yet). The seams here carry the `SHOW` projection as rendered text
-//! rows (`Option<String>`), matching `guc_funcs.c`'s `values[]`/`isnull[]`
-//! text columns; the owner converts to the canonical slot/`Datum` form.
+//! The executor tuple-output trio (`begin/do/end_tup_output`) threads the real
+//! `TupOutputState<'mcx>` (a live `TupleTableSlot` + the `DestReceiver` handle)
+//! built by `backend-executor-execTuples`. The funcs crate builds the SHOW
+//! result `TupleDesc` (all-TEXT columns) and hands the rendered rows across as
+//! text (`Option<String>`), matching `guc_funcs.c`'s `values[]`/`isnull[]`; the
+//! `execTuples` owner converts each text column to the canonical `text` `Datum`,
+//! stores it into the slot, and routes it through the `dest_*` receiver seams.
 
 extern crate alloc;
 
@@ -113,44 +114,49 @@ seam_core::seam!(
 );
 
 // --- executor tuple-output path (execTuples.c) -----------------------------
-
-/// A `TupOutputState` (execTuples.c) for the `SHOW` projection. The real C
-/// struct carries the destination receiver and a `TupleTableSlot`; over the
-/// (still-unbuilt) receiver-value router boundary, the owner threads its own
-/// slot — this opaque carrier holds the destination handle so the rows can be
-/// routed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TupOutputState {
-    /// `tstate->dest` — the destination receiver handle.
-    pub dest: types_nodes::parsestmt::DestReceiverHandle,
-}
+//
+// The real `TupOutputState<'mcx>` (a live `TupleTableSlot` + the `DestReceiver`
+// handle) lives in `types_nodes::tuptable`; the `execTuples` owner installs
+// these onto its real bodies. The funcs crate builds the SHOW result
+// `TupleDesc` (all-TEXT columns) and passes rendered text rows; the owner
+// converts each column to a `text` `Datum`.
 
 seam_core::seam!(
     /// `begin_tup_output_tupdesc(dest, tupdesc, &TTSOpsVirtual)` (execTuples.c):
     /// prepare a `TupOutputState` for projecting rows of `tupdesc` to `dest`.
-    /// `tupdesc` is carried as the rendered column count (the SHOW result is
-    /// one or three TEXT columns); the owner builds the real slot.
-    pub fn begin_tup_output_tupdesc(
+    pub fn begin_tup_output_tupdesc<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         dest: types_nodes::parsestmt::DestReceiverHandle,
-        ncols: i32,
-    ) -> TupOutputState
+        tupdesc: types_tuple::heaptuple::TupleDesc<'mcx>,
+    ) -> PgResult<types_nodes::tuptable::TupOutputState<'mcx>>
 );
 
 seam_core::seam!(
     /// `do_text_output_oneline(tstate, value)` (execTuples.c): emit one
     /// single-text-column tuple (used by `SHOW <var>`).
-    pub fn do_text_output_oneline(tstate: TupOutputState, value: String)
+    pub fn do_text_output_oneline<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        tstate: &mut types_nodes::tuptable::TupOutputState<'mcx>,
+        value: String,
+    ) -> PgResult<()>
 );
 
 seam_core::seam!(
     /// `do_tup_output(tstate, values, isnull)` (execTuples.c): emit one tuple
     /// whose columns are the supplied text values (`None` is the C `isnull`
     /// flag). Used by `SHOW ALL` (a three-text-column row).
-    pub fn do_tup_output(tstate: TupOutputState, values: Vec<Option<String>>)
+    pub fn do_tup_output<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        tstate: &mut types_nodes::tuptable::TupOutputState<'mcx>,
+        values: Vec<Option<String>>,
+    ) -> PgResult<()>
 );
 
 seam_core::seam!(
     /// `end_tup_output(tstate)` (execTuples.c): finish and tear down a
     /// `TupOutputState`.
-    pub fn end_tup_output(tstate: TupOutputState)
+    pub fn end_tup_output<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        tstate: types_nodes::tuptable::TupOutputState<'mcx>,
+    ) -> PgResult<()>
 );

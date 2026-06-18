@@ -406,14 +406,15 @@ pub fn SetPGVariable(name: &str, arg: Option<&Node>, is_local: bool) -> PgResult
 // ===========================================================================
 
 /// `GetPGVariable(name, dest)` (guc_funcs.c:382): the `SHOW` statement.
-pub fn GetPGVariable(
+pub fn GetPGVariable<'mcx>(
+    mcx: Mcx<'mcx>,
     name: &str,
     dest: types_nodes::parsestmt::DestReceiverHandle,
 ) -> PgResult<()> {
     if guc_name_compare(name, "all") == Ordering::Equal {
-        ShowAllGUCConfig(dest)
+        ShowAllGUCConfig(mcx, dest)
     } else {
-        ShowGUCConfigOption(name, dest)
+        ShowGUCConfigOption(mcx, name, dest)
     }
 }
 
@@ -448,13 +449,14 @@ pub fn GetPGVariableResultDesc<'mcx>(mcx: Mcx<'mcx>, name: &str) -> PgResult<Tup
 }
 
 /// `ShowGUCConfigOption(name, dest)` (guc_funcs.c:427): `SHOW` one variable.
-fn ShowGUCConfigOption(
+fn ShowGUCConfigOption<'mcx>(
+    mcx: Mcx<'mcx>,
     name: &str,
     dest: types_nodes::parsestmt::DestReceiverHandle,
 ) -> PgResult<()> {
     // Get the value and canonical spelling of name
     // value = GetConfigOptionByName(name, &varname, false);
-    let (value, _varname) = config_option_value_and_name(name, false)?.ok_or_else(|| {
+    let (value, varname) = config_option_value_and_name(name, false)?.ok_or_else(|| {
         // missing_ok == false, so the lookup returns Err for an unknown name;
         // None should not occur here, but guard rather than panic.
         ereport(ERROR)
@@ -463,27 +465,51 @@ fn ShowGUCConfigOption(
     })?;
 
     // need a tuple descriptor representing a single TEXT column
-    // (begin_tup_output_tupdesc builds the slot from this column count). The
-    // canonical name is the column name (varname); the row value is `value`.
+    // tupdesc = CreateTemplateTupleDesc(1);
+    // TupleDescInitEntry(tupdesc, 1, varname, TEXTOID, -1, 0);
+    let mut tupdesc = backend_access_common_tupdesc::CreateTemplateTupleDesc(mcx, 1)?;
+    backend_access_common_tupdesc::TupleDescInitEntry(
+        &mut tupdesc, 1, Some(&varname), TEXTOID, -1, 0,
+    )?;
+    let tupdesc = Some(mcx::alloc_in(mcx, tupdesc)?);
 
     // prepare for projection of tuples
-    let tstate = seam::begin_tup_output_tupdesc::call(dest, 1);
+    let mut tstate = seam::begin_tup_output_tupdesc::call(mcx, dest, tupdesc)?;
 
     // Send it
-    seam::do_text_output_oneline::call(tstate, value);
+    seam::do_text_output_oneline::call(mcx, &mut tstate, value)?;
 
-    seam::end_tup_output::call(tstate);
+    seam::end_tup_output::call(mcx, tstate)?;
     Ok(())
 }
 
 /// `ShowAllGUCConfig(dest)` (guc_funcs.c:455): the `SHOW ALL` command.
-fn ShowAllGUCConfig(dest: types_nodes::parsestmt::DestReceiverHandle) -> PgResult<()> {
+fn ShowAllGUCConfig<'mcx>(
+    mcx: Mcx<'mcx>,
+    dest: types_nodes::parsestmt::DestReceiverHandle,
+) -> PgResult<()> {
     // need a tuple descriptor representing three TEXT columns
+    // tupdesc = CreateTemplateTupleDesc(3);
+    // TupleDescInitEntry(tupdesc, 1, "name",        TEXTOID, -1, 0);
+    // TupleDescInitEntry(tupdesc, 2, "setting",     TEXTOID, -1, 0);
+    // TupleDescInitEntry(tupdesc, 3, "description", TEXTOID, -1, 0);
+    let mut tupdesc = backend_access_common_tupdesc::CreateTemplateTupleDesc(mcx, 3)?;
+    backend_access_common_tupdesc::TupleDescInitEntry(
+        &mut tupdesc, 1, Some("name"), TEXTOID, -1, 0,
+    )?;
+    backend_access_common_tupdesc::TupleDescInitEntry(
+        &mut tupdesc, 2, Some("setting"), TEXTOID, -1, 0,
+    )?;
+    backend_access_common_tupdesc::TupleDescInitEntry(
+        &mut tupdesc, 3, Some("description"), TEXTOID, -1, 0,
+    )?;
+    let tupdesc = Some(mcx::alloc_in(mcx, tupdesc)?);
+
     // prepare for projection of tuples
-    let tstate = seam::begin_tup_output_tupdesc::call(dest, 3);
+    let mut tstate = seam::begin_tup_output_tupdesc::call(mcx, dest, tupdesc)?;
 
     // collect the variables, in sorted order, and emit each visible row.
-    with_registry(|reg| {
+    let rows = with_registry(|reg| {
         let mut rows: Vec<Vec<Option<String>>> = Vec::new();
         for var in sorted_variables(reg) {
             let conf = var.gen();
@@ -507,14 +533,14 @@ fn ShowAllGUCConfig(dest: types_nodes::parsestmt::DestReceiverHandle) -> PgResul
             rows.push(vec![vname, setting, short_desc]);
         }
         rows
-    })
-    .into_iter()
-    .for_each(|values| {
-        // send it to dest
-        seam::do_tup_output::call(tstate, values);
     });
 
-    seam::end_tup_output::call(tstate);
+    for values in rows {
+        // send it to dest
+        seam::do_tup_output::call(mcx, &mut tstate, values)?;
+    }
+
+    seam::end_tup_output::call(mcx, tstate)?;
     Ok(())
 }
 
@@ -973,6 +999,27 @@ pub fn init_seams() {
     backend_tcop_utility_out_seams::set_pg_variable::set(|name, arg, is_local| {
         let projected = set_arg_from_nodes(arg)?;
         SetPGVariable(name, Some(&projected), is_local)
+    });
+    // `case T_VariableShowStmt: GetPGVariable(n->name, dest)` (SHOW). The body
+    // (`GetPGVariable`) is guc_funcs.c's own; the dispatch reaches it through
+    // the utility-out-seam. The grammar always sets `n->name` (`SHOW ALL` maps
+    // to the literal name "all"), so a missing name is a malformed parse tree.
+    backend_tcop_utility_out_seams::get_pg_variable::set(|mcx, name, dest| {
+        let name = name.ok_or_else(|| {
+            types_error::PgError::error("GetPGVariable: missing variable name".to_string())
+        })?;
+        GetPGVariable(mcx, name, dest)
+    });
+    // `case T_VariableShowStmt: GetPGVariableResultDesc(n->name)` — the SHOW
+    // result tuple descriptor (one TEXT column, named for the variable; three
+    // TEXT columns for `SHOW ALL`). guc_funcs.c's own body, installed here.
+    backend_tcop_utility_out_seams::get_pg_variable_result_desc::set(|mcx, name| {
+        let name = name.ok_or_else(|| {
+            types_error::PgError::error(
+                "GetPGVariableResultDesc: missing variable name".to_string(),
+            )
+        })?;
+        GetPGVariableResultDesc(mcx, name)
     });
     // `InitializeShmemGUCs()` is guc_funcs.c's own body; its standalone-boot
     // seam is declared in `backend-tcop-postgres-seams` (the boot driver's seam

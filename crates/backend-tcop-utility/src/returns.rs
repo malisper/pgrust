@@ -107,7 +107,7 @@ pub fn UtilityTupleDescriptor<'mcx>(
         Node::ExplainStmt(_) => rt::explain_result_desc::call(mcx, parsetree),
         // case T_VariableShowStmt: return GetPGVariableResultDesc(n->name);
         Node::VariableShowStmt(n) => {
-            rt::get_pg_variable_result_desc::call(mcx, n.name.as_deref())
+            rt::get_pg_variable_result_desc::call(mcx, n.name.as_deref())?
         }
         // default: return NULL;
         _ => None,

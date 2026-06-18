@@ -77,8 +77,9 @@ seam!(
     pub fn explain_result_desc<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> TupleDesc<'mcx>
 );
 seam!(
-    /// `GetPGVariableResultDesc(name)` (guc.c) — SHOW result descriptor.
-    pub fn get_pg_variable_result_desc<'mcx>(mcx: Mcx<'mcx>, name: Option<&str>) -> TupleDesc<'mcx>
+    /// `GetPGVariableResultDesc(name)` (guc.c) — SHOW result descriptor. Can
+    /// `ereport` (the canonical-name lookup runs with `missing_ok = false`).
+    pub fn get_pg_variable_result_desc<'mcx>(mcx: Mcx<'mcx>, name: Option<&str>) -> PgResult<TupleDesc<'mcx>>
 );
 
 /* ===========================================================================

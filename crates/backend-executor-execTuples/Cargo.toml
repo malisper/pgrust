@@ -35,3 +35,4 @@ backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
 backend-access-heap-heaptoast-seams = { path = "../backend-access-heap-heaptoast-seams" }
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
 backend-tcop-dest-seams = { path = "../backend-tcop-dest-seams" }
+backend-utils-misc-guc-funcs-seams = { path = "../backend-utils-misc-guc-funcs-seams" }
