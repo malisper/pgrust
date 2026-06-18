@@ -852,7 +852,13 @@ fn iocoerce_core<'mcx>(
     let (out_oid, out_coll, in_oid, in_coll, in_strict, in_args) =
         iocoerce_step_inputs(state, op);
     let (resvalue_id, _resnull_id) = res_cells(state, op);
-    let cur = state.result_cells.get(resvalue_id).clone();
+    // C reads `*op->resvalue` / `*op->resnull`. The cell id may be
+    // STATE_RESULT_CELL (the ExprState's own resvalue/resnull, e.g. a top-level
+    // CoerceViaIO over a Const); read through `read_cell` so that aliasing is
+    // honored — a bare `result_cells.get` would return a default ByVal cell and
+    // drop a by-reference / cstring value (WALL: "cstring arg missing from
+    // by-ref lane").
+    let (cur_value, cur_isnull) = crate::interp_loop::read_cell(state, resvalue_id);
 
     // /* call output function (similar to OutputFunctionCall) */
     // if (*op->resnull) str = NULL; else { args[0]=*resvalue; str = invoke(out); }
@@ -862,10 +868,10 @@ fn iocoerce_core<'mcx>(
     // into `mcx` and can be handed to the input function's by-reference arg slot
     // (the bare-word lane would drop it — WALL: "bool fn: cstring arg missing
     // from by-ref lane").
-    let str_datum: Option<DatumV<'mcx>> = if cur.isnull {
+    let str_datum: Option<DatumV<'mcx>> = if cur_isnull {
         None // str = NULL
     } else {
-        let out_call_args = [cur.value.clone()];
+        let out_call_args = [cur_value.clone()];
         let (val, _isnull) =
             function_call_invoke_datum::call(mcx, out_oid, out_coll, &out_call_args, None)?;
         // Assert(!fcinfo_out->isnull) — output functions never return NULL.
@@ -912,10 +918,9 @@ fn iocoerce_core<'mcx>(
         let (value, isnull) =
             function_call_invoke_datum::call(mcx, in_oid, in_coll, &in_datum_args, None)?;
         // *op->resvalue = d;  (resnull is unchanged: null iff str was NULL).
-        state.result_cells.set(
-            resvalue_id,
-            ResultCell { value, isnull },
-        );
+        // Write through `write_cell` so a STATE_RESULT_CELL target reaches the
+        // ExprState's own resvalue/resnull (mirror of the read above).
+        crate::interp_loop::write_cell(state, resvalue_id, value, isnull);
     }
     Ok(())
 }
