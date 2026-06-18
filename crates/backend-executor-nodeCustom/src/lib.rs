@@ -94,9 +94,9 @@ pub fn ExecInitCustomScan<'mcx>(
 ) -> PgResult<PgBox<'mcx, CustomScanState<'mcx>>> {
     let mcx = estate.es_query_cxt;
 
-    let cscan: &'mcx CustomScan<'mcx> = match node {
-        Node::CustomScan(c) => c,
-        other => panic!("castNode(CustomScan, node) failed: {other:?}"),
+    let cscan: &'mcx CustomScan<'mcx> = match node.as_customscan() {
+        Some(c) => c,
+        None => panic!("castNode(CustomScan, node) failed: {node:?}"),
     };
 
     // Index scanrelid = cscan->scan.scanrelid;
