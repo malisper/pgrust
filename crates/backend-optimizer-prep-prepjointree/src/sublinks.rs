@@ -361,7 +361,7 @@ fn pull_up_sublinks_jointree_recurse<'mcx>(
 /// at this point).
 fn take_joinexpr_quals<'mcx>(jtlink: &mut Option<NodePtr<'mcx>>) -> Option<NodePtr<'mcx>> {
     if let Some(n) = jtlink.as_deref_mut() {
-        if let Node::JoinExpr(j) = n {
+        if let Some(j) = n.as_joinexpr_mut() {
             return j.quals.take();
         }
     }
@@ -391,12 +391,11 @@ fn find_bottom_joinexpr<'a, 'mcx>(
     start: Option<&'a mut Node<'mcx>>,
 ) -> Option<&'a mut Node<'mcx>> {
     let node = start?;
-    let descend = matches!(
-        node,
-        Node::JoinExpr(j) if matches!(j.larg.as_deref(), Some(Node::JoinExpr(_)))
-    );
+    let descend = node
+        .as_joinexpr()
+        .is_some_and(|j| j.larg.as_deref().is_some_and(|n| n.is_joinexpr()));
     if descend {
-        if let Node::JoinExpr(j) = node {
+        if let Some(j) = node.as_joinexpr_mut() {
             return find_bottom_joinexpr(j.larg.as_deref_mut());
         }
         None
@@ -414,10 +413,8 @@ fn attach_quals_to_fromexpr_base<'mcx>(
     newquals: Option<NodePtr<'mcx>>,
 ) {
     let base = find_bottom_fromexpr(jtlink.as_deref_mut());
-    if let Some(Node::FromExpr(f)) = base {
+    if let Some(f) = base.and_then(|n| n.as_fromexpr_mut()) {
         f.quals = newquals;
-    } else {
-        let _ = base;
     }
 }
 
@@ -427,9 +424,9 @@ fn find_bottom_fromexpr<'a, 'mcx>(
     start: Option<&'a mut Node<'mcx>>,
 ) -> Option<&'a mut Node<'mcx>> {
     let node = start?;
-    let descend = matches!(node, Node::JoinExpr(_));
+    let descend = node.is_joinexpr();
     if descend {
-        if let Node::JoinExpr(j) = node {
+        if let Some(j) = node.as_joinexpr_mut() {
             return find_bottom_fromexpr(j.larg.as_deref_mut());
         }
         None
@@ -526,7 +523,7 @@ fn pull_up_sublinks_qual_recurse<'mcx>(
     }
 
     // is_notclause(node)?
-    if let Node::Expr(e) = &*node {
+    if let Some(e) = node.as_expr() {
         if nodefuncs::is_notclause::call(e) {
             // If the immediate argument of NOT is EXISTS, try to convert.
             let arg = nodefuncs::get_notclausearg::call(e);

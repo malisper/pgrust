@@ -104,7 +104,7 @@ use types_error::PgResult;
 use types_nodes::bitmapset::Bitmapset;
 use types_nodes::copy_query::Query;
 use types_nodes::jointype::JoinType;
-use types_nodes::nodes::Node;
+use types_nodes::nodes::{ntag, Node};
 use types_nodes::parsenodes::RTEKind;
 use types_nodes::primnodes::ExprRelids;
 use types_pathnodes::PlannerInfo;
@@ -239,7 +239,7 @@ pub fn reduce_outer_joins<'mcx>(
         ));
         reduce_outer_joins_pass2(mcx, &mut jt_node, &state1, &mut state2, parse, None, &empty_mbms(mcx))?;
         // Put the (possibly mutated) FromExpr back.
-        if let Node::FromExpr(f) = jt_node {
+        if let Some(f) = jt_node.into_fromexpr() {
             *jt = f;
         }
         parse.jointree = Some(jt);
@@ -305,7 +305,7 @@ fn remove_nulling_relids_in_append_rel_list(
         // editing its nullingrels anyway.)
         let mut node = Node::Expr(root.node(id).clone());
         backend_rewrite_core::remove_nulling_relids(&mut node, removable, except);
-        if let Node::Expr(e) = node {
+        if let Some(e) = node.into_expr() {
             *root.node_mut(id) = e;
         }
     }
@@ -349,12 +349,14 @@ fn reduce_outer_joins_pass1<'mcx>(
 ) -> PgResult<ReduceOuterJoinsPass1State<'mcx>> {
     let mut result = reduce_outer_joins_pass1_empty();
 
-    match jtnode {
-        Node::RangeTblRef(r) => {
+    match jtnode.node_tag() {
+        ntag::T_RangeTblRef => {
+            let r = jtnode.expect_rangetblref();
             let varno = r.rtindex;
             result.relids = Some(backend_nodes_core::bitmapset::bms_make_singleton(mcx, varno)?);
         }
-        Node::FromExpr(f) => {
+        ntag::T_FromExpr => {
+            let f = jtnode.expect_fromexpr();
             for l in f.fromlist.iter() {
                 let sub_state = reduce_outer_joins_pass1(mcx, l)?;
                 result.relids = bms_add_members(mcx, result.relids, sub_state.relids.as_deref())?;
@@ -362,7 +364,8 @@ fn reduce_outer_joins_pass1<'mcx>(
                 result.sub_states.push(Box::new(sub_state));
             }
         }
-        Node::JoinExpr(j) => {
+        ntag::T_JoinExpr => {
+            let j = jtnode.expect_joinexpr();
             // join's own RT index is not wanted in result->relids
             if is_outer_join(j.jointype) {
                 result.contains_outer = true;
@@ -415,17 +418,14 @@ fn reduce_outer_joins_pass2<'mcx>(
 ) -> PgResult<()> {
     // pass 2 should never descend as far as an empty subnode or base rel,
     // because it's only called on subtrees marked as contains_outer.
-    match jtnode {
-        Node::RangeTblRef(_) => {
+    match jtnode.node_tag() {
+        ntag::T_RangeTblRef => {
             return Err(types_error::PgError::error("reached base rel"));
         }
-        Node::FromExpr(_) => {
+        ntag::T_FromExpr => {
             // Scan quals to see if we can add any constraints.
             let (mut pass_nonnullable_rels, pass_forced_null_vars) = {
-                let f = match jtnode {
-                    Node::FromExpr(f) => f,
-                    _ => unreachable!(),
-                };
+                let f = jtnode.as_fromexpr_mut().unwrap();
                 let mut pass_nonnullable_rels =
                     find_nonnullable_rels(mcx, qual_as_expr(&f.quals))?;
                 pass_nonnullable_rels =
@@ -438,10 +438,7 @@ fn reduce_outer_joins_pass2<'mcx>(
 
             // And recurse --- but only into interesting subtrees. Mutate the
             // fromlist children in place; the state1 sub_states are aligned.
-            let f = match jtnode {
-                Node::FromExpr(f) => f,
-                _ => unreachable!(),
-            };
+            let f = jtnode.as_fromexpr_mut().unwrap();
             debug_assert_eq!(f.fromlist.len(), state1.sub_states.len());
             for (l, sub_state) in f.fromlist.iter_mut().zip(state1.sub_states.iter()) {
                 if sub_state.contains_outer {
@@ -460,7 +457,7 @@ fn reduce_outer_joins_pass2<'mcx>(
             let _ = pass_nonnullable_rels.take();
             // can't so easily clean up var lists, unfortunately
         }
-        Node::JoinExpr(_) => {
+        ntag::T_JoinExpr => {
             reduce_outer_joins_pass2_joinexpr(
                 mcx,
                 jtnode,
@@ -489,14 +486,8 @@ fn reduce_outer_joins_pass2_joinexpr<'mcx>(
     nonnullable_rels: Option<&Bitmapset>,
     forced_null_vars: &MultiBitmapset<'mcx>,
 ) -> PgResult<()> {
-    let rtindex = match jtnode {
-        Node::JoinExpr(j) => j.rtindex,
-        _ => unreachable!(),
-    };
-    let orig_jointype = match jtnode {
-        Node::JoinExpr(j) => j.jointype,
-        _ => unreachable!(),
-    };
+    let rtindex = jtnode.as_joinexpr().unwrap().rtindex;
+    let orig_jointype = jtnode.as_joinexpr().unwrap().jointype;
     let mut jointype = orig_jointype;
 
     // left_state / right_state, tracked by index so they can be swapped on
@@ -550,7 +541,7 @@ fn reduce_outer_joins_pass2_joinexpr<'mcx>(
     // internal ordering of any CoalesceExpr's built to represent merged join
     // variables. We don't care about that at present, but be wary of it ...
     if jointype == JoinType::JOIN_RIGHT {
-        if let Node::JoinExpr(j) = jtnode {
+        if let Some(j) = jtnode.as_joinexpr_mut() {
             let tmparg = j.larg.take();
             j.larg = j.rarg.take();
             j.rarg = tmparg;
@@ -565,10 +556,7 @@ fn reduce_outer_joins_pass2_joinexpr<'mcx>(
     // qual levels.
     if jointype == JoinType::JOIN_LEFT {
         let nonnullable_vars = {
-            let j_quals = match jtnode {
-                Node::JoinExpr(j) => &j.quals,
-                _ => unreachable!(),
-            };
+            let j_quals = &jtnode.as_joinexpr().unwrap().quals;
             // Find Vars in j->quals that must be non-null in joined rows.
             find_nonnullable_vars(mcx, qual_as_expr(j_quals))?
         };
@@ -596,7 +584,7 @@ fn reduce_outer_joins_pass2_joinexpr<'mcx>(
             );
         }
     }
-    if let Node::JoinExpr(j) = jtnode {
+    if let Some(j) = jtnode.as_joinexpr_mut() {
         j.jointype = jointype;
     }
 
@@ -619,10 +607,7 @@ fn reduce_outer_joins_pass2_joinexpr<'mcx>(
             // immutable borrow of the JoinExpr (no clone needed; the children
             // aren't touched here).
             let (mut lnn, mut lfn) = {
-                let j_quals = match jtnode {
-                    Node::JoinExpr(j) => &j.quals,
-                    _ => unreachable!(),
-                };
+                let j_quals = &jtnode.as_joinexpr().unwrap().quals;
                 (
                     find_nonnullable_rels(mcx, qual_as_expr(j_quals))?,
                     find_forced_null_vars(mcx, qual_as_expr(j_quals))?,
@@ -660,10 +645,7 @@ fn reduce_outer_joins_pass2_joinexpr<'mcx>(
             };
             // Recurse into j->larg (after any JOIN_RIGHT swap above, larg holds
             // the node aligned with left_state).
-            let mut larg = match jtnode {
-                Node::JoinExpr(j) => j.larg.take(),
-                _ => unreachable!(),
-            };
+            let mut larg = jtnode.as_joinexpr_mut().unwrap().larg.take();
             if let Some(child) = larg.as_deref_mut() {
                 reduce_outer_joins_pass2(
                     mcx,
@@ -675,7 +657,7 @@ fn reduce_outer_joins_pass2_joinexpr<'mcx>(
                     pass_forced_null_vars,
                 )?;
             }
-            if let Node::JoinExpr(j) = jtnode {
+            if let Some(j) = jtnode.as_joinexpr_mut() {
                 j.larg = larg;
             }
         }
@@ -692,10 +674,7 @@ fn reduce_outer_joins_pass2_joinexpr<'mcx>(
                 // no constraints pass through JOIN_FULL
                 (None, &empty_fnv)
             };
-            let mut rarg = match jtnode {
-                Node::JoinExpr(j) => j.rarg.take(),
-                _ => unreachable!(),
-            };
+            let mut rarg = jtnode.as_joinexpr_mut().unwrap().rarg.take();
             if let Some(child) = rarg.as_deref_mut() {
                 reduce_outer_joins_pass2(
                     mcx,
@@ -707,7 +686,7 @@ fn reduce_outer_joins_pass2_joinexpr<'mcx>(
                     pass_forced_null_vars,
                 )?;
             }
-            if let Node::JoinExpr(j) = jtnode {
+            if let Some(j) = jtnode.as_joinexpr_mut() {
                 j.rarg = rarg;
             }
         }

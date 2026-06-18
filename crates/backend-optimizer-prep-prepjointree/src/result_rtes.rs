@@ -45,9 +45,9 @@ use types_error::PgResult;
 use types_nodes::bitmapset::Bitmapset;
 use types_nodes::copy_query::Query;
 use types_nodes::jointype::JoinType;
-use types_nodes::nodes::{Node, NodePtr};
+use types_nodes::nodes::{ntag, Node, NodePtr};
 use types_nodes::parsenodes::RTEKind;
-use types_nodes::primnodes::{Expr, ExprRelids};
+use types_nodes::primnodes::ExprRelids;
 use types_pathnodes::{NodeId, PlannerInfo};
 
 /// C `Relids` = `Bitmapset *`: the `'mcx`-arena relid set (NULL/empty = `None`).
@@ -126,9 +126,9 @@ pub fn remove_useless_result_rtes<'mcx>(
         &mut dropped_outer_joins,
         true,
     )?;
-    let f = match new_top {
-        Node::FromExpr(f) => f,
-        _ => panic!("remove_useless_result_rtes: top jointree node is no longer a FromExpr"),
+    let f = match new_top.into_fromexpr() {
+        Some(f) => f,
+        None => panic!("remove_useless_result_rtes: top jointree node is no longer a FromExpr"),
     };
     parse.jointree = Some(mcx::alloc_in(mcx, f)?);
 
@@ -184,12 +184,12 @@ fn remove_useless_results_recurse<'mcx>(
     dropped_outer_joins: &mut Relids<'mcx>,
     is_top: bool,
 ) -> PgResult<Node<'mcx>> {
-    match jtnode {
-        Node::RangeTblRef(_) => {
+    match jtnode.node_tag() {
+        ntag::T_RangeTblRef => {
             // Can't immediately do anything with a RangeTblRef.
             Ok(jtnode)
         }
-        Node::FromExpr(_) => remove_useless_results_recurse_fromexpr(
+        ntag::T_FromExpr => remove_useless_results_recurse_fromexpr(
             mcx,
             root,
             parse,
@@ -198,7 +198,7 @@ fn remove_useless_results_recurse<'mcx>(
             dropped_outer_joins,
             is_top,
         ),
-        Node::JoinExpr(_) => remove_useless_results_recurse_joinexpr(
+        ntag::T_JoinExpr => remove_useless_results_recurse_joinexpr(
             mcx,
             root,
             parse,
@@ -223,10 +223,7 @@ fn remove_useless_results_recurse_fromexpr<'mcx>(
 ) -> PgResult<Node<'mcx>> {
     let mut result_relids: Relids = None;
 
-    let mut f = match jtnode {
-        Node::FromExpr(f) => f,
-        _ => unreachable!(),
-    };
+    let mut f = jtnode.into_fromexpr().unwrap();
 
     // We can drop RTE_RESULT rels from the fromlist so long as at least one
     // child remains, since joining to a one-row table changes nothing. (But we
@@ -302,10 +299,7 @@ fn remove_useless_results_recurse_joinexpr<'mcx>(
     mut parent_quals: Option<&mut Option<NodePtr<'mcx>>>,
     dropped_outer_joins: &mut Relids<'mcx>,
 ) -> PgResult<Node<'mcx>> {
-    let mut j = match jtnode {
-        Node::JoinExpr(j) => j,
-        _ => unreachable!(),
-    };
+    let mut j = jtnode.into_joinexpr().unwrap();
     let jointype = j.jointype;
 
     // First, recurse into larg. INNER absorbs child quals into this node; LEFT
@@ -454,10 +448,7 @@ fn remove_useless_results_recurse_joinexpr<'mcx>(
 /// `&mut JoinExpr` view of a `Node::JoinExpr`.
 #[inline]
 fn as_joinexpr_mut<'a, 'mcx>(n: &'a mut Node<'mcx>) -> &'a mut types_nodes::rawnodes::JoinExpr<'mcx> {
-    match n {
-        Node::JoinExpr(j) => j,
-        _ => unreachable!("expected JoinExpr"),
-    }
+    n.as_joinexpr_mut().unwrap_or_else(|| unreachable!("expected JoinExpr"))
 }
 
 /// The shared INNER/SEMI "collapse to the surviving side" tail (the C
@@ -497,9 +488,9 @@ fn inner_collapse<'mcx>(
 /// `get_result_relid(root, jtnode)` (prepjointree.c:3936). If `jtnode` is a
 /// `RangeTblRef` for an `RTE_RESULT` RTE, return its relid; otherwise 0.
 fn get_result_relid(_root: &PlannerInfo, parse: &Query, jtnode: &Node) -> i32 {
-    let varno = match jtnode {
-        Node::RangeTblRef(r) => r.rtindex,
-        _ => return 0,
+    let varno = match jtnode.as_rangetblref() {
+        Some(r) => r.rtindex,
+        None => return 0,
     };
     if parse.rtable[(varno - 1) as usize].rtekind != RTEKind::RTE_RESULT {
         return 0;
@@ -563,8 +554,9 @@ struct FindDependentPhvsContext {
 
 /// `find_dependent_phvs_walker` (prepjointree.c:4009).
 fn find_dependent_phvs_walker(node: &Node, context: &mut FindDependentPhvsContext) -> bool {
-    match node {
-        Node::Expr(Expr::PlaceHolderVar(phv)) => {
+    match node.node_tag() {
+        ntag::T_PlaceHolderVar => {
+            let phv = node.expect_placeholdervar();
             if phv.phlevelsup as i32 == context.sublevels_up
                 && expr_relids_is_singleton(&phv.phrels, context.varno)
             {
@@ -573,7 +565,8 @@ fn find_dependent_phvs_walker(node: &Node, context: &mut FindDependentPhvsContex
             // fall through to examine children
             expression_tree_walker(node, &mut |n| find_dependent_phvs_walker(n, context))
         }
-        Node::Query(q) => {
+        ntag::T_Query => {
+            let q = node.expect_query();
             context.sublevels_up += 1;
             let result =
                 query_tree_walker(q, &mut |n| find_dependent_phvs_walker(n, context), 0);
@@ -747,8 +740,9 @@ struct SubstitutePhvRelidsContext<'a> {
 /// `substitute_phv_relids_walker` (prepjointree.c:4117). Modifies PHV nodes in
 /// place (the C "cheat and modify in-place" mutator).
 fn substitute_phv_relids_walker(node: &mut Node, context: &mut SubstitutePhvRelidsContext) -> bool {
-    match node {
-        Node::Expr(Expr::PlaceHolderVar(phv)) => {
+    match node.node_tag() {
+        ntag::T_PlaceHolderVar => {
+            let phv = node.as_placeholdervar_mut().unwrap();
             if phv.phlevelsup as i32 == context.sublevels_up
                 && expr_relids_is_member(&phv.phrels, context.varno)
             {
@@ -760,7 +754,8 @@ fn substitute_phv_relids_walker(node: &mut Node, context: &mut SubstitutePhvReli
             // fall through to examine children
             expression_tree_walker_mut(node, &mut |n| substitute_phv_relids_walker(n, context))
         }
-        Node::Query(q) => {
+        ntag::T_Query => {
+            let q = node.as_query_mut().unwrap();
             context.sublevels_up += 1;
             let result =
                 query_tree_mutator(q, &mut |n| substitute_phv_relids_walker(n, context), 0);
@@ -856,10 +851,11 @@ pub fn get_relids_in_jointree<'mcx>(
     include_outer_joins: bool,
     include_inner_joins: bool,
 ) -> PgResult<Option<PgBox<'mcx, Bitmapset<'mcx>>>> {
-    match jtnode {
-        Node::RangeTblRef(r) => Ok(Some(bms_make_singleton(mcx, r.rtindex)?)),
-        Node::FromExpr(f) => get_relids_in_fromexpr(mcx, f, include_outer_joins, include_inner_joins),
-        Node::JoinExpr(j) => {
+    match jtnode.node_tag() {
+        ntag::T_RangeTblRef => Ok(Some(bms_make_singleton(mcx, jtnode.expect_rangetblref().rtindex)?)),
+        ntag::T_FromExpr => get_relids_in_fromexpr(mcx, jtnode.expect_fromexpr(), include_outer_joins, include_inner_joins),
+        ntag::T_JoinExpr => {
+            let j = jtnode.expect_joinexpr();
             let mut result = get_relids_in_jointree(
                 mcx,
                 j.larg.as_deref().expect("JoinExpr with NULL larg"),
@@ -918,15 +914,16 @@ fn find_jointree_node_for_rel<'a, 'mcx>(
         None => return Ok(None),
         Some(n) => n,
     };
-    match jtnode {
-        Node::RangeTblRef(r) => {
-            if relid == r.rtindex {
+    match jtnode.node_tag() {
+        ntag::T_RangeTblRef => {
+            if relid == jtnode.expect_rangetblref().rtindex {
                 Ok(Some(jtnode))
             } else {
                 Ok(None)
             }
         }
-        Node::FromExpr(f) => {
+        ntag::T_FromExpr => {
+            let f = jtnode.expect_fromexpr();
             for l in f.fromlist.iter() {
                 if let Some(found) = find_jointree_node_for_rel(Some(l), relid)? {
                     return Ok(Some(found));
@@ -934,7 +931,8 @@ fn find_jointree_node_for_rel<'a, 'mcx>(
             }
             Ok(None)
         }
-        Node::JoinExpr(j) => {
+        ntag::T_JoinExpr => {
+            let j = jtnode.expect_joinexpr();
             if relid == j.rtindex {
                 return Ok(Some(jtnode));
             }
@@ -1028,15 +1026,16 @@ fn get_nullingrels_recurse<'mcx>(
     upper_nullingrels: Option<&Bitmapset<'mcx>>,
     info: &mut NullingrelInfo<'mcx>,
 ) -> PgResult<()> {
-    match jtnode {
-        Node::RangeTblRef(r) => {
-            let varno = r.rtindex;
+    match jtnode.node_tag() {
+        ntag::T_RangeTblRef => {
+            let varno = jtnode.expect_rangetblref().rtindex;
             debug_assert!(varno > 0 && varno <= info.rtlength);
             info.nullingrels[varno as usize] = clone_relids(mcx, upper_nullingrels)?;
             Ok(())
         }
-        Node::FromExpr(f) => get_nullingrels_recurse_fromexpr(mcx, f, upper_nullingrels, info),
-        Node::JoinExpr(j) => {
+        ntag::T_FromExpr => get_nullingrels_recurse_fromexpr(mcx, jtnode.expect_fromexpr(), upper_nullingrels, info),
+        ntag::T_JoinExpr => {
+            let j = jtnode.expect_joinexpr();
             let larg = j.larg.as_deref().expect("JoinExpr with NULL larg");
             let rarg = j.rarg.as_deref().expect("JoinExpr with NULL rarg");
             match j.jointype {

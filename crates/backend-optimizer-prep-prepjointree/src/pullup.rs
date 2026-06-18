@@ -767,7 +767,7 @@ fn pull_up_simple_subquery<'mcx>(
             if let Some(expr) = subquery.targetList[i].expr.take() {
                 let node = Node::Expr(PgBox::into_inner(expr));
                 let flat = rewritemanip::flatten_join_alias_vars::call(mcx, &query_node, node)?;
-                if let Node::Expr(e) = flat {
+                if let Some(e) = flat.into_expr() {
                     subquery.targetList[i].expr = Some(alloc_in(mcx, e)?);
                 } else {
                     return Err(types_error::PgError::error(
@@ -1544,7 +1544,7 @@ fn eval_const_expressions_in_rtfunc<'mcx>(
     mcx: Mcx<'mcx>,
     func: &mut NodePtr<'mcx>,
 ) -> PgResult<()> {
-    if let Node::RangeTblFunction(rtf) = &mut **func {
+    if let Some(rtf) = func.as_rangetblfunction_mut() {
         if let Some(fe) = rtf.funcexpr.take() {
             // funcexpr is a Node holding an Expr; fold the Expr.
             let node = PgBox::into_inner(fe);
@@ -2155,7 +2155,7 @@ fn is_simple_subquery<'mcx>(
 
     // Don't pull up a subquery with any volatile functions in its targetlist.
     let tlist_node = targetlist_as_node(mcx, &subquery.targetList)?;
-    if let Node::Expr(e) = &tlist_node {
+    if let Some(e) = tlist_node.as_expr() {
         if contain_volatile_functions(Some(e))? {
             return Ok(false);
         }
@@ -2410,7 +2410,7 @@ fn perform_pullup_replace_vars<'mcx>(
         let jt = parse.jointree.take().expect("perform_pullup_replace_vars: no jointree");
         let mut node = Node::FromExpr(PgBox::into_inner(jt));
         replace_vars_in_jointree(mcx, root, parse, &mut node, rvcontext, outer_has_sublinks)?;
-        let jt = if let Node::FromExpr(f) = node {
+        let jt = if let Some(f) = node.into_fromexpr() {
             alloc_in(mcx, f)?
         } else {
             unreachable!("jointree top is a FromExpr");
@@ -2472,7 +2472,7 @@ fn pullup_replace_vars_targetlist<'mcx>(
         if let Some(expr) = tlist[i].expr.take() {
             let node = Node::Expr(PgBox::into_inner(expr));
             let newnode = pullup_replace_vars(mcx, root, node, rvcontext, outer_has_sublinks)?;
-            if let Node::Expr(e) = newnode {
+            if let Some(e) = newnode.into_expr() {
                 tlist[i].expr = Some(alloc_in(mcx, e)?);
             } else {
                 return Err(types_error::PgError::error(
@@ -2594,7 +2594,7 @@ fn replace_vars_in_translated_vars<'mcx>(
         let expr = root.node(id).clone_in(mcx)?;
         let newnode =
             pullup_replace_vars(mcx, root, Node::Expr(expr), rvcontext, outer_has_sublinks)?;
-        if let Node::Expr(e) = newnode {
+        if let Some(e) = newnode.into_expr() {
             *root.node_mut(id) = e;
         } else {
             return Err(types_error::PgError::error(
@@ -2867,7 +2867,7 @@ fn pullup_replace_vars_callback<'mcx>(
                 newnode = Node::Expr(Expr::PlaceHolderVar(phv));
                 // Cache it if possible.
                 if varattno >= types_core::primitive::InvalidAttrNumber && varattno <= tlist_len {
-                    if let Node::Expr(e) = &newnode {
+                    if let Some(e) = newnode.as_expr() {
                         rcon.rv_cache[varattno as usize] = Some(e.clone_in(mcx)?);
                     }
                 }
@@ -2966,7 +2966,7 @@ fn compute_wrap<'mcx>(
 
     // Simple level-zero Var: escapes wrapping unless it's a lateral reference
     // outside the subquery and not under the same lowest nulling outer join.
-    if let Node::Expr(Expr::Var(newvar)) = newnode {
+    if let Some(newvar) = newnode.as_var() {
         if newvar.varlevelsup == 0 {
             if rcon.target_rte.lateral
                 && !bms_is_member(newvar.varno, rcon.relids.as_deref())
@@ -2989,7 +2989,7 @@ fn compute_wrap<'mcx>(
     }
 
     // Same rules for a level-zero PlaceHolderVar.
-    if let Node::Expr(Expr::PlaceHolderVar(newphv)) = newnode {
+    if let Some(newphv) = newnode.as_placeholdervar() {
         if newphv.phlevelsup == 0 {
             if rcon.target_rte.lateral
                 && !expr_relids_subset_of_bms(&newphv.phrels, rcon.relids.as_deref())
@@ -3127,7 +3127,7 @@ fn offset_var_nodes_in_query<'mcx>(
     let node = core::mem::replace(subquery, Query::new(mcx));
     let mut qnode = Node::Query(node);
     OffsetVarNodes(&mut qnode, offset, sublevels_up);
-    if let Node::Query(q) = qnode {
+    if let Some(q) = qnode.into_query() {
         *subquery = q;
     } else {
         unreachable!();
@@ -3144,7 +3144,7 @@ fn increment_var_sublevels_up_in_query<'mcx>(
     let node = core::mem::replace(subquery, Query::new(mcx));
     let mut qnode = Node::Query(node);
     let res = IncrementVarSublevelsUp(&mut qnode, delta, min_sublevels_up);
-    if let Node::Query(q) = qnode {
+    if let Some(q) = qnode.into_query() {
         *subquery = q;
     } else {
         unreachable!();
@@ -3166,7 +3166,7 @@ fn offset_var_nodes_in_append_rel_list(subroot: &mut PlannerInfo, offset: i32, s
     for id in ids {
         let mut node = Node::Expr(subroot.node(id).clone());
         OffsetVarNodes(&mut node, offset, sublevels_up);
-        if let Node::Expr(e) = node {
+        if let Some(e) = node.into_expr() {
             *subroot.node_mut(id) = e;
         }
     }
@@ -3193,7 +3193,7 @@ fn increment_var_sublevels_up_in_append_rel_list(
     for id in ids {
         let mut node = Node::Expr(subroot.node(id).clone());
         IncrementVarSublevelsUp(&mut node, delta, min_sublevels_up)?;
-        if let Node::Expr(e) = node {
+        if let Some(e) = node.into_expr() {
             *subroot.node_mut(id) = e;
         }
     }
