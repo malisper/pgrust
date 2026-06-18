@@ -69,7 +69,7 @@ use types_nodes::nodeforeigncustom::Material as MaterialNode;
 use types_nodes::nodesort::Sort;
 use types_nodes::nodelimit::Limit as LimitNode;
 use types_nodes::nodeprojectset::ProjectSet as ProjectSetNode;
-use types_nodes::nodes::{Node, NodeTag};
+use types_nodes::nodes::{ntag, Node, NodeTag};
 use types_nodes::nodectescan::CteScan;
 use types_nodes::nodefunctionscan::FunctionScan;
 use types_nodes::nodeindexscan::{SubqueryScan, SubqueryScanStatus, TidScan};
@@ -997,7 +997,7 @@ pub fn create_plan<'mcx>(
     // don't bother with that, but we must have it on the top-level tlist seen at
     // execution time. However, ModifyTable plan nodes don't have a tlist
     // matching the querytree targetlist.
-    if !matches!(plan, Node::ModifyTable(_)) {
+    if !plan.is_modifytable() {
         cp_seam::apply_tlist_labeling::call(mcx, root, &mut plan)?;
     }
 
@@ -1770,23 +1770,19 @@ fn create_valuesscan_plan<'mcx>(
         vec_with_capacity_in(mcx, rte.values_lists.len())?;
     for row_node in rte.values_lists.iter() {
         // Each element of values_lists is a List node of column expressions.
-        let cols = match &**row_node {
-            Node::List(list) => list,
-            _ => {
-                return Err(PgError::error(
-                    "create_valuesscan_plan: RTE values_lists element is not a List",
-                ))
-            }
+        let Some(cols) = (**row_node).as_list() else {
+            return Err(PgError::error(
+                "create_valuesscan_plan: RTE values_lists element is not a List",
+            ));
         };
         let mut row: PgVec<'mcx, Expr> = vec_with_capacity_in(mcx, cols.len())?;
         for col in cols.iter() {
-            match &**col {
-                Node::Expr(e) => row.push(e.clone()),
-                _ => {
-                    return Err(PgError::error(
-                        "create_valuesscan_plan: VALUES column is not an expression",
-                    ))
-                }
+            if let Some(e) = (**col).as_expr() {
+                row.push(e.clone());
+            } else {
+                return Err(PgError::error(
+                    "create_valuesscan_plan: VALUES column is not an expression",
+                ));
             }
         }
         values_lists.push(row);
@@ -2115,13 +2111,12 @@ fn create_samplescan_plan<'mcx>(
         .tablesample
         .as_deref()
         .expect("create_samplescan_plan: RTE has no tablesample clause");
-    let mut tsc: TableSampleClause<'mcx> = match tsc_node {
-        Node::TableSampleClause(t) => t.clone_in(mcx)?,
-        _ => {
-            return Err(PgError::error(
-                "create_samplescan_plan: RTE tablesample is not a TableSampleClause",
-            ))
-        }
+    let mut tsc: TableSampleClause<'mcx> = if let Some(t) = tsc_node.as_tablesampleclause() {
+        t.clone_in(mcx)?
+    } else {
+        return Err(PgError::error(
+            "create_samplescan_plan: RTE tablesample is not a TableSampleClause",
+        ));
     };
 
     let has_param_info = root.path(best_path).base().param_info.is_some();
@@ -2439,13 +2434,12 @@ fn create_functionscan_plan<'mcx>(
     // owned RangeTblFunction.
     let mut functions: Vec<RangeTblFunction<'mcx>> = Vec::with_capacity(rte.functions.len());
     for f in rte.functions.iter() {
-        match &**f {
-            Node::RangeTblFunction(rtf) => functions.push(rtf.clone_in(mcx)?),
-            _ => {
-                return Err(PgError::error(
-                    "create_functionscan_plan: RTE functions element is not a RangeTblFunction",
-                ))
-            }
+        if let Some(rtf) = (**f).as_rangetblfunction() {
+            functions.push(rtf.clone_in(mcx)?);
+        } else {
+            return Err(PgError::error(
+                "create_functionscan_plan: RTE functions element is not a RangeTblFunction",
+            ));
         }
     }
 
@@ -2907,26 +2901,29 @@ fn clone_plan_tlist<'mcx>(
 /// `is_projection_capable_plan(plan)` — can the given plan node do projection?
 /// Most plan types can; this lists the ones that can't (read off `nodeTag`).
 fn is_projection_capable_plan(plan: &Node<'_>) -> bool {
-    match plan {
-        Node::Hash(_)
-        | Node::Material(_)
-        | Node::Memoize(_)
-        | Node::Sort(_)
-        | Node::Unique(_)
-        | Node::SetOp(_)
+    match plan.node_tag() {
+        ntag::T_Hash
+        | ntag::T_Material
+        | ntag::T_Memoize
+        | ntag::T_Sort
+        | ntag::T_Unique
+        | ntag::T_SetOp
         // T_LockRows: has no `Node` arm yet (LockRows plan node unported); it
         // can't be constructed, so it never reaches here. When the arm lands it
         // must be added to this not-projection-capable list.
-        | Node::Limit(_)
-        | Node::ModifyTable(_)
-        | Node::Append(_)
-        | Node::MergeAppend(_)
-        | Node::RecursiveUnion(_) => false,
+        | ntag::T_Limit
+        | ntag::T_ModifyTable
+        | ntag::T_Append
+        | ntag::T_MergeAppend
+        | ntag::T_RecursiveUnion => false,
         // CustomScan can project iff it advertises CUSTOMPATH_SUPPORT_PROJECTION.
-        Node::CustomScan(cs) => cs.flags & types_pathnodes::CUSTOMPATH_SUPPORT_PROJECTION != 0,
+        ntag::T_CustomScan => {
+            let cs = plan.expect_customscan();
+            cs.flags & types_pathnodes::CUSTOMPATH_SUPPORT_PROJECTION != 0
+        }
         // ProjectSet projects, but say "no" so the planner won't replace its
         // tlist; the SRFs have to stay at top level.
-        Node::ProjectSet(_) => false,
+        ntag::T_ProjectSet => false,
         _ => true,
     }
 }
@@ -5546,12 +5543,12 @@ fn mark_async_capable_plan(root: &PlannerInfo, plan: &mut Node<'_>, path: PathId
             let subpath = p.subpath;
             // If the generated plan node includes a gating Result node, we
             // can't execute it asynchronously.
-            if matches!(plan, Node::Result(_)) {
+            if plan.is_result() {
                 return false;
             }
             // If a SubqueryScan node atop of an async-capable plan node is
             // deletable, consider it as async-capable.
-            let Node::SubqueryScan(scan_plan) = plan else {
+            let Some(scan_plan) = plan.as_subqueryscan_mut() else {
                 return false;
             };
             if !trivial_subqueryscan(scan_plan) {
@@ -5570,7 +5567,7 @@ fn mark_async_capable_plan(root: &PlannerInfo, plan: &mut Node<'_>, path: PathId
         PathNode::ForeignPath(_) => {
             // If the generated plan node includes a gating Result node, we
             // can't execute it asynchronously.
-            if matches!(plan, Node::Result(_)) {
+            if plan.is_result() {
                 return false;
             }
             // fdwroutine->IsForeignPathAsyncCapable is an FDW callback not
@@ -5582,7 +5579,7 @@ fn mark_async_capable_plan(root: &PlannerInfo, plan: &mut Node<'_>, path: PathId
             let subpath = p.subpath;
             // If the generated plan node includes a Result node for the
             // projection, we can't execute it asynchronously.
-            if matches!(plan, Node::Result(_)) {
+            if plan.is_result() {
                 return false;
             }
             // create_projection_plan() would have pulled up the subplan, so
@@ -5734,10 +5731,9 @@ fn create_append_plan<'mcx>(
 
     // Fill the Append's child / async / partial fields and finalize costs.
     {
-        let append = match &mut append_node {
-            Node::Append(a) => a,
-            _ => unreachable!("append_node is not an Append"),
-        };
+        let append = append_node
+            .as_append_mut()
+            .unwrap_or_else(|| unreachable!("append_node is not an Append"));
         append.appendplans = subplans;
         append.nasyncplans = nasyncplans;
         append.first_partial_plan = first_partial_path;
@@ -5859,10 +5855,9 @@ fn create_merge_append_plan<'mcx>(
 
     // Finalize the MergeAppend node fields.
     {
-        let node = match &mut ma_node {
-            Node::MergeAppend(n) => n,
-            _ => unreachable!("ma_node is not a MergeAppend"),
-        };
+        let node = ma_node
+            .as_mergeappend_mut()
+            .unwrap_or_else(|| unreachable!("ma_node is not a MergeAppend"));
         node.numCols = num_cols;
         node.sortColIdx = node_sort_col_idx.iter().copied().collect();
         node.sortOperators = node_sort_operators.iter().copied().collect();
