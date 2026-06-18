@@ -145,9 +145,9 @@ fn MJExamineQuals<'mcx>(
     for i_clause in 0..n_clauses {
         // OpExpr *qual = (OpExpr *) lfirst(cl);
         // if (!IsA(qual, OpExpr)) elog(ERROR, "mergejoin clause is not an OpExpr");
-        let qual = match &node.mergeclauses[i_clause] {
-            Expr::OpExpr(op) => op,
-            _ => return Err(elog("mergejoin clause is not an OpExpr".into())),
+        let qual = match node.mergeclauses[i_clause].as_opexpr() {
+            Some(op) => op,
+            None => return Err(elog("mergejoin clause is not an OpExpr".into())),
         };
 
         let opfamily = node.mergeFamilies[i_clause];
@@ -570,9 +570,9 @@ fn check_constant_qual(qual: Option<&[Expr]>, is_const_false: &mut bool) -> bool
     for cell in qual {
         // Const *con = (Const *) lfirst(lc);
         // if (!con || !IsA(con, Const)) return false;
-        let con = match cell {
-            Expr::Const(c) => c,
-            _ => return false,
+        let con = match cell.as_const() {
+            Some(c) => c,
+            None => return false,
         };
         // if (con->constisnull || !DatumGetBool(con->constvalue)) *is_const_false = true;
         if con.constisnull || !con.constvalue.as_bool() {
