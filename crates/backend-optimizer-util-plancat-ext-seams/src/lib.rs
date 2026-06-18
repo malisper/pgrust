@@ -82,6 +82,8 @@ pub struct IndexCatInfo {
     pub indkey: Vec<i32>,
     /// `index->indisunique`.
     pub indisunique: bool,
+    /// `index->indisexclusion`.
+    pub indisexclusion: bool,
     /// `index->indnullsnotdistinct`.
     pub indnullsnotdistinct: bool,
     /// `index->indimmediate`.
@@ -533,8 +535,15 @@ pub struct InferIndexInfo {
 
 seam_core::seam!(
     /// `root->parse->onConflict` (`infer_arbiter_indexes`). `None` when the
-    /// query has no `ON CONFLICT` clause.
-    pub fn parse_onconflict(root: &PlannerInfo) -> Option<OnConflictInfo>
+    /// query has no `ON CONFLICT` clause. Resolves the owned `OnConflictExpr`
+    /// through the planner-run query store (`run.resolve(root.parse)`) and interns
+    /// the arbiter element / arbiter-WHERE sub-trees into `root`'s node arena, so
+    /// the returned [`InferenceElemInfo::expr`] / [`OnConflictInfo::arbiter_where`]
+    /// are arena [`NodeId`] handles the consumer reads via `root.node(..)`.
+    pub fn parse_onconflict<'mcx>(
+        run: &PlannerRun<'mcx>,
+        root: &mut PlannerInfo,
+    ) -> PgResult<Option<OnConflictInfo>>
 );
 seam_core::seam!(
     /// `root->parse->resultRelation` (parsetree) — the result RT index. Resolved
@@ -544,8 +553,10 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `root->simple_rte_array[rti]->rellockmode` (rte) — the lock mode for the
-    /// RTE at the given RT index.
-    pub fn rte_rellockmode(root: &PlannerInfo, rti: Index) -> i32
+    /// RTE at the given RT index. Resolved through the planner-run RTE store
+    /// (`planner_rt_fetch(run, root, rti)`) exactly as the other `rte_*`
+    /// projections are.
+    pub fn rte_rellockmode<'mcx>(run: &PlannerRun<'mcx>, root: &PlannerInfo, rti: Index) -> i32
 );
 seam_core::seam!(
     /// `RelationGetIndexList(relation)` returned as a lifetime-free `Vec<Oid>`

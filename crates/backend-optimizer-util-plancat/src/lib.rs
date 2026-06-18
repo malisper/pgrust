@@ -632,7 +632,7 @@ pub fn infer_arbiter_indexes<'mcx>(
 
     // Quickly return NIL for ON CONFLICT DO NOTHING without an inference spec or
     // named constraint.
-    let onconflict = ext::parse_onconflict::call(root);
+    let onconflict = ext::parse_onconflict::call(run, root)?;
     let onconflict = match onconflict {
         Some(oc) => oc,
         None => return Ok(Vec::new()),
@@ -643,7 +643,7 @@ pub fn infer_arbiter_indexes<'mcx>(
 
     let varno = ext::parse_result_relation::call(run, root) as Index;
     let relid = rte::rte_relid::call(run, root, varno);
-    let rellockmode = ext::rte_rellockmode::call(root, varno);
+    let rellockmode = ext::rte_rellockmode::call(run, root, varno);
 
     // Build normalized/BMS representation of plain indexed attributes plus a
     // separate list of expression items.

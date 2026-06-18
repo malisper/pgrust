@@ -118,6 +118,10 @@ backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 # number (parallel-rt). Each panics until its owner installs the seam.
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
 backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
+# infer_arbiter_indexes' `infer_collation_opclass_match` looks up the specified
+# opclass's opfamily / input type (lsyscache get_opclass_*) when matching index
+# attribute opclass/collation.
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }
 backend-utils-cache-inval-seams = { path = "../backend-utils-cache-inval-seams" }
 backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }

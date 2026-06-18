@@ -43,6 +43,13 @@ backend-optimizer-util-relnode-ext-seams = { path = "../backend-optimizer-util-r
 backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
 backend-optimizer-path-costsize = { path = "../backend-optimizer-path-costsize" }
 types-nodes = { path = "../types-nodes" }
+types-error = { path = "../types-error" }
+# infer_arbiter_indexes' `parse_onconflict` flattens the arbiter-WHERE inference
+# predicate to the implicit-AND `List` via make_ands_implicit before interning.
+backend-nodes-core = { path = "../backend-nodes-core" }
+# infer_arbiter_indexes' `node_equal` resolves two arena handles and delegates to
+# equalfuncs' `equal_expr`.
+backend-nodes-equalfuncs-seams = { path = "../backend-nodes-equalfuncs-seams" }
 
 [dev-dependencies]
 # Needed by the synthetic fixture's tests to build an (empty) PlannerRun in an

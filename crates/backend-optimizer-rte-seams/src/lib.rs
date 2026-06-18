@@ -384,7 +384,127 @@ pub fn init_seams() {
     backend_optimizer_util_plancat_ext_seams::parse_result_relation::set(|run, root| {
         run.resolve(root.parse).resultRelation
     });
+
+    // `root->simple_rte_array[varno]->rellockmode` (infer_arbiter_indexes) —
+    // resolved through the same `planner_rt_fetch` RTE store as the other rte_*
+    // projections. The field is `LOCKMODE` (i32).
+    backend_optimizer_util_plancat_ext_seams::rte_rellockmode::set(|run, root, rti| {
+        planner_rt_fetch(run, root, rti).rellockmode as i32
+    });
+
+    // `root->parse->onConflict` (infer_arbiter_indexes). Resolves the owned
+    // `OnConflictExpr` and interns its arbiter sub-trees into `root`'s node arena
+    // (the consumer reads `elem.expr` / `arbiter_where` via `root.node(..)`).
+    backend_optimizer_util_plancat_ext_seams::parse_onconflict::set(parse_onconflict);
+
+    // `equal(a, b)` over two arena node handles (infer_arbiter_indexes' index-
+    // expression membership tests). Resolve both handles through `root`'s arena
+    // and delegate to equalfuncs' `equal_expr`.
+    backend_optimizer_util_plancat_ext_seams::node_equal::set(|root, a, b| {
+        backend_nodes_equalfuncs_seams::equal_expr::call(root.node(a), root.node(b))
+    });
+
     parse_rte::set(|_run, root, rti| root.simple_rte_array[rti as usize]);
+}
+
+/// `root->parse->onConflict` for `infer_arbiter_indexes` (plancat.c): build the
+/// [`OnConflictInfo`] the inference loop reads. The owned `OnConflictExpr` lives
+/// on the planner-run query store; each arbiter element's inner inference
+/// expression and each arbiter-WHERE conjunct are deep-copied into `root`'s node
+/// arena so the returned handles resolve through `root.node(..)` like every other
+/// arena node the inference loop walks (Var detection, `ChangeVarNodes`,
+/// `predicate_implied_by`).
+fn parse_onconflict<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+) -> types_error::PgResult<
+    Option<backend_optimizer_util_plancat_ext_seams::OnConflictInfo>,
+> {
+    use backend_optimizer_util_plancat_ext_seams::{InferenceElemInfo, OnConflictInfo};
+    use types_nodes::nodes::Node;
+    use types_nodes::primnodes::Expr;
+
+    let mcx = run.mcx();
+
+    // Snapshot the parts we need out of the owned OnConflictExpr (an immutable
+    // borrow of the run store); the arena interning below borrows `root` mutably,
+    // so collect the cloned Exprs / collation/opclass scalars first.
+    let snapshot: Option<(Vec<(Expr, types_core::primitive::Oid, types_core::primitive::Oid)>, Vec<Expr>, types_core::primitive::Oid, bool)> = {
+        let parse = run.resolve(root.parse);
+        match parse.onConflict.as_deref() {
+            None => None,
+            Some(oc) => {
+                // Each arbiterElem is an InferenceElem wrapping the inference
+                // expression; clone the inner Expr (the Var / expression the loop
+                // examines) plus its collation/opclass.
+                let mut elems: Vec<(Expr, types_core::primitive::Oid, types_core::primitive::Oid)> =
+                    Vec::with_capacity(oc.arbiterElems.len());
+                for np in oc.arbiterElems.iter() {
+                    let infer = match &**np {
+                        Node::Expr(Expr::InferenceElem(ie)) => ie,
+                        other => {
+                            return Err(types_error::PgError::error(format!(
+                                "arbiterElems element is not an InferenceElem (got {:?})",
+                                other.tag()
+                            )));
+                        }
+                    };
+                    let inner = infer.expr.as_deref().ok_or_else(|| {
+                        types_error::PgError::error(
+                            "InferenceElem with NULL expr (parser bug)",
+                        )
+                    })?;
+                    elems.push((inner.clone_in(mcx)?, infer.infercollid, infer.inferopclass));
+                }
+
+                // arbiterWhere is the (optional) inference-clause predicate; the C
+                // consumer reads it as the implicit-AND `List`. Flatten with
+                // make_ands_implicit, cloning each conjunct into mcx.
+                let arbiter_where: Vec<Expr> = match oc.arbiterWhere.as_deref() {
+                    None => Vec::new(),
+                    Some(Node::Expr(e)) => {
+                        let cloned = e.clone_in(mcx)?;
+                        backend_nodes_core::makefuncs::make_ands_implicit(Some(cloned))
+                    }
+                    Some(other) => {
+                        return Err(types_error::PgError::error(format!(
+                            "OnConflict arbiterWhere is not an Expr (got {:?})",
+                            other.tag()
+                        )));
+                    }
+                };
+
+                let action_is_update =
+                    oc.action == types_nodes::nodes::OnConflictAction::ONCONFLICT_UPDATE;
+                Some((elems, arbiter_where, oc.constraint, action_is_update))
+            }
+        }
+    };
+
+    let (elems, arbiter_where, constraint, action_is_update) = match snapshot {
+        None => return Ok(None),
+        Some(s) => s,
+    };
+
+    let arbiter_elems: Vec<InferenceElemInfo> = elems
+        .into_iter()
+        .map(|(expr, infercollid, inferopclass)| InferenceElemInfo {
+            expr: root.alloc_node(expr),
+            infercollid,
+            inferopclass,
+        })
+        .collect();
+    let arbiter_where: Vec<types_pathnodes::NodeId> = arbiter_where
+        .into_iter()
+        .map(|e| root.alloc_node(e))
+        .collect();
+
+    Ok(Some(OnConflictInfo {
+        arbiter_elems,
+        constraint,
+        action_is_update,
+        arbiter_where,
+    }))
 }
 
 extern crate alloc;

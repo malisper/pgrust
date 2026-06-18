@@ -44,6 +44,180 @@ pub fn init_seams() {
     px::get_check_constraints::set(get_check_constraints);
     px::relation_has_row_triggers::set(relation_has_row_triggers);
     px::relation_has_transition_tables::set(relation_has_transition_tables);
+    px::get_infer_index_info::set(get_infer_index_info);
+    px::infer_collation_opclass_match::set(infer_collation_opclass_match);
+}
+
+/// `index_open(indexoid, rellockmode)` + the `idxForm`/expression/predicate reads
+/// `infer_arbiter_indexes` (plancat.c) needs, with the index left closed at
+/// return. Opens (locks + builds) the index relcache entry, reads the
+/// pg_index-form fields the inference loop examines, and materializes the index
+/// expressions/predicate into `root`'s node arena (empty for a plain or non-
+/// partial index — every catalog and plain-column unique index).
+fn get_infer_index_info(
+    root: &mut types_pathnodes::PlannerInfo,
+    indexoid: Oid,
+    rellockmode: i32,
+) -> PgResult<px::InferIndexInfo> {
+    // `index_open(indexoid, rellockmode)` = lock then build/return the cached
+    // entry; the lock is held to transaction end (the executor needs the same
+    // lock), mirroring get_index_cat_info.
+    if rellockmode != 0 {
+        backend_storage_lmgr_lmgr_seams::lock_relation_oid::call(indexoid, rellockmode)?.keep();
+    }
+    let built = RelationIdGetRelation(indexoid)?;
+    if built == types_core::InvalidOid {
+        return Err(PgError::error(format!(
+            "could not open index with OID {indexoid}"
+        )));
+    }
+
+    // pg_index-form fields off the owned entry.
+    let (indexrelid, indisvalid, indisunique, indisexclusion, indnkeyatts, indkey) =
+        with_relation(indexoid, |rd| {
+            let index = rd.rd_index.as_ref().ok_or_else(|| {
+                PgError::error(format!("relation {indexoid} is not an index"))
+            })?;
+            Ok::<_, PgError>((
+                index.indexrelid,
+                index.indisvalid,
+                index.indisunique,
+                index.indisexclusion,
+                index.indnkeyatts as i32,
+                index
+                    .indkey
+                    .iter()
+                    .map(|&k| k as types_core::primitive::AttrNumber)
+                    .collect::<Vec<_>>(),
+            ))
+        })??;
+
+    // `RelationGetIndexExpressions` / `RelationGetIndexPredicate` as arena node
+    // handles. These reuse the same read paths get_index_expressions /
+    // get_index_predicate use: empty for an index with no expression columns /
+    // no partial predicate (the heap_attisnull quick-exits), and a loud "not
+    // modeled" error for the real arena projection of an expression/partial
+    // index — exactly mirroring those seams.
+    let idx_exprs = get_index_expressions(root, indexoid)?;
+    let idx_predicate = get_index_predicate(root, indexoid)?;
+
+    Ok(px::InferIndexInfo {
+        indexrelid,
+        indisvalid,
+        indisunique,
+        indisexclusion,
+        indnkeyatts,
+        indkey,
+        idx_exprs,
+        idx_predicate,
+    })
+}
+
+/// `infer_collation_opclass_match(elem, idxRel, idxExprs)` (plancat.c): when the
+/// inference element specifies a collation or opclass, verify at least one of the
+/// opened index's attributes matches it (opfamily + input type for the opclass,
+/// collation for the collation), and that the matching attribute is the one the
+/// element refers to (the Var's attno, or — for an expression element — the
+/// cataloged index expression by node-equality). Returns true immediately when
+/// the element specifies neither (the common case).
+fn infer_collation_opclass_match(
+    root: &types_pathnodes::PlannerInfo,
+    indexoid: Oid,
+    elem: &px::InferenceElemInfo,
+    idx_exprs: &[types_pathnodes::NodeId],
+) -> PgResult<bool> {
+    use types_nodes::primnodes::Expr;
+
+    // No collation/opclass specified -> no exact match needed.
+    if elem.infercollid == types_core::InvalidOid && elem.inferopclass == types_core::InvalidOid {
+        return Ok(true);
+    }
+
+    // Lookup opfamily and input type for the specified opclass (if any).
+    let (inferopfamily, inferopcinputtype) = if elem.inferopclass != types_core::InvalidOid {
+        (
+            backend_utils_cache_lsyscache_seams::get_opclass_family::call(elem.inferopclass)?,
+            backend_utils_cache_lsyscache_seams::get_opclass_input_type::call(elem.inferopclass)?,
+        )
+    } else {
+        (types_core::InvalidOid, types_core::InvalidOid)
+    };
+
+    let built = RelationIdGetRelation(indexoid)?;
+    if built == types_core::InvalidOid {
+        return Err(PgError::error(format!(
+            "could not open index with OID {indexoid}"
+        )));
+    }
+
+    // Per-attribute opfamily/opcintype/collation + indkey, off the owned entry.
+    let (natts, opfamilies, opcintypes, collations, indkeys) =
+        with_relation(indexoid, |rd| {
+            let index = rd.rd_index.as_ref().ok_or_else(|| {
+                PgError::error(format!("relation {indexoid} is not an index"))
+            })?;
+            Ok::<_, PgError>((
+                rd.rd_att.natts() as usize,
+                rd.rd_opfamily.clone(),
+                rd.rd_opcintype.clone(),
+                rd.rd_indcollation.clone(),
+                index
+                    .indkey
+                    .iter()
+                    .map(|&k| k as i32)
+                    .collect::<Vec<_>>(),
+            ))
+        })??;
+
+    // The inference element's expression, resolved through `root`'s arena (the
+    // same arena `idx_exprs` index into).
+    let elem_expr = root.node(elem.expr);
+    let elem_is_var = matches!(elem_expr, Expr::Var(_));
+    let elem_varattno = match elem_expr {
+        Expr::Var(v) => v.varattno as i32,
+        _ => 0,
+    };
+
+    let mut nplain = 0usize; // # plain attrs observed (C: nplain).
+    for natt in 1..=natts {
+        let opfamily = *opfamilies.get(natt - 1).unwrap_or(&types_core::InvalidOid);
+        let opcinputtype = *opcintypes.get(natt - 1).unwrap_or(&types_core::InvalidOid);
+        let collation = *collations.get(natt - 1).unwrap_or(&types_core::InvalidOid);
+        let attno = *indkeys.get(natt - 1).unwrap_or(&0);
+
+        if attno != 0 {
+            nplain += 1;
+        }
+
+        // Attribute needed to match opclass, but didn't.
+        if elem.inferopclass != types_core::InvalidOid
+            && (inferopfamily != opfamily || inferopcinputtype != opcinputtype)
+        {
+            continue;
+        }
+        // Attribute needed to match collation, but didn't.
+        if elem.infercollid != types_core::InvalidOid && elem.infercollid != collation {
+            continue;
+        }
+
+        // One matching index att found -> good enough.
+        if elem_is_var {
+            if elem_varattno == attno {
+                return Ok(true);
+            }
+        } else if attno == 0 {
+            // Expression column: compare the element expr to the cataloged index
+            // expression at position (natt-1)-nplain by node-equality.
+            let idx_pos = (natt - 1) - nplain;
+            if let Some(&natt_expr) = idx_exprs.get(idx_pos) {
+                if px::node_equal::call(root, elem.expr, natt_expr) {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+
+    Ok(false)
 }
 
 /// `has_row_triggers` (plancat.c): whether the relation has any row-level
@@ -339,6 +513,7 @@ fn build_index_cat_info(rd: &core_entry_store::RelationData) -> PgResult<px::Ind
         indnkeyatts,
         indkey: index.indkey.iter().map(|&k| k as i32).collect(),
         indisunique: index.indisunique,
+        indisexclusion: index.indisexclusion,
         indnullsnotdistinct: index.indnullsnotdistinct,
         indimmediate: index.indimmediate,
         opfamily: rd.rd_opfamily.clone(),
