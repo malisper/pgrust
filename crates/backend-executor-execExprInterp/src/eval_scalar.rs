@@ -1200,32 +1200,68 @@ pub fn ExecEvalSysVar<'mcx>(
     // execTuples.
     use types_nodes::execexpr::{VarReturningType, EEO_FLAG_NEW_IS_NULL, EEO_FLAG_OLD_IS_NULL};
 
-    let varreturningtype = match &step_data(state, op) {
-        ExprEvalStepData::Var { varreturningtype, .. } => *varreturningtype,
+    let (varreturningtype, attnum) = match &step_data(state, op) {
+        ExprEvalStepData::Var { varreturningtype, attnum, .. } => (*varreturningtype, *attnum),
         _ => unreachable!("ExecEvalSysVar: step is not an EEOP_*_SYSVAR"),
     };
+
+    let (resvalue_id, _resnull_id) = res_cells(state, op);
 
     if (varreturningtype == VarReturningType::VAR_RETURNING_OLD
         && (state.flags & EEO_FLAG_OLD_IS_NULL) != 0)
         || (varreturningtype == VarReturningType::VAR_RETURNING_NEW
             && (state.flags & EEO_FLAG_NEW_IS_NULL) != 0)
     {
-        let (resvalue_id, _resnull_id) = res_cells(state, op);
         state
             .result_cells
             .set(resvalue_id, ResultCell { value: DatumV::null(), isnull: true });
         return Ok(());
     }
 
-    let _ = (slot, econtext, estate);
-    panic!(
-        "ExecEvalSysVar: slot_getsysattr(slot, op.d.var.attnum, &isnull) reads a \
-         system column out of the slot's underlying tuple, owned by the unported \
-         execTuples slot-payload model (the trimmed TupleTableSlot has no \
-         tuple/value storage and execTuples-seams has no slot_getsysattr); \
-         blocked until execTuples lands. (The OLD/NEW-is-NULL short-circuit above \
-         is faithful.)"
-    )
+    // d = slot_getsysattr(slot, op->d.var.attnum, op->resnull);
+    //
+    // The slot header carries the two system attributes that do not live in the
+    // physical tuple: `ctid` (SelfItemPointerAttributeNumber -> tts_tid) and
+    // `tableoid` (TableOidAttributeNumber -> tts_tableOid). slot_getsysattr
+    // returns these *before* dispatching to the per-kind getsysattr callback (see
+    // execTuples slot_ops_vtables::slot_getsysattr), so they are reachable from
+    // the pooled TupleTableSlot header without the full payload model. The
+    // remaining system attributes (xmin/xmax/cmin/cmax) require the underlying
+    // physical tuple, which the trimmed pooled slot does not carry — those stay
+    // blocked on the execTuples slot-payload model.
+    let _ = econtext;
+    let mcx = estate.es_query_cxt;
+    let (value, isnull): (DatumV<'mcx>, bool) =
+        if attnum == types_tuple::heaptuple::SelfItemPointerAttributeNumber as i32 {
+            let s = estate.slot_mut(slot);
+            let bytes = backend_access_common_heaptuple::item_pointer_bytes(
+                mcx,
+                &s.tts_tid,
+            )?;
+            (DatumV::ByRef(bytes), false)
+        } else if attnum == types_tuple::heaptuple::TableOidAttributeNumber as i32 {
+            let s = estate.slot_mut(slot);
+            (DatumV::from_oid(s.tts_tableOid), false)
+        } else {
+            panic!(
+                "ExecEvalSysVar: system attribute {attnum} (other than ctid/tableoid) \
+                 must be read from the slot's underlying physical tuple, owned by the \
+                 unported execTuples slot-payload model (the trimmed pooled \
+                 TupleTableSlot carries only tts_values / tts_tid / tts_tableOid); \
+                 blocked until execTuples lands."
+            );
+        };
+
+    // if (unlikely(*op->resnull)) elog(ERROR, "failed to fetch attribute from slot");
+    if isnull {
+        return Err(types_error::PgError::error(
+            "failed to fetch attribute from slot",
+        ));
+    }
+    state
+        .result_cells
+        .set(resvalue_id, ResultCell { value, isnull });
+    Ok(())
 }
 
 /// `ExecEvalScalarArrayOp(ExprState *state, ExprEvalStep *op)` — `x op ANY/ALL

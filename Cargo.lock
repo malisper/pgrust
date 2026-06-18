@@ -8699,6 +8699,7 @@ dependencies = [
 name = "backend-executor-execExprInterp"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
  "backend-executor-execExpr-seams",
  "backend-executor-execExprInterp-seams",
  "backend-executor-execTuples-seams",
@@ -12342,6 +12343,7 @@ dependencies = [
  "backend-access-table-table",
  "backend-nodes-core",
  "backend-optimizer-prep-preptlist-seams",
+ "backend-optimizer-util-appendinfo-seams",
  "backend-optimizer-util-restrictinfo-seams",
  "backend-parser-coerce-seams",
  "backend-utils-cache-lsyscache-seams",
@@ -12461,7 +12463,9 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-core",
  "types-error",
+ "types-nodes",
  "types-pathnodes",
 ]
 
