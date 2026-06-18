@@ -2337,7 +2337,7 @@ fn replace_domain_constraint_value<'mcx>(
 ) -> PgResult<Option<types_nodes::nodes::NodePtr<'mcx>>> {
     use types_nodes::parsestmt::ParseRefHookState;
     if cref.fields.len() == 1 {
-        if let RichNode::String(s) = &*cref.fields[0] {
+        if let Some(s) = cref.fields[0].as_string() {
             let colname = s.sval.as_str();
             if colname == "value" {
                 if let ParseRefHookState::DomainCheckValue(template) = &pstate.p_ref_hook_state {
@@ -2370,9 +2370,8 @@ fn domain_add_check_constraint<'mcx>(
     domain_name: &str,
     want_constr_addr: bool,
 ) -> PgResult<(String, Option<ObjectAddress>)> {
-    let constr = match &constr_node {
-        RichNode::Constraint(c) => c,
-        _ => unreachable!("domainAddCheckConstraint: not a Constraint"),
+    let Some(constr) = constr_node.as_constraint() else {
+        unreachable!("domainAddCheckConstraint: not a Constraint")
     };
     debug_assert!(constr.contype == CONSTR_CHECK);
 
@@ -2458,8 +2457,8 @@ fn domain_add_check_constraint<'mcx>(
         .to_string();
 
     /* Store the constraint in pg_constraint. */
-    let skip_validation = match &constr_node {
-        RichNode::Constraint(c) => c.skip_validation,
+    let skip_validation = match constr_node.node_tag() {
+        types_nodes::nodes::ntag::T_Constraint => constr_node.expect_constraint().skip_validation,
         _ => unreachable!(),
     };
     let ccoid = backend_catalog_pg_constraint::CreateConstraintEntry(
@@ -2525,9 +2524,8 @@ fn domain_add_not_null_constraint<'mcx>(
     domain_name: &str,
     want_constr_addr: bool,
 ) -> PgResult<Option<ObjectAddress>> {
-    let constr = match &constr_node {
-        RichNode::Constraint(c) => c,
-        _ => unreachable!("domainAddNotNullConstraint: not a Constraint"),
+    let Some(constr) = constr_node.as_constraint() else {
+        unreachable!("domainAddNotNullConstraint: not a Constraint")
     };
     debug_assert!(constr.contype == CONSTR_NOTNULL);
 
@@ -2674,7 +2672,7 @@ pub fn AlterDomainDefault<'mcx>(
          */
         let is_null_const = match default_expr.as_ref() {
             None => true,
-            Some(RichNode::Expr(Expr::Const(c))) => c.constisnull,
+            Some(n) if n.is_const() => n.expect_const().constisnull,
             Some(_) => false,
         };
         if is_null_const {
@@ -2844,9 +2842,9 @@ pub fn AlterDomainAddConstraint<'mcx>(
 
     checkDomainOwner(&typ)?;
 
-    let constr = match new_constraint {
-        RichNode::Constraint(c) => c,
-        _ => {
+    let constr = match new_constraint.as_constraint() {
+        Some(c) => c,
+        None => {
             return ereport(ERROR)
                 .errmsg_internal(format!(
                     "unrecognized node type: {}",
@@ -3081,9 +3079,9 @@ pub fn DefineDomain<'mcx>(
     let typNDims = type_name.arrayBounds.len() as i32;
 
     for node in constraints {
-        let constr = match node {
-            RichNode::Constraint(c) => c,
-            _ => {
+        let constr = match node.as_constraint() {
+            Some(c) => c,
+            None => {
                 return ereport(ERROR)
                     .errmsg_internal("unrecognized node type in CREATE DOMAIN constraints")
                     .finish(errloc(872, "DefineDomain"))
@@ -3112,7 +3110,7 @@ pub fn DefineDomain<'mcx>(
                     )?;
                     let is_null_const = match default_expr.as_ref() {
                         None => true,
-                        Some(RichNode::Expr(Expr::Const(c))) => c.constisnull,
+                        Some(n) if n.is_const() => n.expect_const().constisnull,
                         Some(_) => false,
                     };
                     if is_null_const {
@@ -3271,9 +3269,8 @@ pub fn DefineDomain<'mcx>(
 
     /* Process constraints which refer to the domain ID returned by TypeCreate. */
     for node in constraints {
-        let constr = match node {
-            RichNode::Constraint(c) => c,
-            _ => unreachable!("checked above"),
+        let Some(constr) = node.as_constraint() else {
+            unreachable!("checked above")
         };
         match constr.contype {
             CONSTR_CHECK => {
@@ -4289,9 +4286,9 @@ fn define_domain_seam<'mcx>(
     _pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
     stmt: &RichNode<'mcx>,
 ) -> PgResult<ObjectAddress> {
-    let cds = match stmt {
-        RichNode::CreateDomainStmt(s) => s,
-        _ => {
+    let cds = match stmt.as_createdomainstmt() {
+        Some(s) => s,
+        None => {
             return Err(PgError::error(
                 "define_domain_seam: statement is not a CreateDomainStmt",
             ))
@@ -4301,9 +4298,9 @@ fn define_domain_seam<'mcx>(
     // domainname: List of String nodes -> Vec<String>.
     let mut domainname: Vec<String> = Vec::with_capacity(cds.domainname.len());
     for n in cds.domainname.iter() {
-        match &**n {
-            RichNode::String(s) => domainname.push(s.sval.as_str().to_string()),
-            _ => {
+        match n.as_string() {
+            Some(s) => domainname.push(s.sval.as_str().to_string()),
+            None => {
                 return Err(PgError::error(
                     "CREATE DOMAIN: domain name element is not a String",
                 ))
@@ -4312,30 +4309,31 @@ fn define_domain_seam<'mcx>(
     }
 
     // typeName: raw TypeName node -> resolver TypeName.
-    let raw_tn = match cds.typeName.as_deref() {
-        Some(RichNode::TypeName(tn)) => tn,
-        _ => return Err(PgError::error("CREATE DOMAIN: missing or invalid base TypeName")),
+    let raw_tn = match cds.typeName.as_deref().and_then(|n| n.as_typename()) {
+        Some(tn) => tn,
+        None => return Err(PgError::error("CREATE DOMAIN: missing or invalid base TypeName")),
     };
     let type_name = backend_parser_parse_type::raw_typename_to_parse(raw_tn)?;
 
     // collClause: optional CollateClause -> Option<Vec<String>> (the COLLATE name).
-    let coll_clause: Option<Vec<String>> = match cds.collClause.as_deref() {
-        Some(RichNode::CollateClause(cc)) => {
-            let mut names: Vec<String> = Vec::with_capacity(cc.collname.len());
-            for n in cc.collname.iter() {
-                match &**n {
-                    RichNode::String(s) => names.push(s.sval.as_str().to_string()),
-                    _ => {
-                        return Err(PgError::error(
-                            "CREATE DOMAIN: COLLATE name element is not a String",
-                        ))
+    let coll_clause: Option<Vec<String>> =
+        match cds.collClause.as_deref().and_then(|n| n.as_collateclause()) {
+            Some(cc) => {
+                let mut names: Vec<String> = Vec::with_capacity(cc.collname.len());
+                for n in cc.collname.iter() {
+                    match n.as_string() {
+                        Some(s) => names.push(s.sval.as_str().to_string()),
+                        None => {
+                            return Err(PgError::error(
+                                "CREATE DOMAIN: COLLATE name element is not a String",
+                            ))
+                        }
                     }
                 }
+                Some(names)
             }
-            Some(names)
-        }
-        _ => None,
-    };
+            None => None,
+        };
 
     // constraints: List of Constraint nodes -> Vec<RichNode>.
     let mut constraints: Vec<RichNode<'mcx>> = Vec::with_capacity(cds.constraints.len());
