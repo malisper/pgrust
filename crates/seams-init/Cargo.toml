@@ -448,6 +448,7 @@ backend-utils-adt-geo-ops = { path = "../backend-utils-adt-geo-ops" }
 backend-utils-adt-json = { path = "../backend-utils-adt-json" }
 backend-utils-adt-jsonb-gin = { path = "../backend-utils-adt-jsonb-gin" }
 backend-utils-adt-jsonfuncs = { path = "../backend-utils-adt-jsonfuncs" }
+common-jsonapi = { path = "../common-jsonapi" }
 backend-utils-adt-jsonbsubs = { path = "../backend-utils-adt-jsonbsubs" }
 backend-utils-adt-jsonpath-gram = { path = "../backend-utils-adt-jsonpath-gram" }
 backend-utils-adt-like = { path = "../backend-utils-adt-like" }

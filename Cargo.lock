@@ -21545,6 +21545,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-jsonapi"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-json",
+ "backend-utils-adt-json-seams",
+ "backend-utils-adt-jsonb",
+ "backend-utils-adt-jsonb-seams",
+ "backend-utils-adt-jsonb-util",
+ "backend-utils-adt-jsonfuncs",
+ "backend-utils-error",
+ "backend-utils-mb-mbutils",
+ "backend-utils-misc-stack-depth-seams",
+ "common-jsonapi-seams",
+ "common-wchar",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-json",
+ "types-tuple",
+]
+
+[[package]]
 name = "common-jsonapi-seams"
 version = "0.0.0"
 dependencies = [
@@ -22692,6 +22714,7 @@ dependencies = [
  "common-extra-encnames-fgram",
  "common-hashfn",
  "common-ip",
+ "common-jsonapi",
  "common-md5",
  "common-pglz",
  "common-prng-base64",
