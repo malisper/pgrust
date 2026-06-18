@@ -1881,6 +1881,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-fmgr",
+ "types-hash",
  "types-nbtree",
  "types-opclass",
  "types-scan",

@@ -95,6 +95,7 @@ pub fn init_seams() {
     sx::index_am_canorder::set(index_am_canorder);
     sx::index_am_searcharray::set(index_am_searcharray);
     sx::index_am_has_gettuple::set(index_am_has_gettuple);
+    sx::am_adjust_members::set(am_adjust_members);
 
     // amutils.c SQL-level property reporting: the AM-routine projection, the
     // per-AM `amproperty` / `ambuildphasename` callbacks (which the unified
@@ -382,11 +383,144 @@ fn get_index_am_info(amoid: Oid) -> PgResult<IndexAmInfo> {
     })
 }
 
-/// Whether the AM defines `amadjustmembers`. Built-in btree/hash both do; an
-/// AM resolvable through `GetIndexAmRoutineByAmId` that is neither is a future
-/// extension AM whose vtable would need to carry the flag.
+/// Whether the AM defines `amadjustmembers`. The built-in btree (403), hash
+/// (405), GiST (783), GIN (2742) and SP-GiST (4000) AMs all set
+/// `amroutine->amadjustmembers` (nbtree.c / hash.c / gist.c / ginutil.c /
+/// spgutils.c); BRIN (3580) sets it to NULL (brin.c). An AM resolvable through
+/// `GetIndexAmRoutineByAmId` that is none of these is a future extension AM whose
+/// vtable would need to carry the flag.
 fn am_has_adjustmembers(amoid: Oid) -> bool {
-    matches!(amoid, 403 | 405)
+    matches!(
+        amoid,
+        BTREE_AM_OID | HASH_AM_OID | GIST_AM_OID | GIN_AM_OID | SPGIST_AM_OID
+    )
+}
+
+/// `am_adjust_members` seam — the `amroutine->amadjustmembers(opfamilyoid,
+/// opclassoid, operators, procedures)` dispatch (driven by opclasscmds.c's
+/// `AddOpClass` / `AlterOpFamilyAdd`). Each AM's member-adjustment callback sets
+/// the dependency-strength fields (`ref_is_hard` / `ref_is_family` / `refobjid`)
+/// on the operators and support functions being added to an opclass/opfamily and
+/// may additionally validate them.
+///
+/// The unified `IndexAmRoutine` vtable's `amadjustmembers` slot is not used here:
+/// the real callbacks live in the per-AM opclass-validator crates and several of
+/// them (hash, gin) carry a trimmed per-AM `OpFamilyMember` shape rather than the
+/// seam's canonical `types_opclass::OpFamilyMember`. We dispatch by `amoid` to
+/// the validator body directly. For the trimmed-shape AMs we marshal the shared
+/// fields the callback reads (`is_func`/`number`/`lefttype`/`righttype`) into the
+/// per-AM record, run it, and merge the three dependency fields it mutates back
+/// into the canonical members — leaving `object`/`sortfamily` (which the callback
+/// neither reads nor writes) intact for the consumer's `storeOperators`.
+fn am_adjust_members<'mcx>(
+    mcx: Mcx<'mcx>,
+    amoid: Oid,
+    opfamilyoid: Oid,
+    opclassoid: Oid,
+    mut operators: mcx::PgVec<'mcx, types_opclass::OpFamilyMember>,
+    mut procedures: mcx::PgVec<'mcx, types_opclass::OpFamilyMember>,
+) -> PgResult<(
+    mcx::PgVec<'mcx, types_opclass::OpFamilyMember>,
+    mcx::PgVec<'mcx, types_opclass::OpFamilyMember>,
+)> {
+    match amoid {
+        // btree / GiST / SP-GiST callbacks already operate on the canonical
+        // `types_opclass::OpFamilyMember` — call them in place.
+        BTREE_AM_OID => {
+            backend_access_nbt_validate::btadjustmembers(
+                opfamilyoid,
+                opclassoid,
+                &mut operators,
+                &mut procedures,
+            )?;
+        }
+        GIST_AM_OID => {
+            backend_access_gist_validate::gistadjustmembers(
+                opfamilyoid,
+                opclassoid,
+                &mut operators,
+                &mut procedures,
+            )?;
+        }
+        SPGIST_AM_OID => {
+            backend_access_spg_validate::spgadjustmembers(
+                opfamilyoid,
+                opclassoid,
+                &mut operators,
+                &mut procedures,
+            )?;
+        }
+        // hash / GIN callbacks carry the trimmed per-AM `OpFamilyMember`; marshal
+        // in, run, and merge the mutated dependency fields back.
+        HASH_AM_OID => {
+            let mut ops = to_trimmed(&operators);
+            let mut procs = to_trimmed(&procedures);
+            backend_access_hashvalidate::hashadjustmembers(
+                opfamilyoid,
+                opclassoid,
+                &mut ops,
+                &mut procs,
+            )?;
+            merge_trimmed_deps(&mut operators, &ops);
+            merge_trimmed_deps(&mut procedures, &procs);
+        }
+        GIN_AM_OID => {
+            let mut ops = to_trimmed(&operators);
+            let mut procs = to_trimmed(&procedures);
+            backend_access_gin_core_probe::ginvalidate::ginadjustmembers(
+                opfamilyoid,
+                opclassoid,
+                &mut ops,
+                &mut procs,
+            )?;
+            merge_trimmed_deps(&mut operators, &ops);
+            merge_trimmed_deps(&mut procedures, &procs);
+        }
+        // BRIN has no amadjustmembers (the consumer guards on
+        // `has_adjustmembers`, so this is unreachable for it); any other AM is a
+        // future extension reached through the unported dynamic dispatch.
+        other => panic!(
+            "index access method {other} does not provide a built-in \
+             amadjustmembers callback (dynamic AM dispatch is not yet ported)"
+        ),
+    }
+
+    let _ = mcx;
+    Ok((operators, procedures))
+}
+
+/// `types_hash::...::OpFamilyMember` — the trimmed per-AM record the hash/GIN
+/// `amadjustmembers` callbacks mutate.
+type TrimmedMember = types_hash::backend_access_hash_hashvalidate::OpFamilyMember;
+
+/// Marshal the canonical seam members into the trimmed per-AM record, copying
+/// the fields the hash/GIN callbacks read (`is_func`/`number`/`lefttype`/
+/// `righttype`) plus the current dependency fields.
+fn to_trimmed(members: &[types_opclass::OpFamilyMember]) -> std::vec::Vec<TrimmedMember> {
+    members
+        .iter()
+        .map(|m| TrimmedMember {
+            is_func: m.is_func,
+            number: m.number as i16,
+            lefttype: m.lefttype,
+            righttype: m.righttype,
+            ref_is_hard: m.ref_is_hard,
+            ref_is_family: m.ref_is_family,
+            refobjid: m.refobjid,
+        })
+        .collect()
+}
+
+/// Merge the dependency fields the callback mutated (`ref_is_hard` /
+/// `ref_is_family` / `refobjid`) back into the canonical members; the callbacks
+/// touch nothing else, so `object`/`sortfamily` are preserved.
+fn merge_trimmed_deps(canonical: &mut [types_opclass::OpFamilyMember], trimmed: &[TrimmedMember]) {
+    debug_assert_eq!(canonical.len(), trimmed.len());
+    for (dst, src) in canonical.iter_mut().zip(trimmed.iter()) {
+        dst.ref_is_hard = src.ref_is_hard;
+        dst.ref_is_family = src.ref_is_family;
+        dst.refobjid = src.refobjid;
+    }
 }
 
 /// `index_am_translate_strategy(strategy, amoid, opfamily, missing_ok)` — the
