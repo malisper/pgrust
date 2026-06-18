@@ -282,7 +282,7 @@ fn install_ereport_panic_hook() {
         let _ = EREPORT_PANIC_PREFIX;
         let is_handled_ereport = info.payload().downcast_ref::<String>().is_some()
             || info.payload().downcast_ref::<&str>().is_some();
-        if is_handled_ereport {
+        if is_handled_ereport && std::env::var_os("PGRUST_PANIC_VERBOSE").is_none() {
             // Caught downstream and turned into a clean SQL ERROR: stay quiet.
             return;
         }
