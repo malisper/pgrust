@@ -184,8 +184,10 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `get_notclausearg(notclause)` (clauses.h) — the (sole) argument of a NOT
-    /// `BoolExpr`, returned as the arena `Expr` value.
-    pub fn get_notclausearg(notclause: &Expr) -> Expr
+    /// `BoolExpr`. C returns `linitial(args)` — a borrowed pointer into the
+    /// existing tree, never a copy — so we hand back a borrow tied to the input
+    /// (a `.clone()` of a `SubLink`-bearing arg would hit its deep-copy guard).
+    pub fn get_notclausearg<'a>(notclause: &'a Expr) -> &'a Expr
 );
 
 seam_core::seam!(

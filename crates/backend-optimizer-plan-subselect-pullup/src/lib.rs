@@ -81,24 +81,138 @@ pub fn init_seams() {
         convert_EXISTS_sublink_to_join,
     );
     backend_optimizer_plan_subselect_pullup_seams::convert_VALUES_to_ANY::set(
-        convert_VALUES_to_ANY_panic,
+        convert_VALUES_to_ANY,
     );
 }
 
-/// `convert_VALUES_to_ANY(root, testexpr, values)` (subselect.c) — **deferred to
-/// the planmain stage**: its body needs `convert_testexpr` (already here) plus
-/// `eval_const_expressions` and `make_SAOP_expr`, which are part of the
-/// still-unported SubPlan-building half of subselect.c. Installed as a
-/// seam-and-panic body; `pull_up_sublinks_qual_recurse` (the only caller) is
-/// reachable only from the unported `subquery_planner`, so this panic is latent.
-fn convert_VALUES_to_ANY_panic<'mcx>(
-    _mcx: Mcx<'mcx>,
+/// `convert_VALUES_to_ANY(root, testexpr, values)` (subselect.c): try to rewrite
+/// `x op (VALUES (a), (b), ...)` (an `ANY` SubLink over a constant single-column
+/// VALUES list of ≥2 rows) directly into a `ScalarArrayOpExpr`
+/// (`x op ANY (ARRAY[...])`), avoiding a semijoin entirely. Returns `None` when
+/// the SubLink isn't a simplifiable VALUES sequence (the common case).
+///
+/// We only support the transformation when it ends up with a constant array.
+/// Otherwise the evaluation of a non-hashed SAOP might be slower than the
+/// corresponding Hash Join with VALUES.
+///
+/// C takes `(root, testexpr, values)` extracted from the SubLink; here the
+/// whole `&SubLink` is handed in (matching the sibling conversions), so we deref
+/// its embedded-owned `subselect` (the VALUES `Query`) and `testexpr`.
+fn convert_VALUES_to_ANY<'mcx>(
+    mcx: Mcx<'mcx>,
     _root: &PlannerInfo,
-    _sublink: &SubLink,
+    sublink: &SubLink,
 ) -> PgResult<Option<Expr>> {
-    panic!(
-        "convert_VALUES_to_ANY: the VALUES-list fast path is part of the \
-         SubPlan-building (planmain) half of subselect.c, not yet ported"
+    // `testexpr = (Node *) sublink->testexpr`, `values = (Query *) sublink->subselect`.
+    let testexpr = match sublink.testexpr.as_deref() {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+    let values = match sublink.subselect.as_deref() {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+
+    // Check we have a binary operator over a single-column subquery with no
+    // joins and no LIMIT/OFFSET/ORDER BY clauses.
+    let op = match testexpr.as_opexpr() {
+        Some(op) if op.args.len() == 2 => op,
+        _ => return Ok(None),
+    };
+    if values.targetList.len() > 1
+        || values.limitCount.is_some()
+        || values.limitOffset.is_some()
+        || !values.sortClause.is_empty()
+        || values.rtable.len() != 1
+    {
+        return Ok(None);
+    }
+
+    // rte = linitial_node(RangeTblEntry, values->rtable);
+    let rte = &values.rtable[0];
+    // leftop = linitial(args), rightop = lsecond(args)
+    let leftop = &op.args[0];
+    let rightop = &op.args[1];
+    let opno = op.opno;
+    let inputcollid = op.inputcollid;
+
+    // Also, check that only RTE corresponds to VALUES; the list of values has
+    // at least two items and no volatile functions.
+    if rte.rtekind != RTEKind::RTE_VALUES || rte.values_lists.len() < 2 {
+        return Ok(None);
+    }
+    // contain_volatile_functions((Node *) rte->values_lists): walk every value
+    // expression in every row. `values_lists` is a list of rows, each row a
+    // `Node::List` of value `Node`s.
+    for row in rte.values_lists.iter() {
+        if let Node::List(elems) = row.as_ref() {
+            for value in elems.iter() {
+                if backend_optimizer_util_clauses::grounded::contain_volatile_functions(
+                    value.as_expr(),
+                )? {
+                    return Ok(None);
+                }
+            }
+        }
+    }
+
+    let mut exprs: alloc::vec::Vec<Expr> = alloc::vec::Vec::new();
+
+    for row in rte.values_lists.iter() {
+        // List *elem = lfirst(lc); Node *value = linitial(elem);
+        let value0 = match row.as_ref() {
+            Node::List(elems) => elems
+                .first()
+                .expect("VALUES row has no columns")
+                .as_ref(),
+            _ => return Ok(None),
+        };
+
+        // Prepare an evaluation of the right side of the operator with
+        // substitution of the given value.
+        // value = convert_testexpr(root, rightop, list_make1(value));
+        let rightop_node = Node::Expr(rightop.clone());
+        let subst = match value0.as_expr() {
+            Some(e) => alloc::vec![e.clone()],
+            None => return Ok(None),
+        };
+        let converted = convert_testexpr(&rightop_node, &subst);
+
+        // Try to evaluate constant expressions.  We could get a Const result.
+        let converted_expr = match converted {
+            Node::Expr(e) => e,
+            // convert_testexpr always returns a Node::Expr.
+            _ => return Ok(None),
+        };
+        let folded =
+            backend_optimizer_util_clauses::fold::eval_const_expressions(mcx, converted_expr)?;
+
+        // As we only support constant output arrays, all the items must also be
+        // constant.
+        match folded {
+            Expr::Const(_) => exprs.push(folded),
+            _ => return Ok(None),
+        }
+    }
+
+    // Finally, build ScalarArrayOpExpr at the top of the 'exprs' list.
+    // make_SAOP_expr(opno, leftop, exprType(rightop),
+    //                linitial_oid(rte->colcollations), inputcollid, exprs, false)
+    let coltype = backend_nodes_core::nodefuncs::expr_type(Some(rightop))?;
+    let arraycollid = rte
+        .colcollations
+        .first()
+        .copied()
+        .unwrap_or(types_core::primitive::InvalidOid);
+    backend_optimizer_util_clauses::fold::make_SAOP_expr(
+        mcx,
+        opno,
+        leftop.clone(),
+        coltype,
+        arraycollid,
+        inputcollid,
+        exprs,
+        false,
     )
 }
 

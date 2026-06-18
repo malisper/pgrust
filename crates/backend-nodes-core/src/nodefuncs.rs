@@ -1625,6 +1625,23 @@ pub fn init_seams() {
     seams::exprCollation::set(|expr| expr_collation(Some(expr)).expect("exprCollation"));
     seams::exprLocation::set(|expr| expr_location(Some(expr)).expect("exprLocation"));
 
+    // `is_notclause(clause)` / `get_notclausearg(notclause)` (nodeFuncs.h static
+    // inlines) — `IsA(clause, BoolExpr) && boolop == NOT_EXPR`, and the sole
+    // argument of such a NOT clause. The SubLink-processing path
+    // (prepjointree.c) reaches these; install them over the owned `Expr` model.
+    seams::is_notclause::set(|clause| match clause.as_boolexpr() {
+        Some(b) => b.boolop == primnodes::BoolExprType::NOT_EXPR,
+        None => false,
+    });
+    seams::get_notclausearg::set(|notclause| {
+        notclause
+            .as_boolexpr()
+            .expect("get_notclausearg: not a BoolExpr")
+            .args
+            .first()
+            .expect("NOT clause must have one argument")
+    });
+
     // costsize.c reaches `exprType((Node *) expr)` / `exprTypmod(...)` over
     // arena-resolved planner nodes (set_rel_width, get_expr_width). The
     // `(root, NodeId)` costsize-seams resolve the node here and dispatch to this

@@ -849,7 +849,7 @@ pub fn matches_boolean_partition_clause(
     // NOT clause?
     if nf::is_notclause::call(&clause) {
         let arg = nf::get_notclausearg::call(&clause);
-        if nf::equal::call(&partexpr, &arg) {
+        if nf::equal::call(&partexpr, arg) {
             return true;
         }
     }

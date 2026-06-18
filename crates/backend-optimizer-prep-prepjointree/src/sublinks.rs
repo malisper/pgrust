@@ -527,7 +527,7 @@ fn pull_up_sublinks_qual_recurse<'mcx>(
         if nodefuncs::is_notclause::call(e) {
             // If the immediate argument of NOT is EXISTS, try to convert.
             let arg = nodefuncs::get_notclausearg::call(e);
-            if let Expr::SubLink(sublink) = &arg {
+            if let Expr::SubLink(sublink) = arg {
                 if sublink.subLinkType == SubLinkType::Exists {
                     if let Some(j) = subselect::convert_EXISTS_sublink_to_join::call(
                         mcx, root, parse, sublink, true, available_rels1,
