@@ -255,11 +255,12 @@ pub fn ExecSetVariableStmt(stmt: &VariableSetStmt, isTopLevel: bool) -> PgResult
     // Invoke the post-alter hook for setting this GUC variable, by name.
     // InvokeObjectPostAlterHookArgStr(ParameterAclRelationId, stmt->name,
     //                                 ACL_SET, stmt->kind, false);
-    let _ = ACL_SET; // C: passes ACL_SET; the hook records the access mode.
+    // C: subId = ACL_SET (the access mode), auxiliaryId = (Oid) stmt->kind.
     seam::invoke_object_post_alter_hook_arg_str::call(
         ParameterAclRelationId,
         name.to_string(),
-        variable_set_kind_as_subid(stmt.kind),
+        ACL_SET as i32,
+        variable_set_kind_as_subid(stmt.kind) as Oid,
         false,
     )?;
     Ok(())

@@ -15,7 +15,7 @@
 
 use std::cell::{Cell, RefCell};
 
-use mcx::{Mcx, PgString};
+use mcx::{Mcx, MemoryContext, PgString};
 use types_core::catalog::BOOTSTRAP_SUPERUSERID;
 use types_core::{
     BackendType, ProcessingMode, UserAuth, InvalidOid, Oid, SECURITY_LOCAL_USERID_CHANGE,
@@ -948,6 +948,19 @@ pub fn init_seams() {
     s::init_standalone_process::set(crate::process::InitStandaloneProcess);
     s::has_rolreplication::set(has_rolreplication);
     s::superuser::set(superuser);
+
+    // guc_funcs.c (SET/SHOW layer) reaches `superuser()` and `GetUserId()`
+    // through its own outward seam crate (it depends only on
+    // backend-utils-misc-guc-funcs-seams for cross-subsystem calls). Their real
+    // owner is miscinit.c/superuser.c, so install them here. The guc_funcs seams
+    // are bare (no Mcx / no PgResult), matching C's `bool superuser(void)` and
+    // `Oid GetUserId(void)`; superuser's catalog read happens in superuser_arg's
+    // owner behind a scratch context.
+    backend_utils_misc_guc_funcs_seams::get_user_id::set(GetUserId);
+    backend_utils_misc_guc_funcs_seams::superuser::set(|| {
+        let scratch = MemoryContext::new("guc_funcs superuser seam");
+        superuser(scratch.mcx()).expect("superuser() catalog lookup failed")
+    });
 
     // DatabasePath direct set/clear (the recovery "quick hack" path in
     // ProcessCommittedInvalidationMessages) — bypasses SetDatabasePath's

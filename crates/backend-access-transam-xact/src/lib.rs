@@ -1683,6 +1683,9 @@ pub fn init_seams() {
     seams::get_current_transaction_nest_level::set(GetCurrentTransactionNestLevel);
     seams::transaction_id_is_current_transaction_id::set(TransactionIdIsCurrentTransactionId);
     seams::is_transaction_state::set(IsTransactionState);
+    // guc_funcs.c blocks SET during a parallel operation via IsInParallelMode();
+    // its outward seam's real owner is xact.c, so install it here.
+    backend_utils_misc_guc_funcs_seams::is_in_parallel_mode::set(IsInParallelMode);
     seams::is_aborted_transaction_block_state::set(IsAbortedTransactionBlockState);
     seams::get_current_command_id::set(GetCurrentCommandId);
     seams::check_xid_alive::set(CheckXidAlive);

@@ -18,6 +18,7 @@ backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-misc-superuser-seams = { path = "../backend-utils-misc-superuser-seams" }
+backend-utils-misc-guc-funcs-seams = { path = "../backend-utils-misc-guc-funcs-seams" }
 mcx = { path = "../mcx" }
 types-acl = { path = "../types-acl" }
 types-cache = { path = "../types-cache" }

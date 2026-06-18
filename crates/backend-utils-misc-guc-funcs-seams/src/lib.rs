@@ -92,13 +92,16 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `InvokeObjectPostAlterHookArgStr(ParameterAclRelationId, name, ACL_SET,
-    /// subId, is_internal)` (catalog/objectaccess.h): the post-alter object
-    /// access hook for a GUC change, addressed by name. `subid` is `stmt->kind`
-    /// (the `VariableSetKind`) cast to `int`.
+    /// stmt->kind, is_internal)` (catalog/objectaccess.h): the post-alter object
+    /// access hook for a GUC change, addressed by name. C call (guc_funcs.c:156)
+    /// is `(ParameterAclRelationId, stmt->name, ACL_SET, stmt->kind, false)`, so
+    /// `subid` is `ACL_SET` and `auxiliary_id` is `stmt->kind` (the
+    /// `VariableSetKind`) cast to `int`.
     pub fn invoke_object_post_alter_hook_arg_str(
         class_id: Oid,
         object_name: String,
         subid: i32,
+        auxiliary_id: Oid,
         is_internal: bool,
     ) -> PgResult<()>
 );

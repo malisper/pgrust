@@ -61,6 +61,14 @@ pub fn init_seams() {
     backend_utils_adt_acl_seams::member_can_set_role::set(role_membership::member_can_set_role);
     backend_utils_adt_acl_seams::check_can_set_role::set(role_membership::check_can_set_role);
     backend_utils_adt_acl_seams::has_privs_of_role::set(role_membership::has_privs_of_role);
+    // guc_funcs.c's ConfigOptionIsVisible reaches has_privs_of_role through its
+    // own outward seam crate. C: `bool has_privs_of_role(Oid, Oid)`; the owner's
+    // body carries the per-owner error channel (PgResult) for the catalog
+    // membership scan, so unwrap to the bare bool the SHOW-visibility check uses.
+    backend_utils_misc_guc_funcs_seams::has_privs_of_role::set(|member, role| {
+        role_membership::has_privs_of_role(member, role)
+            .expect("has_privs_of_role catalog lookup failed")
+    });
     backend_utils_adt_acl_seams::get_rolespec_oid::set(role_membership::get_rolespec_oid);
     backend_utils_adt_acl_seams::get_role_oid::set(role_membership::get_role_oid);
     backend_utils_adt_acl_seams::initialize_acl::set(role_membership::initialize_acl);
