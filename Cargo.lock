@@ -19074,6 +19074,7 @@ name = "backend-utils-adt-oid"
 version = "0.0.0"
 dependencies = [
  "backend-libpq-pqformat",
+ "backend-utils-adt-arrayfuncs",
  "backend-utils-adt-numutils",
  "backend-utils-adt-oid-seams",
  "backend-utils-fmgr-core",

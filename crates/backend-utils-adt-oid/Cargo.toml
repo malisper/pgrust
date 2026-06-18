@@ -18,5 +18,6 @@ types-parsenodes = { path = "../types-parsenodes" }
 types-stringinfo = { path = "../types-stringinfo" }
 backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
 backend-utils-adt-numutils = { path = "../backend-utils-adt-numutils" }
+backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
 backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 backend-utils-adt-oid-seams = { path = "../backend-utils-adt-oid-seams" }

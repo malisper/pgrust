@@ -129,6 +129,44 @@ fn fc_oidsend(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     ret_varlena(fcinfo, bytes)
 }
 
+fn fc_oidvectorin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let s = arg_cstring(fcinfo, 0).to_string();
+    let m = scratch_mcx();
+    // C passes fcinfo->context (the soft ErrorSaveContext) to uint32in_subr; the
+    // soft context is not carried on the fmgr frame here, so a bad OID token
+    // raises a hard error. The soft-error caller (InputFunctionCallSafe in
+    // fmgr-core) catches it and records into the real escontext — so
+    // pg_input_is_valid/pg_input_error_info still observe a soft failure.
+    let image_bytes: Vec<u8> = match crate::oidvectorin(m.mcx(), &s, None) {
+        Ok(Some(image)) => image.as_slice().to_vec(),
+        // None only when a soft escontext was supplied (not on this path).
+        Ok(None) => raise(types_error::PgError::error("invalid input syntax for type oid")),
+        Err(e) => raise(e),
+    };
+    ret_varlena(fcinfo, image_bytes)
+}
+
+fn fc_oidvectorout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    use backend_utils_adt_arrayfuncs::foundation;
+    let m = scratch_mcx();
+    let bytes = arg_varlena(fcinfo, 0).to_vec();
+    // check_valid_oidvector reads ndim / dataoffset (== ARR_HASNULL marker) /
+    // elemtype off the array header; the values come from the int-aligned data
+    // region.
+    let ndim = foundation::arr_ndim(&bytes);
+    let dataoffset = foundation::arr_dataoffset_field(&bytes);
+    let elemtype = foundation::arr_elemtype(&bytes);
+    let values: Vec<types_core::Oid> =
+        match backend_utils_adt_arrayfuncs::construct::oidvector_to_oids_bytes(m.mcx(), &bytes) {
+            Ok(v) => v.iter().copied().collect(),
+            Err(e) => raise(e),
+        };
+    match crate::oidvectorout(ndim, dataoffset, elemtype, &values) {
+        Ok(s) => ret_cstring(fcinfo, s),
+        Err(e) => raise(e),
+    }
+}
+
 fn fc_oideq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     ret_bool(crate::oideq(arg_oid(fcinfo, 0), arg_oid(fcinfo, 1)))
 }
@@ -186,6 +224,9 @@ pub fn register_oid_builtins() {
         builtin(1799, "oidout", 1, true, false, fc_oidout),
         builtin(2418, "oidrecv", 1, true, false, fc_oidrecv),
         builtin(2419, "oidsend", 1, true, false, fc_oidsend),
+        // ---- oidvector I/O ----
+        builtin(54, "oidvectorin", 1, true, false, fc_oidvectorin),
+        builtin(55, "oidvectorout", 1, true, false, fc_oidvectorout),
         // ---- comparison operators ----
         builtin(184, "oideq", 2, true, false, fc_oideq),
         builtin(185, "oidne", 2, true, false, fc_oidne),

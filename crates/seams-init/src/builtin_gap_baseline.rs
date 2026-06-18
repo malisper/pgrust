@@ -25,7 +25,7 @@
 //! test that runs `crate::init_all()` then formats `missing_builtins()` (sorted
 //! by `foid`) as the `(oid, "prosrc", BuiltinGapKind::...)` rows below.
 //!
-//! Current gap: 1349 of 3102 canonical built-ins (1349 not registered,
+//! Current gap: 1347 of 3102 canonical built-ins (1347 not registered,
 //! 0 registered with diverging metadata).
 
 use backend_utils_fmgr_core::BuiltinGapKind;
@@ -47,8 +47,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (51, "xidout", BuiltinGapKind::NotRegistered),
     (52, "cidin", BuiltinGapKind::NotRegistered),
     (53, "cidout", BuiltinGapKind::NotRegistered),
-    (54, "oidvectorin", BuiltinGapKind::NotRegistered),
-    (55, "oidvectorout", BuiltinGapKind::NotRegistered),
     (68, "xideq", BuiltinGapKind::NotRegistered),
     (69, "cideq", BuiltinGapKind::NotRegistered),
     (86, "pg_ddl_command_in", BuiltinGapKind::NotRegistered),

@@ -13,15 +13,17 @@
 //! comparison (`oideq`, OID 184) would fall into a recursive `SearchSysCache`
 //! lookup during early single-user boot.
 //!
-//! The `oidvector` family (`buildoidvector`, `check_valid_oidvector`,
-//! `oidvectorin/out/recv/send`, and the `oidvectoreq/ne/lt/le/ge/gt` operators
-//! that delegate to `btoidvectorcmp`) needs the array `oidvector` carrier and
-//! `array_recv`/`array_send`, which are owned by the array subsystem and have no
-//! home in this tree yet (mirroring the `int2vector` deferral in
-//! `backend-utils-adt-int`). They are NOT registered here; they will land with
-//! that carrier rather than be faked. [`check_valid_oidvector`] is provided as a
-//! pure validator on the already-decoded array header (its seam takes the header
-//! fields, not the carrier), since `hashoidvector` consumes it.
+//! The `oidvector` I/O (`buildoidvector`, `oidvectorin`, `oidvectorout`) builds
+//! and reads the on-disk `oidvector` image — a 1-D `ArrayType` of `OIDOID`,
+//! lower bound 0, no NULLs — through the array subsystem's `construct_md_array`
+//! / `oidvector_to_oids_bytes`, and is registered here. The binary
+//! `oidvectorrecv`/`oidvectorsend` still need the `array_recv`/`array_send`
+//! fcinfo-sharing path (they reuse the caller's `flinfo->fn_extra` cache) and so
+//! remain unregistered, as do the `oidvectoreq/ne/lt/le/ge/gt` operators (which
+//! delegate to `btoidvectorcmp`); they will land with that array machinery
+//! rather than be faked. [`check_valid_oidvector`] validates an already-decoded
+//! array header (its seam takes the header fields, not the carrier), as
+//! `hashoidvector` and `oidvectorout` consume it.
 //!
 //! No `extern "C"`, no `*mut`/`*const`, no `libc`; soft errors flow through
 //! `backend-utils-error` / `types_error::SoftErrorContext`.
@@ -64,6 +66,79 @@ pub fn oidsend<'mcx>(mcx: mcx::Mcx<'mcx>, arg1: Oid) -> PgResult<types_datum::By
     let mut buf = backend_libpq_pqformat::pq_begintypsend(mcx)?;
     backend_libpq_pqformat::pq_sendint32(&mut buf, arg1)?;
     Ok(backend_libpq_pqformat::pq_endtypsend(buf))
+}
+
+/// `buildoidvector(oids, n)` (oid.c:84): build the `oidvector` on-disk image — a
+/// 1-D `ArrayType` of `OIDOID` (4-byte pass-by-value, int-aligned, no NULLs)
+/// whose index lower bound is 0 (not 1), matching the historical oidvector
+/// layout. An empty input yields a zero-dimension array.
+pub fn buildoidvector<'mcx>(mcx: mcx::Mcx<'mcx>, oids: &[Oid]) -> PgResult<mcx::PgVec<'mcx, u8>> {
+    // construct_md_array(elems, NULL, 1, &dim1, &lbound0, OIDOID, sizeof(Oid),
+    //                    true /* byval */, TYPALIGN_INT)
+    let datums: Vec<types_datum::Datum> =
+        oids.iter().map(|&o| types_datum::Datum::from_oid(o)).collect();
+    let n = oids.len() as i32;
+    backend_utils_adt_arrayfuncs::construct::construct_md_array(
+        mcx,
+        &datums,
+        None,
+        1,
+        &[n],
+        &[0], // lbound 0, per oidvector convention
+        OIDOID,
+        core::mem::size_of::<Oid>() as i32,
+        true,
+        b'i', // TYPALIGN_INT
+    )
+}
+
+/// `oidvectorin` (oid.c:122): parse a whitespace-separated list of OIDs into an
+/// `oidvector` image. A soft parse error (bad OID token) records into
+/// `escontext` and returns `None` (C's `PG_RETURN_NULL`); a hard error
+/// propagates as `Err`.
+pub fn oidvectorin<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    input: &str,
+    mut escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<Option<mcx::PgVec<'mcx, u8>>> {
+    let mut oids: Vec<Oid> = Vec::new();
+    let mut rest = input;
+    loop {
+        // while (*oidString && isspace(*oidString)) oidString++;
+        rest = rest.trim_start_matches(|c: char| c.is_ascii_whitespace());
+        if rest.is_empty() {
+            break;
+        }
+        // result->values[n] = uint32in_subr(oidString, &oidString, "oid", escontext);
+        let (val, after) = backend_utils_adt_numutils::uint32in_subr(
+            rest,
+            true,
+            "oid",
+            escontext.as_deref_mut(),
+        )?;
+        // if (SOFT_ERROR_OCCURRED(escontext)) PG_RETURN_NULL();
+        if escontext.as_deref().map(|e| e.error_occurred()).unwrap_or(false) {
+            return Ok(None);
+        }
+        oids.push(val as Oid);
+        rest = after;
+    }
+    Ok(Some(buildoidvector(mcx, &oids)?))
+}
+
+/// `oidvectorout` (oid.c:170): render an `oidvector` image as a
+/// space-separated decimal OID list. The header is validated first
+/// (`check_valid_oidvector`).
+pub fn oidvectorout(ndim: i32, dataoffset: i32, elemtype: Oid, values: &[Oid]) -> PgResult<String> {
+    check_valid_oidvector(ndim, dataoffset, elemtype)?;
+    let mut out = String::new();
+    for (i, v) in values.iter().enumerate() {
+        if i != 0 {
+            out.push(' ');
+        }
+        out.push_str(&format!("{v}"));
+    }
+    Ok(out)
 }
 
 /// `check_valid_oidvector` (oid.c:118): validate that an array object meets the
