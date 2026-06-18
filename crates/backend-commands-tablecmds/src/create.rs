@@ -762,6 +762,87 @@ pub fn define_relation<'mcx>(
     Ok(address)
 }
 
+/// `create_ctas_internal(attrList, into)` (createas.c:81-145) — build the
+/// destination relation for a CREATE TABLE AS / CREATE MATERIALIZED VIEW by
+/// faking up a `CreateStmt`, calling `DefineRelation`, creating the TOAST table,
+/// and (for a matview) installing the ON SELECT rule via `StoreViewQuery`.
+///
+/// Installed into `create_ctas_relation` because the createas unit cannot reach
+/// `DefineRelation` (would cycle) and the whole sequence lands entirely in the
+/// catalog with no createas-observable intermediate state.
+pub fn create_ctas_relation<'mcx>(
+    mcx: Mcx<'mcx>,
+    into: types_nodes::ddlnodes::IntoClause<'mcx>,
+    attr_list: PgVec<'mcx, NodePtr<'mcx>>,
+    relkind: u8,
+    is_matview: bool,
+) -> PgResult<ObjectAddress> {
+    /*
+     * Create the target relation by faking up a CREATE TABLE parsetree and
+     * passing it to DefineRelation. We own `into` by value, so move its fields
+     * in; the `options` list is needed again for the TOAST step, so keep a
+     * deep copy.
+     */
+    let mut options_copy: PgVec<'mcx, NodePtr<'mcx>> =
+        vec_with_capacity_in(mcx, into.options.len())?;
+    for opt in into.options.iter() {
+        options_copy.push(alloc_in(mcx, opt.clone_in(mcx)?)?);
+    }
+
+    let create = CreateStmt {
+        relation: into.rel,
+        tableElts: attr_list,
+        inhRelations: vec_with_capacity_in(mcx, 0)?,
+        partbound: None,
+        partspec: None,
+        ofTypename: None,
+        constraints: vec_with_capacity_in(mcx, 0)?,
+        nnconstraints: vec_with_capacity_in(mcx, 0)?,
+        options: into.options,
+        oncommit: into.onCommit,
+        tablespacename: into.tableSpaceName,
+        accessMethod: into.accessMethod,
+        if_not_exists: false,
+    };
+    let options = options_copy;
+
+    /*
+     * Create the relation.  (This will error out if there's an existing view,
+     * so we don't need more code to complain if "replace" is false.)
+     */
+    let into_relation_addr = define_relation(mcx, create, relkind, InvalidOid, None)?;
+
+    /*
+     * If necessary, create a TOAST table for the target table.  Note that
+     * NewRelationCreateToastTable ends with CommandCounterIncrement(), so that
+     * the TOAST table will be visible for insertion.
+     */
+    CommandCounterIncrement()?;
+    create_toast_for_relation(mcx, into_relation_addr.objectId, &options)?;
+
+    /* Create the "view" part of a materialized view. */
+    if is_matview {
+        /* StoreViewQuery scribbles on tree, so make a copy */
+        let view_query_node = into
+            .viewQuery
+            .as_deref()
+            .expect("create_ctas_relation: matview into->viewQuery is NULL");
+        let query = match view_query_node.as_query() {
+            Some(q) => q.clone_in(mcx)?,
+            None => panic!("create_ctas_relation: into->viewQuery is not a Query"),
+        };
+        backend_commands_view_seams::store_view_query::call(
+            mcx,
+            into_relation_addr.objectId,
+            query,
+            false,
+        )?;
+        CommandCounterIncrement()?;
+    }
+
+    Ok(into_relation_addr)
+}
+
 /// `set_attnotnull(wqueue, rel, attnum, is_valid, queue_validation)`
 /// (tablecmds.c:8534) — set the `attnotnull` flag on a column of a relation.
 ///

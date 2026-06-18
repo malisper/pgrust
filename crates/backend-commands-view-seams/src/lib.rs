@@ -52,3 +52,18 @@ seam_core::seam!(
         view_query: &Query<'mcx>,
     ) -> PgResult<Option<mcx::PgString<'mcx>>>
 );
+
+seam_core::seam!(
+    /// `StoreViewQuery(viewOid, viewParse, replace)` (view.c) — install the
+    /// `ON SELECT` rule that backs a (materialized) view. Called by
+    /// `create_ctas_internal` (createas.c, reached through `backend-commands-
+    /// tablecmds`'s `create_ctas_relation`) for the matview leg. The owner
+    /// (`backend-commands-view`) installs it; it depends on `tablecmds`, so the
+    /// reverse call crosses this seam. Can `ereport(ERROR)`.
+    pub fn store_view_query<'mcx>(
+        mcx: Mcx<'mcx>,
+        view_oid: types_core::primitive::Oid,
+        view_parse: Query<'mcx>,
+        replace: bool,
+    ) -> PgResult<()>
+);

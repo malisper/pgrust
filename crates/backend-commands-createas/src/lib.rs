@@ -398,6 +398,12 @@ pub fn ExecCreateTableAs<'mcx>(
      */
     let dest = CreateIntoRelDestReceiver(Some(into))?;
 
+    // The dest router returns a global DestReceiverHandle; the createas registry
+    // token (the one threaded back to the intorel_* callbacks as `state`) is the
+    // owner token the receiver was registered with. Recover it so the run-binding
+    // and reladdr read-back key the same slot the callbacks see.
+    let token = backend_tcop_dest::dest_receiver_state_token(dest);
+
     /*
      * Query contained by CTAS needs to be jumbled if requested, then the
      * post_parse_analyze_hook.
@@ -414,7 +420,7 @@ pub fn ExecCreateTableAs<'mcx>(
         debug_assert!(!is_matview); /* excluded by syntax */
         // Bind the receiver's run state (self->into) before ExecuteQuery drives
         // the executor (which invokes intorel_startup).
-        receiver_setup_run(dest.0, mcx, into.clone_in(mcx)?)?;
+        receiver_setup_run(token, mcx, into.clone_in(mcx)?)?;
         qc = backend_commands_createas_seams::execute_query::call(
             mcx,
             estmt,
@@ -426,7 +432,7 @@ pub fn ExecCreateTableAs<'mcx>(
         )?;
 
         /* get object address that intorel_startup saved for us */
-        let address = receiver_reladdr(dest.0);
+        let address = receiver_reladdr(token);
         return Ok((address, qc));
     }
     debug_assert_eq!(query.commandType, CmdType::CMD_SELECT);
@@ -471,7 +477,7 @@ pub fn ExecCreateTableAs<'mcx>(
 
         // Bind the receiver's run state (self->into) before the executor runs
         // (which invokes intorel_startup).
-        receiver_setup_run(dest.0, mcx, into.clone_in(mcx)?)?;
+        receiver_setup_run(token, mcx, into.clone_in(mcx)?)?;
 
         /*
          * Run the rule rewriter, plan the query, and execute it with output
@@ -491,7 +497,7 @@ pub fn ExecCreateTableAs<'mcx>(
         )?;
 
         /* get object address that intorel_startup saved for us */
-        address = receiver_reladdr(dest.0);
+        address = receiver_reladdr(token);
     }
 
     Ok((address, qc))
@@ -910,6 +916,39 @@ fn exec_create_table_as_seam<'mcx>(
     ExecCreateTableAs(mcx, stmt, query_string, params, qc)
 }
 
+/// Utility-dispatcher entry for `ExecCreateTableAs` (utility.c
+/// `ProcessUtilitySlow`'s `T_CreateTableAsStmt` arm). Adapts the dispatch shape
+/// (`pstate`, an untyped `&Node`, and a `&mut QueryCompletion` out-param) to the
+/// crate's `ExecCreateTableAs`: `query_string` is `pstate->p_sourcetext`, and the
+/// returned `QueryCompletion` is written back into the dispatcher's slot.
+fn exec_create_table_as_utility<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
+    stmt: &Node<'mcx>,
+    params: ParamListInfo,
+    qc: Option<&mut QueryCompletion>,
+) -> PgResult<ObjectAddress> {
+    let ctas = match stmt.as_createtableasstmt() {
+        Some(c) => c,
+        None => panic!("exec_create_table_as: utilityStmt is not a CreateTableAsStmt"),
+    };
+    let query_string = pstate
+        .p_sourcetext
+        .as_ref()
+        .map(|s| s.as_str())
+        .unwrap_or("");
+
+    let qc_in = qc.as_deref().map(|q| QueryCompletion {
+        commandTag: q.commandTag,
+        nprocessed: q.nprocessed,
+    });
+    let (address, qc_out) = ExecCreateTableAs(mcx, ctas, query_string, params, qc_in)?;
+    if let (Some(slot), Some(filled)) = (qc, qc_out) {
+        *slot = filled;
+    }
+    Ok(address)
+}
+
 /// `create_table_as_rel_exists` inward seam impl.
 fn create_table_as_rel_exists_seam<'mcx>(
     mcx: Mcx<'mcx>,
@@ -933,4 +972,7 @@ pub fn init_seams() {
     backend_commands_createas_seams::create_into_rel_dest_receiver::set(
         create_into_rel_dest_receiver_seam,
     );
+    // The utility dispatcher (ProcessUtilitySlow) reaches ExecCreateTableAs
+    // through tcop-utility-out-seams; install the dispatch-shape adapter.
+    backend_tcop_utility_out_seams::exec_create_table_as::set(exec_create_table_as_utility);
 }

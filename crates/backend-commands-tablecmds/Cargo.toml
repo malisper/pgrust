@@ -56,6 +56,11 @@ backend-access-common-reloptions = { path = "../backend-access-common-reloptions
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-commands-define-seams = { path = "../backend-commands-define-seams" }
 backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
+# create_ctas_relation: createas.c's create_ctas_internal builds the relation
+# (DefineRelation, owned here) then for a matview calls StoreViewQuery (view.c,
+# which depends on tablecmds — crosses the view-seams store_view_query seam).
+backend-commands-createas-seams = { path = "../backend-commands-createas-seams" }
+backend-commands-view-seams = { path = "../backend-commands-view-seams" }
 backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }
 backend-utils-cache-syscache = { path = "../backend-utils-cache-syscache" }
 # GetAttributeCompression (tablecmds.c:22044) resolves a column's

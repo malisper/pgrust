@@ -40,6 +40,10 @@ backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
 
 # Outward dependency seams (callees whose owners are not yet ported).
 backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-depth-seams" }
+# Inward seam this crate installs: the CTAS query-jumble + post-parse-analyze
+# preamble (createas.c 244-249). Owned by the queryjumble / post-parse-analyze
+# layer, which lives here.
+backend-commands-createas-seams = { path = "../backend-commands-createas-seams" }
 
 [dev-dependencies]
 backend-parser-driver = { path = "../backend-parser-driver" }

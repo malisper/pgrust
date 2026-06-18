@@ -52,6 +52,9 @@ use backend_commands_tablecmds_seams as seam;
 pub fn init_seams() {
     seam::define_relation::set(create::define_relation);
     seam::build_desc_for_relation::set(create::build_desc_for_relation);
+    // create_ctas_internal (createas.c): owned here because it calls
+    // DefineRelation + StoreViewQuery (the latter across view-seams).
+    backend_commands_createas_seams::create_ctas_relation::set(create::create_ctas_relation);
     // DefineRelation's reloptions block (transformRelOptions + per-relkind
     // validate, tablecmds.c:930-946). Declared as an outward seam from create.rs
     // but its body — the create-time reloptions transform — is F0-owned here.

@@ -334,6 +334,106 @@ fn transformExplainStmt<'mcx>(
     Ok(result)
 }
 
+/// `transformCreateTableAsStmt(pstate, stmt)` (analyze.c) — transform a
+/// CREATE TABLE AS, SELECT ... INTO, or CREATE MATERIALIZED VIEW statement.
+///
+/// As with DECLARE CURSOR and EXPLAIN, the contained statement is transformed
+/// now; the result is represented as a CMD_UTILITY `Query` wrapping the
+/// `CreateTableAsStmt` (whose `query` now holds the analyzed inner `Query`).
+fn transformCreateTableAsStmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'mcx>,
+    stmt: &types_nodes::ddlnodes::CreateTableAsStmt<'mcx>,
+) -> PgResult<Query<'mcx>> {
+    use types_error::ERRCODE_FEATURE_NOT_SUPPORTED;
+
+    /* transform contained query, not allowing SELECT INTO */
+    let inner = stmt
+        .query
+        .as_deref()
+        .expect("transformCreateTableAsStmt: stmt->query is NULL");
+    let query = transformStmt(mcx, pstate, inner)?;
+
+    /* stmt->query = (Node *) query — rebuild the statement carrying it. */
+    let mut new_stmt = stmt.clone_in(mcx)?;
+
+    /* additional work needed for CREATE MATERIALIZED VIEW */
+    if stmt.objtype == types_nodes::parsenodes::ObjectType::Matview {
+        /*
+         * Prohibit a data-modifying CTE in the query used to create a
+         * materialized view.
+         */
+        if query.hasModifyingCTE {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg("materialized views must not use data-modifying statements in WITH")
+                .into_error());
+        }
+
+        /*
+         * Check whether any temporary database objects are used in the
+         * creation query.
+         */
+        if backend_parser_relation::isQueryUsingTempRelation(mcx, &query)? {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg("materialized views must not use temporary tables or views")
+                .into_error());
+        }
+
+        /*
+         * A materialized view may not be defined using bound parameters.
+         */
+        if backend_parser_small1::query_contains_extern_params(&query) {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg("materialized views may not be defined using bound parameters")
+                .into_error());
+        }
+
+        /*
+         * For now, we disallow unlogged materialized views.
+         * stmt->into->rel->relpersistence == RELPERSISTENCE_UNLOGGED
+         */
+        let persistence = new_stmt
+            .into
+            .as_deref()
+            .and_then(Node::as_intoclause)
+            .and_then(|into| into.rel.as_deref())
+            .and_then(Node::as_rangevar)
+            .map(|rv| rv.relpersistence)
+            .expect("transformCreateTableAsStmt: stmt->into->rel is not a RangeVar");
+        if persistence as u8 == types_tuple::access::RELPERSISTENCE_UNLOGGED {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg("materialized views cannot be unlogged")
+                .into_error());
+        }
+
+        /*
+         * At runtime, we'll need a copy of the parsed-but-not-rewritten Query
+         * for purposes of creating the view's ON SELECT rule.  Stash it in the
+         * IntoClause where intorel_startup() can get it from.
+         */
+        let view_query = query.clone_in(mcx)?;
+        let into = new_stmt
+            .into
+            .as_deref_mut()
+            .and_then(Node::as_intoclause_mut)
+            .expect("transformCreateTableAsStmt: stmt->into is not an IntoClause");
+        into.viewQuery = Some(mcx::alloc_in(mcx, Node::Query(view_query))?);
+    }
+
+    /* stmt->query = (Node *) query */
+    new_stmt.query = Some(mcx::alloc_in(mcx, Node::Query(query))?);
+
+    /* represent the command as a utility Query */
+    let mut result = Query::new(mcx);
+    result.commandType = CmdType::CMD_UTILITY;
+    result.utilityStmt = Some(mcx::alloc_in(mcx, Node::CreateTableAsStmt(new_stmt))?);
+    Ok(result)
+}
+
 /// Helper for the INTO rewrite: clear `intoClause` on the leftmost leaf of a
 /// (possibly set-op) `SelectStmt`, matching the C `stmt->intoClause = NULL`.
 fn clear_leftmost_into(stmt: &mut SelectStmt<'_>) {
@@ -373,11 +473,13 @@ pub fn transformStmt<'mcx>(
         ntag::T_ExplainStmt => transformExplainStmt(mcx, pstate, parse_tree.expect_explainstmt())?,
         ntag::T_DeleteStmt => update_delete::transformDeleteStmt(mcx, pstate, parse_tree.expect_deletestmt())?,
         ntag::T_UpdateStmt => update_delete::transformUpdateStmt(mcx, pstate, parse_tree.expect_updatestmt())?,
+        ntag::T_CreateTableAsStmt => {
+            transformCreateTableAsStmt(mcx, pstate, parse_tree.expect_createtableasstmt())?
+        }
         ntag::T_MergeStmt
         | ntag::T_ReturnStmt
         | ntag::T_PLAssignStmt
         | ntag::T_DeclareCursorStmt
-        | ntag::T_CreateTableAsStmt
         | ntag::T_CallStmt => {
             // The remaining DML / special-statement transforms are a follow-on
             // family; they are not reachable on the SELECT/INSERT-milestone path.
@@ -385,7 +487,7 @@ pub fn transformStmt<'mcx>(
             panic!(
                 "transformStmt: DML/special statement (tag {:?}) is in the \
                  follow-on family (transformUpdate/Delete/Merge/Return/\
-                 PLAssign/DeclareCursor/CreateTableAs/Call) — not yet \
+                 PLAssign/DeclareCursor/Call) — not yet \
                  ported (analyze.c:312)",
                 parse_tree.tag()
             );
@@ -486,6 +588,23 @@ pub fn init_seams() {
     backend_parser_analyze_seams::run_post_parse_analyze_hook::set(
         run_post_parse_analyze_hook_impl,
     );
+    // CTAS query-jumble + post-parse-analyze preamble (createas.c 244-249):
+    //   if (IsQueryIdEnabled()) jstate = JumbleQuery(query);
+    //   if (post_parse_analyze_hook) (*post_parse_analyze_hook)(pstate, query, jstate);
+    // queryId jumbling is unported (queryId stays 0, jstate NULL) and the hook is
+    // NULL by default, so this is the same no-op as run_post_parse_analyze_hook.
+    backend_commands_createas_seams::jumble_and_post_analyze::set(jumble_and_post_analyze_impl);
+}
+
+/// Seam impl for the CTAS jumble + post-parse-analyze preamble (createas.c
+/// 244-249). With query-id jumbling unported and the post-parse-analyze hook
+/// NULL by default, both C `if` guards fall through, so this is a no-op.
+fn jumble_and_post_analyze_impl<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _query: &Query<'mcx>,
+    _query_string: &str,
+) -> PgResult<()> {
+    Ok(())
 }
 
 /// Seam impl for the post-parse-analyze hook (analyze.c:127/169/206). The hook

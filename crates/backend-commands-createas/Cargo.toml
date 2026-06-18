@@ -26,6 +26,8 @@ types-matview = { path = "../types-matview" }
 
 # This crate's inward seam crate.
 backend-commands-createas-seams = { path = "../backend-commands-createas-seams" }
+# The utility dispatcher's inward entry seam for ExecCreateTableAs.
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 
 # Error vocabulary.
 backend-utils-error = { path = "../backend-utils-error" }

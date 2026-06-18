@@ -780,5 +780,6 @@ fn define_view_from_node<'mcx>(
 /// this crate owns.
 pub fn init_seams() {
     seam::define_view::set(DefineView);
+    seam::store_view_query::set(StoreViewQuery);
     backend_tcop_utility_out_seams::define_view::set(define_view_from_node);
 }
