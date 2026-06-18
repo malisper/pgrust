@@ -102,11 +102,11 @@ pub fn lock_table_command(lockstmt: &LockStmt) -> PgResult<()> {
      */
     for p in lockstmt.relations.iter() {
         // RangeVar *rv = (RangeVar *) lfirst(p);
-        let rv: RangeVar = match &**p {
-            Node::RangeVar(rv) => to_access_range_var(rv),
-            other => panic!(
+        let rv: RangeVar = match p.as_rangevar() {
+            Some(rv) => to_access_range_var(rv),
+            None => panic!(
                 "LockTableCommand: LockStmt.relations element is not a RangeVar (tag {:?})",
-                other.node_tag()
+                p.node_tag()
             ),
         };
         let recurse = rv.inh; /* bool recurse = rv->inh; */
