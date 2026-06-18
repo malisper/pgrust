@@ -1492,6 +1492,73 @@ pub fn seam_numeric_subdiff_bytes(a: &[u8], b: &[u8]) -> PgResult<f64> {
     numeric_to_float8(&diff)
 }
 
+/// `numeric_int4_opt_error(num, NULL)` body (numeric.c:4516): cast an on-disk
+/// `numeric` to `int4`, rounding to nearest. NaN/infinity raise
+/// "cannot convert {NaN,infinity} to integer"; out-of-range raises
+/// "integer out of range".
+pub fn seam_numeric_int4(num: &[u8]) -> PgResult<i32> {
+    if numeric_is_special(num) {
+        return Err(special_to_int_error(num, "integer"));
+    }
+    let ctx = mcx::MemoryContext::new("numeric_int4 scratch");
+    let mcx = ctx.mcx();
+    let x = set_var_from_num(mcx, num)?;
+    match crate::convert::numericvar_to_int32(&x)? {
+        Some(v) => Ok(v),
+        None => Err(PgError::error("integer out of range")
+            .with_sqlstate(types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)),
+    }
+}
+
+/// `numeric_int8_opt_error(num, NULL)` body (numeric.c:4604): cast an on-disk
+/// `numeric` to `int8`, rounding to nearest. NaN/infinity raise
+/// "cannot convert {NaN,infinity} to bigint"; out-of-range raises
+/// "bigint out of range".
+pub fn seam_numeric_int8(num: &[u8]) -> PgResult<i64> {
+    if numeric_is_special(num) {
+        return Err(special_to_int_error(num, "bigint"));
+    }
+    let ctx = mcx::MemoryContext::new("numeric_int8 scratch");
+    let mcx = ctx.mcx();
+    let x = set_var_from_num(mcx, num)?;
+    match numericvar_to_int64(&x)? {
+        Some(v) => Ok(v),
+        None => Err(PgError::error("bigint out of range")
+            .with_sqlstate(types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)),
+    }
+}
+
+/// `numeric_int2` body (numeric.c:4672): cast an on-disk `numeric` to `int2`,
+/// rounding to nearest. NaN/infinity raise "cannot convert {NaN,infinity} to
+/// smallint"; out-of-range raises "smallint out of range".
+pub fn seam_numeric_int2(num: &[u8]) -> PgResult<i16> {
+    if numeric_is_special(num) {
+        return Err(special_to_int_error(num, "smallint"));
+    }
+    let ctx = mcx::MemoryContext::new("numeric_int2 scratch");
+    let mcx = ctx.mcx();
+    let x = set_var_from_num(mcx, num)?;
+    let val = match numericvar_to_int64(&x)? {
+        Some(v) => v,
+        None => {
+            return Err(PgError::error("smallint out of range")
+                .with_sqlstate(types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE))
+        }
+    };
+    if val < i16::MIN as i64 || val > i16::MAX as i64 {
+        return Err(PgError::error("smallint out of range")
+            .with_sqlstate(types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE));
+    }
+    Ok(val as i16)
+}
+
+/// The shared NaN/infinity error for the `numeric_int{2,4,8}` special arm.
+fn special_to_int_error(num: &[u8], type_name: &str) -> PgError {
+    let what = if numeric_is_nan(num) { "NaN" } else { "infinity" };
+    PgError::error(format!("cannot convert {what} to {type_name}"))
+        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+}
+
 /// Recover the on-disk `numeric` byte image a pointer-bearing `Datum` refers
 /// to. Reads `VARSIZE_4B` from the varlena header to determine the length.
 ///

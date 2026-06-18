@@ -95,6 +95,12 @@ pub fn init_seams() {
     seams::numeric_subdiff::set(ops_sql::seam_numeric_subdiff);
     seams::numeric_subdiff_bytes::set(ops_sql::seam_numeric_subdiff_bytes);
 
+    // numeric->integer casts (numeric.c numeric_int2/4/8): slots declared in
+    // jsonb-seams (jsonb.c is the consumer), owned and installed here.
+    backend_utils_adt_jsonb_seams::numeric_int2::set(ops_sql::seam_numeric_int2);
+    backend_utils_adt_jsonb_seams::numeric_int4::set(ops_sql::seam_numeric_int4);
+    backend_utils_adt_jsonb_seams::numeric_int8::set(ops_sql::seam_numeric_int8);
+
     // Register this unit's SQL-callable functions into the fmgr-core builtin
     // table (C: fmgr_builtins[]), so by-OID dispatch resolves them.
     fmgr_builtins::register_numeric_builtins();

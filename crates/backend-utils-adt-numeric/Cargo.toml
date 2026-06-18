@@ -25,6 +25,11 @@ common-hashfn = { path = "../common-hashfn" }
 # outbound numeric_abbrev_add_sample seam reached from the sort-support abbrev.
 backend-utils-adt-numeric-seams = { path = "../backend-utils-adt-numeric-seams" }
 
+# The numeric->integer cast boundary (numeric_int2/4/8) is a numeric.c function
+# that jsonb.c reaches; the slots are declared in jsonb-seams but numeric.c is
+# their true owner, so this crate installs them cross-crate from init_seams().
+backend-utils-adt-jsonb-seams = { path = "../backend-utils-adt-jsonb-seams" }
+
 # The real backend PRNG (xoroshiro128**) for random_numeric/random_var. The
 # `pg_prng_state` threaded in by the SQL random() setup is `pg_prng::PgPrng`.
 pg-prng = { path = "../pg-prng" }

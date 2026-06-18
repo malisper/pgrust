@@ -18683,6 +18683,7 @@ dependencies = [
 name = "backend-utils-adt-numeric"
 version = "0.0.0"
 dependencies = [
+ "backend-utils-adt-jsonb-seams",
  "backend-utils-adt-numeric-seams",
  "backend-utils-fmgr-core",
  "common-hashfn",
