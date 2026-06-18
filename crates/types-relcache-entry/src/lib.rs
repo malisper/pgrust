@@ -372,6 +372,53 @@ pub struct RuleLock {
     pub rules: mcx::PgVec<'static, RewriteRule>,
 }
 
+/// `RowSecurityPolicy` (`rewrite/rowsecurity.h`) — one row-level-security policy
+/// attached to a relation, the unit `get_row_security_policies` reads off
+/// `rd_rsdesc->policies`.
+///
+/// Cache-ownership keystone (mirrors [`RewriteRule`]): the `qual` /
+/// `with_check_qual` expression trees are loaded by `RelationBuildRowSecurity`
+/// via `stringToNode(polqual)` / `stringToNode(polwithcheck)` and live for the
+/// relcache entry's (backend's) lifetime in the process-lifetime
+/// CacheMemoryContext arena — exactly the C `MemoryContextSetParent(rscxt,
+/// CacheMemoryContext)`. So they are carried as `'static`-bound owned trees, not
+/// raw pointers. The C `ArrayType *roles` is stored decoded into its element
+/// `Oid[]` (the only thing `check_role_for_policy` reads — the `polroles`
+/// array's element values).
+pub struct RowSecurityPolicy {
+    /// `char *policy_name` — name of the policy (`NameStr(polname)`).
+    pub policy_name: mcx::PgString<'static>,
+    /// `char polcmd` — `pg_policy.polcmd` (`'r'`/`'a'`/`'w'`/`'d'`/`'*'`).
+    pub polcmd: i8,
+    /// `ArrayType *roles` — the policy's roles, decoded to their `Oid[]`
+    /// elements (`DatumGetArrayTypePCopy(polroles)`).
+    pub roles: mcx::PgVec<'static, Oid>,
+    /// `bool permissive` — restrictive or permissive policy (`polpermissive`).
+    pub permissive: bool,
+    /// `Expr *qual` — `stringToNode(polqual)`, the row-filter expression, or
+    /// `None` for the C `NULL`. Cached in the CacheMemoryContext arena.
+    pub qual: Option<mcx::PgBox<'static, types_nodes::nodes::Node<'static>>>,
+    /// `Expr *with_check_qual` — `stringToNode(polwithcheck)`, the
+    /// WITH CHECK expression, or `None`. Cached in the CacheMemoryContext arena.
+    pub with_check_qual: Option<mcx::PgBox<'static, types_nodes::nodes::Node<'static>>>,
+    /// `bool hassublinks` — does either expression contain a SubLink?
+    /// (`checkExprHasSubLink(qual) || checkExprHasSubLink(with_check_qual)`).
+    pub hassublinks: bool,
+}
+
+/// `RowSecurityDesc` (`rewrite/rowsecurity.h`) — the set of row-security
+/// policies attached to a relation, the C `RowSecurityDesc *rd_rsdesc`.
+///
+/// The C struct carries `MemoryContext rscxt` (the per-descriptor context that
+/// is reparented under `CacheMemoryContext`); here the whole structure lives in
+/// the process-lifetime CacheMemoryContext arena, so the context identity is
+/// implicit in the `'static` lifetime and is not separately stored.
+pub struct RowSecurityDesc {
+    /// `List *policies` — the policies, in the reverse name order
+    /// `RelationBuildRowSecurity` builds them (C uses `lcons`, prepending).
+    pub policies: mcx::PgVec<'static, RowSecurityPolicy>,
+}
+
 /// `struct RelationData` (`utils/rel.h`) — the real, mutable relcache entry.
 ///
 /// Field order and names mirror the C struct (see `src/include/utils/rel.h`).
@@ -444,7 +491,16 @@ pub struct RelationData {
     /// readers (`with_rel(|r| r.rd_has_trigdesc)`) and the C `relhastriggers`
     /// reconciliation stay cheap.
     pub rd_has_trigdesc: bool,
-    /// `RowSecurityDesc *rd_rsdesc`. Presence only (seam vocabulary).
+    /// `RowSecurityDesc *rd_rsdesc` — the relation's row-security policies,
+    /// built by `RelationBuildRowSecurity` (commands/policy.c) when
+    /// `pg_class.relrowsecurity` is set. The descriptor and its policy
+    /// expression trees are allocated in the process-lifetime CacheMemoryContext
+    /// arena, so they live for the entry's (backend's) lifetime exactly as C
+    /// reparents `rscxt` under `CacheMemoryContext`. `None` is the C
+    /// `rd_rsdesc == NULL` (RLS disabled, or no policies were found).
+    pub rd_rsdesc: Option<mcx::PgBox<'static, RowSecurityDesc>>,
+    /// `bool` mirror of `rd_rsdesc != NULL` — the relcache build family's
+    /// presence flag, kept alongside [`Self::rd_rsdesc`] for cheap seam reads.
     pub rd_has_rsdesc: bool,
 
     /// `List *rd_fkeylist` (managed by `RelationGetFKeyList`); presence flag.
