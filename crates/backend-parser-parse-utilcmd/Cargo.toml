@@ -14,6 +14,7 @@ seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
+types-parsenodes = { path = "../types-parsenodes" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-nodes-core = { path = "../backend-nodes-core" }
 
@@ -34,5 +35,16 @@ backend-nodes-equalfuncs = { path = "../backend-nodes-equalfuncs" }
 
 # ParseState setup (make_parsestate) — reachable owner.
 backend-parser-small1 = { path = "../backend-parser-small1" }
+
+# Type / collation lookups for transformColumnType (typenameType /
+# LookupCollation / typeTypeCollation) — cycle-free reachable owner.
+backend-parser-parse-type = { path = "../backend-parser-parse-type" }
+
+# format_type_be for the uncollatable-type error detail — cycle-free leaf.
+backend-utils-adt-format-type = { path = "../backend-utils-adt-format-type" }
+
+# quote_qualified_identifier for the SERIAL nextval('...') default text —
+# cycle-free leaf.
+backend-utils-adt-ruleutils = { path = "../backend-utils-adt-ruleutils" }
 
 [dev-dependencies]

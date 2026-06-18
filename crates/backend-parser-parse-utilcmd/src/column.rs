@@ -6,8 +6,9 @@
 //! GENERATED / PRIMARY / UNIQUE / CHECK / FOREIGN bucketing and the mutually-
 //! exclusive-clause checks) is fully node-independent and ported 1:1. The
 //! catalog-bound leaves — column-type / COLLATE validation
-//! ([`transformColumnType`]), the SERIAL / IDENTITY sequence generation
-//! ([`generateSerialExtraStmts`]) — cross the outward seams.
+//! ([`crate::coltype::transformColumnType`], grounded in-crate) and the SERIAL /
+//! IDENTITY sequence generation ([`generateSerialExtraStmts`], still seamed:
+//! its ALTER leg reads a live relcache `Relation` the context model omits).
 
 use mcx::{Mcx, PgString, PgVec};
 
@@ -96,7 +97,7 @@ pub fn transformColumnDefinition<'mcx>(
     // the type + any COLLATE via the seam).
     if column.typeName.is_some() {
         let column_node = mcx::alloc_in(mcx, Node::ColumnDef(column.clone_in(mcx)?))?;
-        sx::transformColumnType::call(mcx, &cxt.pstate, column_node.as_ref())?;
+        crate::coltype::transformColumnType(mcx, &cxt.pstate, column_node.as_ref())?;
     }
 
     // Special actions for SERIAL pseudo-types.
@@ -132,8 +133,11 @@ pub fn transformColumnDefinition<'mcx>(
         // nextval('sequencename')::regclass, and build the CONSTR_DEFAULT for it.
         let snamespace_str = snamespace.as_ref().map(PgString::as_str);
         let sname_str = sname.as_ref().map_or("", PgString::as_str);
-        let qstring =
-            sx::quote_qualified_identifier::call(mcx, snamespace_str, sname_str)?;
+        let qstring = backend_utils_adt_ruleutils::quote_qualified_identifier(
+            mcx,
+            snamespace_str,
+            sname_str,
+        )?;
 
         let snamenode = A_Const {
             // snamenode->val.node.type = T_String; snamenode->val.sval.sval = qstring;
@@ -349,7 +353,8 @@ pub fn transformColumnDefinition<'mcx>(
 
                 // ctype = typenameType(...); typeOid = ctype->oid (catalog seam).
                 let column_node = mcx::alloc_in(mcx, Node::ColumnDef(column.clone_in(mcx)?))?;
-                let type_oid = sx::transformColumnType::call(mcx, &cxt.pstate, column_node.as_ref())?;
+                let type_oid =
+                    crate::coltype::transformColumnType(mcx, &cxt.pstate, column_node.as_ref())?;
 
                 if saw_identity {
                     return Err(ereport(ERROR)

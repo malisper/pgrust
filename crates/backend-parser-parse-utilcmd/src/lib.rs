@@ -34,6 +34,7 @@ extern crate alloc;
 pub mod core;
 mod errpos;
 
+pub mod coltype;
 pub mod column;
 pub mod constraint;
 pub mod fk_check_attrs;

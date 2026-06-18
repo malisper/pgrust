@@ -12987,16 +12987,20 @@ version = "0.0.0"
 dependencies = [
  "backend-nodes-core",
  "backend-nodes-equalfuncs",
+ "backend-parser-parse-type",
  "backend-parser-parse-utilcmd-outward-seams",
  "backend-parser-parse-utilcmd-seams",
  "backend-parser-small1",
  "backend-tcop-utility-out-seams",
+ "backend-utils-adt-format-type",
+ "backend-utils-adt-ruleutils",
  "backend-utils-error",
  "mcx",
  "seam-core",
  "types-core",
  "types-error",
  "types-nodes",
+ "types-parsenodes",
 ]
 
 [[package]]
