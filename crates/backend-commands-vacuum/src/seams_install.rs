@@ -154,6 +154,12 @@ pub fn init_seams() {
         vacuum::vacuum_max_eager_freeze_failure_rate::set(|| {
             Ok(vars::vacuum_max_eager_freeze_failure_rate.read())
         });
+        vacuum::vacuum_buffer_usage_limit::set(|| Ok(vars::VacuumBufferUsageLimit.read()));
+        // AmAutoVacuumWorkerProcess() (miscadmin.h): MyBackendType == B_AUTOVAC_WORKER.
+        vacuum::am_autovacuum_worker_process::set(|| {
+            Ok(backend_utils_init_miscinit_seams::my_backend_type::call()
+                == types_core::init::BackendType::AutovacWorker)
+        });
         vacuum::track_cost_delay_timing::set(|| Ok(vars::track_cost_delay_timing.read()));
         vacuum::vacuum_truncate::set(|| Ok(vars::vacuum_truncate.read()));
 
