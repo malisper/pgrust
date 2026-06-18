@@ -52,15 +52,41 @@ fn install_once() {
         // Hook slots the report test's `application_name` SET reaches: install
         // trivial accept-everything bodies (the real hooks live in their
         // owners). check accepts; assign is a no-op.
-        use backend_utils_misc_guc_tables::hooks;
+        use backend_utils_misc_guc_tables::{hooks, vars, GucVarAccessors};
+        use std::sync::atomic::Ordering;
         hooks::check_application_name.install(|_v, _e, _s| Ok(true));
         hooks::assign_application_name.install(|_v, _e| {});
         // `client_encoding` hooks: the SIGHUP apply path re-sets it with the
         // dynamic default, reaching its check/assign slots.
         hooks::check_client_encoding.install(|_v, _e, _s| Ok(true));
         hooks::assign_client_encoding.install(|_v, _e| {});
+
+        // `max_stack_depth` (PGC_SUSET, GUC_UNIT_KB) — the GUC whose assign hook
+        // must fire when the value comes from postgresql.conf (PGC_S_FILE) or a
+        // `-c` switch at backend start, so the stack-depth guard sees the
+        // configured byte limit and not the 100kB boot default. The real bodies
+        // live in backend-utils-misc-stack-depth (which this crate cannot depend
+        // on); install lightweight stand-ins that record the value the deferred
+        // assign hook is fired with, which is exactly what the real
+        // `assign_max_stack_depth` consumes.
+        hooks::check_max_stack_depth.install(|_v, _e, _s| Ok(true));
+        hooks::assign_max_stack_depth
+            .install(|newval, _e| MAX_STACK_DEPTH_ASSIGNED.store(newval, Ordering::SeqCst));
+        vars::max_stack_depth.install(GucVarAccessors {
+            get: || MAX_STACK_DEPTH_VAR.load(Ordering::SeqCst),
+            set: |v| MAX_STACK_DEPTH_VAR.store(v, Ordering::SeqCst),
+        });
     });
 }
+
+/// The last value the `max_stack_depth` assign hook was fired with (the input
+/// the real `assign_max_stack_depth` would convert to `max_stack_depth_bytes`).
+static MAX_STACK_DEPTH_ASSIGNED: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(0);
+/// Live storage for the `max_stack_depth` GUC var slot (the `*conf->variable`
+/// the GUC machinery writes).
+static MAX_STACK_DEPTH_VAR: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(100);
 
 /// A minimal `parse_bool` matching the C `on`/`off`/`true`/`false`/`1`/`0`
 /// surface the SET path needs (the real owner is adt-scalar; the test installs
@@ -248,6 +274,82 @@ fn apply_config_variables_round_trip() {
     .expect("reload should not throw");
     assert!(ok);
     assert_eq!(get_int("bgwriter_lru_maxpages"), Some(100));
+}
+
+#[test]
+fn config_file_value_reaches_max_stack_depth_assign_hook() {
+    use std::sync::atomic::Ordering;
+    let _guard = GUC_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    install_once();
+    initialize_guc_options();
+
+    // initialize_guc_options fired the boot assign hook (boot_val 100) and the
+    // var slot was seeded to 100. (Re-read from the slot rather than asserting,
+    // since the serialized suite shares these process-global statics.)
+    MAX_STACK_DEPTH_ASSIGNED.store(0, Ordering::SeqCst);
+
+    // Apply a postgresql.conf value (PGC_S_FILE) the way ProcessConfigFile does.
+    // max_stack_depth is PGC_SUSET, so a PGC_S_FILE set applies at backend start.
+    let mut items = vec![ConfigItem {
+        name: "max_stack_depth".into(),
+        value: "7000".into(),
+        filename: "postgresql.conf".into(),
+        sourceline: 2,
+        ignore: false,
+        applied: false,
+        errmsg: None,
+    }];
+    let mut conf_file = "postgresql.conf".to_string();
+    let ok = crate::apply_config_variables(
+        &mut items,
+        PGC_POSTMASTER,
+        true,
+        ErrorLevel(0),
+        &mut conf_file,
+        0,
+    )
+    .expect("apply should not throw");
+    assert!(ok, "no error expected");
+    assert!(items[0].applied, "the setting should be marked applied");
+
+    // The live var slot now holds 7000, and — the regression this guards — the
+    // deferred assign hook fired with 7000 (not the 100kB boot default). The
+    // real assign_max_stack_depth converts this to max_stack_depth_bytes, so a
+    // configured value taking effect here is what the stack-depth guard reads.
+    assert_eq!(get_int("max_stack_depth"), Some(7000));
+    assert_eq!(MAX_STACK_DEPTH_VAR.load(Ordering::SeqCst), 7000);
+    assert_eq!(
+        MAX_STACK_DEPTH_ASSIGNED.load(Ordering::SeqCst),
+        7000,
+        "the config-file value must reach assign_max_stack_depth"
+    );
+}
+
+#[test]
+fn command_line_value_reaches_max_stack_depth_assign_hook() {
+    use std::sync::atomic::Ordering;
+    let _guard = GUC_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    install_once();
+    initialize_guc_options();
+
+    // The `-c max_stack_depth=7000` path: process_postgres_switches applies the
+    // switch via SetConfigOption(..., PGC_S_ARGV). Drive the equivalent set and
+    // confirm the assign hook fires with the switch value.
+    let rc = set_config_option_global(
+        "max_stack_depth",
+        Some("6000"),
+        types_guc::PGC_SUSET,
+        types_guc::PGC_S_ARGV,
+        BOOTSTRAP_SUPERUSERID,
+        crate::GUC_ACTION_SET,
+        true,
+        ERROR,
+        false,
+    )
+    .expect("SET max_stack_depth from -c should apply");
+    assert_eq!(rc, 1);
+    assert_eq!(MAX_STACK_DEPTH_VAR.load(Ordering::SeqCst), 6000);
+    assert_eq!(MAX_STACK_DEPTH_ASSIGNED.load(Ordering::SeqCst), 6000);
 }
 
 #[test]
