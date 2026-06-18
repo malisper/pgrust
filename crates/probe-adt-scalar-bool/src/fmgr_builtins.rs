@@ -11,15 +11,16 @@
 //! dispatch resolves them. OIDs / nargs / strict / retset are transcribed
 //! exactly from `pg_proc.dat` (all are `proisstrict => 't'`, none retset).
 //!
-//! Not registered here: `boolrecv` (oid 2436) is not in the requested set; the
-//! moving-aggregate inverse / final functions (`bool_accum`, `bool_accum_inv`,
-//! `bool_alltrue`, `bool_anytrue`) take/return the `internal` `BoolAggState`
-//! pointer, which is not expressible at the fmgr boundary here.
+//! Not registered here: the moving-aggregate inverse / final functions
+//! (`bool_accum`, `bool_accum_inv`, `bool_alltrue`, `bool_anytrue`) take/return
+//! the `internal` `BoolAggState` pointer, which is not expressible at the fmgr
+//! boundary here.
 
 use mcx::MemoryContext;
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
 use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_stringinfo::StringInfo;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -45,6 +46,17 @@ fn arg_cstring<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
         .ref_arg(i)
         .and_then(|p| p.as_cstring())
         .expect("bool fn: cstring arg missing from by-ref lane")
+}
+
+/// A `bytea` / serialized arg's `VARDATA_ANY` payload (header already stripped
+/// by the boundary): the wire bytes a `recv` function reads off the
+/// `StringInfo`.
+#[inline]
+fn arg_varlena<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("bool fn: by-ref arg missing from by-ref lane")
 }
 
 #[inline]
@@ -104,6 +116,25 @@ fn fc_boolout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     // C: boolout palloc's a 2-byte cstring ("t"/"f"). The owned core returns the
     // static spelling; ret_cstring copies it onto the by-ref lane.
     ret_cstring(fcinfo, crate::boolout(b).into())
+}
+
+fn fc_boolrecv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    // C: boolrecv reads one byte off the StringInfo and returns `ext != 0`. The
+    // wire payload arrives on the by-ref lane (header already stripped); copy it
+    // into a scratch StringInfo so pq_getmsgbyte can consume it, mirroring
+    // charrecv.
+    let m = scratch_mcx();
+    let src = arg_varlena(fcinfo, 0);
+    let mut data = mcx::PgVec::new_in(m.mcx());
+    if data.try_reserve(src.len()).is_err() {
+        raise(types_error::PgError::error("out of memory"));
+    }
+    data.extend_from_slice(src);
+    let mut buf = StringInfo::from_vec(data);
+    match crate::boolrecv(&mut buf) {
+        Ok(b) => ret_bool(b),
+        Err(e) => raise(e),
+    }
 }
 
 fn fc_boolsend(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
@@ -197,6 +228,7 @@ pub fn register_probe_adt_scalar_bool_builtins() {
         // ---- I/O + cast ----
         builtin(1242, "boolin", 1, fc_boolin),
         builtin(1243, "boolout", 1, fc_boolout),
+        builtin(2436, "boolrecv", 1, fc_boolrecv),
         builtin(2437, "boolsend", 1, fc_boolsend),
         builtin(2971, "text", 1, fc_booltext),
         // ---- comparison operators ----
