@@ -126,7 +126,7 @@ pub(crate) fn transform_and_check_reloptions<'mcx>(
     let mut astate: Vec<String> = Vec::new();
 
     for opt in options {
-        let Node::DefElem(def) = &**opt else {
+        let Some(def) = opt.as_defelem() else {
             // CreateStmt.options is a List of DefElem (gram.y); a non-DefElem
             // would be a parser invariant violation.
             unreachable!("CreateStmt.options element is not a DefElem");
@@ -271,7 +271,7 @@ pub fn create_toast_for_relation<'mcx>(
     let mut astate: Vec<String> = Vec::new();
 
     for opt in options.iter() {
-        let Node::DefElem(def) = &**opt else {
+        let Some(def) = opt.as_defelem() else {
             unreachable!("CreateStmt.options element is not a DefElem");
         };
         let defname = def.defname.as_deref().unwrap_or("");

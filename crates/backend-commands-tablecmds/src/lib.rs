@@ -110,7 +110,7 @@ use types_nodes::nodes::Node;
 /// `case T_TruncateStmt: ExecuteTruncate(stmt)` (utility.c). The dispatch carries
 /// the parse tree as `&Node`; extract the `TruncateStmt` variant and forward.
 fn execute_truncate_arm<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<()> {
-    let Node::TruncateStmt(s) = stmt else {
+    let Some(s) = stmt.as_truncatestmt() else {
         panic!("execute_truncate: parse tree is not a TruncateStmt");
     };
     truncate::execute_truncate(mcx, s)
@@ -119,7 +119,7 @@ fn execute_truncate_arm<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<()>
 /// `ExecDropStmt → RemoveRelations(stmt)` (utility.c) for the relation removeType
 /// legs (TABLE/SEQUENCE/VIEW/MATVIEW/FOREIGN TABLE/INDEX).
 fn remove_relations_arm<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<()> {
-    let Node::DropStmt(s) = stmt else {
+    let Some(s) = stmt.as_dropstmt() else {
         panic!("remove_relations: parse tree is not a DropStmt");
     };
     drop::remove_relations(mcx, s)
@@ -141,7 +141,7 @@ fn alter_table_slow_arm<'mcx>(
     _params: types_nodes::portalcmds::ParamListInfo,
     is_top_level: bool,
 ) -> PgResult<()> {
-    let Node::AlterTableStmt(atstmt) = parsetree else {
+    let Some(atstmt) = parsetree.as_altertablestmt() else {
         panic!("alter_table_slow: parse tree is not an AlterTableStmt");
     };
 
