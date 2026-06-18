@@ -1747,6 +1747,17 @@ pub fn init_seams() {
     seams::xact_iso_level::set(XactIsoLevel);
     // `int synchronous_commit` (xact.c GUC) — read by walsender's SyncRepRequested.
     seams::synchronous_commit::set(synchronous_commit);
+    // The GUC variable storage slot for `synchronous_commit` (guc_tables.c
+    // defines it in WAL_SETTINGS; the backing `int synchronous_commit` lives in
+    // xact.c). The GUC core / SyncRepRequested read it via `vars::`; install the
+    // accessors backed by the xact-state field so the GUC `set` writes through
+    // and reads see the live value.
+    backend_utils_misc_guc_tables::vars::synchronous_commit.install(
+        backend_utils_misc_guc_tables::GucVarAccessors {
+            get: synchronous_commit,
+            set: SetSynchronousCommit,
+        },
+    );
     // GUC default_transaction_* backing-variable accessors (guc_tables.c reads
     // the slot vars DefaultXactReadOnly/DefaultXactDeferrable/DefaultXactIsoLevel,
     // which StartTransaction copies into the per-xact XactReadOnly/Deferrable/IsoLevel).
