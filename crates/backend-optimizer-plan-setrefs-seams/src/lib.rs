@@ -31,20 +31,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// Copy the `RTEPermissionInfo` payload at `src_index` of a query's
-    /// `rteperminfos` into `glob->finalrteperminfos` (the `add_rte_to_flat_rtable`
-    /// `addRTEPermissionInfo` + `memcpy` step). parse_relation owns the perminfo
-    /// list, which is carried here as opaque `NodeId` handles, so the copy is
-    /// performed by the owner. `new_index` is the 0-based slot the new perminfo
-    /// will occupy (= `newrte->perminfoindex - 1`).
-    pub fn copy_rte_permission_info(
-        finalrteperminfos: &mut alloc::vec::Vec<types_pathnodes::NodeId>,
-        new_index: usize,
-        src_index: usize,
-    ) -> types_error::PgResult<()>
-);
-
-seam_core::seam!(
     /// `IS_DUMMY_REL(fetch_upper_rel(subroot, UPPERREL_FINAL, NULL))`
     /// (`add_rtes_to_flat_rtable`) — is the subquery's final upper rel dummy?
     /// The upper-rel fetch + dummy test lives with the path/relnode owner.

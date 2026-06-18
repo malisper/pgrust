@@ -1684,3 +1684,157 @@ pub fn SS_make_initplan_from_plan<'mcx>(
     root.init_plans.push(nid);
     Ok(())
 }
+
+// ===========================================================================
+// resolve_cte_subplan / resolve_worktable_param
+//   (the SubPlan-init resolution legs of create_ctescan_plan /
+//   create_worktablescan_plan, createplan.c:3884 / :4055). These dereference
+//   the init SubPlans / `wt_param_id` built here by SS_process_ctes, so
+//   subselect.c (this unit) owns them and installs them into createplan-seams.
+// ===========================================================================
+
+/// `create_ctescan_plan`'s CTE-`SubPlan` resolution leg (createplan.c:3884):
+/// walk `cteroot->parse->cteList` to find the referenced CTE's index, read its
+/// `plan_id` from `cteroot->cte_plan_ids`, locate the matching init `SubPlan` in
+/// `cteroot->init_plans`, and return `(plan_id, cte_param_id)` where
+/// `cte_param_id = linitial_int(ctesplan->setParam)`.
+pub fn resolve_cte_subplan<'mcx>(
+    root: &PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    scan_relid: u32,
+) -> PgResult<(i32, i32)> {
+    debug_assert!(scan_relid > 0);
+    let rte = types_pathnodes::planner_run::planner_rt_fetch(run, root, scan_relid);
+    debug_assert_eq!(rte.rtekind, types_nodes::parsenodes::RTEKind::RTE_CTE);
+    debug_assert!(!rte.self_reference);
+
+    let ctename = rte
+        .ctename
+        .as_ref()
+        .map(|s| s.as_str().to_string())
+        .unwrap_or_default();
+
+    // levelsup = rte->ctelevelsup; cteroot = root; while (levelsup-- > 0) cteroot
+    // = cteroot->parent_root.
+    let mut cteroot: &PlannerInfo = root;
+    let mut levelsup = rte.ctelevelsup;
+    while levelsup > 0 {
+        levelsup -= 1;
+        cteroot = cteroot
+            .parent_root
+            .as_deref()
+            .ok_or_else(|| elog_error(alloc::format!("bad levelsup for CTE \"{ctename}\"")))?;
+    }
+
+    // ndx = index of the matching CTE in cteroot->parse->cteList.
+    let mut ndx: usize = 0;
+    let mut found = false;
+    {
+        let parse = run.resolve(cteroot.parse);
+        for cte_node in parse.cteList.iter() {
+            let cte = match &**cte_node {
+                Node::CommonTableExpr(c) => c,
+                _ => return Err(elog_error("cteList element is not a CommonTableExpr")),
+            };
+            let this_name = cte.ctename.as_ref().map(|s| s.as_str()).unwrap_or("");
+            if this_name == ctename {
+                found = true;
+                break;
+            }
+            ndx += 1;
+        }
+    }
+    if !found {
+        return Err(elog_error(alloc::format!(
+            "could not find CTE \"{ctename}\""
+        )));
+    }
+    if ndx >= cteroot.cte_plan_ids.len() {
+        return Err(elog_error(alloc::format!(
+            "could not find plan for CTE \"{ctename}\""
+        )));
+    }
+    let plan_id = cteroot.cte_plan_ids[ndx];
+    if plan_id <= 0 {
+        return Err(elog_error(alloc::format!(
+            "no plan was made for CTE \"{ctename}\""
+        )));
+    }
+
+    // Find the init SubPlan whose plan_id matches; cte_param_id =
+    // linitial_int(ctesplan->setParam).
+    for &ipl in &cteroot.init_plans {
+        if let Expr::SubPlan(splan) = cteroot.node(ipl) {
+            if splan.0.plan_id == plan_id {
+                let cte_param_id = *splan
+                    .0
+                    .setParam
+                    .first()
+                    .ok_or_else(|| elog_error("CTE SubPlan has empty setParam"))?;
+                return Ok((plan_id, cte_param_id));
+            }
+        }
+    }
+    Err(elog_error(alloc::format!(
+        "could not find plan for CTE \"{ctename}\""
+    )))
+}
+
+/// `create_worktablescan_plan`'s work-table-`Param` resolution leg
+/// (createplan.c:4055): walk to the plan level one below where the CTE comes
+/// from and return its `cteroot->wt_param_id`.
+pub fn resolve_worktable_param(
+    root: &PlannerInfo,
+    _run: &PlannerRun<'_>,
+    scan_relid: u32,
+) -> PgResult<i32> {
+    debug_assert!(scan_relid > 0);
+    let rte = types_pathnodes::planner_run::planner_rt_fetch(_run, root, scan_relid);
+    debug_assert_eq!(rte.rtekind, types_nodes::parsenodes::RTEKind::RTE_CTE);
+    debug_assert!(rte.self_reference);
+
+    let ctename = rte
+        .ctename
+        .as_ref()
+        .map(|s| s.as_str().to_string())
+        .unwrap_or_default();
+
+    // levelsup = rte->ctelevelsup; if (levelsup == 0) error; levelsup--; then walk.
+    let mut levelsup = rte.ctelevelsup;
+    if levelsup == 0 {
+        return Err(elog_error(alloc::format!(
+            "bad levelsup for CTE \"{ctename}\""
+        )));
+    }
+    levelsup -= 1;
+    let mut cteroot: &PlannerInfo = root;
+    while levelsup > 0 {
+        levelsup -= 1;
+        cteroot = cteroot
+            .parent_root
+            .as_deref()
+            .ok_or_else(|| elog_error(alloc::format!("bad levelsup for CTE \"{ctename}\"")))?;
+    }
+    if cteroot.wt_param_id < 0 {
+        return Err(elog_error(alloc::format!(
+            "could not find param ID for CTE \"{ctename}\""
+        )));
+    }
+    Ok(cteroot.wt_param_id)
+}
+
+/// `copyObject(list_nth(root->multiexpr_params[subqueryid-1], colno-1))`
+/// (`fix_param_node`, setrefs.c:2136) — resolve a `PARAM_MULTIEXPR` `Param` to
+/// its replacement expression. The `multiexpr_params` replacement `Param` nodes
+/// are interned into `root`'s node arena here (SS_process_sublinks /
+/// build_subplan), so subselect.c owns the lookup+copy. `subqueryid`/`colno` are
+/// 1-based; the caller has already bounds-checked them.
+pub fn resolve_multiexpr_param(
+    root: &PlannerInfo,
+    subqueryid: usize,
+    colno: usize,
+) -> PgResult<Expr> {
+    let nid = root.multiexpr_params[subqueryid - 1][colno - 1];
+    // copyObject of a replacement Param — a flat clone of the interned node.
+    Ok(root.node(nid).clone())
+}

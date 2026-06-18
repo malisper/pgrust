@@ -2570,7 +2570,7 @@ fn create_ctescan_plan<'mcx>(
     // unported, so the (plan_id, cte_param_id) pair is resolved 1:1 through the
     // subselect seam.
     let (plan_id, cte_param_id) =
-        cp_seam::resolve_cte_subplan::call(root, scan_relid)?;
+        cp_seam::resolve_cte_subplan::call(root, run, scan_relid)?;
 
     let has_param_info = root.path(best_path).base().param_info.is_some();
 
@@ -2623,7 +2623,7 @@ fn create_worktablescan_plan<'mcx>(
     // cteroot->wt_param_id. The parent_root walk + wt_param_id read are owned
     // by subselect's recursive-CTE planning, so the resolution is routed 1:1
     // through the subselect seam.
-    let wt_param_id = cp_seam::resolve_worktable_param::call(root, scan_relid)?;
+    let wt_param_id = cp_seam::resolve_worktable_param::call(root, run, scan_relid)?;
 
     let has_param_info = root.path(best_path).base().param_info.is_some();
 

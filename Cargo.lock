@@ -11792,6 +11792,7 @@ dependencies = [
  "backend-optimizer-path-small-seams",
  "backend-optimizer-plan-createplan-seams",
  "backend-optimizer-plan-init-subselect-ext-seams",
+ "backend-optimizer-plan-setrefs-seams",
  "backend-optimizer-plan-small-seams",
  "backend-optimizer-prep-prepqual",
  "backend-optimizer-util-clauses",

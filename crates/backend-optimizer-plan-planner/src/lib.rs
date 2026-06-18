@@ -3108,6 +3108,38 @@ fn record_inval_item_impl(
     Ok(())
 }
 
+/// `mark_partial_aggref(agg, aggsplit)` (planner.c:5743). Adjust an `Aggref` to
+/// represent a partial-aggregation step, in place. Owned by planner.c; routed
+/// through the setrefs seam for `convert_combining_aggrefs`.
+fn mark_partial_aggref_impl(
+    agg: &mut types_nodes::primnodes::Aggref,
+    aggsplit: types_nodes::nodeagg::AggSplit,
+) -> types_error::PgResult<()> {
+    use types_nodes::nodeagg::{do_aggsplit_serialize, do_aggsplit_skipfinal};
+
+    // aggtranstype should be computed by this point; aggsplit should still be
+    // AGGSPLIT_SIMPLE as the parser left it.
+    debug_assert!(agg.aggtranstype != 0);
+    debug_assert_eq!(agg.aggsplit, types_nodes::nodeagg::AGGSPLIT_SIMPLE);
+
+    // Mark the Aggref with the intended partial-aggregation mode.
+    agg.aggsplit = aggsplit;
+
+    // Adjust result type if needed. Normally a partial aggregate returns the
+    // aggregate's transition type; but if that's INTERNAL and we're serializing,
+    // it returns BYTEA instead.
+    const INTERNALOID: Oid = 2281;
+    const BYTEAOID: Oid = 17;
+    if do_aggsplit_skipfinal(aggsplit) {
+        if agg.aggtranstype == INTERNALOID && do_aggsplit_serialize(aggsplit) {
+            agg.aggtype = BYTEAOID;
+        } else {
+            agg.aggtype = agg.aggtranstype;
+        }
+    }
+    Ok(())
+}
+
 pub fn init_seams() {
     use backend_utils_misc_guc_tables::vars;
     use backend_utils_misc_guc_tables::GucVarAccessors;
@@ -3133,6 +3165,11 @@ pub fn init_seams() {
     // so the planner installs this owner seam to compute the hash + push the
     // concrete pair (then read straight into PlannedStmt.invalItems).
     backend_optimizer_plan_setrefs_seams::record_inval_item::set(record_inval_item_impl);
+
+    // mark_partial_aggref (planner.c:5743) — adjust an Aggref to a partial-
+    // aggregation step. planner.c owns it; setrefs's convert_combining_aggrefs
+    // routes through this seam.
+    backend_optimizer_plan_setrefs_seams::mark_partial_aggref::set(mark_partial_aggref_impl);
 
     // GUC `conf->variable` accessors for the three planner GUCs whose backing
     // globals live in planner.c / clauses.c. Per PG 18.3 guc_tables.c all three

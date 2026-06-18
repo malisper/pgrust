@@ -234,8 +234,9 @@ seam_core::seam!(
     /// setParam)`. Dereferences subselect.c's built init SubPlans; owned by the
     /// subselect SubPlan-building unit. `scanrelid` is the CTE base rel's RT
     /// index.
-    pub fn resolve_cte_subplan(
+    pub fn resolve_cte_subplan<'mcx>(
         root: &PlannerInfo,
+        run: &PlannerRun<'mcx>,
         scanrelid: u32,
     ) -> types_error::PgResult<(i32, i32)>
 );
@@ -247,8 +248,9 @@ seam_core::seam!(
     /// `cteroot->wt_param_id`. The `wt_param_id` is assigned during subselect.c
     /// recursive-CTE planning; owned by the subselect unit. `scanrelid` is the
     /// work-table (self-reference CTE) base rel's RT index.
-    pub fn resolve_worktable_param(
+    pub fn resolve_worktable_param<'mcx>(
         root: &PlannerInfo,
+        run: &PlannerRun<'mcx>,
         scanrelid: u32,
     ) -> types_error::PgResult<i32>
 );

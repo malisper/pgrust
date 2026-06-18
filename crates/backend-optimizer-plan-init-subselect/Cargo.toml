@@ -29,8 +29,11 @@ backend-optimizer-path-small-seams = { path = "../backend-optimizer-path-small-s
 backend-optimizer-util-pathnode-seams = { path = "../backend-optimizer-util-pathnode-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
-# createplan.c consumes SS_attach_initplans (subselect.c-owned); installed here.
+# createplan.c consumes SS_attach_initplans + resolve_cte_subplan/resolve_worktable_param
+# (subselect.c-owned); installed here.
 backend-optimizer-plan-createplan-seams = { path = "../backend-optimizer-plan-createplan-seams" }
+# setrefs.c consumes multiexpr_param_lookup (subselect.c populates multiexpr_params); installed here.
+backend-optimizer-plan-setrefs-seams = { path = "../backend-optimizer-plan-setrefs-seams" }
 
 # Outward seams for unported / not-acyclically-reachable callees this crate
 # declares + uses (loud-panic until installed):
