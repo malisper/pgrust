@@ -537,8 +537,10 @@ seam_core::seam!(
     pub fn parse_onconflict(root: &PlannerInfo) -> Option<OnConflictInfo>
 );
 seam_core::seam!(
-    /// `root->parse->resultRelation` (parsetree) — the result RT index.
-    pub fn parse_result_relation(root: &PlannerInfo) -> i32
+    /// `root->parse->resultRelation` (parsetree) — the result RT index. Resolved
+    /// through the planner-run query store (`run.resolve(root.parse)`), so the
+    /// resolver threads as a parameter like the `rte_*` projections.
+    pub fn parse_result_relation<'mcx>(run: &PlannerRun<'mcx>, root: &PlannerInfo) -> i32
 );
 seam_core::seam!(
     /// `root->simple_rte_array[rti]->rellockmode` (rte) — the lock mode for the

@@ -26,6 +26,10 @@ backend-optimizer-plan-init-subselect-ext-seams = { path = "../backend-optimizer
 # resolver crate installs that projection through the same `planner_rt_fetch`
 # RTE store (the seam declares it `(run, root, rel)` with no ported owner).
 backend-optimizer-path-costsize-seams = { path = "../backend-optimizer-path-costsize-seams" }
+# plancat.c `get_relation_foreign_keys` + analyzejoins.c
+# `remove_useless_self_joins` read `parse->resultRelation`; installed here
+# through the same `run.resolve(root.parse)` query store.
+backend-optimizer-util-plancat-ext-seams = { path = "../backend-optimizer-util-plancat-ext-seams" }
 # relnode.c `build_simple_rel` sizes its attr arrays from
 # `list_length(rte->eref->colnames)`; this resolver installs that projection
 # through the same `planner_rt_fetch` RTE store (the relnode-ext seam declares it

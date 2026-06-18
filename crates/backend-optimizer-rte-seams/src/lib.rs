@@ -297,6 +297,13 @@ pub fn init_seams() {
     // Query-level projections — `root->parse->...`.
     parse_rtable_len::set(|run, root| run.rtable(root.parse).len() as i32);
     parse_rteperminfos_len::set(|run, root| run.resolve(root.parse).rteperminfos.len() as i32);
+
+    // `root->parse->resultRelation` (plancat.c get_relation_foreign_keys,
+    // analyzejoins.c remove_useless_self_joins). 0 for a non-DML query.
+    // Resolved through the run store the same way the rte_* projections are.
+    backend_optimizer_util_plancat_ext_seams::parse_result_relation::set(|run, root| {
+        run.resolve(root.parse).resultRelation
+    });
     parse_rte::set(|_run, root, rti| root.simple_rte_array[rti as usize]);
 }
 

@@ -27,6 +27,8 @@ use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{JoinlistNode, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo};
 
 use backend_optimizer_util_relnode as relnode;
+use backend_optimizer_rte_seams as rte;
+use backend_optimizer_util_plancat_ext_seams as px;
 
 use crate::change_relids::{change_relids_in_node, ReplaceRelidContext};
 use crate::relids;
@@ -498,8 +500,9 @@ fn adjust_expr_relids(
 /// remains seam-and-panic (`crate::change_relids` only walks arena `Expr`/
 /// `RestrictInfo` handles, not the `Query` tree). Reaching it is a genuine
 /// keystone, surfaced loudly rather than silently mis-planned.
-pub fn remove_useless_self_joins(
+pub fn remove_useless_self_joins<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     joinlist: Vec<JoinlistNode>,
 ) -> Vec<JoinlistNode> {
     // C: `if (!enable_self_join_elimination || joinlist == NIL ||
@@ -514,11 +517,74 @@ pub fn remove_useless_self_joins(
         return joinlist;
     }
 
-    let _ = root;
-    // The merge-pairs recursion + orphaned-relation removal needs the
-    // Query-tree relid walker the planner model does not carry yet.
+    // C: `toRemove = remove_self_joins_recurse(root, joinlist, toRemove);`
+    // remove_self_joins_recurse only performs surgery when it finds a GROUP of
+    // 2+ range-table entries over the SAME base-table OID (a potential
+    // self-join). Collect the candidate relids exactly as the C does (ordinary
+    // base relations, no TABLESAMPLE, not the UPDATE/DELETE/MERGE target), group
+    // by relid OID, and decide:
+    //   * no same-OID group of >= 2  =>  toRemove is empty, return joinlist
+    //     unchanged (the overwhelmingly common case: distinct tables);
+    //   * a same-OID group of >= 2   =>  genuine self-join elimination, whose
+    //     remove_self_joins_one_group surgery + ChangeVarNodesExtended over
+    //     root->parse is not modeled yet — surface loudly.
+    let result_relation = px::parse_result_relation::call(run, root);
+    let mut candidate_relids: Vec<i32> = Vec::new();
+    collect_self_join_candidates(root, run, &joinlist, result_relation, &mut candidate_relids);
+
+    // Group by reloid; any group of >= 2 is a self-join candidate.
+    let mut reloids: Vec<types_core::primitive::Oid> = candidate_relids
+        .iter()
+        .map(|&varno| rte::rte_relid::call(run, root, varno as types_core::Index))
+        .collect();
+    reloids.sort_unstable();
+    let has_self_join_group = reloids
+        .windows(2)
+        .any(|w| w[0] == w[1]);
+
+    if !has_self_join_group {
+        // toRemove stayed empty — nothing to do.
+        return joinlist;
+    }
+
+    // The merge-pairs surgery + orphaned-relation removal needs the Query-tree
+    // relid walker the planner model does not carry yet.
     panic!(
-        "remove_useless_self_joins: self-join surgery (remove_self_joins_recurse / \
+        "remove_useless_self_joins: self-join surgery (remove_self_joins_one_group / \
          ChangeVarNodesExtended over root->parse) not modeled"
     );
+}
+
+/// `remove_self_joins_recurse`'s candidate-collection half (analyzejoins.c): walk
+/// the joinlist (recursing into nested sub-joinlists) and append every
+/// `RangeTblRef` that is an ordinary base relation eligible for self-join removal
+/// — `rtekind == RTE_RELATION && relkind == RELKIND_RELATION && tablesample ==
+/// NULL && varno != resultRelation` (the `mergeTargetRelation` exclusion is
+/// subsumed: a MERGE target is a result relation). We collect only the relids;
+/// the grouping/removal is decided by the caller.
+fn collect_self_join_candidates<'mcx>(
+    root: &PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    joinlist: &[JoinlistNode],
+    result_relation: i32,
+    out: &mut Vec<i32>,
+) {
+    for node in joinlist {
+        match node {
+            JoinlistNode::Rel(varno) => {
+                let rti = *varno as types_core::Index;
+                if rte::rte_rtekind::call(run, root, rti) == types_pathnodes::RTE_RELATION
+                    && rte::rte_relkind::call(run, root, rti)
+                        == types_tuple::access::RELKIND_RELATION as i8
+                    && !rte::rte_has_tablesample::call(run, root, rti)
+                    && *varno != result_relation
+                {
+                    out.push(*varno);
+                }
+            }
+            JoinlistNode::Sub(sublist) => {
+                collect_self_join_candidates(root, run, sublist, result_relation, out);
+            }
+        }
+    }
 }

@@ -31,5 +31,8 @@ backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }
 backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
 backend-optimizer-util-joininfo-ext-seams = { path = "../backend-optimizer-util-joininfo-ext-seams" }
 backend-optimizer-path-equivclass-ext-seams = { path = "../backend-optimizer-path-equivclass-ext-seams" }
+backend-optimizer-rte-seams = { path = "../backend-optimizer-rte-seams" }
+backend-optimizer-util-plancat-ext-seams = { path = "../backend-optimizer-util-plancat-ext-seams" }
+types-tuple = { path = "../types-tuple" }
 backend-optimizer-plan-small-seams = { path = "../backend-optimizer-plan-small-seams" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }

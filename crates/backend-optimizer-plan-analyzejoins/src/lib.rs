@@ -751,7 +751,7 @@ pub fn init_seams() {
     // remove_useless_self_joins: the early-exit (single-relation / GUC-off) is
     // ported; the deep self-join surgery remains a keystone panic (see the fn).
     backend_optimizer_plan_init_subselect_seams::remove_useless_self_joins::set(
-        |root, joinlist| remove_joins::remove_useless_self_joins(root, joinlist),
+        |root, run, joinlist| remove_joins::remove_useless_self_joins(root, run, joinlist),
     );
 
     backend_optimizer_path_joinpath_seams::innerrel_is_unique::set(

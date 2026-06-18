@@ -641,7 +641,7 @@ pub fn infer_arbiter_indexes<'mcx>(
         return Ok(Vec::new());
     }
 
-    let varno = ext::parse_result_relation::call(root) as Index;
+    let varno = ext::parse_result_relation::call(run, root) as Index;
     let relid = rte::rte_relid::call(run, root, varno);
     let rellockmode = ext::rte_rellockmode::call(root, varno);
 
