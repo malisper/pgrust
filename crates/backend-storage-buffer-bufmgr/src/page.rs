@@ -21,6 +21,53 @@ use types_storage::RelFileLocator;
 use crate::mgr::BufferManager;
 
 impl BufferManager {
+    /// `BufferGetPage(buffer)` read dispatch (bufpage.h): run `f` over the
+    /// buffer's `BLCKSZ` page bytes, routing a local (temp) buffer to its
+    /// backend-local page in the localbuf pool. The closure may compute any
+    /// `Copy`-ish value `R` — for the local arm we take an owned snapshot of the
+    /// page (no shared state to alias) and run `f` over it. The caller holds the
+    /// pin / content lock exactly as C's `BufferGetPage(buffer)` requires.
+    fn with_page_bytes<R>(
+        &self,
+        buffer: Buffer,
+        f: impl FnOnce(&[u8]) -> R,
+    ) -> PgResult<R> {
+        if crate::buf_lock::buffer_is_local(buffer) {
+            // The localbuf page is backend-private, so an in-place read through
+            // the local page-access seam is equivalent to C's `LocalBufHdrGetBlock`
+            // read. `f` is `FnOnce`; the seam takes an `FnMut`, so stash `f` in an
+            // `Option` and `take()` it on the single invocation.
+            let mut out: Option<R> = None;
+            let mut f_once = Some(f);
+            backend_storage_buffer_support_seams::local_buffer_with_page::call(
+                buffer,
+                &mut |bytes| {
+                    out = Some((f_once.take().expect("closure runs once"))(bytes));
+                    Ok(())
+                },
+            )?;
+            return Ok(out.expect("local_buffer_with_page closure must run"));
+        }
+        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
+        Ok(self.with_block(buf_id, f))
+    }
+
+    /// `BufferGetPage(buffer)` in-place write dispatch (bufpage.h): run `f` over
+    /// the buffer's live `BLCKSZ` page bytes for mutation, routing a local
+    /// buffer to its backend-local page. The caller holds the exclusive content
+    /// lock (a no-op for local buffers). `f`'s `Err` propagates.
+    fn with_page_bytes_mut(
+        &self,
+        buffer: Buffer,
+        f: &mut dyn FnMut(&mut [u8]) -> PgResult<()>,
+    ) -> PgResult<()> {
+        if crate::buf_lock::buffer_is_local(buffer) {
+            return backend_storage_buffer_support_seams::local_buffer_with_page::call(buffer, f);
+        }
+        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
+        self.with_block_mut(buf_id, f)
+    }
+
     /// `MarkBufferDirty(buffer)` (bufmgr.c:2640) — mark the contents of a buffer
     /// dirty. The buffer must be pinned and exclusive-content-locked by the
     /// caller. Faithful to the lock-free CAS loop setting `BM_DIRTY |
@@ -90,6 +137,13 @@ impl BufferManager {
     /// stable). Pure read of the descriptor tag.
     pub fn BufferGetBlockNumber(&self, buffer: Buffer) -> PgResult<BlockNumber> {
         // Assert(BufferIsPinned(buffer)).
+        // if (BufferIsLocal(buffer))
+        //     bufHdr = GetLocalBufferDescriptor(-buffer - 1);
+        // (bufmgr.c:3994). Local/temp buffers carry a negative handle and live
+        // in this backend's localbuf pool, not the shared descriptor array.
+        if crate::buf_lock::buffer_is_local(buffer) {
+            return backend_storage_buffer_support_seams::local_buffer_block_number::call(buffer);
+        }
         let buf_id = self.buffer_to_buf_id_pub(buffer)?;
         Ok(self.desc_tag(buf_id).blockNum)
     }
@@ -102,6 +156,11 @@ impl BufferManager {
         buffer: Buffer,
     ) -> PgResult<(RelFileLocator, types_core::primitive::ForkNumber, BlockNumber)> {
         // Assert(BufferIsPinned(buffer)).
+        // if (BufferIsLocal(buffer))
+        //     bufHdr = GetLocalBufferDescriptor(-buffer - 1); (bufmgr.c:4018).
+        if crate::buf_lock::buffer_is_local(buffer) {
+            return backend_storage_buffer_support_seams::local_buffer_get_tag::call(buffer);
+        }
         let buf_id = self.buffer_to_buf_id_pub(buffer)?;
         let tag = self.desc_tag(buf_id);
         // BufTagGetRelFileLocator(&tag) / BufTagGetForkNum(&tag) (buf_internals.h).
@@ -119,6 +178,13 @@ impl BufferManager {
     /// consistent against a concurrent `MarkBufferDirtyHint` LSN stamp; the
     /// checksums-disabled / unlogged fast path returns the LSN without the lock.
     pub fn BufferGetLSNAtomic(&self, buffer: Buffer) -> PgResult<XLogRecPtr> {
+        // Assert(BufferIsPinned(buffer)).
+        // A local buffer is never shared, so no header spinlock is needed
+        // (bufmgr.c:4486 `if (!XLogHintBitIsNeeded() || BufferIsLocal(buffer))`
+        // fast path). Route to the localbuf page-LSN read.
+        if crate::buf_lock::buffer_is_local(buffer) {
+            return backend_storage_buffer_support_seams::local_buffer_get_lsn::call(buffer);
+        }
         let buf_id = self.buffer_to_buf_id_pub(buffer)?;
 
         // If we don't need locking for correctness, fastpath out: a local buffer
@@ -153,6 +219,10 @@ impl BufferManager {
         buffer: Buffer,
         f: &mut dyn FnMut(&mut [u8]) -> PgResult<()>,
     ) -> PgResult<()> {
+        // A local (temp) buffer's page lives in this backend's localbuf pool.
+        if crate::buf_lock::buffer_is_local(buffer) {
+            return backend_storage_buffer_support_seams::local_buffer_with_page::call(buffer, f);
+        }
         let buf_id = self.buffer_to_buf_id_pub(buffer)?;
         self.with_block_mut(buf_id, f)
     }
@@ -165,6 +235,10 @@ impl BufferManager {
         mcx: mcx::Mcx<'mcx>,
         buffer: Buffer,
     ) -> PgResult<mcx::PgVec<'mcx, u8>> {
+        // A local (temp) buffer's page lives in this backend's localbuf pool.
+        if crate::buf_lock::buffer_is_local(buffer) {
+            return backend_storage_buffer_support_seams::local_buffer_page_owned::call(mcx, buffer);
+        }
         let buf_id = self.buffer_to_buf_id_pub(buffer)?;
         self.with_block(buf_id, |block| mcx::slice_in(mcx, block))
     }
@@ -175,8 +249,7 @@ impl BufferManager {
     /// fresh (all-zero) page's header. The caller holds the exclusive content
     /// lock. `Err` carries any page-init `ereport(ERROR)`.
     pub fn page_init(&self, buffer: Buffer) -> PgResult<()> {
-        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
-        self.with_block_mut(buf_id, |block| {
+        self.with_page_bytes_mut(buffer, &mut |block| {
             backend_storage_page::PageInit(block, BLCKSZ, 0)
         })
     }
@@ -184,8 +257,7 @@ impl BufferManager {
     /// `PageSetLSN(BufferGetPage(buffer), lsn)` (bufpage.h) — stamp the page
     /// LSN. The caller holds the exclusive content lock.
     pub fn page_set_lsn(&self, buffer: Buffer, lsn: XLogRecPtr) -> PgResult<()> {
-        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
-        self.with_block_mut(buf_id, |block| {
+        self.with_page_bytes_mut(buffer, &mut |block| {
             let mut page = backend_storage_page::PageMut::new(block)
                 .expect("buffer block is BLCKSZ");
             backend_storage_page::PageSetLSN(&mut page, lsn);
@@ -198,50 +270,45 @@ impl BufferManager {
     /// caller already holds the exclusive content lock that serialises the
     /// stamp).
     pub fn page_get_lsn(&self, buffer: Buffer) -> PgResult<XLogRecPtr> {
-        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
-        Ok(self.with_block(buf_id, |block| {
+        self.with_page_bytes(buffer, |block| {
             let page = backend_storage_page::PageRef::new(block)
                 .expect("buffer block is BLCKSZ");
             backend_storage_page::PageGetLSN(&page)
-        }))
+        })
     }
 
     /// `PageIsNew(BufferGetPage(buffer))` (bufpage.h) — whether the buffer's
     /// page is all-zeroes (`pd_upper == 0`).
     pub fn page_is_new(&self, buffer: Buffer) -> PgResult<bool> {
-        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
-        Ok(self.with_block(buf_id, |block| {
+        self.with_page_bytes(buffer, |block| {
             let page = backend_storage_page::PageRef::new(block)
                 .expect("buffer block is BLCKSZ");
             backend_storage_page::PageIsNew(&page)
-        }))
+        })
     }
 
     /// `PageIsEmpty(BufferGetPage(buffer))` (bufpage.h).
     pub fn page_is_empty(&self, buffer: Buffer) -> PgResult<bool> {
-        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
-        Ok(self.with_block(buf_id, |block| {
+        self.with_page_bytes(buffer, |block| {
             let page = backend_storage_page::PageRef::new(block)
                 .expect("buffer block is BLCKSZ");
             backend_storage_page::PageIsEmpty(&page)
-        }))
+        })
     }
 
     /// `PageIsAllVisible(BufferGetPage(buffer))` (bufpage.h).
     pub fn page_is_all_visible(&self, buffer: Buffer) -> PgResult<bool> {
-        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
-        Ok(self.with_block(buf_id, |block| {
+        self.with_page_bytes(buffer, |block| {
             let page = backend_storage_page::PageRef::new(block)
                 .expect("buffer block is BLCKSZ");
             backend_storage_page::PageIsAllVisible(&page)
-        }))
+        })
     }
 
     /// `PageSetAllVisible(BufferGetPage(buffer))` (bufpage.h). Caller holds the
     /// exclusive content lock.
     pub fn page_set_all_visible(&self, buffer: Buffer) -> PgResult<()> {
-        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
-        self.with_block_mut(buf_id, |block| {
+        self.with_page_bytes_mut(buffer, &mut |block| {
             let mut page = backend_storage_page::PageMut::new(block)
                 .expect("buffer block is BLCKSZ");
             backend_storage_page::PageSetAllVisible(&mut page);
@@ -252,8 +319,7 @@ impl BufferManager {
     /// `PageClearAllVisible(BufferGetPage(buffer))` (bufpage.h). Caller holds the
     /// exclusive content lock.
     pub fn page_clear_all_visible(&self, buffer: Buffer) -> PgResult<()> {
-        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
-        self.with_block_mut(buf_id, |block| {
+        self.with_page_bytes_mut(buffer, &mut |block| {
             let mut page = backend_storage_page::PageMut::new(block)
                 .expect("buffer block is BLCKSZ");
             backend_storage_page::PageClearAllVisible(&mut page);
@@ -268,29 +334,26 @@ impl BufferManager {
 
     /// `PageGetMaxOffsetNumber(BufferGetPage(buffer))` (bufpage.h).
     pub fn page_get_max_offset_number(&self, buffer: Buffer) -> PgResult<OffsetNumber> {
-        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
-        Ok(self.with_block(buf_id, |block| {
+        self.with_page_bytes(buffer, |block| {
             let page = backend_storage_page::PageRef::new(block)
                 .expect("buffer block is BLCKSZ");
             backend_storage_page::PageGetMaxOffsetNumber(&page)
-        }))
+        })
     }
 
     /// `PageGetHeapFreeSpace(BufferGetPage(buffer))` (bufpage.c).
     pub fn page_get_heap_free_space(&self, buffer: Buffer) -> PgResult<usize> {
-        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
-        Ok(self.with_block(buf_id, |block| {
+        self.with_page_bytes(buffer, |block| {
             let page = backend_storage_page::PageRef::new(block)
                 .expect("buffer block is BLCKSZ");
             backend_storage_page::PageGetHeapFreeSpace(&page) as usize
-        }))
+        })
     }
 
     /// `PageTruncateLinePointerArray(BufferGetPage(buffer))` (bufpage.c). Caller
     /// holds the exclusive content lock.
     pub fn page_truncate_line_pointer_array(&self, buffer: Buffer) -> PgResult<()> {
-        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
-        self.with_block_mut(buf_id, |block| {
+        self.with_page_bytes_mut(buffer, &mut |block| {
             let mut page = backend_storage_page::PageMut::new(block)
                 .expect("buffer block is BLCKSZ");
             backend_storage_page::PageTruncateLinePointerArray(&mut page);
@@ -305,8 +368,7 @@ impl BufferManager {
         buffer: Buffer,
         offnum: OffsetNumber,
     ) -> PgResult<types_vacuum::vacuumlazy::LinePointerState> {
-        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
-        self.with_block(buf_id, |block| {
+        self.with_page_bytes(buffer, |block| {
             let page = backend_storage_page::PageRef::new(block)
                 .expect("buffer block is BLCKSZ");
             let itemid = backend_storage_page::PageGetItemId(&page, offnum)?;
@@ -317,7 +379,7 @@ impl BufferManager {
                 is_normal: backend_storage_page::ItemIdIsNormal(&itemid),
                 has_storage: backend_storage_page::ItemIdHasStorage(&itemid),
             })
-        })
+        })?
     }
 
     /// `ItemIdSetUnused(PageGetItemId(BufferGetPage(buffer), offnum))`
@@ -327,8 +389,7 @@ impl BufferManager {
         buffer: Buffer,
         offnum: OffsetNumber,
     ) -> PgResult<()> {
-        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
-        self.with_block_mut(buf_id, |block| {
+        self.with_page_bytes_mut(buffer, &mut |block| {
             let mut itemid = {
                 let r = backend_storage_page::PageRef::new(block)
                     .expect("buffer block is BLCKSZ");
@@ -350,8 +411,7 @@ impl BufferManager {
     /// native-order `int fp_next_slot` followed by `NodesPerPage` one-byte tree
     /// nodes (`uint8 fp_nodes[]`).
     pub fn fsm_buffer_get_page(&self, buffer: Buffer) -> PgResult<types_fsm::FSMPageData> {
-        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
-        Ok(self.with_block(buf_id, |block| {
+        self.with_page_bytes(buffer, |block| {
             let base = fsm_contents_offset();
             let fp_next_slot = i32::from_ne_bytes(
                 block[base..base + 4]
@@ -365,7 +425,7 @@ impl BufferManager {
                 fp_next_slot,
                 fp_nodes,
             }
-        }))
+        })
     }
 
     /// Store a mutated FSM page body back into `(FSMPage)
@@ -381,8 +441,7 @@ impl BufferManager {
             types_fsm::NodesPerPage,
             "fsm_buffer_set_page: fp_nodes must be NodesPerPage long"
         );
-        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
-        self.with_block_mut(buf_id, |block| {
+        self.with_page_bytes_mut(buffer, &mut |block| {
             let base = fsm_contents_offset();
             block[base..base + 4].copy_from_slice(&page.fp_next_slot.to_ne_bytes());
             let nodes_start = base + types_fsm::OFFSET_OF_FP_NODES;

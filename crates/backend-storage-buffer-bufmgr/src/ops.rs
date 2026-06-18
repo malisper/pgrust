@@ -220,10 +220,17 @@ impl BufferManager {
 
     /// `ReleaseBuffer(buffer)` (bufmgr.c:5366) — decrement a buffer's pin count.
     pub fn ReleaseBuffer(&self, buffer: Buffer) -> PgResult<()> {
-        if !self.shared_buffer_is_valid(buffer) {
+        // if (!BufferIsValid(buffer)) elog(ERROR, "bad buffer ID"). A local
+        // (temp) buffer carries a negative handle and IS valid.
+        if !self.shared_buffer_is_valid(buffer)
+            && !crate::buf_lock::buffer_is_local(buffer)
+        {
             return Err(PgError::error(format!("bad buffer ID: {buffer}")));
         }
-        // BufferIsLocal(buffer) -> UnpinLocalBuffer (out of this shared core).
+        // if (BufferIsLocal(buffer)) UnpinLocalBuffer(buffer); (bufmgr.c:5373).
+        if crate::buf_lock::buffer_is_local(buffer) {
+            return backend_storage_buffer_support_seams::unpin_local_buffer::call(buffer);
+        }
         // UnpinBuffer(GetBufferDescriptor(buffer - 1)) (bufmgr.c:5374).
         let buf_id = (buffer - 1) as usize;
         self.unpin_buffer(buf_id);
@@ -245,8 +252,16 @@ impl BufferManager {
     /// modeled in this shared core; the reachable resource-owner release path
     /// only ever carries shared pins.
     pub fn ResOwnerReleaseBufferPin(&self, buffer: Buffer) -> PgResult<()> {
-        if !self.shared_buffer_is_valid(buffer) {
+        // if (!BufferIsValid(buffer)) elog(ERROR, "bad buffer ID"). Local
+        // (temp) buffers carry a negative handle and are valid.
+        if !self.shared_buffer_is_valid(buffer)
+            && !crate::buf_lock::buffer_is_local(buffer)
+        {
             return Err(PgError::error(format!("bad buffer ID: {buffer}")));
+        }
+        // if (BufferIsLocal(buffer)) UnpinLocalBufferNoOwner(buffer); (bufmgr.c:6564).
+        if crate::buf_lock::buffer_is_local(buffer) {
+            return backend_storage_buffer_support_seams::unpin_local_buffer_no_owner::call(buffer);
         }
         // UnpinBufferNoOwner(GetBufferDescriptor(buffer - 1)) (bufmgr.c:6566).
         let buf_id = (buffer - 1) as usize;
@@ -257,10 +272,15 @@ impl BufferManager {
     /// `UnlockReleaseBuffer(buffer)` (bufmgr.c:5383) — release the content lock
     /// then the pin: `LockBuffer(buffer, BUFFER_LOCK_UNLOCK)` + `ReleaseBuffer`.
     pub fn UnlockReleaseBuffer(&self, buffer: Buffer) -> PgResult<()> {
-        let buf_id = self.buffer_to_buf_id(buffer)?;
-        // LockBuffer(buffer, BUFFER_LOCK_UNLOCK) == LWLockRelease(content_lock)
-        // (the unconditional unlock leg of LockBuffer; direct lwlock dep).
-        backend_storage_lmgr_lwlock::LWLockRelease(self.content_lock(buf_id))?;
+        // LockBuffer(buffer, BUFFER_LOCK_UNLOCK). For a local (temp) buffer
+        // there is no content lock (LockBuffer's BufferIsLocal arm returns),
+        // so only the pin is released.
+        if !crate::buf_lock::buffer_is_local(buffer) {
+            let buf_id = self.buffer_to_buf_id(buffer)?;
+            // LockBuffer(buffer, BUFFER_LOCK_UNLOCK) == LWLockRelease(content_lock)
+            // (the unconditional unlock leg of LockBuffer; direct lwlock dep).
+            backend_storage_lmgr_lwlock::LWLockRelease(self.content_lock(buf_id))?;
+        }
         self.ReleaseBuffer(buffer)
     }
 
@@ -269,14 +289,18 @@ impl BufferManager {
     /// is already pinned by this backend).
     pub fn IncrBufferRefCount(&self, buffer: Buffer) -> PgResult<()> {
         // Assert(BufferIsPinned(buffer)).
-        let buf_id = self.buffer_to_buf_id(buffer)?;
-        let refc = self.private_refcount();
-        debug_assert!(refc.get(buf_id as i32) > 0, "IncrBufferRefCount: buffer is not pinned");
         // ResourceOwnerEnlarge(CurrentResourceOwner) (bufmgr.c:5402).
         sb::resowner_enlarge::call()?;
-        // BufferIsLocal(buffer) -> LocalRefCount[-buffer - 1]++ (out of this core).
-        // ref = GetPrivateRefCountEntry(buffer, true); ref->refcount++.
-        refc.incr(buf_id as i32);
+        // if (BufferIsLocal(buffer)) LocalRefCount[-buffer - 1]++; (bufmgr.c:5404).
+        if crate::buf_lock::buffer_is_local(buffer) {
+            backend_storage_buffer_support_seams::incr_local_buffer_ref_count::call(buffer)?;
+        } else {
+            let buf_id = self.buffer_to_buf_id(buffer)?;
+            let refc = self.private_refcount();
+            debug_assert!(refc.get(buf_id as i32) > 0, "IncrBufferRefCount: buffer is not pinned");
+            // ref = GetPrivateRefCountEntry(buffer, true); ref->refcount++.
+            refc.incr(buf_id as i32);
+        }
         // ResourceOwnerRememberBuffer(CurrentResourceOwner, buffer) (bufmgr.c:5415).
         sb::remember_buffer::call(buffer);
         Ok(())
@@ -285,7 +309,11 @@ impl BufferManager {
     /// `BufferIsPermanent(buffer)` (bufmgr.c:5586) — whether the buffer survives
     /// a crash (its relation is WAL-logged). The caller must hold a pin.
     pub fn BufferIsPermanent(&self, buffer: Buffer) -> PgResult<bool> {
-        // Local buffers are used only for temp relations -> always false.
+        // Local buffers are used only for temp relations -> always false
+        // (bufmgr.c:5590).
+        if crate::buf_lock::buffer_is_local(buffer) {
+            return Ok(false);
+        }
         let buf_id = self.buffer_to_buf_id(buffer)?;
         // Assert(BufferIsPinned(buffer)).
         debug_assert!(

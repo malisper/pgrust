@@ -15549,6 +15549,7 @@ dependencies = [
  "backend-catalog-storage-seams",
  "backend-storage-buffer-bufmgr-seams",
  "backend-storage-buffer-support",
+ "backend-storage-buffer-support-seams",
  "backend-storage-ipc-dsm-core-seams",
  "backend-storage-ipc-shmem-seams",
  "backend-storage-lmgr-condition-variable",
@@ -15613,6 +15614,7 @@ dependencies = [
 name = "backend-storage-buffer-support-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",

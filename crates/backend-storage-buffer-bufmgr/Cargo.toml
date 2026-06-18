@@ -37,6 +37,11 @@ backend-storage-lmgr-condition-variable = { path = "../backend-storage-lmgr-cond
 # This crate OWNS and installs the bufmgr seams (the 4 header/freelist seams in
 # F1a; the rest in F1b-d).
 backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+# The `BufferIsLocal` read arms of BufferGetBlockNumber/BufferGetTag/
+# BufferGetLSNAtomic dispatch into localbuf.c via the support-seams crate
+# (declared there, installed by the buffer-support owner). Leaf seam crate —
+# no cycle.
+backend-storage-buffer-support-seams = { path = "../backend-storage-buffer-support-seams" }
 # F2a: the buffer-mapping hash table (BufTable) + the strategy/freelist control
 # block (BufferStrategyControl + ClockSweep) live in the buffer-support crate
 # (buf_table.c / freelist.c). BufferManager OWNS one of each (BufferManagerShmemInit

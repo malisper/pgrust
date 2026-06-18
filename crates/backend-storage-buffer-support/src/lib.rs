@@ -172,6 +172,11 @@ fn unpin_local_buffer(buffer: types_core::primitive::Buffer) -> PgResult<()> {
     local_mgr_get_or_create().UnpinLocalBuffer(buffer)
 }
 
+/// `UnpinLocalBufferNoOwner(buffer)` (localbuf.c).
+fn unpin_local_buffer_no_owner(buffer: types_core::primitive::Buffer) -> PgResult<()> {
+    local_mgr_get_or_create().UnpinLocalBufferNoOwner(buffer)
+}
+
 /// `LocalRefCount[-buffer - 1]++` (localbuf.c, inline `IncrBufferRefCount` arm).
 fn incr_local_buffer_ref_count(buffer: types_core::primitive::Buffer) -> PgResult<()> {
     local_mgr_get_or_create().IncrLocalBufferRefCount(buffer);
@@ -210,6 +215,24 @@ fn local_buffer_get_lsn(
         let page = backend_storage_page::PageRef::new(bytes)?;
         Ok(backend_storage_page::PageGetLSN(&page))
     })
+}
+
+/// `BufferGetPage(buffer)` local arm — in-place read/write of a local buffer's
+/// page bytes (localbuf.c).
+fn local_buffer_with_page(
+    buffer: types_core::primitive::Buffer,
+    f: &mut dyn FnMut(&mut [u8]) -> PgResult<()>,
+) -> PgResult<()> {
+    local_mgr_get_or_create().with_block_mut(buffer, f)
+}
+
+/// `BufferGetPage(buffer)` local arm materialised as an owned page-image copy in
+/// `mcx` (localbuf.c).
+fn local_buffer_page_owned<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    buffer: types_core::primitive::Buffer,
+) -> PgResult<mcx::PgVec<'mcx, u8>> {
+    local_mgr_get_or_create().with_block(buffer, |bytes| mcx::slice_in(mcx, bytes))
 }
 
 /// `LocalBufferAlloc(smgr, forkNum, blockNum, foundPtr)` (localbuf.c).
@@ -315,12 +338,17 @@ pub fn init_seams() {
     // BufferGetBlockNumber/BufferGetTag/BufferGetLSNAtomic).
     backend_storage_buffer_support_seams::mark_local_buffer_dirty::set(mark_local_buffer_dirty);
     backend_storage_buffer_support_seams::unpin_local_buffer::set(unpin_local_buffer);
+    backend_storage_buffer_support_seams::unpin_local_buffer_no_owner::set(
+        unpin_local_buffer_no_owner,
+    );
     backend_storage_buffer_support_seams::incr_local_buffer_ref_count::set(
         incr_local_buffer_ref_count,
     );
     backend_storage_buffer_support_seams::local_buffer_block_number::set(local_buffer_block_number);
     backend_storage_buffer_support_seams::local_buffer_get_tag::set(local_buffer_get_tag);
     backend_storage_buffer_support_seams::local_buffer_get_lsn::set(local_buffer_get_lsn);
+    backend_storage_buffer_support_seams::local_buffer_with_page::set(local_buffer_with_page);
+    backend_storage_buffer_support_seams::local_buffer_page_owned::set(local_buffer_page_owned);
 }
 
 #[cfg(test)]

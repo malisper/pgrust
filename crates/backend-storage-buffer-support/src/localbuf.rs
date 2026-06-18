@@ -263,6 +263,10 @@ impl LocalBufferManager {
 
         if let Some(bufid) = existing {
             debug_assert!(self.tag(bufid) == new_tag);
+            // ResourceOwnerEnlarge(CurrentResourceOwner) (localbuf.c:134) — make
+            // room for the pin PinLocalBuffer is about to remember. (The victim
+            // branch enlarges inside GetLocalVictimBuffer.)
+            backend_storage_buffer_bufmgr_seams::resowner_enlarge::call()?;
             let found = self.PinLocalBuffer(bufid, true)?;
             Ok((Self::buffer_for_index(bufid), found))
         } else {
@@ -349,6 +353,10 @@ impl LocalBufferManager {
     /// buffer, lazily allocating its storage, flushing it if dirty, and dropping
     /// its old hash entry. Returns the (negative) local Buffer handle.
     pub fn GetLocalVictimBuffer(&self) -> PgResult<Buffer> {
+        // ResourceOwnerEnlarge(CurrentResourceOwner) (localbuf.c) — make room for
+        // the pin PinLocalBuffer takes on the chosen victim.
+        backend_storage_buffer_bufmgr_seams::resowner_enlarge::call()?;
+
         let nloc = self.nloc_buffer.get();
         let mut trycounter = nloc;
         let victim_bufid;
@@ -486,6 +494,11 @@ impl LocalBufferManager {
 
         for i in 0..extend_by as usize {
             let victim_buf_id = -buffers[i] - 1;
+
+            // in case we need to pin an existing buffer below
+            // (ResourceOwnerEnlarge(CurrentResourceOwner), localbuf.c:409).
+            backend_storage_buffer_bufmgr_seams::resowner_enlarge::call()?;
+
             let tag = Self::make_tag(rlocator, fork, first_block + i as u32);
 
             let found_existing = self.local_buf_hash.borrow().get(&tag).copied();
@@ -768,6 +781,8 @@ impl LocalBufferManager {
             {
                 // Pin/unpin mostly to make valgrind work, but also the right
                 // thing.
+                // ResourceOwnerEnlarge(CurrentResourceOwner) (bufmgr.c:4963).
+                backend_storage_buffer_bufmgr_seams::resowner_enlarge::call()?;
                 self.PinLocalBuffer(i, false)?;
                 self.FlushLocalBuffer(i)?;
                 self.UnpinLocalBuffer(Self::buffer_for_index(i))?;
@@ -843,15 +858,22 @@ impl LocalBufferManager {
             self.set_state(bufid, buf_state);
         }
         self.local_ref_count.borrow_mut()[bufid as usize] += 1;
+        // ResourceOwnerRememberBuffer(CurrentResourceOwner,
+        //                             BufferDescriptorGetBuffer(buf_hdr));
+        // (localbuf.c:825). The caller did ResourceOwnerEnlarge already.
+        backend_storage_buffer_bufmgr_seams::remember_buffer::call(Self::buffer_for_index(bufid));
 
         Ok(buf_state & BM_VALID != 0)
     }
 
-    /// `UnpinLocalBuffer` — drop a local pin (with resource-owner bookkeeping;
-    /// here the resowner step is the caller's, so this is identical to
-    /// `UnpinLocalBufferNoOwner`).
+    /// `UnpinLocalBuffer` (localbuf.c:832) — drop a local pin with
+    /// resource-owner bookkeeping: `UnpinLocalBufferNoOwner` then
+    /// `ResourceOwnerForgetBuffer`.
     pub fn UnpinLocalBuffer(&self, buffer: Buffer) -> PgResult<()> {
-        self.UnpinLocalBufferNoOwner(buffer)
+        self.UnpinLocalBufferNoOwner(buffer)?;
+        // ResourceOwnerForgetBuffer(CurrentResourceOwner, buffer) (localbuf.c:835).
+        backend_storage_buffer_bufmgr_seams::forget_buffer::call(buffer);
+        Ok(())
     }
 
     /// `UnpinLocalBufferNoOwner` — drop a local pin without resource-owner

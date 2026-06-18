@@ -28,6 +28,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `UnpinLocalBufferNoOwner(buffer)` (localbuf.c) — drop one local pin
+    /// without resource-owner bookkeeping (the `BufferIsLocal` arm of
+    /// `ResOwnerReleaseBufferPin`, where the owner is already mid-release).
+    pub fn unpin_local_buffer_no_owner(
+        buffer: types_core::primitive::Buffer,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `LocalRefCount[-buffer - 1]++` (localbuf.c, the inline `IncrBufferRefCount`
     /// local arm) — bump this backend's local pin count on an already-pinned
     /// local buffer.
@@ -64,4 +73,25 @@ seam_core::seam!(
     pub fn local_buffer_get_lsn(
         buffer: types_core::primitive::Buffer,
     ) -> types_error::PgResult<types_core::primitive::XLogRecPtr>
+);
+
+seam_core::seam!(
+    /// `BufferGetPage(buffer)` local arm — run `f` over a local (temp) buffer's
+    /// live page bytes (`BLCKSZ`) for in-place read/write. Local buffers are
+    /// never shared, so no content lock is involved; the closure operates on the
+    /// backend-local page directly. `f`'s `Err` propagates.
+    pub fn local_buffer_with_page(
+        buffer: types_core::primitive::Buffer,
+        f: &mut dyn FnMut(&mut [u8]) -> types_error::PgResult<()>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `BufferGetPage(buffer)` local arm materialised as an owned snapshot copy
+    /// of a local (temp) buffer's page image in `mcx` (the consumer reads
+    /// page-format fields off it). `Err` carries OOM.
+    pub fn local_buffer_page_owned<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        buffer: types_core::primitive::Buffer,
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, u8>>
 );

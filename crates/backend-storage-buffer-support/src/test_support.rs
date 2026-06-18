@@ -204,6 +204,12 @@ fn install_seams_once() {
     });
     backend_storage_buffer_bufmgr_seams::io_direct_data::set(|| false);
 
+    // --- resource-owner buffer bookkeeping (PinLocalBuffer / UnpinLocalBuffer
+    // remember/forget the local pin; no-op stubs for the local-only tests). ---
+    backend_storage_buffer_bufmgr_seams::resowner_enlarge::set(|| Ok(()));
+    backend_storage_buffer_bufmgr_seams::remember_buffer::set(|_b| {});
+    backend_storage_buffer_bufmgr_seams::forget_buffer::set(|_b| {});
+
     // --- bgwriter wakeup latch. ---
     backend_storage_ipc_latch_seams::set_latch_for_procno::set(|procno| {
         header_state().lock().unwrap().latches.push(procno);
