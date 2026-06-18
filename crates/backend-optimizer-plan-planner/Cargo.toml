@@ -74,6 +74,10 @@ backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
 backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
 # set_pathtarget_cost_width (the create_pathtarget macro tail).
 backend-optimizer-path-costsize = { path = "../backend-optimizer-path-costsize" }
+# get_sortgroupclause_expr (get_number_of_groups GROUP BY estimate).
+backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
+# estimate_num_groups (get_number_of_groups GROUP BY estimate).
+backend-utils-adt-selfuncs-seams = { path = "../backend-utils-adt-selfuncs-seams" }
 # CheckSelectLocking.
 backend-parser-analyze = { path = "../backend-parser-analyze" }
 # has_subclass.

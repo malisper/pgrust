@@ -190,4 +190,27 @@ pub fn init_seams() {
             })
         },
     );
+
+    // `remove_nulling_relids((Node *) expr, removable_relids, except_relids)`
+    // (nodeFuncs.c) over a single owned-arena `Expr` — consumed by
+    // make_pathkeys_for_sortclauses_extended when stripping the group RTE index.
+    // Same `&mut Node` wrap/unwrap as above; `except_relids == None` is the C NULL.
+    backend_nodes_nodeFuncs_seams::remove_nulling_relids::set(
+        |expr, removable_relids, except_relids| {
+            let removable_er = removable_relids
+                .as_ref()
+                .map(|b| types_nodes::primnodes::ExprRelids { words: b.words.clone() })
+                .unwrap_or_default();
+            let except_er = except_relids
+                .as_ref()
+                .map(|b| types_nodes::primnodes::ExprRelids { words: b.words.clone() })
+                .unwrap_or_default();
+            let mut node = types_nodes::nodes::Node::Expr(expr.clone());
+            nulling::remove_nulling_relids(&mut node, &removable_er, &except_er);
+            match node {
+                types_nodes::nodes::Node::Expr(e) => e,
+                _ => unreachable!("remove_nulling_relids returned a non-Expr for an Expr input"),
+            }
+        },
+    );
 }

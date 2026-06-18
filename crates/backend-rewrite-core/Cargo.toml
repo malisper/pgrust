@@ -17,6 +17,8 @@ types-cache = { path = "../types-cache" }
 types-datum = { path = "../types-datum" }
 types-storage = { path = "../types-storage" }
 backend-nodes-core = { path = "../backend-nodes-core" }
+# remove_nulling_relids nodeFuncs seam (owner = this crate's nulling.rs).
+backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
 backend-parser-relation = { path = "../backend-parser-relation" }
 backend-parser-coerce = { path = "../backend-parser-coerce" }
 backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }

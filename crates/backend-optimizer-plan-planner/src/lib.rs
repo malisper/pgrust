@@ -1002,11 +1002,45 @@ fn subquery_planner<'mcx>(
                             run.resolve_mut(root.parse).rtable[i].values_lists[r] = new_row;
                         }
                     }
-                    RTEKind::RTE_FUNCTION | RTEKind::RTE_TABLEFUNC | RTEKind::RTE_GROUP => {
+                    RTEKind::RTE_GROUP => {
+                        // Preprocess the groupexprs list fully (planner.c:1035-1038):
+                        // rte->groupexprs = preprocess_expression(root, groupexprs,
+                        // EXPRKIND_GROUPEXPR). The list is a flat PgVec<NodePtr> of
+                        // Node::Expr; const-fold each element. EXPRKIND_GROUPEXPR runs
+                        // eval_const_expressions but not canonicalize/saop.
+                        let ng = run.resolve(root.parse).rtable[i].groupexprs.len();
+                        for g in 0..ng {
+                            let e: Expr = {
+                                let parse = run.resolve(root.parse);
+                                match &*parse.rtable[i].groupexprs[g] {
+                                    Node::Expr(e) => e.clone(),
+                                    _ => {
+                                        return Err(types_error::PgError::error(
+                                            "subquery_planner: RTE_GROUP groupexpr is not an Expr",
+                                        ))
+                                    }
+                                }
+                            };
+                            let pe = preprocess_expression(
+                                mcx,
+                                &root,
+                                Some(e),
+                                EXPRKIND_GROUPEXPR,
+                            )?;
+                            let pe = pe.ok_or_else(|| {
+                                types_error::PgError::error(
+                                    "subquery_planner: RTE_GROUP groupexpr folded to NULL",
+                                )
+                            })?;
+                            run.resolve_mut(root.parse).rtable[i].groupexprs[g] =
+                                mcx::alloc_in(mcx, Node::Expr(pe))?;
+                        }
+                    }
+                    RTEKind::RTE_FUNCTION | RTEKind::RTE_TABLEFUNC => {
                         panic!(
                             "subquery_planner: per-RTE expression preprocessing \
-                             (planner.c:987-1054) for rtekind {:?} (function/tablefunc/\
-                             groupexprs) is not wired over the owned RTE model",
+                             (planner.c:987-1054) for rtekind {:?} (function/tablefunc) \
+                             is not wired over the owned RTE model",
                             rtekind
                         );
                     }
@@ -1032,14 +1066,56 @@ fn subquery_planner<'mcx>(
             );
         }
 
-        // flatten_group_exprs over targetList + havingQual (C:1088-1095). GROUP-RTE
-        // only; a non-grouped SELECT has hasGroupRTE == false.
+        // Replace any Vars in targetList/havingQual that reference GROUP outputs
+        // with the underlying grouping expressions (C:1088-1095). GROUP-RTE only;
+        // a non-grouped SELECT has hasGroupRTE == false. Performed after the
+        // grouping expressions were preprocessed above.
         if run.resolve(root.parse).hasGroupRTE {
-            panic!(
-                "subquery_planner: flatten_group_exprs (clauses.c) over targetList/\
-                 havingQual (planner.c:1088-1095) has no ported owner; reached \
-                 because parse->hasGroupRTE is set"
-            );
+            use types_nodes::nodes::Node;
+            // flatten_group_exprs reads query->rtable (the RTE_GROUP groupexprs)
+            // and query->hasSubLinks; clone the parse Query into the run arena as
+            // the immutable context so we can mutate targetList/havingQual on the
+            // live Query in place. The clone already carries the preprocessed
+            // groupexprs.
+            let ctx_query = run.resolve(root.parse).clone_in(mcx)?;
+
+            // targetList: apply to each TargetEntry's expr (walking the list is
+            // equivalent to the C flatten over the whole List node).
+            let ntargets = run.resolve(root.parse).targetList.len();
+            for t in 0..ntargets {
+                let expr_opt: Option<Expr> = {
+                    let parse = run.resolve(root.parse);
+                    match parse.targetList[t].expr.as_deref() {
+                        Some(e) => Some(e.clone_in(mcx)?),
+                        None => None,
+                    }
+                };
+                if let Some(e) = expr_opt {
+                    let node = Node::Expr(e);
+                    let flattened = backend_optimizer_util_vars::flatten::flatten_group_exprs(
+                        mcx, &root, &ctx_query, node,
+                    )?;
+                    if let Node::Expr(ne) = flattened {
+                        run.resolve_mut(root.parse).targetList[t].expr =
+                            Some(mcx::alloc_in(mcx, ne)?);
+                    }
+                }
+            }
+
+            // havingQual.
+            let having_opt: Option<Expr> = match run.resolve(root.parse).havingQual.as_deref() {
+                Some(e) => Some(e.clone_in(mcx)?),
+                None => None,
+            };
+            if let Some(e) = having_opt {
+                let node = Node::Expr(e);
+                let flattened = backend_optimizer_util_vars::flatten::flatten_group_exprs(
+                    mcx, &root, &ctx_query, node,
+                )?;
+                if let Node::Expr(ne) = flattened {
+                    run.resolve_mut(root.parse).havingQual = Some(mcx::alloc_in(mcx, ne)?);
+                }
+            }
         }
 
         // hasTargetSRFs re-check (C:1098-1099). Constant-folding can remove all
@@ -2037,24 +2113,37 @@ fn make_group_input_target<'mcx>(
 fn get_number_of_groups<'mcx>(
     run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
-    _path_rows: f64,
+    path_rows: f64,
 ) -> PgResult<f64> {
     let parse = run.resolve(root.parse);
     let has_group_clause = !parse.groupClause.is_empty();
     let has_grouping_sets = !parse.groupingSets.is_empty();
     let has_aggs = parse.hasAggs;
     if has_group_clause {
-        // Plain GROUP BY — estimate based on the optimized groupClause via
-        // estimate_num_groups (selfuncs.c). The GROUP BY path also needs
-        // AGG_SORTED group_pathkeys (and, for non-aggregate GROUP BY,
-        // create_group_path), which are not ported on this path; that gap is
-        // surfaced as a precise error in add_paths_to_grouping_rel before any
-        // group count is consumed, so the estimate is not reached here.
+        // Plain GROUP BY — estimate based on the optimized groupClause (C:3735).
+        // groupExprs = get_sortgrouplist_exprs(root->processed_groupClause,
+        // target_list); dNumGroups = estimate_num_groups(root, groupExprs,
+        // path_rows, NULL, NULL). The grouping-sets leg is gated out upstream.
         debug_assert!(!has_grouping_sets);
-        Err(PgError::error(
-            "get_number_of_groups: GROUP BY group-count estimation (estimate_num_groups) \
-             is reached only on the unported GROUP BY aggregation path",
-        ))
+        // groupExprs = get_sortgrouplist_exprs(processed_groupClause, target_list).
+        // get_number_of_groups is passed `extra->targetList` (the grouping rel's
+        // target); the SortGroupClause tleSortGroupRefs resolve against
+        // processed_tlist, which the grouped target derives from.
+        let group_clause = root.processed_groupClause.clone();
+        let tlist = root.processed_tlist.clone();
+        let group_exprs: Vec<types_pathnodes::NodeId> = group_clause
+            .iter()
+            .map(|&sgc| {
+                backend_nodes_nodeFuncs_seams::get_sortgroupclause_expr::call(root, sgc, &tlist)
+            })
+            .collect();
+        backend_utils_adt_selfuncs_seams::estimate_num_groups::call(
+            run,
+            root,
+            &group_exprs,
+            path_rows,
+            None,
+        )
     } else if has_grouping_sets {
         // Empty grouping sets — gated out upstream.
         panic!("get_number_of_groups: GROUPING SETS gated out upstream");
@@ -2567,11 +2656,47 @@ fn standard_qp_callback(
     // tlist = root->processed_tlist (C:3457).
     let tlist = root.processed_tlist.clone();
 
-    // GROUP BY / window / DISTINCT / set-op pathkeys are all NIL on this path
-    // (their clauses are gated out upstream). Mirror the C else-branches that
-    // assign NIL.
-    root.group_pathkeys = Vec::new();
-    root.num_groupby_pathkeys = 0;
+    // Grouping pathkeys (C:3501). With a plain GROUP BY list (no grouping sets),
+    // convert the optimized groupClause into pathkeys, removing items proven
+    // redundant by EquivalenceClass processing and setting ec_sortref. Grouping
+    // sets are gated out upstream (qp_callback is only reached on the non-gset
+    // path), so we take the plain `parse->groupClause || numOrderedAggs > 0` arm.
+    if !root.processed_groupClause.is_empty() || root.numOrderedAggs > 0 {
+        let mut processed = root.processed_groupClause.clone();
+        let (pathkeys, sortable) =
+            backend_optimizer_path_pathkeys::make_pathkeys_for_sortclauses_extended(
+                root,
+                &mut processed,
+                &tlist,
+                true,  // remove_redundant
+                false, // remove_group_rtindex
+                true,  // set_ec_sortref
+            );
+        // make_pathkeys_for_sortclauses_extended may drop redundant clauses from
+        // the passed list; reflect that back onto processed_groupClause.
+        root.processed_groupClause = processed;
+        if !sortable {
+            // Can't sort; no point in considering aggregate ordering either.
+            root.group_pathkeys = Vec::new();
+            root.num_groupby_pathkeys = 0;
+        } else {
+            root.num_groupby_pathkeys = pathkeys.len() as i32;
+            root.group_pathkeys = pathkeys;
+            // If we have ordered aggs, consider adding onto group_pathkeys.
+            if root.numOrderedAggs > 0 {
+                return Err(PgError::error(
+                    "standard_qp_callback: adjust_group_pathkeys_for_groupagg \
+                     (ordered aggregates, planner.c) is not ported",
+                ));
+            }
+        }
+    } else {
+        root.group_pathkeys = Vec::new();
+        root.num_groupby_pathkeys = 0;
+    }
+
+    // Window / DISTINCT / set-op pathkeys are NIL on this path (their clauses are
+    // gated out upstream). Mirror the C else-branches that assign NIL.
     root.window_pathkeys = Vec::new();
     root.distinct_pathkeys = Vec::new();
     root.setop_pathkeys = Vec::new();
@@ -3145,18 +3270,96 @@ fn preprocess_groupclause<'mcx>(
     root: &mut PlannerInfo,
     force: &[types_core::Index],
 ) -> PgResult<Vec<types_pathnodes::NodeId>> {
-    let _ = (run, root, force);
-    // Reached only when parse->groupClause is non-empty (the caller gates it).
-    // The body needs get_sortgroupref_clause over parse->groupClause and
-    // equal(gc, sc) over SortGroupClause node values carried as NodePtr in the
-    // Query; the processed_groupClause carrier is Vec<NodeId> (arena) with no
-    // bridge from the parse->groupClause NodePtr list. Mirror PG and panic.
-    panic!(
-        "preprocess_groupclause (planner.c:2828): GROUP BY reordering needs \
-         get_sortgroupref_clause + equal() over parse->groupClause SortGroupClause \
-         node values (NodePtr), with no bridge to the processed_groupClause arena \
-         (Vec<NodeId>)"
-    );
+    // Bridge parse->groupClause (a List* of SortGroupClause* carried as NodePtr)
+    // into the planner node arena once, preserving element identity: each
+    // original SortGroupClause is interned to a single stable NodeId so that the
+    // C `list_member_ptr` (pointer identity) maps to NodeId equality here, and so
+    // that the returned processed_groupClause elements are "the same" clauses as
+    // parse->groupClause (the C contract — later processing may modify
+    // processed_groupClause but not parse->groupClause).
+    let group_clause_ids: Vec<types_pathnodes::NodeId> = {
+        let group_clauses: Vec<types_nodes::rawnodes::SortGroupClause> = run
+            .resolve(root.parse)
+            .groupClause
+            .iter()
+            .map(|np| sortgroupclause_from_node(np))
+            .collect::<PgResult<Vec<_>>>()?;
+        group_clauses
+            .into_iter()
+            .map(|sgc| root.alloc_sortgroupclause(sgc))
+            .collect()
+    };
+
+    // For grouping sets, we need to force the ordering (C:2835). `force` is a
+    // list of tleSortGroupRefs; for each, pick the matching groupClause element.
+    if !force.is_empty() {
+        let mut new_groupclause: Vec<types_pathnodes::NodeId> = Vec::new();
+        for &ref_idx in force {
+            // get_sortgroupref_clause(ref, parse->groupClause) — find the clause
+            // with tleSortGroupRef == ref, reusing its interned NodeId.
+            let id = *group_clause_ids
+                .iter()
+                .find(|&&id| root.sortgroupclause(id).tleSortGroupRef == ref_idx)
+                .ok_or_else(|| {
+                    PgError::error(
+                        "preprocess_groupclause: ORDER/GROUP reference is not in the \
+                         GROUP BY clause",
+                    )
+                })?;
+            new_groupclause.push(id);
+        }
+        return Ok(new_groupclause);
+    }
+
+    // If no ORDER BY, nothing useful to do here (C:2848).
+    let sort_clauses: Vec<types_nodes::rawnodes::SortGroupClause> = run
+        .resolve(root.parse)
+        .sortClause
+        .iter()
+        .map(|np| sortgroupclause_from_node(np))
+        .collect::<PgResult<Vec<_>>>()?;
+    if sort_clauses.is_empty() {
+        return Ok(group_clause_ids);
+    }
+
+    // Scan the ORDER BY clause and construct a list of matching GROUP BY items,
+    // but only as far as we can make a matching prefix (C:2858). This assumes
+    // sortClause contains no duplicate items.
+    let mut new_groupclause: Vec<types_pathnodes::NodeId> = Vec::new();
+    'sort: for sc in &sort_clauses {
+        for &gid in &group_clause_ids {
+            let gc = *root.sortgroupclause(gid);
+            // equal(gc, sc) — SortGroupClause derives PartialEq.
+            if gc == *sc {
+                new_groupclause.push(gid);
+                continue 'sort;
+            }
+        }
+        // No match for this sort item, so stop scanning (C:2875: gl == NULL).
+        break;
+    }
+
+    // If no match at all, no point in reordering GROUP BY (C:2880).
+    if new_groupclause.is_empty() {
+        return Ok(group_clause_ids);
+    }
+
+    // Add any remaining GROUP BY items to the new list (C:2891). Partial match
+    // still allows ORDER BY via incremental sort. Give up if any non-sortable
+    // GROUP BY item is found.
+    for &gid in &group_clause_ids {
+        if new_groupclause.contains(&gid) {
+            continue; // it matched an ORDER BY item
+        }
+        if root.sortgroupclause(gid).sortop == 0 {
+            // GROUP BY can't be sorted — give up on reordering.
+            return Ok(group_clause_ids);
+        }
+        new_groupclause.push(gid);
+    }
+
+    debug_assert_eq!(group_clause_ids.len(), new_groupclause.len());
+    Ok(new_groupclause)
 }
 
 // ===========================================================================

@@ -927,6 +927,8 @@ pub const QTW_EXAMINE_RTES_AFTER: i32 = 0x20;
 pub const QTW_IGNORE_CTE_SUBQUERIES: i32 = 0x40;
 /// QTW flag: ignore GROUP-clause RTEs.
 pub const QTW_EXAMINE_SORTGROUP: i32 = 0x80;
+/// QTW flag: ignore the RTE_GROUP groupexprs list (nodeFuncs.h).
+pub const QTW_IGNORE_GROUPEXPRS: i32 = 0x100;
 
 /// `query_tree_walker(query, walker, context, flags)` (nodeFuncs.c) — apply
 /// `walker` to all the expression trees hanging off a `Query`, then recurse into
@@ -1117,7 +1119,7 @@ pub fn range_table_entry_walker(
             }
         }
         RTEKind::RTE_GROUP => {
-            if list_walk!(rte.groupexprs) {
+            if flags & QTW_IGNORE_GROUPEXPRS == 0 && list_walk!(rte.groupexprs) {
                 return true;
             }
         }
@@ -1305,7 +1307,7 @@ pub fn range_table_mutator(
                 }
             }
             RTEKind::RTE_GROUP => {
-                if list_walk!(rte.groupexprs) {
+                if flags & QTW_IGNORE_GROUPEXPRS == 0 && list_walk!(rte.groupexprs) {
                     return true;
                 }
             }

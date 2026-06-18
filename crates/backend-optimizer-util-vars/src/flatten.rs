@@ -483,3 +483,234 @@ fn alias_relid_set<'mcx>(
     }
     Ok(result)
 }
+
+// ===========================================================================
+// flatten_group_exprs (var.c:972) — replace Vars referencing GROUP outputs with
+// the underlying grouping expressions. Unlike flatten_join_alias_vars this
+// always runs with a real `root` (needed to preserve varnullingrels).
+// ===========================================================================
+
+use types_pathnodes::PlannerInfo;
+
+/// `flatten_group_exprs_mutator` context (var.c:64-71). Carries the real `root`
+/// (for `mark_nullable_by_grouping`) plus the `query` whose range table holds
+/// the RTE_GROUP entry.
+struct FlattenGroupCtx<'a, 'mcx> {
+    root: &'a PlannerInfo,
+    query: &'a Query<'mcx>,
+    sublevels_up: i32,
+    possible_sublink: bool,
+    inserted_sublink: bool,
+}
+
+/// `flatten_group_exprs(root, query, node)` (var.c:972). Replaces Vars that
+/// reference GROUP outputs (an `RTE_GROUP` range-table entry) with the
+/// underlying grouping expressions from `rte->groupexprs`.
+///
+/// The top node is never the whole `Query` (the C `Assert(node != query)`); it
+/// is the targetList/havingQual (an expression or list of expressions).
+pub fn flatten_group_exprs<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &PlannerInfo,
+    query: &Query<'mcx>,
+    mut node: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    let mut context = FlattenGroupCtx {
+        root,
+        query,
+        sublevels_up: 0,
+        // flag whether grouping expressions could possibly contain SubLinks
+        possible_sublink: query.hasSubLinks,
+        // if hasSubLinks is already true, no need to work hard
+        inserted_sublink: query.hasSubLinks,
+    };
+    flatten_group_exprs_mutator(mcx, &mut node, &mut context)?;
+    Ok(node)
+}
+
+fn flatten_group_exprs_mutator<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: &mut Node,
+    context: &mut FlattenGroupCtx<'_, 'mcx>,
+) -> PgResult<()> {
+    match node {
+        Node::Expr(Expr::Var(_)) => {
+            let var: Var = match node {
+                Node::Expr(Expr::Var(v)) => v.clone(),
+                _ => unreachable!(),
+            };
+
+            // No change unless Var belongs to the GROUP of the target level.
+            if var.varlevelsup as i32 != context.sublevels_up {
+                return Ok(()); // no need to copy, really
+            }
+            let rte = rt_fetch(context.query, var.varno)?;
+            if rte.rtekind != RTEKind::RTE_GROUP {
+                return Ok(());
+            }
+
+            // Expand group exprs reference: newvar = list_nth(rte->groupexprs,
+            // varattno-1). varattno > 0 (parser invariant).
+            debug_assert!(var.varattno > 0);
+            let idx = (var.varattno - 1) as usize;
+            let src = rte.groupexprs.get(idx).ok_or_else(|| {
+                PgError::error("flatten_group_exprs: groupexpr index out of range")
+            })?;
+            let group_expr = match &**src {
+                Node::Expr(e) => e.clone_in(mcx)?, // copyObject(newvar)
+                _ => {
+                    return Err(PgError::error(
+                        "flatten_group_exprs: groupexpr is not an expression",
+                    ))
+                }
+            };
+            let mut newvar = Node::Expr(group_expr);
+
+            // If expanding an expr carried down from an upper query, adjust its
+            // varlevelsup fields.
+            if context.sublevels_up != 0 {
+                IncrementVarSublevelsUp(&mut newvar, context.sublevels_up, 0)?;
+            }
+
+            // Preserve original Var's location, if possible.
+            if let Node::Expr(Expr::Var(nv)) = &mut newvar {
+                nv.location = var.location;
+            }
+
+            // Detect if we are adding a sublink to query.
+            if context.possible_sublink && !context.inserted_sublink {
+                context.inserted_sublink = checkExprHasSubLink(&newvar);
+            }
+
+            // Lastly, add any varnullingrels to the replacement expression.
+            *node = mark_nullable_by_grouping(context.root, newvar, &var)?;
+            Ok(())
+        }
+        Node::Expr(Expr::Aggref(_)) => {
+            let agglevelsup = match node {
+                Node::Expr(Expr::Aggref(a)) => a.agglevelsup as i32,
+                _ => unreachable!(),
+            };
+            if agglevelsup == context.sublevels_up {
+                // Aggregate of the original level: do not recurse into its
+                // normal args / ORDER BY / filter (no grouped vars there), but
+                // check direct args as though not in an aggregate.
+                if let Node::Expr(Expr::Aggref(agg)) = node {
+                    let mut dargs = core::mem::take(&mut agg.aggdirectargs);
+                    for e in dargs.iter_mut() {
+                        let owned = core::mem::replace(e, Expr::Const(Default::default()));
+                        let mut wrapped = Node::Expr(owned);
+                        flatten_group_exprs_mutator(mcx, &mut wrapped, context)?;
+                        if let Node::Expr(ne) = wrapped {
+                            *e = ne;
+                        }
+                    }
+                    if let Node::Expr(Expr::Aggref(agg)) = node {
+                        agg.aggdirectargs = dargs;
+                    }
+                }
+                return Ok(());
+            }
+            if agglevelsup > context.sublevels_up {
+                // Aggregates of higher levels cannot contain Vars of concern.
+                return Ok(());
+            }
+            // Lower-level aggregate: fall through to generic recursion below.
+            generic_recurse(mcx, node, context)
+        }
+        Node::Expr(Expr::GroupingFunc(_)) => {
+            let agglevelsup = match node {
+                Node::Expr(Expr::GroupingFunc(g)) => g.agglevelsup as i32,
+                _ => unreachable!(),
+            };
+            // GroupingFunc of the original or higher level: no grouped vars in
+            // its arguments.
+            if agglevelsup >= context.sublevels_up {
+                return Ok(());
+            }
+            generic_recurse(mcx, node, context)
+        }
+        Node::Query(q) => {
+            // Recurse into RTE subquery or not-yet-planned sublink subquery.
+            context.sublevels_up += 1;
+            let save_inserted_sublink = context.inserted_sublink;
+            context.inserted_sublink = q.hasSubLinks;
+            let mut err: Option<PgError> = None;
+            query_tree_mutator(
+                q,
+                &mut |n| {
+                    if err.is_some() {
+                        return true;
+                    }
+                    match flatten_group_exprs_mutator(mcx, n, context) {
+                        Ok(()) => false,
+                        Err(e) => {
+                            err = Some(e);
+                            true
+                        }
+                    }
+                },
+                backend_nodes_core::node_walker::QTW_IGNORE_GROUPEXPRS,
+            );
+            if let Some(e) = err {
+                return Err(e);
+            }
+            q.hasSubLinks |= context.inserted_sublink;
+            context.inserted_sublink = save_inserted_sublink;
+            context.sublevels_up -= 1;
+            Ok(())
+        }
+        _ => generic_recurse(mcx, node, context),
+    }
+}
+
+/// Generic `expression_tree_mutator(node, flatten_group_exprs_mutator, context)`
+/// recursion over a node's expression children (in place).
+fn generic_recurse<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: &mut Node,
+    context: &mut FlattenGroupCtx<'_, 'mcx>,
+) -> PgResult<()> {
+    let mut err: Option<PgError> = None;
+    expression_tree_walker_mut(node, &mut |n| {
+        if err.is_some() {
+            return true;
+        }
+        match flatten_group_exprs_mutator(mcx, n, context) {
+            Ok(()) => false,
+            Err(e) => {
+                err = Some(e);
+                true
+            }
+        }
+    });
+    match err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+/// `mark_nullable_by_grouping(root, newnode, oldvar)` (var.c:1107). Preserves the
+/// original Var's `varnullingrels` on the replacement expression. For the common
+/// case (no nullingrels — no GROUPING SETS and no grouping under an outer join)
+/// the replacement is returned unchanged.
+fn mark_nullable_by_grouping<'mcx>(
+    _root: &PlannerInfo,
+    newnode: Node<'mcx>,
+    oldvar: &Var,
+) -> PgResult<Node<'mcx>> {
+    // C: if (root == NULL) return newnode; — root is always non-NULL here.
+    if expr_relids::is_empty(&oldvar.varnullingrels) {
+        return Ok(newnode); // nothing to do
+    }
+    // The nullingrels-present path (grouping sets / grouping under an outer
+    // join) needs pull_varnos_of_level + add_nulling_relids / a PlaceHolderVar
+    // wrapper (make_placeholder_expr); none reachable on the plain GROUP BY path
+    // and gated out upstream (grouping sets loud-panic).
+    Err(PgError::error(
+        "mark_nullable_by_grouping: GROUP Var carries varnullingrels (grouping \
+         sets / outer-join nulling); the nullingrels-preserving path \
+         (pull_varnos_of_level + add_nulling_relids / make_placeholder_expr) is \
+         not ported",
+    ))
+}
