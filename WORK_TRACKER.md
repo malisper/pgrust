@@ -67,6 +67,7 @@ _Last updated: 2026-06-18 · origin/main ≈ `5f57e550a`_
 - **proc/procarray-private accessors** — FastPath F3 lock family (per-slot `fpRelId[]`/`fpLockBits[]` + cross-proc `allProcs` iterator) + blocker-status reporters (`BackendPidGetProc`, `lockGroupMembers`). Gates lmgr-lock's last 6 + pg_locks blocker views.
 - **prepunion subroot / cross-root PathId** — set-op child path import (relates to K8).
 - **fmgr frame-carrier by-ref widening** (TD-FMGR-GETARG-BYREF) — trimmed `types_nodes` FunctionCallInfoBaseData carries bare-word args, no by-ref channel → blocks `pg_getarg_{name,text_pp,varlena_pp,cstring}` + `typmodin`. Cousin of K4.
+- **fn_expr-through-Func-step** (TD-FMGR-FN-OID-AND-EXPR-NODE) — by-OID Func dispatch drops `flinfo->fn_expr`, so `get_fn_expr_rettype/argtype`→0 → **polymorphic functions** (range/array/enum constructors) fail "type OID 0" *(firing `af31b5cf`)*. Same cluster as frame-carrier.
 - **numeric by-ref Datum const-fold** (`make_const`, parse_node.c:418) — `abs(x::numeric)` + numeric-literal const-folding wall here; part of the K4 Datum-by-ref cluster. Also blocks the ~619 unregistered numeric/by-ref builtins from const-folding.
 - **tablecmds `alter_table_slow`** — the ALTER TABLE engine (ADD/ALTER COLUMN, constraints, ENABLE RLS). Gates most `ALTER TABLE` across the suite; ~22k LOC campaign.
 - **FK-join selectivity / ForeignKeyOptInfo arena** (`get_foreign_key_join_selectivity`, `root->fkey_list`) — unmodeled arena-handle; gates FK-aware join selectivity.
@@ -76,7 +77,7 @@ _Last updated: 2026-06-18 · origin/main ≈ `5f57e550a`_
 ---
 
 ## Active lanes
-`a125389c` planner DISTINCT/FOR-UPDATE · `a048453e` GROUP BY exec · `ac81ca4b` DDL/DML · `a3e10fdd` build-size · `ac9fa1f1` flatten_join (explicit JOIN) · type-adt: `aeeacf90` enum · `ae1ed3a0` cash · `aad66717` range · `a4186e51` acl
+`a125389c` planner DISTINCT/FOR-UPDATE · `a048453e` GROUP BY exec · `ac81ca4b` DDL/DML · `a3e10fdd` build-size · `ac9fa1f1` flatten_join · `af31b5cf` fn_expr-thru-Func (polymorphic) · `a4186e51` acl
 
 ## Build/infra notes
 - Artifacts ~6 GB/build (was ~10–14): `713252a14` (line-tables-only) + `c794aeac6` (**`incremental=false` now on `[profile.dev]`** — the lanes' default build; was only on the unused fast-check profile). Cap **~8**, keep ~20 GB buffer.
@@ -84,7 +85,7 @@ _Last updated: 2026-06-18 · origin/main ≈ `5f57e550a`_
 - Reaper = shm + `git worktree prune` ONLY (idle-based auto-rm disrupted live lanes twice; lanes self-clean + orchestrator reaps on pressure).
 
 ## Recently landed
-**2-table joins (comma+equality)** ✅ · **count/min/max/sum aggregates** ✅ · inet/cidr · arrayfuncs (sort/shuffle/sample) · EXPLAIN structural · **boolean error-position (LINE/caret) + varlena cstring-NUL** · policy/RLS (CREATE POLICY + RelationBuildRowSecurity) · proc_arg_attrs · count(\*) exec (#165) · **GROUP BY planning** (+ real parser p_rtable bug fix) · misc2 (15/16) · **count(\*) FROM pg_class = 415** (setrefs varno + IndexOnlyScan) · fmgr builtin registry 2003→1574 (0 mismatches) · cargo dev incremental=0 · min/max planner fall-through · createplan (unique/groupingsets/async, 3→0) · GUC registry 402/404 · typcache complete · lmgr-lock (15→6) · fmgr Phase-1 seams (56/67) · bool.c 100% (type correct e2e) + boolean parser/func-RTE fixes · io_combine_limit boot fix · Datum by-ref bridge (+saophash) · crash-reinit (TLS-unwind) · seclabel→DROP · comment→DROP · multi-row VALUES · parse_expr XML · t_bits crash · setrefs Aggref fixup · smaller build artifacts · plancache F0
+**2-table joins (comma+equality)** ✅ · **count/min/max/sum aggregates** ✅ · type-adt registration: inet/enum/cash/range · arrayfuncs (sort/shuffle/sample) · EXPLAIN structural · **boolean error-position (LINE/caret) + varlena cstring-NUL** · policy/RLS (CREATE POLICY + RelationBuildRowSecurity) · proc_arg_attrs · count(\*) exec (#165) · **GROUP BY planning** (+ real parser p_rtable bug fix) · misc2 (15/16) · **count(\*) FROM pg_class = 415** (setrefs varno + IndexOnlyScan) · fmgr builtin registry 2003→1574 (0 mismatches) · cargo dev incremental=0 · min/max planner fall-through · createplan (unique/groupingsets/async, 3→0) · GUC registry 402/404 · typcache complete · lmgr-lock (15→6) · fmgr Phase-1 seams (56/67) · bool.c 100% (type correct e2e) + boolean parser/func-RTE fixes · io_combine_limit boot fix · Datum by-ref bridge (+saophash) · crash-reinit (TLS-unwind) · seclabel→DROP · comment→DROP · multi-row VALUES · parse_expr XML · t_bits crash · setrefs Aggref fixup · smaller build artifacts · plancache F0
 
 ## DROP status
 CREATE→INSERT→SELECT ✓ · DROP: comment ✓ → seclabel ✓ → **next wall `relation_is_nailed`** (tablecmds seam).
