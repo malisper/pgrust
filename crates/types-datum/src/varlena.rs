@@ -40,57 +40,6 @@ fn varsize_4b(header: [u8; VARHDRSZ]) -> usize {
     len as usize
 }
 
-/// Read the total length encoded by a 4-byte uncompressed varlena header at the
-/// start of `bytes` (`VARSIZE_4B`), or `None` if `bytes` is shorter than the
-/// header or its leading byte is the 1-byte / external tag (not a 4-byte header).
-/// Used to disambiguate a header-FUL canonical `Datum::ByRef` image from a
-/// header-LESS payload at the fmgr boundary without a catalog typlen lookup.
-pub fn varsize_4b_of(bytes: &[u8]) -> Option<usize> {
-    if bytes.len() < VARHDRSZ {
-        return None;
-    }
-    // A 4-byte uncompressed header (`VARATT_IS_4B_U`) has its low two tag bits
-    // clear; a 1-byte short header (`VARATT_IS_1B`, low bit set) or external
-    // pointer is not the form `set_varsize_4b` produces.
-    if bytes[0] & 0x03 != 0 {
-        return None;
-    }
-    let mut header = [0u8; VARHDRSZ];
-    header.copy_from_slice(&bytes[..VARHDRSZ]);
-    Some(varsize_4b(header))
-}
-
-/// `VARSIZE_1B(PTR)` of a 1-byte ("short") varlena header at the start of
-/// `bytes` (`varatt.h`: `(b[0] >> 1) & 0x7F`, the total size INCLUDING the 1-byte
-/// header), or `None` if `bytes` is not a short-header varlena (`VARATT_IS_1B`
-/// requires the low header bit set; an external `VARATT_IS_1B_E` has the next bit
-/// set and is excluded — those forms are not produced by the in-memory input
-/// functions whose results this serves).
-pub fn varsize_1b_of(bytes: &[u8]) -> Option<usize> {
-    let h = *bytes.first()?;
-    // VARATT_IS_1B: low bit set; VARATT_IS_1B_E: 0x01 (whole byte) — exclude the
-    // external pointer form (header byte exactly 0x01).
-    if h & 0x01 == 0x01 && h != 0x01 {
-        Some(((h >> 1) & 0x7F) as usize)
-    } else {
-        None
-    }
-}
-
-/// The size of the length header in front of a `struct varlena` image (`bytes`
-/// addresses the start of the varlena): `VARHDRSZ_SHORT` (1) for the 1-byte
-/// short header (`VARATT_IS_1B`), else `VARHDRSZ` (4) for the standard 4-byte
-/// header. (Toast pointers / `VARATT_IS_1B_E` are not produced by the in-memory
-/// input functions whose results this trims, so they fall to the 1-byte case.)
-pub fn varhdrsz_of(bytes: &[u8]) -> usize {
-    if bytes.first().is_some_and(|b| b & 0x01 == 0x01) {
-        // VARATT_IS_1B: 1-byte short header (`varatt.h` `VARHDRSZ_SHORT`).
-        1
-    } else {
-        VARHDRSZ
-    }
-}
-
 /// An owned `struct varlena` image (`c.h`): the 4-byte length word followed by
 /// the payload, in context-allocated storage — the trimmed analog of a
 /// palloc'd `struct varlena *` in the 4-byte-header uncompressed inline

@@ -33,7 +33,13 @@ pub use types_datum::ExpandedObject;
 /// * [`RefPayload::Cstring`] is C's `char *` (`cstring`) — owned text, never a
 ///   `*const c_char` / `CStr`.
 /// * [`RefPayload::Varlena`] is C's `struct varlena *` (`text`/`bytea`/numeric/
-///   array/fixed-by-ref) — its byte image, owned `Vec<u8>`.
+///   array/fixed-by-ref) — its HEADER-FUL byte image, owned `Vec<u8>`: the
+///   complete `struct varlena` memory C would see, the 4-byte length word
+///   (`VARHDRSZ`/`set_varsize_4b`) followed by the payload. This is the single,
+///   self-describing representation everywhere (no header-LESS variant): an adt
+///   core reads the payload via `&image[VARHDRSZ..]` and writes by prepending
+///   `set_varsize_4b(4 + payload.len())`. Carried VERBATIM across the fmgr-core
+///   boundary — no strip/restamp.
 /// * [`RefPayload::Expanded`] is C's `VARATT_IS_EXPANDED` value — a live,
 ///   possibly-mutable in-memory object.
 ///

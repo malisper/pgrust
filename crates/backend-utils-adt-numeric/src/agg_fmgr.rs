@@ -123,17 +123,6 @@ fn numeric_has_header(bytes: &[u8]) -> bool {
     encoded == bytes.len()
 }
 
-/// Strip the varlena header off a numeric core's full-image output: the
-/// `RefPayload::Varlena` result lane carries the HEADER-LESS payload, which
-/// `ref_out_to_datum` re-stamps into a header-ful canonical `ByRef`. (The arg
-/// lane is asymmetric — a polymorphic `internal` aggregate's numeric arg arrives
-/// header-ful because the typed strip keys off `proargtypes`, which resolves
-/// through the `internal` first parameter.)
-fn numeric_result_image(image: Vec<u8>) -> Vec<u8> {
-    let off = types_datum::varlena::varhdrsz_of(&image);
-    image[off..].to_vec()
-}
-
 /// Take the `internal` transition state out of `args[0]`, downcast to the
 /// concrete carrier. `None` is C's `PG_ARGISNULL(0)` (first call).
 fn take_numeric_state(fcinfo: &mut FunctionCallInfoBaseData) -> Option<Box<NumericAggInternal>> {
@@ -171,10 +160,12 @@ fn ret_internal(fcinfo: &mut FunctionCallInfoBaseData, state: Box<dyn core::any:
     Datum::from_usize(0)
 }
 
-/// `PG_RETURN_NUMERIC(image)` — by-ref numeric result, header-ful (the result
-/// lane mirrors the header-ful arg lane for `internal`-transtype finals).
+/// `PG_RETURN_NUMERIC(image)` — by-ref numeric result. Header-ful everywhere:
+/// the `RefPayload::Varlena` result lane carries the complete header-ful varlena
+/// image verbatim (the numeric core's full image; `numeric_with_header` is
+/// idempotent if it already carries the 4-byte length word).
 fn ret_numeric(fcinfo: &mut FunctionCallInfoBaseData, image: Vec<u8>) -> Datum {
-    fcinfo.set_ref_result(RefPayload::Varlena(numeric_result_image(image)));
+    fcinfo.set_ref_result(RefPayload::Varlena(numeric_with_header(&image)));
     Datum::from_usize(0)
 }
 

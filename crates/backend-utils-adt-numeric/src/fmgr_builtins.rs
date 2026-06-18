@@ -42,31 +42,17 @@ use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
 
 /// `PG_GETARG_NUMERIC(i)`: a `numeric` arg's full varlena byte image.
 ///
-/// By this codebase's varlena convention the fmgr by-reference lane carries only
-/// the header-LESS payload (`VARDATA_ANY`), but every `types_numeric` /
-/// `io`/`convert` accessor reads the on-disk `Numeric` starting at the 4-byte
-/// varlena length header (`NUMERIC_HEADER_SIZE` is measured from VARHDRSZ, like
-/// C). Re-stamp the 4-byte length header over the lane payload to reconstruct the
-/// header-ful image the cores expect (the inverse of [`ret_numeric`]'s strip).
+/// Header-ful everywhere: the fmgr by-reference lane carries the complete on-disk
+/// `Numeric` varlena image (4-byte VARSIZE header + n_header + digits), exactly
+/// what every `types_numeric` / `io`/`convert` accessor reads (`NUMERIC_HEADER_SIZE`
+/// is measured from VARHDRSZ, like C). It crosses VERBATIM — no strip/re-stamp.
 #[inline]
 fn arg_numeric(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Vec<u8> {
-    let payload = fcinfo
+    fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
-        .expect("numeric fn: by-ref `numeric` arg missing from by-ref lane");
-    headerful_numeric(payload)
-}
-
-/// Prepend the 4-byte varlena length header over a header-LESS numeric lane
-/// payload, yielding the header-ful on-disk `Numeric` image the cores read.
-#[inline]
-fn headerful_numeric(payload: &[u8]) -> Vec<u8> {
-    use types_datum::varlena::{set_varsize_4b, VARHDRSZ};
-    let total = payload.len() + VARHDRSZ;
-    let mut image = Vec::with_capacity(total);
-    image.extend_from_slice(&set_varsize_4b(total));
-    image.extend_from_slice(payload);
-    image
+        .expect("numeric fn: by-ref `numeric` arg missing from by-ref lane")
+        .to_vec()
 }
 
 /// `PG_GETARG_CSTRING(i)`: the input cstring on the by-ref lane.
@@ -94,14 +80,10 @@ fn arg_int64(fcinfo: &FunctionCallInfoBaseData, i: usize) -> i64 {
 /// by-value word. The bytes are the full numeric varlena image (with header).
 #[inline]
 fn ret_numeric(fcinfo: &mut FunctionCallInfoBaseData, image: Vec<u8>) -> Datum {
-    // `make_result` produced a header-FUL on-disk image (4-byte VARSIZE +
-    // n_header + digits). The fmgr by-reference lane carries only the header-LESS
-    // payload by this codebase's varlena convention (`ref_out_to_datum`/the array
-    // on-disk path re-stamp the 4-byte length word). Strip the header here — the
-    // inverse of [`arg_numeric`]'s re-stamp.
-    use types_datum::varlena::VARHDRSZ;
-    let payload = image.get(VARHDRSZ..).unwrap_or(&[]).to_vec();
-    fcinfo.set_ref_result(RefPayload::Varlena(payload));
+    // Header-ful everywhere: `make_result` produced a complete header-FUL on-disk
+    // image (4-byte VARSIZE + n_header + digits), which is exactly the form the
+    // `RefPayload::Varlena` lane carries — so it crosses VERBATIM (no strip).
+    fcinfo.set_ref_result(RefPayload::Varlena(image));
     Datum::from_usize(0)
 }
 
