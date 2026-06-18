@@ -340,6 +340,204 @@ pub fn read_file_or_absent<'mcx>(
     Ok(Some(out))
 }
 
+/// `read_binary_file()` core (genfile.c) once the filename is validated:
+/// `AllocateFile(PG_BINARY_R)`, `fseeko` to `seek_offset`, then read either
+/// exactly `bytes_to_read` bytes (when `>= 0`) or the rest of the file (capped
+/// so the would-be bytea stays under `MaxAllocSize`), and `FreeFile`. The seam
+/// returns the raw bytes in `mcx`. `Ok(None)` mirrors `missing_ok && errno ==
+/// ENOENT`. Seam adapter for `read_server_file`.
+pub fn read_server_file<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    filename: &str,
+    seek_offset: i64,
+    bytes_to_read: i64,
+    missing_ok: bool,
+) -> PgResult<Option<mcx::PgVec<'mcx, u8>>> {
+    // MaxAllocSize (memutils.h) = 0x3fffffff; VARHDRSZ = 4.
+    const MAX_ALLOC_SIZE: i64 = 0x3fffffff;
+    const VARHDRSZ_I64: i64 = 4;
+
+    // if (bytes_to_read > MaxAllocSize - VARHDRSZ) ereport(ERROR, ...)
+    if bytes_to_read > MAX_ALLOC_SIZE - VARHDRSZ_I64 {
+        return Err(PgError::new(ERROR, "requested length too large".to_string())
+            .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE));
+    }
+
+    // file = AllocateFile(filename, PG_BINARY_R);
+    let index = match allocated_desc::AllocateFile(Path::new(filename), "rb") {
+        Ok(index) => index,
+        Err(e) => {
+            let errno = e.saved_errno().unwrap_or(0);
+            if missing_ok && errno == libc::ENOENT {
+                return Ok(None);
+            }
+            return Err(file_access_error(
+                ERROR,
+                errno,
+                format!("could not open file \"{filename}\" for reading: %m"),
+            ));
+        }
+    };
+
+    // fseeko(file, seek_offset, (seek_offset >= 0) ? SEEK_SET : SEEK_END)
+    if let Err(errno) = allocated_desc::stream_seek(index, seek_offset) {
+        let _ = allocated_desc::FreeFile(index);
+        return Err(file_access_error(
+            ERROR,
+            errno,
+            format!("could not seek in file \"{filename}\": %m"),
+        ));
+    }
+
+    let bytes = if bytes_to_read >= 0 {
+        // If passed explicit read size just do it.
+        match allocated_desc::stream_read_n(index, bytes_to_read as usize) {
+            Ok(b) => b,
+            Err(errno) => {
+                let _ = allocated_desc::FreeFile(index);
+                return Err(file_access_error(
+                    ERROR,
+                    errno,
+                    format!("could not read file \"{filename}\": %m"),
+                ));
+            }
+        }
+    } else {
+        // Negative read size: read rest of file, but bail if it would make the
+        // bytea exceed MaxAllocSize (the C "file length too large" guard, here
+        // measured on the raw payload that would carry a VARHDRSZ header).
+        let cap = (MAX_ALLOC_SIZE - 1 - VARHDRSZ_I64) as usize;
+        match allocated_desc::stream_read_n(index, cap + 1) {
+            Ok(b) => {
+                if b.len() > cap {
+                    let _ = allocated_desc::FreeFile(index);
+                    return Err(PgError::new(ERROR, "file length too large".to_string())
+                        .with_sqlstate(types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED));
+                }
+                b
+            }
+            Err(errno) => {
+                let _ = allocated_desc::FreeFile(index);
+                return Err(file_access_error(
+                    ERROR,
+                    errno,
+                    format!("could not read file \"{filename}\": %m"),
+                ));
+            }
+        }
+    };
+
+    allocated_desc::FreeFile(index)?;
+
+    let mut out = mcx::vec_with_capacity_in(mcx, bytes.len())?;
+    out.extend_from_slice(&bytes);
+    Ok(Some(out))
+}
+
+/// The fd/storage half of `CreateDirAndVersionFile(dbpath, dbid, tsid, isRedo)`
+/// (dbcommands.c): `MakePGDirectory(dbpath)` (tolerating `EEXIST` under
+/// `isRedo`), then `OpenTransientFile(PG_VERSION, O_WRONLY|O_CREAT|O_EXCL)`
+/// (re-opening `O_TRUNC` when it already exists in replay), `write` of
+/// `PG_MAJORVERSION\n`, `pg_fsync` + `fsync_fname(dbpath)`, `CloseTransientFile`.
+/// `dbid`/`tsid` belong to the caller-owned `!isRedo` WAL emission, so they are
+/// unused here. Seam adapter for `create_db_dir_and_version_file`.
+pub fn create_db_dir_and_version_file(
+    dbpath: &str,
+    _dbid: types_core::Oid,
+    _tsid: types_core::Oid,
+    is_redo: bool,
+) -> PgResult<()> {
+    // PG_MAJORVERSION (pg_config.h) for PostgreSQL 18.x.
+    const PG_MAJORVERSION: &str = "18";
+    // sprintf(buf, "%s\n", PG_MAJORVERSION);
+    let buf = format!("{PG_MAJORVERSION}\n");
+    let bytes = buf.as_bytes();
+
+    // Create database directory.
+    if vfd_core::seam_make_pg_directory(dbpath) < 0 {
+        let errno = errno_now();
+        // Failure other than already exists or not in WAL replay?
+        if errno != libc::EEXIST || !is_redo {
+            return Err(file_access_error(
+                ERROR,
+                errno,
+                format!("could not create directory \"{dbpath}\": %m"),
+            ));
+        }
+    }
+
+    // snprintf(versionfile, "%s/%s", dbpath, "PG_VERSION");
+    let versionfile = format!("{dbpath}/PG_VERSION");
+
+    // fd = OpenTransientFile(versionfile, O_WRONLY | O_CREAT | O_EXCL | PG_BINARY);
+    let create_flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | PG_BINARY;
+    let fd = match allocated_desc::OpenTransientFile(Path::new(&versionfile), create_flags) {
+        Ok(fd) => Ok(fd),
+        Err(e) => {
+            let errno = e.saved_errno().unwrap_or(0);
+            // if (fd < 0 && errno == EEXIST && isRedo)
+            //     fd = OpenTransientFile(versionfile, O_WRONLY | O_TRUNC | PG_BINARY);
+            if errno == libc::EEXIST && is_redo {
+                allocated_desc::OpenTransientFile(
+                    Path::new(&versionfile),
+                    libc::O_WRONLY | libc::O_TRUNC | PG_BINARY,
+                )
+                .map_err(|e2| {
+                    file_access_error(
+                        ERROR,
+                        e2.saved_errno().unwrap_or(0),
+                        format!("could not create file \"{versionfile}\": %m"),
+                    )
+                })
+            } else {
+                Err(file_access_error(
+                    ERROR,
+                    errno,
+                    format!("could not create file \"{versionfile}\": %m"),
+                ))
+            }
+        }
+    }?;
+
+    // Write PG_MAJORVERSION in the PG_VERSION file.
+    let written = transient_write(fd, bytes);
+    if written != bytes.len() as isize {
+        // If write didn't set errno, assume problem is no disk space.
+        let mut errno = if written < 0 { (-written) as i32 } else { errno_now() };
+        if errno == 0 {
+            errno = libc::ENOSPC;
+        }
+        let _ = allocated_desc::CloseTransientFile(fd);
+        return Err(file_access_error(
+            ERROR,
+            errno,
+            format!("could not write to file \"{versionfile}\": %m"),
+        ));
+    }
+
+    // if (pg_fsync(fd) != 0) ereport(data_sync_elevel(ERROR), ...)
+    let fsync_rc = seam_pg_fsync(fd);
+    if fsync_rc != 0 {
+        let errno = -fsync_rc;
+        let _ = allocated_desc::CloseTransientFile(fd);
+        return Err(file_access_error(
+            vfd_core::data_sync_elevel(ERROR),
+            errno,
+            format!("could not fsync file \"{versionfile}\": %m"),
+        ));
+    }
+
+    // fsync_fname(dbpath, true);
+    if let Err(e) = sync_cleanup::fsync_fname(Path::new(dbpath), true) {
+        let _ = allocated_desc::CloseTransientFile(fd);
+        return Err(e);
+    }
+
+    // Close the version file.
+    allocated_desc::CloseTransientFile(fd)?;
+    Ok(())
+}
+
 /// `file_exists` — `AllocateFile(path, "r")` then `FreeFile`. `true` if it could
 /// be opened, `false` on `errno == ENOENT`, `FATAL` on any other open failure.
 pub fn file_exists(path: &str) -> PgResult<bool> {

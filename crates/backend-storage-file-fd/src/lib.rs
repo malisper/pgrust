@@ -49,6 +49,7 @@
 pub mod allocated_desc;
 pub mod seams;
 pub mod sync_cleanup;
+pub mod tblspc_fs;
 pub mod temp_files;
 pub mod vfd_core;
 pub mod vfd_io;
@@ -158,6 +159,30 @@ pub fn init_seams() {
     fd_seams::stat_file::set(seams::seam_stat_file);
     fd_seams::lstat_file::set(seams::seam_lstat_file);
     fd_seams::list_dir::set(seams::seam_list_dir);
+    // genfile.c `read_binary_file` (AllocateFile + fseeko + read + FreeFile).
+    fd_seams::read_server_file::set(seams::read_server_file);
+    // dbcommands.c `CreateDirAndVersionFile` fd/storage half (mkdir + PG_VERSION
+    // write/fsync); the `!isRedo` WAL emission stays in dbcommands.
+    fd_seams::create_db_dir_and_version_file::set(seams::create_db_dir_and_version_file);
+    // src/port `pg_mkdir_p` + libc `rmdir` (dbcommands/tablespace direct calls).
+    fd_seams::pg_mkdir_p::set(vfd_core::seam_pg_mkdir_p);
+    fd_seams::rmdir::set(vfd_core::seam_rmdir);
+
+    // -- backend-storage-file-tblspc-fs-seams -------------------------------
+    // The raw POSIX primitives commands/tablespace.c issues directly. The
+    // decl crate has no separate owner; these are fd.c/`src/port` primitives,
+    // so the fd owner installs them (sanctioned cross-crate install).
+    {
+        use backend_storage_file_tblspc_fs_seams as tfs_seams;
+        tfs_seams::stat::set(tblspc_fs::seam_stat);
+        tfs_seams::lstat::set(tblspc_fs::seam_lstat);
+        tfs_seams::make_pg_directory::set(tblspc_fs::seam_make_pg_directory);
+        tfs_seams::pg_mkdir_p::set(tblspc_fs::seam_pg_mkdir_p);
+        tfs_seams::chmod_dir::set(tblspc_fs::seam_chmod_dir);
+        tfs_seams::symlink::set(tblspc_fs::seam_symlink);
+        tfs_seams::rmdir::set(tblspc_fs::seam_rmdir);
+        tfs_seams::unlink::set(tblspc_fs::seam_unlink);
+    }
 
     // misc.c `pg_tablespace_location` resolution (lstat S_ISLNK + readlink +
     // tablespace-OID guards) — fd-coupled, so installed here.
