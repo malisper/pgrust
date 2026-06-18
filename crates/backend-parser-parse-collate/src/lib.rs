@@ -68,7 +68,7 @@ use types_core::{InvalidOid, Oid, OidIsValid};
 use types_error::{PgResult, ERROR, ERRCODE_COLLATION_MISMATCH, ERRCODE_OUT_OF_MEMORY};
 use types_parsenodes::{AGGKIND_HYPOTHETICAL, AGGKIND_NORMAL, AGGKIND_ORDERED_SET};
 use types_cluster::ParseState;
-use types_nodes::nodes::Node;
+use types_nodes::nodes::{ntag, Node};
 use types_nodes::primnodes::{Aggref, CoercionForm, Expr};
 
 use backend_utils_error::ereport;
@@ -218,7 +218,7 @@ pub fn assign_query_collations<'mcx>(
     // visited; but the expressions under WindowClause nodes (start/end offsets)
     // still get walked, matching query_tree_walker's non-sortgroup branch.
     for wc_node in query.windowClause.iter_mut() {
-        if let Node::WindowClause(wc) = &mut **wc_node {
+        if let Some(wc) = (**wc_node).as_windowclause_mut() {
             if let Some(start) = wc.startOffset.as_deref_mut() {
                 assign_query_collations_walker_node(pstate, start)?;
             }
@@ -284,7 +284,7 @@ fn assign_query_collations_walker_node(
 ) -> PgResult<()> {
     // We don't want to recurse into a set-operations tree; it's already been
     // fully processed in transformSetOperationStmt.
-    if matches!(node, Node::SetOperationStmt(_)) {
+    if node.is_setoperationstmt() {
         return Ok(());
     }
     assign_expr_collations_node(pstate, node)
@@ -392,15 +392,17 @@ fn assign_collations_walker(
     let strength: CollateStrength;
     let location: i32;
 
-    match node {
-        // An embedded expression node: run the full expression switch on it,
-        // which itself merges into `context`, so we are done here.
-        Node::Expr(e) => {
-            return assign_collations_walker_expr(e, context);
-        }
+    // An embedded expression node: run the full expression switch on it, which
+    // itself merges into `context`, so we are done here. (`Node::Expr` is the
+    // routing variant; it has no single `nodeTag`, so it is matched as the
+    // outer enum shape before the per-tag switch below.)
+    if let Some(e) = node.as_expr_mut() {
+        return assign_collations_walker_expr(e, context);
+    }
 
-        Node::TargetEntry(te) => {
-            let ressortgroupref = te.ressortgroupref;
+    match node.node_tag() {
+        ntag::T_TargetEntry => {
+            let ressortgroupref = node.expect_targetentry().ressortgroupref;
             recurse_children(node, &mut loccontext)?;
 
             // TargetEntry can have only one child, and should bubble that state
@@ -421,12 +423,12 @@ fn assign_collations_walker(
                 )?);
             }
         }
-        Node::RangeTblRef(_)
-        | Node::JoinExpr(_)
-        | Node::FromExpr(_)
-        | Node::OnConflictExpr(_)
-        | Node::SortGroupClause(_)
-        | Node::MergeAction(_) => {
+        ntag::T_RangeTblRef
+        | ntag::T_JoinExpr
+        | ntag::T_FromExpr
+        | ntag::T_OnConflictExpr
+        | ntag::T_SortGroupClause
+        | ntag::T_MergeAction => {
             recurse_children(node, &mut loccontext)?;
             // When invoked on a query's jointree, recurse through join nodes to
             // process WHERE/ON expressions, then stop. Likewise for sort/group
@@ -435,7 +437,8 @@ fn assign_collations_walker(
             // Expr switch.)
             return Ok(());
         }
-        Node::Query(q) => {
+        ntag::T_Query => {
+            let q = node.expect_query();
             // Invoked on the Query belonging to a SubLink. Act as though the
             // Query returns its first output column. Special case: EXISTS may
             // return no columns. We needn't recurse, the Query is processed.
@@ -455,7 +458,7 @@ fn assign_collations_walker(
         // which in this model are `Node::Expr` (handled above). Any other `Node`
         // arm reaching the walker is the C default `elog(ERROR, "unrecognized
         // node type")`.
-        other => return Err(unrecognized_node_type(other)),
+        _ => return Err(unrecognized_node_type(node)),
     }
 
     // Now, merge my information into my parent's state.
@@ -821,7 +824,7 @@ fn recurse_expr_children(
     let placeholder = Expr::Var(types_nodes::primnodes::Var::default());
     let mut wrapped = Node::Expr(core::mem::replace(expr, placeholder));
     let res = recurse_children(&mut wrapped, loccontext);
-    if let Node::Expr(e) = wrapped {
+    if let Some(e) = wrapped.into_expr() {
         *expr = e;
     }
     res
