@@ -989,6 +989,18 @@ impl Clone for SubLink {
     }
 }
 
+impl SubLink {
+    /// Deep copy into `mcx` (C: `copyObject` shape). This is the sanctioned,
+    /// non-panicking deep-copy path used by the [`Expr::SubLink`]
+    /// [`Expr::clone_in`] arm (never the panicking derived `.clone()`). The
+    /// embedded owned `subselect` `Query` is deep-cloned via
+    /// [`crate::copy_query::Query::clone_in`] and `testexpr` recurses through
+    /// [`Expr::clone_in`] (mirrors [`Aggref::clone_in`]).
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<SubLink> {
+        clone_sublink(self, mcx)
+    }
+}
+
 /// `AlternativeSubPlan` (nodes/primnodes.h) — a choice among SubPlans
 /// (transient; removed before execution).
 #[derive(Debug)]
@@ -2775,5 +2787,40 @@ mod clone_in_tests {
         assert!(sl.subselect.is_some());
         // Sibling Var deep-copied.
         assert_eq!(be.args[1].as_var().unwrap().varattno, 5);
+    }
+
+    /// Round-trip a `SubLink`-bearing `Expr` wrapped as a `Node::Expr` through
+    /// [`crate::nodes::Node::clone_in`] — the actual root-cause path for the
+    /// reachable `SELECT 1 WHERE EXISTS (...)` blocker: a WHERE-clause `SubLink`
+    /// is stored as `FromExpr.quals` (a `Node`) and deep-cloned by
+    /// `Query::clone_in` -> `FromExpr::clone_in` -> `Node::clone_in`, which must
+    /// route the `Expr` arm through `Expr::clone_in` (not the panicking
+    /// derived `.clone()`).
+    #[test]
+    fn node_clone_in_routes_sublink_expr_through_clone_in() {
+        use crate::nodes::Node;
+        let ctx = MemoryContext::new("clone_in_test");
+        let mcx = ctx.mcx();
+
+        let q = crate::copy_query::Query::new(mcx);
+        let q_boxed = mcx::alloc_in(mcx, q).unwrap();
+        let q_static: PgBox<'static, crate::copy_query::Query<'static>> =
+            unsafe { core::mem::transmute(q_boxed) };
+
+        let node = Node::Expr(Expr::SubLink(SubLink {
+            subLinkType: SubLinkType::Exists,
+            subLinkId: 0,
+            testexpr: None,
+            subselect: Some(q_static),
+            location: 7,
+        }));
+
+        // Would panic on the SubLink child if the Node::Expr arm used a plain
+        // `.clone()`; routing through Expr::clone_in deep-copies it.
+        let cloned = node.clone_in(mcx).unwrap();
+        let sl = cloned.as_expr().unwrap().as_sublink().expect("SubLink");
+        assert_eq!(sl.subLinkType, SubLinkType::Exists);
+        assert_eq!(sl.location, 7);
+        assert!(sl.subselect.is_some());
     }
 }

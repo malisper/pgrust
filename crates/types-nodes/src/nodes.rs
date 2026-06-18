@@ -1436,9 +1436,13 @@ impl<'mcx> Node<'mcx> {
             Node::Boolean(b) => Ok(Node::Boolean(b.clone_in(mcx)?)),
             Node::String(s) => Ok(Node::String(s.clone_in(mcx)?)),
             Node::BitString(b) => Ok(Node::BitString(b.clone_in(mcx)?)),
-            // The `Expr` subtree is lifetime-free (owned `Box`/`Vec`), so a
-            // plain clone reproduces it; `copyObject` over an expression node.
-            Node::Expr(e) => Ok(Node::Expr(e.clone())),
+            // `copyObject` over an expression node. Although the `Expr` subtree
+            // is lifetime-free (owned `Box`/`Vec`), a plain `.clone()` PANICS on
+            // the `Aggref`/`WindowFunc`/`SubLink`/`SubPlan` children (whose
+            // embedded sub-trees are context-allocated); the sanctioned deep
+            // path is `Expr::clone_in` (e.g. a WHERE-clause SubLink stored as
+            // `FromExpr.quals` reaches here via `Query::clone_in`).
+            Node::Expr(e) => Ok(Node::Expr(e.clone_in(mcx)?)),
             Node::List(l) => {
                 let mut out: PgVec<'b, NodePtr<'b>> =
                     mcx::vec_with_capacity_in(mcx, l.len())?;
