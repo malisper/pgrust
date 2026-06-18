@@ -35,7 +35,6 @@ use types_core::{InvalidOid, Oid, OidIsValid, INTERNALOID, OIDOID, PROCEDURE_REL
 use types_error::{PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR};
 use types_nodes::ddlnodes::CreatePLangStmt;
-use types_nodes::nodes::Node;
 use types_storage::lock::RowExclusiveLock;
 
 /// `LANGUAGE_HANDLEROID` — OID of the `language_handler` pseudotype
@@ -64,9 +63,9 @@ fn name_list_strings<'mcx>(
 ) -> PgResult<mcx::PgVec<'mcx, mcx::PgString<'mcx>>> {
     let mut out = mcx::vec_with_capacity_in(mcx, names.len())?;
     for n in names.iter() {
-        let s = match &**n {
-            Node::String(s) => mcx::PgString::from_str_in(s.sval.as_str(), mcx)?,
-            _ => mcx::PgString::from_str_in("", mcx)?,
+        let s = match n.as_string() {
+            Some(s) => mcx::PgString::from_str_in(s.sval.as_str(), mcx)?,
+            None => mcx::PgString::from_str_in("", mcx)?,
         };
         out.push(s);
     }
@@ -83,9 +82,9 @@ fn name_list_to_string(names: &[types_nodes::nodes::NodePtr<'_>]) -> String {
         if i != 0 {
             string.push('.');
         }
-        match &**n {
-            Node::String(s) => string.push_str(s.sval.as_str()),
-            _ => string.push('*'),
+        match n.as_string() {
+            Some(s) => string.push_str(s.sval.as_str()),
+            None => string.push('*'),
         }
     }
     string
