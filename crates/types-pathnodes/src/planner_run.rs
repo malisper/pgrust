@@ -568,7 +568,7 @@ pub fn planner_subplan_get_plan<'a, 'mcx>(
 mod tests {
     use super::*;
     use mcx::MemoryContext;
-    use types_nodes::nodes::CmdType;
+    use types_nodes::nodes::{ntag, CmdType};
 
     #[test]
     fn intern_resolve_round_trips_many_queries() {
@@ -775,8 +775,8 @@ mod tests {
         // finalize_plan's deref: planner_subplan_get_plan(root, plan_id) ->
         // &Node, the owned plan tree.
         let fetched = planner_subplan_get_plan(&run, &root, plan_id);
-        match fetched {
-            Node::Result(res) => assert_eq!(res.plan.plan_node_id, 42),
+        match fetched.node_tag() {
+            ntag::T_Result => assert_eq!(fetched.expect_result().plan.plan_node_id, 42),
             _ => panic!("expected the interned Result plan"),
         }
 
@@ -784,10 +784,10 @@ mod tests {
         assert_eq!(run.resolve_subpath(id), crate::PathId(7));
         let _ = run.resolve_subroot(id);
         // resolve_subplan_mut threads back (setrefs rewrites in place).
-        if let Node::Result(res) = run.resolve_subplan_mut(id) {
+        if let Some(res) = run.resolve_subplan_mut(id).as_result_mut() {
             res.plan.plan_node_id = 99;
         }
-        if let Node::Result(res) = run.resolve_subplan(id) {
+        if let Some(res) = run.resolve_subplan(id).as_result() {
             assert_eq!(res.plan.plan_node_id, 99);
         }
     }
