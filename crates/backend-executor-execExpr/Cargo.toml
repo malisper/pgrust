@@ -16,6 +16,9 @@ types-error = { path = "../types-error" }
 types-datum = { path = "../types-datum" }
 types-tuple = { path = "../types-tuple" }
 types-nodes = { path = "../types-nodes" }
+# Domain-constraint vocabulary (DomainConstraintState / DOM_CONSTRAINT_*) the
+# CoerceToDomain step builder reads back from the typcache seam.
+types-cache = { path = "../types-cache" }
 # ACL vocabulary (AclResult / ACL_EXECUTE) the per-column ACL_EXECUTE check in
 # the grouping/param equality builders compares against.
 types-acl = { path = "../types-acl" }

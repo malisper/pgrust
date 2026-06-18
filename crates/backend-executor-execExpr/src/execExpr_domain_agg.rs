@@ -38,6 +38,7 @@ const OUTER_VAR: i32 = -2;
 
 use crate::execExpr_core as core;
 use backend_catalog_aclchk_seams as aclchk;
+use types_cache::typcache::{DOM_CONSTRAINT_CHECK, DOM_CONSTRAINT_NOTNULL};
 use backend_catalog_objectaccess_seams as objectaccess;
 use backend_executor_execExpr_seams::{CombiningOpInfo, CombiningTestExpr};
 use backend_utils_cache_lsyscache_seams as lsyscache;
@@ -205,96 +206,120 @@ pub fn exec_init_coerce_to_domain<'mcx>(
     };
 
     // ExecInitExprRec(ctest->arg, state, resv, resnull); — evaluate the argument
-    // directly into the caller's result cell. The recursion spine is core-owned.
-    let _ = (resv, ctest_arg);
-    panic!(
-        "execExpr-domain-agg: ExecInitCoerceToDomain needs ExecInitExprRec (the core-owned \
-         opcode-emission recursion, private to execExpr_core) to compile ctest->arg and each \
-         DOM_CONSTRAINT_CHECK con->check_expr, and InitDomainConstraintRef (typcache owner) for \
-         the compiled DomainConstraintState list. The DOMAIN_NOTNULL/DOMAIN_CHECK step shapes, \
-         the lazy checkvalue cell, the get_typlen(resulttype)==-1 MAKE_READONLY R/O forcing, and \
-         the innermost_domainval save/restore are mirrored below once those surfaces land."
-    );
+    // directly into the caller's result cell.
+    core::exec_init_expr_rec(mcx, ctest_arg, state, resv)?;
 
-    // ----- faithful continuation (unreachable until the spine + typcache land) -----
-    #[allow(unreachable_code)]
-    {
-        // foreach(l, constraint_ref->constraints) { ... } — for each compiled
-        // DomainConstraintState (NOTNULL or CHECK):
-        let constraints: &[DomainConstraintStub] = &[];
-        let mut domainval: Option<(ResultCellId, ResultCellId)> = None;
-        // scratch->d.domaincheck.checkvalue == NULL until the first CHECK.
-        let mut checkvalue_alloc: Option<ResultCellId> = None;
-        for con in constraints {
-            // scratch->d.domaincheck.constraintname = con->name; — the compiled
-            // DomainConstraintState's name is borrowed from the typcache-owned
-            // constraint list (`PgString` is not `Clone`; the real wiring re-uses
-            // the typcache allocation). Carried through `con.name` once the list
-            // lands.
-            if let ExprEvalStepData::DomainCheck { constraintname, .. } = &mut scratch.d {
-                *constraintname = con.name_placeholder();
-            }
-            match con.constrainttype {
-                DomConstraintType::NotNull => {
-                    // scratch->opcode = EEOP_DOMAIN_NOTNULL; ExprEvalPushStep.
-                    scratch.opcode = ExprEvalOp::EEOP_DOMAIN_NOTNULL;
-                    core::expr_eval_push_step(mcx, state, clone_step(scratch))?;
+    // Collect the constraints associated with the domain. As of PG v10 these are
+    // baked into the ExprState at init time (InitDomainConstraintRef with
+    // need_exprstate == false: the CHECK expressions are compiled here via
+    // ExecInitExprRec, so typcache need not provide compiled exprs).
+    let constraints = backend_utils_cache_typcache_seams::domain_constraint_list::call(
+        ctest_resulttype,
+    )?;
+
+    // The lazily-allocated CHECK output workspace and the (shared) resulttype /
+    // escontext the DomainCheck steps carry — read once from the scratch the
+    // caller seeded above.
+    let (resulttype, escontext) = match &scratch.d {
+        ExprEvalStepData::DomainCheck {
+            resulttype,
+            escontext,
+            ..
+        } => (*resulttype, *escontext),
+        _ => unreachable!("scratch.d seeded to DomainCheck above"),
+    };
+
+    // foreach(l, constraint_ref->constraints) { ... }
+    let mut domainval: Option<ResultCellId> = None;
+    // scratch->d.domaincheck.checkvalue == NULL until the first CHECK.
+    let mut checkvalue_alloc: Option<ResultCellId> = None;
+    for con in &constraints {
+        // scratch->d.domaincheck.constraintname = con->name;
+        let constraintname = Some(mcx::PgString::from_str_in(&con.name, mcx)?);
+
+        if con.constrainttype == DOM_CONSTRAINT_NOTNULL {
+            // scratch->opcode = EEOP_DOMAIN_NOTNULL; ExprEvalPushStep. The
+            // NOTNULL step shares the domaincheck payload; checkvalue is the
+            // current sentinel (unused on this path).
+            let step = ExprEvalStep {
+                opcode: ExprEvalOp::EEOP_DOMAIN_NOTNULL,
+                resvalue: scratch.resvalue,
+                resnull: scratch.resnull,
+                d: ExprEvalStepData::DomainCheck {
+                    constraintname,
+                    checkvalue: checkvalue_alloc.unwrap_or(STATE_RESULT_CELL),
+                    resulttype,
+                    escontext,
+                },
+            };
+            core::expr_eval_push_step(mcx, state, step)?;
+        } else if con.constrainttype == DOM_CONSTRAINT_CHECK {
+            // Allocate workspace for CHECK output if we didn't yet.
+            let checkvalue = match checkvalue_alloc {
+                Some(c) => c,
+                None => {
+                    let c = new_result_cell(mcx, state)?;
+                    checkvalue_alloc = Some(c);
+                    c
                 }
-                DomConstraintType::Check => {
-                    // Allocate the CHECK output workspace once.
-                    let checkvalue = match checkvalue_alloc {
-                        Some(c) => c,
-                        None => {
-                            let c = new_result_cell(mcx, state)?;
-                            checkvalue_alloc = Some(c);
-                            if let ExprEvalStepData::DomainCheck { checkvalue, .. } = &mut scratch.d
-                            {
-                                *checkvalue = c;
-                            }
-                            c
-                        }
+            };
+
+            // First CHECK: decide where CoerceToDomainValue nodes read from.
+            if domainval.is_none() {
+                // Since value might be read multiple times, force to R/O — but
+                // only if it could be an expanded datum (typlen == -1).
+                if lsyscache_get_typlen(ctest_resulttype)? == -1 {
+                    let dv = new_result_cell(mcx, state)?;
+                    // scratch2 = {0}; EEOP_MAKE_READONLY reading resv -> dv.
+                    let scratch2 = ExprEvalStep {
+                        opcode: ExprEvalOp::EEOP_MAKE_READONLY,
+                        resvalue: dv,
+                        resnull: dv,
+                        d: ExprEvalStepData::MakeReadOnly { value: resv },
                     };
-
-                    // First CHECK: decide where CoerceToDomainValue reads from.
-                    if domainval.is_none() {
-                        // if (get_typlen(ctest->resulttype) == -1) { MAKE_READONLY }
-                        let typlen = lsyscache_get_typlen(ctest_resulttype)?;
-                        if typlen == -1 {
-                            let dv = new_result_cell(mcx, state)?;
-                            // scratch2 = {0}; EEOP_MAKE_READONLY reading resv -> dv.
-                            let scratch2 = ExprEvalStep {
-                                opcode: ExprEvalOp::EEOP_MAKE_READONLY,
-                                resvalue: dv,
-                                resnull: dv,
-                                d: ExprEvalStepData::MakeReadOnly { value: resv },
-                            };
-                            core::expr_eval_push_step(mcx, state, scratch2)?;
-                            domainval = Some((dv, dv));
-                        } else {
-                            // Read straight from resv/resnull.
-                            domainval = Some((resv, resv));
-                        }
-                    }
-                    let (dv, dn) = domainval.unwrap();
-
-                    // Save/restore innermost_domainval while recursing into the
-                    // check expression, then ExecInitExprRec(con->check_expr,
-                    // state, checkvalue, checknull).
-                    let save_dv = state.innermost_domainval;
-                    state.innermost_domainval = Some(dv);
-                    let _ = dn;
-                    // ExecInitExprRec(con->check_expr, state, checkvalue, checknull)
-                    let _ = checkvalue;
-                    state.innermost_domainval = save_dv;
-
-                    // scratch->opcode = EEOP_DOMAIN_CHECK; ExprEvalPushStep.
-                    scratch.opcode = ExprEvalOp::EEOP_DOMAIN_CHECK;
-                    core::expr_eval_push_step(mcx, state, clone_step(scratch))?;
+                    core::expr_eval_push_step(mcx, state, scratch2)?;
+                    domainval = Some(dv);
+                } else {
+                    // No, so it's fine to read from resv/resnull.
+                    domainval = Some(resv);
                 }
             }
+            let dv = domainval.unwrap();
+
+            // Set up value to be returned by CoerceToDomainValue nodes; save and
+            // restore innermost_domainval in case this node is itself within a
+            // check expression for another domain.
+            let save_dv = state.innermost_domainval;
+            state.innermost_domainval = Some(dv);
+            let check_expr = con
+                .check_expr
+                .as_ref()
+                .expect("DOM_CONSTRAINT_CHECK with no check_expr");
+            // ExecInitExprRec(con->check_expr, state, checkvalue, checknull)
+            core::exec_init_expr_rec(mcx, check_expr, state, checkvalue)?;
+            state.innermost_domainval = save_dv;
+
+            // scratch->opcode = EEOP_DOMAIN_CHECK; ExprEvalPushStep.
+            let step = ExprEvalStep {
+                opcode: ExprEvalOp::EEOP_DOMAIN_CHECK,
+                resvalue: scratch.resvalue,
+                resnull: scratch.resnull,
+                d: ExprEvalStepData::DomainCheck {
+                    constraintname,
+                    checkvalue,
+                    resulttype,
+                    escontext,
+                },
+            };
+            core::expr_eval_push_step(mcx, state, step)?;
+        } else {
+            return Err(PgError::error(format!(
+                "unrecognized constraint type: {}",
+                con.constrainttype
+            )));
         }
-        Ok(())
     }
+    Ok(())
 }
 
 // ===========================================================================
@@ -1805,39 +1830,10 @@ fn fixup_qual_jumps<'mcx>(state: &mut ExprState<'mcx>, adjust_jumps: &[usize]) {
     }
 }
 
-/// `get_typlen(typid)` (lsyscache) — placeholder for the typcache/lsyscache
-/// lookup used by the domain MAKE_READONLY decision. No `get_typlen` seam is
-/// exported to this crate yet.
+/// `get_typlen(typid)` (lsyscache.c) — the type's `typlen`, used by the domain
+/// MAKE_READONLY decision (`typlen == -1` means a possibly-expanded varlena).
 fn lsyscache_get_typlen(typid: Oid) -> PgResult<i16> {
-    let _ = typid;
-    panic!(
-        "execExpr-domain-agg: ExecInitCoerceToDomain's get_typlen(resulttype) (lsyscache owner) \
-         is not exported to this crate; needed only to decide the EEOP_MAKE_READONLY R/O forcing"
-    )
-}
-
-/// Stand-in for a compiled `DomainConstraintState` (typcache-owned). Only the
-/// fields the domain-check emission reads are modeled; the list itself is
-/// produced by `InitDomainConstraintRef` (typcache), unported here.
-struct DomainConstraintStub<'mcx> {
-    name: Option<mcx::PgString<'mcx>>,
-    constrainttype: DomConstraintType,
-}
-
-impl<'mcx> DomainConstraintStub<'mcx> {
-    /// The constraint's `name` for the `DomainCheck.constraintname` field. The
-    /// real wiring re-uses the typcache-owned `PgString` allocation (`PgString`
-    /// is not `Clone`); parked as `None` until that list lands.
-    fn name_placeholder(&self) -> Option<mcx::PgString<'mcx>> {
-        let _ = &self.name;
-        None
-    }
-}
-
-#[derive(PartialEq)]
-enum DomConstraintType {
-    NotNull,
-    Check,
+    backend_utils_cache_lsyscache_seams::get_typlen::call(typid)
 }
 
 // ===========================================================================
