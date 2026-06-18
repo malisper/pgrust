@@ -25,6 +25,7 @@ use types_catalog::catalog_dependency::{InvalidObjectAddress, ObjectAddress};
 use types_error::PgResult;
 use types_nodes::nodeindexscan::PlannedStmt;
 use types_nodes::nodes::Node;
+use types_nodes::nodes as ntag;
 use types_nodes::parsestmt::{ParseState, ProcessUtilityContext, PROCESS_UTILITY_SUBCOMMAND};
 use types_nodes::portalcmds::ParamListInfo;
 use types_portal::QueryCompletion;
@@ -108,9 +109,9 @@ fn process_utility_slow_body<'mcx>(
     let secondary_object: ObjectAddress = InvalidObjectAddress;
     let mut command_collected = false;
 
-    match parsetree {
+    match parsetree.node_tag() {
         // ----- relation and attribute manipulation -----
-        Node::CreateSchemaStmt(_) => {
+        t if t == ntag::T_CreateSchemaStmt => {
             rt::create_schema_command::call(
                 mcx,
                 parsetree,
@@ -122,7 +123,7 @@ fn process_utility_slow_body<'mcx>(
             command_collected = true;
         }
 
-        Node::CreateStmt(_) | Node::CreateForeignTableStmt(_) => {
+        t if t == ntag::T_CreateStmt || t == ntag::T_CreateForeignTableStmt => {
             // Run parse analysis ...
             let parsetree_ptr =
                 mcx::alloc_in(mcx, parsetree.clone_in(mcx)?)?;
@@ -136,8 +137,9 @@ fn process_utility_slow_body<'mcx>(
                 // list_delete_first: take the head, keeping ownership.
                 let stmt: types_nodes::nodes::NodePtr<'mcx> = stmts.remove(0);
 
-                match &*stmt {
-                    Node::CreateStmt(cstmt) => {
+                match (&*stmt).node_tag() {
+                    t if t == ntag::T_CreateStmt => {
+                        let Node::CreateStmt(cstmt) = &*stmt else { unreachable!() };
                         // Remember transformed RangeVar for LIKE.
                         table_rv = match &cstmt.relation {
                             Some(rv) => Some(mcx::alloc_in(mcx, rv.clone_in(mcx)?)?),
@@ -168,7 +170,8 @@ fn process_utility_slow_body<'mcx>(
                         // NewRelationCreateToastTable), sharing the new relation OID.
                         rt::create_toast_for_relation::call(mcx, address.objectId, &cstmt.options)?;
                     }
-                    Node::CreateForeignTableStmt(cstmt) => {
+                    t if t == ntag::T_CreateForeignTableStmt => {
+                        let Node::CreateForeignTableStmt(cstmt) = &*stmt else { unreachable!() };
                         // Remember transformed RangeVar for LIKE.
                         table_rv = match &cstmt.base.relation {
                             Some(rv) => Some(mcx::alloc_in(mcx, rv.clone_in(mcx)?)?),
@@ -189,7 +192,7 @@ fn process_utility_slow_body<'mcx>(
                             &stmt,
                         )?;
                     }
-                    Node::TableLikeClause(_) => {
+                    t if t == ntag::T_TableLikeClause => {
                         // Delayed processing of LIKE options; prepend the
                         // resulting sub-statements to `stmts`.
                         let heap_rv_src = table_rv
@@ -230,7 +233,7 @@ fn process_utility_slow_body<'mcx>(
             command_collected = true;
         }
 
-        Node::AlterTableStmt(_) => {
+        t if t == ntag::T_AlterTableStmt => {
             // The whole DETACH-CONCURRENTLY guard + lock-level + relation lookup
             // + EventTrigger fence + AlterTable (+ the "does not exist, skipping"
             // NOTICE) is one tablecmds-owned step (atcontext is internal there).
@@ -246,23 +249,24 @@ fn process_utility_slow_body<'mcx>(
             command_collected = true;
         }
 
-        Node::AlterDomainStmt(_) => {
+        t if t == ntag::T_AlterDomainStmt => {
             // The 'T'/'N'/'O'/'C'/'X'/'V' subtype switch (typecmds.c).
             address = rt::alter_domain::call(mcx, parsetree)?;
         }
 
         // ----- object creation / destruction -----
-        Node::DefineStmt(_) => {
+        t if t == ntag::T_DefineStmt => {
             // The `kind` switch (aggregate / operator / type / TS* / collation).
             address = rt::define_stmt::call(mcx, pstate, parsetree)?;
         }
 
-        Node::CreateDomainStmt(_) => {
+        t if t == ntag::T_CreateDomainStmt => {
             // CREATE DOMAIN.
             address = rt::define_domain::call(mcx, pstate, parsetree)?;
         }
 
-        Node::IndexStmt(stmt) => {
+        t if t == ntag::T_IndexStmt => {
+            let Node::IndexStmt(stmt) = parsetree else { unreachable!() };
             // CREATE INDEX.
             if stmt.concurrent {
                 rt::prevent_in_transaction_block::call(is_top_level, "CREATE INDEX CONCURRENTLY")?;
@@ -311,30 +315,30 @@ fn process_utility_slow_body<'mcx>(
             rt::event_trigger_alter_table_end::call();
         }
 
-        Node::ReindexStmt(_) => {
+        t if t == ntag::T_ReindexStmt => {
             rt::exec_reindex::call(mcx, pstate, parsetree, is_top_level)?;
             // EventTriggerCollectSimpleCommand is called directly.
             command_collected = true;
         }
 
-        Node::CompositeTypeStmt(_) => {
+        t if t == ntag::T_CompositeTypeStmt => {
             // CREATE TYPE (composite).
             address = rt::define_composite_type::call(mcx, parsetree)?;
         }
 
-        Node::CreateEnumStmt(_) => {
+        t if t == ntag::T_CreateEnumStmt => {
             address = rt::define_enum::call(mcx, parsetree)?;
         }
 
-        Node::CreateRangeStmt(_) => {
+        t if t == ntag::T_CreateRangeStmt => {
             address = rt::define_range::call(mcx, pstate, parsetree)?;
         }
 
-        Node::AlterEnumStmt(_) => {
+        t if t == ntag::T_AlterEnumStmt => {
             address = rt::alter_enum::call(mcx, parsetree)?;
         }
 
-        Node::ViewStmt(_) => {
+        t if t == ntag::T_ViewStmt => {
             // CREATE VIEW.
             rt::event_trigger_alter_table_start::call(parsetree);
             address = rt::define_view::call(
@@ -350,31 +354,31 @@ fn process_utility_slow_body<'mcx>(
             rt::event_trigger_alter_table_end::call();
         }
 
-        Node::CreateFunctionStmt(_) => {
+        t if t == ntag::T_CreateFunctionStmt => {
             address = rt::create_function::call(mcx, pstate, parsetree)?;
         }
 
-        Node::AlterFunctionStmt(_) => {
+        t if t == ntag::T_AlterFunctionStmt => {
             address = rt::alter_function::call(mcx, pstate, parsetree)?;
         }
 
-        Node::RuleStmt(_) => {
+        t if t == ntag::T_RuleStmt => {
             address = rt::define_rule::call(mcx, parsetree, query_string)?;
         }
 
-        Node::CreateSeqStmt(_) => {
+        t if t == ntag::T_CreateSeqStmt => {
             address = rt::define_sequence::call(mcx, pstate, parsetree)?;
         }
 
-        Node::AlterSeqStmt(_) => {
+        t if t == ntag::T_AlterSeqStmt => {
             address = rt::alter_sequence::call(mcx, pstate, parsetree)?;
         }
 
-        Node::CreateTableAsStmt(_) => {
+        t if t == ntag::T_CreateTableAsStmt => {
             address = rt::exec_create_table_as::call(mcx, pstate, parsetree, params, qc.take())?;
         }
 
-        Node::RefreshMatViewStmt(_) => {
+        t if t == ntag::T_RefreshMatViewStmt => {
             // REFRESH CONCURRENTLY runs DDL internally; inhibit collection.
             rt::event_trigger_inhibit_command_collection::call();
             let r = rt::exec_refresh_mat_view::call(mcx, parsetree, query_string, qc.take());
@@ -382,79 +386,80 @@ fn process_utility_slow_body<'mcx>(
             address = r?;
         }
 
-        Node::CreateTrigStmt(_) => {
+        t if t == ntag::T_CreateTrigStmt => {
             address = rt::create_trigger::call(mcx, parsetree, query_string)?;
         }
 
-        Node::CommentStmt(_) => {
+        t if t == ntag::T_CommentStmt => {
             address = rt::comment_object_slow::call(mcx, parsetree)?;
         }
 
-        Node::GrantStmt(_) => {
+        t if t == ntag::T_GrantStmt => {
             rt::execute_grant_stmt_slow::call(mcx, parsetree)?;
             // commands are stashed in ExecGrantStmt_oids
             command_collected = true;
         }
 
-        Node::AlterDefaultPrivilegesStmt(_) => {
+        t if t == ntag::T_AlterDefaultPrivilegesStmt => {
             rt::exec_alter_default_privileges_stmt::call(mcx, pstate, parsetree)?;
             rt::event_trigger_collect_alter_def_privs::call(parsetree);
             command_collected = true;
         }
 
-        Node::CreatePolicyStmt(_) => {
+        t if t == ntag::T_CreatePolicyStmt => {
             address = rt::create_policy::call(mcx, parsetree)?;
         }
 
-        Node::AlterPolicyStmt(_) => {
+        t if t == ntag::T_AlterPolicyStmt => {
             address = rt::alter_policy::call(mcx, parsetree)?;
         }
 
-        Node::SecLabelStmt(_) => {
+        t if t == ntag::T_SecLabelStmt => {
             address = rt::exec_sec_label_stmt_slow::call(mcx, parsetree)?;
         }
 
-        Node::DropStmt(_) => {
+        t if t == ntag::T_DropStmt => {
             crate::dispatch::ExecDropStmt(mcx, parsetree, is_top_level)?;
             // no commands stashed for DROP
             command_collected = true;
         }
 
-        Node::RenameStmt(_) => {
+        t if t == ntag::T_RenameStmt => {
             address = rt::exec_rename_stmt_slow::call(mcx, parsetree)?;
         }
 
-        Node::AlterObjectDependsStmt(_) => {
+        t if t == ntag::T_AlterObjectDependsStmt => {
             address = rt::exec_alter_object_depends_stmt_slow::call(mcx, parsetree)?;
         }
 
-        Node::AlterObjectSchemaStmt(_) => {
+        t if t == ntag::T_AlterObjectSchemaStmt => {
             address = rt::exec_alter_object_schema_stmt_slow::call(mcx, parsetree)?;
         }
 
-        Node::AlterOwnerStmt(_) => {
+        t if t == ntag::T_AlterOwnerStmt => {
             address = rt::exec_alter_owner_stmt_slow::call(mcx, parsetree)?;
         }
 
-        Node::AlterOperatorStmt(_) => {
+        t if t == ntag::T_AlterOperatorStmt => {
             address = rt::alter_operator::call(mcx, parsetree)?;
         }
 
-        Node::AlterTypeStmt(_) => {
+        t if t == ntag::T_AlterTypeStmt => {
             address = rt::alter_type::call(mcx, parsetree)?;
         }
 
-        Node::AlterCollationStmt(_) => {
+        t if t == ntag::T_AlterCollationStmt => {
             address = rt::alter_collation::call(mcx, parsetree)?;
         }
 
-        Node::DropOwnedStmt(_) => {
+        t if t == ntag::T_DropOwnedStmt => {
             rt::drop_owned_objects::call(mcx, parsetree)?;
             // no commands stashed for DROP
             command_collected = true;
         }
 
-        Node::CreateStatsStmt(stmt) => {
+        t if t == ntag::T_CreateStatsStmt => {
+            let Node::CreateStatsStmt(stmt) = parsetree else { unreachable!() };
             // CREATE STATISTICS supports only relation names in FROM.
             let rel_src = stmt
                 .relations
@@ -480,7 +485,7 @@ fn process_utility_slow_body<'mcx>(
             address = rt::create_statistics::call(mcx, stmt2)?;
         }
 
-        Node::AlterStatsStmt(_) => {
+        t if t == ntag::T_AlterStatsStmt => {
             address = rt::alter_statistics::call(mcx, parsetree)?;
         }
 

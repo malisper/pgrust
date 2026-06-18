@@ -19,6 +19,7 @@ use types_nodes::nodes::{
     CMD_DELETE, CMD_INSERT, CMD_MERGE, CMD_SELECT, CMD_UPDATE, CMD_UTILITY,
 };
 use types_nodes::nodes::NodePtr;
+use types_nodes::nodes as ntag;
 
 use crate::consts::*;
 
@@ -76,8 +77,11 @@ pub fn AlterObjectTypeCommandTag(objtype: ObjectType) -> CommandTag {
 /// already checked `rowMarks != NIL`.
 fn first_rowmark_strength(rowmarks: &[NodePtr<'_>]) -> LockClauseStrength {
     match rowmarks.first() {
-        Some(n) => match &**n {
-            Node::RowMarkClause(r) => r.strength,
+        Some(n) => match (&**n).node_tag() {
+            t if t == ntag::T_RowMarkClause => {
+                let Node::RowMarkClause(r) = &**n else { unreachable!() };
+                r.strength
+            }
             _ => LockClauseStrength::LCS_NONE,
         },
         None => LockClauseStrength::LCS_NONE,
@@ -87,21 +91,21 @@ fn first_rowmark_strength(rowmarks: &[NodePtr<'_>]) -> LockClauseStrength {
 /// `CreateCommandTag` (utility.c:2361-3236) — determine the command tag for a
 /// parse tree (raw, analyzed `Query`, or `PlannedStmt`).
 pub fn CreateCommandTag(parsetree: &Node) -> PgResult<CommandTag> {
-    let tag: CommandTag = match parsetree {
+    let tag: CommandTag = match parsetree.node_tag() {
         // NOTE: the C `case T_RawStmt:` arm (recurse into `((RawStmt *)
         // parsetree)->stmt`) cannot be reached in this repo's node model:
         // `RawStmt` is not a `Node` enum variant, so a `&Node` never carries one.
 
         // raw plannable queries
-        Node::InsertStmt(_) => CMDTAG_INSERT,
-        Node::DeleteStmt(_) => CMDTAG_DELETE,
-        Node::UpdateStmt(_) => CMDTAG_UPDATE,
-        Node::MergeStmt(_) => CMDTAG_MERGE,
-        Node::SelectStmt(_) => CMDTAG_SELECT,
-        Node::PLAssignStmt(_) => CMDTAG_SELECT,
+        t if t == ntag::T_InsertStmt => CMDTAG_INSERT,
+        t if t == ntag::T_DeleteStmt => CMDTAG_DELETE,
+        t if t == ntag::T_UpdateStmt => CMDTAG_UPDATE,
+        t if t == ntag::T_MergeStmt => CMDTAG_MERGE,
+        t if t == ntag::T_SelectStmt => CMDTAG_SELECT,
+        t if t == ntag::T_PLAssignStmt => CMDTAG_SELECT,
 
         // utility statements --- same whether raw or cooked
-        Node::TransactionStmt(stmt) => match stmt.kind {
+        t if t == ntag::T_TransactionStmt => { let Node::TransactionStmt(stmt) = parsetree else { unreachable!() }; match stmt.kind {
             TRANS_STMT_BEGIN => CMDTAG_BEGIN,
             TRANS_STMT_START => CMDTAG_START_TRANSACTION,
             TRANS_STMT_COMMIT => CMDTAG_COMMIT,
@@ -112,42 +116,44 @@ pub fn CreateCommandTag(parsetree: &Node) -> PgResult<CommandTag> {
             TRANS_STMT_COMMIT_PREPARED => CMDTAG_COMMIT_PREPARED,
             TRANS_STMT_ROLLBACK_PREPARED => CMDTAG_ROLLBACK_PREPARED,
             _ => CMDTAG_UNKNOWN,
-        },
+        } }
 
-        Node::DeclareCursorStmt(_) => CMDTAG_DECLARE_CURSOR,
-        Node::ClosePortalStmt(stmt) => {
+        t if t == ntag::T_DeclareCursorStmt => CMDTAG_DECLARE_CURSOR,
+        t if t == ntag::T_ClosePortalStmt => {
+            let Node::ClosePortalStmt(stmt) = parsetree else { unreachable!() };
             if stmt.portalname.is_none() {
                 CMDTAG_CLOSE_CURSOR_ALL
             } else {
                 CMDTAG_CLOSE_CURSOR
             }
         }
-        Node::FetchStmt(stmt) => {
+        t if t == ntag::T_FetchStmt => {
+            let Node::FetchStmt(stmt) = parsetree else { unreachable!() };
             if stmt.ismove {
                 CMDTAG_MOVE
             } else {
                 CMDTAG_FETCH
             }
         }
-        Node::CreateDomainStmt(_) => CMDTAG_CREATE_DOMAIN,
-        Node::CreateSchemaStmt(_) => CMDTAG_CREATE_SCHEMA,
-        Node::CreateStmt(_) => CMDTAG_CREATE_TABLE,
-        Node::CreateTableSpaceStmt(_) => CMDTAG_CREATE_TABLESPACE,
-        Node::DropTableSpaceStmt(_) => CMDTAG_DROP_TABLESPACE,
-        Node::AlterTableSpaceOptionsStmt(_) => CMDTAG_ALTER_TABLESPACE,
-        Node::CreateExtensionStmt(_) => CMDTAG_CREATE_EXTENSION,
-        Node::AlterExtensionStmt(_) => CMDTAG_ALTER_EXTENSION,
-        Node::AlterExtensionContentsStmt(_) => CMDTAG_ALTER_EXTENSION,
-        Node::CreateFdwStmt(_) => CMDTAG_CREATE_FOREIGN_DATA_WRAPPER,
-        Node::AlterFdwStmt(_) => CMDTAG_ALTER_FOREIGN_DATA_WRAPPER,
-        Node::CreateForeignServerStmt(_) => CMDTAG_CREATE_SERVER,
-        Node::AlterForeignServerStmt(_) => CMDTAG_ALTER_SERVER,
-        Node::CreateUserMappingStmt(_) => CMDTAG_CREATE_USER_MAPPING,
-        Node::AlterUserMappingStmt(_) => CMDTAG_ALTER_USER_MAPPING,
-        Node::DropUserMappingStmt(_) => CMDTAG_DROP_USER_MAPPING,
-        Node::CreateForeignTableStmt(_) => CMDTAG_CREATE_FOREIGN_TABLE,
-        Node::ImportForeignSchemaStmt(_) => CMDTAG_IMPORT_FOREIGN_SCHEMA,
-        Node::DropStmt(stmt) => match stmt.removeType {
+        t if t == ntag::T_CreateDomainStmt => CMDTAG_CREATE_DOMAIN,
+        t if t == ntag::T_CreateSchemaStmt => CMDTAG_CREATE_SCHEMA,
+        t if t == ntag::T_CreateStmt => CMDTAG_CREATE_TABLE,
+        t if t == ntag::T_CreateTableSpaceStmt => CMDTAG_CREATE_TABLESPACE,
+        t if t == ntag::T_DropTableSpaceStmt => CMDTAG_DROP_TABLESPACE,
+        t if t == ntag::T_AlterTableSpaceOptionsStmt => CMDTAG_ALTER_TABLESPACE,
+        t if t == ntag::T_CreateExtensionStmt => CMDTAG_CREATE_EXTENSION,
+        t if t == ntag::T_AlterExtensionStmt => CMDTAG_ALTER_EXTENSION,
+        t if t == ntag::T_AlterExtensionContentsStmt => CMDTAG_ALTER_EXTENSION,
+        t if t == ntag::T_CreateFdwStmt => CMDTAG_CREATE_FOREIGN_DATA_WRAPPER,
+        t if t == ntag::T_AlterFdwStmt => CMDTAG_ALTER_FOREIGN_DATA_WRAPPER,
+        t if t == ntag::T_CreateForeignServerStmt => CMDTAG_CREATE_SERVER,
+        t if t == ntag::T_AlterForeignServerStmt => CMDTAG_ALTER_SERVER,
+        t if t == ntag::T_CreateUserMappingStmt => CMDTAG_CREATE_USER_MAPPING,
+        t if t == ntag::T_AlterUserMappingStmt => CMDTAG_ALTER_USER_MAPPING,
+        t if t == ntag::T_DropUserMappingStmt => CMDTAG_DROP_USER_MAPPING,
+        t if t == ntag::T_CreateForeignTableStmt => CMDTAG_CREATE_FOREIGN_TABLE,
+        t if t == ntag::T_ImportForeignSchemaStmt => CMDTAG_IMPORT_FOREIGN_SCHEMA,
+        t if t == ntag::T_DropStmt => { let Node::DropStmt(stmt) = parsetree else { unreachable!() }; match stmt.removeType {
             OBJECT_TABLE => CMDTAG_DROP_TABLE,
             OBJECT_SEQUENCE => CMDTAG_DROP_SEQUENCE,
             OBJECT_VIEW => CMDTAG_DROP_VIEW,
@@ -184,12 +190,13 @@ pub fn CreateCommandTag(parsetree: &Node) -> PgResult<CommandTag> {
             OBJECT_PUBLICATION => CMDTAG_DROP_PUBLICATION,
             OBJECT_STATISTIC_EXT => CMDTAG_DROP_STATISTICS,
             _ => CMDTAG_UNKNOWN,
-        },
-        Node::TruncateStmt(_) => CMDTAG_TRUNCATE_TABLE,
-        Node::CommentStmt(_) => CMDTAG_COMMENT,
-        Node::SecLabelStmt(_) => CMDTAG_SECURITY_LABEL,
-        Node::CopyStmt(_) => CMDTAG_COPY,
-        Node::RenameStmt(stmt) => {
+        } }
+        t if t == ntag::T_TruncateStmt => CMDTAG_TRUNCATE_TABLE,
+        t if t == ntag::T_CommentStmt => CMDTAG_COMMENT,
+        t if t == ntag::T_SecLabelStmt => CMDTAG_SECURITY_LABEL,
+        t if t == ntag::T_CopyStmt => CMDTAG_COPY,
+        t if t == ntag::T_RenameStmt => {
+            let Node::RenameStmt(stmt) = parsetree else { unreachable!() };
             // When a column is renamed, the command tag is created from its
             // relation type.
             let objtype = if stmt.renameType == OBJECT_COLUMN {
@@ -199,34 +206,41 @@ pub fn CreateCommandTag(parsetree: &Node) -> PgResult<CommandTag> {
             };
             AlterObjectTypeCommandTag(objtype)
         }
-        Node::AlterObjectDependsStmt(stmt) => AlterObjectTypeCommandTag(stmt.objectType),
-        Node::AlterObjectSchemaStmt(stmt) => AlterObjectTypeCommandTag(stmt.objectType),
-        Node::AlterOwnerStmt(stmt) => AlterObjectTypeCommandTag(stmt.objectType),
-        Node::AlterTableMoveAllStmt(stmt) => AlterObjectTypeCommandTag(stmt.objtype),
-        Node::AlterTableStmt(stmt) => AlterObjectTypeCommandTag(stmt.objtype),
-        Node::AlterDomainStmt(_) => CMDTAG_ALTER_DOMAIN,
-        Node::AlterFunctionStmt(stmt) => match stmt.objtype {
+        t if t == ntag::T_AlterObjectDependsStmt => { let Node::AlterObjectDependsStmt(stmt) = parsetree else { unreachable!() }; AlterObjectTypeCommandTag(stmt.objectType) },
+        t if t == ntag::T_AlterObjectSchemaStmt => { let Node::AlterObjectSchemaStmt(stmt) = parsetree else { unreachable!() }; AlterObjectTypeCommandTag(stmt.objectType) },
+        t if t == ntag::T_AlterOwnerStmt => { let Node::AlterOwnerStmt(stmt) = parsetree else { unreachable!() }; AlterObjectTypeCommandTag(stmt.objectType) },
+        t if t == ntag::T_AlterTableMoveAllStmt => { let Node::AlterTableMoveAllStmt(stmt) = parsetree else { unreachable!() }; AlterObjectTypeCommandTag(stmt.objtype) },
+        t if t == ntag::T_AlterTableStmt => { let Node::AlterTableStmt(stmt) = parsetree else { unreachable!() }; AlterObjectTypeCommandTag(stmt.objtype) },
+        t if t == ntag::T_AlterDomainStmt => CMDTAG_ALTER_DOMAIN,
+        t if t == ntag::T_AlterFunctionStmt => {
+            let Node::AlterFunctionStmt(stmt) = parsetree else { unreachable!() };
+            match stmt.objtype {
             OBJECT_FUNCTION => CMDTAG_ALTER_FUNCTION,
             OBJECT_PROCEDURE => CMDTAG_ALTER_PROCEDURE,
             OBJECT_ROUTINE => CMDTAG_ALTER_ROUTINE,
             _ => CMDTAG_UNKNOWN,
-        },
-        Node::GrantStmt(stmt) => {
+        }
+        }
+        t if t == ntag::T_GrantStmt => {
+            let Node::GrantStmt(stmt) = parsetree else { unreachable!() };
             if stmt.is_grant {
                 CMDTAG_GRANT
             } else {
                 CMDTAG_REVOKE
             }
         }
-        Node::GrantRoleStmt(stmt) => {
+        t if t == ntag::T_GrantRoleStmt => {
+            let Node::GrantRoleStmt(stmt) = parsetree else { unreachable!() };
             if stmt.is_grant {
                 CMDTAG_GRANT_ROLE
             } else {
                 CMDTAG_REVOKE_ROLE
             }
         }
-        Node::AlterDefaultPrivilegesStmt(_) => CMDTAG_ALTER_DEFAULT_PRIVILEGES,
-        Node::DefineStmt(stmt) => match stmt.kind {
+        t if t == ntag::T_AlterDefaultPrivilegesStmt => CMDTAG_ALTER_DEFAULT_PRIVILEGES,
+        t if t == ntag::T_DefineStmt => {
+            let Node::DefineStmt(stmt) = parsetree else { unreachable!() };
+            match stmt.kind {
             OBJECT_AGGREGATE => CMDTAG_CREATE_AGGREGATE,
             OBJECT_OPERATOR => CMDTAG_CREATE_OPERATOR,
             OBJECT_TYPE => CMDTAG_CREATE_TYPE,
@@ -237,44 +251,47 @@ pub fn CreateCommandTag(parsetree: &Node) -> PgResult<CommandTag> {
             OBJECT_COLLATION => CMDTAG_CREATE_COLLATION,
             OBJECT_ACCESS_METHOD => CMDTAG_CREATE_ACCESS_METHOD,
             _ => CMDTAG_UNKNOWN,
-        },
-        Node::CompositeTypeStmt(_) => CMDTAG_CREATE_TYPE,
-        Node::CreateEnumStmt(_) => CMDTAG_CREATE_TYPE,
-        Node::CreateRangeStmt(_) => CMDTAG_CREATE_TYPE,
-        Node::AlterEnumStmt(_) => CMDTAG_ALTER_TYPE,
-        Node::ViewStmt(_) => CMDTAG_CREATE_VIEW,
-        Node::CreateFunctionStmt(stmt) => {
+        }
+        }
+        t if t == ntag::T_CompositeTypeStmt => CMDTAG_CREATE_TYPE,
+        t if t == ntag::T_CreateEnumStmt => CMDTAG_CREATE_TYPE,
+        t if t == ntag::T_CreateRangeStmt => CMDTAG_CREATE_TYPE,
+        t if t == ntag::T_AlterEnumStmt => CMDTAG_ALTER_TYPE,
+        t if t == ntag::T_ViewStmt => CMDTAG_CREATE_VIEW,
+        t if t == ntag::T_CreateFunctionStmt => {
+            let Node::CreateFunctionStmt(stmt) = parsetree else { unreachable!() };
             if stmt.is_procedure {
                 CMDTAG_CREATE_PROCEDURE
             } else {
                 CMDTAG_CREATE_FUNCTION
             }
         }
-        Node::IndexStmt(_) => CMDTAG_CREATE_INDEX,
-        Node::RuleStmt(_) => CMDTAG_CREATE_RULE,
-        Node::CreateSeqStmt(_) => CMDTAG_CREATE_SEQUENCE,
-        Node::AlterSeqStmt(_) => CMDTAG_ALTER_SEQUENCE,
-        Node::DoStmt(_) => CMDTAG_DO,
-        Node::CreatedbStmt(_) => CMDTAG_CREATE_DATABASE,
-        Node::AlterDatabaseStmt(_)
-        | Node::AlterDatabaseRefreshCollStmt(_)
-        | Node::AlterDatabaseSetStmt(_) => CMDTAG_ALTER_DATABASE,
-        Node::DropdbStmt(_) => CMDTAG_DROP_DATABASE,
-        Node::NotifyStmt(_) => CMDTAG_NOTIFY,
-        Node::ListenStmt(_) => CMDTAG_LISTEN,
-        Node::UnlistenStmt(_) => CMDTAG_UNLISTEN,
-        Node::LoadStmt(_) => CMDTAG_LOAD,
-        Node::CallStmt(_) => CMDTAG_CALL,
-        Node::ClusterStmt(_) => CMDTAG_CLUSTER,
-        Node::VacuumStmt(stmt) => {
+        t if t == ntag::T_IndexStmt => CMDTAG_CREATE_INDEX,
+        t if t == ntag::T_RuleStmt => CMDTAG_CREATE_RULE,
+        t if t == ntag::T_CreateSeqStmt => CMDTAG_CREATE_SEQUENCE,
+        t if t == ntag::T_AlterSeqStmt => CMDTAG_ALTER_SEQUENCE,
+        t if t == ntag::T_DoStmt => CMDTAG_DO,
+        t if t == ntag::T_CreatedbStmt => CMDTAG_CREATE_DATABASE,
+        t if t == ntag::T_AlterDatabaseStmt || t == ntag::T_AlterDatabaseRefreshCollStmt || t == ntag::T_AlterDatabaseSetStmt => CMDTAG_ALTER_DATABASE,
+        t if t == ntag::T_DropdbStmt => CMDTAG_DROP_DATABASE,
+        t if t == ntag::T_NotifyStmt => CMDTAG_NOTIFY,
+        t if t == ntag::T_ListenStmt => CMDTAG_LISTEN,
+        t if t == ntag::T_UnlistenStmt => CMDTAG_UNLISTEN,
+        t if t == ntag::T_LoadStmt => CMDTAG_LOAD,
+        t if t == ntag::T_CallStmt => CMDTAG_CALL,
+        t if t == ntag::T_ClusterStmt => CMDTAG_CLUSTER,
+        t if t == ntag::T_VacuumStmt => {
+            let Node::VacuumStmt(stmt) = parsetree else { unreachable!() };
             if stmt.is_vacuumcmd {
                 CMDTAG_VACUUM
             } else {
                 CMDTAG_ANALYZE
             }
         }
-        Node::ExplainStmt(_) => CMDTAG_EXPLAIN,
-        Node::CreateTableAsStmt(stmt) => match stmt.objtype {
+        t if t == ntag::T_ExplainStmt => CMDTAG_EXPLAIN,
+        t if t == ntag::T_CreateTableAsStmt => {
+            let Node::CreateTableAsStmt(stmt) = parsetree else { unreachable!() };
+            match stmt.objtype {
             OBJECT_TABLE => {
                 if stmt.is_select_into {
                     CMDTAG_SELECT_INTO
@@ -284,58 +301,66 @@ pub fn CreateCommandTag(parsetree: &Node) -> PgResult<CommandTag> {
             }
             OBJECT_MATVIEW => CMDTAG_CREATE_MATERIALIZED_VIEW,
             _ => CMDTAG_UNKNOWN,
-        },
-        Node::RefreshMatViewStmt(_) => CMDTAG_REFRESH_MATERIALIZED_VIEW,
-        Node::AlterSystemStmt(_) => CMDTAG_ALTER_SYSTEM,
-        Node::VariableSetStmt(stmt) => match stmt.kind {
+        }
+        }
+        t if t == ntag::T_RefreshMatViewStmt => CMDTAG_REFRESH_MATERIALIZED_VIEW,
+        t if t == ntag::T_AlterSystemStmt => CMDTAG_ALTER_SYSTEM,
+        t if t == ntag::T_VariableSetStmt => {
+            let Node::VariableSetStmt(stmt) = parsetree else { unreachable!() };
+            match stmt.kind {
             VAR_SET_VALUE | VAR_SET_CURRENT | VAR_SET_DEFAULT | VAR_SET_MULTI => CMDTAG_SET,
             VAR_RESET | VAR_RESET_ALL => CMDTAG_RESET,
-        },
-        Node::VariableShowStmt(_) => CMDTAG_SHOW,
-        Node::DiscardStmt(stmt) => match stmt.target {
+        }
+        }
+        t if t == ntag::T_VariableShowStmt => CMDTAG_SHOW,
+        t if t == ntag::T_DiscardStmt => {
+            let Node::DiscardStmt(stmt) = parsetree else { unreachable!() };
+            match stmt.target {
             DISCARD_ALL => CMDTAG_DISCARD_ALL,
             DISCARD_PLANS => CMDTAG_DISCARD_PLANS,
             DISCARD_TEMP => CMDTAG_DISCARD_TEMP,
             DISCARD_SEQUENCES => CMDTAG_DISCARD_SEQUENCES,
-        },
-        Node::CreateTransformStmt(_) => CMDTAG_CREATE_TRANSFORM,
-        Node::CreateTrigStmt(_) => CMDTAG_CREATE_TRIGGER,
-        Node::CreateEventTrigStmt(_) => CMDTAG_CREATE_EVENT_TRIGGER,
-        Node::AlterEventTrigStmt(_) => CMDTAG_ALTER_EVENT_TRIGGER,
-        Node::CreatePLangStmt(_) => CMDTAG_CREATE_LANGUAGE,
-        Node::CreateRoleStmt(_) => CMDTAG_CREATE_ROLE,
-        Node::AlterRoleStmt(_) => CMDTAG_ALTER_ROLE,
-        Node::AlterRoleSetStmt(_) => CMDTAG_ALTER_ROLE,
-        Node::DropRoleStmt(_) => CMDTAG_DROP_ROLE,
-        Node::DropOwnedStmt(_) => CMDTAG_DROP_OWNED,
-        Node::ReassignOwnedStmt(_) => CMDTAG_REASSIGN_OWNED,
-        Node::LockStmt(_) => CMDTAG_LOCK_TABLE,
-        Node::ConstraintsSetStmt(_) => CMDTAG_SET_CONSTRAINTS,
-        Node::CheckPointStmt(_) => CMDTAG_CHECKPOINT,
-        Node::ReindexStmt(_) => CMDTAG_REINDEX,
-        Node::CreateConversionStmt(_) => CMDTAG_CREATE_CONVERSION,
-        Node::CreateCastStmt(_) => CMDTAG_CREATE_CAST,
-        Node::CreateOpClassStmt(_) => CMDTAG_CREATE_OPERATOR_CLASS,
-        Node::CreateOpFamilyStmt(_) => CMDTAG_CREATE_OPERATOR_FAMILY,
-        Node::AlterOpFamilyStmt(_) => CMDTAG_ALTER_OPERATOR_FAMILY,
-        Node::AlterOperatorStmt(_) => CMDTAG_ALTER_OPERATOR,
-        Node::AlterTypeStmt(_) => CMDTAG_ALTER_TYPE,
-        Node::AlterTSDictionaryStmt(_) => CMDTAG_ALTER_TEXT_SEARCH_DICTIONARY,
-        Node::AlterTSConfigurationStmt(_) => CMDTAG_ALTER_TEXT_SEARCH_CONFIGURATION,
-        Node::CreatePolicyStmt(_) => CMDTAG_CREATE_POLICY,
-        Node::AlterPolicyStmt(_) => CMDTAG_ALTER_POLICY,
-        Node::CreateAmStmt(_) => CMDTAG_CREATE_ACCESS_METHOD,
-        Node::CreatePublicationStmt(_) => CMDTAG_CREATE_PUBLICATION,
-        Node::AlterPublicationStmt(_) => CMDTAG_ALTER_PUBLICATION,
-        Node::CreateSubscriptionStmt(_) => CMDTAG_CREATE_SUBSCRIPTION,
-        Node::AlterSubscriptionStmt(_) => CMDTAG_ALTER_SUBSCRIPTION,
-        Node::DropSubscriptionStmt(_) => CMDTAG_DROP_SUBSCRIPTION,
-        Node::AlterCollationStmt(_) => CMDTAG_ALTER_COLLATION,
-        Node::PrepareStmt(_) => CMDTAG_PREPARE,
-        Node::ExecuteStmt(_) => CMDTAG_EXECUTE,
-        Node::CreateStatsStmt(_) => CMDTAG_CREATE_STATISTICS,
-        Node::AlterStatsStmt(_) => CMDTAG_ALTER_STATISTICS,
-        Node::DeallocateStmt(stmt) => {
+        }
+        }
+        t if t == ntag::T_CreateTransformStmt => CMDTAG_CREATE_TRANSFORM,
+        t if t == ntag::T_CreateTrigStmt => CMDTAG_CREATE_TRIGGER,
+        t if t == ntag::T_CreateEventTrigStmt => CMDTAG_CREATE_EVENT_TRIGGER,
+        t if t == ntag::T_AlterEventTrigStmt => CMDTAG_ALTER_EVENT_TRIGGER,
+        t if t == ntag::T_CreatePLangStmt => CMDTAG_CREATE_LANGUAGE,
+        t if t == ntag::T_CreateRoleStmt => CMDTAG_CREATE_ROLE,
+        t if t == ntag::T_AlterRoleStmt => CMDTAG_ALTER_ROLE,
+        t if t == ntag::T_AlterRoleSetStmt => CMDTAG_ALTER_ROLE,
+        t if t == ntag::T_DropRoleStmt => CMDTAG_DROP_ROLE,
+        t if t == ntag::T_DropOwnedStmt => CMDTAG_DROP_OWNED,
+        t if t == ntag::T_ReassignOwnedStmt => CMDTAG_REASSIGN_OWNED,
+        t if t == ntag::T_LockStmt => CMDTAG_LOCK_TABLE,
+        t if t == ntag::T_ConstraintsSetStmt => CMDTAG_SET_CONSTRAINTS,
+        t if t == ntag::T_CheckPointStmt => CMDTAG_CHECKPOINT,
+        t if t == ntag::T_ReindexStmt => CMDTAG_REINDEX,
+        t if t == ntag::T_CreateConversionStmt => CMDTAG_CREATE_CONVERSION,
+        t if t == ntag::T_CreateCastStmt => CMDTAG_CREATE_CAST,
+        t if t == ntag::T_CreateOpClassStmt => CMDTAG_CREATE_OPERATOR_CLASS,
+        t if t == ntag::T_CreateOpFamilyStmt => CMDTAG_CREATE_OPERATOR_FAMILY,
+        t if t == ntag::T_AlterOpFamilyStmt => CMDTAG_ALTER_OPERATOR_FAMILY,
+        t if t == ntag::T_AlterOperatorStmt => CMDTAG_ALTER_OPERATOR,
+        t if t == ntag::T_AlterTypeStmt => CMDTAG_ALTER_TYPE,
+        t if t == ntag::T_AlterTSDictionaryStmt => CMDTAG_ALTER_TEXT_SEARCH_DICTIONARY,
+        t if t == ntag::T_AlterTSConfigurationStmt => CMDTAG_ALTER_TEXT_SEARCH_CONFIGURATION,
+        t if t == ntag::T_CreatePolicyStmt => CMDTAG_CREATE_POLICY,
+        t if t == ntag::T_AlterPolicyStmt => CMDTAG_ALTER_POLICY,
+        t if t == ntag::T_CreateAmStmt => CMDTAG_CREATE_ACCESS_METHOD,
+        t if t == ntag::T_CreatePublicationStmt => CMDTAG_CREATE_PUBLICATION,
+        t if t == ntag::T_AlterPublicationStmt => CMDTAG_ALTER_PUBLICATION,
+        t if t == ntag::T_CreateSubscriptionStmt => CMDTAG_CREATE_SUBSCRIPTION,
+        t if t == ntag::T_AlterSubscriptionStmt => CMDTAG_ALTER_SUBSCRIPTION,
+        t if t == ntag::T_DropSubscriptionStmt => CMDTAG_DROP_SUBSCRIPTION,
+        t if t == ntag::T_AlterCollationStmt => CMDTAG_ALTER_COLLATION,
+        t if t == ntag::T_PrepareStmt => CMDTAG_PREPARE,
+        t if t == ntag::T_ExecuteStmt => CMDTAG_EXECUTE,
+        t if t == ntag::T_CreateStatsStmt => CMDTAG_CREATE_STATISTICS,
+        t if t == ntag::T_AlterStatsStmt => CMDTAG_ALTER_STATISTICS,
+        t if t == ntag::T_DeallocateStmt => {
+            let Node::DeallocateStmt(stmt) = parsetree else { unreachable!() };
             if stmt.name.is_none() {
                 CMDTAG_DEALLOCATE_ALL
             } else {
@@ -351,7 +376,9 @@ pub fn CreateCommandTag(parsetree: &Node) -> PgResult<CommandTag> {
         // dispatcher, not through this `&Node` entrypoint.
 
         // parsed-and-rewritten-but-not-planned queries
-        Node::Query(stmt) => match stmt.commandType {
+        t if t == ntag::T_Query => {
+            let Node::Query(stmt) = parsetree else { unreachable!() };
+            match stmt.commandType {
             CMD_SELECT => {
                 // We take a little extra care here so that the result will be
                 // useful for complaints about read-only statements.
@@ -383,7 +410,8 @@ pub fn CreateCommandTag(parsetree: &Node) -> PgResult<CommandTag> {
                 )?;
                 CMDTAG_UNKNOWN
             }
-        },
+        }
+        }
 
         _ => {
             backend_utils_error::elog(

@@ -52,6 +52,7 @@ use types_core::init::BackendType;
 use types_nodes::ddlnodes::TransactionStmtKind;
 use types_nodes::nodeindexscan::PlannedStmt;
 use types_nodes::nodes::Node;
+use types_nodes::nodes as ntag;
 use types_nodes::parsenodes::{
     ObjectType, OBJECT_DATABASE, OBJECT_EVENT_TRIGGER, OBJECT_FOREIGN_TABLE, OBJECT_INDEX,
     OBJECT_MATVIEW, OBJECT_PARAMETER_ACL, OBJECT_ROLE, OBJECT_SEQUENCE, OBJECT_TABLE,
@@ -233,16 +234,20 @@ fn dispatch_switch<'mcx>(
     // through here — the multi-statement NULL handling lives in pquery.)
     let mut qc_opt: Option<&mut QueryCompletion> = Some(qc);
 
-    match parsetree {
+    match parsetree.node_tag() {
         // ******************** transactions ********************
-        Node::TransactionStmt(stmt) => {
+        t if t == ntag::T_TransactionStmt => {
+            let Node::TransactionStmt(stmt) = parsetree else { unreachable!() };
             match stmt.kind {
                 // START TRANSACTION (SQL99) is identical to BEGIN.
                 TransactionStmtKind::TRANS_STMT_BEGIN | TransactionStmtKind::TRANS_STMT_START => {
                     rt::begin_transaction_block::call()?;
                     for cell in stmt.options.iter() {
-                        let item = match &**cell {
-                            Node::DefElem(d) => d,
+                        let item = match (&**cell).node_tag() {
+                            t if t == ntag::T_DefElem => {
+                                let Node::DefElem(d) = &**cell else { unreachable!() };
+                                d
+                            }
                             _ => continue,
                         };
                         let defname = item.defname.as_deref();
@@ -307,101 +312,104 @@ fn dispatch_switch<'mcx>(
         }
 
         // Portal (cursor) manipulation
-        Node::DeclareCursorStmt(_) => {
+        t if t == ntag::T_DeclareCursorStmt => {
             rt::perform_cursor_open::call(mcx, pstate, parsetree, params, is_top_level)?;
         }
 
-        Node::ClosePortalStmt(stmt) => {
+        t if t == ntag::T_ClosePortalStmt => {
+            let Node::ClosePortalStmt(stmt) = parsetree else { unreachable!() };
             CheckRestrictedOperation("CLOSE")?;
             rt::perform_portal_close::call(stmt.portalname.as_deref())?;
         }
 
-        Node::FetchStmt(_) => {
+        t if t == ntag::T_FetchStmt => {
             rt::perform_portal_fetch::call(mcx, parsetree, dest, qc_opt.take())?;
         }
 
-        Node::DoStmt(_) => {
+        t if t == ntag::T_DoStmt => {
             rt::execute_do_stmt::call(mcx, pstate, parsetree, is_atomic_context)?;
         }
 
-        Node::CreateTableSpaceStmt(_) => {
+        t if t == ntag::T_CreateTableSpaceStmt => {
             // no event triggers for global objects
             rt::prevent_in_transaction_block::call(is_top_level, "CREATE TABLESPACE")?;
             rt::create_table_space::call(mcx, parsetree)?;
         }
 
-        Node::DropTableSpaceStmt(_) => {
+        t if t == ntag::T_DropTableSpaceStmt => {
             // no event triggers for global objects
             rt::prevent_in_transaction_block::call(is_top_level, "DROP TABLESPACE")?;
             rt::drop_table_space::call(mcx, parsetree)?;
         }
 
-        Node::AlterTableSpaceOptionsStmt(_) => {
+        t if t == ntag::T_AlterTableSpaceOptionsStmt => {
             // no event triggers for global objects
             rt::alter_table_space_options::call(mcx, parsetree)?;
         }
 
-        Node::TruncateStmt(_) => {
+        t if t == ntag::T_TruncateStmt => {
             rt::execute_truncate::call(mcx, parsetree)?;
         }
 
-        Node::CopyStmt(_) => {
+        t if t == ntag::T_CopyStmt => {
             let processed = rt::do_copy::call(mcx, pstate, parsetree, stmt_location, stmt_len)?;
             set_query_completion(&mut qc_opt, CMDTAG_COPY, processed);
         }
 
-        Node::PrepareStmt(_) => {
+        t if t == ntag::T_PrepareStmt => {
             CheckRestrictedOperation("PREPARE")?;
             rt::prepare_query::call(mcx, pstate, parsetree, stmt_location, stmt_len)?;
         }
 
-        Node::ExecuteStmt(_) => {
+        t if t == ntag::T_ExecuteStmt => {
             rt::execute_query::call(mcx, pstate, parsetree, params, dest, qc_opt.take())?;
         }
 
-        Node::DeallocateStmt(_) => {
+        t if t == ntag::T_DeallocateStmt => {
             CheckRestrictedOperation("DEALLOCATE")?;
             rt::deallocate_query::call(parsetree)?;
         }
 
-        Node::GrantRoleStmt(_) => {
+        t if t == ntag::T_GrantRoleStmt => {
             // no event triggers for global objects
             rt::grant_role::call(mcx, pstate, parsetree)?;
         }
 
-        Node::CreatedbStmt(_) => {
+        t if t == ntag::T_CreatedbStmt => {
             // no event triggers for global objects
             rt::prevent_in_transaction_block::call(is_top_level, "CREATE DATABASE")?;
             rt::createdb::call(mcx, pstate, parsetree)?;
         }
 
-        Node::AlterDatabaseStmt(_) => {
+        t if t == ntag::T_AlterDatabaseStmt => {
             // no event triggers for global objects
             rt::alter_database::call(mcx, pstate, parsetree, is_top_level)?;
         }
 
-        Node::AlterDatabaseRefreshCollStmt(_) => {
+        t if t == ntag::T_AlterDatabaseRefreshCollStmt => {
             // no event triggers for global objects
             rt::alter_database_refresh_coll::call(mcx, parsetree)?;
         }
 
-        Node::AlterDatabaseSetStmt(_) => {
+        t if t == ntag::T_AlterDatabaseSetStmt => {
             // no event triggers for global objects
             rt::alter_database_set::call(mcx, parsetree)?;
         }
 
-        Node::DropdbStmt(_) => {
+        t if t == ntag::T_DropdbStmt => {
             // no event triggers for global objects
             rt::prevent_in_transaction_block::call(is_top_level, "DROP DATABASE")?;
             rt::drop_database::call(mcx, pstate, parsetree)?;
         }
 
         // Query-level asynchronous notification
-        Node::NotifyStmt(stmt) => {
+        t if t == ntag::T_NotifyStmt => {
+            let Node::NotifyStmt(stmt) = parsetree else { unreachable!() };
             rt::async_notify::call(stmt.conditionname.as_deref(), stmt.payload.as_deref())?;
         }
 
-        Node::ListenStmt(stmt) => {
+        t if t == ntag::T_ListenStmt => {
+            let Node::ListenStmt(stmt) = parsetree else { unreachable!() };
             CheckRestrictedOperation("LISTEN")?;
 
             // LISTEN is not allowed in background processes.
@@ -423,7 +431,8 @@ fn dispatch_switch<'mcx>(
             rt::async_listen::call(name)?;
         }
 
-        Node::UnlistenStmt(stmt) => {
+        t if t == ntag::T_UnlistenStmt => {
+            let Node::UnlistenStmt(stmt) = parsetree else { unreachable!() };
             CheckRestrictedOperation("UNLISTEN")?;
             match stmt.conditionname.as_deref() {
                 Some(name) => rt::async_unlisten::call(name)?,
@@ -431,90 +440,92 @@ fn dispatch_switch<'mcx>(
             }
         }
 
-        Node::LoadStmt(stmt) => {
+        t if t == ntag::T_LoadStmt => {
+            let Node::LoadStmt(stmt) = parsetree else { unreachable!() };
             rt::close_all_vfds::call(); // probably not necessary...
                                         // Allowed names are restricted if you're not superuser
             rt::load_file::call(stmt.filename.as_deref(), !rt::superuser::call())?;
         }
 
-        Node::CallStmt(_) => {
+        t if t == ntag::T_CallStmt => {
             rt::execute_call_stmt::call(mcx, parsetree, params, is_atomic_context, dest)?;
         }
 
-        Node::ClusterStmt(_) => {
+        t if t == ntag::T_ClusterStmt => {
             rt::cluster::call(mcx, pstate, parsetree, is_top_level)?;
         }
 
-        Node::VacuumStmt(_) => {
+        t if t == ntag::T_VacuumStmt => {
             rt::exec_vacuum::call(mcx, pstate, parsetree, is_top_level)?;
         }
 
-        Node::ExplainStmt(_) => {
+        t if t == ntag::T_ExplainStmt => {
             rt::explain_query::call(mcx, pstate, parsetree, params, dest)?;
         }
 
-        Node::AlterSystemStmt(_) => {
+        t if t == ntag::T_AlterSystemStmt => {
             rt::prevent_in_transaction_block::call(is_top_level, "ALTER SYSTEM")?;
             rt::alter_system_set_config_file::call(parsetree)?;
         }
 
-        Node::VariableSetStmt(_) => {
+        t if t == ntag::T_VariableSetStmt => {
             rt::exec_set_variable_stmt::call(parsetree, is_top_level)?;
         }
 
-        Node::VariableShowStmt(n) => {
+        t if t == ntag::T_VariableShowStmt => {
+            let Node::VariableShowStmt(n) = parsetree else { unreachable!() };
             rt::get_pg_variable::call(mcx, n.name.as_deref(), dest)?;
         }
 
-        Node::DiscardStmt(_) => {
+        t if t == ntag::T_DiscardStmt => {
             // should we allow DISCARD PLANS?
             CheckRestrictedOperation("DISCARD")?;
             rt::discard_command::call(parsetree, is_top_level)?;
         }
 
-        Node::CreateEventTrigStmt(_) => {
+        t if t == ntag::T_CreateEventTrigStmt => {
             // no event triggers on event triggers
             rt::create_event_trigger::call(mcx, parsetree)?;
         }
 
-        Node::AlterEventTrigStmt(_) => {
+        t if t == ntag::T_AlterEventTrigStmt => {
             // no event triggers on event triggers
             rt::alter_event_trigger::call(parsetree)?;
         }
 
         // ******************************** ROLE statements ****
-        Node::CreateRoleStmt(_) => {
+        t if t == ntag::T_CreateRoleStmt => {
             rt::create_role::call(mcx, pstate, parsetree)?;
         }
 
-        Node::AlterRoleStmt(_) => {
+        t if t == ntag::T_AlterRoleStmt => {
             rt::alter_role::call(mcx, pstate, parsetree)?;
         }
 
-        Node::AlterRoleSetStmt(_) => {
+        t if t == ntag::T_AlterRoleSetStmt => {
             rt::alter_role_set::call(mcx, parsetree)?;
         }
 
-        Node::DropRoleStmt(_) => {
+        t if t == ntag::T_DropRoleStmt => {
             rt::drop_role::call(parsetree)?;
         }
 
-        Node::ReassignOwnedStmt(_) => {
+        t if t == ntag::T_ReassignOwnedStmt => {
             rt::reassign_owned_objects::call(parsetree)?;
         }
 
-        Node::LockStmt(_) => {
+        t if t == ntag::T_LockStmt => {
             // LOCK TABLE outside a transaction block is user error.
             rt::require_transaction_block::call(is_top_level, "LOCK TABLE")?;
             rt::lock_table_command::call(parsetree)?;
         }
 
-        Node::ConstraintsSetStmt(_) => {
+        t if t == ntag::T_ConstraintsSetStmt => {
             rt::warn_no_transaction_block::call(is_top_level, "SET CONSTRAINTS")?;
             rt::after_trigger_set_state::call(parsetree)?;
         }
 
-        Node::CheckPointStmt(_) => {
+        t if t == ntag::T_CheckPointStmt => {
             if !rt::has_privs_of_role::call(rt::get_user_id::call(), ROLE_PG_CHECKPOINT) {
                 return Err(ereport(ERROR)
                     .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
@@ -543,7 +554,8 @@ fn dispatch_switch<'mcx>(
 
         // The following statements have event-trigger support only in some
         // cases, so we "fast path" them in the other cases.
-        Node::GrantStmt(stmt) => {
+        t if t == ntag::T_GrantStmt => {
+            let Node::GrantStmt(stmt) = parsetree else { unreachable!() };
             if rt::event_trigger_supports_object_type::call(stmt.objtype) {
                 rt::process_utility_slow::call(
                     mcx, pstate, pstmt, query_string, context, params, dest, is_top_level,
@@ -554,7 +566,8 @@ fn dispatch_switch<'mcx>(
             }
         }
 
-        Node::DropStmt(stmt) => {
+        t if t == ntag::T_DropStmt => {
+            let Node::DropStmt(stmt) = parsetree else { unreachable!() };
             if rt::event_trigger_supports_object_type::call(stmt.removeType) {
                 rt::process_utility_slow::call(
                     mcx, pstate, pstmt, query_string, context, params, dest, is_top_level,
@@ -565,7 +578,8 @@ fn dispatch_switch<'mcx>(
             }
         }
 
-        Node::RenameStmt(stmt) => {
+        t if t == ntag::T_RenameStmt => {
+            let Node::RenameStmt(stmt) = parsetree else { unreachable!() };
             if rt::event_trigger_supports_object_type::call(stmt.renameType) {
                 rt::process_utility_slow::call(
                     mcx, pstate, pstmt, query_string, context, params, dest, is_top_level,
@@ -576,7 +590,8 @@ fn dispatch_switch<'mcx>(
             }
         }
 
-        Node::AlterObjectDependsStmt(stmt) => {
+        t if t == ntag::T_AlterObjectDependsStmt => {
+            let Node::AlterObjectDependsStmt(stmt) = parsetree else { unreachable!() };
             if rt::event_trigger_supports_object_type::call(stmt.objectType) {
                 rt::process_utility_slow::call(
                     mcx, pstate, pstmt, query_string, context, params, dest, is_top_level,
@@ -587,7 +602,8 @@ fn dispatch_switch<'mcx>(
             }
         }
 
-        Node::AlterObjectSchemaStmt(stmt) => {
+        t if t == ntag::T_AlterObjectSchemaStmt => {
+            let Node::AlterObjectSchemaStmt(stmt) = parsetree else { unreachable!() };
             if rt::event_trigger_supports_object_type::call(stmt.objectType) {
                 rt::process_utility_slow::call(
                     mcx, pstate, pstmt, query_string, context, params, dest, is_top_level,
@@ -598,7 +614,8 @@ fn dispatch_switch<'mcx>(
             }
         }
 
-        Node::AlterOwnerStmt(stmt) => {
+        t if t == ntag::T_AlterOwnerStmt => {
+            let Node::AlterOwnerStmt(stmt) = parsetree else { unreachable!() };
             if rt::event_trigger_supports_object_type::call(stmt.objectType) {
                 rt::process_utility_slow::call(
                     mcx, pstate, pstmt, query_string, context, params, dest, is_top_level,
@@ -609,7 +626,8 @@ fn dispatch_switch<'mcx>(
             }
         }
 
-        Node::CommentStmt(stmt) => {
+        t if t == ntag::T_CommentStmt => {
+            let Node::CommentStmt(stmt) = parsetree else { unreachable!() };
             if rt::event_trigger_supports_object_type::call(stmt.objtype) {
                 rt::process_utility_slow::call(
                     mcx, pstate, pstmt, query_string, context, params, dest, is_top_level,
@@ -620,7 +638,8 @@ fn dispatch_switch<'mcx>(
             }
         }
 
-        Node::SecLabelStmt(stmt) => {
+        t if t == ntag::T_SecLabelStmt => {
+            let Node::SecLabelStmt(stmt) = parsetree else { unreachable!() };
             if rt::event_trigger_supports_object_type::call(stmt.objtype) {
                 rt::process_utility_slow::call(
                     mcx, pstate, pstmt, query_string, context, params, dest, is_top_level,
