@@ -22,6 +22,10 @@ backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumla
 # real owner. Re-signed off the relation OID.
 backend-access-heap-hio-seams = { path = "../backend-access-heap-hio-seams" }
 
+# freespace.c FSM seams (&Relation-keyed); relcache projects a transient read
+# handle off the owned entry to bridge the OID-keyed hio-seam to the FSM owner.
+backend-storage-freespace-seams = { path = "../backend-storage-freespace-seams" }
+
 # The RelationIdCache is a real dynahash table (merged C-faithful raw-pointer
 # dynahash) — the substrate, not a stand-in. Acyclic: dynahash depends only on
 # types/error/storage/core.

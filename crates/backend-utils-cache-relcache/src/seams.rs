@@ -179,6 +179,46 @@ pub fn init_seams() {
     // lives in smgr-owned state.
     hx::relation_get_target_block::set(relation_get_target_block);
     hx::relation_set_target_block::set(relation_set_target_block);
+    // `GetPageWithFreeSpace(rel, len)` / `RecordAndGetPageWithFreeSpace(rel,
+    // oldPage, oldAvail, needed)` (freespace.c) — the hio-seam forms are keyed
+    // by OID; project a transient `Relation` read handle off the owned entry and
+    // delegate to the freespace owner's `&Relation`-keyed seams.
+    hx::get_page_with_free_space::set(get_page_with_free_space);
+    hx::record_and_get_page_with_free_space::set(record_and_get_page_with_free_space);
+}
+
+/// `GetPageWithFreeSpace(relation, len)` (freespace.c) as an OID-keyed hio-seam:
+/// project the owned entry to a transient `Relation` read handle (no release
+/// authority) and call the FSM owner's `&Relation`-keyed seam.
+fn get_page_with_free_space(
+    rel: Oid,
+    len: types_core::Size,
+) -> PgResult<types_core::primitive::BlockNumber> {
+    let relcx = mcx::MemoryContext::new("get_page_with_free_space");
+    let data = crate::core_entry_store::with_relation(rel, |rd| {
+        crate::build::project_relation_data(relcx.mcx(), rd)
+    })??;
+    let rel = types_rel::Relation::open(data, None);
+    backend_storage_freespace_seams::get_page_with_free_space::call(&rel, len)
+}
+
+/// `RecordAndGetPageWithFreeSpace(relation, oldPage, oldSpaceAvail,
+/// spaceNeeded)` (freespace.c) as an OID-keyed hio-seam: project the owned entry
+/// to a transient `Relation` read handle and call the FSM owner's seam.
+fn record_and_get_page_with_free_space(
+    rel: Oid,
+    old_page: types_core::primitive::BlockNumber,
+    old_avail: types_core::Size,
+    needed: types_core::Size,
+) -> PgResult<types_core::primitive::BlockNumber> {
+    let relcx = mcx::MemoryContext::new("record_and_get_page_with_free_space");
+    let data = crate::core_entry_store::with_relation(rel, |rd| {
+        crate::build::project_relation_data(relcx.mcx(), rd)
+    })??;
+    let rel = types_rel::Relation::open(data, None);
+    backend_storage_freespace_seams::record_and_get_page_with_free_space::call(
+        &rel, old_page, old_avail, needed,
+    )
 }
 
 /// `RelationGetTargetBlock(relation)` (utils/rel.h) ==
