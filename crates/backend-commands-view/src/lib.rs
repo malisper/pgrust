@@ -55,6 +55,7 @@ use backend_utils_adt_format_type::format_type_with_typemod;
 use backend_utils_cache_lsyscache::type_::type_is_collatable;
 use backend_utils_cache_lsyscache::collation_constraint_language_cast::get_collation_name;
 
+use backend_commands_tablecmds::AlterTableInternal;
 use backend_commands_tablecmds_seams as tablecmds_seam;
 use backend_commands_view_seams as seam;
 
@@ -67,9 +68,12 @@ use types_error::{
 };
 use types_nodes::copy_query::Query;
 use types_nodes::ddlnodes::{
-    DefElem, DefElemAction, ViewStmt, CASCADED_CHECK_OPTION, LOCAL_CHECK_OPTION,
+    AlterTableCmd, AlterTableType, CreateStmt, DefElem, DefElemAction, ViewStmt,
+    CASCADED_CHECK_OPTION, LOCAL_CHECK_OPTION,
 };
-use types_nodes::nodes::{CmdType, Node};
+use types_nodes::nodes::{CmdType, Node, NodePtr};
+use types_nodes::parsenodes::DROP_RESTRICT;
+use types_nodes::primnodes::OnCommitAction;
 use types_nodes::parsestmt::RawStmt;
 use types_nodes::rawnodes::{ColumnDef, RangeVar};
 use types_nodes::value::StringNode;
@@ -214,7 +218,8 @@ fn DefineVirtualRelation<'mcx>(
          * verify that the old column list is an initial prefix of the new
          * column list.
          */
-        let descriptor: TupleDescData = seam::build_desc_for_relation::call(mcx, &attr_list)?;
+        let descriptor: TupleDescData =
+            backend_commands_tablecmds::build_desc_for_relation(mcx, &attr_list)?;
         checkViewColumns(mcx, &descriptor, &rel.rd_att)?;
 
         /*
@@ -232,11 +237,23 @@ fn DefineVirtualRelation<'mcx>(
          */
         let old_natts = rel.rd_att.natts;
         if attr_list.len() as i32 > old_natts {
-            let mut new_columns: PgVec<ColumnDef> = vec_with_capacity_in(mcx, 0)?;
+            let mut atcmds: PgVec<NodePtr> = vec_with_capacity_in(mcx, 0)?;
             for def in attr_list.iter().skip(old_natts as usize) {
-                new_columns.push(def.clone_in(mcx)?);
+                let atcmd = AlterTableCmd {
+                    subtype: AlterTableType::AT_AddColumnToView,
+                    name: None,
+                    num: 0,
+                    newowner: None,
+                    def: Some(alloc_in(mcx, Node::ColumnDef(def.clone_in(mcx)?))?),
+                    behavior: DROP_RESTRICT,
+                    missing_ok: false,
+                    recurse: false,
+                };
+                atcmds.push(alloc_in(mcx, Node::AlterTableCmd(atcmd))?);
             }
-            seam::alter_table_add_columns_to_view::call(mcx, view_oid, new_columns)?;
+
+            /* EventTriggerAlterTableStart called by ProcessUtilitySlow */
+            AlterTableInternal(mcx, view_oid, &atcmds, true)?;
 
             /* Make the new view columns visible */
             CommandCounterIncrement()?;
@@ -256,8 +273,25 @@ fn DefineVirtualRelation<'mcx>(
         /*
          * Update the view's options.  The new options list replaces the
          * existing options list, even if it's empty.
+         *
+         *   atcmd->subtype = AT_ReplaceRelOptions;
+         *   atcmd->def = (Node *) options;
+         *   atcmds = list_make1(atcmd);
+         *   AlterTableInternal(viewOid, atcmds, true);
          */
-        seam::alter_table_replace_reloptions::call(mcx, view_oid, options)?;
+        let replace_cmd = AlterTableCmd {
+            subtype: AlterTableType::AT_ReplaceRelOptions,
+            name: None,
+            num: 0,
+            newowner: None,
+            def: Some(alloc_in(mcx, Node::List(options))?),
+            behavior: DROP_RESTRICT,
+            missing_ok: false,
+            recurse: false,
+        };
+        let mut atcmds: PgVec<NodePtr> = vec_with_capacity_in(mcx, 1)?;
+        atcmds.push(alloc_in(mcx, Node::AlterTableCmd(replace_cmd))?);
+        AlterTableInternal(mcx, view_oid, &atcmds, true)?;
 
         /*
          * There is very little to do here to update the view's dependencies.
@@ -278,11 +312,40 @@ fn DefineVirtualRelation<'mcx>(
          * there's an existing view, so we don't need more code to complain if
          * "replace" is false).
          *
+         *   createStmt->relation = relation;
+         *   createStmt->tableElts = attrList;
+         *   createStmt->options = options;
+         *   createStmt->oncommit = ONCOMMIT_NOOP;
+         *   ...
          *   address = DefineRelation(createStmt, RELKIND_VIEW, InvalidOid, NULL, NULL);
          */
-        let object_id = seam::define_relation_view::call(mcx, relation, attr_list, options)?;
-        debug_assert!(object_id != InvalidOid);
-        let address = object_address_set(RelationRelationId, object_id);
+        let mut table_elts: PgVec<NodePtr> = vec_with_capacity_in(mcx, attr_list.len())?;
+        for def in attr_list.into_iter() {
+            table_elts.push(alloc_in(mcx, Node::ColumnDef(def))?);
+        }
+        let create_stmt = CreateStmt {
+            relation: Some(alloc_in(mcx, Node::RangeVar(relation))?),
+            tableElts: table_elts,
+            inhRelations: vec_with_capacity_in(mcx, 0)?,
+            partbound: None,
+            partspec: None,
+            ofTypename: None,
+            constraints: vec_with_capacity_in(mcx, 0)?,
+            nnconstraints: vec_with_capacity_in(mcx, 0)?,
+            options,
+            oncommit: OnCommitAction::ONCOMMIT_NOOP,
+            tablespacename: None,
+            accessMethod: None,
+            if_not_exists: false,
+        };
+        let address = tablecmds_seam::define_relation::call(
+            mcx,
+            create_stmt,
+            RELKIND_VIEW,
+            InvalidOid,
+            None,
+        )?;
+        debug_assert!(address.objectId != InvalidOid);
 
         /* Make the new view relation visible */
         CommandCounterIncrement()?;
@@ -693,9 +756,29 @@ fn gettext(msg: &str) -> String {
     msg.to_string()
 }
 
-/// Install this crate's inward `define_view` seam. (The outward
-/// tablecmds/rewriteHandler seams declared in `backend-commands-view-seams` are
-/// installed by their owners when they land.)
+/// `tcop/utility.c` dispatch adapter for `CREATE VIEW`: marshal the
+/// `Node::ViewStmt` the `ProcessUtilitySlow` switch hands across the command
+/// boundary into the owned `ViewStmt` `DefineView` consumes.
+fn define_view_from_node<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &Node<'mcx>,
+    query_string: &str,
+    stmt_location: i32,
+    stmt_len: i32,
+) -> PgResult<ObjectAddress> {
+    let Node::ViewStmt(view_stmt) = stmt else {
+        return Err(ereport(ERROR)
+            .errmsg_internal("DefineView dispatched on a non-ViewStmt node")
+            .into_error());
+    };
+    let owned = view_stmt.clone_in(mcx)?;
+    DefineView(mcx, owned, query_string, stmt_location, stmt_len)
+}
+
+/// Install the inward `define_view` seam (`backend-commands-view-seams`) and the
+/// tcop/utility dispatch seam (`backend-tcop-utility-out-seams::define_view`)
+/// this crate owns.
 pub fn init_seams() {
     seam::define_view::set(DefineView);
+    backend_tcop_utility_out_seams::define_view::set(define_view_from_node);
 }

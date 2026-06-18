@@ -22,9 +22,13 @@ types-storage = { path = "../types-storage" }
 # Error vocabulary.
 backend-utils-error = { path = "../backend-utils-error" }
 
-# This crate's seam crate (inward `define_view` + the outward tablecmds /
-# rewriteHandler seams it owns the declaration of).
+# This crate's seam crate (inward `define_view` + the outward
+# rewriteHandler `view_query_is_auto_updatable` seam it owns the declaration of).
 backend-commands-view-seams = { path = "../backend-commands-view-seams" }
+
+# The tcop/utility dispatcher's outward `define_view` seam — view.c is its
+# owner and installs it (marshals the `Node::ViewStmt` into `DefineView`).
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 
 # Direct deps (no cycle): node construction / inspection, the relcache/table
 # access layer, the rewriter's `DefineQueryRewrite`, parse analysis, the
@@ -44,3 +48,8 @@ backend-access-transam-xact = { path = "../backend-access-transam-xact" }
 # Outward seam: `CheckTableNotInUse` (tablecmds.c) is declared on tablecmds' own
 # seam crate; the replace path calls it across the cycle.
 backend-commands-tablecmds-seams = { path = "../backend-commands-tablecmds-seams" }
+
+# `DefineRelation` (via the `define_relation` seam) and `AlterTableInternal`
+# (the CREATE OR REPLACE VIEW column-add / reloptions-replace legs). tablecmds
+# does not depend on view, so this is a direct (acyclic) edge.
+backend-commands-tablecmds = { path = "../backend-commands-tablecmds" }

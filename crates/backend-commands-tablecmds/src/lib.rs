@@ -42,6 +42,7 @@ pub use at_phase::{
     AlterTable, AlterTableGetLockLevel, AlterTableInternal, AlterTableLookupRelation,
     AlterTableUtilityContext,
 };
+pub use create::{build_desc_for_relation, define_relation};
 
 use backend_commands_tablecmds_seams as seam;
 
