@@ -22,13 +22,19 @@
 //!   single-user boot-path entry (`InitPostgres`).
 //! - `shared_registry_estimate` — `SharedRecordTypmodRegistryEstimate()`:
 //!   `sizeof(SharedRecordTypmodRegistry)`. Fully ported.
+//! - `shared_registry_attached` — reads `CurrentSession->shared_typmod_registry
+//!   != NULL`. Fully ported (pure field read; always false in a single backend).
+//! - `find_or_make_matching_shared_tupledesc` — the typcache shared path. Its C
+//!   body returns NULL when no registry is attached, which is the only reachable
+//!   case in a single backend; that early-return (`Ok(None)`) is ported so the
+//!   caller falls back to the local `RecordCacheArray`. The attached (dshash)
+//!   leg remains keystone-blocked and panics loudly, never silently stubs.
 //!
 //! ## What this crate does NOT install (keystone-blocked, NOT stubbed)
 //!
-//! The other four registry seams (`shared_registry_init`,
-//! `shared_registry_attach`, `shared_typmod_table_find`,
-//! `find_or_make_matching_shared_tupledesc`) and the `shared_registry_attached`
-//! read are the parallel-worker path. Their faithful bodies create/attach the
+//! The other three registry seams (`shared_registry_init`,
+//! `shared_registry_attach`, `shared_typmod_table_find`) are the parallel-worker
+//! path. Their faithful bodies create/attach the
 //! registry's **record table** via `dshash_create(area,
 //! &srtr_record_table_params, area)` — a dshash whose `compare`/`hash` are the
 //! custom `shared_record_table_compare` / `shared_record_table_hash` callbacks
@@ -51,8 +57,9 @@
 
 use std::cell::RefCell;
 
-use mcx::MemoryContext;
+use mcx::{Mcx, MemoryContext, PgBox};
 use types_error::PgResult;
+use types_tuple::heaptuple::TupleDescData;
 
 /// `dshash_table *` — the opaque backend-local handle to a shared hash table.
 /// Modeled as the raw pointer the dshash port hands out; `Session` only stores
@@ -168,6 +175,47 @@ fn shared_registry_estimate() -> usize {
     core::mem::size_of::<SharedRecordTypmodRegistry>()
 }
 
+/// Whether a `SharedRecordTypmodRegistry` is attached to the current session
+/// (`CurrentSession->shared_typmod_registry != NULL`). Pure read of the
+/// `Session` field. False whenever no parallel registry has been attached —
+/// always the case in a single (non-parallel) backend.
+fn shared_registry_attached() -> bool {
+    CURRENT_SESSION.with(|s| {
+        s.borrow()
+            .as_ref()
+            .is_some_and(|sess| !sess.shared_typmod_registry.is_null())
+    })
+}
+
+/// `find_or_make_matching_shared_tupledesc(tupdesc)` (typcache.c:2943).
+///
+/// The shared path of `assign_record_type_typmod`. The C body returns NULL
+/// immediately when `CurrentSession->shared_typmod_registry == NULL` (the only
+/// case in a single backend), which maps to `None` here, telling the caller to
+/// use the local `RecordCacheArray`/`RecordCacheHash`.
+///
+/// The attached path (dshash record/typmod tables over the session DSA area) is
+/// keystone-blocked on dshash custom-callback support (see module docs); it
+/// keeps a loud panic rather than a silent stub. It is unreachable in a single
+/// backend.
+fn find_or_make_matching_shared_tupledesc<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _tupdesc: &TupleDescData<'_>,
+) -> PgResult<Option<PgBox<'mcx, TupleDescData<'mcx>>>> {
+    // If not even attached, nothing to do.
+    if !shared_registry_attached() {
+        return Ok(None);
+    }
+
+    // Attached (parallel) path: dshash record/typmod tables keyed by a
+    // caller-supplied compare/hash over the DSA area. Not expressible over the
+    // current dshash substrate (see module docs). Loud panic, never a stub.
+    panic!(
+        "find_or_make_matching_shared_tupledesc: shared registry attached path \
+         requires dshash custom-callback support (keystone-blocked)"
+    );
+}
+
 /// Install the session seams this crate owns.
 ///
 /// Only the two seams whose faithful bodies are expressible over the current
@@ -178,4 +226,8 @@ fn shared_registry_estimate() -> usize {
 pub fn init_seams() {
     backend_access_common_session_seams::initialize_session::set(initialize_session);
     backend_access_common_session_seams::shared_registry_estimate::set(shared_registry_estimate);
+    backend_access_common_session_seams::shared_registry_attached::set(shared_registry_attached);
+    backend_access_common_session_seams::find_or_make_matching_shared_tupledesc::set(
+        find_or_make_matching_shared_tupledesc,
+    );
 }
