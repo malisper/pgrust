@@ -3851,17 +3851,45 @@ fn store_minimal_into_slot<'mcx>(
         // ExecCopySlotHeapTuple / get_minimal_tuple read the *current* tuple — a
         // virtual-style deform-into-tts_values leaves mintuple stale.
         SlotData::Minimal(mslot) => {
+            // C `tuplesort_gettupleslot` does `ExecStoreMinimalTuple(stup.tuple,
+            // slot, false)`: the fetched tuple lives in the *tuplesort* memory
+            // context (freed by `tuplesort_end`) and the slot borrows it with
+            // `shouldFree=false`, so `tts_minimal_clear` never frees it. The
+            // owned model cannot store a borrowed Box: `mslot.mintuple`'s drop
+            // (in `tts_minimal_clear`, run at `ExecResetTupleTable`) always
+            // deallocates through the Box's allocator — and that allocator is the
+            // engine's `sortcontext`, already destroyed by `ExecEndSort`'s
+            // `tuplesort_end`, giving a use-after-free in the context accounting.
+            //
+            // Faithful owned-model equivalent: copy the minimal tuple into the
+            // *slot's own* memory context (which outlives the sort, exactly like
+            // `tts_minimal_copyslot`'s `MemoryContextSwitchTo(dstslot->tts_mcxt)`)
+            // and store it with `shouldFree=true`, so the slot owns it and frees
+            // it from a live context. The slot's context is recovered from its
+            // own charged member (the `tts_values` Vec's allocator), mirroring how
+            // the engine recovers its context from `memtuples`.
+            let slot_mcx: Mcx<'mcx> = *mslot.base.tts_values.allocator();
+            let owned = mtup.clone_in(slot_mcx)?;
+            // tts_minimal_clear(slot): drop any previously-stored tuple (from a
+            // still-live context) before installing the new one.
+            mslot.mintuple = None;
+            mslot.tuple = None;
+            mslot.base.mark_empty();
+
             mslot.base.mark_not_empty();
             mslot.base.tts_nvalid = 0;
             mslot.off = 0;
-            mslot.mintuple = Some(mtup);
+            mslot.mintuple = Some(owned);
             // mslot->minhdr / mslot->tuple = heap-tuple-shaped view over the body.
             let view = heaptuple::heap_tuple_from_minimal_tuple(
-                mcx,
+                slot_mcx,
                 mslot.mintuple.as_ref().unwrap(),
             )?;
             mslot.minhdr = view.tuple.as_ref().clone();
             mslot.tuple = Some(view);
+            // shouldFree=true: the slot owns this copy and frees it (from its own
+            // live context) on the next clear.
+            mslot.base.tts_flags |= types_slot::TTS_FLAG_SHOULDFREE;
             Ok(())
         }
         // Other slot kinds (e.g. a standalone virtual slot): deform the
