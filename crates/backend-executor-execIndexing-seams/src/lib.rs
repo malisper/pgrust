@@ -19,6 +19,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecCloseIndices(resultRelInfo)` (execIndexing.c): close the result
+    /// relation's opened index descriptors (running each index AM's
+    /// `index_insert_cleanup`, dropping the lock taken by `ExecOpenIndices`).
+    /// A no-op when the relation has no opened indexes (`ri_NumIndices == 0`).
+    /// Consumed by `ExecCloseResultRelations` (execUtils). Index AM cleanup can
+    /// `ereport(ERROR)`.
+    pub fn exec_close_indices<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ExecInsertIndexTuples(resultRelInfo, slot, estate, update, noDupErr,
     /// specConflict, arbiterIndexes, onlySummarizing)` (execIndexing.c): insert
     /// index entries for the tuple in `slot`, returning the list of index OIDs

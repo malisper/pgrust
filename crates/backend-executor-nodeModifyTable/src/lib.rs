@@ -145,4 +145,44 @@ pub fn init_seams() {
     backend_executor_nodeModifyTable_seams::exec_init_partition_merge::set(
         partition_init::ExecInitPartitionMerge,
     );
+
+    // ExecModifyTable's reads of trimmed/now-modeled ResultRelInfo fields,
+    // declared in `crate::exec`.
+    //
+    // `ri_RowIdAttNo` is now carried on the trimmed ResultRelInfo (set up in
+    // ExecInitModifyTable for UPDATE/DELETE/MERGE; 0 for INSERT).
+    exec::ri_row_id_attno::set(|estate, rri| estate.result_rel(rri).ri_RowIdAttNo as i32);
+    // `ri_usesFdwDirectModify` is not carried on the trimmed ResultRelInfo, but
+    // it is only ever true for a foreign table whose FDW does direct modify —
+    // a target ExecInitModifyTable rejects (fdwDirectModifyPlans unsupported),
+    // so it is always false on every reachable path.
+    exec::ri_uses_fdw_direct_modify::set(|_estate, _rri| false);
+
+    // `relinfo->ri_projectNew == NULL` — the insert/update new-tuple junk-filter
+    // projection presence flag (`ri_has_project_new`, set by
+    // exec_build_insert_projection when a projection is built; false for the
+    // common no-junk INSERT).
+    insert::ri_project_new_is_null::set(|estate, rri| {
+        !estate.result_rel(rri).ri_has_project_new
+    });
+
+    // `relinfo->ri_newTupleSlot->tts_ops != planSlot->tts_ops` — compare the
+    // slot class (kind) of the relation's new-tuple slot against the plan slot.
+    insert::ri_new_tuple_slot_ops_differ::set(|estate, rri, plan_slot| {
+        let new_slot = estate
+            .result_rel(rri)
+            .ri_newTupleSlot
+            .expect("ExecGetInsertNewTuple: ri_newTupleSlot is NULL");
+        estate.slot_data(new_slot).kind() != estate.slot_data(plan_slot).kind()
+    });
+
+    // `ExecCopySlot(relinfo->ri_newTupleSlot, planSlot); return ri_newTupleSlot;`
+    insert::exec_copy_into_new_tuple_slot::set(|estate, rri, plan_slot| {
+        let new_slot = estate
+            .result_rel(rri)
+            .ri_newTupleSlot
+            .expect("ExecGetInsertNewTuple: ri_newTupleSlot is NULL");
+        backend_executor_execTuples_seams::exec_copy_slot::call(estate, new_slot, plan_slot)?;
+        Ok(new_slot)
+    });
 }

@@ -550,35 +550,71 @@ fn deferred_ddl(c_func: &str, c_line: u32) -> ! {
 
 // ---- BEFORE/AFTER/INSTEAD STATEMENT (trigger.c:2402-3328) ----
 
-fn exec_bs_insert_triggers_impl(_estate: &mut EStateData<'_>, _relinfo: types_nodes::RriId) -> PgResult<()> {
+/// `trigdesc == NULL || !trigdesc->trig_<which>_before_statement` — whether a
+/// BEFORE STATEMENT entry point has no work (the C `if (trigdesc == NULL)
+/// return; if (!trig_..._before_statement) return;`). The trimmed
+/// `ResultRelInfo` carries the per-statement trigger flags.
+fn bs_trigger_flag(
+    estate: &EStateData<'_>,
+    relinfo: types_nodes::RriId,
+    pick: fn(&types_trigger::TriggerDesc<'_>) -> bool,
+) -> bool {
+    estate
+        .result_rel(relinfo)
+        .ri_TrigDesc
+        .as_ref()
+        .is_some_and(|td| pick(td))
+}
+
+fn exec_bs_insert_triggers_impl(estate: &mut EStateData<'_>, relinfo: types_nodes::RriId) -> PgResult<()> {
+    // if (trigdesc == NULL) return; if (!trig_insert_before_statement) return;
+    if !bs_trigger_flag(estate, relinfo, |td| td.trig_insert_before_statement) {
+        return Ok(());
+    }
     front_half("ExecBSInsertTriggers", 2402)
 }
-fn exec_bs_update_triggers_impl(_estate: &mut EStateData<'_>, _relinfo: types_nodes::RriId) -> PgResult<()> {
+fn exec_bs_update_triggers_impl(estate: &mut EStateData<'_>, relinfo: types_nodes::RriId) -> PgResult<()> {
+    if !bs_trigger_flag(estate, relinfo, |td| td.trig_update_before_statement) {
+        return Ok(());
+    }
     front_half("ExecBSUpdateTriggers", 2896)
 }
-fn exec_bs_delete_triggers_impl(_estate: &mut EStateData<'_>, _relinfo: types_nodes::RriId) -> PgResult<()> {
+fn exec_bs_delete_triggers_impl(estate: &mut EStateData<'_>, relinfo: types_nodes::RriId) -> PgResult<()> {
+    if !bs_trigger_flag(estate, relinfo, |td| td.trig_delete_before_statement) {
+        return Ok(());
+    }
     front_half("ExecBSDeleteTriggers", 2631)
 }
 
 fn exec_as_insert_triggers_impl(
-    _estate: &mut EStateData<'_>,
-    _relinfo: types_nodes::RriId,
+    estate: &mut EStateData<'_>,
+    relinfo: types_nodes::RriId,
     _tc: Option<&mut types_nodes::modifytable::TransitionCaptureState>,
 ) -> PgResult<()> {
+    // if (trigdesc && trig_insert_after_statement) AfterTriggerSaveEvent(...);
+    if !bs_trigger_flag(estate, relinfo, |td| td.trig_insert_after_statement) {
+        return Ok(());
+    }
     front_half("ExecASInsertTriggers", 2453)
 }
 fn exec_as_update_triggers_impl(
-    _estate: &mut EStateData<'_>,
-    _relinfo: types_nodes::RriId,
+    estate: &mut EStateData<'_>,
+    relinfo: types_nodes::RriId,
     _tc: Option<&mut types_nodes::modifytable::TransitionCaptureState>,
 ) -> PgResult<()> {
+    if !bs_trigger_flag(estate, relinfo, |td| td.trig_update_after_statement) {
+        return Ok(());
+    }
     front_half("ExecASUpdateTriggers", 2954)
 }
 fn exec_as_delete_triggers_impl(
-    _estate: &mut EStateData<'_>,
-    _relinfo: types_nodes::RriId,
+    estate: &mut EStateData<'_>,
+    relinfo: types_nodes::RriId,
     _tc: Option<&mut types_nodes::modifytable::TransitionCaptureState>,
 ) -> PgResult<()> {
+    if !bs_trigger_flag(estate, relinfo, |td| td.trig_delete_after_statement) {
+        return Ok(());
+    }
     front_half("ExecASDeleteTriggers", 2682)
 }
 
@@ -599,12 +635,26 @@ fn exec_ir_insert_triggers_impl<'mcx>(
     front_half("ExecIRInsertTriggers", 2570)
 }
 fn exec_ar_insert_triggers_impl<'mcx>(
-    _estate: &mut EStateData<'mcx>,
-    _relinfo: types_nodes::RriId,
+    estate: &mut EStateData<'mcx>,
+    relinfo: types_nodes::RriId,
     _slot: types_nodes::SlotId,
     _recheck_indexes: &[Oid],
-    _tc: Option<&mut types_nodes::modifytable::TransitionCaptureState>,
+    tc: Option<&mut types_nodes::modifytable::TransitionCaptureState>,
 ) -> PgResult<()> {
+    // The FDW + transition-capture guard reads ri_FdwRoutine (not carried on the
+    // trimmed ResultRelInfo; ri_has_fdw_routine == false here) — skip.
+
+    // if ((trigdesc && trig_insert_after_row) ||
+    //     (transition_capture && tcs_insert_new_table)) AfterTriggerSaveEvent(...);
+    let has_ar_row = estate
+        .result_rel(relinfo)
+        .ri_TrigDesc
+        .as_ref()
+        .is_some_and(|td| td.trig_insert_after_row);
+    let tc_new_table = tc.as_ref().is_some_and(|t| t.tcs_insert_new_table);
+    if !has_ar_row && !tc_new_table {
+        return Ok(());
+    }
     front_half("ExecARInsertTriggers", 2544)
 }
 

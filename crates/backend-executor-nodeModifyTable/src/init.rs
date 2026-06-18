@@ -30,6 +30,7 @@ const MT_NRELS_HASH: usize = 64;
 /// subplan. Returns the new `ModifyTableState`.
 pub fn ExecInitModifyTable<'mcx>(
     mcx: Mcx<'mcx>,
+    plan_node: &'mcx types_nodes::nodes::Node<'mcx>,
     node: &'mcx ModifyTable<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
@@ -155,13 +156,17 @@ pub fn ExecInitModifyTable<'mcx>(
     //   mtstate->ps.ExecProcNode = ExecModifyTable;
     //
     // The owned model threads `&mut EStateData` explicitly rather than the C
-    // `PlanState.state` back-pointer, and `ModifyTableState` is not a
-    // `PlanStateNode` variant in the trimmed node model, so the `ps.plan`
-    // alias and the `ExecProcNode` callback install are not expressible here;
-    // the node's `ExecProcNode` callback (`crate::exec::ExecModifyTable`) is
-    // dispatched directly by the family driver, not through the trimmed
-    // `ExecProcNodeMtd` table. `ps` is otherwise the zeroed PlanState head.
-    let ps = PlanStateData::default();
+    // `PlanState.state` back-pointer, and the `ps.plan` alias is not carried
+    // here. But the node's `ExecProcNode` callback IS installed: the top-level
+    // executor dispatches every node (including `T_ModifyTableState`) through
+    // the trimmed `ExecProcNodeMtd` head, so `mtstate->ps.ExecProcNode =
+    // ExecModifyTable` must be set (via the `exec_modify_table_node` adapter).
+    let mut ps = PlanStateData::default();
+    // mtstate->ps.plan = (Plan *) node; — the shared, read-only ModifyTable
+    // plan node (its outerPlan / targetlist are read by ExecInitInsertProjection
+    // and the per-rel init).
+    ps.plan = Some(plan_node);
+    ps.ExecProcNode = Some(crate::exec::exec_modify_table_node);
 
     // mtstate->resultRelInfo = palloc(nrels * sizeof(ResultRelInfo));
     //

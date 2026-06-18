@@ -462,6 +462,12 @@ pub struct ResultRelInfo<'mcx> {
     /// `ProjectionInfo *ri_projectReturning != NULL` — a RETURNING projection
     /// has been built for this relation.
     pub ri_has_project_returning: bool,
+    /// `ProjectionInfo *ri_projectNew != NULL` — an INSERT/UPDATE "new tuple"
+    /// junk-filter projection has been built (`ExecInitInsertProjection` /
+    /// `ExecInitUpdateProjection`). The projection itself is not carried on the
+    /// trimmed `ResultRelInfo`; this presence flag mirrors `ri_projectNew !=
+    /// NULL` (false for the common INSERT case, which has no junk columns).
+    pub ri_has_project_new: bool,
     /// `List *ri_WithCheckOptions != NIL` — WITH CHECK OPTION constraints
     /// apply (RLS / updatable views).
     pub ri_has_with_check_options: bool,

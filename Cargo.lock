@@ -9178,6 +9178,7 @@ dependencies = [
  "backend-access-table-table",
  "backend-access-table-tableam",
  "backend-executor-execExpr-seams",
+ "backend-executor-execIndexing-seams",
  "backend-executor-execMain-seams",
  "backend-executor-execParallel-support-seams",
  "backend-executor-execTuples-seams",

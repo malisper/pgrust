@@ -372,21 +372,19 @@ pub fn ExecCloseResultRelations(estate: &mut EStateData<'_>) -> PgResult<()> {
     //     foreach(lc, resultRelInfo->ri_ancestorResultRels) { ... table_close }
     // }
     //
-    // Closing a result relation's indexes is `ExecCloseIndices`, owned by the
-    // not-yet-ported execIndexing.c (no seam-crate impl). The ancestor close
-    // walks `ri_ancestorResultRels`, a field trimmed from this repo's
-    // ResultRelInfo model. Both land with execIndexing.c + the full
-    // ResultRelInfo; until then a result relation cannot be closed here. A
-    // plain DestNone SELECT opens no result relations
-    // (es_opened_result_relations is NIL), so this loop body is never reached on
-    // that path — consistent with execPartition's ExecCleanupTupleRouting, panic
-    // loudly rather than leak the index opens. (`mirror-pg-and-panic`.)
-    if !estate.es_opened_result_relations.is_empty() {
-        panic!(
-            "ExecCloseResultRelations: closing a result relation's indexes needs \
-             ExecCloseIndices (execIndexing.c) and the trimmed \
-             ri_ancestorResultRels field, neither of which has landed"
-        );
+    // Closing a result relation's indexes is `ExecCloseIndices` (execIndexing.c),
+    // reached through its seam (execIndexing depends on execUtils, so the call
+    // cannot be direct). The ancestor close walks `ri_ancestorResultRels`, a
+    // field trimmed from this repo's ResultRelInfo model: it only ever holds
+    // stub RTs added by cross-partition routing / inheritance expansion, so it is
+    // empty (NIL) on every modeled path; nothing to close there.
+    //   foreach(l, estate->es_opened_result_relations) {
+    //       ExecCloseIndices(resultRelInfo);
+    //       foreach(lc, resultRelInfo->ri_ancestorResultRels) { ... table_close }
+    //   }
+    for idx in 0..estate.es_opened_result_relations.len() {
+        let rri = estate.es_opened_result_relations[idx];
+        backend_executor_execIndexing_seams::exec_close_indices::call(estate, rri)?;
     }
 
     // Close any relations that have been opened by ExecGetTriggerResultRel().

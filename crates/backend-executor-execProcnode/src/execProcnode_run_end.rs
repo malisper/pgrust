@@ -80,9 +80,12 @@ pub fn exec_proc_node_first<'mcx>(
     }
 
     // return node->ExecProcNode(node);
-    let cb = node.ps_head().ExecProcNode.expect(
-        "ExecProcNodeFirst: node ExecProcNode callback missing after first-call rearm",
-    );
+    let cb = node.ps_head().ExecProcNode.unwrap_or_else(|| {
+        panic!(
+            "ExecProcNodeFirst: node ExecProcNode callback missing after first-call rearm (tag={:?})",
+            node.tag()
+        )
+    });
     cb(node, estate)
 }
 

@@ -1303,6 +1303,7 @@ fn existing_datums_to_v<'mcx>(
 /// via `index_check_exclusion`).
 pub fn init_seams() {
     inward::exec_open_indices::set(seam_exec_open_indices);
+    inward::exec_close_indices::set(ExecCloseIndices);
     inward::exec_insert_index_tuples::set(seam_exec_insert_index_tuples);
     inward::exec_check_index_constraints::set(seam_exec_check_index_constraints);
 }

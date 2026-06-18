@@ -92,6 +92,23 @@ seam_core::seam!(
     ) -> PgResult<()>
 );
 
+/// The `PlanState.ExecProcNode` callback installed by `ExecInitModifyTable`
+/// (C: `mtstate->ps.ExecProcNode = ExecModifyTable`): `castNode(ModifyTableState,
+/// pstate)` then run [`ExecModifyTable`]. Adapts the [`ExecProcNodeMtd`]
+/// signature (which carries no `mcx`) by sourcing the per-query context from the
+/// EState.
+pub fn exec_modify_table_node<'mcx>(
+    pstate: &mut types_nodes::PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<SlotId>> {
+    let mcx = estate.es_query_cxt;
+    let node = match pstate {
+        types_nodes::PlanStateNode::ModifyTable(node) => node,
+        other => panic!("castNode(ModifyTableState, pstate) failed: {other:?}"),
+    };
+    ExecModifyTable(mcx, node, estate)
+}
+
 /// `ExecModifyTable(pstate)` — the node's `ExecProcNode` callback: pull tuples
 /// from the subplan and apply the INSERT/UPDATE/DELETE/MERGE until done,
 /// returning each RETURNING tuple (or `None` at end of execution).

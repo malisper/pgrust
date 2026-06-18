@@ -71,8 +71,9 @@ pub fn exec_init_node<'mcx>(
 
         // case T_ModifyTable: ExecInitModifyTable(...) (nodeModifyTable.c)
         Node::ModifyTable(m) => {
-            let s =
-                backend_executor_nodeModifyTable::init::ExecInitModifyTable(mcx, m, estate, eflags)?;
+            let s = backend_executor_nodeModifyTable::init::ExecInitModifyTable(
+                mcx, node, m, estate, eflags,
+            )?;
             alloc_in(mcx, PlanStateNode::ModifyTable(s))?
         }
 
