@@ -31,6 +31,7 @@ mod insert;
 mod locking;
 mod select;
 mod setop;
+mod update_delete;
 
 pub use locking::{applyLockingClause, transformLockingClause, CheckSelectLocking, LCS_asString};
 
@@ -320,9 +321,9 @@ pub fn transformStmt<'mcx>(
         }
         Node::InsertStmt(n) => insert::transformInsertStmt(mcx, pstate, n)?,
         Node::ExplainStmt(n) => transformExplainStmt(mcx, pstate, n)?,
-        Node::DeleteStmt(_)
-        | Node::UpdateStmt(_)
-        | Node::MergeStmt(_)
+        Node::DeleteStmt(n) => update_delete::transformDeleteStmt(mcx, pstate, n)?,
+        Node::UpdateStmt(n) => update_delete::transformUpdateStmt(mcx, pstate, n)?,
+        Node::MergeStmt(_)
         | Node::ReturnStmt(_)
         | Node::PLAssignStmt(_)
         | Node::DeclareCursorStmt(_)
