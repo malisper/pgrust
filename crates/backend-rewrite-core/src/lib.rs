@@ -108,6 +108,7 @@ pub fn init_seams() {
     use mcx::MemoryContext;
     s::contain_aggs_of_level::set(|node, levelsup| walkers::contain_aggs_of_level(node, levelsup));
     s::contain_windowfuncs::set(|node| walkers::contain_windowfuncs(node));
+    s::check_expr_has_sub_link::set(|node| walkers::checkExprHasSubLink(node));
     s::locate_windowfunc::set(|node| walkers::locate_windowfunc(node));
     s::locate_agg_of_level::set(|node, levelsup| walkers::locate_agg_of_level(node, levelsup));
 

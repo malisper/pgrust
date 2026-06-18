@@ -26,6 +26,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `checkExprHasSubLink(node)` (rewriteManip.c): does the node contain a
+    /// SubLink? `RelationBuildRowSecurity` (commands/policy.c) uses it to cache
+    /// `RowSecurityPolicy.hassublinks`. Infallible (a pure expression-tree walk).
+    pub fn check_expr_has_sub_link(node: &Node<'_>) -> bool
+);
+
+seam_core::seam!(
     /// `locate_windowfunc(node)` (rewriteManip.c): the parse location of any
     /// window function in the node, or `-1`. Infallible.
     pub fn locate_windowfunc(node: &Node<'_>) -> i32

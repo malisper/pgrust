@@ -116,6 +116,13 @@ use types_catalog::pg_trigger::{
     Anum_pg_trigger_tgtype,
 };
 
+use types_catalog::pg_policy::{
+    PolicyPolrelidPolnameIndexId, PolicyRelationId, Anum_pg_policy_polcmd,
+    Anum_pg_policy_polname, Anum_pg_policy_polpermissive, Anum_pg_policy_polqual,
+    Anum_pg_policy_polrelid, Anum_pg_policy_polroles, Anum_pg_policy_polwithcheck,
+};
+use types_core::catalog::OIDOID;
+
 use crate::{systable_beginscan, systable_getnext};
 
 const CONSTRAINT_CONRELID_INDEX_OK: bool = true;
@@ -870,6 +877,86 @@ fn relcache_scan_pg_trigger(relid: Oid) -> PgResult<Vec<seam::ScannedPgTrigger>>
 }
 
 // ===========================================================================
+// relcache_scan_pg_policy — RelationBuildRowSecurity
+// ===========================================================================
+
+/// `RelationBuildRowSecurity(relation)`'s `pg_policy` scan (commands/policy.c).
+/// Visits the relation's policies in `polname` order (the
+/// `PolicyPolrelidPolnameIndexId` scan order) and decodes the per-policy
+/// `Form_pg_policy` scalars plus the `polroles` `oid[]` and the
+/// `polqual`/`polwithcheck` `pg_node_tree` text columns.
+fn relcache_scan_pg_policy(relid: Oid) -> PgResult<Vec<seam::ScannedPgPolicy>> {
+    let scratch = MemoryContext::new("RelationBuildRowSecurity scan");
+    let smcx = scratch.mcx();
+
+    // ScanKeyInit(&skey, Anum_pg_policy_polrelid, BTEqualStrategyNumber,
+    //             F_OIDEQ, ObjectIdGetDatum(RelationGetRelid(relation)));
+    let skey = [scan_key_init(
+        Anum_pg_policy_polrelid,
+        BTEqualStrategyNumber,
+        F_OIDEQ,
+        Datum::from_oid(relid),
+    )?];
+
+    // catalog = table_open(PolicyRelationId, AccessShareLock);
+    // sscan = systable_beginscan(catalog, PolicyPolrelidPolnameIndexId, true,
+    //                            NULL, 1, &skey);  -- name order.
+    let relation = table_open(smcx, PolicyRelationId, AccessShareLock)?;
+    let mut scandesc =
+        systable_beginscan(&relation, PolicyPolrelidPolnameIndexId, true, None, &skey)?;
+
+    let mut out = Vec::new();
+    while let Some(ntp) = systable_getnext(smcx, scandesc.desc_mut())? {
+        let row = heap_deform_tuple(smcx, &ntp.tuple, &relation.rd_att, &ntp.data)?;
+
+        // policy->polcmd = policy_form->polcmd;
+        let polcmd = col(&row, Anum_pg_policy_polcmd, "polcmd")?.as_char();
+        // policy->permissive = policy_form->polpermissive;
+        let polpermissive = col(&row, Anum_pg_policy_polpermissive, "polpermissive")?.as_bool();
+        // policy->policy_name = MemoryContextStrdup(rscxt, NameStr(polname));
+        let polname = name_col(&row, Anum_pg_policy_polname, "polname")?;
+
+        // datum = heap_getattr(tuple, Anum_pg_policy_polroles, ...); if (isnull)
+        //   elog(ERROR, ...); policy->roles = DatumGetArrayTypePCopy(datum);
+        let roles_bytes = bytea_col_opt(&row, Anum_pg_policy_polroles).ok_or_else(|| {
+            PgError::error("unexpected null value in pg_policy.polroles")
+        })?;
+        // oid[] is a 1-D array of OIDOID (len 4, by-value, int align).
+        let role_elems = backend_utils_adt_arrayfuncs_seams::deconstruct_array_values_bytes::call(
+            smcx,
+            &roles_bytes,
+            OIDOID,
+            4,
+            true,
+            b'i' as core::ffi::c_char,
+        )?;
+        let mut polroles = Vec::with_capacity(role_elems.len());
+        for (d, _null) in role_elems.iter() {
+            polroles.push(d.as_oid());
+        }
+
+        // datum = heap_getattr(tuple, Anum_pg_policy_polqual, ...);
+        // if (!isnull) policy->qual = stringToNode(TextDatumGetCString(datum));
+        let polqual = text_col_opt(smcx, &row, Anum_pg_policy_polqual)?;
+        let polwithcheck = text_col_opt(smcx, &row, Anum_pg_policy_polwithcheck)?;
+
+        out.push(seam::ScannedPgPolicy {
+            polcmd,
+            polpermissive,
+            polname,
+            polroles,
+            polqual,
+            polwithcheck,
+        });
+    }
+
+    scandesc.end()?;
+    table_close(relation, AccessShareLock)?;
+    drop(scratch);
+    Ok(out)
+}
+
+// ===========================================================================
 // relcache_scan_pg_constraint_fkeys — RelationGetFKeyList
 // ===========================================================================
 
@@ -1268,6 +1355,7 @@ pub fn init_decode_seams() {
     seam::relcache_scan_pg_rewrite::set(relcache_scan_pg_rewrite);
     seam::relcache_scan_pg_statistic_ext::set(relcache_scan_pg_statistic_ext);
     seam::relcache_scan_pg_trigger::set(relcache_scan_pg_trigger);
+    seam::relcache_scan_pg_policy::set(relcache_scan_pg_policy);
     seam::relcache_scan_pg_constraint_fkeys::set(relcache_scan_pg_constraint_fkeys);
     seam::relcache_exclusion_info::set(relcache_exclusion_info);
     seam::scan_pg_attrdef::set(scan_pg_attrdef);

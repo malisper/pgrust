@@ -280,6 +280,32 @@ pub struct ScannedPgTrigger {
     pub tgnewtable: Option<String>,
 }
 
+/// One `pg_policy` row as `RelationBuildRowSecurity` (commands/policy.c)
+/// consumes it: the per-policy `Form_pg_policy` scalar columns plus the decoded
+/// `polroles` `Oid[]` and the `polqual`/`polwithcheck` `pg_node_tree` text. The
+/// scan order is the `PolicyPolrelidPolnameIndexId` order (by `polname`), so
+/// policies are visited in name order. The relcache builder parses the qual
+/// text via `stringToNode` and marshals these into its owned `RowSecurityDesc`.
+#[derive(Clone, Debug)]
+pub struct ScannedPgPolicy {
+    /// `char polcmd` — `pg_policy.polcmd` (`'r'`/`'a'`/`'w'`/`'d'`/`'*'`).
+    pub polcmd: i8,
+    /// `bool polpermissive` — restrictive or permissive policy.
+    pub polpermissive: bool,
+    /// `NameData polname` — the policy's name (`NameStr`).
+    pub polname: String,
+    /// `oid[] polroles` — the policy's roles, decoded to their element
+    /// `Oid[]` (`DatumGetArrayTypePCopy(polroles)`). `BKI_FORCE_NOT_NULL`, so
+    /// always present (a missing value is an error in the decode).
+    pub polroles: Vec<Oid>,
+    /// `pg_node_tree polqual` — the row-filter expression as `nodeToString`
+    /// text, or `None` for the C `isnull` (no USING clause).
+    pub polqual: Option<String>,
+    /// `pg_node_tree polwithcheck` — the WITH CHECK expression text, or `None`
+    /// (no WITH CHECK clause).
+    pub polwithcheck: Option<String>,
+}
+
 /// One key column's resolved exclusion info as `RelationGetExclusionInfo`
 /// consumes it: the operator OID (`conexclop`), its underlying procedure OID
 /// (`get_opcode`), and its opfamily strategy number
@@ -391,6 +417,18 @@ seam_core::seam!(
     /// are built in name order. Can `ereport(ERROR)` (catalog read failure,
     /// null `tgargs`), carried on `Err`.
     pub fn relcache_scan_pg_trigger(relid: Oid) -> PgResult<Vec<ScannedPgTrigger>>
+);
+
+seam_core::seam!(
+    /// `RelationBuildRowSecurity`'s scan (commands/policy.c):
+    /// `systable_beginscan(pg_policy, PolicyPolrelidPolnameIndexId, polrelid =
+    /// relid)` then `systable_getnext` + `GETSTRUCT(Form_pg_policy)` plus the
+    /// `heap_getattr` reads of the `polroles` `oid[]` (decoded to its element
+    /// Oids) and the `polqual`/`polwithcheck` `pg_node_tree` text columns for
+    /// each row. Returns every matching decoded row in scan (`polname`) order so
+    /// policies are visited in name order. Can `ereport(ERROR)` (catalog read
+    /// failure, null `polroles`), carried on `Err`.
+    pub fn relcache_scan_pg_policy(relid: Oid) -> PgResult<Vec<ScannedPgPolicy>>
 );
 
 seam_core::seam!(
