@@ -1344,12 +1344,42 @@ fn subquery_planner<'mcx>(
         }
 
         // expand_grouping_sets (C:1107-1110). GROUPING SETS only.
+        //
+        // C stuffs the flat list of integer grouping sets (a `List *` of
+        // `T_IntList`s) back into `parse->groupingSets`. The expander takes the
+        // groupingSets tree (a `List *` of `GroupingSet` nodes) and returns the
+        // expanded representation; here it goes through the parse-agg seam,
+        // which yields `PgVec<PgVec<i32>>`. Each inner integer set is wrapped as
+        // a `Node::IntList` so the field keeps its `PgVec<NodePtr>` shape with
+        // `T_IntList` element tags, matching C's stored representation.
         if !run.resolve(root.parse).groupingSets.is_empty() {
-            panic!(
-                "subquery_planner: expand_grouping_sets (parse_agg.c) \
-                 (planner.c:1107-1110) has no ported owner; reached because \
-                 parse->groupingSets is non-empty"
-            );
+            let grouping_sets_nodes: alloc::vec::Vec<Node<'mcx>> = {
+                let parse = run.resolve(root.parse);
+                let mut v: alloc::vec::Vec<Node<'mcx>> =
+                    alloc::vec::Vec::with_capacity(parse.groupingSets.len());
+                for gs in parse.groupingSets.iter() {
+                    v.push(gs.as_ref().clone_in(mcx)?);
+                }
+                v
+            };
+            let group_distinct = run.resolve(root.parse).groupDistinct;
+            let expanded = backend_parser_parse_agg_seams::expand_grouping_sets::call(
+                mcx,
+                &grouping_sets_nodes,
+                group_distinct,
+                -1,
+            )?;
+
+            let mut new_gsets: mcx::PgVec<'mcx, types_nodes::nodes::NodePtr<'mcx>> =
+                mcx::PgVec::new_in(mcx);
+            if let Some(sets) = expanded {
+                for set in sets.iter() {
+                    let mut intlist: mcx::PgVec<'mcx, i32> = mcx::PgVec::new_in(mcx);
+                    intlist.extend(set.iter().copied());
+                    new_gsets.push(mcx::alloc_in(mcx, Node::IntList(intlist))?);
+                }
+            }
+            run.resolve_mut(root.parse).groupingSets = new_gsets;
         }
 
         // newHaving HAVING→WHERE transfer loop (C:1154-1199). Runs only when there

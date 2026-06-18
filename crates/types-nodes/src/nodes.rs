@@ -606,6 +606,15 @@ pub enum Node<'mcx> {
     /// (`nodeTag == T_List`), so it is an arm of the central `Node` enum,
     /// holding the sublist's elements. Additive (`#[non_exhaustive]`).
     List(PgVec<'mcx, NodePtr<'mcx>>),
+    /// `T_IntList` — a `List *` of bare integers carried as a `Node *`.
+    ///
+    /// In C an integer `List` (`nodeTag == T_IntList`) holds raw `int` cells
+    /// built by `lappend_int`, not boxed `Integer` value-nodes. It is itself a
+    /// `Node`, so it is an arm of the central `Node` enum. Used where a `Node *`
+    /// slot holds a list of ints — most visibly the expanded `groupingSets`,
+    /// where `expand_grouping_sets` stores a `List` of `T_IntList`s back into
+    /// `Query.groupingSets`. Additive (`#[non_exhaustive]`).
+    IntList(PgVec<'mcx, i32>),
 
     // --- raw-grammar DDL "CREATE" family nodes (crate::ddlnodes) ---
     RoleSpec(crate::ddlnodes::RoleSpec<'mcx>),
@@ -1051,6 +1060,7 @@ impl<'mcx> Node<'mcx> {
             Node::BitString(_) => T_BitString,
             Node::Expr(e) => expr_tag(e),
             Node::List(_) => T_List,
+            Node::IntList(_) => T_IntList,
             // raw-grammar DDL "CREATE" family nodes.
             Node::RoleSpec(_) => T_RoleSpec,
             Node::DefElem(_) => T_DefElem,
@@ -1437,6 +1447,11 @@ impl<'mcx> Node<'mcx> {
                     out.push(mcx::alloc_in(mcx, cloned)?);
                 }
                 Ok(Node::List(out))
+            }
+            Node::IntList(l) => {
+                let mut out: PgVec<'b, i32> = mcx::vec_with_capacity_in(mcx, l.len())?;
+                out.extend(l.iter().copied());
+                Ok(Node::IntList(out))
             }
             // raw-grammar DDL "CREATE" family nodes — real per-struct copyObject.
             Node::RoleSpec(n) => Ok(Node::RoleSpec(n.clone_in(mcx)?)),

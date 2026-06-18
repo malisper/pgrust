@@ -98,3 +98,5 @@ backend-foreign-foreign = { path = "../backend-foreign-foreign" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-utils-init-small = { path = "../backend-utils-init-small" }
 backend-catalog-index-seams = { path = "../backend-catalog-index-seams" }
+# expand_grouping_sets (GROUPING SETS expansion in subquery_planner).
+backend-parser-parse-agg-seams = { path = "../backend-parser-parse-agg-seams" }
