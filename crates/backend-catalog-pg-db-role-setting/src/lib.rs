@@ -372,9 +372,113 @@ pub fn process_db_role_settings(mcx: Mcx<'_>, databaseid: Oid, roleid: Oid) -> P
 /// This crate consumes (does not own) the genam `systable_*`, the
 /// indexing/catalog-form, the guc, and the snapmgr seams — their owners install
 /// them.
+/* ===========================================================================
+ * alter_database_setting seam — the AlterDatabaseSet (dbcommands.c) boundary.
+ *
+ * `AlterDatabaseSet` hands the canonical `'mcx` arena `VariableSetStmt` (an arm
+ * of `types_nodes::nodes::Node`); `AlterSetting` consumes the owner's
+ * owned-`String` `types_parsenodes::VariableSetStmt`. The two parse-node models
+ * meet only here. We convert the arena node into the owned form and run the
+ * catalog read-modify-write.
+ * ========================================================================= */
+
+/// Convert one arena `VariableSetStmt` `args` element to the owned value node.
+///
+/// In the grammar each member is an `A_Const` (its `val` a value node), or an
+/// `A_Const` within a `TypeCast` (the `SET TIME ZONE INTERVAL` case). The owned
+/// model — mirroring `ExtractSetVariableArgs`/`flatten_set_variable_args` —
+/// carries the `A_Const` value node directly (`Node::Integer`/`Float`/`String`/
+/// `Boolean`/`BitString`). We unwrap `A_Const.val` to the bare value node and
+/// re-home it onto the owned `types_parsenodes::Node`.
+fn arena_arg_to_owned(
+    arg: &types_nodes::nodes::Node<'_>,
+) -> PgResult<types_parsenodes::Node> {
+    use types_nodes::nodes::Node as ANode;
+    use types_parsenodes as pn;
+
+    // Unwrap an `A_Const` to its inner value node (a bare value node is taken
+    // as-is). A `TypeCast`-wrapped `A_Const` (`SET TIME ZONE INTERVAL`) is not
+    // representable in the owned value-node model — the same `ConstInterval`
+    // leg `flatten_set_variable_args` handles via `interval_in`/`interval_out`;
+    // that coercion is out of this converter's scope, so it errors like the
+    // owned `flatten_set_variable_args` unrecognized-node path.
+    let val: &ANode = match arg {
+        ANode::A_Const(c) => match c.val.as_deref() {
+            Some(v) => v,
+            // `isnull` A_Const (SQL NULL constant) — not a SET-value shape.
+            None => return Err(unrecognized_arg(arg)),
+        },
+        other => other,
+    };
+
+    match val {
+        ANode::Integer(i) => Ok(pn::Node::Integer(pn::Integer { ival: i.ival })),
+        ANode::Float(f) => Ok(pn::Node::Float(pn::Float {
+            fval: Some(f.fval.as_str().to_string()),
+        })),
+        ANode::String(s) => Ok(pn::Node::String(pn::StringNode {
+            sval: Some(s.sval.as_str().to_string()),
+        })),
+        ANode::Boolean(b) => Ok(pn::Node::Boolean(pn::Boolean { boolval: b.boolval })),
+        ANode::BitString(s) => Ok(pn::Node::BitString(pn::BitString {
+            bsval: Some(s.bsval.as_str().to_string()),
+        })),
+        other => Err(unrecognized_arg(other)),
+    }
+}
+
+/// C: `elog(ERROR, "unrecognized node type: %d", nodeTag(arg))` from
+/// `flatten_set_variable_args` for an arg shape the value-node model can't carry.
+fn unrecognized_arg(node: &types_nodes::nodes::Node<'_>) -> types_error::PgError {
+    backend_utils_error::ereport(types_error::ERROR)
+        .errmsg_internal(format!("unrecognized node type: {}", node.node_tag().0))
+        .into_error()
+}
+
+/// `alter_database_setting` seam body: convert the arena `VariableSetStmt` to
+/// the owned model and run `AlterSetting`.
+fn alter_database_setting<'mcx>(
+    mcx: Mcx<'mcx>,
+    databaseid: Oid,
+    roleid: Oid,
+    setstmt: &types_nodes::nodes::Node<'mcx>,
+) -> PgResult<()> {
+    use types_nodes::ddlnodes::VariableSetKind as AKind;
+
+    let v = match setstmt {
+        types_nodes::nodes::Node::VariableSetStmt(v) => v,
+        other => return Err(unrecognized_arg(other)),
+    };
+
+    let kind = match v.kind {
+        AKind::VAR_SET_VALUE => VariableSetKind::SetValue,
+        AKind::VAR_SET_DEFAULT => VariableSetKind::SetDefault,
+        AKind::VAR_SET_CURRENT => VariableSetKind::SetCurrent,
+        AKind::VAR_SET_MULTI => VariableSetKind::SetMulti,
+        AKind::VAR_RESET => VariableSetKind::Reset,
+        AKind::VAR_RESET_ALL => VariableSetKind::ResetAll,
+    };
+
+    let mut args: Vec<types_parsenodes::Node> = Vec::with_capacity(v.args.len());
+    for a in v.args.iter() {
+        args.push(arena_arg_to_owned(a)?);
+    }
+
+    let owned = VariableSetStmt {
+        kind,
+        name: v.name.as_ref().map(|s| s.as_str().to_string()),
+        args,
+        is_local: v.is_local,
+        location: v.location,
+    };
+
+    AlterSetting(mcx, databaseid, roleid, &owned)
+}
+
 pub fn init_seams() {
     use backend_catalog_pg_db_role_setting_seams as seam;
     seam::apply_db_role_settings::set(process_db_role_settings);
+    seam::alter_database_setting::set(alter_database_setting);
 }
 
 #[cfg(test)]
