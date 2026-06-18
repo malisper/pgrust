@@ -523,7 +523,7 @@ pub fn DefineView<'mcx>(
      * However, it doesn't forbid SELECT INTO, so we have to check for that.
      */
     if let Some(util) = view_parse.utilityStmt.as_deref() {
-        if matches!(util, Node::CreateTableAsStmt(_)) {
+        if util.is_createtableasstmt() {
             return ereport(ERROR)
                 .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
                 .errmsg("views must not contain SELECT INTO")
@@ -568,7 +568,7 @@ pub fn DefineView<'mcx>(
      */
     let mut check_option = false;
     for opt in stmt.options.iter() {
-        if let Node::DefElem(defel) = &**opt {
+        if let Some(defel) = opt.as_defelem() {
             if defel.defname.as_ref().map(|s| s.as_str()) == Some("check_option") {
                 check_option = true;
             }
@@ -610,9 +610,9 @@ pub fn DefineView<'mcx>(
                 break;
             };
             /* te->resname = pstrdup(strVal(lfirst(alist_item))); */
-            let alias_str = match &**alias {
-                Node::String(s) => s.sval.as_str(),
-                _ => {
+            let alias_str = match alias.as_string() {
+                Some(s) => s.sval.as_str(),
+                None => {
                     return Err(ereport(ERROR)
                         .errmsg_internal("CREATE VIEW alias is not a String")
                         .into_error())
@@ -716,9 +716,9 @@ fn make_check_option_defelem<'mcx>(
 /// `view->relpersistence` read for the owned `RangeVar` node, tolerating a NULL
 /// `stmt->view` defensively (the grammar always supplies one).
 fn rangevar_relpersistence(view: Option<&Node>) -> u8 {
-    match view {
-        Some(Node::RangeVar(rv)) => rv.relpersistence as u8,
-        _ => RELPERSISTENCE_PERMANENT,
+    match view.and_then(|v| v.as_rangevar()) {
+        Some(rv) => rv.relpersistence as u8,
+        None => RELPERSISTENCE_PERMANENT,
     }
 }
 
@@ -728,9 +728,9 @@ fn copy_view_rangevar<'mcx>(
     mcx: Mcx<'mcx>,
     view: Option<&Node<'mcx>>,
 ) -> PgResult<RangeVar<'mcx>> {
-    match view {
-        Some(Node::RangeVar(rv)) => rv.clone_in(mcx),
-        _ => Err(ereport(ERROR)
+    match view.and_then(|v| v.as_rangevar()) {
+        Some(rv) => rv.clone_in(mcx),
+        None => Err(ereport(ERROR)
             .errmsg_internal("CREATE VIEW target is not a RangeVar")
             .into_error()),
     }
@@ -766,7 +766,7 @@ fn define_view_from_node<'mcx>(
     stmt_location: i32,
     stmt_len: i32,
 ) -> PgResult<ObjectAddress> {
-    let Node::ViewStmt(view_stmt) = stmt else {
+    let Some(view_stmt) = stmt.as_viewstmt() else {
         return Err(ereport(ERROR)
             .errmsg_internal("DefineView dispatched on a non-ViewStmt node")
             .into_error());
