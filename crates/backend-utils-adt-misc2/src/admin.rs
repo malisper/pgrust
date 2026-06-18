@@ -287,6 +287,15 @@ pub fn pg_stat_file<'mcx>(
     funcapi::record_from_values::call(mcx, &coltypes, &values, &nulls)
 }
 
+/// `pg_stat_file_1arg(filename)` (genfile.c) — the one-argument variant. C is a
+/// pure fmgr wrapper (`return pg_stat_file(fcinfo)`) that exists only to satisfy
+/// the `opr_sanity` check requiring built-ins sharing an implementing C function
+/// to take the same number of arguments. With a single argument `PG_NARGS() != 2`
+/// so `missing_ok` is `false`.
+pub fn pg_stat_file_1arg<'mcx>(mcx: Mcx<'mcx>, filename: &str) -> PgResult<Datum<'mcx>> {
+    pg_stat_file(mcx, filename, false, false)
+}
+
 /// `pg_ls_dir(dirname [, missing_ok, include_dot_dirs])` (genfile.c) — a
 /// materialized SRF of file names.
 pub fn pg_ls_dir<'mcx>(
@@ -320,6 +329,18 @@ pub fn pg_ls_dir<'mcx>(
     }
 
     Ok(Datum::null())
+}
+
+/// `pg_ls_dir_1arg(dirname)` (genfile.c) — the one-argument variant. C is a pure
+/// fmgr wrapper (`return pg_ls_dir(fcinfo)`) existing only for the `opr_sanity`
+/// same-arity check. With a single argument `PG_NARGS() != 3` so both
+/// `missing_ok` and `include_dot_dirs` are `false`.
+pub fn pg_ls_dir_1arg<'mcx>(
+    mcx: Mcx<'mcx>,
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+    dirname: &str,
+) -> PgResult<Datum<'mcx>> {
+    pg_ls_dir(mcx, fcinfo, dirname, false, false)
 }
 
 /// `pg_ls_dir_files(fcinfo, dir, missing_ok)` (genfile.c): the generic
