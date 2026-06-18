@@ -22,4 +22,10 @@ backend-utils-adt-tsvector-ext-seams = { path = "../backend-utils-adt-tsvector-e
 backend-utils-adt-array-more-seams = { path = "../backend-utils-adt-array-more-seams" }
 backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+types-tuple = { path = "../types-tuple" }
+types-ri-triggers = { path = "../types-ri-triggers" }
+backend-executor-spi = { path = "../backend-executor-spi" }
+backend-parser-coerce = { path = "../backend-parser-coerce" }
+backend-tsearch-parse = { path = "../backend-tsearch-parse" }
+backend-access-common-detoast = { path = "../backend-access-common-detoast" }
 seam-core = { path = "../seam-core" }

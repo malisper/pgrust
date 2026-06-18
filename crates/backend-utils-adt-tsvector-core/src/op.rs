@@ -36,11 +36,18 @@ use backend_utils_adt_array_more_seams as arr;
 use backend_utils_adt_tsvector_ext_seams as ext;
 use backend_utils_mb_mbutils_seams as mb;
 
-use ext::{ArrayElem, BinDatum, BinVal, SrfRow, TupleSource};
+use ext::{ArrayElem, SrfRow, TupleSource};
+
+use types_ri_triggers::TriggerDataRef;
+
+use backend_executor_spi::{SPI_fnumber, SPI_getbinval, SPI_gettypeid, SPI_ERROR_NOATTRIBUTE};
+use backend_parser_coerce::IsBinaryCoercible;
+use backend_tsearch_parse::ts_parse::{parsetext, ParsedText};
+use backend_access_common_detoast::pg_detoast_datum_packed;
 
 use crate::access::{
     arrptr, lexeme, posdatalen, posdataptr, posvecptr_off, set_arrptr, set_tsv_size, set_varsize,
-    shortalign, strptr_off, tsv_size, varsize, SIZEOF_NPOS, SIZEOF_WEP, SIZEOF_WORDENTRY,
+    shortalign, strptr_off, tsv_size, varsize, SIZEOF_NPOS, SIZEOF_WEP, SIZEOF_WORDENTRY, VARHDRSZ,
 };
 
 extern crate alloc;
@@ -2225,20 +2232,38 @@ fn trigger_internal_error(msg: &str) -> PgError {
 }
 
 /// `tsvector_update_trigger_byid` (tsvector_op.c:2730).
-pub fn tsvector_update_trigger_byid() -> PgResult<()> {
-    tsvector_update_trigger(false)
+pub fn tsvector_update_trigger_byid<'mcx>(
+    mcx: Mcx<'mcx>,
+    trigdata: TriggerDataRef,
+) -> PgResult<()> {
+    tsvector_update_trigger(mcx, trigdata, false)
 }
 
 /// `tsvector_update_trigger_bycolumn` (tsvector_op.c:2736).
-pub fn tsvector_update_trigger_bycolumn() -> PgResult<()> {
-    tsvector_update_trigger(true)
+pub fn tsvector_update_trigger_bycolumn<'mcx>(
+    mcx: Mcx<'mcx>,
+    trigdata: TriggerDataRef,
+) -> PgResult<()> {
+    tsvector_update_trigger(mcx, trigdata, true)
 }
 
 /// `tsvector_update_trigger` (tsvector_op.c:2742) — shared trigger body. Every
-/// branch decision, error check, message text and SQLSTATE lives here; only the
-/// genuinely-external trigger/SPI/catalog/dictionary primitives are seamed.
-pub fn tsvector_update_trigger(config_column: bool) -> PgResult<()> {
-    let ev = ext::trigger_event::call();
+/// branch decision, error check, message text and SQLSTATE lives here.
+///
+/// `trigdata` is the `TriggerData *` handle (`fcinfo->context`), carried
+/// explicitly rather than read from ambient thread-local state. The relation's
+/// `rd_att` tuple descriptor and the working row tuple are fetched once through
+/// the trigger-manager carrier seams; the column lookups (`SPI_fnumber` /
+/// `SPI_gettypeid` / `SPI_getbinval`), the `IsBinaryCoercible` checks and the
+/// `parsetext` dictionary calls then run against those explicit carriers via the
+/// real owner crates.
+pub fn tsvector_update_trigger<'mcx>(
+    mcx: Mcx<'mcx>,
+    trigdata: TriggerDataRef,
+    config_column: bool,
+) -> PgResult<()> {
+    // Check call context (CALLED_AS_TRIGGER + TRIGGER_FIRED_* over tg_event).
+    let ev = ext::trigger_event::call(trigdata);
     if !ev.called_as_trigger {
         return Err(trigger_internal_error(
             "tsvector_update_trigger: not fired by trigger manager",
@@ -2258,27 +2283,34 @@ pub fn tsvector_update_trigger(config_column: bool) -> PgResult<()> {
     let rettuple: TupleSource;
     let mut update_needed: bool;
     if ev.fired_by_insert {
+        // rettuple = trigdata->tg_trigtuple;
         rettuple = TupleSource::TrigTuple;
         update_needed = true;
     } else if ev.fired_by_update {
+        // rettuple = trigdata->tg_newtuple;
         rettuple = TupleSource::NewTuple;
-        update_needed = false;
+        update_needed = false; // computed below
     } else {
         return Err(trigger_internal_error(
             "tsvector_update_trigger: must be fired for INSERT or UPDATE",
         ));
     }
 
-    let tgnargs = ext::tgnargs::call();
+    let tgnargs = ext::tgnargs::call(trigdata);
     if tgnargs < 3 {
         return Err(trigger_internal_error(
             "tsvector_update_trigger: arguments must be tsvector_field, ts_config, text_field1, ...)",
         ));
     }
 
-    let arg0 = ext::tgarg::call(0);
-    let tsvector_attr_num = ext::spi_fnumber::call(&arg0);
-    if tsvector_attr_num == ext::SPI_ERROR_NOATTRIBUTE {
+    // rel = trigdata->tg_relation;  the column reads all key off rel->rd_att.
+    let tupdesc = ext::tg_relation_tupdesc::call(mcx, trigdata)?;
+    let row = ext::tg_rettuple::call(mcx, trigdata, rettuple)?;
+
+    // Find the target tsvector column.
+    let arg0 = ext::tgarg::call(trigdata, 0);
+    let tsvector_attr_num = SPI_fnumber(&tupdesc, &arg0);
+    if tsvector_attr_num == SPI_ERROR_NOATTRIBUTE {
         return Err(ereport(ERROR)
             .errcode(ERRCODE_UNDEFINED_COLUMN)
             .errmsg(format!(
@@ -2287,7 +2319,8 @@ pub fn tsvector_update_trigger(config_column: bool) -> PgResult<()> {
             ))
             .into_error());
     }
-    if !ext::is_binary_coercible::call(ext::spi_gettypeid::call(tsvector_attr_num), TSVECTOROID) {
+    // This will effectively reject system columns, so no separate test.
+    if !IsBinaryCoercible(SPI_gettypeid(&tupdesc, tsvector_attr_num)?, TSVECTOROID)? {
         return Err(ereport(ERROR)
             .errcode(ERRCODE_DATATYPE_MISMATCH)
             .errmsg(format!(
@@ -2297,11 +2330,12 @@ pub fn tsvector_update_trigger(config_column: bool) -> PgResult<()> {
             .into_error());
     }
 
+    // Find the configuration to use.
     let cfg_id: u32;
     if config_column {
-        let arg1 = ext::tgarg::call(1);
-        let config_attr_num = ext::spi_fnumber::call(&arg1);
-        if config_attr_num == ext::SPI_ERROR_NOATTRIBUTE {
+        let arg1 = ext::tgarg::call(trigdata, 1);
+        let config_attr_num = SPI_fnumber(&tupdesc, &arg1);
+        if config_attr_num == SPI_ERROR_NOATTRIBUTE {
             return Err(ereport(ERROR)
                 .errcode(ERRCODE_UNDEFINED_COLUMN)
                 .errmsg(format!(
@@ -2310,7 +2344,7 @@ pub fn tsvector_update_trigger(config_column: bool) -> PgResult<()> {
                 ))
                 .into_error());
         }
-        if !ext::is_binary_coercible::call(ext::spi_gettypeid::call(config_attr_num), REGCONFIGOID) {
+        if !IsBinaryCoercible(SPI_gettypeid(&tupdesc, config_attr_num)?, REGCONFIGOID)? {
             return Err(ereport(ERROR)
                 .errcode(ERRCODE_DATATYPE_MISMATCH)
                 .errmsg(format!(
@@ -2320,27 +2354,23 @@ pub fn tsvector_update_trigger(config_column: bool) -> PgResult<()> {
                 .into_error());
         }
 
-        match ext::spi_getbinval_oid::call(rettuple, config_attr_num)? {
-            BinVal::Null => {
-                return Err(ereport(ERROR)
-                    .errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED)
-                    .errmsg(format!(
-                        "configuration column \"{}\" must not be null",
-                        cstr_display(&arg1)
-                    ))
-                    .into_error());
-            }
-            BinVal::NotNull(BinDatum::Oid(oid)) => {
-                cfg_id = oid;
-            }
-            BinVal::NotNull(BinDatum::Text(_)) => {
-                return Err(trigger_internal_error(
-                    "tsvector_update_trigger: configuration column is not a regconfig OID",
-                ));
-            }
+        // datum = SPI_getbinval(rettuple, rel->rd_att, config_attr_num, &isnull);
+        let (datum, isnull) = SPI_getbinval(mcx, &row, &tupdesc, config_attr_num)?;
+        if isnull {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED)
+                .errmsg(format!(
+                    "configuration column \"{}\" must not be null",
+                    cstr_display(&arg1)
+                ))
+                .into_error());
         }
+        // cfgId = DatumGetObjectId(datum);
+        cfg_id = datum.as_oid();
     } else {
-        let arg1 = ext::tgarg::call(1);
+        // names = stringToQualifiedNameList(trigger->tgargs[1], NULL);
+        // require a schema so that results are not search path dependent.
+        let arg1 = ext::tgarg::call(trigdata, 1);
         if qualified_name_length(&arg1) < 2 {
             return Err(ereport(ERROR)
                 .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
@@ -2350,22 +2380,25 @@ pub fn tsvector_update_trigger(config_column: bool) -> PgResult<()> {
                 ))
                 .into_error());
         }
+        // cfgId = get_ts_config_oid(names, false);
         cfg_id = ext::lookup_ts_config::call(&arg1)?;
     }
 
-    let mut prs = ext::new_parse_state::call();
+    // initialize parse state (C: prs.lenwords = 32; ... palloc(32)).
+    let mut prs = ParsedText::with_lenwords(32);
 
+    // find all words in indexable column(s).
     let mut i = 2;
     while i < tgnargs {
-        let argi = ext::tgarg::call(i);
-        let numattr = ext::spi_fnumber::call(&argi);
-        if numattr == ext::SPI_ERROR_NOATTRIBUTE {
+        let argi = ext::tgarg::call(trigdata, i);
+        let numattr = SPI_fnumber(&tupdesc, &argi);
+        if numattr == SPI_ERROR_NOATTRIBUTE {
             return Err(ereport(ERROR)
                 .errcode(ERRCODE_UNDEFINED_COLUMN)
                 .errmsg(format!("column \"{}\" does not exist", cstr_display(&argi)))
                 .into_error());
         }
-        if !ext::is_binary_coercible::call(ext::spi_gettypeid::call(numattr), TEXTOID) {
+        if !IsBinaryCoercible(SPI_gettypeid(&tupdesc, numattr)?, TEXTOID)? {
             return Err(ereport(ERROR)
                 .errcode(ERRCODE_DATATYPE_MISMATCH)
                 .errmsg(format!(
@@ -2375,30 +2408,49 @@ pub fn tsvector_update_trigger(config_column: bool) -> PgResult<()> {
                 .into_error());
         }
 
-        if ext::updated_col::call(numattr) {
+        // if (bms_is_member(numattr - FirstLowInvalidHeapAttributeNumber,
+        //                   trigdata->tg_updatedcols)) update_needed = true;
+        if ext::updated_col::call(trigdata, numattr) {
             update_needed = true;
         }
 
-        match ext::spi_getbinval_text::call(rettuple, numattr)? {
-            BinVal::Null => {}
-            BinVal::NotNull(BinDatum::Text(txt)) => {
-                ext::parsetext::call(cfg_id, &mut prs, &txt)?;
-            }
-            BinVal::NotNull(BinDatum::Oid(_)) => {
-                return Err(trigger_internal_error(
-                    "tsvector_update_trigger: text column did not yield text",
-                ));
-            }
+        // datum = SPI_getbinval(rettuple, rel->rd_att, numattr, &isnull);
+        let (datum, isnull) = SPI_getbinval(mcx, &row, &tupdesc, numattr)?;
+        if isnull {
+            i += 1;
+            continue;
         }
+
+        // txt = DatumGetTextPP(datum);
+        // parsetext(cfgId, &prs, VARDATA_ANY(txt), VARSIZE_ANY_EXHDR(txt));
+        let detoasted = pg_detoast_datum_packed(mcx, datum.as_ref_bytes())?;
+        let payload = text_payload(&detoasted);
+        parsetext(cfg_id, &mut prs, payload)?;
 
         i += 1;
     }
 
     if update_needed {
-        ext::make_and_install_tsvector::call(rettuple, tsvector_attr_num, prs)?;
+        // datum = TSVectorGetDatum(make_tsvector(&prs));
+        // rettuple = heap_modify_tuple_by_cols(rettuple, rel->rd_att, 1,
+        //                                      &tsvector_attr_num, &datum, &false);
+        ext::make_and_install_tsvector::call(trigdata, rettuple, tsvector_attr_num, prs)?;
     }
 
     Ok(())
+}
+
+/// `VARDATA_ANY(t)` over a detoasted varlena image: strip the varlena header
+/// (1-byte short header when `(image[0] & 0x01)`, else the 4-byte long header)
+/// and return the payload `parsetext` consumes. The image is already detoasted
+/// (`pg_detoast_datum_packed`), so only the two in-line header forms occur.
+fn text_payload(image: &[u8]) -> &[u8] {
+    // VARATT_IS_1B(image): (image[0] & 0x01) == 0x01  -> short (1-byte) header.
+    if !image.is_empty() && (image[0] & 0x01) != 0 {
+        &image[1..]
+    } else {
+        &image[VARHDRSZ..]
+    }
 }
 
 /// Render a trigger-arg C-string for an error message.

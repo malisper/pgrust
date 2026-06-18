@@ -19381,8 +19381,12 @@ dependencies = [
 name = "backend-utils-adt-tsvector-core"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-detoast",
+ "backend-executor-spi",
  "backend-libpq-pqformat",
+ "backend-parser-coerce",
  "backend-tcop-postgres-seams",
+ "backend-tsearch-parse",
  "backend-utils-adt-array-more-seams",
  "backend-utils-adt-ts-small",
  "backend-utils-adt-tsvector-core-seams",
@@ -19393,8 +19397,10 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-ri-triggers",
  "types-stringinfo",
  "types-tsearch",
+ "types-tuple",
 ]
 
 [[package]]
@@ -19411,9 +19417,13 @@ dependencies = [
 name = "backend-utils-adt-tsvector-ext-seams"
 version = "0.0.0"
 dependencies = [
+ "backend-tsearch-parse",
+ "mcx",
  "seam-core",
  "types-error",
+ "types-ri-triggers",
  "types-tsearch",
+ "types-tuple",
 ]
 
 [[package]]

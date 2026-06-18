@@ -10,5 +10,9 @@ path = "src/lib.rs"
 
 [dependencies]
 seam-core = { path = "../seam-core" }
+mcx = { path = "../mcx" }
 types-error = { path = "../types-error" }
 types-tsearch = { path = "../types-tsearch" }
+types-ri-triggers = { path = "../types-ri-triggers" }
+types-tuple = { path = "../types-tuple" }
+backend-tsearch-parse = { path = "../backend-tsearch-parse" }

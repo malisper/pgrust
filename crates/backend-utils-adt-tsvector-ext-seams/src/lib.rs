@@ -3,16 +3,31 @@
 //! `utils/array.h` element I/O of the array<->tsvector bridges, the `funcapi.h`
 //! set-returning-function row emission (`tsvector_unnest`/`ts_stat1`/`ts_stat2`),
 //! the `executor/spi.h` cursor used by `ts_stat_sql`, the `catalog`/`regproc`
-//! text-search-configuration resolution, and the trigger-manager / `SPI_*` /
-//! dictionary-pipeline primitives driven by `tsvector_update_trigger`.
+//! text-search-configuration resolution, and the trigger-manager / `make_tsvector`
+//! primitives driven by `tsvector_update_trigger`.
 //!
 //! Every branch decision, SQLSTATE and message text of `tsvector_op.c` stays in
 //! the owner crate (`backend-utils-adt-tsvector-core`); only these cross-crate
-//! calls are seamed. The owning units (SPI, funcapi, the tsearch dictionary
-//! pipeline, the trigger manager) install these from their own `init_seams()`
-//! when they land; until then a call panics loudly.
+//! calls are seamed. The owning units (funcapi SRF dispatch, the tsearch
+//! `to_tsany.c` dictionary pipeline, the trigger manager) install these from
+//! their own `init_seams()` when they land; until then a call panics loudly.
+//!
+//! The trigger-manager seams below carry an explicit [`TriggerDataRef`] handle
+//! (the foreign `TriggerData *` from `fcinfo->context`, owned by the unported
+//! trigger manager — same model as `backend-commands-trigger-seams` /
+//! `lsn-trigfuncs`) instead of reading ambient `fcinfo`/`TriggerData` thread-local
+//! state. The `SPI_fnumber` / `SPI_gettypeid` / `SPI_getbinval` column reads are
+//! no longer seamed: the consumer obtains the relation's [`TupleDescData`]
+//! (`rel->rd_att`) and the row [`FormedTuple`] (`tg_trigtuple` / `tg_newtuple`)
+//! through the carrier seams here and calls the real `backend-executor-spi`
+//! accessors directly.
 
 use types_error::PgResult;
+use types_ri_triggers::TriggerDataRef;
+use types_tuple::backend_access_common_heaptuple::FormedTuple;
+use types_tuple::heaptuple::TupleDescData;
+
+use backend_tsearch_parse::ts_parse::ParsedText;
 
 // ===========================================================================
 // Carrier types appearing in the seam signatures below.
@@ -66,59 +81,22 @@ pub enum TupleSource {
     NewTuple,
 }
 
-/// A non-null `SPI_getbinval` payload.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum BinDatum {
-    /// `DatumGetObjectId(datum)` — a `regconfig` OID.
-    Oid(u32),
-    /// `VARDATA_ANY(DatumGetTextPP(datum))` — the detoasted text bytes.
-    Text(Vec<u8>),
-}
-
-/// One decoded `SPI_getbinval` result: the (possibly external) value, or NULL.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum BinVal {
-    /// `isnull == true`.
-    Null,
-    /// `isnull == false`; the raw datum.
-    NotNull(BinDatum),
-}
-
-/// The accumulating parse state, mirroring `ParsedText prs`. The dictionary
-/// pipeline owns the actual `ParsedWord` storage behind the opaque handle,
-/// modelled here as an owning box of the backend's state.
-#[derive(Default)]
-pub struct ParseState {
-    /// Opaque handle to the backend's `ParsedText`; `None` for the initial,
-    /// freshly-allocated empty state.
-    pub handle: Option<Box<dyn core::any::Any>>,
-}
-
-impl core::fmt::Debug for ParseState {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("ParseState")
-            .field("handle", &self.handle.as_ref().map(|_| "<opaque>"))
-            .finish()
-    }
-}
-
-/// `SPI_ERROR_NOATTRIBUTE` (executor/spi.h) — returned by `SPI_fnumber` for an
-/// unknown column name.
-pub const SPI_ERROR_NOATTRIBUTE: i32 = -9;
-
 // ===========================================================================
 // Array element I/O (utils/array.h) — the array<->tsvector bridges.
 //
-// The four `deconstruct_array_builtin` / `construct_array_builtin` bridges
-// (`deconstruct_text_array` / `deconstruct_char_array` / `construct_text_array`
-// / `construct_int2_array`) are homed on the `backend-utils-adt-array-more`
-// seams crate (the array varlena subsystem, `arrayfuncs.c`, which owns those
-// primitives and now installs them); the `tsvector_op.c` consumer calls them
-// through that crate. Only the shared [`ArrayElem`] carrier lives here.
+// The four `deconstruct_array_builtin` / `construct_array_builtin` bridges are
+// homed on the `backend-utils-adt-array-more` seams crate; only the shared
+// [`ArrayElem`] carrier lives here.
 // ===========================================================================
 
 // ===========================================================================
 // funcapi.h — set-returning-function row emission.
+//
+// `tsvector_unnest` / `ts_stat1` / `ts_stat2` return their result set one row
+// per fmgr call through the `SRF_RETURN_NEXT` ValuePerCall protocol. That fmgr
+// SRF dispatch substrate (build a `FuncCallContext`, materialize one result
+// `Datum` per fmgr re-entry) is not yet ported; this seam stands in for the
+// per-row emission until it lands. STOP/handoff: see the crate note.
 // ===========================================================================
 
 seam_core::seam!(
@@ -146,75 +124,74 @@ seam_core::seam!(
 );
 
 // ===========================================================================
-// commands/trigger.h + executor/spi.h + access/htup_details.h — the primitives
-// the ported `tsvector_update_trigger` body drives.
+// commands/trigger.h — the trigger-manager state the ported
+// `tsvector_update_trigger` body reads, keyed on the explicit `TriggerData *`
+// handle (owned by the unported trigger manager).
 // ===========================================================================
 
 seam_core::seam!(
-    /// Decode the trigger event state from the current call context.
-    pub fn trigger_event() -> TriggerEvent
+    /// Decode the trigger-event state from the trigger's call context:
+    /// `CALLED_AS_TRIGGER(fcinfo)` and the `TRIGGER_FIRED_*` predicates over
+    /// `trigdata->tg_event`.
+    pub fn trigger_event(trigdata: TriggerDataRef) -> TriggerEvent
 );
 
 seam_core::seam!(
-    /// `trigger->tgnargs`.
-    pub fn tgnargs() -> i32
+    /// `trigdata->tg_trigger->tgnargs`.
+    pub fn tgnargs(trigdata: TriggerDataRef) -> i32
 );
 
 seam_core::seam!(
-    /// `trigger->tgargs[i]` — the `i`th trigger argument C-string bytes
-    /// (including the terminating NUL).
-    pub fn tgarg(i: i32) -> Vec<u8>
+    /// `trigdata->tg_trigger->tgargs[i]` — the `i`th trigger argument C-string
+    /// bytes (including the terminating NUL).
+    pub fn tgarg(trigdata: TriggerDataRef, i: i32) -> Vec<u8>
 );
 
 seam_core::seam!(
-    /// `SPI_fnumber(rel->rd_att, name)` — attribute number or
-    /// `SPI_ERROR_NOATTRIBUTE`.
-    pub fn spi_fnumber(name: &[u8]) -> i32
+    /// `trigdata->tg_relation->rd_att` — the trigger relation's tuple
+    /// descriptor, copied into `mcx`. The real `SPI_fnumber` / `SPI_gettypeid` /
+    /// `SPI_getbinval` accessors operate over this descriptor.
+    pub fn tg_relation_tupdesc<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        trigdata: TriggerDataRef,
+    ) -> PgResult<TupleDescData<'mcx>>
 );
 
 seam_core::seam!(
-    /// `SPI_gettypeid(rel->rd_att, attnum)`.
-    pub fn spi_gettypeid(attnum: i32) -> u32
-);
-
-seam_core::seam!(
-    /// `IsBinaryCoercible(srctype, targettype)`.
-    pub fn is_binary_coercible(srctype: u32, targettype: u32) -> bool
-);
-
-seam_core::seam!(
-    /// `SPI_getbinval(...)` for a `regconfig` column (returns the OID datum).
-    pub fn spi_getbinval_oid(tuple: TupleSource, attnum: i32) -> PgResult<BinVal>
-);
-
-seam_core::seam!(
-    /// `SPI_getbinval(...)` + `DatumGetTextPP` + detoast for a text column.
-    pub fn spi_getbinval_text(tuple: TupleSource, attnum: i32) -> PgResult<BinVal>
+    /// The trigger's working tuple — `trigdata->tg_trigtuple` (INSERT) or
+    /// `trigdata->tg_newtuple` (UPDATE) — materialized into `mcx` as the
+    /// [`FormedTuple`] the real `SPI_getbinval` reads.
+    pub fn tg_rettuple<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        trigdata: TriggerDataRef,
+        which: TupleSource,
+    ) -> PgResult<FormedTuple<'mcx>>
 );
 
 seam_core::seam!(
     /// `bms_is_member(attnum - FirstLowInvalidHeapAttributeNumber,
     /// trigdata->tg_updatedcols)`.
-    pub fn updated_col(attnum: i32) -> bool
+    pub fn updated_col(trigdata: TriggerDataRef, attnum: i32) -> bool
 );
 
-seam_core::seam!(
-    /// Allocate the initial `ParsedText` (`lenwords = 32`, `curwords = 0`).
-    pub fn new_parse_state() -> ParseState
-);
+// ===========================================================================
+// tsearch/to_tsany.c + access/htup_details.h — build the tsvector from the
+// accumulated parse state and install it in the target column.
+//
+// `make_tsvector` lives in the unported `to_tsany.c`; `heap_modify_tuple_by_cols`
+// is ported but the surrounding `make_tsvector(&prs)` + result-tuple plumbing
+// is owned by the dictionary pipeline, so this stays seamed.
+// ===========================================================================
 
 seam_core::seam!(
-    /// `parsetext(cfgId, &prs, txt, txtlen)` — run the text-search parser +
-    /// dictionary pipeline, appending the lexemes to `prs`.
-    pub fn parsetext(cfg_id: u32, prs: &mut ParseState, txt: &[u8]) -> PgResult<()>
-);
-
-seam_core::seam!(
-    /// `heap_modify_tuple_by_cols(...)` — build the tsvector via
-    /// `make_tsvector(&prs)` and install it in the target column.
+    /// `rettuple = heap_modify_tuple_by_cols(rettuple, rel->rd_att, 1,
+    /// &tsvector_attr_num, &TSVectorGetDatum(make_tsvector(&prs)), &false)` —
+    /// build the tsvector from `prs` and install it in column
+    /// `tsvector_attr_num` of the trigger's working tuple.
     pub fn make_and_install_tsvector(
-        tuple: TupleSource,
+        trigdata: TriggerDataRef,
+        which: TupleSource,
         tsvector_attr_num: i32,
-        prs: ParseState,
+        prs: ParsedText,
     ) -> PgResult<()>
 );
