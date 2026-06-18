@@ -19,48 +19,49 @@
 //!    object (used when the object itself is dropped);
 //!  * [`GetComment`] — fetch an object's comment, or `None`.
 //!
-//! The control flow is identical to the C: the empty-string -> NULL reduction,
-//! the null-comment -> delete vs upsert branch, the "scan; if a match exists
-//! delete-or-update it and stop; else insert" upsert structure (the
-//! found-vs-not-found decision, the `values`/`nulls`/`replaces` array setup, and
-//! the scan-key values), the `DeleteComments` 3-vs-2 scan-key choice, the
-//! `GetComment` `!isnull` branch, the WARNING-not-ERROR special case for a
-//! missing database, the relkind whitelist for column comments, and the
-//! shared-catalog routing for databases/tablespaces/roles.
+//! The control flow is identical to the C, including the real catalog reads and
+//! writes: `table_open(DescriptionRelationId, …)` over a real
+//! [`types_rel::Relation`], the `systable` index scans
+//! (`systable_beginscan`/`getnext`/`endscan` on `DescriptionObjIndexId`), and
+//! the `CatalogTupleDelete` / `heap_modify_tuple`+`CatalogTupleUpdate` /
+//! `heap_form_tuple`+`CatalogTupleInsert` mutations.
 //!
 //! `get_object_address` / `check_object_ownership` (objectaddress.c) are called
-//! through the canonical [`backend_catalog_objectaddress_seams`] (installed by
-//! the merged owner `backend-catalog-objectaddress`); the relation they open is
-//! a real [`types_rel::Relation`], so `strVal(stmt->object)`, the relation
-//! `relkind`/name reads, and `relation_close` are done directly in-crate. Only
-//! genuine cross-subsystem primitives cross the seams in
-//! [`backend_commands_comment_seams`]: the
-//! decomposed `pg_description`/`pg_shdescription` catalog primitives
-//! (`table_open`/`table_close`, the `systable` scans, and the
-//! `CatalogTupleDelete`/`heap_modify_tuple`+`CatalogTupleUpdate`/
-//! `heap_form_tuple`+`CatalogTupleInsert` mutations), and the
-//! `CStringGetTextDatum`/`TextDatumGetCString` varlena conversions.
+//! through the canonical [`backend_catalog_objectaddress_seams`].
 //! `errdetail_relkind_not_supported` is a real ported function
-//! (`backend-catalog-pg-class`) called directly. `GetUserId` is the canonical
-//! miscinit seam.
+//! (`backend-catalog-pg-class`). `GetUserId` is the canonical miscinit seam.
+//! Only the project-wide varlena/`Datum` conversions
+//! (`CStringGetTextDatum`/`TextDatumGetCString`) cross the
+//! [`backend_commands_comment_seams`] boundary.
 
+use backend_access_common_heaptuple::{heap_form_tuple, heap_getattr, heap_modify_tuple};
+use backend_access_common_scankey::ScanKeyInit;
+use backend_access_index_genam_seams as genam;
+use backend_access_table_table::{table_close, table_open};
+use backend_catalog_indexing::keystone::{CatalogTupleDelete, CatalogTupleInsert, CatalogTupleUpdate};
 use backend_catalog_objectaddress_seams as oaddr;
 use backend_commands_comment_seams as seam;
 use backend_utils_error::ereport;
 use backend_utils_init_miscinit_seams::get_user_id;
 use mcx::Mcx;
+use types_catalog::catalog::{
+    DESCRIPTION_OBJ_INDEX_ID, DESCRIPTION_RELATION_ID, SHARED_DESCRIPTION_OBJ_INDEX_ID,
+    SHARED_DESCRIPTION_RELATION_ID,
+};
+use types_core::fmgr::{F_INT4EQ, F_OIDEQ};
 use types_core::{Oid, OidIsValid};
-use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::{
     ErrorLocation, PgResult, ERRCODE_UNDEFINED_DATABASE, ERRCODE_WRONG_OBJECT_TYPE, ERROR, WARNING,
 };
 use types_nodes::parsenodes::{OBJECT_COLUMN, OBJECT_DATABASE, OBJECT_ROLE, OBJECT_TABLESPACE};
 use types_parsenodes::CommentStmt;
+use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock, ShareUpdateExclusiveLock};
 use types_tuple::access::{
     RELKIND_COMPOSITE_TYPE, RELKIND_FOREIGN_TABLE, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE,
     RELKIND_RELATION, RELKIND_VIEW,
 };
+use types_tuple::backend_access_common_heaptuple::Datum;
 
 /*
  * pg_description / pg_shdescription column counts and 1-based attribute numbers
@@ -82,6 +83,34 @@ const ANUM_PG_SHDESCRIPTION_DESCRIPTION: usize = 3;
 /// `ErrorLocation` for `ereport(...).finish(...)` in this module.
 fn here(funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new("../src/backend/commands/comment.c", 0, funcname)
+}
+
+/// `ScanKeyInit(&key, attno, BTEqualStrategyNumber, F_OIDEQ,
+/// ObjectIdGetDatum(value))`.
+fn oid_key<'mcx>(attno: i16, value: Oid) -> PgResult<ScanKeyData<'mcx>> {
+    let mut key = ScanKeyData::empty();
+    ScanKeyInit(
+        &mut key,
+        attno,
+        BTEqualStrategyNumber,
+        F_OIDEQ,
+        Datum::from_oid(value),
+    )?;
+    Ok(key)
+}
+
+/// `ScanKeyInit(&key, attno, BTEqualStrategyNumber, F_INT4EQ,
+/// Int32GetDatum(value))`.
+fn int4_key<'mcx>(attno: i16, value: i32) -> PgResult<ScanKeyData<'mcx>> {
+    let mut key = ScanKeyData::empty();
+    ScanKeyInit(
+        &mut key,
+        attno,
+        BTEqualStrategyNumber,
+        F_INT4EQ,
+        Datum::from_i32(value),
+    )?;
+    Ok(key)
 }
 
 /// `CommentObject` — add the comment in `stmt` into `pg_description` for the
@@ -255,8 +284,7 @@ pub fn CreateComments<'mcx>(
      * When `comment` is None this stays unused — like the C, which only fills
      * the arrays in the `comment != NULL` branch.
      */
-    let mut values: [Datum<'mcx>; NATTS_PG_DESCRIPTION] =
-        core::array::from_fn(|_| Datum::null());
+    let mut values: [Datum<'mcx>; NATTS_PG_DESCRIPTION] = core::array::from_fn(|_| Datum::null());
     let mut nulls = [false; NATTS_PG_DESCRIPTION];
     let mut replaces = [false; NATTS_PG_DESCRIPTION];
     if let Some(comment) = comment {
@@ -271,36 +299,52 @@ pub fn CreateComments<'mcx>(
             seam::cstring_get_text_datum::call(mcx, comment)?;
     }
 
-    /*
-     * Use the index to search for a matching old tuple (comment.c:173-191).
-     * The scan-key values are the `{oid, classoid, subid}` key; the
-     * `DescriptionObjIndexId` index scan lives behind the primitive.
-     */
-    let description = seam::description_open::call(RowExclusiveLock)?;
-    let oldtuple = seam::description_find_one::call(description, oid, classoid, subid)?;
+    /* Use the index to search for a matching old tuple (comment.c:173-191). */
+    let skey = [
+        oid_key(ANUM_PG_DESCRIPTION_OBJOID as i16, oid)?,
+        oid_key(ANUM_PG_DESCRIPTION_CLASSOID as i16, classoid)?,
+        int4_key(ANUM_PG_DESCRIPTION_OBJSUBID as i16, subid)?,
+    ];
 
-    /*
-     * Found the old tuple, so delete or update it; else, if we have a comment,
-     * insert a new one (comment.c:193-218).
-     */
-    match oldtuple {
-        Some(tuple) => {
-            if comment.is_none() {
-                seam::description_delete::call(description, tuple)?;
-            } else {
-                seam::description_update::call(description, tuple, &values, &nulls, &replaces)?;
-            }
+    let description = table_open(mcx, DESCRIPTION_RELATION_ID, RowExclusiveLock)?;
+
+    let mut scan =
+        genam::systable_beginscan::call(&description, DESCRIPTION_OBJ_INDEX_ID, true, None, &skey)?;
+
+    let mut inserted_or_updated = false;
+    // while ((oldtuple = systable_getnext(sd)) != NULL)
+    if let Some(oldtuple) = genam::systable_getnext::call(mcx, scan.desc_mut())? {
+        /* Found the old tuple, so delete or update it (comment.c:193-204). */
+        if comment.is_none() {
+            CatalogTupleDelete(mcx, &description, oldtuple.tuple.t_self)?;
+        } else {
+            // newtuple = heap_modify_tuple(oldtuple, RelationGetDescr(description),
+            //                              values, nulls, replaces);
+            // CatalogTupleUpdate(description, &oldtuple->t_self, newtuple);
+            let mut newtuple = heap_modify_tuple(
+                mcx,
+                &oldtuple,
+                &description.rd_att,
+                &values,
+                &nulls,
+                &replaces,
+            )?;
+            CatalogTupleUpdate(mcx, &description, oldtuple.tuple.t_self, &mut newtuple)?;
+            inserted_or_updated = true;
         }
-        None => {
-            /* If we didn't find an old tuple, insert a new one. */
-            if comment.is_some() {
-                seam::description_insert::call(description, &values, &nulls)?;
-            }
-        }
+        // break; — Assume there can be only one match.
+    }
+
+    scan.end()?;
+
+    /* If we didn't find an old tuple, insert a new one (comment.c:213-218). */
+    if !inserted_or_updated && comment.is_some() {
+        let mut newtuple = heap_form_tuple(mcx, &description.rd_att, &values, &nulls)?;
+        CatalogTupleInsert(mcx, &description, &mut newtuple)?;
     }
 
     /* Done (comment.c:225). */
-    seam::description_close::call(description, NoLock)
+    table_close(description, NoLock)
 }
 
 /// `CreateSharedComments` — create/replace/delete a `pg_shdescription` comment.
@@ -317,8 +361,7 @@ pub fn CreateSharedComments<'mcx>(
     let comment = reduce_empty(comment);
 
     /* Prepare to form or update a tuple, if necessary (comment.c:254-265). */
-    let mut values: [Datum<'mcx>; NATTS_PG_SHDESCRIPTION] =
-        core::array::from_fn(|_| Datum::null());
+    let mut values: [Datum<'mcx>; NATTS_PG_SHDESCRIPTION] = core::array::from_fn(|_| Datum::null());
     let mut nulls = [false; NATTS_PG_SHDESCRIPTION];
     let mut replaces = [false; NATTS_PG_SHDESCRIPTION];
     if let Some(comment) = comment {
@@ -333,27 +376,51 @@ pub fn CreateSharedComments<'mcx>(
     }
 
     /* Use the index to search for a matching old tuple (comment.c:267-281). */
-    let shdescription = seam::shdescription_open::call(RowExclusiveLock)?;
-    let oldtuple = seam::shdescription_find_one::call(shdescription, oid, classoid)?;
+    let skey = [
+        oid_key(ANUM_PG_SHDESCRIPTION_OBJOID as i16, oid)?,
+        oid_key(ANUM_PG_SHDESCRIPTION_CLASSOID as i16, classoid)?,
+    ];
 
-    /* Found: delete or update it; else, with a comment, insert (comment.c:283-307). */
-    match oldtuple {
-        Some(tuple) => {
-            if comment.is_none() {
-                seam::shdescription_delete::call(shdescription, tuple)?;
-            } else {
-                seam::shdescription_update::call(shdescription, tuple, &values, &nulls, &replaces)?;
-            }
+    let shdescription = table_open(mcx, SHARED_DESCRIPTION_RELATION_ID, RowExclusiveLock)?;
+
+    let mut scan = genam::systable_beginscan::call(
+        &shdescription,
+        SHARED_DESCRIPTION_OBJ_INDEX_ID,
+        true,
+        None,
+        &skey,
+    )?;
+
+    let mut inserted_or_updated = false;
+    if let Some(oldtuple) = genam::systable_getnext::call(mcx, scan.desc_mut())? {
+        /* Found: delete or update it (comment.c:283-294). */
+        if comment.is_none() {
+            CatalogTupleDelete(mcx, &shdescription, oldtuple.tuple.t_self)?;
+        } else {
+            let mut newtuple = heap_modify_tuple(
+                mcx,
+                &oldtuple,
+                &shdescription.rd_att,
+                &values,
+                &nulls,
+                &replaces,
+            )?;
+            CatalogTupleUpdate(mcx, &shdescription, oldtuple.tuple.t_self, &mut newtuple)?;
+            inserted_or_updated = true;
         }
-        None => {
-            if comment.is_some() {
-                seam::shdescription_insert::call(shdescription, &values, &nulls)?;
-            }
-        }
+        // break;
+    }
+
+    scan.end()?;
+
+    /* If we didn't find an old tuple, insert a new one (comment.c:303-308). */
+    if !inserted_or_updated && comment.is_some() {
+        let mut newtuple = heap_form_tuple(mcx, &shdescription.rd_att, &values, &nulls)?;
+        CatalogTupleInsert(mcx, &shdescription, &mut newtuple)?;
     }
 
     /* Done (comment.c:315). */
-    seam::shdescription_close::call(shdescription, NoLock)
+    table_close(shdescription, NoLock)
 }
 
 /// `DeleteComments` — remove `pg_description` comments for an object.
@@ -364,16 +431,37 @@ pub fn CreateSharedComments<'mcx>(
 ///
 /// comment.c:325-368.
 pub fn DeleteComments(oid: Oid, classoid: Oid, subid: i32) -> PgResult<()> {
+    let scratch = mcx::MemoryContext::new("DeleteComments");
+    let mcx = scratch.mcx();
+
     /*
      * Build the scan keys: always {objoid, classoid}; add the objsubid key only
-     * when `subid != 0` (comment.c:345-352, where nkeys becomes 3).
+     * when `subid != 0` (comment.c:336-352, where nkeys becomes 3).
      */
-    let objsubid = if subid != 0 { Some(subid) } else { None };
+    let key_objoid = oid_key(ANUM_PG_DESCRIPTION_OBJOID as i16, oid)?;
+    let key_classoid = oid_key(ANUM_PG_DESCRIPTION_CLASSOID as i16, classoid)?;
+    let key_objsubid = int4_key(ANUM_PG_DESCRIPTION_OBJSUBID as i16, subid)?;
 
-    let description = seam::description_open::call(RowExclusiveLock)?;
-    seam::description_delete_all::call(description, oid, classoid, objsubid)?;
-    /* Done (comment.c:367) — closes holding RowExclusiveLock. */
-    seam::description_close::call(description, RowExclusiveLock)
+    let description = table_open(mcx, DESCRIPTION_RELATION_ID, RowExclusiveLock)?;
+
+    // systable_beginscan(description, DescriptionObjIndexId, true, NULL, nkeys, skey)
+    let mut scan = if subid != 0 {
+        let skey = [key_objoid, key_classoid, key_objsubid];
+        genam::systable_beginscan::call(&description, DESCRIPTION_OBJ_INDEX_ID, true, None, &skey)?
+    } else {
+        let skey = [key_objoid, key_classoid];
+        genam::systable_beginscan::call(&description, DESCRIPTION_OBJ_INDEX_ID, true, None, &skey)?
+    };
+
+    // while ((oldtuple = systable_getnext(sd)) != NULL)
+    //     CatalogTupleDelete(description, &oldtuple->t_self);
+    while let Some(oldtuple) = genam::systable_getnext::call(mcx, scan.desc_mut())? {
+        CatalogTupleDelete(mcx, &description, oldtuple.tuple.t_self)?;
+    }
+
+    /* Done (comment.c:366-367) — closes holding RowExclusiveLock. */
+    scan.end()?;
+    table_close(description, RowExclusiveLock)
 }
 
 /// `DeleteSharedComments` — remove `pg_shdescription` comments for a shared
@@ -381,10 +469,31 @@ pub fn DeleteComments(oid: Oid, classoid: Oid, subid: i32) -> PgResult<()> {
 ///
 /// comment.c:373-404. Always two scan keys `{objoid, classoid}`.
 pub fn DeleteSharedComments(oid: Oid, classoid: Oid) -> PgResult<()> {
-    let shdescription = seam::shdescription_open::call(RowExclusiveLock)?;
-    seam::shdescription_delete_all::call(shdescription, oid, classoid)?;
-    /* Done (comment.c:403) — closes holding RowExclusiveLock. */
-    seam::shdescription_close::call(shdescription, RowExclusiveLock)
+    let scratch = mcx::MemoryContext::new("DeleteSharedComments");
+    let mcx = scratch.mcx();
+
+    let skey = [
+        oid_key(ANUM_PG_SHDESCRIPTION_OBJOID as i16, oid)?,
+        oid_key(ANUM_PG_SHDESCRIPTION_CLASSOID as i16, classoid)?,
+    ];
+
+    let shdescription = table_open(mcx, SHARED_DESCRIPTION_RELATION_ID, RowExclusiveLock)?;
+
+    let mut scan = genam::systable_beginscan::call(
+        &shdescription,
+        SHARED_DESCRIPTION_OBJ_INDEX_ID,
+        true,
+        None,
+        &skey,
+    )?;
+
+    while let Some(oldtuple) = genam::systable_getnext::call(mcx, scan.desc_mut())? {
+        CatalogTupleDelete(mcx, &shdescription, oldtuple.tuple.t_self)?;
+    }
+
+    /* Done (comment.c:402-403) — closes holding RowExclusiveLock. */
+    scan.end()?;
+    table_close(shdescription, RowExclusiveLock)
 }
 
 /// `GetComment` — get the comment for an object, or `None` if not found.
@@ -396,26 +505,38 @@ pub fn GetComment<'mcx>(
     classoid: Oid,
     subid: i32,
 ) -> PgResult<Option<String>> {
-    let description = seam::description_open::call(AccessShareLock)?;
+    /* Use the index to search for a matching old tuple (comment.c:421-432). */
+    let skey = [
+        oid_key(ANUM_PG_DESCRIPTION_OBJOID as i16, oid)?,
+        oid_key(ANUM_PG_DESCRIPTION_CLASSOID as i16, classoid)?,
+        int4_key(ANUM_PG_DESCRIPTION_OBJSUBID as i16, subid)?,
+    ];
+
+    let description = table_open(mcx, DESCRIPTION_RELATION_ID, AccessShareLock)?;
+    // tupdesc = RelationGetDescr(description);
+    let tupdesc = &description.rd_att;
+
+    let mut scan =
+        genam::systable_beginscan::call(&description, DESCRIPTION_OBJ_INDEX_ID, true, None, &skey)?;
 
     /* comment = NULL; (comment.c:440) */
     let mut comment: Option<String> = None;
 
-    /*
-     * Found the tuple, get description field (comment.c:441-451). The scan
-     * returns the description column value and its isnull flag for the one
-     * match, or None when nothing matched (the C while-loop body not entered).
-     */
-    if let Some(col) =
-        seam::description_get_description::call(mcx, description, oid, classoid, subid)?
-    {
-        if !col.isnull {
-            comment = Some(seam::text_datum_get_cstring::call(col.value)?);
+    // while ((tuple = systable_getnext(sd)) != NULL)
+    if let Some(tuple) = genam::systable_getnext::call(mcx, scan.desc_mut())? {
+        // value = heap_getattr(tuple, Anum_pg_description_description, tupdesc, &isnull);
+        let (value, isnull) =
+            heap_getattr(mcx, &tuple, ANUM_PG_DESCRIPTION_DESCRIPTION as i32, tupdesc)?;
+        if !isnull {
+            comment = Some(seam::text_datum_get_cstring::call(value)?);
         }
+        // break; — Assume there can be only one match.
     }
 
+    scan.end()?;
+
     /* Done (comment.c:456). */
-    seam::description_close::call(description, AccessShareLock)?;
+    table_close(description, AccessShareLock)?;
 
     Ok(comment)
 }
@@ -436,10 +557,13 @@ fn reduce_empty(comment: Option<&str>) -> Option<&str> {
     }
 }
 
-/// Install this crate's inward seams. comment.c owns no inward seam boundary
-/// (nothing calls *into* it across a dependency cycle — its callers,
-/// dependency.c / ruleutils.c, are downstream), so there is nothing to install.
-/// Present and wired into `seams-init::init_all()` for the registry invariant.
+/// Install this crate's seams.
+///
+/// The catalog read/write control flow runs entirely in-crate over real
+/// relations, so the only outward seams are the project-wide varlena/`Datum`
+/// conversions (installed by their owners). Here we install the inward
+/// [`DeleteComments`] boundary (dependency.c calls it on object drop) and the
+/// collationcmds `create_comment` adapter.
 pub fn init_seams() {
     backend_commands_comment_seams::DeleteComments::set(DeleteComments);
 

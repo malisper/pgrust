@@ -26,3 +26,9 @@ types-parsenodes = { path = "../types-parsenodes" }
 types-nodes = { path = "../types-nodes" }
 types-tuple = { path = "../types-tuple" }
 types-rel = { path = "../types-rel" }
+types-scan = { path = "../types-scan" }
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-access-common-scankey = { path = "../backend-access-common-scankey" }
+backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }
+backend-access-table-table = { path = "../backend-access-table-table" }
+backend-catalog-indexing = { path = "../backend-catalog-indexing" }

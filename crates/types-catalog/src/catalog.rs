@@ -144,6 +144,10 @@ pub const PARAMETER_ACL_RELATION_ID: Oid = 6243;
 /// `ReplicationOriginRelationId` — `pg_replication_origin`
 /// (`pg_replication_origin_d.h`).
 pub const REPLICATION_ORIGIN_RELATION_ID: Oid = 6000;
+/// `DescriptionRelationId` — `pg_description` (`pg_description_d.h`).
+pub const DESCRIPTION_RELATION_ID: Oid = 2609;
+/// `DescriptionObjIndexId` — `pg_description_o_c_o_index` (`pg_description_d.h`).
+pub const DESCRIPTION_OBJ_INDEX_ID: Oid = 2675;
 /// `SharedDescriptionRelationId` — `pg_shdescription` (`pg_shdescription_d.h`).
 pub const SHARED_DESCRIPTION_RELATION_ID: Oid = 2396;
 /// `SharedSecLabelRelationId` — `pg_shseclabel` (`pg_shseclabel_d.h`).
