@@ -101,6 +101,34 @@ fn node_list<'mcx>(mcx: Mcx<'mcx>, l: *mut RawList) -> PgResult<PgVec<'mcx, Node
     Ok(out)
 }
 
+/// `SelectStmt.distinctClause` (`*mut List` of `*mut Node`) → `PgVec<NodePtr>`,
+/// preserving the grammar's `list_make1(NIL)` "SELECT DISTINCT (all columns)"
+/// marker. The C grammar encodes plain DISTINCT (vs DISTINCT ON) as a one-element
+/// list whose sole cell is NULL; the owned model — whose `NodePtr` cannot be NULL
+/// — represents that NULL cell as an empty `Node::List`, which the analyze layer
+/// (`distinct_all_marker`) detects. Real DISTINCT ON elements are column
+/// expressions and convert normally. (analyze/select.c `transformDistinctClause`
+/// reads `linitial(distinctClause) == NULL`.)
+fn distinct_clause_list<'mcx>(
+    mcx: Mcx<'mcx>,
+    l: *mut RawList,
+) -> PgResult<PgVec<'mcx, NodePtr<'mcx>>> {
+    if l.is_null() {
+        return Ok(PgVec::new_in(mcx));
+    }
+    let list: &RawList = unsafe { &*l };
+    let mut out = mcx::vec_with_capacity_in(mcx, list.len().max(0) as usize)?;
+    for cell in list.cells() {
+        let np: *mut RawNode = cell.ptr();
+        match node_opt(mcx, np)? {
+            Some(p) => out.push(p),
+            // NULL cell == the plain-DISTINCT marker: encode as empty Node::List.
+            None => out.push(mcx::alloc_in(mcx, Node::List(PgVec::new_in(mcx)))?),
+        }
+    }
+    Ok(out)
+}
+
 /// `*mut List` of `Oid` (int cells) → `PgVec<Oid>`.
 fn oid_list<'mcx>(mcx: Mcx<'mcx>, l: *mut RawList) -> PgResult<PgVec<'mcx, u32>> {
     if l.is_null() {

@@ -11,7 +11,7 @@
 fn conv_select<'mcx>(mcx: Mcx<'mcx>, p: *mut cs::SelectStmt) -> PgResult<tn::SelectStmt<'mcx>> {
     let s = unsafe { &*p };
     Ok(tn::SelectStmt {
-        distinctClause: node_list(mcx, s.distinctClause)?,
+        distinctClause: distinct_clause_list(mcx, s.distinctClause)?,
         intoClause: into_clause_opt(mcx, s.intoClause)?,
         targetList: node_list(mcx, s.targetList)?,
         fromClause: node_list(mcx, s.fromClause)?,
