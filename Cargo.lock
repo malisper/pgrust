@@ -1671,6 +1671,8 @@ name = "backend-access-heap-hio"
 version = "0.0.0"
 dependencies = [
  "backend-access-heap-hio-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-page",
  "backend-utils-error",
  "types-core",
  "types-error",
@@ -22174,6 +22176,7 @@ dependencies = [
  "backend-access-heap-heapam-visibility",
  "backend-access-heap-heapam-xlog",
  "backend-access-heap-heaptoast",
+ "backend-access-heap-hio",
  "backend-access-heap-pruneheap",
  "backend-access-heap-rewriteheap",
  "backend-access-heap-vacuumlazy",
