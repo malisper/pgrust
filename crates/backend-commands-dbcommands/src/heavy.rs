@@ -107,8 +107,8 @@ fn defel_has_arg(defel: &DefElem) -> bool {
 /// String or there's no arg (define.c).
 fn def_get_string(defel: &DefElem) -> PgResult<String> {
     match defel.arg.as_deref() {
-        Some(Node::String(s)) => Ok(s.sval.as_str().to_string()),
-        Some(Node::Integer(_)) | Some(Node::Float(_)) | Some(Node::Boolean(_)) => {
+        Some(n) if n.is_string() => Ok(n.expect_string().sval.as_str().to_string()),
+        Some(n) if n.is_integer() || n.is_float() || n.is_boolean() => {
             // define.c: TypeName/numeric arms aren't used by the database
             // options, so the only valid string-yielding arm is T_String.
             Err(ereport(ERROR)
@@ -127,8 +127,8 @@ fn def_get_string(defel: &DefElem) -> PgResult<String> {
 
 /// `defGetInt32(defel)` (define.c).
 fn def_get_int32(defel: &DefElem) -> PgResult<i32> {
-    match defel.arg.as_deref() {
-        Some(Node::Integer(i)) => Ok(i.ival),
+    match defel.arg.as_deref().and_then(|n| n.as_integer()) {
+        Some(i) => Ok(i.ival),
         _ => Err(ereport(ERROR)
             .errcode(ERRCODE_SYNTAX_ERROR)
             .errmsg(format!("{} requires an integer value", def_name(defel)))
@@ -141,13 +141,14 @@ fn def_get_int32(defel: &DefElem) -> PgResult<i32> {
 /// the strings "true"/"false"/"on"/"off".
 fn def_get_boolean(defel: &DefElem) -> PgResult<bool> {
     match defel.arg.as_deref() {
-        Some(Node::Boolean(b)) => Ok(b.boolval),
-        Some(Node::Integer(i)) => match i.ival {
+        Some(n) if n.is_boolean() => Ok(n.expect_boolean().boolval),
+        Some(n) if n.is_integer() => match n.expect_integer().ival {
             0 => Ok(false),
             1 => Ok(true),
             _ => boolean_err(defel),
         },
-        Some(Node::String(s)) => {
+        Some(n) if n.is_string() => {
+            let s = n.expect_string();
             let v = s.sval.as_str();
             if v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("on") {
                 Ok(true)
@@ -171,8 +172,8 @@ fn boolean_err(defel: &DefElem) -> PgResult<bool> {
 
 /// `defGetObjectId(defel)` (define.c).
 fn def_get_object_id(defel: &DefElem) -> PgResult<Oid> {
-    match defel.arg.as_deref() {
-        Some(Node::Integer(i)) => Ok(i.ival as u32),
+    match defel.arg.as_deref().and_then(|n| n.as_integer()) {
+        Some(i) => Ok(i.ival as u32),
         _ => Err(ereport(ERROR)
             .errcode(ERRCODE_SYNTAX_ERROR)
             .errmsg(format!("{} requires a numeric value", def_name(defel)))
@@ -183,7 +184,7 @@ fn def_get_object_id(defel: &DefElem) -> PgResult<Oid> {
 
 /// `IsA(defel->arg, Integer)`.
 fn arg_is_integer(defel: &DefElem) -> bool {
-    matches!(defel.arg.as_deref(), Some(Node::Integer(_)))
+    defel.arg.as_deref().is_some_and(|n| n.is_integer())
 }
 
 /// `errorConflictingDefElem(defel, pstate)` (define.c): a duplicate option.
@@ -202,10 +203,7 @@ fn def_elems<'a, 'mcx>(
 ) -> Vec<&'a DefElem<'mcx>> {
     options
         .iter()
-        .filter_map(|n| match &**n {
-            Node::DefElem(d) => Some(d),
-            _ => None,
-        })
+        .filter_map(|n| n.as_defelem())
         .collect()
 }
 
@@ -2285,7 +2283,7 @@ pub fn AlterDatabaseSet<'mcx>(stmt: &AlterDatabaseSetStmt<'mcx>) -> PgResult<Oid
     // seam (the parser's `'mcx` parse-node model and the owner's owned-String
     // VariableSetStmt model meet only at that seam).
     let setstmt = match stmt.setstmt.as_deref() {
-        Some(node @ Node::VariableSetStmt(_)) => node,
+        Some(node) if node.is_variablesetstmt() => node,
         _ => {
             return Err(ereport(ERROR)
                 .errmsg("ALTER DATABASE SET requires a SET statement".to_string())
