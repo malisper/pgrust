@@ -1,0 +1,43 @@
+[package]
+name = "backend-optimizer-prep-prepunion"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_optimizer_prep_prepunion"
+path = "src/lib.rs"
+
+[dependencies]
+seam-core = { path = "../seam-core" }
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-nodes = { path = "../types-nodes" }
+types-pathnodes = { path = "../types-pathnodes" }
+
+# Owner of the plan_set_operations seam this crate installs.
+backend-optimizer-prep-prepunion-seams = { path = "../backend-optimizer-prep-prepunion-seams" }
+
+# Relnode constructors (setup_simple_rel_arrays / build_simple_rel /
+# fetch_upper_rel / find_base_rel) — concrete deps, relnode has no optimizer
+# owner deps so no cycle.
+backend-optimizer-util-relnode = { path = "../backend-optimizer-util-relnode" }
+# Path constructors + add_path/set_cheapest + import_path_from_subroot.
+backend-optimizer-util-pathnode = { path = "../backend-optimizer-util-pathnode" }
+# set_subquery_size_estimates.
+backend-optimizer-path-costsize = { path = "../backend-optimizer-path-costsize" }
+# Pathkey machinery for sorted set-op paths.
+backend-optimizer-path-pathkeys = { path = "../backend-optimizer-path-pathkeys" }
+# tlist helpers (make_pathtarget_from_tlist, grouping_is_*, get_tlist_exprs,
+# make_tlist_from_pathtarget).
+backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
+# makeVar / makeTargetEntry / exprType / exprTypmod / exprCollation /
+# applyRelabelType.
+backend-nodes-core = { path = "../backend-nodes-core" }
+
+# Cross-cycle seams.
+backend-optimizer-plan-planner-seams = { path = "../backend-optimizer-plan-planner-seams" }
+backend-utils-adt-selfuncs-seams = { path = "../backend-utils-adt-selfuncs-seams" }
+backend-parser-coerce-seams = { path = "../backend-parser-coerce-seams" }
+backend-optimizer-util-relnode-seams = { path = "../backend-optimizer-util-relnode-seams" }

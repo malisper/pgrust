@@ -312,6 +312,7 @@ pub fn init_all() {
     backend_optimizer_prep_prepqual::init_seams();
     backend_optimizer_prep_prepjointree::init_seams();
     backend_optimizer_prep_preptlist::init_seams();
+    backend_optimizer_prep_prepunion::init_seams();
     backend_optimizer_prep_prepagg::init_seams();
     backend_optimizer_plan_subselect_pullup::init_seams();
     backend_optimizer_plan_analyzejoins::init_seams();

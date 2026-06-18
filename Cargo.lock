@@ -12353,6 +12353,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-prep-prepunion"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "backend-optimizer-path-costsize",
+ "backend-optimizer-path-pathkeys",
+ "backend-optimizer-plan-planner-seams",
+ "backend-optimizer-prep-prepunion-seams",
+ "backend-optimizer-util-pathnode",
+ "backend-optimizer-util-relnode",
+ "backend-optimizer-util-relnode-seams",
+ "backend-optimizer-util-vars",
+ "backend-parser-coerce-seams",
+ "backend-utils-adt-selfuncs-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
 name = "backend-optimizer-prep-prepunion-seams"
 version = "0.0.0"
 dependencies = [
@@ -22943,6 +22966,7 @@ dependencies = [
  "backend-optimizer-prep-prepjointree",
  "backend-optimizer-prep-prepqual",
  "backend-optimizer-prep-preptlist",
+ "backend-optimizer-prep-prepunion",
  "backend-optimizer-rte-seams",
  "backend-optimizer-util-appendinfo",
  "backend-optimizer-util-clauses",
