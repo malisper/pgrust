@@ -40,6 +40,7 @@ backend-access-gin-ginfast = { path = "../backend-access-gin-ginfast" }
 backend-access-gin-ginget = { path = "../backend-access-gin-ginget" }
 backend-access-gin-gininsert = { path = "../backend-access-gin-gininsert" }
 backend-access-gin-ginscan = { path = "../backend-access-gin-ginscan" }
+backend-access-gin-ginutil = { path = "../backend-access-gin-ginutil" }
 backend-access-gin-ginvacuum = { path = "../backend-access-gin-ginvacuum" }
 backend-access-gin-ginxlog = { path = "../backend-access-gin-ginxlog" }
 backend-access-hashvalidate = { path = "../backend-access-hashvalidate" }

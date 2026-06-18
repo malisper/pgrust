@@ -54,8 +54,8 @@ use mcx::Mcx;
 
 use backend_storage_buffer_bufmgr_seams as bufmgr;
 use backend_storage_page::{
-    PageAddItemExtended, PageGetItemId, PageGetMaxOffsetNumber, PageIndexTupleDelete, PageIsNew,
-    PageMut, PageRef,
+    PageAddItemExtended, PageGetContents, PageGetItemId, PageGetMaxOffsetNumber,
+    PageIndexTupleDelete, PageIsNew, PageMut, PageRef,
 };
 use backend_utils_error::{ereport, PgResult};
 use types_error::error::ERROR;
@@ -72,11 +72,11 @@ use backend_access_gin_gindatapage::{
 use backend_access_gin_ginentrypage::GinFormTuple;
 use backend_access_gin_ginutil::{gintuple_get_attrnum, gintuple_get_key, initGinState, ginUpdateStats};
 
-use types_core::primitive::{BlockNumber, OffsetNumber, Oid, TransactionId};
+use types_core::primitive::{BlockNumber, ForkNumber, OffsetNumber, Oid, TransactionId};
 use types_core::{InvalidBlockNumber, XLogRecPtr};
 use types_gin::{
-    GinMaxItemSize, GinState, GinStatsData, GIN_DELETED, GIN_EXCLUSIVE, GIN_LIST, GIN_ROOT_BLKNO,
-    GIN_SHARE, GIN_UNLOCK,
+    GinMaxItemSize, GinMetaPageData, GinState, GinStatsData, GIN_DELETED, GIN_EXCLUSIVE, GIN_LIST,
+    GIN_METAPAGE_BLKNO, GIN_ROOT_BLKNO, GIN_SHARE, GIN_UNLOCK,
 };
 use types_rel::Relation;
 use types_storage::storage::{Buffer, InvalidBuffer};
@@ -101,10 +101,14 @@ const RM_GIN_ID: types_core::RmgrId = 13;
 const XLOG_GIN_VACUUM_PAGE: u8 = 0x40;
 /// `XLOG_GIN_DELETE_PAGE` info byte (ginxlog.h).
 const XLOG_GIN_DELETE_PAGE: u8 = 0x50;
+/// `XLOG_GIN_UPDATE_META_PAGE` info byte (ginxlog.h).
+const XLOG_GIN_UPDATE_META_PAGE: u8 = 0x60;
 
 // `REGBUF_*` flags (xloginsert.h).
 const REGBUF_STANDARD: u8 = 0x04;
 const REGBUF_FORCE_IMAGE: u8 = 0x01;
+/// `REGBUF_WILL_INIT` (xloginsert.h).
+const REGBUF_WILL_INIT: u8 = 0x02;
 
 /// `sizeof(ItemPointerData)` on disk (6 bytes).
 const SIZE_OF_ITEM_POINTER: usize = 6;
@@ -129,6 +133,244 @@ pub fn init_seams() {
     backend_access_gin_ginutil_seams::ginvacuumcleanup::set(
         |mcx, info, stats| ginvacuumcleanup(mcx, info, stats),
     );
+    // The buffer-cache / WAL metapage substrate `ginutil.c` declares (its real
+    // body needs the bufmgr / freespace / xloginsert substrate + the GIN-page
+    // recyclability test, all of which live here). `ginutil::GinNewBuffer` /
+    // `ginGetStats` / `ginUpdateStats` are the thin dispatchers; the bodies are
+    // here.
+    backend_access_gin_ginutil_seams::gin_new_buffer::set(gin_new_buffer_impl);
+    backend_access_gin_ginutil_seams::gin_get_stats::set(gin_get_stats_impl);
+    backend_access_gin_ginutil_seams::gin_update_stats::set(
+        |index, n_total, n_entry, n_data, n_entries, is_build| {
+            gin_update_stats_impl(index, n_total, n_entry, n_data, n_entries, is_build)
+        },
+    );
+}
+
+// ===========================================================================
+// GinNewBuffer / ginGetStats / ginUpdateStats substrate (ginutil.c:305/634/655).
+//
+// These are `ginutil.c` functions whose real bodies need the buffer-cache /
+// freespace / WAL substrate (and, for `GinNewBuffer`, the GIN-page
+// recyclability test that lives here). `ginutil` declares them as outward seams
+// and dispatches; this crate — already carrying every needed dependency — owns
+// the bodies and installs the seams.
+// ===========================================================================
+
+/// On-disk byte offsets of `GinMetaPageData` fields within the page contents
+/// area (`GinPageGetMeta` == `PageGetContents`), native layout.
+const OFF_GIN_HEAD: usize = 0;
+const OFF_GIN_TAIL: usize = 4;
+const OFF_GIN_TAILFREESIZE: usize = 8;
+const OFF_GIN_NPENDINGPAGES: usize = 12;
+const OFF_GIN_NPENDINGHEAPTUPLES: usize = 16;
+const OFF_GIN_NTOTALPAGES: usize = 24;
+const OFF_GIN_NENTRYPAGES: usize = 28;
+const OFF_GIN_NDATAPAGES: usize = 32;
+const OFF_GIN_NENTRIES: usize = 40;
+const OFF_GIN_VERSION: usize = 48;
+/// `sizeof(GinMetaPageData)` on disk (`MAXALIGN(offsetof(ginVersion)+4)` = 56).
+const SIZE_OF_GIN_META_PAGE_DATA: usize = 56;
+/// Byte offset of `pd_lower` within `PageHeaderData`.
+const OFF_PD_LOWER: usize = 12;
+
+/// `GinPageGetMeta(page)` — read the metadata struct from a page byte image.
+fn read_meta(page: &[u8]) -> PgResult<GinMetaPageData> {
+    let pr = PageRef::new(page)?;
+    let c = PageGetContents(&pr)?;
+    let g32 = |o: usize| u32::from_ne_bytes([c[o], c[o + 1], c[o + 2], c[o + 3]]);
+    let g64 = |o: usize| {
+        i64::from_ne_bytes([
+            c[o], c[o + 1], c[o + 2], c[o + 3], c[o + 4], c[o + 5], c[o + 6], c[o + 7],
+        ])
+    };
+    Ok(GinMetaPageData {
+        head: g32(OFF_GIN_HEAD),
+        tail: g32(OFF_GIN_TAIL),
+        tailFreeSize: g32(OFF_GIN_TAILFREESIZE),
+        nPendingPages: g32(OFF_GIN_NPENDINGPAGES),
+        nPendingHeapTuples: g64(OFF_GIN_NPENDINGHEAPTUPLES),
+        nTotalPages: g32(OFF_GIN_NTOTALPAGES),
+        nEntryPages: g32(OFF_GIN_NENTRYPAGES),
+        nDataPages: g32(OFF_GIN_NDATAPAGES),
+        nEntries: g64(OFF_GIN_NENTRIES),
+        ginVersion: i32::from_ne_bytes([
+            c[OFF_GIN_VERSION],
+            c[OFF_GIN_VERSION + 1],
+            c[OFF_GIN_VERSION + 2],
+            c[OFF_GIN_VERSION + 3],
+        ]),
+    })
+}
+
+/// Offset of the metadata within the page (`PageGetContents` == header size,
+/// `MAXALIGN(SizeOfPageHeaderData)` = 24).
+const META_OFFSET: usize = 24;
+
+/// Write the metadata struct into a page byte image and set `pd_lower` just past
+/// the metadata (so xlog page compression won't drop it), mirroring the
+/// `((PageHeader) metapage)->pd_lower = ...` idiom.
+fn write_meta(page: &mut [u8], meta: &GinMetaPageData) {
+    let put32 = |page: &mut [u8], fo: usize, v: u32| {
+        let p = META_OFFSET + fo;
+        page[p..p + 4].copy_from_slice(&v.to_ne_bytes());
+    };
+    let put64 = |page: &mut [u8], fo: usize, v: i64| {
+        let p = META_OFFSET + fo;
+        page[p..p + 8].copy_from_slice(&v.to_ne_bytes());
+    };
+    put32(page, OFF_GIN_HEAD, meta.head);
+    put32(page, OFF_GIN_TAIL, meta.tail);
+    put32(page, OFF_GIN_TAILFREESIZE, meta.tailFreeSize);
+    put32(page, OFF_GIN_NPENDINGPAGES, meta.nPendingPages);
+    put64(page, OFF_GIN_NPENDINGHEAPTUPLES, meta.nPendingHeapTuples);
+    put32(page, OFF_GIN_NTOTALPAGES, meta.nTotalPages);
+    put32(page, OFF_GIN_NENTRYPAGES, meta.nEntryPages);
+    put32(page, OFF_GIN_NDATAPAGES, meta.nDataPages);
+    put64(page, OFF_GIN_NENTRIES, meta.nEntries);
+    {
+        let p = META_OFFSET + OFF_GIN_VERSION;
+        page[p..p + 4].copy_from_slice(&meta.ginVersion.to_ne_bytes());
+    }
+    let pd_lower = (META_OFFSET + SIZE_OF_GIN_META_PAGE_DATA) as u16;
+    page[OFF_PD_LOWER..OFF_PD_LOWER + 2].copy_from_slice(&pd_lower.to_ne_bytes());
+}
+
+/// Serialize a [`GinMetaPageData`] to its on-disk byte image (for the WAL record
+/// body that copies `metadata`).
+fn meta_to_bytes(meta: &GinMetaPageData) -> [u8; SIZE_OF_GIN_META_PAGE_DATA] {
+    let mut buf = [0u8; SIZE_OF_GIN_META_PAGE_DATA];
+    buf[OFF_GIN_HEAD..OFF_GIN_HEAD + 4].copy_from_slice(&meta.head.to_ne_bytes());
+    buf[OFF_GIN_TAIL..OFF_GIN_TAIL + 4].copy_from_slice(&meta.tail.to_ne_bytes());
+    buf[OFF_GIN_TAILFREESIZE..OFF_GIN_TAILFREESIZE + 4]
+        .copy_from_slice(&meta.tailFreeSize.to_ne_bytes());
+    buf[OFF_GIN_NPENDINGPAGES..OFF_GIN_NPENDINGPAGES + 4]
+        .copy_from_slice(&meta.nPendingPages.to_ne_bytes());
+    buf[OFF_GIN_NPENDINGHEAPTUPLES..OFF_GIN_NPENDINGHEAPTUPLES + 8]
+        .copy_from_slice(&meta.nPendingHeapTuples.to_ne_bytes());
+    buf[OFF_GIN_NTOTALPAGES..OFF_GIN_NTOTALPAGES + 4]
+        .copy_from_slice(&meta.nTotalPages.to_ne_bytes());
+    buf[OFF_GIN_NENTRYPAGES..OFF_GIN_NENTRYPAGES + 4]
+        .copy_from_slice(&meta.nEntryPages.to_ne_bytes());
+    buf[OFF_GIN_NDATAPAGES..OFF_GIN_NDATAPAGES + 4]
+        .copy_from_slice(&meta.nDataPages.to_ne_bytes());
+    buf[OFF_GIN_NENTRIES..OFF_GIN_NENTRIES + 8].copy_from_slice(&meta.nEntries.to_ne_bytes());
+    buf[OFF_GIN_VERSION..OFF_GIN_VERSION + 4].copy_from_slice(&meta.ginVersion.to_ne_bytes());
+    buf
+}
+
+/// `index->rd_locator` serialized as the WAL `RelFileLocator` (12 bytes:
+/// spcOid / dbOid / relNumber).
+fn relfilelocator_bytes(index: &Relation<'_>) -> [u8; 12] {
+    let mut b = [0u8; 12];
+    b[0..4].copy_from_slice(&index.rd_locator.spcOid.to_ne_bytes());
+    b[4..8].copy_from_slice(&index.rd_locator.dbOid.to_ne_bytes());
+    b[8..12].copy_from_slice(&index.rd_locator.relNumber.to_ne_bytes());
+    b
+}
+
+/// `GinNewBuffer(index)` (ginutil.c:305) — allocate a fresh page, recycling via
+/// the FSM (`GetFreeIndexPage` + `ConditionalLockBuffer` + `GinPageIsRecyclable`)
+/// else extending the index file (`ExtendBufferedRel`, `EB_LOCK_FIRST`). The
+/// returned buffer is pinned and exclusive-locked.
+fn gin_new_buffer_impl<'mcx>(index: &Relation<'mcx>) -> PgResult<Buffer> {
+    // First, try to get a page from the FSM.
+    loop {
+        let blkno = get_free_index_page(index)?;
+        if blkno == InvalidBlockNumber {
+            break;
+        }
+
+        let buffer = read_buffer(index, blkno)?;
+
+        // Guard against someone else having already recycled this page; the
+        // buffer may be locked if so.
+        if bufmgr::conditional_lock_buffer::call(buffer)? {
+            let mut recyclable = false;
+            bufmgr::with_buffer_page::call(buffer, &mut |page: &mut [u8]| {
+                recyclable = GinPageIsRecyclable(page)?;
+                Ok(())
+            })?;
+            if recyclable {
+                return Ok(buffer); // OK to use
+            }
+            lock_buffer(buffer, GIN_UNLOCK)?;
+        }
+
+        // Can't use it, so release the buffer and try again.
+        release_buffer(buffer);
+    }
+
+    // Must extend the file.
+    bufmgr::extend_buffered_rel::call(index, ForkNumber::MAIN_FORKNUM)
+}
+
+/// `ginGetStats(index, stats)` (ginutil.c:634) — read the metapage statistics
+/// under `GIN_SHARE` and return them.
+fn gin_get_stats_impl<'mcx>(index: &Relation<'mcx>) -> PgResult<GinMetaPageData> {
+    let metabuffer = read_buffer(index, GIN_METAPAGE_BLKNO)?;
+    lock_buffer(metabuffer, GIN_SHARE)?;
+    let mut metadata = GinMetaPageData::default();
+    bufmgr::with_buffer_page::call(metabuffer, &mut |page: &mut [u8]| {
+        metadata = read_meta(page)?;
+        Ok(())
+    })?;
+    unlock_release_buffer(metabuffer);
+    Ok(metadata)
+}
+
+/// `ginUpdateStats(index, stats, is_build)` (ginutil.c:655) — write the four
+/// planner-stat fields into the metapage under `GIN_EXCLUSIVE` (in a critical
+/// section), reset `pd_lower` past the metadata, mark dirty, emit
+/// `XLOG_GIN_UPDATE_META_PAGE` before unlock when WAL is needed and this is not
+/// a build, then unlock-release. `nPendingPages` / `ginVersion` are *not*
+/// touched.
+fn gin_update_stats_impl<'mcx>(
+    index: &Relation<'mcx>,
+    n_total_pages: BlockNumber,
+    n_entry_pages: BlockNumber,
+    n_data_pages: BlockNumber,
+    n_entries: i64,
+    is_build: bool,
+) -> PgResult<()> {
+    let metabuffer = read_buffer(index, GIN_METAPAGE_BLKNO)?;
+    lock_buffer(metabuffer, GIN_EXCLUSIVE)?;
+
+    // START_CRIT_SECTION();
+    let mut metadata = GinMetaPageData::default();
+    bufmgr::with_buffer_page::call(metabuffer, &mut |page: &mut [u8]| {
+        let mut m = read_meta(page)?;
+        m.nTotalPages = n_total_pages;
+        m.nEntryPages = n_entry_pages;
+        m.nDataPages = n_data_pages;
+        m.nEntries = n_entries;
+        write_meta(page, &m);
+        metadata = m;
+        Ok(())
+    })?;
+
+    mark_buffer_dirty(metabuffer);
+
+    if relation_needs_wal(index) && !is_build {
+        // ginxlogUpdateMeta { RelFileLocator locator; GinMetaPageData metadata;
+        //   BlockNumber prevTail; BlockNumber newRightlink; int32 ntuples; }
+        let mut rec = Vec::new();
+        rec.extend_from_slice(&relfilelocator_bytes(index));
+        rec.extend_from_slice(&meta_to_bytes(&metadata));
+        rec.extend_from_slice(&InvalidBlockNumber.to_ne_bytes()); // prevTail
+        rec.extend_from_slice(&InvalidBlockNumber.to_ne_bytes()); // newRightlink
+        rec.extend_from_slice(&0i32.to_ne_bytes()); // ntuples
+
+        xlog_begin_insert()?;
+        xlog_register_data(&rec)?;
+        xlog_register_buffer(0, metabuffer, REGBUF_WILL_INIT | REGBUF_STANDARD)?;
+        let recptr = xlog_insert_record(RM_GIN_ID, XLOG_GIN_UPDATE_META_PAGE)?;
+        page_set_lsn(metabuffer, recptr)?;
+    }
+
+    unlock_release_buffer(metabuffer);
+    // END_CRIT_SECTION();
+    Ok(())
 }
 
 // ===========================================================================
@@ -1135,6 +1377,12 @@ fn relation_get_number_of_blocks<'mcx>(rel: &Relation<'mcx>) -> PgResult<BlockNu
 }
 fn record_free_index_page<'mcx>(rel: &Relation<'mcx>, blkno: BlockNumber) -> PgResult<()> {
     backend_storage_freespace_seams::record_free_index_page::call(rel, blkno)
+}
+fn get_free_index_page<'mcx>(rel: &Relation<'mcx>) -> PgResult<BlockNumber> {
+    backend_storage_freespace_seams::get_free_index_page::call(rel)
+}
+fn read_buffer<'mcx>(rel: &Relation<'mcx>, blkno: BlockNumber) -> PgResult<Buffer> {
+    bufmgr::read_buffer::call(rel, blkno)
 }
 fn index_free_space_map_vacuum<'mcx>(rel: &Relation<'mcx>) -> PgResult<()> {
     backend_storage_freespace_seams::index_free_space_map_vacuum::call(rel)

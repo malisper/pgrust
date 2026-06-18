@@ -26,6 +26,9 @@ backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
 backend-access-index-indexam-seams = { path = "../backend-access-index-indexam-seams" }
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-access-common-indextuple = { path = "../backend-access-common-indextuple" }
 backend-access-gin-ginutil-seams = { path = "../backend-access-gin-ginutil-seams" }
 
 [dev-dependencies]

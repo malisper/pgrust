@@ -124,10 +124,100 @@ pub const PROGRESS_GIN_PHASE_MERGE_2: i64 = 6;
 // other owners install). The `init_seams()` is the empty conventional hook.
 // ===========================================================================
 
-/// This crate installs no inward seams of its own; its `-seams` crate carries
-/// only *outward* declarations (the GIN AM vtable callbacks and the cross-
-/// subsystem substrate) installed by their real owners.
-pub fn init_seams() {}
+/// Install the `initGinState` / `gintuple` substrate seams `ginutil.c`'s own
+/// functions reach — the catalog/relcache/typcache lookups and the index-tuple
+/// deform. These bodies live here (they are `ginutil.c`'s logic) but are routed
+/// through the `-seams` crate so `ginutil` can name the relcache/typcache/fmgr/
+/// indextuple substrate without a dependency cycle. The buffer-cache / WAL
+/// metapage substrate (`gin_new_buffer` / `gin_get_stats` / `gin_update_stats`)
+/// is installed by `ginvacuum` (which already carries that substrate).
+pub fn init_seams() {
+    sx::gin_relation_get_descr::set(gin_relation_get_descr_impl);
+    sx::gin_relation_get_relation_name::set(gin_relation_get_relation_name_impl);
+    sx::gin_lookup_cmp_proc_finfo::set(|mcx, atttypid| gin_lookup_cmp_proc_finfo_impl(mcx, atttypid));
+    sx::gin_index_getattr::set(gin_index_getattr_impl);
+    sx::gin_get_null_category::set(gin_get_null_category_impl);
+}
+
+/// `RelationGetDescr(index)` (utils/rel.h) — the index's nominal tuple
+/// descriptor, owned-copied into `mcx` (the relcache owns the refcounted
+/// original; the safe port hands back an owned copy).
+fn gin_relation_get_descr_impl<'mcx>(
+    mcx: Mcx<'mcx>,
+    index: &Relation<'mcx>,
+) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>> {
+    Ok(Some(relcache::relation_get_descr::call(mcx, index)?))
+}
+
+/// `RelationGetRelationName(index)` (`NameStr(rd_rel->relname)`) — the index's
+/// name, owned-copied into `mcx`.
+fn gin_relation_get_relation_name_impl<'mcx>(
+    mcx: Mcx<'mcx>,
+    index: &Relation<'mcx>,
+) -> PgResult<mcx::PgString<'mcx>> {
+    mcx::PgString::from_str_in(index.rd_rel.relname.as_str(), mcx)
+}
+
+/// `lookup_type_cache(atttypid, TYPECACHE_CMP_PROC_FINFO)->cmp_proc_finfo`
+/// (ginutil.c:147) — the index key type's default btree comparator. Resolve the
+/// cmp-proc OID through the typcache, then build its `FmgrInfo`. An
+/// `InvalidOid` cmp-proc yields an `FmgrInfo` with `fn_oid == InvalidOid`, which
+/// `initGinState` turns into the `could not identify a comparison function`
+/// ereport.
+fn gin_lookup_cmp_proc_finfo_impl<'mcx>(
+    mcx: Mcx<'mcx>,
+    atttypid: Oid,
+) -> PgResult<types_core::fmgr::FmgrInfo> {
+    let cmp_oid =
+        backend_utils_cache_typcache_seams::lookup_element_cmp_proc::call(atttypid)?;
+    if !OidIsValid(cmp_oid) {
+        return Ok(types_core::fmgr::FmgrInfo::default());
+    }
+    backend_utils_fmgr_fmgr_seams::fmgr_info::call(mcx, cmp_oid)
+}
+
+/// `index_getattr(tuple, attnum, tupdesc, &isnull)` (access/itup.h) — deform the
+/// `attnum`-th attribute of a GIN index tuple against `tupdesc`, returning
+/// `(datum, isnull)`. The C macro's null/cache fast paths fold into the
+/// `nocache_index_getattr` byte walk (correct, just not cache-accelerated).
+fn gin_index_getattr_impl<'mcx>(
+    mcx: Mcx<'mcx>,
+    tuple: &[u8],
+    attnum: u16,
+    tupdesc: &types_tuple::heaptuple::TupleDesc<'mcx>,
+) -> PgResult<(Datum<'mcx>, bool)> {
+    let td = tupdesc
+        .as_ref()
+        .ok_or_else(|| PgError::error("gin_index_getattr: null tuple descriptor"))?;
+    backend_access_common_indextuple::nocache_index_getattr_seam(mcx, tuple, attnum as i32, td)
+}
+
+/// `GinGetNullCategory(tuple, ginstate)` (ginblock.h:221) — read the stored null
+/// category byte at `IndexInfoFindDataOffset(t_info) + (oneCol ? 0 :
+/// sizeof(int16))`.
+fn gin_get_null_category_impl(tuple: &[u8], one_col: bool) -> PgResult<GinNullCategory> {
+    // t_info is the u16 at bytes 6..8 of the IndexTupleData header.
+    let t_info = u16::from_ne_bytes([tuple[6], tuple[7]]);
+    let data_off = index_info_find_data_offset(t_info);
+    let off = data_off + if one_col { 0 } else { core::mem::size_of::<i16>() };
+    Ok(tuple[off] as GinNullCategory)
+}
+
+/// `IndexInfoFindDataOffset(t_info)` (access/itup.h) — `MAXALIGN(8)` without
+/// nulls, `MAXALIGN(8 + IndexAttributeBitMapData)` with.
+fn index_info_find_data_offset(t_info: u16) -> usize {
+    const INDEX_NULL_MASK: u16 = 0x8000;
+    const SIZEOF_INDEX_TUPLE_DATA: usize = 8;
+    const SIZEOF_INDEX_ATTRIBUTE_BITMAP_DATA: usize =
+        (types_core::INDEX_MAX_KEYS as usize + 7) / 8;
+    let raw = if (t_info & INDEX_NULL_MASK) == 0 {
+        SIZEOF_INDEX_TUPLE_DATA
+    } else {
+        SIZEOF_INDEX_TUPLE_DATA + SIZEOF_INDEX_ATTRIBUTE_BITMAP_DATA
+    };
+    // MAXALIGN.
+    (raw + 7) & !7
+}
 
 // ===========================================================================
 // ginhandler (ginutil.c:37)
@@ -421,7 +511,7 @@ pub fn initGinState<'mcx>(index: &Relation<'mcx>, mcx: Mcx<'mcx>) -> PgResult<Gi
             )?;
         } else {
             // lookup_type_cache(attr->atttypid, TYPECACHE_CMP_PROC_FINFO);
-            let cmp = sx::gin_lookup_cmp_proc_finfo::call(attr.atttypid)?;
+            let cmp = sx::gin_lookup_cmp_proc_finfo::call(mcx, attr.atttypid)?;
             if !OidIsValid(cmp.fn_oid) {
                 return Err(ereport(ERROR)
                     .errcode(ERRCODE_UNDEFINED_FUNCTION)
