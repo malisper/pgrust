@@ -2573,6 +2573,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-sequence"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-relation-seams",
+ "backend-access-sequence-seams",
+ "backend-catalog-pg-class-seams",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-utils-cache-relcache-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-sequence-seams"
 version = "0.0.0"
 dependencies = [
@@ -22380,6 +22397,7 @@ dependencies = [
  "backend-access-rmgrdesc-smgrdesc",
  "backend-access-rmgrdesc-xactdesc",
  "backend-access-rmgrdesc-xlogdesc",
+ "backend-access-sequence",
  "backend-access-spg-proc",
  "backend-access-spg-quadtree",
  "backend-access-spgist-core",
