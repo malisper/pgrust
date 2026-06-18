@@ -153,17 +153,27 @@ fn routine_destroy_opaque(
     Ok(())
 }
 
-/// Install every `TableFuncRoutine` seam, keyed by routine kind (the `XmlTable`
-/// arm panics until xml.c lands). One installer owns the whole dispatch.
+/// The `TableFuncRoutine` vtable seams are owned and installed by
+/// `backend-executor-nodeTableFuncscan` (the single kind-dispatching owner that
+/// also serves the `XmlTable` arm via `xml.c`). This unit no longer installs
+/// them — doing so collided (double-install) with that owner and would have
+/// regressed the `XmlTable` arm, since these adapters panic on it. The
+/// `JsonbTable` adapter bodies below (and the `JsonTable*` impls in
+/// [`crate::json_table`]) remain available for the JSON_TABLE
+/// executor-integration keystone (`init_table_func` / `eval_column`); the
+/// dispatcher's `JsonbTable` arm will route into them once that substrate lands.
 pub fn install_routines() {
-    use backend_executor_tablefuncRoutine_seams as r;
-    r::routine_init_opaque::set(routine_init_opaque);
-    r::routine_set_document::set(routine_set_document);
-    r::routine_set_namespace::set(routine_set_namespace);
-    r::routine_has_set_row_filter::set(routine_has_set_row_filter);
-    r::routine_set_row_filter::set(routine_set_row_filter);
-    r::routine_set_column_filter::set(routine_set_column_filter);
-    r::routine_fetch_row::set(routine_fetch_row);
-    r::routine_get_value::set(routine_get_value);
-    r::routine_destroy_opaque::set(routine_destroy_opaque);
+    // Reference the adapters so they (and the `json_table` impls they call)
+    // stay compiled and ready for the keystone, without registering the seams.
+    let _ = (
+        routine_init_opaque as fn(_, _, _) -> _,
+        routine_set_document as fn(_, _, _) -> _,
+        routine_set_namespace as fn(_, _, _, _) -> _,
+        routine_has_set_row_filter as fn(_) -> _,
+        routine_set_row_filter as fn(_, _, _) -> _,
+        routine_set_column_filter as fn(_, _, _, _) -> _,
+        routine_fetch_row as fn(_, _) -> _,
+        routine_get_value as fn(_, _, _, _, _) -> _,
+        routine_destroy_opaque as fn(_, _) -> _,
+    );
 }
