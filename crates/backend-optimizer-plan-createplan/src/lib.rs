@@ -100,16 +100,22 @@ use types_nodes::rawnodes::RangeTblFunction;
 use mcx::PgString;
 use types_pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
 use types_pathnodes::{
-    IndexOptInfo, MaterialPath, NodeId, Path, PathId, PathKey, PathNode, PathTarget, PlannerInfo,
-    RelId, Relids, RinfoId,
+    EcId, IndexOptInfo, MaterialPath, NodeId, Path, PathId, PathKey, PathNode, PathTarget,
+    PlannerInfo, RelId, Relids, RinfoId,
     RELOPT_BASEREL, RELOPT_OTHER_MEMBER_REL, RTE_RELATION,
     UNIQUE_PATH_HASH, UNIQUE_PATH_NOOP, UNIQUE_PATH_SORT,
 };
+use types_nodes::nodebitmapand::BitmapAnd;
+use types_nodes::nodebitmapheapscan::BitmapHeapScan;
+use types_nodes::nodebitmapindexscan::BitmapIndexScan;
+use types_nodes::nodebitmapor::BitmapOr;
 use types_nodes::nodeagg::AGGSPLIT_SIMPLE;
 use types_core::primitive::{AttrNumber, Index, InvalidOid, Oid};
 use types_tuple::access::RELKIND_FOREIGN_TABLE;
 
-use backend_nodes_core::makefuncs::{make_bool_const, make_orclause, make_target_entry};
+use backend_nodes_core::makefuncs::{
+    make_ands_explicit, make_bool_const, make_orclause, make_target_entry,
+};
 use backend_nodes_core::nodefuncs::expression_tree_mutator;
 use backend_nodes_equalfuncs_seams::equal_expr as equal_expr_seam;
 use backend_optimizer_path_equivclass_seams as equivclass;
@@ -1721,6 +1727,452 @@ fn create_indexscan_plan<'mcx>(
     };
 
     Ok(plan)
+}
+
+// ---------------------------------------------------------------------------
+// create_bitmap_scan_plan / create_bitmap_subplan / bitmap_subplan_mark_shared
+// (createplan.c ~3190). Build a BitmapHeapScan over the Plan tree produced by
+// recursively converting the BitmapHeapPath's `bitmapqual` (an IndexPath,
+// BitmapAndPath, or BitmapOrPath) into BitmapIndexScan / BitmapAnd / BitmapOr
+// nodes.
+// ---------------------------------------------------------------------------
+
+/// `create_bitmap_scan_plan(root, (BitmapHeapPath *) best_path, tlist,
+/// scan_clauses)` — returns a bitmap scan plan for the base relation scanned by
+/// `best_path` with restriction clauses `scan_clauses` and targetlist `tlist`.
+fn create_bitmap_scan_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+    tlist: Vec<TargetEntry<'mcx>>,
+    scan_clauses: Vec<RinfoId>,
+) -> PgResult<Node<'mcx>> {
+    let (bitmapqual, parallel_aware, has_param_info, parent_relid) = match root.path(best_path) {
+        PathNode::BitmapHeapPath(p) => (
+            p.bitmapqual
+                .expect("create_bitmap_scan_plan: BitmapHeapPath has no bitmapqual"),
+            p.path.parallel_aware,
+            p.path.param_info.is_some(),
+            p.path.parent,
+        ),
+        _ => {
+            return Err(PgError::error(
+                "create_bitmap_scan_plan: best_path is not a BitmapHeapPath",
+            ))
+        }
+    };
+
+    let baserelid = root.rel(parent_relid).relid;
+
+    // it should be a base rel...
+    debug_assert!(baserelid > 0);
+    debug_assert_eq!(
+        planner_rt_fetch(run, root, baserelid).rtekind,
+        types_nodes::parsenodes::RTEKind::RTE_RELATION
+    );
+
+    // Process the bitmapqual tree into a Plan tree and qual lists.
+    let mut bitmapqualplan = create_bitmap_subplan(mcx, root, run, bitmapqual)?;
+    let mut bitmapqualorig = bitmapqualplan.qual; // bare expr arena handles
+    let indexquals = bitmapqualplan.indexqual; // bare expr arena handles
+    let index_ecs = bitmapqualplan.index_ecs; // EquivalenceClass ids
+
+    if parallel_aware {
+        bitmap_subplan_mark_shared(&mut bitmapqualplan.plan)?;
+    }
+
+    // The qpqual list must contain all restrictions not automatically handled
+    // by the index, other than pseudoconstant clauses which will be handled by
+    // a separate gating plan node. qpqual must contain scan_clauses minus
+    // whatever appears in indexquals.
+    let mut qpqual: Vec<RinfoId> = Vec::new();
+    for &rinfo in &scan_clauses {
+        let ri = root.rinfo(rinfo);
+        if ri.pseudoconstant {
+            continue; // we may drop pseudoconstants here
+        }
+        let clause_id = ri.clause;
+        // list_member(indexquals, clause): equal() over the stripped indexquals.
+        let clause_expr = root.node(clause_id).clone();
+        if indexquals
+            .iter()
+            .any(|&iq| equal_expr_seam::call(root.node(iq), &clause_expr))
+        {
+            continue; // simple duplicate
+        }
+        // rinfo->parent_ec && list_member_ptr(indexECs, rinfo->parent_ec)
+        if let Some(pec) = root.rinfo(rinfo).parent_ec {
+            if index_ecs.iter().any(|&ec| ec == pec) {
+                continue; // derived from same EquivalenceClass
+            }
+        }
+        // !contain_mutable_functions(clause) &&
+        //     predicate_implied_by(list_make1(clause), indexquals, false)
+        if !contain_mutable_functions(Some(&clause_expr))? {
+            let single = [clause_id];
+            if predtest::predicate_implied_by::call(root, &single, &indexquals, false) {
+                continue; // provably implied by indexquals
+            }
+        }
+        qpqual.push(rinfo);
+    }
+
+    // Sort clauses into best execution order.
+    let qpqual = order_qual_clauses_rinfo(root, &qpqual);
+    // Reduce RestrictInfo list to bare expressions; ignore pseudoconstants.
+    let qpqual = extract_actual_clauses(root, &qpqual, false);
+
+    // When dealing with special operators, we'll have duplicate clauses in
+    // qpqual and bitmapqualorig; drop them from bitmapqualorig.
+    // list_difference_ptr(bitmapqualorig, qpqual) — identity over arena handles.
+    bitmapqualorig.retain(|&b| !qpqual.iter().any(|&q| q == b));
+
+    // We have to replace any outer-relation variables with nestloop params in
+    // the qpqual and bitmapqualorig expressions.
+    let (qpqual, bitmapqualorig) = if has_param_info {
+        let qpqual = replace_nestloop_params_list(mcx, root, &qpqual)?;
+        let bitmapqualorig = replace_nestloop_params_list(mcx, root, &bitmapqualorig)?;
+        (qpqual, bitmapqualorig)
+    } else {
+        (qpqual, bitmapqualorig)
+    };
+
+    // Resolve owned-Expr field carriers.
+    let tlist_field = tlist_to_plan_field(mcx, tlist)?;
+    let qpqual_field = build_node_list_to_expr_field(mcx, root, &qpqual)?;
+    let bitmapqualorig_field = node_list_to_expr_vec(mcx, root, &bitmapqualorig)?;
+
+    let mut scan_plan = BitmapHeapScan {
+        scan: Scan::default(),
+        bitmapqualorig: bitmapqualorig_field,
+    };
+    {
+        let plan: &mut Plan = &mut scan_plan.scan.plan;
+        plan.targetlist = tlist_field;
+        plan.qual = qpqual_field;
+        plan.lefttree = Some(mcx::alloc_in(mcx, bitmapqualplan.plan)?);
+        plan.righttree = None;
+    }
+    scan_plan.scan.scanrelid = baserelid;
+
+    copy_generic_path_info(&mut scan_plan.scan.plan, root.path(best_path).base());
+
+    Ok(Node::BitmapHeapScan(scan_plan))
+}
+
+/// The byproducts `create_bitmap_subplan` returns alongside the Plan tree:
+/// `qual`/`indexqual` (bare-expression arena-handle lists, implicit-AND form)
+/// and `indexECs` (EquivalenceClass ids) — the C out-parameters.
+struct BitmapSubplan<'mcx> {
+    plan: Node<'mcx>,
+    qual: Vec<NodeId>,
+    indexqual: Vec<NodeId>,
+    index_ecs: Vec<EcId>,
+}
+
+/// `create_bitmap_subplan(root, bitmapqual, &qual, &indexqual, &indexECs)` —
+/// given a bitmapqual path tree, generate the Plan tree that implements it,
+/// returning the original-condition and generated-indexqual lists plus the
+/// EquivalenceClass list for the top-level indexquals.
+fn create_bitmap_subplan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    bitmapqual: PathId,
+) -> PgResult<BitmapSubplan<'mcx>> {
+    match root.path(bitmapqual) {
+        PathNode::BitmapAndPath(_) => {
+            let (bitmapquals, startup_cost, total_cost, selectivity, parent_relid, parallel_safe) =
+                match root.path(bitmapqual) {
+                    PathNode::BitmapAndPath(p) => (
+                        p.bitmapquals.clone(),
+                        p.path.startup_cost,
+                        p.path.total_cost,
+                        p.bitmapselectivity,
+                        p.path.parent,
+                        p.path.parallel_safe,
+                    ),
+                    _ => unreachable!(),
+                };
+
+            // There may well be redundant quals among the subplans; eliminate
+            // obvious duplicates with list_concat_unique.
+            let mut subplans: Vec<Node<'mcx>> = Vec::new();
+            let mut subquals: Vec<NodeId> = Vec::new();
+            let mut subindexquals: Vec<NodeId> = Vec::new();
+            let mut subindexecs: Vec<EcId> = Vec::new();
+            for child in &bitmapquals {
+                let sub = create_bitmap_subplan(mcx, root, run, *child)?;
+                subplans.push(sub.plan);
+                list_concat_unique_nodes(root, &mut subquals, &sub.qual);
+                list_concat_unique_nodes(root, &mut subindexquals, &sub.indexqual);
+                // Duplicates in indexECs aren't worth getting rid of.
+                subindexecs.extend(sub.index_ecs);
+            }
+
+            let tuples = root.rel(parent_relid).tuples;
+            let mut node = BitmapAnd {
+                plan: Plan::default(),
+                bitmapplans: subplans,
+            };
+            node.plan.startup_cost = startup_cost;
+            node.plan.total_cost = total_cost;
+            node.plan.plan_rows = costsize::clamp_row_est::call(selectivity * tuples);
+            node.plan.plan_width = 0; // meaningless
+            node.plan.parallel_aware = false;
+            node.plan.parallel_safe = parallel_safe;
+
+            Ok(BitmapSubplan {
+                plan: Node::BitmapAnd(node),
+                qual: subquals,
+                indexqual: subindexquals,
+                index_ecs: subindexecs,
+            })
+        }
+        PathNode::BitmapOrPath(_) => {
+            let (bitmapquals, startup_cost, total_cost, selectivity, parent_relid, parallel_safe) =
+                match root.path(bitmapqual) {
+                    PathNode::BitmapOrPath(p) => (
+                        p.bitmapquals.clone(),
+                        p.path.startup_cost,
+                        p.path.total_cost,
+                        p.bitmapselectivity,
+                        p.path.parent,
+                        p.path.parallel_safe,
+                    ),
+                    _ => unreachable!(),
+                };
+
+            // Here, we only detect qual-free subplans (an "... OR true ..."
+            // reduces to "true"). We do not try to eliminate redundant
+            // subclauses (could be hundreds/thousands of OR conditions).
+            let mut subplans: Vec<Node<'mcx>> = Vec::new();
+            let mut subquals: Vec<NodeId> = Vec::new();
+            let mut subindexquals: Vec<NodeId> = Vec::new();
+            let mut const_true_subqual = false;
+            let mut const_true_subindexqual = false;
+            for child in &bitmapquals {
+                let sub = create_bitmap_subplan(mcx, root, run, *child)?;
+                subplans.push(sub.plan);
+                if sub.qual.is_empty() {
+                    const_true_subqual = true;
+                } else if !const_true_subqual {
+                    let exprs = node_list_to_expr_vec_std(root, &sub.qual);
+                    let anded = make_ands_explicit(exprs);
+                    subquals.push(root.alloc_node(anded));
+                }
+                if sub.indexqual.is_empty() {
+                    const_true_subindexqual = true;
+                } else if !const_true_subindexqual {
+                    let exprs = node_list_to_expr_vec_std(root, &sub.indexqual);
+                    let anded = make_ands_explicit(exprs);
+                    subindexquals.push(root.alloc_node(anded));
+                }
+            }
+
+            // In the presence of ScalarArrayOpExpr quals, a BitmapOrPath may
+            // have just one subpath; don't add an OR step.
+            let plan: Node<'mcx> = if subplans.len() == 1 {
+                subplans.into_iter().next().unwrap()
+            } else {
+                let tuples = root.rel(parent_relid).tuples;
+                let mut node = BitmapOr {
+                    plan: Plan::default(),
+                    isshared: false,
+                    bitmapplans: subplans,
+                };
+                node.plan.startup_cost = startup_cost;
+                node.plan.total_cost = total_cost;
+                node.plan.plan_rows = costsize::clamp_row_est::call(selectivity * tuples);
+                node.plan.plan_width = 0; // meaningless
+                node.plan.parallel_aware = false;
+                node.plan.parallel_safe = parallel_safe;
+                Node::BitmapOr(node)
+            };
+
+            // If there were constant-TRUE subquals, the OR reduces to TRUE.
+            // Also avoid generating one-element ORs.
+            let qual = if const_true_subqual {
+                Vec::new()
+            } else if subquals.len() <= 1 {
+                subquals
+            } else {
+                let exprs = node_list_to_expr_vec_std(root, &subquals);
+                alloc::vec![root.alloc_node(make_orclause(exprs))]
+            };
+            let indexqual = if const_true_subindexqual {
+                Vec::new()
+            } else if subindexquals.len() <= 1 {
+                subindexquals
+            } else {
+                let exprs = node_list_to_expr_vec_std(root, &subindexquals);
+                alloc::vec![root.alloc_node(make_orclause(exprs))]
+            };
+
+            Ok(BitmapSubplan {
+                plan,
+                qual,
+                indexqual,
+                index_ecs: Vec::new(),
+            })
+        }
+        PathNode::IndexPath(_) => {
+            let (indexclauses, indpred, indexselectivity, indextotalcost, parent_relid, parallel_safe) =
+                match root.path(bitmapqual) {
+                    PathNode::IndexPath(p) => {
+                        let ii = p
+                            .indexinfo
+                            .as_deref()
+                            .expect("create_bitmap_subplan: IndexPath has no indexinfo");
+                        (
+                            p.indexclauses.clone(),
+                            ii.indpred.clone(),
+                            p.indexselectivity,
+                            p.indextotalcost,
+                            p.path.parent,
+                            p.path.parallel_safe,
+                        )
+                    }
+                    _ => unreachable!(),
+                };
+
+            // Use the regular indexscan plan build machinery, then convert the
+            // produced IndexScan into a BitmapIndexScan.
+            let iscan_node =
+                create_indexscan_plan(mcx, root, run, bitmapqual, Vec::new(), Vec::new(), false)?;
+            let iscan = match iscan_node {
+                Node::IndexScan(s) => s,
+                _ => {
+                    return Err(PgError::error(
+                        "create_bitmap_subplan: create_indexscan_plan did not return an IndexScan",
+                    ))
+                }
+            };
+
+            let mut bnode = BitmapIndexScan {
+                scan: Scan::default(),
+                indexid: iscan.indexid,
+                isshared: false,
+                indexqual: iscan.indexqual,
+                indexqualorig: iscan.indexqualorig,
+            };
+            bnode.scan.scanrelid = iscan.scan.scanrelid;
+            // not used:
+            bnode.scan.plan.targetlist = None;
+            bnode.scan.plan.qual = None;
+            bnode.scan.plan.lefttree = None;
+            bnode.scan.plan.righttree = None;
+            // set cost/width fields appropriately:
+            let tuples = root.rel(parent_relid).tuples;
+            bnode.scan.plan.startup_cost = 0.0;
+            bnode.scan.plan.total_cost = indextotalcost;
+            bnode.scan.plan.plan_rows =
+                costsize::clamp_row_est::call(indexselectivity * tuples);
+            bnode.scan.plan.plan_width = 0; // meaningless
+            bnode.scan.plan.parallel_aware = false;
+            bnode.scan.plan.parallel_safe = parallel_safe;
+
+            // Extract original index clauses, actual index quals, relevant ECs.
+            let mut subquals: Vec<NodeId> = Vec::new();
+            let mut subindexquals: Vec<NodeId> = Vec::new();
+            let mut subindexecs: Vec<EcId> = Vec::new();
+            for iclause in &indexclauses {
+                let rinfo = iclause
+                    .rinfo
+                    .expect("create_bitmap_subplan: IndexClause has no rinfo");
+                let ri = root.rinfo(rinfo);
+                debug_assert!(!ri.pseudoconstant);
+                subquals.push(ri.clause);
+                let actuals = get_actual_clauses(root, &iclause.indexquals);
+                subindexquals.extend(actuals);
+                if let Some(pec) = root.rinfo(rinfo).parent_ec {
+                    subindexecs.push(pec);
+                }
+            }
+            // We can add any index predicate conditions, too.
+            for &pred in &indpred {
+                // The index predicate was implied by the query as a whole, but
+                // may or may not be implied by the conditions pushed into the
+                // bitmapqual. Avoid generating redundant conditions.
+                let single = [pred];
+                if !predtest::predicate_implied_by::call(root, &single, &subquals, false) {
+                    subquals.push(pred);
+                    subindexquals.push(pred);
+                }
+            }
+
+            Ok(BitmapSubplan {
+                plan: Node::BitmapIndexScan(bnode),
+                qual: subquals,
+                indexqual: subindexquals,
+                index_ecs: subindexecs,
+            })
+        }
+        _ => Err(PgError::error("unrecognized node type in create_bitmap_subplan")),
+    }
+}
+
+/// `bitmap_subplan_mark_shared(plan)` (createplan.c) — set the `isshared` flag
+/// in the bitmap subplan so it is created in shared memory (for a parallel
+/// bitmap heap scan). Recurses to the leftmost leaf of an AND, sets `isshared`
+/// on OR / BitmapIndexScan nodes.
+fn bitmap_subplan_mark_shared(plan: &mut Node<'_>) -> PgResult<()> {
+    match plan {
+        Node::BitmapAnd(a) => {
+            let first = a
+                .bitmapplans
+                .first_mut()
+                .expect("bitmap_subplan_mark_shared: empty BitmapAnd");
+            bitmap_subplan_mark_shared(first)
+        }
+        Node::BitmapOr(o) => {
+            o.isshared = true;
+            let first = o
+                .bitmapplans
+                .first_mut()
+                .expect("bitmap_subplan_mark_shared: empty BitmapOr");
+            bitmap_subplan_mark_shared(first)
+        }
+        Node::BitmapIndexScan(b) => {
+            b.isshared = true;
+            Ok(())
+        }
+        _ => Err(PgError::error(
+            "bitmap_subplan_mark_shared: unrecognized node type",
+        )),
+    }
+}
+
+/// `list_concat_unique(dst, src)` over bare-expression arena handles: append
+/// each element of `src` not already present (by `equal()`) in `dst`.
+fn list_concat_unique_nodes(root: &PlannerInfo, dst: &mut Vec<NodeId>, src: &[NodeId]) {
+    for &s in src {
+        let s_expr = root.node(s);
+        if !dst.iter().any(|&d| equal_expr_seam::call(root.node(d), s_expr)) {
+            dst.push(s);
+        }
+    }
+}
+
+/// Resolve a list of bare clause arena handles into an owned (non-optional)
+/// plan-node `PgVec<Expr>` field.
+fn node_list_to_expr_vec<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &PlannerInfo,
+    nodes: &[NodeId],
+) -> PgResult<PgVec<'mcx, Expr>> {
+    let mut out = vec_with_capacity_in(mcx, nodes.len())?;
+    for &nid in nodes {
+        out.push(root.node(nid).clone());
+    }
+    Ok(out)
+}
+
+/// Resolve a list of bare clause arena handles into a plain `Vec<Expr>` (for
+/// `make_ands_explicit` / `make_orclause`, which take owned expression lists).
+fn node_list_to_expr_vec_std(root: &PlannerInfo, nodes: &[NodeId]) -> Vec<Expr> {
+    nodes.iter().map(|&nid| root.node(nid).clone()).collect()
 }
 
 /// Resolve a list of bare clause arena handles into an owned plan-node
@@ -7200,6 +7652,12 @@ pub fn init_seams() {
     // `cp_seam` indirection (declared in this unit's -seams crate). Install it now
     // that the converter is ported (covers both T_IndexScan and T_IndexOnlyScan).
     cp_seam::create_indexscan_plan::set(create_indexscan_plan);
+
+    // `create_bitmap_scan_plan` is reached from create_scan_plan's dispatch via
+    // the `cp_seam` indirection (declared in this unit's -seams crate). Install
+    // it now that the converter is ported (BitmapHeapScan over BitmapIndexScan/
+    // BitmapAnd/BitmapOr).
+    cp_seam::create_bitmap_scan_plan::set(create_bitmap_scan_plan);
 
     // `create_subqueryscan_subplan`: the subroot-recursion leg of
     // create_subqueryscan_plan. For set-operation children the subquery path

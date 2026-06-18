@@ -26,6 +26,9 @@ use crate::planstate::PlanStateNode;
 
 pub use crate::execstate_tags::T_BitmapOrState;
 
+/// `T_BitmapOr` plan-node tag (nodetags.h).
+pub const T_BitmapOr: crate::nodes::NodeTag = crate::nodes::NodeTag(338);
+
 /// `BitmapOr` plan node (plannodes.h):
 ///
 /// ```c
@@ -46,6 +49,27 @@ pub struct BitmapOr<'mcx> {
     /// `BitmapIndexScan` / `BitmapAnd` / `BitmapOr` `Plan`). `Node` is the
     /// unified plan-node enum that `ExecInitNode` recurses over.
     pub bitmapplans: Vec<crate::nodes::Node<'mcx>>,
+}
+
+impl BitmapOr<'_> {
+    /// `nodeTag(node)` — always `T_BitmapOr`.
+    pub fn tag(&self) -> crate::nodes::NodeTag {
+        T_BitmapOr
+    }
+
+    /// Deep copy into `mcx` (C: `copyObject` shape). Fallible: copying
+    /// allocates.
+    pub fn clone_in<'b>(&self, mcx: mcx::Mcx<'b>) -> types_error::PgResult<BitmapOr<'b>> {
+        let mut bitmapplans = mcx::vec_with_capacity_in(mcx, self.bitmapplans.len())?;
+        for child in self.bitmapplans.iter() {
+            bitmapplans.push(child.clone_in(mcx)?);
+        }
+        Ok(BitmapOr {
+            plan: self.plan.clone_in(mcx)?,
+            isshared: self.isshared,
+            bitmapplans: bitmapplans.into_iter().collect(),
+        })
+    }
 }
 
 /// `BitmapOrState` executor node (execnodes.h):

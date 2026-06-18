@@ -113,12 +113,15 @@ pub fn exec_init_node<'mcx>(
 
         // case T_BitmapOr: ExecInitBitmapOr(...) (nodeBitmapOr.c)
         //
-        // The trimmed central `Plan` (`Node`) enum has no `BitmapOr` variant
-        // yet, so no `Node::BitmapOr` arm exists to route here. Adding the
-        // `BitmapOr` Plan variant is the central-node keystone (K1 follow-on),
-        // out of scope for this executor-driver dispatch; the owner
-        // `ExecInitBitmapOr` is ported and ready. A plain `DestNone` SELECT
-        // never reaches this (BitmapOr only appears under a BitmapHeapScan).
+        // `ExecInitBitmapOr` returns a `PgBox<BitmapOrState>`; wrap it in the
+        // central `PlanStateNode`.
+        ntag::T_BitmapOr => {
+            let bitmap_or = node.expect_bitmapor();
+            let s = backend_executor_nodeBitmapOr::ExecInitBitmapOr(
+                mcx, bitmap_or, estate, eflags,
+            )?;
+            alloc_in(mcx, PlanStateNode::BitmapOr(s))?
+        }
 
         // ------------------------------------------------------------------
         // scan nodes
@@ -159,11 +162,13 @@ pub fn exec_init_node<'mcx>(
         }
 
         // case T_BitmapHeapScan: ExecInitBitmapHeapScan(...) (nodeBitmapHeapscan.c)
-        //
-        // No `BitmapHeapScan` Plan variant on the trimmed central `Node` enum
-        // (central-node keystone, K1 follow-on). The owner
-        // `ExecInitBitmapHeapScan` is ported; a plain seqscan/indexscan SELECT
-        // does not produce a bitmap heap scan.
+        ntag::T_BitmapHeapScan => {
+            let bitmap_heap = node.expect_bitmapheapscan();
+            let s = backend_executor_nodeBitmapHeapscan::ExecInitBitmapHeapScan(
+                node, bitmap_heap, estate, eflags,
+            )?;
+            alloc_in(mcx, PlanStateNode::BitmapHeapScan(s))?
+        }
 
         // case T_TidScan: ExecInitTidScan(...) (nodeTidscan.c)
         //

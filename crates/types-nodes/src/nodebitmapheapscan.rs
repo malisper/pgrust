@@ -40,6 +40,9 @@ use crate::execnodes::ScanStateData;
 
 pub use crate::nodeindexscan::{Plan, Scan};
 
+/// `T_BitmapHeapScan` plan-node tag (nodetags.h).
+pub const T_BitmapHeapScan: crate::nodes::NodeTag = crate::nodes::NodeTag(344);
+
 /// `SharedBitmapState` (execnodes.h) — the state of the parallel bitmap scan.
 /// `#[repr(i32)]` to match the C enum's storage in the DSM-shared
 /// `ParallelBitmapHeapState`.
@@ -245,6 +248,29 @@ pub struct BitmapHeapScan<'mcx> {
     /// `List *bitmapqualorig` — original index quals (expression nodes), for
     /// rechecking on lossy pages.
     pub bitmapqualorig: mcx::PgVec<'mcx, crate::primnodes::Expr>,
+}
+
+impl BitmapHeapScan<'_> {
+    /// `nodeTag(node)` — always `T_BitmapHeapScan`.
+    pub fn tag(&self) -> crate::nodes::NodeTag {
+        T_BitmapHeapScan
+    }
+
+    /// Deep copy into `mcx` (C: `copyObject` shape). Fallible: copying
+    /// allocates.
+    pub fn clone_in<'b>(
+        &self,
+        mcx: mcx::Mcx<'b>,
+    ) -> types_error::PgResult<BitmapHeapScan<'b>> {
+        let mut bitmapqualorig = mcx::vec_with_capacity_in(mcx, self.bitmapqualorig.len())?;
+        for e in self.bitmapqualorig.iter() {
+            bitmapqualorig.push(e.clone());
+        }
+        Ok(BitmapHeapScan {
+            scan: self.scan.clone_in(mcx)?,
+            bitmapqualorig,
+        })
+    }
 }
 
 /// What `node->sinstrument` (a single C `SharedBitmapHeapInstrumentation *`)
