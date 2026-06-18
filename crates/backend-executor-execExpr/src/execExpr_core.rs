@@ -2742,9 +2742,9 @@ pub fn exec_init_hashjoin_qual<'mcx>(
         .ps
         .plan
         .expect("ExecInitHashJoin: js.ps.plan is NULL");
-    let hj = match plan {
-        types_nodes::nodes::Node::HashJoin(h) => h,
-        other => panic!("ExecInitHashJoin: js.ps.plan is not a HashJoin node: {other:?}"),
+    let hj = match plan.as_hashjoin() {
+        Some(h) => h,
+        None => panic!("ExecInitHashJoin: js.ps.plan is not a HashJoin node: {plan:?}"),
     };
 
     match kind {
@@ -2767,12 +2767,13 @@ pub fn exec_init_hashjoin_qual<'mcx>(
                 Some(list) => {
                     let mut out = mcx::vec_with_capacity_in(mcx, list.len())?;
                     for n in list.iter() {
-                        match n {
-                            types_nodes::nodes::Node::Expr(e) => out.push(e.clone()),
-                            other => panic!(
+                        if let Some(e) = n.as_expr() {
+                            out.push(e.clone());
+                        } else {
+                            panic!(
                                 "ExecInitHashJoin: hashclauses element is not an \
-                                 expression node: {other:?}"
-                            ),
+                                 expression node: {n:?}"
+                            );
                         }
                     }
                     out
