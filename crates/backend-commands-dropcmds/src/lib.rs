@@ -683,9 +683,9 @@ fn str_val(object: &Node) -> String {
 
 /// `strVal(node)` for a `String` value node.
 fn node_str_val(node: &Node) -> String {
-    match node {
-        Node::String(StringNode { sval }) => sval.clone().unwrap_or_default(),
-        _ => unreachable!("Node::String expected for strVal()"),
+    match node.as_string() {
+        Some(StringNode { sval }) => sval.clone().unwrap_or_default(),
+        None => unreachable!("Node::String expected for strVal()"),
     }
 }
 
@@ -757,9 +757,9 @@ fn llast(list: &[Node]) -> &Node {
 fn namelist_of_nodes(cells: &[Node]) -> PgResult<Vec<Option<String>>> {
     Ok(cells
         .iter()
-        .map(|cell| match cell {
-            Node::String(StringNode { sval }) => sval.clone(),
-            _ => unreachable!("Node::String expected in name list"),
+        .map(|cell| match cell.as_string() {
+            Some(StringNode { sval }) => sval.clone(),
+            None => unreachable!("Node::String expected in name list"),
         })
         .collect())
 }
