@@ -236,8 +236,10 @@ fn examine_expression_stats<'mcx, 'run>(
     vardata: &mut VariableStatData,
 ) -> PgResult<()> {
     // The nullingrels bits could prevent matching; strip them when the
-    // expression overlaps any outer join.
-    let mut node = basenode.clone();
+    // expression overlaps any outer join. clone_in (deep): the matched node may
+    // be an Aggref (e.g. a HAVING `max(b) > 15`), whose context-allocated
+    // TargetEntry args a bare derived `.clone()` panics on.
+    let mut node = basenode.clone_in(mcx)?;
     let outer_join_rels = root.outer_join_rels.clone();
     if rel_seams::relids_overlap::call(varnos, &outer_join_rels) {
         let none: Relids = None;
