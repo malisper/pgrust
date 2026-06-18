@@ -1660,6 +1660,25 @@ fn seam_define_savepoint(name: &str) -> PgResult<()> {
     engine::DefineSavepoint(Some(name))
 }
 
+/// `ReleaseSavepoint(name)` — utility-out-seam adapter. The grammar requires a
+/// savepoint name for `RELEASE [SAVEPOINT] name`, so a `None` here is a parser
+/// invariant violation.
+fn seam_release_savepoint(name: Option<&str>) -> PgResult<()> {
+    engine::ReleaseSavepoint(name.expect("RELEASE SAVEPOINT requires a savepoint name"))
+}
+
+/// `RollbackToSavepoint(name)` — utility-out-seam adapter (name required by the
+/// grammar, same as RELEASE).
+fn seam_rollback_to_savepoint(name: Option<&str>) -> PgResult<()> {
+    engine::RollbackToSavepoint(name.expect("ROLLBACK TO SAVEPOINT requires a savepoint name"))
+}
+
+/// `PrepareTransactionBlock(gid)` — utility-out-seam adapter. `PREPARE
+/// TRANSACTION 'gid'` always carries a gid in the grammar.
+fn seam_prepare_transaction_block(gid: Option<&str>) -> PgResult<bool> {
+    engine::PrepareTransactionBlock(gid.expect("PREPARE TRANSACTION requires a transaction id"))
+}
+
 /// `XactIsoLevel = XACT_READ_COMMITTED` — seam adapter for
 /// `set_xact_iso_level_read_committed`.
 fn seam_set_xact_iso_level_read_committed() {
@@ -1797,6 +1816,18 @@ pub fn init_seams() {
         util::warn_no_transaction_block::set(WarnNoTransactionBlock);
         util::xact_read_only::set(XactReadOnly);
         util::is_in_parallel_mode::set(IsInParallelMode);
+
+        // Transaction-control verbs (BEGIN/COMMIT/ROLLBACK/SAVEPOINT/RELEASE/
+        // ROLLBACK TO/PREPARE). The dispatch in standard_ProcessUtility's
+        // T_TransactionStmt case reaches these xact.c entry points through the
+        // utility-out-seams.
+        util::begin_transaction_block::set(engine::BeginTransactionBlock);
+        util::end_transaction_block::set(engine::EndTransactionBlock);
+        util::user_abort_transaction_block::set(engine::UserAbortTransactionBlock);
+        util::define_savepoint::set(engine::DefineSavepoint);
+        util::release_savepoint::set(seam_release_savepoint);
+        util::rollback_to_savepoint::set(seam_rollback_to_savepoint);
+        util::prepare_transaction_block::set(seam_prepare_transaction_block);
     }
 
     // matview.c reaches CommandCounterIncrement through its outward frontier
