@@ -1270,10 +1270,18 @@ fn portal_run_multi(
                 }
 
                 /*
-                 * We can't have the holdSnapshot also be the active one ...
-                 * force an extra snapshot copy.
+                 * We can't have the holdSnapshot also be the active one,
+                 * because UpdateActiveSnapshotCommandId would complain.  So
+                 * force an extra snapshot copy.  Plain PushActiveSnapshot would
+                 * have copied the transaction snapshot anyway, so this only adds
+                 * a copy step when setHoldSnapshot is true.
+                 *   PushCopiedSnapshot(snapshot);
+                 * (`snapshot` is the transaction snapshot taken above — NOT the
+                 * active snapshot: there is no active snapshot at this point in
+                 * PortalRunMulti, the parse/plan snapshot having been popped by
+                 * exec_simple_query.)
                  */
-                snapmgr_seam::push_copied_active_snapshot::call()?;
+                snapmgr_seam::push_copied_snapshot::call(Rc::new(snapshot))?;
 
                 active_snapshot_set = true;
             } else {

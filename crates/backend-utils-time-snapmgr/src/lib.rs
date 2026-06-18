@@ -1614,6 +1614,10 @@ pub fn init_seams() {
         PushActiveSnapshot(&new_handle((*snapshot).clone()));
         Ok(())
     });
+    seams::push_copied_snapshot::set(|snapshot| {
+        PushCopiedSnapshot(&new_handle((*snapshot).clone()));
+        Ok(())
+    });
     seams::push_active_snapshot_with_level::set(|snapshot, snap_level| {
         PushActiveSnapshotWithLevel(&new_handle((*snapshot).clone()), snap_level);
         Ok(())

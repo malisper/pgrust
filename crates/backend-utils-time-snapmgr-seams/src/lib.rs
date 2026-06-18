@@ -132,6 +132,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `PushCopiedSnapshot(snapshot)` (snapmgr.c:729): push a *copy* of the
+    /// given snapshot onto the active-snapshot stack. Used by `PortalRunMulti`
+    /// (pquery.c:1257) with the transaction snapshot, so the active snapshot can
+    /// carry a fresh command id without aliasing a registered hold snapshot. The
+    /// snapshot crosses as the shared `Rc<SnapshotData>` the stack aliases.
+    pub fn push_copied_snapshot(
+        snapshot: std::rc::Rc<types_snapshot::SnapshotData>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `UpdateActiveSnapshotCommandId()` (copyto.c:831): bump the active
     /// snapshot's command id so this query sees the results of previously
     /// executed commands. `Err` carries snapmgr `ereport(ERROR)`s.
