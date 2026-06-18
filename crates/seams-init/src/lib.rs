@@ -1106,8 +1106,6 @@ mod recurrence_guard {
         //     (populate_typ_list); scan substrate exists, the driver is unwritten.
         //   * scan_indisclustered — cluster.c `get_tables_to_cluster` pg_index
         //     `indisclustered` systable scan; driver unwritten.
-        //   * log_heap_visible — XLOG_HEAP2_VISIBLE WAL emission; owner has
-        //     log_heap_new_cid/log_heap_update but not this one.
         //   * index_compute_xid_horizon_for_tuples — the full index-buffer
         //     line-pointer + heap-page conflict-horizon driver; only the per-tuple
         //     helper HeapTupleHeaderAdvanceConflictHorizon is ported.
@@ -1117,7 +1115,6 @@ mod recurrence_guard {
         // DELETE each entry when its driver lands in the heap-AM port.
         ("backend_access_heap_heapam", "index_compute_xid_horizon_for_tuples"),
         ("backend_access_heap_heapam", "insert_one_tuple"),
-        ("backend_access_heap_heapam", "log_heap_visible"),
         ("backend_access_heap_heapam", "read_pg_type"),
         ("backend_access_heap_heapam", "scan_indisclustered"),
         // (TD-DEST-COMMAND-LIFECYCLE RETIRED: printtup.c's

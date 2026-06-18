@@ -497,12 +497,27 @@ pub struct xl_heap_visible {
     pub flags: u8,
 }
 
+/// `SizeOfHeapVisible` (`access/heapam_xlog.h`): `offsetof(xl_heap_visible,
+/// flags) + sizeof(uint8)` — `snapshotConflictHorizon`(u32)@0, `flags`(u8)@4 =>
+/// 5 bytes.
+#[allow(non_upper_case_globals)]
+pub const SizeOfHeapVisible: usize = 5;
+
 impl xl_heap_visible {
     pub fn from_bytes(rec: &[u8]) -> Self {
         Self {
             snapshotConflictHorizon: u32_at(rec, 0),
             flags: u8_at(rec, 4),
         }
+    }
+
+    /// Serialize into the `SizeOfHeapVisible`-byte on-disk layout, matching the
+    /// C struct field order (`snapshotConflictHorizon`@0, `flags`@4).
+    pub fn to_bytes(&self) -> [u8; SizeOfHeapVisible] {
+        let mut out = [0u8; SizeOfHeapVisible];
+        out[0..4].copy_from_slice(&self.snapshotConflictHorizon.to_ne_bytes());
+        out[4] = self.flags;
+        out
     }
 }
 

@@ -54,7 +54,10 @@ use types_tuple::heaptuple::{
     HEAP_XMAX_COMMITTED, HEAP_XMAX_INVALID, HEAP_XMAX_IS_MULTI, HEAP_XMAX_KEYSHR_LOCK,
     HEAP_XMAX_LOCK_ONLY,
 };
-use types_xlog_records::heapam_xlog::{xl_heap_new_cid, SizeOfHeapNewCid};
+use types_xlog_records::heapam_xlog::{
+    xl_heap_new_cid, xl_heap_visible, SizeOfHeapNewCid, SizeOfHeapVisible,
+};
+use types_wal::xloginsert::{REGBUF_NO_IMAGE, REGBUF_STANDARD};
 use types_xlog_records::multixact::MultiXactStatus;
 
 // htup_details.h infomask helpers + lock-mask vocabulary already live in the
@@ -76,7 +79,7 @@ use backend_access_transam_xloginsert_seams as xloginsert_seam;
 use backend_storage_buffer_bufmgr_seams as bufmgr_seam;
 
 use types_wal::wal::RM_HEAP2_ID;
-use backend_rmgrdesc_next::heapdesc::XLOG_HEAP2_NEW_CID;
+use backend_rmgrdesc_next::heapdesc::{XLOG_HEAP2_NEW_CID, XLOG_HEAP2_VISIBLE};
 
 // ===========================================================================
 // HeapTupleFreeze / HeapPageFreeze — NET-NEW descriptors (access/heapam.h).
@@ -371,6 +374,56 @@ pub fn log_heap_new_cid(
     Ok(recptr)
 }
 
+// ===========================================================================
+// log_heap_visible — emit the XLOG_HEAP2_VISIBLE record (heapam.c).
+// ===========================================================================
+
+/// `VISIBILITYMAP_XLOG_CATALOG_REL` (heapam_xlog.h) — the VM-bit that flags the
+/// heap relation as catalog-accessible during logical decoding; carried only in
+/// `xl_heap_visible.flags`.
+const VISIBILITYMAP_XLOG_CATALOG_REL: u8 = 0x04;
+
+/// `log_heap_visible(rel, heap_buffer, vm_buffer, snapshotConflictHorizon,
+/// vmflags)` (heapam.c) — emit the `XLOG_HEAP2_VISIBLE` WAL record when a
+/// visibility-map bit is set during VACUUM. Backup block 0 is the VM buffer;
+/// backup block 1 is the heap buffer (registered with `REGBUF_NO_IMAGE` to
+/// optimize away the FPI unless `XLogHintBitIsNeeded()`). Returns the record's
+/// LSN.
+pub fn log_heap_visible(
+    rel: &RelationData,
+    heap_buffer: Buffer,
+    vm_buffer: Buffer,
+    snapshot_conflict_horizon: TransactionId,
+    vmflags: u8,
+) -> PgResult<XLogRecPtr> {
+    debug_assert!(heap_buffer != InvalidBuffer);
+    debug_assert!(vm_buffer != InvalidBuffer);
+
+    let mut xlrec = xl_heap_visible {
+        snapshotConflictHorizon: snapshot_conflict_horizon,
+        flags: vmflags,
+    };
+    if delete::relation_is_accessible_in_logical_decoding(rel) {
+        xlrec.flags |= VISIBILITYMAP_XLOG_CATALOG_REL;
+    }
+
+    xloginsert_seam::xlog_begin_insert::call()?;
+    let buf = xlrec.to_bytes();
+    xloginsert_seam::xlog_register_data::call(&buf[..SizeOfHeapVisible])?;
+
+    xloginsert_seam::xlog_register_buffer::call(0, vm_buffer, 0)?;
+
+    let mut flags = REGBUF_STANDARD;
+    if !backend_access_transam_xlog_seams::xlog_hint_bit_is_needed::call() {
+        flags |= REGBUF_NO_IMAGE;
+    }
+    xloginsert_seam::xlog_register_buffer::call(1, heap_buffer, flags)?;
+
+    let recptr = xloginsert_seam::xlog_insert_record::call(RM_HEAP2_ID, XLOG_HEAP2_VISIBLE)?;
+
+    Ok(recptr)
+}
+
 /// `HeapTupleHeaderGetCmin(hdr)` — combo-CID resolution via the owner seam.
 fn HeapTupleHeaderGetCmin(hdr: &HeapTupleHeaderData) -> CommandId {
     backend_utils_time_combocid_seams::heap_tuple_header_get_cmin::call(hdr)
@@ -400,6 +453,13 @@ pub fn init_seams() {
     // `HeapTupleGetUpdateXid(htup)` reduces to the visibility crate's
     // `HeapTupleHeaderGetUpdateXid` (header-only multixact resolution).
     heapam_seam::heap_tuple_get_update_xid::set(|tuple| HeapTupleHeaderGetUpdateXid(tuple));
+
+    // `log_heap_visible(rel, heap_buffer, vm_buffer, snapshotConflictHorizon,
+    // vmflags)` — emit the XLOG_HEAP2_VISIBLE record (heapam.c). Called by
+    // visibilitymap_set when a VM bit is set during VACUUM.
+    heapam_seam::log_heap_visible::set(|rel, heap_buffer, vm_buffer, horizon, vmflags| {
+        log_heap_visible(rel, heap_buffer, vm_buffer, horizon, vmflags)
+    });
 
     // `HeapKeyTest(tuple, RelationGetDescr(rel), nkeys, keys)` (access/valid.h)
     // — the qualified-scan scan-key evaluation (#281).

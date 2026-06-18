@@ -1138,7 +1138,7 @@ fn TransactionIdDidCommit(xid: TransactionId) -> PgResult<bool> {
 }
 
 /// `RelationIsAccessibleInLogicalDecoding(relation)` (utils/rel.h).
-fn relation_is_accessible_in_logical_decoding(relation: &RelationData<'_>) -> bool {
+pub(crate) fn relation_is_accessible_in_logical_decoding(relation: &RelationData<'_>) -> bool {
     let wal = backend_access_transam_xlog_seams::wal_level::call();
     let xlog_logical_info_active = wal >= types_wal::WalLevel::Logical;
     xlog_logical_info_active
