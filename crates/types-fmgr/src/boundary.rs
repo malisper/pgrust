@@ -54,6 +54,14 @@ pub enum RefPayload {
     Composite(Vec<u8>),
     /// A live expanded object (PG `VARATT_IS_EXPANDED`).
     Expanded(Box<dyn ExpandedObject>),
+    /// A C `internal` pseudo-type value — a `void *` to live, caller-owned
+    /// mutable state (e.g. an aggregate's `NumericAggState`/`ArrayBuildState`).
+    /// The owned referent is an erased `Box<dyn Any>`; the callee downcasts it
+    /// to its private state type and mutates it in place, returning the same
+    /// box. C never `datumCopy`s, flattens, or compares an `internal` Datum, so
+    /// the byte-oriented operations panic on this arm (a wiring bug, not a data
+    /// path).
+    Internal(Box<dyn core::any::Any>),
 }
 
 impl RefPayload {
@@ -103,6 +111,47 @@ impl RefPayload {
         }
     }
 
+    /// True iff this is an `internal` pseudo-type value.
+    pub fn is_internal(&self) -> bool {
+        matches!(self, RefPayload::Internal(_))
+    }
+
+    /// CHECKED `&T` downcast of an `internal` payload (C: the unchecked
+    /// `(StateType *) PG_GETARG_POINTER(0)`). `None` if this is not an
+    /// `Internal` arm; panics on a type mismatch (a wiring bug).
+    pub fn as_internal<T: core::any::Any>(&self) -> Option<&T> {
+        match self {
+            RefPayload::Internal(a) => Some(a.downcast_ref::<T>().unwrap_or_else(|| {
+                panic!(
+                    "RefPayload::Internal: downcast_ref to {} failed",
+                    core::any::type_name::<T>()
+                )
+            })),
+            _ => None,
+        }
+    }
+
+    /// CHECKED `&mut T` downcast of an `internal` payload.
+    pub fn as_internal_mut<T: core::any::Any>(&mut self) -> Option<&mut T> {
+        match self {
+            RefPayload::Internal(a) => Some(a.downcast_mut::<T>().unwrap_or_else(|| {
+                panic!(
+                    "RefPayload::Internal: downcast_mut to {} failed",
+                    core::any::type_name::<T>()
+                )
+            })),
+            _ => None,
+        }
+    }
+
+    /// Take the erased `internal` box out, consuming the payload.
+    pub fn into_internal(self) -> Option<Box<dyn core::any::Any>> {
+        match self {
+            RefPayload::Internal(a) => Some(a),
+            _ => None,
+        }
+    }
+
     /// Flatten-on-store (the disk/wire path): consume and produce flat bytes.
     pub fn flatten(self) -> Vec<u8> {
         match self {
@@ -114,6 +163,9 @@ impl RefPayload {
                 let mut dst = vec![0u8; n];
                 eo.flatten_into(&mut dst);
                 dst
+            }
+            RefPayload::Internal(_) => {
+                panic!("RefPayload::Internal cannot be flattened (C: an internal Datum is never serialized; use the aggregate's serialfn)")
             }
         }
     }
@@ -130,6 +182,9 @@ impl RefPayload {
                 let mut dst = vec![0u8; n];
                 eo.flatten_into(&mut dst);
                 RefPayload::Varlena(dst)
+            }
+            RefPayload::Internal(_) => {
+                panic!("RefPayload::Internal cannot be cloned (C: an internal Datum is never datumCopy'd)")
             }
         }
     }
@@ -151,6 +206,7 @@ impl core::fmt::Debug for RefPayload {
                 .debug_struct("Expanded")
                 .field("flat_size", &eo.get_flat_size())
                 .finish(),
+            RefPayload::Internal(_) => f.debug_tuple("Internal").field(&"<opaque>").finish(),
         }
     }
 }
@@ -166,6 +222,10 @@ impl PartialEq for RefPayload {
             // A composite image only equals another composite image (never a
             // bare cstring/varlena, even byte-for-byte).
             (RefPayload::Composite(_), _) | (_, RefPayload::Composite(_)) => false,
+            // An `internal` value has no value-equality (C compares the void*
+            // pointers; two distinct boxes are never equal). Identity is tested
+            // out-of-band by the caller, never through this impl.
+            (RefPayload::Internal(_), _) | (_, RefPayload::Internal(_)) => false,
             (a, b) => a.clone_flat().flatten() == b.clone_flat().flatten(),
         }
     }

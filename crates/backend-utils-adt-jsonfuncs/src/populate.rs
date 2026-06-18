@@ -196,6 +196,7 @@ fn fmgr_out_to_datum<'mcx>(mcx: Mcx<'mcx>, out: FmgrOut<'mcx>) -> PgResult<Datum
                 )?,
             )),
             types_fmgr::boundary::RefPayload::Expanded(eo) => Ok(Datum::Expanded(eo)),
+            types_fmgr::boundary::RefPayload::Internal(state) => Ok(Datum::Internal(state)),
         },
     }
 }

@@ -2397,9 +2397,33 @@ pub fn datum_to_ref_arg(
             NullableDatum::value(Datum::null()),
             Some(RefPayload::Composite(t.to_datum_image())),
         ),
-        CanonDatum::Expanded(_) | CanonDatum::Internal(_) => {
-            panic!("datum_to_ref_arg: Expanded/Internal Datum not yet produced — wave 2")
+        CanonDatum::Internal(_) => {
+            // An `internal` value cannot be cloned out of a borrow (the
+            // `Box<dyn Any>` has no Clone). The by-value `datum_to_ref_arg_owned`
+            // path moves it instead; reaching here means a borrowed-arg caller
+            // tried to marshal an internal Datum, a wiring bug.
+            panic!("datum_to_ref_arg: an `internal` Datum must cross by value (use datum_to_ref_arg_owned / function_call_invoke_datum_owned)")
         }
+        CanonDatum::Expanded(_) => {
+            panic!("datum_to_ref_arg: Expanded Datum not yet produced — wave 2")
+        }
+    }
+}
+
+/// By-value form of [`datum_to_ref_arg`]: consumes the canonical [`Datum`] so an
+/// `internal` value's owned `Box<dyn Any>` moves into the `RefPayload::Internal`
+/// by-reference referent (C: `args[0].value = (Datum) state`, a `void *`).
+pub fn datum_to_ref_arg_owned(
+    val: types_tuple::backend_access_common_heaptuple::Datum<'_>,
+) -> (NullableDatum, Option<RefPayload>) {
+    use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
+    match val {
+        CanonDatum::Internal(state) => (
+            NullableDatum::value(Datum::null()),
+            Some(RefPayload::Internal(state)),
+        ),
+        // Every other arm has the same marshalling as the borrowed form.
+        other => datum_to_ref_arg(&other),
     }
 }
 
@@ -2429,6 +2453,9 @@ fn ref_out_to_datum<'mcx>(
                 mcx, &image,
             )?,
         )),
+        // An `internal`-returning function (an aggregate transfn) hands back its
+        // live state box; carry it on the canonical `Internal` arm.
+        Some(RefPayload::Internal(state)) => Ok(CanonDatum::Internal(state)),
         Some(payload) => {
             let bytes: Vec<u8> = payload.flatten();
             Ok(CanonDatum::ByRef(mcx::slice_in(mcx, &bytes)?))
@@ -2922,11 +2949,15 @@ fn function_call_invoke_seam(
 /// returns NULL through `fcinfo->isnull`, which the caller reads back; the strict
 /// short-circuit was already applied by the interpreter's `_STRICT` opcodes. The
 /// result `Datum` (by-value or by-reference) is materialized into `mcx`.
-fn function_call_invoke_datum_seam<'mcx>(
+/// Shared core of the by-OID `FunctionCallInvoke` over the canonical `Datum`
+/// lane: re-resolve `fn_oid`, stamp `fn_expr`, build the `fcinfo` frame from the
+/// already-marshalled `(word, ref)` pairs, dispatch, and materialize the result.
+fn function_call_invoke_datum_core<'mcx>(
     mcx: Mcx<'mcx>,
     fn_oid: Oid,
     collation: Oid,
-    args: &[types_tuple::backend_access_common_heaptuple::Datum<'mcx>],
+    nargs: Vec<NullableDatum>,
+    ref_args: Vec<Option<RefPayload>>,
     fn_expr: Option<&types_nodes::primnodes::Expr>,
 ) -> PgResult<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)> {
     let mut resolved = fmgr_info(mcx, fn_oid)?;
@@ -2946,17 +2977,6 @@ fn function_call_invoke_datum_seam<'mcx>(
             tag: 0,
             node: Some(types_core::fmgr::FnExprErased::new(expr.clone_in(mcx)?)),
         })));
-    }
-
-    // Build the `fcinfo->args[]` frame: by-value word lane + by-reference side
-    // channel. The canonical arg's own NULL state rides its variant; the
-    // interpreter has already applied the strict-null short-circuit upstream.
-    let mut nargs: Vec<NullableDatum> = Vec::with_capacity(args.len());
-    let mut ref_args: Vec<Option<RefPayload>> = Vec::with_capacity(args.len());
-    for val in args {
-        let (nd, refp) = datum_to_ref_arg(val);
-        nargs.push(nd);
-        ref_args.push(refp);
     }
 
     // C: fcache->flinfo.fn_expr = fcinfo->flinfo->fn_expr (fmgr.c:658).
@@ -2980,6 +3000,47 @@ fn function_call_invoke_datum_seam<'mcx>(
     // Materialize the result into `mcx` (by-value or by-reference).
     let result = ref_out_to_datum(mcx, word, ref_result)?;
     Ok((result, false))
+}
+
+fn function_call_invoke_datum_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    fn_oid: Oid,
+    collation: Oid,
+    args: &[types_tuple::backend_access_common_heaptuple::Datum<'mcx>],
+    fn_expr: Option<&types_nodes::primnodes::Expr>,
+) -> PgResult<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)> {
+    // Build the `fcinfo->args[]` frame: by-value word lane + by-reference side
+    // channel. The canonical arg's own NULL state rides its variant; the
+    // interpreter has already applied the strict-null short-circuit upstream.
+    let mut nargs: Vec<NullableDatum> = Vec::with_capacity(args.len());
+    let mut ref_args: Vec<Option<RefPayload>> = Vec::with_capacity(args.len());
+    for val in args {
+        let (nd, refp) = datum_to_ref_arg(val);
+        nargs.push(nd);
+        ref_args.push(refp);
+    }
+    function_call_invoke_datum_core(mcx, fn_oid, collation, nargs, ref_args, fn_expr)
+}
+
+/// By-value form of [`function_call_invoke_datum_seam`]: consumes `args`, so an
+/// `internal` argument's `Box<dyn Any>` moves into the by-reference side channel
+/// (and back out as the result) instead of cloning. This is the form the
+/// aggregate transition machinery uses for `internal`-transtype aggregates.
+fn function_call_invoke_datum_owned_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    fn_oid: Oid,
+    collation: Oid,
+    args: Vec<types_tuple::backend_access_common_heaptuple::Datum<'mcx>>,
+    fn_expr: Option<&types_nodes::primnodes::Expr>,
+) -> PgResult<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)> {
+    let mut nargs: Vec<NullableDatum> = Vec::with_capacity(args.len());
+    let mut ref_args: Vec<Option<RefPayload>> = Vec::with_capacity(args.len());
+    for val in args {
+        let (nd, refp) = datum_to_ref_arg_owned(val);
+        nargs.push(nd);
+        ref_args.push(refp);
+    }
+    function_call_invoke_datum_core(mcx, fn_oid, collation, nargs, ref_args, fn_expr)
 }
 
 /// `CreateConversionCommand`'s conversion-function empty-input self-test
@@ -3652,6 +3713,9 @@ pub fn init_seams() {
     backend_utils_fmgr_fmgr_seams::function_call_invoke::set(function_call_invoke_seam);
     backend_utils_fmgr_fmgr_seams::fastpath_function_call_invoke::set(function_call_invoke_seam);
     backend_utils_fmgr_fmgr_seams::function_call_invoke_datum::set(function_call_invoke_datum_seam);
+    backend_utils_fmgr_fmgr_seams::function_call_invoke_datum_owned::set(
+        function_call_invoke_datum_owned_seam,
+    );
     // The planner const-folder's `evaluate_expr` fmgr leg (clauses.c): fmgr owns
     // the function-by-OID invocation over constant args.
     backend_optimizer_util_clauses_seams::fmgr_call::set(fmgr_call_seam);

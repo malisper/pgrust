@@ -209,6 +209,19 @@ impl FunctionCallInfoBaseData {
         self.ref_args.get(index).and_then(|slot| slot.as_ref())
     }
 
+    /// Mutably borrow the by-reference payload for argument `index` (C: the
+    /// `internal` aggregate transfn scribbles on `*(StateType *) args[0]` in
+    /// place).
+    pub fn ref_arg_mut(&mut self, index: usize) -> Option<&mut RefPayload> {
+        self.ref_args.get_mut(index).and_then(|slot| slot.as_mut())
+    }
+
+    /// Take the by-reference payload for argument `index` out, leaving `None`
+    /// (move an `internal` state box out of the call frame).
+    pub fn take_ref_arg(&mut self, index: usize) -> Option<RefPayload> {
+        self.ref_args.get_mut(index).and_then(|slot| slot.take())
+    }
+
     /// Store the by-reference result (C: a pointer-`Datum` return).
     pub fn set_ref_result(&mut self, payload: RefPayload) {
         self.ref_result = Some(payload);

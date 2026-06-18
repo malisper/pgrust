@@ -414,11 +414,15 @@ fn invoke_transfn<'mcx>(
         .fn_expr
         .as_ref()
         .and_then(|e| e.downcast_ref::<types_nodes::primnodes::Expr>());
-    backend_utils_fmgr_fmgr_seams::function_call_invoke_datum::call(
+    // By-value dispatch: arg 0 may be a `Datum::Internal` (the running
+    // aggregate state for an `internal`-transtype aggregate), whose owned
+    // `Box<dyn Any>` cannot be cloned out of a borrow. The owned seam moves it
+    // into the fmgr by-reference side channel and back out as the result.
+    backend_utils_fmgr_fmgr_seams::function_call_invoke_datum_owned::call(
         mcx,
         pertrans.transfn.fn_oid,
         pertrans.agg_collation,
-        &args,
+        args,
         fn_expr,
     )
 }
@@ -502,11 +506,40 @@ pub fn ExecAggPlainTransByRef<'mcx>(
     aggstate.current_set = setno;
     aggstate.curpertrans = transno as i32;
 
+    let mcx = estate.es_query_cxt;
+
+    // C `internal`-pseudo-type transition state (e.g. NumericAggState,
+    // ArrayBuildState): the running value is a `Datum::Internal` box that cannot
+    // be cloned. The transfn mutates the state in place and returns the same
+    // pointer, so C's `newVal == pergroupstate->transValue` reparent fast path is
+    // always taken (no datumCopy). MOVE the state out (it is NULL on the first
+    // call, before any state has been built), invoke, and store the returned
+    // state back — no clone, no copy-into-aggcontext, no pointer comparison
+    // (`Datum::Internal` is not comparable, as C never compares an internal).
+    let is_internal = pertrans_ref(aggstate, transno).aggtranstype == INTERNALOID;
+    if is_internal {
+        let (trans_value, trans_value_is_null) = {
+            let pg = pergroup_mut(aggstate, setoff, transno);
+            (
+                core::mem::replace(&mut pg.trans_value, AggDatum::null()),
+                pg.trans_value_is_null,
+            )
+        };
+        let (new_val, isnull) = {
+            let pertrans = pertrans_ref(aggstate, transno);
+            invoke_transfn(pertrans, trans_value, trans_value_is_null, input_args, mcx)?
+        };
+        let pergroup = pergroup_mut(aggstate, setoff, transno);
+        pergroup.trans_value = new_val;
+        pergroup.trans_value_is_null = isnull;
+        aggstate.curpertrans = -1;
+        return Ok(());
+    }
+
     let (trans_value, trans_value_is_null) = {
         let pg = pergroup_ref(aggstate, setoff, transno);
         (pg.trans_value.clone(), pg.trans_value_is_null)
     };
-    let mcx = estate.es_query_cxt;
     let (transtype_by_val, transtype_len) = {
         let pertrans = pertrans_ref(aggstate, transno);
         (pertrans.transtype_by_val, pertrans.transtype_len)
@@ -945,6 +978,10 @@ fn datum_ptr_eq(a: &AggDatum<'_>, b: &AggDatum<'_>) -> bool {
 }
 
 /// `TUPLESORT_NONE` (tuplesort.h) — no extra sort options.
+/// `INTERNALOID` (catalog/pg_type_d.h) — the `internal` pseudo-type, whose
+/// transition value is a `void *` carried on the canonical `Datum::Internal`.
+const INTERNALOID: types_core::Oid = 2281;
+
 const TUPLESORT_NONE: i32 = 0;
 
 /// `work_mem` (guc) — sort working-memory limit, in kilobytes. The GUC is a

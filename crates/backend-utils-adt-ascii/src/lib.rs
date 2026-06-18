@@ -192,6 +192,7 @@ fn arg_text<'a>(arg: FmgrArg<'a, '_>) -> &'a [u8] {
         FmgrArg::Ref(RefPayload::Cstring(s)) => s.as_bytes(),
         FmgrArg::Ref(RefPayload::Composite(_))
         | FmgrArg::Ref(RefPayload::Expanded(_))
+        | FmgrArg::Ref(RefPayload::Internal(_))
         | FmgrArg::ByVal(_) => &[],
     }
 }

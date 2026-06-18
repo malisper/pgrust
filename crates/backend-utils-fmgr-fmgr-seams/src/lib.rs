@@ -962,6 +962,26 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `FunctionCallInvoke(fcinfo)` over the canonical [`Datum`] lane, taking the
+    /// arguments **by value** (moving them in). This is the form an aggregate
+    /// transition function needs: a `Datum::Internal` (C `internal` pseudo-type)
+    /// argument is a `Box<dyn Any>` that cannot be cloned out of a borrow — it is
+    /// moved into the `fcinfo` by-reference side channel, mutated in place by the
+    /// transfn, and the (possibly same) state moved back out as the result. Every
+    /// other arm behaves exactly like [`function_call_invoke_datum`]. Returns the
+    /// result `Datum<'mcx>` (a by-value scalar, a materialized by-reference value,
+    /// or a `Datum::Internal` carrying the returned state) and the callee's
+    /// read-back `fcinfo->isnull`.
+    pub fn function_call_invoke_datum_owned<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        fn_oid: Oid,
+        collation: Oid,
+        args: Vec<Datum<'mcx>>,
+        fn_expr: Option<&types_nodes::primnodes::Expr>,
+    ) -> PgResult<(Datum<'mcx>, bool)>
+);
+
+seam_core::seam!(
     /// `construct_array_builtin(datums, n, CSTRINGOID)` +
     /// `DatumGetInt32(OidFunctionCall1(typmodin, PointerGetDatum(arrtypmod)))`
     /// (parse_type.c `typenameTypeMod`): apply a type's `typmodin` function to
