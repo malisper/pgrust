@@ -254,6 +254,58 @@ fn set_varsize_short(dest: &mut [u8], len: usize) {
 /// `VARDATA(PTR)` byte offset for a 4-byte-header varlena (== `VARHDRSZ`).
 const VARDATA_4B_OFF: usize = VARHDRSZ;
 
+/// `SET_VARSIZE(PTR, len)` (varatt.h, little-endian): a 4-byte uncompressed
+/// header whose `VARSIZE_4B == len` (low two bits 00). Returns the header bytes.
+#[inline]
+fn set_varsize_4b(len: usize) -> [u8; 4] {
+    ((len as u32) << 2).to_ne_bytes()
+}
+
+/// Normalize a varlena (`attlen == -1`) `Datum::ByRef` image to the header-FUL
+/// on-disk form `fill_val` / `heap_compute_data_size` require.
+///
+/// The tree's `Datum::ByRef` lane carries a varlena element in one of two
+/// conventions (see the [crate docs] and the keystone `TD-VARLENA-HEADER-
+/// CONVENTION`): a self-consistent header-ful varlena (`VARSIZE == len`, the
+/// heap-deform / `ref_out` form) OR a header-LESS raw payload (a parser/executor
+/// `Const`, e.g. a `text` literal `'doh!'` carries bare UTF-8 with no length
+/// word). C always sees the header-ful `struct varlena *`, so its `VARSIZE(val)`
+/// is well-defined; here a header-less payload made `varsize()` read the first
+/// four payload bytes as a (garbage) length and index out of bounds.
+///
+/// A self-consistent header-ful image (4-byte or 1-byte/short header) and a
+/// TOAST pointer (external/expanded, `VARATT_IS_1B_E`) pass through VERBATIM; a
+/// header-less payload is framed with a 4-byte `SET_VARSIZE` header so the
+/// downstream `varsize*` / short-conversion / copy arithmetic reads the REAL
+/// length. This is the inverse of fmgr-core's `byref_to_headerless_payload`,
+/// using the same `VARSIZE == len` self-consistency disambiguation — no catalog
+/// `typlen` lookup, so it is correct on the boot (pre-catalog) `InsertOneValue`
+/// path too. Mirrors `arrayfuncs::ensure_headerful_varlena`.
+fn ensure_headerful_varlena<'a>(bytes: &'a [u8]) -> alloc::borrow::Cow<'a, [u8]> {
+    use alloc::borrow::Cow;
+    // A TOAST pointer (external / expanded) is a 1-byte-E header, never a
+    // header-less payload — pass verbatim so the external/expanded arms see it.
+    if !bytes.is_empty() && varatt_is_1b_e(bytes) {
+        return Cow::Borrowed(bytes);
+    }
+    // Already a self-consistent 4-byte-header varlena (`VARSIZE_4B == len`).
+    if bytes.len() >= VARHDRSZ && varatt_is_4b_u(bytes) && varsize_4b(bytes) == bytes.len() {
+        return Cow::Borrowed(bytes);
+    }
+    // Already a self-consistent 1-byte ("short") header varlena
+    // (`VARSIZE_1B == len`). The `VARSIZE == len` guard keeps a fixed-length
+    // by-ref image out (this path is only reached for `attlen == -1`).
+    if !bytes.is_empty() && varatt_is_1b(bytes) && varsize_1b(bytes) == bytes.len() {
+        return Cow::Borrowed(bytes);
+    }
+    // Header-less payload: frame as a 4-byte-header varlena (VARHDRSZ + payload).
+    let total = VARHDRSZ + bytes.len();
+    let mut buf = alloc::vec::Vec::with_capacity(total);
+    buf.extend_from_slice(&set_varsize_4b(total));
+    buf.extend_from_slice(bytes);
+    Cow::Owned(buf)
+}
+
 // ---------------------------------------------------------------------------
 // att_isnull (tupmacs.h)
 // ---------------------------------------------------------------------------
@@ -336,23 +388,46 @@ pub fn heap_compute_data_size(
         let val = &values[i];
         let atti = &tuple_desc.compact_attrs[i];
 
+        // For a varlena attribute (`attlen == -1`), the `Datum::ByRef` image may
+        // arrive header-less (a parser/executor `Const`); normalize it to the
+        // header-ful form C's `VARSIZE*` macros require before reading lengths.
+        // Other attlens (by-value, cstring, fixed by-ref) carry no varlena
+        // header, so they are read straight from the value below.
+        let varlena_image: Option<alloc::borrow::Cow<'_, [u8]>> = if atti.attlen == -1 {
+            Some(ensure_headerful_varlena(val.as_ref_bytes()))
+        } else {
+            None
+        };
+
         // COMPACT_ATTR_IS_PACKABLE(atti) && VARATT_CAN_MAKE_SHORT(DatumGetPointer(val))
-        if compact_attr_is_packable(atti) && varatt_can_make_short(val.as_ref_bytes()) {
+        if compact_attr_is_packable(atti)
+            && varatt_can_make_short(varlena_image.as_deref().unwrap())
+        {
             // we're anticipating converting to a short varlena header, so
             // adjust length and don't count any alignment
-            data_length += varatt_converted_short_size(val.as_ref_bytes());
-        } else if atti.attlen == -1 && varatt_is_external_expanded(val.as_ref_bytes()) {
+            data_length += varatt_converted_short_size(varlena_image.as_deref().unwrap());
+        } else if atti.attlen == -1 && varatt_is_external_expanded(varlena_image.as_deref().unwrap())
+        {
             // we want to flatten the expanded value so that the constructed
             // tuple doesn't depend on it
             data_length = att_nominal_alignby(data_length, atti.attalignby);
             data_length += backend_utils_adt_misc2_seams::eoh_get_flat_size::call(
-                types_datum::ExpandedObjectRef::from_expanded_datum_bytes(val.as_ref_bytes()),
+                types_datum::ExpandedObjectRef::from_expanded_datum_bytes(
+                    varlena_image.as_deref().unwrap(),
+                ),
             )?;
         } else {
             // att_datum_alignby(data_length, attalignby, attlen, val)
-            data_length = att_datum_alignby(data_length, atti.attalignby, atti.attlen, val);
+            data_length = att_datum_alignby(
+                data_length,
+                atti.attalignby,
+                atti.attlen,
+                val,
+                varlena_image.as_deref(),
+            );
             // att_addlength_datum(data_length, attlen, val)
-            data_length = att_addlength_datum(data_length, atti.attlen, val);
+            data_length =
+                att_addlength_datum(data_length, atti.attlen, val, varlena_image.as_deref());
         }
     }
 
@@ -368,9 +443,19 @@ fn compact_attr_is_packable(att: &CompactAttribute) -> bool {
 
 /// `att_datum_alignby(cur_offset, attalignby, attlen, attdatum)` (tupmacs.h):
 /// no alignment for a short varlena, else `TYPEALIGN(attalignby, cur_offset)`.
+///
+/// `varlena_image` is the header-ful normalization of `val` for an `attlen == -1`
+/// varlena (see [`ensure_headerful_varlena`]); `None` for other attlens.
 #[inline]
-fn att_datum_alignby(cur_offset: usize, attalignby: u8, attlen: i16, val: &Datum) -> usize {
-    if attlen == -1 && varatt_is_short(val.as_ref_bytes()) {
+fn att_datum_alignby(
+    cur_offset: usize,
+    attalignby: u8,
+    attlen: i16,
+    val: &Datum,
+    varlena_image: Option<&[u8]>,
+) -> usize {
+    let _ = val;
+    if attlen == -1 && varatt_is_short(varlena_image.unwrap()) {
         cur_offset
     } else {
         att_nominal_alignby(cur_offset, attalignby)
@@ -379,12 +464,20 @@ fn att_datum_alignby(cur_offset: usize, attalignby: u8, attlen: i16, val: &Datum
 
 /// `att_addlength_datum(cur_offset, attlen, attdatum)` (tupmacs.h):
 /// `att_addlength_pointer(cur_offset, attlen, DatumGetPointer(attdatum))`.
+///
+/// `varlena_image` is the header-ful normalization of `val` for an `attlen == -1`
+/// varlena (see [`ensure_headerful_varlena`]); `None` for other attlens.
 #[inline]
-fn att_addlength_datum(cur_offset: usize, attlen: i16, val: &Datum) -> usize {
+fn att_addlength_datum(
+    cur_offset: usize,
+    attlen: i16,
+    val: &Datum,
+    varlena_image: Option<&[u8]>,
+) -> usize {
     if attlen > 0 {
         cur_offset + attlen as usize
     } else if attlen == -1 {
-        cur_offset + varsize_any(val.as_ref_bytes())
+        cur_offset + varsize_any(varlena_image.unwrap())
     } else {
         debug_assert_eq!(attlen, -2);
         // strlen + 1
@@ -459,8 +552,10 @@ fn fill_val(
         store_att_byval(data, off, byval_datum(datum), att.attlen);
         data_length = att.attlen as usize;
     } else if att.attlen == -1 {
-        // varlena
-        let val = datum.as_ref_bytes();
+        // varlena — normalize a possibly header-less `ByRef` image (parser/
+        // executor `Const`) to the header-ful form C's `VARSIZE*` macros read.
+        let val_image = ensure_headerful_varlena(datum.as_ref_bytes());
+        let val: &[u8] = val_image.as_ref();
         *infomask |= HEAP_HASVARWIDTH;
         if varatt_is_external(val) {
             if varatt_is_external_expanded(val) {
@@ -1817,13 +1912,26 @@ fn expand_tuple<'mcx>(
             if attrmiss[attnum].am_present {
                 let att = &tuple_desc.compact_attrs[attnum];
                 let value = missing_value(&attrmiss[attnum], att);
+                // A varlena missing value is normalized to its header-ful image
+                // before its length is read (mirror of heap_compute_data_size).
+                let varlena_image: Option<alloc::borrow::Cow<'_, [u8]>> = if att.attlen == -1 {
+                    Some(ensure_headerful_varlena(value.as_ref_bytes()))
+                } else {
+                    None
+                };
                 target_data_len = att_datum_alignby(
                     target_data_len,
                     att.attalignby,
                     att.attlen,
                     value,
+                    varlena_image.as_deref(),
                 );
-                target_data_len = att_addlength_datum(target_data_len, att.attlen, value);
+                target_data_len = att_addlength_datum(
+                    target_data_len,
+                    att.attlen,
+                    value,
+                    varlena_image.as_deref(),
+                );
             } else {
                 // no missing value, so it must be null
                 has_nulls = true;
