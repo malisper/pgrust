@@ -715,6 +715,31 @@ fn seam_pull_varnos(root: &PlannerInfo, node: NodeId) -> Relids {
     pull_varnos(Some(root), &wrapped)
 }
 
+/// `bms_is_member(0, pull_varnos(root, node))` (cost_incremental_sort) —
+/// installed seam. True iff the expression references a Var with `varno 0`.
+fn seam_pull_varnos_contains_zero(root: &PlannerInfo, node: NodeId) -> bool {
+    let scratch = mcx::MemoryContext::new("pull_varnos contains-zero seam wrapper");
+    let wrapped = node_expr_wrapper(root.node(node), scratch.mcx());
+    let relids = pull_varnos(Some(root), &wrapped);
+    bms_is_member(0, &relids)
+}
+
+/// `bms_is_member(x, a)` (bitmapset.c).
+fn bms_is_member(x: i32, a: &Relids) -> bool {
+    if x < 0 {
+        panic!("negative bitmapset member not allowed");
+    }
+    let a = match a {
+        None => return false,
+        Some(a) => a,
+    };
+    let wnum = (x as usize) / 64;
+    if wnum >= a.words.len() {
+        return false;
+    }
+    (a.words[wnum] & (1u64 << ((x as usize) % 64))) != 0
+}
+
 /// `pull_vars_of_level((Node *) node, levelsup)` (var.c) — installed seam.
 /// Returns the level-`levelsup` Vars/PHVs as fresh arena handles.
 fn seam_pull_vars_of_level(
@@ -908,6 +933,11 @@ pub fn init_seams() {
     // does, matching C exactly.
     use backend_optimizer_path_small_seams as ps;
     ps::num_relids::set(seam_num_relids_root);
+
+    // cost_incremental_sort's `bms_is_member(0, pull_varnos(root, em_expr))`
+    // (costsize.c). var.c owns pull_varnos.
+    use backend_optimizer_path_costsize_seams as cz;
+    cz::pull_varnos_contains_zero::set(seam_pull_varnos_contains_zero);
 }
 
 /// `pull_var_clause((Node *) node, flags)` (var.c) — the equivclass-ext seam

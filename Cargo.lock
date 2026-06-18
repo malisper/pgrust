@@ -12750,6 +12750,7 @@ version = "0.0.0"
 dependencies = [
  "backend-nodes-core",
  "backend-nodes-equalfuncs-seams",
+ "backend-optimizer-path-costsize-seams",
  "backend-optimizer-path-equivclass-ext-seams",
  "backend-optimizer-path-indxpath",
  "backend-optimizer-path-joinpath-seams",
