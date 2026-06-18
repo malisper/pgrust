@@ -15,7 +15,7 @@
 //! [`GroupingSet`]; `setOperations` is a `Node` wrapping [`SetOperationStmt`].
 
 use types_core::primitive::Oid;
-use types_nodes::nodes::Node;
+use types_nodes::nodes::{ntag, Node};
 use types_nodes::rawnodes::{GroupingSet, SetOperationStmt, SortGroupClause, GROUPING_SET_EMPTY};
 use types_nodes::copy_query::Query;
 
@@ -33,9 +33,9 @@ fn oid_is_valid(oid: Oid) -> bool {
 /// always a SortGroupClause node in these clauses.
 #[inline]
 fn as_sort_group_clause<'a>(node: &'a Node<'_>) -> &'a SortGroupClause {
-    match node {
-        Node::SortGroupClause(s) => s,
-        other => panic!("expected SortGroupClause in group/distinct clause, got {other:?}"),
+    match node.node_tag() {
+        ntag::T_SortGroupClause => node.expect_sortgroupclause(),
+        _ => panic!("expected SortGroupClause in group/distinct clause, got {node:?}"),
     }
 }
 
@@ -152,9 +152,10 @@ pub fn query_is_distinct_for(query: &Query<'_>, colnos: &[i32], opids: &[Oid]) -
          * we know we're certainly not unique.
          */
         if query.groupingSets.len() == 1 {
-            let gs: &GroupingSet = match &*query.groupingSets[0] {
-                Node::GroupingSet(g) => g,
-                other => panic!("expected GroupingSet in groupingSets, got {other:?}"),
+            let gs_node = &*query.groupingSets[0];
+            let gs: &GroupingSet = match gs_node.node_tag() {
+                ntag::T_GroupingSet => gs_node.expect_groupingset(),
+                _ => panic!("expected GroupingSet in groupingSets, got {gs_node:?}"),
             };
             if gs.kind == GROUPING_SET_EMPTY {
                 return true;
@@ -176,9 +177,10 @@ pub fn query_is_distinct_for(query: &Query<'_>, colnos: &[i32], opids: &[Oid]) -
      * except with ALL.
      */
     if let Some(setop_node) = &query.setOperations {
-        let topop: &SetOperationStmt = match &**setop_node {
-            Node::SetOperationStmt(s) => s,
-            other => panic!("expected SetOperationStmt in setOperations, got {other:?}"),
+        let setop_n = &**setop_node;
+        let topop: &SetOperationStmt = match setop_n.node_tag() {
+            ntag::T_SetOperationStmt => setop_n.expect_setoperationstmt(),
+            _ => panic!("expected SetOperationStmt in setOperations, got {setop_n:?}"),
         };
         debug_assert!(topop.op != types_nodes::rawnodes::SETOP_NONE);
 
