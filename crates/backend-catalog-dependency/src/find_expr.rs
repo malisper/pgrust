@@ -566,7 +566,7 @@ fn find_expr_references_query(
             for i in 0..joinmergedcols {
                 // list_nth(joinaliasvars, i)
                 let aliasvar = &*query.rtable[rte_index].joinaliasvars[i as usize];
-                if !matches!(aliasvar, Node::Expr(Expr::Var(_))) {
+                if !aliasvar.is_var() {
                     find_expr_references_walker(aliasvar, context)?;
                 }
             }
