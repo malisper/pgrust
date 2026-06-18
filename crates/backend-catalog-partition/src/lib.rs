@@ -587,12 +587,13 @@ pub fn get_proposed_default_constraint<'mcx>(
 /// works on (the constraint list is always primitive expression nodes; C
 /// stores them as `Node *` and casts).
 fn node_to_expr(node: Node<'_>) -> PgResult<Expr> {
-    match node {
-        Node::Expr(e) => Ok(e),
-        other => Err(ereport(ERROR)
+    let tag = node.tag();
+    match node.into_expr() {
+        Some(e) => Ok(e),
+        None => Err(ereport(ERROR)
             .errmsg(format!(
                 "unexpected non-expression node {:?} in partition constraint",
-                other.tag()
+                tag
             ))
             .into_error()),
     }
