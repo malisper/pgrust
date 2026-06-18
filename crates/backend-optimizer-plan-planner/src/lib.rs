@@ -4553,11 +4553,19 @@ fn add_paths_to_grouping_rel<'mcx>(
                 )?;
                 backend_optimizer_util_pathnode::add_path(root, grouped_rel, agg_path)?;
             } else if has_group_clause {
-                // GROUP BY without aggregation — make a GroupPath (C:7195).
-                return Err(PgError::error(
-                    "add_paths_to_grouping_rel: GROUP BY without aggregation needs \
-                     create_group_path (not ported)",
-                ));
+                // GROUP BY without aggregation or grouping sets — make a
+                // GroupPath (C:7195). info->clauses is the processed group
+                // clause; havingQual is the HAVING qual list.
+                let group_path = backend_optimizer_util_pathnode::create::create_group_path(
+                    run,
+                    root,
+                    grouped_rel,
+                    ordered,
+                    root.processed_groupClause.clone(),
+                    having_quals.clone(),
+                    d_num_groups,
+                )?;
+                backend_optimizer_util_pathnode::add_path(root, grouped_rel, group_path)?;
             } else {
                 unreachable!("add_paths_to_grouping_rel: no agg and no group clause");
             }
