@@ -6,7 +6,7 @@
 //! into.
 
 use mcx::Mcx;
-use types_core::primitive::InvalidOid;
+use types_core::primitive::{AttrNumber, InvalidOid};
 use types_core::Oid;
 use types_error::{PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERROR};
 use types_nodes::fmgr::FunctionCallInfoBaseData;
@@ -103,22 +103,115 @@ pub fn get_expr_result_type<'mcx>(
     mcx: Mcx<'mcx>,
     expr: Option<&Node<'mcx>>,
 ) -> PgResult<ResolvedResultType<'mcx>> {
+    use types_nodes::primnodes::Expr;
+
     // C dispatches on the expression node's tag:
     //   IsA(expr, FuncExpr) -> internal_get_result_type(funcid, expr, NULL, ...)
     //   IsA(expr, OpExpr)   -> internal_get_result_type(get_opcode(opno), expr, NULL, ...)
     //   IsA(expr, RowExpr) && row_typeid == RECORDOID -> build tupdesc from RowExpr
     //   IsA(expr, Const) && consttype == RECORDOID && !constisnull -> RECORD Const
     //   else (generic) -> exprType(expr) + get_type_func_class + lookup_rowtype_tupdesc_copy
-    //
-    // The `funcid`/`opno` extraction and the RowExpr/Const/generic arms read the
-    // expression-node tree (`FuncExpr.funcid`, `OpExpr.opno`, `RowExpr.args`,
-    // the RECORD `Const` datum, `exprType`), which is owned by the
-    // nodeFuncs/parser side and not reachable from the funcapi unit. The
-    // FuncExpr/OpExpr arms then fold back into `internal_get_result_type`; that
-    // funnel plus all the other arms is resolved together behind the nodeFuncs
-    // owner seam, which calls back into `internal_get_result_type` for the
-    // function-call arms (loud panic until nodeFuncs lands).
-    backend_nodes_core_seams::get_expr_result_type_node::call(mcx, expr)
+
+    // C: if (expr && IsA(expr, FuncExpr))
+    //        result = internal_get_result_type(((FuncExpr *) expr)->funcid, expr, NULL, ...)
+    if let Some(Node::Expr(Expr::FuncExpr(fe))) = expr {
+        return internal_get_result_type(mcx, fe.funcid, expr, None);
+    }
+
+    // C: else if (expr && IsA(expr, OpExpr))
+    //        result = internal_get_result_type(get_opcode(((OpExpr *) expr)->opno), expr, NULL, ...)
+    if let Some(Node::Expr(Expr::OpExpr(op))) = expr {
+        let funcid = backend_utils_cache_lsyscache_seams::get_opcode::call(op.opno)?;
+        return internal_get_result_type(mcx, funcid, expr, None);
+    }
+
+    // C: else if (expr && IsA(expr, RowExpr) && ((RowExpr *) expr)->row_typeid == RECORDOID)
+    //        /* We can resolve the record type by generating the tupdesc directly */
+    if let Some(Node::Expr(Expr::RowExpr(rexpr))) = expr {
+        if rexpr.row_typeid == RECORDOID {
+            let mut out = ResolvedResultType::default();
+            // tupdesc = CreateTemplateTupleDesc(list_length(rexpr->args));
+            let mut tupdesc =
+                backend_access_common_tupdesc::CreateTemplateTupleDesc(mcx, rexpr.args.len() as i32)?;
+            // Assert(list_length(rexpr->args) == list_length(rexpr->colnames));
+            debug_assert!(rexpr.args.len() == rexpr.colnames.len());
+            // forboth(lcc, rexpr->args, lcn, rexpr->colnames) { ... }
+            let mut i: AttrNumber = 1;
+            for (col, colname) in rexpr.args.iter().zip(rexpr.colnames.iter()) {
+                let info = backend_nodes_nodeFuncs_seams::expr_type_info::call(col)?;
+                // TupleDescInitEntry(tupdesc, i, colname, exprType(col), exprTypmod(col), 0);
+                backend_access_common_tupdesc::TupleDescInitEntry(
+                    &mut tupdesc,
+                    i,
+                    Some(colname.as_str()),
+                    info.typid,
+                    info.typmod,
+                    0,
+                )?;
+                // TupleDescInitEntryCollation(tupdesc, i, exprCollation(col));
+                backend_access_common_tupdesc::TupleDescInitEntryCollation(
+                    &mut tupdesc,
+                    i,
+                    info.collation,
+                )?;
+                i += 1;
+            }
+            // if (resultTypeId) *resultTypeId = rexpr->row_typeid;
+            out.result_type_id = Some(rexpr.row_typeid);
+            // if (resultTupleDesc) *resultTupleDesc = BlessTupleDesc(tupdesc);
+            let td = Some(mcx::alloc_in(mcx, tupdesc)?);
+            out.result_tuple_desc =
+                backend_executor_execTuples_seams::bless_tuple_desc::call(mcx, td)?;
+            out.class = Some(TypeFuncClass::Composite);
+            return Ok(out);
+        }
+    }
+
+    // C: else if (expr && IsA(expr, Const) && ((Const *) expr)->consttype == RECORDOID
+    //             && !((Const *) expr)->constisnull)
+    //        /* resolve field names of a RECORD-type Const from its datum's typmod */
+    if let Some(Node::Expr(Expr::Const(c))) = expr {
+        if c.consttype == RECORDOID && !c.constisnull {
+            // The RECORD-type Const path inspects the rowtype datum header
+            // (DatumGetHeapTupleHeader / HeapTupleHeaderGetTypeId /
+            // HeapTupleHeaderGetTypMod), which is Datum-model machinery owned
+            // below funcapi (heaptoast/typcache). This arm is reached only by
+            // EXPLAIN of SEARCH/CYCLE recursive CTEs (the C comment notes "we
+            // may need to resolve field names of a RECORD-type Const"); it is
+            // out of scope for any function-in-FROM. Route to the owner seam,
+            // which stays mirror-and-panic until the datum-header readers land.
+            return backend_nodes_core_seams::get_expr_result_type_node::call(mcx, expr);
+        }
+    }
+
+    // C: else { /* handle as a generic expression; no chance to resolve RECORD */ }
+    let mut out = ResolvedResultType::default();
+    // Oid typid = exprType(expr);
+    let typid = match expr {
+        Some(Node::Expr(e)) => backend_nodes_nodeFuncs_seams::expr_type_info::call(e)?.typid,
+        // exprType(NULL) yields InvalidOid; a non-Expr Node is not a valid
+        // expression here (C casts to (Node *) and exprType would elog), but the
+        // function-in-FROM callers always pass an Expr.
+        _ => backend_nodes_nodeFuncs_seams::expr_type::call(node_to_external(expr)),
+    };
+    // if (resultTypeId) *resultTypeId = typid;
+    out.result_type_id = Some(typid);
+    // if (resultTupleDesc) *resultTupleDesc = NULL;
+    out.result_tuple_desc = None;
+    // result = get_type_func_class(typid, &base_typid);
+    let (result, base_typid) = get_type_func_class(typid)?;
+    // if ((result == TYPEFUNC_COMPOSITE || result == TYPEFUNC_COMPOSITE_DOMAIN) && resultTupleDesc)
+    //     *resultTupleDesc = lookup_rowtype_tupdesc_copy(base_typid, -1);
+    if matches!(
+        result,
+        TypeFuncClass::Composite | TypeFuncClass::CompositeDomain
+    ) {
+        let td =
+            backend_utils_cache_typcache_seams::lookup_rowtype_tupdesc_copy::call(mcx, base_typid, -1)?;
+        out.result_tuple_desc = Some(td);
+    }
+    out.class = Some(result);
+    Ok(out)
 }
 
 /// `get_func_result_type(functionId, resultTypeId, resultTupleDesc)`

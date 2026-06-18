@@ -20718,6 +20718,7 @@ dependencies = [
  "backend-access-common-tupdesc-seams",
  "backend-catalog-namespace-seams",
  "backend-commands-functioncmds-seams",
+ "backend-executor-execTuples-seams",
  "backend-nodes-core-seams",
  "backend-nodes-nodeFuncs-seams",
  "backend-utils-adt-arrayfuncs-seams",
