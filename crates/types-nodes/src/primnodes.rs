@@ -1750,6 +1750,11 @@ pub enum Expr {
     RestrictInfo(RinfoRef),
 }
 
+// Generated `etag` module + `impl Expr { expr_tag() }` — the Expr-side tag
+// dispatch surface (node-opaque P3), mirroring `Node::node_tag()`/`ntag`.
+// File-scoped: contains both `pub mod etag` and an `impl Expr` block.
+include!(concat!(env!("OUT_DIR"), "/expr_tag.rs"));
+
 impl Expr {
     /// `castNode(Var, node)` — borrow the [`Var`] payload, or `None` if this is
     /// not an `Expr::Var`. The optimizer uses this where C writes
@@ -2646,6 +2651,30 @@ mod clone_in_tests {
             varattnosyn: varattno,
             ..Default::default()
         })
+    }
+
+    /// `expr_tag()` returns the variant's `NodeTag`, and `etag::T_*` consts
+    /// equal those tags — proving the Expr-side tag dispatch surface
+    /// (`match e.expr_tag() { etag::T_Var => e.as_var(), .. }`) compiles and is
+    /// correct. Also confirms the dual-homed twins (DistinctExpr/NullIfExpr,
+    /// struct-equal to OpExpr) carry their OWN distinct tags.
+    #[test]
+    fn expr_tag_surface_dispatches() {
+        let v = a_var(1);
+        assert_eq!(v.expr_tag(), etag::T_Var);
+        // The canonical tag-keyed dispatch shape the migration targets.
+        let got = match v.expr_tag() {
+            etag::T_Var => v.as_var().map(|x| x.varattno),
+            etag::T_Const => None,
+            _ => None,
+        };
+        assert_eq!(got, Some(1));
+
+        // Distinct tags for the OpExpr-payload twins.
+        assert_ne!(etag::T_DistinctExpr, etag::T_NullIfExpr);
+        assert_ne!(etag::T_OpExpr, etag::T_DistinctExpr);
+        // etag re-export equals the ntag value (same numeric tag).
+        assert_eq!(etag::T_Var, crate::nodes::ntag::T_Var);
     }
 
     /// Round-trip `Expr::clone_in` on a list of `TargetEntry`s whose `expr` is an
