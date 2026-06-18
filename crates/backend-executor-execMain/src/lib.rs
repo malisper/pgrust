@@ -83,6 +83,7 @@ use backend_executor_execProcnode_seams as procnode;
 use backend_executor_execUtils as execUtils;
 use backend_executor_execUtils_seams as execUtils_seams;
 use backend_tcop_dest_seams as dest;
+use backend_access_transam_xact_seams as xact_seams;
 use backend_utils_cache_lsyscache_seams as lsyscache;
 use backend_utils_init_miscinit_seams as miscinit;
 
@@ -166,34 +167,42 @@ pub fn standard_ExecutorStart(query_desc: &mut QueryDesc, mut eflags: i32) -> Pg
     //               if (!hasModifyingCTE) eflags |= EXEC_FLAG_SKIP_TRIGGERS;
     //   CMD_{INSERT,DELETE,UPDATE,MERGE}: es_output_cid = GetCurrentCommandId(true);
     //   default: elog(ERROR, "unrecognized operation code").
+    // es_output_cid is set inside the `with_mut` work-bundle borrow below; the
+    // command id we need to write (if any) is computed here so the xact-owner
+    // call happens outside that borrow.
+    let mut es_output_cid: Option<types_core::xact::CommandId> = None;
     match operation {
         CmdType::CMD_SELECT => {
-            // SELECT FOR [KEY] UPDATE/SHARE and modifying CTEs mark tuples; both
-            // pull the xact owner (GetCurrentCommandId) and are out of the plain
-            // SELECT path — guard-and-panic.
-            query_desc.work.with(|w| {
-                if w.plannedstmt
+            // SELECT FOR [KEY] UPDATE/SHARE and modifying CTEs need to mark
+            // tuples: es_output_cid = GetCurrentCommandId(true).
+            let needs_cid = query_desc.work.with(|w| {
+                w.plannedstmt
                     .rowMarks
                     .as_ref()
                     .is_some_and(|m| !m.is_empty())
                     || w.plannedstmt.hasModifyingCTE
-                {
-                    panic!(
-                        "execMain standard_ExecutorStart: SELECT FOR UPDATE/SHARE rowMarks or \
-                         modifying CTE needs es_output_cid = GetCurrentCommandId(true) (xact \
-                         owner) — #167 F0d"
-                    );
-                }
             });
+            let has_modifying_cte =
+                query_desc.work.with(|w| w.plannedstmt.hasModifyingCTE);
+            if needs_cid {
+                es_output_cid = Some(xact_seams::get_current_command_id::call(true)?);
+            }
             // A SELECT without modifying CTEs can't queue triggers.
-            eflags |= EXEC_FLAG_SKIP_TRIGGERS;
+            if !has_modifying_cte {
+                eflags |= EXEC_FLAG_SKIP_TRIGGERS;
+            }
+        }
+        CmdType::CMD_INSERT
+        | CmdType::CMD_DELETE
+        | CmdType::CMD_UPDATE
+        | CmdType::CMD_MERGE => {
+            es_output_cid = Some(xact_seams::get_current_command_id::call(true)?);
         }
         _ => {
-            panic!(
-                "execMain standard_ExecutorStart: only CMD_SELECT is wired on this driver \
-                 frontier; non-SELECT command id assignment (es_output_cid = \
-                 GetCurrentCommandId) reaches the xact owner — #167 F0d"
-            );
+            return Err(types_error::PgError::error(alloc::format!(
+                "unrecognized operation code: {}",
+                operation as i32
+            )));
         }
     }
 
@@ -206,6 +215,9 @@ pub fn standard_ExecutorStart(query_desc: &mut QueryDesc, mut eflags: i32) -> Pg
     let es_crosscheck_snapshot = query_desc.crosscheck_snapshot.clone();
 
     query_desc.work.with_mut(|w| {
+        if let Some(cid) = es_output_cid {
+            w.estate.es_output_cid = cid;
+        }
         w.estate.es_param_list_info = params;
         w.estate.es_snapshot = es_snapshot.clone();
         w.estate.es_crosscheck_snapshot = es_crosscheck_snapshot.clone();

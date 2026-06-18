@@ -8770,6 +8770,7 @@ dependencies = [
 name = "backend-executor-execMain"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-xact-seams",
  "backend-catalog-aclchk-seams",
  "backend-catalog-objectaddress-seams",
  "backend-executor-execAmi",
