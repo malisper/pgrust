@@ -763,7 +763,7 @@ pub fn setRuleCheckAsUser(node: &mut Node<'_>, userid: Oid) {
 }
 
 fn setRuleCheckAsUser_walker(node: &mut Node<'_>, userid: Oid) -> bool {
-    if let Node::Query(qry) = node {
+    if let Some(qry) = node.as_query_mut() {
         setRuleCheckAsUser_Query(qry, userid);
         return false;
     }
@@ -789,7 +789,7 @@ fn setRuleCheckAsUser_Query(qry: &mut Query<'_>, userid: Oid) {
 
     /* Recurse into subquery-in-WITH */
     for cte in qry.cteList.iter_mut() {
-        if let Node::Query(ctequery) = &mut **cte {
+        if let Some(ctequery) = cte.as_query_mut() {
             setRuleCheckAsUser_Query(ctequery, userid);
         }
     }
