@@ -87,14 +87,14 @@ pub use vacuum_rel::heap_vacuum_rel;
 /// that seam here to delegate to the in-crate driver — the heap AM being the
 /// only ported table AM, this is the heap provider's vtable entry.
 pub fn init_seams() {
-    backend_access_heap_vacuumlazy_seams::heap_vacuum_rel::set(|rel, params, bstrategy| {
-        heap_vacuum_rel(rel, &params, bstrategy)
+    backend_access_heap_vacuumlazy_seams::heap_vacuum_rel::set(|mcx, rel, params, bstrategy| {
+        heap_vacuum_rel(mcx, rel, &params, bstrategy)
     });
 
     // heapam_relation_vacuum — the heap table AM's `relation_vacuum`
     // callback. `vacuum.c` (`vacuum_rel`) reaches the heap vacuum driver
     // through this table-AM dispatch seam.
-    backend_commands_vacuum_seams::table_relation_vacuum::set(|rel, params, bstrategy| {
-        heap_vacuum_rel(rel, &params, bstrategy)
+    backend_commands_vacuum_seams::table_relation_vacuum::set(|mcx, rel, params, bstrategy| {
+        heap_vacuum_rel(mcx, rel, &params, bstrategy)
     });
 }

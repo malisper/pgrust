@@ -40,7 +40,7 @@ const SIZE_OF_PAGE_HEADER_DATA: usize = types_storage::bufpage::SizeOfPageHeader
 /// `VM_ALL_FROZEN(r, b, &v)` (access/visibilitymap.h:26).
 #[inline]
 fn vm_all_frozen(
-    rel: types_core::Oid,
+    rel: &types_rel::Relation<'_>,
     heap_blk: BlockNumber,
     vmbuf: &mut Buffer,
 ) -> PgResult<bool> {
@@ -56,8 +56,8 @@ fn here(funcname: &'static str) -> ErrorLocation {
 /// `lazy_scan_new_or_empty()` (vacuumlazy.c:1809) — handle a PageIsNew or
 /// PageIsEmpty page; returns `true` if the page was processed here (caller should
 /// move on), `false` if it is an ordinary page to be pruned.
-pub fn lazy_scan_new_or_empty(
-    vacrel: &mut LVRelState,
+pub fn lazy_scan_new_or_empty<'mcx>(
+    vacrel: &mut LVRelState<'mcx>,
     buf: Buffer,
     blkno: BlockNumber,
     sharelock: bool,
@@ -70,9 +70,9 @@ pub fn lazy_scan_new_or_empty(
          */
         backend_storage_buffer_bufmgr_seams::unlock_release_buffer::call(buf);
 
-        if vl::get_recorded_free_space::call(vacrel.rel, blkno)? == 0 {
+        if vl::get_recorded_free_space::call(&vacrel.rel, blkno)? == 0 {
             let freespace = BLCKSZ as usize - SIZE_OF_PAGE_HEADER_DATA;
-            vl::record_page_with_free_space::call(vacrel.rel, blkno, freespace)?;
+            vl::record_page_with_free_space::call(&vacrel.rel, blkno, freespace)?;
         }
 
         return Ok(true);
@@ -102,13 +102,12 @@ pub fn lazy_scan_new_or_empty(
              * If the page has not been previously WAL-logged, do so now, to
              * avoid a PANIC during replay.
              */
-            if vl::relation_needs_wal::call(vacrel.rel)? && vl::page_lsn_is_invalid::call(buf)? {
+            if vl::relation_needs_wal::call(&vacrel.rel)? && vl::page_lsn_is_invalid::call(buf)? {
                 vl::log_newpage_buffer::call(buf, true)?;
             }
 
             vl::page_set_all_visible::call(buf)?;
-            vl::visibilitymap_set::call(types_vacuum::vacuumlazy::VmSetArgs {
-                rel: vacrel.rel,
+            vl::visibilitymap_set::call(&vacrel.rel, types_vacuum::vacuumlazy::VmSetArgs {
                 heap_blk: blkno,
                 heap_buf: buf,
                 rec_ptr: InvalidXLogRecPtr,
@@ -124,7 +123,7 @@ pub fn lazy_scan_new_or_empty(
 
         let freespace = vl::page_get_heap_free_space::call(buf)?;
         backend_storage_buffer_bufmgr_seams::unlock_release_buffer::call(buf);
-        vl::record_page_with_free_space::call(vacrel.rel, blkno, freespace)?;
+        vl::record_page_with_free_space::call(&vacrel.rel, blkno, freespace)?;
         return Ok(true);
     }
 
@@ -135,8 +134,8 @@ pub fn lazy_scan_new_or_empty(
 /// `lazy_scan_prune()` (vacuumlazy.c:1944) — prune and freeze one page. Caller
 /// must hold pin and buffer cleanup lock. Returns `(ndeleted, has_lpdead_items,
 /// vm_page_frozen)`.
-pub fn lazy_scan_prune(
-    vacrel: &mut LVRelState,
+pub fn lazy_scan_prune<'mcx>(
+    vacrel: &mut LVRelState<'mcx>,
     buf: Buffer,
     blkno: BlockNumber,
     mut vmbuffer: Buffer,
@@ -158,7 +157,7 @@ pub fn lazy_scan_prune(
     }
 
     let out = vl::heap_page_prune_and_freeze::call(types_vacuum::vacuumlazy::PruneAndFreezeArgs {
-        relation: vacrel.rel,
+        relation: vacrel.rel.rd_id,
         buffer: buf,
         vistest: vacrel.vistest,
         options: prune_options,
@@ -237,8 +236,7 @@ pub fn lazy_scan_prune(
 
         vl::page_set_all_visible::call(buf)?;
         backend_storage_buffer_bufmgr_seams::mark_buffer_dirty::call(buf);
-        let old_vmbits = vl::visibilitymap_set::call(types_vacuum::vacuumlazy::VmSetArgs {
-            rel: vacrel.rel,
+        let old_vmbits = vl::visibilitymap_set::call(&vacrel.rel, types_vacuum::vacuumlazy::VmSetArgs {
             heap_blk: blkno,
             heap_buf: buf,
             rec_ptr: InvalidXLogRecPtr,
@@ -261,7 +259,7 @@ pub fn lazy_scan_prune(
         && !vl::page_is_all_visible::call(buf)?
         && {
             let (status, buf2) =
-                vl::visibilitymap_get_status::call(vacrel.rel, blkno, vmbuffer)?;
+                vl::visibilitymap_get_status::call(&vacrel.rel, blkno, vmbuffer)?;
             vmbuffer = buf2;
             status != 0
         }
@@ -273,7 +271,7 @@ pub fn lazy_scan_prune(
             ))
             .finish(here("lazy_scan_prune"))
             .ok();
-        vl::visibilitymap_clear::call(vacrel.rel, blkno, vmbuffer, VISIBILITYMAP_VALID_BITS)?;
+        vl::visibilitymap_clear::call(&vacrel.rel, blkno, vmbuffer, VISIBILITYMAP_VALID_BITS)?;
     } else if presult.lpdead_items > 0 && vl::page_is_all_visible::call(buf)? {
         ereport(WARNING)
             .errmsg(format!(
@@ -284,11 +282,11 @@ pub fn lazy_scan_prune(
             .ok();
         vl::page_clear_all_visible::call(buf)?;
         backend_storage_buffer_bufmgr_seams::mark_buffer_dirty::call(buf);
-        vl::visibilitymap_clear::call(vacrel.rel, blkno, vmbuffer, VISIBILITYMAP_VALID_BITS)?;
+        vl::visibilitymap_clear::call(&vacrel.rel, blkno, vmbuffer, VISIBILITYMAP_VALID_BITS)?;
     } else if all_visible_according_to_vm
         && presult.all_visible
         && presult.all_frozen
-        && !vm_all_frozen(vacrel.rel, blkno, &mut vmbuffer)?
+        && !vm_all_frozen(&vacrel.rel, blkno, &mut vmbuffer)?
     {
         /*
          * Avoid relying on all_visible_according_to_vm as a proxy for the
@@ -300,8 +298,7 @@ pub fn lazy_scan_prune(
         }
 
         debug_assert!(!transaction_id_is_valid(presult.vm_conflict_horizon));
-        let old_vmbits = vl::visibilitymap_set::call(types_vacuum::vacuumlazy::VmSetArgs {
-            rel: vacrel.rel,
+        let old_vmbits = vl::visibilitymap_set::call(&vacrel.rel, types_vacuum::vacuumlazy::VmSetArgs {
             heap_blk: blkno,
             heap_buf: buf,
             rec_ptr: InvalidXLogRecPtr,
@@ -327,8 +324,8 @@ pub fn lazy_scan_prune(
 /// lock (cannot prune/freeze). Returns `(processed, has_lpdead_items)` where
 /// `processed == false` means an aggressive VACUUM must retry via
 /// `lazy_scan_prune`.
-pub fn lazy_scan_noprune(
-    vacrel: &mut LVRelState,
+pub fn lazy_scan_noprune<'mcx>(
+    vacrel: &mut LVRelState<'mcx>,
     buf: Buffer,
     blkno: BlockNumber,
 ) -> PgResult<(bool, bool)> {
@@ -394,7 +391,7 @@ pub fn lazy_scan_noprune(
         }
 
         let htsv = vl::heap_tuple_satisfies_vacuum::call(
-            vacrel.rel,
+            &vacrel.rel,
             buf,
             offnum,
             vacrel.cutoffs.OldestXmin,

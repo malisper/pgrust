@@ -2185,7 +2185,16 @@ fn vacuum_rel<'mcx>(
 
             rel = None;
         } else {
-            rt::table_relation_vacuum::call(rel_handle, *p, bstrategy)?;
+            /*
+             * Recover the live, open Relation from the relcache without
+             * re-locking (the lock from vacuum_open_relation is held), and hand
+             * the OWNED value to the heap vacuum driver, which holds it for the
+             * whole scan (the `PlannerRun(mcx)` analog). The driver drops its
+             * own relcache reference when it finishes; the original reference
+             * (rel_handle) is closed below.
+             */
+            let open_relation = table_seam::table_open::call(mcx, rel_handle, NoLock)?;
+            rt::table_relation_vacuum::call(mcx, open_relation, *p, bstrategy)?;
             rel = Some(rel_handle);
         }
     } else {

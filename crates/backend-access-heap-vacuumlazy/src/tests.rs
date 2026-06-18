@@ -5,12 +5,75 @@
 //! save/restore of vacuum error state, the transaction-id wraparound compares,
 //! and the truncation-decision arithmetic.
 
+use mcx::{Mcx, MemoryContext, PgString, PgVec};
+use types_rel::{FormData_pg_class, Relation, RelationData};
+use types_storage::RelFileLocator;
+use types_tuple::heaptuple::TupleDescData;
+
 use crate::consts::*;
 use crate::core::{LVRelState, LVSavedErrInfo, VacErrPhase};
 use crate::errcb::{restore_vacuum_error_info, update_vacuum_error_info, vacuum_error_callback};
 
-fn base_state() -> LVRelState {
-    let mut vr = LVRelState::new_zeroed();
+/// A minimal transient `Relation` for the seam-free unit tests. The error-context
+/// tests never read any of its fields (they exercise only the reporting strings
+/// stored directly on `LVRelState`), so the trimmed defaults are sufficient.
+fn test_relation<'mcx>(mcx: Mcx<'mcx>) -> Relation<'mcx> {
+    let td = TupleDescData {
+        natts: 0,
+        tdtypeid: 0,
+        tdtypmod: -1,
+        tdrefcount: 1,
+        constr: None,
+        compact_attrs: PgVec::new_in(mcx),
+        attrs: PgVec::new_in(mcx),
+    };
+    let data = RelationData {
+        rd_id: 0,
+        rd_locator: RelFileLocator {
+            spcOid: 0,
+            dbOid: 0,
+            relNumber: 0,
+        },
+        rd_backend: types_core::primitive::INVALID_PROC_NUMBER,
+        rd_rel: FormData_pg_class {
+            relname: PgString::from_str_in("t", mcx).unwrap(),
+            relnamespace: 0,
+            relowner: 0,
+            relrowsecurity: false,
+            relpages: 0,
+            reltuples: 0.0,
+            relallvisible: 0,
+            reltoastrelid: 0,
+            reltablespace: 0,
+            relfilenode: 0,
+            relisshared: false,
+            relhasindex: false,
+            relhassubclass: false,
+            relpersistence: b'p',
+            relkind: b'r',
+            reltype: 0,
+            relam: 0,
+            relispopulated: true,
+            relreplident: b'd',
+            relispartition: false,
+            relfrozenxid: 0,
+            relminmxid: 0,
+        },
+        rd_att: mcx::alloc_in(mcx, td).unwrap(),
+        rd_options: None,
+        rd_index: None,
+        rd_opcintype: PgVec::new_in(mcx),
+        rd_opfamily: PgVec::new_in(mcx),
+        rd_indoption: PgVec::new_in(mcx),
+        rd_indcollation: PgVec::new_in(mcx),
+        rd_trigdesc: None,
+        pgstat_enabled: false,
+    };
+    Relation::open(data, None)
+}
+
+fn base_state<'mcx>(mcx: Mcx<'mcx>) -> LVRelState<'mcx> {
+    let mut vr = LVRelState::new_zeroed(mcx, test_relation(mcx));
     vr.relnamespace = "public".into();
     vr.relname = "t".into();
     vr
@@ -18,7 +81,8 @@ fn base_state() -> LVRelState {
 
 #[test]
 fn errcb_scan_heap_messages() {
-    let mut vr = base_state();
+    let ctx = MemoryContext::new("vacuumlazy-test");
+    let mut vr = base_state(ctx.mcx());
     vr.phase = VacErrPhase::ScanHeap;
 
     // invalid block -> "while scanning relation"
@@ -48,7 +112,8 @@ fn errcb_scan_heap_messages() {
 
 #[test]
 fn errcb_index_and_truncate_messages() {
-    let mut vr = base_state();
+    let ctx = MemoryContext::new("vacuumlazy-test");
+    let mut vr = base_state(ctx.mcx());
     vr.indname = Some("t_pkey".into());
 
     vr.phase = VacErrPhase::VacuumIndex;
@@ -82,7 +147,8 @@ fn errcb_index_and_truncate_messages() {
 
 #[test]
 fn update_and_restore_error_info() {
-    let mut vr = base_state();
+    let ctx = MemoryContext::new("vacuumlazy-test");
+    let mut vr = base_state(ctx.mcx());
     vr.blkno = 1;
     vr.offnum = 2;
     vr.phase = VacErrPhase::ScanHeap;

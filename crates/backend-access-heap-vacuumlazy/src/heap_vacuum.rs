@@ -42,7 +42,7 @@ fn here(funcname: &'static str) -> ErrorLocation {
 /// `lazy_vacuum_heap_rel()` (vacuumlazy.c:2720) — second pass over the heap.
 /// Marks LP_DEAD items in `vacrel.dead_items` as LP_UNUSED. Pages that never had
 /// `lazy_scan_prune` record LP_DEAD items are not visited.
-pub fn lazy_vacuum_heap_rel(vacrel: &mut LVRelState) -> PgResult<()> {
+pub fn lazy_vacuum_heap_rel<'mcx>(vacrel: &mut LVRelState<'mcx>) -> PgResult<()> {
     let mut vacuumed_pages: BlockNumber = 0;
     let mut vmbuffer: Buffer = InvalidBuffer;
     let mut saved_err_info = LVSavedErrInfo {
@@ -85,7 +85,7 @@ pub fn lazy_vacuum_heap_rel(vacrel: &mut LVRelState) -> PgResult<()> {
     let stream = vl::read_stream_begin_relation::call(
         READ_STREAM_MAINTENANCE | READ_STREAM_USE_BATCHING,
         vacrel.bstrategy,
-        vacrel.rel,
+        &vacrel.rel,
         MAIN_FORKNUM,
         types_vacuum::vacuumlazy::ScanCallback::ReapNextBlock,
         iter,
@@ -103,7 +103,7 @@ pub fn lazy_vacuum_heap_rel(vacrel: &mut LVRelState) -> PgResult<()> {
 
         /* Read (and pin) the chosen block's buffer. */
         let buf =
-            vl::read_buffer_extended::call(vacrel.rel, MAIN_FORKNUM, reap.blkno, vacrel.bstrategy)?;
+            vl::read_buffer_extended::call(&vacrel.rel, MAIN_FORKNUM, reap.blkno, vacrel.bstrategy)?;
 
         let blkno = backend_storage_buffer_bufmgr_seams::buffer_get_block_number::call(buf);
         vacrel.blkno = blkno;
@@ -111,7 +111,7 @@ pub fn lazy_vacuum_heap_rel(vacrel: &mut LVRelState) -> PgResult<()> {
         debug_assert!(blkno == reap.blkno);
 
         /* Pin the visibility map page in case we need to mark the page all-visible. */
-        vmbuffer = vl::visibilitymap_pin::call(vacrel.rel, blkno, vmbuffer)?;
+        vmbuffer = vl::visibilitymap_pin::call(&vacrel.rel, blkno, vmbuffer)?;
 
         /* We need a non-cleanup exclusive lock to mark dead_items unused. */
         backend_storage_buffer_bufmgr_seams::lock_buffer::call(buf, BUFFER_LOCK_EXCLUSIVE)?;
@@ -120,7 +120,7 @@ pub fn lazy_vacuum_heap_rel(vacrel: &mut LVRelState) -> PgResult<()> {
         /* Record the page's available space. */
         let freespace = vl::page_get_heap_free_space::call(buf)?;
         backend_storage_buffer_bufmgr_seams::unlock_release_buffer::call(buf);
-        vl::record_page_with_free_space::call(vacrel.rel, blkno, freespace)?;
+        vl::record_page_with_free_space::call(&vacrel.rel, blkno, freespace)?;
         vacuumed_pages += 1;
     }
 
@@ -153,8 +153,8 @@ pub fn lazy_vacuum_heap_rel(vacrel: &mut LVRelState) -> PgResult<()> {
 /// `lazy_vacuum_heap_page()` (vacuumlazy.c:2838) — free a page's LP_DEAD items
 /// listed in `deadoffsets`. Caller must hold an exclusive buffer lock; `vmbuffer`
 /// must already pin `blkno`'s visibility map page.
-pub fn lazy_vacuum_heap_page(
-    vacrel: &mut LVRelState,
+pub fn lazy_vacuum_heap_page<'mcx>(
+    vacrel: &mut LVRelState<'mcx>,
     blkno: BlockNumber,
     buffer: Buffer,
     deadoffsets: &[OffsetNumber],
@@ -197,9 +197,9 @@ pub fn lazy_vacuum_heap_page(
     backend_storage_buffer_bufmgr_seams::mark_buffer_dirty::call(buffer);
 
     /* XLOG stuff. */
-    if vl::relation_needs_wal::call(vacrel.rel)? {
+    if vl::relation_needs_wal::call(&vacrel.rel)? {
         vl::log_heap_prune_and_freeze::call(
-            vacrel.rel,
+            vacrel.rel.rd_id,
             buffer,
             InvalidTransactionId,
             false, /* no cleanup lock required */
@@ -226,8 +226,7 @@ pub fn lazy_vacuum_heap_page(
         }
 
         vl::page_set_all_visible::call(buffer)?;
-        vl::visibilitymap_set::call(types_vacuum::vacuumlazy::VmSetArgs {
-            rel: vacrel.rel,
+        vl::visibilitymap_set::call(&vacrel.rel, types_vacuum::vacuumlazy::VmSetArgs {
             heap_blk: blkno,
             heap_buf: buffer,
             rec_ptr: InvalidXLogRecPtr,
@@ -252,8 +251,8 @@ pub fn lazy_vacuum_heap_page(
 /// `(all_visible, visibility_cutoff_xid, all_frozen)`.
 ///
 /// This is a stripped-down version of `lazy_scan_prune()`; keep the two in sync.
-pub fn heap_page_is_all_visible(
-    vacrel: &mut LVRelState,
+pub fn heap_page_is_all_visible<'mcx>(
+    vacrel: &mut LVRelState<'mcx>,
     buf: Buffer,
 ) -> PgResult<(bool, TransactionId, bool)> {
     let blockno = backend_storage_buffer_bufmgr_seams::buffer_get_block_number::call(buf);
@@ -284,7 +283,7 @@ pub fn heap_page_is_all_visible(
         debug_assert!(lp.is_normal);
 
         let htsv = vl::heap_tuple_satisfies_vacuum::call(
-            vacrel.rel,
+            &vacrel.rel,
             buf,
             offnum,
             vacrel.cutoffs.OldestXmin,

@@ -33,7 +33,7 @@ fn offset_number_is_valid(offset_number: OffsetNumber) -> bool {
 /// message for the given vacuum reporting state, or `None` for the cases the C
 /// function does nothing for (an invalid block in heap/truncate phases, or the
 /// `VACUUM_ERRCB_PHASE_UNKNOWN` arm).
-pub fn vacuum_error_callback(errinfo: &LVRelState) -> Option<String> {
+pub fn vacuum_error_callback<'mcx>(errinfo: &LVRelState<'mcx>) -> Option<String> {
     let indname = errinfo.indname.as_deref().unwrap_or("");
     match errinfo.phase {
         VacErrPhase::ScanHeap => {
@@ -101,8 +101,8 @@ pub fn vacuum_error_callback(errinfo: &LVRelState) -> Option<String> {
 /// `update_vacuum_error_info()` (vacuumlazy.c:3822) — update the information
 /// required for the vacuum error callback, optionally saving the current
 /// information into `saved_vacrel` for later restoration.
-pub fn update_vacuum_error_info(
-    vacrel: &mut LVRelState,
+pub fn update_vacuum_error_info<'mcx>(
+    vacrel: &mut LVRelState<'mcx>,
     saved_vacrel: Option<&mut LVSavedErrInfo>,
     phase: VacErrPhase,
     blkno: BlockNumber,
@@ -121,7 +121,7 @@ pub fn update_vacuum_error_info(
 
 /// `restore_vacuum_error_info()` (vacuumlazy.c:3841) — restore the vacuum
 /// information saved by a prior [`update_vacuum_error_info`].
-pub fn restore_vacuum_error_info(vacrel: &mut LVRelState, saved_vacrel: &LVSavedErrInfo) {
+pub fn restore_vacuum_error_info<'mcx>(vacrel: &mut LVRelState<'mcx>, saved_vacrel: &LVSavedErrInfo) {
     vacrel.blkno = saved_vacrel.blkno;
     vacrel.offnum = saved_vacrel.offnum;
     vacrel.phase = saved_vacrel.phase;

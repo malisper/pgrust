@@ -308,7 +308,7 @@ pub fn heap_lock_tuple<'mcx>(
      * be necessary.
      */
     if page_is_all_visible(buffer)? {
-        vmbuffer = page_seam::visibilitymap_pin::call(relation.rd_id, block, vmbuffer)?;
+        vmbuffer = page_seam::visibilitymap_pin::call(relation, block, vmbuffer)?;
     }
 
     bufmgr_seam::lock_buffer_exclusive::call(buffer)?;
@@ -670,7 +670,7 @@ pub fn heap_lock_tuple<'mcx>(
          */
         if vmbuffer == InvalidBuffer && page_is_all_visible(buffer)? {
             lock_buffer_unlock(buffer)?;
-            vmbuffer = page_seam::visibilitymap_pin::call(relation.rd_id, block, vmbuffer)?;
+            vmbuffer = page_seam::visibilitymap_pin::call(relation, block, vmbuffer)?;
             bufmgr_seam::lock_buffer_exclusive::call(buffer)?;
             tuple = read_on_page_tuple(mcx, relation.rd_id, buffer, tid)?;
             continue 'l3;
@@ -830,7 +830,7 @@ fn commit_lock<'mcx>(
 
     /* Clear only the all-frozen bit on the VM if needed */
     if page_is_all_visible(buffer)?
-        && page_seam::visibilitymap_clear::call(relation.rd_id, block, vmbuffer, VISIBILITYMAP_ALL_FROZEN)?
+        && page_seam::visibilitymap_clear::call(relation, block, vmbuffer, VISIBILITYMAP_ALL_FROZEN)?
     {
         *cleared_all_frozen = true;
     }
@@ -972,7 +972,7 @@ fn heap_lock_updated_tuple_rec<'mcx>(
              */
             let pinned_desired_page;
             if page_is_all_visible(buf)? {
-                vmbuffer = page_seam::visibilitymap_pin::call(rel.rd_id, block, vmbuffer)?;
+                vmbuffer = page_seam::visibilitymap_pin::call(rel, block, vmbuffer)?;
                 pinned_desired_page = true;
             } else {
                 pinned_desired_page = false;
@@ -987,7 +987,7 @@ fn heap_lock_updated_tuple_rec<'mcx>(
              */
             if !pinned_desired_page && page_is_all_visible(buf)? {
                 lock_buffer_unlock(buf)?;
-                vmbuffer = page_seam::visibilitymap_pin::call(rel.rd_id, block, vmbuffer)?;
+                vmbuffer = page_seam::visibilitymap_pin::call(rel, block, vmbuffer)?;
                 bufmgr_seam::lock_buffer_exclusive::call(buf)?;
                 mytup = reread_on_page_tuple(mcx, rel.rd_id, buf, mytup.t_self)?;
             }
@@ -1118,7 +1118,7 @@ fn heap_lock_updated_tuple_rec<'mcx>(
 
                 let mut cleared_all_frozen = false;
                 if page_is_all_visible(buf)?
-                    && page_seam::visibilitymap_clear::call(rel.rd_id, block, vmbuffer, VISIBILITYMAP_ALL_FROZEN)?
+                    && page_seam::visibilitymap_clear::call(rel, block, vmbuffer, VISIBILITYMAP_ALL_FROZEN)?
                 {
                     cleared_all_frozen = true;
                 }

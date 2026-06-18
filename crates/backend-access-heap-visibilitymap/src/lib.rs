@@ -623,14 +623,12 @@ pub fn visibilitymap_prepare_truncate(
 // Seam installation — the inward visibility-map seam this unit owns
 // (`backend-access-heap-visibilitymap-seams`).
 //
-// NOTE on the parallel Oid-keyed VM seams homed in
-// `backend-access-heap-vacuumlazy-seams` (visibilitymap_count/get_status/pin/
-// set/clear, keyed by `Oid`): those are vacuumlazy's *outward* dependency
-// seams. Installing them requires resolving the `Oid` back to a real
-// `Relation` via `RelationIdGetRelation`, which needs a scoped `Mcx` the
-// Oid-keyed signatures don't carry; that router is a separate contract concern
-// and out of this wave's scope. They remain uninstalled (loud-panic) as before
-// this wave — not introduced here.
+// The five VM seams homed in `backend-access-heap-vacuumlazy-seams`
+// (visibilitymap_count/get_status/pin/set/clear) are now `&Relation<'mcx>`-keyed
+// (the vacuumlazy-mcx keystone re-signed them off bare `Oid`). They are this
+// unit's true inward surface — the heap-vacuum driver, heapam, and
+// catalog-indexing all reach the VM through them — so this owner installs them
+// here by delegating straight to the in-crate implementations.
 // ---------------------------------------------------------------------------
 
 /// Install every seam declared in `backend-access-heap-visibilitymap-seams` to
@@ -643,6 +641,35 @@ pub fn init_seams() {
             Ok((status, vmbuf))
         },
     );
+
+    // The five `&Relation<'mcx>`-keyed VM seams in vacuumlazy-seams.
+    backend_access_heap_vacuumlazy_seams::visibilitymap_count::set(|rel| {
+        visibilitymap_count(rel)
+    });
+    backend_access_heap_vacuumlazy_seams::visibilitymap_get_status::set(|rel, heap_blk, vmbuf_in| {
+        let mut vmbuf = vmbuf_in;
+        let status = visibilitymap_get_status(rel, heap_blk, &mut vmbuf)?;
+        Ok((status, vmbuf))
+    });
+    backend_access_heap_vacuumlazy_seams::visibilitymap_pin::set(|rel, heap_blk, vmbuf_in| {
+        let mut vmbuf = vmbuf_in;
+        visibilitymap_pin(rel, heap_blk, &mut vmbuf)?;
+        Ok(vmbuf)
+    });
+    backend_access_heap_vacuumlazy_seams::visibilitymap_set::set(|rel, args| {
+        visibilitymap_set(
+            rel,
+            args.heap_blk,
+            args.heap_buf,
+            args.rec_ptr,
+            args.vm_buf,
+            args.cutoff_xid,
+            args.flags,
+        )
+    });
+    backend_access_heap_vacuumlazy_seams::visibilitymap_clear::set(|rel, heap_blk, vmbuf, flags| {
+        visibilitymap_clear(rel, heap_blk, vmbuf, flags)
+    });
 }
 
 #[cfg(test)]

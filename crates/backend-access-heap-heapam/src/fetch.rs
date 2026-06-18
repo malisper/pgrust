@@ -340,7 +340,7 @@ pub fn heap_hot_search_buffer<'mcx>(
         // check whether all chain members are dead to all transactions.
         if want_all_dead && all_dead == Some(true) {
             if vistest.is_none() {
-                vistest = Some(vacuumlazy_seam::global_vis_test_for::call(relid)?);
+                vistest = Some(vacuumlazy_seam::global_vis_test_for::call(relation)?);
             }
             if !HeapTupleIsSurelyDead(&heap_tuple.tuple, vistest.unwrap())? {
                 all_dead = Some(false);

@@ -778,8 +778,7 @@ pub fn heap_multi_insert<'mcx>(
             // visibilitymap_set(relation, BufferGetBlockNumber(buffer), buffer,
             //                   InvalidXLogRecPtr, vmbuffer, InvalidTransactionId,
             //                   VISIBILITYMAP_ALL_VISIBLE | VISIBILITYMAP_ALL_FROZEN);
-            page_seam::visibilitymap_set::call(types_vacuum::vacuumlazy::VmSetArgs {
-                rel: relation.rd_id,
+            page_seam::visibilitymap_set::call(relation, types_vacuum::vacuumlazy::VmSetArgs {
                 heap_blk: backend_storage_buffer_bufmgr_seams::buffer_get_block_number::call(buffer),
                 heap_buf: buffer,
                 rec_ptr: types_core::InvalidXLogRecPtr,
@@ -960,12 +959,12 @@ fn relation_is_used_as_catalog_table(relation: &RelationData<'_>) -> bool {
 /// `visibilitymap_clear(rel, heap_blk, vmbuf, flags)` via the page seam (W2
 /// owner). C ignores the return; we do too.
 fn visibilitymap_clear(
-    relation: &RelationData<'_>,
+    relation: &Relation<'_>,
     heap_blk: BlockNumber,
     vmbuf: Buffer,
     flags: u8,
 ) -> PgResult<()> {
-    page_seam::visibilitymap_clear::call(relation.rd_id, heap_blk, vmbuf, flags)?;
+    page_seam::visibilitymap_clear::call(relation, heap_blk, vmbuf, flags)?;
     Ok(())
 }
 

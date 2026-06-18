@@ -9,6 +9,8 @@ name = "backend_access_heap_vacuumlazy"
 path = "src/lib.rs"
 
 [dependencies]
+mcx = { path = "../mcx" }
+types-rel = { path = "../types-rel" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-storage = { path = "../types-storage" }
@@ -22,3 +24,6 @@ backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }
 backend-access-common-tidstore-seams = { path = "../backend-access-common-tidstore-seams" }
 backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+
+[dev-dependencies]
+types-tuple = { path = "../types-tuple" }

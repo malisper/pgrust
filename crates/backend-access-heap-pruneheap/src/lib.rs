@@ -317,7 +317,7 @@ pub fn heap_page_prune_opt<'mcx>(
 
     // Check whether prune_xid indicates that there may be dead rows that can be
     // cleaned up.
-    let vistest = vacuumlazy_seam::global_vis_test_for::call(relation.rd_id)?;
+    let vistest = vacuumlazy_seam::global_vis_test_for::call(relation)?;
 
     if !procarray_seam::global_vis_test_is_removable_xid::call(vistest, prune_xid)? {
         return Ok(());

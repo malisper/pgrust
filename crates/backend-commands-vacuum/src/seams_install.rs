@@ -48,7 +48,9 @@ pub fn init_seams() {
     vacuum::vac_cleanup_one_index::set(crate::vac_cleanup_one_index);
 
     // --- backend-access-heap-vacuumlazy-seams (lazy-vacuum command layer) ---
-    vacuumlazy::vacuum_get_cutoffs::set(crate::vacuum_get_cutoffs);
+    vacuumlazy::vacuum_get_cutoffs::set(|rel, params, cutoffs| {
+        crate::vacuum_get_cutoffs(rel.rd_id, params, cutoffs)
+    });
     vacuumlazy::vacuum_xid_failsafe_check::set(crate::vacuum_xid_failsafe_check);
     vacuumlazy::vac_open_indexes::set(vac_open_indexes_rowexcl);
     vacuumlazy::vac_close_indexes::set(vac_close_indexes_nolock);
@@ -176,17 +178,45 @@ fn exec_vacuum_arm<'mcx>(
 
 use types_core::primitive::Oid;
 use types_error::PgResult;
+use types_rel::Relation;
 use types_storage::lock::{NoLock, RowExclusiveLock};
 use types_vacuum::vacuumlazy::UpdateRelStatsArgs;
+use backend_access_table_table_seams as table_seam;
 
-/// `vac_open_indexes(rel, RowExclusiveLock, &nindexes, &indrels)`.
-fn vac_open_indexes_rowexcl(rel: Oid) -> PgResult<alloc::vec::Vec<Oid>> {
-    crate::vac_open_indexes(rel, RowExclusiveLock)
+/// `vac_open_indexes(rel, RowExclusiveLock, &nindexes, &indrels)` — open all the
+/// vacuumable (indisready) indexes of `rel` and return the live, owned index
+/// `Relation`s allocated in the driver run's `mcx`. The lock is taken by
+/// `index_open(RowExclusiveLock)`; `table_open(mcx, oid, NoLock)` then recovers
+/// the owned `Relation` value from the relcache without re-locking (the same
+/// open-then-recover idiom the heap path uses).
+fn vac_open_indexes_rowexcl<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+) -> PgResult<alloc::vec::Vec<Relation<'mcx>>> {
+    let indexoidlist = vacuum::relation_get_index_list::call(rel.rd_id)?;
+    let mut irel: alloc::vec::Vec<Relation<'mcx>> =
+        alloc::vec::Vec::with_capacity(indexoidlist.len());
+
+    for indexoid in indexoidlist {
+        let opened = vacuum::index_open::call(indexoid, RowExclusiveLock)?;
+        if opened.indisready {
+            irel.push(table_seam::table_open::call(mcx, opened.index, NoLock)?);
+        } else {
+            vacuum::index_close::call(opened.index, RowExclusiveLock)?;
+        }
+    }
+
+    Ok(irel)
 }
 
-/// `vac_close_indexes(nindexes, indrels, NoLock)`.
-fn vac_close_indexes_nolock(indrels: alloc::vec::Vec<Oid>) -> PgResult<()> {
-    crate::vac_close_indexes(&indrels, NoLock)
+/// `vac_close_indexes(nindexes, indrels, NoLock)` — release the owned index
+/// `Relation`s (each `Relation::close(NoLock)` drops the relcache reference; the
+/// `RowExclusiveLock` taken by `vac_open_indexes` is held until commit).
+fn vac_close_indexes_nolock<'mcx>(indrels: alloc::vec::Vec<Relation<'mcx>>) -> PgResult<()> {
+    for r in indrels {
+        r.close(NoLock)?;
+    }
+    Ok(())
 }
 
 /// `vac_close_indexes(nindexes, indrels, lockmode)` — the vacuumparallel worker

@@ -172,7 +172,6 @@ pub struct PruneAndFreezeArgs {
 /// `visibilitymap_set(...)` inputs.
 #[derive(Clone, Copy, Debug)]
 pub struct VmSetArgs {
-    pub rel: Oid,
     pub heap_blk: BlockNumber,
     pub heap_buf: Buffer,
     pub rec_ptr: XLogRecPtr,

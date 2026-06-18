@@ -31,7 +31,7 @@ fn here(funcname: &'static str) -> ErrorLocation {
 /// `lazy_vacuum()` (vacuumlazy.c:2450) — remove the dead TIDs collected so far
 /// from indexes (phase II) and then from the heap (phase III), unless the bypass
 /// or failsafe paths apply.
-pub fn lazy_vacuum(vacrel: &mut LVRelState) -> PgResult<()> {
+pub fn lazy_vacuum<'mcx>(vacrel: &mut LVRelState<'mcx>) -> PgResult<()> {
     debug_assert!(vacrel.nindexes > 0);
     debug_assert!(vacrel.lpdead_item_pages > 0);
 
@@ -75,9 +75,9 @@ pub fn lazy_vacuum(vacrel: &mut LVRelState) -> PgResult<()> {
 
 /// `lazy_vacuum_all_indexes()` (vacuumlazy.c:2575) — perform index bulk deletion
 /// across every index. Returns `true` iff all indexes were successfully vacuumed.
-pub fn lazy_vacuum_all_indexes(vacrel: &mut LVRelState) -> PgResult<bool> {
+pub fn lazy_vacuum_all_indexes<'mcx>(vacrel: &mut LVRelState<'mcx>) -> PgResult<bool> {
     let mut allindexes = true;
-    let old_live_tuples = vl::relation_get_reltuples::call(vacrel.rel)?;
+    let old_live_tuples = vl::relation_get_reltuples::call(&vacrel.rel)?;
 
     debug_assert!(vacrel.nindexes > 0);
     debug_assert!(vacrel.do_index_vacuuming);
@@ -96,10 +96,10 @@ pub fn lazy_vacuum_all_indexes(vacrel: &mut LVRelState) -> PgResult<bool> {
 
     if !parallel_vacuum_is_active(vacrel) {
         for idx in 0..vacrel.nindexes as usize {
-            let indrel = vacrel.indrels[idx];
+            let indrel = vacrel.indrels[idx].alias();
             let istat = vacrel.indstats[idx];
 
-            let new_istat = lazy_vacuum_one_index(indrel, istat, old_live_tuples, vacrel)?;
+            let new_istat = lazy_vacuum_one_index(&indrel, istat, old_live_tuples, vacrel)?;
             vacrel.indstats[idx] = new_istat;
 
             vl::pgstat_progress_update_param::call(
@@ -146,7 +146,7 @@ pub fn lazy_vacuum_all_indexes(vacrel: &mut LVRelState) -> PgResult<bool> {
 /// `lazy_check_wraparound_failsafe()` (vacuumlazy.c:2950) — check whether the
 /// table's relfrozenxid/relminmxid is dangerously old and, if so, trigger the
 /// failsafe. Returns `true` if the failsafe has been triggered.
-pub fn lazy_check_wraparound_failsafe(vacrel: &mut LVRelState) -> PgResult<bool> {
+pub fn lazy_check_wraparound_failsafe<'mcx>(vacrel: &mut LVRelState<'mcx>) -> PgResult<bool> {
     /* Don't warn more than once per VACUUM. */
     if vl::vacuum_failsafe_active::call()? {
         return Ok(true);

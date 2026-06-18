@@ -1802,12 +1802,15 @@ dependencies = [
  "backend-storage-buffer-bufmgr-seams",
  "backend-tcop-postgres-seams",
  "backend-utils-error",
+ "mcx",
  "pg-prng-seams",
  "pg-rusage-seams",
  "types-core",
  "types-error",
+ "types-rel",
  "types-rusage",
  "types-storage",
+ "types-tuple",
  "types-vacuum",
 ]
 
@@ -1815,9 +1818,11 @@ dependencies = [
 name = "backend-access-heap-vacuumlazy-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
+ "types-rel",
  "types-tuple",
  "types-vacuum",
 ]

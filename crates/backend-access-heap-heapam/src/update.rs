@@ -215,7 +215,7 @@ pub fn heap_update<'mcx>(
      * be necessary.
      */
     if page_is_all_visible(buffer)? {
-        vmbuffer = page_seam::visibilitymap_pin::call(relation.rd_id, block, vmbuffer)?;
+        vmbuffer = page_seam::visibilitymap_pin::call(relation, block, vmbuffer)?;
     }
 
     bufmgr_seam::lock_buffer_exclusive::call(buffer)?;
@@ -514,7 +514,7 @@ pub fn heap_update<'mcx>(
          */
         if vmbuffer == InvalidBuffer && page_is_all_visible(buffer)? {
             lock_buffer_unlock(buffer)?;
-            vmbuffer = page_seam::visibilitymap_pin::call(relation.rd_id, block, vmbuffer)?;
+            vmbuffer = page_seam::visibilitymap_pin::call(relation, block, vmbuffer)?;
             bufmgr_seam::lock_buffer_exclusive::call(buffer)?;
             // Re-materialize the on-page tuple after the lock round-trip.
             oldtup = read_on_page_tuple(mcx, relation.rd_id, buffer, otid)?;
@@ -672,7 +672,7 @@ pub fn heap_update<'mcx>(
          */
         if page_is_all_visible(buffer)?
             && page_seam::visibilitymap_clear::call(
-                relation.rd_id,
+                relation,
                 block,
                 vmbuffer,
                 VISIBILITYMAP_ALL_FROZEN,
@@ -749,7 +749,7 @@ pub fn heap_update<'mcx>(
             }
             /* Acquire VM page pin if needed and we don't have it. */
             if vmbuffer == InvalidBuffer && page_is_all_visible(buffer)? {
-                vmbuffer = page_seam::visibilitymap_pin::call(relation.rd_id, block, vmbuffer)?;
+                vmbuffer = page_seam::visibilitymap_pin::call(relation, block, vmbuffer)?;
             }
             /* Re-acquire the lock on the old tuple's page. */
             bufmgr_seam::lock_buffer_exclusive::call(buffer)?;
@@ -889,7 +889,7 @@ pub fn heap_update<'mcx>(
             Ok(())
         })?;
         page_seam::visibilitymap_clear::call(
-            relation.rd_id,
+            relation,
             buffer_get_block_number(buffer)?,
             vmbuffer,
             VISIBILITYMAP_VALID_BITS,
@@ -903,7 +903,7 @@ pub fn heap_update<'mcx>(
             Ok(())
         })?;
         page_seam::visibilitymap_clear::call(
-            relation.rd_id,
+            relation,
             buffer_get_block_number(newbuf)?,
             vmbuffer_new,
             VISIBILITYMAP_VALID_BITS,

@@ -43,7 +43,7 @@ pub enum NextBlock {
 
 /// `heap_vac_scan_next_block()` (vacuumlazy.c:1571) — return the next block for
 /// the main vacuum scan, or [`NextBlock::Exhausted`] when finished.
-pub fn heap_vac_scan_next_block(vacrel: &mut LVRelState) -> PgResult<NextBlock> {
+pub fn heap_vac_scan_next_block<'mcx>(vacrel: &mut LVRelState<'mcx>) -> PgResult<NextBlock> {
     let mut blk_info: u8 = 0;
 
     /* relies on InvalidBlockNumber + 1 overflowing to 0 on first call */
@@ -123,8 +123,8 @@ pub fn heap_vac_scan_next_block(vacrel: &mut LVRelState) -> PgResult<NextBlock> 
 // for definite-assignment, so the dead initial `false` triggers
 // `unused_assignments`.
 #[allow(unused_assignments)]
-pub fn find_next_unskippable_block(
-    vacrel: &mut LVRelState,
+pub fn find_next_unskippable_block<'mcx>(
+    vacrel: &mut LVRelState<'mcx>,
     skipsallvis: &mut bool,
 ) -> PgResult<()> {
     let rel_pages = vacrel.rel_pages;
@@ -137,7 +137,7 @@ pub fn find_next_unskippable_block(
 
     loop {
         let (mapbits, vmbuf) = vl::visibilitymap_get_status::call(
-            vacrel.rel,
+            &vacrel.rel,
             next_unskippable_block,
             next_unskippable_vmbuffer,
         )?;

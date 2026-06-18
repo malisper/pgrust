@@ -19,7 +19,7 @@ use alloc::vec::Vec;
 
 use types_core::{bits32, MultiXactId, Oid, TransactionId};
 use types_error::PgResult;
-use types_rel::FormData_pg_class;
+use types_rel::{FormData_pg_class, Relation};
 use types_tuple::heaptuple::ItemPointerData;
 use types_vacuum::vacuum::VacuumParams;
 use types_vacuum::vacuumlazy::{StrategyHandle, TidStore, UpdateRelStatsArgs};
@@ -234,7 +234,7 @@ seam_core::seam!(pub fn check_for_interrupts() -> PgResult<()>);
 seam_core::seam!(pub fn injection_point(name: String) -> PgResult<()>);
 // `cluster_rel_for_vacuum_full` -> backend-commands-cluster-seams::cluster_rel
 //   (vacuum opens the held relation NoLock and calls the real cluster_rel).
-seam_core::seam!(pub fn table_relation_vacuum(rel: Oid, params: VacuumParams, bstrategy: StrategyHandle) -> PgResult<()>);
+seam_core::seam!(pub fn table_relation_vacuum<'mcx>(mcx: mcx::Mcx<'mcx>, rel: Relation<'mcx>, params: VacuumParams, bstrategy: StrategyHandle) -> PgResult<()>);
 seam_core::seam!(pub fn at_eoxact_guc(is_commit: bool, nestlevel: i32) -> PgResult<()>);
 // `get_user_id_and_sec_context` -> backend-utils-init-miscinit-seams.
 seam_core::seam!(pub fn set_user_id_and_sec_context(userid: Oid, sec_context: i32) -> PgResult<()>);

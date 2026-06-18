@@ -708,7 +708,7 @@ fn TransactionIdIsValid(xid: TransactionId) -> bool {
 /// a zeroed `SnapshotData` with `snapshot_type = SNAPSHOT_NON_VACUUMABLE` and
 /// `vistest` set from the relation's global-visibility test state.
 fn init_non_vacuumable_snapshot(rel: &Relation) -> PgResult<SnapshotData> {
-    let vistest = vacuumlazy_seam::global_vis_test_for::call(rel.rd_id)?;
+    let vistest = vacuumlazy_seam::global_vis_test_for::call(rel)?;
     let mut snapshot = SnapshotData::sentinel(SnapshotType::SNAPSHOT_NON_VACUUMABLE);
     snapshot.vistest = vistest;
     Ok(snapshot)

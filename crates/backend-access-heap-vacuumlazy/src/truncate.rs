@@ -32,7 +32,7 @@ fn here(funcname: &'static str) -> ErrorLocation {
 
 /// `should_attempt_truncation()` (vacuumlazy.c:3180) — decide whether to try to
 /// truncate empty pages off the end of the relation.
-pub fn should_attempt_truncation(vacrel: &mut LVRelState) -> PgResult<bool> {
+pub fn should_attempt_truncation<'mcx>(vacrel: &mut LVRelState<'mcx>) -> PgResult<bool> {
     if !vacrel.do_rel_truncate || vl::vacuum_failsafe_active::call()? {
         return Ok(false);
     }
@@ -51,7 +51,7 @@ pub fn should_attempt_truncation(vacrel: &mut LVRelState) -> PgResult<bool> {
 /// `lazy_truncate_heap()` (vacuumlazy.c:3200) — try to truncate the relation down
 /// to the last nonempty page, taking an `AccessExclusiveLock` with the timeout
 /// heuristics and looping while pages remain to remove.
-pub fn lazy_truncate_heap(vacrel: &mut LVRelState) -> PgResult<()> {
+pub fn lazy_truncate_heap<'mcx>(vacrel: &mut LVRelState<'mcx>) -> PgResult<()> {
     let mut orig_rel_pages: BlockNumber = vacrel.rel_pages;
     let mut new_rel_pages: BlockNumber;
     let mut lock_waiter_detected: bool;
@@ -80,7 +80,7 @@ pub fn lazy_truncate_heap(vacrel: &mut LVRelState) -> PgResult<()> {
         lock_waiter_detected = false;
         lock_retry = 0;
         loop {
-            if vl::conditional_lock_relation::call(vacrel.rel, AccessExclusiveLock)? {
+            if vl::conditional_lock_relation::call(&vacrel.rel, AccessExclusiveLock)? {
                 break;
             }
 
@@ -112,9 +112,9 @@ pub fn lazy_truncate_heap(vacrel: &mut LVRelState) -> PgResult<()> {
          * Now that we have exclusive lock, look to see if the rel has grown
          * whilst we were vacuuming with non-exclusive lock.
          */
-        new_rel_pages = vl::relation_get_number_of_blocks::call(vacrel.rel)?;
+        new_rel_pages = vl::relation_get_number_of_blocks::call(&vacrel.rel)?;
         if new_rel_pages != orig_rel_pages {
-            vl::unlock_relation::call(vacrel.rel, AccessExclusiveLock)?;
+            vl::unlock_relation::call(&vacrel.rel, AccessExclusiveLock)?;
             return Ok(());
         }
 
@@ -127,15 +127,15 @@ pub fn lazy_truncate_heap(vacrel: &mut LVRelState) -> PgResult<()> {
 
         if new_rel_pages >= orig_rel_pages {
             /* can't do anything after all */
-            vl::unlock_relation::call(vacrel.rel, AccessExclusiveLock)?;
+            vl::unlock_relation::call(&vacrel.rel, AccessExclusiveLock)?;
             return Ok(());
         }
 
         /* Okay to truncate. */
-        vl::relation_truncate::call(vacrel.rel, new_rel_pages)?;
+        vl::relation_truncate::call(&vacrel.rel, new_rel_pages)?;
 
         /* Release the exclusive lock as soon as we have truncated. */
-        vl::unlock_relation::call(vacrel.rel, AccessExclusiveLock)?;
+        vl::unlock_relation::call(&vacrel.rel, AccessExclusiveLock)?;
 
         /* Update statistics. */
         vacrel.removed_pages = vacrel
@@ -163,8 +163,8 @@ pub fn lazy_truncate_heap(vacrel: &mut LVRelState) -> PgResult<()> {
 /// of the relation to find the last page that cannot be truncated away. Sets
 /// `*lock_waiter_detected` if a conflicting lock request appeared. Returns the
 /// new (smaller) relation length in blocks.
-pub fn count_nondeletable_pages(
-    vacrel: &mut LVRelState,
+pub fn count_nondeletable_pages<'mcx>(
+    vacrel: &mut LVRelState<'mcx>,
     lock_waiter_detected: &mut bool,
 ) -> PgResult<BlockNumber> {
     let mut blkno: BlockNumber;
@@ -188,7 +188,7 @@ pub fn count_nondeletable_pages(
             let currenttime = Instant::now();
             let elapsed = currenttime.duration_since(starttime);
             if (elapsed.as_micros() / 1000) >= VACUUM_TRUNCATE_LOCK_CHECK_INTERVAL as u128 {
-                if vl::lock_has_waiters_relation::call(vacrel.rel, AccessExclusiveLock)? {
+                if vl::lock_has_waiters_relation::call(&vacrel.rel, AccessExclusiveLock)? {
                     ereport(if vacrel.verbose { INFO } else { DEBUG2 })
                         .errmsg(format!(
                             "table \"{}\": suspending truncate due to conflicting lock request",
@@ -214,7 +214,7 @@ pub fn count_nondeletable_pages(
             let prefetch_start = blkno & !(PREFETCH_SIZE - 1);
             let mut pblkno = prefetch_start;
             while pblkno <= blkno {
-                vl::prefetch_buffer::call(vacrel.rel, MAIN_FORKNUM, pblkno)?;
+                vl::prefetch_buffer::call(&vacrel.rel, MAIN_FORKNUM, pblkno)?;
                 backend_tcop_postgres_seams::check_for_interrupts::call()?;
                 pblkno += 1;
             }
@@ -222,7 +222,7 @@ pub fn count_nondeletable_pages(
         }
 
         let buf =
-            vl::read_buffer_extended::call(vacrel.rel, MAIN_FORKNUM, blkno, vacrel.bstrategy)?;
+            vl::read_buffer_extended::call(&vacrel.rel, MAIN_FORKNUM, blkno, vacrel.bstrategy)?;
 
         /* In this phase we only need shared access to the buffer. */
         backend_storage_buffer_bufmgr_seams::lock_buffer::call(buf, BUFFER_LOCK_SHARE)?;

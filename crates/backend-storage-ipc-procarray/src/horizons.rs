@@ -565,5 +565,5 @@ pub fn init_seams() {
     // declaration (the seam was originally mis-homed there; the owner-homed
     // copy lives in procarray-seams). Install both so the actually-consumed
     // declaration resolves to this owner.
-    backend_access_heap_vacuumlazy_seams::global_vis_test_for::set(GlobalVisTestFor);
+    backend_access_heap_vacuumlazy_seams::global_vis_test_for::set(|rel| GlobalVisTestFor(rel.rd_id));
 }

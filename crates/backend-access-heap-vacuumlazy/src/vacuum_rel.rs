@@ -39,7 +39,10 @@ fn fmax(a: f64, b: f64) -> f64 {
 
 /// `heap_vacuum_eager_scan_setup()` (vacuumlazy.c:488) — set up the eager
 /// scanning state for vacuuming a single relation.
-pub fn heap_vacuum_eager_scan_setup(vacrel: &mut LVRelState, params: &VacuumParams) -> PgResult<()> {
+pub fn heap_vacuum_eager_scan_setup<'mcx>(
+    vacrel: &mut LVRelState<'mcx>,
+    params: &VacuumParams,
+) -> PgResult<()> {
     /* Initialize eager scan management fields to their disabled values. */
     vacrel.next_eager_scan_region_start = InvalidBlockNumber;
     vacrel.eager_scan_max_fails_per_region = 0;
@@ -90,7 +93,7 @@ pub fn heap_vacuum_eager_scan_setup(vacrel: &mut LVRelState, params: &VacuumPara
      * Our success cap is MAX_EAGER_FREEZE_SUCCESS_RATE of the all-visible but
      * not all-frozen blocks in the relation.
      */
-    let (allvisible, allfrozen) = vl::visibilitymap_count::call(vacrel.rel)?;
+    let (allvisible, allfrozen) = vl::visibilitymap_count::call(&vacrel.rel)?;
 
     vacrel.eager_scan_remaining_successes =
         (MAX_EAGER_FREEZE_SUCCESS_RATE * allvisible.wrapping_sub(allfrozen) as f64) as BlockNumber;
@@ -130,8 +133,9 @@ pub fn heap_vacuum_eager_scan_setup(vacrel: &mut LVRelState, params: &VacuumPara
 ///
 /// At entry, the caller has already established a transaction and opened and
 /// locked the relation.
-pub fn heap_vacuum_rel(
-    rel: types_core::Oid,
+pub fn heap_vacuum_rel<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    rel: types_rel::Relation<'mcx>,
     params: &VacuumParams,
     bstrategy: types_vacuum::vacuumlazy::StrategyHandle,
 ) -> PgResult<()> {
@@ -164,31 +168,31 @@ pub fn heap_vacuum_rel(
     /* Used for instrumentation and stats report. */
     starttime = vl::get_current_timestamp::call()?;
 
-    let relid = rel;
+    let relid = rel.rd_id;
     vl::pgstat_progress_start_command::call(PROGRESS_COMMAND_VACUUM, relid)?;
 
     /*
      * Set up the central working state. Copy the rel names into local memory for
-     * error reporting.
+     * error reporting. The run owns `mcx` and holds the live open `rel` for the
+     * whole scan (C: `vacrel->rel = rel`).
      */
-    let mut vr = LVRelState::new_zeroed();
+    let mut vr = LVRelState::new_zeroed(mcx, rel);
 
     vr.dbname = vl::get_database_name::call(vl::my_database_id::call()?)?;
-    vr.relnamespace = vl::get_namespace_name::call(vl::relation_get_namespace::call(rel)?)?;
-    vr.relname = vl::relation_get_relation_name::call(rel)?;
+    vr.relnamespace = vl::get_namespace_name::call(vl::relation_get_namespace::call(&vr.rel)?)?;
+    vr.relname = vl::relation_get_relation_name::call(&vr.rel)?;
     vr.indname = None;
     vr.phase = VacErrPhase::Unknown;
     vr.verbose = verbose;
     vl::push_error_context::call()?;
 
     /* Set up high level stuff about rel and its indexes. */
-    vr.rel = rel;
-    vr.indrels = vl::vac_open_indexes::call(vr.rel)?;
+    vr.indrels = vl::vac_open_indexes::call(vr.mcx, &vr.rel)?;
     vr.nindexes = vr.indrels.len() as i32;
     vr.bstrategy = bstrategy;
     if instrument && vr.nindexes > 0 {
         for i in 0..vr.nindexes as usize {
-            indnames.push(vl::relation_get_relation_name::call(vr.indrels[i])?);
+            indnames.push(vl::relation_get_relation_name::call(&vr.indrels[i])?);
         }
     }
 
@@ -225,10 +229,10 @@ pub fn heap_vacuum_rel(
      * Get cutoffs, then determine the extent of the blocks we'll scan. Then
      * acquire vistest, used in pruning.
      */
-    vr.aggressive = vl::vacuum_get_cutoffs::call(rel, *params, &mut vr.cutoffs)?;
-    orig_rel_pages = vl::relation_get_number_of_blocks::call(rel)?;
+    vr.aggressive = vl::vacuum_get_cutoffs::call(&vr.rel, *params, &mut vr.cutoffs)?;
+    orig_rel_pages = vl::relation_get_number_of_blocks::call(&vr.rel)?;
     vr.rel_pages = orig_rel_pages;
-    vr.vistest = vl::global_vis_test_for::call(rel)?;
+    vr.vistest = vl::global_vis_test_for::call(&vr.rel)?;
 
     /* Initialize state used to track oldest extant XID/MXID. */
     vr.new_relfrozen_xid = vr.cutoffs.OldestXmin;
@@ -338,7 +342,7 @@ pub fn heap_vacuum_rel(
 
     /* Clamp relallvisible to be not more than pg_class.relpages. */
     new_rel_pages = vr.rel_pages; /* After possible rel truncation. */
-    let (av, af) = vl::visibilitymap_count::call(rel)?;
+    let (av, af) = vl::visibilitymap_count::call(&vr.rel)?;
     new_rel_allvisible = av;
     new_rel_allfrozen = af;
     if new_rel_allvisible > new_rel_pages {
@@ -352,7 +356,7 @@ pub fn heap_vacuum_rel(
 
     /* Now actually update rel's pg_class entry. */
     let (fz_updated, mm_updated) = vl::vac_update_relstats::call(types_vacuum::vacuumlazy::UpdateRelStatsArgs {
-        relation: rel,
+        relation: vr.rel.rd_id,
         num_pages: new_rel_pages,
         num_tuples: vr.new_live_tuples,
         num_all_visible_pages: new_rel_allvisible,
@@ -368,7 +372,7 @@ pub fn heap_vacuum_rel(
     /* Report results to the cumulative stats system. */
     vl::pgstat_report_vacuum::call(
         relid,
-        vl::relation_is_shared::call(rel)?,
+        vl::relation_is_shared::call(&vr.rel)?,
         fmax(vr.new_live_tuples, 0.0) as i64,
         vr.recently_dead_tuples + vr.missed_dead_tuples,
         starttime,
@@ -410,8 +414,8 @@ pub fn heap_vacuum_rel(
 /// The `instrument` completion-log block of `heap_vacuum_rel()` (the
 /// `appendStringInfo` cascade), factored out to keep the entry readable.
 #[allow(clippy::too_many_arguments)]
-fn emit_verbose_log(
-    vr: &mut LVRelState,
+fn emit_verbose_log<'mcx>(
+    vr: &mut LVRelState<'mcx>,
     params: &VacuumParams,
     verbose: bool,
     orig_rel_pages: BlockNumber,

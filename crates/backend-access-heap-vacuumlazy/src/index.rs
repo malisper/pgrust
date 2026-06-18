@@ -21,7 +21,7 @@ use backend_access_heap_vacuumlazy_seams as vl;
 
 /// `lazy_cleanup_all_indexes()` (vacuumlazy.c:3003) — perform index cleanup
 /// across every index (serially or via parallel vacuum).
-pub fn lazy_cleanup_all_indexes(vacrel: &mut LVRelState) -> PgResult<()> {
+pub fn lazy_cleanup_all_indexes<'mcx>(vacrel: &mut LVRelState<'mcx>) -> PgResult<()> {
     let reltuples = vacrel.new_rel_tuples;
     let estimated_count = vacrel.scanned_pages < vacrel.rel_pages;
 
@@ -36,11 +36,11 @@ pub fn lazy_cleanup_all_indexes(vacrel: &mut LVRelState) -> PgResult<()> {
 
     if !parallel_vacuum_is_active(vacrel) {
         for idx in 0..vacrel.nindexes as usize {
-            let indrel = vacrel.indrels[idx];
+            let indrel = vacrel.indrels[idx].alias();
             let istat = vacrel.indstats[idx];
 
             let new_istat =
-                lazy_cleanup_one_index(indrel, istat, reltuples, estimated_count, vacrel)?;
+                lazy_cleanup_one_index(&indrel, istat, reltuples, estimated_count, vacrel)?;
             vacrel.indstats[idx] = new_istat;
 
             vl::pgstat_progress_update_param::call(
@@ -67,15 +67,15 @@ pub fn lazy_cleanup_all_indexes(vacrel: &mut LVRelState) -> PgResult<()> {
 
 /// `lazy_vacuum_one_index()` (vacuumlazy.c:3071) — run `vac_bulkdel_one_index`
 /// for a single index, returning its updated bulk-delete stats.
-pub fn lazy_vacuum_one_index(
-    indrel: types_core::Oid,
+pub fn lazy_vacuum_one_index<'mcx>(
+    indrel: &types_rel::Relation<'mcx>,
     istat: Option<IndexBulkDeleteResult>,
     reltuples: f64,
-    vacrel: &mut LVRelState,
+    vacrel: &mut LVRelState<'mcx>,
 ) -> PgResult<Option<IndexBulkDeleteResult>> {
     let ivinfo = IndexVacuumInfo {
-        index: handle_to_types(indrel),
-        heaprel: handle_to_types(vacrel.rel),
+        index: indrel.rd_id,
+        heaprel: vacrel.rel.rd_id,
         analyze_only: false,
         report_progress: false,
         estimated_count: true,
@@ -95,7 +95,7 @@ pub fn lazy_vacuum_one_index(
     update_vacuum_error_info(
         vacrel,
         Some(&mut saved_err_info),
-        VacErrPhase::VacuumIndex,
+        VacErrPhase::VacuumIndex, // re-signed seam takes &Relation
         crate::consts::InvalidBlockNumber,
         crate::consts::InvalidOffsetNumber,
     );
@@ -117,16 +117,16 @@ pub fn lazy_vacuum_one_index(
 
 /// `lazy_cleanup_one_index()` (vacuumlazy.c:3120) — run `vac_cleanup_one_index`
 /// for a single index, returning its updated cleanup stats.
-pub fn lazy_cleanup_one_index(
-    indrel: types_core::Oid,
+pub fn lazy_cleanup_one_index<'mcx>(
+    indrel: &types_rel::Relation<'mcx>,
     istat: Option<IndexBulkDeleteResult>,
     reltuples: f64,
     estimated_count: bool,
-    vacrel: &mut LVRelState,
+    vacrel: &mut LVRelState<'mcx>,
 ) -> PgResult<Option<IndexBulkDeleteResult>> {
     let ivinfo = IndexVacuumInfo {
-        index: handle_to_types(indrel),
-        heaprel: handle_to_types(vacrel.rel),
+        index: indrel.rd_id,
+        heaprel: vacrel.rel.rd_id,
         analyze_only: false,
         report_progress: false,
         estimated_count,
@@ -160,11 +160,11 @@ pub fn lazy_cleanup_one_index(
 
 /// `update_relstats_all_indexes()` (vacuumlazy.c:3723) — update `pg_class`
 /// relstats (relpages, reltuples) for every index using the recorded stats.
-pub fn update_relstats_all_indexes(vacrel: &mut LVRelState) -> PgResult<()> {
+pub fn update_relstats_all_indexes<'mcx>(vacrel: &mut LVRelState<'mcx>) -> PgResult<()> {
     debug_assert!(vacrel.do_index_cleanup);
 
     for idx in 0..vacrel.nindexes as usize {
-        let indrel = vacrel.indrels[idx];
+        let indrel = vacrel.indrels[idx].alias();
         let istat = vacrel.indstats[idx];
 
         let istat = match istat {
@@ -173,7 +173,7 @@ pub fn update_relstats_all_indexes(vacrel: &mut LVRelState) -> PgResult<()> {
         };
 
         vl::vac_update_relstats::call(types_vacuum::vacuumlazy::UpdateRelStatsArgs {
-            relation: indrel,
+            relation: indrel.rd_id,
             num_pages: istat.num_pages,
             num_tuples: istat.num_index_tuples,
             num_all_visible_pages: 0,
@@ -185,14 +185,6 @@ pub fn update_relstats_all_indexes(vacrel: &mut LVRelState) -> PgResult<()> {
         })?;
     }
     Ok(())
-}
-
-/// The relation's `Oid` identity carried by [`IndexVacuumInfo`] (Relation =
-/// Oid-via-relcache); the `IndexVacuumInfo` fields are already `Oid`, so this
-/// is the identity function, kept for symmetry with `strategy_to_types`.
-#[inline]
-fn handle_to_types(h: types_core::Oid) -> types_core::Oid {
-    h
 }
 
 #[inline]

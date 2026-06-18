@@ -28,8 +28,10 @@
 //!     through the small substrate handles defined in
 //!     [`seams_ub_heaprest::vacuumlazy`].
 
+use mcx::Mcx;
+use types_rel::Relation;
 use types_core::{
-    BlockNumber, Buffer, MultiXactId, OffsetNumber, Oid, TransactionId, BLCKSZ, InvalidOid,
+    BlockNumber, Buffer, MultiXactId, OffsetNumber, TransactionId, BLCKSZ,
 };
 use types_vacuum::vacuum::VacuumCutoffs;
 use types_vacuum::vacuumparallel::{IndexBulkDeleteResult, VacDeadItemsInfo};
@@ -110,13 +112,17 @@ pub enum VacErrPhase {
 /// `typedef struct LVRelState` (vacuumlazy.c:259-411) — the central per-relation
 /// working state, allocated once per relation and threaded through almost every
 /// function as `&mut LVRelState`.
-pub struct LVRelState {
+pub struct LVRelState<'mcx> {
+    /// The memory context the driver run owns (the `PlannerRun<'mcx>` analog).
+    /// Held for the whole scan so owned `Relation`s and other arena values
+    /// share its lifetime.
+    pub mcx: Mcx<'mcx>,
     // -- Target heap relation and its indexes --
-    /// `Relation rel` — its `RelationGetRelid` (Oid-via-relcache); the
-    /// substrate re-resolves the live `&RelationData` from the relcache.
-    pub rel: Oid,
-    /// `Relation *indrels` — the open index relations, by their `RelationGetRelid`.
-    pub indrels: Vec<Oid>,
+    /// `Relation rel` — the live, open heap relation, held across the whole
+    /// scan/truncate/stats (C: `vacrel->rel = rel`, vacuumlazy.c:681).
+    pub rel: Relation<'mcx>,
+    /// `Relation *indrels` — the open index relations.
+    pub indrels: Vec<Relation<'mcx>>,
     /// `int nindexes`.
     pub nindexes: i32,
 
@@ -242,13 +248,15 @@ pub struct LVRelState {
     pub eager_scan_remaining_fails: BlockNumber,
 }
 
-impl LVRelState {
+impl<'mcx> LVRelState<'mcx> {
     /// The `palloc0`-equivalent freshly-zeroed state (`heap_vacuum_rel` allocates
-    /// `LVRelState` with `palloc0`). Handle/`Vec`/`String` fields take their
-    /// null/empty values.
-    pub fn new_zeroed() -> LVRelState {
+    /// `LVRelState` with `palloc0`), holding the run's `mcx` and the live open
+    /// heap `rel` (C: `vacrel->rel = rel`). Handle/`Vec`/`String` fields take
+    /// their null/empty values.
+    pub fn new_zeroed(mcx: Mcx<'mcx>, rel: Relation<'mcx>) -> LVRelState<'mcx> {
         LVRelState {
-            rel: InvalidOid,
+            mcx,
+            rel,
             indrels: Vec::new(),
             nindexes: 0,
             bstrategy: StrategyHandle::none(),
@@ -326,6 +334,6 @@ pub struct LVSavedErrInfo {
 /// `ParallelVacuumIsActive(vacrel)` (vacuumlazy.c:221) — true iff we are in
 /// parallel mode and the DSM segment is initialized (`vacrel->pvs != NULL`).
 #[inline]
-pub fn parallel_vacuum_is_active(vacrel: &LVRelState) -> bool {
+pub fn parallel_vacuum_is_active(vacrel: &LVRelState<'_>) -> bool {
     !vacrel.pvs.is_none()
 }

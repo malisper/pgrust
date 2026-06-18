@@ -40,7 +40,7 @@ fn here(funcname: &'static str) -> ErrorLocation {
 /// `lazy_scan_heap()` (vacuumlazy.c:1200) — scan the heap, pruning and freezing
 /// tuples, recording dead TIDs, and (between TID-store fills) vacuuming indexes
 /// and the heap. The workhorse of phase I.
-pub fn lazy_scan_heap(vacrel: &mut LVRelState) -> PgResult<()> {
+pub fn lazy_scan_heap<'mcx>(vacrel: &mut LVRelState<'mcx>) -> PgResult<()> {
     let rel_pages: BlockNumber = vacrel.rel_pages;
     let mut blkno: BlockNumber = 0;
     let mut next_fsm_block_to_vacuum: BlockNumber = 0;
@@ -95,7 +95,7 @@ pub fn lazy_scan_heap(vacrel: &mut LVRelState) -> PgResult<()> {
             crate::vacuum_phase::lazy_vacuum(vacrel)?;
 
             /* Vacuum the FSM to make newly-freed space visible. */
-            vl::free_space_map_vacuum_range::call(vacrel.rel, next_fsm_block_to_vacuum, blkno + 1)?;
+            vl::free_space_map_vacuum_range::call(&vacrel.rel, next_fsm_block_to_vacuum, blkno + 1)?;
             next_fsm_block_to_vacuum = blkno;
 
             /* Report that we are once again scanning the heap. */
@@ -120,7 +120,7 @@ pub fn lazy_scan_heap(vacrel: &mut LVRelState) -> PgResult<()> {
 
         /* Read (and pin) the chosen block's buffer. */
         let buf =
-            vl::read_buffer_extended::call(vacrel.rel, MAIN_FORKNUM, blkno, vacrel.bstrategy)?;
+            vl::read_buffer_extended::call(&vacrel.rel, MAIN_FORKNUM, blkno, vacrel.bstrategy)?;
 
         vl::check_buffer_is_pinned_once::call(buf)?;
 
@@ -140,7 +140,7 @@ pub fn lazy_scan_heap(vacrel: &mut LVRelState) -> PgResult<()> {
         );
 
         /* Pin the visibility map page in case we need to mark the page all-visible. */
-        vmbuffer = vl::visibilitymap_pin::call(vacrel.rel, blkno, vmbuffer)?;
+        vmbuffer = vl::visibilitymap_pin::call(&vacrel.rel, blkno, vmbuffer)?;
 
         /*
          * We need a buffer cleanup lock to prune/defragment. If we can't get one
@@ -231,7 +231,7 @@ pub fn lazy_scan_heap(vacrel: &mut LVRelState) -> PgResult<()> {
             let freespace = vl::page_get_heap_free_space::call(buf)?;
 
             backend_storage_buffer_bufmgr_seams::unlock_release_buffer::call(buf);
-            vl::record_page_with_free_space::call(vacrel.rel, blkno, freespace)?;
+            vl::record_page_with_free_space::call(&vacrel.rel, blkno, freespace)?;
 
             /* Periodically perform FSM vacuuming for tables without indexes. */
             if got_cleanup_lock
@@ -240,7 +240,7 @@ pub fn lazy_scan_heap(vacrel: &mut LVRelState) -> PgResult<()> {
                 && blkno - next_fsm_block_to_vacuum >= VACUUM_FSM_EVERY_PAGES
             {
                 vl::free_space_map_vacuum_range::call(
-                    vacrel.rel,
+                    &vacrel.rel,
                     next_fsm_block_to_vacuum,
                     blkno,
                 )?;
@@ -261,7 +261,7 @@ pub fn lazy_scan_heap(vacrel: &mut LVRelState) -> PgResult<()> {
 
     /* Compute the new value for pg_class.reltuples. */
     vacrel.new_live_tuples = vl::vac_estimate_reltuples::call(
-        vacrel.rel,
+        vacrel.rel.rd_id,
         rel_pages,
         vacrel.scanned_pages,
         vacrel.live_tuples as f64,
@@ -279,7 +279,7 @@ pub fn lazy_scan_heap(vacrel: &mut LVRelState) -> PgResult<()> {
 
     /* Vacuum the remainder of the Free Space Map. */
     if rel_pages > next_fsm_block_to_vacuum {
-        vl::free_space_map_vacuum_range::call(vacrel.rel, next_fsm_block_to_vacuum, rel_pages)?;
+        vl::free_space_map_vacuum_range::call(&vacrel.rel, next_fsm_block_to_vacuum, rel_pages)?;
     }
 
     /* Report all blocks vacuumed. */

@@ -161,7 +161,7 @@ pub fn heap_delete<'mcx>(
      * the lock.
      */
     if page_is_all_visible(buffer)? {
-        vmbuffer = page_seam::visibilitymap_pin::call(relation.rd_id, block, vmbuffer)?;
+        vmbuffer = page_seam::visibilitymap_pin::call(relation, block, vmbuffer)?;
     }
 
     bufmgr_seam::lock_buffer_exclusive::call(buffer)?;
@@ -182,7 +182,7 @@ pub fn heap_delete<'mcx>(
             // C: release only the content lock (keep the pin), pin the VM page,
             // re-lock exclusive, fall through.
             lock_buffer_unlock(buffer)?;
-            vmbuffer = page_seam::visibilitymap_pin::call(relation.rd_id, block, vmbuffer)?;
+            vmbuffer = page_seam::visibilitymap_pin::call(relation, block, vmbuffer)?;
             bufmgr_seam::lock_buffer_exclusive::call(buffer)?;
             // Re-materialize the on-page tuple after the lock round-trip.
             tp = read_on_page_tuple(mcx, relation.rd_id, buffer, tid)?;
@@ -469,7 +469,7 @@ pub fn heap_delete<'mcx>(
         // The PageClearAllVisible above already cleared the page flag; clear the
         // visibility-map bit too.
         page_seam::visibilitymap_clear::call(
-            relation.rd_id,
+            relation,
             buffer_get_block_number(buffer)?,
             vmbuffer,
             VISIBILITYMAP_VALID_BITS,

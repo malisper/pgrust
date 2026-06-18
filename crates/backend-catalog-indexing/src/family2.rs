@@ -755,7 +755,8 @@ fn index_update_stats(rel: &Relation<'_>, hasindex: bool, reltuples: f64) -> PgR
         )?;
 
         if rel.rd_rel.relkind != RELKIND_INDEX {
-            let (av, af) = backend_access_heap_vacuumlazy_seams::visibilitymap_count::call(relid)?;
+            let (av, af) =
+                backend_access_heap_vacuumlazy_seams::visibilitymap_count::call(&reopen_self(mcx, rel)?)?;
             relallvisible = av;
             relallfrozen = af;
         }

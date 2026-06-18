@@ -24,7 +24,7 @@ fn here(funcname: &'static str) -> ErrorLocation {
 
 /// `dead_items_alloc()` (vacuumlazy.c:3473) — allocate (or set up parallel) the
 /// `dead_items` TID store and `dead_items_info`, sized from the work-mem GUC.
-pub fn dead_items_alloc(vacrel: &mut LVRelState, nworkers: i32) -> PgResult<()> {
+pub fn dead_items_alloc<'mcx>(vacrel: &mut LVRelState<'mcx>, nworkers: i32) -> PgResult<()> {
     let vac_work_mem: i32 = if vl::am_autovacuum_worker_process::call()?
         && vl::autovacuum_work_mem::call()? != -1
     {
@@ -38,7 +38,7 @@ pub fn dead_items_alloc(vacrel: &mut LVRelState, nworkers: i32) -> PgResult<()> 
      * are at least two indexes on a table.
      */
     if nworkers >= 0 && vacrel.nindexes > 1 && vacrel.do_index_vacuuming {
-        if vl::relation_uses_local_buffers::call(vacrel.rel)? {
+        if vl::relation_uses_local_buffers::call(&vacrel.rel)? {
             /* Cannot vacuum temporary tables in parallel. */
             if nworkers > 0 {
                 ereport(WARNING)
@@ -51,8 +51,8 @@ pub fn dead_items_alloc(vacrel: &mut LVRelState, nworkers: i32) -> PgResult<()> 
             }
         } else {
             let init = vl::parallel_vacuum_init::call(types_vacuum::vacuumlazy::ParallelVacuumInitArgs {
-                rel: vacrel.rel,
-                indrels: vacrel.indrels.clone(),
+                rel: vacrel.rel.rd_id,
+                indrels: vacrel.indrels.iter().map(|r| r.rd_id).collect(),
                 nindexes: vacrel.nindexes,
                 nrequested: nworkers,
                 vac_work_mem,
@@ -83,8 +83,8 @@ pub fn dead_items_alloc(vacrel: &mut LVRelState, nworkers: i32) -> PgResult<()> 
 
 /// `dead_items_add()` (vacuumlazy.c:3538) — record the LP_DEAD offsets of one
 /// heap block into the TID store and update the progress counters.
-pub fn dead_items_add(
-    vacrel: &mut LVRelState,
+pub fn dead_items_add<'mcx>(
+    vacrel: &mut LVRelState<'mcx>,
     blkno: BlockNumber,
     offsets: Vec<OffsetNumber>,
 ) -> PgResult<()> {
@@ -105,7 +105,7 @@ pub fn dead_items_add(
 
 /// `dead_items_reset()` (vacuumlazy.c:3560) — forget all collected dead items so
 /// phase I can resume after an intermediate index/heap vacuuming pass.
-pub fn dead_items_reset(vacrel: &mut LVRelState) -> PgResult<()> {
+pub fn dead_items_reset<'mcx>(vacrel: &mut LVRelState<'mcx>) -> PgResult<()> {
     if parallel_vacuum_is_active(vacrel) {
         vl::parallel_vacuum_reset_dead_items::call(vacrel.pvs)?;
         let (ts, info) = vl::parallel_vacuum_get_dead_items::call(vacrel.pvs)?;
@@ -126,7 +126,7 @@ pub fn dead_items_reset(vacrel: &mut LVRelState) -> PgResult<()> {
 /// `dead_items_cleanup()` (vacuumlazy.c:3582) — perform cleanup for resources
 /// allocated in [`dead_items_alloc`]; in the parallel case, tear down parallel
 /// vacuum state.
-pub fn dead_items_cleanup(vacrel: &mut LVRelState) -> PgResult<()> {
+pub fn dead_items_cleanup<'mcx>(vacrel: &mut LVRelState<'mcx>) -> PgResult<()> {
     if !parallel_vacuum_is_active(vacrel) {
         /* Don't bother with pfree here. */
         return Ok(());

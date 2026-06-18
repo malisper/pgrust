@@ -28,6 +28,7 @@ use types_core::{
     BlockNumber, Buffer, MultiXactId, OffsetNumber, Oid, TimestampTz, TransactionId,
 };
 use types_error::PgResult;
+use types_rel::Relation;
 use types_vacuum::vacuum::{HeapTupleFreeze, VacuumCutoffs, VacuumParams};
 use types_vacuum::vacuumlazy::{
     GlobalVisStateHandle, LinePointerState, ParallelVacuumInit, ParallelVacuumInitArgs,
@@ -43,9 +44,11 @@ use types_vacuum::vacuumparallel::{IndexBulkDeleteResult, IndexVacuumInfo, VacDe
 seam_core::seam!(
     /// `heap_vacuum_rel(rel, params, bstrategy)` — perform VACUUM for one heap
     /// relation. The caller has already established a transaction and opened
-    /// and locked the relation; `rel` is its `RelationGetRelid`.
-    pub fn heap_vacuum_rel(
-        rel: Oid,
+    /// and locked the relation; the owned `rel` is held for the whole scan
+    /// (the `PlannerRun(mcx)` analog).
+    pub fn heap_vacuum_rel<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: Relation<'mcx>,
         params: VacuumParams,
         bstrategy: StrategyHandle,
     ) -> PgResult<()>
@@ -58,8 +61,8 @@ seam_core::seam!(
 seam_core::seam!(
     /// `vacuum_get_cutoffs(rel, params, &cutoffs)` — compute the freeze/removal
     /// cutoffs; returns `aggressive`.
-    pub fn vacuum_get_cutoffs(
-        rel: Oid,
+    pub fn vacuum_get_cutoffs<'mcx>(
+        rel: &Relation<'mcx>,
         params: VacuumParams,
         cutoffs: &mut VacuumCutoffs,
     ) -> PgResult<bool>
@@ -71,13 +74,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `vac_open_indexes(rel, RowExclusiveLock, &nindexes, &indrels)`.
-    pub fn vac_open_indexes(rel: Oid) -> PgResult<Vec<Oid>>
+    /// `vac_open_indexes(rel, RowExclusiveLock, &nindexes, &indrels)`. The
+    /// `mcx` carries the driver run's arena so the opened index `Relation`s are
+    /// allocated with the run's lifetime.
+    pub fn vac_open_indexes<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &Relation<'mcx>,
+    ) -> PgResult<Vec<Relation<'mcx>>>
 );
 
 seam_core::seam!(
     /// `vac_close_indexes(nindexes, indrels, NoLock)`.
-    pub fn vac_close_indexes(indrels: Vec<Oid>) -> PgResult<()>
+    pub fn vac_close_indexes<'mcx>(indrels: Vec<Relation<'mcx>>) -> PgResult<()>
 );
 
 seam_core::seam!(
@@ -189,8 +197,8 @@ seam_core::seam!(
 seam_core::seam!(
     /// `HeapTupleSatisfiesVacuum(tuple, OldestXmin, buffer)` — returns the
     /// `HTSV_Result` integer code.
-    pub fn heap_tuple_satisfies_vacuum(
-        rel: Oid,
+    pub fn heap_tuple_satisfies_vacuum<'mcx>(
+        rel: &Relation<'mcx>,
         buffer: Buffer,
         offnum: OffsetNumber,
         oldest_xmin: TransactionId,
@@ -207,36 +215,36 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `visibilitymap_count(rel, &all_visible, &all_frozen)`.
-    pub fn visibilitymap_count(rel: Oid) -> PgResult<(BlockNumber, BlockNumber)>
+    pub fn visibilitymap_count<'mcx>(rel: &Relation<'mcx>) -> PgResult<(BlockNumber, BlockNumber)>
 );
 seam_core::seam!(
     /// `visibilitymap_get_status(rel, heap_blk, &vmbuf)` — returns the `VM_*`
     /// status bits and the (possibly newly pinned) vm buffer.
-    pub fn visibilitymap_get_status(
-        rel: Oid,
+    pub fn visibilitymap_get_status<'mcx>(
+        rel: &Relation<'mcx>,
         heap_blk: BlockNumber,
         vmbuf_in: Buffer,
     ) -> PgResult<(u8, Buffer)>
 );
 seam_core::seam!(
     /// `visibilitymap_pin(rel, heap_blk, &vmbuf)`.
-    pub fn visibilitymap_pin(
-        rel: Oid,
+    pub fn visibilitymap_pin<'mcx>(
+        rel: &Relation<'mcx>,
         heap_blk: BlockNumber,
         vmbuf_in: Buffer,
     ) -> PgResult<Buffer>
 );
 seam_core::seam!(
     /// `visibilitymap_set(...)` — returns the previous vm bits (`old_vmbits`).
-    pub fn visibilitymap_set(args: VmSetArgs) -> PgResult<u8>
+    pub fn visibilitymap_set<'mcx>(rel: &Relation<'mcx>, args: VmSetArgs) -> PgResult<u8>
 );
 seam_core::seam!(
     /// `visibilitymap_clear(rel, heap_blk, vmbuf, flags)` — clear the given VM
     /// bits for `heap_blk`. Returns C's `bool`: whether any bit was actually
     /// cleared (heap_lock_tuple / heap_lock_updated_tuple_rec use it to decide
     /// whether to set `XLH_LOCK_ALL_FROZEN_CLEARED`).
-    pub fn visibilitymap_clear(
-        rel: Oid,
+    pub fn visibilitymap_clear<'mcx>(
+        rel: &Relation<'mcx>,
         heap_blk: BlockNumber,
         vmbuf: Buffer,
         flags: u8,
@@ -255,10 +263,10 @@ seam_core::seam!(
     /// `scan_block::heap_vac_scan_next_block` and
     /// `scan_block::vacuum_reap_lp_read_stream_next`), so the buffer is read
     /// through `read_buffer_extended`.
-    pub fn read_stream_begin_relation(
+    pub fn read_stream_begin_relation<'mcx>(
         flags: i32,
         bstrategy: StrategyHandle,
-        rel: Oid,
+        rel: &Relation<'mcx>,
         fork: i32,
         callback: ScanCallback,
         reap_iter: TidStoreIterHandle,
@@ -275,8 +283,8 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `ReadBufferExtended(rel, fork, blkno, RBM_NORMAL, bstrategy)`.
-    pub fn read_buffer_extended(
-        rel: Oid,
+    pub fn read_buffer_extended<'mcx>(
+        rel: &Relation<'mcx>,
         fork: i32,
         blkno: BlockNumber,
         bstrategy: StrategyHandle,
@@ -284,7 +292,7 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `PrefetchBuffer(rel, fork, blkno)`.
-    pub fn prefetch_buffer(rel: Oid, fork: i32, blkno: BlockNumber) -> PgResult<()>
+    pub fn prefetch_buffer<'mcx>(rel: &Relation<'mcx>, fork: i32, blkno: BlockNumber) -> PgResult<()>
 );
 // `release_buffer` / `unlock_release_buffer` re-homed to the canonical owner
 // `backend-storage-buffer-bufmgr-seams` (bufmgr.c); caller binds there.
@@ -357,23 +365,23 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `FreeSpaceMapVacuumRange(rel, start, end)`.
-    pub fn free_space_map_vacuum_range(
-        rel: Oid,
+    pub fn free_space_map_vacuum_range<'mcx>(
+        rel: &Relation<'mcx>,
         start: BlockNumber,
         end: BlockNumber,
     ) -> PgResult<()>
 );
 seam_core::seam!(
     /// `RecordPageWithFreeSpace(rel, heap_blk, spaceavail)`.
-    pub fn record_page_with_free_space(
-        rel: Oid,
+    pub fn record_page_with_free_space<'mcx>(
+        rel: &Relation<'mcx>,
         heap_blk: BlockNumber,
         spaceavail: usize,
     ) -> PgResult<()>
 );
 seam_core::seam!(
     /// `GetRecordedFreeSpace(rel, heap_blk)`.
-    pub fn get_recorded_free_space(rel: Oid, heap_blk: BlockNumber) -> PgResult<usize>
+    pub fn get_recorded_free_space<'mcx>(rel: &Relation<'mcx>, heap_blk: BlockNumber) -> PgResult<usize>
 );
 
 // =======================================================================
@@ -382,50 +390,50 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `UnlockRelation(rel, lockmode)`.
-    pub fn unlock_relation(rel: Oid, lockmode: i32) -> PgResult<()>
+    pub fn unlock_relation<'mcx>(rel: &Relation<'mcx>, lockmode: i32) -> PgResult<()>
 );
 seam_core::seam!(
     /// `ConditionalLockRelation(rel, lockmode)`.
-    pub fn conditional_lock_relation(rel: Oid, lockmode: i32) -> PgResult<bool>
+    pub fn conditional_lock_relation<'mcx>(rel: &Relation<'mcx>, lockmode: i32) -> PgResult<bool>
 );
 seam_core::seam!(
     /// `LockHasWaitersRelation(rel, lockmode)`.
-    pub fn lock_has_waiters_relation(rel: Oid, lockmode: i32) -> PgResult<bool>
+    pub fn lock_has_waiters_relation<'mcx>(rel: &Relation<'mcx>, lockmode: i32) -> PgResult<bool>
 );
 seam_core::seam!(
     /// `RelationTruncate(rel, nblocks)`.
-    pub fn relation_truncate(rel: Oid, nblocks: BlockNumber) -> PgResult<()>
+    pub fn relation_truncate<'mcx>(rel: &Relation<'mcx>, nblocks: BlockNumber) -> PgResult<()>
 );
 seam_core::seam!(
     /// `RelationGetNumberOfBlocks(rel)`.
-    pub fn relation_get_number_of_blocks(rel: Oid) -> PgResult<BlockNumber>
+    pub fn relation_get_number_of_blocks<'mcx>(rel: &Relation<'mcx>) -> PgResult<BlockNumber>
 );
 seam_core::seam!(
     /// `RelationNeedsWAL(rel)`.
-    pub fn relation_needs_wal(rel: Oid) -> PgResult<bool>
+    pub fn relation_needs_wal<'mcx>(rel: &Relation<'mcx>) -> PgResult<bool>
 );
 seam_core::seam!(
     /// `RelationUsesLocalBuffers(rel)` — true for temp tables.
-    pub fn relation_uses_local_buffers(rel: Oid) -> PgResult<bool>
+    pub fn relation_uses_local_buffers<'mcx>(rel: &Relation<'mcx>) -> PgResult<bool>
 );
 
 // ---- relcache field reads the driver does inline in C ----------------
 
 seam_core::seam!(
     /// `RelationGetNamespace(rel)`.
-    pub fn relation_get_namespace(rel: Oid) -> PgResult<Oid>
+    pub fn relation_get_namespace<'mcx>(rel: &Relation<'mcx>) -> PgResult<Oid>
 );
 seam_core::seam!(
     /// `RelationGetRelationName(rel)`.
-    pub fn relation_get_relation_name(rel: Oid) -> PgResult<String>
+    pub fn relation_get_relation_name<'mcx>(rel: &Relation<'mcx>) -> PgResult<String>
 );
 seam_core::seam!(
     /// `rel->rd_rel->relisshared`.
-    pub fn relation_is_shared(rel: Oid) -> PgResult<bool>
+    pub fn relation_is_shared<'mcx>(rel: &Relation<'mcx>) -> PgResult<bool>
 );
 seam_core::seam!(
     /// `rel->rd_rel->reltuples` widened to f64.
-    pub fn relation_get_reltuples(rel: Oid) -> PgResult<f64>
+    pub fn relation_get_reltuples<'mcx>(rel: &Relation<'mcx>) -> PgResult<f64>
 );
 
 // =======================================================================
@@ -521,7 +529,7 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `GlobalVisTestFor(rel)`.
-    pub fn global_vis_test_for(rel: Oid) -> PgResult<GlobalVisStateHandle>
+    pub fn global_vis_test_for<'mcx>(rel: &Relation<'mcx>) -> PgResult<GlobalVisStateHandle>
 );
 // `pg_global_prng_uint32` is re-homed to `pg-prng-seams` (owner
 // `pg-prng`), whose stem matches its true owner `src/common/pg_prng.c`.
