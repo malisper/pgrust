@@ -392,7 +392,7 @@ pub(crate) fn truncate_check_rel(
      * pg_upgrade.
      */
     if !ts_globals_seam::allowSystemTableMods::call()?
-        && backend_catalog_catalog::IsSystemClassByNamespace(relid, relnamespace)
+        && seam::is_system_class_relid::call(relid, relkind, relnamespace)?
         && (!seam::is_binary_upgrade::call()? || relid != LargeObjectRelationId)
     {
         return ereport(ERROR)
@@ -439,7 +439,7 @@ pub(crate) fn truncate_check_activity<'mcx>(_mcx: Mcx<'mcx>, rel: &Relation<'mcx
 /// `RangeVarCallbackForTruncate(relation, relId, oldRelId, arg)`
 /// (tablecmds.c:19530).
 fn RangeVarCallbackForTruncate(
-    mcx: Mcx<'_>,
+    _mcx: Mcx<'_>,
     _relation: &AccessRangeVar,
     rel_id: Oid,
     _old_rel_id: Oid,
@@ -449,7 +449,7 @@ fn RangeVarCallbackForTruncate(
         return Ok(());
     }
 
-    let info = seam::get_pg_class_drop_info::call(mcx, rel_id)?.ok_or_else(|| {
+    let info = seam::get_pg_class_drop_info::call(rel_id)?.ok_or_else(|| {
         ereport(ERROR)
             .errmsg_internal(format!("cache lookup failed for relation {rel_id}"))
             .into_error()

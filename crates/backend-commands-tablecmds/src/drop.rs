@@ -133,7 +133,7 @@ pub fn remove_relations<'mcx>(mcx: Mcx<'mcx>, drop: &DropStmt<'mcx>) -> PgResult
         });
 
         let mut callback = |callback_rel: &AccessRangeVar, rel_oid: Oid, old_rel_oid: Oid| {
-            RangeVarCallbackForDropRelation(mcx, callback_rel, rel_oid, old_rel_oid, &state)
+            RangeVarCallbackForDropRelation(callback_rel, rel_oid, old_rel_oid, &state)
         };
         let rel_oid = RangeVarGetRelidExtended(
             mcx,
@@ -195,30 +195,9 @@ pub fn remove_relations<'mcx>(mcx: Mcx<'mcx>, drop: &DropStmt<'mcx>) -> PgResult
     Ok(())
 }
 
-/// `SearchSysCache1(RELOID, relid)` + `GETSTRUCT` projection of the `pg_class`
-/// fields the DROP / TRUNCATE `RangeVarGetRelidExtended` callbacks read.
-/// `Ok(None)` for a concurrently-dropped relation (`!HeapTupleIsValid`).
-pub fn get_pg_class_drop_info(
-    mcx: Mcx<'_>,
-    relid: Oid,
-) -> PgResult<Option<seam::PgClassDropInfo>> {
-    let Some(form) = backend_utils_cache_syscache_seams::search_pg_class_full_form::call(mcx, relid)?
-    else {
-        return Ok(None);
-    };
-    Ok(Some(seam::PgClassDropInfo {
-        relkind: form.relkind as u8,
-        relpersistence: form.relpersistence as u8,
-        relispartition: form.relispartition,
-        relnamespace: form.relnamespace,
-        relname: form.relname.as_str().to_string(),
-    }))
-}
-
 /// `RangeVarCallbackForDropRelation(rel, relOid, oldRelOid, arg)`
 /// (tablecmds.c:1702).
 fn RangeVarCallbackForDropRelation(
-    mcx: Mcx<'_>,
     rel: &AccessRangeVar,
     rel_oid: Oid,
     old_rel_oid: Oid,
@@ -253,7 +232,7 @@ fn RangeVarCallbackForDropRelation(
         return Ok(());
     }
 
-    let info = match seam::get_pg_class_drop_info::call(mcx, rel_oid)? {
+    let info = match seam::get_pg_class_drop_info::call(rel_oid)? {
         Some(info) => info,
         None => return Ok(()), /* concurrently dropped, so nothing to do */
     };
@@ -304,7 +283,7 @@ fn RangeVarCallbackForDropRelation(
      * failed concurrent process and allow its drop.
      */
     let mut invalid_system_index = false;
-    if backend_catalog_catalog::IsSystemClassByNamespace(rel_oid, info.relnamespace)
+    if seam::is_system_class_relid::call(rel_oid, info.relkind, info.relnamespace)?
         && info.relkind == RELKIND_INDEX
     {
         if let Some(indisvalid) = seam::get_index_isvalid::call(rel_oid)? {
@@ -320,7 +299,7 @@ fn RangeVarCallbackForDropRelation(
     /* In the case of an invalid index, it is fine to bypass this check */
     if !invalid_system_index
         && !backend_commands_tablespace_globals_seams::allowSystemTableMods::call()?
-        && backend_catalog_catalog::IsSystemClassByNamespace(rel_oid, info.relnamespace)
+        && seam::is_system_class_relid::call(rel_oid, info.relkind, info.relnamespace)?
     {
         return ereport(ERROR)
             .errcode(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)

@@ -57,7 +57,6 @@ backend-commands-define-seams = { path = "../backend-commands-define-seams" }
 backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
 backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }
 backend-utils-cache-syscache = { path = "../backend-utils-cache-syscache" }
-backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 # GetAttributeCompression (tablecmds.c:22044) resolves a column's
 # attcompression from its compression name + type toastability.
 backend-access-common-toast-compression = { path = "../backend-access-common-toast-compression" }
