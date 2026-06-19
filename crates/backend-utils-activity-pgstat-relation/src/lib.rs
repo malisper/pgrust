@@ -1344,6 +1344,14 @@ pub fn init_seams() {
             .expect("pgstat_update_heap_dead_tuples failed");
     });
 
+    // `pgstat_count_truncate(rel)` (tablecmds ExecuteTruncateGuts). The tablecmds
+    // caller crosses by `&Relation`; project (relid, relisshared, pgstat_enabled)
+    // off the handle — exactly the three fields C reads off `rel->rd_rel` /
+    // `rel->pgstat_enabled`.
+    backend_commands_tablecmds_seams::pgstat_count_truncate::set(|rel| {
+        pgstat_count_truncate(rel.rd_id, rel.rd_rel.relisshared, rel.pgstat_enabled)
+    });
+
     // --- transactional / 2PC seams (backend-utils-activity-stat-seams,
     //     consumed by backend-utils-activity-xact + twophase-rmgr) ---
     use backend_utils_activity_stat_seams as statseam;

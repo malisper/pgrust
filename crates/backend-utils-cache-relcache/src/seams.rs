@@ -230,6 +230,7 @@ pub fn init_seams() {
     tcx::relation_is_nailed::set(tc_relation_is_nailed);
     tcx::relation_get_refcount::set(tc_relation_get_refcount);
     tcx::relation_get_create_subid::set(tc_relation_get_create_subid);
+    tcx::relation_get_new_relfilelocator_subid::set(tc_relation_get_new_relfilelocator_subid);
 }
 
 /// `rel->rd_isnailed` (rel.h) — read off the live owned relcache entry.
@@ -247,6 +248,14 @@ fn tc_relation_get_create_subid(
     rel: &types_rel::Relation<'_>,
 ) -> PgResult<types_core::SubTransactionId> {
     crate::core_entry_store::with_relation(rel.rd_id, |rd| rd.rd_createSubid)
+}
+
+/// `rel->rd_newRelfilelocatorSubid` (rel.h) — the sub-xact that gave this
+/// relation a new relfilenumber (`InvalidSubTransactionId` if none).
+fn tc_relation_get_new_relfilelocator_subid(
+    rel: &types_rel::Relation<'_>,
+) -> PgResult<types_core::SubTransactionId> {
+    crate::core_entry_store::with_relation(rel.rd_id, |rd| rd.rd_newRelfilelocatorSubid)
 }
 
 /// Project the registry-owned relcache entry into a transient `Relation` read

@@ -136,6 +136,12 @@ pub fn init_seams() {
     // shim allocates a scratch context.
     backend_commands_tablecmds_seams::heap_truncate_find_fks::set(crate::heap_truncate_find_FKs);
     backend_commands_tablecmds_seams::heap_truncate_check_fks::set(heap_truncate_check_fks_seam);
+
+    // Storage-truncate chain: the immediate, non-rollbackable single-rel
+    // truncation (in-place TRUNCATE / ON COMMIT path) and its `heap_truncate`
+    // wrapper. Both carry `mcx` and match the owner signatures.
+    backend_commands_tablecmds_seams::heap_truncate_one_rel::set(crate::truncate::heap_truncate_one_rel);
+    backend_commands_tablecmds_seams::heap_truncate::set(crate::truncate::heap_truncate);
 }
 
 /// Seam body for `heap_truncate_check_FKs(relids, tempTables)` (catalog/heap.c).

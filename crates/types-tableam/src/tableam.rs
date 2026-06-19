@@ -346,6 +346,13 @@ pub struct TableAmRoutine {
         persistence: i8,
     ) -> PgResult<(u32, u32)>,
 
+    /// `relation_nontransactional_truncate(rel)` (`access/tableam.h`) — remove
+    /// all tuples from the relation immediately and non-transactionally (the
+    /// truncation cannot be rolled back). For heap this is `RelationTruncate(rel,
+    /// 0)`. Used for `ON COMMIT` temp-table truncation and the in-place TRUNCATE
+    /// path (a relation new in the current subtransaction).
+    pub relation_nontransactional_truncate: fn(rel: &Relation<'_>) -> PgResult<()>,
+
     /// `scan_analyze_next_block(scan, stream)` (`access/tableam.h`) — the
     /// outer-loop callback of `acquire_sample_rows`: pin and share-lock the next
     /// block to be sampled, leaving it the scan's current page. Returns `false`

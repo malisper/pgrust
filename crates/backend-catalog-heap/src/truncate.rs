@@ -29,6 +29,8 @@ use types_core::primitive::{Oid, OidIsValid};
 use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
 use types_catalog::pg_constraint::CONSTRAINT_FOREIGN;
 use types_tuple::access::RELKIND_PARTITIONED_TABLE;
+use types_rel::Relation;
+use types_storage::lock::{AccessExclusiveLock, NoLock};
 
 /// `list_member_oid(list, datum)`.
 fn list_member_oid(list: &[Oid], datum: Oid) -> bool {
@@ -212,6 +214,71 @@ pub fn heap_truncate_check_FKs<'mcx>(
                 }
             }
         }
+    }
+
+    Ok(())
+}
+
+/// `heap_truncate_one_rel(rel)` (heap.c:3631): immediately and
+/// non-transactionally delete all data within a single relation (and its TOAST
+/// table). Not transaction-safe — the truncation cannot be rolled back. Caller
+/// must have checked permissions and hold AccessExclusiveLock.
+pub fn heap_truncate_one_rel<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<()> {
+    /*
+     * Truncate the relation.  Partitioned tables have no storage, so there is
+     * nothing to do for them here.
+     */
+    if rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
+        return Ok(());
+    }
+
+    /* Truncate the underlying relation */
+    backend_access_table_tableam_seams::table_relation_nontransactional_truncate::call(rel)?;
+
+    /* If the relation has indexes, truncate the indexes too */
+    backend_catalog_index_seams::relation_truncate_indexes::call(mcx, rel)?;
+
+    /* If there is a toast table, truncate that too */
+    let toastrelid = rel.rd_rel.reltoastrelid;
+    if OidIsValid(toastrelid) {
+        let toastrel =
+            backend_access_table_table_seams::table_open::call(mcx, toastrelid, AccessExclusiveLock)?;
+        backend_access_table_tableam_seams::table_relation_nontransactional_truncate::call(
+            &toastrel,
+        )?;
+        backend_catalog_index_seams::relation_truncate_indexes::call(mcx, &toastrel)?;
+        /* keep the lock... */
+        toastrel.close(NoLock)?;
+    }
+
+    Ok(())
+}
+
+/// `heap_truncate(relids)` (heap.c:3590): the ON COMMIT DELETE ROWS truncation
+/// path for temporary tables — open each relation with AccessExclusiveLock,
+/// reject any referenced by a foreign key from outside the group, then truncate
+/// each in place. Not transaction-safe (only used where rollback doesn't
+/// matter).
+pub fn heap_truncate<'mcx>(mcx: Mcx<'mcx>, relids: &[Oid]) -> PgResult<()> {
+    /* Open relations for processing, and grab exclusive access on each */
+    let mut relations: Vec<Relation<'mcx>> = Vec::with_capacity(relids.len());
+    for &rid in relids {
+        let rel = backend_access_table_table_seams::table_open::call(mcx, rid, AccessExclusiveLock)?;
+        relations.push(rel);
+    }
+
+    /* Don't allow truncate on tables that are referenced by foreign keys */
+    heap_truncate_check_FKs(mcx, relids, true)?;
+
+    /* OK to do it */
+    for rel in relations.iter() {
+        /* Truncate the relation */
+        heap_truncate_one_rel(mcx, rel)?;
+    }
+
+    /* Close the relations, but keep exclusive lock on them until commit */
+    for rel in relations.into_iter() {
+        rel.close(NoLock)?;
     }
 
     Ok(())

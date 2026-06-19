@@ -102,6 +102,9 @@ pub fn init_seams() {
     backend_access_table_tableam_seams::table_relation_set_new_filelocator::set(
         table_relation_set_new_filelocator,
     );
+    backend_access_table_tableam_seams::table_relation_nontransactional_truncate::set(
+        table_relation_nontransactional_truncate,
+    );
 
     // GUC variable accessors over this unit's `thread_local` backing store —
     // C's `conf->variable` pointer (`&synchronize_seqscans` /
@@ -232,6 +235,13 @@ fn table_relation_set_new_filelocator<'mcx>(
     //     persistence, &freezeXid, &minmulti);
     let routine = am(rel);
     (routine.relation_set_new_filelocator)(rel, &newrlocator, relpersistence)
+}
+
+/// `rel->rd_tableam->relation_nontransactional_truncate(rel)`
+/// (access/tableam.h:1606).
+fn table_relation_nontransactional_truncate(rel: &Relation<'_>) -> PgResult<()> {
+    let routine = am(rel);
+    (routine.relation_nontransactional_truncate)(rel)
 }
 
 // ===========================================================================

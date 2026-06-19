@@ -238,7 +238,7 @@ pub fn execute_truncate_guts<'mcx>(
     }
 
     /* Prepare to catch AFTER triggers; fire BEFORE STATEMENT triggers. */
-    seam::exec_truncate_fire_before_triggers::call(&relids, run_as_table_owner)?;
+    seam::exec_truncate_fire_before_triggers::call(mcx, &relids, run_as_table_owner)?;
 
     /*
      * OK, truncate each table.
@@ -278,18 +278,23 @@ pub fn execute_truncate_guts<'mcx>(
             || seam::relation_get_new_relfilelocator_subid::call(rel)? == my_subid
         {
             /* Immediate, non-rollbackable truncation is OK */
-            seam::heap_truncate_one_rel::call(rel)?;
+            seam::heap_truncate_one_rel::call(mcx, rel)?;
         } else {
             /*
              * This effectively deletes all rows in the table, and may be done
              * in a serializable transaction.
              */
-            seam::check_table_for_serializable_conflict_in::call(rel)?;
+            backend_storage_lmgr_predicate_seams::check_table_for_serializable_conflict_in::call(
+                rel,
+            )?;
 
             /*
              * Need the full transaction-safe pushups: new empty storage file.
              */
-            seam::relation_set_new_relfilenumber::call(rel, rel.rd_rel.relpersistence)?;
+            backend_utils_cache_relcache_seams::relation_set_new_relfilenumber::call(
+                rel.rd_id,
+                rel.rd_rel.relpersistence as i8,
+            )?;
 
             let heap_relid = rel.rd_id;
 
@@ -297,9 +302,9 @@ pub fn execute_truncate_guts<'mcx>(
             let toast_relid = rel.rd_rel.reltoastrelid;
             if OidIsValid(toast_relid) {
                 let toastrel = relation_open(mcx, toast_relid, AccessExclusiveLock)?;
-                seam::relation_set_new_relfilenumber::call(
-                    &toastrel,
-                    toastrel.rd_rel.relpersistence,
+                backend_utils_cache_relcache_seams::relation_set_new_relfilenumber::call(
+                    toastrel.rd_id,
+                    toastrel.rd_rel.relpersistence as i8,
                 )?;
                 toastrel.close(NoLock)?;
             }
@@ -340,7 +345,7 @@ pub fn execute_truncate_guts<'mcx>(
     }
 
     /* Fire AFTER STATEMENT triggers and tear down the EState. */
-    seam::exec_truncate_fire_after_triggers::call(&relids, run_as_table_owner)?;
+    seam::exec_truncate_fire_after_triggers::call(mcx, &relids, run_as_table_owner)?;
 
     /*
      * Close any rels opened by CASCADE (the C `list_difference_ptr`); the

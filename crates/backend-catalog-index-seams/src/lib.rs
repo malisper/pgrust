@@ -189,6 +189,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `RelationTruncateIndexes(heapRelation)` (heap.c): truncate every index of
+    /// the relation to zero tuples and rebuild it from the empty heap (using a
+    /// dummy IndexInfo so no user code runs). Reached from `heap_truncate_one_rel`
+    /// (catalog/heap.c, the ON COMMIT / in-place TRUNCATE path). Owned by
+    /// `catalog/index.c` (where index_open / BuildDummyIndexInfo / index_build
+    /// live). `Err` carries the rebuild `ereport(ERROR)`s.
+    pub fn relation_truncate_indexes<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        heap_relation: &types_rel::Relation<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `plan_create_index_workers(tableOid, indexOid)` (planner.c) — decide how
     /// many parallel workers a CREATE INDEX should request. Reached from
     /// `index_build` only in normal processing mode for a parallel-capable AM.

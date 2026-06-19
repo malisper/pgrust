@@ -520,14 +520,17 @@ seam_core::seam!(
     /// `heap_truncate(relids)` (heap.c): the ON COMMIT DELETE ROWS truncation
     /// path — open, truncate, and reindex each relation in-place. `Err` carries
     /// its `ereport(ERROR)`s.
-    pub fn heap_truncate(relids: &[Oid]) -> PgResult<()>
+    pub fn heap_truncate<'mcx>(mcx: mcx::Mcx<'mcx>, relids: &[Oid]) -> PgResult<()>
 );
 
 seam_core::seam!(
     /// `heap_truncate_one_rel(rel)` (heap.c): immediate, non-rollbackable
     /// truncation of a single relation (and its toast table). `Err` carries its
     /// `ereport(ERROR)`s.
-    pub fn heap_truncate_one_rel(rel: &types_rel::Relation<'_>) -> PgResult<()>
+    pub fn heap_truncate_one_rel<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+    ) -> PgResult<()>
 );
 
 seam_core::seam!(
@@ -545,24 +548,6 @@ seam_core::seam!(
     /// every FK reference into the truncated group is internal to the group
     /// (RESTRICT) — raises otherwise. The owned model passes the relids.
     pub fn heap_truncate_check_fks(relids: &[Oid], temp_tables: bool) -> PgResult<()>
-);
-
-seam_core::seam!(
-    /// `CheckTableForSerializableConflictIn(rel)` (predicate.c): record a
-    /// rw-conflict into this transaction from each predicate-lock holder, so a
-    /// serializable TRUNCATE conflicts correctly.
-    pub fn check_table_for_serializable_conflict_in(rel: &types_rel::Relation<'_>) -> PgResult<()>
-);
-
-seam_core::seam!(
-    /// `RelationSetNewRelfilenumber(rel, persistence)` (relcache.c): create a
-    /// fresh empty storage file and assign it as the relation's relfilenumber,
-    /// scheduling the old file for deletion at commit. `Err` carries the
-    /// storage/catalog `ereport(ERROR)`s.
-    pub fn relation_set_new_relfilenumber(
-        rel: &types_rel::Relation<'_>,
-        persistence: u8,
-    ) -> PgResult<()>
 );
 
 seam_core::seam!(
@@ -630,7 +615,11 @@ seam_core::seam!(
     /// the EState / ResultRelInfo / trigger machinery is unported, so the whole
     /// before-trigger block crosses by relids. `Err` carries the trigger
     /// `ereport(ERROR)`s.
-    pub fn exec_truncate_fire_before_triggers(relids: &[Oid], run_as_table_owner: bool) -> PgResult<()>
+    pub fn exec_truncate_fire_before_triggers<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        relids: &[Oid],
+        run_as_table_owner: bool,
+    ) -> PgResult<()>
 );
 
 seam_core::seam!(
@@ -639,7 +628,11 @@ seam_core::seam!(
     /// TRUNCATE triggers for the given relations and tear down the EState.
     /// Coarse seam (see [`exec_truncate_fire_before_triggers`]). `Err` carries
     /// the trigger `ereport(ERROR)`s.
-    pub fn exec_truncate_fire_after_triggers(relids: &[Oid], run_as_table_owner: bool) -> PgResult<()>
+    pub fn exec_truncate_fire_after_triggers<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        relids: &[Oid],
+        run_as_table_owner: bool,
+    ) -> PgResult<()>
 );
 
 seam_core::seam!(

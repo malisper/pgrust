@@ -126,7 +126,10 @@ pub fn pre_commit_on_commit_actions() -> PgResult<()> {
      * relations are removed after they are worked on.
      */
     if !oids_to_truncate.is_empty() {
-        seam::heap_truncate::call(&oids_to_truncate)?;
+        // The owner `heap_truncate` carries `mcx`; this caller has none in scope
+        // (it runs at pre-commit), so allocate a scratch context for the scans.
+        let ctx = mcx::MemoryContext::new("heap_truncate");
+        seam::heap_truncate::call(ctx.mcx(), &oids_to_truncate)?;
     }
 
     if !oids_to_drop.is_empty() {

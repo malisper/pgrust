@@ -208,3 +208,15 @@ seam_core::seam!(
     /// `Err` carries the `ereport(ERROR)`s of fork creation / WAL logging.
     pub fn smgr_create_init_fork_and_log(rlocator: RelFileLocator) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `RelationTruncate(rel, nblocks)` (storage.c): physically truncate the
+    /// relation's storage to `nblocks` blocks (discarding shared buffers and
+    /// WAL-logging an `XLOG_SMGR_TRUNCATE` record for a permanent rel). The
+    /// heap AM's `relation_nontransactional_truncate` callback calls this with
+    /// `nblocks = 0`. `Err` carries the storage/WAL `ereport(ERROR)`s.
+    pub fn relation_truncate(
+        rel: &types_rel::Relation<'_>,
+        nblocks: types_core::primitive::BlockNumber,
+    ) -> PgResult<()>
+);

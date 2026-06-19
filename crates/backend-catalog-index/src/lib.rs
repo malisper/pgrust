@@ -2670,6 +2670,47 @@ fn AppendAttributeTuples<'mcx>(
 }
 
 /* ===========================================================================
+ * RelationTruncateIndexes (heap.c)
+ * ========================================================================= */
+
+/// `RelationTruncateIndexes(heapRelation)` (heap.c:3542): truncate every index
+/// of the relation to zero tuples and reconstruct it from the (now empty) heap.
+/// A dummy `IndexInfo` is used so no user-defined expression / predicate code
+/// runs (this may execute during ON COMMIT processing). Caller must hold
+/// AccessExclusiveLock on the heap.
+///
+/// Homed here (not in heap.c's crate) because the per-index work —
+/// `index_open` / `BuildDummyIndexInfo` / `index_build` / `index_close` — all
+/// lives in this unit; `heap_truncate_one_rel` reaches it through the
+/// `relation_truncate_indexes` seam.
+pub fn RelationTruncateIndexes<'mcx>(
+    mcx: Mcx<'mcx>,
+    heap_relation: &Relation<'mcx>,
+) -> PgResult<()> {
+    // foreach(indlist, RelationGetIndexList(heapRelation))
+    let indexoidlist = relcache::relation_get_index_list::call(mcx, heap_relation)?;
+    for &index_id in indexoidlist.iter() {
+        // Open the index relation; use exclusive lock, just to be sure.
+        let current_index = indexam::index_open::call(mcx, index_id, ACCESS_EXCLUSIVE_LOCK)?;
+
+        // Fetch info needed for index_build using a dummy IndexInfo (cheaper and,
+        // more importantly, avoids running user code in index expressions /
+        // predicates during ON COMMIT processing).
+        let mut index_info = BuildDummyIndexInfo(mcx, &current_index)?;
+
+        // Now truncate the actual file (and discard buffers).
+        storage::relation_truncate::call(&current_index, 0)?;
+
+        // Initialize the index and rebuild (no need to re-establish pkey setting).
+        index_build(mcx, heap_relation, &current_index, &mut index_info)?;
+
+        // We're done with this index.
+        current_index.close(NO_LOCK)?;
+    }
+    Ok(())
+}
+
+/* ===========================================================================
  * BuildDummyIndexInfo
  * ========================================================================= */
 
@@ -3631,6 +3672,7 @@ pub fn init_seams() {
     // build_indices) — the build / introspection core (keystones #340–#344).
     index_seam::build_index_info::set(BuildIndexInfo);
     index_seam::index_build::set(index_build);
+    index_seam::relation_truncate_indexes::set(RelationTruncateIndexes);
 
     // FormIndexDatum (ExecInsertIndexTuples / index build / logical-rep conflict
     // detection): compute an index tuple's column values from a heap slot,

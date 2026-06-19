@@ -30,6 +30,7 @@
 use std::cell::RefCell;
 
 use mcx::Mcx;
+use types_storage::lock::{AccessExclusiveLock, NoLock};
 use types_core::primitive::Oid;
 use types_core::xact::CommandId;
 use types_datum::Datum;
@@ -618,6 +619,71 @@ fn exec_as_delete_triggers_impl(
     front_half("ExecASDeleteTriggers", 2682)
 }
 
+// ---- TRUNCATE STATEMENT (tablecmds.c ExecuteTruncateGuts + trigger.c) ----
+
+/// `AfterTriggerBeginQuery() + CreateExecutorState() + InitResultRelInfo() per
+/// rel + ExecBSTruncateTriggers()` (tablecmds.c:2090-2136 / trigger.c:3281).
+///
+/// Coarse seam: the EState / ResultRelInfo machinery lives in the C caller, so
+/// the whole BEFORE-STATEMENT-TRUNCATE block crosses by relids. We open each
+/// relation (already locked AccessExclusiveLock by the caller; the relcache
+/// entry is hot), and consult its `rd_trigdesc`. `ExecBSTruncateTriggers`
+/// early-returns when `trigdesc == NULL || !trig_truncate_before_statement`
+/// (trigger.c:3289-3292) — the no-trigger common case is a faithful no-op. A
+/// rel that actually carries a BEFORE STATEMENT TRUNCATE trigger needs the
+/// per-trigger firing substrate (`front_half`), still unported.
+fn exec_truncate_fire_before_triggers_impl(
+    mcx: Mcx<'_>,
+    relids: &[Oid],
+    _run_as_table_owner: bool,
+) -> PgResult<()> {
+    for &relid in relids {
+        // C holds AccessExclusiveLock from the caller's table_open; re-open to
+        // read the relcache TriggerDesc, then release our extra refcount but
+        // keep the lock (NoLock close, as the caller does).
+        let rel =
+            backend_access_table_table_seams::table_open::call(mcx, relid, AccessExclusiveLock)?;
+        let fires = rel
+            .rd_trigdesc
+            .as_ref()
+            .is_some_and(|td| td.trig_truncate_before_statement);
+        rel.close(NoLock)?;
+        if fires {
+            front_half("ExecBSTruncateTriggers", 3281);
+        }
+    }
+    Ok(())
+}
+
+/// `ExecASTruncateTriggers() per rel + AfterTriggerEndQuery() +
+/// FreeExecutorState()` (tablecmds.c:2334-2352 / trigger.c:3327).
+///
+/// `ExecASTruncateTriggers` only queues an AFTER event when
+/// `trigdesc && trig_truncate_after_statement` (trigger.c:3332); otherwise it
+/// is a no-op. With no truncate triggers there is nothing to queue, so the
+/// `AfterTriggerBeginQuery`/`AfterTriggerEndQuery` bracket and the EState are
+/// pure overhead — a faithful no-op. A rel carrying an AFTER STATEMENT
+/// TRUNCATE trigger needs `AfterTriggerSaveEvent`, still unported.
+fn exec_truncate_fire_after_triggers_impl(
+    mcx: Mcx<'_>,
+    relids: &[Oid],
+    _run_as_table_owner: bool,
+) -> PgResult<()> {
+    for &relid in relids {
+        let rel =
+            backend_access_table_table_seams::table_open::call(mcx, relid, AccessExclusiveLock)?;
+        let fires = rel
+            .rd_trigdesc
+            .as_ref()
+            .is_some_and(|td| td.trig_truncate_after_statement);
+        rel.close(NoLock)?;
+        if fires {
+            front_half("ExecASTruncateTriggers", 3327);
+        }
+    }
+    Ok(())
+}
+
 // ---- ROW INSERT (trigger.c:2466-2570) ----
 
 fn exec_br_insert_triggers_impl<'mcx>(
@@ -1059,6 +1125,15 @@ pub fn init_seams() {
     s::exec_ir_update_triggers::set(exec_ir_update_triggers_impl);
     s::exec_ar_update_triggers::set(exec_ar_update_triggers_impl);
     s::has_noncloned_pk_fkey_trigger::set(has_noncloned_pk_fkey_trigger_impl);
+
+    // STATEMENT TRUNCATE firing (coarse seams on tablecmds-seams; the EState /
+    // ResultRelInfo machinery lives in the tablecmds caller).
+    backend_commands_tablecmds_seams::exec_truncate_fire_before_triggers::set(
+        exec_truncate_fire_before_triggers_impl,
+    );
+    backend_commands_tablecmds_seams::exec_truncate_fire_after_triggers::set(
+        exec_truncate_fire_after_triggers_impl,
+    );
 }
 
 /// Suppress dead-code warnings for the deep-firing helpers that are reachable

@@ -39,6 +39,7 @@ backend-access-table-tableam-seams = { path = "../backend-access-table-tableam-s
 backend-access-table-tableam = { path = "../backend-access-table-tableam" }
 # DML callbacks delegate here (seam-and-panic until the dml stage lands).
 backend-access-heap-heapam-handler-dml-seams = { path = "../backend-access-heap-heapam-handler-dml-seams" }
+backend-catalog-storage-seams = { path = "../backend-catalog-storage-seams" }
 # index_build_range_scan provider deps (heapam_index_build_range_scan +
 # table_index_build_range_scan install). All acyclic: this crate is the
 # table-AM provider one layer above the heap scan/visibility core.

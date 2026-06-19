@@ -517,6 +517,13 @@ fn heapam_relation_set_new_filelocator(
     dml_seam::heapam_relation_set_new_filelocator::call(rel, newrlocator, persistence)
 }
 
+/// `heapam_relation_nontransactional_truncate(rel)` (heapam_handler.c:626) —
+/// `RelationTruncate(rel, 0)`. The buffer/smgr/WAL truncation engine lives in
+/// storage.c (crossed via the storage seam).
+fn heapam_relation_nontransactional_truncate(rel: &Relation<'_>) -> PgResult<()> {
+    backend_catalog_storage_seams::relation_truncate::call(rel, 0)
+}
+
 // ===========================================================================
 // TOAST callbacks
 // ===========================================================================
@@ -638,6 +645,7 @@ pub fn get_heapam_table_am_routine() -> TableAmRoutine {
         tuple_lock: heapam_tuple_lock,
 
         relation_set_new_filelocator: heapam_relation_set_new_filelocator,
+        relation_nontransactional_truncate: heapam_relation_nontransactional_truncate,
 
         scan_analyze_next_block: analyze_scan::heapam_scan_analyze_next_block,
         scan_analyze_next_tuple: analyze_scan::heapam_scan_analyze_next_tuple,

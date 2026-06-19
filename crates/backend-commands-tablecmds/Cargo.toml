@@ -28,6 +28,7 @@ backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 backend-access-common-relation = { path = "../backend-access-common-relation" }
 backend-nodes-core = { path = "../backend-nodes-core" }
 backend-access-table-table-seams = { path = "../backend-access-table-table-seams" }
+backend-storage-lmgr-predicate-seams = { path = "../backend-storage-lmgr-predicate-seams" }
 backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
 backend-access-transam-xact = { path = "../backend-access-transam-xact" }
 backend-catalog-namespace = { path = "../backend-catalog-namespace" }

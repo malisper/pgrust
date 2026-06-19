@@ -142,6 +142,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `table_relation_nontransactional_truncate(rel)` (access/tableam.h, static
+    /// inline): `rel->rd_tableam->relation_nontransactional_truncate(rel)` —
+    /// immediately and non-transactionally remove all tuples from the relation
+    /// (the truncation cannot be rolled back). Used by `heap_truncate_one_rel`
+    /// (the ON COMMIT / in-place TRUNCATE path). `Err` carries the AM's
+    /// `ereport(ERROR)`s.
+    pub fn table_relation_nontransactional_truncate(rel: &Relation<'_>) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `table_beginscan(relation, snapshot, 0, NULL)` (copyto.c:1076): start a
     /// forward sequential scan of `relation` under `snapshot`. The COPY driver
     /// passes `GetActiveSnapshot()` explicitly (the C call's second argument);

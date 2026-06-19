@@ -1272,6 +1272,7 @@ pub fn init_seams() {
     storage_seam::relation_preserve_storage::set(RelationPreserveStorage);
     storage_seam::relation_set_new_filelocator_storage::set(relation_set_new_filelocator_storage);
     storage_seam::smgr_create_init_fork_and_log::set(smgr_create_init_fork_and_log);
+    storage_seam::relation_truncate::set(RelationTruncate);
 
     // Parallel-worker transfer of pending syncs. The bodies are owned here; the
     // seam decls live in parallel-rt-seams. The DSM chunk is a packed array of

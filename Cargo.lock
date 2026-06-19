@@ -1516,6 +1516,7 @@ dependencies = [
  "backend-access-table-tableam-seams",
  "backend-access-transam-xact-seams",
  "backend-catalog-catalog-seams",
+ "backend-catalog-storage-seams",
  "backend-executor-execExpr-seams",
  "backend-executor-execTuples-seams",
  "backend-executor-execUtils-seams",
@@ -4540,6 +4541,7 @@ dependencies = [
  "backend-access-common-tupdesc",
  "backend-access-index-genam-seams",
  "backend-access-table-table",
+ "backend-access-table-table-seams",
  "backend-access-table-tableam-seams",
  "backend-access-transam-xact",
  "backend-catalog-aclchk-seams",
@@ -4548,6 +4550,7 @@ dependencies = [
  "backend-catalog-catalog-seams",
  "backend-catalog-dependency",
  "backend-catalog-heap-seams",
+ "backend-catalog-index-seams",
  "backend-catalog-indexing",
  "backend-catalog-indexing-seams",
  "backend-catalog-objectaccess",
@@ -5886,6 +5889,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-rel",
  "types-storage",
  "types-wal",
 ]
@@ -7876,6 +7880,7 @@ dependencies = [
  "backend-commands-view-seams",
  "backend-nodes-core",
  "backend-storage-lmgr-lmgr",
+ "backend-storage-lmgr-predicate-seams",
  "backend-tcop-utility-out-seams",
  "backend-utils-adt-acl-seams",
  "backend-utils-adt-arrayfuncs-seams",
@@ -7992,6 +7997,7 @@ name = "backend-commands-trigger"
 version = "0.0.0"
 dependencies = [
  "backend-access-heap-heapam-seams",
+ "backend-access-table-table-seams",
  "backend-access-transam-xact-seams",
  "backend-commands-tablecmds-seams",
  "backend-commands-trigger-seams",
@@ -8010,6 +8016,7 @@ dependencies = [
  "types-rel",
  "types-ri-triggers",
  "types-snapshot",
+ "types-storage",
  "types-tableam",
  "types-trigger",
  "types-tuple",
@@ -17728,6 +17735,7 @@ dependencies = [
  "backend-access-transam-twophase-seams",
  "backend-access-transam-xact-seams",
  "backend-catalog-catalog-seams",
+ "backend-commands-tablecmds-seams",
  "backend-utils-activity-pgstat",
  "backend-utils-activity-pgstat-backend",
  "backend-utils-activity-pgstat-database",
@@ -17740,6 +17748,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-pgstat",
+ "types-rel",
  "types-tuple",
 ]
 
