@@ -466,6 +466,89 @@ fn error_recovery(mcx: Mcx<'_>, err: types_error::PgError, state: &mut LoopState
     Ok(())
 }
 
+/// Re-entrant wrapper around [`error_recovery`], mirroring C's re-armed
+/// `sigsetjmp` (postgres.c:4393).
+///
+/// In C the outer error-recovery block runs *inside* the `sigsetjmp` scope, so
+/// an `ereport(ERROR)` raised while cleaning up (e.g. a second error inside
+/// `AbortCurrentTransaction` / `PortalErrorCleanup` — an "abort-in-abort")
+/// `longjmp`s right back to the top of the same recovery block and re-runs it;
+/// it does NOT fall out of `PostgresMain`. The backend keeps serving once the
+/// cleanup eventually settles. Only a `FATAL`/`PANIC` ends the process.
+///
+/// The straight `error_recovery(...)?` this replaces did the opposite: any
+/// `Err` (or panic) raised *during* recovery propagated out of the loop and the
+/// `!`-returning `PostgresMain` wrapper called `proc_exit(1)` — turning a
+/// recoverable second error in the cleanup path into a backend kill (the
+/// port-introduced unwind/cleanup escalation class). This wrapper restores the
+/// C contract: a recovery-time `ERROR` (or any panic, which we map to `ERROR`)
+/// re-runs recovery on the new error; a recovery-time `FATAL`/`PANIC`
+/// (e.g. the lost-protocol-sync `FATAL` `error_recovery` raises deliberately)
+/// propagates so the backend exits exactly as C does.
+fn run_error_recovery(
+    mcx: Mcx<'_>,
+    err: types_error::PgError,
+    state: &mut LoopState,
+) -> PgResult<()> {
+    // Re-arming bound: C relies on AbortTransaction being re-entrant-safe and
+    // eventually succeeding; a recovery that cannot settle is genuine
+    // unrecoverable corruption, which C escalates to PANIC (process exit). We
+    // mirror that terminal outcome after a generous cap so a pathological
+    // abort-in-abort loop ends the backend instead of spinning forever.
+    const MAX_RECOVERY_ATTEMPTS: u32 = 16;
+
+    let mut pending = err;
+    for _ in 0..MAX_RECOVERY_ATTEMPTS {
+        // Catch a panic raised inside the recovery block itself (e.g. a seam
+        // miss or `panic!`-shaped hard error inside abort/cleanup), exactly as
+        // C's re-armed sigsetjmp catches an ereport(ERROR) thrown there.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            error_recovery(mcx, pending.clone(), state)
+        }));
+        match outcome {
+            // Recovery completed cleanly — back to the idle loop.
+            Ok(Ok(())) => return Ok(()),
+            // Recovery raised a structured error. A FATAL/PANIC ends the
+            // backend (C `proc_exit`); a lesser ERROR re-runs recovery on it.
+            Ok(Err(next)) => {
+                if next.level() >= FATAL {
+                    return Err(next);
+                }
+                pending = next;
+            }
+            // Recovery panicked. Reconstruct the structured PgError (same
+            // payload channels as the per-iteration catch_unwind) and re-run
+            // recovery on it — an ERROR-level second pass.
+            Err(payload) => {
+                pending = match payload.downcast::<types_error::PgError>() {
+                    Ok(e) => *e,
+                    Err(payload) => {
+                        let msg = payload
+                            .downcast_ref::<String>()
+                            .cloned()
+                            .or_else(|| {
+                                payload.downcast_ref::<&str>().map(|s| s.to_string())
+                            });
+                        match msg {
+                            Some(m) => types_error::PgError::error(m),
+                            None => {
+                                types_error::PgError::error("error recovery panicked")
+                            }
+                        }
+                    }
+                };
+            }
+        }
+    }
+
+    // Could not settle the transaction after repeated attempts: unrecoverable,
+    // mirror C's PANIC-during-recovery process exit.
+    Err(ereport(FATAL)
+        .errcode(types_error::error::ERRCODE_INTERNAL_ERROR)
+        .errmsg("error recovery failed to settle the transaction; terminating backend")
+        .into_error())
+}
+
 // ===========================================================================
 // Idle-state handling — the `if (send_ready_for_query)` block, postgres.c:4565
 // ===========================================================================
@@ -964,7 +1047,7 @@ fn postgres_main_inner(dbname: Option<&str>, username: Option<&str>) -> PgResult
         if let Err(err) = iter {
             // The C switches into MessageContext before FlushErrorState; we pass
             // the (about-to-be-reset) per-iteration context.
-            error_recovery(message_context.mcx(), err, &mut state)?;
+            run_error_recovery(message_context.mcx(), err, &mut state)?;
 
             // C's sigsetjmp handler ends with `if (!ignore_till_sync)
             // send_ready_for_query = true;` (postgres.c) so the next loop
