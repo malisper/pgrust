@@ -478,17 +478,25 @@ pub fn CreateCachedPlan(
     // AllocSetContextCreate(CurrentMemoryContext, "CachedPlanSource", ...).
     let context = MemoryContext::new("CachedPlanSource");
 
-    // raw_parse_tree = copyObject(raw_parse_tree).
-    let raw_copy = clone_raw_into(&context, raw_parse_tree)?;
-
-    let mut data = new_source(context, false, command_tag, query_string.to_string());
-    data.raw_parse_tree = Some(raw_copy);
-
+    // Build the source and intern it FIRST, so its `context` reaches its final,
+    // stable heap address (inside the `Rc<RefCell<..>>`) before anything is
+    // cloned into it. Cloning into a stack-local context and then *moving* that
+    // context into the struct (and again into the `Rc`/HashMap) would invalidate
+    // every `Mcx(&context)` borrow the clone captured — a use-after-free on drop.
+    let data = new_source(context, false, command_tag, query_string.to_string());
     let handle = with_state(|s| {
         let h = s.alloc_handle();
         s.sources.insert(h, Rc::new(RefCell::new(data)));
         h
     });
+
+    // raw_parse_tree = copyObject(raw_parse_tree) — into the now-stable context.
+    let src = get_source(handle);
+    let raw_copy = {
+        let p = src.borrow();
+        clone_raw_into(&p.context, raw_parse_tree)?
+    };
+    src.borrow_mut().raw_parse_tree = Some(raw_copy);
     Ok(handle)
 }
 
@@ -533,16 +541,23 @@ pub fn CreateOneShotCachedPlan(
     query_string: &str,
     command_tag: CommandTag,
 ) -> PgResult<CachedPlanSourceHandle> {
+    // Intern the source FIRST so its `context` is at its final stable address
+    // before cloning into it (see CreateCachedPlan — a move-after-clone dangles
+    // every captured `Mcx(&context)` borrow, a use-after-free on drop).
     let context = MemoryContext::new("CachedPlanSource");
-    let raw_copy = clone_raw_into(&context, raw_parse_tree)?;
-    let mut data = new_source(context, true, command_tag, query_string.to_string());
-    data.raw_parse_tree = Some(raw_copy);
-
+    let data = new_source(context, true, command_tag, query_string.to_string());
     let handle = with_state(|s| {
         let h = s.alloc_handle();
         s.sources.insert(h, Rc::new(RefCell::new(data)));
         h
     });
+
+    let src = get_source(handle);
+    let raw_copy = {
+        let p = src.borrow();
+        clone_raw_into(&p.context, raw_parse_tree)?
+    };
+    src.borrow_mut().raw_parse_tree = Some(raw_copy);
     Ok(handle)
 }
 
@@ -576,25 +591,22 @@ pub fn CompleteCachedPlan(
     };
 
     // querytree_context: a fresh child for non-one-shot; for one-shot the data
-    // lives directly in `context`.
-    let query_context = if is_oneshot {
-        None
-    } else {
-        Some(MemoryContext::new("CachedPlanQuery"))
-    };
+    // lives directly in `context`. Install it into the interned source FIRST so
+    // it is at its final stable heap address before cloning into it — cloning
+    // into a stack-local context then moving it into `p.query_context` would
+    // dangle every captured `Mcx(&context)` borrow (use-after-free on drop).
+    if !is_oneshot {
+        src.borrow_mut().query_context = Some(MemoryContext::new("CachedPlanQuery"));
+    }
 
-    // Copy the querytree list into the owning context.
+    // Copy the querytree list into the now-stable owning context.
     let owned_qlist = {
         let p = src.borrow();
-        let ctx = query_context.as_ref().unwrap_or(&p.context);
+        let ctx = p.query_context.as_ref().unwrap_or(&p.context);
         clone_query_list_into(ctx, querytree_list)?
     };
 
-    {
-        let mut p = src.borrow_mut();
-        p.query_context = query_context;
-        p.query_list = owned_qlist;
-    }
+    src.borrow_mut().query_list = owned_qlist;
 
     if !is_oneshot && StmtPlanRequiresRevalidation(&src)? {
         // extract_query_dependencies over the owned query list.
@@ -978,16 +990,27 @@ fn RevalidateCachedQuery(
     }
     drop(desc_scratch);
 
-    // Allocate new query_context and copy the completed querytree into it.
-    let querytree_context = MemoryContext::new("CachedPlanQuery");
-    let qlist = clone_query_list_into(&querytree_context, tlist.as_slice())?;
+    // Install the new query_context into the interned source FIRST so it is at
+    // its final stable heap address before cloning into it — cloning into a
+    // stack-local context then moving it into `p.query_context` dangles every
+    // captured `Mcx(&context)` borrow (use-after-free on drop).
+    src.borrow_mut().query_context = Some(MemoryContext::new("CachedPlanQuery"));
+    let qlist = {
+        let p = src.borrow();
+        let qctx = p.query_context.as_ref().expect("just set");
+        clone_query_list_into(qctx, tlist.as_slice())?
+    };
 
     let deps = extract_deps(&qlist)?;
     let role = backend_seams::get_user_id::call()?;
     let rsec = backend_seams::row_security::call()?;
     let scratch = MemoryContext::new("plancache_sp");
     let sp_val = namespace_seams::get_search_path_matcher_value::call(scratch.mcx())?;
-    let sp = clone_search_path_into(&querytree_context, &sp_val)?;
+    let sp = {
+        let p = src.borrow();
+        let qctx = p.query_context.as_ref().expect("just set");
+        clone_search_path_into(qctx, &sp_val)?
+    };
 
     {
         let mut p = src.borrow_mut();
@@ -997,7 +1020,6 @@ fn RevalidateCachedQuery(
         p.rewrite_role_id = role;
         p.rewrite_row_security = rsec;
         p.search_path = Some(sp);
-        p.query_context = Some(querytree_context);
         p.query_list = qlist;
         // Note: we do not reset generic_cost or total_custom_cost.
         p.is_valid = true;
@@ -1122,17 +1144,52 @@ fn BuildCachedPlan(
     // passes the bound value param list through to the planner so the planner
     // can fold `$n` consts (`ParamListInfo` is now a real shared value, not an
     // opaque handle).
-    let plan_context = MemoryContext::new("CachedPlan");
+    //
+    // Intern the CachedPlan with an empty stmt_list FIRST so its `context`
+    // reaches its final stable heap address inside the `Rc`, THEN clone the
+    // planned stmts into that now-stable context. Cloning into a stack-local
+    // `plan_context` and then moving it into `CachedPlanData`/the `Rc` would
+    // dangle every captured `Mcx(&context)` borrow (use-after-free on drop).
+    let is_oneshot = src.borrow().is_oneshot;
+    let plan_role_id = backend_seams::get_user_id::call()?;
+    let generation = {
+        let mut p = src.borrow_mut();
+        p.generation += 1;
+        p.generation
+    };
+    let plan_handle = with_state(|s| {
+        let h = s.alloc_handle();
+        s.plans.insert(
+            h,
+            Rc::new(RefCell::new(CachedPlanData {
+                magic: CACHEDPLAN_MAGIC,
+                stmt_list: Vec::new(),
+                is_oneshot,
+                is_saved: false,
+                is_valid: true,
+                plan_role_id,
+                depends_on_role: false,
+                saved_xmin: 0,
+                generation,
+                refcount: 0,
+                context: MemoryContext::new("CachedPlan"),
+            })),
+        );
+        h
+    });
+    let plan_rc = with_state(|s| s.plans.get(&plan_handle).cloned().expect("just inserted"));
+
     let plist: Vec<PlannedStmt<'static>> = {
+        let plan_p = plan_rc.borrow();
         let planned = postgres_seams::pg_plan_queries_value::call(
-            plan_context.mcx(),
+            plan_p.context.mcx(),
             qlist.as_slice(),
             qstr.as_str(),
             cursor_options,
             bound_params.as_deref(),
         )?;
-        // Own the planned stmts in plan_context (already allocated there).
-        clone_plan_list_into(&plan_context, planned.as_slice())?
+        // Own the planned stmts in the now-stable plan context.
+        clone_plan_list_into(&plan_p.context, planned.as_slice())?
     };
 
     // qlist's nodes were allocated in `transient`; drop them before that arena
@@ -1143,9 +1200,6 @@ fn BuildCachedPlan(
         snapmgr_seams::pop_active_snapshot::call()?;
     }
 
-    let is_oneshot = src.borrow().is_oneshot;
-
-    let plan_role_id = backend_seams::get_user_id::call()?;
     let mut depends_on_role = src.borrow().depends_on_rls;
     let mut is_transient = false;
     for stmt in plist.iter() {
@@ -1168,34 +1222,18 @@ fn BuildCachedPlan(
         0 // InvalidTransactionId
     };
 
-    let generation = {
-        let mut p = src.borrow_mut();
-        p.generation += 1;
-        p.generation
-    };
-
-    let plan = CachedPlanData {
-        magic: CACHEDPLAN_MAGIC,
-        stmt_list: plist,
-        is_oneshot,
-        is_saved: false,
-        is_valid: true,
-        plan_role_id,
-        depends_on_role,
-        saved_xmin,
-        generation,
-        refcount: 0,
-        context: plan_context,
-    };
+    // Fill in the remaining fields on the already-interned plan (its `context`
+    // and the `stmt_list` cloned into it are at their final stable addresses).
+    {
+        let mut plan_p = plan_rc.borrow_mut();
+        plan_p.stmt_list = plist;
+        plan_p.depends_on_role = depends_on_role;
+        plan_p.saved_xmin = saved_xmin;
+    }
 
     drop(transient);
 
-    let handle = with_state(|s| {
-        let h = s.alloc_handle();
-        s.plans.insert(h, Rc::new(RefCell::new(plan)));
-        h
-    });
-    Ok(handle)
+    Ok(plan_handle)
 }
 
 /* ==========================================================================
@@ -1543,32 +1581,17 @@ pub fn CopyCachedPlan(plansource: CachedPlanSourceHandle) -> PgResult<CachedPlan
         }
     }
 
-    let context = MemoryContext::new("CachedPlanSource");
-    let query_context = MemoryContext::new("CachedPlanQuery");
-
+    // Intern the destination source (with its two fresh contexts) FIRST so the
+    // contexts reach their final stable heap addresses inside the `Rc`, THEN
+    // clone each tree into the now-stable contexts. Cloning into stack-local
+    // contexts and moving them into `newdata`/the `Rc` would dangle every
+    // captured `Mcx(&context)` borrow (use-after-free on drop).
     let newdata = {
         let p = src.borrow();
-        let raw_copy = match &p.raw_parse_tree {
-            Some(r) => Some(clone_raw_into(&context, r)?),
-            None => None,
-        };
-        let analyzed_copy = match &p.analyzed_parse_tree {
-            Some(q) => Some(clone_query_into(&context, q)?),
-            None => None,
-        };
-        let result_desc_copy = match &p.result_desc {
-            Some(td) => Some(clone_tupdesc_into(&context, td)?),
-            None => None,
-        };
-        let query_list_copy = clone_query_list_into(&query_context, p.query_list.as_slice())?;
-        let search_path_copy = match &p.search_path {
-            Some(sp) => Some(clone_search_path_into(&query_context, sp)?),
-            None => None,
-        };
         CachedPlanSourceData {
             magic: CACHEDPLANSOURCE_MAGIC,
-            raw_parse_tree: raw_copy,
-            analyzed_parse_tree: analyzed_copy,
+            raw_parse_tree: None,
+            analyzed_parse_tree: None,
             query_string: p.query_string.clone(),
             command_tag: p.command_tag,
             param_types: p.param_types.clone(),
@@ -1577,11 +1600,11 @@ pub fn CopyCachedPlan(plansource: CachedPlanSourceHandle) -> PgResult<CachedPlan
             has_post_rewrite: p.has_post_rewrite,
             cursor_options: p.cursor_options,
             fixed_result: p.fixed_result,
-            result_desc: result_desc_copy,
-            query_list: query_list_copy,
+            result_desc: None,
+            query_list: Vec::new(),
             relation_oids: p.relation_oids.clone(),
             inval_items: p.inval_items.clone(),
-            search_path: search_path_copy,
+            search_path: None,
             rewrite_role_id: p.rewrite_role_id,
             rewrite_row_security: p.rewrite_row_security,
             depends_on_rls: p.depends_on_rls,
@@ -1595,8 +1618,8 @@ pub fn CopyCachedPlan(plansource: CachedPlanSourceHandle) -> PgResult<CachedPlan
             total_custom_cost: p.total_custom_cost,
             num_custom_plans: p.num_custom_plans,
             num_generic_plans: p.num_generic_plans,
-            query_context: Some(query_context),
-            context,
+            query_context: Some(MemoryContext::new("CachedPlanQuery")),
+            context: MemoryContext::new("CachedPlanSource"),
         }
     };
 
@@ -1605,6 +1628,39 @@ pub fn CopyCachedPlan(plansource: CachedPlanSourceHandle) -> PgResult<CachedPlan
         s.sources.insert(h, Rc::new(RefCell::new(newdata)));
         h
     });
+
+    // Now clone every tree into the destination's stable contexts.
+    {
+        let p = src.borrow();
+        let dst = get_source(handle);
+        let d = dst.borrow();
+        let raw_copy = match &p.raw_parse_tree {
+            Some(r) => Some(clone_raw_into(&d.context, r)?),
+            None => None,
+        };
+        let analyzed_copy = match &p.analyzed_parse_tree {
+            Some(q) => Some(clone_query_into(&d.context, q)?),
+            None => None,
+        };
+        let result_desc_copy = match &p.result_desc {
+            Some(td) => Some(clone_tupdesc_into(&d.context, td)?),
+            None => None,
+        };
+        let qctx = d.query_context.as_ref().expect("just set");
+        let query_list_copy = clone_query_list_into(qctx, p.query_list.as_slice())?;
+        let search_path_copy = match &p.search_path {
+            Some(sp) => Some(clone_search_path_into(qctx, sp)?),
+            None => None,
+        };
+        drop(d);
+        let mut d = dst.borrow_mut();
+        d.raw_parse_tree = raw_copy;
+        d.analyzed_parse_tree = analyzed_copy;
+        d.result_desc = result_desc_copy;
+        d.query_list = query_list_copy;
+        d.search_path = search_path_copy;
+    }
+
     Ok(handle)
 }
 
