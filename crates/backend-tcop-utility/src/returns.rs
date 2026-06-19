@@ -30,12 +30,12 @@ pub fn UtilityReturnsTuples(parsetree: &Node) -> PgResult<bool> {
             // stmt->funcexpr is a FuncExpr once analyzed; reach it through the
             // Node::Expr(Expr::FuncExpr) arm. Any other shape is not a
             // record-returning CALL.
-            match stmt.funcexpr.as_deref() {
-                Some(Node::Expr(expr)) => match expr.as_funcexpr() {
+            match stmt.funcexpr.as_deref().and_then(|n| n.as_expr()) {
+                Some(expr) => match expr.as_funcexpr() {
                     Some(func) => func.funcresulttype == RECORDOID,
                     None => false,
                 },
-                _ => false,
+                None => false,
             }
         }
         // case T_FetchStmt:
