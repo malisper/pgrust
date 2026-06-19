@@ -457,8 +457,7 @@ fn InstrCountFiltered1(node: &mut SeqScanState<'_>, delta: u64) {
 /// `((Scan *) node->ps.plan)->scanrelid`.
 fn scan_scanrelid(node: &SeqScanState<'_>) -> u32 {
     match node.ss.ps.plan {
-        Some(types_nodes::nodes::Node::SeqScan(s)) => s.scan.scanrelid,
-        Some(other) => panic!("SeqScan node has unexpected plan node: {:?}", other.tag()),
+        Some(p) => p.expect_seqscan().scan.scanrelid,
         None => panic!("SeqScan node has no plan"),
     }
 }
