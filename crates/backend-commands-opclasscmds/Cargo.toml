@@ -40,6 +40,7 @@ backend-catalog-pg-depend-seams = { path = "../backend-catalog-pg-depend-seams" 
 backend-catalog-pg-shdepend-seams = { path = "../backend-catalog-pg-shdepend-seams" }
 backend-commands-amcmds-seams = { path = "../backend-commands-amcmds-seams" }
 backend-commands-event-trigger-seams = { path = "../backend-commands-event-trigger-seams" }
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 backend-parser-parse-func-seams = { path = "../backend-parser-parse-func-seams" }
 backend-parser-parse-oper-seams = { path = "../backend-parser-parse-oper-seams" }
 backend-parser-parse-type-seams = { path = "../backend-parser-parse-type-seams" }

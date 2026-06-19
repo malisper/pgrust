@@ -109,14 +109,48 @@ const HASHEXTENDED_PROC: i32 = 2;
 /// `SHRT_MAX` (`<limits.h>`) — the cap applied when an AM's `amstrategies` is 0.
 const SHRT_MAX: i32 = 32767;
 
+mod convert;
+
 /// `pub fn init_seams()` — opclasscmds owns the full-name-list
 /// `get_opclass_oid` / `get_opfamily_oid` lookup seams (the `objectaddress.c`
-/// `get_object_address_opcf` resolution path's callees). Its DDL surface
-/// (CREATE/ALTER OPERATOR CLASS/FAMILY) is reached only from the still-unported
-/// utility.c / alter.c, so no other inward seam is owned.
+/// `get_object_address_opcf` resolution path's callees), plus the
+/// `ProcessUtilitySlow` (`utility.c`) dispatch seams for CREATE OPERATOR
+/// CLASS/FAMILY and ALTER OPERATOR FAMILY.
 pub fn init_seams() {
+    use backend_tcop_utility_out_seams as rt;
+
     backend_commands_opclasscmds_seams::get_opclass_oid::set(seam_get_opclass_oid);
     backend_commands_opclasscmds_seams::get_opfamily_oid::set(seam_get_opfamily_oid);
+
+    // ProcessUtilitySlow dispatch (utility.c): the C `castNode(...)` is the
+    // runtime tag assert, mirrored here as the parse-node accessor miss.
+    rt::define_op_class::set(|mcx, parsetree| match parsetree.as_createopclassstmt() {
+        Some(stmt) => {
+            let resolved = convert::create_op_class_stmt(stmt)?;
+            DefineOpClass(mcx, &resolved)
+        }
+        None => Err(types_error::PgError::error(
+            "define_op_class: parse tree is not a CreateOpClassStmt",
+        )),
+    });
+    rt::define_op_family::set(|mcx, parsetree| match parsetree.as_createopfamilystmt() {
+        Some(stmt) => {
+            let resolved = convert::create_op_family_stmt(stmt)?;
+            DefineOpFamily(mcx, &resolved)
+        }
+        None => Err(types_error::PgError::error(
+            "define_op_family: parse tree is not a CreateOpFamilyStmt",
+        )),
+    });
+    rt::alter_op_family::set(|mcx, parsetree| match parsetree.as_alteropfamilystmt() {
+        Some(stmt) => {
+            let resolved = convert::alter_op_family_stmt(stmt)?;
+            AlterOpFamily(mcx, &resolved)
+        }
+        None => Err(types_error::PgError::error(
+            "alter_op_family: parse tree is not an AlterOpFamilyStmt",
+        )),
+    });
 }
 
 /// Adapt the seam-borne `&[&str]` qualified name into the owner's

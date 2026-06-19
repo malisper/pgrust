@@ -412,6 +412,69 @@ pub fn event_trigger_collect_simple_command(
     })
 }
 
+/// `EventTriggerCollectSimpleCommand` (event_trigger.c) for a CREATE OPERATOR
+/// FAMILY `CreateOpFamilyStmt` (opclasscmds.c `CreateOpFamily`). No-op without
+/// an active collection state (the standalone / no-trigger case), matching the
+/// C early `return`. The active path would deep-copy the statement into the
+/// state arena like its `Node`-typed sibling above; that command-deparse path
+/// is the deeper sub-campaign and is not modelled here, so it loudly stops.
+pub fn event_trigger_collect_simple_command_opfamily(
+    _address: ObjectAddress,
+    _secondary_object: ObjectAddress,
+    _stmt: &types_opclass::CreateOpFamilyStmt,
+) -> PgResult<()> {
+    if !collecting() {
+        return Ok(());
+    }
+    panic!(
+        "EventTriggerCollectSimpleCommand: CREATE OPERATOR FAMILY command \
+         collection is part of the command-deparse sub-campaign and is not \
+         modelled here"
+    );
+}
+
+/// `EventTriggerCollectCreateOpClass(stmt, opclassoid, operators, procedures)`
+/// (event_trigger.c) — record a CREATE OPERATOR CLASS. No-op without an active
+/// collection state (standalone). The active path builds an `SCT_CreateOpClass`
+/// `CollectedCommand` carrying the `operators`/`procedures` member lists, a
+/// command variant that is part of the command-deparse sub-campaign and is not
+/// modelled here.
+pub fn event_trigger_collect_create_opclass(
+    _stmt: &types_opclass::CreateOpClassStmt,
+    _opclassoid: Oid,
+    _operators: &[types_opclass::OpFamilyMember],
+    _procedures: &[types_opclass::OpFamilyMember],
+) -> PgResult<()> {
+    if !collecting() {
+        return Ok(());
+    }
+    panic!(
+        "EventTriggerCollectCreateOpClass: the SCT_CreateOpClass collected \
+         command (with its operator/procedure member lists) is part of the \
+         command-deparse sub-campaign and is not modelled here"
+    );
+}
+
+/// `EventTriggerCollectAlterOpFam(stmt, opfamilyoid, operators, procedures)`
+/// (event_trigger.c) — record an ALTER OPERATOR FAMILY ADD/DROP. No-op without
+/// an active collection state (standalone). The active path builds an
+/// `SCT_AlterOpFamily` `CollectedCommand`, part of the unmodelled
+/// command-deparse sub-campaign.
+pub fn event_trigger_collect_alter_opfam(
+    _stmt: &types_opclass::AlterOpFamilyStmt,
+    _opfamilyoid: Oid,
+    _operators: &[types_opclass::OpFamilyMember],
+    _procedures: &[types_opclass::OpFamilyMember],
+) -> PgResult<()> {
+    if !collecting() {
+        return Ok(());
+    }
+    panic!(
+        "EventTriggerCollectAlterOpFam: the SCT_AlterOpFamily collected command \
+         is part of the command-deparse sub-campaign and is not modelled here"
+    );
+}
+
 /// `EventTriggerAlterTableStart(parsetree)` (event_trigger.c:1753) — begin
 /// collecting an ALTER TABLE command. When no event-trigger state is set or
 /// collection is inhibited (the standalone / no-trigger case), this is a no-op,
@@ -559,5 +622,18 @@ pub fn init_seams() {
     backend_commands_event_trigger_seams::EventTriggerSupportsObject::set(|object| {
         Ok(event_trigger_supports_object(object))
     });
+
+    // CREATE/ALTER OPERATOR CLASS/FAMILY command collection (opclasscmds.c).
+    // No-ops in standalone (no event-trigger state); the active-collection
+    // deparse path stops loudly inside each body.
+    backend_commands_event_trigger_seams::event_trigger_collect_simple_command::set(
+        event_trigger_collect_simple_command_opfamily,
+    );
+    backend_commands_event_trigger_seams::event_trigger_collect_create_opclass::set(
+        event_trigger_collect_create_opclass,
+    );
+    backend_commands_event_trigger_seams::event_trigger_collect_alter_opfam::set(
+        event_trigger_collect_alter_opfam,
+    );
 }
 

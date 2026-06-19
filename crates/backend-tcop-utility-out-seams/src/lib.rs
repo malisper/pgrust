@@ -927,6 +927,19 @@ seam!(
     pub fn alter_policy<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
 );
 seam!(
+    /// `DefineOpClass(stmt)` (opclasscmds.c) — CREATE OPERATOR CLASS.
+    pub fn define_op_class<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `DefineOpFamily(stmt)` (opclasscmds.c) — CREATE OPERATOR FAMILY.
+    pub fn define_op_family<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `AlterOpFamily(stmt)` (opclasscmds.c) — ALTER OPERATOR FAMILY ADD/DROP.
+    /// Returns the opfamily OID; the dispatch builds the `ObjectAddress`.
+    pub fn alter_op_family<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<Oid>
+);
+seam!(
     /// `CreateStatistics(stmt, true)` (statscmds.c) — CREATE STATISTICS.
     pub fn create_statistics<'mcx>(mcx: Mcx<'mcx>, stmt: NodePtr<'mcx>) -> PgResult<ObjectAddress>
 );

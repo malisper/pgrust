@@ -493,11 +493,29 @@ fn process_utility_slow_body<'mcx>(
             address = rt::alter_statistics::call(mcx, parsetree)?;
         }
 
+        t if t == ntag::T_CreateOpClassStmt => {
+            address = rt::define_op_class::call(mcx, parsetree)?;
+        }
+
+        t if t == ntag::T_CreateOpFamilyStmt => {
+            address = rt::define_op_family::call(mcx, parsetree)?;
+        }
+
+        t if t == ntag::T_AlterOpFamilyStmt => {
+            // ObjectAddressSet(address, OperatorFamilyRelationId, AlterOpFamily(stmt))
+            let opfamilyoid = rt::alter_op_family::call(mcx, parsetree)?;
+            address = ObjectAddress {
+                classId: types_catalog::catalog::OPERATOR_FAMILY_RELATION_ID,
+                objectId: opfamilyoid,
+                objectSubId: 0,
+            };
+        }
+
         // The extension / FDW / AM / publication / subscription / transform /
-        // cast / conversion / language / op-class / op-family / user-mapping /
-        // import-foreign-schema DDL arms (utility.c:1395-1581). Their owners are
-        // not yet ported; route them to one documented seam-panic so the
-        // unported set is a single loud panic rather than ~30 panicking arms.
+        // cast / conversion / language / user-mapping / import-foreign-schema
+        // DDL arms (utility.c:1395-1581). Their owners are not yet ported; route
+        // them to one documented seam-panic so the unported set is a single loud
+        // panic rather than ~30 panicking arms.
         _ => {
             address = rt::process_utility_slow_unported::call(mcx, pstate, parsetree, is_top_level)?;
         }

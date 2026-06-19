@@ -26,6 +26,7 @@ pub mod family1;
 pub mod family2;
 pub mod family3;
 pub mod family_authid;
+pub mod family_opclass;
 pub mod keystone;
 
 /// Install every inward seam this unit owns. Wired into `seams-init::init_all`.
@@ -49,4 +50,5 @@ pub fn init_seams() {
     family2::install();
     family3::install();
     family_authid::install();
+    family_opclass::install();
 }

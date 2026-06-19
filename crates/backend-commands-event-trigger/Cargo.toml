@@ -16,6 +16,7 @@ types-error = { path = "../types-error" }
 types-catalog = { path = "../types-catalog" }
 types-evtcache = { path = "../types-evtcache" }
 types-nodes = { path = "../types-nodes" }
+types-opclass = { path = "../types-opclass" }
 backend-utils-cache-evtcache-seams = { path = "../backend-utils-cache-evtcache-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-commands-extension-seams = { path = "../backend-commands-extension-seams" }
