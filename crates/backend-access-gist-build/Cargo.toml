@@ -33,6 +33,13 @@ backend-storage-page = { path = "../backend-storage-page" }
 # gistunion, gistfillitupvec + page accessors.
 backend-access-gist-core = { path = "../backend-access-gist-core" }
 
+# Build-dispatch seams (gistbuild/gistbuildempty `ambuild`/`ambuildempty`): the
+# GiST AM vtable lives in the lower gist-core crate, which reaches these entries
+# (above it in the dep graph) through these seams; gist-build installs them from
+# its `init_seams`. Acyclic — gist-am-seams is a leaf seam crate (types-only
+# deps), and gist-core already sits above it.
+backend-access-gist-am-seams = { path = "../backend-access-gist-am-seams" }
+
 # Buffer manager (bufmgr.c): ReadBuffer / LockBuffer / UnlockReleaseBuffer /
 # BufferGetPage / BufferGetBlockNumber / MarkBufferDirty / PageSetLSN.
 backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }

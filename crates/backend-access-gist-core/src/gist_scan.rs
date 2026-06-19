@@ -30,7 +30,9 @@ use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use backend_access_gist_am_seams::{gistbulkdelete, gistinsert, gistvacuumcleanup};
+use backend_access_gist_am_seams::{
+    gistbuild, gistbuildempty, gistbulkdelete, gistinsert, gistvacuumcleanup,
+};
 use backend_access_gist_dispatch_seams::{gist_consistent, gist_distance};
 use backend_access_index_indexam_seams::index_getprocid;
 use backend_storage_buffer_bufmgr_seams::{
@@ -1266,24 +1268,24 @@ pub fn gisthandler() -> IndexAmRoutine {
 // `gisthandler` for why the build / cross-crate slots are sanctioned panic legs
 // (reached via the #341 index.c dispatch).
 
-/// `ambuild` adapter — `gistbuild` (gist-build, above this crate) needs the real
-/// `IndexInfo`; reached via the #341 dispatch.
+/// `ambuild` adapter — `gistbuild` (gist-build) sits above this crate in the
+/// dep graph, so it is reached through the `gistbuild` build-dispatch seam
+/// (#341, owned/installed by gist-build), which downcasts the
+/// `IndexInfoCarrier` (#342) back to the real `IndexInfo<'mcx>` and drives the
+/// serial heap-scan build. Mirrors the nbtree `btbuild` seam.
 fn gistbuild_am<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _heap_relation: &Relation<'mcx>,
-    _index_relation: &Relation<'mcx>,
-    _index_info: &mut IndexInfoCarrier<'_, 'mcx>,
+    mcx: Mcx<'mcx>,
+    heap_relation: &Relation<'mcx>,
+    index_relation: &Relation<'mcx>,
+    index_info: &mut IndexInfoCarrier<'_, 'mcx>,
 ) -> PgResult<IndexBuildResult> {
-    panic!(
-        "gistbuild: index.c build dispatch (#341) not yet ported — \
-         gistbuild lives in backend-access-gist-build and needs the real IndexInfo"
-    )
+    gistbuild::call(mcx, heap_relation, index_relation, index_info)
 }
 
-/// `ambuildempty` adapter — `gistbuildempty` (gist-build) not reachable from
-/// this crate; reached via the #341 dispatch.
-fn gistbuildempty_am<'mcx>(_mcx: Mcx<'mcx>, _index_relation: &Relation<'mcx>) -> PgResult<()> {
-    panic!("gistbuildempty: lives in backend-access-gist-build, not reachable from gist-core (#341)")
+/// `ambuildempty` adapter — `gistbuildempty` (gist-build) sits above this crate;
+/// reached through the `gistbuildempty` seam (owned/installed by gist-build).
+fn gistbuildempty_am<'mcx>(mcx: Mcx<'mcx>, index_relation: &Relation<'mcx>) -> PgResult<()> {
+    gistbuildempty::call(mcx, index_relation)
 }
 
 /// `amcostestimate` adapter — `gistcostestimate` (selfuncs.c) not reachable;

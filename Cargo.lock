@@ -1116,6 +1116,7 @@ dependencies = [
 name = "backend-access-gist-build"
 version = "0.1.0"
 dependencies = [
+ "backend-access-gist-am-seams",
  "backend-access-gist-core",
  "backend-access-heap-vacuumlazy-seams",
  "backend-access-index-indexam-seams",
@@ -23323,6 +23324,7 @@ dependencies = [
  "backend-access-gin-ginutil",
  "backend-access-gin-ginvacuum",
  "backend-access-gin-ginxlog",
+ "backend-access-gist-build",
  "backend-access-gist-core",
  "backend-access-gist-proc",
  "backend-access-hash-core",

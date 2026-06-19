@@ -15,11 +15,43 @@
 use mcx::Mcx;
 use types_error::PgResult;
 use types_rel::Relation;
-use types_tableam::amapi::IndexUniqueCheck;
+use types_tableam::amapi::{IndexBuildResult, IndexUniqueCheck};
 use types_tableam::index_info_carrier::IndexInfoCarrier;
 use types_tableam::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_tuple::heaptuple::ItemPointerData;
+
+seam_core::seam!(
+    /// `gistbuild(heap, index, indexInfo)` (gistbuild.c): the GiST AM's
+    /// `ambuild` entry — drive the CREATE INDEX build (sorted bottom-up or the
+    /// insert/buffering build), scanning the heap once and packing the GiST
+    /// tree, then return the heap/index tuple counts.
+    ///
+    /// `gistbuild`'s real body lives in `backend-access-gist-build`, which sits
+    /// ABOVE the AM-vtable crate (`backend-access-gist-core`) in the dep graph
+    /// (gist-build depends on gist-core), so the vtable's `ambuild` adapter
+    /// cannot call it directly. This seam bridges that edge (owner = gist-build,
+    /// installed from its `init_seams`): the adapter passes the
+    /// `IndexInfoCarrier` (#342) through, and gist-build downcasts it back to
+    /// the real `types_nodes::execnodes::IndexInfo<'mcx>`. Mirrors the nbtree
+    /// `btbuild` build-dispatch seam. `Err` carries the build's
+    /// `ereport(ERROR)` surface.
+    pub fn gistbuild<'mcx, 'a>(
+        mcx: Mcx<'mcx>,
+        heap: &Relation<'mcx>,
+        index: &Relation<'mcx>,
+        index_info: &mut IndexInfoCarrier<'a, 'mcx>,
+    ) -> PgResult<IndexBuildResult>
+);
+
+seam_core::seam!(
+    /// `gistbuildempty(index)` (gistbuild.c): the GiST AM's `ambuildempty`
+    /// entry — write an empty init-fork index (the unlogged-table init image).
+    /// Lives in `backend-access-gist-build` above the vtable crate, so it is
+    /// reached through this seam (owner = gist-build). `Err` carries its
+    /// `ereport(ERROR)` surface.
+    pub fn gistbuildempty<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'mcx>) -> PgResult<()>
+);
 
 seam_core::seam!(
     /// `gistinsert(r, values, isnull, ht_ctid, heapRel, checkUnique,

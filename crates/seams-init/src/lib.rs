@@ -60,6 +60,9 @@ pub fn init_all() {
     backend_access_spg_quadtree::init_seams();
     backend_access_gist_proc::init_seams();
     backend_access_gist_core::init_seams();
+    // gist-build installs the `gistbuild`/`gistbuildempty` AM build-dispatch
+    // seams that gist-core's `ambuild`/`ambuildempty` adapters call (#341).
+    backend_access_gist_build::init_seams();
     backend_access_nbt_dedup::init_seams();
     backend_access_nbt_xlog::init_seams();
     backend_access_nbtree_nbtree::init_seams();
