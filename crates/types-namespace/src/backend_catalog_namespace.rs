@@ -131,6 +131,45 @@ pub struct FuncProcAttrs<'mcx> {
     pub protrftypes: Option<OidArrayDatum<'mcx>>,
 }
 
+/// The `pg_proc`-row projection `plpgsql_compile_callback` (pl_comp.c) reads off
+/// its `SearchSysCache1(PROCOID, funcid)` tuple to compile a PL/pgSQL function:
+/// the `Form_pg_proc` `GETSTRUCT` scalars (`proname` / `prorettype` /
+/// `proretset` / `prokind` / `provolatile` / `pronargs`), the `prosrc` text
+/// attribute (`TextDatumGetCString(SysCacheGetAttrNotNull(.., prosrc))`), and the
+/// `get_func_arg_info(procTup, ...)` decomposition (`proallargtypes` ?? the
+/// `proargtypes` oidvector, plus `proargnames` / `proargmodes`). `None`/empty
+/// array fields mirror a SQL-NULL attribute; the compile consumer performs the
+/// per-argument logic and the C shape checks.
+#[derive(Debug)]
+pub struct ProcCompileRow<'mcx> {
+    /// `NameStr(procStruct->proname)`.
+    pub proname: PgString<'mcx>,
+    /// `procStruct->prorettype`.
+    pub prorettype: Oid,
+    /// `procStruct->proretset`.
+    pub proretset: bool,
+    /// `procStruct->prokind` (raw `char`).
+    pub prokind: u8,
+    /// `procStruct->provolatile` (raw `char`).
+    pub provolatile: u8,
+    /// `procStruct->pronargs` — the count of *input* arguments
+    /// (`function->fn_nargs`).
+    pub pronargs: i32,
+    /// `TextDatumGetCString(SysCacheGetAttrNotNull(.., Anum_pg_proc_prosrc))` —
+    /// the function source text the scanner/grammar parses.
+    pub prosrc: PgString<'mcx>,
+    /// `get_func_arg_info`'s `*p_argtypes` (length `numargs` = the total
+    /// argument count, including OUT/INOUT/TABLE args): `proallargtypes` when
+    /// present, else the declared `proargtypes` oidvector.
+    pub argtypes: PgVec<'mcx, Oid>,
+    /// `get_func_arg_info`'s `*p_argnames` (empty => C's `NULL`; an element is
+    /// the empty string where the C `char *` is NULL/empty).
+    pub argnames: PgVec<'mcx, PgString<'mcx>>,
+    /// `get_func_arg_info`'s `*p_argmodes` (empty => C's `NULL`; raw proargmode
+    /// chars otherwise).
+    pub argmodes: PgVec<'mcx, u8>,
+}
+
 /// The decomposed `pg_proc` row fields `FuncnameGetCandidates`/`MatchNamedCall`
 /// read out of each catlist member: the `Form_pg_proc` GETSTRUCT reads plus
 /// the `proallargtypes` `SysCacheGetAttr` extraction.

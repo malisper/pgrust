@@ -35,5 +35,7 @@ backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type
 backend-utils-adt-ruleutils-seams = { path = "../backend-utils-adt-ruleutils-seams" }
 # cached_function_compile driver (utils/cache/funccache.c) — plpgsql_compile entry.
 backend-utils-cache-funccache-seams = { path = "../backend-utils-cache-funccache-seams" }
+# raw_parser syntax-only drive (parser/parser.c) for check_sql_expr (pl_gram.y).
+backend-parser-driver-seams = { path = "../backend-parser-driver-seams" }
 # check_function_bodies GUC read (guc.c) for the inline (DO) compile path.
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }

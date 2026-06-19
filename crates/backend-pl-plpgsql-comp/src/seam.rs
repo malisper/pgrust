@@ -188,9 +188,18 @@ pub fn get_collation_oid(_names: &[String], _missing_ok: bool) -> ! {
     panic!("plpgsql compile: get_collation_oid() not reachable (namespace collation owner unwired for compile)")
 }
 
-/// `check_sql_expr` — raw-parse the SQL text for syntax only.
-pub fn check_sql_expr(_stmt: &str, _location: i32) -> ! {
-    panic!("plpgsql compile: check_sql_expr() raw-parse not reachable (raw_parser owner unwired for compile)")
+/// `check_sql_expr(stmt, parseMode, location, yyscanner)` (pl_gram.y) — when
+/// `plpgsql_check_syntax` is set, raw-parse the SQL text for syntax only
+/// (`(void) raw_parser(stmt, parseMode)`), discarding the parse tree; a syntax
+/// error is raised inside the parser at the error position. The caller (the
+/// grammar, via the comp-seam) already short-circuits when `!plpgsql_check_syntax`
+/// — this is reached only in the validating (`forValidator`) compile.
+pub fn check_sql_expr(
+    stmt: &str,
+    mode: types_plpgsql::RawParseMode,
+    _location: i32,
+) -> types_error::PgResult<()> {
+    backend_parser_driver_seams::raw_parse_syntax_check::call(stmt.to_owned(), mode)
 }
 
 /// `CreateTemplateTupleDesc(numvars)` + per-member `TupleDescInitEntry` /

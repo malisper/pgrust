@@ -549,11 +549,29 @@ fn raw_typename_to_parse(
     })
 }
 
+/// `(void) raw_parser(stmt, parseMode)` (parser/parser.c) for `check_sql_expr`
+/// (pl_gram.y): raw-parse the SQL text for syntax only and discard the tree. A
+/// grammar/syntax error is raised inside `raw_parser` and propagates on `Err`.
+fn raw_parse_syntax_check(
+    stmt: alloc::string::String,
+    mode: RawParseMode,
+) -> PgResult<()> {
+    let ctx = mcx::MemoryContext::new("raw_parse_syntax_check");
+    let mcx = ctx.mcx();
+    // C: `(void) raw_parser(stmt, parseMode)` — only the syntax-check side effect
+    // (the error on a malformed string) matters; the parse tree is discarded with
+    // the scratch context.
+    let _list = raw_parser(mcx, stmt.as_str(), mode)?;
+    Ok(())
+}
+
 /// Install this crate's owned inward seams. `raw_parse_type_name` (the
 /// `parse_type.c` inner drive) is installed here: the driver owns `raw_parser`
 /// and bridges its arena `TypeName` into the owned carrier the resolver reads.
+/// `raw_parse_syntax_check` is the `check_sql_expr` (pl_gram.y) syntax-only drive.
 pub fn init_seams() {
     backend_parser_driver_seams::raw_parse_type_name::set(raw_parse_type_name);
+    backend_parser_driver_seams::raw_parse_syntax_check::set(raw_parse_syntax_check);
 }
 
 /// Error helper for the `base_yylex` UESCAPE checks (parser.c:273/278): a

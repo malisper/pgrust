@@ -14046,6 +14046,7 @@ dependencies = [
 name = "backend-pl-plpgsql-comp"
 version = "0.0.0"
 dependencies = [
+ "backend-parser-driver-seams",
  "backend-pl-plpgsql-comp-seams",
  "backend-pl-plpgsql-funcs",
  "backend-pl-plpgsql-gram",

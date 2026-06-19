@@ -15,7 +15,7 @@ pub mod namespace;
 
 pub use backend_catalog_namespace::{
     CatalogObjectName, CharArrayDatum, FastpathProcRow, FuncArgInfo, FuncProcAttrs, OidArrayDatum,
-    OperRow, ProcRow, TextArrayDatum,
+    OperRow, ProcCompileRow, ProcRow, TextArrayDatum,
 };
 pub use namespace::{
     FuncCandidate, FuncCandidateList, SearchPathMatcher, TempNamespaceStatus, RVR_MISSING_OK,

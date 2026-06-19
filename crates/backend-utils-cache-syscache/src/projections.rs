@@ -64,7 +64,9 @@ use types_tuple::backend_access_common_tupdesc::PgTypeInfo;
 use backend_utils_cache_syscache_seams::CastRow;
 use types_cache::syscache::{ForeignDataWrapperFormRow, ForeignServerFormRow};
 use types_namespace::OperRow;
-use types_namespace::{CharArrayDatum, FuncProcAttrs, OidArrayDatum, ProcRow, TextArrayDatum};
+use types_namespace::{
+    CharArrayDatum, FuncProcAttrs, OidArrayDatum, ProcCompileRow, ProcRow, TextArrayDatum,
+};
 use backend_nodes_read_seams as nodes_read_seams;
 use backend_utils_adt_varlena_seams as varlena_seams;
 use backend_optimizer_prep_prepagg_seams as prepagg_seams;
@@ -2673,6 +2675,127 @@ pub(crate) fn proc_arg_attrs<'mcx>(
         proargmodes,
         proargnames,
         protrftypes,
+    }))
+}
+
+/// `OIDOID` (`pg_type_d.h`) — element-type OID for the `proallargtypes` shape
+/// check `get_func_arg_info` runs.
+const SYS_OIDOID: Oid = 26;
+
+/// `SearchSysCache1(PROCOID, funcid)` projected to the [`ProcCompileRow`] the
+/// PL/pgSQL compiler reads (`plpgsql_compile_callback`, pl_comp.c): the
+/// `Form_pg_proc` `GETSTRUCT` scalars, the `prosrc` text
+/// (`SysCacheGetAttrNotNull` + `TextDatumGetCString`), and the
+/// `get_func_arg_info(procTup, &argtypes, &argnames, &argmodes)`
+/// (funcapi.c) decomposition. `Ok(None)` on a cache miss (`!HeapTupleIsValid`);
+/// the caller raises its own `cache lookup failed for function %u`.
+pub(crate) fn proc_compile_row<'mcx>(
+    mcx: Mcx<'mcx>,
+    funcid: Oid,
+) -> PgResult<Option<ProcCompileRow<'mcx>>> {
+    let tuple = SearchSysCache1(mcx, PROCOID, SysCacheKey::Value(KeyDatum::from_oid(funcid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+
+    // GETSTRUCT scalars (Form_pg_proc).
+    let proname = getattr_name(mcx, PROCOID, &tup, Anum_pg_proc_proname)?;
+    let prorettype = getattr_oid(mcx, PROCOID, &tup, Anum_pg_proc_prorettype)?;
+    let proretset = getattr_bool(mcx, PROCOID, &tup, Anum_pg_proc_proretset)?;
+    let prokind = getattr_char(mcx, PROCOID, &tup, Anum_pg_proc_prokind)? as u8;
+    let provolatile = getattr_char(mcx, PROCOID, &tup, Anum_pg_proc_provolatile)? as u8;
+    let pronargs = getattr_i16(mcx, PROCOID, &tup, Anum_pg_proc_pronargs)? as i32;
+
+    // prosrc = TextDatumGetCString(SysCacheGetAttrNotNull(.., Anum_pg_proc_prosrc)).
+    let prosrc_datum = SysCacheGetAttrNotNull(mcx, PROCOID, &tup, Anum_pg_proc_prosrc)?;
+    let prosrc = varlena_seams::text_to_cstring_v::call(mcx, &prosrc_datum)?;
+
+    // get_func_arg_info(procTup, &argtypes, &argnames, &argmodes) (funcapi.c):
+    //  *p_argtypes = proallargtypes if not-null, else the proargtypes oidvector.
+    let proallargtypes = getattr_oid_array(mcx, PROCOID, &tup, Anum_pg_proc_proallargtypes)?;
+    let argtypes: PgVec<'mcx, Oid> = match proallargtypes {
+        Some(arr) => {
+            // We expect a 1-D non-null OID array; verify (the C elog).
+            if arr.ndim != 1 || arr.dim0 < 0 || arr.hasnull || arr.elemtype != SYS_OIDOID {
+                ReleaseSysCache(tup);
+                return Err(PgError::error(
+                    "proallargtypes is not a 1-D Oid array or it contains nulls",
+                ));
+            }
+            arr.values
+        }
+        None => {
+            // No proallargtypes: use the declared proargtypes oidvector.
+            let proargtypes_datum =
+                SysCacheGetAttrNotNull(mcx, PROCOID, &tup, Anum_pg_proc_proargtypes)?;
+            let proargtypes_bytes = match &proargtypes_datum {
+                Datum::ByRef(b) => &b[..],
+                _ => {
+                    ReleaseSysCache(tup);
+                    return Err(PgError::error(
+                        "syscache proc_compile_row: proargtypes attribute is by-value",
+                    ));
+                }
+            };
+            let proargtypes_vec =
+                arrayfuncs_seams::oidvector_to_oids_bytes::call(mcx, proargtypes_bytes)?;
+            let mut argtypes = vec_with_capacity_in(mcx, proargtypes_vec.len())?;
+            for &t in proargtypes_vec.iter() {
+                argtypes.push(t);
+            }
+            argtypes
+        }
+    };
+    let numargs = argtypes.len();
+
+    // *p_argnames: NULL (=> empty) when proargnames is SQL-null. The C `elog`
+    // fires when the element count disagrees with numargs.
+    let argnames: PgVec<'mcx, PgString<'mcx>> =
+        match getattr_text_array(mcx, PROCOID, &tup, Anum_pg_proc_proargnames)? {
+            None => vec_with_capacity_in(mcx, 0)?,
+            Some(arr) => {
+                if arr.values.len() != numargs {
+                    ReleaseSysCache(tup);
+                    return Err(PgError::error(
+                        "proargnames must have the same number of elements as the function has arguments",
+                    ));
+                }
+                arr.values
+            }
+        };
+
+    // *p_argmodes: NULL (=> empty) when proargmodes is SQL-null. The C `elog`
+    // checks a 1-D char array of length numargs.
+    let argmodes: PgVec<'mcx, u8> =
+        match getattr_char_array(mcx, PROCOID, &tup, Anum_pg_proc_proargmodes)? {
+            None => vec_with_capacity_in(mcx, 0)?,
+            Some(arr) => {
+                if arr.ndim != 1
+                    || arr.dim0 as usize != numargs
+                    || arr.hasnull
+                    || arr.elemtype != SYS_CHAROID
+                {
+                    ReleaseSysCache(tup);
+                    return Err(PgError::error(format!(
+                        "proargmodes is not a 1-D char array of length {numargs} or it contains nulls"
+                    )));
+                }
+                arr.values
+            }
+        };
+
+    ReleaseSysCache(tup);
+    Ok(Some(ProcCompileRow {
+        proname,
+        prorettype,
+        proretset,
+        prokind,
+        provolatile,
+        pronargs,
+        prosrc,
+        argtypes,
+        argnames,
+        argmodes,
     }))
 }
 

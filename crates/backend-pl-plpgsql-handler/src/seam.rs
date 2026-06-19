@@ -334,24 +334,72 @@ pub fn validate_function_body(funcoid: Oid) -> PgResult<()> {
     Ok(())
 }
 
-/// `plpgsql_compile(fake_fcinfo, true)` — the validator's test-compile. The
-/// owned-inputs compile entry (`plpgsql_compile_from_source`) needs the full
-/// `ProcCompileFacts` projected from the `pg_proc` row; assembling those facts +
-/// the polymorphic-return resolution from the (absent, validator-time) call
-/// expression is the compile substrate. Loud until the compile bridge lands; the
-/// pseudotype checks above are real and CREATE FUNCTION succeeds with
-/// `check_function_bodies = off`.
+/// `plpgsql_compile(fake_fcinfo, true)` — the validator's test-compile.
+///
+/// The fake fcinfo `plpgsql_validator` builds carries only `flinfo->fn_oid =
+/// funcoid`, a zeroed `fncollation` (== `InvalidOid`), and the dml/event-trigger
+/// `context` flag. `plpgsql_compile` resolves the on-disk `pg_proc` row and calls
+/// `plpgsql_compile_callback(forValidator=true)`. Here we project that `pg_proc`
+/// row (`proc_compile_row`: the `Form_pg_proc` scalars + `prosrc` +
+/// `get_func_arg_info` decomposition), assemble the owned [`ProcCompileFacts`],
+/// and drive the comp owner's owned-inputs compile body
+/// (`plpgsql_compile_from_source`). Trigger/event-trigger functions take their
+/// `fn_is_trigger` arm; for a polymorphic return the compile body substitutes the
+/// integer family (the C `forValidator` branch), so no call-expression rettype is
+/// needed. A syntax/semantic error surfaces as the compile body's `ereport`,
+/// caught at the `PGFunction` boundary, exactly as in C.
 fn validate_test_compile(
     funcoid: Oid,
-    _is_dml_trigger: bool,
-    _is_event_trigger: bool,
+    is_dml_trigger: bool,
+    is_event_trigger: bool,
 ) -> PgResult<()> {
-    panic!(
-        "seam not wired: plpgsql_compile(fake_fcinfo, forValidator=true) (pl_handler.c) for \
-         function {funcoid} — the validator test-compile needs ProcCompileFacts projected from \
-         pg_proc + the funccache/fcinfo-model compile bridge (compile keystone); set \
-         check_function_bodies = off to skip body validation"
-    );
+    use backend_pl_plpgsql_comp::ProcCompileFacts;
+    use types_plpgsql::PLpgSQL_trigtype;
+
+    let scratch = mcx::MemoryContext::new("plpgsql_validator test-compile");
+    let mcx = scratch.mcx();
+
+    // proc_compile_row == plpgsql_compile's SearchSysCache1(PROCOID, funcid) +
+    // GETSTRUCT + get_func_arg_info; a cache miss is the C `cache lookup failed`.
+    let row = backend_utils_cache_syscache_seams::proc_compile_row::call(mcx, funcoid)?
+        .ok_or_else(|| {
+            PgError::error(format!("cache lookup failed for function {funcoid}"))
+        })?;
+
+    // fn_is_trigger arm (the C `switch (function->fn_is_trigger)`).
+    let fn_is_trigger = if is_dml_trigger {
+        PLpgSQL_trigtype::PLPGSQL_DML_TRIGGER
+    } else if is_event_trigger {
+        PLpgSQL_trigtype::PLPGSQL_EVENT_TRIGGER
+    } else {
+        PLpgSQL_trigtype::PLPGSQL_NOT_TRIGGER
+    };
+
+    let facts = ProcCompileFacts {
+        proname: row.proname.as_str().to_owned(),
+        fn_oid: funcoid,
+        // fake_fcinfo->fncollation is zeroed (InvalidOid) at validation time.
+        fn_input_collation: types_core::InvalidOid,
+        prosrc: row.prosrc.as_str().to_owned(),
+        prorettype: row.prorettype,
+        proretset: row.proretset,
+        prokind: row.prokind,
+        provolatile: row.provolatile,
+        pronargs: row.pronargs,
+        argtypes: row.argtypes.iter().copied().collect(),
+        argnames: row.argnames.iter().map(|s| s.as_str().to_owned()).collect(),
+        argmodes: row.argmodes.iter().copied().collect(),
+        fn_is_trigger,
+        for_validator: true,
+        // The validator has no call expression; the for_validator compile branch
+        // substitutes the integer family for a polymorphic return type itself.
+        resolved_rettype: types_core::InvalidOid,
+    };
+
+    // The compile body `ereport`s on a faulty function; that propagates as a
+    // PgError panic caught at the PGFunction boundary (== C's longjmp).
+    let _function = backend_pl_plpgsql_comp::plpgsql_compile_from_source(&facts);
+    Ok(())
 }
 
 /// `castNode(InlineCodeBlock, DatumGetPointer(PG_GETARG_DATUM(0)))` — unpack the

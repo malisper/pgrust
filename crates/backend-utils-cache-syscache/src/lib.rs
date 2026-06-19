@@ -1090,6 +1090,7 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::proc_row_by_oid::set(projections::proc_row_by_oid);
     backend_utils_cache_syscache_seams::proc_catlist::set(projections::proc_catlist);
     backend_utils_cache_syscache_seams::proc_arg_attrs::set(projections::proc_arg_attrs);
+    backend_utils_cache_syscache_seams::proc_compile_row::set(projections::proc_compile_row);
     backend_utils_cache_syscache_seams::search_constraint_form_by_oid::set(
         projections::search_constraint_form_by_oid,
     );

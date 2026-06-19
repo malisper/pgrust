@@ -20,3 +20,6 @@ backend-parser-scan-seams = { path = "../backend-parser-scan-seams" }
 backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
 # plpgsql_parse_word/dblword/tripword (pl_comp.c — not yet ported; via seam).
 backend-pl-plpgsql-comp-seams = { path = "../backend-pl-plpgsql-comp-seams" }
+
+[dev-dependencies]
+backend-parser-gram-core = { path = "../backend-parser-gram-core" }

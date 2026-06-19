@@ -16,7 +16,16 @@ extern crate alloc;
 use alloc::string::String;
 
 use types_error::PgResult;
-use types_parsenodes::TypeName;
+use types_parsenodes::{RawParseMode, TypeName};
+
+seam_core::seam!(
+    /// `(void) raw_parser(stmt, parseMode)` (parser/parser.c) — raw-parse the SQL
+    /// text for syntax only, discarding the parse tree. `check_sql_expr`
+    /// (pl_gram.y) calls this when `plpgsql_check_syntax` is set (CREATE
+    /// FUNCTION-time validation) to surface a syntax error at the right location;
+    /// a grammar/syntax error is raised inside the parser and propagates on `Err`.
+    pub fn raw_parse_syntax_check(stmt: String, mode: RawParseMode) -> PgResult<()>
+);
 
 seam_core::seam!(
     /// `raw_parser(str, RAW_PARSE_TYPE_NAME)` +

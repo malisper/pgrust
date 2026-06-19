@@ -2099,8 +2099,13 @@ pub fn init_seams() {
     });
     comp_seams::mark_expr_as_assignment_source::set(mark_expr_as_assignment_source);
     comp_seams::perform_rewrite_query::set(perform_rewrite_query);
-    comp_seams::check_sql_expr::set(|stmt, _parse_mode, location| {
-        seam::check_sql_expr(stmt, location)
+    comp_seams::check_sql_expr::set(|stmt, parse_mode, location| {
+        // C `check_sql_expr` returns immediately unless `plpgsql_check_syntax`
+        // (set only for a forValidator compile); skip the raw-parse otherwise.
+        if !plpgsql_check_syntax() {
+            return Ok(());
+        }
+        seam::check_sql_expr(stmt, parse_mode, location)
     });
     comp_seams::parse_datatype::set(|string, location| seam::parse_datatype(string, location));
     comp_seams::get_collation_oid::set(|names, missing_ok| {

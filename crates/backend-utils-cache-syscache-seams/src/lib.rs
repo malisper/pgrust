@@ -16,7 +16,9 @@ use types_core::Oid;
 use types_error::PgResult;
 use types_hash::backend_access_hash_hashvalidate::{AmopRow, AmprocRow, OpclassForm};
 use mcx::PgString;
-use types_namespace::{CatalogObjectName, FastpathProcRow, FuncProcAttrs, OperRow, ProcRow};
+use types_namespace::{
+    CatalogObjectName, FastpathProcRow, FuncProcAttrs, OperRow, ProcCompileRow, ProcRow,
+};
 use types_cache::AuthIdRow;
 use types_cache::syscache::{
     ClassOwnerAcl, ForeignDataWrapperFormRow, ForeignServerFormRow, NamespaceOwnerAcl,
@@ -635,6 +637,24 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         funcid: Oid,
     ) -> PgResult<Option<FuncProcAttrs<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(PROCOID, funcid)` projected to the [`ProcCompileRow`] the
+    /// PL/pgSQL compiler (`plpgsql_compile_callback`, pl_comp.c) reads to compile
+    /// a function: the `Form_pg_proc` `GETSTRUCT` scalars (`proname`/`prorettype`/
+    /// `proretset`/`prokind`/`provolatile`/`pronargs`), the `prosrc` text
+    /// (`TextDatumGetCString(SysCacheGetAttrNotNull(.., prosrc))`), and the
+    /// `get_func_arg_info(procTup, ...)` decomposition (`proallargtypes` ?? the
+    /// `proargtypes` oidvector, plus `proargnames`/`proargmodes`, with the C
+    /// 1-D-array shape `elog`s raised here as `Err`). `Ok(None)` on a cache miss
+    /// (`!HeapTupleIsValid`); the validator/handler caller raises its own
+    /// `cache lookup failed for function %u`, as in C. The projected strings/Vecs
+    /// are copied into the caller's `Mcx`; `Err` includes OOM from the copy.
+    pub fn proc_compile_row<'mcx>(
+        mcx: Mcx<'mcx>,
+        funcid: Oid,
+    ) -> PgResult<Option<ProcCompileRow<'mcx>>>
 );
 
 seam_core::seam!(
