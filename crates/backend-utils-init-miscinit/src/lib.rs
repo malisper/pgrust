@@ -1129,6 +1129,20 @@ pub fn init_seams() {
     backend_port_path_seams::getppid::set(boot_paths::getppid);
     backend_port_path_seams::pid_appears_live::set(boot_paths::pid_appears_live);
     backend_port_path_seams::touch_file_times::set(boot_paths::touch_file_times);
+    // The `port/path.c` helpers that `commands/tablespace.c` reaches through the
+    // tablespace-globals seam group, also homed in `boot_paths`.
+    backend_commands_tablespace_globals_seams::canonicalize_path::set(
+        boot_paths::canonicalize_path_pub,
+    );
+    backend_commands_tablespace_globals_seams::is_absolute_path::set(
+        boot_paths::is_absolute_path_pub,
+    );
+    backend_commands_tablespace_globals_seams::path_is_prefix_of_path::set(
+        boot_paths::path_is_prefix_of_path_pub,
+    );
+    backend_commands_tablespace_globals_seams::get_parent_directory::set(
+        boot_paths::get_parent_directory_pub,
+    );
     common_username_seams::get_user_name_or_exit::set(startup_paths::get_user_name_or_exit);
 
     // ---- GUC variable accessors (C `conf->variable` backing store) ----------

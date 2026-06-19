@@ -76,4 +76,5 @@ backend-postmaster-postmaster-seams = { path = "../backend-postmaster-postmaster
 backend-libpq-pqcomm-seams = { path = "../backend-libpq-pqcomm-seams" }
 backend-common-exec-seams = { path = "../backend-common-exec-seams" }
 common-path-seams = { path = "../common-path-seams" }
+backend-commands-tablespace-globals-seams = { path = "../backend-commands-tablespace-globals-seams" }
 common-username-seams = { path = "../common-username-seams" }

@@ -660,6 +660,43 @@ pub fn first_dir_separator_pub(filename: &str) -> Option<usize> {
     first_dir_separator(filename.as_bytes())
 }
 
+/// `pstrdup(path); canonicalize_path(buf)` (`path.c`): public canonicalizing
+/// accessor used by `commands/tablespace.c` (Unix-ify the offered LOCATION and
+/// strip trailing slashes). Infallible in C beyond the `pstrdup` alloc.
+pub fn canonicalize_path_pub(path: &str) -> PgResult<String> {
+    Ok(canonicalize_path(path))
+}
+
+/// `is_absolute_path(path)` (`port.h`): public predicate accessor.
+pub fn is_absolute_path_pub(path: &str) -> PgResult<bool> {
+    Ok(is_absolute_path(path))
+}
+
+/// `path_is_prefix_of_path(path1, path2)` (`path.c`): true when `path1` is a
+/// prefix of `path2` that ends on a directory boundary (i.e. `path2` continues
+/// with a directory separator or the string ends). Pure string predicate.
+pub fn path_is_prefix_of_path_pub(path1: &str, path2: &str) -> PgResult<bool> {
+    let p1 = path1.as_bytes();
+    let p2 = path2.as_bytes();
+    let path1_len = p1.len();
+    let starts_with = p2.len() >= path1_len && &p2[..path1_len] == p1;
+    // IS_DIR_SEP(path2[path1_len]) || path2[path1_len] == '\0'
+    let boundary = match p2.get(path1_len) {
+        Some(&c) => is_dir_sep(c),
+        None => true, // the C '\0' terminator
+    };
+    Ok(starts_with && boundary)
+}
+
+/// `pstrdup(path); get_parent_directory(buf)` (`path.c`): strip the last path
+/// component (and the slash(es) just ahead of it), returning the parent
+/// directory. Never erases a leading slash.
+pub fn get_parent_directory_pub(path: &str) -> PgResult<String> {
+    let mut buf: Vec<u8> = path.as_bytes().to_vec();
+    trim_directory(&mut buf);
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
 /// `getppid()` (libc): parent process id.
 pub fn getppid() -> i32 {
     // SAFETY: getppid never fails and has no preconditions.

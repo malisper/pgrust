@@ -21145,6 +21145,7 @@ dependencies = [
  "backend-access-transam-parallel",
  "backend-access-transam-parallel-rt-seams",
  "backend-commands-matview-deps-seams",
+ "backend-commands-tablespace-globals-seams",
  "backend-common-exec-seams",
  "backend-libpq-pqcomm-seams",
  "backend-libpq-pqsignal-seams",
