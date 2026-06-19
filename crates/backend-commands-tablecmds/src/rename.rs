@@ -110,7 +110,7 @@ fn namestrcpy_image(src: &str) -> [u8; 64] {
 /// `relnamespace` / `reloftype` are projected off the relcache `rd_rel` of the
 /// already-opened (or to-be-opened) relation rather than a `Form_pg_class`
 /// pointer, matching the rest of this crate's `rd_rel` field-read convention.
-fn renameatt_check(
+pub(crate) fn renameatt_check(
     myrelid: Oid,
     relname: &str,
     relkind: u8,
@@ -344,7 +344,7 @@ fn renameatt_internal<'mcx>(
 /// (tablecmds.c:3989) — pre-lock permission/integrity checks for the
 /// `renameatt` / RENAME CONSTRAINT resolution.  A concurrently-dropped relation
 /// (`None` drop-info) is a no-op.
-fn RangeVarCallbackForRenameAttribute(mcx: Mcx<'_>, relid: Oid) -> PgResult<()> {
+pub(crate) fn RangeVarCallbackForRenameAttribute(mcx: Mcx<'_>, relid: Oid) -> PgResult<()> {
     // tuple = SearchSysCache1(RELOID, relid); if (!valid) return; /* dropped */
     // form = (Form_pg_class) GETSTRUCT(tuple);
     // The drop-info projection carries relkind / relnamespace / relname off the
@@ -601,7 +601,7 @@ fn att_field_i16(mcx: Mcx<'_>, tup: &FormedTuple<'_>, anum: i16) -> PgResult<i16
 /// `((Form_pg_class) GETSTRUCT(SearchSysCache1(RELOID, relid)))->reloftype` —
 /// the `reloftype` column the trimmed relcache `rd_rel` does not carry. Returns
 /// `InvalidOid` for a concurrently-dropped relation.
-fn pg_class_reloftype(mcx: Mcx<'_>, relid: Oid) -> PgResult<Oid> {
+pub(crate) fn pg_class_reloftype(mcx: Mcx<'_>, relid: Oid) -> PgResult<Oid> {
     let Some(tuple) = syscache_seam::search_syscache_copy_pg_class_tuple::call(mcx, relid)? else {
         return Ok(InvalidOid);
     };

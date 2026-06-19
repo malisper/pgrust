@@ -1744,13 +1744,14 @@ mod recurrence_guard {
         // until the owning family lands. DELETE each entry as its family ports the
         // function and installs the seam in `init_seams()`.
         // RenameRelation / renameatt / rename_relation_internal RETIRED: the
-        // RENAME drivers (rename.rs) are ported and installed in init_seams(),
-        // so the guard now sees the `::set(...)` install. (RenameConstraint
-        // remains below — its rename_constraint_internal reads pg_constraint
-        // contype/conindid/coninhcount/connoinherit off the constraint tuple,
-        // and no pg_constraint form-reader seam exposes those yet.)
-        ("backend_commands_tablecmds", "RenameConstraint"),
-        ("backend_commands_tablecmds", "AlterTableNamespace"),
+        // RENAME drivers (rename.rs) are ported and installed in init_seams().
+        // RenameConstraint / AlterTableNamespace RETIRED: the RENAME CONSTRAINT +
+        // SET SCHEMA drivers (rename_schema.rs) are ported and installed
+        // (rename_constraint_internal reads pg_constraint via the installed
+        // read_constraint_form syscache seam; SET SCHEMA moves the row type via
+        // the installed alter_type_namespace_internal typecmds seam).
+        // AlterTableNamespaceInternal stays: its body is ported and reached from
+        // AlterTableNamespace, but it is not installed as a standalone seam.
         ("backend_commands_tablecmds", "AlterTableNamespaceInternal"),
         ("backend_commands_tablecmds", "alter_relation_namespace_internal"),
         // `at_exec_change_owner` retired from this list: the ALTER-phase spine

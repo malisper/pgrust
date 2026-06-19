@@ -43,6 +43,7 @@ mod oncommit;
 mod partbound;
 mod partition;
 mod rename;
+mod rename_schema;
 mod smallfns;
 mod truncate;
 
@@ -101,6 +102,10 @@ pub fn init_seams() {
     seam::renameatt::set(rename::renameatt);
     seam::RenameRelation::set(rename::RenameRelation);
     seam::rename_relation_internal::set(rename::RenameRelationInternal);
+
+    // RENAME CONSTRAINT + SET SCHEMA execute-phase drivers (rename_schema.rs).
+    seam::RenameConstraint::set(rename_schema::RenameConstraint);
+    seam::AlterTableNamespace::set(rename_schema::AlterTableNamespace);
 
     seam::register_on_commit_action::set(oncommit::register_on_commit_action);
     seam::remove_on_commit_action::set(oncommit::remove_on_commit_action);

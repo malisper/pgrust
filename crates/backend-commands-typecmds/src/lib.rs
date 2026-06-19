@@ -4627,6 +4627,12 @@ pub fn init_seams() {
     me::AlterTypeNamespace_oid::set(AlterTypeNamespace_oid);
     me::AlterTypeOwner::set(alter_type_owner_seam);
 
+    // AlterTableNamespaceInternal (tablecmds.c) moves a relation's row type via
+    // this seam during ALTER TABLE ... SET SCHEMA; the body lives here.
+    backend_commands_tablecmds_seams::alter_type_namespace_internal::set(
+        AlterTypeNamespaceInternal,
+    );
+
     // ProcessUtilitySlow dispatch target (utility.c) for CREATE DOMAIN — decode
     // the `CreateDomainStmt` and run the ported `DefineDomain` body.
     backend_tcop_utility_out_seams::define_domain::set(define_domain_seam);
