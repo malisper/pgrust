@@ -172,11 +172,31 @@ pub fn init_seams() {
     // reopened by Oid later — vacuum.c's open-then-recover idiom.
     vacuum::try_relation_open::set(|relid, lmode| {
         // try_relation_open(relid, lmode): take the lock (kept until commit) and
-        // return the rel's Oid, or None if the relation has disappeared. The
-        // owned Relation drops here (relcache ref released); the lock is held.
+        // return the rel's Oid, or None if the relation has disappeared.
+        //
+        // C's vacuum_rel keeps the opened `Relation *` (its `rd_refcnt` pin)
+        // live for the WHOLE of vacuum_rel and only releases it with the
+        // explicit `relation_close(rel, NoLock)` at the end (or an early-exit
+        // `relation_close(rel, lmode)`). The Oid-model carries the relation as a
+        // bare Oid, but the relcache pin still has to outlive the work: the
+        // intermediate `table_open(rel_handle, NoLock)` recover-calls bump and
+        // then drop their own pin (vacuum/cluster consume the owned value), so
+        // without this held pin the entry's `rd_refcnt` would return to 0 mid
+        // vacuum and the final `relation_close` would underflow it to -1.
+        //
+        // `mem::forget` the owned `Relation` so its `RelationIncrementReference
+        // Count` (+1) stays held — the relcache-resource analog of the lock
+        // guard's `.keep()`. The matching `relation_close(rel_handle, ...)` in
+        // vacuum_rel releases it (rd_refcnt 1 -> 0). The lock is likewise kept.
         let cx = mcx::MemoryContext::new("vacuum_open_relation");
         let opened = relation_seam::try_relation_open::call(cx.mcx(), relid, lmode)?;
-        Ok(opened.map(|rel| rel.rd_id))
+        Ok(opened.map(|rel| {
+            let oid = rel.rd_id;
+            // Hold the relcache pin past this closure (no Drop release): the
+            // entry stays pinned until vacuum_rel's explicit relation_close.
+            core::mem::forget(rel);
+            oid
+        }))
     });
     vacuum::conditional_lock_relation_oid::set(|relid, lmode| {
         // ConditionalLockRelationOid(relid, lmode) -> bool. The owner returns a
