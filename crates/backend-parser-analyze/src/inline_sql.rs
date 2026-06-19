@@ -56,7 +56,7 @@ pub fn inline_sql_function<'mcx>(
     _funcid: Oid,
     result_type: Oid,
     result_collid: Oid,
-    _input_collid: Oid,
+    input_collid: Oid,
     args: &[Expr],
     _funcvariadic: bool,
     _estimate: bool,
@@ -91,9 +91,21 @@ pub fn inline_sql_function<'mcx>(
         if raw_list.len() != 1 {
             return Ok(None);
         }
-        // make_parsestate + sql_fn_parser_setup ($n resolve against
-        // proargtypes): parse_analyze_fixedparams is the fixed-param analogue.
-        crate::parse_analyze_fixedparams(mcx, &raw_list[0], prosrc_mcx, &form.proargtypes)?
+        // prepare_sql_fn_parse_info + sql_fn_parser_setup (clauses.c:4674/4690):
+        // a `$n` resolves against proargtypes and a body bareword that names an
+        // argument resolves to its Param, under the call's input collation.
+        let nargs = form.proargtypes.len();
+        let argnames = match &form.proargnames {
+            Some(names) if names.len() >= nargs && nargs > 0 => Some(names.clone()),
+            _ => None,
+        };
+        let pinfo = types_nodes::parsestmt::SqlFnParseInfo::new(
+            form.proname.clone(),
+            input_collid,
+            form.proargtypes.clone(),
+            argnames,
+        );
+        crate::parse_analyze_sql_function(mcx, &raw_list[0], prosrc_mcx, pinfo)?
     };
 
     // ---- the "simple SELECT expression" gate (clauses.c:4700) -------------

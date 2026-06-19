@@ -3216,20 +3216,208 @@ fn transformMultiAssignRef<'mcx>(
     }
 }
 
-/// The PreParseColumnRefHook leg of `transformColumnRef` — the hook ABI carries
-/// opaque cross-ABI function pointers; reached only when a hook is installed
-/// (absent in the stock server).
-/// The PostParseColumnRefHook leg of `transformColumnRef`.
+/// The PostParseColumnRefHook leg of `transformColumnRef`. Selects the installed
+/// hook from the active `pstate.p_ref_hook_state` arm — the real artifact the C
+/// function pointer selects. The only post-columnref hook in the core backend is
+/// `sql_fn_post_column_ref` (SQL-function-body parsing), installed by
+/// `sql_fn_parser_setup` via the `SqlFunction` ref-hook arm. A non-`None` result
+/// replaces the reference; otherwise the default `var` (and, when that is also
+/// `None`, the "no translation found" error) stands.
 fn seam_transform_post_columnref_hook<'mcx>(
-    _pstate: &mut ParseState<'mcx>,
-    _cref: ColumnRef<'mcx>,
-    _node: Option<Node<'mcx>>,
+    pstate: &mut ParseState<'mcx>,
+    cref: ColumnRef<'mcx>,
+    node: Option<Node<'mcx>>,
 ) -> PgResult<Node<'mcx>> {
-    panic!(
-        "transformColumnRef's PostParseColumnRefHook leg needs the opaque \
-         columnref parser-hook ABI; the hook-installed path is reached only when \
-         a hook is present (absent in the stock server)."
-    )
+    use types_nodes::parsestmt::ParseRefHookState;
+
+    let result = match &pstate.p_ref_hook_state {
+        ParseRefHookState::SqlFunction(pinfo) => {
+            let pinfo = pinfo.clone();
+            sql_fn_post_column_ref(pstate, &pinfo, &cref, node.as_ref())?
+        }
+        // No other post-columnref hook exists in the core backend; the active arm
+        // installs no `p_post_columnref_hook` (C `== NULL`), so the default `var`
+        // stands.
+        ParseRefHookState::None
+        | ParseRefHookState::FixedParams(_)
+        | ParseRefHookState::VarParams(_)
+        | ParseRefHookState::DomainCheckValue(_) => None,
+    };
+
+    // The hook's result, if any, replaces the reference (C: `if (node != NULL)
+    // return node;`). Otherwise the default resolution stands.
+    if let Some(n) = result {
+        return Ok(n);
+    }
+    if let Some(n) = node {
+        return Ok(n);
+    }
+
+    // Throw error if no translation found. The hook didn't resolve it and there
+    // is no default var: this is the same "no column" error the no-hook tail
+    // raises. errorMissingColumn over the single-part name (the common SQL-fn
+    // bareword case); multi-part refs that reach here likewise have no column.
+    let mcx = aexpr_clone_ctx(pstate);
+    let colname = cref
+        .fields
+        .last()
+        .and_then(str_val)
+        .unwrap_or_default();
+    let relname = if cref.fields.len() >= 2 {
+        cref.fields.first().and_then(str_val)
+    } else {
+        None
+    };
+    errorMissingColumn(mcx, pstate, relname.as_deref(), &colname, cref.location)?;
+    unreachable!()
+}
+
+/// `sql_fn_post_column_ref` (executor/functions.c:353) — parser callback for
+/// `ColumnRef`s when parsing a SQL-function body. Resolves a bareword (or
+/// `fname.param`, `fname.param.field`, `param.field`, with optional trailing `.*`)
+/// that names a function parameter to the corresponding `$n` `Param`. Never
+/// overrides a real table-column reference (returns `None` when `var` is set).
+fn sql_fn_post_column_ref<'mcx>(
+    pstate: &mut ParseState<'mcx>,
+    pinfo: &types_nodes::parsestmt::SqlFnParseInfo,
+    cref: &ColumnRef<'mcx>,
+    var: Option<&Node<'mcx>>,
+) -> PgResult<Option<Node<'mcx>>> {
+    // Never override a table-column reference.
+    if var.is_some() {
+        return Ok(None);
+    }
+
+    // nnames = list_length(cref->fields);  if (nnames > 3) return NULL;
+    let mut nnames = cref.fields.len();
+    if nnames > 3 {
+        return Ok(None);
+    }
+
+    // if (IsA(llast(cref->fields), A_Star)) nnames--;
+    if cref
+        .fields
+        .last()
+        .map(|f| f.is_a_star())
+        .unwrap_or(false)
+    {
+        nnames -= 1;
+    }
+
+    let name1 = str_val(&cref.fields[0])
+        .ok_or_else(|| PgError::error("sql_fn_post_column_ref: field is not a String"))?;
+    let name2 = if nnames > 1 {
+        Some(
+            str_val(&cref.fields[1])
+                .ok_or_else(|| PgError::error("sql_fn_post_column_ref: field is not a String"))?,
+        )
+    } else {
+        None
+    };
+
+    // The resolved Param (if any) and whether a trailing subfield remains.
+    let (param, has_subfield): (Option<types_nodes::primnodes::Param>, bool) = if nnames == 3 {
+        // Three-part name: first part must match the function name; second part
+        // is the parameter, third is a field reference.
+        if name1 != pinfo.fname {
+            return Ok(None);
+        }
+        let p = sql_fn_resolve_param_name(pinfo, name2.as_deref().unwrap(), cref.location)?;
+        (p, true)
+    } else if nnames == 2 && name1 == pinfo.fname {
+        // Two-part name with first part matching function name: try the second
+        // part as a parameter name (no subfield), else the first part as a
+        // parameter name with the second as a subfield.
+        let p = sql_fn_resolve_param_name(pinfo, name2.as_deref().unwrap(), cref.location)?;
+        if p.is_some() {
+            (p, false)
+        } else {
+            (
+                sql_fn_resolve_param_name(pinfo, &name1, cref.location)?,
+                true,
+            )
+        }
+    } else {
+        // Single name, or parameter name followed by subfield.
+        let p = sql_fn_resolve_param_name(pinfo, &name1, cref.location)?;
+        (p, nnames > 1)
+    };
+
+    let Some(param) = param else {
+        return Ok(None); // No match.
+    };
+
+    if has_subfield {
+        // Reference to a field of a composite parameter. `subfield` is the
+        // second field for the 2-name `param.field` case, or the third for the
+        // 3-name `fname.param.field` case. ParseFuncOrColumn resolves the field
+        // selection; if it can't, it returns NULL and we fail back at the caller.
+        let subfield_idx = if nnames == 3 { 2 } else { 1 };
+        let subfield = str_val(&cref.fields[subfield_idx])
+            .ok_or_else(|| PgError::error("sql_fn_post_column_ref: subfield is not a String"))?;
+        let mcx = aexpr_clone_ctx(pstate);
+        let funcname = [mcx::PgString::from_str_in(&subfield, mcx)?];
+        let last_srf = last_srf_expr(pstate);
+        let res = backend_parser_func::ParseFuncOrColumn(
+            pstate,
+            &funcname,
+            vec![Expr::Param(param)],
+            last_srf.as_ref(),
+            None,
+            false,
+            cref.location,
+        )?;
+        return Ok(res.map(Node::Expr));
+    }
+
+    Ok(Some(Node::Expr(Expr::Param(param))))
+}
+
+/// `sql_fn_make_param` (executor/functions.c:485) — construct a `PARAM_EXTERN`
+/// `Param` node for the given 1-based parameter number, using the function's
+/// argument types and (optionally) its input collation.
+fn sql_fn_make_param(
+    pinfo: &types_nodes::parsestmt::SqlFnParseInfo,
+    paramno: i32,
+    location: i32,
+) -> PgResult<types_nodes::primnodes::Param> {
+    let paramtype = pinfo.argtypes[(paramno - 1) as usize];
+    let mut paramcollid = lsyscache::get_typcollation::call(paramtype)?;
+
+    // A valid function input collation overrides the type-derived collation.
+    if OidIsValid(pinfo.collation) && OidIsValid(paramcollid) {
+        paramcollid = pinfo.collation;
+    }
+
+    Ok(types_nodes::primnodes::Param {
+        paramkind: types_nodes::primnodes::PARAM_EXTERN,
+        paramid: paramno,
+        paramtype,
+        paramtypmod: -1,
+        paramcollid,
+        location,
+    })
+}
+
+/// `sql_fn_resolve_param_name` (executor/functions.c:515) — search the function's
+/// argument names for `paramname`; on a match, build the corresponding `Param`.
+fn sql_fn_resolve_param_name(
+    pinfo: &types_nodes::parsestmt::SqlFnParseInfo,
+    paramname: &str,
+    location: i32,
+) -> PgResult<Option<types_nodes::primnodes::Param>> {
+    let Some(argnames) = pinfo.argnames.as_ref() else {
+        return Ok(None);
+    };
+    for (i, name) in argnames.iter().enumerate() {
+        if i >= pinfo.argtypes.len() {
+            break;
+        }
+        if name.as_deref() == Some(paramname) {
+            return Ok(Some(sql_fn_make_param(pinfo, (i + 1) as i32, location)?));
+        }
+    }
+    Ok(None)
 }
 
 // ===========================================================================
@@ -3280,6 +3468,18 @@ fn transformParamRef<'mcx>(
         ParseRefHookState::VarParams(parstate) => Some(
             backend_parser_small1::variable_paramref_hook(pstate, parstate, &hook_pref)?,
         ),
+        // sql_fn_param_ref (functions.c:469): a `$n` valid for the function's
+        // argument count resolves to a Param; an out-of-range number returns
+        // NULL (falls to the generic error below).
+        ParseRefHookState::SqlFunction(pinfo) => {
+            let paramno = pref.number;
+            if paramno <= 0 || paramno as usize > pinfo.argtypes.len() {
+                None
+            } else {
+                let pinfo = pinfo.clone();
+                Some(sql_fn_make_param(&pinfo, paramno, pref.location)?)
+            }
+        }
         // A domain CHECK parse state installs no paramref hook (C
         // `p_paramref_hook == NULL`): a `$n` reference falls to the generic
         // "there is no parameter $n" error below.

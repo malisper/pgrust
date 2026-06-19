@@ -314,6 +314,51 @@ impl FixedParamState {
     }
 }
 
+/// `SQLFunctionParseInfo` (`executor/functions.c`) — the ref-hook state installed
+/// by `sql_fn_parser_setup` when parsing a SQL-function body. It lets a body
+/// bareword that names a function parameter (or `fname.param`, `fname.param.field`,
+/// `param.field`) resolve to the corresponding `$n` `Param`, and lets a `$n`
+/// `ParamRef` resolve against the function's declared argument types.
+///
+/// Built by `prepare_sql_fn_parse_info` from the function's `pg_proc` row: the
+/// function name (`fname`, used only to qualify argument names), the input
+/// collation, the (poly-resolved) argument types, and — when present — the
+/// argument names. `argnames` is `None` when the function has no named arguments
+/// (or too few name entries); an individual `None` entry is an unnamed slot.
+#[derive(Clone)]
+pub struct SqlFnParseInfo {
+    /// `pinfo->fname` — the function's name (only used to qualify argument
+    /// names in `name.param` / `name.param.field` references).
+    pub fname: alloc::string::String,
+    /// `pinfo->collation` — the function's input collation; when valid it
+    /// overrides the type-derived collation of a parameter `Param`.
+    pub collation: Oid,
+    /// `pinfo->argtypes` — the (polymorphic-resolved) declared argument types,
+    /// `numParams == argtypes.len()`.
+    pub argtypes: Rc<Vec<Oid>>,
+    /// `pinfo->argnames` — per-argument names, or `None` when the function has
+    /// no usable argument names. An individual `None` entry is an unnamed slot.
+    pub argnames: Option<Rc<Vec<Option<alloc::string::String>>>>,
+}
+
+impl SqlFnParseInfo {
+    /// Build a `SqlFnParseInfo` from the function's name, input collation,
+    /// argument types, and (optional) argument names.
+    pub fn new(
+        fname: alloc::string::String,
+        collation: Oid,
+        argtypes: Vec<Oid>,
+        argnames: Option<Vec<Option<alloc::string::String>>>,
+    ) -> SqlFnParseInfo {
+        SqlFnParseInfo {
+            fname,
+            collation,
+            argtypes: Rc::new(argtypes),
+            argnames: argnames.map(Rc::new),
+        }
+    }
+}
+
 /// `void *p_ref_hook_state` (`parser/parse_node.h`) — common passthrough state
 /// for the parser hook functions above. Owned by the hook installer.
 ///
@@ -333,6 +378,10 @@ pub enum ParseRefHookState {
     VarParams(VarParamState),
     /// `setup_parse_fixed_parameters`' fixed type array.
     FixedParams(FixedParamState),
+    /// `sql_fn_parser_setup`'s SQL-function-body parse info (executor/functions.c):
+    /// resolves a body bareword that names a function parameter to its `$n`
+    /// `Param`, and a `$n` `ParamRef` against the function's argument types.
+    SqlFunction(SqlFnParseInfo),
     /// `domainAddCheckConstraint`'s prepared `CoerceToDomainValue *` (typecmds.c):
     /// the template node `replace_domain_constraint_value` copies when it sees a
     /// reference to `VALUE` in a domain CHECK constraint expression. C stores the

@@ -2333,6 +2333,26 @@ pub(crate) fn get_func_form(funcid: Oid) -> PgResult<clauses_seams::PgProcSimple
     let (_proconfig, proconfig_isnull) =
         SysCacheGetAttr(mcx, PROCOID, &tup, Anum_pg_proc_proconfig)?;
 
+    // proname (NameStr) — fmgr_sql's prepare_sql_fn_parse_info uses it to qualify
+    // SQL-function-body argument-name references.
+    let proname = getattr_name(mcx, PROCOID, &tup, Anum_pg_proc_proname)?
+        .as_str()
+        .to_owned();
+
+    // proargnames / proargmodes -> input-argument names (get_func_input_arg_names,
+    // funcapi.c:1522): the per-input-arg names a SQL-function body resolves a
+    // bareword against. `None` when there are no argument names.
+    let proargnames_raw = getattr_text_array(mcx, PROCOID, &tup, Anum_pg_proc_proargnames)?
+        .map(|arr| {
+            arr.values
+                .iter()
+                .map(|s| Some(s.as_str().to_string()))
+                .collect::<std::vec::Vec<Option<String>>>()
+        });
+    let proargmodes_raw = getattr_char_array(mcx, PROCOID, &tup, Anum_pg_proc_proargmodes)?
+        .map(|arr| arr.values.iter().map(|&c| c as i8).collect::<std::vec::Vec<i8>>());
+    let proargnames = get_func_input_arg_names(proargnames_raw, proargmodes_raw);
+
     ReleaseSysCache(tup);
     Ok(clauses_seams::PgProcSimple {
         pronargs,
@@ -2347,7 +2367,49 @@ pub(crate) fn get_func_form(funcid: Oid) -> PgResult<clauses_seams::PgProcSimple
         prolang_is_sql: prolang == SQL_LANGUAGE_ID,
         proconfig_isnull,
         prokind,
+        proname,
+        proargnames,
     })
+}
+
+/// `get_func_input_arg_names(proargnames, proargmodes, &arg_names)`
+/// (funcapi.c:1522) — extract the names of the *input* arguments (IN / INOUT /
+/// VARIADIC), in input-argument order. Returns `None` when there are no argument
+/// names (C `*arg_names = NULL`). An unnamed input slot is `None`; the empty
+/// string is treated as unnamed.
+fn get_func_input_arg_names(
+    proargnames: Option<std::vec::Vec<Option<String>>>,
+    proargmodes: Option<std::vec::Vec<i8>>,
+) -> Option<std::vec::Vec<Option<String>>> {
+    // Do nothing if null proargnames.
+    let argnames = proargnames?;
+    if argnames.is_empty() {
+        return None;
+    }
+
+    // PROARGMODE_{IN='i', INOUT='b', VARIADIC='v'} keep their names; OUT/TABLE
+    // are dropped from the input-argument list.
+    const PROARGMODE_IN: i8 = b'i' as i8;
+    const PROARGMODE_INOUT: i8 = b'b' as i8;
+    const PROARGMODE_VARIADIC: i8 = b'v' as i8;
+
+    let mut inargnames: std::vec::Vec<Option<String>> = std::vec::Vec::new();
+    for (i, name) in argnames.iter().enumerate() {
+        let keep = match &proargmodes {
+            None => true,
+            Some(modes) => {
+                let m = modes.get(i).copied().unwrap_or(PROARGMODE_IN);
+                m == PROARGMODE_IN || m == PROARGMODE_INOUT || m == PROARGMODE_VARIADIC
+            }
+        };
+        if keep {
+            inargnames.push(match name {
+                Some(s) if !s.is_empty() => Some(s.clone()),
+                _ => None,
+            });
+        }
+    }
+    Some(inargnames)
 }
 
 /// `get_func_sql_body(funcid)` — `inline_function`'s pg_proc body read

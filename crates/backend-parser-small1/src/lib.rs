@@ -655,6 +655,57 @@ pub fn setup_parse_fixed_parameters(pstate: &mut ParseState<'_>, param_types: &[
     // /* no need to use p_coerce_param_hook */
 }
 
+/// `sql_fn_parser_setup(pstate, pinfo)` (executor/functions.c:340) — parser
+/// setup hook for parsing a SQL-function body. Installs the post-columnref hook
+/// (so a body bareword that names a function parameter resolves to its `$n`
+/// Param) and the paramref hook (so `$n` resolves against the function's
+/// argument types), with the [`SqlFnParseInfo`] as the ref-hook state.
+///
+/// `p_post_columnref_hook` / `p_paramref_hook` are set to the SQL-function
+/// markers so the parser's hook gates fire; the active `SqlFunction` ref-hook arm
+/// is what `transformColumnRef` / `transformParamRef` dispatch on (mirroring C's
+/// `pstate->p_{post_columnref,paramref}_hook = sql_fn_{post_column_ref,param_ref}`
+/// — the function pointer and the ref-hook state are set in lockstep).
+///
+/// [`SqlFnParseInfo`]: types_nodes::parsestmt::SqlFnParseInfo
+pub fn setup_parse_sql_function(
+    pstate: &mut ParseState<'_>,
+    pinfo: types_nodes::parsestmt::SqlFnParseInfo,
+) {
+    // pstate->p_pre_columnref_hook = NULL;
+    pstate.p_pre_columnref_hook = None;
+    // pstate->p_post_columnref_hook = sql_fn_post_column_ref;
+    pstate.p_post_columnref_hook =
+        Some(sql_fn_post_column_ref_marker as types_nodes::parsestmt::PostParseColumnRefHook<'_>);
+    // pstate->p_paramref_hook = sql_fn_param_ref;
+    pstate.p_paramref_hook =
+        Some(sql_fn_param_ref_marker as types_nodes::parsestmt::ParseParamRefHook<'_>);
+    // /* no need to use p_coerce_param_hook */
+    // pstate->p_ref_hook_state = pinfo;
+    pstate.p_ref_hook_state = ParseRefHookState::SqlFunction(pinfo);
+}
+
+/// Marker for `pstate.p_post_columnref_hook` under SQL-function-body parsing. The
+/// real dispatch reads the `SqlFunction` ref-hook arm in `transformColumnRef`
+/// (parse_expr); this value only makes the hook gate fire.
+fn sql_fn_post_column_ref_marker<'mcx>(
+    _pstate: &mut ParseState<'mcx>,
+    _cref: &types_nodes::rawnodes::ColumnRef<'mcx>,
+    var: Option<types_nodes::nodes::NodePtr<'mcx>>,
+) -> PgResult<Option<types_nodes::nodes::NodePtr<'mcx>>> {
+    // Unreachable: the dispatch is by ref-hook arm, not by this function pointer.
+    Ok(var)
+}
+
+/// Marker for `pstate.p_paramref_hook` under SQL-function-body parsing. The real
+/// dispatch reads the `SqlFunction` ref-hook arm in `transformParamRef`.
+fn sql_fn_param_ref_marker<'mcx>(
+    _pstate: &mut ParseState<'mcx>,
+    _pref: &types_nodes::rawnodes::ParamRef,
+) -> PgResult<Option<types_nodes::nodes::NodePtr<'mcx>>> {
+    Ok(None)
+}
+
 /// `fixed_paramref_hook(pstate, pref)` (parse_param.c) — transform a `ParamRef`
 /// using fixed parameter types.
 pub fn fixed_paramref_hook<'mcx>(

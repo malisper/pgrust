@@ -83,6 +83,32 @@ pub fn parse_analyze_fixedparams<'mcx>(
     Ok(query)
 }
 
+/// `pg_analyze_and_rewrite_withcb(parsetree, sourceText, sql_fn_parser_setup,
+/// pinfo, NULL)` (functions.c) — analyze a SQL-function body statement with the
+/// SQL-function parser hooks installed, so a `$n` `ParamRef` and a bareword that
+/// names a function argument both resolve to the matching `Param`. The rewrite
+/// leg (`pg_rewrite_query`) is applied by the caller; this returns the analyzed
+/// `Query`.
+pub fn parse_analyze_sql_function<'mcx>(
+    mcx: Mcx<'mcx>,
+    parse_tree: &RawStmt<'mcx>,
+    source_text: &str,
+    pinfo: types_nodes::parsestmt::SqlFnParseInfo,
+) -> PgResult<Query<'mcx>> {
+    let mut pstate = backend_parser_small1::make_parsestate(mcx, None)?;
+
+    pstate.p_sourcetext = Some(mcx::PgString::from_str_in(source_text, mcx)?);
+
+    // sql_fn_parser_setup(pstate, pinfo): install the SQL-function hooks.
+    backend_parser_small1::setup_parse_sql_function(&mut pstate, pinfo);
+
+    let query = transformTopLevelStmt(mcx, &mut pstate, parse_tree)?;
+
+    backend_parser_small1::free_parsestate(pstate)?;
+
+    Ok(query)
+}
+
 /// `parse_analyze_varparams(parseTree, sourceText, paramTypes, numParams,
 /// queryEnv)` (analyze.c:144) — analyze a raw statement deducing unknown `$n`
 /// parameter types from context. The passed-in type array can be grown/replaced

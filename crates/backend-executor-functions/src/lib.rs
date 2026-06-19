@@ -295,9 +295,17 @@ fn fmgr_sql<'mcx>(
     let params = build_param_list(fcinfo, proargtypes)?;
 
     // ---- Parse + analyze the body queries ---------------------------------
-    // sql_fn_parser_setup resolves `$n` against proargtypes; parse_analyze_-
-    // fixedparams is the fixed-param analogue.
-    let querytrees = parse_body_queries(mcx, prosrc.as_str(), prosqlbody.as_deref(), proargtypes)?;
+    // prepare_sql_fn_parse_info + sql_fn_parser_setup: a `$n` resolves against
+    // proargtypes and a body bareword that names an argument resolves to its
+    // Param. The input collation is the call frame's fncollation.
+    let collation = fcinfo.fncollation;
+    let pinfo = prepare_sql_fn_parse_info(
+        &form.proname,
+        form.proargnames.as_deref(),
+        proargtypes,
+        collation,
+    );
+    let querytrees = parse_body_queries(mcx, prosrc.as_str(), prosqlbody.as_deref(), &pinfo)?;
 
     // ---- Snapshot management (functions.c:1655) ---------------------------
     // The caller (a containing query) already has an active snapshot. A
@@ -458,7 +466,7 @@ fn parse_body_queries<'mcx>(
     mcx: Mcx<'mcx>,
     prosrc: &str,
     prosqlbody: Option<&str>,
-    proargtypes: &[Oid],
+    pinfo: &types_nodes::parsestmt::SqlFnParseInfo,
 ) -> PgResult<mcx::PgVec<'mcx, Query<'mcx>>> {
     let mut out: mcx::PgVec<'mcx, Query<'mcx>> = mcx::PgVec::new_in(mcx);
 
@@ -478,17 +486,47 @@ fn parse_body_queries<'mcx>(
             types_parsenodes::RawParseMode::RAW_PARSE_DEFAULT,
         )?;
         for raw in raw_list.iter() {
-            let query = backend_parser_analyze::parse_analyze_fixedparams(
+            // pg_analyze_and_rewrite_withcb(parsetree, prosrc, sql_fn_parser_setup,
+            // pinfo, NULL): install the SQL-function parser hooks (so `$n` and a
+            // bareword that names an argument resolve to a Param) before analysis.
+            let query = backend_parser_analyze::parse_analyze_sql_function(
                 mcx,
                 raw,
                 prosrc_mcx,
-                proargtypes,
+                pinfo.clone(),
             )?;
             out.push(query);
         }
     }
 
     Ok(out)
+}
+
+/// `prepare_sql_fn_parse_info` (functions.c:251) — assemble the SQL-function-body
+/// parse info from the function's `pg_proc` facts and input collation. The
+/// polymorphic-argument resolution C does here against `call_expr` is already
+/// reflected in the caller's `argtypes` (the const-folding `get_func_form`
+/// returns declared types; a polymorphic SQL function never reaches the analyze
+/// leg — `check_sql_function_body` only raw-parses it, and `fmgr_sql` resolves
+/// the actual types from the call frame). `argnames` is dropped when there are
+/// fewer name entries than arguments (C `n_arg_names < nargs`).
+fn prepare_sql_fn_parse_info(
+    proname: &str,
+    proargnames: Option<&[Option<alloc::string::String>]>,
+    argtypes: &[Oid],
+    collation: Oid,
+) -> types_nodes::parsestmt::SqlFnParseInfo {
+    let nargs = argtypes.len();
+    let argnames = match proargnames {
+        Some(names) if names.len() >= nargs && nargs > 0 => Some(names.to_vec()),
+        _ => None,
+    };
+    types_nodes::parsestmt::SqlFnParseInfo::new(
+        proname.to_owned(),
+        collation,
+        argtypes.to_vec(),
+        argnames,
+    )
 }
 
 /// Collect the body's `Query` nodes out of a `stringToNode(prosqlbody)` result.
@@ -604,11 +642,19 @@ fn check_sql_function_body(mcx: Mcx<'_>, funcoid: Oid) -> PgResult<()> {
     // analyzed Query trees. (AcquireRewriteLocks / pg_rewrite_query — the C
     // rewrite leg — apply RLS/rule rewriting; the repo's analyze path produces
     // analyzed Query trees suitable for the statement-shape checks below.)
+    // prepare_sql_fn_parse_info(tuple, NULL, InvalidOid) — at CREATE FUNCTION
+    // time there's no call expression, so the input collation is InvalidOid.
+    let pinfo = prepare_sql_fn_parse_info(
+        &form.proname,
+        form.proargnames.as_deref(),
+        &form.proargtypes,
+        InvalidOid,
+    );
     let querytrees = parse_body_queries(
         mcx,
         prosrc.as_str(),
         prosqlbody.as_ref().map(|s| s.as_str()),
-        &form.proargtypes,
+        &pinfo,
     )?;
 
     // check_sql_fn_statements (functions.c:2042): reject calling procedures

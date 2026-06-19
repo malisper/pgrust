@@ -53,6 +53,14 @@ pub struct PgProcSimple {
     /// `inline_function`'s paranoia gate (clauses.c:4585) and passed to
     /// `check_sql_fn_retval`.
     pub prokind: u8,
+    /// `NameStr(proname)` — the function's name. Used by `fmgr_sql`'s
+    /// `prepare_sql_fn_parse_info` to qualify SQL-function-body argument-name
+    /// references (`fname.param`).
+    pub proname: alloc::string::String,
+    /// `proargnames` (text[], nullable) decoded to per-arg names, `None` when
+    /// the function has no named arguments. Used by `prepare_sql_fn_parse_info`
+    /// (`get_func_input_arg_names`) to resolve a body bareword to a `$n` Param.
+    pub proargnames: Option<alloc::vec::Vec<Option<alloc::string::String>>>,
 }
 
 extern crate alloc;
