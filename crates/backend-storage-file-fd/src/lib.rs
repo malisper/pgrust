@@ -96,6 +96,7 @@ pub fn init_seams() {
     // sync / rename / existence primitives.
     fd_seams::pg_fsync::set(seams::seam_pg_fsync);
     fd_seams::fsync_fname::set(seams::seam_fsync_fname);
+    fd_seams::sync_data_directory::set(sync_cleanup::SyncDataDirectory);
     fd_seams::pg_file_exists::set(seams::seam_pg_file_exists);
     fd_seams::basic_open_file::set(seams::basic_open_file);
     fd_seams::basic_open_file_flags::set(seams::basic_open_file_flags);

@@ -17,11 +17,13 @@
 //!     currently bottoms out here.
 //!   * `pgstat_restore_stats()` / `pgstat_discard_stats()` (pgstat.c).
 //!
-//! Several archive/crash-recovery-only legs (`ResetUnloggedRelations`,
-//! `DeleteAllExportedSnapshotFiles`, the hot-standby `InitRecoveryTransaction
-//! Environment`/`ProcArrayInitRecovery` cluster, `SyncDataDirectory`/
-//! `RemoveTempXlogFiles`) likewise cross precise seam-panics into their unported
-//! owners; they are unreachable on the clean DB_SHUTDOWNED path.
+//! The crash-recovery cleanup legs (`RemoveTempXlogFiles`, here, and
+//! `SyncDataDirectory`, through the fd owner's seam) run on the crash path
+//! (control state != shut down) and are ported. Several archive/hot-standby-only
+//! legs (`ResetUnloggedRelations`, `DeleteAllExportedSnapshotFiles`, the
+//! hot-standby `InitRecoveryTransactionEnvironment`/`ProcArrayInitRecovery`
+//! cluster) still cross precise seam-panics into their unported owners; they are
+//! unreachable on the clean DB_SHUTDOWNED path.
 
 #![allow(non_snake_case)]
 
@@ -199,16 +201,13 @@ pub fn StartupXLOG() -> PgResult<()> {
     }
 
     // If we previously crashed, clean up temp WAL files and fsync the data
-    // directory.
+    // directory. (xlog.c:5608-5616)
     let did_crash;
     if dbstate != DBState::Shutdowned && dbstate != DBState::ShutdownedInRecovery {
-        // RemoveTempXlogFiles(); SyncDataDirectory();
-        return Err(PgError::new(
-            PANIC,
-            "blocked: StartupXLOG crash-recovery cleanup — RemoveTempXlogFiles + \
-             SyncDataDirectory (xlog.c:5602) require the unported temp-WAL-scan + \
-             fsync-recurse legs; pending crash-recovery family fill",
-        ));
+        RemoveTempXlogFiles()?;
+        // SyncDataDirectory() is owned by storage/file/fd.c.
+        backend_storage_file_fd_seams::sync_data_directory::call()?;
+        did_crash = true;
     } else {
         did_crash = false;
     }
@@ -903,6 +902,37 @@ pub fn CheckRequiredParameterValues() -> PgResult<()> {
 /// hot-standby path is unreached on the clean / crash boot; default false.
 fn enable_hot_standby() -> bool {
     false
+}
+
+// ===========================================================================
+// RemoveTempXlogFiles (xlog.c:3852).
+// ===========================================================================
+
+/// `static void RemoveTempXlogFiles(void)` (xlog.c:3852) — remove all temporary
+/// (`xlogtemp.*`) WAL segment files left in `pg_wal` by an interrupted segment
+/// initialization. Called at the start of crash recovery, at a point where no
+/// other process writes fresh WAL data.
+pub fn RemoveTempXlogFiles() -> PgResult<()> {
+    use types_wal::xlog_consts::XLOGDIR;
+
+    // elog(DEBUG2, "removing all temporary WAL segments");
+
+    // AllocateDir(XLOGDIR) + the ReadDir walk. The fd-owned directory read
+    // (`read_dir_names`) excludes `.`/`..`; on an unreadable directory it
+    // ereports (carried on `Err`), exactly as the C `AllocateDir`/`ReadDir`
+    // failure would on this crash-recovery path.
+    let names = backend_storage_file_fd_seams::read_dir_names::call(XLOGDIR)?;
+    for name in names {
+        // if (strncmp(xlde->d_name, "xlogtemp.", 9) != 0) continue;
+        if !name.starts_with("xlogtemp.") {
+            continue;
+        }
+        let path = format!("{XLOGDIR}/{name}");
+        // unlink(path); the C ignores the return value.
+        let _ = backend_storage_file_fd_seams::unlink_file::call(&path);
+        // elog(DEBUG2, "removed temporary WAL segment \"%s\"", path);
+    }
+    Ok(())
 }
 
 // ===========================================================================

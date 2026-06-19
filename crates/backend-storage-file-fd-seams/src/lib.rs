@@ -465,6 +465,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `void SyncDataDirectory(void)` (`fd.c:3609`) — fsync (or `syncfs`) the
+    /// whole data directory tree at startup after a crash. No-op when
+    /// `enableFsync` is off. Walk/fsync failures `ereport` at
+    /// `data_sync_elevel`, carried on `Err`. Called by `StartupXLOG` on the
+    /// crash-recovery path.
+    pub fn sync_data_directory() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `unlink(path)`. 0 on success, `-errno` on failure.
     pub fn unlink_file(path: &str) -> i32
 );
