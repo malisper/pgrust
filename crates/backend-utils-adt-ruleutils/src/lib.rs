@@ -1979,19 +1979,19 @@ pub fn set_deparse_plan<'mcx, 'p>(
 
     // OUTER referent: Append/MergeAppend special-case the first child.
     dpns.outer_plan = match tag {
-        ntag::T_Append => match plan {
-            Node::Append(a) => match a.appendplans.first() {
+        ntag::T_Append => match plan.as_append() {
+            Some(a) => match a.appendplans.first() {
                 Some(c) => Some(mcx::alloc_in(mcx, c.clone_in(mcx)?)?),
                 None => None,
             },
-            _ => None,
+            None => None,
         },
-        ntag::T_MergeAppend => match plan {
-            Node::MergeAppend(m) => match m.mergeplans.first() {
+        ntag::T_MergeAppend => match plan.as_mergeappend() {
+            Some(m) => match m.mergeplans.first() {
                 Some(c) => Some(mcx::alloc_in(mcx, c.clone_in(mcx)?)?),
                 None => None,
             },
-            _ => None,
+            None => None,
         },
         // dpns->outer_plan = outerPlan(plan)
         _ => clone_subplan(mcx, &header.lefttree)?,
@@ -2005,12 +2005,12 @@ pub fn set_deparse_plan<'mcx, 'p>(
     // INNER referent: SubqueryScan / CteScan / WorkTableScan / ModifyTable
     // special cases, else innerPlan(plan).
     dpns.inner_plan = match tag {
-        ntag::T_SubqueryScan => match plan {
-            Node::SubqueryScan(s) => clone_subplan(mcx, &s.subplan)?,
-            _ => None,
+        ntag::T_SubqueryScan => match plan.as_subqueryscan() {
+            Some(s) => clone_subplan(mcx, &s.subplan)?,
+            None => None,
         },
-        ntag::T_CteScan => match plan {
-            Node::CteScan(c) => {
+        ntag::T_CteScan => match plan.as_ctescan() {
+            Some(c) => {
                 // list_nth(dpns->subplans, ctePlanId - 1)
                 let idx = (c.ctePlanId - 1) as usize;
                 match dpns.subplans.get(idx) {
@@ -2018,14 +2018,14 @@ pub fn set_deparse_plan<'mcx, 'p>(
                     None => None,
                 }
             }
-            _ => None,
+            None => None,
         },
-        ntag::T_WorkTableScan => match plan {
-            Node::WorkTableScan(w) => Some(find_recursive_union(mcx, dpns, w.wtParam)?),
-            _ => None,
+        ntag::T_WorkTableScan => match plan.as_worktablescan() {
+            Some(w) => Some(find_recursive_union(mcx, dpns, w.wtParam)?),
+            None => None,
         },
-        ntag::T_ModifyTable => match plan {
-            Node::ModifyTable(m) => {
+        ntag::T_ModifyTable => match plan.as_modifytable() {
+            Some(m) => {
                 if m.operation == types_nodes::nodes::CmdType::CMD_MERGE {
                     clone_subplan(mcx, &header.lefttree)?
                 } else {
@@ -2033,7 +2033,7 @@ pub fn set_deparse_plan<'mcx, 'p>(
                     Some(mcx::alloc_in(mcx, plan.clone_in(mcx)?)?)
                 }
             }
-            _ => None,
+            None => None,
         },
         _ => clone_subplan(mcx, &header.righttree)?,
     };
@@ -2041,12 +2041,13 @@ pub fn set_deparse_plan<'mcx, 'p>(
     // INNER tlist: INSERT ON CONFLICT uses exclRelTlist; else inner_plan's tlist.
     dpns.inner_tlist = match tag {
         ntag::T_ModifyTable
-            if matches!(plan, Node::ModifyTable(m)
-                if m.operation == types_nodes::nodes::CmdType::CMD_INSERT) =>
+            if plan
+                .as_modifytable()
+                .is_some_and(|m| m.operation == types_nodes::nodes::CmdType::CMD_INSERT) =>
         {
-            match plan {
-                Node::ModifyTable(m) => tlist_as_node_vec(mcx, &m.exclRelTlist)?,
-                _ => PgVec::new_in(mcx),
+            match plan.as_modifytable() {
+                Some(m) => tlist_as_node_vec(mcx, &m.exclRelTlist)?,
+                None => PgVec::new_in(mcx),
             }
         }
         _ => match dpns.inner_plan.as_ref() {
@@ -2056,11 +2057,14 @@ pub fn set_deparse_plan<'mcx, 'p>(
     };
 
     // INDEX referent tlist: IndexOnlyScan / ForeignScan / CustomScan.
-    dpns.index_tlist = match plan {
-        Node::IndexOnlyScan(s) => tlist_as_node_vec(mcx, &s.indextlist)?,
-        Node::ForeignScan(f) => tlist_as_node_vec(mcx, &f.fdw_scan_tlist)?,
-        Node::CustomScan(c) => tlist_as_node_vec(mcx, &c.custom_scan_tlist)?,
-        _ => PgVec::new_in(mcx),
+    dpns.index_tlist = if let Some(s) = plan.as_indexonlyscan() {
+        tlist_as_node_vec(mcx, &s.indextlist)?
+    } else if let Some(f) = plan.as_foreignscan() {
+        tlist_as_node_vec(mcx, &f.fdw_scan_tlist)?
+    } else if let Some(c) = plan.as_customscan() {
+        tlist_as_node_vec(mcx, &c.custom_scan_tlist)?
+    } else {
+        PgVec::new_in(mcx)
     };
 
     Ok(())
@@ -2075,7 +2079,7 @@ pub fn find_recursive_union<'mcx>(
 ) -> PgResult<PgBox<'mcx, Node<'mcx>>> {
     for ancestor in dpns.ancestors.iter() {
         if ancestor.node_tag() == types_nodes::nodes::ntag::T_RecursiveUnion {
-            if let Node::RecursiveUnion(ru) = ancestor.as_ref() {
+            if let Some(ru) = ancestor.as_recursiveunion() {
                 if ru.wtParam == wt_param {
                     return mcx::alloc_in(mcx, ancestor.clone_in(mcx)?);
                 }
@@ -2242,7 +2246,7 @@ pub fn set_deparse_context_plan<'mcx, 'p>(
     set_deparse_plan(mcx, &mut dpcontext[0], plan)?;
 
     // For ModifyTable, set aliases for OLD and NEW in RETURNING.
-    if let Node::ModifyTable(m) = plan {
+    if let Some(m) = plan.as_modifytable() {
         dpcontext[0].ret_old_alias = match m.returningOldAlias.as_ref() {
             Some(b) => Some(pstrdup(
                 mcx,

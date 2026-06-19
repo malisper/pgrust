@@ -537,24 +537,24 @@ fn collect_body_queries<'mcx>(
     n: &Node<'mcx>,
     out: &mut mcx::PgVec<'mcx, Query<'mcx>>,
 ) -> PgResult<()> {
-    match n {
-        Node::List(outer) => {
-            let Some(first) = outer.first() else {
-                return Ok(());
-            };
-            match &**first {
-                Node::List(inner) => push_query_list(mcx, &inner[..], out),
-                Node::Query(_) => push_query_list(mcx, core::slice::from_ref(first), out),
-                _ => Err(PgError::error(
-                    "fmgr_sql: prosqlbody is not a list of Query nodes",
-                )),
-            }
+    if let Some(outer) = n.as_list() {
+        let Some(first) = outer.first() else {
+            return Ok(());
+        };
+        if let Some(inner) = first.as_list() {
+            push_query_list(mcx, &inner[..], out)
+        } else if first.is_query() {
+            push_query_list(mcx, core::slice::from_ref(first), out)
+        } else {
+            Err(PgError::error(
+                "fmgr_sql: prosqlbody is not a list of Query nodes",
+            ))
         }
-        Node::Query(q) => {
-            out.push(q.clone_in(mcx)?);
-            Ok(())
-        }
-        _ => Err(PgError::error("fmgr_sql: prosqlbody is not a Query")),
+    } else if let Some(q) = n.as_query() {
+        out.push(q.clone_in(mcx)?);
+        Ok(())
+    } else {
+        Err(PgError::error("fmgr_sql: prosqlbody is not a Query"))
     }
 }
 
@@ -671,7 +671,7 @@ fn check_sql_fn_statements(querytrees: &[Query<'_>]) -> PgResult<()> {
     for query in querytrees {
         if query.commandType == CMD_UTILITY {
             if let Some(util) = query.utilityStmt.as_ref() {
-                if let Node::CallStmt(stmt) = &**util {
+                if let Some(stmt) = util.as_callstmt() {
                     if !stmt.outargs.is_empty() {
                         return Err(PgError::error(
                             "calling procedures with output arguments is not \

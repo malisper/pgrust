@@ -197,9 +197,7 @@ pub fn ExplainTargetRel<'mcx>(
                 if functions.len() == 1 {
                     let rtfunc = &functions[0];
                     if let Some(funcexpr) = rtfunc.funcexpr.as_ref() {
-                        if let Node::Expr(types_nodes::primnodes::Expr::FuncExpr(fe)) =
-                            &**funcexpr
-                        {
+                        if let Some(fe) = funcexpr.as_funcexpr() {
                             let funcid = fe.funcid;
                             objectname = lsyscache::function::get_func_name(mcx, funcid)?;
                             if verbose {

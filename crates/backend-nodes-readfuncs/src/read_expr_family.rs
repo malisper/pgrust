@@ -1256,14 +1256,13 @@ fn read_sortgroupclause_list_field<'mcx>(
     let mut out = Vec::with_capacity(elements.len());
     for cell in elements {
         let __n = PgBox::into_inner(cell);
-        match __n {
-            Node::SortGroupClause(s) => out.push(s),
-            other => {
-                return Err(elog_error(alloc::format!(
-                    "expected SortGroupClause in list, got {:?}",
-                    other.node_tag()
-                )))
-            }
+        if __n.is_sortgroupclause() {
+            out.push(__n.into_sortgroupclause().unwrap());
+        } else {
+            return Err(elog_error(alloc::format!(
+                "expected SortGroupClause in list, got {:?}",
+                __n.node_tag()
+            )));
         }
     }
     Ok(out)

@@ -157,9 +157,12 @@ fn transformPartitionSpec<'mcx>(
     let mut new_params: mcx::PgVec<'mcx, types_nodes::nodes::NodePtr<'mcx>> =
         mcx::vec_with_capacity_in(mcx, partspec.partParams.len())?;
     for l in partspec.partParams.iter() {
-        let pelem = match &**l {
-            Node::PartitionElem(pe) => pe,
-            other => unreachable!("partParams element is not a PartitionElem: {}", other.node_tag()),
+        let pelem = match l.as_partitionelem() {
+            Some(pe) => pe,
+            None => unreachable!(
+                "partParams element is not a PartitionElem: {}",
+                l.node_tag()
+            ),
         };
 
         /* Copy, to avoid scribbling on the input. */
@@ -217,9 +220,12 @@ fn ComputePartitionAttrs<'mcx>(
     let am_name = if am_oid == HASH_AM_OID { "hash" } else { "btree" };
 
     for (attn, pp) in part_params.iter().enumerate() {
-        let pelem = match &**pp {
-            Node::PartitionElem(pe) => pe,
-            other => unreachable!("partParams element is not a PartitionElem: {}", other.node_tag()),
+        let pelem = match pp.as_partitionelem() {
+            Some(pe) => pe,
+            None => unreachable!(
+                "partParams element is not a PartitionElem: {}",
+                pp.node_tag()
+            ),
         };
 
         let atttype: Oid;
@@ -276,9 +282,12 @@ fn ComputePartitionAttrs<'mcx>(
                 .expr
                 .as_deref()
                 .expect("PartitionElem with no name must have an expr");
-            let expr = match expr_node {
-                Node::Expr(e) => e,
-                other => unreachable!("partition expr is not an Expr: {}", other.node_tag()),
+            let expr = match expr_node.as_expr() {
+                Some(e) => e,
+                None => unreachable!(
+                    "partition expr is not an Expr: {}",
+                    expr_node.node_tag()
+                ),
             };
             atttype = backend_nodes_core::nodefuncs::expr_type(Some(expr))?;
             attcollation = backend_nodes_core::nodefuncs::expr_collation(Some(expr))?;
@@ -512,10 +521,7 @@ fn nodelist_to_namelist<'mcx>(
 ) -> Vec<Option<String>> {
     nodes
         .iter()
-        .map(|n| match &**n {
-            Node::String(s) => Some(s.sval.as_str().to_string()),
-            _ => None,
-        })
+        .map(|n| n.as_string().map(|s| s.sval.as_str().to_string()))
         .collect()
 }
 

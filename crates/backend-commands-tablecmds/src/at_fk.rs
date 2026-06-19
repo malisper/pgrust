@@ -868,9 +868,9 @@ pub fn ATAddForeignKeyConstraint<'mcx>(
         if old_check_ok {
             // C: lfirst_oid(old_pfeqop_item) — the old pfeqop carried as an
             // Integer-node oid in the (cold) ALTER COLUMN TYPE revalidation list.
-            let old_pfeqop = match &*fkconstraint.old_conpfeqop[old_pfeqop_idx] {
-                Node::Integer(i) => i.ival as Oid,
-                _ => InvalidOid,
+            let old_pfeqop = match fkconstraint.old_conpfeqop[old_pfeqop_idx].as_integer() {
+                Some(i) => i.ival as Oid,
+                None => InvalidOid,
             };
             old_check_ok = pfeqop == old_pfeqop;
             old_pfeqop_idx += 1;

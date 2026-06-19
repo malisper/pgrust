@@ -713,9 +713,12 @@ pub fn define_relation<'mcx>(
             .partspec
             .as_deref()
             .expect("partitioned implies CreateStmt.partspec is set");
-        let partspec = match partspec_node {
-            Node::PartitionSpec(ps) => ps,
-            other => unreachable!("CreateStmt.partspec is not a PartitionSpec: {}", other.node_tag()),
+        let partspec = match partspec_node.as_partitionspec() {
+            Some(ps) => ps,
+            None => unreachable!(
+                "CreateStmt.partspec is not a PartitionSpec: {}",
+                partspec_node.node_tag()
+            ),
         };
         crate::partition::define_relation_partspec(mcx, &rel, partspec, query_string)?;
 

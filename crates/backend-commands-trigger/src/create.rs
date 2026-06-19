@@ -606,9 +606,9 @@ fn scan_existing_trigger<'mcx>(
 
 /// `strVal(lfirst(le))` over a `String` node.
 fn node_strval(node: &Node<'_>) -> PgResult<String> {
-    match node {
-        Node::String(s) => Ok(s.sval.as_str().to_string()),
-        _ => Err(ereport(ERROR)
+    match node.as_string() {
+        Some(s) => Ok(s.sval.as_str().to_string()),
+        None => Err(ereport(ERROR)
             .errmsg_internal("CreateTrigger: expected a String node")
             .into_error()),
     }
@@ -630,10 +630,7 @@ fn funcname_strings<'mcx>(
 fn funcname_display(stmt: &CreateTrigStmt<'_>) -> String {
     stmt.funcname
         .iter()
-        .filter_map(|n| match &**n {
-            Node::String(s) => Some(s.sval.as_str().to_string()),
-            _ => None,
-        })
+        .filter_map(|n| n.as_string().map(|s| s.sval.as_str().to_string()))
         .collect::<Vec<_>>()
         .join(".")
 }
