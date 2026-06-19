@@ -421,7 +421,7 @@ fn standard_planner<'mcx>(
         // glob->subplans is empty, so this loop never runs.
         let node = core::mem::replace(
             run.resolve_subplan_mut(*pid),
-            Node::Result(types_nodes::noderesult::Result::default()),
+            Node::mk_result(mcx, types_nodes::noderesult::Result::default()),
         );
         subplans.push(Some(mcx::alloc_in(mcx, node)?));
     }
@@ -875,7 +875,7 @@ fn subquery_planner_carried<'mcx>(
         // arena as the immutable context node, exactly as the hasGroupRTE block
         // below does for flatten_group_exprs. Cheap and only built when needed.
         let outer_query: Option<Node<'mcx>> = if root.hasJoinRTEs {
-            Some(Node::Query(run.resolve(root.parse).clone_in(mcx)?))
+            Some(Node::mk_query(mcx, run.resolve(root.parse).clone_in(mcx)?))
         } else {
             None
         };
@@ -1181,7 +1181,7 @@ fn subquery_planner_carried<'mcx>(
                                 })?;
                                 new_cols.push(mcx::alloc_in(mcx, Node::Expr(pe))?);
                             }
-                            let new_row = mcx::alloc_in(mcx, Node::List(new_cols))?;
+                            let new_row = mcx::alloc_in(mcx, Node::mk_list(mcx, new_cols))?;
                             run.resolve_mut(root.parse).rtable[i].values_lists[r] = new_row;
                         }
                     }
@@ -1416,7 +1416,7 @@ fn subquery_planner_carried<'mcx>(
                 for set in sets.iter() {
                     let mut intlist: mcx::PgVec<'mcx, i32> = mcx::PgVec::new_in(mcx);
                     intlist.extend(set.iter().copied());
-                    new_gsets.push(mcx::alloc_in(mcx, Node::IntList(intlist))?);
+                    new_gsets.push(mcx::alloc_in(mcx, Node::mk_int_list(mcx, intlist))?);
                 }
             }
             run.resolve_mut(root.parse).groupingSets = new_gsets;
@@ -1814,7 +1814,7 @@ fn preprocess_qual_conditions_query<'mcx>(
 ) -> PgResult<()> {
     let jt = run.resolve_mut(root.parse).jointree.take();
     if let Some(jt) = jt {
-        let mut node = Node::FromExpr(mcx::PgBox::into_inner(jt));
+        let mut node = Node::mk_from_expr(mcx, mcx::PgBox::into_inner(jt));
         preprocess_qual_conditions(mcx, root, run, outer_query, &mut node)?;
         let f = node
             .into_fromexpr()

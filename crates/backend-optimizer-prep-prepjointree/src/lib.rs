@@ -230,7 +230,7 @@ pub fn reduce_outer_joins<'mcx>(
     // pass2 mutates the jointree, so take it out, walk it, put it back.
     if let Some(mut jt) = parse.jointree.take() {
         // The top node is a FromExpr; wrap it in a Node to walk uniformly.
-        let mut jt_node = Node::FromExpr(core::mem::replace(
+        let mut jt_node = Node::mk_from_expr(mcx, core::mem::replace(
             &mut *jt,
             types_nodes::rawnodes::FromExpr {
                 fromlist: mcx::PgVec::new_in(mcx),

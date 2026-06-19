@@ -65,7 +65,7 @@ use types_nodes::nodes::Node;
 use types_nodes::nodes::CmdType;
 use types_nodes::parsenodes::{RangeTblEntry, RTEKind};
 use types_nodes::primnodes::{Expr, ParamKind, SubLink, SubLinkType};
-use types_nodes::rawnodes::{FromExpr, JoinExpr, RangeTblRef};
+use types_nodes::rawnodes::{JoinExpr, RangeTblRef};
 use types_pathnodes::{Bitmapset, PlannerInfo, Relids};
 
 // ===========================================================================
@@ -307,7 +307,7 @@ pub fn convert_ANY_sublink_to_join<'mcx>(
         .subselect
         .as_deref()
         .expect("convert_ANY_sublink_to_join: SubLink has no subselect");
-    let subselect_node = Node::Query(subselect.clone_in(mcx)?);
+    let subselect_node = Node::mk_query(mcx, subselect.clone_in(mcx)?);
 
     // If the sub-select contains any Vars of the parent query, we treat it as
     // LATERAL.  (Vars from higher levels don't matter here.)
@@ -405,7 +405,7 @@ pub fn convert_ANY_sublink_to_join<'mcx>(
         jointype: JoinType::JOIN_SEMI,
         isNatural: false,
         larg: None, // caller must fill this in
-        rarg: Some(alloc_in(mcx, Node::RangeTblRef(rtr))?),
+        rarg: Some(alloc_in(mcx, Node::mk_range_tbl_ref(mcx, rtr))?),
         usingClause: PgVec::new_in(mcx),
         join_using_alias: None,
         quals: Some(alloc_in(mcx, quals)?),
@@ -469,7 +469,7 @@ pub fn convert_EXISTS_sublink_to_join<'mcx>(
     //
     // Re-wrap the (mutated) subselect Query as a Node for the level walkers.
     {
-        let subselect_as_node = Node::Query(subselect);
+        let subselect_as_node = Node::mk_query(mcx, subselect);
         if backend_optimizer_util_vars::var::contain_vars_of_level(&subselect_as_node, 1) {
             return Ok(None);
         }
@@ -507,7 +507,7 @@ pub fn convert_EXISTS_sublink_to_join<'mcx>(
     let rtoffset = parse.rtable.len() as i32;
     {
         // OffsetVarNodes((Node *) subselect, rtoffset, 0)
-        let mut subselect_node2 = Node::Query(subselect);
+        let mut subselect_node2 = Node::mk_query(mcx, subselect);
         backend_rewrite_core::offset::OffsetVarNodes(&mut subselect_node2, rtoffset, 0);
         // IncrementVarSublevelsUp((Node *) subselect, -1, 1)
         backend_rewrite_core::increment::IncrementVarSublevelsUp(&mut subselect_node2, -1, 1)?;
@@ -570,7 +570,7 @@ pub fn convert_EXISTS_sublink_to_join<'mcx>(
         let first = fromexpr.fromlist.remove(0);
         PgBox::into_inner(first)
     } else {
-        Node::FromExpr(PgBox::into_inner(sub_jointree))
+        Node::mk_from_expr(mcx, PgBox::into_inner(sub_jointree))
     };
 
     let result = JoinExpr {
@@ -721,7 +721,7 @@ pub fn replace_empty_jointree<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) -> 
     // And jam a reference into the jointree.
     let rtr = RangeTblRef { rtindex: rti };
     let jt = parse.jointree.as_mut().unwrap();
-    jt.fromlist.push(alloc_in(mcx, Node::RangeTblRef(rtr))?);
+    jt.fromlist.push(alloc_in(mcx, Node::mk_range_tbl_ref(mcx, rtr))?);
     Ok(())
 }
 

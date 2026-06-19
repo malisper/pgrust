@@ -836,7 +836,7 @@ pub fn SS_process_ctes<'mcx>(
                     None => unreachable!(),
                 };
                 let cq = cte.ctequery.as_deref().unwrap().as_query().unwrap();
-                Node::Query(cq.clone_in(mcx)?)
+                Node::mk_query(mcx, cq.clone_in(mcx)?)
             };
             let dml = contain_dml(&cte_query_node);
             let outer_selfref = if cterefcount <= 1 {
@@ -1227,7 +1227,7 @@ fn inline_cte_walker_query<'mcx>(
             // with appropriate level adjustment for outer references.
             let mut newquery = ctx.ctequery.clone_in(mcx)?;
             if ctx.levelsup > 0 {
-                let mut nq_node = Node::Query(newquery);
+                let mut nq_node = Node::mk_query(mcx, newquery);
                 backend_rewrite_core::increment::IncrementVarSublevelsUp(
                     &mut nq_node,
                     ctx.levelsup as i32,
@@ -1420,7 +1420,7 @@ fn convert_EXISTS_to_ANY<'mcx>(
 
     // The rest of the sub-select must not refer to any Vars of the parent query.
     if backend_optimizer_util_vars::var::contain_vars_of_level(
-        &Node::Query(subselect.clone_in(mcx)?),
+        &Node::mk_query(mcx, subselect.clone_in(mcx)?),
         1,
     ) {
         return Ok(None);

@@ -15,7 +15,7 @@ use types_nodes::nodes::Node;
 use types_nodes::rawnodes::{FromExpr, RangeTblRef};
 
 fn rtr<'mcx>(mcx: Mcx<'mcx>, rtindex: i32) -> PgBox<'mcx, Node<'mcx>> {
-    PgBox::new_in(Node::RangeTblRef(RangeTblRef { rtindex }), mcx)
+    PgBox::new_in(Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex }), mcx)
 }
 
 fn from_expr<'mcx>(
@@ -52,7 +52,7 @@ fn trivial_path_single_non_rangetblref_is_none() {
     let cx = MemoryContext::new("plan-small-test");
     let mcx = cx.mcx();
 
-    let inner = PgBox::new_in(Node::FromExpr(from_expr(mcx, [rtr(mcx, 1)])), mcx);
+    let inner = PgBox::new_in(Node::mk_from_expr(mcx, from_expr(mcx, [rtr(mcx, 1)])), mcx);
     let jt = from_expr(mcx, [inner]);
     assert_eq!(trivial_path_varno(&jt), None);
 }

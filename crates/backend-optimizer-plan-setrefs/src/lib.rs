@@ -2771,7 +2771,7 @@ fn set_subqueryscan_references<'mcx>(
         // otherwise have done on it (no set_upper_references — a SubqueryScan is
         // created with correct references to its subplan's outputs already).
         fix_scan_common(root, &mut sqs.scan, rtoffset, mcx)?;
-        Ok(Node::SubqueryScan(sqs))
+        Ok(Node::mk_subquery_scan(mcx, sqs))
     }
 }
 
@@ -3339,7 +3339,7 @@ fn extract_query_dependencies_value<'mcx>(
     for query in query_list.iter() {
         // Wrap the borrowed Query as the `Node::Query` the walker expects. The
         // walker only reads it, so a clone of the owned value tree is faithful.
-        let node = Node::Query(query.clone_in(_mcx)?);
+        let node = Node::mk_query(_mcx, query.clone_in(_mcx)?);
         if extract_query_dependencies_walker(&node, &mut ctx)? {
             break;
         }

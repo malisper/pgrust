@@ -205,7 +205,7 @@ fn pull_up_sublinks_jointree_recurse<'mcx>(
             let varno = r.rtindex;
             *relids = relids_make_singleton(varno);
             // jtnode is returned unmodified.
-            Ok(Some(alloc_in(mcx, Node::RangeTblRef(r))?))
+            Ok(Some(alloc_in(mcx, Node::mk_range_tbl_ref(mcx, r))?))
         }
         ntag::T_FromExpr => {
             let f = PgBox::into_inner(jtnode).into_fromexpr().expect("FromExpr");
@@ -235,7 +235,7 @@ fn pull_up_sublinks_jointree_recurse<'mcx>(
                 fromlist: newfromlist,
                 quals: None,
             };
-            let mut jtlink: Option<NodePtr<'mcx>> = Some(alloc_in(mcx, Node::FromExpr(newf))?);
+            let mut jtlink: Option<NodePtr<'mcx>> = Some(alloc_in(mcx, Node::mk_from_expr(mcx, newf))?);
 
             // Now process qual --- all children are available for use.
             let newquals = pull_up_sublinks_qual_recurse(
@@ -294,7 +294,7 @@ fn pull_up_sublinks_jointree_recurse<'mcx>(
                     // jtlink starts as the JoinExpr itself; spliced joins stack
                     // above it.
                     let mut jtlink: Option<NodePtr<'mcx>> =
-                        Some(alloc_in(mcx, Node::JoinExpr(j))?);
+                        Some(alloc_in(mcx, Node::mk_join_expr(mcx, j))?);
                     let avail = relids_union(&leftrelids, &rightrelids);
                     let quals = take_joinexpr_quals(&mut jtlink);
                     let newquals = pull_up_sublinks_qual_recurse(
@@ -324,7 +324,7 @@ fn pull_up_sublinks_jointree_recurse<'mcx>(
                     if rtindex != 0 {
                         *relids = relids_add_member(relids.take(), rtindex);
                     }
-                    Ok(Some(alloc_in(mcx, Node::JoinExpr(j))?))
+                    Ok(Some(alloc_in(mcx, Node::mk_join_expr(mcx, j))?))
                 }
                 JoinType::JOIN_FULL => {
                     // can't do anything with full-join quals
@@ -332,7 +332,7 @@ fn pull_up_sublinks_jointree_recurse<'mcx>(
                     if rtindex != 0 {
                         *relids = relids_add_member(relids.take(), rtindex);
                     }
-                    Ok(Some(alloc_in(mcx, Node::JoinExpr(j))?))
+                    Ok(Some(alloc_in(mcx, Node::mk_join_expr(mcx, j))?))
                 }
                 JoinType::JOIN_RIGHT => {
                     let quals = j.quals.take();
@@ -351,7 +351,7 @@ fn pull_up_sublinks_jointree_recurse<'mcx>(
                     if rtindex != 0 {
                         *relids = relids_add_member(relids.take(), rtindex);
                     }
-                    Ok(Some(alloc_in(mcx, Node::JoinExpr(j))?))
+                    Ok(Some(alloc_in(mcx, Node::mk_join_expr(mcx, j))?))
                 }
                 _ => Err(types_error::PgError::error("unrecognized join type")),
             }
@@ -680,7 +680,7 @@ fn splice_join_and_recurse<'mcx>(
     j.quals = newquals;
 
     // *jtlink = (Node *) j;
-    *jtlink = Some(alloc_in(mcx, Node::JoinExpr(j))?);
+    *jtlink = Some(alloc_in(mcx, Node::mk_join_expr(mcx, j))?);
     Ok(())
 }
 
@@ -715,6 +715,6 @@ fn splice_join_and_recurse_under_not<'mcx>(
     j.rarg = rarg;
     j.quals = newquals;
 
-    *jtlink = Some(alloc_in(mcx, Node::JoinExpr(j))?);
+    *jtlink = Some(alloc_in(mcx, Node::mk_join_expr(mcx, j))?);
     Ok(())
 }

@@ -70,7 +70,7 @@ fn preprocess_qual_conditions_fromexpr_qual() {
         fromlist: PgVec::new_in(mcx),
         quals: Some(qual),
     };
-    let mut node = Node::FromExpr(from);
+    let mut node = Node::mk_from_expr(mcx, from);
 
     preprocess_qual_conditions(mcx, &root, &mut node)
         .expect("preprocess_qual_conditions must not panic for a Const qual");
@@ -91,7 +91,7 @@ fn preprocess_qual_conditions_rangetblref_noop() {
     let cx = MemoryContext::new("planner-test4");
     let mcx = cx.mcx();
     let root = PlannerInfo::default();
-    let mut node = Node::RangeTblRef(RangeTblRef { rtindex: 1 });
+    let mut node = Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex: 1 });
     preprocess_qual_conditions(mcx, &root, &mut node).expect("RangeTblRef leaf must be a no-op");
 }
 
