@@ -337,20 +337,43 @@ pub fn PortalCleanup(portal: Portal) -> PgResult<()> {
     //   if (queryDesc) { portal->queryDesc = NULL; if (status != PORTAL_FAILED) {...} }
     let query_desc = portal.borrow_mut().queryDesc.take();
     if let Some(query_desc) = query_desc {
-        if portal.borrow().status != PORTAL_FAILED {
-            // We must make the portal's resource owner current (C: save
-            // CurrentResourceOwner, set it to portal->resowner, restore after).
-            // The save/restore-global idiom is a scoped callback here.
-            let resowner = portal.borrow().resowner.clone();
-            let mut query_desc = Some(query_desc);
-            resowner::with_current_resource_owner::call(resowner, &mut || {
-                let mut qd = query_desc.take().unwrap();
+        // We must make the portal's resource owner current (C: save
+        // CurrentResourceOwner, set it to portal->resowner, restore after).
+        // The save/restore-global idiom is a scoped callback here.
+        //
+        // Unlike C — where `queryDesc` is a bare pointer that is simply left
+        // dangling (leaked into the portal context) on the PORTAL_FAILED path —
+        // this port `take()`s an *owned* QueryDesc, so when it goes out of scope
+        // it is dropped, running `Relation::drop` → `RelationClose` for every
+        // scan relation in `es_relations`. Those relcache pins were remembered
+        // against the portal's resource owner (CurrentResourceOwner was the
+        // portal owner during ExecutorStart/Run), so the matching forget MUST
+        // also run under the portal owner — otherwise the forget lands on the
+        // transaction owner and the pin is double-released by the abort-path
+        // ResourceOwnerRelease of the portal owner (rd_refcnt underflows, and
+        // the next CREATE INDEX/DROP sees a stale "in use" refcount). We
+        // therefore drop the QueryDesc under the portal's resource owner on
+        // BOTH paths; the PORTAL_FAILED path skips ExecutorFinish/End (matching
+        // C's "skip during error abort"), running only the implicit Drop.
+        let resowner = portal.borrow().resowner.clone();
+        let is_failed = portal.borrow().status == PORTAL_FAILED;
+        let mut query_desc = Some(query_desc);
+        resowner::with_current_resource_owner::call(resowner, &mut || {
+            let mut qd = query_desc.take().unwrap();
+            if !is_failed {
                 executor::executor_finish::call(&mut qd)?;
                 executor::executor_end::call(&mut qd)?;
                 executor::free_query_desc::call(qd)?;
-                Ok(())
-            })?;
-        }
+            } else {
+                // PORTAL_FAILED: do not run the executor again; just drop the
+                // owned QueryDesc here so its relcache-pin forgets land on the
+                // portal owner (now current). C leaks the pointer and relies on
+                // the resowner abort to release the pins; in the owned model the
+                // Drop releases them, but it must happen under this owner.
+                drop(qd);
+            }
+            Ok(())
+        })?;
     }
 
     Ok(())
