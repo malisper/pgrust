@@ -318,10 +318,7 @@ pub fn ExecInitBitmapIndexScan<'mcx>(
     let mcx: Mcx<'mcx> = estate.es_query_cxt;
 
     // BitmapIndexScan *node — the enclosing plan-tree node (castNode).
-    let bis: &'mcx BitmapIndexScan<'mcx> = match node {
-        types_nodes::nodes::Node::BitmapIndexScan(n) => n,
-        other => panic!("castNode(BitmapIndexScan, node) failed: {other:?}"),
-    };
+    let bis: &'mcx BitmapIndexScan<'mcx> = node.expect_bitmapindexscan();
 
     // check for unsupported flags
     //   Assert(!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK)));
@@ -595,7 +592,7 @@ pub fn ExecBitmapIndexScanRetrieveInstrumentation<'mcx>(
 /// `((BitmapIndexScan *) node->ss.ps.plan)->isshared`.
 fn plan_isshared(node: &BitmapIndexScanState<'_>) -> PgResult<bool> {
     match node.ss.ps.plan {
-        Some(types_nodes::nodes::Node::BitmapIndexScan(bis)) => Ok(bis.isshared),
+        Some(p) if p.node_tag() == types_nodes::nodes::ntag::T_BitmapIndexScan => Ok(p.expect_bitmapindexscan().isshared),
         _ => Err(elog("BitmapIndexScan node has wrong plan type")),
     }
 }
