@@ -22,7 +22,7 @@
 
 use types_core::Oid;
 use types_datum::Datum;
-use types_sortsupport::{SkipSupportData, SortSupportData};
+use types_sortsupport::{SkipSupportData, SkipSupportIncDecId, SortSupportData};
 
 /// A SortSupport fast comparator: C `int (*comparator)(Datum, Datum,
 /// SortSupport)` minus the third `ssup` argument the in-core fast comparators
@@ -31,6 +31,17 @@ use types_sortsupport::{SkipSupportData, SortSupportData};
 /// exactly as C passes them; the substrate mints a
 /// [`types_sortsupport::SortComparatorId`] token denoting this function pointer.
 pub type FastComparator = fn(Datum, Datum) -> i32;
+
+/// A skip-support increment / decrement kernel: C `Datum (*SkipSupportIncDec)
+/// (Relation rel, Datum existing, bool *overflow)` minus the `rel` argument the
+/// in-core trivial-type kernels (`int4_increment` / `int4_decrement` / ...)
+/// never read. The kernel returns the incremented / decremented copy paired
+/// with the `*overflow` (or `*underflow`) flag the C kernels set through their
+/// out-pointer. The substrate mints a
+/// [`types_sortsupport::SkipSupportIncDecId`] token denoting this function
+/// pointer and interprets it when [`run_skip_increment`] / [`run_skip_decrement`]
+/// runs the callback.
+pub type SkipIncDec = fn(Datum) -> (Datum, bool);
 
 // ===========================================================================
 // run_sortsupport — invoke the type's `*sortsupport` strategy routine.
@@ -123,44 +134,73 @@ seam_core::seam!(
 // Each routine corresponds to `sksup->decrement = <type>_decrement;` and
 // `sksup->increment = <type>_increment;` in C. The boundary `low_elem` /
 // `high_elem` Datums are computed in-crate and stored on the node directly by
-// the strategy routine before the install; the substrate only needs to wire
-// the increment / decrement callbacks (it mints the
-// [`SkipSupportIncDecId`](types_sortsupport::SkipSupportIncDecId) tokens for
-// the named type's kernels).
+// the strategy routine before the install; the substrate wires the increment /
+// decrement callbacks: `nbtcompare` passes its native kernels, the substrate
+// mints the [`SkipSupportIncDecId`](types_sortsupport::SkipSupportIncDecId)
+// tokens denoting them and stores them into `sksup.increment` / `sksup.decrement`
+// (exactly as the parallel `install_sortsupport_*` seams do for `comparator`).
 // ===========================================================================
 
 seam_core::seam!(
     /// `sksup->decrement = bool_decrement; sksup->increment = bool_increment;`
     /// (btboolskipsupport).
-    pub fn install_skipsupport_bool(sksup: &mut SkipSupportData)
+    pub fn install_skipsupport_bool(sksup: &mut SkipSupportData, increment: SkipIncDec, decrement: SkipIncDec)
 );
 
 seam_core::seam!(
     /// `sksup->decrement = int2_decrement; sksup->increment = int2_increment;`
     /// (btint2skipsupport).
-    pub fn install_skipsupport_int2(sksup: &mut SkipSupportData)
+    pub fn install_skipsupport_int2(sksup: &mut SkipSupportData, increment: SkipIncDec, decrement: SkipIncDec)
 );
 
 seam_core::seam!(
     /// `sksup->decrement = int4_decrement; sksup->increment = int4_increment;`
     /// (btint4skipsupport).
-    pub fn install_skipsupport_int4(sksup: &mut SkipSupportData)
+    pub fn install_skipsupport_int4(sksup: &mut SkipSupportData, increment: SkipIncDec, decrement: SkipIncDec)
 );
 
 seam_core::seam!(
     /// `sksup->decrement = int8_decrement; sksup->increment = int8_increment;`
     /// (btint8skipsupport).
-    pub fn install_skipsupport_int8(sksup: &mut SkipSupportData)
+    pub fn install_skipsupport_int8(sksup: &mut SkipSupportData, increment: SkipIncDec, decrement: SkipIncDec)
 );
 
 seam_core::seam!(
     /// `sksup->decrement = oid_decrement; sksup->increment = oid_increment;`
     /// (btoidskipsupport).
-    pub fn install_skipsupport_oid(sksup: &mut SkipSupportData)
+    pub fn install_skipsupport_oid(sksup: &mut SkipSupportData, increment: SkipIncDec, decrement: SkipIncDec)
 );
 
 seam_core::seam!(
     /// `sksup->decrement = char_decrement; sksup->increment = char_increment;`
     /// (btcharskipsupport).
-    pub fn install_skipsupport_char(sksup: &mut SkipSupportData)
+    pub fn install_skipsupport_char(sksup: &mut SkipSupportData, increment: SkipIncDec, decrement: SkipIncDec)
+);
+
+// ===========================================================================
+// run_skip_increment / run_skip_decrement — invoke a `SkipSupportIncDec`
+// callback (the substrate side of C's `sksup->increment(rel, existing, &of)` /
+// `sksup->decrement(rel, existing, &uf)`).
+//
+// OUTWARD seams owned by the substrate (it minted the
+// [`SkipSupportIncDecId`](types_sortsupport::SkipSupportIncDecId) token in
+// `install_skipsupport_*` and holds the kernel registry). The B-Tree skip-array
+// strategy code (`_bt_skiparray_strat_increment` / `_bt_skiparray_strat_decrement`,
+// nbtpreprocesskeys.c) calls them. The `rel` argument is dropped: the in-core
+// trivial-type kernels never read it. Returns `(result, overflow)` exactly as
+// C returns the new datum + sets `*overflow` / `*underflow`.
+// ===========================================================================
+
+seam_core::seam!(
+    /// `sksup->increment(rel, existing, &overflow)` for an in-core skip-support
+    /// increment kernel denoted by `id`: return the incremented copy paired with
+    /// the overflow flag.
+    pub fn run_skip_increment(id: SkipSupportIncDecId, existing: Datum) -> (Datum, bool)
+);
+
+seam_core::seam!(
+    /// `sksup->decrement(rel, existing, &underflow)` for an in-core skip-support
+    /// decrement kernel denoted by `id`: return the decremented copy paired with
+    /// the underflow flag.
+    pub fn run_skip_decrement(id: SkipSupportIncDecId, existing: Datum) -> (Datum, bool)
 );

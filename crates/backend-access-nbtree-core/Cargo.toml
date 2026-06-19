@@ -59,6 +59,12 @@ backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache
 backend-access-index-indexam-seams = { path = "../backend-access-index-indexam-seams" }
 backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
 backend-utils-adt-datum-seams = { path = "../backend-utils-adt-datum-seams" }
+# `PrepareSkipSupportFromOpclass` (utils/adt/skipsupport.c) — skip-array support.
+backend-utils-adt-skipsupport-seams = { path = "../backend-utils-adt-skipsupport-seams" }
+# `sksup->increment(...)` / `sksup->decrement(...)` skip-support callbacks
+# (utils/sort/sortsupport.c substrate; called by the skip-array strategy code).
+backend-access-nbt-compare-seams = { path = "../backend-access-nbt-compare-seams" }
+types-sortsupport = { path = "../types-sortsupport" }
 # btoptions: build_reloptions(RELOPT_KIND_BTREE, BTOptions) dispatch (nbtutils.c).
 backend-access-common-reloptions-seams = { path = "../backend-access-common-reloptions-seams" }
 types-datum = { path = "../types-datum" }

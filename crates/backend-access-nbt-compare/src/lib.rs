@@ -229,7 +229,7 @@ pub fn btboolskipsupport(sksup: &mut SkipSupportData) {
     sksup.low_elem = bool_get_datum(false);
     sksup.high_elem = bool_get_datum(true);
     // sksup->decrement = bool_decrement; sksup->increment = bool_increment;
-    sort::install_skipsupport_bool::call(sksup);
+    sort::install_skipsupport_bool::call(sksup, bool_increment, bool_decrement);
 }
 
 // ===========================================================================
@@ -284,7 +284,7 @@ pub fn btint2skipsupport(sksup: &mut SkipSupportData) {
     sksup.low_elem = int16_get_datum(i16::MIN);
     sksup.high_elem = int16_get_datum(i16::MAX);
     // sksup->decrement = int2_decrement; sksup->increment = int2_increment;
-    sort::install_skipsupport_int2::call(sksup);
+    sort::install_skipsupport_int2::call(sksup, int2_increment, int2_decrement);
 }
 
 // ===========================================================================
@@ -352,7 +352,7 @@ pub fn btint4skipsupport(sksup: &mut SkipSupportData) {
     sksup.low_elem = int32_get_datum(i32::MIN);
     sksup.high_elem = int32_get_datum(i32::MAX);
     // sksup->decrement = int4_decrement; sksup->increment = int4_increment;
-    sort::install_skipsupport_int4::call(sksup);
+    sort::install_skipsupport_int4::call(sksup, int4_increment, int4_decrement);
 }
 
 // ===========================================================================
@@ -423,7 +423,7 @@ pub fn btint8skipsupport(sksup: &mut SkipSupportData) {
     sksup.low_elem = int64_get_datum(i64::MIN);
     sksup.high_elem = int64_get_datum(i64::MAX);
     // sksup->decrement = int8_decrement; sksup->increment = int8_increment;
-    sort::install_skipsupport_int8::call(sksup);
+    sort::install_skipsupport_int8::call(sksup, int8_increment, int8_decrement);
 }
 
 // ===========================================================================
@@ -566,7 +566,7 @@ pub fn btoidskipsupport(sksup: &mut SkipSupportData) {
     sksup.low_elem = object_id_get_datum(InvalidOid);
     sksup.high_elem = object_id_get_datum(OID_MAX);
     // sksup->decrement = oid_decrement; sksup->increment = oid_increment;
-    sort::install_skipsupport_oid::call(sksup);
+    sort::install_skipsupport_oid::call(sksup, oid_increment, oid_decrement);
 }
 
 /// `btoidvectorcmp`
@@ -634,7 +634,7 @@ pub fn btcharskipsupport(sksup: &mut SkipSupportData) {
     sksup.low_elem = uint8_get_datum(0);
     sksup.high_elem = uint8_get_datum(UCHAR_MAX);
     // sksup->decrement = char_decrement; sksup->increment = char_increment;
-    sort::install_skipsupport_char::call(sksup);
+    sort::install_skipsupport_char::call(sksup, char_increment, char_decrement);
 }
 
 #[cfg(test)]

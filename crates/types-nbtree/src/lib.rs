@@ -456,12 +456,21 @@ impl BTParallelScanDescData {
 }
 
 /// `BTSkipSupport` opclass sentinels for a skip array (`access/nbtree.h`).
+///
+/// Mirrors C's `SkipSupportData`: the `low_elem` / `high_elem` boundary values
+/// plus the `increment` / `decrement` callbacks (held as
+/// [`SkipSupportIncDecId`] tokens the skip-support substrate interprets, the
+/// owned-model stand-in for the C `SkipSupportIncDec` function pointers).
 #[derive(Clone, Debug)]
 pub struct BTSkipSupport<'mcx> {
     /// lowest sorting non-NULL value
     pub low_elem: Datum<'mcx>,
     /// highest sorting non-NULL value
     pub high_elem: Datum<'mcx>,
+    /// `SkipSupportIncDec increment` — increment-to-next-distinct callback token.
+    pub increment: Option<types_sortsupport::SkipSupportIncDecId>,
+    /// `SkipSupportIncDec decrement` — decrement-to-prev-distinct callback token.
+    pub decrement: Option<types_sortsupport::SkipSupportIncDecId>,
     /// 1-based attribute number the skip support is for
     pub attno: AttrNumber,
 }

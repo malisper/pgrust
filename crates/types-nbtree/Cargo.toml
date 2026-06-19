@@ -15,4 +15,5 @@ types-scan = { path = "../types-scan" }
 types-storage = { path = "../types-storage" }
 types-condvar = { path = "../types-condvar" }
 types-tuple = { path = "../types-tuple" }
+types-sortsupport = { path = "../types-sortsupport" }
 mcx = { path = "../mcx" }

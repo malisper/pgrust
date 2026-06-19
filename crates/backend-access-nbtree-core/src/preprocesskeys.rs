@@ -89,6 +89,8 @@ use backend_utils_fmgr_fmgr_seams::function_call2_coll_datum;
 // and the opfamily lookups live in the lsyscache seams crate.
 use backend_utils_adt_arrayfuncs_seams::deconstruct_array_values_bytes;
 use backend_access_index_indexam_seams as indexam;
+use backend_access_nbt_compare_seams as nbtcompare;
+use backend_utils_adt_skipsupport_seams as skipsupport;
 use backend_utils_cache_lsyscache_seams::{
     get_opcode, get_opfamily_member, get_opfamily_proc, get_typlenbyvalalign,
 };
@@ -282,27 +284,91 @@ fn binsrch_array_skey(
 }
 
 /// `array->sksup->decrement(rel, sk_argument, &underflow)` — opclass skip-support
-/// decrement. The repo carries `sksup` as a `u64` handle with no producer.
-fn skip_decrement(_rel: &Relation, _attno: AttrNumber, _arg: &Datum) -> (Datum<'static>, bool) {
-    panic!("_bt_skiparray_strat_decrement: opclass skip-support decrement not yet ported")
+/// decrement. Dispatched through the skip-support substrate's `run_skip_decrement`
+/// seam, keyed by the `SkipSupportIncDecId` token resolved in
+/// `PrepareSkipSupportFromOpclass`. The `rel` argument is dropped (the in-core
+/// trivial-type kernels never read it). The boundary `Datum` is the
+/// pass-by-value scalar the skip-support types operate on.
+fn skip_decrement(
+    _rel: &Relation,
+    decrement: Option<types_sortsupport::SkipSupportIncDecId>,
+    arg: &Datum,
+) -> (Datum<'static>, bool) {
+    let id = decrement
+        .expect("_bt_skiparray_strat_decrement: skip array's decrement callback must be set");
+    let (res, underflow) =
+        nbtcompare::run_skip_decrement::call(id, datum_to_word(arg));
+    (word_to_datum(res), underflow)
 }
 
 /// `array->sksup->increment(rel, sk_argument, &overflow)` — opclass skip-support
-/// increment.
-fn skip_increment(_rel: &Relation, _attno: AttrNumber, _arg: &Datum) -> (Datum<'static>, bool) {
-    panic!("_bt_skiparray_strat_increment: opclass skip-support increment not yet ported")
+/// increment. Dispatched through `run_skip_increment` keyed by the token.
+fn skip_increment(
+    _rel: &Relation,
+    increment: Option<types_sortsupport::SkipSupportIncDecId>,
+    arg: &Datum,
+) -> (Datum<'static>, bool) {
+    let id = increment
+        .expect("_bt_skiparray_strat_increment: skip array's increment callback must be set");
+    let (res, overflow) =
+        nbtcompare::run_skip_increment::call(id, datum_to_word(arg));
+    (word_to_datum(res), overflow)
 }
 
-/// `PrepareSkipSupportFromOpclass(opfamily, opcintype, reverse)` (sortsupport,
-/// unported). Returns the `(handle, BTSkipSupport)` pair, or `None`.
+/// Convert a canonical by-value `Datum` into the bare-word fmgr-seam `Datum`
+/// the skip-support kernels operate on (the trivial skip-support types are all
+/// pass-by-value). A by-reference argument is not produced for these types.
+#[inline]
+fn datum_to_word(d: &Datum) -> types_datum::Datum {
+    match d {
+        Datum::ByVal(w) => types_datum::Datum::from_usize(*w),
+        _ => panic!(
+            "_bt_skiparray_strat_adjust: by-reference skip-support argument not produced \
+             for a trivial skip-support type"
+        ),
+    }
+}
+
+/// `PrepareSkipSupportFromOpclass(opfamily, opcintype, reverse)`
+/// (`utils/adt/skipsupport.c`). Returns the `(handle, BTSkipSupport)` pair, or
+/// `None` when the opclass has no skip support function.
+///
+/// In C the caller does:
+/// ```c
+/// array->sksup = PrepareSkipSupportFromOpclass(opfamily, opcintype, reverse);
+/// array->null_elem = (array->sksup == NULL || ...);
+/// ```
+/// The owned model carries `sksup` as a `u64` handle (non-zero == "has skip
+/// support") plus the resolved sentinels/callbacks in `sksup_data`.
 fn prepare_skip_support(
-    _rel: &Relation,
-    _attno: AttrNumber,
-    _opfamily: Oid,
-    _opcintype: Oid,
-    _reverse: bool,
-) -> Option<(u64, types_nbtree::BTSkipSupport<'static>)> {
-    panic!("_bt_preprocess_array_keys: PrepareSkipSupportFromOpclass (sortsupport) not yet ported")
+    rel: &Relation,
+    attno: AttrNumber,
+    opfamily: Oid,
+    opcintype: Oid,
+    reverse: bool,
+) -> PgResult<Option<(u64, types_nbtree::BTSkipSupport<'static>)>> {
+    let sksup =
+        match skipsupport::prepare_skip_support_from_opclass::call(opfamily, opcintype, reverse)? {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+
+    let _ = rel;
+    // C: `sksup->attnum` is filled by the skip-array setup; here we record the
+    // 1-based attribute number directly. The boundary `low_elem` / `high_elem`
+    // come back as bare-word fmgr `Datum`s (the trivial skip-support types are
+    // all pass-by-value); bridge them into the canonical by-value `Datum`.
+    let data = types_nbtree::BTSkipSupport {
+        low_elem: word_to_datum(sksup.low_elem),
+        high_elem: word_to_datum(sksup.high_elem),
+        increment: sksup.increment,
+        decrement: sksup.decrement,
+        attno,
+    };
+    // The `u64` handle is an opaque "has skip support" marker (non-zero); the
+    // real callbacks travel in `sksup_data`. Use the attno (always >= 1) so the
+    // handle is non-zero and stable.
+    Ok(Some((attno as u64, data)))
 }
 
 /// The `fn_oid` carried by an ORDER-proc fmgr handle (low 32 bits), used only
@@ -1330,7 +1396,11 @@ fn _bt_skiparray_strat_decrement<'mcx>(
     }
 
     // Decrement, handling underflow by marking the qual unsatisfiable
-    let (new_sk_argument, uflow) = skip_decrement(rel, arraysk.sk_attno, &orig_sk_argument);
+    let decrement = so.arrayKeys[array]
+        .sksup_data
+        .as_ref()
+        .and_then(|d| d.decrement);
+    let (new_sk_argument, uflow) = skip_decrement(rel, decrement, &orig_sk_argument);
     if uflow {
         so.qual_ok = false;
         return Ok(());
@@ -1375,7 +1445,11 @@ fn _bt_skiparray_strat_increment<'mcx>(
         return Ok(());
     }
 
-    let (new_sk_argument, oflow) = skip_increment(rel, arraysk.sk_attno, &orig_sk_argument);
+    let increment = so.arrayKeys[array]
+        .sksup_data
+        .as_ref()
+        .and_then(|d| d.increment);
+    let (new_sk_argument, oflow) = skip_increment(rel, increment, &orig_sk_argument);
     if oflow {
         so.qual_ok = false;
         return Ok(());
@@ -1691,7 +1765,7 @@ pub fn _bt_preprocess_array_keys<'mcx>(
             so.arrayKeys[numArrayKeys as usize].attlen = attlen;
             so.arrayKeys[numArrayKeys as usize].attbyval = attbyval;
             so.arrayKeys[numArrayKeys as usize].null_elem = true; // for now
-            match prepare_skip_support(rel, attno_skip, opfamily, opcintype, reverse) {
+            match prepare_skip_support(rel, attno_skip, opfamily, opcintype, reverse)? {
                 Some((handle, data)) => {
                     so.arrayKeys[numArrayKeys as usize].sksup = Some(handle);
                     so.arrayKeys[numArrayKeys as usize].sksup_data = Some(relocate_sksup(data));
@@ -1934,6 +2008,8 @@ fn relocate_sksup<'mcx>(s: types_nbtree::BTSkipSupport<'static>) -> types_nbtree
     types_nbtree::BTSkipSupport {
         low_elem: relocate_datum(s.low_elem),
         high_elem: relocate_datum(s.high_elem),
+        increment: s.increment,
+        decrement: s.decrement,
         attno: s.attno,
     }
 }

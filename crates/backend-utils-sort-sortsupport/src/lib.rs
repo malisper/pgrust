@@ -28,8 +28,9 @@ use types_error::{PgError, PgResult};
 use types_tuple::Datum;
 use types_rel::Relation;
 use types_sortsupport::{
-    AbbrevAbortId, AbbrevConverterId, SortComparatorId, SortSupportData, BTORDER_PROC,
-    BTSORTSUPPORT_PROC, COMPARE_GT, GIST_AM_OID, GIST_SORTSUPPORT_PROC,
+    AbbrevAbortId, AbbrevConverterId, SkipSupportData, SkipSupportIncDecId, SortComparatorId,
+    SortSupportData, BTORDER_PROC, BTSORTSUPPORT_PROC, COMPARE_GT, GIST_AM_OID,
+    GIST_SORTSUPPORT_PROC,
 };
 
 use backend_utils_fmgr_core::{
@@ -574,6 +575,69 @@ fn install_native_comparator(ssup: &mut SortSupportData<'_>, cmp: nbtcompare::Fa
 }
 
 // ===========================================================================
+// install_skipsupport_* — the substrate side of
+// `sksup->increment = <type>_increment; sksup->decrement = <type>_decrement;`.
+//
+// These seams are OWNED by this substrate (declared in nbt-compare-seams) and
+// installed here. A type's `*skipsupport` routine in nbtcompare calls them with
+// its native increment / decrement kernels; we mint a `SkipSupportIncDecId`
+// token denoting each kernel and write it into `sksup.increment` /
+// `sksup.decrement`, exactly as C's `sksup->increment = int4_increment;`. The
+// token is interpreted later by `run_skip_increment` / `run_skip_decrement`.
+// ===========================================================================
+
+thread_local! {
+    /// Token -> increment/decrement kernel, indexed by `SkipSupportIncDecId.0`.
+    /// Mirrors `SHIMS` (the C `SkipSupportIncDec` function pointer the strategy
+    /// routine stored into `sksup`; here we store the kernel pointer keyed by the
+    /// token, in per-backend state for the backend's lifetime).
+    static SKIP_INCDEC: RefCell<Vec<nbtcompare::SkipIncDec>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Register a skip-support increment / decrement kernel and hand back its token.
+fn register_skip_incdec(kernel: nbtcompare::SkipIncDec) -> SkipSupportIncDecId {
+    SKIP_INCDEC.with(|s| {
+        let mut v = s.borrow_mut();
+        let id = v.len() as u32;
+        v.push(kernel);
+        SkipSupportIncDecId(id)
+    })
+}
+
+/// Common body for all six `install_skipsupport_*` seams: register the native
+/// increment / decrement kernels and store their tokens in `sksup.increment` /
+/// `sksup.decrement`.
+fn install_native_skipsupport(
+    sksup: &mut SkipSupportData,
+    increment: nbtcompare::SkipIncDec,
+    decrement: nbtcompare::SkipIncDec,
+) {
+    sksup.increment = Some(register_skip_incdec(increment));
+    sksup.decrement = Some(register_skip_incdec(decrement));
+}
+
+/// `sksup->increment(rel, existing, &overflow)` — invoke the increment kernel a
+/// [`SkipSupportIncDecId`] denotes. The `rel` argument is dropped (the in-core
+/// trivial-type kernels never read it).
+fn run_skip_increment(
+    id: SkipSupportIncDecId,
+    existing: types_datum::Datum,
+) -> (types_datum::Datum, bool) {
+    let kernel = SKIP_INCDEC.with(|s| s.borrow()[id.0 as usize]);
+    kernel(existing)
+}
+
+/// `sksup->decrement(rel, existing, &underflow)` — invoke the decrement kernel a
+/// [`SkipSupportIncDecId`] denotes.
+fn run_skip_decrement(
+    id: SkipSupportIncDecId,
+    existing: types_datum::Datum,
+) -> (types_datum::Datum, bool) {
+    let kernel = SKIP_INCDEC.with(|s| s.borrow()[id.0 as usize]);
+    kernel(existing)
+}
+
+// ===========================================================================
 // install_gist_sortsupport_* — the substrate side of `gist_point_sortsupport`.
 //
 // Owned + installed here (declared in gist-proc-seams). `gist_point_sortsupport`
@@ -661,6 +725,19 @@ pub fn init_seams() {
     nbtcompare_seams::install_sortsupport_int4::set(install_native_comparator);
     nbtcompare_seams::install_sortsupport_int8::set(install_native_comparator);
     nbtcompare_seams::install_sortsupport_oid::set(install_native_comparator);
+
+    // The skip-support install seams (owned by this substrate): mint the
+    // increment / decrement tokens nbtcompare's `*skipsupport` routines store.
+    nbtcompare_seams::install_skipsupport_bool::set(install_native_skipsupport);
+    nbtcompare_seams::install_skipsupport_int2::set(install_native_skipsupport);
+    nbtcompare_seams::install_skipsupport_int4::set(install_native_skipsupport);
+    nbtcompare_seams::install_skipsupport_int8::set(install_native_skipsupport);
+    nbtcompare_seams::install_skipsupport_oid::set(install_native_skipsupport);
+    nbtcompare_seams::install_skipsupport_char::set(install_native_skipsupport);
+
+    // The skip-support increment / decrement run seams (owned by this substrate).
+    nbtcompare_seams::run_skip_increment::set(run_skip_increment);
+    nbtcompare_seams::run_skip_decrement::set(run_skip_decrement);
 
     // The GiST `gist_point_sortsupport` install seams (owned by this substrate).
     gist_proc::install_gist_sortsupport_comparator::set(install_gist_comparator);

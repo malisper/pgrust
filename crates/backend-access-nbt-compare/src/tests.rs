@@ -225,27 +225,27 @@ fn strategy_routines_route_to_installers() {
     // Recording skipsupport installers: stamp a token into both inc/dec slots so
     // we can confirm the routine reached the right installer; low/high are set
     // by the routine directly and asserted below.
-    sort::install_skipsupport_bool::set(|sk| {
+    sort::install_skipsupport_bool::set(|sk, _inc, _dec| {
         sk.decrement = Some(SkipSupportIncDecId(1));
         sk.increment = Some(SkipSupportIncDecId(1));
     });
-    sort::install_skipsupport_int2::set(|sk| {
+    sort::install_skipsupport_int2::set(|sk, _inc, _dec| {
         sk.decrement = Some(SkipSupportIncDecId(2));
         sk.increment = Some(SkipSupportIncDecId(2));
     });
-    sort::install_skipsupport_int4::set(|sk| {
+    sort::install_skipsupport_int4::set(|sk, _inc, _dec| {
         sk.decrement = Some(SkipSupportIncDecId(4));
         sk.increment = Some(SkipSupportIncDecId(4));
     });
-    sort::install_skipsupport_int8::set(|sk| {
+    sort::install_skipsupport_int8::set(|sk, _inc, _dec| {
         sk.decrement = Some(SkipSupportIncDecId(8));
         sk.increment = Some(SkipSupportIncDecId(8));
     });
-    sort::install_skipsupport_oid::set(|sk| {
+    sort::install_skipsupport_oid::set(|sk, _inc, _dec| {
         sk.decrement = Some(SkipSupportIncDecId(26));
         sk.increment = Some(SkipSupportIncDecId(26));
     });
-    sort::install_skipsupport_char::set(|sk| {
+    sort::install_skipsupport_char::set(|sk, _inc, _dec| {
         sk.decrement = Some(SkipSupportIncDecId(18));
         sk.increment = Some(SkipSupportIncDecId(18));
     });
