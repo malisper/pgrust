@@ -2679,7 +2679,7 @@ fn cook_default<'mcx>(
     /* Finally, take care of collations in the finished expression. */
     backend_parser_parse_collate::assign_expr_collations(Some(&pstate), &mut expr)?;
 
-    Ok(Some(RichNode::Expr(expr)))
+    Ok(Some(RichNode::mk_expr(mcx, expr)))
 }
 
 /// `replace_domain_constraint_value(pstate, cref)` (typecmds.c:3633) — the
@@ -2701,7 +2701,7 @@ fn replace_domain_constraint_value<'mcx>(
                     /* Propagate location knowledge, if any */
                     dom_val.location = cref.location;
                     let mcx = *pstate.p_rtable.allocator();
-                    let node = RichNode::Expr(Expr::CoerceToDomainValue(dom_val));
+                    let node = RichNode::mk_expr(mcx, Expr::CoerceToDomainValue(dom_val));
                     return Ok(Some(mcx::alloc_in(mcx, node)?));
                 }
             }
@@ -2807,7 +2807,7 @@ fn domain_add_check_constraint<'mcx>(
     }
 
     /* Convert to string form for storage. */
-    let expr_node = RichNode::Expr(expr);
+    let expr_node = RichNode::mk_expr(mcx, expr);
     let ccbin = me::node_to_string::call(mcx, expr_node.clone_in(mcx)?)?
         .as_str()
         .to_string();

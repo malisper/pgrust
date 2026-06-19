@@ -394,9 +394,10 @@ pub fn transformGroupingFunc<'mcx>(
     result_list.reserve(p.args.len());
     let expr_kind = pstate.p_expr_kind;
     for arg in p.args.into_iter() {
+        let arg_node = Node::mk_expr(pstate_mcx(pstate), arg);
         let current_result = backend_parser_parse_expr_seams::transformExpr::call(
             pstate,
-            Some(Node::Expr(arg)),
+            Some(arg_node),
             expr_kind,
         )?;
         // acceptability of expressions is checked later
