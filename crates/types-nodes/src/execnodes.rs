@@ -405,6 +405,19 @@ pub struct ResultRelInfo<'mcx> {
     /// `List *ri_onConflictArbiterIndexes` — index OIDs that arbitrate
     /// ON CONFLICT / apply-conflict detection. `None` is the C NIL.
     pub ri_onConflictArbiterIndexes: Option<PgVec<'mcx, Oid>>,
+    /// `ExprState **ri_TrigWhenExprs` — array of WHEN-clause expression states,
+    /// one slot per `ri_TrigDesc->triggers[i]`, lazily compiled by
+    /// `TriggerEnabled` the first time a trigger with a `tgqual` WHEN clause is
+    /// considered. `InitResultRelInfo` `palloc0`s this to `numtriggers` slots
+    /// (all `None`); a `None` element is "not yet compiled" (the C NULL). `None`
+    /// for the whole field is the C NULL (no trigdesc / not initialized).
+    ///
+    /// The companion C `FmgrInfo *ri_TrigFunctions` cache collapses in this port:
+    /// the idiomatic `function_call_invoke` seam re-resolves each trigger
+    /// function by its `pg_proc` OID internally, so no per-trigger `FmgrInfo`
+    /// slot is threaded (see `exec_call_trigger_func`). The `ri_TrigInstrument`
+    /// (EXPLAIN ANALYZE instrumentation) array is likewise not modeled.
+    pub ri_TrigWhenExprs: Option<PgVec<'mcx, Option<PgBox<'mcx, ExprState<'mcx>>>>>,
     /// `TupleTableSlot *ri_TrigOldSlot` — for trigger OLD tuples.
     pub ri_TrigOldSlot: Option<SlotId>,
     /// `TupleTableSlot *ri_TrigNewSlot` — for trigger NEW tuples.

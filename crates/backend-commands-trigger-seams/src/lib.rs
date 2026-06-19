@@ -37,6 +37,23 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `AfterTriggerBeginQuery()` (trigger.c) — start an after-trigger query
+    /// level (bumps `afterTriggers.query_depth`). Called by the executor's
+    /// `ExecutorStart` unless `EXEC_FLAG_SKIP_TRIGGERS`/`EXPLAIN_ONLY`.
+    pub fn after_trigger_begin_query() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AfterTriggerEndQuery(estate)` (trigger.c) — fire this query level's
+    /// AFTER IMMEDIATE events, promote deferred ones, release the level's
+    /// storage. Called by the executor's `ExecutorFinish` unless
+    /// `EXEC_FLAG_SKIP_TRIGGERS`.
+    pub fn after_trigger_end_query<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `AfterTriggerEndXact(isCommit)` — shut down the deferred-trigger
     /// manager.
     pub fn after_trigger_end_xact(is_commit: bool) -> PgResult<()>

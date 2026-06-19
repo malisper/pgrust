@@ -8135,6 +8135,7 @@ dependencies = [
  "backend-commands-trigger-seams",
  "backend-parser-func",
  "backend-parser-relation",
+ "backend-storage-buffer-bufmgr-seams",
  "backend-storage-lmgr-lmgr",
  "backend-tcop-utility-out-seams",
  "backend-utils-cache-lsyscache",
@@ -9150,6 +9151,7 @@ dependencies = [
  "backend-catalog-aclchk-seams",
  "backend-catalog-catalog",
  "backend-catalog-objectaddress-seams",
+ "backend-commands-trigger-seams",
  "backend-executor-execAmi",
  "backend-executor-execAmi-seams",
  "backend-executor-execExpr",
@@ -24938,6 +24940,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "types-core",
+ "types-error",
 ]
 
 [[package]]

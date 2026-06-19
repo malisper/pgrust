@@ -15,8 +15,9 @@
 #![no_std]
 extern crate alloc;
 
-use mcx::{PgString, PgVec};
+use mcx::{Mcx, PgString, PgVec};
 use types_core::primitive::Oid;
+use types_error::PgResult;
 
 /// `Trigger` (`utils/reltrigger.h`): one trigger as the relcache materializes it
 /// from a `pg_trigger` row. The leading `tgoid` is the trigger's own OID; the
@@ -136,7 +137,110 @@ pub struct TriggerDesc<'mcx> {
     pub trig_delete_old_table: bool,
 }
 
+/// Deep-clone a `PgString` into `mcx` (the `pstrdup` of `CopyTriggerDesc`).
+fn clone_pgstring<'a, 'b>(s: &PgString<'a>, mcx: Mcx<'b>) -> PgResult<PgString<'b>> {
+    s.clone_in(mcx)
+}
+
+/// Deep-clone an `Option<PgString>` into `mcx`.
+fn clone_opt_pgstring<'a, 'b>(
+    s: &Option<PgString<'a>>,
+    mcx: Mcx<'b>,
+) -> PgResult<Option<PgString<'b>>> {
+    match s {
+        Some(s) => Ok(Some(clone_pgstring(s, mcx)?)),
+        None => Ok(None),
+    }
+}
+
+impl<'mcx> Trigger<'mcx> {
+    /// Deep-copy one `Trigger` into `mcx` — the per-element body of
+    /// `CopyTriggerDesc` (`commands/trigger.c`): the `memcpy` of the scalar
+    /// fields plus the `pstrdup`/`palloc`+`memcpy` of `tgname`/`tgattr`/`tgargs`/
+    /// `tgqual`/`tgoldtable`/`tgnewtable`.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Trigger<'b>> {
+        let tgname = clone_pgstring(&self.tgname, mcx)?;
+
+        let mut tgattr: PgVec<'b, i16> = PgVec::new_in(mcx);
+        tgattr.try_reserve(self.tgattr.len()).map_err(|_| mcx.oom(self.tgattr.len()))?;
+        for &a in self.tgattr.iter() {
+            tgattr.push(a);
+        }
+
+        let mut tgargs: PgVec<'b, PgString<'b>> = PgVec::new_in(mcx);
+        tgargs.try_reserve(self.tgargs.len()).map_err(|_| mcx.oom(self.tgargs.len()))?;
+        for arg in self.tgargs.iter() {
+            tgargs.push(clone_pgstring(arg, mcx)?);
+        }
+
+        Ok(Trigger {
+            tgoid: self.tgoid,
+            tgname,
+            tgfoid: self.tgfoid,
+            tgtype: self.tgtype,
+            tgenabled: self.tgenabled,
+            tgisinternal: self.tgisinternal,
+            tgisclone: self.tgisclone,
+            tgconstrrelid: self.tgconstrrelid,
+            tgconstrindid: self.tgconstrindid,
+            tgconstraint: self.tgconstraint,
+            tgdeferrable: self.tgdeferrable,
+            tginitdeferred: self.tginitdeferred,
+            tgnargs: self.tgnargs,
+            tgnattr: self.tgnattr,
+            tgattr,
+            tgargs,
+            tgqual: clone_opt_pgstring(&self.tgqual, mcx)?,
+            tgoldtable: clone_opt_pgstring(&self.tgoldtable, mcx)?,
+            tgnewtable: clone_opt_pgstring(&self.tgnewtable, mcx)?,
+        })
+    }
+}
+
 impl<'mcx> TriggerDesc<'mcx> {
+    /// `CopyTriggerDesc(trigdesc)` (`commands/trigger.c`) — deep-copy the whole
+    /// descriptor (the `triggers` array and every owned string/array within it)
+    /// into `mcx`. The `trig_*` summary flags are plain scalars copied as-is.
+    ///
+    /// C returns `NULL` for an empty descriptor (`numtriggers <= 0`); the caller
+    /// (`InitResultRelInfo`) only calls this when `rd_trigdesc` is `Some`, and a
+    /// built descriptor always has `numtriggers > 0`, so this is a faithful
+    /// full copy.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<TriggerDesc<'b>> {
+        let mut triggers: PgVec<'b, Trigger<'b>> = PgVec::new_in(mcx);
+        triggers
+            .try_reserve(self.triggers.len())
+            .map_err(|_| mcx.oom(self.triggers.len()))?;
+        for t in self.triggers.iter() {
+            triggers.push(t.clone_in(mcx)?);
+        }
+        Ok(TriggerDesc {
+            triggers,
+            numtriggers: self.numtriggers,
+            trig_insert_before_row: self.trig_insert_before_row,
+            trig_insert_after_row: self.trig_insert_after_row,
+            trig_insert_instead_row: self.trig_insert_instead_row,
+            trig_insert_before_statement: self.trig_insert_before_statement,
+            trig_insert_after_statement: self.trig_insert_after_statement,
+            trig_update_before_row: self.trig_update_before_row,
+            trig_update_after_row: self.trig_update_after_row,
+            trig_update_instead_row: self.trig_update_instead_row,
+            trig_update_before_statement: self.trig_update_before_statement,
+            trig_update_after_statement: self.trig_update_after_statement,
+            trig_delete_before_row: self.trig_delete_before_row,
+            trig_delete_after_row: self.trig_delete_after_row,
+            trig_delete_instead_row: self.trig_delete_instead_row,
+            trig_delete_before_statement: self.trig_delete_before_statement,
+            trig_delete_after_statement: self.trig_delete_after_statement,
+            trig_truncate_before_statement: self.trig_truncate_before_statement,
+            trig_truncate_after_statement: self.trig_truncate_after_statement,
+            trig_insert_new_table: self.trig_insert_new_table,
+            trig_update_old_table: self.trig_update_old_table,
+            trig_update_new_table: self.trig_update_new_table,
+            trig_delete_old_table: self.trig_delete_old_table,
+        })
+    }
+
     /// An empty `TriggerDesc` (no triggers, all flags false) allocated in
     /// `mcx` — the shape `RelationBuildTriggers` starts from before it populates
     /// the array and flags. (C `palloc0`s the struct.)

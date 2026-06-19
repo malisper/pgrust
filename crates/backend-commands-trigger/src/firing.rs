@@ -41,6 +41,7 @@ use types_nodes::trigger::{
     TriggerData, T_TriggerData, TRIGGER_EVENT_OPMASK, TRIGGER_EVENT_ROW, AFTER_TRIGGER_2CTID,
     AFTER_TRIGGER_CP_UPDATE, AFTER_TRIGGER_DONE, AFTER_TRIGGER_FDW_FETCH, AFTER_TRIGGER_FDW_REUSE,
     AFTER_TRIGGER_IN_PROGRESS, AFTER_TRIGGER_OFFSET, AFTER_TRIGGER_TUP_BITS,
+    TRIGGER_EVENT_INSERT,
 };
 use types_nodes::EStateData;
 use types_tuple::heaptuple::{HeapTuple, HeapTupleData, ItemPointerData};
@@ -195,18 +196,41 @@ pub struct TriggerResultRel {
     pub relid: Oid,
     /// `rel->rd_rel->relkind`.
     pub relkind: i8,
-    /// `rInfo->ri_TrigDesc->triggers` — the relation's triggers.
-    pub triggers: Vec<Trigger<'static>>,
+    /// `rInfo->ri_TrigDesc->triggers` — the relation's triggers, reduced to the
+    /// dispatch facts `after_trigger_execute` reads (`tgoid`/`tgfoid`/`tgtype`),
+    /// so no `'mcx`-bound `Trigger` value escapes the per-query relation open.
+    pub triggers: Vec<DispatchTrigger>,
 }
 
 /// `ExecGetTriggerResultRel(estate, relid, NULL)` for the firing path — open the
 /// trigger target relation by Oid and read its trigger descriptor + relkind.
 ///
-/// The per-relation `TriggerDesc` is built by `RelationBuildTriggers` (the
-/// catalog-read DDL leg, deferred), so this re-resolution is not reachable until
-/// that substrate lands.  Loud, 1:1-named.
-fn trigger_result_rel_open(_relid: Oid) -> PgResult<TriggerResultRel> {
-    Err(exec_get_trigger_result_rel_unported())
+/// `ExecGetTriggerResultRel` opens the target relation (no new lock — the lock
+/// is held from queue time) and reads its relcache `rd_trigdesc`, built by
+/// `RelationBuildTriggers`. We `table_open(relid, NoLock)`, project the dispatch
+/// facts off `rd_trigdesc->triggers`, and close (NoLock) keeping the lock,
+/// mirroring the C cache-miss path.
+fn trigger_result_rel_open(mcx: Mcx<'_>, relid: Oid) -> PgResult<TriggerResultRel> {
+    let rel = backend_access_table_table_seams::table_open::call(mcx, relid, NoLock)?;
+    let relkind = rel.rd_rel.relkind as i8;
+    let triggers: Vec<DispatchTrigger> = match rel.rd_trigdesc.as_ref() {
+        None => Vec::new(),
+        Some(td) => td
+            .triggers
+            .iter()
+            .map(|t| DispatchTrigger {
+                tgoid: t.tgoid,
+                tgfoid: t.tgfoid,
+                tgtype: t.tgtype,
+            })
+            .collect(),
+    };
+    rel.close(NoLock)?;
+    Ok(TriggerResultRel {
+        relid,
+        relkind,
+        triggers,
+    })
 }
 
 /// `AfterTriggerExecute(...)` (trigger.c:4328) — fire one queued after-trigger
@@ -218,7 +242,8 @@ fn trigger_result_rel_open(_relid: Oid) -> PgResult<TriggerResultRel> {
 /// `event`/`evtshared` are passed by value.  Returns `Ok(())` if the trigger
 /// fired (or was silently skipped because the trigger was dropped since the
 /// event was queued).
-pub fn after_trigger_execute(
+pub fn after_trigger_execute<'mcx>(
+    mcx: Mcx<'mcx>,
     rel: &mut TriggerResultRel,
     event: &types_nodes::trigger::AfterTriggerEventData,
     evtshared: &SharedRecord,
@@ -231,7 +256,11 @@ pub fn after_trigger_execute(
         None => return Ok(()),
         Some(i) => i,
     };
-    let trigger = clone_trigger(&rel.triggers[tgindx]);
+    let trigger = DispatchTrigger {
+        tgoid: rel.triggers[tgindx].tgoid,
+        tgfoid: rel.triggers[tgindx].tgfoid,
+        tgtype: rel.triggers[tgindx].tgtype,
+    };
 
     // Fetch the required tuple(s). FDW_FETCH/FDW_REUSE only arise for a genuine
     // FDW event on a foreign table (a regular-table event always sets at least
@@ -248,7 +277,7 @@ pub fn after_trigger_execute(
         // invalid ctid1 (the AFTER-statement / no-row case) means no trigger
         // tuple, exactly as C.
         if item_pointer_is_valid(&event.ate_ctid1) {
-            tg_trigtuple = Some(fetch_trigger_tuple(rel.relid, &event.ate_ctid1)?);
+            tg_trigtuple = Some(fetch_trigger_tuple(mcx, rel.relid, &event.ate_ctid1)?);
         }
         let has_ctid2 =
             tup_bits == AFTER_TRIGGER_2CTID || (event.ate_flags & AFTER_TRIGGER_CP_UPDATE) != 0;
@@ -256,7 +285,7 @@ pub fn after_trigger_execute(
             if (event.ate_flags & AFTER_TRIGGER_CP_UPDATE) != 0 {
                 return Err(cross_partition_update_unported());
             }
-            tg_newtuple = Some(fetch_trigger_tuple(rel.relid, &event.ate_ctid2)?);
+            tg_newtuple = Some(fetch_trigger_tuple(mcx, rel.relid, &event.ate_ctid2)?);
         }
     }
 
@@ -266,7 +295,12 @@ pub fn after_trigger_execute(
     if evtshared.ats_has_table {
         return Err(transition_table_unported());
     }
-    if evtshared.ats_rolid != INVALID_OID {
+    // GetUserIdAndSecContext(&save_rolid, ...); if (save_rolid != ats_rolid)
+    // SetUserIdAndSecContext(...). The event was queued with ats_rolid =
+    // GetUserId(); firing in the same session it equals the current user, so no
+    // role switch is needed. A genuine mismatch (e.g. a deferred event fired
+    // under a different role) needs SetUserIdAndSecContext, still unported.
+    if evtshared.ats_rolid != backend_utils_init_miscinit::GetUserId() {
         return Err(role_switch_unported());
     }
 
@@ -290,55 +324,110 @@ pub fn after_trigger_execute(
     // The dispatch reads only tgfoid; carry it via a synthesized minimal trigger
     // box so exec_call_trigger_func can read tg_trigger.tgfoid.
     let mut trigdata = trigdata;
-    trigdata.tg_trigger = make_dispatch_trigger(trigger.tgoid, trigger.tgfoid, trigger.tgtype);
+    trigdata.tg_trigger =
+        make_dispatch_trigger(mcx, trigger.tgoid, trigger.tgfoid, trigger.tgtype)?;
 
     let _rettuple = exec_call_trigger_func(trigdata)?;
     Ok(())
 }
 
-/// `table_tuple_fetch_row_version(rel, ctid, SnapshotAny, slot)` for the trigger
-/// re-fetch — re-resolve the relation by Oid and run the ported `heap_fetch`
-/// under `SnapshotAny` (AFTER triggers see the tuple regardless of visibility).
-/// A failed fetch is the C `elog(ERROR, "failed to fetch tuple for AFTER
-/// trigger")`.  `heap_fetch` itself loud-panics until the heap-scan family lands.
-fn fetch_trigger_tuple(
+/// `table_tuple_fetch_row_version(rel, ctid, SnapshotAny, slot)` +
+/// `ExecFetchSlotHeapTuple` for the trigger re-fetch — re-resolve the relation
+/// by Oid and run the ported `heap_fetch` under `SnapshotAny` (AFTER triggers
+/// see the tuple regardless of visibility), then materialize the on-page tuple
+/// into the query context. A failed fetch is the C `elog(ERROR, "failed to fetch
+/// tuple1 for AFTER trigger")`.
+///
+/// The returned `HeapTupleData` is deep-copied into `mcx` (the per-query
+/// `es_query_cxt`) and the pinned buffer is released, so no buffer pin escapes.
+/// The `'static` lifetime on the result is an extension of that `'mcx`
+/// allocation: the side-channel `TriggerData` is installed and dropped strictly
+/// within `after_trigger_execute`, which runs inside the same query context, so
+/// the tuple outlives every read of it. (The owned-events model stores the queue
+/// as a `'static` backend-global; this is the documented boundary where a
+/// per-query tuple re-enters that path.)
+fn fetch_trigger_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
     relid: Oid,
     ctid: &ItemPointerData,
 ) -> PgResult<mcx::PgBox<'static, HeapTupleData<'static>>> {
-    // The relation handle and a 'static-lifetime fetch are not available to the
-    // queue's backend-global firing path: heap_fetch needs an `Mcx<'mcx>` +
-    // `&Relation<'mcx>` that the per-query context owns. This is the per-row
-    // AFTER fetch substrate; loud, 1:1-named.
-    let _ = (relid, ctid);
-    Err(per_row_fetch_unported())
+    let rel = backend_access_table_table_seams::table_open::call(mcx, relid, NoLock)?;
+    let snapshot_any =
+        types_snapshot::SnapshotData::sentinel(types_snapshot::SnapshotType::SNAPSHOT_ANY);
+
+    let fetched =
+        backend_access_heap_heapam_seams::heap_fetch::call(mcx, &rel, &snapshot_any, *ctid, false)?;
+
+    let result = if fetched.found {
+        // ExecFetchSlotHeapTuple: the on-page tuple, deep-copied into mcx so it
+        // survives the buffer release below.
+        let formed = fetched
+            .tuple
+            .expect("heap_fetch found==true must carry the tuple");
+        let copied: HeapTupleData<'mcx> = formed.tuple.clone_in(mcx)?;
+        let boxed: mcx::PgBox<'mcx, HeapTupleData<'mcx>> =
+            mcx::PgBox::try_new_in(copied, mcx).map_err(|_| mcx.oom(0))?;
+        // SAFETY: `boxed` is allocated in `mcx` (= estate.es_query_cxt). The
+        // side-channel TriggerData that borrows this tuple is installed and
+        // dropped within the enclosing `after_trigger_execute` call, which runs
+        // inside the same query context, so the data outlives all reads.
+        let extended: mcx::PgBox<'static, HeapTupleData<'static>> =
+            unsafe { core::mem::transmute(boxed) };
+        Ok(extended)
+    } else {
+        Err(PgError::error(
+            "failed to fetch tuple1 for AFTER trigger".to_string(),
+        ))
+    };
+
+    // ReleaseBuffer(userbuf) — drop the pin heap_fetch left on success.
+    if types_storage::buf::BufferIsValid(fetched.userbuf) {
+        backend_storage_buffer_bufmgr_seams::release_buffer::call(fetched.userbuf);
+    }
+    rel.close(NoLock)?;
+    result
 }
 
 /// Build the minimal `tg_trigger` box `exec_call_trigger_func` dispatches on
-/// (only `tgfoid` is read).
-fn make_dispatch_trigger(
-    _tgoid: Oid,
-    _tgfoid: Oid,
-    _tgtype: i16,
-) -> Option<mcx::PgBox<'static, Trigger<'static>>> {
-    // A `PgBox<'static, Trigger>` needs a `'static` Mcx, which the backend-global
-    // firing path does not own. The full row-firing path that would build this
-    // is gated on the WHEN-qual / slot substrate; this back-half by-Oid path is
-    // itself gated above (trigger_result_rel_open / fetch). Returning None keeps
-    // the (unreachable) dispatch honest.
-    None
-}
-
-/// Deep-clone one `Trigger` into a `'static` value (the firing-cache copy).
-/// Cloning a `Trigger<'mcx>` requires an `Mcx` for its owned strings/arrays;
-/// the backend-global firing path has none, so this back-half is reached only
-/// through the gated `trigger_result_rel_open`, which never returns a populated
-/// `triggers` Vec. Kept as the 1:1 analogue of the C struct copy.
-fn clone_trigger(_trigger: &Trigger<'static>) -> DispatchTrigger {
-    DispatchTrigger {
-        tgoid: 0,
-        tgfoid: 0,
-        tgtype: 0,
-    }
+/// (only `tgfoid` is read). Allocated in `mcx` and lifetime-extended to
+/// `'static` for the side-channel, on the same grounds as `fetch_trigger_tuple`.
+fn make_dispatch_trigger<'mcx>(
+    mcx: Mcx<'mcx>,
+    tgoid: Oid,
+    tgfoid: Oid,
+    tgtype: i16,
+) -> PgResult<Option<mcx::PgBox<'static, Trigger<'static>>>> {
+    use mcx::{PgString, PgVec};
+    // A minimal Trigger carrying the dispatch facts exec_call_trigger_func reads
+    // (tgfoid) plus the type bits the RI/builtin accessors may read off the
+    // side-channel.
+    let trig = Trigger {
+        tgoid,
+        tgname: PgString::new_in(mcx),
+        tgfoid,
+        tgtype,
+        tgenabled: 0,
+        tgisinternal: false,
+        tgisclone: false,
+        tgconstrrelid: INVALID_OID,
+        tgconstrindid: INVALID_OID,
+        tgconstraint: INVALID_OID,
+        tgdeferrable: false,
+        tginitdeferred: false,
+        tgnargs: 0,
+        tgnattr: 0,
+        tgattr: PgVec::new_in(mcx),
+        tgargs: PgVec::new_in(mcx),
+        tgqual: None,
+        tgoldtable: None,
+        tgnewtable: None,
+    };
+    let boxed: mcx::PgBox<'mcx, Trigger<'mcx>> =
+        mcx::PgBox::try_new_in(trig, mcx).map_err(|_| mcx.oom(0))?;
+    // SAFETY: see fetch_trigger_tuple — allocated in the query context that
+    // outlives the side-channel install/drop.
+    let extended: mcx::PgBox<'static, Trigger<'static>> = unsafe { core::mem::transmute(boxed) };
+    Ok(Some(extended))
 }
 
 /// The minimal trigger facts `after_trigger_execute` reads (the C
@@ -406,11 +495,12 @@ pub fn after_trigger_mark_events(
 pub fn after_trigger_invoke_events(
     events: &mut EventList,
     firing_id: CommandId,
-    _estate: &mut EStateData<'_>,
+    estate: &mut EStateData<'_>,
     _delete_ok: bool,
 ) -> PgResult<bool> {
     let mut all_fired = true;
     let mut cur: Option<TriggerResultRel> = None;
+    let mcx = estate.es_query_cxt;
 
     let n = events.events.len();
     for i in 0..n {
@@ -424,7 +514,7 @@ pub fn after_trigger_invoke_events(
                 .map(|c| c.relid != evtshared.ats_relid)
                 .unwrap_or(true);
             if need_reopen {
-                cur = Some(trigger_result_rel_open(evtshared.ats_relid)?);
+                cur = Some(trigger_result_rel_open(mcx, evtshared.ats_relid)?);
             }
             let rel = cur.as_mut().expect("trigger result relation is open");
 
@@ -433,7 +523,7 @@ pub fn after_trigger_invoke_events(
             }
 
             let event = events.events[i];
-            after_trigger_execute(rel, &event, &evtshared)?;
+            after_trigger_execute(mcx, rel, &event, &evtshared)?;
 
             events.events[i].ate_flags &= !AFTER_TRIGGER_IN_PROGRESS;
             events.events[i].ate_flags |= AFTER_TRIGGER_DONE;
@@ -703,8 +793,8 @@ fn exec_ir_insert_triggers_impl<'mcx>(
 fn exec_ar_insert_triggers_impl<'mcx>(
     estate: &mut EStateData<'mcx>,
     relinfo: types_nodes::RriId,
-    _slot: types_nodes::SlotId,
-    _recheck_indexes: &[Oid],
+    slot: types_nodes::SlotId,
+    recheck_indexes: &[Oid],
     tc: Option<&mut types_nodes::modifytable::TransitionCaptureState>,
 ) -> PgResult<()> {
     // The FDW + transition-capture guard reads ri_FdwRoutine (not carried on the
@@ -721,7 +811,202 @@ fn exec_ar_insert_triggers_impl<'mcx>(
     if !has_ar_row && !tc_new_table {
         return Ok(());
     }
-    front_half("ExecARInsertTriggers", 2544)
+    // Transition tables are firing substrate (GetAfterTriggersTransitionTable /
+    // TransitionTableAddTuple); a present transition_capture means the
+    // transition-table leg is needed, which is not ported.
+    if tc.is_some() {
+        return Err(transition_table_unported());
+    }
+    // AfterTriggerSaveEvent(estate, relinfo, NULL, NULL, TRIGGER_EVENT_INSERT,
+    //                       true, NULL, slot, recheckIndexes, NULL, NULL, false);
+    after_trigger_save_event(
+        estate,
+        relinfo,
+        TRIGGER_EVENT_INSERT,
+        /* row_trigger */ true,
+        /* newslot */ Some(slot),
+        recheck_indexes,
+    )
+}
+
+// ===========================================================================
+// AfterTriggerSaveEvent (trigger.c:4925) — queue the after-trigger events.
+//
+// Ported for the reachable INSERT/DELETE/UPDATE *row* path on a regular
+// (non-FDW, non-partitioned) table with no transition tables. The
+// transition-capture, FDW-tuplestore, cross-partition root-conversion, and
+// statement-level (cancel_prior_stmt_triggers) legs are firing substrate and
+// loud-guarded by the callers / below.
+// ===========================================================================
+
+/// `AfterTriggerSaveEvent(...)` (trigger.c:4925) for the regular-table row path.
+///
+/// The big C signature collapses: `src_partinfo`/`dst_partinfo` (cross-partition
+/// update), `oldslot`/`modifiedCols` (UPDATE/DELETE column set), and
+/// `transition_capture` are not threaded on this reachable INSERT-row leg (the
+/// caller guards transition capture). `recheck_indexes` is needed for the
+/// deferred-unique-constraint skip (`F_UNIQUE_KEY_RECHECK`).
+fn after_trigger_save_event<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    relinfo: types_nodes::RriId,
+    event: u32,
+    row_trigger: bool,
+    newslot: Option<types_nodes::SlotId>,
+    recheck_indexes: &[Oid],
+) -> PgResult<()> {
+    use types_catalog::pg_trigger::{
+        TRIGGER_TYPE_AFTER, TRIGGER_TYPE_INSERT, TRIGGER_TYPE_MATCHES, TRIGGER_TYPE_ROW,
+    };
+    use types_nodes::trigger::{
+        AFTER_TRIGGER_1CTID, AFTER_TRIGGER_DEFERRABLE, AFTER_TRIGGER_INITDEFERRED,
+    };
+
+    // if (afterTriggers.query_depth < 0) elog(ERROR, "... outside of query");
+    let query_depth = with_after_triggers(|at| at.query_depth);
+    if query_depth < 0 {
+        return Err(PgError::error(
+            "AfterTriggerSaveEvent() called outside of query".to_string(),
+        ));
+    }
+    // Be sure we have enough space to record events at this query depth.
+    with_after_triggers(|at| crate::queue::after_trigger_enlarge_query_state(at));
+
+    // relkind / relid of the target relation.
+    let rel_oid = estate
+        .result_rel(relinfo)
+        .ri_RelationDesc
+        .as_ref()
+        .map(|r| r.rd_id)
+        .expect("AfterTriggerSaveEvent: ResultRelInfo has no relation");
+    let relkind = estate
+        .result_rel(relinfo)
+        .ri_RelationDesc
+        .as_ref()
+        .map(|r| r.rd_rel.relkind)
+        .expect("AfterTriggerSaveEvent: ResultRelInfo has no relation");
+
+    // Only the reachable INSERT-row path is ported here; other events are
+    // queued only by the (loud-guarded) UPDATE/DELETE front-halves.
+    if !(row_trigger && event == TRIGGER_EVENT_INSERT) {
+        return Err(PgError::error(
+            "AfterTriggerSaveEvent: only the row-level INSERT event is ported \
+             (UPDATE/DELETE/statement/cross-partition save legs not yet ported)"
+                .to_string(),
+        ));
+    }
+    if relkind as i8 == RELKIND_FOREIGN_TABLE {
+        return Err(fdw_tuple_fetch_unported());
+    }
+
+    // Validate the event and collect the tuple CTID (INSERT row case).
+    // ItemPointerCopy(&newslot->tts_tid, &new_event.ate_ctid1);
+    let newslot = newslot.expect("AfterTriggerSaveEvent: INSERT row event needs a newslot");
+    let ctid1 = estate.slot(newslot).tts_tid;
+    let mut new_event = types_nodes::trigger::AfterTriggerEventData {
+        // new_event.ate_flags = AFTER_TRIGGER_1CTID (non-FDW, non-UPDATE row).
+        ate_flags: AFTER_TRIGGER_1CTID,
+        ate_ctid1: ctid1,
+        ate_ctid2: ItemPointerData::default(),
+        ate_src_part: INVALID_OID,
+        ate_dst_part: INVALID_OID,
+    };
+
+    let tgtype_event = TRIGGER_TYPE_INSERT;
+    let tgtype_level = TRIGGER_TYPE_ROW;
+    let user_id = backend_utils_init_miscinit::GetUserId();
+
+    // for (i = 0; i < trigdesc->numtriggers; i++) { ... afterTriggerAddEvent }
+    // Collect the matching triggers first (immutable borrow of estate), then add
+    // events into the query-level list.
+    let trigs: Vec<(Oid, bool, bool, Oid, Oid)> = {
+        let rri = estate.result_rel(relinfo);
+        let trigdesc = rri
+            .ri_TrigDesc
+            .as_ref()
+            .expect("AfterTriggerSaveEvent: ri_TrigDesc is NULL but event reached save");
+        let mut out = Vec::new();
+        for trig in trigdesc.triggers.iter() {
+            if !TRIGGER_TYPE_MATCHES(trig.tgtype, tgtype_level, TRIGGER_TYPE_AFTER, tgtype_event) {
+                continue;
+            }
+            // TriggerEnabled(estate, relinfo, trigger, event, ...). The WHEN-clause
+            // (tgqual) leg compiles an ExprState (ExecPrepareQual / stringToNode),
+            // which is the #159 plan-layer gate — keep it loud. The no-WHEN common
+            // case is the replication-role / tgenabled check below.
+            if trig.tgqual.is_some() {
+                return Err(when_qual_unported());
+            }
+            if !trigger_enabled_no_qual(trig.tgenabled) {
+                continue;
+            }
+            // RI-trigger skip (RI_FKey_trigger_type) and F_UNIQUE_KEY_RECHECK skip
+            // only matter for UPDATE/DELETE / unique-constraint triggers; a plain
+            // user AFTER INSERT trigger is RI_TRIGGER_NONE on INSERT, so no skip.
+            out.push((
+                trig.tgoid,
+                trig.tgdeferrable,
+                trig.tginitdeferred,
+                trig.tgconstrindid,
+                trig.tgfoid,
+            ));
+        }
+        out
+    };
+    let _ = recheck_indexes; // only consulted for F_UNIQUE_KEY_RECHECK triggers
+
+    let qd = query_depth as usize;
+    for (tgoid, tgdeferrable, tginitdeferred, _tgconstrindid, _tgfoid) in trigs {
+        let new_shared = SharedRecord {
+            ats_event: (event & TRIGGER_EVENT_OPMASK)
+                | (if row_trigger { TRIGGER_EVENT_ROW } else { 0 })
+                | (if tgdeferrable { AFTER_TRIGGER_DEFERRABLE } else { 0 })
+                | (if tginitdeferred { AFTER_TRIGGER_INITDEFERRED } else { 0 }),
+            ats_tgoid: tgoid,
+            ats_relid: rel_oid,
+            ats_rolid: user_id,
+            ats_firing_id: 0,
+            ats_modifiedcols: None,
+            ats_has_table: false,
+        };
+        with_after_triggers(|at| {
+            crate::queue::after_trigger_add_event(
+                &mut at.query_stack[qd].events,
+                new_event,
+                &new_shared,
+            );
+        });
+    }
+    let _ = &mut new_event;
+    Ok(())
+}
+
+/// The no-WHEN portion of `TriggerEnabled` (trigger.c): the replication-role /
+/// `tgenabled` firing-control check. (The column-specific `tgattr` check only
+/// fires for UPDATE; the WHEN `tgqual` leg is handled by the caller as the
+/// #159-gated path.)
+fn trigger_enabled_no_qual(tgenabled: i8) -> bool {
+    use types_catalog::pg_trigger::{
+        TRIGGER_DISABLED, TRIGGER_FIRES_ON_ORIGIN, TRIGGER_FIRES_ON_REPLICA,
+    };
+    // SessionReplicationRole: this port runs in the ORIGIN/LOCAL role (replica
+    // apply is a separate path), so a TRIGGER_FIRES_ON_REPLICA / TRIGGER_DISABLED
+    // trigger is skipped; ORIGIN/ALWAYS fires.
+    if tgenabled == TRIGGER_FIRES_ON_REPLICA || tgenabled == TRIGGER_DISABLED {
+        return false;
+    }
+    let _ = TRIGGER_FIRES_ON_ORIGIN;
+    true
+}
+
+#[cold]
+#[inline(never)]
+fn when_qual_unported() -> PgError {
+    PgError::error(
+        "TriggerEnabled: a WHEN-clause (tgqual) trigger needs ExecPrepareQual / \
+         stringToNode to compile the predicate into ri_TrigWhenExprs (the #159 \
+         plan-layer expression gate) — not ported"
+            .to_string(),
+    )
 }
 
 // ---- ROW DELETE (trigger.c:2702-2849) ----
@@ -1023,29 +1308,6 @@ fn item_pointer_is_valid(p: &ItemPointerData) -> bool {
 
 #[cold]
 #[inline(never)]
-fn exec_get_trigger_result_rel_unported() -> PgError {
-    PgError::error(
-        "AfterTriggerExecute/afterTriggerInvokeEvents: ExecGetTriggerResultRel re-resolves \
-         the target relation's TriggerDesc by Oid, but the per-relation TriggerDesc is built \
-         by RelationBuildTriggers (catalog-read DDL leg) and is not readable from the relcache \
-         by Oid yet"
-            .to_string(),
-    )
-}
-
-#[cold]
-#[inline(never)]
-fn per_row_fetch_unported() -> PgError {
-    PgError::error(
-        "AfterTriggerExecute: per-row AFTER-trigger tuple re-fetch \
-         (table_tuple_fetch_row_version / heap_fetch under SnapshotAny) needs a booted buffer \
-         manager + a per-query Mcx/Relation, not reachable from the backend-global firing path"
-            .to_string(),
-    )
-}
-
-#[cold]
-#[inline(never)]
 fn fdw_tuple_fetch_unported() -> PgError {
     PgError::error(
         "AfterTriggerExecute: FDW / foreign-table after-trigger tuple sourcing \
@@ -1094,6 +1356,13 @@ pub fn init_seams() {
     // Transaction / subtransaction lifecycle.
     s::after_trigger_begin_xact::set(after_trigger_begin_xact_impl);
     s::after_trigger_fire_deferred::set(after_trigger_fire_deferred_impl);
+
+    // Per-query firing bracket (ExecutorStart / ExecutorFinish).
+    s::after_trigger_begin_query::set(|| {
+        crate::queue::after_trigger_begin_query();
+        Ok(())
+    });
+    s::after_trigger_end_query::set(after_trigger_end_query);
     s::after_trigger_end_xact::set(after_trigger_end_xact_impl);
     s::after_trigger_begin_sub_xact::set(after_trigger_begin_sub_xact_impl);
     s::after_trigger_end_sub_xact::set(after_trigger_end_sub_xact_impl);
@@ -1140,7 +1409,6 @@ pub fn init_seams() {
 /// only through the gated by-Oid path (kept 1:1 with the C call graph).
 #[allow(dead_code)]
 fn _firing_helpers_used() {
-    let _ = clone_trigger as fn(&Trigger<'static>) -> DispatchTrigger;
     let _ = deferred_ddl as fn(&str, u32) -> !;
     let _ = trigger_not_found as fn(&str, &str) -> PgError;
 }

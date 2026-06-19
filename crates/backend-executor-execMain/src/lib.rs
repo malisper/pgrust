@@ -95,6 +95,7 @@ use types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber;
 
 // EState eflags (executor/executor.h). Mirrored locally; there is no canonical
 // shared constant yet (other node crates likewise define them locally).
+const EXEC_FLAG_EXPLAIN_ONLY: i32 = 0x0001;
 const EXEC_FLAG_REWIND: i32 = 0x0004;
 const EXEC_FLAG_BACKWARD: i32 = 0x0008;
 const EXEC_FLAG_MARK: i32 = 0x0010;
@@ -246,8 +247,12 @@ pub fn standard_ExecutorStart(query_desc: &mut QueryDesc, mut eflags: i32) -> Pg
         Ok::<(), types_error::PgError>(())
     })?;
 
-    // AfterTriggerBeginQuery() unless SKIP_TRIGGERS / EXPLAIN_ONLY — SKIP_TRIGGERS
-    // is set for the plain SELECT above, so it is elided (faithful no-op).
+    // AfterTriggerBeginQuery() unless SKIP_TRIGGERS / EXPLAIN_ONLY. For a plain
+    // SELECT, SKIP_TRIGGERS is set above, so this is elided; for a DML query
+    // with triggers it opens the after-trigger query level.
+    if (eflags & (EXEC_FLAG_SKIP_TRIGGERS | EXEC_FLAG_EXPLAIN_ONLY)) == 0 {
+        backend_commands_trigger_seams::after_trigger_begin_query::call()?;
+    }
 
     // InitPlan(queryDesc, eflags).
     InitPlan(query_desc, eflags)
@@ -730,8 +735,16 @@ pub fn standard_ExecutorFinish(query_desc: &mut QueryDesc) -> PgResult<()> {
              (secondary ModifyTable nodes) not wired — #167 F0d"
         );
     }
-    // AfterTriggerEndQuery(estate) unless SKIP_TRIGGERS — SKIP_TRIGGERS is set for
-    // the plain SELECT, so it is elided (faithful no-op).
+    // AfterTriggerEndQuery(estate) unless SKIP_TRIGGERS — fires this query
+    // level's AFTER IMMEDIATE events. SKIP_TRIGGERS is set for the plain SELECT,
+    // so it is elided there.
+    let skip_triggers =
+        query_desc.work.with(|w| (w.estate.es_top_eflags & EXEC_FLAG_SKIP_TRIGGERS) != 0);
+    if !skip_triggers {
+        query_desc.with_estate_mut(|estate| {
+            backend_commands_trigger_seams::after_trigger_end_query::call(estate)
+        })?;
+    }
     query_desc.with_estate_mut(|estate| {
         estate.es_finished = true;
     });
@@ -1265,7 +1278,8 @@ fn InitResultRelInfo<'mcx>(
     partition_root_rri: Option<types_nodes::RriId>,
     instrument_options: i32,
 ) -> PgResult<()> {
-    let _ = (mcx, instrument_options);
+    let _ = instrument_options;
+    let qcx = mcx;
 
     // MemSet(resultRelInfo, 0, sizeof(ResultRelInfo)); — start from the
     // zero-initialized shape, then set the fields below.
@@ -1284,12 +1298,31 @@ fn InitResultRelInfo<'mcx>(
     // (rd_trigdesc == NULL); the trigger-carrying case needs CopyTriggerDesc
     // (trigger.c) plus the trimmed-away ri_TrigFunctions/ri_TrigWhenExprs/
     // ri_TrigInstrument arrays, which are not modeled here.
-    if relation.rd_trigdesc.is_some() {
-        return Err(unported(
-            "InitResultRelInfo: ResultRelInfo for a relation with triggers \
-             (CopyTriggerDesc + ri_TrigFunctions/ri_TrigWhenExprs are not \
-             carried on the trimmed ResultRelInfo)",
-        ));
+    if let Some(trigdesc) = relation.rd_trigdesc.as_ref() {
+        // resultRelInfo->ri_TrigDesc = CopyTriggerDesc(resultRelationDesc->trigdesc);
+        let copied = trigdesc.clone_in(qcx)?;
+
+        // resultRelInfo->ri_TrigFunctions = palloc0(n * sizeof(FmgrInfo));
+        // resultRelInfo->ri_TrigWhenExprs = palloc0(n * sizeof(ExprState *));
+        // The FmgrInfo cache collapses (function_call_invoke re-resolves by OID);
+        // only the WHEN-clause ExprState array is carried, palloc0'd to numtriggers
+        // (all None = "not yet compiled"), lazily filled by TriggerEnabled.
+        let n = copied.numtriggers as usize;
+        let mut when_exprs: mcx::PgVec<'mcx, Option<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>> =
+            mcx::PgVec::new_in(qcx);
+        when_exprs.try_reserve(n).map_err(|_| qcx.oom(n))?;
+        for _ in 0..n {
+            when_exprs.push(None);
+        }
+        result_rel_info.ri_TrigWhenExprs = Some(when_exprs);
+
+        // Mirror the row-level summary flags ports read directly.
+        result_rel_info.ri_has_trigdesc = true;
+        result_rel_info.ri_trig_update_before_row = copied.trig_update_before_row;
+        result_rel_info.ri_trig_update_instead_row = copied.trig_update_instead_row;
+        result_rel_info.ri_trig_update_after_row = copied.trig_update_after_row;
+        result_rel_info.ri_TrigDesc =
+            Some(mcx::PgBox::try_new_in(copied, qcx).map_err(|_| qcx.oom(0))?);
     }
     // else: ri_TrigDesc / ri_has_trigdesc / ri_trig_* stay at their default
     // (None / false) — the C NULL trigger desc.
