@@ -4416,6 +4416,7 @@ dependencies = [
  "types-acl",
  "types-array",
  "types-cache",
+ "types-catalog",
  "types-core",
  "types-datum",
  "types-error",
