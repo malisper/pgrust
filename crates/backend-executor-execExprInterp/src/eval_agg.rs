@@ -555,17 +555,20 @@ pub fn ExecEvalAggOrderedTransDatum<'mcx>(
         .steps
         .as_ref()
         .expect("ExecEvalAggOrderedTransDatum: steps not ready");
-    let (pertrans, setno) = match &steps[op].d {
-        ExprEvalStepData::AggTrans { pertrans, setno, .. } => (*pertrans, *setno),
+    let (pertrans, setno, resvalue_id) = match &steps[op].d {
+        ExprEvalStepData::AggTrans { pertrans, setno, .. } => {
+            (*pertrans, *setno, steps[op].resvalue)
+        }
         _ => unreachable!("ExecEvalAggOrderedTransDatum: step is not EEOP_AGG_ORDERED_TRANS_DATUM"),
     };
 
     // tuplesort_putdatum(pertrans->sortstates[setno], *op->resvalue, *op->resnull);
-    // The seam now takes the canonical `Datum<'mcx>`; clone the result cell's
-    // value out before re-borrowing `state` to fetch the sortstate.
-    let cell = state.result_cells.get(steps[op].resvalue);
-    let value = cell.value.clone();
-    let isnull = cell.isnull;
+    // `op->resvalue` is STATE_RESULT_CELL (the trans value the preceding sub-steps
+    // wrote into `&state->resvalue`), so read it through `read_cell`, which routes
+    // the sentinel to `state.resvalue`/`resnull` (a bare arena read would deref a
+    // dead slot 0). Clone the value out before re-borrowing `state` for sortstate.
+    let (value, isnull) = crate::interp_loop::read_cell(state, resvalue_id);
+    let value = value.clone();
 
     let sortstate = ordered_sortstate(state, pertrans, setno)?;
     tuplesort_putdatum::call(sortstate, value, isnull)

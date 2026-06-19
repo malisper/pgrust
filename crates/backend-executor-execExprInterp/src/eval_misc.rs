@@ -7,7 +7,7 @@
 // into the canonical by-value arm.
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::{PgError, PgResult};
-use types_nodes::execexpr::{ExprEvalStepData, ExprState, ResultCell};
+use types_nodes::execexpr::{ExprEvalStepData, ExprState};
 use types_nodes::execnodes::EcxtId;
 use types_nodes::nodes::CmdType;
 use types_nodes::EStateData;
@@ -153,13 +153,10 @@ pub fn ExecEvalGroupingFunc<'mcx>(
 
     // *op->resvalue = Int32GetDatum(result);
     // *op->resnull = false;
-    state.result_cells.set(
-        resvalue_id,
-        ResultCell {
-            value: Datum::from_i32(result),
-            isnull: false,
-        },
-    );
+    // Route through write_cell so a top-level GROUPING() (resvalue ==
+    // STATE_RESULT_CELL) writes the ExprState's own resvalue/resnull rather than a
+    // dead arena slot 0 the assign never reads.
+    crate::interp_loop::write_cell(state, resvalue_id, Datum::from_i32(result), false);
     Ok(())
 }
 
@@ -229,12 +226,9 @@ pub fn ExecEvalMergeSupportFunc<'mcx>(
     };
 
     // *op->resvalue = ...; *op->resnull = false;
-    state.result_cells.set(
-        resvalue_id,
-        ResultCell {
-            value: Datum::ByVal(value.as_usize()),
-            isnull: false,
-        },
-    );
+    // Route through write_cell: a top-level MERGE-support RETURNING expression has
+    // resvalue == STATE_RESULT_CELL, which must land in the ExprState's own
+    // resvalue/resnull, not a dead arena slot 0.
+    crate::interp_loop::write_cell(state, resvalue_id, Datum::ByVal(value.as_usize()), false);
     Ok(())
 }
