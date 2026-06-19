@@ -340,10 +340,7 @@ pub fn ExecInitTableFuncScan<'mcx>(
     // TableFuncScan *node — the enclosing plan-tree node (the C `TableFuncScan
     // *` is the same pointer, via struct embedding). Panics if it is not a
     // `TableFuncScan` (the C `castNode`).
-    let tfscan: &'mcx TableFuncScan<'mcx> = match node {
-        types_nodes::nodes::Node::TableFuncScan(t) => t,
-        other => panic!("castNode(TableFuncScan, node) failed: {other:?}"),
-    };
+    let tfscan: &'mcx TableFuncScan<'mcx> = node.expect_tablefuncscan();
     let tf = &tfscan.tablefunc;
 
     // check for unsupported flags
@@ -928,7 +925,7 @@ fn node_econtext(tstate: &TableFuncScanState<'_>) -> EcxtId {
 #[inline]
 fn plan_ordinalitycol(tstate: &TableFuncScanState<'_>) -> i32 {
     match tstate.ss.ps.plan {
-        Some(types_nodes::nodes::Node::TableFuncScan(t)) => t.tablefunc.ordinalitycol,
+        Some(p) => p.expect_tablefuncscan().tablefunc.ordinalitycol,
         _ => panic!("TableFuncScan: plan is not a TableFuncScan node"),
     }
 }
