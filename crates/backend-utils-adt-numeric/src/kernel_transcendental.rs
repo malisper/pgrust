@@ -848,7 +848,11 @@ pub fn power_var<'mcx>(
 /// `power_var_int` below. Mirrors the C `f`/rscale computation exactly.
 fn power_var_int_rscale(base: &NumericVar<'_>, exp: i32, exp_dscale: i32) -> i32 {
     let f = power_var_int_f(base, exp);
-    let mut rscale = NUMERIC_MIN_SIG_DIGITS - f as i32;
+    // C: `rscale = NUMERIC_MIN_SIG_DIGITS - (int) f`. `(int) f` of an
+    // out-of-`int`-range `f` is UB in C but is immediately clamped by the
+    // `max`/`min` below; saturate the cast and subtraction so an extreme
+    // (under/overflowing) `f` cannot panic in debug builds.
+    let mut rscale = NUMERIC_MIN_SIG_DIGITS.saturating_sub(f as i32);
     rscale = max(rscale, base.dscale);
     rscale = max(rscale, exp_dscale);
     rscale = max(rscale, NUMERIC_MIN_DISPLAY_SCALE);

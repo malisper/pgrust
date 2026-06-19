@@ -137,8 +137,13 @@ pub fn set_var_from_num<'mcx>(mcx: Mcx<'mcx>, num: &[u8]) -> PgResult<NumericVar
 /// interface to [`make_result_opt_error`] without the `have_error` argument.
 /// (numeric.c:8010)
 pub fn make_result<'mcx>(mcx: Mcx<'mcx>, var: &NumericVar<'_>) -> PgResult<PgVec<'mcx, u8>> {
-    make_result_opt_error(mcx, var)?
-        .ok_or_else(|| PgError::error("make_result: make_result_opt_error returned None without error"))
+    // C: make_result(var) == make_result_opt_error(var, NULL); the NULL
+    // `have_error` path raises "value overflows numeric format" on int16
+    // field overflow (numeric.c:7987).
+    make_result_opt_error(mcx, var)?.ok_or_else(|| {
+        PgError::error("value overflows numeric format")
+            .with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
+    })
 }
 
 /// `make_result_opt_error(var, &have_error)`: build the packed on-disk

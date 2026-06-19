@@ -14,11 +14,10 @@
 //! `pg_proc.dat` (rows 1773-1776).
 //!
 //! The `numeric` overloads (`to_char(numeric, text)` 1772, `to_number` 1777)
-//! are NOT registered here: their argument and/or result is `numeric`, a
-//! by-reference on-disk image whose fmgr-frame encoding (`numeric` varlena ->
-//! `NumericVar`) is not the by-value scalar lane these `fc_` adapters cover; the
-//! `*_boundary` entries already marshal them for the executor, but the
-//! registry-frame `numeric` carrier is out of scope for this row set.
+//! are registered via [`fc_numeric_to_char`] / [`fc_numeric_to_number`], which
+//! read the by-reference `numeric`/`text` images off the by-ref lane and hand
+//! them to the `*_boundary` marshal entries (whose `numeric` varlena ->
+//! `NumericVar` decode is the same one the executor uses).
 
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
@@ -278,6 +277,55 @@ fn fc_to_timestamp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     }
 }
 
+/// `numeric_to_char(numeric, text) -> text` (oid 1772). Arg 0 is the by-ref
+/// `numeric` image, arg 1 the by-ref `text` format; the `text` result goes back
+/// on the by-ref lane.
+fn fc_numeric_to_char(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let collid = fcinfo.fncollation;
+    let num_payload = arg_text_payload(fcinfo, 0);
+    let fmt_payload = arg_text_payload(fcinfo, 1);
+    let m = scratch_mcx();
+    let bytes: Vec<u8> = {
+        let num = FmgrArg::Ref(&num_payload);
+        let fmt = FmgrArg::Ref(&fmt_payload);
+        match crate::fmgr_boundary::numeric_to_char_boundary(m.mcx(), &num, &fmt, collid) {
+            Ok(image) => image.as_slice().to_vec(),
+            Err(e) => raise(e),
+        }
+    };
+    fcinfo.set_ref_result(RefPayload::Varlena(bytes));
+    Datum::from_usize(0)
+}
+
+/// `to_number(text, text) -> numeric` (oid 1777). Both args are by-ref `text`;
+/// the `numeric` result goes back on the by-ref lane, or SQL NULL for the C
+/// `PG_RETURN_NULL()` empty/oversized-format arm.
+fn fc_numeric_to_number(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let collid = fcinfo.fncollation;
+    let value_payload = arg_text_payload(fcinfo, 0);
+    let fmt_payload = arg_text_payload(fcinfo, 1);
+    let m = scratch_mcx();
+    let result: Option<Vec<u8>> = {
+        let value = FmgrArg::Ref(&value_payload);
+        let fmt = FmgrArg::Ref(&fmt_payload);
+        match crate::fmgr_boundary::numeric_to_number_boundary(m.mcx(), &value, &fmt, collid) {
+            Ok(Some(image)) => Some(image.as_slice().to_vec()),
+            Ok(None) => None,
+            Err(e) => raise(e),
+        }
+    };
+    match result {
+        Some(bytes) => {
+            fcinfo.set_ref_result(RefPayload::Varlena(bytes));
+            Datum::from_usize(0)
+        }
+        None => {
+            fcinfo.isnull = true;
+            Datum::from_usize(0)
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -316,5 +364,7 @@ pub fn register_formatting_builtins() {
         builtin(2049, "timestamp_to_char", 2, true, false, fc_timestamp_to_char),
         builtin(1780, "to_date", 2, true, false, fc_to_date),
         builtin(1778, "to_timestamp", 2, true, false, fc_to_timestamp),
+        builtin(1772, "numeric_to_char", 2, true, false, fc_numeric_to_char),
+        builtin(1777, "numeric_to_number", 2, true, false, fc_numeric_to_number),
     ]);
 }
