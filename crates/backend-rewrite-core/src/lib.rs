@@ -116,6 +116,21 @@ pub fn init_seams() {
         replace::map_variable_attnos_expr_list(mcx, exprs, attmap)
     });
 
+    s::map_variable_attnos_node::set(
+        |mcx, mut node, target_varno, sublevels_up, attmap, to_rowtype| {
+            let mut found_whole_row = false;
+            replace::map_variable_attnos(
+                &mut *node,
+                target_varno,
+                sublevels_up,
+                attmap,
+                to_rowtype,
+                &mut found_whole_row,
+            )?;
+            Ok((node, found_whole_row))
+        },
+    );
+
     // rewriteSupport.c
     backend_rewrite_rewritesupport_seams::get_rewrite_oid::set(support::get_rewrite_oid);
     backend_rewrite_rewritesupport_seams::SetRelationRuleStatus::set(support::SetRelationRuleStatus);

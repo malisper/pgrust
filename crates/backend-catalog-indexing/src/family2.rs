@@ -86,6 +86,7 @@ const ANUM_PG_CLASS_RELALLFROZEN: i16 = 13;
 const ANUM_PG_CLASS_RELTOASTRELID: i16 = 14;
 const ANUM_PG_CLASS_RELHASINDEX: i16 = 15;
 const ANUM_PG_CLASS_RELHASRULES: i16 = 21;
+const ANUM_PG_CLASS_RELHASSUBCLASS: i16 = 23;
 const ANUM_PG_CLASS_RELROWSECURITY: i16 = 24;
 const ANUM_PG_CLASS_RELFORCEROWSECURITY: i16 = 25;
 
@@ -974,6 +975,45 @@ fn set_relation_rule_status(
             &form,
         )?;
     }
+    Ok(true)
+}
+
+/// `SetRelationHasSubclass` catalog body (tablecmds.c:3647): open pg_class
+/// RowExclusiveLock, `SearchSysCacheCopy1(RELOID, relid)`; if
+/// `relhassubclass != relhassubclass`, set the field and `CatalogTupleUpdate`,
+/// otherwise `CacheInvalidateRelcacheByTuple` to force a relcache rebuild
+/// anyway. Returns `HeapTupleIsValid(tuple)`. Same update-or-invalidate shape
+/// as `set_relation_rule_status`; the field-write must run against the owner's
+/// full pg_class copy here, not the trimmed command-layer `PgClassForm`.
+fn set_relation_has_subclass_catalog(relid: Oid, relhassubclass: bool) -> PgResult<bool> {
+    let ctx = MemoryContext::new("set_relation_has_subclass_catalog");
+    let mcx = ctx.mcx();
+    let pg_class = table_open(mcx, cat::catalog::RELATION_RELATION_ID, RowExclusiveLock)?;
+    let Some(oldtup) = fetch_by_oid(mcx, &pg_class, ANUM_PG_CLASS_OID, relid)? else {
+        pg_class.close(RowExclusiveLock)?;
+        return Ok(false);
+    };
+    let (values, nulls) = deform(mcx, &pg_class, &oldtup)?;
+    let cur = values[(ANUM_PG_CLASS_RELHASSUBCLASS - 1) as usize].as_bool();
+    if cur != relhassubclass {
+        let mut values = values;
+        let mut nulls = nulls;
+        let mut replaces = vec![false; values.len()];
+        set_col(
+            &mut values,
+            &mut nulls,
+            &mut replaces,
+            ANUM_PG_CLASS_RELHASSUBCLASS,
+            Datum::from_bool(relhassubclass),
+        );
+        modify_and_update(mcx, &pg_class, &oldtup, &values, &nulls, &replaces)?;
+    } else {
+        // CacheInvalidateRelcacheByTuple(tuple): relisshared is column 16.
+        let relisshared = values[(16 - 1) as usize].as_bool();
+        let form = pg_class_form_for_inval(relid, relisshared);
+        backend_utils_cache_inval_seams::cache_invalidate_relcache_by_pg_class::call(relid, &form)?;
+    }
+    pg_class.close(RowExclusiveLock)?;
     Ok(true)
 }
 
@@ -2597,4 +2637,19 @@ pub fn install() {
     // `index_update_stats` seam is declared on `backend-catalog-index-seams`
     // (index.c's owner), installed here because this is the pg_class-write layer.
     backend_catalog_index_seams::index_update_stats::set(index_update_stats);
+
+    // SetRelationHasSubclass catalog body (tablecmds.c): the pg_class
+    // `relhassubclass` write, declared on tablecmds-seams (its owner) but
+    // installed here, the pg_class-write layer. `Ok(false)` (no tuple) maps to
+    // the C `cache lookup failed for relation %u` elog(ERROR).
+    backend_commands_tablecmds_seams::set_relation_has_subclass_catalog::set(
+        |relid, relhassubclass| {
+            if !set_relation_has_subclass_catalog(relid, relhassubclass)? {
+                return Err(PgError::error(format!(
+                    "cache lookup failed for relation {relid}"
+                )));
+            }
+            Ok(())
+        },
+    );
 }

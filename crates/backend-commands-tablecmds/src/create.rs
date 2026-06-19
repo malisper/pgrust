@@ -1041,6 +1041,85 @@ fn store_catalog_inheritance<'mcx>(
     seam::store_catalog_inheritance_supers::call(mcx, relation_id, supers, child_is_partition)
 }
 
+/// The pg_inherits write loop of `StoreCatalogInheritance` (tablecmds.c:3521),
+/// installed as the `store_catalog_inheritance_supers` seam. `supers` is
+/// non-empty (the early NIL return is handled by the in-owner wrapper).
+pub fn store_catalog_inheritance_supers<'mcx>(
+    mcx: Mcx<'mcx>,
+    relation_id: Oid,
+    supers: &[Oid],
+    child_is_partition: bool,
+) -> PgResult<()> {
+    /*
+     * Store INHERITS information in pg_inherits using direct ancestors only.
+     * Also enter dependencies on the direct ancestors, and make sure they are
+     * marked with relhassubclass = true.
+     *
+     * table_open(InheritsRelationId, RowExclusiveLock): the StoreSingleInheritance
+     * owner takes its own lock per call, so the explicit open here only mirrors
+     * the C lifetime; the RAII handle drops at scope end (lock is xact-scoped).
+     */
+    let inh_relation = relation_open(
+        mcx,
+        types_catalog::pg_inherits::InheritsRelationId,
+        RowExclusiveLock,
+    )?;
+
+    let mut seq_number = 1i32;
+    for &parent_oid in supers.iter() {
+        store_catalog_inheritance1(mcx, relation_id, parent_oid, seq_number, child_is_partition)?;
+        seq_number += 1;
+    }
+
+    drop(inh_relation);
+    Ok(())
+}
+
+/// `StoreCatalogInheritance1` (tablecmds.c:3556): make catalog entries showing
+/// `relationId` as an inheritance child of `parentOid`.
+fn store_catalog_inheritance1<'mcx>(
+    mcx: Mcx<'mcx>,
+    relation_id: Oid,
+    parent_oid: Oid,
+    seq_number: i32,
+    child_is_partition: bool,
+) -> PgResult<()> {
+    /* store the pg_inherits row */
+    backend_catalog_pg_inherits::StoreSingleInheritance(relation_id, parent_oid, seq_number)?;
+
+    /* Store a dependency too */
+    let parentobject = object_address_set(RelationRelationId, parent_oid);
+    let childobject = object_address_set(RelationRelationId, relation_id);
+    backend_catalog_dependency_seams::record_dependency_on::call(
+        childobject,
+        parentobject,
+        child_dependency_type(child_is_partition),
+    )?;
+
+    /*
+     * Post creation hook of this inheritance (InvokeObjectPostAlterHookArg):
+     * a no-op in this port (fires only when an extension installs an
+     * object_access_hook, which never happens here).
+     */
+
+    /* Mark the parent as having subclasses. */
+    crate::smallfns::set_relation_has_subclass(mcx, parent_oid, true)?;
+
+    Ok(())
+}
+
+/// `child_dependency_type(child_is_partition)` (catalog/heap.c): partitions get
+/// an AUTO dependency, regular inheritance children a NORMAL one.
+fn child_dependency_type(
+    child_is_partition: bool,
+) -> types_catalog::catalog_dependency::DependencyType {
+    if child_is_partition {
+        types_catalog::catalog_dependency::DEPENDENCY_AUTO
+    } else {
+        types_catalog::catalog_dependency::DEPENDENCY_NORMAL
+    }
+}
+
 /// `findAttrByName(attributeName, columns)` (tablecmds.c:3609): the 1-based
 /// index of the matching column, or 0 if none.
 #[allow(dead_code)]

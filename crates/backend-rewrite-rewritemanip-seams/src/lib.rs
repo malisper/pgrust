@@ -75,3 +75,21 @@ seam_core::seam!(
         attmap: &[types_core::primitive::AttrNumber],
     ) -> PgResult<(mcx::PgVec<'mcx, types_nodes::primnodes::Expr>, bool)>
 );
+
+seam_core::seam!(
+    /// `map_variable_attnos(node, target_varno, sublevels_up, attmap, to_rowtype,
+    /// &found_whole_row)` (rewriteManip.c:1701) over a single `Node *`, as
+    /// `commands/tablecmds.c` `MergeAttributes` calls it on inherited default and
+    /// CHECK-constraint expressions. The owned model consumes the node, mutates it
+    /// in place, and returns it together with the `found_whole_row` out-parameter.
+    /// `Err` carries the rewrite `ereport(ERROR)` surface. Owned by the
+    /// `backend-rewrite-core` unit; installed from its `init_seams()`.
+    pub fn map_variable_attnos_node<'mcx>(
+        mcx: Mcx<'mcx>,
+        node: types_nodes::nodes::NodePtr<'mcx>,
+        target_varno: i32,
+        sublevels_up: i32,
+        attmap: &[types_core::primitive::AttrNumber],
+        to_rowtype: types_core::primitive::Oid,
+    ) -> PgResult<(types_nodes::nodes::NodePtr<'mcx>, bool)>
+);

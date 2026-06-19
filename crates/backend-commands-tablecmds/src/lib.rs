@@ -60,6 +60,10 @@ pub fn init_seams() {
     // but its body — the create-time reloptions transform — is F0-owned here.
     seam::transform_and_check_reloptions::set(create::transform_and_check_reloptions);
     seam::merge_attributes::set(mergeattr::merge_attributes);
+    // StoreCatalogInheritance pg_inherits write loop (tablecmds.c:3521): the
+    // CREATE TABLE ... INHERITS pg_inherits rows + dependencies + parent
+    // relhassubclass marking.
+    seam::store_catalog_inheritance_supers::set(create::store_catalog_inheritance_supers);
     seam::get_attribute_compression::set(create::get_attribute_compression);
     // set_attnotnull (tablecmds.c:8534) — the PK/NOT-NULL-implied attnotnull
     // catalog poke, called from DefineRelation's not-null merge tail.
