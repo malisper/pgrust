@@ -12,7 +12,6 @@
 use mcx::Mcx;
 use types_core::primitive::{InvalidOid, Oid};
 use types_datum::datum::Datum;
-use types_datum::NullableDatum;
 use types_error::PgResult;
 use types_pathnodes::PlannerInfo;
 use types_selfuncs::{
@@ -241,47 +240,47 @@ pub(crate) fn var_eq_const<'mcx>(
             InvalidOid,
             ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS,
         )?;
-        // (values, numbers) of the MCV slot, empty when no slot is present.
-        let empty_v: &[Datum] = &[];
+        // (numbers) of the MCV slot, empty when no slot is present.
         let empty_n: &[f32] = &[];
-        let mcv_values: &[Datum] = slot_opt.as_ref().map(|s| s.values.as_slice()).unwrap_or(empty_v);
         let mcv_numbers: &[f32] = slot_opt.as_ref().map(|s| s.numbers.as_slice()).unwrap_or(empty_n);
 
-        // The constant crosses the operator's `function_call_invoke` boundary as
-        // the bare ABI word. A by-value scalar IS its word; a by-reference value
-        // (text/name/varchar/numeric) compared against ACTUAL MCV slot values is
-        // the selfuncs by-reference value-carrier follow-on (WALL 1ai): the MCV
-        // slot values (`mcv_values`) are themselves bare pointer words from the
-        // C-shaped `pg_statistic` tuple, so comparing a `ByRef` const against them
-        // needs the canonical by-reference fmgr lane threaded through
-        // `get_attstatsslot` — out of this lane's scope. The extraction is
-        // deferred to actual use: on a fresh cluster the MCV slot is EMPTY
-        // (no `ANALYZE`), so the loop body never runs and a by-reference constant
-        // (e.g. `WHERE relname = 'pg_type'`) flows through to the no-MCV-match
-        // branch below without ever needing the bare word.
-        let constval_word = |c: &types_tuple::backend_access_common_heaptuple::Datum<'_>| -> Datum {
-            match c {
-                types_tuple::backend_access_common_heaptuple::Datum::ByVal(w) => {
-                    Datum::from_usize(*w)
-                }
-                _ => panic!(
-                    "var_eq_const: by-reference constant compared against MCV slot \
-                     values requires the selfuncs by-reference value carrier (WALL 1ai)"
-                ),
-            }
+        // The constant and each MCV slot value cross the operator's fmgr boundary
+        // as their canonical images (by-value word OR by-reference referent) via
+        // the by-reference-capable `function_call_invoke_datum` lane, the same one
+        // the inequality path (be1df0607) uses. For a pass-by-reference element
+        // type (`name`/`text`/`bytea`/`numeric`) the bare `AttStatsSlot.values`
+        // offset is non-dereferenceable, so the slot is re-decoded by value via
+        // `slot_canon_values`; a by-reference constant (e.g.
+        // `WHERE relname = 'pg_class'`) is then compared correctly against the MCV
+        // values. The constant `constval` is already the canonical Const image.
+        let canon = match slot_opt.as_ref() {
+            Some(s) => crate::ineq::slot_canon_values(
+                mcx,
+                stats_tuple,
+                STATISTIC_KIND_MCV,
+                InvalidOid,
+                s.valuetype,
+            )?,
+            None => None,
         };
+        let empty_v: &[Datum] = &[];
+        let mcv_bare: &[Datum] =
+            slot_opt.as_ref().map(|s| s.values.as_slice()).unwrap_or(empty_v);
         // Is the constant "=" to any of the column's most common values?
-        for i in 0..mcv_values.len() {
+        for i in 0..mcv_bare.len() {
+            let mcv = crate::ineq::slot_value_canon(mcv_bare, canon.as_ref(), i, mcx)?;
             // be careful to apply operator right way 'round
             let (arg0, arg1) = if varonleft {
-                (mcv_values[i], constval_word(constval))
+                (mcv, constval.clone_in(mcx)?)
             } else {
-                (constval_word(constval), mcv_values[i])
+                (constval.clone_in(mcx)?, mcv)
             };
-            let (fresult, isnull) = fmgr::function_call_invoke::call(
+            let (fresult, isnull) = fmgr::function_call_invoke_datum::call(
+                mcx,
                 opfuncoid,
                 collation,
-                &[NullableDatum::value(arg0), NullableDatum::value(arg1)],
+                &[arg0, arg1],
+                None,
             )?;
             if !isnull && fresult.as_bool() {
                 matched = true;

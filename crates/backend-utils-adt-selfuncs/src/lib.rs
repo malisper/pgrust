@@ -31,11 +31,12 @@
 //! probe `SearchSysCache3(STATRELATTINH, ...)` is now installed by the syscache
 //! unit, so `examine_simple_variable` can pin a `statsTuple` for an analyzed
 //! relation column and the `Form_pg_statistic` field reads ([`scalar`]) are
-//! live. The two remaining ineq leaves `convert_to_scalar` /
-//! `get_actual_variable_range` stay seam-and-panic until the per-type scalar
-//! conversion (numeric/string/bytea/timestamp/network) and the index-endpoint
-//! min/max probe land — they are reached only for an inequality against a
-//! histogram on an analyzed column.
+//! live. `convert_to_scalar` is ported per-type. `get_actual_variable_range`
+//! declines gracefully (returns `false`, as C does for an unsuitable index) —
+//! the index-only-scan endpoint probe needs a bare-scan indexam form the
+//! node-shaped indexam seams don't expose — so the caller falls back to the
+//! histogram bound. Both are reached only for an inequality against a histogram
+//! on an analyzed column.
 
 #![allow(non_upper_case_globals)]
 #![allow(clippy::too_many_arguments)]

@@ -35,7 +35,7 @@ use types_selfuncs::DEFAULT_INEQ_SEL;
 /// values are re-decoded by value via `get_attstatsslot_value_datums`
 /// (`canon[i]`, aligned 1:1 with the bare slot). A pass-by-value element is the
 /// bare word wrapped as `ByVal` (no separate canonical array is fetched).
-fn slot_value_canon<'mcx>(
+pub(crate) fn slot_value_canon<'mcx>(
     bare: &[Datum],
     canon: Option<&mcx::PgVec<'mcx, DatumV<'mcx>>>,
     i: usize,
@@ -51,7 +51,7 @@ fn slot_value_canon<'mcx>(
 /// array when the element type is pass-by-reference (so the bare-word
 /// `AttStatsSlot.values` offsets cannot be dereferenced at the fmgr boundary).
 /// Returns `None` for a pass-by-value element type — the bare word is the value.
-fn slot_canon_values<'mcx>(
+pub(crate) fn slot_canon_values<'mcx>(
     mcx: Mcx<'mcx>,
     stats_tuple: types_selfuncs::StatsTuple,
     reqkind: i32,
@@ -287,13 +287,29 @@ fn get_actual_variable_range(
     _min: Option<&mut Datum>,
     _max: Option<&mut Datum>,
 ) -> bool {
-    panic!(
-        "selfuncs: get_actual_variable_range is blocked — the index endpoint probe \
-         (get_actual_variable_endpoint) needs a raw-scankey index_rescan(scan, ScanKey[], ...) \
-         form and an executor-free index_fetch_heap over a bare table_slot_create slot under a \
-         transient SnapshotNonVacuumable, none of which the node-shaped indexam-seams expose \
-         (out-of-lane: backend-access-index-indexam owner)"
-    )
+    // C contract (selfuncs.c:6573): "If successful, store values in *min and/or
+    // *max, and return true. If unsuccessful, return false." A `false` return is
+    // not an error — the caller (`ineq_histogram_selectivity`) then uses whatever
+    // extremal value is recorded in `pg_statistic`, exactly as C does when there
+    // is no suitable index (`rel->indexlist == NIL`, partitioned table, no
+    // ordering / index-only-capable index matching the var) or when the endpoint
+    // probe gives up after visiting too many heap pages.
+    //
+    // The actual endpoint extraction (`get_actual_variable_endpoint`) drives the
+    // index-only-scan machinery directly: `index_beginscan(heapRel, indexRel, ...)`
+    // followed by a raw-scankey `index_rescan(scan, ScanKey[1], 1, NULL, 0)` (an
+    // `SK_ISNULL | SK_SEARCHNOTNULL` key), `index_getnext_tid` in a chosen
+    // direction, and an executor-free `index_fetch_heap` over a bare
+    // `table_slot_create` slot under a transient `SnapshotNonVacuumable` seeded
+    // from `GlobalVisTestFor(heapRel)`. The installed indexam seams are all
+    // node-shaped: `index_rescan` reads `ioss_ScanKeys` off an
+    // `IndexOnlyScanState`, and `index_getnext_tid`/`index_fetch_heap` take a
+    // `SlotId` into the `EState` slot pool plus `&mut EStateData` — none expose
+    // the bare-scan probe this needs, and there is no `SnapshotNonVacuumable` /
+    // `GlobalVisTestFor` setup seam (owner: backend-access-index-indexam). With
+    // the probe unavailable we decline exactly as C does for an unsuitable index,
+    // and the caller falls back to the histogram bound rather than failing.
+    false
 }
 
 /// `convert_to_scalar(...)` (selfuncs.c) — the faithful per-type
@@ -307,8 +323,8 @@ use crate::convert::convert_to_scalar;
 /// `ineq_histogram_selectivity(root, vardata, opoid, opproc, isgt, iseq,
 /// collation, constval, consttype)` (selfuncs.c) — selectivity of an
 /// inequality from the histogram. Returns the histogram selectivity, or `-1.0`
-/// if no usable histogram. 1:1 with the C body (the deep statics
-/// `get_actual_variable_range` / `convert_to_scalar` panic — see above).
+/// if no usable histogram. 1:1 with the C body (`get_actual_variable_range`
+/// declines gracefully — see above — so the recorded histogram bound is used).
 pub(crate) fn ineq_histogram_selectivity<'mcx>(
     mcx: Mcx<'mcx>,
     root: &PlannerInfo,
