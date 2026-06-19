@@ -1314,13 +1314,13 @@ fn markRTEForSelectPriv<'mcx>(
 /// The `IsA(j->larg, RangeTblRef) ? rtindex : IsA(j->larg, JoinExpr) ? rtindex`
 /// dispatch from `markRTEForSelectPriv`'s whole-row JOIN branch.
 fn join_input_rtindex(node: Option<&Node<'_>>) -> PgResult<i32> {
-    match node {
-        Some(Node::RangeTblRef(rtr)) => Ok(rtr.rtindex),
-        Some(Node::JoinExpr(j)) => Ok(j.rtindex),
+    match node.map(|n| (n.node_tag(), n)) {
+        Some((ntag::T_RangeTblRef, n)) => Ok(n.expect_rangetblref().rtindex),
+        Some((ntag::T_JoinExpr, n)) => Ok(n.expect_joinexpr().rtindex),
         other => Err(ereport(ERROR)
             .errmsg_internal(format!(
                 "unrecognized node type: {}",
-                other.map(|n| n.node_tag().0).unwrap_or(0)
+                other.map(|(t, _)| t.0).unwrap_or(0)
             ))
             .into_error()),
     }
@@ -2222,9 +2222,9 @@ pub fn addRangeTableEntryForValues<'mcx>(
     };
 
     // numcolumns = list_length(linitial(exprs))
-    let numcolumns = match exprs.first().map(|n| n.as_ref()) {
-        Some(Node::List(items)) => items.len(),
-        _ => {
+    let numcolumns = match exprs.first().map(|n| n.as_ref()).and_then(|n| n.as_list()) {
+        Some(items) => items.len(),
+        None => {
             return Err(ereport(ERROR)
                 .errmsg(format!("VALUES exprs first row is not a List"))
                 .into_error())
@@ -3805,11 +3805,15 @@ fn scan_ns_item_for_column_by_posn<'mcx>(
 
     // The C returns a Node* that is a Var; unwrap to the Expr the caller wants.
     Ok(match node {
-        Some(Node::Expr(expr)) => Some(expr),
-        Some(other) => panic!(
-            "scan_ns_item_for_column_by_posn: scanNSItemForColumn returned non-Expr node (tag {})",
-            other.node_tag().0
-        ),
+        Some(n) => {
+            let tag = n.node_tag();
+            Some(n.into_expr().unwrap_or_else(|| {
+                panic!(
+                    "scan_ns_item_for_column_by_posn: scanNSItemForColumn returned non-Expr node (tag {})",
+                    tag.0
+                )
+            }))
+        }
         None => None,
     })
 }
