@@ -532,11 +532,32 @@ thread_local! {
     /// `makefuncs::CONST_VALUE_CONTEXT` / `params::PARAM_LIST_CONTEXT`).
     static CONST_VALUE_CONTEXT: &'static MemoryContext =
         Box::leak(Box::new(MemoryContext::new("Const value")));
+
+    /// Backend-lifetime context backing the coercion-seam entry points that
+    /// take no explicit `Mcx` (the parse_func.c / clauses.c callers mirroring
+    /// the C signatures, which allocate in `CurrentMemoryContext`). The Expr
+    /// trees these seams return are embedded in long-lived Query/Plan
+    /// structures and can carry context-allocated `mcx::PgBox`/`PgVec` children
+    /// (e.g. an `Aggref` argument-`TargetEntry` list, whose `expr` is a
+    /// `PgBox<Expr>`). A transient `MemoryContext::new(..)` freed on return
+    /// would leave those children's allocator dangling, so dropping the owning
+    /// Query later double-frees through a NULL `Mcx` (a `coerce(agg(x))` cast
+    /// segfault). This leaked, never-reset context keeps them valid for the
+    /// node's lifetime (mirrors `CONST_VALUE_CONTEXT`).
+    static COERCE_NODE_CONTEXT: &'static MemoryContext =
+        Box::leak(Box::new(MemoryContext::new("coerce node")));
 }
 
 /// `Mcx<'static>` for the backend-lifetime [`CONST_VALUE_CONTEXT`].
 fn const_value_mcx() -> Mcx<'static> {
     CONST_VALUE_CONTEXT.with(|c| c.mcx())
+}
+
+/// `Mcx<'static>` for the backend-lifetime [`COERCE_NODE_CONTEXT`], used by the
+/// no-`Mcx` coercion seam entry points whose returned Expr tree outlives the
+/// call (see the doc-comment on `COERCE_NODE_CONTEXT`).
+fn coerce_node_mcx() -> Mcx<'static> {
+    COERCE_NODE_CONTEXT.with(|c| c.mcx())
 }
 
 /// The `inputTypeId == UNKNOWNOID && IsA(node, Const)` arm of coerce_type.
@@ -2751,9 +2772,8 @@ fn seam_coerce_type<'mcx>(
     cformat: CoercionForm,
     location: i32,
 ) -> PgResult<Expr> {
-    let cx = MemoryContext::new("coerce_type");
     coerce_type(
-        cx.mcx(),
+        coerce_node_mcx(),
         pstate,
         Some(node),
         input_type_id,
@@ -2793,16 +2813,16 @@ fn seam_enforce_generic_type_consistency(
 
 // The inward seams carry only `&mut ParseState` (no `Mcx`), matching the C
 // signatures consumed by parse_expr.c / parse_oper.c. ParseState carries no
-// `Mcx`, so a scratch context backs the transient allocations (detoast in
-// make_const, etc.); the produced Expr tree is lifetime-free (Const carries
-// `Datum<'static>`, nodes are owned `Box`/`Vec`), so it outlives the scratch.
+// `Mcx`, so the durable backend-lifetime `COERCE_NODE_CONTEXT` (see its
+// doc-comment) backs the produced Expr tree: it can embed context-allocated
+// `mcx::PgBox`/`PgVec` children (e.g. an `Aggref` argument-`TargetEntry` list),
+// which a transient context freed on return would dangle.
 fn seam_coerce_to_boolean<'mcx>(
     pstate: &mut ParseState<'mcx>,
     node: Expr,
     construct_name: &str,
 ) -> PgResult<Expr> {
-    let cx = MemoryContext::new("coerce_to_boolean");
-    coerce_to_boolean(cx.mcx(), Some(pstate), node, construct_name)
+    coerce_to_boolean(coerce_node_mcx(), Some(pstate), node, construct_name)
 }
 
 fn seam_coerce_to_specific_type<'mcx>(
@@ -2811,8 +2831,13 @@ fn seam_coerce_to_specific_type<'mcx>(
     target_type_id: Oid,
     construct_name: &str,
 ) -> PgResult<Expr> {
-    let cx = MemoryContext::new("coerce_to_specific_type");
-    coerce_to_specific_type(cx.mcx(), Some(pstate), node, target_type_id, construct_name)
+    coerce_to_specific_type(
+        coerce_node_mcx(),
+        Some(pstate),
+        node,
+        target_type_id,
+        construct_name,
+    )
 }
 
 fn seam_coerce_to_common_type<'mcx>(
@@ -2821,8 +2846,7 @@ fn seam_coerce_to_common_type<'mcx>(
     target_type_id: Oid,
     context: &str,
 ) -> PgResult<Expr> {
-    let cx = MemoryContext::new("coerce_to_common_type");
-    coerce_to_common_type(cx.mcx(), Some(pstate), node, target_type_id, context)
+    coerce_to_common_type(coerce_node_mcx(), Some(pstate), node, target_type_id, context)
 }
 
 fn seam_select_common_type<'mcx>(
@@ -2843,9 +2867,8 @@ fn seam_coerce_to_target_type<'mcx>(
     cformat: CoercionForm,
     location: i32,
 ) -> PgResult<Option<Expr>> {
-    let cx = MemoryContext::new("coerce_to_target_type");
     coerce_to_target_type(
-        cx.mcx(),
+        coerce_node_mcx(),
         Some(pstate),
         expr,
         exprtype,
