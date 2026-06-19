@@ -301,7 +301,11 @@ fn populate_recordset_worker<'mcx>(
 
     if is_json {
         // text *json = PG_GETARG_TEXT_PP(json_arg_num);
-        let json = funcapi::srf_arg_varlena_bytes::call(mcx, fcinfo_ref, json_arg_num)?;
+        // The seam yields the header-ful varlena image; the json (text) document
+        // is its VARDATA (skip the 4-byte length word), as C reads via
+        // VARDATA_ANY.
+        let json_image = funcapi::srf_arg_varlena_bytes::call(mcx, fcinfo_ref, json_arg_num)?;
+        let json = &json_image[VARHDRSZ..];
 
         let state = Rc::new(RefCell::new(PopulateRecordsetState {
             function_name: funcname,
@@ -379,7 +383,7 @@ fn populate_recordset_worker<'mcx>(
 
         // pg_parse_json_or_ereport(&lex, sem);
         let encoding = common_jsonapi_seams::get_database_encoding::call();
-        let parse = common_jsonapi_seams::pg_parse_json::call(&json, encoding, true, &mut sem);
+        let parse = common_jsonapi_seams::pg_parse_json::call(json, encoding, true, &mut sem);
         drop(sem);
 
         let state = Rc::try_unwrap(state)
@@ -400,7 +404,7 @@ fn populate_recordset_worker<'mcx>(
             Ok(JsonParseErrorType::JSON_SUCCESS) => {}
             Ok(res) => {
                 // pg_parse_json_or_ereport: a parse failure raises.
-                common_jsonapi_seams::errsave_error::call(res, &json)?;
+                common_jsonapi_seams::errsave_error::call(res, json)?;
                 unreachable!("errsave_error with no escontext raises");
             }
             Err(e) => return Err(e),

@@ -1730,20 +1730,19 @@ mod recurrence_guard {
         // — its true C home — over the new bufmgr `read_buffer_without_relcache`
         // seam + the page-item walk gated by `HeapTupleSatisfiesVisibility`. Both
         // reach real bodies.)
-        // DESIGN_DEBT (TD-JSONFUNCS-FMGR-ARG-DETOAST): jsonfuncs.c's SQL entry
-        // points (`json[b]_object_keys`/`_each`/`_array_elements`/`populate_*`/
-        // `to_record(set)`) read a `json`/`jsonb` varlena argument and (for
-        // populate_recordset) a composite `record` argument from the fmgr call
-        // frame. The repo's trimmed `FunctionCallInfoBaseData` carries args as
-        // bare-word `types_datum::Datum`, and the bare-word -> detoasted bytes /
-        // -> `FormedTuple` conversion is the project-wide fmgr argument-detoast
-        // boundary that funcapi (the call-frame owner) has not yet grown. These
-        // two seams (`srf_arg_varlena_bytes` for the json/jsonb arg bytes,
-        // `srf_arg_record` for the composite record arg) are declared on funcapi
-        // and called by jsonfuncs; funcapi cannot install them until that
-        // detoast boundary lands, so they loud-panic on a real SRF call path.
-        // DELETE these entries when funcapi grows the fmgr arg-detoast accessors.
-        ("backend_utils_fmgr_funcapi", "srf_arg_varlena_bytes"),
+        // DESIGN_DEBT (TD-JSONFUNCS-FMGR-ARG-DETOAST): jsonfuncs.c's
+        // populate_recordset SQL entry point reads a composite `record` argument
+        // from the fmgr call frame. The repo's trimmed `FunctionCallInfoBaseData`
+        // carries args as bare-word `types_datum::Datum`, and the bare-word ->
+        // detoasted `FormedTuple` conversion is the project-wide fmgr
+        // argument-detoast boundary that funcapi (the call-frame owner) has not
+        // yet grown for the composite-record arm. `srf_arg_record` is declared on
+        // funcapi and called by jsonfuncs; funcapi cannot install it until that
+        // detoast boundary lands, so it loud-panics on a real SRF call path.
+        // (The sibling `srf_arg_varlena_bytes` — the json/jsonb varlena-argument
+        // reader — IS now installed: the by-reference call-frame lane carries the
+        // header-ful varlena image, which funcapi reads directly.)
+        // DELETE this entry when funcapi grows the composite arg-detoast accessor.
         ("backend_utils_fmgr_funcapi", "srf_arg_record"),
         // DESIGN_DEBT (TD-TABLECMDS-F1F6-UNPORTED): tablecmds.c is a 22k-LOC giant
         // ported in families. Only FAMILY F0 (relation create/drop/truncate +

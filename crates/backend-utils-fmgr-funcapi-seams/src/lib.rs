@@ -171,14 +171,17 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// Read a varlena (`bytea`/`text`/`json`/`jsonb`) argument at position `n`
-    /// as its detoasted payload bytes: the C `PG_GETARG_*_PP(n)` / `PG_DETOAST`
-    /// of a by-reference argument off `fcinfo->args[n].value`. The fmgr owns the
-    /// trimmed `args` array AND the bare-word -> varlena detoast boundary, so the
-    /// read is seamed. Used by `json[b]_object_keys` (and other varlena-input
-    /// SRFs) to obtain the input document bytes. For `jsonb` the bytes are the
-    /// full varlena (header included), matching the `&jb[VARHDRSZ..]` container
-    /// convention; for `text`/`json` the bytes are the VARDATA payload. `Err`
-    /// carries detoast OOM.
+    /// as its detoasted, FULL on-disk varlena image (the 4-byte length word
+    /// included): the C `PG_GETARG_*_PP(n)` / `PG_DETOAST` of a by-reference
+    /// argument off the call frame's by-reference lane. The fmgr owns the
+    /// trimmed `args` array AND the bare-word -> varlena detoast boundary, so
+    /// the read is seamed. Used by `json[b]_object_keys` /
+    /// `json[b]_array_elements[_text]` / `json[b]_each[_text]` /
+    /// `json[b]_populate_record[set]` to obtain the input document bytes. The
+    /// bytes are always header-ful (matching the by-reference lane's
+    /// header-for-header round-trip): the `jsonb` callers read the container at
+    /// `&image[VARHDRSZ..]`; the `text`/`json` callers read `VARDATA` (skip the
+    /// 4-byte header). `Err` carries detoast OOM.
     pub fn srf_arg_varlena_bytes<'mcx>(
         mcx: Mcx<'mcx>,
         fcinfo: &types_nodes::fmgr::FunctionCallInfoBaseData<'mcx>,

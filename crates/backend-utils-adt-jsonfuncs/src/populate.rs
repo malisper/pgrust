@@ -1794,9 +1794,13 @@ fn populate_record_worker<'mcx>(
     // Build the JsValue from the input.
     let jsv: JsValue = if is_json {
         // text *json = PG_GETARG_TEXT_PP(json_arg_num);
-        let json = funcapi::srf_arg_varlena_bytes::call(mcx, fcinfo_ref, json_arg_num)?;
+        // The seam yields the header-ful varlena image; the json (text) document
+        // is its VARDATA (skip the 4-byte length word), as C reads via
+        // VARDATA_ANY.
+        let json_image = funcapi::srf_arg_varlena_bytes::call(mcx, fcinfo_ref, json_arg_num)?;
+        let json = &json_image[VARHDRSZ..];
         JsValue::Json {
-            str: Some(json.as_slice().to_vec()),
+            str: Some(json.to_vec()),
             // type not used in populate_composite()
             type_: JsonTokenType::JSON_TOKEN_INVALID,
         }

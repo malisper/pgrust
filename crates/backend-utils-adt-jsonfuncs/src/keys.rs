@@ -248,9 +248,12 @@ pub fn json_object_keys<'mcx>(
     let nulls: [bool; 1] = [false];
 
     // text *json = PG_GETARG_TEXT_PP(0);
-    let json = funcapi::srf_arg_varlena_bytes::call(mcx, fcinfo, 0)?;
+    // The seam yields the header-ful varlena image; the json (text) document is
+    // its VARDATA (skip the 4-byte length word), as C reads via VARDATA_ANY.
+    let json_image = funcapi::srf_arg_varlena_bytes::call(mcx, fcinfo, 0)?;
+    let json = &json_image[VARHDRSZ..];
 
-    let keys = json_object_keys_worker(&json)?;
+    let keys = json_object_keys_worker(json)?;
 
     // For each key: SRF_RETURN_NEXT(funcctx, CStringGetTextDatum(nxt)).
     for key in &keys {

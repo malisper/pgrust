@@ -340,12 +340,15 @@ fn json_array_elements_impl<'mcx>(
     as_text: bool,
 ) -> PgResult<Datum<'mcx>> {
     // text *json = PG_GETARG_TEXT_PP(0);
-    let json = funcapi::srf_arg_varlena_bytes::call(mcx, fcinfo, 0)?;
+    // The seam yields the header-ful varlena image; the json (text) document is
+    // its VARDATA (skip the 4-byte length word), as C reads via VARDATA_ANY.
+    let json_image = funcapi::srf_arg_varlena_bytes::call(mcx, fcinfo, 0)?;
+    let json = &json_image[VARHDRSZ..];
 
     // InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC | MAT_SRF_BLESS);
     funcapi::InitMaterializedSRF::call(fcinfo, types_nodes::funcapi::MAT_SRF_BLESS)?;
 
-    let rows = elements_worker(&json, funcname, as_text)?;
+    let rows = elements_worker(json, funcname, as_text)?;
 
     put_element_rows(mcx, fcinfo, &rows, as_text)?;
 

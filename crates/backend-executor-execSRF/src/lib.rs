@@ -61,6 +61,7 @@ use backend_executor_execSRF_seams as seams;
 
 mod generate_series;
 mod generate_subscripts;
+mod json_each;
 mod json_srf;
 mod pg_input_error_info;
 mod regexp_split;
@@ -101,6 +102,12 @@ pub fn init_seams() {
     // 3955/3969/3957) — the value-per-call json (text) SRFs (their SAX-callback
     // collection cores are `backend-utils-adt-jsonfuncs::{elements,keys}`).
     json_srf::register_json_srfs();
+    // `json_each`/`json_each_text`/`jsonb_each`/`jsonb_each_text` (OIDs
+    // 3958/3959/3208/3932) — the materialize-mode json/jsonb (key,value) SRFs
+    // (their `each_worker`/`each_worker_jsonb` bodies fill the materialize
+    // tuplestore via InitMaterializedSRF; core is
+    // `backend-utils-adt-jsonfuncs::each`).
+    json_each::register_json_each_srfs();
 }
 
 // ===========================================================================

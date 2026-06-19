@@ -431,6 +431,48 @@ pub fn srf_arg_lsn<'mcx>(
     fcinfo.args[n].value.as_u64()
 }
 
+/// Read a varlena (`bytea`/`text`/`json`/`jsonb`) argument at position `n` off
+/// the call frame's by-reference lane as its FULL on-disk varlena image (the
+/// 4-byte length word included).
+///
+/// In C the SRF readers are `PG_GETARG_TEXT_PP(n)` (a detoasted `text *`, read
+/// via `VARDATA_ANY`) and `PG_GETARG_JSONB_P(n)` (a detoasted `Jsonb *`, read
+/// via its container header at `&jb->root`); both hand back a header-ful
+/// (`struct varlena *`) pointer and the caller peels the header itself. The
+/// owned by-reference lane carries that same header-ful image: `ExecEvalFuncArgs`
+/// (execSRF.c) stores the compiled argument's `Datum::ByRef` bytes verbatim into
+/// `ref_args[n]` as a [`FmgrArgRef::Varlena`], and a by-reference value
+/// round-trips header-for-header. So this returns the image unchanged; the
+/// `json`/`text` callers read its `VARDATA` (skip the 4-byte header) and the
+/// `jsonb` callers read its container at `&image[VARHDRSZ..]`. `Err` carries
+/// alloc OOM. A NULL or non-varlena argument is a contract violation (the SRF
+/// callers check `PG_ARGISNULL`/strictness first) and panics.
+pub fn srf_arg_varlena_bytes<'mcx>(
+    mcx: Mcx<'mcx>,
+    fcinfo: &FunctionCallInfoBaseData<'mcx>,
+    n: usize,
+) -> PgResult<mcx::PgVec<'mcx, u8>> {
+    use types_nodes::fmgr::FmgrArgRef;
+
+    // C: PG_GETARG_TEXT_PP / PG_GETARG_JSONB_P detoast the by-reference arg.
+    // The owned lane already carries the detoasted, header-ful image in
+    // `ref_args[n]`; read it as a Varlena payload.
+    let image: &[u8] = match fcinfo.ref_arg(n) {
+        Some(FmgrArgRef::Varlena(bytes)) => bytes.as_slice(),
+        _ => panic!(
+            "srf_arg_varlena_bytes: argument {n} is absent from the by-reference \
+             lane or is not a varlena (the SRF caller must check PG_ARGISNULL / \
+             strictness before reading a varlena argument)"
+        ),
+    };
+
+    // Copy into an `mcx`-owned buffer (the C readers hand back a pointer into
+    // the detoasted copy; the owned model returns an arena-allocated `PgVec`).
+    let mut out = mcx::vec_with_capacity_in::<u8>(mcx, image.len())?;
+    out.extend_from_slice(image);
+    Ok(out)
+}
+
 /// `CStringGetTextDatum(s)` — build a `text *` Datum from a string in `mcx`
 /// (the SRF text-column helper the inward seam exposes).
 pub fn cstring_get_text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<DatumV<'mcx>> {

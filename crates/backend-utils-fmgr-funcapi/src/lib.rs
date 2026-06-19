@@ -74,6 +74,12 @@ pub fn init_seams() {
     backend_utils_fmgr_funcapi_seams::srf_arg0_oid::set(srf_support::srf_arg0_oid);
     backend_utils_fmgr_funcapi_seams::srf_arg_int64::set(srf_support::srf_arg_int64);
     backend_utils_fmgr_funcapi_seams::srf_arg_lsn::set(srf_support::srf_arg_lsn);
+    // The header-ful varlena-argument reader the json/jsonb SRFs (object_keys /
+    // array_elements / each / populate_record[set]) use to obtain the input
+    // document bytes off the by-reference call-frame lane.
+    backend_utils_fmgr_funcapi_seams::srf_arg_varlena_bytes::set(
+        srf_support::srf_arg_varlena_bytes,
+    );
     backend_utils_fmgr_funcapi_seams::cstring_get_text_datum::set(
         srf_support::cstring_get_text_datum,
     );
