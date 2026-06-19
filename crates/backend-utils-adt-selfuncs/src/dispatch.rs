@@ -81,11 +81,15 @@ pub fn call_oprrest<'mcx>(
     inputcollid: Oid,
     var_relid: i32,
 ) -> PgResult<f64> {
-    // The estimator's detoasted-stats allocations live in a per-call context
-    // (the result is a scalar f64), matching C running these in the planner's
-    // memory context.
-    let cx = mcx::MemoryContext::new("selfuncs restriction estimate");
-    let mcx = cx.mcx();
+    // C runs the estimators in the planner's memory context (the result is a
+    // scalar f64, but the estimators also intern arena nodes — e.g.
+    // `examine_variable` sets `vardata->var = root.alloc_node(...)` — that ESCAPE
+    // into `PlannerInfo::node_arena`, which outlives this call). Allocating those
+    // escaping nodes in a throwaway per-call context and dropping it here leaves
+    // the arena holding dangling boxes that under-charge their (freed) context at
+    // planner teardown (TD-STATIC-EROSION). Use the planner context so the
+    // interned nodes live exactly as long as the arena, matching C.
+    let mcx = run.mcx();
     match oprrest {
         F_EQSEL => eqsel(mcx, run, root, operatorid, args, var_relid, inputcollid),
         F_NEQSEL => neqsel(mcx, run, root, operatorid, args, var_relid, inputcollid),
@@ -175,8 +179,10 @@ pub fn call_oprjoin<'mcx>(
     jointype: i16,
     sjinfo: Option<&SpecialJoinInfo>,
 ) -> PgResult<f64> {
-    let cx = mcx::MemoryContext::new("selfuncs join estimate");
-    let mcx = cx.mcx();
+    // Use the planner context (not a throwaway per-call context): the join
+    // estimators intern arena nodes via `examine_variable` that escape into
+    // `PlannerInfo::node_arena` and must outlive this call (TD-STATIC-EROSION).
+    let mcx = run.mcx();
     // C's join estimators dereference `sjinfo` unconditionally (the planner
     // always passes a real SpecialJoinInfo for an operator join clause).
     let sjinfo = sjinfo.expect("call_oprjoin: NULL sjinfo for a join-selectivity estimator");
