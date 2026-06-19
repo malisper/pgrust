@@ -354,15 +354,24 @@ fn plan_leaf_subquery<'mcx>(
             None
         };
 
+    let tuple_fraction = root.tuple_fraction;
+    // C passes the recursion-planning `root` as the leaf's `parent_root`. Move it
+    // in by value and recover it from `subroot.parent_root` afterwards.
+    let parent_root = core::mem::take(root);
     let mut subroot = backend_optimizer_plan_planner_seams::subquery_planner_for_setop::call(
         mcx,
         run,
         glob,
         subquery_id,
+        parent_root,
         recursion_carry,
         false,
-        root.tuple_fraction,
+        tuple_fraction,
     )?;
+    *root = *subroot
+        .parent_root
+        .take()
+        .expect("recurse_set_operations: subroot lost its parent_root");
     // Move the accumulated glob back to the outer root.
     root.glob = subroot.glob.take();
     Ok(subroot)

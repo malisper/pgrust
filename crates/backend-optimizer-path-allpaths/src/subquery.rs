@@ -170,19 +170,27 @@ pub fn set_subquery_pathlist<'mcx>(
     // subquery is moved into the run.
     let subquery_tlist_len = subquery.targetList.len();
     let subquery_id = run.intern(subquery);
-    let parent_level = root.query_level;
     let glob = *root
         .glob
         .take()
         .ok_or_else(|| PgError::error("set_subquery_pathlist: outer root has no glob"))?;
+    // C passes the outer `root` as the subroot's parent_root so the subquery's
+    // CTE / upper-Var references can walk up to this level. The owned model
+    // moves the outer root in by value and recovers it from `subroot.parent_root`
+    // afterwards (any upper-Var plan_params land on it, exactly as in C).
+    let parent_root = core::mem::take(root);
     let mut subroot = backend_optimizer_plan_planner_seams::subquery_planner_for_fromsubquery::call(
         mcx,
         run,
         glob,
         subquery_id,
-        parent_level,
+        parent_root,
         tuple_fraction,
     )?;
+    *root = *subroot
+        .parent_root
+        .take()
+        .expect("set_subquery_pathlist: subroot lost its parent_root");
     root.glob = subroot.glob.take();
 
     // Isolate the params needed by this specific subplan (C:2660-2661).

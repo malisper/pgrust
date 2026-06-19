@@ -362,6 +362,17 @@ pub fn parse_sub_analyze<'mcx>(
     // live back-pointer.
     if let Some(cloned_parent) = pstate.parentParseState.as_deref() {
         merge_perminfo_marks(mcx, parent_pstate, cloned_parent)?;
+        // Same divergence as the permission marks: a CTE reference inside this
+        // subquery (`addRangeTableEntryForCTE` with `levelsup > 0`) does
+        // `cte->cterefcount++` on the *clone's* `p_ctenamespace`, because the
+        // owned `parentParseState` is a deep copy of `parent_pstate`'s spine.
+        // C bumps the single shared CommonTableExpr, so the parent sees it
+        // directly. Merge the clone's bumped refcounts back into the live
+        // `parent_pstate.p_ctenamespace` (positionally / by-name identical, the
+        // clone only ever increments) so `sync_cte_refcounts` at the defining
+        // level reads the true count and does not drop the CTE plan. Deeper
+        // levels propagate as each frame's `parse_sub_analyze` returns.
+        merge_cte_refcounts(parent_pstate, cloned_parent);
     }
 
     backend_parser_small1::free_parsestate(pstate)?;
@@ -403,6 +414,31 @@ fn merge_perminfo_marks<'mcx>(
         }
     }
     Ok(())
+}
+
+/// Merge `cterefcount` bumps recorded on a cloned parent `ParseState` (`src`,
+/// the child subquery's owned `parentParseState`) back into the live parent
+/// (`dst`). A CTE referenced from inside the subquery did `cterefcount++` on the
+/// clone's `p_ctenamespace` entry (see `addRangeTableEntryForCTE` /
+/// `bump_cte_namespace_refcount`); the clone started as a copy of `dst`'s
+/// namespace and only ever increments, so adopting the clone's (>= live) value
+/// per matching CTE name transfers the bump. C does not need this because the
+/// namespace and `qry->cteList` alias the single shared `CommonTableExpr`.
+fn merge_cte_refcounts<'mcx>(dst: &mut ParseState<'mcx>, src: &ParseState<'mcx>) {
+    for d in dst.p_ctenamespace.iter_mut() {
+        let name = match d.ctename.as_deref() {
+            Some(n) => n,
+            None => continue,
+        };
+        for s in src.p_ctenamespace.iter() {
+            if s.ctename.as_deref() == Some(name) {
+                if s.cterefcount > d.cterefcount {
+                    d.cterefcount = s.cterefcount;
+                }
+                break;
+            }
+        }
+    }
 }
 
 /* ===========================================================================

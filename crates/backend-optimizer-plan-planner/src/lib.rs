@@ -600,6 +600,7 @@ fn subquery_planner_for_setop_impl<'mcx>(
     run: &mut PlannerRun<'mcx>,
     glob: PlannerGlobal,
     subquery_id: types_pathnodes::QueryId,
+    parent_root: PlannerInfo,
     recursion_carry: Option<(i32, f64)>,
     has_recursion: bool,
     tuple_fraction: f64,
@@ -609,7 +610,7 @@ fn subquery_planner_for_setop_impl<'mcx>(
         run,
         glob,
         subquery_id,
-        None,
+        Some(parent_root),
         recursion_carry,
         has_recursion,
         tuple_fraction,
@@ -633,7 +634,7 @@ fn subquery_planner_for_fromsubquery_impl<'mcx>(
     run: &mut PlannerRun<'mcx>,
     glob: PlannerGlobal,
     subquery_id: types_pathnodes::QueryId,
-    parent_query_level: u32,
+    parent_root: PlannerInfo,
     tuple_fraction: f64,
 ) -> PgResult<PlannerInfo> {
     subquery_planner_carried(
@@ -641,7 +642,7 @@ fn subquery_planner_for_fromsubquery_impl<'mcx>(
         run,
         glob,
         subquery_id,
-        Some(parent_query_level),
+        Some(parent_root),
         None,
         false,
         tuple_fraction,
@@ -658,13 +659,13 @@ fn subquery_planner<'mcx>(
     run: &mut PlannerRun<'mcx>,
     glob: PlannerGlobal,
     parse_id: types_pathnodes::QueryId,
-    parent_query_level: Option<u32>,
+    parent_root: Option<PlannerInfo>,
     has_recursion: bool,
     tuple_fraction: f64,
     setops: Option<()>,
 ) -> PgResult<PlannerInfo> {
     subquery_planner_carried(
-        mcx, run, glob, parse_id, parent_query_level, None, has_recursion,
+        mcx, run, glob, parse_id, parent_root, None, has_recursion,
         tuple_fraction, setops,
     )
 }
@@ -678,7 +679,7 @@ fn subquery_planner_carried<'mcx>(
     run: &mut PlannerRun<'mcx>,
     glob: PlannerGlobal,
     parse_id: types_pathnodes::QueryId,
-    parent_query_level: Option<u32>,
+    parent_root: Option<PlannerInfo>,
     recursion_carry: Option<(i32, f64)>,
     has_recursion: bool,
     tuple_fraction: f64,
@@ -689,10 +690,15 @@ fn subquery_planner_carried<'mcx>(
     root.parse = parse_id;
     root.glob = Some(Box::new(glob));
     // root->query_level = parent_root ? parent_root->query_level + 1 : 1 (C:666).
-    root.query_level = match parent_query_level {
-        Some(l) => l + 1,
+    // root->parent_root = parent_root (C:688). The parent PlannerInfo is moved
+    // in by value (its `glob` was already taken out by the caller and threaded
+    // separately as `glob` above); CTE / upper-Var resolution walks this chain.
+    // The caller recovers the parent by taking `subroot.parent_root` back out.
+    root.query_level = match &parent_root {
+        Some(p) => p.query_level + 1,
         None => 1,
     };
+    root.parent_root = parent_root.map(Box::new);
     root.hasRecursion = has_recursion;
     // For a recursive WITH query, assign the work-table PARAM_EXEC id now so the
     // self-reference's WorkTableScan and the RecursiveUnion path agree (C:698).
@@ -7669,12 +7675,15 @@ pub fn init_seams() {
             // Intern the owned sub-Query so the run can resolve its targetList.
             let subquery_id = run.intern(subquery);
 
-            // Move the shared glob from the parent root into the recursion.
-            let parent_level = root.query_level;
+            // Move the shared glob from the parent root into the recursion, then
+            // move the parent root itself out by value so it can become the
+            // subroot's `parent_root` (C passes `root` as the parent_root arg).
+            // We restore both back onto `*root` after the subquery is planned.
             let glob = *root
                 .glob
                 .take()
                 .expect("plan_sublink_subquery: parent root->glob is NULL");
+            let parent_root = core::mem::take(root);
 
             // subroot = subquery_planner(glob, subquery, root, hasRecursion,
             //                            tuple_fraction, NULL) (subselect.c:221).
@@ -7683,11 +7692,18 @@ pub fn init_seams() {
                 run,
                 glob,
                 subquery_id,
-                Some(parent_level),
+                Some(parent_root),
                 has_recursion,
                 tuple_fraction,
                 None, // setops
             )?;
+
+            // Recover the parent root (taken in by value, mutated for any
+            // upper-Var plan_params) and restore it onto `*root`.
+            *root = *subroot
+                .parent_root
+                .take()
+                .expect("plan_sublink_subquery: subroot lost its parent_root");
 
             // final_rel = fetch_upper_rel(subroot, UPPERREL_FINAL, NULL);
             // best_path = get_cheapest_fractional_path(final_rel, tuple_fraction);
