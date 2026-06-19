@@ -869,7 +869,7 @@ mod wire {
     use backend_storage_buffer_bufmgr_seams as bufmgr_seam;
     use backend_storage_page::{
         ItemIdGetOffset, PageAddItemExtended, PageGetHeapFreeSpace, PageGetItemId,
-        PageGetMaxOffsetNumber, PageGetPageSize, PageIsAllVisible, PageMut, PageRef,
+        PageGetMaxOffsetNumber, PageIsAllVisible, PageMut, PageRef,
     };
     use types_core::{BlockNumber, OffsetNumber, Size};
     use types_storage::bufpage::PAI_IS_HEAP;
@@ -921,12 +921,15 @@ mod wire {
     // page-format read. `with_buffer_page` hands the live page image; the
     // predicate never mutates it.
     pub fn buffer_get_page_size(buffer: Buffer) -> PgResult<Size> {
-        let mut out: Size = 0;
-        bufmgr_seam::with_buffer_page::call(buffer, &mut |bytes| {
-            out = PageGetPageSize(&PageRef::new(bytes)?);
-            Ok(())
-        })?;
-        Ok(out)
+        // `BufferGetPageSize` (storage/bufmgr.h): unconditionally `BLCKSZ`. Unlike
+        // `PageGetPageSize` (which reads `pd_pagesize_version` off the page header
+        // and is only valid on a *formatted* page), this can be called on a raw,
+        // not-yet-`PageInit`'d disk block — which is exactly what
+        // `RelationAddBlocks` does for freshly-extended victim buffers. Reading the
+        // header there would return 0 and underflow the `freespace =
+        // BufferGetPageSize - SizeOfPageHeaderData` computation.
+        debug_assert!(buffer != super::InvalidBuffer);
+        Ok(types_core::primitive::BLCKSZ as Size)
     }
 
     pub fn page_get_max_offset_number(buffer: Buffer) -> PgResult<OffsetNumber> {
