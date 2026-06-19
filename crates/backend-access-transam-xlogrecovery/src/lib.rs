@@ -165,6 +165,7 @@ pub fn init_seams() {
     // around the redo loop.
     seams::init_wal_recovery::set(orchestrator::init_wal_recovery);
     seams::finish_wal_recovery::set(orchestrator::finish_wal_recovery);
+    seams::perform_wal_recovery::set(orchestrator::perform_wal_recovery);
     seams::shutdown_wal_recovery::set(orchestrator::shutdown_wal_recovery);
 
     // `InRecovery` (the startup process's backend-local replay flag), now backed

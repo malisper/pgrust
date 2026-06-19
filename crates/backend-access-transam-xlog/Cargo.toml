@@ -45,6 +45,8 @@ backend-access-transam-clog-seams = { path = "../backend-access-transam-clog-sea
 backend-access-transam-multixact-seams = { path = "../backend-access-transam-multixact-seams" }
 backend-access-transam-commit-ts-seams = { path = "../backend-access-transam-commit-ts-seams" }
 backend-access-transam-subtrans-seams = { path = "../backend-access-transam-subtrans-seams" }
+backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
+backend-storage-file-reinit = { path = "../backend-storage-file-reinit" }
 backend-access-transam-twophase-seams = { path = "../backend-access-transam-twophase-seams" }
 backend-access-transam-varsup-seams = { path = "../backend-access-transam-varsup-seams" }
 backend-access-transam-timeline-seams = { path = "../backend-access-transam-timeline-seams" }

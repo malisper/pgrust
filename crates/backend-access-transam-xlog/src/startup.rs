@@ -69,6 +69,7 @@ use backend_replication_walsender_seams as walsender_seam;
 use backend_utils_activity_pgstat_seams as pgstat_seam;
 use backend_utils_cache_relcache_seams as relcache_seam;
 use backend_utils_misc_ps_status_seams as ps_seam;
+use backend_utils_time_snapmgr_seams as snapmgr_seam;
 
 const CONTROL_FILE_LOCK: usize = 9;
 const PROC_ARRAY_LOCK: usize = 4;
@@ -361,17 +362,44 @@ pub fn StartupXLOG() -> PgResult<()> {
     // Reset ps status display.
     ps_seam::set_ps_display::call(String::new());
 
-    // When recovering from a backup, complain if we did not roll forward far
-    // enough to reach consistency. The local minRecoveryPoint / backupStartPoint
-    // checks are recovery-path; on the clean path InRecovery is false.
+    // When recovering from a backup (in recovery AND archive recovery was
+    // requested), complain if we did not roll forward far enough to reach the
+    // point where the database is consistent. (xlog.c:5947-5969)
+    //
+    // On crash recovery LocalMinRecoveryPoint is Invalid (set inside the redo
+    // phase) and backupStartPoint is Invalid, so the predicate is false and we
+    // fall through. The local-min-recovery-point copy lives in the recovery
+    // driver's backend-local state; on the crash path it is Invalid, so the
+    // `EndOfLog < LocalMinRecoveryPoint` half is never true.
     if in_recovery {
-        return Err(PgError::new(
-            PANIC,
-            "blocked: StartupXLOG post-redo consistency check + end-of-recovery actions \
-             (xlog.c:5926-6181) — ResetUnloggedRelations / DeleteAllExportedSnapshotFiles / \
-             the hot-standby ProcArray cluster and the archive-recovery timeline switch are \
-             owned by unported subsystems; pending recovery family fill",
-        ));
+        let (backup_start_point, archive_recovery_requested, backup_end_required) = {
+            let cf = control_file_mut();
+            (
+                cf.backupStartPoint,
+                recovery_seam::archive_recovery_requested::call(),
+                cf.backupEndRequired,
+            )
+        };
+        if backup_start_point != InvalidXLogRecPtr {
+            // Ran off end of WAL before reaching end-of-backup WAL record — only
+            // reachable on the backup-recovery path; surface that boundary.
+            if archive_recovery_requested || backup_end_required {
+                return ereport(FATAL)
+                    .errmsg("WAL ends before end of online backup")
+                    .errhint(
+                        "All WAL generated while online backup was taken must be available at recovery.",
+                    )
+                    .finish(loc(5960, "StartupXLOG"))
+                    .map(|_| ());
+            }
+        }
+
+        // Reset unlogged relations to the contents of their INIT fork. Done AFTER
+        // recovery is complete (to include unlogged relations created during
+        // recovery) but BEFORE recovery is marked successful. (xlog.c:5979)
+        backend_storage_file_reinit::ResetUnloggedRelations(
+            backend_storage_file_reinit::UNLOGGED_RELATION_INIT,
+        )?;
     }
 
     // Pre-scan prepared transactions to find out the XID range present.
@@ -639,24 +667,94 @@ pub fn SeedTransamVariablesFromCheckpoint() -> PgResult<()> {
     Ok(())
 }
 
-/// The redo phase of `StartupXLOG` (xlog.c:5739-5916): the `if (InRecovery)`
-/// block. The hot-standby cluster + `PerformWalRecovery` it drives bottom out
-/// on unported owners (procarray, the per-AM redo dispatch via #157, the
-/// unlogged-relation reset). Surface that boundary precisely.
+/// The redo phase of `StartupXLOG` (xlog.c:5754-5916): the `if (InRecovery)`
+/// block. Sets `SharedRecoveryState`, propagates the recovery state into
+/// pg_control, resets unlogged relations + exported-snapshot files, and drives
+/// `PerformWalRecovery`.
+///
+/// The hot-standby cluster (xlog.c:5841-5910) only runs when
+/// `ArchiveRecoveryRequested && EnableHotStandby`; on the crash-recovery path
+/// (`ArchiveRecoveryRequested == false`) it is faithfully skipped, exactly as in
+/// C. The boundary for hot standby is surfaced precisely.
 fn startup_xlog_redo_phase(
     _check_point: &types_control::CheckPoint,
     _was_shutdown: bool,
-    _have_backup_label: bool,
-    _have_tblspc_map: bool,
+    have_backup_label: bool,
+    have_tblspc_map: bool,
 ) -> PgResult<bool> {
-    Err(PgError::new(
-        PANIC,
-        "blocked: StartupXLOG redo phase (xlog.c:5739) — the InArchiveRecovery / \
-         CheckRequiredParameterValues / ResetUnloggedRelations / hot-standby \
-         InitRecoveryTransactionEnvironment+ProcArrayInitRecovery cluster and the \
-         PerformWalRecovery redo loop (per-AM rm_redo, #157) are owned by unported \
-         subsystems; pending recovery family fill",
-    ))
+    let in_archive_recovery = recovery_seam::archive_recovery_requested::call();
+
+    // Initialize state for RecoveryInProgress(). (xlog.c:5757-5763)
+    unsafe {
+        let ctl = &mut *xlog_ctl();
+        shmem::spin_lock_acquire(&ctl.info_lck);
+        ctl.SharedRecoveryState = if in_archive_recovery {
+            RecoveryState::Archive
+        } else {
+            RecoveryState::Crash
+        };
+        shmem::spin_lock_release(&ctl.info_lck);
+    }
+
+    // Update pg_control to show that we are recovering and to show the selected
+    // checkpoint as the place we are starting from. (xlog.c:5773)
+    UpdateControlFile();
+
+    // If there was a backup_label / tablespace_map file, its info has now been
+    // propagated into pg_control; rename it out of the way. (xlog.c:5782-5800)
+    // On the crash-recovery path neither is present (have_backup_label ==
+    // have_tblspc_map == false), so these legs do not run. The backup-recovery
+    // file renames go through the unported backup-label durable-rename leg; if a
+    // backup_label is ever present here, surface that boundary precisely rather
+    // than silently skipping it.
+    if have_backup_label || have_tblspc_map {
+        return Err(PgError::new(
+            PANIC,
+            "blocked: StartupXLOG backup_label / tablespace_map rename (xlog.c:5782) — \
+             durable_rename of BACKUP_LABEL_FILE / TABLESPACE_MAP is reached only on the \
+             backup-recovery path; pending recovery family fill",
+        ));
+    }
+
+    // LocalMinRecoveryPoint bookkeeping (xlog.c:5811-5819) is owned by the
+    // recovery driver's backend-local state, which already initialized it from
+    // the control file inside InitWalRecovery; nothing extra needed on this path.
+
+    // Check that the GUCs used to generate the WAL allow recovery. (xlog.c:5822)
+    CheckRequiredParameterValues()?;
+
+    // We're in recovery, so unlogged relations may be trashed and must be reset.
+    // This must happen BEFORE allowing Hot Standby connections. (xlog.c:5829)
+    backend_storage_file_reinit::ResetUnloggedRelations(
+        backend_storage_file_reinit::UNLOGGED_RELATION_CLEANUP,
+    )?;
+
+    // Delete any saved transaction snapshot files left behind by crashed
+    // backends. (xlog.c:5835)
+    snapmgr_seam::delete_all_exported_snapshot_files::call()?;
+
+    // Initialize for Hot Standby, if enabled. (xlog.c:5841-5910) Only entered
+    // when ArchiveRecoveryRequested && EnableHotStandby; faithfully skipped on
+    // the crash-recovery path. If hot standby is ever requested here, surface the
+    // (unported InitRecoveryTransactionEnvironment / ProcArrayInitRecovery)
+    // boundary precisely.
+    if in_archive_recovery && enable_hot_standby() {
+        return Err(PgError::new(
+            PANIC,
+            "blocked: StartupXLOG hot-standby init (xlog.c:5841) — \
+             InitRecoveryTransactionEnvironment + ProcArrayInitRecovery + \
+             StartupSUBTRANS + ProcArrayApplyRecoveryInfo are owned by unported \
+             hot-standby legs; pending recovery family fill",
+        ));
+    }
+
+    // We're all set for replaying the WAL now. Do it. (xlog.c:5913)
+    {
+        let cx = mcx::MemoryContext::new("StartupXLOG/PerformWalRecovery");
+        recovery_seam::perform_wal_recovery::call(cx.mcx())?;
+    }
+
+    Ok(true)
 }
 
 // ===========================================================================

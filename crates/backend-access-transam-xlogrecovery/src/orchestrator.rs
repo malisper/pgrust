@@ -854,6 +854,19 @@ pub fn finish_wal_recovery(mcx: Mcx<'_>) -> PgResult<crate::core::EndOfWalRecove
 }
 
 // ===========================================================================
+// PerformWalRecovery (xlogrecovery.c:1670) — orchestrator entry.
+// ===========================================================================
+
+/// `void PerformWalRecovery(void)` (xlogrecovery.c:1670) — the redo apply loop,
+/// driven by `StartupXLOG`'s `if (InRecovery)` block. Resolves the startup
+/// process's backend-local recovery state (C's file-static globals, created by
+/// [`init_wal_recovery`]) and runs the replay driver against it.
+pub fn perform_wal_recovery(mcx: Mcx<'_>) -> PgResult<()> {
+    let st = recovery_state_mut();
+    crate::replay::perform_wal_recovery(st, mcx)
+}
+
+// ===========================================================================
 // ShutdownWalRecovery (xlogrecovery.c:1626).
 // ===========================================================================
 

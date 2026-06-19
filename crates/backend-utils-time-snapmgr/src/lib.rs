@@ -1669,6 +1669,7 @@ pub fn init_seams() {
     // the matview copy-and-bump composite, and the large-object on-top-owner
     // register/unregister. Same `new_handle` Rc<->SnapHandle adapters as above.
     seams::import_snapshot::set(|idstr| ImportSnapshot(&idstr));
+    seams::delete_all_exported_snapshot_files::set(DeleteAllExportedSnapshotFiles);
     seams::push_copied_snapshot_and_bump::set(|| {
         PushCopiedSnapshot(&GetActiveSnapshot());
         UpdateActiveSnapshotCommandId()

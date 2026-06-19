@@ -363,15 +363,65 @@ pub(crate) fn recovery_pauses_here(_st: &mut XLogRecoveryState, _end_of_recovery
     )
 }
 
-/// `static bool recoveryApplyDelay(XLogReaderState *record)` (xlogrecovery.c) —
-/// honor `recovery_min_apply_delay` for a commit record.
-pub(crate) fn recovery_apply_delay(_st: &mut XLogRecoveryState, _record: RecordRef) -> bool {
+/// `static bool recoveryApplyDelay(XLogReaderState *record)`
+/// (xlogrecovery.c:3004) — honor `recovery_min_apply_delay` for a commit record.
+pub(crate) fn recovery_apply_delay(st: &mut XLogRecoveryState, record: RecordRef) -> bool {
+    // Nothing to do if no delay configured. (The GUC's boot value is 0, so this
+    // is the universal crash-recovery / non-standby case.)
+    if crate::gucvars::recovery_min_apply_delay() <= 0 {
+        return false;
+    }
+
+    // No delay is applied on a database not yet consistent.
+    if !st.reached_consistency {
+        return false;
+    }
+
+    // Nothing to do if crash recovery is requested.
+    if !st.archive_recovery_requested {
+        return false;
+    }
+
+    // Is it a COMMIT record? We deliberately do not delay aborts (no MVCC
+    // effect). Read the held reader's current record, mirroring the C
+    // `XLogRecGetRmid(record)` / `XLogRecGetInfo(record)` over `xlogreader`.
+    let r = reader_state();
+    if backend_access_transam_xlogreader::XLogRecGetRmid(r) != RM_XACT_ID {
+        return false;
+    }
+    let xact_info = backend_access_transam_xlogreader::XLogRecGetInfo(r) & XLOG_XACT_OPMASK;
+    if xact_info != XLOG_XACT_COMMIT && xact_info != XLOG_XACT_COMMIT_PREPARED {
+        return false;
+    }
+
+    let mut xtime: TimestampTz = 0;
+    if !get_record_timestamp(record, &mut xtime) {
+        return false;
+    }
+
+    // delayUntil = TimestampTzPlusMilliseconds(xtime, recovery_min_apply_delay).
+    let delay_until =
+        xtime + (crate::gucvars::recovery_min_apply_delay() as TimestampTz) * 1000;
+
+    // Exit without arming the latch if it's already past time to apply this
+    // record.
+    let now = timestamp_seam::get_current_timestamp::call();
+    let msecs = timestamp_seam::timestamp_difference_milliseconds::call(now, delay_until);
+    if msecs <= 0 {
+        return false;
+    }
+
+    // The remaining timed wait loop (ResetLatch / ProcessStartupProcInterrupts /
+    // CheckForStandbyTrigger / WaitLatch on XLogRecoveryCtl->recoveryWakeupLatch)
+    // is reached only when a positive `recovery_min_apply_delay` is configured on
+    // a consistent archive-recovery standby — never on the crash-recovery path.
+    // Surface that (unported startup-proc latch-wait) boundary precisely.
     panic!(
-        "blocked: xlogrecovery::stop::recovery_apply_delay — the recovery_min_apply_delay \
-         wait loop needs the recovery-wakeup-latch WaitLatch/ResetLatch wait + \
-         ProcessStartupProcInterrupts + a per-iteration recovery-pause re-check \
-         (unported startup-proc latch-wait machinery); get_record_timestamp is now landed \
-         but the timed wait loop remains the blocker; pending stop-family fill"
+        "blocked: xlogrecovery::stop::recovery_apply_delay wait loop (xlogrecovery.c:3049) — \
+         the recovery_min_apply_delay timed WaitLatch on recoveryWakeupLatch + \
+         ProcessStartupProcInterrupts + CheckForStandbyTrigger require the unported \
+         startup-proc latch-wait machinery; reached only with a positive \
+         recovery_min_apply_delay on a consistent standby; pending stop-family fill"
     )
 }
 

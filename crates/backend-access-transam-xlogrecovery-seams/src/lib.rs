@@ -33,6 +33,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `void PerformWalRecovery(void)` (xlogrecovery.c:1670) — the main redo
+    /// apply loop, driven by `StartupXLOG`'s `if (InRecovery)` block. Reads and
+    /// applies WAL records until the recovery target / end of WAL is reached.
+    /// Operates on the owner's process-lifetime backend-local recovery state
+    /// (created by [`init_wal_recovery`]); `mcx` is the startup process's current
+    /// memory context.
+    pub fn perform_wal_recovery<'mcx>(mcx: mcx::Mcx<'mcx>) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `void ShutdownWalRecovery(void)` (xlogrecovery.c:1626) — clean up the WAL
     /// reader and leftovers from restoring WAL from archive.
     pub fn shutdown_wal_recovery() -> types_error::PgResult<()>

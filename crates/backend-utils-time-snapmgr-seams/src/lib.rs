@@ -308,3 +308,10 @@ seam_core::seam!(
         snapshot: std::rc::Rc<types_snapshot::SnapshotData>,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `void DeleteAllExportedSnapshotFiles(void)` (snapmgr.c:1584) — clean up
+    /// the exported-snapshot files left behind by crashed backends. Called by
+    /// `StartupXLOG`'s crash-recovery (`if (InRecovery)`) block.
+    pub fn delete_all_exported_snapshot_files() -> PgResult<()>
+);
