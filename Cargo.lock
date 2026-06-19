@@ -13888,6 +13888,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-pl-plpgsql-comp"
+version = "0.0.0"
+dependencies = [
+ "backend-pl-plpgsql-comp-seams",
+ "backend-pl-plpgsql-funcs",
+ "backend-pl-plpgsql-gram",
+ "backend-pl-plpgsql-scanner",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-adt-ruleutils-seams",
+ "backend-utils-cache-funccache-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-misc-guc-tables",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-plpgsql",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-pl-plpgsql-comp-seams"
 version = "0.0.0"
 dependencies = [
@@ -23551,6 +23574,7 @@ dependencies = [
  "backend-parser-parse-utilcmd",
  "backend-parser-relation",
  "backend-parser-small1",
+ "backend-pl-plpgsql-comp",
  "backend-port-atomics",
  "backend-port-sysv-sema",
  "backend-port-sysv-shmem",

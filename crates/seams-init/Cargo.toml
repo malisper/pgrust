@@ -612,3 +612,4 @@ port-noblock = { path = "../port-noblock" }
 port-pqsignal = { path = "../port-pqsignal" }
 probe-adt-scalar-bool = { path = "../probe-adt-scalar-bool" }
 backend-utils-adt-jsonpath-exec = { path = "../backend-utils-adt-jsonpath-exec" }
+backend-pl-plpgsql-comp = { path = "../backend-pl-plpgsql-comp" }
