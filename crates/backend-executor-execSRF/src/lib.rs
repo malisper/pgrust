@@ -60,7 +60,10 @@ use types_tuple::heaptuple::TupleDescData;
 use backend_executor_execSRF_seams as seams;
 
 mod generate_series;
+mod generate_series_numeric;
 mod generate_subscripts;
+mod regexp_matches;
+mod string_to_table;
 mod json_each;
 mod json_record;
 mod json_srf;
@@ -101,6 +104,19 @@ pub fn init_seams() {
     // value-per-call SRF emitting the split-out substrings (its glob match +
     // split core is `backend-utils-adt-regexp::regexp_split_to_table`).
     regexp_split::register_regexp_split();
+    // `generate_series(numeric, numeric [, numeric])` (OIDs 3259/3260) — the
+    // value-per-call numeric SRF (its NaN/zero-step validation + per-call
+    // cmp_var/add_var advance core is `backend-utils-adt-numeric::series_srf`,
+    // over the numeric kernels).
+    generate_series_numeric::register_generate_series_numeric();
+    // `regexp_matches(text, text [, text])` (OIDs 2763/2764) — the value-per-call
+    // SRF emitting one `text[]` row per match (its glob scan + per-row build core
+    // is `backend-utils-adt-regexp::regexp_matches`).
+    regexp_matches::register_regexp_matches();
+    // `string_to_table(text, text [, text])` (OIDs 6160/6161) — the value-per-call
+    // SRF emitting one `text` field per call (its split core is
+    // `backend-utils-adt-varlena::split_format::split_text`).
+    string_to_table::register_string_to_table();
     // `json_array_elements`/`json_array_elements_text`/`json_object_keys` (OIDs
     // 3955/3969/3957) — the value-per-call json (text) SRFs (their SAX-callback
     // collection cores are `backend-utils-adt-jsonfuncs::{elements,keys}`).

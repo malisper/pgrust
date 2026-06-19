@@ -9500,7 +9500,10 @@ dependencies = [
  "backend-utils-adt-int8",
  "backend-utils-adt-jsonfuncs",
  "backend-utils-adt-misc",
+ "backend-utils-adt-numeric",
  "backend-utils-adt-regexp",
+ "backend-utils-adt-tsvector-core",
+ "backend-utils-adt-varlena",
  "backend-utils-adt-varlena-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-syscache-seams",
@@ -9517,6 +9520,7 @@ dependencies = [
  "types-error",
  "types-fmgr",
  "types-nodes",
+ "types-numeric",
  "types-tuple",
 ]
 

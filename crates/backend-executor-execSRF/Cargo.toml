@@ -56,8 +56,23 @@ backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
 types-array = { path = "../types-array" }
 
 # regexp_split_to_table(text, text [, text]) (OIDs 2765/2766): the glob match +
-# split value core (regexp_split_to_table / build_regexp_split_result).
+# split value core (regexp_split_to_table / build_regexp_split_result), and
+# regexp_matches(text, text [, text]) (OIDs 2763/2764): the per-match text[]
+# build core (setup_regexp_matches / build_regexp_match_result).
 backend-utils-adt-regexp = { path = "../backend-utils-adt-regexp" }
+
+# generate_series(numeric, numeric [, numeric]) (OIDs 3259/3260): the numeric
+# value core (set_var_from_num / cmp_var / add_var / make_result) over NumericVar.
+backend-utils-adt-numeric = { path = "../backend-utils-adt-numeric" }
+types-numeric = { path = "../types-numeric" }
+
+# string_to_table(text, text [, text]) (OIDs 6160/6161): the split-field value
+# core (split_text) emitting one text field per call.
+backend-utils-adt-varlena = { path = "../backend-utils-adt-varlena" }
+
+# unnest(tsvector) (OID 3322): the (lexeme, positions, weights) row materializer
+# (tsvector_unnest).
+backend-utils-adt-tsvector-core = { path = "../backend-utils-adt-tsvector-core" }
 
 # json_array_elements / json_array_elements_text / json_object_keys (OIDs
 # 3955/3969/3957): the json (text) SAX-callback collection cores (elements_worker
