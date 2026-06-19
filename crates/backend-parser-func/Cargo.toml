@@ -27,6 +27,7 @@ backend-nodes-core = { path = "../backend-nodes-core" }
 backend-parser-parse-func-seams = { path = "../backend-parser-parse-func-seams" }
 
 # Outward seam crates (dependencies reached across cycles).
+backend-optimizer-util-clauses-seams = { path = "../backend-optimizer-util-clauses-seams" }
 backend-parser-coerce-seams = { path = "../backend-parser-coerce-seams" }
 backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }
 backend-parser-parse-type-seams = { path = "../backend-parser-parse-type-seams" }

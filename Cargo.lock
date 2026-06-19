@@ -13182,6 +13182,7 @@ dependencies = [
  "backend-catalog-namespace-seams",
  "backend-commands-functioncmds-seams",
  "backend-nodes-core",
+ "backend-optimizer-util-clauses-seams",
  "backend-parser-clause-seams",
  "backend-parser-coerce-seams",
  "backend-parser-parse-agg-seams",

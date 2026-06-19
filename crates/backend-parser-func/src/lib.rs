@@ -1401,6 +1401,62 @@ pub fn init_seams() {
             func_signature_string(&names, nargs, &[], &argtypes)
         },
     );
+
+    // Cross-crate install: `recheck_cast_function_args` (clauses.c:4382, the
+    // const-fold simplify path) re-runs the parser's type resolution over the
+    // (reordered / default-expanded) argument list. The decl lives on
+    // `backend-optimizer-util-clauses-seams`; the body needs the parser's
+    // `enforce_generic_type_consistency` + `make_fn_arguments`, both reachable
+    // here.
+    backend_optimizer_util_clauses_seams::recheck_cast_function_args::set(
+        seam_recheck_cast_function_args,
+    );
+}
+
+/// `recheck_cast_function_args` (clauses.c:4382): recheck function args and
+/// typecast as needed. Re-derives the actual argument types via `exprType`,
+/// re-runs `enforce_generic_type_consistency` against the declared (possibly
+/// polymorphic) `proargtypes` to resolve polymorphism and verify the resolved
+/// result type still matches what the parser produced, then applies any needed
+/// casts via `make_fn_arguments`. Returns the (possibly cast) argument list.
+fn seam_recheck_cast_function_args(
+    mut args: Vec<Expr>,
+    result_type: Oid,
+    proargtypes: Vec<Oid>,
+    prorettype: Oid,
+) -> PgResult<Vec<Expr>> {
+    if args.len() > FUNC_MAX_ARGS {
+        return Err(internal_error("too many function arguments"));
+    }
+
+    let nargs = args.len() as i32;
+    let actual_arg_types: Vec<Oid> = args
+        .iter()
+        .map(|a| exprType(Some(a)))
+        .collect::<PgResult<_>>()?;
+
+    debug_assert_eq!(args.len(), proargtypes.len());
+    let mut declared_arg_types = proargtypes;
+
+    let rettype = enforce_generic_type_consistency::call(
+        &actual_arg_types,
+        &mut declared_arg_types,
+        nargs,
+        prorettype,
+        false,
+    )?;
+
+    // let's just check we got the same answer as the parser did ...
+    if rettype != result_type {
+        return Err(internal_error(
+            "function's resolved result type changed during planning",
+        ));
+    }
+
+    // perform any necessary typecasting of arguments (pstate == NULL)
+    make_fn_arguments(None, &mut args, &actual_arg_types, &declared_arg_types)?;
+
+    Ok(args)
 }
 
 /// Seam entry for `func_get_detail`. The sole cross-crate caller is
