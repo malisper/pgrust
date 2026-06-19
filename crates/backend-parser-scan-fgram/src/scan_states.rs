@@ -155,7 +155,7 @@ impl<'a> Scanner<'a> {
             // PUSH_YYLLOC / SET_YYLLOC: error cursor at this esc seq, restored
             // after. yylloc reporting for warnings already done above.
             let saved = self.save_push_yylloc();
-            self.set_esc_yylloc();
+            self.set_esc_yylloc(p);
             let res = if is_utf16_surrogate_first(c) {
                 self.utf16_first_part = c;
                 self.state = State::Xeu;
@@ -172,7 +172,7 @@ impl<'a> Scanner<'a> {
         // <xe,xeu>{xeunicodefail} = \\(u[0-9A-Fa-f]{0,3}|U[0-9A-Fa-f]{0,7})
         if let Some(end) = self.match_xeunicodefail(p) {
             self.pos = end;
-            self.set_esc_yylloc();
+            self.set_esc_yylloc(p);
             return Err(self.lexerr_full(
                 ERRCODE_INVALID_ESCAPE_SEQUENCE,
                 "invalid Unicode escape",
@@ -407,7 +407,7 @@ impl<'a> Scanner<'a> {
             let mut c = parse_hex(&self.scanbuf[hexstart..end]);
             self.pos = end;
             let saved = self.save_push_yylloc();
-            self.set_esc_yylloc();
+            self.set_esc_yylloc(p);
             let res = (|| {
                 if !is_utf16_surrogate_second(c) {
                     return Err(self.lexerr("invalid Unicode surrogate pair"));
@@ -422,7 +422,7 @@ impl<'a> Scanner<'a> {
         // <xe,xeu>{xeunicodefail}
         if let Some(end) = self.match_xeunicodefail(p) {
             self.pos = end;
-            self.set_esc_yylloc();
+            self.set_esc_yylloc(p);
             return Err(self.lexerr_full(
                 ERRCODE_INVALID_ESCAPE_SEQUENCE,
                 "invalid Unicode escape",
@@ -431,7 +431,13 @@ impl<'a> Scanner<'a> {
             ));
         }
         // <xeu>. | <xeu>\n | <xeu><<EOF>>: missing second escape sequence.
-        self.set_esc_yylloc();
+        // The `.`/`\n` rules match one char (flex yyleng==1) so the error
+        // cursor's "at or near" snippet (lloc..match-end) names that char (e.g.
+        // the closing quote); `<<EOF>>` matches zero, leaving the cursor at EOF.
+        self.set_esc_yylloc(p);
+        if !self.eof_at(p) {
+            self.pos = p + 1;
+        }
         Err(self.lexerr("invalid Unicode surrogate pair"))
     }
 
@@ -560,10 +566,14 @@ impl<'a> Scanner<'a> {
     fn pop_yylloc(&mut self, _saved: i32) {
         self.yylloc = self.save_yylloc;
     }
-    /// SET_YYLLOC() at the current token start (used to point the error cursor
-    /// at an escape sequence inside a string).
-    fn set_esc_yylloc(&mut self) {
-        self.yylloc = self.tok_start as i32;
+    /// `SET_YYLLOC()` -- `*yylloc = yytext - scanbuf`, i.e. the byte offset of
+    /// the start of the CURRENT matched rule text (`pos`), NOT the overall token
+    /// start. Inside a string the `<xe>`/`<xeu>` escape rules call this (under
+    /// PUSH/POP) to point the error cursor at the offending escape sequence
+    /// (scan.l:655/676/694/699), so "at or near" names the escape, not the whole
+    /// `E'...'` literal.
+    fn set_esc_yylloc(&mut self, pos: usize) {
+        self.yylloc = pos as i32;
     }
 }
 

@@ -228,6 +228,56 @@ fn fc_interval_to_char(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     })
 }
 
+/// `VARDATA_ANY` of a by-reference `text` argument: the payload bytes after the
+/// 4-byte uncompressed length header (`RefPayload::Cstring` is verbatim).
+#[inline]
+fn arg_text_body(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Vec<u8> {
+    let payload = fcinfo
+        .ref_arg(i)
+        .expect("to_date/to_timestamp fn: text arg missing from by-ref lane");
+    match payload {
+        RefPayload::Varlena(b) => {
+            let img = b.as_slice();
+            if img.len() >= 4 {
+                img[4..].to_vec()
+            } else {
+                Vec::new()
+            }
+        }
+        RefPayload::Cstring(s) => s.as_bytes().to_vec(),
+        _ => raise(PgError::error(
+            "to_date/to_timestamp fmgr arg: expected a by-reference text varlena",
+        )),
+    }
+}
+
+/// `to_date(text, text) -> date` (formatting.c). Both args are by-reference
+/// `text`; the `date` result is the by-value `DateADT` (int32).
+fn fc_to_date(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let date_txt = arg_text_body(fcinfo, 0);
+    let fmt = arg_text_body(fcinfo, 1);
+    let collid = fcinfo.fncollation;
+    let m = scratch_mcx();
+    match crate::to_date(m.mcx(), &date_txt, &fmt, collid) {
+        Ok(d) => Datum::from_i32(d),
+        Err(e) => raise(e),
+    }
+}
+
+/// `to_timestamp(text, text) -> timestamptz` (formatting.c). Both args are
+/// by-reference `text`; the `timestamptz` result is the by-value `Timestamp`
+/// (int64).
+fn fc_to_timestamp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let date_txt = arg_text_body(fcinfo, 0);
+    let fmt = arg_text_body(fcinfo, 1);
+    let collid = fcinfo.fncollation;
+    let m = scratch_mcx();
+    match crate::to_timestamp(m.mcx(), &date_txt, &fmt, collid) {
+        Ok(r) => Datum::from_i64(r.timestamp),
+        Err(e) => raise(e),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -264,5 +314,7 @@ pub fn register_formatting_builtins() {
         builtin(1768, "interval_to_char", 2, true, false, fc_interval_to_char),
         builtin(1770, "timestamptz_to_char", 2, true, false, fc_timestamptz_to_char),
         builtin(2049, "timestamp_to_char", 2, true, false, fc_timestamp_to_char),
+        builtin(1780, "to_date", 2, true, false, fc_to_date),
+        builtin(1778, "to_timestamp", 2, true, false, fc_to_timestamp),
     ]);
 }

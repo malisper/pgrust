@@ -573,8 +573,13 @@ pub unsafe fn base_yylex(
             // match end); a direct-ereport lexer error is reported verbatim
             // with its own SQLSTATE, as C does.
             if e.yyerror {
-                let lloc = lexer.scanner().yylloc();
-                record_yyerror(&e.message, lloc, yyscanner);
+                // Use the location captured WHEN the error was built, not the
+                // live `scanner.yylloc()`: the `<xe>`/`<xeu>` escape rules set
+                // the error cursor to the offending escape via PUSH/SET, then
+                // POP it back to the string-token start (scan.l does the
+                // ereport BEFORE POP_YYLLOC via longjmp, but our scanner returns
+                // the error and pops first). `e.location` is the pre-POP value.
+                record_yyerror(&e.message, e.location, yyscanner);
             } else {
                 CUR_ERRMSG.with(|m| *m.borrow_mut() = e.message);
                 CUR_ERRSTATE.with(|s| *s.borrow_mut() = e.sqlstate);

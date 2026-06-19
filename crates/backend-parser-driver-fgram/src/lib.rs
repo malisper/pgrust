@@ -196,9 +196,17 @@ impl<'a> BaseLexer<'a> {
         match self.scanner.core_yylex() {
             Ok(tok) => Ok(tok),
             Err(e) => {
-                let loc = self.errpos(e.location);
                 let mut pe: ParseError = e.into();
-                pe.location = loc;
+                // A `yyerror`-path error is rendered by `scanner_yyerror`, which
+                // needs the raw BYTE offset to slice the "at or near" snippet
+                // (`scanbuf[lloc..match-end]`) and runs `scanner_errposition`
+                // itself for the cursor. Converting here would double-apply it
+                // (a char cursor offset slices off the leading byte, e.g. the
+                // `\` of a Unicode escape). Only the direct-ereport path uses
+                // `location` as a final cursor, so convert just that one.
+                if !pe.yyerror {
+                    pe.location = self.errpos(pe.location);
+                }
                 Err(pe)
             }
         }
@@ -297,7 +305,9 @@ impl<'a> BaseLexer<'a> {
             if third.token != tokens::SCONST {
                 return Err(ParseError {
                     message: "UESCAPE must be followed by a simple string literal".to_string(),
-                    location: self.errpos(third.location),
+                    // Raw BYTE offset: `scanner_yyerror` (the yyerror renderer)
+                    // runs `scanner_errposition` for the cursor itself.
+                    location: third.location,
                     sqlstate: *b"42601",
                     yyerror: true,
                     detail: None,
@@ -313,7 +323,8 @@ impl<'a> BaseLexer<'a> {
                 // (UESCAPE string) token, like the sibling check above.
                 return Err(ParseError {
                     message: "invalid Unicode escape character".to_string(),
-                    location: self.errpos(third.location),
+                    // Raw BYTE offset (see sibling check above).
+                    location: third.location,
                     sqlstate: *b"42601",
                     yyerror: true,
                     detail: None,
