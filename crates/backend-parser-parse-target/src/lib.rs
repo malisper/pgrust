@@ -649,7 +649,7 @@ pub fn transformAssignedExpr<'mcx>(
             Node::mk_var(mcx, var)
         };
 
-        let rhs = expr_to_node(expr.expect("transformAssignedExpr: NULL expr for indirection"));
+        let rhs = expr_to_node(mcx, expr.expect("transformAssignedExpr: NULL expr for indirection"));
         let assigned = transformAssignmentIndirection(
             mcx,
             pstate,
@@ -1470,11 +1470,11 @@ fn ExpandIndirectionStar<'mcx>(
     ind.indirection.truncate(new_len);
 
     // Transform that.
-    let expr = parse_expr::transformExpr::call(pstate, Some(Node::A_Indirection(ind)), expr_kind)?
+    let expr = parse_expr::transformExpr::call(pstate, Some(Node::mk_a_indirection(mcx, ind)), expr_kind)?
         .expect("ExpandIndirectionStar: NULL expr");
 
     // Expand the rowtype expression into individual fields.
-    ExpandRowReference(mcx, pstate, expr_to_node(expr), make_target_entry)
+    ExpandRowReference(mcx, pstate, expr_to_node(mcx, expr), make_target_entry)
 }
 
 // ===========================================================================
@@ -2153,8 +2153,8 @@ fn FigureColnameInternal(node: Option<&Node<'_>>, name: &mut Option<String>) -> 
 // ===========================================================================
 
 /// Move an `Expr` into a raw `Node` wrapper (`Node::Expr`).
-fn expr_to_node<'mcx>(e: Expr) -> Node<'mcx> {
-    Node::Expr(e)
+fn expr_to_node<'mcx>(mcx: Mcx<'mcx>, e: Expr) -> Node<'mcx> {
+    Node::mk_expr(mcx, e)
 }
 
 /// `(Node *) expr` — unwrap a `Node::Expr` to its inner `Expr`.
