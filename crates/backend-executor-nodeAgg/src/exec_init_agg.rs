@@ -97,7 +97,7 @@ pub fn ExecInitAgg<'mcx>(
     // shared, read-only plan tree (the wrapping `Node::Agg`). The result
     // projection (ExecAssignProjectionInfo -> ExecBuildProjectionInfo) reads its
     // targetlist off this back-link via `Node::plan_head().targetlist`.
-    debug_assert!(matches!(plan_node, types_nodes::nodes::Node::Agg(_)));
+    debug_assert!(plan_node.is_agg());
     aggstate.ss.ps.plan = Some(plan_node);
     // C: aggstate->ss.ps.ExecProcNode = ExecAgg;
     aggstate.ss.ps.ExecProcNode = Some(crate::node_lifecycle::exec_agg_node);
@@ -824,8 +824,8 @@ fn clone_phase_sortnode<'mcx>(
         .lefttree
         .as_ref()
         .expect("chained Agg has an outer Sort plan");
-    let sort: &Sort<'mcx> = match &**outer {
-        types_nodes::nodes::Node::Sort(s) => s,
+    let sort: &Sort<'mcx> = match outer.node_tag() {
+        types_nodes::nodes::ntag::T_Sort => outer.expect_sort(),
         other => panic!("castNode(Sort, outerPlan(aggnode)) failed: {other:?}"),
     };
     alloc_in(mcx, sort.clone_in(mcx)?)

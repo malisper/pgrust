@@ -252,8 +252,8 @@ fn agg_plan<'a, 'mcx>(
         .ps
         .plan
         .expect("find_cols: ss.ps.plan is NULL");
-    match plan {
-        Node::Agg(a) => Ok(a),
+    match plan.node_tag() {
+        types_nodes::nodes::ntag::T_Agg => Ok(plan.expect_agg()),
         other => panic!("castNode(Agg, ss.ps.plan) failed: {other:?}"),
     }
 }
@@ -293,7 +293,7 @@ pub fn find_cols_walker<'mcx, 'n>(
     }
 
     // if (IsA(node, Aggref)) { is_aggref = true; walk; is_aggref = false; }
-    if matches!(node, Node::Expr(types_nodes::primnodes::Expr::Aggref(_))) {
+    if matches!(node.as_expr(), Some(types_nodes::primnodes::Expr::Aggref(_))) {
         debug_assert!(!context.is_aggref);
         context.is_aggref = true;
         walk_children(node, context, mcx)?;
