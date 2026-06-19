@@ -14,6 +14,15 @@ fast-check = "check --profile fast-check"
 # `force` is left at its default (false): these apply only when the variable is
 # not already set in the environment, so an explicit
 # `PGRUST_PGSHAREDIR=/somewhere cargo build` still overrides them.
+[build]
+# Shared compile cache across all worktrees/lanes. 43 worktrees were each
+# compiling the whole workspace from scratch (~98 GB of redundant target dirs);
+# sccache lets the first lane to compile a crate populate the cache and every
+# other lane get a cache hit instead of recompiling. CARGO_INCREMENTAL=0 (below)
+# is required for sccache to cache rustc invocations.
+rustc-wrapper = "sccache"
+
 [env]
 CARGO_INCREMENTAL = "0"
 PGRUST_PGSHAREDIR = "/tmp/pgrust_share"
+SCCACHE_CACHE_SIZE = "80G"
