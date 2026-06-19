@@ -132,6 +132,18 @@ fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
     fcinfo.set_ref_result(RefPayload::Varlena(image));
     Datum::from_usize(0)
 }
+
+/// Set an already-complete varlena image (e.g. a flat `ArrayType` produced by
+/// `construct_md_array` / `makeArrayResult`, whose leading word is its own
+/// `SET_VARSIZE` header) as the by-ref result, WITHOUT prepending another
+/// varlena header. `ret_varlena` exists for raw payloads that still need a
+/// `SET_VARSIZE` frame; an array image already carries one, so wrapping it again
+/// would shift every field by `VARHDRSZ` (corrupting `ARR_ELEMTYPE`, which
+/// `array_out` then reads as 0 -> "cache lookup failed for type 0").
+fn ret_varlena_image(fcinfo: &mut FunctionCallInfoBaseData, image: Vec<u8>) -> Datum {
+    fcinfo.set_ref_result(RefPayload::Varlena(image));
+    Datum::from_usize(0)
+}
 /// Set a `cstring` (`_out`) result on the by-ref lane and return the dummy word.
 #[inline]
 fn ret_cstring(fcinfo: &mut FunctionCallInfoBaseData, s: String) -> Datum {
@@ -774,7 +786,10 @@ fn fc_text_to_array(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let fldsep = opt_arg_bytes(fcinfo, 1);
     let out = ok(crate::split_format::text_to_array(m.mcx(), inputstring, fldsep, None, c));
     match out {
-        Some(d) => ret_varlena(fcinfo, d.as_ref_bytes().to_vec()),
+        // `d` is already a complete array varlena (`Datum::ByRef(ArrayType
+        // image)`); set it as the varlena result directly — do NOT re-wrap it in
+        // another `SET_VARSIZE` header.
+        Some(d) => ret_varlena_image(fcinfo, d.as_ref_bytes().to_vec()),
         None => {
             fcinfo.set_result_null(true);
             Datum::from_usize(0)
@@ -790,7 +805,10 @@ fn fc_text_to_array_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let out =
         ok(crate::split_format::text_to_array_null(m.mcx(), inputstring, fldsep, null_string, c));
     match out {
-        Some(d) => ret_varlena(fcinfo, d.as_ref_bytes().to_vec()),
+        // `d` is already a complete array varlena (`Datum::ByRef(ArrayType
+        // image)`); set it as the varlena result directly — do NOT re-wrap it in
+        // another `SET_VARSIZE` header.
+        Some(d) => ret_varlena_image(fcinfo, d.as_ref_bytes().to_vec()),
         None => {
             fcinfo.set_result_null(true);
             Datum::from_usize(0)

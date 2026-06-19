@@ -694,27 +694,78 @@ fn array_cast_and_set<'mcx>(
 /// detoasting a varlena (`attlen == -1`) first (mirrors `PG_DETOAST_DATUM`).
 ///
 /// In the owned model a pass-by-ref `Datum` carries the pointer word into a
-/// caller-owned varlena/cstring; the owner threads those bytes through the
-/// detoast seam, which materializes them in `mcx`. A `Datum` that does not
-/// carry an addressable payload (the bare-word case) raises the same
-/// `ereport(ERROR)` surface the C TOAST machinery would on a corrupt pointer.
+/// caller-owned varlena/cstring/fixed-length image (`DatumGetPointer`); this
+/// dereferences that pointer and copies the element's stored bytes into `mcx`,
+/// detoasting a varlena (`attlen == -1`) through the detoast seam first (mirrors
+/// `PG_DETOAST_DATUM`). The length to read is keyed off `attlen` exactly as
+/// `att_addlength_pointer` / `datumGetSize`: `attlen > 0` reads `attlen` bytes;
+/// `attlen == -1` reads `VARSIZE_ANY` bytes (then detoasts); `attlen == -2`
+/// reads the NUL-terminated cstring image (`strlen + 1`).
 fn datum_payload_bytes<'mcx>(mcx: Mcx<'mcx>, attlen: i32, src: Datum) -> PgResult<PgVec<'mcx, u8>> {
-    // The element bytes are reachable only through the detoast subsystem, which
-    // is an unported neighbor; route through its seam (loud panic until it
-    // lands), exactly as every other by-reference element access in this crate
-    // does. The seam takes the verbatim varlena bytes — here the Datum word is
-    // the pointer into them — so we hand the detoast owner the datum word and
-    // let it resolve the payload.
-    let _ = (attlen, src);
-    detoast_seam::detoast_attr::call(mcx, datum_as_byte_window(src))
+    if attlen == -1 {
+        // Varlena: read the verbatim varlena image at the pointer word and route
+        // it through the detoast seam (which materializes the detoasted bytes in
+        // `mcx`), exactly as `construct_md_array`'s `PG_DETOAST_DATUM(elems[i])`.
+        return detoast_seam::detoast_attr::call(mcx, datum_as_byte_window(src));
+    }
+    // Fixed-length by-ref (`attlen > 0`) or cstring (`attlen == -2`): copy the
+    // exact stored image at the pointer word.
+    let bytes = unsafe { datum_byref_image(attlen, src) };
+    slice_to_pgvec(mcx, bytes)
 }
 
-/// View the bytes a pass-by-ref `Datum`'s pointer word addresses. The owned
-/// model has no global address space; the detoast seam (the byref-payload
-/// owner) resolves the real bytes, so this hands it an empty window keyed by
-/// the datum and lets the owner fault loudly until it lands.
-fn datum_as_byte_window(_src: Datum) -> &'static [u8] {
-    &[]
+/// `DatumGetPointer(src)` over the bytes a pass-by-ref `Datum`'s pointer word
+/// addresses, bounded by `VARSIZE_ANY` for a varlena (`attlen == -1`),
+/// `strlen + 1` for a cstring (`attlen == -2`), or `attlen` bytes for a
+/// fixed-length by-ref type. `src` must hold a live pointer into an `mcx`-owned
+/// image (e.g. `cstring_bytes_to_text_datum` / `datum_from_buf`).
+///
+/// # Safety
+/// `src` is a by-reference `Datum` whose pointer word targets a live image
+/// spanning at least the computed length (datum.c's `Datum` contract).
+unsafe fn datum_byref_image<'a>(attlen: i32, src: Datum) -> &'a [u8] {
+    if attlen == -1 {
+        return datum_varlena_image(src);
+    }
+    let p = src.as_usize() as *const u8;
+    let len = if attlen == -2 {
+        // strlen + 1 over the NUL-terminated cstring image.
+        let mut n = 0usize;
+        while *p.add(n) != 0 {
+            n += 1;
+        }
+        n + 1
+    } else {
+        attlen as usize
+    };
+    core::slice::from_raw_parts(p, len)
+}
+
+/// `(&[u8]) view of VARSIZE_ANY(DatumGetPointer(src))` for a varlena `Datum`:
+/// read the leading header word to learn the total size, then return the full
+/// image. Mirrors `backend-utils-adt-scalar-datum-core`'s `varlena_image`.
+///
+/// # Safety
+/// `src` points at a valid varlena the caller keeps alive in `mcx`.
+unsafe fn datum_varlena_image<'a>(src: Datum) -> &'a [u8] {
+    use types_datum::varlena::VARHDRSZ;
+    let p = src.as_usize() as *const u8;
+    // Read enough of the header to compute VARSIZE_ANY (the 4-byte length word
+    // also covers the 1-byte short / external tag bytes).
+    let head = core::slice::from_raw_parts(p, VARHDRSZ);
+    let total = foundation::varsize_any(head, 0);
+    core::slice::from_raw_parts(p, total)
+}
+
+/// `DatumGetArrayTypeP(arraydatum)`'s input window: the verbatim varlena bytes
+/// at the array `Datum`'s pointer word (bounded by `VARSIZE_ANY`), handed to the
+/// detoast seam by the `array_*` header-projection helpers.
+///
+/// SAFETY of the deref is upheld by the `Datum` contract (the pointer word
+/// targets a live `mcx`-owned varlena); the unsafe is encapsulated here so the
+/// many `array_*` header-projection call sites stay safe, exactly as they read.
+fn datum_as_byte_window<'a>(src: Datum) -> &'a [u8] {
+    unsafe { datum_varlena_image(src) }
 }
 
 /// `strlen(cstr)` over a NUL-terminated cstring payload (cstring elements,
@@ -841,13 +892,19 @@ pub fn accum_array_result<'mcx>(
         if astate.typlen == -1 {
             // dvalue = PointerGetDatum(PG_DETOAST_DATUM_COPY(dvalue));
             let bytes = detoast_seam::detoast_attr::call(mcx, datum_as_byte_window(dvalue))?;
-            dvalue = Datum::from_usize(bytes.as_ptr() as usize);
+            // The detoasted copy is palloc'd in the build context (C's
+            // `rcontext`); it must outlive this frame so the accumulated
+            // `dvalues` pointer word stays valid until `makeArrayResult`. Leak
+            // the buffer into `mcx` (reclaimed by the owning context, not Rust
+            // drop) exactly as `datum_from_buf` does — without the forget the
+            // `PgVec` is dropped here and the dvalue pointer dangles.
+            dvalue = datum_from_buf(bytes);
         } else {
             // dvalue = datumCopy(dvalue, typbyval, typlen); — a fixed-len
             // by-ref copy. The payload bytes are resolved through the same
-            // byref window owner.
+            // byref window owner, then leaked into the build context.
             let bytes = datum_payload_bytes(mcx, astate.typlen as i32, dvalue)?;
-            dvalue = Datum::from_usize(bytes.as_ptr() as usize);
+            dvalue = datum_from_buf(bytes);
         }
     }
 

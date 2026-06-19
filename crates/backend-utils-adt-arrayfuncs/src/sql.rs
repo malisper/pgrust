@@ -1223,15 +1223,22 @@ fn dims_vec(a: &[u8]) -> Vec<i32> {
     v
 }
 
-/// View the bytes a pass-by-reference (`typlen == -1`) element `Datum`'s
-/// pointer word addresses, for the detoast seam. The owned model has no global
-/// address space; the detoast subsystem (the byref-payload owner) resolves the
-/// real bytes, so this hands it an empty window keyed by the datum and lets the
-/// owner fault loudly until detoast lands — the same bridge `construct.rs` uses
-/// for every other by-reference element access in this crate. This is the
-/// boundary where the C `PG_DETOAST_DATUM(value)` reads through the pointer.
-fn datum_as_byte_window<'a>(_value: Datum) -> &'a [u8] {
-    &[]
+/// `DatumGetPointer(value)` over a pass-by-reference (`typlen == -1`) element
+/// `Datum`: the verbatim varlena image at the pointer word, bounded by
+/// `VARSIZE_ANY`, handed to the detoast seam. This is the boundary where the C
+/// `PG_DETOAST_DATUM(value)` reads through the pointer. The owned model carries
+/// a live pointer into an `mcx`-owned varlena image in the Datum word (datum.c's
+/// `Datum` contract), so the deref is sound.
+fn datum_as_byte_window<'a>(value: Datum) -> &'a [u8] {
+    use types_datum::varlena::VARHDRSZ;
+    unsafe {
+        let p = value.as_usize() as *const u8;
+        // Read the leading header word to compute VARSIZE_ANY, then return the
+        // full varlena image.
+        let head = core::slice::from_raw_parts(p, VARHDRSZ);
+        let total = foundation::varsize_any(head, 0);
+        core::slice::from_raw_parts(p, total)
+    }
 }
 
 #[cfg(test)]
