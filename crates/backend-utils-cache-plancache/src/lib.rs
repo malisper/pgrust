@@ -2314,7 +2314,7 @@ fn seam_cached_plan_get_target_list<'mcx>(
     let tl = CachedPlanGetTargetList(mcx, plansource.0, None)?;
     let mut out = mcx::vec_with_capacity_in(mcx, tl.len())?;
     for te in tl.into_iter() {
-        out.push(Node::TargetEntry(te));
+        out.push(Node::mk_target_entry(mcx, te));
     }
     Ok(out)
 }

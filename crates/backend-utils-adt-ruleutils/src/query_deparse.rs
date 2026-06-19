@@ -455,7 +455,7 @@ fn flatten_group_exprs_targetlist<'mcx>(
         .as_deref()
         .map(|e| -> PgResult<_> { Ok(Node::Expr(e.clone_in(mcx)?)) })
         .transpose()?
-        .unwrap_or(Node::List(PgVec::new_in(mcx)));
+        .unwrap_or(Node::mk_list(mcx, PgVec::new_in(mcx)));
     let boxed = mcx::alloc_in(mcx, hq)?;
     let _ = backend_utils_adt_ruleutils_seams::flatten_group_exprs::call(mcx, &snapshot, &boxed)?;
     // (Unreachable: the seam owner is unported and panics. Kept to wire the
@@ -2155,7 +2155,7 @@ fn get_function_rte<'mcx>(
                 }
             }
             str_(context, "UNNEST(")?;
-            let list = mcx::alloc_in(mcx, Node::List(allargs))?;
+            let list = mcx::alloc_in(mcx, Node::mk_list(mcx, allargs))?;
             get_rule_expr(&list, context, true)?;
             ch_(context, b')')?;
         } else {
@@ -2499,7 +2499,7 @@ fn clone_node_list_from_tles<'mcx>(
     let mut out = PgVec::new_in(mcx);
     out.try_reserve(tl.len()).map_err(|_| mcx.oom(0))?;
     for t in tl.iter() {
-        out.push(mcx::alloc_in(mcx, Node::TargetEntry(t.clone_in(mcx)?))?);
+        out.push(mcx::alloc_in(mcx, Node::mk_target_entry(mcx, t.clone_in(mcx)?))?);
     }
     Ok(out)
 }
@@ -2513,7 +2513,7 @@ fn node_list<'mcx>(
     for n in items.iter() {
         out.push(mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
     }
-    Ok(Node::List(out))
+    Ok(Node::mk_list(mcx, out))
 }
 
 fn clone_opt_tupdesc<'mcx>(
