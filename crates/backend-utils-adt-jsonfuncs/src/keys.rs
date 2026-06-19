@@ -121,8 +121,13 @@ pub fn jsonb_object_keys<'mcx>(
     mcx: Mcx<'mcx>,
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
 ) -> PgResult<Datum<'mcx>> {
-    // InitMaterializedSRF(fcinfo, 0);
-    funcapi::InitMaterializedSRF::call(fcinfo, 0)?;
+    // InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC | MAT_SRF_BLESS);
+    // `jsonb_object_keys` returns `SETOF text` (a SCALAR result type, not a row
+    // type); bless the executor-supplied 1-column `expectedDesc`.
+    funcapi::InitMaterializedSRF::call(
+        fcinfo,
+        types_nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC | types_nodes::funcapi::MAT_SRF_BLESS,
+    )?;
     let nulls: [bool; 1] = [false];
 
     // Jsonb *jb = PG_GETARG_JSONB_P(0);
@@ -243,8 +248,13 @@ pub fn json_object_keys<'mcx>(
     mcx: Mcx<'mcx>,
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
 ) -> PgResult<Datum<'mcx>> {
-    // InitMaterializedSRF(fcinfo, 0);
-    funcapi::InitMaterializedSRF::call(fcinfo, 0)?;
+    // InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC | MAT_SRF_BLESS);
+    // `json_object_keys` returns `SETOF text` (a SCALAR result type, not a row
+    // type); bless the executor-supplied 1-column `expectedDesc`.
+    funcapi::InitMaterializedSRF::call(
+        fcinfo,
+        types_nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC | types_nodes::funcapi::MAT_SRF_BLESS,
+    )?;
     let nulls: [bool; 1] = [false];
 
     // text *json = PG_GETARG_TEXT_PP(0);

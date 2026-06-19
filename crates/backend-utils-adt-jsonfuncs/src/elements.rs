@@ -147,7 +147,14 @@ fn jsonb_array_elements_impl<'mcx>(
     let rows = elements_worker_jsonb(mcx, &jb, funcname, as_text)?;
 
     // InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC | MAT_SRF_BLESS);
-    funcapi::InitMaterializedSRF::call(fcinfo, types_nodes::funcapi::MAT_SRF_BLESS)?;
+    // A single-column (`jsonb`/`text`) SRF returns `SETOF jsonb`/`SETOF text`,
+    // a SCALAR result type; `get_call_result_type` would reject it ("return
+    // type must be a row type"), so C blesses the executor-supplied
+    // `expectedDesc` (the 1-column `value` descriptor) instead.
+    funcapi::InitMaterializedSRF::call(
+        fcinfo,
+        types_nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC | types_nodes::funcapi::MAT_SRF_BLESS,
+    )?;
 
     put_element_rows(mcx, fcinfo, &rows, as_text)?;
 
@@ -346,7 +353,12 @@ fn json_array_elements_impl<'mcx>(
     let json = &json_image[VARHDRSZ..];
 
     // InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC | MAT_SRF_BLESS);
-    funcapi::InitMaterializedSRF::call(fcinfo, types_nodes::funcapi::MAT_SRF_BLESS)?;
+    // Single-column SRF: bless the executor-supplied 1-column `expectedDesc`
+    // (a `SETOF json`/`text` SCALAR result type is not a row type).
+    funcapi::InitMaterializedSRF::call(
+        fcinfo,
+        types_nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC | types_nodes::funcapi::MAT_SRF_BLESS,
+    )?;
 
     let rows = elements_worker(json, funcname, as_text)?;
 

@@ -63,6 +63,8 @@ mod generate_series;
 mod generate_subscripts;
 mod json_each;
 mod json_srf;
+mod jsonb_srf;
+mod recordset_srf;
 mod pg_input_error_info;
 mod regexp_split;
 mod srf_registry;
@@ -108,6 +110,20 @@ pub fn init_seams() {
     // tuplestore via InitMaterializedSRF; core is
     // `backend-utils-adt-jsonfuncs::each`).
     json_each::register_json_each_srfs();
+    // `jsonb_array_elements`/`jsonb_array_elements_text`/`jsonb_object_keys`
+    // (OIDs 3219/3465/3931) — the materialize-mode jsonb array-elements /
+    // object-keys SRFs (their `elements_worker_jsonb` / `jsonb_object_keys`
+    // bodies fill the materialize tuplestore via InitMaterializedSRF; core is
+    // `backend-utils-adt-jsonfuncs::{elements,keys}`).
+    jsonb_srf::register_jsonb_srfs();
+    // `json_to_recordset`/`jsonb_to_recordset` (OIDs 3205/3491) — the
+    // materialize-mode json/jsonb array-of-objects -> setof record SRFs (their
+    // `populate_recordset_worker` body fills the materialize tuplestore via
+    // InitMaterializedSRF; core is `backend-utils-adt-jsonfuncs::recordset`).
+    // The `json[b]_populate_recordset` siblings are NOT registered: they read
+    // an optional composite `record` argument through the uninstalled funcapi
+    // `srf_arg_record` seam (see recordset_srf.rs).
+    recordset_srf::register_recordset_srfs();
 }
 
 // ===========================================================================
