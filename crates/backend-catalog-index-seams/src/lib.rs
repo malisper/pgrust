@@ -157,18 +157,21 @@ seam_core::seam!(
     /// `bool isnull[INDEX_MAX_KEYS]` buffers; they return by value here.
     /// Expression evaluation can `ereport(ERROR)`, carried on `Err`.
     ///
-    /// The result array stays on the word-model `types_datum::Datum` (rather
-    /// than the canonical `Datum`): the sole consumer feeds it straight
-    /// into `backend-access-index-genam-seams::build_index_value_description`,
-    /// whose `values: &[types_datum::Datum]` contract is owned outside this
-    /// batch. Migrating the element type here would diverge from that landed
-    /// contract; it follows when genam migrates.
+    /// The result array carries the canonical per-attribute
+    /// [`types_tuple::backend_access_common_heaptuple::Datum`] so a
+    /// by-reference index key (text/varchar/name/numeric/uuid/macaddr/…) crosses
+    /// as its `ByRef` byte image rather than collapsing to a bare machine word
+    /// (which would panic the scalar accessor on a by-ref value). The downstream
+    /// consumers — `index_insert`, the unique/exclusion `ScanKey`, and
+    /// `backend-access-index-genam-seams::build_index_value_description` — all
+    /// take this canonical `Datum`.
     pub fn form_index_datum<'mcx>(
         index_info: &types_nodes::execnodes::IndexInfo<'_>,
         slot: types_nodes::execnodes::SlotId,
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<(
-        [types_datum::Datum; types_core::fmgr::INDEX_MAX_KEYS as usize],
+        [types_tuple::backend_access_common_heaptuple::Datum<'mcx>;
+            types_core::fmgr::INDEX_MAX_KEYS as usize],
         [bool; types_core::fmgr::INDEX_MAX_KEYS as usize],
     )>
 );

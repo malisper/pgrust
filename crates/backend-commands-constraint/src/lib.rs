@@ -311,13 +311,12 @@ pub fn unique_key_recheck(
             // the row is now dead, because that is the TID the index will know
             // about.
             let num_index_attrs = index_info.ii_NumIndexAttrs as usize;
-            let values_v = datums_to_v(mcx, &values, num_index_attrs)?;
             {
                 let mut carrier = IndexInfoCarrier::new(&mut index_info);
                 indexam::index_insert(
                     mcx,
                     &index_rel,
-                    &values_v,
+                    &values[..num_index_attrs],
                     &isnull[..num_index_attrs],
                     &checktid,
                     &heap,
@@ -365,22 +364,6 @@ pub fn unique_key_recheck(
 
     let _ = skipped; // both the skip and the completion path return NULL.
     Ok(Datum::null())
-}
-
-/// Bridge `FormIndexDatum`'s bare-word `values[0..n]` into the canonical
-/// per-attribute by-value `Datum` lane that `index_insert` consumes (the same
-/// bridge the ported `execIndexing` makes between these two value models).
-fn datums_to_v<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
-    values: &[types_datum::Datum; INDEX_MAX_KEYS],
-    n: usize,
-) -> PgResult<mcx::PgVec<'mcx, DatumV<'mcx>>> {
-    let mut v: mcx::PgVec<'mcx, DatumV<'mcx>> = mcx::PgVec::new_in(mcx);
-    v.try_reserve(n).map_err(|_| mcx.oom(n))?;
-    for d in &values[..n] {
-        v.push(DatumV::ByVal(d.as_usize()));
-    }
-    Ok(v)
 }
 
 /// Build a `TRIGGER_PROTOCOL_VIOLATED` (`ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED`,

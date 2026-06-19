@@ -492,12 +492,17 @@ fn FormIndexDatum<'mcx>(
     slot: types_nodes::SlotId,
     estate: &mut types_nodes::EStateData<'mcx>,
 ) -> PgResult<(
-    [types_datum::Datum; INDEX_MAX_KEYS as usize],
+    [types_tuple::backend_access_common_heaptuple::Datum<'mcx>; INDEX_MAX_KEYS as usize],
     [bool; INDEX_MAX_KEYS as usize],
 )> {
     let mcx = estate.es_query_cxt;
 
-    let mut values = [types_datum::Datum::null(); INDEX_MAX_KEYS as usize];
+    // The canonical per-attribute `Datum` carries a by-reference index key
+    // (text/varchar/name/numeric/…) as its `ByRef` byte image; collapsing to a
+    // bare machine word here would panic the scalar accessor on a by-ref value.
+    let mut values: [types_tuple::backend_access_common_heaptuple::Datum<'mcx>;
+        INDEX_MAX_KEYS as usize] =
+        core::array::from_fn(|_| types_tuple::backend_access_common_heaptuple::Datum::null());
     let mut isnull = [false; INDEX_MAX_KEYS as usize];
 
     let n = index_info.ii_NumIndexAttrs as usize;
@@ -530,11 +535,11 @@ fn FormIndexDatum<'mcx>(
             // System column: slot_getsysattr against the slot's stored tuple.
             let sd = estate.slot_data_mut(slot);
             let (d, is_null) = exec_tuples::slot_getsysattr::call(mcx, sd, keycol)?;
-            (d.as_usize(), is_null)
+            (d, is_null)
         } else if keycol != 0 {
             // Plain index column; get the value directly from the heap tuple.
             let (d, is_null) = exec_tuples::slot_getattr::call(estate, slot, keycol)?;
-            (d.as_usize(), is_null)
+            (d, is_null)
         } else {
             // Index expression --- need to evaluate it.
             let states = expr_states.as_mut().ok_or_else(|| {
@@ -549,10 +554,10 @@ fn FormIndexDatum<'mcx>(
             let (d, is_null) =
                 exec_expr::exec_eval_expr_switch_context::call(state, ecxt, estate)?;
             indexpr_item += 1;
-            (d.as_usize(), is_null)
+            (d, is_null)
         };
 
-        values[i] = types_datum::Datum::from_usize(datum);
+        values[i] = datum;
         isnull[i] = this_isnull;
     }
 

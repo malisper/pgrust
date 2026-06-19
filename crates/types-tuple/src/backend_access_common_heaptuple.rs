@@ -180,6 +180,25 @@ impl Datum<'_> {
         self.byval_word()
     }
 
+    /// The pointer-shaped machine word for a varlena/by-reference value: a
+    /// `ByVal` arm returns its scalar word; a `ByRef` arm returns the address of
+    /// its owned byte image (the flat varlena, header included). This is the
+    /// `DatumGetPointer(X)` view a pointer-model codec seam consumes (e.g.
+    /// `DatumGetRangeTypeP`), where the borrow of `self` keeps the bytes live
+    /// for the duration of the call. Panics on the non-varlena arms
+    /// (`Cstring`/`Composite`/`Expanded`/`Internal`), which are never index
+    /// keys.
+    #[track_caller]
+    pub fn as_byref_word(&self) -> usize {
+        match self {
+            Datum::ByVal(d) => *d,
+            Datum::ByRef(b) => b.as_ptr() as usize,
+            Datum::Cstring(_) | Datum::Composite(_) | Datum::Expanded(_) | Datum::Internal(_) => {
+                panic!("Datum::as_byref_word called on a non-varlena value")
+            }
+        }
+    }
+
     /// C: `BoolGetDatum(X)`.
     pub fn from_bool(value: bool) -> Self {
         Datum::ByVal(value as usize)

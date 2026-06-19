@@ -370,18 +370,17 @@ fn insert_one_index<'mcx>(
     let index_unchanged = update
         && index_unchanged_by_update(estate, result_rel_info, i, index_info, index_relation)?;
 
-    // Bridge: FormIndexDatum yields the AM's raw input as bare scalar words;
-    // index_insert / the ScanKey / BuildIndexValueDescription consume the
-    // canonical per-attribute Datum (by-value word arm).
+    // FormIndexDatum yields the canonical per-attribute Datum (a by-reference
+    // key crosses as its `ByRef` byte image); index_insert / the ScanKey /
+    // BuildIndexValueDescription all consume it directly.
     let num_index_attrs = index_info.ii_NumIndexAttrs as usize;
-    let values_v = datums_to_v(mcx, &values, num_index_attrs)?;
 
     let mut satisfies_constraint = {
         let mut carrier = IndexInfoCarrier::new(index_info);
         indexam::index_insert(
             mcx,
             index_relation,
-            &values_v,
+            &values[..num_index_attrs],
             &isnull[..num_index_attrs],
             tupleid,
             heap_relation,
@@ -599,7 +598,7 @@ fn check_exclusion_or_unique_constraint<'mcx>(
     index: &Relation<'mcx>,
     index_info: &IndexInfo<'mcx>,
     tupleid: Option<&ItemPointerData>,
-    values: &[DatumWord; INDEX_MAX_KEYS as usize],
+    values: &[DatumV<'mcx>; INDEX_MAX_KEYS as usize],
     isnull: &[bool; INDEX_MAX_KEYS as usize],
     new_index: bool,
     wait_mode: CeoucWaitMode,
@@ -652,7 +651,7 @@ fn check_exclusion_or_unique_constraint<'mcx>(
             let attname = alloc::string::String::from_utf8_lossy(att.attname.name_str()).into_owned();
             let typtype = typcache_seams::type_cache_typtype::call(atttypid)?;
 
-            ExecWithoutOverlapsNotEmpty(mcx, heap, &attname, values[indnkeyatts - 1], typtype)?;
+            ExecWithoutOverlapsNotEmpty(mcx, heap, &attname, &values[indnkeyatts - 1], typtype)?;
         }
     }
 
@@ -686,7 +685,11 @@ fn check_exclusion_or_unique_constraint<'mcx>(
             0, // InvalidOid
             index_collations[i],
             constr_procs[i] as types_core::primitive::RegProcedure,
-            DatumV::ByVal(values[i].as_usize()),
+            // Carry the canonical per-attribute value into the scan key. A
+            // by-reference key (text/numeric/uuid/…) crosses as its `ByRef`
+            // byte image; collapsing it to a bare word would panic the scalar
+            // accessor on a by-ref value.
+            values[i].clone_in(mcx)?,
         )?;
         scankeys.push(entry);
     }
@@ -741,7 +744,7 @@ fn exclusion_scan_loop<'mcx>(
     index_info: &IndexInfo<'mcx>,
     constr_procs: &PgVec<'mcx, Oid>,
     tupleid: Option<&ItemPointerData>,
-    values: &[DatumWord; INDEX_MAX_KEYS as usize],
+    values: &[DatumV<'mcx>; INDEX_MAX_KEYS as usize],
     isnull: &[bool; INDEX_MAX_KEYS as usize],
     existing_slot: SlotId,
     scankeys: &[ScanKeyData<'mcx>],
@@ -818,6 +821,7 @@ fn exclusion_scan_loop<'mcx>(
             // If lossy indexscan, must recheck the condition.
             if index_scan.xs_recheck
                 && !index_recheck_constraint(
+                    mcx,
                     index,
                     constr_procs,
                     &existing_values,
@@ -883,13 +887,13 @@ fn exclusion_scan_loop<'mcx>(
             let error_new = genam_seams::build_index_value_description::call(
                 mcx,
                 index,
-                &datums_to_v(mcx, values, indnkeyatts)?,
+                &values[..indnkeyatts],
                 &isnull[..indnkeyatts],
             )?;
             let error_existing = genam_seams::build_index_value_description::call(
                 mcx,
                 index,
-                &existing_datums_to_v(mcx, &existing_values, indnkeyatts)?,
+                &existing_values[..indnkeyatts],
                 &existing_isnull[..indnkeyatts],
             )?;
             let index_name = index.name();
@@ -958,7 +962,7 @@ pub fn check_exclusion_constraint<'mcx>(
     index: &Relation<'mcx>,
     index_info: &IndexInfo<'mcx>,
     tupleid: Option<&ItemPointerData>,
-    values: &[DatumWord; INDEX_MAX_KEYS as usize],
+    values: &[DatumV<'mcx>; INDEX_MAX_KEYS as usize],
     isnull: &[bool; INDEX_MAX_KEYS as usize],
     new_index: bool,
 ) -> PgResult<()> {
@@ -986,11 +990,12 @@ pub fn check_exclusion_constraint<'mcx>(
 /// Check existing tuple's index values to see if it really matches the
 /// exclusion condition against the `new_values`. Returns true if conflict.
 fn index_recheck_constraint<'mcx>(
+    mcx: Mcx<'mcx>,
     index: &Relation<'mcx>,
     constr_procs: &PgVec<'mcx, Oid>,
-    existing_values: &[DatumWord; INDEX_MAX_KEYS as usize],
+    existing_values: &[DatumV<'mcx>; INDEX_MAX_KEYS as usize],
     existing_isnull: &[bool; INDEX_MAX_KEYS as usize],
-    new_values: &[DatumWord; INDEX_MAX_KEYS as usize],
+    new_values: &[DatumV<'mcx>; INDEX_MAX_KEYS as usize],
     indnkeyatts: usize,
 ) -> PgResult<bool> {
     for i in 0..indnkeyatts {
@@ -1001,11 +1006,14 @@ fn index_recheck_constraint<'mcx>(
 
         // !DatumGetBool(OidFunctionCall2Coll(constr_procs[i],
         //     index->rd_indcollation[i], existing_values[i], new_values[i]))
-        let res = fmgr_seams::function_call2_coll::call(
+        // Cross the canonical-value lane so a by-reference key (range, etc.)
+        // carries its byte image into fmgr instead of a bare word.
+        let res = fmgr_seams::function_call2_coll_datum::call(
+            mcx,
             constr_procs[i],
             index.rd_indcollation[i],
-            existing_values[i],
-            new_values[i],
+            existing_values[i].clone_in(mcx)?,
+            new_values[i].clone_in(mcx)?,
         )?;
         if !res.as_bool() {
             return Ok(false);
@@ -1155,13 +1163,19 @@ fn ExecWithoutOverlapsNotEmpty<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     attname: &str,
-    attval: DatumWord,
+    attval: &DatumV<'mcx>,
     typtype: i8,
 ) -> PgResult<()> {
+    // The range/multirange `*_is_empty` seams are on the pointer-model word
+    // `Datum`: a range value is by-reference, so cross its owned varlena image
+    // as the `DatumGetPointer` word (`as_byref_word`) the seam detoasts.
+    let attval_word = DatumWord::from_usize(attval.as_byref_word());
     let isempty = match typtype {
-        TYPTYPE_RANGE => backend_utils_adt_rangetypes_seams::range_is_empty::call(mcx, attval)?,
+        TYPTYPE_RANGE => {
+            backend_utils_adt_rangetypes_seams::range_is_empty::call(mcx, attval_word)?
+        }
         TYPTYPE_MULTIRANGE => {
-            backend_utils_adt_multirangetypes_seams::multirange_is_empty::call(mcx, attval)?
+            backend_utils_adt_multirangetypes_seams::multirange_is_empty::call(mcx, attval_word)?
         }
         _ => {
             return Err(ereport(ERROR)
@@ -1267,31 +1281,6 @@ fn exec_qual_opt<'mcx>(
         None => Ok(true),
         Some(state) => expr_seams::exec_qual::call(state, econtext, estate),
     }
-}
-
-/// Bridge `FormIndexDatum`'s bare-word `values[0..n]` into the canonical
-/// per-attribute by-value `Datum` lane `index_insert` /
-/// `build_index_value_description` consume.
-fn datums_to_v<'mcx>(
-    mcx: Mcx<'mcx>,
-    values: &[DatumWord; INDEX_MAX_KEYS as usize],
-    n: usize,
-) -> PgResult<PgVec<'mcx, DatumV<'mcx>>> {
-    let mut v: PgVec<'mcx, DatumV<'mcx>> = PgVec::new_in(mcx);
-    v.try_reserve(n).map_err(|_| mcx.oom(n))?;
-    for d in &values[..n] {
-        v.push(DatumV::ByVal(d.as_usize()));
-    }
-    Ok(v)
-}
-
-/// Same as [`datums_to_v`] but for the `existing_values` array.
-fn existing_datums_to_v<'mcx>(
-    mcx: Mcx<'mcx>,
-    values: &[DatumWord; INDEX_MAX_KEYS as usize],
-    n: usize,
-) -> PgResult<PgVec<'mcx, DatumV<'mcx>>> {
-    datums_to_v(mcx, values, n)
 }
 
 // ===========================================================================
