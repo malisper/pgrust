@@ -208,14 +208,14 @@ pub fn transformSetOperationStmt<'mcx>(
             false,
         )?;
         tlist.push(tle);
-        targetvars.push(mcx::alloc_in(mcx, Node::Expr(Expr::Var(var)))?);
+        targetvars.push(mcx::alloc_in(mcx, Node::mk_var(mcx, var))?);
         // makeString(colName): colName == pstrdup(lefttle->resname), never NULL
         // for a valid (non-resjunk) leftmost target entry.
         let sval = match colname {
             Some(s) => mcx::PgString::from_str_in(s, mcx)?,
             None => return Err(elog_error("set-op leftmost column has no name")),
         };
-        let name_node = Node::String(types_nodes::value::StringNode { sval });
+        let name_node = Node::mk_string(mcx, types_nodes::value::StringNode { sval });
         targetnames.push(mcx::alloc_in(mcx, name_node)?);
         sortnscolumns.push(ParseNamespaceColumn {
             p_varno: leftmost_rti as types_core::primitive::Index,
@@ -385,7 +385,7 @@ fn transformSetOperationTree<'mcx>(
 
     if is_leaf {
         // Process leaf SELECT: analyze as a sub-query (resolve_unknowns=false).
-        let stmt_node = Node::SelectStmt(stmt.clone_in(mcx)?);
+        let stmt_node = Node::mk_select_stmt(mcx, stmt.clone_in(mcx)?);
         let select_query_node =
             crate::parse_sub_analyze(mcx, &stmt_node, pstate, None, false, false)?;
         let select_query_ref = select_query_node.as_ref();
@@ -430,7 +430,7 @@ fn transformSetOperationTree<'mcx>(
         let rtr = types_nodes::rawnodes::RangeTblRef {
             rtindex: nsitem.p_rtindex,
         };
-        return mcx::alloc_in(mcx, Node::RangeTblRef(rtr));
+        return mcx::alloc_in(mcx, Node::mk_range_tbl_ref(mcx, rtr));
     }
 
     // Process an internal node (set operation node).
@@ -529,7 +529,7 @@ fn transformSetOperationTree<'mcx>(
 
         if op.op != SetOperation::SETOP_UNION || !op.all {
             let grpcl = makeSortGroupClauseForSetOp(rescoltype, recursive)?;
-            op.groupClauses.push(mcx::alloc_in(mcx, Node::SortGroupClause(grpcl))?);
+            op.groupClauses.push(mcx::alloc_in(mcx, Node::mk_sort_group_clause(mcx, grpcl))?);
         }
 
         // Construct a dummy tlist entry to return (SetToDefault carrier).
@@ -560,7 +560,7 @@ fn transformSetOperationTree<'mcx>(
         *tl = out_tl;
     }
 
-    mcx::alloc_in(mcx, Node::SetOperationStmt(op))
+    mcx::alloc_in(mcx, Node::mk_set_operation_stmt(mcx, op))
 }
 
 /// `determineRecursiveColTypes(pstate, larg, nrtargetlist)` — set up the parent

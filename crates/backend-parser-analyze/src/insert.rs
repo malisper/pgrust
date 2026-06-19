@@ -431,7 +431,7 @@ fn transformInsertMultiRowValues<'mcx>(
         for expr in row.into_iter() {
             row_nodes.push(mcx::alloc_in(mcx, Node::Expr(expr))?);
         }
-        exprs_lists.push(mcx::alloc_in(mcx, Node::List(row_nodes))?);
+        exprs_lists.push(mcx::alloc_in(mcx, Node::mk_list(mcx, row_nodes))?);
     }
 
     // Construct column type/typmod/collation lists from the first row.
@@ -452,7 +452,7 @@ fn transformInsertMultiRowValues<'mcx>(
     // LATERAL only if there are current-level Vars (CREATE RULE NEW/OLD). The
     // namespace is otherwise empty.
     let lateral = if pstate.p_rtable.len() != 1 {
-        let probe = Node::List({
+        let probe = Node::mk_list(mcx, {
             let mut v: PgVec<'mcx, NodePtr<'mcx>> =
                 mcx::vec_with_capacity_in(mcx, exprs_lists.len())?;
             for e in exprs_lists.iter() {
@@ -692,7 +692,7 @@ fn transformOnConflictClause<'mcx>(
         for tle in set_tles.into_iter() {
             on_conflict_set.push(mcx::alloc_in(
                 mcx,
-                Node::TargetEntry(tle),
+                Node::mk_target_entry(mcx, tle),
             )?);
         }
 
@@ -780,7 +780,7 @@ fn build_on_conflict_excluded_targetlist<'mcx>(
             name,
             false,
         )?;
-        result.push(mcx::alloc_in(mcx, Node::TargetEntry(te))?);
+        result.push(mcx::alloc_in(mcx, Node::mk_target_entry(mcx, te))?);
     }
 
     // Add a whole-row-Var entry to support references to "EXCLUDED.*". Its resno
@@ -800,7 +800,7 @@ fn build_on_conflict_excluded_targetlist<'mcx>(
         None,
         true,
     )?;
-    result.push(mcx::alloc_in(mcx, Node::TargetEntry(te))?);
+    result.push(mcx::alloc_in(mcx, Node::mk_target_entry(mcx, te))?);
 
     Ok(result)
 }

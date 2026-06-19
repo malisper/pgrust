@@ -217,12 +217,12 @@ fn conv_rangefunction_functions<'mcx>(
             Some(c) => c.ptr::<RawList>(),
             None => core::ptr::null_mut(),
         };
-        let coldef = Node::List(node_list(mcx, coldef_raw)?);
+        let coldef = Node::mk_list(mcx, node_list(mcx, coldef_raw)?);
 
         let mut pair = mcx::vec_with_capacity_in::<NodePtr<'mcx>>(mcx, 2)?;
         pair.push(fexpr);
         pair.push(mcx::alloc_in(mcx, coldef)?);
-        out.push(mcx::alloc_in(mcx, Node::List(pair))?);
+        out.push(mcx::alloc_in(mcx, Node::mk_list(mcx, pair))?);
     }
     Ok(out)
 }
@@ -369,7 +369,7 @@ fn conv_cte<'mcx>(
             let cc = conv_cte_cycle(mcx, c.cycle_clause)?;
             Some(mcx::alloc_in(
                 mcx,
-                types_nodes::nodes::Node::CTECycleClause(cc),
+                types_nodes::nodes::Node::mk_cte_cycle_clause(mcx, cc),
             )?)
         },
         location: c.location,
@@ -545,27 +545,27 @@ fn conv_value_node<'mcx>(mcx: Mcx<'mcx>, n: *mut RawNode) -> PgResult<Node<'mcx>
     match tag {
         tags::T_Integer => {
             let v = unsafe { &*n.cast::<pgrust_pg_ffi::nodes::Integer>() };
-            Ok(Node::Integer(tn_val::Integer { ival: v.ival }))
+            Ok(Node::mk_integer(mcx, tn_val::Integer { ival: v.ival }))
         }
         tags::T_Float => {
             let v = unsafe { &*n.cast::<pgrust_pg_ffi::nodes::Float>() };
-            Ok(Node::Float(tn_val::Float {
+            Ok(Node::mk_float(mcx, tn_val::Float {
                 fval: cstr(mcx, v.fval)?,
             }))
         }
         tags::T_Boolean => {
             let v = unsafe { &*n.cast::<pgrust_pg_ffi::nodes::Boolean>() };
-            Ok(Node::Boolean(tn_val::Boolean { boolval: v.boolval }))
+            Ok(Node::mk_boolean(mcx, tn_val::Boolean { boolval: v.boolval }))
         }
         tags::T_String => {
             let v = unsafe { &*n.cast::<pgrust_pg_ffi::nodes::StringNode>() };
-            Ok(Node::String(tn_val::StringNode {
+            Ok(Node::mk_string(mcx, tn_val::StringNode {
                 sval: cstr(mcx, v.sval)?,
             }))
         }
         tags::T_BitString => {
             let v = unsafe { &*n.cast::<pgrust_pg_ffi::nodes::BitString>() };
-            Ok(Node::BitString(tn_val::BitString {
+            Ok(Node::mk_bit_string(mcx, tn_val::BitString {
                 bsval: cstr(mcx, v.bsval)?,
             }))
         }

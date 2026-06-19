@@ -226,7 +226,7 @@ pub fn transformSelectStmt<'mcx>(
     qry.windowClause = {
         let mut v = mcx::vec_with_capacity_in(mcx, window_clause.len())?;
         for wc in window_clause {
-            v.push(mcx::alloc_in(mcx, Node::WindowClause(wc))?);
+            v.push(mcx::alloc_in(mcx, Node::mk_window_clause(mcx, wc))?);
         }
         v
     };
@@ -406,7 +406,7 @@ pub fn transformValuesClause<'mcx>(
             let e = colexprs[i][r].clone();
             row.push(mcx::alloc_in(mcx, Node::Expr(e))?);
         }
-        exprs_lists.push(mcx::alloc_in(mcx, Node::List(row))?);
+        exprs_lists.push(mcx::alloc_in(mcx, Node::mk_list(mcx, row))?);
     }
 
     /*
@@ -415,7 +415,7 @@ pub fn transformValuesClause<'mcx>(
      */
     let mut lateral = false;
     if !pstate.p_rtable.is_empty() {
-        let probe = Node::List({
+        let probe = Node::mk_list(mcx, {
             let mut v = mcx::vec_with_capacity_in(mcx, exprs_lists.len())?;
             for e in exprs_lists.iter() {
                 v.push(mcx::alloc_in(mcx, e.clone_in(mcx)?)?);

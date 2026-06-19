@@ -366,13 +366,13 @@ fn transformJoinUsingClause<'mcx>(
         let e = make_a_expr(
             A_Expr_Kind::AEXPR_OP,
             name,
-            Some(alloc_in(mcx, Node::Expr(Expr::Var(lvar.clone())))?),
-            Some(alloc_in(mcx, Node::Expr(Expr::Var(rvar.clone())))?),
+            Some(alloc_in(mcx, Node::mk_var(mcx, lvar.clone()))?),
+            Some(alloc_in(mcx, Node::mk_var(mcx, rvar.clone()))?),
             -1,
         );
 
         /* Prepare to combine into an AND clause, if multiple join columns */
-        andargs.push(Node::A_Expr(e));
+        andargs.push(Node::mk_a_expr(mcx, e));
     }
 
     /* Only need an AND if there's more than one join column */
@@ -387,7 +387,7 @@ fn transformJoinUsingClause<'mcx>(
         for a in andargs.into_iter() {
             args.push(alloc_in(mcx, a)?);
         }
-        Node::BoolExpr(types_nodes::rawexprnodes::BoolExpr {
+        Node::mk_bool_expr(mcx, types_nodes::rawexprnodes::BoolExpr {
             boolop: AND_EXPR,
             args,
             location: -1,
@@ -614,7 +614,7 @@ fn transformRangeFunction<'mcx>(
                         COERCE_EXPLICIT_CALL,
                         fc.location,
                     )?;
-                    let newfc_node = Node::FuncCall(newfc);
+                    let newfc_node = Node::mk_func_call(mcx, newfc);
 
                     let newfexpr = transformExpr(
                         pstate,
@@ -949,7 +949,7 @@ fn transformFromClauseItem<'mcx>(
 
             let rtindex = nsitem.p_rtindex;
             let namespace = alloc::vec![nsitem];
-            let rtr = Node::RangeTblRef(RangeTblRef { rtindex });
+            let rtr = Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex });
             Ok((rtr, namespace))
         }
         ntag::T_RangeSubselect => {
@@ -958,7 +958,7 @@ fn transformFromClauseItem<'mcx>(
             let nsitem = transformRangeSubselect(mcx, pstate, rs)?;
             let rtindex = nsitem.p_rtindex;
             let namespace = alloc::vec![nsitem];
-            let rtr = Node::RangeTblRef(RangeTblRef { rtindex });
+            let rtr = Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex });
             Ok((rtr, namespace))
         }
         ntag::T_RangeFunction => {
@@ -967,7 +967,7 @@ fn transformFromClauseItem<'mcx>(
             let nsitem = transformRangeFunction(mcx, pstate, rf)?;
             let rtindex = nsitem.p_rtindex;
             let namespace = alloc::vec![nsitem];
-            let rtr = Node::RangeTblRef(RangeTblRef { rtindex });
+            let rtr = Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex });
             Ok((rtr, namespace))
         }
         /*
@@ -1017,7 +1017,7 @@ fn transformFromClauseItem<'mcx>(
             /* Transform TABLESAMPLE details and attach to the RTE */
             let tablesample = transformRangeTableSample(mcx, pstate, rts)?;
             pstate.p_rtable[(top_rtindex - 1) as usize].tablesample =
-                Some(alloc_in(mcx, Node::TableSampleClause(tablesample))?);
+                Some(alloc_in(mcx, Node::mk_table_sample_clause(mcx, tablesample))?);
 
             Ok((rel, namespace))
         }
@@ -1465,7 +1465,7 @@ fn transform_from_clause_item_join<'mcx>(
 
     /* C: *top_nsitem = nsitem; *namespace = lappend(my_namespace, nsitem). */
     my_namespace.push(nsitem);
-    Ok((Node::JoinExpr(j), my_namespace))
+    Ok((Node::mk_join_expr(mcx, j), my_namespace))
 }
 
 // ===========================================================================
@@ -1744,7 +1744,7 @@ pub fn setNamespaceLateralState(
 fn make_string_node<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<NodePtr<'mcx>> {
     alloc_in(
         mcx,
-        Node::String(types_nodes::value::StringNode {
+        Node::mk_string(mcx, types_nodes::value::StringNode {
             sval: mcx::PgString::from_str_in(s, mcx)?,
         }),
     )
@@ -2055,6 +2055,6 @@ fn funcexprs_as_list_node<'mcx>(
     for n in funcexprs.iter() {
         v.push(alloc_in(mcx, (**n).clone_in(mcx)?)?);
     }
-    Ok(Node::List(v))
+    Ok(Node::mk_list(mcx, v))
 }
 

@@ -317,7 +317,7 @@ pub fn applyLockingClause<'mcx>(
     qry.rowMarks
         .try_reserve(1)
         .map_err(|_| mcx.oom(core::mem::size_of::<RowMarkClause>()))?;
-    let node = mcx::alloc_in(mcx, Node::RowMarkClause(rc))?;
+    let node = mcx::alloc_in(mcx, Node::mk_row_mark_clause(mcx, rc))?;
     qry.rowMarks.push(node);
     Ok(())
 }

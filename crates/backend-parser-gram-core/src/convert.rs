@@ -123,7 +123,7 @@ fn distinct_clause_list<'mcx>(
         match node_opt(mcx, np)? {
             Some(p) => out.push(p),
             // NULL cell == the plain-DISTINCT marker: encode as empty Node::List.
-            None => out.push(mcx::alloc_in(mcx, Node::List(PgVec::new_in(mcx)))?),
+            None => out.push(mcx::alloc_in(mcx, Node::mk_list(mcx, PgVec::new_in(mcx)))?),
         }
     }
     Ok(out)
@@ -230,79 +230,79 @@ pub fn convert_node<'mcx>(mcx: Mcx<'mcx>, n: *mut RawNode) -> PgResult<Node<'mcx
         // A bare `List *` node (e.g. a VALUES row): convert its elements.
         tags::T_List => {
             let l = n.cast::<RawList>();
-            Ok(Node::List(node_list(mcx, l)?))
+            Ok(Node::mk_list(mcx, node_list(mcx, l)?))
         }
 
         // --- statements ---
-        tags::T_SelectStmt => Ok(Node::SelectStmt(conv_select(mcx, n.cast())?)),
-        tags::T_InsertStmt => Ok(Node::InsertStmt(conv_insert(mcx, n.cast())?)),
-        tags::T_UpdateStmt => Ok(Node::UpdateStmt(conv_update(mcx, n.cast())?)),
-        tags::T_DeleteStmt => Ok(Node::DeleteStmt(conv_delete(mcx, n.cast())?)),
-        tags::T_MergeStmt => Ok(Node::MergeStmt(conv_merge(mcx, n.cast())?)),
+        tags::T_SelectStmt => Ok(Node::mk_select_stmt(mcx, conv_select(mcx, n.cast())?)),
+        tags::T_InsertStmt => Ok(Node::mk_insert_stmt(mcx, conv_insert(mcx, n.cast())?)),
+        tags::T_UpdateStmt => Ok(Node::mk_update_stmt(mcx, conv_update(mcx, n.cast())?)),
+        tags::T_DeleteStmt => Ok(Node::mk_delete_stmt(mcx, conv_delete(mcx, n.cast())?)),
+        tags::T_MergeStmt => Ok(Node::mk_merge_stmt(mcx, conv_merge(mcx, n.cast())?)),
         tags::T_SetOperationStmt => {
-            Ok(Node::SetOperationStmt(conv_setop_stmt(mcx, n.cast())?))
+            Ok(Node::mk_set_operation_stmt(mcx, conv_setop_stmt(mcx, n.cast())?))
         }
 
         // --- raw expression / grammar nodes ---
-        tags::T_A_Expr => Ok(Node::A_Expr(conv_a_expr(mcx, n.cast())?)),
-        tags::T_ColumnRef => Ok(Node::ColumnRef(conv_columnref(mcx, n.cast())?)),
-        tags::T_ParamRef => Ok(Node::ParamRef(conv_paramref(n.cast()))),
+        tags::T_A_Expr => Ok(Node::mk_a_expr(mcx, conv_a_expr(mcx, n.cast())?)),
+        tags::T_ColumnRef => Ok(Node::mk_column_ref(mcx, conv_columnref(mcx, n.cast())?)),
+        tags::T_ParamRef => Ok(Node::mk_param_ref(mcx, conv_paramref(n.cast()))),
         tags::T_A_Const => Ok(conv_a_const(mcx, n.cast())?),
-        tags::T_FuncCall => Ok(Node::FuncCall(conv_funccall(mcx, n.cast())?)),
-        tags::T_A_Star => Ok(Node::A_Star(tn::A_Star)),
-        tags::T_A_Indices => Ok(Node::A_Indices(conv_a_indices(mcx, n.cast())?)),
+        tags::T_FuncCall => Ok(Node::mk_func_call(mcx, conv_funccall(mcx, n.cast())?)),
+        tags::T_A_Star => Ok(Node::mk_a_star(mcx, tn::A_Star)),
+        tags::T_A_Indices => Ok(Node::mk_a_indices(mcx, conv_a_indices(mcx, n.cast())?)),
         tags::T_A_Indirection => {
-            Ok(Node::A_Indirection(conv_a_indirection(mcx, n.cast())?))
+            Ok(Node::mk_a_indirection(mcx, conv_a_indirection(mcx, n.cast())?))
         }
-        tags::T_A_ArrayExpr => Ok(Node::A_ArrayExpr(conv_a_arrayexpr(mcx, n.cast())?)),
-        tags::T_ResTarget => Ok(Node::ResTarget(conv_restarget(mcx, n.cast())?)),
+        tags::T_A_ArrayExpr => Ok(Node::mk_a_array_expr(mcx, conv_a_arrayexpr(mcx, n.cast())?)),
+        tags::T_ResTarget => Ok(Node::mk_res_target(mcx, conv_restarget(mcx, n.cast())?)),
         tags::T_MultiAssignRef => {
-            Ok(Node::MultiAssignRef(conv_multiassignref(mcx, n.cast())?))
+            Ok(Node::mk_multi_assign_ref(mcx, conv_multiassignref(mcx, n.cast())?))
         }
-        tags::T_TypeCast => Ok(Node::TypeCast(conv_typecast(mcx, n.cast())?)),
-        tags::T_CollateClause => Ok(Node::CollateClause(conv_collate(mcx, n.cast())?)),
-        tags::T_SortBy => Ok(Node::SortBy(conv_sortby(mcx, n.cast())?)),
-        tags::T_WindowDef => Ok(Node::WindowDef(conv_windowdef(mcx, n.cast())?)),
+        tags::T_TypeCast => Ok(Node::mk_type_cast(mcx, conv_typecast(mcx, n.cast())?)),
+        tags::T_CollateClause => Ok(Node::mk_collate_clause(mcx, conv_collate(mcx, n.cast())?)),
+        tags::T_SortBy => Ok(Node::mk_sort_by(mcx, conv_sortby(mcx, n.cast())?)),
+        tags::T_WindowDef => Ok(Node::mk_window_def(mcx, conv_windowdef(mcx, n.cast())?)),
         tags::T_RangeSubselect => {
-            Ok(Node::RangeSubselect(conv_rangesubselect(mcx, n.cast())?))
+            Ok(Node::mk_range_subselect(mcx, conv_rangesubselect(mcx, n.cast())?))
         }
-        tags::T_RangeFunction => Ok(Node::RangeFunction(conv_rangefunction(mcx, n.cast())?)),
+        tags::T_RangeFunction => Ok(Node::mk_range_function(mcx, conv_rangefunction(mcx, n.cast())?)),
         tags::T_RangeTableSample => {
-            Ok(Node::RangeTableSample(conv_rangetablesample(mcx, n.cast())?))
+            Ok(Node::mk_range_table_sample(mcx, conv_rangetablesample(mcx, n.cast())?))
         }
-        tags::T_TypeName => Ok(Node::TypeName(conv_typename(mcx, n.cast())?)),
-        tags::T_ColumnDef => Ok(Node::ColumnDef(conv_columndef(mcx, n.cast())?)),
+        tags::T_TypeName => Ok(Node::mk_type_name(mcx, conv_typename(mcx, n.cast())?)),
+        tags::T_ColumnDef => Ok(Node::mk_column_def(mcx, conv_columndef(mcx, n.cast())?)),
 
         // --- range/join structure ---
-        tags::T_RangeVar => Ok(Node::RangeVar(conv_rangevar(mcx, n.cast())?)),
-        tags::T_JoinExpr => Ok(Node::JoinExpr(conv_joinexpr(mcx, n.cast())?)),
-        tags::T_FromExpr => Ok(Node::FromExpr(conv_fromexpr(mcx, n.cast())?)),
-        tags::T_RangeTblRef => Ok(Node::RangeTblRef(conv_rangetblref(n.cast()))),
-        tags::T_Alias => Ok(Node::Alias(conv_alias(mcx, n.cast())?)),
+        tags::T_RangeVar => Ok(Node::mk_range_var(mcx, conv_rangevar(mcx, n.cast())?)),
+        tags::T_JoinExpr => Ok(Node::mk_join_expr(mcx, conv_joinexpr(mcx, n.cast())?)),
+        tags::T_FromExpr => Ok(Node::mk_from_expr(mcx, conv_fromexpr(mcx, n.cast())?)),
+        tags::T_RangeTblRef => Ok(Node::mk_range_tbl_ref(mcx, conv_rangetblref(n.cast()))),
+        tags::T_Alias => Ok(Node::mk_alias(mcx, conv_alias(mcx, n.cast())?)),
 
         // --- clauses / specs ---
-        tags::T_WithClause => Ok(Node::WithClause(conv_withclause(mcx, n.cast())?)),
+        tags::T_WithClause => Ok(Node::mk_with_clause(mcx, conv_withclause(mcx, n.cast())?)),
         tags::T_CommonTableExpr => {
-            Ok(Node::CommonTableExpr(conv_cte(mcx, n.cast())?))
+            Ok(Node::mk_common_table_expr(mcx, conv_cte(mcx, n.cast())?))
         }
-        tags::T_InferClause => Ok(Node::InferClause(conv_infer(mcx, n.cast())?)),
+        tags::T_InferClause => Ok(Node::mk_infer_clause(mcx, conv_infer(mcx, n.cast())?)),
         tags::T_OnConflictClause => {
-            Ok(Node::OnConflictClause(conv_onconflict_clause(mcx, n.cast())?))
+            Ok(Node::mk_on_conflict_clause(mcx, conv_onconflict_clause(mcx, n.cast())?))
         }
         tags::T_MergeWhenClause => {
-            Ok(Node::MergeWhenClause(conv_mergewhen(mcx, n.cast())?))
+            Ok(Node::mk_merge_when_clause(mcx, conv_mergewhen(mcx, n.cast())?))
         }
         tags::T_ReturningClause => {
-            Ok(Node::ReturningClause(conv_returning(mcx, n.cast())?))
+            Ok(Node::mk_returning_clause(mcx, conv_returning(mcx, n.cast())?))
         }
-        tags::T_GroupingSet => Ok(Node::GroupingSet(conv_groupingset(mcx, n.cast())?)),
-        tags::T_WindowClause => Ok(Node::WindowClause(conv_windowclause(mcx, n.cast())?)),
+        tags::T_GroupingSet => Ok(Node::mk_grouping_set(mcx, conv_groupingset(mcx, n.cast())?)),
+        tags::T_WindowClause => Ok(Node::mk_window_clause(mcx, conv_windowclause(mcx, n.cast())?)),
         tags::T_SortGroupClause => {
-            Ok(Node::SortGroupClause(conv_sortgroupclause(n.cast())))
+            Ok(Node::mk_sort_group_clause(mcx, conv_sortgroupclause(n.cast())))
         }
-        tags::T_RowMarkClause => Ok(Node::RowMarkClause(conv_rowmark(n.cast()))),
+        tags::T_RowMarkClause => Ok(Node::mk_row_mark_clause(mcx, conv_rowmark(n.cast()))),
         tags::T_LockingClause => {
-            Ok(Node::LockingClause(conv_lockingclause(mcx, n.cast())?))
+            Ok(Node::mk_locking_clause(mcx, conv_lockingclause(mcx, n.cast())?))
         }
 
         // --- value (leaf literal) nodes ---
@@ -313,312 +313,312 @@ pub fn convert_node<'mcx>(mcx: Mcx<'mcx>, n: *mut RawNode) -> PgResult<Node<'mcx
         tags::T_BitString => Ok(conv_value_node(mcx, n)?),
 
         // --- grammar-produced raw `Expr`-deriving nodes (rawexprnodes) ---
-        tags::T_BoolExpr => Ok(Node::BoolExpr(conv_boolexpr(mcx, n.cast())?)),
-        tags::T_CaseExpr => Ok(Node::CaseExpr(conv_caseexpr(mcx, n.cast())?)),
-        tags::T_CaseWhen => Ok(Node::CaseWhen(conv_casewhen(mcx, n.cast())?)),
-        tags::T_CoalesceExpr => Ok(Node::CoalesceExpr(conv_coalesceexpr(mcx, n.cast())?)),
-        tags::T_MinMaxExpr => Ok(Node::MinMaxExpr(conv_minmaxexpr(mcx, n.cast())?)),
-        tags::T_SubLink => Ok(Node::SubLink(conv_sublink(mcx, n.cast())?)),
-        tags::T_NullTest => Ok(Node::NullTest(conv_nulltest(mcx, n.cast())?)),
-        tags::T_BooleanTest => Ok(Node::BooleanTest(conv_booleantest(mcx, n.cast())?)),
-        tags::T_RowExpr => Ok(Node::RowExpr(conv_rowexpr(mcx, n.cast())?)),
-        tags::T_GroupingFunc => Ok(Node::GroupingFunc(conv_groupingfunc(mcx, n.cast())?)),
-        tags::T_CollateExpr => Ok(Node::CollateExpr(conv_collateexpr(mcx, n.cast())?)),
-        tags::T_SetToDefault => Ok(Node::SetToDefault(conv_settodefault(n.cast()))),
+        tags::T_BoolExpr => Ok(Node::mk_bool_expr(mcx, conv_boolexpr(mcx, n.cast())?)),
+        tags::T_CaseExpr => Ok(Node::mk_case_expr(mcx, conv_caseexpr(mcx, n.cast())?)),
+        tags::T_CaseWhen => Ok(Node::mk_case_when(mcx, conv_casewhen(mcx, n.cast())?)),
+        tags::T_CoalesceExpr => Ok(Node::mk_coalesce_expr(mcx, conv_coalesceexpr(mcx, n.cast())?)),
+        tags::T_MinMaxExpr => Ok(Node::mk_min_max_expr(mcx, conv_minmaxexpr(mcx, n.cast())?)),
+        tags::T_SubLink => Ok(Node::mk_sub_link(mcx, conv_sublink(mcx, n.cast())?)),
+        tags::T_NullTest => Ok(Node::mk_null_test(mcx, conv_nulltest(mcx, n.cast())?)),
+        tags::T_BooleanTest => Ok(Node::mk_boolean_test(mcx, conv_booleantest(mcx, n.cast())?)),
+        tags::T_RowExpr => Ok(Node::mk_row_expr(mcx, conv_rowexpr(mcx, n.cast())?)),
+        tags::T_GroupingFunc => Ok(Node::mk_grouping_func(mcx, conv_groupingfunc(mcx, n.cast())?)),
+        tags::T_CollateExpr => Ok(Node::mk_collate_expr(mcx, conv_collateexpr(mcx, n.cast())?)),
+        tags::T_SetToDefault => Ok(Node::mk_set_to_default(mcx, conv_settodefault(n.cast()))),
         tags::T_CurrentOfExpr => {
-            Ok(Node::CurrentOfExpr(conv_currentofexpr(mcx, n.cast())?))
+            Ok(Node::mk_current_of_expr(mcx, conv_currentofexpr(mcx, n.cast())?))
         }
-        tags::T_NamedArgExpr => Ok(Node::NamedArgExpr(conv_namedargexpr(mcx, n.cast())?)),
+        tags::T_NamedArgExpr => Ok(Node::mk_named_arg_expr(mcx, conv_namedargexpr(mcx, n.cast())?)),
         tags::T_SQLValueFunction => {
-            Ok(Node::SQLValueFunction(conv_sqlvaluefunction(n.cast())))
+            Ok(Node::mk_sql_value_function(mcx, conv_sqlvaluefunction(n.cast())))
         }
-        tags::T_XmlExpr => Ok(Node::XmlExpr(conv_xmlexpr(mcx, n.cast())?)),
-        tags::T_XmlSerialize => Ok(Node::XmlSerialize(conv_xmlserialize(mcx, n.cast())?)),
+        tags::T_XmlExpr => Ok(Node::mk_xml_expr(mcx, conv_xmlexpr(mcx, n.cast())?)),
+        tags::T_XmlSerialize => Ok(Node::mk_xml_serialize(mcx, conv_xmlserialize(mcx, n.cast())?)),
 
         // --- DDL "CREATE" family (F2): supporting / helper nodes ---
-        tags::T_RoleSpec => Ok(Node::RoleSpec(conv_rolespec(mcx, n.cast())?)),
-        tags::T_DefElem => Ok(Node::DefElem(conv_defelem(mcx, n.cast())?)),
-        tags::T_Constraint => Ok(Node::Constraint(conv_constraint(mcx, n.cast())?)),
+        tags::T_RoleSpec => Ok(Node::mk_role_spec(mcx, conv_rolespec(mcx, n.cast())?)),
+        tags::T_DefElem => Ok(Node::mk_def_elem(mcx, conv_defelem(mcx, n.cast())?)),
+        tags::T_Constraint => Ok(Node::mk_constraint(mcx, conv_constraint(mcx, n.cast())?)),
         tags::T_TableLikeClause => {
-            Ok(Node::TableLikeClause(conv_tablelikeclause(mcx, n.cast())?))
+            Ok(Node::mk_table_like_clause(mcx, conv_tablelikeclause(mcx, n.cast())?))
         }
-        tags::T_IndexElem => Ok(Node::IndexElem(conv_indexelem(mcx, n.cast())?)),
+        tags::T_IndexElem => Ok(Node::mk_index_elem(mcx, conv_indexelem(mcx, n.cast())?)),
         tags::T_FunctionParameter => {
-            Ok(Node::FunctionParameter(conv_functionparameter(mcx, n.cast())?))
+            Ok(Node::mk_function_parameter(mcx, conv_functionparameter(mcx, n.cast())?))
         }
         tags::T_ObjectWithArgs => {
-            Ok(Node::ObjectWithArgs(conv_objectwithargs(mcx, n.cast())?))
+            Ok(Node::mk_object_with_args(mcx, conv_objectwithargs(mcx, n.cast())?))
         }
-        tags::T_AccessPriv => Ok(Node::AccessPriv(conv_accesspriv(mcx, n.cast())?)),
+        tags::T_AccessPriv => Ok(Node::mk_access_priv(mcx, conv_accesspriv(mcx, n.cast())?)),
         tags::T_CreateOpClassItem => {
-            Ok(Node::CreateOpClassItem(conv_createopclassitem(mcx, n.cast())?))
+            Ok(Node::mk_create_op_class_item(mcx, conv_createopclassitem(mcx, n.cast())?))
         }
-        tags::T_StatsElem => Ok(Node::StatsElem(conv_statselem(mcx, n.cast())?)),
+        tags::T_StatsElem => Ok(Node::mk_stats_elem(mcx, conv_statselem(mcx, n.cast())?)),
         tags::T_PartitionElem => {
-            Ok(Node::PartitionElem(conv_partitionelem(mcx, n.cast())?))
+            Ok(Node::mk_partition_elem(mcx, conv_partitionelem(mcx, n.cast())?))
         }
         tags::T_PartitionSpec => {
-            Ok(Node::PartitionSpec(conv_partitionspec(mcx, n.cast())?))
+            Ok(Node::mk_partition_spec(mcx, conv_partitionspec(mcx, n.cast())?))
         }
         tags::T_PartitionBoundSpec => {
-            Ok(Node::PartitionBoundSpec(conv_partitionboundspec(mcx, n.cast())?))
+            Ok(Node::mk_partition_bound_spec(mcx, conv_partitionboundspec(mcx, n.cast())?))
         }
         tags::T_PartitionRangeDatum => {
-            Ok(Node::PartitionRangeDatum(conv_partitionrangedatum(mcx, n.cast())?))
+            Ok(Node::mk_partition_range_datum(mcx, conv_partitionrangedatum(mcx, n.cast())?))
         }
-        tags::T_IntoClause => Ok(Node::IntoClause(conv_intoclause(mcx, n.cast())?)),
+        tags::T_IntoClause => Ok(Node::mk_into_clause(mcx, conv_intoclause(mcx, n.cast())?)),
 
         // --- DDL "CREATE" family (F2): statements ---
-        tags::T_CreateStmt => Ok(Node::CreateStmt(conv_createstmt(mcx, n.cast())?)),
-        tags::T_IndexStmt => Ok(Node::IndexStmt(conv_indexstmt(mcx, n.cast())?)),
+        tags::T_CreateStmt => Ok(Node::mk_create_stmt(mcx, conv_createstmt(mcx, n.cast())?)),
+        tags::T_IndexStmt => Ok(Node::mk_index_stmt(mcx, conv_indexstmt(mcx, n.cast())?)),
         tags::T_CreateSeqStmt => {
-            Ok(Node::CreateSeqStmt(conv_createseqstmt(mcx, n.cast())?))
+            Ok(Node::mk_create_seq_stmt(mcx, conv_createseqstmt(mcx, n.cast())?))
         }
         tags::T_CreateStatsStmt => {
-            Ok(Node::CreateStatsStmt(conv_createstatsstmt(mcx, n.cast())?))
+            Ok(Node::mk_create_stats_stmt(mcx, conv_createstatsstmt(mcx, n.cast())?))
         }
         tags::T_CreateFunctionStmt => {
-            Ok(Node::CreateFunctionStmt(conv_createfunctionstmt(mcx, n.cast())?))
+            Ok(Node::mk_create_function_stmt(mcx, conv_createfunctionstmt(mcx, n.cast())?))
         }
-        tags::T_DefineStmt => Ok(Node::DefineStmt(conv_definestmt(mcx, n.cast())?)),
+        tags::T_DefineStmt => Ok(Node::mk_define_stmt(mcx, conv_definestmt(mcx, n.cast())?)),
         tags::T_CreateDomainStmt => {
-            Ok(Node::CreateDomainStmt(conv_createdomainstmt(mcx, n.cast())?))
+            Ok(Node::mk_create_domain_stmt(mcx, conv_createdomainstmt(mcx, n.cast())?))
         }
         tags::T_CompositeTypeStmt => {
-            Ok(Node::CompositeTypeStmt(conv_compositetypestmt(mcx, n.cast())?))
+            Ok(Node::mk_composite_type_stmt(mcx, conv_compositetypestmt(mcx, n.cast())?))
         }
         tags::T_CreateEnumStmt => {
-            Ok(Node::CreateEnumStmt(conv_createenumstmt(mcx, n.cast())?))
+            Ok(Node::mk_create_enum_stmt(mcx, conv_createenumstmt(mcx, n.cast())?))
         }
         tags::T_CreateRangeStmt => {
-            Ok(Node::CreateRangeStmt(conv_createrangestmt(mcx, n.cast())?))
+            Ok(Node::mk_create_range_stmt(mcx, conv_createrangestmt(mcx, n.cast())?))
         }
-        tags::T_ViewStmt => Ok(Node::ViewStmt(conv_viewstmt(mcx, n.cast())?)),
+        tags::T_ViewStmt => Ok(Node::mk_view_stmt(mcx, conv_viewstmt(mcx, n.cast())?)),
         tags::T_CreateTableAsStmt => {
-            Ok(Node::CreateTableAsStmt(conv_createtableasstmt(mcx, n.cast())?))
+            Ok(Node::mk_create_table_as_stmt(mcx, conv_createtableasstmt(mcx, n.cast())?))
         }
         tags::T_CreateSchemaStmt => {
-            Ok(Node::CreateSchemaStmt(conv_createschemastmt(mcx, n.cast())?))
+            Ok(Node::mk_create_schema_stmt(mcx, conv_createschemastmt(mcx, n.cast())?))
         }
         tags::T_CreateExtensionStmt => {
-            Ok(Node::CreateExtensionStmt(conv_createextensionstmt(mcx, n.cast())?))
+            Ok(Node::mk_create_extension_stmt(mcx, conv_createextensionstmt(mcx, n.cast())?))
         }
         tags::T_CreateTrigStmt => {
-            Ok(Node::CreateTrigStmt(conv_createtrigstmt(mcx, n.cast())?))
+            Ok(Node::mk_create_trig_stmt(mcx, conv_createtrigstmt(mcx, n.cast())?))
         }
         tags::T_CreateRoleStmt => {
-            Ok(Node::CreateRoleStmt(conv_createrolestmt(mcx, n.cast())?))
+            Ok(Node::mk_create_role_stmt(mcx, conv_createrolestmt(mcx, n.cast())?))
         }
-        tags::T_CreatedbStmt => Ok(Node::CreatedbStmt(conv_createdbstmt(mcx, n.cast())?)),
+        tags::T_CreatedbStmt => Ok(Node::mk_createdb_stmt(mcx, conv_createdbstmt(mcx, n.cast())?)),
         tags::T_CreateCastStmt => {
-            Ok(Node::CreateCastStmt(conv_createcaststmt(mcx, n.cast())?))
+            Ok(Node::mk_create_cast_stmt(mcx, conv_createcaststmt(mcx, n.cast())?))
         }
         tags::T_CreateOpClassStmt => {
-            Ok(Node::CreateOpClassStmt(conv_createopclassstmt(mcx, n.cast())?))
+            Ok(Node::mk_create_op_class_stmt(mcx, conv_createopclassstmt(mcx, n.cast())?))
         }
         tags::T_CreateOpFamilyStmt => {
-            Ok(Node::CreateOpFamilyStmt(conv_createopfamilystmt(mcx, n.cast())?))
+            Ok(Node::mk_create_op_family_stmt(mcx, conv_createopfamilystmt(mcx, n.cast())?))
         }
         tags::T_CreatePLangStmt => {
-            Ok(Node::CreatePLangStmt(conv_createplangstmt(mcx, n.cast())?))
+            Ok(Node::mk_create_p_lang_stmt(mcx, conv_createplangstmt(mcx, n.cast())?))
         }
         tags::T_CreateTableSpaceStmt => {
-            Ok(Node::CreateTableSpaceStmt(conv_createtablespacestmt(mcx, n.cast())?))
+            Ok(Node::mk_create_table_space_stmt(mcx, conv_createtablespacestmt(mcx, n.cast())?))
         }
         tags::T_CreateConversionStmt => {
-            Ok(Node::CreateConversionStmt(conv_createconversionstmt(mcx, n.cast())?))
+            Ok(Node::mk_create_conversion_stmt(mcx, conv_createconversionstmt(mcx, n.cast())?))
         }
-        tags::T_CreateAmStmt => Ok(Node::CreateAmStmt(conv_createamstmt(mcx, n.cast())?)),
+        tags::T_CreateAmStmt => Ok(Node::mk_create_am_stmt(mcx, conv_createamstmt(mcx, n.cast())?)),
 
         // --- DDL "ALTER/DROP" family (F3): supporting / helper nodes ---
-        tags::T_PartitionCmd => Ok(Node::PartitionCmd(conv_partitioncmd(mcx, n.cast())?)),
+        tags::T_PartitionCmd => Ok(Node::mk_partition_cmd(mcx, conv_partitioncmd(mcx, n.cast())?)),
         tags::T_ReplicaIdentityStmt => {
-            Ok(Node::ReplicaIdentityStmt(conv_replicaidentitystmt(mcx, n.cast())?))
+            Ok(Node::mk_replica_identity_stmt(mcx, conv_replicaidentitystmt(mcx, n.cast())?))
         }
         tags::T_ATAlterConstraint => {
-            Ok(Node::ATAlterConstraint(conv_ataltconstraint(mcx, n.cast())?))
+            Ok(Node::mk_at_alter_constraint(mcx, conv_ataltconstraint(mcx, n.cast())?))
         }
 
         // --- DDL "ALTER/DROP" family (F3): statements ---
         tags::T_AlterTableStmt => {
-            Ok(Node::AlterTableStmt(conv_altertablestmt(mcx, n.cast())?))
+            Ok(Node::mk_alter_table_stmt(mcx, conv_altertablestmt(mcx, n.cast())?))
         }
-        tags::T_AlterTableCmd => Ok(Node::AlterTableCmd(conv_altertablecmd(mcx, n.cast())?)),
+        tags::T_AlterTableCmd => Ok(Node::mk_alter_table_cmd(mcx, conv_altertablecmd(mcx, n.cast())?)),
         tags::T_AlterCollationStmt => {
-            Ok(Node::AlterCollationStmt(conv_altercollationstmt(mcx, n.cast())?))
+            Ok(Node::mk_alter_collation_stmt(mcx, conv_altercollationstmt(mcx, n.cast())?))
         }
         tags::T_AlterDomainStmt => {
-            Ok(Node::AlterDomainStmt(conv_alterdomainstmt(mcx, n.cast())?))
+            Ok(Node::mk_alter_domain_stmt(mcx, conv_alterdomainstmt(mcx, n.cast())?))
         }
-        tags::T_AlterEnumStmt => Ok(Node::AlterEnumStmt(conv_alterenumstmt(mcx, n.cast())?)),
+        tags::T_AlterEnumStmt => Ok(Node::mk_alter_enum_stmt(mcx, conv_alterenumstmt(mcx, n.cast())?)),
         tags::T_AlterStatsStmt => {
-            Ok(Node::AlterStatsStmt(conv_alterstatsstmt(mcx, n.cast())?))
+            Ok(Node::mk_alter_stats_stmt(mcx, conv_alterstatsstmt(mcx, n.cast())?))
         }
-        tags::T_AlterSeqStmt => Ok(Node::AlterSeqStmt(conv_alterseqstmt(mcx, n.cast())?)),
+        tags::T_AlterSeqStmt => Ok(Node::mk_alter_seq_stmt(mcx, conv_alterseqstmt(mcx, n.cast())?)),
         tags::T_AlterOpFamilyStmt => {
-            Ok(Node::AlterOpFamilyStmt(conv_alteropfamilystmt(mcx, n.cast())?))
+            Ok(Node::mk_alter_op_family_stmt(mcx, conv_alteropfamilystmt(mcx, n.cast())?))
         }
         tags::T_AlterFunctionStmt => {
-            Ok(Node::AlterFunctionStmt(conv_alterfunctionstmt(mcx, n.cast())?))
+            Ok(Node::mk_alter_function_stmt(mcx, conv_alterfunctionstmt(mcx, n.cast())?))
         }
-        tags::T_DropStmt => Ok(Node::DropStmt(conv_dropstmt(mcx, n.cast())?)),
-        tags::T_RenameStmt => Ok(Node::RenameStmt(conv_renamestmt(mcx, n.cast())?)),
+        tags::T_DropStmt => Ok(Node::mk_drop_stmt(mcx, conv_dropstmt(mcx, n.cast())?)),
+        tags::T_RenameStmt => Ok(Node::mk_rename_stmt(mcx, conv_renamestmt(mcx, n.cast())?)),
         tags::T_AlterObjectDependsStmt => {
-            Ok(Node::AlterObjectDependsStmt(conv_alterobjectdependsstmt(mcx, n.cast())?))
+            Ok(Node::mk_alter_object_depends_stmt(mcx, conv_alterobjectdependsstmt(mcx, n.cast())?))
         }
         tags::T_AlterObjectSchemaStmt => {
-            Ok(Node::AlterObjectSchemaStmt(conv_alterobjectschemastmt(mcx, n.cast())?))
+            Ok(Node::mk_alter_object_schema_stmt(mcx, conv_alterobjectschemastmt(mcx, n.cast())?))
         }
         tags::T_AlterOwnerStmt => {
-            Ok(Node::AlterOwnerStmt(conv_alterownerstmt(mcx, n.cast())?))
+            Ok(Node::mk_alter_owner_stmt(mcx, conv_alterownerstmt(mcx, n.cast())?))
         }
         tags::T_AlterOperatorStmt => {
-            Ok(Node::AlterOperatorStmt(conv_alteroperatorstmt(mcx, n.cast())?))
+            Ok(Node::mk_alter_operator_stmt(mcx, conv_alteroperatorstmt(mcx, n.cast())?))
         }
-        tags::T_AlterTypeStmt => Ok(Node::AlterTypeStmt(conv_altertypestmt(mcx, n.cast())?)),
-        tags::T_AlterDefaultPrivilegesStmt => Ok(Node::AlterDefaultPrivilegesStmt(
+        tags::T_AlterTypeStmt => Ok(Node::mk_alter_type_stmt(mcx, conv_altertypestmt(mcx, n.cast())?)),
+        tags::T_AlterDefaultPrivilegesStmt => Ok(Node::mk_alter_default_privileges_stmt(mcx, 
             conv_alterdefaultprivilegesstmt(mcx, n.cast())?,
         )),
-        tags::T_AlterRoleStmt => Ok(Node::AlterRoleStmt(conv_alterrolestmt(mcx, n.cast())?)),
+        tags::T_AlterRoleStmt => Ok(Node::mk_alter_role_stmt(mcx, conv_alterrolestmt(mcx, n.cast())?)),
         tags::T_AlterRoleSetStmt => {
-            Ok(Node::AlterRoleSetStmt(conv_alterrolesetstmt(mcx, n.cast())?))
+            Ok(Node::mk_alter_role_set_stmt(mcx, conv_alterrolesetstmt(mcx, n.cast())?))
         }
-        tags::T_DropOwnedStmt => Ok(Node::DropOwnedStmt(conv_dropownedstmt(mcx, n.cast())?)),
+        tags::T_DropOwnedStmt => Ok(Node::mk_drop_owned_stmt(mcx, conv_dropownedstmt(mcx, n.cast())?)),
         tags::T_ReassignOwnedStmt => {
-            Ok(Node::ReassignOwnedStmt(conv_reassignownedstmt(mcx, n.cast())?))
+            Ok(Node::mk_reassign_owned_stmt(mcx, conv_reassignownedstmt(mcx, n.cast())?))
         }
-        tags::T_AlterTableSpaceOptionsStmt => Ok(Node::AlterTableSpaceOptionsStmt(
+        tags::T_AlterTableSpaceOptionsStmt => Ok(Node::mk_alter_table_space_options_stmt(mcx, 
             conv_altertablespaceoptionsstmt(mcx, n.cast())?,
         )),
         tags::T_AlterTableMoveAllStmt => {
-            Ok(Node::AlterTableMoveAllStmt(conv_altertablemoveallstmt(mcx, n.cast())?))
+            Ok(Node::mk_alter_table_move_all_stmt(mcx, conv_altertablemoveallstmt(mcx, n.cast())?))
         }
         tags::T_AlterExtensionStmt => {
-            Ok(Node::AlterExtensionStmt(conv_alterextensionstmt(mcx, n.cast())?))
+            Ok(Node::mk_alter_extension_stmt(mcx, conv_alterextensionstmt(mcx, n.cast())?))
         }
-        tags::T_AlterExtensionContentsStmt => Ok(Node::AlterExtensionContentsStmt(
+        tags::T_AlterExtensionContentsStmt => Ok(Node::mk_alter_extension_contents_stmt(mcx, 
             conv_alterextensioncontentsstmt(mcx, n.cast())?,
         )),
-        tags::T_AlterFdwStmt => Ok(Node::AlterFdwStmt(conv_alterfdwstmt(mcx, n.cast())?)),
+        tags::T_AlterFdwStmt => Ok(Node::mk_alter_fdw_stmt(mcx, conv_alterfdwstmt(mcx, n.cast())?)),
         tags::T_AlterForeignServerStmt => {
-            Ok(Node::AlterForeignServerStmt(conv_alterforeignserverstmt(mcx, n.cast())?))
+            Ok(Node::mk_alter_foreign_server_stmt(mcx, conv_alterforeignserverstmt(mcx, n.cast())?))
         }
         tags::T_AlterUserMappingStmt => {
-            Ok(Node::AlterUserMappingStmt(conv_alterusermappingstmt(mcx, n.cast())?))
+            Ok(Node::mk_alter_user_mapping_stmt(mcx, conv_alterusermappingstmt(mcx, n.cast())?))
         }
         tags::T_AlterPolicyStmt => {
-            Ok(Node::AlterPolicyStmt(conv_alterpolicystmt(mcx, n.cast())?))
+            Ok(Node::mk_alter_policy_stmt(mcx, conv_alterpolicystmt(mcx, n.cast())?))
         }
         tags::T_AlterDatabaseStmt => {
-            Ok(Node::AlterDatabaseStmt(conv_alterdatabasestmt(mcx, n.cast())?))
+            Ok(Node::mk_alter_database_stmt(mcx, conv_alterdatabasestmt(mcx, n.cast())?))
         }
-        tags::T_AlterDatabaseRefreshCollStmt => Ok(Node::AlterDatabaseRefreshCollStmt(
+        tags::T_AlterDatabaseRefreshCollStmt => Ok(Node::mk_alter_database_refresh_coll_stmt(mcx, 
             conv_alterdatabaserefreshcollstmt(mcx, n.cast())?,
         )),
         tags::T_AlterDatabaseSetStmt => {
-            Ok(Node::AlterDatabaseSetStmt(conv_alterdatabasesetstmt(mcx, n.cast())?))
+            Ok(Node::mk_alter_database_set_stmt(mcx, conv_alterdatabasesetstmt(mcx, n.cast())?))
         }
         tags::T_AlterTSDictionaryStmt => {
-            Ok(Node::AlterTSDictionaryStmt(conv_altertsdictionarystmt(mcx, n.cast())?))
+            Ok(Node::mk_alter_ts_dictionary_stmt(mcx, conv_altertsdictionarystmt(mcx, n.cast())?))
         }
-        tags::T_AlterTSConfigurationStmt => Ok(Node::AlterTSConfigurationStmt(
+        tags::T_AlterTSConfigurationStmt => Ok(Node::mk_alter_ts_configuration_stmt(mcx, 
             conv_altertsconfigurationstmt(mcx, n.cast())?,
         )),
         tags::T_AlterPublicationStmt => {
-            Ok(Node::AlterPublicationStmt(conv_alterpublicationstmt(mcx, n.cast())?))
+            Ok(Node::mk_alter_publication_stmt(mcx, conv_alterpublicationstmt(mcx, n.cast())?))
         }
         tags::T_AlterSubscriptionStmt => {
-            Ok(Node::AlterSubscriptionStmt(conv_altersubscriptionstmt(mcx, n.cast())?))
+            Ok(Node::mk_alter_subscription_stmt(mcx, conv_altersubscriptionstmt(mcx, n.cast())?))
         }
 
         // --- utility / GRANT / transaction family (F4) ---
-        tags::T_GrantStmt => Ok(Node::GrantStmt(conv_grantstmt(mcx, n.cast())?)),
-        tags::T_GrantRoleStmt => Ok(Node::GrantRoleStmt(conv_grantrolestmt(mcx, n.cast())?)),
-        tags::T_VariableSetStmt => Ok(Node::VariableSetStmt(conv_variablesetstmt(mcx, n.cast())?)),
+        tags::T_GrantStmt => Ok(Node::mk_grant_stmt(mcx, conv_grantstmt(mcx, n.cast())?)),
+        tags::T_GrantRoleStmt => Ok(Node::mk_grant_role_stmt(mcx, conv_grantrolestmt(mcx, n.cast())?)),
+        tags::T_VariableSetStmt => Ok(Node::mk_variable_set_stmt(mcx, conv_variablesetstmt(mcx, n.cast())?)),
         tags::T_VariableShowStmt => {
-            Ok(Node::VariableShowStmt(conv_variableshowstmt(mcx, n.cast())?))
+            Ok(Node::mk_variable_show_stmt(mcx, conv_variableshowstmt(mcx, n.cast())?))
         }
-        tags::T_TransactionStmt => Ok(Node::TransactionStmt(conv_transactionstmt(mcx, n.cast())?)),
-        tags::T_CopyStmt => Ok(Node::CopyStmt(conv_copystmt(mcx, n.cast())?)),
-        tags::T_ExplainStmt => Ok(Node::ExplainStmt(conv_explainstmt(mcx, n.cast())?)),
-        tags::T_PrepareStmt => Ok(Node::PrepareStmt(conv_preparestmt(mcx, n.cast())?)),
-        tags::T_ExecuteStmt => Ok(Node::ExecuteStmt(conv_executestmt(mcx, n.cast())?)),
-        tags::T_DeallocateStmt => Ok(Node::DeallocateStmt(conv_deallocatestmt(mcx, n.cast())?)),
+        tags::T_TransactionStmt => Ok(Node::mk_transaction_stmt(mcx, conv_transactionstmt(mcx, n.cast())?)),
+        tags::T_CopyStmt => Ok(Node::mk_copy_stmt(mcx, conv_copystmt(mcx, n.cast())?)),
+        tags::T_ExplainStmt => Ok(Node::mk_explain_stmt(mcx, conv_explainstmt(mcx, n.cast())?)),
+        tags::T_PrepareStmt => Ok(Node::mk_prepare_stmt(mcx, conv_preparestmt(mcx, n.cast())?)),
+        tags::T_ExecuteStmt => Ok(Node::mk_execute_stmt(mcx, conv_executestmt(mcx, n.cast())?)),
+        tags::T_DeallocateStmt => Ok(Node::mk_deallocate_stmt(mcx, conv_deallocatestmt(mcx, n.cast())?)),
         tags::T_DeclareCursorStmt => {
-            Ok(Node::DeclareCursorStmt(conv_declarecursorstmt(mcx, n.cast())?))
+            Ok(Node::mk_declare_cursor_stmt(mcx, conv_declarecursorstmt(mcx, n.cast())?))
         }
-        tags::T_ClosePortalStmt => Ok(Node::ClosePortalStmt(conv_closeportalstmt(mcx, n.cast())?)),
-        tags::T_FetchStmt => Ok(Node::FetchStmt(conv_fetchstmt(mcx, n.cast())?)),
-        tags::T_VacuumStmt => Ok(Node::VacuumStmt(conv_vacuumstmt(mcx, n.cast())?)),
-        tags::T_VacuumRelation => Ok(Node::VacuumRelation(conv_vacuumrelation(mcx, n.cast())?)),
-        tags::T_ClusterStmt => Ok(Node::ClusterStmt(conv_clusterstmt(mcx, n.cast())?)),
-        tags::T_ReindexStmt => Ok(Node::ReindexStmt(conv_reindexstmt(mcx, n.cast())?)),
-        tags::T_CheckPointStmt => Ok(Node::CheckPointStmt(tdn::CheckPointStmt)),
-        tags::T_DiscardStmt => Ok(Node::DiscardStmt(conv_discardstmt(n.cast()))),
-        tags::T_LockStmt => Ok(Node::LockStmt(conv_lockstmt(mcx, n.cast())?)),
+        tags::T_ClosePortalStmt => Ok(Node::mk_close_portal_stmt(mcx, conv_closeportalstmt(mcx, n.cast())?)),
+        tags::T_FetchStmt => Ok(Node::mk_fetch_stmt(mcx, conv_fetchstmt(mcx, n.cast())?)),
+        tags::T_VacuumStmt => Ok(Node::mk_vacuum_stmt(mcx, conv_vacuumstmt(mcx, n.cast())?)),
+        tags::T_VacuumRelation => Ok(Node::mk_vacuum_relation(mcx, conv_vacuumrelation(mcx, n.cast())?)),
+        tags::T_ClusterStmt => Ok(Node::mk_cluster_stmt(mcx, conv_clusterstmt(mcx, n.cast())?)),
+        tags::T_ReindexStmt => Ok(Node::mk_reindex_stmt(mcx, conv_reindexstmt(mcx, n.cast())?)),
+        tags::T_CheckPointStmt => Ok(Node::mk_check_point_stmt(mcx, tdn::CheckPointStmt)),
+        tags::T_DiscardStmt => Ok(Node::mk_discard_stmt(mcx, conv_discardstmt(n.cast()))),
+        tags::T_LockStmt => Ok(Node::mk_lock_stmt(mcx, conv_lockstmt(mcx, n.cast())?)),
         tags::T_ConstraintsSetStmt => {
-            Ok(Node::ConstraintsSetStmt(conv_constraintssetstmt(mcx, n.cast())?))
+            Ok(Node::mk_constraints_set_stmt(mcx, conv_constraintssetstmt(mcx, n.cast())?))
         }
-        tags::T_LoadStmt => Ok(Node::LoadStmt(conv_loadstmt(mcx, n.cast())?)),
-        tags::T_TruncateStmt => Ok(Node::TruncateStmt(conv_truncatestmt(mcx, n.cast())?)),
-        tags::T_CommentStmt => Ok(Node::CommentStmt(conv_commentstmt(mcx, n.cast())?)),
-        tags::T_SecLabelStmt => Ok(Node::SecLabelStmt(conv_seclabelstmt(mcx, n.cast())?)),
-        tags::T_RuleStmt => Ok(Node::RuleStmt(conv_rulestmt(mcx, n.cast())?)),
-        tags::T_NotifyStmt => Ok(Node::NotifyStmt(conv_notifystmt(mcx, n.cast())?)),
-        tags::T_ListenStmt => Ok(Node::ListenStmt(conv_listenstmt(mcx, n.cast())?)),
-        tags::T_UnlistenStmt => Ok(Node::UnlistenStmt(conv_unlistenstmt(mcx, n.cast())?)),
-        tags::T_DoStmt => Ok(Node::DoStmt(conv_dostmt(mcx, n.cast())?)),
-        tags::T_CallStmt => Ok(Node::CallStmt(conv_callstmt(mcx, n.cast())?)),
+        tags::T_LoadStmt => Ok(Node::mk_load_stmt(mcx, conv_loadstmt(mcx, n.cast())?)),
+        tags::T_TruncateStmt => Ok(Node::mk_truncate_stmt(mcx, conv_truncatestmt(mcx, n.cast())?)),
+        tags::T_CommentStmt => Ok(Node::mk_comment_stmt(mcx, conv_commentstmt(mcx, n.cast())?)),
+        tags::T_SecLabelStmt => Ok(Node::mk_sec_label_stmt(mcx, conv_seclabelstmt(mcx, n.cast())?)),
+        tags::T_RuleStmt => Ok(Node::mk_rule_stmt(mcx, conv_rulestmt(mcx, n.cast())?)),
+        tags::T_NotifyStmt => Ok(Node::mk_notify_stmt(mcx, conv_notifystmt(mcx, n.cast())?)),
+        tags::T_ListenStmt => Ok(Node::mk_listen_stmt(mcx, conv_listenstmt(mcx, n.cast())?)),
+        tags::T_UnlistenStmt => Ok(Node::mk_unlisten_stmt(mcx, conv_unlistenstmt(mcx, n.cast())?)),
+        tags::T_DoStmt => Ok(Node::mk_do_stmt(mcx, conv_dostmt(mcx, n.cast())?)),
+        tags::T_CallStmt => Ok(Node::mk_call_stmt(mcx, conv_callstmt(mcx, n.cast())?)),
         tags::T_RefreshMatViewStmt => {
-            Ok(Node::RefreshMatViewStmt(conv_refreshmatviewstmt(mcx, n.cast())?))
+            Ok(Node::mk_refresh_mat_view_stmt(mcx, conv_refreshmatviewstmt(mcx, n.cast())?))
         }
-        tags::T_AlterSystemStmt => Ok(Node::AlterSystemStmt(conv_altersystemstmt(mcx, n.cast())?)),
-        tags::T_DropdbStmt => Ok(Node::DropdbStmt(conv_dropdbstmt(mcx, n.cast())?)),
-        tags::T_DropRoleStmt => Ok(Node::DropRoleStmt(conv_droprolestmt(mcx, n.cast())?)),
+        tags::T_AlterSystemStmt => Ok(Node::mk_alter_system_stmt(mcx, conv_altersystemstmt(mcx, n.cast())?)),
+        tags::T_DropdbStmt => Ok(Node::mk_dropdb_stmt(mcx, conv_dropdbstmt(mcx, n.cast())?)),
+        tags::T_DropRoleStmt => Ok(Node::mk_drop_role_stmt(mcx, conv_droprolestmt(mcx, n.cast())?)),
         tags::T_DropTableSpaceStmt => {
-            Ok(Node::DropTableSpaceStmt(conv_droptablespacestmt(mcx, n.cast())?))
+            Ok(Node::mk_drop_table_space_stmt(mcx, conv_droptablespacestmt(mcx, n.cast())?))
         }
-        tags::T_CreateFdwStmt => Ok(Node::CreateFdwStmt(conv_createfdwstmt(mcx, n.cast())?)),
-        tags::T_CreateForeignServerStmt => Ok(Node::CreateForeignServerStmt(
+        tags::T_CreateFdwStmt => Ok(Node::mk_create_fdw_stmt(mcx, conv_createfdwstmt(mcx, n.cast())?)),
+        tags::T_CreateForeignServerStmt => Ok(Node::mk_create_foreign_server_stmt(mcx, 
             conv_createforeignserverstmt(mcx, n.cast())?,
         )),
-        tags::T_CreateForeignTableStmt => Ok(Node::CreateForeignTableStmt(
+        tags::T_CreateForeignTableStmt => Ok(Node::mk_create_foreign_table_stmt(mcx, 
             conv_createforeigntablestmt(mcx, n.cast())?,
         )),
         tags::T_CreateUserMappingStmt => {
-            Ok(Node::CreateUserMappingStmt(conv_createusermappingstmt(mcx, n.cast())?))
+            Ok(Node::mk_create_user_mapping_stmt(mcx, conv_createusermappingstmt(mcx, n.cast())?))
         }
         tags::T_DropUserMappingStmt => {
-            Ok(Node::DropUserMappingStmt(conv_dropusermappingstmt(mcx, n.cast())?))
+            Ok(Node::mk_drop_user_mapping_stmt(mcx, conv_dropusermappingstmt(mcx, n.cast())?))
         }
-        tags::T_ImportForeignSchemaStmt => Ok(Node::ImportForeignSchemaStmt(
+        tags::T_ImportForeignSchemaStmt => Ok(Node::mk_import_foreign_schema_stmt(mcx, 
             conv_importforeignschemastmt(mcx, n.cast())?,
         )),
-        tags::T_CreatePolicyStmt => Ok(Node::CreatePolicyStmt(conv_createpolicystmt(mcx, n.cast())?)),
-        tags::T_PublicationTable => Ok(Node::PublicationTable(conv_publicationtable(mcx, n.cast())?)),
+        tags::T_CreatePolicyStmt => Ok(Node::mk_create_policy_stmt(mcx, conv_createpolicystmt(mcx, n.cast())?)),
+        tags::T_PublicationTable => Ok(Node::mk_publication_table(mcx, conv_publicationtable(mcx, n.cast())?)),
         tags::T_PublicationObjSpec => {
-            Ok(Node::PublicationObjSpec(conv_publicationobjspec(mcx, n.cast())?))
+            Ok(Node::mk_publication_obj_spec(mcx, conv_publicationobjspec(mcx, n.cast())?))
         }
         tags::T_CreatePublicationStmt => {
-            Ok(Node::CreatePublicationStmt(conv_createpublicationstmt(mcx, n.cast())?))
+            Ok(Node::mk_create_publication_stmt(mcx, conv_createpublicationstmt(mcx, n.cast())?))
         }
-        tags::T_CreateSubscriptionStmt => Ok(Node::CreateSubscriptionStmt(
+        tags::T_CreateSubscriptionStmt => Ok(Node::mk_create_subscription_stmt(mcx, 
             conv_createsubscriptionstmt(mcx, n.cast())?,
         )),
         tags::T_DropSubscriptionStmt => {
-            Ok(Node::DropSubscriptionStmt(conv_dropsubscriptionstmt(mcx, n.cast())?))
+            Ok(Node::mk_drop_subscription_stmt(mcx, conv_dropsubscriptionstmt(mcx, n.cast())?))
         }
         tags::T_CreateEventTrigStmt => {
-            Ok(Node::CreateEventTrigStmt(conv_createeventtrigstmt(mcx, n.cast())?))
+            Ok(Node::mk_create_event_trig_stmt(mcx, conv_createeventtrigstmt(mcx, n.cast())?))
         }
         tags::T_AlterEventTrigStmt => {
-            Ok(Node::AlterEventTrigStmt(conv_altereventtrigstmt(mcx, n.cast())?))
+            Ok(Node::mk_alter_event_trig_stmt(mcx, conv_altereventtrigstmt(mcx, n.cast())?))
         }
         tags::T_CreateTransformStmt => {
-            Ok(Node::CreateTransformStmt(conv_createtransformstmt(mcx, n.cast())?))
+            Ok(Node::mk_create_transform_stmt(mcx, conv_createtransformstmt(mcx, n.cast())?))
         }
-        tags::T_ReturnStmt => Ok(Node::ReturnStmt(conv_returnstmt(mcx, n.cast())?)),
-        tags::T_PLAssignStmt => Ok(Node::PLAssignStmt(conv_plassignstmt(mcx, n.cast())?)),
+        tags::T_ReturnStmt => Ok(Node::mk_return_stmt(mcx, conv_returnstmt(mcx, n.cast())?)),
+        tags::T_PLAssignStmt => Ok(Node::mk_pl_assign_stmt(mcx, conv_plassignstmt(mcx, n.cast())?)),
 
         // --- anything else: the absent DDL/utility node families ---
         other => unported(other, node_tag_name(other)),

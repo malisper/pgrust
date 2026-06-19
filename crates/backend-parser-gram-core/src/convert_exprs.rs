@@ -16,26 +16,26 @@ fn conv_a_const<'mcx>(mcx: Mcx<'mcx>, p: *mut cs::A_Const) -> PgResult<Node<'mcx
         // The union's first member is a bare `Node` header carrying the tag.
         let inner_tag = unsafe { c.val.node.type_ };
         let node = match inner_tag {
-            tags::T_Integer => Node::Integer(tn_val::Integer {
+            tags::T_Integer => Node::mk_integer(mcx, tn_val::Integer {
                 ival: unsafe { c.val.ival.ival },
             }),
-            tags::T_Float => Node::Float(tn_val::Float {
+            tags::T_Float => Node::mk_float(mcx, tn_val::Float {
                 fval: cstr(mcx, unsafe { c.val.fval.fval })?,
             }),
-            tags::T_Boolean => Node::Boolean(tn_val::Boolean {
+            tags::T_Boolean => Node::mk_boolean(mcx, tn_val::Boolean {
                 boolval: unsafe { c.val.boolval.boolval },
             }),
-            tags::T_String => Node::String(tn_val::StringNode {
+            tags::T_String => Node::mk_string(mcx, tn_val::StringNode {
                 sval: cstr(mcx, unsafe { c.val.sval.sval })?,
             }),
-            tags::T_BitString => Node::BitString(tn_val::BitString {
+            tags::T_BitString => Node::mk_bit_string(mcx, tn_val::BitString {
                 bsval: cstr(mcx, unsafe { c.val.bsval.bsval })?,
             }),
             other => panic!("gram converter: invalid A_Const ValUnion tag {other}"),
         };
         Some(mcx::alloc_in(mcx, node)?)
     };
-    Ok(Node::A_Const(tn::A_Const {
+    Ok(Node::mk_a_const(mcx, tn::A_Const {
         val,
         isnull: c.isnull,
         location: c.location,

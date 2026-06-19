@@ -460,7 +460,7 @@ fn check_agglevels_and_constraints<'mcx>(
             }
             let mut args: Vec<Node> = Vec::new();
             for te in agg.args.iter() {
-                args.push(Node::TargetEntry(te.clone_in(mcx)?));
+                args.push(Node::mk_target_entry(mcx, te.clone_in(mcx)?));
             }
             let filter = match agg.aggfilter.as_deref() {
                 Some(e) => Some(Node::Expr(e.clone())),
@@ -1363,7 +1363,7 @@ pub fn parseCheckAggregates<'mcx>(
 
     // Flatten join alias vars if any RTE_JOIN entries.
     if has_join_rtes {
-        let qry_node = Node::Query(qry.clone_in(mcx)?);
+        let qry_node = Node::mk_query(mcx, qry.clone_in(mcx)?);
         let flat = flatten_group_clauses(mcx, &qry_node, group_clauses)?;
         group_clauses = flat;
     }
@@ -1418,7 +1418,7 @@ pub fn parseCheckAggregates<'mcx>(
 
     // A read-only snapshot of the query used by the seam calls inside the
     // mutator/walker (flatten_join_alias_vars, check_functional_grouping).
-    let qry_snapshot = Node::Query(qry.clone_in(mcx)?);
+    let qry_snapshot = Node::mk_query(mcx, qry.clone_in(mcx)?);
 
     // qry->constraintDeps, extended in place by check_functional_grouping.
     let mut constraint_deps: Vec<Oid> = qry.constraintDeps.iter().copied().collect();
@@ -1428,7 +1428,7 @@ pub fn parseCheckAggregates<'mcx>(
     // finalize_grouping_exprs walks the list (modifying GroupingFunc refs).
     let mut tlist_nodes: Vec<Node> = Vec::new();
     for te in tlist.into_iter() {
-        tlist_nodes.push(Node::TargetEntry(te));
+        tlist_nodes.push(Node::mk_target_entry(mcx, te));
     }
     finalize_grouping_exprs_list(
         mcx,
@@ -1520,7 +1520,7 @@ pub fn parseCheckAggregates<'mcx>(
 
     // Aggregates can't appear in a recursive term.
     if pstate.p_hasAggs && has_self_ref_rtes {
-        let qry_node = Node::Query(qry.clone_in(mcx)?);
+        let qry_node = Node::mk_query(mcx, qry.clone_in(mcx)?);
         let loc = backend_rewrite_rewritemanip_seams::locate_agg_of_level::call(&qry_node, 0);
         return Err(ereport(ERROR)
             .errcode(ERRCODE_INVALID_RECURSION)
@@ -1545,7 +1545,7 @@ fn flatten_group_clauses<'mcx>(
         let flat = backend_rewrite_rewritemanip_seams::flatten_join_alias_vars::call(
             mcx,
             qry_node,
-            Node::TargetEntry(tle),
+            Node::mk_target_entry(mcx, tle),
         )?;
         match flat.into_targetentry() {
             Some(te) => out.push(te),

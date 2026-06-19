@@ -282,7 +282,7 @@ fn cte_name<'a>(cte: &'a CommonTableExpr<'_>) -> &'a str {
 
 /// `makeString(pstrdup(s))` — a `Node::String` allocated for a colname list.
 fn make_string_node<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<PgBox<'mcx, Node<'mcx>>> {
-    let node = Node::String(StringNode {
+    let node = Node::mk_string(mcx, StringNode {
         sval: PgString::from_str_in(s, mcx)?,
     });
     mcx::alloc_in(mcx, node)
@@ -719,7 +719,7 @@ fn analyzeCTE<'mcx>(
 
         cte.cycle_clause = Some(mcx::alloc_in(
             mcx,
-            types_nodes::nodes::Node::CTECycleClause(cycle_clause),
+            types_nodes::nodes::Node::mk_cte_cycle_clause(mcx, cycle_clause),
         )?);
     }
 
@@ -1629,7 +1629,7 @@ fn checkWellFormedRecursion<'mcx>(
         cstate.selfrefcount = 0;
         cstate.context = RecursionContext::NonRecursiveTerm;
         if let Some(larg) = stmt.larg.as_deref() {
-            let node = Node::SelectStmt(larg.clone_in(mcx)?);
+            let node = Node::mk_select_stmt(mcx, larg.clone_in(mcx)?);
             checkWellFormedRecursionWalker(mcx, pstate, &node, cstate)?;
         }
         debug_assert!(cstate.innerwiths.is_empty());
@@ -1640,7 +1640,7 @@ fn checkWellFormedRecursion<'mcx>(
         cstate.selfrefcount = 0;
         cstate.context = RecursionContext::Ok;
         if let Some(rarg) = stmt.rarg.as_deref() {
-            let node = Node::SelectStmt(rarg.clone_in(mcx)?);
+            let node = Node::mk_select_stmt(mcx, rarg.clone_in(mcx)?);
             checkWellFormedRecursionWalker(mcx, pstate, &node, cstate)?;
         }
         debug_assert!(cstate.innerwiths.is_empty());
@@ -1831,12 +1831,12 @@ fn checkWellFormedSelectStmt<'mcx>(
 
     if save_context != RecursionContext::Ok {
         // just recurse without changing state
-        let node = Node::SelectStmt(stmt.clone_in(mcx)?);
+        let node = Node::mk_select_stmt(mcx, stmt.clone_in(mcx)?);
         raw_walk_children_recursion(mcx, pstate, &node, cstate)?;
     } else {
         match stmt.op {
             SetOperation::SETOP_NONE | SetOperation::SETOP_UNION => {
-                let node = Node::SelectStmt(stmt.clone_in(mcx)?);
+                let node = Node::mk_select_stmt(mcx, stmt.clone_in(mcx)?);
                 raw_walk_children_recursion(mcx, pstate, &node, cstate)?;
             }
             SetOperation::SETOP_INTERSECT => {
@@ -1900,7 +1900,7 @@ fn walk_opt_select<'mcx>(
 ) -> PgResult<bool> {
     match child {
         Some(s) => {
-            let node = Node::SelectStmt(s.clone_in(mcx)?);
+            let node = Node::mk_select_stmt(mcx, s.clone_in(mcx)?);
             checkWellFormedRecursionWalker(mcx, pstate, &node, cstate)
         }
         None => Ok(false),
