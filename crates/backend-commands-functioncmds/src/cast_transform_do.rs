@@ -681,13 +681,12 @@ pub fn ExecuteDoStmt(stmt: &DoStmt, atomic: bool) -> PgResult<()> {
 /// raises the faithful "DefElem has no arg" error rather than silently coercing.
 fn lower_defelem(node: &types_nodes::nodes::Node<'_>) -> DefElem {
     let d = node.expect_defelem();
-    let arg = d.arg.as_deref().and_then(|n| match n {
-        types_nodes::nodes::Node::String(s) => {
-            Some(Box::new(Node::String(types_parsenodes::StringNode {
+    let arg = d.arg.as_deref().and_then(|n| {
+        n.as_string().map(|s| {
+            Box::new(Node::String(types_parsenodes::StringNode {
                 sval: Some(s.sval.as_str().to_string()),
-            })))
-        }
-        _ => None,
+            }))
+        })
     });
     DefElem {
         defnamespace: d.defnamespace.as_ref().map(|v| v.as_str().to_string()),
