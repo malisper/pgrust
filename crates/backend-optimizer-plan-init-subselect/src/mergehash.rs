@@ -18,9 +18,17 @@ use backend_optimizer_plan_init_subselect_ext_seams as initext;
 const INVALID_OID: Oid = 0;
 
 /// Resolve the rinfo's `clause` to a 2-arg `OpExpr`, returning
-/// `(opno, leftarg, rightarg)`. Returns `None` for pseudoconstant rinfos or
+/// `(opno, lefttype, righttype)`. Returns `None` for pseudoconstant rinfos or
 /// when the clause is not a binary `OpExpr` (`is_opclause` + `list_length == 2`).
-fn binary_opclause(root: &PlannerInfo, restrictinfo: RinfoId) -> Option<(Oid, Expr, Expr)> {
+///
+/// C reads the left/right operands as bare `Node *` pointers (`get_leftop` /
+/// `get_rightop`) and immediately passes them to `exprType`. We mirror that by
+/// computing the operand types while the clause node borrow is live, rather than
+/// deep-cloning the operand `Expr` trees out of `root` — cloning is both
+/// needless and unsound for operands carrying context-allocated children (e.g.
+/// a `SubPlan`, whose lifetime-free `Expr::clone` deliberately panics; clone
+/// must route through `clone_in`).
+fn binary_opclause(root: &PlannerInfo, restrictinfo: RinfoId) -> Option<(Oid, Oid, Oid)> {
     let ri = root.rinfo(restrictinfo);
     if ri.pseudoconstant {
         return None;
@@ -30,9 +38,10 @@ fn binary_opclause(root: &PlannerInfo, restrictinfo: RinfoId) -> Option<(Oid, Ex
         if op.args.len() != 2 {
             return None;
         }
-        let left = op.args[0].clone();
-        let right = op.args[1].clone();
-        Some((op.opno, left, right))
+        let opno = op.opno;
+        let lefttype = eqext::expr_type::call(&op.args[0]);
+        let righttype = eqext::expr_type::call(&op.args[1]);
+        Some((opno, lefttype, righttype))
     } else {
         None
     }
@@ -40,9 +49,12 @@ fn binary_opclause(root: &PlannerInfo, restrictinfo: RinfoId) -> Option<(Oid, Ex
 
 /// Read `contain_volatile_functions((Node *) restrictinfo->clause)`.
 fn clause_is_volatile(root: &PlannerInfo, restrictinfo: RinfoId) -> bool {
+    // C reads the clause as a bare `Node *`; `contain_volatile_functions` only
+    // walks it. Pass the borrowed clause node directly — cloning the whole Expr
+    // tree is both needless and unsound for clauses carrying context-allocated
+    // children (e.g. a `SubPlan`, whose lifetime-free `Expr::clone` panics).
     let clause_id = root.rinfo(restrictinfo).clause;
-    let clause = root.node(clause_id).clone();
-    eqext::contain_volatile_functions::call(&clause)
+    eqext::contain_volatile_functions::call(root.node(clause_id))
 }
 
 /// `check_mergejoinable` (initsplan.c:3795).
@@ -51,11 +63,10 @@ fn clause_is_volatile(root: &PlannerInfo, restrictinfo: RinfoId) -> bool {
 /// Supported for binary opclauses where the operator is mergejoinable and there
 /// are no volatile functions in the args.
 pub fn check_mergejoinable(root: &mut PlannerInfo, restrictinfo: RinfoId) -> PgResult<()> {
-    let (opno, leftarg, _rightarg) = match binary_opclause(root, restrictinfo) {
+    let (opno, lefttype, _righttype) = match binary_opclause(root, restrictinfo) {
         Some(x) => x,
         None => return Ok(()),
     };
-    let lefttype = eqext::expr_type::call(&leftarg);
 
     if lsc::op_mergejoinable::call(opno, lefttype)?
         && !clause_is_volatile(root, restrictinfo)
@@ -75,11 +86,10 @@ pub fn check_mergejoinable(root: &mut PlannerInfo, restrictinfo: RinfoId) -> PgR
 
 /// `check_hashjoinable` (initsplan.c:3832).
 pub fn check_hashjoinable(root: &mut PlannerInfo, restrictinfo: RinfoId) -> PgResult<()> {
-    let (opno, leftarg, _rightarg) = match binary_opclause(root, restrictinfo) {
+    let (opno, lefttype, _righttype) = match binary_opclause(root, restrictinfo) {
         Some(x) => x,
         None => return Ok(()),
     };
-    let lefttype = eqext::expr_type::call(&leftarg);
 
     if lsc::op_hashjoinable::call(opno, lefttype)?
         && !clause_is_volatile(root, restrictinfo)
@@ -95,18 +105,15 @@ pub fn check_hashjoinable(root: &mut PlannerInfo, restrictinfo: RinfoId) -> PgRe
 /// usable hash function + equality operator (`TYPECACHE_HASH_PROC |
 /// TYPECACHE_EQ_OPR`).
 pub fn check_memoizable(root: &mut PlannerInfo, restrictinfo: RinfoId) {
-    let (_opno, leftarg, rightarg) = match binary_opclause(root, restrictinfo) {
+    let (_opno, lefttype, righttype) = match binary_opclause(root, restrictinfo) {
         Some(x) => x,
         None => return,
     };
 
-    let lefttype = eqext::expr_type::call(&leftarg);
     let (hash_proc, eq_opr) = initext::lookup_type_cache_hasheq::call(lefttype);
     if hash_proc != INVALID_OID && eq_opr != INVALID_OID {
         root.rinfo_mut(restrictinfo).left_hasheqoperator = eq_opr;
     }
-
-    let righttype = eqext::expr_type::call(&rightarg);
 
     // Lookup the right type, unless it's the same as the left type.
     let (hash_proc_r, eq_opr_r) = if lefttype != righttype {

@@ -79,16 +79,26 @@ use crate::{from_collapse_limit, join_collapse_limit, JoinTreeItem, JtId, JtNode
 ///
 /// `make_ands_implicit(NULL) -> NIL`, an `AND` BoolExpr -> its args, a constant
 /// TRUE -> NIL, anything else -> a one-element list — exactly the C semantics.
-fn quals_implicit_and(quals: Option<&Node>) -> Vec<Expr> {
+fn quals_implicit_and(mcx: mcx::Mcx<'_>, quals: Option<&Node>) -> Vec<Expr> {
     // C views `(List *) f->quals` by pointer; the owned model stores the qual
     // conjuncts as owned `Expr` values, so deep-copy out. The derived
     // `Expr::clone()` panics on owned-subtree variants (SubLink/SubPlan/Aggref)
     // whose children only deep-copy via `clone_in` (`copyObject` shape); route
-    // the copy through `Expr::clone_in`. The returned `Expr` is fully owned (no
-    // borrow of the transient context), so it moves into the JoinTreeItem list.
+    // the copy through `Expr::clone_in`.
+    //
+    // The clone MUST land in the long-lived planner arena (`run.mcx()`), NOT a
+    // throwaway `MemoryContext`. `Expr` is lifetime-free: `clone_in` erases the
+    // arena lifetime to `'static`, but the cloned node's `PgBox`/`PgVec`
+    // children still point into the arena it was allocated in and are
+    // deallocated against that arena when the node is dropped. The resulting
+    // `Expr` moves into `JoinTreeItem.quals` and is dropped much later (when
+    // `deconstruct_jointree` drops `item_list`); cloning into a local context
+    // that is freed on return leaves those child pointers dangling, so the
+    // eventual drop frees against an already-freed context (use-after-free /
+    // segfault). The planner arena outlives the whole planner run, satisfying
+    // the `clone_in` `'static`-erasure invariant.
     let clause: Option<Expr> = quals.and_then(|n| n.as_expr()).map(|e| {
-        let cx = mcx::MemoryContext::new("jointree quals_implicit_and clone");
-        e.clone_in(cx.mcx())
+        e.clone_in(mcx)
             .unwrap_or_else(|err| panic!("quals_implicit_and: clone_in: {err:?}"))
     });
     make_ands_implicit(clause)
@@ -213,7 +223,7 @@ fn deconstruct_recurse_fromexpr(
         ..Default::default()
     };
     jtitem.kind = JtNodeKind::FromExpr {
-        quals: quals_implicit_and(f.quals.as_deref()),
+        quals: quals_implicit_and(run.mcx(), f.quals.as_deref()),
     };
     // This node belongs to parent_domain, as do its children.
     jtitem.jdomain = parent_domain;
@@ -306,7 +316,7 @@ fn deconstruct_recurse(
         joinlist = alloc::vec![JoinlistNode::Rel(varno)];
     } else if let Some(f) = jtnode.as_fromexpr() {
         jtitem.kind = JtNodeKind::FromExpr {
-            quals: quals_implicit_and(f.quals.as_deref()),
+            quals: quals_implicit_and(run.mcx(), f.quals.as_deref()),
         };
         // This node belongs to parent_domain, as do its children.
         jtitem.jdomain = parent_domain;
@@ -350,7 +360,7 @@ fn deconstruct_recurse(
             // the `types_nodes::jointype::JoinType` enum the raw node carries.
             jointype: j.jointype as types_pathnodes::JoinType,
             rtindex: j.rtindex,
-            quals: quals_implicit_and(j.quals.as_deref()),
+            quals: quals_implicit_and(run.mcx(), j.quals.as_deref()),
         };
         let jointype = j.jointype as types_pathnodes::JoinType;
         if jointype == JOIN_INNER {
@@ -756,7 +766,7 @@ fn process_security_barrier_quals(
         .resolve_rte(rte_id)
         .securityQuals
         .iter()
-        .map(|qualset_node| quals_implicit_and(Some(qualset_node)))
+        .map(|qualset_node| quals_implicit_and(run.mcx(), Some(qualset_node)))
         .collect();
 
     let qualscope = bms::relids_copy::call(&item_list[jti].qualscope);
@@ -825,7 +835,7 @@ fn deconstruct_distribute_oj_quals(
         // one, then successively put them back as we crawl up the join stack.
         let mut quals = core::mem::take(&mut item_list[jti].oj_joinclauses);
         if !bms::relids_is_empty::call(&joins_below) {
-            quals = remove_nulling_relids_exprs(&quals, &joins_below, &None);
+            quals = remove_nulling_relids_exprs(run.mcx(), &quals, &joins_below, &None);
         }
 
         // We'll need to mark the lower versions of the quals as not safe to
@@ -877,7 +887,7 @@ fn deconstruct_distribute_oj_quals(
             // Pb*c). We must also remove that bit from incompatible_joins.
             if above_sjinfo {
                 let single = bms::relids_make_singleton::call(othersj.ojrelid as i32);
-                quals = add_nulling_relids_exprs(&quals, &sjinfo.syn_lefthand, &single);
+                quals = add_nulling_relids_exprs(run.mcx(), &quals, &sjinfo.syn_lefthand, &single);
                 incompatible_joins = del_member(incompatible_joins, othersj.ojrelid as i32);
             }
 
@@ -924,7 +934,7 @@ fn deconstruct_distribute_oj_quals(
             // back bits stripped above). Update incompatible_joins too.
             if below_sjinfo {
                 let single = bms::relids_make_singleton::call(othersj.ojrelid as i32);
-                quals = add_nulling_relids_exprs(&quals, &othersj.syn_righthand, &single);
+                quals = add_nulling_relids_exprs(run.mcx(), &quals, &othersj.syn_righthand, &single);
                 incompatible_joins = del_member(incompatible_joins, othersj.ojrelid as i32);
             }
 
@@ -965,20 +975,25 @@ fn del_member(a: Relids, x: i32) -> Relids {
 /// `remove_nulling_relids((Node *) quals, removable, except)` applied over an
 /// implicit-AND `List *` of quals: map it element-wise over the conjunct list.
 /// The per-Expr work is `eqext::remove_nulling_relids`.
-fn remove_nulling_relids_exprs(quals: &[Expr], removable: &Relids, except: &Relids) -> Vec<Expr> {
+fn remove_nulling_relids_exprs(mcx: mcx::Mcx<'_>, quals: &[Expr], removable: &Relids, except: &Relids) -> Vec<Expr> {
     quals
         .iter()
-        .map(|q| eqext::remove_nulling_relids::call(clone_qual_expr(q), bms::relids_copy::call(removable), bms::relids_copy::call(except)))
+        .map(|q| eqext::remove_nulling_relids::call(clone_qual_expr(mcx, q), bms::relids_copy::call(removable), bms::relids_copy::call(except)))
         .collect()
 }
 
 /// Deep-copy a qual `Expr` value (C: pointer reuse). The derived `Expr::clone()`
 /// panics on owned-subtree variants (SubLink/SubPlan/Aggref) whose children only
-/// deep-copy via `clone_in`; route every qual copy through `Expr::clone_in`. The
-/// returned `Expr` is fully owned (no borrow of the transient context).
-fn clone_qual_expr(expr: &Expr) -> Expr {
-    let cx = mcx::MemoryContext::new("jointree qual clone");
-    expr.clone_in(cx.mcx())
+/// deep-copy via `clone_in`; route every qual copy through `Expr::clone_in`.
+///
+/// The copy MUST land in the long-lived planner arena, not a throwaway
+/// `MemoryContext`: the returned `Expr` (lifetime-erased to `'static`) keeps
+/// `PgBox`/`PgVec` children pointing into the arena it was allocated in, and the
+/// node is dropped much later (with the postponed-OJ / nulling-relids qual
+/// lists). A local context freed on return would leave those children dangling,
+/// so the eventual drop frees against an already-freed context (use-after-free).
+fn clone_qual_expr(mcx: mcx::Mcx<'_>, expr: &Expr) -> Expr {
+    expr.clone_in(mcx)
         .unwrap_or_else(|e| panic!("clone_qual_expr: clone_in: {e:?}"))
 }
 
@@ -987,12 +1002,12 @@ fn clone_qual_expr(expr: &Expr) -> Expr {
 /// `add_nulling_relids_expr` seam in this crate's ext-seams (the rewrite-core
 /// owner works over `&mut Node`, model mismatch — loud-panic until that seam is
 /// installed; only reached for outer-join clone quals).
-fn add_nulling_relids_exprs(quals: &[Expr], target: &Relids, added: &Relids) -> Vec<Expr> {
+fn add_nulling_relids_exprs(mcx: mcx::Mcx<'_>, quals: &[Expr], target: &Relids, added: &Relids) -> Vec<Expr> {
     quals
         .iter()
         .map(|q| {
             initext::add_nulling_relids_expr::call(
-                clone_qual_expr(q),
+                clone_qual_expr(mcx, q),
                 bms::relids_copy::call(target),
                 bms::relids_copy::call(added),
             )
