@@ -781,22 +781,63 @@ fn eval_windowfunction<'mcx>(
         .expect("eval_windowfunction: perfunc.wfunc not set")
         .winfnoid;
 
-    let result: i64 = match winfnoid {
+    // C dispatches every window function by OID through FunctionCallInvoke; here
+    // we dispatch straight to the ported body (each returns `(Datum, isnull)`,
+    // mirroring `*result` / `fcinfo->isnull`). The leadlag family is folded onto
+    // `leadlag_common` exactly as C's six `window_lag*`/`window_lead*` thunks do.
+    let (result, isnull): (Datum<'mcx>, bool) = match winfnoid {
         // window_row_number (windowfuncs.c): increment up from 1.
-        3100 => window_row_number(winstate, perfuncno, estate)?,
+        3100 => (Datum::from_i64(window_row_number(winstate, perfuncno, estate)?), false),
         // window_rank (windowfuncs.c).
-        3101 => window_rank(winstate, perfuncno, estate)?,
+        3101 => (Datum::from_i64(window_rank(winstate, perfuncno, estate)?), false),
         // window_dense_rank (windowfuncs.c).
-        3102 => window_dense_rank(winstate, perfuncno, estate)?,
+        3102 => (Datum::from_i64(window_dense_rank(winstate, perfuncno, estate)?), false),
+        // window_percent_rank (windowfuncs.c).
+        3103 => (Datum::from_f64(window_percent_rank(winstate, perfuncno, estate)?), false),
+        // window_cume_dist (windowfuncs.c).
+        3104 => (Datum::from_f64(window_cume_dist(winstate, perfuncno, estate)?), false),
+        // window_ntile (windowfuncs.c).
+        3105 => window_ntile(winstate, perfuncno, estate)?,
+        // lag / lag_with_offset / lag_with_offset_and_default (forward = false).
+        3106 => leadlag_common(winstate, perfuncno, false, false, false, estate)?,
+        3107 => leadlag_common(winstate, perfuncno, false, true, false, estate)?,
+        3108 => leadlag_common(winstate, perfuncno, false, true, true, estate)?,
+        // lead / lead_with_offset / lead_with_offset_and_default (forward = true).
+        3109 => leadlag_common(winstate, perfuncno, true, false, false, estate)?,
+        3110 => leadlag_common(winstate, perfuncno, true, true, false, estate)?,
+        3111 => leadlag_common(winstate, perfuncno, true, true, true, estate)?,
+        // window_first_value (windowfuncs.c).
+        3112 => window_first_value(winstate, perfuncno, estate)?,
+        // window_last_value (windowfuncs.c).
+        3113 => window_last_value(winstate, perfuncno, estate)?,
+        // window_nth_value (windowfuncs.c).
+        3114 => window_nth_value(winstate, perfuncno, estate)?,
         other => panic!(
             "eval_windowfunction: window function OID {other} not ported \
-             (only row_number/rank/dense_rank are implemented in this crate)"
+             (windowfuncs.c builtin set: 3100-3114)"
         ),
     };
 
-    // The implemented window functions all return a by-value int8, never NULL,
-    // so the pass-by-ref datumCopy guard (numfuncs > 1) does not apply.
-    Ok((Datum::from_i64(result), false))
+    // The window function might have returned a pass-by-ref result that's just a
+    // pointer into one of the WindowObject's temporary slots. That's not a
+    // problem if it's the only window function using the WindowObject; but if
+    // there's more than one function, we'd better copy the result to ensure it's
+    // not clobbered by later window functions.
+    //   if (!perfuncstate->resulttypeByVal && !fcinfo->isnull && winstate->numfuncs > 1)
+    //       *result = datumCopy(*result, byval, len);
+    //
+    // C copies into `ps_ExprContext->ecxt_per_tuple_memory` (the switched-to
+    // context). The owned model can't hand back an `'mcx`-lived datum from that
+    // borrow-scoped child context, so the copy lands in `es_query_cxt` (already
+    // `Mcx<'mcx>`): the copied value is consumed by `ExecProject` within the same
+    // tuple cycle and never outlives the per-query arena, so the longer-lived
+    // home is behavior-preserving (it just defers reclamation to the query end).
+    if !perfunc_ref(winstate, perfuncno).resulttypeByVal && !isnull && winstate.numfuncs > 1 {
+        let copied = result.clone_in(estate.es_query_cxt)?;
+        return Ok((copied, isnull));
+    }
+
+    Ok((result, isnull))
 }
 
 /// `window_row_number(fcinfo)` (windowfuncs.c) — just increment up from 1 until
@@ -870,6 +911,324 @@ fn window_dense_rank<'mcx>(
         write_rank_context(winstate, perfuncno, cur + 1)?;
     }
     read_rank_context(winstate, perfuncno)
+}
+
+/// `window_percent_rank(fcinfo)` (windowfuncs.c) — fraction `(RK - 1) / (NR - 1)`
+/// between 0 and 1 inclusive, where RK is the current row's rank and NR is the
+/// total number of rows. Returns float8.
+fn window_percent_rank<'mcx>(
+    winstate: &mut WindowAggState<'mcx>,
+    perfuncno: usize,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<f64> {
+    let totalrows = WinGetPartitionRowCount(winstate, estate)?;
+    debug_assert!(totalrows > 0);
+
+    let up = rank_up(winstate, perfuncno, estate)?;
+    if up {
+        let new_rank = WinGetCurrentPosition(winstate) + 1;
+        write_rank_context(winstate, perfuncno, new_rank)?;
+    }
+
+    // return zero if there's only one row, per spec
+    if totalrows <= 1 {
+        return Ok(0.0);
+    }
+
+    let rank = read_rank_context(winstate, perfuncno)?;
+    Ok((rank - 1) as f64 / (totalrows - 1) as f64)
+}
+
+/// `window_cume_dist(fcinfo)` (windowfuncs.c) — fraction `NP / NR` between 0 and
+/// 1 inclusive, where NP is the number of rows preceding or peers to the current
+/// row, and NR is the total number of rows. Returns float8.
+fn window_cume_dist<'mcx>(
+    winstate: &mut WindowAggState<'mcx>,
+    perfuncno: usize,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<f64> {
+    let totalrows = WinGetPartitionRowCount(winstate, estate)?;
+    debug_assert!(totalrows > 0);
+
+    let up = rank_up(winstate, perfuncno, estate)?;
+    let rank = read_rank_context(winstate, perfuncno)?;
+    if up || rank == 1 {
+        // The current row is not peer to prior row or is just the first, so
+        // count up the number of rows that are peer to the current.
+        let mut new_rank = WinGetCurrentPosition(winstate) + 1;
+
+        // start from current + 1
+        let mut row = new_rank;
+        while row < totalrows {
+            if !WinRowsArePeers(winstate, perfuncno, row - 1, row, estate)? {
+                break;
+            }
+            new_rank += 1;
+            row += 1;
+        }
+        write_rank_context(winstate, perfuncno, new_rank)?;
+    }
+
+    let rank = read_rank_context(winstate, perfuncno)?;
+    Ok(rank as f64 / totalrows as f64)
+}
+
+/// `window_ntile(fcinfo)` (windowfuncs.c) — compute an exact numeric value with
+/// scale 0, ranging from 1 to n. Returns int4 (or NULL if the bucket count
+/// argument is NULL, per spec). Returns `(Datum, isnull)`.
+fn window_ntile<'mcx>(
+    winstate: &mut WindowAggState<'mcx>,
+    perfuncno: usize,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<(Datum<'mcx>, bool)> {
+    // context = WinGetPartitionLocalMemory(winobj, sizeof(ntile_context));
+    let mut ctx = read_ntile_context(winstate, perfuncno)?;
+
+    if ctx.ntile == 0 {
+        // first call
+        let total = WinGetPartitionRowCount(winstate, estate)?;
+        let (nbuckets_datum, isnull) = WinGetFuncArgCurrent(winstate, perfuncno, 0, estate)?;
+
+        // per spec: If NT is the null value, then the result is the null value.
+        if isnull {
+            return Ok((Datum::null(), true));
+        }
+        let nbuckets = nbuckets_datum.as_i32();
+
+        // per spec: If NT is less than or equal to 0, then an exception
+        // condition is raised.
+        if nbuckets <= 0 {
+            return Err(types_error::PgError::error(
+                "argument of ntile must be greater than zero",
+            ));
+        }
+
+        ctx.ntile = 1;
+        ctx.rows_per_bucket = 0;
+        ctx.boundary = total / nbuckets as i64;
+        if ctx.boundary <= 0 {
+            ctx.boundary = 1;
+        } else {
+            // If the total number is not divisible, add 1 row to leading
+            // buckets.
+            ctx.remainder = total % nbuckets as i64;
+            if ctx.remainder != 0 {
+                ctx.boundary += 1;
+            }
+        }
+    }
+
+    ctx.rows_per_bucket += 1;
+    if ctx.boundary < ctx.rows_per_bucket {
+        // ntile up
+        if ctx.remainder != 0 && ctx.ntile as i64 == ctx.remainder {
+            ctx.remainder = 0;
+            ctx.boundary -= 1;
+        }
+        ctx.ntile += 1;
+        ctx.rows_per_bucket = 1;
+    }
+
+    let result = ctx.ntile;
+    write_ntile_context(winstate, perfuncno, &ctx)?;
+    Ok((Datum::from_i32(result), false))
+}
+
+/// `leadlag_common` (windowfuncs.c) — common operation of `lead()` and `lag()`.
+/// For `lead()` `forward` is true, whereas for `lag()` it is false. `withoffset`
+/// indicates we have an offset second argument; `withdefault` indicates we have a
+/// default third argument. Returns `(Datum, isnull)`.
+fn leadlag_common<'mcx>(
+    winstate: &mut WindowAggState<'mcx>,
+    perfuncno: usize,
+    forward: bool,
+    withoffset: bool,
+    withdefault: bool,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<(Datum<'mcx>, bool)> {
+    let offset: i32;
+    let const_offset: bool;
+
+    if withoffset {
+        let (off_datum, isnull) = WinGetFuncArgCurrent(winstate, perfuncno, 1, estate)?;
+        if isnull {
+            return Ok((Datum::null(), true));
+        }
+        offset = off_datum.as_i32();
+        const_offset = get_fn_expr_arg_stable(winstate, perfuncno, 1);
+    } else {
+        offset = 1;
+        const_offset = true;
+    }
+
+    let relpos = if forward { offset as i64 } else { -(offset as i64) };
+    let (mut result, mut isnull, isout) = WinGetFuncArgInPartition(
+        winstate,
+        perfuncno,
+        0,
+        relpos,
+        WINDOW_SEEK_CURRENT,
+        const_offset,
+        estate,
+    )?;
+
+    if isout {
+        // target row is out of the partition; supply default value if provided,
+        // otherwise it'll stay NULL.
+        if withdefault {
+            let (d, n) = WinGetFuncArgCurrent(winstate, perfuncno, 2, estate)?;
+            result = d;
+            isnull = n;
+        }
+    }
+
+    if isnull {
+        return Ok((Datum::null(), true));
+    }
+
+    Ok((result, false))
+}
+
+/// `window_first_value(fcinfo)` (windowfuncs.c) — value of VE on the first row of
+/// the window frame. Returns `(Datum, isnull)`.
+fn window_first_value<'mcx>(
+    winstate: &mut WindowAggState<'mcx>,
+    perfuncno: usize,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<(Datum<'mcx>, bool)> {
+    let (result, isnull, _isout) =
+        WinGetFuncArgInFrame(winstate, perfuncno, 0, 0, WINDOW_SEEK_HEAD, true, estate)?;
+    if isnull {
+        return Ok((Datum::null(), true));
+    }
+    Ok((result, false))
+}
+
+/// `window_last_value(fcinfo)` (windowfuncs.c) — value of VE on the last row of
+/// the window frame. Returns `(Datum, isnull)`.
+fn window_last_value<'mcx>(
+    winstate: &mut WindowAggState<'mcx>,
+    perfuncno: usize,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<(Datum<'mcx>, bool)> {
+    let (result, isnull, _isout) =
+        WinGetFuncArgInFrame(winstate, perfuncno, 0, 0, WINDOW_SEEK_TAIL, true, estate)?;
+    if isnull {
+        return Ok((Datum::null(), true));
+    }
+    Ok((result, false))
+}
+
+/// `window_nth_value(fcinfo)` (windowfuncs.c) — value of VE on the n-th row from
+/// the first row of the window frame. Returns `(Datum, isnull)`.
+fn window_nth_value<'mcx>(
+    winstate: &mut WindowAggState<'mcx>,
+    perfuncno: usize,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<(Datum<'mcx>, bool)> {
+    let (nth_datum, isnull) = WinGetFuncArgCurrent(winstate, perfuncno, 1, estate)?;
+    if isnull {
+        return Ok((Datum::null(), true));
+    }
+    let nth = nth_datum.as_i32();
+    let const_offset = get_fn_expr_arg_stable(winstate, perfuncno, 1);
+
+    if nth <= 0 {
+        return Err(types_error::PgError::error(
+            "argument of nth_value must be greater than zero",
+        ));
+    }
+
+    let (result, isnull, _isout) = WinGetFuncArgInFrame(
+        winstate,
+        perfuncno,
+        0,
+        nth as i64 - 1,
+        WINDOW_SEEK_HEAD,
+        const_offset,
+        estate,
+    )?;
+    if isnull {
+        return Ok((Datum::null(), true));
+    }
+    Ok((result, false))
+}
+
+/// `ntile_context` (windowfuncs.c): `int32 ntile; int64 rows_per_bucket; int64
+/// boundary; int64 remainder`.
+#[derive(Default, Clone, Copy)]
+struct NtileContext {
+    ntile: i32,
+    rows_per_bucket: i64,
+    boundary: i64,
+    remainder: i64,
+}
+
+// Byte layout of `ntile_context` in partition-local memory: i32 ntile followed
+// by three i64 fields, native-endian, matching C's struct field order (the
+// trailing fields are accessed as a flat scratch buffer, so we pack them
+// contiguously rather than honoring C's alignment padding — the memory is
+// private to this code).
+const NTILE_CONTEXT_SIZE: usize = 4 + 8 * 3;
+
+/// Read the `ntile_context` from the perfunc's partition-local memory
+/// (allocated zeroed on first access, so the first read returns `ntile == 0`).
+fn read_ntile_context<'mcx>(
+    winstate: &mut WindowAggState<'mcx>,
+    perfuncno: usize,
+) -> PgResult<NtileContext> {
+    let buf = WinGetPartitionLocalMemory(winstate, perfuncno, NTILE_CONTEXT_SIZE)?;
+    let mut ntile = [0u8; 4];
+    let mut rows_per_bucket = [0u8; 8];
+    let mut boundary = [0u8; 8];
+    let mut remainder = [0u8; 8];
+    ntile.copy_from_slice(&buf[0..4]);
+    rows_per_bucket.copy_from_slice(&buf[4..12]);
+    boundary.copy_from_slice(&buf[12..20]);
+    remainder.copy_from_slice(&buf[20..28]);
+    Ok(NtileContext {
+        ntile: i32::from_ne_bytes(ntile),
+        rows_per_bucket: i64::from_ne_bytes(rows_per_bucket),
+        boundary: i64::from_ne_bytes(boundary),
+        remainder: i64::from_ne_bytes(remainder),
+    })
+}
+
+/// Write the `ntile_context` back into the perfunc's partition-local memory.
+fn write_ntile_context<'mcx>(
+    winstate: &mut WindowAggState<'mcx>,
+    perfuncno: usize,
+    ctx: &NtileContext,
+) -> PgResult<()> {
+    let buf = WinGetPartitionLocalMemory(winstate, perfuncno, NTILE_CONTEXT_SIZE)?;
+    buf[0..4].copy_from_slice(&ctx.ntile.to_ne_bytes());
+    buf[4..12].copy_from_slice(&ctx.rows_per_bucket.to_ne_bytes());
+    buf[12..20].copy_from_slice(&ctx.boundary.to_ne_bytes());
+    buf[20..28].copy_from_slice(&ctx.remainder.to_ne_bytes());
+    Ok(())
+}
+
+/// `get_fn_expr_arg_stable(flinfo, argnum)` (fmgr.c) — true if the `argnum`'th
+/// argument of the window function call is a value that doesn't change during
+/// query execution (a `Const`, or an external `Param`). Mirrors
+/// `get_call_expr_arg_stable` over the `WindowFunc` node's args, which the
+/// owned model reaches via the perfunc's `wfunc`.
+fn get_fn_expr_arg_stable(winstate: &WindowAggState<'_>, perfuncno: usize, argnum: usize) -> bool {
+    let wfunc = match perfunc_ref(winstate, perfuncno).wfunc.as_ref() {
+        Some(w) => w,
+        None => return false,
+    };
+    let arg = match wfunc.args.get(argnum) {
+        Some(a) => a,
+        None => return false,
+    };
+    match arg {
+        types_nodes::primnodes::Expr::Const(_) => true,
+        types_nodes::primnodes::Expr::Param(p) => {
+            p.paramkind == types_nodes::primnodes::PARAM_EXTERN
+        }
+        _ => false,
+    }
 }
 
 /// Read the `int64 rank` of the `rank_context` from the perfunc's
