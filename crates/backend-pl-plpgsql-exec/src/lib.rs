@@ -215,7 +215,7 @@ fn block_handle_rc(
 fn exec_block_init_var(estate: &mut PLpgSQL_execstate, dno: int32) {
     {
         let mut var = take_var(estate, dno);
-        seam::assign_simple_var(estate, &mut var, Datum::null(), true, false);
+        assign_simple_var(estate, &mut var, Datum::null(), true, false);
         put_var(estate, dno, var);
     }
 
@@ -656,7 +656,7 @@ fn exec_stmt_fori(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_fori) -> P
 
         {
             let mut var = take_var(estate, var_dno);
-            seam::assign_simple_var(estate, &mut var, Datum::from_i32(loop_value), false, false);
+            assign_simple_var(estate, &mut var, Datum::from_i32(loop_value), false, false);
             put_var(estate, var_dno, var);
         }
 
@@ -801,7 +801,7 @@ fn exec_return_simple_var(estate: &mut PLpgSQL_execstate, dno: int32) {
 fn exec_set_found(estate: &mut PLpgSQL_execstate, state: bool) {
     let dno = estate.found_varno;
     let mut var = take_var(estate, dno);
-    seam::assign_simple_var(estate, &mut var, Datum::from_bool(state), false, false);
+    assign_simple_var(estate, &mut var, Datum::from_bool(state), false, false);
     put_var(estate, dno, var);
 }
 
@@ -939,6 +939,118 @@ fn exec_stmt_rollback(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
 // Top-level executor entry points
 // ===========================================================================
 
+/// One call argument value (`fcinfo->args[i]` — its `(Datum, isnull)` pair).
+#[derive(Debug, Clone, Copy)]
+pub struct FunctionCallArg {
+    pub value: Datum,
+    pub isnull: bool,
+}
+
+/// The result of executing a scalar PL/pgSQL function: the result `Datum`, its
+/// NULL flag (the C `fcinfo->isnull`), and its runtime type Oid.
+#[derive(Debug, Clone, Copy)]
+pub struct FunctionResult {
+    pub value: Datum,
+    pub isnull: bool,
+    pub rettype: Oid,
+}
+
+/// `plpgsql_estate_setup(estate, func, rsi, simple_eval_estate,
+/// simple_eval_resowner)` (pl_exec.c) — build the per-call execution state.
+///
+/// The scalar control-flow fields are populated 1:1 from the function. The
+/// substrate handles (`paramLI` via `makeParamList`, the simple-expr `EState`,
+/// the cast-expr hash, and the per-tuple `eval_econtext` via
+/// `plpgsql_create_econtext`) are owned by the executor/SPI substrate; they are
+/// left `None` here and created lazily the first time an expression is
+/// evaluated (the expr-eval seams panic loudly until that substrate lands).
+/// Control-flow-only execution never reads them.
+pub fn plpgsql_estate_setup(
+    func: &PLpgSQL_function,
+    rsi: Option<types_plpgsql::ReturnSetInfo>,
+    simple_eval_estate: Option<EState>,
+    simple_eval_resowner: Option<ResourceOwner>,
+) -> PLpgSQL_execstate {
+    PLpgSQL_execstate {
+        func: None, // opaque back-ref; the comp↔exec handle is set when needed
+        trigdata: None,
+        evtrigdata: None,
+
+        retval: Datum::null(),
+        retisnull: true,
+        rettype: INVALID_OID,
+
+        fn_rettype: func.fn_rettype,
+        retistuple: func.fn_retistuple,
+        retisset: func.fn_retset,
+
+        readonly_func: func.fn_readonly,
+        atomic: true,
+
+        exitlabel: None,
+        cur_error: None,
+
+        tuple_store: None,
+        tuple_store_desc: None,
+        tuple_store_cxt: None,
+        tuple_store_owner: None,
+        rsi,
+
+        found_varno: func.found_varno,
+        ndatums: func.ndatums,
+        datums: Vec::new(), // filled by copy_plpgsql_datums
+        datum_context: None,
+
+        // makeParamList(0) + hook install — executor param substrate (lazy).
+        paramLI: None,
+
+        // shared_simple_eval_estate / private one; shared cast hash — lazy
+        // (created on first simple-expr eval, which is itself loud today).
+        simple_eval_estate,
+        simple_eval_resowner,
+        procedure_resowner: None,
+
+        cast_hash: None,
+
+        stmt_mcontext: None,
+        stmt_mcontext_parent: None,
+
+        eval_tuptable: None,
+        eval_processed: 0,
+        eval_econtext: None, // plpgsql_create_econtext — lazy
+
+        err_stmt: None,
+        err_var: None,
+        err_text: None,
+
+        plugin_info: None,
+    }
+}
+
+/// `copy_plpgsql_datums(estate, func)` (pl_exec.c) — make the per-call local
+/// copies of the function's datums.
+///
+/// In C, VAR/PROMISE/REC datums are byte-copied into a single workspace while
+/// ROW/RECFIELD are shared read-only. In the owned model every datum is cloned
+/// into the execstate's `datums` Vec (the clone is value-equivalent; ROW and
+/// RECFIELD carry only read-only cached data).
+fn copy_plpgsql_datums(estate: &mut PLpgSQL_execstate, func: &PLpgSQL_function) {
+    let ndatums = estate.ndatums as usize;
+    let mut datums = Vec::with_capacity(ndatums);
+    for i in 0..ndatums {
+        match datum_dtype(&func.datums[i]) {
+            PLpgSQL_datum_type::PLPGSQL_DTYPE_VAR
+            | PLpgSQL_datum_type::PLPGSQL_DTYPE_PROMISE
+            | PLpgSQL_datum_type::PLPGSQL_DTYPE_REC
+            | PLpgSQL_datum_type::PLPGSQL_DTYPE_ROW
+            | PLpgSQL_datum_type::PLPGSQL_DTYPE_RECFIELD => {
+                datums.push(func.datums[i].clone());
+            }
+        }
+    }
+    estate.datums = datums;
+}
+
 /// `plpgsql_exec_function(func, fcinfo, simple_eval_estate, simple_eval_resowner,
 /// procedure_resowner, atomic)` (pl_exec.c) — the per-call executor.
 ///
@@ -948,18 +1060,129 @@ fn exec_stmt_rollback(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
 /// SPI Proc context) and the result coercion are the value substrate (loud);
 /// the block run + the RC handling is real once they land.
 pub fn plpgsql_exec_function(
-    _func: &PLpgSQL_function,
-    _simple_eval_estate: Option<EState>,
-    _simple_eval_resowner: Option<ResourceOwner>,
-    _procedure_resowner: Option<ResourceOwner>,
-    _atomic: bool,
-) -> Datum {
-    panic!(
-        "seam not wired: plpgsql_exec_function (pl_exec.c) — plpgsql_estate_setup tail \
-         (makeParamList / plpgsql_create_econtext / cast hash) + coerce_function_result_tuple \
-         + SPI_connect/finish (SPI + executor substrate); the control-flow core \
-         (exec_toplevel_block) is ported and runs once they land"
-    );
+    func: &PLpgSQL_function,
+    args: &[FunctionCallArg],
+    simple_eval_estate: Option<EState>,
+    simple_eval_resowner: Option<ResourceOwner>,
+    procedure_resowner: Option<ResourceOwner>,
+    atomic: bool,
+) -> FunctionResult {
+    // Setup the execution state.
+    let mut estate = plpgsql_estate_setup(func, None, simple_eval_estate, simple_eval_resowner);
+    estate.procedure_resowner = procedure_resowner;
+    estate.atomic = atomic;
+
+    // Make local execution copies of all the datums.
+    estate.err_text = Some(mem::sdup("during initialization of execution state"));
+    copy_plpgsql_datums(&mut estate, func);
+
+    // Store the actual call argument values into the appropriate variables.
+    estate.err_text = Some(mem::sdup(
+        "while storing call arguments into local variables",
+    ));
+    for i in 0..(func.fn_nargs as usize) {
+        let n = func.fn_argvarnos[i];
+        let arg = &args[i];
+        match datum_dtype(&estate.datums[n as usize]) {
+            PLpgSQL_datum_type::PLPGSQL_DTYPE_VAR
+            | PLpgSQL_datum_type::PLPGSQL_DTYPE_PROMISE => {
+                let mut var = take_var(&mut estate, n);
+                assign_simple_var(&mut estate, &mut var, arg.value, arg.isnull, false);
+                // The varlena R/W-expanded-object commandeering + flat-array
+                // force-expand of the C arg loop is an expanded-object
+                // optimization; the value substrate (expand_array /
+                // TransferExpandedObject) is not reachable, and the
+                // store-by-value above is value-equivalent for the in-memory
+                // scalar case the control-flow path exercises.
+                let varlena = var.datatype.as_ref().map(|t| t.typlen) == Some(-1);
+                put_var(&mut estate, n, var);
+                if !arg.isnull && varlena {
+                    // R/W or array detoast/expand leg (loud value substrate).
+                    seam::arg_store_expanded_object(arg.value);
+                }
+            }
+            PLpgSQL_datum_type::PLPGSQL_DTYPE_REC => {
+                if !arg.isnull {
+                    seam::exec_move_row_from_datum(&mut estate, n, arg.value);
+                } else {
+                    seam::exec_move_row_null(&mut estate, n);
+                }
+                exec_eval_cleanup(&mut estate);
+            }
+            other => seam::elog_unrecognized_dtype_exec(other),
+        }
+    }
+
+    estate.err_text = Some(mem::sdup("during function entry"));
+
+    // Set the magic variable FOUND to false.
+    exec_set_found(&mut estate, false);
+
+    // (The instrumentation plugin func_beg hook is owned by the plugin
+    // rendezvous substrate; plpgsql_plugin_ptr is null in this build.)
+
+    // Now call the toplevel block of statements.
+    estate.err_text = None;
+    let action = func
+        .action
+        .as_deref()
+        .expect("compiled PL/pgSQL function has an action block");
+    let rc = exec_toplevel_block(&mut estate, action);
+    if rc != PLpgSQL_rc::PLPGSQL_RC_RETURN {
+        estate.err_text = None;
+        seam::ereport_no_return_statement();
+    }
+
+    // We got a return value — process it.
+    estate.err_text = Some(mem::sdup(
+        "while casting return value to function's return type",
+    ));
+
+    let mut result = FunctionResult {
+        value: estate.retval,
+        isnull: estate.retisnull,
+        rettype: estate.rettype,
+    };
+
+    if estate.retisset {
+        // SRF materialize-mode result: the tuplestore + ReturnSetInfo handoff
+        // is the SRF/executor substrate.
+        seam::coerce_set_result(&mut estate);
+        result.value = Datum::null();
+        result.isnull = true;
+    } else if !estate.retisnull {
+        // Cast the result to the function's declared type and copy it out to
+        // the upper executor context. The tuple/coercion path is the value
+        // substrate; the VOID / matching-scalar fast path is real.
+        if estate.retistuple {
+            seam::coerce_function_result_tuple(&mut estate);
+            result.value = estate.retval;
+        } else if estate.fn_rettype == estate.rettype {
+            // No coercion needed for an exact type match (the VOID-return hack
+            // path: rettype==VOIDOID==fn_rettype). Datum is returned by value.
+            result.value = estate.retval;
+        } else {
+            // exec_cast_value to the declared rettype + datumCopy out.
+            let (retval, retisnull, rettype, fn_rettype) =
+                (estate.retval, estate.retisnull, estate.rettype, estate.fn_rettype);
+            let (v, isnull) = seam::exec_cast_value(
+                &mut estate,
+                retval,
+                retisnull,
+                rettype,
+                -1,
+                fn_rettype,
+                -1,
+            );
+            result.value = v;
+            result.isnull = isnull;
+        }
+    }
+
+    // Let the eval econtext be released (exec_eval_cleanup + teardown happens
+    // as the estate drops; the SPI Proc context / shared econtext are owned by
+    // the caller's SPI bracket).
+    result
 }
 
 /// `plpgsql_exec_trigger(func, trigdata)` (pl_exec.c) — the DML-trigger
@@ -1160,7 +1383,7 @@ fn read_var_value(d: &PLpgSQL_datum) -> (Datum, bool, Oid) {
 
 fn discard_temp_var(estate: &mut PLpgSQL_execstate, dno: int32) {
     let mut var = take_var(estate, dno);
-    seam::assign_simple_var(estate, &mut var, Datum::null(), true, false);
+    assign_simple_var(estate, &mut var, Datum::null(), true, false);
     put_var(estate, dno, var);
 }
 
@@ -1202,6 +1425,55 @@ fn var_placeholder() -> PLpgSQL_datum {
 /// common-case default (false) is the path the C takes for ordinary functions.
 fn func_is_procedure(_estate: &PLpgSQL_execstate) -> bool {
     false
+}
+
+/// `assign_simple_var(estate, var, newvalue, isnull, freeable)` (pl_exec.c 8770)
+/// — assign to a "simple" (scalar VAR/PROMISE) variable's value/isnull.
+///
+/// The value store + promise-cancel is real. Two legs touch the value
+/// substrate and route loud: (1) the non-atomic detoast of an external TOAST
+/// pointer (`!estate->atomic && typlen==-1 && VARATT_IS_EXTERNAL_NON_EXPANDED`)
+/// — needs `detoast_external_attr` + `datumCopy`; (2) freeing the old value
+/// (`var->freeval`) — needs `DeleteExpandedObject`/`pfree`. Neither fires for
+/// the common in-atomic, non-freeable, non-toast store (e.g. the FOUND magic
+/// var or a bool/int assignment).
+fn assign_simple_var(
+    estate: &mut PLpgSQL_execstate,
+    var: &mut PLpgSQL_var,
+    newvalue: Datum,
+    isnull: bool,
+    freeable: bool,
+) {
+    debug_assert!(matches!(
+        var.dtype,
+        PLpgSQL_datum_type::PLPGSQL_DTYPE_VAR | PLpgSQL_datum_type::PLPGSQL_DTYPE_PROMISE
+    ));
+
+    let typlen = var.datatype.as_ref().map(|t| t.typlen).unwrap_or(0);
+
+    // Non-atomic contexts must not store bare TOAST pointers (they go stale
+    // after a commit); force a detoast. Expanded objects are fine.
+    if !estate.atomic && !isnull && typlen == -1 && seam::datum_is_external_non_expanded(newvalue)
+    {
+        // detoast in eval_mcontext, copy to function context, free input if
+        // freeable — all in the value/toast substrate.
+        let (detoasted, _now_freeable) = seam::assign_simple_var_detoast(newvalue, freeable);
+        var.value = detoasted;
+        var.isnull = isnull;
+        var.freeval = true;
+        var.promise = PLpgSQL_promise_type::PLPGSQL_PROMISE_NONE;
+        return;
+    }
+
+    // Free the old value if needed (value/toast substrate).
+    if var.freeval {
+        seam::assign_simple_var_free_old(var.value, var.isnull, typlen);
+    }
+
+    var.value = newvalue;
+    var.isnull = isnull;
+    var.freeval = freeable;
+    var.promise = PLpgSQL_promise_type::PLPGSQL_PROMISE_NONE;
 }
 
 // --- SQLSTATE classification (errcodes.h macros, pure bit ops) --------------

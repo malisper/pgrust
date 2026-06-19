@@ -615,3 +615,4 @@ probe-adt-scalar-bool = { path = "../probe-adt-scalar-bool" }
 backend-utils-adt-jsonpath-exec = { path = "../backend-utils-adt-jsonpath-exec" }
 backend-pl-plpgsql-comp = { path = "../backend-pl-plpgsql-comp" }
 backend-pl-plpgsql-exec = { path = "../backend-pl-plpgsql-exec" }
+backend-pl-plpgsql-handler = { path = "../backend-pl-plpgsql-handler" }

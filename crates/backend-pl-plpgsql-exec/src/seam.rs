@@ -39,20 +39,36 @@ pub fn elog_unrecognized_dtype_exec(dtype: PLpgSQL_datum_type) -> ! {
     panic!("unrecognized dtype: {dtype:?}");
 }
 
-/// `assign_simple_var(estate, var, newvalue, isnull, freeable)` (pl_exec.c
-/// 8770): assign to a "simple" variable's value/isnull, freeing the old value
-/// and updating any promise / shared-datum bookkeeping. Touches the runtime
-/// Datum store + `exec_eval_using_params`/expanded-datum transfer substrate.
-pub fn assign_simple_var(
-    _estate: &mut PLpgSQL_execstate,
-    _var: &mut PLpgSQL_var,
-    _newvalue: Datum,
-    _isnull: bool,
-    _freeable: bool,
-) {
+/// `VARATT_IS_EXTERNAL_NON_EXPANDED(DatumGetPointer(value))` — is the Datum a
+/// bare on-disk TOAST pointer (not an expanded object)? The varlena-header
+/// inspection is the toast substrate; until it lands this reports `false` (the
+/// common in-memory value path), so `assign_simple_var` takes its plain store
+/// branch. A bare TOAST pointer reaching a non-atomic store would need the
+/// detoast leg below.
+#[inline]
+pub fn datum_is_external_non_expanded(_value: Datum) -> bool {
+    // The varlena TOAST-pointer probe (access/detoast.h) is owned elsewhere.
+    // No bare TOAST pointer reaches the control-flow-only path; report false.
+    false
+}
+
+/// The non-atomic detoast leg of `assign_simple_var` (pl_exec.c 8786): detoast
+/// an external varlena in the eval mcontext, `datumCopy` it into the function
+/// context, free the input if freeable. Returns `(detoasted, freeable=true)`.
+pub fn assign_simple_var_detoast(_newvalue: Datum, _freeable: bool) -> (Datum, bool) {
     panic!(
-        "seam not wired: assign_simple_var (pl_exec.c) — runtime Datum store + \
-         datumTransfer / expanded-datum bookkeeping (value substrate)"
+        "seam not wired: assign_simple_var non-atomic detoast (pl_exec.c) — \
+         detoast_external_attr + datumCopy (toast/value substrate)"
+    );
+}
+
+/// The free-old-value leg of `assign_simple_var` (pl_exec.c 8810): release the
+/// previous value, either `DeleteExpandedObject` for a R/W expanded object or
+/// `pfree` for a flat freeable datum.
+pub fn assign_simple_var_free_old(_oldvalue: Datum, _oldisnull: bool, _typlen: i16) {
+    panic!(
+        "seam not wired: assign_simple_var free old value (pl_exec.c) — \
+         DeleteExpandedObject / pfree (expanded-object + palloc substrate)"
     );
 }
 
@@ -156,6 +172,57 @@ pub fn plpgsql_fulfill_promise(_estate: &mut PLpgSQL_execstate, _var: &mut PLpgS
     panic!(
         "seam not wired: plpgsql_fulfill_promise (pl_exec.c) — promise value \
          computation (trigger/SRF context substrate) + assign_simple_var"
+    );
+}
+
+/// The varlena R/W-expanded / flat-array commandeering leg of the
+/// `plpgsql_exec_function` argument-store loop (pl_exec.c): for a non-null
+/// varlena arg, take ownership of a R/W expanded object or force a flat array
+/// into expanded form. `TransferExpandedObject` / `expand_array` are the
+/// expanded-object value substrate.
+pub fn arg_store_expanded_object(_value: Datum) {
+    panic!(
+        "seam not wired: plpgsql_exec_function varlena arg commandeer (pl_exec.c) — \
+         TransferExpandedObject / expand_array (expanded-object value substrate)"
+    );
+}
+
+/// `exec_move_row_from_datum(estate, rec, value)` (pl_exec.c): assign a
+/// composite datum into a REC/ROW target. Record deconstruction substrate.
+pub fn exec_move_row_from_datum(
+    _estate: &mut PLpgSQL_execstate,
+    _target_dno: int32,
+    _value: Datum,
+) {
+    panic!(
+        "seam not wired: exec_move_row_from_datum (pl_exec.c) — composite/expanded-record \
+         deconstruction + assign (value substrate)"
+    );
+}
+
+/// `ereport(ERROR, ERRCODE_S_R_E_FUNCTION_EXECUTED_NO_RETURN_STATEMENT)`
+/// (pl_exec.c) — the toplevel block fell through without RETURN.
+pub fn ereport_no_return_statement() -> ! {
+    panic!("control reached end of function without RETURN (ERRCODE_S_R_E_FUNCTION_EXECUTED_NO_RETURN_STATEMENT)");
+}
+
+/// The set-returning-function result handoff of `plpgsql_exec_function`
+/// (pl_exec.c): validate the `ReturnSetInfo`, set materialize mode, copy the
+/// tuplestore + descriptor out. SRF / tuplestore / executor substrate.
+pub fn coerce_set_result(_estate: &mut PLpgSQL_execstate) {
+    panic!(
+        "seam not wired: plpgsql_exec_function SETOF result (pl_exec.c) — \
+         ReturnSetInfo materialize-mode + tuplestore handoff (SRF/executor substrate)"
+    );
+}
+
+/// The composite-result coercion leg of `plpgsql_exec_function` (pl_exec.c):
+/// coerce a tuple result to the declared rowtype, handling dropped columns, and
+/// copy it out to the upper executor context. Tupdesc/heaptuple value substrate.
+pub fn coerce_function_result_tuple(_estate: &mut PLpgSQL_execstate) {
+    panic!(
+        "seam not wired: plpgsql_exec_function tuple result coercion (pl_exec.c) — \
+         coerce_function_result_tuple / CreateTupleDescCopy + datumCopy (tupdesc/value substrate)"
     );
 }
 
