@@ -11,3 +11,4 @@ path = "src/lib.rs"
 [dependencies]
 port-crc32c-seams = { path = "../port-crc32c-seams" }
 port-pg-crc32c-seams = { path = "../port-pg-crc32c-seams" }
+backend-utils-hash-small-seams = { path = "../backend-utils-hash-small-seams" }

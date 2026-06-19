@@ -10,6 +10,7 @@
 //! every consumer in this tree runs little-endian and the seam signature is
 //! the little-endian `u32`. The table carries the little-endian values only.
 
+mod legacy;
 mod table;
 
 use table::PG_CRC32C_TABLE;
@@ -71,6 +72,9 @@ pub fn pg_comp_crc32c_sb8(mut crc: u32, data: &[u8]) -> u32 {
 pub fn init_seams() {
     port_crc32c_seams::comp_crc32c::set(pg_comp_crc32c_sb8);
     port_pg_crc32c_seams::pg_comp_crc32c::set(pg_comp_crc32c_sb8);
+    // Legacy CRC-32 (`pg_crc.c`, combined-into this unit): full INIT/COMP/FIN
+    // over one lexeme's bytes, used by `gtsvector_compress` as the array key.
+    backend_utils_hash_small_seams::legacy_crc32_lexeme::set(legacy::legacy_crc32_lexeme);
 }
 
 #[cfg(test)]
@@ -91,6 +95,16 @@ mod tests {
     #[test]
     fn empty() {
         assert_eq!(pg_comp_crc32c_sb8(0xFFFF_FFFF, b""), 0xFFFF_FFFF);
+    }
+
+    /// `init_seams()` installs the legacy CRC-32 seam, and a `::call` through
+    /// the real seam (the path `gtsvector_compress` reaches) returns the
+    /// standard CRC-32 check vector — no "seam not installed" panic.
+    #[test]
+    fn legacy_seam_installed_and_returns_check_vector() {
+        init_seams();
+        let v = backend_utils_hash_small_seams::legacy_crc32_lexeme::call(b"123456789");
+        assert_eq!(v, 0xCBF4_3926);
     }
 
     /// Splitting the input across two COMP calls matches a single call,

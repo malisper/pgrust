@@ -23338,6 +23338,7 @@ version = "0.0.0"
 name = "port-crc32c"
 version = "0.0.0"
 dependencies = [
+ "backend-utils-hash-small-seams",
  "port-crc32c-seams",
  "port-pg-crc32c-seams",
 ]
