@@ -179,6 +179,15 @@ impl OwnedTupleDesc {
         for (i, a) in self.attrs.iter().enumerate() {
             td.compact_attrs[i].attnullability = a.attnullability;
         }
+        // `CreateTupleDesc` leaves `td.constr = NULL`; carry the owned
+        // `rd_att->constr` (defval/check/missing + accounting) into the projected
+        // descriptor so consumers (`build_column_default` via
+        // `TupleDescGetDefault`, ExecConstraints, the missing-attr deform) see the
+        // same `rd_att->constr` the C relcache stamps. This is the owned->borrowed
+        // half of the C `CreateTupleDescCopyConstr`.
+        if let Some(oc) = self.constr.as_ref() {
+            td.constr = Some(oc.project_in(mcx)?);
+        }
         td.tdtypeid = self.tdtypeid;
         td.tdtypmod = self.tdtypmod;
         td.tdrefcount = 1;
@@ -206,6 +215,7 @@ impl OwnedTupleDesc {
                 attbyval: a.attbyval,
                 attalign: a.attalign,
                 attnotnull: a.attnotnull,
+                atthasdef: a.atthasdef,
                 attidentity: a.attidentity,
                 attgenerated: a.attgenerated,
                 attisdropped: a.attisdropped,
@@ -252,6 +262,66 @@ pub struct OwnedTupleConstr {
     pub has_generated_stored: bool,
     /// `bool has_generated_virtual`.
     pub has_generated_virtual: bool,
+}
+
+impl OwnedTupleConstr {
+    /// Project the owned `rd_att->constr` into the borrowed cross-unit
+    /// [`types_tuple::heaptuple::TupleConstr`] allocated in `mcx`. The
+    /// owned->borrowed half of the C `CreateTupleDescCopyConstr`: each
+    /// `OwnedAttrDefault.adbin` cstring and `OwnedConstrCheck.ccbin`/`ccname`
+    /// becomes a `PgString`; each `OwnedAttrMissing.am_value` image is
+    /// re-materialized into a fresh `Datum<'mcx>`; the `num_*`/`has_*` accounting
+    /// is carried verbatim.
+    pub fn project_in<'mcx>(
+        &self,
+        mcx: mcx::Mcx<'mcx>,
+    ) -> PgResult<mcx::PgBox<'mcx, types_tuple::heaptuple::TupleConstr<'mcx>>> {
+        use types_tuple::backend_access_common_heaptuple::Datum;
+        use types_tuple::heaptuple::{AttrDefault, AttrMissing, ConstrCheck};
+
+        let mut defval = mcx::vec_with_capacity_in(mcx, self.defval.len())?;
+        for d in &self.defval {
+            defval.push(AttrDefault {
+                adnum: d.adnum,
+                adbin: Some(mcx::PgString::from_str_in(&d.adbin, mcx)?),
+            });
+        }
+
+        let mut check = mcx::vec_with_capacity_in(mcx, self.check.len())?;
+        for c in &self.check {
+            check.push(ConstrCheck {
+                ccname: Some(mcx::PgString::from_str_in(&c.ccname, mcx)?),
+                ccbin: Some(mcx::PgString::from_str_in(&c.ccbin, mcx)?),
+                ccenforced: c.ccenforced,
+                ccvalid: c.ccvalid,
+                ccnoinherit: c.ccnoinherit,
+            });
+        }
+
+        let mut missing = mcx::vec_with_capacity_in(mcx, self.missing.len())?;
+        for m in &self.missing {
+            let am_value = match (m.am_present, m.am_value.as_ref()) {
+                (true, Some(img)) => img.to_datum(mcx)?,
+                _ => Datum::null(),
+            };
+            missing.push(AttrMissing {
+                am_present: m.am_present,
+                am_value,
+            });
+        }
+
+        let constr = types_tuple::heaptuple::TupleConstr {
+            num_defval: defval.len() as u16,
+            num_check: check.len() as u16,
+            defval,
+            check,
+            missing,
+            has_not_null: self.has_not_null,
+            has_generated_stored: self.has_generated_stored,
+            has_generated_virtual: self.has_generated_virtual,
+        };
+        mcx::alloc_in(mcx, constr)
+    }
 }
 
 /// `struct AttrDefault` (`access/tupdesc.h`) — one column default.
@@ -322,6 +392,10 @@ pub struct OwnedAttr {
     pub attbyval: bool,
     pub attalign: i8,
     pub attnotnull: bool,
+    /// `bool atthasdef` — this column has a default expression in
+    /// `pg_attrdef` (and thus an entry in `rd_att->constr->defval`). Read by
+    /// `build_column_default` to decide whether to fetch the column default.
+    pub atthasdef: bool,
     /// `char attidentity` — one of the `ATTRIBUTE_IDENTITY_*` constants, or
     /// `'\0'`. Copied from the source descriptor by `RelationBuildLocalRelation`.
     pub attidentity: i8,

@@ -41,6 +41,8 @@ fn attr(
         attbyval,
         attalign,
         attnotnull,
+        // Nailed bootstrap catalogs have no column defaults.
+        atthasdef: false,
         attidentity,
         attgenerated,
         attisdropped,
