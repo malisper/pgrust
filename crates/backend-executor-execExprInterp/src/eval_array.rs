@@ -175,13 +175,21 @@ pub fn ExecEvalArrayCoerce<'mcx>(
 
     // NULL array -> NULL result.
     // if (*op->resnull) return;
-    let resnull = state.result_cells.get(resnull_id).isnull;
+    //
+    // `op->resvalue`/`op->resnull` are pointers that, in C, alias the step's
+    // result variable — which is `&state->resvalue`/`&state->resnull` (the
+    // STATE_RESULT_CELL sentinel) when the array sub-expression wrote into the
+    // ExprState's own result slot. That is exactly what happens for an
+    // ArrayCoerce arg compiled with target `resv` (e.g. the array operand of a
+    // ScalarArrayOpExpr): the preceding EEOP_CONST/EEOP_ARRAYEXPR step writes
+    // the source array into `state.resvalue`. Reading the raw `result_cells`
+    // slot would miss that aliasing (slot 0 is the sentinel, never a populated
+    // arena cell — it would read a zero `ByVal` default), so resolve both the
+    // null flag and the source array through the sentinel-aware accessor.
+    let (arraydatum, resnull) = crate::interp_loop::read_cell(state, resvalue_id);
     if resnull {
         return Ok(());
     }
-
-    // arraydatum = *op->resvalue;
-    let arraydatum = state.result_cells.get(resvalue_id).value;
 
     // The per-query memory context the coerced result varlena is allocated in.
     let mcx = estate.ecxt(econtext).ecxt_per_query_memory;

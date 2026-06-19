@@ -1185,8 +1185,13 @@ pub fn ExecEvalConstraintNotNull<'mcx>(
         _ => unreachable!("ExecEvalConstraintNotNull: step is not an EEOP_DOMAIN_NOTNULL"),
     };
 
+    // C reads `*op->resnull` — the step's result variable, which aliases
+    // `state->resnull` (the STATE_RESULT_CELL sentinel) when the domain value was
+    // evaluated into the ExprState's own result slot. Resolve through the
+    // sentinel-aware accessor so a top-level CoerceToDomain (whose arg targets
+    // STATE_RESULT_CELL) is not read from a never-populated arena slot 0.
     let (resvalue_id, _resnull_id) = res_cells(state, op);
-    let resnull = state.result_cells.get(resvalue_id).isnull;
+    let (_value, resnull) = crate::interp_loop::read_cell(state, resvalue_id);
 
     if resnull {
         return Err(PgError::error(format!(
