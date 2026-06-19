@@ -213,10 +213,7 @@ pub fn ExecInitMaterial<'mcx>(
 ) -> PgResult<PgBox<'mcx, MaterialState<'mcx>>> {
     let mcx = estate.es_query_cxt;
 
-    let material: &'mcx Material<'mcx> = match node {
-        types_nodes::nodes::Node::Material(m) => m,
-        other => panic!("castNode(Material, node) failed: {other:?}"),
-    };
+    let material: &'mcx Material<'mcx> = node.expect_material();
 
     // create state structure
     //
