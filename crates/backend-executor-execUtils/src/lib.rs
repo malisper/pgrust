@@ -855,22 +855,25 @@ pub fn ExecAssignScanProjectionInfo<'mcx>(
 /// so its callers pass the varno explicitly via
 /// [`ExecAssignScanProjectionInfoWithVarno`] instead.
 fn scan_scanrelid(ps: &PlanStateData<'_>) -> u32 {
-    use types_nodes::nodes::Node;
-    match ps.plan {
-        Some(Node::SeqScan(s)) => s.scan.scanrelid,
-        Some(Node::TidRangeScan(s)) => s.scan.scanrelid,
-        Some(Node::IndexScan(s)) => s.scan.scanrelid,
-        Some(Node::IndexOnlyScan(s)) => s.scan.scanrelid,
-        Some(Node::FunctionScan(s)) => s.scan.scanrelid,
-        Some(Node::TableFuncScan(s)) => s.scan.scanrelid,
-        Some(Node::ValuesScan(s)) => s.scan.scanrelid,
-        Some(Node::CteScan(s)) => s.scan.scanrelid,
-        Some(Node::NamedTuplestoreScan(s)) => s.scan.scanrelid,
-        Some(Node::SubqueryScan(s)) => s.scan.scanrelid,
-        Some(Node::ForeignScan(s)) => s.scan.scanrelid,
-        Some(Node::CustomScan(s)) => s.scan.scanrelid,
-        Some(other) => panic!("scan_scanrelid: plan is not a Scan node: {other:?}"),
-        None => panic!("scan_scanrelid: ScanState has no plan"),
+    use types_nodes::nodes::ntag;
+    let node = ps
+        .plan
+        .as_ref()
+        .unwrap_or_else(|| panic!("scan_scanrelid: ScanState has no plan"));
+    match node.node_tag() {
+        ntag::T_SeqScan => node.expect_seqscan().scan.scanrelid,
+        ntag::T_TidRangeScan => node.expect_tidrangescan().scan.scanrelid,
+        ntag::T_IndexScan => node.expect_indexscan().scan.scanrelid,
+        ntag::T_IndexOnlyScan => node.expect_indexonlyscan().scan.scanrelid,
+        ntag::T_FunctionScan => node.expect_functionscan().scan.scanrelid,
+        ntag::T_TableFuncScan => node.expect_tablefuncscan().scan.scanrelid,
+        ntag::T_ValuesScan => node.expect_valuesscan().scan.scanrelid,
+        ntag::T_CteScan => node.expect_ctescan().scan.scanrelid,
+        ntag::T_NamedTuplestoreScan => node.expect_namedtuplestorescan().scan.scanrelid,
+        ntag::T_SubqueryScan => node.expect_subqueryscan().scan.scanrelid,
+        ntag::T_ForeignScan => node.expect_foreignscan().scan.scanrelid,
+        ntag::T_CustomScan => node.expect_customscan().scan.scanrelid,
+        _ => panic!("scan_scanrelid: plan is not a Scan node: {:?}", node.node_tag()),
     }
 }
 
