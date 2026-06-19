@@ -400,6 +400,26 @@ impl<'a> JsonPathLexer<'a> {
             }
         }
 
+        // flex applies global longest-match across ALL rules, including the
+        // catch-all `{other}+` (which becomes an xnq string). When `{other}+`
+        // runs strictly longer than the best numeric/junk/fail candidate, it
+        // wins (ties go to the earlier numeric rule). Defer to the `{other}+`
+        // rule in scan_initial by declining here. This is what makes e.g.
+        // `0755` (decint_junk=`07` len 2 < `{other}+`=`0755` len 4) and
+        // `0b0x` (bininteger has no junk rule; `{other}+`=`0b0x` len 4 wins)
+        // lex as strings -> grammar "syntax error at end" rather than a
+        // scanner "trailing junk" error.
+        if matches!(best_kind, Kind::None) {
+            return Ok(None);
+        }
+        let mut other_len = 0usize;
+        while crate::is_other(*s.get(p + other_len).unwrap_or(&0)) && p + other_len < s.len() {
+            other_len += 1;
+        }
+        if other_len > best_len {
+            return Ok(None);
+        }
+
         match best_kind {
             Kind::None => Ok(None),
             Kind::Numeric => {
@@ -418,15 +438,21 @@ impl<'a> JsonPathLexer<'a> {
             }
             Kind::RealFail => {
                 // {realfail} -> yyerror "invalid numeric literal"; yyterminate.
-                // C reports at yytext (the literal start), so error before
-                // advancing the cursor.
-                self.yyerror(escontext, "invalid numeric literal")?;
+                // yytext is the matched literal (`s[p..p+best_len]`).
+                self.yyerror_yytext(escontext, p, p + best_len, "invalid numeric literal")?;
                 self.pos = p + best_len;
                 Ok(Some(Step::Terminate))
             }
             Kind::Junk => {
                 // {*_junk} -> yyerror "trailing junk after numeric literal".
-                self.yyerror(escontext, "trailing junk after numeric literal")?;
+                // yytext is the matched junk lexeme (`s[p..p+best_len]`) =
+                // valid numeric + exactly one `{other}` char.
+                self.yyerror_yytext(
+                    escontext,
+                    p,
+                    p + best_len,
+                    "trailing junk after numeric literal",
+                )?;
                 self.pos = p + best_len;
                 Ok(Some(Step::Terminate))
             }

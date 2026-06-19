@@ -1330,11 +1330,12 @@ pub fn parsejsonpath(
         match parsed {
             Some(r) if !aborted && consumed_all => Ok::<_, PgError>(Some(r)),
             _ => {
-                // C: jsonpath_yyparse() != 0 -> jsonpath_yyerror(NULL, escontext,
-                // scanner, "invalid input"). If a soft error is already set
-                // (e.g. from a makeItem* action), yyerror leaves it intact.
+                // C: on a syntax error bison's generated parser calls
+                // jsonpath_yyerror(result, escontext, scanner, "syntax error")
+                // (jsonpath_gram.c). If a soft error is already set (e.g. from a
+                // makeItem* action), yyerror leaves it intact.
                 if !escontext_ref.as_ref().is_some_and(|c| c.error_occurred()) {
-                    jsonpath_yyerror(escontext_ref.as_deref_mut(), str, str.len(), "invalid input")?;
+                    jsonpath_yyerror(escontext_ref.as_deref_mut(), str, str.len(), "syntax error")?;
                 }
                 Ok(None)
             }

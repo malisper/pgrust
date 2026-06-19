@@ -358,6 +358,20 @@ impl<'a> JsonPathLexer<'a> {
         jsonpath_yyerror(escontext.as_deref_mut(), self.input, self.pos, message)
     }
 
+    /// Like `yyerror`, but with an explicit `yytext` span (`[start, end)` into
+    /// `self.input`) — the text of the flex rule that matched. C's
+    /// `jsonpath_yyerror` formats the "at or near \"%s\"" clause from `yytext`,
+    /// i.e. the matched lexeme, not the whole remaining input.
+    fn yyerror_yytext(
+        &self,
+        escontext: &mut Option<&mut SoftErrorContext>,
+        start: usize,
+        end: usize,
+        message: &str,
+    ) -> PgResult<()> {
+        jsonpath_yyerror_yytext(escontext.as_deref_mut(), &self.input[start..end], message)
+    }
+
     /// `addUnicodeChar(ch, escontext)`.
     fn add_unicode_char(
         &mut self,
@@ -567,7 +581,26 @@ pub fn jsonpath_yyerror(
         }
     }
 
-    if pos >= input.len() {
+    let yytext: &[u8] = if pos >= input.len() { &[] } else { &input[pos..] };
+    jsonpath_yyerror_yytext(escontext, yytext, message)
+}
+
+/// As `jsonpath_yyerror`, but the caller supplies `yytext` (the matched lexeme)
+/// directly. C's `jsonpath_yyerror` keys the "at end" vs "at or near" choice on
+/// whether `yytext` is empty (`*yytext == YY_END_OF_BUFFER_CHAR`) and formats
+/// the near-text from `yytext` itself.
+pub fn jsonpath_yyerror_yytext(
+    escontext: Option<&mut SoftErrorContext>,
+    yytext: &[u8],
+    message: &str,
+) -> PgResult<()> {
+    if let Some(ctx) = escontext.as_ref() {
+        if ctx.error_occurred() {
+            return Ok(());
+        }
+    }
+
+    if yytext.is_empty() {
         ereturn(
             escontext,
             (),
@@ -575,7 +608,7 @@ pub fn jsonpath_yyerror(
                 .with_sqlstate(ERRCODE_SYNTAX_ERROR),
         )
     } else {
-        let near = alloc::string::String::from_utf8_lossy(&input[pos..]).into_owned();
+        let near = alloc::string::String::from_utf8_lossy(yytext).into_owned();
         ereturn(
             escontext,
             (),
