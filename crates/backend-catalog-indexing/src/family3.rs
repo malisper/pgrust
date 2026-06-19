@@ -758,6 +758,103 @@ fn catalog_tuple_insert_pg_policy<'mcx>(
     Ok(policy_id)
 }
 
+/// `construct_array_builtin(text_datums, n, TEXTOID)` — a 1-D `text[]` array
+/// varlena (the `evttags` column), built directly from the UTF-8 strings.
+fn build_text_array<'mcx>(mcx: Mcx<'mcx>, strs: &[std::string::String]) -> PgResult<Datum<'mcx>> {
+    let refs: std::vec::Vec<&str> = strs.iter().map(|s| s.as_str()).collect();
+    let buf = backend_utils_adt_arrayfuncs::construct::build_text_array(mcx, &refs)?;
+    Ok(Datum::ByRef(buf))
+}
+
+/// `CreateEventTrigger`'s pg_event_trigger INSERT (commands/event_trigger.c
+/// `insert_event_trigger_tuple`): allocate the OID, form the 7-column row,
+/// `CatalogTupleInsert`, return the OID.
+fn catalog_tuple_insert_pg_event_trigger<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    row: &cat::pg_event_trigger::PgEventTriggerInsertRow,
+) -> PgResult<types_core::Oid> {
+    use cat::pg_event_trigger as pe;
+
+    // trigoid = GetNewOidWithIndex(tgrel, EventTriggerOidIndexId,
+    //                              Anum_pg_event_trigger_oid);
+    let trigoid = GetNewOidWithIndex(rel, pe::EventTriggerOidIndexId, pe::Anum_pg_event_trigger_oid)?;
+
+    let mut values: mcx::PgVec<'mcx, Datum<'mcx>> =
+        mcx::vec_with_capacity_in(mcx, pe::Natts_pg_event_trigger)?;
+    let mut isnull: mcx::PgVec<'mcx, bool> =
+        mcx::vec_with_capacity_in(mcx, pe::Natts_pg_event_trigger)?;
+    for _ in 0..pe::Natts_pg_event_trigger {
+        values.push(Datum::null());
+        isnull.push(false);
+    }
+
+    // values[Anum_pg_event_trigger_oid - 1]       = ObjectIdGetDatum(trigoid);
+    // namestrcpy(&evtnamedata, trigname);   values[evtname - 1] = NameGetDatum(...);
+    // namestrcpy(&evteventdata, eventname); values[evtevent - 1] = NameGetDatum(...);
+    // values[evtowner - 1]   = ObjectIdGetDatum(evtOwner);
+    // values[evtfoid - 1]    = ObjectIdGetDatum(funcoid);
+    // values[evtenabled - 1] = CharGetDatum(TRIGGER_FIRES_ON_ORIGIN);
+    values[pe::Anum_pg_event_trigger_oid as usize - 1] = Datum::from_oid(trigoid);
+    values[pe::Anum_pg_event_trigger_evtname as usize - 1] = namein_datum(mcx, &row.evtname)?;
+    values[pe::Anum_pg_event_trigger_evtevent as usize - 1] = namein_datum(mcx, &row.evtevent)?;
+    values[pe::Anum_pg_event_trigger_evtowner as usize - 1] = Datum::from_oid(row.evtowner);
+    values[pe::Anum_pg_event_trigger_evtfoid as usize - 1] = Datum::from_oid(row.evtfoid);
+    values[pe::Anum_pg_event_trigger_evtenabled as usize - 1] = Datum::from_char(row.evtenabled);
+
+    // if (taglist == NIL) nulls[evttags - 1] = true;
+    // else values[evttags - 1] = filter_list_to_array(taglist);
+    match &row.evttags {
+        Some(tags) => {
+            values[pe::Anum_pg_event_trigger_evttags as usize - 1] = build_text_array(mcx, tags)?;
+        }
+        None => isnull[pe::Anum_pg_event_trigger_evttags as usize - 1] = true,
+    }
+
+    // tuple = heap_form_tuple(tgrel->rd_att, values, nulls);
+    // CatalogTupleInsert(tgrel, tuple);
+    let tupdesc = rel.rd_att_clone_in(mcx)?;
+    let mut tup = heap_form_tuple(mcx, &tupdesc, &values, &isnull)?;
+    CatalogTupleInsert(mcx, rel, &mut tup)?;
+
+    Ok(trigoid)
+}
+
+/// `AlterEventTrigger`'s pg_event_trigger UPDATE (commands/event_trigger.c):
+/// `evtForm->evtenabled = tgenabled;` over the syscache-copied tuple, then
+/// `CatalogTupleUpdate(tgrel, &tup->t_self, tup)`. Replaces only the
+/// `evtenabled` column, preserving every other column of the held tuple.
+fn catalog_tuple_update_pg_event_trigger_enabled<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    evt_tuple: &types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+    tgenabled: i8,
+) -> PgResult<()> {
+    use cat::pg_event_trigger as pe;
+
+    let mut values: mcx::PgVec<'mcx, Datum<'mcx>> =
+        mcx::vec_with_capacity_in(mcx, pe::Natts_pg_event_trigger)?;
+    let mut isnull: mcx::PgVec<'mcx, bool> =
+        mcx::vec_with_capacity_in(mcx, pe::Natts_pg_event_trigger)?;
+    let mut replaces: mcx::PgVec<'mcx, bool> =
+        mcx::vec_with_capacity_in(mcx, pe::Natts_pg_event_trigger)?;
+    for _ in 0..pe::Natts_pg_event_trigger {
+        values.push(Datum::null());
+        isnull.push(false);
+        replaces.push(false);
+    }
+
+    let i = pe::Anum_pg_event_trigger_evtenabled as usize - 1;
+    replaces[i] = true;
+    values[i] = Datum::from_char(tgenabled);
+
+    let tupdesc = rel.rd_att_clone_in(mcx)?;
+    let mut new_tuple = backend_access_common_heaptuple::heap_modify_tuple(
+        mcx, evt_tuple, &tupdesc, &values, &isnull, &replaces,
+    )?;
+    crate::keystone::CatalogTupleUpdate(mcx, rel, evt_tuple.tuple.t_self, &mut new_tuple)
+}
+
 /// `CStringGetByteaDatum` over a raw payload: a `bytea` varlena image (4-byte
 /// header `SET_VARSIZE(len + VARHDRSZ)` then the verbatim bytes). C builds the
 /// `tgargs` bytea as `arg1\0arg2\0...`; this wraps that payload unchanged.
@@ -944,6 +1041,12 @@ pub fn install() {
     );
     backend_catalog_indexing_seams::catalog_tuple_insert_pg_trigger::set(
         catalog_tuple_insert_pg_trigger,
+    );
+    backend_catalog_indexing_seams::catalog_tuple_insert_pg_event_trigger::set(
+        catalog_tuple_insert_pg_event_trigger,
+    );
+    backend_catalog_indexing_seams::catalog_tuple_update_pg_event_trigger_enabled::set(
+        catalog_tuple_update_pg_event_trigger_enabled,
     );
     backend_catalog_indexing_seams::catalog_tuple_update_pg_policy::set(
         catalog_tuple_update_pg_policy,

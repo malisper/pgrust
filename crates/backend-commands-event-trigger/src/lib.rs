@@ -32,23 +32,43 @@
 
 use core::cell::RefCell;
 
-use mcx::MemoryContext;
+use mcx::{Mcx, MemoryContext};
 use types_catalog::catalog::{
     AUTH_ID_RELATION_ID, AUTH_MEM_RELATION_ID, DATABASE_RELATION_ID, EVENT_TRIGGER_RELATION_ID,
-    PARAMETER_ACL_RELATION_ID, TABLE_SPACE_RELATION_ID,
+    PARAMETER_ACL_RELATION_ID, PROCEDURE_RELATION_ID, TABLE_SPACE_RELATION_ID,
 };
 use types_catalog::catalog_dependency::ObjectAddress;
+use types_catalog::pg_event_trigger::PgEventTriggerInsertRow;
 use types_core::primitive::{InvalidOid, Oid};
-use types_error::PgResult;
+use types_error::{
+    PgError, PgResult, ERROR, ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED,
+    ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_SYNTAX_ERROR,
+    ERRCODE_UNDEFINED_OBJECT,
+};
 use types_evtcache::EventTriggerEvent;
 use types_nodes::nodes::Node;
-use types_nodes::parsenodes::ObjectType;
+use types_nodes::parsenodes::{ObjectType, OBJECT_EVENT_TRIGGER};
 
 use backend_commands_event_trigger_fire_seams as fire_seams;
 use backend_commands_extension_seams as extension_seams;
 use backend_utils_cache_evtcache_seams as evtcache_seams;
 use backend_utils_init_small_seams as init_small_seams;
 use backend_utils_misc_guc_tables::vars;
+
+use backend_catalog_aclchk_seams as aclchk_seams;
+use backend_catalog_indexing_seams as indexing_seams;
+use backend_catalog_objectaccess_seams as objectaccess_seams;
+use backend_utils_cache_syscache_seams as syscache_seams;
+use backend_utils_error::ereport;
+
+/// `TRIGGER_FIRES_ON_ORIGIN` `'O'` (utils/rel.h) — the on-disk `evtenabled`
+/// firing-configuration byte set at creation.
+const TRIGGER_FIRES_ON_ORIGIN: i8 = b'O' as i8;
+/// `TRIGGER_DISABLED` `'D'` (utils/rel.h).
+const TRIGGER_DISABLED: i8 = b'D' as i8;
+/// `EVENT_TRIGGEROID` (pg_type) — the `event_trigger` pseudo-type a handler
+/// function must return.
+const EVENT_TRIGGEROID: Oid = 3838;
 
 // ===========================================================================
 // Backend-local query state (file-static in C).
@@ -640,6 +660,381 @@ pub fn event_trigger_supports_object(object: &ObjectAddress) -> bool {
 }
 
 // ===========================================================================
+// CreateEventTrigger / AlterEventTrigger (event_trigger.c) — catalog-write side.
+// ===========================================================================
+
+/// Outward-seam adapter for `CreateEventTrigger` (utility.c:894,
+/// `T_CreateEventTrigStmt`): downcast the arena [`Node`] and run the ported
+/// body. The C result `Oid` is discarded by the standard ProcessUtility arm
+/// ("no event triggers on event triggers"), so the seam returns `()`.
+fn create_event_trigger_seam<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<()> {
+    let s = stmt.as_createeventtrigstmt().ok_or_else(|| {
+        PgError::error("create_event_trigger_seam: statement is not a CreateEventTrigStmt")
+    })?;
+    CreateEventTrigger(mcx, s)?;
+    Ok(())
+}
+
+/// Outward-seam adapter for `AlterEventTrigger` (utility.c:899,
+/// `T_AlterEventTrigStmt`).
+fn alter_event_trigger_seam<'mcx>(stmt: &Node<'mcx>) -> PgResult<()> {
+    let ctx = MemoryContext::new("AlterEventTrigger");
+    let mcx = ctx.mcx();
+    let s = stmt.as_altereventtrigstmt().ok_or_else(|| {
+        PgError::error("alter_event_trigger_seam: statement is not an AlterEventTrigStmt")
+    })?;
+    let trigname = s.trigname.as_ref().map(|n| n.as_str()).unwrap_or("");
+    AlterEventTrigger(mcx, trigname, s.tgenabled)?;
+    Ok(())
+}
+
+/// `CreateEventTrigger` (event_trigger.c:123-210) — create an event trigger.
+pub fn CreateEventTrigger<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &types_nodes::ddlnodes::CreateEventTrigStmt<'mcx>,
+) -> PgResult<Oid> {
+    let evtowner: Oid = backend_utils_init_miscinit::GetUserId();
+
+    let trigname = stmt.trigname.as_ref().map(|n| n.as_str()).unwrap_or("");
+    let eventname = stmt.eventname.as_ref().map(|n| n.as_str()).unwrap_or("");
+
+    /*
+     * It would be nice to allow database owners or even regular users to do
+     * this, but there are obvious privilege escalation risks which would have
+     * to somehow be plugged first.
+     */
+    if !backend_utils_init_miscinit_seams::superuser::call(mcx)? {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
+            .errmsg(format!(
+                "permission denied to create event trigger \"{trigname}\""
+            ))
+            .errhint("Must be superuser to create an event trigger.")
+            .into_error());
+    }
+
+    /* Validate event name. */
+    if eventname != "ddl_command_start"
+        && eventname != "ddl_command_end"
+        && eventname != "sql_drop"
+        && eventname != "login"
+        && eventname != "table_rewrite"
+    {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg(format!("unrecognized event name \"{eventname}\""))
+            .into_error());
+    }
+
+    /* Validate filter conditions. */
+    let mut tags: Option<Vec<String>> = None;
+    for lc in stmt.whenclause.iter() {
+        let def = lc.as_defelem().ok_or_else(|| {
+            PgError::error("CreateEventTrigger: whenclause element is not a DefElem")
+        })?;
+        let defname = def.defname.as_ref().map(|n| n.as_str()).unwrap_or("");
+        if defname == "tag" {
+            if tags.is_some() {
+                error_duplicate_filter_variable(defname)?;
+            }
+            tags = Some(def_string_list(def)?);
+        } else {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_SYNTAX_ERROR)
+                .errmsg(format!("unrecognized filter variable \"{defname}\""))
+                .into_error());
+        }
+    }
+
+    /* Validate tag list, if any. */
+    if (eventname == "ddl_command_start"
+        || eventname == "ddl_command_end"
+        || eventname == "sql_drop")
+        && tags.is_some()
+    {
+        validate_ddl_tags("tag", tags.as_deref().expect("tags is Some"))?;
+    } else if eventname == "table_rewrite" && tags.is_some() {
+        validate_table_rewrite_tags("tag", tags.as_deref().expect("tags is Some"))?;
+    } else if eventname == "login" && tags.is_some() {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg("tag filtering is not supported for login event triggers")
+            .into_error());
+    }
+
+    /*
+     * Give user a nice error message if an event trigger of the same name
+     * already exists.
+     */
+    if syscache_seams::event_trigger_name_exists::call(trigname)? {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_DUPLICATE_OBJECT)
+            .errmsg(format!("event trigger \"{trigname}\" already exists"))
+            .into_error());
+    }
+
+    /* Find and validate the trigger function. */
+    let mut names: Vec<mcx::PgString<'mcx>> = Vec::new();
+    for n in stmt.funcname.iter() {
+        let s = n.as_string().ok_or_else(|| {
+            PgError::error("CreateEventTrigger: funcname element is not a String node")
+        })?;
+        names.push(mcx::PgString::from_str_in(s.sval.as_str(), mcx)?);
+    }
+    let funcoid = backend_parser_func::LookupFuncName(mcx, &names, 0, &[], false)?;
+    let funcrettype = backend_utils_cache_lsyscache::function::get_func_rettype(funcoid)?;
+    if funcrettype != EVENT_TRIGGEROID {
+        let display = names
+            .iter()
+            .map(|s| s.as_str().to_string())
+            .collect::<Vec<_>>()
+            .join(".");
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
+            .errmsg(format!("function {display} must return type event_trigger"))
+            .into_error());
+    }
+
+    /* Insert catalog entries. */
+    insert_event_trigger_tuple(mcx, trigname, eventname, evtowner, funcoid, tags.as_deref())
+}
+
+/// `validate_ddl_tags` (event_trigger.c:215-237) — validate DDL command tags.
+fn validate_ddl_tags(filtervar: &str, taglist: &[String]) -> PgResult<()> {
+    for tag in taglist {
+        let command_tag = backend_tcop_cmdtag::get_command_tag_enum(tag.as_bytes());
+        if command_tag == types_portal::CMDTAG_UNKNOWN {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_SYNTAX_ERROR)
+                .errmsg(format!(
+                    "filter value \"{tag}\" not recognized for filter variable \"{filtervar}\""
+                ))
+                .into_error());
+        }
+        if !backend_tcop_cmdtag::command_tag_event_trigger_ok(command_tag) {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg(format!("event triggers are not supported for {tag}"))
+                .into_error());
+        }
+    }
+    Ok(())
+}
+
+/// `validate_table_rewrite_tags` (event_trigger.c:242-259) — validate tags for
+/// the table_rewrite event.
+fn validate_table_rewrite_tags(_filtervar: &str, taglist: &[String]) -> PgResult<()> {
+    for tag in taglist {
+        let command_tag = backend_tcop_cmdtag::get_command_tag_enum(tag.as_bytes());
+        if !backend_tcop_cmdtag::command_tag_table_rewrite_ok(command_tag) {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg(format!("event triggers are not supported for {tag}"))
+                .into_error());
+        }
+    }
+    Ok(())
+}
+
+/// `error_duplicate_filter_variable` (event_trigger.c:264-271) — always errors.
+fn error_duplicate_filter_variable(defname: &str) -> PgResult<()> {
+    Err(ereport(ERROR)
+        .errcode(ERRCODE_SYNTAX_ERROR)
+        .errmsg(format!(
+            "filter variable \"{defname}\" specified more than once"
+        ))
+        .into_error())
+}
+
+/// Read a `DefElem`'s `arg` as a list of `String` node values — the
+/// `WHEN tag IN ('cmd1', 'cmd2')` parser representation (`(List *) def->arg`).
+fn def_string_list(def: &types_nodes::ddlnodes::DefElem<'_>) -> PgResult<Vec<String>> {
+    let arg = def
+        .arg
+        .as_ref()
+        .ok_or_else(|| PgError::error("event trigger filter variable requires a parameter"))?;
+    let cells = arg
+        .as_list()
+        .ok_or_else(|| PgError::error("event trigger filter value must be a list of names"))?;
+    let mut out = Vec::new();
+    for cell in cells.iter() {
+        let s = cell.as_string().ok_or_else(|| {
+            PgError::error("event trigger filter value must be a list of names")
+        })?;
+        out.push(s.sval.as_str().to_string());
+    }
+    Ok(out)
+}
+
+/// `insert_event_trigger_tuple` (event_trigger.c:276-346) — insert the new
+/// pg_event_trigger row and record dependencies.
+fn insert_event_trigger_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    trigname: &str,
+    eventname: &str,
+    evt_owner: Oid,
+    funcoid: Oid,
+    taglist: Option<&[String]>,
+) -> PgResult<Oid> {
+    /* Open pg_event_trigger. */
+    let tgrel = backend_access_table_table_seams::table_open::call(
+        mcx,
+        EVENT_TRIGGER_RELATION_ID,
+        types_storage::lock::RowExclusiveLock,
+    )?;
+
+    /*
+     * In the parser, a clause like WHEN tag IN ('cmd1', 'cmd2') is a List of
+     * String nodes; in the catalog we store the tags as a text array, with
+     * each tag ASCII-uppercased (`filter_list_to_array`).
+     */
+    let evttags: Option<Vec<String>> = taglist.map(filter_list_to_array);
+
+    let row = PgEventTriggerInsertRow {
+        evtname: trigname.to_string(),
+        evtevent: eventname.to_string(),
+        evtowner: evt_owner,
+        evtfoid: funcoid,
+        evtenabled: TRIGGER_FIRES_ON_ORIGIN,
+        evttags,
+    };
+
+    /* Build + insert the heap tuple, returning the freshly-allocated OID. */
+    let trigoid = indexing_seams::catalog_tuple_insert_pg_event_trigger::call(mcx, &tgrel, &row)?;
+
+    /*
+     * Login event triggers have an additional flag in pg_database to enable
+     * faster lookups in hot codepaths. Set the flag unless already True.
+     */
+    if eventname == "login" {
+        SetDatabaseHasLoginEventTriggers(mcx)?;
+    }
+
+    /* Depend on owner. */
+    backend_catalog_pg_shdepend::recordDependencyOnOwner(
+        EVENT_TRIGGER_RELATION_ID,
+        trigoid,
+        evt_owner,
+    )?;
+
+    /* Depend on event trigger function. */
+    let myself = ObjectAddress {
+        classId: EVENT_TRIGGER_RELATION_ID,
+        objectId: trigoid,
+        objectSubId: 0,
+    };
+    let referenced = ObjectAddress {
+        classId: PROCEDURE_RELATION_ID,
+        objectId: funcoid,
+        objectSubId: 0,
+    };
+    backend_catalog_pg_depend::recordDependencyOn(
+        mcx,
+        &myself,
+        &referenced,
+        types_catalog::catalog_dependency::DEPENDENCY_NORMAL,
+    )?;
+
+    /* Depend on extension, if any. */
+    backend_catalog_pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, false)?;
+
+    /* Post creation hook for new event trigger. */
+    objectaccess_seams::invoke_object_post_create_hook::call(EVENT_TRIGGER_RELATION_ID, trigoid, 0)?;
+
+    /* Close pg_event_trigger. */
+    tgrel.close(types_storage::lock::RowExclusiveLock)?;
+
+    Ok(trigoid)
+}
+
+/// `filter_list_to_array` (event_trigger.c:359-383) — ASCII-uppercase each tag,
+/// to be stored as the catalog `text[]` `evttags` column.
+fn filter_list_to_array(filterlist: &[String]) -> Vec<String> {
+    filterlist
+        .iter()
+        .map(|tag| {
+            tag.bytes()
+                .map(|b| pg_ascii_toupper(b) as char)
+                .collect::<String>()
+        })
+        .collect()
+}
+
+/// `pg_ascii_toupper` (utils/adt/ascii.c semantics): uppercase only ASCII a-z.
+#[inline]
+fn pg_ascii_toupper(ch: u8) -> u8 {
+    if ch.is_ascii_lowercase() {
+        ch - (b'a' - b'A')
+    } else {
+        ch
+    }
+}
+
+/// `SetDatabaseHasLoginEventTriggers` (event_trigger.c:389-421) — set
+/// `pg_database.dathasloginevt` for the current database.
+pub fn SetDatabaseHasLoginEventTriggers(mcx: Mcx<'_>) -> PgResult<()> {
+    backend_catalog_pg_database_seams::set_database_has_login_event_triggers::call(mcx)
+}
+
+/// `AlterEventTrigger` (event_trigger.c:426-473) — ALTER EVENT TRIGGER foo
+/// ENABLE | DISABLE | ENABLE ALWAYS | REPLICA.
+pub fn AlterEventTrigger<'mcx>(mcx: Mcx<'mcx>, trigname: &str, tgenabled: i8) -> PgResult<Oid> {
+    let tgrel = backend_access_table_table_seams::table_open::call(
+        mcx,
+        EVENT_TRIGGER_RELATION_ID,
+        types_storage::lock::RowExclusiveLock,
+    )?;
+
+    /* tup = SearchSysCacheCopy1(EVENTTRIGGERNAME, ...); evtForm->{oid,evtevent} */
+    let (trigoid, evtevent) = match syscache_seams::event_trigger_by_name::call(mcx, trigname)? {
+        Some((oid, evtevent, _owner)) => (oid, evtevent.as_str().to_string()),
+        None => {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_UNDEFINED_OBJECT)
+                .errmsg(format!("event trigger \"{trigname}\" does not exist"))
+                .into_error());
+        }
+    };
+
+    if !aclchk_seams::object_ownercheck::call(
+        EVENT_TRIGGER_RELATION_ID,
+        trigoid,
+        backend_utils_init_miscinit::GetUserId(),
+    )? {
+        aclchk_seams::aclcheck_error::call(
+            types_acl::ACLCHECK_NOT_OWNER,
+            OBJECT_EVENT_TRIGGER,
+            Some(trigname.to_string()),
+        )?;
+    }
+
+    /* tuple is a copy, so we can modify it below: evtForm->evtenabled = tgenabled. */
+    let evt_tuple = syscache_seams::search_syscache_copy_pg_event_trigger_tuple::call(mcx, trigoid)?
+        .ok_or_else(|| PgError::error(format!("cache lookup failed for event trigger {trigoid}")))?;
+    indexing_seams::catalog_tuple_update_pg_event_trigger_enabled::call(
+        mcx,
+        &tgrel,
+        &evt_tuple,
+        tgenabled,
+    )?;
+
+    /*
+     * Login event triggers have an additional flag in pg_database to enable
+     * faster lookups in hot codepaths. Set the flag unless already True.
+     */
+    if evtevent == "login" && tgenabled != TRIGGER_DISABLED {
+        SetDatabaseHasLoginEventTriggers(mcx)?;
+    }
+
+    objectaccess_seams::invoke_object_post_alter_hook::call(EVENT_TRIGGER_RELATION_ID, trigoid, 0)?;
+
+    /* clean up */
+    tgrel.close(types_storage::lock::RowExclusiveLock)?;
+
+    Ok(trigoid)
+}
+
+// ===========================================================================
 // Seam install.
 // ===========================================================================
 
@@ -692,6 +1087,8 @@ pub fn init_seams() {
     backend_tcop_utility_out_seams::event_trigger_supports_object_type::set(
         event_trigger_supports_object_type,
     );
+    backend_tcop_utility_out_seams::create_event_trigger::set(create_event_trigger_seam);
+    backend_tcop_utility_out_seams::alter_event_trigger::set(alter_event_trigger_seam);
 
     // Inward seams (callers: tcop/utility dispatch via the out-seams above; and
     // catalog/dependency.c's drop-time `sql_drop` collection gate). Only the

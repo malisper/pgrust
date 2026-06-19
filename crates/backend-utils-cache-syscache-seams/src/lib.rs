@@ -2347,6 +2347,34 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCache1(EVENTTRIGGERNAME, CStringGetDatum(trigname))` projected to
+    /// the `(oid, evtevent, evtowner)` `Form_pg_event_trigger` fields
+    /// `AlterEventTrigger` / `AlterEventTriggerOwner` read. `Ok(None)` on a cache
+    /// miss; the caller raises `event trigger "%s" does not exist`.
+    pub fn event_trigger_by_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        trigname: &str,
+    ) -> PgResult<Option<(Oid, PgString<'mcx>, Oid)>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(EVENTTRIGGERNAME, CStringGetDatum(trigname))` existence
+    /// probe — `CreateEventTrigger`'s "event trigger already exists" check.
+    pub fn event_trigger_name_exists(trigname: &str) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `SearchSysCacheCopy1(EVENTTRIGGEROID, ObjectIdGetDatum(trigoid))` returned
+    /// as the owned writable `FormedTuple` copy (`AlterEventTrigger`'s
+    /// `evtenabled` update needs the held tuple for `heap_modify_tuple` over its
+    /// `t_self`). `Ok(None)` on a cache miss.
+    pub fn search_syscache_copy_pg_event_trigger_tuple<'mcx>(
+        mcx: Mcx<'mcx>,
+        trigoid: Oid,
+    ) -> PgResult<Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>>
+);
+
+seam_core::seam!(
     /// `SearchSysCache1(PUBLICATIONREL, pubrelid)` +
     /// `GETSTRUCT(Form_pg_publication_rel)` projected to `(prpubid, prrelid)`
     /// (the publication-table description arm). `Ok(None)` on a cache miss.

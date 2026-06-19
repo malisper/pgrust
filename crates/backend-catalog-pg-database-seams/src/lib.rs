@@ -178,3 +178,15 @@ seam_core::seam!(
         new_owner_id: Oid,
     ) -> PgResult<mcx::PgVec<'mcx, u8>>
 );
+
+seam_core::seam!(
+    /// `SetDatabaseHasLoginEventTriggers()` (event_trigger.c:389-421): set
+    /// `pg_database.dathasloginevt` for the current database (`MyDatabaseId`).
+    /// `table_open(DatabaseRelationId, RowExclusiveLock)` +
+    /// `LockSharedObject(DatabaseRelationId, MyDatabaseId, 0,
+    /// AccessExclusiveLock)` + `SearchSysCacheLockedCopy1(DATABASEOID,
+    /// MyDatabaseId)`; if `!dathasloginevt` set it + `CatalogTupleUpdate` +
+    /// `CommandCounterIncrement`; `UnlockTuple(InplaceUpdateTupleLock)` +
+    /// `table_close`. `Err` carries the catalog-mutation `ereport(ERROR)`s.
+    pub fn set_database_has_login_event_triggers(mcx: Mcx<'_>) -> PgResult<()>
+);

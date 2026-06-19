@@ -1231,6 +1231,11 @@ pub fn init_seams() {
     s::language_name::set(projections::language_name);
     s::constraint_name::set(projections::constraint_name);
     s::event_trigger_name::set(projections::event_trigger_name);
+    s::event_trigger_by_name::set(projections::event_trigger_by_name);
+    s::event_trigger_name_exists::set(projections::event_trigger_name_exists);
+    s::search_syscache_copy_pg_event_trigger_tuple::set(
+        projections::search_syscache_copy_pg_event_trigger_tuple,
+    );
     s::get_publication_name_syscache::set(projections::get_publication_name_syscache);
     s::get_subscription_name_syscache::set(projections::get_subscription_name_syscache);
     s::search_attnum_attname::set(projections::search_attnum_attname);

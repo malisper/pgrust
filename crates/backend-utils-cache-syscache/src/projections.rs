@@ -21,7 +21,7 @@ use crate::{
     SysCacheGetAttrNotNull, AGGFNOID, AMNAME, AMOID, AMOPOPID, AMOPSTRATEGY, AMPROCNUM, ATTNAME, ATTNUM,
     AUTHMEMMEMROLE, AUTHMEMROLEMEM, AUTHNAME, AUTHOID,
     CASTSOURCETARGET, CLAAMNAMENSP, CLAOID, COLLNAMEENCNSP, COLLOID, CONNAMENSP, CONSTROID, CONVOID,
-    DATABASEOID, ENUMOID, ENUMTYPOIDNAME, EVENTTRIGGEROID,
+    DATABASEOID, ENUMOID, ENUMTYPOIDNAME, EVENTTRIGGERNAME, EVENTTRIGGEROID,
     FOREIGNDATAWRAPPERNAME,
     FOREIGNDATAWRAPPEROID, FOREIGNSERVERNAME, FOREIGNSERVEROID, FOREIGNTABLEREL, INDEXRELID, LANGNAME,
     LANGOID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, OPEROID, OPFAMILYAMNAMENSP, OPFAMILYOID,
@@ -5242,6 +5242,63 @@ pub(crate) fn event_trigger_name<'mcx>(
     evtid: Oid,
 ) -> PgResult<Option<PgString<'mcx>>> {
     lookup_name1(mcx, EVENTTRIGGEROID, SysCacheKey::Value(KeyDatum::from_oid(evtid)), Anum_pg_event_trigger_evtname_b2)
+}
+
+const Anum_pg_event_trigger_oid_b: i32 = 1;
+const Anum_pg_event_trigger_evtevent_b: i32 = 3;
+const Anum_pg_event_trigger_evtowner_b: i32 = 4;
+
+/// `SearchSysCache1(EVENTTRIGGERNAME, CStringGetDatum(trigname))` projected to
+/// the `(oid, evtevent, evtowner)` `Form_pg_event_trigger` fields
+/// `AlterEventTrigger` / `AlterEventTriggerOwner` read. `Ok(None)` on a cache
+/// miss (`!HeapTupleIsValid`); the caller raises `event trigger "%s" does not
+/// exist`.
+pub(crate) fn event_trigger_by_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    trigname: &str,
+) -> PgResult<Option<(Oid, PgString<'mcx>, Oid)>> {
+    let tuple = SearchSysCache1(mcx, EVENTTRIGGERNAME, SysCacheKey::Str(trigname))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let oid = getattr_oid(mcx, EVENTTRIGGERNAME, &tup, Anum_pg_event_trigger_oid_b)?;
+    let evtevent = getattr_name(mcx, EVENTTRIGGERNAME, &tup, Anum_pg_event_trigger_evtevent_b)?;
+    let evtowner = getattr_oid(mcx, EVENTTRIGGERNAME, &tup, Anum_pg_event_trigger_evtowner_b)?;
+    ReleaseSysCache(tup);
+    Ok(Some((oid, evtevent, evtowner)))
+}
+
+/// `SearchSysCache1(EVENTTRIGGERNAME, CStringGetDatum(trigname))` existence
+/// probe — `CreateEventTrigger`'s "already exists" check. `Ok(true)` when a row
+/// is present.
+pub(crate) fn event_trigger_name_exists(trigname: &str) -> PgResult<bool> {
+    let scratch = MemoryContext::new("syscache pg_event_trigger name-exists probe");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, EVENTTRIGGERNAME, SysCacheKey::Str(trigname))?;
+    match tuple {
+        Some(tup) => {
+            ReleaseSysCache(tup);
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
+/// `SearchSysCacheCopy1(EVENTTRIGGEROID, ObjectIdGetDatum(trigoid))` returned as
+/// the owned writable `FormedTuple` copy — `AlterEventTrigger`'s `evtenabled`
+/// update needs the held tuple for `heap_modify_tuple` over its `t_self`,
+/// preserving all non-`evtenabled` columns. `Ok(None)` on a cache miss.
+pub(crate) fn search_syscache_copy_pg_event_trigger_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    trigoid: Oid,
+) -> PgResult<Option<FormedTuple<'mcx>>> {
+    let tuple = SearchSysCache1(mcx, EVENTTRIGGEROID, SysCacheKey::Value(KeyDatum::from_oid(trigoid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let copy = tup.clone_in(mcx)?;
+    ReleaseSysCache(tup);
+    Ok(Some(copy))
 }
 
 pub(crate) fn get_publication_name_syscache<'mcx>(

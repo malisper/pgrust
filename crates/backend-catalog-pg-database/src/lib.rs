@@ -34,7 +34,9 @@ use types_core::fmgr::{F_NAMEEQ, F_OIDEQ, NAMEDATALEN};
 use types_error::{PgError, PgResult};
 use types_rel::Relation;
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::{AccessShareLock, InplaceUpdateTupleLock};
+use types_storage::lock::{
+    AccessExclusiveLock, AccessShareLock, InplaceUpdateTupleLock, RowExclusiveLock,
+};
 use types_tuple::backend_access_common_heaptuple::{Datum, DeformedColumn, FormedTuple};
 use types_tuple::heaptuple::{ItemPointerData, TupleDescData};
 
@@ -454,6 +456,67 @@ fn update_pg_database<'mcx>(
     Ok(())
 }
 
+/// `SetDatabaseHasLoginEventTriggers` (event_trigger.c:389-421) — set
+/// `pg_database.dathasloginevt` for the current database, indicating that the
+/// database has on-login event triggers.
+///
+/// C: `pg_db = table_open(DatabaseRelationId, RowExclusiveLock)`;
+/// `LockSharedObject(DatabaseRelationId, MyDatabaseId, 0, AccessExclusiveLock)`
+/// (a custom shared lock preventing `EventTriggerOnLogin()` from concurrently
+/// resetting the flag); `tuple = SearchSysCacheLockedCopy1(DATABASEOID,
+/// MyDatabaseId)`; if `!db->dathasloginevt` then set it, `CatalogTupleUpdate`,
+/// `CommandCounterIncrement`; `UnlockTuple(pg_db, &otid,
+/// InplaceUpdateTupleLock)`; `table_close`.
+fn set_database_has_login_event_triggers(mcx: Mcx<'_>) -> PgResult<()> {
+    let my_database_id = backend_commands_tablespace_globals_seams::MyDatabaseId::call()?;
+
+    // pg_db = table_open(DatabaseRelationId, RowExclusiveLock);
+    let rel = table_seams::table_open::call(mcx, cat::DatabaseRelationId, RowExclusiveLock)?;
+
+    // LockSharedObject(DatabaseRelationId, MyDatabaseId, 0, AccessExclusiveLock).
+    // Held by the returned guard until transaction end (the C default).
+    let _guard = lmgr_seams::lock_shared_object::call(
+        cat::DatabaseRelationId,
+        my_database_id,
+        0,
+        AccessExclusiveLock,
+    )?;
+
+    // tuple = SearchSysCacheLockedCopy1(DATABASEOID, ObjectIdGetDatum(MyDatabaseId));
+    // (LockTuple(InplaceUpdateTupleLock) + GETSTRUCT, via the locked read.)
+    let locked = scan_pg_database_locked_for_update(
+        mcx,
+        &rel,
+        my_database_id,
+        true,
+        my_database_id,
+        "",
+    )?;
+    let (otid, mut form) = match locked {
+        Some(pair) => pair,
+        None => {
+            return Err(PgError::error(format!(
+                "cache lookup failed for database {my_database_id}"
+            )));
+        }
+    };
+
+    if !form.dathasloginevt {
+        // db->dathasloginevt = true; CatalogTupleUpdate(pg_db, &otid, tuple);
+        // CommandCounterIncrement();
+        form.dathasloginevt = true;
+        update_pg_database(mcx, &rel, otid, &form)?;
+        backend_access_transam_xact::CommandCounterIncrement()?;
+    } else {
+        // No change: drop the inplace tuple lock taken by the locked read.
+        lmgr_seams::unlock_tuple::call(rel.rd_id, otid, InplaceUpdateTupleLock)?;
+    }
+
+    // table_close(pg_db, RowExclusiveLock);
+    rel.close(RowExclusiveLock)?;
+    Ok(())
+}
+
 /// Locked scan by OID / by name + `LockTuple(rel, &tup->t_self,
 /// InplaceUpdateTupleLock)` + decode (the `ALTER DATABASE` read).
 fn scan_pg_database_locked_for_update<'mcx>(
@@ -556,4 +619,5 @@ pub fn init_seams() {
     s::update_pg_database::set(update_pg_database);
     s::scan_pg_database_locked_for_update::set(scan_pg_database_locked_for_update);
     s::set_pg_database_invalid_inplace::set(set_pg_database_invalid_inplace);
+    s::set_database_has_login_event_triggers::set(set_database_has_login_event_triggers);
 }

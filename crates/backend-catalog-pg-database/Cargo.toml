@@ -49,3 +49,6 @@ backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-sea
 # criticalSharedRelcachesBuilt — GetDatabaseTuple/ByOid force a heap scan (no
 # index) until the critical shared relcache entries are nailed (postinit.c).
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+# SetDatabaseHasLoginEventTriggers: MyDatabaseId + CommandCounterIncrement.
+backend-commands-tablespace-globals-seams = { path = "../backend-commands-tablespace-globals-seams" }
+backend-access-transam-xact = { path = "../backend-access-transam-xact" }

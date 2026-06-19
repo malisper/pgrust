@@ -1305,6 +1305,38 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `CreateEventTrigger`'s pg_event_trigger INSERT (commands/event_trigger.c
+    /// `insert_event_trigger_tuple`): allocate the OID via
+    /// `GetNewOidWithIndex(tgrel, EventTriggerOidIndexId,
+    /// Anum_pg_event_trigger_oid)`, build the 7-column row (`oid`, `evtname` /
+    /// `evtevent` via `namein`, `evtowner`, `evtfoid`, `evtenabled`, and the
+    /// text[]-or-NULL `evttags`), then `heap_form_tuple(tgrel->rd_att, values,
+    /// nulls)` + `CatalogTupleInsert(tgrel, tuple)`, returning the
+    /// freshly-allocated OID. `rel` is the open pg_event_trigger relation. `Err`
+    /// carries the heap/index mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_event_trigger<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        row: &types_catalog::pg_event_trigger::PgEventTriggerInsertRow,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `AlterEventTrigger`'s pg_event_trigger UPDATE (commands/event_trigger.c):
+    /// `evtForm->evtenabled = tgenabled;` over the syscache-copied tuple
+    /// (`evt_tuple`), then `heap_modify_tuple` replacing only the `evtenabled`
+    /// column + `CatalogTupleUpdate(tgrel, &tup->t_self, tup)`. `rel` is the open
+    /// pg_event_trigger relation. `Err` carries the heap/index mutation
+    /// `ereport(ERROR)`s.
+    pub fn catalog_tuple_update_pg_event_trigger_enabled<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        evt_tuple: &types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+        tgenabled: i8,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `CreateTrigger`'s pg_trigger INSERT/UPDATE (commands/trigger.c): allocate
     /// the trigger OID (when `row.existing` is `None`) via
     /// `GetNewOidWithIndex(tgrel, TriggerOidIndexId, Anum_pg_trigger_oid)`, build
