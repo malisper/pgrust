@@ -37,6 +37,9 @@ mod bm {
 mod ac {
     pub use backend_storage_aio_completion_seams::*;
 }
+mod rcr {
+    pub use backend_utils_cache_relcache_seams::*;
+}
 
 /// `Option<ResourceOwner>` → the seam carrier (`ResourceOwner::NULL` for None).
 fn flat(o: Option<ResourceOwner>) -> ResourceOwner {
@@ -89,6 +92,39 @@ static BUFFER_IO_DESC: types_resowner::ResourceOwnerDesc = types_resowner::Resou
     release_priority: types_resowner::RELEASE_PRIO_BUFFER_IOS,
     ReleaseResource: Some(release_buffer_io),
     DebugPrint: None,
+};
+
+// ===========================================================================
+// Relation-ref ResourceOwnerDesc (`relref_resowner_desc`, defined in
+// relcache.c). The release callback delegates to the relcache crate through
+// the `release_relation_ref` seam (which runs `ResOwnerReleaseRelation`).
+// The remembered `Datum` is the relation's `Oid` handle (the relcache entry
+// key), mirroring the C `Relation` pointer.
+// ===========================================================================
+
+fn release_relation_ref(res: Datum) {
+    let relid: types_core::primitive::Oid = res.as_usize() as u32;
+    rcr::release_relation_ref::call(relid)
+        .expect("ResOwnerReleaseRelation: leaked relcache pin release failed");
+}
+
+/// `ResOwnerPrintRelCache(Datum res)` (relcache.c) — leak-warning formatter for
+/// `relref_resowner_desc`. C prints `relation "<relname>"`; the relname lives
+/// behind the relcache entry, so this port prints the relation's OID identity
+/// (`relation with OID <oid>`), which is what the leak warning needs to point at
+/// the offending pin. With the remember/forget wiring below the leak path no
+/// longer fires for the CREATE INDEX case this addresses.
+fn print_relation_ref(res: Datum) -> Option<String> {
+    let relid = res.as_usize() as u32;
+    Some(format!("relation with OID {relid}"))
+}
+
+static RELCACHE_DESC: types_resowner::ResourceOwnerDesc = types_resowner::ResourceOwnerDesc {
+    name: None, // "relcache reference" — rendered via DebugPrint below
+    release_phase: RESOURCE_RELEASE_BEFORE_LOCKS,
+    release_priority: types_resowner::RELEASE_PRIO_RELCACHE_REFS,
+    ReleaseResource: Some(release_relation_ref),
+    DebugPrint: Some(print_relation_ref),
 };
 
 /// Get the current resource owner, erroring if there is none (the bufmgr
@@ -257,6 +293,38 @@ pub fn install() {
         let owner = current_or_err().expect("forget_buffer_io: CurrentResourceOwner is NULL");
         ResourceOwnerForget(owner, Datum::from_i32(buffer), &BUFFER_IO_DESC)
             .expect("ResourceOwnerForgetBufferIO");
+    });
+
+    // --- relcache-seams (relation-ref pin bookkeeping) ---------------------
+    // `ResourceOwnerEnlarge(CurrentResourceOwner)` /
+    // `ResourceOwnerRememberRelationRef(CurrentResourceOwner, rel)` /
+    // `ResourceOwnerForgetRelationRef(CurrentResourceOwner, rel)` (relcache.c).
+    // The remembered Datum is the relation's Oid handle.
+    rcr::resource_owner_enlarge_relation::set(|| {
+        let owner = current_or_err()?;
+        ResourceOwnerEnlarge(owner)
+    });
+
+    rcr::resource_owner_remember_relation::set(|relid| {
+        let owner =
+            current_or_err().expect("RelationIncrementReferenceCount: CurrentResourceOwner is NULL");
+        ResourceOwnerRemember(
+            owner,
+            Datum::from_usize(relid as usize),
+            &RELCACHE_DESC,
+        )
+        .expect("ResourceOwnerRememberRelationRef");
+    });
+
+    rcr::resource_owner_forget_relation::set(|relid| {
+        let owner =
+            current_or_err().expect("RelationDecrementReferenceCount: CurrentResourceOwner is NULL");
+        ResourceOwnerForget(
+            owner,
+            Datum::from_usize(relid as usize),
+            &RELCACHE_DESC,
+        )
+        .expect("ResourceOwnerForgetRelationRef");
     });
 
     // --- aio-completion-seams: AIO-handle resowner registry ----------------

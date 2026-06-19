@@ -22320,6 +22320,7 @@ dependencies = [
  "backend-storage-lmgr-lock",
  "backend-storage-lmgr-predicate",
  "backend-storage-lmgr-proc",
+ "backend-utils-cache-relcache-seams",
  "backend-utils-error",
  "backend-utils-resowner-all-seams",
  "backend-utils-resowner-pc-seams",

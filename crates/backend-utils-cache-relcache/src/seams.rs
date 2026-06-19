@@ -37,6 +37,10 @@ pub fn init_seams() {
     sx::relation_rd_indam::set(relation_rd_indam);
     sx::relation_increment_reference_count::set(relation_increment_reference_count);
     sx::relation_decrement_reference_count::set(relation_decrement_reference_count);
+    // `ResOwnerReleaseRelation` (relcache.c) — the `relref_resowner_desc`
+    // `ReleaseResource` callback. Release a leaked relcache pin found during
+    // resource-owner release WITHOUT re-forgetting it from the owner.
+    sx::release_relation_ref::set(release_relation_ref);
     sx::rd_support_at::set(rd_support_at);
     sx::index_getprocinfo::set(index_getprocinfo);
     sx::index_opclass_missing_options_error::set(index_opclass_missing_options_error);
@@ -1179,6 +1183,13 @@ fn relation_decrement_reference_count(index_oid: Oid) -> PgResult<()> {
         Some(rd) => crate::core_entry_store::RelationDecrementReferenceCount(rd),
         None => Ok(()),
     }
+}
+
+/// `ResOwnerReleaseRelation(Datum res)` (relcache.c) — release a leaked
+/// relcache pin during resource-owner release. The relation is identified by
+/// its `Oid` handle (the entry key).
+fn release_relation_ref(relid: Oid) -> PgResult<()> {
+    crate::core_entry_store::ResOwnerReleaseRelation(relid)
 }
 
 fn rd_support_at(index_oid: Oid, procindex: i32) -> PgResult<RegProcedure> {

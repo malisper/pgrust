@@ -458,30 +458,75 @@ pub(crate) fn eoxact_list_add(st: &mut RelcacheState, relid: Oid) {
 
 /// `RelationIncrementReferenceCount(rel)` (relcache.c): pin the entry
 /// (`rd_refcnt += 1`) and register the relation ref with the current resource
-/// owner (unless in bootstrap mode). The resource-owner remember half is the
-/// per-query-lifecycle RAII glue; until that owner lands it is the documented
-/// no-op pin (the refcount itself is authoritative here).
+/// owner so a transaction/portal abort can release a leaked pin. Mirrors C:
+///
+/// ```c
+/// ResourceOwnerEnlarge(CurrentResourceOwner);
+/// relation->rd_refcnt += 1;
+/// if (!IsBootstrapProcessingMode())
+///     ResourceOwnerRememberRelationRef(CurrentResourceOwner, relation);
+/// ```
+///
+/// The enlarge (which may `ereport` on OOM) runs BEFORE the bump so the
+/// subsequent infallible remember cannot fail. The remember is skipped in
+/// bootstrap processing mode (no resource owner exists yet).
 pub fn RelationIncrementReferenceCount(rel: Oid) -> PgResult<()> {
+    backend_utils_cache_relcache_seams::resource_owner_enlarge_relation::call()?;
     with_relation_mut(rel, |rd| rd.rd_refcnt += 1)?;
-    // ResourceOwnerEnlarge + ResourceOwnerRememberRelationRef: resowner glue
-    // (per-query-lifecycle RAII). The refcount above is the authoritative pin.
+    if !backend_utils_init_miscinit_seams::is_bootstrap_processing_mode::call() {
+        backend_utils_cache_relcache_seams::resource_owner_remember_relation::call(rel);
+    }
     Ok(())
 }
 
 /// `RelationDecrementReferenceCount(rel)` (relcache.c): drop the pin
 /// (`rd_refcnt -= 1`), asserting it was positive, and forget the relation ref
-/// with the resource owner (resowner glue, as above).
+/// with the resource owner. Mirrors C:
+///
+/// ```c
+/// Assert(relation->rd_refcnt > 0);
+/// relation->rd_refcnt -= 1;
+/// if (!IsBootstrapProcessingMode())
+///     ResourceOwnerForgetRelationRef(CurrentResourceOwner, relation);
+/// ```
 pub fn RelationDecrementReferenceCount(rel: Oid) -> PgResult<()> {
     with_relation_mut(rel, |rd| {
         debug_assert!(rd.rd_refcnt > 0);
         rd.rd_refcnt -= 1;
-    })
+    })?;
+    if !backend_utils_init_miscinit_seams::is_bootstrap_processing_mode::call() {
+        backend_utils_cache_relcache_seams::resource_owner_forget_relation::call(rel);
+    }
+    Ok(())
 }
 
 /// `RelationClose(relation)` (relcache.c): drop the relcache reference, then run
 /// [`RelationCloseCleanup`] (the immediate-flush-of-dropped-or-invalidated path).
 pub fn RelationClose(relation: Oid) -> PgResult<()> {
     RelationDecrementReferenceCount(relation)?;
+    RelationCloseCleanup(relation)
+}
+
+/// `ResOwnerReleaseRelation(Datum res)` (relcache.c) — the `ReleaseResource`
+/// callback of `relref_resowner_desc`, invoked by `ResourceOwnerReleaseAll` for
+/// a relcache pin that was still held when the resource owner was released
+/// (i.e. a leak on abort, or normal portal/transaction teardown). Mirrors C:
+///
+/// ```c
+/// Relation rel = (Relation) DatumGetPointer(res);
+/// rel->rd_refcnt -= 1;
+/// RelationCloseCleanup(rel);
+/// ```
+///
+/// Unlike [`RelationDecrementReferenceCount`] this does NOT call
+/// `ResourceOwnerForgetRelationRef`: the ref is already being removed from the
+/// (currently-releasing) owner's array by `ResourceOwnerReleaseAll`, and the
+/// owner forbids Forget once release has started.
+pub fn ResOwnerReleaseRelation(relation: Oid) -> PgResult<()> {
+    with_relation_mut(relation, |rd| {
+        debug_assert!(rd.rd_refcnt > 0);
+        rd.rd_refcnt -= 1;
+    })?;
     RelationCloseCleanup(relation)
 }
 

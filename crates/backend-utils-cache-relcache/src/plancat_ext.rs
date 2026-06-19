@@ -23,7 +23,38 @@ use backend_optimizer_util_plancat_ext_seams as px;
 use types_core::primitive::{BlockNumber, Oid};
 use types_error::{PgError, PgResult};
 
-use crate::core_entry_store::{self, RelationIdGetRelation, with_relation};
+use crate::core_entry_store::{self, RelationClose, RelationIdGetRelation, with_relation};
+
+/// `index_open(indexoid, NoLock)` (the relcache-pin half) + run `read` while the
+/// entry is pinned + `index_close(indexRelation, NoLock)`.
+///
+/// In C `get_relation_info` / `infer_arbiter_indexes` open each index with
+/// `index_open(indexoid, lmode)`, read the descriptor, then
+/// `index_close(indexRelation, NoLock)` — the close drops the relcache **pin**
+/// (`RelationDecrementReferenceCount`) but keeps the lock (held to xact end).
+/// The pgrust by-OID accessors each need that same pin/unpin pairing so the
+/// pin is not leaked onto the resource owner (otherwise it surfaces as
+/// "resource was not closed" at statement/transaction end). The caller does the
+/// `LockRelationOid(.., lmode).keep()` separately when a lock is wanted; this
+/// helper takes no lock and always unpins, on both the `Ok` and `Err` paths,
+/// mirroring `index_close`.
+fn with_index_open<R>(
+    indexoid: Oid,
+    read: impl FnOnce() -> PgResult<R>,
+) -> PgResult<R> {
+    let built = RelationIdGetRelation(indexoid)?;
+    if built == types_core::InvalidOid {
+        return Err(PgError::error(format!(
+            "could not open index with OID {indexoid}"
+        )));
+    }
+    let result = read();
+    // `index_close(indexRelation, NoLock)` — drop the relcache pin (keep the
+    // lock). Run on the error path too, like C's resource cleanup, so a failed
+    // read does not leak the pin.
+    RelationClose(indexoid)?;
+    result
+}
 
 /// Install every plancat-ext seam relcache owns.
 pub fn init_seams() {
@@ -65,32 +96,29 @@ fn get_infer_index_info(
     if rellockmode != 0 {
         backend_storage_lmgr_lmgr_seams::lock_relation_oid::call(indexoid, rellockmode)?.keep();
     }
-    let built = RelationIdGetRelation(indexoid)?;
-    if built == types_core::InvalidOid {
-        return Err(PgError::error(format!(
-            "could not open index with OID {indexoid}"
-        )));
-    }
 
-    // pg_index-form fields off the owned entry.
+    // pg_index-form fields off the owned entry, with the index pinned for the
+    // read and unpinned afterwards (`index_open`/`index_close(.., NoLock)`).
     let (indexrelid, indisvalid, indisunique, indisexclusion, indnkeyatts, indkey) =
-        with_relation(indexoid, |rd| {
-            let index = rd.rd_index.as_ref().ok_or_else(|| {
-                PgError::error(format!("relation {indexoid} is not an index"))
-            })?;
-            Ok::<_, PgError>((
-                index.indexrelid,
-                index.indisvalid,
-                index.indisunique,
-                index.indisexclusion,
-                index.indnkeyatts as i32,
-                index
-                    .indkey
-                    .iter()
-                    .map(|&k| k as types_core::primitive::AttrNumber)
-                    .collect::<Vec<_>>(),
-            ))
-        })??;
+        with_index_open(indexoid, || {
+            with_relation(indexoid, |rd| {
+                let index = rd.rd_index.as_ref().ok_or_else(|| {
+                    PgError::error(format!("relation {indexoid} is not an index"))
+                })?;
+                Ok::<_, PgError>((
+                    index.indexrelid,
+                    index.indisvalid,
+                    index.indisunique,
+                    index.indisexclusion,
+                    index.indnkeyatts as i32,
+                    index
+                        .indkey
+                        .iter()
+                        .map(|&k| k as types_core::primitive::AttrNumber)
+                        .collect::<Vec<_>>(),
+                ))
+            })?
+        })?;
 
     // `RelationGetIndexExpressions` / `RelationGetIndexPredicate` as arena node
     // handles. These reuse the same read paths get_index_expressions /
@@ -143,81 +171,74 @@ fn infer_collation_opclass_match(
         (types_core::InvalidOid, types_core::InvalidOid)
     };
 
-    let built = RelationIdGetRelation(indexoid)?;
-    if built == types_core::InvalidOid {
-        return Err(PgError::error(format!(
-            "could not open index with OID {indexoid}"
-        )));
-    }
+    // Open the index (pin), read its per-attribute catalog data + run the match
+    // loop, then unpin (`index_open`/`index_close(.., NoLock)`).
+    with_index_open(indexoid, || {
+        // Per-attribute opfamily/opcintype/collation + indkey, off the owned entry.
+        let (natts, opfamilies, opcintypes, collations, indkeys) =
+            with_relation(indexoid, |rd| {
+                let index = rd.rd_index.as_ref().ok_or_else(|| {
+                    PgError::error(format!("relation {indexoid} is not an index"))
+                })?;
+                Ok::<_, PgError>((
+                    rd.rd_att.natts() as usize,
+                    rd.rd_opfamily.clone(),
+                    rd.rd_opcintype.clone(),
+                    rd.rd_indcollation.clone(),
+                    index.indkey.iter().map(|&k| k as i32).collect::<Vec<_>>(),
+                ))
+            })??;
 
-    // Per-attribute opfamily/opcintype/collation + indkey, off the owned entry.
-    let (natts, opfamilies, opcintypes, collations, indkeys) =
-        with_relation(indexoid, |rd| {
-            let index = rd.rd_index.as_ref().ok_or_else(|| {
-                PgError::error(format!("relation {indexoid} is not an index"))
-            })?;
-            Ok::<_, PgError>((
-                rd.rd_att.natts() as usize,
-                rd.rd_opfamily.clone(),
-                rd.rd_opcintype.clone(),
-                rd.rd_indcollation.clone(),
-                index
-                    .indkey
-                    .iter()
-                    .map(|&k| k as i32)
-                    .collect::<Vec<_>>(),
-            ))
-        })??;
+        // The inference element's expression, resolved through `root`'s arena (the
+        // same arena `idx_exprs` index into).
+        let elem_expr = root.node(elem.expr);
+        let elem_is_var = matches!(elem_expr, Expr::Var(_));
+        let elem_varattno = match elem_expr {
+            Expr::Var(v) => v.varattno as i32,
+            _ => 0,
+        };
 
-    // The inference element's expression, resolved through `root`'s arena (the
-    // same arena `idx_exprs` index into).
-    let elem_expr = root.node(elem.expr);
-    let elem_is_var = matches!(elem_expr, Expr::Var(_));
-    let elem_varattno = match elem_expr {
-        Expr::Var(v) => v.varattno as i32,
-        _ => 0,
-    };
+        let mut nplain = 0usize; // # plain attrs observed (C: nplain).
+        for natt in 1..=natts {
+            let opfamily = *opfamilies.get(natt - 1).unwrap_or(&types_core::InvalidOid);
+            let opcinputtype = *opcintypes.get(natt - 1).unwrap_or(&types_core::InvalidOid);
+            let collation = *collations.get(natt - 1).unwrap_or(&types_core::InvalidOid);
+            let attno = *indkeys.get(natt - 1).unwrap_or(&0);
 
-    let mut nplain = 0usize; // # plain attrs observed (C: nplain).
-    for natt in 1..=natts {
-        let opfamily = *opfamilies.get(natt - 1).unwrap_or(&types_core::InvalidOid);
-        let opcinputtype = *opcintypes.get(natt - 1).unwrap_or(&types_core::InvalidOid);
-        let collation = *collations.get(natt - 1).unwrap_or(&types_core::InvalidOid);
-        let attno = *indkeys.get(natt - 1).unwrap_or(&0);
-
-        if attno != 0 {
-            nplain += 1;
-        }
-
-        // Attribute needed to match opclass, but didn't.
-        if elem.inferopclass != types_core::InvalidOid
-            && (inferopfamily != opfamily || inferopcinputtype != opcinputtype)
-        {
-            continue;
-        }
-        // Attribute needed to match collation, but didn't.
-        if elem.infercollid != types_core::InvalidOid && elem.infercollid != collation {
-            continue;
-        }
-
-        // One matching index att found -> good enough.
-        if elem_is_var {
-            if elem_varattno == attno {
-                return Ok(true);
+            if attno != 0 {
+                nplain += 1;
             }
-        } else if attno == 0 {
-            // Expression column: compare the element expr to the cataloged index
-            // expression at position (natt-1)-nplain by node-equality.
-            let idx_pos = (natt - 1) - nplain;
-            if let Some(&natt_expr) = idx_exprs.get(idx_pos) {
-                if px::node_equal::call(root, elem.expr, natt_expr) {
+
+            // Attribute needed to match opclass, but didn't.
+            if elem.inferopclass != types_core::InvalidOid
+                && (inferopfamily != opfamily || inferopcinputtype != opcinputtype)
+            {
+                continue;
+            }
+            // Attribute needed to match collation, but didn't.
+            if elem.infercollid != types_core::InvalidOid && elem.infercollid != collation {
+                continue;
+            }
+
+            // One matching index att found -> good enough.
+            if elem_is_var {
+                if elem_varattno == attno {
                     return Ok(true);
+                }
+            } else if attno == 0 {
+                // Expression column: compare the element expr to the cataloged index
+                // expression at position (natt-1)-nplain by node-equality.
+                let idx_pos = (natt - 1) - nplain;
+                if let Some(&natt_expr) = idx_exprs.get(idx_pos) {
+                    if px::node_equal::call(root, elem.expr, natt_expr) {
+                        return Ok(true);
+                    }
                 }
             }
         }
-    }
 
-    Ok(false)
+        Ok(false)
+    })
 }
 
 /// `has_row_triggers` (plancat.c): whether the relation has any row-level
@@ -413,39 +434,36 @@ fn get_index_cat_info(indexoid: Oid, lmode: i32) -> PgResult<px::IndexCatInfo> {
     }
 
     // Force the index entry to be built/cached (the `relation_open(.., NoLock)`
-    // half of `index_open`).
-    let built = RelationIdGetRelation(indexoid)?;
-    if built == types_core::InvalidOid {
-        return Err(PgError::error(format!(
-            "could not open index with OID {indexoid}"
-        )));
-    }
+    // half of `index_open`), read the descriptor, then drop the relcache pin
+    // (`index_close(indexRelation, NoLock)`).
+    with_index_open(indexoid, || {
+        // Read the bulk of the descriptor from the owned entry.
+        let mut info = with_relation(indexoid, |rd| build_index_cat_info(rd))??;
 
-    // Read the bulk of the descriptor from the owned entry.
-    let mut info = with_relation(indexoid, |rd| build_index_cat_info(rd))??;
-
-    // `index_can_return(indexRelation, attno)` (indexam.c) per column: read the
-    // AM's `amcanreturn` callback off the cached `rd_indam` vtable. NULL means
-    // the AM never supports index-only scans (`canreturn[i] = false`). We need a
-    // `Relation` to invoke the callback; project the owned entry and wrap it.
-    let amcanreturn = with_relation(indexoid, |rd| {
-        rd.rd_indam.as_ref().and_then(|am| am.amcanreturn)
-    })?;
-    if let Some(amcanreturn) = amcanreturn {
-        let relcx = mcx::MemoryContext::new("index_can_return");
-        let data =
-            with_relation(indexoid, |rd| crate::build::project_relation_data(relcx.mcx(), rd))??;
-        let rel = types_rel::Relation::open(data, None);
-        let mut canreturn = Vec::with_capacity(info.indnatts as usize);
-        for i in 0..info.indnatts {
-            canreturn.push(amcanreturn(&rel, i + 1)?);
+        // `index_can_return(indexRelation, attno)` (indexam.c) per column: read the
+        // AM's `amcanreturn` callback off the cached `rd_indam` vtable. NULL means
+        // the AM never supports index-only scans (`canreturn[i] = false`). We need a
+        // `Relation` to invoke the callback; project the owned entry and wrap it.
+        let amcanreturn = with_relation(indexoid, |rd| {
+            rd.rd_indam.as_ref().and_then(|am| am.amcanreturn)
+        })?;
+        if let Some(amcanreturn) = amcanreturn {
+            let relcx = mcx::MemoryContext::new("index_can_return");
+            let data = with_relation(indexoid, |rd| {
+                crate::build::project_relation_data(relcx.mcx(), rd)
+            })??;
+            let rel = types_rel::Relation::open(data, None);
+            let mut canreturn = Vec::with_capacity(info.indnatts as usize);
+            for i in 0..info.indnatts {
+                canreturn.push(amcanreturn(&rel, i + 1)?);
+            }
+            info.canreturn = canreturn;
+        } else {
+            info.canreturn = vec![false; info.indnatts as usize];
         }
-        info.canreturn = canreturn;
-    } else {
-        info.canreturn = vec![false; info.indnatts as usize];
-    }
 
-    Ok(info)
+        Ok(info)
+    })
 }
 
 /// Build the [`px::IndexCatInfo`] from the owned relcache index entry's cached
@@ -551,32 +569,28 @@ fn get_index_expressions(
     indexoid: Oid,
 ) -> PgResult<Vec<types_pathnodes::NodeId>> {
     let _ = root;
-    let built = RelationIdGetRelation(indexoid)?;
-    if built == types_core::InvalidOid {
-        return Err(PgError::error(format!(
-            "could not open index with OID {indexoid}"
-        )));
-    }
-    // `RelationGetIndexExpressions(index)` quick-exits to NIL when the index has
-    // no expression columns (the C `heap_attisnull(rd_indextuple,
-    // Anum_pg_index_indexprs)` short-circuit). A zero in `indkey` marks an
-    // expression column; a plain index — every pg_class system index — has none,
-    // so the list is empty without invoking the node-tree builder.
-    let has_exprs = with_relation(indexoid, |rd| {
-        rd.rd_index
-            .as_ref()
-            .is_some_and(|i| i.indkey.iter().any(|&k| k == 0))
-    })?;
-    if !has_exprs {
-        return Ok(Vec::new());
-    }
-    // The non-empty case builds the raw index-tuple expression tree (node
-    // vocabulary, via the relcache node-transform owner) and materializes it
-    // into the planner arena — not modeled through this read path.
-    crate::derived::RelationGetIndexExpressions(indexoid)?;
-    Err(PgError::error(
-        "get_index_expressions: index expression arena projection not modeled",
-    ))
+    with_index_open(indexoid, || {
+        // `RelationGetIndexExpressions(index)` quick-exits to NIL when the index has
+        // no expression columns (the C `heap_attisnull(rd_indextuple,
+        // Anum_pg_index_indexprs)` short-circuit). A zero in `indkey` marks an
+        // expression column; a plain index — every pg_class system index — has none,
+        // so the list is empty without invoking the node-tree builder.
+        let has_exprs = with_relation(indexoid, |rd| {
+            rd.rd_index
+                .as_ref()
+                .is_some_and(|i| i.indkey.iter().any(|&k| k == 0))
+        })?;
+        if !has_exprs {
+            return Ok(Vec::new());
+        }
+        // The non-empty case builds the raw index-tuple expression tree (node
+        // vocabulary, via the relcache node-transform owner) and materializes it
+        // into the planner arena — not modeled through this read path.
+        crate::derived::RelationGetIndexExpressions(indexoid)?;
+        Err(PgError::error(
+            "get_index_expressions: index expression arena projection not modeled",
+        ))
+    })
 }
 
 /// `RelationGetIndexPredicate(indexRelation)` (relcache.c) as fresh arena node
@@ -586,65 +600,52 @@ fn get_index_predicate(
     indexoid: Oid,
 ) -> PgResult<Vec<types_pathnodes::NodeId>> {
     let _ = root;
-    let built = RelationIdGetRelation(indexoid)?;
-    if built == types_core::InvalidOid {
-        return Err(PgError::error(format!(
-            "could not open index with OID {indexoid}"
-        )));
-    }
-    // `RelationGetIndexPredicate(index)` quick-exits to NIL unless the index is
-    // partial (the C `heap_attisnull(rd_indextuple, Anum_pg_index_indpred)`
-    // short-circuit). Read the presence via the syscache owner's test (the same
-    // `rd_index_has_indpred` uses) and skip the node-tree builder when absent.
-    let has_pred = backend_utils_cache_syscache_seams::pg_index_has_predicate::call(indexoid)?
-        .unwrap_or(false);
-    if !has_pred {
-        return Ok(Vec::new());
-    }
-    crate::derived::RelationGetIndexPredicate(indexoid)?;
-    Err(PgError::error(
-        "get_index_predicate: partial-index predicate arena projection not modeled",
-    ))
+    with_index_open(indexoid, || {
+        // `RelationGetIndexPredicate(index)` quick-exits to NIL unless the index is
+        // partial (the C `heap_attisnull(rd_indextuple, Anum_pg_index_indpred)`
+        // short-circuit). Read the presence via the syscache owner's test (the same
+        // `rd_index_has_indpred` uses) and skip the node-tree builder when absent.
+        let has_pred = backend_utils_cache_syscache_seams::pg_index_has_predicate::call(indexoid)?
+            .unwrap_or(false);
+        if !has_pred {
+            return Ok(Vec::new());
+        }
+        crate::derived::RelationGetIndexPredicate(indexoid)?;
+        Err(PgError::error(
+            "get_index_predicate: partial-index predicate arena projection not modeled",
+        ))
+    })
 }
 
 /// `RelationGetNumberOfBlocks(indexRelation)` (bufmgr.c) for an index — the main
 /// fork block count via smgr, off the entry's locator/backend (the same read as
 /// the table `relation_get_number_of_blocks` seam).
 fn index_number_of_blocks(indexoid: Oid) -> PgResult<BlockNumber> {
-    let built = RelationIdGetRelation(indexoid)?;
-    if built == types_core::InvalidOid {
-        return Err(PgError::error(format!(
-            "could not open index with OID {indexoid}"
-        )));
-    }
-    let (locator, backend) =
-        with_relation(indexoid, |rd| (rd.rd_locator, rd.rd_backend))?;
-    backend_storage_smgr_seams::smgrnblocks::call(
-        locator,
-        backend,
-        types_core::primitive::MAIN_FORKNUM,
-    )
+    with_index_open(indexoid, || {
+        let (locator, backend) = with_relation(indexoid, |rd| (rd.rd_locator, rd.rd_backend))?;
+        backend_storage_smgr_seams::smgrnblocks::call(
+            locator,
+            backend,
+            types_core::primitive::MAIN_FORKNUM,
+        )
+    })
 }
 
 /// `amroutine->amgettreeheight(indexRelation)` (index AM) — the index tree
 /// height; only called when `IndexCatInfo::amhasgettreeheight` is true.
 fn index_get_tree_height(indexoid: Oid) -> PgResult<i32> {
-    let built = RelationIdGetRelation(indexoid)?;
-    if built == types_core::InvalidOid {
-        return Err(PgError::error(format!(
-            "could not open index with OID {indexoid}"
-        )));
-    }
-    let amgettreeheight = with_relation(indexoid, |rd| {
-        rd.rd_indam.as_ref().and_then(|am| am.amgettreeheight)
-    })?;
-    let amgettreeheight = amgettreeheight.ok_or_else(|| {
-        PgError::error("index_get_tree_height: amgettreeheight not set")
-    })?;
-    let relcx = mcx::MemoryContext::new("index_get_tree_height");
-    let data = with_relation(indexoid, |rd| crate::build::project_relation_data(relcx.mcx(), rd))??;
-    let rel = types_rel::Relation::open(data, None);
-    amgettreeheight(relcx.mcx(), &rel)
+    with_index_open(indexoid, || {
+        let amgettreeheight = with_relation(indexoid, |rd| {
+            rd.rd_indam.as_ref().and_then(|am| am.amgettreeheight)
+        })?;
+        let amgettreeheight = amgettreeheight
+            .ok_or_else(|| PgError::error("index_get_tree_height: amgettreeheight not set"))?;
+        let relcx = mcx::MemoryContext::new("index_get_tree_height");
+        let data =
+            with_relation(indexoid, |rd| crate::build::project_relation_data(relcx.mcx(), rd))??;
+        let rel = types_rel::Relation::open(data, None);
+        amgettreeheight(relcx.mcx(), &rel)
+    })
 }
 
 /// `RelationGetStatExtList(relation)` (relcache.c) — OIDs of the relation's

@@ -1115,3 +1115,49 @@ seam_core::seam!(
         attnullability: i8,
     ) -> types_error::PgResult<()>
 );
+
+// ---------------------------------------------------------------------------
+// Relation-ref resource-owner bookkeeping (relcache.c
+// `RelationIncrementReferenceCount` / `RelationDecrementReferenceCount`, which
+// call `ResourceOwnerEnlarge` / `ResourceOwnerRememberRelationRef` /
+// `ResourceOwnerForgetRelationRef`). The relation-ref `ResourceOwnerDesc`
+// (`relref_resowner_desc`) is defined in relcache.c; in this port the resowner
+// owner crate holds the descriptor and installs the three remember/forget/
+// enlarge seams below (mirroring the buffer-pin/buffer-IO arrangement), so the
+// relcache owner can wire its refcount lifecycle to the current resource owner.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `ResourceOwnerEnlarge(CurrentResourceOwner)` (relcache.c, before
+    /// `ResourceOwnerRememberRelationRef`) — ensure the current resource owner
+    /// has room to remember one more relation ref so the remember below cannot
+    /// fail. `Err` carries the `ereport(ERROR)` on memory exhaustion. Installed
+    /// by the resowner owner crate.
+    pub fn resource_owner_enlarge_relation() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ResourceOwnerRememberRelationRef(CurrentResourceOwner, rel)`
+    /// (relcache.c) — record one relcache pin on the current resource owner so a
+    /// transaction/portal abort can release the leaked pin. The relation is
+    /// identified by its `Oid` handle. Installed by the resowner owner crate.
+    pub fn resource_owner_remember_relation(relid: types_core::primitive::Oid)
+);
+
+seam_core::seam!(
+    /// `ResourceOwnerForgetRelationRef(CurrentResourceOwner, rel)` (relcache.c)
+    /// — drop the record of one relcache pin from the current resource owner.
+    /// Installed by the resowner owner crate.
+    pub fn resource_owner_forget_relation(relid: types_core::primitive::Oid)
+);
+
+seam_core::seam!(
+    /// `ResOwnerReleaseRelation(Datum res)` (relcache.c) — the `ReleaseResource`
+    /// callback of `relref_resowner_desc`: release a leaked relcache pin found
+    /// during resource-owner release. Decrements the entry's refcount WITHOUT
+    /// re-forgetting it from the (already-being-released) owner, then runs the
+    /// `RelationCloseCleanup` drop-of-invalidated path. Installed by the
+    /// relcache owner crate; called by the resowner desc. `Err` carries any
+    /// `ereport`.
+    pub fn release_relation_ref(relid: types_core::primitive::Oid) -> types_error::PgResult<()>
+);
