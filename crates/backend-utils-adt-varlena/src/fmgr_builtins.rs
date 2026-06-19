@@ -758,22 +758,41 @@ fn opt_arg_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> Option<&
     Some(arg_bytes(fcinfo, i))
 }
 
-/// Wrap the flat array image carried on the by-ref lane into the canonical
-/// by-reference `Datum` the `split_format` cores consume (C `DatumGetArrayTypeP`
-/// reads the same contiguous block). Copies the bytes into `mcx`.
+/// The full, header-FUL flat `ArrayType` image on the by-ref lane (C
+/// `PG_GETARG_ARRAYTYPE_P` / `DatumGetArrayTypeP`). Unlike `arg_bytes` (which
+/// strips the leading 4-byte varlena length word via `vardata_any_slice` for
+/// the `text`/`bytea` cores), the array cores and the `array_to_text_elements`
+/// seam read the `ArrayType` struct fields off the contiguous block STARTING at
+/// the `vl_len_` word (`arrayfuncs::foundation::arr_*` reads `ndim` at offset 4,
+/// `dataoffset` at 8, `elemtype` at 12). Stripping the header here misaligns
+/// every field by 4 bytes — `ARR_ELEMTYPE` then reads `ARR_DIMS[0]` (the element
+/// count) as the element type OID ("cache lookup failed for type N").
+#[inline]
+fn arg_array_image<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("array fn: by-ref array arg missing from by-ref lane")
+}
+
+/// Wrap the header-FUL flat array image carried on the by-ref lane into the
+/// canonical by-reference `Datum` the `split_format` cores consume (C
+/// `DatumGetArrayTypeP` reads the same contiguous block, header word included).
+/// Copies the bytes into `mcx`.
 fn arg_array_datum<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     fcinfo: &FunctionCallInfoBaseData,
     i: usize,
 ) -> types_tuple::backend_access_common_heaptuple::Datum<'mcx> {
-    let bytes = arg_bytes(fcinfo, i);
+    let bytes = arg_array_image(fcinfo, i);
     let v = ok(mcx::slice_in(mcx, bytes));
     types_tuple::backend_access_common_heaptuple::Datum::ByRef(v)
 }
 
-/// `ARR_ELEMTYPE(array)` — the element type Oid stored in the flat `ArrayType`
-/// header at byte offset 12 (`int32 vl_len_; int ndim; int32 dataoffset; Oid
-/// elemtype`).
+/// `ARR_ELEMTYPE(array)` — the element type Oid stored in the header-FUL flat
+/// `ArrayType` at byte offset 12 (`int32 vl_len_; int ndim; int32 dataoffset;
+/// Oid elemtype`). `array` MUST be the header-ful image (`arg_array_image`),
+/// matching `arrayfuncs::foundation::arr_elemtype`.
 #[inline]
 fn arr_elemtype(array: &[u8]) -> Oid {
     u32::from_ne_bytes([array[12], array[13], array[14], array[15]])
@@ -817,7 +836,7 @@ fn fc_text_to_array_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 fn fc_array_to_text(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let m = scratch_mcx();
-    let elemtype = arr_elemtype(arg_bytes(fcinfo, 0));
+    let elemtype = arr_elemtype(arg_array_image(fcinfo, 0));
     let v = arg_array_datum(m.mcx(), fcinfo, 0);
     let fldsep = arg_bytes(fcinfo, 1);
     let out = ok(crate::split_format::array_to_text(m.mcx(), v, elemtype, fldsep)).to_vec();
@@ -828,7 +847,7 @@ fn fc_array_to_text_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     // `fldsep` (arg1) are still required (C reads them unconditionally), only
     // `null_string` (arg2) may be NULL.
     let m = scratch_mcx();
-    let elemtype = arr_elemtype(arg_bytes(fcinfo, 0));
+    let elemtype = arr_elemtype(arg_array_image(fcinfo, 0));
     let v = arg_array_datum(m.mcx(), fcinfo, 0);
     let fldsep = arg_bytes(fcinfo, 1);
     let null_string = opt_arg_bytes(fcinfo, 2);
