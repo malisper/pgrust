@@ -116,9 +116,22 @@ type xmlExternalEntityLoader = unsafe extern "C" fn(
 /* ===================================================================== *
  *  libxml2 symbols (the subset xml.c actually invokes through its seams).
  * ===================================================================== */
+/// libxml2 `xmlFreeFunc` — the type of the global `xmlFree` deallocator
+/// pointer (`xmlmemory.h`: `typedef void (*xmlFreeFunc)(void *mem);`).
+type xmlFreeFunc = unsafe extern "C" fn(mem: *mut c_void);
+
 extern "C" {
     fn xmlInitParser();
-    fn xmlFree(p: *mut c_void);
+
+    /// libxml2 exports `xmlFree` as a GLOBAL VARIABLE holding a function
+    /// pointer, NOT as a function:
+    ///   `XMLPUBVAR xmlFreeFunc xmlFree;`  (xmlmemory.h)
+    /// Binding it as `fn xmlFree(...)` resolves the call to the *address of
+    /// the variable* and executes the stored pointer bits as code → SIGBUS.
+    /// It must be bound as a data symbol and called through the contained
+    /// pointer (see the `xmlFree()` wrapper below).
+    #[link_name = "xmlFree"]
+    static xmlFreePtr: xmlFreeFunc;
 
     // parsing
     fn xmlNewParserCtxt() -> *mut xmlParserCtxt;
@@ -231,6 +244,16 @@ extern "C" {
     fn xmlSetStructuredErrorFunc(ctx: *mut c_void, handler: Option<xmlStructuredErrorFunc>);
 
     fn xmlStrlen(s: *const c_uchar) -> c_int;
+}
+
+/// Call the libxml2 global `xmlFree` deallocator through its function-pointer
+/// variable. Mirrors C `xmlFree(p)` (which the headers expand to
+/// `(*xmlFree)(p)` via the `xmlFreeFunc` global). libxml2 initialises the
+/// pointer to its default allocator at library load (and `xmlMemSetup` may
+/// override it), so it is non-NULL for the whole process lifetime.
+#[inline]
+unsafe fn xmlFree(p: *mut c_void) {
+    (xmlFreePtr)(p);
 }
 
 type xmlStructuredErrorFunc = unsafe extern "C" fn(user_data: *mut c_void, error: *mut c_void);
