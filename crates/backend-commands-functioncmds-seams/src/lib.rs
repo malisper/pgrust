@@ -319,8 +319,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `parser_errposition(pstate, location)`.
-    pub fn parser_errposition(location: i32) -> i32
+    /// `parser_errposition(pstate, location)` (parse_node.c): returns the
+    /// 1-based character cursor position
+    /// (`pg_mbstrlen_with_len(p_sourcetext, location) + 1`) for a `>= 0`
+    /// `location`, or `0` when `location < 0` or the source text is `None`
+    /// (the C `pstate == NULL || pstate->p_sourcetext == NULL` no-op). The
+    /// installer carries the active query string (`pstate->p_sourcetext`).
+    pub fn parser_errposition(source: Option<String>, location: i32) -> i32
 );
 
 seam_core::seam!(

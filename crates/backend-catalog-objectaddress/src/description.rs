@@ -119,7 +119,7 @@ pub fn get_object_description<'mcx>(
         }
 
         CastRelationId => {
-            match syscache::cast_source_target::call(object.objectId)? {
+            match crate::resolve::cast_source_target(mcx, object.objectId)? {
                 None => {
                     if !missing_ok {
                         return Err(elog_error(format!(

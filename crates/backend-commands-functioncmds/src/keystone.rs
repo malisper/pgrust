@@ -114,7 +114,7 @@ pub(crate) fn procedure_error(defel: &DefElem) -> PgError {
     ereport(ERROR)
         .errcode(ERRCODE_INVALID_FUNCTION_DEFINITION)
         .errmsg("invalid attribute in procedure definition")
-        .errposition(seam::parser_errposition::call(defel.location))
+        .errposition(seam::parser_errposition::call(None, defel.location))
         .into_error()
 }
 
@@ -123,7 +123,7 @@ pub(crate) fn error_conflicting_def_elem(defel: &DefElem) -> PgError {
     ereport(ERROR)
         .errcode(ERRCODE_SYNTAX_ERROR)
         .errmsg("conflicting or redundant options")
-        .errposition(seam::parser_errposition::call(defel.location))
+        .errposition(seam::parser_errposition::call(None, defel.location))
         .into_error()
 }
 

@@ -163,6 +163,7 @@ pub fn interpret_function_parameter_list(
     objtype: i32,
     want_parameter_types_list: bool,
     want_in_parameter_names_list: bool,
+    source_text: Option<&str>,
 ) -> PgResult<InterpretedParameters> {
     let parameter_count = parameters.len();
     let mut in_types: Vec<Oid> = Vec::with_capacity(parameter_count);
@@ -216,7 +217,7 @@ pub fn interpret_function_parameter_list(
                             "SQL function cannot accept shell type {}",
                             seam::type_name_to_string::call(t.clone())?
                         ))
-                        .errposition(seam::parser_errposition::call(t.location))
+                        .errposition(seam::parser_errposition::call(source_text.map(str::to_string), t.location))
                         .into_error());
                 } else if objtype == OBJECT_AGGREGATE {
                     return Err(ereport(ERROR)
@@ -225,7 +226,7 @@ pub fn interpret_function_parameter_list(
                             "aggregate cannot accept shell type {}",
                             seam::type_name_to_string::call(t.clone())?
                         ))
-                        .errposition(seam::parser_errposition::call(t.location))
+                        .errposition(seam::parser_errposition::call(source_text.map(str::to_string), t.location))
                         .into_error());
                 } else {
                     ereport(NOTICE)
@@ -234,7 +235,7 @@ pub fn interpret_function_parameter_list(
                             "argument type {} is only a shell",
                             seam::type_name_to_string::call(t.clone())?
                         ))
-                        .errposition(seam::parser_errposition::call(t.location))
+                        .errposition(seam::parser_errposition::call(source_text.map(str::to_string), t.location))
                         .finish(errloc(255, "interpret_function_parameter_list"))?;
                 }
             }
@@ -246,7 +247,7 @@ pub fn interpret_function_parameter_list(
                     "type {} does not exist",
                     seam::type_name_to_string::call(t.clone())?
                 ))
-                .errposition(seam::parser_errposition::call(t.location))
+                .errposition(seam::parser_errposition::call(source_text.map(str::to_string), t.location))
                 .into_error());
         }
 
@@ -260,19 +261,19 @@ pub fn interpret_function_parameter_list(
                 return Err(ereport(ERROR)
                     .errcode(ERRCODE_INVALID_FUNCTION_DEFINITION)
                     .errmsg("aggregates cannot accept set arguments")
-                    .errposition(seam::parser_errposition::call(fp.location))
+                    .errposition(seam::parser_errposition::call(source_text.map(str::to_string), fp.location))
                     .into_error());
             } else if objtype == OBJECT_PROCEDURE {
                 return Err(ereport(ERROR)
                     .errcode(ERRCODE_INVALID_FUNCTION_DEFINITION)
                     .errmsg("procedures cannot accept set arguments")
-                    .errposition(seam::parser_errposition::call(fp.location))
+                    .errposition(seam::parser_errposition::call(source_text.map(str::to_string), fp.location))
                     .into_error());
             } else {
                 return Err(ereport(ERROR)
                     .errcode(ERRCODE_INVALID_FUNCTION_DEFINITION)
                     .errmsg("functions cannot accept set arguments")
-                    .errposition(seam::parser_errposition::call(fp.location))
+                    .errposition(seam::parser_errposition::call(source_text.map(str::to_string), fp.location))
                     .into_error());
             }
         }
@@ -284,7 +285,7 @@ pub fn interpret_function_parameter_list(
                 return Err(ereport(ERROR)
                     .errcode(ERRCODE_INVALID_FUNCTION_DEFINITION)
                     .errmsg("VARIADIC parameter must be the last input parameter")
-                    .errposition(seam::parser_errposition::call(fp.location))
+                    .errposition(seam::parser_errposition::call(source_text.map(str::to_string), fp.location))
                     .into_error());
             }
             in_types.push(toid);
@@ -306,7 +307,7 @@ pub fn interpret_function_parameter_list(
                     return Err(ereport(ERROR)
                         .errcode(ERRCODE_INVALID_FUNCTION_DEFINITION)
                         .errmsg("VARIADIC parameter must be the last parameter")
-                        .errposition(seam::parser_errposition::call(fp.location))
+                        .errposition(seam::parser_errposition::call(source_text.map(str::to_string), fp.location))
                         .into_error());
                 }
                 /* Procedures with output parameters always return RECORD */
@@ -329,7 +330,7 @@ pub fn interpret_function_parameter_list(
                         return Err(ereport(ERROR)
                             .errcode(ERRCODE_INVALID_FUNCTION_DEFINITION)
                             .errmsg("VARIADIC parameter must be an array")
-                            .errposition(seam::parser_errposition::call(fp.location))
+                            .errposition(seam::parser_errposition::call(source_text.map(str::to_string), fp.location))
                             .into_error());
                     }
                 }
@@ -374,7 +375,7 @@ pub fn interpret_function_parameter_list(
                         return Err(ereport(ERROR)
                             .errcode(ERRCODE_INVALID_FUNCTION_DEFINITION)
                             .errmsg(format!("parameter name \"{name}\" used more than once"))
-                            .errposition(seam::parser_errposition::call(fp.location))
+                            .errposition(seam::parser_errposition::call(source_text.map(str::to_string), fp.location))
                             .into_error());
                     }
                 }
@@ -394,7 +395,7 @@ pub fn interpret_function_parameter_list(
                 return Err(ereport(ERROR)
                     .errcode(ERRCODE_INVALID_FUNCTION_DEFINITION)
                     .errmsg("only input parameters can have default values")
-                    .errposition(seam::parser_errposition::call(fp.location))
+                    .errposition(seam::parser_errposition::call(source_text.map(str::to_string), fp.location))
                     .into_error());
             }
 
@@ -408,7 +409,7 @@ pub fn interpret_function_parameter_list(
                 return Err(ereport(ERROR)
                     .errcode(ERRCODE_INVALID_COLUMN_REFERENCE)
                     .errmsg("cannot use table references in parameter default value")
-                    .errposition(seam::parser_errposition::call(fp.location))
+                    .errposition(seam::parser_errposition::call(source_text.map(str::to_string), fp.location))
                     .into_error());
             }
 
@@ -421,7 +422,7 @@ pub fn interpret_function_parameter_list(
                     .errmsg(
                         "input parameters after one with a default value must also have defaults",
                     )
-                    .errposition(seam::parser_errposition::call(fp.location))
+                    .errposition(seam::parser_errposition::call(source_text.map(str::to_string), fp.location))
                     .into_error());
             }
 
@@ -434,7 +435,7 @@ pub fn interpret_function_parameter_list(
                 return Err(ereport(ERROR)
                     .errcode(ERRCODE_INVALID_FUNCTION_DEFINITION)
                     .errmsg("procedure OUT parameters cannot appear after one with a default value")
-                    .errposition(seam::parser_errposition::call(fp.location))
+                    .errposition(seam::parser_errposition::call(source_text.map(str::to_string), fp.location))
                     .into_error());
             }
         }
@@ -746,7 +747,7 @@ fn compute_function_attributes(
                 return Err(ereport(ERROR)
                     .errcode(ERRCODE_INVALID_FUNCTION_DEFINITION)
                     .errmsg("invalid attribute in procedure definition")
-                    .errposition(seam::parser_errposition::call(defel.location))
+                    .errposition(seam::parser_errposition::call(None, defel.location))
                     .into_error());
             }
             windowfunc_item = Some(defel.clone());
@@ -1035,6 +1036,7 @@ pub fn CreateFunction<'mcx>(
         },
         true,
         true,
+        query_string.as_deref(),
     )?;
 
     let prorettype: Oid;

@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 mcx = { path = "../mcx" }
 backend-utils-error = { path = "../backend-utils-error" }
+backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
 
 # Ported owner crates (call directly)
 backend-catalog-namespace = { path = "../backend-catalog-namespace" }

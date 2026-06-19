@@ -414,6 +414,7 @@ pub fn DefineAggregate(
             OBJECT_AGGREGATE,
             false,
             false,
+            pstate.p_sourcetext.as_ref().map(|s| s.as_str()),
         )?;
         parameterTypes = interpreted.parameter_types;
         allParameterTypes = interpreted.all_parameter_types;

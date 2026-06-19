@@ -1691,6 +1691,69 @@ pub fn get_catalog_object_by_oid<'mcx>(
     get_catalog_object_by_oid_extended(mcx, catalog, oidcol, object_id, false)
 }
 
+/// The `(castsource, casttarget)` projection of the `CastRelationId` arm shared
+/// by `getObjectDescription` (objectaddress.c 2969) and `getObjectIdentityParts`
+/// (objectaddress.c 4927). Faithful to the C inline body:
+///
+/// ```c
+/// castDesc = table_open(CastRelationId, AccessShareLock);
+/// rcscan = systable_beginscan(castDesc, CastOidIndexId, true, NULL, 1, skey);
+/// tup = systable_getnext(rcscan);
+/// if (!HeapTupleIsValid(tup)) { ... return; }     // -> Ok(None)
+/// castForm = (Form_pg_cast) GETSTRUCT(tup);
+/// // castForm->castsource, castForm->casttarget
+/// systable_endscan(rcscan);
+/// table_close(castDesc, AccessShareLock);
+/// ```
+///
+/// `castsource`/`casttarget` are `NOT NULL` columns, so they are read directly
+/// (no null short-circuit). `Ok(None)` is the C `!HeapTupleIsValid(tup)` (the
+/// caller raises its own "could not find tuple for cast" when `!missing_ok`).
+pub fn cast_source_target<'mcx>(
+    mcx: Mcx<'mcx>,
+    castid: Oid,
+) -> PgResult<Option<(Oid, Oid)>> {
+    use types_storage::lock::AccessShareLock;
+
+    let cast_desc = backend_access_common_relation_seams::relation_open::call(
+        mcx,
+        CastRelationId,
+        AccessShareLock,
+    )?;
+
+    let tup = get_catalog_object_by_oid(mcx, &cast_desc, Anum_pg_cast_oid, castid)?;
+
+    let Some(tup) = tup else {
+        cast_desc.close(AccessShareLock)?;
+        return Ok(None);
+    };
+
+    let castsource = cast_attr_oid(mcx, &tup, Anum_pg_cast_castsource, &cast_desc)?;
+    let casttarget = cast_attr_oid(mcx, &tup, Anum_pg_cast_casttarget, &cast_desc)?;
+
+    cast_desc.close(AccessShareLock)?;
+    Ok(Some((castsource, casttarget)))
+}
+
+/// `heap_getattr(tup, attnum, RelationGetDescr(castDesc), &isnull)` for a
+/// `NOT NULL` `pg_cast` oid column, returning the `Oid` value. Mirrors the
+/// macro's `fastgetattr` -> `nocachegetattr` for `attnum > 0`.
+fn cast_attr_oid<'mcx>(
+    mcx: Mcx<'mcx>,
+    tup: &FormedTuple<'_>,
+    attnum: i16,
+    cast_desc: &Relation<'mcx>,
+) -> PgResult<Oid> {
+    let datum: TupleDatum<'mcx> = backend_access_common_heaptuple::nocachegetattr(
+        mcx,
+        &tup.tuple,
+        attnum as i32,
+        &cast_desc.rd_att,
+        tup.data.as_slice(),
+    )?;
+    Ok(datum.as_oid())
+}
+
 /// `get_catalog_object_by_oid_extended(Relation catalog, AttrNumber oidcol,
 /// Oid objectId, bool locktuple)` (objectaddress.c 2803).
 pub fn get_catalog_object_by_oid_extended<'mcx>(

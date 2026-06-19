@@ -213,11 +213,31 @@ fn error_conflicting_def_elem(defel: &DefElem) -> PgError {
         .expect_err("ereport(ERROR) always yields an Err")
 }
 
-/// `parser_errposition(pstate, location)` — without a `ParseState` we cannot map
-/// the byte offset to a cursor position, so (as the unported-grammar dispatch
-/// passes no pstate) we mirror the `pstate == NULL` C behaviour: no errposition.
+/// `parser_errposition(pstate, location)` (parse_node.c). Many `DefineType`
+/// call sites are reached without a `ParseState` (the unported-grammar dispatch
+/// passes none), where the C `pstate == NULL` no-op applies — those callers pass
+/// `None` and get `0`. The `like = <type>` branch, however, does carry the
+/// active query string (`pstate->p_sourcetext`, threaded through `DefineType`),
+/// so it reproduces the full body:
+///   if (location < 0) return 0;
+///   if (p_sourcetext == NULL) return 0;
+///   pos = pg_mbstrlen_with_len(p_sourcetext, location) + 1;
 fn parser_errposition(_location: i32) -> i32 {
     0
+}
+
+/// Source-aware `parser_errposition(pstate, location)` for the `DefineType`
+/// branches that thread the query string.
+fn parser_errposition_src(source: Option<&str>, location: i32) -> i32 {
+    if location < 0 {
+        return 0;
+    }
+    match source {
+        Some(s) => {
+            backend_utils_mb_mbutils_seams::pg_mbstrlen_with_len::call(s.as_bytes(), location) + 1
+        }
+        None => 0,
+    }
 }
 
 /// `defGetString(def)` (define.c).
@@ -435,6 +455,7 @@ pub fn DefineType<'mcx>(
     mcx: Mcx<'mcx>,
     names: &[String],
     parameters: &[Node],
+    source_text: Option<&str>,
 ) -> PgResult<ObjectAddress> {
     let mut internalLength: i16 = -1; /* default: variable-length */
     let mut inputName: Option<Vec<String>> = None;
@@ -615,7 +636,23 @@ pub fn DefineType<'mcx>(
      * overridden by other options regardless of the ordering in the list.
      */
     if let Some(el) = likeTypeEl {
-        let (typlen, typbyval, typalign, typstorage) = typenameTypeFields(&defGetTypeName(el)?)?;
+        // likeType = typenameType(pstate, defGetTypeName(likeTypeEl), NULL);
+        // The C threads `pstate` so the "does not exist"/"is only a shell"
+        // error carries `parser_errposition(pstate, typeName->location)`; the
+        // `typename_type_id` seam strips the ParseState, so we re-attach the
+        // cursor position from the threaded query string here.
+        let like_type_name = defGetTypeName(el)?;
+        let (typlen, typbyval, typalign, typstorage) =
+            typenameTypeFields(&like_type_name).map_err(|e| {
+                if e.cursor_position().is_none() {
+                    e.with_cursor_position(parser_errposition_src(
+                        source_text,
+                        like_type_name.location,
+                    ))
+                } else {
+                    e
+                }
+            })?;
         internalLength = typlen;
         byValue = typbyval;
         alignment = typalign;
@@ -4750,7 +4787,12 @@ fn define_stmt_seam<'mcx>(
                     }
                 }
             }
-            DefineType(mcx, &names, &definition)
+            DefineType(
+                mcx,
+                &names,
+                &definition,
+                pstate.p_sourcetext.as_ref().map(|s| s.as_str()),
+            )
         }
         OBJECT_OPERATOR => {
             // Assert(stmt->args == NIL).

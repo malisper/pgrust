@@ -69,7 +69,7 @@ pub fn init_seams() {
 /// parity; `CreateFunction` re-derives what it needs.
 fn create_function_seam<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    _pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
+    pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
     stmt: &types_nodes::nodes::Node<'mcx>,
 ) -> types_error::PgResult<types_catalog::catalog_dependency::ObjectAddress> {
     use backend_parser_parse_type::rich_node_to_parse;
@@ -136,7 +136,8 @@ fn create_function_seam<'mcx>(
         sql_body: None,
     };
 
-    ddl_core::CreateFunction(mcx, &pn, sql_body_rich, None)
+    let query_string = pstate.p_sourcetext.as_ref().map(|s| s.as_str().to_string());
+    ddl_core::CreateFunction(mcx, &pn, sql_body_rich, query_string)
 }
 
 /// Outward-seam adapter for `CreateCast(stmt)` (utility.c `ProcessUtilitySlow`

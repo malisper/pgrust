@@ -1074,14 +1074,19 @@ pub fn init_seams() {
             location
         }
     });
-    // functioncmds.c (CreateFunction) likewise re-declares `parser_errposition`
-    // (parse_node.c) without its `ParseState`; with no source text reachable the
-    // C reduces to `location < 0 ? 0 : location`.
-    backend_commands_functioncmds_seams::parser_errposition::set(|location| {
+    // functioncmds.c / aggregatecmds.c call `parser_errposition(pstate,
+    // location)` (parse_node.c). The installer carries the active query string
+    // (`pstate->p_sourcetext`) so the seam reproduces the full C body:
+    //   if (location < 0) return 0;
+    //   if (p_sourcetext == NULL) return 0;
+    //   pos = pg_mbstrlen_with_len(p_sourcetext, location) + 1;
+    backend_commands_functioncmds_seams::parser_errposition::set(|source, location| {
         if location < 0 {
-            0
-        } else {
-            location
+            return 0;
+        }
+        match source {
+            Some(s) => mb::pg_mbstrlen_with_len::call(s.as_bytes(), location) + 1,
+            None => 0,
         }
     });
     backend_parser_scansup_seams::truncate_identifier::set(truncate_identifier);

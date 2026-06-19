@@ -163,6 +163,8 @@ pub const Anum_pg_amop_oid: i16 = 1;
 pub const Anum_pg_amproc_oid: i16 = 1;
 // pg_cast
 pub const Anum_pg_cast_oid: i16 = 1;
+pub const Anum_pg_cast_castsource: i16 = 2;
+pub const Anum_pg_cast_casttarget: i16 = 3;
 // pg_collation
 pub const Anum_pg_collation_oid: i16 = 1;
 pub const Anum_pg_collation_collname: i16 = 2;
