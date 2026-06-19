@@ -510,10 +510,7 @@ pub fn ExecInitLimit<'mcx>(
 ) -> PgResult<PgBox<'mcx, LimitStateData<'mcx>>> {
     let mcx = estate.es_query_cxt;
 
-    let limit: &'mcx Limit<'mcx> = match node {
-        types_nodes::nodes::Node::Limit(l) => l,
-        other => panic!("castNode(Limit, node) failed: {other:?}"),
-    };
+    let limit: &'mcx Limit<'mcx> = node.expect_limit();
 
     // check for unsupported flags
     //   Assert(!(eflags & EXEC_FLAG_MARK));
