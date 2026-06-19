@@ -465,7 +465,7 @@ fn lock_view_recurse(
     };
 
     /* LockViewRecurse_walker((Node *) viewquery, &context); */
-    let node = Node::Query(viewquery);
+    let node = Node::mk_query(mcx, viewquery);
     let walk_result = lock_view_recurse_walker(mcx, &node, &mut context);
 
     /*

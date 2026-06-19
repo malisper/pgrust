@@ -39,7 +39,7 @@ fn result_node_text_with_costs() {
     // Build a Result plan node and its plan-state.
     let plan_node: PgBox<'_, Node<'_>> = alloc_in(
         mcx,
-        Node::Result(ResultPlan {
+        Node::mk_result(mcx, ResultPlan {
             plan: empty_plan(),
             resconstantqual: None,
         }),
@@ -82,7 +82,7 @@ fn nested_result_recursion_text() {
     // Outer Result plan node.
     let outer_plan: PgBox<'_, Node<'_>> = alloc_in(
         mcx,
-        Node::Result(ResultPlan {
+        Node::mk_result(mcx, ResultPlan {
             plan: empty_plan(),
             resconstantqual: None,
         }),
@@ -90,7 +90,7 @@ fn nested_result_recursion_text() {
     .unwrap();
     let inner_plan: PgBox<'_, Node<'_>> = alloc_in(
         mcx,
-        Node::Result(ResultPlan {
+        Node::mk_result(mcx, ResultPlan {
             plan: empty_plan(),
             resconstantqual: None,
         }),
@@ -156,7 +156,7 @@ fn target_rel_valuesscan_alias_text() {
     let ctx = MemoryContext::new("explain-test");
     let mcx = ctx.mcx();
 
-    let plan_node: Node<'_> = Node::ValuesScan(ValuesScan {
+    let plan_node: Node<'_> = Node::mk_values_scan(mcx, ValuesScan {
         scan: Scan {
             plan: empty_plan(),
             scanrelid: 1,
@@ -237,14 +237,14 @@ fn parse_option_list_costs_off_format_json() {
 fn mk_defelem<'mcx>(mcx: mcx::Mcx<'mcx>, name: &str, val: &str) -> PgBox<'mcx, Node<'mcx>> {
     let arg = alloc_in(
         mcx,
-        Node::String(types_nodes::value::StringNode {
+        Node::mk_string(mcx, types_nodes::value::StringNode {
             sval: mcx::PgString::from_str_in(val, mcx).unwrap(),
         }),
     )
     .unwrap();
     alloc_in(
         mcx,
-        Node::DefElem(types_nodes::ddlnodes::DefElem {
+        Node::mk_def_elem(mcx, types_nodes::ddlnodes::DefElem {
             defnamespace: None,
             defname: Some(mcx::PgString::from_str_in(name, mcx).unwrap()),
             arg: Some(arg),
