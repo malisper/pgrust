@@ -23,6 +23,7 @@ use types_core::Oid;
 // Every other (genuine-value) Datum use in this crate — the `FmgrArg`/`FmgrOut`
 // boundary value arms — has moved onto canonical `types_tuple::Datum<'mcx>`.
 use types_datum::{Datum, NullableDatum};
+use types_error::SoftErrorContext;
 
 use crate::boundary::RefPayload;
 
@@ -133,6 +134,16 @@ pub struct FunctionCallInfoBaseData {
     /// `fmNodePtr context` — extra info about context (the C node-tag a
     /// context-demuxing callee switches on). `None` is C's NULL.
     pub context: Option<ContextNode>,
+    /// Soft-error channel. In C the soft-error sink reaches the called function
+    /// as `fcinfo->context` when it `IsA(ErrorSaveContext)` (an input function
+    /// does `escontext = (Node *) fcinfo->context`). The tag-only `context`
+    /// above cannot carry the real `ErrorSaveContext`, so it lives here as an
+    /// owned, caller-supplied sink: the caller installs `Some(..)` to request
+    /// soft handling, the called function (via its fmgr adapter) routes a
+    /// recoverable error into it through `ereturn`, and the caller reads it back
+    /// after the call. `None` is C's NULL escontext — the called function's
+    /// `ereturn` degrades to a hard error (panic), exactly as C `ereport`s.
+    pub escontext: Option<SoftErrorContext>,
     /// `fmNodePtr resultinfo` — extra info about the result (set-returning
     /// `ReturnSetInfo`). The tag-only carrier; `None` is C's NULL.
     pub resultinfo: Option<ContextNode>,
@@ -176,6 +187,7 @@ impl FunctionCallInfoBaseData {
         Self {
             flinfo,
             context,
+            escontext: None,
             resultinfo,
             fncollation,
             isnull: false,
@@ -185,6 +197,27 @@ impl FunctionCallInfoBaseData {
             ref_result: None,
             internal_args: Vec::new(),
         }
+    }
+
+    /// Install the soft-error sink (C: pointing `fcinfo->context` at an
+    /// `ErrorSaveContext` node). The called function's fmgr adapter routes a
+    /// recoverable error here instead of throwing.
+    pub fn set_escontext(&mut self, escontext: SoftErrorContext) {
+        self.escontext = Some(escontext);
+    }
+
+    /// Borrow the soft-error sink for an fmgr adapter to thread into the value
+    /// core (`Some` is C's non-NULL `escontext`; `None` means throw hard).
+    pub fn escontext_mut(&mut self) -> Option<&mut SoftErrorContext> {
+        self.escontext.as_mut()
+    }
+
+    /// C `SOFT_ERROR_OCCURRED(fcinfo->context)`: did the called function record
+    /// a recoverable error into the installed sink?
+    pub fn soft_error_occurred(&self) -> bool {
+        self.escontext
+            .as_ref()
+            .is_some_and(|c| c.error_occurred())
     }
 
     pub fn nargs(&self) -> usize {
@@ -299,6 +332,7 @@ impl Clone for FunctionCallInfoBaseData {
         Self {
             flinfo: self.flinfo.clone(),
             context: self.context,
+            escontext: self.escontext.clone(),
             resultinfo: self.resultinfo,
             fncollation: self.fncollation,
             isnull: self.isnull,

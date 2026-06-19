@@ -159,16 +159,25 @@ fn raise(err: types_error::PgError) -> ! {
 // ===========================================================================
 
 /// Generic `reg*in(cstring)` adapter: the value core takes `(mcx, &str,
-/// Option<&mut SoftErrorContext>)` and returns `PgResult<Option<Oid>>`. At this
-/// boundary the soft-error context is `None` (a hard parse — `fcinfo->context`
-/// soft folding is not modeled on the frame, matching every other adt `_in`).
+/// Option<&mut SoftErrorContext>)` and returns `PgResult<Option<Oid>>`. The
+/// soft-error sink comes from the call frame (C: `escontext = (Node *)
+/// fcinfo->context`): a recoverable parse/lookup failure `ereturn`s into it and
+/// the core returns `Ok(None)`, leaving the result NULL; a hard `ereport(ERROR)`
+/// (escontext absent, or a non-recoverable callee) propagates as a panic. With
+/// no caller-supplied sink the frame's escontext is `None`, so every error is
+/// hard — matching C's `regprocin` with a NULL escontext.
 fn fc_regin(
     fcinfo: &mut FunctionCallInfoBaseData,
     core: fn(mcx::Mcx<'_>, &str, Option<&mut types_error::SoftErrorContext>) -> types_error::PgResult<Option<Oid>>,
 ) -> Datum {
-    let s = arg_cstring(fcinfo, 0);
+    let s = alloc::string::String::from(arg_cstring(fcinfo, 0));
     let m = scratch_mcx();
-    match core(m.mcx(), s, None) {
+    // Move the frame's sink out so it can be threaded into the core, then put
+    // the (possibly error-recorded) sink back for the boundary to inspect.
+    let mut escontext = fcinfo.escontext.take();
+    let outcome = core(m.mcx(), &s, escontext.as_mut());
+    fcinfo.escontext = escontext;
+    match outcome {
         Ok(opt) => ret_oid_opt(fcinfo, opt),
         Err(e) => raise(e),
     }
@@ -836,15 +845,25 @@ fn fc_hash_record_extended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     }
 }
 
-/// `record_in(cstring, oid, int4) -> record`. The soft-error context is `None`
-/// (a hard parse — `fcinfo->context` soft folding is not modeled on the frame,
-/// matching every other adt `_in`). A `None` (soft-error) result is NULL.
+/// `record_in(cstring, oid, int4) -> record`. The soft-error sink comes from
+/// the call frame (C: `escontext = (Node *) fcinfo->context`): a recoverable
+/// parse failure `ereturn`s into it and the core returns `Ok(None)` (NULL
+/// result); a hard error propagates. With no caller sink the frame's escontext
+/// is `None`, so every error is hard.
 fn fc_record_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let s = arg_cstring(fcinfo, 0);
+    let s = alloc::string::String::from(arg_cstring(fcinfo, 0));
     let tupioparam = arg_oid(fcinfo, 1);
     let tup_typmod = arg_i32(fcinfo, 2);
     let m = scratch_mcx();
-    let r = crate::rowtypes::record_in(m.mcx(), Some(s), tupioparam, tup_typmod, None);
+    let mut escontext = fcinfo.escontext.take();
+    let r = crate::rowtypes::record_in(
+        m.mcx(),
+        Some(&s),
+        tupioparam,
+        tup_typmod,
+        escontext.as_mut(),
+    );
+    fcinfo.escontext = escontext;
     match r {
         Ok(Some(t)) => ret_record(fcinfo, &t),
         Ok(None) => ret_null(fcinfo),

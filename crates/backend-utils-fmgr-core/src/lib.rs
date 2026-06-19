@@ -1305,11 +1305,19 @@ fn invoke_io3(
     Ok((result, fcinfo.result_is_null()))
 }
 
-/// Same as [`invoke_io3`] but threads a soft-error context. A soft error fills
-/// the context (returning `(0, true, true)`); with no context the error is
-/// rethrown. C builds `fcinfo` with `escontext` as the context node; here the
-/// `PGFunction` has no escontext channel, so the callee signals a soft error by
-/// returning `Err`, absorbed into the context at this boundary.
+/// Same as [`invoke_io3`] but threads a soft-error context. C builds `fcinfo`
+/// with the `ErrorSaveContext` node as `fcinfo->context` and the input function
+/// `ereturn`s a recoverable error into it; a non-recoverable `ereport(ERROR)`
+/// is thrown regardless.
+///
+/// The frame now carries a real `escontext` channel ([`FunctionCallInfoBaseData::
+/// set_escontext`]): the input function's fmgr adapter threads it into the value
+/// core, which routes a soft error there via `ereturn`. So:
+///   * the soft error never reaches the `Err` path — it lands in the frame's
+///     escontext, which is copied back out (`(0, true, true)`);
+///   * an `Err` here is a genuine hard error (a panic that bypassed escontext);
+///     it propagates even when `escontext` is `Some` — no more blanket folding
+///     of every hard error into a soft one.
 fn invoke_io3_soft(
     mcx: Mcx<'_>,
     res: &FmgrResolution,
@@ -1328,15 +1336,30 @@ fn invoke_io3_soft(
             NullableDatum::value(typmod),
         ],
     );
-    match function_call_invoke(mcx, res, &mut fcinfo) {
-        Ok(result) => Ok((result, fcinfo.result_is_null(), false)),
-        Err(e) => match escontext {
-            Some(ctx) => {
-                ctx.save(e);
-                Ok((Datum::null(), true, true))
+    // Install the soft-error sink on the frame (C: `fcinfo->context =
+    // (Node *) escontext`), preserving the caller's `details_wanted`. With no
+    // caller sink, the frame keeps a NULL escontext and the callee's `ereturn`
+    // degrades to a hard error.
+    if let Some(caller) = escontext.as_ref() {
+        fcinfo.set_escontext(types_error::SoftErrorContext::new(caller.details_wanted()));
+    }
+    let invoke = function_call_invoke(mcx, res, &mut fcinfo);
+    // C: SOFT_ERROR_OCCURRED(escontext) — did the callee record a soft error?
+    if fcinfo.soft_error_occurred() {
+        // Reflect the captured soft error back into the caller's sink, then
+        // report the soft outcome. (A soft error never produces an `Err` here.)
+        if let Some(caller) = escontext {
+            match fcinfo.escontext.as_mut().and_then(|c| c.take_error()) {
+                Some(captured) => caller.save(captured),
+                None => caller.mark_error_occurred(),
             }
-            None => Err(e),
-        },
+        }
+        return Ok((Datum::null(), true, true));
+    }
+    match invoke {
+        Ok(result) => Ok((result, fcinfo.result_is_null(), false)),
+        // A hard `ereport(ERROR)`: propagate even under a soft request.
+        Err(e) => Err(e),
     }
 }
 
