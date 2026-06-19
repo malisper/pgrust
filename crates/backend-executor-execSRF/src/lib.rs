@@ -73,6 +73,8 @@ mod pg_input_error_info;
 mod regexp_split;
 mod srf_registry;
 mod unnest;
+mod multirange_unnest;
+mod system_srf;
 pub use srf_registry::{register_srf, srf_invoke_by_oid, srf_is_registered};
 
 #[cfg(test)]
@@ -145,6 +147,16 @@ pub fn init_seams() {
     // `record` argument through the now-installed funcapi `srf_arg_record` seam.
     // Their bodies are `backend-utils-adt-jsonfuncs::{populate,recordset}`.
     json_record::register_json_record_srfs();
+    // `unnest(anymultirange)` (OID 1293) — the value-per-call SRF emitting each
+    // member range (its `multirange_get_typcache`->rngtype + `multirange_get_range`
+    // serialization core is
+    // `backend-utils-adt-multirangetypes::operators::multirange_unnest_images`).
+    multirange_unnest::register_multirange_unnest();
+    // `pg_options_to_table(text[])` (OID 2289) and `pg_prepared_statement()` (OID
+    // 2510) — the materialize-mode system SRFs whose `(mcx, fcinfo)` bodies drive
+    // `InitMaterializedSRF`/`materialized_srf_putvalues` themselves (cores in
+    // `backend-foreign-foreign` / `backend-commands-prepare`).
+    system_srf::register_system_srfs();
 }
 
 // ===========================================================================

@@ -801,3 +801,60 @@ pub fn multirange_unnest<'mcx>(
     }
     Ok(ranges)
 }
+
+/// SRF-friendly entry point for `multirange_unnest` (multirangetypes.c:2714)
+/// driven over the executor frame: parse the multirange varlena image, resolve
+/// the member-range typcache (C: `multirange_get_typcache(fcinfo,
+/// MultirangeTypeGetOid(mr))->rngtype`), and materialize the whole member-range
+/// sequence as serialized `RangeType` varlena images — the on-disk
+/// `RangeTypePGetDatum` byte image of each member range, in order, exactly what
+/// each `SRF_RETURN_NEXT` would hand back. Keeps the one unavoidable raw
+/// `VARSIZE` read of a `RangeTypeP` inside this ADT crate (which owns the
+/// serialized layout), handing the executor-frame SRF a clean `Vec<Vec<u8>>` it
+/// crosses on the by-ref lane one element per call.
+pub fn multirange_unnest_images<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<Vec<Vec<u8>>> {
+    // DatumGetMultirangeTypeP(PG_GETARG_DATUM(0)): copy the by-ref varlena image
+    // into `mcx` (so the detoasted handle below lives for `'mcx`) and hand its
+    // address to `datum_get_multirange_type_p` as the argument Datum word.
+    let word = {
+        use core::alloc::Layout;
+        use mcx::Allocator;
+        mcx::check_alloc_size(image.len())?;
+        let layout = Layout::from_size_align(image.len().max(1), 8)
+            .expect("valid MultirangeType image layout");
+        let block = mcx.allocate(layout).map_err(|_| mcx.oom(image.len()))?;
+        let dst = block.as_ptr() as *mut u8;
+        // SAFETY: `dst` heads a freshly allocated `image.len()`-byte region.
+        unsafe {
+            core::ptr::copy_nonoverlapping(image.as_ptr(), dst, image.len());
+        }
+        Datum::from_usize(dst as usize)
+    };
+    let multirange = crate::typcache_io::datum_get_multirange_type_p(mcx, word)?;
+
+    // typcache = multirange_get_typcache(fcinfo, MultirangeTypeGetOid(mr));
+    // rangetyp = typcache->rngtype;
+    let mtc = crate::typcache_io::multirange_get_typcache(multirange_type_get_oid(multirange))?;
+    let rangetyp = *mtc
+        .rngtype
+        .expect("multirange typcache has a range subtype");
+
+    let ranges = multirange_unnest(mcx, &rangetyp, multirange)?;
+
+    let mut out = Vec::with_capacity(ranges.len());
+    for r in ranges {
+        // RangeType is a plain 4-byte-header uncompressed varlena (range_serialize
+        // writes SET_VARSIZE), so its byte length is VARSIZE_4B(ptr) = (len >> 2).
+        // SAFETY: `r.ptr` is a fully-detoasted RangeType image allocated in `mcx`
+        // (by `multirange_get_range`); the low 30 bits of its 4-byte header carry
+        // the total image length.
+        let size = unsafe {
+            let raw = (r.ptr as *const u8).cast::<u32>().read_unaligned();
+            (raw >> 2) as usize
+        };
+        // SAFETY: the `size`-byte image is contiguous and live for `'mcx`.
+        let bytes = unsafe { core::slice::from_raw_parts(r.ptr as *const u8, size) };
+        out.push(bytes.to_vec());
+    }
+    Ok(out)
+}

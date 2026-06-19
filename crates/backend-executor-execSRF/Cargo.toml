@@ -79,6 +79,18 @@ backend-utils-adt-tsvector-core = { path = "../backend-utils-adt-tsvector-core" 
 # / json_object_keys_worker).
 backend-utils-adt-jsonfuncs = { path = "../backend-utils-adt-jsonfuncs" }
 
+# unnest(anymultirange) (OID 1293): the member-range materializer
+# (multirange_unnest_images) over multirange_get_typcache + multirange_get_range.
+backend-utils-adt-multirangetypes = { path = "../backend-utils-adt-multirangetypes" }
+
+# pg_options_to_table(text[]) (OID 2289): the (option_name, option_value)
+# materialize-mode SRF body (untransformRelOptions + materialized_srf_putvalues).
+backend-foreign-foreign = { path = "../backend-foreign-foreign" }
+
+# pg_prepared_statement() (OID 2510): the prepared-statement catalog materialize-
+# mode SRF body (the PREPARED_QUERIES hash scan + materialized_srf_putvalues).
+backend-commands-prepare = { path = "../backend-commands-prepare" }
+
 # Shared type stack + allocator + error.
 allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
 backend-utils-error = { path = "../backend-utils-error" }
