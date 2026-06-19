@@ -15,8 +15,10 @@
 //!
 //! The `oidvector` I/O (`buildoidvector`, `oidvectorin`, `oidvectorout`) builds
 //! and reads the on-disk `oidvector` image — a 1-D `ArrayType` of `OIDOID`,
-//! lower bound 0, no NULLs — through the array subsystem's `construct_md_array`
-//! / `oidvector_to_oids_bytes`, and is registered here. The binary
+//! lower bound 0, no NULLs. `buildoidvector` lays out the fixed `oidvector`
+//! struct by hand (as the C does, *not* via `construct_md_array`, which would
+//! collapse an empty vector to a zero-dimension array and break the syscache
+//! key match), and is registered here. The binary
 //! `oidvectorrecv`/`oidvectorsend` still need the `array_recv`/`array_send`
 //! fcinfo-sharing path (they reuse the caller's `flinfo->fn_extra` cache) and so
 //! remain unregistered; they will land with that array machinery rather than be
@@ -69,28 +71,54 @@ pub fn oidsend<'mcx>(mcx: mcx::Mcx<'mcx>, arg1: Oid) -> PgResult<types_datum::By
     Ok(backend_libpq_pqformat::pq_endtypsend(buf))
 }
 
-/// `buildoidvector(oids, n)` (oid.c:84): build the `oidvector` on-disk image — a
-/// 1-D `ArrayType` of `OIDOID` (4-byte pass-by-value, int-aligned, no NULLs)
-/// whose index lower bound is 0 (not 1), matching the historical oidvector
-/// layout. An empty input yields a zero-dimension array.
+/// `buildoidvector(oids, n)` (oid.c:84): build the `oidvector` on-disk image.
+///
+/// Unlike a general `OIDOID[]` array, an `oidvector` is a fixed-layout struct
+/// (`palloc0(OidVectorSize(n))` then the header is filled by hand); it is *not*
+/// built through `construct_md_array`, so even an empty vector (`n == 0`) keeps
+/// `ndim == 1` / `dim1 == 0` rather than collapsing to a zero-dimension empty
+/// array. This layout is load-bearing: the PROCNAMEARGSNSP / PROCNAMEARGSNSP-
+/// style syscaches key on the oidvector bytes, and the search key (this
+/// function) must be byte-identical to the on-disk `proargtypes` image the
+/// invalidation path deforms, or a catcache entry can never be invalidated.
+///
+/// Header layout (`offsetof(oidvector, values) == 24`): `vl_len_` (set via
+/// `SET_VARSIZE` = `total << 2`), `ndim = 1`, `dataoffset = 0` (never any
+/// nulls), `elemtype = OIDOID`, `dim1 = n`, `lbound1 = 0` (index lower bound 0,
+/// historical), followed by the `n` 4-byte `Oid` values.
 pub fn buildoidvector<'mcx>(mcx: mcx::Mcx<'mcx>, oids: &[Oid]) -> PgResult<mcx::PgVec<'mcx, u8>> {
-    // construct_md_array(elems, NULL, 1, &dim1, &lbound0, OIDOID, sizeof(Oid),
-    //                    true /* byval */, TYPALIGN_INT)
-    let datums: Vec<types_datum::Datum> =
-        oids.iter().map(|&o| types_datum::Datum::from_oid(o)).collect();
-    let n = oids.len() as i32;
-    backend_utils_adt_arrayfuncs::construct::construct_md_array(
-        mcx,
-        &datums,
-        None,
-        1,
-        &[n],
-        &[0], // lbound 0, per oidvector convention
-        OIDOID,
-        core::mem::size_of::<Oid>() as i32,
-        true,
-        b'i', // TYPALIGN_INT
-    )
+    // offsetof(oidvector, values): vl_len_(4) + ndim(4) + dataoffset(4) +
+    // elemtype(4) + dim1(4) + lbound1(4) = 24.
+    const HEADER: usize = 24;
+    let n = oids.len();
+    // OidVectorSize(n) = offsetof(oidvector, values) + n * sizeof(Oid).
+    let total = HEADER + n * core::mem::size_of::<Oid>();
+
+    // result = (oidvector *) palloc0(OidVectorSize(n));
+    let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    buf.resize(total, 0u8);
+
+    // SET_VARSIZE(result, OidVectorSize(n)): va_header = (uint32) total << 2.
+    let vl_len: u32 = (total as u32) << 2;
+    buf[0..4].copy_from_slice(&vl_len.to_ne_bytes());
+    // result->ndim = 1;
+    buf[4..8].copy_from_slice(&1i32.to_ne_bytes());
+    // result->dataoffset = 0;
+    buf[8..12].copy_from_slice(&0i32.to_ne_bytes());
+    // result->elemtype = OIDOID;
+    buf[12..16].copy_from_slice(&OIDOID.to_ne_bytes());
+    // result->dim1 = n;
+    buf[16..20].copy_from_slice(&(n as i32).to_ne_bytes());
+    // result->lbound1 = 0;
+    buf[20..24].copy_from_slice(&0i32.to_ne_bytes());
+
+    // if (n > 0 && oids) memcpy(result->values, oids, n * sizeof(Oid));
+    for (i, v) in oids.iter().enumerate() {
+        let off = HEADER + i * core::mem::size_of::<Oid>();
+        buf[off..off + 4].copy_from_slice(&v.to_ne_bytes());
+    }
+
+    Ok(buf)
 }
 
 /// `oidvectorin` (oid.c:122): parse a whitespace-separated list of OIDs into an
