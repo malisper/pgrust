@@ -64,6 +64,20 @@ pub mod nodes;
 /// `PgNodeBox`, and `OpaqueNode` newtype that the later flip wires in. Coexists
 /// with the live `nodes::Node` enum, which is UNTOUCHED.
 pub mod opaque_node;
+/// P3 node-opaque pre-flip CODEGEN (additive, gated off): the generated
+/// `NodePayload` adapter + impl set for every flip-target `Node` variant
+/// (`#[repr(transparent)]` `NodePayload_<V>` + `node_tag`/`clone_in_dyn`/
+/// `equal_dyn` + single-lifetime soundness witness). Emitted by
+/// `build.rs::emit_node_payload_impls`; compiled ONLY behind the off-by-default
+/// `node_payload_codegen` feature so the live `nodes::Node` enum stays
+/// byte-untouched in the normal build. At the atomic flip the gate is removed and
+/// this module becomes the live representation. See
+/// docs/proposals/node-opaque-migration.md §6.5 step 1.
+#[cfg(feature = "node_payload_codegen")]
+#[allow(non_camel_case_types, dead_code, unused_imports)]
+pub mod node_payload_gen {
+    include!(concat!(env!("OUT_DIR"), "/node_payload_impls.rs"));
+}
 /// Central generated leaf-node tree (`Node<'mcx>` + `node_tag`/`copy_node_in`/
 /// `equal_node`), built by `build.rs` from `nodetags.h` + `nodes.list`.
 pub mod node_tree;

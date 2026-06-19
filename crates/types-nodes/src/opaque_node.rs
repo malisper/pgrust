@@ -46,6 +46,69 @@ use crate::nodes::{Node, NodeTag};
 use mcx::{Mcx, PgBox};
 use types_error::PgResult;
 
+/// Installable node-equality seam for the generated `NodePayload::equal_dyn`
+/// bodies (node-opaque P3 codegen). The real per-payload `equal()` comparators
+/// (the `equalfuncs.c` port) live in the higher `backend-nodes-equalfuncs`
+/// crate, which depends on `types-nodes` — so the generated `equal_dyn` in this
+/// crate cannot call them directly without a dependency cycle. Instead each
+/// `equal_dyn` (after the tag gate) routes through this fn-ptr seam, which
+/// `backend-nodes-equalfuncs` installs at the flip via [`install_node_equal_seam`].
+///
+/// The seam receives the shared `NodeTag` (both payloads already tag-checked
+/// equal by the caller) and the two `repr(transparent)` payload data pointers
+/// (`__payload_ptr()`), exactly the witnesses C's `equal()` dispatch uses. Until
+/// installed it panics **loudly** (the project's sanctioned "not yet wired" seam
+/// pattern, mirroring `node_tree`'s `out_node_custom`/`read_node_custom`) — it
+/// NEVER fabricates a `true`/`false`. This whole codegen module is gated behind
+/// the off-by-default `node_payload_codegen` feature, so the seam is dead in the
+/// normal build.
+pub type NodeEqualFn = fn(NodeTag, *const (), *const ()) -> bool;
+
+/// The installed comparator's fn-pointer, stored as `usize` (0 = uninstalled).
+/// `no_std`-native interior mutability — the crate is `#![no_std]`, so this uses
+/// a `core` atomic rather than `std::sync::OnceLock`.
+static NODE_EQUAL_SEAM: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+/// Install the real node-equality comparator (called once by
+/// `backend-nodes-equalfuncs::init_seams` at the flip). Idempotent: a second
+/// install with the same fn is a no-op; a conflicting install is a hard error
+/// (mirrors the project's seam-install discipline).
+pub fn install_node_equal_seam(f: NodeEqualFn) {
+    use core::sync::atomic::Ordering;
+    let addr = f as usize;
+    match NODE_EQUAL_SEAM.compare_exchange(0, addr, Ordering::SeqCst, Ordering::SeqCst) {
+        Ok(_) => {}
+        Err(prev) => {
+            // Already installed. A re-install with a *different* fn pointer is a
+            // wiring bug; the same pointer is a benign double-install.
+            if prev != addr {
+                panic!("install_node_equal_seam: conflicting re-install");
+            }
+        }
+    }
+}
+
+/// The seam entry the generated `equal_dyn` bodies call. Panics loudly until
+/// `backend-nodes-equalfuncs` installs the real comparator at the flip.
+#[inline]
+pub fn node_equal_seam(tag: NodeTag, a: *const (), b: *const ()) -> bool {
+    use core::sync::atomic::Ordering;
+    let addr = NODE_EQUAL_SEAM.load(Ordering::SeqCst);
+    if addr == 0 {
+        panic!(
+            "node_equal_seam: node-equality comparator for tag {tag:?} not installed; \
+             backend-nodes-equalfuncs installs it at the node-opaque flip \
+             (this codegen module is gated behind `node_payload_codegen`)"
+        );
+    }
+    // SAFETY: `addr` is a non-null value previously stored from a valid
+    // `NodeEqualFn` pointer by `install_node_equal_seam`; transmuting a usize
+    // back to that exact fn-ptr type is sound (same provenance, same signature).
+    let f: NodeEqualFn = unsafe { core::mem::transmute::<usize, NodeEqualFn>(addr) };
+    f(tag, a, b)
+}
+
 /// A concrete node payload (`struct Var<'mcx>` etc.). Lifetime-parameterized, so
 /// it cannot be `: 'static` and cannot require [`core::any::Any`] — the downcast
 /// witness is the [`NodeTag`], which we already have (C's `castNode`).

@@ -8,6 +8,16 @@ publish.workspace = true
 name = "types_nodes"
 path = "src/lib.rs"
 
+[features]
+# Node-opaque migration P3 pre-flip codegen (docs/proposals/node-opaque-migration.md
+# §6.5 step 1). When enabled, compiles the generated `NodePayload` adapter + impl
+# set (`$OUT_DIR/node_payload_impls.rs`, emitted by `build.rs::emit_node_payload_impls`)
+# into the `node_payload_gen` module. OFF BY DEFAULT: the normal build
+# (`cargo build --bin postgres`) leaves the live `Node` enum byte-untouched; this
+# feature only exists to validate that the codegen compiles ahead of the atomic
+# flip. At the flip the gate is removed and the module becomes the live rep.
+node_payload_codegen = []
+
 [dependencies]
 types-core = { path = "../types-core" }
 types-acl = { path = "../types-acl" }
