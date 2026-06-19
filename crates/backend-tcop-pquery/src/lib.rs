@@ -1206,7 +1206,12 @@ fn run_from_store(
                 break;
             }
 
-            exectuples_seam::exec_reset_one_slot::call(&mut slot)?; /* ExecClearTuple(slot) */
+            // ExecClearTuple(slot): clear the stored tuple only, keeping the
+            // slot's tuple descriptor for the next fetch. (ExecResetOneSlot would
+            // *release* tts_tupleDescriptor — that is the executor-teardown op,
+            // not the per-row clear, and would leave the slot descriptor-less for
+            // the second and subsequent rows.)
+            exectuples_seam::exec_clear_tuple_payload::call(&mut slot)?;
 
             /*
              * check our tuple count.. if we've processed the proper number then
