@@ -32,6 +32,19 @@ seam!(
     ) -> types_error::PgResult<Option<ProcCompileInfo<'mcx>>>
 );
 
+/* ---- pl/plpgsql opaque-header accessor ------------------------------------- */
+
+seam!(
+    /// `cfunc->use_count` read through a procedural language's *opaque*
+    /// `CachedFunction` header handle. PL/pgSQL's `PLpgSQL_function.cfunc` is
+    /// modeled in `types-plpgsql` as an inherited-opacity handle (it forwards
+    /// the header across this seam rather than embedding the real struct), so
+    /// `plpgsql_free_function_memory`'s "Better not call this on an in-use
+    /// function" assert reads the count back through funccache, the field's
+    /// owner. The funccache owner installs this; until then it panics loudly.
+    pub fn cfunc_use_count(cfunc: types_plpgsql::CachedFunction) -> u64
+);
+
 /* ---- commands/trigger.c (TriggerData downcast) ----------------------------- */
 
 seam!(

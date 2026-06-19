@@ -9492,6 +9492,7 @@ name = "backend-executor-functions"
 version = "0.0.0"
 dependencies = [
  "backend-access-transam-xact-seams",
+ "backend-catalog-pg-proc-seams",
  "backend-executor-execMain",
  "backend-executor-execTuples",
  "backend-executor-functions-seams",
@@ -9502,6 +9503,7 @@ dependencies = [
  "backend-parser-driver",
  "backend-rewrite-rewritehandler-seams",
  "backend-tcop-dest",
+ "backend-utils-cache-lsyscache-seams",
  "backend-utils-time-snapmgr-seams",
  "mcx",
  "seam-core",
@@ -13847,6 +13849,22 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-plpgsql",
+]
+
+[[package]]
+name = "backend-pl-plpgsql-funcs"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-spi-seams",
+ "backend-nodes-core",
+ "backend-utils-cache-funccache-seams",
+ "backend-utils-mmgr-mcxt-seams",
+ "mcx",
+ "types-error",
+ "types-logical",
+ "types-nodes",
+ "types-plpgsql",
+ "types-ri-triggers",
 ]
 
 [[package]]
@@ -20521,6 +20539,7 @@ dependencies = [
  "types-error",
  "types-funccache",
  "types-nodes",
+ "types-plpgsql",
 ]
 
 [[package]]

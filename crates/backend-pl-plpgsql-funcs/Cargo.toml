@@ -1,0 +1,26 @@
+[package]
+name = "backend-pl-plpgsql-funcs"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_pl_plpgsql_funcs"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-error = { path = "../types-error" }
+types-plpgsql = { path = "../types-plpgsql" }
+types-logical = { path = "../types-logical" }
+types-ri-triggers = { path = "../types-ri-triggers" }
+# Real Bitmapset for mark_local_assignment_targets (nodes/bitmapset.c).
+types-nodes = { path = "../types-nodes" }
+backend-nodes-core = { path = "../backend-nodes-core" }
+# SPI_freeplan (spi.c — via owner seam).
+backend-executor-spi-seams = { path = "../backend-executor-spi-seams" }
+# MemoryContextDelete (mcxt.c — via owner seam).
+backend-utils-mmgr-mcxt-seams = { path = "../backend-utils-mmgr-mcxt-seams" }
+# cfunc->use_count read through plpgsql's opaque CachedFunction header (via
+# funccache's seam; uninstalled until the plpgsql/funccache header model unifies).
+backend-utils-cache-funccache-seams = { path = "../backend-utils-cache-funccache-seams" }

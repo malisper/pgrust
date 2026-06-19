@@ -67,6 +67,7 @@ use backend_optimizer_util_clauses_seams as clauses_seams;
 use backend_rewrite_rewritehandler_seams as rewrite_seams;
 use backend_utils_time_snapmgr_seams as snapmgr;
 use backend_access_transam_xact_seams as xact_seams;
+use backend_utils_cache_lsyscache_seams as lsyscache_seams;
 
 /// `VOIDOID` (pg_type.dat).
 const VOIDOID: Oid = 2278;
@@ -74,6 +75,41 @@ const VOIDOID: Oid = 2278;
 const RECORDOID: Oid = 2249;
 /// `PROVOLATILE_VOLATILE` (pg_proc.h) — `'v'`.
 const PROVOLATILE_VOLATILE: u8 = b'v';
+/// `TYPTYPE_PSEUDO` (pg_type.h) — `'p'`.
+const TYPTYPE_PSEUDO: u8 = b'p';
+/// `CMD_UTILITY` discriminant (`nodes.h`).
+const CMD_UTILITY: types_nodes::nodes::CmdType = types_nodes::nodes::CmdType::CMD_UTILITY;
+
+// Polymorphic pseudo-type OIDs (pg_type.dat) for `IsPolymorphicType`.
+const ANYELEMENTOID: Oid = 2283;
+const ANYARRAYOID: Oid = 2277;
+const ANYNONARRAYOID: Oid = 2776;
+const ANYENUMOID: Oid = 3500;
+const ANYRANGEOID: Oid = 3831;
+const ANYMULTIRANGEOID: Oid = 4537;
+const ANYCOMPATIBLEOID: Oid = 5077;
+const ANYCOMPATIBLEARRAYOID: Oid = 5078;
+const ANYCOMPATIBLENONARRAYOID: Oid = 5079;
+const ANYCOMPATIBLERANGEOID: Oid = 5080;
+const ANYCOMPATIBLEMULTIRANGEOID: Oid = 4538;
+
+/// `IsPolymorphicType(typid)` (catalog/pg_type.h:313): a pure OID comparison.
+fn is_polymorphic_type(typid: Oid) -> bool {
+    matches!(
+        typid,
+        ANYELEMENTOID
+            | ANYARRAYOID
+            | ANYNONARRAYOID
+            | ANYENUMOID
+            | ANYRANGEOID
+            | ANYMULTIRANGEOID
+            | ANYCOMPATIBLEOID
+            | ANYCOMPATIBLEARRAYOID
+            | ANYCOMPATIBLENONARRAYOID
+            | ANYCOMPATIBLERANGEOID
+            | ANYCOMPATIBLEMULTIRANGEOID
+    )
+}
 
 // ===========================================================================
 // DR_sqlfunction — the result-capturing destination receiver.
@@ -500,6 +536,111 @@ fn push_query_list<'mcx>(
 }
 
 // ===========================================================================
+// SQL-function-body validator — fmgr_sql_validator's body-check leg
+// (pg_proc.c:884-988), installed as the pg-proc `run_sql_function_body_check`
+// seam. Reached on CREATE FUNCTION ... LANGUAGE sql with check_function_bodies
+// = on, after pg_proc's in-crate pseudotype checks pass.
+// ===========================================================================
+
+/// The body-checking portion of `fmgr_sql_validator` (pg_proc.c:884-988): read
+/// `prosrc`/`prosqlbody`, then — when no input type is polymorphic — parse and
+/// analyze the body queries so any syntax or type error is raised at CREATE
+/// FUNCTION time; with a polymorphic argument we can only raw-parse (the actual
+/// argument datatypes are unresolvable until call time), which still catches
+/// silly syntactic errors. Finally run `check_sql_fn_statements`.
+///
+/// The `error_context_stack` push/pop wiring the
+/// `sql_function_parse_error_callback` (transposing a syntax error to CREATE
+/// FUNCTION coordinates) lives in pg_proc, around this call.
+///
+/// `check_sql_fn_retval` / `get_func_result_type` return-type validation
+/// (pg_proc.c:980-985) is functions.c machinery not yet ported in this tree
+/// (`check_sql_fn_retval` operates over the rewritten query-tree lists and
+/// needs the full `coerce_fn_result_column` family); when it lands it slots in
+/// after `check_sql_fn_statements`. Its absence weakens validation (a return
+/// type mismatch is caught at call time rather than definition time) but never
+/// produces a wrong result.
+fn check_sql_function_body(mcx: Mcx<'_>, funcoid: Oid) -> PgResult<()> {
+    // init_sql_fcache-equivalent reads: pg_proc facts + the body source.
+    let form = clauses_seams::get_func_form::call(funcoid)?;
+    let (prosrc, prosqlbody) = clauses_seams::get_func_sql_body::call(mcx, funcoid)?;
+
+    // haspolyarg (pg_proc.c:869-881): recomputed here — the pseudotype/poly
+    // argument loop ran in pg_proc's in-crate validator before this seam, but
+    // only its error-raising verdict crossed; we need the boolean. A
+    // polymorphic argument means actual datatypes are unresolvable now, so we
+    // skip full analysis (and the retval check) and only raw-parse.
+    let mut haspolyarg = false;
+    for &argtype in form.proargtypes.iter() {
+        if lsyscache_seams::get_typtype::call(argtype)? == TYPTYPE_PSEUDO
+            && is_polymorphic_type(argtype)
+        {
+            haspolyarg = true;
+        }
+    }
+
+    if haspolyarg {
+        // Raw-parse only (pg_proc.c:931 pg_parse_query): catch syntax errors.
+        // prosqlbody, if present, is already a parsed Query tree, so a
+        // polymorphic function with a stored body has nothing left to syntax-
+        // check; for the prosrc text we raw_parser it.
+        if prosqlbody.as_ref().is_none() {
+            let prosrc_mcx: &str = {
+                let boxed = mcx::alloc_in(mcx, mcx::PgString::from_str_in(prosrc.as_str(), mcx)?)?;
+                mcx::leak_in(boxed).as_str()
+            };
+            let _ = backend_parser_driver::raw_parser(
+                mcx,
+                prosrc_mcx,
+                types_parsenodes::RawParseMode::RAW_PARSE_DEFAULT,
+            )?;
+        }
+        return Ok(());
+    }
+
+    // Full precheck (pg_proc.c:937-963): parse + analyze + rewrite the body.
+    // `parse_body_queries` runs raw_parser + parse_analyze_fixedparams ($n
+    // against proargtypes); for a stored prosqlbody it deserializes the already-
+    // analyzed Query trees. (AcquireRewriteLocks / pg_rewrite_query — the C
+    // rewrite leg — apply RLS/rule rewriting; the repo's analyze path produces
+    // analyzed Query trees suitable for the statement-shape checks below.)
+    let querytrees = parse_body_queries(
+        mcx,
+        prosrc.as_str(),
+        prosqlbody.as_ref().map(|s| s.as_str()),
+        &form.proargtypes,
+    )?;
+
+    // check_sql_fn_statements (functions.c:2042): reject calling procedures
+    // with output arguments from a SQL function body.
+    check_sql_fn_statements(&querytrees)?;
+
+    Ok(())
+}
+
+/// `check_sql_fn_statements` (functions.c:2042) + `check_sql_fn_statement`
+/// (functions.c:2051): for each body `Query`, disallow a `CALL` of a procedure
+/// that has output arguments (unsupported inside a SQL function).
+fn check_sql_fn_statements(querytrees: &[Query<'_>]) -> PgResult<()> {
+    for query in querytrees {
+        if query.commandType == CMD_UTILITY {
+            if let Some(util) = query.utilityStmt.as_ref() {
+                if let Node::CallStmt(stmt) = &**util {
+                    if !stmt.outargs.is_empty() {
+                        return Err(PgError::error(
+                            "calling procedures with output arguments is not \
+                             supported in SQL functions",
+                        )
+                        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+// ===========================================================================
 // run_body — the postquel_start/getnext/end loop over the body queries.
 // ===========================================================================
 
@@ -626,4 +767,12 @@ fn run_one_query<'mcx>(
 /// Install this crate's inward seams. Wired into `seams-init`.
 pub fn init_seams() {
     backend_executor_functions_seams::fmgr_sql::set(fmgr_sql);
+    // fmgr_sql_validator's body-check leg (pg_proc.c:884-988). Cross-crate
+    // install of the pg-proc seam: the body-check is functions.c machinery
+    // (parse/analyze the body, check_sql_fn_statements), reused for the
+    // CREATE FUNCTION validator path.
+    backend_catalog_pg_proc_seams::run_sql_function_body_check::set(|funcoid| {
+        let ctx = MemoryContext::new("check_sql_function_body");
+        check_sql_function_body(ctx.mcx(), funcoid)
+    });
 }

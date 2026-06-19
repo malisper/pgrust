@@ -25,6 +25,8 @@ types-slot = { path = "../types-slot" }
 
 # own inward seam crate (installed from init_seams)
 backend-executor-functions-seams = { path = "../backend-executor-functions-seams" }
+# cross-crate seam install: fmgr_sql_validator's body-check (pg_proc.c)
+backend-catalog-pg-proc-seams = { path = "../backend-catalog-pg-proc-seams" }
 
 # direct deps (no cycle: none of these depend on this crate or its seam)
 backend-executor-execMain = { path = "../backend-executor-execMain" }
@@ -40,3 +42,4 @@ backend-rewrite-rewritehandler-seams = { path = "../backend-rewrite-rewritehandl
 backend-optimizer-util-clauses-seams = { path = "../backend-optimizer-util-clauses-seams" }
 backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
