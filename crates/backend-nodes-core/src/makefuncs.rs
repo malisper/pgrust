@@ -52,7 +52,7 @@
 //! `detoast_attr` seam.
 
 use mcx::{alloc_in, Mcx, MemoryContext, PgBox, PgString, PgVec};
-use types_core::primitive::{AttrNumber, Index, Oid};
+use types_core::primitive::{AttrNumber, Index, InvalidAttrNumber, Oid};
 use types_core::catalog::BOOLOID;
 use types_core::InvalidOid;
 // Datum-unification: the owned `Const` carries the canonical unified value type
@@ -114,6 +114,84 @@ pub fn make_var(
         varlevelsup,
         ..Default::default()
     }
+}
+
+/// `makeWholeRowVar(rte, varno, varlevelsup, allowScalar)` (makefuncs.c) —
+/// build a whole-row `Var` referencing range-table entry `rte`.
+///
+/// The RELATION / join / VALUES / CTE / tablefunc cases are ported in full
+/// (a named composite rowtype from `get_rel_type_id`, or a RECORD). The
+/// SUBQUERY-expanded-from-SRF and FUNCTION cases need `exprType` over a
+/// `RangeTblFunction.funcexpr` carried as a `Node *`; the repo's
+/// `expr_type` works over the trimmed `Expr`, not a parse `Node`, so those
+/// arms mirror PG and panic precisely (the planner only reaches them when a
+/// view/SRF subquery or a FUNCTION RTE is whole-row-referenced).
+pub fn make_whole_row_var(
+    rte: &types_nodes::parsenodes::RangeTblEntry<'_>,
+    varno: i32,
+    varlevelsup: Index,
+    allow_scalar: bool,
+) -> PgResult<Var> {
+    use types_nodes::parsenodes::RTEKind;
+    const RECORDOID: Oid = 2249;
+
+    let result = match rte.rtekind {
+        RTEKind::RTE_RELATION => {
+            // relation: the rowtype is a named composite type
+            let toid = lsyscache::get_rel_type_id::call(rte.relid)?;
+            if toid == InvalidOid {
+                return Err(types_error::PgError::error(format!(
+                    "relation with OID {} does not have a composite type",
+                    rte.relid
+                ))
+                .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE));
+            }
+            make_var(varno, InvalidAttrNumber, toid, -1, InvalidOid, varlevelsup)
+        }
+        RTEKind::RTE_SUBQUERY => {
+            if rte.relid != InvalidOid {
+                // Subquery expanded from a view: use the view's rowtype.
+                let toid = lsyscache::get_rel_type_id::call(rte.relid)?;
+                if toid == InvalidOid {
+                    return Err(types_error::PgError::error(format!(
+                        "relation with OID {} does not have a composite type",
+                        rte.relid
+                    ))
+                    .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE));
+                }
+                make_var(varno, InvalidAttrNumber, toid, -1, InvalidOid, varlevelsup)
+            } else if !rte.functions.is_empty() {
+                // Subquery expanded from a set-returning function — must match
+                // the RTE_FUNCTION single-function path. Needs exprType over the
+                // RangeTblFunction.funcexpr Node, which the repo can't yet take.
+                panic!(
+                    "make_whole_row_var: RTE_SUBQUERY-from-SRF needs exprType over \
+                     RangeTblFunction.funcexpr (a parse Node, not a trimmed Expr) — \
+                     model gap, not reached by the inheritance path"
+                );
+            } else {
+                // Normal subquery-in-FROM: anonymous RECORD.
+                make_var(varno, InvalidAttrNumber, RECORDOID, -1, InvalidOid, varlevelsup)
+            }
+        }
+        RTEKind::RTE_FUNCTION => {
+            if rte.funcordinality || rte.functions.len() != 1 {
+                // More than one function or ordinality: anonymous RECORD.
+                make_var(varno, InvalidAttrNumber, RECORDOID, -1, InvalidOid, varlevelsup)
+            } else {
+                let _ = allow_scalar;
+                panic!(
+                    "make_whole_row_var: single-function RTE_FUNCTION needs exprType/\
+                     exprCollation over RangeTblFunction.funcexpr (a parse Node, not a \
+                     trimmed Expr) — model gap, not reached by the inheritance path"
+                );
+            }
+        }
+        // join, tablefunc, VALUES, CTE, etc. — whole-row Var of RECORD type.
+        _ => make_var(varno, InvalidAttrNumber, RECORDOID, -1, InvalidOid, varlevelsup),
+    };
+
+    Ok(result)
 }
 
 thread_local! {

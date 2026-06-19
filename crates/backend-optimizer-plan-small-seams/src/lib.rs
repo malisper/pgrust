@@ -84,8 +84,10 @@ seam_core::seam!(
     /// `add_other_rels_to_query(root)` (initsplan.c:196): expand appendrels by
     /// adding "otherrels" for their children, propagating lateral_relids etc.
     /// `run` resolves the per-RT-index RTE (`rtekind`/`inh`/`relkind`) the
-    /// inheritance-expansion decision reads.
-    pub fn add_other_rels_to_query<'mcx>(root: &mut PlannerInfo, run: &PlannerRun<'mcx>)
+    /// inheritance-expansion decision reads; the inheritance branch of
+    /// `expand_inherited_rtentry` interns fresh child RTEs into the run store, so
+    /// it is threaded `&mut`.
+    pub fn add_other_rels_to_query<'mcx>(root: &mut PlannerInfo, run: &mut PlannerRun<'mcx>)
 );
 
 seam_core::seam!(

@@ -16,6 +16,18 @@ use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{PlannerGlobal, PlannerInfo, QueryId};
 
 seam_core::seam!(
+    /// `select_rowmark_type(rte, strength)` (planner.c:2503) — choose the
+    /// `RowMarkType` for a relation RTE given a `FOR UPDATE/SHARE` strength.
+    /// inherit.c's `expand_single_inheritance_child` re-selects the mark type
+    /// per child (relkind may differ from the parent). Owner planner.c is
+    /// ported; the cyclic edge from inherit.c routes through this seam.
+    pub fn select_rowmark_type(
+        rte: &types_nodes::parsenodes::RangeTblEntry<'_>,
+        strength: types_nodes::rawnodes::LockClauseStrength,
+    ) -> PgResult<types_nodes::execnodes::RowMarkType>
+);
+
+seam_core::seam!(
     /// `pg_plan_query(querytree, query_string, cursorOptions, boundParams)`
     /// (tcop/postgres.c → planner): plan one rewritten `Query` into a
     /// `PlannedStmt`. COPY passes `CURSOR_OPT_PARALLEL_OK` and no bound params.

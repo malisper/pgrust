@@ -14,6 +14,21 @@ use types_nodes::partition::PartitionPruneContext;
 use types_nodes::{Bitmapset, EStateData};
 
 seam_core::seam!(
+    /// `prune_append_rel_partitions(rel)` (partprune.c:723): perform
+    /// compile-time partition pruning of a partitioned baserel using its
+    /// `baserestrictinfo`, returning the `PartitionDesc` indexes of the
+    /// surviving partitions (the C `Bitmapset *`). inherit.c's
+    /// `expand_partitioned_rtentry` calls it to initialize `rel->live_parts`.
+    /// Owned by `partprune.c`, which is keystone-blocked on the
+    /// `PartitionPruneStep` carrier (see the partprune-blocked memory note), so
+    /// this currently panics when reached.
+    pub fn prune_append_rel_partitions<'mcx>(
+        root: &mut types_pathnodes::PlannerInfo,
+        rel: types_pathnodes::RelId,
+    ) -> PgResult<types_pathnodes::Relids>
+);
+
+seam_core::seam!(
     /// `make_partition_pruneinfo(root, parentrel, subpaths, prunequal)`
     /// (partprune.c:226): build a `PartitionPruneInfo` describing how the
     /// executor should prune `subpaths` of the partitioned `parentrel` using

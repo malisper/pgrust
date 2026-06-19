@@ -531,7 +531,13 @@ pub fn get_relation_info<'mcx>(
         ext::set_relation_partition_info::call(root, rel, relation_object_id)?;
     }
 
-    backend_utils_cache_relcache_seams::relation_close::call(relation_object_id)?;
+    // `table_close(relation, NoLock)` — a single unpin. The `relation` guard's
+    // Drop is `relation_close(rel, NoLock)`, so consuming it here is the one
+    // close (an additional by-OID `relation_close::call` would double-unpin and
+    // drive `rd_refcnt` below the caller's outstanding pins — the inheritance
+    // expansion path, which holds its own parent open across `get_relation_info`,
+    // exposes that underflow).
+    relation.close(NoLock)?;
 
     // (The C get_relation_info_hook is a plugin hook; no plugin hook surface in
     // this port.)

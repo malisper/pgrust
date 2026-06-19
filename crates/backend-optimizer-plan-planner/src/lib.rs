@@ -7578,6 +7578,9 @@ pub fn init_seams() {
 
     backend_optimizer_plan_planner_seams::pg_plan_query::set(pg_plan_query_impl);
     backend_optimizer_plan_planner_seams::plan_cluster_use_sort::set(plan_cluster_use_sort_impl);
+    backend_optimizer_plan_planner_seams::select_rowmark_type::set(|rte, strength| {
+        select_rowmark_type(rte, strength)
+    });
 
     // Window-clause cost seams (costsize.c's cost_windowagg reads them; the
     // planner owns the arena WindowClause + the parse Query they need).

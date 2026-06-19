@@ -72,7 +72,7 @@ fn add_base_rels_to_query_node<'mcx>(
 /// Create "otherrel" `RelOptInfo`s for the children of appendrel baserels.
 pub fn add_other_rels_to_query<'mcx>(
     root: &mut PlannerInfo,
-    run: &PlannerRun<'mcx>,
+    run: &mut PlannerRun<'mcx>,
 ) -> PgResult<()> {
     for rti in 1..root.simple_rel_array_size {
         let rel_id = match root.simple_rel_array[rti as usize] {

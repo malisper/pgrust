@@ -257,7 +257,7 @@ fn make_inh_translation_list(
 
 /// `adjust_appendrel_attrs(root, node, nappinfos, appinfos)` (appendinfo.c) —
 /// copy `node` translating parent Vars/rtindexes to the corresponding child.
-fn adjust_appendrel_attrs(
+pub fn adjust_appendrel_attrs(
     root: &mut PlannerInfo,
     node: Expr,
     appinfos: &[AppendRelInfo],

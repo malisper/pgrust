@@ -50,10 +50,12 @@ seam_core::seam!(
     /// `expand_inherited_rtentry(root, rel, rte, rti)` (inherit.c) — expand an
     /// inheritance/partition parent into its child "otherrels". The owner
     /// (`backend-optimizer-util-inherit`) builds child `RelOptInfo`s via
-    /// `build_simple_rel`, which needs the planner run to resolve RTE handles, so
-    /// the seam carries `&PlannerRun` alongside `&mut PlannerInfo`.
+    /// `build_simple_rel`, and the inheritance branch constructs fresh child RTEs
+    /// (`makeNode(RangeTblEntry)` + `lappend(parse->rtable, childrte)`), which
+    /// interns into the planner-run RTE/Query store — so the seam carries
+    /// `&mut PlannerRun` alongside `&mut PlannerInfo`.
     pub fn expand_inherited_rtentry<'mcx>(
-        run: &PlannerRun<'mcx>,
+        run: &mut PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         rti: i32,
     ) -> PgResult<()>
