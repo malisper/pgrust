@@ -211,6 +211,34 @@ pub fn event_trigger_end_complete_query() {
     });
 }
 
+/// `EventTriggerInhibitCommandCollection` (event_trigger.c) — suppress DDL
+/// command collection for the duration of a command that should not be
+/// reported (e.g. REFRESH MATERIALIZED VIEW CONCURRENTLY's internal work).
+///
+/// C: `if (!currentEventTriggerState) return; currentEventTriggerState->
+/// commandCollectionInhibited = true;`. When no query state is installed
+/// (the common no-event-trigger case) this is a cheap no-op.
+pub fn event_trigger_inhibit_command_collection() {
+    CURRENT_STATE.with(|s| {
+        if let Some(st) = s.borrow_mut().last_mut() {
+            st.command_collection_inhibited = true;
+        }
+    });
+}
+
+/// `EventTriggerUndoInhibitCommandCollection` (event_trigger.c) — re-establish
+/// DDL command collection after a previously inhibited stretch.
+///
+/// C: `if (!currentEventTriggerState) return; currentEventTriggerState->
+/// commandCollectionInhibited = false;`. A no-op when no query state is set.
+pub fn event_trigger_undo_inhibit_command_collection() {
+    CURRENT_STATE.with(|s| {
+        if let Some(st) = s.borrow_mut().last_mut() {
+            st.command_collection_inhibited = false;
+        }
+    });
+}
+
 /// Process-global backing for the `event_triggers` GUC.
 ///
 /// C: `bool event_triggers = true;` (event_trigger.c:86) is the
@@ -633,6 +661,12 @@ pub fn init_seams() {
     );
     backend_tcop_utility_out_seams::event_trigger_end_complete_query::set(
         event_trigger_end_complete_query,
+    );
+    backend_tcop_utility_out_seams::event_trigger_inhibit_command_collection::set(
+        event_trigger_inhibit_command_collection,
+    );
+    backend_tcop_utility_out_seams::event_trigger_undo_inhibit_command_collection::set(
+        event_trigger_undo_inhibit_command_collection,
     );
     backend_tcop_utility_out_seams::event_trigger_ddl_command_start::set(|parsetree| {
         event_trigger_ddl_command_start(parsetree)
