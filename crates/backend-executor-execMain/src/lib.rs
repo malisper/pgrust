@@ -267,16 +267,36 @@ fn InitPlan(query_desc: &mut QueryDesc, eflags: i32) -> PgResult<()> {
         }
 
         // ExecInitRangeTable(estate, rangeTable, permInfos, bms_copy(unprunableRelids)).
-        // Move the range table / permInfos / unprunableRelids out of the bundle's
-        // plannedstmt into the EState (C aliases the planner-owned lists; the
-        // owned model hands the bundle-owned copies over).
-        let range_table = plannedstmt.rtable.take().unwrap_or_else(|| {
-            mcx::PgVec::new_in(estate.es_query_cxt)
-        });
-        let perm_infos = plannedstmt.permInfos.take().unwrap_or_else(|| {
-            mcx::PgVec::new_in(estate.es_query_cxt)
-        });
-        let unpruned = plannedstmt.unprunableRelids.take();
+        // C aliases the planner-owned lists into the EState (`estate->es_range_table
+        // = plannedstmt->rtable`), leaving them reachable through the bundle's
+        // plannedstmt afterward (EXPLAIN reads `queryDesc->plannedstmt->rtable`
+        // post-ExecutorStart). The owned model can't share the same allocation, so
+        // hand the EState a clone and leave the bundle's plannedstmt lists intact.
+        let qcx = estate.es_query_cxt;
+        let range_table = match plannedstmt.rtable.as_ref() {
+            Some(rt) => {
+                let mut out = mcx::vec_with_capacity_in(qcx, rt.len())?;
+                for rte in rt.iter() {
+                    out.push(rte.clone_in(qcx)?);
+                }
+                out
+            }
+            None => mcx::PgVec::new_in(qcx),
+        };
+        let perm_infos = match plannedstmt.permInfos.as_ref() {
+            Some(pi) => {
+                let mut out = mcx::vec_with_capacity_in(qcx, pi.len())?;
+                for p in pi.iter() {
+                    out.push(p.clone_in(qcx)?);
+                }
+                out
+            }
+            None => mcx::PgVec::new_in(qcx),
+        };
+        let unpruned = match plannedstmt.unprunableRelids.as_ref() {
+            Some(b) => Some(mcx::alloc_in(qcx, b.clone_in(qcx)?)?),
+            None => None,
+        };
         execUtils::ExecInitRangeTable(estate, range_table, perm_infos, unpruned)?;
 
         // estate->es_plannedstmt = plannedstmt;  (C aliases; owned model clones a
