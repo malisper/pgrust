@@ -102,3 +102,11 @@ backend-storage-lmgr-predicate-seams = { path = "../backend-storage-lmgr-predica
 backend-commands-event-trigger-seams = { path = "../backend-commands-event-trigger-seams" }
 backend-utils-error-seams = { path = "../backend-utils-error-seams" }
 types-pgstat = { path = "../types-pgstat" }
+
+# index_drop: RelationDropStorage (schedule index storage unlink at commit),
+# pgstat_drop_relation (drop the per-relation stats entry transactionally), the
+# PushActiveSnapshot/GetTransactionSnapshot bracket around the pg_index delete,
+# and the DROP INDEX CONCURRENTLY session-lock / locker-drain leg.
+backend-catalog-storage-seams = { path = "../backend-catalog-storage-seams" }
+backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat-seams" }
+backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }

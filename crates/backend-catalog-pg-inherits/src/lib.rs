@@ -767,6 +767,8 @@ pub fn init_seams() {
     backend_catalog_pg_inherits_seams::type_inherits_from::set(typeInheritsFrom);
     // index_create (catalog/index.c) partition-index parent link.
     backend_catalog_pg_inherits_seams::store_single_inheritance::set(StoreSingleInheritance);
+    // index_drop (catalog/index.c) partition-index parent-link cleanup.
+    backend_catalog_pg_inherits_seams::delete_inherits_tuple::set(DeleteInheritsTuple);
 }
 
 #[cfg(test)]

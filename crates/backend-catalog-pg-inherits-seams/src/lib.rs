@@ -41,3 +41,18 @@ seam_core::seam!(
         seq_number: i32,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `DeleteInheritsTuple(inhrelid, inhparent, expect_detach_pending,
+    /// childname)` (catalog/pg_inherits.c): remove `pg_inherits` rows for a
+    /// child relation (optionally only the one naming `inhparent`). `index_drop`
+    /// (catalog/index.c) calls it as `DeleteInheritsTuple(indexId, InvalidOid,
+    /// false, NULL)` to clear a partition index's parent link. Returns whether
+    /// any row was deleted. `Err` carries its `ereport(ERROR)`s.
+    pub fn delete_inherits_tuple(
+        inhrelid: Oid,
+        inhparent: Oid,
+        expect_detach_pending: bool,
+        childname: Option<&str>,
+    ) -> PgResult<bool>
+);

@@ -1259,6 +1259,19 @@ pub fn init_seams() {
     inward_pc::lock_relation_oid::set(LockRelationOid);
     inward_pc::unlock_relation_oid::set(UnlockRelationOid);
 
+    // index_drop (DROP INDEX CONCURRENTLY) session locks + locker drain.
+    inward::lock_relation_id_for_session::set(|relid, lockmode| {
+        LockRelationIdForSession(&relid, lockmode)
+    });
+    inward::unlock_relation_id_for_session::set(|relid, lockmode| {
+        UnlockRelationIdForSession(&relid, lockmode)
+    });
+    inward::wait_for_lockers::set(|heaplocktag, lockmode, progress| {
+        let ctx = mcx::MemoryContext::new("WaitForLockers");
+        WaitForLockers(ctx.mcx(), heaplocktag, lockmode, progress)
+    });
+    inward::set_locktag_relation::set(set_locktag_relation);
+
     // --- lazy-vacuum driver's relation-lock seams (vacuumlazy.c's truncation
     //     interlock). In C these are macros that take `relation` and derive
     //     `&relation->rd_lockInfo.lockRelId`; here the LockRelId is resolved off

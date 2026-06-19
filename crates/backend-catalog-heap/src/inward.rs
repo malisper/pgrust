@@ -123,6 +123,34 @@ pub fn init_seams() {
     backend_commands_tablecmds_seams::add_relation_not_null_constraints::set(
         crate::AddRelationNotNullConstraints,
     );
+
+    // Catalog-row delete helpers that `index_drop` (catalog/index.c) calls to
+    // clean up a dropped index's pg_class / pg_attribute / pg_statistic rows.
+    // The inward seams carry no `mcx`; the shims allocate a scratch context.
+    backend_catalog_heap_seams::DeleteRelationTuple::set(delete_relation_tuple_seam);
+    backend_catalog_heap_seams::DeleteAttributeTuples::set(delete_attribute_tuples_seam);
+    backend_catalog_heap_seams::RemoveStatistics::set(remove_statistics_seam);
+}
+
+/// Seam body for `DeleteRelationTuple(relid)` (catalog/heap.c). The inward seam
+/// carries no `mcx`.
+fn delete_relation_tuple_seam(relid: types_core::Oid) -> PgResult<()> {
+    let ctx = MemoryContext::new("DeleteRelationTuple");
+    crate::DeleteRelationTuple(ctx.mcx(), relid)
+}
+
+/// Seam body for `DeleteAttributeTuples(relid)` (catalog/heap.c). The inward
+/// seam carries no `mcx`.
+fn delete_attribute_tuples_seam(relid: types_core::Oid) -> PgResult<()> {
+    let ctx = MemoryContext::new("DeleteAttributeTuples");
+    crate::DeleteAttributeTuples(ctx.mcx(), relid)
+}
+
+/// Seam body for `RemoveStatistics(relid, attnum)` (catalog/heap.c). The inward
+/// seam carries no `mcx`.
+fn remove_statistics_seam(relid: types_core::Oid, attnum: i16) -> PgResult<()> {
+    let ctx = MemoryContext::new("RemoveStatistics");
+    crate::RemoveStatistics(ctx.mcx(), relid, attnum)
 }
 
 /// Seam body for `CheckAttributeNamesTypes` (catalog/heap.c). The descriptor

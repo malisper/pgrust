@@ -1714,6 +1714,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCache1(INDEXRELID, index_oid)` then `(tuple->t_self,
+    /// !heap_attisnull(tuple, Anum_pg_index_indexprs, ...))` — the heap TID of
+    /// the index's `pg_index` row (for `CatalogTupleDelete`) plus whether the
+    /// index has expression columns. `index_drop` (catalog/index.c) reads both
+    /// off the single sys-cache fetch the C performs. `Ok(None)` on a cache miss
+    /// (`!HeapTupleIsValid`); the caller raises `cache lookup failed for index`.
+    pub fn pg_index_tid_and_hasexprs(
+        index_oid: Oid,
+    ) -> PgResult<Option<(types_tuple::heaptuple::ItemPointerData, bool)>>
+);
+
+seam_core::seam!(
     /// `SearchSysCache1(INDEXRELID, index_oid)` then
     /// `heap_getattr(rd_indextuple, Anum_pg_index_indexprs, GetPgIndexDescriptor,
     /// &isnull)` + `TextDatumGetCString` — the raw `pg_index.indexprs`

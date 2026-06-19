@@ -2940,6 +2940,25 @@ pub(crate) fn pg_index_has_predicate(index_oid: Oid) -> PgResult<Option<bool>> {
     Ok(Some(!is_null))
 }
 
+/// `SearchSysCache1(INDEXRELID, index_oid)` then `(tuple->t_self,
+/// !heap_attisnull(tuple, Anum_pg_index_indexprs, ...))` — the index's pg_index
+/// heap TID plus whether it has expression columns. `index_drop` reads both off
+/// the single sys-cache fetch the C performs. `Ok(None)` on a cache miss.
+pub(crate) fn pg_index_tid_and_hasexprs(
+    index_oid: Oid,
+) -> PgResult<Option<(types_tuple::heaptuple::ItemPointerData, bool)>> {
+    let scratch = MemoryContext::new("syscache index_drop tid/indexprs projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, INDEXRELID, SysCacheKey::Value(KeyDatum::from_oid(index_oid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let tid = tup.tuple.t_self;
+    let (_value, is_null) = SysCacheGetAttr(mcx, INDEXRELID, &tup, Anum_pg_index_indexprs)?;
+    ReleaseSysCache(tup);
+    Ok(Some((tid, !is_null)))
+}
+
 /// `SearchSysCache1(INDEXRELID, index_oid)` then `heap_getattr(rd_indextuple,
 /// Anum_pg_index_indexprs, ...)` + `TextDatumGetCString` — the raw
 /// `pg_index.indexprs` `pg_node_tree` text, or `None` when the column is null

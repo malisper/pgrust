@@ -420,3 +420,47 @@ seam_core::seam!(
         lock_rel_id: types_storage::lock::LockRelId,
     ) -> PgResult<i32>
 );
+
+seam_core::seam!(
+    /// `LockRelationIdForSession(relid, lockmode)` (lmgr.c): take a session-level
+    /// lock on a relation (survives across the transaction), keyed by its
+    /// `(dbId, relId)` `LockRelId`. Used by `index_drop` (DROP INDEX
+    /// CONCURRENTLY) to hold the table/index across its commit/start sequence.
+    /// `Err` carries the lock-manager `ereport(ERROR)` surface.
+    pub fn lock_relation_id_for_session(
+        relid: types_storage::lock::LockRelId,
+        lockmode: LOCKMODE,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `UnlockRelationIdForSession(relid, lockmode)` (lmgr.c): release a
+    /// session-level relation lock taken by `LockRelationIdForSession`.
+    /// `Err` carries the lock-manager `ereport(ERROR)` surface.
+    pub fn unlock_relation_id_for_session(
+        relid: types_storage::lock::LockRelId,
+        lockmode: LOCKMODE,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `WaitForLockers(heaplocktag, lockmode, progress)` (lmgr.c): wait until all
+    /// conflicting lockers of the relation named by `heaplocktag` have released.
+    /// Used by `index_drop` (DROP INDEX CONCURRENTLY) to drain in-flight users of
+    /// the index. `Err` carries the lock-manager `ereport(ERROR)` surface.
+    pub fn wait_for_lockers(
+        heaplocktag: types_storage::lock::LOCKTAG,
+        lockmode: LOCKMODE,
+        progress: bool,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `SET_LOCKTAG_RELATION(tag, dbid, relid)` (lock.h): build the relation-lock
+    /// `LOCKTAG` for `(dbid, relid)`. `index_drop` uses it to form the heap
+    /// locktag it hands to `WaitForLockers`.
+    pub fn set_locktag_relation(
+        dbid: types_core::Oid,
+        relid: types_core::Oid,
+    ) -> types_storage::lock::LOCKTAG
+);

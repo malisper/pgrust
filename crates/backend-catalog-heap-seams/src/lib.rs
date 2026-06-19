@@ -126,6 +126,30 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `DeleteRelationTuple(relid)` (catalog/heap.c): remove the relation's
+    /// `pg_class` row. Used by `index_drop`'s catalog cleanup. The C allocates
+    /// in `CurrentMemoryContext`, so the seam carries no `mcx`. Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn DeleteRelationTuple(relid: Oid) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `DeleteAttributeTuples(relid)` (catalog/heap.c): remove the relation's
+    /// `pg_attribute` rows. Used by `index_drop`'s catalog cleanup. The C
+    /// allocates in `CurrentMemoryContext`, so the seam carries no `mcx`. Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn DeleteAttributeTuples(relid: Oid) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `RemoveStatistics(relid, attnum)` (catalog/heap.c): remove `pg_statistic`
+    /// rows for a relation (`attnum == 0`) or one column. Used by `index_drop`
+    /// for expressional indexes. The C allocates in `CurrentMemoryContext`, so
+    /// the seam carries no `mcx`. Can `ereport(ERROR)`, carried on `Err`.
+    pub fn RemoveStatistics(relid: Oid, attnum: i16) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `CheckAttributeNamesTypes(tupdesc, relkind, flags)` (catalog/heap.c):
     /// validate a candidate `TupleDesc`'s column names (no duplicates / system
     /// names) and datatypes (no disallowed pseudo-types) for a relation of the

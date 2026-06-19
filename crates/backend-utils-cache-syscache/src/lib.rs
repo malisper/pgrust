@@ -995,6 +995,9 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::pg_index_has_predicate::set(
         projections::pg_index_has_predicate,
     );
+    backend_utils_cache_syscache_seams::pg_index_tid_and_hasexprs::set(
+        projections::pg_index_tid_and_hasexprs,
+    );
     backend_utils_cache_syscache_seams::pg_index_exprs_text::set(
         projections::pg_index_exprs_text,
     );

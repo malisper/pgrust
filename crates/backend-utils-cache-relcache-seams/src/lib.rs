@@ -84,6 +84,15 @@ pub fn relation_with_entry<R>(
 }
 
 seam_core::seam!(
+    /// `RelationForgetRelation(rid)` (relcache.c): drop (or mark drop-pending)
+    /// the relcache entry for a relation the caller has deleted. `index_drop`
+    /// (catalog/index.c) calls it after closing the index relation so the
+    /// relcache won't rebuild the entry while its catalog rows are removed.
+    /// `Err` carries its `ereport(ERROR)`s.
+    pub fn relation_forget_relation(rid: types_core::primitive::Oid) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `RelationIdGetRelation(relationId)` (relcache.c): load (or build) the
     /// relcache entry for `relationId`, taking the `rd_refcnt += 1` pin, and
     /// hand back the consumed slice of the entry copied into `mcx`. `Ok(None)`

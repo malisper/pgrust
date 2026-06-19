@@ -44,6 +44,7 @@ pub fn init_seams() {
     sx::free_fake_relcache_entry::set(free_fake_relcache_entry);
 
     // --- invalidate ---
+    sx::relation_forget_relation::set(crate::invalidate::RelationForgetRelation);
     sx::at_eoxact_relation_cache::set(at_eoxact_relation_cache);
     sx::at_eosubxact_relation_cache::set(at_eosubxact_relation_cache);
     sx::relation_cache_invalidate::set(relation_cache_invalidate);

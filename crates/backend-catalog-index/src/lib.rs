@@ -144,17 +144,21 @@
 //!
 //! # What is NOT landed in this pass (precise STOP boundaries)
 //!
-//! The remaining catalog-*write* drivers — the `index_concurrently_*` family,
-//! `validate_index`, `index_drop`, `reindex_index`/`reindex_relation` — need a
-//! much larger outward producer surface that is not yet ported, so their inward
-//! seams (`reindex_relation`, `index_drop`) stay UNINSTALLED here: a call panics
-//! loudly (mirror-PG-and-panic). Concretely:
+//! `index_drop` (with `index_concurrently_set_dead`) is now ported and INSTALLED:
+//! the non-concurrent path (the DROP TABLE leg that drops a table's indexes,
+//! including the implicit TOAST index) and the DROP/REINDEX INDEX CONCURRENTLY
+//! path (transaction commit/start, snapshot push/pop, session locks +
+//! `WaitForLockers`, `RelationDropStorage`, the pg_index / pg_class /
+//! pg_attribute / pg_statistic / pg_inherits row deletes).
 //!
-//! * `index_drop` / `index_concurrently_*` / `validate_index` /
-//!   `IndexCheckExclusion` need transaction commit/start, snapshot push/pop,
-//!   `WaitForLockers`, `RelationDropStorage`, `performDeletion`, executor
-//!   table-scan + `check_exclusion_constraint`, and `tuplesort`-based TID merge —
-//!   all unported here.
+//! The remaining catalog-*write* drivers — the `index_concurrently_*` build
+//! family, `validate_index`, `reindex_relation` — need a much larger outward
+//! producer surface that is not yet ported, so their inward seams stay
+//! UNINSTALLED here: a call panics loudly (mirror-PG-and-panic). Concretely:
+//!
+//! * `index_concurrently_*` / `validate_index` / `IndexCheckExclusion` need
+//!   executor table-scan + `check_exclusion_constraint` and a `tuplesort`-based
+//!   TID merge — all unported here.
 //! * `FormIndexDatum` is NOT landed here: the `form_index_datum` inward seam's
 //!   result-array contract is the word-model `types_datum::Datum`, but the
 //!   executor eval/slot seams it must route through (`exec_prepare_expr_list` /
@@ -849,6 +853,10 @@ use backend_bootstrap_bootstrap_seams as bootstrap;
 use backend_storage_lmgr_predicate_seams as predicate;
 use backend_commands_event_trigger_seams as event_trigger;
 use backend_utils_error_seams as error_seams;
+use backend_catalog_storage_seams as storage;
+use backend_utils_activity_pgstat_seams as pgstat;
+use backend_storage_lmgr_lmgr_seams as lmgr;
+use backend_utils_time_snapmgr_seams as snapmgr;
 use types_catalog::catalog_dependency::{
     ObjectAddress, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL,
     DEPENDENCY_PARTITION_PRI, DEPENDENCY_PARTITION_SEC,
@@ -1749,6 +1757,317 @@ pub fn index_set_state_flags<'mcx>(
     indexing::catalog_tuple_update_pg_index::call(mcx, &pg_index, tid, &form)?;
 
     pg_index.close(ROW_EXCLUSIVE_LOCK)?;
+    Ok(())
+}
+
+/* ===========================================================================
+ * index_concurrently_set_dead / index_drop
+ * ========================================================================= */
+
+/// `RELKIND_HAS_STORAGE(relkind)` (`catalog/pg_class.h`).
+fn RELKIND_HAS_STORAGE(relkind: u8) -> bool {
+    use types_tuple::access::{
+        RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_RELATION, RELKIND_SEQUENCE, RELKIND_TOASTVALUE,
+    };
+    relkind == RELKIND_RELATION
+        || relkind == RELKIND_INDEX
+        || relkind == RELKIND_SEQUENCE
+        || relkind == RELKIND_TOASTVALUE
+        || relkind == RELKIND_MATVIEW
+}
+
+/// `RELPERSISTENCE_TEMP` (`catalog/pg_class.h`).
+const RELPERSISTENCE_TEMP_U8: u8 = b't';
+
+/// `index_concurrently_set_dead(heapId, indexId)` (catalog/index.c): the second
+/// pg_index state transition of DROP/REINDEX INDEX CONCURRENTLY — transfer the
+/// index's predicate locks to the heap, clear `indisready`/`indislive`
+/// (`INDEX_DROP_SET_DEAD`), and invalidate the table's relcache so sessions
+/// refresh their index lists. Holds session locks across the surrounding
+/// commit; the relations are reopened here under ShareUpdateExclusiveLock.
+///
+/// ```c
+/// void index_concurrently_set_dead(Oid heapId, Oid indexId)
+/// {
+///     userHeapRelation  = table_open(heapId, ShareUpdateExclusiveLock);
+///     userIndexRelation = index_open(indexId, ShareUpdateExclusiveLock);
+///     TransferPredicateLocksToHeapRelation(userIndexRelation);
+///     index_set_state_flags(indexId, INDEX_DROP_SET_DEAD);
+///     CacheInvalidateRelcache(userHeapRelation);
+///     table_close(userHeapRelation, NoLock);
+///     index_close(userIndexRelation, NoLock);
+/// }
+/// ```
+pub fn index_concurrently_set_dead<'mcx>(
+    mcx: Mcx<'mcx>,
+    heap_id: Oid,
+    index_id: Oid,
+) -> PgResult<()> {
+    let user_heap_relation =
+        table_am::table_open::call(mcx, heap_id, SHARE_UPDATE_EXCLUSIVE_LOCK)?;
+    let user_index_relation =
+        indexam::index_open::call(mcx, index_id, SHARE_UPDATE_EXCLUSIVE_LOCK)?;
+    predicate::transfer_predicate_locks_to_heap_relation::call(user_index_relation.rd_id)?;
+
+    index_set_state_flags(
+        mcx,
+        index_id,
+        backend_catalog_index_seams::IndexStateFlagsAction::DropSetDead,
+    )?;
+
+    inval::cache_invalidate_relcache::call(user_heap_relation.rd_id)?;
+
+    user_heap_relation.close(NO_LOCK)?;
+    user_index_relation.close(NO_LOCK)?;
+    Ok(())
+}
+
+/// `index_drop(indexId, concurrent, concurrent_lock_mode)` (catalog/index.c):
+/// drop an index relation and remove all of its catalog rows. The DROP TABLE
+/// path reaches it (via dependency.c's `doDeletion`) for every index the table
+/// owns, including the implicit TOAST index.
+///
+/// To drop an index safely we take an exclusive lock on its *parent table*
+/// (not just the index): another backend relying on a cached index-OID list
+/// could otherwise try to use the just-dropped index. The concurrent path
+/// (DROP/REINDEX INDEX CONCURRENTLY) instead disables the index in stages
+/// across multiple transactions, taking only ShareUpdateExclusiveLock.
+pub fn index_drop<'mcx>(
+    mcx: Mcx<'mcx>,
+    index_id: Oid,
+    concurrent: bool,
+    concurrent_lock_mode: bool,
+) -> PgResult<()> {
+    /*
+     * A temporary relation uses a non-concurrent DROP. Assert it never asks
+     * for the concurrent legs.
+     */
+    debug_assert!(
+        lsyscache::get_rel_persistence::call(index_id)
+            .map(|p| p != RELPERSISTENCE_TEMP_U8)
+            .unwrap_or(true)
+            || (!concurrent && !concurrent_lock_mode)
+    );
+
+    /*
+     * To drop an index safely, we must grab exclusive lock on its parent
+     * table. In the concurrent case we take ShareUpdateExclusiveLock instead.
+     */
+    let heap_id = IndexGetRelation(index_id, false)?;
+    let lockmode = if concurrent || concurrent_lock_mode {
+        SHARE_UPDATE_EXCLUSIVE_LOCK
+    } else {
+        ACCESS_EXCLUSIVE_LOCK
+    };
+    let mut user_heap_relation = table_am::table_open::call(mcx, heap_id, lockmode)?;
+    let mut user_index_relation = indexam::index_open::call(mcx, index_id, lockmode)?;
+
+    /*
+     * We might still have open queries using it in our own session, which the
+     * above locking won't prevent, so test explicitly.
+     */
+    tablecmds::check_table_not_in_use::call(&user_index_relation, "DROP INDEX")?;
+
+    /*
+     * Drop Index Concurrently is more or less the reverse process of Create
+     * Index Concurrently — disable the index in stages, waiting out any
+     * transactions that might be using it, before the physical deletion.
+     */
+    if concurrent {
+        /*
+         * We must commit our transaction to make the first pg_index state
+         * update visible to other sessions. DROP INDEX CONCURRENTLY is
+         * restricted to dropping one index with no dependencies, so no
+         * transactional work must have happened yet — verify no XID is
+         * assigned.
+         */
+        if xact::get_top_transaction_id_if_any::call() != types_core::InvalidTransactionId {
+            let msg: alloc::string::String =
+                "DROP INDEX CONCURRENTLY must be first action in transaction".into();
+            return Err(
+                PgError::error(msg).with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            );
+        }
+
+        /* Mark index invalid by updating its pg_index entry */
+        index_set_state_flags(
+            mcx,
+            index_id,
+            backend_catalog_index_seams::IndexStateFlagsAction::DropClearValid,
+        )?;
+
+        /*
+         * Invalidate the relcache for the table, so that after this commit all
+         * sessions refresh any cached plans that might reference the index.
+         */
+        inval::cache_invalidate_relcache::call(user_heap_relation.rd_id)?;
+
+        /* save lockrelid and locktag for below, then close but keep locks */
+        let heaprelid = relcache::rel_lock_relid::call(user_heap_relation.rd_id)?;
+        let heaplocktag = lmgr::set_locktag_relation::call(heaprelid.dbId, heaprelid.relId);
+        let indexrelid = relcache::rel_lock_relid::call(user_index_relation.rd_id)?;
+
+        user_heap_relation.close(NO_LOCK)?;
+        user_index_relation.close(NO_LOCK)?;
+
+        /*
+         * Commit so the indisvalid update becomes visible; then start another
+         * transaction. Take session-level locks first so neither the table nor
+         * the index can be dropped before we finish.
+         */
+        lmgr::lock_relation_id_for_session::call(heaprelid, SHARE_UPDATE_EXCLUSIVE_LOCK)?;
+        lmgr::lock_relation_id_for_session::call(indexrelid, SHARE_UPDATE_EXCLUSIVE_LOCK)?;
+
+        snapmgr::pop_active_snapshot::call()?;
+        xact::commit_transaction_command::call()?;
+        xact::start_transaction_command::call()?;
+
+        /*
+         * Wait until no running transaction could be using the index for a
+         * query (AccessExclusiveLock checks for running transactions holding
+         * locks of any kind on the table).
+         */
+        lmgr::wait_for_lockers::call(heaplocktag, ACCESS_EXCLUSIVE_LOCK, true)?;
+
+        /*
+         * Updating pg_index might involve TOAST table access, so ensure we
+         * have a valid snapshot.
+         */
+        snapmgr::push_active_snapshot::call(alloc::rc::Rc::new(
+            snapmgr::get_transaction_snapshot::call()?,
+        ))?;
+
+        /* Finish invalidation of index and mark it as dead */
+        index_concurrently_set_dead(mcx, heap_id, index_id)?;
+
+        snapmgr::pop_active_snapshot::call()?;
+
+        /* Commit again to make the pg_index update visible to other sessions. */
+        xact::commit_transaction_command::call()?;
+        xact::start_transaction_command::call()?;
+
+        /* Wait till every transaction that saw the old index state has finished. */
+        lmgr::wait_for_lockers::call(heaplocktag, ACCESS_EXCLUSIVE_LOCK, true)?;
+
+        /*
+         * Re-open relations to complete our actions; grab AccessExclusiveLock
+         * on the index before the physical deletion.
+         */
+        user_heap_relation = table_am::table_open::call(mcx, heap_id, SHARE_UPDATE_EXCLUSIVE_LOCK)?;
+        user_index_relation = indexam::index_open::call(mcx, index_id, ACCESS_EXCLUSIVE_LOCK)?;
+
+        /* keep the session-lock ids for release at the end */
+        return index_drop_finish(
+            mcx,
+            index_id,
+            user_heap_relation,
+            user_index_relation,
+            Some((heaprelid, indexrelid)),
+        );
+    } else {
+        /* Not concurrent, so just transfer predicate locks and we're good */
+        predicate::transfer_predicate_locks_to_heap_relation::call(user_index_relation.rd_id)?;
+    }
+
+    index_drop_finish(mcx, index_id, user_heap_relation, user_index_relation, None)
+}
+
+/// The shared tail of `index_drop` (catalog/index.c) after the index relation is
+/// open under the final lock: schedule physical removal, drop stats, flush the
+/// relcache, delete pg_index / pg_class / pg_attribute / pg_statistic /
+/// pg_inherits rows, and invalidate the owning relation's relcache. `session`
+/// carries the DROP INDEX CONCURRENTLY session locks to release at the end.
+fn index_drop_finish<'mcx>(
+    mcx: Mcx<'mcx>,
+    index_id: Oid,
+    user_heap_relation: Relation<'mcx>,
+    user_index_relation: Relation<'mcx>,
+    session: Option<(
+        types_storage::lock::LockRelId,
+        types_storage::lock::LockRelId,
+    )>,
+) -> PgResult<()> {
+    /* Schedule physical removal of the files (if any) */
+    if RELKIND_HAS_STORAGE(user_index_relation.rd_rel.relkind) {
+        storage::relation_drop_storage::call(
+            user_index_relation.rd_locator,
+            user_index_relation.rd_backend,
+        )?;
+    }
+
+    /* ensure that stats are dropped if transaction commits */
+    pgstat::pgstat_drop_relation::call(
+        user_index_relation.rd_id,
+        user_index_relation.rd_rel.relisshared,
+    )?;
+
+    /*
+     * Close and flush the index's relcache entry, to ensure relcache doesn't
+     * try to rebuild it while we're deleting catalog entries. We keep the lock.
+     */
+    user_index_relation.close(NO_LOCK)?;
+
+    relcache::relation_forget_relation::call(index_id)?;
+
+    /*
+     * Updating pg_index might involve TOAST table access, so ensure we have a
+     * valid snapshot.
+     */
+    snapmgr::push_active_snapshot::call(alloc::rc::Rc::new(
+        snapmgr::get_transaction_snapshot::call()?,
+    ))?;
+
+    /* fix INDEX relation, and check for expressional index */
+    let pg_index = table_am::table_open::call(mcx, INDEX_RELATION_ID, ROW_EXCLUSIVE_LOCK)?;
+
+    /*
+     * tuple = SearchSysCache1(INDEXRELID, ...);
+     * hasexprs = !heap_attisnull(tuple, Anum_pg_index_indexprs, ...);
+     * CatalogTupleDelete(indexRelation, &tuple->t_self);
+     */
+    let Some((tid, hasexprs)) = syscache::pg_index_tid_and_hasexprs::call(index_id)? else {
+        return elog_error(alloc::format!("cache lookup failed for index {index_id}"));
+    };
+
+    indexing::catalog_tuple_delete::call(&pg_index, tid)?;
+
+    pg_index.close(ROW_EXCLUSIVE_LOCK)?;
+
+    snapmgr::pop_active_snapshot::call()?;
+
+    /*
+     * if it has any expression columns, we might have stored statistics about
+     * them.
+     */
+    if hasexprs {
+        heap::RemoveStatistics::call(index_id, 0)?;
+    }
+
+    /* fix ATTRIBUTE relation */
+    heap::DeleteAttributeTuples::call(index_id)?;
+
+    /* fix RELATION relation */
+    heap::DeleteRelationTuple::call(index_id)?;
+
+    /* fix INHERITS relation */
+    pg_inherits::delete_inherits_tuple::call(index_id, InvalidOid, false, None)?;
+
+    /*
+     * We are presently too lazy to recompute relhasindex (the next VACUUM will
+     * fix it). But we must send a shared-cache-inval notice on the owning
+     * relation so other backends update their relcache index lists.
+     */
+    inval::cache_invalidate_relcache::call(user_heap_relation.rd_id)?;
+
+    /* Close owning rel, but keep lock */
+    user_heap_relation.close(NO_LOCK)?;
+
+    /* Release the session locks before we go. */
+    if let Some((heaprelid, indexrelid)) = session {
+        lmgr::unlock_relation_id_for_session::call(heaprelid, SHARE_UPDATE_EXCLUSIVE_LOCK)?;
+        lmgr::unlock_relation_id_for_session::call(indexrelid, SHARE_UPDATE_EXCLUSIVE_LOCK)?;
+    }
+
     Ok(())
 }
 
@@ -3168,11 +3487,10 @@ fn reindex_relation<'mcx>(
  * Seam installation
  * ========================================================================= */
 
-/// Install this unit's inward seams. Mirror-PG-and-panic: only the two
-/// fully-grounded slices are installed here; the catalog-write / build / drop
-/// core (`index_create`, `build_index_info`, `index_build`, `reindex_relation`,
-/// `index_drop`) stays uninstalled until its keystones land (see the crate
-/// header), so calling one still panics loudly.
+/// Install this unit's inward seams. Mirror-PG-and-panic: the build/validate
+/// concurrent legs (`index_concurrently_*`, `validate_index`) stay uninstalled
+/// until their executor/tuplesort keystones land (see the crate header), so
+/// calling one still panics loudly.
 pub fn init_seams() {
     // IndexGetRelation.
     index_seam::index_get_relation::set(IndexGetRelation);
@@ -3209,6 +3527,15 @@ pub fn init_seams() {
     });
     index_seam::reindex_relation::set(|mcx, relid, flags, params| {
         reindex_relation(mcx, relid, flags, &params).map(|_| ())
+    });
+
+    // index_drop — drop one index relation and its catalog rows (dependency.c's
+    // doDeletion for an index object; the DROP TABLE path reaches it for every
+    // index a table owns, including the implicit TOAST index). The inward seam
+    // carries no `mcx`, so the shim allocates a scratch context.
+    index_seam::index_drop::set(|index_id, concurrent, concurrent_lock_mode| {
+        let ctx = mcx::MemoryContext::new("index_drop");
+        index_drop(ctx.mcx(), index_id, concurrent, concurrent_lock_mode)
     });
 
     // Parallel-worker transfer of the reindex state (owned by index.c, the
