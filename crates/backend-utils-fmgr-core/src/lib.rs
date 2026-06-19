@@ -3082,9 +3082,29 @@ fn detoast_ref_arg_if_toasted<'mcx>(
 ) -> PgResult<Option<RefPayload>> {
     match refp {
         Some(RefPayload::Varlena(bytes)) => {
-            let toasted = !bytes.is_empty()
-                && (bytes[0] == 0x01 /* VARATT_IS_EXTERNAL / 1B-E */
-                    || (bytes[0] & 0x03) == 0x02 /* VARATT_IS_4B_C compressed */);
+            // A genuine inline-COMPRESSED varlena (4B-C, low two bits `0b10`) is a
+            // self-consistent 4-byte-header varlena: `VARSIZE_4B(bytes) == len`
+            // (`toast_compress_datum` stamps the total length via
+            // `SET_VARSIZE_COMPRESSED`). A fixed-length by-reference value carried on
+            // the `Varlena` arm — notably a `name` (NAMEDATALEN buffer, no varlena
+            // header) — is NOT a varlena: when its first byte happens to have low two
+            // bits `0b10` (e.g. an ASCII letter like 'r' = 0x72) the bare tag test
+            // misfires and the value is fed to the pglz decompressor, which then
+            // `ereport`s `truncated compressed datum`. Require the self-consistent
+            // 4-byte length so only real compressed varlenas are detoasted. (This is
+            // the same `VARSIZE == len` disambiguation `ensure_headerful_varlena`
+            // applies on the deform side.)
+            let is_compressed_4b = bytes.len() >= 4 && (bytes[0] & 0x03) == 0x02 && {
+                // VARSIZE_4B(bytes): low 30 bits of the 4-byte length word.
+                let word = u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                #[cfg(target_endian = "big")]
+                let varsize_4b = (word & 0x3FFF_FFFF) as usize;
+                #[cfg(target_endian = "little")]
+                let varsize_4b = ((word >> 2) & 0x3FFF_FFFF) as usize;
+                varsize_4b == bytes.len()
+            };
+            let toasted = (!bytes.is_empty() && bytes[0] == 0x01/* VARATT_IS_EXTERNAL / 1B-E */)
+                || is_compressed_4b;
             if toasted {
                 let flat =
                     backend_access_common_detoast_seams::pg_detoast_datum_packed::call(mcx, &bytes)?;
