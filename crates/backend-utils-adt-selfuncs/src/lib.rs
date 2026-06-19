@@ -75,6 +75,13 @@ pub fn init_seams() {
     seams::stats_tuple_stanullfrac::set(scalar::seam_stats_tuple_stanullfrac);
     seams::mcv_selectivity::set(ineq::seam_mcv_selectivity);
     seams::estimate_num_groups::set(misc::seam_estimate_num_groups);
+    // pathnode.c `create_unique_path` reaches `estimate_num_groups(..., NULL,
+    // NULL)`; install the pathnode-side outward seam (no estinfo).
+    backend_optimizer_util_pathnode_seams::estimate_num_groups_simple::set(
+        |run, root, group_exprs, input_rows| {
+            misc::seam_estimate_num_groups(run, root, group_exprs, input_rows, None)
+        },
+    );
 
     // The plancat selectivity-dispatch seams (`restriction_selectivity` /
     // `join_selectivity` / `function_selectivity` reach these): map the

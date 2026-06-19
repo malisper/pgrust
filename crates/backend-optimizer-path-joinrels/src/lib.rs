@@ -364,7 +364,7 @@ pub fn join_search_one_level<'mcx>(mcx: Mcx<'mcx>, root: &mut PlannerInfo, run: 
                     // We can build a rel of the right level from this pair. Do so
                     // if there is at least one relevant join clause or restriction.
                     if geqo::have_relevant_joinclause::call(root, old_rel, new_rel)
-                        || have_join_order_restriction(root, old_rel, new_rel)
+                        || have_join_order_restriction(run, root, old_rel, new_rel)
                     {
                         make_join_rel(mcx, root, run, old_rel, new_rel)?;
                     }
@@ -419,7 +419,7 @@ fn make_rels_by_clause_joins<'mcx>(
     for &other_rel in other_rels.iter().skip(first_rel_idx as usize) {
         if !bms::relids_overlap::call(&root.rel(old_rel).relids, &root.rel(other_rel).relids)
             && (geqo::have_relevant_joinclause::call(root, old_rel, other_rel)
-                || have_join_order_restriction(root, old_rel, other_rel))
+                || have_join_order_restriction(run, root, old_rel, other_rel))
         {
             make_join_rel(mcx, root, run, old_rel, other_rel)?;
         }
@@ -463,7 +463,13 @@ type JoinLegality = Option<(Option<usize>, bool)>;
 ///
 /// Caller supplies the two rels plus the union of their relids (`joinrelids`).
 /// Returns `None` on failure; `Some((match_index, reversed))` on success.
-fn join_is_legal(root: &PlannerInfo, rel1: RelId, rel2: RelId, joinrelids: &Relids) -> JoinLegality {
+fn join_is_legal<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    rel1: RelId,
+    rel2: RelId,
+    joinrelids: &Relids,
+) -> JoinLegality {
     let mut match_sjinfo: Option<usize> = None;
     let mut reversed = false;
     let mut unique_ified = false;
@@ -472,43 +478,52 @@ fn join_is_legal(root: &PlannerInfo, rel1: RelId, rel2: RelId, joinrelids: &Reli
     // Scan the join info list for matches and conflicts.
     let n_sj = root.join_info_list.len();
     for i in 0..n_sj {
+        // Snapshot the per-SJ relids/jointype this iteration reads. We must
+        // release the `&root.join_info_list[i]` borrow before any
+        // `can_create_unique_path` call (which needs `&mut root` to cache the
+        // UniquePath on the rel, exactly as C `create_unique_path` does); the SJ
+        // is identified by index `i` for the matched-SJ accessors afterward.
         let sj = &root.join_info_list[i];
+        let sj_min_righthand = sj.min_righthand.clone();
+        let sj_min_lefthand = sj.min_lefthand.clone();
+        let sj_syn_righthand = sj.syn_righthand.clone();
+        let sj_jointype = sj.jointype;
 
         // Not relevant unless its RHS overlaps the proposed join.
-        if !bms::relids_overlap::call(&sj.min_righthand, joinrelids) {
+        if !bms::relids_overlap::call(&sj_min_righthand, joinrelids) {
             continue;
         }
 
         // Not relevant if proposed join is fully contained within RHS.
-        if bms::relids_is_subset::call(joinrelids, &sj.min_righthand) {
+        if bms::relids_is_subset::call(joinrelids, &sj_min_righthand) {
             continue;
         }
 
-        let rel1_relids = &root.rel(rel1).relids;
-        let rel2_relids = &root.rel(rel2).relids;
+        let rel1_relids = root.rel(rel1).relids.clone();
+        let rel2_relids = root.rel(rel2).relids.clone();
 
         // Not relevant if SJ is already done within either input.
-        if bms::relids_is_subset::call(&sj.min_lefthand, rel1_relids)
-            && bms::relids_is_subset::call(&sj.min_righthand, rel1_relids)
+        if bms::relids_is_subset::call(&sj_min_lefthand, &rel1_relids)
+            && bms::relids_is_subset::call(&sj_min_righthand, &rel1_relids)
         {
             continue;
         }
-        if bms::relids_is_subset::call(&sj.min_lefthand, rel2_relids)
-            && bms::relids_is_subset::call(&sj.min_righthand, rel2_relids)
+        if bms::relids_is_subset::call(&sj_min_lefthand, &rel2_relids)
+            && bms::relids_is_subset::call(&sj_min_righthand, &rel2_relids)
         {
             continue;
         }
 
         // If it's a semijoin and we already joined the RHS to any other rels
         // within either input, then the semijoin is no longer relevant.
-        if sj.jointype == JOIN_SEMI {
-            if bms::relids_is_subset::call(&sj.syn_righthand, rel1_relids)
-                && !pathnode::relids_equal::call(&sj.syn_righthand, rel1_relids)
+        if sj_jointype == JOIN_SEMI {
+            if bms::relids_is_subset::call(&sj_syn_righthand, &rel1_relids)
+                && !pathnode::relids_equal::call(&sj_syn_righthand, &rel1_relids)
             {
                 continue;
             }
-            if bms::relids_is_subset::call(&sj.syn_righthand, rel2_relids)
-                && !pathnode::relids_equal::call(&sj.syn_righthand, rel2_relids)
+            if bms::relids_is_subset::call(&sj_syn_righthand, &rel2_relids)
+                && !pathnode::relids_equal::call(&sj_syn_righthand, &rel2_relids)
             {
                 continue;
             }
@@ -516,25 +531,28 @@ fn join_is_legal(root: &PlannerInfo, rel1: RelId, rel2: RelId, joinrelids: &Reli
 
         // If one input contains min_lefthand and the other min_righthand, then we
         // can perform the SJ at this join. Reject matches to more than one SJ.
-        if bms::relids_is_subset::call(&sj.min_lefthand, rel1_relids)
-            && bms::relids_is_subset::call(&sj.min_righthand, rel2_relids)
+        if bms::relids_is_subset::call(&sj_min_lefthand, &rel1_relids)
+            && bms::relids_is_subset::call(&sj_min_righthand, &rel2_relids)
         {
             if match_sjinfo.is_some() {
                 return None; // invalid join path
             }
             match_sjinfo = Some(i);
             reversed = false;
-        } else if bms::relids_is_subset::call(&sj.min_lefthand, rel2_relids)
-            && bms::relids_is_subset::call(&sj.min_righthand, rel1_relids)
+        } else if bms::relids_is_subset::call(&sj_min_lefthand, &rel2_relids)
+            && bms::relids_is_subset::call(&sj_min_righthand, &rel1_relids)
         {
             if match_sjinfo.is_some() {
                 return None; // invalid join path
             }
             match_sjinfo = Some(i);
             reversed = true;
-        } else if sj.jointype == JOIN_SEMI
-            && pathnode::relids_equal::call(&sj.syn_righthand, rel2_relids)
-            && pathnode::can_create_unique_path::call(root, rel2, sj)
+        } else if sj_jointype == JOIN_SEMI
+            && pathnode::relids_equal::call(&sj_syn_righthand, &rel2_relids)
+            && {
+                let sj_owned = root.join_info_list[i].clone();
+                pathnode::can_create_unique_path::call(run, root, rel2, &sj_owned)
+            }
         {
             // For a semijoin, we can join the RHS to anything else by
             // unique-ifying the RHS (if the RHS can be unique-ified).
@@ -544,9 +562,12 @@ fn join_is_legal(root: &PlannerInfo, rel1: RelId, rel2: RelId, joinrelids: &Reli
             match_sjinfo = Some(i);
             reversed = false;
             unique_ified = true;
-        } else if sj.jointype == JOIN_SEMI
-            && pathnode::relids_equal::call(&sj.syn_righthand, rel1_relids)
-            && pathnode::can_create_unique_path::call(root, rel1, sj)
+        } else if sj_jointype == JOIN_SEMI
+            && pathnode::relids_equal::call(&sj_syn_righthand, &rel1_relids)
+            && {
+                let sj_owned = root.join_info_list[i].clone();
+                pathnode::can_create_unique_path::call(run, root, rel1, &sj_owned)
+            }
         {
             // Reversed semijoin case.
             if match_sjinfo.is_some() {
@@ -558,8 +579,8 @@ fn join_is_legal(root: &PlannerInfo, rel1: RelId, rel2: RelId, joinrelids: &Reli
         } else {
             // Otherwise, the proposed join overlaps the RHS but isn't a valid
             // implementation of this SJ. If both inputs overlap the RHS, allow it.
-            if bms::relids_overlap::call(rel1_relids, &sj.min_righthand)
-                && bms::relids_overlap::call(rel2_relids, &sj.min_righthand)
+            if bms::relids_overlap::call(&rel1_relids, &sj_min_righthand)
+                && bms::relids_overlap::call(&rel2_relids, &sj_min_righthand)
             {
                 continue; // assume valid previous violation of RHS
             }
@@ -567,7 +588,7 @@ fn join_is_legal(root: &PlannerInfo, rel1: RelId, rel2: RelId, joinrelids: &Reli
             // The proposed join could still be legal, but only if we can
             // associate it into the RHS of this SJ: it must be a LEFT join and
             // not overlap the LHS.
-            if sj.jointype != JOIN_LEFT || bms::relids_overlap::call(joinrelids, &sj.min_lefthand) {
+            if sj_jointype != JOIN_LEFT || bms::relids_overlap::call(joinrelids, &sj_min_lefthand) {
                 return None; // invalid join path
             }
 
@@ -686,7 +707,7 @@ pub fn make_join_rel<'mcx>(
     let joinrelids = pathnode::relids_union::call(&root.rel(rel1).relids, &root.rel(rel2).relids);
 
     // Check validity and determine join type.
-    let (match_index, reversed) = match join_is_legal(root, rel1, rel2, &joinrelids) {
+    let (match_index, reversed) = match join_is_legal(run, root, rel1, rel2, &joinrelids) {
         Some(v) => v,
         None => return Ok(None), // invalid join path
     };
@@ -904,8 +925,8 @@ fn populate_joinrel_with_paths<'mcx>(
 
             // If we know how to unique-ify the RHS and one input rel is exactly
             // the RHS we can consider unique-ifying it and doing a regular join.
-            if pathnode::relids_equal::call(&sjinfo.syn_righthand, &root.rel(rel2).relids)
-                && pathnode::can_create_unique_path::call(root, rel2, sjinfo)
+            if pathnode::relids_equal::call(&sjinfo.syn_righthand, &root.rel(rel2).relids.clone())
+                && pathnode::can_create_unique_path::call(run, root, rel2, sjinfo)
             {
                 if is_dummy_rel(root, rel1)
                     || is_dummy_rel(root, rel2)
@@ -952,7 +973,12 @@ fn populate_joinrel_with_paths<'mcx>(
 /// `have_join_order_restriction` (joinrels.c:1065) — detect whether the two
 /// relations should be joined to satisfy a join-order restriction arising from
 /// special or lateral joins.
-pub fn have_join_order_restriction(root: &PlannerInfo, rel1: RelId, rel2: RelId) -> bool {
+pub fn have_join_order_restriction<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    rel1: RelId,
+    rel2: RelId,
+) -> bool {
     let mut result = false;
 
     let rel1_relids = root.rel(rel1).relids.clone();
@@ -1020,7 +1046,7 @@ pub fn have_join_order_restriction(root: &PlannerInfo, rel1: RelId, rel2: RelId)
 
     // We do not force the join if either input rel can legally be joined to
     // anything else using joinclauses.
-    if result && (has_legal_joinclause(root, rel1) || has_legal_joinclause(root, rel2)) {
+    if result && (has_legal_joinclause(run, root, rel1) || has_legal_joinclause(run, root, rel2)) {
         result = false;
     }
 
@@ -1079,8 +1105,11 @@ fn has_join_restriction(root: &PlannerInfo, rel: RelId) -> bool {
 
 /// `has_legal_joinclause` (joinrels.c:1234) — detect whether the specified
 /// relation can legally be joined to any other rels using join clauses.
-fn has_legal_joinclause(root: &PlannerInfo, rel: RelId) -> bool {
-    for &rel2 in &root.initial_rels {
+fn has_legal_joinclause<'mcx>(run: &PlannerRun<'mcx>, root: &mut PlannerInfo, rel: RelId) -> bool {
+    // Clone the initial-rels snapshot so the loop body can take `&mut root` for
+    // `join_is_legal` (which now caches a UniquePath via create_unique_path).
+    let initial_rels = root.initial_rels.clone();
+    for rel2 in initial_rels {
         // ignore rels that are already in "rel"
         if bms::relids_overlap::call(&root.rel(rel).relids, &root.rel(rel2).relids) {
             continue;
@@ -1090,7 +1119,7 @@ fn has_legal_joinclause(root: &PlannerInfo, rel: RelId) -> bool {
             // join_is_legal needs relids of the union
             let joinrelids = pathnode::relids_union::call(&root.rel(rel).relids, &root.rel(rel2).relids);
 
-            if join_is_legal(root, rel, rel2, &joinrelids).is_some() {
+            if join_is_legal(run, root, rel, rel2, &joinrelids).is_some() {
                 // Yes, this will work
                 return true;
             }

@@ -14,6 +14,9 @@ types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
 types-pathnodes = { path = "../types-pathnodes" }
+# pathnode.c `create_unique_path` reaches the subquery-distinctness probe via the
+# pathnode-side outward seam. pathnode-seams is a leaf seam crate — no cycle.
+backend-optimizer-util-pathnode-seams = { path = "../backend-optimizer-util-pathnode-seams" }
 backend-nodes-core = { path = "../backend-nodes-core" }
 backend-rewrite-core = { path = "../backend-rewrite-core" }
 backend-optimizer-util-relnode = { path = "../backend-optimizer-util-relnode" }

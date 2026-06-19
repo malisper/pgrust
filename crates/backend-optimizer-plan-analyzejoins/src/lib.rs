@@ -322,6 +322,52 @@ pub fn rel_supports_distinctness<'mcx>(
     false
 }
 
+/// The `RTE_SUBQUERY` distinctness probe from `create_unique_path`
+/// (pathnode.c:1959): for a subquery rel whose `semi_rhs_exprs` (`uniq_exprs`)
+/// are simple Vars referencing subquery outputs, is the subquery already
+/// guaranteed distinct over those columns under `in_operators`?
+///
+/// `query_supports_distinctness(rte->subquery)` &&
+/// `translate_sub_tlist(uniq_exprs, rel->relid)` non-NIL &&
+/// `query_is_distinct_for(rte->subquery, colnos, in_operators)`. `translate_sub_tlist`
+/// (a pathnode.c static) is inlined: each `uniq_expr` must be a `Var` with
+/// `varno == rel->relid`; otherwise punt (NIL → false).
+pub fn subquery_is_distinct_for<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &PlannerInfo,
+    rel: RelId,
+    uniq_exprs: &[types_pathnodes::NodeId],
+    in_operators: &[types_core::primitive::Oid],
+) -> bool {
+    let relid = root.rel(rel).relid;
+
+    let rte_id = root.simple_rte_array[relid as usize];
+    let rte = run.resolve_rte(rte_id);
+    let subquery = match rte.subquery.as_deref() {
+        Some(q) => q,
+        None => return false,
+    };
+
+    if !query_distinct::query_supports_distinctness(subquery) {
+        return false;
+    }
+
+    // translate_sub_tlist(uniq_exprs, relid): each element must be a Var of this
+    // rel; build the list of output column numbers, else punt.
+    let mut colnos: Vec<i32> = Vec::new();
+    for &nid in uniq_exprs {
+        match root.node(nid) {
+            Expr::Var(v) if v.varno == relid as i32 => colnos.push(v.varattno as i32),
+            _ => return false, /* punt */
+        }
+    }
+    if colnos.is_empty() {
+        return false;
+    }
+
+    query_distinct::query_is_distinct_for(subquery, &colnos, in_operators)
+}
+
 /// `rel_is_distinct_for(root, rel, clause_list, extra_clauses)` (analyzejoins.c:980)
 /// — does the relation return only distinct rows according to `clause_list`?
 ///
@@ -768,6 +814,13 @@ pub fn init_seams() {
                 restrictlist,
                 force_cache,
             )
+        },
+    );
+
+    // pathnode.c `create_unique_path`'s RTE_SUBQUERY distinctness probe.
+    backend_optimizer_util_pathnode_seams::subquery_is_distinct_for::set(
+        |run, root, rel, uniq_exprs, in_operators| {
+            subquery_is_distinct_for(run, root, rel, uniq_exprs, in_operators)
         },
     );
 

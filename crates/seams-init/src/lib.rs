@@ -1136,23 +1136,14 @@ mod recurrence_guard {
         // their owner `backend-utils-activity-status` is not a complete crate —
         // the guard does not flag those, so no allowlist entry is needed; the
         // debt is the unported backend_status.c owner.)
-        // DESIGN_DEBT (TD-PATHNODE-CAN-CREATE-UNIQUE): pathnode.c's
-        // `can_create_unique_path` is the `create_unique_path(...) != NULL` test.
-        // Its body (`create_unique_path`, pathnode.c:1730) is itself genuinely
-        // uninstalled in the otherwise-complete `backend-optimizer-util-pathnode`
-        // crate — it crosses lsyscache (`get_ordering_op_for_equality_op` /
-        // `get_equality_op_for_ordering_op`), plancat
-        // (`relation_has_unique_index_for`), analyzejoins
-        // (`query_is_distinct_for`), and pathkeys.c
-        // (`make_pathkeys_for_sortclauses`), all unported, so `create_unique_path`
-        // delegates to a `unique_seam` that nobody installs (loud panic).
-        // Installing `can_create_unique_path` would just relocate that same panic.
-        // DELETE this entry once `create_unique_path`'s cross-subsystem owners
-        // land. (`install_dummy_append_path` — the pathnode-side of joinrels.c's
-        // `mark_dummy_rel` — is now INSTALLED by the pathnode owner: its body only
-        // needs `create_append_path`/`add_path`/`set_cheapest`, all ported
-        // in-owner.)
-        ("backend_optimizer_util_pathnode", "can_create_unique_path"),
+        // (TD-PATHNODE-CAN-CREATE-UNIQUE RETIRED: `create_unique_path`
+        // (pathnode.c:1730) is now ported FULLY in-owner and `can_create_unique_path`
+        // is installed; its cross-subsystem helpers — lsyscache
+        // get_ordering/get_equality ops, indxpath relation_has_unique_index_for,
+        // analyzejoins subquery distinctness, pathkeys make_pathkeys_for_sortclauses,
+        // selfuncs estimate_num_groups — are all installed from their owners. The
+        // child-rel `adjust_appendrel_attrs_multilevel` leg remains a loud
+        // partitionwise-only seam.)
         // (#159 STEP C plancache de-handle RETIRED: the handle-based tupdesc pc-seam
         // `free_tuple_desc` is no longer called — plancache now owns TupleDescData
         // values in a private MemoryContext (clone_in via the value `create_tuple_desc_copy`

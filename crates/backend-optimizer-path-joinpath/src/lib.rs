@@ -1261,13 +1261,13 @@ fn sort_inner_and_outer<'mcx>(
 
     // Unique-ification.
     if jointype == JOIN_UNIQUE_OUTER {
-        outer_path = match jp::create_unique_path::call(root, outerrel, outer_path, &extra.sjinfo)? {
+        outer_path = match jp::create_unique_path::call(run, root, outerrel, outer_path, &extra.sjinfo)? {
             Some(p) => p,
             None => return Ok(()), // Assert(outer_path) in C
         };
         jointype = JOIN_INNER;
     } else if jointype == JOIN_UNIQUE_INNER {
-        inner_path = match jp::create_unique_path::call(root, innerrel, inner_path, &extra.sjinfo)? {
+        inner_path = match jp::create_unique_path::call(run, root, innerrel, inner_path, &extra.sjinfo)? {
             Some(p) => p,
             None => return Ok(()),
         };
@@ -1640,7 +1640,7 @@ fn match_unsorted_outer<'mcx>(
             Some(p) => p,
             None => return Ok(()),
         };
-        inner_cheapest_total = jp::create_unique_path::call(root, innerrel, ict, &extra.sjinfo)?;
+        inner_cheapest_total = jp::create_unique_path::call(run, root, innerrel, ict, &extra.sjinfo)?;
         if inner_cheapest_total.is_none() {
             return Ok(()); // Assert(inner_cheapest_total)
         }
@@ -1669,7 +1669,7 @@ fn match_unsorted_outer<'mcx>(
             if Some(outerpath) != root.rel(outerrel).cheapest_total_path {
                 continue;
             }
-            outerpath = match jp::create_unique_path::call(root, outerrel, outerpath, &extra.sjinfo)?
+            outerpath = match jp::create_unique_path::call(run, root, outerrel, outerpath, &extra.sjinfo)?
             {
                 Some(p) => p,
                 None => continue, // Assert(outerpath)
@@ -1904,7 +1904,7 @@ fn consider_parallel_nestloop<'mcx>(
                     continue;
                 }
                 innerpath =
-                    match jp::create_unique_path::call(root, innerrel, innerpath, &extra.sjinfo)? {
+                    match jp::create_unique_path::call(run, root, innerrel, innerpath, &extra.sjinfo)? {
                         Some(p) => p,
                         None => continue,
                     };
@@ -2008,7 +2008,7 @@ fn hash_inner_and_outer<'mcx>(
 
     if jointype == JOIN_UNIQUE_OUTER {
         cheapest_total_outer =
-            match jp::create_unique_path::call(root, outerrel, cheapest_total_outer, &extra.sjinfo)? {
+            match jp::create_unique_path::call(run, root, outerrel, cheapest_total_outer, &extra.sjinfo)? {
                 Some(p) => p,
                 None => return Ok(()),
             };
@@ -2026,7 +2026,7 @@ fn hash_inner_and_outer<'mcx>(
     // no possibility of cheap startup here
     } else if jointype == JOIN_UNIQUE_INNER {
         cheapest_total_inner =
-            match jp::create_unique_path::call(root, innerrel, cheapest_total_inner, &extra.sjinfo)? {
+            match jp::create_unique_path::call(run, root, innerrel, cheapest_total_inner, &extra.sjinfo)? {
                 Some(p) => p,
                 None => return Ok(()),
             };

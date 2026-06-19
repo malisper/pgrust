@@ -677,7 +677,8 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `create_unique_path(root, rel, subpath, sjinfo)` (pathnode.c:1730).
-    pub fn create_unique_path(
+    pub fn create_unique_path<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         rel: RelId,
         subpath: PathId,
@@ -693,6 +694,65 @@ seam_core::seam!(
         required_outer: &Relids,
         loop_count: f64,
     ) -> PgResult<Option<PathId>>
+);
+
+/* ----------------------------------------------------------------------
+ * Cross-subsystem helpers `create_unique_path` (pathnode.c:1730) consumes.
+ *
+ * pathnode.c is below pathkeys.c / indxpath.c / analyzejoins.c / selfuncs.c
+ * in the build DAG, so it cannot name those crates directly. These outward
+ * seams give it a contract; the owning unit installs the body from its
+ * `init_seams()`. (lsyscache's `get_ordering_op_for_equality_op` /
+ * `get_equality_op_for_ordering_op` are *below* pathnode and reached via the
+ * lsyscache-seams crate directly, so they are not redeclared here.)
+ * -------------------------------------------------------------------- */
+
+seam_core::seam!(
+    /// `make_pathkeys_for_sortclauses(root, sortclauses, tlist)` (pathkeys.c).
+    /// Returns the canonical pathkey list for the given (arena `NodeId`)
+    /// SortGroupClause / TargetEntry lists. Installed by pathkeys.c.
+    pub fn make_pathkeys_for_sortclauses(
+        root: &mut PlannerInfo,
+        sortclauses: &[NodeId],
+        tlist: &[NodeId],
+    ) -> Vec<PathKey>
+);
+seam_core::seam!(
+    /// `relation_has_unique_index_for(root, rel, NIL, exprlist, oprlist)`
+    /// (plancat.c via indxpath.c). True when the relation has a unique index that
+    /// proves `exprlist` is unique under `oprlist`. Installed by indxpath.c.
+    pub fn relation_has_unique_index_for(
+        root: &mut PlannerInfo,
+        rel: RelId,
+        exprlist: &[NodeId],
+        oprlist: &[Oid],
+    ) -> bool
+);
+seam_core::seam!(
+    /// The `RTE_SUBQUERY` distinctness probe from `create_unique_path`
+    /// (pathnode.c:1959): `query_supports_distinctness(rte->subquery)` &&
+    /// `translate_sub_tlist(uniq_exprs, rel->relid)` non-NIL &&
+    /// `query_is_distinct_for(rte->subquery, colnos, in_operators)`. Installed by
+    /// analyzejoins.c (which owns the `Query`-distinctness machinery + the
+    /// `PlannerRun` sub-`Query` resolver). `uniq_exprs` are arena `Var` handles.
+    pub fn subquery_is_distinct_for<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+        root: &PlannerInfo,
+        rel: RelId,
+        uniq_exprs: &[NodeId],
+        in_operators: &[Oid],
+    ) -> bool
+);
+seam_core::seam!(
+    /// `estimate_num_groups(root, group_exprs, input_rows, NULL, NULL)`
+    /// (selfuncs.c). Estimates the number of distinct groups. Installed by
+    /// selfuncs.c.
+    pub fn estimate_num_groups_simple<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+        root: &mut PlannerInfo,
+        group_exprs: &[NodeId],
+        input_rows: f64,
+    ) -> PgResult<f64>
 );
 seam_core::seam!(
     /// `reparameterize_path_by_child(root, path, child_rel)` (pathnode.c:4408).
@@ -1122,8 +1182,9 @@ seam_core::seam!(
     /// (pathnode.c) — can the relation's RHS be unique-ified for a semijoin?
     /// Returns whether a `UniquePath` could be created (the C non-NULL test);
     /// the path itself is cached on the rel by the owner.
-    pub fn can_create_unique_path(
-        root: &PlannerInfo,
+    pub fn can_create_unique_path<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+        root: &mut PlannerInfo,
         rel: RelId,
         sjinfo: &SpecialJoinInfo,
     ) -> bool

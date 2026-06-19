@@ -47,9 +47,12 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `have_join_order_restriction(root, rel1, rel2)`
-    /// (`optimizer/path/joinrels.c`).
-    pub fn have_join_order_restriction(
-        root: &PlannerInfo,
+    /// (`optimizer/path/joinrels.c`). Threads `&PlannerRun` + `&mut PlannerInfo`
+    /// because its `join_is_legal` leg now reaches `create_unique_path`, which
+    /// caches a `UniquePath` on the candidate rel.
+    pub fn have_join_order_restriction<'mcx>(
+        run: &PlannerRun<'mcx>,
+        root: &mut PlannerInfo,
         rel1: RelId,
         rel2: RelId,
     ) -> bool

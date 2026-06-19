@@ -119,7 +119,8 @@ seam_core::seam!(
 seam_core::seam!(
     /// `create_unique_path(root, rel, subpath, sjinfo)` — allocate the unique
     /// `Path`; `None` when unique-ification is impossible (C `NULL`).
-    pub fn create_unique_path(
+    pub fn create_unique_path<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         rel: RelId,
         subpath: PathId,

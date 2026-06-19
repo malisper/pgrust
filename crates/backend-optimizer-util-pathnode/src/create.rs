@@ -22,13 +22,19 @@ use types_pathnodes::{
     MinMaxAggInfo, MinMaxAggPath, ModifyTablePath, NestPath, NodeId, NodeTag, Path, PathId, PathKey,
     PathNode, PathTarget, PlannerInfo, ProjectSetPath, ProjectionPath, QualCost, RecursiveUnionPath,
     RelId, Relids, RinfoId, ScanDirection, SetOpCmd, SetOpPath, SetOpStrategy, SortPath,
-    SpecialJoinInfo, SubqueryScanPath, TidPath, TidRangePath, UpperUniquePath, WindowAggPath,
+    SpecialJoinInfo, SubqueryScanPath, TargetEntryNode, TidPath, TidRangePath, UniquePath,
+    UpperUniquePath, WindowAggPath, JOIN_SEMI, UNIQUE_PATH_HASH, UNIQUE_PATH_NOOP, UNIQUE_PATH_SORT,
 };
 
 use backend_optimizer_util_pathnode_seams as seam;
 use types_pathnodes::planner_run::PlannerRun;
 use backend_optimizer_util_pathnode_seams::AggClauseCostsLite;
 use backend_optimizer_util_relnode_seams as bms;
+use backend_utils_cache_lsyscache_seams as seam_lsys;
+use backend_optimizer_util_pathnode_seams as seam_pk;
+use backend_optimizer_util_pathnode_seams as seam_ix;
+use backend_optimizer_util_pathnode_seams as seam_aj;
+use backend_optimizer_util_pathnode_seams as seam_sf;
 
 use crate::{clamp_row_est, compare_path_costs, oom, CostSelector};
 
@@ -2261,21 +2267,343 @@ pub fn adjust_limit_rows_costs(
  * walks over the arena `PathNode` variants and are ported 1:1.
  * ======================================================================== */
 
+/* RTEKind constants (parsenodes.h) used by `create_unique_path`. types-pathnodes
+ * only exports `RTE_RELATION`. */
+const RTE_RELATION: u32 = 0;
+const RTE_SUBQUERY: u32 = 1;
+/// `T_UniquePath` (nodetags.h).
+const T_UNIQUE_PATH: NodeTag = NodeTag(295);
+
+/// `IS_OTHER_REL(rel)` (pathnodes.h).
+#[inline]
+fn is_other_rel_kind(reloptkind: types_pathnodes::RelOptKind) -> bool {
+    reloptkind == types_pathnodes::RELOPT_OTHER_MEMBER_REL
+        || reloptkind == types_pathnodes::RELOPT_OTHER_JOINREL
+        || reloptkind == types_pathnodes::RELOPT_OTHER_UPPER_REL
+}
+
 /// `create_unique_path(root, rel, subpath, sjinfo)` (pathnode.c:1730).
 ///
-/// Reaches `get_ordering_op_for_equality_op` / `get_equality_op_for_ordering_op`
-/// (lsyscache), `relation_has_unique_index_for` (plancat), `query_is_distinct_for`
-/// (analyzejoins), `make_pathkeys_for_sortclauses` (pathkeys.c), and constructs
-/// `TargetEntry`/`SortGroupClause` over `semi_rhs_exprs`. None ported in this
-/// wave — the whole body crosses the dedicated unique seam (panics until the
-/// pathkeys/catalog owners land).
-pub fn create_unique_path(
+/// Builds a [`UniquePath`] that removes duplicates from `subpath`, choosing
+/// `UNIQUE_PATH_NOOP` (input already unique), `UNIQUE_PATH_HASH`, or
+/// `UNIQUE_PATH_SORT`, caching the result on `rel.cheapest_unique_path`. Returns
+/// `None` (C `NULL`) when unique-ification is impossible.
+///
+/// The `IS_OTHER_REL(rel)` child-relation leg (inheritance/partitionwise
+/// semijoin) needs `adjust_appendrel_attrs_multilevel` (prepunion.c, unported in
+/// this wave) and is routed through the dedicated `adjust_child_seam` panic;
+/// ordinary IN/EXISTS/ANY-sublink semijoins over a base table or subquery take
+/// the main path below.
+pub fn create_unique_path<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     rel: RelId,
     subpath: PathId,
     sjinfo: &SpecialJoinInfo,
 ) -> PgResult<Option<PathId>> {
-    unique_seam::create_unique_path::call(root, rel, subpath, sjinfo)
+    // Caller made a mistake if subpath isn't cheapest_total, or wrong sjinfo.
+    debug_assert_eq!(root.rel(rel).cheapest_total_path, Some(subpath));
+    debug_assert_eq!(sjinfo.jointype, JOIN_SEMI);
+    debug_assert!(bms::relids_equal::call(&root.rel(rel).relids, &sjinfo.syn_righthand));
+
+    // If result already cached, return it.
+    if let Some(p) = root.rel(rel).cheapest_unique_path {
+        return Ok(Some(p));
+    }
+
+    // If it's not possible to unique-ify, return NULL.
+    if !(sjinfo.semi_can_btree || sjinfo.semi_can_hash) {
+        return Ok(None);
+    }
+
+    let reloptkind = root.rel(rel).reloptkind;
+
+    // Punt if this is a child relation and we failed to build a unique-ified
+    // path for its parent.
+    if is_other_rel_kind(reloptkind) {
+        let top_parent = root.rel(rel).top_parent;
+        let parent_has_path = top_parent
+            .map(|tp| root.rel(tp).cheapest_unique_path.is_some())
+            .unwrap_or(false);
+        if !parent_has_path {
+            return Ok(None);
+        }
+    }
+
+    // First, identify the columns/expressions to be made unique along with the
+    // associated equality operators.
+    //
+    // We track, per accepted column, the local hash-side equality operator (used
+    // for the Unique node's in_operators) and a fresh ORDER BY tlist/sortlist
+    // (consumed by make_pathkeys_for_sortclauses to detect redundant columns).
+    let mut uniq_exprs: Vec<NodeId>;
+    let in_operators: Vec<Oid>;
+
+    if is_other_rel_kind(reloptkind) {
+        // Child rel: derive from the parent's UniquePath. Crosses the unported
+        // adjust_appendrel_attrs_multilevel mutator (panics for the
+        // partitionwise/inheritance semijoin leg only).
+        return adjust_child_seam::create_unique_path_child::call(run, root, rel, subpath, sjinfo);
+    } else {
+        let semi_rhs_exprs = sjinfo.semi_rhs_exprs.clone();
+        let semi_operators = sjinfo.semi_operators.clone();
+
+        let mut uexprs: Vec<NodeId> = Vec::new();
+        let mut inops: Vec<Oid> = Vec::new();
+        // The fresh ORDER BY tlist (arena TargetEntry handles) + matching
+        // SortGroupClause handles, built incrementally so the pathkey machinery
+        // can spot redundant (constant-equated) columns.
+        let mut newtlist: Vec<NodeId> = Vec::new();
+        let mut sort_list: Vec<NodeId> = Vec::new();
+
+        for (idx, &uniqexpr) in semi_rhs_exprs.iter().enumerate() {
+            let in_oper = semi_operators[idx];
+
+            // Try to build an ORDER BY list to sort the input compatibly.
+            let sortop = seam_lsys::get_ordering_op_for_equality_op::call(in_oper, false)?;
+            if sortop != InvalidOid {
+                // The Unique node will need equality operators. Normally the same
+                // as the IN clause operators, but for cross-type operators it's
+                // the operator for the IN clause operators' RHS datatype.
+                let eqop = match seam_lsys::get_equality_op_for_ordering_op::call(sortop)? {
+                    Some((eqop, _)) if eqop != InvalidOid => eqop,
+                    _ => {
+                        return Err(PgError::error(alloc::format!(
+                            "could not find equality operator for ordering operator {sortop}"
+                        )));
+                    }
+                };
+
+                // makeTargetEntry(uniqexpr, list_length(newtlist)+1, NULL, false)
+                // with ressortgroupref assigned to its resno (assignSortGroupRef
+                // over a fresh tlist returns max-used+1 == the new resno).
+                let resno = (newtlist.len() + 1) as AttrNumber;
+                let tle = TargetEntryNode {
+                    expr: uniqexpr,
+                    resno,
+                    resname: None,
+                    ressortgroupref: resno as Index,
+                    resorigtbl: 0,
+                    resorigcol: 0,
+                    resjunk: false,
+                };
+                let tle_id = root.alloc_targetentry(tle);
+                newtlist.push(tle_id);
+
+                let sortcl = types_nodes::rawnodes::SortGroupClause {
+                    tleSortGroupRef: resno as Index,
+                    eqop,
+                    sortop,
+                    reverse_sort: false,
+                    nulls_first: false,
+                    hashable: false, // no need to make this accurate
+                };
+                let sortcl_id = root.alloc_sortgroupclause(sortcl);
+                sort_list.push(sortcl_id);
+
+                // Convert the SortGroupClause list to pathkey form. If the
+                // just-added clause is redundant, the result is shorter.
+                let sort_pathkeys =
+                    seam_pk::make_pathkeys_for_sortclauses::call(root, &sort_list, &newtlist);
+                if sort_pathkeys.len() != sort_list.len() {
+                    // Drop the redundant SortGroupClause and tlist entry; this
+                    // column is not needed.
+                    sort_list.pop();
+                    debug_assert_eq!(sort_pathkeys.len(), sort_list.len());
+                    newtlist.pop();
+                    continue;
+                }
+            } else if sjinfo.semi_can_btree {
+                // shouldn't happen
+                return Err(PgError::error(alloc::format!(
+                    "could not find ordering operator for equality operator {in_oper}"
+                )));
+            }
+
+            // We need to include this column in the output list.
+            uexprs.push(uniqexpr);
+            inops.push(in_oper);
+        }
+
+        // If all the RHS columns are equated to constants we'd have to do
+        // something special; just punt.
+        if uexprs.is_empty() {
+            return Ok(None);
+        }
+        uniq_exprs = uexprs;
+        in_operators = inops;
+    }
+
+    // OK, build the path node.
+    let rel_reltarget = root.rel(rel).reltarget.clone();
+    let rel_rows = root.rel(rel).rows;
+    let rel_consider_parallel = root.rel(rel).consider_parallel;
+    let rtekind = root.rel(rel).rtekind;
+    let sp: Path = root.path(subpath).base().clone();
+
+    let mut path = base_path(T_UNIQUE_PATH, T_UNIQUE, rel, rel_reltarget);
+    path.param_info = sp.param_info.clone();
+    path.parallel_aware = false;
+    path.parallel_safe = rel_consider_parallel && sp.parallel_safe;
+    path.parallel_workers = sp.parallel_workers;
+    // Assume the output is unsorted (might get overridden below).
+    path.pathkeys = Vec::new();
+
+    let mut umethod = UNIQUE_PATH_NOOP;
+
+    // If the input is a relation with a unique index proving the semi_rhs_exprs
+    // are unique, we don't need to do anything.
+    let mut is_noop = false;
+    if rtekind == RTE_RELATION
+        && sjinfo.semi_can_btree
+        && seam_ix::relation_has_unique_index_for::call(root, rel, &uniq_exprs, &in_operators)
+    {
+        umethod = UNIQUE_PATH_NOOP;
+        path.rows = rel_rows;
+        path.disabled_nodes = sp.disabled_nodes;
+        path.startup_cost = sp.startup_cost;
+        path.total_cost = sp.total_cost;
+        path.pathkeys = sp.pathkeys.clone();
+        is_noop = true;
+    }
+
+    // If the input is a subquery whose output must be unique already, we don't
+    // need to do anything (only when semi_rhs_exprs are simple Vars referencing
+    // subquery outputs).
+    if !is_noop
+        && rtekind == RTE_SUBQUERY
+        && seam_aj::subquery_is_distinct_for::call(run, root, rel, &uniq_exprs, &in_operators)
+    {
+        umethod = UNIQUE_PATH_NOOP;
+        path.rows = rel_rows;
+        path.disabled_nodes = sp.disabled_nodes;
+        path.startup_cost = sp.startup_cost;
+        path.total_cost = sp.total_cost;
+        path.pathkeys = sp.pathkeys.clone();
+        is_noop = true;
+    }
+
+    if is_noop {
+        let id = root.alloc_path(PathNode::UniquePath(UniquePath {
+            path,
+            subpath: Some(subpath),
+            umethod,
+            in_operators,
+            uniq_exprs,
+        }));
+        root.rel_mut(rel).cheapest_unique_path = Some(id);
+        return Ok(Some(id));
+    }
+
+    // Estimate number of output rows.
+    let est_rows = seam_sf::estimate_num_groups_simple::call(run, root, &uniq_exprs, rel_rows)?;
+    path.rows = est_rows;
+    let num_cols = uniq_exprs.len() as i32;
+    let sub_width = sp.pathtarget.as_deref().map(|t| t.width).unwrap_or(0);
+
+    // semi_can_hash may be cleared below; track a local copy.
+    let mut semi_can_hash = sjinfo.semi_can_hash;
+    let semi_can_btree = sjinfo.semi_can_btree;
+
+    // Estimate cost for sort+unique implementation via a dummy arena Path.
+    let mut sort_disabled = 0i32;
+    let mut sort_startup = 0.0f64;
+    let mut sort_total = 0.0f64;
+    if semi_can_btree {
+        let dummy = base_path(T_PATH, T_SORT, rel, None);
+        let dummy_id = root.alloc_path(PathNode::Path(dummy));
+        let wm = seam::work_mem::call();
+        seam::cost_sort::call(
+            root, dummy_id, &[], sp.disabled_nodes, sp.total_cost, rel_rows, sub_width, 0.0, wm,
+            -1.0,
+        );
+        let d = root.path(dummy_id).base();
+        sort_disabled = d.disabled_nodes;
+        sort_startup = d.startup_cost;
+        // Charge one cpu_operator_cost per comparison per input tuple.
+        sort_total = d.total_cost + seam::cpu_operator_cost::call() * rel_rows * num_cols as f64;
+    }
+
+    // Estimate cost for hash implementation via a dummy arena Path.
+    let mut agg_disabled = 0i32;
+    let mut agg_startup = 0.0f64;
+    let mut agg_total = 0.0f64;
+    if semi_can_hash {
+        // Estimate the overhead per hashtable entry at 64 bytes.
+        let hashentrysize = (sub_width + 64) as f64;
+        if hashentrysize * path.rows > seam::get_hash_memory_limit::call() {
+            // We should not try to hash.
+            semi_can_hash = false;
+        } else {
+            let dummy = base_path(T_AGG_PATH, T_AGG, rel, None);
+            let dummy_id = root.alloc_path(PathNode::Path(dummy));
+            seam::cost_agg::call(
+                run, root, dummy_id, AGG_HASHED, None, num_cols, path.rows, &[], sp.disabled_nodes,
+                sp.startup_cost, sp.total_cost, rel_rows, sub_width,
+            );
+            let d = root.path(dummy_id).base();
+            agg_disabled = d.disabled_nodes;
+            agg_startup = d.startup_cost;
+            agg_total = d.total_cost;
+        }
+    }
+
+    if semi_can_btree && semi_can_hash {
+        if agg_disabled < sort_disabled
+            || (agg_disabled == sort_disabled && agg_total < sort_total)
+        {
+            umethod = UNIQUE_PATH_HASH;
+        } else {
+            umethod = UNIQUE_PATH_SORT;
+        }
+    } else if semi_can_btree {
+        umethod = UNIQUE_PATH_SORT;
+    } else if semi_can_hash {
+        umethod = UNIQUE_PATH_HASH;
+    } else {
+        // We can get here only if we abandoned hashing above.
+        return Ok(None);
+    }
+
+    if umethod == UNIQUE_PATH_HASH {
+        path.disabled_nodes = agg_disabled;
+        path.startup_cost = agg_startup;
+        path.total_cost = agg_total;
+    } else {
+        path.disabled_nodes = sort_disabled;
+        path.startup_cost = sort_startup;
+        path.total_cost = sort_total;
+    }
+
+    let id = root.alloc_path(PathNode::UniquePath(UniquePath {
+        path,
+        subpath: Some(subpath),
+        umethod,
+        in_operators,
+        uniq_exprs: core::mem::take(&mut uniq_exprs),
+    }));
+    root.rel_mut(rel).cheapest_unique_path = Some(id);
+    Ok(Some(id))
+}
+
+/// `create_unique_path(root, rel, rel->cheapest_total_path, sjinfo) != NULL`
+/// (joinrels.c `join_is_legal`) — can the relation's RHS be unique-ified for a
+/// semijoin? Faithfully calls [`create_unique_path`] (which caches the path on
+/// the rel) and reports whether a path was produced.
+pub fn can_create_unique_path<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    rel: RelId,
+    sjinfo: &SpecialJoinInfo,
+) -> bool {
+    let subpath = match root.rel(rel).cheapest_total_path {
+        Some(p) => p,
+        None => return false,
+    };
+    matches!(
+        create_unique_path(run, root, rel, subpath, sjinfo),
+        Ok(Some(_))
+    )
 }
 
 /// `install_dummy_append_path(root, rel)` — the pathnode-side body of joinrels.c's
@@ -2499,15 +2827,6 @@ mod unique_seam {
     use super::*;
 
     seam_core::seam!(
-        /// pathnode.c:1730 cross-subsystem body of `create_unique_path`.
-        pub fn create_unique_path(
-            root: &mut PlannerInfo,
-            rel: RelId,
-            subpath: PathId,
-            sjinfo: &SpecialJoinInfo,
-        ) -> PgResult<Option<PathId>>
-    );
-    seam_core::seam!(
         /// pathnode.c:4242 cross-subsystem body of `reparameterize_path`.
         pub fn reparameterize_path(
             root: &mut PlannerInfo,
@@ -2538,9 +2857,19 @@ mod adjust_child_seam {
             child_rel: RelId,
         ) -> PgResult<Option<PathId>>
     );
+    seam_core::seam!(
+        /// pathnode.c:1792-1803 `IS_OTHER_REL(rel)` leg of `create_unique_path`:
+        /// derive `uniq_exprs` from the parent's `UniquePath` via
+        /// `adjust_appendrel_attrs_multilevel` (prepunion.c, unported). Fires only
+        /// for inheritance/partitionwise child semijoins; panics until the
+        /// appendrel-attrs mutator owner lands. Ordinary IN/EXISTS semijoins never
+        /// reach here.
+        pub fn create_unique_path_child<'mcx>(
+            run: &PlannerRun<'mcx>,
+            root: &mut PlannerInfo,
+            rel: RelId,
+            subpath: PathId,
+            sjinfo: &SpecialJoinInfo,
+        ) -> PgResult<Option<PathId>>
+    );
 }
-
-// Keep InvalidOid referenced (used by future unique-path equality-op handling
-// once the catalog seams land; documents the OID-validity domain).
-#[allow(dead_code)]
-const _INVALID_OID: Oid = InvalidOid;

@@ -17,6 +17,9 @@ types-tuple = { path = "../types-tuple" }
 types-nodes = { path = "../types-nodes" }
 types-pathnodes = { path = "../types-pathnodes" }
 types-selfuncs = { path = "../types-selfuncs" }
+# pathnode.c `create_unique_path` reaches `estimate_num_groups` via the
+# pathnode-side outward seam. pathnode-seams is a leaf seam crate — no cycle.
+backend-optimizer-util-pathnode-seams = { path = "../backend-optimizer-util-pathnode-seams" }
 types-statistics = { path = "../types-statistics" }
 types-scan = { path = "../types-scan" }
 types-acl = { path = "../types-acl" }

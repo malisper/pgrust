@@ -106,7 +106,8 @@ pub use unique::{
 /// `seams-init`.
 pub fn init_seams() {
     use backend_optimizer_path_indxpath_seams as ix;
-    
+    use backend_optimizer_util_pathnode_seams as pn;
+
     use types_pathnodes::{IndexOptInfo, NodeId, PlannerInfo, RelId, RinfoId};
     use types_core::primitive::Oid;
     use types_error::PgResult;
@@ -144,6 +145,13 @@ pub fn init_seams() {
          oprlist: &[Oid]|
          -> bool {
             unique::relation_has_unique_index_for(root, rel, restrictlist, exprlist, oprlist)
+        },
+    );
+    // pathnode.c `create_unique_path` calls this with `restrictlist == NIL`;
+    // install the pathnode-side outward seam (no restrictlist arg).
+    pn::relation_has_unique_index_for::set(
+        |root: &mut PlannerInfo, rel: RelId, exprlist: &[NodeId], oprlist: &[Oid]| -> bool {
+            unique::relation_has_unique_index_for(root, rel, &[], exprlist, oprlist)
         },
     );
     ix::relation_has_unique_index_ext::set(

@@ -170,7 +170,7 @@ fn merge_clump(
     while idx < clumps.len() {
         let old_joinrel = clumps[idx].joinrel;
 
-        if force || desirable_join(root, old_joinrel, new_clump.joinrel) {
+        if force || desirable_join(run, root, old_joinrel, new_clump.joinrel) {
             /*
              * Construct a RelOptInfo representing the join of these two input
              * relations (build + partitionwise/gather paths + set_cheapest),
@@ -228,9 +228,14 @@ fn merge_clump(
 /// `desirable_join(root, outer_rel, inner_rel)` — heuristic for `gimme_tree`:
 /// join if there is an applicable join clause, or a join-order restriction
 /// forcing these rels together; otherwise postpone.
-fn desirable_join(root: &PlannerInfo, outer_rel: RelId, inner_rel: RelId) -> bool {
+fn desirable_join<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    outer_rel: RelId,
+    inner_rel: RelId,
+) -> bool {
     if geqo_seams::have_relevant_joinclause::call(root, outer_rel, inner_rel)
-        || geqo_seams::have_join_order_restriction::call(root, outer_rel, inner_rel)
+        || geqo_seams::have_join_order_restriction::call(run, root, outer_rel, inner_rel)
     {
         return true;
     }
