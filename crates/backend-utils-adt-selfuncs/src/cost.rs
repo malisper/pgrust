@@ -674,6 +674,58 @@ pub(crate) fn hashcostestimate<'mcx, 'run>(
     })
 }
 
+/// `gistcostestimate(root, path, loop_count, ...)` (gistutil.c) — the GiST index
+/// AM's cost estimator. Runs the AM-independent [`genericcostestimate`], then
+/// adds the same two CPU descent-cost components btree charges: a `log2(N)`
+/// comparison cost for the initial descent (when the index has more than one
+/// tuple), and a per-page CPU cost for each page descended through
+/// (`tree_height + 1`). GiST presets neither `num_index_tuples` nor
+/// `num_sa_scans` (it has no ScalarArrayOp special-casing), so `num_sa_scans`
+/// stays at `genericcostestimate`'s default of 1. 1:1 with the C body.
+pub(crate) fn gistcostestimate<'mcx, 'run>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'run>,
+    root: &mut PlannerInfo,
+    path_id: PathId,
+    loop_count: f64,
+) -> PgResult<AmCostEstimate> {
+    let index: IndexOptInfo = {
+        let path = expect_index_path(root, path_id);
+        (**path
+            .indexinfo
+            .as_ref()
+            .expect("gistcostestimate: indexinfo must be set"))
+        .clone()
+    };
+
+    let mut costs = GenericCosts::default();
+    genericcostestimate(mcx, run, root, path_id, loop_count, &mut costs)?;
+
+    let cpu_operator_cost = cz::cpu_operator_cost::call();
+
+    // We model index descent costs similarly to those for btree. Add a CPU-cost
+    // component to represent the initial descent: about log2(N) comparisons.
+    if index.tuples > 1.0 {
+        let descent_cost = (index.tuples.ln() / 2.0f64.ln()).ceil() * cpu_operator_cost;
+        costs.index_startup_cost += descent_cost;
+        costs.index_total_cost += costs.num_sa_scans * descent_cost;
+    }
+
+    // Add a CPU-cost component for each page descended through (tree_height + 1).
+    let descent_cost =
+        (index.tree_height as f64 + 1.0) * DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost;
+    costs.index_startup_cost += descent_cost;
+    costs.index_total_cost += costs.num_sa_scans * descent_cost;
+
+    Ok(AmCostEstimate {
+        index_startup_cost: costs.index_startup_cost,
+        index_total_cost: costs.index_total_cost,
+        index_selectivity: costs.index_selectivity,
+        index_correlation: costs.index_correlation,
+        index_pages: costs.num_index_pages,
+    })
+}
+
 /// `&mut`-borrow the `IndexPath` for a `PathId`, panicking if it is not one.
 fn expect_index_path(root: &PlannerInfo, path_id: PathId) -> &types_pathnodes::IndexPath {
     match root.path(path_id) {
@@ -706,6 +758,9 @@ pub fn seam_amcostestimate<'mcx>(
         // HASH_AM_OID (pg_am.h) — the hash access method.
         405 => hashcostestimate(mcx, run, root, path_id, loop_count)
             .expect("hashcostestimate"),
+        // GIST_AM_OID (pg_am.h) — the GiST access method.
+        783 => gistcostestimate(mcx, run, root, path_id, loop_count)
+            .expect("gistcostestimate"),
         other => panic!(
             "amcostestimate: no cost estimator ported for index AM oid {}",
             other

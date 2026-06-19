@@ -51,6 +51,7 @@ use nbtcompare_seams as nbtcompare; // `FastComparator` type alias lives here.
 // comparator / abbrev tokens and write them into the `ssup` fields). The
 // `GistComparator` / `GistAbbrevConverter` kernel type aliases live here.
 use backend_access_gist_proc_seams as gist_proc;
+use backend_access_gist_dispatch_seams as gist_dispatch;
 
 /// `OidIsValid(oid)` — `InvalidOid` is 0.
 #[inline]
@@ -432,7 +433,15 @@ pub fn PrepareSortSupportFromGistIndexRel(
             "missing support function {GIST_SORTSUPPORT_PROC}({opcintype},{opcintype}) in opfamily {opfamily}"
         )));
     }
-    oid_function_call1_sortsupport(sortSupportFunction, ssup)?;
+    // C: OidFunctionCall1(sortSupportFunction, PointerGetDatum(ssup)). The GiST
+    // GIST_SORTSUPPORT_PROC installs `ssup->comparator` (and the abbreviation
+    // hooks). The owned `Datum` cannot carry the live SortSupport pointer
+    // through fmgr `OidFunctionCall1`, so the call is routed by OID through the
+    // GiST opclass-support typed dispatch (the same dispatch the GiST AM uses
+    // for consistent/distance/...). Unlike the btree comparator path, a GiST
+    // sortsupport proc must install a comparator — there is no old-style btree
+    // comparator fallback — so a missing install surfaces at sort time.
+    gist_dispatch::gist_sortsupport::call(sortSupportFunction, ssup)?;
 
     Ok(())
 }

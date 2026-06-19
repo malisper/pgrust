@@ -26,6 +26,8 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+pub mod fmgr_builtins;
+
 use backend_access_gist_dispatch_seams as dispatch;
 use backend_access_gist_proc_seams as gist_sortsupport_seams;
 use backend_utils_adt_network_gist_seams as inet_gist;
@@ -1571,6 +1573,13 @@ pub fn init_seams() {
     dispatch::gist_fetch::set(dispatch_fetch);
     dispatch::gist_options::set(dispatch_options);
     dispatch::gist_sortsupport::set(dispatch_sortsupport);
+
+    // Register the fmgr builtin rows for this crate's GiST opclass support
+    // procs (C: their `fmgr_builtins[]` rows). Without these, `fmgr_info`
+    // (reached via `index_getprocinfo` in `initGISTstate`) cannot resolve the
+    // internal-language prosrc names, and `CREATE INDEX ... USING gist` errors
+    // `internal function "..." is not in internal lookup table`.
+    fmgr_builtins::register_gist_proc_builtins();
 }
 
 #[cfg(test)]
