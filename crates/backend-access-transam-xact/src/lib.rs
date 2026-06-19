@@ -1737,6 +1737,14 @@ pub fn init_seams() {
     // guc_funcs.c blocks SET during a parallel operation via IsInParallelMode();
     // its outward seam's real owner is xact.c, so install it here.
     backend_utils_misc_guc_funcs_seams::is_in_parallel_mode::set(IsInParallelMode);
+    // guc_funcs.c warns (does not error) when SET LOCAL / SET TRANSACTION is run
+    // outside a transaction block; the real owner is xact.c. The seam returns ();
+    // WarnNoTransactionBlock takes the WARNING (throwError=false) branch, which
+    // emits the report and returns Ok, so this never propagates an Err.
+    backend_utils_misc_guc_funcs_seams::warn_no_transaction_block::set(|is_top_level, stmt_type| {
+        WarnNoTransactionBlock(is_top_level, &stmt_type)
+            .expect("WarnNoTransactionBlock (WARNING path) does not error");
+    });
     seams::is_aborted_transaction_block_state::set(IsAbortedTransactionBlockState);
     seams::get_current_command_id::set(GetCurrentCommandId);
     seams::check_xid_alive::set(CheckXidAlive);
