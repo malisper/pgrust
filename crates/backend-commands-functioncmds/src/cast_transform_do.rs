@@ -659,3 +659,57 @@ pub fn ExecuteDoStmt(stmt: &DoStmt, atomic: bool) -> PgResult<()> {
     /* execute the inline handler */
     seam::execute_inline_handler::call(laninline, codeblock)
 }
+
+// ===========================================================================
+// execute_do_stmt seam adapter (backend_tcop_utility_out_seams::execute_do_stmt)
+// ===========================================================================
+//
+// `standard_ProcessUtility` (utility.c) reaches `ExecuteDoStmt` with the live,
+// arena-lifetimed `types_nodes::Node<'mcx>` parse tree, whereas the ported body
+// above operates on the non-lifetimed `types_parsenodes::DoStmt` model the rest
+// of functioncmds is written against. The seam adapter bridges the two node
+// models: it lowers the live `DoStmt` (a `T_DoStmt` node whose `args` is a list
+// of `DefElem` nodes carrying `String` value-node args, per gram.y) into the
+// `types_parsenodes` shape, then calls the faithful body.
+//
+// The `pstate` the seam carries is unused by `ExecuteDoStmt` (the C body takes
+// only `(DoStmt *, bool)`); it is accepted to match the inward-seam contract.
+
+/// Lower one live `DefElem` node into the `types_parsenodes` model. DO only ever
+/// produces `DefElem`s with `String` value-node args (`as` / `language`); any
+/// other arg shape is left as a `None` arg so the body's `def_arg_str_val`
+/// raises the faithful "DefElem has no arg" error rather than silently coercing.
+fn lower_defelem(node: &types_nodes::nodes::Node<'_>) -> DefElem {
+    let d = node.expect_defelem();
+    let arg = d.arg.as_deref().and_then(|n| match n {
+        types_nodes::nodes::Node::String(s) => {
+            Some(Box::new(Node::String(types_parsenodes::StringNode {
+                sval: Some(s.sval.as_str().to_string()),
+            })))
+        }
+        _ => None,
+    });
+    DefElem {
+        defnamespace: d.defnamespace.as_ref().map(|v| v.as_str().to_string()),
+        defname: d.defname.as_ref().map(|v| v.as_str().to_string()),
+        arg,
+        defaction: d.defaction,
+        location: d.location,
+    }
+}
+
+/// Seam adapter for `backend_tcop_utility_out_seams::execute_do_stmt`. Lowers
+/// the live `T_DoStmt` node into the `types_parsenodes` model and runs the
+/// faithful [`ExecuteDoStmt`] body.
+pub fn execute_do_stmt_seam<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
+    stmt: &types_nodes::nodes::Node<'mcx>,
+    atomic: bool,
+) -> PgResult<()> {
+    let live = stmt.expect_dostmt();
+    let lowered = DoStmt {
+        args: live.args.iter().map(|n| Node::DefElem(lower_defelem(n))).collect(),
+    };
+    ExecuteDoStmt(&lowered, atomic)
+}

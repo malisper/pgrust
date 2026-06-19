@@ -51,6 +51,9 @@ pub fn init_seams() {
     backend_commands_functioncmds_seams::get_transform_oid::set(
         cast_transform_do::get_transform_oid,
     );
+    // `ExecuteDoStmt` (DO) — reached by standard_ProcessUtility's T_DoStmt arm
+    // through the `backend_tcop_utility_out_seams::execute_do_stmt` inward seam.
+    backend_tcop_utility_out_seams::execute_do_stmt::set(cast_transform_do::execute_do_stmt_seam);
 }
 
 #[allow(unused_imports)]
