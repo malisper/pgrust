@@ -181,7 +181,7 @@ fn transformPartitionSpec<'mcx>(
             new_elem.expr = Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, transformed_expr))?);
         }
 
-        new_params.push(mcx::alloc_in(mcx, Node::PartitionElem(new_elem))?);
+        new_params.push(mcx::alloc_in(mcx, Node::mk_partition_elem(mcx, new_elem))?);
     }
 
     Ok(PartitionSpec {
