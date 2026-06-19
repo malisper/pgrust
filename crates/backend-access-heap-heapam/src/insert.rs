@@ -867,17 +867,16 @@ pub fn simple_heap_insert<'mcx>(
 // ===========================================================================
 
 /// `HeapTupleHeaderSetXmin(tup, xid)` — `tup->t_choice.t_heap.t_xmin = xid`.
+///
+/// C writes the `t_heap` union arm unconditionally; ensure the Rust enum is on
+/// that arm first (an in-memory `heap_form_tuple` tuple arrives as `TDatum`).
 fn HeapTupleHeaderSetXmin(hdr: &mut HeapTupleHeaderData<'_>, xid: TransactionId) {
-    if let HeapTupleHeaderChoice::THeap(f) = &mut hdr.t_choice {
-        f.t_xmin = xid;
-    }
+    hdr.ensure_heap_arm().t_xmin = xid;
 }
 
 /// `HeapTupleHeaderSetXmax(tup, xid)` — `tup->t_choice.t_heap.t_xmax = xid`.
 fn HeapTupleHeaderSetXmax(hdr: &mut HeapTupleHeaderData<'_>, xid: TransactionId) {
-    if let HeapTupleHeaderChoice::THeap(f) = &mut hdr.t_choice {
-        f.t_xmax = xid;
-    }
+    hdr.ensure_heap_arm().t_xmax = xid;
 }
 
 /// `HeapTupleHeaderSetXminFrozen(tup)` — `tup->t_infomask |= HEAP_XMIN_FROZEN`.
@@ -889,9 +888,7 @@ fn HeapTupleHeaderSetXminFrozen(hdr: &mut HeapTupleHeaderData<'_>) {
 /// cid; tup->t_infomask &= ~HEAP_COMBOCID`. (Asserts `!HEAP_MOVED` in C; a
 /// freshly-formed insert tuple never has `HEAP_MOVED`.)
 fn HeapTupleHeaderSetCmin(hdr: &mut HeapTupleHeaderData<'_>, cid: CommandId) {
-    if let HeapTupleHeaderChoice::THeap(f) = &mut hdr.t_choice {
-        f.t_field3 = HeapTupleField3::TCid(cid);
-    }
+    hdr.ensure_heap_arm().t_field3 = HeapTupleField3::TCid(cid);
     hdr.t_infomask &= !HEAP_COMBOCID;
 }
 

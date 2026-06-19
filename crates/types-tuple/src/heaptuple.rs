@@ -431,6 +431,34 @@ impl<'mcx> HeapTupleHeaderData<'mcx> {
         })
     }
 
+    /// Ensure `t_choice` is the `THeap` union arm and return `&mut` to its
+    /// fields, converting from `TDatum` if necessary.
+    ///
+    /// In C `t_choice` is a `union` of `HeapTupleFields` (`t_heap`) and
+    /// `DatumTupleFields` (`t_datum`) over the *same* 12 bytes, so the
+    /// `HeapTupleHeaderSet{Xmin,Xmax,Cmin,...}` macros write `t_heap` fields
+    /// unconditionally — regardless of how the bytes were last interpreted.
+    /// `heap_form_tuple` builds an in-memory tuple with the `t_datum` arm
+    /// (`datum_len_`/`datum_typmod`/`datum_typeid`); when such a tuple is later
+    /// stamped for on-page storage (`heap_prepare_insert`, `heap_update`'s
+    /// new-tuple path), C's union write reinterprets those bytes as `t_heap`.
+    /// The Rust enum models the union as a tagged variant, so a stamp on a
+    /// `TDatum` header would otherwise be a silent no-op (the matching bug:
+    /// xmin/xmax left as stale datum words, breaking visibility and HOT chains).
+    /// This converts the arm — the datum words are about to be overwritten by
+    /// the stamping caller, so they are dropped (the C reinterpretation likewise
+    /// discards them).
+    pub fn ensure_heap_arm(&mut self) -> &mut HeapTupleFields {
+        if !matches!(self.t_choice, HeapTupleHeaderChoice::THeap(_)) {
+            self.t_choice = HeapTupleHeaderChoice::THeap(HeapTupleFields::default());
+        }
+        match &mut self.t_choice {
+            HeapTupleHeaderChoice::THeap(f) => f,
+            // Just set above.
+            HeapTupleHeaderChoice::TDatum(_) => unreachable!(),
+        }
+    }
+
     /// Write this header's fixed fields back over an item's on-page bytes (the C
     /// in-place stores through the `HeapTupleHeader` pointer). `t_bits` and the
     /// tuple's user-data area past byte 23 are left untouched.

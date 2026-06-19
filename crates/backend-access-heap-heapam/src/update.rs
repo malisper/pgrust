@@ -39,7 +39,7 @@ use types_tableam::tableam::{
 };
 use types_tuple::backend_access_common_heaptuple::FormedTuple;
 use types_tuple::heaptuple::{
-    HeapTupleData, HeapTupleField3, HeapTupleHeaderChoice, HeapTupleHeaderData, ItemPointerData,
+    HeapTupleData, HeapTupleField3, HeapTupleHeaderData, ItemPointerData,
     FirstLowInvalidHeapAttributeNumber, TableOidAttributeNumber, HEAP2_XACT_MASK, HEAP_COMBOCID,
     HEAP_HASEXTERNAL, HEAP_HOT_UPDATED, HEAP_KEYS_UPDATED, HEAP_MOVED, HEAP_ONLY_TUPLE,
     HEAP_UPDATED, HEAP_XACT_MASK, HEAP_XMAX_INVALID, HEAP_XMAX_KEYSHR_LOCK, HEAP_XMAX_LOCK_ONLY,
@@ -1584,17 +1584,16 @@ fn HeapTupleIsHeapOnly(hdr: &HeapTupleHeaderData<'_>) -> bool {
 // --- header-field setters (htup_details.h inline functions) ----------------
 
 /// `HeapTupleHeaderSetXmin(tup, xid)`.
+///
+/// C writes the `t_heap` union arm unconditionally; ensure the Rust enum is on
+/// that arm first (the new-tuple copy from `heap_modify_tuple` arrives `TDatum`).
 fn HeapTupleHeaderSetXmin(hdr: &mut HeapTupleHeaderData<'_>, xid: TransactionId) {
-    if let HeapTupleHeaderChoice::THeap(f) = &mut hdr.t_choice {
-        f.t_xmin = xid;
-    }
+    hdr.ensure_heap_arm().t_xmin = xid;
 }
 
 /// `HeapTupleHeaderSetXmax(tup, xid)`.
 fn HeapTupleHeaderSetXmax(hdr: &mut HeapTupleHeaderData<'_>, xid: TransactionId) {
-    if let HeapTupleHeaderChoice::THeap(f) = &mut hdr.t_choice {
-        f.t_xmax = xid;
-    }
+    hdr.ensure_heap_arm().t_xmax = xid;
 }
 
 /// `HeapTupleHeaderSetCmin(tup, cid)` — `t_field3.t_cid = cid; t_infomask &=
@@ -1602,18 +1601,14 @@ fn HeapTupleHeaderSetXmax(hdr: &mut HeapTupleHeaderData<'_>, xid: TransactionId)
 /// cleared above via HEAP_XACT_MASK.)
 fn HeapTupleHeaderSetCmin(hdr: &mut HeapTupleHeaderData<'_>, cid: CommandId) {
     debug_assert!(hdr.t_infomask & HEAP_MOVED == 0);
-    if let HeapTupleHeaderChoice::THeap(f) = &mut hdr.t_choice {
-        f.t_field3 = HeapTupleField3::TCid(cid);
-    }
+    hdr.ensure_heap_arm().t_field3 = HeapTupleField3::TCid(cid);
     hdr.t_infomask &= !HEAP_COMBOCID;
 }
 
 /// `HeapTupleHeaderSetCmax(tup, cid, iscombo)`.
 fn HeapTupleHeaderSetCmax(hdr: &mut HeapTupleHeaderData<'_>, cid: CommandId, iscombo: bool) {
     debug_assert!(hdr.t_infomask & HEAP_MOVED == 0);
-    if let HeapTupleHeaderChoice::THeap(f) = &mut hdr.t_choice {
-        f.t_field3 = HeapTupleField3::TCid(cid);
-    }
+    hdr.ensure_heap_arm().t_field3 = HeapTupleField3::TCid(cid);
     if iscombo {
         hdr.t_infomask |= HEAP_COMBOCID;
     } else {
