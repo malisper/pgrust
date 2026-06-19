@@ -3413,16 +3413,16 @@ pub fn bt_truncate<'mcx>(
 }
 
 /// `index_truncate_tuple(itupdesc, source, leavenatts)` over byte-sliced index
-/// tuples. The `index_truncate_tuple` seam takes a `FormedIndexTuple`; there is
-/// no producer that adapts an on-page byte slice into one here.
+/// tuples, via the `backend-access-common-indextuple` seam (which parses the
+/// on-page byte image into a `FormedIndexTuple`, truncates against the index's
+/// `rd_att`, and serializes back).
 fn index_truncate_tuple_bytes<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _rel: &Relation<'mcx>,
-    _source: &[u8],
-    _leavenatts: i32,
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    source: &[u8],
+    leavenatts: i32,
 ) -> PgResult<PgVec<'mcx, u8>> {
-    let _ = &indextuple::index_form_tuple::call; // anchor the dep
-    panic!("_bt_truncate: index_truncate_tuple over byte-sliced index tuples not yet ported")
+    indextuple::index_truncate_tuple::call(mcx, rel, source, leavenatts)
 }
 
 /// `_bt_keep_natts()` — how many key attributes to keep when truncating.

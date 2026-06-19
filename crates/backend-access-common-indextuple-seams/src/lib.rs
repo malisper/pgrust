@@ -68,6 +68,24 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `index_truncate_tuple(RelationGetDescr(rel), source, leavenatts)`
+    /// (indextuple.c) over a byte-sliced index tuple — the nbtree
+    /// suffix-truncation primitive (`_bt_truncate`). nbtree carries index
+    /// tuples as on-page byte slices, not `FormedIndexTuple`, so the source is
+    /// the contiguous on-disk image (`IndexTupleData` header, optional null
+    /// bitmap, `MAXALIGN`-padded user data, exactly as `index_form_tuple`
+    /// produces). The descriptor is the index relation's own `rd_att`. Returns
+    /// the truncated pivot tuple's on-disk bytes in `mcx`; `t_tid` is copied
+    /// from the source. `Err` carries the oversize ereport / OOM.
+    pub fn index_truncate_tuple<'mcx>(
+        mcx: Mcx<'mcx>,
+        rel: &Relation<'mcx>,
+        source: &[u8],
+        leavenatts: i32,
+    ) -> types_error::PgResult<PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
     /// `index_getattr(itup, attnum, tupdesc, &isnull)` (access/itup.h): deform a
     /// *single* (1-based) attribute out of an index tuple's on-disk byte image,
     /// walking only as far as the target column (the `nocache_index_getattr`

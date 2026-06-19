@@ -188,6 +188,39 @@ impl<'mcx> FormedIndexTuple<'mcx> {
         }
     }
 
+    /// Parse a contiguous on-disk index-tuple byte image (exactly the layout
+    /// [`on_disk_image`](Self::on_disk_image) produces, i.e. what nbtree carries
+    /// on a page) into the owned field split: the 8-byte header, the null
+    /// bitmap (when `INDEX_NULL_MASK` is set), then the user-data area at
+    /// `IndexInfoFindDataOffset(t_info)`. The inverse of `on_disk_image`.
+    pub fn from_on_disk_image<'b>(mcx: Mcx<'b>, itup: &[u8]) -> PgResult<FormedIndexTuple<'b>> {
+        if itup.len() < SIZEOF_INDEX_TUPLE_DATA {
+            return Err(PgError::error("index tuple image shorter than its header"));
+        }
+        let mut t_tid = ItemPointerData::default();
+        t_tid.ip_blkid.bi_hi = u16::from_ne_bytes([itup[0], itup[1]]);
+        t_tid.ip_blkid.bi_lo = u16::from_ne_bytes([itup[2], itup[3]]);
+        t_tid.ip_posid = u16::from_ne_bytes([itup[4], itup[5]]);
+        let t_info = u16::from_ne_bytes([itup[6], itup[7]]);
+        let header = IndexTupleData { t_tid, t_info };
+
+        let total = (t_info & INDEX_SIZE_MASK) as usize;
+        if itup.len() < total {
+            return Err(PgError::error("index tuple image shorter than its size field"));
+        }
+        let data_off = index_info_find_data_offset(t_info);
+
+        let bits: PgVec<'b, bits8> = if (t_info & INDEX_NULL_MASK) != 0 {
+            let nb = data_off.saturating_sub(SIZEOF_INDEX_TUPLE_DATA);
+            slice_in(mcx, &itup[SIZEOF_INDEX_TUPLE_DATA..SIZEOF_INDEX_TUPLE_DATA + nb])?
+        } else {
+            slice_in(mcx, &[])?
+        };
+        let data: PgVec<'b, u8> = slice_in(mcx, &itup[data_off..total])?;
+
+        Ok(FormedIndexTuple { header, bits, data })
+    }
+
     /// A deep copy of the tuple into `mcx` (the owned analogue of C's single
     /// `memcpy(result, source, IndexTupleSize(source))`).
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<FormedIndexTuple<'b>> {
@@ -714,6 +747,24 @@ pub fn nocache_index_getattr_seam<'mcx>(
     nocache_index_getattr_internal(mcx, attnum, itupdesc, tp, bp)
 }
 
+/// Body for the `index_truncate_tuple` seam consumed by nbtree (`_bt_truncate`):
+/// `index_truncate_tuple(RelationGetDescr(rel), source, leavenatts)` over a
+/// byte-sliced index tuple. nbtree carries the source as an on-page byte image,
+/// so we parse it into a [`FormedIndexTuple`], call the real
+/// [`index_truncate_tuple`] against `rel.rd_att`, and serialize the truncated
+/// pivot back to on-disk bytes.
+pub fn index_truncate_tuple_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+    source: &[u8],
+    leavenatts: i32,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let tupdesc = rel.rd_att.as_ref();
+    let formed = FormedIndexTuple::from_on_disk_image(mcx, source)?;
+    let truncated = index_truncate_tuple(mcx, tupdesc, &formed, leavenatts)?;
+    truncated.on_disk_image(mcx)
+}
+
 /// Wire this crate's seams (declared in
 /// `backend-access-common-indextuple-seams`) to their real bodies.
 pub fn init_seams() {
@@ -721,6 +772,7 @@ pub fn init_seams() {
     backend_access_common_indextuple_seams::index_form_tuple_desc::set(index_form_tuple_desc_seam);
     backend_access_common_indextuple_seams::index_deform_tuple::set(index_deform_tuple_seam);
     backend_access_common_indextuple_seams::nocache_index_getattr::set(nocache_index_getattr_seam);
+    backend_access_common_indextuple_seams::index_truncate_tuple::set(index_truncate_tuple_seam);
 }
 
 // ---------------------------------------------------------------------------

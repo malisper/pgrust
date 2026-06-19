@@ -43,8 +43,6 @@
 //!     ConditionalLockBuffer / ExtendBufferedRel seam exists yet (the page.rs
 //!     copies already panic at these exact boundaries). The split / new-root /
 //!     fastpath paths bottom out here.
-//!   * `_bt_vacuum_cycleid` (nbtutils.c) — `btvacinfo` shmem array unported (the
-//!     utils.rs copy panics).
 //!   * `CheckForSerializableConflictIn` / `PredicateLockPage(Split)` /
 //!     `SpeculativeInsertionWait` / `XactLockTableWait` (SSI / speculative-insert)
 //!     — not plumbed to this layer; behaviour-preserving no-ops / honest panics
@@ -621,9 +619,9 @@ fn _bt_conditionallockbuf<'mcx>(_rel: &Relation<'mcx>, buf: Buffer) -> bool {
 }
 
 /// `_bt_vacuum_cycleid(rel)` (nbtutils.c) — the active VACUUM cycle ID, from the
-/// `btvacinfo` shmem array, which is unported (utils.rs panics here too).
-fn _bt_vacuum_cycleid<'mcx>(_rel: &Relation<'mcx>) -> u16 {
-    panic!("_bt_split: _bt_vacuum_cycleid (btvacinfo shmem array) not yet ported")
+/// `btvacinfo` shmem array. Delegates to the ported reader in `utils`.
+fn _bt_vacuum_cycleid<'mcx>(rel: &Relation<'mcx>) -> PgResult<u16> {
+    crate::utils::bt_vacuum_cycleid(rel)
 }
 
 /// `ReadBuffer(rel, blkno)` (bufmgr) — read-without-lock, for the fastpath cache
@@ -1952,7 +1950,7 @@ fn _bt_split<'mcx>(
 
     /* Finish off leftpage special-area fields. */
     lopaque.btpo_next = rightpagenumber;
-    lopaque.btpo_cycleid = _bt_vacuum_cycleid(rel);
+    lopaque.btpo_cycleid = _bt_vacuum_cycleid(rel)?;
     encode_opaque(&mut leftpage, &lopaque);
 
     /* rightpage special area. */
