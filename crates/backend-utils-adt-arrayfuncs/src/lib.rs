@@ -92,6 +92,12 @@ pub fn init_seams() {
     // GetAggInitVal materializing an aggregate's `{0,0}` agginitval).
     fmgr_builtins::register_arrayfuncs_builtins();
 
+    // Register the SQL-facing array builtins (array_eq/ne/lt/gt/le/ge,
+    // arraycontains/contained/overlap, array_ndims/dims/lower/upper/length/
+    // cardinality, array_cat, array_position[_start]/positions, array_remove/
+    // replace) so they dispatch by OID for `SELECT array_*( ... )`.
+    fmgr_builtins::register_arrayfuncs_sql_builtins();
+
     // Register the `internal`-transtype `array_agg` aggregate transition/final
     // functions (array_userfuncs.c) so `SELECT array_agg(x) FROM t` resolves
     // them by OID. setup_peragg_finalfn resolves the finalfn via `fmgr_info` at

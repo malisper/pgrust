@@ -137,3 +137,481 @@ pub fn register_arrayfuncs_builtins() {
         builtin(2401, "array_send", 1, true, false, fc_array_send),
     ]);
 }
+
+// ===========================================================================
+// SQL-facing array builtins (the bodies in `array_userfuncs`, `element_slice`,
+// `ops`, and `sql`). Each `fc_` wrapper marshals fmgr's by-value word /
+// by-reference lane onto the ported body's value-typed signature and back.
+// ===========================================================================
+
+use types_array::ArrayElementDatum;
+use types_core::Oid;
+
+/// `PG_GETARG_ANY_ARRAY_P(i)` when the arg may be NULL: the by-ref varlena image
+/// on the by-ref lane, or `None` for a SQL-NULL.
+fn opt_arg_varlena<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> Option<&'a [u8]> {
+    if fcinfo.arg(i).map(|d| d.isnull).unwrap_or(true) {
+        return None;
+    }
+    fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .or(Some(&[]))
+}
+
+/// `PG_ARGISNULL(i)`.
+fn arg_isnull(fcinfo: &FunctionCallInfoBaseData, i: usize) -> bool {
+    fcinfo.arg(i).map(|d| d.isnull).unwrap_or(true)
+}
+
+/// `fcinfo->fncollation`.
+fn collation(fcinfo: &FunctionCallInfoBaseData) -> Oid {
+    fcinfo.fncollation
+}
+
+/// Materialize argument `i` as an `ArrayElementDatum` for `element_type`. A
+/// pass-by-value element rides the by-value word; a by-reference element rides
+/// its on-disk bytes on the by-ref lane (mirroring C's bare `Datum` that is
+/// either the value or a pointer into stored bytes).
+fn arg_element<'a>(
+    fcinfo: &'a FunctionCallInfoBaseData,
+    i: usize,
+    element_type: Oid,
+) -> ArrayElementDatum<'a> {
+    let s = ok(backend_utils_cache_lsyscache_seams::get_typlenbyvalalign::call(
+        element_type,
+    ));
+    if s.typbyval {
+        ArrayElementDatum::ByValue(fcinfo.arg(i).map(|d| d.value).unwrap_or(Datum::from_usize(0)))
+    } else {
+        ArrayElementDatum::ByRef(
+            fcinfo
+                .ref_arg(i)
+                .and_then(|p| p.as_varlena().or_else(|| p.as_cstring().map(|c| c.as_bytes())))
+                .expect("array element fn: by-ref element missing from by-ref lane"),
+        )
+    }
+}
+
+fn ret_bool(v: bool) -> Datum {
+    Datum::from_bool(v)
+}
+
+fn ret_i32(v: i32) -> Datum {
+    Datum::from_i32(v)
+}
+
+/// `PG_RETURN_NULL()`.
+fn ret_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    fcinfo.set_result_null(true);
+    Datum::from_usize(0)
+}
+
+/// Return an `Option<i32>` result, mapping `None` to SQL-NULL.
+fn ret_opt_i32(fcinfo: &mut FunctionCallInfoBaseData, v: Option<i32>) -> Datum {
+    match v {
+        Some(n) => Datum::from_i32(n),
+        None => ret_null(fcinfo),
+    }
+}
+
+/// Return an array (by-ref varlena image) or SQL-NULL.
+fn ret_opt_array(fcinfo: &mut FunctionCallInfoBaseData, image: Option<Vec<u8>>) -> Datum {
+    match image {
+        Some(img) => {
+            fcinfo.set_ref_result(RefPayload::Varlena(img));
+            Datum::from_usize(0)
+        }
+        None => ret_null(fcinfo),
+    }
+}
+
+/// `cstring_to_text(buf)`: wrap a header-less UTF-8 payload as a `text` varlena.
+fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, payload: &[u8]) -> Datum {
+    let total = payload.len() + 4;
+    let mut img = Vec::with_capacity(total);
+    img.extend_from_slice(&((total as u32) << 2).to_ne_bytes());
+    img.extend_from_slice(payload);
+    fcinfo.set_ref_result(RefPayload::Varlena(img));
+    Datum::from_usize(0)
+}
+
+// --- comparison / containment (strict, anyarray anyarray -> bool) -----------
+
+fn fc_array_eq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let a = arg_varlena(fcinfo, 0).to_vec();
+    let b = arg_varlena(fcinfo, 1).to_vec();
+    ret_bool(ok(crate::ops::array_eq(&a, &b, collation(fcinfo))))
+}
+
+fn fc_array_ne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let a = arg_varlena(fcinfo, 0).to_vec();
+    let b = arg_varlena(fcinfo, 1).to_vec();
+    ret_bool(ok(crate::ops::array_ne(&a, &b, collation(fcinfo))))
+}
+
+fn fc_array_lt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let a = arg_varlena(fcinfo, 0).to_vec();
+    let b = arg_varlena(fcinfo, 1).to_vec();
+    ret_bool(ok(crate::ops::array_lt(&a, &b, collation(fcinfo))))
+}
+
+fn fc_array_gt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let a = arg_varlena(fcinfo, 0).to_vec();
+    let b = arg_varlena(fcinfo, 1).to_vec();
+    ret_bool(ok(crate::ops::array_gt(&a, &b, collation(fcinfo))))
+}
+
+fn fc_array_le(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let a = arg_varlena(fcinfo, 0).to_vec();
+    let b = arg_varlena(fcinfo, 1).to_vec();
+    ret_bool(ok(crate::ops::array_le(&a, &b, collation(fcinfo))))
+}
+
+fn fc_array_ge(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let a = arg_varlena(fcinfo, 0).to_vec();
+    let b = arg_varlena(fcinfo, 1).to_vec();
+    ret_bool(ok(crate::ops::array_ge(&a, &b, collation(fcinfo))))
+}
+
+fn fc_arraycontains(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let a = arg_varlena(fcinfo, 0).to_vec();
+    let b = arg_varlena(fcinfo, 1).to_vec();
+    ret_bool(ok(crate::ops::arraycontains(&a, &b, collation(fcinfo))))
+}
+
+fn fc_arraycontained(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let a = arg_varlena(fcinfo, 0).to_vec();
+    let b = arg_varlena(fcinfo, 1).to_vec();
+    ret_bool(ok(crate::ops::arraycontained(&a, &b, collation(fcinfo))))
+}
+
+fn fc_arrayoverlap(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let a = arg_varlena(fcinfo, 0).to_vec();
+    let b = arg_varlena(fcinfo, 1).to_vec();
+    ret_bool(ok(crate::ops::arrayoverlap(&a, &b, collation(fcinfo))))
+}
+
+// --- dims / bounds (strict, anyarray [int4] -> int4 / text) -----------------
+
+fn fc_array_ndims(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let a = arg_varlena(fcinfo, 0).to_vec();
+    ret_opt_i32(fcinfo, crate::element_slice::array_ndims(&a))
+}
+
+fn fc_array_dims(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let a = arg_varlena(fcinfo, 0).to_vec();
+    let m = scratch_mcx();
+    let payload: Option<Vec<u8>> =
+        ok(crate::element_slice::array_dims(m.mcx(), &a)).map(|v| v.as_slice().to_vec());
+    match payload {
+        Some(v) => ret_text(fcinfo, &v),
+        None => ret_null(fcinfo),
+    }
+}
+
+fn fc_array_lower(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let a = arg_varlena(fcinfo, 0).to_vec();
+    let reqdim = arg_int32(fcinfo, 1);
+    ret_opt_i32(fcinfo, crate::element_slice::array_lower(&a, reqdim))
+}
+
+fn fc_array_upper(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let a = arg_varlena(fcinfo, 0).to_vec();
+    let reqdim = arg_int32(fcinfo, 1);
+    ret_opt_i32(fcinfo, crate::element_slice::array_upper(&a, reqdim))
+}
+
+fn fc_array_length(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let a = arg_varlena(fcinfo, 0).to_vec();
+    let reqdim = arg_int32(fcinfo, 1);
+    ret_opt_i32(fcinfo, crate::element_slice::array_length(&a, reqdim))
+}
+
+fn fc_array_cardinality(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let a = arg_varlena(fcinfo, 0).to_vec();
+    ret_i32(crate::element_slice::array_cardinality(&a))
+}
+
+// --- array_cat / append / prepend (non-strict, anyarray -> anyarray) --------
+
+fn fc_array_cat(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let v1 = opt_arg_varlena(fcinfo, 0).map(|s| s.to_vec());
+    let v2 = opt_arg_varlena(fcinfo, 1).map(|s| s.to_vec());
+    let m = scratch_mcx();
+    let r = ok(crate::array_userfuncs::array_cat(
+        m.mcx(),
+        v1.as_deref(),
+        v2.as_deref(),
+    ));
+    ret_opt_array(fcinfo, r.map(|v| v.as_slice().to_vec()))
+}
+
+// --- array_position / array_positions (non-strict) --------------------------
+
+fn fc_array_position(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let array = opt_arg_varlena(fcinfo, 0).map(|s| s.to_vec());
+    let m = scratch_mcx();
+    let searched = match (&array, arg_isnull(fcinfo, 1)) {
+        (Some(a), false) => Some(arg_element(fcinfo, 1, crate::foundation::arr_elemtype(a))),
+        _ => None,
+    };
+    let r = ok(crate::array_userfuncs::array_position(
+        m.mcx(),
+        array.as_deref(),
+        searched,
+        collation(fcinfo),
+    ));
+    ret_opt_i32(fcinfo, r)
+}
+
+fn fc_array_position_start(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let array = opt_arg_varlena(fcinfo, 0).map(|s| s.to_vec());
+    let m = scratch_mcx();
+    let searched = match (&array, arg_isnull(fcinfo, 1)) {
+        (Some(a), false) => Some(arg_element(fcinfo, 1, crate::foundation::arr_elemtype(a))),
+        _ => None,
+    };
+    let start = if arg_isnull(fcinfo, 2) {
+        None
+    } else {
+        Some(arg_int32(fcinfo, 2))
+    };
+    let r = ok(crate::array_userfuncs::array_position_start(
+        m.mcx(),
+        array.as_deref(),
+        searched,
+        start,
+        collation(fcinfo),
+    ));
+    ret_opt_i32(fcinfo, r)
+}
+
+fn fc_array_positions(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let array = opt_arg_varlena(fcinfo, 0).map(|s| s.to_vec());
+    let m = scratch_mcx();
+    let searched = match (&array, arg_isnull(fcinfo, 1)) {
+        (Some(a), false) => Some(arg_element(fcinfo, 1, crate::foundation::arr_elemtype(a))),
+        _ => None,
+    };
+    let r = ok(crate::array_userfuncs::array_positions(
+        m.mcx(),
+        array.as_deref(),
+        searched,
+        collation(fcinfo),
+    ));
+    ret_opt_array(fcinfo, r.map(|v| v.as_slice().to_vec()))
+}
+
+// --- array_remove / array_replace (non-strict) ------------------------------
+
+fn fc_array_remove(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let array = match opt_arg_varlena(fcinfo, 0) {
+        None => return ret_null(fcinfo),
+        Some(a) => a.to_vec(),
+    };
+    let element_type = crate::foundation::arr_elemtype(&array);
+    let search_isnull = arg_isnull(fcinfo, 1);
+    let search = if search_isnull {
+        ArrayElementDatum::ByValue(Datum::from_usize(0))
+    } else {
+        arg_element(fcinfo, 1, element_type)
+    };
+    let m = scratch_mcx();
+    let r = ok(crate::sql::array_remove(
+        m.mcx(),
+        &array,
+        search,
+        search_isnull,
+        collation(fcinfo),
+    ));
+    ret_opt_array(fcinfo, Some(r.as_slice().to_vec()))
+}
+
+fn fc_array_replace(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let array = match opt_arg_varlena(fcinfo, 0) {
+        None => return ret_null(fcinfo),
+        Some(a) => a.to_vec(),
+    };
+    let element_type = crate::foundation::arr_elemtype(&array);
+    let search_isnull = arg_isnull(fcinfo, 1);
+    let search = if search_isnull {
+        ArrayElementDatum::ByValue(Datum::from_usize(0))
+    } else {
+        arg_element(fcinfo, 1, element_type)
+    };
+    let replace_isnull = arg_isnull(fcinfo, 2);
+    let replace = if replace_isnull {
+        ArrayElementDatum::ByValue(Datum::from_usize(0))
+    } else {
+        arg_element(fcinfo, 2, element_type)
+    };
+    let m = scratch_mcx();
+    let r = ok(crate::sql::array_replace(
+        m.mcx(),
+        &array,
+        search,
+        search_isnull,
+        replace,
+        replace_isnull,
+        collation(fcinfo),
+    ));
+    ret_opt_array(fcinfo, Some(r.as_slice().to_vec()))
+}
+
+// --- trim_array / width_bucket_array (strict, anyarray ... -> ...) ----------
+
+fn fc_trim_array(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let array = arg_varlena(fcinfo, 0).to_vec();
+    let n = arg_int32(fcinfo, 1);
+    let m = scratch_mcx();
+    let img = ok(crate::sql::trim_array(m.mcx(), &array, n)).as_slice().to_vec();
+    fcinfo.set_ref_result(RefPayload::Varlena(img));
+    Datum::from_usize(0)
+}
+
+fn fc_width_bucket_array(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let thresholds = arg_varlena(fcinfo, 1).to_vec();
+    let element_type = crate::foundation::arr_elemtype(&thresholds);
+    let operand = arg_element(fcinfo, 0, element_type);
+    ret_i32(ok(crate::sql::width_bucket_array(
+        operand,
+        &thresholds,
+        collation(fcinfo),
+    )))
+}
+
+// --- array_shuffle / array_sample / array_reverse (strict) ------------------
+
+fn fc_array_shuffle(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let array = arg_varlena(fcinfo, 0).to_vec();
+    let m = scratch_mcx();
+    let img = ok(crate::array_userfuncs::array_shuffle(m.mcx(), &array)).as_slice().to_vec();
+    fcinfo.set_ref_result(RefPayload::Varlena(img));
+    Datum::from_usize(0)
+}
+
+fn fc_array_sample(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let array = arg_varlena(fcinfo, 0).to_vec();
+    let n = arg_int32(fcinfo, 1);
+    let m = scratch_mcx();
+    let img = ok(crate::array_userfuncs::array_sample(m.mcx(), &array, n)).as_slice().to_vec();
+    fcinfo.set_ref_result(RefPayload::Varlena(img));
+    Datum::from_usize(0)
+}
+
+fn fc_array_reverse(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let array = arg_varlena(fcinfo, 0).to_vec();
+    let m = scratch_mcx();
+    let img = ok(crate::array_userfuncs::array_reverse(m.mcx(), &array)).as_slice().to_vec();
+    fcinfo.set_ref_result(RefPayload::Varlena(img));
+    Datum::from_usize(0)
+}
+
+// --- array_sort family (strict, anyarray [bool [bool]] -> anyarray) ---------
+
+fn fc_array_sort(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let array = arg_varlena(fcinfo, 0).to_vec();
+    let m = scratch_mcx();
+    let arr = ok(mcx::slice_in(m.mcx(), &array));
+    let img = ok(crate::array_userfuncs::array_sort(m.mcx(), &arr, collation(fcinfo)))
+        .as_slice()
+        .to_vec();
+    fcinfo.set_ref_result(RefPayload::Varlena(img));
+    Datum::from_usize(0)
+}
+
+fn fc_array_sort_order(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let array = arg_varlena(fcinfo, 0).to_vec();
+    let descending = fcinfo.arg(1).map(|d| d.value.as_bool()).unwrap_or(false);
+    let m = scratch_mcx();
+    let arr = ok(mcx::slice_in(m.mcx(), &array));
+    let img = ok(crate::array_userfuncs::array_sort_order(
+        m.mcx(),
+        &arr,
+        descending,
+        collation(fcinfo),
+    ))
+    .as_slice()
+    .to_vec();
+    fcinfo.set_ref_result(RefPayload::Varlena(img));
+    Datum::from_usize(0)
+}
+
+fn fc_array_sort_order_nulls_first(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let array = arg_varlena(fcinfo, 0).to_vec();
+    let descending = fcinfo.arg(1).map(|d| d.value.as_bool()).unwrap_or(false);
+    let nulls_first = fcinfo.arg(2).map(|d| d.value.as_bool()).unwrap_or(false);
+    let m = scratch_mcx();
+    let arr = ok(mcx::slice_in(m.mcx(), &array));
+    let img = ok(crate::array_userfuncs::array_sort_order_nulls_first(
+        m.mcx(),
+        &arr,
+        descending,
+        nulls_first,
+        collation(fcinfo),
+    ))
+    .as_slice()
+    .to_vec();
+    fcinfo.set_ref_result(RefPayload::Varlena(img));
+    Datum::from_usize(0)
+}
+
+/// A strict (`proisstrict => 't'`) builtin row.
+fn sbuiltin(
+    foid: u32,
+    name: &str,
+    nargs: i16,
+    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
+) -> BuiltinFunction {
+    builtin(foid, name, nargs, true, false, func)
+}
+
+/// A non-strict (`proisstrict => 'f'`) builtin row.
+fn nbuiltin(
+    foid: u32,
+    name: &str,
+    nargs: i16,
+    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
+) -> BuiltinFunction {
+    builtin(foid, name, nargs, false, false, func)
+}
+
+/// Register the SQL-facing array builtins whose bodies are ported.
+pub fn register_arrayfuncs_sql_builtins() {
+    backend_utils_fmgr_core::register_builtins([
+        // comparison / containment
+        sbuiltin(744, "array_eq", 2, fc_array_eq),
+        sbuiltin(390, "array_ne", 2, fc_array_ne),
+        sbuiltin(391, "array_lt", 2, fc_array_lt),
+        sbuiltin(392, "array_gt", 2, fc_array_gt),
+        sbuiltin(393, "array_le", 2, fc_array_le),
+        sbuiltin(396, "array_ge", 2, fc_array_ge),
+        sbuiltin(2748, "arraycontains", 2, fc_arraycontains),
+        sbuiltin(2749, "arraycontained", 2, fc_arraycontained),
+        sbuiltin(2747, "arrayoverlap", 2, fc_arrayoverlap),
+        // dims / bounds
+        sbuiltin(748, "array_ndims", 1, fc_array_ndims),
+        sbuiltin(747, "array_dims", 1, fc_array_dims),
+        sbuiltin(2091, "array_lower", 2, fc_array_lower),
+        sbuiltin(2092, "array_upper", 2, fc_array_upper),
+        sbuiltin(2176, "array_length", 2, fc_array_length),
+        sbuiltin(3179, "array_cardinality", 1, fc_array_cardinality),
+        // trim / width_bucket / shuffle / sample / reverse
+        sbuiltin(6172, "trim_array", 2, fc_trim_array),
+        sbuiltin(3218, "width_bucket_array", 2, fc_width_bucket_array),
+        sbuiltin(6215, "array_shuffle", 1, fc_array_shuffle),
+        sbuiltin(6216, "array_sample", 2, fc_array_sample),
+        sbuiltin(6381, "array_reverse", 1, fc_array_reverse),
+        sbuiltin(6388, "array_sort", 1, fc_array_sort),
+        sbuiltin(6389, "array_sort_order", 2, fc_array_sort_order),
+        sbuiltin(6390, "array_sort_order_nulls_first", 3, fc_array_sort_order_nulls_first),
+        // cat / position / positions / remove / replace
+        nbuiltin(383, "array_cat", 2, fc_array_cat),
+        nbuiltin(3277, "array_position", 2, fc_array_position),
+        nbuiltin(3278, "array_position_start", 3, fc_array_position_start),
+        nbuiltin(3279, "array_positions", 2, fc_array_positions),
+        nbuiltin(3167, "array_remove", 2, fc_array_remove),
+        nbuiltin(3168, "array_replace", 3, fc_array_replace),
+    ]);
+}
