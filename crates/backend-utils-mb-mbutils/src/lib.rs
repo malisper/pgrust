@@ -1432,6 +1432,30 @@ pub fn init_seams() {
     seams::report_invalid_encoding::set(report_invalid_encoding);
     seams::report_untranslatable_char::set(report_untranslatable_char);
     seams::check_encoding_conversion_args::set(check_encoding_conversion_args);
+    seams::find_default_conversion_proc::set(|for_encoding, to_encoding| {
+        // The seam carries no Mcx; FindDefaultConversionProc allocates its
+        // catalog lookups transiently. Run it in a scratch context.
+        let ctx = MemoryContext::new("FindDefaultConversionProc");
+        FindDefaultConversionProc(ctx.mcx(), for_encoding, to_encoding)
+    });
+    seams::pg_do_encoding_conversion_buf::set(
+        |mcx, proc, src_encoding, dest_encoding, src, dst_capacity, no_error| {
+            // Mirror pg_do_encoding_conversion_buf (mbutils.c): limit the input
+            // so the worst-case output (MAX_CONVERSION_GROWTH per byte) fits the
+            // caller's destination buffer of capacity `dst_capacity`
+            // (C: `(destlen - 1) / MAX_CONVERSION_GROWTH`; destlen >= 1).
+            let cap = (dst_capacity.max(1) as usize - 1) / MAX_CONVERSION_GROWTH;
+            let srclen = src.len().min(cap);
+            convert_via_proc_counted::call(
+                mcx,
+                proc,
+                src_encoding,
+                dest_encoding,
+                &src[..srclen],
+                no_error,
+            )
+        },
+    );
 
     // `SetMessageEncoding` is a mbutils.c routine, but its declaration is homed in
     // pg_locale.c's seam crate (the consumer is pg_perm_setlocale). Install it

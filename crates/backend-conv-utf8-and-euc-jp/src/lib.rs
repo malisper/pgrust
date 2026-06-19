@@ -22,7 +22,9 @@ extern crate alloc;
 mod tables;
 
 use backend_utils_error::PgResult;
-use backend_utils_mb_conv_string_helpers::{ConversionResult, LocalToUtf, UtfToLocal};
+use backend_utils_mb_conv_string_helpers::{
+    make_conversion_builtin, ConversionResult, LocalToUtf, UtfToLocal,
+};
 use backend_utils_mb_mbutils_seams::check_encoding_conversion_args;
 use types_wchar::encoding::{pg_enc, PG_EUC_JP, PG_UTF8};
 
@@ -63,7 +65,14 @@ pub fn utf8_to_euc_jp(
 
 /// This crate owns no inward seams (conversions are dispatched via the
 /// `pg_conversion` catalog, mirroring the C module).
-pub fn init_seams() {}
+pub fn init_seams() {
+    // Register the two ported conversion procedures as fmgr builtins
+    // (utf8_and_euc_jp, pg_proc.dat OIDs) so they resolve in-process.
+    backend_utils_fmgr_core::register_builtins([
+        make_conversion_builtin(4362, "euc_jp_to_utf8", euc_jp_to_utf8),
+        make_conversion_builtin(4363, "utf8_to_euc_jp", utf8_to_euc_jp),
+    ]);
+}
 
 #[cfg(test)]
 mod tests;

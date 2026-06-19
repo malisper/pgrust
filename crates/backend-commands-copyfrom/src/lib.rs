@@ -42,7 +42,7 @@ use std::collections::HashMap;
 use mcx::Mcx;
 use types_copy::{
     AttrValue, CopyFileHandle, CopyGetDataResult, CopyParseOptions, CopyParseState,
-    CopySource, EolType, RAW_BUF_SIZE,
+    CopySource, EolType, INPUT_BUF_SIZE, RAW_BUF_SIZE,
 };
 use types_core::primitive::{AttrNumber, Oid};
 use types_tuple::backend_access_common_heaptuple::Datum as RichDatum;
@@ -473,27 +473,38 @@ pub fn BeginCopyFrom<'mcx>(
         defexprs.push(None);
     }
 
-    // Use client encoding when ENCODING option is not specified. In single-user
-    // mode the client encoding is the database encoding.
+    // Look up encoding conversion function (copyfrom.c:1685-1688):
+    // `if (cstate->opts.file_encoding < 0) cstate->file_encoding =
+    //  pg_get_client_encoding(); else cstate->file_encoding =
+    //  cstate->opts.file_encoding;`
     let database_encoding = backend_utils_mb_mbutils_seams::get_database_encoding::call();
     let file_encoding = if file_encoding_opt < 0 {
-        database_encoding
+        backend_utils_mb_mbutils_seams::pg_get_client_encoding::call()
     } else {
         file_encoding_opt
     };
 
-    // Look up encoding conversion function (copyfrom.c:1693-1710). We only
-    // support the no-transcoding fast path; a genuine conversion would need
-    // FindDefaultConversionProc + pg_do_encoding_conversion_buf.
+    // Look up encoding conversion function (copyfrom.c:1693-1710).
     let need_transcoding = !(file_encoding == database_encoding
         || file_encoding == PG_SQL_ASCII
         || database_encoding == PG_SQL_ASCII);
-    if need_transcoding {
-        return Err(unsupported(
-            "BeginCopyFrom: COPY FROM encoding transcoding (FindDefaultConversionProc) \
-             is not yet wired",
-        ));
-    }
+    let conversion_proc = if need_transcoding {
+        let proc = backend_utils_mb_mbutils_seams::find_default_conversion_proc::call(
+            file_encoding,
+            database_encoding,
+        )?;
+        if proc == types_core::InvalidOid {
+            return Err(PgError::error(format!(
+                "default conversion function for encoding \"{}\" to \"{}\" does not exist",
+                common_encnames_seams::pg_encoding_to_char::call(file_encoding),
+                common_encnames_seams::pg_encoding_to_char::call(database_encoding),
+            ))
+            .with_sqlstate(types_error::ERRCODE_UNDEFINED_FUNCTION));
+        }
+        proc
+    } else {
+        types_core::InvalidOid
+    };
 
     // Build the parse state. raw_buf is RAW_BUF_SIZE+1; the codec fills it.
     let mut cstate = CopyParseState {
@@ -509,7 +520,7 @@ pub fn BeginCopyFrom<'mcx>(
         econtext: None,
         file_encoding,
         need_transcoding,
-        conversion_proc: 0,
+        conversion_proc,
         bytes_processed: 0,
         cur_lineno: 0,
         eol_type: EolType::EOL_UNKNOWN,
@@ -548,6 +559,15 @@ pub fn BeginCopyFrom<'mcx>(
     cstate.raw_buf.clear();
     cstate.raw_buf.resize((RAW_BUF_SIZE + 1) as usize, 0);
     cstate.raw_buf_len = 0;
+
+    // C (copyfrom.c BeginCopyFrom): `input_buf` is a distinct INPUT_BUF_SIZE+1
+    // buffer only when transcoding; otherwise it aliases `raw_buf`
+    // (`input_is_raw`). The codec tracks the live length via input_buf_len.
+    if need_transcoding {
+        cstate.input_buf.resize((INPUT_BUF_SIZE + 1) as usize, 0);
+    }
+    cstate.input_buf_index = 0;
+    cstate.input_buf_len = 0;
 
     // Open the data source: stdin (pipe) or a server-side file.
     let pipe = filename.is_none();
@@ -771,8 +791,11 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
             backend_executor_execTuples::slot_store_fetch::ExecClearTuple(estate.slot_data_mut(singleslot))?;
 
             // NextCopyFrom(cstate, econtext, myslot->tts_values, myslot->tts_isnull):
-            // pull one row of AttrValues from the parser.
-            let row = parse::NextCopyFrom(&mut state.cstate)?;
+            // pull one row of AttrValues from the parser. The C
+            // `CopyFromErrorCallback` is active across this call; attach its
+            // context line on error propagation (copyfrom.c:251).
+            let row = parse::NextCopyFrom(&mut state.cstate)
+                .map_err(|e| e.add_context(copy_from_error_context(&state.cstate)))?;
             let row = match row {
                 Some(r) => r,
                 None => break,
@@ -955,6 +978,78 @@ fn unsupported(msg: &str) -> PgError {
         .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
         .errmsg(msg.to_string())
         .into_error()
+}
+
+/// `CopyLimitPrintoutLength(str)` (copyfrom.c:329) — cap a value printed in an
+/// error context at `MAX_COPY_DATA_DISPLAY` (1024) bytes (truncated on a
+/// character boundary), appending `...` when shortened.
+fn copy_limit_printout_length(s: &str) -> String {
+    const MAX_COPY_DATA_DISPLAY: usize = 1024;
+    let slen = s.len();
+    let len = backend_utils_mb_mbutils_seams::pg_mbcliplen::call(
+        s.as_bytes(),
+        slen as i32,
+        MAX_COPY_DATA_DISPLAY as i32,
+    ) as usize;
+    if len == slen {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..len])
+    }
+}
+
+/// `CopyFromErrorCallback(arg)` (copyfrom.c:251) — the COPY FROM error-context
+/// callback, rendered as the single context line C's `errcontext()` would
+/// append. The port attaches it on error propagation (the sanctioned
+/// replacement for C's `error_context_stack` callback) around the per-row
+/// `NextCopyFrom` call.
+fn copy_from_error_context(cstate: &CopyParseState<'_>) -> String {
+    let cur_relname = cstate.rel.rd_rel.relname.as_str();
+
+    if cstate.relname_only {
+        return format!("COPY {cur_relname}");
+    }
+    if cstate.opts.binary {
+        // Can't usefully display the data.
+        return match &cstate.cur_attname {
+            Some(att) => format!(
+                "COPY {cur_relname}, line {}, column {att}",
+                cstate.cur_lineno
+            ),
+            None => format!("COPY {cur_relname}, line {}", cstate.cur_lineno),
+        };
+    }
+    match (&cstate.cur_attname, &cstate.cur_attval) {
+        (Some(att), Some(val)) => {
+            // Error is relevant to a particular column.
+            let attval = copy_limit_printout_length(val);
+            format!(
+                "COPY {cur_relname}, line {}, column {att}: \"{attval}\"",
+                cstate.cur_lineno
+            )
+        }
+        (Some(att), None) => {
+            // Error is relevant to a particular column, value is NULL.
+            format!(
+                "COPY {cur_relname}, line {}, column {att}: null input",
+                cstate.cur_lineno
+            )
+        }
+        (None, _) => {
+            // Error is relevant to a particular line; print it if line_buf is
+            // still valid.
+            if cstate.line_buf_valid {
+                let lineval =
+                    copy_limit_printout_length(&String::from_utf8_lossy(&cstate.line_buf));
+                format!(
+                    "COPY {cur_relname}, line {}: \"{lineval}\"",
+                    cstate.cur_lineno
+                )
+            } else {
+                format!("COPY {cur_relname}, line {}", cstate.cur_lineno)
+            }
+        }
+    }
 }
 
 /// `ResultRelInfo.ri_RelationDesc` as a fresh alias (the open relation the

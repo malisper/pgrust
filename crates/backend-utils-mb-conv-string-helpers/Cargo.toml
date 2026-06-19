@@ -20,3 +20,8 @@ backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
 common-encnames-seams = { path = "../common-encnames-seams" }
 backend-utils-mb-wstrcmp = { path = "../backend-utils-mb-wstrcmp" }
 backend-utils-mb-wstrncmp = { path = "../backend-utils-mb-wstrncmp" }
+# The fmgr-builtin shim adapter for registering ported encoding-conversion
+# procedures by OID (so fmgr resolves them in-process, no dlopen).
+types-fmgr = { path = "../types-fmgr" }
+types-datum = { path = "../types-datum" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }

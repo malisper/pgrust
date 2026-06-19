@@ -14,4 +14,5 @@ backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
 backend-utils-mb-conv-string-helpers = { path = "../backend-utils-mb-conv-string-helpers" }
 types-wchar = { path = "../types-wchar" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 types-error = { path = "../types-error" }

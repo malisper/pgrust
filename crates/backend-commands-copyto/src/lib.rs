@@ -818,13 +818,21 @@ pub fn BeginCopyTo<'mcx>(
         backend_utils_time_snapmgr_seams::update_active_snapshot_command_id::call()?;
 
         // Create dest receiver for COPY OUT (DestCopyOut → CreateCopyDestReceiver)
-        // and associate it with this cstate.
-        let receiver = receiver_register();
+        // and associate it with this cstate. CreateCopyDestReceiver registers the
+        // COPY-OUT vtable in the tcop-dest router and returns its handle; the
+        // executor dispatches `receiveSlot` (copy_dest_receive_slot) through that
+        // handle. The receiver's owner-state token (the RECEIVERS index that
+        // `copy_dest_receive` binds the live cstate under) is recovered from the
+        // handle for receiver_bind/unbind. (A bare receiver_register() index is
+        // NOT a router handle — passing it to the executor sends the query's rows
+        // to the default client dest instead of the COPY file/frontend sink.)
+        let handle = CreateCopyDestReceiver();
+        let receiver = backend_tcop_dest::dest_receiver_state_token(handle);
         cstate.receiver = Some(receiver);
 
         // Create a QueryDesc and ExecutorStart (computes the result tupdesc).
         let started =
-            execmain_s::create_query_desc_and_start::call(mcx.context(), &plan, source_text, receiver)?;
+            execmain_s::create_query_desc_and_start::call(mcx.context(), &plan, source_text, handle.0)?;
         // tupDesc = queryDesc->tupDesc; ExecGetResultType(planstate). Clone out
         // of the bundle so the descriptor lives in the COPY context.
         tup_desc = started.with_result_tupdesc(|td| {

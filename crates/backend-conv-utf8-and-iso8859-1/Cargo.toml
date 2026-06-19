@@ -14,3 +14,4 @@ types-wchar = { path = "../types-wchar" }
 backend-utils-mb-conv-string-helpers = { path = "../backend-utils-mb-conv-string-helpers" }
 backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
 common-wchar = { path = "../common-wchar" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }

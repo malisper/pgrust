@@ -23,7 +23,8 @@ mod tables;
 
 use backend_utils_error::ereport;
 use backend_utils_mb_conv_string_helpers::{
-    check_encoding_conversion_args, ConversionResult, LocalToUtf, UtfToLocal,
+    check_encoding_conversion_args, make_conversion_builtin, ConversionResult, LocalToUtf,
+    UtfToLocal,
 };
 use types_error::{PgResult, ERRCODE_INTERNAL_ERROR, ERROR};
 use types_wchar::encoding::{
@@ -109,4 +110,11 @@ fn unexpected_encoding<T>(encoding: pg_enc) -> PgResult<T> {
 
 /// Wires this crate's seams. It declares none of its own, so this is a no-op
 /// kept for the uniform `seams-init` startup convention.
-pub fn init_seams() {}
+pub fn init_seams() {
+    // Register the two ported conversion procedures as fmgr builtins
+    // (utf8_and_iso8859, pg_proc.dat OIDs) so they resolve in-process.
+    backend_utils_fmgr_core::register_builtins([
+        make_conversion_builtin(4372, "utf8_to_iso8859", utf8_to_iso8859),
+        make_conversion_builtin(4373, "iso8859_to_utf8", iso8859_to_utf8),
+    ]);
+}

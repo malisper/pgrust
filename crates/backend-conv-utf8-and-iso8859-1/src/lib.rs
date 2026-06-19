@@ -17,7 +17,9 @@
 
 #![allow(clippy::result_large_err)]
 
-use backend_utils_mb_conv_string_helpers::{check_encoding_conversion_args, ConversionResult};
+use backend_utils_mb_conv_string_helpers::{
+    check_encoding_conversion_args, make_conversion_builtin, ConversionResult,
+};
 use backend_utils_mb_mbutils_seams::{report_invalid_encoding, report_untranslatable_char};
 use common_wchar::{pg_utf8_islegal, pg_utf_mblen_private};
 use types_error::PgResult;
@@ -142,4 +144,12 @@ pub fn utf8_to_iso8859_1(
 
 /// Wires this crate's seams. It declares none of its own, so this is a no-op
 /// kept for the uniform `seams-init` startup convention.
-pub fn init_seams() {}
+pub fn init_seams() {
+    // Register the two ported conversion procedures as fmgr builtins so their
+    // pg_proc OIDs (utf8_and_iso8859_1, pg_proc.dat) resolve in-process instead
+    // of dlopen'ing `$libdir/utf8_and_iso8859_1`.
+    backend_utils_fmgr_core::register_builtins([
+        make_conversion_builtin(4374, "iso8859_1_to_utf8", iso8859_1_to_utf8),
+        make_conversion_builtin(4375, "utf8_to_iso8859_1", utf8_to_iso8859_1),
+    ]);
+}

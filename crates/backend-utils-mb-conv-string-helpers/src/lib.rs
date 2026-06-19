@@ -741,5 +741,154 @@ fn append_binary_string_info_nt(str: &mut StringInfo<'_>, data: &[u8]) -> PgResu
 /// kept for the uniform `seams-init` startup convention.
 pub fn init_seams() {}
 
+// ===========================================================================
+// fmgr-builtin shim adapter for ported encoding-conversion procedures.
+//
+// Every per-encoding conversion module's `PG_FUNCTION_ARGS` entry point has the
+// uniform C signature:
+//
+//   Datum conv(PG_FUNCTION_ARGS)
+//   {
+//       int      src_encoding = PG_GETARG_INT32(0);
+//       int      dest_encoding = PG_GETARG_INT32(1);
+//       unsigned char *src = (unsigned char *) PG_GETARG_CSTRING(2);
+//       unsigned char *dest = (unsigned char *) PG_GETARG_CSTRING(3);
+//       int      len = PG_GETARG_INT32(4);
+//       bool     noError = PG_GETARG_BOOL(5);
+//       int      converted = <do the conversion, writing into dest>;
+//       PG_RETURN_INT32(converted);
+//   }
+//
+// The ported Rust bodies are all `fn(pg_enc, pg_enc, &[u8], bool) ->
+// PgResult<ConversionResult>` (the produced bytes + source-bytes-consumed).
+// `make_conversion_builtin` wraps one of those into the bare-`Datum`
+// `PGFunction` ABI the function manager dispatches, so the conversion proc OID
+// resolves to the in-process Rust body (no `dlopen` of a `$libdir/utf8_and_*`
+// shared library). This mirrors the `convert_via_proc_counted_seam` packing in
+// `backend-utils-fmgr-core` exactly:
+//   * src_encoding / dest_encoding arrive as by-value int4 args (0, 1),
+//   * the source `cstring` arrives in `ref_args[2]`,
+//   * the destination `cstring` is written back into `ref_args[3]`,
+//   * the int4 return is the count of source bytes consumed.
+// ===========================================================================
+
+/// The uniform ported conversion-procedure body signature.
+pub type ConversionFn = fn(pg_enc, pg_enc, &[u8], bool) -> PgResult<ConversionResult>;
+
+/// Build the `BuiltinFunction` (C `fmgr_builtins[]` row) for a ported encoding
+/// conversion procedure, dispatching the bare-`Datum` `PGFunction` ABI into
+/// `conv`. `foid`/`name` are transcribed from `pg_proc.dat`; all conversion
+/// procedures are `nargs = 6`, strict, non-set-returning.
+pub fn make_conversion_builtin(
+    foid: u32,
+    name: &str,
+    conv: ConversionFn,
+) -> types_fmgr::BuiltinFunction {
+    // The conversion fn is stored in the closure via a generated dispatcher.
+    // Since `PGFunction` is a plain `fn` pointer (no captured environment), the
+    // conversion body must be threaded through a per-OID wrapper. We instead key
+    // the dispatch on a thread-local registry the wrapper consults by fn_oid.
+    register_conversion_body(foid, conv);
+    types_fmgr::BuiltinFunction {
+        foid,
+        name: name.to_string(),
+        nargs: 6,
+        strict: true,
+        retset: false,
+        func: Some(conversion_dispatch),
+    }
+}
+
+thread_local! {
+    static CONVERSION_BODIES: core::cell::RefCell<
+        alloc_map::Map,
+    > = core::cell::RefCell::new(alloc_map::Map::new());
+}
+
+/// Tiny OID→ConversionFn map (std `HashMap` wrapper kept local so the crate's
+/// no_std-ish surface is unaffected). Per-backend (thread_local), mirroring the
+/// fmgr builtin registry's own backend-private model.
+mod alloc_map {
+    use super::ConversionFn;
+    use std::collections::HashMap;
+    pub struct Map(HashMap<u32, ConversionFn>);
+    impl Map {
+        pub fn new() -> Self {
+            Map(HashMap::new())
+        }
+        pub fn insert(&mut self, k: u32, v: ConversionFn) {
+            self.0.insert(k, v);
+        }
+        pub fn get(&self, k: u32) -> Option<ConversionFn> {
+            self.0.get(&k).copied()
+        }
+    }
+}
+
+fn register_conversion_body(foid: u32, conv: ConversionFn) {
+    CONVERSION_BODIES.with(|m| m.borrow_mut().insert(foid, conv));
+}
+
+/// The shared `PGFunction` dispatcher: look up the conversion body by the
+/// resolved `fn_oid` and run it over the fmgr boundary.
+fn conversion_dispatch(
+    fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
+) -> types_datum::Datum {
+    let foid = fcinfo.flinfo.as_ref().map(|f| f.fn_oid).unwrap_or(0);
+    let conv = match CONVERSION_BODIES.with(|m| m.borrow().get(foid)) {
+        Some(c) => c,
+        None => std::panic::panic_any(PgError::error(format!(
+            "encoding conversion procedure {foid} is not registered"
+        ))),
+    };
+
+    // PG_GETARG_INT32(0) / PG_GETARG_INT32(1).
+    let src_encoding = fcinfo
+        .arg(0)
+        .expect("conversion proc: missing src_encoding arg")
+        .value
+        .as_i32();
+    let dest_encoding = fcinfo
+        .arg(1)
+        .expect("conversion proc: missing dest_encoding arg")
+        .value
+        .as_i32();
+
+    // PG_GETARG_CSTRING(2): the source bytes arrive in ref_args[2].
+    let src: Vec<u8> = match fcinfo.ref_args.get(2).and_then(|r| r.as_ref()) {
+        Some(p) => p.as_cstring().map(|s| s.as_bytes().to_vec()).unwrap_or_default(),
+        None => Vec::new(),
+    };
+
+    let no_error = fcinfo
+        .arg(5)
+        .map(|a| a.value.as_bool())
+        .unwrap_or(false);
+
+    let result = match conv(
+        src_encoding as pg_enc,
+        dest_encoding as pg_enc,
+        &src,
+        no_error,
+    ) {
+        Ok(r) => r,
+        Err(e) => std::panic::panic_any(e),
+    };
+
+    // Write the converted, NUL-terminated output back into ref_args[3]
+    // (the destination cstring referent). The fmgr cstring ABI carries text;
+    // an encoding-conversion result need not be valid UTF-8, so this byte->
+    // String framing is the known cstring-boundary limitation (the same one
+    // `convert_via_proc_counted_seam` notes on the source side), not introduced
+    // here.
+    let dst = String::from_utf8_lossy(&result.bytes).into_owned();
+    if let Some(slot) = fcinfo.ref_args.get_mut(3) {
+        *slot = Some(types_fmgr::boundary::RefPayload::Cstring(dst));
+    }
+
+    // PG_RETURN_INT32(converted).
+    types_datum::Datum::from_i32(result.converted)
+}
+
 #[cfg(test)]
 mod tests;

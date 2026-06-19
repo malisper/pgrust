@@ -6570,6 +6570,7 @@ dependencies = [
  "backend-utils-fmgr-core",
  "backend-utils-fmgr-fmgr-seams",
  "backend-utils-mb-mbutils-seams",
+ "common-encnames-seams",
  "mcx",
  "types-copy",
  "types-core",
@@ -8740,6 +8741,7 @@ name = "backend-conv-utf8-and-euc-jp"
 version = "0.0.0"
 dependencies = [
  "backend-utils-error",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "backend-utils-mb-mbutils-seams",
  "types-error",
@@ -8808,6 +8810,7 @@ name = "backend-conv-utf8-and-iso8859"
 version = "0.0.0"
 dependencies = [
  "backend-utils-error",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "common-wchar",
  "types-error",
@@ -8818,6 +8821,7 @@ dependencies = [
 name = "backend-conv-utf8-and-iso8859-1"
 version = "0.0.0"
 dependencies = [
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "backend-utils-mb-mbutils-seams",
  "common-wchar",
@@ -21970,13 +21974,16 @@ version = "0.0.0"
 dependencies = [
  "backend-libpq-pqformat",
  "backend-utils-error",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-mbutils-seams",
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
  "common-encnames-seams",
  "common-wchar",
  "mcx",
+ "types-datum",
  "types-error",
+ "types-fmgr",
  "types-stringinfo",
  "types-wchar",
 ]

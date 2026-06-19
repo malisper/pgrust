@@ -14,7 +14,7 @@
 //! panic; the no-transcoding text path the driver exercises end-to-end never
 //! reaches them.
 
-use mcx::Mcx;
+use mcx::{Mcx, MemoryContext};
 use types_copy::{
     AttrInfo, AttrValue, CopyGetDataResult, CopyParseState, EncodingConversionResult,
 };
@@ -80,25 +80,41 @@ pub fn init_seams() {
     });
     s::pg_encoding_max_length::set(pg_encoding_max_length);
     s::pg_do_encoding_conversion_buf::set(
-        |_proc: Oid, _se: i32, _de: i32, _src: &[u8], _cap: i32| -> PgResult<EncodingConversionResult> {
-            Err(unsupported(
-                "COPY FROM encoding conversion (pg_do_encoding_conversion_buf) is not yet wired",
-            ))
+        |proc: Oid, se: i32, de: i32, src: &[u8], cap: i32| -> PgResult<EncodingConversionResult> {
+            // copyfromparse.c:504 — convert as much of `src` as fits a `cap`-byte
+            // destination buffer with noError=true (stop short on a bad sequence).
+            // The seam carries no Mcx; the converted bytes are copied out into the
+            // owned result, so run the conversion in a scratch context.
+            let ctx = MemoryContext::new("CopyConvertBuf");
+            let (converted_src_len, converted) =
+                backend_utils_mb_mbutils_seams::pg_do_encoding_conversion_buf::call(
+                    ctx.mcx(), proc, se, de, src, cap, true,
+                )?;
+            Ok(EncodingConversionResult {
+                converted_src_len,
+                converted: converted.to_vec(),
+            })
         },
     );
-    s::report_invalid_encoding::set(|encoding: i32, _mbstr: &[u8]| -> PgResult<()> {
-        Err(PgError::error(format!(
-            "invalid byte sequence for encoding \"{encoding}\""
-        )))
+    s::report_invalid_encoding::set(|encoding: i32, mbstr: &[u8]| -> PgResult<()> {
+        // report_invalid_encoding (mbutils.c) — formats the leading bad-char hex
+        // dump ("0xe3 0x81") and raises ERRCODE_CHARACTER_NOT_IN_REPERTOIRE.
+        backend_utils_mb_mbutils_seams::report_invalid_encoding::call(encoding, mbstr)
     });
     s::pg_verifymbstr::set(|mbstr: &[u8]| -> PgResult<()> {
         backend_utils_mb_mbutils_seams::pg_verifymbstr::call(mbstr, false).map(|_| ())
     });
     s::conversion_error_raise::set(
-        |_proc: Oid, _se: i32, _de: i32, _src: &[u8], _cap: i32| -> PgResult<()> {
-            Err(unsupported(
-                "COPY FROM conversion error reporting is not yet wired",
-            ))
+        |proc: Oid, se: i32, de: i32, src: &[u8], cap: i32| -> PgResult<()> {
+            // copyfromparse.c:568 — re-run the conversion with noError=false so the
+            // conversion routine itself raises the specific error.
+            let ctx = MemoryContext::new("CopyConversionError");
+            backend_utils_mb_mbutils_seams::pg_do_encoding_conversion_buf::call(
+                ctx.mcx(), proc, se, de, src, cap, false,
+            )?;
+            // The conversion routine should have raised; if it returned, mirror
+            // C's `elog(ERROR, "encoding conversion failed without error")`.
+            Err(PgError::error("encoding conversion failed without error"))
         },
     );
 

@@ -236,6 +236,40 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `FindDefaultConversionProc(for_encoding, to_encoding)`
+    /// (`catalog/namespace.c`): return the OID of the default conversion
+    /// procedure between the two encodings (searching the active search path),
+    /// or `InvalidOid` if none exists. Mirrors the C signature; the seam carries
+    /// no `Mcx` (the owner runs the catalog lookup in a scratch context).
+    pub fn find_default_conversion_proc(
+        for_encoding: i32,
+        to_encoding: i32,
+    ) -> PgResult<types_core::primitive::Oid>
+);
+
+seam_core::seam!(
+    /// `pg_do_encoding_conversion_buf(proc, src_encoding, dest_encoding, src,
+    /// srclen, dest, dstlen, noError)` (`utils/mb/mbutils.c`): convert `src`
+    /// from `src_encoding` to `dest_encoding` using the already-resolved
+    /// conversion `proc`, limiting the input so the worst-case output fits a
+    /// destination buffer of capacity `dst_capacity`. Returns the number of
+    /// source bytes consumed (C's `convertedlen`, 0 if nothing could be
+    /// converted) together with the converted output bytes (excluding the
+    /// trailing NUL), allocated in `mcx`. With `no_error = true` an invalid
+    /// byte sequence stops the conversion short (returns what converted); with
+    /// `no_error = false` the conversion procedure raises (carried on `Err`).
+    pub fn pg_do_encoding_conversion_buf<'mcx>(
+        mcx: Mcx<'mcx>,
+        proc: types_core::primitive::Oid,
+        src_encoding: i32,
+        dest_encoding: i32,
+        src: &[u8],
+        dst_capacity: i32,
+        no_error: bool,
+    ) -> PgResult<(i32, PgVec<'mcx, u8>)>
+);
+
+seam_core::seam!(
     /// `check_encoding_conversion_args(src_encoding, dest_encoding, len,
     /// expected_src_encoding, expected_dest_encoding)` (mbutils.c): validate the
     /// source/destination encoding ids and the length argument passed to a
