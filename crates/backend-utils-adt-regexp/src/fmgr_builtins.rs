@@ -60,16 +60,18 @@ fn arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
     )
 }
 
-/// A `name` arg's value bytes: the varlena-framed NAMEDATALEN buffer (header
-/// skipped) trimmed at the first NUL (C: `NameStr(name)`).
+/// A `name` arg's value bytes trimmed at the first NUL (C: `NameStr(name)`).
+/// A `name` is a fixed-length (typlen 64) pass-by-reference type that is NOT a
+/// varlena: it crosses the by-ref lane as its raw NUL-padded `NameData` buffer
+/// with NO length-word header. It must be read VERBATIM — running it through
+/// `varlena_payload` would misread the first buffer byte as a varlena header
+/// and chop leading characters off the name.
 #[inline]
 fn arg_name<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    let buf = varlena_payload(
-        fcinfo
-            .ref_arg(i)
-            .and_then(|p| p.as_varlena())
-            .expect("regexp fn: name arg missing from by-ref lane"),
-    );
+    let buf = fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("regexp fn: name arg missing from by-ref lane");
     match buf.iter().position(|&b| b == 0) {
         Some(n) => &buf[..n],
         None => buf,

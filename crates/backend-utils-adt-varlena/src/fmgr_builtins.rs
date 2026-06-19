@@ -54,6 +54,21 @@ fn arg_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
     crate::vardata_any_slice(image)
 }
 
+/// A `name` arg's raw `NAMEDATALEN` buffer bytes. Unlike `text`/`bytea`, a
+/// `name` is a fixed-length (typlen 64) pass-by-reference type that is NOT a
+/// varlena: it crosses the by-ref lane as its raw NUL-padded `NameData` buffer
+/// with NO length-word header in front (exactly as C's `Name`/`NameStr`). It
+/// must be read VERBATIM — running it through `vardata_any_slice` would
+/// misread the first buffer byte as a varlena header and chop leading
+/// characters off the name. The cores NUL-trim it (`name_str` / `name_text`).
+#[inline]
+fn arg_name_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("varlena fn: name arg missing from by-ref lane")
+}
+
 /// `PG_GET_COLLATION()`: the collation the operator was invoked under.
 #[inline]
 fn collation(fcinfo: &FunctionCallInfoBaseData) -> Oid {
@@ -200,59 +215,59 @@ fn fc_btvarstrequalimage(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 
 fn fc_nameeqtext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let c = collation(fcinfo);
-    ret_bool(ok(crate::name_pattern::nameeqtext(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+    ret_bool(ok(crate::name_pattern::nameeqtext(arg_name_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
 }
 fn fc_namenetext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let c = collation(fcinfo);
-    ret_bool(ok(crate::name_pattern::namenetext(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+    ret_bool(ok(crate::name_pattern::namenetext(arg_name_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
 }
 fn fc_namelttext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let c = collation(fcinfo);
-    ret_bool(ok(crate::name_pattern::namelttext(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+    ret_bool(ok(crate::name_pattern::namelttext(arg_name_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
 }
 fn fc_nameletext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let c = collation(fcinfo);
-    ret_bool(ok(crate::name_pattern::nameletext(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+    ret_bool(ok(crate::name_pattern::nameletext(arg_name_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
 }
 fn fc_namegttext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let c = collation(fcinfo);
-    ret_bool(ok(crate::name_pattern::namegttext(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+    ret_bool(ok(crate::name_pattern::namegttext(arg_name_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
 }
 fn fc_namegetext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let c = collation(fcinfo);
-    ret_bool(ok(crate::name_pattern::namegetext(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+    ret_bool(ok(crate::name_pattern::namegetext(arg_name_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
 }
 fn fc_btnametextcmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let c = collation(fcinfo);
-    ret_i32(ok(crate::name_pattern::btnametextcmp(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+    ret_i32(ok(crate::name_pattern::btnametextcmp(arg_name_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
 }
 fn fc_texteqname(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let c = collation(fcinfo);
-    ret_bool(ok(crate::name_pattern::texteqname(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+    ret_bool(ok(crate::name_pattern::texteqname(arg_bytes(fcinfo, 0), arg_name_bytes(fcinfo, 1), c)))
 }
 fn fc_textnename(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let c = collation(fcinfo);
-    ret_bool(ok(crate::name_pattern::textnename(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+    ret_bool(ok(crate::name_pattern::textnename(arg_bytes(fcinfo, 0), arg_name_bytes(fcinfo, 1), c)))
 }
 fn fc_textltname(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let c = collation(fcinfo);
-    ret_bool(ok(crate::name_pattern::textltname(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+    ret_bool(ok(crate::name_pattern::textltname(arg_bytes(fcinfo, 0), arg_name_bytes(fcinfo, 1), c)))
 }
 fn fc_textlename(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let c = collation(fcinfo);
-    ret_bool(ok(crate::name_pattern::textlename(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+    ret_bool(ok(crate::name_pattern::textlename(arg_bytes(fcinfo, 0), arg_name_bytes(fcinfo, 1), c)))
 }
 fn fc_textgtname(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let c = collation(fcinfo);
-    ret_bool(ok(crate::name_pattern::textgtname(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+    ret_bool(ok(crate::name_pattern::textgtname(arg_bytes(fcinfo, 0), arg_name_bytes(fcinfo, 1), c)))
 }
 fn fc_textgename(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let c = collation(fcinfo);
-    ret_bool(ok(crate::name_pattern::textgename(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+    ret_bool(ok(crate::name_pattern::textgename(arg_bytes(fcinfo, 0), arg_name_bytes(fcinfo, 1), c)))
 }
 fn fc_bttextnamecmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let c = collation(fcinfo);
-    ret_i32(ok(crate::name_pattern::bttextnamecmp(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+    ret_i32(ok(crate::name_pattern::bttextnamecmp(arg_bytes(fcinfo, 0), arg_name_bytes(fcinfo, 1), c)))
 }
 
 // ---------------------------------------------------------------------------
@@ -305,7 +320,7 @@ fn fc_byteasend(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 fn fc_name_text(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     // C: name -> text (proname `text`, prosrc name_text). arg0 is a `name`.
     let m = scratch_mcx();
-    let out = ok(crate::wire_io::name_text(m.mcx(), arg_bytes(fcinfo, 0))).to_vec();
+    let out = ok(crate::wire_io::name_text(m.mcx(), arg_name_bytes(fcinfo, 0))).to_vec();
     ret_varlena(fcinfo, out)
 }
 fn fc_text_name(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {

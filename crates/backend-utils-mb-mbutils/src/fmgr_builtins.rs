@@ -57,16 +57,16 @@ fn varlena_image(payload: &[u8]) -> Vec<u8> {
 }
 
 /// `PG_GETARG_NAME(i)`: a `name` value as a `NameData` (a copy of the varlena
-/// payload, NUL-padded to the fixed size). Under the header-ful-everywhere
-/// convention the by-ref lane carries the full varlena image; this skips the
-/// 4-byte header.
+/// payload, NUL-padded to the fixed size). A `name` is NOT a varlena: it
+/// crosses the by-ref lane as its raw NUL-padded NAMEDATALEN buffer with no
+/// length-word header, so it is read verbatim — stripping a varlena header
+/// here would chop leading characters off the name.
 #[inline]
 fn arg_name(fcinfo: &FunctionCallInfoBaseData, i: usize) -> NameData {
-    let image = fcinfo
+    let bytes = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("mbutils fn: name arg missing from by-ref lane");
-    let bytes = varlena_payload(image);
     let mut nd = NameData::default();
     let n = bytes.len().min(NAMEDATALEN as usize);
     nd.data[..n].copy_from_slice(&bytes[..n]);
