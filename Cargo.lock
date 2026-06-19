@@ -17876,8 +17876,12 @@ dependencies = [
 name = "backend-test-regress"
 version = "0.0.0"
 dependencies = [
+ "backend-catalog-catalog",
  "backend-parser-coerce-seams",
+ "backend-utils-adt-geo-ops",
  "backend-utils-fmgr-dfmgr-seams",
+ "common-extra-encnames-fgram",
+ "common-path-seams",
  "types-core",
  "types-datum",
  "types-error",

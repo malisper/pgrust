@@ -15,3 +15,7 @@ types-datum = { path = "../types-datum" }
 types-fmgr = { path = "../types-fmgr" }
 backend-parser-coerce-seams = { path = "../backend-parser-coerce-seams" }
 backend-utils-fmgr-dfmgr-seams = { path = "../backend-utils-fmgr-dfmgr-seams" }
+backend-catalog-catalog = { path = "../backend-catalog-catalog" }
+backend-utils-adt-geo-ops = { path = "../backend-utils-adt-geo-ops" }
+common-extra-encnames-fgram = { path = "../common-extra-encnames-fgram" }
+common-path-seams = { path = "../common-path-seams" }
