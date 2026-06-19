@@ -98,10 +98,20 @@ fn ret_cstring(fcinfo: &mut FunctionCallInfoBaseData, s: String) -> Datum {
     Datum::from_usize(0)
 }
 
-/// Set a `bytea` (`_send`) result on the by-ref lane.
+/// Set a `bytea` (`_send`) result on the by-ref lane. Under the
+/// header-ful-everywhere convention the `RefPayload::Varlena` carrier must hold a
+/// COMPLETE `struct varlena *` image (4-byte length header + payload), exactly
+/// what a downstream `byteaout`/`VARDATA_ANY` reader skips the header off. The
+/// `_send` core returns the bare payload bytes, so frame them with the 4-byte
+/// header here (`SET_VARSIZE`); handing back a headerless payload makes a reader
+/// mis-parse the first payload byte as a short varlena header and drop bytes.
 #[inline]
 fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
-    fcinfo.set_ref_result(RefPayload::Varlena(bytes));
+    const VARHDRSZ: usize = 4;
+    let mut image = Vec::with_capacity(bytes.len() + VARHDRSZ);
+    image.extend_from_slice(&types_datum::varlena::set_varsize_4b(bytes.len() + VARHDRSZ));
+    image.extend_from_slice(&bytes);
+    fcinfo.set_ref_result(RefPayload::Varlena(image));
     Datum::from_usize(0)
 }
 
