@@ -40,6 +40,7 @@ mod f1_rename;
 mod helpers;
 mod mergeattr;
 mod oncommit;
+mod partbound;
 mod partition;
 mod smallfns;
 mod truncate;
@@ -98,6 +99,16 @@ pub fn init_seams() {
     seam::pre_commit_on_commit_actions::set(oncommit::pre_commit_on_commit_actions);
     seam::at_eoxact_on_commit_actions::set(oncommit::at_eoxact_on_commit_actions);
     seam::at_eosubxact_on_commit_actions::set(oncommit::at_eosubxact_on_commit_actions);
+
+    // transformPartitionBound (parse_utilcmd.c) — the partition `FOR VALUES`
+    // bound transform. Declared as an outward seam from the low-level
+    // parse-utilcmd crate (relcache/partcache/planner-bound); the body lives in
+    // `partbound` here, where the partition key + expression/coercion engine are
+    // reachable. Used by parse-utilcmd's ATTACH PARTITION leg; the inline
+    // DefineRelation path (create.rs) calls the body directly.
+    backend_parser_parse_utilcmd_outward_seams::transformPartitionBound::set(
+        partbound::transform_partition_bound_seam,
+    );
 
     // --- ProcessUtility dispatch arms (utility.c TRUNCATE + DROP relations) ---
     backend_tcop_utility_out_seams::execute_truncate::set(execute_truncate_arm);

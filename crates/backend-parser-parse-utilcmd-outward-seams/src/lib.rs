@@ -97,7 +97,7 @@ seam_core::seam!(
     /// partcache/planner-bound. Carries the bound `Node` in and out.
     pub fn transformPartitionBound<'mcx>(
         mcx: Mcx<'mcx>,
-        pstate: &ParseState<'mcx>,
+        pstate: &mut ParseState<'mcx>,
         parent_relid: Oid,
         spec: NodeBox<'mcx>,
     ) -> PgResult<NodeBox<'mcx>>

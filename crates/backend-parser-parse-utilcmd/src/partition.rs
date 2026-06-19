@@ -24,7 +24,7 @@ use crate::core::{CreateStmtContext, NodePtr};
 /// through the seam; the bound and the result are carried as the bound `Node`.
 pub fn transformPartitionBound<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    pstate: &ParseState<'mcx>,
+    pstate: &mut ParseState<'mcx>,
     parent_relid: Oid,
     spec: NodePtr<'mcx>,
 ) -> PgResult<NodePtr<'mcx>> {
@@ -51,7 +51,8 @@ pub fn transformPartitionCmd<'mcx>(
     };
 
     if let Some(bound) = bound {
-        cxt.partbound = Some(transformPartitionBound(mcx, &cxt.pstate, cxt.rel_oid, bound)?);
+        cxt.partbound = Some(transformPartitionBound(mcx, &mut cxt.pstate, cxt.rel_oid, bound)?);
+        // NB: `&mut cxt.pstate` deref-coerces `PgBox<ParseState>` to `&mut ParseState`.
     }
     Ok(())
 }
