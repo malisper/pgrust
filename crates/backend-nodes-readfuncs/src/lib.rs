@@ -754,15 +754,15 @@ pub fn parse_node_string<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgBox<'mcx, Node<'mcx
     };
 
     let node: Node<'mcx> = match label {
-        b"VAR" => Node::Expr(Expr::Var(read_var()?)),
-        b"CONST" => Node::Expr(Expr::Const(read_const(mcx)?)),
-        b"PARAM" => Node::Expr(Expr::Param(read_param()?)),
-        b"OPEXPR" => Node::Expr(Expr::OpExpr(read_opexpr(mcx)?)),
-        b"DISTINCTEXPR" => Node::Expr(Expr::DistinctExpr(read_opexpr(mcx)?)),
-        b"NULLIFEXPR" => Node::Expr(Expr::NullIfExpr(read_opexpr(mcx)?)),
-        b"FUNCEXPR" => Node::Expr(Expr::FuncExpr(read_funcexpr(mcx)?)),
-        b"BOOLEXPR" => Node::Expr(Expr::BoolExpr(read_boolexpr(mcx)?)),
-        b"TARGETENTRY" => Node::TargetEntry(read_targetentry(mcx)?),
+        b"VAR" => Node::mk_expr(mcx, Expr::Var(read_var()?)),
+        b"CONST" => Node::mk_expr(mcx, Expr::Const(read_const(mcx)?)),
+        b"PARAM" => Node::mk_expr(mcx, Expr::Param(read_param()?)),
+        b"OPEXPR" => Node::mk_expr(mcx, Expr::OpExpr(read_opexpr(mcx)?)),
+        b"DISTINCTEXPR" => Node::mk_expr(mcx, Expr::DistinctExpr(read_opexpr(mcx)?)),
+        b"NULLIFEXPR" => Node::mk_expr(mcx, Expr::NullIfExpr(read_opexpr(mcx)?)),
+        b"FUNCEXPR" => Node::mk_expr(mcx, Expr::FuncExpr(read_funcexpr(mcx)?)),
+        b"BOOLEXPR" => Node::mk_expr(mcx, Expr::BoolExpr(read_boolexpr(mcx)?)),
+        b"TARGETENTRY" => Node::mk_target_entry(mcx, read_targetentry(mcx)?),
         // The remaining per-tag `_read<Type>` readers are dispatched through the
         // per-family `try_read` chain (each reads its fields in the exact order
         // the OUT side wrote them). A LABEL no family claims falls through to C's

@@ -901,7 +901,7 @@ pub fn transformAssignmentIndirection<'mcx>(
 
             // If target is a domain, apply constraints.
             if base_type_id != target_type_id {
-                return Ok(Node::Expr(parse_coerce::coerce_to_domain(
+                return Ok(Node::mk_expr(mcx, parse_coerce::coerce_to_domain(
                     mcx,
                     Expr::FieldStore(fstore),
                     base_type_id,
@@ -954,7 +954,7 @@ pub fn transformAssignmentIndirection<'mcx>(
         -1,
     )?;
     match result {
-        Some(e) => Ok(Node::Expr(e)),
+        Some(e) => Ok(Node::mk_expr(mcx, e)),
         None => {
             if target_is_subscripting {
                 Err(ereport(ERROR)
@@ -1099,7 +1099,7 @@ fn transformAssignmentSubscripts<'mcx>(
         };
     }
 
-    Ok(Node::Expr(result))
+    Ok(Node::mk_expr(mcx, result))
 }
 
 // ===========================================================================
@@ -1743,7 +1743,7 @@ pub fn expandRecordVariable<'mcx>(
                 let mypstate = make_fake_pstate(mcx, ps, &subquery.rtable)?;
                 return expandRecordVariable(mcx, &mypstate, &inner_var, 0);
             }
-            drilled = Some(Node::Expr(expr.clone()));
+            drilled = Some(Node::mk_expr(mcx, expr.clone()));
         }
         RTE_JOIN => {
             debug_assert!(attnum > 0 && (attnum as usize) <= rte.joinaliasvars.len());
@@ -1795,7 +1795,7 @@ pub fn expandRecordVariable<'mcx>(
                     let mypstate = make_fake_pstate_owned(mcx, ps, ctequery_rtable)?;
                     return expandRecordVariable(mcx, &mypstate, &inner_var, 0);
                 }
-                drilled = Some(Node::Expr(expr.clone()));
+                drilled = Some(Node::mk_expr(mcx, expr.clone()));
             }
         }
         RTE_GROUP => {

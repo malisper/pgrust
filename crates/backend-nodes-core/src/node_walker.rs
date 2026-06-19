@@ -1549,7 +1549,7 @@ mod tests {
             rarg: None,
             usingClause: mcx::PgVec::new_in(mcx),
             join_using_alias: None,
-            quals: Some(mcx::alloc_in(mcx, Node::Expr(op_with_two_vars())).unwrap()),
+            quals: Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, op_with_two_vars())).unwrap()),
             alias: None,
             rtindex: 0,
         });
@@ -1558,7 +1558,7 @@ mod tests {
         fromlist.push(mcx::alloc_in(mcx, join).unwrap());
         let from = FromExpr {
             fromlist,
-            quals: Some(mcx::alloc_in(mcx, Node::Expr(Expr::Var(Var::default()))).unwrap()),
+            quals: Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, Expr::Var(Var::default()))).unwrap()),
         };
         let node = Node::mk_from_expr(mcx, from);
 

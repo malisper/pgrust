@@ -404,7 +404,7 @@ pub fn transformValuesClause<'mcx>(
             mcx::vec_with_capacity_in(mcx, sublist_length.max(0) as usize)?;
         for i in 0..(sublist_length.max(0) as usize) {
             let e = colexprs[i][r].clone();
-            row.push(mcx::alloc_in(mcx, Node::Expr(e))?);
+            row.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, e))?);
         }
         exprs_lists.push(mcx::alloc_in(mcx, Node::mk_list(mcx, row))?);
     }

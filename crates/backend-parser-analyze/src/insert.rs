@@ -429,7 +429,7 @@ fn transformInsertMultiRowValues<'mcx>(
         let mut row_nodes: PgVec<'mcx, NodePtr<'mcx>> =
             mcx::vec_with_capacity_in(mcx, row.len())?;
         for expr in row.into_iter() {
-            row_nodes.push(mcx::alloc_in(mcx, Node::Expr(expr))?);
+            row_nodes.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, expr))?);
         }
         exprs_lists.push(mcx::alloc_in(mcx, Node::mk_list(mcx, row_nodes))?);
     }
@@ -661,10 +661,10 @@ fn transformOnConflictClause<'mcx>(
     let mut arbiter_elems: PgVec<'mcx, NodePtr<'mcx>> =
         mcx::vec_with_capacity_in(mcx, arbiter_exprs.len())?;
     for e in arbiter_exprs.into_iter() {
-        arbiter_elems.push(mcx::alloc_in(mcx, Node::Expr(e))?);
+        arbiter_elems.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, e))?);
     }
     let arbiter_where: Option<NodePtr<'mcx>> = match arbiter_where_expr {
-        Some(e) => Some(mcx::alloc_in(mcx, Node::Expr(e))?),
+        Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e))?),
         None => None,
     };
 
@@ -709,7 +709,7 @@ fn transformOnConflictClause<'mcx>(
             "WHERE",
         )?;
         on_conflict_where = match where_expr {
-            Some(e) => Some(mcx::alloc_in(mcx, Node::Expr(e))?),
+            Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e))?),
             None => None,
         };
 

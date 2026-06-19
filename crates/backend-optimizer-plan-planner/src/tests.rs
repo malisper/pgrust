@@ -65,7 +65,7 @@ fn preprocess_qual_conditions_fromexpr_qual() {
     let root = PlannerInfo::default();
 
     // FromExpr { fromlist: [], quals: Some(Node::Expr(Const true)) }.
-    let qual = PgBox::new_in(Node::Expr(bool_const(true)), mcx);
+    let qual = PgBox::new_in(Node::mk_expr(mcx, bool_const(true)), mcx);
     let from = FromExpr {
         fromlist: PgVec::new_in(mcx),
         quals: Some(qual),

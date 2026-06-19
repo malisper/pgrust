@@ -435,7 +435,7 @@ pub fn has_partition_attrs<'mcx>(
             // Bitmapset *expr_attrs = NULL;
             // Find all attributes referenced
             // pull_varattnos(expr, 1, &expr_attrs);
-            let expr_node = Node::Expr(expr.clone());
+            let expr_node = Node::mk_expr(mcx, expr.clone());
             let expr_attrs = pull_varattnos(&expr_node, 1, None);
             // partexprs_item = lnext(partexprs, partexprs_item);
             partexprs_item += 1;
@@ -578,7 +578,7 @@ pub fn get_proposed_default_constraint<'mcx>(
     let implicit = make_ands_implicit(defPartConstraint);
     let mut result: PgVec<'mcx, Node<'mcx>> = vec_with_capacity_in(mcx, implicit.len())?;
     for e in implicit {
-        result.push(Node::Expr(e));
+        result.push(Node::mk_expr(mcx, e));
     }
     Ok(result)
 }

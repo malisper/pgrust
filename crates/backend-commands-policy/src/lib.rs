@@ -1357,7 +1357,7 @@ fn wrap_expr<'mcx>(
     mcx: Mcx<'mcx>,
     e: &types_nodes::primnodes::Expr,
 ) -> PgResult<Node<'mcx>> {
-    Ok(Node::Expr(e.clone_in(mcx)?))
+    Ok(Node::mk_expr(mcx, e.clone_in(mcx)?))
 }
 
 /// As [`wrap_expr`] but returning an owned `Node` value.
@@ -1365,7 +1365,7 @@ fn wrap_expr_owned<'mcx>(
     mcx: Mcx<'mcx>,
     e: &types_nodes::primnodes::Expr,
 ) -> PgResult<Node<'mcx>> {
-    Ok(Node::Expr(e.clone_in(mcx)?))
+    Ok(Node::mk_expr(mcx, e.clone_in(mcx)?))
 }
 
 /// `CStringGetTextDatum(nodeToString(qual))` precursor — render the optional
@@ -1376,7 +1376,7 @@ fn node_to_string_opt<'mcx>(
 ) -> PgResult<Option<String>> {
     match qual {
         Some(e) => {
-            let node = Node::Expr(e.clone_in(mcx)?);
+            let node = Node::mk_expr(mcx, e.clone_in(mcx)?);
             let s = nodes_seams::node_to_string_with_locations::call(mcx, &node)?;
             Ok(Some(s.as_str().to_string()))
         }

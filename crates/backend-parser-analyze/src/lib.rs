@@ -670,7 +670,7 @@ pub(crate) fn opt_expr_to_node<'mcx>(
     e: Option<types_nodes::primnodes::Expr>,
 ) -> PgResult<Option<NodePtr<'mcx>>> {
     match e {
-        Some(expr) => Ok(Some(mcx::alloc_in(mcx, Node::Expr(expr))?)),
+        Some(expr) => Ok(Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, expr))?)),
         None => Ok(None),
     }
 }

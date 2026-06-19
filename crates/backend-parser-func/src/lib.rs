@@ -196,7 +196,7 @@ fn p_last_srf_eq(pstate: &ParseState<'_>, last_srf: Option<&Expr>) -> PgResult<b
 /// Set `pstate->p_last_srf = (Node *) result` (boxed `Node::Expr` in `mcx`).
 fn set_p_last_srf<'mcx>(pstate: &mut ParseState<'mcx>, result: &Expr) -> PgResult<()> {
     let mcx = pstate_mcx(pstate);
-    pstate.p_last_srf = Some(mcx::alloc_in(mcx, Node::Expr(result.clone()))?);
+    pstate.p_last_srf = Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, result.clone()))?);
     Ok(())
 }
 

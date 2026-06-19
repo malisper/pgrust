@@ -512,7 +512,7 @@ pub fn ExplainNode<'es, 'p>(
         // make_ands_explicit(qual): the qual list deparses as an AND of its
         // members; the structural slice never reaches this, so wrap the first
         // member as the representative node for the (panicking) deparse call.
-        let node = mcx::alloc_in(mcx, Node::Expr(qual[0].clone()))?;
+        let node = mcx::alloc_in(mcx, Node::mk_expr(mcx, qual[0].clone()))?;
         let _ = ruleutils_s::deparse_expression::call(mcx, &node, &context, false, false)?;
         // Unreachable on a structural plan (the seam panicked); mirror C by not
         // emitting anything further here.

@@ -1207,7 +1207,7 @@ fn wrap_expr_node<'mcx>(
     e: Option<Expr>,
 ) -> PgResult<Option<PgBox<'mcx, Node<'mcx>>>> {
     match e {
-        Some(expr) => Ok(Some(mcx::alloc_in(mcx, Node::Expr(expr))?)),
+        Some(expr) => Ok(Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, expr))?)),
         None => Ok(None),
     }
 }

@@ -301,7 +301,7 @@ mod tests {
             typmod: -1,
             location: -1,
         };
-        mcx::alloc_in(mcx, Node::Expr(Expr::SQLValueFunction(svf)))
+        mcx::alloc_in(mcx, Node::mk_expr(mcx, Expr::SQLValueFunction(svf)))
     }
 
     fn test_pull_varnos<'mcx>(

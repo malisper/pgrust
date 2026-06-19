@@ -171,12 +171,12 @@ fn convert_VALUES_to_ANY<'mcx>(
         // Prepare an evaluation of the right side of the operator with
         // substitution of the given value.
         // value = convert_testexpr(root, rightop, list_make1(value));
-        let rightop_node = Node::Expr(rightop.clone());
+        let rightop_node = Node::mk_expr(mcx, rightop.clone());
         let subst = match value0.as_expr() {
             Some(e) => alloc::vec![e.clone()],
             None => return Ok(None),
         };
-        let converted = convert_testexpr(&rightop_node, &subst);
+        let converted = convert_testexpr(mcx, &rightop_node, &subst);
 
         // Try to evaluate constant expressions.  We could get a Const result.
         // convert_testexpr always returns a Node::Expr.
@@ -227,9 +227,13 @@ fn convert_VALUES_to_ANY<'mcx>(
 /// The testexpr in the analyzed tree is a `Node::Expr(...)` subtree (Params and
 /// OpExprs). We run the substitution over the `Expr` model; `subst_nodes` are
 /// the `Var` Exprs produced by [`generate_subquery_vars`].
-fn convert_testexpr<'mcx>(testexpr: &Node<'mcx>, subst_nodes: &[Expr]) -> Node<'mcx> {
+fn convert_testexpr<'mcx>(
+    mcx: Mcx<'mcx>,
+    testexpr: &Node<'mcx>,
+    subst_nodes: &[Expr],
+) -> Node<'mcx> {
     match testexpr.as_expr() {
-        Some(e) => Node::Expr(convert_testexpr_mutator(e.clone(), subst_nodes)),
+        Some(e) => Node::mk_expr(mcx, convert_testexpr_mutator(e.clone(), subst_nodes)),
         // The C always passes an expression tree here; an ANY SubLink's testexpr
         // is an OpExpr / BoolExpr, i.e. a `Node::Expr`. Anything else is a
         // malformed parse tree.
@@ -336,7 +340,7 @@ pub fn convert_ANY_sublink_to_join<'mcx>(
         .testexpr
         .as_deref()
         .expect("convert_ANY_sublink_to_join: ANY SubLink has no testexpr");
-    let testexpr_node = Node::Expr(testexpr_expr.clone());
+    let testexpr_node = Node::mk_expr(mcx, testexpr_expr.clone());
     let upper_varnos =
         backend_optimizer_util_vars::var::pull_varnos(Some(root), &testexpr_node);
     if relids_is_empty(&upper_varnos) {
@@ -398,7 +402,7 @@ pub fn convert_ANY_sublink_to_join<'mcx>(
     };
 
     // Build the new join's qual expression, replacing Params with these Vars.
-    let quals = convert_testexpr(&testexpr_node, &subquery_vars);
+    let quals = convert_testexpr(mcx, &testexpr_node, &subquery_vars);
 
     // And finally, build the JoinExpr node.
     let result = JoinExpr {

@@ -485,7 +485,7 @@ fn transformFrameOffset<'mcx>(
     /* Disallow variables in frame offsets */
     crate::checkExprIsVarFree(pstate, &node, constructName)?;
 
-    Ok((Some(Node::Expr(node)), inRangeFunc))
+    Ok((Some(Node::mk_expr(mcx, node)), inRangeFunc))
 }
 
 // ===========================================================================

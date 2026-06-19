@@ -333,7 +333,7 @@ fn make_vacuum_relation<'mcx>(
     // C builds this into vac_context via palloc; a plain arena alloc is
     // behavior-equivalent here.
     let rel_node = match relation {
-        Some(rv) => Some(mcx::alloc_in(mcx, Node::RangeVar(rv.clone_in(mcx)?))?),
+        Some(rv) => Some(mcx::alloc_in(mcx, Node::mk_range_var(mcx, rv.clone_in(mcx)?))?),
         None => None,
     };
     let mut cols: PgVec<types_nodes::nodes::NodePtr<'mcx>> = PgVec::new_in(mcx);

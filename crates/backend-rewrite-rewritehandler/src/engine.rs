@@ -92,7 +92,7 @@ fn get_generated_columns<'mcx>(
         {
             let defexpr = build_generation_expression(mcx, rel, (i + 1) as i32)?;
             // ChangeVarNodes(defexpr, 1, rt_index, 0)
-            let mut defnode = Node::Expr(defexpr);
+            let mut defnode = Node::mk_expr(mcx, defexpr);
             ChangeVarNodes(&mut defnode, 1, rt_index, 0);
             let defexpr = defnode
                 .into_expr()
@@ -207,8 +207,8 @@ fn process_matched_tle<'mcx>(
         }
     }
     if !equal_node(
-        &Node::Expr(priorbottom.clone()),
-        &Node::Expr(src_input.clone()),
+        &Node::mk_expr(mcx, priorbottom.clone()),
+        &Node::mk_expr(mcx, src_input.clone()),
     ) {
         return Err(PgError::new(
             ERROR,
@@ -702,7 +702,7 @@ pub fn rewriteValuesRTE<'mcx>(
                         )?
                     }
                 };
-                new_list.push(alloc_in(mcx, Node::Expr(new_expr))?);
+                new_list.push(alloc_in(mcx, Node::mk_expr(mcx, new_expr))?);
             } else {
                 new_list.push(alloc_in(mcx, col.clone_in(mcx)?)?);
             }
@@ -1318,7 +1318,7 @@ pub fn rewriteRuleAction<'mcx>(
         if parsetree.hasSubLinks && !rule_action.hasSubLinks {
             for tle in rule_action.returningList.iter() {
                 if let Some(e) = tle.expr.as_deref() {
-                    if checkExprHasSubLink(&Node::Expr(e.clone())) {
+                    if checkExprHasSubLink(&Node::mk_expr(mcx, e.clone())) {
                         rule_action.hasSubLinks = true;
                         break;
                     }

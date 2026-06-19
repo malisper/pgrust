@@ -64,7 +64,7 @@ const InvalidAttrNumber: AttrNumber = 0;
 /// Wrap a cooked [`Expr`] into a `Node::Expr` `NodePtr` for the storage
 /// boundary (`nodeToString` / `CreateConstraintEntry` take `&Node`).
 fn expr_to_nodeptr<'mcx>(mcx: Mcx<'mcx>, expr: Expr) -> PgResult<NodePtr<'mcx>> {
-    alloc_in(mcx, Node::Expr(expr))
+    alloc_in(mcx, Node::mk_expr(mcx, expr))
 }
 
 /* ================================================================
@@ -102,7 +102,7 @@ pub fn cookDefault<'mcx>(
 
     if attgenerated != 0 {
         /* Disallow refs to other generated columns */
-        let expr_node = Node::Expr(expr);
+        let expr_node = Node::mk_expr(mcx, expr);
         check_nested_generated(mcx, pstate, &expr_node)?;
         let Some(e) = expr_node.into_expr() else {
             unreachable!("wrapped Expr node");
@@ -122,7 +122,7 @@ pub fn cookDefault<'mcx>(
 
         /* Check security of expressions for virtual generated column */
         if attgenerated == ATTRIBUTE_GENERATED_VIRTUAL as i8 {
-            let expr_node = Node::Expr(expr);
+            let expr_node = Node::mk_expr(mcx, expr);
             check_virtual_generated_security(mcx, pstate, &expr_node)?;
             let Some(e) = expr_node.into_expr() else {
                 unreachable!("wrapped Expr node");
@@ -134,7 +134,7 @@ pub fn cookDefault<'mcx>(
          * For a default expression, transformExpr() should have rejected
          * column references.
          */
-        debug_assert!(!backend_optimizer_util_vars::var::contain_var_clause(&Node::Expr(
+        debug_assert!(!backend_optimizer_util_vars::var::contain_var_clause(&Node::mk_expr(mcx, 
             expr.clone_in(mcx)?
         )));
     }

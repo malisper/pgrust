@@ -680,8 +680,8 @@ fn clone_jointree_shape<'mcx>(mcx: Mcx<'mcx>, n: &Node<'mcx>) -> PgResult<Node<'
 /// A dummy placeholder jointree node used while moving a node out of a `&mut`
 /// slot (the slot is always overwritten before being read again).
 #[inline]
-fn dummy_node<'mcx>() -> Node<'mcx> {
-    Node::RangeTblRef(types_nodes::rawnodes::RangeTblRef { rtindex: 0 })
+fn dummy_node<'mcx>(mcx: Mcx<'mcx>) -> Node<'mcx> {
+    Node::mk_range_tbl_ref(mcx, types_nodes::rawnodes::RangeTblRef { rtindex: 0 })
 }
 
 // ===========================================================================
@@ -944,7 +944,7 @@ fn pull_up_simple_subquery<'mcx>(
         .take()
         .expect("subquery has no jointree");
     if jt.quals.is_none() && jt.fromlist.len() == 1 {
-        let only = core::mem::replace(&mut *jt.fromlist[0], dummy_node());
+        let only = core::mem::replace(&mut *jt.fromlist[0], dummy_node(mcx));
         return Ok(only);
     }
     Ok(Node::mk_from_expr(mcx, PgBox::into_inner(jt)))
@@ -1563,7 +1563,7 @@ fn eval_const_expressions_in_rtfunc<'mcx>(
             if node.is_expr() {
                 let e = node.into_expr().expect("is_expr implies into_expr");
                 let folded = backend_optimizer_util_clauses::fold::eval_const_expressions(mcx, e)?;
-                rtf.funcexpr = Some(alloc_in(mcx, Node::Expr(folded))?);
+                rtf.funcexpr = Some(alloc_in(mcx, Node::mk_expr(mcx, folded))?);
             } else {
                 rtf.funcexpr = Some(alloc_in(mcx, node)?);
             }
@@ -1911,7 +1911,7 @@ fn pull_up_constant_function<'mcx>(
     // `functypclass = get_expr_result_type(rtf->funcexpr, &funcrettype, &tupdesc);`
     let resolved = backend_utils_fmgr_funcapi::result_type::get_expr_result_type(
         mcx,
-        Some(&Node::Expr(funcexpr.clone_in(mcx)?)),
+        Some(&Node::mk_expr(mcx, funcexpr.clone_in(mcx)?)),
     )?;
     if resolved.class != Some(types_nodes::funcapi::TypeFuncClass::Scalar) {
         return Ok(jtnode); // must be a one-column composite type
@@ -2181,7 +2181,7 @@ fn targetlist_as_node<'mcx>(
     items.try_reserve(tlist.len()).map_err(|_| mcx.oom(tlist.len()))?;
     for te in tlist.iter() {
         if let Some(expr) = te.expr.as_deref() {
-            items.push(alloc_in(mcx, Node::Expr(expr.clone_in(mcx)?))?);
+            items.push(alloc_in(mcx, Node::mk_expr(mcx, expr.clone_in(mcx)?))?);
         }
     }
     Ok(Node::mk_list(mcx, items))
@@ -2392,7 +2392,7 @@ fn perform_pullup_replace_vars<'mcx>(
         let n = parse.mergeActionList.len();
         for i in 0..n {
             // Each element is a Node::Expr / Node holding a MergeAction.
-            let action = core::mem::replace(&mut *parse.mergeActionList[i], dummy_node());
+            let action = core::mem::replace(&mut *parse.mergeActionList[i], dummy_node(mcx));
             let action = pullup_replace_vars_merge_action(
                 mcx,
                 root,
@@ -2502,7 +2502,7 @@ fn pullup_replace_vars_nodelist<'mcx>(
 ) -> PgResult<()> {
     let n = list.len();
     for i in 0..n {
-        let node = core::mem::replace(&mut *list[i], dummy_node());
+        let node = core::mem::replace(&mut *list[i], dummy_node(mcx));
         let newnode = pullup_replace_vars(mcx, root, node, rvcontext, outer_has_sublinks)?;
         *list[i] = newnode;
     }
@@ -2543,7 +2543,7 @@ fn pullup_replace_vars_opt_expr<'mcx>(
             let newnode = pullup_replace_vars(
                 mcx,
                 root,
-                Node::Expr(PgBox::into_inner(n)),
+                Node::mk_expr(mcx, PgBox::into_inner(n)),
                 rvcontext,
                 outer_has_sublinks,
             )?;
@@ -2597,7 +2597,7 @@ fn replace_vars_in_translated_vars<'mcx>(
         }
         let expr = root.node(id).clone_in(mcx)?;
         let newnode =
-            pullup_replace_vars(mcx, root, Node::Expr(expr), rvcontext, outer_has_sublinks)?;
+            pullup_replace_vars(mcx, root, Node::mk_expr(mcx, expr), rvcontext, outer_has_sublinks)?;
         if let Some(e) = newnode.into_expr() {
             *root.node_mut(id) = e;
         } else {
@@ -2844,7 +2844,7 @@ fn pullup_replace_vars_callback<'mcx>(
         && rcon.rv_cache[varattno as usize].is_some()
     {
         let cached = rcon.rv_cache[varattno as usize].as_ref().unwrap();
-        newnode = Node::Expr(cached.clone_in(mcx)?);
+        newnode = Node::mk_expr(mcx, cached.clone_in(mcx)?);
     } else {
         // Generate the replacement expression (whole-row expansion +
         // non-default varreturningtype handled by ReplaceVarFromTargetList).
@@ -2857,7 +2857,7 @@ fn pullup_replace_vars_callback<'mcx>(
             0,
             mcx,
         )?;
-        newnode = Node::Expr(replacement);
+        newnode = Node::mk_expr(mcx, replacement);
 
         if need_phv {
             let wrap = compute_wrap(mcx, root, rcon, var, &newnode)?;

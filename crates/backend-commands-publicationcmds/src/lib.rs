@@ -1075,7 +1075,7 @@ fn TransformPubWhereClauses<'mcx>(
 
         /* Re-wrap the transformed Expr as a walkable Node for storage. */
         let wherenode: Option<PgBox<'mcx, Node<'mcx>>> = match whereclause {
-            Some(expr) => Some(mcx::alloc_in(mcx, Node::Expr(expr))?),
+            Some(expr) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, expr))?),
             None => None,
         };
 

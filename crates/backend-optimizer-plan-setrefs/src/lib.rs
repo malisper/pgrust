@@ -2044,7 +2044,7 @@ fn set_scan_node_refs<'mcx>(
                     if let Some(e) = funcexpr {
                         let fixed = fix_scan_expr(mcx, root, e, rtoffset, 1.0)?;
                         functions[f].funcexpr =
-                            Some(mcx::alloc_in(mcx, Node::Expr(fixed))?);
+                            Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, fixed))?);
                     }
                 }
             }
@@ -2398,7 +2398,7 @@ fn fix_join_expr_nodelist<'mcx>(
     for n in list {
         let e = node_into_expr(n)?;
         let fixed = fix_join_expr_mutator(mcx, root, e, ctx)?;
-        out.push(Node::Expr(fixed));
+        out.push(Node::mk_expr(mcx, fixed));
     }
     Ok(Some(out))
 }
@@ -2418,7 +2418,7 @@ fn fix_upper_nodelist<'mcx>(
     for n in list {
         let e = node_into_expr(n)?;
         let fixed = fix_upper_expr(mcx, root, e, ctx)?;
-        out.push(Node::Expr(fixed));
+        out.push(Node::mk_expr(mcx, fixed));
     }
     Ok(Some(out))
 }
@@ -3372,7 +3372,7 @@ pub fn extract_expr_dependencies_value<'mcx>(
     };
     // (void) extract_query_dependencies_walker(result, &root); — `result` is a
     // bare Expr, wrapped as the `Node::Expr` the walker dispatches on.
-    let node = Node::Expr(expr.clone());
+    let node = Node::mk_expr(_mcx, expr.clone());
     extract_query_dependencies_walker(&node, &mut ctx)?;
     Ok(ext::QueryDependenciesValue {
         relation_oids: ctx.relation_oids,

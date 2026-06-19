@@ -456,14 +456,14 @@ fn check_agglevels_and_constraints<'mcx>(
         AggOrGrouping::Agg(agg) => {
             let mut directargs: Vec<Node> = Vec::new();
             for e in agg.aggdirectargs.iter() {
-                directargs.push(Node::Expr(e.clone()));
+                directargs.push(Node::mk_expr(mcx, e.clone()));
             }
             let mut args: Vec<Node> = Vec::new();
             for te in agg.args.iter() {
                 args.push(Node::mk_target_entry(mcx, te.clone_in(mcx)?));
             }
             let filter = match agg.aggfilter.as_deref() {
-                Some(e) => Some(Node::Expr(e.clone())),
+                Some(e) => Some(Node::mk_expr(mcx, e.clone())),
                 None => None,
             };
             (directargs, args, filter, agg.location)
@@ -471,7 +471,7 @@ fn check_agglevels_and_constraints<'mcx>(
         AggOrGrouping::Grouping(grp) => {
             let mut args: Vec<Node> = Vec::new();
             for e in grp.args.iter() {
-                args.push(Node::Expr(e.clone()));
+                args.push(Node::mk_expr(mcx, e.clone()));
             }
             (Vec::new(), args, None, grp.location)
         }
@@ -1793,7 +1793,7 @@ fn substitute_grouped_columns_mutator(node: &mut Node, context: &mut SubstituteC
             // grouping_columns are the common Vars, wrapped as nodes.
             let mut grouping_columns: Vec<Node> = Vec::new();
             for e in context.group_clause_common_vars {
-                grouping_columns.push(Node::Expr(e.clone()));
+                grouping_columns.push(Node::mk_expr(context.mcx, e.clone()));
             }
             let deps = core::mem::take(context.constraint_deps);
             match backend_catalog_pg_constraint::check_functional_grouping(
@@ -2135,11 +2135,11 @@ fn compute_grouping_refs(
             flat_node = backend_rewrite_rewritemanip_seams::flatten_join_alias_vars::call(
                 context.mcx,
                 context.qry,
-                Node::Expr(expr.clone()),
+                Node::mk_expr(context.mcx, expr.clone()),
             )?;
             flat_node
         } else {
-            Node::Expr(expr.clone())
+            Node::mk_expr(context.mcx, expr.clone())
         };
 
         let cur_expr: &Expr = match expr_node.as_expr() {

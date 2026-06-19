@@ -2643,7 +2643,7 @@ pub fn addRangeTableEntryForGroup<'mcx>(
         // groupexprs = lappend(groupexprs, copyObject(te->expr))
         let expr = te.expr.as_deref();
         let expr_node = match expr {
-            Some(e) => Node::Expr(e.clone()),
+            Some(e) => Node::mk_expr(mcx, e.clone()),
             None => panic!("addRangeTableEntryForGroup: group clause has no expr"),
         };
         groupexprs.push(mcx::alloc_in(mcx, expr_node)?);

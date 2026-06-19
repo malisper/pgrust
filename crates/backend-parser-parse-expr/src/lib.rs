@@ -807,7 +807,7 @@ fn make_simple_a_expr<'mcx>(
         sval: mcx::PgString::from_str_in(op, mcx)?,
     });
     name.push(mcx::alloc_in(mcx, str_node)?);
-    Ok(Node::A_Expr(A_Expr {
+    Ok(Node::mk_a_expr(mcx, A_Expr {
         kind,
         name,
         lexpr: Some(mcx::alloc_in(mcx, lexpr)?),
@@ -2671,7 +2671,7 @@ fn transformWholeRowRef<'mcx>(
                 args.push(e);
             }
         }
-        Ok(Node::Expr(Expr::RowExpr(RowExpr {
+        Ok(Node::mk_expr(mcx, Expr::RowExpr(RowExpr {
             args,
             row_typeid: RECORDOID,
             row_format: CoercionForm::COERCE_IMPLICIT_CAST,

@@ -1247,7 +1247,7 @@ fn transform_from_clause_item_join<'mcx>(
 
         /* Construct the generated JOIN ON clause */
         let quals = transformJoinUsingClause(mcx, pstate, &l_usingvars, &r_usingvars)?;
-        j.quals = Some(alloc_in(mcx, Node::Expr(quals))?);
+        j.quals = Some(alloc_in(mcx, Node::mk_expr(mcx, quals))?);
     } else if j.quals.is_some() {
         /* User-written ON-condition; transform it */
         let quals_node = j
@@ -1256,7 +1256,7 @@ fn transform_from_clause_item_join<'mcx>(
             .unwrap()
             .clone_in(mcx)?;
         let quals = transformJoinOnClause(mcx, pstate, quals_node, &mut my_namespace)?;
-        j.quals = Some(alloc_in(mcx, Node::Expr(quals))?);
+        j.quals = Some(alloc_in(mcx, Node::mk_expr(mcx, quals))?);
     } else {
         /* CROSS JOIN: no quals */
     }
@@ -1638,7 +1638,7 @@ fn buildMergedJoinVar<'mcx>(
      */
     assign_expr_collations(Some(pstate), &mut res_node)?;
 
-    Ok((Node::Expr(res_node), which))
+    Ok((Node::mk_expr(mcx, res_node), which))
 }
 
 // ===========================================================================
@@ -2040,7 +2040,7 @@ fn store_back_funcexprs<'mcx>(
 ) -> PgResult<()> {
     debug_assert_eq!(funcexprs.len(), exprs.len());
     for (slot, e) in funcexprs.iter_mut().zip(exprs.into_iter()) {
-        *slot = alloc_in(mcx, Node::Expr(e))?;
+        *slot = alloc_in(mcx, Node::mk_expr(mcx, e))?;
     }
     Ok(())
 }

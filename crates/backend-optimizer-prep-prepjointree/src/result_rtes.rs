@@ -56,8 +56,8 @@ type Relids<'mcx> = Option<PgBox<'mcx, Bitmapset<'mcx>>>;
 /// A dummy placeholder jointree node used while moving a node out of a `&mut`
 /// slot (the slot is always overwritten before being read again).
 #[inline]
-fn dummy_node<'mcx>() -> Node<'mcx> {
-    Node::RangeTblRef(types_nodes::rawnodes::RangeTblRef { rtindex: 0 })
+fn dummy_node<'mcx>(mcx: Mcx<'mcx>) -> Node<'mcx> {
+    Node::mk_range_tbl_ref(mcx, types_nodes::rawnodes::RangeTblRef { rtindex: 0 })
 }
 
 /// Convert an `'mcx`-arena [`Bitmapset`] relid set to the lifetime-free
@@ -235,7 +235,7 @@ fn remove_useless_results_recurse_fromexpr<'mcx>(
     let mut i = 0usize;
     while i < f.fromlist.len() {
         // Recursively transform child, allowing it to push up quals into f.quals.
-        let child = core::mem::replace(&mut *f.fromlist[i], dummy_node());
+        let child = core::mem::replace(&mut *f.fromlist[i], dummy_node(mcx));
         let child = remove_useless_results_recurse(
             mcx,
             root,
@@ -282,7 +282,7 @@ fn remove_useless_results_recurse_fromexpr<'mcx>(
             *pq = merged;
         }
         // return (Node *) linitial(f->fromlist)
-        let child = core::mem::replace(&mut *f.fromlist[0], dummy_node());
+        let child = core::mem::replace(&mut *f.fromlist[0], dummy_node(mcx));
         return Ok(child);
     }
 

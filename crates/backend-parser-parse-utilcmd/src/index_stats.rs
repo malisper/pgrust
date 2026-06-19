@@ -75,7 +75,7 @@ pub fn transformIndexStmt<'mcx>(
             assign_expr_collations(Some(&pstate), e)?;
         }
         stmt.whereClause = match where_expr {
-            Some(e) => Some(mcx::alloc_in(mcx, Node::Expr(e))?),
+            Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e))?),
             None => None,
         };
     }
@@ -136,7 +136,7 @@ fn transform_index_elem_expr<'mcx>(
         assign_expr_collations(Some(pstate), e)?;
     }
     ielem.expr = match t {
-        Some(e) => Some(mcx::alloc_in(mcx, Node::Expr(e))?),
+        Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e))?),
         None => None,
     };
     Ok(())
@@ -222,7 +222,7 @@ fn transform_stats_elem_expr<'mcx>(
         assign_expr_collations(Some(pstate), e)?;
     }
     selem.expr = match t {
-        Some(e) => Some(mcx::alloc_in(mcx, Node::Expr(e))?),
+        Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e))?),
         None => None,
     };
     Ok(())
