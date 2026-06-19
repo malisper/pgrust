@@ -1316,64 +1316,64 @@ fn read_aggref<'mcx>(mcx: Mcx<'mcx>) -> PgResult<pn::Aggref> {
 }
 
 /// Dispatch the read_expr_family LABELs this module owns. Reconstructs the
-/// post-analysis `Node::Expr(Expr::X)` form for each shared LABEL.
+/// post-analysis `Node::mk_expr(mcx, Expr::X)` form for each shared LABEL.
 pub(crate) fn try_read<'mcx>(mcx: Mcx<'mcx>, label: &[u8]) -> Option<PgResult<Node<'mcx>>> {
     let res: PgResult<Node<'mcx>> = match label {
-        b"AGGREF" => read_aggref(mcx).map(|n| Node::Expr(Expr::Aggref(n))),
-        b"GROUPINGFUNC" => read_grouping_func(mcx).map(|n| Node::Expr(Expr::GroupingFunc(n))),
-        b"WINDOWFUNC" => read_window_func(mcx).map(|n| Node::Expr(Expr::WindowFunc(n))),
+        b"AGGREF" => read_aggref(mcx).map(|n| Node::mk_expr(mcx, Expr::Aggref(n))),
+        b"GROUPINGFUNC" => read_grouping_func(mcx).map(|n| Node::mk_expr(mcx, Expr::GroupingFunc(n))),
+        b"WINDOWFUNC" => read_window_func(mcx).map(|n| Node::mk_expr(mcx, Expr::WindowFunc(n))),
         b"MERGESUPPORTFUNC" => {
-            read_merge_support_func().map(|n| Node::Expr(Expr::MergeSupportFunc(n)))
+            read_merge_support_func().map(|n| Node::mk_expr(mcx, Expr::MergeSupportFunc(n)))
         }
         b"SUBSCRIPTINGREF" => {
-            read_subscripting_ref(mcx).map(|n| Node::Expr(Expr::SubscriptingRef(n)))
+            read_subscripting_ref(mcx).map(|n| Node::mk_expr(mcx, Expr::SubscriptingRef(n)))
         }
-        b"NAMEDARGEXPR" => read_named_arg_expr(mcx).map(|n| Node::Expr(Expr::NamedArgExpr(n))),
+        b"NAMEDARGEXPR" => read_named_arg_expr(mcx).map(|n| Node::mk_expr(mcx, Expr::NamedArgExpr(n))),
         b"SCALARARRAYOPEXPR" => {
-            read_scalar_array_op_expr(mcx).map(|n| Node::Expr(Expr::ScalarArrayOpExpr(n)))
+            read_scalar_array_op_expr(mcx).map(|n| Node::mk_expr(mcx, Expr::ScalarArrayOpExpr(n)))
         }
-        b"SUBLINK" => read_sublink(mcx).map(|n| Node::Expr(Expr::SubLink(n))),
-        b"FIELDSELECT" => read_field_select(mcx).map(|n| Node::Expr(Expr::FieldSelect(n))),
-        b"FIELDSTORE" => read_field_store(mcx).map(|n| Node::Expr(Expr::FieldStore(n))),
-        b"RELABELTYPE" => read_relabel_type(mcx).map(|n| Node::Expr(Expr::RelabelType(n))),
-        b"COERCEVIAIO" => read_coerce_via_io(mcx).map(|n| Node::Expr(Expr::CoerceViaIO(n))),
+        b"SUBLINK" => read_sublink(mcx).map(|n| Node::mk_expr(mcx, Expr::SubLink(n))),
+        b"FIELDSELECT" => read_field_select(mcx).map(|n| Node::mk_expr(mcx, Expr::FieldSelect(n))),
+        b"FIELDSTORE" => read_field_store(mcx).map(|n| Node::mk_expr(mcx, Expr::FieldStore(n))),
+        b"RELABELTYPE" => read_relabel_type(mcx).map(|n| Node::mk_expr(mcx, Expr::RelabelType(n))),
+        b"COERCEVIAIO" => read_coerce_via_io(mcx).map(|n| Node::mk_expr(mcx, Expr::CoerceViaIO(n))),
         b"ARRAYCOERCEEXPR" => {
-            read_array_coerce_expr(mcx).map(|n| Node::Expr(Expr::ArrayCoerceExpr(n)))
+            read_array_coerce_expr(mcx).map(|n| Node::mk_expr(mcx, Expr::ArrayCoerceExpr(n)))
         }
         b"CONVERTROWTYPEEXPR" => {
-            read_convert_rowtype_expr(mcx).map(|n| Node::Expr(Expr::ConvertRowtypeExpr(n)))
+            read_convert_rowtype_expr(mcx).map(|n| Node::mk_expr(mcx, Expr::ConvertRowtypeExpr(n)))
         }
-        b"COLLATEEXPR" => read_collate_expr(mcx).map(|n| Node::Expr(Expr::CollateExpr(n))),
-        b"CASEEXPR" => read_case_expr(mcx).map(|n| Node::Expr(Expr::CaseExpr(n))),
-        b"CASETESTEXPR" => read_case_test_expr().map(|n| Node::Expr(Expr::CaseTestExpr(n))),
-        b"ARRAYEXPR" => read_array_expr(mcx).map(|n| Node::Expr(Expr::ArrayExpr(n))),
-        b"ROWEXPR" => read_row_expr(mcx).map(|n| Node::Expr(Expr::RowExpr(n))),
-        b"ROWCOMPAREEXPR" => read_row_compare_expr(mcx).map(|n| Node::Expr(Expr::RowCompareExpr(n))),
-        b"COALESCEEXPR" => read_coalesce_expr(mcx).map(|n| Node::Expr(Expr::CoalesceExpr(n))),
-        b"MINMAXEXPR" => read_minmax_expr(mcx).map(|n| Node::Expr(Expr::MinMaxExpr(n))),
+        b"COLLATEEXPR" => read_collate_expr(mcx).map(|n| Node::mk_expr(mcx, Expr::CollateExpr(n))),
+        b"CASEEXPR" => read_case_expr(mcx).map(|n| Node::mk_expr(mcx, Expr::CaseExpr(n))),
+        b"CASETESTEXPR" => read_case_test_expr().map(|n| Node::mk_expr(mcx, Expr::CaseTestExpr(n))),
+        b"ARRAYEXPR" => read_array_expr(mcx).map(|n| Node::mk_expr(mcx, Expr::ArrayExpr(n))),
+        b"ROWEXPR" => read_row_expr(mcx).map(|n| Node::mk_expr(mcx, Expr::RowExpr(n))),
+        b"ROWCOMPAREEXPR" => read_row_compare_expr(mcx).map(|n| Node::mk_expr(mcx, Expr::RowCompareExpr(n))),
+        b"COALESCEEXPR" => read_coalesce_expr(mcx).map(|n| Node::mk_expr(mcx, Expr::CoalesceExpr(n))),
+        b"MINMAXEXPR" => read_minmax_expr(mcx).map(|n| Node::mk_expr(mcx, Expr::MinMaxExpr(n))),
         b"SQLVALUEFUNCTION" => {
-            read_sqlvalue_function().map(|n| Node::Expr(Expr::SQLValueFunction(n)))
+            read_sqlvalue_function().map(|n| Node::mk_expr(mcx, Expr::SQLValueFunction(n)))
         }
-        b"XMLEXPR" => read_xml_expr(mcx).map(|n| Node::Expr(Expr::XmlExpr(n))),
-        b"JSONVALUEEXPR" => read_json_value_expr(mcx).map(|n| Node::Expr(Expr::JsonValueExpr(n))),
+        b"XMLEXPR" => read_xml_expr(mcx).map(|n| Node::mk_expr(mcx, Expr::XmlExpr(n))),
+        b"JSONVALUEEXPR" => read_json_value_expr(mcx).map(|n| Node::mk_expr(mcx, Expr::JsonValueExpr(n))),
         b"JSONCONSTRUCTOREXPR" => {
-            read_json_constructor_expr(mcx).map(|n| Node::Expr(Expr::JsonConstructorExpr(n)))
+            read_json_constructor_expr(mcx).map(|n| Node::mk_expr(mcx, Expr::JsonConstructorExpr(n)))
         }
         b"JSONISPREDICATE" => {
-            read_json_is_predicate(mcx).map(|n| Node::Expr(Expr::JsonIsPredicate(n)))
+            read_json_is_predicate(mcx).map(|n| Node::mk_expr(mcx, Expr::JsonIsPredicate(n)))
         }
-        b"JSONEXPR" => read_json_expr(mcx).map(|n| Node::Expr(Expr::JsonExpr(n))),
-        b"NULLTEST" => read_null_test(mcx).map(|n| Node::Expr(Expr::NullTest(n))),
-        b"BOOLEANTEST" => read_boolean_test(mcx).map(|n| Node::Expr(Expr::BooleanTest(n))),
-        b"COERCETODOMAIN" => read_coerce_to_domain(mcx).map(|n| Node::Expr(Expr::CoerceToDomain(n))),
+        b"JSONEXPR" => read_json_expr(mcx).map(|n| Node::mk_expr(mcx, Expr::JsonExpr(n))),
+        b"NULLTEST" => read_null_test(mcx).map(|n| Node::mk_expr(mcx, Expr::NullTest(n))),
+        b"BOOLEANTEST" => read_boolean_test(mcx).map(|n| Node::mk_expr(mcx, Expr::BooleanTest(n))),
+        b"COERCETODOMAIN" => read_coerce_to_domain(mcx).map(|n| Node::mk_expr(mcx, Expr::CoerceToDomain(n))),
         b"COERCETODOMAINVALUE" => {
-            read_coerce_to_domain_value().map(|n| Node::Expr(Expr::CoerceToDomainValue(n)))
+            read_coerce_to_domain_value().map(|n| Node::mk_expr(mcx, Expr::CoerceToDomainValue(n)))
         }
-        b"SETTODEFAULT" => read_set_to_default().map(|n| Node::Expr(Expr::SetToDefault(n))),
-        b"CURRENTOFEXPR" => read_current_of_expr().map(|n| Node::Expr(Expr::CurrentOfExpr(n))),
-        b"NEXTVALUEEXPR" => read_next_value_expr().map(|n| Node::Expr(Expr::NextValueExpr(n))),
-        b"INFERENCEELEM" => read_inference_elem(mcx).map(|n| Node::Expr(Expr::InferenceElem(n))),
-        b"RETURNINGEXPR" => read_returning_expr(mcx).map(|n| Node::Expr(Expr::ReturningExpr(n))),
+        b"SETTODEFAULT" => read_set_to_default().map(|n| Node::mk_expr(mcx, Expr::SetToDefault(n))),
+        b"CURRENTOFEXPR" => read_current_of_expr().map(|n| Node::mk_expr(mcx, Expr::CurrentOfExpr(n))),
+        b"NEXTVALUEEXPR" => read_next_value_expr().map(|n| Node::mk_expr(mcx, Expr::NextValueExpr(n))),
+        b"INFERENCEELEM" => read_inference_elem(mcx).map(|n| Node::mk_expr(mcx, Expr::InferenceElem(n))),
+        b"RETURNINGEXPR" => read_returning_expr(mcx).map(|n| Node::mk_expr(mcx, Expr::ReturningExpr(n))),
         // NOTE: `_outSubPlan`/`_outAlternativeSubPlan` serialize faithfully
         // (the OUT side is exact), but the repo carriers `SubPlanExpr(Box<
         // SubPlan<'static>>)` / `AlternativeSubPlanExpr(Box<AlternativeSubPlan<
@@ -1492,7 +1492,7 @@ mod tests {
             aggtransno: -1,
             location: -1,
         };
-        let node = Node::Expr(Expr::Aggref(aggref));
+        let node = Node::mk_expr(mcx, Expr::Aggref(aggref));
 
         let text = backend_nodes_outfuncs::nodeToString(mcx, &node).expect("out");
         let parsed = string_to_node(mcx, text.as_str()).expect("read");
@@ -1593,7 +1593,7 @@ mod tests {
             subselect,
             location: -1,
         });
-        let node = Node::Expr(sublink);
+        let node = Node::mk_expr(mcx, sublink);
 
         let text = backend_nodes_outfuncs::nodeToString(mcx, &node).expect("out");
         let parsed = string_to_node(mcx, text.as_str()).expect("read");
