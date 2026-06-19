@@ -68,4 +68,8 @@ backend-utils-adt-format-type = { path = "../backend-utils-adt-format-type" }
 # cycle-free leaf.
 backend-utils-adt-ruleutils = { path = "../backend-utils-adt-ruleutils" }
 
+# generateSerialExtraStmts: ChooseRelationName for the implicit sequence name.
+# Cycle-free: indexcmds does not depend on parse-utilcmd.
+backend-commands-indexcmds = { path = "../backend-commands-indexcmds" }
+
 [dev-dependencies]

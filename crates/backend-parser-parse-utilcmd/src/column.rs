@@ -5,10 +5,11 @@
 //! The constraint-scanning core (the `[NOT] NULL` / DEFAULT / IDENTITY /
 //! GENERATED / PRIMARY / UNIQUE / CHECK / FOREIGN bucketing and the mutually-
 //! exclusive-clause checks) is fully node-independent and ported 1:1. The
-//! catalog-bound leaves — column-type / COLLATE validation
-//! ([`crate::coltype::transformColumnType`], grounded in-crate) and the SERIAL /
-//! IDENTITY sequence generation ([`generateSerialExtraStmts`], still seamed:
-//! its ALTER leg reads a live relcache `Relation` the context model omits).
+//! catalog-bound leaf — column-type / COLLATE validation
+//! ([`crate::coltype::transformColumnType`], grounded in-crate). The SERIAL /
+//! IDENTITY sequence generation is grounded in-crate too
+//! ([`crate::serial::generateSerialExtraStmts`]); its ALTER leg opens the
+//! existing relation by OID through the relcache.
 
 use mcx::{Mcx, PgString, PgVec};
 
@@ -33,8 +34,6 @@ use types_nodes::rawnodes::{A_Const, FuncCall, TypeCast, TypeName};
 const INT8OID: Oid = 20;
 const INT2OID: Oid = 21;
 const INT4OID: Oid = 23;
-
-use backend_parser_parse_utilcmd_outward_seams as sx;
 
 use crate::core::{make_string, CreateStmtContext, NodePtr};
 use crate::errpos::parser_errposition;
@@ -111,40 +110,22 @@ pub fn transformColumnDefinition<'mcx>(
     // Special actions for SERIAL pseudo-types.
     if is_serial {
         let seq_type_id = column.typeName.as_deref().map_or(0 as Oid, |tn| tn.typeOid);
-        let relation = clone_relation(cxt)?;
 
-        let column_node = mcx::alloc_in(mcx, Node::mk_column_def(mcx, column.clone_in(mcx)?))?;
-        let (column_out, snamespace, sname, before_stmts, after_stmts) =
-            sx::generateSerialExtraStmts::call(
-                mcx,
-                column_node,
-                relation,
-                cxt.rel_oid,
-                cxt.isalter,
-                cxt.stmtType,
-                seq_type_id,
-                PgVec::new_in(mcx),
-                false,
-                false,
-            )?;
-        // generateSerialExtraStmts sets column->identitySequence.
-        if let Some(c) = column_out.as_columndef() {
-            column.identitySequence = match &c.identitySequence {
-                Some(r) => Some(mcx::alloc_in(mcx, r.clone_in(mcx)?)?),
-                None => None,
-            };
-        }
-        cxt.blist.extend(before_stmts);
-        cxt.blist.extend(after_stmts);
+        let (snamespace, sname) = crate::serial::generateSerialExtraStmts(
+            cxt,
+            &mut column,
+            seq_type_id,
+            PgVec::new_in(mcx),
+            false,
+            false,
+        )?;
 
         // Create an expression tree representing the function call
         // nextval('sequencename')::regclass, and build the CONSTR_DEFAULT for it.
-        let snamespace_str = snamespace.as_ref().map(PgString::as_str);
-        let sname_str = sname.as_ref().map_or("", PgString::as_str);
         let qstring = backend_utils_adt_ruleutils::quote_qualified_identifier(
             mcx,
-            snamespace_str,
-            sname_str,
+            Some(snamespace.as_str()),
+            sname.as_str(),
         )?;
 
         let snamenode = A_Const {
@@ -383,23 +364,14 @@ pub fn transformColumnDefinition<'mcx>(
                     None => (PgVec::new_in(mcx), 0),
                 };
 
-                let relation = clone_relation(cxt)?;
-                let column_node = mcx::alloc_in(mcx, Node::mk_column_def(mcx, column.clone_in(mcx)?))?;
-                let (_column_out, _snamespace, _sname, before_stmts, after_stmts) =
-                    sx::generateSerialExtraStmts::call(
-                        mcx,
-                        column_node,
-                        relation,
-                        cxt.rel_oid,
-                        cxt.isalter,
-                        cxt.stmtType,
-                        type_oid,
-                        options,
-                        true,
-                        false,
-                    )?;
-                cxt.blist.extend(before_stmts);
-                cxt.blist.extend(after_stmts);
+                let (_snamespace, _sname) = crate::serial::generateSerialExtraStmts(
+                    cxt,
+                    &mut column,
+                    type_oid,
+                    options,
+                    true,
+                    false,
+                )?;
 
                 column.identity = generated_when;
                 saw_identity = true;
@@ -630,16 +602,6 @@ fn opt_clone_str(
     s: &Option<PgString<'_>>,
 ) -> PgResult<Option<alloc::string::String>> {
     Ok(s.as_ref().map(|s| s.as_str().into()))
-}
-
-fn clone_relation<'mcx>(cxt: &CreateStmtContext<'mcx>) -> PgResult<NodePtr<'mcx>> {
-    let mcx = cxt.mcx;
-    match cxt.relation.as_deref() {
-        Some(n) => mcx::alloc_in(mcx, n.clone_in(mcx)?),
-        None => Err(types_error::PgError::error(
-            "transformColumnDefinition: SERIAL/IDENTITY column requires cxt.relation",
-        )),
-    }
 }
 
 fn clone_relation_opt<'mcx>(cxt: &CreateStmtContext<'mcx>) -> PgResult<Option<NodePtr<'mcx>>> {

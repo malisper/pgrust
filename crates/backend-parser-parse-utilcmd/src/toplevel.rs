@@ -12,8 +12,8 @@
 //! predicate / index-element / stat expressions in-crate. The creation-namespace
 //! lookup ([`range_var_get_and_check_creation_namespace`]) is likewise grounded.
 //! [`transformAlterTableStmt`] still routes through the outward seam (its
-//! per-subcommand relcache dispatch + generateSerialExtraStmts are not yet
-//! reachable). [`transformRuleStmt`] (the inward seam this crate owns) ports the
+//! per-subcommand relcache dispatch is not yet reachable).
+//! [`transformRuleStmt`] (the inward seam this crate owns) ports the
 //! entry point and delegates the relcache OLD/NEW fake-RTE + analyze.c-driven
 //! action transform to the outward seam.
 

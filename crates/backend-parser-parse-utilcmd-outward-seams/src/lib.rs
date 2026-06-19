@@ -18,47 +18,13 @@
 #![allow(clippy::result_large_err)]
 #![allow(clippy::too_many_arguments)]
 
-use mcx::{Mcx, PgBox, PgString, PgVec};
+use mcx::{Mcx, PgBox, PgVec};
 use types_core::Oid;
 use types_error::PgResult;
 use types_nodes::nodes::Node;
 use types_nodes::parsestmt::ParseState;
 
 type NodeBox<'mcx> = PgBox<'mcx, Node<'mcx>>;
-
-seam_core::seam!(
-    /// `generateSerialExtraStmts(cxt, column, seqtypid, seqoptions, for_identity,
-    /// col_exists, &snamespace, &sname)` (parse_utilcmd.c): generate the CREATE
-    /// SEQUENCE + ALTER SEQUENCE ... OWNED BY statements for a serial/identity
-    /// column, determine the sequence name (`ChooseRelationName` /
-    /// `RangeVarGetCreationNamespace` / `get_namespace_name`), set the column's
-    /// `identitySequence`, and return the chosen `(snamespace, sname)` plus the
-    /// "before" statements to prepend to `cxt.blist` and the "after" statements
-    /// to append to the appropriate list. Catalog/relcache/sequence-bound.
-    ///
-    /// Returns `(snamespace, sname, before_stmts, after_stmts)`. The caller
-    /// appends `before_stmts` to `cxt.blist`; `after_stmts` go to `cxt.blist`
-    /// when `col_exists`, else to `cxt.alist`. The column's
-    /// `identitySequence` is set on the returned `column` node.
-    pub fn generateSerialExtraStmts<'mcx>(
-        mcx: Mcx<'mcx>,
-        column: NodeBox<'mcx>,
-        relation: NodeBox<'mcx>,
-        rel_oid: Oid,
-        is_alter: bool,
-        stmt_type: &str,
-        seqtypid: Oid,
-        seqoptions: PgVec<'mcx, NodeBox<'mcx>>,
-        for_identity: bool,
-        col_exists: bool,
-    ) -> PgResult<(
-        NodeBox<'mcx>,
-        Option<PgString<'mcx>>,
-        Option<PgString<'mcx>>,
-        PgVec<'mcx, NodeBox<'mcx>>,
-        PgVec<'mcx, NodeBox<'mcx>>,
-    )>
-);
 
 seam_core::seam!(
     /// `transformTableLikeClause(cxt, table_like_clause)` (parse_utilcmd.c):

@@ -43,6 +43,7 @@ pub mod index_stats;
 pub mod like;
 pub mod partition;
 pub mod schema;
+pub mod serial;
 pub mod toplevel;
 
 // --- Shared core re-exports -------------------------------------------------

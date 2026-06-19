@@ -412,6 +412,56 @@ pub fn event_trigger_collect_simple_command(
     })
 }
 
+/// `EventTriggerCollectSimpleCommand(address, secondaryObject, (Node *) stmt)`
+/// (event_trigger.c) for a CREATE SCHEMA `CreateSchemaStmt` (schemacmds.c
+/// `CreateSchemaCommand`). No-op without an active collection state (the
+/// standalone / no-trigger case), matching the C early `return`. The active
+/// path deep-copies the statement into the state's private `cmd_cxt` arena and
+/// appends a `CollectedCommand`, exactly like the `Node`-typed
+/// [`event_trigger_collect_simple_command`] above (a `CreateSchemaStmt` is an
+/// ordinary parse-tree node, so this path is fully modelled).
+pub fn event_trigger_collect_simple_command_create_schema(
+    address: ObjectAddress,
+    secondary_object: ObjectAddress,
+    stmt: &types_nodes::ddlnodes::CreateSchemaStmt<'_>,
+) -> PgResult<()> {
+    if !collecting() {
+        return Ok(());
+    }
+
+    let in_extension = extension_seams::creating_extension::call();
+
+    CURRENT_STATE.with(|s| {
+        let mut stack = s.borrow_mut();
+        let st = match stack.last_mut() {
+            Some(st) => st,
+            None => return Ok(()),
+        };
+
+        // copyObject into the state's private arena, wrapped as a Node.
+        let copied_stmt = stmt.clone_in(st.cmd_cxt.mcx())?;
+        let copied = Node::mk_create_schema_stmt(st.cmd_cxt.mcx(), copied_stmt);
+        // SAFETY: `copied` lives in `cmd_cxt`; `command_list` is dropped before
+        // `cmd_cxt` (field order in `EventTriggerQueryState`), so the copy never
+        // outlives its arena — same invariant as the generic collector above.
+        let copied: Node<'static> =
+            unsafe { core::mem::transmute::<Node<'_>, Node<'static>>(copied) };
+
+        let command = CollectedCommand {
+            in_extension,
+            parsetree: copied,
+            address,
+            secondary_object,
+        };
+
+        st.command_list
+            .try_reserve(1)
+            .map_err(|_| st.cmd_cxt.oom(core::mem::size_of::<CollectedCommand>()))?;
+        st.command_list.push(command);
+        Ok(())
+    })
+}
+
 /// `EventTriggerCollectSimpleCommand` (event_trigger.c) for a CREATE OPERATOR
 /// FAMILY `CreateOpFamilyStmt` (opclasscmds.c `CreateOpFamily`). No-op without
 /// an active collection state (the standalone / no-trigger case), matching the
@@ -628,6 +678,9 @@ pub fn init_seams() {
     // deparse path stops loudly inside each body.
     backend_commands_event_trigger_seams::event_trigger_collect_simple_command::set(
         event_trigger_collect_simple_command_opfamily,
+    );
+    backend_commands_event_trigger_seams::event_trigger_collect_simple_command_create_schema::set(
+        event_trigger_collect_simple_command_create_schema,
     );
     backend_commands_event_trigger_seams::event_trigger_collect_create_opclass::set(
         event_trigger_collect_create_opclass,

@@ -43,4 +43,5 @@ backend-commands-dbcommands-seams = { path = "../backend-commands-dbcommands-sea
 backend-commands-event-trigger-seams = { path = "../backend-commands-event-trigger-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-tcop-utility-fc-seams = { path = "../backend-tcop-utility-fc-seams" }
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 backend-parser-parse-utilcmd-seams = { path = "../backend-parser-parse-utilcmd-seams" }

@@ -535,10 +535,33 @@ fn stmt_authrole<'mcx>(
     }
 }
 
-/// Install this crate's inward seam ([`backend_commands_schemacmds_seams`]).
+/// `create_schema_command` out-seam (`backend-tcop-utility-out-seams`): marshal
+/// the dispatched `CreateSchemaStmt` node into [`CreateSchemaCommand`].
+fn create_schema_command_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &Node<'mcx>,
+    query_string: &str,
+    stmt_location: i32,
+    stmt_len: i32,
+) -> PgResult<()> {
+    let css = match stmt.as_createschemastmt() {
+        Some(s) => s,
+        None => {
+            return Err(PgError::error(
+                "create_schema_command_seam: statement is not a CreateSchemaStmt",
+            ))
+        }
+    };
+    CreateSchemaCommand(mcx, css, query_string, stmt_location, stmt_len).map(|_oid| ())
+}
+
+/// Install this crate's seams: the inward
+/// [`backend_commands_schemacmds_seams`] and the `create_schema_command`
+/// dispatch seam in `backend-tcop-utility-out-seams`.
 pub fn init_seams() {
     backend_commands_schemacmds_seams::alter_schema_owner_oid::set(|schema_oid, new_owner_id| {
         let ctx = mcx::MemoryContext::new("alter_schema_owner_oid");
         AlterSchemaOwner_oid(ctx.mcx(), schema_oid, new_owner_id)
     });
+    backend_tcop_utility_out_seams::create_schema_command::set(create_schema_command_seam);
 }
