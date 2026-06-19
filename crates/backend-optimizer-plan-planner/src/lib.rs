@@ -2034,6 +2034,7 @@ fn grouping_planner<'mcx>(
         root.sort_pathkeys =
             backend_optimizer_path_pathkeys::make_pathkeys_for_sortclauses(
                 root,
+                mcx,
                 &sort_clause_ids,
                 &processed,
             );
@@ -2268,6 +2269,7 @@ fn grouping_planner<'mcx>(
     let mut qp_callback = move |root: &mut PlannerInfo| -> PgResult<()> {
         standard_qp_callback(
             root,
+            mcx,
             &sort_clause_ids,
             &distinct_clause_ids,
             first_active_window,
@@ -3415,6 +3417,7 @@ fn make_window_input_target<'mcx>(
 /// redundant partition clauses from `wc->partitionClause` in place.
 fn make_pathkeys_for_window(
     root: &mut PlannerInfo,
+    mcx: Mcx<'_>,
     wc_id: types_pathnodes::NodeId,
     tlist: &[types_pathnodes::NodeId],
 ) -> PgResult<Vec<types_pathnodes::PathKey>> {
@@ -3445,7 +3448,7 @@ fn make_pathkeys_for_window(
         let mut part = part_ids.clone();
         let (pathkeys, sortable) =
             backend_optimizer_path_pathkeys::make_pathkeys_for_sortclauses_extended(
-                root, &mut part, tlist, true, // remove_redundant
+                root, mcx, &mut part, tlist, true, // remove_redundant
                 false, false,
             );
         debug_assert!(sortable);
@@ -3458,7 +3461,7 @@ fn make_pathkeys_for_window(
     // OFFSET needs the ordering column for in_range tests).
     if !ord_ids.is_empty() {
         let orderby_pathkeys = backend_optimizer_path_pathkeys::make_pathkeys_for_sortclauses(
-            root, &ord_ids, tlist,
+            root, mcx, &ord_ids, tlist,
         );
         window_pathkeys = if !window_pathkeys.is_empty() {
             backend_optimizer_path_pathkeys::append_pathkeys(root, window_pathkeys, &orderby_pathkeys)
@@ -3558,7 +3561,7 @@ fn create_one_window_path<'mcx>(
 
     for (idx, &wc_id) in active_windows.iter().enumerate() {
         let winref = root.windowclause(wc_id).winref;
-        let window_pathkeys = make_pathkeys_for_window(root, wc_id, &tlist)?;
+        let window_pathkeys = make_pathkeys_for_window(root, run.mcx(), wc_id, &tlist)?;
 
         let path_pathkeys = root.path(path).base().pathkeys.clone();
         let (is_sorted, presorted_keys) =
@@ -5400,7 +5403,7 @@ fn has_volatile_pathkey(root: &PlannerInfo, keys: &[types_pathnodes::PathKey]) -
 /// requiring the same or a stricter variation, repeating for any remaining
 /// aggregates with different pathkeys. The `Bitmapset` sets of AggInfo indexes
 /// are rendered as sorted `Vec<usize>` (the C uses small index sets).
-fn adjust_group_pathkeys_for_groupagg(root: &mut PlannerInfo) {
+fn adjust_group_pathkeys_for_groupagg(root: &mut PlannerInfo, mcx: Mcx<'_>) {
     use backend_optimizer_util_pathnode_seams::PathKeysComparison;
 
     // grouppathkeys = root->group_pathkeys (clone so the by-value list arithmetic
@@ -5490,6 +5493,7 @@ fn adjust_group_pathkeys_for_groupagg(root: &mut PlannerInfo) {
             let (sortlist_ids, args_ids) = intern_aggref_sort_inputs(root, aggref_id);
             let pathkeys = backend_optimizer_path_pathkeys::make_pathkeys_for_sortclauses(
                 root,
+                mcx,
                 &sortlist_ids,
                 &args_ids,
             );
@@ -5695,6 +5699,7 @@ fn intern_aggref_sort_inputs(
 /// cascade (planner.c:3630-3642).
 fn standard_qp_callback(
     root: &mut PlannerInfo,
+    mcx: Mcx<'_>,
     sort_clause_ids: &[types_pathnodes::NodeId],
     distinct_clause_ids: &[types_pathnodes::NodeId],
     first_active_window: Option<types_pathnodes::NodeId>,
@@ -5718,6 +5723,7 @@ fn standard_qp_callback(
             let (pathkeys, _sortable) =
                 backend_optimizer_path_pathkeys::make_pathkeys_for_sortclauses_extended(
                     root,
+                    mcx,
                     &mut processed,
                     &tlist,
                     false,          // remove_redundant
@@ -5736,6 +5742,7 @@ fn standard_qp_callback(
         let (pathkeys, sortable) =
             backend_optimizer_path_pathkeys::make_pathkeys_for_sortclauses_extended(
                 root,
+                mcx,
                 &mut processed,
                 &tlist,
                 true,  // remove_redundant
@@ -5754,7 +5761,7 @@ fn standard_qp_callback(
             root.group_pathkeys = pathkeys;
             // If we have ordered aggs, consider adding onto group_pathkeys.
             if root.numOrderedAggs > 0 {
-                adjust_group_pathkeys_for_groupagg(root);
+                adjust_group_pathkeys_for_groupagg(root, mcx);
             }
         }
     } else {
@@ -5766,7 +5773,7 @@ fn standard_qp_callback(
     // (C:3545-3554). make_pathkeys_for_window also removes redundant partition
     // clauses from that WindowClause in place.
     root.window_pathkeys = match first_active_window {
-        Some(wc_id) => make_pathkeys_for_window(root, wc_id, &tlist)?,
+        Some(wc_id) => make_pathkeys_for_window(root, mcx, wc_id, &tlist)?,
         None => Vec::new(),
     };
 
@@ -5781,6 +5788,7 @@ fn standard_qp_callback(
         let (pathkeys, sortable) =
             backend_optimizer_path_pathkeys::make_pathkeys_for_sortclauses_extended(
                 root,
+                mcx,
                 &mut processed,
                 &tlist,
                 true,  // remove_redundant
@@ -5801,6 +5809,7 @@ fn standard_qp_callback(
     //   make_pathkeys_for_sortclauses(root, parse->sortClause, tlist) (C:3583).
     root.sort_pathkeys = backend_optimizer_path_pathkeys::make_pathkeys_for_sortclauses(
         root,
+        mcx,
         sort_clause_ids,
         &tlist,
     );

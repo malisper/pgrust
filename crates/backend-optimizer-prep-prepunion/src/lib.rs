@@ -496,7 +496,7 @@ fn generate_union_paths<'mcx>(
             let mut path = apath;
             if !group_list.is_empty() {
                 let pk =
-                    pathkeys::make_pathkeys_for_sortclauses(root, &group_list, &tlist);
+                    pathkeys::make_pathkeys_for_sortclauses(root, mcx, &group_list, &tlist);
                 path = pathnode::create::create_sort_path(root, result_rel, path, pk, -1.0)?;
             }
             let num_cols = root.path(path).base().pathkeys.len() as i32;
@@ -575,7 +575,7 @@ fn generate_nonunion_paths<'mcx>(
     }
 
     let nonunion_pathkeys = if can_sort {
-        let pk = pathkeys::make_pathkeys_for_sortclauses(root, &group_list, &tlist);
+        let pk = pathkeys::make_pathkeys_for_sortclauses(root, mcx, &group_list, &tlist);
         root.query_pathkeys = pk.clone();
         pk
     } else {
@@ -657,10 +657,10 @@ fn generate_nonunion_paths<'mcx>(
     // Sort path (C:1191-1251).
     if can_sort {
         let slpath = sorted_input_for_setop(
-            root, lrel, lpath, &group_list, &lpath_tlist, &nonunion_pathkeys,
+            root, mcx, lrel, lpath, &group_list, &lpath_tlist, &nonunion_pathkeys,
         )?;
         let srpath = sorted_input_for_setop(
-            root, rrel, rpath, &group_list, &rpath_tlist, &nonunion_pathkeys,
+            root, mcx, rrel, rpath, &group_list, &rpath_tlist, &nonunion_pathkeys,
         )?;
         let path = pathnode::create::create_setop_path(
             root, result_rel, slpath, srpath, cmd, types_pathnodes::SETOP_SORTED,
@@ -677,13 +677,14 @@ fn generate_nonunion_paths<'mcx>(
 /// presorted path or sort the cheapest.
 fn sorted_input_for_setop(
     root: &mut PlannerInfo,
+    mcx: Mcx<'_>,
     rel: RelId,
     path: PathId,
     group_list: &[NodeId],
     path_tlist: &[NodeId],
     nonunion_pathkeys: &[types_pathnodes::PathKey],
 ) -> PgResult<PathId> {
-    let pk = pathkeys::make_pathkeys_for_sortclauses(root, group_list, path_tlist);
+    let pk = pathkeys::make_pathkeys_for_sortclauses(root, mcx, group_list, path_tlist);
     let path_pathkeys = root.path(path).base().pathkeys.clone();
     if pathkeys::pathkeys_contained_in(&pk, &path_pathkeys) {
         return Ok(path);

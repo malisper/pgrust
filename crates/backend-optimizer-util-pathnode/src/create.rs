@@ -2404,7 +2404,7 @@ pub fn create_unique_path<'mcx>(
                 // Convert the SortGroupClause list to pathkey form. If the
                 // just-added clause is redundant, the result is shorter.
                 let sort_pathkeys =
-                    seam_pk::make_pathkeys_for_sortclauses::call(root, &sort_list, &newtlist);
+                    seam_pk::make_pathkeys_for_sortclauses::call(root, run.mcx(), &sort_list, &newtlist);
                 if sort_pathkeys.len() != sort_list.len() {
                     // Drop the redundant SortGroupClause and tlist entry; this
                     // column is not needed.

@@ -614,6 +614,7 @@ fn compare_fractional_path_costs(
 /// sortgroupref (0 for none, e.g. index/partition keys).
 pub fn make_pathkey_from_sortinfo(
     root: &mut PlannerInfo,
+    mcx: mcx::Mcx<'_>,
     expr: &types_nodes::primnodes::Expr,
     opfamily: Oid,
     opcintype: Oid,
@@ -653,7 +654,7 @@ pub fn make_pathkey_from_sortinfo(
     // get_eclass_for_sort_expr's call to canonicalize_ec_expression.)
     let eclass = ec::get_eclass_for_sort_expr::call(
         root,
-        clone_sortkey_expr(expr),
+        clone_sortkey_expr(mcx, expr),
         opfamilies,
         opcintype,
         collation,
@@ -675,6 +676,7 @@ pub fn make_pathkey_from_sortinfo(
 ///   Like `make_pathkey_from_sortinfo`, but work from a sort operator.
 pub fn make_pathkey_from_sortop(
     root: &mut PlannerInfo,
+    mcx: mcx::Mcx<'_>,
     expr: &types_nodes::primnodes::Expr,
     ordering_op: Oid,
     reverse_sort: bool,
@@ -694,6 +696,7 @@ pub fn make_pathkey_from_sortop(
 
     make_pathkey_from_sortinfo(
         root,
+        mcx,
         expr,
         opfamily,
         opcintype,
@@ -713,6 +716,7 @@ pub fn make_pathkey_from_sortop(
 ///   scan direction.
 pub fn build_index_pathkeys(
     root: &mut PlannerInfo,
+    mcx: mcx::Mcx<'_>,
     index: &IndexOptInfo,
     scandir: ScanDirection,
 ) -> Vec<PathKey> {
@@ -748,6 +752,7 @@ pub fn build_index_pathkeys(
         // OK, try to make a canonical pathkey for this sort key.
         let cpathkey = make_pathkey_from_sortinfo(
             root,
+            mcx,
             &indexkey,
             index.sortopfamily[i],
             index.opcintype[i],
@@ -863,6 +868,7 @@ pub fn matches_boolean_partition_clause(
 ///   is true if pathkeys were built only for a prefix of the partition key.
 pub fn build_partition_pathkeys(
     root: &mut PlannerInfo,
+    mcx: mcx::Mcx<'_>,
     partrel: RelId,
     scandir: ScanDirection,
 ) -> (Vec<PathKey>, bool) {
@@ -898,6 +904,7 @@ pub fn build_partition_pathkeys(
         // scan like a NULLS LAST index: nulls_first for backward scan only.
         let cpathkey = make_pathkey_from_sortinfo(
             root,
+            mcx,
             &key_col,
             opfamily,
             opcintype,
@@ -933,6 +940,7 @@ pub fn build_partition_pathkeys(
 ///   the expression isn't already in some EC.
 pub fn build_expression_pathkey(
     root: &mut PlannerInfo,
+    mcx: mcx::Mcx<'_>,
     expr: &types_nodes::primnodes::Expr,
     opno: Oid,
     rel: &Relids,
@@ -946,6 +954,7 @@ pub fn build_expression_pathkey(
     let collation = nf::exprCollation::call(expr);
     let cpathkey = make_pathkey_from_sortinfo(
         root,
+        mcx,
         expr,
         opfamily,
         opcintype,
@@ -1206,12 +1215,13 @@ pub fn build_join_pathkeys(
 ///   `NodeId`s; `tlist` are `TargetEntry` `NodeId`s.
 pub fn make_pathkeys_for_sortclauses(
     root: &mut PlannerInfo,
+    mcx: mcx::Mcx<'_>,
     sortclauses: &[NodeId],
     tlist: &[NodeId],
 ) -> Vec<PathKey> {
     let mut owned = sortclauses.to_vec();
     let (result, sortable) =
-        make_pathkeys_for_sortclauses_extended(root, &mut owned, tlist, false, false, false);
+        make_pathkeys_for_sortclauses_extended(root, mcx, &mut owned, tlist, false, false, false);
     // It's caller error if not all clauses were sortable.
     debug_assert!(sortable);
     result
@@ -1226,6 +1236,7 @@ pub fn make_pathkeys_for_sortclauses(
 /// `set_ec_sortref`: copy the sortref into the pathkey's EC if not yet set.
 pub fn make_pathkeys_for_sortclauses_extended(
     root: &mut PlannerInfo,
+    mcx: mcx::Mcx<'_>,
     sortclauses: &mut Vec<NodeId>,
     tlist: &[NodeId],
     remove_redundant: bool,
@@ -1248,7 +1259,7 @@ pub fn make_pathkeys_for_sortclauses_extended(
             continue;
         }
 
-        let mut sortkey = clone_sortkey_expr(root.node(sortkey_id));
+        let mut sortkey = clone_sortkey_expr(mcx, root.node(sortkey_id));
         if remove_group_rtindex {
             debug_assert!(root.group_rtindex > 0);
             // remove_nulling_relids(sortkey, bms_make_singleton(group_rtindex), NULL).
@@ -1261,6 +1272,7 @@ pub fn make_pathkeys_for_sortclauses_extended(
 
         let pathkey = make_pathkey_from_sortop(
             root,
+            mcx,
             &sortkey,
             info.sortop,
             info.reverse_sort,
@@ -1898,10 +1910,23 @@ fn mcx_collect(
 /// derived `Expr::clone()` panics for the owned-subtree variants
 /// (`Aggref`/`SubLink`/`SubPlan`) whose children only deep-copy via `clone_in`
 /// (`copyObject` shape), so route every sort-key copy through `Expr::clone_in`.
-/// The returned `Expr` is fully owned (no borrow of the transient context), so
-/// it can be moved into the planner's `node_arena` / EquivalenceClass.
-fn clone_sortkey_expr(expr: &types_nodes::primnodes::Expr) -> types_nodes::primnodes::Expr {
-    let cx = mcx::MemoryContext::new("pathkeys sortkey clone");
-    expr.clone_in(cx.mcx())
+///
+/// The clone MUST land in the long-lived planner arena (`run.mcx()`), NOT a
+/// throwaway `MemoryContext`. `Expr` is lifetime-free: `clone_in` erases the
+/// arena lifetime to `'static`, but the cloned node's `PgBox`/`PgVec` children
+/// still point into the arena it was allocated in and are deallocated against
+/// that arena when the node is dropped. The returned `Expr` is moved into the
+/// planner's `node_arena` / EquivalenceClass (via `get_eclass_for_sort_expr`),
+/// or held as a `sortkey` local across further planning, and is dropped much
+/// later; cloning into a local context freed on return leaves those child
+/// pointers dangling, so the eventual `drop_in_place::<Expr>` frees against an
+/// already-freed context (use-after-free / segfault in `Mcx::deallocate`). The
+/// planner arena outlives the whole planner run, satisfying the `clone_in`
+/// `'static`-erasure invariant.
+fn clone_sortkey_expr(
+    mcx: mcx::Mcx<'_>,
+    expr: &types_nodes::primnodes::Expr,
+) -> types_nodes::primnodes::Expr {
+    expr.clone_in(mcx)
         .unwrap_or_else(|e| panic!("clone_sortkey_expr: {e:?}"))
 }

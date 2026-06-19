@@ -203,17 +203,49 @@ fn fmgr_out_to_datum<'mcx>(mcx: Mcx<'mcx>, out: FmgrOut<'mcx>) -> PgResult<Datum
 
 /// Bridge the canonical [`Datum`] to the bare-word `types_datum::Datum` the
 /// `arrayfuncs.c` `ArrayBuildState` primitives consume. A by-value scalar
-/// carries its machine word; a by-reference element cannot be addressed as a
-/// bare word in the owned model (the arrayfuncs byref-element path resolves the
-/// payload through the unported detoast seam and panics loudly there — the same
-/// divergence the whole `arrayfuncs` crate already carries, not introduced
-/// here), so it is forwarded as a zero word.
-fn datum_to_bare_word(d: Datum<'_>) -> types_datum::datum::Datum {
+/// carries its machine word directly. A by-reference element (varlena, fixed-len
+/// by-ref, or cstring) is a `Datum` whose word is a POINTER into a live image;
+/// `accumArrayResult` dereferences that pointer (`PG_DETOAST_DATUM_COPY` for
+/// varlena, an `attlen`-byte / NUL-terminated copy for fixed-len-by-ref /
+/// cstring). We therefore materialize the element's verbatim byte image into
+/// `mcx` (a leaked allocation, reclaimed by the owning context, not Rust drop —
+/// the same convention `datum_from_buf` uses) and return a real pointer word.
+///
+/// Forwarding a zero word here (the old behavior) made `accumArrayResult`
+/// dereference a NULL pointer and crash (`json_to_record` over a by-ref element
+/// type such as `text[]`/`bpchar[]`/`name[]`): SIGSEGV in `datum_payload_bytes`.
+fn datum_to_bare_word<'mcx>(
+    mcx: Mcx<'mcx>,
+    d: Datum<'mcx>,
+    disnull: bool,
+) -> PgResult<types_datum::datum::Datum> {
+    // A SQL NULL element carries no payload word; accumArrayResult ignores the
+    // value when `disnull`, so a zero word is correct (and matches C, which
+    // passes the still-(Datum)0 element through on the null branch).
+    if disnull {
+        return Ok(types_datum::datum::Datum::from_usize(0));
+    }
     match d {
-        Datum::ByVal(w) => types_datum::datum::Datum::from_usize(w),
-        // By-reference: the bare word would be a pointer into palloc'd bytes;
-        // arrayfuncs' accum copies through the detoast seam keyed off the word.
-        _ => types_datum::datum::Datum::from_usize(0),
+        Datum::ByVal(w) => Ok(types_datum::datum::Datum::from_usize(w)),
+        // By-reference: copy the verbatim image into `mcx` and hand back a
+        // pointer word. `as_varlena_bytes` yields the flat image for
+        // ByRef/Composite/Expanded; `Cstring` needs an explicit NUL terminator
+        // so the cstring (attlen == -2) copy path can find its end.
+        Datum::Cstring(ref s) => {
+            let mut bytes = s.clone().into_bytes();
+            bytes.push(0);
+            let buf = mcx::slice_in(mcx, &bytes)?;
+            let ptr = buf.as_ptr() as usize;
+            core::mem::forget(buf);
+            Ok(types_datum::datum::Datum::from_usize(ptr))
+        }
+        ref other => {
+            let bytes = other.as_varlena_bytes();
+            let buf = mcx::slice_in(mcx, bytes.as_ref())?;
+            let ptr = buf.as_ptr() as usize;
+            core::mem::forget(buf);
+            Ok(types_datum::datum::Datum::from_usize(ptr))
+        }
     }
 }
 
@@ -373,7 +405,7 @@ fn populate_array_element(
 
     // accumArrayResult(ctx->astate, element, element_isnull, element_type, acxt);
     let astate = ctx.astate.take();
-    let dword = datum_to_bare_word(element);
+    let dword = datum_to_bare_word(mcxt, element, element_isnull)?;
     ctx.astate = Some(accum_array_result(
         mcxt,
         astate,

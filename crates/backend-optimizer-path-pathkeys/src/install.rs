@@ -41,8 +41,8 @@ pub fn init_seams() {
     pn::pathkeys_contained_in::set(|keys1, keys2| crate::pathkeys_contained_in(keys1, keys2));
     // `create_unique_path` (pathnode.c) detects constant-equated columns via the
     // pathkey machinery; install the owner body.
-    pn::make_pathkeys_for_sortclauses::set(|root, sortclauses, tlist| {
-        crate::make_pathkeys_for_sortclauses(root, sortclauses, tlist)
+    pn::make_pathkeys_for_sortclauses::set(|root, mcx, sortclauses, tlist| {
+        crate::make_pathkeys_for_sortclauses(root, mcx, sortclauses, tlist)
     });
 
     // --- joinpath-seams (the join-pathkeys family) ----------------------

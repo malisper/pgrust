@@ -827,6 +827,7 @@ fn reltarget_exprs_parallel_safe(root: &PlannerInfo, rel: RelId) -> bool {
 /// already mentioned in some EquivalenceClass.
 fn build_ordinality_pathkeys(
     root: &mut PlannerInfo,
+    mcx: Mcx<'_>,
     rel: RelId,
 ) -> Vec<types_pathnodes::PathKey> {
     let ordattno: AttrNumber = root.rel(rel).max_attr;
@@ -849,6 +850,7 @@ fn build_ordinality_pathkeys(
             let relids = bms::relids_copy::call(&root.rel(rel).relids);
             backend_optimizer_path_pathkeys::build_expression_pathkey(
                 root,
+                mcx,
                 &var,
                 INT8_LESS_OPERATOR,
                 &relids,

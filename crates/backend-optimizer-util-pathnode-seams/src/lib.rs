@@ -711,8 +711,9 @@ seam_core::seam!(
     /// `make_pathkeys_for_sortclauses(root, sortclauses, tlist)` (pathkeys.c).
     /// Returns the canonical pathkey list for the given (arena `NodeId`)
     /// SortGroupClause / TargetEntry lists. Installed by pathkeys.c.
-    pub fn make_pathkeys_for_sortclauses(
+    pub fn make_pathkeys_for_sortclauses<'mcx>(
         root: &mut PlannerInfo,
+        mcx: mcx::Mcx<'mcx>,
         sortclauses: &[NodeId],
         tlist: &[NodeId],
     ) -> Vec<PathKey>

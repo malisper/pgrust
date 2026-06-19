@@ -30,7 +30,7 @@ pub fn set_function_pathlist<'mcx>(
     let required_outer = bms::relids_copy::call(&root.rel(rel).lateral_relids);
 
     let pathkeys = if rte::rte_funcordinality::call(run, root, rti) {
-        build_ordinality_pathkeys(root, rel)
+        build_ordinality_pathkeys(root, run.mcx(), rel)
     } else {
         alloc::vec::Vec::new()
     };

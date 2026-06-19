@@ -582,7 +582,7 @@ pub fn build_index_paths<'mcx>(
     let useful_pathkeys: Vec<types_pathnodes::PathKey>;
 
     if index_is_ordered && pathkeys_possibly_useful {
-        let index_pathkeys = build_index_pathkeys(root, index, ForwardScanDirection);
+        let index_pathkeys = build_index_pathkeys(root, mcx, index, ForwardScanDirection);
         useful_pathkeys = truncate_useless_pathkeys(root, rel, &index_pathkeys);
         // orderbyclauses / orderbyclausecols stay NIL.
     } else if index.amcanorderbyop && pathkeys_possibly_useful {
@@ -655,7 +655,7 @@ pub fn build_index_paths<'mcx>(
 
     // 5. If the index is ordered, a backwards scan might be interesting.
     if index_is_ordered && pathkeys_possibly_useful {
-        let index_pathkeys = build_index_pathkeys(root, index, BackwardScanDirection);
+        let index_pathkeys = build_index_pathkeys(root, mcx, index, BackwardScanDirection);
         let useful_pathkeys = truncate_useless_pathkeys(root, rel, &index_pathkeys);
         if !useful_pathkeys.is_empty() {
             let ipath = pathnode::create_index_path::call(

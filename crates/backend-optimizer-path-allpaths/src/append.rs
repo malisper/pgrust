@@ -688,6 +688,7 @@ pub fn generate_orderedappend_paths<'mcx>(
     {
         let (pk, partial) = backend_optimizer_path_pathkeys::build_partition_pathkeys(
             root,
+            mcx,
             rel,
             ForwardScanDirection,
         );
@@ -695,6 +696,7 @@ pub fn generate_orderedappend_paths<'mcx>(
         partition_pathkeys_partial = partial;
         let (pkd, partial_d) = backend_optimizer_path_pathkeys::build_partition_pathkeys(
             root,
+            mcx,
             rel,
             BackwardScanDirection,
         );
