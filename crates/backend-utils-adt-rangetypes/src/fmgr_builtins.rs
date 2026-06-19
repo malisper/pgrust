@@ -341,6 +341,30 @@ fn fc_int8range_subdiff(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     ok(crate::range_fmgr_boundary::int8range_subdiff(m.mcx(), fcinfo))
 }
 
+/// `numrange_subdiff(numeric, numeric) -> float8` (oid 3924).
+fn fc_numrange_subdiff(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    ok(crate::range_fmgr_boundary::numrange_subdiff(m.mcx(), fcinfo))
+}
+
+/// `daterange_subdiff(date, date) -> float8` (oid 3925).
+fn fc_daterange_subdiff(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    ok(crate::range_fmgr_boundary::daterange_subdiff(m.mcx(), fcinfo))
+}
+
+/// `tsrange_subdiff(timestamp, timestamp) -> float8` (oid 3929).
+fn fc_tsrange_subdiff(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    ok(crate::range_fmgr_boundary::tsrange_subdiff(m.mcx(), fcinfo))
+}
+
+/// `tstzrange_subdiff(timestamptz, timestamptz) -> float8` (oid 3930).
+fn fc_tstzrange_subdiff(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    ok(crate::range_fmgr_boundary::tstzrange_subdiff(m.mcx(), fcinfo))
+}
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -375,9 +399,6 @@ fn builtin(
 /// - `range_sortsupport` (6391) / `range_typanalyze` (3916): take an `internal`
 ///   (`SortSupport` / `VacAttrStats`) executor-owned scratch struct, not
 ///   expressible on the by-ref boundary.
-/// - the `numrange`/`daterange`/`tsrange`/`tstzrange` subdiffs: ride the
-///   Datum-seam arg surface of their element types (numeric/date/timestamp), not
-///   the generic by-ref range boundary.
 pub fn register_rangetypes_builtins() {
     backend_utils_fmgr_core::register_builtins([
         // I/O: cstring/internal/bytea <-> anyrange.
@@ -443,6 +464,10 @@ pub fn register_rangetypes_builtins() {
         // subdiff opclass support (scalar args -> float8).
         builtin(3922, "int4range_subdiff", 2, true, false, fc_int4range_subdiff),
         builtin(3923, "int8range_subdiff", 2, true, false, fc_int8range_subdiff),
+        builtin(3924, "numrange_subdiff", 2, true, false, fc_numrange_subdiff),
+        builtin(3925, "daterange_subdiff", 2, true, false, fc_daterange_subdiff),
+        builtin(3929, "tsrange_subdiff", 2, true, false, fc_tsrange_subdiff),
+        builtin(3930, "tstzrange_subdiff", 2, true, false, fc_tstzrange_subdiff),
     ]);
 }
 
