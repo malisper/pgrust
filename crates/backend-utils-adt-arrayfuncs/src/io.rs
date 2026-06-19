@@ -649,18 +649,36 @@ fn read_array_str<'mcx>(
                 let is_null = matches!(tok, ArrayTok::ElemNull);
 
                 // Read the element's value, or check that NULL is allowed.
+                //
+                // C: `InputFunctionCallSafe(inputproc, (tok == ATOK_ELEM_NULL)
+                // ? NULL : elembuf.data, ...)`. For a NULL element C passes a
+                // NULL `char *str` to the input function. `InputFunctionCallSafe`
+                // short-circuits a *strict* input proc on a NULL `str` to
+                // `*result = (Datum) 0` and `return true` WITHOUT invoking the
+                // proc; the resulting Datum is discarded (the null is recorded in
+                // the bitmap, never stored). Every type's input function is
+                // `proisstrict`, so this is the universal NULL-element behavior.
+                //
+                // The `input_function_call_safe` seam takes a `&str` and cannot
+                // represent C's NULL pointer, so substituting `""` here would
+                // instead INVOKE the proc on an empty string (e.g. `int4in("")`),
+                // which fails with "invalid input syntax" and — being routed
+                // through the soft-error `Ok(None)` arm below — would abort the
+                // whole parse and yield an empty array image (a downstream
+                // detoast crash). Mirror C's strict short-circuit directly: a
+                // NULL element contributes a placeholder null `Datum`, never a
+                // proc call.
                 let value = if is_null {
-                    input_function_call_safe(mcx, meta, None, typmod)?
+                    Datum::null()
                 } else {
                     let s = core::str::from_utf8(&elembuf).map_err(|_| {
                         PgError::error("invalid byte sequence for encoding")
                             .with_sqlstate(ERRCODE_INVALID_TEXT_REPRESENTATION)
                     })?;
-                    input_function_call_safe(mcx, meta, Some(s), typmod)?
-                };
-                let value = match value {
-                    Some(v) => v,
-                    None => return Ok(None), // soft error reported by input proc
+                    match input_function_call_safe(mcx, meta, Some(s), typmod)? {
+                        Some(v) => v,
+                        None => return Ok(None), // soft error reported by input proc
+                    }
                 };
 
                 if values.try_reserve(1).is_err() || nulls.try_reserve(1).is_err() {
@@ -1372,18 +1390,14 @@ fn read_array_binary<'mcx>(
         }
 
         if itemlen == -1 {
-            // -1 length means NULL: ReceiveFunctionCall(receiveproc, NULL, ...).
-            // (The receive function is called with an empty buffer; strict
-            // element NULLs are recorded in the null bitmap, so the resulting
-            // value is unused.)
-            let value = fmgr::array_receive_function_call::call(
-                mcx,
-                meta.typiofunc,
-                &[],
-                meta.typioparam,
-                typmod,
-            )?;
-            values.push(value);
+            // -1 length means NULL: C `ReceiveFunctionCall(receiveproc, NULL,
+            // ...)`. `ReceiveFunctionCall` short-circuits a *strict* receive proc
+            // on a NULL `buf` to `(Datum) 0` WITHOUT invoking the proc; the value
+            // is discarded (the null is recorded in the bitmap, never stored).
+            // Every type's receive function is `proisstrict`, so mirror that
+            // strict short-circuit directly rather than invoking the proc on an
+            // empty buffer (e.g. `int4recv(&[])`), which would misparse / error.
+            values.push(Datum::null());
             nulls.push(true);
             continue;
         }
