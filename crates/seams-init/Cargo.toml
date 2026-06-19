@@ -284,6 +284,7 @@ backend-access-hashfunc = { path = "../backend-access-hashfunc" }
 backend-access-hash-entry = { path = "../backend-access-hash-entry" }
 backend-archive-shell-archive = { path = "../backend-archive-shell-archive" }
 backend-commands-async = { path = "../backend-commands-async" }
+backend-test-regress = { path = "../backend-test-regress" }
 backend-nodes-extensible = { path = "../backend-nodes-extensible" }
 backend-optimizer-rte-seams = { path = "../backend-optimizer-rte-seams" }
 backend-optimizer-path-allpaths = { path = "../backend-optimizer-path-allpaths" }

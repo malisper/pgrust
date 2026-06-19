@@ -72,3 +72,27 @@ seam_core::seam!(
         function_id: Oid,
     ) -> PgResult<LoadedExternalFunc>
 );
+
+seam_core::seam!(
+    /// Resolve a `(library, function)` pair against the in-process registry of
+    /// shared libraries whose C bodies have been ported into the Rust backend
+    /// (e.g. the `src/test/regress/regress.c` regression-support library, which
+    /// cannot be `dlopen`ed because the Rust backend does not expose the C ABI).
+    /// `library` is the simple, suffix-free library name (`$libdir/regress` →
+    /// `regress`). Returns the loaded `(user_fn, api_version)` pair the function
+    /// manager caches, or `None` when no such library/symbol is registered (the
+    /// caller then falls through to the real OS dynamic loader). The registered
+    /// `_PG_init`-equivalent or the symbol body can `ereport(ERROR)`.
+    pub fn resolve_builtin_library_function(
+        library: &str,
+        function: &str,
+    ) -> PgResult<Option<LoadedExternalFunc>>
+);
+
+seam_core::seam!(
+    /// Whether `library` (the simple, suffix-free library name) names a shared
+    /// library whose C body has been ported into the Rust backend and registered
+    /// (see [`resolve_builtin_library_function`]). `load_file` consults this so a
+    /// bare library load of such a module succeeds without touching the OS loader.
+    pub fn builtin_library_present(library: &str) -> bool
+);

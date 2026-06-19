@@ -17438,6 +17438,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-test-regress"
+version = "0.0.0"
+dependencies = [
+ "backend-parser-coerce-seams",
+ "backend-utils-fmgr-dfmgr-seams",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-fmgr",
+]
+
+[[package]]
 name = "backend-timezone-localtime"
 version = "0.0.0"
 dependencies = [
@@ -23335,6 +23347,7 @@ dependencies = [
  "backend-tcop-postgres",
  "backend-tcop-pquery",
  "backend-tcop-utility",
+ "backend-test-regress",
  "backend-timezone-localtime",
  "backend-timezone-pgtz",
  "backend-timezone-strftime",

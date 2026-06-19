@@ -778,14 +778,58 @@ pub fn fmgr_abi_extra() -> String {
  * load and hands the loaded-symbol work to `port-dynloader-seams`.
  * ========================================================================= */
 
+/// The simple, suffix-free library name a `probin`/`filename` reduces to for the
+/// in-process ported-library registry (see
+/// [`backend_utils_fmgr_dfmgr_seams::resolve_builtin_library_function`]). Strips
+/// any directory prefix (`$libdir/regress` → `regress`, `/path/to/regress.so` →
+/// `regress`) and a trailing `DLSUFFIX`. Returns `None` for a name that still
+/// has interior structure that the registry never carries (it only registers
+/// bare library names).
+fn simple_library_name(name: &str) -> Option<&str> {
+    // Drop everything up to and including the last directory separator.
+    let base = match first_dir_separator(name) {
+        Some(_) => name.rsplit('/').next().unwrap_or(name),
+        None => name,
+    };
+    // Drop a trailing DLSUFFIX if present.
+    let base = base.strip_suffix(DLSUFFIX).unwrap_or(base);
+    if base.is_empty() {
+        None
+    } else {
+        Some(base)
+    }
+}
+
 /// Installer for `backend_utils_fmgr_dfmgr_seams::load_external_function`:
 /// `load_external_function(probin, prosrc, true, &handle)` (dfmgr.c) then
 /// `fetch_finfo_record(handle, prosrc)` (fmgr.c, via the loader runtime).
+///
+/// Before touching the OS dynamic loader, the in-process registry of shared
+/// libraries whose C bodies are ported into the Rust backend is consulted: such
+/// modules (e.g. `src/test/regress/regress.c`) cannot be `dlopen`ed because the
+/// Rust backend exposes no C ABI, so their functions resolve directly to the
+/// ported `PGFunction`. A registered library whose requested symbol is absent
+/// is treated like the C "function not found in file" error (it would never
+/// have a real `.so` to fall back to).
 fn install_load_external_function(
     probin: &str,
     prosrc: &str,
     _function_id: types_core::Oid,
 ) -> PgResult<types_fmgr::LoadedExternalFunc> {
+    if let Some(library) = simple_library_name(probin) {
+        if backend_utils_fmgr_dfmgr_seams::builtin_library_present::call(library) {
+            return match backend_utils_fmgr_dfmgr_seams::resolve_builtin_library_function::call(
+                library, prosrc,
+            )? {
+                Some(loaded) => Ok(loaded),
+                None => Err(PgError::error(format!(
+                    "could not find function \"{prosrc}\" in file \"{probin}\""
+                ))
+                .with_sqlstate(ERRCODE_UNDEFINED_FUNCTION)),
+            };
+        }
+    }
+
     let ctx = mcx::MemoryContext::new("load_external_function");
     // C: user_fn = load_external_function(filename, funcname, true, &libraryhandle);
     let handle = load_external_function(ctx.mcx(), probin, prosrc, true)?;
@@ -817,6 +861,13 @@ fn install_invoke_output_plugin_callback(
 /// MemoryContext inside the installer (exactly like `load_external_function`
 /// / `load_output_plugin`) so the marshaled arity-2 seam shape stays intact.
 fn install_load_file(filename: &str, restricted: bool) -> PgResult<()> {
+    // A library whose C body is ported into the Rust backend is already "loaded"
+    // (its symbols live in-process); a bare load succeeds without the OS loader.
+    if let Some(library) = simple_library_name(filename) {
+        if backend_utils_fmgr_dfmgr_seams::builtin_library_present::call(library) {
+            return Ok(());
+        }
+    }
     let ctx = mcx::MemoryContext::new("load_file");
     load_file(ctx.mcx(), filename, restricted)
 }

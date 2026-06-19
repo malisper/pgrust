@@ -4019,4 +4019,31 @@ pub fn init_seams() {
         }
         Ok(())
     });
+
+    // `fmgr_c_validator` (pg_proc.c:781-823): make sure the library file exists,
+    // is loadable, and contains the specified link symbol with a valid function
+    // information record. C: load_external_function(probin, prosrc, true, &h)
+    // then fetch_finfo_record(h, prosrc); both are folded into this crate's
+    // `load_external_function` dfmgr seam (which returns the validated
+    // `(user_fn, api_version)` pair). The seam carries no caller `mcx`, so it
+    // runs behind a scratch context.
+    backend_catalog_pg_proc_seams::validate_c_function::set(|funcoid| {
+        let scratch = MemoryContext::new("validate_c_function");
+        let mcx = scratch.mcx();
+        // C: SearchSysCache1(PROCOID, funcoid); if (!valid) elog(ERROR,
+        // "cache lookup failed for function %u").
+        let proc = backend_utils_cache_syscache_seams::lookup_proc::call(mcx, funcoid)?
+            .ok_or_else(|| PgError::error(format!("cache lookup failed for function {funcoid}")))?;
+        // C: SysCacheGetAttrNotNull(PROCOID, tuple, Anum_pg_proc_prosrc/probin).
+        let prosrc = proc.prosrc.as_ref().map(|s| s.as_str()).ok_or_else(|| {
+            PgError::error(format!("null prosrc for function {funcoid}"))
+        })?;
+        let probin = proc.probin.as_ref().map(|s| s.as_str()).ok_or_else(|| {
+            PgError::error(format!("null probin for function {funcoid}"))
+        })?;
+        // C: (void) load_external_function(probin, prosrc, true, &libraryhandle);
+        //    (void) fetch_finfo_record(libraryhandle, prosrc);
+        backend_utils_fmgr_dfmgr_seams::load_external_function::call(probin, prosrc, funcoid)?;
+        Ok(())
+    });
 }

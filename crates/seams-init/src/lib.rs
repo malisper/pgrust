@@ -16,6 +16,7 @@ pub fn init_all() {
     contrib_amcheck_verify_common::init_seams();
     backend_archive_shell_archive::init_seams();
     backend_commands_async::init_seams();
+    backend_test_regress::init_seams();
     common_extra_encnames::init_seams();
     backend_access_common_detoast::init_seams();
     backend_access_common_toast_compression::init_seams();
