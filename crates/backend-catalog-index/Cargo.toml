@@ -110,3 +110,11 @@ types-pgstat = { path = "../types-pgstat" }
 backend-catalog-storage-seams = { path = "../backend-catalog-storage-seams" }
 backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat-seams" }
 backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
+# FormIndexDatum: slot_getattr / slot_getsysattr (execTuples), index-expression
+# eval (execExpr ExecPrepareExprList / ExecEvalExprSwitchContext), and the
+# per-tuple expression context (execUtils GetPerTupleExprContext).
+backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
+backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }
+backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
+# The word-model result Datum the form_index_datum seam yields.
+types-datum = { path = "../types-datum" }

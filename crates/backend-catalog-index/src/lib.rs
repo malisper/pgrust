@@ -159,13 +159,14 @@
 //! * `index_concurrently_*` / `validate_index` / `IndexCheckExclusion` need
 //!   executor table-scan + `check_exclusion_constraint` and a `tuplesort`-based
 //!   TID merge — all unported here.
-//! * `FormIndexDatum` is NOT landed here: the `form_index_datum` inward seam's
-//!   result-array contract is the word-model `types_datum::Datum`, but the
-//!   executor eval/slot seams it must route through (`exec_prepare_expr_list` /
-//!   `slot_getattr` / `slot_getsysattr` / `exec_eval_expr_switch_context`)
-//!   yield the canonical `types_tuple::Datum`; reconciling that element-type
-//!   divergence is owned by the genam-side migration the seam doc names, so it
-//!   stays uninstalled (mirror-pg-and-panic) until then.
+//! * `FormIndexDatum` IS landed and INSTALLED here. The `form_index_datum`
+//!   inward seam's result-array contract is the word-model `types_datum::Datum`;
+//!   the executor eval/slot seams it routes through (`exec_prepare_expr_list` /
+//!   `slot_getattr` / `slot_getsysattr` / `exec_eval_expr_switch_context`) yield
+//!   the canonical `types_tuple::Datum`, so each result is narrowed to its bare
+//!   scalar word via `as_usize()` (exact for a by-value type — every case the
+//!   current correctness scope reaches; a loud panic on a by-reference value,
+//!   which would need the Datum-unification flip the seam doc names).
 //!
 //! Within the landed `index_build`, four sub-legs are reached only under
 //! specific conditions and route to precise inward seams owned by the layers
@@ -211,6 +212,9 @@ use backend_catalog_heap_seams as heap;
 use backend_nodes_nodeFuncs_seams as nodefuncs;
 use backend_nodes_equalfuncs_seams as equalfuncs;
 use backend_rewrite_rewritemanip_seams as rewritemanip;
+use backend_executor_execTuples_seams as exec_tuples;
+use backend_executor_execExpr_seams as exec_expr;
+use backend_executor_execUtils_seams as exec_utils;
 
 use types_core::primitive::AttrNumber;
 
@@ -451,6 +455,114 @@ pub fn BuildIndexInfo<'mcx>(
     }
 
     Ok(ii)
+}
+
+/* ===========================================================================
+ * FormIndexDatum
+ * ========================================================================= */
+
+/// `FormIndexDatum(indexInfo, slot, estate, values, isnull)` (catalog/index.c):
+/// compute the index tuple's column values from the heap tuple in `slot`,
+/// evaluating any index expressions in the estate's per-tuple expression
+/// context. For each of the index's key columns, either fetch a plain heap
+/// attribute (`ii_IndexAttrNumbers[i] != 0`) or evaluate the next index
+/// expression (`ii_IndexAttrNumbers[i] == 0`) from `ii_Expressions`.
+///
+/// The C fills caller-provided `Datum values[INDEX_MAX_KEYS]` /
+/// `bool isnull[INDEX_MAX_KEYS]`; the port returns the populated fixed arrays.
+///
+/// The result element type is the word-model `types_datum::Datum` (the seam's
+/// landed contract; the sole consumers — `index_insert` / the ScanKey /
+/// `BuildIndexValueDescription` — bridge each word into the canonical
+/// `Datum::ByVal` arm). The executor seams this routes through
+/// (`slot_getattr` / `slot_getsysattr` / `ExecEvalExprSwitchContext`) yield the
+/// canonical `Datum`, so each result is narrowed to its bare scalar word via
+/// `as_usize()`: exact for a by-value type (every case the current correctness
+/// scope reaches), and a loud panic on a by-reference value (which would need
+/// the Datum-unification flip the seam doc names).
+///
+/// The C builds `indexInfo->ii_ExpressionsState` lazily and caches it on the
+/// `IndexInfo`. The seam crosses `indexInfo` immutably, so when index
+/// expressions are present the executable states are compiled transiently per
+/// call via `ExecPrepareExprList` (behaviorally identical — same results — only
+/// the cross-call caching optimization is dropped; no caller relies on the
+/// cache being populated by this call).
+fn FormIndexDatum<'mcx>(
+    index_info: &IndexInfo<'_>,
+    slot: types_nodes::SlotId,
+    estate: &mut types_nodes::EStateData<'mcx>,
+) -> PgResult<(
+    [types_datum::Datum; INDEX_MAX_KEYS as usize],
+    [bool; INDEX_MAX_KEYS as usize],
+)> {
+    let mcx = estate.es_query_cxt;
+
+    let mut values = [types_datum::Datum::null(); INDEX_MAX_KEYS as usize];
+    let mut isnull = [false; INDEX_MAX_KEYS as usize];
+
+    let n = index_info.ii_NumIndexAttrs as usize;
+
+    // The C asserts `indexInfo->ii_Expressions == NIL ||
+    // indexInfo->ii_Expressions->length == 1` only implicitly via the
+    // expression-count check below; build the executable expression states up
+    // front if any index expression columns exist.
+    let mut expr_states: Option<
+        mcx::PgVec<'mcx, mcx::PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>,
+    > = None;
+    let mut econtext: Option<types_nodes::EcxtId> = None;
+    if let Some(exprs) = index_info.ii_Expressions.as_deref() {
+        // First time through, set up expression evaluation state (transiently;
+        // see the doc comment on caching).
+        let states = exec_expr::exec_prepare_expr_list::call(exprs, estate)?;
+        // Check caller has set up context correctly: the per-tuple expression
+        // context with `ecxt_scantuple == slot`.
+        econtext = Some(exec_utils::get_per_tuple_expr_context::call(estate)?);
+        expr_states = Some(states);
+    }
+
+    // Index into the prepared expression states as we consume expr columns.
+    let mut indexpr_item: usize = 0;
+
+    for i in 0..n {
+        let keycol: AttrNumber = index_info.ii_IndexAttrNumbers[i];
+
+        let (datum, this_isnull) = if keycol < 0 {
+            // System column: slot_getsysattr against the slot's stored tuple.
+            let sd = estate.slot_data_mut(slot);
+            let (d, is_null) = exec_tuples::slot_getsysattr::call(mcx, sd, keycol)?;
+            (d.as_usize(), is_null)
+        } else if keycol != 0 {
+            // Plain index column; get the value directly from the heap tuple.
+            let (d, is_null) = exec_tuples::slot_getattr::call(estate, slot, keycol)?;
+            (d.as_usize(), is_null)
+        } else {
+            // Index expression --- need to evaluate it.
+            let states = expr_states.as_mut().ok_or_else(|| {
+                PgError::error("wrong number of index expressions")
+            })?;
+            if indexpr_item >= states.len() {
+                return Err(PgError::error("wrong number of index expressions"));
+            }
+            let ecxt = econtext.expect("econtext set up alongside expr_states");
+            let state: &mut types_nodes::execexpr::ExprState<'mcx> =
+                &mut states[indexpr_item];
+            let (d, is_null) =
+                exec_expr::exec_eval_expr_switch_context::call(state, ecxt, estate)?;
+            indexpr_item += 1;
+            (d.as_usize(), is_null)
+        };
+
+        values[i] = types_datum::Datum::from_usize(datum);
+        isnull[i] = this_isnull;
+    }
+
+    // Check that all the expressions were consumed.
+    let num_states = expr_states.as_ref().map(|s| s.len()).unwrap_or(0);
+    if indexpr_item != num_states {
+        return Err(PgError::error("wrong number of index expressions"));
+    }
+
+    Ok((values, isnull))
 }
 
 /* ===========================================================================
@@ -3519,6 +3631,11 @@ pub fn init_seams() {
     // build_indices) — the build / introspection core (keystones #340–#344).
     index_seam::build_index_info::set(BuildIndexInfo);
     index_seam::index_build::set(index_build);
+
+    // FormIndexDatum (ExecInsertIndexTuples / index build / logical-rep conflict
+    // detection): compute an index tuple's column values from a heap slot,
+    // evaluating index expressions in the per-tuple context.
+    index_seam::form_index_datum::set(FormIndexDatum);
 
     // index_create (the CREATE INDEX gate: DefineIndex → index_create →
     // index_build) + index_constraint_create (PK/UNIQUE/EXCLUDE constraint
