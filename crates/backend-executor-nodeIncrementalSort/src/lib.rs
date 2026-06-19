@@ -883,10 +883,7 @@ pub fn ExecInitIncrementalSort<'mcx>(
     debug_assert!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) == 0);
 
     // castNode(IncrementalSort, node).
-    match node {
-        types_nodes::nodes::Node::IncrementalSort(_) => {}
-        other => panic!("castNode(IncrementalSort, node) failed: {other:?}"),
-    };
+    let _ = node.expect_incrementalsort();
 
     // Initialize state structure.
     //   incrsortstate = makeNode(IncrementalSortState);
@@ -1487,10 +1484,7 @@ fn incremental_sort_plan<'a, 'mcx>(
 fn incremental_sort_plan_of<'a, 'mcx>(
     node: &'a types_nodes::nodes::Node<'mcx>,
 ) -> PgResult<&'a IncrementalSort<'mcx>> {
-    match node {
-        types_nodes::nodes::Node::IncrementalSort(s) => Ok(s),
-        other => panic!("IncrementalSort node's plan back-link is not an IncrementalSort: {other:?}"),
-    }
+    Ok(node.expect_incrementalsort())
 }
 
 /// `outerPlanState(node)` — `node->ss.ps.lefttree`.
