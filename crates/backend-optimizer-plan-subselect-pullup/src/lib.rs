@@ -176,7 +176,7 @@ fn convert_VALUES_to_ANY<'mcx>(
             Some(e) => alloc::vec![e.clone()],
             None => return Ok(None),
         };
-        let converted = convert_testexpr(mcx, &rightop_node, &subst);
+        let converted = convert_testexpr(mcx, &rightop_node, &subst)?;
 
         // Try to evaluate constant expressions.  We could get a Const result.
         // convert_testexpr always returns a Node::Expr.
@@ -231,9 +231,9 @@ fn convert_testexpr<'mcx>(
     mcx: Mcx<'mcx>,
     testexpr: &Node<'mcx>,
     subst_nodes: &[Expr],
-) -> Node<'mcx> {
+) -> PgResult<Node<'mcx>> {
     match testexpr.as_expr() {
-        Some(e) => Node::mk_expr(mcx, convert_testexpr_mutator(e.clone(), subst_nodes)),
+        Some(e) => Ok(Node::mk_expr(mcx, convert_testexpr_mutator(e.clone(), subst_nodes))),
         // The C always passes an expression tree here; an ANY SubLink's testexpr
         // is an OpExpr / BoolExpr, i.e. a `Node::Expr`. Anything else is a
         // malformed parse tree.
@@ -402,7 +402,7 @@ pub fn convert_ANY_sublink_to_join<'mcx>(
     };
 
     // Build the new join's qual expression, replacing Params with these Vars.
-    let quals = convert_testexpr(mcx, &testexpr_node, &subquery_vars);
+    let quals = convert_testexpr(mcx, &testexpr_node, &subquery_vars)?;
 
     // And finally, build the JoinExpr node.
     let result = JoinExpr {

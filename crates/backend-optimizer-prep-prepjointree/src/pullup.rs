@@ -680,8 +680,8 @@ fn clone_jointree_shape<'mcx>(mcx: Mcx<'mcx>, n: &Node<'mcx>) -> PgResult<Node<'
 /// A dummy placeholder jointree node used while moving a node out of a `&mut`
 /// slot (the slot is always overwritten before being read again).
 #[inline]
-fn dummy_node<'mcx>(mcx: Mcx<'mcx>) -> Node<'mcx> {
-    Node::mk_range_tbl_ref(mcx, types_nodes::rawnodes::RangeTblRef { rtindex: 0 })
+fn dummy_node<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Node<'mcx>> {
+    Ok(Node::mk_range_tbl_ref(mcx, types_nodes::rawnodes::RangeTblRef { rtindex: 0 }))
 }
 
 // ===========================================================================
@@ -944,7 +944,7 @@ fn pull_up_simple_subquery<'mcx>(
         .take()
         .expect("subquery has no jointree");
     if jt.quals.is_none() && jt.fromlist.len() == 1 {
-        let only = core::mem::replace(&mut *jt.fromlist[0], dummy_node(mcx));
+        let only = core::mem::replace(&mut *jt.fromlist[0], dummy_node(mcx)?);
         return Ok(only);
     }
     Ok(Node::mk_from_expr(mcx, PgBox::into_inner(jt)))
@@ -2392,7 +2392,7 @@ fn perform_pullup_replace_vars<'mcx>(
         let n = parse.mergeActionList.len();
         for i in 0..n {
             // Each element is a Node::Expr / Node holding a MergeAction.
-            let action = core::mem::replace(&mut *parse.mergeActionList[i], dummy_node(mcx));
+            let action = core::mem::replace(&mut *parse.mergeActionList[i], dummy_node(mcx)?);
             let action = pullup_replace_vars_merge_action(
                 mcx,
                 root,
@@ -2502,7 +2502,7 @@ fn pullup_replace_vars_nodelist<'mcx>(
 ) -> PgResult<()> {
     let n = list.len();
     for i in 0..n {
-        let node = core::mem::replace(&mut *list[i], dummy_node(mcx));
+        let node = core::mem::replace(&mut *list[i], dummy_node(mcx)?);
         let newnode = pullup_replace_vars(mcx, root, node, rvcontext, outer_has_sublinks)?;
         *list[i] = newnode;
     }
