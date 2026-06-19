@@ -36,8 +36,8 @@ use crate::enum_lookup::{
 };
 use crate::model::{
     config_bool, config_enum, config_generic, config_int, config_real, config_string,
-    config_var_val, config_var_value, GucStack, GUC_NEEDS_REPORT, GUC_PENDING_RESTART, GUC_LOCAL,
-    GUC_SAVE, GUC_SET, GUC_SET_LOCAL,
+    config_var_val, config_var_value, GucStack, SharedExtra, GUC_NEEDS_REPORT, GUC_PENDING_RESTART,
+    GUC_LOCAL, GUC_SAVE, GUC_SET, GUC_SET_LOCAL,
 };
 use types_guc::GUC_REPORT;
 use crate::name::{guc_name_eq, MAP_OLD_GUC_NAMES};
@@ -390,7 +390,7 @@ pub fn parse_and_validate_value(
     record: &GucVariable,
     value: &str,
     source: GucSource,
-) -> PgResult<(config_var_val, Option<GucHookExtra>)> {
+) -> PgResult<(config_var_val, Option<SharedExtra>)> {
     let gen = record.gen();
     let name = gen.name;
 
@@ -527,14 +527,14 @@ fn call_bool_check_hook(
     conf: &config_bool,
     newval: &mut bool,
     source: GucSource,
-) -> PgResult<Option<GucHookExtra>> {
+) -> PgResult<Option<SharedExtra>> {
     let Some(slot) = conf.check_hook else {
         return Ok(None);
     };
     crate::reset_guc_check_error();
     let mut extra: Option<GucHookExtra> = None;
     if (slot.get())(newval, &mut extra, source)? {
-        Ok(extra)
+        Ok(extra.map(SharedExtra::new))
     } else {
         let name = conf.gen.name;
         Err(check_hook_error(
@@ -548,14 +548,14 @@ fn call_int_check_hook(
     conf: &config_int,
     newval: &mut i32,
     source: GucSource,
-) -> PgResult<Option<GucHookExtra>> {
+) -> PgResult<Option<SharedExtra>> {
     let Some(slot) = conf.check_hook else {
         return Ok(None);
     };
     crate::reset_guc_check_error();
     let mut extra: Option<GucHookExtra> = None;
     if (slot.get())(newval, &mut extra, source)? {
-        Ok(extra)
+        Ok(extra.map(SharedExtra::new))
     } else {
         let name = conf.gen.name;
         Err(check_hook_error(
@@ -569,14 +569,14 @@ fn call_real_check_hook(
     conf: &config_real,
     newval: &mut f64,
     source: GucSource,
-) -> PgResult<Option<GucHookExtra>> {
+) -> PgResult<Option<SharedExtra>> {
     let Some(slot) = conf.check_hook else {
         return Ok(None);
     };
     crate::reset_guc_check_error();
     let mut extra: Option<GucHookExtra> = None;
     if (slot.get())(newval, &mut extra, source)? {
-        Ok(extra)
+        Ok(extra.map(SharedExtra::new))
     } else {
         let name = conf.gen.name;
         Err(check_hook_error(
@@ -590,14 +590,14 @@ fn call_string_check_hook(
     conf: &config_string,
     newval: &mut Option<String>,
     source: GucSource,
-) -> PgResult<Option<GucHookExtra>> {
+) -> PgResult<Option<SharedExtra>> {
     let Some(slot) = conf.check_hook else {
         return Ok(None);
     };
     crate::reset_guc_check_error();
     let mut extra: Option<GucHookExtra> = None;
     if (slot.get())(newval, &mut extra, source)? {
-        Ok(extra)
+        Ok(extra.map(SharedExtra::new))
     } else {
         let name = conf.gen.name;
         // C fallback message: `newval ? newval : ""`.
@@ -613,14 +613,14 @@ fn call_enum_check_hook(
     conf: &config_enum,
     newval: &mut i32,
     source: GucSource,
-) -> PgResult<Option<GucHookExtra>> {
+) -> PgResult<Option<SharedExtra>> {
     let Some(slot) = conf.check_hook else {
         return Ok(None);
     };
     crate::reset_guc_check_error();
     let mut extra: Option<GucHookExtra> = None;
     if (slot.get())(newval, &mut extra, source)? {
-        Ok(extra)
+        Ok(extra.map(SharedExtra::new))
     } else {
         let name = conf.gen.name;
         let valname = config_enum_lookup_by_value(conf, *newval).unwrap_or("?");
@@ -654,16 +654,23 @@ fn call_enum_check_hook(
 /// `reset_extra` (C's `conf->gen.extra = conf->reset_extra = extra`). On a check
 /// hook failure C does `elog(FATAL)`; here that surfaces as the `PgError` the
 /// caller turns into a fatal boot error.
-pub fn initialize_one_guc_option_hooks(var: &GucVariable) -> PgResult<Option<GucHookExtra>> {
+pub fn initialize_one_guc_option_hooks(var: &mut GucVariable) -> PgResult<Option<SharedExtra>> {
+    // C: `conf->gen.extra = conf->reset_extra = extra` (guc.c:1674). The boot
+    // extra is the payload the variable's own check hook produced from the boot
+    // value; stashing it in both `gen.extra` and `reset_extra` is what lets a
+    // later GUC-stack restore or RESET re-run the assign hook with the matching
+    // extra instead of `None`.
     match var {
         GucVariable::Bool(conf) => {
             let mut newval = conf.boot_val;
             let extra = call_bool_check_hook(conf, &mut newval, PGC_S_DEFAULT)?;
             if let Some(slot) = conf.assign_hook {
                 if slot.installed() {
-                    (slot.get())(newval, extra.as_ref());
+                    (slot.get())(newval, extra.as_deref());
                 }
             }
+            conf.gen.extra = extra.clone();
+            conf.reset_extra = extra.clone();
             Ok(extra)
         }
         GucVariable::Int(conf) => {
@@ -671,9 +678,11 @@ pub fn initialize_one_guc_option_hooks(var: &GucVariable) -> PgResult<Option<Guc
             let extra = call_int_check_hook(conf, &mut newval, PGC_S_DEFAULT)?;
             if let Some(slot) = conf.assign_hook {
                 if slot.installed() {
-                    (slot.get())(newval, extra.as_ref());
+                    (slot.get())(newval, extra.as_deref());
                 }
             }
+            conf.gen.extra = extra.clone();
+            conf.reset_extra = extra.clone();
             Ok(extra)
         }
         GucVariable::Real(conf) => {
@@ -681,9 +690,11 @@ pub fn initialize_one_guc_option_hooks(var: &GucVariable) -> PgResult<Option<Guc
             let extra = call_real_check_hook(conf, &mut newval, PGC_S_DEFAULT)?;
             if let Some(slot) = conf.assign_hook {
                 if slot.installed() {
-                    (slot.get())(newval, extra.as_ref());
+                    (slot.get())(newval, extra.as_deref());
                 }
             }
+            conf.gen.extra = extra.clone();
+            conf.reset_extra = extra.clone();
             Ok(extra)
         }
         GucVariable::String(conf) => {
@@ -692,9 +703,11 @@ pub fn initialize_one_guc_option_hooks(var: &GucVariable) -> PgResult<Option<Guc
             let extra = call_string_check_hook(conf, &mut newval, PGC_S_DEFAULT)?;
             if let Some(slot) = conf.assign_hook {
                 if slot.installed() {
-                    (slot.get())(newval.as_deref(), extra.as_ref());
+                    (slot.get())(newval.as_deref(), extra.as_deref());
                 }
             }
+            conf.gen.extra = extra.clone();
+            conf.reset_extra = extra.clone();
             Ok(extra)
         }
         GucVariable::Enum(conf) => {
@@ -702,9 +715,11 @@ pub fn initialize_one_guc_option_hooks(var: &GucVariable) -> PgResult<Option<Guc
             let extra = call_enum_check_hook(conf, &mut newval, PGC_S_DEFAULT)?;
             if let Some(slot) = conf.assign_hook {
                 if slot.installed() {
-                    (slot.get())(newval, extra.as_ref());
+                    (slot.get())(newval, extra.as_deref());
                 }
             }
+            conf.gen.extra = extra.clone();
+            conf.reset_extra = extra.clone();
             Ok(extra)
         }
     }
@@ -968,6 +983,11 @@ pub fn set_config_option(
         return Ok(-1);
     }
 
+    // C threads the *same* `newextra` pointer through both the value path
+    // (`conf->gen.extra`) and the makeDefault path (`conf->reset_extra` and each
+    // matching `stack->prior.extra`). With `SharedExtra` = `Arc`, clone the
+    // pointer for the makeDefault block before the value path consumes it.
+    let make_default_extra = if make_default { newextra.clone() } else { None };
     if change_val {
         let record = &mut reg.vars[idx];
         // Save old value to support transaction abort (guc.c:3754). Skipped when
@@ -985,7 +1005,7 @@ pub fn set_config_option(
     }
     if make_default {
         let record = &mut reg.vars[idx];
-        make_default_bookkeeping(record, &newval, source, context, srole);
+        make_default_bookkeeping(record, &newval, make_default_extra, source, context, srole);
     }
 
     Ok(if change_val { 1 } else { -1 })
@@ -996,7 +1016,7 @@ pub fn set_config_option(
 fn boot_default_value(
     record: &GucVariable,
     source: GucSource,
-) -> PgResult<(config_var_val, Option<GucHookExtra>)> {
+) -> PgResult<(config_var_val, Option<SharedExtra>)> {
     match record {
         GucVariable::Bool(c) => {
             let mut v = c.boot_val;
@@ -1046,7 +1066,7 @@ fn reset_value(record: &GucVariable) -> config_var_val {
 fn reset_value_and_extra(
     record: &GucVariable,
     source: GucSource,
-) -> PgResult<(config_var_val, Option<GucHookExtra>)> {
+) -> PgResult<(config_var_val, Option<SharedExtra>)> {
     match record {
         GucVariable::Bool(c) => {
             let mut v = c.reset_val;
@@ -1128,7 +1148,7 @@ pub type DeferredAssignHook = Box<dyn FnOnce()>;
 fn apply_value(
     record: &mut GucVariable,
     newval: config_var_val,
-    extra: Option<GucHookExtra>,
+    extra: Option<SharedExtra>,
     source: GucSource,
     context: GucContext,
     srole: Oid,
@@ -1153,7 +1173,8 @@ fn apply_value(
             }
             c.assign_hook.map(|slot| {
                 let f = slot.get();
-                Box::new(move || f(b, extra.as_ref())) as DeferredAssignHook
+                let extra = extra.clone();
+                Box::new(move || f(b, extra.as_deref())) as DeferredAssignHook
             })
         }
         (GucVariable::Int(c), config_var_val::Intval(v)) => {
@@ -1163,7 +1184,8 @@ fn apply_value(
             }
             c.assign_hook.map(|slot| {
                 let f = slot.get();
-                Box::new(move || f(v, extra.as_ref())) as DeferredAssignHook
+                let extra = extra.clone();
+                Box::new(move || f(v, extra.as_deref())) as DeferredAssignHook
             })
         }
         (GucVariable::Real(c), config_var_val::Realval(v)) => {
@@ -1173,7 +1195,8 @@ fn apply_value(
             }
             c.assign_hook.map(|slot| {
                 let f = slot.get();
-                Box::new(move || f(v, extra.as_ref())) as DeferredAssignHook
+                let extra = extra.clone();
+                Box::new(move || f(v, extra.as_deref())) as DeferredAssignHook
             })
         }
         (GucVariable::String(c), config_var_val::Stringval(s)) => {
@@ -1183,7 +1206,8 @@ fn apply_value(
             c.value = Some(s.clone());
             c.assign_hook.map(|slot| {
                 let f = slot.get();
-                Box::new(move || f(s.as_deref(), extra.as_ref())) as DeferredAssignHook
+                let extra = extra.clone();
+                Box::new(move || f(s.as_deref(), extra.as_deref())) as DeferredAssignHook
             })
         }
         (GucVariable::Enum(c), config_var_val::Enumval(v)) => {
@@ -1193,13 +1217,23 @@ fn apply_value(
             }
             c.assign_hook.map(|slot| {
                 let f = slot.get();
-                Box::new(move || f(v, extra.as_ref())) as DeferredAssignHook
+                let extra = extra.clone();
+                Box::new(move || f(v, extra.as_deref())) as DeferredAssignHook
             })
         }
         (_record, _) => None,
     };
 
     let gen = record.gen_mut();
+    // C: `set_extra_field(&conf->gen, &conf->gen.extra, newextra)` (guc.c:3762).
+    // The live variable must remember its current extra so the GUC stack
+    // (`set_stack_value`) can copy it into a `prior`/`masked` slot, and so a
+    // later `AtEOXact_GUC` restore re-runs the assign hook with the *matching*
+    // extra. The timezone/datestyle assign hooks downcast a non-NULL extra, so a
+    // dropped extra panics on rollback ("GUC assign hook reached with no extra
+    // payload"). The deferred closure above holds its own clone of the same
+    // `Arc`, mirroring C's shared pointer.
+    gen.extra = extra;
     gen.source = source;
     gen.scontext = context;
     gen.srole = srole;
@@ -1212,17 +1246,36 @@ fn apply_value(
 fn make_default_bookkeeping(
     record: &mut GucVariable,
     newval: &config_var_val,
+    extra: Option<SharedExtra>,
     source: GucSource,
     context: GucContext,
     srole: Oid,
 ) {
     if record.gen().reset_source <= source {
+        // C: `conf->reset_val = newval; set_extra_field(..., &conf->reset_extra,
+        // newextra)` (guc.c:3774). The per-type `reset_extra` slot remembers the
+        // default's extra so a later RESET re-runs the assign hook with it.
         match (&mut *record, newval) {
-            (GucVariable::Bool(c), config_var_val::Boolval(v)) => c.reset_val = *v,
-            (GucVariable::Int(c), config_var_val::Intval(v)) => c.reset_val = *v,
-            (GucVariable::Real(c), config_var_val::Realval(v)) => c.reset_val = *v,
-            (GucVariable::String(c), config_var_val::Stringval(v)) => c.reset_val = v.clone(),
-            (GucVariable::Enum(c), config_var_val::Enumval(v)) => c.reset_val = *v,
+            (GucVariable::Bool(c), config_var_val::Boolval(v)) => {
+                c.reset_val = *v;
+                c.reset_extra = extra.clone();
+            }
+            (GucVariable::Int(c), config_var_val::Intval(v)) => {
+                c.reset_val = *v;
+                c.reset_extra = extra.clone();
+            }
+            (GucVariable::Real(c), config_var_val::Realval(v)) => {
+                c.reset_val = *v;
+                c.reset_extra = extra.clone();
+            }
+            (GucVariable::String(c), config_var_val::Stringval(v)) => {
+                c.reset_val = v.clone();
+                c.reset_extra = extra.clone();
+            }
+            (GucVariable::Enum(c), config_var_val::Enumval(v)) => {
+                c.reset_val = *v;
+                c.reset_extra = extra.clone();
+            }
             (_record, _) => return,
         }
         let gen = record.gen_mut();
@@ -1231,10 +1284,13 @@ fn make_default_bookkeeping(
         gen.reset_srole = srole;
     }
     // for (stack = conf->gen.stack; stack; stack = stack->prev) ...
+    // C copies `newextra` into each matching `stack->prior.extra`
+    // (set_extra_field, guc.c:3786).
     let mut stack = record.gen_mut().stack.as_deref_mut();
     while let Some(s) = stack {
         if s.source <= source {
             s.prior.val = Some(newval.clone());
+            s.prior.extra = extra.clone();
             s.source = source;
             s.scontext = context;
             s.srole = srole;
@@ -1265,14 +1321,12 @@ fn set_stack_value(record: &GucVariable, val: &mut config_var_value) {
         GucVariable::Enum(c) => config_var_val::Enumval(current_enum(c)),
     };
     val.val = Some(cur);
-    // C copies conf->gen.extra (a refcounted void*) into the stack entry. The
-    // model's GucHookExtra is a non-Clone `Box<dyn Any>` with no identity, and on
-    // restore the assign hook is re-run with `None` extra (as the RESET path in
-    // `apply_value` already does); so the stack entry carries no extra. Behavior
-    // is preserved for every GUC whose assign hook does not depend on a cached
-    // extra payload (the documented model boundary, audit finding "reset_extra").
-    let _ = record;
-    val.extra = None;
+    // C: `set_extra_field(gconf, &(val->extra), gconf->extra)` (guc.c:838) —
+    // copy the variable's *current* extra into the stack slot. With `SharedExtra`
+    // = `Arc`, cloning copies the pointer (C's refcounted `set_extra_field`), so
+    // an `AtEOXact_GUC` rollback re-runs the assign hook with the matching extra
+    // instead of `None` (which made every extra-consuming assign hook panic).
+    val.extra = record.gen().extra.clone();
 }
 
 /// `discard_stack_value(gconf, val)` (guc.c:846): clear a no-longer-needed stack
@@ -1410,45 +1464,50 @@ fn restore_stacked_value(
     newvalue: &config_var_value,
 ) -> bool {
     let newval = newvalue.val.as_ref();
-    let newextra = newvalue.extra.as_ref();
+    // The restored extra travels with the stacked value (C's
+    // `newvalue.extra`). `as_deref()` peels the `Arc` to the `&GucHookExtra` the
+    // assign hook expects; `newextra` (the owned `Option<SharedExtra>`) is stored
+    // back into `conf->gen.extra` after the hook fires (guc.c:2416 et al.).
+    let newextra = newvalue.extra.clone();
+    let newextra_ref: Option<&GucHookExtra> = newvalue.extra.as_deref();
     let mut changed = false;
     match (record, newval) {
         (GucVariable::Bool(c), Some(config_var_val::Boolval(nv))) => {
-            if current_bool(c) != *nv || extra_differs(c.gen.extra.as_ref(), newextra) {
+            if current_bool(c) != *nv || extra_differs(c.gen.extra.as_deref(), newextra_ref) {
                 if let Some(slot) = c.assign_hook {
-                    (slot.get())(*nv, newextra);
+                    (slot.get())(*nv, newextra_ref);
                 }
                 c.value = Some(*nv);
                 if c.variable.installed() {
                     c.variable.write(*nv);
                 }
-                c.gen.extra = None;
+                c.gen.extra = newextra;
                 changed = true;
             }
         }
         (GucVariable::Int(c), Some(config_var_val::Intval(nv))) => {
-            if current_int(c) != *nv || extra_differs(c.gen.extra.as_ref(), newextra) {
+            if current_int(c) != *nv || extra_differs(c.gen.extra.as_deref(), newextra_ref) {
                 if let Some(slot) = c.assign_hook {
-                    (slot.get())(*nv, newextra);
+                    (slot.get())(*nv, newextra_ref);
                 }
                 c.value = Some(*nv);
                 if c.variable.installed() {
                     c.variable.write(*nv);
                 }
-                c.gen.extra = None;
+                c.gen.extra = newextra;
                 changed = true;
             }
         }
         (GucVariable::Real(c), Some(config_var_val::Realval(nv))) => {
-            if current_real(c) != *nv || extra_differs(c.gen.extra.as_ref(), newextra) {
+            if current_real(c) != *nv || extra_differs(c.gen.extra.as_deref(), newextra_ref) {
                 if let Some(slot) = c.assign_hook {
-                    (slot.get())(*nv, newextra);
+                    (slot.get())(*nv, newextra_ref);
                 }
                 c.value = Some(*nv);
                 if c.variable.installed() {
                     c.variable.write(*nv);
                 }
-                c.gen.extra = None;
+                c.gen.extra = newextra;
                 changed = true;
             }
         }
@@ -1458,28 +1517,28 @@ fn restore_stacked_value(
                 (None, None) => false,
                 _ => true,
             };
-            if differs || extra_differs(c.gen.extra.as_ref(), newextra) {
+            if differs || extra_differs(c.gen.extra.as_deref(), newextra_ref) {
                 if let Some(slot) = c.assign_hook {
-                    (slot.get())(nv.as_deref(), newextra);
+                    (slot.get())(nv.as_deref(), newextra_ref);
                 }
                 c.value = Some(nv.clone());
                 if c.variable.installed() {
                     c.variable.write(nv.clone());
                 }
-                c.gen.extra = None;
+                c.gen.extra = newextra;
                 changed = true;
             }
         }
         (GucVariable::Enum(c), Some(config_var_val::Enumval(nv))) => {
-            if current_enum(c) != *nv || extra_differs(c.gen.extra.as_ref(), newextra) {
+            if current_enum(c) != *nv || extra_differs(c.gen.extra.as_deref(), newextra_ref) {
                 if let Some(slot) = c.assign_hook {
-                    (slot.get())(*nv, newextra);
+                    (slot.get())(*nv, newextra_ref);
                 }
                 c.value = Some(*nv);
                 if c.variable.installed() {
                     c.variable.write(*nv);
                 }
-                c.gen.extra = None;
+                c.gen.extra = newextra;
                 changed = true;
             }
         }

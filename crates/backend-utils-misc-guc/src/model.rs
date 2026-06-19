@@ -49,6 +49,21 @@ pub const GUC_SET_LOCAL: GucStackState = 3;
 /// (C's `void *extra`). Re-exported from guc_tables (one definition).
 pub use backend_utils_misc_guc_tables::GucHookExtra as HookExtra;
 
+/// A *shared* GUC extra payload, the faithful analog of C's `void *extra`.
+///
+/// In `guc.c` the `extra` blob a check hook produces is a single refcounted
+/// `malloc`'d allocation whose *pointer* is copied (not deep-copied) into
+/// `conf->gen.extra`, `conf->reset_extra`, and every GUC-stack
+/// `prior.extra`/`masked.extra` slot that needs it (`set_extra_field`,
+/// guc.c:792); `guc_extra_field_used` tracks whether any live slot still points
+/// at it. Because our [`GucHookExtra`] is a `Box<dyn Any + Send>` with no
+/// pointer identity and is not `Clone`, we model that single shared allocation
+/// with [`Arc`]: cloning the `Arc` copies the pointer (C's `set_extra_field`),
+/// and the payload is freed when the last slot drops it (C's `guc_free` once
+/// `!guc_extra_field_used`). The `Arc` derefs to `&GucHookExtra`, so the assign
+/// hook signature (`Option<&GucHookExtra>`) is unchanged.
+pub type SharedExtra = std::sync::Arc<GucHookExtra>;
+
 /// `union config_var_val` (`utils/guc_tables.h`); originally a C union.
 #[derive(Debug)]
 pub enum config_var_val {
@@ -72,13 +87,15 @@ impl Clone for config_var_val {
 }
 
 /// `config_var_value` (`utils/guc_tables.h`): a value plus its `extra`. The
-/// `extra` payload is not `Clone` (it is a `Box<dyn Any>`), so this struct is
-/// not `Clone`; the GUC stack moves it by value (matching C, which copies the
-/// pointer).
+/// `extra` is a [`SharedExtra`] (`Arc`), so a stack slot's extra can *share* the
+/// live variable's extra by pointer — the faithful analog of C's
+/// `set_extra_field`, which copies the refcounted `void *` pointer rather than
+/// deep-copying. This is what lets `AtEOXact_GUC` rollback re-run the assign
+/// hook with the matching extra.
 #[derive(Debug, Default)]
 pub struct config_var_value {
     pub val: Option<config_var_val>,
-    pub extra: Option<GucHookExtra>,
+    pub extra: Option<SharedExtra>,
 }
 
 /// `GucStack` (`utils/guc_tables.h`): one transactional save level.
@@ -116,7 +133,7 @@ pub struct config_generic {
     pub srole: Oid,
     pub reset_srole: Oid,
     pub stack: Option<Box<GucStack>>,
-    pub extra: Option<GucHookExtra>,
+    pub extra: Option<SharedExtra>,
     pub last_reported: Option<String>,
     pub sourcefile: Option<String>,
     pub sourceline: i32,
@@ -173,7 +190,7 @@ pub struct config_bool {
     pub assign_hook: Option<&'static GucBoolAssignHook>,
     pub show_hook: Option<&'static GucShowHook>,
     pub reset_val: bool,
-    pub reset_extra: Option<GucHookExtra>,
+    pub reset_extra: Option<SharedExtra>,
 }
 
 /// `struct config_int`.
@@ -189,7 +206,7 @@ pub struct config_int {
     pub assign_hook: Option<&'static GucIntAssignHook>,
     pub show_hook: Option<&'static GucShowHook>,
     pub reset_val: i32,
-    pub reset_extra: Option<GucHookExtra>,
+    pub reset_extra: Option<SharedExtra>,
 }
 
 /// `struct config_real`.
@@ -205,7 +222,7 @@ pub struct config_real {
     pub assign_hook: Option<&'static GucRealAssignHook>,
     pub show_hook: Option<&'static GucShowHook>,
     pub reset_val: f64,
-    pub reset_extra: Option<GucHookExtra>,
+    pub reset_extra: Option<SharedExtra>,
 }
 
 /// `struct config_string`.
@@ -219,7 +236,7 @@ pub struct config_string {
     pub assign_hook: Option<&'static GucStringAssignHook>,
     pub show_hook: Option<&'static GucShowHook>,
     pub reset_val: Option<String>,
-    pub reset_extra: Option<GucHookExtra>,
+    pub reset_extra: Option<SharedExtra>,
 }
 
 /// `struct config_enum`.
@@ -234,7 +251,7 @@ pub struct config_enum {
     pub assign_hook: Option<&'static GucEnumAssignHook>,
     pub show_hook: Option<&'static GucShowHook>,
     pub reset_val: i32,
-    pub reset_extra: Option<GucHookExtra>,
+    pub reset_extra: Option<SharedExtra>,
 }
 
 impl config_enum {
@@ -245,4 +262,4 @@ impl config_enum {
 }
 
 /// The `void **extra` typed alias the check-hook callers pass through.
-pub type ExtraSlot = Option<GucHookExtra>;
+pub type ExtraSlot = Option<SharedExtra>;

@@ -206,7 +206,7 @@ pub fn initialize_guc_options() {
 pub fn try_initialize_guc_options() -> PgResult<()> {
     let mut reg = GucRegistry::new();
     for setting in all_settings() {
-        if let Some(var) = build_variable(setting) {
+        if let Some(mut var) = build_variable(setting) {
             // `InitializeOneGUCOption` (guc.c): after seeding `*conf->variable =
             // conf->reset_val = boot_val`, C fires the variable's `assign_hook`
             // with the boot value so hook-side global state derived from a GUC
@@ -233,7 +233,7 @@ pub fn try_initialize_guc_options() -> PgResult<()> {
             // its hook-side global state, which the sync-rep commit invariant
             // needs.
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _ = crate::registry::initialize_one_guc_option_hooks(&var);
+                let _ = crate::registry::initialize_one_guc_option_hooks(&mut var);
             }));
             reg.define(var)?;
         }

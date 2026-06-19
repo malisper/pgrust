@@ -18,7 +18,15 @@ use types_guc::{config_enum_entry, GucSource};
 /// `void **extra` (`utils/guc.h`). Each hook defines its own private struct,
 /// so this is the genuinely heterogeneous kind of opacity that stays opaque
 /// (docs/types.md rule 6).
-pub type GucHookExtra = Box<dyn Any + Send>;
+///
+/// `Send + Sync`: in `guc.c` the extra is a single refcounted `malloc`'d blob
+/// whose *pointer* is shared (`set_extra_field`) between `conf->gen.extra`,
+/// `conf->reset_extra`, and the GUC-stack `prior`/`masked` slots. We model that
+/// shared allocation with `Arc<GucHookExtra>` (`model::SharedExtra`), and the
+/// GUC store lives behind a `Mutex` global, so the payload must be `Sync` as
+/// well as `Send`. Every check hook's payload is plain data (ints/strings/enum
+/// ids), so this is satisfied trivially.
+pub type GucHookExtra = Box<dyn Any + Send + Sync>;
 
 // The C hook typedefs (`utils/guc.h`). A check hook may canonicalize
 // `newval` in place and may produce an `extra` payload for the paired assign
