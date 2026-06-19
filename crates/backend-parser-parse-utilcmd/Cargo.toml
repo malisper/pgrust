@@ -72,4 +72,10 @@ backend-utils-adt-ruleutils = { path = "../backend-utils-adt-ruleutils" }
 # Cycle-free: indexcmds does not depend on parse-utilcmd.
 backend-commands-indexcmds = { path = "../backend-commands-indexcmds" }
 
+# transformRuleStmt: rule-action parse analysis (transformStmt) and the
+# OLD/NEW-usage walkers (rangeTableEntry_used / getInsertSelectQueryIndex).
+# Cycle-free: neither analyze nor rewrite-core depends on parse-utilcmd.
+backend-parser-analyze = { path = "../backend-parser-analyze" }
+backend-rewrite-core = { path = "../backend-rewrite-core" }
+
 [dev-dependencies]

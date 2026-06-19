@@ -102,20 +102,3 @@ seam_core::seam!(
         spec: NodeBox<'mcx>,
     ) -> PgResult<NodeBox<'mcx>>
 );
-
-seam_core::seam!(
-    /// The catalog/relcache leaf of `transformRuleStmt` (parse_utilcmd.c):
-    /// `table_openrv(stmt->relation, AccessExclusiveLock)`, building the fake
-    /// OLD/NEW range-table entries, running each action statement through
-    /// analyze.c (`transformStmt`) and the WHERE qual through
-    /// `transformWhereClause`, and validating OLD/NEW usage. Returns the
-    /// analysed `(actions, where_clause)`.
-    pub fn transformRuleStmtCatalog<'mcx>(
-        mcx: Mcx<'mcx>,
-        stmt: &types_nodes::ddlnodes::RuleStmt<'mcx>,
-        query_string: &str,
-    ) -> PgResult<(
-        PgVec<'mcx, types_nodes::copy_query::Query<'mcx>>,
-        Option<Node<'mcx>>,
-    )>
-);

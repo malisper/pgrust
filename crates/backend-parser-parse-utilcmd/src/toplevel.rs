@@ -31,7 +31,7 @@ use types_nodes::ddlnodes::{CreateStmt, RuleStmt};
 use types_nodes::nodes::{ntag, Node};
 
 use backend_parser_parse_utilcmd_outward_seams as sx;
-use backend_parser_small1::make_parsestate;
+use backend_parser_small1::{free_parsestate, make_parsestate};
 use types_storage::lock::NoLock;
 
 use crate::column::transformColumnDefinition;
@@ -325,15 +325,435 @@ fn to_access_range_var(rv: &types_nodes::rawnodes::RangeVar<'_>) -> types_tuple:
     }
 }
 
-/// `transformRuleStmt` — parse analysis for CREATE RULE. Builds the OLD/NEW
-/// pseudo-relation rtable and runs each action statement through analyze.c;
-/// the relcache OLD/NEW fake-RTE + analyze-driven transform is routed through
-/// the outward seam. Returns `(actions, where_clause)`.
+/// `transformRuleStmt` — parse analysis for CREATE RULE (parse_utilcmd.c).
+///
+/// Opens the event relation under `AccessExclusiveLock`, sets up the OLD/NEW
+/// pseudo-relation range-table entries (OLD always varno 1, NEW varno 2),
+/// transforms the WHERE qual, and runs each action statement through
+/// analyze.c's [`transformStmt`], validating the OLD/NEW usage per event type.
+/// Returns `(actions, where_clause)`.
 pub fn transformRuleStmt<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &RuleStmt<'_>,
     query_string: &str,
 ) -> PgResult<(PgVec<'mcx, Query<'mcx>>, Option<Node<'mcx>>)> {
+    use types_nodes::nodes::CmdType;
+    use types_nodes::parsestmt::ParseExprKind::EXPR_KIND_WHERE;
+    use types_storage::lock::AccessShareLock;
+    use types_tuple::access::{RangeVar as AccessRangeVar, RELKIND_MATVIEW};
+
     let stmt = stmt.clone_in(mcx)?;
-    sx::transformRuleStmtCatalog::call(mcx, &stmt, query_string)
+
+    // PRS2_OLD_VARNO / PRS2_NEW_VARNO (primnodes.h).
+    const PRS2_OLD_VARNO: i32 = 1;
+    const PRS2_NEW_VARNO: i32 = 2;
+
+    // To avoid deadlock, the first thing we do is grab AccessExclusiveLock on
+    // the target relation. This will be needed by DefineQueryRewrite().
+    let rel_rv: AccessRangeVar = match stmt.relation.as_ref().and_then(|n| n.as_rangevar()) {
+        Some(rv) => to_access_range_var(rv),
+        None => {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
+                .errmsg("CREATE RULE: missing or invalid event relation")
+                .into_error())
+        }
+    };
+    let rel = backend_access_table_table::table_openrv(
+        mcx,
+        &rel_rv,
+        types_storage::lock::AccessExclusiveLock,
+    )?;
+
+    if rel.rd_rel.relkind == RELKIND_MATVIEW {
+        return Err(ereport(ERROR)
+            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg("rules on materialized views are not supported")
+            .into_error());
+    }
+
+    // Set up pstate.
+    let mut pstate = make_parsestate(mcx, None)?;
+    pstate.p_sourcetext = Some(PgString::from_str_in(query_string, mcx)?);
+
+    // NOTE: 'OLD' must always have a varno equal to 1 and 'NEW' equal to 2.
+    let old_alias = make_old_new_alias(mcx, "old")?;
+    let new_alias = make_old_new_alias(mcx, "new")?;
+    let oldnsitem = backend_parser_relation::addRangeTableEntryForRelation(
+        mcx,
+        &mut pstate,
+        &rel,
+        AccessShareLock,
+        Some(old_alias),
+        false,
+        false,
+    )?;
+    let newnsitem = backend_parser_relation::addRangeTableEntryForRelation(
+        mcx,
+        &mut pstate,
+        &rel,
+        AccessShareLock,
+        Some(new_alias),
+        false,
+        false,
+    )?;
+
+    // They must be in the namespace too for lookup purposes, but only add the
+    // one(s) relevant for the current kind of rule. Not added to the joinlist.
+    match stmt.event {
+        CmdType::CMD_SELECT => {
+            backend_parser_relation::addNSItemToQuery(
+                mcx, &mut pstate, oldnsitem, false, true, true,
+            )?;
+        }
+        CmdType::CMD_UPDATE => {
+            backend_parser_relation::addNSItemToQuery(
+                mcx, &mut pstate, oldnsitem, false, true, true,
+            )?;
+            backend_parser_relation::addNSItemToQuery(
+                mcx, &mut pstate, newnsitem, false, true, true,
+            )?;
+        }
+        CmdType::CMD_INSERT => {
+            backend_parser_relation::addNSItemToQuery(
+                mcx, &mut pstate, newnsitem, false, true, true,
+            )?;
+        }
+        CmdType::CMD_DELETE => {
+            backend_parser_relation::addNSItemToQuery(
+                mcx, &mut pstate, oldnsitem, false, true, true,
+            )?;
+        }
+        ev => {
+            return Err(ereport(ERROR)
+                .errmsg(&alloc::format!("unrecognized event type: {}", ev as i32))
+                .into_error())
+        }
+    }
+
+    // Take care of the where clause.
+    let where_clause_in: Option<Node<'mcx>> = stmt
+        .where_clause
+        .as_ref()
+        .map(|n| n.clone_in(mcx))
+        .transpose()?;
+    let mut where_clause: Option<Node<'mcx>> = {
+        let mut e = backend_parser_clause::transformWhereClause(
+            mcx,
+            &mut pstate,
+            where_clause_in,
+            EXPR_KIND_WHERE,
+            "WHERE",
+        )?;
+        // We have to fix its collations too.
+        if let Some(expr) = e.as_mut() {
+            backend_parser_parse_collate::assign_expr_collations(Some(&pstate), expr)?;
+        }
+        match e {
+            Some(expr) => Some(Node::mk_expr(mcx, expr)),
+            None => None,
+        }
+    };
+
+    // This is probably dead code without add_missing_from.
+    if pstate.p_rtable.len() != 2 {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
+            .errmsg("rule WHERE condition cannot contain references to other relations")
+            .into_error());
+    }
+
+    let actions: PgVec<'mcx, Query<'mcx>>;
+
+    if stmt.actions.is_empty() {
+        // 'instead nothing' rules with a qualification need a query rangetable
+        // so the rewrite handler can add the negated rule qualification to the
+        // original query. We create a query with command type CMD_NOTHING.
+        let mut nothing_qry = Query::new(mcx);
+        nothing_qry.commandType = CmdType::CMD_NOTHING;
+        nothing_qry.rtable = core::mem::replace(&mut pstate.p_rtable, PgVec::new_in(mcx));
+        nothing_qry.rteperminfos =
+            core::mem::replace(&mut pstate.p_rteperminfos, PgVec::new_in(mcx));
+        nothing_qry.jointree = Some(PgBox::new_in(
+            types_nodes::rawnodes::FromExpr {
+                fromlist: PgVec::new_in(mcx),
+                quals: None,
+            },
+            mcx,
+        ));
+        let mut v = PgVec::new_in(mcx);
+        v.push(nothing_qry);
+        actions = v;
+    } else {
+        let mut newactions: PgVec<'mcx, Query<'mcx>> = PgVec::new_in(mcx);
+
+        // Transform each statement, like parse_sub_analyze().
+        for action in stmt.actions.iter() {
+            let mut sub_pstate = make_parsestate(mcx, None)?;
+            // Outer ParseState isn't parent of inner: pass the text by hand.
+            sub_pstate.p_sourcetext = Some(PgString::from_str_in(query_string, mcx)?);
+
+            // Set up OLD/NEW in the rtable for this statement, in relnamespace
+            // only (not varnamespace); they aren't referred to by unqualified
+            // field names nor "*" in rule actions.
+            let s_old_alias = make_old_new_alias(mcx, "old")?;
+            let s_new_alias = make_old_new_alias(mcx, "new")?;
+            let s_oldnsitem = backend_parser_relation::addRangeTableEntryForRelation(
+                mcx,
+                &mut sub_pstate,
+                &rel,
+                AccessShareLock,
+                Some(s_old_alias),
+                false,
+                false,
+            )?;
+            let s_old_rtindex = s_oldnsitem.p_rtindex;
+            let s_newnsitem = backend_parser_relation::addRangeTableEntryForRelation(
+                mcx,
+                &mut sub_pstate,
+                &rel,
+                AccessShareLock,
+                Some(s_new_alias),
+                false,
+                false,
+            )?;
+            backend_parser_relation::addNSItemToQuery(
+                mcx,
+                &mut sub_pstate,
+                s_oldnsitem,
+                false,
+                true,
+                false,
+            )?;
+            backend_parser_relation::addNSItemToQuery(
+                mcx,
+                &mut sub_pstate,
+                s_newnsitem,
+                false,
+                true,
+                false,
+            )?;
+
+            // Transform the rule action statement.
+            let action_node = action.clone_in(mcx)?;
+            let mut top_subqry =
+                backend_parser_analyze::transformStmt(mcx, &mut sub_pstate, &action_node)?;
+
+            // We cannot support utility-statement actions (eg NOTIFY) with a
+            // nonempty rule WHERE condition.
+            if top_subqry.commandType == CmdType::CMD_UTILITY && where_clause.is_some() {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
+                    .errmsg(
+                        "rules with WHERE conditions can only have SELECT, INSERT, UPDATE, or DELETE actions",
+                    )
+                    .into_error());
+            }
+
+            // If the action is INSERT...SELECT, OLD/NEW have been pushed down
+            // into the SELECT, and that's what we need to look at. We resolve
+            // the sub-query index so we can also mutate its jointree below.
+            let sub_idx =
+                backend_rewrite_core::insert_select::getInsertSelectQueryIndex(&top_subqry)?;
+
+            // Reject conditional set-ops up front.
+            {
+                let sub_qry: &Query = match sub_idx {
+                    Some(i) => sub_query_at(&top_subqry, i)?,
+                    None => &top_subqry,
+                };
+                if sub_qry.setOperations.is_some() && where_clause.is_some() {
+                    return Err(ereport(ERROR)
+                        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                        .errmsg("conditional UNION/INTERSECT/EXCEPT statements are not implemented")
+                        .into_error());
+                }
+            }
+
+            // Validate action's use of OLD/NEW, qual too.
+            let (has_old, has_new) = {
+                let sub_qry: &Query = match sub_idx {
+                    Some(i) => sub_query_at(&top_subqry, i)?,
+                    None => &top_subqry,
+                };
+                let sub_qry_node = Node::mk_query(mcx, sub_qry.clone_in(mcx)?);
+                let has_old = backend_rewrite_core::walkers::rangeTableEntry_used(
+                    &sub_qry_node,
+                    PRS2_OLD_VARNO,
+                    0,
+                ) || where_clause.as_ref().is_some_and(|w| {
+                    backend_rewrite_core::walkers::rangeTableEntry_used(w, PRS2_OLD_VARNO, 0)
+                });
+                let has_new = backend_rewrite_core::walkers::rangeTableEntry_used(
+                    &sub_qry_node,
+                    PRS2_NEW_VARNO,
+                    0,
+                ) || where_clause.as_ref().is_some_and(|w| {
+                    backend_rewrite_core::walkers::rangeTableEntry_used(w, PRS2_NEW_VARNO, 0)
+                });
+                (has_old, has_new)
+            };
+
+            match stmt.event {
+                CmdType::CMD_SELECT => {
+                    if has_old {
+                        return Err(ereport(ERROR)
+                            .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
+                            .errmsg("ON SELECT rule cannot use OLD")
+                            .into_error());
+                    }
+                    if has_new {
+                        return Err(ereport(ERROR)
+                            .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
+                            .errmsg("ON SELECT rule cannot use NEW")
+                            .into_error());
+                    }
+                }
+                CmdType::CMD_UPDATE => { /* both are OK */ }
+                CmdType::CMD_INSERT => {
+                    if has_old {
+                        return Err(ereport(ERROR)
+                            .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
+                            .errmsg("ON INSERT rule cannot use OLD")
+                            .into_error());
+                    }
+                }
+                CmdType::CMD_DELETE => {
+                    if has_new {
+                        return Err(ereport(ERROR)
+                            .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
+                            .errmsg("ON DELETE rule cannot use NEW")
+                            .into_error());
+                    }
+                }
+                ev => {
+                    return Err(ereport(ERROR)
+                        .errmsg(&alloc::format!("unrecognized event type: {}", ev as i32))
+                        .into_error())
+                }
+            }
+
+            // OLD/NEW are not allowed in WITH queries (they would amount to
+            // outer references for the WITH, which we disallow). Check both the
+            // top_subqry and sub_qry CTE lists.
+            {
+                // C wraps each cteList (a List*) as a Node* for the walk; here
+                // we walk the list elements directly, which is equivalent
+                // (query_or_expression_tree_walker over a List visits members).
+                let cte_used = |varno: i32| -> bool {
+                    let top_hit = top_subqry.cteList.iter().any(|c| {
+                        backend_rewrite_core::walkers::rangeTableEntry_used(c, varno, 0)
+                    });
+                    if top_hit {
+                        return true;
+                    }
+                    let sub_qry: &Query = match sub_idx {
+                        Some(i) => match sub_query_at(&top_subqry, i) {
+                            Ok(q) => q,
+                            Err(_) => return false,
+                        },
+                        None => &top_subqry,
+                    };
+                    sub_qry.cteList.iter().any(|c| {
+                        backend_rewrite_core::walkers::rangeTableEntry_used(c, varno, 0)
+                    })
+                };
+                if cte_used(PRS2_OLD_VARNO) {
+                    return Err(ereport(ERROR)
+                        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                        .errmsg("cannot refer to OLD within WITH query")
+                        .into_error());
+                }
+                if cte_used(PRS2_NEW_VARNO) {
+                    return Err(ereport(ERROR)
+                        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                        .errmsg("cannot refer to NEW within WITH query")
+                        .into_error());
+                }
+            }
+
+            // For efficiency's sake, add OLD to the rule action's jointree only
+            // if it was actually referenced. For INSERT, NEW is not a relation;
+            // for UPDATE NEW is another reference to OLD.
+            if has_old || (has_new && stmt.event == CmdType::CMD_UPDATE) {
+                // Mutate the (possibly pushed-down) sub-query's jointree.
+                let sub_qry_mut: &mut Query = match sub_idx {
+                    Some(i) => sub_query_at_mut(&mut top_subqry, i)?,
+                    None => &mut top_subqry,
+                };
+                if sub_qry_mut.setOperations.is_some() {
+                    // Can't-happen case (rejected above), but guard anyway.
+                    return Err(ereport(ERROR)
+                        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                        .errmsg("conditional UNION/INTERSECT/EXCEPT statements are not implemented")
+                        .into_error());
+                }
+                let rtr = Node::mk_range_tbl_ref(
+                    mcx,
+                    types_nodes::rawnodes::RangeTblRef {
+                        rtindex: s_old_rtindex,
+                    },
+                );
+                if let Some(jt) = sub_qry_mut.jointree.as_mut() {
+                    jt.fromlist.push(mcx::alloc_in(mcx, rtr)?);
+                }
+            }
+
+            newactions.push(top_subqry);
+            free_parsestate(sub_pstate)?;
+        }
+
+        actions = newactions;
+    }
+
+    // Silence unused-mut when no actions branch ran.
+    let _ = &mut where_clause;
+
+    free_parsestate(pstate)?;
+
+    // Close relation, but keep the exclusive lock (RAII drop releases the
+    // relcache reference; the lock is retained for DefineQueryRewrite).
+    backend_access_table_table::table_close(rel, NoLock)?;
+
+    Ok((actions, where_clause))
+}
+
+/// `makeAlias("old"/"new", NIL)` — build a bare relation alias.
+fn make_old_new_alias<'mcx>(
+    mcx: Mcx<'mcx>,
+    name: &str,
+) -> PgResult<types_nodes::rawnodes::Alias<'mcx>> {
+    Ok(types_nodes::rawnodes::Alias {
+        aliasname: Some(PgString::from_str_in(name, mcx)?),
+        colnames: PgVec::new_in(mcx),
+    })
+}
+
+/// Resolve the `Query` at sub-query index `i` (a `getInsertSelectQuery`
+/// position): the SELECT pushed into an INSERT's `RTE_SUBQUERY` range-table
+/// entry. `&Query` view.
+fn sub_query_at<'a, 'mcx>(top: &'a Query<'mcx>, rtindex: usize) -> PgResult<&'a Query<'mcx>> {
+    top.rtable
+        .get(rtindex - 1)
+        .and_then(|rte| rte.subquery.as_deref())
+        .ok_or_else(|| {
+            ereport(ERROR)
+                .errmsg("transformRuleStmt: INSERT...SELECT subquery RTE missing")
+                .into_error()
+        })
+}
+
+/// Mutable counterpart of [`sub_query_at`].
+fn sub_query_at_mut<'a, 'mcx>(
+    top: &'a mut Query<'mcx>,
+    rtindex: usize,
+) -> PgResult<&'a mut Query<'mcx>> {
+    top.rtable
+        .get_mut(rtindex - 1)
+        .and_then(|rte| rte.subquery.as_deref_mut())
+        .ok_or_else(|| {
+            ereport(ERROR)
+                .errmsg("transformRuleStmt: INSERT...SELECT subquery RTE missing")
+                .into_error()
+        })
 }
