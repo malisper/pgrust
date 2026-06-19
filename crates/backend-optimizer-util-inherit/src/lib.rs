@@ -559,9 +559,9 @@ fn make_string_node<'mcx>(
 /// Read the `String` value out of a value-node `NodePtr` (the parser's
 /// `makeString` colname). Empty when the node is not a String.
 fn node_string_value(np: &types_nodes::nodes::NodePtr<'_>) -> alloc::string::String {
-    match &**np {
-        types_nodes::nodes::Node::String(s) => s.sval.as_str().to_string(),
-        _ => alloc::string::String::new(),
+    match (**np).as_string() {
+        Some(s) => s.sval.as_str().to_string(),
+        None => alloc::string::String::new(),
     }
 }
 
@@ -906,20 +906,16 @@ fn collect_child_security_quals<'mcx>(
     for qualset_np in rte.securityQuals.iter() {
         // Each securityQuals element is itself a List of Exprs (a qual set).
         let mut set: Vec<Expr> = Vec::new();
-        match &**qualset_np {
-            types_nodes::nodes::Node::List(list) => {
-                for q in list.iter() {
-                    if let Some(e) = (**q).as_expr() {
-                        set.push(e.clone_in(mcx)?);
-                    }
-                }
-            }
-            // Defensive: a bare Expr (shouldn't happen, but mirror clone path).
-            other => {
-                if let Some(e) = other.as_expr() {
+        let qualset_node = &**qualset_np;
+        if let Some(list) = qualset_node.as_list() {
+            for q in list.iter() {
+                if let Some(e) = (**q).as_expr() {
                     set.push(e.clone_in(mcx)?);
                 }
             }
+        } else if let Some(e) = qualset_node.as_expr() {
+            // Defensive: a bare Expr (shouldn't happen, but mirror clone path).
+            set.push(e.clone_in(mcx)?);
         }
         out.push(set);
     }
