@@ -912,6 +912,21 @@ pub fn init_seams() {
         tv.oidCount = 0;
     });
 
+    // `XLOG_NEXTOID` redo (xlog.c:8316-8331): believe the recorded nextOid
+    // exactly and zero the prefetch count, under `OidGenLock`. varsup owns the
+    // `TransamVariables` singleton + lock; the XLOG redo dispatcher reaches them
+    // here.
+    seams::redo_set_next_oid::set(|next_oid| {
+        let guard = acquire(OID_GEN_LOCK, true)?;
+        {
+            let mut tv = transam();
+            tv.nextOid = next_oid;
+            tv.oidCount = 0;
+        }
+        guard.release()?;
+        Ok(())
+    });
+
     seams::get_latest_completed_xid::set(|| transam().latestCompletedXid);
     seams::set_latest_completed_xid::set(|fxid| {
         transam().latestCompletedXid = fxid;

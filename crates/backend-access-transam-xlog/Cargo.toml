@@ -49,6 +49,8 @@ backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams
 backend-storage-file-reinit = { path = "../backend-storage-file-reinit" }
 backend-access-transam-twophase-seams = { path = "../backend-access-transam-twophase-seams" }
 backend-access-transam-varsup-seams = { path = "../backend-access-transam-varsup-seams" }
+backend-access-transam-xlogutils = { path = "../backend-access-transam-xlogutils" }
+backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
 backend-access-transam-timeline-seams = { path = "../backend-access-transam-timeline-seams" }
 backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }
 backend-replication-logical-origin-seams = { path = "../backend-replication-logical-origin-seams" }

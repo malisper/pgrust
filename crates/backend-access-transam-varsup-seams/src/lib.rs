@@ -146,6 +146,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `XLOG_NEXTOID` redo (xlog.c:8316-8331 in `xlog_redo`):
+    /// `TransamVariables->nextOid = nextOid; TransamVariables->oidCount = 0;`
+    /// under `OidGenLock`. The record carries the recorded `nextOid` exactly;
+    /// replay believes it (no max-with-current, to survive OID wraparound).
+    /// varsup owns the `TransamVariables` singleton + `OidGenLock`, so the XLOG
+    /// redo dispatcher reaches the counter through this owner seam.
+    pub fn redo_set_next_oid(next_oid: Oid) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `TransamVariables->xactCompletionCount++` — bump the completed-transaction
     /// generation counter (procarray.c's end-of-xact / clear-transaction paths,
     /// under `ProcArrayLock`). Owned in varsup; plain shared-memory increment.

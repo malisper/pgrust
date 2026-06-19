@@ -19,6 +19,7 @@
 //! `GetCurrentReplayRecPtr` will be consulted when that subsystem lands.
 
 use backend_utils_error::PgResult;
+use types_core::Oid;
 use types_wal::rmgr::XLogReaderState;
 use types_wal::wal::XLR_INFO_MASK;
 
@@ -58,8 +59,21 @@ pub fn xlog_redo(record: &mut XLogReaderState<'_>) -> PgResult<()> {
         & !XLR_INFO_MASK;
 
     if info == XLOG_NEXTOID {
-        // TransamVariables->nextOid = nextOid; oidCount = 0  (under OidGenLock)
-        ext::xlog_redo_nextoid(record)
+        // memcpy(&nextOid, XLogRecGetData(record), sizeof(Oid)); then
+        // TransamVariables->nextOid = nextOid; oidCount = 0  (under OidGenLock).
+        let data = record
+            .record
+            .as_ref()
+            .expect("xlog_redo dispatched on a decoded record")
+            .data();
+        // `Oid` is a 4-byte unsigned; the record's main data is exactly the OID.
+        let next_oid = Oid::from_ne_bytes(
+            data.get(..4)
+                .expect("XLOG_NEXTOID record carries a 4-byte Oid")
+                .try_into()
+                .expect("4-byte slice"),
+        );
+        backend_access_transam_varsup_seams::redo_set_next_oid::call(next_oid)
     } else if info == XLOG_CHECKPOINT_SHUTDOWN || info == XLOG_CHECKPOINT_ONLINE {
         // counters from the CheckPoint image; ControlFile + XLogCtl shmem;
         // ThisTimeLineID == replayTLI check (GetCurrentReplayRecPtr);
@@ -79,8 +93,46 @@ pub fn xlog_redo(record: &mut XLogReaderState<'_>) -> PgResult<()> {
         // nothing to do here, handled in xlogrecovery.c
         Ok(())
     } else if info == XLOG_FPI || info == XLOG_FPI_FOR_HINT {
-        // per-block XLogReadBufferForRedo -> BLK_RESTORED -> UnlockReleaseBuffer.
-        ext::xlog_redo_fpi(record, info == XLOG_FPI_FOR_HINT)
+        // XLOG_FPI / XLOG_FPI_FOR_HINT (xlog.c:8542-8576): the record carries
+        // only block references, each with a full-page image. Replay each by
+        // re-reading the buffer (XLogReadBufferForRedo, which restores the FPI),
+        // asserting BLK_RESTORED, then UnlockReleaseBuffer. XLOG_FPI_FOR_HINT
+        // records may legally carry no image (full_page_writes was off) — in
+        // that case there is nothing to do for that block.
+        let max_block_id = record
+            .record
+            .as_ref()
+            .expect("xlog_redo dispatched on a decoded record")
+            .max_block_id();
+
+        for block_id in 0..=max_block_id {
+            let block_id = block_id as u8;
+            let has_image = record
+                .record
+                .as_ref()
+                .expect("decoded record")
+                .has_block_image(block_id as usize);
+            if !has_image {
+                if info == XLOG_FPI {
+                    return Err(backend_utils_error::PgError::new(
+                        types_error::ERROR,
+                        "XLOG_FPI record did not contain a full-page image",
+                    ));
+                }
+                continue;
+            }
+
+            let (action, buffer) =
+                backend_access_transam_xlogutils::XLogReadBufferForRedo(record, block_id)?;
+            if action != types_wal::XLogRedoAction::BlkRestored {
+                return Err(backend_utils_error::PgError::new(
+                    types_error::ERROR,
+                    "unexpected XLogReadBufferForRedo result when restoring backup block",
+                ));
+            }
+            backend_storage_buffer_bufmgr_seams::unlock_release_buffer::call(buffer);
+        }
+        Ok(())
     } else if info == XLOG_BACKUP_END {
         // nothing to do here, handled in xlogrecovery_redo()
         Ok(())
@@ -118,11 +170,6 @@ mod ext {
     }
 
     deferred! {
-        /// `XLOG_NEXTOID`: `memcpy(&nextOid, XLogRecGetData(record), ...)` then
-        /// `TransamVariables->nextOid` under OidGenLock.
-        pub fn xlog_redo_nextoid(record: &mut XLogReaderState<'_>) -> PgResult<()>;
-        /// `XLOG_FPI` / `XLOG_FPI_FOR_HINT`: restore the carried full-page image.
-        pub fn xlog_redo_fpi(record: &mut XLogReaderState<'_>, for_hint: bool) -> PgResult<()>;
         /// The control-file / XLogCtl-shmem / multixact arms. These read the
         /// replay timeline internally via `GetCurrentReplayRecPtr` (ambient
         /// `XLogCtl` recovery state owned by xlogrecovery), exactly as the C
