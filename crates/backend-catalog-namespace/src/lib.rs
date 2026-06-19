@@ -136,6 +136,9 @@ pub fn init_seams() {
     });
     backend_catalog_namespace_seams::get_namespace_oid::set(crate::get_namespace_oid);
     backend_catalog_namespace_seams::range_var_get_relid::set(crate::RangeVarGetRelid);
+    backend_commands_vacuum_seams::range_var_get_relid_extended::set(
+        seam_vacuum_range_var_get_relid_extended,
+    );
     backend_catalog_namespace_seams::range_var_get_relid_maintains_table::set(
         crate::RangeVarGetRelidMaintainsTable,
     );
@@ -734,6 +737,24 @@ fn seam_range_var_get_relid_from_text(
         parts.iter().map(|p| Some(p.as_str().to_string())).collect();
     let relation = makeRangeVarFromNameList(&names)?;
     RangeVarGetRelid(mcx, &relation, lockmode, missing_ok)
+}
+
+/// `RangeVarGetRelidExtended(relation, lockmode, flags, NULL, NULL)` — the
+/// no-callback form used by VACUUM/ANALYZE relation expansion
+/// (commands/vacuum.c `expand_vacuum_rel`). The vacuum-seams declaration drops
+/// the caller's `Mcx` (a scratch context suffices: the only outputs are the
+/// by-value `Oid` and the lock taken, neither context-bound) and the callback
+/// (NULL on this path).
+fn seam_vacuum_range_var_get_relid_extended(
+    relation: types_nodes::rawnodes::RangeVar<'_>,
+    lockmode: i32,
+    rvr_opts: i32,
+) -> PgResult<Oid> {
+    let scratch = mcx::MemoryContext::new("vacuum RangeVarGetRelidExtended");
+    let rv = rangevar_from_node(&relation);
+    // rvr_opts carries the RVR_* flag bits (non-negative); the owner signature
+    // types `flags` as u32.
+    RangeVarGetRelidExtended(scratch.mcx(), &rv, lockmode, rvr_opts as u32, None)
 }
 
 /// `RangeVarGetAndCheckCreationNamespace(relation, NoLock, &existing_relid)`

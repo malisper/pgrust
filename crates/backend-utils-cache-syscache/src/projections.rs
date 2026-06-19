@@ -3478,6 +3478,47 @@ pub(crate) fn search_pg_class_full_form<'mcx>(
     Ok(Some(form))
 }
 
+/// `SearchSysCache1(RELOID, relid)` + `GETSTRUCT` projected to the cross-unit
+/// trimmed `types_rel::FormData_pg_class`. Backs the vacuum/analyze
+/// `search_syscache_class` seam (`vacuum_open_relation` / `vac_update_relstats`
+/// read the relkind/relpersistence/relisshared/relfrozenxid fields off
+/// `rel->rd_rel`). `Ok(None)` on a cache miss.
+pub(crate) fn search_syscache_class<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+) -> PgResult<Option<types_rel::FormData_pg_class<'mcx>>> {
+    let tuple = SearchSysCache1(mcx, RELOID, SysCacheKey::Value(KeyDatum::from_oid(relid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let form = types_rel::FormData_pg_class {
+        relname: getattr_name(mcx, RELOID, &tup, Anum_pg_class_relname)?,
+        relnamespace: getattr_oid(mcx, RELOID, &tup, Anum_pg_class_relnamespace)?,
+        relowner: getattr_oid(mcx, RELOID, &tup, Anum_pg_class_relowner)?,
+        relrowsecurity: getattr_bool(mcx, RELOID, &tup, Anum_pg_class_relrowsecurity)?,
+        relpages: getattr_i32(mcx, RELOID, &tup, Anum_pg_class_relpages)?,
+        reltuples: getattr_f32(mcx, RELOID, &tup, Anum_pg_class_reltuples)?,
+        relallvisible: getattr_i32(mcx, RELOID, &tup, Anum_pg_class_relallvisible)?,
+        reltoastrelid: getattr_oid(mcx, RELOID, &tup, Anum_pg_class_reltoastrelid)?,
+        reltablespace: getattr_oid(mcx, RELOID, &tup, Anum_pg_class_reltablespace)?,
+        relfilenode: getattr_oid(mcx, RELOID, &tup, Anum_pg_class_relfilenode)?,
+        relisshared: getattr_bool(mcx, RELOID, &tup, Anum_pg_class_relisshared)?,
+        relhasindex: getattr_bool(mcx, RELOID, &tup, Anum_pg_class_relhasindex)?,
+        relhassubclass: getattr_bool(mcx, RELOID, &tup, Anum_pg_class_relhassubclass)?,
+        relpersistence: getattr_char(mcx, RELOID, &tup, Anum_pg_class_relpersistence)? as u8,
+        relkind: getattr_char(mcx, RELOID, &tup, Anum_pg_class_relkind)? as u8,
+        reltype: getattr_oid(mcx, RELOID, &tup, Anum_pg_class_reltype)?,
+        relam: getattr_oid(mcx, RELOID, &tup, Anum_pg_class_relam)?,
+        relispopulated: getattr_bool(mcx, RELOID, &tup, Anum_pg_class_relispopulated)?,
+        relreplident: getattr_char(mcx, RELOID, &tup, Anum_pg_class_relreplident)? as u8,
+        relispartition: getattr_bool(mcx, RELOID, &tup, Anum_pg_class_relispartition)?,
+        relfrozenxid: getattr_u32(mcx, RELOID, &tup, Anum_pg_class_relfrozenxid)?,
+        relminmxid: getattr_u32(mcx, RELOID, &tup, Anum_pg_class_relminmxid)?,
+    };
+    ReleaseSysCache(tup);
+    Ok(Some(form))
+}
+
 /// `SearchSysCacheCopy1(RELOID, relid)` + `GETSTRUCT` → the writable
 /// `types_cluster::PgClassForm` and the held tuple's heap TID (`tup->t_self`).
 /// `Ok(None)` on a cache miss. Backs the `search_syscache_copy_pg_class` seam

@@ -911,6 +911,7 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::oper_catlist3::set(projections::oper_catlist3);
     backend_utils_cache_syscache_seams::oper_catlist1::set(projections::oper_catlist1);
     backend_utils_cache_syscache_seams::oper_row_by_oid::set(projections::oper_row_by_oid);
+    backend_commands_vacuum_seams::search_syscache_class::set(projections::search_syscache_class);
     backend_optimizer_util_clauses_seams::get_func_form::set(projections::get_func_form);
     backend_optimizer_util_clauses_seams::fetch_function_defaults::set(
         projections::fetch_function_defaults,

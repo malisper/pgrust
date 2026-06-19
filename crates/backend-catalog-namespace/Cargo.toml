@@ -24,6 +24,7 @@ backend-catalog-catalog-seams = { path = "../backend-catalog-catalog-seams" }
 backend-catalog-dependency-seams = { path = "../backend-catalog-dependency-seams" }
 backend-commands-tablecmds-seams = { path = "../backend-commands-tablecmds-seams" }
 backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }
+backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }
 backend-catalog-objectaccess-seams = { path = "../backend-catalog-objectaccess-seams" }
 backend-catalog-objectaddress-seams = { path = "../backend-catalog-objectaddress-seams" }
 backend-catalog-pg-namespace-seams = { path = "../backend-catalog-pg-namespace-seams" }

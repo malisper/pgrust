@@ -31,6 +31,7 @@ backend-utils-cache-catcache-seams = { path = "../backend-utils-cache-catcache-s
 backend-utils-cache-inval-seams = { path = "../backend-utils-cache-inval-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-optimizer-util-clauses-seams = { path = "../backend-optimizer-util-clauses-seams" }
+backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
 backend-optimizer-prep-prepagg-seams = { path = "../backend-optimizer-prep-prepagg-seams" }
