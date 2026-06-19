@@ -115,8 +115,6 @@ pub fn ParseFuncOrColumn<'mcx>(
         }
     }
 
-    let first_arg: Option<Expr> = fargs.first().cloned();
-
     // Decide whether it's legitimate to consider the construct a column
     // projection.
     let could_be_projection = nargs == 1
@@ -131,10 +129,33 @@ pub fn ParseFuncOrColumn<'mcx>(
         && funcname.len() == 1
         && (actual_arg_types[0] == RECORDOID || ISCOMPLEX(actual_arg_types[0])?);
 
+    // C: `first_arg = linitial(fargs)` — a bare pointer alias, consumed only on
+    // the column-projection path, which requires a composite/RECORD argument
+    // (`could_be_projection`). We materialize an owned copy only in that case,
+    // via the sanctioned deep-copy `Expr::clone_in`: a derived `.clone()` would
+    // panic on a `SubLink`/`SubPlan` argument whose embedded sub-tree is
+    // context-allocated. For a scalar argument no copy is taken at all, so the
+    // panicking `Clone` is never reached. Materialized here (before `fargs` is
+    // re-ordered/mutated below) so the borrow ends immediately.
+    let first_arg: Option<Expr> = if could_be_projection {
+        match fargs.first() {
+            Some(e) => Some(e.clone_in(mcx)?),
+            None => None,
+        }
+    } else {
+        None
+    };
+
     // If it's column syntax, check for column projection case first.
     if could_be_projection && is_column {
-        let retval =
-            ParseComplexProjection(pstate, funcname[0].as_str(), first_arg.clone(), location)?;
+        // Deep-copy again (`clone_in`) rather than move: the disjoint NotFound
+        // path below also consumes `first_arg`, and the borrow checker can't see
+        // the two are mutually exclusive.
+        let fa = match &first_arg {
+            Some(e) => Some(e.clone_in(mcx)?),
+            None => None,
+        };
+        let retval = ParseComplexProjection(pstate, funcname[0].as_str(), fa, location)?;
         if retval.is_some() {
             return Ok(retval);
         }

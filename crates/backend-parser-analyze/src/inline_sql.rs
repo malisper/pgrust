@@ -209,7 +209,7 @@ pub fn inline_sql_function<'mcx>(
 
     // ---- substitute parameters + usecount checks (clauses.c:4802) ---------
     let mut usecounts = vec![0i32; form.pronargs as usize];
-    let newexpr = substitute_actual_parameters(newexpr, args, &mut usecounts)?;
+    let newexpr = substitute_actual_parameters(mcx, newexpr, args, &mut usecounts)?;
 
     for (i, param) in args.iter().enumerate() {
         let count = usecounts.get(i).copied().unwrap_or(0);
@@ -306,7 +306,8 @@ fn query_clone_from_node<'mcx>(
 
 /// `substitute_actual_parameters` (clauses.c:4909): replace each `PARAM_EXTERN`
 /// `Param` by the actual argument expression, counting uses.
-fn substitute_actual_parameters(
+fn substitute_actual_parameters<'mcx>(
+    mcx: Mcx<'mcx>,
     node: Expr,
     args: &[Expr],
     usecounts: &mut [i32],
@@ -325,7 +326,11 @@ fn substitute_actual_parameters(
             )));
         }
         usecounts[(id - 1) as usize] += 1;
-        return Ok(args[(id - 1) as usize].clone());
+        // C: copyObject(param) — the actual argument expression may embed a
+        // `SubLink` (e.g. a sub-SELECT argument) whose `subselect` Query carries
+        // context-allocated children, so a plain derived `.clone()` panics. The
+        // sanctioned deep-copy into the planner arena is `Expr::clone_in`.
+        return args[(id - 1) as usize].clone_in(mcx);
     }
     // expression_tree_mutator over children; thread the (rare) error out.
     let mut err: Option<PgError> = None;
@@ -333,7 +338,7 @@ fn substitute_actual_parameters(
         if err.is_some() {
             return Expr::Const(Const::default());
         }
-        match substitute_actual_parameters(child, args, usecounts) {
+        match substitute_actual_parameters(mcx, child, args, usecounts) {
             Ok(n) => n,
             Err(e) => {
                 err = Some(e);
