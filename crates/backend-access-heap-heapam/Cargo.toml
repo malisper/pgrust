@@ -60,6 +60,7 @@ backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-sea
 # replica-identity bitmap (relcache), combocid AdjustCmax/SetCmax.
 backend-access-heap-hio-seams = { path = "../backend-access-heap-hio-seams" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
+backend-nodes-core-tidbitmap-seams = { path = "../backend-nodes-core-tidbitmap-seams" }
 types-nodes = { path = "../types-nodes" }
 types-datum = { path = "../types-datum" }
 # F3 UPDATE: per-attribute binary equality (datumIsEqual) for

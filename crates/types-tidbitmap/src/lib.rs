@@ -80,6 +80,27 @@ pub struct TBMIterator {
     pub shared_iterator: Option<Box<TBMSharedIterator>>,
 }
 
+/// The decoded result of one `tbm_iterate` step, as the bitmap-scan table-AM
+/// (`heapam_scan_bitmap_next_tuple` / `BitmapHeapScanNextBlock`) consumes it.
+/// Combines `tbm_iterate` and `tbm_extract_page_tuple`: a `TBMIterateResult`
+/// (`nodes/tidbitmap.h`, owned by `tidbitmap.c`) plus, for an exact (non-lossy)
+/// page, the extracted per-tuple `OffsetNumber`s. The real `TBMIterateResult`
+/// stays private to `tidbitmap.c`; the table-AM only needs these decoded
+/// fields, so the seam hands them back as a plain value.
+#[derive(Clone, Debug, Default)]
+pub struct TBMIterateOutcome {
+    /// `TBMIterateResult.blockno` — page containing tuples from the bitmap.
+    pub blockno: u32,
+    /// `TBMIterateResult.lossy` — whether the bitmap is lossy for this page.
+    pub lossy: bool,
+    /// `TBMIterateResult.recheck` — whether to recheck the qual conditions.
+    pub recheck: bool,
+    /// `tbm_extract_page_tuple(tbmres, offsets, ...)` for an exact page — the
+    /// `OffsetNumber`s of the candidate tuples on the page. Empty for a lossy
+    /// page (the AM scans every line pointer instead).
+    pub offsets: alloc::vec::Vec<u16>,
+}
+
 impl TBMIterator {
     /// `tbm_exhausted(iterator)` (`nodes/tidbitmap.h`): `!iterator->i.<ptr>`.
     /// After `tbm_end_iterate` both pointers are NULL, so checking either is

@@ -1459,6 +1459,7 @@ dependencies = [
  "backend-catalog-catalog-seams",
  "backend-executor-execTuples-seams",
  "backend-nodes-core-seams",
+ "backend-nodes-core-tidbitmap-seams",
  "backend-rmgrdesc-next",
  "backend-storage-buffer-bufmgr-seams",
  "backend-storage-ipc-procarray-seams",

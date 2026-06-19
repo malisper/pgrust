@@ -36,7 +36,7 @@ use types_snapshot::snapshot::IsMVCCSnapshot;
 use types_tableam::relscan::{
     ParallelBlockTableScanExt, ParallelBlockTableScanWorkerData, ParallelTableScanDescData,
     TableScanDesc, TableScanDescData, SO_ALLOW_PAGEMODE, SO_ALLOW_STRAT, SO_ALLOW_SYNC,
-    SO_TEMP_SNAPSHOT, SO_TYPE_ANALYZE, SO_TYPE_SEQSCAN, SO_TYPE_TIDSCAN,
+    SO_TEMP_SNAPSHOT, SO_TYPE_ANALYZE, SO_TYPE_BITMAPSCAN, SO_TYPE_SEQSCAN, SO_TYPE_TIDSCAN,
 };
 use types_tableam::scankey::ScanKeyData;
 use types_tableam::tableam::{
@@ -75,6 +75,10 @@ use backend_utils_cache_relcache_seams as relcache;
 /// DESIGN_DEBT.md; they are tracked in `seams-init`'s
 /// `CONTRACT_RECONCILE_PENDING`.
 pub fn init_seams() {
+    backend_access_table_tableam_bm_seams::table_beginscan_bm::set(table_beginscan_bm);
+    backend_access_table_tableam_bm_seams::table_scan_bitmap_next_tuple::set(
+        table_scan_bitmap_next_tuple,
+    );
     backend_access_table_tableam_bm_seams::table_endscan::set(table_endscan_bm);
     backend_access_table_tableam_bm_seams::table_rescan::set(table_rescan_bm);
 
@@ -690,6 +694,39 @@ pub fn table_beginscan_tid<'mcx>(
 ) -> PgResult<TableScanDesc<'mcx>> {
     let flags = SO_TYPE_TIDSCAN;
     (am(rel).scan_begin)(mcx, rel, snapshot, 0, mcx::PgVec::new_in(mcx), None, flags)
+}
+
+/// `table_beginscan_bm(rel, snapshot, nkeys, key)` (tableam.h inline) — set up a
+/// `TableScanDesc` for a bitmap heap scan (`SO_TYPE_BITMAPSCAN |
+/// SO_ALLOW_PAGEMODE`). The executor (`BitmapTableScanSetup`) passes no scan
+/// keys; the snapshot crosses as a shared `Rc<SnapshotData>`.
+pub fn table_beginscan_bm<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: Relation<'mcx>,
+    snapshot: Option<std::rc::Rc<types_snapshot::SnapshotData>>,
+) -> PgResult<TableScanDesc<'mcx>> {
+    let flags = SO_TYPE_BITMAPSCAN | SO_ALLOW_PAGEMODE;
+    (am(&rel).scan_begin)(
+        mcx,
+        &rel,
+        snapshot.map(|s| (*s).clone()),
+        0,
+        mcx::PgVec::new_in(mcx),
+        None,
+        flags,
+    )
+}
+
+/// `table_scan_bitmap_next_tuple(scan, slot, &recheck, &lossy_pages,
+/// &exact_pages)` (tableam.h inline) — fetch the next visible tuple of a bitmap
+/// heap scan into `slot`, dispatching to the AM's `scan_bitmap_next_tuple`.
+pub fn table_scan_bitmap_next_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut TableScanDescData<'mcx>,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<Option<(bool, u64, u64)>> {
+    let routine = am(&scan.rs_rd);
+    (routine.scan_bitmap_next_tuple)(mcx, scan, slot)
 }
 
 /// `table_endscan(scan)` (tableam.h inline) — end a relation scan.

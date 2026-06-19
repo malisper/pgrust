@@ -1968,6 +1968,35 @@ fn provide_tbm_union(
     tbm_union(a, b)
 }
 
+/// Seam provider for `tbm_iterate(iterator)`: advance the iterator one step and
+/// decode the result (combining `tbm_iterate` with `tbm_extract_page_tuple` for
+/// an exact page) into the `TBMIterateOutcome` the bitmap-scan table-AM
+/// consumes. Returns `None` when the bitmap is exhausted (C's `blockno ==
+/// InvalidBlockNumber`).
+fn provide_tbm_iterate(
+    iterator: &mut types_tidbitmap::TBMIterator,
+) -> PgResult<Option<types_tidbitmap::TBMIterateOutcome>> {
+    let mut tbmres = TBMIterateResult::default();
+    if !tbm_iterate(iterator, &mut tbmres)? {
+        return Ok(None);
+    }
+    // The exact-page tuple offsets (lossy pages carry none; the AM scans every
+    // line pointer itself).
+    let offsets = if tbmres.lossy {
+        Vec::new()
+    } else {
+        let mut buf = [0u16; TBM_MAX_TUPLES_PER_PAGE];
+        let n = tbm_extract_page_tuple(&tbmres, &mut buf);
+        buf[..n as usize].to_vec()
+    };
+    Ok(Some(types_tidbitmap::TBMIterateOutcome {
+        blockno: tbmres.blockno,
+        lossy: tbmres.lossy,
+        recheck: tbmres.recheck,
+        offsets,
+    }))
+}
+
 /// Install this family's inward seams. Called from
 /// [`crate::init_seams`] once the family is filled.
 pub fn init_seams() {
@@ -1981,6 +2010,7 @@ pub fn init_seams() {
         provide_tbm_prepare_shared_iterate,
     );
     backend_nodes_core_tidbitmap_seams::tbm_begin_iterate::set(provide_tbm_begin_iterate);
+    backend_nodes_core_tidbitmap_seams::tbm_iterate::set(provide_tbm_iterate);
     backend_nodes_core_tidbitmap_seams::tbm_end_iterate::set(provide_tbm_end_iterate);
     backend_nodes_core_tidbitmap_seams::tbm_free::set(provide_tbm_free);
     backend_nodes_core_tidbitmap_seams::tbm_free_shared_area::set(provide_tbm_free_shared_area);

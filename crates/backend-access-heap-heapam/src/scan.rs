@@ -82,6 +82,8 @@ use backend_utils_time_snapmgr_seams as snapmgr_seam;
 use backend_access_table_tableam as tableam;
 
 use backend_access_heap_heapam_visibility::HeapTupleSatisfiesVisibility;
+use backend_nodes_core_tidbitmap_seams as tidbitmap_seam;
+use crate::fetch;
 
 /// `OffsetNumberNext(offsetNumber)` (`storage/off.h`).
 #[inline]
@@ -1165,15 +1167,10 @@ pub fn heap_beginscan<'mcx>(
 
     initscan(mcx, &mut sscan, false)?;
 
-    // C sets up a ReadStream here for seqscan / tidrangescan; the inline
-    // read-stream collapse needs no separate stream object. A bitmap-scan stream
-    // is not part of this sequential-scan core.
-    if (sscan.rs_flags & SO_TYPE_BITMAPSCAN) != 0 {
-        return Err(ereport(ERROR)
-            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-            .errmsg_internal("bitmap heap scan is not part of the heap sequential-scan core")
-            .into_error());
-    }
+    // C sets up a ReadStream here for seqscan / tidrangescan / bitmap heap
+    // scans; the inline read-stream collapse needs no separate stream object —
+    // the bitmap scan pulls its blocks directly off `rs_base.rs_tbmiterator` in
+    // BitmapHeapScanNextBlock, exactly as the seqscan core reads blocks inline.
 
     Ok(sscan)
 }
@@ -1367,6 +1364,243 @@ pub fn heap_getnextslot<'mcx>(
         .clone_in(mcx)?;
     exec_store_buffer_heap_tuple(tuple, slot, cbuf)?;
     Ok(true)
+}
+
+// ===========================================================================
+// Bitmap heap scan (heapam_handler.c): BitmapHeapScanNextBlock +
+// heapam_scan_bitmap_next_tuple.
+// ===========================================================================
+
+/// `BitmapHeapScanNextBlock(scan, &recheck, &lossy_pages, &exact_pages)`
+/// (heapam_handler.c) — pull the next block off the scan's `rs_tbmiterator`,
+/// fill `rs_vistuples[]` with the visible candidate offsets on that page, and
+/// leave it the scan's current page. Returns `true` when a block was found (the
+/// page may yield zero visible tuples; the caller loops back), `false` when the
+/// bitmap and relation are exhausted.
+///
+/// C drives block selection through `read_stream_next_buffer` over a read
+/// stream whose callback (`bitmapheap_stream_read_next`) pulls from
+/// `rs_tbmiterator`; the inline read-stream collapse here calls `tbm_iterate`
+/// directly and `read_buffer`s the block, exactly as the seqscan core reads its
+/// blocks inline (see the module docs).
+fn BitmapHeapScanNextBlock<'mcx>(
+    mcx: Mcx<'mcx>,
+    sscan: &mut TableScanDescData<'mcx>,
+    recheck: &mut bool,
+    lossy_pages: &mut u64,
+    exact_pages: &mut u64,
+) -> PgResult<bool> {
+    debug_assert!((sscan.rs_flags & SO_TYPE_BITMAPSCAN) != 0);
+
+    {
+        let scan = heap_scan(sscan);
+        scan.rs_cindex = 0;
+        scan.rs_ntuples = 0;
+
+        // Release buffer containing previous block.
+        if buffer_is_valid(scan.rs_cbuf) {
+            bufmgr_seam::release_buffer::call(scan.rs_cbuf);
+            scan.rs_cbuf = InvalidBuffer;
+        }
+    }
+
+    // hscan->rs_cbuf = read_stream_next_buffer(...): pull the next TBM page and
+    // pin its buffer. `tbm_iterate` returns None when the bitmap is exhausted.
+    let outcome = tidbitmap_seam::tbm_iterate::call(&mut sscan.rs_tbmiterator)?;
+    let tbmres = match outcome {
+        Some(o) => o,
+        None => {
+            // the bitmap is exhausted
+            return Ok(false);
+        }
+    };
+
+    debug_assert!(tbmres.blockno != InvalidBlockNumber);
+
+    let block = tbmres.blockno;
+    let buffer = bufmgr_seam::read_buffer::call(&sscan.rs_rd, block)?;
+    {
+        let scan = heap_scan(sscan);
+        scan.rs_cbuf = buffer;
+        scan.rs_cblock = block;
+    }
+    debug_assert!(bufmgr_seam::buffer_get_block_number::call(buffer) == block);
+
+    *recheck = tbmres.recheck;
+
+    let relid = sscan.rs_rd.rd_id;
+
+    // Prune and repair fragmentation for the whole page, if possible.
+    prune_seam::heap_page_prune_opt::call(mcx, &sscan.rs_rd, buffer)?;
+
+    // We must hold share lock on the buffer content while examining tuple
+    // visibility. Afterwards, the tuples found visible are good as long as we
+    // hold the buffer pin.
+    bufmgr_seam::lock_buffer::call(buffer, BUFFER_LOCK_SHARE)?;
+
+    let mut ntup: u32 = 0;
+
+    if !tbmres.lossy {
+        // Non-lossy: walk the offsets listed in tbmres, following any HOT chain
+        // starting at each. `heap_hot_search_buffer` returns the live chain
+        // member's tid; record its offset.
+        let mut snapshot = sscan
+            .rs_snapshot
+            .clone()
+            .expect("bitmap heap scan requires an MVCC snapshot");
+        for &offnum in &tbmres.offsets {
+            let mut tid = ItemPointerData::default();
+            backend_storage_page::ItemPointerSet(&mut tid, block, offnum);
+            let res = fetch::heap_hot_search_buffer(
+                mcx,
+                tid,
+                &sscan.rs_rd,
+                buffer,
+                &mut snapshot,
+                false,
+                true,
+            )?;
+            if res.found {
+                let off = backend_storage_page::ItemPointerGetOffsetNumber(&res.tid);
+                heap_scan(sscan).rs_vistuples[ntup as usize] = off;
+                ntup += 1;
+            }
+        }
+    } else {
+        // Lossy: examine each line pointer on the page. We can ignore HOT
+        // chains since we recheck each tuple anyway. The page-bytes closure does
+        // the visibility test (and the serializable conflict-out check, which
+        // only needs the tuple + snapshot); the predicate-lock TID calls for
+        // visible tuples are deferred to after the closure (they need the live
+        // snapshot but no page access).
+        let mut snapshot = sscan
+            .rs_snapshot
+            .clone()
+            .expect("bitmap heap scan requires an MVCC snapshot");
+        let mut visible: std::vec::Vec<(
+            OffsetNumber,
+            ItemPointerData,
+            types_core::primitive::TransactionId,
+        )> = std::vec::Vec::new();
+        bufmgr_seam::with_buffer_page::call(buffer, &mut |page_bytes| {
+            let page = PageRef::new(page_bytes)?;
+            let maxoff = PageGetMaxOffsetNumber(&page);
+            let mut offnum: OffsetNumber = FirstOffsetNumber;
+            while offnum <= maxoff {
+                let lp = PageGetItemId(&page, offnum)?;
+                if !ItemIdIsNormal(&lp) {
+                    offnum = OffsetNumberNext(offnum);
+                    continue;
+                }
+                let item = PageGetItem(&page, &lp)?;
+                let mut loctup = FormedTuple::read_on_page_full(
+                    mcx,
+                    &item[..ItemIdGetLength(&lp) as usize],
+                    block,
+                    offnum,
+                    relid,
+                )?;
+                let valid = HeapTupleSatisfiesVisibility(&mut loctup.tuple, &mut snapshot, buffer)?;
+                if valid {
+                    let header = loctup
+                        .tuple
+                        .t_data
+                        .as_ref()
+                        .expect("bitmap lossy scan: normal line-pointer tuple has no t_data");
+                    let xmin = types_tuple::heaptuple::HeapTupleHeaderGetXmin(header);
+                    visible.push((offnum, loctup.tuple.t_self, xmin));
+                }
+                predicate_seam::heap_check_for_serializable_conflict_out::call(
+                    valid, relid, &loctup.tuple, buffer, &mut snapshot,
+                )?;
+                offnum = OffsetNumberNext(offnum);
+            }
+            Ok(())
+        })?;
+        for (offnum, tid, xmin) in visible {
+            heap_scan(sscan).rs_vistuples[ntup as usize] = offnum;
+            ntup += 1;
+            predicate_seam::predicate_lock_tid::call(relid, tid, &snapshot, xmin)?;
+        }
+    }
+
+    bufmgr_seam::lock_buffer::call(buffer, BUFFER_LOCK_UNLOCK)?;
+
+    debug_assert!(ntup <= MaxHeapTuplesPerPage as u32);
+    heap_scan(sscan).rs_ntuples = ntup;
+
+    if tbmres.lossy {
+        *lossy_pages += 1;
+    } else {
+        *exact_pages += 1;
+    }
+
+    // Return true: a valid block was found and the bitmap is not exhausted. If
+    // there are no visible tuples on this page, rs_ntuples == 0 and
+    // heapam_scan_bitmap_next_tuple loops back here to advance to the next block.
+    Ok(true)
+}
+
+/// `heapam_scan_bitmap_next_tuple(scan, slot, &recheck, &lossy_pages,
+/// &exact_pages)` (heapam_handler.c) — store the next visible tuple of a bitmap
+/// heap scan into `slot`. Advances over the current page's `rs_vistuples[]`,
+/// calling [`BitmapHeapScanNextBlock`] when the page is exhausted. Returns
+/// `Some((recheck, lossy_inc, exact_inc))` when a tuple was stored, `None` at
+/// end of scan.
+pub fn heapam_scan_bitmap_next_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    sscan: &mut TableScanDescData<'mcx>,
+    slot: &mut types_nodes::tuptable::SlotData<'mcx>,
+) -> PgResult<Option<(bool, u64, u64)>> {
+    let mut recheck = false;
+    let mut lossy_pages: u64 = 0;
+    let mut exact_pages: u64 = 0;
+
+    // Out of range? If so, advance to the next block (or exhaust the bitmap).
+    while heap_scan(sscan).rs_cindex >= heap_scan(sscan).rs_ntuples {
+        if !BitmapHeapScanNextBlock(mcx, sscan, &mut recheck, &mut lossy_pages, &mut exact_pages)? {
+            return Ok(None);
+        }
+    }
+
+    let relid = sscan.rs_rd.rd_id;
+    let (targoffset, block, buffer) = {
+        let scan = heap_scan(sscan);
+        let targoffset = scan.rs_vistuples[scan.rs_cindex as usize];
+        (targoffset, scan.rs_cblock, scan.rs_cbuf)
+    };
+
+    // Materialize the on-page tuple at `targoffset` (C aliases t_data into the
+    // pinned page; the owned model reads the full image under the held pin).
+    let mut tuple_holder: Option<FormedTuple<'mcx>> = None;
+    bufmgr_seam::with_buffer_page::call(buffer, &mut |page_bytes| {
+        let page = PageRef::new(page_bytes)?;
+        let lp = PageGetItemId(&page, targoffset)?;
+        debug_assert!(ItemIdIsNormal(&lp));
+        let item = PageGetItem(&page, &lp)?;
+        tuple_holder = Some(FormedTuple::read_on_page_full(
+            mcx,
+            &item[..ItemIdGetLength(&lp) as usize],
+            block,
+            targoffset,
+            relid,
+        )?);
+        Ok(())
+    })?;
+    let tuple = tuple_holder.expect("bitmap scan: tuple materialization closure did not run");
+
+    pgstat_seam::pgstat_count_heap_fetch::call(
+        relid,
+        sscan.rs_rd.rd_rel.relisshared,
+        sscan.rs_rd.pgstat_enabled,
+    );
+
+    // Set up the result slot to point to this tuple (acquires a pin on buffer).
+    exec_store_buffer_heap_tuple(tuple, slot, buffer)?;
+
+    heap_scan(sscan).rs_cindex += 1;
+
+    Ok(Some((recheck, lossy_pages, exact_pages)))
 }
 
 /// `ExecClearTuple(slot)` over the payload-bearing slot (the heap-scan vtable

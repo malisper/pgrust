@@ -369,4 +369,20 @@ pub struct TableAmRoutine {
         deadrows: &mut f64,
         slot: &mut SlotData<'mcx>,
     ) -> PgResult<bool>,
+
+    /// `scan_bitmap_next_tuple(scan, slot, &recheck, &lossy_pages,
+    /// &exact_pages)` (`access/tableam.h`) — fetch the next visible tuple of a
+    /// bitmap heap scan into `slot`. The heap AM
+    /// (`heapam_scan_bitmap_next_tuple`) advances over the current page's
+    /// visible tuples, internally calling `BitmapHeapScanNextBlock` to pull the
+    /// next block off the scan descriptor's `rs_tbmiterator` when the current
+    /// page is exhausted. Returns `Some((recheck, lossy_inc, exact_inc))` when a
+    /// tuple was stored (the C `true`), `None` at end of scan (the C `false`).
+    /// `recheck` is the AM's per-tuple recheck flag; `lossy_inc`/`exact_inc` are
+    /// the per-block bumps for the node's `lossy_pages`/`exact_pages` counters.
+    pub scan_bitmap_next_tuple: for<'mcx> fn(
+        mcx: Mcx<'mcx>,
+        scan: &mut TableScanDescData<'mcx>,
+        slot: &mut SlotData<'mcx>,
+    ) -> PgResult<Option<(bool, u64, u64)>>,
 }

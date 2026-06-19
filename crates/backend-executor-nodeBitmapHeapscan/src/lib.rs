@@ -400,6 +400,23 @@ pub fn ExecBitmapHeapScan<'mcx>(
     ExecScan(node, estate)
 }
 
+/// The `PlanState.ExecProcNode` callback installed by [`ExecInitBitmapHeapScan`]:
+/// `castNode(BitmapHeapScanState, pstate)` then run `ExecBitmapHeapScan`,
+/// returning the produced tuple's slot id (the C `return slot`) or `None`.
+fn exec_bitmap_heap_scan_node<'mcx>(
+    pstate: &mut types_nodes::PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<types_nodes::SlotId>> {
+    let node = match pstate {
+        types_nodes::PlanStateNode::BitmapHeapScan(node) => &mut **node,
+        other => panic!(
+            "castNode(BitmapHeapScanState, pstate) failed: tag {}",
+            other.tag()
+        ),
+    };
+    ExecBitmapHeapScan(node, estate)
+}
+
 /// `ExecReScanBitmapHeapScan(node)` — prepare to rescan the bitmap heap scan.
 pub fn ExecReScanBitmapHeapScan<'mcx>(
     node: &mut BitmapHeapScanState<'mcx>,
@@ -563,9 +580,12 @@ pub fn ExecInitBitmapHeapScan<'mcx>(
     // scanstate->ss.ps.plan = (Plan *) node;
     scanstate.ss.ps.plan = Some(node);
     // scanstate->ss.ps.state = estate;  (threaded explicitly)
-    // scanstate->ss.ps.ExecProcNode = ExecBitmapHeapScan;  (dispatch slot wired
-    // by the executor; the owned model dispatches to this crate's
-    // ExecBitmapHeapScan directly, no stored callback).
+    // scanstate->ss.ps.ExecProcNode = ExecBitmapHeapScan;
+    // The owned model installs a trampoline that downcasts the enclosing
+    // PlanStateNode back to this crate's BitmapHeapScanState and runs
+    // ExecBitmapHeapScan; ExecInitNode reads this slot and arms it behind
+    // ExecProcNodeFirst via ExecSetExecProcNode.
+    scanstate.ss.ps.ExecProcNode = Some(exec_bitmap_heap_scan_node);
 
     // scanstate->tbm = NULL;
     scanstate.tbm = None;

@@ -11,7 +11,7 @@
 use mcx::{Mcx, PgBox};
 use types_error::PgResult;
 use types_execparallel::DsaAreaHandle;
-use types_tidbitmap::{dsa_pointer, TBMIterator, TIDBitmap};
+use types_tidbitmap::{dsa_pointer, TBMIterateOutcome, TBMIterator, TIDBitmap};
 
 seam_core::seam!(
     /// `tbm_create(maxbytes, dsa)` (tidbitmap.c): create an initially-empty
@@ -53,6 +53,17 @@ seam_core::seam!(
         dsa: Option<DsaAreaHandle>,
         dsp: dsa_pointer,
     ) -> PgResult<TBMIterator>
+);
+
+seam_core::seam!(
+    /// `tbm_iterate(iterator, tbmres)` (tidbitmap.c): advance the unified
+    /// iterator one step, returning the next page's [`TBMIterateOutcome`]
+    /// (combining `tbm_iterate` with `tbm_extract_page_tuple` for an exact
+    /// page), or `None` when the bitmap is exhausted (the C `false` return /
+    /// `blockno == InvalidBlockNumber`). The bitmap-scan table-AM
+    /// (`BitmapHeapScanNextBlock`) drives this off the scan descriptor's
+    /// `rs_tbmiterator`.
+    pub fn tbm_iterate(iterator: &mut TBMIterator) -> PgResult<Option<TBMIterateOutcome>>
 );
 
 seam_core::seam!(

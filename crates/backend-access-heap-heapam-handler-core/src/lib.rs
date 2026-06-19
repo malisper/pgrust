@@ -149,6 +149,15 @@ fn heapam_scan_getnextslot<'mcx>(
     heapam::scan::heap_getnextslot(mcx, scan, direction, slot)
 }
 
+/// `.scan_bitmap_next_tuple = heapam_scan_bitmap_next_tuple`.
+fn heapam_scan_bitmap_next_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut TableScanDescData<'mcx>,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<Option<(bool, u64, u64)>> {
+    heapam::scan::heapam_scan_bitmap_next_tuple(mcx, scan, slot)
+}
+
 /// `.scan_end = heap_endscan`.
 fn heapam_scan_end(scan: TableScanDesc<'_>) -> PgResult<()> {
     heapam::scan::heap_endscan(scan)
@@ -620,6 +629,8 @@ pub fn get_heapam_table_am_routine() -> TableAmRoutine {
 
         scan_analyze_next_block: analyze_scan::heapam_scan_analyze_next_block,
         scan_analyze_next_tuple: analyze_scan::heapam_scan_analyze_next_tuple,
+
+        scan_bitmap_next_tuple: heapam_scan_bitmap_next_tuple,
     }
 }
 
