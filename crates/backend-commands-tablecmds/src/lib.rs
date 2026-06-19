@@ -32,6 +32,7 @@ mod at_coldrop;
 mod at_column;
 mod at_constraint;
 mod at_dropvalidate;
+mod at_fk;
 mod at_phase;
 mod create;
 mod drop;

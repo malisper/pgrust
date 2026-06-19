@@ -39,4 +39,6 @@ backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type
 backend-utils-adt-ri-triggers-seams = { path = "../backend-utils-adt-ri-triggers-seams" }
 backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
 backend-utils-misc-more-seams = { path = "../backend-utils-misc-more-seams" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
+types-fmgr = { path = "../types-fmgr" }
 types-acl = { path = "../types-acl" }

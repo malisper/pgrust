@@ -18,6 +18,7 @@
 
 pub mod cache;
 pub mod checks;
+pub mod fmgr_builtins;
 pub mod querybuild;
 pub mod triggers;
 
@@ -333,4 +334,8 @@ pub fn init_seams() {
     backend_utils_adt_ri_triggers_seams::invalidate_constraint_cache_callback::set(
         cache::invalidate_constraint_cache_callback,
     );
+    // Register the RI trigger procs into the fmgr builtin table so that the
+    // FK-enforcing triggers dispatch to their bodies (C: their `fmgr_builtins[]`
+    // rows). Must run before any FK trigger fires.
+    fmgr_builtins::register_ri_builtins();
 }

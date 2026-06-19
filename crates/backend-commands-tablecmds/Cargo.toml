@@ -112,3 +112,14 @@ backend-parser-parse-collate = { path = "../backend-parser-parse-collate" }
 backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
 backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
 backend-optimizer-plan-planner = { path = "../backend-optimizer-plan-planner" }
+# ADD FOREIGN KEY (ATAddForeignKeyConstraint): trigger creation, FK validation,
+# dependency records, opclass/coercion lookups for the equality operators.
+backend-commands-trigger = { path = "../backend-commands-trigger" }
+backend-catalog-pg-depend-seams = { path = "../backend-catalog-pg-depend-seams" }
+backend-access-index-amapi-seams = { path = "../backend-access-index-amapi-seams" }
+backend-parser-coerce = { path = "../backend-parser-coerce" }
+backend-parser-coerce-seams = { path = "../backend-parser-coerce-seams" }
+backend-access-table-table = { path = "../backend-access-table-table" }
+backend-catalog-pg-constraint-seams = { path = "../backend-catalog-pg-constraint-seams" }
+backend-utils-cache-relcache = { path = "../backend-utils-cache-relcache" }
+types-cache = { path = "../types-cache" }

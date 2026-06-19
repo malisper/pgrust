@@ -332,17 +332,18 @@ pub fn ATExecAddConstraint<'mcx>(
             lockmode,
         ),
         ConstrType::CONSTR_FOREIGN => {
-            // ATAddForeignKeyConstraint creates the pg_constraint 'f' row
-            // (CreateConstraintEntry — ported) AND the RI trigger pair via
-            // createForeignKey{Action,Check}Triggers -> CreateTrigger. CreateTrigger
-            // (the catalog-write DDL leg of trigger.c) plus RelationBuildTriggers
-            // (relcache trigger load) are an explicitly-deferred family that has not
-            // landed, so the RI check triggers cannot be installed and the FK could
-            // not be enforced on INSERT/UPDATE. Faithfully seam-and-panic on the
-            // whole subcommand rather than write a half-built FK (a pg_constraint row
-            // with no enforcing triggers).
-            unported(
-                "ADD FOREIGN KEY (ATAddForeignKeyConstraint): blocked on the CreateTrigger / RelationBuildTriggers keystone (trigger.c catalog-write DDL leg unported)",
+            // ATAddForeignKeyConstraint(wqueue, tab, rel, newConstraint, recurse,
+            // false, lockmode) — validate the FK, create the pg_constraint 'f'
+            // row, and install the RI enforcement triggers.
+            crate::at_fk::ATAddForeignKeyConstraint(
+                mcx,
+                wqueue,
+                ti,
+                rel,
+                new_constraint,
+                recurse,
+                false,
+                lockmode,
             )
         }
         other => Err(backend_utils_error::ereport(ERROR)

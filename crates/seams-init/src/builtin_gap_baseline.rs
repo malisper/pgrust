@@ -177,18 +177,9 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (1640, "pg_get_viewdef_name", BuiltinGapKind::NotRegistered),
     (1641, "pg_get_viewdef", BuiltinGapKind::NotRegistered),
     (1642, "pg_get_userbyid", BuiltinGapKind::NotRegistered),
-    (1644, "RI_FKey_check_ins", BuiltinGapKind::NotRegistered),
-    (1645, "RI_FKey_check_upd", BuiltinGapKind::NotRegistered),
-    (1646, "RI_FKey_cascade_del", BuiltinGapKind::NotRegistered),
-    (1647, "RI_FKey_cascade_upd", BuiltinGapKind::NotRegistered),
-    (1648, "RI_FKey_restrict_del", BuiltinGapKind::NotRegistered),
-    (1649, "RI_FKey_restrict_upd", BuiltinGapKind::NotRegistered),
-    (1650, "RI_FKey_setnull_del", BuiltinGapKind::NotRegistered),
-    (1651, "RI_FKey_setnull_upd", BuiltinGapKind::NotRegistered),
-    (1652, "RI_FKey_setdefault_del", BuiltinGapKind::NotRegistered),
-    (1653, "RI_FKey_setdefault_upd", BuiltinGapKind::NotRegistered),
-    (1654, "RI_FKey_noaction_del", BuiltinGapKind::NotRegistered),
-    (1655, "RI_FKey_noaction_upd", BuiltinGapKind::NotRegistered),
+    // RI_FKey_* (OIDs 1644-1655): now registered into the fmgr builtin table by
+    // backend-utils-adt-ri-triggers::fmgr_builtins::register_ri_builtins (the FK
+    // enforcement lane), so they are no longer gaps.
     (1662, "pg_get_triggerdef", BuiltinGapKind::NotRegistered),
     (1665, "pg_get_serial_sequence", BuiltinGapKind::NotRegistered),
     (1686, "pg_get_keywords", BuiltinGapKind::NotRegistered),
