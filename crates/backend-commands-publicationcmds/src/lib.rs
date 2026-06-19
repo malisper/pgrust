@@ -71,7 +71,7 @@ use types_nodes::ddlnodes::{
     AP_AddObjects, AP_DropObjects, AP_SetObjects, PUBLICATIONOBJ_TABLE,
     PUBLICATIONOBJ_TABLES_IN_CUR_SCHEMA, PUBLICATIONOBJ_TABLES_IN_SCHEMA,
 };
-use types_nodes::nodes::Node;
+use types_nodes::nodes::{ntag, Node};
 use types_nodes::parsenodes::{DROP_CASCADE, ObjectType};
 use types_nodes::parsestmt::{ParseExprKind, ParseState};
 use types_nodes::primnodes::Expr;
@@ -339,11 +339,11 @@ struct PublicationOptions {
 /// accessors switch on (`nodeTag(def->arg)`).
 fn defel_arg(defel: &DefElem) -> Option<DefElemArg> {
     let node = defel.arg.as_deref()?;
-    Some(match node {
-        Node::Integer(i) => DefElemArg::Integer(i.ival as i64),
-        Node::Float(f) => DefElemArg::Float(f.fval.as_str().to_string()),
-        Node::Boolean(b) => DefElemArg::Boolean(b.boolval),
-        Node::String(s) => DefElemArg::String(s.sval.as_str().to_string()),
+    Some(match node.node_tag() {
+        ntag::T_Integer => DefElemArg::Integer(node.expect_integer().ival as i64),
+        ntag::T_Float => DefElemArg::Float(node.expect_float().fval.as_str().to_string()),
+        ntag::T_Boolean => DefElemArg::Boolean(node.expect_boolean().boolval),
+        ntag::T_String => DefElemArg::String(node.expect_string().sval.as_str().to_string()),
         _ => DefElemArg::AStar,
     })
 }
@@ -421,8 +421,8 @@ fn parse_publication_options<'mcx>(
 
     /* Parse options */
     for defel_node in options {
-        let defel = match &**defel_node {
-            Node::DefElem(d) => d,
+        let defel = match defel_node.node_tag() {
+            ntag::T_DefElem => defel_node.expect_defelem(),
             _ => {
                 return Err(PgError::error(
                     "publication option list element is not a DefElem",
@@ -531,8 +531,8 @@ fn ObjectsInPublicationToOids<'mcx>(
     }
 
     for pubobj_node in pubobjspec_list {
-        let pubobj: &PublicationObjSpec = match &**pubobj_node {
-            Node::PublicationObjSpec(p) => p,
+        let pubobj: &PublicationObjSpec = match pubobj_node.node_tag() {
+            ntag::T_PublicationObjSpec => pubobj_node.expect_publicationobjspec(),
             _ => {
                 return Err(PgError::error(
                     "publication object list element is not a PublicationObjSpec",
