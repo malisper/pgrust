@@ -639,6 +639,50 @@ fn fc_regexp_match_no_flags(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 
 // ---------------------------------------------------------------------------
+// fc_ adapters — regexp_split_to_array (non-set-returning; returns text[]).
+// ---------------------------------------------------------------------------
+
+/// Set a non-nullable `text[]` result on the by-ref `Varlena` lane from the
+/// value core's `Vec<payload>`. Unlike `regexp_match`, the split functions never
+/// return a NULL whole result and never produce NULL array elements, so each
+/// element payload is wrapped as a non-NULL element.
+fn ret_text_array_nonnull(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    m: &mcx::MemoryContext,
+    elems: PgVec<'_, PgVec<'_, u8>>,
+) -> Datum {
+    let views: Vec<Option<&[u8]>> = elems.iter().map(|e| Some(e.as_slice())).collect();
+    let image = ok(backend_utils_adt_arrayfuncs::construct::build_text_array_nullable(
+        m.mcx(),
+        &views,
+    ));
+    fcinfo.set_ref_result(RefPayload::Varlena(image.as_slice().to_vec()));
+    Datum::from_usize(0)
+}
+
+/// `regexp_split_to_array(text, text, text) -> text[]` (OID 2768).
+fn fc_regexp_split_to_array(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    let s = arg_text(fcinfo, 0);
+    let p = arg_text(fcinfo, 1);
+    let flags = arg_text(fcinfo, 2);
+    let r = ok(crate::regexp_split_to_array(m.mcx(), s, p, Some(flags), c));
+    ret_text_array_nonnull(fcinfo, &m, r)
+}
+
+/// `regexp_split_to_array(text, text) -> text[]` (OID 2767,
+/// `regexp_split_to_array_no_flags`).
+fn fc_regexp_split_to_array_no_flags(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    let s = arg_text(fcinfo, 0);
+    let p = arg_text(fcinfo, 1);
+    let r = ok(crate::regexp_split_to_array_no_flags(m.mcx(), s, p, c));
+    ret_text_array_nonnull(fcinfo, &m, r)
+}
+
+// ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
 
@@ -713,5 +757,7 @@ pub fn register_regexp_builtins() {
         // ---- regexp_match (non-set-returning -> text[]) ----
         builtin(3396, "regexp_match_no_flags", 2, true, fc_regexp_match_no_flags),
         builtin(3397, "regexp_match", 3, true, fc_regexp_match),
+        builtin(2767, "regexp_split_to_array_no_flags", 2, true, fc_regexp_split_to_array_no_flags),
+        builtin(2768, "regexp_split_to_array", 3, true, fc_regexp_split_to_array),
     ]);
 }

@@ -319,8 +319,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (2764, "regexp_matches", BuiltinGapKind::NotRegistered),
     (2765, "regexp_split_to_table_no_flags", BuiltinGapKind::NotRegistered),
     (2766, "regexp_split_to_table", BuiltinGapKind::NotRegistered),
-    (2767, "regexp_split_to_array_no_flags", BuiltinGapKind::NotRegistered),
-    (2768, "regexp_split_to_array", BuiltinGapKind::NotRegistered),
     (2769, "pg_stat_get_checkpointer_num_timed", BuiltinGapKind::NotRegistered),
     (2770, "pg_stat_get_checkpointer_num_requested", BuiltinGapKind::NotRegistered),
     (2771, "pg_stat_get_checkpointer_buffers_written", BuiltinGapKind::NotRegistered),
