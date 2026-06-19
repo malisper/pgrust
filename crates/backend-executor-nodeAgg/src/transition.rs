@@ -1144,23 +1144,28 @@ fn fcinfo_arg_value<'mcx>(
 }
 
 /// `fcinfo->args[i].value = v; fcinfo->args[i].isnull = isnull;` — store one
-/// argument into the transfn call frame. The unified `Datum` carries a by-value
-/// word; the fcinfo `args[]` are `types_datum::NullableDatum`, so convert the
-/// word across the two Datum models (by-value).
-fn fcinfo_set_arg(
-    pertrans: &mut AggStatePerTransData<'_>,
+/// argument into the transfn call frame.
+///
+/// The owned `transfn_fcinfo->args[]` is the bare-word `types_datum::NullableDatum`
+/// (#296), which cannot carry a by-reference value: collapsing one into the word
+/// via `as_usize()` panics ("scalar accessor called on a by-reference value") for
+/// a pass-by-ref aggregate input (text/name/numeric ordered-set DISTINCT key
+/// fetched out of the per-trans tuplesort). So the canonical input value is
+/// stored into the by-ref-capable `pertrans->distinct_value`/`_isnull` slot (C's
+/// `args[1].{value,isnull}` for the single-column ordered/distinct path). The
+/// single-column ordered-aggregate drain only ever loads index 1.
+fn fcinfo_set_arg<'mcx>(
+    pertrans: &mut AggStatePerTransData<'mcx>,
     i: i32,
-    value: types_tuple::backend_access_common_heaptuple::Datum<'_>,
+    value: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
     isnull: bool,
 ) {
-    let fcinfo = pertrans
-        .transfn_fcinfo
-        .as_mut()
-        .expect("fcinfo_set_arg: pertrans->transfn_fcinfo not built by build_pertrans_for_aggref");
-    fcinfo.args[i as usize] = types_datum::NullableDatum {
-        value: types_datum::Datum::from_usize(value.as_usize()),
-        isnull,
-    };
+    debug_assert_eq!(
+        i, 1,
+        "fcinfo_set_arg: only the single-column ordered/distinct args[1] store is modeled"
+    );
+    pertrans.distinct_value = value;
+    pertrans.distinct_value_isnull = isnull;
 }
 
 /// `pertrans->transfn_fcinfo->args[n] = { value, isnull }` — the interpreter's
@@ -1168,6 +1173,15 @@ fn fcinfo_set_arg(
 /// into the per-trans transfn call frame before the distinct comparison reads it
 /// (`ExecEvalPreOrderedDistinctSingle` reads `args[1]`). Mirrors C, where the
 /// compiler recursed the input directly into `&trans_fcinfo->args[1]`.
+///
+/// The owned `transfn_fcinfo->args[]` is the bare-word `types_datum::NullableDatum`
+/// (#296), which cannot carry a by-reference DISTINCT key (text/name/numeric):
+/// collapsing one into the word panics ("scalar accessor called on a
+/// by-reference value"). So the canonical input is stored into the by-ref-capable
+/// `pertrans->distinct_value`/`distinct_value_isnull` slot, from which
+/// `ExecEvalPreOrderedDistinctSingle` reads it. (The `n` index is retained for
+/// fidelity with C's `args[1]`; the single-column DISTINCT comparator only ever
+/// loads index 1.)
 pub fn set_transfn_arg<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
     transno: usize,
@@ -1175,11 +1189,16 @@ pub fn set_transfn_arg<'mcx>(
     value: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
     isnull: bool,
 ) {
+    debug_assert_eq!(
+        n, 1,
+        "set_transfn_arg: only the single-column DISTINCT args[1] store is modeled"
+    );
     let pertrans = &mut aggstate
         .pertrans
         .as_mut()
         .expect("set_transfn_arg: aggstate->pertrans not built")[transno];
-    fcinfo_set_arg(pertrans, n, value, isnull);
+    pertrans.distinct_value = value;
+    pertrans.distinct_value_isnull = isnull;
 }
 
 /// `DatumGetBool(FunctionCall2Coll(&pertrans->equalfnOne, aggCollation,

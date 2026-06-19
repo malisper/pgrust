@@ -105,6 +105,22 @@ pub struct AggStatePerTransData<'mcx> {
     pub lastisnull: bool,
     /// `bool haslast`.
     pub haslast: bool,
+    /// The single-column-DISTINCT current input value, carried by-ref-faithfully.
+    ///
+    /// C reads the current value back out of `transfn_fcinfo->args[1]` (the
+    /// interpreter recursed the input straight into that fcinfo arg). The owned
+    /// model's `FunctionCallInfoBaseData.args[]` is the bare-word
+    /// `types_datum::NullableDatum` (#296), which cannot carry a by-reference
+    /// value (text/name/numeric DISTINCT key) — collapsing one into the word
+    /// panics ("scalar accessor called on a by-reference value"). So the
+    /// interpreter stores the canonical input here instead, and
+    /// `ExecEvalPreOrderedDistinctSingle` reads it from here. Mirrors
+    /// `args[1].{value,isnull}` faithfully for both by-value and by-reference
+    /// input types.
+    pub distinct_value: Datum<'mcx>,
+    /// The isnull flag paired with [`Self::distinct_value`] (C:
+    /// `transfn_fcinfo->args[1].isnull`).
+    pub distinct_value_isnull: bool,
     /// `Tuplesortstate **sortstates` — one per grouping set, if DISTINCT/ORDER BY.
     pub sortstates: Option<PgVec<'mcx, Option<PgBox<'mcx, Tuplesortstate<'mcx>>>>>,
     /// `FunctionCallInfo transfn_fcinfo` — pre-initialized transfn call info.
@@ -153,6 +169,8 @@ impl Default for AggStatePerTransData<'_> {
             lastdatum: Datum::null(),
             lastisnull: false,
             haslast: false,
+            distinct_value: Datum::null(),
+            distinct_value_isnull: false,
             sortstates: None,
             transfn_fcinfo: None,
             serialfn_fcinfo: None,

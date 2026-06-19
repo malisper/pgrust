@@ -36,7 +36,7 @@
 use backend_executor_execTuples_seams::{
     exec_clear_tuple, exec_copy_slot, exec_store_virtual_tuple, store_virtual_values,
 };
-use backend_utils_fmgr_fmgr_seams::function_call2_coll;
+use backend_utils_fmgr_fmgr_seams::function_call2_coll_datum;
 use backend_utils_sort_tuplesort_seams::{tuplesort_putdatum, tuplesort_puttupleslot};
 
 // The bare-word newtype: the transition-value form the fmgr/tuplesort seams and
@@ -277,20 +277,30 @@ pub fn ExecEvalPreOrderedDistinctSingle<'mcx>(
     pertrans: usize,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
-    let _ = &estate;
-    // Read the (immutable) comparison inputs/config off the pertrans first.
+    // The comparison and the datumCopy land in the per-query context (the
+    // value-lifetime-correct context for the non-hashed single-group gate; see
+    // `distinct_last_datum_copy`).
+    let mcx = estate.es_query_cxt;
+
+    // Read the comparison inputs/config off the pertrans first. `value`/
+    // `lastdatum` are the CANONICAL value type — a by-reference DISTINCT key
+    // (text/name/numeric) is carried faithfully in its `ByRef` arm, NOT collapsed
+    // into a bare scalar word (which panics "scalar accessor called on a
+    // by-reference value").
     let (value, isnull, haslast, lastisnull, lastdatum, agg_collation, equalfn_one_oid,
          inputtype_by_val, inputtype_len) = {
         let pt =
             &aggstate.pertrans.as_ref().expect("ExecEvalPreOrderedDistinctSingle: pertrans")[pertrans];
         // Datum value = pertrans->transfn_fcinfo->args[1].value;
         // bool  isnull = pertrans->transfn_fcinfo->args[1].isnull;
+        // (Owned model: the interpreter parked the canonical input in
+        //  pertrans->distinct_value rather than the bare-word fcinfo args[].)
         (
-            transfn_arg_value(pt, 1),
-            transfn_arg_isnull(pt, 1),
+            pt.distinct_value.clone_in(mcx)?,
+            pt.distinct_value_isnull,
             pt.haslast,
             pt.lastisnull,
-            word_of(&pt.lastdatum),
+            pt.lastdatum.clone_in(mcx)?,
             pt.agg_collation,
             pt.equalfn_one.fn_oid,
             pt.inputtype_by_val,
@@ -310,25 +320,40 @@ pub fn ExecEvalPreOrderedDistinctSingle<'mcx>(
         true
     } else {
         // DatumGetBool(FunctionCall2Coll(&equalfnOne, aggCollation, lastdatum, value))
-        let r = function_call2_coll::call(equalfn_one_oid, agg_collation, lastdatum, value)?;
-        datum_get_bool(r)
+        // Through the by-reference-capable canonical fmgr lane: a by-ref key
+        // crosses as its referent bytes (the equality function reads VARDATA_ANY).
+        let r = function_call2_coll_datum::call(
+            mcx,
+            equalfn_one_oid,
+            agg_collation,
+            lastdatum.clone_in(mcx)?,
+            value.clone_in(mcx)?,
+        )?;
+        r.as_bool()
     };
 
     if !equal {
         // if (pertrans->haslast && !pertrans->inputtypeByVal && !pertrans->lastisnull)
         //     pfree(DatumGetPointer(pertrans->lastdatum));
-        if haslast && !inputtype_by_val && !lastisnull {
-            pfree_last_datum(aggstate, pertrans, lastdatum);
-        }
+        //
+        // No explicit free in the owned model: a by-reference `lastdatum` owns its
+        // bytes in `mcx` (the per-query context), reclaimed when that context is
+        // reset/deleted — exactly the lifetime C's curaggcontext pfree targets.
+        let _ = (haslast, inputtype_by_val, lastisnull);
 
-        let new_lastdatum = if !isnull {
+        let new_lastdatum: DatumV = if !isnull {
             // oldContext = MemoryContextSwitchTo(aggstate->curaggcontext->ecxt_per_tuple_memory);
             // pertrans->lastdatum = datumCopy(value, inputtypeByVal, inputtypeLen);
             // MemoryContextSwitchTo(oldContext);
-            distinct_last_datum_copy(aggstate, pertrans, value, inputtype_by_val, inputtype_len, estate)?
+            backend_utils_adt_datum_seams::datum_copy_v::call(
+                mcx,
+                &value,
+                inputtype_by_val,
+                inputtype_len as i32,
+            )?
         } else {
             // pertrans->lastdatum = (Datum) 0;
-            Datum::null()
+            DatumV::null()
         };
 
         let pt = &mut aggstate
@@ -336,7 +361,7 @@ pub fn ExecEvalPreOrderedDistinctSingle<'mcx>(
             .as_mut()
             .expect("ExecEvalPreOrderedDistinctSingle: pertrans")[pertrans];
         pt.haslast = true;
-        pt.lastdatum = DatumV::ByVal(new_lastdatum.as_usize());
+        pt.lastdatum = new_lastdatum;
         pt.lastisnull = isnull;
         return Ok(true);
     }
@@ -344,50 +369,6 @@ pub fn ExecEvalPreOrderedDistinctSingle<'mcx>(
     Ok(false)
 }
 
-/// `DatumGetBool(d)` — low bit of the datum word.
-#[inline]
-fn datum_get_bool(d: Datum) -> bool {
-    d.as_bool()
-}
-
-/// `pfree(DatumGetPointer(pertrans->lastdatum))` — free a by-reference last
-/// datum from the curaggcontext. Owned by the mmgr/datum unit (a by-ref
-/// `Datum` pointer is not modeled in the trimmed shared vocabulary).
-fn pfree_last_datum<'mcx>(_aggstate: &mut AggState<'mcx>, _pertrans: usize, _lastdatum: Datum) {
-    panic!(
-        "backend-executor-execExprInterp::eval_agg: pfree of pertrans->lastdatum (a by-reference \
-         Datum pointer) is the mmgr owner's; the trimmed model does not carry a by-ref Datum"
-    );
-}
-
-/// `pertrans->lastdatum = datumCopy(value, inputtypeByVal, inputtypeLen)` into
-/// the curaggcontext per-tuple memory. By-value datums are returned verbatim (no
-/// allocation, as in C); by-reference datums are deep-copied through the datum.c
-/// seam into the per-query context (the value-lifetime-correct context; see the
-/// nodeAgg `datum_copy_into_ecxt` note — for the non-hashed single-group gate the
-/// aggcontext and query context coincide in lifetime).
-fn distinct_last_datum_copy<'mcx>(
-    aggstate: &mut AggState<'mcx>,
-    _pertrans: usize,
-    value: Datum,
-    inputtype_by_val: bool,
-    inputtype_len: i16,
-    estate: &mut EStateData<'mcx>,
-) -> PgResult<Datum> {
-    if inputtype_by_val {
-        return Ok(value);
-    }
-    let _ = aggstate;
-    let mcx = estate.es_query_cxt;
-    let value_v = DatumV::from_usize(value.as_usize());
-    let copied = backend_utils_adt_datum_seams::datum_copy_v::call(
-        mcx,
-        &value_v,
-        inputtype_by_val,
-        inputtype_len as i32,
-    )?;
-    Ok(Datum::from_usize(copied.as_usize()))
-}
 
 /// `ExecEvalPreOrderedDistinctMulti(AggState *aggstate,
 /// AggStatePerTrans pertrans)` — multi-column DISTINCT filter over presorted
