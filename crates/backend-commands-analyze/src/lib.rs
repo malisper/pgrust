@@ -753,13 +753,25 @@ fn do_analyze_rel<'mcx>(
     if !inh {
         rt::pgstat_report_analyze::call(
             onerel.rd_id,
+            onerel.rd_rel.relisshared,
+            onerel.rd_rel.relkind,
+            onerel.pgstat_enabled,
             totalrows,
             totaldeadrows,
             va_cols.is_empty(),
             0,
         )?;
     } else if onerel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
-        rt::pgstat_report_analyze::call(onerel.rd_id, 0.0, 0.0, va_cols.is_empty(), 0)?;
+        rt::pgstat_report_analyze::call(
+            onerel.rd_id,
+            onerel.rd_rel.relisshared,
+            onerel.rd_rel.relkind,
+            onerel.pgstat_enabled,
+            0.0,
+            0.0,
+            va_cols.is_empty(),
+            0,
+        )?;
     }
 
     // If not part of VACUUM ANALYZE, let index AMs do cleanup.
@@ -1132,26 +1144,32 @@ fn acquire_sample_rows<'mcx>(
     let mut scan = tableam::table_beginscan_analyze::call(mcx, onerel)?;
     let mut slot = table_slot_create(mcx, onerel)?;
 
-    // Begin the block-sampling read stream over the real vacuum
-    // BufferAccessStrategy, reached through the analyze-owned seam (mirroring
-    // vacuumlazy).
-    let mut bs_for_cb = bs;
-    let mut next_block = move || -> BlockNumber {
-        if BlockSampler_HasMore(&bs_for_cb) {
-            BlockSampler_Next(&mut bs_for_cb)
-        } else {
-            // InvalidBlockNumber
-            BlockNumber::MAX
-        }
-    };
-    let stream = rt::analyze_read_stream_begin::call(onerel.rd_id, bstrategy, &mut next_block)?;
-
+    // C drives a read stream whose per-block callback is
+    // `block_sampling_read_stream_next` (returning the next BlockSampler-chosen
+    // block, `InvalidBlockNumber` to end) and whose `BufferAccessStrategy` is the
+    // vacuum `vac_strategy`. In the owned model — mirroring vacuumlazy's owned
+    // block-selection — the stream carries no read-ahead I/O of its own: the
+    // `next_buffer` closure pulls the next sampled block straight from the
+    // BlockSampler and pins it with the real vacuum strategy through the
+    // bufmgr-owned `ReadBufferExtended(rel, MAIN_FORKNUM, blk, RBM_NORMAL,
+    // bstrategy)` seam. The pinned buffer is then share-locked by
+    // `heapam_scan_analyze_next_block`, exactly as C's stream consumer does.
     let mut blksdone: BlockNumber = 0;
 
-    // Outer loop over blocks to sample.
+    // Outer loop over blocks to sample. The closure drives the real `bs` so its
+    // `m` (blocks actually read) is the count used in the extrapolation below,
+    // exactly as C's `bs.m`.
     let mut next_buffer = || -> PgResult<Buffer> {
-        let b = rt::analyze_read_stream_next_buffer::call(stream)?;
-        Ok(b)
+        if !BlockSampler_HasMore(&bs) {
+            // InvalidBuffer ends the stream / outer loop.
+            return Ok(types_storage::buf::InvalidBuffer);
+        }
+        let blk = BlockSampler_Next(&mut bs);
+        backend_storage_buffer_bufmgr_seams::read_buffer_with_strategy::call(
+            onerel,
+            blk,
+            bstrategy.clone(),
+        )
     };
     while tableam::table_scan_analyze_next_block::call(mcx, &mut scan, &mut next_buffer)? {
         vacuum_delay_point()?;
@@ -1192,7 +1210,6 @@ fn acquire_sample_rows<'mcx>(
         )?;
     }
 
-    rt::analyze_read_stream_end::call(stream)?;
     slot_seam::exec_drop_single_tuple_table_slot::call(slot)?;
     tableam::table_endscan::call(scan)?;
 
@@ -1550,6 +1567,7 @@ fn update_attstats<'mcx>(
             .map_err(|_| PgError::error("heap_modify_tuple failed in update_attstats"))?;
             let otid = stup.tuple.t_self;
             rt::catalog_tuple_update_with_info_pg_statistic::call(
+                mcx,
                 &sd,
                 otid,
                 &mut stup,
@@ -1559,7 +1577,7 @@ fn update_attstats<'mcx>(
             let mut stup =
                 backend_access_common_heaptuple::heap_form_tuple(mcx, &sd.rd_att, &values, &nulls)
                     .map_err(|_| PgError::error("heap_form_tuple failed in update_attstats"))?;
-            rt::catalog_tuple_insert_with_info_pg_statistic::call(&sd, &mut stup, indstate_ref)?;
+            rt::catalog_tuple_insert_with_info_pg_statistic::call(mcx, &sd, &mut stup, indstate_ref)?;
         }
     }
 

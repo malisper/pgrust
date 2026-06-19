@@ -58,10 +58,14 @@ seam_core::seam!(
 seam_core::seam!(
     /// `pgstat_report_analyze(onerel, totalrows, totaldeadrows, resetcounter,
     /// starttime)` (pgstat_relation.c): report the just-completed ANALYZE to the
-    /// cumulative stats system. The owner (pgstat) does not expose this entry;
-    /// a call panics loudly. `onerel` is identified by OID for the report.
+    /// cumulative stats system. Owner pgstat_relation.c installs it. The relation
+    /// is reduced to the `(relid, relisshared, relkind, pgstat_enabled)` facets
+    /// the C reads off `onerel->rd_rel` / `onerel->pgstat_enabled`.
     pub fn pgstat_report_analyze(
-        onerel: Oid,
+        relid: Oid,
+        relisshared: bool,
+        relkind: u8,
+        pgstat_enabled: bool,
         livetuples: f64,
         deadtuples: f64,
         resetcounter: bool,
@@ -100,49 +104,11 @@ seam_core::seam!(
     ) -> PgResult<()>
 );
 
-// ---------------------------------------------------------------------------
-// Block-sampling read stream (read_stream.c) over the vacuum `BufferAccessStrategy`.
-//
-// `acquire_sample_rows` builds a read stream whose block callback is
-// `block_sampling_read_stream_next` and whose `BufferAccessStrategy` is
-// `vac_strategy` — the real `Rc<RefCell<BufferAccessStrategyData>>` the leader
-// created in `ExecVacuum` and threaded down the vacuum/analyze spine. The read
-// stream is reached through these analyze-owned seams (mirroring the vacuumlazy
-// read-stream seams). The block callback is supplied as a closure pulling the
-// next sampled block. They are NOT installed (the read_stream.c owner is
-// unported); a call panics loudly.
-// ---------------------------------------------------------------------------
-
-/// An opaque owner-side `ReadStream *` handle (the analyze block-sampling stream).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AnalyzeReadStreamHandle(pub u64);
-
-seam_core::seam!(
-    /// `read_stream_begin_relation(READ_STREAM_MAINTENANCE |
-    /// READ_STREAM_USE_BATCHING, vac_strategy, scan->rs_rd, MAIN_FORKNUM,
-    /// block_sampling_read_stream_next, &bs, 0)` (analyze.c): begin the
-    /// block-sampling read stream. `next_block` is the
-    /// `block_sampling_read_stream_next` callback (returns the next sampled
-    /// `BlockNumber`, or `InvalidBlockNumber` to end). Owner unported; panics.
-    pub fn analyze_read_stream_begin(
-        rel: Oid,
-        bstrategy: types_storage::buf::BufferAccessStrategy,
-        next_block: &mut dyn FnMut() -> BlockNumber,
-    ) -> PgResult<AnalyzeReadStreamHandle>
-);
-
-seam_core::seam!(
-    /// `read_stream_next_buffer(stream, NULL)` (read_stream.c): the next buffer
-    /// of the block-sampling stream (`InvalidBuffer` at end). Owner unported.
-    pub fn analyze_read_stream_next_buffer(
-        stream: AnalyzeReadStreamHandle,
-    ) -> PgResult<types_storage::buf::Buffer>
-);
-
-seam_core::seam!(
-    /// `read_stream_end(stream)` (read_stream.c). Owner unported; panics.
-    pub fn analyze_read_stream_end(stream: AnalyzeReadStreamHandle) -> PgResult<()>
-);
+// The block-sampling read stream (read_stream.c) is bypassed in the owned
+// model: `acquire_sample_rows` pulls each BlockSampler-chosen block straight
+// from the sampler and pins it through the bufmgr-owned
+// `read_buffer_with_strategy` seam (the same owned posture vacuumlazy uses),
+// so no analyze-owned read-stream seam is needed.
 
 seam_core::seam!(
     /// `CatalogTupleInsertWithInfo(sd, tup, indstate)` (catalog/indexing.c) for
@@ -151,6 +117,7 @@ seam_core::seam!(
     /// generic `FormedTuple` insert into pg_statistic, so analyze owns this seam;
     /// a call panics until a generic catalog-tuple insert is exposed.
     pub fn catalog_tuple_insert_with_info_pg_statistic<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         sd: &types_rel::Relation<'mcx>,
         tup: &mut types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
         indstate: &mut types_cluster::CatalogIndexState<'mcx>,
@@ -162,6 +129,7 @@ seam_core::seam!(
     /// (catalog/indexing.c) for the pg_statistic update in `update_attstats`.
     /// Owner exposes only per-catalog typed variants; analyze owns this seam.
     pub fn catalog_tuple_update_with_info_pg_statistic<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         sd: &types_rel::Relation<'mcx>,
         otid: types_tuple::heaptuple::ItemPointerData,
         tup: &mut types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,

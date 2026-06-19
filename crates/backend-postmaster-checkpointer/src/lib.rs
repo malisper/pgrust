@@ -1279,8 +1279,26 @@ pub fn FirstCallSinceLastCheckpoint() -> bool {
 // ===========================================================================
 
 /// `LWLockAcquire(CheckpointerCommLock, LW_EXCLUSIVE)`.
+///
+/// checkpointer.c follows C's bare acquire/release protocol: the lock is taken
+/// here and dropped by an explicit `LWLockRelease` ([`comm_lock_release`]) at a
+/// point the function chooses (and by `LWLockReleaseAll` on the error path). The
+/// `lwlock_acquire_main` seam hands back a `MainLWLockGuard` whose `Drop`
+/// releases the lock — letting it drop here would release the lock immediately
+/// (before the protected section) and make the later `comm_lock_release` a
+/// double-release of an unheld lock ("lock ... is not held"). The lock is
+/// already recorded in the backend's held-lock table by the acquire itself, so
+/// we `forget` the guard to suppress the drop-release while keeping the hold; the
+/// explicit `comm_lock_release` / `LWLockReleaseAll` is the sole releaser, as in
+/// C.
 fn comm_lock_acquire() {
-    let _ = lwlock::lwlock_acquire_main::call(CHECKPOINTER_COMM_LOCK, LWLockMode::LW_EXCLUSIVE);
+    match lwlock::lwlock_acquire_main::call(CHECKPOINTER_COMM_LOCK, LWLockMode::LW_EXCLUSIVE) {
+        Ok(guard) => core::mem::forget(guard),
+        Err(_) => {
+            // LWLockAcquire only fails by ereport(ERROR) ("too many LWLocks"),
+            // which unwinds; nothing to hold on that path.
+        }
+    }
 }
 
 /// `LWLockRelease(CheckpointerCommLock)`.

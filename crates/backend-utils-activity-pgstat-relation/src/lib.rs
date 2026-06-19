@@ -1369,4 +1369,22 @@ pub fn init_seams() {
             pgstat_report_vacuum(tableoid, shared, livetuples, deadtuples, starttime)
         },
     );
+
+    // --- analyze.c end-of-analyze stats report (pgstat_report_analyze). Homes
+    //     in analyze-rt-seams; pgstat_relation.c owns it. The C casts the
+    //     double row estimates to PgStat_Counter. ---
+    backend_commands_analyze_rt_seams::pgstat_report_analyze::set(
+        |relid, relisshared, relkind, pgstat_enabled, livetuples, deadtuples, resetcounter, starttime| {
+            pgstat_report_analyze(
+                relid,
+                relisshared,
+                relkind,
+                pgstat_enabled,
+                livetuples as PgStat_Counter,
+                deadtuples as PgStat_Counter,
+                resetcounter,
+                starttime,
+            )
+        },
+    );
 }
