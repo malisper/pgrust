@@ -117,10 +117,14 @@ fn create_function_seam<'mcx>(
         options.push(rich_node_to_parse(n)?);
     }
 
-    let sql_body = match cfs.sql_body.as_deref() {
-        Some(n) => Some(Box::new(rich_node_to_parse(n)?)),
-        None => None,
-    };
+    // The SQL-standard function body (`RETURN expr` -> a `ReturnStmt`, or
+    // `BEGIN ATOMIC ... END` -> a statement list) is a rich raw parse tree that
+    // the flat `types_parsenodes` vocabulary cannot represent. It is threaded
+    // directly as a rich node into `CreateFunction`, which transforms it
+    // (`transformStmt`) into the cooked `prosqlbody`. The flat `sql_body` field
+    // only ever needs to signal presence, which `CreateFunction` reads from the
+    // rich node instead.
+    let sql_body_rich: Option<&types_nodes::nodes::Node<'mcx>> = cfs.sql_body.as_deref();
 
     let pn = types_parsenodes::CreateFunctionStmt {
         is_procedure: cfs.is_procedure,
@@ -129,10 +133,10 @@ fn create_function_seam<'mcx>(
         parameters,
         returnType,
         options,
-        sql_body,
+        sql_body: None,
     };
 
-    ddl_core::CreateFunction(mcx, &pn, None)
+    ddl_core::CreateFunction(mcx, &pn, sql_body_rich, None)
 }
 
 /// Outward-seam adapter for `CreateCast(stmt)` (utility.c `ProcessUtilitySlow`

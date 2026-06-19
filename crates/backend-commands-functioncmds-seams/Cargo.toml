@@ -17,3 +17,4 @@ types-acl = { path = "../types-acl" }
 types-catalog = { path = "../types-catalog" }
 types-tuple = { path = "../types-tuple" }
 types-parsenodes = { path = "../types-parsenodes" }
+types-nodes = { path = "../types-nodes" }

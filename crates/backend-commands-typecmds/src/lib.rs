@@ -1535,6 +1535,7 @@ fn makeRangeConstructors(name: &str, namespace: Oid, rangeOid: Oid, subtype: Oid
             PROSRC[i],                     /* prosrc */
             None,                          /* probin */
             None,                          /* prosqlbody */
+            Vec::new(),                    /* prosqlbody_refs */
             PROKIND_FUNCTION,
             false,                         /* security_definer */
             false,                         /* leakproof */
@@ -1602,6 +1603,7 @@ fn makeMultirangeConstructors(
         "multirange_constructor0",
         None,
         None,
+        Vec::new(),
         PROKIND_FUNCTION,
         false,
         false,
@@ -1644,6 +1646,7 @@ fn makeMultirangeConstructors(
         "multirange_constructor1",
         None,
         None,
+        Vec::new(),
         PROKIND_FUNCTION,
         false,
         false,
@@ -1682,6 +1685,7 @@ fn makeMultirangeConstructors(
         "multirange_constructor2",
         None,
         None,
+        Vec::new(),
         PROKIND_FUNCTION,
         false,
         false,

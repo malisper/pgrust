@@ -20,9 +20,16 @@ types-tuple = { path = "../types-tuple" }
 types-storage = { path = "../types-storage" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-nodes-core = { path = "../backend-nodes-core" }
+backend-nodes-outfuncs = { path = "../backend-nodes-outfuncs" }
 
 # Inward seam contract owned by this crate.
 backend-parser-analyze-seams = { path = "../backend-parser-analyze-seams" }
+
+# functioncmds' interpret_sql_body seam (the inline SQL-function body
+# interpreter), installed by this crate — it owns transformStmt + nodeToString +
+# the dependency-reference walker.
+backend-commands-functioncmds-seams = { path = "../backend-commands-functioncmds-seams" }
+backend-catalog-dependency = { path = "../backend-catalog-dependency" }
 
 # Merged sibling owners called directly (cycle-free; they depend on the
 # analyze *-seams* decls, never on this impl crate).

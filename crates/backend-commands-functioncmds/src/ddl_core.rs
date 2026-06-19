@@ -821,16 +821,17 @@ fn compute_function_attributes(
 // ===========================================================================
 
 fn interpret_AS_clause(
+    mcx: Mcx<'_>,
     language_oid: Oid,
     language_name: &str,
     funcname: &str,
     as_clause: &[Node],
     as_clause_set: bool,
-    sql_body_in: Option<&Node>,
+    sql_body_in: Option<&types_nodes::nodes::Node<'_>>,
     parameter_types: Vec<Oid>,
     in_parameter_names: Vec<String>,
     query_string: Option<String>,
-) -> PgResult<(String, Option<String>, Option<Box<Node>>)> {
+) -> PgResult<(String, Option<String>, Option<String>, Vec<ObjectAddress>)> {
     if sql_body_in.is_none() && !as_clause_set {
         return Err(ereport(ERROR)
             .errcode(ERRCODE_INVALID_FUNCTION_DEFINITION)
@@ -852,7 +853,8 @@ fn interpret_AS_clause(
             .into_error());
     }
 
-    let mut sql_body_out: Option<Box<Node>> = None;
+    let mut sql_body_out: Option<String> = None;
+    let mut sql_body_refs: Vec<ObjectAddress> = Vec::new();
     let prosrc_str: String;
     let probin_str: Option<String>;
 
@@ -873,13 +875,16 @@ fn interpret_AS_clause(
             prosrc_str = s;
         }
     } else if let Some(sql_body_in) = sql_body_in {
-        sql_body_out = Some(Box::new(seam::interpret_sql_body::call(
+        let interpreted = seam::interpret_sql_body::call(
+            mcx,
             funcname.to_string(),
-            sql_body_in.clone(),
+            sql_body_in,
             parameter_types,
             in_parameter_names,
             query_string,
-        )?));
+        )?;
+        sql_body_out = Some(interpreted.text);
+        sql_body_refs = interpreted.body_refs;
         /*
          * We must put something in prosrc.  For the moment, just record an
          * empty string.
@@ -913,7 +918,7 @@ fn interpret_AS_clause(
         prosrc_str = src;
     }
 
-    Ok((prosrc_str, probin_str, sql_body_out))
+    Ok((prosrc_str, probin_str, sql_body_out, sql_body_refs))
 }
 // ===========================================================================
 // CreateFunction (functioncmds.c:1025)
@@ -922,9 +927,10 @@ fn interpret_AS_clause(
 /// `CreateFunction(pstate, stmt)` (functioncmds.c:1025).
 ///
 /// `query_string` is `pstate->p_sourcetext`, for the inline SQL-body interpreter.
-pub fn CreateFunction(
-    mcx: Mcx<'_>,
+pub fn CreateFunction<'mcx>(
+    mcx: Mcx<'mcx>,
     stmt: &CreateFunctionStmt,
+    sql_body_rich: Option<&types_nodes::nodes::Node<'mcx>>,
     query_string: Option<String>,
 ) -> PgResult<ObjectAddress> {
     /* Convert list of names to a name and namespace */
@@ -965,7 +971,7 @@ pub fn CreateFunction(
     let language: String = match &attrs.language {
         Some(l) => l.clone(),
         None => {
-            if stmt.sql_body.is_some() {
+            if sql_body_rich.is_some() {
                 "sql".to_string()
             } else {
                 return Err(ereport(ERROR)
@@ -1077,13 +1083,14 @@ pub fn CreateFunction(
         None
     };
 
-    let (prosrc_str, probin_str, prosqlbody) = interpret_AS_clause(
+    let (prosrc_str, probin_str, prosqlbody, prosqlbody_refs) = interpret_AS_clause(
+        mcx,
         language_oid,
         &language,
         &funcname,
         &attrs.as_clause,
         attrs.as_clause_set,
-        stmt.sql_body.as_deref(),
+        sql_body_rich,
         params.parameter_types_list.clone(),
         params.in_parameter_names_list.clone(),
         query_string,
@@ -1137,6 +1144,7 @@ pub fn CreateFunction(
         prosrc: prosrc_str,
         probin: probin_str,
         prosqlbody,
+        prosqlbody_refs,
         prokind,
         security: attrs.security_definer,
         is_leak_proof: attrs.is_leakproof,

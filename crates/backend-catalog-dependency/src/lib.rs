@@ -140,7 +140,7 @@ use backend_utils_cache_lsyscache_seams as lsyscache_seams;
 use backend_utils_cache_syscache_seams as syscache_seams;
 use backend_utils_misc_stack_depth_seams as stack_depth_seams;
 
-mod find_expr;
+pub mod find_expr;
 pub use find_expr::{find_expr_references_walker, FindExprReferencesContext};
 
 mod seams;

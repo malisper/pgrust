@@ -101,7 +101,12 @@ pub struct ProcedureCreateArgs {
     pub language_validator: Oid,
     pub prosrc: String,
     pub probin: Option<String>,
-    pub prosqlbody: Option<Box<Node>>,
+    /// The cooked SQL-function body, already serialized to its `pg_node_tree`
+    /// text by `interpret_sql_body` (`None` for the classic `AS '...'` form).
+    pub prosqlbody: Option<String>,
+    /// The body's referenced objects (extracted from the in-memory cooked node),
+    /// recorded against the new function as `DEPENDENCY_NORMAL` dependencies.
+    pub prosqlbody_refs: Vec<ObjectAddress>,
     pub prokind: i8,
     pub security: bool,
     pub is_leak_proof: bool,
@@ -328,15 +333,36 @@ seam_core::seam!(
     pub fn default_has_table_refs(def: Node) -> PgResult<bool>
 );
 
+/// The product of `interpret_AS_clause`'s inline-SQL-body branch: the serialized
+/// `pg_node_tree` text (stored in `pg_proc.prosqlbody`) plus the object
+/// references the cooked body depends on, extracted from the *in-memory* cooked
+/// node (so dependency recording never has to round-trip the text back through
+/// `stringToNode`, matching C's in-memory `recordDependencyOnExpr`).
+#[derive(Clone, Debug, Default)]
+pub struct InterpretedSqlBody {
+    /// `nodeToString(*sql_body_out)` — the stored `pg_node_tree`.
+    pub text: String,
+    /// The body's referenced objects (`find_expr_references` over the cooked
+    /// node), to be recorded against the new function in `ProcedureCreate`.
+    pub body_refs: Vec<ObjectAddress>,
+}
+
 seam_core::seam!(
-    /// The whole inline-SQL-body branch of `interpret_AS_clause`.
-    pub fn interpret_sql_body(
+    /// The whole inline-SQL-body branch of `interpret_AS_clause`
+    /// (functioncmds.c:910). Transforms the raw `sql_body_in` (a `ReturnStmt`
+    /// for `RETURN expr`, or the `BEGIN ATOMIC ... END` statement list) into the
+    /// cooked SQL-body node-tree and returns its serialized `pg_node_tree` text
+    /// (`nodeToString`) plus the body's object references. The owner
+    /// (`backend-parser-analyze`) installs it: it owns `transformStmt`, rich
+    /// `nodeToString`, and the dependency-reference walker.
+    pub fn interpret_sql_body<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         funcname: String,
-        sql_body_in: Node,
+        sql_body_in: &types_nodes::nodes::Node<'mcx>,
         parameter_types: Vec<Oid>,
         in_parameter_names: Vec<String>,
         query_string: Option<String>,
-    ) -> PgResult<Node>
+    ) -> PgResult<InterpretedSqlBody>
 );
 
 seam_core::seam!(

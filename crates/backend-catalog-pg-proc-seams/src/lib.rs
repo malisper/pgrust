@@ -252,11 +252,12 @@ seam_core::seam!(
  * cooked-tree owner (the parser/analyze model that yields real `Query`/expr
  * trees) installs them when it lands. `mirror-pg-and-panic`. */
 
-seam_core::seam!(
-    /// `nodeToString(prosqlbody)` (pg_proc.c:373): serialize the parsed SQL-body
-    /// node to its `pg_node_tree` text. `Err` carries OOM / serializer error.
-    pub fn node_to_string_sqlbody(prosqlbody: types_parsenodes::Node) -> PgResult<String>
-);
+/* The SQL-function body (`prosqlbody`) is no longer carried as a cooked
+ * `types_parsenodes::Node` through pg-proc: `interpret_sql_body` (in the
+ * parser-owning crate) serializes the cooked body to its `pg_node_tree` text and
+ * extracts its object references up front, so `ProcedureCreate` stores the text
+ * directly and records the references without a seam (the
+ * `node_to_string_sqlbody` / `record_dependency_on_sqlbody` seams are gone). */
 
 seam_core::seam!(
     /// `nodeToString((Node *) parameterDefaults)` (pg_proc.c:360): serialize the
@@ -265,18 +266,6 @@ seam_core::seam!(
     pub fn node_to_string_defaults(
         parameter_defaults: Vec<types_parsenodes::Node>,
     ) -> PgResult<String>
-);
-
-seam_core::seam!(
-    /// `recordDependencyOnExpr(&myself, prosqlbody, NIL, DEPENDENCY_NORMAL)`
-    /// (pg_proc.c:666): record the SQL-body's object references against the new
-    /// function (`func_oid` identifies `myself`, classId
-    /// `ProcedureRelationId`). `Err` carries the heap/index-mutation
-    /// `ereport(ERROR)`s.
-    pub fn record_dependency_on_sqlbody(
-        func_oid: Oid,
-        prosqlbody: types_parsenodes::Node,
-    ) -> PgResult<()>
 );
 
 seam_core::seam!(

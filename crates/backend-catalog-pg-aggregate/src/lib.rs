@@ -767,6 +767,7 @@ pub fn AggregateCreate(args: AggregateCreateArgs) -> PgResult<ObjectAddress> {
         prosrc: String::from("aggregate_dummy"), /* placeholder (no such proc) */
         probin: None,                  /* probin */
         prosqlbody: None,              /* prosqlbody */
+        prosqlbody_refs: alloc::vec::Vec::new(), /* prosqlbody_refs */
         prokind: PROKIND_AGGREGATE,
         security: false, /* security invoker (currently not definable for agg) */
         is_leak_proof: false, /* isLeakProof */

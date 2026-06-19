@@ -7146,6 +7146,7 @@ dependencies = [
  "types-catalog",
  "types-core",
  "types-error",
+ "types-nodes",
  "types-parsenodes",
  "types-tuple",
 ]
@@ -13197,8 +13198,11 @@ dependencies = [
 name = "backend-parser-analyze"
 version = "0.0.0"
 dependencies = [
+ "backend-catalog-dependency",
  "backend-commands-createas-seams",
+ "backend-commands-functioncmds-seams",
  "backend-nodes-core",
+ "backend-nodes-outfuncs",
  "backend-optimizer-util-clauses",
  "backend-optimizer-util-clauses-seams",
  "backend-optimizer-util-vars",

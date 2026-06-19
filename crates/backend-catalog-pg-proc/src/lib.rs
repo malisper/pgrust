@@ -155,7 +155,8 @@ fn format_procedure_owned(funcoid: Oid) -> PgResult<String> {
 /// The Datum array arguments are owned idiomatic types: `parameterTypes` is the
 /// input-argument `oidvector` (`&[Oid]`); `allParameterTypes` / `parameterModes`
 /// / `parameterNames` / `trftypes` / `proconfig` are `Option<Vec<…>>` (`None` ≡
-/// the C `PointerGetDatum(NULL)`); `prosqlbody` is an owned `Option<Node>`;
+/// the C `PointerGetDatum(NULL)`); `prosqlbody` is the cooked SQL-body already
+/// serialized to its `pg_node_tree` text (`Option<String>`);
 /// `parameterDefaults` is a `Vec<Node>` (empty ≡ `NIL`); `trfoids` a `Vec<Oid>`.
 pub fn ProcedureCreate(
     procedureName: &str,
@@ -168,7 +169,8 @@ pub fn ProcedureCreate(
     languageValidator: Oid,
     prosrc: &str,
     probin: Option<&str>,
-    prosqlbody: Option<Node>,
+    prosqlbody: Option<String>,
+    prosqlbody_refs: Vec<types_catalog::catalog_dependency::ObjectAddress>,
     prokind: i8,
     security_definer: bool,
     isLeakProof: bool,
@@ -367,10 +369,9 @@ pub fn ProcedureCreate(
     } else {
         None
     };
-    let prosqlbody_text: Option<String> = match &prosqlbody {
-        Some(body) => Some(seam::node_to_string_sqlbody::call(body.clone())?),
-        None => None,
-    };
+    /* `prosqlbody` already arrives serialized to its `pg_node_tree` text
+     * (interpret_sql_body did the nodeToString in the parser-owning crate). */
+    let prosqlbody_text: Option<String> = prosqlbody.clone();
 
     let ctx = MemoryContext::new("ProcedureCreate");
     let mcx = ctx.mcx();
@@ -690,12 +691,17 @@ pub fn ProcedureCreate(
     drop(addrs);
 
     /* dependency on SQL routine body */
-    if languageObjectId == SQLlanguageId {
-        if let Some(body) = &prosqlbody {
-            /* recordDependencyOnExpr(&myself, prosqlbody, NIL, DEPENDENCY_NORMAL)
-             * over the cooked SQL-body node — crosses the pg-proc seam. */
-            seam::record_dependency_on_sqlbody::call(retval, body.clone())?;
+    if languageObjectId == SQLlanguageId && !prosqlbody_refs.is_empty() {
+        /* recordDependencyOnExpr(&myself, prosqlbody, NIL, DEPENDENCY_NORMAL):
+         * the body's object references were extracted from the *in-memory*
+         * cooked node by `interpret_sql_body` (so we never have to round-trip
+         * the stored text back through `stringToNode`). Record them against the
+         * new function exactly as `recordDependencyOnExpr` would. */
+        let mut body_addrs = new_object_addresses();
+        for r in &prosqlbody_refs {
+            add_exact_object_address(r, &mut body_addrs);
         }
+        record_object_address_dependencies(&myself, &mut body_addrs, DEPENDENCY_NORMAL)?;
     }
 
     /* dependency on parameter default expressions */
@@ -1269,6 +1275,7 @@ fn procedure_create_from_args(
         prosrc,
         probin,
         prosqlbody,
+        prosqlbody_refs,
         prokind,
         security,
         is_leak_proof,
@@ -1299,7 +1306,8 @@ fn procedure_create_from_args(
         language_validator,
         &prosrc,
         probin.as_deref(),
-        prosqlbody.map(|b| *b),
+        prosqlbody,
+        prosqlbody_refs,
         prokind,
         security,
         is_leak_proof,

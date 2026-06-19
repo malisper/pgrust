@@ -293,6 +293,79 @@ pub fn transformSelectStmt<'mcx>(
     Ok(qry)
 }
 
+/// `transformReturnStmt(pstate, stmt)` (analyze.c) — transform a `RETURN expr`
+/// statement (the body of a new-style SQL function defined with `RETURN`) into a
+/// `CMD_SELECT` `Query` with `isReturn = true` and a single-column target list
+/// holding the transformed return expression.
+pub fn transformReturnStmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'mcx>,
+    stmt: &types_nodes::ddlnodes::ReturnStmt<'mcx>,
+) -> PgResult<Query<'mcx>> {
+    let mut qry = Query::new(mcx);
+    qry.commandType = CmdType::CMD_SELECT;
+    qry.isReturn = true;
+
+    /*
+     * qry->targetList = list_make1(makeTargetEntry(
+     *     transformExpr(pstate, stmt->returnval, EXPR_KIND_SELECT_TARGET),
+     *     1, NULL, false));
+     */
+    let returnval = match stmt.returnval.as_deref() {
+        Some(n) => Some(n.clone_in(mcx)?),
+        None => None,
+    };
+    let expr = backend_parser_parse_expr::transformExpr(
+        pstate,
+        returnval,
+        ParseExprKind::EXPR_KIND_SELECT_TARGET,
+    )?;
+    let expr = expr.ok_or_else(|| elog_error("RETURN has no return value"))?;
+    let tle = backend_nodes_core::makefuncs::make_target_entry(mcx, expr, 1, None, false)?;
+    qry.targetList = {
+        let mut v = mcx::vec_with_capacity_in(mcx, 1)?;
+        v.push(tle);
+        v
+    };
+
+    /* if (pstate->p_resolve_unknowns) resolveTargetListUnknowns(...) */
+    if pstate.p_resolve_unknowns {
+        let mut tlist: Vec<types_nodes::primnodes::TargetEntry<'mcx>> =
+            core::mem::replace(&mut qry.targetList, mcx::PgVec::new_in(mcx))
+                .into_iter()
+                .collect();
+        backend_parser_parse_target::resolveTargetListUnknowns(mcx, pstate, &mut tlist)?;
+        qry.targetList = {
+            let mut v = mcx::vec_with_capacity_in(mcx, tlist.len())?;
+            for te in tlist {
+                v.push(te);
+            }
+            v
+        };
+    }
+
+    /* move the range table and join tree out of the ParseState into the Query */
+    qry.rtable = core::mem::replace(&mut pstate.p_rtable, mcx::PgVec::new_in(mcx));
+    qry.rteperminfos = core::mem::replace(&mut pstate.p_rteperminfos, mcx::PgVec::new_in(mcx));
+    let joinlist = core::mem::replace(&mut pstate.p_joinlist, mcx::PgVec::new_in(mcx));
+    qry.jointree = Some(mcx::alloc_in(
+        mcx,
+        types_nodes::rawnodes::FromExpr {
+            fromlist: joinlist,
+            quals: None,
+        },
+    )?);
+
+    qry.hasSubLinks = pstate.p_hasSubLinks;
+    qry.hasWindowFuncs = pstate.p_hasWindowFuncs;
+    qry.hasTargetSRFs = pstate.p_hasTargetSRFs;
+    qry.hasAggs = pstate.p_hasAggs;
+
+    backend_parser_parse_collate::assign_query_collations(Some(pstate), &mut qry)?;
+
+    Ok(qry)
+}
+
 /// `transformValuesClause(pstate, stmt)` — transform a standalone VALUES into a
 /// `Query` with a VALUES RTE. Reaches `addRangeTableEntryForValues`, which is a
 /// seam-and-panic in the parse_relation owner (the central Node enum has no

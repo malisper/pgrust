@@ -166,6 +166,164 @@ pub fn parse_analyze_varparams<'mcx>(
 }
 
 /* ===========================================================================
+ * interpret_sql_body (functioncmds.c:910) — the inline SQL-body branch
+ * =========================================================================== */
+
+/// `IsPolymorphicType(typid)` (pg_type.h) — the pseudo-types a SQL function with
+/// an unquoted body may not have as an argument.
+fn is_polymorphic_type(typid: types_core::primitive::Oid) -> bool {
+    use types_core::primitive::Oid;
+    // ANYELEMENT/ANYARRAY/ANYNONARRAY/ANYENUM/ANYRANGE/ANYMULTIRANGE +
+    // ANYCOMPATIBLE family (pg_type.dat).
+    const ANYELEMENTOID: Oid = 2283;
+    const ANYARRAYOID: Oid = 2277;
+    const ANYNONARRAYOID: Oid = 2776;
+    const ANYENUMOID: Oid = 3500;
+    const ANYRANGEOID: Oid = 3831;
+    const ANYMULTIRANGEOID: Oid = 4537;
+    const ANYCOMPATIBLEOID: Oid = 5077;
+    const ANYCOMPATIBLEARRAYOID: Oid = 5078;
+    const ANYCOMPATIBLENONARRAYOID: Oid = 5079;
+    const ANYCOMPATIBLERANGEOID: Oid = 5080;
+    const ANYCOMPATIBLEMULTIRANGEOID: Oid = 4538;
+    matches!(
+        typid,
+        ANYELEMENTOID
+            | ANYARRAYOID
+            | ANYNONARRAYOID
+            | ANYENUMOID
+            | ANYRANGEOID
+            | ANYMULTIRANGEOID
+            | ANYCOMPATIBLEOID
+            | ANYCOMPATIBLEARRAYOID
+            | ANYCOMPATIBLENONARRAYOID
+            | ANYCOMPATIBLERANGEOID
+            | ANYCOMPATIBLEMULTIRANGEOID
+    )
+}
+
+/// Transform one body statement (`transformStmt`) under the SQL-function parser
+/// hooks, raising the C "X is not yet supported in unquoted SQL function body"
+/// error for a `CMD_UTILITY` result.
+fn transform_one_body_stmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    pinfo: &types_nodes::parsestmt::SqlFnParseInfo,
+    query_string: Option<&str>,
+    stmt: &Node<'mcx>,
+) -> PgResult<Query<'mcx>> {
+    let mut pstate = backend_parser_small1::make_parsestate(mcx, None)?;
+    if let Some(s) = query_string {
+        pstate.p_sourcetext = Some(mcx::PgString::from_str_in(s, mcx)?);
+    }
+    backend_parser_small1::setup_parse_sql_function(&mut pstate, pinfo.clone());
+    let q = transformStmt(mcx, &mut pstate, stmt)?;
+    if q.commandType == CmdType::CMD_UTILITY {
+        return Err(ereport(ERROR)
+            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg("statement is not yet supported in unquoted SQL function body")
+            .into_error());
+    }
+    backend_parser_small1::free_parsestate(pstate)?;
+    Ok(q)
+}
+
+/// `interpret_AS_clause`'s inline-SQL-body branch (functioncmds.c:910). Build the
+/// SQL-function parse info, transform the raw `sql_body_in` (a `ReturnStmt` for
+/// `RETURN expr`, or — for `BEGIN ATOMIC ... END` — a `List` whose single element
+/// is the statement list) into the cooked SQL-body node-tree, and return its
+/// serialized `pg_node_tree` text (`nodeToString`). The cooked shape matches
+/// what `fmgr_sql` / planner inlining read back via `stringToNode`:
+///   * `RETURN expr`  -> a bare `Query` node.
+///   * `BEGIN ATOMIC` -> `list_make1(list_of_Query)` (a `List` of one `List`).
+pub fn interpret_sql_body<'mcx>(
+    mcx: Mcx<'mcx>,
+    funcname: String,
+    sql_body_in: &Node<'mcx>,
+    parameter_types: Vec<types_core::primitive::Oid>,
+    in_parameter_names: Vec<String>,
+    query_string: Option<String>,
+) -> PgResult<backend_commands_functioncmds_seams::InterpretedSqlBody> {
+    // pinfo->argtypes / argnames, with the polymorphic-arg check.
+    let nargs = parameter_types.len();
+    let mut argnames: Vec<Option<String>> = Vec::with_capacity(nargs);
+    for (i, &typ) in parameter_types.iter().enumerate() {
+        if is_polymorphic_type(typ) {
+            return Err(ereport(ERROR)
+                .errcode(types_error::ERRCODE_INVALID_FUNCTION_DEFINITION)
+                .errmsg(
+                    "SQL function with unquoted function body cannot have \
+                     polymorphic arguments",
+                )
+                .into_error());
+        }
+        // pinfo->argnames[i] = (s[0] != '\0') ? s : NULL;
+        match in_parameter_names.get(i) {
+            Some(s) if !s.is_empty() => argnames.push(Some(s.clone())),
+            _ => argnames.push(None),
+        }
+    }
+    let argnames_opt = if nargs > 0 { Some(argnames) } else { None };
+    let pinfo = types_nodes::parsestmt::SqlFnParseInfo::new(
+        funcname,
+        types_core::InvalidOid,
+        parameter_types,
+        argnames_opt,
+    );
+    let qstr = query_string.as_deref();
+
+    // if (IsA(sql_body_in, List)) { ... BEGIN ATOMIC ... } else { ... RETURN ... }
+    let cooked: Node<'mcx> = if sql_body_in.node_tag() == ntag::T_List {
+        // stmts = linitial_node(List, castNode(List, sql_body_in));
+        let outer = sql_body_in.expect_list();
+        let stmts: &[NodePtr<'mcx>] = match outer.first() {
+            Some(first) => match (**first).node_tag() {
+                ntag::T_List => &(**first).expect_list()[..],
+                // A grammar that already produced the bare statement list.
+                _ => &outer[..],
+            },
+            None => &outer[..],
+        };
+        let mut transformed = mcx::PgVec::new_in(mcx);
+        for stmt in stmts {
+            let q = transform_one_body_stmt(mcx, &pinfo, qstr, stmt.as_ref())?;
+            transformed.push(mcx::alloc_in(mcx, Node::mk_query(mcx, q))?);
+        }
+        // *sql_body_out = (Node *) list_make1(transformed_stmts);
+        let inner = Node::List(transformed);
+        let mut outer_vec = mcx::PgVec::new_in(mcx);
+        outer_vec.push(mcx::alloc_in(mcx, inner)?);
+        Node::List(outer_vec)
+    } else {
+        // q = transformStmt(pstate, sql_body_in); *sql_body_out = (Node *) q;
+        let q = transform_one_body_stmt(mcx, &pinfo, qstr, sql_body_in)?;
+        Node::mk_query(mcx, q)
+    };
+
+    // *prosrc_str_p = ""; *probin = NULL; nodeToString(*sql_body_out).
+    // Use the `nodes::Node` serializer (outfuncs) — its text is what the read
+    // path (`backend_nodes_core::read::string_to_node`) consumes.
+    let text = backend_nodes_outfuncs::nodeToString(mcx, &cooked)?
+        .as_str()
+        .to_string();
+
+    // recordDependencyOnExpr's reference-collection half (dependency.c:1697),
+    // run over the *in-memory* cooked node so the CREATE FUNCTION dependency
+    // recording never has to round-trip the stored text through `stringToNode`.
+    // The depender OID isn't known until `ProcedureCreate` inserts the row, so
+    // the references travel back with the serialized body and are recorded
+    // there.
+    let mut refs_ctx =
+        backend_catalog_dependency::find_expr::FindExprReferencesContext::new(mcx);
+    backend_catalog_dependency::find_expr::find_expr_references_walker(&cooked, &mut refs_ctx)?;
+    if let Some(e) = refs_ctx.err.take() {
+        return Err(e);
+    }
+    let body_refs = refs_ctx.addrs.refs;
+
+    Ok(backend_commands_functioncmds_seams::InterpretedSqlBody { text, body_refs })
+}
+
+/* ===========================================================================
  * parse_sub_analyze
  * =========================================================================== */
 
@@ -503,8 +661,10 @@ pub fn transformStmt<'mcx>(
         ntag::T_CreateTableAsStmt => {
             transformCreateTableAsStmt(mcx, pstate, parse_tree.expect_createtableasstmt())?
         }
+        ntag::T_ReturnStmt => {
+            select::transformReturnStmt(mcx, pstate, parse_tree.expect_returnstmt())?
+        }
         ntag::T_MergeStmt
-        | ntag::T_ReturnStmt
         | ntag::T_PLAssignStmt
         | ntag::T_DeclareCursorStmt
         | ntag::T_CallStmt => {
@@ -513,7 +673,7 @@ pub fn transformStmt<'mcx>(
             // Mirror the C dispatch and panic loudly until the family lands.
             panic!(
                 "transformStmt: DML/special statement (tag {:?}) is in the \
-                 follow-on family (transformUpdate/Delete/Merge/Return/\
+                 follow-on family (transformUpdate/Delete/Merge/\
                  PLAssign/DeclareCursor/Call) — not yet \
                  ported (analyze.c:312)",
                 parse_tree.tag()
@@ -607,6 +767,9 @@ pub fn init_seams() {
     backend_parser_analyze_seams::query_requires_rewrite_plan_value::set(
         query_requires_rewrite_plan_value_impl,
     );
+    // The inline SQL-function body interpreter (functioncmds.c:910): this is the
+    // lowest crate that owns `transformStmt` and the rich node serializer.
+    backend_commands_functioncmds_seams::interpret_sql_body::set(interpret_sql_body);
     // `if (post_parse_analyze_hook) (*post_parse_analyze_hook)(pstate, query,
     // jstate);` (analyze.c:127/169/206). The hook is a per-backend `fn` pointer
     // extensions install; it is NULL by default. With no extension loaded the C
