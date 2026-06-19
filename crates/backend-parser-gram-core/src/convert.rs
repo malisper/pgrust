@@ -129,6 +129,37 @@ fn distinct_clause_list<'mcx>(
     Ok(out)
 }
 
+/// `DefineStmt.args` (`*mut List`) → `PgVec<NodePtr>`, preserving the grammar's
+/// `aggr_args` NULL-cell convention. For a new-style aggregate the grammar builds
+/// `args` as the pair `list_make2(direct_args_or_NIL, makeInteger(numDirectArgs))`
+/// (gram.y `aggr_args`); a zero-direct-argument aggregate (`CREATE AGGREGATE
+/// foo(*)`) has `NIL` as the first element, i.e. a NULL list cell. The owned model
+/// — whose `NodePtr` cannot be NULL — represents that NULL cell as an empty
+/// `Node::List`, which `aggregatecmds::DefineAggregate` reads back through
+/// `nodeAsList(&args[0])` (an empty list == no direct args), exactly as C's
+/// `linitial_node(List, args)` yields `NIL`. Non-aggregate DefineStmt kinds never
+/// place a NULL cell in `args`, so this is a faithful superset of `node_list`.
+fn define_args_list<'mcx>(
+    mcx: Mcx<'mcx>,
+    l: *mut RawList,
+) -> PgResult<PgVec<'mcx, NodePtr<'mcx>>> {
+    if l.is_null() {
+        return Ok(PgVec::new_in(mcx));
+    }
+    let list: &RawList = unsafe { &*l };
+    let mut out = mcx::vec_with_capacity_in(mcx, list.len().max(0) as usize)?;
+    for cell in list.cells() {
+        let np: *mut RawNode = cell.ptr();
+        match node_opt(mcx, np)? {
+            Some(p) => out.push(p),
+            // NULL cell == the new-style `aggr_args` "no direct args" marker
+            // (`NIL` first element); encode as an empty `Node::List`.
+            None => out.push(mcx::alloc_in(mcx, Node::mk_list(mcx, PgVec::new_in(mcx)))?),
+        }
+    }
+    Ok(out)
+}
+
 /// `*mut List` of `Oid` (int cells) → `PgVec<Oid>`.
 fn oid_list<'mcx>(mcx: Mcx<'mcx>, l: *mut RawList) -> PgResult<PgVec<'mcx, u32>> {
     if l.is_null() {

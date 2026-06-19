@@ -989,6 +989,13 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::search_syscache_exists_reloid::set(
         projections::search_syscache_exists_reloid,
     );
+    // functioncmds.c reaches `SearchSysCacheExists3(PROCNAMEARGSNSP, ...)`
+    // through the functioncmds-seams `function_exists_in_namespace` channel
+    // (AlterFunction / RenameFunction name-collision probe). syscache.c owns the
+    // PROCNAMEARGSNSP cache, so it installs the probe.
+    backend_commands_functioncmds_seams::function_exists_in_namespace::set(
+        projections::function_exists_in_namespace,
+    );
     backend_utils_cache_syscache_seams::rel_relkind::set(projections::rel_relkind);
     backend_utils_cache_syscache_seams::rel_relhastriggers::set(
         projections::rel_relhastriggers,

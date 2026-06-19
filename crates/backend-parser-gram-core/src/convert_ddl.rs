@@ -518,7 +518,7 @@ fn conv_definestmt<'mcx>(mcx: Mcx<'mcx>, p: *mut cd::DefineStmt) -> PgResult<tdn
         kind: object_type(s.kind),
         oldstyle: s.oldstyle,
         defnames: node_list(mcx, s.defnames)?,
-        args: node_list(mcx, s.args)?,
+        args: define_args_list(mcx, s.args)?,
         definition: node_list(mcx, s.definition)?,
         if_not_exists: s.if_not_exists,
         replace: s.replace,

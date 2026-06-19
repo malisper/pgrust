@@ -19,6 +19,8 @@ backend-catalog-pg-class = { path = "../backend-catalog-pg-class" }
 backend-catalog-objectaddress-seams = { path = "../backend-catalog-objectaddress-seams" }
 backend-catalog-indexing = { path = "../backend-catalog-indexing" }
 backend-commands-seclabel-seams = { path = "../backend-commands-seclabel-seams" }
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
+backend-parser-parse-type = { path = "../backend-parser-parse-type" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-access-common-scankey = { path = "../backend-access-common-scankey" }
 backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }

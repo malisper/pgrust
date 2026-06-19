@@ -1402,6 +1402,15 @@ pub fn init_seams() {
         },
     );
 
+    // Cross-crate install: `NameListToString(names)` (catalog/namespace.c) —
+    // render a possibly-qualified name list as a dotted string. functioncmds.c /
+    // pg_aggregate.c / typecmds.c reach it through the functioncmds-seams channel
+    // for `ereport` object-name text. The decl carries the already-resolved
+    // (non-NULL) name components as owned `Vec<String>`, so the dotted render is a
+    // plain `'.'` join (the C `NULL -> '*'` arm cannot occur for these callers,
+    // which never pass an A_Star component).
+    backend_commands_functioncmds_seams::name_list_to_string::set(|names| Ok(names.join(".")));
+
     // Cross-crate install: `LookupFuncName(funcname, nargs, argtypes,
     // missing_ok)` (parse_func.c, body here) is reached by functioncmds.c
     // (CreateCast / SUPPORT lookup) and by typecmds.c's I/O-function resolution

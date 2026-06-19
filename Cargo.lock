@@ -7739,6 +7739,8 @@ dependencies = [
  "backend-catalog-pg-class",
  "backend-commands-seclabel-seams",
  "backend-commands-user-seams",
+ "backend-parser-parse-type",
+ "backend-tcop-utility-out-seams",
  "backend-utils-cache-relcache-seams",
  "backend-utils-error",
  "backend-utils-init-miscinit-seams",

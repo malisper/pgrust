@@ -719,15 +719,86 @@ fn object_node(stmt: &SecLabelStmt) -> &Node {
         .expect("SecLabelStmt::object must be a valid parser node")
 }
 
+/// Decode an arena [`types_nodes::ddlnodes::SecLabelStmt`] into the flat
+/// [`types_parsenodes::SecLabelStmt`] that [`ExecSecLabelStmt`] consumes, then
+/// run it. This is the bridge from the utility dispatcher's arena parse tree to
+/// the old-model command body, mirroring the COMMENT seam adapter
+/// (`arena_commentstmt_to_owned`). The arena `object` node is lowered through
+/// `rich_node_to_parse` (the project-wide arena→parsenodes lowering).
+fn arena_seclabelstmt_to_owned(
+    stmt: &types_nodes::ddlnodes::SecLabelStmt<'_>,
+) -> PgResult<SecLabelStmt> {
+    let object = match stmt.object.as_deref() {
+        Some(n) => Some(Box::new(backend_parser_parse_type::rich_node_to_parse(n)?)),
+        None => None,
+    };
+    Ok(SecLabelStmt {
+        objtype: stmt.objtype,
+        object,
+        provider: stmt.provider.as_ref().map(|s| s.as_str().to_string()),
+        label: stmt.label.as_ref().map(|s| s.as_str().to_string()),
+    })
+}
+
+/// Outward-seam adapter for the SECURITY LABEL fast path
+/// (`exec_sec_label_stmt`): used by the utility dispatcher when the object type
+/// does NOT support event triggers (utility.c `T_SecLabelStmt` non-event-trigger
+/// leg). Returns `()` (the resolved address is discarded by the dispatcher).
+fn exec_sec_label_stmt_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &types_nodes::nodes::Node<'mcx>,
+) -> PgResult<()> {
+    let sls = match stmt.as_seclabelstmt() {
+        Some(s) => s,
+        None => {
+            return Err(PgError::error(
+                "exec_sec_label_stmt_seam: statement is not a SecLabelStmt",
+            ))
+        }
+    };
+    let owned = arena_seclabelstmt_to_owned(sls)?;
+    ExecSecLabelStmt(mcx, &owned)?;
+    Ok(())
+}
+
+/// Outward-seam adapter for the SECURITY LABEL slow path
+/// (`exec_sec_label_stmt_slow`): used by `ProcessUtilitySlow` for object types
+/// that support event triggers. Returns the resolved [`ObjectAddress`] so
+/// `ddl_command_end` event triggers can reach the labeled object.
+fn exec_sec_label_stmt_slow_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &types_nodes::nodes::Node<'mcx>,
+) -> PgResult<ObjectAddress> {
+    let sls = match stmt.as_seclabelstmt() {
+        Some(s) => s,
+        None => {
+            return Err(PgError::error(
+                "exec_sec_label_stmt_slow_seam: statement is not a SecLabelStmt",
+            ))
+        }
+    };
+    let owned = arena_seclabelstmt_to_owned(sls)?;
+    ExecSecLabelStmt(mcx, &owned)
+}
+
 /// Install this crate's seams.
 ///
 /// The catalog read/write control flow runs entirely in-crate over real
 /// relations, so the only outward seams are the project-wide varlena/`Datum`
 /// conversions (installed by their owners). Here we install the inward
 /// [`DeleteSecurityLabel`] boundary, which dependency.c fires unconditionally
-/// for every dropped object to clean up its `pg_seclabel`/`pg_shseclabel` rows.
+/// for every dropped object to clean up its `pg_seclabel`/`pg_shseclabel` rows,
+/// plus the SECURITY LABEL dispatch seams (`exec_sec_label_stmt` /
+/// `exec_sec_label_stmt_slow`).
 pub fn init_seams() {
     backend_commands_seclabel_seams::DeleteSecurityLabel::set(DeleteSecurityLabel);
+
+    // utility.c dispatches SECURITY LABEL through tcop-utility-out-seams: the
+    // fast path (no event-trigger support) calls `exec_sec_label_stmt`; the slow
+    // path (`ProcessUtilitySlow`) calls `exec_sec_label_stmt_slow`. Both decode
+    // the arena SecLabelStmt and run the ported `ExecSecLabelStmt` body.
+    backend_tcop_utility_out_seams::exec_sec_label_stmt::set(exec_sec_label_stmt_seam);
+    backend_tcop_utility_out_seams::exec_sec_label_stmt_slow::set(exec_sec_label_stmt_slow_seam);
 
     // user.c DROP ROLE: `DeleteSharedSecurityLabel(roleid, AuthIdRelationId)`.
     backend_commands_user_seams::delete_shared_security_label::set(|roleid| {

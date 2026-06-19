@@ -33,7 +33,7 @@ use backend_commands_functioncmds::interpret_function_parameter_list;
 
 use backend_catalog_aclchk_seams::{aclcheck_error, object_aclcheck};
 use backend_catalog_pg_aggregate_seams::{aggregate_create, AggregateCreateArgs};
-use backend_parser_parse_type_seams::{typename_to_string, typename_type_id};
+use backend_parser_parse_type_seams::{typename_to_string, typename_type_id_node};
 use backend_utils_adt_format_type_seams::format_type_be;
 use backend_utils_cache_lsyscache_seams::{get_namespace_name, get_type_input_info, get_typtype};
 use backend_utils_fmgr_fmgr_seams::oid_input_function_call;
@@ -383,7 +383,11 @@ pub fn DefineAggregate(
             aggArgType = InvalidOid;
         } else {
             numArgs = 1;
-            aggArgType = typename_type_id::call(&baseTypeR)?;
+            // Resolve through the full-`TypeName` node seam (not the trimmed
+            // resolver TypeName) so an array base type (`foo[]`) keeps its
+            // `arrayBounds` and resolves to the array OID, matching C's
+            // `typenameTypeId(NULL, baseType)`.
+            aggArgType = typename_type_id_node::call(baseType)?;
         }
         parameterTypes = if numArgs == 0 {
             Vec::new()
@@ -440,7 +444,13 @@ pub fn DefineAggregate(
      * aggregate.
      */
     let transType = transType.as_ref().unwrap();
-    let transTypeId: Oid = typename_type_id::call(&to_resolver_typename(transType))?;
+    // Resolve through the full-`TypeName` node seam so an array transition type
+    // (`stype = foo[]`) keeps its `arrayBounds` and resolves to the array OID
+    // (whose `typinput` is `array_in`), matching C's `typenameTypeId(NULL,
+    // transType)`. The trimmed resolver TypeName drops `arrayBounds`, which would
+    // misresolve `foo[]` to the element type `foo` and feed `'{}'` to the
+    // element's input function.
+    let transTypeId: Oid = typename_type_id_node::call(transType)?;
     let transTypeType: i8 = get_typtype::call(transTypeId)? as i8;
     if transTypeType == TYPTYPE_PSEUDO && !IsPolymorphicType(transTypeId) {
         if transTypeId == INTERNALOID && superuser::call(mcx)? {
@@ -486,7 +496,9 @@ pub fn DefineAggregate(
     let mut mtransTypeId: Oid = InvalidOid;
     let mut mtransTypeType: i8 = 0;
     if let Some(mtransType) = mtransType.as_ref() {
-        mtransTypeId = typename_type_id::call(&to_resolver_typename(mtransType))?;
+        // Full-`TypeName` node seam: preserve `arrayBounds` for `mstype = foo[]`
+        // (see the transtype resolution above).
+        mtransTypeId = typename_type_id_node::call(mtransType)?;
         mtransTypeType = get_typtype::call(mtransTypeId)? as i8;
         if mtransTypeType == TYPTYPE_PSEUDO && !IsPolymorphicType(mtransTypeId) {
             if mtransTypeId == INTERNALOID && superuser::call(mcx)? {

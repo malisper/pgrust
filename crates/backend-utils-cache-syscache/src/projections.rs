@@ -2041,6 +2041,33 @@ pub(crate) fn collation_name_enc_nsp_exists(
     Ok(exists)
 }
 
+/// `SearchSysCacheExists3(PROCNAMEARGSNSP, proname, proargtypes, nsp)`
+/// (functioncmds.c `AlterFunction` / `RenameFunction` collision probe): whether
+/// a function with the given (name, input-argument types, namespace) already
+/// exists. The `parameter_types` list is framed as the `oidvector` syscache key
+/// exactly as `search_proc_name_args_nsp` does.
+pub(crate) fn function_exists_in_namespace(
+    proname: String,
+    proargtypes: Vec<Oid>,
+    nsp: Oid,
+) -> PgResult<bool> {
+    let scratch = MemoryContext::new("function_exists_in_namespace probe");
+    let mcx = scratch.mcx();
+    let oidvec = backend_utils_adt_oid::buildoidvector(mcx, &proargtypes)?;
+    let tuple = SearchSysCache3(
+        mcx,
+        PROCNAMEARGSNSP,
+        SysCacheKey::Str(&proname),
+        SysCacheKey::Bytes(&oidvec[..]),
+        SysCacheKey::Value(KeyDatum::from_oid(nsp)),
+    )?;
+    let exists = tuple.is_some();
+    if let Some(tup) = tuple {
+        ReleaseSysCache(tup);
+    }
+    Ok(exists)
+}
+
 /// `SearchSysCache1(CONSTROID, ObjectIdGetDatum(conoid))` projected to the
 /// scalar [`FormData_pg_constraint`] columns plus the heap TID (`tup->t_self`),
 /// then `ReleaseSysCache`. `Ok(None)` on a cache miss (`!HeapTupleIsValid`);
