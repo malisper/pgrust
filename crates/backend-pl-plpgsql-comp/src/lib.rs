@@ -27,6 +27,10 @@ use core::cell::RefCell;
 
 use types_core::Oid;
 use types_datum::Datum;
+use types_error::{
+    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_FUNCTION_DEFINITION,
+    ERRCODE_UNDEFINED_OBJECT, ERRCODE_UNDEFINED_TABLE, ERRCODE_WRONG_OBJECT_TYPE,
+};
 use types_plpgsql::*;
 
 use backend_pl_plpgsql_funcs as funcs;
@@ -357,25 +361,26 @@ pub fn plpgsql_parse_tripword(
 // ===========================================================================
 
 /// `plpgsql_parse_wordtype` — the scanner found `word%TYPE`.
-pub fn plpgsql_parse_wordtype(ident: &str) -> Box<PLpgSQL_type> {
+pub fn plpgsql_parse_wordtype(ident: &str) -> PgResult<Box<PLpgSQL_type>> {
     if let Some(top) = funcs::plpgsql_ns_top() {
         if let Some(item) = funcs::plpgsql_ns_lookup(&top, false, ident, None, None, None) {
             match item.itemtype {
                 PLpgSQL_nsitem_type::PLPGSQL_NSTYPE_VAR => {
-                    return mem::boxed(datum_var_datatype(item.itemno));
+                    return Ok(mem::boxed(datum_var_datatype(item.itemno)));
                 }
                 PLpgSQL_nsitem_type::PLPGSQL_NSTYPE_REC => {
-                    return mem::boxed(datum_rec_datatype(item.itemno));
+                    return Ok(mem::boxed(datum_rec_datatype(item.itemno)));
                 }
                 PLpgSQL_nsitem_type::PLPGSQL_NSTYPE_LABEL => {}
             }
         }
     }
-    panic!("variable \"{ident}\" does not exist (SQLSTATE 42704)");
+    Err(PgError::error(format!("variable \"{ident}\" does not exist"))
+        .with_sqlstate(ERRCODE_UNDEFINED_OBJECT))
 }
 
 /// `plpgsql_parse_cwordtype` — `%TYPE` for a block-qualified var or a column.
-pub fn plpgsql_parse_cwordtype(idents: &[String]) -> Box<PLpgSQL_type> {
+pub fn plpgsql_parse_cwordtype(idents: &[String]) -> PgResult<Box<PLpgSQL_type>> {
     if idents.len() == 2 {
         if let Some(top) = funcs::plpgsql_ns_top() {
             let mut nnames: i32 = 0;
@@ -388,9 +393,9 @@ pub fn plpgsql_parse_cwordtype(idents: &[String]) -> Box<PLpgSQL_type> {
                 Some(&mut nnames),
             ) {
                 if item.itemtype == PLpgSQL_nsitem_type::PLPGSQL_NSTYPE_VAR {
-                    return mem::boxed(datum_var_datatype(item.itemno));
+                    return Ok(mem::boxed(datum_var_datatype(item.itemno)));
                 } else if item.itemtype == PLpgSQL_nsitem_type::PLPGSQL_NSTYPE_REC && nnames == 2 {
-                    return mem::boxed(datum_rec_datatype(item.itemno));
+                    return Ok(mem::boxed(datum_rec_datatype(item.itemno)));
                 }
             }
         }
@@ -403,28 +408,35 @@ pub fn plpgsql_parse_cwordtype(idents: &[String]) -> Box<PLpgSQL_type> {
 }
 
 /// `plpgsql_parse_wordrowtype` — the scanner found `word%ROWTYPE`.
-pub fn plpgsql_parse_wordrowtype(ident: &str) -> Box<PLpgSQL_type> {
+pub fn plpgsql_parse_wordrowtype(ident: &str) -> PgResult<Box<PLpgSQL_type>> {
     let class_oid = seam::relname_get_relid(ident);
     if !oid_is_valid(class_oid) {
-        panic!("relation \"{ident}\" does not exist (SQLSTATE 42P01)");
+        return Err(PgError::error(format!("relation \"{ident}\" does not exist"))
+            .with_sqlstate(ERRCODE_UNDEFINED_TABLE));
     }
     let typ_oid = seam::get_rel_type_id(class_oid);
     if !oid_is_valid(typ_oid) {
-        panic!("relation \"{ident}\" does not have a composite type (SQLSTATE 42809)");
+        return Err(
+            PgError::error(format!("relation \"{ident}\" does not have a composite type"))
+                .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE),
+        );
     }
-    plpgsql_build_datatype_internal(typ_oid, -1, INVALID_OID, None)
+    Ok(plpgsql_build_datatype_internal(typ_oid, -1, INVALID_OID, None))
 }
 
 /// `plpgsql_parse_cwordrowtype` — `compositeword%ROWTYPE` (qualified table).
-pub fn plpgsql_parse_cwordrowtype(idents: &[String]) -> Box<PLpgSQL_type> {
-    // Qualified table name -> RangeVarGetRelid -> get_rel_type_id; the namespace
-    // owner is unwired for compile, so this mirror-PG-and-panics.
-    let class_oid = seam::relname_get_relid(idents.last().map(String::as_str).unwrap_or(""));
+pub fn plpgsql_parse_cwordrowtype(idents: &[String]) -> PgResult<Box<PLpgSQL_type>> {
+    // Qualified table name -> RangeVarGetRelid -> get_rel_type_id.
+    let relname = idents.last().map(String::as_str).unwrap_or("");
+    let class_oid = seam::relname_get_relid(relname);
     let typ_oid = seam::get_rel_type_id(class_oid);
     if !oid_is_valid(typ_oid) {
-        panic!("relation does not have a composite type (SQLSTATE 42809)");
+        return Err(
+            PgError::error(format!("relation \"{relname}\" does not have a composite type"))
+                .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE),
+        );
     }
-    plpgsql_build_datatype_internal(typ_oid, -1, INVALID_OID, None)
+    Ok(plpgsql_build_datatype_internal(typ_oid, -1, INVALID_OID, None))
 }
 
 // ===========================================================================
@@ -711,18 +723,24 @@ fn build_datatype(
 }
 
 /// `plpgsql_build_datatype_arrayof` — build the array type over `dtype`.
-pub fn plpgsql_build_datatype_arrayof(dtype: Box<PLpgSQL_type>) -> Box<PLpgSQL_type> {
+pub fn plpgsql_build_datatype_arrayof(dtype: Box<PLpgSQL_type>) -> PgResult<Box<PLpgSQL_type>> {
     if dtype.typisarray {
-        return dtype;
+        return Ok(dtype);
     }
     let array_typeid = seam::get_array_type(dtype.typoid);
     if !oid_is_valid(array_typeid) {
-        panic!(
-            "could not find array type for data type {} (SQLSTATE 42704)",
+        return Err(PgError::error(format!(
+            "could not find array type for data type {}",
             seam::format_type_be(dtype.typoid)
-        );
+        ))
+        .with_sqlstate(ERRCODE_UNDEFINED_OBJECT));
     }
-    plpgsql_build_datatype_internal(array_typeid, dtype.atttypmod, dtype.collation, None)
+    Ok(plpgsql_build_datatype_internal(
+        array_typeid,
+        dtype.atttypmod,
+        dtype.collation,
+        None,
+    ))
 }
 
 // ===========================================================================
@@ -731,7 +749,7 @@ pub fn plpgsql_build_datatype_arrayof(dtype: Box<PLpgSQL_type>) -> Box<PLpgSQL_t
 
 /// `plpgsql_recognize_err_condition` — check a condition name and translate it
 /// to SQLSTATE.  Returns the first match.
-pub fn plpgsql_recognize_err_condition(condname: &str, allow_sqlstate: bool) -> i32 {
+pub fn plpgsql_recognize_err_condition(condname: &str, allow_sqlstate: bool) -> PgResult<i32> {
     if allow_sqlstate
         && condname.len() == 5
         && condname
@@ -739,24 +757,27 @@ pub fn plpgsql_recognize_err_condition(condname: &str, allow_sqlstate: bool) -> 
             .all(|c| c.is_ascii_digit() || c.is_ascii_uppercase())
     {
         let b = condname.as_bytes();
-        return make_sqlstate(b[0], b[1], b[2], b[3], b[4]);
+        return Ok(make_sqlstate(b[0], b[1], b[2], b[3], b[4]));
     }
 
     if let Some(sqlerrstate) = exception_label_lookup(condname) {
-        return sqlerrstate;
+        return Ok(sqlerrstate);
     }
-    panic!("unrecognized exception condition \"{condname}\" (SQLSTATE 42704)");
+    Err(
+        PgError::error(format!("unrecognized exception condition \"{condname}\""))
+            .with_sqlstate(ERRCODE_UNDEFINED_OBJECT),
+    )
 }
 
 /// `plpgsql_parse_err_condition` — `PLpgSQL_condition` entry(s) for a name.
-pub fn plpgsql_parse_err_condition(condname: &str) -> PLpgSQL_condition {
+pub fn plpgsql_parse_err_condition(condname: &str) -> PgResult<PLpgSQL_condition> {
     // XXX Eventually we will want to look for user-defined exception names here.
     if condname == "others" {
-        return PLpgSQL_condition {
+        return Ok(PLpgSQL_condition {
             sqlerrstate: PLPGSQL_OTHERS,
             condname: mem::sdup(condname),
             next: None,
-        };
+        });
     }
 
     let mut head: Option<Box<PLpgSQL_condition>> = None;
@@ -769,8 +790,11 @@ pub fn plpgsql_parse_err_condition(condname: &str) -> PLpgSQL_condition {
     }
 
     match head {
-        Some(p) => *p,
-        None => panic!("unrecognized exception condition \"{condname}\" (SQLSTATE 42704)"),
+        Some(p) => Ok(*p),
+        None => Err(
+            PgError::error(format!("unrecognized exception condition \"{condname}\""))
+                .with_sqlstate(ERRCODE_UNDEFINED_OBJECT),
+        ),
     }
 }
 
@@ -2024,15 +2048,15 @@ pub fn init_seams() {
         Ok(plpgsql_build_cursor_arg_row(lineno, args))
     });
     comp_seams::plpgsql_build_datatype_arrayof::set(|elem| {
-        Ok(plpgsql_build_datatype_arrayof(Box::new(elem)))
+        plpgsql_build_datatype_arrayof(Box::new(elem))
     });
     comp_seams::plpgsql_build_datatype::set(|typoid, typmod, collation| {
         Ok(plpgsql_build_datatype_internal(typoid, typmod, collation, None))
     });
-    comp_seams::plpgsql_parse_wordtype::set(|dtname| Ok(plpgsql_parse_wordtype(dtname)));
-    comp_seams::plpgsql_parse_wordrowtype::set(|dtname| Ok(plpgsql_parse_wordrowtype(dtname)));
-    comp_seams::plpgsql_parse_cwordtype::set(|dtnames| Ok(plpgsql_parse_cwordtype(dtnames)));
-    comp_seams::plpgsql_parse_cwordrowtype::set(|dtnames| Ok(plpgsql_parse_cwordrowtype(dtnames)));
+    comp_seams::plpgsql_parse_wordtype::set(plpgsql_parse_wordtype);
+    comp_seams::plpgsql_parse_wordrowtype::set(plpgsql_parse_wordrowtype);
+    comp_seams::plpgsql_parse_cwordtype::set(plpgsql_parse_cwordtype);
+    comp_seams::plpgsql_parse_cwordrowtype::set(plpgsql_parse_cwordrowtype);
 
     comp_seams::plpgsql_build_record_for_loop::set(|name, lineno| {
         Ok(plpgsql_build_record_for_loop(name, lineno).map(Box::new))
@@ -2064,9 +2088,9 @@ pub fn init_seams() {
     comp_seams::plpgsql_add_initdatums_collect::set(|| plpgsql_add_initdatums(true));
     comp_seams::plpgsql_check_shadowvar::set(plpgsql_check_shadowvar);
 
-    comp_seams::plpgsql_parse_err_condition::set(|condname| Ok(plpgsql_parse_err_condition(condname)));
+    comp_seams::plpgsql_parse_err_condition::set(plpgsql_parse_err_condition);
     comp_seams::plpgsql_recognize_err_condition::set(|condname, allow| {
-        plpgsql_recognize_err_condition(condname, allow);
+        plpgsql_recognize_err_condition(condname, allow)?;
         Ok(())
     });
     comp_seams::check_assignable::set(|dno, location| {
