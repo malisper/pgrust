@@ -189,6 +189,38 @@ fn ret_i64(v: i64) -> Datum {
     Datum::from_i64(v)
 }
 
+#[inline]
+fn ret_i16(v: i16) -> Datum {
+    Datum::from_i16(v)
+}
+
+#[inline]
+fn ret_f32(v: f32) -> Datum {
+    Datum::from_f32(v)
+}
+
+#[inline]
+fn ret_f64(v: f64) -> Datum {
+    Datum::from_f64(v)
+}
+
+/// Write an `Option<T>` scalar cast result: `None` (the JSON value was
+/// `jbvNull`) is `PG_RETURN_NULL()`, `Some(x)` crosses through `to_datum`.
+#[inline]
+fn ret_opt<T>(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    v: Option<T>,
+    to_datum: impl FnOnce(T) -> Datum,
+) -> Datum {
+    match v {
+        Some(x) => to_datum(x),
+        None => {
+            fcinfo.set_result_null(true);
+            Datum::from_usize(0)
+        }
+    }
+}
+
 /// A scratch context for cores that allocate their result through `Mcx`. The
 /// resulting bytes are copied onto the by-ref lane before it is dropped (C: the
 /// palloc'd result lives in the caller's context; here it crosses by value).
@@ -365,6 +397,71 @@ fn fc_jsonb_hash_extended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 
 // ---------------------------------------------------------------------------
+// Scalar cast adapters (jsonb.c): `jsonb -> {bool,int2,int4,int8,float4,float8,
+// numeric}`. Each consumes the full header-ful `jsonb` image (the cores strip
+// `VARHDRSZ` internally) and returns the scalar, or SQL NULL when the JSON value
+// is `jbvNull`.
+// ---------------------------------------------------------------------------
+
+/// `jsonb_bool(jsonb) -> bool` (oid 3556).
+fn fc_jsonb_bool(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let jb = arg_jsonb_image(fcinfo, 0);
+    let v = ok(crate::jsonb_bool(jb));
+    ret_opt(fcinfo, v, ret_bool)
+}
+
+/// `jsonb_int2(jsonb) -> int2` (oid 3450).
+fn fc_jsonb_int2(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let jb = arg_jsonb_image(fcinfo, 0);
+    let v = ok(crate::jsonb_int2(jb));
+    ret_opt(fcinfo, v, ret_i16)
+}
+
+/// `jsonb_int4(jsonb) -> int4` (oid 3451).
+fn fc_jsonb_int4(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let jb = arg_jsonb_image(fcinfo, 0);
+    let v = ok(crate::jsonb_int4(jb));
+    ret_opt(fcinfo, v, ret_i32)
+}
+
+/// `jsonb_int8(jsonb) -> int8` (oid 3452).
+fn fc_jsonb_int8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let jb = arg_jsonb_image(fcinfo, 0);
+    let v = ok(crate::jsonb_int8(jb));
+    ret_opt(fcinfo, v, ret_i64)
+}
+
+/// `jsonb_float4(jsonb) -> float4` (oid 3453).
+fn fc_jsonb_float4(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let jb = arg_jsonb_image(fcinfo, 0);
+    let v = ok(crate::jsonb_float4(jb));
+    ret_opt(fcinfo, v, ret_f32)
+}
+
+/// `jsonb_float8(jsonb) -> float8` (oid 2580).
+fn fc_jsonb_float8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let jb = arg_jsonb_image(fcinfo, 0);
+    let v = ok(crate::jsonb_float8(jb));
+    ret_opt(fcinfo, v, ret_f64)
+}
+
+/// `jsonb_numeric(jsonb) -> numeric` (oid 3449). The numeric result is a
+/// by-reference varlena image built in a scratch context and copied onto the
+/// by-ref lane.
+fn fc_jsonb_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let bytes: Option<Vec<u8>> = ok(crate::jsonb_numeric(m.mcx(), arg_jsonb_image(fcinfo, 0)))
+        .map(|image| image.as_slice().to_vec());
+    match bytes {
+        Some(b) => ret_varlena(fcinfo, b),
+        None => {
+            fcinfo.set_result_null(true);
+            Datum::from_usize(0)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
 
@@ -417,6 +514,14 @@ pub fn register_jsonb_builtins() {
         // Hash.
         builtin(4045, "jsonb_hash", 1, true, false, fc_jsonb_hash),
         builtin(3416, "jsonb_hash_extended", 2, true, false, fc_jsonb_hash_extended),
+        // Scalar casts (jsonb.c).
+        builtin(3556, "jsonb_bool", 1, true, false, fc_jsonb_bool),
+        builtin(3450, "jsonb_int2", 1, true, false, fc_jsonb_int2),
+        builtin(3451, "jsonb_int4", 1, true, false, fc_jsonb_int4),
+        builtin(3452, "jsonb_int8", 1, true, false, fc_jsonb_int8),
+        builtin(3453, "jsonb_float4", 1, true, false, fc_jsonb_float4),
+        builtin(2580, "jsonb_float8", 1, true, false, fc_jsonb_float8),
+        builtin(3449, "jsonb_numeric", 1, true, false, fc_jsonb_numeric),
     ]);
 }
 
