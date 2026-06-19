@@ -19,28 +19,33 @@
 //! therefore maps to: deform via the seam, then take attribute `attnum - 1`.
 
 use backend_executor_execTuples_seams::slot_getallattrs_by_id;
-use backend_utils_fmgr_fmgr_seams::function_call1_coll;
-use types_core::primitive::InvalidOid;
+use backend_utils_fmgr_fmgr_seams::function_call_invoke_datum;
 // The canonical unified value type (Datum-unification keystone) — what the
 // interpreter eval entry points return, and what the keystone-owned
 // const/init step-payload values carry.
 use types_tuple::backend_access_common_heaptuple::Datum;
+use types_core::primitive::Oid;
 use types_error::PgResult;
 
-/// Lower a canonical by-value datum to the bare scalar word the still-bare-word
-/// fmgr `function_call1_coll` seam takes for a hash-key argument.
-///
-/// This is the *one* sanctioned bare-word edge left in the hash fast paths: the
-/// fmgr seam's `arg1: DatumWord` ABI (fmgr is not migrated in this wave) takes a
-/// machine word, not the canonical value. A by-reference hash key (e.g. hashing
-/// `text`) cannot cross this still-bare-word seam — it panics here, exactly like
-/// the by-reference array-element edge in `eval_scalar`'s saophash callbacks.
-/// Threading the canonical carrier through the fmgr call frame is the fmgr-wave
-/// follow-on (the `function_call1_coll` seam would need a canonical-`Datum`
-/// argument); recorded, not forged.
+/// `DatumGetUInt32(hashop->d.hashdatum.fn_addr(fcinfo))` for a single hash-key
+/// argument — the by-reference-capable hash call the `ExecJust*Hash*Var` fast
+/// paths drive. The canonical `value` crosses the fmgr boundary via the
+/// `function_call_invoke_datum` lane (by-value word OR by-reference referent
+/// bytes), so a by-ref `text`/`name`/`varchar` hash key survives the gather
+/// (the former `function_call1_coll` bare-word seam panicked on such a value).
+/// The owned `FmgrInfo` carries only `fn_oid`; the seam re-resolves and
+/// dispatches under `collation` (`fcinfo->fncollation`). Returns the hash word.
 #[inline]
-fn hash_arg_word(v: &Datum<'_>) -> types_datum::Datum {
-    types_datum::Datum::from_usize(v.as_usize())
+fn hash_one_datum<'mcx>(
+    fn_oid: Oid,
+    collation: Oid,
+    value: &Datum<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> PgResult<u32> {
+    let mcx = estate.es_query_cxt;
+    let args = [value.clone()];
+    let (result, _isnull) = function_call_invoke_datum::call(mcx, fn_oid, collation, &args, None)?;
+    Ok(result.as_u32())
 }
 use types_nodes::execexpr::{ExprEvalStepData, ExprState};
 use types_nodes::execnodes::EcxtId;
@@ -48,6 +53,30 @@ use types_nodes::{EStateData, SlotId};
 use types_tuple::backend_access_common_heaptuple::DeformedColumn;
 
 use crate::dispatch::CheckOpSlotCompatibility;
+
+/// Read the `(fn_oid, fncollation)` an `EEOP_HASHDATUM_*` step caches in its
+/// `op->d.hashdatum` payload (`finfo->fn_oid` + `fcinfo_data->fncollation`),
+/// for the `ExecJust*Hash*Var` fast paths. The collation is `fcinfo->fncollation`
+/// (the compiler's `init_fcinfo` sets it from the hash expression's
+/// `inputcollid`); a collation-aware hash function (e.g. `hashtext` under a
+/// nondeterministic collation) reads it back.
+#[inline]
+fn hashdatum_fn_and_coll(step: &ExprEvalStepData, who: &str) -> (Oid, Oid) {
+    match step {
+        ExprEvalStepData::HashDatum { finfo, fcinfo_data, .. } => {
+            let fn_oid = finfo
+                .as_ref()
+                .unwrap_or_else(|| panic!("{who}: hashop finfo not resolved"))
+                .fn_oid;
+            let collation = fcinfo_data
+                .as_ref()
+                .map(|f| f.fncollation)
+                .unwrap_or(types_core::primitive::InvalidOid);
+            (fn_oid, collation)
+        }
+        _ => panic!("{who}: step is not an EEOP_HASHDATUM_*"),
+    }
+}
 
 /// `pg_rotate_left32(word, n)` (pg_bitutils.h) — rotate a 32-bit word left by
 /// `n` bits. The hash fast paths seed/combine the running hash key with this.
@@ -274,13 +303,7 @@ pub fn ExecJustHashVarImpl<'mcx>(
         ExprEvalStepData::Var { attnum, .. } => *attnum,
         _ => unreachable!("ExecJustHashVarImpl: step[1] is not an EEOP_*_VAR"),
     };
-    let fn_oid = match &steps[2].d {
-        ExprEvalStepData::HashDatum { finfo, .. } => finfo
-            .as_ref()
-            .expect("ExecJustHashVarImpl: hashop finfo not resolved")
-            .fn_oid,
-        _ => unreachable!("ExecJustHashVarImpl: step[2] is not an EEOP_HASHDATUM_*"),
-    };
+    let (fn_oid, collation) = hashdatum_fn_and_coll(&steps[2].d, "ExecJustHashVarImpl");
 
     // CheckOpSlotCompatibility(fetchop, slot);
     CheckOpSlotCompatibility(&steps[0], estate.slot(slot))?;
@@ -303,9 +326,9 @@ pub fn ExecJustHashVarImpl<'mcx>(
     // The owned FmgrInfo carries only fn_oid; the fmgr seam re-resolves and
     // dispatches (the typed PGFunction is never produced — see the F0 contract).
     if !isnull {
-        let result = function_call1_coll::call(fn_oid, InvalidOid, hash_arg_word(&value))?;
+        let hashvalue = hash_one_datum(fn_oid, collation, &value, estate)?;
         // DatumGetUInt32 then UInt32GetDatum is identity on the word.
-        Ok((Datum::from_u32(result.as_u32()), false))
+        Ok((Datum::from_u32(hashvalue), false))
     } else {
         Ok((Datum::null(), false))
     }
@@ -329,13 +352,7 @@ pub fn ExecJustHashVarVirtImpl<'mcx>(
         ExprEvalStepData::Var { attnum, .. } => *attnum,
         _ => unreachable!("ExecJustHashVarVirtImpl: step[0] is not an EEOP_*_VAR"),
     };
-    let fn_oid = match &steps[1].d {
-        ExprEvalStepData::HashDatum { finfo, .. } => finfo
-            .as_ref()
-            .expect("ExecJustHashVarVirtImpl: hashop finfo not resolved")
-            .fn_oid,
-        _ => unreachable!("ExecJustHashVarVirtImpl: step[1] is not an EEOP_HASHDATUM_*"),
-    };
+    let (fn_oid, collation) = hashdatum_fn_and_coll(&steps[1].d, "ExecJustHashVarVirtImpl");
 
     // fcinfo->args[0].value  = slot->tts_values[attnum];
     // fcinfo->args[0].isnull = slot->tts_isnull[attnum];
@@ -349,8 +366,8 @@ pub fn ExecJustHashVarVirtImpl<'mcx>(
     //     return DatumGetUInt32(hashop->d.hashdatum.fn_addr(fcinfo));
     // else return (Datum) 0;
     if !isnull {
-        let result = function_call1_coll::call(fn_oid, InvalidOid, hash_arg_word(&value))?;
-        Ok((Datum::from_u32(result.as_u32()), false))
+        let hashvalue = hash_one_datum(fn_oid, collation, &value, estate)?;
+        Ok((Datum::from_u32(hashvalue), false))
     } else {
         Ok((Datum::null(), false))
     }
@@ -647,13 +664,7 @@ pub fn ExecJustHashInnerVarWithIV<'mcx>(
         ExprEvalStepData::Var { attnum, .. } => *attnum,
         _ => unreachable!("ExecJustHashInnerVarWithIV: step[2] is not an EEOP_*_VAR"),
     };
-    let fn_oid = match &steps[3].d {
-        ExprEvalStepData::HashDatum { finfo, .. } => finfo
-            .as_ref()
-            .expect("ExecJustHashInnerVarWithIV: hashop finfo not resolved")
-            .fn_oid,
-        _ => unreachable!("ExecJustHashInnerVarWithIV: step[3] is not an EEOP_HASHDATUM_*"),
-    };
+    let (fn_oid, collation) = hashdatum_fn_and_coll(&steps[3].d, "ExecJustHashInnerVarWithIV");
 
     // CheckOpSlotCompatibility(fetchop, econtext->ecxt_innertuple);
     // slot_getsomeattrs(econtext->ecxt_innertuple, fetchop->d.fetch.last_var);
@@ -673,8 +684,7 @@ pub fn ExecJustHashInnerVarWithIV<'mcx>(
     //     hashkey = hashkey ^ hashvalue;
     // }
     if !isnull {
-        let result = function_call1_coll::call(fn_oid, InvalidOid, hash_arg_word(&value))?;
-        let hashvalue = result.as_u32();
+        let hashvalue = hash_one_datum(fn_oid, collation, &value, estate)?;
         hashkey ^= hashvalue;
     }
 
@@ -746,13 +756,7 @@ pub fn ExecJustHashOuterVarStrict<'mcx>(
         ExprEvalStepData::Var { attnum, .. } => *attnum,
         _ => unreachable!("ExecJustHashOuterVarStrict: step[1] is not an EEOP_*_VAR"),
     };
-    let fn_oid = match &steps[2].d {
-        ExprEvalStepData::HashDatum { finfo, .. } => finfo
-            .as_ref()
-            .expect("ExecJustHashOuterVarStrict: hashop finfo not resolved")
-            .fn_oid,
-        _ => unreachable!("ExecJustHashOuterVarStrict: step[2] is not an EEOP_HASHDATUM_*"),
-    };
+    let (fn_oid, collation) = hashdatum_fn_and_coll(&steps[2].d, "ExecJustHashOuterVarStrict");
 
     // CheckOpSlotCompatibility(fetchop, econtext->ecxt_outertuple);
     // slot_getsomeattrs(econtext->ecxt_outertuple, fetchop->d.fetch.last_var);
@@ -771,8 +775,8 @@ pub fn ExecJustHashOuterVarStrict<'mcx>(
     //     return (Datum) 0;
     // }
     if !isnull {
-        let result = function_call1_coll::call(fn_oid, InvalidOid, hash_arg_word(&value))?;
-        Ok((Datum::from_u32(result.as_u32()), false))
+        let hashvalue = hash_one_datum(fn_oid, collation, &value, estate)?;
+        Ok((Datum::from_u32(hashvalue), false))
     } else {
         Ok((Datum::null(), true))
     }

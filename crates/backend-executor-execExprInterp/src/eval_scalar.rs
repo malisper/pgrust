@@ -427,14 +427,19 @@ pub fn exec_rowcompare_step<'mcx>(
 
 /// Read a `HashDatum`-payload step's `(fn_oid, fncollation)`, gather its single
 /// argument cell into the call frame, and surface the previous (intermediate)
-/// hash via `iresult`. Returns `(fn_oid, collation, args, arg0_isnull, iresult)`.
+/// hash via `iresult`. The argument crosses to the hash function via the
+/// canonical [`DatumV`] lane (the by-reference-capable form), so a by-ref
+/// text/name/varchar key survives the gather — the bare-word `word_of`
+/// downgrade panics on such a value (the type's hash function, e.g.
+/// `hashtext`/`namehash`, reads its argument by reference).
+/// Returns `(fn_oid, collation, args, arg0_isnull, iresult)`.
 fn hashdatum_step_inputs<'mcx>(
     state: &ExprState<'mcx>,
     op: usize,
 ) -> (
     types_core::primitive::Oid,
     types_core::primitive::Oid,
-    Vec<types_datum::NullableDatum>,
+    Vec<DatumV<'mcx>>,
     bool,
     u32,
 ) {
@@ -453,11 +458,10 @@ fn hashdatum_step_inputs<'mcx>(
                 .as_ref()
                 .expect("EEOP_HASHDATUM_*: op->d.hashdatum.fcinfo_data missing");
             // fcinfo->args[0] <- the hash-key cell the sub-expression evaluated.
+            // Carry the full canonical Datum image (by-value word OR by-reference
+            // referent bytes) so the hash function reads a by-ref key correctly.
             let c = state.result_cells.get(*arg_cell);
-            let args = vec![types_datum::NullableDatum {
-                value: word_of(&c.value),
-                isnull: c.isnull,
-            }];
+            let args = vec![c.value.clone()];
             // DatumGetUInt32(op->d.hashdatum.iresult->value) (NEXT32 only; the
             // FIRST variants ignore it).
             let existing = iresult
@@ -467,6 +471,23 @@ fn hashdatum_step_inputs<'mcx>(
             (finfo.fn_oid, fcinfo.fncollation, args, c.isnull, existing)
         }
         other => unreachable!("EEOP_HASHDATUM_* carries the wrong payload: {other:?}"),
+    }
+}
+
+/// Recover the `fn_expr` stamped onto an `EEOP_HASHDATUM_*` step's
+/// `op->d.hashdatum.finfo->fn_expr`, threaded back to the by-ref `Datum`
+/// dispatch (mirrors [`func_step_fn_expr`]).
+fn hashdatum_step_fn_expr<'a, 'mcx>(
+    state: &'a ExprState<'mcx>,
+    op: usize,
+) -> Option<&'a types_nodes::primnodes::Expr> {
+    match step_data(state, op) {
+        ExprEvalStepData::HashDatum { finfo, .. } => finfo
+            .as_ref()?
+            .fn_expr
+            .as_ref()?
+            .downcast_ref::<types_nodes::primnodes::Expr>(),
+        _ => None,
     }
 }
 
@@ -484,9 +505,12 @@ pub fn exec_hashdatum_step<'mcx>(
     first: bool,
     strict: bool,
     jumpdone: i32,
+    estate: &EStateData<'mcx>,
 ) -> PgResult<usize> {
     let (fn_oid, collation, args, arg0_isnull, existing) = hashdatum_step_inputs(state, op);
     let (resvalue_id, _resnull_id) = res_cells(state, op);
+    let mcx = estate.es_query_cxt;
+    let fn_expr = hashdatum_step_fn_expr(state, op);
 
     if first {
         if strict {
@@ -497,17 +521,19 @@ pub fn exec_hashdatum_step<'mcx>(
                     .set(resvalue_id, ResultCell { value: DatumV::null(), isnull: true });
                 return Ok(jumpdone as usize);
             }
-            let (word, _isnull) = function_call_invoke::call(fn_oid, collation, &args)?;
+            let (value, _isnull) =
+                function_call_invoke_datum::call(mcx, fn_oid, collation, &args, fn_expr)?;
             state.result_cells.set(
                 resvalue_id,
-                ResultCell { value: DatumV::from_usize(word.as_usize()), isnull: false },
+                ResultCell { value, isnull: false },
             );
             return Ok(op + 1);
         }
         // EEOP_HASHDATUM_FIRST: non-null -> hash; null -> 0.
         let value = if !arg0_isnull {
-            let (word, _isnull) = function_call_invoke::call(fn_oid, collation, &args)?;
-            DatumV::from_usize(word.as_usize())
+            let (value, _isnull) =
+                function_call_invoke_datum::call(mcx, fn_oid, collation, &args, fn_expr)?;
+            value
         } else {
             DatumV::from_usize(0)
         };
@@ -528,8 +554,9 @@ pub fn exec_hashdatum_step<'mcx>(
                 .set(resvalue_id, ResultCell { value: DatumV::null(), isnull: true });
             return Ok(jumpdone as usize);
         }
-        let (word, _isnull) = function_call_invoke::call(fn_oid, collation, &args)?;
-        let hashvalue = Datum::from_usize(word.as_usize()).as_u32();
+        let (value, _isnull) =
+            function_call_invoke_datum::call(mcx, fn_oid, collation, &args, fn_expr)?;
+        let hashvalue = value.as_u32();
         state.result_cells.set(
             resvalue_id,
             ResultCell { value: DatumV::from_u32(rotated ^ hashvalue), isnull: false },
@@ -539,8 +566,9 @@ pub fn exec_hashdatum_step<'mcx>(
 
     // EEOP_HASHDATUM_NEXT32: leave the hash alone on NULL inputs.
     let combined = if !arg0_isnull {
-        let (word, _isnull) = function_call_invoke::call(fn_oid, collation, &args)?;
-        let hashvalue = Datum::from_usize(word.as_usize()).as_u32();
+        let (value, _isnull) =
+            function_call_invoke_datum::call(mcx, fn_oid, collation, &args, fn_expr)?;
+        let hashvalue = value.as_u32();
         rotated ^ hashvalue
     } else {
         rotated

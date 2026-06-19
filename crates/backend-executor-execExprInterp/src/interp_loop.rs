@@ -898,7 +898,7 @@ pub fn ExecInterpExpr<'mcx>(
                     ExprEvalStepData::HashDatum { jumpdone, .. } => *jumpdone,
                     _ => unreachable!("EEOP_HASHDATUM_*: payload is not HashDatum"),
                 };
-                op = eval_scalar::exec_hashdatum_step(state, op, first, strict, jumpdone)?;
+                op = eval_scalar::exec_hashdatum_step(state, op, first, strict, jumpdone, estate)?;
             }
 
             EEOP_XMLEXPR => {
