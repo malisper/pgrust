@@ -82,6 +82,7 @@ use types_catalog::pg_aggregate::{
 };
 use types_catalog::pg_language::FormData_pg_language;
 use types_nodes::nodes::NodePtr;
+use types_nodes::primnodes::Expr;
 
 /// `Anum_pg_class_relam` (`catalog/pg_class.h`).
 const Anum_pg_class_relam: i32 = 7;
@@ -2216,6 +2217,30 @@ pub(crate) fn get_func_form(funcid: Oid) -> PgResult<clauses_seams::PgProcSimple
         prolang_is_sql: prolang == SQL_LANGUAGE_ID,
         proconfig_isnull,
     })
+}
+
+/// `fetch_function_defaults(func_tuple)` (clauses.c:4353): read the
+/// `pg_proc.proargdefaults` `pg_node_tree` column of `funcid` and parse it into
+/// the default-argument expression list (`castNode(List, stringToNode(str))`).
+///
+/// The clauses seam threads no `MemoryContext`, so we deserialize into a private
+/// scratch context and move the (lifetime-free) `Expr` nodes out into an owned
+/// `Vec`. Each list element is an `Expr`-deriving node; a non-`Expr` element is
+/// an error (the column is only ever a list of expressions). The C call site
+/// only reaches this with a non-null column (`SysCacheGetAttrNotNull`), so a
+/// SQL-null column or a cache miss is an `Err`.
+pub(crate) fn fetch_function_defaults(funcid: Oid) -> PgResult<std::vec::Vec<Expr>> {
+    let scratch = MemoryContext::new("syscache fetch_function_defaults projection");
+    let mcx = scratch.mcx();
+    let nodes = proc_argdefaults(mcx, funcid)?;
+    let mut out: std::vec::Vec<Expr> = std::vec::Vec::with_capacity(nodes.len());
+    for node in nodes {
+        let expr = mcx::PgBox::into_inner(node).into_expr().ok_or_else(|| {
+            PgError::error("fetch_function_defaults: proargdefaults element is not an expression")
+        })?;
+        out.push(expr);
+    }
+    Ok(out)
 }
 
 /// `SearchSysCache1(PROCOID, ObjectIdGetDatum(funcid))` projected to the
