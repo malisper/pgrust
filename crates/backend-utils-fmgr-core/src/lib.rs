@@ -3375,18 +3375,25 @@ fn convert_via_proc_counted_seam<'mcx>(
         NullableDatum::value(int32_get_datum(src.len() as i32)),
         NullableDatum::value(Datum::from_bool(no_error)),
     ];
-    // C frames both buffers as `cstring` (`char *`). The owned model carries a
-    // `cstring` as `RefPayload::Cstring(String)`; an encoding-conversion source
-    // need not be valid UTF-8, so this byte->String framing is the fmgr cstring
-    // ABI's known limitation, not introduced here. This path is reachable only
-    // once conversion procedures are dispatchable by OID (registered as fmgr
-    // builtins) — until then `fmgr_info` errors above for an unregistered proc.
-    let src_str = String::from_utf8_lossy(src).into_owned();
+    // C frames both buffers as `cstring` (`char *`). A C `cstring` is a raw
+    // NUL-terminated byte buffer, NOT a UTF-8 string: an encoding-conversion
+    // source is by definition in the *source* encoding (e.g. raw EUC_KR bytes),
+    // which need not be valid UTF-8. Carrying it through `RefPayload::Cstring`
+    // (a Rust `String`) would force a lossy UTF-8 reframe of the very bytes
+    // being converted, corrupting the input. The faithful carrier for a C
+    // `char *` of arbitrary bytes is the raw byte lane (`RefPayload::Varlena`,
+    // which the boundary treats as an owned byte image with no header strip in
+    // this context): the conversion proc reads its source bytes from
+    // `ref_args[2]` and writes the converted, raw output bytes into the
+    // `ref_args[3]` referent. The destination referent starts empty; the callee
+    // overwrites it. This path is reachable only once conversion procedures are
+    // dispatchable by OID (registered as fmgr builtins) — until then `fmgr_info`
+    // errors above for an unregistered proc.
     let ref_args = vec![
         None,
         None,
-        Some(RefPayload::Cstring(src_str)),
-        Some(RefPayload::Cstring(String::new())),
+        Some(RefPayload::Varlena(src.to_vec())),
+        Some(RefPayload::Varlena(Vec::new())),
         None,
         None,
     ];
@@ -3396,8 +3403,8 @@ fn convert_via_proc_counted_seam<'mcx>(
     fcinfo.ref_args = ref_args;
     let result = invoke_flinfo(mcx, &resolved.resolution, &mut fcinfo, oid, fn_expr)?;
     // Recover the destination buffer the conversion function wrote.
-    let converted = match fcinfo.ref_args.get(3).and_then(|r| r.as_ref()) {
-        Some(RefPayload::Cstring(s)) => s.as_bytes(),
+    let converted: &[u8] = match fcinfo.ref_args.get(3).and_then(|r| r.as_ref()) {
+        Some(RefPayload::Varlena(b)) => b.as_slice(),
         _ => &[],
     };
     Ok((result.as_i32(), mcx::slice_in(mcx, converted)?))

@@ -19,6 +19,7 @@
 
 extern crate alloc;
 
+mod fmgr_builtins;
 mod tables;
 
 use backend_utils_error::PgResult;
@@ -61,9 +62,14 @@ pub fn utf8_to_euc_kr(
     )
 }
 
-/// This crate owns no inward seams (conversions are dispatched via the
-/// `pg_conversion` catalog, mirroring the C module).
-pub fn init_seams() {}
+/// The C module's `euc_kr_to_utf8` / `utf8_to_euc_kr` procedures are reached
+/// through the `pg_conversion` catalog by OID; in C they live in a dynamically
+/// loaded `$libdir/utf8_and_euc_kr` shared object. This port mocks that loading
+/// by registering the two procedures in the fmgr builtin fast-path registry
+/// (keyed by their `pg_proc.dat` OIDs), so `convert_via_proc` can dispatch them.
+pub fn init_seams() {
+    fmgr_builtins::register_utf8_and_euc_kr_builtins();
+}
 
 #[cfg(test)]
 mod tests;

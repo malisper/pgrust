@@ -8749,9 +8749,13 @@ name = "backend-conv-utf8-and-euc-kr"
 version = "0.0.0"
 dependencies = [
  "backend-utils-error",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "backend-utils-mb-mbutils-seams",
+ "types-core",
+ "types-datum",
  "types-error",
+ "types-fmgr",
  "types-wchar",
 ]
 
