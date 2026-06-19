@@ -488,10 +488,7 @@ fn trivial_path_varno(jointree: &types_nodes::rawnodes::FromExpr) -> Option<i32>
     assert!(!fromlist.is_empty(), "parse->jointree->fromlist != NIL");
 
     if fromlist.len() == 1 {
-        match &*fromlist[0] {
-            Node::RangeTblRef(rtr) => Some(rtr.rtindex),
-            _ => None,
-        }
+        fromlist[0].as_rangetblref().map(|rtr| rtr.rtindex)
     } else {
         None
     }
