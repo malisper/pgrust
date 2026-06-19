@@ -2,11 +2,15 @@
 //! list from a `CREATE TABLE`'s explicit columns plus inherited parents.
 //!
 //! The non-inheritance path (`supers == NIL`, not a partition), the
-//! legacy-inheritance path (`supers != NIL`), and the multi-parent merge helpers
-//! (`MergeInheritedAttribute` / `MergeChildAttribute` / `MergeCheckConstraint`)
-//! are ported here. The partition column-merge path (`is_partition`) is NOT yet
-//! ported (it bottoms out on the partition machinery): it panics with a precise
-//! handoff.
+//! legacy-inheritance path (`supers != NIL`), the partition column-merge path
+//! (`is_partition`), and the multi-parent merge helpers (`MergeInheritedAttribute`
+//! / `MergeChildAttribute` / `MergeCheckConstraint`) are ported here. The
+//! partition arm shares the parents loop with the inheritance arm (guarded by
+//! `is_partition`): it sets the explicit column list aside as `saved_columns`,
+//! inherits the parent's identity columns, applies the partition-specific
+//! relkind/persistence checks (`CheckTableNotInUse`, temp/permanent rules), and
+//! reconciles `saved_columns` (column-constraint specs + default overrides +
+//! generated-column conflicts) against the merged column list at the end.
 
 use backend_utils_error::ereport;
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgString, PgVec};
@@ -126,16 +130,12 @@ pub fn merge_attributes<'mcx>(
 
     /*
      * In case of a partition, there are no new column definitions, only dummy
-     * ColumnDefs created for column constraints.  C sets them aside for now and
-     * processes them at the end. The partition column-merge path is NOT yet
-     * ported (it bottoms out on the partition machinery).
+     * ColumnDefs created for column constraints.  Set them aside for now and
+     * process them at the end.
      */
+    let mut saved_columns: PgVec<'mcx, ColumnDef<'mcx>> = vec_with_capacity_in(mcx, 0)?;
     if is_partition {
-        panic!(
-            "MergeAttributes: partition column-merge path not yet ported \
-             (is_partition=true); only the plain CREATE TABLE and \
-             legacy-inheritance paths are ported"
-        );
+        saved_columns = std::mem::replace(&mut columns, vec_with_capacity_in(mcx, 0)?);
     }
 
     /*
@@ -148,10 +148,19 @@ pub fn merge_attributes<'mcx>(
         let relation = relation_open(mcx, parent, NoLock)?;
 
         /*
+         * Check for active uses of the parent partitioned table in the
+         * current transaction, such as being used in some manner by an
+         * enclosing command.
+         */
+        if is_partition {
+            crate::smallfns::check_table_not_in_use(&relation, "CREATE TABLE .. PARTITION OF")?;
+        }
+
+        /*
          * We do not allow partitioned tables and partitions to participate in
          * regular inheritance.
          */
-        if relation.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
+        if relation.rd_rel.relkind == RELKIND_PARTITIONED_TABLE && !is_partition {
             return ereport(ERROR)
                 .errcode(ERRCODE_WRONG_OBJECT_TYPE)
                 .errmsg(format!(
@@ -161,7 +170,7 @@ pub fn merge_attributes<'mcx>(
                 .finish(here("MergeAttributes"))
                 .map(|()| unreachable!());
         }
-        if relation.rd_rel.relispartition {
+        if relation.rd_rel.relispartition && !is_partition {
             return ereport(ERROR)
                 .errcode(ERRCODE_WRONG_OBJECT_TYPE)
                 .errmsg(format!(
@@ -186,16 +195,42 @@ pub fn merge_attributes<'mcx>(
                 .map(|()| unreachable!());
         }
 
-        /* Permanent rels cannot inherit from temporary ones */
-        if relpersistence != RELPERSISTENCE_TEMP
-            && relation.rd_rel.relpersistence == RELPERSISTENCE_TEMP
+        /*
+         * If the parent is permanent, so must be all of its partitions.  Note
+         * that inheritance allows that case.
+         */
+        if is_partition
+            && relation.rd_rel.relpersistence != RELPERSISTENCE_TEMP
+            && relpersistence == RELPERSISTENCE_TEMP
         {
             return ereport(ERROR)
                 .errcode(ERRCODE_WRONG_OBJECT_TYPE)
                 .errmsg(format!(
-                    "cannot inherit from temporary relation \"{}\"",
+                    "cannot create a temporary relation as partition of permanent relation \"{}\"",
                     relation.rd_rel.relname.as_str()
                 ))
+                .finish(here("MergeAttributes"))
+                .map(|()| unreachable!());
+        }
+
+        /* Permanent rels cannot inherit from temporary ones */
+        if relpersistence != RELPERSISTENCE_TEMP
+            && relation.rd_rel.relpersistence == RELPERSISTENCE_TEMP
+        {
+            let msg = if !is_partition {
+                format!(
+                    "cannot inherit from temporary relation \"{}\"",
+                    relation.rd_rel.relname.as_str()
+                )
+            } else {
+                format!(
+                    "cannot create a permanent relation as partition of temporary relation \"{}\"",
+                    relation.rd_rel.relname.as_str()
+                )
+            };
+            return ereport(ERROR)
+                .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+                .errmsg(msg)
                 .finish(here("MergeAttributes"))
                 .map(|()| unreachable!());
         }
@@ -204,9 +239,14 @@ pub fn merge_attributes<'mcx>(
         if relation.rd_rel.relpersistence == RELPERSISTENCE_TEMP
             && !backend_utils_cache_relcache_seams::rd_islocaltemp::call(&relation)?
         {
+            let msg = if !is_partition {
+                "cannot inherit from temporary relation of another session"
+            } else {
+                "cannot create as partition of temporary relation of another session"
+            };
             return ereport(ERROR)
                 .errcode(ERRCODE_WRONG_OBJECT_TYPE)
-                .errmsg("cannot inherit from temporary relation of another session")
+                .errmsg(msg)
                 .finish(here("MergeAttributes"))
                 .map(|()| unreachable!());
         }
@@ -278,8 +318,12 @@ pub fn merge_attributes<'mcx>(
 
             /*
              * Regular inheritance children are independent enough not to
-             * inherit identity columns.  (is_partition handled separately.)
+             * inherit identity columns.  But partitions are integral part of
+             * a partitioned table and inherit identity column.
              */
+            if is_partition {
+                newdef.identity = attribute.attidentity;
+            }
 
             /*
              * Does it match some previously considered column from another
@@ -494,6 +538,104 @@ pub fn merge_attributes<'mcx>(
                 ))
                 .finish(here("MergeAttributes"))
                 .map(|()| unreachable!());
+        }
+    }
+
+    /*
+     * Now that we have the column definition list for a partition, we can
+     * check whether the columns referenced in the column constraint specs
+     * actually exist.  Also, merge column defaults.
+     */
+    if is_partition {
+        for restdef in saved_columns.iter() {
+            let restname = colname_of(restdef).to_string();
+            let mut found = false;
+
+            for coldef in columns.iter_mut() {
+                if colname_of(coldef) == restname.as_str() {
+                    found = true;
+
+                    /*
+                     * Check for conflicts related to generated columns.
+                     *
+                     * Same rules as above: generated-ness has to match the
+                     * parent, but the contents of the generation expression
+                     * can be different.
+                     */
+                    if coldef.generated != 0 {
+                        if restdef.raw_default.is_some() && restdef.generated == 0 {
+                            return ereport(ERROR)
+                                .errcode(ERRCODE_INVALID_COLUMN_DEFINITION)
+                                .errmsg(format!(
+                                    "column \"{restname}\" inherits from generated column but specifies default"
+                                ))
+                                .finish(here("MergeAttributes"))
+                                .map(|()| unreachable!());
+                        }
+                        if restdef.identity != 0 {
+                            return ereport(ERROR)
+                                .errcode(ERRCODE_INVALID_COLUMN_DEFINITION)
+                                .errmsg(format!(
+                                    "column \"{restname}\" inherits from generated column but specifies identity"
+                                ))
+                                .finish(here("MergeAttributes"))
+                                .map(|()| unreachable!());
+                        }
+                    } else if restdef.generated != 0 {
+                        return ereport(ERROR)
+                            .errcode(ERRCODE_INVALID_COLUMN_DEFINITION)
+                            .errmsg(format!(
+                                "child column \"{restname}\" specifies generation expression"
+                            ))
+                            .errhint("A child table column cannot be generated unless its parent column is.")
+                            .finish(here("MergeAttributes"))
+                            .map(|()| unreachable!());
+                    }
+
+                    if coldef.generated != 0
+                        && restdef.generated != 0
+                        && coldef.generated != restdef.generated
+                    {
+                        return ereport(ERROR)
+                            .errcode(ERRCODE_INVALID_COLUMN_DEFINITION)
+                            .errmsg(format!(
+                                "column \"{restname}\" inherits from generated column of different kind"
+                            ))
+                            .errdetail(format!(
+                                "Parent column is {}, child column is {}.",
+                                if coldef.generated == ATTRIBUTE_GENERATED_STORED { "STORED" } else { "VIRTUAL" },
+                                if restdef.generated == ATTRIBUTE_GENERATED_STORED { "STORED" } else { "VIRTUAL" }
+                            ))
+                            .finish(here("MergeAttributes"))
+                            .map(|()| unreachable!());
+                    }
+
+                    /*
+                     * Override the parent's default value for this column
+                     * (coldef->cooked_default) with the partition's local
+                     * definition (restdef->raw_default), if there's one. It
+                     * should be physically impossible to get a cooked default
+                     * in the local definition or a raw default in the
+                     * inherited definition, but make sure they're nulls, for
+                     * future-proofing.
+                     */
+                    debug_assert!(restdef.cooked_default.is_none());
+                    debug_assert!(coldef.raw_default.is_none());
+                    if let Some(rd) = restdef.raw_default.as_ref() {
+                        coldef.raw_default = Some(alloc_in(mcx, rd.clone_in(mcx)?)?);
+                        coldef.cooked_default = None;
+                    }
+                }
+            }
+
+            /* complain for constraints on columns not in parent */
+            if !found {
+                return ereport(ERROR)
+                    .errcode(ERRCODE_UNDEFINED_COLUMN)
+                    .errmsg(format!("column \"{restname}\" does not exist"))
+                    .finish(here("MergeAttributes"))
+                    .map(|()| unreachable!());
+            }
         }
     }
 
