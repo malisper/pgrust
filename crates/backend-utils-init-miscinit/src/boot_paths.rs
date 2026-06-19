@@ -672,6 +672,24 @@ pub fn is_absolute_path_pub(path: &str) -> PgResult<bool> {
     Ok(is_absolute_path(path))
 }
 
+/// `canonicalize_path(path)` (`common/path.c`) seam adapter: the
+/// `common_path_seams`/owned-`String` shape (canonicalization can change the
+/// length, so the canonical form is returned). Faithful lexical non-Windows
+/// port — the same body `commands/tablespace.c` reaches via
+/// [`canonicalize_path_pub`], here exposed for the `dfmgr`/`extension`/
+/// `variable`/`varlena` callers that take owned strings.
+pub fn canonicalize_path_owned(path: String) -> String {
+    canonicalize_path(&path)
+}
+
+/// `is_absolute_path(path)` (`common/path.c` and `port/path.c`, identical
+/// non-Windows bodies): bare `bool` predicate accessor for the
+/// `common_path_seams`/`port_path_seams` callers (`dfmgr`, `extension`,
+/// `copyto`).
+pub fn is_absolute_path_bool(path: &str) -> bool {
+    is_absolute_path(path)
+}
+
 /// `path_is_prefix_of_path(path1, path2)` (`path.c`): true when `path1` is a
 /// prefix of `path2` that ends on a directory boundary (i.e. `path2` continues
 /// with a directory separator or the string ends). Pure string predicate.

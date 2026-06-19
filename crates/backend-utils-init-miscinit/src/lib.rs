@@ -1123,6 +1123,18 @@ pub fn init_seams() {
     // get_share_path(my_exec_path) (common/path.c): the share-dir derivation the
     // tzdb (pgtz) and timezonesets (tzparser) reads resolve against.
     common_path_seams::get_share_path::set(boot_paths::get_share_path);
+    // canonicalize_path / is_absolute_path (common/path.c & port/path.c): the
+    // lexical path helpers the file-path-validation callers reach —
+    // `dfmgr.c` ($libdir expansion), `commands/extension.c` (control-file /
+    // directory resolution), `commands/variable.c` (the `data_directory`-style
+    // path GUC check), `utils/adt/varlena.c` (`split_part` format helper) for
+    // `common_path_seams`, and `commands/copyto.c` (the COPY TO filename
+    // absolute-path requirement) for `port_path_seams`. Both `is_absolute_path`
+    // bodies are identical on the Unix build. Bodies are the same faithful
+    // `boot_paths` ports `commands/tablespace.c` already reaches.
+    common_path_seams::canonicalize_path::set(boot_paths::canonicalize_path_owned);
+    common_path_seams::is_absolute_path::set(boot_paths::is_absolute_path_bool);
+    port_path_seams::is_absolute_path::set(boot_paths::is_absolute_path_bool);
     backend_common_exec_seams::set_pglocale_pgservice::set(
         startup_paths::set_pglocale_pgservice,
     );

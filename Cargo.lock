@@ -21554,6 +21554,7 @@ dependencies = [
  "common-username-seams",
  "libc",
  "mcx",
+ "port-path-seams",
  "types-core",
  "types-datum",
  "types-error",
