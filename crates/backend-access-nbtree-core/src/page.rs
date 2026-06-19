@@ -1418,21 +1418,21 @@ fn _bt_delitems_cmp(
 /// `_bt_delitems_delete_check(rel, buf, heapRel, delstate)` — tableam interface
 /// to delete a subset of index tuples found safe to delete by the heap AM.
 pub fn bt_delitems_delete_check<'mcx>(
+    mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     buf: Buffer,
     heap_rel: &Relation<'mcx>,
     mut delstate: types_nbtree::TmIndexDeleteOp<'mcx>,
 ) -> PgResult<()> {
-    with_temp_mcx(|mcx| {
+    {
         /*
          * Use the tableam interface to determine which tuples to delete first.
-         * table_index_delete_tuples() is the heap AM's tableam dispatch; no
-         * tableam-dispatch seam reaches this crate, so that single boundary is
-         * not yet portable.  All leaf-page-wise reconstruction + physical
-         * delete + WAL logic BELOW IS fully ported.
+         * The heap AM (heapam_index_delete_tuples) does the full deletability
+         * analysis; all leaf-page-wise reconstruction + physical delete + WAL
+         * logic below is ported here.
          */
         let snapshot_conflict_horizon: TransactionId =
-            table_index_delete_tuples(heap_rel, &mut delstate)?;
+            table_index_delete_tuples(mcx, heap_rel, &mut delstate)?;
         let is_catalog_rel = relation_is_accessible_in_logical_decoding(heap_rel)?;
 
         /* Should not WAL-log snapshotConflictHorizon unless it's required. */
@@ -1455,7 +1455,7 @@ pub fn bt_delitems_delete_check<'mcx>(
 
         let mut postingidxoffnum: OffsetNumber = 0; /* InvalidOffsetNumber */
         // deletable/updatable are scratch consumed by _bt_delitems_delete in
-        // this call, so they live in the temp mcx (not the caller's `'mcx`).
+        // this call; they ride the caller's working arena.
         let mut deletable: PgVec<'_, OffsetNumber> =
             vec_with_capacity_in(mcx, MaxIndexTuplesPerPage)?;
         let mut updatable: PgVec<'_, BTVacuumPosting<'_>> =
@@ -1576,7 +1576,7 @@ pub fn bt_delitems_delete_check<'mcx>(
         )?;
 
         Ok(())
-    })
+    }
 }
 
 /// `ItemPointerCompare(a, b)` — compare two heap TIDs (block, then offset).
@@ -1594,18 +1594,16 @@ fn item_pointer_compare(a: &ItemPointerData, b: &ItemPointerData) -> i32 {
     0
 }
 
-/// `table_index_delete_tuples(heapRel, delstate)` — tableam dispatch.
+/// `table_index_delete_tuples(heapRel, delstate)` — tableam dispatch, routed
+/// through the tableam.c owner's seam (a direct dependency would cycle: the
+/// heap AM the dispatch reaches transitively depends on nbtree). `mcx` is the
+/// caller's working arena (the heap AM allocates its per-block scratch there).
 fn table_index_delete_tuples<'mcx>(
-    _heap_rel: &Relation<'mcx>,
-    _delstate: &mut types_nbtree::TmIndexDeleteOp<'mcx>,
+    mcx: Mcx<'mcx>,
+    heap_rel: &Relation<'mcx>,
+    delstate: &mut types_nbtree::TmIndexDeleteOp<'mcx>,
 ) -> PgResult<TransactionId> {
-    /*
-     * No tableam-dispatch seam reaches this crate.  The heap AM exposes
-     * heap_index_delete_tuples via backend-access-heap-heapam-seams, but the
-     * generic table_index_delete_tuples() dispatch (rd_tableam->...) is not
-     * exposed here, so this single boundary is not yet portable.
-     */
-    panic!("_bt_delitems_delete_check: table_index_delete_tuples (tableam index deletion dispatch) not yet ported")
+    backend_access_table_tableam_seams::table_index_delete_tuples::call(mcx, heap_rel, delstate)
 }
 
 /// `RelationIsAccessibleInLogicalDecoding(rel)` (utils/rel.h):

@@ -304,3 +304,24 @@ seam_core::seam!(
         all_dead: Option<&mut bool>,
     ) -> PgResult<bool>
 );
+
+seam_core::seam!(
+    /// `table_index_delete_tuples(rel, delstate)` (`access/tableam.h` inline) —
+    /// the tableam dispatch an index AM calls during (simple or bottom-up)
+    /// index-tuple deletion. Dispatches to the AM's `index_delete_tuples`
+    /// callback (heap's `heapam_index_delete_tuples` → `heap_index_delete_tuples`),
+    /// which sorts/(for bottom-up)shrinks `delstate->deltids`, visits the
+    /// referenced heap blocks to decide which TIDs are safely deletable
+    /// (updating the `deltids`/`status` arrays in place), and returns the
+    /// operation's `snapshotConflictHorizon`.
+    ///
+    /// Owned by the tableam.c unit (`backend-access-table-tableam`), which
+    /// installs it from `init_seams()`; nbtree-core calls through this seam
+    /// because depending on the tableam crate directly would cycle (the heap AM
+    /// the dispatch reaches transitively depends on nbtree).
+    pub fn table_index_delete_tuples<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &Relation<'mcx>,
+        delstate: &mut types_tableam::tableam::TmIndexDeleteOp<'mcx>,
+    ) -> PgResult<types_core::TransactionId>
+);

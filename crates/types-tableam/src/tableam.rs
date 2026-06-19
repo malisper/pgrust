@@ -91,6 +91,47 @@ pub struct TM_FailureData {
     pub traversed: bool,
 }
 
+/// `TM_IndexDelete` (`access/tableam.h`) — one TID handed to the tableam by an
+/// index AM during (bottom-up) index deletion.
+#[derive(Clone, Copy, Debug)]
+pub struct TmIndexDelete {
+    /// table TID from index tuple
+    pub tid: ItemPointerData,
+    /// offset into the `TM_IndexStatus` array
+    pub id: i16,
+}
+
+/// `TM_IndexStatus` (`access/tableam.h`) — mutable per-TID status that the
+/// index AM initializes and the tableam updates.
+#[derive(Clone, Copy, Debug)]
+pub struct TmIndexStatus {
+    /// index AM page offset number
+    pub idxoffnum: types_core::primitive::OffsetNumber,
+    /// currently known to be deletable?
+    pub knowndeletable: bool,
+    /// promising (duplicate) index tuple? (bottom-up only)
+    pub promising: bool,
+    /// space freed in index if deleted (bottom-up only)
+    pub freespace: i16,
+}
+
+/// `TM_IndexDeleteOp` (`access/tableam.h`) — describes a (bottom-up) index
+/// deletion operation. `irel` is carried by the caller's `Relation` argument
+/// across the `_bt_delitems_delete_check` seam, so it is not duplicated here.
+#[derive(Clone, Debug)]
+pub struct TmIndexDeleteOp<'mcx> {
+    /// index block number (for error reports)
+    pub iblknum: types_core::primitive::BlockNumber,
+    /// bottom-up (not simple) deletion?
+    pub bottomup: bool,
+    /// bottom-up space target
+    pub bottomupfreespace: i32,
+    /// the `deltids` array (its length is C's `ndeltids`)
+    pub deltids: PgVec<'mcx, TmIndexDelete>,
+    /// the per-TID `status` array (parallel to `deltids`)
+    pub status: PgVec<'mcx, TmIndexStatus>,
+}
+
 /// `TU_UpdateIndexes` (`access/tableam.h`) — which indexes to update after a
 /// tuple update.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -405,4 +446,20 @@ pub struct TableAmRoutine {
         scan: &mut TableScanDescData<'mcx>,
         slot: &mut SlotData<'mcx>,
     ) -> PgResult<Option<(bool, u64, u64)>>,
+
+    /// `index_delete_tuples(rel, delstate)` (`access/tableam.h`) — the
+    /// index-AM-facing entry point an index AM calls (via
+    /// `table_index_delete_tuples`) during simple or bottom-up index-tuple
+    /// deletion. The heap implementation
+    /// (`heapam_handler.c heapam_index_delete_tuples`) defers to
+    /// `heap_index_delete_tuples`: it sorts (and, for bottom-up passes, shrinks)
+    /// `delstate->deltids`, visits the referenced heap blocks under share lock
+    /// to decide which TIDs are safely deletable, updates the `deltids`/`status`
+    /// arrays in place, and returns the operation's `snapshotConflictHorizon`.
+    /// `delstate` is `&mut` because it is updated in place.
+    pub index_delete_tuples: for<'mcx> fn(
+        mcx: Mcx<'mcx>,
+        rel: &Relation<'mcx>,
+        delstate: &mut TmIndexDeleteOp<'mcx>,
+    ) -> PgResult<TransactionId>,
 }

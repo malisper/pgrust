@@ -1121,7 +1121,7 @@ pub fn _bt_bottomupdel_pass<'mcx>(
     // the seam call below re-reads the buffer fresh.
 
     /* Ask tableam which TIDs are deletable, then physically delete them */
-    nbtcore::bt_delitems_delete_check::call(rel, buf, heap_rel, delstate)?;
+    nbtcore::bt_delitems_delete_check::call(mcx, rel, buf, heap_rel, delstate)?;
 
     /* Report "success" to caller unconditionally to avoid deduplication */
     if neverdedup {

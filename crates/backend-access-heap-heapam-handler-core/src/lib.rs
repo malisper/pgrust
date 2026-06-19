@@ -338,6 +338,19 @@ fn heapam_index_fetch_tuple<'mcx>(
     Ok(res.found)
 }
 
+/// `heapam_index_delete_tuples(rel, delstate)` (heapam_handler.c) — the heap
+/// AM's `index_delete_tuples` callback. The body in C is simply
+/// `return heap_index_delete_tuples(rel, delstate);`; the full deletability
+/// logic lives in `heap_index_delete_tuples` (ported in
+/// `backend-access-heap-heapam::index_delete`), reached through its seam.
+fn heapam_index_delete_tuples<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    delstate: &mut types_tableam::tableam::TmIndexDeleteOp<'mcx>,
+) -> PgResult<types_core::TransactionId> {
+    backend_access_heap_heapam_seams::heap_index_delete_tuples::call(mcx, rel, delstate)
+}
+
 // ===========================================================================
 // Non-modifying single-tuple callbacks
 // ===========================================================================
@@ -633,6 +646,7 @@ pub fn get_heapam_table_am_routine() -> TableAmRoutine {
         index_fetch_reset: heapam_index_fetch_reset,
         index_fetch_end: heapam_index_fetch_end,
         index_fetch_tuple: heapam_index_fetch_tuple,
+        index_delete_tuples: heapam_index_delete_tuples,
 
         tuple_fetch_row_version: heapam_fetch_row_version,
         tuple_tid_valid: heapam_tuple_tid_valid,

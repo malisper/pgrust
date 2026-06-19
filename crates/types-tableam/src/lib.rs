@@ -38,5 +38,5 @@ pub use tableam::{
     BulkInsertStateData, IndexFetchTableData, LockTupleExclusive, LockTupleKeyShare, LockTupleMode,
     LockTupleNoKeyExclusive, LockTupleShare, Snapshot, TM_FailureData, TM_Result,
     TUPLE_LOCK_FLAG_FIND_LAST_VERSION, TUPLE_LOCK_FLAG_LOCK_UPDATE_IN_PROGRESS, TU_UpdateIndexes,
-    TableAmRoutine,
+    TableAmRoutine, TmIndexDelete, TmIndexDeleteOp, TmIndexStatus,
 };

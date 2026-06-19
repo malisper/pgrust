@@ -339,46 +339,10 @@ pub struct BTDedupInterval {
     pub nitems: uint16,
 }
 
-/// `TM_IndexDelete` (`access/tableam.h`) — one TID handed to the tableam by an
-/// index AM during (bottom-up) index deletion.
-#[derive(Clone, Copy, Debug)]
-pub struct TmIndexDelete {
-    /// table TID from index tuple
-    pub tid: ItemPointerData,
-    /// offset into the `TM_IndexStatus` array
-    pub id: i16,
-}
-
-/// `TM_IndexStatus` (`access/tableam.h`) — mutable per-TID status that the
-/// index AM initializes and the tableam updates.
-#[derive(Clone, Copy, Debug)]
-pub struct TmIndexStatus {
-    /// index AM page offset number
-    pub idxoffnum: OffsetNumber,
-    /// currently known to be deletable?
-    pub knowndeletable: bool,
-    /// promising (duplicate) index tuple? (bottom-up only)
-    pub promising: bool,
-    /// space freed in index if deleted (bottom-up only)
-    pub freespace: i16,
-}
-
-/// `TM_IndexDeleteOp` (`access/tableam.h`) — describes a (bottom-up) index
-/// deletion operation. `irel` is carried by the caller's `Relation` argument
-/// across the `_bt_delitems_delete_check` seam, so it is not duplicated here.
-#[derive(Clone, Debug)]
-pub struct TmIndexDeleteOp<'mcx> {
-    /// index block number (for error reports)
-    pub iblknum: BlockNumber,
-    /// bottom-up (not simple) deletion?
-    pub bottomup: bool,
-    /// bottom-up space target
-    pub bottomupfreespace: i32,
-    /// the `deltids` array (its length is C's `ndeltids`)
-    pub deltids: PgVec<'mcx, TmIndexDelete>,
-    /// the per-TID `status` array (parallel to `deltids`)
-    pub status: PgVec<'mcx, TmIndexStatus>,
-}
+// `TM_IndexDelete` / `TM_IndexStatus` / `TM_IndexDeleteOp` (`access/tableam.h`)
+// live in `types-tableam` (their C home); re-exported here for the index-AM
+// callers that historically reached them through `types_nbtree`.
+pub use types_tableam::{TmIndexDelete, TmIndexDeleteOp, TmIndexStatus};
 
 /// `IndexUniqueCheck` (`access/genam.h`) — the uniqueness-check mode requested
 /// by the executor for an index insert.

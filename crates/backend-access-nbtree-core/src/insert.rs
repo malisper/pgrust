@@ -2868,7 +2868,9 @@ fn _bt_simpledel_pass<'mcx>(
     debug_assert!(delstate.deltids.len() >= deletable.len());
 
     /* Physically delete LP_DEAD tuples (plus any delete-safe extra TIDs). */
-    backend_access_nbtree_core_seams::bt_delitems_delete_check::call(rel, buffer, heap_rel, delstate)
+    backend_access_nbtree_core_seams::bt_delitems_delete_check::call(
+        mcx, rel, buffer, heap_rel, delstate,
+    )
 }
 
 // ===========================================================================

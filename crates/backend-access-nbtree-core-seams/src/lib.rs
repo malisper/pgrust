@@ -328,6 +328,7 @@ seam_core::seam!(
     /// (WAL-logged inside its own critical section). Consumes `delstate`.
     /// `Err` carries the tableam / WAL `ereport(ERROR)`s.
     pub fn bt_delitems_delete_check<'mcx>(
+        mcx: Mcx<'mcx>,
         rel: &Relation<'mcx>,
         buf: Buffer,
         heap_rel: &Relation<'mcx>,

@@ -99,6 +99,9 @@ pub fn init_seams() {
     backend_access_table_tableam_seams::table_index_fetch_tuple_check::set(
         table_index_fetch_tuple_check,
     );
+    backend_access_table_tableam_seams::table_index_delete_tuples::set(
+        table_index_delete_tuples,
+    );
     backend_access_table_tableam_seams::table_relation_set_new_filelocator::set(
         table_relation_set_new_filelocator,
     );
@@ -653,6 +656,21 @@ pub fn table_index_fetch_tuple_check<'mcx>(
     backend_executor_execTuples_seams::exec_drop_single_tuple_table_slot::call(slot)?;
 
     Ok(found)
+}
+
+/// `table_index_delete_tuples(rel, delstate)` (`access/tableam.h` inline) — the
+/// tableam dispatch an index AM calls during (simple or bottom-up) index-tuple
+/// deletion: `return rel->rd_tableam->index_delete_tuples(rel, delstate);`.
+/// Dispatches to the AM's `index_delete_tuples` callback (heap's is
+/// `heapam_index_delete_tuples`), which determines the deletable TIDs and
+/// returns the operation's `snapshotConflictHorizon`.
+pub fn table_index_delete_tuples<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    delstate: &mut types_tableam::tableam::TmIndexDeleteOp<'mcx>,
+) -> PgResult<types_core::TransactionId> {
+    let routine = am(rel);
+    (routine.index_delete_tuples)(mcx, rel, delstate)
 }
 
 // ===========================================================================
