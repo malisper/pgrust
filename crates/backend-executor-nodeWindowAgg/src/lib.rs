@@ -2071,8 +2071,8 @@ pub fn ExecInitWindowAgg<'mcx>(
 ) -> PgResult<PgBox<'mcx, WindowAggState<'mcx>>> {
     let mcx = estate.es_query_cxt;
 
-    let wnode: &'mcx WindowAgg<'mcx> = match node {
-        types_nodes::nodes::Node::WindowAgg(w) => w,
+    let wnode: &'mcx WindowAgg<'mcx> = match node.node_tag() {
+        types_nodes::nodes::ntag::T_WindowAgg => node.expect_windowagg(),
         other => panic!("castNode(WindowAgg, node) failed: {other:?}"),
     };
 
@@ -3350,13 +3350,13 @@ pub fn WinGetFuncArgCurrent<'mcx>(
 
 /// The WindowAgg plan node embedded in this state (read-only at run time).
 fn node<'a, 'mcx>(winstate: &'a WindowAggState<'mcx>) -> &'a WindowAgg<'mcx> {
-    match winstate
+    let plan = winstate
         .ss
         .ps
         .plan
-        .expect("WindowAggState: plan back-pointer not set")
-    {
-        types_nodes::nodes::Node::WindowAgg(w) => w,
+        .expect("WindowAggState: plan back-pointer not set");
+    match plan.node_tag() {
+        types_nodes::nodes::ntag::T_WindowAgg => plan.expect_windowagg(),
         other => panic!("WindowAggState.plan is not a WindowAgg: {other:?}"),
     }
 }
