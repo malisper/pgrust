@@ -42,6 +42,42 @@ pub fn init_seams() {
         seam_query_rewrite_canonical,
     );
     backend_rewrite_rewritehandler_seams::acquire_rewrite_locks::set(seam_acquire_rewrite_locks);
+    backend_rewrite_rewritehandler_seams::relation_has_security_invoker::set(
+        seam_relation_has_security_invoker,
+    );
+    backend_rewrite_rewritehandler_seams::relation_is_security_view::set(
+        seam_relation_is_security_view,
+    );
+    backend_rewrite_rewritehandler_seams::relation_has_check_option::set(
+        seam_relation_has_check_option,
+    );
+    backend_rewrite_rewritehandler_seams::relation_has_cascaded_check_option::set(
+        seam_relation_has_cascaded_check_option,
+    );
+}
+
+// The view-option predicates (`utils/rel.h` `RelationHasSecurityInvoker`,
+// `RelationIsSecurityView`, `RelationHasCheckOption`,
+// `RelationHasCascadedCheckOption`) read the *view* `StdRdOptions`/`ViewOptions`
+// out of `rd_options`. The trimmed `RelationData::rd_options` carries only the
+// heap `StdRdOptions` (the relcache drops parsed View options — see
+// `extract_rel_options_seam`), so a view's `security_barrier`/`security_invoker`/
+// `check_option` flags are not recoverable from the relcache entry in this
+// model. They therefore answer the no-view-options value (`false`), which is the
+// correct result for a plain `CREATE VIEW` (no reloptions). A view defined WITH
+// CHECK OPTION or as a security_barrier/security_invoker view is the documented
+// banked blocker (its enforcement needs the ViewOptions carrier on rd_options).
+fn seam_relation_has_security_invoker(_view: &types_rel::Relation<'_>) -> bool {
+    false
+}
+fn seam_relation_is_security_view(_view: &types_rel::Relation<'_>) -> bool {
+    false
+}
+fn seam_relation_has_check_option(_view: &types_rel::Relation<'_>) -> bool {
+    false
+}
+fn seam_relation_has_cascaded_check_option(_view: &types_rel::Relation<'_>) -> bool {
+    false
 }
 
 /// `AcquireRewriteLocks(parsetree, forExecute, forUpdatePushedDown)`

@@ -1872,14 +1872,6 @@ mod recurrence_guard {
         // entry when execReplication lands.
         ("backend_catalog_pg_subscription", "check_subscription_relkind"),
 
-        // DESIGN_DEBT (TD-RIR-RULE-ENGINE): rewriteHandler.c's
-        // relation_has_security_invoker is installed by the DML/RIR rule-engine
-        // slice (alongside get_view_query / relation_is_updatable), which is the
-        // NEXT rewriteHandler slice and is keystone-blocked on the query_rewrite
-        // contract collapse (portalcmds::Query opaque token). No body yet; the
-        // lockcmds caller seam-and-panics. DELETE when the RIR engine lands.
-        ("backend_rewrite_rewritehandler", "relation_has_security_invoker"),
-
     ];
 
     /// CATALOG.tsv unit statuses that mean the owner crate is COMPLETE — its

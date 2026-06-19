@@ -24,11 +24,18 @@
 //!    (consumers: publicationcmds, plancat). Installs the
 //!    `expand_generated_columns_in_expr` seam.
 //!
-//! The rule-firing engine (`RewriteQuery`/`fireRules`/`rewriteRuleAction`/
-//! `rewriteTargetView`) and the RIR engine (`fireRIRrules`/`ApplyRetrieveRule`/
-//! `get_view_query`/`relation_is_updatable`) are the remaining STEP-2 work; the
-//! `query_rewrite` contract collapse is a separate hard STOP (see crate notes /
-//! DESIGN_DEBT TD-REWRITEHANDLER-RULELOCK).
+//! The rule-firing engine (`RewriteQuery`/`fireRules`/`rewriteRuleAction`), the
+//! auto-updatable-view rewrite (`rewriteTargetView`, in `engine.rs`), and the
+//! RIR engine (`fireRIRrules`/`ApplyRetrieveRule`/`get_view_query`/
+//! `relation_is_updatable`) are ported. `rewriteTargetView` covers the
+//! auto-updatable INSERT/UPDATE/DELETE-on-view rewrite; the WITH CHECK OPTION /
+//! security-barrier enforcement legs are gated on the *view* `ViewOptions`
+//! carrier (the trimmed `rd_options` carries only the heap `StdRdOptions`, so a
+//! view's `check_option`/`security_barrier`/`security_invoker` flags read
+//! `false`), and the INSERT .. ON CONFLICT EXCLUDED-RTE rebuild / sublink-view
+//! locking legs remain precise mirror-and-panic boundaries. The `query_rewrite`
+//! contract collapse is a separate hard STOP (see crate notes / DESIGN_DEBT
+//! TD-REWRITEHANDLER-RULELOCK).
 
 use mcx::{Mcx, PgBox, PgString};
 
@@ -393,7 +400,7 @@ pub fn view_query_is_auto_updatable(
 /// first offending non-updatable required column.
 ///
 /// Caller `relation_is_updatable` (and the next-slice `rewriteTargetView`).
-fn view_cols_are_auto_updatable<'mcx>(
+pub(crate) fn view_cols_are_auto_updatable<'mcx>(
     mcx: Mcx<'mcx>,
     viewquery: &Query<'mcx>,
     required_cols: Option<&types_nodes::bitmapset::Bitmapset<'_>>,
@@ -440,7 +447,7 @@ fn view_cols_are_auto_updatable<'mcx>(
 /// Vars of the base relation, as verified by view_query_is_auto_updatable).
 ///
 /// Caller `relation_is_updatable` (and the next-slice `rewriteTargetView`).
-fn adjust_view_column_set<'mcx>(
+pub(crate) fn adjust_view_column_set<'mcx>(
     mcx: Mcx<'mcx>,
     cols: Option<&types_nodes::bitmapset::Bitmapset<'_>>,
     targetlist: &[TargetEntry<'mcx>],

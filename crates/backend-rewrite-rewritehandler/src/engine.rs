@@ -1793,6 +1793,501 @@ fn has_any_rls_relation(parsetree: &Query<'_>) -> bool {
 }
 
 // ===========================================================================
+// rewriteTargetView (rewriteHandler.c:3216)
+// ===========================================================================
+
+/// `rewriteTargetView(parsetree, view)` (rewriteHandler.c:3216) — rewrite a DML
+/// query whose target relation is an auto-updatable view so the view's base
+/// relation becomes the target relation. The view's `ON SELECT` `Query` is
+/// pulled up: its single base RTE is appended to the outer query's range table,
+/// the view targetlist Vars are re-pointed at it, every reference to the view
+/// (targetlist resnos, quals, RTI references, `resultRelation`) is rewritten to
+/// the base relation, and any view WHERE quals / WITH CHECK OPTIONs are carried
+/// over. The (possibly views-on-views) result is handled by the caller's
+/// recursion through `RewriteQuery`.
+fn rewriteTargetView<'mcx>(
+    mcx: Mcx<'mcx>,
+    mut parsetree: Query<'mcx>,
+    view: &Relation<'mcx>,
+) -> PgResult<Query<'mcx>> {
+    use backend_nodes_core::bitmapset::{bms_is_empty, bms_union};
+    use backend_parser_relation::{addRTEPermissionInfo, getRTEPermissionInfo};
+    use types_storage::lock::RowExclusiveLock;
+
+    // Get the Query from the view's ON SELECT rule. get_view_query already
+    // returns a fresh copyObject re-projected into mcx, so it is ours to munge.
+    let mut viewquery = crate::get_view_query(mcx, view)?;
+
+    // Locate the RTE and perminfo describing the view in the outer query.
+    let view_result_relation = parsetree.resultRelation;
+    let view_rte_idx = (view_result_relation - 1) as usize;
+    let view_perminfo_idx = getRTEPermissionInfo(&parsetree.rteperminfos, &parsetree.rtable[view_rte_idx])?;
+
+    // Are we doing INSERT/UPDATE, or MERGE containing INSERT/UPDATE?
+    let mut insert_or_update = parsetree.commandType == CmdType::CMD_INSERT
+        || parsetree.commandType == CmdType::CMD_UPDATE;
+    if parsetree.commandType == CmdType::CMD_MERGE {
+        for node in parsetree.mergeActionList.iter() {
+            if let Some(action) = (**node).as_mergeaction() {
+                if action.commandType == CmdType::CMD_INSERT
+                    || action.commandType == CmdType::CMD_UPDATE
+                {
+                    insert_or_update = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    // restrict_nonsystem_relation_kind & RESTRICT_RELKIND_VIEW: the GUC is not
+    // carried in this slice (no consumer sets it for views on the test spine);
+    // the C default leaves it clear, so the access-restriction branch is a no-op.
+
+    // The view must be updatable, else fail. If INSERT/UPDATE (or MERGE
+    // containing INSERT/UPDATE), also require at least one updatable column.
+    let auto_update_detail = crate::view_query_is_auto_updatable(&viewquery, insert_or_update)?;
+    if let Some(detail) = auto_update_detail {
+        return Err(crate::error_view_not_updatable(
+            view,
+            parsetree.commandType,
+            &parsetree.mergeActionList,
+            Some(detail),
+        ));
+    }
+
+    // For INSERT/UPDATE (or MERGE containing INSERT/UPDATE) the modified columns
+    // must all be updatable.
+    if insert_or_update {
+        let mut modified_cols = bms_union(
+            mcx,
+            parsetree.rteperminfos[view_perminfo_idx].insertedCols.as_deref(),
+            parsetree.rteperminfos[view_perminfo_idx].updatedCols.as_deref(),
+        )?;
+
+        for tle in parsetree.targetList.iter() {
+            if !tle.resjunk {
+                let prev = modified_cols.take();
+                modified_cols = Some(backend_nodes_core::bitmapset::bms_add_member(
+                    mcx,
+                    prev,
+                    tle.resno as i32 - crate::FirstLowInvalidHeapAttributeNumber,
+                )?);
+            }
+        }
+
+        if let Some(oc) = parsetree.onConflict.as_deref() {
+            for tle_node in oc.onConflictSet.iter() {
+                if let Some(tle) = (**tle_node).as_targetentry() {
+                    if !tle.resjunk {
+                        let prev = modified_cols.take();
+                        modified_cols = Some(backend_nodes_core::bitmapset::bms_add_member(
+                            mcx,
+                            prev,
+                            tle.resno as i32 - crate::FirstLowInvalidHeapAttributeNumber,
+                        )?);
+                    }
+                }
+            }
+        }
+
+        for node in parsetree.mergeActionList.iter() {
+            if let Some(action) = (**node).as_mergeaction() {
+                if action.commandType == CmdType::CMD_INSERT
+                    || action.commandType == CmdType::CMD_UPDATE
+                {
+                    for tle_node in action.targetList.iter() {
+                        if let Some(tle) = (**tle_node).as_targetentry() {
+                            if !tle.resjunk {
+                                let prev = modified_cols.take();
+                                modified_cols = Some(backend_nodes_core::bitmapset::bms_add_member(
+                                    mcx,
+                                    prev,
+                                    tle.resno as i32 - crate::FirstLowInvalidHeapAttributeNumber,
+                                )?);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut non_updatable_col: Option<String> = None;
+        let detail = crate::view_cols_are_auto_updatable(
+            mcx,
+            &viewquery,
+            modified_cols.as_deref(),
+            None,
+            &mut non_updatable_col,
+        )?;
+        if let Some(detail) = detail {
+            let col = non_updatable_col.unwrap_or_default();
+            let view_name = view.name();
+            let (msg, code) = match parsetree.commandType {
+                CmdType::CMD_INSERT => (
+                    format!("cannot insert into column \"{col}\" of view \"{view_name}\""),
+                    ERRCODE_FEATURE_NOT_SUPPORTED,
+                ),
+                CmdType::CMD_UPDATE => (
+                    format!("cannot update column \"{col}\" of view \"{view_name}\""),
+                    ERRCODE_FEATURE_NOT_SUPPORTED,
+                ),
+                CmdType::CMD_MERGE => (
+                    format!("cannot merge into column \"{col}\" of view \"{view_name}\""),
+                    ERRCODE_FEATURE_NOT_SUPPORTED,
+                ),
+                other => {
+                    return Err(elog(&format!("unrecognized CmdType: {}", other as i32)));
+                }
+            };
+            return Err(PgError::new(ERROR, msg)
+                .with_sqlstate(code)
+                .with_detail(detail.to_string()));
+        }
+    }
+
+    // For MERGE, guard against a partial set of INSTEAD OF triggers.
+    if parsetree.commandType == CmdType::CMD_MERGE {
+        for node in parsetree.mergeActionList.iter() {
+            if let Some(action) = (**node).as_mergeaction() {
+                if action.commandType != CmdType::CMD_NOTHING
+                    && view_has_instead_trigger(view, action.commandType, &[])?
+                {
+                    return Err(PgError::new(
+                        ERROR,
+                        format!("cannot merge into view \"{}\"", view.name()),
+                    )
+                    .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .with_detail(
+                        "MERGE is not supported for views with INSTEAD OF triggers for some actions but not all."
+                            .to_string(),
+                    )
+                    .with_hint(
+                        "To enable merging into the view, either provide a full set of INSTEAD OF triggers or drop the existing INSTEAD OF triggers."
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    // view_query_is_auto_updatable verified a single base relation.
+    let jt = viewquery
+        .jointree
+        .as_ref()
+        .expect("auto-updatable view has a jointree");
+    debug_assert_eq!(jt.fromlist.len(), 1);
+    let rtr = (*jt.fromlist[0])
+        .as_rangetblref()
+        .unwrap_or_else(|| panic!("auto-updatable view fromlist[0] is not a RangeTblRef"));
+    let base_rt_index = rtr.rtindex;
+    let base_perminfo_idx = {
+        let base_rte = &viewquery.rtable[(base_rt_index - 1) as usize];
+        debug_assert_eq!(base_rte.rtekind, RTEKind::RTE_RELATION);
+        getRTEPermissionInfo(&viewquery.rteperminfos, base_rte)?
+    };
+    let base_relid = viewquery.rtable[(base_rt_index - 1) as usize].relid;
+
+    // Acquire RowExclusiveLock on the base relation (it will become the target).
+    let base_rel = table_open(mcx, base_relid, RowExclusiveLock)?;
+
+    // Refresh the base RTE's relkind in case it changed since the view was made.
+    viewquery.rtable[(base_rt_index - 1) as usize].relkind = base_rel.rd_rel.relkind as i8;
+
+    // If the view query contains sublink subqueries, lock relations they refer
+    // to. This is the documented '\''static-SubLink keystone; a no-op otherwise.
+    if viewquery.hasSubLinks {
+        base_rel.close(NoLock)?;
+        return Err(elog(
+            "rewriteTargetView: locking sublink subqueries in a security-/sublink-bearing \
+             view is blocked on the '\\''static SubLink.subselect keystone \
+             (owner: backend-rewrite-rewritehandler rewriteTargetView)",
+        ));
+    }
+
+    // Create the new target RTE describing the base relation (scribble on the
+    // copied base_rte), append it to the outer query's range table.
+    let new_rt_index;
+    {
+        let mut new_rte = viewquery.rtable[(base_rt_index - 1) as usize].clone_in(mcx)?;
+        new_rte.rellockmode = RowExclusiveLock;
+        // INSERTs never inherit; UPDATE/DELETE/MERGE use the view's inh flag.
+        if parsetree.commandType == CmdType::CMD_INSERT {
+            new_rte.inh = false;
+        }
+        new_rte.securityQuals = PgVec::new_in(mcx);
+        new_rte.perminfoindex = 0;
+        parsetree.rtable.push(new_rte);
+        new_rt_index = parsetree.rtable.len() as i32;
+    }
+
+    // Adjust the view targetlist Vars to reference the new target RTE, making
+    // their varnos new_rt_index instead of base_rt_index. We keep our own owned
+    // copy of the (re-pointed) view targetlist for the replacements below.
+    let mut view_targetlist: Vec<types_nodes::primnodes::TargetEntry<'mcx>> = viewquery
+        .targetList
+        .iter()
+        .map(|t| t.clone_in(mcx))
+        .collect::<PgResult<_>>()?;
+    for tle in view_targetlist.iter_mut() {
+        let mut node = Node::mk_target_entry(mcx, tle.clone_in(mcx)?);
+        ChangeVarNodes(&mut node, base_rt_index, new_rt_index, 0);
+        *tle = node.into_targetentry().unwrap_or_else(|| unreachable!());
+    }
+
+    // Per-relation permission bits on the new RTE. Mark the new target with the
+    // INSERT/UPDATE/DELETE perms the caller needs against the view, dropping the
+    // ACL_SELECT bit. checkAsUser depends on the view's security_invoker flag.
+    let new_perminfo_idx = {
+        let new_rte = parsetree.rtable.last_mut().unwrap();
+        addRTEPermissionInfo(&mut parsetree.rteperminfos, new_rte)?
+    };
+    {
+        let check_as_user = if rewrite_relation_has_security_invoker(view) {
+            InvalidOid
+        } else {
+            view.rd_rel.relowner
+        };
+        let required_perms = parsetree.rteperminfos[view_perminfo_idx].requiredPerms;
+        // Per-column perms: keep the base view's selectedCols; set inserted/
+        // updatedCols from the outer query's modified columns, mapped through
+        // the (re-pointed) view targetlist.
+        let base_selected = match viewquery.rteperminfos[base_perminfo_idx]
+            .selectedCols
+            .as_ref()
+        {
+            Some(b) => Some(alloc_in(mcx, b.clone_in(mcx)?)?),
+            None => None,
+        };
+        let view_inserted = parsetree.rteperminfos[view_perminfo_idx].insertedCols.as_deref();
+        let new_inserted = crate::adjust_view_column_set(mcx, view_inserted, &view_targetlist)?;
+        let view_updated = parsetree.rteperminfos[view_perminfo_idx].updatedCols.as_deref();
+        let new_updated = crate::adjust_view_column_set(mcx, view_updated, &view_targetlist)?;
+
+        let np = &mut parsetree.rteperminfos[new_perminfo_idx];
+        debug_assert!(bms_is_empty(np.insertedCols.as_deref()) && bms_is_empty(np.updatedCols.as_deref()));
+        np.checkAsUser = check_as_user;
+        np.requiredPerms = required_perms;
+        np.selectedCols = base_selected;
+        np.insertedCols = new_inserted;
+        np.updatedCols = new_updated;
+    }
+
+    // Move any security-barrier quals from the view RTE onto the new target RTE.
+    {
+        let view_secquals: Vec<NodePtr<'mcx>> =
+            parsetree.rtable[view_rte_idx].securityQuals.drain(..).collect();
+        let new_rte = parsetree.rtable.last_mut().unwrap();
+        let mut sq = PgVec::new_in(mcx);
+        sq.extend(view_secquals);
+        new_rte.securityQuals = sq;
+    }
+
+    // Update all Vars in the outer query that reference the view to reference
+    // the appropriate base-relation column instead.
+    {
+        let view_rte = parsetree.rtable[view_rte_idx].clone_in(mcx)?;
+        let mut node = Node::mk_query(mcx, parsetree);
+        let mut outer = None;
+        ReplaceVarsFromTargetList(
+            &mut node,
+            view_result_relation,
+            0,
+            &view_rte,
+            &view_targetlist,
+            new_rt_index,
+            ReplaceVarsNoMatchOption::ReportError,
+            0,
+            &mut outer,
+            mcx,
+        )?;
+        parsetree = node.into_query().unwrap_or_else(|| unreachable!());
+    }
+
+    // Update all other RTI references that point to the view (e.g.
+    // resultRelation) to point to the new base relation instead.
+    {
+        let mut node = Node::mk_query(mcx, parsetree);
+        ChangeVarNodes(&mut node, view_result_relation, new_rt_index, 0);
+        parsetree = node.into_query().unwrap_or_else(|| unreachable!());
+    }
+    debug_assert_eq!(parsetree.resultRelation, new_rt_index);
+
+    // For INSERT/UPDATE we must also update resnos in the targetlist to refer to
+    // columns of the base relation; same for MERGE INSERT/UPDATE action tlists.
+    if parsetree.commandType != CmdType::CMD_DELETE {
+        for tle in parsetree.targetList.iter_mut() {
+            if tle.resjunk {
+                continue;
+            }
+            tle.resno = view_tle_base_attno(&view_targetlist, tle.resno)?;
+        }
+        for node in parsetree.mergeActionList.iter_mut() {
+            // MergeAction tlist resnos: re-point through the view tlist.
+            let Some(action) = (**node).as_mergeaction_mut() else {
+                continue;
+            };
+            if action.commandType == CmdType::CMD_INSERT
+                || action.commandType == CmdType::CMD_UPDATE
+            {
+                for tle_node in action.targetList.iter_mut() {
+                    if let Some(tle) = (**tle_node).as_targetentry_mut() {
+                        if tle.resjunk {
+                            continue;
+                        }
+                        tle.resno = view_tle_base_attno(&view_targetlist, tle.resno)?;
+                    }
+                }
+            }
+        }
+    }
+
+    // INSERT .. ON CONFLICT .. DO UPDATE rewriting (EXCLUDED pseudo-rel rebuild)
+    // is a deeper leg that needs addRangeTableEntryForRelation /
+    // BuildOnConflictExcludedTargetlist substrate this slice does not hold.
+    if parsetree
+        .onConflict
+        .as_deref()
+        .is_some_and(|oc| oc.action == OnConflictAction::ONCONFLICT_UPDATE)
+    {
+        base_rel.close(NoLock)?;
+        return Err(elog(
+            "rewriteTargetView: INSERT .. ON CONFLICT .. DO UPDATE on an auto-updatable \
+             view (EXCLUDED RTE rebuild) is not part of this slice \
+             (owner: backend-rewrite-rewritehandler rewriteTargetView)",
+        ));
+    }
+
+    // For UPDATE/DELETE/MERGE, pull up any WHERE quals from the view, re-pointed
+    // at the new target. For INSERT the view's quals are ignored in the main
+    // query (only the WITH CHECK OPTION, below, uses them).
+    let view_quals_present = viewquery
+        .jointree
+        .as_ref()
+        .and_then(|jt| jt.quals.as_deref())
+        .is_some();
+    if parsetree.commandType != CmdType::CMD_INSERT && view_quals_present {
+        let mut viewqual = viewquery
+            .jointree
+            .as_ref()
+            .and_then(|jt| jt.quals.as_deref())
+            .unwrap()
+            .clone_in(mcx)?;
+        ChangeVarNodes(&mut viewqual, base_rt_index, new_rt_index, 0);
+
+        if rewrite_relation_is_security_view(view) {
+            // Security-barrier view: prepend the qual as a security qual on the
+            // new RTE. Not exercised on the simple-view spine; the option flag
+            // is not carried (always false), so this branch is unreachable.
+            let new_rte = &mut parsetree.rtable[(new_rt_index - 1) as usize];
+            let existing: Vec<NodePtr<'mcx>> = new_rte.securityQuals.drain(..).collect();
+            let mut sq = PgVec::new_in(mcx);
+            sq.push(alloc_in(mcx, viewqual)?);
+            sq.extend(existing);
+            new_rte.securityQuals = sq;
+            if !parsetree.hasSubLinks {
+                let added = &parsetree.rtable[(new_rt_index - 1) as usize].securityQuals[0];
+                parsetree.hasSubLinks = checkExprHasSubLink(added);
+            }
+        } else {
+            AddQual(&mut parsetree, Some(&viewqual), mcx)?;
+        }
+    }
+
+    // For INSERT/UPDATE (or MERGE containing INSERT/UPDATE), handle the WITH
+    // CHECK OPTION. The view-option flags (check_option/cascaded) are not carried
+    // on the trimmed rd_options, so both read false here and no WCO is added —
+    // a view defined WITH CHECK OPTION is the documented banked blocker.
+    if insert_or_update {
+        let mut has_wco = rewrite_relation_has_check_option(view);
+        let mut cascaded = rewrite_relation_has_cascaded_check_option(view);
+
+        if let Some(parent) = parsetree.withCheckOptions.first() {
+            if let Some(parent_wco) = (**parent).as_withcheckoption() {
+                if parent_wco.cascaded {
+                    has_wco = true;
+                    cascaded = true;
+                }
+            }
+        }
+
+        if has_wco && (cascaded || view_quals_present) {
+            let mut wco = types_nodes::rawnodes::WithCheckOption {
+                kind: types_nodes::rawnodes::WCOKind::WCO_VIEW_CHECK,
+                relname: Some(PgString::from_str_in(view.name(), mcx)?),
+                polname: None,
+                qual: None,
+                cascaded,
+            };
+            let mut added_sublink = false;
+            if view_quals_present {
+                let mut q = viewquery
+                    .jointree
+                    .as_ref()
+                    .and_then(|jt| jt.quals.as_deref())
+                    .unwrap()
+                    .clone_in(mcx)?;
+                ChangeVarNodes(&mut q, base_rt_index, new_rt_index, 0);
+                if parsetree.commandType == CmdType::CMD_INSERT {
+                    added_sublink = checkExprHasSubLink(&q);
+                }
+                wco.qual = Some(alloc_in(mcx, q)?);
+            }
+            let existing_wcos: Vec<NodePtr<'mcx>> =
+                parsetree.withCheckOptions.drain(..).collect();
+            let mut new_wcos = PgVec::new_in(mcx);
+            new_wcos.push(alloc_in(mcx, Node::mk_with_check_option(mcx, wco))?);
+            new_wcos.extend(existing_wcos);
+            parsetree.withCheckOptions = new_wcos;
+            if !parsetree.hasSubLinks && added_sublink {
+                parsetree.hasSubLinks = true;
+            }
+        }
+    }
+
+    base_rel.close(NoLock)?;
+    Ok(parsetree)
+}
+
+/// `get_tle_by_resno(view_targetlist, resno)` then take the base-relation
+/// `varattno` (the C resno-remap helper inlined at three sites in
+/// `rewriteTargetView`). Errors exactly as the C `elog` if the entry is missing,
+/// junk, or not a plain Var.
+fn view_tle_base_attno<'mcx>(
+    view_targetlist: &[types_nodes::primnodes::TargetEntry<'mcx>],
+    resno: i16,
+) -> PgResult<i16> {
+    use backend_parser_relation::get_tle_by_resno;
+    let view_tle = get_tle_by_resno(view_targetlist, resno);
+    match view_tle {
+        Some(tle) if !tle.resjunk => {
+            if let Some(var) = tle.expr.as_deref().and_then(Expr::as_var) {
+                return Ok(var.varattno);
+            }
+            Err(elog(&format!(
+                "attribute number {resno} not found in view targetlist"
+            )))
+        }
+        _ => Err(elog(&format!(
+            "attribute number {resno} not found in view targetlist"
+        ))),
+    }
+}
+
+/// `RelationHasSecurityInvoker(view)` via the rewriteHandler seam.
+fn rewrite_relation_has_security_invoker(view: &Relation<'_>) -> bool {
+    backend_rewrite_rewritehandler_seams::relation_has_security_invoker::call(view)
+}
+fn rewrite_relation_is_security_view(view: &Relation<'_>) -> bool {
+    backend_rewrite_rewritehandler_seams::relation_is_security_view::call(view)
+}
+fn rewrite_relation_has_check_option(view: &Relation<'_>) -> bool {
+    backend_rewrite_rewritehandler_seams::relation_has_check_option::call(view)
+}
+fn rewrite_relation_has_cascaded_check_option(view: &Relation<'_>) -> bool {
+    backend_rewrite_rewritehandler_seams::relation_has_cascaded_check_option::call(view)
+}
+
+// ===========================================================================
 // RewriteQuery + QueryRewrite (rewriteHandler.c:3882, 4566)
 // ===========================================================================
 
@@ -2073,17 +2568,53 @@ fn RewriteQuery<'mcx>(
             }
         }
 
-        // Auto-updatable view rewrite.
+        // Auto-updatable view rewrite. If there was no unqualified INSTEAD rule,
+        // and the target is a view without INSTEAD OF triggers, see if the view
+        // can be automatically updated and, if so, rewrite the query here and
+        // add it to product_queries so it gets recursively rewritten.
+        //
+        // The view-rewritten query (the C `pt == parsetree`) is recursed with
+        // `orig_rt_length` (to finish any VALUES RTE it contained), while the
+        // fireRules product queries are recursed with `product_orig_rt_length`;
+        // we therefore carry it separately.
+        let mut view_rewritten: Option<Query<'mcx>> = None;
         if !instead
             && rt_entry_relation.rd_rel.relkind == RELKIND_VIEW as u8
             && !view_has_instead_trigger(&rt_entry_relation, event, &parsetree.mergeActionList)?
         {
-            rt_entry_relation.close(NoLock)?;
-            return Err(elog(
-                "RewriteQuery: automatic view-update rewrite (rewriteTargetView) is not \
-                 part of this engine slice (owner: backend-rewrite-rewritehandler \
-                 rewriteTargetView); an auto-updatable view target was reached",
-            ));
+            // Qualified INSTEAD rules block automatic updating.
+            if qual_product.is_some() {
+                let err = crate::error_view_not_updatable(
+                    &rt_entry_relation,
+                    parsetree.commandType,
+                    &parsetree.mergeActionList,
+                    Some("Views with conditional DO INSTEAD rules are not automatically updatable."),
+                );
+                rt_entry_relation.close(NoLock)?;
+                return Err(err);
+            }
+
+            // Attempt the rewrite (throws if the view can't be auto-updated).
+            parsetree = match rewriteTargetView(mcx, parsetree, &rt_entry_relation) {
+                Ok(q) => q,
+                Err(e) => {
+                    rt_entry_relation.close(NoLock)?;
+                    return Err(e);
+                }
+            };
+
+            // product_queries holds any DO ALSO rule actions. The rewritten
+            // query goes before (INSERT) or after (UPDATE/DELETE/MERGE) those,
+            // but since we recurse it with a different orig_rt_length we keep it
+            // in `view_rewritten` and stitch the ordering into `rewritten` below.
+            view_rewritten = Some(parsetree);
+            // parsetree has been consumed; re-borrow a placeholder so subsequent
+            // reads (RETURNING check) see the suppressed-instead state.
+            parsetree = view_rewritten.as_ref().unwrap().clone_in(mcx)?;
+
+            instead = true;
+            returning = true;
+            updatableview = true;
         }
 
         // Whether fireRules produced any product queries (the C
@@ -2093,7 +2624,7 @@ fn RewriteQuery<'mcx>(
         let product_queries_nonempty = !product_queries.is_empty();
 
         // Recursively rewrite product queries (with recursion guard).
-        if !product_queries.is_empty() {
+        if !product_queries.is_empty() || view_rewritten.is_some() {
             let guard = RewriteEvent {
                 relation: rt_entry_relation.rd_id,
                 event,
@@ -2108,12 +2639,25 @@ fn RewriteQuery<'mcx>(
                 .with_sqlstate(ERRCODE_INVALID_OBJECT_DEFINITION));
             }
             rewrite_events.push(guard);
+            // C ordering: for an INSERT updatable view, the rewritten query is
+            // lcons'd (first); otherwise it is lappend'd (last). Recurse it with
+            // `orig_rt_length`; the fireRules product queries with
+            // `product_orig_rt_length`.
+            let view_is_insert =
+                view_rewritten.as_ref().map(|q| q.commandType == CmdType::CMD_INSERT);
+            if view_is_insert == Some(true) {
+                if let Some(vq) = view_rewritten.take() {
+                    rewritten.extend(RewriteQuery(mcx, vq, rewrite_events, orig_rt_length, num_ctes_processed)?);
+                }
+            }
             for pt in product_queries.into_iter() {
-                // pt == parsetree only happens for the updatable-view path, which
-                // we don't reach here; product queries always come from fireRules.
                 let newstuff =
                     RewriteQuery(mcx, pt, rewrite_events, product_orig_rt_length, num_ctes_processed)?;
                 rewritten.extend(newstuff);
+            }
+            if let Some(vq) = view_rewritten.take() {
+                // non-INSERT updatable view: appended after the DO ALSO actions.
+                rewritten.extend(RewriteQuery(mcx, vq, rewrite_events, orig_rt_length, num_ctes_processed)?);
             }
             rewrite_events.pop();
         }

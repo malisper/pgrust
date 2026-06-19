@@ -105,6 +105,34 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `RelationIsSecurityView(relation)` (`utils/rel.h`): whether the view's
+    /// parsed reloptions have the `security_barrier` flag set (default `false`
+    /// when no reloptions). Like `relation_has_security_invoker`, this reads the
+    /// *view* `StdRdOptions`/`ViewOptions`, which the trimmed
+    /// `RelationData::rd_options` (heap `StdRdOptions` only) does not carry, so
+    /// the owner answers from the no-view-options model (`false`). Homed in
+    /// `backend-rewrite-rewritehandler`.
+    pub fn relation_is_security_view(relation: &types_rel::Relation<'_>) -> bool
+);
+
+seam_core::seam!(
+    /// `RelationHasCheckOption(relation)` (`utils/rel.h`): whether the view has
+    /// a `WITH [LOCAL|CASCADED] CHECK OPTION` (i.e. its `ViewOptions.check_option`
+    /// is `LOCAL` or `CASCADED`). The trimmed `rd_options` does not carry view
+    /// options, so the owner answers `false` (no WITH CHECK OPTION). Homed in
+    /// `backend-rewrite-rewritehandler`.
+    pub fn relation_has_check_option(relation: &types_rel::Relation<'_>) -> bool
+);
+
+seam_core::seam!(
+    /// `RelationHasCascadedCheckOption(relation)` (`utils/rel.h`): whether the
+    /// view has a `WITH CASCADED CHECK OPTION` (its `ViewOptions.check_option`
+    /// is `CASCADED`). The trimmed `rd_options` does not carry view options, so
+    /// the owner answers `false`. Homed in `backend-rewrite-rewritehandler`.
+    pub fn relation_has_cascaded_check_option(relation: &types_rel::Relation<'_>) -> bool
+);
+
+seam_core::seam!(
     /// `relation_is_updatable(reloid, outer_reloids, include_triggers,
     /// include_cols)` (rewriteHandler.c): the bitmask of `CMD_*` events the
     /// relation supports for auto-updatable-view purposes. `include_cols` is
