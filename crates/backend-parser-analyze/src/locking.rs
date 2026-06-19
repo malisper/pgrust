@@ -297,7 +297,7 @@ pub fn applyLockingClause<'mcx>(
 
     /* Check for pre-existing entry for same rtindex (C: get_parse_rowmark). */
     for rc_node in qry.rowMarks.iter_mut() {
-        if let Node::RowMarkClause(rc) = rc_node.as_mut() {
+        if let Some(rc) = rc_node.as_mut().as_rowmarkclause_mut() {
             if rc.rti == rtindex {
                 rc.strength = max_strength(rc.strength, strength);
                 rc.waitPolicy = max_wait_policy(rc.waitPolicy, wait_policy);

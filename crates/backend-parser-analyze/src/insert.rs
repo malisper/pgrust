@@ -439,12 +439,9 @@ fn transformInsertMultiRowValues<'mcx>(
     let mut coltypmods: PgVec<'mcx, i32> = PgVec::new_in(mcx);
     let mut colcollations: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
     if let Some(first) = exprs_lists.first() {
-        if let Node::List(items) = first.as_ref() {
+        if let Some(items) = first.as_ref().as_list() {
             for val in items.iter() {
-                let expr = match val.as_ref() {
-                    Node::Expr(e) => Some(e),
-                    _ => None,
-                };
+                let expr = val.as_ref().as_expr();
                 coltypes.push(backend_nodes_core::nodefuncs::expr_type(expr)?);
                 coltypmods.push(backend_nodes_core::nodefuncs::expr_typmod(expr)?);
                 colcollations.push(InvalidOid);
@@ -490,9 +487,9 @@ fn transformInsertMultiRowValues<'mcx>(
 
     let mut var_exprs: PgVec<'mcx, Expr> = mcx::vec_with_capacity_in(mcx, var_nodes.len())?;
     for vn in var_nodes.into_iter() {
-        match mcx::PgBox::into_inner(vn) {
-            Node::Expr(e) => var_exprs.push(e),
-            _ => return Err(elog_error("expandNSItemVars produced a non-Expr node")),
+        match mcx::PgBox::into_inner(vn).into_expr() {
+            Some(e) => var_exprs.push(e),
+            None => return Err(elog_error("expandNSItemVars produced a non-Expr node")),
         }
     }
 
