@@ -956,9 +956,10 @@ pub enum ExprEvalStepData<'mcx> {
     },
     /// `sqlvaluefunction` — for EEOP_SQLVALUEFUNCTION.
     SqlValueFunction {
-        /// `SQLValueFunction *svf` — original node; parked until primnodes
-        /// carries `SQLValueFunction` (opaque address for now).
-        svf: usize,
+        /// `SQLValueFunction *svf` — the original node. In C the step holds a
+        /// pointer back into the plan tree; the node is `Copy`, so the owned
+        /// model stores it inline (the interpreter reads `op`/`typmod` off it).
+        svf: crate::primnodes::SQLValueFunction,
     },
     /// `nextvalueexpr` — for EEOP_NEXTVALUEEXPR.
     NextValueExpr { seqid: Oid, seqtypid: Oid },

@@ -53,6 +53,9 @@ backend-utils-adt-jsonb-util = { path = "../backend-utils-adt-jsonb-util" }
 backend-utils-adt-jsonb = { path = "../backend-utils-adt-jsonb" }
 backend-utils-adt-numeric = { path = "../backend-utils-adt-numeric" }
 backend-utils-adt-jsonfuncs = { path = "../backend-utils-adt-jsonfuncs" }
+# EEOP_SQLVALUEFUNCTION date/time arms: GetSQLCurrent*/GetSQLLocal* helpers
+# (the role/user/catalog/schema arms go through function_call_invoke_datum).
+backend-utils-adt-datetime = { path = "../backend-utils-adt-datetime" }
 # xml.c value workers (xmlconcat/xmlserialize/xmlparse/xmlpi/xmlroot/
 # xml_is_document) for EEOP_XMLEXPR. A leaf adt unit (types-* only deps).
 backend-utils-adt-xml = { path = "../backend-utils-adt-xml" }

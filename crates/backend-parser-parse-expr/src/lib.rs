@@ -313,6 +313,21 @@ pub fn transformExprRecurse<'mcx>(
         ntag::T_CoalesceExpr => transformCoalesceExpr(pstate, expr.into_coalesceexpr().unwrap())?,
         ntag::T_MinMaxExpr => transformMinMaxExpr(pstate, expr.into_minmaxexpr().unwrap())?,
 
+        // T_SQLValueFunction → transformSQLValueFunction(pstate, (SQLValueFunction *) expr).
+        // The grammar emits CURRENT_DATE / CURRENT_USER / … as the raw
+        // `Node::SQLValueFunction`; lift it into the primnodes form (its result
+        // type/typmod are filled in by `transformSQLValueFunction`).
+        ntag::T_SQLValueFunction => {
+            let raw = expr.into_sqlvaluefunction().unwrap();
+            let svf = SQLValueFunction {
+                op: raw.op,
+                r#type: raw.type_,
+                typmod: raw.typmod,
+                location: raw.location,
+            };
+            transformSQLValueFunction(pstate, svf)?
+        }
+
         // Expr-carried nodes that reach the dispatcher untransformed-or-recursed.
         // DEFAULT must have been processed by the caller (handled in the
         // `Node::Expr(SetToDefault)` arm of `transform_expr_node`).

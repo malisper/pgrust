@@ -837,15 +837,17 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
 
         // ----- T_SQLValueFunction -----
         etag::T_SQLValueFunction => {
+            // C: scratch.d.sqlvaluefunction.svf = (SQLValueFunction *) node;
+            // The node is `Copy`, so the owned step carries it inline.
+            let svf = match node {
+                Expr::SQLValueFunction(s) => *s,
+                _ => unreachable!("T_SQLValueFunction tag without SQLValueFunction payload"),
+            };
             let scratch = ExprEvalStep {
                 opcode: ExprEvalOp::EEOP_SQLVALUEFUNCTION,
                 resvalue: resv,
                 resnull: resv,
-                // The original SQLValueFunction node is parked as an opaque
-                // address in the keystone payload; the interpreter reads op/type
-                // off the node. Not threaded here yet — but the step shape and
-                // dispatch are correct.
-                d: ExprEvalStepData::SqlValueFunction { svf: 0 },
+                d: ExprEvalStepData::SqlValueFunction { svf },
             };
             expr_eval_push_step(mcx, state, scratch)?;
             Ok(())

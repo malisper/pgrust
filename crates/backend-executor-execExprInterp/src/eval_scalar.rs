@@ -1009,44 +1009,96 @@ pub fn ExecEvalCoerceViaIOSafe<'mcx>(
 
 /// `ExecEvalSQLValueFunction(ExprState *state, ExprEvalStep *op)` — evaluate
 /// CURRENT_DATE / CURRENT_USER / etc.
+///
+/// ```c
+/// LOCAL_FCINFO(fcinfo, 0);
+/// SQLValueFunction *svf = op->d.sqlvaluefunction.svf;
+/// *op->resnull = false;
+/// switch (svf->op) { ... }
+/// ```
+///
+/// The date/time arms call the datetime owner's `GetSQLCurrent*` /
+/// `GetSQLLocal*` helpers and box the result into the canonical [`Datum`] (a
+/// by-value `date`/`time`/`timestamp` word, or a 12-byte by-reference `timetz`
+/// image for `CURRENT_TIME`). The role/user/catalog/schema arms mirror C's
+/// `InitFunctionCallInfoData(*fcinfo, ...); current_user(fcinfo)` by dispatching
+/// the corresponding pg_proc builtin through the OID-keyed fmgr call frame
+/// (`function_call_invoke_datum`), which materializes the by-reference `name`
+/// result and surfaces `fcinfo->isnull`.
 pub fn ExecEvalSQLValueFunction<'mcx>(
     state: &mut ExprState<'mcx>,
     op: usize,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    // LOCAL_FCINFO(fcinfo, 0);
-    // SQLValueFunction *svf = op->d.sqlvaluefunction.svf;
-    // *op->resnull = false;
-    // switch (svf->op) {
-    //   case SVFOP_CURRENT_DATE:  *op->resvalue = DateADTGetDatum(GetSQLCurrentDate()); break;
-    //   case SVFOP_CURRENT_TIME[_N]: ... GetSQLCurrentTime(svf->typmod) ...
-    //   case SVFOP_CURRENT_TIMESTAMP[_N]: ... GetSQLCurrentTimestamp(svf->typmod) ...
-    //   case SVFOP_LOCALTIME[_N]: ... GetSQLLocalTime(svf->typmod) ...
-    //   case SVFOP_LOCALTIMESTAMP[_N]: ... GetSQLLocalTimestamp(svf->typmod) ...
-    //   case SVFOP_CURRENT_ROLE/USER/USER:
-    //       InitFunctionCallInfoData(...); *op->resvalue = current_user(fcinfo);
-    //       *op->resnull = fcinfo->isnull; break;
-    //   case SVFOP_SESSION_USER: ... session_user(fcinfo) ...
-    //   case SVFOP_CURRENT_CATALOG: ... current_database(fcinfo) ...
-    //   case SVFOP_CURRENT_SCHEMA: ... current_schema(fcinfo) ...
-    // }
-    //
-    // The SQLValueFunction node (op->d.sqlvaluefunction.svf) is parked as an
-    // opaque address — primnodes does not carry `SQLValueFunction` yet, so its
-    // `op` discriminant / `typmod` are not readable here. Even with the node,
-    // every arm dispatches to a date/time or session helper
-    // (GetSQLCurrentDate / current_user / etc.) owned by the datetime / misc
-    // adt units, and the role/user arms build a LOCAL_FCINFO call frame (fmgr).
-    // Blocked on primnodes (svf node) + those adt owners.
-    let _ = (state, op, estate);
-    panic!(
-        "ExecEvalSQLValueFunction: op.d.sqlvaluefunction.svf is a parked opaque \
-         address (primnodes does not carry SQLValueFunction yet), and the arms \
-         dispatch to GetSQLCurrent* / current_user / current_database / \
-         current_schema in the unported datetime / misc-adt owners (the user \
-         arms over a LOCAL_FCINFO call frame); blocked until primnodes + those \
-         owners land"
-    )
+    use types_nodes::primnodes::SQLValueFunctionOp::*;
+
+    let svf = match step_data(state, op) {
+        ExprEvalStepData::SqlValueFunction { svf } => *svf,
+        other => panic!("ExecEvalSQLValueFunction: wrong step payload {other:?}"),
+    };
+    let (resvalue_id, _resnull_id) = res_cells(state, op);
+    let mcx = estate.es_query_cxt;
+
+    use backend_utils_adt_datetime::date::{GetSQLCurrentDate, GetSQLCurrentTime, GetSQLLocalTime};
+    use backend_utils_adt_datetime::timestamp::{GetSQLCurrentTimestamp, GetSQLLocalTimestamp};
+
+    // *op->resnull = false; (the role/user/catalog/schema arms may set it true)
+    let (value, isnull): (DatumV<'mcx>, bool) = match svf.op {
+        SVFOP_CURRENT_DATE => {
+            // DateADTGetDatum(GetSQLCurrentDate())
+            (DatumV::from_i32(GetSQLCurrentDate()), false)
+        }
+        SVFOP_CURRENT_TIME | SVFOP_CURRENT_TIME_N => {
+            // TimeTzADTPGetDatum(GetSQLCurrentTime(svf->typmod)) — `timetz` is
+            // pass-by-reference; the 12-byte image is time:i64 LE + zone:i32 LE.
+            let t = GetSQLCurrentTime(svf.typmod);
+            let mut img: Vec<u8> = Vec::with_capacity(12);
+            img.extend_from_slice(&(t.time as i64).to_le_bytes());
+            img.extend_from_slice(&t.zone.to_le_bytes());
+            (DatumV::ByRef(mcx::slice_in(mcx, &img)?), false)
+        }
+        SVFOP_CURRENT_TIMESTAMP | SVFOP_CURRENT_TIMESTAMP_N => {
+            // TimestampTzGetDatum(GetSQLCurrentTimestamp(svf->typmod))
+            (DatumV::from_i64(GetSQLCurrentTimestamp(svf.typmod)?), false)
+        }
+        SVFOP_LOCALTIME | SVFOP_LOCALTIME_N => {
+            // TimeADTGetDatum(GetSQLLocalTime(svf->typmod))
+            (DatumV::from_i64(GetSQLLocalTime(svf.typmod)), false)
+        }
+        SVFOP_LOCALTIMESTAMP | SVFOP_LOCALTIMESTAMP_N => {
+            // TimestampGetDatum(GetSQLLocalTimestamp(svf->typmod))
+            (DatumV::from_i64(GetSQLLocalTimestamp(svf.typmod)?), false)
+        }
+        SVFOP_CURRENT_ROLE | SVFOP_CURRENT_USER | SVFOP_USER => {
+            // InitFunctionCallInfoData(*fcinfo, NULL, 0, InvalidOid, NULL, NULL);
+            // *op->resvalue = current_user(fcinfo); *op->resnull = fcinfo->isnull;
+            sql_value_builtin(mcx, F_CURRENT_USER)?
+        }
+        SVFOP_SESSION_USER => sql_value_builtin(mcx, F_SESSION_USER)?,
+        SVFOP_CURRENT_CATALOG => sql_value_builtin(mcx, F_CURRENT_DATABASE)?,
+        SVFOP_CURRENT_SCHEMA => sql_value_builtin(mcx, F_CURRENT_SCHEMA)?,
+    };
+
+    crate::interp_loop::write_cell(state, resvalue_id, value, isnull);
+    Ok(())
+}
+
+/// pg_proc OIDs of the zero-argument SQL value-function builtins (pg_proc.dat).
+const F_CURRENT_USER: u32 = 745;
+const F_SESSION_USER: u32 = 746;
+const F_CURRENT_DATABASE: u32 = 861;
+const F_CURRENT_SCHEMA: u32 = 1402;
+
+/// Mirror C's `InitFunctionCallInfoData(*fcinfo, NULL, 0, InvalidOid, NULL,
+/// NULL); current_user(fcinfo); *op->resnull = fcinfo->isnull;` — run a
+/// zero-argument SQL value-function builtin through the OID-keyed fmgr call
+/// frame and return its `(value, isnull)`.
+fn sql_value_builtin<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    fn_oid: u32,
+) -> PgResult<(DatumV<'mcx>, bool)> {
+    // Oid is `u32`; InvalidOid (0) collation matches C's InitFunctionCallInfoData.
+    function_call_invoke_datum::call(mcx, fn_oid, 0, &[], None)
 }
 
 /// `ExecEvalCurrentOfExpr(ExprState *state, ExprEvalStep *op)` — CURRENT OF
