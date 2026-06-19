@@ -2476,7 +2476,19 @@ pub fn deconstruct_text_array<'mcx>(
     array: &[u8],
 ) -> PgResult<PgVec<'mcx, PgString<'mcx>>> {
     let (elmlen, elmbyval, elmalign) = deconstruct_builtin_meta(foundation::TEXTOID)?;
-    let pairs = deconstruct_array(mcx, array, foundation::TEXTOID, elmlen, elmbyval, elmalign)?;
+    // Use the value-lane element walk: it materializes each by-reference text
+    // element's verbatim varlena bytes as a `Datum::ByRef`. (The bare
+    // `deconstruct_array` stores only the in-buffer *offset* in its by-ref
+    // output Datum, which is not a dereferenceable pointer — projecting it as a
+    // varlena image segfaults.)
+    let pairs = deconstruct_array_values(
+        mcx,
+        array,
+        foundation::TEXTOID,
+        elmlen,
+        elmbyval,
+        elmalign,
+    )?;
 
     let mut out = mcx::vec_with_capacity_in::<PgString<'mcx>>(mcx, pairs.len())?;
     for (d, isnull) in pairs.iter() {
@@ -2486,9 +2498,9 @@ pub fn deconstruct_text_array<'mcx>(
             return Err(PgError::error("null array element not allowed in this context")
                 .with_sqlstate(ERRCODE_NULL_VALUE_NOT_ALLOWED));
         }
-        // Each element Datum is a text varlena pointer word; project it to its
-        // UTF-8 payload through the detoast/text owner.
-        let bytes = detoast_seam::detoast_attr::call(mcx, datum_as_byte_window(*d))?;
+        // Each element value carries the text varlena bytes; detoast (handles a
+        // short/compressed header) and project to its UTF-8 payload.
+        let bytes = detoast_value_to_array(mcx, d)?;
         let s = text_to_pgstring(mcx, &bytes)?;
         out.push(s);
     }
@@ -2513,7 +2525,17 @@ pub fn deconstruct_text_array_nullable<'mcx>(
     // arr = DatumGetArrayTypeP(array);
     let arr = detoast_seam::detoast_attr::call(mcx, array)?;
     let (elmlen, elmbyval, elmalign) = deconstruct_builtin_meta(foundation::TEXTOID)?;
-    let pairs = deconstruct_array(mcx, &arr, foundation::TEXTOID, elmlen, elmbyval, elmalign)?;
+    // Value-lane walk: materialize each by-reference text element's verbatim
+    // varlena bytes (the bare offset-Datum from `deconstruct_array` is not a
+    // dereferenceable pointer — see `deconstruct_text_array`).
+    let pairs = deconstruct_array_values(
+        mcx,
+        &arr,
+        foundation::TEXTOID,
+        elmlen,
+        elmbyval,
+        elmalign,
+    )?;
 
     let mut out = mcx::vec_with_capacity_in::<Option<PgString<'mcx>>>(mcx, pairs.len())?;
     for (d, isnull) in pairs.iter() {
@@ -2521,9 +2543,9 @@ pub fn deconstruct_text_array_nullable<'mcx>(
             out.push(None);
             continue;
         }
-        // Each element Datum is a text varlena pointer word; project it to its
-        // UTF-8 payload through the detoast/text owner.
-        let bytes = detoast_seam::detoast_attr::call(mcx, datum_as_byte_window(*d))?;
+        // Each element value carries the text varlena bytes; detoast and project
+        // to its UTF-8 payload.
+        let bytes = detoast_value_to_array(mcx, d)?;
         out.push(Some(text_to_pgstring(mcx, &bytes)?));
     }
     Ok(out)
