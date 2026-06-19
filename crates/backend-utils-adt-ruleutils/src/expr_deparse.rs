@@ -2184,7 +2184,7 @@ pub fn get_variable<'mcx>(
         // return NULL;
         // OUTER_VAR/INNER_VAR/INDEX_VAR resolution walks the plan tlists, rendering
         // the resolved referent into context->buf (no refname returned).
-        let node = Node::Expr(Expr::Var(var.clone()));
+        let node = Node::mk_expr(context.buf.allocator(), Expr::Var(var.clone()));
         resolve_special_varno(&node, context)?;
         return Ok(None);
     }
