@@ -593,6 +593,22 @@ pub fn string_to_node<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<PgBox<'mcx, Nod
     string_to_node_internal(mcx, s, false)
 }
 
+/// `stringToNode(str)` (read.c) faithful to C's *nullable* `void *` return: a
+/// top-level `<>` / empty input renders C's NULL pointer (`nodeRead` returns
+/// NULL), here `Ok(None)`. This is the shape the catalog read paths need when a
+/// stored `pg_node_tree` can legitimately be a null pointer — e.g. an
+/// unconditional rule's `pg_rewrite.ev_qual` (`<>`), a policy with no qual, or a
+/// dropped/empty default — where C does `node = stringToNode(text)` and keeps
+/// the resulting NULL. The non-`Option` [`string_to_node`] entry is for callers
+/// whose input is guaranteed to be a real node rendering.
+pub fn string_to_node_opt<'mcx>(
+    mcx: Mcx<'mcx>,
+    s: &str,
+) -> PgResult<Option<PgBox<'mcx, Node<'mcx>>>> {
+    let _guard = StrtokGuard::install(s);
+    node_read(mcx, None)
+}
+
 /// `stringToNodeWithLocations(const char *str)` (read.c, under
 /// `DEBUG_NODE_TESTS_ENABLED`) — like [`string_to_node`] but instructing the
 /// readfuncs recursion to restore location fields rather than reset them to

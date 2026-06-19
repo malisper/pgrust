@@ -684,9 +684,12 @@ pub fn RelationBuildRuleLock(relation: &mut RelationData) -> PgResult<()> {
         };
 
         // `rule->qual = (Node *) stringToNode(ev_qual)` — a single expression
-        // node, or NULL for an unconditional rule.
+        // node, or NULL for an unconditional rule. `ev_qual` is a non-NULL
+        // `pg_node_tree` column whose rendering is the literal `<>` for an
+        // unconditional rule, which `stringToNode` resolves to a NULL pointer;
+        // use the nullable entry so `<>` yields `None` rather than an error.
         let qual = match row.ev_qual {
-            Some(text) => Some(read_seam::string_to_node::call(cache_mcx, text.as_str())?),
+            Some(text) => read_seam::string_to_node_opt::call(cache_mcx, text.as_str())?,
             None => None,
         };
 
@@ -696,11 +699,16 @@ pub fn RelationBuildRuleLock(relation: &mut RelationData) -> PgResult<()> {
         // arena). C keeps a `List *`; the owned model keeps the `Query` values.
         let mut actions: mcx::PgVec<'static, types_nodes::copy_query::Query<'static>> =
             mcx::PgVec::new_in(cache_mcx);
-        if let Some(text) = row.ev_action {
-            let action_node = read_seam::string_to_node::call(cache_mcx, text.as_str())?;
-            // `ev_action` deserializes to a `List` of `Query` (the C
-            // `List *actions`). An empty action list is a valid INSTEAD NOTHING
-            // rule.
+        // `ev_action` deserializes to a `List` of `Query` (the C `List
+        // *actions`). An empty action list (INSTEAD NOTHING) renders as `<>`,
+        // which `stringToNode` resolves to a NULL pointer — leave `actions`
+        // empty in that case. Use the nullable entry so the `<>` rendering is
+        // `None` rather than an error.
+        let action_node = match row.ev_action {
+            Some(text) => read_seam::string_to_node_opt::call(cache_mcx, text.as_str())?,
+            None => None,
+        };
+        if let Some(action_node) = action_node {
             let action_inner = mcx::PgBox::into_inner(action_node);
             match action_inner.node_tag() {
                 ntag::T_List => {

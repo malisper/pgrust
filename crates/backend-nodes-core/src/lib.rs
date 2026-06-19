@@ -77,6 +77,7 @@ pub fn init_seams() {
 
     // read family (nodes/read.c): string_to_node.
     backend_nodes_read_seams::string_to_node::set(read::string_to_node);
+    backend_nodes_read_seams::string_to_node_opt::set(read::string_to_node_opt);
 
     seams::bms_is_member::set(bitmapset::bms_is_member);
     seams::bms_add_member::set(bitmapset::bms_add_member);

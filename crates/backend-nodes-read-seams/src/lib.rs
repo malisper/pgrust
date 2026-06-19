@@ -18,3 +18,14 @@ seam_core::seam!(
         s: &str,
     ) -> PgResult<PgBox<'mcx, Node<'mcx>>>
 );
+
+seam_core::seam!(
+    /// `stringToNode(str)` faithful to C's nullable `void *` return: a top-level
+    /// `<>` / empty rendering yields `Ok(None)` (C's NULL), not an error. For
+    /// catalog read paths where a stored `pg_node_tree` may legitimately be a
+    /// null pointer (e.g. an unconditional rule's `pg_rewrite.ev_qual`).
+    pub fn string_to_node_opt<'mcx>(
+        mcx: Mcx<'mcx>,
+        s: &str,
+    ) -> PgResult<Option<PgBox<'mcx, Node<'mcx>>>>
+);
