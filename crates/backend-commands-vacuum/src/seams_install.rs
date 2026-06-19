@@ -106,6 +106,51 @@ pub fn init_seams() {
     vacuum::relation_get_index_list::set(|relid| {
         backend_utils_cache_relcache::derived::RelationGetIndexList(relid)
     });
+    // vac_open_indexes: `index_open(indexoid, lockmode)` (indexam.c). C's
+    // `vac_open_indexes` holds each opened index `Relation *` in `Irel[]` (one
+    // relcache pin) under `lockmode`, and `vac_close_indexes` releases that same
+    // pin with `index_close(NoLock)` (the `RowExclusiveLock` stays held until
+    // commit). The vacuum index model carries the index as a bare OID plus its
+    // `indisready` flag, so this seam OPENS the index (taking `lockmode` and a
+    // pin), reads `rd_index->indisready`, then immediately CLOSES with `NoLock`
+    // to release its own relcache pin while keeping the lock held — the same
+    // open-then-recover idiom `relation_is_other_temp` uses. The pin C keeps in
+    // `Irel[]` is instead re-acquired by the consumer's `table_open(NoLock)`
+    // recover-call (lazy path) and balanced by `vac_close_indexes`, or — for the
+    // not-ready / Oid-model paths — re-acquired and released by `index_close`
+    // below. Net refcount returns to 0 with the lock held to commit, faithful to
+    // vacuum.c (and consistent with the rd_refcnt pin-balance discipline of the
+    // vacuum_open_relation fix).
+    vacuum::index_open::set(|indexoid, lockmode| {
+        use backend_access_index_indexam_seams as indexam;
+        let cx = mcx::MemoryContext::new("vacuum_index_open");
+        let irel = indexam::index_open::call(cx.mcx(), indexoid, lockmode)?;
+        let indisready = irel.rd_index.as_ref().is_some_and(|i| i.indisready);
+        // Release this open's relcache pin (rd_refcnt -> back down) but keep the
+        // `lockmode` lock: `Relation::close(NoLock)` drops the pin without
+        // releasing the lock.
+        irel.close(NoLock)?;
+        Ok(vacuum::OpenedIndex {
+            index: indexoid,
+            indisready,
+        })
+    });
+    // vac_close_indexes: `index_close(indrel, lockmode)` (indexam.c). The vacuum
+    // index model lost the owned `Relation` handle (the open closed its own pin
+    // and kept only the OID + the held lock), so re-open the index by OID with
+    // `NoLock` to recover an owned handle — this re-takes a relcache pin but no
+    // new lock — then close it under `lockmode` to drop that pin AND release the
+    // lock the matching `index_open` took. Net: the index is unpinned and (for
+    // a non-`NoLock` lockmode) unlocked, matching C's `index_close(rel,lockmode)`.
+    vacuum::index_close::set(|indexoid, lockmode| {
+        use backend_access_index_indexam_seams as indexam;
+        let cx = mcx::MemoryContext::new("vacuum_index_close");
+        let irel = indexam::index_open::call(cx.mcx(), indexoid, NoLock)?;
+        // indexam.c `index_close(relation, lockmode)` is just `relation_close`
+        // (the relcache pin decrement + conditional lock release); the index-kind
+        // validation already happened at index_open above.
+        irel.close(lockmode)
+    });
     // vacuum_get_cutoffs: the autovacuum freeze-max-age GUCs (autovacuum.c owns
     // the `conf->variable` backing + installs the GucVarAccessors; read the slot).
     vacuum::autovacuum_freeze_max_age::set(|| {
@@ -406,14 +451,18 @@ use backend_access_table_table_seams as table_seam;
 
 /// `vac_open_indexes(rel, RowExclusiveLock, &nindexes, &indrels)` — open all the
 /// vacuumable (indisready) indexes of `rel` and return the live, owned index
-/// `Relation`s allocated in the driver run's `mcx`. The lock is taken by
-/// `index_open(RowExclusiveLock)`; `table_open(mcx, oid, NoLock)` then recovers
-/// the owned `Relation` value from the relcache without re-locking (the same
-/// open-then-recover idiom the heap path uses).
+/// `Relation`s allocated in the driver run's `mcx`. The `RowExclusiveLock` is
+/// taken (and held until commit) by `index_open(RowExclusiveLock)`; the vacuum
+/// index model then carries the index as an OID, so `index_open(mcx, oid,
+/// NoLock)` recovers the owned index `Relation` value from the relcache without
+/// re-locking — the open-then-recover idiom. (`table_open` cannot be used here:
+/// it rejects index relkinds, so the recover goes through `indexam::index_open`,
+/// which validates the index kind.)
 fn vac_open_indexes_rowexcl<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
 ) -> PgResult<alloc::vec::Vec<Relation<'mcx>>> {
+    use backend_access_index_indexam_seams as indexam;
     let indexoidlist = vacuum::relation_get_index_list::call(rel.rd_id)?;
     let mut irel: alloc::vec::Vec<Relation<'mcx>> =
         alloc::vec::Vec::with_capacity(indexoidlist.len());
@@ -421,7 +470,7 @@ fn vac_open_indexes_rowexcl<'mcx>(
     for indexoid in indexoidlist {
         let opened = vacuum::index_open::call(indexoid, RowExclusiveLock)?;
         if opened.indisready {
-            irel.push(table_seam::table_open::call(mcx, opened.index, NoLock)?);
+            irel.push(indexam::index_open::call(mcx, opened.index, NoLock)?);
         } else {
             vacuum::index_close::call(opened.index, RowExclusiveLock)?;
         }

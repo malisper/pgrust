@@ -8234,6 +8234,7 @@ dependencies = [
  "backend-access-common-tidstore-seams",
  "backend-access-heap-vacuumlazy-seams",
  "backend-access-index-genam-seams",
+ "backend-access-index-indexam-seams",
  "backend-access-table-table",
  "backend-access-table-table-seams",
  "backend-access-transam-clog-seams",
