@@ -21,20 +21,20 @@ fn build_def_item_classifies_unquoted_values() {
     let mcx = cx.mcx();
 
     let i = buildDefItem(mcx, "k", "42", false).unwrap();
-    assert!(matches!(i.arg.as_deref(), Some(Node::Integer(n)) if n.ival == 42));
+    assert!(i.arg.as_deref().and_then(|n| n.as_integer()).is_some_and(|n| n.ival == 42));
 
     let f = buildDefItem(mcx, "k", "1.5", false).unwrap();
-    assert!(matches!(f.arg.as_deref(), Some(Node::Float(_))));
+    assert!(f.arg.as_deref().is_some_and(|n| n.is_float()));
 
     let b = buildDefItem(mcx, "k", "true", false).unwrap();
-    assert!(matches!(b.arg.as_deref(), Some(Node::Boolean(n)) if n.boolval));
+    assert!(b.arg.as_deref().and_then(|n| n.as_boolean()).is_some_and(|n| n.boolval));
 
     let s = buildDefItem(mcx, "k", "hello", false).unwrap();
-    assert!(matches!(s.arg.as_deref(), Some(Node::String(_))));
+    assert!(s.arg.as_deref().is_some_and(|n| n.is_string()));
 
     // A quoted value is always a string, even when it looks numeric.
     let q = buildDefItem(mcx, "k", "42", true).unwrap();
-    assert!(matches!(q.arg.as_deref(), Some(Node::String(_))));
+    assert!(q.arg.as_deref().is_some_and(|n| n.is_string()));
 }
 
 #[test]

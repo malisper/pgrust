@@ -550,9 +550,12 @@ fn make_string_node<'mcx>(
     mcx: Mcx<'mcx>,
     s: &str,
 ) -> PgResult<types_nodes::nodes::NodePtr<'mcx>> {
-    let node = types_nodes::nodes::Node::String(types_nodes::value::StringNode {
-        sval: mcx::PgString::from_str_in(s, mcx)?,
-    });
+    let node = types_nodes::nodes::Node::mk_string(
+        mcx,
+        types_nodes::value::StringNode {
+            sval: mcx::PgString::from_str_in(s, mcx)?,
+        },
+    );
     mcx::alloc_in(mcx, node)
 }
 
