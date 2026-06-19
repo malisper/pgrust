@@ -1306,6 +1306,7 @@ fn CreateFKCheckTrigger<'mcx>(
     let trig_address = backend_commands_trigger::create::CreateTrigger(
         mcx,
         &fk_trigger,
+        "",
         my_rel_oid,
         ref_rel_oid,
         constraint_oid,
@@ -1355,7 +1356,7 @@ fn createForeignKeyActionTriggers<'mcx>(
         constrrel: None,
     };
     let del_addr = backend_commands_trigger::create::CreateTrigger(
-        mcx, &del_trigger, ref_rel_oid, my_rel_oid, constraint_oid, index_oid, InvalidOid,
+        mcx, &del_trigger, "", ref_rel_oid, my_rel_oid, constraint_oid, index_oid, InvalidOid,
         parent_del_trigger, true, false,
     )?;
     let delete_trig_oid = del_addr.objectId;
@@ -1382,7 +1383,7 @@ fn createForeignKeyActionTriggers<'mcx>(
         constrrel: None,
     };
     let upd_addr = backend_commands_trigger::create::CreateTrigger(
-        mcx, &upd_trigger, ref_rel_oid, my_rel_oid, constraint_oid, index_oid, InvalidOid,
+        mcx, &upd_trigger, "", ref_rel_oid, my_rel_oid, constraint_oid, index_oid, InvalidOid,
         parent_upd_trigger, true, false,
     )?;
     let update_trig_oid = upd_addr.objectId;

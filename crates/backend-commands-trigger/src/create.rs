@@ -72,6 +72,7 @@ fn valid(oid: Oid) -> bool {
 pub fn CreateTrigger<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &CreateTrigStmt<'mcx>,
+    query_string: &str,
     rel_oid: Oid,
     ref_rel_oid: Oid,
     constraint_oid: Oid,
@@ -84,6 +85,7 @@ pub fn CreateTrigger<'mcx>(
     CreateTriggerFiringOn(
         mcx,
         stmt,
+        query_string,
         rel_oid,
         ref_rel_oid,
         constraint_oid,
@@ -101,6 +103,7 @@ pub fn CreateTrigger<'mcx>(
 pub fn CreateTriggerFiringOn<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &CreateTrigStmt<'mcx>,
+    query_string: &str,
     rel_oid: Oid,
     ref_rel_oid: Oid,
     constraint_oid: Oid,
@@ -273,13 +276,11 @@ pub fn CreateTriggerFiringOn<'mcx>(
             .into_error());
     }
 
-    // WHEN clause: not yet ported on the create path.
-    if stmt.whenClause.is_some() {
-        return Err(ereport(ERROR)
-            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-            .errmsg("trigger WHEN conditions are not yet supported")
-            .into_error());
-    }
+    // Parse the WHEN clause, if any. As a side effect this fills when_rtable
+    // (the OLD/NEW pseudo-relation RTEs), which we'll need below for
+    // recordDependencyOnExpr. (We are never passed an already-transformed
+    // clause here; the partition-recurse leg that would do so is gated below.)
+    let when = transform_trigger_when(mcx, &rel, stmt, tgtype, query_string)?;
 
     // User CREATE CONSTRAINT TRIGGER (its own pg_constraint entry) is unported.
     if stmt.isconstraint && !valid(constraint_oid) {
@@ -424,7 +425,7 @@ pub fn CreateTriggerFiringOn<'mcx>(
         tgnargs: nargs,
         tgattr: columns.clone(),
         tgargs,
-        tgqual: None,
+        tgqual: when.qual.clone(),
         tgoldtable: None,
         tgnewtable: None,
     };
@@ -498,6 +499,19 @@ pub fn CreateTriggerFiringOn<'mcx>(
         )?;
     }
 
+    // If it has a WHEN clause, add dependencies on objects mentioned in the
+    // expression (eg, functions, as well as any columns used).
+    if !when.when_rtable.is_empty() {
+        if let Some(when_clause) = when.when_clause.as_ref() {
+            backend_catalog_dependency_seams::record_dependency_on_expr::call(
+                myself.clone(),
+                when_clause,
+                &when.when_rtable,
+                DEPENDENCY_NORMAL,
+            )?;
+        }
+    }
+
     // InvokeObjectPostCreateHookArg(TriggerRelationId, trigoid, 0, isInternal)
     // (a no-op without an installed object-access hook).
     backend_catalog_objectaccess_seams::invoke_object_post_create_hook_arg::call(
@@ -511,6 +525,210 @@ pub fn CreateTriggerFiringOn<'mcx>(
     rel.close(NoLock)?;
 
     Ok(myself)
+}
+
+/// `PRS2_OLD_VARNO` / `PRS2_NEW_VARNO` (primnodes.h): the WHEN clause's OLD/NEW
+/// pseudo-relations are always range-table entries 1 and 2.
+const PRS2_OLD_VARNO: i32 = 1;
+const PRS2_NEW_VARNO: i32 = 2;
+
+/// The result of transforming a trigger WHEN clause (commands/trigger.c:566-688).
+struct WhenTransform<'mcx> {
+    /// `nodeToString(whenClause)` — the `pg_node_tree` image stored in
+    /// `pg_trigger.tgqual` (None when there is no WHEN clause).
+    qual: Option<String>,
+    /// The already-transformed WHEN expression, for `recordDependencyOnExpr`.
+    when_clause: Option<Node<'mcx>>,
+    /// `pstate->p_rtable` (the OLD/NEW RTEs) — needed by
+    /// `recordDependencyOnExpr`. Empty when there is no WHEN clause.
+    when_rtable: mcx::PgVec<'mcx, types_nodes::parsenodes::RangeTblEntry<'mcx>>,
+}
+
+/// `make_old_new_alias(name)` — an `Alias` with just `aliasname` set, for the
+/// OLD/NEW WHEN-clause range-table entries (mirrors `makeAlias(name, NIL)`).
+fn make_old_new_alias<'mcx>(
+    mcx: Mcx<'mcx>,
+    name: &str,
+) -> PgResult<types_nodes::rawnodes::Alias<'mcx>> {
+    Ok(types_nodes::rawnodes::Alias {
+        aliasname: Some(mcx::PgString::from_str_in(name, mcx)?),
+        colnames: mcx::PgVec::new_in(mcx),
+    })
+}
+
+/// `TRIGGER_FOR_BEFORE(type)` — `(type) & TRIGGER_TYPE_BEFORE` (pg_trigger.h).
+fn trigger_for_before(tgtype: i16) -> bool {
+    (tgtype & pt::TRIGGER_TYPE_BEFORE) != 0
+}
+
+/// Parse + validate a trigger WHEN clause and render it as a `tgqual` image
+/// (commands/trigger.c:558-688). Sets up a `ParseState` with OLD (varno 1) and
+/// NEW (varno 2) pseudo-relation RTEs over `rel`, transforms the clause,
+/// fixes its collations, checks the OLD/NEW reference restrictions per tgtype,
+/// then `nodeToString`s it. Returns an empty [`WhenTransform`] when there is no
+/// WHEN clause.
+fn transform_trigger_when<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &types_rel::RelationData<'mcx>,
+    stmt: &CreateTrigStmt<'mcx>,
+    tgtype: i16,
+    query_string: &str,
+) -> PgResult<WhenTransform<'mcx>> {
+    let Some(when_in) = stmt.whenClause.as_ref() else {
+        return Ok(WhenTransform {
+            qual: None,
+            when_clause: None,
+            when_rtable: mcx::PgVec::new_in(mcx),
+        });
+    };
+
+    // Set up a pstate to parse with.
+    let mut pstate = backend_parser_small1::make_parsestate(mcx, None)?;
+    pstate.p_sourcetext = Some(mcx::PgString::from_str_in(query_string, mcx)?);
+
+    // Set up nsitems for OLD and NEW references.
+    // 'OLD' must always have varno equal to 1 and 'NEW' equal to 2.
+    let old_alias = make_old_new_alias(mcx, "old")?;
+    let new_alias = make_old_new_alias(mcx, "new")?;
+    let oldnsitem = backend_parser_relation::addRangeTableEntryForRelation(
+        mcx,
+        &mut pstate,
+        rel,
+        AccessShareLock,
+        Some(old_alias),
+        false,
+        false,
+    )?;
+    backend_parser_relation::addNSItemToQuery(mcx, &mut pstate, oldnsitem, false, true, true)?;
+    let newnsitem = backend_parser_relation::addRangeTableEntryForRelation(
+        mcx,
+        &mut pstate,
+        rel,
+        AccessShareLock,
+        Some(new_alias),
+        false,
+        false,
+    )?;
+    backend_parser_relation::addNSItemToQuery(mcx, &mut pstate, newnsitem, false, true, true)?;
+
+    // Transform expression.  Copy to be sure we don't modify original.
+    let clause_copy = (**when_in).clone_in(mcx)?;
+    let mut when_expr = backend_parser_clause_seams::transform_where_clause::call(
+        mcx,
+        &mut pstate,
+        Some(clause_copy),
+        types_nodes::parsestmt::ParseExprKind::EXPR_KIND_TRIGGER_WHEN,
+        "WHEN",
+    )?;
+
+    // We have to fix its collations too.
+    if let Some(e) = when_expr.as_mut() {
+        backend_parser_parse_collate::assign_expr_collations(Some(&pstate), e)?;
+    }
+    let when_node = match when_expr {
+        Some(e) => Node::mk_expr(mcx, e),
+        None => {
+            return Ok(WhenTransform {
+                qual: None,
+                when_clause: None,
+                when_rtable: core::mem::replace(&mut pstate.p_rtable, mcx::PgVec::new_in(mcx)),
+            })
+        }
+    };
+
+    // Check for disallowed references to OLD/NEW.
+    //
+    // NB: pull_var_clause is okay here only because we don't allow subselects
+    // in WHEN clauses; it would fail to examine the contents of subselects.
+    for var_expr in backend_optimizer_util_vars::pull_var_clause(&when_node, 0) {
+        let var = var_expr.as_var().ok_or_else(|| {
+            ereport(ERROR)
+                .errmsg_internal("trigger WHEN: pull_var_clause returned a non-Var")
+                .into_error()
+        })?;
+        match var.varno {
+            PRS2_OLD_VARNO => {
+                if !pt::TRIGGER_FOR_ROW(tgtype) {
+                    return when_obj_def_err(
+                        "statement trigger's WHEN condition cannot reference column values",
+                    );
+                }
+                if pt::TRIGGER_FOR_INSERT(tgtype) {
+                    return when_obj_def_err(
+                        "INSERT trigger's WHEN condition cannot reference OLD values",
+                    );
+                }
+                // system columns are okay here
+            }
+            PRS2_NEW_VARNO => {
+                if !pt::TRIGGER_FOR_ROW(tgtype) {
+                    return when_obj_def_err(
+                        "statement trigger's WHEN condition cannot reference column values",
+                    );
+                }
+                if pt::TRIGGER_FOR_DELETE(tgtype) {
+                    return when_obj_def_err(
+                        "DELETE trigger's WHEN condition cannot reference NEW values",
+                    );
+                }
+                if var.varattno < 0 && trigger_for_before(tgtype) {
+                    return Err(ereport(ERROR)
+                        .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                        .errmsg("BEFORE trigger's WHEN condition cannot reference NEW system columns")
+                        .into_error());
+                }
+                if trigger_for_before(tgtype) && var.varattno == 0 {
+                    if let Some(constr) = rel.rd_att.constr.as_ref() {
+                        if constr.has_generated_stored || constr.has_generated_virtual {
+                            return Err(ereport(ERROR)
+                                .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
+                                .errmsg("BEFORE trigger's WHEN condition cannot reference NEW generated columns")
+                                .errdetail("A whole-row reference is used and the table contains generated columns.")
+                                .into_error());
+                        }
+                    }
+                }
+                if trigger_for_before(tgtype) && var.varattno > 0 {
+                    let att = rel.rd_att.attr((var.varattno - 1) as usize);
+                    if att.attgenerated != 0 {
+                        let colname = String::from_utf8_lossy(att.attname.name_str());
+                        return Err(ereport(ERROR)
+                            .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
+                            .errmsg("BEFORE trigger's WHEN condition cannot reference NEW generated columns")
+                            .errdetail(format!("Column \"{colname}\" is a generated column."))
+                            .into_error());
+                    }
+                }
+            }
+            _ => {
+                // can't happen without add_missing_from, so just elog
+                return Err(ereport(ERROR)
+                    .errmsg_internal(
+                        "trigger WHEN condition cannot contain references to other relations",
+                    )
+                    .into_error());
+            }
+        }
+    }
+
+    // we'll need the rtable for recordDependencyOnExpr
+    let when_rtable = core::mem::replace(&mut pstate.p_rtable, mcx::PgVec::new_in(mcx));
+    let qual = backend_nodes_outfuncs::nodeToString(mcx, &when_node)?
+        .as_str()
+        .to_string();
+
+    Ok(WhenTransform {
+        qual: Some(qual),
+        when_clause: Some(when_node),
+        when_rtable,
+    })
+}
+
+fn when_obj_def_err(msg: &str) -> PgResult<WhenTransform<'static>> {
+    Err(ereport(ERROR)
+        .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
+        .errmsg(msg.to_string())
+        .into_error())
 }
 
 fn addr(class_id: Oid, object_id: Oid, sub_id: i32) -> ObjectAddress {
@@ -645,10 +863,11 @@ const F_UNIQUE_KEY_RECHECK: Oid = 1250;
 pub fn init_seams() {
     // ProcessUtilitySlow dispatch: CREATE TRIGGER.
     backend_tcop_utility_out_seams::create_trigger::set(
-        |mcx, parsetree, _query_string| match parsetree.as_createtrigstmt() {
+        |mcx, parsetree, query_string| match parsetree.as_createtrigstmt() {
             Some(stmt) => CreateTrigger(
                 mcx,
                 stmt,
+                query_string,
                 InvalidOid,
                 InvalidOid,
                 InvalidOid,
@@ -700,6 +919,7 @@ pub fn init_seams() {
             CreateTrigger(
                 mcx,
                 &stmt,
+                "",
                 rel_oid,
                 InvalidOid,
                 constraint_oid,

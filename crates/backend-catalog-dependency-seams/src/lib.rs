@@ -135,6 +135,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `recordDependencyOnExpr(&depender, expr, rtable, behavior)`
+    /// (dependency.c): scan a multi-relation expression (e.g. a trigger WHEN
+    /// clause, whose Vars reference the OLD/NEW pseudo-relations carried in
+    /// `rtable`) for object references and record the dependencies with the
+    /// given behavior. `Err` carries the `ereport(ERROR)`s.
+    pub fn record_dependency_on_expr<'mcx>(
+        depender: ObjectAddress,
+        expr: &types_nodes::nodes::Node<'mcx>,
+        rtable: &[types_nodes::parsenodes::RangeTblEntry<'mcx>],
+        behavior: types_catalog::catalog_dependency::DependencyType,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `deleteDependencyRecordsForClass(classId, objectId, refclassId,
     /// deptype)` (dependency.c): delete pg_depend rows for the given object
     /// that have the given referenced class and dependency type. Returns the

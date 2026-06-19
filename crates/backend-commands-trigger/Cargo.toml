@@ -55,6 +55,13 @@ backend-catalog-pg-depend = { path = "../backend-catalog-pg-depend" }
 backend-catalog-pg-inherits = { path = "../backend-catalog-pg-inherits" }
 backend-parser-func = { path = "../backend-parser-func" }
 backend-parser-relation = { path = "../backend-parser-relation" }
+# CreateTrigger WHEN-clause transform (transform_trigger_when in create.rs).
+backend-parser-small1 = { path = "../backend-parser-small1" }
+backend-parser-clause-seams = { path = "../backend-parser-clause-seams" }
+backend-parser-parse-collate = { path = "../backend-parser-parse-collate" }
+backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
+backend-nodes-outfuncs = { path = "../backend-nodes-outfuncs" }
+backend-catalog-dependency-seams = { path = "../backend-catalog-dependency-seams" }
 backend-storage-lmgr-lmgr = { path = "../backend-storage-lmgr-lmgr" }
 backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }

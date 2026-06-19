@@ -111,6 +111,15 @@ fn seam_record_dependency_on_single_rel_expr(
     )
 }
 
+fn seam_record_dependency_on_expr(
+    depender: ObjectAddress,
+    expr: &Node<'_>,
+    rtable: &[types_nodes::parsenodes::RangeTblEntry<'_>],
+    behavior: DependencyType,
+) -> PgResult<()> {
+    crate::recordDependencyOnExpr(&depender, expr, rtable, behavior)
+}
+
 /// Install every seam declared in `backend-catalog-dependency-seams`.
 pub fn init_seams() {
     seams::new_object_addresses::set(seam_new_object_addresses);
@@ -124,4 +133,5 @@ pub fn init_seams() {
     seams::perform_multiple_deletions::set(seam_perform_multiple_deletions);
     seams::record_object_address_dependencies::set(seam_record_object_address_dependencies);
     seams::record_dependency_on_single_rel_expr::set(seam_record_dependency_on_single_rel_expr);
+    seams::record_dependency_on_expr::set(seam_record_dependency_on_expr);
 }
