@@ -20,10 +20,12 @@ use types_core::Oid;
 use types_error::{PgError, PgResult};
 use types_fmgr::{FmgrArg, RefPayload};
 
+use crate::dch_entry::{interval_to_char, timestamp_to_char, timestamptz_to_char};
 use crate::num_entry::{
     float4_to_char, float8_to_char, int4_to_char, int8_to_char, numeric_to_char,
     numeric_to_number,
 };
+use types_datetime::{Interval, Timestamp};
 
 // ===========================================================================
 // Built-in function Oids (fmgroids.h; pg_proc.dat 1772-1777).
@@ -172,4 +174,49 @@ pub fn float8_to_char_boundary<'mcx>(
 ) -> PgResult<PgVec<'mcx, u8>> {
     let bytes = float8_to_char(value, arg_text_payload(fmt)?, collid)?;
     varlena_image_from_payload(mcx, &bytes)
+}
+
+/// `timestamp_to_char(PG_GETARG_TIMESTAMP(0), PG_GETARG_TEXT_PP(1))`
+/// (formatting.c:4011): by-value `timestamp` + by-ref text format -> text image,
+/// or SQL NULL (`None`) for the empty-format / non-finite-input arm.
+pub fn timestamp_to_char_boundary<'mcx>(
+    mcx: Mcx<'mcx>,
+    dt: Timestamp,
+    fmt: &FmgrArg<'_, '_>,
+    collid: Oid,
+) -> PgResult<Option<PgVec<'mcx, u8>>> {
+    match timestamp_to_char(mcx, dt, arg_text_payload(fmt)?, collid)? {
+        Some(bytes) => Ok(Some(varlena_image_from_payload(mcx, &bytes)?)),
+        None => Ok(None),
+    }
+}
+
+/// `timestamptz_to_char(PG_GETARG_TIMESTAMPTZ(0), PG_GETARG_TEXT_PP(1))`
+/// (formatting.c:4046): by-value `timestamptz` + by-ref text format -> text
+/// image, or SQL NULL (`None`).
+pub fn timestamptz_to_char_boundary<'mcx>(
+    mcx: Mcx<'mcx>,
+    dt: Timestamp,
+    fmt: &FmgrArg<'_, '_>,
+    collid: Oid,
+) -> PgResult<Option<PgVec<'mcx, u8>>> {
+    match timestamptz_to_char(mcx, dt, arg_text_payload(fmt)?, collid)? {
+        Some(bytes) => Ok(Some(varlena_image_from_payload(mcx, &bytes)?)),
+        None => Ok(None),
+    }
+}
+
+/// `interval_to_char(PG_GETARG_INTERVAL_P(0), PG_GETARG_TEXT_PP(1))`
+/// (formatting.c:4087): by-ref `interval` + by-ref text format -> text image,
+/// or SQL NULL (`None`).
+pub fn interval_to_char_boundary<'mcx>(
+    mcx: Mcx<'mcx>,
+    it: &Interval,
+    fmt: &FmgrArg<'_, '_>,
+    collid: Oid,
+) -> PgResult<Option<PgVec<'mcx, u8>>> {
+    match interval_to_char(mcx, it, arg_text_payload(fmt)?, collid)? {
+        Some(bytes) => Ok(Some(varlena_image_from_payload(mcx, &bytes)?)),
+        None => Ok(None),
+    }
 }

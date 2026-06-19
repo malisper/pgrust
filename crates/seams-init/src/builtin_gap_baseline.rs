@@ -25,7 +25,7 @@
 //! test that runs `crate::init_all()` then formats `missing_builtins()` (sorted
 //! by `foid`) as the `(oid, "prosrc", BuiltinGapKind::...)` rows below.
 //!
-//! Current gap: 1283 of 3102 canonical built-ins (1283 not registered,
+//! Current gap: 1280 of 3102 canonical built-ins (1280 not registered,
 //! 0 registered with diverging metadata).
 
 use backend_utils_fmgr_core::BuiltinGapKind;
@@ -220,8 +220,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (1765, "setval3_oid", BuiltinGapKind::NotRegistered),
     (1766, "numeric_smaller", BuiltinGapKind::NotRegistered),
     (1767, "numeric_larger", BuiltinGapKind::NotRegistered),
-    (1768, "interval_to_char", BuiltinGapKind::NotRegistered),
-    (1770, "timestamptz_to_char", BuiltinGapKind::NotRegistered),
     (1772, "numeric_to_char", BuiltinGapKind::NotRegistered),
     (1777, "numeric_to_number", BuiltinGapKind::NotRegistered),
     (1778, "to_timestamp", BuiltinGapKind::NotRegistered),
@@ -280,7 +278,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (2026, "pg_backend_pid", BuiltinGapKind::NotRegistered),
     (2030, "jsonb_path_match_tz", BuiltinGapKind::NotRegistered),
     (2034, "pg_conf_load_time", BuiltinGapKind::NotRegistered),
-    (2049, "timestamp_to_char", BuiltinGapKind::NotRegistered),
     (2084, "show_all_settings", BuiltinGapKind::NotRegistered),
     (2091, "array_lower", BuiltinGapKind::NotRegistered),
     (2092, "array_upper", BuiltinGapKind::NotRegistered),
