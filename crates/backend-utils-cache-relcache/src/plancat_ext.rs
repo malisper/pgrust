@@ -363,13 +363,20 @@ fn relation_get_index_list_oids(relid: Oid) -> PgResult<Vec<Oid>> {
 }
 
 /// `RelationGetFKeyList(relation)` (relcache.c) as the planner-ready
-/// [`px::CachedFkInfo`] rows `get_relation_foreign_keys` (plancat.c) walks. The
-/// entry is forced to be built/cached (the C `relation_open` in
-/// `get_relation_info`'s caller already did this), then the FK list is built
-/// from `pg_constraint`.
+/// [`px::CachedFkInfo`] rows `get_relation_foreign_keys` (plancat.c) walks.
+///
+/// In C `RelationGetFKeyList(Relation relation)` takes the caller's
+/// already-open `Relation` and never pins it itself; `get_relation_info` holds
+/// the relation open across this call (it `table_open`ed it and closes it after
+/// FK collection). So this must NOT take a fresh `rd_refcnt` pin: a
+/// `RelationIdGetRelation` here would `RelationIncrementReferenceCount` a pin
+/// that nothing releases — this function builds a value `Vec` and returns, with
+/// no `Relation` carrier to drop — leaking one reference per `get_relation_info`
+/// and making `CheckTableNotInUse` later refuse a same-session `DROP` of the
+/// table. The entry is guaranteed already built and pinned (the caller opened
+/// it), so a pin-free `cache_lookup` is the faithful presence check.
 fn get_relation_fkey_list(relid: Oid) -> PgResult<Vec<px::CachedFkInfo>> {
-    let built = RelationIdGetRelation(relid)?;
-    if built == types_core::InvalidOid {
+    if core_entry_store::cache_lookup(relid).is_none() {
         return Err(PgError::error(format!(
             "could not open relation with OID {relid}"
         )));

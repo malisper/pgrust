@@ -1181,7 +1181,12 @@ pub fn build_physical_tlist<'mcx>(
                 let tid = root.alloc_targetentry(te);
                 tlist.push(tid);
             }
-            backend_utils_cache_relcache_seams::relation_close::call(relid)?;
+            // `relation_close(relation, NoLock)` — one unpin. Consume the
+            // handle so its `Drop` (also `relation_close(rel, NoLock)`) does not
+            // fire a SECOND unpin: a by-OID `relation_close::call` here PLUS the
+            // guard's Drop would double-decrement `rd_refcnt`, driving it below
+            // the caller's outstanding pins.
+            relation.close(NoLock)?;
             Ok(tlist)
         }
         crate::RTE_SUBQUERY => {
