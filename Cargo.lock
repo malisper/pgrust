@@ -2910,6 +2910,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-table-toast-helper"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-detoast-seams",
+ "backend-access-common-toast-internals-seams",
+ "backend-access-table-toast-helper-seams",
+ "backend-utils-cache-relcache-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-table-toast-helper-seams"
 version = "0.0.0"
 dependencies = [
@@ -23164,6 +23178,7 @@ dependencies = [
  "backend-access-spgist-core",
  "backend-access-table-table",
  "backend-access-table-tableam",
+ "backend-access-table-toast-helper",
  "backend-access-tablesample-core",
  "backend-access-transam-clog",
  "backend-access-transam-commit-ts",

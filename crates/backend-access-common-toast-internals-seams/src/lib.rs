@@ -72,6 +72,38 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `toast_save_datum(rel, value, oldexternal, options)` (toast_internals.c):
+    /// move a varlena `value` (its verbatim on-disk bytes, header included) out
+    /// to the relation's TOAST table, chunking it across rows, and return the
+    /// new on-disk-external TOAST pointer image. `rel` is the heap relation that
+    /// owns the value (crosses as its OID; the relcache resolves the live entry,
+    /// from which `rd_rel->reltoastrelid` is read). `oldexternal` is the column's
+    /// prior external pointer image (`tai_oldexternal`), used to reuse the same
+    /// TOAST value OID when re-saving, or `None`. `Err` carries the toast-table
+    /// insert / index `ereport(ERROR)` surface and OOM.
+    pub fn toast_save_datum<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: types_core::primitive::Oid,
+        value: &[u8],
+        oldexternal: Option<&[u8]>,
+        options: i32,
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
+    /// `toast_delete_datum(rel, value, is_speculative)` (toast_internals.c):
+    /// delete a single on-disk-external TOAST datum's chunks from the relation's
+    /// TOAST table. `rel` is the heap relation that owns the value (crosses as
+    /// its OID). `value` is the verbatim external pointer image. `Err` carries
+    /// the toast-table scan/delete `ereport(ERROR)` surface.
+    pub fn toast_delete_datum(
+        rel: types_core::primitive::Oid,
+        value: &[u8],
+        is_speculative: bool,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `get_toast_snapshot()` (toast_internals.c): the snapshot to use for
     /// reading toast data (`&SnapshotToastData`, crossing as an owned
     /// trimmed copy). In C this reads the per-backend snapshot stacks via

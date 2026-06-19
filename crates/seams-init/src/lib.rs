@@ -46,6 +46,7 @@ pub fn init_all() {
     backend_access_heap_heapam_visibility::init_seams();
     backend_access_heap_heapam_xlog::init_seams();
     backend_access_heap_heaptoast::init_seams();
+    backend_access_table_toast_helper::init_seams();
     backend_access_heap_hio::init_seams();
     backend_access_heap_pruneheap::init_seams();
     backend_access_heap_rewriteheap::init_seams();
