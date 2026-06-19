@@ -269,10 +269,9 @@ pub fn change_relids_in_query(
         Some(&mut skip_rtr),
     );
 
-    let walked = match node {
-        Node::Query(q) => q,
-        _ => unreachable!("ChangeVarNodes returned a non-Query for a Query input"),
-    };
+    let walked = node
+        .into_query()
+        .unwrap_or_else(|| unreachable!("ChangeVarNodes returned a non-Query for a Query input"));
     *run.resolve_mut(parse) = walked;
 }
 
