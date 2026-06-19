@@ -455,6 +455,14 @@ pub fn init_seams() {
     // `HeapTupleHeaderGetUpdateXid` (header-only multixact resolution).
     heapam_seam::heap_tuple_get_update_xid::set(|tuple| HeapTupleHeaderGetUpdateXid(tuple));
 
+    // `heap_page_tuple_header(buf, offnum)` — deform the on-page
+    // `HeapTupleHeader` at `(buf, offnum)`, the analog of C's
+    // `(HeapTupleHeader) PageGetItem(page, PageGetItemId(page, offnum))` for a
+    // normal line pointer. Bodied by `read_on_page_header`.
+    heapam_seam::heap_page_tuple_header::set(|mcx, buf, offnum| {
+        read_on_page_header(mcx, buf, offnum)
+    });
+
     // `log_heap_visible(rel, heap_buffer, vm_buffer, snapshotConflictHorizon,
     // vmflags)` — emit the XLOG_HEAP2_VISIBLE record (heapam.c). Called by
     // visibilitymap_set when a VM bit is set during VACUUM.
