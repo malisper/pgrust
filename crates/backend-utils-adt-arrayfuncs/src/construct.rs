@@ -3328,6 +3328,25 @@ fn datum_from_buf(buf: PgVec<'_, u8>) -> Datum {
     Datum::from_usize(ptr)
 }
 
+/// Copy a verbatim by-reference element image (the full on-disk bytes a by-ref
+/// `Datum` points at — e.g. the complete varlena image, the `attlen`-byte
+/// fixed-length image, or the NUL-terminated cstring image) into `mcx` and
+/// return a `Datum` whose pointer word targets that live copy.
+///
+/// `array_agg_transfn`'s element arrives on the fmgr by-reference lane
+/// (`fcinfo->args[1]` is a pass-by-ref type, so its payload rides
+/// `FmgrArgRef`, not the bare by-value word). C reads it with `PG_GETARG_DATUM`,
+/// which yields a real pointer into the call's argument image; here we rebuild
+/// that pointer by copying the lane bytes into the (aggcontext) `mcx`, so the
+/// `accumArrayResult` by-ref copy path (`PG_DETOAST_DATUM_COPY` / `datumCopy`)
+/// has a valid pointer to read. Without this, reading the bare by-value word for
+/// a by-ref element yields a NULL/garbage pointer and `accumArrayResult`'s
+/// varlena-header deref segfaults.
+pub fn byref_image_to_datum<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<Datum> {
+    let buf = slice_to_pgvec(mcx, image)?;
+    Ok(datum_from_buf(buf))
+}
+
 /// `CStringGetTextDatum(s)` over a UTF-8 str: build a text varlena in `mcx` and
 /// return its pointer word.
 fn cstring_to_text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum> {

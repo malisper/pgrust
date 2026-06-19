@@ -159,15 +159,15 @@ fn fc_array_agg_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 
     // elem = PG_ARGISNULL(1) ? (Datum) 0 : PG_GETARG_DATUM(1);
     let disnull = arg_isnull(fcinfo, 1);
+    let ctx_mcx = carrier.ctx.mcx();
     let elem: Datum = if disnull {
         Datum::from_usize(0)
     } else {
-        elem_datum(fcinfo, arg1_typeid)
+        elem_datum(fcinfo, &carrier.state, ctx_mcx)
     };
 
     // state = accumArrayResult(state, elem, PG_ARGISNULL(1), arg1_typeid,
     //                          aggcontext);
-    let ctx_mcx = carrier.ctx.mcx();
     let new_state = ok(construct::accum_array_result(
         ctx_mcx,
         Some(core::mem::take(&mut carrier.state)),
@@ -183,18 +183,47 @@ fn fc_array_agg_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 
 /// `PG_GETARG_DATUM(1)` for the element argument. A by-value element (the
 /// resolved `arg1_typeid` is pass-by-value, e.g. `int4`) arrives in the by-value
-/// word; a by-ref element arrives on the by-ref lane and is materialized into a
-/// `Datum` whose word the `accumArrayResult` by-ref copy path consumes.
-fn elem_datum(fcinfo: &FunctionCallInfoBaseData, _arg1_typeid: Oid) -> Datum {
-    // The by-value word is always populated by the fmgr boundary for a by-value
-    // type. (For a by-ref type the boundary delivers the payload on the by-ref
-    // lane; `accumArrayResult`'s by-ref branch resolves it through the detoast
-    // seam — the same substrate boundary every other by-ref element access in
-    // this crate bottoms out on.)
-    fcinfo
-        .arg(1)
-        .map(|d| d.value)
-        .unwrap_or_else(|| Datum::from_usize(0))
+/// word; a by-ref element (`text`/`numeric`/`name`/…) arrives on the fmgr
+/// by-reference lane (`fcinfo->args[1]` payload rides `FmgrArgRef`, not the bare
+/// word) and is materialized into a `Datum` whose pointer word `accumArrayResult`'s
+/// by-ref copy path (`PG_DETOAST_DATUM_COPY` / `datumCopy`) consumes.
+fn elem_datum<'mcx>(
+    fcinfo: &FunctionCallInfoBaseData,
+    state: &types_datum::array_build::ArrayBuildState,
+    ctx_mcx: mcx::Mcx<'mcx>,
+) -> Datum {
+    // For a by-value element, the boundary populates the by-value word.
+    if state.typbyval {
+        return fcinfo
+            .arg(1)
+            .map(|d| d.value)
+            .unwrap_or_else(|| Datum::from_usize(0));
+    }
+    // For a by-ref element, C's `PG_GETARG_DATUM(1)` yields a real pointer into
+    // the argument image. The bare by-value word here is NOT that pointer (it is
+    // unset/garbage for a by-ref arg); the payload rides the by-reference lane.
+    // Copy the verbatim element image into the aggcontext and hand back a Datum
+    // pointing at it, so `accumArrayResult`'s by-ref deref has a live pointer.
+    match fcinfo.ref_arg(1) {
+        // Varlena (`typlen == -1`) and fixed-length by-ref (`typlen > 0`) images
+        // ride the `Varlena` lane verbatim — copy them as-is.
+        Some(types_fmgr::boundary::RefPayload::Varlena(b)) => {
+            ok(construct::byref_image_to_datum(ctx_mcx, b.as_slice()))
+        }
+        // `cstring` (`typlen == -2`) elements: `accumArrayResult`'s by-ref copy
+        // reads a NUL-terminated image, so append the terminator the `Cstring`
+        // lane drops.
+        Some(types_fmgr::boundary::RefPayload::Cstring(s)) => {
+            let mut img = s.clone().into_bytes();
+            img.push(0);
+            ok(construct::byref_image_to_datum(ctx_mcx, &img))
+        }
+        // No by-ref payload seeded: same diagnostic the other by-ref accessors use.
+        _ => raise(types_error::PgError::error(
+            "array_agg_transfn: arg 1 has no by-reference payload on the call frame \
+             (the dispatcher did not seed ref_args[1] for a by-ref element)",
+        )),
+    }
 }
 
 /// `array_agg_finalfn`(2334): make a 1-D array of the accumulated elements.
