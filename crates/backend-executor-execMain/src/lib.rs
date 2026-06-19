@@ -1129,6 +1129,23 @@ pub fn exec_check_permissions(
     Ok(true)
 }
 
+/// `ExecCheckOneRelPerms(perminfo)` + `aclcheck_error(ACLCHECK_NO_PRIV,
+/// OBJECT_VIEW, get_rel_name(perminfo->relid))` for `subquery_planner`'s
+/// view-permission ACL loop (planner.c:866-882). Unlike
+/// [`exec_check_permissions`], the planner check hardcodes `OBJECT_VIEW` for the
+/// error (the RTE is known to be `RELKIND_VIEW`).
+fn exec_check_one_rel_perms_view(perminfo: &RTEPermissionInfo<'_>) -> PgResult<()> {
+    if !exec_check_one_rel_perms(perminfo)? {
+        let name = lsyscache_get_rel_name(perminfo.relid)?;
+        aclchk::aclcheck_error::call(
+            AclResult::AclcheckNoPriv,
+            types_nodes::parsenodes::ObjectType::View,
+            name,
+        )?;
+    }
+    Ok(())
+}
+
 // ===========================================================================
 // ExecSupportsBackwardScan — execMain owns the seam decl (its caller passes the
 // whole PlannedStmt); the body is execAmi's planTree walker.
@@ -2242,6 +2259,7 @@ pub fn init_seams() {
     seams::exec_partition_check::set(ExecPartitionCheck);
     seams::exec_partition_check_emit_error::set(ExecPartitionCheckEmitError);
     seams::exec_check_permissions_select::set(exec_check_permissions_select);
+    seams::exec_check_one_rel_perms_view::set(exec_check_one_rel_perms_view);
     seams::exec_build_slot_value_description::set(ExecBuildSlotValueDescription);
     seams::init_result_rel_info::set(InitResultRelInfo);
     seams::check_valid_result_rel::set(CheckValidResultRel);

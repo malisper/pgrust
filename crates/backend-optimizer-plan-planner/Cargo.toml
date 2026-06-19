@@ -104,3 +104,7 @@ backend-utils-init-small = { path = "../backend-utils-init-small" }
 backend-catalog-index-seams = { path = "../backend-catalog-index-seams" }
 # expand_grouping_sets (GROUPING SETS expansion in subquery_planner).
 backend-parser-parse-agg-seams = { path = "../backend-parser-parse-agg-seams" }
+# subquery_planner view-permission ACL loop (planner.c:866-882):
+# getRTEPermissionInfo (parse_relation.c) + ExecCheckOneRelPerms (execMain.c).
+backend-parser-relation-seams = { path = "../backend-parser-relation-seams" }
+backend-executor-execMain-seams = { path = "../backend-executor-execMain-seams" }

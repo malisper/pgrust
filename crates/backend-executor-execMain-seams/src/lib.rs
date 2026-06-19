@@ -412,6 +412,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecCheckOneRelPerms(perminfo)` (execMain.c) for `subquery_planner`'s
+    /// view-permission ACL loop (planner.c:866-882). The planner checks
+    /// `ACL_SELECT` (etc.) on each `RELKIND_VIEW` RTE's `RTEPermissionInfo`,
+    /// because selectivity estimation only checks the view owner's permissions
+    /// on the underlying tables, so the invoking user's privilege on the view
+    /// itself must be verified here. On a denial this raises
+    /// `aclcheck_error(ACLCHECK_NO_PRIV, OBJECT_VIEW, get_rel_name(relid))`
+    /// (carried on `Err`); `Ok(())` means the check passed. The owner runs the
+    /// access-method-level permission check (`pg_class_aclmask` /
+    /// `pg_attribute_aclcheck`), which can `ereport(ERROR)`.
+    pub fn exec_check_one_rel_perms_view(
+        perminfo: &types_nodes::RTEPermissionInfo<'_>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `resultRelInfo->ri_FdwRoutine->ExecForeignUpdate(estate, resultRelInfo,
     /// slot, planSlot)` (fdwapi): dispatch an UPDATE to the foreign-table FDW
     /// via the per-relation `FdwRoutine` vtable carried on the pooled

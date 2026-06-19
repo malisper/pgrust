@@ -12379,6 +12379,7 @@ version = "0.0.0"
 dependencies = [
  "backend-catalog-index-seams",
  "backend-catalog-pg-inherits",
+ "backend-executor-execMain-seams",
  "backend-foreign-foreign",
  "backend-lib-bipartite-match",
  "backend-lib-knapsack",
@@ -12415,6 +12416,7 @@ dependencies = [
  "backend-optimizer-util-vars",
  "backend-parser-analyze",
  "backend-parser-parse-agg-seams",
+ "backend-parser-relation-seams",
  "backend-rewrite-rewritemanip-seams",
  "backend-utils-adt-selfuncs-seams",
  "backend-utils-cache-lsyscache",
@@ -15729,6 +15731,7 @@ dependencies = [
  "backend-nodes-outfuncs",
  "backend-parser-parse-utilcmd-seams",
  "backend-rewrite-core",
+ "backend-rewrite-rewriteDefine-seams",
  "backend-rewrite-rewritesupport-seams",
  "backend-tcop-utility-out-seams",
  "backend-utils-adt-format-type",
@@ -15746,6 +15749,15 @@ dependencies = [
  "types-rel",
  "types-storage",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-rewrite-rewriteDefine-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-nodes",
 ]
 
 [[package]]
@@ -20989,6 +21001,7 @@ dependencies = [
  "backend-nodes-core-seams",
  "backend-nodes-read-seams",
  "backend-optimizer-util-plancat-ext-seams",
+ "backend-rewrite-rewriteDefine-seams",
  "backend-rewrite-rewritemanip-seams",
  "backend-storage-buffer-bufmgr-seams",
  "backend-storage-file-fd-seams",

@@ -815,6 +815,20 @@ fn setRuleCheckAsUser_Query(qry: &mut Query<'_>, userid: Oid) {
     }
 }
 
+/// `set_rule_check_as_user` seam entry — apply [`setRuleCheckAsUser`] starting
+/// at a `Query` (the rule-action shape the relcache holds). C calls
+/// `setRuleCheckAsUser((Node *) rule->actions, userid)`; the owned model holds
+/// each action as a `Query` value, so the relcache invokes this per action.
+fn set_rule_check_as_user_seam(query: &mut Query<'_>, userid: Oid) {
+    setRuleCheckAsUser_Query(query, userid);
+}
+
+/// `set_rule_check_as_user_node` seam entry — apply [`setRuleCheckAsUser`] to a
+/// generic expression `Node` (the rule `qual`).
+fn set_rule_check_as_user_node_seam(node: &mut Node<'_>, userid: Oid) {
+    setRuleCheckAsUser(node, userid);
+}
+
 /* ===========================================================================
  * EnableDisableRule (rewriteDefine.c:691)
  * ========================================================================= */
@@ -1059,4 +1073,8 @@ fn define_rule_seam<'mcx>(
 /// Install this crate's `ProcessUtilitySlow` dispatch seam.
 pub fn init_seams() {
     backend_tcop_utility_out_seams::define_rule::set(define_rule_seam);
+    backend_rewrite_rewriteDefine_seams::set_rule_check_as_user::set(set_rule_check_as_user_seam);
+    backend_rewrite_rewriteDefine_seams::set_rule_check_as_user_node::set(
+        set_rule_check_as_user_node_seam,
+    );
 }

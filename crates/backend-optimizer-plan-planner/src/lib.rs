@@ -860,20 +860,26 @@ fn subquery_planner_carried<'mcx>(
         }
     }
 
-    // View-permission ACL loop (C:866-882). Only fires for RELKIND_VIEW RTEs
-    // with a perminfoindex. ExecCheckOneRelPerms has no ported owner. We scan
-    // for any such RTE and panic precisely only if one is present (a plain table
-    // SELECT has none).
+    // View-permission ACL loop (C:866-882). We need to check access permissions
+    // for any view relations mentioned in the query, in order to prevent
+    // information being leaked by selectivity estimation functions, which only
+    // check view owner permissions on underlying tables. This means access
+    // permissions for views are checked twice (the executor checks them again).
     {
         let parse = run.resolve(root.parse);
         const RELKIND_VIEW: i8 = b'v' as i8;
         for rte in parse.rtable.iter() {
             if rte.perminfoindex != 0 && rte.relkind == RELKIND_VIEW {
-                panic!(
-                    "subquery_planner: view-permission ACL check \
-                     (getRTEPermissionInfo + ExecCheckOneRelPerms, parse_relation.c/\
-                     execMain.c) has no ported owner for the owned RTE model"
-                );
+                // perminfo = getRTEPermissionInfo(parse->rteperminfos, rte);
+                let idx = backend_parser_relation_seams::get_rte_permission_info::call(
+                    parse.rteperminfos.as_slice(),
+                    rte,
+                )?;
+                // result = ExecCheckOneRelPerms(perminfo);
+                // if (!result) aclcheck_error(ACLCHECK_NO_PRIV, OBJECT_VIEW, ...);
+                backend_executor_execMain_seams::exec_check_one_rel_perms_view::call(
+                    &parse.rteperminfos[idx],
+                )?;
             }
         }
     }

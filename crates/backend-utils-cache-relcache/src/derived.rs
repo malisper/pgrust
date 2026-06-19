@@ -20,6 +20,10 @@
 use backend_access_index_genam_seams as genam_seam;
 use backend_access_index_indexam_seams as indexam_seam;
 use backend_nodes_read_seams as read_seam;
+use backend_rewrite_rewriteDefine_seams::{
+    set_rule_check_as_user as set_rule_check_as_user_seam,
+    set_rule_check_as_user_node as set_rule_check_as_user_node_seam,
+};
 use backend_utils_cache_relcache_nodexform_seams as nodexform_seam;
 use backend_utils_error::{ereport, PgResult};
 use mcx::{Mcx, MemoryContext};
@@ -688,7 +692,7 @@ pub fn RelationBuildRuleLock(relation: &mut RelationData) -> PgResult<()> {
         // `pg_node_tree` column whose rendering is the literal `<>` for an
         // unconditional rule, which `stringToNode` resolves to a NULL pointer;
         // use the nullable entry so `<>` yields `None` rather than an error.
-        let qual = match row.ev_qual {
+        let mut qual = match row.ev_qual {
             Some(text) => read_seam::string_to_node_opt::call(cache_mcx, text.as_str())?,
             None => None,
         };
@@ -741,6 +745,31 @@ pub fn RelationBuildRuleLock(relation: &mut RelationData) -> PgResult<()> {
                         .into_error());
                 }
             }
+        }
+
+        // Determine the role to perform the rule's permission checks as
+        // (relcache.c:855-882). If this is a SELECT rule defining a view, and
+        // the view has "security_invoker" set, all permission checks on the
+        // relations referred to by the rule are performed as the invoking user
+        // (InvalidOid). In all other cases — including non-SELECT rules on a
+        // security-invoker view — they are performed as the relation owner.
+        //
+        // The view "security_invoker" reloption is not carried on the owned
+        // RelationData entry built here, so the security-invoker SELECT-view
+        // branch (check_as_user = InvalidOid) is not yet expressible; the
+        // owner branch is faithful for every non-security-invoker view, which
+        // is the default and the common spine.
+        let check_as_user = relation.rd_rel.relowner;
+
+        // Scan through the rule's actions and the qual, setting the
+        // checkAsUser field on all RTEPermissionInfos. Doing this at rule load
+        // (rather than at store) avoids ALTER TABLE OWNER having to rewrite the
+        // stored rules. setRuleCheckAsUser is owned by rewriteDefine.c.
+        for action in actions.iter_mut() {
+            set_rule_check_as_user_seam::call(action, check_as_user);
+        }
+        if let Some(q) = qual.as_deref_mut() {
+            set_rule_check_as_user_node_seam::call(q, check_as_user);
         }
 
         rules.push(RewriteRule {

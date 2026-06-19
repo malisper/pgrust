@@ -49,3 +49,6 @@ backend-rewrite-rewritesupport-seams = { path = "../backend-rewrite-rewritesuppo
 
 # Inward dispatch seam this crate installs (ProcessUtilitySlow CREATE RULE leg).
 backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
+# This unit's own inward seam (setRuleCheckAsUser, called by relcache's
+# RelationBuildRuleLock when a view's ON SELECT rule is loaded).
+backend-rewrite-rewriteDefine-seams = { path = "../backend-rewrite-rewriteDefine-seams" }

@@ -97,6 +97,9 @@ backend-nodes-read-seams = { path = "../backend-nodes-read-seams" }
 # `checkExprHasSubLink` (rewriteManip.c) for RelationBuildRowSecurity's
 # RowSecurityPolicy.hassublinks. Seam crate (leaf): acyclic.
 backend-rewrite-rewritemanip-seams = { path = "../backend-rewrite-rewritemanip-seams" }
+# setRuleCheckAsUser: stamp checkAsUser on a loaded rule's RTEPermissionInfos
+# (view ON SELECT rules check underlying-rel perms as the view owner).
+backend-rewrite-rewriteDefine-seams = { path = "../backend-rewrite-rewriteDefine-seams" }
 backend-access-table-tableam-seams = { path = "../backend-access-table-tableam-seams" }
 backend-utils-cache-relmapper-seams = { path = "../backend-utils-cache-relmapper-seams" }
 backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
