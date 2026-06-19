@@ -16,3 +16,5 @@ types-nodes = { path = "../types-nodes" }
 types-tuple = { path = "../types-tuple" }
 backend-partitioning-partbounds-seams = { path = "../backend-partitioning-partbounds-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-utils-adt-scalar-seams = { path = "../backend-utils-adt-scalar-seams" }
+backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }

@@ -13,12 +13,13 @@
 //! the caller passes the owned `PartitionKeyData` / `PartitionBoundInfoData`
 //! views; the support functions dispatch by their stored lookup key.
 
-use mcx::{Mcx, PgVec};
+use mcx::{Mcx, PgBox, PgVec};
 use types_core::primitive::Oid;
 use types_error::PgResult;
+use types_nodes::ddlnodes::PartitionBoundSpec;
 use types_nodes::nodes::Node;
 use types_nodes::partition::{
-    PartitionBoundInfoData, PartitionKeyData, PartitionRangeDatumKind,
+    PartitionBoundInfo, PartitionBoundInfoData, PartitionKeyData, PartitionRangeDatumKind,
 };
 use types_rel::RelationData;
 // Canonical value type (`Datum` unification). The partition-routing seams carry
@@ -112,6 +113,35 @@ seam_core::seam!(
         relid: Oid,
         parent: &RelationData<'p>,
     ) -> PgResult<PgVec<'mcx, Node<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `partition_bounds_create(boundspecs, nparts, key, &mapping)`
+    /// (partbounds.c): build a [`PartitionBoundInfoData`] from a list of
+    /// partition bound-spec parse nodes, dispatching by `key->strategy` to
+    /// `create_{hash,list,range}_bounds`. Returns the bound info plus the
+    /// `*mapping` array (original spec index → canonical partition index). The
+    /// comparison/hash support functions and `datumCopy` can `ereport(ERROR)`,
+    /// carried on `Err`; allocations are charged to `mcx`.
+    pub fn partition_bounds_create<'mcx>(
+        mcx: Mcx<'mcx>,
+        boundspecs: &[&PartitionBoundSpec<'_>],
+        nparts: usize,
+        key: &PartitionKeyData<'_>,
+    ) -> PgResult<(PartitionBoundInfo<'mcx>, PgVec<'mcx, i32>)>
+);
+
+seam_core::seam!(
+    /// `partition_bounds_copy(src, key)` (partbounds.c): return a deep copy of
+    /// `src` with bound data types described by `key`. By-reference bound datums
+    /// are `datumCopy`'d into `mcx`; the `kind`/`indexes`/`interleaved_parts`
+    /// arrays are duplicated. `datumCopy` can `ereport(ERROR)`, carried on
+    /// `Err`; allocations are charged to `mcx`.
+    pub fn partition_bounds_copy<'mcx>(
+        mcx: Mcx<'mcx>,
+        src: &PartitionBoundInfoData<'_>,
+        key: &PartitionKeyData<'_>,
+    ) -> PgResult<PgBox<'mcx, PartitionBoundInfoData<'mcx>>>
 );
 
 /* ==========================================================================

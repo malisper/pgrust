@@ -13978,7 +13978,9 @@ dependencies = [
 name = "backend-partitioning-partbounds"
 version = "0.0.0"
 dependencies = [
+ "backend-nodes-core-seams",
  "backend-partitioning-partbounds-seams",
+ "backend-utils-adt-scalar-seams",
  "backend-utils-fmgr-fmgr-seams",
  "mcx",
  "types-core",
