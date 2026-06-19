@@ -85,6 +85,7 @@ const ANUM_PG_CLASS_RELALLVISIBLE: i16 = 12;
 const ANUM_PG_CLASS_RELALLFROZEN: i16 = 13;
 const ANUM_PG_CLASS_RELTOASTRELID: i16 = 14;
 const ANUM_PG_CLASS_RELHASINDEX: i16 = 15;
+const ANUM_PG_CLASS_RELCHECKS: i16 = 20;
 const ANUM_PG_CLASS_RELHASRULES: i16 = 21;
 const ANUM_PG_CLASS_RELHASTRIGGERS: i16 = 22;
 const ANUM_PG_CLASS_RELHASSUBCLASS: i16 = 23;
@@ -939,6 +940,35 @@ fn fixed_attr_offset(
     Some(off)
 }
 
+/// `SetRelationNumChecks`'s disk-store branch (heap.c): open pg_class
+/// RowExclusiveLock, `SearchSysCacheCopy1(RELOID, relid)`, set
+/// `relStruct->relchecks = numchecks`, and `CatalogTupleUpdate`. The caller
+/// (`backend-catalog-heap`) has already confirmed the stored value differs from
+/// `numchecks` (and owns the equal-value `CacheInvalidateRelcache` branch), so
+/// this is the unconditional store. `Ok(())` maps the C `cache lookup failed for
+/// relation %u` elog(ERROR) to an error when no tuple is found.
+fn set_relation_num_checks(relid: Oid, numchecks: i32) -> PgResult<()> {
+    let ctx = MemoryContext::new("set_relation_num_checks");
+    let mcx = ctx.mcx();
+    let r = table_open(mcx, cat::catalog::RELATION_RELATION_ID, RowExclusiveLock)?;
+    let oldtup = fetch_by_oid(mcx, &r, ANUM_PG_CLASS_OID, relid)?.ok_or_else(|| {
+        PgError::error(format!("cache lookup failed for relation {relid}"))
+    })?;
+    let (mut values, mut nulls) = deform(mcx, &r, &oldtup)?;
+    let mut replaces = vec![false; values.len()];
+    // relStruct->relchecks = numchecks (int2 in pg_class).
+    set_col(
+        &mut values,
+        &mut nulls,
+        &mut replaces,
+        ANUM_PG_CLASS_RELCHECKS,
+        Datum::from_i16(numchecks as i16),
+    );
+    modify_and_update(mcx, &r, &oldtup, &values, &nulls, &replaces)?;
+    r.close(RowExclusiveLock)?;
+    Ok(())
+}
+
 /// `SetRelationRuleStatus` (rewriteSupport.c): re-fetch the pg_class row for
 /// `relation_id`; if `relhasrules != rel_has_rules`, set it and
 /// `CatalogTupleUpdate`; otherwise `CacheInvalidateRelcacheByTuple` to force a
@@ -1456,6 +1486,9 @@ fn catalog_tuple_update_pg_constraint(
     set_col(&mut values, &mut nulls, &mut replaces, pc::Anum_pg_constraint_conislocal, Datum::from_bool(fields.conislocal));
     set_col(&mut values, &mut nulls, &mut replaces, pc::Anum_pg_constraint_coninhcount, Datum::from_i16(fields.coninhcount));
     set_col(&mut values, &mut nulls, &mut replaces, pc::Anum_pg_constraint_conparentid, Datum::from_oid(fields.conparentid));
+    set_col(&mut values, &mut nulls, &mut replaces, pc::Anum_pg_constraint_convalidated, Datum::from_bool(fields.convalidated));
+    set_col(&mut values, &mut nulls, &mut replaces, pc::Anum_pg_constraint_connoinherit, Datum::from_bool(fields.connoinherit));
+    set_col(&mut values, &mut nulls, &mut replaces, pc::Anum_pg_constraint_conenforced, Datum::from_bool(fields.conenforced));
     modify_and_update(mcx, &r, &oldtup, &values, &nulls, &replaces)
 }
 
@@ -2720,6 +2753,11 @@ pub fn install() {
     // `index_update_stats` seam is declared on `backend-catalog-index-seams`
     // (index.c's owner), installed here because this is the pg_class-write layer.
     backend_catalog_index_seams::index_update_stats::set(index_update_stats);
+
+    // SetRelationNumChecks disk-store branch (heap.c): the pg_class `relchecks`
+    // write, declared on heap-seams (its owner) but installed here, the
+    // pg_class-write layer.
+    backend_catalog_heap_seams::set_relation_num_checks::set(set_relation_num_checks);
 
     // SetRelationHasSubclass catalog body (tablecmds.c): the pg_class
     // `relhassubclass` write, declared on tablecmds-seams (its owner) but

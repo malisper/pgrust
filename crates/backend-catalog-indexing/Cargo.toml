@@ -40,6 +40,9 @@ backend-catalog-index-seams = { path = "../backend-catalog-index-seams" }
 # SetRelationHasSubclass pg_class write (tablecmds.c): the relhassubclass-column
 # catalog write, declared on tablecmds-seams, installed from this write layer.
 backend-commands-tablecmds-seams = { path = "../backend-commands-tablecmds-seams" }
+# SetRelationNumChecks pg_class `relchecks` write (heap.c): declared on
+# heap-seams, installed from this pg_class-write layer.
+backend-catalog-heap-seams = { path = "../backend-catalog-heap-seams" }
 backend-access-heap-heapam-seams = { path = "../backend-access-heap-heapam-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }

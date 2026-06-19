@@ -241,6 +241,14 @@ pub struct ConstraintFieldUpdate {
     /// `convalidated` — flipped to `true` by `AlterDomainValidateConstraint`;
     /// the other mutator sites carry through the row's existing value.
     pub convalidated: bool,
+    /// `connoinherit` — set `true` by `MergeWithExistingConstraint` when merging
+    /// a NO INHERIT child into the row; the other mutator sites carry through the
+    /// row's existing value.
+    pub connoinherit: bool,
+    /// `conenforced` — flipped to `true` by `MergeWithExistingConstraint` when an
+    /// enforced child constraint is merged into a not-enforced parent; the other
+    /// mutator sites carry through the row's existing value.
+    pub conenforced: bool,
 }
 
 /// A `SearchSysCache1(CONSTROID)` projection: the scalar `Form_pg_constraint`

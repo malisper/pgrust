@@ -44,9 +44,11 @@ use types_core::fmgr::{F_NAMEEQ, F_OIDEQ, INDEX_MAX_KEYS};
 use types_core::primitive::{AttrNumber, InvalidAttrNumber, InvalidOid, Oid, OidIsValid};
 use types_error::{
     PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED,
-    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
-    ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
+    ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+    ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE,
+    ERROR, NOTICE,
 };
+use types_error::pg_error::ErrorLocation;
 use types_nodes::bitmapset::Bitmapset;
 use types_nodes::parsenodes::DropBehavior;
 use types_nodes::nodes::{Node, NodePtr};
@@ -76,6 +78,16 @@ use backend_utils_cache_syscache_seams as syscache_seams;
 
 /// `NAMEDATALEN`.
 const NAMEDATALEN: usize = 64;
+
+use backend_nodes_equalfuncs_seams as equalfuncs_seams;
+use backend_nodes_read_seams as read_seams;
+use backend_utils_error::ereport;
+
+/// `ErrorLocation` for `ereport(...).finish(...)` in this module (the C source
+/// is `src/backend/catalog/heap.c` for `MergeWithExistingConstraint`).
+fn here(funcname: &'static str) -> ErrorLocation {
+    ErrorLocation::new("../src/backend/catalog/heap.c", 0, funcname)
+}
 
 /* ===========================================================================
  * small helpers (mirror src-idiomatic)
@@ -1004,6 +1016,8 @@ pub fn AdjustNotNullInheritance(
                 coninhcount: conform.coninhcount,
                 conparentid: conform.conparentid,
                 convalidated: conform.convalidated,
+                connoinherit: conform.connoinherit,
+                conenforced: conform.conenforced,
             };
             indexing_seams::catalog_tuple_update_pg_constraint::call(
                 &pg_constraint,
@@ -1018,6 +1032,252 @@ pub fn AdjustNotNullInheritance(
     }
 
     Ok(false)
+}
+
+/* ===========================================================================
+ * MergeWithExistingConstraint (catalog/heap.c:2451-2611)
+ * ========================================================================= */
+
+/// `MergeWithExistingConstraint(rel, ccname, expr, ...)` (heap.c) — check for a
+/// pre-existing CHECK constraint conflicting with a proposed new one of the same
+/// name. Returns `true` if the new constraint was merged into an identical
+/// existing one (a duplicate), `false` if no matching row exists. Raises on a
+/// genuine conflict.
+///
+/// `expr` is the cooked (transformed) CHECK expression node; it is compared
+/// against the stored `conbin` via `equal(expr, stringToNode(conbin))`.
+/// `rel_name` / `relispartition` come from the target relation.
+#[allow(clippy::too_many_arguments)]
+pub fn MergeWithExistingConstraint(
+    mcx: Mcx<'_>,
+    relid: Oid,
+    rel_name: &str,
+    relispartition: bool,
+    ccname: &str,
+    expr: &Node<'_>,
+    mut allow_merge: bool,
+    is_local: bool,
+    is_enforced: bool,
+    is_initially_valid: bool,
+    is_no_inherit: bool,
+) -> PgResult<bool> {
+    let con_ctx = MemoryContext::new("pg_constraint");
+    /* conDesc = table_open(ConstraintRelationId, RowExclusiveLock); */
+    let conDesc = table::table_open(con_ctx.mcx(), CONSTRAINT_RELATION_ID, RowExclusiveLock)?;
+
+    let skey = [
+        oid_key(Anum_pg_constraint_conrelid, relid)?,
+        oid_key(Anum_pg_constraint_contypid, InvalidOid)?,
+        name_key(mcx, Anum_pg_constraint_conname, ccname)?,
+    ];
+
+    /*
+     * There can be at most one matching row. We re-implement the scan loop
+     * (rather than `systable_scan_foreach`) so the deformed `conbin` Datum
+     * survives long enough to detoast — the shared helper discards `values`.
+     */
+    let mut scan = genam_seams::systable_beginscan::call(
+        &conDesc,
+        ConstraintRelidTypidNameIndexId,
+        true,
+        None,
+        &skey,
+    )?;
+    let scratch = MemoryContext::new("pg_constraint scan row");
+    let smcx = scratch.mcx();
+
+    let Some(tup) = genam_seams::systable_getnext::call(smcx, scan.desc_mut())? else {
+        /* No matching row; nothing to merge. */
+        scan.end()?;
+        conDesc.close(RowExclusiveLock)?;
+        return Ok(false);
+    };
+
+    let cols = heap_deform_tuple(smcx, &tup.tuple, &conDesc.rd_att, &tup.data)?;
+    let mut values: PgVec<'_, Datum<'_>> = mcx::vec_with_capacity_in(smcx, cols.len())?;
+    for (value, _null) in cols.iter() {
+        values.push(value.clone());
+    }
+    let mut con = form_pg_constraint(&values);
+    let tid = tup.tuple.t_self;
+
+    /* Found it.  Conflicts if not identical check constraint */
+    let mut found = false;
+    if con.contype == CONSTRAINT_CHECK {
+        /* val = fastgetattr(tup, Anum_pg_constraint_conbin, ...); */
+        let conbin_is_null = cols
+            .get(Anum_pg_constraint_conbin as usize - 1)
+            .map(|(_, n)| *n)
+            .unwrap_or(true);
+        if conbin_is_null {
+            scan.end()?;
+            conDesc.close(RowExclusiveLock)?;
+            return Err(PgError::new(
+                ERROR,
+                format!("null conbin for rel {rel_name}"),
+            ));
+        }
+        let conbin_datum = &values[Anum_pg_constraint_conbin as usize - 1];
+        let conbin = varlena_seams::text_to_cstring_v::call(smcx, conbin_datum)?
+            .as_str()
+            .to_string();
+        /* if (equal(expr, stringToNode(TextDatumGetCString(val)))) found = true; */
+        let stored = read_seams::string_to_node::call(smcx, &conbin)?;
+        if equalfuncs_seams::equal_node::call(expr, &stored) {
+            found = true;
+        }
+    }
+
+    /*
+     * If the existing constraint is purely inherited (no local definition) then
+     * interpret addition of a local constraint as a legal merge.  This allows
+     * ALTER ADD CONSTRAINT on parent and child tables to be given in either
+     * order with same end state.  However if the relation is a partition, all
+     * inherited constraints are always non-local, including those that were
+     * merged.
+     */
+    if is_local && !con.conislocal && !relispartition {
+        allow_merge = true;
+    }
+
+    if !found || !allow_merge {
+        scan.end()?;
+        conDesc.close(RowExclusiveLock)?;
+        return Err(PgError::new(
+            ERROR,
+            format!("constraint \"{ccname}\" for relation \"{rel_name}\" already exists"),
+        )
+        .with_sqlstate(ERRCODE_DUPLICATE_OBJECT));
+    }
+
+    /* If the child constraint is "no inherit" then cannot merge */
+    if con.connoinherit {
+        scan.end()?;
+        conDesc.close(RowExclusiveLock)?;
+        return Err(PgError::new(
+            ERROR,
+            format!(
+                "constraint \"{ccname}\" conflicts with non-inherited constraint on relation \"{rel_name}\""
+            ),
+        )
+        .with_sqlstate(ERRCODE_INVALID_OBJECT_DEFINITION));
+    }
+
+    /*
+     * Must not change an existing inherited constraint to "no inherit" status.
+     * That's because inherited constraints should be able to propagate to
+     * lower-level children.
+     */
+    if con.coninhcount > 0 && is_no_inherit {
+        scan.end()?;
+        conDesc.close(RowExclusiveLock)?;
+        return Err(PgError::new(
+            ERROR,
+            format!(
+                "constraint \"{ccname}\" conflicts with inherited constraint on relation \"{rel_name}\""
+            ),
+        )
+        .with_sqlstate(ERRCODE_INVALID_OBJECT_DEFINITION));
+    }
+
+    /*
+     * If the child constraint is "not valid" then cannot merge with a valid
+     * parent constraint.
+     */
+    if is_initially_valid && con.conenforced && !con.convalidated {
+        scan.end()?;
+        conDesc.close(RowExclusiveLock)?;
+        return Err(PgError::new(
+            ERROR,
+            format!(
+                "constraint \"{ccname}\" conflicts with NOT VALID constraint on relation \"{rel_name}\""
+            ),
+        )
+        .with_sqlstate(ERRCODE_INVALID_OBJECT_DEFINITION));
+    }
+
+    /*
+     * A non-enforced child constraint cannot be merged with an enforced parent
+     * constraint. However, the reverse is allowed, where the child constraint
+     * is enforced.
+     */
+    if (!is_local && is_enforced && !con.conenforced)
+        || (is_local && !is_enforced && con.conenforced)
+    {
+        scan.end()?;
+        conDesc.close(RowExclusiveLock)?;
+        return Err(PgError::new(
+            ERROR,
+            format!(
+                "constraint \"{ccname}\" conflicts with NOT ENFORCED constraint on relation \"{rel_name}\""
+            ),
+        )
+        .with_sqlstate(ERRCODE_INVALID_OBJECT_DEFINITION));
+    }
+
+    /* OK to update the tuple */
+    ereport(NOTICE)
+        .errmsg(format!(
+            "merging constraint \"{ccname}\" with inherited definition"
+        ))
+        .finish(here("MergeWithExistingConstraint"))?;
+
+    /*
+     * In case of partitions, an inherited constraint must be inherited only once
+     * since it cannot have multiple parents and it is never considered local.
+     */
+    if relispartition {
+        con.coninhcount = 1;
+        con.conislocal = false;
+    } else if is_local {
+        con.conislocal = true;
+    } else {
+        let mut newcount = con.coninhcount;
+        if pg_add_s16_overflow(con.coninhcount, 1, &mut newcount) {
+            scan.end()?;
+            conDesc.close(RowExclusiveLock)?;
+            return Err(
+                PgError::new(ERROR, "too many inheritance parents".to_string())
+                    .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+            );
+        }
+        con.coninhcount = newcount;
+    }
+
+    if is_no_inherit {
+        debug_assert!(is_local);
+        con.connoinherit = true;
+    }
+
+    /*
+     * If the child constraint is required to be enforced while the parent
+     * constraint is not, this should be allowed by marking the child constraint
+     * as enforced. In the reverse case, an error would have already been thrown
+     * before reaching this point.
+     */
+    if is_enforced && !con.conenforced {
+        debug_assert!(is_local);
+        con.conenforced = true;
+        con.convalidated = true;
+    }
+
+    /* CatalogTupleUpdate(conDesc, &tup->t_self, tup); */
+    let fields = ConstraintFieldUpdate {
+        conname: con.conname,
+        connamespace: con.connamespace,
+        conislocal: con.conislocal,
+        coninhcount: con.coninhcount,
+        conparentid: con.conparentid,
+        convalidated: con.convalidated,
+        connoinherit: con.connoinherit,
+        conenforced: con.conenforced,
+    };
+    indexing_seams::catalog_tuple_update_pg_constraint::call(&conDesc, tid, &fields)?;
+
+    scan.end()?;
+    conDesc.close(RowExclusiveLock)?;
+
+    Ok(found)
 }
 
 /* ===========================================================================
@@ -1357,6 +1617,8 @@ pub fn RenameConstraintById(mcx: Mcx<'_>, conId: Oid, newname: &str) -> PgResult
         coninhcount: conform.coninhcount,
         conparentid: conform.conparentid,
         convalidated: conform.convalidated,
+        connoinherit: conform.connoinherit,
+        conenforced: conform.conenforced,
     };
     indexing_seams::catalog_tuple_update_pg_constraint::call(&conDesc, con.tid, &fields)?;
 
@@ -1412,6 +1674,8 @@ pub fn AlterConstraintNamespaces(
                 coninhcount: conform.coninhcount,
                 conparentid: conform.conparentid,
                 convalidated: conform.convalidated,
+                connoinherit: conform.connoinherit,
+                conenforced: conform.conenforced,
             };
             indexing_seams::catalog_tuple_update_pg_constraint::call(&conRel, row.tid, &fields)?;
 
@@ -1489,6 +1753,8 @@ pub fn ConstraintSetParentConstraint(
             coninhcount: constrForm.coninhcount,
             conparentid: constrForm.conparentid,
             convalidated: constrForm.convalidated,
+            connoinherit: constrForm.connoinherit,
+            conenforced: constrForm.conenforced,
         };
         indexing_seams::catalog_tuple_update_pg_constraint::call(&constrRel, tid, &fields)?;
 
@@ -1526,6 +1792,8 @@ pub fn ConstraintSetParentConstraint(
             coninhcount: constrForm.coninhcount,
             conparentid: constrForm.conparentid,
             convalidated: constrForm.convalidated,
+            connoinherit: constrForm.connoinherit,
+            conenforced: constrForm.conenforced,
         };
         indexing_seams::catalog_tuple_update_pg_constraint::call(&constrRel, tid, &fields)?;
 
@@ -2464,6 +2732,8 @@ pub fn set_constraint_validated(_mcx: Mcx<'_>, con_oid: Oid) -> PgResult<()> {
         coninhcount: conform.coninhcount,
         conparentid: conform.conparentid,
         convalidated: true,
+        connoinherit: conform.connoinherit,
+        conenforced: conform.conenforced,
     };
     indexing_seams::catalog_tuple_update_pg_constraint::call(&conrel, con.tid, &fields)?;
 

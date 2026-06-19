@@ -20,6 +20,9 @@ backend-catalog-pg-constraint-seams = { path = "../backend-catalog-pg-constraint
 backend-catalog-pg-depend-seams = { path = "../backend-catalog-pg-depend-seams" }
 backend-commands-indexcmds-seams = { path = "../backend-commands-indexcmds-seams" }
 backend-nodes-core = { path = "../backend-nodes-core" }
+backend-nodes-read-seams = { path = "../backend-nodes-read-seams" }
+backend-nodes-equalfuncs-seams = { path = "../backend-nodes-equalfuncs-seams" }
+backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-adt-domains-seams = { path = "../backend-utils-adt-domains-seams" }
 backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }

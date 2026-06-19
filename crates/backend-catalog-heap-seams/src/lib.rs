@@ -186,27 +186,12 @@ seam_core::seam!(
     pub fn set_relation_num_checks(relid: Oid, numchecks: i32) -> PgResult<()>
 );
 
-seam_core::seam!(
-    /// `MergeWithExistingConstraint(rel, ccname, expr, ...)` (heap.c): the
-    /// `pg_constraint` lookup + conflict checks + `conislocal` / `coninhcount`
-    /// / `connoinherit` / `conenforced` field-update path. Blocked: needs a
-    /// `conbin` reader (`fastgetattr` + `stringToNode` + `equal`) and an
-    /// extended `pg_constraint` field-update carrier the typed catalog-write
-    /// model has not assembled. `expr` is passed pre-flattened as its
-    /// `nodeToString` image (`ccbin`) so the seam can compare against the
-    /// stored `conbin`. Returns `true` if merged (duplicate). `Err` carries the
-    /// conflict / mutation `ereport(ERROR)`s.
-    pub fn merge_with_existing_constraint(
-        relid: Oid,
-        ccname: &str,
-        ccbin: &str,
-        allow_merge: bool,
-        is_local: bool,
-        is_enforced: bool,
-        is_initially_valid: bool,
-        is_no_inherit: bool,
-    ) -> PgResult<bool>
-);
+// `MergeWithExistingConstraint`'s `pg_constraint` lookup + conflict checks +
+// `conislocal`/`coninhcount`/`connoinherit`/`conenforced`/`convalidated`
+// field-update path is now REAL in the pg_constraint owner crate
+// (`backend_catalog_pg_constraint::MergeWithExistingConstraint`), which
+// `backend-catalog-heap` calls directly, so the former
+// `merge_with_existing_constraint` mirror-and-panic seam is gone.
 
 seam_core::seam!(
     /// `RemoveAttributeById`'s pg_attribute mutation (heap.c): `relation_open(

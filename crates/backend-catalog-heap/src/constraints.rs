@@ -687,13 +687,14 @@ pub fn StoreConstraints<'mcx>(
 }
 
 /* ================================================================
- *  MergeWithExistingConstraint (mirror-and-panic)
+ *  MergeWithExistingConstraint
  * ================================================================ */
 
 /// `MergeWithExistingConstraint` (heap.c) — check for a pre-existing CHECK
-/// constraint conflicting with a proposed new one. Needs a `conbin` reader +
-/// an extended `pg_constraint` field-update carrier the typed catalog-write
-/// model has not assembled; driven through a mirror-and-panic seam.
+/// constraint conflicting with a proposed new one. The full body (pg_constraint
+/// scan + `conbin` reader + `equal(expr, stringToNode(conbin))` comparison +
+/// `conislocal`/`coninhcount`/`connoinherit`/`conenforced`/`convalidated`
+/// field-update) lives in the pg_constraint owner crate; we delegate to it.
 fn MergeWithExistingConstraint<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
@@ -705,13 +706,13 @@ fn MergeWithExistingConstraint<'mcx>(
     is_initially_valid: bool,
     is_no_inherit: bool,
 ) -> PgResult<bool> {
-    let ccbin = backend_nodes_outfuncs::nodeToString(mcx, expr)?
-        .as_str()
-        .to_string();
-    backend_catalog_heap_seams::merge_with_existing_constraint::call(
+    backend_catalog_pg_constraint::MergeWithExistingConstraint(
+        mcx,
         rel.rd_id,
+        &rel.rd_rel.relname.as_str().to_string(),
+        rel.rd_rel.relispartition,
         ccname,
-        &ccbin,
+        expr,
         allow_merge,
         is_local,
         is_enforced,
