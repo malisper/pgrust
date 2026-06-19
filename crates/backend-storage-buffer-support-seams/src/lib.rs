@@ -95,3 +95,28 @@ seam_core::seam!(
         buffer: types_core::primitive::Buffer,
     ) -> types_error::PgResult<mcx::PgVec<'mcx, u8>>
 );
+
+seam_core::seam!(
+    /// `StartLocalBufferIO(GetLocalBufferDescriptor(-buffer - 1), for_input,
+    /// nowait)` (localbuf.c) — the `BufferIsLocal` arm of `StartBufferIO` that
+    /// `ReadBuffer_common` / `ZeroAndLockBuffer` reach when reading or zeroing a
+    /// temp-relation block. Returns `true` iff this backend must perform the I/O
+    /// (the block is not already valid / not already clean).
+    pub fn start_local_buffer_io(
+        buffer: types_core::primitive::Buffer,
+        for_input: bool,
+        nowait: bool,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `TerminateLocalBufferIO(GetLocalBufferDescriptor(-buffer - 1), clear_dirty,
+    /// set_flag_bits, release_aio)` (localbuf.c) — the `BufferIsLocal` arm of
+    /// `TerminateBufferIO` that finishes a temp-relation read by ORing in
+    /// `BM_VALID` (with synchronous I/O `release_aio` is never set).
+    pub fn terminate_local_buffer_io(
+        buffer: types_core::primitive::Buffer,
+        clear_dirty: bool,
+        set_flag_bits: u32,
+    ) -> types_error::PgResult<()>
+);

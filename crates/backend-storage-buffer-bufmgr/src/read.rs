@@ -626,12 +626,24 @@ impl BufferManager {
 
         let (buffer, found) =
             self.PinBufferForBlock(rlocator, persistence, fork_num, block_num, has_strategy)?;
-        let buf_id = (buffer - 1) as usize;
 
         if found {
             // Already valid and pinned; nothing to read.
             return Ok(buffer);
         }
+
+        // Temp/local relations: the buffer carries a NEGATIVE handle into the
+        // backend-local pool, not a shared `buffer - 1` slot. C threads
+        // `BufferIsLocal` through `StartReadBuffers`/`WaitReadBuffers`
+        // (bufmgr.c:1310/1536/1553), dispatching to `StartLocalBufferIO` /
+        // `TerminateLocalBufferIO` and reading into the local page. Mirror that
+        // here as the synchronous single-block read; the shared `buf_id =
+        // buffer - 1` index would underflow for a local handle.
+        if buffer_is_local(buffer) {
+            return self.read_local_buffer_miss(rlocator, fork_num, block_num, mode, buffer);
+        }
+
+        let buf_id = (buffer - 1) as usize;
 
         // Miss: we hold a fresh victim. StartBufferIO, then read (synchronously).
         if !self.start_buffer_io(buf_id, false, None)? {
@@ -692,6 +704,83 @@ impl BufferManager {
         // this backend performed the synchronous read, bufmgr.c:1089).
         self.terminate_buffer_io(buf_id, false, BM_VALID, true, false)?;
         let _ = flags;
+        Ok(buffer)
+    }
+
+    /// The `BufferIsLocal` arm of the synchronous single-block read miss
+    /// (bufmgr.c's `StartReadBuffers`/`WaitReadBuffers` local path): a temp
+    /// relation's victim local buffer is filled by reading the block off disk
+    /// directly into the backend-local page. `StartLocalBufferIO` / the smgr
+    /// readv / `PageIsVerified` / `TerminateLocalBufferIO` mirror the shared
+    /// path, but every step routes through the local-buffer subsystem (the
+    /// buffer handle is a NEGATIVE local index, never a shared `buffer - 1`
+    /// slot). The buffer is already pinned by `PinBufferForBlock`.
+    fn read_local_buffer_miss(
+        &self,
+        rlocator: RelFileLocatorBackend,
+        fork_num: ForkNumber,
+        block_num: BlockNumber,
+        mode: ReadBufferMode,
+        buffer: Buffer,
+    ) -> PgResult<Buffer> {
+        use backend_storage_buffer_support_seams as lb;
+
+        // StartLocalBufferIO(bufHdr, true, false): false iff some path already
+        // made the block valid (it cannot under synchronous single-process temp
+        // I/O, but mirror C's early-out faithfully).
+        if !lb::start_local_buffer_io::call(buffer, true, false)? {
+            return Ok(buffer);
+        }
+
+        // Read the single block into the backend-local page bytes (the inline
+        // IOMETHOD_SYNC transfer; temp relations are never WAL-logged).
+        lb::local_buffer_with_page::call(buffer, &mut |dst: &mut [u8]| {
+            let mut bufs: [&mut [u8]; 1] = [dst];
+            smgr::smgrreadv(rlocator, fork_num, block_num, &mut bufs, 1)
+        })?;
+
+        // Verify the just-read page (the synchronous form of the RBM
+        // PageIsVerified gate). Local buffers are never shared, so no content
+        // lock is involved.
+        let mut verified = (true, false);
+        lb::local_buffer_with_page::call(buffer, &mut |bytes: &mut [u8]| {
+            let p = page::PageRef::new(bytes)?;
+            verified = page::PageIsVerified(&p, block_num, types_storage::bufpage::PIV_LOG_LOG)?;
+            Ok(())
+        })?;
+        if !verified.0 {
+            let path = relpath_str(rlocator, fork_num);
+            if mode == ReadBufferMode::ZeroOnError {
+                backend_utils_error::emit_error_report_for(
+                    &backend_utils_error::ereport(types_error::error::WARNING)
+                        .errcode(types_error::error::ERRCODE_DATA_CORRUPTED)
+                        .errmsg_internal(format!(
+                            "invalid page in block {block_num} of relation \"{path}\"; zeroing out page"
+                        ))
+                        .into_error(),
+                );
+                lb::local_buffer_with_page::call(buffer, &mut |bytes: &mut [u8]| {
+                    bytes.fill(0);
+                    Ok(())
+                })?;
+            } else {
+                // Fail the I/O (set BM_IO_ERROR) so a later WaitIO cannot block,
+                // then surface the corruption.
+                lb::terminate_local_buffer_io::call(
+                    buffer,
+                    false,
+                    types_storage::buf::BM_IO_ERROR,
+                )?;
+                return Err(PgError::new(
+                    types_error::error::ERROR,
+                    format!("invalid page in block {block_num} of relation \"{path}\""),
+                )
+                .with_sqlstate(types_error::error::ERRCODE_DATA_CORRUPTED));
+            }
+        }
+
+        // Mark valid + terminate the local I/O (BM_VALID, no dirty-clear).
+        lb::terminate_local_buffer_io::call(buffer, false, BM_VALID)?;
         Ok(buffer)
     }
 

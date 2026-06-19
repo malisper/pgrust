@@ -235,6 +235,25 @@ fn local_buffer_page_owned<'mcx>(
     local_mgr_get_or_create().with_block(buffer, |bytes| mcx::slice_in(mcx, bytes))
 }
 
+/// `StartLocalBufferIO(GetLocalBufferDescriptor(-buffer - 1), ...)` (localbuf.c).
+fn start_local_buffer_io(
+    buffer: types_core::primitive::Buffer,
+    for_input: bool,
+    nowait: bool,
+) -> PgResult<bool> {
+    local_mgr_get_or_create().StartLocalBufferIO(-buffer - 1, for_input, nowait)
+}
+
+/// `TerminateLocalBufferIO(GetLocalBufferDescriptor(-buffer - 1), ...)`
+/// (localbuf.c). Synchronous I/O never releases an AIO pin (`release_aio = false`).
+fn terminate_local_buffer_io(
+    buffer: types_core::primitive::Buffer,
+    clear_dirty: bool,
+    set_flag_bits: u32,
+) -> PgResult<()> {
+    local_mgr_get_or_create().TerminateLocalBufferIO(-buffer - 1, clear_dirty, set_flag_bits, false)
+}
+
 /// `LocalBufferAlloc(smgr, forkNum, blockNum, foundPtr)` (localbuf.c).
 fn local_buffer_alloc(
     smgr_reln: types_storage::RelFileLocatorBackend,
@@ -349,6 +368,8 @@ pub fn init_seams() {
     backend_storage_buffer_support_seams::local_buffer_get_lsn::set(local_buffer_get_lsn);
     backend_storage_buffer_support_seams::local_buffer_with_page::set(local_buffer_with_page);
     backend_storage_buffer_support_seams::local_buffer_page_owned::set(local_buffer_page_owned);
+    backend_storage_buffer_support_seams::start_local_buffer_io::set(start_local_buffer_io);
+    backend_storage_buffer_support_seams::terminate_local_buffer_io::set(terminate_local_buffer_io);
 }
 
 #[cfg(test)]
