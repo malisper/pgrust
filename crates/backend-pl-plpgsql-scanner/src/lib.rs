@@ -520,7 +520,7 @@ impl<'mcx> PlpgsqlScanner<'mcx> {
                     // not A.B, so just process A
                     self.push_back_token(tok3, &aux3)?;
                     self.push_back_token(tok2, &aux2)?;
-                    let yytxt = self.scanbuf_token_at(aux1.lloc);
+                    let yytxt = self.scanbuf_token_span(aux1.lloc, aux1.lloc + aux1.leng);
                     let res = comp_seam::plpgsql_parse_word::call(
                         aux1.lval.str.as_deref().unwrap_or(""),
                         &yytxt,
@@ -549,7 +549,7 @@ impl<'mcx> PlpgsqlScanner<'mcx> {
                     || (tok2 == ('=' as i32)
                         || tok2 == COLON_EQUALS
                         || tok2 == ('[' as i32));
-                let yytxt = self.scanbuf_token_at(aux1.lloc);
+                let yytxt = self.scanbuf_token_span(aux1.lloc, aux1.lloc + aux1.leng);
                 let res = comp_seam::plpgsql_parse_word::call(
                     aux1.lval.str.as_deref().unwrap_or(""),
                     &yytxt,
@@ -641,6 +641,7 @@ impl<'mcx> PlpgsqlScanner<'mcx> {
             Ok(token)
         } else {
             let core = scan_seam::core_yylex::call(self.mcx, self.scanbuf, self.pos)?;
+            let token_end = core.end_pos;
             self.pos = core.end_pos;
             let mut token = core.token;
             auxdata.lloc = core.location;
@@ -655,8 +656,15 @@ impl<'mcx> PlpgsqlScanner<'mcx> {
                 Some(String::from_utf8_lossy(&core.str_value).into_owned())
             };
 
-            // remember the length of yytext before it gets changed
-            let yytext = self.scanbuf_token_at(auxdata.lloc);
+            // remember the length of yytext before it gets changed.
+            //
+            // In C, flex zaps a NUL at the end of the matched token, so the
+            // scanbuf-anchored `yytext` reads exactly the token via `strlen`.
+            // The stateless core lexer here never mutates the scan buffer, so
+            // the token text must be bounded by the lexer-reported token span
+            // `[location, end_pos)` rather than scanned to the next NUL (which
+            // would over-read to the end of the whole input).
+            let yytext = self.scanbuf_token_span(auxdata.lloc, token_end);
             auxdata.leng = yytext.len() as i32;
 
             // Check for << >> and #, which the core considers operators
@@ -905,24 +913,20 @@ impl<'mcx> PlpgsqlScanner<'mcx> {
         // release storage: dropping `self` releases the owned scanner state.
     }
 
-    /// `yyextra->core_yy_extra.scanbuf + lloc` as a NUL-terminated C string read:
-    /// the token text starting at byte offset `lloc`, up to (not including) the
-    /// next NUL or end of buffer.
-    ///
-    /// The core lexer NUL-truncates the just-scanned token in C's in-place
-    /// buffer; in the stateless model the buffer is unmodified, so we recover the
-    /// token text by reading from `lloc` up to the first NUL. When there is no
-    /// embedded NUL (the common case), this is the buffer tail from `lloc` —
-    /// matching C's `strlen(scanbuf + lloc)` for the just-read token, whose
-    /// trailing character flex restored.
-    fn scanbuf_token_at(&self, lloc: i32) -> String {
-        let off = lloc.max(0) as usize;
-        if off >= self.scanbuf.len() {
+    /// The exact text of the token the core lexer just matched: the scan-buffer
+    /// bytes in `[start, end)` (the lexer-reported token start and resume
+    /// position). This mirrors flex's NUL-zapped `yytext` without mutating the
+    /// (stateless) scan buffer. A NUL in the span (defensive; tokens never span
+    /// one) still terminates the text.
+    fn scanbuf_token_span(&self, start: i32, end: i32) -> String {
+        let lo = start.max(0) as usize;
+        let hi = (end.max(0) as usize).min(self.scanbuf.len());
+        if lo >= hi {
             return String::new();
         }
-        let tail = &self.scanbuf[off..];
-        let end = tail.iter().position(|&b| b == 0).unwrap_or(tail.len());
-        String::from_utf8_lossy(&tail[..end]).into_owned()
+        let slice = &self.scanbuf[lo..hi];
+        let n = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
+        String::from_utf8_lossy(&slice[..n]).into_owned()
     }
 }
 
