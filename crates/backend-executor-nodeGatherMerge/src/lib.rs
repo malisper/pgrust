@@ -137,10 +137,7 @@ pub fn ExecInitGatherMerge<'mcx>(
 ) -> PgResult<PgBox<'mcx, GatherMergeStateData<'mcx>>> {
     let mcx = estate.es_query_cxt;
 
-    let node: &'mcx GatherMerge<'mcx> = match plan_node {
-        types_nodes::nodes::Node::GatherMerge(g) => g,
-        other => panic!("castNode(GatherMerge, node) failed: {other:?}"),
-    };
+    let node: &'mcx GatherMerge<'mcx> = plan_node.expect_gathermerge();
 
     // Gather merge node doesn't have innerPlan node.
     //   Assert(innerPlan(node) == NULL);
@@ -1350,15 +1347,12 @@ fn sift_down<'mcx>(
 
 /// `castNode(GatherMerge, gm_state->ps.plan)` — the node's concrete plan.
 fn gather_merge_plan<'a, 'mcx>(gm_state: &'a GatherMergeStateData<'mcx>) -> &'a GatherMerge<'mcx> {
-    match gm_state
+    gm_state
         .ps
         .plan
         .as_deref()
         .expect("GatherMergeState has no plan")
-    {
-        types_nodes::nodes::Node::GatherMerge(g) => g,
-        other => panic!("castNode(GatherMerge, gm_state->ps.plan) failed: {other:?}"),
-    }
+        .expect_gathermerge()
 }
 
 /// `gm->num_workers`.
