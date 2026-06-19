@@ -473,10 +473,17 @@ pub fn heapam_index_build_range_scan<'mcx>(
         }
     }
 
-    // ExecDropSingleTupleTableSlot(slot): the slot lives in estate's tuple
-    // table and is released with the executor state below (the standalone slot
-    // C drops separately rides the pool here).
-    let _ = slot;
+    // ExecDropSingleTupleTableSlot(slot) (heapam_handler.c). C's
+    // table_slot_create made a STANDALONE TTSOpsBufferHeapTuple slot, and the
+    // last ExecStoreBufferHeapTuple in the loop left a *buffer pin* on the final
+    // heap page (taken via IncrBufferRefCount, living in the bufmgr private
+    // refcount + the current ResourceOwner — NOT in the owned SlotData value).
+    // ExecDropSingleTupleTableSlot calls ExecClearTuple first, whose
+    // tts_buffer_heap_clear runs ReleaseBuffer(bslot->buffer); dropping the slot
+    // (or freeing the estate) alone does NOT release that pin. Skipping the clear
+    // leaked one buffer pin per CREATE INDEX / REINDEX heap scan ("resource was
+    // not closed" at statement end). Clear the slot to release the pin, matching C.
+    slot_seam::exec_clear_tuple_by_id::call(&mut estate, slot)?;
 
     // FreeExecutorState(estate).
     expr_seam::free_executor_state::call(estate)?;
