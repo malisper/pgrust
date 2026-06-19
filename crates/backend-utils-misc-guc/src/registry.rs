@@ -1462,12 +1462,23 @@ fn push_old_value(record: &mut GucVariable, action: GucAction) {
 fn restore_stacked_value(
     record: &mut GucVariable,
     newvalue: &config_var_value,
+    deferred_hooks: &mut Vec<DeferredAssignHook>,
 ) -> bool {
     let newval = newvalue.val.as_ref();
     // The restored extra travels with the stacked value (C's
     // `newvalue.extra`). `as_deref()` peels the `Arc` to the `&GucHookExtra` the
     // assign hook expects; `newextra` (the owned `Option<SharedExtra>`) is stored
     // back into `conf->gen.extra` after the hook fires (guc.c:2416 et al.).
+    //
+    // The variable's `assign_hook` is NOT fired inline: a hook may recursively
+    // re-enter `SetConfigOption` (e.g. `assign_role` -> `SetCurrentRoleId` ->
+    // `SetOuterUserId` -> `SetConfigOption("is_superuser")`), which re-locks the
+    // process-global GUC store and would deadlock while `AtEOXact_GUC` still
+    // holds the `with_store_mut` borrow. Mirroring [`apply_value`], the hook is
+    // captured into `deferred_hooks` and fired by the caller AFTER the store
+    // borrow is released. The owner-storage `*conf->variable = newval` write and
+    // the `conf->gen.extra` update stay inline (neither re-enters the store), so
+    // C's ordering (value in the record before the hook fires) is preserved.
     let newextra = newvalue.extra.clone();
     let newextra_ref: Option<&GucHookExtra> = newvalue.extra.as_deref();
     let mut changed = false;
@@ -1475,7 +1486,10 @@ fn restore_stacked_value(
         (GucVariable::Bool(c), Some(config_var_val::Boolval(nv))) => {
             if current_bool(c) != *nv || extra_differs(c.gen.extra.as_deref(), newextra_ref) {
                 if let Some(slot) = c.assign_hook {
-                    (slot.get())(*nv, newextra_ref);
+                    let f = slot.get();
+                    let v = *nv;
+                    let extra = newextra.clone();
+                    deferred_hooks.push(Box::new(move || f(v, extra.as_deref())));
                 }
                 c.value = Some(*nv);
                 if c.variable.installed() {
@@ -1488,7 +1502,10 @@ fn restore_stacked_value(
         (GucVariable::Int(c), Some(config_var_val::Intval(nv))) => {
             if current_int(c) != *nv || extra_differs(c.gen.extra.as_deref(), newextra_ref) {
                 if let Some(slot) = c.assign_hook {
-                    (slot.get())(*nv, newextra_ref);
+                    let f = slot.get();
+                    let v = *nv;
+                    let extra = newextra.clone();
+                    deferred_hooks.push(Box::new(move || f(v, extra.as_deref())));
                 }
                 c.value = Some(*nv);
                 if c.variable.installed() {
@@ -1501,7 +1518,10 @@ fn restore_stacked_value(
         (GucVariable::Real(c), Some(config_var_val::Realval(nv))) => {
             if current_real(c) != *nv || extra_differs(c.gen.extra.as_deref(), newextra_ref) {
                 if let Some(slot) = c.assign_hook {
-                    (slot.get())(*nv, newextra_ref);
+                    let f = slot.get();
+                    let v = *nv;
+                    let extra = newextra.clone();
+                    deferred_hooks.push(Box::new(move || f(v, extra.as_deref())));
                 }
                 c.value = Some(*nv);
                 if c.variable.installed() {
@@ -1519,7 +1539,10 @@ fn restore_stacked_value(
             };
             if differs || extra_differs(c.gen.extra.as_deref(), newextra_ref) {
                 if let Some(slot) = c.assign_hook {
-                    (slot.get())(nv.as_deref(), newextra_ref);
+                    let f = slot.get();
+                    let s = nv.clone();
+                    let extra = newextra.clone();
+                    deferred_hooks.push(Box::new(move || f(s.as_deref(), extra.as_deref())));
                 }
                 c.value = Some(nv.clone());
                 if c.variable.installed() {
@@ -1532,7 +1555,10 @@ fn restore_stacked_value(
         (GucVariable::Enum(c), Some(config_var_val::Enumval(nv))) => {
             if current_enum(c) != *nv || extra_differs(c.gen.extra.as_deref(), newextra_ref) {
                 if let Some(slot) = c.assign_hook {
-                    (slot.get())(*nv, newextra_ref);
+                    let f = slot.get();
+                    let v = *nv;
+                    let extra = newextra.clone();
+                    deferred_hooks.push(Box::new(move || f(v, extra.as_deref())));
                 }
                 c.value = Some(*nv);
                 if c.variable.installed() {
@@ -1559,16 +1585,26 @@ fn extra_differs(cur: Option<&GucHookExtra>, new: Option<&GucHookExtra>) -> bool
 /// walk. The caller ([`crate::at_eoxact_guc`]) owns the `GUCNestLevel` update.
 /// During abort, discard all GUC settings applied at nesting levels >=
 /// `nest_level`; on commit, fold/keep per the stack-state rules.
-pub fn at_eoxact_guc(reg: &mut GucRegistry, is_commit: bool, nest_level: i32) {
+pub fn at_eoxact_guc(
+    reg: &mut GucRegistry,
+    is_commit: bool,
+    nest_level: i32,
+    deferred_hooks: &mut Vec<DeferredAssignHook>,
+) {
     debug_assert!(nest_level > 0);
     for record in reg.iter_mut() {
-        pop_var_stack(record, is_commit, nest_level);
+        pop_var_stack(record, is_commit, nest_level, deferred_hooks);
     }
 }
 
 /// Process and pop one variable's stack entries within the nest level
 /// (the `while ((stack = gconf->stack) ...)` loop body of `AtEOXact_GUC`).
-fn pop_var_stack(record: &mut GucVariable, is_commit: bool, nest_level: i32) {
+fn pop_var_stack(
+    record: &mut GucVariable,
+    is_commit: bool,
+    nest_level: i32,
+    deferred_hooks: &mut Vec<DeferredAssignHook>,
+) {
     loop {
         // Peek the top stack entry.
         let top_level = match record.gen().stack.as_ref() {
@@ -1667,7 +1703,7 @@ fn pop_var_stack(record: &mut GucVariable, is_commit: bool, nest_level: i32) {
                 )
             };
 
-            changed = restore_stacked_value(record, &newvalue);
+            changed = restore_stacked_value(record, &newvalue, deferred_hooks);
 
             // Release stacked values (already taken above / discard the rest).
             discard_stack_value(&mut stack.prior);

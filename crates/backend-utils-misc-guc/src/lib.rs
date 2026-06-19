@@ -278,9 +278,20 @@ pub fn at_start_guc() {
 /// nesting level to `nest_level - 1`. Owned here (guc_stack.c is part of the GUC
 /// unit); the per-variable rollback walk lives in [`registry`].
 pub fn at_eoxact_guc(is_commit: bool, nest_level: i32) {
+    // Collect each restored variable's assign hook to fire AFTER the store
+    // borrow is released. A hook (e.g. `role`'s `assign_role`) may recursively
+    // re-enter `SetConfigOption` and re-lock the process-global GUC store, which
+    // would deadlock if fired while the `with_store_mut` guard is held. This
+    // mirrors `set_config_option_global`'s deferral.
+    let mut deferred_hooks: Vec<registry::DeferredAssignHook> = Vec::new();
     live::with_store_mut(|reg| {
-        registry::at_eoxact_guc(reg, is_commit, nest_level);
+        registry::at_eoxact_guc(reg, is_commit, nest_level, &mut deferred_hooks);
     });
+    // Store borrow is now released: fire the assign hook(s), which may
+    // recursively re-enter the GUC store, in restore order.
+    for hook in deferred_hooks {
+        hook();
+    }
     // GUCNestLevel = nestLevel - 1 (guc.c:2536).
     set_guc_nest_level(nest_level - 1);
 }
