@@ -19,7 +19,12 @@ seam_core::seam!(
     /// well-formed JSON, returning `JSON_SUCCESS` on success or the first
     /// `JsonParseErrorType` encountered. Engine behind `json_in` / `json_recv`
     /// / `json_validate` (without unique-key checking).
-    pub fn parse_validate(json: &[u8]) -> JsonParseErrorType
+    ///
+    /// Returns `Err` only for the recursive descent's `check_stack_depth()`
+    /// `ereport(ERROR, "stack depth limit exceeded")`, which C raises
+    /// immediately; a malformed-but-shallow input is reported through the
+    /// returned `JsonParseErrorType` (rendered by `errsave_error`), not `Err`.
+    pub fn parse_validate(json: &[u8]) -> PgResult<JsonParseErrorType>
 );
 
 seam_core::seam!(
@@ -27,7 +32,10 @@ seam_core::seam!(
     /// validate `json` *and* report whether every object's keys are unique.
     /// Returns `(result, unique)`; `unique` is meaningful only when
     /// `result == JSON_SUCCESS`. Drives `json_validate(check_unique_keys)`.
-    pub fn parse_validate_unique(json: &[u8]) -> (JsonParseErrorType, bool)
+    ///
+    /// `Err` only for the `check_stack_depth()` hard error (see
+    /// [`parse_validate`]); shallow parse failures ride the returned tuple.
+    pub fn parse_validate_unique(json: &[u8]) -> PgResult<(JsonParseErrorType, bool)>
 );
 
 seam_core::seam!(

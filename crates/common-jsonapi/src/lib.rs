@@ -1621,16 +1621,28 @@ impl<'m> SaxSink for UniqueSink<'m> {
 // ===========================================================================
 
 /// `parse_validate(json)` — validate `json` with the null semantic action.
-fn run_parse_validate(json: &[u8]) -> TjErr {
+///
+/// C's `check_stack_depth()` inside the recursive `parse_object`/`parse_array`
+/// `ereport(ERROR, "stack depth limit exceeded")`s and unwinds at once. The
+/// recursive descent here cannot return a `PgError` through the
+/// `JsonParseErrorType` channel, so the guard stashes the real error and signals
+/// `NestingTooDeep`; surface that stashed error as `Err` here (otherwise it
+/// would be mis-rendered as the incremental parser's `JSON_NESTING_TOO_DEEP`
+/// "max depth 6400" detail), mirroring C's immediate raise.
+fn run_parse_validate(json: &[u8]) -> PgResult<TjErr> {
     let encoding = backend_utils_mb_mbutils::GetDatabaseEncoding();
     let mut lex = make_json_lex_context_cstring_len(json, encoding, false);
     let mut sink = NullSink;
-    tj_err(pg_parse_json(&mut lex, &mut sink))
+    let result = pg_parse_json(&mut lex, &mut sink);
+    if let Some(e) = take_stack_error() {
+        return Err(e);
+    }
+    Ok(tj_err(result))
 }
 
 /// `parse_validate_unique(json)` — validate `json` and report key uniqueness
 /// (json.c `json_validate(check_unique_keys=true)`).
-fn run_parse_validate_unique(json: &[u8]) -> (TjErr, bool) {
+fn run_parse_validate_unique(json: &[u8]) -> PgResult<(TjErr, bool)> {
     let encoding = backend_utils_mb_mbutils::GetDatabaseEncoding();
     // need_escapes=true to de-escape keys for the uniqueness comparison.
     let mut lex = make_json_lex_context_cstring_len(json, encoding, true);
@@ -1639,7 +1651,12 @@ fn run_parse_validate_unique(json: &[u8]) -> (TjErr, bool) {
         let mut sink = UniqueSink { state: &mut state };
         pg_parse_json(&mut lex, &mut sink)
     };
-    (tj_err(result), state.unique)
+    // Surface the recursive descent's stack-depth hard error (see
+    // `run_parse_validate`) ahead of any shallow parse result.
+    if let Some(e) = take_stack_error() {
+        return Err(e);
+    }
+    Ok((tj_err(result), state.unique))
 }
 
 /// `lex_first_token(json)` — lex the first token and report its type

@@ -317,17 +317,17 @@ fn install_jsonapi() {
     JSONAPI_INIT.call_once(|| {
         // Trivial validator: nonempty input is valid; "{}" is unique.
         common_jsonapi_seams::parse_validate::set(|json: &[u8]| {
-            if json.is_empty() {
+            Ok(if json.is_empty() {
                 PErr::JSON_INVALID_TOKEN
             } else {
                 PErr::JSON_SUCCESS
-            }
+            })
         });
         common_jsonapi_seams::parse_validate_unique::set(|json: &[u8]| {
-            (
+            Ok((
                 if json.is_empty() { PErr::JSON_INVALID_TOKEN } else { PErr::JSON_SUCCESS },
                 true,
-            )
+            ))
         });
         common_jsonapi_seams::lex_first_token::set(|json: &[u8]| {
             let t = match json.first() {

@@ -139,7 +139,7 @@ where
 /// as text, so on success the validated bytes are returned unchanged. A
 /// swallowed soft error surfaces as `Ok(None)`; a hard error as `Err`.
 pub fn json_in<'mcx>(mcx: Mcx<'mcx>, json: &[u8]) -> PgResult<Option<PgVec<'mcx, u8>>> {
-    let result = jsonapi::parse_validate::call(json);
+    let result = jsonapi::parse_validate::call(json)?;
     if result != JsonParseErrorType::JSON_SUCCESS {
         jsonapi::errsave_error::call(result, json)?;
         return Ok(None);
@@ -163,7 +163,7 @@ pub fn json_send<'mcx>(mcx: Mcx<'mcx>, json: &[u8]) -> PgResult<PgVec<'mcx, u8>>
 /// C: `json_recv(PG_FUNCTION_ARGS)` (json.c:151) — read the message text and
 /// validate it; the stored representation is the same text.
 pub fn json_recv<'mcx>(mcx: Mcx<'mcx>, str: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
-    let result = jsonapi::parse_validate::call(str);
+    let result = jsonapi::parse_validate::call(str)?;
     if result != JsonParseErrorType::JSON_SUCCESS {
         jsonapi::errsave_error::call(result, str)?;
         // pg_parse_json_or_ereport never returns on failure.
@@ -1526,9 +1526,9 @@ pub fn escape_json_text(buf: &mut PgVec<'_, u8>, txt: &[u8]) -> PgResult<()> {
 /// (json.c:1811).
 pub fn json_validate(json: &[u8], check_unique_keys: bool, throw_error: bool) -> PgResult<bool> {
     let (result, unique) = if check_unique_keys {
-        jsonapi::parse_validate_unique::call(json)
+        jsonapi::parse_validate_unique::call(json)?
     } else {
-        (jsonapi::parse_validate::call(json), true)
+        (jsonapi::parse_validate::call(json)?, true)
     };
 
     if result != JsonParseErrorType::JSON_SUCCESS {
