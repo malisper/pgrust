@@ -717,7 +717,6 @@ pub fn DefineIndex<'mcx>(
     at_eoxact_guc(false, root_save_nestlevel);
     root_save_nestlevel = NewGUCNestLevel();
     restrict_search_path::call()?;
-    let _ = root_save_nestlevel;
 
     // Add any requested comment.
     if let Some(comment) = stmt.idxcomment.as_ref() {
@@ -730,7 +729,7 @@ pub fn DefineIndex<'mcx>(
             return Err(define_index_partition_recursion());
         }
         // No partitions / ONLY: indexes on partitioned tables aren't built.
-        at_eoxact_guc(false, NewGUCNestLevel());
+        at_eoxact_guc(false, root_save_nestlevel);
         SetUserIdAndSecContext(root_save_userid, root_save_sec_context);
         owner_table_close(rel, types_storage::lock::NoLock)?;
         if !OidIsValid(parent_index_id) {
@@ -741,6 +740,7 @@ pub fn DefineIndex<'mcx>(
         return Ok(address);
     }
 
+    at_eoxact_guc(false, root_save_nestlevel);
     SetUserIdAndSecContext(root_save_userid, root_save_sec_context);
 
     if !concurrent {
