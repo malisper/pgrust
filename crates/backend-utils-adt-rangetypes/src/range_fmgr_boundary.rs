@@ -73,6 +73,78 @@ fn argisnull(fcinfo: &FunctionCallInfoBaseData, n: usize) -> bool {
     fcinfo.arg(n).map(|nd| nd.isnull).unwrap_or(true)
 }
 
+/// Resolve the bare element word a `RangeBound.val` carrier must hold for the
+/// `range_constructor{2,3}` element argument `n`, given the range element type.
+///
+/// C reads `PG_GETARG_DATUM(n)` directly: for a by-VALUE element (`int4` etc.)
+/// that word *is* the value; for a by-REFERENCE element (`numeric`, `text`,
+/// `tstzrange`'s `timestamptz` is by-value but `numeric` is by-ref) the word is
+/// a `Pointer` to the value's varlena image in the caller's memory context, and
+/// `range_serialize`'s `datum_compute_size`/`datum_write` dereference it.
+///
+/// On the owned fmgr boundary a by-reference argument's referent does NOT ride
+/// the bare `args[n].value` word (which is only a placeholder) — it rides the
+/// `ref_args` side channel as a `RefPayload::Varlena` image (the same lane
+/// `text_to_cstring` reads the flags arg from). So for a by-reference element we
+/// must MATERIALIZE that image into a real, MAXALIGN(8)-aligned varlena living
+/// in `mcx` and return its pointer word, exactly the form `DatumGetPointer`
+/// expects. For a by-value element the bare word crosses verbatim.
+///
+/// Mirrors `fmgr_builtins::range_bytes_to_arg_word` (the symmetric staging the
+/// `fc_` wrapper does for whole-range arguments). Without this the bare
+/// placeholder word flowed straight into `datum_write`, dereferencing a
+/// non-pointer and faulting (SIGSEGV) for by-reference element ranges such as
+/// `numrange`.
+fn stage_elem_arg<'mcx>(
+    mcx: Mcx<'mcx>,
+    fcinfo: &FunctionCallInfoBaseData,
+    n: usize,
+    elem_typbyval: bool,
+) -> PgResult<Datum> {
+    if elem_typbyval {
+        // By-value element: the machine word IS the value.
+        return Ok(getarg_datum(fcinfo, n));
+    }
+    // By-reference element: the referent image rides the by-ref side channel.
+    match fcinfo.ref_arg(n).and_then(|p| p.as_varlena()) {
+        Some(image) => materialize_byref_word(mcx, image),
+        // No by-ref payload present: fall back to the bare word. This covers a
+        // fixed-length-by-reference element already passed as a live pointer (or
+        // a NULL the caller guards), matching C's direct `PG_GETARG_DATUM`.
+        None => Ok(getarg_datum(fcinfo, n)),
+    }
+}
+
+/// Copy a by-reference value's varlena image into `mcx` as a MAXALIGN(8)-aligned
+/// block and return the pointer `Datum` word (`PointerGetDatum`). The 8-byte
+/// alignment matches what `palloc` hands a detoasted datum, which the element
+/// type's by-ref accessors rely on.
+fn materialize_byref_word<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<Datum> {
+    use allocator_api2::alloc::Allocator;
+    use core::alloc::Layout;
+    mcx::check_alloc_size(image.len())?;
+    let layout = Layout::from_size_align(image.len().max(1), 8)
+        .expect("valid by-ref element image layout");
+    let block = mcx.allocate(layout).map_err(|_| mcx.oom(image.len()))?;
+    let dst = block.as_ptr() as *mut u8;
+    // SAFETY: `dst` heads a freshly allocated image.len()-byte region.
+    unsafe {
+        core::ptr::copy_nonoverlapping(image.as_ptr(), dst, image.len());
+    }
+    Ok(Datum::from_usize(dst as usize))
+}
+
+/// The range element type's `typbyval`, read off the resolved range
+/// `TypeCacheEntry`. A range type always has `rngelemtype` set
+/// (`range_get_typcache` resolves `TYPECACHE_RANGE_INFO`).
+fn elem_typbyval(typcache: &types_cache::typcache::TypeCacheEntry) -> bool {
+    typcache
+        .rngelemtype
+        .as_ref()
+        .map(|e| e.typbyval)
+        .unwrap_or(true)
+}
+
 /// `PG_GETARG_RANGE_P(n)` — `DatumGetRangeTypeP(PG_GETARG_DATUM(n))`. The detoast
 /// is the range ADT's own `datum_get_range_type_p` kernel (in `range_repr_serialize`).
 fn getarg_range_p<'mcx>(
@@ -206,11 +278,14 @@ pub fn range_constructor2<'mcx>(
     mcx: Mcx<'mcx>,
     fcinfo: &mut FunctionCallInfoBaseData,
 ) -> PgResult<Datum> {
-    let arg1 = getarg_datum(fcinfo, 0);
-    let arg2 = getarg_datum(fcinfo, 1);
     let rngtypid = get_fn_expr_rettype(fcinfo.flinfo.as_deref());
 
     let typcache = range_get_typcache(rngtypid)?;
+    let elem_byval = elem_typbyval(&typcache);
+
+    // C: lower.val = PG_GETARG_DATUM(0) (a by-ref element rides the ref lane).
+    let arg1 = stage_elem_arg(mcx, fcinfo, 0, elem_byval)?;
+    let arg2 = stage_elem_arg(mcx, fcinfo, 1, elem_byval)?;
 
     let lower = RangeBound {
         val: if argisnull(fcinfo, 0) { Datum::null() } else { arg1 },
@@ -234,11 +309,10 @@ pub fn range_constructor3<'mcx>(
     mcx: Mcx<'mcx>,
     fcinfo: &mut FunctionCallInfoBaseData,
 ) -> PgResult<Datum> {
-    let arg1 = getarg_datum(fcinfo, 0);
-    let arg2 = getarg_datum(fcinfo, 1);
     let rngtypid = get_fn_expr_rettype(fcinfo.flinfo.as_deref());
 
     let typcache = range_get_typcache(rngtypid)?;
+    let elem_byval = elem_typbyval(&typcache);
 
     if argisnull(fcinfo, 2) {
         return Err(PgError::error("range constructor flags argument must not be null")
@@ -246,11 +320,19 @@ pub fn range_constructor3<'mcx>(
     }
 
     // flags = range_parse_flags(text_to_cstring(PG_GETARG_TEXT_PP(2)));
-    // TextDatumGetCString detoasts the `text` arg word; the varlena image is
-    // carried in the by-ref side channel, addressed by the arg Datum.
-    let flags_str =
-        backend_utils_adt_varlena_seams::text_to_cstring::call(mcx, getarg_datum(fcinfo, 2))?;
+    // `text` is pass-by-REFERENCE: `TextDatumGetCString` dereferences the arg
+    // word as a `struct varlena *`. On the owned fmgr boundary the referent rides
+    // the `ref_args` side channel (a const-folded `text` literal arrives as
+    // `RefPayload::Varlena` with only a NULL placeholder on the by-value word), so
+    // we must materialize it into a real pointer word before `text_to_cstring`
+    // dereferences it — otherwise the NULL placeholder faults (SIGSEGV).
+    let flags_word = stage_elem_arg(mcx, fcinfo, 2, false)?;
+    let flags_str = backend_utils_adt_varlena_seams::text_to_cstring::call(mcx, flags_word)?;
     let flags = crate::range_io::range_parse_flags(flags_str.as_str())?;
+
+    // C: lower.val = PG_GETARG_DATUM(0) (a by-ref element rides the ref lane).
+    let arg1 = stage_elem_arg(mcx, fcinfo, 0, elem_byval)?;
+    let arg2 = stage_elem_arg(mcx, fcinfo, 1, elem_byval)?;
 
     let lower = RangeBound {
         val: if argisnull(fcinfo, 0) { Datum::null() } else { arg1 },
