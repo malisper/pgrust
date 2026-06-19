@@ -132,7 +132,7 @@ pub fn setSchemaName<'mcx>(
             return Err(ereport(ERROR)
                 .errcode(ERRCODE_INVALID_SCHEMA_DEFINITION)
                 .errmsg(alloc::format!(
-                    "CREATE specifies a schema ({ctx}) different from the one being created ({stmt})"
+                    "CREATE specifies a schema ({stmt}) different from the one being created ({ctx})"
                 ))
                 .into_error());
         }

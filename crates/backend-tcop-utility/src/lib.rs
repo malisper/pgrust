@@ -112,6 +112,24 @@ pub fn init_seams() {
     // `PlannedStmt` + `None` receiver and re-enters the dispatch.
     backend_tcop_utility_out_seams::process_utility_wrapper::set(dispatch::process_utility_wrapper);
 
+    // `CreateSchemaCommand`'s embedded-element loop (schemacmds.c) runs each
+    // sub-statement (CREATE TABLE/VIEW/SEQUENCE/INDEX/TRIGGER) through a wrapper
+    // `PlannedStmt` + `ProcessUtility(.., PROCESS_UTILITY_SUBCOMMAND, ..,
+    // None_Receiver, NULL)` — identical construction to `process_utility_wrapper`.
+    // Install the schemacmds-owned subcommand seam pointing at that same body.
+    backend_tcop_utility_fc_seams::process_utility_create_schema_subcommand::set(
+        |stmt, query_string, stmt_location, stmt_len| {
+            let ctx = mcx::MemoryContext::new("process_utility_create_schema_subcommand");
+            dispatch::process_utility_wrapper(
+                ctx.mcx(),
+                stmt,
+                query_string,
+                stmt_location,
+                stmt_len,
+            )
+        },
+    );
+
     // EventTriggerSupportsObjectType (commands/event_trigger.c): a pure dispatch
     // predicate the GRANT/DROP/RENAME/ALTER…/COMMENT/SECURITY LABEL fast-path
     // arms consult. The real owner `backend-commands-event-trigger` (the

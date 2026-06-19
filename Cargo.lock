@@ -17928,6 +17928,7 @@ dependencies = [
  "backend-parser-analyze-seams",
  "backend-tcop-cmdtag",
  "backend-tcop-dest",
+ "backend-tcop-utility-fc-seams",
  "backend-tcop-utility-out-seams",
  "backend-tcop-utility-seams",
  "backend-utils-error",
