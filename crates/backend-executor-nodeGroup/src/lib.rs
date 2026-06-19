@@ -269,10 +269,7 @@ pub fn ExecInitGroup<'mcx>(
 ) -> PgResult<PgBox<'mcx, GroupStateData<'mcx>>> {
     let mcx = estate.es_query_cxt;
 
-    let group: &'mcx Group<'mcx> = match node {
-        types_nodes::nodes::Node::Group(g) => g,
-        other => panic!("castNode(Group, node) failed: {other:?}"),
-    };
+    let group: &'mcx Group<'mcx> = node.expect_group();
 
     // check for unsupported flags
     //   Assert(!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK)));
