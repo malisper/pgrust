@@ -199,7 +199,7 @@ pub fn coerce_to_target_type<'mcx>(
     let result = coerce_type(
         mcx,
         pstate,
-        Some(stripped.clone()),
+        Some(stripped.clone_in(mcx)?),
         exprtype,
         targettype,
         targettypmod,

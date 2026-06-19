@@ -3187,14 +3187,27 @@ fn transformMultiAssignRef<'mcx>(
             // Build a Param representing the current subquery output column
             // (PARAM_MULTIEXPR). paramid = (subLinkId << 16) | colno.
             debug_assert!(sublink.subLinkType == SubLinkType::MultiExpr);
-            let texpr: Option<&Expr> = Some(tle_expr);
+            // qtree = castNode(Query, sublink->subselect);
+            // tle = (TargetEntry *) list_nth(qtree->targetList, colno - 1);
+            // The Param's type/typmod/collation/location come from the *colno-th*
+            // output column of the sub-SELECT, not from the SubLink as a whole
+            // (whose exprType is RECORDOID).
+            let qtree = sublink
+                .subselect
+                .as_deref()
+                .ok_or_else(|| PgError::error("MULTIEXPR SubLink has no subselect"))?;
+            let coltle = qtree
+                .targetList
+                .get((colno - 1) as usize)
+                .ok_or_else(|| PgError::error("transformMultiAssignRef: colno out of range"))?;
+            let colexpr: Option<&Expr> = coltle.expr.as_deref();
             let param = Param {
                 paramkind: ParamKind::PARAM_MULTIEXPR,
                 paramid: (sublink.subLinkId << 16) | colno,
-                paramtype: expr_type(texpr)?,
-                paramtypmod: expr_typmod(texpr)?,
-                paramcollid: expr_collation(texpr)?,
-                location: expr_location(texpr)?,
+                paramtype: expr_type(colexpr)?,
+                paramtypmod: expr_typmod(colexpr)?,
+                paramcollid: expr_collation(colexpr)?,
+                location: expr_location(colexpr)?,
             };
             Ok(Expr::Param(param))
         }
