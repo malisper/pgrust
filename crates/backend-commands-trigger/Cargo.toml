@@ -33,6 +33,8 @@ backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache
 backend-access-heap-heapam-seams = { path = "../backend-access-heap-heapam-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+# assign_session_replication_role flushes the plan cache when the role changes.
+backend-utils-cache-plancache = { path = "../backend-utils-cache-plancache" }
 # CreateTrigger catalog-write DDL leg (create.rs).
 types-acl = { path = "../types-acl" }
 types-catalog = { path = "../types-catalog" }

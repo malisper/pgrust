@@ -22,6 +22,7 @@ types-scan = { path = "../types-scan" }
 types-snapshot = { path = "../types-snapshot" }
 types-storage = { path = "../types-storage" }
 types-tableam = { path = "../types-tableam" }
+types-guc = { path = "../types-guc" }
 backend-access-table-tableam-seams = { path = "../backend-access-table-tableam-seams" }
 backend-access-table-tableam-bm-seams = { path = "../backend-access-table-tableam-bm-seams" }
 backend-commands-createas-seams = { path = "../backend-commands-createas-seams" }
@@ -36,4 +37,5 @@ backend-storage-smgr-seams = { path = "../backend-storage-smgr-seams" }
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
 backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }

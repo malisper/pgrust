@@ -39,6 +39,32 @@ std::thread_local! {
     /// `int SessionReplicationRole = SESSION_REPLICATION_ROLE_ORIGIN` (trigger.c:64)
     /// — backing store for the guc-table slot; PGC_SUSET, boot value 0 (ORIGIN).
     static SESSION_REPLICATION_ROLE: core::cell::Cell<i32> = const { core::cell::Cell::new(0) };
+    /// The role value the assign hook last acted on. C reads the OLD
+    /// `SessionReplicationRole` global inside `assign_session_replication_role`
+    /// (the hook fires before `*conf->variable = newval`); this port's GUC engine
+    /// writes the variable slot *before* firing the deferred assign hook, so the
+    /// hook tracks the prior value here instead of re-reading the (already
+    /// updated) slot. Seeded to ORIGIN (0), the boot value.
+    static SESSION_REPLICATION_ROLE_PREV: core::cell::Cell<i32> = const { core::cell::Cell::new(0) };
+}
+
+/// `assign_session_replication_role(int newval, void *extra)` (trigger.c). Must
+/// flush the plan cache when changing replication role, but not unnecessarily.
+fn assign_session_replication_role(
+    newval: i32,
+    _extra: Option<&backend_utils_misc_guc_tables::GucHookExtra>,
+) {
+    let changed = SESSION_REPLICATION_ROLE_PREV.with(|c| {
+        let old = c.get();
+        c.set(newval);
+        old != newval
+    });
+    if changed {
+        // C: `if (SessionReplicationRole != newval) ResetPlanCache();`. The
+        // assign hook is `void`; ResetPlanCache cannot fail in practice, and the
+        // C signature has no error surface, so drop its `PgResult`.
+        let _ = backend_utils_cache_plancache::ResetPlanCache();
+    }
 }
 
 pub fn init_seams() {
@@ -55,6 +81,12 @@ pub fn init_seams() {
             set: |v| SESSION_REPLICATION_ROLE.with(|c| c.set(v)),
         },
     );
+
+    // `assign_session_replication_role` (trigger.c) — the assign hook for the
+    // `session_replication_role` GUC. C wires this function pointer into the
+    // config table at compile time; this unit owns it and installs the slot.
+    backend_utils_misc_guc_tables::hooks::assign_session_replication_role
+        .install(assign_session_replication_role);
 
     // Cross-crate install: `AfterTriggerPendingOnRel` (trigger.c, body in
     // `queue`) is consumed by tablecmds `ExecuteTruncate`; its decl lives on

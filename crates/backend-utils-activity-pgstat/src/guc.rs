@@ -31,6 +31,13 @@ thread_local! {
     /// the `stats_fetch_consistency` `boot_val` (also `cache`).
     static FETCH_CONSISTENCY: Cell<i32> = const { Cell::new(1) };
 
+    /// The `pgstat_fetch_consistency` value the assign hook last acted on. C's
+    /// `assign_stats_fetch_consistency` reads the OLD `pgstat_fetch_consistency`
+    /// global (the hook fires before `*conf->variable = newval`); this port's GUC
+    /// engine writes the variable slot *before* firing the deferred assign hook,
+    /// so the hook tracks the prior value here. Seeded to the boot value (`1`).
+    static FETCH_CONSISTENCY_PREV: Cell<i32> = const { Cell::new(1) };
+
     /// `int pgstat_track_functions` (pgstat.c). Boot default `TRACK_FUNC_NONE`
     /// (`0`); the GUC engine overrides it from the `track_functions` `boot_val`
     /// (also `none`). Read by `ExecInitFunc` (execExpr.c) to decide whether to
@@ -56,6 +63,24 @@ pub fn fetch_consistency() -> i32 {
 /// Write `pgstat_fetch_consistency` (GUC assign).
 pub fn set_fetch_consistency(v: i32) {
     FETCH_CONSISTENCY.with(|c| c.set(v));
+}
+
+/// `assign_stats_fetch_consistency(int newval, void *extra)` (pgstat.c). Changing
+/// this value invalidates the currently-cached stats snapshot, so the next
+/// access fetches the latest data — but don't drop it unnecessarily.
+pub fn assign_stats_fetch_consistency(
+    newval: i32,
+    _extra: Option<&backend_utils_misc_guc_tables::GucHookExtra>,
+) {
+    let changed = FETCH_CONSISTENCY_PREV.with(|c| {
+        let old = c.get();
+        c.set(newval);
+        old != newval
+    });
+    if changed {
+        // C: `if (pgstat_fetch_consistency != newval) pgstat_clear_snapshot();`.
+        crate::pgstat_core::pgstat_clear_snapshot();
+    }
 }
 
 /// Read `pgstat_track_functions`.

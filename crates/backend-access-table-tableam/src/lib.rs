@@ -134,6 +134,13 @@ pub fn init_seams() {
         },
     );
 
+    // `check_default_table_access_method` (tableamapi.c) — the GUC check hook
+    // for `default_table_access_method`. C wires this function pointer into the
+    // config table at compile time; here this unit owns it and installs it into
+    // the guc-tables slot.
+    backend_utils_misc_guc_tables::hooks::check_default_table_access_method
+        .install(check_default_table_access_method);
+
     // `table_finish_bulk_insert` (tableam.h inline) — this unit owns the inline
     // dispatch wrapper, so it installs the consumer-side decls the CTAS
     // (`createas.c`) and matview (`matview.c`) bulk-insert receivers carry. The
@@ -288,6 +295,58 @@ pub fn set_default_table_access_method(value: &str) {
 /// Read the `synchronize_seqscans` GUC.
 pub fn synchronize_seqscans() -> bool {
     SYNCHRONIZE_SEQSCANS_GUC.with(Cell::get)
+}
+
+/// `check_default_table_access_method(char **newval, void **extra, GucSource
+/// source)` (access/table/tableamapi.c). The `default_table_access_method` GUC
+/// check hook: reject an empty or over-long name, and (when we can reach the
+/// catalog) verify the named access method actually exists.
+fn check_default_table_access_method(
+    newval: &mut Option<String>,
+    _extra: &mut Option<backend_utils_misc_guc_tables::GucHookExtra>,
+    _source: types_guc::GucSource,
+) -> PgResult<bool> {
+    // `**newval == '\0'`: a string GUC's value is never NULL here (boot val is
+    // "heap" and the GUC string store never returns to NULL), so an empty value
+    // is the `Some("")` case.
+    let name = match newval.as_deref() {
+        Some(s) => s,
+        None => "",
+    };
+
+    if name.is_empty() {
+        backend_utils_misc_guc_seams::guc_check_errdetail::call(
+            "\"default_table_access_method\" cannot be empty.".to_string(),
+        );
+        return Ok(false);
+    }
+
+    if name.len() >= types_core::fmgr::NAMEDATALEN as usize {
+        backend_utils_misc_guc_seams::guc_check_errdetail::call(format!(
+            "\"default_table_access_method\" is too long (maximum {} characters).",
+            types_core::fmgr::NAMEDATALEN - 1
+        ));
+        return Ok(false);
+    }
+
+    // If we aren't inside a transaction, or not connected to a database, we
+    // cannot do the catalog access necessary to verify the method. Must accept
+    // the value on faith.
+    let in_xact = backend_access_transam_xact_seams::is_transaction_state::call();
+    let my_db = backend_utils_init_small_seams::my_database_id::call();
+    if in_xact && my_db != types_core::primitive::InvalidOid {
+        // `get_table_am_oid(*newval, true)` — `missing_ok = true` so a missing AM
+        // returns InvalidOid rather than erroring.
+        let am_oid = backend_commands_tablecmds_seams::get_table_am_oid::call(name, true)?;
+        if !types_core::primitive::OidIsValid(am_oid) {
+            backend_utils_misc_guc_seams::guc_check_errdetail::call(format!(
+                "Table access method \"{name}\" does not exist."
+            ));
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
 }
 
 /// Assign the `synchronize_seqscans` GUC.
