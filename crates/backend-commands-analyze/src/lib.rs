@@ -212,7 +212,12 @@ fn nsp_name(mcx: Mcx<'_>, nspid: Oid) -> PgResult<String> {
 /// Re-derive [`StdAnalyzeData`] for a column type, exactly as `std_typanalyze`
 /// computed it (deterministic, stable across the ANALYZE run).
 fn std_analyze_data(attrtypid: Oid) -> PgResult<StdAnalyzeData> {
-    let ops = get_sort_group_operators(attrtypid, false, true, false, false)?;
+    // C `std_typanalyze`: get_sort_group_operators(typid, false, false, false, ...).
+    // All three need_* are false so a type lacking a "<"/"=" operator (e.g. point)
+    // yields InvalidOid rather than erroring; std_analyze then picks the trivial
+    // compute_stats path. Passing need_eq=true here spuriously errored
+    // "could not identify an equality operator for type point" during ANALYZE.
+    let ops = get_sort_group_operators(attrtypid, false, false, false, false)?;
     let eqopr = ops.eq_opr;
     let ltopr = ops.lt_opr;
     let eqfunc = if OidIsValid(eqopr) {
@@ -1642,8 +1647,11 @@ pub fn std_typanalyze<'mcx>(stats: &mut VacAttrStats<'mcx>) -> PgResult<bool> {
         stats.attstattarget = default_statistics_target();
     }
 
-    // Look for default "<" and "=" operators for the column's type.
-    let ops = get_sort_group_operators(stats.attrtypid, false, true, false, false)?;
+    // Look for default "<" and "=" operators for the column's type. C
+    // `std_typanalyze` passes all three need_* as false, so a type lacking these
+    // operators (e.g. point/path) returns InvalidOid and falls to the trivial
+    // path rather than erroring "could not identify an equality operator".
+    let ops = get_sort_group_operators(stats.attrtypid, false, false, false, false)?;
     let ltopr = ops.lt_opr;
     let eqopr = ops.eq_opr;
 

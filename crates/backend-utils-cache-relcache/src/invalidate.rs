@@ -413,10 +413,16 @@ fn equal_tuple_descs(
         if a1.attnotnull && a1.attnullability != a2.attnullability {
             return false;
         }
-        // C also compares attndims/attstorage/attcompression/atthasdef/
-        // attidentity/attgenerated/attislocal/attinhcount; those fields are not
-        // carried on the trimmed OwnedAttr mirror (they are not consumed
-        // elsewhere in this crate), so they are not representable here.
+        // C equalTupleDescs also compares attndims/attstorage/attcompression
+        // (now carried on the mirror — attstorage drives the TOAST pass).
+        // atthasdef/attidentity/attgenerated/attislocal/attinhcount remain
+        // either compared above or not carried on the trimmed mirror.
+        if a1.attndims != a2.attndims
+            || a1.attstorage != a2.attstorage
+            || a1.attcompression != a2.attcompression
+        {
+            return false;
+        }
     }
 
     // Compare the constr substructure (C equalTupleDescs constr block): the
