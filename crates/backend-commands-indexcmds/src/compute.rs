@@ -20,7 +20,7 @@ use types_core::{InvalidOid, OidIsValid};
 use types_error::PgResult;
 use types_nodes::ddlnodes::IndexElem;
 use types_nodes::execnodes::IndexInfo;
-use types_nodes::nodes::{Node, NodePtr};
+use types_nodes::nodes::{ntag, NodePtr};
 use types_nodes::primnodes::Expr;
 use types_scan::scankey::{InvalidStrategy, StrategyNumber};
 
@@ -501,10 +501,11 @@ fn set_exclusion(index_info: &mut IndexInfo<'_>, i: usize, opid: Oid, proc_oid: 
 /// nodes (the operator name); render it as `Vec<String>` for
 /// `compatible_oper_opid`.
 fn exclusion_list_entry(node: &NodePtr<'_>) -> Vec<String> {
-    match node.as_ref() {
-        Node::List(items) => name_list_strings(items),
-        other => panic!(
-            "ComputeIndexAttrs: exclusionOpNames entry is not a List node (got {other:?})"
+    match node.node_tag() {
+        ntag::T_List => name_list_strings(node.expect_list()),
+        _ => panic!(
+            "ComputeIndexAttrs: exclusionOpNames entry is not a List node (got {:?})",
+            node.node_tag()
         ),
     }
 }

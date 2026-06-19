@@ -51,7 +51,7 @@ use types_core::primitive::Oid;
 use types_core::{InvalidOid, OidIsValid};
 use types_error::PgResult;
 use types_nodes::ddlnodes::{IndexElem, IndexStmt};
-use types_nodes::nodes::Node;
+use types_nodes::nodes::{ntag, Node};
 use types_nodes::primnodes::Expr;
 use types_nodes::rawnodes::RangeVar;
 use types_rel::Relation;
@@ -148,8 +148,8 @@ const SECURITY_RESTRICTED_OPERATION: i32 = 1 << 1;
 
 /// `strVal`-style read of a `Node::String`'s `sval`.
 pub(crate) fn node_sval<'a>(node: &'a Node<'_>) -> &'a str {
-    match node {
-        Node::String(s) => s.sval.as_str(),
+    match node.node_tag() {
+        ntag::T_String => node.expect_string().sval.as_str(),
         _ => panic!("indexcmds: expected a String value node in a name list"),
     }
 }
@@ -896,16 +896,16 @@ fn relation_should_recurse(stmt: &IndexStmt<'_>) -> bool {
 }
 
 fn index_stmt_relation<'a, 'mcx>(stmt: &'a IndexStmt<'mcx>) -> Option<&'a RangeVar<'mcx>> {
-    stmt.relation.as_ref().and_then(|n| match n.as_ref() {
-        Node::RangeVar(rv) => Some(rv),
+    stmt.relation.as_ref().and_then(|n| match n.node_tag() {
+        ntag::T_RangeVar => Some(n.expect_rangevar()),
         _ => None,
     })
 }
 
 /// `(IndexElem *) lfirst(...)` — read an `IndexElem` out of a name-list `Node`.
 fn node_as_index_elem<'a, 'mcx>(node: &'a Node<'mcx>) -> &'a IndexElem<'mcx> {
-    match node {
-        Node::IndexElem(e) => e,
+    match node.node_tag() {
+        ntag::T_IndexElem => node.expect_indexelem(),
         _ => panic!("DefineIndex: indexParams entry is not an IndexElem"),
     }
 }
@@ -997,11 +997,11 @@ fn utility_range_var_get_relid_owns_relation<'mcx>(
     relation: types_nodes::nodes::NodePtr<'mcx>,
     lockmode: types_storage::lock::LOCKMODE,
 ) -> PgResult<Oid> {
-    let rv = match &*relation {
-        Node::RangeVar(rv) => rv,
-        other => unreachable!(
+    let rv = match relation.node_tag() {
+        ntag::T_RangeVar => relation.expect_rangevar(),
+        _ => unreachable!(
             "range_var_get_relid_owns_relation: not a RangeVar node: {}",
-            other.node_tag()
+            relation.node_tag()
         ),
     };
     backend_catalog_namespace::RangeVarGetRelidOwnsRelation(mcx, rv, lockmode)
@@ -1017,11 +1017,11 @@ fn create_index_count_partitions<'mcx>(
     stmt: types_nodes::nodes::NodePtr<'mcx>,
     lockmode: types_storage::lock::LOCKMODE,
 ) -> PgResult<i32> {
-    let index_stmt = match &*stmt {
-        Node::IndexStmt(s) => s,
-        other => unreachable!(
+    let index_stmt = match stmt.node_tag() {
+        ntag::T_IndexStmt => stmt.expect_indexstmt(),
+        _ => unreachable!(
             "create_index_count_partitions: not an IndexStmt node: {}",
-            other.node_tag()
+            stmt.node_tag()
         ),
     };
     let rv = match index_stmt_relation(index_stmt) {
@@ -1084,12 +1084,10 @@ fn define_index_dispatch_arm<'mcx>(
     nparts: i32,
     is_alter_table: bool,
 ) -> PgResult<ObjectAddress> {
-    let stmt = match mcx::PgBox::into_inner(stmt) {
-        Node::IndexStmt(s) => s,
-        other => unreachable!(
-            "define_index: not an IndexStmt node: {}",
-            other.node_tag()
-        ),
+    let stmt_tag = stmt.node_tag();
+    let stmt = match mcx::PgBox::into_inner(stmt).into_indexstmt() {
+        Some(s) => s,
+        None => unreachable!("define_index: not an IndexStmt node: {}", stmt_tag),
     };
     DefineIndex(
         mcx,
