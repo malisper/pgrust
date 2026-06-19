@@ -30,7 +30,7 @@ use mcx::Mcx;
 use types_core::primitive::{AttrNumber, Index, Oid};
 use types_error::{PgError, PgResult};
 use types_nodes::copy_query::Query;
-use types_nodes::nodes::Node;
+use types_nodes::nodes::{ntag, Node};
 use types_nodes::parsenodes::RangeTblEntry;
 use types_nodes::primnodes::{Expr, OpExpr, WindowFunc};
 use types_nodes::rawnodes::{SortGroupClause, WindowClause, SETOP_EXCEPT};
@@ -158,27 +158,18 @@ fn call_support_wfunc_monotonic(prosupport: Oid, winfnoid: Oid, wclause: &Window
 /// Resolve a `NodePtr` (a boxed `Node`) that is expected to wrap a
 /// `SortGroupClause`. Returns `None` if it is some other node kind.
 fn node_as_sortgroupclause<'a>(node: &'a Node<'_>) -> Option<&'a SortGroupClause> {
-    match node {
-        Node::SortGroupClause(s) => Some(s),
-        _ => None,
-    }
+    node.as_sortgroupclause()
 }
 
 /// Resolve a `NodePtr` expected to wrap a `WindowClause`.
 fn node_as_windowclause<'a, 'mcx>(node: &'a Node<'mcx>) -> Option<&'a WindowClause<'mcx>> {
-    match node {
-        Node::WindowClause(w) => Some(w),
-        _ => None,
-    }
+    node.as_windowclause()
 }
 
 /// Unwrap a `Node` to its inner `Expr` (the `Node::Expr` arm); `None` for
 /// non-expression nodes.
 fn node_as_expr<'a>(node: &'a Node<'_>) -> Option<&'a Expr> {
-    match node {
-        Node::Expr(e) => Some(e),
-        _ => None,
-    }
+    node.as_expr()
 }
 
 /// Collect the `SortGroupClause`s out of a `PgVec<NodePtr>` (distinctClause /
@@ -247,10 +238,7 @@ pub(crate) fn subquery_is_pushdown_safe(
         let topop = top
             .setOperations
             .as_ref()
-            .and_then(|n| match n.as_ref() {
-                Node::SetOperationStmt(op) => Some(op),
-                _ => None,
-            })
+            .and_then(|n| n.as_ref().as_setoperationstmt())
             .ok_or_else(|| PgError::error("subquery_is_pushdown_safe: top has no SetOperationStmt"))?;
         compare_tlist_datatypes(&subquery.targetList, &topop.colTypes, safety_info)?;
     }
@@ -264,8 +252,9 @@ fn recurse_pushdown_safe(
     top: &Query<'_>,
     safety_info: &mut PushdownSafetyInfo,
 ) -> PgResult<bool> {
-    match set_op {
-        Node::RangeTblRef(rtr) => {
+    match set_op.node_tag() {
+        ntag::T_RangeTblRef => {
+            let rtr = set_op.expect_rangetblref();
             // rte = rt_fetch(rtr->rtindex, topquery->rtable); subquery = rte->subquery.
             let idx = (rtr.rtindex as usize)
                 .checked_sub(1)
@@ -280,7 +269,8 @@ fn recurse_pushdown_safe(
                 .ok_or_else(|| PgError::error("recurse_pushdown_safe: setop component has no subquery"))?;
             subquery_is_pushdown_safe(mcx, subquery, top, safety_info)
         }
-        Node::SetOperationStmt(op) => {
+        ntag::T_SetOperationStmt => {
+            let op = set_op.expect_setoperationstmt();
             // EXCEPT is no good (point 2 for subquery_is_pushdown_safe).
             if op.op == SETOP_EXCEPT {
                 return Ok(false);
@@ -295,7 +285,7 @@ fn recurse_pushdown_safe(
         }
         other => Err(PgError::error(alloc::format!(
             "unrecognized node type in recurse_pushdown_safe: {:?}",
-            other.node_tag()
+            other
         ))),
     }
 }
@@ -561,9 +551,9 @@ pub(crate) fn subquery_push_qual<'mcx>(
             subquery.hasSubLinks = b;
         }
 
-        let new_qual: Option<Expr> = match qual_node {
-            Node::Expr(e) => Some(e),
-            _ => return Err(PgError::error("subquery_push_qual: replaced qual is not an Expr")),
+        let new_qual: Option<Expr> = match qual_node.into_expr() {
+            Some(e) => Some(e),
+            None => return Err(PgError::error("subquery_push_qual: replaced qual is not an Expr")),
         };
 
         // Attach to HAVING when grouping/aggregation present, else WHERE.
@@ -599,8 +589,9 @@ fn recurse_push_qual<'mcx>(
     rti: Index,
     qual: &Expr,
 ) -> PgResult<()> {
-    match set_op {
-        Node::RangeTblRef(rtr) => {
+    match set_op.node_tag() {
+        ntag::T_RangeTblRef => {
+            let rtr = set_op.expect_rangetblref();
             let idx = (rtr.rtindex as usize)
                 .checked_sub(1)
                 .ok_or_else(|| PgError::error("recurse_push_qual: bad rtindex"))?;
@@ -622,13 +613,14 @@ fn recurse_push_qual<'mcx>(
             top.rtable[idx] = subrte;
             Ok(())
         }
-        Node::SetOperationStmt(op) => {
+        ntag::T_SetOperationStmt => {
+            let op = set_op.expect_setoperationstmt();
             recurse_push_qual(mcx, op.larg.as_ref().expect("setop larg"), top, rte, rti, qual)?;
             recurse_push_qual(mcx, op.rarg.as_ref().expect("setop rarg"), top, rte, rti, qual)
         }
         other => Err(PgError::error(alloc::format!(
             "unrecognized node type in recurse_push_qual: {:?}",
-            other.node_tag()
+            other
         ))),
     }
 }
