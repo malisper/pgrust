@@ -580,9 +580,7 @@ fn createdb_arm<'mcx>(
     pstate: &mut UtilParseState<'mcx>,
     stmt: &UtilNode<'mcx>,
 ) -> PgResult<()> {
-    let UtilNode::CreatedbStmt(s) = stmt else {
-        panic!("createdb: parse tree is not a CreatedbStmt");
-    };
+    let s = stmt.expect_createdbstmt();
     createdb(pstate, s)?;
     Ok(())
 }
@@ -594,27 +592,21 @@ fn alter_database_arm<'mcx>(
     stmt: &UtilNode<'mcx>,
     is_top_level: bool,
 ) -> PgResult<()> {
-    let UtilNode::AlterDatabaseStmt(s) = stmt else {
-        panic!("alter_database: parse tree is not an AlterDatabaseStmt");
-    };
+    let s = stmt.expect_alterdatabasestmt();
     AlterDatabase(pstate, s, is_top_level)?;
     Ok(())
 }
 
 /// `case T_AlterDatabaseRefreshCollStmt: AlterDatabaseRefreshColl(stmt)` (utility.c).
 fn alter_database_refresh_coll_arm<'mcx>(_mcx: Mcx<'mcx>, stmt: &UtilNode<'mcx>) -> PgResult<()> {
-    let UtilNode::AlterDatabaseRefreshCollStmt(s) = stmt else {
-        panic!("alter_database_refresh_coll: parse tree is not an AlterDatabaseRefreshCollStmt");
-    };
+    let s = stmt.expect_alterdatabaserefreshcollstmt();
     AlterDatabaseRefreshColl(s)?;
     Ok(())
 }
 
 /// `case T_AlterDatabaseSetStmt: AlterDatabaseSet(stmt)` (utility.c).
 fn alter_database_set_arm<'mcx>(_mcx: Mcx<'mcx>, stmt: &UtilNode<'mcx>) -> PgResult<()> {
-    let UtilNode::AlterDatabaseSetStmt(s) = stmt else {
-        panic!("alter_database_set: parse tree is not an AlterDatabaseSetStmt");
-    };
+    let s = stmt.expect_alterdatabasesetstmt();
     AlterDatabaseSet(s)?;
     Ok(())
 }
@@ -625,8 +617,6 @@ fn drop_database_arm<'mcx>(
     pstate: &mut UtilParseState<'mcx>,
     stmt: &UtilNode<'mcx>,
 ) -> PgResult<()> {
-    let UtilNode::DropdbStmt(s) = stmt else {
-        panic!("drop_database: parse tree is not a DropdbStmt");
-    };
+    let s = stmt.expect_dropdbstmt();
     DropDatabase(pstate, s)
 }
