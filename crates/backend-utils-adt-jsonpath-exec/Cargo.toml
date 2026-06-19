@@ -15,6 +15,8 @@ types-error = { path = "../types-error" }
 backend-utils-error = { path = "../backend-utils-error" }
 types-tuple = { path = "../types-tuple" }
 types-datum = { path = "../types-datum" }
+types-fmgr = { path = "../types-fmgr" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 types-jsonb = { path = "../types-jsonb" }
 types-jsonpath = { path = "../types-jsonpath" }
 types-datetime = { path = "../types-datetime" }

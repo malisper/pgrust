@@ -39,4 +39,8 @@
 //! seams have no inward contract.
 pub fn init_seams() {
     crate::routine_install::install_routines();
+    // Register the scalar (non-SRF) jsonpath_exec.c predicates / query helpers
+    // into the fmgr-core builtin table (C: `fmgr_builtins[]`). The set-returning
+    // `jsonb_path_query` / `_tz` are registered by the SRF executor-frame lane.
+    crate::register_jsonpath_exec_builtins();
 }

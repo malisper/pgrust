@@ -76,12 +76,14 @@ pub(crate) use backend_utils_adt_jsonpath_exec_seams as seam;
 use JsonPathItemType::*;
 
 mod datetime;
+mod fmgr_builtins;
 mod json_table;
 mod routine_install;
 mod seams;
 #[cfg(test)]
 mod tests;
 
+pub use fmgr_builtins::register_jsonpath_exec_builtins;
 pub use seams::init_seams;
 
 pub use json_table::{
