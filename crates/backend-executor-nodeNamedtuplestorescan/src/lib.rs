@@ -162,10 +162,7 @@ pub fn ExecInitNamedTuplestoreScan<'mcx>(
 
     // NamedTuplestoreScan *node — the enclosing plan-tree node. Panics if it is
     // not a `NamedTuplestoreScan` (the C `castNode`).
-    let ntscan: &'mcx NamedTuplestoreScan<'mcx> = match node {
-        types_nodes::nodes::Node::NamedTuplestoreScan(n) => n,
-        other => panic!("castNode(NamedTuplestoreScan, node) failed: {other:?}"),
-    };
+    let ntscan: &'mcx NamedTuplestoreScan<'mcx> = node.expect_namedtuplestorescan();
 
     // check for unsupported flags
     //   Assert(!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK)));
