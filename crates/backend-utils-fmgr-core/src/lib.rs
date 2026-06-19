@@ -3076,6 +3076,31 @@ fn function_call_invoke_seam(
 /// on a plain (4B-U / short) value, so the explicit gate only additionally guards
 /// the non-varlena `Varlena`-arm carriers from a spurious tag misread.
 #[inline]
+/// Total byte length of a structurally-valid external (1B-E) TOAST pointer
+/// datum with `va_tag == tag`: `VARHDRSZ_EXTERNAL + VARTAG_SIZE(tag)`
+/// (`varatt.h`). `None` for an unrecognized tag (not a TOAST pointer). Used to
+/// disambiguate a real external pointer from a fixed-length by-reference value
+/// whose raw bytes coincidentally begin `0x01 <tag>` (e.g. a `macaddr`).
+///
+/// `VARHDRSZ_EXTERNAL` is 2 (the `va_header` byte + `va_tag` byte).
+/// `VARTAG_SIZE`: INDIRECT/EXPANDED carry a single in-memory pointer
+/// (`size_of::<usize>()`), ONDISK carries `struct varatt_external` (16 bytes).
+fn external_pointer_len_for_tag(tag: u8) -> Option<usize> {
+    const VARHDRSZ_EXTERNAL: usize = 2;
+    const VARTAG_INDIRECT: u8 = 1;
+    const VARTAG_EXPANDED_RO: u8 = 2;
+    const VARTAG_EXPANDED_RW: u8 = 3;
+    const VARTAG_ONDISK: u8 = 18;
+    let payload = match tag {
+        VARTAG_INDIRECT | VARTAG_EXPANDED_RO | VARTAG_EXPANDED_RW => {
+            core::mem::size_of::<usize>()
+        }
+        VARTAG_ONDISK => 16,
+        _ => return None,
+    };
+    Some(VARHDRSZ_EXTERNAL + payload)
+}
+
 fn detoast_ref_arg_if_toasted<'mcx>(
     mcx: Mcx<'mcx>,
     refp: Option<RefPayload>,
@@ -3103,8 +3128,24 @@ fn detoast_ref_arg_if_toasted<'mcx>(
                 let varsize_4b = ((word >> 2) & 0x3FFF_FFFF) as usize;
                 varsize_4b == bytes.len()
             };
-            let toasted = (!bytes.is_empty() && bytes[0] == 0x01/* VARATT_IS_EXTERNAL / 1B-E */)
-                || is_compressed_4b;
+            // VARATT_IS_EXTERNAL (1B-E): `va_header == 0x01`. But a fixed-length
+            // by-reference value (notably `macaddr` — 6 raw bytes, no varlena
+            // header) is also carried on the `Varlena` arm, and its first byte
+            // can legitimately be 0x01 (e.g. the literal `01:02:03:04:05:06`).
+            // The bare `bytes[0] == 0x01` test then misfires and feeds the value
+            // to TOAST detoast — and when `bytes[1]` happens to be a vartag
+            // (e.g. 0x02 == VARTAG_EXPANDED_RO) it dispatches into the expanded-
+            // object flatten path (`eom_get_flat_size`), which panics. A genuine
+            // external TOAST pointer datum is structurally exact: its total
+            // length is `VARHDRSZ_EXTERNAL + VARTAG_SIZE(va_tag)` for a
+            // recognized tag. Require that self-consistency so only real
+            // external pointers are detoasted (the same disambiguation as the
+            // `VARSIZE == len` test for the compressed-4b case above).
+            let is_external_1b_e = bytes.len() >= 2
+                && bytes[0] == 0x01
+                && external_pointer_len_for_tag(bytes[1])
+                    .is_some_and(|n| n == bytes.len());
+            let toasted = is_external_1b_e || is_compressed_4b;
             if toasted {
                 let flat =
                     backend_access_common_detoast_seams::pg_detoast_datum_packed::call(mcx, &bytes)?;

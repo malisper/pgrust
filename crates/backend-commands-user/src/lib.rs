@@ -2803,6 +2803,22 @@ pub fn init_seams() {
         set: set_createrole_self_grant_string,
     });
 
+    /* `SplitIdentifierString(rawstring, ',', &elemlist)` (varlena.c) — the
+     * canonical owner is backend-utils-adt-varlena. This crate's command paths
+     * (check_createrole_self_grant) and the postgres.c GUC check hook
+     * (check_restrict_nonsystem_relation_kind) both consume the owned
+     * `Option<Vec<String>>` shape via this seam, so install it here delegating
+     * to the varlena owner. The result strings are copied into owned `String`s,
+     * so the varlena owner's transient mcx may be dropped immediately. */
+    seam::split_identifier_string::set(|rawstring| {
+        let ctx = mcx::MemoryContext::new("split_identifier_string");
+        let mcx = ctx.mcx();
+        let res = backend_utils_adt_varlena_seams::split_identifier_string::call(
+            mcx, &rawstring, ',',
+        )?;
+        Ok(res.map(|list| list.iter().map(|s| s.as_str().to_string()).collect()))
+    });
+
     /* Read seams consumed within this crate's command paths. */
     seam::password_encryption::set(|| Ok(get_password_encryption()));
     seam::def_get_string::set(|opt| def_get_string(&opt));

@@ -419,10 +419,15 @@ fn fc_name_text(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 fn fc_text_name(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     detoast_varlena_args(fcinfo);
-    // C: text -> name (proname `name`, prosrc text_name). Result is the fixed
-    // NAMEDATALEN buffer, crossed as its raw bytes on the by-ref lane.
+    // C: text -> name (proname `name`, prosrc text_name). The result is a
+    // `Name` — a fixed NAMEDATALEN, zero-padded buffer with NO varlena header.
+    // It crosses the by-ref lane as its RAW bytes (matching the name crate's
+    // `ret_name`); `ret_varlena` would prepend a 4-byte varlena header and
+    // corrupt the value (e.g. a text[]::name[] cast then renders each element
+    // as the stray header bytes).
     let nd = ok(crate::wire_io::text_name(arg_bytes(fcinfo, 0)));
-    ret_varlena(fcinfo, nd.to_vec())
+    fcinfo.set_ref_result(RefPayload::Varlena(nd.to_vec()));
+    Datum::from_usize(0)
 }
 
 // --- length / octet-length / concat (wire_io.rs / bytea.rs) ---
