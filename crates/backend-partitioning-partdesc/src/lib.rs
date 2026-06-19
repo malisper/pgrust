@@ -393,9 +393,9 @@ fn parse_boundspec<'mcx>(
     text: &str,
 ) -> PgResult<PgBox<'mcx, PartitionBoundSpec<'mcx>>> {
     let node = backend_nodes_read_seams::string_to_node::call(mcx, text)?;
-    match PgBox::into_inner(node) {
-        Node::PartitionBoundSpec(spec) => mcx::alloc_in(mcx, spec),
-        _ => Err(elog_error(alloc::string::String::from(
+    match PgBox::into_inner(node).into_partitionboundspec() {
+        Some(spec) => mcx::alloc_in(mcx, spec),
+        None => Err(elog_error(alloc::string::String::from(
             "invalid relpartbound: stringToNode did not yield a PartitionBoundSpec",
         ))),
     }

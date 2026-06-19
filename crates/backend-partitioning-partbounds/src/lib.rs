@@ -488,9 +488,9 @@ fn make_one_partition_rbound(
     kind.resize(partnatts, PartitionRangeDatumKind::Value);
 
     for (i, node) in datum_nodes.iter().enumerate() {
-        let datum = match &**node {
-            Node::PartitionRangeDatum(prd) => prd,
-            _ => return Err(elog_error("range bound spec datum is not a PartitionRangeDatum")),
+        let datum = match (**node).as_partitionrangedatum() {
+            Some(prd) => prd,
+            None => return Err(elog_error("range bound spec datum is not a PartitionRangeDatum")),
         };
 
         // What's contained in this range datum?
