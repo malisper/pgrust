@@ -1276,10 +1276,12 @@ pub fn ExecInitMergeJoin<'mcx>(
     // time we advance past an inner tuple we will never return to. Only
     // Material wants the extra MARKs, and only if eflags doesn't specify
     // REWIND. (For IndexScan/IndexOnlyScan we must NOT set mj_ExtraMarks.)
-    let inner_is_material = matches!(
-        node.join.plan.righttree.as_deref(),
-        Some(types_nodes::nodes::Node::Material(_))
-    );
+    let inner_is_material = node
+        .join
+        .plan
+        .righttree
+        .as_deref()
+        .is_some_and(|n| n.is_material());
     mergestate.mj_ExtraMarks = inner_is_material
         && (eflags & EXEC_FLAG_REWIND) == 0
         && !mergestate.mj_SkipMarkRestore;

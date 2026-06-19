@@ -54,7 +54,6 @@ use types_core::primitive::Oid;
 use types_core::{InvalidOid, TransactionId};
 use types_error::{PgError, PgResult};
 use types_nodes::ddlnodes::PartitionBoundSpec;
-use types_nodes::nodes::Node;
 use types_nodes::partition::{PartitionBoundInfo, PartitionDescData, PartitionKeyData};
 use types_nodes::Opaque;
 use types_rel::{Relation, RelationData};
