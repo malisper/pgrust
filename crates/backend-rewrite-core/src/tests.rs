@@ -173,9 +173,9 @@ fn add_qual_ands_with_existing() {
 
     // Now an AND of the two quals.
     let quals = q.jointree.as_deref().unwrap().quals.as_deref().unwrap();
-    match quals {
-        Node::Expr(Expr::BoolExpr(b)) => assert_eq!(b.args.len(), 2),
-        other => panic!("expected AND BoolExpr, got {other:?}"),
+    match quals.as_expr() {
+        Some(Expr::BoolExpr(b)) => assert_eq!(b.args.len(), 2),
+        _ => panic!("expected AND BoolExpr, got {quals:?}"),
     }
 }
 
@@ -231,15 +231,15 @@ fn add_inverted_qual_wraps_is_not_true() {
     crate::manip_rule::AddInvertedQual(&mut q, Some(&qual), mcx).unwrap();
 
     let quals = q.jointree.as_deref().unwrap().quals.as_deref().unwrap();
-    match quals {
-        Node::Expr(Expr::BooleanTest(bt)) => {
+    match quals.as_expr() {
+        Some(Expr::BooleanTest(bt)) => {
             assert_eq!(bt.booltesttype, BoolTestType::IS_NOT_TRUE);
             match bt.arg.as_deref() {
                 Some(Expr::Var(v)) => assert_eq!(v.varno, 3),
                 other => panic!("unexpected BooleanTest arg: {other:?}"),
             }
         }
-        other => panic!("expected BooleanTest, got {other:?}"),
+        _ => panic!("expected BooleanTest, got {quals:?}"),
     }
 }
 
