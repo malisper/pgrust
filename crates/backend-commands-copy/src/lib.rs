@@ -39,7 +39,7 @@ use types_copy::{
 use types_core::primitive::{AttrNumber, Oid};
 use types_error::{PgError, PgResult};
 use types_nodes::ddlnodes::{CopyStmt, DefElem};
-use types_nodes::nodes::{Node, NodePtr};
+use types_nodes::nodes::{ntag, Node, NodePtr};
 use types_nodes::nodelimit::LimitOption;
 use types_nodes::parsestmt::{ParseState, RawStmt};
 use types_nodes::rawnodes::{ColumnRef, ResTarget, SelectStmt, SetOperation};
@@ -73,12 +73,12 @@ fn def_name<'a>(defel: &'a DefElem) -> &'a str {
 /// `define.c` value accessors switch on. `None` for `def->arg == NULL`.
 fn defel_arg(defel: &DefElem) -> Option<DefElemArg> {
     let node = defel.arg.as_deref()?;
-    Some(match node {
-        Node::Integer(i) => DefElemArg::Integer(i.ival as i64),
-        Node::Float(f) => DefElemArg::Float(f.fval.to_string()),
-        Node::Boolean(b) => DefElemArg::Boolean(b.boolval),
-        Node::String(s) => DefElemArg::String(s.sval.to_string()),
-        Node::A_Star(_) => DefElemArg::AStar,
+    Some(match node.node_tag() {
+        ntag::T_Integer => DefElemArg::Integer(node.expect_integer().ival as i64),
+        ntag::T_Float => DefElemArg::Float(node.expect_float().fval.to_string()),
+        ntag::T_Boolean => DefElemArg::Boolean(node.expect_boolean().boolval),
+        ntag::T_String => DefElemArg::String(node.expect_string().sval.to_string()),
+        ntag::T_A_Star => DefElemArg::AStar,
         _ => DefElemArg::AStar,
     })
 }
@@ -133,7 +133,8 @@ fn defGetCopyHeaderChoice<'mcx>(mcx: Mcx<'mcx>, defel: &DefElem, is_from: bool) 
     };
 
     // Allow 0, 1, "true", "false", "on", "off", or "match".
-    if let Node::Integer(i) = arg {
+    if arg.node_tag() == ntag::T_Integer {
+        let i = arg.expect_integer();
         match i.ival {
             0 => return Ok(CopyHeaderChoice::COPY_HEADER_FALSE),
             1 => return Ok(CopyHeaderChoice::COPY_HEADER_TRUE),
@@ -211,8 +212,8 @@ fn defGetCopyRejectLimitOption(defel: &DefElem) -> PgResult<i64> {
             return Err(PgError::error(format!("{} requires a numeric value", def_name(defel)))
                 .with_sqlstate(ERRCODE_SYNTAX_ERROR));
         }
-        Some(Node::String(s)) => backend_utils_adt_numutils::pg_strtoint64(s.sval.as_str())?,
-        Some(Node::Integer(i)) => i.ival as i64,
+        Some(s) if s.node_tag() == ntag::T_String => backend_utils_adt_numutils::pg_strtoint64(s.expect_string().sval.as_str())?,
+        Some(i) if i.node_tag() == ntag::T_Integer => i.expect_integer().ival as i64,
         Some(_) => {
             // defGetInt64 over the projected arg: only Integer / Float / String
             // produce an int64; anything else errors like define.c.
@@ -307,7 +308,7 @@ fn new_copy_format_options<'mcx>(mcx: Mcx<'mcx>) -> PgResult<CopyFormatOptions<'
 
 /// `IsA(defel->arg, A_Star)`.
 fn defel_arg_is_a_star(defel: &DefElem) -> bool {
-    matches!(defel.arg.as_deref(), Some(Node::A_Star(_)))
+    defel.arg.as_deref().is_some_and(|n| n.node_tag() == ntag::T_A_Star)
 }
 
 /// `IsA(defel->arg, List)` ⇒ the list's elements (column-name `String` nodes),
@@ -316,7 +317,10 @@ fn defel_arg_string_list<'mcx>(
     mcx: Mcx<'mcx>,
     defel: &DefElem,
 ) -> PgResult<Option<PgVec<'mcx, NodePtr<'mcx>>>> {
-    let Some(Node::List(elems)) = defel.arg.as_deref() else {
+    let Some(arg) = defel.arg.as_deref() else {
+        return Ok(None);
+    };
+    let Some(elems) = arg.as_list() else {
         return Ok(None);
     };
     let mut out: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
@@ -366,7 +370,7 @@ pub fn ProcessCopyOptions<'mcx>(
 
     // Extract options from the statement node tree.
     for node in options.unwrap_or(&[]) {
-        let Node::DefElem(defel) = node.as_ref() else {
+        let Some(defel) = node.as_ref().as_defelem() else {
             // lfirst_node(DefElem, option) — the parser only puts DefElems here.
             continue;
         };
@@ -744,7 +748,7 @@ pub fn CopyGetAttnums<'mcx>(
         }
         Some(names) => {
             for name_node in names {
-                let Node::String(sn) = name_node.as_ref() else {
+                let Some(sn) = name_node.as_ref().as_string() else {
                     // strVal(lfirst(l)) — the parser only puts String nodes here.
                     continue;
                 };
@@ -809,7 +813,7 @@ pub fn DoCopy<'mcx>(
     stmt_location: i32,
     stmt_len: i32,
 ) -> PgResult<u64> {
-    let Node::CopyStmt(stmt) = stmt else {
+    let Some(stmt) = stmt.as_copystmt() else {
         return Err(PgError::error("DoCopy: not a CopyStmt").with_sqlstate(ERRCODE_SYNTAX_ERROR));
     };
 
@@ -863,7 +867,7 @@ pub fn DoCopy<'mcx>(
 
     if let Some(relation_node) = stmt.relation.as_deref() {
         // stmt->relation is a RangeVar node.
-        let Node::RangeVar(rv) = relation_node else {
+        let Some(rv) = relation_node.as_rangevar() else {
             return Err(PgError::error("COPY: relation is not a RangeVar")
                 .with_sqlstate(ERRCODE_SYNTAX_ERROR));
         };
