@@ -171,6 +171,37 @@ fn defel_arg_is_null(defel: &DefElem) -> bool {
     defel.arg.is_none()
 }
 
+/// `defGetString(def)` (define.c). GRANT/REVOKE role-membership option values
+/// (`WITH ADMIN/INHERIT/SET <value>`) arrive as scalar value nodes; this mirrors
+/// the C arms that yield a string for those. The `TypeName`/`List` arms of the C
+/// (which need `TypeNameToString`/`NameListToString`) are never produced by the
+/// role-option grammar, so they fall through to the unrecognized-node error like
+/// the C `default`.
+fn def_get_string(def: &DefElem) -> PgResult<String> {
+    let arg = def.arg.as_deref().ok_or_else(|| {
+        ereport(ERROR)
+            .errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg(format!("{} requires a parameter", def_name(def)))
+            .into_error()
+    })?;
+    match arg {
+        // case T_Integer: return psprintf("%ld", (long) intVal(def->arg));
+        Node::Integer(i) => Ok(i.ival.to_string()),
+        // case T_Float: return castNode(Float, def->arg)->fval;
+        Node::Float(f) => Ok(f.fval.clone().unwrap_or_default()),
+        // case T_Boolean: return boolVal(def->arg) ? "true" : "false";
+        Node::Boolean(b) => Ok(if b.boolval { "true" } else { "false" }.to_string()),
+        // case T_String: return strVal(def->arg);
+        Node::String(s) => Ok(s.sval.clone().unwrap_or_default()),
+        // case T_A_Star: return pstrdup("*");
+        Node::A_Star => Ok("*".to_string()),
+        // default: elog(ERROR, "unrecognized node type: %d", nodeTag(def->arg));
+        other => Err(ereport(ERROR)
+            .errmsg_internal(format!("unrecognized node type: {}", other.node_tag_name()))
+            .into_error()),
+    }
+}
+
 /// `strVal(defel->arg)`.
 fn defel_str(defel: &DefElem) -> String {
     match defel.arg.as_deref().and_then(|n| n.as_string()) {
@@ -2774,6 +2805,7 @@ pub fn init_seams() {
 
     /* Read seams consumed within this crate's command paths. */
     seam::password_encryption::set(|| Ok(get_password_encryption()));
+    seam::def_get_string::set(|opt| def_get_string(&opt));
     seam::createrole_self_grant_enabled::set(|| Ok(get_createrole_self_grant_enabled()));
     seam::createrole_self_grant_options::set(|| Ok(get_createrole_self_grant_options()));
 
@@ -2839,6 +2871,8 @@ pub fn init_seams() {
     backend_tcop_utility_out_seams::alter_role_set::set(alter_role_set_arm);
     backend_tcop_utility_out_seams::drop_role::set(drop_role_arm);
     backend_tcop_utility_out_seams::reassign_owned_objects::set(reassign_owned_objects_arm);
+    backend_tcop_utility_out_seams::grant_role::set(grant_role_arm);
+    backend_tcop_utility_out_seams::drop_owned_objects::set(drop_owned_objects_arm);
 }
 
 /* -------------------------------------------------------------------------
@@ -2891,6 +2925,20 @@ fn drop_role_arm<'mcx>(mcx: Mcx<'mcx>, stmt: &ANode<'mcx>) -> PgResult<()> {
 fn reassign_owned_objects_arm<'mcx>(mcx: Mcx<'mcx>, stmt: &ANode<'mcx>) -> PgResult<()> {
     let owned = convert::reassign_owned_stmt_to_owned(stmt.expect_reassignownedstmt())?;
     ReassignOwnedObjects(mcx, &owned)
+}
+
+fn grant_role_arm<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut DispatchParseState<'mcx>,
+    stmt: &ANode<'mcx>,
+) -> PgResult<()> {
+    let owned = convert::grant_role_stmt_to_owned(stmt.expect_grantrolestmt())?;
+    GrantRole(mcx, Some(&*pstate), &owned)
+}
+
+fn drop_owned_objects_arm<'mcx>(mcx: Mcx<'mcx>, stmt: &ANode<'mcx>) -> PgResult<()> {
+    let owned = convert::drop_owned_stmt_to_owned(stmt.expect_dropownedstmt())?;
+    DropOwnedObjects(mcx, &owned)
 }
 
 #[cfg(test)]

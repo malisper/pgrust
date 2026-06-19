@@ -177,6 +177,48 @@ pub fn reassign_owned_stmt_to_owned(
     Ok(pn::ReassignOwnedStmt { roles, newrole })
 }
 
+pub fn grant_role_stmt_to_owned(
+    s: &types_nodes::ddlnodes::GrantRoleStmt<'_>,
+) -> PgResult<pn::GrantRoleStmt> {
+    let mut granted_roles = Vec::with_capacity(s.granted_roles.len());
+    for r in s.granted_roles.as_slice() {
+        granted_roles.push(node_to_owned(r)?);
+    }
+    let mut grantee_roles = Vec::with_capacity(s.grantee_roles.len());
+    for r in s.grantee_roles.as_slice() {
+        grantee_roles.push(node_to_owned(r)?);
+    }
+    let mut opt = Vec::with_capacity(s.opt.len());
+    for o in s.opt.as_slice() {
+        opt.push(node_to_owned(o)?);
+    }
+    let grantor = match s.grantor.as_deref() {
+        Some(r) => Some(Box::new(node_to_owned(r)?)),
+        None => None,
+    };
+    Ok(pn::GrantRoleStmt {
+        granted_roles,
+        grantee_roles,
+        is_grant: s.is_grant,
+        opt,
+        grantor,
+        behavior: s.behavior,
+    })
+}
+
+pub fn drop_owned_stmt_to_owned(
+    s: &types_nodes::ddlnodes::DropOwnedStmt<'_>,
+) -> PgResult<pn::DropOwnedStmt> {
+    let mut roles = Vec::with_capacity(s.roles.len());
+    for r in s.roles.as_slice() {
+        roles.push(node_to_owned(r)?);
+    }
+    Ok(pn::DropOwnedStmt {
+        roles,
+        behavior: s.behavior,
+    })
+}
+
 /// Convert an arena `VariableSetStmt` (the `setstmt` of `ALTER ROLE … SET`) to
 /// the owned model. `AlterRoleSet` only forwards it to `AlterSetting`; the value
 /// extraction over `args` (`A_Const` nodes) is the GUC owner's concern, so the
