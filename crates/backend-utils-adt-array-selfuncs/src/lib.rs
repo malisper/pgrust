@@ -64,7 +64,7 @@ use types_selfuncs::{
 
 use backend_utils_adt_arrayfuncs_seams::deconstruct_array;
 use backend_utils_adt_selfuncs_seams::{
-    const_node_info, examine_variable, get_restriction_variable, release_variable_stats,
+    examine_variable, get_restriction_variable, release_variable_stats,
     statistic_proc_security_check, stats_tuple_stanullfrac,
 };
 use backend_utils_cache_lsyscache_seams::{
@@ -263,17 +263,21 @@ pub fn scalararraysel_containment<'mcx>(
     }
 
     /*
-     * leftop must be a constant, else punt.
+     * leftop must be a constant, else punt. The caller (scalararraysel) already
+     * reduced leftop with estimate_expression_value and interned it into the
+     * planner node arena, so resolve it directly here (C: `if (!IsA(leftop,
+     * Const)) return -1`).
      */
-    let leftconst = match const_node_info::call(leftop)? {
-        Some(c) => c,
+    let leftconst = match root.node(leftop).as_const() {
+        Some(c) => c.clone(),
         None => return Ok(-1.0),
     };
     if leftconst.constisnull {
         /* qual can't succeed if null on left */
         return Ok(0.0);
     }
-    let constval = leftconst.constvalue;
+    /* C: `((Const *) leftop)->constvalue` — the by-value/by-ref Datum word. */
+    let constval = Datum::from_usize(leftconst.constvalue.as_usize());
 
     /* Get element type's default comparison function */
     let typentry = ElemCmpInfo::lookup(elemtype)?;

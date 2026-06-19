@@ -216,6 +216,14 @@ pub fn init_seams() {
     backend_optimizer_path_small_seams::is_pseudo_constant_clause::set(|clause| {
         grounded::is_pseudo_constant_clause(Some(clause))
     });
+    // C: `estimate_expression_value(root, node)` (clauses.c:2395). The port folds
+    // over a memory context; `root` is part of the C signature but the
+    // estimation-mode mutator does not read it (it const-folds stable functions
+    // and strips PlaceHolderVars purely structurally). Run the fold in the
+    // planner-run context the caller supplies.
+    backend_optimizer_path_small_seams::estimate_expression_value::set(|run, _root, node| {
+        fold::estimate_expression_value(run.mcx(), node.clone())
+    });
     backend_optimizer_path_small_seams::is_pseudo_constant_clause_relids::set(|clause, relids| {
         // C: `if (bms_is_empty(relids) && !contain_volatile_functions(clause))
         // return true;`. The seam threads `relids` as the planner-side

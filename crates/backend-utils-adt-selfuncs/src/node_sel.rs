@@ -27,7 +27,11 @@ use types_pathnodes::{JoinType, NodeId, PlannerInfo, SpecialJoinInfo};
 use backend_optimizer_path_joinpath_seams as jp;
 use backend_optimizer_path_small_seams as clausesel;
 use backend_optimizer_util_relnode_seams as rel_seams;
+use backend_utils_adt_arrayfuncs_seams as arr;
 use backend_utils_cache_lsyscache_seams as lsc;
+use backend_utils_cache_typcache_seams as tc;
+
+use types_nodes::primnodes::CaseTestExpr;
 
 use crate::examine::{examine_variable, release_variable_stats};
 use crate::scalar::{stats_tuple_stanullfrac, var_eq_const};
@@ -340,6 +344,313 @@ pub(crate) fn rowcomparesel<'mcx>(
 }
 
 /* ---------------------------------------------------------------------------
+ * scalararraysel (selfuncs.c:1823)
+ * ------------------------------------------------------------------------- */
+
+/// `F_EQSEL` (fmgroids.h) — `eqsel`'s pg_proc OID.
+const F_EQSEL: Oid = 101;
+/// `F_NEQSEL` (fmgroids.h) — `neqsel`'s pg_proc OID.
+const F_NEQSEL: Oid = 102;
+/// `F_EQJOINSEL` (fmgroids.h) — `eqjoinsel`'s pg_proc OID.
+const F_EQJOINSEL: Oid = 105;
+/// `F_NEQJOINSEL` (fmgroids.h) — `neqjoinsel`'s pg_proc OID.
+const F_NEQJOINSEL: Oid = 106;
+
+/// `strip_array_coercion(node)` (selfuncs.c:1790) — peel binary-compatible
+/// `ArrayCoerceExpr` / `RelabelType` wrappers off an array-valued expression.
+fn strip_array_coercion(node: &Expr) -> &Expr {
+    let mut node = node;
+    loop {
+        if let Some(acoerce) = node.as_arraycoerceexpr() {
+            // If the per-element expression is just a RelabelType on top of
+            // CaseTestExpr, then we know it's a binary-compatible relabeling.
+            let is_binary_relabel = acoerce
+                .elemexpr
+                .as_deref()
+                .and_then(|e| e.as_relabeltype())
+                .and_then(|r| r.arg.as_deref())
+                .map(|a| a.is_casetestexpr())
+                .unwrap_or(false);
+            if is_binary_relabel {
+                if let Some(arg) = acoerce.arg.as_deref() {
+                    node = arg;
+                    continue;
+                }
+            }
+            break;
+        } else if let Some(relabel) = node.as_relabeltype() {
+            // We don't really expect this case, but may as well cope.
+            if let Some(arg) = relabel.arg.as_deref() {
+                node = arg;
+                continue;
+            }
+            break;
+        } else {
+            break;
+        }
+    }
+    node
+}
+
+/// Apply the operator's selectivity estimator to a single `[leftop, elem]` arg
+/// pair (C's per-element `FunctionCall4Coll`/`FunctionCall5Coll` over the
+/// operator's `oprrest`/`oprjoin`). The installed `restriction_selectivity` /
+/// `join_selectivity` seams perform the same `get_oprrest(operator)` +
+/// `FunctionCallNColl` the C inner loop does.
+#[allow(clippy::too_many_arguments)]
+fn saop_element_selec<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    operator: Oid,
+    leftop: &Expr,
+    elem: &Expr,
+    inputcollid: Oid,
+    is_join_clause: bool,
+    var_relid: i32,
+    jointype: JoinType,
+    sjinfo: Option<&SpecialJoinInfo>,
+) -> PgResult<f64> {
+    let args = [leftop.clone(), elem.clone()];
+    if is_join_clause {
+        clausesel::join_selectivity::call(run, root, operator, &args, inputcollid, jointype, sjinfo)
+    } else {
+        clausesel::restriction_selectivity::call(run, root, operator, &args, inputcollid, var_relid)
+    }
+}
+
+/// `scalararraysel(root, clause, is_join_clause, varRelid, jointype, sjinfo)`
+/// (selfuncs.c) — selectivity of a `ScalarArrayOpExpr` (`x = ANY(array)`,
+/// `x <> ALL(array)`, etc.). 1:1 with the C body. The per-element operator
+/// estimation runs through the installed `restriction_selectivity` /
+/// `join_selectivity` seams, which look up the operator's `oprrest`/`oprjoin`
+/// and invoke it exactly as the C inner loop's `FunctionCall4Coll` does.
+pub(crate) fn scalararraysel<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    clause: &Expr,
+    is_join_clause: bool,
+    var_relid: i32,
+    jointype: JoinType,
+    sjinfo: Option<&SpecialJoinInfo>,
+) -> PgResult<f64> {
+    let saop = match clause.as_scalararrayopexpr() {
+        Some(s) => s,
+        None => panic!("scalararraysel: expected ScalarArrayOpExpr, got {clause:?}"),
+    };
+    let operator = saop.opno;
+    let use_or = saop.useOr;
+    let inputcollid = saop.inputcollid;
+    let mut is_equality = false;
+    let mut is_inequality = false;
+
+    // First, deconstruct the expression. Assert(list_length(clause->args) == 2).
+    assert_eq!(saop.args.len(), 2, "scalararraysel: SAOP must have 2 args");
+    let leftop = saop.args[0].clone();
+    let rightop = saop.args[1].clone();
+
+    // Aggressively reduce both sides to constants.
+    let leftop = clausesel::estimate_expression_value::call(run, root, &leftop)?;
+    let rightop = clausesel::estimate_expression_value::call(run, root, &rightop)?;
+
+    // Get nominal (after relabeling) element type of rightop.
+    let nominal_element_type =
+        lsc::get_base_element_type::call(backend_nodes_core::nodefuncs::expr_type(Some(&rightop))?)?;
+    if nominal_element_type == InvalidOid {
+        // probably shouldn't happen
+        return Ok(0.5);
+    }
+    // Get nominal collation, too, for generating constants.
+    let nominal_element_collation =
+        backend_nodes_core::nodefuncs::expr_collation(Some(&rightop))?;
+
+    // Look through any binary-compatible relabeling of rightop.
+    let rightop = strip_array_coercion(&rightop).clone();
+
+    // Detect whether the operator is the default equality or inequality operator
+    // of the array element type.
+    let eq_opr = tc::lookup_type_cache_eq_opr::call(nominal_element_type)?;
+    if eq_opr != InvalidOid {
+        if operator == eq_opr {
+            is_equality = true;
+        } else if lsc::get_negator::call(operator)? == eq_opr {
+            is_inequality = true;
+        }
+    }
+
+    // If it is equality or inequality, we might be able to estimate this as a
+    // form of array containment; for instance "const = ANY(column)" can be
+    // treated as "ARRAY[const] <@ column". scalararraysel_containment tries that,
+    // returning the selectivity estimate if successful, or -1 if not.
+    if (is_equality || is_inequality) && !is_join_clause {
+        let leftop_id: NodeId = root.alloc_node(leftop.clone());
+        let rightop_id: NodeId = root.alloc_node(rightop.clone());
+        let s1 = backend_utils_adt_array_selfuncs::scalararraysel_containment(
+            mcx,
+            run,
+            root,
+            leftop_id,
+            rightop_id,
+            nominal_element_type,
+            is_equality,
+            use_or,
+            var_relid,
+        )?;
+        if s1 >= 0.0 {
+            return Ok(s1);
+        }
+    }
+
+    // Look up the underlying operator's selectivity estimator. Punt if it hasn't
+    // got one.
+    let oprsel = if is_join_clause {
+        lsc::get_oprjoin::call(operator)?
+    } else {
+        lsc::get_oprrest::call(operator)?
+    };
+    if oprsel == InvalidOid {
+        return Ok(0.5);
+    }
+
+    // In the array-containment check above, we must only believe an operator is
+    // equality/inequality if it is the default btree equality operator (or its
+    // negator). But here we can be laxer, and also believe that any operator
+    // using eqsel()/neqsel() as selectivity estimator acts like equality.
+    if oprsel == F_EQSEL || oprsel == F_EQJOINSEL {
+        is_equality = true;
+    } else if oprsel == F_NEQSEL || oprsel == F_NEQJOINSEL {
+        is_inequality = true;
+    }
+
+    let mut s1: f64;
+
+    if let Some(c) = rightop.as_const() {
+        // Case 1: rightop is an Array constant.
+        if c.constisnull {
+            // qual can't succeed if null array
+            return Ok(0.0);
+        }
+        let arraydatum = c.constvalue.clone();
+
+        // get_typlenbyvalalign(ARR_ELEMTYPE) — for a base-element Const array the
+        // nominal element type equals the array header's element type.
+        let s = lsc::get_typlenbyvalalign::call(nominal_element_type)?;
+        let deconstructed = arr::deconstruct_array_v::call(
+            mcx,
+            arraydatum,
+            nominal_element_type,
+            s.typlen,
+            s.typbyval,
+            s.typalign as core::ffi::c_char,
+        )?;
+
+        // For generic operators we assume independence per element. But for
+        // "= ANY" / "<> ALL", if the elements are distinct the probabilities are
+        // disjoint, so we just sum them (with a sanity check on the result).
+        let init = if use_or { 0.0 } else { 1.0 };
+        s1 = init;
+        let mut s1disjoint = init;
+
+        for (elem_value, elem_isnull) in deconstructed.iter() {
+            let elem = Expr::Const(backend_nodes_core::makefuncs::make_const(
+                mcx,
+                nominal_element_type,
+                -1,
+                nominal_element_collation,
+                s.typlen as i32,
+                elem_value.clone(),
+                *elem_isnull,
+                s.typbyval,
+            )?);
+            let s2 = saop_element_selec(
+                run, root, operator, &leftop, &elem, inputcollid, is_join_clause, var_relid,
+                jointype, sjinfo,
+            )?;
+
+            if use_or {
+                s1 = s1 + s2 - s1 * s2;
+                if is_equality {
+                    s1disjoint += s2;
+                }
+            } else {
+                s1 *= s2;
+                if is_inequality {
+                    s1disjoint += s2 - 1.0;
+                }
+            }
+        }
+
+        // accept disjoint-probability estimate if in range
+        if (if use_or { is_equality } else { is_inequality })
+            && (0.0..=1.0).contains(&s1disjoint)
+        {
+            s1 = s1disjoint;
+        }
+    } else if let Some(ae) = rightop.as_arrayexpr().filter(|a| !a.multidims) {
+        // Case 2: rightop is a non-multidim ARRAY[] construct.
+        let (elmlen, _elmbyval) = lsc::get_typlenbyval::call(ae.element_typeid)?;
+        let _ = elmlen;
+
+        let init = if use_or { 0.0 } else { 1.0 };
+        s1 = init;
+        let mut s1disjoint = init;
+
+        for elem in ae.elements.iter() {
+            // Theoretically, if elem isn't of nominal_element_type we should
+            // insert a RelabelType, but it seems unlikely any estimator cares.
+            let s2 = saop_element_selec(
+                run, root, operator, &leftop, elem, inputcollid, is_join_clause, var_relid,
+                jointype, sjinfo,
+            )?;
+
+            if use_or {
+                s1 = s1 + s2 - s1 * s2;
+                if is_equality {
+                    s1disjoint += s2;
+                }
+            } else {
+                s1 *= s2;
+                if is_inequality {
+                    s1disjoint += s2 - 1.0;
+                }
+            }
+        }
+
+        if (if use_or { is_equality } else { is_inequality })
+            && (0.0..=1.0).contains(&s1disjoint)
+        {
+            s1 = s1disjoint;
+        }
+    } else {
+        // Case 3: otherwise, make a guess. We need a dummy rightop that doesn't
+        // look like a constant; CaseTestExpr is a convenient choice.
+        let dummyexpr = Expr::CaseTestExpr(CaseTestExpr {
+            typeId: nominal_element_type,
+            typeMod: -1,
+            collation: inputcollid,
+        });
+        let s2 = saop_element_selec(
+            run, root, operator, &leftop, &dummyexpr, inputcollid, is_join_clause, var_relid,
+            jointype, sjinfo,
+        )?;
+        s1 = if use_or { 0.0 } else { 1.0 };
+
+        // Arbitrarily assume 10 elements in the eventual array value (see also
+        // estimate_array_length). We don't risk a disjoint-probability assumption.
+        for _ in 0..10 {
+            if use_or {
+                s1 = s1 + s2 - s1 * s2;
+            } else {
+                s1 *= s2;
+            }
+        }
+    }
+
+    // result should be in range, but make sure...
+    Ok(clamp_probability(s1))
+}
+
+/* ---------------------------------------------------------------------------
  * Seam bodies (installed by crate::init_seams). The clausesel seams do not
  * carry an Mcx; the stats estimators run their detoast allocations in a per-call
  * planner-scoped memory context, matching C running them in the planner cxt.
@@ -399,4 +710,21 @@ pub fn seam_rowcomparesel<'mcx>(
     sjinfo: Option<&SpecialJoinInfo>,
 ) -> PgResult<f64> {
     rowcomparesel(run, root, clause, var_relid, jointype, sjinfo)
+}
+
+/// Seam body for `scalararraysel`.
+pub fn seam_scalararraysel<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    clause: &Expr,
+    is_join_clause: bool,
+    var_relid: i32,
+    jointype: JoinType,
+    sjinfo: Option<&SpecialJoinInfo>,
+) -> PgResult<f64> {
+    let cx = mcx::MemoryContext::new("selfuncs scalararraysel estimate");
+    let mcx = cx.mcx();
+    scalararraysel(
+        mcx, run, root, clause, is_join_clause, var_relid, jointype, sjinfo,
+    )
 }

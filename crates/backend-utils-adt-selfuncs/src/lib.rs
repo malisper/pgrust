@@ -94,6 +94,7 @@ pub fn init_seams() {
     backend_optimizer_path_small_seams::nulltestsel::set(node_sel::seam_nulltestsel);
     backend_optimizer_path_small_seams::nulltestsel_var::set(node_sel::seam_nulltestsel);
     backend_optimizer_path_small_seams::rowcomparesel::set(node_sel::seam_rowcomparesel);
+    backend_optimizer_path_small_seams::scalararraysel::set(node_sel::seam_scalararraysel);
 
     // The index-AM cost-estimation family (genericcostestimate/btcostestimate),
     // reached through costsize.c's `amcostestimate` dispatch.

@@ -47,6 +47,8 @@ backend-utils-adt-datetime = { path = "../backend-utils-adt-datetime" }
 backend-utils-adt-range-selfuncs = { path = "../backend-utils-adt-range-selfuncs" }
 backend-utils-adt-network-selfuncs = { path = "../backend-utils-adt-network-selfuncs" }
 backend-utils-adt-array-selfuncs = { path = "../backend-utils-adt-array-selfuncs" }
+backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
+backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
 backend-utils-adt-geo-selfuncs = { path = "../backend-utils-adt-geo-selfuncs" }
 backend-utils-adt-regexp-seams = { path = "../backend-utils-adt-regexp-seams" }
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
