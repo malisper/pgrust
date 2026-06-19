@@ -26,7 +26,7 @@ use types_nodes::executor::TupleSlotKind;
 use types_nodes::nodeagg::{do_aggsplit_combine, AggStrategy, Aggref};
 use backend_executor_nodeAgg::AggStateData;
 use types_nodes::parsenodes::OBJECT_FUNCTION;
-use types_nodes::primnodes::{Expr, OpExpr, AND_EXPR};
+use types_nodes::primnodes::{etag, Expr, OpExpr, AND_EXPR};
 use types_nodes::EStateData;
 use types_tuple::heaptuple::TupleDescData;
 
@@ -1461,8 +1461,9 @@ pub fn exec_build_param_set_equal<'mcx>(
 /// Aggref/WindowFunc/GroupingFunc argument lists are NOT descended (their args
 /// are compiled separately), matching C.
 fn agg_setup_walker(node: &Expr, info: &mut LastAttnumInfo) {
-    match node {
-        Expr::Var(variable) => {
+    match node.expr_tag() {
+        etag::T_Var => {
+            let variable = node.as_var().expect("Var");
             let attnum = variable.varattno;
             match variable.varno {
                 INNER_VAR => info.last_inner = info.last_inner.max(attnum),
@@ -1470,37 +1471,49 @@ fn agg_setup_walker(node: &Expr, info: &mut LastAttnumInfo) {
                 _ => info.last_scan = info.last_scan.max(attnum),
             }
         }
-        Expr::Const(_)
-        | Expr::Param(_)
-        | Expr::CaseTestExpr(_)
-        | Expr::CoerceToDomainValue(_)
-        | Expr::SetToDefault(_)
-        | Expr::CurrentOfExpr(_)
-        | Expr::NextValueExpr(_)
-        | Expr::SQLValueFunction(_)
-        | Expr::Aggref(_)
-        | Expr::GroupingFunc(_)
-        | Expr::WindowFunc(_)
-        | Expr::MergeSupportFunc(_) => {}
-        Expr::RelabelType(e) => agg_descend_opt(e.arg.as_deref(), info),
-        Expr::CollateExpr(e) => agg_descend_opt(e.arg.as_deref(), info),
-        Expr::CoerceViaIO(e) => agg_descend_opt(e.arg.as_deref(), info),
-        Expr::ConvertRowtypeExpr(e) => agg_descend_opt(e.arg.as_deref(), info),
-        Expr::FieldSelect(e) => agg_descend_opt(e.arg.as_deref(), info),
-        Expr::NamedArgExpr(e) => agg_descend_opt(e.arg.as_deref(), info),
-        Expr::NullTest(e) => agg_descend_opt(e.arg.as_deref(), info),
-        Expr::BooleanTest(e) => agg_descend_opt(e.arg.as_deref(), info),
-        Expr::CoerceToDomain(e) => agg_descend_opt(e.arg.as_deref(), info),
-        Expr::ArrayCoerceExpr(e) => agg_descend_opt(e.arg.as_deref(), info),
-        Expr::FuncExpr(e) => agg_descend_list(&e.args, info),
-        Expr::OpExpr(e) | Expr::DistinctExpr(e) | Expr::NullIfExpr(e) => {
+        etag::T_Const
+        | etag::T_Param
+        | etag::T_CaseTestExpr
+        | etag::T_CoerceToDomainValue
+        | etag::T_SetToDefault
+        | etag::T_CurrentOfExpr
+        | etag::T_NextValueExpr
+        | etag::T_SQLValueFunction
+        | etag::T_Aggref
+        | etag::T_GroupingFunc
+        | etag::T_WindowFunc
+        | etag::T_MergeSupportFunc => {}
+        etag::T_RelabelType => agg_descend_opt(node.expect_relabeltype().arg.as_deref(), info),
+        etag::T_CollateExpr => agg_descend_opt(node.expect_collateexpr().arg.as_deref(), info),
+        etag::T_CoerceViaIO => agg_descend_opt(node.expect_coerceviaio().arg.as_deref(), info),
+        etag::T_ConvertRowtypeExpr => {
+            agg_descend_opt(node.expect_convertrowtypeexpr().arg.as_deref(), info)
+        }
+        etag::T_FieldSelect => agg_descend_opt(node.expect_fieldselect().arg.as_deref(), info),
+        etag::T_NamedArgExpr => agg_descend_opt(node.expect_namedargexpr().arg.as_deref(), info),
+        etag::T_NullTest => agg_descend_opt(node.expect_nulltest().arg.as_deref(), info),
+        etag::T_BooleanTest => agg_descend_opt(node.expect_booleantest().arg.as_deref(), info),
+        etag::T_CoerceToDomain => {
+            agg_descend_opt(node.expect_coercetodomain().arg.as_deref(), info)
+        }
+        etag::T_ArrayCoerceExpr => {
+            agg_descend_opt(node.expect_arraycoerceexpr().arg.as_deref(), info)
+        }
+        etag::T_FuncExpr => agg_descend_list(&node.expect_funcexpr().args, info),
+        etag::T_OpExpr | etag::T_DistinctExpr | etag::T_NullIfExpr => {
+            let e = node
+                .as_opexpr()
+                .or_else(|| node.as_distinctexpr())
+                .or_else(|| node.as_nullifexpr())
+                .expect("OpExpr/DistinctExpr/NullIfExpr");
             agg_descend_list(&e.args, info)
         }
-        Expr::BoolExpr(e) => agg_descend_list(&e.args, info),
-        Expr::CoalesceExpr(e) => agg_descend_list(&e.args, info),
-        Expr::MinMaxExpr(e) => agg_descend_list(&e.args, info),
-        Expr::ArrayExpr(e) => agg_descend_list(&e.elements, info),
-        Expr::CaseExpr(e) => {
+        etag::T_BoolExpr => agg_descend_list(&node.expect_boolexpr().args, info),
+        etag::T_CoalesceExpr => agg_descend_list(&node.expect_coalesceexpr().args, info),
+        etag::T_MinMaxExpr => agg_descend_list(&node.expect_minmaxexpr().args, info),
+        etag::T_ArrayExpr => agg_descend_list(&node.expect_arrayexpr().elements, info),
+        etag::T_CaseExpr => {
+            let e = node.expect_caseexpr();
             agg_descend_opt(e.arg.as_deref(), info);
             for w in &e.args {
                 agg_descend_opt(w.expr.as_deref(), info);
@@ -1860,13 +1873,16 @@ pub fn classify_testexpr(node: &SubPlanState<'_>) -> CombiningTestExpr {
         .as_ref()
         .expect("buildSubPlanHash: hashable subplan->testexpr is NULL");
 
-    match &**testexpr {
-        Expr::OpExpr(_) => CombiningTestExpr::SingleOp,
-        Expr::BoolExpr(b) if b.boolop == AND_EXPR => CombiningTestExpr::AndClause {
-            ncols: b.args.len() as i32,
-        },
-        other => CombiningTestExpr::Unrecognized {
-            node_tag: node_tag_of(other),
+    let texpr: &Expr = testexpr;
+    match texpr.expr_tag() {
+        etag::T_OpExpr => CombiningTestExpr::SingleOp,
+        etag::T_BoolExpr if texpr.expect_boolexpr().boolop == AND_EXPR => {
+            CombiningTestExpr::AndClause {
+                ncols: texpr.expect_boolexpr().args.len() as i32,
+            }
+        }
+        _ => CombiningTestExpr::Unrecognized {
+            node_tag: node_tag_of(texpr),
         },
     }
 }
@@ -1927,20 +1943,21 @@ pub fn resolve_combining_op(node: &SubPlanState<'_>, idx: usize) -> PgResult<Com
 
 /// `lfirst_node(OpExpr, list_nth_cell(oplist, idx))`.
 fn oplist_op(testexpr: &Expr, idx: usize) -> &OpExpr {
-    let elem = match testexpr {
-        Expr::OpExpr(op) => {
+    let elem = match testexpr.expr_tag() {
+        etag::T_OpExpr => {
             assert!(idx == 0, "oplist index {idx} out of range for single OpExpr");
-            return op;
+            return testexpr.as_opexpr().expect("OpExpr");
         }
-        Expr::BoolExpr(b) if b.boolop == AND_EXPR => b
+        etag::T_BoolExpr if testexpr.expect_boolexpr().boolop == AND_EXPR => testexpr
+            .expect_boolexpr()
             .args
             .get(idx)
             .unwrap_or_else(|| panic!("oplist index {idx} out of range for and-clause args")),
-        other => panic!("resolve_combining_op: subplan->testexpr is neither OpExpr nor AND-clause BoolExpr: {other:?}"),
+        _ => panic!("resolve_combining_op: subplan->testexpr is neither OpExpr nor AND-clause BoolExpr: {testexpr:?}"),
     };
-    match elem {
-        Expr::OpExpr(op) => op,
-        other => panic!("resolve_combining_op: and-clause arg {idx} is not an OpExpr: {other:?}"),
+    match elem.expr_tag() {
+        etag::T_OpExpr => elem.as_opexpr().expect("OpExpr"),
+        _ => panic!("resolve_combining_op: and-clause arg {idx} is not an OpExpr: {elem:?}"),
     }
 }
 

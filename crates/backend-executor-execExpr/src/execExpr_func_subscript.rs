@@ -24,7 +24,7 @@ use types_core::AttrNumber;
 use types_error::PgResult;
 use types_nodes::execexpr::{ExprState, ProjectionInfo, SubPlanState};
 use types_nodes::execnodes::Opaque;
-use types_nodes::primnodes::Expr;
+use types_nodes::primnodes::{etag, Expr};
 use types_nodes::{EStateData, EcxtId, SlotId};
 
 use backend_executor_execExpr_seams::{ProjectionKind, SlotAttr};
@@ -352,25 +352,35 @@ pub(crate) fn is_assignment_indirection_expr(expr: Option<&Expr>) -> bool {
         None => return false,
         Some(e) => e,
     };
-    match expr {
+    match expr.expr_tag() {
         // C: if (IsA(expr, FieldStore)) { ... if arg is CaseTestExpr ... }
-        Expr::FieldStore(fstore) => {
-            if matches!(fstore.arg.as_deref(), Some(Expr::CaseTestExpr(_))) {
+        etag::T_FieldStore => {
+            let fstore = expr.expect_fieldstore();
+            if matches!(
+                fstore.arg.as_deref().map(|a| a.expr_tag()),
+                Some(etag::T_CaseTestExpr)
+            ) {
                 return true;
             }
         }
         // C: else if (IsA(expr, SubscriptingRef)) { ... if refexpr is CaseTestExpr }
-        Expr::SubscriptingRef(sbs_ref) => {
-            if matches!(sbs_ref.refexpr.as_deref(), Some(Expr::CaseTestExpr(_))) {
+        etag::T_SubscriptingRef => {
+            let sbs_ref = expr.expect_subscriptingref();
+            if matches!(
+                sbs_ref.refexpr.as_deref().map(|a| a.expr_tag()),
+                Some(etag::T_CaseTestExpr)
+            ) {
                 return true;
             }
         }
         // C: else if (IsA(expr, CoerceToDomain)) return recurse(cd->arg);
-        Expr::CoerceToDomain(cd) => {
+        etag::T_CoerceToDomain => {
+            let cd = expr.expect_coercetodomain();
             return is_assignment_indirection_expr(cd.arg.as_deref());
         }
         // C: else if (IsA(expr, RelabelType)) return recurse(r->arg);
-        Expr::RelabelType(r) => {
+        etag::T_RelabelType => {
+            let r = expr.expect_relabeltype();
             return is_assignment_indirection_expr(r.arg.as_deref());
         }
         _ => {}

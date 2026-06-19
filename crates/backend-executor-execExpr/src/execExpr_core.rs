@@ -33,7 +33,7 @@ use types_nodes::execexpr::{
 use types_nodes::execnodes::PlanStateData;
 use types_nodes::nodehashjoin::HashJoinState;
 use types_nodes::primnodes::{
-    BoolExprType, Const, Expr, NullTestType, ParamKind, VarReturningType as VrtKind,
+    etag, BoolExprType, Const, Expr, NullTestType, ParamKind, VarReturningType as VrtKind,
 };
 use types_nodes::execnodes::EStateLink;
 use types_nodes::{EStateData, EcxtId, SlotId};
@@ -165,8 +165,9 @@ fn exec_ready_expr<'mcx>(state: &mut ExprState<'mcx>) -> PgResult<()> {
 /// descended into (their args are evaluated separately), matching C, and
 /// SubPlan is handled by accumulating the MULTIEXPR count (not modeled deeply).
 fn expr_setup_walker(node: &Expr, info: &mut ExprSetupInfo) {
-    match node {
-        Expr::Var(variable) => {
+    match node.expr_tag() {
+        etag::T_Var => {
+            let variable = node.as_var().expect("Var");
             let attnum = variable.varattno;
             match variable.varno {
                 INNER_VAR => {
@@ -179,40 +180,48 @@ fn expr_setup_walker(node: &Expr, info: &mut ExprSetupInfo) {
             }
         }
         // Pure-leaf nodes — no child expressions to descend.
-        Expr::Const(_)
-        | Expr::Param(_)
-        | Expr::CaseTestExpr(_)
-        | Expr::CoerceToDomainValue(_)
-        | Expr::SetToDefault(_)
-        | Expr::CurrentOfExpr(_)
-        | Expr::NextValueExpr(_)
-        | Expr::SQLValueFunction(_)
-        | Expr::Aggref(_)
-        | Expr::GroupingFunc(_)
-        | Expr::WindowFunc(_)
-        | Expr::MergeSupportFunc(_) => {}
+        etag::T_Const
+        | etag::T_Param
+        | etag::T_CaseTestExpr
+        | etag::T_CoerceToDomainValue
+        | etag::T_SetToDefault
+        | etag::T_CurrentOfExpr
+        | etag::T_NextValueExpr
+        | etag::T_SQLValueFunction
+        | etag::T_Aggref
+        | etag::T_GroupingFunc
+        | etag::T_WindowFunc
+        | etag::T_MergeSupportFunc => {}
         // Single-arg passthrough / coercion nodes.
-        Expr::RelabelType(e) => descend_opt(e.arg.as_deref(), info),
-        Expr::CollateExpr(e) => descend_opt(e.arg.as_deref(), info),
-        Expr::CoerceViaIO(e) => descend_opt(e.arg.as_deref(), info),
-        Expr::ConvertRowtypeExpr(e) => descend_opt(e.arg.as_deref(), info),
-        Expr::FieldSelect(e) => descend_opt(e.arg.as_deref(), info),
-        Expr::NamedArgExpr(e) => descend_opt(e.arg.as_deref(), info),
-        Expr::NullTest(e) => descend_opt(e.arg.as_deref(), info),
-        Expr::BooleanTest(e) => descend_opt(e.arg.as_deref(), info),
-        Expr::CoerceToDomain(e) => descend_opt(e.arg.as_deref(), info),
-        Expr::ArrayCoerceExpr(e) => descend_opt(e.arg.as_deref(), info),
+        etag::T_RelabelType => descend_opt(node.expect_relabeltype().arg.as_deref(), info),
+        etag::T_CollateExpr => descend_opt(node.expect_collateexpr().arg.as_deref(), info),
+        etag::T_CoerceViaIO => descend_opt(node.expect_coerceviaio().arg.as_deref(), info),
+        etag::T_ConvertRowtypeExpr => {
+            descend_opt(node.expect_convertrowtypeexpr().arg.as_deref(), info)
+        }
+        etag::T_FieldSelect => descend_opt(node.expect_fieldselect().arg.as_deref(), info),
+        etag::T_NamedArgExpr => descend_opt(node.expect_namedargexpr().arg.as_deref(), info),
+        etag::T_NullTest => descend_opt(node.expect_nulltest().arg.as_deref(), info),
+        etag::T_BooleanTest => descend_opt(node.expect_booleantest().arg.as_deref(), info),
+        etag::T_CoerceToDomain => descend_opt(node.expect_coercetodomain().arg.as_deref(), info),
+        etag::T_ArrayCoerceExpr => descend_opt(node.expect_arraycoerceexpr().arg.as_deref(), info),
         // Operator / function nodes — descend their argument lists.
-        Expr::FuncExpr(e) => descend_list(&e.args, info),
-        Expr::OpExpr(e) | Expr::DistinctExpr(e) | Expr::NullIfExpr(e) => {
+        etag::T_FuncExpr => descend_list(&node.expect_funcexpr().args, info),
+        etag::T_OpExpr | etag::T_DistinctExpr | etag::T_NullIfExpr => {
+            let e = node
+                .as_opexpr()
+                .or_else(|| node.as_distinctexpr())
+                .or_else(|| node.as_nullifexpr())
+                .expect("OpExpr/DistinctExpr/NullIfExpr");
             descend_list(&e.args, info)
         }
-        Expr::BoolExpr(e) => descend_list(&e.args, info),
-        Expr::CoalesceExpr(e) => descend_list(&e.args, info),
-        Expr::MinMaxExpr(e) => descend_list(&e.args, info),
-        Expr::ArrayExpr(e) => descend_list(&e.elements, info),
+        etag::T_BoolExpr => descend_list(&node.expect_boolexpr().args, info),
+        etag::T_CoalesceExpr => descend_list(&node.expect_coalesceexpr().args, info),
+        etag::T_MinMaxExpr => descend_list(&node.expect_minmaxexpr().args, info),
+        etag::T_ArrayExpr => descend_list(&node.expect_arrayexpr().elements, info),
         // CASE: arg + each WHEN's (expr,result) + ELSE.
-        Expr::CaseExpr(e) => {
+        etag::T_CaseExpr => {
+            let e = node.expect_caseexpr();
             descend_opt(e.arg.as_deref(), info);
             for w in &e.args {
                 descend_opt(w.expr.as_deref(), info);
@@ -382,9 +391,10 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
     resv: ResultCellId,
 ) -> PgResult<()> {
     // C: check_stack_depth(); — guarded by the host stack here.
-    match node {
+    match node.expr_tag() {
         // ----- T_Var -----
-        Expr::Var(variable) => {
+        etag::T_Var => {
+            let variable = node.as_var().expect("Var");
             let mut scratch = ExprEvalStep {
                 opcode: ExprEvalOp::EEOP_SCAN_VAR, // set below
                 resvalue: resv,
@@ -434,7 +444,8 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
         }
 
         // ----- T_Const -----
-        Expr::Const(con) => {
+        etag::T_Const => {
+            let con = node.expect_const();
             let scratch = ExprEvalStep {
                 opcode: ExprEvalOp::EEOP_CONST,
                 resvalue: resv,
@@ -449,7 +460,8 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
         }
 
         // ----- T_Param -----
-        Expr::Param(param) => {
+        etag::T_Param => {
+            let param = node.expect_param();
             match param.paramkind {
                 ParamKind::PARAM_EXEC => {
                     let scratch = ExprEvalStep {
@@ -490,7 +502,8 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
         }
 
         // ----- T_Aggref -----
-        Expr::Aggref(aggref) => {
+        etag::T_Aggref => {
+            let aggref = node.expect_aggref();
             // C (execExpr.c ExecInitExprRec T_Aggref):
             //   AggState *aggstate = castNode(AggState, state->parent);
             //   aggstate->aggs = lappend(aggstate->aggs, astate);
@@ -524,7 +537,8 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
         }
 
         // ----- T_GroupingFunc -----
-        Expr::GroupingFunc(grp) => {
+        etag::T_GroupingFunc => {
+            let grp = node.expect_groupingfunc();
             // C reads agg->groupingSets off the parent Agg plan to decide
             // whether to carry the cols; without the threaded parent we carry
             // the cols (the common grouping-sets case), matching the EXPLAIN
@@ -546,7 +560,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
         }
 
         // ----- T_MergeSupportFunc -----
-        Expr::MergeSupportFunc(_) => {
+        etag::T_MergeSupportFunc => {
             let scratch = ExprEvalStep {
                 opcode: ExprEvalOp::EEOP_MERGE_SUPPORT_FUNC,
                 resvalue: resv,
@@ -558,7 +572,8 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
         }
 
         // ----- T_FuncExpr / T_OpExpr / T_DistinctExpr / T_NullIfExpr -----
-        Expr::FuncExpr(func) => {
+        etag::T_FuncExpr => {
+            let func = node.expect_funcexpr();
             let mut scratch = scratch_for(resv);
             crate::execExpr_func_subscript::exec_init_func(
                 mcx,
@@ -576,20 +591,23 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
         // of the implementing function the planner filled in) and
         // op->inputcollid to ExecInitFunc — NOT op->opno (a PG_OPERATOR oid),
         // which would resolve the wrong function in fmgr_info.
-        Expr::OpExpr(op) => {
+        etag::T_OpExpr => {
+            let op = node.as_opexpr().expect("OpExpr");
             let mut scratch = scratch_for(resv);
             crate::execExpr_func_subscript::exec_init_func(mcx, &mut scratch, node, &op.args, op.opfuncid, op.inputcollid, state)?;
             expr_eval_push_step(mcx, state, scratch)?;
             Ok(())
         }
-        Expr::DistinctExpr(op) => {
+        etag::T_DistinctExpr => {
+            let op = node.expect_distinctexpr();
             let mut scratch = scratch_for(resv);
             crate::execExpr_func_subscript::exec_init_func(mcx, &mut scratch, node, &op.args, op.opfuncid, op.inputcollid, state)?;
             scratch.opcode = ExprEvalOp::EEOP_DISTINCT;
             expr_eval_push_step(mcx, state, scratch)?;
             Ok(())
         }
-        Expr::NullIfExpr(op) => {
+        etag::T_NullIfExpr => {
+            let op = node.expect_nullifexpr();
             let mut scratch = scratch_for(resv);
             crate::execExpr_func_subscript::exec_init_func(mcx, &mut scratch, node, &op.args, op.opfuncid, op.inputcollid, state)?;
             scratch.opcode = ExprEvalOp::EEOP_NULLIF;
@@ -598,7 +616,8 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
         }
 
         // ----- T_NamedArgExpr (transparent wrapper around its arg) -----
-        Expr::NamedArgExpr(nae) => {
+        etag::T_NamedArgExpr => {
+            let nae = node.expect_namedargexpr();
             let arg = nae
                 .arg
                 .as_deref()
@@ -607,19 +626,22 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
         }
 
         // ----- T_RelabelType (no-op coercion) -----
-        Expr::RelabelType(relabel) => {
+        etag::T_RelabelType => {
+            let relabel = node.expect_relabeltype();
             let arg = relabel.arg.as_deref().expect("RelabelType.arg present");
             exec_init_expr_rec(mcx, arg, state, resv)
         }
 
         // ----- T_CollateExpr (planner removes it; transparent if seen) -----
-        Expr::CollateExpr(collate) => {
+        etag::T_CollateExpr => {
+            let collate = node.expect_collateexpr();
             let arg = collate.arg.as_deref().expect("CollateExpr.arg present");
             exec_init_expr_rec(mcx, arg, state, resv)
         }
 
         // ----- T_BoolExpr -----
-        Expr::BoolExpr(boolexpr) => {
+        etag::T_BoolExpr => {
+            let boolexpr = node.expect_boolexpr();
             let nargs = boolexpr.args.len();
             // allocate scratch NULL-tracker cell shared by all AND/OR steps
             let anynull = if boolexpr.boolop != BoolExprType::NOT_EXPR {
@@ -680,7 +702,8 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
         }
 
         // ----- T_CaseExpr -----
-        Expr::CaseExpr(caseexpr) => {
+        etag::T_CaseExpr => {
+            let caseexpr = node.expect_caseexpr();
             // If there's a test expression, C evaluates it into a caseval/
             // casenull workspace cell and (only if get_typlen(exprType(arg)) ==
             // -1, i.e. a varlena that could be an expanded datum) emits an
@@ -764,7 +787,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
         }
 
         // ----- T_CaseTestExpr -----
-        Expr::CaseTestExpr(_) => {
+        etag::T_CaseTestExpr => {
             let scratch = match state.innermost_caseval {
                 None => ExprEvalStep {
                     opcode: ExprEvalOp::EEOP_CASE_TESTVAL_EXT,
@@ -784,7 +807,8 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
         }
 
         // ----- T_CoalesceExpr -----
-        Expr::CoalesceExpr(coalesce) => {
+        etag::T_CoalesceExpr => {
+            let coalesce = node.expect_coalesceexpr();
             let mut adjust_jumps: PgVec<'mcx, usize> =
                 mcx::vec_with_capacity_in(mcx, coalesce.args.len())?;
             for e in &coalesce.args {
@@ -812,7 +836,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
         }
 
         // ----- T_SQLValueFunction -----
-        Expr::SQLValueFunction(_svf) => {
+        etag::T_SQLValueFunction => {
             let scratch = ExprEvalStep {
                 opcode: ExprEvalOp::EEOP_SQLVALUEFUNCTION,
                 resvalue: resv,
@@ -828,7 +852,8 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
         }
 
         // ----- T_NullTest -----
-        Expr::NullTest(ntest) => {
+        etag::T_NullTest => {
+            let ntest = node.expect_nulltest();
             if ntest.argisrow {
                 // Row null-test needs a rowcache and the composite-deform path
                 // (ExecEvalRowNull[NotNull]); the rowcache lives in the step,
@@ -860,7 +885,8 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
         }
 
         // ----- T_BooleanTest -----
-        Expr::BooleanTest(btest) => {
+        etag::T_BooleanTest => {
+            let btest = node.expect_booleantest();
             use types_nodes::primnodes::BoolTestType;
             // Evaluate argument directly into result datum.
             let arg = btest.arg.as_deref().expect("BooleanTest.arg present");
@@ -884,7 +910,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
         }
 
         // ----- T_CurrentOfExpr -----
-        Expr::CurrentOfExpr(_) => {
+        etag::T_CurrentOfExpr => {
             let scratch = ExprEvalStep {
                 opcode: ExprEvalOp::EEOP_CURRENTOFEXPR,
                 resvalue: resv,
@@ -896,7 +922,8 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
         }
 
         // ----- T_NextValueExpr -----
-        Expr::NextValueExpr(nve) => {
+        etag::T_NextValueExpr => {
+            let nve = node.expect_nextvalueexpr();
             let scratch = ExprEvalStep {
                 opcode: ExprEvalOp::EEOP_NEXTVALUEEXPR,
                 resvalue: resv,
@@ -911,7 +938,8 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
         }
 
         // ----- T_FieldSelect -----
-        Expr::FieldSelect(fselect) => {
+        etag::T_FieldSelect => {
+            let fselect = node.expect_fieldselect();
             // Evaluate the input rowtype value into the result cell, then the
             // FIELDSELECT step extracts the field. The rowcache is filled at
             // runtime (the typcache owner supplies the descriptor); the step
@@ -934,7 +962,8 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
 
         // ----- nodes routed to owner families / structural blockers -----
         // ----- T_ScalarArrayOpExpr -----
-        Expr::ScalarArrayOpExpr(opexpr) => {
+        etag::T_ScalarArrayOpExpr => {
+            let opexpr = node.expect_scalararrayopexpr();
             let mut scratch = scratch_for(resv);
             crate::execExpr_func_subscript::exec_init_scalar_array_op(
                 mcx, &mut scratch, opexpr, state, resv,
@@ -943,7 +972,8 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             Ok(())
         }
         // ----- T_MinMaxExpr -----
-        Expr::MinMaxExpr(minmaxexpr) => {
+        etag::T_MinMaxExpr => {
+            let minmaxexpr = node.expect_minmaxexpr();
             let nelems = minmaxexpr.args.len();
 
             // Look up the btree comparison function for the datatype.
@@ -1032,7 +1062,8 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             Ok(())
         }
         // ----- T_ArrayExpr -----
-        Expr::ArrayExpr(arrayexpr) => {
+        etag::T_ArrayExpr => {
+            let arrayexpr = node.expect_arrayexpr();
             // Evaluate by computing each element, then forming the array.
             // Elements are computed into per-element result cells associated
             // with the ARRAYEXPR step (the owned-model stand-in for C's
@@ -1077,7 +1108,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             expr_eval_push_step(mcx, state, scratch)?;
             Ok(())
         }
-        Expr::RowExpr(_) => panic!(
+        etag::T_RowExpr => panic!(
             "execExpr-core: RowExpr recurses each field into &scratch.d.row.elemvalues[i] / \
              elemnulls[i] (execExpr.c:2048-2050), but the ExprEvalStepData::Row variant models \
              elemvalues/elemnulls as plain Datum/bool workspace vecs with no per-element \
@@ -1086,7 +1117,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
              needs ExecTypeFromExprList + BlessTupleDesc (execTuples owner, no seam). \
              lookup_rowtype_tupdesc_copy (named-type branch) and exprType are landed seams."
         ),
-        Expr::RowCompareExpr(_) => panic!(
+        etag::T_RowCompareExpr => panic!(
             "execExpr-core: RowCompareExpr recurses left/right args into &fcinfo->args[0/1].value \
              (execExpr.c:2127-2130), but the ExprEvalStepData::RowCompareStep variant carries \
              finfo/fcinfo_data/fn_addr/jumpnull/jumpdone with no per-arg ResultCellId cells (the \
@@ -1096,14 +1127,16 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
              lockstep with the interpreter (joint keystone). The opfamily/proc lsyscache lookups \
              and fmgr_info seams are landed."
         ),
-        Expr::SubscriptingRef(sbsref) => {
+        etag::T_SubscriptingRef => {
+            let sbsref = node.expect_subscriptingref();
             let mut scratch = scratch_for(resv);
             crate::execExpr_func_subscript::exec_init_subscripting_ref(
                 mcx, &mut scratch, sbsref, state, resv,
             )
         }
         // ----- T_CoerceViaIO -----
-        Expr::CoerceViaIO(iocoerce) => {
+        etag::T_CoerceViaIO => {
+            let iocoerce = node.expect_coerceviaio();
             // C: ExecInitExprRec(iocoerce->arg, state, resv, resnull);
             let arg = iocoerce.arg.as_deref().expect("CoerceViaIO.arg present");
             exec_init_expr_rec(mcx, arg, state, resv)?;
@@ -1210,7 +1243,8 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             Ok(())
         }
         // ----- T_ArrayCoerceExpr -----
-        Expr::ArrayCoerceExpr(acoerce) => {
+        etag::T_ArrayCoerceExpr => {
+            let acoerce = node.expect_arraycoerceexpr();
             // C: ExecInitExprRec(acoerce->arg, state, resv, resnull);
             let arg = acoerce.arg.as_deref().expect("ArrayCoerceExpr.arg present");
             exec_init_expr_rec(mcx, arg, state, resv)?;
@@ -1312,7 +1346,8 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             Ok(())
         }
         // ----- T_ConvertRowtypeExpr -----
-        Expr::ConvertRowtypeExpr(convert) => {
+        etag::T_ConvertRowtypeExpr => {
+            let convert = node.expect_convertrowtypeexpr();
             // C: rowcachep = palloc(2 * sizeof(ExprEvalRowtypeCache));
             //    rowcachep[0].cacheptr = NULL; rowcachep[1].cacheptr = NULL;
             // The in/out rowtype caches are fresh (cacheptr == NULL); the
@@ -1353,7 +1388,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             expr_eval_push_step(mcx, state, scratch)?;
             Ok(())
         }
-        Expr::FieldStore(_) => panic!(
+        etag::T_FieldStore => panic!(
             "execExpr-core: FieldStore threads each new field value through \
              state->innermost_caseval = &values[fieldnum-1] and recurses into \
              &values[fieldnum-1] (execExpr.c:1581-1586), but the ExprEvalStepData::FieldStore \
@@ -1366,7 +1401,8 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
              is a landed seam."
         ),
         // ----- T_CoerceToDomain -----
-        Expr::CoerceToDomain(ctest) => {
+        etag::T_CoerceToDomain => {
+            let ctest = node.expect_coercetodomain();
             // C: ExecInitCoerceToDomain(&scratch, ctest, state, resv, resnull);
             // The DOMAIN_NOTNULL/DOMAIN_CHECK step emission is owned by the
             // execExpr_domain_agg sibling family (it threads the
@@ -1386,7 +1422,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
         }
 
         // ----- T_CoerceToDomainValue -----
-        Expr::CoerceToDomainValue(_) => {
+        etag::T_CoerceToDomainValue => {
             // C: read from innermost_domainval; if NULL (a standalone domain
             //    check rather than one embedded in a larger expression) we must
             //    read from econtext->domainValue_datum via the specialized
@@ -1411,7 +1447,8 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             expr_eval_push_step(mcx, state, scratch)?;
             Ok(())
         }
-        Expr::SubPlan(subplan) => {
+        etag::T_SubPlan => {
+            let subplan = node.expect_subplan();
             // `Expr::SubPlan` carries a `Box<SubPlan<'static>>` (the lifetime-free
             // Expr enum erases the arena lifetime); the SubPlan tree is allocated
             // in the EState per-query context, so reinstate the compiler's `'mcx`
@@ -1425,11 +1462,12 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             };
             crate::execExpr_func_subscript::exec_init_sub_plan_expr(mcx, sub, state, resv)
         }
-        Expr::AlternativeSubPlan(_) => panic!(
+        etag::T_AlternativeSubPlan => panic!(
             "execExpr-core: AlternativeSubPlan must be replaced by a concrete SubPlan before \
              execution (planner: select cheapest alternative)"
         ),
-        Expr::WindowFunc(wfunc) => {
+        etag::T_WindowFunc => {
+            let wfunc = node.expect_windowfunc();
             // C (execExpr.c ExecInitExprRec T_WindowFunc):
             //   WindowFuncExprState *wfstate = makeNode(WindowFuncExprState);
             //   wfstate->wfunc = wfunc;
@@ -1516,30 +1554,32 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             Ok(())
         }
         // ----- T_JsonExpr (JSON_VALUE / JSON_QUERY / JSON_EXISTS) -----
-        Expr::JsonExpr(jsexpr) => {
+        etag::T_JsonExpr => {
+            let jsexpr = node.expect_jsonexpr();
             crate::execExpr_json::exec_init_json_expr(mcx, jsexpr, state, resv)
         }
         // ----- T_XmlExpr (XMLELEMENT / XMLFOREST / XMLCONCAT / ...) -----
-        Expr::XmlExpr(xexpr) => {
+        etag::T_XmlExpr => {
+            let xexpr = node.expect_xmlexpr();
             crate::execExpr_json::exec_init_xml_expr(mcx, xexpr, state, resv)
         }
-        Expr::JsonValueExpr(_) | Expr::JsonConstructorExpr(_)
-        | Expr::JsonIsPredicate(_) => panic!(
+        etag::T_JsonValueExpr | etag::T_JsonConstructorExpr
+        | etag::T_JsonIsPredicate => panic!(
             "execExpr-core: JSON-constructor expression compilation is owned by execExpr_json \
              (ExecInitJsonConstructor)"
         ),
-        Expr::SetToDefault(_) => panic!(
+        etag::T_SetToDefault => panic!(
             "execExpr-core: SetToDefault must have been replaced before execution (planner); \
              reaching ExecInitExprRec with one is a planner error"
         ),
-        Expr::SubLink(_) => panic!(
+        etag::T_SubLink => panic!(
             "execExpr-core: SubLink is always replaced by a SubPlan before execution"
         ),
-        Expr::InferenceElem(_) => panic!(
+        etag::T_InferenceElem => panic!(
             "execExpr-core: InferenceElem is a planner-only unique-index inference node, never \
              compiled"
         ),
-        Expr::ReturningExpr(_) => panic!(
+        etag::T_ReturningExpr => panic!(
             "execExpr-core: ReturningExpr compilation is owned by execExpr_modify"
         ),
         // #[non_exhaustive] guard.

@@ -13,7 +13,7 @@ use types_nodes::execexpr::{
     JsonPathVariableState, ResultCellId,
 };
 use types_nodes::primnodes::{
-    Expr, JsonBehaviorType, JsonExpr, JsonExprOp, JsonReturning, XmlExpr,
+    etag, Expr, JsonBehaviorType, JsonExpr, JsonExprOp, JsonReturning, XmlExpr,
 };
 use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 
@@ -473,17 +473,17 @@ fn patch_jumps<'mcx>(state: &mut ExprState<'mcx>, targets: &[usize], dest: i32) 
 /// C: `IsA(behavior->expr, Const) && ((Const *) behavior->expr)->constisnull`.
 fn on_behavior_is_null_const(behavior: &types_nodes::primnodes::JsonBehavior) -> bool {
     match behavior.expr.as_deref() {
-        Some(Expr::Const(con)) => con.constisnull,
+        Some(e) if e.expr_tag() == etag::T_Const => e.expect_const().constisnull,
         _ => false,
     }
 }
 
 fn is_coerce_via_io(expr: &Expr) -> bool {
-    matches!(expr, Expr::CoerceViaIO(_))
+    expr.expr_tag() == etag::T_CoerceViaIO
 }
 
 fn is_coerce_to_domain(expr: &Expr) -> bool {
-    matches!(expr, Expr::CoerceToDomain(_))
+    expr.expr_tag() == etag::T_CoerceToDomain
 }
 
 /// `ExecInitExprRec` `T_XmlExpr` arm (execExpr.c:2640) — push the steps to
