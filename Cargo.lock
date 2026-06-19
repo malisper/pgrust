@@ -13890,6 +13890,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-pl-plpgsql-gram"
+version = "0.0.0"
+dependencies = [
+ "backend-parser-scan-fgram",
+ "backend-pl-plpgsql-comp-seams",
+ "backend-pl-plpgsql-funcs",
+ "backend-pl-plpgsql-scanner",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-parsenodes",
+ "types-plpgsql",
+]
+
+[[package]]
 name = "backend-pl-plpgsql-scanner"
 version = "0.0.0"
 dependencies = [
