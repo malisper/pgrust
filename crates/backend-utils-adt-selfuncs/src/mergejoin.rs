@@ -21,8 +21,6 @@
 
 use mcx::Mcx;
 use types_core::primitive::{InvalidOid, Oid, OidIsValid};
-use types_datum::datum::Datum;
-use types_datum::NullableDatum;
 use types_error::PgResult;
 use types_nodes::primnodes::Expr;
 use types_pathnodes::planner_run::PlannerRun;
@@ -94,52 +92,66 @@ fn index_am_translate_compare_type(cmptype: i32, amoid: Oid, opfamily: Oid) -> i
 /// &min, &max, &have_data)` (selfuncs.c) — update `(min, max, have_data)`
 /// according to the values in `sslot`, ordering them by `opfuncoid` (a "<"
 /// comparison proc). 1:1 with the C body; `opproc` caching is folded into a
-/// single up-front resolution since `function_call_invoke` re-resolves by OID.
+/// single up-front resolution since `function_call_invoke_datum` re-resolves by
+/// OID.
+///
+/// The values cross the ordering proc's fmgr boundary as their canonical images
+/// (`canon[i]` for a by-reference element type — `name`/`text`/`bytea`/`numeric`
+/// — whose bare `sslot->values` offset is non-dereferenceable; the bare word
+/// for a pass-by-value element). The resulting `(min, max)` are likewise
+/// canonical `DatumV`, so the consuming `scalarineqsel` comparisons hold the
+/// real referent bytes for a by-reference column.
 #[allow(clippy::too_many_arguments)]
-fn get_stats_slot_range(
-    sslot: &AttStatsSlot<'_>,
+fn get_stats_slot_range<'mcx>(
+    mcx: Mcx<'mcx>,
+    sslot: &AttStatsSlot<'mcx>,
+    canon: Option<&mcx::PgVec<'mcx, DatumV<'mcx>>>,
     opfuncoid: Oid,
     collation: Oid,
-    min: &mut Datum,
-    max: &mut Datum,
+    min: &mut Option<DatumV<'mcx>>,
+    max: &mut Option<DatumV<'mcx>>,
     have_data: &mut bool,
 ) -> PgResult<()> {
-    let mut tmin = *min;
-    let mut tmax = *max;
+    let mut tmin = min.clone();
+    let mut tmax = max.clone();
     let mut have = *have_data;
 
     // Scan all the slot's values. The C `datumCopy(tmin/tmax)` write-back is a
-    // plain `Datum` move in this value model (the per-call mcx arena holding the
-    // slot values outlives the estimate); tmin/tmax start as `*min`/`*max`, so
+    // `clone_in` in this value model (the per-call mcx arena holding the slot
+    // values outlives the estimate); tmin/tmax start as `*min`/`*max`, so
     // writing them back unconditionally matches the C `found_t*` guards.
     for i in 0..sslot.values.len() {
-        let v = sslot.values[i];
+        let v = crate::ineq::slot_value_canon(&sslot.values, canon, i, mcx)?;
         if !have {
-            tmin = v;
-            tmax = v;
+            tmin = Some(v.clone_in(mcx)?);
+            tmax = Some(v);
             *have_data = true;
             have = true;
             continue;
         }
 
         // opproc(values[i], tmin) — value < tmin ?
-        let (lt_min, lt_min_null) = fmgr::function_call_invoke::call(
+        let (lt_min, lt_min_null) = fmgr::function_call_invoke_datum::call(
+            mcx,
             opfuncoid,
             collation,
-            &[NullableDatum::value(v), NullableDatum::value(tmin)],
+            &[v.clone_in(mcx)?, tmin.as_ref().unwrap().clone_in(mcx)?],
+            None,
         )?;
         if !lt_min_null && lt_min.as_bool() {
-            tmin = v;
+            tmin = Some(v.clone_in(mcx)?);
         }
 
         // opproc(tmax, values[i]) — tmax < value ?
-        let (gt_max, gt_max_null) = fmgr::function_call_invoke::call(
+        let (gt_max, gt_max_null) = fmgr::function_call_invoke_datum::call(
+            mcx,
             opfuncoid,
             collation,
-            &[NullableDatum::value(tmax), NullableDatum::value(v)],
+            &[tmax.as_ref().unwrap().clone_in(mcx)?, v.clone_in(mcx)?],
+            None,
         )?;
         if !gt_max_null && gt_max.as_bool() {
-            tmax = v;
+            tmax = Some(v);
         }
     }
 
@@ -164,7 +176,7 @@ fn get_variable_range<'mcx>(
     vardata: &VariableStatData,
     sortop: Oid,
     collation: Oid,
-) -> PgResult<Option<(Datum, Datum)>> {
+) -> PgResult<Option<(DatumV<'mcx>, DatumV<'mcx>)>> {
     let stats_tuple = match vardata.stats_tuple {
         None => return Ok(None), // no stats available, so default result
         Some(t) => t,
@@ -176,13 +188,15 @@ fn get_variable_range<'mcx>(
         return Ok(None);
     }
 
-    let mut tmin: Datum = Datum::from_usize(0);
-    let mut tmax: Datum = Datum::from_usize(0);
+    let mut tmin: Option<DatumV<'mcx>> = None;
+    let mut tmax: Option<DatumV<'mcx>> = None;
     let mut have_data = false;
 
     // If there is a histogram with the ordering we want, grab the first and
-    // last values. (The C datumCopy is a plain move here: the per-call mcx
-    // arena holding sslot.values outlives this estimate.)
+    // last values. The slot values cross as their canonical images (`canon[i]`
+    // for a by-reference element type whose bare offset is non-dereferenceable);
+    // the C datumCopy is a `clone_in` here (the per-call mcx arena holding
+    // sslot.values outlives this estimate).
     if let Some(sslot) = lsc::get_attstatsslot::call(
         mcx,
         stats_tuple,
@@ -191,8 +205,25 @@ fn get_variable_range<'mcx>(
         ATTSTATSSLOT_VALUES,
     )? {
         if sslot.stacoll == collation && !sslot.values.is_empty() {
-            tmin = sslot.values[0];
-            tmax = sslot.values[sslot.values.len() - 1];
+            let canon = crate::ineq::slot_canon_values(
+                mcx,
+                stats_tuple,
+                STATISTIC_KIND_HISTOGRAM,
+                sortop,
+                sslot.valuetype,
+            )?;
+            tmin = Some(crate::ineq::slot_value_canon(
+                &sslot.values,
+                canon.as_ref(),
+                0,
+                mcx,
+            )?);
+            tmax = Some(crate::ineq::slot_value_canon(
+                &sslot.values,
+                canon.as_ref(),
+                sslot.values.len() - 1,
+                mcx,
+            )?);
             have_data = true;
         }
     }
@@ -207,8 +238,17 @@ fn get_variable_range<'mcx>(
             InvalidOid,
             ATTSTATSSLOT_VALUES,
         )? {
+            let canon = crate::ineq::slot_canon_values(
+                mcx,
+                stats_tuple,
+                STATISTIC_KIND_HISTOGRAM,
+                InvalidOid,
+                sslot.valuetype,
+            )?;
             get_stats_slot_range(
+                mcx,
                 &sslot,
+                canon.as_ref(),
                 opfuncoid,
                 collation,
                 &mut tmin,
@@ -242,8 +282,17 @@ fn get_variable_range<'mcx>(
         }
 
         if use_mcvs {
+            let canon = crate::ineq::slot_canon_values(
+                mcx,
+                stats_tuple,
+                STATISTIC_KIND_MCV,
+                InvalidOid,
+                sslot.valuetype,
+            )?;
             get_stats_slot_range(
+                mcx,
                 &sslot,
+                canon.as_ref(),
                 opfuncoid,
                 collation,
                 &mut tmin,
@@ -254,7 +303,7 @@ fn get_variable_range<'mcx>(
     }
 
     if have_data {
-        Ok(Some((tmin, tmax)))
+        Ok(Some((tmin.unwrap(), tmax.unwrap())))
     } else {
         Ok(None)
     }
@@ -472,12 +521,13 @@ pub fn mergejoinscansel<'mcx>(
     // The fraction of the left variable that will be scanned is the fraction
     // that's <= the right-side maximum value. Only believe non-default
     // estimates.
-    // The range endpoints are bare on-disk histogram words (`ByVal`); this path
-    // is reached only when statistics are present.
-    let rightmax_v = DatumV::ByVal(rightmax.as_usize());
-    let leftmax_v = DatumV::ByVal(leftmax.as_usize());
-    let rightmin_v = DatumV::ByVal(rightmin.as_usize());
-    let leftmin_v = DatumV::ByVal(leftmin.as_usize());
+    // The range endpoints are the canonical value images that `get_variable_range`
+    // distilled (the real referent bytes for a by-reference column type), so the
+    // consuming `scalarineqsel` comparisons carry them across the fmgr boundary.
+    let rightmax_v = rightmax;
+    let leftmax_v = leftmax;
+    let rightmin_v = rightmin;
+    let leftmin_v = leftmin;
     let selec = scalarineqsel(
         mcx, root, leop, isgt, true, collation, &leftvar, &rightmax_v, op_righttype,
     )?;

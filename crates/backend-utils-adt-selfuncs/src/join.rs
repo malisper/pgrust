@@ -13,8 +13,8 @@
 use mcx::Mcx;
 use types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_datum::datum::Datum;
-use types_datum::NullableDatum;
 use types_error::PgResult;
+use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{
     NodeId, PlannerInfo, RelId, Relids, SpecialJoinInfo, JOIN_ANTI, JOIN_FULL, JOIN_INNER,
@@ -35,9 +35,17 @@ use crate::scalar::{get_variable_numdistinct, statistic_proc_security_check, sta
 /// [`eqjoinsel_semi`]: the `(values, numbers)` of the side's `AttStatsSlot`
 /// (empty when `have_mcvs` is false) and the side's `stanullfrac` (`None` when
 /// there is no `Form_pg_statistic`, matching C's `stats ? stats->stanullfrac : 0`).
-pub struct JoinSide<'a> {
+pub struct JoinSide<'a, 'mcx> {
     /// `sslot->values` — the side's MCV values (empty when no MCV slot).
     pub values: &'a [Datum],
+    /// The canonical (value-carrying) images of `values`, present when the
+    /// slot's element type is pass-by-reference (`name`/`text`/`bytea`/`numeric`).
+    /// The bare `sslot->values` offset is non-dereferenceable for a by-reference
+    /// element, so the join operator's fmgr boundary is crossed via these
+    /// canonical images on the by-reference-capable
+    /// [`fmgr::function_call_invoke_datum`] lane; `None` for a pass-by-value
+    /// element (the bare word is the value).
+    pub canon: Option<&'a mcx::PgVec<'mcx, DatumV<'mcx>>>,
     /// `sslot->numbers` — the side's MCV frequencies (empty when no MCV slot).
     pub numbers: &'a [f32],
     /// `stats->stanullfrac`, or `None` (`stats == NULL`).
@@ -46,7 +54,7 @@ pub struct JoinSide<'a> {
     pub have_mcvs: bool,
 }
 
-impl JoinSide<'_> {
+impl JoinSide<'_, '_> {
     fn nullfrac(&self) -> f64 {
         self.stanullfrac.map(|f| f as f64).unwrap_or(0.0)
     }
@@ -55,11 +63,12 @@ impl JoinSide<'_> {
 /// `eqjoinsel_inner(opfuncoid, collation, ..., nd1, nd2, ..., sslot1, sslot2,
 /// stats1, stats2, have_mcvs1, have_mcvs2)` (selfuncs.c) — inner-join equality
 /// selectivity. 1:1 with the C body.
-pub fn eqjoinsel_inner(
+pub fn eqjoinsel_inner<'mcx>(
+    mcx: Mcx<'mcx>,
     opfuncoid: Oid,
     collation: Oid,
-    side1: &JoinSide<'_>,
-    side2: &JoinSide<'_>,
+    side1: &JoinSide<'_, 'mcx>,
+    side2: &JoinSide<'_, 'mcx>,
     nd1: f64,
     nd2: f64,
 ) -> PgResult<f64> {
@@ -84,13 +93,16 @@ pub fn eqjoinsel_inner(
                 if hasmatch2[j] {
                     continue;
                 }
-                let (fresult, isnull) = fmgr::function_call_invoke::call(
+                let arg0 =
+                    crate::ineq::slot_value_canon(side1.values, side1.canon, i, mcx)?;
+                let arg1 =
+                    crate::ineq::slot_value_canon(side2.values, side2.canon, j, mcx)?;
+                let (fresult, isnull) = fmgr::function_call_invoke_datum::call(
+                    mcx,
                     opfuncoid,
                     collation,
-                    &[
-                        NullableDatum::value(side1.values[i]),
-                        NullableDatum::value(side2.values[j]),
-                    ],
+                    &[arg0, arg1],
+                    None,
                 )?;
                 if !isnull && fresult.as_bool() {
                     hasmatch1[i] = true;
@@ -179,11 +191,12 @@ pub fn eqjoinsel_inner(
 /// `vardata2_rel_rows` is `vardata2->rel->rows` (`None` when `vardata2->rel`
 /// is NULL); `inner_rel_rows` is `inner_rel->rows`. The clamping of `nd2` and
 /// `isdefault2` is reproduced exactly.
-pub fn eqjoinsel_semi(
+pub fn eqjoinsel_semi<'mcx>(
+    mcx: Mcx<'mcx>,
     opfuncoid: Oid,
     collation: Oid,
-    side1: &JoinSide<'_>,
-    side2: &JoinSide<'_>,
+    side1: &JoinSide<'_, 'mcx>,
+    side2: &JoinSide<'_, 'mcx>,
     mut nd1: f64,
     mut nd2: f64,
     isdefault1: bool,
@@ -222,13 +235,16 @@ pub fn eqjoinsel_semi(
                 if hasmatch2[j] {
                     continue;
                 }
-                let (fresult, isnull) = fmgr::function_call_invoke::call(
+                let arg0 =
+                    crate::ineq::slot_value_canon(side1.values, side1.canon, i, mcx)?;
+                let arg1 =
+                    crate::ineq::slot_value_canon(side2.values, side2.canon, j, mcx)?;
+                let (fresult, isnull) = fmgr::function_call_invoke_datum::call(
+                    mcx,
                     opfuncoid,
                     collation,
-                    &[
-                        NullableDatum::value(side1.values[i]),
-                        NullableDatum::value(side2.values[j]),
-                    ],
+                    &[arg0, arg1],
+                    None,
                 )?;
                 if !isnull && fresult.as_bool() {
                     hasmatch1[i] = true;
@@ -297,15 +313,21 @@ fn build_join_side<'mcx>(
     vardata: &VariableStatData,
     opfuncoid: Oid,
     get_mcv_stats: bool,
-) -> PgResult<(Option<AttStatsSlot<'mcx>>, Option<f32>, bool)> {
+) -> PgResult<(
+    Option<AttStatsSlot<'mcx>>,
+    Option<mcx::PgVec<'mcx, DatumV<'mcx>>>,
+    Option<f32>,
+    bool,
+)> {
     let stats_tuple = match vardata.stats_tuple {
-        None => return Ok((None, None, false)),
+        None => return Ok((None, None, None, false)),
         Some(t) => t,
     };
     // note we allow use of nullfrac regardless of security check
     let stanullfrac = Some(stats_tuple_stanullfrac(stats_tuple));
     let mut have_mcvs = false;
     let mut slot = None;
+    let mut canon = None;
     if get_mcv_stats && statistic_proc_security_check(vardata, opfuncoid)? {
         slot = lsc::get_attstatsslot::call(
             mcx,
@@ -315,8 +337,21 @@ fn build_join_side<'mcx>(
             ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS,
         )?;
         have_mcvs = slot.is_some();
+        // For a by-reference element type the bare `sslot->values` offset is
+        // non-dereferenceable at the operator's fmgr boundary, so re-decode the
+        // slot values by value (the same `slot_canon_values` the scalar MCV path
+        // uses). `None` for a pass-by-value element.
+        if let Some(s) = slot.as_ref() {
+            canon = crate::ineq::slot_canon_values(
+                mcx,
+                stats_tuple,
+                STATISTIC_KIND_MCV,
+                InvalidOid,
+                s.valuetype,
+            )?;
+        }
     }
-    Ok((slot, stanullfrac, have_mcvs))
+    Ok((slot, canon, stanullfrac, have_mcvs))
 }
 
 /// `find_join_input_rel(root, relids)` (selfuncs.c, static) — the RelOptInfo for
@@ -374,21 +409,23 @@ pub fn eqjoinsel<'mcx>(
         )?
         .is_some();
 
-    let (slot1, stanullfrac1, have_mcvs1) =
+    let (slot1, canon1, stanullfrac1, have_mcvs1) =
         build_join_side(mcx, &vardata1, opfuncoid, get_mcv_stats)?;
-    let (slot2, stanullfrac2, have_mcvs2) =
+    let (slot2, canon2, stanullfrac2, have_mcvs2) =
         build_join_side(mcx, &vardata2, opfuncoid, get_mcv_stats)?;
 
     let empty_v: &[Datum] = &[];
     let empty_n: &[f32] = &[];
     let side1 = JoinSide {
         values: slot1.as_ref().map(|s| s.values.as_slice()).unwrap_or(empty_v),
+        canon: canon1.as_ref(),
         numbers: slot1.as_ref().map(|s| s.numbers.as_slice()).unwrap_or(empty_n),
         stanullfrac: stanullfrac1,
         have_mcvs: have_mcvs1,
     };
     let side2 = JoinSide {
         values: slot2.as_ref().map(|s| s.values.as_slice()).unwrap_or(empty_v),
+        canon: canon2.as_ref(),
         numbers: slot2.as_ref().map(|s| s.numbers.as_slice()).unwrap_or(empty_n),
         stanullfrac: stanullfrac2,
         have_mcvs: have_mcvs2,
@@ -396,7 +433,7 @@ pub fn eqjoinsel<'mcx>(
 
     // We need to compute the inner-join selectivity in all cases.
     let selec_inner =
-        eqjoinsel_inner(opfuncoid, collation, &side1, &side2, nd1, nd2)?;
+        eqjoinsel_inner(mcx, opfuncoid, collation, &side1, &side2, nd1, nd2)?;
 
     let mut selec = match sjinfo.jointype {
         JOIN_INNER | JOIN_LEFT | JOIN_FULL => selec_inner,
@@ -409,7 +446,7 @@ pub fn eqjoinsel<'mcx>(
 
             let s = if !join_is_reversed {
                 eqjoinsel_semi(
-                    opfuncoid, collation, &side1, &side2, nd1, nd2, isdefault1, isdefault2,
+                    mcx, opfuncoid, collation, &side1, &side2, nd1, nd2, isdefault1, isdefault2,
                     vardata2_rel_rows, inner_rel_rows,
                 )?
             } else {
@@ -420,7 +457,7 @@ pub fn eqjoinsel<'mcx>(
                     InvalidOid
                 };
                 eqjoinsel_semi(
-                    commopfuncoid, collation, &side2, &side1, nd2, nd1, isdefault2, isdefault1,
+                    mcx, commopfuncoid, collation, &side2, &side1, nd2, nd1, isdefault2, isdefault1,
                     vardata1_rel_rows, inner_rel_rows,
                 )?
             };
