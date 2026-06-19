@@ -245,30 +245,41 @@ fn defGetString(mcx: Mcx<'_>, defel: &DefElem) -> PgResult<String> {
     let s = backend_commands_define_seams::def_get_string::call(
         mcx,
         defel.defname.clone().unwrap_or_default(),
-        defel_arg(defel),
+        defel_arg(mcx, defel)?,
     )?;
     Ok(s.to_string())
 }
 
 /// `defGetBoolean(def)` (define.c).
-fn defGetBoolean(defel: &DefElem) -> PgResult<bool> {
+fn defGetBoolean(mcx: Mcx<'_>, defel: &DefElem) -> PgResult<bool> {
     backend_commands_define_seams::def_get_boolean::call(
         defel.defname.clone().unwrap_or_default(),
-        defel_arg(defel),
+        defel_arg(mcx, defel)?,
     )
 }
 
 /// Project a `DefElem`'s value node into the `DefElemArg` the define.c value
 /// accessors switch on (`nodeTag(def->arg)` dispatch).
-fn defel_arg(defel: &DefElem) -> Option<DefElemArg> {
-    let node = defel.arg.as_deref()?;
-    Some(match node {
+///
+/// The structural `TypeName`/`List` forms are rendered to text here (matching
+/// define.c's `defGetString`: `T_TypeName -> TypeNameToString`,
+/// `T_List -> NameListToString`); a bare unquoted identifier (e.g.
+/// `alignment = double`) parses to a `TypeName` node, so collapsing it to
+/// `A_Star` would lose the value.
+fn defel_arg(mcx: Mcx<'_>, defel: &DefElem) -> PgResult<Option<DefElemArg>> {
+    let Some(node) = defel.arg.as_deref() else {
+        return Ok(None);
+    };
+    Ok(Some(match node {
         Node::Integer(i) => DefElemArg::Integer(i.ival as i64),
         Node::Float(f) => DefElemArg::Float(f.fval.clone().unwrap_or_default()),
         Node::Boolean(b) => DefElemArg::Boolean(b.boolval),
         Node::String(s) => DefElemArg::String(s.sval.clone().unwrap_or_default()),
+        Node::TypeName(tn) => DefElemArg::TypeName(TypeNameToString(mcx, tn)?),
+        Node::List(_) => DefElemArg::List(NameListToString_seam(mcx, &defGetQualifiedName(defel)?)?),
+        Node::A_Star => DefElemArg::AStar,
         _ => DefElemArg::AStar,
-    })
+    }))
 }
 
 /// `defGetTypeName(def)` (define.c) — returns the `TypeName` the `DefElem`'s
@@ -700,7 +711,7 @@ pub fn DefineType<'mcx>(
         }
     }
     if let Some(el) = preferredEl {
-        preferred = defGetBoolean(el)?;
+        preferred = defGetBoolean(mcx, el)?;
     }
     if let Some(el) = delimiterEl {
         let p = defGetString(mcx, el)?;
@@ -726,7 +737,7 @@ pub fn DefineType<'mcx>(
         defaultValue = Some(defGetString(mcx, el)?);
     }
     if let Some(el) = byValueEl {
-        byValue = defGetBoolean(el)?;
+        byValue = defGetBoolean(mcx, el)?;
     }
     if let Some(el) = alignmentEl {
         let a = defGetString(mcx, el)?;
@@ -772,7 +783,7 @@ pub fn DefineType<'mcx>(
         }
     }
     if let Some(el) = collatableEl {
-        collation = if defGetBoolean(el)? {
+        collation = if defGetBoolean(mcx, el)? {
             DEFAULT_COLLATION_OID
         } else {
             InvalidOid
