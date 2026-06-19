@@ -35,7 +35,14 @@ use types_error::{
 
 use port_dynloader_seams as loader;
 
-/// Platform shared-library suffix (`DLSUFFIX`), `.so` on the build platforms.
+/// Platform shared-library suffix (`DLSUFFIX`): the C build sets this per
+/// platform — `.dylib` on macOS/Darwin, `.so` elsewhere (Makefile.global's
+/// `DLSUFFIX`). Matching it is what lets the in-process ported-library registry
+/// recognize a fully-qualified `.../regress.dylib` probin as the bare `regress`
+/// library on macOS.
+#[cfg(target_os = "macos")]
+const DLSUFFIX: &str = ".dylib";
+#[cfg(not(target_os = "macos"))]
 const DLSUFFIX: &str = ".so";
 
 /* =========================================================================

@@ -18696,9 +18696,12 @@ name = "backend-utils-adt-encode"
 version = "0.0.0"
 dependencies = [
  "backend-utils-adt-encode-seams",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-mbutils-seams",
  "mcx",
+ "types-datum",
  "types-error",
+ "types-fmgr",
 ]
 
 [[package]]

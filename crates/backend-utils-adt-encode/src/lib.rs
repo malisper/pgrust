@@ -203,6 +203,119 @@ fn seam_hex_decode_safe<'mcx>(mcx: Mcx<'mcx>, src: &[u8]) -> PgResult<PgVec<'mcx
 pub fn init_seams() {
     backend_utils_adt_encode_seams::hex_encode::set(seam_hex_encode);
     backend_utils_adt_encode_seams::hex_decode_safe::set(seam_hex_decode_safe);
+    register_encode_builtins();
+}
+
+// ---------------------------------------------------------------------------
+// fmgr builtins: `binary_encode` / `binary_decode` (C: their `fmgr_builtins[]`
+// rows, pg_proc OIDs 1946 / 1947). These are the `encode(bytea, text)` /
+// `decode(text, text)` SQL functions; they cross the by-ref varlena lane.
+// ---------------------------------------------------------------------------
+
+use types_datum::Datum;
+use types_fmgr::boundary::RefPayload;
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+
+/// `VARDATA_ANY` payload bytes of a by-ref varlena arg: skip the 1-byte (short)
+/// or 4-byte (long, uncompressed) header. Mirrors `vardata_any_slice` in
+/// `backend-utils-adt-varlena`; inline literals (the only inputs these reach)
+/// are never compressed/external.
+fn vardata_any_slice(image: &[u8]) -> &[u8] {
+    if image.is_empty() {
+        return &[];
+    }
+    let header = image[0];
+    if header != 0x01 && header & 0x01 == 0x01 {
+        let total = (((header >> 1) & 0x7F) as usize).min(image.len());
+        &image[1..total.max(1)]
+    } else if image.len() >= VARHDRSZ as usize {
+        &image[VARHDRSZ as usize..]
+    } else {
+        &[]
+    }
+}
+
+/// `PG_GETARG_BYTEA_PP(i)` / `PG_GETARG_TEXT_PP(i)`: the detoasted payload bytes
+/// of a by-ref varlena arg.
+fn arg_varlena_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    let image = fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("encode fn: by-ref varlena arg missing from by-ref lane");
+    vardata_any_slice(image)
+}
+
+/// Stamp a 4-byte uncompressed varlena header in front of a header-less payload
+/// and set it as the by-ref `text`/`bytea` result (mirrors `ret_varlena` in
+/// `backend-utils-adt-varlena`); the wire layer strips the header downstream.
+fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: &[u8]) -> Datum {
+    let mut image = Vec::with_capacity(bytes.len() + VARHDRSZ as usize);
+    image.extend_from_slice(&types_datum::varlena::set_varsize_4b(
+        bytes.len() + VARHDRSZ as usize,
+    ));
+    image.extend_from_slice(bytes);
+    fcinfo.set_ref_result(RefPayload::Varlena(image));
+    Datum::from_usize(0)
+}
+
+/// Raise a builtin's `ereport(ERROR)` through the dispatch point every builtin
+/// crosses (`invoke_pgfunction`'s `catch_unwind`).
+fn raise(err: PgError) -> ! {
+    std::panic::panic_any(err)
+}
+
+/// `binary_encode(bytea, text) -> text` (C `binary_encode`).
+fn fc_binary_encode(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let scratch = mcx::MemoryContext::new("binary_encode scratch");
+    let result: Vec<u8> = {
+        let data = arg_varlena_bytes(fcinfo, 0);
+        let name = arg_varlena_bytes(fcinfo, 1);
+        let name = std::str::from_utf8(name)
+            .expect("encode: encoding name is database-encoding text");
+        match binary_encode_bytes(scratch.mcx(), data, name) {
+            Ok(v) => v.as_slice().to_vec(),
+            Err(e) => raise(e),
+        }
+    };
+    ret_varlena(fcinfo, &result)
+}
+
+/// `binary_decode(text, text) -> bytea` (C `binary_decode`).
+fn fc_binary_decode(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let scratch = mcx::MemoryContext::new("binary_decode scratch");
+    let result: Vec<u8> = {
+        let data = arg_varlena_bytes(fcinfo, 0);
+        let name = arg_varlena_bytes(fcinfo, 1);
+        let name = std::str::from_utf8(name)
+            .expect("decode: encoding name is database-encoding text");
+        match binary_decode_bytes(scratch.mcx(), data, name) {
+            Ok(v) => v.as_slice().to_vec(),
+            Err(e) => raise(e),
+        }
+    };
+    ret_varlena(fcinfo, &result)
+}
+
+/// Register the `encode.c` SQL builtins (C: their `fmgr_builtins[]` rows).
+fn register_encode_builtins() {
+    backend_utils_fmgr_core::register_builtins([
+        BuiltinFunction {
+            foid: 1946,
+            name: "binary_encode".to_string(),
+            nargs: 2,
+            strict: true,
+            retset: false,
+            func: Some(fc_binary_encode),
+        },
+        BuiltinFunction {
+            foid: 1947,
+            name: "binary_decode".to_string(),
+            nargs: 2,
+            strict: true,
+            retset: false,
+            func: Some(fc_binary_decode),
+        },
+    ]);
 }
 
 // ---------------------------------------------------------------------------
