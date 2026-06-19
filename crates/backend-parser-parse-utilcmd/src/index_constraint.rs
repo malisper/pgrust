@@ -342,10 +342,19 @@ pub fn transform_index_constraint_catalog<'mcx>(
                 .errposition(parser_errposition(pstate, con.location))
                 .into_error());
         }
-        unimplemented!(
-            "transformIndexConstraint USING INDEX path needs index_open / \
-             get_relname_relid / GetDefaultOpClass by-OID catalog reads"
-        );
+        // ALTER TABLE ... ADD CONSTRAINT ... USING INDEX: C opens the named
+        // index via get_relname_relid + index_open, validates it (unique,
+        // non-expression, non-partial, btree, default opclass/collation/sort
+        // options) and copies its key columns into constraint->keys /
+        // ->including. That whole leg needs relcache/syscache by-OID reads
+        // (index_open, RelationGetIndexExpressions/Predicate, GetDefaultOpClass,
+        // SysCacheGetAttrNotNull on pg_index) which are not reachable from the
+        // parse-analysis crate. Stop loudly and recoverably rather than crash.
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg("ADD CONSTRAINT ... USING INDEX is not yet supported")
+            .errposition(parser_errposition(pstate, con.location))
+            .into_error());
     }
 
     // EXCLUDE: break the (IndexElem, opname) pairs apart.
@@ -420,11 +429,23 @@ pub fn transform_index_constraint_catalog<'mcx>(
                 // A system column in the new table; accept it (never null).
                 found = true;
             } else if !inh_relations.is_empty() {
-                // Inherited tables — needs table_openrv on each parent.
-                unimplemented!(
-                    "transformIndexConstraint inherited-relation column search \
-                     needs table_openrv by name"
-                );
+                // Inherited tables: C searches each parent's TupleDesc for the
+                // key column (table_openrv + RelationGetDescr per parent, plus
+                // a PRIMARY-KEY not-null addition and atttypid capture for the
+                // WITHOUT OVERLAPS check). That requires opening each parent
+                // relation by name through the relcache, which is not reachable
+                // here. Stop loudly and recoverably rather than crash; if the
+                // column truly lives only in a parent, DefineIndex would resolve
+                // it, but we cannot confirm `found` without the relcache.
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .errmsg(alloc::format!(
+                        "column \"{}\" named in key is not in the new table; \
+                         resolving inherited columns in a key constraint is not yet supported",
+                        key
+                    ))
+                    .errposition(parser_errposition(pstate, con.location))
+                    .into_error());
             }
 
             if !found && !isalter {
@@ -457,12 +478,19 @@ pub fn transform_index_constraint_catalog<'mcx>(
             }
 
             // WITHOUT OVERLAPS: the last key must be a range/multirange type.
+            // C resolves the column type OID (typenameTypeId on the new
+            // column's TypeName, or atttypid from an existing/inherited table)
+            // and asserts type_is_range || type_is_multirange. That needs the
+            // type-cache / catalog by-OID reads (typenameTypeId, type_is_range,
+            // type_is_multirange) not reachable here. Stop loudly and
+            // recoverably rather than crash.
             if con.without_overlaps && kidx == n_keys - 1 {
                 if found {
-                    unimplemented!(
-                        "transformIndexConstraint WITHOUT OVERLAPS range-type check \
-                         needs typenameTypeId / type_is_range by-OID reads"
-                    );
+                    return Err(ereport(ERROR)
+                        .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                        .errmsg("WITHOUT OVERLAPS constraints are not yet supported")
+                        .errposition(parser_errposition(pstate, con.location))
+                        .into_error());
                 }
             }
 
@@ -504,10 +532,18 @@ pub fn transform_index_constraint_catalog<'mcx>(
             if plancat_ext::system_attribute_by_name::call(key)?.is_some() {
                 found = true;
             } else if !inh_relations.is_empty() {
-                unimplemented!(
-                    "transformIndexConstraint INCLUDE inherited-relation column search \
-                     needs table_openrv by name"
-                );
+                // INCLUDE column resolved only via an inherited parent: same
+                // table_openrv-by-name relcache need as the key path above.
+                // Stop loudly and recoverably rather than crash.
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .errmsg(alloc::format!(
+                        "column \"{}\" named in INCLUDE is not in the new table; \
+                         resolving inherited columns is not yet supported",
+                        key
+                    ))
+                    .errposition(parser_errposition(pstate, con.location))
+                    .into_error());
             }
         }
 
