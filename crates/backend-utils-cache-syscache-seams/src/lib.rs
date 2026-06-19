@@ -1779,6 +1779,34 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCache1(RELOID, ObjectIdGetDatum(relid))` then
+    /// `SysCacheGetAttr(RELOID, tuple, Anum_pg_class_relpartbound, &isnull)` +
+    /// `TextDatumGetCString` — the raw `pg_class.relpartbound` `pg_node_tree`
+    /// text that `partdesc.c`'s `RelationBuildPartitionDesc` (and the qual
+    /// builder) feed to `stringToNode` to recover the partition's
+    /// `PartitionBoundSpec`. `Ok(None)` when the relation is not a partition
+    /// (`relpartbound` SQL NULL) or on a cache miss; `Ok(Some(text))` otherwise.
+    /// `Err` carries the catcache error surface. (`partdesc.c` retries the read
+    /// directly against `pg_class` on a still-null value to defeat a concurrent
+    /// `DETACH CONCURRENTLY`; that direct-scan fallback is a separate seam.)
+    pub fn pg_class_relpartbound_text(relid: Oid) -> PgResult<Option<String>>
+);
+
+seam_core::seam!(
+    /// The direct-`pg_class` re-read of `relpartbound` (`partdesc.c`'s
+    /// `table_open(RelationRelationId)` / `systable_beginscan(ClassOidIndexId)` /
+    /// `heap_getattr(.., Anum_pg_class_relpartbound)` fallback), used when the
+    /// catcache fetch returned NULL — a concurrent `ATTACH` may not yet be
+    /// visible to the syscache, or a `DETACH CONCURRENTLY` may have reset
+    /// `relpartbound`. In this single-backend, snapshot-stable port the
+    /// catcache is authoritative once `AcceptInvalidationMessages` has flushed
+    /// it, so the install re-reads through the same fresh catalog snapshot.
+    /// `Ok(None)` when still null (the caller then `goto retry`s once); `Err`
+    /// carries the catalog read surface.
+    pub fn pg_class_relpartbound_text_direct(relid: Oid) -> PgResult<Option<String>>
+);
+
+seam_core::seam!(
     /// `GetSysCacheOid1(PUBLICATIONNAME, Anum_pg_publication_oid,
     /// CStringGetDatum(pubname))` (`get_publication_oid`). `InvalidOid` (0) when
     /// not found; the caller turns that into the "publication does not exist"

@@ -269,6 +269,97 @@ impl PartitionStrategy {
     }
 }
 
+impl<'mcx> PartitionBoundInfoData<'mcx> {
+    /// Deep copy into `mcx` (C: the `partition_bounds_copy` deep clone, here a
+    /// lifetime-reprojection: by-reference bound datums carry their byte image
+    /// in the `Datum` enum and are `datumCopy`'d via [`Datum::clone_in`], so no
+    /// `typbyval`/`typlen` is needed). Used by partdesc to materialize the
+    /// relcache descriptor into the `PartitionDirectory`'s own context and to
+    /// re-project it back into a caller's context on lookup.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> types_error::PgResult<PartitionBoundInfoData<'b>> {
+        // datums[][]
+        let mut datums: PgVec<'b, PgVec<'b, Datum<'b>>> =
+            mcx::vec_with_capacity_in(mcx, self.datums.len())?;
+        for row in self.datums.iter() {
+            let mut nrow: PgVec<'b, Datum<'b>> = mcx::vec_with_capacity_in(mcx, row.len())?;
+            for d in row.iter() {
+                nrow.push(d.clone_in(mcx)?);
+            }
+            datums.push(nrow);
+        }
+        // kind[][]
+        let kind = match &self.kind {
+            None => None,
+            Some(rows) => {
+                let mut nkind: PgVec<'b, PgVec<'b, PartitionRangeDatumKind>> =
+                    mcx::vec_with_capacity_in(mcx, rows.len())?;
+                for row in rows.iter() {
+                    let mut nrow: PgVec<'b, PartitionRangeDatumKind> =
+                        mcx::vec_with_capacity_in(mcx, row.len())?;
+                    for k in row.iter() {
+                        nrow.push(*k);
+                    }
+                    nkind.push(nrow);
+                }
+                Some(nkind)
+            }
+        };
+        // interleaved_parts
+        let interleaved_parts = match &self.interleaved_parts {
+            None => None,
+            Some(bms) => Some(mcx::alloc_in(mcx, bms.clone_in(mcx)?)?),
+        };
+        // indexes[]
+        let mut indexes: PgVec<'b, i32> = mcx::vec_with_capacity_in(mcx, self.indexes.len())?;
+        for v in self.indexes.iter() {
+            indexes.push(*v);
+        }
+        Ok(PartitionBoundInfoData {
+            strategy: self.strategy,
+            ndatums: self.ndatums,
+            datums,
+            kind,
+            interleaved_parts,
+            nindexes: self.nindexes,
+            indexes,
+            null_index: self.null_index,
+            default_index: self.default_index,
+        })
+    }
+}
+
+impl<'mcx> PartitionDescData<'mcx> {
+    /// Deep copy into `mcx`. The owned-tree analogue of the C
+    /// `partdesc`-into-`new_pdcxt` materialization: the `PartitionDirectory`
+    /// stores a clone in its own context, and a lookup re-projects that clone
+    /// into the caller's context. `oids`/`is_leaf` are plain scalars; the
+    /// `boundinfo` is deep-copied via [`PartitionBoundInfoData::clone_in`].
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> types_error::PgResult<PartitionDescData<'b>> {
+        let mut oids: PgVec<'b, Oid> = mcx::vec_with_capacity_in(mcx, self.oids.len())?;
+        for v in self.oids.iter() {
+            oids.push(*v);
+        }
+        let mut is_leaf: PgVec<'b, bool> = mcx::vec_with_capacity_in(mcx, self.is_leaf.len())?;
+        for v in self.is_leaf.iter() {
+            is_leaf.push(*v);
+        }
+        let boundinfo = match &self.boundinfo {
+            None => None,
+            Some(bi) => Some(mcx::alloc_in(mcx, bi.clone_in(mcx)?)?),
+        };
+        Ok(PartitionDescData {
+            nparts: self.nparts,
+            detached_exist: self.detached_exist,
+            oids,
+            is_leaf,
+            boundinfo,
+            last_found_datum_index: self.last_found_datum_index,
+            last_found_part_index: self.last_found_part_index,
+            last_found_count: self.last_found_count,
+        })
+    }
+}
+
 /// `PartitionBoundInfo` — owned alias (`partdefs.h`).
 pub type PartitionBoundInfo<'mcx> = Option<PgBox<'mcx, PartitionBoundInfoData<'mcx>>>;
 /// `PartitionKey` — owned alias (`partdefs.h`).

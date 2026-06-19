@@ -3296,6 +3296,25 @@ pub(crate) fn pg_index_pred_text(index_oid: Oid) -> PgResult<Option<String>> {
     Ok(text)
 }
 
+/// `SearchSysCache1(RELOID, relid)` then `SysCacheGetAttr(RELOID, tuple,
+/// Anum_pg_class_relpartbound, &isnull)` + `TextDatumGetCString` — the raw
+/// `pg_class.relpartbound` `pg_node_tree` text that `partdesc.c`'s
+/// `RelationBuildPartitionDesc` feeds to `stringToNode`. `None` when the column
+/// is SQL NULL (the relation is not a partition) or on a cache miss.
+pub(crate) fn pg_class_relpartbound_text(relid: Oid) -> PgResult<Option<String>> {
+    // `Anum_pg_class_relpartbound` (pg_class.h, PG 18 column 34, 1-based).
+    const ANUM_PG_CLASS_RELPARTBOUND: i32 = 34;
+    let scratch = MemoryContext::new("syscache relpartbound projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, RELOID, SysCacheKey::Value(KeyDatum::from_oid(relid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let text = getattr_option_text(mcx, RELOID, &tup, ANUM_PG_CLASS_RELPARTBOUND)?;
+    ReleaseSysCache(tup);
+    Ok(text)
+}
+
 /// `ParseLongOption` + skip-with-WARNING over the deconstructed `proconfig`
 /// element strings — the `TransformGUCArray(array, &names, &values)` body
 /// (guc.c), driven off the already-decoded `"name=value"` element strings.

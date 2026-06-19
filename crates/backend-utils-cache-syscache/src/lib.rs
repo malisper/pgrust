@@ -1030,6 +1030,12 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::pg_index_pred_text::set(
         projections::pg_index_pred_text,
     );
+    backend_utils_cache_syscache_seams::pg_class_relpartbound_text::set(
+        projections::pg_class_relpartbound_text,
+    );
+    backend_utils_cache_syscache_seams::pg_class_relpartbound_text_direct::set(
+        projections::pg_class_relpartbound_text,
+    );
     backend_utils_cache_syscache_seams::search_pg_index_info::set(
         projections::search_pg_index_info,
     );
