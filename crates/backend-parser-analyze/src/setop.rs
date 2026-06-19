@@ -491,7 +491,11 @@ fn transformSetOperationTree<'mcx>(
         let lcoltype = exprtype(lcolnode)?;
         let rcoltype = exprtype(rcolnode)?;
 
-        let exprs = [lcolnode.clone(), rcolnode.clone()];
+        // C: `exprs = list_make2(lcolnode, rcolnode)` — read-only inputs to
+        // `select_common_type`. The `Expr` enum embeds owned (context-allocated)
+        // sub-trees (SubLink/Aggref/…) whose deep copy must go through
+        // `clone_in` (never the panicking derived `.clone()`).
+        let exprs = [lcolnode.clone_in(mcx)?, rcolnode.clone_in(mcx)?];
         let rescoltype =
             backend_parser_coerce::select_common_type(Some(pstate), &exprs, Some(context))?;
         // bestlocation: the C tracks the bestexpr's location for the error
@@ -501,21 +505,21 @@ fn transformSetOperationTree<'mcx>(
 
         // Coerce UNKNOWN Const/Param children in place; verify others.
         let lcolnode2 = if lcoltype != UNKNOWNOID {
-            backend_parser_coerce::coerce_to_common_type(mcx, Some(pstate), lcolnode.clone(), rescoltype, context)?
+            backend_parser_coerce::coerce_to_common_type(mcx, Some(pstate), lcolnode.clone_in(mcx)?, rescoltype, context)?
         } else if matches!(lcolnode, Expr::Const(_)) || matches!(lcolnode, Expr::Param(_)) {
-            backend_parser_coerce::coerce_to_common_type(mcx, Some(pstate), lcolnode.clone(), rescoltype, context)?
+            backend_parser_coerce::coerce_to_common_type(mcx, Some(pstate), lcolnode.clone_in(mcx)?, rescoltype, context)?
         } else {
-            lcolnode.clone()
+            lcolnode.clone_in(mcx)?
         };
         let rcolnode2 = if rcoltype != UNKNOWNOID {
-            backend_parser_coerce::coerce_to_common_type(mcx, Some(pstate), rcolnode.clone(), rescoltype, context)?
+            backend_parser_coerce::coerce_to_common_type(mcx, Some(pstate), rcolnode.clone_in(mcx)?, rescoltype, context)?
         } else if matches!(rcolnode, Expr::Const(_)) || matches!(rcolnode, Expr::Param(_)) {
-            backend_parser_coerce::coerce_to_common_type(mcx, Some(pstate), rcolnode.clone(), rescoltype, context)?
+            backend_parser_coerce::coerce_to_common_type(mcx, Some(pstate), rcolnode.clone_in(mcx)?, rescoltype, context)?
         } else {
-            rcolnode.clone()
+            rcolnode.clone_in(mcx)?
         };
 
-        let mut coerced = [lcolnode2.clone(), rcolnode2.clone()];
+        let mut coerced = [lcolnode2.clone_in(mcx)?, rcolnode2.clone_in(mcx)?];
         let rescoltypmod = backend_parser_coerce::select_common_typmod(&coerced, rescoltype)?;
         let rescolcoll = backend_parser_parse_collate::select_common_collation(
             Some(&*pstate),

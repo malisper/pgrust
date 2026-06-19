@@ -2377,6 +2377,7 @@ pub use fmgr_builtins::register_ruleutils_builtins;
 
 pub mod constraintdef;
 pub mod indexdef;
+pub mod statisticsdef;
 
 /// `PRETTYFLAG_PAREN` (ruleutils.c 88).
 pub(crate) const PRETTYFLAG_PAREN: i32 = 0x0001;

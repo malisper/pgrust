@@ -223,6 +223,59 @@ fn fc_pg_get_constraintdef_ext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     }
 }
 
+/// `pg_get_statisticsobjdef(oid) -> text` (oid 3415). Full CREATE STATISTICS
+/// definition: `pg_get_statisticsobj_worker(statextid, false, true)`.
+fn fc_pg_get_statisticsobjdef(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let statextid = arg_oid(fcinfo, 0);
+    let m = scratch_mcx();
+    let res = ok(crate::statisticsdef::pg_get_statisticsobj_worker(
+        m.mcx(),
+        statextid,
+        false,
+        true,
+    ));
+    match res {
+        Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
+        None => ret_null(fcinfo),
+    }
+}
+
+/// `pg_get_statisticsobjdef_columns(oid) -> text` (oid 6174). Columns and
+/// expressions only: `pg_get_statisticsobj_worker(statextid, true, true)`.
+fn fc_pg_get_statisticsobjdef_columns(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let statextid = arg_oid(fcinfo, 0);
+    let m = scratch_mcx();
+    let res = ok(crate::statisticsdef::pg_get_statisticsobj_worker(
+        m.mcx(),
+        statextid,
+        true,
+        true,
+    ));
+    match res {
+        Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
+        None => ret_null(fcinfo),
+    }
+}
+
+/// `pg_get_statisticsobjdef_expressions(oid) -> _text` (oid 6173). Builds a
+/// `text[]` of the per-expression deparses (ruleutils.c 1838-1900). The
+/// result is a `text` *array* (`construct_array`), whose by-ref array image is
+/// not expressible at this fmgr adapter yet, and the body bottoms out on the
+/// same unported `Form_pg_statistic_ext` deform as the worker. SEAM-AND-PANIC:
+/// resolvable (so the empty-input psql describe target list type-checks), but
+/// not executable until the catalog deform + text-array result writer land.
+fn fc_pg_get_statisticsobjdef_expressions(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let statextid = arg_oid(fcinfo, 0);
+    panic!(
+        "ruleutils pg_get_statisticsobjdef_expressions(statext {}): the \
+         Form_pg_statistic_ext stxexprs deform + text[] (`_text`) array result \
+         writer are unported for this entry — the deparse_expression engine is \
+         ported, but the catalog read and the array result boundary are not yet \
+         installed",
+        statextid
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -260,6 +313,12 @@ pub fn register_ruleutils_builtins() {
         builtin(2507, "pg_get_indexdef_ext", 3, true, false, fc_pg_get_indexdef_ext),
         builtin(1387, "pg_get_constraintdef", 1, true, false, fc_pg_get_constraintdef),
         builtin(2508, "pg_get_constraintdef_ext", 2, true, false, fc_pg_get_constraintdef_ext),
+        // Slice 3: extended-statistics deparse (resolvable; workers seam-and-panic
+        // at the unported Form_pg_statistic_ext deform — empty-input psql `\d`
+        // describe only needs resolution, see statisticsdef.rs).
+        builtin(3415, "pg_get_statisticsobjdef", 1, true, false, fc_pg_get_statisticsobjdef),
+        builtin(6174, "pg_get_statisticsobjdef_columns", 1, true, false, fc_pg_get_statisticsobjdef_columns),
+        builtin(6173, "pg_get_statisticsobjdef_expressions", 1, true, false, fc_pg_get_statisticsobjdef_expressions),
     ]);
 }
 
