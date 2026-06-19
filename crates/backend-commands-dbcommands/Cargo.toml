@@ -45,6 +45,7 @@ backend-catalog-pg-subscription-seams = { path = "../backend-catalog-pg-subscrip
 backend-replication-slot-seams = { path = "../backend-replication-slot-seams" }
 backend-utils-adt-pg-locale-seams = { path = "../backend-utils-adt-pg-locale-seams" }
 backend-commands-collationcmds-seams = { path = "../backend-commands-collationcmds-seams" }
+backend-commands-user-seams = { path = "../backend-commands-user-seams" }
 backend-utils-adt-pg-locale-env-seams = { path = "../backend-utils-adt-pg-locale-env-seams" }
 backend-utils-adt-ruleutils-seams = { path = "../backend-utils-adt-ruleutils-seams" }
 backend-storage-lmgr-lmgr = { path = "../backend-storage-lmgr-lmgr" }

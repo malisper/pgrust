@@ -16,6 +16,9 @@ backend-commands-user-seams = { path = "../backend-commands-user-seams" }
 backend-catalog-catalog-seams = { path = "../backend-catalog-catalog-seams" }
 backend-utils-misc-superuser-seams = { path = "../backend-utils-misc-superuser-seams" }
 backend-utils-adt-acl-seams = { path = "../backend-utils-adt-acl-seams" }
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
+backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
+backend-catalog-binary-upgrade-seams = { path = "../backend-catalog-binary-upgrade-seams" }
 mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }

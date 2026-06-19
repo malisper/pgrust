@@ -109,6 +109,23 @@ const GRANT_ROLE_SPECIFIED_ADMIN: u32 = 0x0001;
 const GRANT_ROLE_SPECIFIED_INHERIT: u32 = 0x0002;
 const GRANT_ROLE_SPECIFIED_SET: u32 = 0x0004;
 
+/// `check_password_hook_type` (`commands/user.h`) — a loadable module's
+/// password-policy callback. `(username, shadow_pass, password_type,
+/// validuntil)`.
+type CheckPasswordHook =
+    fn(&str, &str, PasswordType, Option<TimestampTz>) -> PgResult<()>;
+
+thread_local! {
+    /// `Oid binary_upgrade_next_pg_authid_oid` (user.c:70) — preselected
+    /// pg_authid OID for `pg_upgrade`'s binary restore; `InvalidOid` otherwise.
+    static BINARY_UPGRADE_NEXT_PG_AUTHID_OID: core::cell::Cell<Oid> =
+        const { core::cell::Cell::new(InvalidOid) };
+
+    /// `check_password_hook_type check_password_hook = NULL` (user.c:91).
+    static CHECK_PASSWORD_HOOK: core::cell::Cell<Option<CheckPasswordHook>> =
+        const { core::cell::Cell::new(None) };
+}
+
 /// `typedef struct GrantRoleOptions` (user.c:72-78).
 #[derive(Clone, Copy, Debug)]
 pub struct GrantRoleOptions {
@@ -2803,6 +2820,104 @@ pub fn init_seams() {
     seam::has_privs_of_role::set(|member, role| {
         backend_utils_adt_acl_seams::has_privs_of_role::call(member, role)
     });
+
+    /* Cross-subsystem reads/effects with simple owners: `CommandCounterIncrement`
+     * (xact.c) and the `IsBinaryUpgrade` process global (init/miscinit, exposed
+     * by binary-upgrade-seams). Delegated to the canonical owners. */
+    seam::command_counter_increment::set(|| {
+        backend_access_transam_xact_seams::command_counter_increment::call()
+    });
+    seam::is_binary_upgrade::set(|| {
+        Ok(backend_catalog_binary_upgrade_seams::is_binary_upgrade::call())
+    });
+
+    /* `Oid binary_upgrade_next_pg_authid_oid` (user.c:70) — this command unit's
+     * own per-backend global, consumed (reset to InvalidOid) by CreateRole on a
+     * binary-upgrade restore. */
+    seam::take_binary_upgrade_next_pg_authid_oid::set(|| {
+        Ok(BINARY_UPGRADE_NEXT_PG_AUTHID_OID.with(|c| {
+            let v = c.get();
+            c.set(InvalidOid);
+            v
+        }))
+    });
+
+    /* `check_password_hook_type check_password_hook = NULL` (user.c:91) — this
+     * unit's own plugin-hook global; `NULL` until a loadable module (e.g.
+     * `passwordcheck`) registers one. With no hook, `has_check_password_hook`
+     * is false and `call_check_password_hook` is never reached. */
+    seam::has_check_password_hook::set(|| {
+        Ok(CHECK_PASSWORD_HOOK.with(|h| h.get().is_some()))
+    });
+    seam::call_check_password_hook::set(|username, password, password_type, validuntil| {
+        match CHECK_PASSWORD_HOOK.with(|h| h.get()) {
+            Some(hook) => hook(&username, &password, password_type, validuntil),
+            None => Err(types_error::PgError::error(
+                "call_check_password_hook: no check_password_hook installed",
+            )),
+        }
+    });
+
+    /* Utility-dispatch entry seams (ProcessUtilitySlow → user.c). The arena
+     * parse node flowing through dispatch is converted to the owned
+     * `types_parsenodes` role-statement model these drivers consume. */
+    backend_tcop_utility_out_seams::create_role::set(create_role_arm);
+    backend_tcop_utility_out_seams::alter_role::set(alter_role_arm);
+    backend_tcop_utility_out_seams::alter_role_set::set(alter_role_set_arm);
+    backend_tcop_utility_out_seams::drop_role::set(drop_role_arm);
+    backend_tcop_utility_out_seams::reassign_owned_objects::set(reassign_owned_objects_arm);
+}
+
+/* -------------------------------------------------------------------------
+ * Utility-dispatch entry adapters.
+ *
+ * `ProcessUtilitySlow` hands the canonical `'mcx`-arena parse node and the
+ * dispatch-owned `ParseState`. Each adapter converts the arena statement into
+ * the owned `types_parsenodes` form (see [`convert`]) and calls the driver.
+ * `CreateRole`/`AlterRole` take `pstate` only for error positioning; the
+ * dispatch `ParseState` and `types_parsenodes::ParseState` are the one
+ * re-exported type, so it is passed straight through.
+ * ------------------------------------------------------------------------- */
+
+mod convert;
+
+use types_nodes::nodes::Node as ANode;
+use types_nodes::parsestmt::ParseState as DispatchParseState;
+
+fn create_role_arm<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut DispatchParseState<'mcx>,
+    stmt: &ANode<'mcx>,
+) -> PgResult<()> {
+    let owned = convert::create_role_stmt_to_owned(stmt.expect_createrolestmt())?;
+    CreateRole(mcx, Some(&*pstate), &owned)?;
+    Ok(())
+}
+
+fn alter_role_arm<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut DispatchParseState<'mcx>,
+    stmt: &ANode<'mcx>,
+) -> PgResult<()> {
+    let owned = convert::alter_role_stmt_to_owned(stmt.expect_alterrolestmt())?;
+    AlterRole(mcx, Some(&*pstate), &owned)?;
+    Ok(())
+}
+
+fn alter_role_set_arm<'mcx>(_mcx: Mcx<'mcx>, stmt: &ANode<'mcx>) -> PgResult<()> {
+    let owned = convert::alter_role_set_stmt_to_owned(stmt.expect_alterrolesetstmt())?;
+    AlterRoleSet(&owned)?;
+    Ok(())
+}
+
+fn drop_role_arm<'mcx>(stmt: &ANode<'mcx>) -> PgResult<()> {
+    let owned = convert::drop_role_stmt_to_owned(stmt.expect_droprolestmt())?;
+    DropRole(&owned)
+}
+
+fn reassign_owned_objects_arm<'mcx>(mcx: Mcx<'mcx>, stmt: &ANode<'mcx>) -> PgResult<()> {
+    let owned = convert::reassign_owned_stmt_to_owned(stmt.expect_reassignownedstmt())?;
+    ReassignOwnedObjects(mcx, &owned)
 }
 
 #[cfg(test)]

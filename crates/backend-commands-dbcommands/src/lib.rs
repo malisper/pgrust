@@ -567,6 +567,23 @@ pub fn init_seams() {
             heavy::check_encoding_locale_matches(scratch.mcx(), encoding, collate, ctype)
         },
     );
+
+    // commands/user.c (CREATE/ALTER ROLE ... CREATEDB, REASSIGN/DROP OWNED with
+    // database settings) reaches dbcommands.c's `have_createdb_privilege` and
+    // `get_database_oid` through backend-commands-user-seams. dbcommands owns
+    // these bodies; install them here. `have_createdb_privilege` does a catalog
+    // read (`Mcx`) but the user-seams decl is bare; run it behind a scratch
+    // context (only the Copy `bool` escapes). `get_database_oid` takes the
+    // database name as the seam's owned `String` (the owner borrows it as
+    // `&str`).
+    {
+        use backend_commands_user_seams as u;
+        u::have_createdb_privilege::set(|| {
+            let scratch = mcx::MemoryContext::new("user.c have_createdb_privilege seam");
+            have_createdb_privilege(scratch.mcx())
+        });
+        u::get_database_oid::set(|dbname, missing_ok| get_database_oid(&dbname, missing_ok));
+    }
 }
 
 use types_nodes::nodes::Node as UtilNode;

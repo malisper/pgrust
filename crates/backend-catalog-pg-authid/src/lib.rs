@@ -38,6 +38,36 @@ fn open<'mcx>(mcx: Mcx<'mcx>, rel: Oid) -> PgResult<types_rel::Relation<'mcx>> {
 
 /// `GetNewOidWithIndex(rel, indexId, oidColumn)` dispatched by the catalog's OID
 /// index (`AuthIdOidIndexId` ⇒ pg_authid, `AuthMemOidIndexId` ⇒ pg_auth_members).
+/// `table_open(relid, lockmode)` — open the role catalog, taking `lockmode`
+/// (held to transaction end; the relcache reference is dropped with the
+/// transient context but the lock persists, per C `relation_close(NoLock)`).
+/// The user seam's contract carries the relation as its OID identity (the role
+/// catalog drivers re-open it in their own `mcx`), so we return the OID after
+/// acquiring the lock.
+fn table_open_seam(relid: Oid, lockmode: types_storage::lock::LOCKMODE) -> PgResult<Oid> {
+    let ctx = MemoryContext::new("table_open_authid");
+    let mcx = ctx.mcx();
+    let r = table_open(mcx, relid, lockmode)?;
+    let id = r.rd_id;
+    // `r` drops here: refcount release only, the lock stays to xact end (C
+    // `relation_close(rel, NoLock)`).
+    Ok(id)
+}
+
+/// `table_close(rel, lockmode)` — `rel` is the OID identity. user.c closes the
+/// role catalog with `NoLock` (the lock is held to transaction end), so there
+/// is nothing to release here; a non-`NoLock` close would release the lock.
+fn table_close_seam(rel: Oid, lockmode: types_storage::lock::LOCKMODE) -> PgResult<()> {
+    if lockmode != types_storage::lock::NoLock {
+        let ctx = MemoryContext::new("table_close_authid");
+        let mcx = ctx.mcx();
+        // Re-open (no extra lock) and close at `lockmode` to release it.
+        let r = table_open(mcx, rel, types_storage::lock::NoLock)?;
+        r.close(lockmode)?;
+    }
+    Ok(())
+}
+
 fn get_new_oid_with_index(rel: Oid, index_id: Oid) -> PgResult<Oid> {
     let ctx = MemoryContext::new("get_new_oid_with_index_authid");
     let mcx = ctx.mcx();
@@ -164,4 +194,6 @@ pub fn init_seams() {
     user::delete_authmem_by_oid::set(delete_authmem_by_oid);
     user::delete_authmem_by_roleid::set(delete_authmem_by_roleid);
     user::delete_authmem_by_member::set(delete_authmem_by_member);
+    user::table_open::set(table_open_seam);
+    user::table_close::set(table_close_seam);
 }

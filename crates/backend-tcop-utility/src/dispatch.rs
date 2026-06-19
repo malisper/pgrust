@@ -511,7 +511,7 @@ fn dispatch_switch<'mcx>(
         }
 
         t if t == ntag::T_ReassignOwnedStmt => {
-            rt::reassign_owned_objects::call(parsetree)?;
+            rt::reassign_owned_objects::call(mcx, parsetree)?;
         }
 
         t if t == ntag::T_LockStmt => {

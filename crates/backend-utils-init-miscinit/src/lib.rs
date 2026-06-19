@@ -1226,6 +1226,34 @@ pub fn init_seams() {
             Ok(())
         });
     }
+
+    // commands/user.c (CREATE/ALTER/DROP/RENAME ROLE, GRANT/REVOKE membership)
+    // reaches the miscinit.c user-id substrate through
+    // backend-commands-user-seams. miscinit owns these bodies; install them
+    // here. `GetUserId`/`GetOuterUserId`/`GetSessionUserId` are infallible in C
+    // (`Oid f(void)`) — wrap in `Ok`. `has_rolreplication` does a catalog read
+    // (`Mcx`) but the user-seams decl is bare; run it behind a scratch context
+    // (only the Copy `bool` escapes). `GetUserNameFromId` already takes `mcx`;
+    // the user-seams decl returns the name directly (its callers all pass
+    // `noerr=false`, where C never returns NULL), so an unexpected `None` (the
+    // `noerr=true` C `char *NULL`) maps to the same undefined-object error.
+    {
+        use backend_commands_user_seams as u;
+        u::get_user_id::set(|| Ok(GetUserId()));
+        u::get_outer_user_id::set(|| Ok(GetOuterUserId()));
+        u::get_session_user_id::set(|| Ok(GetSessionUserId()));
+        u::has_rolreplication::set(|roleid| {
+            let scratch = MemoryContext::new("user.c has_rolreplication seam");
+            has_rolreplication(scratch.mcx(), roleid)
+        });
+        u::get_user_name_from_id::set(|mcx, roleid, noerr| {
+            match GetUserNameFromId(mcx, roleid, noerr)? {
+                Some(name) => Ok(name),
+                None => Err(PgError::new(ERROR, format!("invalid role OID: {roleid}"))
+                    .with_sqlstate(ERRCODE_UNDEFINED_OBJECT)),
+            }
+        });
+    }
 }
 
 #[cfg(test)]

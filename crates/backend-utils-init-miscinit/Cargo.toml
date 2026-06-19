@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 libc = "0.2"
 backend-commands-matview-deps-seams = { path = "../backend-commands-matview-deps-seams" }
+backend-commands-user-seams = { path = "../backend-commands-user-seams" }
 mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }

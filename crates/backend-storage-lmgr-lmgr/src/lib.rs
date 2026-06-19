@@ -1290,4 +1290,10 @@ pub fn init_seams() {
         let lri = backend_utils_cache_relcache_seams::rel_lock_relid::call(rel.rd_id)?;
         LockHasWaitersRelation(&lri, lockmode)
     });
+
+    // user.c `LockSharedObject(AuthIdRelationId, roleid, 0, lockmode)` —
+    // CREATE/ALTER/DROP ROLE lock the role-catalog object by OID.
+    backend_commands_user_seams::lock_shared_object_authid::set(|roleid, lockmode| {
+        LockSharedObject(types_core::AUTH_ID_RELATION_ID, roleid, 0, lockmode)
+    });
 }

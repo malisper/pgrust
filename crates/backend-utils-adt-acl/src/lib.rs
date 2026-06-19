@@ -38,6 +38,7 @@ pub mod aclitem_io;
 pub mod fmgr_builtins;
 pub mod has_privilege;
 pub mod role_membership;
+mod user_seam_wiring;
 
 /// C: `typedef struct { const char *name; AclMode value; } priv_map` —
 /// one entry of a privilege-name → privilege-bit table.
@@ -72,4 +73,9 @@ pub fn init_seams() {
     // (C: their `fmgr_builtins[]` rows): the aclitem type I/O + the
     // has_*_privilege / pg_has_role read families.
     fmgr_builtins::register_acl_builtins();
+
+    // commands/user.c role-membership / role-resolution seams. `has_privs_of_role`
+    // is intentionally NOT installed here: backend-commands-user installs it
+    // (via the acl-seams delegation) to avoid a duplicate-install panic.
+    user_seam_wiring::install();
 }

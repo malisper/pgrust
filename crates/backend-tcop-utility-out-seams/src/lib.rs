@@ -553,8 +553,9 @@ seam!(
     pub fn drop_role<'mcx>(stmt: &Node<'mcx>) -> PgResult<()>
 );
 seam!(
-    /// `ReassignOwnedObjects(stmt)` (user.c) — REASSIGN OWNED.
-    pub fn reassign_owned_objects<'mcx>(stmt: &Node<'mcx>) -> PgResult<()>
+    /// `ReassignOwnedObjects(stmt)` (user.c) — REASSIGN OWNED. Allocates the
+    /// role-name lookups in the caller's context.
+    pub fn reassign_owned_objects<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<()>
 );
 
 /* ---- LOCK / SET CONSTRAINTS / CHECKPOINT (lockcmds / trigger / xlog) ---- */

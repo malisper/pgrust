@@ -496,6 +496,18 @@ pub fn init_seams() {
     s::invoke_function_execute_hook::set(invoke_function_execute_hook);
     s::InvokeObjectDropHookArg::set(invoke_object_drop_hook);
 
+    // user.c role-object access hooks (CREATE/ALTER/DROP ROLE), all on
+    // `AuthIdRelationId` with `subId = 0`.
+    backend_commands_user_seams::invoke_object_post_create_hook_authid::set(|roleid| {
+        invoke_object_post_create_hook(types_core::AUTH_ID_RELATION_ID, roleid, 0, false)
+    });
+    backend_commands_user_seams::invoke_object_post_alter_hook_authid::set(|roleid| {
+        invoke_object_post_alter_hook(types_core::AUTH_ID_RELATION_ID, roleid, 0, InvalidOid, false)
+    });
+    backend_commands_user_seams::invoke_object_drop_hook_authid::set(|roleid| {
+        invoke_object_drop_hook(types_core::AUTH_ID_RELATION_ID, roleid, 0, 0)
+    });
+
     // guc_funcs.c (SetPGVariable) invokes the by-name post-alter hook for the
     // GUC change through its own outward seam crate. C macro
     // `InvokeObjectPostAlterHookArgStr(classId, name, subId, auxiliaryId,
