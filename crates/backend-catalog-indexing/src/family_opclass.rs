@@ -151,10 +151,41 @@ fn insert_pg_amproc(rel: &RelationData<'_>, form: &oc::FormData_pg_amproc) -> Pg
     Ok(entryoid)
 }
 
+/// `CreateAccessMethod`'s pg_am insert (commands/amcmds.c).
+fn insert_pg_am(
+    rel: &RelationData<'_>,
+    amname: &str,
+    amhandler: Oid,
+    amtype: u8,
+) -> PgResult<Oid> {
+    let ctx = MemoryContext::new("insert_pg_am");
+    let mcx = ctx.mcx();
+    let r = reopen(mcx, rel)?;
+
+    // amoid = GetNewOidWithIndex(rel, AmOidIndexId, Anum_pg_am_oid);
+    let amoid = GetNewOidWithIndex(&r, oc::AmOidIndexId, oc::Anum_pg_am_oid)?;
+
+    let mut values: Vec<Datum> = vec![Datum::null(); oc::Natts_pg_am];
+    let nulls: Vec<bool> = vec![false; oc::Natts_pg_am];
+
+    // values[Anum_pg_am_oid-1]      = ObjectIdGetDatum(amoid);
+    // values[Anum_pg_am_amname-1]   = CStringGetDatum(namein(stmt->amname));
+    // values[Anum_pg_am_amhandler-1]= ObjectIdGetDatum(amhandler);
+    // values[Anum_pg_am_amtype-1]   = CharGetDatum(stmt->amtype);
+    values[oc::Anum_pg_am_oid as usize - 1] = Datum::from_oid(amoid);
+    values[oc::Anum_pg_am_amname as usize - 1] = name_datum(mcx, amname)?;
+    values[oc::Anum_pg_am_amhandler as usize - 1] = Datum::from_oid(amhandler);
+    values[oc::Anum_pg_am_amtype as usize - 1] = Datum::from_char(amtype as i8);
+
+    form_and_insert(mcx, &r, &values, &nulls)?;
+    Ok(amoid)
+}
+
 pub fn install() {
     use backend_catalog_indexing_seams as s;
     s::catalog_tuple_insert_pg_opfamily::set(insert_pg_opfamily);
     s::catalog_tuple_insert_pg_opclass::set(insert_pg_opclass);
     s::catalog_tuple_insert_pg_amop::set(insert_pg_amop);
     s::catalog_tuple_insert_pg_amproc::set(insert_pg_amproc);
+    s::catalog_tuple_insert_pg_am::set(insert_pg_am);
 }

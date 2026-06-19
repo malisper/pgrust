@@ -139,3 +139,19 @@ pub struct FormData_pg_amproc {
     pub amprocnum: i16,
     pub amproc: Oid,
 }
+
+// ---------------------------------------------------------------------------
+// pg_am (commands/amcmds.c CreateAccessMethod)
+// ---------------------------------------------------------------------------
+
+/// `AccessMethodRelationId` — `pg_am` (`pg_am_d.h`).
+pub const AccessMethodRelationId: Oid = 2601;
+/// `AmOidIndexId` — `pg_am_oid_index` (`pg_am_d.h`).
+pub const AmOidIndexId: Oid = 2652;
+
+pub const Anum_pg_am_oid: AttrNumber = 1;
+pub const Anum_pg_am_amname: AttrNumber = 2;
+pub const Anum_pg_am_amhandler: AttrNumber = 3;
+pub const Anum_pg_am_amtype: AttrNumber = 4;
+/// `Natts_pg_am` (`pg_am_d.h`).
+pub const Natts_pg_am: usize = 4;

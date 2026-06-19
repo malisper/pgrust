@@ -20460,6 +20460,8 @@ name = "backend-utils-adt-varlena"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-detoast-seams",
+ "backend-commands-comment-seams",
+ "backend-commands-seclabel-seams",
  "backend-lib-hyperloglog",
  "backend-libpq-pqformat",
  "backend-parser-scansup-seams",

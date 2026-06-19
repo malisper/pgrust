@@ -25,6 +25,8 @@ types-regex = { path = "../types-regex" }
 types-stringinfo = { path = "../types-stringinfo" }
 backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
+backend-commands-comment-seams = { path = "../backend-commands-comment-seams" }
+backend-commands-seclabel-seams = { path = "../backend-commands-seclabel-seams" }
 backend-utils-adt-quote-seams = { path = "../backend-utils-adt-quote-seams" }
 backend-utils-adt-numutils = { path = "../backend-utils-adt-numutils" }
 backend-utils-adt-regexp-seams = { path = "../backend-utils-adt-regexp-seams" }

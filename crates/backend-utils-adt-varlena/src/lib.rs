@@ -399,6 +399,25 @@ fn seam_text_to_cstring_v<'mcx>(mcx: Mcx<'mcx>, d: &DatumV<'_>) -> PgResult<PgSt
     text_payload_to_pgstring(mcx, &payload)
 }
 
+/// `CStringGetTextDatum(s)` for the comment.c / seclabel.c command drivers:
+/// build a by-reference `text` `Datum` (header-ful varlena image) the same way
+/// the funcapi SRF leg does, routing through this owner's `cstring_to_text_v`.
+/// C: `PointerGetDatum(cstring_to_text(s))`.
+fn seam_cstring_get_text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<DatumV<'mcx>> {
+    backend_utils_adt_varlena_seams::cstring_to_text_v::call(mcx, s)
+}
+
+/// `TextDatumGetCString(value)` for the comment.c / seclabel.c command drivers:
+/// detoast the by-reference `text` `Datum` back to an owned `String`. C:
+/// `text_to_cstring((text *) DatumGetPointer(value))`. The detoast/copy runs in
+/// a private scratch context; the result is copied out as an owned `String`.
+fn seam_text_datum_get_cstring(value: DatumV<'_>) -> PgResult<String> {
+    let ctx = mcx::MemoryContext::new("TextDatumGetCString");
+    let mcx = ctx.mcx();
+    let s = backend_utils_adt_varlena_seams::text_to_cstring_v::call(mcx, &value)?;
+    Ok(s.as_str().to_owned())
+}
+
 // --- Bare-word shims — the still-pinned ABI edge; forge one word, reuse logic. ---
 
 fn seam_cstring_to_text<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<BareDatum> {
@@ -556,6 +575,16 @@ pub fn init_seams() {
     s::varstr_cmp::set(seam_varstr_cmp);
     s::split_identifier_string::set(seam_split_identifier_string);
     s::split_directories_string::set(seam_split_directories_string);
+
+    // `CStringGetTextDatum` / `TextDatumGetCString` (builtins.h) for the
+    // comment.c and seclabel.c command drivers (pg_description / pg_seclabel
+    // text columns). varlena.c owns these macros' bodies, so this owner installs
+    // the comment-seams / seclabel-seams Datum-shaped variants; they route
+    // through the same `cstring_to_text_v` / `text_to_cstring_v` cores.
+    backend_commands_comment_seams::cstring_get_text_datum::set(seam_cstring_get_text_datum);
+    backend_commands_comment_seams::text_datum_get_cstring::set(seam_text_datum_get_cstring);
+    backend_commands_seclabel_seams::cstring_get_text_datum::set(seam_cstring_get_text_datum);
+    backend_commands_seclabel_seams::text_datum_get_cstring::set(seam_text_datum_get_cstring);
     s::text_to_qualified_name_list::set(seam_text_to_qualified_name_list);
     s::text_substr::set(seam_text_substr);
     s::replace_text_regexp::set(seam_replace_text_regexp);
