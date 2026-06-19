@@ -467,7 +467,7 @@ fn emit_accessor_block(
     let pat_mut = pat.to_string();
     let pat_wild = pat.replacen("(x)", "(_)", 1);
     let mut n = 0;
-    let methods: [(String, String); 5] = [
+    let methods: [(String, String); 6] = [
         (
             format!("as_{lc}"),
             format!(
@@ -490,6 +490,14 @@ fn emit_accessor_block(
                 "    /// `castNode({ident}, node)` (borrow, asserting) — panics if not `{ident}`.\n    \
                  pub fn expect_{lc}(&self) -> &{ret} {{\n        \
                  match self {{ {pat} => x, _ => ::core::panic!(\"expect_{lc}: not a {ident} node\") }}\n    }}\n",
+            ),
+        ),
+        (
+            format!("expect_{lc}_mut"),
+            format!(
+                "    /// `castNode({ident}, node)` (mutable borrow, asserting) — panics if not `{ident}`.\n    \
+                 pub fn expect_{lc}_mut(&mut self) -> &mut {ret} {{\n        \
+                 match self {{ {pat_mut} => x, _ => ::core::panic!(\"expect_{lc}_mut: not a {ident} node\") }}\n    }}\n",
             ),
         ),
         (
@@ -558,7 +566,7 @@ fn emit_expr_accessors(
         let ty = &v.payload; // payload type text, e.g. `OpExpr`, `SubPlanExpr`
         let pat = format!("Expr::{ident}(x)");
         let pat_wild = format!("Expr::{ident}(_)");
-        let methods: [(String, String); 6] = [
+        let methods: [(String, String); 7] = [
             (
                 format!("is_{lc}"),
                 format!(
@@ -588,6 +596,14 @@ fn emit_expr_accessors(
                     "    /// `castNode({ident}, node)` (borrow, asserting) — panics if not `Expr::{ident}`.\n    #[inline]\n    \
                      pub fn expect_{lc}(&self) -> &{ty} {{\n        \
                      match self {{ {pat} => x, _ => ::core::panic!(\"Expr::expect_{lc}: not a {ident}\") }}\n    }}\n",
+                ),
+            ),
+            (
+                format!("expect_{lc}_mut"),
+                format!(
+                    "    /// `castNode({ident}, node)` (mutable borrow, asserting) — panics if not `Expr::{ident}`.\n    #[inline]\n    \
+                     pub fn expect_{lc}_mut(&mut self) -> &mut {ty} {{\n        \
+                     match self {{ {pat} => x, _ => ::core::panic!(\"Expr::expect_{lc}_mut: not a {ident}\") }}\n    }}\n",
                 ),
             ),
             (
