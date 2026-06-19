@@ -64,7 +64,7 @@
 
 use types_core::{Oid, InvalidOid};
 use types_nodes::primnodes::{
-    self, ArrayExpr, CaseExpr, CaseWhen, Const, Expr, JsonConstructorExpr, JsonExpr, OpExpr,
+    self, etag, ArrayExpr, CaseExpr, CaseWhen, Const, Expr, JsonConstructorExpr, JsonExpr, OpExpr,
     RelabelType, ScalarArrayOpExpr, SubLink,
 };
 use types_nodes::primnodes::{CoercionForm, SubLinkType, XmlExprOp};
@@ -106,25 +106,25 @@ pub fn expr_type(expr: Option<&Expr>) -> PgResult<Oid> {
     let Some(expr) = expr else {
         return Ok(InvalidOid);
     };
-    let type_ = match expr {
-        Expr::Var(v) => v.vartype,
-        Expr::Const(c) => c.consttype,
-        Expr::Param(p) => p.paramtype,
-        Expr::Aggref(a) => a.aggtype,
-        Expr::GroupingFunc(_) => INT4OID,
-        Expr::WindowFunc(w) => w.wintype,
-        Expr::MergeSupportFunc(m) => m.msftype,
-        Expr::SubscriptingRef(s) => s.refrestype,
-        Expr::FuncExpr(f) => f.funcresulttype,
-        Expr::NamedArgExpr(n) => expr_type(n.arg.as_deref())?,
-        Expr::OpExpr(o) => o.opresulttype,
-        Expr::DistinctExpr(o) => o.opresulttype,
-        Expr::NullIfExpr(o) => o.opresulttype,
-        Expr::ScalarArrayOpExpr(_) => BOOLOID,
-        Expr::BoolExpr(_) => BOOLOID,
-        Expr::SubLink(sublink) => sublink_result_type(sublink)?,
-        Expr::SubPlan(sp) => {
-            let subplan = &sp.0;
+    let type_ = match expr.expr_tag() {
+        etag::T_Var => expr.as_var().unwrap().vartype,
+        etag::T_Const => expr.as_const().unwrap().consttype,
+        etag::T_Param => expr.as_param().unwrap().paramtype,
+        etag::T_Aggref => expr.as_aggref().unwrap().aggtype,
+        etag::T_GroupingFunc => INT4OID,
+        etag::T_WindowFunc => expr.as_windowfunc().unwrap().wintype,
+        etag::T_MergeSupportFunc => expr.as_mergesupportfunc().unwrap().msftype,
+        etag::T_SubscriptingRef => expr.as_subscriptingref().unwrap().refrestype,
+        etag::T_FuncExpr => expr.as_funcexpr().unwrap().funcresulttype,
+        etag::T_NamedArgExpr => expr_type(expr.as_namedargexpr().unwrap().arg.as_deref())?,
+        etag::T_OpExpr => expr.as_opexpr().unwrap().opresulttype,
+        etag::T_DistinctExpr => expr.as_distinctexpr().unwrap().opresulttype,
+        etag::T_NullIfExpr => expr.as_nullifexpr().unwrap().opresulttype,
+        etag::T_ScalarArrayOpExpr => BOOLOID,
+        etag::T_BoolExpr => BOOLOID,
+        etag::T_SubLink => sublink_result_type(expr.as_sublink().unwrap())?,
+        etag::T_SubPlan => {
+            let subplan = &expr.as_subplan().unwrap().0;
             if subplan.subLinkType == SubLinkType::Expr
                 || subplan.subLinkType == SubLinkType::Array
             {
@@ -142,26 +142,27 @@ pub fn expr_type(expr: Option<&Expr>) -> PgResult<Oid> {
                 BOOLOID
             }
         }
-        Expr::AlternativeSubPlan(asp) => {
+        etag::T_AlternativeSubPlan => {
             // subplans should all return the same thing
-            asp.0.subplans[0].firstColType_via_sublink()?
+            expr.as_alternativesubplan().unwrap().0.subplans[0].firstColType_via_sublink()?
         }
-        Expr::FieldSelect(f) => f.resulttype,
-        Expr::FieldStore(f) => f.resulttype,
-        Expr::RelabelType(r) => r.resulttype,
-        Expr::CoerceViaIO(c) => c.resulttype,
-        Expr::ArrayCoerceExpr(a) => a.resulttype,
-        Expr::ConvertRowtypeExpr(c) => c.resulttype,
-        Expr::CollateExpr(c) => expr_type(c.arg.as_deref())?,
-        Expr::CaseExpr(c) => c.casetype,
-        Expr::CaseTestExpr(c) => c.typeId,
-        Expr::ArrayExpr(a) => a.array_typeid,
-        Expr::RowExpr(r) => r.row_typeid,
-        Expr::RowCompareExpr(_) => BOOLOID,
-        Expr::CoalesceExpr(c) => c.coalescetype,
-        Expr::MinMaxExpr(m) => m.minmaxtype,
-        Expr::SQLValueFunction(s) => s.r#type,
-        Expr::XmlExpr(x) => {
+        etag::T_FieldSelect => expr.as_fieldselect().unwrap().resulttype,
+        etag::T_FieldStore => expr.as_fieldstore().unwrap().resulttype,
+        etag::T_RelabelType => expr.as_relabeltype().unwrap().resulttype,
+        etag::T_CoerceViaIO => expr.as_coerceviaio().unwrap().resulttype,
+        etag::T_ArrayCoerceExpr => expr.as_arraycoerceexpr().unwrap().resulttype,
+        etag::T_ConvertRowtypeExpr => expr.as_convertrowtypeexpr().unwrap().resulttype,
+        etag::T_CollateExpr => expr_type(expr.as_collateexpr().unwrap().arg.as_deref())?,
+        etag::T_CaseExpr => expr.as_caseexpr().unwrap().casetype,
+        etag::T_CaseTestExpr => expr.as_casetestexpr().unwrap().typeId,
+        etag::T_ArrayExpr => expr.as_arrayexpr().unwrap().array_typeid,
+        etag::T_RowExpr => expr.as_rowexpr().unwrap().row_typeid,
+        etag::T_RowCompareExpr => BOOLOID,
+        etag::T_CoalesceExpr => expr.as_coalesceexpr().unwrap().coalescetype,
+        etag::T_MinMaxExpr => expr.as_minmaxexpr().unwrap().minmaxtype,
+        etag::T_SQLValueFunction => expr.as_sqlvaluefunction().unwrap().r#type,
+        etag::T_XmlExpr => {
+            let x = expr.as_xmlexpr().unwrap();
             if x.op == XmlExprOp::IS_DOCUMENT {
                 BOOLOID
             } else if x.op == XmlExprOp::IS_XMLSERIALIZE {
@@ -170,22 +171,28 @@ pub fn expr_type(expr: Option<&Expr>) -> PgResult<Oid> {
                 XMLOID
             }
         }
-        Expr::JsonValueExpr(jve) => expr_type(jve.formatted_expr.as_deref())?,
-        Expr::JsonConstructorExpr(ctor) => json_returning_typid(ctor),
-        Expr::JsonIsPredicate(_) => BOOLOID,
-        Expr::JsonExpr(jexpr) => json_expr_returning_typid(jexpr),
-        Expr::NullTest(_) => BOOLOID,
-        Expr::BooleanTest(_) => BOOLOID,
-        Expr::CoerceToDomain(c) => c.resulttype,
-        Expr::CoerceToDomainValue(c) => c.typeId,
-        Expr::SetToDefault(s) => s.typeId,
-        Expr::CurrentOfExpr(_) => BOOLOID,
-        Expr::NextValueExpr(n) => n.typeId,
-        Expr::InferenceElem(n) => expr_type(n.expr.as_deref())?,
-        Expr::ReturningExpr(r) => expr_type(r.retexpr.as_deref())?,
+        etag::T_JsonValueExpr => {
+            expr_type(expr.as_jsonvalueexpr().unwrap().formatted_expr.as_deref())?
+        }
+        etag::T_JsonConstructorExpr => {
+            json_returning_typid(expr.as_jsonconstructorexpr().unwrap())
+        }
+        etag::T_JsonIsPredicate => BOOLOID,
+        etag::T_JsonExpr => json_expr_returning_typid(expr.as_jsonexpr().unwrap()),
+        etag::T_NullTest => BOOLOID,
+        etag::T_BooleanTest => BOOLOID,
+        etag::T_CoerceToDomain => expr.as_coercetodomain().unwrap().resulttype,
+        etag::T_CoerceToDomainValue => expr.as_coercetodomainvalue().unwrap().typeId,
+        etag::T_SetToDefault => expr.as_settodefault().unwrap().typeId,
+        etag::T_CurrentOfExpr => BOOLOID,
+        etag::T_NextValueExpr => expr.as_nextvalueexpr().unwrap().typeId,
+        etag::T_InferenceElem => expr_type(expr.as_inferenceelem().unwrap().expr.as_deref())?,
+        etag::T_ReturningExpr => {
+            expr_type(expr.as_returningexpr().unwrap().retexpr.as_deref())?
+        }
         // `Expr` is #[non_exhaustive]; an unmodeled future variant is the C
         // default: elog(ERROR, "unrecognized node type").
-        other => return Err(unrecognized_node_type_error(expr_variant_name(other))?),
+        _ => return Err(unrecognized_node_type_error(expr_variant_name(expr))?),
     };
     Ok(type_)
 }
@@ -260,12 +267,12 @@ pub fn expr_typmod(expr: Option<&Expr>) -> PgResult<i32> {
     let Some(expr) = expr else {
         return Ok(-1);
     };
-    let typmod = match expr {
-        Expr::Var(v) => v.vartypmod,
-        Expr::Const(c) => c.consttypmod,
-        Expr::Param(p) => p.paramtypmod,
-        Expr::SubscriptingRef(s) => s.reftypmod,
-        Expr::FuncExpr(_) => {
+    let typmod = match expr.expr_tag() {
+        etag::T_Var => expr.as_var().unwrap().vartypmod,
+        etag::T_Const => expr.as_const().unwrap().consttypmod,
+        etag::T_Param => expr.as_param().unwrap().paramtypmod,
+        etag::T_SubscriptingRef => expr.as_subscriptingref().unwrap().reftypmod,
+        etag::T_FuncExpr => {
             // Be smart about length-coercion functions...
             let (is_len, coerced) = expr_is_length_coercion(Some(expr))?;
             if is_len {
@@ -274,12 +281,13 @@ pub fn expr_typmod(expr: Option<&Expr>) -> PgResult<i32> {
                 -1
             }
         }
-        Expr::NamedArgExpr(n) => expr_typmod(n.arg.as_deref())?,
-        Expr::NullIfExpr(o) => {
+        etag::T_NamedArgExpr => expr_typmod(expr.as_namedargexpr().unwrap().arg.as_deref())?,
+        etag::T_NullIfExpr => {
             // result is first argument or NULL → report first arg's typmod
-            expr_typmod(o.args.first())?
+            expr_typmod(expr.as_nullifexpr().unwrap().args.first())?
         }
-        Expr::SubLink(sublink) => {
+        etag::T_SubLink => {
+            let sublink = expr.as_sublink().unwrap();
             if sublink.subLinkType == SubLinkType::Expr
                 || sublink.subLinkType == SubLinkType::Array
             {
@@ -290,8 +298,8 @@ pub fn expr_typmod(expr: Option<&Expr>) -> PgResult<i32> {
             }
             -1
         }
-        Expr::SubPlan(sp) => {
-            let subplan = &sp.0;
+        etag::T_SubPlan => {
+            let subplan = &expr.as_subplan().unwrap().0;
             if subplan.subLinkType == SubLinkType::Expr
                 || subplan.subLinkType == SubLinkType::Array
             {
@@ -300,8 +308,8 @@ pub fn expr_typmod(expr: Option<&Expr>) -> PgResult<i32> {
                 -1
             }
         }
-        Expr::AlternativeSubPlan(asp) => {
-            let sp = &asp.0.subplans[0];
+        etag::T_AlternativeSubPlan => {
+            let sp = &expr.as_alternativesubplan().unwrap().0.subplans[0];
             if sp.subLinkType == SubLinkType::Expr
                 || sp.subLinkType == SubLinkType::Array
             {
@@ -310,29 +318,39 @@ pub fn expr_typmod(expr: Option<&Expr>) -> PgResult<i32> {
                 -1
             }
         }
-        Expr::FieldSelect(f) => f.resulttypmod,
-        Expr::RelabelType(r) => r.resulttypmod,
-        Expr::ArrayCoerceExpr(a) => a.resulttypmod,
-        Expr::CollateExpr(c) => expr_typmod(c.arg.as_deref())?,
-        Expr::CaseExpr(cexpr) => case_expr_typmod(cexpr)?,
-        Expr::CaseTestExpr(c) => c.typeMod,
-        Expr::ArrayExpr(arrayexpr) => array_expr_typmod(arrayexpr)?,
-        Expr::CoalesceExpr(cexpr) => agree_typmod(&cexpr.args, cexpr.coalescetype)?,
-        Expr::MinMaxExpr(mexpr) => agree_typmod(&mexpr.args, mexpr.minmaxtype)?,
-        Expr::SQLValueFunction(s) => s.typmod,
-        Expr::JsonValueExpr(jve) => expr_typmod(jve.formatted_expr.as_deref())?,
-        Expr::JsonConstructorExpr(ctor) => match &ctor.returning {
+        etag::T_FieldSelect => expr.as_fieldselect().unwrap().resulttypmod,
+        etag::T_RelabelType => expr.as_relabeltype().unwrap().resulttypmod,
+        etag::T_ArrayCoerceExpr => expr.as_arraycoerceexpr().unwrap().resulttypmod,
+        etag::T_CollateExpr => expr_typmod(expr.as_collateexpr().unwrap().arg.as_deref())?,
+        etag::T_CaseExpr => case_expr_typmod(expr.as_caseexpr().unwrap())?,
+        etag::T_CaseTestExpr => expr.as_casetestexpr().unwrap().typeMod,
+        etag::T_ArrayExpr => array_expr_typmod(expr.as_arrayexpr().unwrap())?,
+        etag::T_CoalesceExpr => {
+            let cexpr = expr.as_coalesceexpr().unwrap();
+            agree_typmod(&cexpr.args, cexpr.coalescetype)?
+        }
+        etag::T_MinMaxExpr => {
+            let mexpr = expr.as_minmaxexpr().unwrap();
+            agree_typmod(&mexpr.args, mexpr.minmaxtype)?
+        }
+        etag::T_SQLValueFunction => expr.as_sqlvaluefunction().unwrap().typmod,
+        etag::T_JsonValueExpr => {
+            expr_typmod(expr.as_jsonvalueexpr().unwrap().formatted_expr.as_deref())?
+        }
+        etag::T_JsonConstructorExpr => match &expr.as_jsonconstructorexpr().unwrap().returning {
             Some(r) => r.typmod,
             None => -1,
         },
-        Expr::JsonExpr(jexpr) => match &jexpr.returning {
+        etag::T_JsonExpr => match &expr.as_jsonexpr().unwrap().returning {
             Some(r) => r.typmod,
             None => -1,
         },
-        Expr::CoerceToDomain(c) => c.resulttypmod,
-        Expr::CoerceToDomainValue(c) => c.typeMod,
-        Expr::SetToDefault(s) => s.typeMod,
-        Expr::ReturningExpr(r) => expr_typmod(r.retexpr.as_deref())?,
+        etag::T_CoerceToDomain => expr.as_coercetodomain().unwrap().resulttypmod,
+        etag::T_CoerceToDomainValue => expr.as_coercetodomainvalue().unwrap().typeMod,
+        etag::T_SetToDefault => expr.as_settodefault().unwrap().typeMod,
+        etag::T_ReturningExpr => {
+            expr_typmod(expr.as_returningexpr().unwrap().retexpr.as_deref())?
+        }
         _ => -1,
     };
     Ok(typmod)
@@ -632,23 +650,24 @@ pub fn expr_collation(expr: Option<&Expr>) -> PgResult<Oid> {
     let Some(expr) = expr else {
         return Ok(InvalidOid);
     };
-    let coll = match expr {
-        Expr::Var(v) => v.varcollid,
-        Expr::Const(c) => c.constcollid,
-        Expr::Param(p) => p.paramcollid,
-        Expr::Aggref(a) => a.aggcollid,
-        Expr::GroupingFunc(_) => InvalidOid,
-        Expr::WindowFunc(w) => w.wincollid,
-        Expr::MergeSupportFunc(m) => m.msfcollid,
-        Expr::SubscriptingRef(s) => s.refcollid,
-        Expr::FuncExpr(f) => f.funccollid,
-        Expr::NamedArgExpr(n) => expr_collation(n.arg.as_deref())?,
-        Expr::OpExpr(o) => o.opcollid,
-        Expr::DistinctExpr(o) => o.opcollid,
-        Expr::NullIfExpr(o) => o.opcollid,
-        Expr::ScalarArrayOpExpr(_) => InvalidOid,
-        Expr::BoolExpr(_) => InvalidOid,
-        Expr::SubLink(sublink) => {
+    let coll = match expr.expr_tag() {
+        etag::T_Var => expr.as_var().unwrap().varcollid,
+        etag::T_Const => expr.as_const().unwrap().constcollid,
+        etag::T_Param => expr.as_param().unwrap().paramcollid,
+        etag::T_Aggref => expr.as_aggref().unwrap().aggcollid,
+        etag::T_GroupingFunc => InvalidOid,
+        etag::T_WindowFunc => expr.as_windowfunc().unwrap().wincollid,
+        etag::T_MergeSupportFunc => expr.as_mergesupportfunc().unwrap().msfcollid,
+        etag::T_SubscriptingRef => expr.as_subscriptingref().unwrap().refcollid,
+        etag::T_FuncExpr => expr.as_funcexpr().unwrap().funccollid,
+        etag::T_NamedArgExpr => expr_collation(expr.as_namedargexpr().unwrap().arg.as_deref())?,
+        etag::T_OpExpr => expr.as_opexpr().unwrap().opcollid,
+        etag::T_DistinctExpr => expr.as_distinctexpr().unwrap().opcollid,
+        etag::T_NullIfExpr => expr.as_nullifexpr().unwrap().opcollid,
+        etag::T_ScalarArrayOpExpr => InvalidOid,
+        etag::T_BoolExpr => InvalidOid,
+        etag::T_SubLink => {
+            let sublink = expr.as_sublink().unwrap();
             if sublink.subLinkType == SubLinkType::Expr
                 || sublink.subLinkType == SubLinkType::Array
             {
@@ -659,8 +678,8 @@ pub fn expr_collation(expr: Option<&Expr>) -> PgResult<Oid> {
             }
             InvalidOid
         }
-        Expr::SubPlan(sp) => {
-            let subplan = &sp.0;
+        etag::T_SubPlan => {
+            let subplan = &expr.as_subplan().unwrap().0;
             if subplan.subLinkType == SubLinkType::Expr
                 || subplan.subLinkType == SubLinkType::Array
             {
@@ -669,53 +688,63 @@ pub fn expr_collation(expr: Option<&Expr>) -> PgResult<Oid> {
                 InvalidOid
             }
         }
-        Expr::AlternativeSubPlan(asp) => asp.0.subplans[0].firstColCollation,
-        Expr::FieldSelect(f) => f.resultcollid,
-        Expr::FieldStore(_) => InvalidOid,
-        Expr::RelabelType(r) => r.resultcollid,
-        Expr::CoerceViaIO(c) => c.resultcollid,
-        Expr::ArrayCoerceExpr(a) => a.resultcollid,
-        Expr::ConvertRowtypeExpr(_) => InvalidOid,
-        Expr::CollateExpr(c) => c.collOid,
-        Expr::CaseExpr(c) => c.casecollid,
-        Expr::CaseTestExpr(c) => c.collation,
-        Expr::ArrayExpr(a) => a.array_collid,
-        Expr::RowExpr(_) => InvalidOid,
-        Expr::RowCompareExpr(_) => InvalidOid,
-        Expr::CoalesceExpr(c) => c.coalescecollid,
-        Expr::MinMaxExpr(m) => m.minmaxcollid,
-        Expr::SQLValueFunction(s) => {
-            if s.r#type == NAMEOID {
+        etag::T_AlternativeSubPlan => {
+            expr.as_alternativesubplan().unwrap().0.subplans[0].firstColCollation
+        }
+        etag::T_FieldSelect => expr.as_fieldselect().unwrap().resultcollid,
+        etag::T_FieldStore => InvalidOid,
+        etag::T_RelabelType => expr.as_relabeltype().unwrap().resultcollid,
+        etag::T_CoerceViaIO => expr.as_coerceviaio().unwrap().resultcollid,
+        etag::T_ArrayCoerceExpr => expr.as_arraycoerceexpr().unwrap().resultcollid,
+        etag::T_ConvertRowtypeExpr => InvalidOid,
+        etag::T_CollateExpr => expr.as_collateexpr().unwrap().collOid,
+        etag::T_CaseExpr => expr.as_caseexpr().unwrap().casecollid,
+        etag::T_CaseTestExpr => expr.as_casetestexpr().unwrap().collation,
+        etag::T_ArrayExpr => expr.as_arrayexpr().unwrap().array_collid,
+        etag::T_RowExpr => InvalidOid,
+        etag::T_RowCompareExpr => InvalidOid,
+        etag::T_CoalesceExpr => expr.as_coalesceexpr().unwrap().coalescecollid,
+        etag::T_MinMaxExpr => expr.as_minmaxexpr().unwrap().minmaxcollid,
+        etag::T_SQLValueFunction => {
+            if expr.as_sqlvaluefunction().unwrap().r#type == NAMEOID {
                 C_COLLATION_OID
             } else {
                 InvalidOid
             }
         }
-        Expr::XmlExpr(x) => {
-            if x.op == XmlExprOp::IS_XMLSERIALIZE {
+        etag::T_XmlExpr => {
+            if expr.as_xmlexpr().unwrap().op == XmlExprOp::IS_XMLSERIALIZE {
                 DEFAULT_COLLATION_OID
             } else {
                 InvalidOid
             }
         }
-        Expr::JsonValueExpr(jve) => expr_collation(jve.formatted_expr.as_deref())?,
-        Expr::JsonConstructorExpr(ctor) => match ctor.coercion.as_deref() {
-            Some(c) => expr_collation(Some(c))?,
-            None => InvalidOid,
-        },
-        Expr::JsonIsPredicate(_) => InvalidOid,
-        Expr::JsonExpr(jexpr) => jexpr.collation,
-        Expr::NullTest(_) => InvalidOid,
-        Expr::BooleanTest(_) => InvalidOid,
-        Expr::CoerceToDomain(c) => c.resultcollid,
-        Expr::CoerceToDomainValue(c) => c.collation,
-        Expr::SetToDefault(s) => s.collation,
-        Expr::CurrentOfExpr(_) => InvalidOid,
-        Expr::NextValueExpr(_) => InvalidOid,
-        Expr::InferenceElem(n) => expr_collation(n.expr.as_deref())?,
-        Expr::ReturningExpr(r) => expr_collation(r.retexpr.as_deref())?,
+        etag::T_JsonValueExpr => {
+            expr_collation(expr.as_jsonvalueexpr().unwrap().formatted_expr.as_deref())?
+        }
+        etag::T_JsonConstructorExpr => {
+            match expr.as_jsonconstructorexpr().unwrap().coercion.as_deref() {
+                Some(c) => expr_collation(Some(c))?,
+                None => InvalidOid,
+            }
+        }
+        etag::T_JsonIsPredicate => InvalidOid,
+        etag::T_JsonExpr => expr.as_jsonexpr().unwrap().collation,
+        etag::T_NullTest => InvalidOid,
+        etag::T_BooleanTest => InvalidOid,
+        etag::T_CoerceToDomain => expr.as_coercetodomain().unwrap().resultcollid,
+        etag::T_CoerceToDomainValue => expr.as_coercetodomainvalue().unwrap().collation,
+        etag::T_SetToDefault => expr.as_settodefault().unwrap().collation,
+        etag::T_CurrentOfExpr => InvalidOid,
+        etag::T_NextValueExpr => InvalidOid,
+        etag::T_InferenceElem => {
+            expr_collation(expr.as_inferenceelem().unwrap().expr.as_deref())?
+        }
+        etag::T_ReturningExpr => {
+            expr_collation(expr.as_returningexpr().unwrap().retexpr.as_deref())?
+        }
         // #[non_exhaustive]: C default elog(ERROR, "unrecognized node type").
-        other => return Err(unrecognized_node_type_error(expr_variant_name(other))?),
+        _ => return Err(unrecognized_node_type_error(expr_variant_name(expr))?),
     };
     Ok(coll)
 }
@@ -730,15 +759,15 @@ pub fn expr_input_collation(expr: Option<&Expr>) -> Oid {
     let Some(expr) = expr else {
         return InvalidOid;
     };
-    match expr {
-        Expr::Aggref(a) => a.inputcollid,
-        Expr::WindowFunc(w) => w.inputcollid,
-        Expr::FuncExpr(f) => f.inputcollid,
-        Expr::OpExpr(o) => o.inputcollid,
-        Expr::DistinctExpr(o) => o.inputcollid,
-        Expr::NullIfExpr(o) => o.inputcollid,
-        Expr::ScalarArrayOpExpr(s) => s.inputcollid,
-        Expr::MinMaxExpr(m) => m.inputcollid,
+    match expr.expr_tag() {
+        etag::T_Aggref => expr.as_aggref().unwrap().inputcollid,
+        etag::T_WindowFunc => expr.as_windowfunc().unwrap().inputcollid,
+        etag::T_FuncExpr => expr.as_funcexpr().unwrap().inputcollid,
+        etag::T_OpExpr => expr.as_opexpr().unwrap().inputcollid,
+        etag::T_DistinctExpr => expr.as_distinctexpr().unwrap().inputcollid,
+        etag::T_NullIfExpr => expr.as_nullifexpr().unwrap().inputcollid,
+        etag::T_ScalarArrayOpExpr => expr.as_scalararrayopexpr().unwrap().inputcollid,
+        etag::T_MinMaxExpr => expr.as_minmaxexpr().unwrap().inputcollid,
         _ => InvalidOid,
     }
 }
@@ -753,60 +782,62 @@ pub fn expr_input_collation(expr: Option<&Expr>) -> Oid {
 /// checks `collation == InvalidOid`) are no-ops here, matching a non-asserting
 /// build. `Err` carries the unrecognized-node-type error.
 pub fn expr_set_collation(expr: &mut Expr, collation: Oid) -> PgResult<()> {
-    match expr {
-        Expr::Var(v) => v.varcollid = collation,
-        Expr::Const(c) => c.constcollid = collation,
-        Expr::Param(p) => p.paramcollid = collation,
-        Expr::Aggref(a) => a.aggcollid = collation,
-        Expr::GroupingFunc(_) => {}
-        Expr::WindowFunc(w) => w.wincollid = collation,
-        Expr::MergeSupportFunc(m) => m.msfcollid = collation,
-        Expr::SubscriptingRef(s) => s.refcollid = collation,
-        Expr::FuncExpr(f) => f.funccollid = collation,
-        Expr::NamedArgExpr(_) => {} // Assert(collation == exprCollation(arg))
-        Expr::OpExpr(o) => o.opcollid = collation,
-        Expr::DistinctExpr(o) => o.opcollid = collation,
-        Expr::NullIfExpr(o) => o.opcollid = collation,
-        Expr::ScalarArrayOpExpr(_) => {}
-        Expr::BoolExpr(_) => {}
-        Expr::SubLink(_) => {} // assert-only in C
-        Expr::FieldSelect(f) => f.resultcollid = collation,
-        Expr::FieldStore(_) => {}
-        Expr::RelabelType(r) => r.resultcollid = collation,
-        Expr::CoerceViaIO(c) => c.resultcollid = collation,
-        Expr::ArrayCoerceExpr(a) => a.resultcollid = collation,
-        Expr::ConvertRowtypeExpr(_) => {}
-        Expr::CaseExpr(c) => c.casecollid = collation,
-        Expr::ArrayExpr(a) => a.array_collid = collation,
-        Expr::RowExpr(_) => {}
-        Expr::RowCompareExpr(_) => {}
-        Expr::CoalesceExpr(c) => c.coalescecollid = collation,
-        Expr::MinMaxExpr(m) => m.minmaxcollid = collation,
-        Expr::SQLValueFunction(_) => {} // assert-only
-        Expr::XmlExpr(_) => {}          // assert-only
-        Expr::JsonValueExpr(jve) => {
-            if let Some(fe) = jve.formatted_expr.as_deref_mut() {
+    match expr.expr_tag() {
+        etag::T_Var => expr.as_var_mut().unwrap().varcollid = collation,
+        etag::T_Const => expr.as_const_mut().unwrap().constcollid = collation,
+        etag::T_Param => expr.as_param_mut().unwrap().paramcollid = collation,
+        etag::T_Aggref => expr.as_aggref_mut().unwrap().aggcollid = collation,
+        etag::T_GroupingFunc => {}
+        etag::T_WindowFunc => expr.as_windowfunc_mut().unwrap().wincollid = collation,
+        etag::T_MergeSupportFunc => expr.as_mergesupportfunc_mut().unwrap().msfcollid = collation,
+        etag::T_SubscriptingRef => expr.as_subscriptingref_mut().unwrap().refcollid = collation,
+        etag::T_FuncExpr => expr.as_funcexpr_mut().unwrap().funccollid = collation,
+        etag::T_NamedArgExpr => {} // Assert(collation == exprCollation(arg))
+        etag::T_OpExpr => expr.as_opexpr_mut().unwrap().opcollid = collation,
+        etag::T_DistinctExpr => expr.as_distinctexpr_mut().unwrap().opcollid = collation,
+        etag::T_NullIfExpr => expr.as_nullifexpr_mut().unwrap().opcollid = collation,
+        etag::T_ScalarArrayOpExpr => {}
+        etag::T_BoolExpr => {}
+        etag::T_SubLink => {} // assert-only in C
+        etag::T_FieldSelect => expr.as_fieldselect_mut().unwrap().resultcollid = collation,
+        etag::T_FieldStore => {}
+        etag::T_RelabelType => expr.as_relabeltype_mut().unwrap().resultcollid = collation,
+        etag::T_CoerceViaIO => expr.as_coerceviaio_mut().unwrap().resultcollid = collation,
+        etag::T_ArrayCoerceExpr => expr.as_arraycoerceexpr_mut().unwrap().resultcollid = collation,
+        etag::T_ConvertRowtypeExpr => {}
+        etag::T_CaseExpr => expr.as_caseexpr_mut().unwrap().casecollid = collation,
+        etag::T_ArrayExpr => expr.as_arrayexpr_mut().unwrap().array_collid = collation,
+        etag::T_RowExpr => {}
+        etag::T_RowCompareExpr => {}
+        etag::T_CoalesceExpr => expr.as_coalesceexpr_mut().unwrap().coalescecollid = collation,
+        etag::T_MinMaxExpr => expr.as_minmaxexpr_mut().unwrap().minmaxcollid = collation,
+        etag::T_SQLValueFunction => {} // assert-only
+        etag::T_XmlExpr => {}          // assert-only
+        etag::T_JsonValueExpr => {
+            if let Some(fe) = expr.as_jsonvalueexpr_mut().unwrap().formatted_expr.as_deref_mut() {
                 expr_set_collation(fe, collation)?;
             }
         }
-        Expr::JsonConstructorExpr(ctor) => {
-            if let Some(c) = ctor.coercion.as_deref_mut() {
+        etag::T_JsonConstructorExpr => {
+            if let Some(c) = expr.as_jsonconstructorexpr_mut().unwrap().coercion.as_deref_mut() {
                 expr_set_collation(c, collation)?;
             }
         }
-        Expr::JsonIsPredicate(_) => {}
-        Expr::JsonExpr(jexpr) => jexpr.collation = collation,
-        Expr::NullTest(_) => {}
-        Expr::BooleanTest(_) => {}
-        Expr::CoerceToDomain(c) => c.resultcollid = collation,
-        Expr::CoerceToDomainValue(c) => c.collation = collation,
-        Expr::SetToDefault(s) => s.collation = collation,
-        Expr::CurrentOfExpr(_) => {}
-        Expr::NextValueExpr(_) => {}
+        etag::T_JsonIsPredicate => {}
+        etag::T_JsonExpr => expr.as_jsonexpr_mut().unwrap().collation = collation,
+        etag::T_NullTest => {}
+        etag::T_BooleanTest => {}
+        etag::T_CoerceToDomain => expr.as_coercetodomain_mut().unwrap().resultcollid = collation,
+        etag::T_CoerceToDomainValue => {
+            expr.as_coercetodomainvalue_mut().unwrap().collation = collation
+        }
+        etag::T_SetToDefault => expr.as_settodefault_mut().unwrap().collation = collation,
+        etag::T_CurrentOfExpr => {}
+        etag::T_NextValueExpr => {}
         // Per the C comment, exprSetCollation needn't worry about subplans,
         // PlaceHolderVars, or ReturningExprs (parse-analysis only).
-        other => {
-            return Err(unrecognized_node_type_error(expr_variant_name(other))?);
+        _ => {
+            return Err(unrecognized_node_type_error(expr_variant_name(expr))?);
         }
     }
     Ok(())
@@ -819,15 +850,17 @@ pub fn expr_set_collation(expr: &mut Expr, collation: Oid) -> PgResult<()> {
 /// `exprSetInputCollation(expr, inputcollation)` (nodeFuncs.c) — assign
 /// input-collation information; a no-op for node types that don't store it.
 pub fn expr_set_input_collation(expr: &mut Expr, inputcollation: Oid) {
-    match expr {
-        Expr::Aggref(a) => a.inputcollid = inputcollation,
-        Expr::WindowFunc(w) => w.inputcollid = inputcollation,
-        Expr::FuncExpr(f) => f.inputcollid = inputcollation,
-        Expr::OpExpr(o) => o.inputcollid = inputcollation,
-        Expr::DistinctExpr(o) => o.inputcollid = inputcollation,
-        Expr::NullIfExpr(o) => o.inputcollid = inputcollation,
-        Expr::ScalarArrayOpExpr(s) => s.inputcollid = inputcollation,
-        Expr::MinMaxExpr(m) => m.inputcollid = inputcollation,
+    match expr.expr_tag() {
+        etag::T_Aggref => expr.as_aggref_mut().unwrap().inputcollid = inputcollation,
+        etag::T_WindowFunc => expr.as_windowfunc_mut().unwrap().inputcollid = inputcollation,
+        etag::T_FuncExpr => expr.as_funcexpr_mut().unwrap().inputcollid = inputcollation,
+        etag::T_OpExpr => expr.as_opexpr_mut().unwrap().inputcollid = inputcollation,
+        etag::T_DistinctExpr => expr.as_distinctexpr_mut().unwrap().inputcollid = inputcollation,
+        etag::T_NullIfExpr => expr.as_nullifexpr_mut().unwrap().inputcollid = inputcollation,
+        etag::T_ScalarArrayOpExpr => {
+            expr.as_scalararrayopexpr_mut().unwrap().inputcollid = inputcollation
+        }
+        etag::T_MinMaxExpr => expr.as_minmaxexpr_mut().unwrap().inputcollid = inputcollation,
         _ => {}
     }
 }
@@ -861,34 +894,67 @@ pub fn expr_location(expr: Option<&Expr>) -> PgResult<i32> {
     let Some(expr) = expr else {
         return Ok(-1);
     };
-    let loc = match expr {
-        Expr::SubscriptingRef(s) => expr_location(s.refexpr.as_deref())?,
-        Expr::FuncExpr(f) => leftmost_loc(-1, expr_location_list(&f.args)?),
-        Expr::NamedArgExpr(n) => leftmost_loc(-1, expr_location(n.arg.as_deref())?),
-        Expr::OpExpr(o) => leftmost_loc(-1, expr_location_list(&o.args)?),
-        Expr::DistinctExpr(o) => leftmost_loc(-1, expr_location_list(&o.args)?),
-        Expr::NullIfExpr(o) => leftmost_loc(-1, expr_location_list(&o.args)?),
-        Expr::ScalarArrayOpExpr(s) => leftmost_loc(s.location, expr_location_list(&s.args)?),
-        Expr::BoolExpr(b) => leftmost_loc(-1, expr_location_list(&b.args)?),
-        Expr::SubLink(s) => leftmost_loc(expr_location(s.testexpr.as_deref())?, -1),
-        Expr::FieldSelect(f) => expr_location(f.arg.as_deref())?,
-        Expr::FieldStore(f) => expr_location(f.arg.as_deref())?,
-        Expr::RelabelType(r) => leftmost_loc(-1, expr_location(r.arg.as_deref())?),
-        Expr::CoerceViaIO(c) => leftmost_loc(-1, expr_location(c.arg.as_deref())?),
-        Expr::ArrayCoerceExpr(c) => leftmost_loc(-1, expr_location(c.arg.as_deref())?),
-        Expr::ConvertRowtypeExpr(c) => leftmost_loc(-1, expr_location(c.arg.as_deref())?),
-        Expr::CollateExpr(c) => expr_location(c.arg.as_deref())?,
-        Expr::RowCompareExpr(r) => expr_location_list(&r.largs)?,
-        Expr::XmlExpr(x) => leftmost_loc(-1, expr_location_list(&x.args)?),
-        Expr::JsonValueExpr(jve) => expr_location(jve.raw_expr.as_deref())?,
-        Expr::JsonExpr(jexpr) => {
-            leftmost_loc(-1, expr_location(jexpr.formatted_expr.as_deref())?)
+    let loc = match expr.expr_tag() {
+        etag::T_SubscriptingRef => {
+            expr_location(expr.as_subscriptingref().unwrap().refexpr.as_deref())?
         }
-        Expr::NullTest(n) => leftmost_loc(-1, expr_location(n.arg.as_deref())?),
-        Expr::BooleanTest(b) => leftmost_loc(-1, expr_location(b.arg.as_deref())?),
-        Expr::CoerceToDomain(c) => leftmost_loc(-1, expr_location(c.arg.as_deref())?),
-        Expr::ReturningExpr(r) => expr_location(r.retexpr.as_deref())?,
-        Expr::InferenceElem(n) => expr_location(n.expr.as_deref())?,
+        etag::T_FuncExpr => leftmost_loc(-1, expr_location_list(&expr.as_funcexpr().unwrap().args)?),
+        etag::T_NamedArgExpr => {
+            leftmost_loc(-1, expr_location(expr.as_namedargexpr().unwrap().arg.as_deref())?)
+        }
+        etag::T_OpExpr => leftmost_loc(-1, expr_location_list(&expr.as_opexpr().unwrap().args)?),
+        etag::T_DistinctExpr => {
+            leftmost_loc(-1, expr_location_list(&expr.as_distinctexpr().unwrap().args)?)
+        }
+        etag::T_NullIfExpr => {
+            leftmost_loc(-1, expr_location_list(&expr.as_nullifexpr().unwrap().args)?)
+        }
+        etag::T_ScalarArrayOpExpr => {
+            let s = expr.as_scalararrayopexpr().unwrap();
+            leftmost_loc(s.location, expr_location_list(&s.args)?)
+        }
+        etag::T_BoolExpr => leftmost_loc(-1, expr_location_list(&expr.as_boolexpr().unwrap().args)?),
+        etag::T_SubLink => {
+            leftmost_loc(expr_location(expr.as_sublink().unwrap().testexpr.as_deref())?, -1)
+        }
+        etag::T_FieldSelect => expr_location(expr.as_fieldselect().unwrap().arg.as_deref())?,
+        etag::T_FieldStore => expr_location(expr.as_fieldstore().unwrap().arg.as_deref())?,
+        etag::T_RelabelType => {
+            leftmost_loc(-1, expr_location(expr.as_relabeltype().unwrap().arg.as_deref())?)
+        }
+        etag::T_CoerceViaIO => {
+            leftmost_loc(-1, expr_location(expr.as_coerceviaio().unwrap().arg.as_deref())?)
+        }
+        etag::T_ArrayCoerceExpr => {
+            leftmost_loc(-1, expr_location(expr.as_arraycoerceexpr().unwrap().arg.as_deref())?)
+        }
+        etag::T_ConvertRowtypeExpr => {
+            leftmost_loc(-1, expr_location(expr.as_convertrowtypeexpr().unwrap().arg.as_deref())?)
+        }
+        etag::T_CollateExpr => expr_location(expr.as_collateexpr().unwrap().arg.as_deref())?,
+        etag::T_RowCompareExpr => expr_location_list(&expr.as_rowcompareexpr().unwrap().largs)?,
+        etag::T_XmlExpr => leftmost_loc(-1, expr_location_list(&expr.as_xmlexpr().unwrap().args)?),
+        etag::T_JsonValueExpr => {
+            expr_location(expr.as_jsonvalueexpr().unwrap().raw_expr.as_deref())?
+        }
+        etag::T_JsonExpr => {
+            leftmost_loc(-1, expr_location(expr.as_jsonexpr().unwrap().formatted_expr.as_deref())?)
+        }
+        etag::T_NullTest => {
+            leftmost_loc(-1, expr_location(expr.as_nulltest().unwrap().arg.as_deref())?)
+        }
+        etag::T_BooleanTest => {
+            leftmost_loc(-1, expr_location(expr.as_booleantest().unwrap().arg.as_deref())?)
+        }
+        etag::T_CoerceToDomain => {
+            leftmost_loc(-1, expr_location(expr.as_coercetodomain().unwrap().arg.as_deref())?)
+        }
+        etag::T_ReturningExpr => {
+            expr_location(expr.as_returningexpr().unwrap().retexpr.as_deref())?
+        }
+        etag::T_InferenceElem => {
+            expr_location(expr.as_inferenceelem().unwrap().expr.as_deref())?
+        }
         // All other modeled variants carry only trimmed-away `location`
         // fields — unknown.
         _ => -1,
