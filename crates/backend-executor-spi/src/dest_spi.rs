@@ -33,11 +33,31 @@ use types_nodes::tuptable::SlotData;
 use types_tuple::heaptuple::TupleDescData;
 use types_xml::{SpiColumn, SpiResult, SpiRow};
 
+/// One raw column value retained from a received row: the bare-word datum value
+/// (pass-by-value codec word; `0` for SQL NULL) and the is-null flag. This is
+/// the `SPI_getbinval(tuptab->vals[i], tupdesc, n, &isnull)` raw-datum read that
+/// the PL/pgSQL `exec_run_select` / `exec_eval_expr` slow path needs (the
+/// string-rendered [`SpiRow`] loses the raw value). Only pass-by-value datums
+/// (the value word itself) cross faithfully; a pass-by-reference result is the
+/// separate by-ref-Datum keystone (the value would need to be `datumCopy`'d into
+/// a long-lived context, which the rich `Datum::ByRef` payload carries but the
+/// bare-word channel cannot).
+#[derive(Clone, Copy)]
+pub(crate) struct RawCol {
+    pub value: usize,
+    pub isnull: bool,
+}
+
 /// One DestSPI receiver's collected state: the result column descriptors (set
-/// at `rStartup`) and the string-rendered rows (appended at `receiveSlot`).
+/// at `rStartup`), the string-rendered rows (appended at `receiveSlot`), and —
+/// for the PL/pgSQL raw-datum consumer — the raw bare-word datums of every
+/// received row's columns (`SPI_getbinval` material).
 struct SpiReceiverState {
     columns: Vec<SpiColumn>,
     rows: Vec<SpiRow>,
+    /// The per-row raw column words (parallel to `rows`). One inner Vec per
+    /// received row, one [`RawCol`] per (non-dropped-aware) column index.
+    raw_rows: Vec<Vec<RawCol>>,
 }
 
 thread_local! {
@@ -52,6 +72,7 @@ fn receiver_register() -> u64 {
         let st = SpiReceiverState {
             columns: Vec::new(),
             rows: Vec::new(),
+            raw_rows: Vec::new(),
         };
         if let Some(i) = reg.iter().position(Option::is_none) {
             reg[i] = Some(st);
@@ -131,8 +152,18 @@ fn spi_printtup<'mcx>(mcx: Mcx<'mcx>, state: u64, slot: &mut SlotData<'mcx>) -> 
         with_receiver(state, |st| st.columns.iter().map(|c| (c.typeid, c.is_dropped)).collect());
 
     let mut row: SpiRow = Vec::with_capacity(cols.len());
+    // The parallel raw bare-word datums (SPI_getbinval material). A by-value
+    // datum's word is `as_usize()`; for NULL the word is 0 (DatumGetXxx of a
+    // null is never read because isnull guards it).
+    let mut raw_row: Vec<RawCol> = Vec::with_capacity(cols.len());
     for (i, (value, isnull)) in cols.iter().enumerate() {
         let (typeid, dropped) = coltypes.get(i).copied().unwrap_or((0u32, false));
+
+        raw_row.push(RawCol {
+            value: if *isnull { 0 } else { value.as_usize() },
+            isnull: *isnull,
+        });
+
         if dropped {
             row.push(None);
             continue;
@@ -150,7 +181,10 @@ fn spi_printtup<'mcx>(mcx: Mcx<'mcx>, state: u64, slot: &mut SlotData<'mcx>) -> 
         row.push(Some(String::from_utf8_lossy(&bytes).into_owned()));
     }
 
-    with_receiver(state, |st| st.rows.push(row));
+    with_receiver(state, |st| {
+        st.rows.push(row);
+        st.raw_rows.push(raw_row);
+    });
     Ok(true)
 }
 
@@ -177,6 +211,26 @@ pub fn take_spi_result(receiver: DestReceiverHandle) -> SpiResult {
             columns: taken.columns,
             rows: taken.rows,
         }
+    })
+}
+
+/// Take the collected raw bare-word datums (and column type OIDs) for
+/// `receiver`, freeing the receiver slot. Returns `(columns, raw_rows)` — the
+/// per-row [`RawCol`] words (`SPI_getbinval` material) plus the column
+/// descriptors (for the result type OIDs). The PL/pgSQL `exec_run_select`
+/// raw-datum consumer uses this instead of the string-rendered [`SpiResult`].
+pub(crate) fn take_spi_raw_result(
+    receiver: DestReceiverHandle,
+) -> (Vec<SpiColumn>, Vec<Vec<RawCol>>) {
+    let state = backend_tcop_dest::dest_receiver_state_token(receiver);
+    RECEIVERS.with(|r| {
+        let mut reg = r.borrow_mut();
+        let slot = (state - 1) as usize;
+        let taken = reg
+            .get_mut(slot)
+            .and_then(Option::take)
+            .expect("backend-executor-spi: take_spi_raw_result on an unregistered DestSPI receiver");
+        (taken.columns, taken.raw_rows)
     })
 }
 

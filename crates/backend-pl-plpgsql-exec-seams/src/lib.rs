@@ -47,3 +47,49 @@ seam_core::seam!(
         dno: int32,
     ) -> PgResult<DatumTypeInfo>
 );
+
+/// One PL/pgSQL scalar datum value bound into a `Param` for expression
+/// evaluation: the bare-word value, its is-null flag, and its type OID
+/// (`estate->datums[dno]` projected to what `setup_param_list` binds).
+#[derive(Clone, Copy, Debug)]
+pub struct EvalParamValue {
+    pub value: usize,
+    pub isnull: bool,
+    pub typeid: Oid,
+}
+
+/// The raw result of evaluating a PL/pgSQL expression to a single value (the
+/// first row's first column, `SPI_getbinval(tuptab->vals[0], tupdesc, 1)`).
+#[derive(Clone, Copy, Debug)]
+pub struct EvalExprResult {
+    /// The bare-word result datum (`0` when null).
+    pub value: usize,
+    pub isnull: bool,
+    /// The result column's type OID (`SPI_gettypeid(tupdesc, 1)`).
+    pub typeid: Oid,
+    /// `SPI_processed` — the number of rows the expression produced.
+    pub processed: u64,
+}
+
+seam_core::seam!(
+    /// `exec_eval_expr(estate, expr)` slow path (`pl_exec.c`'s `exec_run_select`):
+    /// prepare the PL/pgSQL expression `query` (in its `parse_mode`) with the
+    /// PL/pgSQL parser hooks installed (so variable barewords resolve to
+    /// `$dno+1` `Param`s), bind the referenced scalar datums from
+    /// `datum_snapshot` (indexed by `dno`), run the one-row SELECT, and return
+    /// the first row's first-column raw datum.
+    ///
+    /// The executor (`pl_exec.c`, this unit) cannot reach the SPI plan surface
+    /// directly (it is layered below SPI), so the SPI owner installs this from
+    /// the handler's `init_seams()`. `datum_snapshot[dno]` carries the current
+    /// `(value, isnull, typeid)` of each scalar datum (the
+    /// `setup_param_list`/`plpgsql_param_fetch` value); a `None` entry is a
+    /// non-scalar datum that cannot be a simple-expr Param.
+    pub fn exec_eval_expr_via_spi(
+        query: std::string::String,
+        parse_mode: types_parsenodes::RawParseMode,
+        parse_state: types_nodes::parsestmt::PlpgsqlExprParseState,
+        datum_snapshot: std::vec::Vec<Option<EvalParamValue>>,
+        maxtuples: i64,
+    ) -> PgResult<EvalExprResult>
+);

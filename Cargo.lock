@@ -14112,6 +14112,8 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-nodes",
+ "types-parsenodes",
  "types-plpgsql",
 ]
 
@@ -14156,6 +14158,7 @@ dependencies = [
  "backend-executor-spi",
  "backend-pl-plpgsql-comp",
  "backend-pl-plpgsql-exec",
+ "backend-pl-plpgsql-exec-seams",
  "backend-pl-plpgsql-funcs",
  "backend-utils-adt-format-type-seams",
  "backend-utils-adt-varlena",

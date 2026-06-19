@@ -20,6 +20,7 @@ types-parsenodes = { path = "../types-parsenodes" }
 # The three plpgsql layers this handler drives.
 backend-pl-plpgsql-comp = { path = "../backend-pl-plpgsql-comp" }
 backend-pl-plpgsql-exec = { path = "../backend-pl-plpgsql-exec" }
+backend-pl-plpgsql-exec-seams = { path = "../backend-pl-plpgsql-exec-seams" }
 backend-pl-plpgsql-funcs = { path = "../backend-pl-plpgsql-funcs" }
 
 # SPI_connect_ext / SPI_finish bracketing (spi.c) — direct (top layer, no cycle).

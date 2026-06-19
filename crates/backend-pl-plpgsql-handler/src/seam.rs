@@ -174,21 +174,116 @@ pub fn create_procedure_resowner() -> ResourceOwner {
     );
 }
 
-/// `plpgsql_compile(fcinfo, false)` (pl_comp.c) for the call handler. The
-/// compile entry consumes the arena-lifetimed `types_nodes` `FunctionCallInfo`
-/// (catalog reads + polymorphic-argtype resolution off the live call
-/// expression); the fmgr `PGFunction` boundary supplies the non-lifetimed
-/// `types_fmgr` fcinfo, so bridging the two fcinfo models is the fmgr-dispatch
-/// substrate. Loud until that bridge lands; `plpgsql_compile_inline` (the DO
-/// path) takes a plain `String` and is reached directly without it.
+/// `plpgsql_compile(fcinfo, false)` (pl_comp.c) for the call handler.
+///
+/// In C this dispatches `cached_function_compile(fcinfo, …, forValidator=false)`,
+/// which on a cache miss reads the called function's `pg_proc` row and runs
+/// `plpgsql_compile_callback`. The fmgr `PGFunction` boundary carries the
+/// non-lifetimed `types_fmgr` fcinfo whose `flinfo->fn_oid` names the function
+/// being called and whose `fncollation` is the call's input collation; the
+/// funccache cache-reuse + `fn_extra` save (the funccache↔plpgsql opaque-`cfunc`
+/// header keystone) is not yet modeled, so each call recompiles from the
+/// on-disk `pg_proc` row here. That recompile is value-equivalent to the cache
+/// miss in C (the result is the same `PLpgSQL_function`); only the reuse
+/// optimization is absent.
+///
+/// This is the bridge between the fmgr call frame and the comp owner's
+/// owned-inputs compile body: project the `pg_proc` row to [`ProcCompileFacts`]
+/// (mirroring `plpgsql_compile`'s `SearchSysCache1(PROCOID)` + `get_func_arg_info`)
+/// with `for_validator = false`, the live `fncollation` as the input collation,
+/// and the trigtype demuxed from `fcinfo->context`, then drive
+/// `plpgsql_compile_from_source`. A polymorphic return type is resolved from the
+/// call expression via `get_fn_expr_rettype`; for the non-polymorphic common
+/// case it is left `InvalidOid` (the compile body uses the declared `prorettype`).
 pub fn compile_for_call(
-    _fcinfo: &mut FunctionCallInfoBaseData,
+    fcinfo: &mut FunctionCallInfoBaseData,
 ) -> types_plpgsql::PLpgSQL_function {
-    panic!(
-        "seam not wired: plpgsql_compile(fcinfo) for the call handler (pl_handler.c) — the \
-         fmgr PGFunction fcinfo (types_fmgr) must be bridged to the arena-lifetimed compile \
-         fcinfo (types_nodes) the comp entry consumes (fmgr-dispatch substrate)"
-    );
+    // fcinfo->flinfo->fn_oid — the function being called.
+    let funcoid = flinfo_fn_oid(fcinfo);
+
+    // The trigger / event-trigger demux (CALLED_AS_TRIGGER / CALLED_AS_EVENT_TRIGGER):
+    // the caller routes the trigger entries directly, but plpgsql_compile keys the
+    // compile arm off the same context flags, so carry them into the facts.
+    let is_dml_trigger = called_as_trigger(fcinfo);
+    let is_event_trigger = called_as_event_trigger(fcinfo);
+
+    // fcinfo->fncollation — the input collation the compile records on the
+    // function (used by exec for collation-aware simple-expr eval).
+    let fn_input_collation = fcinfo.fncollation;
+
+    match compile_proc_from_row(
+        funcoid,
+        is_dml_trigger,
+        is_event_trigger,
+        fn_input_collation,
+        /* for_validator = */ false,
+        // The non-polymorphic common case: the compile body uses prorettype.
+        // A polymorphic return needs get_fn_expr_rettype off the call
+        // expression (FmgrInfo.fn_expr); the owned tag-only fn_expr does not
+        // carry the resolved type, so leave InvalidOid (substituted as in C's
+        // resolve_polymorphic_argtypes when the call expr is unavailable).
+        types_core::InvalidOid,
+    ) {
+        Ok(func) => func,
+        Err(e) => propagate(e),
+    }
+}
+
+/// Shared body of the call-handler / validator compile: project the `pg_proc`
+/// row to [`ProcCompileFacts`] (the `SearchSysCache1(PROCOID)` + `GETSTRUCT` +
+/// `get_func_arg_info` of `plpgsql_compile`) and drive the comp owner's
+/// owned-inputs compile body `plpgsql_compile_from_source`.
+fn compile_proc_from_row(
+    funcoid: Oid,
+    is_dml_trigger: bool,
+    is_event_trigger: bool,
+    fn_input_collation: Oid,
+    for_validator: bool,
+    resolved_rettype: Oid,
+) -> PgResult<types_plpgsql::PLpgSQL_function> {
+    use backend_pl_plpgsql_comp::ProcCompileFacts;
+    use types_plpgsql::PLpgSQL_trigtype;
+
+    let scratch = mcx::MemoryContext::new("plpgsql_compile");
+    let mcx = scratch.mcx();
+
+    // proc_compile_row == plpgsql_compile's SearchSysCache1(PROCOID, funcid) +
+    // GETSTRUCT + get_func_arg_info; a cache miss is the C `cache lookup failed`.
+    let row = backend_utils_cache_syscache_seams::proc_compile_row::call(mcx, funcoid)?
+        .ok_or_else(|| {
+            PgError::error(format!("cache lookup failed for function {funcoid}"))
+        })?;
+
+    // fn_is_trigger arm (the C `switch (function->fn_is_trigger)`).
+    let fn_is_trigger = if is_dml_trigger {
+        PLpgSQL_trigtype::PLPGSQL_DML_TRIGGER
+    } else if is_event_trigger {
+        PLpgSQL_trigtype::PLPGSQL_EVENT_TRIGGER
+    } else {
+        PLpgSQL_trigtype::PLPGSQL_NOT_TRIGGER
+    };
+
+    let facts = ProcCompileFacts {
+        proname: row.proname.as_str().to_owned(),
+        fn_oid: funcoid,
+        fn_input_collation,
+        prosrc: row.prosrc.as_str().to_owned(),
+        prorettype: row.prorettype,
+        proretset: row.proretset,
+        prokind: row.prokind,
+        provolatile: row.provolatile,
+        pronargs: row.pronargs,
+        argtypes: row.argtypes.iter().copied().collect(),
+        argnames: row.argnames.iter().map(|s| s.as_str().to_owned()).collect(),
+        argmodes: row.argmodes.iter().copied().collect(),
+        fn_is_trigger,
+        for_validator,
+        resolved_rettype,
+    };
+
+    // The compile body `ereport`s on a faulty function; that propagates as a
+    // PgError panic caught at the PGFunction boundary (== C's longjmp).
+    Ok(backend_pl_plpgsql_comp::plpgsql_compile_from_source(&facts))
 }
 
 // --- validator substrate -----------------------------------------------------
@@ -353,52 +448,18 @@ fn validate_test_compile(
     is_dml_trigger: bool,
     is_event_trigger: bool,
 ) -> PgResult<()> {
-    use backend_pl_plpgsql_comp::ProcCompileFacts;
-    use types_plpgsql::PLpgSQL_trigtype;
-
-    let scratch = mcx::MemoryContext::new("plpgsql_validator test-compile");
-    let mcx = scratch.mcx();
-
-    // proc_compile_row == plpgsql_compile's SearchSysCache1(PROCOID, funcid) +
-    // GETSTRUCT + get_func_arg_info; a cache miss is the C `cache lookup failed`.
-    let row = backend_utils_cache_syscache_seams::proc_compile_row::call(mcx, funcoid)?
-        .ok_or_else(|| {
-            PgError::error(format!("cache lookup failed for function {funcoid}"))
-        })?;
-
-    // fn_is_trigger arm (the C `switch (function->fn_is_trigger)`).
-    let fn_is_trigger = if is_dml_trigger {
-        PLpgSQL_trigtype::PLPGSQL_DML_TRIGGER
-    } else if is_event_trigger {
-        PLpgSQL_trigtype::PLPGSQL_EVENT_TRIGGER
-    } else {
-        PLpgSQL_trigtype::PLPGSQL_NOT_TRIGGER
-    };
-
-    let facts = ProcCompileFacts {
-        proname: row.proname.as_str().to_owned(),
-        fn_oid: funcoid,
-        // fake_fcinfo->fncollation is zeroed (InvalidOid) at validation time.
-        fn_input_collation: types_core::InvalidOid,
-        prosrc: row.prosrc.as_str().to_owned(),
-        prorettype: row.prorettype,
-        proretset: row.proretset,
-        prokind: row.prokind,
-        provolatile: row.provolatile,
-        pronargs: row.pronargs,
-        argtypes: row.argtypes.iter().copied().collect(),
-        argnames: row.argnames.iter().map(|s| s.as_str().to_owned()).collect(),
-        argmodes: row.argmodes.iter().copied().collect(),
-        fn_is_trigger,
-        for_validator: true,
-        // The validator has no call expression; the for_validator compile branch
-        // substitutes the integer family for a polymorphic return type itself.
-        resolved_rettype: types_core::InvalidOid,
-    };
-
-    // The compile body `ereport`s on a faulty function; that propagates as a
-    // PgError panic caught at the PGFunction boundary (== C's longjmp).
-    let _function = backend_pl_plpgsql_comp::plpgsql_compile_from_source(&facts);
+    // The validator's fake fcinfo zeroes fncollation (== InvalidOid) and has no
+    // call expression; the for_validator compile branch substitutes the integer
+    // family for a polymorphic return type itself, so resolved_rettype stays
+    // InvalidOid.
+    let _function = compile_proc_from_row(
+        funcoid,
+        is_dml_trigger,
+        is_event_trigger,
+        /* fn_input_collation = */ types_core::InvalidOid,
+        /* for_validator = */ true,
+        /* resolved_rettype = */ types_core::InvalidOid,
+    )?;
     Ok(())
 }
 

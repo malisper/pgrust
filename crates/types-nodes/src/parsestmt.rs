@@ -359,6 +359,83 @@ impl SqlFnParseInfo {
     }
 }
 
+/// One PL/pgSQL variable resolvable in an expression: the data the parser hook
+/// needs to materialize a `PARAM_EXTERN` `Param` for a reference to it (the C
+/// `make_datum_param` result). `dno` is the variable's datum number; the C
+/// param id is `dno + 1`.
+#[derive(Clone)]
+pub struct PlpgsqlParamInfo {
+    /// `datum->dno` — the variable's datum number. The `Param.paramid` is
+    /// `dno + 1`.
+    pub dno: i32,
+    /// The variable's type OID (`Param.paramtype`).
+    pub typeid: Oid,
+    /// The variable's typmod (`Param.paramtypmod`).
+    pub typmod: i32,
+    /// The variable's collation (`Param.paramcollid`).
+    pub collation: Oid,
+}
+
+/// `PLpgSQL_expr`'s parser ref-hook state (`pl_comp.c`'s
+/// `plpgsql_parser_setup` / `plpgsql_pre_column_ref` / `plpgsql_param_ref`).
+///
+/// In C the hook state is the live `PLpgSQL_expr *`, and the hooks walk the
+/// expr's namespace chain (`plpgsql_ns_lookup`) on demand to resolve a bareword
+/// (`a`) or `block.var` reference to the variable's datum, then build a
+/// `PARAM_EXTERN` `Param` via `make_datum_param`. The owned ref-hook state is an
+/// enum arm (not a `void *`), so the namespace is pre-resolved at expr-prepare
+/// time into a name → [`PlpgsqlParamInfo`] map the hook reads; the set of
+/// referenced datum numbers is recorded back through the shared `paramnos`
+/// (mirroring C's `expr->paramnos` bitmap, which `setup_param_list` later reads
+/// to know which estate datums to bind).
+#[derive(Clone)]
+pub struct PlpgsqlExprParseState {
+    /// Lower-cased variable name → its [`PlpgsqlParamInfo`]. The plpgsql scanner
+    /// already down-cases identifiers, so the map is keyed on the down-cased
+    /// name. A `block.var` qualified reference is stored under both `var` and
+    /// `block.var` keys by the builder.
+    pub names: Rc<alloc::collections::BTreeMap<alloc::string::String, PlpgsqlParamInfo>>,
+    /// The datum numbers actually referenced during the parse (C
+    /// `expr->paramnos`). Shared, growable; read back after analysis to drive
+    /// `setup_param_list`. Cloning the carrier shares the same `Vec` (the hook
+    /// records into the live state the caller inspects afterward).
+    pub paramnos: Rc<core::cell::RefCell<Vec<i32>>>,
+    /// `pinfo->collation` analogue — the expr's function input collation, used
+    /// when the variable's own collation is invalid (C `make_datum_param` keeps
+    /// the datum's collation; this is a fallback for unset collations).
+    pub input_collation: Oid,
+}
+
+impl PlpgsqlExprParseState {
+    /// Build the parse state from the pre-resolved name → param-info map.
+    pub fn new(
+        names: alloc::collections::BTreeMap<alloc::string::String, PlpgsqlParamInfo>,
+        input_collation: Oid,
+    ) -> PlpgsqlExprParseState {
+        PlpgsqlExprParseState {
+            names: Rc::new(names),
+            paramnos: Rc::new(core::cell::RefCell::new(Vec::new())),
+            input_collation,
+        }
+    }
+
+    /// Record that datum `dno` was referenced (C `bms_add_member(expr->paramnos,
+    /// dno)`); idempotent.
+    pub fn record_paramno(&self, dno: i32) {
+        let mut p = self.paramnos.borrow_mut();
+        if !p.contains(&dno) {
+            p.push(dno);
+        }
+    }
+
+    /// The recorded referenced datum numbers, sorted ascending.
+    pub fn referenced_dnos(&self) -> Vec<i32> {
+        let mut v = self.paramnos.borrow().clone();
+        v.sort_unstable();
+        v
+    }
+}
+
 /// `void *p_ref_hook_state` (`parser/parse_node.h`) — common passthrough state
 /// for the parser hook functions above. Owned by the hook installer.
 ///
@@ -382,6 +459,11 @@ pub enum ParseRefHookState {
     /// resolves a body bareword that names a function parameter to its `$n`
     /// `Param`, and a `$n` `ParamRef` against the function's argument types.
     SqlFunction(SqlFnParseInfo),
+    /// `plpgsql_parser_setup`'s PL/pgSQL expression parse state (pl_comp.c):
+    /// resolves a bareword (or `block.var`) that names a PL/pgSQL variable to a
+    /// `PARAM_EXTERN` `Param` (paramid = dno+1) via the pre-resolved namespace
+    /// map, recording the referenced datum numbers back through `paramnos`.
+    PlpgsqlExpr(PlpgsqlExprParseState),
     /// `domainAddCheckConstraint`'s prepared `CoerceToDomainValue *` (typecmds.c):
     /// the template node `replace_domain_constraint_value` copies when it sees a
     /// reference to `VALUE` in a domain CHECK constraint expression. C stores the

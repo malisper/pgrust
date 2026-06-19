@@ -3272,10 +3272,14 @@ fn seam_transform_post_columnref_hook<'mcx>(
         }
         // No other post-columnref hook exists in the core backend; the active arm
         // installs no `p_post_columnref_hook` (C `== NULL`), so the default `var`
-        // stands.
+        // stands. (PL/pgSQL's variable resolution is done by the pre-columnref
+        // hook above; in the default RESOLVE_ERROR variable_conflict mode the
+        // post hook only raises an ambiguity error, which a no-range-table
+        // expression never reaches.)
         ParseRefHookState::None
         | ParseRefHookState::FixedParams(_)
         | ParseRefHookState::VarParams(_)
+        | ParseRefHookState::PlpgsqlExpr(_)
         | ParseRefHookState::DomainCheckValue(_) => None,
     };
 
@@ -3458,6 +3462,98 @@ fn sql_fn_resolve_param_name(
     Ok(None)
 }
 
+/// `plpgsql_pre_column_ref(pstate, cref)` (pl_comp.c:1135) — the PL/pgSQL
+/// expression `p_pre_columnref_hook`. A 1- or 2-element column reference that
+/// names a PL/pgSQL variable (`var` or `block.var`) is resolved — ahead of any
+/// table-column resolution, since a PL/pgSQL expression has no range table — to
+/// a `PARAM_EXTERN` `Param` whose paramid is the variable's `dno + 1`, via the
+/// pre-resolved namespace map in the [`ParseRefHookState::PlpgsqlExpr`] arm. The
+/// referenced datum number is recorded so `setup_param_list` knows to bind it.
+/// A name that does not resolve to a variable returns `None` (falls through to
+/// the standard column resolution, which then errors if truly undefined — C
+/// `resolve_column_ref` returning NULL).
+fn plpgsql_pre_column_ref<'mcx>(
+    pstate: &mut ParseState<'mcx>,
+    cref: &types_nodes::rawnodes::ColumnRef<'mcx>,
+) -> PgResult<Option<types_nodes::nodes::NodePtr<'mcx>>> {
+    use types_nodes::parsestmt::ParseRefHookState;
+
+    let ParseRefHookState::PlpgsqlExpr(state) = &pstate.p_ref_hook_state else {
+        return Ok(None);
+    };
+    let state = state.clone();
+
+    // Build the candidate down-cased lookup name(s). The plpgsql scanner already
+    // down-cased identifiers in the namespace; match the same way. For a single
+    // field `var`; for two fields `block.var` (and also try the bare `var`,
+    // matching plpgsql_ns_lookup's two-name resolution).
+    let parts: Vec<String> = cref
+        .fields
+        .iter()
+        .filter_map(str_val)
+        .collect();
+    if parts.is_empty() || parts.len() > 3 {
+        return Ok(None);
+    }
+
+    // Lookup keys: the fully-qualified dotted name, then progressively shorter
+    // suffixes down to the last bareword (so `block.var` and `var` both hit).
+    let info = {
+        let names = &state.names;
+        let mut found = None;
+        // Try the full dotted form first, then the trailing single name.
+        let dotted = parts.join(".").to_ascii_lowercase();
+        if let Some(i) = names.get(&dotted) {
+            found = Some(i.clone());
+        } else if let Some(last) = parts.last() {
+            if let Some(i) = names.get(&last.to_ascii_lowercase()) {
+                found = Some(i.clone());
+            }
+        }
+        found
+    };
+
+    let Some(info) = info else {
+        return Ok(None);
+    };
+
+    // make_datum_param: PARAM_EXTERN with paramid = dno + 1.
+    let mut paramcollid = info.collation;
+    if !OidIsValid(paramcollid) && OidIsValid(state.input_collation) {
+        paramcollid = state.input_collation;
+    }
+    let param = types_nodes::primnodes::Param {
+        paramkind: types_nodes::primnodes::PARAM_EXTERN,
+        paramid: info.dno + 1,
+        paramtype: info.typeid,
+        paramtypmod: info.typmod,
+        paramcollid,
+        location: cref.location,
+    };
+
+    // Record the referenced datum number (expr->paramnos) for setup_param_list.
+    state.record_paramno(info.dno);
+
+    let mcx = aexpr_clone_ctx(pstate);
+    let node = Node::mk_expr(mcx, Expr::Param(param));
+    Ok(Some(mcx::alloc_in(mcx, node)?))
+}
+
+/// Install the PL/pgSQL expression parser hooks on `pstate` (the
+/// `plpgsql_parser_setup` body): the pre-columnref hook that resolves variable
+/// references to Params, and the `PlpgsqlExpr` ref-hook state carrying the
+/// pre-resolved namespace map. (The post-columnref / coerce-param hooks handle
+/// the variable_conflict and unknown-coercion cases; for a PL/pgSQL expression
+/// with no range table the pre-hook resolves every variable reference, so they
+/// are not needed for the default RESOLVE_ERROR conflict mode.)
+pub fn setup_parse_plpgsql_expr<'mcx>(
+    pstate: &mut ParseState<'mcx>,
+    state: types_nodes::parsestmt::PlpgsqlExprParseState,
+) {
+    pstate.p_pre_columnref_hook = Some(plpgsql_pre_column_ref);
+    pstate.p_ref_hook_state = types_nodes::parsestmt::ParseRefHookState::PlpgsqlExpr(state);
+}
+
 // ===========================================================================
 // Seam-and-panic transform arms (unported sibling owners). Each routes through
 // a panic-until-landed seam declared in the matching sibling `*-seams` crate.
@@ -3520,8 +3616,14 @@ fn transformParamRef<'mcx>(
         }
         // A domain CHECK parse state installs no paramref hook (C
         // `p_paramref_hook == NULL`): a `$n` reference falls to the generic
-        // "there is no parameter $n" error below.
-        ParseRefHookState::None | ParseRefHookState::DomainCheckValue(_) => None,
+        // "there is no parameter $n" error below. A PL/pgSQL expression resolves
+        // variable references through the pre-columnref hook (as barewords), not
+        // through `$n` ParamRefs, so a literal `$n` in a PL/pgSQL expression has
+        // no parameter (C `plpgsql_param_ref` only matches the `$n` form plpgsql
+        // itself synthesizes, never user `$n` text).
+        ParseRefHookState::None
+        | ParseRefHookState::PlpgsqlExpr(_)
+        | ParseRefHookState::DomainCheckValue(_) => None,
     };
 
     // if (result == NULL) ereport(ERROR, "there is no parameter $%d", ...)

@@ -102,22 +102,32 @@ pub fn exec_assign_value(
 /// 5665): evaluate a PL/pgSQL expression, via the simple-expr fast path or a
 /// one-row SPI select. Returns `(value, isnull, rettype, rettypmod)`.
 pub fn exec_eval_expr(
-    _estate: &mut PLpgSQL_execstate,
-    _expr: &PLpgSQL_expr,
+    estate: &mut PLpgSQL_execstate,
+    expr: &PLpgSQL_expr,
 ) -> (Datum, bool, Oid, int32) {
-    panic!(
-        "seam not wired: exec_eval_expr (pl_exec.c) — exec_eval_simple_expr \
-         (executor ExprState/ExprEvalStep #165/#324) / exec_run_select (SPI plan surface)"
-    );
+    super::exec_eval_expr_impl(estate, expr)
 }
 
 /// `exec_eval_boolean(estate, expr, &isNull)` (pl_exec.c 5642): evaluate a
 /// boolean condition expression. Returns `(value, isnull)`.
-pub fn exec_eval_boolean(_estate: &mut PLpgSQL_execstate, _expr: &PLpgSQL_expr) -> (bool, bool) {
-    panic!(
-        "seam not wired: exec_eval_boolean (pl_exec.c) — exec_eval_expr + \
-         exec_cast_value to BOOLOID (executor ExprState #165/#324)"
-    );
+pub fn exec_eval_boolean(estate: &mut PLpgSQL_execstate, expr: &PLpgSQL_expr) -> (bool, bool) {
+    // exec_eval_expr + exec_cast_value(value, valtype -> BOOLOID).
+    const BOOLOID: Oid = 16;
+    let (value, isnull, rettype, rettypmod) = super::exec_eval_expr_impl(estate, expr);
+    if isnull {
+        return (false, true);
+    }
+    if rettype == BOOLOID {
+        // No coercion needed: DatumGetBool reads the low byte.
+        return (value.as_bool(), false);
+    }
+    // A non-boolean condition needs a cast to bool (exec_cast_value). This is the
+    // value-substrate cast path; route through the cast seam (loud until the
+    // cast-expr substrate lands — a comparison/boolean condition, the common
+    // case, returns BOOLOID above and never reaches here).
+    let (cast_value, cast_isnull) =
+        exec_cast_value(estate, value, isnull, rettype, rettypmod, BOOLOID, -1);
+    (cast_value.as_bool(), cast_isnull)
 }
 
 /// `exec_eval_datum(estate, datum, &typeid, &typetypmod, &value, &isnull)`

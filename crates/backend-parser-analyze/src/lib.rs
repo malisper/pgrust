@@ -111,6 +111,34 @@ pub fn parse_analyze_sql_function<'mcx>(
     Ok(query)
 }
 
+/// `pg_analyze_and_rewrite_withcb(parsetree, sourceText, plpgsql_parser_setup,
+/// expr, NULL)` (pl_exec.c `exec_prepare_plan`) — analyze a PL/pgSQL expression
+/// (or statement) with the PL/pgSQL parser hooks installed, so a bareword (or
+/// `block.var`) that names a PL/pgSQL variable resolves to its `PARAM_EXTERN`
+/// `Param` (paramid = dno+1). Returns the analyzed `Query`; the referenced datum
+/// numbers are recorded into the passed-in `PlpgsqlExprParseState` (read back by
+/// `setup_param_list`). The rewrite leg is applied by the caller.
+pub fn parse_analyze_plpgsql_expr<'mcx>(
+    mcx: Mcx<'mcx>,
+    parse_tree: &RawStmt<'mcx>,
+    source_text: &str,
+    state: types_nodes::parsestmt::PlpgsqlExprParseState,
+) -> PgResult<Query<'mcx>> {
+    let mut pstate = backend_parser_small1::make_parsestate(mcx, None)?;
+
+    pstate.p_sourcetext = Some(mcx::PgString::from_str_in(source_text, mcx)?);
+
+    // plpgsql_parser_setup(pstate, expr): install the PL/pgSQL parser hooks +
+    // ref-hook state.
+    backend_parser_parse_expr::setup_parse_plpgsql_expr(&mut pstate, state);
+
+    let query = transformTopLevelStmt(mcx, &mut pstate, parse_tree)?;
+
+    backend_parser_small1::free_parsestate(pstate)?;
+
+    Ok(query)
+}
+
 /// `parse_analyze_varparams(parseTree, sourceText, paramTypes, numParams,
 /// queryEnv)` (analyze.c:144) — analyze a raw statement deducing unknown `$n`
 /// parameter types from context. The passed-in type array can be grown/replaced

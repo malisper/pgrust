@@ -69,6 +69,7 @@ mod accessors;
 mod backbone;
 mod cursor;
 mod dest_spi;
+mod eval;
 mod exec;
 mod prepare;
 mod result_code;
@@ -78,6 +79,7 @@ pub use accessors::*;
 pub use backbone::*;
 pub use cursor::{spi_cursor_fetch, spi_cursor_tupdesc};
 pub use dest_spi::create_spi_dest_receiver;
+pub use eval::{spi_eval_expr, EvalParamValue, EvalResult};
 pub use result_code::*;
 pub use select::{spi_execute_select, spi_query_tupdesc};
 

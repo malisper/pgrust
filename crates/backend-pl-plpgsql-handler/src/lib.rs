@@ -490,6 +490,47 @@ pub fn init_seams() {
         plpgsql_inline_handler(codeblock)
     });
 
+    // Install the PL/pgSQL expression evaluator's SPI bridge (the executor's
+    // `exec_eval_expr` → `exec_run_select` slow path). The executor unit is
+    // layered below SPI and reaches the SPI plan surface through this seam; the
+    // handler (the top layer, with SPI access) installs it. The exec-seams
+    // bridge types map 1:1 to the SPI `spi_eval_expr` value types.
+    backend_pl_plpgsql_exec_seams::exec_eval_expr_via_spi::set(
+        |query: String,
+         parse_mode,
+         parse_state,
+         datum_snapshot: Vec<Option<backend_pl_plpgsql_exec_seams::EvalParamValue>>,
+         maxtuples| {
+            let mut resolve = |dno: i32| -> PgResult<backend_executor_spi::EvalParamValue> {
+                // setup_param_list reads estate->datums[dno]; the snapshot carries
+                // the value the caller (exec) read out of the live execstate.
+                match datum_snapshot.get(dno as usize).and_then(|o| o.as_ref()) {
+                    Some(v) => Ok(backend_executor_spi::EvalParamValue {
+                        value: v.value,
+                        isnull: v.isnull,
+                        typeid: v.typeid,
+                    }),
+                    None => Err(types_error::PgError::error(format!(
+                        "PL/pgSQL expression references datum {dno} that is not a scalar variable"
+                    ))),
+                }
+            };
+            let r = backend_executor_spi::spi_eval_expr(
+                &query,
+                parse_mode,
+                parse_state,
+                maxtuples,
+                &mut resolve,
+            )?;
+            Ok(backend_pl_plpgsql_exec_seams::EvalExprResult {
+                value: r.value,
+                isnull: r.isnull,
+                typeid: r.typeid,
+                processed: r.processed,
+            })
+        },
+    );
+
     register_handler_builtins();
 
     // Register `$libdir/plpgsql` with the in-process ported-library loader

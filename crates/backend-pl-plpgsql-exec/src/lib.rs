@@ -818,6 +818,131 @@ fn exec_eval_cleanup(estate: &mut PLpgSQL_execstate) {
 }
 
 // ===========================================================================
+// exec_eval_expr / exec_eval_boolean — the PL/pgSQL expression evaluator over
+// the SPI plan surface (pl_exec.c's exec_run_select slow path).
+// ===========================================================================
+
+/// Build the [`PlpgsqlExprParseState`] for `expr`: walk the expression's
+/// namespace chain collecting every scalar (VAR/PROMISE) variable visible to it
+/// into a down-cased name → [`PlpgsqlParamInfo`] map, so the parser hook can
+/// resolve a bareword reference to the variable's `$dno+1` `Param`. (The C
+/// `plpgsql_pre_column_ref` walks the live `expr->ns` via `plpgsql_ns_lookup` on
+/// demand; the owned parser hook reads a pre-resolved map instead.)
+fn build_plpgsql_parse_state(
+    estate: &PLpgSQL_execstate,
+    expr: &types_plpgsql::PLpgSQL_expr,
+    input_collation: Oid,
+) -> types_nodes::parsestmt::PlpgsqlExprParseState {
+    use types_nodes::parsestmt::{PlpgsqlExprParseState, PlpgsqlParamInfo};
+
+    let mut names: std::collections::BTreeMap<std::string::String, PlpgsqlParamInfo> =
+        std::collections::BTreeMap::new();
+
+    // Walk the namespace chain (expr->ns -> prev -> ...). A VAR/REC nsitem's
+    // `itemno` is its datum dno; LABEL items are block markers (skipped). The
+    // most-local binding of a name wins, so only insert if not already present.
+    let mut cur = expr.ns.as_deref();
+    while let Some(ns) = cur {
+        match ns.itemtype {
+            types_plpgsql::PLpgSQL_nsitem_type::PLPGSQL_NSTYPE_VAR => {
+                let dno = ns.itemno;
+                if dno >= 0 && (dno as usize) < estate.datums.len() {
+                    if let PLpgSQL_datum::Var(v) = &estate.datums[dno as usize] {
+                        if let Some(t) = v.datatype.as_ref() {
+                            let key = ns.name.to_ascii_lowercase();
+                            names.entry(key).or_insert(PlpgsqlParamInfo {
+                                dno,
+                                typeid: t.typoid,
+                                typmod: t.atttypmod,
+                                collation: t.collation,
+                            });
+                        }
+                    }
+                }
+            }
+            // REC variables are composite; a bareword reference to a whole record
+            // in a scalar expression is the composite-Datum path (not the simple
+            // scalar Param case). Skip here — a reference to one would fall to the
+            // standard resolution and error, exactly as an unported leg.
+            types_plpgsql::PLpgSQL_nsitem_type::PLPGSQL_NSTYPE_REC => {}
+            types_plpgsql::PLpgSQL_nsitem_type::PLPGSQL_NSTYPE_LABEL => {}
+        }
+        cur = ns.prev.as_deref();
+    }
+
+    PlpgsqlExprParseState::new(names, input_collation)
+}
+
+/// Build the per-datum value snapshot (`setup_param_list` material): for every
+/// scalar VAR/PROMISE datum, its current `(value, isnull, typeid)`; a `None`
+/// entry for a non-scalar datum (ROW/REC/RECFIELD), which a simple scalar
+/// expression never binds as a Param.
+fn build_datum_snapshot(
+    estate: &PLpgSQL_execstate,
+) -> std::vec::Vec<Option<exec_seams::EvalParamValue>> {
+    let mut snap = std::vec::Vec::with_capacity(estate.datums.len());
+    for d in estate.datums.iter() {
+        match d {
+            PLpgSQL_datum::Var(v) => {
+                let typeid = v.datatype.as_ref().map(|t| t.typoid).unwrap_or(INVALID_OID);
+                snap.push(Some(exec_seams::EvalParamValue {
+                    value: v.value.as_usize(),
+                    isnull: v.isnull,
+                    typeid,
+                }));
+            }
+            _ => snap.push(None),
+        }
+    }
+    snap
+}
+
+/// `exec_eval_expr(estate, expr, &isNull, &rettype, &rettypmod)` (pl_exec.c) —
+/// evaluate a PL/pgSQL expression. The owned model drives the `exec_run_select`
+/// one-row SELECT slow path over the SPI plan surface (the `exec_eval_simple_expr`
+/// cached-`ExprState` fast path is an optimization; the slow path is always
+/// correct). Returns `(value, isnull, rettype, rettypmod)`. The result is a
+/// pass-by-value datum word (the by-ref-result keystone is separate).
+fn exec_eval_expr_impl(
+    estate: &mut PLpgSQL_execstate,
+    expr: &types_plpgsql::PLpgSQL_expr,
+) -> (Datum, bool, Oid, int32) {
+    // The expression's input collation (fncollation analogue): the function's
+    // input collation. The execstate does not carry it directly; the variables'
+    // own collations drive Param collation, so InvalidOid is the fallback.
+    let input_collation = INVALID_OID;
+
+    let parse_state = build_plpgsql_parse_state(estate, expr, input_collation);
+    let snapshot = build_datum_snapshot(estate);
+
+    // exec_run_select passes maxtuples = 0 for exec_eval_expr's underlying
+    // single-row evaluation (C caps the simple-expr to one row; the one-row
+    // SELECT a scalar expression produces yields exactly one row).
+    let result = match exec_seams::exec_eval_expr_via_spi::call(
+        expr.query.clone(),
+        expr.parseMode,
+        parse_state,
+        snapshot,
+        2, // detect ">1 row" like C exec_run_select(expr, 2, ...)
+    ) {
+        Ok(r) => r,
+        Err(e) => std::panic::panic_any(e),
+    };
+
+    // rettypmod is read by exec_run_select as SPI_gettypmod(tupdesc, 1); the
+    // PL/pgSQL callers that consume exec_eval_expr's rettypmod (FOR-i bounds,
+    // CASE) cast through exec_cast_value which tolerates -1, and exec_stmt_return
+    // ignores it. -1 is the correct typmod for the int/bool results the value
+    // path produces.
+    (
+        Datum::from_usize(result.value),
+        result.isnull,
+        result.typeid,
+        -1,
+    )
+}
+
+// ===========================================================================
 // Value-substrate statement arms — dispatch targets with LOUD bodies. Each is a
 // whole-statement SQL/value leg (SPI / executor / fmgr), not control flow.
 // ===========================================================================
