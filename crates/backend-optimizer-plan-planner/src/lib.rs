@@ -4111,12 +4111,13 @@ fn preprocess_grouping_sets<'mcx>(
         let parse = run.resolve(root.parse);
         let mut out: Vec<Vec<i32>> = Vec::with_capacity(parse.groupingSets.len());
         for np in parse.groupingSets.iter() {
-            match np.as_ref() {
-                Node::IntList(l) => out.push(l.iter().copied().collect()),
-                other => {
+            let np = np.as_ref();
+            match np.as_intlist() {
+                Some(l) => out.push(l.iter().copied().collect()),
+                None => {
                     return Err(PgError::error(alloc::format!(
                         "preprocess_grouping_sets: groupingSets element is not a T_IntList (tag {:?})",
-                        other.node_tag()
+                        np.node_tag()
                     )));
                 }
             }
