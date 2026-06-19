@@ -130,7 +130,7 @@ pub fn TransactionIdIsInProgress(xid: TransactionId) -> PgResult<bool> {
 
         // Step 2: check the cached child-Xids arrays.
         let pgprocno =
-            PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos[pgxactoff as usize]);
+            PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos()[pgxactoff as usize]);
         let (pxids, subxids) = proc::proc_subxids::call(pgprocno);
         for j in (0..pxids).rev() {
             let cxid = subxids[j as usize];
@@ -221,7 +221,7 @@ pub fn TransactionIdIsActive(xid: TransactionId) -> PgResult<bool> {
     let num_procs = PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().numProcs);
     for i in 0..num_procs {
         let pgprocno =
-            PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos[i as usize]);
+            PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos()[i as usize]);
 
         // Fetch xid just once (dense ProcGlobal->xids[i]).
         let pxid = proc::proc_array_xid::call(i);
@@ -323,7 +323,7 @@ pub fn BackendPidGetProcWithLock(pid: i32) -> Option<ProcNumber> {
     let num_procs = PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().numProcs);
     for index in 0..num_procs {
         let pgprocno =
-            PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos[index as usize]);
+            PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos()[index as usize]);
         if proc::proc_pid::call(pgprocno) == pid {
             return Some(pgprocno);
         }
@@ -368,7 +368,7 @@ pub fn BackendXidGetPid(xid: TransactionId) -> i32 {
     for index in 0..num_procs {
         if proc::proc_array_xid::call(index) == xid {
             let pgprocno =
-                PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos[index as usize]);
+                PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos()[index as usize]);
             result = proc::proc_pid::call(pgprocno);
             break;
         }
@@ -405,7 +405,7 @@ pub fn GetCurrentVirtualXIDs<'mcx>(
     let num_procs = PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().numProcs);
     for index in 0..num_procs {
         let pgprocno =
-            PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos[index as usize]);
+            PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos()[index as usize]);
         let status_flags = proc::proc_global_status_flags::call(index);
 
         if proc::proc_is_my_proc::call(pgprocno) {
@@ -462,7 +462,7 @@ pub fn GetVirtualXIDsDelayingChkpt<'mcx>(
     let num_procs = PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().numProcs);
     for index in 0..num_procs {
         let pgprocno =
-            PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos[index as usize]);
+            PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos()[index as usize]);
 
         if (proc::proc_delay_chkpt_flags::call(pgprocno) & delay_chkpt_type) != 0 {
             let (proc_number, lxid) = proc::proc_vxid::call(pgprocno);
@@ -495,7 +495,7 @@ pub fn HaveVirtualXIDsDelayingChkpt(vxids: &[VirtualTransactionId], delay_chkpt_
     let num_procs = PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().numProcs);
     for index in 0..num_procs {
         let pgprocno =
-            PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos[index as usize]);
+            PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos()[index as usize]);
 
         let (proc_number, lxid) = proc::proc_vxid::call(pgprocno);
         let vxid = VirtualTransactionId {
@@ -550,7 +550,7 @@ pub fn SignalVirtualTransaction(
     let num_procs = PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().numProcs);
     for index in 0..num_procs {
         let pgprocno =
-            PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos[index as usize]);
+            PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos()[index as usize]);
         let (proc_number, lxid) = proc::proc_vxid::call(pgprocno);
 
         if proc_number == vxid.procNumber && lxid == vxid.localTransactionId {
@@ -585,7 +585,7 @@ pub fn MinimumActiveBackends(min: i32) -> bool {
     let num_procs = PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().numProcs);
     for index in 0..num_procs {
         let pgprocno =
-            PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos[index as usize]);
+            PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos()[index as usize]);
 
         if pgprocno == -1 {
             continue; // do not count deleted entries
@@ -620,7 +620,7 @@ pub fn CountDBBackends(databaseid: Oid) -> PgResult<i32> {
     let num_procs = PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().numProcs);
     for index in 0..num_procs {
         let pgprocno =
-            PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos[index as usize]);
+            PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos()[index as usize]);
 
         if proc::proc_pid::call(pgprocno) == 0 {
             continue; // do not count prepared xacts
@@ -644,7 +644,7 @@ pub fn CountDBConnections(databaseid: Oid) -> PgResult<i32> {
     let num_procs = PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().numProcs);
     for index in 0..num_procs {
         let pgprocno =
-            PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos[index as usize]);
+            PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos()[index as usize]);
 
         if proc::proc_pid::call(pgprocno) == 0 {
             continue; // do not count prepared xacts
@@ -675,7 +675,7 @@ pub fn CancelDBBackends(
     let num_procs = PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().numProcs);
     for index in 0..num_procs {
         let pgprocno =
-            PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos[index as usize]);
+            PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos()[index as usize]);
 
         if databaseid == InvalidOid || proc::proc_database_id::call(pgprocno) == databaseid {
             let (proc_number, _lxid) = proc::proc_vxid::call(pgprocno);
@@ -703,7 +703,7 @@ pub fn CountUserBackends(roleid: Oid) -> PgResult<i32> {
     let num_procs = PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().numProcs);
     for index in 0..num_procs {
         let pgprocno =
-            PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos[index as usize]);
+            PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos()[index as usize]);
 
         if proc::proc_pid::call(pgprocno) == 0 {
             continue; // do not count prepared xacts
@@ -746,7 +746,7 @@ pub fn CountOtherDBBackends(database_id: Oid) -> PgResult<(bool, i32, i32)> {
         let num_procs = PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().numProcs);
         for index in 0..num_procs {
             let pgprocno =
-                PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos[index as usize]);
+                PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos()[index as usize]);
             let status_flags = proc::proc_global_status_flags::call(index);
 
             if proc::proc_database_id::call(pgprocno) != database_id {
@@ -805,7 +805,7 @@ pub fn TerminateOtherDBBackends<'mcx>(mcx: Mcx<'mcx>, database_id: Oid) -> PgRes
     let num_procs = PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().numProcs);
     for i in 0..num_procs {
         let pgprocno =
-            PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos[i as usize]);
+            PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos()[i as usize]);
 
         if proc::proc_database_id::call(pgprocno) != database_id {
             continue;

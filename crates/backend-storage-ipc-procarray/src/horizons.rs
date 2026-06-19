@@ -187,7 +187,7 @@ pub fn ComputeXidHorizons() -> PgResult<ComputeXidHorizonsResult> {
 
     for index in 0..num_procs {
         let pgprocno =
-            PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos[index as usize]);
+            PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos()[index as usize]);
         let status_flags = proc::proc_global_status_flags::call(index);
 
         // Fetch xid just once - see GetNewTransactionId

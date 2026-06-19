@@ -54,11 +54,22 @@ fn TOTAL_MAX_CACHED_SUBXIDS() -> i32 {
 }
 
 /// `ProcArrayStruct` (`storage/ipc/procarray.c`) — the in-shared-memory
-/// ProcArray header. The C `pgprocnos[FLEXIBLE_ARRAY_MEMBER]` trailing array is
-/// modelled as an owned `Vec<i32>` of indexes into `ProcGlobal->allProcs[]`
-/// sized to `PROCARRAY_MAXPROCS` at `ProcArrayShmemInit` time (the FLEXIBLE
-/// member is the genuinely-shared payload; the header is a per-process view of
-/// the same shmem region).
+/// ProcArray header. This is the genuinely-shared cluster state: it is carved
+/// from the main `MAP_SHARED` segment by `ProcArrayShmemInit` (via
+/// `ShmemInitStruct`) and every backend's `procArray` process-local points at
+/// the same physical struct, so a mutation by one backend (e.g.
+/// `ProcArrayEndTransaction` clearing its xid, `ProcArrayAdd` appending its
+/// slot) is immediately visible to every other backend. All accesses happen
+/// under `ProcArrayLock`, matching C.
+///
+/// The header is `#[repr(C)]` so its layout in shmem is stable across
+/// processes; the C `pgprocnos[FLEXIBLE_ARRAY_MEMBER]` trailing array lives in
+/// the same shmem block immediately after the header (sized to
+/// `PROCARRAY_MAXPROCS`), reached through [`ProcArrayStruct::pgprocnos`] /
+/// [`ProcArrayStruct::pgprocnos_mut`] rather than an owned `Vec` (a `Vec`'s
+/// backing buffer would be process-private heap, defeating cross-backend
+/// visibility).
+#[repr(C)]
 #[derive(Debug)]
 pub struct ProcArrayStruct {
     /// number of valid `pgprocnos` entries.
@@ -85,8 +96,64 @@ pub struct ProcArrayStruct {
     /// oldest catalog xmin of any replication slot.
     pub replication_slot_catalog_xmin: TransactionId,
 
-    /// indexes into `ProcGlobal->allProcs[]` (`pgprocnos[FLEXIBLE_ARRAY_MEMBER]`).
-    pub pgprocnos: Vec<i32>,
+    /// `pgprocnos[FLEXIBLE_ARRAY_MEMBER]` — the flexible trailing array of
+    /// indexes into `ProcGlobal->allProcs[]`. Zero-length marker; the real
+    /// `maxProcs` `i32` slots follow this header in the same shmem block and are
+    /// reached via [`ProcArrayStruct::pgprocnos`] / [`pgprocnos_mut`].
+    pub pgprocnos: [i32; 0],
+}
+
+impl ProcArrayStruct {
+    /// `&procArray->pgprocnos[0 .. maxProcs]` — the flexible trailing array in
+    /// the same shmem block as the header.
+    #[inline]
+    pub fn pgprocnos(&self) -> &[i32] {
+        // SAFETY: `ProcArrayShmemInit` carved `header + maxProcs * i32` bytes
+        // and the flexible member begins right after the `#[repr(C)]` header at
+        // the `pgprocnos` field offset. Reads of `maxProcs` slots stay in the
+        // allocation.
+        unsafe { core::slice::from_raw_parts(self.pgprocnos.as_ptr(), self.maxProcs as usize) }
+    }
+
+    /// `&mut procArray->pgprocnos[0 .. maxProcs]`.
+    #[inline]
+    pub fn pgprocnos_mut(&mut self) -> &mut [i32] {
+        // SAFETY: see `pgprocnos`; `&mut self` here is the per-process view of
+        // the shared block, and all callers hold `ProcArrayLock` exclusively.
+        unsafe {
+            core::slice::from_raw_parts_mut(self.pgprocnos.as_mut_ptr(), self.maxProcs as usize)
+        }
+    }
+}
+
+/// Per-process pointer into the shared `ProcArrayStruct` (the realization of
+/// C's `static ProcArrayStruct *procArray`). `Deref`/`DerefMut` give field
+/// access on the shared struct so the existing
+/// `procArray->numProcs` / `procArray->pgprocnos[i]` call sites read and write
+/// the one physical struct in shmem.
+#[derive(Clone, Copy, Debug)]
+pub struct ProcArrayPtr(*mut ProcArrayStruct);
+
+// SAFETY: the pointer addresses the cluster-wide shmem ProcArray, valid for the
+// process lifetime; all field access is serialized by `ProcArrayLock` exactly
+// as in C. The thread_local that holds it is per-backend.
+unsafe impl Send for ProcArrayPtr {}
+
+impl core::ops::Deref for ProcArrayPtr {
+    type Target = ProcArrayStruct;
+    #[inline]
+    fn deref(&self) -> &ProcArrayStruct {
+        // SAFETY: `self.0` points at the shared ProcArray header in shmem.
+        unsafe { &*self.0 }
+    }
+}
+
+impl core::ops::DerefMut for ProcArrayPtr {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut ProcArrayStruct {
+        // SAFETY: as above; callers hold `ProcArrayLock` for the mutation.
+        unsafe { &mut *self.0 }
+    }
 }
 
 /// The dense per-slot mirror of one ProcArray entry, as the idiomatic crate
@@ -158,8 +225,11 @@ pub struct ComputeXidHorizonsResult {
 
 thread_local! {
     /// `static ProcArrayStruct *procArray;` — the per-process pointer into the
-    /// shared ProcArray header (set by `ProcArrayShmemInit`).
-    pub static PROC_ARRAY: RefCell<Option<ProcArrayStruct>> = const { RefCell::new(None) };
+    /// shared ProcArray header in the `MAP_SHARED` segment (set by
+    /// `ProcArrayShmemInit`). The pointer is per-process (correctly forked) but
+    /// the struct it addresses is shared, so mutations are visible to every
+    /// backend.
+    pub static PROC_ARRAY: RefCell<Option<ProcArrayPtr>> = const { RefCell::new(None) };
 
     /// `static TransactionId *KnownAssignedXids;` — the hot-standby ring buffer
     /// (lives in the shmem region; the cursor bounds are in `ProcArrayStruct`).
@@ -248,10 +318,10 @@ pub fn ProcArrayShmemSize() -> PgResult<Size> {
 
 /// `offsetof(ProcArrayStruct, pgprocnos)` (procarray.c) — the fixed header size
 /// preceding the flexible `pgprocnos[]` array (six `int` + three
-/// `TransactionId` words). The Rust [`ProcArrayStruct`] models the flexible
-/// member as an owned `Vec`, so this mirrors the C struct's offset constant
-/// (36, c2rust verified) rather than a Rust `offset_of!`.
-const PROC_ARRAY_HEADER_SIZE: Size = 36;
+/// `TransactionId` words = 36 on the C layout). Taken from the `#[repr(C)]`
+/// [`ProcArrayStruct`] directly so the shmem allocation matches the struct the
+/// per-process pointer derefs.
+const PROC_ARRAY_HEADER_SIZE: Size = core::mem::offset_of!(ProcArrayStruct, pgprocnos) as Size;
 
 /// `ProcArrayShmemInit(void)` (procarray.c) — allocate-or-attach the ProcArray
 /// header (`ShmemInitStruct`) and the KnownAssignedXids ring; wire the
@@ -262,11 +332,15 @@ pub fn ProcArrayShmemInit() -> PgResult<()> {
     let maxprocs = PROCARRAY_MAXPROCS();
     let total_max_cached_subxids = TOTAL_MAX_CACHED_SUBXIDS();
 
-    // Create or attach to the ProcArray shared structure. The C carves the
-    // header + flexible `pgprocnos[PROCARRAY_MAXPROCS]` array from shared
-    // memory; this dense model owns the header as a per-process `Vec`-backed
-    // view, but we still call `ShmemInitStruct` so the genuinely-shared
-    // allocate-or-attach + `found` semantics are honoured.
+    // Create or attach to the ProcArray shared structure. C:
+    //   procArray = (ProcArrayStruct *)
+    //     ShmemInitStruct("Proc Array",
+    //                     add_size(offsetof(ProcArrayStruct, pgprocnos),
+    //                              mul_size(sizeof(int), PROCARRAY_MAXPROCS)),
+    //                     &found);
+    // The header + flexible `pgprocnos[PROCARRAY_MAXPROCS]` array are one block
+    // in the main shared-memory segment; `procArray` is the per-process pointer
+    // at the single physical struct, so all backends mutate the same array.
     let header_size = shmem::add_size::call(
         PROC_ARRAY_HEADER_SIZE,
         shmem::mul_size::call(
@@ -274,25 +348,37 @@ pub fn ProcArrayShmemInit() -> PgResult<()> {
             maxprocs as Size,
         )?,
     )?;
-    let (_addr, found) = shmem::shmem_init_struct::call("Proc Array", header_size)?;
+    let (addr, found) = shmem::shmem_init_struct::call("Proc Array", header_size)?;
+    let proc_array = addr as *mut ProcArrayStruct;
 
     if !found {
-        // We're the first - initialize.
-        let proc_array = ProcArrayStruct {
-            numProcs: 0,
-            maxProcs: maxprocs,
-            maxKnownAssignedXids: total_max_cached_subxids,
-            numKnownAssignedXids: 0,
-            tailKnownAssignedXids: 0,
-            headKnownAssignedXids: 0,
-            lastOverflowedXid: types_core::InvalidTransactionId,
-            replication_slot_xmin: types_core::InvalidTransactionId,
-            replication_slot_catalog_xmin: types_core::InvalidTransactionId,
-            pgprocnos: vec![0; maxprocs as usize],
-        };
-        PROC_ARRAY.with(|p| *p.borrow_mut() = Some(proc_array));
+        // We're the first - initialize the shared struct in place.
+        // SAFETY: `proc_array` addresses `header_size` writable shmem bytes
+        // (header + `maxprocs` `i32` slots) just carved by `ShmemInitStruct`.
+        unsafe {
+            (*proc_array).numProcs = 0;
+            (*proc_array).maxProcs = maxprocs;
+            (*proc_array).maxKnownAssignedXids = total_max_cached_subxids;
+            (*proc_array).numKnownAssignedXids = 0;
+            (*proc_array).tailKnownAssignedXids = 0;
+            (*proc_array).headKnownAssignedXids = 0;
+            (*proc_array).lastOverflowedXid = types_core::InvalidTransactionId;
+            (*proc_array).replication_slot_xmin = types_core::InvalidTransactionId;
+            (*proc_array).replication_slot_catalog_xmin = types_core::InvalidTransactionId;
+            // Zero the flexible `pgprocnos[]` region.
+            core::ptr::write_bytes(
+                (*proc_array).pgprocnos.as_mut_ptr(),
+                0,
+                maxprocs as usize,
+            );
+        }
         backend_access_transam_varsup_seams::init_xact_completion_count::call();
     }
+
+    // Record this backend's per-process pointer at the shared struct (C's
+    // `procArray = ...` assignment runs in every process, allocator or
+    // attacher).
+    PROC_ARRAY.with(|p| *p.borrow_mut() = Some(ProcArrayPtr(proc_array)));
 
     // `allProcs = ProcGlobal->allProcs;` — in C this caches the base of the
     // dense PGPROC array. Here the dense per-slot fields are reached through
@@ -447,4 +533,64 @@ pub fn init_seams() {
     seams::proc_array_shmem_init::set(ProcArrayShmemInit);
     seams::get_max_snapshot_xid_count::set(GetMaxSnapshotXidCount);
     seams::get_max_snapshot_subxid_count::set(GetMaxSnapshotSubxidCount);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The header offset the C `offsetof(ProcArrayStruct, pgprocnos)` reports
+    /// (six `int` + three `TransactionId` = 36 on PG's 32-bit-xid layout).
+    #[test]
+    fn header_offset_matches_c() {
+        assert_eq!(PROC_ARRAY_HEADER_SIZE, 36);
+    }
+
+    /// Cross-backend visibility: two `ProcArrayPtr`s (conn1's and conn2's
+    /// per-process pointers) over the SAME backing block — the realization of
+    /// fork sharing one `MAP_SHARED` `ShmemInitStruct` region — must see each
+    /// other's mutations. This is exactly the bug: before this change the body
+    /// lived in a per-process `Vec`, so conn1's `ProcArrayAdd`/end-of-xact
+    /// updates were invisible to conn2's `GetSnapshotData`.
+    #[test]
+    fn two_pointers_share_one_struct() {
+        let maxprocs = 8usize;
+        // One shared block: header + flexible pgprocnos[maxprocs], as
+        // ShmemInitStruct carves it. A heap `Vec<u8>` stands in for the shmem
+        // bytes for this single-process test (a real fork would share the same
+        // physical page).
+        let block_size = PROC_ARRAY_HEADER_SIZE as usize + maxprocs * core::mem::size_of::<i32>();
+        let mut block: Vec<u8> = vec![0u8; block_size + 8];
+        // Max-align the base the way ShmemInitStruct does.
+        let base = {
+            let raw = block.as_mut_ptr() as usize;
+            let aligned = (raw + 7) & !7usize;
+            aligned as *mut ProcArrayStruct
+        };
+
+        // conn1 and conn2: distinct per-process pointers at the SAME struct.
+        let mut conn1 = ProcArrayPtr(base);
+        let conn2 = ProcArrayPtr(base);
+
+        // First backend initializes the shared header in place.
+        conn1.numProcs = 0;
+        conn1.maxProcs = maxprocs as i32;
+        conn1.lastOverflowedXid = types_core::InvalidTransactionId;
+        for slot in conn1.pgprocnos_mut() {
+            *slot = 0;
+        }
+
+        // conn1 performs a ProcArrayAdd-shaped mutation: append a slot and
+        // advance numProcs (mirrors membership.rs writing the shared array).
+        conn1.pgprocnos_mut()[0] = 42;
+        conn1.numProcs = 1;
+        conn1.lastOverflowedXid = 12345;
+
+        // conn2 (a different per-process view) observes conn1's writes — the
+        // cross-connection visibility the fix delivers.
+        assert_eq!(conn2.numProcs, 1);
+        assert_eq!(conn2.maxProcs, maxprocs as i32);
+        assert_eq!(conn2.pgprocnos()[0], 42);
+        assert_eq!(conn2.lastOverflowedXid, 12345);
+    }
 }

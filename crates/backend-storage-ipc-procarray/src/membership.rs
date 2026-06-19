@@ -77,7 +77,7 @@ fn proc_array_add_locked(pgprocno: ProcNumber) -> PgResult<()> {
         // itself, the overhead should be marginal.
         let mut index = 0;
         while index < array_p.numProcs {
-            let this_procno = array_p.pgprocnos[index as usize];
+            let this_procno = array_p.pgprocnos()[index as usize];
             debug_assert_eq!(proc::proc_pgxactoff::call(this_procno), index);
             // If we have found our right position in the array, break.
             if this_procno > pgprocno {
@@ -88,7 +88,7 @@ fn proc_array_add_locked(pgprocno: ProcNumber) -> PgResult<()> {
 
         let movecount = array_p.numProcs - index;
         // memmove the pgprocnos array (procarray-owned) ...
-        array_p.pgprocnos.copy_within(
+        array_p.pgprocnos_mut().copy_within(
             index as usize..(index + movecount) as usize,
             (index + 1) as usize,
         );
@@ -97,7 +97,7 @@ fn proc_array_add_locked(pgprocno: ProcNumber) -> PgResult<()> {
         proc::proc_array_subxid_states_memmove::call(index + 1, index, movecount);
         proc::proc_array_status_flags_memmove::call(index + 1, index, movecount);
 
-        array_p.pgprocnos[index as usize] = pgprocno;
+        array_p.pgprocnos_mut()[index as usize] = pgprocno;
         proc::set_proc_pgxactoff::call(pgprocno, index);
         proc::set_proc_array_xid::call(index, proc::proc_xid::call(pgprocno));
         let (count, overflowed) = proc::proc_subxid_status::call(pgprocno);
@@ -109,7 +109,7 @@ fn proc_array_add_locked(pgprocno: ProcNumber) -> PgResult<()> {
         // adjust pgxactoff for all following PGPROCs.
         index += 1;
         while index < array_p.numProcs {
-            let procno = array_p.pgprocnos[index as usize];
+            let procno = array_p.pgprocnos()[index as usize];
             debug_assert_eq!(proc::proc_pgxactoff::call(procno), index - 1);
             proc::set_proc_pgxactoff::call(procno, index);
             index += 1;
@@ -149,7 +149,7 @@ fn proc_array_remove_locked(pgprocno: ProcNumber, latest_xid: TransactionId) -> 
 
         debug_assert!(myoff >= 0 && myoff < array_p.numProcs);
         debug_assert_eq!(
-            proc::proc_pgxactoff::call(array_p.pgprocnos[myoff as usize]),
+            proc::proc_pgxactoff::call(array_p.pgprocnos()[myoff as usize]),
             myoff
         );
 
@@ -176,7 +176,7 @@ fn proc_array_remove_locked(pgprocno: ProcNumber, latest_xid: TransactionId) -> 
 
         // Keep the PGPROC array sorted. See notes above.
         let movecount = array_p.numProcs - myoff - 1;
-        array_p.pgprocnos.copy_within(
+        array_p.pgprocnos_mut().copy_within(
             (myoff + 1) as usize..(myoff + 1 + movecount) as usize,
             myoff as usize,
         );
@@ -184,14 +184,15 @@ fn proc_array_remove_locked(pgprocno: ProcNumber, latest_xid: TransactionId) -> 
         proc::proc_array_subxid_states_memmove::call(myoff, myoff + 1, movecount);
         proc::proc_array_status_flags_memmove::call(myoff, myoff + 1, movecount);
 
-        array_p.pgprocnos[(array_p.numProcs - 1) as usize] = -1; // for debugging
+        let last = (array_p.numProcs - 1) as usize;
+        array_p.pgprocnos_mut()[last] = -1; // for debugging
         array_p.numProcs -= 1;
 
         // Adjust pgxactoff of following procs for removed PGPROC (note that
         // numProcs already has been decremented).
         let mut index = myoff;
         while index < array_p.numProcs {
-            let procno = array_p.pgprocnos[index as usize];
+            let procno = array_p.pgprocnos()[index as usize];
             debug_assert_eq!(proc::proc_pgxactoff::call(procno) - 1, index);
             proc::set_proc_pgxactoff::call(procno, index);
             index += 1;

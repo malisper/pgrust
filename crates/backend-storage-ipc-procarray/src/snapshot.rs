@@ -186,7 +186,7 @@ pub fn GetSnapshotData() -> PgResult<SnapshotData> {
                     suboverflowed = true;
                 } else if nsubxids > 0 {
                     let pgprocno =
-                        PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos[pgxactoff as usize]);
+                        PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos()[pgxactoff as usize]);
                     // pg_read_barrier() pairs with GetNewTransactionId; the seam
                     // copies the proc's cached subxids.
                     let (proc_n, proc_subxids) = proc::proc_subxids::call(pgprocno);
@@ -381,7 +381,7 @@ pub fn ProcArrayInstallImportedXmin(
     let num_procs = PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().numProcs);
 
     for index in 0..num_procs {
-        let pgprocno = PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos[index as usize]);
+        let pgprocno = PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos()[index as usize]);
         let status_flags = proc::proc_global_status_flags::call(index);
 
         // Ignore procs running LAZY VACUUM.
@@ -554,7 +554,7 @@ fn get_running_transaction_data_locked<'mcx>(
         // Also, update the oldest running xid within the current database.
         if transaction_id_precedes(xid, oldest_database_running_xid) {
             let pgprocno =
-                PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos[index as usize]);
+                PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos()[index as usize]);
             if proc::proc_database_id::call(pgprocno) == my_database_id {
                 oldest_database_running_xid = xid;
             }
@@ -573,7 +573,7 @@ fn get_running_transaction_data_locked<'mcx>(
     if !suboverflowed {
         for index in 0..num_procs {
             let pgprocno =
-                PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos[index as usize]);
+                PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos()[index as usize]);
             let nsubxids = proc::proc_array_subxid_state::call(index).0;
             if nsubxids > 0 {
                 // barrier not really required, as XidGenLock is held, but ...
@@ -840,7 +840,7 @@ pub fn GetConflictingVirtualXIDs<'mcx>(
     let num_procs = PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().numProcs);
     for index in 0..num_procs {
         let pgprocno =
-            PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos[index as usize]);
+            PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos()[index as usize]);
 
         // Exclude prepared transactions.
         if proc::proc_pid::call(pgprocno) == 0 {
