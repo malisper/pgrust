@@ -1283,6 +1283,7 @@ dependencies = [
  "backend-access-hash-core-seams",
  "backend-access-hash-entry-seams",
  "backend-access-heap-heapam-seams",
+ "backend-access-index-indexam-seams",
  "backend-access-transam-xlog-seams",
  "backend-access-transam-xloginsert-seams",
  "backend-commands-vacuum-seams",

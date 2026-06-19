@@ -32,6 +32,7 @@ backend-access-hash-core-seams = { path = "../backend-access-hash-core-seams" }
 # Outward seam crates (substrate callees).
 backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+backend-access-index-indexam-seams = { path = "../backend-access-index-indexam-seams" }
 backend-storage-freespace-seams = { path = "../backend-storage-freespace-seams" }
 backend-access-common-indextuple-seams = { path = "../backend-access-common-indextuple-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }

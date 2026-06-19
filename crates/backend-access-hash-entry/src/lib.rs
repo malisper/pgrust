@@ -544,19 +544,23 @@ pub fn hashbuildempty(index: &types_rel::Relation) -> PgResult<()> {
 // `hashhandler` for why the `IndexInfo`-carrying / cross-crate slots are
 // sanctioned panic legs (reached via the #341 index.c dispatch).
 
-/// `ambuild` adapter — `hashbuild` lives above this crate; reached via the
-/// index.c build dispatch (#334/#341), which downcasts the `IndexInfoCarrier`
-/// back to the real `IndexInfo<'mcx>`.
+/// `ambuild` adapter — `hashbuild` lives in this crate, so the adapter calls
+/// it directly. The index.c build dispatch (#334/#341) wraps the caller's owned
+/// `&mut IndexInfo<'mcx>` in the `IndexInfoCarrier` (#342); recover the concrete
+/// struct here (tag-checked downcast — a NULL/wrong-type carrier is the C
+/// NULL-pointer programming error) before driving the serial heap-scan build.
 fn hashbuild_am<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _heap_relation: &types_rel::Relation<'mcx>,
-    _index_relation: &types_rel::Relation<'mcx>,
-    _index_info: &mut IndexInfoCarrier<'_, 'mcx>,
+    mcx: Mcx<'mcx>,
+    heap_relation: &types_rel::Relation<'mcx>,
+    index_relation: &types_rel::Relation<'mcx>,
+    index_info: &mut IndexInfoCarrier<'_, 'mcx>,
 ) -> PgResult<IndexBuildResult> {
-    panic!(
-        "hashbuild: index.c build dispatch (#341) not yet ported — \
-         needs the real types_nodes::execnodes::IndexInfo"
-    )
+    let info = index_info
+        .downcast_mut::<types_nodes::execnodes::IndexInfo<'_>>()
+        .unwrap_or_else(|| {
+            panic!("hashbuild: IndexInfoCarrier did not carry the expected IndexInfo")
+        });
+    hashbuild(mcx, heap_relation, index_relation, info)
 }
 
 /// `ambuildempty` adapter — wires this crate's `hashbuildempty`.

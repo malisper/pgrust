@@ -38,6 +38,7 @@ use backend_storage_page::{
 };
 use backend_utils_cache_lsyscache_seams as lsyscache;
 use backend_utils_cache_relcache_seams as relcache;
+use backend_access_index_indexam_seams as indexam;
 use backend_utils_fmgr_fmgr_seams as fmgr;
 
 use crate::hashpage::{_hash_relbuf, _hash_getbuf};
@@ -76,7 +77,7 @@ pub(crate) fn _hash_checkqual(_scan: &HashScan, _itup: &[u8]) -> bool {
 /// hash function and return the 32-bit hash key.
 pub fn _hash_datum2hashkey<'mcx>(rel: &Relation<'mcx>, key: &Datum<'mcx>) -> PgResult<u32> {
     // XXX assumes index has only one attribute
-    let procinfo = relcache::index_getprocinfo::call(rel.rd_id, 1, HASHSTANDARD_PROC, 0, -1)?;
+    let procinfo = indexam::index_getprocinfo::call(rel, 1, HASHSTANDARD_PROC)?;
     let collation = relcache::rd_indcollation::call(rel, 1)?;
 
     // DatumGetUInt32(FunctionCall1Coll(procinfo, collation, key))
