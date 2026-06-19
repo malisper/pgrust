@@ -740,10 +740,7 @@ pub fn ExecInitSetOp<'mcx>(
 
     let mcx = estate.es_query_cxt;
 
-    let node: &'mcx SetOp<'mcx> = match plan_node {
-        types_nodes::nodes::Node::SetOp(s) => s,
-        other => panic!("castNode(SetOp, node) failed: {other:?}"),
-    };
+    let node: &'mcx SetOp<'mcx> = plan_node.expect_setop();
 
     // create state structure: makeNode(SetOpState)
     let mut setopstate = mcx::alloc_in(mcx, SetOpStateData::new_in(mcx))?;
@@ -982,17 +979,11 @@ pub fn ExecReScanSetOp<'mcx>(
 /// The plan link is the shared, read-only `&'mcx Node`, so the returned borrow
 /// is tied to `'mcx`, not to the `&setopstate` borrow.
 fn setop_plan<'mcx>(setopstate: &SetOpStateData<'mcx>) -> &'mcx SetOp<'mcx> {
-    match setopstate
+    setopstate
         .ps
         .plan
         .expect("SetOpState.ps.plan is NULL (executor did not splice the plan link)")
-    {
-        types_nodes::nodes::Node::SetOp(s) => s,
-        other => panic!(
-            "SetOpState.ps.plan is not a SetOp node (tag {})",
-            other.tag()
-        ),
-    }
+        .expect_setop()
 }
 
 /// `ExecProcNode(outerPlanState/innerPlanState(setopstate))` — pull the next
