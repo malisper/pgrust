@@ -1882,10 +1882,15 @@ fn substitute_grouped_columns_mutator(node: &mut Node, context: &mut SubstituteC
 /// `expression_tree_mutator(node, substitute_grouped_columns_mutator, context)`
 /// via the in-place owned-tree walker.
 fn mutate_generic(node: &mut Node, context: &mut SubstituteContext) {
-    expression_tree_walker_mut(node, &mut |n: &mut Node| {
-        substitute_grouped_columns_mutator(n, context);
-        context.error.is_some()
-    });
+    let mcx = context.mcx;
+    expression_tree_walker_mut(
+        node,
+        &mut |n: &mut Node| {
+            substitute_grouped_columns_mutator(n, context);
+            context.error.is_some()
+        },
+        mcx,
+    );
 }
 
 /// Take an `Expr` out of an `&mut Expr` slot, leaving a cheap placeholder
@@ -2194,10 +2199,15 @@ fn compute_grouping_refs(
 
 /// `expression_tree_walker(node, finalize_grouping_exprs_walker, context)`.
 fn finalize_generic(node: &mut Node, context: &mut FinalizeContext) {
-    expression_tree_walker_mut(node, &mut |n: &mut Node| {
-        finalize_grouping_exprs_walker(n, context);
-        context.error.is_some()
-    });
+    let mcx = context.mcx;
+    expression_tree_walker_mut(
+        node,
+        &mut |n: &mut Node| {
+            finalize_grouping_exprs_walker(n, context);
+            context.error.is_some()
+        },
+        mcx,
+    );
 }
 
 // ===========================================================================

@@ -30,6 +30,16 @@ struct AddNullingCtx<'a> {
     sublevels_up: i32,
 }
 
+/// Recurse into a node's children via the in-place walker with a per-call
+/// scratch arena for its transient `Node::Expr` wrappers (the walk never
+/// allocates — `mcx` is threaded only for the future opaque-`Node` flip's
+/// `mk_expr`; freed on return).
+fn add_walk_children(node: &mut Node, ctx: &mut AddNullingCtx) -> bool {
+    let scratch = mcx::MemoryContext::new("add_nulling_relids scratch");
+    let mcx = scratch.mcx();
+    expression_tree_walker_mut(node, &mut |n| add_nulling_relids_mutator(n, ctx), mcx)
+}
+
 fn add_nulling_relids_mutator(node: &mut Node, ctx: &mut AddNullingCtx) -> bool {
     match node.node_tag() {
         ntag::T_Var => {
@@ -54,7 +64,7 @@ fn add_nulling_relids_mutator(node: &mut Node, ctx: &mut AddNullingCtx) -> bool 
                 return false;
             }
             // Otherwise fall through to copy the PlaceHolderVar normally
-            expression_tree_walker_mut(node, &mut |n| add_nulling_relids_mutator(n, ctx))
+            add_walk_children(node, ctx)
         }
         ntag::T_Query => {
             let q = node.as_query_mut().unwrap();
@@ -63,7 +73,7 @@ fn add_nulling_relids_mutator(node: &mut Node, ctx: &mut AddNullingCtx) -> bool 
             ctx.sublevels_up -= 1;
             result
         }
-        _ => expression_tree_walker_mut(node, &mut |n| add_nulling_relids_mutator(n, ctx)),
+        _ => add_walk_children(node, ctx),
     }
 }
 
@@ -96,6 +106,15 @@ struct RemoveNullingCtx<'a> {
     sublevels_up: i32,
 }
 
+/// Recurse into a node's children via the in-place walker with a per-call
+/// scratch arena (see [`add_walk_children`] — the walk never allocates; `mcx` is
+/// threaded only for the future opaque-`Node` flip).
+fn remove_walk_children(node: &mut Node, ctx: &mut RemoveNullingCtx) -> bool {
+    let scratch = mcx::MemoryContext::new("remove_nulling_relids scratch");
+    let mcx = scratch.mcx();
+    expression_tree_walker_mut(node, &mut |n| remove_nulling_relids_mutator(n, ctx), mcx)
+}
+
 fn remove_nulling_relids_mutator(node: &mut Node, ctx: &mut RemoveNullingCtx) -> bool {
     match node.node_tag() {
         ntag::T_Var => {
@@ -117,9 +136,7 @@ fn remove_nulling_relids_mutator(node: &mut Node, ctx: &mut RemoveNullingCtx) ->
             };
             if matched {
                 // Copy the PlaceHolderVar and mutate what's below ...
-                expression_tree_walker_mut(node, &mut |n| {
-                    remove_nulling_relids_mutator(n, ctx)
-                });
+                remove_walk_children(node, ctx);
                 let phv = node.as_placeholdervar_mut().unwrap();
                 phv.phnullingrels =
                     relids::difference(&phv.phnullingrels, ctx.removable_relids);
@@ -129,7 +146,7 @@ fn remove_nulling_relids_mutator(node: &mut Node, ctx: &mut RemoveNullingCtx) ->
                 false
             } else {
                 // Otherwise fall through to copy the PlaceHolderVar normally
-                expression_tree_walker_mut(node, &mut |n| remove_nulling_relids_mutator(n, ctx))
+                remove_walk_children(node, ctx)
             }
         }
         ntag::T_Query => {
@@ -140,7 +157,7 @@ fn remove_nulling_relids_mutator(node: &mut Node, ctx: &mut RemoveNullingCtx) ->
             ctx.sublevels_up -= 1;
             result
         }
-        _ => expression_tree_walker_mut(node, &mut |n| remove_nulling_relids_mutator(n, ctx)),
+        _ => remove_walk_children(node, ctx),
     }
 }
 

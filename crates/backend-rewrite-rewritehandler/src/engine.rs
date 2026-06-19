@@ -1778,9 +1778,11 @@ fn fireRIRonSubLink<'mcx>(
 
     // Do NOT recurse into Query nodes; expression_tree_walker_mut's Query arm
     // returns false, matching the C QTW behavior.
-    backend_nodes_core::node_walker::expression_tree_walker_mut(node, &mut |n| {
-        fireRIRonSubLink(mcx, n, active_rirs, has_row_security, err)
-    })
+    backend_nodes_core::node_walker::expression_tree_walker_mut(
+        node,
+        &mut |n| fireRIRonSubLink(mcx, n, active_rirs, has_row_security, err),
+        mcx,
+    )
 }
 
 /// Whether the query has already been flagged as needing row-security handling.

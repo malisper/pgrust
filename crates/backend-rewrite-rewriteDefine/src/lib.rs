@@ -767,9 +767,13 @@ fn setRuleCheckAsUser_walker(node: &mut Node<'_>, userid: Oid) -> bool {
         setRuleCheckAsUser_Query(qry, userid);
         return false;
     }
-    backend_nodes_core::node_walker::expression_tree_walker_mut(node, &mut |child| {
-        setRuleCheckAsUser_walker(child, userid)
-    })
+    let scratch = mcx::MemoryContext::new("setRuleCheckAsUser scratch");
+    let scratch_mcx = scratch.mcx();
+    backend_nodes_core::node_walker::expression_tree_walker_mut(
+        node,
+        &mut |child| setRuleCheckAsUser_walker(child, userid),
+        scratch_mcx,
+    )
 }
 
 fn setRuleCheckAsUser_Query(qry: &mut Query<'_>, userid: Oid) {

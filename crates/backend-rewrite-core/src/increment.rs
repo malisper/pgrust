@@ -42,6 +42,17 @@ struct IncrCtx {
     err: Option<PgError>,
 }
 
+/// Recurse into a node's children via the in-place walker, supplying a per-call
+/// scratch arena for its transient `Node::Expr` wrappers. The walk itself never
+/// allocates (it `mem::replace`s children in place); the `Mcx` is threaded only
+/// so the future opaque-`Node` flip's `mk_expr` has a context. Scratch is freed
+/// on return.
+fn incr_walk_children(node: &mut Node, ctx: &mut IncrCtx) -> bool {
+    let scratch = mcx::MemoryContext::new("IncrementVarSublevelsUp scratch");
+    let mcx = scratch.mcx();
+    expression_tree_walker_mut(node, &mut |n| IncrementVarSublevelsUp_walker(n, ctx), mcx)
+}
+
 fn IncrementVarSublevelsUp_walker(node: &mut Node, ctx: &mut IncrCtx) -> bool {
     if ctx.err.is_some() {
         return true; // abort the remaining walk
@@ -70,7 +81,7 @@ fn IncrementVarSublevelsUp_walker(node: &mut Node, ctx: &mut IncrCtx) -> bool {
                     (agg.agglevelsup as i32 + ctx.delta_sublevels_up) as u32;
             }
             // fall through to recurse into argument
-            expression_tree_walker_mut(node, &mut |n| IncrementVarSublevelsUp_walker(n, ctx))
+            incr_walk_children(node, ctx)
         }
         ntag::T_GroupingFunc => {
             let grp = node.as_groupingfunc_mut().unwrap();
@@ -78,7 +89,7 @@ fn IncrementVarSublevelsUp_walker(node: &mut Node, ctx: &mut IncrCtx) -> bool {
                 grp.agglevelsup =
                     (grp.agglevelsup as i32 + ctx.delta_sublevels_up) as u32;
             }
-            expression_tree_walker_mut(node, &mut |n| IncrementVarSublevelsUp_walker(n, ctx))
+            incr_walk_children(node, ctx)
         }
         ntag::T_PlaceHolderVar => {
             let phv = node.as_placeholdervar_mut().unwrap();
@@ -86,14 +97,14 @@ fn IncrementVarSublevelsUp_walker(node: &mut Node, ctx: &mut IncrCtx) -> bool {
                 phv.phlevelsup =
                     (phv.phlevelsup as i32 + ctx.delta_sublevels_up) as u32;
             }
-            expression_tree_walker_mut(node, &mut |n| IncrementVarSublevelsUp_walker(n, ctx))
+            incr_walk_children(node, ctx)
         }
         ntag::T_ReturningExpr => {
             let rexpr = node.as_returningexpr_mut().unwrap();
             if rexpr.retlevelsup >= ctx.min_sublevels_up {
                 rexpr.retlevelsup += ctx.delta_sublevels_up;
             }
-            expression_tree_walker_mut(node, &mut |n| IncrementVarSublevelsUp_walker(n, ctx))
+            incr_walk_children(node, ctx)
         }
         ntag::T_Query => {
             let q = node.as_query_mut().unwrap();
@@ -104,7 +115,7 @@ fn IncrementVarSublevelsUp_walker(node: &mut Node, ctx: &mut IncrCtx) -> bool {
             ctx.min_sublevels_up -= 1;
             result
         }
-        _ => expression_tree_walker_mut(node, &mut |n| IncrementVarSublevelsUp_walker(n, ctx)),
+        _ => incr_walk_children(node, ctx),
     }
 }
 
@@ -207,7 +218,11 @@ fn SetVarReturningType_walker(node: &mut Node, ctx: &mut SetReturnCtx) -> bool {
             ctx.sublevels_up -= 1;
             result
         }
-        _ => expression_tree_walker_mut(node, &mut |n| SetVarReturningType_walker(n, ctx)),
+        _ => {
+            let scratch = mcx::MemoryContext::new("SetVarReturningType scratch");
+            let mcx = scratch.mcx();
+            expression_tree_walker_mut(node, &mut |n| SetVarReturningType_walker(n, ctx), mcx)
+        }
     }
 }
 

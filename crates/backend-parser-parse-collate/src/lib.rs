@@ -793,15 +793,19 @@ fn recurse_children(
     loccontext: &mut AssignCollationsContext<'_, '_>,
 ) -> PgResult<()> {
     let mut err: Option<types_error::PgError> = None;
-    expression_tree_walker_mut(node, &mut |child: &mut Node| {
-        match assign_collations_walker(child, loccontext) {
+    let scratch = mcx::MemoryContext::new("assign_collations scratch");
+    let scratch_mcx = scratch.mcx();
+    expression_tree_walker_mut(
+        node,
+        &mut |child: &mut Node| match assign_collations_walker(child, loccontext) {
             Ok(()) => false,
             Err(e) => {
                 err = Some(e);
                 true
             }
-        }
-    });
+        },
+        scratch_mcx,
+    );
     match err {
         Some(e) => Err(e),
         None => Ok(()),

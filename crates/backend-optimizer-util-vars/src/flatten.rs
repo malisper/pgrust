@@ -310,18 +310,22 @@ fn flatten_join_alias_vars_mutator<'mcx>(
         // MinMaxAggInfo) shouldn't appear here; the central walker has no arms
         // for them, so recursion over the remaining node types is correct.
         let mut err: Option<PgError> = None;
-        expression_tree_walker_mut(node, &mut |n| {
-            if err.is_some() {
-                return true;
-            }
-            match flatten_join_alias_vars_mutator(mcx, n, context) {
-                Ok(()) => false,
-                Err(e) => {
-                    err = Some(e);
-                    true
+        expression_tree_walker_mut(
+            node,
+            &mut |n| {
+                if err.is_some() {
+                    return true;
                 }
-            }
-        });
+                match flatten_join_alias_vars_mutator(mcx, n, context) {
+                    Ok(()) => false,
+                    Err(e) => {
+                        err = Some(e);
+                        true
+                    }
+                }
+            },
+            mcx,
+        );
         match err {
             Some(e) => Err(e),
             None => Ok(()),
@@ -685,18 +689,22 @@ fn generic_recurse<'mcx>(
     context: &mut FlattenGroupCtx<'_, 'mcx>,
 ) -> PgResult<()> {
     let mut err: Option<PgError> = None;
-    expression_tree_walker_mut(node, &mut |n| {
-        if err.is_some() {
-            return true;
-        }
-        match flatten_group_exprs_mutator(mcx, n, context) {
-            Ok(()) => false,
-            Err(e) => {
-                err = Some(e);
-                true
+    expression_tree_walker_mut(
+        node,
+        &mut |n| {
+            if err.is_some() {
+                return true;
             }
-        }
-    });
+            match flatten_group_exprs_mutator(mcx, n, context) {
+                Ok(()) => false,
+                Err(e) => {
+                    err = Some(e);
+                    true
+                }
+            }
+        },
+        mcx,
+    );
     match err {
         Some(e) => Err(e),
         None => Ok(()),

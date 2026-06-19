@@ -147,18 +147,24 @@ fn replace_rte_variables_mutator(
         }
         _ => {
             let mut err: Option<PgError> = None;
-            let aborted = expression_tree_walker_mut(node, &mut |n| {
-                if err.is_some() {
-                    return true;
-                }
-                match replace_rte_variables_mutator(n, context, &mut *callback) {
-                    Ok(abort) => abort,
-                    Err(e) => {
-                        err = Some(e);
-                        true
+            let scratch = mcx::MemoryContext::new("replace_rte_variables scratch");
+            let scratch_mcx = scratch.mcx();
+            let aborted = expression_tree_walker_mut(
+                node,
+                &mut |n| {
+                    if err.is_some() {
+                        return true;
                     }
-                }
-            });
+                    match replace_rte_variables_mutator(n, context, &mut *callback) {
+                        Ok(abort) => abort,
+                        Err(e) => {
+                            err = Some(e);
+                            true
+                        }
+                    }
+                },
+                scratch_mcx,
+            );
             if let Some(e) = err {
                 return Err(e);
             }
@@ -357,18 +363,24 @@ fn map_variable_attnos_mutator(node: &mut Node, ctx: &mut MapAttnosCtx<'_>) -> P
 
 fn recurse_map_attnos(node: &mut Node, ctx: &mut MapAttnosCtx<'_>) -> PgResult<bool> {
     let mut err: Option<PgError> = None;
-    let aborted = expression_tree_walker_mut(node, &mut |n| {
-        if err.is_some() {
-            return true;
-        }
-        match map_variable_attnos_mutator(n, ctx) {
-            Ok(abort) => abort,
-            Err(e) => {
-                err = Some(e);
-                true
+    let scratch = mcx::MemoryContext::new("map_variable_attnos scratch");
+    let scratch_mcx = scratch.mcx();
+    let aborted = expression_tree_walker_mut(
+        node,
+        &mut |n| {
+            if err.is_some() {
+                return true;
             }
-        }
-    });
+            match map_variable_attnos_mutator(n, ctx) {
+                Ok(abort) => abort,
+                Err(e) => {
+                    err = Some(e);
+                    true
+                }
+            }
+        },
+        scratch_mcx,
+    );
     if let Some(e) = err {
         return Err(e);
     }

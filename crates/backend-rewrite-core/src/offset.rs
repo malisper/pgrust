@@ -17,9 +17,14 @@ use types_nodes::primnodes::ExprRelids;
 
 use crate::relids;
 
-struct OffsetCtx {
+struct OffsetCtx<'mcx> {
     offset: i32,
     sublevels_up: i32,
+    /// Scratch arena for the transient `Node::Expr` wrappers the in-place walker
+    /// builds (`expression_tree_walker_mut`). The C walk never allocates; this
+    /// context exists only so the wrapper-construction has an `Mcx` available
+    /// (the opaque-`Node` flip's `mk_expr` needs one). Freed with the walk.
+    mcx: mcx::Mcx<'mcx>,
 }
 
 /// `offset_relid_set(relids, offset)` (rewriteManip.c:526) — produce a fresh set
@@ -34,7 +39,7 @@ fn offset_relid_set(relids_set: &ExprRelids, offset: i32) -> ExprRelids {
     result
 }
 
-fn OffsetVarNodes_walker(node: &mut Node, ctx: &mut OffsetCtx) -> bool {
+fn OffsetVarNodes_walker(node: &mut Node, ctx: &mut OffsetCtx<'_>) -> bool {
     match node.node_tag() {
         ntag::T_Var => {
             let var = node.as_var_mut().unwrap();
@@ -68,7 +73,8 @@ fn OffsetVarNodes_walker(node: &mut Node, ctx: &mut OffsetCtx) -> bool {
                 j.rtindex += ctx.offset;
             }
             // fall through to examine children
-            expression_tree_walker_mut(node, &mut |n| OffsetVarNodes_walker(n, ctx))
+            let mcx = ctx.mcx;
+            expression_tree_walker_mut(node, &mut |n| OffsetVarNodes_walker(n, ctx), mcx)
         }
         ntag::T_PlaceHolderVar => {
             // mutate phrels/phnullingrels in place, then recurse into children
@@ -77,7 +83,8 @@ fn OffsetVarNodes_walker(node: &mut Node, ctx: &mut OffsetCtx) -> bool {
                 phv.phrels = offset_relid_set(&phv.phrels, ctx.offset);
                 phv.phnullingrels = offset_relid_set(&phv.phnullingrels, ctx.offset);
             }
-            expression_tree_walker_mut(node, &mut |n| OffsetVarNodes_walker(n, ctx))
+            let mcx = ctx.mcx;
+            expression_tree_walker_mut(node, &mut |n| OffsetVarNodes_walker(n, ctx), mcx)
         }
         ntag::T_Query => {
             let q = node.as_query_mut().unwrap();
@@ -91,15 +98,24 @@ fn OffsetVarNodes_walker(node: &mut Node, ctx: &mut OffsetCtx) -> bool {
         // central Node universe walked here (the C code Asserts they're absent
         // from parse/rewrite trees, and handles AppendRelInfo only in planner
         // structures that aren't reachable through this walker).
-        _ => expression_tree_walker_mut(node, &mut |n| OffsetVarNodes_walker(n, ctx)),
+        _ => {
+            let mcx = ctx.mcx;
+            expression_tree_walker_mut(node, &mut |n| OffsetVarNodes_walker(n, ctx), mcx)
+        }
     }
 }
 
 /// `OffsetVarNodes(node, offset, sublevels_up)` (rewriteManip.c:475).
 pub fn OffsetVarNodes(node: &mut Node, offset: i32, sublevels_up: i32) {
+    // Per-walk scratch arena for the in-place walker's transient `Node::Expr`
+    // wrappers (mcx is unused today — the walk mutates in place and never
+    // allocates — but is threaded so the opaque-`Node` flip's `mk_expr` has a
+    // context). Freed when this function returns.
+    let scratch = mcx::MemoryContext::new("OffsetVarNodes scratch");
     let mut ctx = OffsetCtx {
         offset,
         sublevels_up,
+        mcx: scratch.mcx(),
     };
 
     // Must be prepared to start with a Query or a bare expression tree; if it's a

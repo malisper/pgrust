@@ -739,6 +739,19 @@ struct SubstitutePhvRelidsContext<'a> {
 
 /// `substitute_phv_relids_walker` (prepjointree.c:4117). Modifies PHV nodes in
 /// place (the C "cheat and modify in-place" mutator).
+/// Recurse into a node's children via the in-place walker with a per-call
+/// scratch arena for its transient `Node::Expr` wrappers. The walk never
+/// allocates; the `Mcx` is threaded only so the future opaque-`Node` flip's
+/// `mk_expr` has a context. Freed on return.
+fn substitute_walk_children(
+    node: &mut Node,
+    context: &mut SubstitutePhvRelidsContext,
+) -> bool {
+    let scratch = mcx::MemoryContext::new("substitute_phv_relids scratch");
+    let mcx = scratch.mcx();
+    expression_tree_walker_mut(node, &mut |n| substitute_phv_relids_walker(n, context), mcx)
+}
+
 fn substitute_phv_relids_walker(node: &mut Node, context: &mut SubstitutePhvRelidsContext) -> bool {
     match node.node_tag() {
         ntag::T_PlaceHolderVar => {
@@ -752,7 +765,7 @@ fn substitute_phv_relids_walker(node: &mut Node, context: &mut SubstitutePhvReli
                 debug_assert!(!phv.phrels.words.iter().all(|&w| w == 0));
             }
             // fall through to examine children
-            expression_tree_walker_mut(node, &mut |n| substitute_phv_relids_walker(n, context))
+            substitute_walk_children(node, context)
         }
         ntag::T_Query => {
             let q = node.as_query_mut().unwrap();
@@ -762,7 +775,7 @@ fn substitute_phv_relids_walker(node: &mut Node, context: &mut SubstitutePhvReli
             context.sublevels_up -= 1;
             result
         }
-        _ => expression_tree_walker_mut(node, &mut |n| substitute_phv_relids_walker(n, context)),
+        _ => substitute_walk_children(node, context),
     }
 }
 
