@@ -40,7 +40,9 @@ use types_nodes::primnodes::{
     ReturningExpr, Var,
 };
 use types_pathnodes::planner_run::PlannerRun;
-use types_pathnodes::{Bitmapset, NestLoopParamNode, NodeId, PlannerInfo, PlannerParamItem, Relids};
+use types_pathnodes::{
+    Bitmapset, NestLoopParamNode, NodeId, PlannerGlobal, PlannerInfo, PlannerParamItem, Relids,
+};
 
 // Seam modules (call via `::call(...)`).
 use backend_nodes_equalfuncs_seams::equal_expr;
@@ -60,9 +62,28 @@ fn elog_error(msg: &str) -> PgError {
 
 /// Append `typ` to `root->glob->paramExecTypes`, returning the new slot's index
 /// (the old `list_length`). C: `lappend_oid(root->glob->paramExecTypes, typ)`.
-fn append_param_exec_type(root: &mut PlannerInfo, typ: Oid) -> i32 {
-    let glob = root
-        .glob
+///
+/// In C the single `PlannerGlobal` is shared by pointer across every planning
+/// level, so this can be appended from any `root`. In the owned model the one
+/// `glob` lives on whichever root is currently being planned (the deepest /
+/// most-recently-recursed root — e.g. a SubLink's `subroot`), and an *upper*
+/// `root` reached by ascending `parent_root` has its `glob` moved out for the
+/// duration. Param-exec slots are global, so we must always register against
+/// the live `glob`. Callers therefore pass the glob owner here (the original,
+/// un-ascended `root`) rather than the ascended level (which holds the
+/// `plan_params` list but not the shared `glob`).
+fn append_param_exec_type(glob_owner: &mut PlannerInfo, typ: Oid) -> i32 {
+    append_param_exec_type_glob(&mut glob_owner.glob, typ)
+}
+
+/// Same as [`append_param_exec_type`] but operating on a `glob` `Box` that has
+/// been temporarily `take()`n out of its owning root (so the caller can hold a
+/// concurrent `&mut` to an *ascended* parent level for the `plan_params` push).
+fn append_param_exec_type_glob(
+    glob: &mut Option<alloc::boxed::Box<PlannerGlobal>>,
+    typ: Oid,
+) -> i32 {
+    let glob = glob
         .as_mut()
         .expect("paramassign: root->glob must be set");
     let id = glob.param_exec_types.len() as i32;
@@ -151,45 +172,60 @@ fn relids_to_expr_relids(relids: &Relids) -> ExprRelids {
  * Record the need for the Var in the proper upper-level root->plan_params.
  */
 fn assign_param_for_var(root: &mut PlannerInfo, var: &Var) -> PgResult<i32> {
-    // Find the query level the Var belongs to.
-    let root = ascend_mut(root, var.varlevelsup);
+    // In the owned model the single shared `glob` lives on this (deepest) root.
+    // We register the param-exec slot against it, but the PlannerParamItem /
+    // plan_params list belongs to the *upper* level the Var references, reached
+    // by ascending `parent_root`. Take the shared `glob` out of `root` for the
+    // duration so we can hold a `&mut` to the ascended level concurrently, then
+    // restore it. C never has to do this dance because glob is one shared
+    // pointer; here it is moved-down-the-chain ownership.
+    let mut glob = root.glob.take();
 
-    // If there's already a matching PlannerParamItem there, just use it.
-    for ppl in root.plan_params.clone() {
-        if let Expr::Var(pvar) = root.node(ppl) {
-            // This comparison must match _equalVar(), except for ignoring
-            // varlevelsup.  Note that _equalVar() ignores varnosyn, varattnosyn,
-            // and location, so this does too.
-            if pvar.varno == var.varno
-                && pvar.varattno == var.varattno
-                && pvar.vartype == var.vartype
-                && pvar.vartypmod == var.vartypmod
-                && pvar.varcollid == var.varcollid
-                && pvar.varreturningtype == var.varreturningtype
-                && relids_equal::call(
-                    &expr_relids_to_relids(&pvar.varnullingrels),
-                    &expr_relids_to_relids(&var.varnullingrels),
-                )
-            {
-                return Ok(root.planner_param_item(ppl).paramId);
+    let result = (|| {
+        // Find the query level the Var belongs to.
+        let root = ascend_mut(root, var.varlevelsup);
+
+        // If there's already a matching PlannerParamItem there, just use it.
+        for ppl in root.plan_params.clone() {
+            let item = root.planner_param_item(ppl).item;
+            if let Expr::Var(pvar) = root.node(item) {
+                // This comparison must match _equalVar(), except for ignoring
+                // varlevelsup.  Note that _equalVar() ignores varnosyn,
+                // varattnosyn, and location, so this does too.
+                if pvar.varno == var.varno
+                    && pvar.varattno == var.varattno
+                    && pvar.vartype == var.vartype
+                    && pvar.vartypmod == var.vartypmod
+                    && pvar.varcollid == var.varcollid
+                    && pvar.varreturningtype == var.varreturningtype
+                    && relids_equal::call(
+                        &expr_relids_to_relids(&pvar.varnullingrels),
+                        &expr_relids_to_relids(&var.varnullingrels),
+                    )
+                {
+                    return Ok(root.planner_param_item(ppl).paramId);
+                }
             }
         }
-    }
 
-    // Nope, so make a new one.
-    let mut newvar = var.clone();
-    newvar.varlevelsup = 0;
-    let vartype = newvar.vartype;
+        // Nope, so make a new one.
+        let mut newvar = var.clone();
+        newvar.varlevelsup = 0;
+        let vartype = newvar.vartype;
 
-    let param_id = append_param_exec_type(root, vartype);
-    let item = root.alloc_node(Expr::Var(newvar));
-    let pitem = root.alloc_planner_param_item(PlannerParamItem {
-        item,
-        paramId: param_id,
-    });
-    root.plan_params.push(pitem);
+        let param_id = append_param_exec_type_glob(&mut glob, vartype);
+        let item = root.alloc_node(Expr::Var(newvar));
+        let pitem = root.alloc_planner_param_item(PlannerParamItem {
+            item,
+            paramId: param_id,
+        });
+        root.plan_params.push(pitem);
 
-    Ok(param_id)
+        Ok(param_id)
+    })();
+
+    root.glob = glob;
+    result
 }
 
 /*
@@ -223,47 +259,58 @@ fn assign_param_for_placeholdervar(
     root: &mut PlannerInfo,
     phv: &PlaceHolderVar,
 ) -> PgResult<i32> {
-    // Find the query level the PHV belongs to.
-    let root = ascend_mut(root, phv.phlevelsup);
+    // Take the shared `glob` out of this (deepest) root so it can be appended to
+    // while a `&mut` to the ascended upper level is held (see
+    // `assign_param_for_var` for the rationale).
+    let mut glob = root.glob.take();
 
-    // If there's already a matching PlannerParamItem there, just use it.
-    for ppl in root.plan_params.clone() {
-        if let Expr::PlaceHolderVar(pphv) = root.node(ppl) {
-            // We assume comparing the PHIDs is sufficient.
-            if pphv.phid == phv.phid {
-                return Ok(root.planner_param_item(ppl).paramId);
+    let result = (|| {
+        // Find the query level the PHV belongs to.
+        let root = ascend_mut(root, phv.phlevelsup);
+
+        // If there's already a matching PlannerParamItem there, just use it.
+        for ppl in root.plan_params.clone() {
+            let item = root.planner_param_item(ppl).item;
+            if let Expr::PlaceHolderVar(pphv) = root.node(item) {
+                // We assume comparing the PHIDs is sufficient.
+                if pphv.phid == phv.phid {
+                    return Ok(root.planner_param_item(ppl).paramId);
+                }
             }
         }
-    }
 
-    // Nope, so make a new one.
-    let copied = increment_expr_sublevels(
-        Expr::PlaceHolderVar(phv.clone_in(mcx)?),
-        -(phv.phlevelsup as i32),
-        0,
-    )?;
-    let newphv = match copied {
-        Expr::PlaceHolderVar(p) => p,
-        _ => unreachable!(),
-    };
-    debug_assert!(newphv.phlevelsup == 0);
+        // Nope, so make a new one.
+        let copied = increment_expr_sublevels(
+            Expr::PlaceHolderVar(phv.clone_in(mcx)?),
+            -(phv.phlevelsup as i32),
+            0,
+        )?;
+        let newphv = match copied {
+            Expr::PlaceHolderVar(p) => p,
+            _ => unreachable!(),
+        };
+        debug_assert!(newphv.phlevelsup == 0);
 
-    let ptype = expr_type_info::call(
-        newphv
-            .phexpr
-            .as_deref()
-            .expect("PlaceHolderVar::phexpr must be set"),
-    )?
-    .typid;
+        let ptype = expr_type_info::call(
+            newphv
+                .phexpr
+                .as_deref()
+                .expect("PlaceHolderVar::phexpr must be set"),
+        )?
+        .typid;
 
-    let param_id = append_param_exec_type(root, ptype);
-    let item = root.alloc_node(Expr::PlaceHolderVar(newphv));
-    let pitem = root.alloc_planner_param_item(PlannerParamItem {
-        item,
-        paramId: param_id,
-    });
-    root.plan_params.push(pitem);
-    Ok(param_id)
+        let param_id = append_param_exec_type_glob(&mut glob, ptype);
+        let item = root.alloc_node(Expr::PlaceHolderVar(newphv));
+        let pitem = root.alloc_planner_param_item(PlannerParamItem {
+            item,
+            paramId: param_id,
+        });
+        root.plan_params.push(pitem);
+        Ok(param_id)
+    })();
+
+    root.glob = glob;
+    result
 }
 
 /*
@@ -299,42 +346,52 @@ pub fn replace_outer_placeholdervar(
 pub fn replace_outer_agg(mcx: Mcx<'_>, root: &mut PlannerInfo, agg: &Aggref) -> PgResult<Param> {
     debug_assert!(agg.agglevelsup > 0 && agg.agglevelsup < root.query_level);
 
-    // Find the query level the Aggref belongs to.
-    let root = ascend_mut(root, agg.agglevelsup);
+    // Take the shared `glob` out of this (deepest) root so it can be appended to
+    // while a `&mut` to the ascended upper level is held (see
+    // `assign_param_for_var` for the rationale).
+    let mut glob = root.glob.take();
 
-    // It does not seem worthwhile to try to de-duplicate references to outer
-    // aggs.  Just make a new slot every time.
-    let copied = increment_expr_sublevels(
-        Expr::Aggref(agg.clone_in(mcx)?),
-        -(agg.agglevelsup as i32),
-        0,
-    )?;
-    let newagg = match copied {
-        Expr::Aggref(a) => a,
-        _ => unreachable!(),
-    };
-    debug_assert!(newagg.agglevelsup == 0);
+    let result = (|| {
+        // Find the query level the Aggref belongs to.
+        let root = ascend_mut(root, agg.agglevelsup);
 
-    let aggtype = newagg.aggtype;
-    let aggcollid = newagg.aggcollid;
-    let location = newagg.location;
+        // It does not seem worthwhile to try to de-duplicate references to outer
+        // aggs.  Just make a new slot every time.
+        let copied = increment_expr_sublevels(
+            Expr::Aggref(agg.clone_in(mcx)?),
+            -(agg.agglevelsup as i32),
+            0,
+        )?;
+        let newagg = match copied {
+            Expr::Aggref(a) => a,
+            _ => unreachable!(),
+        };
+        debug_assert!(newagg.agglevelsup == 0);
 
-    let param_id = append_param_exec_type(root, aggtype);
-    let item = root.alloc_node(Expr::Aggref(newagg));
-    let pitem = root.alloc_planner_param_item(PlannerParamItem {
-        item,
-        paramId: param_id,
-    });
-    root.plan_params.push(pitem);
+        let aggtype = newagg.aggtype;
+        let aggcollid = newagg.aggcollid;
+        let location = newagg.location;
 
-    Ok(Param {
-        paramkind: ParamKind::PARAM_EXEC,
-        paramid: param_id,
-        paramtype: aggtype,
-        paramtypmod: -1,
-        paramcollid: aggcollid,
-        location,
-    })
+        let param_id = append_param_exec_type_glob(&mut glob, aggtype);
+        let item = root.alloc_node(Expr::Aggref(newagg));
+        let pitem = root.alloc_planner_param_item(PlannerParamItem {
+            item,
+            paramId: param_id,
+        });
+        root.plan_params.push(pitem);
+
+        Ok(Param {
+            paramkind: ParamKind::PARAM_EXEC,
+            paramid: param_id,
+            paramtype: aggtype,
+            paramtypmod: -1,
+            paramcollid: aggcollid,
+            location,
+        })
+    })();
+
+    root.glob = glob;
+    result
 }
 
 /*
@@ -350,38 +407,48 @@ pub fn replace_outer_grouping(
 
     debug_assert!(grp.agglevelsup > 0 && grp.agglevelsup < root.query_level);
 
-    // Find the query level the GroupingFunc belongs to.
-    let root = ascend_mut(root, grp.agglevelsup);
+    // Take the shared `glob` out of this (deepest) root so it can be appended to
+    // while a `&mut` to the ascended upper level is held (see
+    // `assign_param_for_var` for the rationale).
+    let mut glob = root.glob.take();
 
-    // Just make a new slot every time.
-    let copied = increment_expr_sublevels(
-        Expr::GroupingFunc(grp.clone_in(mcx)?),
-        -(grp.agglevelsup as i32),
-        0,
-    )?;
-    let newgrp = match copied {
-        Expr::GroupingFunc(g) => g,
-        _ => unreachable!(),
-    };
-    debug_assert!(newgrp.agglevelsup == 0);
+    let result = (|| {
+        // Find the query level the GroupingFunc belongs to.
+        let root = ascend_mut(root, grp.agglevelsup);
 
-    let location = newgrp.location;
-    let param_id = append_param_exec_type(root, ptype);
-    let item = root.alloc_node(Expr::GroupingFunc(newgrp));
-    let pitem = root.alloc_planner_param_item(PlannerParamItem {
-        item,
-        paramId: param_id,
-    });
-    root.plan_params.push(pitem);
+        // Just make a new slot every time.
+        let copied = increment_expr_sublevels(
+            Expr::GroupingFunc(grp.clone_in(mcx)?),
+            -(grp.agglevelsup as i32),
+            0,
+        )?;
+        let newgrp = match copied {
+            Expr::GroupingFunc(g) => g,
+            _ => unreachable!(),
+        };
+        debug_assert!(newgrp.agglevelsup == 0);
 
-    Ok(Param {
-        paramkind: ParamKind::PARAM_EXEC,
-        paramid: param_id,
-        paramtype: ptype,
-        paramtypmod: -1,
-        paramcollid: InvalidOid,
-        location,
-    })
+        let location = newgrp.location;
+        let param_id = append_param_exec_type_glob(&mut glob, ptype);
+        let item = root.alloc_node(Expr::GroupingFunc(newgrp));
+        let pitem = root.alloc_planner_param_item(PlannerParamItem {
+            item,
+            paramId: param_id,
+        });
+        root.plan_params.push(pitem);
+
+        Ok(Param {
+            paramkind: ParamKind::PARAM_EXEC,
+            paramid: param_id,
+            paramtype: ptype,
+            paramtypmod: -1,
+            paramcollid: InvalidOid,
+            location,
+        })
+    })();
+
+    root.glob = glob;
+    result
 }
 
 /*
@@ -398,40 +465,50 @@ pub fn replace_outer_merge_support(
 
     debug_assert!(run.resolve(root.parse).commandType != CmdType::CMD_MERGE);
 
-    // The parser should have ensured that the MergeSupportFunc is in the
-    // RETURNING list of an upper-level MERGE query, so find that query.
-    let target: &mut PlannerInfo = {
-        let mut cur: &mut PlannerInfo = root;
-        loop {
-            cur = match cur.parent_root.as_mut() {
-                Some(p) => p,
-                None => return Err(elog_error("MergeSupportFunc found outside MERGE")),
-            };
-            if run.resolve(cur.parse).commandType == CmdType::CMD_MERGE {
-                break cur;
+    // Take the shared `glob` out of this (deepest) root so it can be appended to
+    // while a `&mut` to the upper MERGE target level is held (see
+    // `assign_param_for_var` for the rationale).
+    let mut glob = root.glob.take();
+
+    let result = (|| {
+        // The parser should have ensured that the MergeSupportFunc is in the
+        // RETURNING list of an upper-level MERGE query, so find that query.
+        let target: &mut PlannerInfo = {
+            let mut cur: &mut PlannerInfo = root;
+            loop {
+                cur = match cur.parent_root.as_mut() {
+                    Some(p) => p,
+                    None => return Err(elog_error("MergeSupportFunc found outside MERGE")),
+                };
+                if run.resolve(cur.parse).commandType == CmdType::CMD_MERGE {
+                    break cur;
+                }
             }
-        }
-    };
+        };
 
-    // Just make a new slot every time.
-    let newmsf = msf.clone_in(mcx)?;
-    let location = newmsf.location;
-    let param_id = append_param_exec_type(target, ptype);
-    let item = target.alloc_node(Expr::MergeSupportFunc(newmsf));
-    let pitem = target.alloc_planner_param_item(PlannerParamItem {
-        item,
-        paramId: param_id,
-    });
-    target.plan_params.push(pitem);
+        // Just make a new slot every time.
+        let newmsf = msf.clone_in(mcx)?;
+        let location = newmsf.location;
+        let param_id = append_param_exec_type_glob(&mut glob, ptype);
+        let item = target.alloc_node(Expr::MergeSupportFunc(newmsf));
+        let pitem = target.alloc_planner_param_item(PlannerParamItem {
+            item,
+            paramId: param_id,
+        });
+        target.plan_params.push(pitem);
 
-    Ok(Param {
-        paramkind: ParamKind::PARAM_EXEC,
-        paramid: param_id,
-        paramtype: ptype,
-        paramtypmod: -1,
-        paramcollid: InvalidOid,
-        location,
-    })
+        Ok(Param {
+            paramkind: ParamKind::PARAM_EXEC,
+            paramid: param_id,
+            paramtype: ptype,
+            paramtypmod: -1,
+            paramcollid: InvalidOid,
+            location,
+        })
+    })();
+
+    root.glob = glob;
+    result
 }
 
 /*
@@ -453,37 +530,47 @@ pub fn replace_outer_returning(
 
     debug_assert!(rexpr.retlevelsup > 0 && (rexpr.retlevelsup as i64) < root.query_level as i64);
 
-    // Find the query level the ReturningExpr belongs to.
-    let root = ascend_mut(root, rexpr.retlevelsup as Index);
+    // Take the shared `glob` out of this (deepest) root so it can be appended to
+    // while a `&mut` to the ascended upper level is held (see
+    // `assign_param_for_var` for the rationale).
+    let mut glob = root.glob.take();
 
-    // Just make a new slot every time.
-    let copied = increment_expr_sublevels(
-        Expr::ReturningExpr(rexpr.clone_in(mcx)?),
-        -(rexpr.retlevelsup as i32),
-        0,
-    )?;
-    let newrexpr = match copied {
-        Expr::ReturningExpr(r) => r,
-        _ => unreachable!(),
-    };
-    debug_assert!(newrexpr.retlevelsup == 0);
+    let result = (|| {
+        // Find the query level the ReturningExpr belongs to.
+        let root = ascend_mut(root, rexpr.retlevelsup as Index);
 
-    let param_id = append_param_exec_type(root, ptype);
-    let item = root.alloc_node(Expr::ReturningExpr(newrexpr));
-    let pitem = root.alloc_planner_param_item(PlannerParamItem {
-        item,
-        paramId: param_id,
-    });
-    root.plan_params.push(pitem);
+        // Just make a new slot every time.
+        let copied = increment_expr_sublevels(
+            Expr::ReturningExpr(rexpr.clone_in(mcx)?),
+            -(rexpr.retlevelsup as i32),
+            0,
+        )?;
+        let newrexpr = match copied {
+            Expr::ReturningExpr(r) => r,
+            _ => unreachable!(),
+        };
+        debug_assert!(newrexpr.retlevelsup == 0);
 
-    Ok(Param {
-        paramkind: ParamKind::PARAM_EXEC,
-        paramid: param_id,
-        paramtype: ptype,
-        paramtypmod: info.typmod,
-        paramcollid: info.collation,
-        location: retexpr_location,
-    })
+        let param_id = append_param_exec_type_glob(&mut glob, ptype);
+        let item = root.alloc_node(Expr::ReturningExpr(newrexpr));
+        let pitem = root.alloc_planner_param_item(PlannerParamItem {
+            item,
+            paramId: param_id,
+        });
+        root.plan_params.push(pitem);
+
+        Ok(Param {
+            paramkind: ParamKind::PARAM_EXEC,
+            paramid: param_id,
+            paramtype: ptype,
+            paramtypmod: info.typmod,
+            paramcollid: info.collation,
+            location: retexpr_location,
+        })
+    })();
+
+    root.glob = glob;
+    result
 }
 
 /*

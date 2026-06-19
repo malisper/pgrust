@@ -1497,7 +1497,11 @@ fn transformCaseExpr<'mcx>(
         let wresult = transformExprRecurse(pstate, wresult)?
             .ok_or_else(|| PgError::error("transformCaseExpr: CASE/THEN result is NULL"))?;
 
-        resultexprs.push(wresult.clone());
+        // C keeps the same node pointer in both `resultexprs` (for common-type
+        // selection) and `neww->result`; the owned model needs a separate value,
+        // so deep-copy via `clone_in` (the derived `.clone()` panics on embedded
+        // owned sub-trees such as a SubLink CASE result — `ARRAY(SELECT ...)`).
+        resultexprs.push(wresult.clone_in(aexpr_clone_ctx(pstate))?);
         newargs.push(CaseWhen {
             expr: Some(Box::new(cond)),
             result: Some(Box::new(wresult)),
@@ -1520,7 +1524,9 @@ fn transformCaseExpr<'mcx>(
 
     // Common type: default result first (lcons), then WHEN results.
     let mut common_inputs: Vec<Expr> = Vec::with_capacity(resultexprs.len() + 1);
-    common_inputs.push(defresult.clone());
+    // Deep-copy (not derived `.clone()`, which panics on a SubLink default
+    // result) — C reuses the same pointer; the owned model needs its own value.
+    common_inputs.push(defresult.clone_in(aexpr_clone_ctx(pstate))?);
     common_inputs.extend(resultexprs);
 
     let ptype = coerce::select_common_type::call(pstate, &common_inputs, Some("CASE"))?;
