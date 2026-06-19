@@ -382,6 +382,7 @@ pub fn init_all() {
     backend_replication_walsender::init_seams();
     backend_rmgrdesc_next::init_seams();
     backend_rewrite_core::init_seams();
+    backend_rewrite_rewriteDefine::init_seams();
     backend_rewrite_rewriteRemove::init_seams();
     backend_rewrite_rewritehandler::init_seams();
     backend_storage_file_buffile::init_seams();

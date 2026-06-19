@@ -46,3 +46,6 @@ backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-s
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-parser-parse-utilcmd-seams = { path = "../backend-parser-parse-utilcmd-seams" }
 backend-rewrite-rewritesupport-seams = { path = "../backend-rewrite-rewritesupport-seams" }
+
+# Inward dispatch seam this crate installs (ProcessUtilitySlow CREATE RULE leg).
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }

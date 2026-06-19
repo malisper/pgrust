@@ -379,6 +379,7 @@ backend-replication-walreceiverfuncs = { path = "../backend-replication-walrecei
 backend-replication-walsender = { path = "../backend-replication-walsender" }
 backend-rmgrdesc-next = { path = "../backend-rmgrdesc-next" }
 backend-rewrite-core = { path = "../backend-rewrite-core" }
+backend-rewrite-rewriteDefine = { path = "../backend-rewrite-rewriteDefine" }
 backend-rewrite-rewriteRemove = { path = "../backend-rewrite-rewriteRemove" }
 backend-rewrite-rewritehandler = { path = "../backend-rewrite-rewritehandler" }
 backend-storage-file-buffile = { path = "../backend-storage-file-buffile" }

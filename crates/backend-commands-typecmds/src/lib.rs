@@ -4631,43 +4631,76 @@ fn make_multirange_constructors_seam(
 /// `parser_errposition`, which `DefineType`'s port does not yet need).
 fn define_stmt_seam<'mcx>(
     mcx: Mcx<'mcx>,
-    _pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
+    pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
     stmt: &RichNode<'mcx>,
 ) -> PgResult<ObjectAddress> {
-    use types_nodes::parsenodes::OBJECT_TYPE;
+    use types_nodes::parsenodes::{OBJECT_AGGREGATE, OBJECT_OPERATOR, OBJECT_TYPE};
 
     let ds = match stmt.as_definestmt() {
         Some(d) => d,
         None => return Err(PgError::error("define_stmt_seam: statement is not a DefineStmt")),
     };
 
-    if ds.kind == OBJECT_TYPE {
-        // defnames: List of String -> Vec<String>.
-        let mut names: Vec<String> = Vec::with_capacity(ds.defnames.len());
-        for n in ds.defnames.iter() {
-            match n.as_string() {
-                Some(s) => names.push(s.sval.as_str().to_string()),
-                None => {
-                    return Err(PgError::error(
-                        "CREATE TYPE: type name element is not a String",
-                    ))
+    // definition: List of DefElem -> Vec<parsenodes::Node::DefElem>.  Shared by
+    // all kinds.
+    let mut definition: Vec<Node> = Vec::with_capacity(ds.definition.len());
+    for n in ds.definition.iter() {
+        definition.push(backend_parser_parse_type::rich_node_to_parse(n)?);
+    }
+
+    match ds.kind {
+        OBJECT_TYPE => {
+            // defnames: List of String -> Vec<String>.
+            let mut names: Vec<String> = Vec::with_capacity(ds.defnames.len());
+            for n in ds.defnames.iter() {
+                match n.as_string() {
+                    Some(s) => names.push(s.sval.as_str().to_string()),
+                    None => {
+                        return Err(PgError::error(
+                            "CREATE TYPE: type name element is not a String",
+                        ))
+                    }
                 }
             }
+            DefineType(mcx, &names, &definition)
         }
-
-        // definition: List of DefElem -> Vec<parsenodes::Node::DefElem>.
-        let mut parameters: Vec<Node> = Vec::with_capacity(ds.definition.len());
-        for n in ds.definition.iter() {
-            parameters.push(backend_parser_parse_type::rich_node_to_parse(n)?);
+        OBJECT_OPERATOR => {
+            // Assert(stmt->args == NIL).
+            let names = decode_name_list(&ds.defnames);
+            backend_commands_operatorcmds::DefineOperator(mcx, &names, &definition)
         }
-
-        DefineType(mcx, &names, &parameters)
-    } else {
-        Err(PgError::error(format!(
+        OBJECT_AGGREGATE => {
+            // defnames + args (the FunctionParameter list / numDirectArgs pair).
+            let names = decode_name_list(&ds.defnames);
+            let mut args: Vec<Node> = Vec::with_capacity(ds.args.len());
+            for n in ds.args.iter() {
+                args.push(backend_parser_parse_type::rich_node_to_parse(n)?);
+            }
+            backend_commands_aggregatecmds::DefineAggregate(
+                mcx,
+                pstate,
+                &names,
+                &args,
+                ds.oldstyle,
+                &definition,
+                ds.replace,
+            )
+        }
+        _ => Err(PgError::error(format!(
             "define_stmt: DefineStmt kind {:?} not yet ported",
             ds.kind
-        )))
+        ))),
     }
+}
+
+/// Decode a `List *` of `String`/NULL name elements (a possibly-qualified
+/// object name) into the `&[Option<String>]` (`NameList`) shape the
+/// `QualifiedNameGetCreationNamespace` callers consume.
+fn decode_name_list(defnames: &[types_nodes::nodes::NodePtr<'_>]) -> Vec<Option<String>> {
+    defnames
+        .iter()
+        .map(|n| n.as_string().map(|s| s.sval.as_str().to_string()))
+        .collect()
 }
 
 /// Outward-seam adapter for `DefineDomain(pstate, (CreateDomainStmt *) stmt)`

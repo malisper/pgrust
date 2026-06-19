@@ -1042,3 +1042,21 @@ pub fn RenameRewriteRule<'mcx>(
 
     Ok(address)
 }
+
+/// `ProcessUtilitySlow` `T_RuleStmt` dispatch target (utility.c) — decode the
+/// `RuleStmt` from the parse `Node` and run the ported [`DefineRule`] body.
+fn define_rule_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &Node<'mcx>,
+    query_string: &str,
+) -> PgResult<ObjectAddress> {
+    let rs = stmt
+        .as_rulestmt()
+        .ok_or_else(|| PgError::error("define_rule_seam: statement is not a RuleStmt"))?;
+    DefineRule(mcx, rs, query_string)
+}
+
+/// Install this crate's `ProcessUtilitySlow` dispatch seam.
+pub fn init_seams() {
+    backend_tcop_utility_out_seams::define_rule::set(define_rule_seam);
+}

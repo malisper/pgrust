@@ -27,6 +27,8 @@ backend-parser-coerce = { path = "../backend-parser-coerce" }
 backend-parser-parse-collate = { path = "../backend-parser-parse-collate" }
 backend-optimizer-util-var-seams = { path = "../backend-optimizer-util-var-seams" }
 backend-nodes-core = { path = "../backend-nodes-core" }
+backend-commands-operatorcmds = { path = "../backend-commands-operatorcmds" }
+backend-commands-aggregatecmds = { path = "../backend-commands-aggregatecmds" }
 backend-parser-parse-type = { path = "../backend-parser-parse-type" }
 backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 
