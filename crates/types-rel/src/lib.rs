@@ -453,6 +453,24 @@ impl<'mcx> Relation<'mcx> {
             .pgstat_enabled = enabled;
     }
 
+    /// Replace this handle's trimmed projected copy with a freshly re-projected
+    /// one, keeping the same shared cache cell (pin) and closer (lock authority).
+    ///
+    /// Mirrors C's `index->rd_index` becoming visible after the relcache entry
+    /// is rebuilt in-place by the `CommandCounterIncrement` sinval: in C the
+    /// `Relation` is a live `RelationData *`, so a rebuild of the cache entry is
+    /// seen through the already-held pointer. The owned model carries a value
+    /// *snapshot* of the entry taken at open time, so a snapshot taken before
+    /// the rebuild is stale; the opener re-projects after the CCI to pick up the
+    /// rebuilt fields (e.g. `rd_index` populated by
+    /// `RelationInitIndexAccessInfo`). Sound only while this handle is the sole
+    /// holder of the trimmed copy (no alias taken yet), which the
+    /// `index_create` build path guarantees.
+    pub fn replace_data(&mut self, data: RelationData<'mcx>) {
+        *Rc::get_mut(&mut self.data)
+            .expect("replace_data on a shared relation copy") = data;
+    }
+
     /// `relation_close(relation, lockmode)` / `table_close(...)`: release
     /// the relcache reference and, if `lockmode` is not `NoLock`, the lock.
     /// On a handle without release authority this is a no-op (the C close of

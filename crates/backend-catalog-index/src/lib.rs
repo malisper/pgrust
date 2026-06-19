@@ -1112,7 +1112,8 @@ pub fn index_create<'mcx>(
      * lock. `index_open` — not `table_open` — because the new relation is an
      * INDEX; `table_open`'s `validate_relation_kind` rejects RELKIND_INDEX.)
      */
-    let index_relation = indexam::index_open::call(mcx, index_relation_id, ACCESS_EXCLUSIVE_LOCK)?;
+    let mut index_relation =
+        indexam::index_open::call(mcx, index_relation_id, ACCESS_EXCLUSIVE_LOCK)?;
 
     /*
      * Fill in the index's pg_class entry fields that heap_create did not set
@@ -1373,6 +1374,25 @@ pub fn index_create<'mcx>(
      */
     if miscinit::is_bootstrap_processing_mode::call() {
         relcache::relation_init_index_access_info::call(index_relation_id)?;
+    }
+
+    /*
+     * The relcache entry for this index was rebuilt in-place by the sinval
+     * during the CommandCounterIncrement above, which is when
+     * RelationInitIndexAccessInfo finally populates rd_index/rd_indam/etc. (the
+     * pg_index row only exists after UpdateIndexRelation, also above). In C,
+     * `indexRelation` is the live `RelationData *`, so it sees the rebuild
+     * through the held pointer. In the owned model the handle carries a value
+     * *snapshot* taken back at `index_open` — before the pg_index row existed —
+     * so its rd_index is still NULL. Re-project the handle's copy from the now-
+     * rebuilt cache cell so the build (which reads rd_index->indnkeyatts for the
+     * sort keys) sees the populated descriptor. Pin-free: the handle already
+     * holds the pin + AccessExclusiveLock.
+     */
+    if let Some(refreshed) =
+        relcache::relation_project_existing::call(mcx, index_relation_id)?
+    {
+        index_relation.replace_data(refreshed);
     }
 
     /*

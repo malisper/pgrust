@@ -1686,15 +1686,16 @@ pub fn set_plan_refs<'mcx>(
 
     // Plan-type-specific fixes. We match on the `Node` enum variant directly
     // (the model's source of truth). Several arms `return` (no tail recursion).
-    // NOTE: `BitmapHeapScan`, `LockRows`, and `BitmapOr` are NOT represented as
-    // `Node` variants in this repo's enum (verified against nodes.rs), so they
-    // cannot reach this dispatch; their C arms have no place to land and are
-    // therefore absent (a plan carrying them is unconstructible in this model).
+    // NOTE: `LockRows` and `BitmapOr` are NOT represented as `Node` variants in
+    // this repo's enum (verified against nodes.rs), so they cannot reach this
+    // dispatch; their C arms have no place to land and are therefore absent (a
+    // plan carrying them is unconstructible in this model).
     match plan.node_tag() {
         // -- plain scan types -------------------------------------------------
         ntag::T_SeqScan
         | ntag::T_SampleScan
         | ntag::T_IndexScan
+        | ntag::T_BitmapHeapScan
         | ntag::T_TidScan
         | ntag::T_TidRangeScan
         | ntag::T_FunctionScan
@@ -1992,9 +1993,18 @@ fn set_scan_node_refs<'mcx>(
             s.indexqualorig =
                 fix_scan_list_expr(mcx, root, s.indexqualorig.take(), rtoffset, neq)?;
         }
-        // NOTE: `Node::BitmapHeapScan` is not a variant in this repo's Node enum
-        // (verified against nodes.rs), so the C `T_BitmapHeapScan` arm has no
-        // place to land here and is omitted (unconstructible in this model).
+        ntag::T_BitmapHeapScan => {
+            let s = plan.as_bitmapheapscan_mut().unwrap();
+            fix_scan_common(root, &mut s.scan, rtoffset, mcx)?;
+            // C: splan->bitmapqualorig =
+            //      fix_scan_list(root, splan->bitmapqualorig, rtoffset,
+            //                    NUM_EXEC_QUAL(plan));
+            let neq = num_exec_qual(&s.scan.plan);
+            let qualorig = core::mem::replace(&mut s.bitmapqualorig, PgVec::new_in(mcx));
+            s.bitmapqualorig =
+                fix_scan_list_expr(mcx, root, Some(qualorig), rtoffset, neq)?
+                    .unwrap_or_else(|| PgVec::new_in(mcx));
+        }
         ntag::T_TidScan => {
             let s = plan.as_tidscan_mut().unwrap();
             fix_scan_common(root, &mut s.scan, rtoffset, mcx)?;
