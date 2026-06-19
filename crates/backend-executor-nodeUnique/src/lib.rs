@@ -281,10 +281,7 @@ pub fn ExecInitUnique<'mcx>(
 ) -> PgResult<PgBox<'mcx, UniqueStateData<'mcx>>> {
     let mcx = estate.es_query_cxt;
 
-    let unique: &'mcx Unique<'mcx> = match node {
-        types_nodes::nodes::Node::Unique(u) => u,
-        other => panic!("castNode(Unique, node) failed: {other:?}"),
-    };
+    let unique: &'mcx Unique<'mcx> = node.expect_unique();
 
     // check for unsupported flags
     //   Assert(!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK)));
