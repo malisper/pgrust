@@ -184,6 +184,7 @@ pub struct AlteredTableInfo<'mcx> {
 
     /* Information saved by Phase 1 for Phase 2: */
     pub subcmds: [PgVec<'mcx, NodePtr<'mcx>>; AT_NUM_PASSES], /* Lists of AlterTableCmd */
+    pub afterStmts: PgVec<'mcx, NodePtr<'mcx>>, /* List of utility command parsetrees */
 
     /* Information saved by Phases 1/2 for Phase 3: */
     pub constraints: PgVec<'mcx, NewConstraint<'mcx>>, /* List of NewConstraint */
@@ -667,7 +668,7 @@ fn ATPrepCmd<'mcx>(
     }
 
     // Copy the original subcommand for each table, so we can scribble on it.
-    let cmd = cmd.clone_in(mcx)?;
+    let mut cmd = cmd.clone_in(mcx)?;
 
     let pass: AlterTablePass;
 
@@ -678,11 +679,14 @@ fn ATPrepCmd<'mcx>(
                 rel,
                 ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_COMPOSITE_TYPE | ATT_FOREIGN_TABLE,
             )?;
-            unported("ADD COLUMN (ATPrepAddColumn)");
+            crate::at_coladd::ATPrepAddColumn(mcx, rel, recurse, recursing, false, &mut cmd)?;
+            // Recursion occurs during execution phase.
+            pass = AT_PASS_ADD_COL;
         }
         AT_AddColumnToView => {
             ATSimplePermissions(cmd.subtype, rel, ATT_VIEW)?;
-            unported("ADD COLUMN to view (ATPrepAddColumn)");
+            crate::at_coladd::ATPrepAddColumn(mcx, rel, recurse, recursing, true, &mut cmd)?;
+            pass = AT_PASS_ADD_COL;
         }
         AT_ColumnDefault => {
             // ALTER COLUMN DEFAULT — defaults allowed on views too.
@@ -811,7 +815,10 @@ fn ATPrepCmd<'mcx>(
                 rel,
                 ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_COMPOSITE_TYPE | ATT_FOREIGN_TABLE,
             )?;
-            unported("DROP COLUMN (ATPrepDropColumn)");
+            crate::at_coldrop::ATPrepDropColumn(
+                mcx, wqueue, rel, recurse, recursing, &mut cmd, lockmode, context,
+            )?;
+            pass = AT_PASS_DROP;
         }
         AT_AddIndex => {
             ATSimplePermissions(cmd.subtype, rel, ATT_TABLE | ATT_PARTITIONED_TABLE)?;
@@ -1218,7 +1225,30 @@ fn ATExecCmd<'mcx>(
         }
 
         // --- Unported executed families (faithful seam-and-panic) ---
-        AT_AddColumn | AT_AddColumnToView => unported("ADD COLUMN (ATExecAddColumn)"),
+        AT_AddColumn | AT_AddColumnToView => {
+            // ATExecAddColumn(wqueue, tab, rel, &cmd, cmd->recurse, false,
+            //     lockmode, cur_pass, context). ATExecAddColumn needs &mut wqueue
+            // (to append newvals / schedule transformed subcommands / recurse into
+            // children), so we re-open `rel` by relid into an owned carrier rather
+            // than borrowing it out of wqueue[ti].
+            let relid = wqueue[ti].relid;
+            let owned_rel = backend_access_common_relation::relation_open(mcx, relid, NoLock)?;
+            let cmd_owned = cmd.clone_in(mcx)?;
+            let recurse = cmd.recurse;
+            _address = crate::at_coladd::ATExecAddColumn(
+                mcx,
+                wqueue,
+                ti,
+                &owned_rel,
+                cmd_owned,
+                recurse,
+                false,
+                lockmode,
+                cur_pass,
+                Some(context),
+            )?;
+            drop(owned_rel);
+        }
         AT_AddIdentity => unported("ADD IDENTITY (ATExecAddIdentity)"),
         AT_SetIdentity => unported("SET IDENTITY (ATExecSetIdentity)"),
         AT_DropIdentity => unported("DROP IDENTITY (ATExecDropIdentity)"),
@@ -1227,7 +1257,24 @@ fn ATExecCmd<'mcx>(
         AT_SetExpression => unported("SET EXPRESSION (ATExecSetExpression + ATRewriteTable)"),
         AT_DropExpression => unported("DROP EXPRESSION (ATExecDropExpression)"),
         AT_SetCompression => unported("SET COMPRESSION (ATExecSetCompression)"),
-        AT_DropColumn => unported("DROP COLUMN (ATExecDropColumn)"),
+        AT_DropColumn => {
+            // ATExecDropColumn(wqueue, rel, cmd->name, cmd->behavior,
+            //     cmd->recurse, false, cmd->missing_ok, lockmode, NULL)
+            let colname = cmd
+                .name
+                .as_ref()
+                .map(|s| s.as_str())
+                .expect("DROP COLUMN requires a column name");
+            _address = crate::at_coldrop::ATExecDropColumn(
+                mcx,
+                rel,
+                colname,
+                cmd.behavior,
+                cmd.recurse,
+                false,
+                cmd.missing_ok,
+            )?;
+        }
         AT_AddIndex | AT_ReAddIndex => unported("ADD INDEX (ATExecAddIndex)"),
         AT_ReAddStatistics => unported("ReAdd STATISTICS (ATExecAddStatistics)"),
         AT_AddConstraint | AT_ReAddConstraint => unported("ADD CONSTRAINT (ATExecAddConstraint)"),
@@ -1346,7 +1393,7 @@ fn ATRewriteTables<'mcx>(
 
 /// `ATGetQueueEntry(...)` (tablecmds.c:6561) — find or create the work-queue
 /// entry for `rel`, returning its index into `wqueue`.
-fn ATGetQueueEntry<'mcx>(
+pub(crate) fn ATGetQueueEntry<'mcx>(
     mcx: Mcx<'mcx>,
     wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
     rel: &Relation<'mcx>,
@@ -1369,6 +1416,7 @@ fn ATGetQueueEntry<'mcx>(
         oldDesc: old_desc,
         rel: None,
         subcmds: core::array::from_fn(|_| PgVec::new_in(mcx)),
+        afterStmts: PgVec::new_in(mcx),
         constraints: PgVec::new_in(mcx),
         newvals: PgVec::new_in(mcx),
         verify_new_notnull: false,
@@ -1472,7 +1520,7 @@ fn alter_table_type_to_string(cmdtype: AlterTableType) -> Option<&'static str> {
 
 /// `ATSimplePermissions(...)` (tablecmds.c:6738) — relkind targeting + owner +
 /// system-catalog checks.
-fn ATSimplePermissions(
+pub(crate) fn ATSimplePermissions(
     cmdtype: AlterTableType,
     rel: &Relation<'_>,
     allowed_targets: i32,

@@ -106,7 +106,7 @@ pub fn transformColumnType<'mcx>(
 /// the C "must be simple constants or identifiers" error); `arrayBounds` only
 /// need their `Integer` bound (else `-1`) for `LookupTypeName` to resolve the
 /// array type.
-fn raw_typename_to_parse(
+pub(crate) fn raw_typename_to_parse(
     tn: &types_nodes::rawnodes::TypeName<'_>,
 ) -> PgResult<types_parsenodes::TypeName> {
     use alloc::string::ToString;

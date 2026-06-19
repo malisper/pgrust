@@ -46,6 +46,8 @@ pub struct PgClassForm {
     pub relpersistence: u8,
     /// `char relkind`.
     pub relkind: u8,
+    /// `int16 relnatts` — number of (live + dropped) user columns.
+    pub relnatts: i16,
     /// `int32 relpages`.
     pub relpages: i32,
     /// `float4 reltuples`.

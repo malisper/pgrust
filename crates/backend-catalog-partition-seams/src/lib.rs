@@ -8,7 +8,21 @@ use mcx::{Mcx, PgVec};
 use types_core::primitive::Oid;
 use types_error::PgResult;
 use types_nodes::nodes::Node;
-use types_rel::RelationData;
+use types_pathnodes::Bitmapset;
+use types_rel::{Relation, RelationData};
+
+seam_core::seam!(
+    /// `has_partition_attrs(rel, attnums, &used_in_expr)` (catalog/partition.c):
+    /// returns whether any of the columns in `attnums` (offset by
+    /// `FirstLowInvalidHeapAttributeNumber`) is used in the relation's partition
+    /// key, either directly or within a partition-key expression (in which case
+    /// `used_in_expr` is set). Returns `false` for non-partitioned relations.
+    pub fn has_partition_attrs<'mcx>(
+        mcx: Mcx<'mcx>,
+        rel: &Relation<'mcx>,
+        attnums: Option<&Bitmapset>,
+    ) -> PgResult<(bool, bool)>
+);
 
 seam_core::seam!(
     /// `get_partition_parent(relid, even_if_detached)` (catalog/partition.c):

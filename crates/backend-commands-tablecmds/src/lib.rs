@@ -27,6 +27,8 @@
 
 #![allow(non_snake_case)]
 
+mod at_coladd;
+mod at_coldrop;
 mod at_column;
 mod at_phase;
 mod create;

@@ -34,6 +34,7 @@ extern crate alloc;
 pub mod core;
 mod errpos;
 
+pub mod alter;
 pub mod coltype;
 pub mod column;
 pub mod constraint;
@@ -67,6 +68,7 @@ pub fn init_seams() {
         transformCreateSchemaStmtElements,
     );
     backend_parser_parse_utilcmd_seams::transformRuleStmt::set(transformRuleStmt);
+    backend_parser_parse_utilcmd_seams::transformAlterTableStmt::set(transformAlterTableStmt);
 
     // The tcop/utility.c ProcessUtilitySlow CREATE TABLE / CREATE INDEX / CREATE
     // STATISTICS arms run these parse-analysis transforms through the utility

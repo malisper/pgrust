@@ -6,11 +6,14 @@
 
 #![allow(non_snake_case)]
 
-use mcx::{Mcx, PgVec};
+use mcx::{Mcx, PgBox, PgVec};
 use types_error::PgResult;
 use types_nodes::copy_query::Query;
 use types_nodes::ddlnodes::RuleStmt;
 use types_nodes::nodes::Node;
+
+/// An owned, arena-allocated `Node` (`Node *` in C).
+pub type NodeBox<'mcx> = PgBox<'mcx, Node<'mcx>>;
 
 seam_core::seam!(
     /// `transformCreateSchemaStmtElements(schemaElts, schemaName)`
@@ -37,4 +40,21 @@ seam_core::seam!(
         stmt: &RuleStmt<'_>,
         query_string: &str,
     ) -> PgResult<(PgVec<'mcx, Query<'mcx>>, Option<Node<'mcx>>)>
+);
+
+seam_core::seam!(
+    /// `transformAlterTableStmt(relid, stmt, queryString, &beforeStmts,
+    /// &afterStmts)` (parse_utilcmd.c): parse analysis for ALTER TABLE — opens
+    /// the target relation by OID (caller holds the lock), sets up a
+    /// `CreateStmtContext`, and per-subcommand re-uses the CREATE TABLE element
+    /// transforms (`transformColumnDefinition` / `transformTableConstraint` /
+    /// `transformIndexConstraints` / FK / CHECK postprocess). Returns the
+    /// (possibly-rewritten) `AlterTableStmt` plus the before/after statement
+    /// lists. Can `ereport(ERROR)` / allocate, carried on `Err`.
+    pub fn transformAlterTableStmt<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: types_core::Oid,
+        stmt: NodeBox<'mcx>,
+        query_string: &str,
+    ) -> PgResult<(NodeBox<'mcx>, PgVec<'mcx, NodeBox<'mcx>>, PgVec<'mcx, NodeBox<'mcx>>)>
 );

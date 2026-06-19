@@ -255,22 +255,7 @@ fn propagate_notnull(cxt: &mut CreateStmtContext<'_>) {
     }
 }
 
-/// `transformAlterTableStmt` — parse analysis for ALTER TABLE. The
-/// per-subcommand dispatch opens the target relation through the relcache and
-/// walks USING / ADD-COLUMN expressions; routed through the outward seam.
-/// Returns `(stmt, beforeStmts, afterStmts)`.
-pub fn transformAlterTableStmt<'mcx>(
-    mcx: Mcx<'mcx>,
-    relid: Oid,
-    stmt: NodePtr<'mcx>,
-    query_string: &str,
-) -> PgResult<(
-    NodePtr<'mcx>,
-    PgVec<'mcx, NodePtr<'mcx>>,
-    PgVec<'mcx, NodePtr<'mcx>>,
-)> {
-    sx::transformAlterTableStmt::call(mcx, relid, stmt, query_string)
-}
+pub use crate::alter::transformAlterTableStmt;
 
 pub use crate::index_stats::{transformIndexStmt, transformStatsStmt};
 

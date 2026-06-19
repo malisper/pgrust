@@ -3818,6 +3818,7 @@ pub(crate) fn search_syscache_copy_pg_class<'mcx>(
         relisshared: getattr_bool(mcx, RELOID, &tup, Anum_pg_class_relisshared)?,
         relpersistence: getattr_char(mcx, RELOID, &tup, Anum_pg_class_relpersistence)? as u8,
         relkind: getattr_char(mcx, RELOID, &tup, Anum_pg_class_relkind)? as u8,
+        relnatts: getattr_i16(mcx, RELOID, &tup, Anum_pg_class_relnatts)?,
         relpages: getattr_i32(mcx, RELOID, &tup, Anum_pg_class_relpages)?,
         reltuples: getattr_f32(mcx, RELOID, &tup, Anum_pg_class_reltuples)?,
         relallvisible: getattr_i32(mcx, RELOID, &tup, Anum_pg_class_relallvisible)?,

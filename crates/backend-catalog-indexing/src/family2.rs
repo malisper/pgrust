@@ -502,6 +502,7 @@ fn update_pg_class_from_form<'mcx>(
     set_col(&mut values, &mut nulls, &mut replaces, 16, Datum::from_bool(form.relisshared));
     set_col(&mut values, &mut nulls, &mut replaces, 17, Datum::from_char(form.relpersistence as i8));
     set_col(&mut values, &mut nulls, &mut replaces, 18, Datum::from_char(form.relkind as i8));
+    set_col(&mut values, &mut nulls, &mut replaces, 19, Datum::from_i16(form.relnatts));
     set_col(&mut values, &mut nulls, &mut replaces, 10, Datum::from_i32(form.relpages));
     set_col(&mut values, &mut nulls, &mut replaces, 11, Datum::from_f32(form.reltuples));
     set_col(&mut values, &mut nulls, &mut replaces, 12, Datum::from_i32(form.relallvisible));

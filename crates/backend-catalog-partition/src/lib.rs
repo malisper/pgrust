@@ -605,4 +605,17 @@ pub fn init_seams() {
     backend_catalog_partition_seams::get_partition_parent::set(get_partition_parent);
     backend_catalog_partition_seams::get_partition_ancestors::set(get_partition_ancestors);
     backend_catalog_partition_seams::map_partition_varattnos::set(map_partition_varattnos);
+    backend_catalog_partition_seams::has_partition_attrs::set(has_partition_attrs_seam);
+}
+
+/// Adapter for the `has_partition_attrs` seam: returns `(found, used_in_expr)`
+/// instead of the C out-parameter.
+fn has_partition_attrs_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    attnums: Option<&types_pathnodes::Bitmapset>,
+) -> PgResult<(bool, bool)> {
+    let mut used_in_expr = false;
+    let found = has_partition_attrs(mcx, rel, attnums, Some(&mut used_in_expr))?;
+    Ok((found, used_in_expr))
 }

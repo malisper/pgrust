@@ -78,4 +78,8 @@ backend-commands-indexcmds = { path = "../backend-commands-indexcmds" }
 backend-parser-analyze = { path = "../backend-parser-analyze" }
 backend-rewrite-core = { path = "../backend-rewrite-core" }
 
+# getIdentitySequence (transformAlterTableStmt ALTER COLUMN TYPE / SET IDENTITY
+# identity-sequence lookup). Cycle-free leaf.
+backend-catalog-pg-depend = { path = "../backend-catalog-pg-depend" }
+
 [dev-dependencies]
