@@ -242,7 +242,22 @@ pub fn OpenTransientFilePerm(
     // Close excess kernel FDs.
     vfd_core::with_fd(vfd_core::ReleaseLruFiles)?;
 
-    let file = vfd_core::BasicOpenFilePerm(file_name, file_flags, file_mode)?;
+    // C's BasicOpenFilePerm returns -1 with errno set; OpenTransientFilePerm
+    // then returns that -1 to the caller (durable_rename etc.), which inspects
+    // errno to tolerate cases like ENOENT. Mirror that by surfacing the saved
+    // errno on the returned error rather than ereporting here.
+    let file = match vfd_core::BasicOpenFilePermOrErrno(file_name, file_flags, file_mode)? {
+        Ok(file) => file,
+        Err(saved) => {
+            return Err(file_access_error(
+                saved,
+                "could not open file: %m".to_string(),
+                2720,
+                "OpenTransientFilePerm",
+                ERROR,
+            ));
+        }
+    };
     let raw_fd = file.as_raw_fd();
     let create_subid = get_current_sub_transaction_id();
     with_fd(|fd| {

@@ -790,6 +790,22 @@ pub fn BasicOpenFilePerm(
     }
 }
 
+/// Like [`BasicOpenFilePerm`] but, on open failure, returns the saved OS
+/// `errno` instead of ereporting — mirroring C's `BasicOpenFilePerm`, which
+/// returns `-1` with `errno` set so callers (e.g. `OpenTransientFilePerm`,
+/// `durable_rename`) can inspect and tolerate specific errnos such as `ENOENT`.
+pub fn BasicOpenFilePermOrErrno(
+    file_name: impl AsRef<Path>,
+    file_flags: i32,
+    file_mode: u32,
+) -> PgResult<Result<StdFile, i32>> {
+    match BasicOpenFilePermFd(file_name, file_flags, file_mode)? {
+        -1 => Ok(Err(errno())),
+        // SAFETY: `raw` is a freshly opened owned descriptor.
+        raw => Ok(Ok(unsafe { StdFile::from_raw_fd(raw) })),
+    }
+}
+
 /// Inner of `BasicOpenFilePerm` returning the raw kernel fd (or -1, errno set),
 /// matching the exact C control flow including the EMFILE/ENFILE retry loop.
 pub(crate) fn BasicOpenFilePermFd(
