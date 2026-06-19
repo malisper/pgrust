@@ -1899,17 +1899,24 @@ fn seam_expr_type_info(
 
 /// `exprType(ExternalFnExpr)` seam (fmgr `get_fn_expr_rettype` path).
 ///
-/// The `ExternalFnExpr` carrier is tag-only (`types_fmgr::ExternalFnExpr {
-/// tag }`) — the fmgr/funcapi consumers build it from `node.tag()` of the
-/// not-yet-ported plan/expression `Node`, carrying only the node tag. The
-/// argument-bearing expression nodes whose result type lives in a struct field
-/// (`FuncExpr.funcresulttype`, `OpExpr.opresulttype`, …) are not constructible
-/// from a bare tag, so the `exprType` lookup falls through to `InvalidOid` —
-/// exactly the C fall-through for a node kind whose type cannot be read. (The
-/// real, field-bearing entry point this family installs is `expr_type_info`
-/// over a borrowed `&Expr`.)
-fn seam_expr_type(_expr: types_fmgr::ExternalFnExpr) -> Oid {
-    InvalidOid
+/// When the carrier holds the field-bearing call node (`node == Some`, the
+/// erased `primnodes::Expr` that `fmgr_info_set_expr` / the funcapi
+/// `call_expr` adapter stamped), read its result type through the real
+/// `expr_type` — this is C's `exprType(flinfo->fn_expr)` reading
+/// `FuncExpr.funcresulttype` / `OpExpr.opresulttype`, and is what
+/// `internal_get_result_type` needs to resolve a polymorphic (`anyelement`)
+/// return type from the concrete call. A tag-only carrier (`node == None`)
+/// falls through to `InvalidOid`, exactly the C fall-through for a node kind
+/// whose type cannot be read.
+fn seam_expr_type(expr: types_fmgr::ExternalFnExpr) -> Oid {
+    match expr
+        .node
+        .as_ref()
+        .and_then(|n| n.downcast_ref::<Expr>())
+    {
+        Some(e) => expr_type(Some(e)).unwrap_or(InvalidOid),
+        None => InvalidOid,
+    }
 }
 
 /// `get_call_expr_argtype(expr, argnum)` (fmgr.c) over the tag-only carrier.

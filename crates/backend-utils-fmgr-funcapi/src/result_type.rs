@@ -289,7 +289,15 @@ pub fn internal_get_result_type<'mcx>(
     // C: if (IsPolymorphicType(rettype)) { ... }
     if is_polymorphic_type(rettype) {
         // C: Oid newrettype = exprType(call_expr);
-        let newrettype = backend_nodes_nodeFuncs_seams::expr_type::call(node_to_external(call_expr));
+        // The polymorphic return type is resolved from the concrete call
+        // expression: `exprType` reads `FuncExpr.funcresulttype` (the parser
+        // already stamped the resolved element type there). That needs the
+        // field-bearing call node, so build a node-bearing `ExternalFnExpr`
+        // (erasing the owned `Expr` into the carrier the `expr_type` seam
+        // downcasts) rather than the tag-only adapter.
+        let newrettype = backend_nodes_nodeFuncs_seams::expr_type::call(
+            external_with_node(mcx, call_expr)?,
+        );
 
         // C: if (newrettype == InvalidOid) ereport(ERROR, DATATYPE_MISMATCH, ...);
         if newrettype == InvalidOid {
@@ -362,6 +370,24 @@ fn node_to_external(call_expr: Option<&Node<'_>>) -> types_fmgr::ExternalFnExpr 
         // through to `InvalidOid` (the tag-only contract).
         node: None,
     }
+}
+
+/// Build a field-bearing `ExternalFnExpr` from the call-expression `Node`,
+/// erasing the owned `Expr` (cloned into `mcx`) into the carrier so the
+/// `expr_type` seam can read its result-type field (C: `exprType(call_expr)`
+/// over a real `FuncExpr`/`OpExpr`). A `Node` that is not an expression (or a
+/// `None` call_expr) yields the tag-only carrier, for which `expr_type` falls
+/// through to `InvalidOid` — matching C's `exprType(NULL) == InvalidOid`.
+fn external_with_node<'mcx>(
+    mcx: Mcx<'mcx>,
+    call_expr: Option<&Node<'mcx>>,
+) -> PgResult<types_fmgr::ExternalFnExpr> {
+    let tag = call_expr.map(|n| n.tag().0).unwrap_or(0);
+    let node = match call_expr.and_then(|n| n.as_expr()) {
+        Some(e) => Some(types_core::fmgr::FnExprErased::new(e.clone_in(mcx)?)),
+        None => None,
+    };
+    Ok(types_fmgr::ExternalFnExpr { tag, node })
 }
 
 /// `get_expr_result_tupdesc(expr, noError)` (funcapi.c:551) — convenience

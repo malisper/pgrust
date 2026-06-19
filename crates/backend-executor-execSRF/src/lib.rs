@@ -62,6 +62,7 @@ use backend_executor_execSRF_seams as seams;
 mod generate_series;
 mod pg_input_error_info;
 mod srf_registry;
+mod unnest;
 pub use srf_registry::{register_srf, srf_invoke_by_oid, srf_is_registered};
 
 #[cfg(test)]
@@ -81,6 +82,10 @@ pub fn init_seams() {
     // `pg_input_error_info(text, text) RETURNS record` (OID 6211) — a
     // single-row composite record function reached via nodeFunctionscan.
     pg_input_error_info::register_pg_input_error_info();
+    // `unnest(anyarray)` (OID 2331) — the value-per-call SRF emitting each
+    // array element, registered in the executor-frame table (its element
+    // deconstruction core is `backend-utils-adt-arrayfuncs::array_unnest`).
+    unnest::register_unnest();
 }
 
 // ===========================================================================

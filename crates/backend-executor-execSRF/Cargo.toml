@@ -49,6 +49,11 @@ backend-utils-adt-misc = { path = "../backend-utils-adt-misc" }
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 
+# unnest(anyarray) (OID 2331): the value-per-call SRF element-deconstruction
+# core (array_unnest) and the ArrayElementDatum element carrier.
+backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
+types-array = { path = "../types-array" }
+
 # Shared type stack + allocator + error.
 allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
 backend-utils-error = { path = "../backend-utils-error" }
