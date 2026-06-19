@@ -249,23 +249,24 @@ fn extract_single_body_query<'a, 'mcx>(
     mcx: Mcx<'mcx>,
     n: &'a types_nodes::nodes::Node<'mcx>,
 ) -> PgResult<Option<types_nodes::copy_query::Query<'mcx>>> {
-    use types_nodes::nodes::Node;
-    let query_list: &[types_nodes::nodes::NodePtr<'mcx>] = match n {
-        Node::List(outer) => {
+    use types_nodes::nodes::ntag;
+    let query_list: &[types_nodes::nodes::NodePtr<'mcx>] = match n.node_tag() {
+        ntag::T_List => {
+            let outer = n.expect_list();
             // query_list = linitial_node(List, n): the first element is itself a
             // List of Query nodes.
             let first = match outer.first() {
                 Some(p) => p,
                 None => return Ok(None),
             };
-            match &**first {
-                Node::List(inner) => &inner[..],
+            match (**first).node_tag() {
+                ntag::T_List => &(**first).expect_list()[..],
                 // A bare Query as the sole element (defensive).
-                Node::Query(_) => core::slice::from_ref(first),
+                ntag::T_Query => core::slice::from_ref(first),
                 _ => return Ok(None),
             }
         }
-        Node::Query(_) => {
+        ntag::T_Query => {
             // else query_list = list_make1(n).
             return Ok(Some(query_clone_from_node(mcx, n)?));
         }
