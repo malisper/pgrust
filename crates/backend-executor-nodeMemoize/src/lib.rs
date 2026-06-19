@@ -838,10 +838,7 @@ pub fn ExecInitMemoize<'mcx>(
     eflags: i32,
 ) -> PgResult<alloc::boxed::Box<MemoizeScanState<'mcx>>> {
     // MemoizeState *mstate = makeNode(MemoizeState);
-    let node: &'mcx Memoize<'mcx> = match plan_node {
-        types_nodes::nodes::Node::Memoize(m) => m,
-        other => panic!("castNode(Memoize, node) failed: {other:?}"),
-    };
+    let node: &'mcx Memoize<'mcx> = plan_node.expect_memoize();
 
     let mut mstate = make_memoize_state(estate)?;
 
