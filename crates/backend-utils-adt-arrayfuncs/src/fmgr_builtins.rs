@@ -615,9 +615,13 @@ fn fc_array_positions(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // --- array_remove / array_replace (non-strict) ------------------------------
 
 fn fc_array_remove(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let array = match opt_arg_varlena(fcinfo, 0) {
+    // C array_remove uses PG_GETARG_ARRAYTYPE_P, which detoasts: a stored array
+    // can be inline-compressed/external, so read it through the detoasting lane
+    // before any ARR_* header read (matches array_position(s)/array_dims; raw
+    // opt_arg_varlena would read a garbage header on a toasted input).
+    let array = match opt_arg_array_detoast(fcinfo, 0) {
         None => return ret_null(fcinfo),
-        Some(a) => a.to_vec(),
+        Some(a) => a,
     };
     let element_type = crate::foundation::arr_elemtype(&array);
     let search_isnull = arg_isnull(fcinfo, 1);
@@ -638,9 +642,12 @@ fn fc_array_remove(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 
 fn fc_array_replace(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let array = match opt_arg_varlena(fcinfo, 0) {
+    // C array_replace uses PG_GETARG_ARRAYTYPE_P, which detoasts (see
+    // fc_array_remove): detoast before reading the ARR_* header so a toasted /
+    // inline-compressed array input is not read as a garbage header.
+    let array = match opt_arg_array_detoast(fcinfo, 0) {
         None => return ret_null(fcinfo),
-        Some(a) => a.to_vec(),
+        Some(a) => a,
     };
     let element_type = crate::foundation::arr_elemtype(&array);
     let search_isnull = arg_isnull(fcinfo, 1);

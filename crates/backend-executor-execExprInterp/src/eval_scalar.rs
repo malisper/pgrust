@@ -516,17 +516,17 @@ pub fn exec_hashdatum_step<'mcx>(
         if strict {
             // EEOP_HASHDATUM_FIRST_STRICT: NULL input -> NULL result, jump.
             if arg0_isnull {
-                state
-                    .result_cells
-                    .set(resvalue_id, ResultCell { value: DatumV::null(), isnull: true });
+                // For the FINAL (or single) hash column the build sets
+                // `resvalue` to STATE_RESULT_CELL (`&state->resvalue`), so write
+                // through `write_cell`; a raw `result_cells.set` would land in
+                // the dead arena slot 0 and EEOP_DONE_RETURN would return a
+                // stale value. (Same fix class as ExecEvalParamExtern.)
+                crate::interp_loop::write_cell(state, resvalue_id, DatumV::null(), true);
                 return Ok(jumpdone as usize);
             }
             let (value, _isnull) =
                 function_call_invoke_datum::call(mcx, fn_oid, collation, &args, fn_expr)?;
-            state.result_cells.set(
-                resvalue_id,
-                ResultCell { value, isnull: false },
-            );
+            crate::interp_loop::write_cell(state, resvalue_id, value, false);
             return Ok(op + 1);
         }
         // EEOP_HASHDATUM_FIRST: non-null -> hash; null -> 0.
@@ -537,9 +537,7 @@ pub fn exec_hashdatum_step<'mcx>(
         } else {
             DatumV::from_usize(0)
         };
-        state
-            .result_cells
-            .set(resvalue_id, ResultCell { value, isnull: false });
+        crate::interp_loop::write_cell(state, resvalue_id, value, false);
         return Ok(op + 1);
     }
 
@@ -549,17 +547,17 @@ pub fn exec_hashdatum_step<'mcx>(
     if strict {
         // EEOP_HASHDATUM_NEXT32_STRICT: NULL input -> NULL result, jump.
         if arg0_isnull {
-            state
-                .result_cells
-                .set(resvalue_id, ResultCell { value: DatumV::null(), isnull: true });
+            crate::interp_loop::write_cell(state, resvalue_id, DatumV::null(), true);
             return Ok(jumpdone as usize);
         }
         let (value, _isnull) =
             function_call_invoke_datum::call(mcx, fn_oid, collation, &args, fn_expr)?;
         let hashvalue = value.as_u32();
-        state.result_cells.set(
+        crate::interp_loop::write_cell(
+            state,
             resvalue_id,
-            ResultCell { value: DatumV::from_u32(rotated ^ hashvalue), isnull: false },
+            DatumV::from_u32(rotated ^ hashvalue),
+            false,
         );
         return Ok(op + 1);
     }
@@ -573,9 +571,7 @@ pub fn exec_hashdatum_step<'mcx>(
     } else {
         rotated
     };
-    state
-        .result_cells
-        .set(resvalue_id, ResultCell { value: DatumV::from_u32(combined), isnull: false });
+    crate::interp_loop::write_cell(state, resvalue_id, DatumV::from_u32(combined), false);
     Ok(op + 1)
 }
 
