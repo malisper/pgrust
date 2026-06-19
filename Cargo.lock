@@ -4626,6 +4626,7 @@ dependencies = [
  "backend-parser-parse-expr",
  "backend-parser-relation",
  "backend-parser-small1",
+ "backend-partitioning-partdesc",
  "backend-storage-lmgr-lmgr",
  "backend-storage-lmgr-predicate-seams",
  "backend-utils-activity-pgstat-seams",

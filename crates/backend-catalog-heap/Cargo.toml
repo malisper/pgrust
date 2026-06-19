@@ -78,6 +78,7 @@ backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat
 backend-commands-tablecmds-seams = { path = "../backend-commands-tablecmds-seams" }
 backend-optimizer-util-plancat-ext-seams = { path = "../backend-optimizer-util-plancat-ext-seams" }
 backend-catalog-partition = { path = "../backend-catalog-partition" }
+backend-partitioning-partdesc = { path = "../backend-partitioning-partdesc" }
 backend-catalog-pg-subscription-seams = { path = "../backend-catalog-pg-subscription-seams" }
 backend-storage-lmgr-predicate-seams = { path = "../backend-storage-lmgr-predicate-seams" }
 backend-utils-cache-inval = { path = "../backend-utils-cache-inval" }

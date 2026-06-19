@@ -8,11 +8,10 @@
 //! and `text` varlena images are built inline (the same self-contained byte
 //! layout `backend-catalog-indexing` uses, avoiding an adt-int/oid dependency).
 //!
-//! `StorePartitionBound` is NOT landed here: it rewrites `pg_class.relpartbound`
-//! from a transformed `PartitionBoundSpec`, which depends on the partition-bound
-//! transform/validation machinery (`transformPartitionBound` /
-//! `check_new_partition_bound` in `partitioning/partbounds.c`) and the partition
-//! descriptor (`partitioning/partdesc.c`), neither of which is ported yet.
+//! `StorePartitionBound` rewrites `pg_class.relpartbound` (the transformed
+//! `PartitionBoundSpec` as a `pg_node_tree` text), sets `relispartition`, resets
+//! a stale `relhassubclass`, updates `pg_partitioned_table.partdefid` for a
+//! default partition, and invalidates the relevant relcache entries.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -305,6 +304,138 @@ pub fn StorePartitionKey<'mcx>(
 
     /* Invalidate the relcache so the next CCI rebuilds the partition key. */
     backend_utils_cache_inval::cache_invalidate::CacheInvalidateRelcache(rel)?;
+
+    Ok(())
+}
+
+/* genbki: pg_class oid index + relevant attribute numbers (pg_class.h). */
+const ClassOidIndexId: Oid = 2662;
+const Anum_pg_class_oid: AttrNumber = 1;
+const Anum_pg_class_relhassubclass: AttrNumber = 23;
+const Anum_pg_class_relispartition: AttrNumber = 28;
+const Anum_pg_class_relpartbound: AttrNumber = 34;
+const Natts_pg_class: usize = 34;
+/* RELKIND_RELATION (catalog/pg_class.h). */
+const RELKIND_RELATION: u8 = b'r';
+
+/*
+ *	StorePartitionBound
+ *		Update pg_class tuple of rel to store the partition bound and set
+ *		relispartition to true
+ *
+ * Faithful port of catalog/heap.c:StorePartitionBound. Writes the transformed
+ * `PartitionBoundSpec` into `pg_class.relpartbound` as a `pg_node_tree` text,
+ * sets `relispartition`, resets a leftover `relhassubclass` for a plain table,
+ * updates `pg_partitioned_table.partdefid` for the default partition, and
+ * invalidates the relevant relcache entries.
+ *
+ * The full pg_class row is fetched + rewritten via `heap_modify_tuple` (not the
+ * trimmed `PgClassForm` carrier, which omits the variable-length `relpartbound`
+ * tail).
+ */
+pub fn StorePartitionBound<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+    parent: &types_rel::Relation<'mcx>,
+    bound: &types_nodes::ddlnodes::PartitionBoundSpec<'mcx>,
+) -> PgResult<()> {
+    use types_storage::lock::RowExclusiveLock;
+
+    // classRel = table_open(RelationRelationId, RowExclusiveLock);
+    let class_rel = backend_access_table_table::table_open(mcx, RelationRelationId, RowExclusiveLock)?;
+
+    // tuple = SearchSysCacheCopy1(RELOID, RelationGetRelid(rel)); — fetched here
+    // by a keyed scan of the pg_class OID index (no RELOID copy-with-TID seam).
+    let mut key = [ScanKeyData::empty()];
+    ScanKeyInit(
+        &mut key[0],
+        Anum_pg_class_oid,
+        BTEqualStrategyNumber,
+        F_OIDEQ,
+        Datum::from_oid(rel.rd_id),
+    )?;
+    let mut scan = backend_access_index_genam_seams::systable_beginscan::call(
+        &class_rel,
+        ClassOidIndexId,
+        true,
+        None,
+        &key[..1],
+    )?;
+    let tuple = backend_access_index_genam_seams::systable_getnext::call(mcx, scan.desc_mut())?;
+    let Some(tuple) = tuple else {
+        scan.end()?;
+        class_rel.close(RowExclusiveLock)?;
+        return backend_utils_error::elog(
+            types_error::ERROR,
+            &format!("cache lookup failed for relation {}", rel.rd_id),
+        );
+    };
+
+    // memset new_val/new_null/new_repl; fill in relpartbound; set relispartition.
+    let mut new_val: Vec<Datum> = vec![Datum::null(); Natts_pg_class];
+    let mut new_null: Vec<bool> = vec![false; Natts_pg_class];
+    let mut new_repl: Vec<bool> = vec![false; Natts_pg_class];
+
+    // new_val[relpartbound] = CStringGetTextDatum(nodeToString(bound));
+    let bound_node = types_nodes::nodes::Node::PartitionBoundSpec(bound.clone_in(mcx)?);
+    let bound_str = backend_nodes_outfuncs::nodeToString(mcx, &bound_node)?;
+    new_val[(Anum_pg_class_relpartbound - 1) as usize] =
+        cstring_to_text_datum(mcx, bound_str.as_str())?;
+    new_null[(Anum_pg_class_relpartbound - 1) as usize] = false;
+    new_repl[(Anum_pg_class_relpartbound - 1) as usize] = true;
+
+    // Also set the flag: relispartition = true.
+    new_val[(Anum_pg_class_relispartition - 1) as usize] = Datum::from_bool(true);
+    new_repl[(Anum_pg_class_relispartition - 1) as usize] = true;
+
+    // We already checked for no inheritance children, but reset relhassubclass
+    // in case it was left over.
+    if rel.rd_rel.relkind == RELKIND_RELATION && rel.rd_rel.relhassubclass {
+        new_val[(Anum_pg_class_relhassubclass - 1) as usize] = Datum::from_bool(false);
+        new_repl[(Anum_pg_class_relhassubclass - 1) as usize] = true;
+    }
+
+    let mut newtuple = backend_access_common_heaptuple::heap_modify_tuple(
+        mcx,
+        &tuple,
+        &class_rel.rd_att,
+        &new_val,
+        &new_null,
+        &new_repl,
+    )?;
+
+    // CatalogTupleUpdate(classRel, &newtuple->t_self, newtuple);
+    backend_catalog_indexing::keystone::CatalogTupleUpdate(
+        mcx,
+        &class_rel,
+        tuple.tuple.t_self,
+        &mut newtuple,
+    )?;
+
+    scan.end()?;
+    class_rel.close(RowExclusiveLock)?;
+
+    // If we're storing bounds for the default partition, update
+    // pg_partitioned_table too.
+    if bound.is_default {
+        backend_catalog_partition::update_default_partition_oid(parent.rd_id, rel.rd_id)?;
+    }
+
+    // Make these updates visible.
+    backend_access_transam_xact::CommandCounterIncrement()?;
+
+    // The partition constraint for the default partition depends on the bounds
+    // of every other partition, so invalidate the default partition's relcache
+    // entry every time a partition is added or removed.
+    let partdesc =
+        backend_partitioning_partdesc::RelationGetPartitionDesc(mcx, &parent.alias(), true)?;
+    let default_part_oid =
+        backend_partitioning_partdesc::get_default_oid_from_partdesc(Some(&partdesc));
+    if types_core::primitive::OidIsValid(default_part_oid) {
+        backend_utils_cache_inval::cache_invalidate::CacheInvalidateRelcacheByRelid(default_part_oid)?;
+    }
+
+    backend_utils_cache_inval::cache_invalidate::CacheInvalidateRelcache(parent)?;
 
     Ok(())
 }
