@@ -70,9 +70,12 @@ seam_core::seam!(
     /// `partition_rbound_datum_cmp(partsupfunc, partcollation, rb_datums,
     /// rb_kind, tuple_datums, n_tuple_datums)` (partbounds.c): compare a range
     /// bound against the key tuple (`<0`, `0`, `>0`). The comparison function
-    /// can `ereport(ERROR)`.
+    /// can `ereport(ERROR)`. C reads `partsupfunc[i]` / `partcollation[i]` from
+    /// the partitioned table's relcache `PartitionKey`, so the owned model
+    /// passes the `PartitionKeyData` view (the per-key comparison support
+    /// functions and collations live on it).
     pub fn partition_rbound_datum_cmp<'mcx>(
-        partcollation: &[Oid],
+        key: &PartitionKeyData<'_>,
         rb_datums: &[Datum<'mcx>],
         rb_kind: &[PartitionRangeDatumKind],
         tuple_datums: &[Datum<'mcx>],

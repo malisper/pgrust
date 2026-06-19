@@ -125,6 +125,7 @@ backend-catalog-namespace = { path = "../backend-catalog-namespace" }
 backend-catalog-objectaccess = { path = "../backend-catalog-objectaccess" }
 backend-catalog-objectaddress = { path = "../backend-catalog-objectaddress" }
 backend-catalog-partition = { path = "../backend-catalog-partition" }
+backend-partitioning-partbounds = { path = "../backend-partitioning-partbounds" }
 backend-catalog-indexing = { path = "../backend-catalog-indexing" }
 backend-catalog-heap = { path = "../backend-catalog-heap" }
 backend-catalog-index = { path = "../backend-catalog-index" }

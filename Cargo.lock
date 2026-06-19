@@ -13973,6 +13973,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-partitioning-partbounds"
+version = "0.0.0"
+dependencies = [
+ "backend-partitioning-partbounds-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-partitioning-partbounds-seams"
 version = "0.0.0"
 dependencies = [
@@ -23785,6 +23798,7 @@ dependencies = [
  "backend-parser-parse-utilcmd",
  "backend-parser-relation",
  "backend-parser-small1",
+ "backend-partitioning-partbounds",
  "backend-pl-plpgsql-comp",
  "backend-pl-plpgsql-exec",
  "backend-pl-plpgsql-handler",

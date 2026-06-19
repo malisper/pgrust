@@ -585,7 +585,7 @@ pub(crate) fn get_partition_for_tuple<'mcx>(
                         range_bound_at(dispatch, last_datum_offset as usize);
                     let cmpval =
                         backend_partitioning_partbounds_seams::partition_rbound_datum_cmp::call(
-                            key.partcollation.as_slice(),
+                            key,
                             &last_datums,
                             &kind,
                             values,
@@ -605,7 +605,7 @@ pub(crate) fn get_partition_for_tuple<'mcx>(
                             range_bound_at(dispatch, (last_datum_offset + 1) as usize);
                         let cmpval2 =
                             backend_partitioning_partbounds_seams::partition_rbound_datum_cmp::call(
-                                key.partcollation.as_slice(),
+                                key,
                                 &up_datums,
                                 &up_kind,
                                 values,
