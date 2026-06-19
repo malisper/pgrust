@@ -393,6 +393,7 @@ pub fn process_db_role_settings(mcx: Mcx<'_>, databaseid: Oid, roleid: Oid) -> P
 fn arena_arg_to_owned(
     arg: &types_nodes::nodes::Node<'_>,
 ) -> PgResult<types_parsenodes::Node> {
+    use types_nodes::nodes::ntag;
     use types_nodes::nodes::Node as ANode;
     use types_parsenodes as pn;
 
@@ -402,28 +403,32 @@ fn arena_arg_to_owned(
     // leg `flatten_set_variable_args` handles via `interval_in`/`interval_out`;
     // that coercion is out of this converter's scope, so it errors like the
     // owned `flatten_set_variable_args` unrecognized-node path.
-    let val: &ANode = match arg {
-        ANode::A_Const(c) => match c.val.as_deref() {
+    let val: &ANode = match arg.node_tag() {
+        ntag::T_A_Const => match arg.expect_a_const().val.as_deref() {
             Some(v) => v,
             // `isnull` A_Const (SQL NULL constant) — not a SET-value shape.
             None => return Err(unrecognized_arg(arg)),
         },
-        other => other,
+        _ => arg,
     };
 
-    match val {
-        ANode::Integer(i) => Ok(pn::Node::Integer(pn::Integer { ival: i.ival })),
-        ANode::Float(f) => Ok(pn::Node::Float(pn::Float {
-            fval: Some(f.fval.as_str().to_string()),
+    match val.node_tag() {
+        ntag::T_Integer => Ok(pn::Node::Integer(pn::Integer {
+            ival: val.expect_integer().ival,
         })),
-        ANode::String(s) => Ok(pn::Node::String(pn::StringNode {
-            sval: Some(s.sval.as_str().to_string()),
+        ntag::T_Float => Ok(pn::Node::Float(pn::Float {
+            fval: Some(val.expect_float().fval.as_str().to_string()),
         })),
-        ANode::Boolean(b) => Ok(pn::Node::Boolean(pn::Boolean { boolval: b.boolval })),
-        ANode::BitString(s) => Ok(pn::Node::BitString(pn::BitString {
-            bsval: Some(s.bsval.as_str().to_string()),
+        ntag::T_String => Ok(pn::Node::String(pn::StringNode {
+            sval: Some(val.expect_string().sval.as_str().to_string()),
         })),
-        other => Err(unrecognized_arg(other)),
+        ntag::T_Boolean => Ok(pn::Node::Boolean(pn::Boolean {
+            boolval: val.expect_boolean().boolval,
+        })),
+        ntag::T_BitString => Ok(pn::Node::BitString(pn::BitString {
+            bsval: Some(val.expect_bitstring().bsval.as_str().to_string()),
+        })),
+        _ => Err(unrecognized_arg(val)),
     }
 }
 
@@ -445,9 +450,9 @@ fn alter_database_setting<'mcx>(
 ) -> PgResult<()> {
     use types_nodes::ddlnodes::VariableSetKind as AKind;
 
-    let v = match setstmt {
-        types_nodes::nodes::Node::VariableSetStmt(v) => v,
-        other => return Err(unrecognized_arg(other)),
+    let v = match setstmt.node_tag() {
+        types_nodes::nodes::ntag::T_VariableSetStmt => setstmt.expect_variablesetstmt(),
+        _ => return Err(unrecognized_arg(setstmt)),
     };
 
     let kind = match v.kind {
