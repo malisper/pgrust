@@ -57,16 +57,43 @@ pub fn prepare_hash_slot<'mcx>(
     //   }
     //   ExecStoreVirtualTuple(hashslot);
     //
-    // This pokes the slots' tts_values/tts_isnull arrays and calls
-    // slot_getsomeattrs / ExecStoreVirtualTuple, owned by the unported
-    // execTuples unit, for which the trimmed shared TupleTableSlot vocabulary
-    // carries no value arrays and no seam is declared. Loud panic until that
-    // surface lands.
-    let _ = (aggstate, perhash_idx, inputslot, hashslot, estate);
-    panic!(
-        "backend-executor-execTuples: slot_getsomeattrs / ExecStoreVirtualTuple \
-         not yet ported (prepare_hash_slot)"
-    );
+    // Read each needed input column (slot_getsomeattr deforms up to that attr)
+    // and assemble the hash slot's numhashGrpCols-wide virtual tuple via
+    // store_virtual_values (ExecClearTuple + per-column fill + StoreVirtual).
+    let (num_cols, idx_input) = {
+        let perhash = &aggstate.perhash.as_ref().expect("perhash")[perhash_idx as usize];
+        let num_cols = perhash.numhash_grp_cols;
+        let src = perhash
+            .hash_grp_col_idx_input
+            .as_ref()
+            .expect("perhash->hashGrpColIdxInput");
+        let mut idx_input = mcx::vec_with_capacity_in(estate.es_query_cxt, src.len())?;
+        for &v in src.iter() {
+            idx_input.push(v);
+        }
+        (num_cols, idx_input)
+    };
+
+    let mut values =
+        mcx::vec_with_capacity_in(estate.es_query_cxt, num_cols.max(0) as usize)?;
+    let mut isnull =
+        mcx::vec_with_capacity_in(estate.es_query_cxt, num_cols.max(0) as usize)?;
+    for i in 0..num_cols as usize {
+        // varNumber = perhash->hashGrpColIdxInput[i] - 1; (1-based attr = +1)
+        let attno = idx_input[i] as i32;
+        let (val, null) =
+            backend_executor_execTuples_seams::slot_getsomeattr::call(estate, inputslot, attno)?;
+        values.push(val);
+        isnull.push(null);
+    }
+
+    backend_executor_execTuples_seams::store_virtual_values::call(
+        estate,
+        hashslot,
+        values.as_slice(),
+        isnull.as_slice(),
+    )?;
+    Ok(())
 }
 
 /// `build_hash_tables(aggstate)` — (re)create the tuple hash table for every
@@ -131,23 +158,110 @@ pub fn build_hash_table<'mcx>(
     );
 
     // additionalsize = aggstate->numtrans * sizeof(AggStatePerGroupData);
-    let _additionalsize =
+    let additionalsize =
         aggstate.numtrans as usize * core::mem::size_of::<AggStatePerGroupData<'_>>();
 
     // use_variable_hash_iv = DO_AGGSPLIT_SKIPFINAL(aggstate->aggsplit);
-    let _use_variable_hash_iv = do_aggsplit_skipfinal(aggstate.aggsplit);
+    let use_variable_hash_iv = do_aggsplit_skipfinal(aggstate.aggsplit);
 
-    // BuildTupleHashTable needs the hashslot's tuple descriptor and ops
-    // (perhash->hashslot->tts_tupleDescriptor / tts_ops) plus the per-key
-    // descriptors and the meta/table/tmp contexts. The slot descriptor/ops are
-    // owned by the unported execTuples slot machinery and are not carried in
-    // the trimmed TupleTableSlot vocabulary, so the execGrouping seam cannot be
-    // marshaled here. Loud panic until that surface lands.
-    let _ = (setno, nbuckets, estate);
-    panic!(
-        "backend-executor-execTuples: hashslot tts_tupleDescriptor/tts_ops not yet \
-         available to marshal BuildTupleHashTable (build_hash_table)"
-    );
+    let mcx = estate.es_query_cxt;
+
+    // Read the per-hash key descriptors and the hashslot's tuple descriptor.
+    let (num_cols, hashslot, idx_hash, eqfuncoids, hashfunctions, grp_collations) = {
+        let perhash = &aggstate.perhash.as_ref().expect("perhash")[setno as usize];
+        let hashslot = perhash.hashslot.expect("perhash->hashslot");
+        let mut idx_hash = mcx::vec_with_capacity_in(
+            mcx,
+            perhash
+                .hash_grp_col_idx_hash
+                .as_ref()
+                .map(|v| v.len())
+                .unwrap_or(0),
+        )?;
+        for &v in perhash
+            .hash_grp_col_idx_hash
+            .as_ref()
+            .expect("perhash->hashGrpColIdxHash")
+            .iter()
+        {
+            idx_hash.push(v);
+        }
+        let mut eqfuncoids =
+            mcx::vec_with_capacity_in(mcx, perhash.eqfuncoids.as_ref().map(|v| v.len()).unwrap_or(0))?;
+        for &o in perhash.eqfuncoids.as_ref().expect("perhash->eqfuncoids").iter() {
+            eqfuncoids.push(o);
+        }
+        let mut hashfunctions = mcx::vec_with_capacity_in(
+            mcx,
+            perhash.hashfunctions.as_ref().map(|v| v.len()).unwrap_or(0),
+        )?;
+        for f in perhash.hashfunctions.as_ref().expect("perhash->hashfunctions").iter() {
+            hashfunctions.push(f.clone());
+        }
+        let mut grp_collations = {
+            let aggnode = perhash.aggnode.as_ref().expect("perhash->aggnode");
+            let src = aggnode
+                .grp_collations
+                .as_ref()
+                .expect("perhash->aggnode->grpCollations");
+            let mut v = mcx::vec_with_capacity_in(mcx, src.len())?;
+            for &c in src.iter() {
+                v.push(c);
+            }
+            v
+        };
+        let _ = &mut grp_collations;
+        (
+            perhash.num_cols,
+            hashslot,
+            idx_hash,
+            eqfuncoids,
+            hashfunctions,
+            grp_collations,
+        )
+    };
+
+    // perhash->hashslot->tts_tupleDescriptor / tts_ops (MinimalTuple slot).
+    let hash_desc =
+        backend_executor_execTuples_seams::exec_slot_descriptor::call(mcx, estate, hashslot)?;
+
+    // tmpcxt = aggstate->tmpcontext->ecxt_per_tuple_memory; — the per-tuple
+    // context of the node's ExprContext (an EcxtId in the EState pool).
+    let tmpcontext = aggstate.tmpcontext.expect("tmpcontext");
+
+    // The three contexts (metacxt = hash_metacxt, tablecxt = hash_tablecxt,
+    // tmpcxt) are caller-owned; the table borrows them.
+    let table = {
+        let tmpcxt: &mcx::MemoryContext = &estate.ecxt(tmpcontext).ecxt_per_tuple_memory;
+        let metacxt = aggstate
+            .hash_metacxt
+            .as_ref()
+            .expect("aggstate->hash_metacxt");
+        let tablecxt = aggstate
+            .hash_tablecxt
+            .as_ref()
+            .expect("aggstate->hash_tablecxt");
+        backend_executor_execGrouping_seams::build_tuple_hash_table::call(
+            mcx,
+            None,
+            hash_desc,
+            types_nodes::TupleSlotKind::MinimalTuple,
+            num_cols,
+            idx_hash.as_slice(),
+            eqfuncoids.as_slice(),
+            hashfunctions.as_slice(),
+            grp_collations.as_slice(),
+            nbuckets,
+            additionalsize,
+            metacxt,
+            tablecxt,
+            tmpcxt,
+            use_variable_hash_iv,
+        )?
+    };
+
+    aggstate.perhash.as_mut().expect("perhash")[setno as usize].hashtable = Some(table);
+    Ok(())
 }
 
 /// `hashagg_recompile_expressions(aggstate, minslot, nullcheck)` — recompile
@@ -231,17 +345,29 @@ pub fn hash_create_memory<'mcx>(
         backend_executor_execUtils_seams::create_work_expr_context::call(estate, work_mem_kb)?,
     );
 
-    // The hash_metacxt (AllocSet) / hash_tablecxt (Bump) context creation
-    // (AllocSetContextCreate / BumpContextCreate as children of es_query_cxt)
-    // is owned by the not-yet-ported mmgr context-factory surface (no
-    // owned-model bridge for child AllocSet/Bump contexts). Loud panic until it
-    // lands; the ExprContext assignment above is the #165 P0 deliverable.
-    panic!(
-        "backend-executor-nodeAgg::hash_create_memory: hashcontext (EcxtId) is assigned \
-         via CreateWorkExprContext (#165 P0), but the hash_metacxt/hash_tablecxt \
-         AllocSet/Bump child-context creation is owned by the not-yet-ported mmgr \
-         context-factory surface"
-    );
+    // aggstate->hash_metacxt = AllocSetContextCreate(es_query_cxt,
+    //                                                "HashAgg meta context",
+    //                                                ALLOCSET_DEFAULT_SIZES);
+    //
+    // The meta context holds the bucket array(s) of TupleHashEntryData; it
+    // doubles as the table grows and frees the old array, so an AllocSet
+    // (malloc-backed) child of the per-query context is the faithful backend.
+    let query_cxt = estate.es_query_cxt.context();
+    aggstate.hash_metacxt = Some(query_cxt.new_child("HashAgg meta context"));
+
+    // aggstate->hash_tablecxt = BumpContextCreate(es_query_cxt,
+    //                                             "HashAgg table context", ...);
+    //
+    // The hash entries (grouping key firstTuple + pergroup data) live in the
+    // table context. The bump allocator is used because entries are not freed
+    // until the whole table is reset, so a bump-arena child of the per-query
+    // context is the faithful backend. The C sizes the bump's maxBlockSize off
+    // work_mem (pg_prevpower2_size_t(work_mem*1024/16), clamped to
+    // [ALLOCSET_DEFAULT_INITSIZE, ALLOCSET_DEFAULT_MAXSIZE]); block sizing is
+    // internal to bumpalo in this model, so the budget is not a parameter here.
+    aggstate.hash_tablecxt = Some(query_cxt.new_child_bump("HashAgg table context"));
+
+    Ok(())
 }
 
 /// `hash_choose_num_buckets(hashentrysize, ngroups, memory)` — choose a bucket
@@ -392,30 +518,51 @@ pub fn lookup_hash_entries<'mcx>(
         if want_new {
             // entry = LookupTupleHashEntry(hashtable, hashslot, &isnew, &hash);
             //
-            // The canonical seam delivers the entry (and its additional bytes)
-            // through a callback. On a new entry the C runs
-            // initialize_hash_entry, then stashes the per-group pointer
-            // (TupleHashEntryGetAdditional) into hash_pergroup[setno]. That
-            // pointer-cache aliases the execGrouping-owned additional bytes and
-            // needs the real entry type, so the body still loud-panics.
-            let hashtable = aggstate.perhash.as_mut().expect("perhash")[setno as usize]
-                .hashtable
-                .as_mut()
-                .expect("perhash->hashtable");
-            let _ = backend_executor_execGrouping_seams::lookup_tuple_hash_entry::call(
-                &mut **hashtable,
-                hashslot,
-                estate,
-                &mut |_entry, _additional| {
-                    // creation allowed → entry is always non-NULL; when isnew the
-                    // C calls initialize_hash_entry(aggstate, hashtable, entry).
-                    // pergroup[setno] = TupleHashEntryGetAdditional(hashtable, entry);
-                    panic!(
-                        "backend-executor-execGrouping: hash_pergroup pointer into entry \
-                         additional space needs the real entry type (lookup_hash_entries)"
-                    );
-                },
-            )?;
+            // The seam finds/creates the entry and reports whether it is new.
+            // When new the C runs initialize_hash_entry; then it caches the
+            // per-group pointer (TupleHashEntryGetAdditional) in
+            // hash_pergroup[setno]. In the owned model the entry's additional
+            // bytes are execGrouping-owned and cannot be aliased into a typed
+            // `AggStatePerGroup` cache held alongside a live table borrow. For
+            // numtrans == 0 (hashed DISTINCT / set-op dedup / DISTINCT-only
+            // grouping) there is no per-group transition state, so the cache is
+            // an empty array and the divergence is inert: the lookup itself does
+            // the dedup. For numtrans > 0 the typed-additional aliasing is a
+            // genuine keystone (advance_aggregates mutates per-group state in
+            // place inside the entry); loud-panic there.
+            let isnew = {
+                let hashtable = aggstate.perhash.as_mut().expect("perhash")[setno as usize]
+                    .hashtable
+                    .as_mut()
+                    .expect("perhash->hashtable");
+                let (isnew, _hash) =
+                    backend_executor_execGrouping_seams::lookup_tuple_hash_entry::call(
+                        &mut **hashtable,
+                        hashslot,
+                        estate,
+                        &mut |_entry, _additional| {},
+                    )?;
+                isnew
+            };
+
+            if aggstate.numtrans == 0 {
+                // No per-group state: initialize_hash_entry only bumps the group
+                // counter / checks limits, and the per-group pointer is unused.
+                if isnew {
+                    aggstate.hash_ngroups_current += 1;
+                    crate::spill::hash_agg_check_limits(aggstate, estate, estate_mcx(estate))?;
+                }
+                if let Some(hp) = aggstate.hash_pergroup.as_mut() {
+                    hp[setno as usize] = Some(mcx::PgVec::new_in(estate.es_query_cxt));
+                }
+            } else {
+                let _ = isnew;
+                panic!(
+                    "backend-executor-execGrouping: hash_pergroup pointer into entry \
+                     additional space (typed AggStatePerGroup aliasing) needs in-place \
+                     per-group state for numtrans > 0 (lookup_hash_entries)"
+                );
+            }
         } else {
             // Spill mode: LookupTupleHashEntryHash with create == false (the C
             // passes p_isnew == NULL); a miss spills the tuple via
@@ -620,18 +767,159 @@ pub fn agg_retrieve_hash_table_in_memory<'mcx>(
     //   if (result) return result;
     // }
     //
-    // The interrupt check and ScanTupleHashTable are available as seams, but
-    // the body reconstructs the representative tuple by poking
-    // firstSlot/hashslot tts_values/tts_isnull arrays (execTuples-owned, absent
-    // from the shared vocabulary) and reinterprets the entry's additional bytes
-    // as the per-group array (execGrouping-owned real entry type). Both are
-    // unported with no seam. Loud panic until they land.
-    backend_tcop_postgres_seams::check_for_interrupts::call()?;
-    let _ = (aggstate, estate);
-    panic!(
-        "backend-executor-execTuples/execGrouping: representative-tuple slot poking + \
-         entry additional layout not yet ported (agg_retrieve_hash_table_in_memory)"
-    );
+    // econtext = aggstate->ss.ps.ps_ExprContext;
+    let econtext = aggstate
+        .ss
+        .ps
+        .ps_ExprContext
+        .expect("agg_retrieve_hash_table_in_memory: ps_ExprContext is NULL");
+    // firstSlot = aggstate->ss.ss_ScanTupleSlot;
+    let first_slot = aggstate
+        .ss
+        .ss_ScanTupleSlot
+        .expect("agg_retrieve_hash_table_in_memory: ss_ScanTupleSlot is NULL");
+
+    // firstSlot descriptor natts (for the all-null base then grouped-col fill).
+    let first_natts = crate::exec_init_agg::scan_tuple_desc(aggstate, estate)?
+        .as_deref()
+        .map(|d| d.natts)
+        .expect("agg_retrieve_hash_table_in_memory: scanDesc is NULL");
+
+    loop {
+        // CHECK_FOR_INTERRUPTS();
+        backend_tcop_postgres_seams::check_for_interrupts::call()?;
+
+        let setno = aggstate.current_set;
+        let hashslot = aggstate.perhash.as_ref().expect("perhash")[setno as usize]
+            .hashslot
+            .expect("perhash->hashslot");
+
+        // entry = ScanTupleHashTable(hashtable, &perhash->hashiter);
+        let mut entry_tuple: Option<
+            types_tuple::backend_access_common_heaptuple::FormedMinimalTuple<'mcx>,
+        > = None;
+        let found = {
+            let mcx = estate.es_query_cxt;
+            let mut hashiter = aggstate.perhash.as_ref().expect("perhash")[setno as usize].hashiter;
+            let hashtable = aggstate.perhash.as_mut().expect("perhash")[setno as usize]
+                .hashtable
+                .as_mut()
+                .expect("perhash->hashtable");
+            let found = backend_executor_execGrouping_seams::scan_tuple_hash_table::call(
+                &mut **hashtable,
+                &mut hashiter,
+                estate,
+                &mut |entry, _additional| {
+                    // TupleHashEntryGetTuple(entry) — group's first tuple. For
+                    // numtrans == 0 there is no per-group state in `additional`.
+                    entry_tuple = entry
+                        .firstTuple
+                        .as_ref()
+                        .map(|m| m.clone_in(mcx).expect("clone hash entry tuple"));
+                },
+            )?;
+            aggstate.perhash.as_mut().expect("perhash")[setno as usize].hashiter = hashiter;
+            found
+        };
+
+        if !found {
+            // Switch to the next grouping set, or finish.
+            let nextset = aggstate.current_set + 1;
+            if nextset < aggstate.num_hashes {
+                crate::node_lifecycle::select_current_set(aggstate, nextset, true);
+                let s = aggstate.current_set as usize;
+                let iter = {
+                    let table = aggstate.perhash.as_mut().expect("perhash")[s]
+                        .hashtable
+                        .as_mut()
+                        .expect("perhash->hashtable");
+                    backend_executor_execGrouping_seams::init_tuple_hash_iterator::call(
+                        &mut **table,
+                    )
+                };
+                aggstate.perhash.as_mut().expect("perhash")[s].hashiter = iter;
+                continue;
+            } else {
+                return Ok(None);
+            }
+        }
+
+        // ResetExprContext(econtext);
+        backend_executor_execUtils_seams::reset_expr_context::call(estate, econtext)?;
+
+        // Transform representative tuple back into one with the right columns:
+        //   ExecStoreMinimalTuple(TupleHashEntryGetTuple(entry), hashslot, false);
+        //   slot_getallattrs(hashslot);
+        let mtup = entry_tuple.expect("scan callback captured the entry tuple");
+        backend_executor_execTuples_seams::exec_store_minimal_tuple::call(
+            estate, mtup, hashslot, false,
+        )?;
+        let hash_cols =
+            backend_executor_execTuples_seams::slot_getallattrs_by_id::call(estate, hashslot)?;
+
+        // ExecClearTuple(firstSlot);
+        // memset(firstSlot->tts_isnull, true, natts);
+        // for i in numhashGrpCols: firstSlot[varNumber] = hashslot[i];
+        // ExecStoreVirtualTuple(firstSlot);
+        let (num_hash_cols, idx_input) = {
+            let perhash = &aggstate.perhash.as_ref().expect("perhash")[setno as usize];
+            let n = perhash.numhash_grp_cols;
+            let src = perhash
+                .hash_grp_col_idx_input
+                .as_ref()
+                .expect("perhash->hashGrpColIdxInput");
+            let mut idx = mcx::vec_with_capacity_in(estate.es_query_cxt, src.len())?;
+            for &v in src.iter() {
+                idx.push(v);
+            }
+            (n, idx)
+        };
+        let mut values: mcx::PgVec<'mcx, types_tuple::backend_access_common_heaptuple::Datum<'mcx>> =
+            mcx::vec_with_capacity_in(estate.es_query_cxt, first_natts.max(0) as usize)?;
+        let mut isnull = mcx::vec_with_capacity_in(estate.es_query_cxt, first_natts.max(0) as usize)?;
+        for _ in 0..first_natts {
+            values.push(types_tuple::backend_access_common_heaptuple::Datum::null());
+            isnull.push(true);
+        }
+        for i in 0..num_hash_cols as usize {
+            let var_number = idx_input[i] as usize - 1;
+            values[var_number] = hash_cols[i].0.clone();
+            isnull[var_number] = hash_cols[i].1;
+        }
+        backend_executor_execTuples_seams::store_virtual_values::call(
+            estate,
+            first_slot,
+            values.as_slice(),
+            isnull.as_slice(),
+        )?;
+
+        // econtext->ecxt_outertuple = firstSlot;
+        estate.ecxt_mut(econtext).ecxt_outertuple = Some(first_slot);
+
+        // prepare_projection_slot(aggstate, firstSlot, current_set);
+        let current_set = aggstate.current_set;
+        crate::finalize::prepare_projection_slot(aggstate, first_slot, current_set, estate)?;
+
+        // finalize_aggregates(aggstate, peragg, pergroup);
+        //
+        // For numtrans > 0 the per-group transition values live in the entry's
+        // additional bytes (typed-additional aliasing keystone); finalize reads
+        // them. For numtrans == 0 (hashed DISTINCT / set-op dedup) there are no
+        // aggregates to finalize, so this is a no-op and the projection emits the
+        // grouping columns directly.
+        if aggstate.numtrans == 0 {
+            // result = project_aggregates(aggstate);
+            if let Some(result) = crate::finalize::project_aggregates(aggstate, estate)? {
+                return Ok(Some(result));
+            }
+        } else {
+            panic!(
+                "backend-executor-nodeAgg: finalize_aggregates over the entry's per-group \
+                 additional bytes (typed AggStatePerGroup aliasing) for numtrans > 0 \
+                 (agg_retrieve_hash_table_in_memory)"
+            );
+        }
+    }
 }
 
 /// `hash_agg_entry_size(numTrans, tupleWidth, transitionSpace)` — estimate the

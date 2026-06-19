@@ -184,126 +184,405 @@ pub fn find_cols<'mcx>(
     Option<PgBox<'mcx, Bitmapset<'mcx>>>,
 )> {
     // Agg *agg = (Agg *) aggstate->ss.ps.plan;
+    let agg = agg_plan(aggstate)?;
+
     let mut context = FindColsContext {
         is_aggref: false,
         aggregated: None,
         unaggregated: None,
     };
 
-    // Examine tlist and quals. The targetlist and qual are expression trees
-    // owned by the not-yet-ported nodes/nodeFuncs.c walker; the walk runs
-    // through that owner's seam (find_cols_walker is the callback). The Agg
-    // plan node's targetlist/qual are reached off the shared plan tree.
-    let agg_node = agg_plan(aggstate)?;
-    find_cols_walker(agg_node.targetlist.as_deref(), &mut context)?;
-    find_cols_walker(agg_node.qual.as_deref(), &mut context)?;
+    // Examine tlist and quals.
+    //   (void) find_cols_walker((Node *) agg->plan.targetlist, &context);
+    //   (void) find_cols_walker((Node *) agg->plan.qual, &context);
+    //
+    // The C passes the `List *` targetlist/qual to the walker, which iterates
+    // and walks each element. In the owned model the targetlist is a
+    // `Vec<TargetEntry>` (each entry's expr is the walked child) and the qual a
+    // `Vec<Expr>`; iterate and walk each as a wrapped `Node`. The wrappers are
+    // built in a scratch context that is freed when the walk returns (the
+    // walker only read-borrows them).
+    let scratch = mcx::MemoryContext::new("find_cols scratch");
+    let swx = scratch.mcx();
+    if let Some(tlist) = agg.plan.targetlist.as_ref() {
+        for te in tlist.iter() {
+            if let Some(expr) = te.expr.as_deref() {
+                let node = Node::Expr(expr.clone_in(swx)?);
+                find_cols_walker(Some(&node), &mut context, mcx)?;
+            }
+        }
+    }
+    if let Some(qual) = agg.plan.qual.as_ref() {
+        for expr in qual.iter() {
+            let node = Node::Expr(expr.clone_in(swx)?);
+            find_cols_walker(Some(&node), &mut context, mcx)?;
+        }
+    }
 
     // In some cases, grouping columns will not appear in the tlist.
-    let num_cols = agg_node.num_cols;
-    let grp_col_idx = agg_node.grp_col_idx.clone_for_read();
-    for i in 0..num_cols {
-        let attno = grp_col_idx[i as usize] as i32;
-        context.unaggregated = Some(backend_nodes_core_seams::bms_add_member::call(
-            mcx,
-            context.unaggregated.take(),
-            attno,
-        )?);
+    //   for (int i = 0; i < agg->numCols; i++)
+    //       context.unaggregated = bms_add_member(context.unaggregated,
+    //                                             agg->grpColIdx[i]);
+    let num_cols = agg.num_cols;
+    if num_cols > 0 {
+        let grp = agg
+            .grp_col_idx
+            .as_ref()
+            .expect("find_cols: grpColIdx with numCols > 0");
+        for i in 0..num_cols as usize {
+            let attno = grp[i] as i32;
+            context.unaggregated = Some(backend_nodes_core_seams::bms_add_member::call(
+                mcx,
+                context.unaggregated.take(),
+                attno,
+            )?);
+        }
     }
 
     Ok((context.aggregated, context.unaggregated))
 }
 
-/// `(Agg *) aggstate->ss.ps.plan` — read the Agg plan node off the shared,
-/// read-only plan tree the node-state aliases. The plan tree's `Node` enum
-/// does not yet carry the `T_Agg` variant (it lands with the planner's Agg
-/// node port), so the projection through it goes through the plan owner.
+/// `(Agg *) aggstate->ss.ps.plan` — read the `Agg` plan node off the shared,
+/// read-only plan tree the node-state aliases.
 fn agg_plan<'a, 'mcx>(
-    _aggstate: &'a AggStateData<'mcx>,
-) -> PgResult<&'a AggPlanView<'mcx>> {
-    // The Agg plan node is reached through the shared plan tree (`ss.ps.plan`,
-    // a `&Node`). The `Node` vocabulary on main does not yet define the
-    // `T_Agg` variant, so this projection is owned by the planner-plan-node
-    // unit; until it lands, the access panics loudly rather than fabricate a
-    // stand-in node shape.
-    panic!(
-        "backend-nodes-plannodes: Agg plan-node variant (T_Agg) not yet defined in the \
-         shared Node vocabulary; find_cols/find_hash_columns cannot read ss.ps.plan"
-    )
-}
-
-/// A read-only view of the `Agg` plan-node fields the column analysis consumes
-/// (`plan.targetlist`, `plan.qual`, `numCols`, `grpColIdx`). Defined by the
-/// planner-plannodes owner when the `Node::Agg` variant lands.
-pub struct AggPlanView<'mcx> {
-    /// `plan.targetlist`.
-    pub targetlist: Option<PgBox<'mcx, Node<'mcx>>>,
-    /// `plan.qual`.
-    pub qual: Option<PgBox<'mcx, Node<'mcx>>>,
-    /// `numCols`.
-    pub num_cols: i32,
-    /// `grpColIdx`.
-    pub grp_col_idx: GrpColIdxView,
-}
-
-/// Helper carrying `grpColIdx`; abstracts the slice read so the planner-owned
-/// view can supply it when the `Node::Agg` variant lands.
-pub struct GrpColIdxView;
-
-impl GrpColIdxView {
-    fn clone_for_read(&self) -> &[i16] {
-        // Reached only after agg_plan() panics for the missing Node variant;
-        // present for signature parity.
-        &[]
+    aggstate: &'a AggStateData<'mcx>,
+) -> PgResult<&'a types_nodes::nodeagg::Agg<'mcx>> {
+    let plan = aggstate
+        .ss
+        .ps
+        .plan
+        .expect("find_cols: ss.ps.plan is NULL");
+    match plan {
+        Node::Agg(a) => Ok(a),
+        other => panic!("castNode(Agg, ss.ps.plan) failed: {other:?}"),
     }
 }
 
 /// `find_cols_walker(node, context)` — expression walker collecting referenced
-/// `Var` colnos into the context, marking aggregated vs unaggregated.
-pub fn find_cols_walker<'mcx>(
-    node: Option<&Node<'mcx>>,
+/// `Var` colnos into the context, marking aggregated vs unaggregated. Returns
+/// `false` (the C walker never aborts: it collects over the whole tree).
+pub fn find_cols_walker<'mcx, 'n>(
+    node: Option<&Node<'n>>,
     context: &mut FindColsContext<'mcx>,
+    mcx: Mcx<'mcx>,
 ) -> PgResult<bool> {
     // if (node == NULL) return false;
-    let Some(_node) = node else {
+    let Some(node) = node else {
         return Ok(false);
     };
 
-    // if (IsA(node, Var)) { ... } / if (IsA(node, Aggref)) { ... } /
+    // if (IsA(node, Var)) { ... }
+    if let Some(var) = node.as_var() {
+        // setrefs.c should have set the varno to OUTER_VAR; varlevelsup == 0.
+        debug_assert_eq!(var.varlevelsup, 0);
+        let attno = var.varattno as i32;
+        if context.is_aggref {
+            context.aggregated = Some(backend_nodes_core_seams::bms_add_member::call(
+                mcx,
+                context.aggregated.take(),
+                attno,
+            )?);
+        } else {
+            context.unaggregated = Some(backend_nodes_core_seams::bms_add_member::call(
+                mcx,
+                context.unaggregated.take(),
+                attno,
+            )?);
+        }
+        return Ok(false);
+    }
+
+    // if (IsA(node, Aggref)) { is_aggref = true; walk; is_aggref = false; }
+    if matches!(node, Node::Expr(types_nodes::primnodes::Expr::Aggref(_))) {
+        debug_assert!(!context.is_aggref);
+        context.is_aggref = true;
+        walk_children(node, context, mcx)?;
+        context.is_aggref = false;
+        return Ok(false);
+    }
+
     // return expression_tree_walker(node, find_cols_walker, context);
-    //
-    // expression_tree_walker IS ported (backend-nodes-core::node_walker) and
-    // `Var`/`Aggref` ARE Expr variants in the shared Node enum now, so the walk
-    // is implementable. But its only caller `find_cols` sources the Agg plan
-    // node's targetlist/qual/grpColIdx via `agg_plan(aggstate)` reading
-    // `ss.ps.plan` — and the shared `Node` vocabulary still has no `T_Agg`
-    // plan-node variant (agg_plan() below panics on exactly that). The walk is
-    // therefore unreachable with real expression trees until the planner's Agg
-    // plan node lands. Blocked on the T_Agg plan-node keystone, NOT on nodeFuncs.
-    let _ = context;
-    panic!(
-        "backend-nodes-plannodes: find_cols_walker is implementable (expression_tree_walker + \
-         Var/Aggref ported) but unreachable — its caller find_cols cannot read the Agg plan node \
-         (T_Agg not in the shared Node vocabulary; see agg_plan)"
-    )
+    walk_children(node, context, mcx)?;
+    Ok(false)
+}
+
+/// Drive `expression_tree_walker` over `node`'s children with `find_cols_walker`
+/// as the per-child callback. The seam'd walker may surface an allocation
+/// failure raised inside the callback; capture it and re-raise.
+fn walk_children<'mcx, 'n>(
+    node: &Node<'n>,
+    context: &mut FindColsContext<'mcx>,
+    mcx: Mcx<'mcx>,
+) -> PgResult<()> {
+    let mut err: Option<types_error::PgError> = None;
+    backend_nodes_core_seams::expression_tree_walker::call(node, &mut |child| {
+        if err.is_some() {
+            return true;
+        }
+        match find_cols_walker(Some(child), context, mcx) {
+            Ok(abort) => abort,
+            Err(e) => {
+                err = Some(e);
+                true
+            }
+        }
+    });
+    match err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 /// `find_hash_columns(aggstate)` — set up the per-hash column descriptors
 /// (input/hash slot column indices) for every grouping set.
 pub fn find_hash_columns<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
     mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
-    // Find Vars that will be needed in tlist and qual. find_cols reads the Agg
-    // plan node (ss.ps.plan) via agg_plan(), which the shared Node vocabulary
-    // cannot express until the T_Agg plan-node variant lands. The
-    // expression-walker vocabulary it would feed (expression_tree_walker /
-    // Var / Aggref) is already ported; the block is the upstream Agg plan node.
-    let _ = (aggstate, mcx);
-    panic!(
-        "backend-nodes-plannodes: find_hash_columns depends on find_cols, which cannot read the \
-         Agg plan node (T_Agg not in the shared Node vocabulary). nodeFuncs walker is ported; \
-         the block is the T_Agg plan-node keystone"
-    )
+    use types_core::primitive::AttrNumber;
+
+    // scanDesc = aggstate->ss.ss_ScanTupleSlot->tts_tupleDescriptor;
+    let scan_desc = crate::exec_init_agg::scan_tuple_desc(aggstate, estate)?;
+    let scan_natts = scan_desc
+        .as_deref()
+        .map(|d| d.natts)
+        .expect("find_hash_columns: scanDesc is NULL");
+
+    // List *outerTlist = outerPlanState(aggstate)->plan->targetlist;
+    // Cloned into mcx so the hashTlist (list_nth of it) outlives this borrow.
+    let outer_tlist: PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>> = {
+        let outer = aggstate
+            .ss
+            .ps
+            .lefttree
+            .as_deref()
+            .expect("find_hash_columns: outerPlanState is NULL");
+        let outer_plan = outer
+            .ps_head()
+            .plan
+            .expect("find_hash_columns: outer plan is NULL");
+        match outer_plan.plan_head().targetlist.as_ref() {
+            Some(tl) => {
+                let mut v = vec_with_capacity_in(mcx, tl.len())?;
+                for te in tl.iter() {
+                    v.push(te.clone_in(mcx)?);
+                }
+                v
+            }
+            None => PgVec::new_in(mcx),
+        }
+    };
+
+    let num_hashes = aggstate.num_hashes;
+
+    // find_cols(aggstate, &aggregated_colnos, &base_colnos);
+    let (aggregated_colnos, base_colnos) = find_cols(aggstate, mcx)?;
+
+    // aggstate->colnos_needed = bms_union(base_colnos, aggregated_colnos);
+    aggstate.colnos_needed = backend_nodes_core_seams::bms_union::call(
+        mcx,
+        base_colnos.as_deref(),
+        aggregated_colnos.as_deref(),
+    )?;
+    aggstate.max_colno_needed = 0;
+    aggstate.all_cols_needed = true;
+
+    for i in 0..scan_natts {
+        let colno = i + 1;
+        if backend_nodes_core_seams::bms_is_member::call(colno, aggstate.colnos_needed.as_deref()) {
+            aggstate.max_colno_needed = colno;
+        } else {
+            aggstate.all_cols_needed = false;
+        }
+    }
+
+    // Snapshot all_grouped_cols (read for every grouping set below).
+    let all_grouped_cols: Option<PgVec<'mcx, i32>> = match aggstate.all_grouped_cols.as_ref() {
+        Some(v) => {
+            let mut out = vec_with_capacity_in(mcx, v.len())?;
+            for &c in v.iter() {
+                out.push(c);
+            }
+            Some(out)
+        }
+        None => None,
+    };
+
+    for j in 0..num_hashes as usize {
+        // Bitmapset *colnos = bms_copy(base_colnos);
+        let mut colnos = backend_nodes_core_seams::bms_copy::call(mcx, base_colnos.as_deref())?;
+
+        // AttrNumber *grpColIdx = perhash->aggnode->grpColIdx;
+        let perhash_num_cols = aggstate.perhash.as_ref().expect("perhash")[j].num_cols;
+        let grp_col_idx: PgVec<'mcx, AttrNumber> = {
+            let aggnode = aggstate.perhash.as_ref().expect("perhash")[j]
+                .aggnode
+                .as_ref()
+                .expect("perhash->aggnode");
+            let src = aggnode
+                .grp_col_idx
+                .as_ref()
+                .expect("perhash->aggnode->grpColIdx");
+            let mut v = vec_with_capacity_in(mcx, src.len())?;
+            for &c in src.iter() {
+                v.push(c);
+            }
+            v
+        };
+
+        // perhash->largestGrpColIdx = 0;
+        aggstate.perhash.as_mut().expect("perhash")[j].largest_grp_col_idx = 0;
+
+        // Grouping-sets pruning via prepare_projection_slot's logic: drop Vars
+        // referenced in tlist/qual only for other grouping sets.
+        //   if (aggstate->phases[0].grouped_cols) { ... }
+        let has_grouped_cols = aggstate
+            .phases
+            .as_ref()
+            .and_then(|p| p.first())
+            .map(|ph| ph.grouped_cols.is_some())
+            .unwrap_or(false);
+        if has_grouped_cols {
+            if let Some(all_gc) = all_grouped_cols.as_ref() {
+                for &attnum in all_gc.iter() {
+                    let is_member = {
+                        let grouped_cols = aggstate.phases.as_ref().expect("phases")[0]
+                            .grouped_cols
+                            .as_ref()
+                            .expect("grouped_cols")
+                            .get(j)
+                            .map(|b| &**b);
+                        backend_nodes_core_seams::bms_is_member::call(attnum, grouped_cols)
+                    };
+                    if !is_member {
+                        colnos = backend_nodes_core_seams::bms_del_member::call(
+                            colnos.take(),
+                            attnum,
+                        );
+                    }
+                }
+            }
+        }
+
+        // maxCols = bms_num_members(colnos) + perhash->numCols;
+        let max_cols = backend_nodes_core_seams::bms_num_members::call(colnos.as_deref())
+            + perhash_num_cols;
+
+        // perhash->hashGrpColIdxInput = palloc(maxCols * sizeof(AttrNumber));
+        // perhash->hashGrpColIdxHash  = palloc(perhash->numCols * sizeof(AttrNumber));
+        let mut hash_grp_col_idx_input: PgVec<'mcx, AttrNumber> =
+            vec_with_capacity_in(mcx, max_cols.max(0) as usize)?;
+        let mut hash_grp_col_idx_hash: PgVec<'mcx, AttrNumber> =
+            vec_with_capacity_in(mcx, perhash_num_cols.max(0) as usize)?;
+        // Size the input/hash vectors to their max so positional writes land.
+        for _ in 0..max_cols.max(0) {
+            hash_grp_col_idx_input.push(0);
+        }
+        for _ in 0..perhash_num_cols.max(0) {
+            hash_grp_col_idx_hash.push(0);
+        }
+
+        // Add all the grouping columns to colnos.
+        for i in 0..perhash_num_cols as usize {
+            colnos = Some(backend_nodes_core_seams::bms_add_member::call(
+                mcx,
+                colnos.take(),
+                grp_col_idx[i] as i32,
+            )?);
+        }
+
+        // First build mapping for columns directly hashed.
+        let mut numhash_grp_cols: i32 = 0;
+        for i in 0..perhash_num_cols as usize {
+            hash_grp_col_idx_input[i] = grp_col_idx[i];
+            hash_grp_col_idx_hash[i] = (i + 1) as AttrNumber;
+            numhash_grp_cols += 1;
+            // delete already mapped columns
+            colnos =
+                backend_nodes_core_seams::bms_del_member::call(colnos.take(), grp_col_idx[i] as i32);
+        }
+
+        // and add the remaining columns
+        let mut i: i32 = -1;
+        loop {
+            i = backend_nodes_core_seams::bms_next_member::call(colnos.as_deref(), i);
+            if i < 0 {
+                break;
+            }
+            hash_grp_col_idx_input[numhash_grp_cols as usize] = i as AttrNumber;
+            numhash_grp_cols += 1;
+        }
+
+        // and build a tuple descriptor for the hashtable
+        let mut hash_tlist: PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>> =
+            vec_with_capacity_in(mcx, numhash_grp_cols.max(0) as usize)?;
+        let mut largest: i32 = 0;
+        for i in 0..numhash_grp_cols as usize {
+            let var_number = hash_grp_col_idx_input[i] as i32 - 1;
+            // hashTlist = lappend(hashTlist, list_nth(outerTlist, varNumber));
+            let te = outer_tlist
+                .get(var_number as usize)
+                .expect("find_hash_columns: list_nth(outerTlist, varNumber) out of range");
+            hash_tlist.push(te.clone_in(mcx)?);
+            if var_number + 1 > largest {
+                largest = var_number + 1;
+            }
+        }
+
+        // hashDesc = ExecTypeFromTL(hashTlist);
+        let hash_desc = backend_executor_execTuples_seams::exec_type_from_tl::call(
+            mcx,
+            hash_tlist.as_slice(),
+        )?;
+
+        // execTuplesHashPrepare(perhash->numCols, perhash->aggnode->grpOperators,
+        //                       &perhash->eqfuncoids, &perhash->hashfunctions);
+        let grp_operators: PgVec<'mcx, Oid> = {
+            let aggnode = aggstate.perhash.as_ref().expect("perhash")[j]
+                .aggnode
+                .as_ref()
+                .expect("perhash->aggnode");
+            let src = aggnode
+                .grp_operators
+                .as_ref()
+                .expect("perhash->aggnode->grpOperators");
+            let mut v = vec_with_capacity_in(mcx, src.len())?;
+            for &o in src.iter() {
+                v.push(o);
+            }
+            v
+        };
+        let (eqfuncoids, hashfunctions) =
+            backend_executor_execGrouping_seams::exec_tuples_hash_prepare::call(
+                mcx,
+                perhash_num_cols,
+                grp_operators.as_slice(),
+            )?;
+
+        // perhash->hashslot = ExecAllocTableSlot(&estate->es_tupleTable, hashDesc,
+        //                                        &TTSOpsMinimalTuple);
+        let hashslot = backend_executor_execTuples_seams::exec_alloc_table_slot::call(
+            estate,
+            hash_desc,
+            types_nodes::TupleSlotKind::MinimalTuple,
+        )?;
+
+        // Commit all per-hash outputs.
+        let perhash = &mut aggstate.perhash.as_mut().expect("perhash")[j];
+        perhash.largest_grp_col_idx = largest;
+        perhash.numhash_grp_cols = numhash_grp_cols;
+        perhash.hash_grp_col_idx_input = Some(hash_grp_col_idx_input);
+        perhash.hash_grp_col_idx_hash = Some(hash_grp_col_idx_hash);
+        perhash.eqfuncoids = Some(eqfuncoids);
+        perhash.hashfunctions = Some(hashfunctions);
+        perhash.hashslot = Some(hashslot);
+
+        // list_free(hashTlist); bms_free(colnos); — owned values drop here.
+    }
+
+    // bms_free(base_colnos); — owned value drops here.
+    Ok(())
 }
 
 /// `build_pertrans_for_aggref(...)` — set up one `AggStatePerTransData` from

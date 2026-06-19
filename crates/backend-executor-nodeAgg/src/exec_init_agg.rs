@@ -31,14 +31,14 @@ use crate::spill::hash_agg_set_limits;
 // catalog/pg_type_d.h, access/transam.h, postgres_ext.h).
 // ---------------------------------------------------------------------------
 
-/// `EXEC_FLAG_REWIND` (executor/executor.h).
-const EXEC_FLAG_REWIND: i32 = 0x0001;
-/// `EXEC_FLAG_BACKWARD` (executor/executor.h).
-const EXEC_FLAG_BACKWARD: i32 = 0x0002;
-/// `EXEC_FLAG_MARK` (executor/executor.h).
-const EXEC_FLAG_MARK: i32 = 0x0004;
 /// `EXEC_FLAG_EXPLAIN_ONLY` (executor/executor.h).
-const EXEC_FLAG_EXPLAIN_ONLY: i32 = 0x0020;
+const EXEC_FLAG_EXPLAIN_ONLY: i32 = 0x0001;
+/// `EXEC_FLAG_REWIND` (executor/executor.h).
+const EXEC_FLAG_REWIND: i32 = 0x0004;
+/// `EXEC_FLAG_BACKWARD` (executor/executor.h).
+const EXEC_FLAG_BACKWARD: i32 = 0x0008;
+/// `EXEC_FLAG_MARK` (executor/executor.h).
+const EXEC_FLAG_MARK: i32 = 0x0010;
 
 /// `INTERNALOID` (catalog/pg_type_d.h).
 const INTERNALOID: Oid = 2281;
@@ -462,7 +462,7 @@ pub fn ExecInitAgg<'mcx>(
             aggstate.hash_planned_partitions = planned_partitions;
 
             // find_hash_columns(aggstate);
-            find_hash_columns(&mut aggstate, mcx)?;
+            find_hash_columns(&mut aggstate, estate, mcx)?;
 
             // Skip massive memory allocation if just doing EXPLAIN.
             if eflags & EXEC_FLAG_EXPLAIN_ONLY == 0 {
@@ -534,7 +534,7 @@ fn outer_slot_ops(aggstate: &AggStateData<'_>) -> TupleSlotKind {
 /// descriptor of the scan slot, owned by execTuples (the slot pool). The
 /// trimmed `TupleTableSlot` carries no descriptor payload yet, so the read is
 /// execTuples-owned: panic until the slot payload model lands.
-fn scan_tuple_desc<'mcx>(
+pub(crate) fn scan_tuple_desc<'mcx>(
     aggstate: &AggStateData<'mcx>,
     estate: &EStateData<'mcx>,
 ) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>> {

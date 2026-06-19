@@ -38,6 +38,12 @@ use types_nodes::planstate::PlanStateNode;
 use types_nodes::{EStateData, TupleSlotKind};
 
 seam_core::seam!(
+    /// `TupleHashEntrySize()` (executor.h) — `sizeof(TupleHashEntryData)`, the
+    /// fixed per-entry overhead the hash-agg memory estimate adds. Infallible.
+    pub fn tuple_hash_entry_size() -> usize
+);
+
+seam_core::seam!(
     /// `execTuplesHashPrepare(numCols, eqOperators, &eqFuncOids, &hashFunctions)`
     /// (execGrouping.c): look up the equality-function OIDs and hash `FmgrInfo`s
     /// for the `num_cols` grouping columns described by `eq_operators`. The C

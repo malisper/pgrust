@@ -47,6 +47,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `slot->tts_tupleDescriptor` for an arbitrary pool slot (tuptable.h): the
+    /// tuple descriptor a slot was created with, addressed by its `EState`
+    /// tuple-table pool [`SlotId`], copied into `mcx`. nodeAgg's
+    /// `build_hash_table` reads `perhash->hashslot->tts_tupleDescriptor` to
+    /// marshal `BuildTupleHashTable`.
+    ///
+    /// PROVISIONAL: re-sign when the slot payload model lands (the descriptor
+    /// will then be lent, not copied).
+    pub fn exec_slot_descriptor<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        estate: &types_nodes::EStateData<'mcx>,
+        slot: types_nodes::SlotId,
+    ) -> types_error::PgResult<types_tuple::heaptuple::TupleDesc<'mcx>>
+);
+
+seam_core::seam!(
     /// `slot_getallattrs(slot)` (tuptable.h, via execTuples.c's
     /// `slot_getsomeattrs`) plus the subsequent `slot->tts_values[i]` /
     /// `slot->tts_isnull[i]` reads: fully deconstruct the slot and return its

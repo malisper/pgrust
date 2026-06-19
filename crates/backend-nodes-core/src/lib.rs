@@ -97,6 +97,9 @@ pub fn init_seams() {
     seams::bms_equal::set(bitmapset::bms_equal);
     seams::bms_free::set(bitmapset::bms_free);
 
+    // expression_tree_walker (node_walker.rs) — generic expression recursion.
+    seams::expression_tree_walker::set(node_walker::expression_tree_walker);
+
     // makefuncs family — the three canonical constructor seams.
     use backend_nodes_makefuncs_seams as makefuncs_seams;
     makefuncs_seams::make_const_node::set(makefuncs::make_const_node_seam);

@@ -760,6 +760,11 @@ fn lookup_internal<'mcx>(
 
 /// Install every `backend-executor-execGrouping-seams` implementation. Called
 /// once from `seams-init`.
+/// `TupleHashEntrySize()` (executor.h) — `sizeof(TupleHashEntryData)`.
+fn tuple_hash_entry_size() -> usize {
+    core::mem::size_of::<TupleHashEntryData>()
+}
+
 pub fn init_seams() {
     use backend_executor_execGrouping_seams as s;
     s::build_tuple_hash_table::set(build_tuple_hash_table);
@@ -772,5 +777,6 @@ pub fn init_seams() {
     s::scan_tuple_hash_table::set(scan_tuple_hash_table);
     s::term_tuple_hash_iterator::set(term_tuple_hash_iterator);
     s::exec_tuples_hash_prepare::set(exec_tuples_hash_prepare);
+    s::tuple_hash_entry_size::set(tuple_hash_entry_size);
     s::exec_tuples_match_prepare::set(exec_tuples_match_prepare);
 }

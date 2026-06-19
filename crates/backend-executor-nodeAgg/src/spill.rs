@@ -35,10 +35,7 @@ fn get_hash_memory_limit() -> usize {
 /// to refresh the running `hashentrysize` estimate. Owned by the
 /// not-yet-ported `backend-executor-execGrouping` unit.
 fn tuple_hash_entry_size() -> f64 {
-    panic!(
-        "seam not installed: backend-executor-execGrouping::TupleHashEntrySize \
-         (execGrouping.c) — needed by the hash-agg metrics update"
-    )
+    backend_executor_execGrouping_seams::tuple_hash_entry_size::call() as f64
 }
 
 /// `hash_agg_set_limits(hashentrysize, input_groups, used_bits, &mem_limit,

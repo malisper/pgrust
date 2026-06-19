@@ -804,6 +804,19 @@ fn seam_exec_scan_slot_descriptor<'mcx>(
     }
 }
 
+/// Seam `exec_slot_descriptor` — `slot->tts_tupleDescriptor` for an arbitrary
+/// pool slot, copied into `mcx`.
+fn seam_exec_slot_descriptor<'mcx>(
+    mcx: Mcx<'mcx>,
+    estate: &EStateData<'mcx>,
+    slot: types_nodes::SlotId,
+) -> PgResult<TupleDesc<'mcx>> {
+    match estate.slot_data(slot).base().tts_tupleDescriptor.as_deref() {
+        Some(d) => Ok(Some(mcx::alloc_in(mcx, d.clone_in(mcx)?)?)),
+        None => Ok(None),
+    }
+}
+
 /// Seam `execute_attr_map_slot_explicit` — `execute_attr_map_slot(attrMap,
 /// in_slot, out_slot)` (tupconvert.c) with an explicitly-supplied `attr_map`.
 ///
@@ -1016,6 +1029,7 @@ pub fn init_seams() {
     seams::slot_getsomeattr::set(seam_slot_getsomeattr);
     seams::slot_natts::set(seam_slot_natts);
     seams::exec_scan_slot_descriptor::set(seam_exec_scan_slot_descriptor);
+    seams::exec_slot_descriptor::set(seam_exec_slot_descriptor);
     seams::execute_attr_map_slot_explicit::set(seam_execute_attr_map_slot_explicit);
     // RriId form: reads the conversion map off the ResultRelInfo's
     // ri_ChildToRootMap (ExecCrossPartitionUpdate path).

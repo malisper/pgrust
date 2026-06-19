@@ -504,15 +504,47 @@ pub fn prepare_projection_slot<'mcx>(
         if slot_empty {
             backend_executor_execTuples_seams::exec_store_all_null_tuple::call(estate, slot)?;
         } else if aggstate.all_grouped_cols.is_some() {
-            // The all_grouped_cols null-forcing branch: slot_getsomeattrs +
-            // direct slot->tts_isnull[] poke + bms_is_member, none of which
-            // the trimmed slot/Bitmapset model supports yet.
-            let _ = (aggstate, slot, current_set);
-            panic!(
-                "prepare_projection_slot: the all_grouped_cols branch needs \
-                 slot_getsomeattrs, the slot tts_isnull payload, and \
-                 bms_is_member, none of which are ported yet"
-            );
+            // all_grouped_cols is arranged in desc order. Force every column
+            // referenced for OTHER grouping sets (not in this set's
+            // grouped_cols) to NULL.
+            //   slot_getsomeattrs(slot, linitial_int(all_grouped_cols));
+            //   foreach lc in all_grouped_cols:
+            //     if (!bms_is_member(attnum, grouped_cols))
+            //         slot->tts_isnull[attnum - 1] = true;
+            let mut cols =
+                backend_executor_execTuples_seams::slot_getallattrs_by_id::call(estate, slot)?;
+            let grouped_cols = aggstate
+                .grouped_cols
+                .as_ref()
+                .map(|b| &**b);
+            // all_grouped_cols snapshot.
+            let all_gc: alloc::vec::Vec<i32> = aggstate
+                .all_grouped_cols
+                .as_ref()
+                .expect("all_grouped_cols")
+                .iter()
+                .copied()
+                .collect();
+            for attnum in all_gc {
+                if !backend_nodes_core_seams::bms_is_member::call(attnum, grouped_cols) {
+                    // slot->tts_isnull[attnum - 1] = true;
+                    cols[(attnum - 1) as usize].1 = true;
+                }
+            }
+            // Re-store the adjusted virtual tuple.
+            let mut values =
+                mcx::vec_with_capacity_in(estate.es_query_cxt, cols.len())?;
+            let mut isnull = mcx::vec_with_capacity_in(estate.es_query_cxt, cols.len())?;
+            for c in cols.iter() {
+                values.push(c.0.clone());
+                isnull.push(c.1);
+            }
+            backend_executor_execTuples_seams::store_virtual_values::call(
+                estate,
+                slot,
+                values.as_slice(),
+                isnull.as_slice(),
+            )?;
         }
     }
 

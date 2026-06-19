@@ -209,6 +209,20 @@ seam_core::seam!(
     pub fn bms_free<'mcx>(a: Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>)
 );
 
+seam_core::seam!(
+    /// `expression_tree_walker(node, walker, context)` (nodes/nodeFuncs.c): the
+    /// generic expression-tree recursion driver. Visits `node`'s immediate
+    /// expression children, invoking `walker` on each (the walker is
+    /// responsible for re-recursing). `context` is captured by the `FnMut`
+    /// closure in the owned model. Returns `true` as soon as a `walker` call
+    /// returns `true` (early abort), else `false`. Infallible (the recursion
+    /// itself never `ereport`s; a walker may).
+    pub fn expression_tree_walker(
+        node: &types_nodes::nodes::Node<'_>,
+        walker: &mut dyn FnMut(&types_nodes::nodes::Node<'_>) -> bool,
+    ) -> bool
+);
+
 /* ==========================================================================
  * print.c consumed edges
  *
