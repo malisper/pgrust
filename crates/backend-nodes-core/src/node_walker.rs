@@ -411,34 +411,36 @@ pub fn expression_tree_walker_mut(
         }};
     }
 
-    // Stays a structural `&mut Node` match: the node-opaque accessor surface
-    // exposes no `as_*_mut`/`expect_*_mut` for the `Expr`/`Query`/`TargetEntry`/
-    // `JoinExpr` arms this walker mutates in place, so a `node_tag()` dispatch
-    // cannot reach a `&mut` child here.
-    match node {
-        Node::Expr(e) => walk_expr_children_mut(e, walker),
+    // An embedded expression node: recurse into its `Expr` children in place.
+    // `Node::Expr` spans every `Expr` tag (Var..Aggref), not a single `ntag`, so
+    // it is peeled first via the `as_expr_mut` accessor (the dual-homed-tag
+    // pattern) before the unambiguous single-tag arms dispatch on `node_tag()`.
+    if let Some(e) = node.as_expr_mut() {
+        return walk_expr_children_mut(e, walker);
+    }
 
+    match node.node_tag() {
         // C `case T_List: foreach(temp, (List *) node) WALK(lfirst(temp));` —
         // visit each element in place. A bare `List` node is a legitimate walker
         // argument (e.g. the `VALUES` rows reached by `assign_collations`'s
         // in-place walk over `(VALUES ...)` sublists). Mirrors the read-only
-        // `expression_tree_walker`'s `Node::List` arm.
-        Node::List(items) => list_walk!(items),
+        // `expression_tree_walker`'s `T_List` arm.
+        ntag::T_List => list_walk!(node.expect_list_mut()),
 
-        Node::RangeTblRef(_)
-        | Node::SortGroupClause(_)
-        | Node::RowMarkClause(_)
-        | Node::A_Star(_)
-        | Node::ParamRef(_)
-        | Node::Integer(_)
-        | Node::Float(_)
-        | Node::Boolean(_)
-        | Node::String(_)
-        | Node::BitString(_) => false,
+        ntag::T_RangeTblRef
+        | ntag::T_SortGroupClause
+        | ntag::T_RowMarkClause
+        | ntag::T_A_Star
+        | ntag::T_ParamRef
+        | ntag::T_Integer
+        | ntag::T_Float
+        | ntag::T_Boolean
+        | ntag::T_String
+        | ntag::T_BitString => false,
 
-        Node::Query(_) => false,
+        ntag::T_Query => false,
 
-        Node::TargetEntry(te) => match te.expr.as_deref_mut() {
+        ntag::T_TargetEntry => match node.expect_targetentry_mut().expr.as_deref_mut() {
             Some(e) => {
                 // C `T_TargetEntry` arm: `WALK(tle->expr)`, mutating in place.
                 // Move the child out (a plain `.clone()` hits `Aggref`'s
@@ -456,15 +458,20 @@ pub fn expression_tree_walker_mut(
             None => false,
         },
 
-        Node::FromExpr(from) => list_walk!(from.fromlist) || walk_opt!(from.quals.as_mut()),
+        ntag::T_FromExpr => {
+            let from = node.expect_fromexpr_mut();
+            list_walk!(from.fromlist) || walk_opt!(from.quals.as_mut())
+        }
 
-        Node::JoinExpr(join) => {
+        ntag::T_JoinExpr => {
+            let join = node.expect_joinexpr_mut();
             walk_opt!(join.larg.as_mut())
                 || walk_opt!(join.rarg.as_mut())
                 || walk_opt!(join.quals.as_mut())
         }
 
-        Node::OnConflictExpr(oce) => {
+        ntag::T_OnConflictExpr => {
+            let oce = node.expect_onconflictexpr_mut();
             list_walk!(oce.arbiterElems)
                 || walk_opt!(oce.arbiterWhere.as_mut())
                 || list_walk!(oce.onConflictSet)
@@ -472,36 +479,41 @@ pub fn expression_tree_walker_mut(
                 || list_walk!(oce.exclRelTlist)
         }
 
-        Node::MergeAction(action) => {
+        ntag::T_MergeAction => {
+            let action = node.expect_mergeaction_mut();
             walk_opt!(action.qual.as_mut()) || list_walk!(action.targetList)
         }
 
-        Node::WindowClause(wc) => {
+        ntag::T_WindowClause => {
+            let wc = node.expect_windowclause_mut();
             list_walk!(wc.partitionClause)
                 || list_walk!(wc.orderClause)
                 || walk_opt!(wc.startOffset.as_mut())
                 || walk_opt!(wc.endOffset.as_mut())
         }
 
-        Node::CommonTableExpr(cte) => {
+        ntag::T_CommonTableExpr => {
+            let cte = node.expect_commontableexpr_mut();
             walk_opt!(cte.ctequery.as_mut()) || walk_opt!(cte.cycle_clause.as_mut())
         }
 
-        Node::CTECycleClause(cc) => {
+        ntag::T_CTECycleClause => {
+            let cc = node.expect_ctecycleclause_mut();
             walk_opt!(cc.cycle_mark_value.as_mut()) || walk_opt!(cc.cycle_mark_default.as_mut())
         }
 
-        Node::TableFunc(tf) => walk_table_func_mut(tf, walker),
+        ntag::T_TableFunc => walk_table_func_mut(node.expect_tablefunc_mut(), walker),
 
-        Node::SetOperationStmt(setop) => {
+        ntag::T_SetOperationStmt => {
+            let setop = node.expect_setoperationstmt_mut();
             walk_opt!(setop.larg.as_mut()) || walk_opt!(setop.rarg.as_mut())
         }
 
-        Node::WithCheckOption(wco) => walk_opt!(wco.qual.as_mut()),
+        ntag::T_WithCheckOption => walk_opt!(node.expect_withcheckoption_mut().qual.as_mut()),
 
-        Node::RangeTblFunction(rtf) => walk_opt!(rtf.funcexpr.as_mut()),
+        ntag::T_RangeTblFunction => walk_opt!(node.expect_rangetblfunction_mut().funcexpr.as_mut()),
 
-        Node::GroupingSet(gs) => list_walk!(gs.content),
+        ntag::T_GroupingSet => list_walk!(node.expect_groupingset_mut().content),
 
         _ => unrecognized_expression_node(node),
     }
@@ -1380,11 +1392,9 @@ pub fn query_or_expression_tree_mutator(
     mutator: &mut dyn FnMut(&mut Node) -> bool,
     flags: i32,
 ) -> bool {
-    // Structural `&mut Node` match: no `as_query_mut`/`expect_query_mut`
-    // accessor exists to reach the `&mut Query` the mutator branch needs.
-    match node {
-        Node::Query(q) => query_tree_mutator(q, mutator, flags),
-        other => mutator(other),
+    match node.node_tag() {
+        ntag::T_Query => query_tree_mutator(node.expect_query_mut(), mutator, flags),
+        _ => mutator(node),
     }
 }
 
