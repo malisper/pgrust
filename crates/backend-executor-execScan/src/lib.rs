@@ -355,9 +355,17 @@ where
             }
             //   if (!(*recheckMtd)(node, slot)) return ExecClearTuple(slot);
             // The recheck method reads the PASSED replacement slot (e.g.
-            // IndexRecheck sets econtext->ecxt_scantuple = slot); the recheck
-            // callbacks of all scan-node consumers do this themselves, so the
-            // EPQ replacement slot is the operative one.
+            // C's `IndexRecheck(node, slot)` does `econtext->ecxt_scantuple =
+            // slot`). The Rust recheck callbacks take only `(node, estate)` and
+            // cannot see this EPQ replacement slot, so the driver points the
+            // node's per-tuple expr context at it here — equivalent to each C
+            // *Recheck setting `ecxt_scantuple = slot` from the slot the driver
+            // passed it.
+            if let Some(ecxt) = node.ss().ps.ps_ExprContext {
+                if let Some(Some(ec)) = estate.es_exprcontexts.get_mut(ecxt.0 as usize) {
+                    ec.ecxt_scantuple = Some(epq_slot);
+                }
+            }
             if !recheck_mtd(node, estate)? {
                 execTuples::exec_clear_tuple::call(estate, epq_slot)?;
                 return Ok(None);

@@ -134,6 +134,7 @@ fn IndexNext<'mcx>(node: &mut IndexScanState<'mcx>, estate: &mut EStateData<'mcx
         if node.iss_ScanDesc.as_ref().unwrap().xs_recheck {
             // econtext->ecxt_scantuple = slot;
             // if (!ExecQualAndReset(node->indexqualorig, econtext)) { filtered; continue }
+            estate.ecxt_mut(econtext).ecxt_scantuple = Some(scan_slot);
             let passed = exec_qual_and_reset(node.indexqualorig.as_deref_mut(), econtext, estate)?;
             if !passed {
                 instr_count_filtered2(node, 1);
@@ -248,6 +249,8 @@ fn IndexNextWithReorder<'mcx>(
 
         // If the index was lossy, recheck the index quals and ORDER BY exprs.
         if node.iss_ScanDesc.as_ref().unwrap().xs_recheck {
+            // econtext->ecxt_scantuple = slot;
+            estate.ecxt_mut(econtext).ecxt_scantuple = Some(scan_slot);
             let passed = exec_qual_and_reset(node.indexqualorig.as_deref_mut(), econtext, estate)?;
             if !passed {
                 instr_count_filtered2(node, 1);
@@ -261,6 +264,7 @@ fn IndexNextWithReorder<'mcx>(
         let use_recomputed;
         if node.iss_ScanDesc.as_ref().unwrap().xs_recheckorderby {
             // econtext->ecxt_scantuple = slot; ResetExprContext; EvalOrderByExpressions.
+            estate.ecxt_mut(econtext).ecxt_scantuple = Some(scan_slot);
             execUtils::reset_expr_context::call(estate, econtext)?;
             EvalOrderByExpressions(node, econtext, scan_slot, estate)?;
 
