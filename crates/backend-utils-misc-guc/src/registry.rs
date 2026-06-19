@@ -631,6 +631,85 @@ fn call_enum_check_hook(
     }
 }
 
+/// `InitializeOneGUCOption`'s hook-firing step (guc.c:1644), for the boot value.
+///
+/// C, for every variable, sets `newval = boot_val`, then:
+///
+/// ```c
+/// if (!call_<type>_check_hook(conf, &newval, &extra, PGC_S_DEFAULT, LOG))
+///     elog(FATAL, "failed to initialize %s ...");
+/// if (conf->assign_hook)
+///     conf->assign_hook(newval, extra);
+/// ```
+///
+/// i.e. the boot `extra` is **not** `NULL` — it is exactly the payload the
+/// variable's own check hook produces from the boot value. (The earlier port
+/// fired the assign hook with `extra = None`, which is why every extra-consuming
+/// assign hook — `assign_datestyle`, `assign_timezone`, `assign_log_timezone`,
+/// `assign_client_encoding`, `assign_role`, `assign_random_seed`,
+/// `assign_log_destination` — panicked at boot trying to downcast a missing
+/// payload.)
+///
+/// Returns the check hook's `extra` so the caller can stash it as the variable's
+/// `reset_extra` (C's `conf->gen.extra = conf->reset_extra = extra`). On a check
+/// hook failure C does `elog(FATAL)`; here that surfaces as the `PgError` the
+/// caller turns into a fatal boot error.
+pub fn initialize_one_guc_option_hooks(var: &GucVariable) -> PgResult<Option<GucHookExtra>> {
+    match var {
+        GucVariable::Bool(conf) => {
+            let mut newval = conf.boot_val;
+            let extra = call_bool_check_hook(conf, &mut newval, PGC_S_DEFAULT)?;
+            if let Some(slot) = conf.assign_hook {
+                if slot.installed() {
+                    (slot.get())(newval, extra.as_ref());
+                }
+            }
+            Ok(extra)
+        }
+        GucVariable::Int(conf) => {
+            let mut newval = conf.boot_val;
+            let extra = call_int_check_hook(conf, &mut newval, PGC_S_DEFAULT)?;
+            if let Some(slot) = conf.assign_hook {
+                if slot.installed() {
+                    (slot.get())(newval, extra.as_ref());
+                }
+            }
+            Ok(extra)
+        }
+        GucVariable::Real(conf) => {
+            let mut newval = conf.boot_val;
+            let extra = call_real_check_hook(conf, &mut newval, PGC_S_DEFAULT)?;
+            if let Some(slot) = conf.assign_hook {
+                if slot.installed() {
+                    (slot.get())(newval, extra.as_ref());
+                }
+            }
+            Ok(extra)
+        }
+        GucVariable::String(conf) => {
+            // `newval = guc_strdup(boot_val)` (NULL boot_val stays NULL).
+            let mut newval = conf.boot_val.clone();
+            let extra = call_string_check_hook(conf, &mut newval, PGC_S_DEFAULT)?;
+            if let Some(slot) = conf.assign_hook {
+                if slot.installed() {
+                    (slot.get())(newval.as_deref(), extra.as_ref());
+                }
+            }
+            Ok(extra)
+        }
+        GucVariable::Enum(conf) => {
+            let mut newval = conf.boot_val;
+            let extra = call_enum_check_hook(conf, &mut newval, PGC_S_DEFAULT)?;
+            if let Some(slot) = conf.assign_hook {
+                if slot.installed() {
+                    (slot.get())(newval, extra.as_ref());
+                }
+            }
+            Ok(extra)
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // SHOW rendering.
 // ---------------------------------------------------------------------------

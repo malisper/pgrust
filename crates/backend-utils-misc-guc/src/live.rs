@@ -216,70 +216,30 @@ pub fn try_initialize_guc_options() -> PgResult<()> {
             // agree with the boot value. C runs this for every variable that has
             // an `assign_hook`.
             //
-            // We fire each installed boot assign hook the same way, but guard the
-            // call: a number of assign hooks have only partially-ported bodies
-            // that `panic!("… not yet ported")` (client_encoding, DateStyle,
-            // TimeZone, role, seed, log_destination, io_combine_limit, …). Those
-            // same stubs already panic on a runtime `SET`, so their *boot-time*
-            // side effect is deferred for exactly the same reason their SET side
-            // effect is. Catching the panic here defers the unported hook's boot
-            // effect (no worse than today, where it never ran at all) while still
-            // running every fully-ported hook — which is what the sync-rep commit
-            // invariant needs. The boot `extra` is `None`: the boot value is the
-            // compiled-in default, for which the `extra`-producing check hooks are
-            // not run at this stage.
+            // We fire each variable's boot hooks exactly as C's
+            // `InitializeOneGUCOption` does: run the variable's own check hook on
+            // the boot value to produce the `extra` payload, then call the assign
+            // hook with `(boot_val, extra)`. The earlier port called the assign
+            // hook with `extra = None`, which made every extra-consuming hook
+            // (DateStyle/TimeZone/log_timezone/client_encoding/role/seed/
+            // log_destination) panic at boot trying to downcast a missing payload.
+            //
+            // The call is still wrapped in `catch_unwind`: a few assign hooks have
+            // genuinely-unported bodies that `panic!("… not yet ported")` (they
+            // panic on a runtime `SET` for the same reason), so catching here
+            // defers that one hook's boot side effect — no worse than before,
+            // where no hook ran at all — while every fully-ported hook (and now
+            // every extra-consuming hook with a ported check hook) runs and seeds
+            // its hook-side global state, which the sync-rep commit invariant
+            // needs.
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                fire_boot_assign_hook(&var)
+                let _ = crate::registry::initialize_one_guc_option_hooks(&var);
             }));
             reg.define(var)?;
         }
     }
     *GUC_STORE.lock().unwrap() = Some(reg);
     Ok(())
-}
-
-/// `InitializeOneGUCOption`'s `if (conf->assign_hook) conf->assign_hook(newval,
-/// extra)` step at boot, fired with `newval = boot_val` and `extra = NULL`. Only
-/// invokes hooks whose owner slot is installed (skipping owners absent from this
-/// binary), mirroring C's guard that the hook function pointer is non-NULL.
-fn fire_boot_assign_hook(var: &GucVariable) {
-    match var {
-        GucVariable::Bool(c) => {
-            if let Some(slot) = c.assign_hook {
-                if slot.installed() {
-                    (slot.get())(c.boot_val, None);
-                }
-            }
-        }
-        GucVariable::Int(c) => {
-            if let Some(slot) = c.assign_hook {
-                if slot.installed() {
-                    (slot.get())(c.boot_val, None);
-                }
-            }
-        }
-        GucVariable::Real(c) => {
-            if let Some(slot) = c.assign_hook {
-                if slot.installed() {
-                    (slot.get())(c.boot_val, None);
-                }
-            }
-        }
-        GucVariable::String(c) => {
-            if let Some(slot) = c.assign_hook {
-                if slot.installed() {
-                    (slot.get())(c.boot_val.as_deref(), None);
-                }
-            }
-        }
-        GucVariable::Enum(c) => {
-            if let Some(slot) = c.assign_hook {
-                if slot.installed() {
-                    (slot.get())(c.boot_val, None);
-                }
-            }
-        }
-    }
 }
 
 /// True once [`initialize_guc_options`] has built the store.
