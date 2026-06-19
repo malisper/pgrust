@@ -90,10 +90,9 @@ fn ascend_mut(root: &mut PlannerInfo, levelsup: Index) -> &mut PlannerInfo {
 fn increment_expr_sublevels(e: Expr, delta: i32, min: i32) -> PgResult<Expr> {
     let mut node = Node::Expr(e);
     IncrementVarSublevelsUp(&mut node, delta, min)?;
-    match node {
-        Node::Expr(e) => Ok(e),
-        _ => unreachable!("IncrementVarSublevelsUp preserves the Node::Expr wrapper"),
-    }
+    Ok(node
+        .into_expr()
+        .unwrap_or_else(|| unreachable!("IncrementVarSublevelsUp preserves the Node::Expr wrapper")))
 }
 
 /// `equal(a, b)` over a `curOuterParams` `paramval` (always a `Var` or
