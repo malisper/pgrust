@@ -30,6 +30,7 @@ use types_nodes::rawnodes::SelectStmt;
 mod inline_sql;
 mod insert;
 mod locking;
+mod merge;
 mod select;
 mod setop;
 mod special;
@@ -707,15 +708,17 @@ pub fn transformStmt<'mcx>(
         ntag::T_CallStmt => {
             special::transformCallStmt(mcx, pstate, parse_tree.expect_callstmt())?
         }
-        ntag::T_MergeStmt | ntag::T_PLAssignStmt => {
-            // MERGE and PL/pgSQL assignment transforms are a follow-on family;
-            // MERGE needs the planner-side MergeAction substrate and PLAssign is
-            // produced only in the RAW_PARSE_PLPGSQL_ASSIGN raw-parse modes.
-            // Mirror the C dispatch and panic loudly until they land.
+        ntag::T_MergeStmt => {
+            merge::transformMergeStmt(mcx, pstate, parse_tree.expect_mergestmt())?
+        }
+        ntag::T_PLAssignStmt => {
+            // The PL/pgSQL assignment transform is the remaining follow-on-family
+            // member; PLAssign is produced only in the RAW_PARSE_PLPGSQL_ASSIGN
+            // raw-parse modes. Mirror the C dispatch and panic loudly until it
+            // lands.
             panic!(
-                "transformStmt: DML/special statement (tag {:?}) is in the \
-                 follow-on family (transformMerge/PLAssign) — not yet \
-                 ported (analyze.c:312)",
+                "transformStmt: PLAssignStmt (tag {:?}) is in the follow-on \
+                 family (transformPLAssignStmt) — not yet ported (analyze.c:312)",
                 parse_tree.tag()
             );
         }

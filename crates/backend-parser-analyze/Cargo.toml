@@ -46,6 +46,9 @@ backend-parser-parse-collate = { path = "../backend-parser-parse-collate" }
 backend-parser-agg = { path = "../backend-parser-agg" }
 backend-parser-small1 = { path = "../backend-parser-small1" }
 backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
+# errdetail_relkind_not_supported (the MERGE relkind-not-supported detail);
+# cycle-free (pg-class has no parser dep).
+backend-catalog-pg-class = { path = "../backend-catalog-pg-class" }
 
 # The SQL-function inliner body (clauses.c inline_function) installed by this
 # crate: the parser driver + the fold crate's contain_*/coercion deps. All are

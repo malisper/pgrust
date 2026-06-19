@@ -13297,6 +13297,7 @@ name = "backend-parser-analyze"
 version = "0.0.0"
 dependencies = [
  "backend-catalog-dependency",
+ "backend-catalog-pg-class",
  "backend-commands-createas-seams",
  "backend-commands-functioncmds-seams",
  "backend-nodes-core",
