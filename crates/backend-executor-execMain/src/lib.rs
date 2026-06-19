@@ -1721,11 +1721,9 @@ fn ExecRelCheck<'mcx>(
             }
             // checkconstr = stringToNode(check[i].ccbin);
             let node = backend_nodes_core::read::string_to_node(mcx, ci.ccbin.as_str())?;
-            let checkconstr_expr = match &*node {
-                types_nodes::nodes::Node::Expr(e) => e.clone(),
-                other => {
-                    return Err(unported_node("ExecRelCheck: ccbin is not an Expr", other))
-                }
+            let checkconstr_expr = match node.as_expr() {
+                Some(e) => e.clone(),
+                None => return Err(unported_node("ExecRelCheck: ccbin is not an Expr", &node)),
             };
             // checkconstr = expand_generated_columns_in_expr(checkconstr, rel, 1);
             let expanded = backend_rewrite_rewritehandler::expand_generated_columns_in_expr(
@@ -1800,12 +1798,12 @@ pub fn ExecPartitionCheck<'mcx>(
         // ExecPrepareCheck takes an implicit-AND Expr list.
         let mut exprs: alloc::vec::Vec<types_nodes::primnodes::Expr> = alloc::vec::Vec::new();
         for n in qual.iter() {
-            match n {
-                types_nodes::nodes::Node::Expr(e) => exprs.push(e.clone()),
-                other => {
+            match n.as_expr() {
+                Some(e) => exprs.push(e.clone()),
+                None => {
                     return Err(unported_node(
                         "ExecPartitionCheck: partition qual element is not an Expr",
-                        other,
+                        n,
                     ))
                 }
             }
