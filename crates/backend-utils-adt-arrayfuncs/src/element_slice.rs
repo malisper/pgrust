@@ -26,7 +26,9 @@ use types_error::{
     ERRCODE_NULL_VALUE_NOT_ALLOWED, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
 };
 
-use crate::construct::{construct_empty_array, construct_md_array, deconstruct_array};
+use crate::construct::{
+    construct_empty_array, construct_md_array, construct_md_array_values, deconstruct_array_values,
+};
 use crate::foundation::{
     arr_data_offset, arr_data_ptr_off, arr_dim, arr_elemtype, arr_lbound, arr_ndim,
     arr_nullbitmap_off, arr_overhead_nonulls, arr_overhead_withnulls, arr_size, array_bitmap_copy,
@@ -873,7 +875,13 @@ pub fn array_set_slice<'mcx>(
     // empty array => create an array with nSubscripts dims, bounds from indices.
     if ndim == 0 {
         let elmtype = arr_elemtype(array);
-        let elems = deconstruct_array(mcx, src_array, elmtype, elmlen, elmbyval, elmalign)?;
+        // Decode the source elements into the dereferenceable value lane
+        // (`types_tuple::Datum`, carrying verbatim by-ref bytes). The bare-word
+        // `deconstruct_array` Datum stores only an in-buffer offset for a
+        // pass-by-ref element, which `construct_md_array` would then deref as a
+        // pointer (SIGSEGV). Mirror C's `deconstruct_array` + `construct_md_array`
+        // pair via the owned value-lane counterparts.
+        let elems = deconstruct_array_values(mcx, src_array, elmtype, elmlen, elmbyval, elmalign)?;
         let nelems = elems.len() as i32;
 
         let mut dim = PgVec::new_in(mcx);
@@ -903,13 +911,13 @@ pub fn array_set_slice<'mcx>(
                 .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR));
         }
 
-        let mut dvalues: PgVec<'mcx, Datum> = PgVec::new_in(mcx);
+        let mut dvalues: PgVec<'mcx, types_tuple::Datum<'mcx>> = PgVec::new_in(mcx);
         let mut dnulls: PgVec<'mcx, bool> = PgVec::new_in(mcx);
-        for e in elems.iter() {
-            dvalues.push(e.0);
-            dnulls.push(e.1);
+        for (val, isnull) in elems.into_iter() {
+            dvalues.push(val);
+            dnulls.push(isnull);
         }
-        return construct_md_array(
+        return construct_md_array_values(
             mcx, &dvalues, Some(&dnulls), nsubscripts, &dim, &lb, elmtype, elmlen, elmbyval,
             elmalign,
         );

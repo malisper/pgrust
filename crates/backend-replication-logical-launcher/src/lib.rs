@@ -1361,6 +1361,16 @@ pub fn IsLogicalLauncher() -> bool {
     with_ctx(|c| c.launcher_pid) == globals::my_proc_pid::call()
 }
 
+/// `IsLogicalWorker()` (worker.c): `return MyLogicalRepWorker != NULL;`.
+///
+/// The `MyLogicalRepWorker` global pointer is, in this port, the launcher-owned
+/// `my_logical_rep_worker_slot()` cell (set to `Some(slot)` at attach,
+/// cleared/unset otherwise). So a non-`NULL` `MyLogicalRepWorker` is exactly a
+/// set slot. `ProcessInterrupts` reads it to phrase the `ProcDiePending` FATAL.
+pub fn IsLogicalWorker() -> bool {
+    my_logical_rep_worker_slot().get().is_some()
+}
+
 /// `GetLeaderApplyWorkerPid(pid)` (launcher.c). The leader apply worker's PID
 /// if `pid` is a parallel apply worker, else `InvalidPid`.
 pub fn GetLeaderApplyWorkerPid(pid: i32) -> PgResult<i32> {
@@ -1521,6 +1531,10 @@ pub fn init_seams() {
     s::logicalrep_sync_worker_count::set(logicalrep_sync_worker_count);
     s::GetLeaderApplyWorkerPid::set(GetLeaderApplyWorkerPid);
     s::IsLogicalLauncher::set(IsLogicalLauncher);
+    // `IsLogicalWorker()` (worker.c) — the `MyLogicalRepWorker != NULL` read
+    // `ProcessInterrupts` makes when phrasing the `ProcDiePending` FATAL. The
+    // `MyLogicalRepWorker` slot is launcher-owned, so install here.
+    tcop::is_logical_worker::set(IsLogicalWorker);
     s::ApplyLauncherWakeupAtCommit::set(ApplyLauncherWakeupAtCommit);
     s::ApplyLauncherForgetWorkerStartTime::set(ApplyLauncherForgetWorkerStartTime);
     // The inward seam (consumed by xact's AtEOXact) is void per the C return;
