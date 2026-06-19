@@ -37,27 +37,45 @@ macro_rules! av_guc {
     };
 }
 
+// These cells back the autovacuum.c GUC globals (the `*conf->variable` storage
+// for the matching guc_tables.c entries). They MUST be seeded with the C
+// `boot_val` from guc_tables.c — the same discipline `guc-tables::backing` uses
+// for its own GUC cells. This seeding is load-bearing: `InitializeGUCOptions`
+// applies each boot_val (`registry::apply_value`) before this crate's
+// `init_seams()` installs the `vars::*` accessor, and `apply_value` only writes
+// the owner backing store when the accessor is already `installed()`. So the
+// boot-time write is skipped here; without the correct seed these cells would
+// keep a placeholder (formerly 0) for the process lifetime — making e.g.
+// `autovacuum_freeze_max_age`/`autovacuum_multixact_freeze_max_age` read 0 and
+// `vacuum_get_cutoffs` spuriously emit "cutoff for freezing multixacts is far
+// in the past" on a fresh cluster.
+//
+// NOTE: `autovacuum_start_daemon` keeps boot value `false` here (NOT the C
+// boot_val `true`) on purpose: the autovacuum launcher process is not yet
+// ported, so starting it from the postmaster panics. That is a separate
+// keystone; flip this to `true` once the launcher is ported.
 av_guc!(autovacuum_start_daemon, set_autovacuum_start_daemon, AUTOVACUUM_START_DAEMON, bool, false);
-av_guc!(autovacuum_worker_slots, set_autovacuum_worker_slots, AUTOVACUUM_WORKER_SLOTS, i32, 0);
-av_guc!(autovacuum_max_workers, set_autovacuum_max_workers, AUTOVACUUM_MAX_WORKERS, i32, 0);
+av_guc!(autovacuum_worker_slots, set_autovacuum_worker_slots, AUTOVACUUM_WORKER_SLOTS, i32, 16);
+av_guc!(autovacuum_max_workers, set_autovacuum_max_workers, AUTOVACUUM_MAX_WORKERS, i32, 3);
 av_guc!(autovacuum_work_mem, set_autovacuum_work_mem, AUTOVACUUM_WORK_MEM, i32, -1);
-av_guc!(autovacuum_naptime, set_autovacuum_naptime, AUTOVACUUM_NAPTIME, i32, 0);
-av_guc!(autovacuum_vac_thresh, set_autovacuum_vac_thresh, AUTOVACUUM_VAC_THRESH, i32, 0);
-av_guc!(autovacuum_vac_max_thresh, set_autovacuum_vac_max_thresh, AUTOVACUUM_VAC_MAX_THRESH, i32, 0);
-av_guc!(autovacuum_vac_scale, set_autovacuum_vac_scale, AUTOVACUUM_VAC_SCALE, f64, 0.0);
-av_guc!(autovacuum_vac_ins_thresh, set_autovacuum_vac_ins_thresh, AUTOVACUUM_VAC_INS_THRESH, i32, 0);
-av_guc!(autovacuum_vac_ins_scale, set_autovacuum_vac_ins_scale, AUTOVACUUM_VAC_INS_SCALE, f64, 0.0);
-av_guc!(autovacuum_anl_thresh, set_autovacuum_anl_thresh, AUTOVACUUM_ANL_THRESH, i32, 0);
-av_guc!(autovacuum_anl_scale, set_autovacuum_anl_scale, AUTOVACUUM_ANL_SCALE, f64, 0.0);
-av_guc!(autovacuum_freeze_max_age, set_autovacuum_freeze_max_age, AUTOVACUUM_FREEZE_MAX_AGE, i32, 0);
-av_guc!(autovacuum_multixact_freeze_max_age, set_autovacuum_multixact_freeze_max_age, AUTOVACUUM_MULTIXACT_FREEZE_MAX_AGE, i32, 0);
-av_guc!(autovacuum_vac_cost_delay, set_autovacuum_vac_cost_delay, AUTOVACUUM_VAC_COST_DELAY, f64, 0.0);
-av_guc!(autovacuum_vac_cost_limit, set_autovacuum_vac_cost_limit, AUTOVACUUM_VAC_COST_LIMIT, i32, 0);
+av_guc!(autovacuum_naptime, set_autovacuum_naptime, AUTOVACUUM_NAPTIME, i32, 60);
+av_guc!(autovacuum_vac_thresh, set_autovacuum_vac_thresh, AUTOVACUUM_VAC_THRESH, i32, 50);
+av_guc!(autovacuum_vac_max_thresh, set_autovacuum_vac_max_thresh, AUTOVACUUM_VAC_MAX_THRESH, i32, 100000000);
+av_guc!(autovacuum_vac_scale, set_autovacuum_vac_scale, AUTOVACUUM_VAC_SCALE, f64, 0.2);
+av_guc!(autovacuum_vac_ins_thresh, set_autovacuum_vac_ins_thresh, AUTOVACUUM_VAC_INS_THRESH, i32, 1000);
+av_guc!(autovacuum_vac_ins_scale, set_autovacuum_vac_ins_scale, AUTOVACUUM_VAC_INS_SCALE, f64, 0.2);
+av_guc!(autovacuum_anl_thresh, set_autovacuum_anl_thresh, AUTOVACUUM_ANL_THRESH, i32, 50);
+av_guc!(autovacuum_anl_scale, set_autovacuum_anl_scale, AUTOVACUUM_ANL_SCALE, f64, 0.1);
+av_guc!(autovacuum_freeze_max_age, set_autovacuum_freeze_max_age, AUTOVACUUM_FREEZE_MAX_AGE, i32, 200000000);
+av_guc!(autovacuum_multixact_freeze_max_age, set_autovacuum_multixact_freeze_max_age, AUTOVACUUM_MULTIXACT_FREEZE_MAX_AGE, i32, 400000000);
+av_guc!(autovacuum_vac_cost_delay, set_autovacuum_vac_cost_delay, AUTOVACUUM_VAC_COST_DELAY, f64, 2.0);
+av_guc!(autovacuum_vac_cost_limit, set_autovacuum_vac_cost_limit, AUTOVACUUM_VAC_COST_LIMIT, i32, -1);
 av_guc!(Log_autovacuum_min_duration, set_Log_autovacuum_min_duration, LOG_AUTOVACUUM_MIN_DURATION, i32, 600000);
 
 // `pgstat_track_counts` (`utils/activity/pgstat.c`) — autovacuum refuses to
-// run without it. The per-backend global it gates `AutoVacuumingActive` /
-// `autovac_init` on.
+// run without it. C boot_val is `true`, but it is kept `false` here in lockstep
+// with `autovacuum_start_daemon` above (gates the unported launcher's
+// `AutoVacuumingActive`); flip to `true` alongside the launcher port.
 av_guc!(pgstat_track_counts, set_pgstat_track_counts, PGSTAT_TRACK_COUNTS, bool, false);
 
 /* =========================================================================
