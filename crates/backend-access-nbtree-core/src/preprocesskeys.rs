@@ -87,7 +87,8 @@ use types_scan::scankey::{
 use backend_utils_fmgr_fmgr_seams::function_call2_coll;
 // `deconstruct_array` lives in the arrayfuncs seams crate; `get_typlenbyvalalign`
 // and the opfamily lookups live in the lsyscache seams crate.
-use backend_utils_adt_arrayfuncs_seams::deconstruct_array;
+use backend_utils_adt_arrayfuncs_seams::deconstruct_array_values_bytes;
+use backend_access_index_indexam_seams as indexam;
 use backend_utils_cache_lsyscache_seams::{
     get_opcode, get_opfamily_member, get_opfamily_proc, get_typlenbyvalalign,
 };
@@ -265,17 +266,21 @@ fn compact_attr(rel: &Relation, attoff: i32) -> (i16, bool) {
 // ---------------------------------------------------------------------------
 
 /// `index_getprocinfo(rel, attno, BTORDER_PROC)` (access/genam.c) — fetch the
-/// cached same-type ORDER support proc as an fmgr handle. No `u64`-handle
-/// producer exists for `so->orderProcs[]`.
-fn index_getprocinfo(_rel: &Relation, _attno: AttrNumber, _procnum: i16) -> u64 {
-    panic!("_bt_setup_array_cmp: index_getprocinfo (ORDER support proc handle) not yet ported")
+/// cached same-type ORDER support proc. `so->orderProcs[]` carries the proc as a
+/// `u64` handle whose low 32 bits are the proc OID (the lane on which the array
+/// comparator dispatches, `function_call2_coll_oid`); resolve the real cached
+/// `FmgrInfo` via the indexam seam and carry its `fn_oid`.
+fn index_getprocinfo(rel: &Relation, attno: AttrNumber, procnum: i16) -> PgResult<u64> {
+    let finfo = indexam::index_getprocinfo::call(rel, attno, procnum as u16)?;
+    Ok(finfo.fn_oid as u64)
 }
 
-/// `fmgr_info(proc, &flinfo)` / `fmgr_info_cxt(...)` (fmgr.c) — materialise an
-/// fmgr handle for a freshly-looked-up cross-type proc. No `u64`-handle
-/// producer exists.
-fn fmgr_info(_cmp_proc: Oid) -> u64 {
-    panic!("_bt_setup_array_cmp: fmgr_info (ORDER support proc handle) not yet ported")
+/// `fmgr_info(proc, &flinfo)` / `fmgr_info_cxt(...)` (fmgr.c) — materialise the
+/// ORDER proc handle for a freshly-looked-up cross-type proc. The handle carries
+/// the proc OID in its low 32 bits (the array comparator re-resolves the
+/// `FmgrInfo` by OID at dispatch through the fmgr seam).
+fn fmgr_info(cmp_proc: Oid) -> u64 {
+    cmp_proc as u64
 }
 
 /// `_bt_binsrch_array_skey(orderproc, false, NoMovementScanDirection, tupdatum,
@@ -1749,12 +1754,19 @@ pub fn _bt_preprocess_array_keys<'mcx>(
             elemtype = rd_opcintype(rel, arrayKeyData[numArrayKeyDataPos as usize].sk_attno);
         }
 
-        // Deconstruct the array into elements (compress out NULLs).
+        // Deconstruct the array into elements (compress out NULLs). The array
+        // `sk_argument` is a varlena carried as the canonical by-reference Datum
+        // (`Datum::ByRef` bytes); detoast + split it on the byte-image lane so a
+        // by-reference element type (text[]/name[]/...) yields real per-element
+        // `Datum<'mcx>` values rather than a bare offset word. C reads the array
+        // via `DatumGetArrayTypeP(sk_argument)`; the byte image is its equivalent.
         let tlbva = get_typlenbyvalalign::call(elemtype)?;
-        let arr_word = to_word(&arrayKeyData[numArrayKeyDataPos as usize].sk_argument);
-        let pairs = deconstruct_array::call(
+        let arr_bytes = arrayKeyData[numArrayKeyDataPos as usize]
+            .sk_argument
+            .as_ref_bytes();
+        let pairs = deconstruct_array_values_bytes::call(
             mcx,
-            arr_word,
+            arr_bytes,
             elemtype,
             tlbva.typlen,
             tlbva.typbyval,
@@ -1764,7 +1776,7 @@ pub fn _bt_preprocess_array_keys<'mcx>(
         let mut elem_values: PgVec<'mcx, Datum<'mcx>> = vec_with_capacity_in(mcx, pairs.len())?;
         for (val, isnull) in pairs.iter() {
             if !*isnull {
-                elem_values.push(word_to_datum(*val));
+                elem_values.push(val.clone());
             }
         }
         let num_nonnulls = elem_values.len() as i32;
@@ -1931,6 +1943,7 @@ fn relocate_sksup<'mcx>(s: types_nbtree::BTSkipSupport<'static>) -> types_nbtree
 
 /// Convert a bare-word fmgr-seam `Datum` into the canonical by-value `Datum`.
 #[inline]
+#[allow(dead_code)]
 fn word_to_datum<'mcx>(w: types_datum::Datum) -> Datum<'mcx> {
     Datum::ByVal(w.as_usize())
 }
@@ -2245,7 +2258,7 @@ fn _bt_setup_array_cmp<'mcx>(
 
     // Non-cross-type: use the cached comparison function.
     if elemtype == opcintype {
-        *orderproc = index_getprocinfo(rel, skey.sk_attno, BTORDER_PROC);
+        *orderproc = index_getprocinfo(rel, skey.sk_attno, BTORDER_PROC)?;
         if let Some((_out, is_order)) = sortprocp {
             *is_order = true; // *sortprocp = orderproc
         }
