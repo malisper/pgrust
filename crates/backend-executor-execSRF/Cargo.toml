@@ -23,6 +23,10 @@ backend-nodes-core = { path = "../backend-nodes-core" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
 backend-utils-sort-storage-seams = { path = "../backend-utils-sort-storage-seams" }
+# Materialize-mode tuplestore drain: the funcResultSlot pool slot
+# (ExecInitExtraTupleSlot), per-row fetch (slot_getattr /
+# ExecFetchSlotHeapTupleDatum) and descriptor copy.
+backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 # check_stack_depth (postgres.c) guarding the targetlist-SRF recursion.
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }

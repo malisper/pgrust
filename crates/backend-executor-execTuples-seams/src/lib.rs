@@ -343,6 +343,24 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecFetchSlotHeapTupleDatum(slot)` (execTuples.c): fetch the slot's
+    /// current row as a composite/row `Datum` (`heap_copy_tuple_as_datum` over
+    /// `ExecFetchSlotHeapTuple(slot, false)`). The slot is addressed by its
+    /// EState tuple-table pool [`SlotId`]; the result is the canonical
+    /// [`types_tuple::backend_access_common_heaptuple::Datum`] (a
+    /// `Datum::Composite` carrying the row image in `mcx`). Used by the
+    /// `ExecMakeFunctionResultSet` Materialize-mode drain to return a whole
+    /// `funcReturnsTuple` row from `funcResultSlot`. Fallible on the materialize
+    /// OOM / form path.
+    pub fn exec_fetch_slot_heap_tuple_datum<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        slot: types_nodes::SlotId,
+    ) -> types_error::PgResult<
+        types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+    >
+);
+
+seam_core::seam!(
     /// `ExecInitResultSlot(planstate, tts_ops)` (execTuples.c): create the
     /// node's result slot (from its already-set `ps_ResultTupleDesc`) in the
     /// EState slot pool, storing the id in `planstate.ps_ResultTupleSlot`.

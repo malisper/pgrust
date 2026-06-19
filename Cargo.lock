@@ -9313,6 +9313,7 @@ dependencies = [
  "backend-access-common-tupdesc",
  "backend-executor-execExpr-seams",
  "backend-executor-execSRF-seams",
+ "backend-executor-execTuples-seams",
  "backend-nodes-core",
  "backend-tcop-postgres-seams",
  "backend-utils-adt-int",

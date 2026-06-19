@@ -744,6 +744,17 @@ fn seam_slot_getattr_by_id<'mcx>(
     Ok(backend_executor_execTuples_seams::SlotAttr { value, isnull })
 }
 
+/// Seam `exec_fetch_slot_heap_tuple_datum` (SlotId form) —
+/// `ExecFetchSlotHeapTupleDatum` resolving the pool `SlotId` to its live
+/// payload-bearing `&mut SlotData`, returning the row as a composite `Datum`.
+fn seam_exec_fetch_slot_heap_tuple_datum<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    slot: SlotId,
+) -> PgResult<Datum<'mcx>> {
+    let mcx = estate.es_query_cxt;
+    crate::slot_store_fetch::ExecFetchSlotHeapTupleDatum(mcx, estate.slot_data_mut(slot))
+}
+
 /// Seam `slot_getattr` (SlotId form) — `slot_getattr` resolving the pool
 /// `SlotId` to its live payload-bearing `&mut SlotData`, returning the bare
 /// `(value, isnull)` pair.
@@ -1026,6 +1037,7 @@ pub fn init_seams() {
     seams::cur_tuple_getattr::set(seam_cur_tuple_getattr);
     seams::slot_getattr_by_id::set(seam_slot_getattr_by_id);
     seams::slot_getattr::set(seam_slot_getattr);
+    seams::exec_fetch_slot_heap_tuple_datum::set(seam_exec_fetch_slot_heap_tuple_datum);
     seams::slot_getsomeattr::set(seam_slot_getsomeattr);
     seams::slot_natts::set(seam_slot_natts);
     seams::exec_scan_slot_descriptor::set(seam_exec_scan_slot_descriptor);

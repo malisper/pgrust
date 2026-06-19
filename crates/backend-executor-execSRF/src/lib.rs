@@ -53,7 +53,7 @@ use types_nodes::funcapi::{
     SFRM_Materialize_Preferred, SFRM_Materialize_Random, SFRM_ValuePerCall,
 };
 use types_nodes::primnodes::Expr;
-use types_nodes::{EcxtId, EStateData, PlanStateData};
+use types_nodes::{EcxtId, EStateData, PlanStateData, SlotId, TupleSlotKind};
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_tuple::heaptuple::TupleDescData;
 
@@ -661,19 +661,87 @@ fn ExecInitFunctionResultSet<'mcx>(
     mcx::alloc_in(estate.es_query_cxt, state)
 }
 
+/// `ExecPrepareTuplestoreResult(sexpr, econtext, resultStore, resultDesc)`
+/// (execSRF.c:864) — set up to return values from an SRF's whole-tuplestore
+/// result. Stows the tuplestore on `funcResultStore` and (lazily) builds the
+/// `funcResultSlot` the drain reads each row out of.
+///
+/// In the owned model the C raw `TupleTableSlot *funcResultSlot` is an EState
+/// tuple-table pool [`SlotId`]; `MakeSingleTupleTableSlot(slotDesc,
+/// &TTSOpsMinimalTuple)` ↦ `ExecInitExtraTupleSlot` against the per-query pool
+/// (the slot lives as long as the SRF result, i.e. the query, which matches the
+/// C `func.fn_mcxt` lifetime for this leg).
+fn exec_prepare_tuplestore_result<'mcx>(
+    sexpr: &mut SetExprState<'mcx>,
+    econtext: EcxtId,
+    result_store: Tuplestorestate<'mcx>,
+    result_desc: Option<PgBox<'mcx, TupleDescData<'mcx>>>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let _ = econtext;
+    let per_query = estate.es_query_cxt;
+
+    // sexpr->funcResultStore = resultStore;
+    sexpr.funcResultStore = Some(mcx::alloc_in(per_query, result_store)?);
+
+    if sexpr.funcResultSlot.is_none() {
+        // Create a slot so we can read data out of the tuplestore. C picks the
+        // descriptor: funcResultDesc if known, else the function-provided
+        // resultDesc (copied so we don't assume it's long-lived), else fail.
+        let slot_desc: PgBox<'mcx, TupleDescData<'mcx>> = if let Some(d) =
+            sexpr.funcResultDesc.as_deref()
+        {
+            mcx::alloc_in(per_query, d.clone_in(per_query)?)?
+        } else if let Some(rd) = result_desc.as_deref() {
+            // don't assume resultDesc is long-lived: CreateTupleDescCopy.
+            let copy = backend_access_common_tupdesc::CreateTupleDescCopy(per_query, rd)?;
+            mcx::alloc_in(per_query, copy)?
+        } else {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg(
+                    "function returning setof record called in context that cannot accept type record",
+                )
+                .into_error());
+        };
+
+        // funcResultSlot = MakeSingleTupleTableSlot(slotDesc, &TTSOpsMinimalTuple);
+        // The descriptor moves into the pool slot.
+        let slot = backend_executor_execTuples_seams::exec_init_extra_tuple_slot::call(
+            estate,
+            Some(slot_desc),
+            TupleSlotKind::MinimalTuple,
+        )?;
+        sexpr.funcResultSlot = Some(slot);
+    }
+
+    // If function provided a tupdesc, cross-check it against funcResultDesc and
+    // (in C) free a dynamically-allocated one. The owned model drops
+    // `result_desc` by ownership at end of scope.
+    if let Some(rd) = result_desc.as_deref() {
+        if let Some(frd) = sexpr.funcResultDesc.as_deref() {
+            tupledesc_match(frd, rd)?;
+        }
+    }
+
+    // Register cleanup callback if we didn't already (C: RegisterExprContextCallback
+    // ShutdownSetExpr). The owned drain ends the tuplestore inline when exhausted
+    // (tuplestore_end in the drain tail); record the registration flag for parity.
+    sexpr.shutdown_reg = true;
+
+    Ok(())
+}
+
 /// `ExecMakeFunctionResultSet(fcache, econtext, argContext, &isNull, &isDone)`
 /// (execSRF.c:496) — evaluate a targetlist SRF and return one result row's
 /// `(Datum, isNull, isDone)`. nodeProjectSet.c.
 ///
-/// The ValuePerCall protocol (one `(Datum, isnull, isDone)` per call, the
-/// function reporting `ExprMultipleResult` until exhaustion) is ported in full;
-/// it is the path `generate_series`/`unnest` take. The Materialize-mode leg
-/// (`SFRM_Materialize`: the function returns a whole tuplestore which we then
-/// drain row-by-row through `funcResultStore`/`funcResultSlot`) requires
-/// `ExecPrepareTuplestoreResult` + a `MakeSingleTupleTableSlot` slot fed by
-/// `tuplestore_gettupleslot`; that slot-drain crosses the owned-EState slot
-/// pool model (the C `funcResultSlot` is a raw `TupleTableSlot *`) and panics
-/// precisely until that leg lands.
+/// Both protocols are ported: the ValuePerCall loop (one `(Datum, isnull,
+/// isDone)` per call, reporting `ExprMultipleResult` until exhaustion — the
+/// path `generate_series`/`unnest` take) and the Materialize leg
+/// (`SFRM_Materialize`: the function returns a whole tuplestore, prepared by
+/// [`exec_prepare_tuplestore_result`] and drained row-by-row through
+/// `funcResultStore`/`funcResultSlot`).
 fn ExecMakeFunctionResultSet<'mcx>(
     fcache: &mut SetExprState<'mcx>,
     econtext: EcxtId,
@@ -689,20 +757,55 @@ fn ExecMakeFunctionResultSet<'mcx>(
         // Guard against stack overflow due to overly complex expressions.
         backend_tcop_postgres_seams::check_stack_depth::call()?;
 
-        // If a previous call returned a set result as a tuplestore, continue
-        // reading rows from it until empty (execSRF.c:519).
+        // If a previous call of the function returned a set result in the form
+        // of a tuplestore, continue reading rows from it until it's empty
+        // (execSRF.c:519). `funcResultSlot` is the pool slot prepared by
+        // ExecPrepareTuplestoreResult.
         if fcache.funcResultStore.is_some() {
-            // The funcResultSlot drain (tuplestore_gettupleslot + slot_getattr /
-            // ExecFetchSlotHeapTupleDatum over a MakeSingleTupleTableSlot slot)
-            // crosses the owned-EState slot-pool boundary; left as the precise
-            // loud boundary (only reachable via the Materialize leg below).
-            return Err(ereport(ERROR)
-                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-                .errmsg(
-                    "ExecMakeFunctionResultSet: SFRM_Materialize tuplestore drain \
-                     (funcResultStore/funcResultSlot) is not yet wired",
-                )
-                .into_error());
+            let slot = fcache
+                .funcResultSlot
+                .expect("funcResultStore set without a funcResultSlot");
+            // foundTup = tuplestore_gettupleslot(funcResultStore, true, false,
+            //                                    funcResultSlot);
+            // (C switches into slot->tts_mcxt so the fetched tuple outlives the
+            // slot clear; the owned slot pool allocates the carrier in the
+            // per-query context, so no switch is needed.)
+            let found_tup = {
+                let store = fcache
+                    .funcResultStore
+                    .as_mut()
+                    .expect("funcResultStore present");
+                backend_utils_sort_storage_seams::tuplestore_gettupleslot::call(
+                    store, true, false, slot, estate,
+                )?
+            };
+
+            if found_tup {
+                // *isDone = ExprMultipleResult;
+                if fcache.funcReturnsTuple {
+                    // We must return the whole tuple as a Datum.
+                    // return ExecFetchSlotHeapTupleDatum(funcResultSlot);
+                    let d =
+                        backend_executor_execTuples_seams::exec_fetch_slot_heap_tuple_datum::call(
+                            estate, slot,
+                        )?;
+                    return Ok((d, false, ExprDoneCond::ExprMultipleResult));
+                } else {
+                    // Extract the first column and return it as a scalar.
+                    // return slot_getattr(funcResultSlot, 1, isNull);
+                    let (d, isnull) = backend_executor_execTuples_seams::slot_getattr::call(
+                        estate, slot, 1,
+                    )?;
+                    return Ok((d, isnull, ExprDoneCond::ExprMultipleResult));
+                }
+            }
+            // Exhausted the tuplestore, so clean up.
+            // tuplestore_end(funcResultStore); funcResultStore = NULL;
+            if let Some(store) = fcache.funcResultStore.take() {
+                backend_utils_sort_storage_seams::tuplestore_end::call(store);
+            }
+            // *isDone = ExprEndResult; *isNull = true; return (Datum) 0;
+            return Ok((Datum::default(), true, ExprDoneCond::ExprEndResult));
         }
 
         // Collect the current argument values into fcinfo, unless we already
@@ -763,8 +866,8 @@ fn ExecMakeFunctionResultSet<'mcx>(
             result_isnull = isnull;
             this_isdone = rsinfo.isDone;
             return_mode = rsinfo.returnMode;
-            // The Materialize leg would call ExecPrepareTuplestoreResult here;
-            // route it to the loud boundary below.
+            // SFRM_Materialize: the function built a whole tuplestore; prepare
+            // to drain it row-by-row (execSRF.c:658).
             if matches!(return_mode, SetFunctionReturnMode::Materialize) {
                 // Protocol cross-check: materialize mode must report
                 // ExprSingleResult (execSRF.c:660).
@@ -775,15 +878,16 @@ fn ExecMakeFunctionResultSet<'mcx>(
                         .into_error());
                 }
                 if rsinfo.setResult.payload().is_some() {
-                    return Err(ereport(ERROR)
-                        .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-                        .errmsg(
-                            "ExecMakeFunctionResultSet: SFRM_Materialize result preparation \
-                             (ExecPrepareTuplestoreResult) is not yet wired",
-                        )
-                        .into_error());
+                    // prepare to return values from the tuplestore.
+                    let set_desc = rsinfo.setDesc.take();
+                    let set_result = core::mem::take(&mut rsinfo.setResult);
+                    exec_prepare_tuplestore_result(
+                        fcache, econtext, set_result, set_desc, estate,
+                    )?;
+                    // loop back to top to start returning from the tuplestore.
+                    continue;
                 }
-                // setResult left null ⇒ empty set.
+                // if setResult was left null, treat it as empty set.
                 return Ok((Datum::default(), true, ExprDoneCond::ExprEndResult));
             }
         } else {

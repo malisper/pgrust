@@ -379,3 +379,149 @@ fn unregistered_srf_oid_errors() {
     let err = srf_invoke_by_oid(424242, &mut frame).unwrap_err();
     assert_eq!(err.sqlstate(), types_error::error::ERRCODE_UNDEFINED_FUNCTION);
 }
+
+// ===========================================================================
+//  SFRM_Materialize-mode drain (ExecMakeFunctionResultSet)
+// ===========================================================================
+
+const TEST_MAT_SRF_OID: types_core::Oid = 1_000_002;
+
+/// The drain workspace shared by the mocked `tuplestore_gettupleslot` /
+/// `slot_getattr` seams: `pending` is the rows still in the materialized
+/// store, `current` is the row the latest `gettupleslot` loaded into the slot.
+struct MatDrain {
+    pending: alloc::vec::Vec<i32>,
+    current: Option<i32>,
+}
+
+thread_local! {
+    static MAT_DRAIN: std::cell::RefCell<MatDrain> =
+        std::cell::RefCell::new(MatDrain { pending: alloc::vec::Vec::new(), current: None });
+}
+
+static MAT_INSTALL: Once = Once::new();
+
+/// A materialize-mode SRF: one call, `returnMode = SFRM_Materialize`,
+/// `isDone = ExprSingleResult`, and a `setResult` tuplestore carrying the rows
+/// {10, 20, 30}. Mirrors a composite/whole-set SRF (`json_each`-shaped) that
+/// builds its whole output in a tuplestore.
+fn materialize_srf<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+    let mcx = fcinfo.fn_mcxt.expect("fn_mcxt set");
+    // Seed the drain workspace and hand back a tuplestore (the MockStore payload
+    // is a marker; the mocked gettupleslot reads MAT_DRAIN).
+    MAT_DRAIN.with(|d| {
+        d.borrow_mut().pending = alloc::vec![10, 20, 30];
+        d.borrow_mut().current = None;
+    });
+    let rsinfo = fcinfo.resultinfo.as_mut().expect("resultinfo present");
+    rsinfo.returnMode = SetFunctionReturnMode::Materialize;
+    rsinfo.isDone = ExprDoneCond::ExprSingleResult;
+    rsinfo.setResult =
+        Tuplestorestate::begin(mcx, MockStore::default()).expect("materialize setResult");
+    fcinfo.isnull = false;
+    Datum::default()
+}
+
+fn install_materialize() {
+    setup();
+    // gettupleslot pops the next pending row into `current`; false when empty.
+    backend_utils_sort_storage_seams::tuplestore_gettupleslot::set(
+        |_state, _forward, _copy, _slot, _estate| {
+            MAT_DRAIN.with(|d| {
+                let mut d = d.borrow_mut();
+                if d.pending.is_empty() {
+                    d.current = None;
+                    Ok(false)
+                } else {
+                    let v = d.pending.remove(0);
+                    d.current = Some(v);
+                    Ok(true)
+                }
+            })
+        },
+    );
+    // slot_getattr(slot, 1) returns the row gettupleslot loaded.
+    backend_executor_execTuples_seams::slot_getattr::set(|_estate, _slot, _attnum| {
+        let v = MAT_DRAIN.with(|d| d.borrow().current.expect("row loaded"));
+        Ok((Datum::from_i32(v), false))
+    });
+    // The funcResultSlot allocation: any SlotId is fine (the mocks ignore it).
+    backend_executor_execTuples_seams::exec_init_extra_tuple_slot::set(
+        |_estate, _td, _ops| Ok(types_nodes::SlotId(99)),
+    );
+    // tuplestore_end: drop the carrier (no-op cleanup for the mock).
+    backend_utils_sort_storage_seams::tuplestore_end::set(|_state| {});
+    // check_stack_depth guard at the top of ExecMakeFunctionResultSet.
+    backend_tcop_postgres_seams::check_stack_depth::set(|| Ok(()));
+    register_srf(TEST_MAT_SRF_OID, materialize_srf);
+}
+
+#[test]
+fn make_function_result_set_materialize_drains_all_rows() {
+    MAT_INSTALL.call_once(install_materialize);
+
+    let ctx = MemoryContext::new("execSRF mat per-query");
+    let mcx = ctx.mcx();
+    let mut estate = EStateData::new_in(mcx);
+    let econtext = push_econtext(&mut estate);
+
+    let mut fcache = SetExprState::default();
+    fcache.funcReturnsSet = true;
+    // scalar (1-column) return → drain via slot_getattr, not the whole-tuple path.
+    fcache.funcReturnsTuple = false;
+    fcache.expr = Some(mcx::alloc_in(
+        mcx,
+        Expr::FuncExpr(FuncExpr {
+            funcid: TEST_MAT_SRF_OID,
+            funcresulttype: INT4OID,
+            funcretset: true,
+            funcvariadic: false,
+            funcformat: Default::default(),
+            funccollid: 0,
+            inputcollid: 0,
+            args: alloc::vec::Vec::new(),
+            location: -1,
+        }),
+    )
+    .unwrap());
+    fcache.func.fn_oid = TEST_MAT_SRF_OID;
+    fcache.func.fn_retset = true;
+    fcache.func.fn_strict = false;
+    fcache.args = Some(mcx::PgVec::new_in(mcx));
+    // funcResultDesc: a 1-column int4 descriptor so ExecPrepareTuplestoreResult
+    // builds the funcResultSlot from it.
+    let rd = backend_access_common_tupdesc::CreateTemplateTupleDesc(mcx, 1).unwrap();
+    let mut rd = mcx::alloc_in(mcx, rd).unwrap();
+    backend_access_common_tupdesc::TupleDescInitEntry(&mut rd, 1, Some("v"), INT4OID, -1, 0)
+        .unwrap();
+    fcache.funcResultDesc = Some(rd);
+    let frame = FunctionCallInfoBaseData {
+        flinfo: Some(fcache.func.clone()),
+        nargs: 0,
+        ..Default::default()
+    };
+    fcache.fcinfo = Some(mcx::alloc_in(mcx, frame).unwrap());
+
+    let arg_ctx = ctx.mcx().context().new_child("argcontext");
+
+    // First call: materialize-mode SRF runs, ExecPrepareTuplestoreResult sets up
+    // funcResultStore/funcResultSlot, then the restart loop drains the first row.
+    let mut got = alloc::vec::Vec::new();
+    loop {
+        let (d, isnull, isdone) =
+            ExecMakeFunctionResultSet(&mut fcache, econtext, &arg_ctx, &mut estate)
+                .expect("ExecMakeFunctionResultSet materialize");
+        if isdone == ExprDoneCond::ExprEndResult {
+            assert!(isnull, "end-of-set row is null");
+            break;
+        }
+        assert!(!isnull);
+        assert_eq!(isdone, ExprDoneCond::ExprMultipleResult);
+        got.push(d.as_i32());
+        // The funcResultStore is set after the first (materialize) call.
+        assert!(fcache.funcResultStore.is_some());
+    }
+    assert_eq!(got, alloc::vec![10, 20, 30], "materialize SRF drains {{10,20,30}}");
+    // Store cleaned up when exhausted.
+    assert!(fcache.funcResultStore.is_none());
+}

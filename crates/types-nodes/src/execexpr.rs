@@ -23,7 +23,7 @@ use types_tuple::backend_access_common_heaptuple::{Datum, FormedTuple};
 use types_tuple::heaptuple::TupleDescData;
 
 use crate::execnodes::{EcxtId, Opaque, SlotId};
-use types_slot::{TupleSlotKind, TupleTableSlot};
+use types_slot::TupleSlotKind;
 use crate::fmgr::FunctionCallInfoBaseData;
 use crate::nodes::NodeTag;
 use crate::planstate::{PlanStateLink, PlanStateNode};
@@ -1735,8 +1735,11 @@ pub struct SetExprState<'mcx> {
     /// (`None` = the C `NULL`).
     pub funcResultStore: Option<PgBox<'mcx, crate::funcapi::Tuplestorestate<'mcx>>>,
     /// `TupleTableSlot *funcResultSlot` — the row currently being returned
-    /// (`None` = the C `NULL`).
-    pub funcResultSlot: Option<PgBox<'mcx, TupleTableSlot<'mcx>>>,
+    /// (`None` = the C `NULL`). In the owned model the C raw `TupleTableSlot *`
+    /// is the EState tuple-table pool [`SlotId`] (the slot the Materialize-mode
+    /// drain reads each row out of); `MakeSingleTupleTableSlot` ↦
+    /// `ExecInitExtraTupleSlot` against the per-query `EState` pool.
+    pub funcResultSlot: Option<crate::execnodes::SlotId>,
     /// `TupleDesc funcResultDesc` — tuple descriptor for the function's output
     /// (`None` = the C `NULL`).
     pub funcResultDesc: Option<PgBox<'mcx, TupleDescData<'mcx>>>,
