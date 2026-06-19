@@ -310,7 +310,13 @@ pub fn PostmasterMain(argv: &[&str]) -> ! {
      * forked child deletes it (delete_postmaster_context) after copying out the
      * startup data it needs. The substrate (anchored on the per-process
      * TopMemoryContext) lives with the mmgr owner (portalmem `top_context`).
-     * getInstallationPaths is folded into the runtime's path resolution.
+     * getInstallationPaths(argv[0]) resolves `my_exec_path` (find_my_exec) and
+     * `pkglib_path` (get_pkglib_path) from the executable location — the same
+     * find_my_exec + get_pkglib_path computation InitStandaloneProcess performs
+     * for the single-user driver. Without this `pkglib_path` stays empty, so the
+     * `$libdir` macro in dynamic_library_path expands to "" and every library
+     * search (load_external_function / load_file) fails the absolute-path check.
+     * Both legs are idempotent (they skip when the global is already set).
      *
      * Set up the postmaster's signal handlers (pqinitmask / block / pqsignal /
      * unblock), the wait-event support, and the process-local latch. The
@@ -320,6 +326,12 @@ pub fn PostmasterMain(argv: &[&str]) -> ! {
      * setup + InitProcessLocalLatch in the boot driver).
      */
     backend_utils_mmgr_portalmem::top_context::create_postmaster_context();
+
+    // getInstallationPaths(argv[0]): set my_exec_path + pkglib_path from the
+    // executable location. C calls this from PostmasterMain; the seam body is
+    // the find_my_exec + get_pkglib_path tail shared with InitStandaloneProcess.
+    backend_common_exec_seams::resolve_standalone_paths::call(&argv_owned[0])
+        .unwrap_or_else(|e| panic!("getInstallationPaths: {e:?}"));
 
     sp::install_postmaster_signal_handlers::call();
     sp::init_process_local_latch::call();

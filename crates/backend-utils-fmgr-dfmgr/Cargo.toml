@@ -19,6 +19,8 @@ seam-core = { path = "../seam-core" }
 port-dynloader-seams = { path = "../port-dynloader-seams" }
 backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }
 backend-utils-fmgr-dfmgr-seams = { path = "../backend-utils-fmgr-dfmgr-seams" }
+# LOAD '<file>' (utility.c) routes to dfmgr's load_file via this out-seam.
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 common-path-seams = { path = "../common-path-seams" }
 backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
 backend-utils-init-small = { path = "../backend-utils-init-small" }

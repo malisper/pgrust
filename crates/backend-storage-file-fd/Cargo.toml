@@ -33,6 +33,8 @@ backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
 # they are fd.c/`src/port` primitives — sanctioned cross-crate install).
 backend-storage-file-tblspc-fs-seams = { path = "../backend-storage-file-tblspc-fs-seams" }
 backend-postmaster-postmaster-seams = { path = "../backend-postmaster-postmaster-seams" }
+# LOAD's closeAllVfds (utility.c) — fd.c owns closeAllVfds (sanctioned install).
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 backend-storage-file-fileperm-seams = { path = "../backend-storage-file-fileperm-seams" }
 # Seam crates for UNPORTED neighbors (calls panic loudly until the owner lands).
 backend-storage-aio-seams = { path = "../backend-storage-aio-seams" }

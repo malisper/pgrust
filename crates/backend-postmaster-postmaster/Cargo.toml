@@ -74,6 +74,7 @@ backend-utils-activity-status-seams = { path = "../backend-utils-activity-status
 # The shared host/GUC/config/shmem bring-up seams the single-user driver also
 # uses (real owners installed). Seams crate — acyclic.
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+backend-common-exec-seams = { path = "../backend-common-exec-seams" }
 backend-utils-init-small = { path = "../backend-utils-init-small" }
 backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
 # Postmaster-owned signal-handler + process-local-latch setup.

@@ -72,6 +72,13 @@ pub fn init_seams() {
         let _ = crate::sync_cleanup::RemovePgTempFiles();
     });
 
+    // `closeAllVfds()` (fd.c) — the LOAD utility statement (utility.c) closes all
+    // VFDs before loading the library. C returns void and the call site ignores
+    // failure ("probably not necessary..."), so the PgResult is discarded.
+    backend_tcop_utility_out_seams::close_all_vfds::set(|| {
+        let _ = crate::allocated_desc::closeAllVfds();
+    });
+
     // -- backend-storage-file-fd-seams --------------------------------------
 
     // file_perm.c: SetDataDirectoryCreatePerm (owns the create-mode globals).

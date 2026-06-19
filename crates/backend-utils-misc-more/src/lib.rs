@@ -69,6 +69,14 @@ pub fn init_seams() {
     backend_utils_misc_superuser_seams::superuser::set(superuser::superuser);
     backend_utils_misc_superuser_seams::superuser_arg::set(superuser::superuser_arg);
 
+    // LOAD '<file>' (utility.c) restricts the library name for non-superusers via
+    // `superuser()`. C's `bool superuser(void)` is infallible (its catalog read
+    // is cached); surface a lookup failure as a panic, matching the guc_funcs
+    // install of the same function.
+    backend_tcop_utility_out_seams::superuser::set(|| {
+        superuser::superuser().expect("superuser() catalog lookup failed")
+    });
+
     // utils/misc/rls.c inward seam. The seam is `Mcx`-free; the C
     // `check_enable_rls` charges the transient `get_rel_name` copy (used only
     // on the `noError == false` error path) to `CurrentMemoryContext`, so the

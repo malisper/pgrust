@@ -902,6 +902,17 @@ pub fn init_seams() {
     backend_utils_fmgr_dfmgr_seams::load_file::set(install_load_file);
     backend_utils_fmgr_dfmgr_seams::load_external_function::set(install_load_external_function);
 
+    // LOAD '<file>' (utility.c) reaches dfmgr's `load_file(filename, restricted)`
+    // through the tcop utility out-seam. C passes a non-NULL `filename`; route it
+    // through the same registry-aware installer so a ported builtin library
+    // (e.g. `$libdir/regress`) loads in-process without the OS dynamic loader.
+    backend_tcop_utility_out_seams::load_file::set(|filename, restricted| {
+        let filename = filename.ok_or_else(|| {
+            PgError::error("LOAD: missing library name").with_sqlstate(ERRCODE_INVALID_NAME)
+        })?;
+        install_load_file(filename, restricted)
+    });
+
     // Install the two ported-library consult-seams to delegate to the shared
     // registry the seams crate owns. Each ported library (regress, plpgsql, ...)
     // registers itself there from its own init_seams via `register_builtin_library`;

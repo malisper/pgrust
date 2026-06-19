@@ -14536,6 +14536,7 @@ name = "backend-postmaster-postmaster"
 version = "0.0.0"
 dependencies = [
  "backend-access-transam-xlog-seams",
+ "backend-common-exec-seams",
  "backend-libpq-pqcomm",
  "backend-libpq-pqsignal",
  "backend-postmaster-autovacuum-seams",
@@ -16272,6 +16273,7 @@ dependencies = [
  "backend-storage-file-tblspc-fs-seams",
  "backend-storage-ipc-dsm-core-seams",
  "backend-tcop-postgres-seams",
+ "backend-tcop-utility-out-seams",
  "backend-utils-activity-stat-seams",
  "backend-utils-activity-waitevent-seams",
  "backend-utils-adt-misc-seams",
@@ -21469,6 +21471,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-transam-parallel-rt-seams",
  "backend-storage-file-fd-seams",
+ "backend-tcop-utility-out-seams",
  "backend-utils-fmgr-dfmgr-seams",
  "backend-utils-init-small",
  "backend-utils-misc-guc-tables",
@@ -22043,6 +22046,7 @@ dependencies = [
  "backend-access-transam-xlog-seams",
  "backend-catalog-aclchk-seams",
  "backend-catalog-namespace-seams",
+ "backend-tcop-utility-out-seams",
  "backend-utils-adt-acl-seams",
  "backend-utils-cache-inval-seams",
  "backend-utils-cache-lsyscache-seams",

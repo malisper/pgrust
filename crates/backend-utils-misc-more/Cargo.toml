@@ -13,6 +13,8 @@ path = "src/lib.rs"
 backend-utils-misc-more-seams = { path = "../backend-utils-misc-more-seams" }
 backend-utils-misc-ps-status-seams = { path = "../backend-utils-misc-ps-status-seams" }
 backend-utils-misc-superuser-seams = { path = "../backend-utils-misc-superuser-seams" }
+# LOAD '<file>' (utility.c) restricts library names via superuser().
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 
 # Shared vocabulary.
 types-core = { path = "../types-core" }
