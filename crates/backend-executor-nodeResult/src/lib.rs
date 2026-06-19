@@ -194,10 +194,7 @@ pub fn ExecInitResult<'mcx>(
 ) -> PgResult<PgBox<'mcx, ResultState<'mcx>>> {
     let mcx = estate.es_query_cxt;
 
-    let result: &'mcx ResultPlan<'mcx> = match node {
-        types_nodes::nodes::Node::Result(r) => r,
-        other => panic!("castNode(Result, node) failed: {other:?}"),
-    };
+    let result: &'mcx ResultPlan<'mcx> = node.expect_result();
 
     // check for unsupported flags
     //   Assert(!(eflags & (EXEC_FLAG_MARK | EXEC_FLAG_BACKWARD)) ||
