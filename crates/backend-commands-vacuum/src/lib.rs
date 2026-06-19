@@ -120,8 +120,8 @@ const MAX_PARALLEL_WORKER_LIMIT: i32 = 1024;
 const SECURITY_RESTRICTED_OPERATION: i32 = 0x0002;
 /// `RVR_SKIP_LOCKED` (catalog/namespace.h).
 const RVR_SKIP_LOCKED: i32 = 0x02;
-/// `FirstMultiXactId` (access/multixact.h) — not present in types-core.
-const FirstMultiXactId: MultiXactId = 2;
+/// `FirstMultiXactId` (access/multixact.h:25) — `((MultiXactId) 1)`.
+const FirstMultiXactId: MultiXactId = 1;
 /// `PARALLEL_VACUUM_DELAY_REPORT_INTERVAL_NS` (vacuum.c) — `NS_PER_S`.
 const PARALLEL_VACUUM_DELAY_REPORT_INTERVAL_NS: i64 = 1_000_000_000;
 
