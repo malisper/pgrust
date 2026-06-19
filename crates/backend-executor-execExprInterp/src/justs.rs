@@ -492,7 +492,17 @@ pub fn ExecJustApplyFuncToCase<'mcx>(
     //
     // The function's argument cells (the C `&fcinfo->args[i]`) are the Func
     // step's `arg_cells` in the owned model.
-    let (nargs, arg_cells, fn_oid) = {
+    // nargs = op->d.func.nargs;
+    // fcinfo = op->d.func.fcinfo_data;
+    // args = fcinfo->args;
+    //
+    // Gather the function's `(fn_oid, fncollation)`, its per-argument result
+    // cells (the C `&fcinfo->args[i]`), and the call-expression node stamped on
+    // the resolved `FmgrInfo` (for polymorphic callees), exactly as
+    // `eval_scalar::func_step_inputs` does for the general FUNCEXPR opcodes. The
+    // per-arg value carries the CANONICAL `Datum<'mcx>` straight from the cell
+    // (a by-reference text/name argument survives the gather — WALL 1aq).
+    let (nargs, arg_cells, fn_oid, collation, fn_expr) = {
         let steps = state
             .steps
             .as_ref()
@@ -502,17 +512,26 @@ pub fn ExecJustApplyFuncToCase<'mcx>(
                 nargs,
                 arg_cells,
                 finfo,
+                fcinfo_data,
                 ..
             } => {
                 let cells: Vec<_> = arg_cells
                     .as_ref()
                     .map(|c| c.iter().copied().collect())
                     .unwrap_or_default();
-                let oid = finfo
+                let finfo = finfo
                     .as_ref()
-                    .expect("ExecJustApplyFuncToCase: func finfo not resolved")
-                    .fn_oid;
-                (*nargs, cells, oid)
+                    .expect("ExecJustApplyFuncToCase: func finfo not resolved");
+                let oid = finfo.fn_oid;
+                let collation = fcinfo_data
+                    .as_ref()
+                    .expect("ExecJustApplyFuncToCase: func fcinfo_data missing")
+                    .fncollation;
+                let fn_expr = finfo
+                    .fn_expr
+                    .as_ref()
+                    .and_then(|e| e.downcast_ref::<types_nodes::primnodes::Expr>());
+                (*nargs, cells, oid, collation, fn_expr)
             }
             _ => unreachable!("ExecJustApplyFuncToCase: step[1] is not an EEOP_FUNCEXPR_STRICT*"),
         }
@@ -521,10 +540,15 @@ pub fn ExecJustApplyFuncToCase<'mcx>(
     // strict function, so check for NULL args
     // for (int argno = 0; argno < nargs; argno++)
     //     if (args[argno].isnull) { *isnull = true; return (Datum) 0; }
+    //
+    // and build the canonical arg frame for the run case.
+    let mut args: Vec<Datum<'mcx>> = Vec::with_capacity(nargs as usize);
     for argno in 0..(nargs as usize) {
-        if state.result_cells.get(arg_cells[argno]).isnull {
+        let cell = state.result_cells.get(arg_cells[argno]);
+        if cell.isnull {
             return Ok((Datum::null(), true));
         }
+        args.push(cell.value.clone());
     }
 
     // fcinfo->isnull = false;
@@ -532,24 +556,15 @@ pub fn ExecJustApplyFuncToCase<'mcx>(
     // *isnull = fcinfo->isnull;
     // return d;
     //
-    // The strict-NULL arg scan and the casetest data shuffle above are done in
-    // the owned ResultCellArena. The function dispatch itself is a general
-    // N-argument fmgr call (`fn_addr(fcinfo)` over `fcinfo->args[0..nargs]`).
-    // The fmgr owner (backend-utils-fmgr-fmgr, #52) is merged, but its seam
-    // surface only exposes arity-specific leaves (`FunctionCall1/2/3Coll`) — it
-    // has no general "invoke this resolved frame" entry, and the trimmed
-    // `FunctionCallInfoBaseData` carries no `args[]` to pass one. A faithful
-    // dispatch for the arbitrary-nargs FUNCEXPR_STRICT shape therefore needs a
-    // general FunctionCallInvoke seam from the fmgr owner; gathering the
-    // arg-cells here and invoking it is the remaining step.
-    let _ = (fn_oid, estate);
-    panic!(
-        "ExecJustApplyFuncToCase: the strict-NULL arg scan and casetest shuffle \
-         are modeled; the arbitrary-nargs fn_addr(fcinfo) dispatch still needs a \
-         general FunctionCallInvoke seam from the fmgr owner (its seam surface \
-         exposes only FunctionCall1/2/3Coll, and the trimmed \
-         FunctionCallInfoBaseData has no args[] to pass a built frame)"
-    )
+    // The general arbitrary-`nargs` fmgr dispatch goes through the
+    // `function_call_invoke_datum` seam (the by-reference-capable canonical lane):
+    // the owned `FmgrInfo` carries only `fn_oid`, so the owner re-resolves by OID
+    // and runs the function under `fncollation` on the built `args` frame,
+    // returning the result `Datum` and the callee's `fcinfo->isnull`.
+    let mcx = estate.es_query_cxt;
+    let (value, isnull) =
+        function_call_invoke_datum::call(mcx, fn_oid, collation, &args, fn_expr)?;
+    Ok((value, isnull))
 }
 
 /// `ExecJustConst` — return a single Const value.
