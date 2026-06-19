@@ -145,7 +145,7 @@ fn convert_VALUES_to_ANY<'mcx>(
     // expression in every row. `values_lists` is a list of rows, each row a
     // `Node::List` of value `Node`s.
     for row in rte.values_lists.iter() {
-        if let Node::List(elems) = row.as_ref() {
+        if let Some(elems) = row.as_ref().as_list() {
             for value in elems.iter() {
                 if backend_optimizer_util_clauses::grounded::contain_volatile_functions(
                     value.as_expr(),
