@@ -488,13 +488,13 @@ fn rolespec_oid(role: &DdlRoleSpec<'_>, mcx: Mcx<'_>) -> PgResult<Oid> {
 /// `ExecuteGrantStmt(stmt)` (aclchk.c). The slow-path leg installed for
 /// `Node::GrantStmt`.
 pub fn execute_grant_stmt(mcx: Mcx<'_>, stmt: &Node<'_>) -> PgResult<()> {
-    let Node::GrantStmt(stmt) = stmt else {
+    let Some(stmt) = stmt.as_grantstmt() else {
         return Err(PgError::error("execute_grant_stmt: not a GrantStmt"));
     };
 
     // grantor clause: only for SQL compatibility; must be current user.
     if let Some(grantor) = &stmt.grantor {
-        let Node::RoleSpec(rs) = &**grantor else {
+        let Some(rs) = (**grantor).as_rolespec() else {
             return Err(PgError::error("ExecuteGrantStmt: grantor is not a RoleSpec"));
         };
         let grantor_oid = rolespec_oid(rs, mcx)?;
@@ -524,7 +524,7 @@ pub fn execute_grant_stmt(mcx: Mcx<'_>, stmt: &Node<'_>) -> PgResult<()> {
     // Convert the grantee RoleSpec list into an Oid list (PUBLIC -> ACL_ID_PUBLIC).
     let mut grantees: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, stmt.grantees.len())?;
     for g in stmt.grantees.iter() {
-        let Node::RoleSpec(rs) = &**g else {
+        let Some(rs) = (**g).as_rolespec() else {
             return Err(PgError::error("ExecuteGrantStmt: grantee is not a RoleSpec"));
         };
         let uid = match rs.roletype {
@@ -541,7 +541,7 @@ pub fn execute_grant_stmt(mcx: Mcx<'_>, stmt: &Node<'_>) -> PgResult<()> {
     } else {
         let mut acc = ACL_NO_RIGHTS;
         for p in stmt.privileges.iter() {
-            let Node::AccessPriv(privnode) = &**p else {
+            let Some(privnode) = (**p).as_accesspriv() else {
                 return Err(PgError::error("ExecuteGrantStmt: privilege is not an AccessPriv"));
             };
             let AccessPriv { priv_name, cols } = privnode;
@@ -602,7 +602,7 @@ fn object_names_to_oids<'mcx>(
             for name in objnames.iter() {
                 // get_object_address(OBJECT_SCHEMA, String(name), ...) ->
                 // get_object_address_unqualified -> get_namespace_oid(name, false).
-                let Node::String(s) = &**name else {
+                let Some(s) = (**name).as_string() else {
                     return Err(PgError::error(
                         "objectNamesToOids(OBJECT_SCHEMA): object name is not a String node",
                     ));
