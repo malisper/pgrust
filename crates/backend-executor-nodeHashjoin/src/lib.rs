@@ -646,10 +646,7 @@ pub fn ExecInitHashJoin<'mcx>(
 ) -> PgResult<PgBox<'mcx, HashJoinState<'mcx>>> {
     let mcx = estate.es_query_cxt;
 
-    let hj: &'mcx HashJoin<'mcx> = match node {
-        types_nodes::nodes::Node::HashJoin(h) => h,
-        other => panic!("castNode(HashJoin, node) failed: {other:?}"),
-    };
+    let hj: &'mcx HashJoin<'mcx> = node.expect_hashjoin();
 
     // check for unsupported flags
     debug_assert!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) == 0);
@@ -799,9 +796,9 @@ fn node_list_to_exprs<'mcx>(
     let nodes = nodes.unwrap_or(&[]);
     let mut out: PgVec<'mcx, Expr> = vec_with_capacity_in(mcx, nodes.len())?;
     for n in nodes {
-        match n {
-            types_nodes::nodes::Node::Expr(e) => out.push(e.clone()),
-            other => panic!("hashkeys list element is not an expression node: {other:?}"),
+        match n.as_expr() {
+            Some(e) => out.push(e.clone()),
+            None => panic!("hashkeys list element is not an expression node: {n:?}"),
         }
     }
     Ok(out)
@@ -845,8 +842,7 @@ fn build_hash_exprs<'mcx>(
     let outer_keys: PgVec<'mcx, Expr> = node_list_to_exprs(mcx, hj.hashkeys.as_deref())?;
     let inner_keys: PgVec<'mcx, Expr> = {
         let inner_hash_keys = match hj.join.plan.righttree.as_deref() {
-            Some(types_nodes::nodes::Node::Hash(h)) => h.hashkeys.as_deref(),
-            Some(other) => panic!("innerPlan(HashJoin) is not a Hash node: {other:?}"),
+            Some(p) => p.expect_hash().hashkeys.as_deref(),
             None => None,
         };
         node_list_to_exprs(mcx, inner_hash_keys)?
@@ -899,8 +895,7 @@ fn build_hash_exprs<'mcx>(
     // optimization is disabled). The owner sets up the skew hash function from
     // `outer_hashfuncid[0]` / `linitial_oid(hashcollations)` only when valid.
     let skew_table = match hj.join.plan.righttree.as_deref() {
-        Some(types_nodes::nodes::Node::Hash(h)) => h.skewTable,
-        Some(other) => panic!("innerPlan(HashJoin) is not a Hash node: {other:?}"),
+        Some(p) => p.expect_hash().skewTable,
         None => 0,
     };
     nodeHash::setup_skew_hashfunction::call(
