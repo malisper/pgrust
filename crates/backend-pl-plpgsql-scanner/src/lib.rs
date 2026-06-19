@@ -712,6 +712,23 @@ impl<'mcx> PlpgsqlScanner<'mcx> {
                 let kwnum = scan_keyword_lookup(&yytext, RESERVED_PL_KEYWORDS);
                 if kwnum >= 0 {
                     token = RESERVED_PL_KEYWORDS[kwnum as usize].1;
+                } else if token != IDENT
+                    && token != UIDENT
+                    && token != PARAM
+                    && is_identifier_word(&yytext)
+                {
+                    // The repo's stateless `core_yylex` resolves the *full* core
+                    // SQL keyword list, so an unquoted word that is a core SQL
+                    // keyword (`return`, `call`, `fetch`, `table`, `default`, ...)
+                    // comes back bearing that core keyword's token. But C hands
+                    // the core scanner *only* PL/pgSQL's reserved list, so any
+                    // word not in that list — including a core SQL keyword that is
+                    // an *unreserved* (or non-) PL keyword — is returned as plain
+                    // `IDENT`. Force `IDENT` here so the `plpgsql_yylex` IDENT
+                    // path runs (variable lookup + the `UnreservedPLKeywords`
+                    // reclassification in `finish_word`), reproducing
+                    // `plpgsql_scanner_init`'s reserved-only core keyword list.
+                    token = IDENT;
                 }
             }
 
@@ -928,6 +945,23 @@ impl<'mcx> PlpgsqlScanner<'mcx> {
         let n = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
         String::from_utf8_lossy(&slice[..n]).into_owned()
     }
+}
+
+/// Is `text` an unquoted identifier-shaped word — the only token shape the core
+/// SQL scanner ever returns as a keyword? (A keyword match requires the
+/// `{identifier}` flex rule: a leading letter/`_`, then letters/digits/`_`/`$`.)
+/// Used to tell a core-SQL-keyword token (which the reserved-only PL core
+/// scanner of C would instead have returned as `IDENT`) apart from operator and
+/// punctuation tokens, which must keep their token code.
+fn is_identifier_word(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    match bytes.first() {
+        Some(&c) if c == b'_' || c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    bytes
+        .iter()
+        .all(|&c| c == b'_' || c == b'$' || c.is_ascii_alphanumeric())
 }
 
 /// `plpgsql_token_is_unreserved_keyword(token)` — is `token` an unreserved
