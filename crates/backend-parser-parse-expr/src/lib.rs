@@ -372,12 +372,14 @@ fn transform_expr_node<'mcx>(
                 "transformExprRecurse: unexpected already-analyzed BoolExpr",
             ))
         }
-        Expr::GroupingFunc(_) => seam_transform_grouping_func(pstate, Node::Expr(e)),
+        Expr::GroupingFunc(_) => {
+            seam_transform_grouping_func(pstate, Node::mk_expr(aexpr_clone_ctx(pstate), e))
+        }
         Expr::MergeSupportFunc(f) => transformMergeSupportFunc(pstate, f),
 
         Expr::NamedArgExpr(mut na) => {
             // na->arg = transformExprRecurse(pstate, na->arg); result = expr.
-            let arg = na.arg.take().map(|b| expr_to_node(*b));
+            let arg = na.arg.take().map(|b| expr_to_node(aexpr_clone_ctx(pstate), *b));
             let new_arg = transformExprRecurse(pstate, arg)?;
             na.arg = new_arg.map(Box::new);
             Ok(Expr::NamedArgExpr(na))
@@ -420,7 +422,7 @@ fn transform_expr_node<'mcx>(
 
         Expr::NullTest(mut n) => {
             // n->arg = transformExprRecurse(...); argisrow from arg's type.
-            let arg = n.arg.take().map(|b| expr_to_node(*b));
+            let arg = n.arg.take().map(|b| expr_to_node(aexpr_clone_ctx(pstate), *b));
             let new_arg = transformExprRecurse(pstate, arg)?;
             n.argisrow = lsyscache::type_is_rowtype::call(expr_type(new_arg.as_ref())?)?;
             n.arg = new_arg.map(Box::new);
@@ -440,13 +442,15 @@ fn transform_expr_node<'mcx>(
         Expr::CaseTestExpr(_) | Expr::Var(_) => Ok(e),
 
         // SQL/JSON predicate — owning parse-node vocabulary not yet in types.
-        Expr::JsonIsPredicate(_) => seam_transform_json_expr(pstate, Node::Expr(e)),
+        Expr::JsonIsPredicate(_) => {
+            seam_transform_json_expr(pstate, Node::mk_expr(aexpr_clone_ctx(pstate), e))
+        }
 
         other => Err(ereport(ERROR)
             .errcode(ERRCODE_INTERNAL_ERROR)
             .errmsg(alloc::format!(
                 "unrecognized node type: {}",
-                Node::Expr(other).node_tag().0
+                Node::mk_expr(aexpr_clone_ctx(pstate), other).node_tag().0
             ))
             .into_error()),
     }
@@ -454,8 +458,13 @@ fn transform_expr_node<'mcx>(
 
 /// Wrap a typed `Expr` back into a raw `Node` for re-entry into
 /// [`transformExprRecurse`] (the C casts `(Node *) expr` freely).
-fn expr_to_node(e: Expr) -> Node<'static> {
-    Node::Expr(e)
+///
+/// The `mcx` arg threads the allocation context through the constructor (routed
+/// via `Node::mk_expr`) so this construction site is ready for the node-opaque
+/// flip (§6 `value_no_mcx` sub-sweep); today `mk_expr` ignores `mcx` so this is
+/// behavior-preserving.
+fn expr_to_node<'mcx>(mcx: mcx::Mcx<'mcx>, e: Expr) -> Node<'mcx> {
+    Node::mk_expr(mcx, e)
 }
 
 // ===========================================================================
@@ -671,7 +680,7 @@ fn transformAExprIn<'mcx>(
             .ok_or_else(|| PgError::error("transformAExprIn: IN item is NULL"))?;
         rexprs.push(rexpr.clone());
         // contain_vars_of_level((Node *) rexpr, 0).
-        if contain_vars_of_level(&Node::Expr(rexpr.clone()), 0) {
+        if contain_vars_of_level(&Node::mk_expr(aexpr_clone_ctx(pstate), rexpr.clone()), 0) {
             rvars.push(rexpr);
             has_rvars = true;
         } else {
@@ -1242,7 +1251,7 @@ fn transformBooleanTest<'mcx>(
         BoolTestType::IS_NOT_UNKNOWN => "IS NOT UNKNOWN",
     };
 
-    let arg = b.arg.take().map(|x| expr_to_node(*x));
+    let arg = b.arg.take().map(|x| expr_to_node(aexpr_clone_ctx(pstate), *x));
     let arg = transformExprRecurse(pstate, arg)?
         .ok_or_else(|| PgError::error("transformBooleanTest: BooleanTest argument is NULL"))?;
     let arg = coerce::coerce_to_boolean::call(pstate, arg, clausename)?;
@@ -1513,11 +1522,14 @@ fn transformCaseExpr<'mcx>(
     // Transform the default clause; NULL → untyped NULL A_Const.
     let defresult_node: Node<'mcx> = match boxed_node(c.defresult) {
         Some(d) => d,
-        None => Node::A_Const(A_Const {
-            val: None,
-            isnull: true,
-            location: -1,
-        }),
+        None => Node::mk_a_const(
+            aexpr_clone_ctx(pstate),
+            A_Const {
+                val: None,
+                isnull: true,
+                location: -1,
+            },
+        ),
     };
     let mut defresult = transformExprRecurse(pstate, Some(defresult_node))?
         .ok_or_else(|| PgError::error("transformCaseExpr: CASE default result is NULL"))?;
@@ -3389,7 +3401,10 @@ fn sql_fn_post_column_ref<'mcx>(
         return Ok(res.map(Node::Expr));
     }
 
-    Ok(Some(Node::Expr(Expr::Param(param))))
+    Ok(Some(Node::mk_expr(
+        aexpr_clone_ctx(pstate),
+        Expr::Param(param),
+    )))
 }
 
 /// `sql_fn_make_param` (executor/functions.c:485) — construct a `PARAM_EXTERN`
