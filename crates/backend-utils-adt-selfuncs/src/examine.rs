@@ -28,8 +28,10 @@
 //!   the stats-absent / default-estimate paths are the live common case.
 //! * `statext_expressions_load` — extended-statistics per-expression tuple load
 //!   (unported; reached only after an `equal()` match on an EXPRESSIONS stat).
-//! * the CTE-subroot recursion (`cte_plan_ids` / `glob->subroots`) requires the
-//!   unported CTE planner.
+//! * the CTE-subroot recursion (`cte_plan_ids` / `glob->subroots`) is live: the
+//!   referenced CTE's subroot is located via the `parent_root` walk +
+//!   `cte_plan_ids` index + the run's subroot store (populated by
+//!   `SS_process_ctes`); see [`examine_cte_subroot`].
 
 use mcx::Mcx;
 use types_core::primitive::{AttrNumber, Index, InvalidOid, Oid, OidIsValid};
@@ -38,7 +40,7 @@ use types_nodes::bitmapset::Bitmapset;
 use types_nodes::parsenodes::RTEKind;
 use types_nodes::primnodes::{Expr, Var};
 use types_pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
-use types_pathnodes::{NodeId, PlannerInfo, RelId, Relids, SpecialJoinInfo};
+use types_pathnodes::{NodeId, PlanId, PlannerInfo, RelId, Relids, SpecialJoinInfo};
 use types_selfuncs::{StatsTuple, StatsTupleFreeFunc, VariableStatData};
 
 use backend_catalog_aclchk_seams as aclchk;
@@ -451,14 +453,23 @@ fn examine_subquery_variable<'mcx, 'run>(
 
     // Find the subquery's planner subroot.
     let subroot: &PlannerInfo = if rtekind == RTEKind::RTE_SUBQUERY {
+        // Fetch RelOptInfo for subquery. Note that we don't change the rel
+        // returned in vardata, since caller expects it to be a rel of the
+        // caller's query level. Because we might already be recursing, we can't
+        // use that rel pointer either, but have to look up the Var's rel afresh.
         let relid = rel_seams::find_base_rel::call(root, var.varno);
         match root.rel(relid).subroot.0.as_deref() {
             Some(sr) => sr,
             None => return Ok(()), // subquery hasn't been planned yet
         }
     } else {
-        // CTE case (see examine_cte_variable's seam-and-panic rationale).
-        return examine_cte_variable(mcx, run, root, var, vardata);
+        // CTE case is more difficult: find the referenced CTE, and locate the
+        // subroot previously made for it (`list_nth(root->glob->subroots,
+        // plan_id - 1)`).
+        match examine_cte_subroot(run, root, var)? {
+            Some(sr) => sr,
+            None => return Ok(()), // subquery hasn't been planned yet
+        }
     };
 
     // Use the subquery parsetree as mangled by the planner (subroot->parse).
@@ -522,27 +533,89 @@ fn examine_subquery_variable<'mcx, 'run>(
     Ok(())
 }
 
-/// The CTE arm of [`examine_subquery_variable`].
-fn examine_cte_variable<'mcx, 'run>(
-    _mcx: Mcx<'mcx>,
-    _run: &PlannerRun<'run>,
-    _root: &PlannerInfo,
-    _var: &Var,
-    _vardata: &mut VariableStatData,
-) -> PgResult<()> {
-    // The CTE subroot lookup walks `cteroot->parse->cteList` to match the CTE by
-    // `rte->ctename`, indexes `cteroot->cte_plan_ids`, and resolves
-    // `glob->subroots[plan_id - 1]`. The parent_root chain + per-run CTE
-    // planning that populate `cte_plan_ids` and the run's subroot store are
-    // produced only by the unported CTE planner (SS_process_ctes /
-    // subquery_planner). Until that lands, recursing into a CTE column's stats
-    // is seam-and-panic (mirror-PG-and-panic) rather than silently returning
-    // stats-free vardata.
-    panic!(
-        "selfuncs: examine_simple_variable CTE recursion is blocked — locating the CTE's planner \
-         subroot via parent_root walk + cte_plan_ids -> glob->subroots requires the unported CTE \
-         planner to have populated cte_plan_ids and the run's subroot store"
-    )
+/// The CTE-subroot lookup arm of [`examine_subquery_variable`] (the `else`
+/// branch of selfuncs.c's `examine_simple_variable` `RTE_CTE` case).
+///
+/// Walks `cteroot` up `rte->ctelevelsup` via `parent_root`, finds the
+/// referenced CTE's index `ndx` by matching `rte->ctename` against
+/// `cteroot->parse->cteList`, reads `plan_id = list_nth_int(cteroot->
+/// cte_plan_ids, ndx)`, and returns `subroot = list_nth(root->glob->subroots,
+/// plan_id - 1)`. The subroot PlannerInfos live in the run's subroot store
+/// (`glob->subroots` carries the parallel [`PlanId`] handles), so the C
+/// `list_nth(root->glob->subroots, plan_id - 1)` becomes
+/// `run.resolve_subroot(PlanId(plan_id - 1))`.
+///
+/// `cte_plan_ids` and the run's subroot store are populated by `SS_process_ctes`
+/// (backend-optimizer-plan-init-subselect), which runs during planning, so this
+/// is reachable for the common non-recursive-CTE case. Returns `Ok(None)` only
+/// where C punts (subroot not yet planned — `subroot == NULL`).
+fn examine_cte_subroot<'mcx, 'run, 'a>(
+    run: &'a PlannerRun<'run>,
+    root: &PlannerInfo,
+    var: &Var,
+) -> PgResult<Option<&'a PlannerInfo>> {
+    let rte = planner_rt_fetch(run, root, var.varno as Index);
+    let ctename = rte.ctename.as_ref().map(|s| s.as_str()).unwrap_or("");
+
+    // Find the referenced CTE, and locate the subroot previously made for it.
+    //
+    // levelsup = rte->ctelevelsup; cteroot = root;
+    // while (levelsup-- > 0) { cteroot = cteroot->parent_root; ... }
+    let mut cteroot: &PlannerInfo = root;
+    let mut levelsup = rte.ctelevelsup;
+    while levelsup > 0 {
+        levelsup -= 1;
+        cteroot = cteroot.parent_root.as_deref().ok_or_else(|| {
+            // shouldn't happen
+            PgError::error(alloc::format!("bad levelsup for CTE \"{ctename}\""))
+        })?;
+    }
+
+    // ndx = index of the matching CTE in cteroot->parse->cteList.
+    //
+    // Note: cte_plan_ids can be shorter than cteList, if we are still working on
+    // planning the CTEs (ie, this is a side-reference from another CTE). So we
+    // mustn't use forboth here.
+    let mut ndx: usize = 0;
+    let mut found = false;
+    {
+        let parse = run.resolve(cteroot.parse);
+        for cte_node in parse.cteList.iter() {
+            let cte = cte_node
+                .as_commontableexpr()
+                .ok_or_else(|| PgError::error("cteList element is not a CommonTableExpr"))?;
+            let this_name = cte.ctename.as_ref().map(|s| s.as_str()).unwrap_or("");
+            if this_name == ctename {
+                found = true;
+                break;
+            }
+            ndx += 1;
+        }
+    }
+    if !found {
+        // shouldn't happen
+        return Err(PgError::error(alloc::format!(
+            "could not find CTE \"{ctename}\""
+        )));
+    }
+    if ndx >= cteroot.cte_plan_ids.len() {
+        // shouldn't happen
+        return Err(PgError::error(alloc::format!(
+            "could not find plan for CTE \"{ctename}\""
+        )));
+    }
+    let plan_id = cteroot.cte_plan_ids[ndx];
+    if plan_id <= 0 {
+        // shouldn't happen
+        return Err(PgError::error(alloc::format!(
+            "no plan was made for CTE \"{ctename}\""
+        )));
+    }
+
+    // subroot = list_nth(root->glob->subroots, plan_id - 1). The owned subroot
+    // PlannerInfos live in the run's parallel subroot store, keyed by the same
+    // 1-based plan_id (here converted to the 0-based PlanId handle).
+    Ok(Some(run.resolve_subroot(PlanId(plan_id as u32 - 1))))
 }
 
 /* ===========================================================================
