@@ -51,6 +51,8 @@ backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-sea
 backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
 backend-access-transam-varsup-seams = { path = "../backend-access-transam-varsup-seams" }
 backend-catalog-pg-inherits-seams = { path = "../backend-catalog-pg-inherits-seams" }
+backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
+types-acl = { path = "../types-acl" }
 backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
@@ -68,6 +70,8 @@ backend-access-table-table = { path = "../backend-access-table-table" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-access-common-scankey = { path = "../backend-access-common-scankey" }
 backend-access-common-relation-seams = { path = "../backend-access-common-relation-seams" }
+backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }
 backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
 # (backend-utils-cache-relcache-seams already declared above — relation_rules)

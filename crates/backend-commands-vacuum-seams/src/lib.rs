@@ -151,8 +151,9 @@ seam_core::seam!(pub fn vacuum_buffer_usage_limit() -> PgResult<i32>);
 seam_core::seam!(pub fn get_access_strategy_with_size(ring_size: i32) -> PgResult<BufferAccessStrategy>);
 
 // ---- utils/acl.h -------------------------------------------------------
-seam_core::seam!(pub fn database_ownercheck() -> PgResult<bool>);
-seam_core::seam!(pub fn pg_class_aclcheck_maintain(relid: Oid) -> PgResult<bool>);
+// `object_ownercheck(DatabaseRelationId, MyDatabaseId, GetUserId())` and
+// `pg_class_aclcheck(relid, GetUserId(), ACL_MAINTAIN)` are owned by aclchk.c
+// and called directly through `backend-catalog-aclchk-seams` from vacuum.c.
 
 // ---- access/table.h + storage/lmgr.h + catalog/namespace.h ------------
 seam_core::seam!(pub fn try_relation_open(relid: Oid, lmode: i32) -> PgResult<Option<Oid>>);
@@ -169,8 +170,8 @@ seam_core::seam!(pub fn search_syscache_class<'mcx>(
 // `find_all_inheritors` -> backend-catalog-pg-inherits-seams (owner-installed).
 seam_core::seam!(pub fn unlock_relation_oid(relid: Oid, lockmode: i32) -> PgResult<()>);
 // `relation_close` -> backend-access-table-table-seams (owner-installed).
-seam_core::seam!(pub fn lock_relation_id_for_session(rel: Oid, lockmode: i32) -> PgResult<()>);
-seam_core::seam!(pub fn unlock_relation_id_for_session(rel: Oid, lockmode: i32) -> PgResult<()>);
+seam_core::seam!(pub fn lock_relation_id_for_session(rel: types_storage::lock::LockRelId, lockmode: i32) -> PgResult<()>);
+seam_core::seam!(pub fn unlock_relation_id_for_session(rel: types_storage::lock::LockRelId, lockmode: i32) -> PgResult<()>);
 
 // ---- get_all_vacuum_rels seqscan --------------------------------------
 seam_core::seam!(pub fn scan_all_pg_class<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Vec<PgClassScanRow<'mcx>>>);

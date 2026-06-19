@@ -28,6 +28,8 @@
 
 extern crate alloc;
 
+mod catalog;
+
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -1770,6 +1772,11 @@ mod gucs {
 }
 
 pub fn init_seams() {
+    // pg_tablespace catalog primitives (table_open/scan/insert/update/delete)
+    // inlined into tablespace.c — there is no separate pg_tablespace.c unit, so
+    // this unit owns and installs them.
+    catalog::install();
+
     backend_commands_tablespace_seams::tblspc_redo::set(tblspc_redo);
     backend_commands_tablespace_seams::get_tablespace_name::set(get_tablespace_name);
     backend_commands_tablespace_seams::get_tablespace_oid::set(|name, missing_ok| {

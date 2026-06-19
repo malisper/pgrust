@@ -20,6 +20,8 @@
 
 use backend_access_heap_vacuumlazy_seams as vacuumlazy;
 use backend_commands_vacuum_seams as vacuum;
+use backend_access_common_relation_seams as relation_seam;
+use backend_storage_lmgr_lmgr_seams as lmgr_seam;
 
 pub fn init_seams() {
     // --- backend-commands-vacuum-seams (this unit's public helpers) ---------
@@ -88,6 +90,42 @@ pub fn init_seams() {
     // --- catalog SCAN + inplace-WRITE seams (vacuum.c's own pg_class /
     //     pg_database seqscans + systable_inplace_update writers) ---------------
     crate::catalog_scan::install();
+
+    // --- access/table.h + storage/lmgr.h relation lock/open seams (vacuum.c's
+    //     own vacuum_open_relation / vac_open_indexes session-lock calls) -------
+    // These delegate straight to their real owners (relation.c / lmgr.c). The
+    // vacuum model carries the opened relation as a bare Oid: the lock is taken
+    // and held until commit (the owner's `.keep()`), and the relation is
+    // reopened by Oid later — vacuum.c's open-then-recover idiom.
+    vacuum::try_relation_open::set(|relid, lmode| {
+        // try_relation_open(relid, lmode): take the lock (kept until commit) and
+        // return the rel's Oid, or None if the relation has disappeared. The
+        // owned Relation drops here (relcache ref released); the lock is held.
+        let cx = mcx::MemoryContext::new("vacuum_open_relation");
+        let opened = relation_seam::try_relation_open::call(cx.mcx(), relid, lmode)?;
+        Ok(opened.map(|rel| rel.rd_id))
+    });
+    vacuum::conditional_lock_relation_oid::set(|relid, lmode| {
+        // ConditionalLockRelationOid(relid, lmode) -> bool. The owner returns a
+        // RAII guard; on success keep the lock (transaction-scoped) and report
+        // true, else false (C's `LOCKACQUIRE_NOT_AVAIL`).
+        match lmgr_seam::conditional_lock_relation_oid::call(relid, lmode)? {
+            Some(guard) => {
+                guard.keep();
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    });
+    vacuum::unlock_relation_oid::set(|relid, lmode| {
+        lmgr_seam::unlock_relation_oid::call(relid, lmode)
+    });
+    vacuum::lock_relation_id_for_session::set(|relid, lmode| {
+        lmgr_seam::lock_relation_id_for_session::call(relid, lmode)
+    });
+    vacuum::unlock_relation_id_for_session::set(|relid, lmode| {
+        lmgr_seam::unlock_relation_id_for_session::call(relid, lmode)
+    });
 
     // --- ProcessUtility dispatch arm (utility.c VacuumStmt → ExecVacuum) ------
     backend_tcop_utility_out_seams::exec_vacuum::set(exec_vacuum_arm);

@@ -93,6 +93,7 @@ use backend_storage_lmgr_lwlock_seams as lwlock_seam;
 use backend_storage_ipc_procarray_seams as procarray_seam;
 use backend_access_transam_varsup_seams as varsup_seam;
 use backend_catalog_pg_inherits_seams as pg_inherits_seam;
+use backend_catalog_aclchk_seams as aclchk_seam;
 use backend_utils_misc_guc_seams as guc_seam;
 use backend_utils_init_miscinit_seams as miscinit_seam;
 use backend_utils_init_small_seams as init_small_seam;
@@ -983,8 +984,14 @@ pub fn vacuum_is_permitted_for_relation(
      *   - the role has the MAINTAIN privilege on the relation
      *----------
      */
-    if (rt::database_ownercheck::call()? && !reltuple.relisshared)
-        || rt::pg_class_aclcheck_maintain::call(relid)?
+    let userid = miscinit_seam::get_user_id::call();
+    if (aclchk_seam::object_ownercheck::call(
+        types_core::catalog::DATABASE_RELATION_ID,
+        init_small_seam::my_database_id::call(),
+        userid,
+    )? && !reltuple.relisshared)
+        || aclchk_seam::pg_class_aclcheck::call(relid, userid, types_acl::acl::ACL_MAINTAIN)?
+            == types_acl::acl::AclResult::AclcheckOk
     {
         return Ok(true);
     }
@@ -2081,7 +2088,7 @@ fn vacuum_rel<'mcx>(
      * Get a session-level lock too. ...
      */
     lockrelid = relcache_seam::rel_lock_relid::call(rel_handle)?;
-    rt::lock_relation_id_for_session::call(lockrelid.relId, lmode)?;
+    rt::lock_relation_id_for_session::call(lockrelid, lmode)?;
 
     /*
      * Set index_cleanup option based on index_cleanup reloption ...
@@ -2251,7 +2258,7 @@ fn vacuum_rel<'mcx>(
     /*
      * Now release the session-level lock on the main table.
      */
-    rt::unlock_relation_id_for_session::call(lockrelid.relId, lmode)?;
+    rt::unlock_relation_id_for_session::call(lockrelid, lmode)?;
 
     /* Report that we really did it. */
     Ok(true)
