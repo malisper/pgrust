@@ -113,6 +113,47 @@ thread_local! {
     static SIGNAL_DUE_AT: Cell<TimestampTz> = const { Cell::new(0) };
 }
 
+/// RAII guard that blocks SIGALRM delivery for its lifetime, restoring the
+/// previous signal mask on drop.
+///
+/// C relies on the implicit atomicity of the mainline w.r.t. the SIGALRM
+/// handler: by the time `schedule_alarm()` arms the kernel timer (and may, on
+/// an already-due timeout, cause the handler to fire almost immediately), the
+/// mainline is no longer touching the global timeout arrays.  In this port the
+/// arrays are a `RefCell`, and `schedule_alarm()` is reached *while the caller
+/// still holds a `borrow()`* of that cell; an interrupting handler would then
+/// try `borrow_mut()` and trip `RefCell already borrowed`.  Blocking SIGALRM
+/// across the borrow-holding `schedule_alarm()` window holds any such interrupt
+/// pending until the borrow is released and the mask restored — at which point
+/// the handler runs exactly once, with no live conflicting borrow, matching C.
+struct BlockSigAlarm {
+    saved: libc::sigset_t,
+}
+
+impl BlockSigAlarm {
+    fn new() -> Self {
+        // SAFETY: standard POSIX signal-mask manipulation; `set`/`saved` are
+        // owned local sigset_t values that we fully initialize via sigemptyset.
+        unsafe {
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            let mut saved: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, libc::SIGALRM);
+            libc::sigprocmask(libc::SIG_BLOCK, &set, &mut saved);
+            BlockSigAlarm { saved }
+        }
+    }
+}
+
+impl Drop for BlockSigAlarm {
+    fn drop(&mut self) {
+        // SAFETY: restore the exact mask captured in new().
+        unsafe {
+            libc::sigprocmask(libc::SIG_SETMASK, &self.saved, std::ptr::null_mut());
+        }
+    }
+}
+
 #[inline]
 fn disable_alarm() {
     ALARM_ENABLED.with(|c| c.set(false));
@@ -298,6 +339,22 @@ fn schedule_alarm(data: &TimeoutData, now: TimestampTz) -> PgResult<()> {
         }
     }
     Ok(())
+}
+
+/// Borrow TIMEOUT_DATA and run [`schedule_alarm`] with SIGALRM blocked for the
+/// whole borrow window, including the `setitimer()` call.
+///
+/// `schedule_alarm()` re-enables the alarm and arms the kernel timer while we
+/// hold a `borrow()` of the cell; for an already-due timeout the handler would
+/// otherwise fire (`setitimer` with a 1µs delay) and reentrantly `borrow_mut()`
+/// → `RefCell already borrowed`.  The `BlockSigAlarm` guard outlives the borrow
+/// (it is dropped after the `with` closure returns), so any pending SIGALRM is
+/// delivered only once the borrow is released — exactly C's atomicity.
+fn schedule_alarm_blocked(now: TimestampTz) -> PgResult<()> {
+    let _block = BlockSigAlarm::new();
+    TIMEOUT_DATA.with(|d| schedule_alarm(&d.borrow(), now))
+    // `_block` drops here, after the borrow has been released, unblocking any
+    // SIGALRM that arrived while we held the borrow.
 }
 
 /*****************************************************************************
@@ -486,9 +543,7 @@ pub fn reschedule_timeouts() {
     let num_active = TIMEOUT_DATA.with(|d| d.borrow().num_active_timeouts);
     if num_active > 0 {
         let now = backend_utils_adt_timestamp_seams::get_current_timestamp::call();
-        TIMEOUT_DATA
-            .with(|d| schedule_alarm(&d.borrow(), now))
-            .expect("reschedule_timeouts: schedule_alarm");
+        schedule_alarm_blocked(now).expect("reschedule_timeouts: schedule_alarm");
     }
 }
 
@@ -503,7 +558,7 @@ pub fn enable_timeout_after(id: TimeoutId, delay_ms: i32) -> PgResult<()> {
     TIMEOUT_DATA.with(|d| enable_timeout(&mut d.borrow_mut(), id.as_index(), now, fin_time, 0))?;
 
     // Set the timer interrupt.
-    TIMEOUT_DATA.with(|d| schedule_alarm(&d.borrow(), now))
+    schedule_alarm_blocked(now)
 }
 
 /// `enable_timeout_every(id, fin_time, delay_ms)` — fire periodically, first
@@ -516,9 +571,7 @@ pub fn enable_timeout_every(id: TimeoutId, fin_time: TimestampTz, delay_ms: i32)
         .with(|d| enable_timeout(&mut d.borrow_mut(), id.as_index(), now, fin_time, delay_ms))
         .expect("enable_timeout_every: enable_timeout");
 
-    TIMEOUT_DATA
-        .with(|d| schedule_alarm(&d.borrow(), now))
-        .expect("enable_timeout_every: schedule_alarm");
+    schedule_alarm_blocked(now).expect("enable_timeout_every: schedule_alarm");
 }
 
 /// `enable_timeout_at(id, fin_time)` — fire `id` at the specified time.
@@ -531,7 +584,7 @@ pub fn enable_timeout_at(id: TimeoutId, fin_time: TimestampTz) -> PgResult<()> {
     let now = backend_utils_adt_timestamp_seams::get_current_timestamp::call();
     TIMEOUT_DATA.with(|d| enable_timeout(&mut d.borrow_mut(), id.as_index(), now, fin_time, 0))?;
 
-    TIMEOUT_DATA.with(|d| schedule_alarm(&d.borrow(), now))
+    schedule_alarm_blocked(now)
 }
 
 /// `enable_timeouts(timeouts, count)` — enable multiple timeouts at once,
@@ -565,7 +618,7 @@ pub fn enable_timeouts(timeouts: &[EnableTimeoutParams]) -> PgResult<()> {
     })?;
 
     // Set the timer interrupt.
-    TIMEOUT_DATA.with(|d| schedule_alarm(&d.borrow(), now))
+    schedule_alarm_blocked(now)
 }
 
 /// `disable_timeout(id, keep_indicator)` — cancel the specified timeout.
@@ -604,9 +657,7 @@ pub fn disable_timeout(id: TimeoutId, keep_indicator: bool) {
 
     // Reschedule the interrupt, if any timeouts remain active.
     if let Some(now) = now {
-        TIMEOUT_DATA
-            .with(|d| schedule_alarm(&d.borrow(), now))
-            .expect("disable_timeout: schedule_alarm");
+        schedule_alarm_blocked(now).expect("disable_timeout: schedule_alarm");
     }
 }
 
@@ -642,7 +693,7 @@ pub fn disable_timeouts(timeouts: &[DisableTimeoutParams]) -> PgResult<()> {
     // Reschedule the interrupt, if any timeouts remain active.
     if num_active > 0 {
         let now = backend_utils_adt_timestamp_seams::get_current_timestamp::call();
-        TIMEOUT_DATA.with(|d| schedule_alarm(&d.borrow(), now))?;
+        schedule_alarm_blocked(now)?;
     }
     Ok(())
 }
