@@ -20,6 +20,7 @@ types-partition = { path = "../types-partition" }
 backend-optimizer-util-relnode-seams = { path = "../backend-optimizer-util-relnode-seams" }
 backend-optimizer-util-relnode-ext-seams = { path = "../backend-optimizer-util-relnode-ext-seams" }
 backend-optimizer-util-joininfo-ext-seams = { path = "../backend-optimizer-util-joininfo-ext-seams" }
+backend-optimizer-plan-init-subselect-ext-seams = { path = "../backend-optimizer-plan-init-subselect-ext-seams" }
 backend-optimizer-util-pathnode-seams = { path = "../backend-optimizer-util-pathnode-seams" }
 backend-optimizer-util-appendinfo-seams = { path = "../backend-optimizer-util-appendinfo-seams" }
 backend-optimizer-path-equivclass-seams = { path = "../backend-optimizer-path-equivclass-seams" }

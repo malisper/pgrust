@@ -13154,6 +13154,7 @@ dependencies = [
  "backend-optimizer-path-equivclass-ext-seams",
  "backend-optimizer-path-equivclass-seams",
  "backend-optimizer-path-joinpath-seams",
+ "backend-optimizer-plan-init-subselect-ext-seams",
  "backend-optimizer-rte-seams",
  "backend-optimizer-util-appendinfo-seams",
  "backend-optimizer-util-joininfo-ext-seams",

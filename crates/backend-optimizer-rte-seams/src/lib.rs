@@ -286,6 +286,58 @@ pub fn init_seams() {
         Ok(Some(vars))
     });
 
+    // plancat.c `build_physical_tlist` RTE_SUBQUERY case:
+    //   foreach(l, subquery->targetList) {
+    //       TargetEntry *tle = lfirst(l);
+    //       Var *var = makeVarFromTargetEntry(varno, tle);
+    //       tlist = lappend(tlist, makeTargetEntry((Expr *) var, tle->resno,
+    //                                              NULL, tle->resjunk));
+    //   }
+    // The RTE carries its sub-`Query` inline (`rte->subquery`); we iterate its
+    // targetList, build one same-level Var per entry via makeVarFromTargetEntry
+    // (varattno = tle->resno, type/typmod/collation from exprType/exprTypmod/
+    // exprCollation(tle->expr)), and return (var-handle, resno, resjunk) per
+    // column. Note: unlike convert_*_sublink_to_join's generate_subquery_vars,
+    // build_physical_tlist does NOT skip resjunk entries — it preserves resno
+    // and resjunk so the physical tlist matches the subquery's output exactly.
+    backend_optimizer_util_plancat_ext_seams::subquery_physical_tlist::set(|run, root, rti| {
+        // Build the Var values while borrowing the RTE's inline subquery, then
+        // drop that borrow before allocating into root's node arena.
+        let vars: alloc::vec::Vec<(
+            types_nodes::primnodes::Var,
+            types_core::primitive::AttrNumber,
+            bool,
+        )> = {
+            let rte = planner_rt_fetch(run, root, rti);
+            let subquery = rte.subquery.as_ref().ok_or_else(|| {
+                types_error::PgError::error(alloc::format!(
+                    "build_physical_tlist: RTE {} is RTE_SUBQUERY but has no subquery",
+                    rti
+                ))
+            })?;
+            let mut acc = alloc::vec::Vec::new();
+            for tle in subquery.targetList.iter() {
+                let var = backend_nodes_core::makefuncs::make_var_from_target_entry(
+                    rti as i32, tle,
+                )?;
+                acc.push((var, tle.resno, tle.resjunk));
+            }
+            acc
+        };
+
+        let mut out: alloc::vec::Vec<(
+            types_pathnodes::NodeId,
+            types_core::primitive::AttrNumber,
+            bool,
+        )> =
+            alloc::vec::Vec::with_capacity(vars.len());
+        for (var, resno, resjunk) in vars.into_iter() {
+            let vid = root.alloc_node(types_pathnodes::Expr::Var(var));
+            out.push((vid, resno, resjunk));
+        }
+        Ok(out)
+    });
+
     // `add_base_clause_to_rel` / `add_other_rels_to_query` /
     // `remove_useless_groupby_columns` read `(rtekind, inh, relkind)` from one
     // RTE in a single projection. Declared in the init-subselect-ext consumer

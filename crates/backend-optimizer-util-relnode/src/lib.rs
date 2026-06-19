@@ -2549,6 +2549,24 @@ pub fn init_seams() {
         find_base_rel_ignore_join,
     );
 
+    // relnode OWNS find_base_rel + the RelOptInfo::subroot field; install the
+    // init-subselect-ext seam `finalize_plan`'s T_SubqueryScan arm consumes:
+    //   rel = find_base_rel(root, sscan->scan.scanrelid);
+    //   subquery_params = rel->subroot->outer_params;
+    // (subselect.c finalize_plan). The subroot is the sub-`PlannerInfo` stashed
+    // on the base RelOptInfo by set_subquery_pathlist; we read its
+    // `outer_params` Relids. A base rel with no subroot (not a subquery rel)
+    // has an empty `outer_params`, matching a NULL subroot's degenerate set.
+    backend_optimizer_plan_init_subselect_ext_seams::base_rel_subroot_outer_params::set(
+        |root, scanrelid| {
+            let relid = find_base_rel(root, scanrelid);
+            match root.rel(relid).subroot.as_deref() {
+                Some(subroot) => subroot.outer_params.clone(),
+                None => types_pathnodes::Relids::default(),
+            }
+        },
+    );
+
     /* relnode-seams bitmapset ops relnode owns but does not itself consume. */
     bms::relids_next_member::set(bms_next_member);
     bms::relids_get_singleton_member::set(bms_get_singleton_member);
