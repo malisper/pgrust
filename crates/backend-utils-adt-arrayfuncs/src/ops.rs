@@ -35,11 +35,15 @@ const INVALID_OID: Oid = 0;
 /// believe record is hashable, but we're committed to hashing).
 const F_HASH_RECORD: Oid = 6192;
 
-/// `format_type_be(element_type)`-style identifier for the "could not identify"
-/// error messages. We don't have the catalog name-formatting here, so we render
-/// the OID — the surface (`ERRCODE`, message text shape) matches C.
+/// `format_type_be(element_type)` for the "could not identify ... function for
+/// type %s" error messages. Routes to the real `format_type.c` formatter (the
+/// no-`Mcx` `format_type_be_str` seam, which formats in a scratch context), so
+/// the message names the type (`bit varying`) rather than its OID. On a lookup
+/// failure fall back to the OID so we still produce a message rather than
+/// masking the original "could not identify" error with a formatting panic.
 fn format_type_be(element_type: Oid) -> String {
-    format!("{}", element_type)
+    backend_utils_adt_format_type_seams::format_type_be_str::call(element_type)
+        .unwrap_or_else(|_| format!("{}", element_type))
 }
 
 /// A faithful translation of the flat-`ArrayType` portion of `array_iter`
