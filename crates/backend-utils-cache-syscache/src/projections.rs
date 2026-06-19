@@ -3475,6 +3475,46 @@ pub(crate) fn class_relkind_namespace(relid: Oid) -> PgResult<Option<(u8, Oid)>>
     Ok(Some((relkind, relnamespace)))
 }
 
+/// `SearchSysCache1(RELOID, ObjectIdGetDatum(relid))` then read the
+/// `Form_pg_class` columns `dbsize.c`'s `pg_relation_filenode` /
+/// `pg_relation_filepath` consult, returned as a flat tuple
+/// `(relkind, relfilenode, relisshared, reltablespace, relnamespace,
+/// relpersistence)`. `Ok(None)` on a cache miss (`!HeapTupleIsValid`). The
+/// projection is by-value, so the tuple copy lives in a scratch context dropped
+/// before returning; `ReleaseSysCache` mirrors C's release of the tuple.
+pub fn pg_class_form_dbsize(
+    relid: Oid,
+) -> PgResult<Option<(i8, Oid, bool, Oid, Oid, i8)>> {
+    const Anum_pg_class_relnamespace: i32 = 3;
+    const Anum_pg_class_relfilenode: i32 = 8;
+    const Anum_pg_class_reltablespace: i32 = 9;
+    const Anum_pg_class_relisshared: i32 = 16;
+    const Anum_pg_class_relpersistence: i32 = 17;
+    const Anum_pg_class_relkind: i32 = 18;
+
+    let scratch = MemoryContext::new("syscache dbsize pg_class projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, RELOID, SysCacheKey::Value(KeyDatum::from_oid(relid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let relkind = getattr_char(mcx, RELOID, &tup, Anum_pg_class_relkind)?;
+    let relfilenode = getattr_oid(mcx, RELOID, &tup, Anum_pg_class_relfilenode)?;
+    let relisshared = getattr_bool(mcx, RELOID, &tup, Anum_pg_class_relisshared)?;
+    let reltablespace = getattr_oid(mcx, RELOID, &tup, Anum_pg_class_reltablespace)?;
+    let relnamespace = getattr_oid(mcx, RELOID, &tup, Anum_pg_class_relnamespace)?;
+    let relpersistence = getattr_char(mcx, RELOID, &tup, Anum_pg_class_relpersistence)?;
+    ReleaseSysCache(tup);
+    Ok(Some((
+        relkind,
+        relfilenode,
+        relisshared,
+        reltablespace,
+        relnamespace,
+        relpersistence,
+    )))
+}
+
 /// `SearchSysCache1(INDEXRELID, index_oid)` then whether `indpred` is non-null
 /// (`!heap_attisnull(rd_indextuple, Anum_pg_index_indpred, NULL)`).
 pub(crate) fn pg_index_has_predicate(index_oid: Oid) -> PgResult<Option<bool>> {

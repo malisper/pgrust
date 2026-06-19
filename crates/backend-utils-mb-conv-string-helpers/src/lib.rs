@@ -854,9 +854,13 @@ fn conversion_dispatch(
         .value
         .as_i32();
 
-    // PG_GETARG_CSTRING(2): the source bytes arrive in ref_args[2].
+    // PG_GETARG_CSTRING(2): the source bytes arrive on the raw byte lane
+    // (`RefPayload::Varlena`). A C conversion-proc `cstring` is an arbitrary
+    // NUL-terminated byte buffer in the *source* encoding — not necessarily
+    // valid UTF-8 — so `convert_via_proc_counted_seam` carries it as raw bytes;
+    // read them back the same way (mirroring the euc-* fc_ adapters).
     let src: Vec<u8> = match fcinfo.ref_args.get(2).and_then(|r| r.as_ref()) {
-        Some(p) => p.as_cstring().map(|s| s.as_bytes().to_vec()).unwrap_or_default(),
+        Some(p) => p.as_varlena().map(|b| b.to_vec()).unwrap_or_default(),
         None => Vec::new(),
     };
 
@@ -875,15 +879,12 @@ fn conversion_dispatch(
         Err(e) => std::panic::panic_any(e),
     };
 
-    // Write the converted, NUL-terminated output back into ref_args[3]
-    // (the destination cstring referent). The fmgr cstring ABI carries text;
-    // an encoding-conversion result need not be valid UTF-8, so this byte->
-    // String framing is the known cstring-boundary limitation (the same one
-    // `convert_via_proc_counted_seam` notes on the source side), not introduced
-    // here.
-    let dst = String::from_utf8_lossy(&result.bytes).into_owned();
+    // Write the converted raw output bytes back into the ref_args[3] destination
+    // referent on the same raw byte lane the seam recovers them from. The result
+    // bytes are in the *destination* encoding and likewise need not be valid
+    // UTF-8, so they cross as raw bytes (`RefPayload::Varlena`), not a String.
     if let Some(slot) = fcinfo.ref_args.get_mut(3) {
-        *slot = Some(types_fmgr::boundary::RefPayload::Cstring(dst));
+        *slot = Some(types_fmgr::boundary::RefPayload::Varlena(result.bytes));
     }
 
     // PG_RETURN_INT32(converted).

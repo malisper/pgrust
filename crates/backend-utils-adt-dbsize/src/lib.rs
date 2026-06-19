@@ -1263,6 +1263,96 @@ pub fn pg_relation_filepath(relid: Oid) -> PgResult<Option<String>> {
 }
 
 // ===========================================================================
+// Outbound-seam provider bodies (relation-open family + stat).
+// ===========================================================================
+
+/// `try_relation_open(relOid, AccessShareLock)` provider.
+///
+/// Open the relation through the real `relation_open` family over a scratch
+/// `MemoryContext` the seam contract does not carry, project the on-disk address
+/// + toast/index metadata `dbsize.c` reads into the flat [`OpenRelation`]
+/// carrier, then let the [`Relation`] handle drop.
+///
+/// The handle's `Drop` releases only the relcache reference with `NoLock`,
+/// leaving the `AccessShareLock` (transaction-scoped, taken with `.keep()` by
+/// the open) held until [`relation_close_provider`] releases it — exactly C's
+/// split between `try_relation_open` (takes lock + pin) and
+/// `relation_close(rel, AccessShareLock)` (drops both). The relcache pin is not
+/// needed across the gap because the size routines consult only the copied-out
+/// fields, and the lock keeps the relation from being dropped concurrently.
+fn try_relation_open_provider(rel_oid: Oid) -> PgResult<Option<OpenRelation>> {
+    let scratch = mcx::MemoryContext::new("dbsize try_relation_open");
+    let mcx = scratch.mcx();
+    let opened = backend_access_common_relation::try_relation_open(
+        mcx,
+        rel_oid,
+        types_storage::lock::AccessShareLock,
+    )?;
+    Ok(opened.map(|rel| project_open_relation(&rel)))
+}
+
+/// `relation_open(relOid, AccessShareLock)` provider — must succeed (errors if
+/// the relation cannot be opened). See [`try_relation_open_provider`] for the
+/// lock/pin split.
+fn relation_open_provider(rel_oid: Oid) -> PgResult<OpenRelation> {
+    let scratch = mcx::MemoryContext::new("dbsize relation_open");
+    let mcx = scratch.mcx();
+    let rel = backend_access_common_relation::relation_open(
+        mcx,
+        rel_oid,
+        types_storage::lock::AccessShareLock,
+    )?;
+    Ok(project_open_relation(&rel))
+}
+
+/// Project a live [`Relation`] into the flat [`OpenRelation`] carrier the size
+/// routines consult: `rd_locator.{spcOid,dbOid,relNumber}`, `rd_backend`, and
+/// `rd_rel.{reltoastrelid,relhasindex}`.
+fn project_open_relation(rel: &types_rel::Relation<'_>) -> OpenRelation {
+    OpenRelation {
+        spc_oid: rel.rd_locator.spcOid,
+        db_oid: rel.rd_locator.dbOid,
+        rel_number: rel.rd_locator.relNumber,
+        backend: rel.rd_backend,
+        reltoastrelid: rel.rd_rel.reltoastrelid,
+        relhasindex: rel.rd_rel.relhasindex,
+    }
+}
+
+/// `relation_close(rel, AccessShareLock)` provider: release the
+/// `AccessShareLock` the matching open took. The relcache reference was already
+/// released when the open's [`Relation`] handle dropped (with `NoLock`), so this
+/// only re-derives the relation lock tag from the OID and unlocks it — mirroring
+/// C's `UnlockRelationId(&relid, AccessShareLock)` leg of `relation_close`.
+fn relation_close_provider(rel_oid: Oid) -> PgResult<()> {
+    backend_storage_lmgr_lmgr_seams::unlock_relation_oid::call(
+        rel_oid,
+        types_storage::lock::AccessShareLock,
+    )
+}
+
+/// `stat(path, &fst)` provider: `stat()` over the relation segment path
+/// (relative to the data-directory cwd the backend runs in, exactly as C's bare
+/// `stat()`), discriminated by `errno` so the caller replicates C's
+/// `errno == ENOENT` (vanished file → stop the segment walk) vs. other-`errno`
+/// (`could not stat file` error) branches. Follows symlinks, like `stat(2)`.
+fn stat_provider(path: &str) -> StatResult {
+    match std::fs::metadata(path) {
+        Ok(md) => StatResult::Ok(FileStat {
+            size: md.len() as i64,
+            is_dir: md.is_dir(),
+        }),
+        Err(e) => match e.raw_os_error() {
+            Some(errno) if errno == libc::ENOENT => StatResult::NotFound,
+            Some(errno) => StatResult::Error { errno },
+            // No OS errno (should not happen for fs::metadata); treat as the
+            // generic file-access failure so the caller raises the file error.
+            None => StatResult::Error { errno: libc::EIO },
+        },
+    }
+}
+
+// ===========================================================================
 // Seam install + fmgr builtin registration.
 // ===========================================================================
 
@@ -1274,9 +1364,6 @@ pub fn init_seams() {
     fmgr_builtins::register_dbsize_builtins();
 
     // Install the value-typed, acyclic outbound seams to their real owners.
-    // (The remaining outbound seams — read_dir/stat/database_exists/relation_open
-    // and friends — require either the runtime filesystem dir-walk substrate or
-    // an `Mcx` thread the seam contract does not carry; they stay uninstalled.)
     my_database_id::set(backend_utils_init_small::globals::MyDatabaseId);
     my_database_tablespace::set(backend_utils_init_small::globals::MyDatabaseTableSpace);
     get_user_id::set(|| Ok(backend_utils_init_miscinit::GetUserId()));
@@ -1288,6 +1375,59 @@ pub fn init_seams() {
         backend_catalog_storage::proc_number_for_temp_relations,
     );
     check_for_interrupts::set(backend_tcop_postgres::interrupt::check_for_interrupts);
+
+    // Relation-open family over AccessShareLock (the table/index size routines).
+    try_relation_open::set(try_relation_open_provider);
+    relation_open::set(relation_open_provider);
+    relation_close::set(relation_close_provider);
+
+    // RelationGetIndexList(rel) — the index OIDs for the indexes/total-size
+    // walks (takes the relation OID directly).
+    relation_get_index_list::set(backend_utils_cache_relcache::derived::RelationGetIndexList);
+
+    // SearchSysCache1(RELOID, ...) -> the Form_pg_class columns pg_relation_filenode
+    // / pg_relation_filepath read, mapped into the dbsize PgClassForm carrier.
+    pg_class_form::set(|relid| {
+        Ok(backend_utils_cache_syscache::pg_class_form_dbsize(relid)?.map(
+            |(relkind, relfilenode, relisshared, reltablespace, relnamespace, relpersistence)| {
+                PgClassForm {
+                    relkind,
+                    relfilenode,
+                    relisshared,
+                    reltablespace,
+                    relnamespace,
+                    relpersistence,
+                }
+            },
+        ))
+    });
+
+    // RelationMapOidToFilenumber(relid, relisshared) — the relation mapper
+    // (infallible in C; wrapped Ok for the seam's PgResult contract).
+    relation_map_oid_to_filenumber::set(|relid, relisshared| {
+        Ok(backend_utils_cache_relmapper::RelationMapOidToFilenumber(relid, relisshared))
+    });
+
+    // RelidByRelfilenumber(reltablespace, relfilenumber) — the relfilenumber map
+    // reverse lookup. C reads MyDatabaseTableSpace inside; the owner takes it as
+    // an explicit arg, so supply it from the backend global here.
+    relid_by_relfilenumber::set(|reltablespace, relfilenumber| {
+        backend_utils_cache_relfilenumbermap::RelidByRelfilenumber(
+            reltablespace,
+            relfilenumber,
+            backend_utils_init_small::globals::MyDatabaseTableSpace(),
+        )
+    });
+
+    // stat(path) over the runtime filesystem (relative to the backend's
+    // data-directory cwd, like C's bare stat()).
+    stat::set(stat_provider);
+
+    // NOTE: `read_dir` stays uninstalled. It is the AllocateDir/ReadDir/FreeDir
+    // directory-walk substrate used only by pg_database_size / pg_tablespace_size
+    // (not by pg_relation_size or any other relation-size routine); modelling the
+    // eager AllocateDir-or-NULL + skip-"."/".." walk faithfully needs the fd.c
+    // directory-descriptor lane, which is out of scope here.
 }
 
 #[cfg(test)]

@@ -53,6 +53,10 @@ mod projections;
 
 pub use cacheinfo::*;
 
+/// The `Form_pg_class` projection `dbsize.c` installs its `pg_class_form`
+/// outbound seam to (`pg_relation_filenode` / `pg_relation_filepath`).
+pub use projections::pg_class_form_dbsize;
+
 /* ---------------------------------------------------------------------------
  * Per-backend module state (the syscache.c file-scope statics)
  * ------------------------------------------------------------------------- */

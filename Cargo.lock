@@ -18886,16 +18886,23 @@ dependencies = [
 name = "backend-utils-adt-dbsize"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-relation",
  "backend-catalog-namespace",
  "backend-catalog-storage",
  "backend-common-relpath",
+ "backend-storage-lmgr-lmgr-seams",
  "backend-tcop-postgres",
  "backend-utils-adt-acl",
  "backend-utils-adt-numeric",
+ "backend-utils-cache-relcache",
+ "backend-utils-cache-relfilenumbermap",
+ "backend-utils-cache-relmapper",
+ "backend-utils-cache-syscache",
  "backend-utils-error",
  "backend-utils-fmgr-core",
  "backend-utils-init-miscinit",
  "backend-utils-init-small",
+ "libc",
  "mcx",
  "seam-core",
  "types-catalog",
@@ -18904,6 +18911,7 @@ dependencies = [
  "types-error",
  "types-fmgr",
  "types-numeric",
+ "types-rel",
  "types-storage",
 ]
 
