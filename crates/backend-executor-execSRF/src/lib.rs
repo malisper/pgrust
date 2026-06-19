@@ -60,7 +60,10 @@ use types_tuple::heaptuple::TupleDescData;
 use backend_executor_execSRF_seams as seams;
 
 mod generate_series;
+mod generate_subscripts;
+mod json_srf;
 mod pg_input_error_info;
+mod regexp_split;
 mod srf_registry;
 mod unnest;
 pub use srf_registry::{register_srf, srf_invoke_by_oid, srf_is_registered};
@@ -86,6 +89,18 @@ pub fn init_seams() {
     // array element, registered in the executor-frame table (its element
     // deconstruction core is `backend-utils-adt-arrayfuncs::array_unnest`).
     unnest::register_unnest();
+    // `generate_subscripts(anyarray, int4 [, bool])` (OIDs 1191/1192) — the
+    // value-per-call SRF emitting a dimension's subscript range (its bound core
+    // is `backend-utils-adt-arrayfuncs::sql::generate_subscripts`).
+    generate_subscripts::register_generate_subscripts();
+    // `regexp_split_to_table(text, text [, text])` (OIDs 2765/2766) — the
+    // value-per-call SRF emitting the split-out substrings (its glob match +
+    // split core is `backend-utils-adt-regexp::regexp_split_to_table`).
+    regexp_split::register_regexp_split();
+    // `json_array_elements`/`json_array_elements_text`/`json_object_keys` (OIDs
+    // 3955/3969/3957) — the value-per-call json (text) SRFs (their SAX-callback
+    // collection cores are `backend-utils-adt-jsonfuncs::{elements,keys}`).
+    json_srf::register_json_srfs();
 }
 
 // ===========================================================================

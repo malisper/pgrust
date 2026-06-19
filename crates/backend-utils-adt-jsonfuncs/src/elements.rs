@@ -35,7 +35,7 @@ use backend_utils_fmgr_funcapi_seams as funcapi;
 /// One emitted element row's column value: `None` is a SQL NULL, `Some(bytes)`
 /// is the raw payload bytes — text (no varlena header, wrapped by
 /// `bytes_to_varlena_v`) or a full `jsonb` varlena (`JsonbValueToJsonb`).
-type ElementRow = Option<Vec<u8>>;
+pub type ElementRow = Option<Vec<u8>>;
 
 /// Read the leading `JsonbContainer.header` word from the root container bytes.
 #[inline]
@@ -258,7 +258,7 @@ fn elements_scalar(state: &mut ElementsState, lex: &JsonLexContext, token: &[u8]
 
 /// Core of `elements_worker` (jsonfuncs.c:2307-2347): parse the json text with
 /// the `elements_*` SAX callbacks, collecting the array element rows.
-fn elements_worker(json: &[u8], funcname: &str, as_text: bool) -> PgResult<Vec<ElementRow>> {
+pub fn elements_worker(json: &[u8], funcname: &str, as_text: bool) -> PgResult<Vec<ElementRow>> {
     // state = palloc0(sizeof(ElementsState)); sem = palloc0(sizeof(JsonSemAction));
     let state = Rc::new(RefCell::new(ElementsState {
         rows: Vec::new(),

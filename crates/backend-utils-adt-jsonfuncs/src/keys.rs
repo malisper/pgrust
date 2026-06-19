@@ -196,7 +196,7 @@ fn okeys_scalar(lex: &JsonLexContext) -> PgResult<JsonParseErrorType> {
 /// Core of `json_object_keys` (jsonfuncs.c:737-769): collect the document-order
 /// keys of a json (text) object by parsing `json` with the `okeys_*` SAX
 /// callbacks. `json` is the text payload bytes.
-fn json_object_keys_worker(json: &[u8]) -> PgResult<Vec<Vec<u8>>> {
+pub fn json_object_keys_worker(json: &[u8]) -> PgResult<Vec<Vec<u8>>> {
     // state = palloc(sizeof(OkeysState)); sem = palloc0(sizeof(JsonSemAction));
     let state = Rc::new(RefCell::new(OkeysState::default()));
     let mut sem = JsonSemAction::default();

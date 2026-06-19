@@ -49,10 +49,20 @@ backend-utils-adt-misc = { path = "../backend-utils-adt-misc" }
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 
-# unnest(anyarray) (OID 2331): the value-per-call SRF element-deconstruction
-# core (array_unnest) and the ArrayElementDatum element carrier.
+# unnest(anyarray) (OID 2331) + generate_subscripts(anyarray, int4 [, bool])
+# (OIDs 1191/1192): the value-per-call SRF element-deconstruction / subscript
+# cores (array_unnest / generate_subscripts) and the ArrayElementDatum carrier.
 backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
 types-array = { path = "../types-array" }
+
+# regexp_split_to_table(text, text [, text]) (OIDs 2765/2766): the glob match +
+# split value core (regexp_split_to_table / build_regexp_split_result).
+backend-utils-adt-regexp = { path = "../backend-utils-adt-regexp" }
+
+# json_array_elements / json_array_elements_text / json_object_keys (OIDs
+# 3955/3969/3957): the json (text) SAX-callback collection cores (elements_worker
+# / json_object_keys_worker).
+backend-utils-adt-jsonfuncs = { path = "../backend-utils-adt-jsonfuncs" }
 
 # Shared type stack + allocator + error.
 allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
