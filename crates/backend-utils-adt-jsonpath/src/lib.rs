@@ -74,6 +74,9 @@ pub use types_jsonpath::parse::{
 
 use JsonPathItemType::*;
 
+mod fmgr_builtins;
+pub use fmgr_builtins::register_jsonpath_builtins;
+
 mod seams;
 pub use seams::init_seams;
 

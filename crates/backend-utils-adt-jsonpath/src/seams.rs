@@ -13,4 +13,11 @@
 //! `escape_json_with_len` via `backend-utils-adt-json-seams`, `expr_type` via
 //! `backend-nodes-nodeFuncs-seams`) or directly (`numeric_out`,
 //! `datetime_format_has_tz`); installing those is the owners' job.
-pub fn init_seams() {}
+//!
+//! This crate DOES own its fmgr `pg_proc` entries (`jsonpath_in`/`_out`): they
+//! are registered into the `fmgr_builtins[]` table here so the internal-lookup
+//! resolution by `prosrc` name finds them, mirroring how every type's I/O
+//! family is published by its owner's `init_seams()`.
+pub fn init_seams() {
+    crate::register_jsonpath_builtins();
+}

@@ -28,5 +28,7 @@ backend-regex-core = { path = "../backend-regex-core" }
 backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
 # parsejsonpath (jsonpath_gram.y/jsonpath_scan.l) — unported owner, seamed.
 backend-utils-adt-jsonpath-gram-seams = { path = "../backend-utils-adt-jsonpath-gram-seams" }
+# fmgr_builtins[] registry — register the jsonpath I/O fmgr entries.
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 
 [dev-dependencies]
