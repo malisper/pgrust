@@ -191,6 +191,10 @@ pub fn ExplainNode<'es, 'p>(
             sname = "BitmapAnd";
             pname = sname.into();
         }
+        ntag::T_BitmapOr => {
+            sname = "BitmapOr";
+            pname = sname.into();
+        }
         ntag::T_NestLoop => {
             sname = "Nested Loop";
             pname = sname.into();
@@ -206,6 +210,10 @@ pub fn ExplainNode<'es, 'p>(
         }
         ntag::T_SeqScan => {
             sname = "Seq Scan";
+            pname = sname.into();
+        }
+        ntag::T_SampleScan => {
+            sname = "Sample Scan";
             pname = sname.into();
         }
         ntag::T_Gather => {
@@ -228,12 +236,24 @@ pub fn ExplainNode<'es, 'p>(
             sname = "Bitmap Index Scan";
             pname = sname.into();
         }
+        ntag::T_BitmapHeapScan => {
+            sname = "Bitmap Heap Scan";
+            pname = sname.into();
+        }
+        ntag::T_TidScan => {
+            sname = "Tid Scan";
+            pname = sname.into();
+        }
         ntag::T_TidRangeScan => {
             sname = "Tid Range Scan";
             pname = sname.into();
         }
         ntag::T_SubqueryScan => {
             sname = "Subquery Scan";
+            pname = sname.into();
+        }
+        ntag::T_FunctionScan => {
+            sname = "Function Scan";
             pname = sname.into();
         }
         ntag::T_TableFuncScan => {
@@ -250,6 +270,10 @@ pub fn ExplainNode<'es, 'p>(
         }
         ntag::T_NamedTuplestoreScan => {
             sname = "Named Tuplestore Scan";
+            pname = sname.into();
+        }
+        ntag::T_WorkTableScan => {
+            sname = "WorkTable Scan";
             pname = sname.into();
         }
         ntag::T_ForeignScan => {
@@ -274,15 +298,18 @@ pub fn ExplainNode<'es, 'p>(
             sname = "Sort";
             pname = sname.into();
         }
+        ntag::T_IncrementalSort => {
+            sname = "Incremental Sort";
+            pname = sname.into();
+        }
         ntag::T_Group => {
             sname = "Group";
             pname = sname.into();
         }
-        // NOTE: the `Agg` / `WindowAgg` / `LockRows` / `IncrementalSort` plan
-        // nodes are not modelled in the `Node` enum yet, so they cannot reach
-        // here; their explain.c name cases (Aggregate strategy/partialmode,
-        // WindowAgg, ...) land when those plan-node variants do. Anything not
-        // matched below falls through to the C default "???".
+        // NOTE: the `Agg` / `WindowAgg` plan nodes carry extra explain detail
+        // (Aggregate strategy/partialmode; WindowAgg) that is not yet wired, so
+        // their name cases land when that detail does. Anything not matched
+        // below falls through to the C default "???".
         ntag::T_Unique => {
             sname = "Unique";
             pname = sname.into();
@@ -298,6 +325,9 @@ pub fn ExplainNode<'es, 'p>(
             strategy = Some(st);
             pname = pn.into();
         }
+        // NOTE: the `LockRows` plan node is not modelled in the `Node` enum yet,
+        // so its `ntag::T_LockRows` const is not generated and it cannot reach
+        // this switch; its name case ("LockRows") lands when that variant does.
         ntag::T_Limit => {
             sname = "Limit";
             pname = sname.into();
@@ -611,6 +641,11 @@ fn explain_scan_target_switch<'es, 'p>(
             es,
             plan_node,
             plan_node.expect_samplescan().scan.scanrelid,
+        ),
+        ntag::T_BitmapHeapScan => scantarget::ExplainScanTarget(
+            es,
+            plan_node,
+            plan_node.expect_bitmapheapscan().scan.scanrelid,
         ),
         ntag::T_TidScan => {
             scantarget::ExplainScanTarget(es, plan_node, plan_node.expect_tidscan().scan.scanrelid)

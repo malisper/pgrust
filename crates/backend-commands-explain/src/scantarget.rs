@@ -184,11 +184,34 @@ pub fn ExplainTargetRel<'mcx>(
         }
         ntag::T_FunctionScan => {
             // Assert(rte->rtekind == RTE_FUNCTION);
-            // If the expression is still a single FuncExpr, get the real name.
-            // The trimmed RangeTblEntry holds `functions` as opaque NodePtr; the
-            // funcexpr/FuncExpr unwrap is an expression-shape inspection that the
-            // structural slice cannot perform without the modelled FuncExpr. Punt
-            // to no objectname (C's "Otherwise, punt") rather than guess.
+            //
+            // If the expression is still a function call of a single function,
+            // we can get the real name of the function. Otherwise, punt. (Even
+            // if it was a single function call originally, the optimizer could
+            // have simplified it away.)  Mirrors explain.c ExplainTargetRel's
+            // T_FunctionScan case: read `fscan->functions`, and if it holds a
+            // single RangeTblFunction whose funcexpr is a FuncExpr, resolve
+            // its funcid through get_func_name / get_func_namespace.
+            let fscan = plan_node.expect_functionscan();
+            if let Some(functions) = fscan.functions.as_ref() {
+                if functions.len() == 1 {
+                    let rtfunc = &functions[0];
+                    if let Some(funcexpr) = rtfunc.funcexpr.as_ref() {
+                        if let Node::Expr(types_nodes::primnodes::Expr::FuncExpr(fe)) =
+                            &**funcexpr
+                        {
+                            let funcid = fe.funcid;
+                            objectname = lsyscache::function::get_func_name(mcx, funcid)?;
+                            if verbose {
+                                let nspid = lsyscache::function::get_func_namespace(funcid)?;
+                                namespace = lsyscache::namespace_range_index_pubsub::get_namespace_name_or_temp(
+                                    mcx, nspid,
+                                )?;
+                            }
+                        }
+                    }
+                }
+            }
             objecttag = Some("Function Name");
         }
         ntag::T_TableFuncScan => {
