@@ -67,6 +67,7 @@ use types_nodes::nodeindexscan::{Plan, Scan};
 use types_nodes::noderesult::Result as ResultNode;
 use types_nodes::nodeforeigncustom::Material as MaterialNode;
 use types_nodes::nodesort::Sort;
+use types_nodes::nodememoize::Memoize;
 use types_nodes::nodelimit::Limit as LimitNode;
 use types_nodes::nodeprojectset::ProjectSet as ProjectSetNode;
 use types_nodes::nodes::{ntag, Node, NodeTag};
@@ -117,6 +118,8 @@ use backend_nodes_core::makefuncs::{
     make_ands_explicit, make_bool_const, make_orclause, make_target_entry,
 };
 use backend_nodes_core::nodefuncs::expression_tree_mutator;
+use backend_nodes_core::nodefuncs::expr_collation;
+use backend_nodes_core::bitmapset::bms_union;
 use backend_nodes_equalfuncs_seams::equal_expr as equal_expr_seam;
 use backend_optimizer_path_equivclass_seams as equivclass;
 use backend_optimizer_plan_createplan_seams as cp_seam;
@@ -147,6 +150,9 @@ use backend_optimizer_path_equivclass::is_redundant_with_indexclauses;
 use backend_optimizer_util_predtest_seams as predtest;
 // contain_mutable_functions (clauses.c) — guard the predicate_implied_by check.
 use backend_optimizer_util_clauses::grounded::contain_mutable_functions;
+// pull_paramids (clauses.c) — collect paramids referenced by the Memoize cache
+// key expressions, used for create_memoize_plan's keyparamids.
+use backend_optimizer_util_clauses::grounded::pull_paramids;
 
 // ---------------------------------------------------------------------------
 // RTEKind dispatch keys used by use_physical_tlist (parsenodes.h enum values).
@@ -1078,8 +1084,7 @@ pub fn create_plan_recurse<'mcx>(
         }
         T_ProjectSet => create_project_set_plan(mcx, root, run, best_path),
         T_Material => create_material_plan(mcx, root, run, best_path, flags),
-        // create_memoize_plan is not yet ported; stays a forward seam-panic.
-        T_Memoize => cp_seam::create_memoize_plan::call(mcx, root, run, best_path, flags),
+        T_Memoize => create_memoize_plan(mcx, root, run, best_path, flags),
         // IsA(best_path, UpperUniquePath) vs UniquePath — the sub-discrimination
         // is internal to the Unique family; route the whole T_Unique pathtype.
         T_Unique => create_unique_dispatch_plan(mcx, root, run, best_path, flags),
@@ -3528,6 +3533,136 @@ fn create_material_plan<'mcx>(
     copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
 
     Ok(Node::mk_material(mcx, plan))
+}
+
+// ---------------------------------------------------------------------------
+// create_memoize_plan (createplan.c ~1660) + make_memoize (~6705)
+// ---------------------------------------------------------------------------
+
+/// `make_memoize(lefttree, hashoperators, collations, param_exprs, singlerow,
+/// binary_mode, est_entries, keyparamids)` (createplan.c ~6705) — build a
+/// `Memoize` plan node atop `lefttree`. The Memoize's targetlist is the
+/// child's (it doesn't project); qual is NIL.
+#[allow(clippy::too_many_arguments)]
+fn make_memoize<'mcx>(
+    mcx: Mcx<'mcx>,
+    lefttree: Node<'mcx>,
+    hash_operators: PgVec<'mcx, Oid>,
+    collations: PgVec<'mcx, Oid>,
+    param_exprs: PgVec<'mcx, Expr>,
+    singlerow: bool,
+    binary_mode: bool,
+    est_entries: u32,
+    keyparamids: Option<PgBox<'mcx, Bitmapset<'mcx>>>,
+) -> PgResult<Memoize<'mcx>> {
+    // node->numKeys = list_length(param_exprs);
+    let num_keys = param_exprs.len() as i32;
+    // plan->targetlist = lefttree->targetlist;
+    let tlist = clone_plan_tlist(mcx, &lefttree)?;
+    let mut plan = Plan::default();
+    plan.targetlist = tlist;
+    plan.qual = None;
+    plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
+    plan.righttree = None;
+    Ok(Memoize {
+        plan,
+        // plan_node_id is set by SS_finalize_plan; makeNode zeroes it.
+        plan_node_id: 0,
+        numKeys: num_keys,
+        hashOperators: hash_operators,
+        collations,
+        param_exprs,
+        singlerow,
+        binary_mode,
+        est_entries,
+        keyparamids,
+    })
+}
+
+/// `create_memoize_plan(root, best_path, flags)` (createplan.c ~1660) — create
+/// a `Memoize` plan that caches the inner-side results of a parameterized
+/// nested loop.
+fn create_memoize_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+    flags: i32,
+) -> PgResult<Node<'mcx>> {
+    // Snapshot the fields of the MemoizePath we need before mutating root.
+    let (subpath, path_param_exprs, hash_op_list, singlerow, binary_mode, est_entries) =
+        match root.path(best_path) {
+            PathNode::MemoizePath(p) => (
+                p.subpath
+                    .expect("create_memoize_plan: MemoizePath has no subpath"),
+                p.param_exprs.clone(),
+                p.hash_operators.clone(),
+                p.singlerow,
+                p.binary_mode,
+                p.est_entries,
+            ),
+            _ => unreachable!("create_memoize_plan on non-MemoizePath"),
+        };
+
+    // subplan = create_plan_recurse(root, best_path->subpath,
+    //                               flags | CP_SMALL_TLIST);
+    let subplan = create_plan_recurse(mcx, root, run, subpath, flags | CP_SMALL_TLIST)?;
+
+    // param_exprs = (List *) replace_nestloop_params(root,
+    //                                  (Node *) best_path->param_exprs);
+    let nkeys = path_param_exprs.len();
+    let mut param_exprs: PgVec<'mcx, Expr> = vec_with_capacity_in(mcx, nkeys)?;
+    for &cid in &path_param_exprs {
+        let replaced = replace_nestloop_params(mcx, root, cid)?;
+        param_exprs.push(root.node(replaced).clone());
+    }
+
+    // Assert(nkeys > 0);
+    debug_assert!(nkeys > 0, "create_memoize_plan: param_exprs is empty");
+
+    // operators = palloc(nkeys * sizeof(Oid));
+    // collations = palloc(nkeys * sizeof(Oid));
+    // forboth(lc, param_exprs, lc2, best_path->hash_operators) {
+    //     operators[i] = opno;
+    //     collations[i] = exprCollation((Node *) param_expr);
+    // }
+    let mut operators: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, nkeys)?;
+    let mut collations: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, nkeys)?;
+    for (param_expr, opno) in param_exprs.iter().zip(hash_op_list.iter()) {
+        operators.push(*opno);
+        collations.push(expr_collation(Some(param_expr))?);
+    }
+
+    // keyparamids = pull_paramids((Expr *) param_exprs);
+    // C walks the whole List*; mirror by accumulating per-element paramids.
+    let mut keyparamids: Option<PgBox<'mcx, Bitmapset<'mcx>>> = None;
+    for param_expr in param_exprs.iter() {
+        let ids = pull_paramids(mcx, Some(param_expr))?;
+        keyparamids = bms_union(
+            mcx,
+            keyparamids.as_deref(),
+            ids.as_deref(),
+        )?;
+    }
+
+    // plan = make_memoize(subplan, operators, collations, param_exprs,
+    //                     singlerow, binary_mode, est_entries, keyparamids);
+    let mut plan = make_memoize(
+        mcx,
+        subplan,
+        operators,
+        collations,
+        param_exprs,
+        singlerow,
+        binary_mode,
+        est_entries,
+        keyparamids,
+    )?;
+
+    // copy_generic_path_info(&plan->plan, (Path *) best_path);
+    copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
+
+    Ok(Node::mk_memoize(mcx, plan))
 }
 
 // ===========================================================================
