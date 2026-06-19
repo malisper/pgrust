@@ -459,10 +459,7 @@ pub fn ExecInitHash<'mcx>(
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<PgBox<'mcx, HashState<'mcx>>> {
-    let node: &'mcx Hash<'mcx> = match node_enum {
-        types_nodes::nodes::Node::Hash(h) => h,
-        other => panic!("ExecInitHash: node is not a Hash plan node: {other:?}"),
-    };
+    let node: &'mcx Hash<'mcx> = node_enum.expect_hash();
     // check for unsupported flags
     //   Assert(!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK)));
     debug_assert!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) == 0);

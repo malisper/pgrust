@@ -182,8 +182,7 @@ pub fn ExecHashTableCreate<'mcx>(
     // left subplan (the inner-relation source). Read the planner's row/width
     // estimates and skew gating off the real plan tree.
     let hash_node: &HashPlan<'mcx> = match state.ps.plan {
-        Some(types_nodes::nodes::Node::Hash(h)) => h,
-        Some(other) => panic!("ExecHashTableCreate: state.ps.plan is not a Hash node: {other:?}"),
+        Some(p) => p.expect_hash(),
         None => panic!("ExecHashTableCreate: state.ps.plan is NULL"),
     };
     let outer_node = hash_node
