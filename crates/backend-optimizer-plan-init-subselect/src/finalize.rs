@@ -374,6 +374,11 @@ fn finalize_node_specific<'mcx>(
                 fin_exprs!(iq);
             }
         }
+        types_nodes::nodes::ntag::T_BitmapHeapScan => {
+            let s = plan.as_bitmapheapscan_mut().unwrap();
+            fin_exprs!(s.bitmapqualorig);
+            add_scan_params!();
+        }
         types_nodes::nodes::ntag::T_TidScan => {
             let s = plan.as_tidscan_mut().unwrap();
             if let Some(tq) = s.tidquals.as_ref() {
