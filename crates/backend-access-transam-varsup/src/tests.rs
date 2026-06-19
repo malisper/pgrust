@@ -99,3 +99,35 @@ fn set_transaction_id_limit_arithmetic_matches_c() {
     assert!(xid_warn_limit >= FirstNormalTransactionId);
     assert!(xid_warn_limit < xid_stop_limit);
 }
+
+/// Cross-backend visibility: two [`TransamPtr`]s (conn1's and conn2's
+/// per-process pointers) over the SAME backing `TransamVariablesData` — the
+/// realization of fork sharing one `MAP_SHARED` `ShmemInitStruct` region — must
+/// see each other's mutations. This is exactly the bug the change fixes: before
+/// it, the struct lived in a process-local `static Mutex`, so conn1's
+/// `MaintainLatestCompletedXid` advance at commit was invisible to conn2's
+/// `GetSnapshotData`, leaving conn1's committed rows un-seeable by conn2.
+#[test]
+fn two_pointers_share_one_transam_variables() {
+    // One backing struct in the (here heap-stand-in for) shmem segment. A real
+    // fork would share the same physical page; both pointers address it.
+    let mut backing = Box::new(TransamVariablesData::default());
+    let base: *mut TransamVariablesData = &mut *backing;
+
+    // conn1 and conn2: distinct per-process pointers at the SAME struct.
+    let mut conn1 = TransamPtr(base);
+    let conn2 = TransamPtr(base);
+
+    // conn1 performs the commit-path mutation procarray's
+    // MaintainLatestCompletedXid does under ProcArrayLock: advance
+    // latestCompletedXid and bump xactCompletionCount.
+    conn1.latestCompletedXid = FullTransactionId { value: 0xDEAD_BEEF };
+    conn1.xactCompletionCount = 42;
+    conn1.nextXid = FullTransactionId { value: 0x1_0000_0007 };
+
+    // conn2 (a different per-process view) observes conn1's writes — the
+    // cross-connection visibility the fix delivers.
+    assert_eq!(conn2.latestCompletedXid, FullTransactionId { value: 0xDEAD_BEEF });
+    assert_eq!(conn2.xactCompletionCount, 42);
+    assert_eq!(conn2.nextXid, FullTransactionId { value: 0x1_0000_0007 });
+}

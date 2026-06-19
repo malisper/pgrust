@@ -28,6 +28,7 @@ backend-access-transam-subtrans-seams = { path = "../backend-access-transam-subt
 backend-access-transam-commit-ts-seams = { path = "../backend-access-transam-commit-ts-seams" }
 backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
 backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
+backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" }
 backend-storage-ipc-pmsignal-seams = { path = "../backend-storage-ipc-pmsignal-seams" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }

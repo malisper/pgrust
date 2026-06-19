@@ -13,12 +13,16 @@
 //! limit math needs.
 //!
 //! `TransamVariables` is shared-memory state in C (one cluster-wide singleton,
-//! carved by `VarsupShmemInit`). Here it is a process-shared, synchronized
-//! singleton ([`TRANSAM_VARIABLES`]); the genuine cross-backend serialization
-//! is the real LWLock (`XidGenLock` / `OidGenLock` / `XactTruncationLock`),
-//! acquired through the ported lwlock crate as an RAII guard. The inner
-//! `Mutex` only makes the shared struct safe to touch from Rust while the
-//! LWLock is held.
+//! carved by `VarsupShmemInit` via `ShmemInitStruct("TransamVariables", ...)`).
+//! Here it is likewise allocated in the main `MAP_SHARED` segment by
+//! [`VarsupShmemInit`]; every backend's per-process pointer ([`TransamPtr`],
+//! the realization of C's `TransamVariables *TransamVariables`) derefs the one
+//! physical struct, so a mutation by one backend (e.g.
+//! `MaintainLatestCompletedXid` advancing `latestCompletedXid` at commit) is
+//! immediately visible to every other backend. The genuine cross-backend
+//! serialization is the real LWLock (`XidGenLock` / `OidGenLock` /
+//! `XactTruncationLock` / `ProcArrayLock` / `CommitTsLock`), acquired through
+//! the ported lwlock crate as an RAII guard, exactly as in C.
 //!
 //! `ERROR`-level conditions (parallel mode, recovery, OID-counter overrun,
 //! wraparound stop limit) are returned as `Err(PgError)`. WARNING/DEBUG1
@@ -28,7 +32,7 @@
 //! signalling, catalog name/existence lookups, the process-mode predicates —
 //! goes through the owners' `-seams` crates (panic until each owner lands).
 
-use std::sync::Mutex;
+use std::cell::Cell;
 
 use backend_access_transam_clog_seams as clog_seams;
 use backend_access_transam_commit_ts_seams as commit_ts_seams;
@@ -61,25 +65,57 @@ use types_storage::{LWLockMode, OID_GEN_LOCK, XACT_TRUNCATION_LOCK, XID_GEN_LOCK
 /// Number of OIDs to prefetch (preallocate) per XLOG write (`VAR_OID_PREFETCH`).
 const VAR_OID_PREFETCH: u32 = 8192;
 
-/// `TransamVariables` (varsup.c:44) — the cluster-wide shared singleton, here
-/// a process-shared `Mutex`. The LWLocks serialize cross-backend; the `Mutex`
-/// makes the struct safe to touch from Rust while the LWLock is held.
-static TRANSAM_VARIABLES: Mutex<TransamVariablesData> = Mutex::new(TransamVariablesData {
-    nextOid: 0,
-    oidCount: 0,
-    nextXid: FullTransactionId { value: 0 },
-    oldestXid: 0,
-    xidVacLimit: 0,
-    xidWarnLimit: 0,
-    xidStopLimit: 0,
-    xidWrapLimit: 0,
-    oldestXidDB: 0,
-    oldestCommitTsXid: 0,
-    newestCommitTsXid: 0,
-    latestCompletedXid: FullTransactionId { value: 0 },
-    xactCompletionCount: 0,
-    oldestClogXid: 0,
-});
+/// Per-process pointer into the shared [`TransamVariablesData`] singleton (the
+/// realization of C's `TransamVariables *TransamVariables`, transam.c:32). The
+/// struct it addresses lives in the main `MAP_SHARED` shmem segment (carved by
+/// [`VarsupShmemInit`]), so the same physical bytes back every backend; the
+/// pointer itself is per-process (correctly forked). `Deref`/`DerefMut` give
+/// field access on the shared struct so the existing
+/// `TransamVariables->latestCompletedXid` / `nextXid` call sites read and write
+/// the one physical struct.
+#[derive(Clone, Copy)]
+struct TransamPtr(*mut TransamVariablesData);
+
+// SAFETY: the pointer addresses the cluster-wide shmem `TransamVariablesData`,
+// valid for the process lifetime; all field access is serialized by the LWLocks
+// noted on each field group, exactly as in C. The `Cell` that holds it is
+// per-backend (a thread-local).
+unsafe impl Send for TransamPtr {}
+
+impl core::ops::Deref for TransamPtr {
+    type Target = TransamVariablesData;
+    #[inline]
+    fn deref(&self) -> &TransamVariablesData {
+        // SAFETY: `self.0` points at the shared singleton in shmem.
+        unsafe { &*self.0 }
+    }
+}
+
+impl core::ops::DerefMut for TransamPtr {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut TransamVariablesData {
+        // SAFETY: as above; callers hold the appropriate LWLock for the write.
+        unsafe { &mut *self.0 }
+    }
+}
+
+thread_local! {
+    /// `TransamVariables *TransamVariables;` (transam.c:32) — the per-process
+    /// pointer at the shared singleton, set by [`VarsupShmemInit`].
+    static TRANSAM_VARIABLES: Cell<Option<TransamPtr>> = const { Cell::new(None) };
+}
+
+/// Borrow the per-process pointer at the shared `TransamVariablesData`, panic
+/// if accessed before `VarsupShmemInit`. Returns a copy of the `TransamPtr`
+/// (the cheap `*mut`), which derefs the shared struct; the LWLock the caller
+/// holds provides the cross-process serialization.
+#[inline]
+fn transam() -> TransamPtr {
+    TRANSAM_VARIABLES.with(|p| {
+        p.get()
+            .expect("TransamVariables accessed before VarsupShmemInit")
+    })
+}
 
 fn here(funcname: &str) -> ErrorLocation {
     ErrorLocation::new("varsup.c", 0, funcname)
@@ -226,16 +262,41 @@ pub fn VarsupShmemSize() -> Size {
 }
 
 /// `VarsupShmemInit` (varsup.c 56-72). C carves the cluster-wide
-/// `TransamVariablesData` singleton from the shared segment and `memset`s it to
-/// zero when freshly created (`!IsUnderPostmaster`); an attaching backend just
-/// finds it. Here the singleton is [`TRANSAM_VARIABLES`] (a const-zeroed
-/// `Mutex`); the postmaster zeroes it explicitly, an attaching backend leaves
-/// it as found.
-pub fn VarsupShmemInit() {
-    if !init_small_seams::is_under_postmaster::call() {
-        let mut tv = TRANSAM_VARIABLES.lock().unwrap();
-        *tv = TransamVariablesData::default();
+/// `TransamVariablesData` singleton from the shared segment via
+/// `ShmemInitStruct("TransamVariables", ...)` and `memset`s it to zero when
+/// freshly created (`!found`); an attaching backend just finds it. Here the
+/// singleton is allocated in the main `MAP_SHARED` segment the same way; the
+/// first backend zeroes it, an attaching backend leaves it as found, and every
+/// backend records its per-process [`TransamPtr`] at the one physical struct.
+///
+/// ```c
+/// TransamVariables = (TransamVariablesData *)
+///     ShmemInitStruct("TransamVariables", sizeof(TransamVariablesData), &found);
+/// if (!found)
+///     memset(TransamVariables, 0, sizeof(TransamVariablesData));
+/// ```
+pub fn VarsupShmemInit() -> PgResult<()> {
+    use backend_storage_ipc_shmem_seams as shmem;
+
+    let (addr, found) =
+        shmem::shmem_init_struct::call("TransamVariables", VarsupShmemSize() as usize)?;
+    let tv = addr as *mut TransamVariablesData;
+
+    if !found {
+        // We're the first — zero the freshly-carved shared struct in place.
+        // SAFETY: `tv` addresses `sizeof(TransamVariablesData)` writable shmem
+        // bytes just carved by `ShmemInitStruct`.
+        unsafe {
+            *tv = TransamVariablesData::default();
+        }
     }
+
+    // Record this backend's per-process pointer at the shared struct (C's
+    // `TransamVariables = ...` assignment runs in every process, allocator or
+    // attacher).
+    TRANSAM_VARIABLES.with(|p| p.set(Some(TransamPtr(tv))));
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -277,19 +338,19 @@ pub fn GetNewTransactionId(mcx: Mcx<'_>, isSubXact: bool) -> PgResult<FullTransa
 
     let mut guard = acquire(XID_GEN_LOCK, true)?;
 
-    let mut full_xid = TRANSAM_VARIABLES.lock().unwrap().nextXid;
+    let mut full_xid = transam().nextXid;
     let mut xid = XidFromFullTransactionId(full_xid);
 
     // Check to see if it's safe to assign another XID. This protects against
     // catastrophic data loss due to XID wraparound. Note that this coding also
     // appears in GetNewMultiXactId.
-    let xid_vac_limit = TRANSAM_VARIABLES.lock().unwrap().xidVacLimit;
+    let xid_vac_limit = transam().xidVacLimit;
     if TransactionIdFollowsOrEquals(xid, xid_vac_limit) {
         // For safety's sake, we release XidGenLock while sending signals,
         // warnings, etc., to avoid any possibility of deadlock while doing
         // get_database_name(). First, copy all the shared values we'll need.
         let (xidStopLimit, xidWarnLimit, xidWrapLimit, oldest_datoid) = {
-            let tv = TRANSAM_VARIABLES.lock().unwrap();
+            let tv = transam();
             (
                 tv.xidStopLimit,
                 tv.xidWarnLimit,
@@ -354,7 +415,7 @@ pub fn GetNewTransactionId(mcx: Mcx<'_>, isSubXact: bool) -> PgResult<FullTransa
 
         // Re-acquire lock and start over
         guard = acquire(XID_GEN_LOCK, true)?;
-        full_xid = TRANSAM_VARIABLES.lock().unwrap().nextXid;
+        full_xid = transam().nextXid;
         xid = XidFromFullTransactionId(full_xid);
     }
 
@@ -369,7 +430,7 @@ pub fn GetNewTransactionId(mcx: Mcx<'_>, isSubXact: bool) -> PgResult<FullTransa
     // successfully completed ExtendCLOG() --- if that routine fails, we want
     // the next incoming transaction to try it again.
     {
-        let mut tv = TRANSAM_VARIABLES.lock().unwrap();
+        let mut tv = transam();
         FullTransactionIdAdvance(&mut tv.nextXid);
     }
 
@@ -401,7 +462,7 @@ pub fn ReadNextFullTransactionId() -> FullTransactionId {
     // (matching that should-never-happen abort) rather than widen the inward
     // seam every consumer treats as infallible.
     let guard = acquire(XID_GEN_LOCK, false).expect("XidGenLock acquire");
-    let fullXid = TRANSAM_VARIABLES.lock().unwrap().nextXid;
+    let fullXid = transam().nextXid;
     guard.release().expect("XidGenLock release");
     fullXid
 }
@@ -419,7 +480,7 @@ pub fn AdvanceNextFullTransactionIdPastXid(xid: TransactionId) -> PgResult<()> {
     debug_assert!(am_startup_process() || !init_small_seams::is_under_postmaster::call());
 
     // Fast return if this isn't an xid high enough to move the needle.
-    let cur_next = TRANSAM_VARIABLES.lock().unwrap().nextXid;
+    let cur_next = transam().nextXid;
     let next_xid = XidFromFullTransactionId(cur_next);
     if !TransactionIdFollowsOrEquals(xid, next_xid) {
         return Ok(());
@@ -438,7 +499,7 @@ pub fn AdvanceNextFullTransactionIdPastXid(xid: TransactionId) -> PgResult<()> {
     // We still need to take a lock to modify the value when there are
     // concurrent readers.
     let guard = acquire(XID_GEN_LOCK, true)?;
-    TRANSAM_VARIABLES.lock().unwrap().nextXid = newNextFullXid;
+    transam().nextXid = newNextFullXid;
     guard.release()?;
 
     Ok(())
@@ -453,7 +514,7 @@ pub fn AdvanceNextFullTransactionIdPastXid(xid: TransactionId) -> PgResult<()> {
 pub fn AdvanceOldestClogXid(oldest_datfrozenxid: TransactionId) -> PgResult<()> {
     let guard = acquire(XACT_TRUNCATION_LOCK, true)?;
     {
-        let mut tv = TRANSAM_VARIABLES.lock().unwrap();
+        let mut tv = transam();
         if TransactionIdPrecedes(tv.oldestClogXid, oldest_datfrozenxid) {
             tv.oldestClogXid = oldest_datfrozenxid;
         }
@@ -508,7 +569,7 @@ pub fn SetTransactionIdLimit(
     // Grab lock for just long enough to set the new limit values.
     let guard = acquire(XID_GEN_LOCK, true)?;
     let curXid = {
-        let mut tv = TRANSAM_VARIABLES.lock().unwrap();
+        let mut tv = transam();
         tv.oldestXid = oldest_datfrozenxid;
         tv.xidVacLimit = xidVacLimit;
         tv.xidWarnLimit = xidWarnLimit;
@@ -577,7 +638,7 @@ pub fn ForceTransactionIdLimitUpdate() -> PgResult<bool> {
     // Locking is probably not really necessary, but let's be careful.
     let guard = acquire(XID_GEN_LOCK, false)?;
     let (nextXid, xidVacLimit, oldestXid, oldestXidDB) = {
-        let tv = TRANSAM_VARIABLES.lock().unwrap();
+        let tv = transam();
         (
             XidFromFullTransactionId(tv.nextXid),
             tv.xidVacLimit,
@@ -621,7 +682,7 @@ pub fn GetNewObjectId() -> PgResult<Oid> {
     let guard = acquire(OID_GEN_LOCK, true)?;
 
     let result = {
-        let mut tv = TRANSAM_VARIABLES.lock().unwrap();
+        let mut tv = transam();
 
         // Check for wraparound of the OID counter. We *must* not return 0
         // (InvalidOid), and in normal operation we mustn't return anything
@@ -646,11 +707,11 @@ pub fn GetNewObjectId() -> PgResult<Oid> {
         // If we run out of logged-for-use oids then we must log more.
         if tv.oidCount == 0 {
             let next_to_log = tv.nextOid.wrapping_add(VAR_OID_PREFETCH);
-            // Release the data mutex across the WAL insert (the LWLock still
-            // serializes); reacquire to commit the prefetch accounting.
-            drop(tv);
+            // The WAL insert runs while we still hold OidGenLock (matching C);
+            // the shared-struct pointer is re-fetched after to commit the
+            // prefetch accounting.
             xlog_seams::xlog_put_next_oid::call(next_to_log)?;
-            tv = TRANSAM_VARIABLES.lock().unwrap();
+            tv = transam();
             tv.oidCount = VAR_OID_PREFETCH;
         }
 
@@ -681,10 +742,9 @@ fn SetNextObjectId(nextOid: Oid) -> PgResult<()> {
     let guard = acquire(OID_GEN_LOCK, true)?;
 
     {
-        let mut tv = TRANSAM_VARIABLES.lock().unwrap();
+        let mut tv = transam();
         if tv.nextOid > nextOid {
             let cur = tv.nextOid;
-            drop(tv);
             guard.release()?;
             return Err(PgError::new(
                 ERROR,
@@ -717,7 +777,7 @@ fn SetNextObjectId(nextOid: Oid) -> PgResult<()> {
 pub fn XLogRedoNextOid(next_oid: Oid) -> PgResult<()> {
     let guard = acquire(OID_GEN_LOCK, true)?;
     {
-        let mut tv = TRANSAM_VARIABLES.lock().unwrap();
+        let mut tv = transam();
         tv.nextOid = next_oid;
         tv.oidCount = 0;
     }
@@ -752,10 +812,10 @@ pub fn AssertTransactionIdInAllowableRange(xid: TransactionId) {
         }
 
         // C cannot acquire XidGenLock here (it may already be held) and relies
-        // on 32-bit atomic reads; the Mutex read of the owned struct is already
-        // correctly ordered.
+        // on 32-bit atomic reads of the shared struct; the lockless read of the
+        // two words mirrors that.
         let (oldest_xid, next_xid) = {
-            let tv = TRANSAM_VARIABLES.lock().unwrap();
+            let tv = transam();
             (tv.oldestXid, XidFromFullTransactionId(tv.nextXid))
         };
 
@@ -831,60 +891,58 @@ pub fn init_seams() {
     // is a `ProcArrayLock`-protected field of the `TransamVariables` singleton
     // owned here; procarray reaches it through this owner seam.
     seams::init_xact_completion_count::set(|| {
-        TRANSAM_VARIABLES.lock().unwrap().xactCompletionCount = 1;
+        transam().xactCompletionCount = 1;
     });
 
     // `TransamVariables->latestCompletedXid` get/set + `xactCompletionCount++` —
     // the end-of-xact bookkeeping procarray.c's `MaintainLatestCompletedXid*` /
     // `ProcArray{EndTransactionInternal,Remove,ClearTransaction}` perform under
-    // `ProcArrayLock`. The fields live in the `TransamVariables` singleton owned
-    // here; procarray reaches them through these owner seams (the backing
-    // `Mutex` provides the mutual exclusion the LWLock gives in C).
+    // `ProcArrayLock`. The fields live in the shared `TransamVariables`
+    // singleton owned here; procarray reaches them through these owner seams,
+    // holding `ProcArrayLock` across the call exactly as in C — so the mutation
+    // is visible to every backend reading the same shmem struct.
     // `TransamVariables->nextXid = checkPoint.nextXid; nextOid = checkPoint.nextOid;
     // oidCount = 0;` — the WAL-startup (xlog.c:5631-5634) seed of the XID/OID
     // counters from the starting checkpoint. No other process is up yet in C, so
-    // there is no lock; the backing `Mutex` is incidental.
+    // there is no lock.
     seams::set_transam_variables_at_startup::set(|next_xid, next_oid| {
-        let mut tv = TRANSAM_VARIABLES.lock().unwrap();
+        let mut tv = transam();
         tv.nextXid = next_xid;
         tv.nextOid = next_oid;
         tv.oidCount = 0;
     });
 
-    seams::get_latest_completed_xid::set(|| TRANSAM_VARIABLES.lock().unwrap().latestCompletedXid);
+    seams::get_latest_completed_xid::set(|| transam().latestCompletedXid);
     seams::set_latest_completed_xid::set(|fxid| {
-        TRANSAM_VARIABLES.lock().unwrap().latestCompletedXid = fxid;
+        transam().latestCompletedXid = fxid;
     });
     seams::increment_xact_completion_count::set(|| {
-        TRANSAM_VARIABLES.lock().unwrap().xactCompletionCount += 1;
+        transam().xactCompletionCount += 1;
     });
-    seams::get_xact_completion_count::set(|| TRANSAM_VARIABLES.lock().unwrap().xactCompletionCount);
-    seams::get_oldest_xid::set(|| TRANSAM_VARIABLES.lock().unwrap().oldestXid);
-    seams::get_oldest_clog_xid::set(|| TRANSAM_VARIABLES.lock().unwrap().oldestClogXid);
+    seams::get_xact_completion_count::set(|| transam().xactCompletionCount);
+    seams::get_oldest_xid::set(|| transam().oldestXid);
+    seams::get_oldest_clog_xid::set(|| transam().oldestClogXid);
 
     // `TransamVariables->{oldest,newest}CommitTsXid` (access/transam.h field
     // accessors). commit_ts.c reads/writes these under `CommitTsLock`, which it
-    // holds across the call; varsup owns the `TransamVariables` singleton, so
-    // the seam is a plain field get/set on `TRANSAM_VARIABLES` (the backing
-    // `Mutex` provides the mutual exclusion the LWLock gives in C).
-    seams::get_oldest_commit_ts_xid::set(|| TRANSAM_VARIABLES.lock().unwrap().oldestCommitTsXid);
-    seams::get_newest_commit_ts_xid::set(|| TRANSAM_VARIABLES.lock().unwrap().newestCommitTsXid);
+    // holds across the call; varsup owns the shared `TransamVariables`
+    // singleton, so the seam is a plain field get/set on the shmem struct
+    // (`CommitTsLock`, held by the caller, gives the cross-backend exclusion).
+    seams::get_oldest_commit_ts_xid::set(|| transam().oldestCommitTsXid);
+    seams::get_newest_commit_ts_xid::set(|| transam().newestCommitTsXid);
     seams::set_oldest_commit_ts_xid::set(|xid| {
-        TRANSAM_VARIABLES.lock().unwrap().oldestCommitTsXid = xid;
+        transam().oldestCommitTsXid = xid;
     });
     seams::set_newest_commit_ts_xid::set(|xid| {
-        TRANSAM_VARIABLES.lock().unwrap().newestCommitTsXid = xid;
+        transam().newestCommitTsXid = xid;
     });
 
     // `VarsupShmemSize()` / `VarsupShmemInit()` (ipci.c shmem accumulator /
-    // create-or-attach). Both are infallible in C/here; the seam contract
-    // carries the generic shmem `add_size`/out-of-memory `ereport(ERROR)`
-    // surface, so wrap in `Ok`.
+    // create-or-attach). `VarsupShmemInit` now carves the shared struct via
+    // `ShmemInitStruct`, so it carries that out-of-memory `ereport(ERROR)`
+    // surface on `Err`; `VarsupShmemSize` is the infallible struct size.
     seams::varsup_shmem_size::set(|| Ok(VarsupShmemSize()));
-    seams::varsup_shmem_init::set(|| {
-        VarsupShmemInit();
-        Ok(())
-    });
+    seams::varsup_shmem_init::set(VarsupShmemInit);
 
     // vacuum's `vac_update_datfrozenxid` wraparound-limit refresh predicate.
     seams::force_transaction_id_limit_update::set(ForceTransactionIdLimitUpdate);
