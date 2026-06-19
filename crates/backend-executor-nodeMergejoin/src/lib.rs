@@ -1176,10 +1176,7 @@ pub fn ExecInitMergeJoin<'mcx>(
 
     let mcx = estate.es_query_cxt;
 
-    let node: &'mcx MergeJoin<'mcx> = match plan_node {
-        types_nodes::nodes::Node::MergeJoin(m) => m,
-        other => panic!("castNode(MergeJoin, node) failed: {other:?}"),
-    };
+    let node: &'mcx MergeJoin<'mcx> = plan_node.expect_mergejoin();
 
     // create state structure: makeNode(MergeJoinState)
     //   mergestate->js.ps.plan = (Plan *) node;
