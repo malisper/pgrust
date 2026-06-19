@@ -2159,19 +2159,16 @@ fn expr_to_node<'mcx>(e: Expr) -> Node<'mcx> {
 
 /// `(Node *) expr` — unwrap a `Node::Expr` to its inner `Expr`.
 fn node_to_expr<'mcx>(n: Node<'mcx>) -> Expr {
-    match n {
-        Node::Expr(e) => e,
-        other => panic!("node_to_expr: non-Expr node ({other:?}) where an Expr was required"),
-    }
+    let tag = n.node_tag();
+    n.into_expr()
+        .unwrap_or_else(|| panic!("node_to_expr: non-Expr node ({tag:?}) where an Expr was required"))
 }
 
 /// Borrow the inner `Expr` of a `Node::Expr` for an `exprType`/`exprTypmod`
 /// inspection.
 fn node_expr_ref<'a, 'mcx>(n: &'a Node<'mcx>) -> &'a Expr {
-    match n {
-        Node::Expr(e) => e,
-        _ => panic!("node_expr_ref: non-Expr node where an Expr was required"),
-    }
+    n.as_expr()
+        .expect("node_expr_ref: non-Expr node where an Expr was required")
 }
 
 /// Extract a `Var` from a `Node::Expr(Expr::Var)`.
