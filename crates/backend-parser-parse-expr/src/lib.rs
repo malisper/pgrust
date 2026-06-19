@@ -3436,8 +3436,8 @@ fn transformSubLink<'mcx>(
 
     // Check that we got a SELECT. Anything else should be impossible given
     // restrictions of the grammar, but check anyway.
-    let qtree = match qtree_node.as_ref() {
-        Node::Query(q) if q.commandType == types_nodes::nodes::CmdType::CMD_SELECT => q,
+    let qtree = match qtree_node.as_ref().as_query() {
+        Some(q) if q.commandType == types_nodes::nodes::CmdType::CMD_SELECT => q,
         _ => {
             return Err(PgError::error(
                 "unexpected non-SELECT command in SubLink",
