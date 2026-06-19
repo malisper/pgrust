@@ -426,6 +426,24 @@ fn fc_inet_server_port(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     }
 }
 
+/// `inet_client_addr() -> inet or NULL` (network.c). 0-ary, not strict.
+fn fc_inet_client_addr(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    match crate::inet_client_addr() {
+        Ok(Some(a)) => ret_inet(fcinfo, a),
+        Ok(None) => ret_null(fcinfo),
+        Err(e) => raise(e),
+    }
+}
+
+/// `inet_server_addr() -> inet or NULL` (network.c). 0-ary, not strict.
+fn fc_inet_server_addr(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    match crate::inet_server_addr() {
+        Ok(Some(a)) => ret_inet(fcinfo, a),
+        Ok(None) => ret_null(fcinfo),
+        Err(e) => raise(e),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -512,6 +530,9 @@ pub fn register_network_builtins() {
         // 0-ary session-info int4 functions (proisstrict => 'f').
         builtin(2197, "inet_client_port", 0, false, false, fc_inet_client_port),
         builtin(2199, "inet_server_port", 0, false, false, fc_inet_server_port),
+        // 0-ary session-info inet functions (proisstrict => 'f').
+        builtin(2196, "inet_client_addr", 0, false, false, fc_inet_client_addr),
+        builtin(2198, "inet_server_addr", 0, false, false, fc_inet_server_addr),
     ]);
 }
 

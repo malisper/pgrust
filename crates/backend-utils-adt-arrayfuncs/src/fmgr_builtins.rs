@@ -233,6 +233,21 @@ fn ret_i32(v: i32) -> Datum {
     Datum::from_i32(v)
 }
 
+/// `PG_RETURN_UINT32`.
+fn ret_u32(v: u32) -> Datum {
+    Datum::from_u32(v)
+}
+
+/// `PG_RETURN_UINT64`.
+fn ret_u64(v: u64) -> Datum {
+    Datum::from_u64(v)
+}
+
+/// `PG_GETARG_INT64(i)`: the by-value 64-bit word.
+fn arg_i64(fcinfo: &FunctionCallInfoBaseData, i: usize) -> i64 {
+    fcinfo.arg(i).expect("array fn: missing arg").value.as_i64()
+}
+
 /// `PG_RETURN_NULL()`.
 fn ret_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     fcinfo.set_result_null(true);
@@ -322,6 +337,29 @@ fn fc_arrayoverlap(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let a = arg_array_detoast(fcinfo, 0);
     let b = arg_array_detoast(fcinfo, 1);
     ret_bool(ok(crate::ops::arrayoverlap(&a, &b, collation(fcinfo))))
+}
+
+// --- btarraycmp / hash (strict, anyarray -> int4 / int4 / int8) -------------
+
+/// `btarraycmp(anyarray, anyarray) -> int4` (oid 382): `array_cmp(fcinfo)`.
+fn fc_btarraycmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let a = arg_array_detoast(fcinfo, 0);
+    let b = arg_array_detoast(fcinfo, 1);
+    ret_i32(ok(crate::ops::btarraycmp(&a, &b, collation(fcinfo))))
+}
+
+/// `hash_array(anyarray) -> int4` (oid 626): `PG_RETURN_UINT32(result)`.
+fn fc_hash_array(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let a = arg_array_detoast(fcinfo, 0);
+    ret_u32(ok(crate::ops::hash_array(&a, collation(fcinfo))))
+}
+
+/// `hash_array_extended(anyarray, int8) -> int8` (oid 782). arg1 is the seed
+/// (`PG_GETARG_INT64(1)` cast to `uint64`); `PG_RETURN_UINT64(result)`.
+fn fc_hash_array_extended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let a = arg_array_detoast(fcinfo, 0);
+    let seed = arg_i64(fcinfo, 1) as u64;
+    ret_u64(ok(crate::ops::hash_array_extended(&a, collation(fcinfo), seed)))
 }
 
 // --- dims / bounds (strict, anyarray [int4] -> int4 / text) -----------------
@@ -808,6 +846,10 @@ pub fn register_arrayfuncs_sql_builtins() {
         sbuiltin(2748, "arraycontains", 2, fc_arraycontains),
         sbuiltin(2749, "arraycontained", 2, fc_arraycontained),
         sbuiltin(2747, "arrayoverlap", 2, fc_arrayoverlap),
+        // btarraycmp / hash
+        sbuiltin(382, "btarraycmp", 2, fc_btarraycmp),
+        sbuiltin(626, "hash_array", 1, fc_hash_array),
+        sbuiltin(782, "hash_array_extended", 2, fc_hash_array_extended),
         // dims / bounds
         sbuiltin(748, "array_ndims", 1, fc_array_ndims),
         sbuiltin(747, "array_dims", 1, fc_array_dims),

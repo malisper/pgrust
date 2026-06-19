@@ -1747,6 +1747,9 @@ pub fn register_datetime_builtins() {
         builtin(1316, "timestamp_time", 1, true, false, fc_timestamp_time),
         builtin(2019, "timestamptz_time", 1, true, false, fc_timestamptz_time),
         builtin(2025, "datetime_timestamp", 2, true, false, fc_datetime_timestamp),
+        // oid 1272 (proname datetime_pl) has prosrc `datetime_timestamp`; the
+        // fmgr builtin funcName is the prosrc, so it shares the symbol with 2025.
+        builtin(1272, "datetime_timestamp", 2, true, false, fc_datetime_timestamp),
         builtin(1370, "time_interval", 1, true, false, fc_time_interval),
         builtin(1419, "interval_time", 1, true, false, fc_interval_time),
         builtin(1690, "time_mi_time", 2, true, false, fc_time_mi_time),
@@ -1780,6 +1783,9 @@ pub fn register_datetime_builtins() {
         builtin(2047, "time_timetz", 1, true, false, fc_time_timetz),
         builtin(1388, "timestamptz_timetz", 1, true, false, fc_timestamptz_timetz),
         builtin(1359, "datetimetz_timestamptz", 2, true, false, fc_datetimetz_timestamptz),
+        // oid 1297 (proname datetimetz_pl) has prosrc `datetimetz_timestamptz`;
+        // the fmgr builtin funcName is the prosrc (shares symbol with 1359).
+        builtin(1297, "datetimetz_timestamptz", 2, true, false, fc_datetimetz_timestamptz),
         builtin(1273, "timetz_part", 2, true, false, fc_timetz_part),
         builtin(6201, "extract_timetz", 2, true, false, fc_extract_timetz),
         builtin(2037, "timetz_zone", 2, true, false, fc_timetz_zone),

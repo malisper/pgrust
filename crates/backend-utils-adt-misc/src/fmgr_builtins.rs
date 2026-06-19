@@ -332,6 +332,18 @@ fn fc_parse_ident(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     Datum::from_usize(0)
 }
 
+/// `pg_typeof(any)` (misc.c:563) -> `regtype` (`PG_RETURN_OID`).
+///
+/// Not strict (`proisstrict => 'f'`): the result is the static argument type
+/// regardless of whether the value is NULL. The arg-type OID comes from the
+/// call expression via `get_fn_expr_argtype(fcinfo->flinfo, 0)` (the fmgr
+/// shim's job), exactly as C does.
+fn fc_pg_typeof(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let arg0_type =
+        backend_utils_fmgr_core::get_fn_expr_argtype(fcinfo.flinfo.as_deref(), 0);
+    Datum::from_oid(crate::pg_typeof(arg0_type))
+}
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -442,5 +454,7 @@ pub fn register_misc_builtins() {
         builtin(6315, "pg_basetype", 1, true, false, fc_pg_basetype),
         // 1268 parse_ident(text, bool)         -> text[]
         builtin(1268, "parse_ident", 2, true, false, fc_parse_ident),
+        // 1619 pg_typeof(any)                  -> regtype (proisstrict => 'f')
+        builtin(1619, "pg_typeof", 1, false, false, fc_pg_typeof),
     ]);
 }

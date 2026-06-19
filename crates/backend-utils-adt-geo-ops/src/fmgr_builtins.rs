@@ -346,6 +346,33 @@ fc_pred_lseg!(fc_lseg_ge, crate::lseg::lseg_ge, res);
 fc_pred_lseg!(fc_lseg_parallel, crate::lseg::lseg_parallel, res);
 fc_pred_lseg!(fc_lseg_perp, crate::lseg::lseg_perp, res);
 
+// intersection predicates (mixed geometric types)
+/// `inter_sl(lseg, line) -> bool` (geo_ops.c).
+fn fc_inter_sl(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let ls = arg_lseg(fcinfo, 0);
+    let l = arg_line(fcinfo, 1);
+    ret_bool(ok(crate::proximity::inter_sl(&ls, &l)))
+}
+/// `inter_lb(line, box) -> bool` (geo_ops.c).
+fn fc_inter_lb(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let l = arg_line(fcinfo, 0);
+    let b = arg_box(fcinfo, 1);
+    ret_bool(ok(crate::proximity::inter_lb(&l, &b)))
+}
+/// `inter_sb(lseg, box) -> bool` (geo_ops.c).
+fn fc_inter_sb(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let ls = arg_lseg(fcinfo, 0);
+    let b = arg_box(fcinfo, 1);
+    ret_bool(ok(crate::proximity::inter_sb(&ls, &b)))
+}
+
+/// `boxes_bound_box(box, box) -> box` (geo_ops.c) — the bounding box of two boxes.
+fn fc_boxes_bound_box(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let b1 = arg_box(fcinfo, 0);
+    let b2 = arg_box(fcinfo, 1);
+    ret_box(fcinfo, crate::boxes::boxes_bound_box(&b1, &b2))
+}
+
 // lseg unary predicates
 fn fc_lseg_vertical(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let ls = arg_lseg(fcinfo, 0);
@@ -985,6 +1012,18 @@ pub fn register_geo_ops_builtins() {
         builtin(1497, "line_perp", 2, true, false, fc_line_perp),
         builtin(1498, "line_vertical", 1, true, false, fc_line_vertical),
         builtin(1499, "line_horizontal", 1, true, false, fc_line_horizontal),
+        // operator-row OIDs for the lseg predicate/measurement cores (same
+        // prosrc as the 1408-1411/1530 rows above; pg_proc gives these OIDs).
+        builtin(995, "lseg_parallel", 2, true, false, fc_lseg_parallel),
+        builtin(996, "lseg_perp", 2, true, false, fc_lseg_perp),
+        builtin(997, "lseg_vertical", 1, true, false, fc_lseg_vertical),
+        builtin(998, "lseg_horizontal", 1, true, false, fc_lseg_horizontal),
+        builtin(1487, "lseg_length", 1, true, false, fc_lseg_length),
+        // mixed-type intersection predicates + box bounding box.
+        builtin(277, "inter_sl", 2, true, false, fc_inter_sl),
+        builtin(278, "inter_lb", 2, true, false, fc_inter_lb),
+        builtin(373, "inter_sb", 2, true, false, fc_inter_sb),
+        builtin(4067, "boxes_bound_box", 2, true, false, fc_boxes_bound_box),
     ]);
 }
 

@@ -145,6 +145,282 @@ fn fc_xmltotext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 
 // ---------------------------------------------------------------------------
+// Additional argument readers for the multi-arg xml export functions.
+// ---------------------------------------------------------------------------
+
+/// `PG_GETARG_BOOL(i)`: the boolean arg word.
+#[inline]
+fn arg_bool(fcinfo: &FunctionCallInfoBaseData, i: usize) -> bool {
+    fcinfo.arg(i).expect("xml fn: missing bool arg").value.as_bool()
+}
+
+/// `PG_GETARG_OID(i)` (regclass): the OID arg word.
+#[inline]
+fn arg_oid(fcinfo: &FunctionCallInfoBaseData, i: usize) -> u32 {
+    fcinfo.arg(i).expect("xml fn: missing oid arg").value.as_u32()
+}
+
+/// `PG_GETARG_INT32(i)`.
+#[inline]
+fn arg_int32(fcinfo: &FunctionCallInfoBaseData, i: usize) -> i32 {
+    fcinfo.arg(i).expect("xml fn: missing int4 arg").value.as_i32()
+}
+
+/// A `text`/`refcursor` arg as a UTF-8 `&str` (its detoasted payload bytes).
+#[inline]
+fn arg_text_str<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
+    core::str::from_utf8(arg_text_bytes(fcinfo, i)).expect("xml fn: text arg not valid UTF-8")
+}
+
+/// A `name` arg as a UTF-8 `&str`. A `name` crosses the by-ref lane as its raw
+/// NUL-padded `NAMEDATALEN` buffer (no varlena header); NUL-trim then decode.
+#[inline]
+fn arg_name_str<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
+    let payload = fcinfo
+        .ref_arg(i)
+        .expect("xml fn: name arg missing from by-ref lane");
+    let bytes: &[u8] = match payload {
+        types_fmgr::RefPayload::Varlena(b) => b.as_slice(),
+        types_fmgr::RefPayload::Cstring(s) => s.as_bytes(),
+        other => panic!("xml fn: name arg has unexpected by-ref payload {other:?}"),
+    };
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    core::str::from_utf8(&bytes[..end]).expect("xml fn: name arg not valid UTF-8")
+}
+
+/// An optional `xml` arg (for the non-strict `xmlconcat2`): `None` when the arg
+/// is SQL NULL, else its detoasted payload bytes.
+#[inline]
+fn arg_xml_opt<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> Option<&'a [u8]> {
+    if fcinfo.args.get(i).map(|a| a.isnull).unwrap_or(true) {
+        None
+    } else {
+        Some(arg_text_bytes(fcinfo, i))
+    }
+}
+
+/// `PG_RETURN_BYTEA_P(b)` — a header-ful `bytea` varlena result word.
+#[inline]
+fn ret_bytea(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
+    ret_varlena(fcinfo, bytes)
+}
+
+/// `PG_RETURN_BOOL(b)`.
+#[inline]
+fn ret_bool_w(v: bool) -> Datum {
+    ret_bool(v)
+}
+
+// ---------------------------------------------------------------------------
+// fc_ adapters — predicates / send / concat / text.
+// ---------------------------------------------------------------------------
+
+/// `xmlexists(text, xml) -> bool` (OID 2614).
+fn fc_xmlexists(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let xpath = arg_text_bytes(fcinfo, 0);
+    let data = arg_text_bytes(fcinfo, 1);
+    ret_bool_w(ok(crate::xmlexists(xpath, data)))
+}
+
+/// `xmlvalidate(xml, text) -> bool` (OID 2897). The core is the removed-feature
+/// stub: it ignores both args and always errors.
+fn fc_xmlvalidate(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let _ = fcinfo;
+    ret_bool_w(ok(crate::xmlvalidate(
+        Datum::from_usize(0),
+        Datum::from_usize(0),
+    )))
+}
+
+/// `xml_send(xml) -> bytea` (OID 2899).
+fn fc_xml_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let x = arg_text_bytes(fcinfo, 0);
+    let out = ok(crate::xml_send(x));
+    ret_bytea(fcinfo, out)
+}
+
+/// `xmlconcat2(xml, xml) -> xml` (OID 2900, NOT strict).
+fn fc_xmlconcat2(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let a = arg_xml_opt(fcinfo, 0);
+    let b = arg_xml_opt(fcinfo, 1);
+    match ok(crate::xmlconcat2(a, b)) {
+        Some(out) => ret_varlena(fcinfo, out),
+        None => {
+            fcinfo.set_result_null(true);
+            Datum::from_usize(0)
+        }
+    }
+}
+
+/// `xmltext(text) -> xml` (OID 3813).
+fn fc_xmltext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let arg = arg_text_bytes(fcinfo, 0);
+    let out = ok(crate::xmltext(arg));
+    ret_varlena(fcinfo, out)
+}
+
+// ---------------------------------------------------------------------------
+// fc_ adapters — table / query / cursor / schema / database export.
+// ---------------------------------------------------------------------------
+
+/// `table_to_xml(regclass, bool, bool, text) -> xml` (OID 2923).
+fn fc_table_to_xml(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let relid = arg_oid(fcinfo, 0);
+    let nulls = arg_bool(fcinfo, 1);
+    let tableforest = arg_bool(fcinfo, 2);
+    let targetns = arg_text_str(fcinfo, 3).to_owned();
+    let out = ok(crate::table_to_xml(relid, nulls, tableforest, &targetns));
+    ret_varlena(fcinfo, out)
+}
+
+/// `query_to_xml(text, bool, bool, text) -> xml` (OID 2924).
+fn fc_query_to_xml(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let query = arg_text_str(fcinfo, 0).to_owned();
+    let nulls = arg_bool(fcinfo, 1);
+    let tableforest = arg_bool(fcinfo, 2);
+    let targetns = arg_text_str(fcinfo, 3).to_owned();
+    let out = ok(crate::query_to_xml(&query, nulls, tableforest, &targetns));
+    ret_varlena(fcinfo, out)
+}
+
+/// `cursor_to_xml(refcursor, int4, bool, bool, text) -> xml` (OID 2925).
+fn fc_cursor_to_xml(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let name = arg_text_str(fcinfo, 0).to_owned();
+    let count = arg_int32(fcinfo, 1);
+    let nulls = arg_bool(fcinfo, 2);
+    let tableforest = arg_bool(fcinfo, 3);
+    let targetns = arg_text_str(fcinfo, 4).to_owned();
+    let out = ok(crate::cursor_to_xml(&name, count, nulls, tableforest, &targetns));
+    ret_varlena(fcinfo, out)
+}
+
+/// `table_to_xmlschema(regclass, bool, bool, text) -> xml` (OID 2926).
+fn fc_table_to_xmlschema(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let relid = arg_oid(fcinfo, 0);
+    let nulls = arg_bool(fcinfo, 1);
+    let tableforest = arg_bool(fcinfo, 2);
+    let targetns = arg_text_str(fcinfo, 3).to_owned();
+    let out = ok(crate::table_to_xmlschema(relid, nulls, tableforest, &targetns));
+    ret_varlena(fcinfo, out)
+}
+
+/// `query_to_xmlschema(text, bool, bool, text) -> xml` (OID 2927).
+fn fc_query_to_xmlschema(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let query = arg_text_str(fcinfo, 0).to_owned();
+    let nulls = arg_bool(fcinfo, 1);
+    let tableforest = arg_bool(fcinfo, 2);
+    let targetns = arg_text_str(fcinfo, 3).to_owned();
+    let out = ok(crate::query_to_xmlschema(&query, nulls, tableforest, &targetns));
+    ret_varlena(fcinfo, out)
+}
+
+/// `cursor_to_xmlschema(refcursor, bool, bool, text) -> xml` (OID 2928).
+fn fc_cursor_to_xmlschema(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let name = arg_text_str(fcinfo, 0).to_owned();
+    let nulls = arg_bool(fcinfo, 1);
+    let tableforest = arg_bool(fcinfo, 2);
+    let targetns = arg_text_str(fcinfo, 3).to_owned();
+    let out = ok(crate::cursor_to_xmlschema(&name, nulls, tableforest, &targetns));
+    ret_varlena(fcinfo, out)
+}
+
+/// `table_to_xml_and_xmlschema(regclass, bool, bool, text) -> xml` (OID 2929).
+fn fc_table_to_xml_and_xmlschema(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let relid = arg_oid(fcinfo, 0);
+    let nulls = arg_bool(fcinfo, 1);
+    let tableforest = arg_bool(fcinfo, 2);
+    let targetns = arg_text_str(fcinfo, 3).to_owned();
+    let out = ok(crate::table_to_xml_and_xmlschema(
+        relid,
+        nulls,
+        tableforest,
+        &targetns,
+    ));
+    ret_varlena(fcinfo, out)
+}
+
+/// `query_to_xml_and_xmlschema(text, bool, bool, text) -> xml` (OID 2930).
+fn fc_query_to_xml_and_xmlschema(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let query = arg_text_str(fcinfo, 0).to_owned();
+    let nulls = arg_bool(fcinfo, 1);
+    let tableforest = arg_bool(fcinfo, 2);
+    let targetns = arg_text_str(fcinfo, 3).to_owned();
+    let out = ok(crate::query_to_xml_and_xmlschema(
+        &query,
+        nulls,
+        tableforest,
+        &targetns,
+    ));
+    ret_varlena(fcinfo, out)
+}
+
+/// `schema_to_xml(name, bool, bool, text) -> xml` (OID 2933).
+fn fc_schema_to_xml(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let name = arg_name_str(fcinfo, 0).to_owned();
+    let nulls = arg_bool(fcinfo, 1);
+    let tableforest = arg_bool(fcinfo, 2);
+    let targetns = arg_text_str(fcinfo, 3).to_owned();
+    let out = ok(crate::schema_to_xml(&name, nulls, tableforest, &targetns));
+    ret_varlena(fcinfo, out)
+}
+
+/// `schema_to_xmlschema(name, bool, bool, text) -> xml` (OID 2934).
+fn fc_schema_to_xmlschema(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let name = arg_name_str(fcinfo, 0).to_owned();
+    let nulls = arg_bool(fcinfo, 1);
+    let tableforest = arg_bool(fcinfo, 2);
+    let targetns = arg_text_str(fcinfo, 3).to_owned();
+    let out = ok(crate::schema_to_xmlschema(&name, nulls, tableforest, &targetns));
+    ret_varlena(fcinfo, out)
+}
+
+/// `schema_to_xml_and_xmlschema(name, bool, bool, text) -> xml` (OID 2935).
+fn fc_schema_to_xml_and_xmlschema(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let name = arg_name_str(fcinfo, 0).to_owned();
+    let nulls = arg_bool(fcinfo, 1);
+    let tableforest = arg_bool(fcinfo, 2);
+    let targetns = arg_text_str(fcinfo, 3).to_owned();
+    let out = ok(crate::schema_to_xml_and_xmlschema(
+        &name,
+        nulls,
+        tableforest,
+        &targetns,
+    ));
+    ret_varlena(fcinfo, out)
+}
+
+/// `database_to_xml(bool, bool, text) -> xml` (OID 2936).
+fn fc_database_to_xml(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let nulls = arg_bool(fcinfo, 0);
+    let tableforest = arg_bool(fcinfo, 1);
+    let targetns = arg_text_str(fcinfo, 2).to_owned();
+    let out = ok(crate::database_to_xml(nulls, tableforest, &targetns));
+    ret_varlena(fcinfo, out)
+}
+
+/// `database_to_xmlschema(bool, bool, text) -> xml` (OID 2937).
+fn fc_database_to_xmlschema(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let nulls = arg_bool(fcinfo, 0);
+    let tableforest = arg_bool(fcinfo, 1);
+    let targetns = arg_text_str(fcinfo, 2).to_owned();
+    let out = ok(crate::database_to_xmlschema(nulls, tableforest, &targetns));
+    ret_varlena(fcinfo, out)
+}
+
+/// `database_to_xml_and_xmlschema(bool, bool, text) -> xml` (OID 2938).
+fn fc_database_to_xml_and_xmlschema(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let nulls = arg_bool(fcinfo, 0);
+    let tableforest = arg_bool(fcinfo, 1);
+    let targetns = arg_text_str(fcinfo, 2).to_owned();
+    let out = ok(crate::database_to_xml_and_xmlschema(
+        nulls,
+        tableforest,
+        &targetns,
+    ));
+    ret_varlena(fcinfo, out)
+}
+
+// ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
 
