@@ -190,6 +190,84 @@ static SHARED_ALL_PROCS: AtomicPtr<PGPROC> = AtomicPtr::new(core::ptr::null_mut(
 /// Length of the [`SHARED_ALL_PROCS`] array (`total_procs`), for bounds checks.
 static SHARED_ALL_PROCS_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+// ---- genuinely-shared per-PGPROC `procLatch` words ----
+//
+// `with_proc_latch` reaches `&proc->procLatch` to let `SetLatch`/`OwnLatch`/
+// `DisownLatch` mutate the all-atomic `Latch` (`is_set`/`maybe_sleeping`/
+// `owner_pid`). The C `procLatch` lives in the shared `PGPROC` block, and the
+// whole point of `SetLatch` is CROSS-PROCESS wakeup: one backend sets another
+// process' latch (`is_set` + signal the `owner_pid`). The `SHARED_ALL_PROCS`
+// base above points into the per-process `PROC_GLOBAL` `allProcs` `Vec`, which
+// is COW-inherited — fine for read-mostly fields and for async-signal-safety
+// (no RefCell re-borrow), but a process-local copy: a write to
+// `allProcs[n].procLatch` in one process is invisible to every other. That
+// silently breaks every inter-process latch wakeup — most visibly the startup
+// process' end-of-recovery `RequestCheckpoint`, whose `SetLatch` of the
+// checkpointer's `procLatch` finds `owner_pid == 0` (the checkpointer `OwnLatch`'d
+// its OWN private copy) and never signals, hanging recovery.
+//
+// So the `procLatch` words specifically live in a genuine shmem segment placed
+// by the postmaster and inherited as a true shared mapping by every fork
+// (exactly like the pid words / freelists / advertised aux procs). The
+// PGPROC array's other fields stay process-local; only the latch — the one
+// field designed for cross-process mutation — is promoted to real shmem.
+static SHARED_PROC_LATCHES: AtomicPtr<types_storage::latch::Latch> =
+    AtomicPtr::new(core::ptr::null_mut());
+
+/// Length of [`SHARED_PROC_LATCHES`] (== total_procs), for bounds checks.
+static SHARED_PROC_LATCH_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+// ---- genuinely-shared per-PGPROC `cvWaitLink` nodes ----
+//
+// A `ConditionVariable`'s wait queue is a `proclist` threaded through each
+// waiter's `PGPROC.cvWaitLink`. `ConditionVariablePrepareToSleep` (in the
+// waiter) pushes its own procno onto the CV's shared list head under the CV
+// spinlock; `ConditionVariableBroadcast` (in another process) walks that list
+// and `SetLatch`es each waiter. The list *head* lives in the shared
+// ConditionVariable (`CheckpointerShmem`), but the per-PGPROC link nodes the
+// walk follows must be shared too — otherwise the broadcaster resolves a
+// waiter's `cvWaitLink` in its OWN process-local PGPROC copy (where the waiter
+// never linked itself), so the traversal sees an inconsistent list and the two
+// processes spin forever on the CV mutex. This is exactly what hangs the
+// end-of-recovery `RequestCheckpoint`/`CheckpointerMain` CV handshake once the
+// shared `procLatch` lets the initial wakeup through. So `cvWaitLink` lives in
+// genuine shmem, like the latch words above.
+static SHARED_CV_WAIT_LINKS: AtomicPtr<types_storage::proclist_node> =
+    AtomicPtr::new(core::ptr::null_mut());
+
+/// Length of [`SHARED_CV_WAIT_LINKS`] (== total_procs), for bounds checks.
+static SHARED_CV_WAIT_LINK_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// `&proc->cvWaitLink` over the genuinely-shared array (read).
+pub(crate) fn cv_wait_link_read(procno: ProcNumber) -> types_storage::proclist_node {
+    let base = SHARED_CV_WAIT_LINKS.load(AtomicOrdering::Relaxed);
+    let count = SHARED_CV_WAIT_LINK_COUNT.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "cv_wait_link_read: cvWaitLink base uninitialized (InitProcGlobal not run)"
+    );
+    let idx = procno as usize;
+    assert!(idx < count, "cvWaitLink index {idx} out of range (count {count})");
+    // SAFETY: `base` addresses `count` `proclist_node`s of genuine shared
+    // memory; `idx < count`. Read under the CV spinlock (caller-held), mirroring
+    // C's plain read of `proc->cvWaitLink`.
+    unsafe { core::ptr::read(base.add(idx)) }
+}
+
+/// `proc->cvWaitLink = node` over the genuinely-shared array (write).
+pub(crate) fn cv_wait_link_write(procno: ProcNumber, node: types_storage::proclist_node) {
+    let base = SHARED_CV_WAIT_LINKS.load(AtomicOrdering::Relaxed);
+    let count = SHARED_CV_WAIT_LINK_COUNT.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "cv_wait_link_write: cvWaitLink base uninitialized (InitProcGlobal not run)"
+    );
+    let idx = procno as usize;
+    assert!(idx < count, "cvWaitLink index {idx} out of range (count {count})");
+    // SAFETY: see `cv_wait_link_read`; written under the CV spinlock.
+    unsafe { core::ptr::write(base.add(idx), node) };
+}
+
 /// Pointer to the genuinely-shared `ProcStructLock` spinlock word. Set by
 /// [`InitProcGlobal`], NULL until then. C: `slock_t *ProcStructLock` placed by
 /// `ShmemInitStruct`.
@@ -219,6 +297,96 @@ static SHARED_PROC_STRUCT_LOCK: AtomicPtr<types_storage::storage::Spinlock> =
 /// `INVALID_PROC_NUMBER` as the i32 sentinel for an absent list link / empty
 /// head — matches C's empty-`dlist` (`head == NULL`) and detached-node state.
 const FREE_LINK_NIL: i32 = -1;
+
+// ---- genuinely-shared advertised auxiliary proc numbers ----
+//
+// `ProcGlobal->checkpointerProc` / `ProcGlobal->walwriterProc` are the slot
+// numbers the checkpointer / WAL writer advertise about THEMSELVES at startup
+// (`set_checkpointer_proc_to_self` / `set_walwriter_proc_to_self`), so that an
+// *unrelated* process (a backend, or the startup process during the
+// end-of-recovery `RequestCheckpoint`) can resolve them and `SetLatch` the
+// aux process to wake it. In C these words live in the shared `PROC_HDR`.
+//
+// They MUST be genuinely shared, not part of the COW-inherited `PROC_GLOBAL`
+// value: the checkpointer writes `checkpointerProc` in its OWN process after
+// being forked, so a process-local copy would never propagate to the reader.
+// During crash recovery the startup process is forked from the postmaster's
+// image (where `checkpointerProc == INVALID_PROC_NUMBER`, the checkpointer not
+// having advertised yet) and would spin in `RequestCheckpoint`'s
+// retry-then-error loop forever, never completing the end-of-recovery
+// checkpoint handshake. So — exactly like the pid words / freelists above —
+// these advertised slot numbers live in a real shmem segment placed by the
+// postmaster and inherited as a true shared mapping by every fork.
+
+/// Index into [`SHARED_AUX_PROCS`] for each advertised auxiliary proc number.
+#[derive(Clone, Copy)]
+enum AuxProcSlot {
+    Checkpointer = 0,
+    WalWriter = 1,
+}
+
+/// Number of advertised auxiliary proc-number words.
+const NUM_AUX_PROC_SLOTS: usize = 2;
+
+/// Base of the genuinely-shared `[ProcNumber; NUM_AUX_PROC_SLOTS]` array holding
+/// the advertised auxiliary proc numbers. Set by [`InitProcGlobal`], NULL until
+/// then. C: the `checkpointerProc` / `walwriterProc` words of the shared
+/// `PROC_HDR`.
+static SHARED_AUX_PROCS: AtomicPtr<ProcNumber> = AtomicPtr::new(core::ptr::null_mut());
+
+/// `ProcGlobal->{checkpointer,walwriter}Proc` read over the genuinely-shared
+/// array. Returns `INVALID_PROC_NUMBER` if the block is not yet initialized
+/// (mirrors the pre-`InitProcGlobal` default).
+fn aux_proc_read(slot: AuxProcSlot) -> ProcNumber {
+    let base = SHARED_AUX_PROCS.load(AtomicOrdering::Relaxed);
+    if base.is_null() {
+        return INVALID_PROC_NUMBER;
+    }
+    // SAFETY: `base` addresses `NUM_AUX_PROC_SLOTS` `ProcNumber`s of genuine
+    // shared memory; `slot as usize` is in range by construction. A single
+    // aligned word read mirrors C's plain read of the `PROC_HDR` field.
+    unsafe { core::ptr::read(base.add(slot as usize)) }
+}
+
+/// `ProcGlobal->{checkpointer,walwriter}Proc = value` over the genuinely-shared
+/// array. No-op (with a debug assert) if the block is not yet initialized.
+fn aux_proc_write(slot: AuxProcSlot, value: ProcNumber) {
+    let base = SHARED_AUX_PROCS.load(AtomicOrdering::Relaxed);
+    debug_assert!(
+        !base.is_null(),
+        "advertised aux proc block uninitialized (InitProcGlobal not run)"
+    );
+    if base.is_null() {
+        return;
+    }
+    // SAFETY: see `aux_proc_read`; a single aligned word write mirrors C's plain
+    // write of the `PROC_HDR` field.
+    unsafe { core::ptr::write(base.add(slot as usize), value) };
+}
+
+/// `ProcGlobal->checkpointerProc` (genuinely shared).
+pub(crate) fn checkpointer_proc_read() -> ProcNumber {
+    aux_proc_read(AuxProcSlot::Checkpointer)
+}
+
+/// `ProcGlobal->checkpointerProc = value` (genuinely shared).
+pub(crate) fn checkpointer_proc_write(value: ProcNumber) {
+    aux_proc_write(AuxProcSlot::Checkpointer, value);
+}
+
+/// `ProcGlobal->walwriterProc` (genuinely shared). The reader is the walwriter
+/// latch-wakeup in xlog's `XLogSetAsyncXactLSN`, currently a no-op stub
+/// (`wake_walwriter`); kept wired so the cross-process word is correct the
+/// moment that wakeup is enabled, mirroring `checkpointer_proc_read`.
+#[allow(dead_code)]
+pub(crate) fn walwriter_proc_read() -> ProcNumber {
+    aux_proc_read(AuxProcSlot::WalWriter)
+}
+
+/// `ProcGlobal->walwriterProc = value` (genuinely shared).
+pub(crate) fn walwriter_proc_write(value: ProcNumber) {
+    aux_proc_write(AuxProcSlot::WalWriter, value);
+}
 
 /// Per-PGPROC `links` realization: the `next`/`prev` ProcNumber of an intrusive
 /// freelist node. `repr(C)` so the in-shmem layout is fixed and plain-int
@@ -476,6 +644,59 @@ fn init_shared_pid_block(total_procs: usize) -> PgResult<()> {
         unsafe { (*lock_ptr).unlock() };
     }
     SHARED_PROC_STRUCT_LOCK.store(lock_ptr, AtomicOrdering::Relaxed);
+
+    // Advertised auxiliary proc numbers (checkpointerProc / walwriterProc).
+    let aux_size = mul_size(NUM_AUX_PROC_SLOTS, size_of::<ProcNumber>());
+    let (aux_ptr, aux_found) =
+        shmem::shmem_init_struct::call("PROC_HDR advertised aux procs", aux_size)?;
+    let aux_ptr = aux_ptr as *mut ProcNumber;
+    if !aux_found {
+        // No aux process has advertised yet: INVALID_PROC_NUMBER, matching the
+        // `PROC_HDR` field defaults (`InitProcGlobal` sets both to
+        // INVALID_PROC_NUMBER).
+        // SAFETY: `aux_ptr` addresses `NUM_AUX_PROC_SLOTS` writable `ProcNumber`
+        // words of shmem.
+        for i in 0..NUM_AUX_PROC_SLOTS {
+            unsafe { core::ptr::write(aux_ptr.add(i), INVALID_PROC_NUMBER) };
+        }
+    }
+    SHARED_AUX_PROCS.store(aux_ptr, AtomicOrdering::Relaxed);
+
+    // Per-PGPROC `procLatch` words (genuinely shared for cross-process wakeup).
+    let latch_size = mul_size(total_procs, size_of::<types_storage::latch::Latch>());
+    let (latch_ptr, latch_found) =
+        shmem::shmem_init_struct::call("PGPROC procLatch words", latch_size)?;
+    let latch_ptr = latch_ptr as *mut types_storage::latch::Latch;
+    if !latch_found {
+        // Zero the block (C's MemSet of the PGPROC array), then `InitSharedLatch`
+        // each one: cleared (is_set=0, maybe_sleeping=0, owner_pid=0) and marked
+        // shared (is_shared=true). `OwnLatch` later stamps owner_pid.
+        // SAFETY: `latch_ptr` addresses `latch_size` writable shmem bytes; the
+        // all-atomic `Latch` is sound to zero-initialize then field-write.
+        unsafe { core::ptr::write_bytes(latch_ptr as *mut u8, 0, latch_size) };
+        for i in 0..total_procs {
+            // SAFETY: in-range slot of the shared latch array.
+            let l = unsafe { &*latch_ptr.add(i) };
+            l.is_shared.store(true, core::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    SHARED_PROC_LATCHES.store(latch_ptr, AtomicOrdering::Relaxed);
+    SHARED_PROC_LATCH_COUNT.store(total_procs, AtomicOrdering::Relaxed);
+
+    // Per-PGPROC `cvWaitLink` nodes (genuinely shared so a CV broadcast in one
+    // process walks the same wait queue the waiter linked itself onto).
+    let cv_size = mul_size(total_procs, size_of::<types_storage::proclist_node>());
+    let (cv_ptr, cv_found) =
+        shmem::shmem_init_struct::call("PGPROC cvWaitLink nodes", cv_size)?;
+    let cv_ptr = cv_ptr as *mut types_storage::proclist_node;
+    if !cv_found {
+        // Zero (`proclist_node { next: 0, prev: 0 }`) — not linked into any
+        // queue, matching C's MemSet of the PGPROC block.
+        // SAFETY: `cv_ptr` addresses `cv_size` writable shmem bytes.
+        unsafe { core::ptr::write_bytes(cv_ptr as *mut u8, 0, cv_size) };
+    }
+    SHARED_CV_WAIT_LINKS.store(cv_ptr, AtomicOrdering::Relaxed);
+    SHARED_CV_WAIT_LINK_COUNT.store(total_procs, AtomicOrdering::Relaxed);
 
     Ok(())
 }
@@ -1107,28 +1328,30 @@ pub(crate) fn proc_latch_handle(procNumber: ProcNumber) -> LatchHandle {
 /// array; the latch unit applies its own `SetLatch`/`OwnLatch`/`DisownLatch`
 /// algorithm inside the callback.
 pub(crate) fn with_proc_latch(procno: ProcNumber, f: &mut dyn FnMut(&types_storage::latch::Latch)) {
-    // Reach `&proc->procLatch` through the stable `allProcs` base recorded by
-    // InitProcGlobal, NOT through the `PROC_GLOBAL` RefCell borrow. The `Latch`
-    // is all-atomic and the array buffer never moves after InitProcGlobal, so
-    // this is the faithful async-signal-safe `&proc->procLatch`: `SetLatch`
-    // from a `SIGALRM` handler no longer re-borrows the RefCell (the source of
-    // the "RefCell already borrowed" aborts under statement_timeout workloads).
-    let base = SHARED_ALL_PROCS.load(AtomicOrdering::Relaxed);
-    let count = SHARED_ALL_PROCS_COUNT.load(AtomicOrdering::Relaxed);
+    // Reach `&proc->procLatch` through the genuinely-shared `SHARED_PROC_LATCHES`
+    // array placed in real shmem by InitProcGlobal — NOT the per-process
+    // `allProcs` `Vec` (whose `procLatch` writes would be invisible to other
+    // processes, silently breaking every cross-process `SetLatch` wakeup, e.g.
+    // the end-of-recovery checkpoint handshake). This also keeps the original
+    // async-signal-safety property: the `Latch` is all-atomic and the array is
+    // a fixed shmem mapping, so `SetLatch` from a `SIGALRM` handler takes no
+    // `PROC_GLOBAL` RefCell borrow (no "RefCell already borrowed" abort).
+    let base = SHARED_PROC_LATCHES.load(AtomicOrdering::Relaxed);
+    let count = SHARED_PROC_LATCH_COUNT.load(AtomicOrdering::Relaxed);
     assert!(
         !base.is_null(),
-        "with_proc_latch: allProcs base uninitialized (InitProcGlobal not run)"
+        "with_proc_latch: procLatch base uninitialized (InitProcGlobal not run)"
     );
     let idx = procno as usize;
     assert!(
         procno >= 0 && idx < count,
         "with_proc_latch: ProcNumber {procno} out of range (0..{count})"
     );
-    // SAFETY: `base` addresses the stable, process-lifetime `allProcs` buffer
-    // placed by InitProcGlobal; `idx` is bounds-checked against its length.
-    // We only read the all-atomic embedded `Latch` through a shared reference,
-    // never aliasing the RefCell's `&mut` (the `Latch` fields are atomics,
-    // mutated concurrently/cross-process exactly as C's `volatile` latch is).
-    let latch: &types_storage::latch::Latch = unsafe { &(*base.add(idx)).procLatch };
+    // SAFETY: `base` addresses the stable, process-lifetime shared `procLatch`
+    // array placed by InitProcGlobal; `idx` is bounds-checked against its
+    // length. We only touch the all-atomic `Latch` through a shared reference;
+    // its fields are mutated concurrently/cross-process exactly as C's
+    // `volatile` latch is.
+    let latch: &types_storage::latch::Latch = unsafe { &*base.add(idx) };
     f(latch);
 }

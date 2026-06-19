@@ -391,18 +391,35 @@ pub fn PGReserveSemaphores(max_semas: i32) -> PgResult<()> {
 /// `PGSemaphoreReset` (`semctl(..., SETVAL, 0)`) would hit a removed set and fail
 /// `EINVAL`, aborting startup. So in the postmaster process we keep the sets:
 /// they must outlive every reinit, and at genuine postmaster exit the kernel
-/// reclaims the SysV sets on the postmaster's death anyway. A real child running
-/// this on its own exit only affects the shared sets it would have removed; but
-/// children never created the sets (`PGReserveSemaphores` runs only in the
-/// postmaster), so their inherited callback finding `num_sema_sets == 0` for the
-/// keys they didn't create is already a no-op over `my_sema_sets`.
+/// reclaims the SysV sets on the postmaster's death anyway. Forked children
+/// inherit a *populated* `my_sema_sets` via copy-on-write (`PGReserveSemaphores`
+/// runs once in the postmaster, before the first fork), so a child running this
+/// callback on its own exit would `IPC_RMID` the still-shared sets and break the
+/// surviving postmaster — therefore no process under the postmaster removes the
+/// sets either. Only a true standalone backend reclaims the sets it created.
 fn release_semaphores(_status: i32, _arg: types_tuple::Datum<'static>) -> PgResult<()> {
     // The postmaster owns the persistent semaphore sets that every re-forked
     // child inherits across crash reinit; they must never be removed while the
     // postmaster lives (see the divergence note above).
-    if backend_utils_init_small_seams::is_postmaster_environment::call()
-        && !backend_utils_init_small_seams::is_under_postmaster::call()
-    {
+    //
+    // In this tree `PGReserveSemaphores` runs exactly once, in the postmaster,
+    // before the first fork — so every child inherits a *non-empty*
+    // `my_sema_sets` mirror via fork's copy-on-write (the old "children find
+    // num_sema_sets == 0, so the kill loop is a no-op" assumption is false).
+    // The sets are real, shared OS objects keyed for the whole cluster; if any
+    // child ran this `IPC_RMID` loop on its own `on_shmem_exit` — including the
+    // children the postmaster SIGQUITs during crash reinit — it would destroy
+    // the sets out from under the surviving postmaster, and the very next
+    // re-forked auxiliary process' `PGSemaphoreReset` (`semctl(.., SETVAL, 0)`)
+    // would fault `EINVAL` and abort crash recovery.
+    //
+    // So no process in a postmaster environment (the postmaster itself OR any
+    // of its forked children) may remove the sets: they must outlive every
+    // reinit, and the kernel reclaims the SysV sets when the postmaster finally
+    // dies. Only a genuine standalone backend (`--single`,
+    // `is_postmaster_environment() == false`) actually created its own sets and
+    // must reclaim them here on exit.
+    if backend_utils_init_small_seams::is_postmaster_environment::call() {
         return Ok(());
     }
 

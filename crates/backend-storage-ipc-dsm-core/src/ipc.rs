@@ -218,7 +218,29 @@ pub fn shmem_exit(code: i32) -> PgResult<()> {
     // an equal footing with the main segment: dsm_backend_shutdown
     // unregisters each callback before invoking it, so an erroring callback
     // doesn't stop the remaining ones from eventually running.
-    dsm::dsm_backend_shutdown()?;
+    //
+    // DIVERGENCE FROM C, tied to this tree's crash-reinit model (the same
+    // reasoning as the skipped `CreateSharedMemoryAndSemaphores` re-create in
+    // PostmasterStateMachine and the kept SysV semaphore sets in
+    // `ReleaseSemaphores`): on crash reinit the postmaster runs `shmem_exit(1)`
+    // and then, *unlike* C, deliberately does NOT re-create the shared-memory /
+    // DSM substrate — the re-forked children inherit the postmaster's still-live
+    // mappings through fork's copy-on-write. If the postmaster detached (munmap)
+    // its DSM segments here, every child forked after the reinit would inherit
+    // an unmapped hole where a persistent segment (e.g. the cumulative-stats DSA
+    // that `StartupXLOG`'s `pgstat_discard_stats` walks) used to live, and fault
+    // with an intermittent SIGSEGV the moment it dereferenced a resolved
+    // backend-local pointer into that segment. So the postmaster keeps its DSM
+    // mappings across reinit; the kernel reclaims them at genuine postmaster
+    // exit. A real child detaching on its *own* exit only unmaps its private
+    // post-fork copy and is harmless, so this is gated to the postmaster
+    // process alone (the standalone `--single` backend, which is its own DSM
+    // owner, still shuts down normally).
+    let is_postmaster = backend_utils_init_small_seams::is_postmaster_environment::call()
+        && !backend_utils_init_small_seams::is_under_postmaster::call();
+    if !is_postmaster {
+        dsm::dsm_backend_shutdown()?;
+    }
 
     // Call on_shmem_exit callbacks: generally, releasing low-level shared
     // memory resources; partly a backstop in case the early callbacks fail

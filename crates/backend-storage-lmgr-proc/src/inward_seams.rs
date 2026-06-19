@@ -75,11 +75,14 @@ fn set_proc_lw_wait_link(procno: ProcNumber, node: proclist_node) {
 }
 
 fn proc_cv_wait_link(procno: ProcNumber) -> proclist_node {
-    with_proc_by_number(procno, |p| p.cvWaitLink)
+    // Genuinely shared (not the COW-inherited PGPROC): a ConditionVariable
+    // broadcast in one process walks the wait queue a waiter linked itself onto
+    // in another. See `proc_shmem::cv_wait_link_read`.
+    crate::proc_shmem::cv_wait_link_read(procno)
 }
 
 fn set_proc_cv_wait_link(procno: ProcNumber, node: proclist_node) {
-    with_proc_by_number(procno, |p| p.cvWaitLink = node);
+    crate::proc_shmem::cv_wait_link_write(procno, node);
 }
 
 // ---- latch / semaphore (foreign: latch.c / sysv_sema) ----
@@ -1010,14 +1013,18 @@ fn proc_lock_wakeup(_space: &mut types_deadlock::LockSpace, _lock: types_deadloc
 /// (`INVALID_PROC_NUMBER` while not running). Read by `RequestCheckpoint` /
 /// `ForwardSyncRequest` to wake the checkpointer.
 fn checkpointer_proc() -> ProcNumber {
-    crate::proc_shmem::with_proc_global(|pg| pg.checkpointerProc)
+    // Genuinely shared (not the COW-inherited PROC_GLOBAL value): the
+    // checkpointer advertises itself in its own process after fork, so a
+    // process-local copy would never reach this reader (e.g. the startup
+    // process' end-of-recovery RequestCheckpoint). See `proc_shmem`.
+    crate::proc_shmem::checkpointer_proc_read()
 }
 
 /// `ProcGlobal->checkpointerProc = MyProcNumber` — the checkpointer advertises
 /// its own proc number at startup.
 fn set_checkpointer_proc_to_self() -> PgResult<()> {
     let me = crate::proc_shmem::my_proc_number();
-    crate::proc_shmem::with_proc_global(|pg| pg.checkpointerProc = me);
+    crate::proc_shmem::checkpointer_proc_write(me);
     Ok(())
 }
 
@@ -1025,7 +1032,7 @@ fn set_checkpointer_proc_to_self() -> PgResult<()> {
 /// own proc number at startup so backends can wake it while it sleeps.
 fn set_walwriter_proc_to_self() -> PgResult<()> {
     let me = crate::proc_shmem::my_proc_number();
-    crate::proc_shmem::with_proc_global(|pg| pg.walwriterProc = me);
+    crate::proc_shmem::walwriter_proc_write(me);
     Ok(())
 }
 
