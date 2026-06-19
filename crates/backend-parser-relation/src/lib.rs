@@ -58,7 +58,7 @@ use types_tuple::heaptuple::{
 use types_tuple::access::RELKIND_COMPOSITE_TYPE;
 use types_tuple::access::RELPERSISTENCE_TEMP;
 
-use types_nodes::nodes::{Node, NodePtr};
+use types_nodes::nodes::{ntag, Node, NodePtr};
 use types_nodes::nodes::CmdType::CMD_SELECT;
 use types_nodes::value::StringNode;
 use types_nodes::primnodes::{Var, VarReturningType};
@@ -117,8 +117,8 @@ fn make_string_node<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<NodePtr<'mcx>> {
 
 /// `strVal(node)` — read a `String` node's contents.
 fn str_val<'a>(node: &'a Node<'_>) -> &'a str {
-    match node {
-        Node::String(s) => s.sval.as_str(),
+    match node.node_tag() {
+        ntag::T_String => node.expect_string().sval.as_str(),
         _ => panic!("strVal: node is not a String"),
     }
 }
@@ -1868,10 +1868,7 @@ pub fn addRangeTableEntryForFunction<'mcx>(
 
         // The funcexpr is carried as a Node::Expr; extract the inner Expr for
         // the nodeFuncs accessors.
-        let funcexpr_expr: Option<&Expr> = match &**funcexpr_node {
-            Node::Expr(e) => Some(e),
-            _ => None,
-        };
+        let funcexpr_expr: Option<&Expr> = funcexpr_node.as_expr();
 
         // C: functypclass = get_expr_result_type(funcexpr, &funcrettype, &tupdesc);
         let resolved =
@@ -1983,8 +1980,8 @@ pub fn addRangeTableEntryForFunction<'mcx>(
                 // C: i = 1; foreach(col, coldeflist) { ColumnDef *n = ...; }
                 let mut i: AttrNumber = 1;
                 for col in coldeflist.iter() {
-                    let n = match &**col {
-                        Node::ColumnDef(cd) => cd,
+                    let n = match col.node_tag() {
+                        ntag::T_ColumnDef => col.expect_columndef(),
                         _ => {
                             return Err(ereport(ERROR)
                                 .errmsg("addRangeTableEntryForFunction: coldeflist element is not a ColumnDef")
@@ -2160,11 +2157,15 @@ pub fn addRangeTableEntryForFunction<'mcx>(
 /// or -1 for an empty list.
 fn expr_location_of_list<'mcx>(list: &PgVec<'mcx, NodePtr<'mcx>>) -> PgResult<i32> {
     match list.first() {
-        Some(first) => match &**first {
-            Node::ColumnDef(cd) => Ok(cd.location),
-            Node::Expr(e) => backend_nodes_core::nodefuncs::expr_location(Some(e)),
-            _ => Ok(-1),
-        },
+        Some(first) => {
+            if let Some(e) = first.as_expr() {
+                return backend_nodes_core::nodefuncs::expr_location(Some(e));
+            }
+            match first.node_tag() {
+                ntag::T_ColumnDef => Ok(first.expect_columndef().location),
+                _ => Ok(-1),
+            }
+        }
         None => Ok(-1),
     }
 }
@@ -2678,11 +2679,11 @@ pub fn isLockedRefname(pstate: &ParseState<'_>, refname: Option<&str>) -> bool {
     // Iterate pstate->p_locking_clause (a list of LockingClause nodes), reading
     // each lc->lockedRels (parse_relation.c:2677-2702).
     for lc_node in pstate.p_locking_clause.iter() {
-        let lc = match &**lc_node {
-            Node::LockingClause(lc) => lc,
-            other => panic!(
+        let lc = match lc_node.node_tag() {
+            ntag::T_LockingClause => lc_node.expect_lockingclause(),
+            _ => panic!(
                 "isLockedRefname: p_locking_clause element is not a LockingClause (got {:?})",
-                other.tag()
+                lc_node.tag()
             ),
         };
 
@@ -2692,11 +2693,11 @@ pub fn isLockedRefname(pstate: &ParseState<'_>, refname: Option<&str>) -> bool {
         } else if let Some(refname) = refname {
             // Just the named tables.
             for relnode in lc.lockedRels.iter() {
-                let thisrel = match &**relnode {
-                    Node::RangeVar(rv) => rv,
-                    other => panic!(
+                let thisrel = match relnode.node_tag() {
+                    ntag::T_RangeVar => relnode.expect_rangevar(),
+                    _ => panic!(
                         "isLockedRefname: lockedRels element is not a RangeVar (got {:?})",
-                        other.tag()
+                        relnode.tag()
                     ),
                 };
                 if thisrel.relname.as_ref().map(|s| s.as_str()) == Some(refname) {
