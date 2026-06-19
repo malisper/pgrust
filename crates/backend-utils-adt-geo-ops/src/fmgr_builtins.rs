@@ -1257,13 +1257,55 @@ fn fc_poly_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     ret_ref(fcinfo, crate::io::poly_send(&arg_poly(fcinfo, 0)))
 }
 
+// --- binary `*_recv` <- internal (the wire message rides the by-ref lane) ---
+//
+// The wire message arrives verbatim on the by-ref lane (RefPayload::Varlena);
+// each recv core walks it through a `&mut &[u8]` cursor and builds the geo
+// value, which crosses back as its header-ful varlena image via the existing
+// `ret_*` helpers.
+
+fn fc_point_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let mut buf = arg_bytes(fcinfo, 0);
+    let p = ok(crate::io::point_recv(&mut buf));
+    ret_point(fcinfo, p)
+}
+fn fc_box_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let mut buf = arg_bytes(fcinfo, 0);
+    let b = ok(crate::io::box_recv(&mut buf));
+    ret_box(fcinfo, b)
+}
+fn fc_lseg_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let mut buf = arg_bytes(fcinfo, 0);
+    let ls = ok(crate::io::lseg_recv(&mut buf));
+    ret_lseg(fcinfo, ls)
+}
+fn fc_line_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let mut buf = arg_bytes(fcinfo, 0);
+    let l = ok(crate::io::line_recv(&mut buf));
+    ret_line(fcinfo, l)
+}
+fn fc_circle_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let mut buf = arg_bytes(fcinfo, 0);
+    let c = ok(crate::io::circle_recv(&mut buf));
+    ret_circle(fcinfo, c)
+}
+fn fc_path_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let mut buf = arg_bytes(fcinfo, 0);
+    let p = ok(crate::io::path_recv(&mut buf));
+    ret_path(fcinfo, p)
+}
+fn fc_poly_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let mut buf = arg_bytes(fcinfo, 0);
+    let p = ok(crate::io::poly_recv(&mut buf));
+    ret_poly(fcinfo, p)
+}
+
 /// Register the varlena `path`/`polygon` `geo_ops.c` builtins (I/O, comparison,
 /// containment, measurement, arithmetic, conversions) plus every geometric type's
-/// binary `*_send`. Called from this crate's `init_seams()`. The `*_recv`
-/// functions take `internal` (a `StringInfo` pointer) which is not expressible at
-/// this fmgr boundary, so they are deferred (as for every other type's recv).
-/// OIDs/nargs/strict/retset transcribed exactly from `pg_proc.dat`; all strict,
-/// none retset. The builtin `name` is the `prosrc` C symbol.
+/// binary `*_send` and `*_recv`. Called from this crate's `init_seams()`. The
+/// `*_recv` wire message rides the by-ref lane (each core walks a `&mut &[u8]`
+/// cursor). OIDs/nargs/strict/retset transcribed exactly from `pg_proc.dat`; all
+/// strict, none retset. The builtin `name` is the `prosrc` C symbol.
 pub fn register_geo_ops_path_poly_builtins() {
     backend_utils_fmgr_core::register_builtins([
         // path I/O.
@@ -1330,6 +1372,14 @@ pub fn register_geo_ops_path_poly_builtins() {
         builtin(2491, "circle_send", 1, true, false, fc_circle_send),
         builtin(2483, "path_send", 1, true, false, fc_path_send),
         builtin(2487, "poly_send", 1, true, false, fc_poly_send),
+        // binary `*_recv` over all geometric types.
+        builtin(2428, "point_recv", 1, true, false, fc_point_recv),
+        builtin(2484, "box_recv", 1, true, false, fc_box_recv),
+        builtin(2480, "lseg_recv", 1, true, false, fc_lseg_recv),
+        builtin(2488, "line_recv", 1, true, false, fc_line_recv),
+        builtin(2490, "circle_recv", 1, true, false, fc_circle_recv),
+        builtin(2482, "path_recv", 1, true, false, fc_path_recv),
+        builtin(2486, "poly_recv", 1, true, false, fc_poly_recv),
     ]);
 }
 
