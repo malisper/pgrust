@@ -1,0 +1,25 @@
+[package]
+name = "backend-utils-cache-funccache"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_cache_funccache"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-tuple = { path = "../types-tuple" }
+types-nodes = { path = "../types-nodes" }
+types-funccache = { path = "../types-funccache" }
+
+backend-utils-error = { path = "../backend-utils-error" }
+common-hashfn = { path = "../common-hashfn" }
+
+backend-utils-fmgr-funcapi = { path = "../backend-utils-fmgr-funcapi" }
+backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-utils-cache-funccache-seams = { path = "../backend-utils-cache-funccache-seams" }

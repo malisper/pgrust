@@ -1243,6 +1243,11 @@ pub fn init_seams() {
     s::search_seqrelid::set(projections::search_seqrelid);
     s::pg_type_default::set(projections::pg_type_default);
     s::search_pg_proc_fastpath::set(projections::search_pg_proc_fastpath);
+    // Cross-crate install: funccache's pg_proc projection is a syscache catalog
+    // read, so the syscache owner installs it into the funccache seam crate.
+    backend_utils_cache_funccache_seams::search_proc_compile_info::set(
+        projections::search_proc_compile_info,
+    );
     s::fetch_class_reloptions::set(projections::fetch_class_reloptions);
     s::aggregate_tuple_by_fnoid::set(projections::aggregate_tuple_by_fnoid);
     s::publication_rel_pub_rel::set(projections::publication_rel_pub_rel);

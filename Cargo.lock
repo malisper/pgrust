@@ -20494,6 +20494,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-cache-funccache"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-tupdesc",
+ "backend-utils-cache-funccache-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-fmgr-funcapi",
+ "common-hashfn",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-funccache",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-cache-funccache-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-funccache",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-utils-cache-inval"
 version = "0.0.0"
 dependencies = [
@@ -20918,6 +20948,7 @@ dependencies = [
  "backend-utils-adt-pg-locale-catalog-seams",
  "backend-utils-adt-varlena-seams",
  "backend-utils-cache-catcache-seams",
+ "backend-utils-cache-funccache-seams",
  "backend-utils-cache-inval-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-syscache-pc-seams",
@@ -20937,6 +20968,7 @@ dependencies = [
  "types-error",
  "types-fmgr",
  "types-format-type",
+ "types-funccache",
  "types-hash",
  "types-namespace",
  "types-nodes",
@@ -23563,6 +23595,7 @@ dependencies = [
  "backend-utils-cache-attoptcache",
  "backend-utils-cache-catcache",
  "backend-utils-cache-evtcache",
+ "backend-utils-cache-funccache",
  "backend-utils-cache-inval",
  "backend-utils-cache-lsyscache",
  "backend-utils-cache-partcache",
@@ -23958,6 +23991,16 @@ version = "0.0.0"
 dependencies = [
  "types-core",
  "types-storage",
+]
+
+[[package]]
+name = "types-funccache"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-tuple",
 ]
 
 [[package]]

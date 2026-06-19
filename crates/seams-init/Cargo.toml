@@ -518,6 +518,7 @@ backend-utils-adt-ri-triggers = { path = "../backend-utils-adt-ri-triggers" }
 backend-utils-cache-attoptcache = { path = "../backend-utils-cache-attoptcache" }
 backend-utils-cache-catcache = { path = "../backend-utils-cache-catcache" }
 backend-utils-cache-evtcache = { path = "../backend-utils-cache-evtcache" }
+backend-utils-cache-funccache = { path = "../backend-utils-cache-funccache" }
 backend-utils-cache-inval = { path = "../backend-utils-cache-inval" }
 backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }
 backend-utils-cache-partcache = { path = "../backend-utils-cache-partcache" }

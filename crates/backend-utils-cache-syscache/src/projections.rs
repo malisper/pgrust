@@ -5848,6 +5848,64 @@ pub(crate) fn search_pg_proc_fastpath<'mcx>(
     Ok(Some(row))
 }
 
+/// `SearchSysCache1(PROCOID, funcOid)` + `GETSTRUCT` projected to the
+/// `funccache.c` `cached_function_compile` inputs: the input-type signature
+/// (`pronargs`/`proargtypes`/`proname`) the hash key needs, plus the row's
+/// `HeapTupleHeaderGetRawXmin(procTup->t_data)` / `procTup->t_self` for the
+/// up-to-dateness check. `Ok(None)` is the C `!HeapTupleIsValid(procTup)` cache
+/// miss (the caller raises "cache lookup failed for function %u"). Mirrors
+/// [`search_pg_proc_fastpath`]; the installer owns the `ReleaseSysCache`.
+pub(crate) fn search_proc_compile_info<'mcx>(
+    mcx: Mcx<'mcx>,
+    func_oid: Oid,
+) -> PgResult<Option<types_funccache::ProcCompileInfo<'mcx>>> {
+    let tuple = SearchSysCache1(mcx, PROCOID, SysCacheKey::Value(KeyDatum::from_oid(func_oid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let pronargs = getattr_i16(mcx, PROCOID, &tup, Anum_pg_proc_pronargs)?;
+    let proname = getattr_name(mcx, PROCOID, &tup, Anum_pg_proc_proname)?;
+
+    // proargtypes is an oidvector (BKI_FORCE_NOT_NULL).
+    let proargtypes_datum = SysCacheGetAttrNotNull(mcx, PROCOID, &tup, Anum_pg_proc_proargtypes)?;
+    let proargtypes_bytes = match &proargtypes_datum {
+        Datum::ByRef(b) => &b[..],
+        Datum::ByVal(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => {
+            return Err(PgError::error(
+                "search_proc_compile_info: proargtypes attribute is by-value",
+            ))
+        }
+    };
+    let proargtypes_vec = arrayfuncs_seams::oidvector_to_oids_bytes::call(mcx, proargtypes_bytes)?;
+    let mut proargtypes = vec_with_capacity_in(mcx, proargtypes_vec.len())?;
+    for &t in proargtypes_vec.iter() {
+        proargtypes.push(t);
+    }
+
+    // HeapTupleHeaderGetRawXmin(procTup->t_data) + procTup->t_self.
+    let xmin = HeapTupleHeaderGetRawXmin(
+        tup.tuple
+            .t_data
+            .as_ref()
+            .expect("pg_proc tuple has a header"),
+    );
+    let tid = tup.tuple.t_self;
+
+    let row = types_funccache::ProcCompileInfo {
+        pronargs,
+        proargtypes,
+        proname,
+        xmin,
+        tid,
+    };
+    ReleaseSysCache(tup);
+    Ok(Some(row))
+}
+
 // `catalog/pg_class.h` reloptions attribute number (PG 18 column order).
 const Anum_pg_class_reloptions_fcr: i32 = 33;
 
