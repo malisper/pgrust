@@ -78,6 +78,9 @@ backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-error = { path = "../backend-utils-error" }
 # F3 WaitReadBuffers' retry loop runs CHECK_FOR_INTERRUPTS between re-issues.
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+# RelationCopyStorageUsingBuffer brackets the per-block page copy + WAL log in
+# START_CRIT_SECTION()/END_CRIT_SECTION() (miscadmin.h).
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
 # InitBufferManagerAccess registers the AtProcExit_Buffers cleanup via
 # on_shmem_exit (ipc.c), reached through the ipc seam crate.
 backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }

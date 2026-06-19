@@ -63,6 +63,7 @@ use backend_storage_buffer_support::{buf_table_hash_code, buf_table_hash_partiti
 use backend_storage_lmgr_lwlock as lwlock;
 use backend_storage_page as page;
 use backend_storage_smgr_smgr as smgr;
+use backend_utils_init_miscinit_seams as misc;
 
 /// `InvalidBuffer` (buf.h).
 const INVALID_BUFFER: Buffer = 0;
@@ -1325,6 +1326,7 @@ impl BufferManager {
             )?;
 
             // START_CRIT_SECTION().
+            misc::start_crit_section::call();
             // Copy page data from the source to the destination
             // (memcpy(dstPage, srcPage, BLCKSZ)) and mark the destination dirty.
             let mut page_image = [0u8; BLCKSZ as usize];
@@ -1344,6 +1346,7 @@ impl BufferManager {
                 )?;
             }
             // END_CRIT_SECTION().
+            misc::end_crit_section::call();
 
             self.UnlockReleaseBuffer(dst_buf)?;
             self.UnlockReleaseBuffer(src_buf)?;

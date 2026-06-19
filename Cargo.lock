@@ -16325,6 +16325,7 @@ dependencies = [
  "backend-storage-smgr-smgr",
  "backend-tcop-postgres-seams",
  "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
  "backend-utils-init-small-seams",
  "backend-utils-misc-guc-tables",
  "backend-utils-misc-ps-status-seams",
