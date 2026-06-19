@@ -190,13 +190,15 @@ struct CachedPlanData {
 #[allow(dead_code)]
 struct CachedExpressionData {
     magic: i32,
-    /// `Node *expr` — owned planned expression. `Expr` is lifetime-free (owns
-    /// its payload inline), so no arena backing is needed.
+    /// `Node *expr` — owned planned expression, allocated into `context` below
+    /// (see `GetCachedExpression`). Its `PgBox`/`PgVec` children live in that
+    /// context, so `context` must outlive `expr`.
     expr: Expr,
     is_valid: bool,
     relation_oids: Vec<Oid>,
     inval_items: Vec<InvalItemKey>,
-    /// `MemoryContext context` — declared AFTER `expr` so it drops last.
+    /// `MemoryContext context` — backs `expr`'s node children; declared AFTER
+    /// `expr` so it drops last (the node's allocator must outlive the node).
     context: MemoryContext,
 }
 
@@ -1662,13 +1664,21 @@ pub fn CachedPlanGetTargetList<'mcx>(
 /// `GetCachedExpression(expr)`.
 pub fn GetCachedExpression(expr: Expr) -> PgResult<CachedExpressionHandle> {
     // expression_planner_with_deps(expr, &relationOids, &invalItems).
-    let scratch = MemoryContext::new("plancache_planexpr");
-    let (planned_expr, relation_oids, inval_items) =
-        planner_pc_seams::expression_planner_with_deps_value::call(scratch.mcx(), expr)?;
-
-    // `Expr` is lifetime-free; cexpr->context exists only for faithful
-    // structure (no arena-borrowed payload to back).
+    //
+    // The planned `Expr` is cached at backend lifetime (in `s.expressions` /
+    // `cached_expression_list`) and evaluated on later calls, so it MUST outlive
+    // this function. A planned `Expr` tree can embed context-allocated
+    // `mcx::PgBox`/`PgVec` children (const-folded sub-expressions the planner
+    // builds into the passed `Mcx`), so planning into a transient context freed
+    // on return would dangle them — a later evaluation or the cache drop would
+    // double-free through a NULL `Mcx` (SIGSEGV), the parser-coerce crash class.
+    // C plans into `cexpr->context`; we mirror that here by creating the
+    // per-CachedExpression `context` FIRST and planning into IT, so the node's
+    // children live exactly as long as the `CachedExpressionData` that owns them
+    // (`context` is declared after `expr` in the struct, so it drops last).
     let context = MemoryContext::new("CachedExpression");
+    let (planned_expr, relation_oids, inval_items) =
+        planner_pc_seams::expression_planner_with_deps_value::call(context.mcx(), expr)?;
 
     let data = CachedExpressionData {
         magic: CACHEDEXPR_MAGIC,

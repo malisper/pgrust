@@ -205,24 +205,46 @@ pub fn errdomainconstraint(_datatype_oid: u32, _conname: &str) -> PgResult<()> {
  * seam crates without forming a cycle.
  * ======================================================================== */
 
+std::thread_local! {
+    /// Backend-lifetime context backing [`plan_check_expr`]. The planned domain
+    /// CHECK `Expr` it produces is cached in the typcache at backend lifetime
+    /// and can embed context-allocated `mcx::PgBox`/`PgVec` children, so a
+    /// transient context freed on return would dangle them (double-free /
+    /// SIGSEGV on later domain-check evaluation or cache drop). This leaked,
+    /// never-reset context keeps them valid for the node's lifetime (mirrors
+    /// parser-coerce's `COERCE_NODE_CONTEXT` and makefuncs' `CONST_VALUE_CONTEXT`).
+    static DOMAIN_CHECK_CONTEXT: &'static MemoryContext =
+        alloc::boxed::Box::leak(alloc::boxed::Box::new(MemoryContext::new("Domain constraints")));
+}
+
+/// `Mcx<'static>` for the backend-lifetime [`DOMAIN_CHECK_CONTEXT`].
+fn domain_check_mcx() -> Mcx<'static> {
+    DOMAIN_CHECK_CONTEXT.with(|c| c.mcx())
+}
+
 /// `stringToNode(conbin)` + `expression_planner()` for one domain CHECK
 /// constraint (the `plan_check_expr` seam). Returns the planned expression as
 /// the real owned [`Expr`] value.
 ///
 /// C plans into the domain's "Domain constraints" `MemoryContext` (`ctx`) so the
-/// node lives at cache lifetime; here the planned [`Expr`] is a lifetime-free
-/// owned value (its child `Box`/`Vec` are the global allocator), so it escapes
-/// any context safely. The reader's transient arena needs a context to allocate
-/// the intermediate `Node` graph in; we use a private scratch context that is
-/// dropped on return (the cloned `Expr` is independent of it). `ctx` is
-/// therefore unused — the owned `Expr` makes the C "plan into ctx" detail moot.
+/// node lives at cache lifetime. The returned [`Expr`] is stored long-term in
+/// the typcache `DomainConstraintState` and evaluated on every cast to the
+/// domain, so it MUST outlive this call. A planned `Expr` tree can embed
+/// context-allocated `mcx::PgBox`/`PgVec` children (e.g. const-folded
+/// sub-expressions the `expression_planner` builds into the passed `Mcx`), so a
+/// transient `MemoryContext::new(..)` freed on return would leave those
+/// children's allocator dangling — a later domain-constraint evaluation or the
+/// typcache drop would then double-free through a NULL `Mcx` (SIGSEGV), exactly
+/// the parser-coerce `coerce(agg(x))` crash class. We therefore back the read +
+/// plan with the leaked, backend-lifetime [`DOMAIN_CHECK_CONTEXT`] (mirrors
+/// parser-coerce's `COERCE_NODE_CONTEXT` / makefuncs' `CONST_VALUE_CONTEXT`),
+/// which keeps the planned node valid for the cache's lifetime. `ctx` is unused
+/// — the durable backend context subsumes the C "plan into ctx" detail.
 pub fn plan_check_expr(conbin: &str, _ctx: DomainCtxHandle) -> PgResult<Expr> {
-    // The node reader / const-folder allocate their intermediate graph in this
-    // scratch context; the returned owned `Expr` is cloned out and survives the
-    // drop. (C does this work in the dccContext; the owned model needs no such
-    // long-lived arena because `Expr` is global-heap owned.)
-    let scratch = MemoryContext::new("Domain check expr");
-    let mcx: Mcx = scratch.mcx();
+    // The node reader / const-folder allocate their intermediate graph — and the
+    // escaping planned `Expr`'s `PgBox`/`PgVec` children — in this durable
+    // backend-lifetime context, so they remain valid after this seam returns.
+    let mcx: Mcx<'static> = domain_check_mcx();
 
     // expr = stringToNode(conbin);
     let node = backend_nodes_read_seams::string_to_node::call(mcx, conbin)?;
