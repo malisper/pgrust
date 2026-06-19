@@ -176,8 +176,11 @@ fn heapam_scan_bitmap_next_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     scan: &mut TableScanDescData<'mcx>,
     slot: &mut SlotData<'mcx>,
-) -> PgResult<Option<(bool, u64, u64)>> {
-    heapam::scan::heapam_scan_bitmap_next_tuple(mcx, scan, slot)
+    recheck: &mut bool,
+    lossy_pages: &mut u64,
+    exact_pages: &mut u64,
+) -> PgResult<bool> {
+    heapam::scan::heapam_scan_bitmap_next_tuple(mcx, scan, slot, recheck, lossy_pages, exact_pages)
 }
 
 /// `.scan_sample_next_block = heapam_scan_sample_next_block`.

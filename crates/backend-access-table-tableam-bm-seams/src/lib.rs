@@ -29,18 +29,26 @@ seam_core::seam!(
 seam_core::seam!(
     /// `table_scan_bitmap_next_tuple(scan, slot, &recheck, &lossy_pages,
     /// &exact_pages)` (access/tableam.h): fetch the next visible tuple of a
-    /// bitmap table scan into `slot`. Returns `Some((recheck, lossy_inc,
-    /// exact_inc))` when a tuple was stored (the C `true`), `None` at end of
-    /// scan (the C `false`). `recheck` is the AM's per-tuple recheck flag;
-    /// `lossy_inc`/`exact_inc` are the per-block bumps the C applies to the
-    /// node's `lossy_pages`/`exact_pages` counters. Fallible — the AM
-    /// `ereport`s (e.g. unexpected call during logical decoding) and the heap
-    /// fetch can error.
+    /// bitmap table scan into `slot`. Returns `Ok(true)` when a tuple was
+    /// stored (the C `true`), `Ok(false)` at end of scan (the C `false`).
+    ///
+    /// `recheck`, `lossy_pages`, and `exact_pages` are caller-owned
+    /// out-parameters (C: `bool *recheck`, `uint64 *lossy_pages`,
+    /// `uint64 *exact_pages`). They are written ONLY when the AM advances to a
+    /// new block (`BitmapHeapScanNextBlock`); per-tuple calls within a block
+    /// leave them untouched, so the per-block `recheck` flag and the page
+    /// counters persist across the multiple per-tuple fetches on that block.
+    /// They must NOT be reset by this routine. Fallible — the AM `ereport`s
+    /// (e.g. unexpected call during logical decoding) and the heap fetch can
+    /// error.
     pub fn table_scan_bitmap_next_tuple<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         scan: &mut TableScanDescData<'mcx>,
         slot: &mut SlotData<'mcx>,
-    ) -> PgResult<Option<(bool, u64, u64)>>
+        recheck: &mut bool,
+        lossy_pages: &mut u64,
+        exact_pages: &mut u64,
+    ) -> PgResult<bool>
 );
 
 seam_core::seam!(

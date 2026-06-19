@@ -812,9 +812,12 @@ pub fn table_scan_bitmap_next_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     scan: &mut TableScanDescData<'mcx>,
     slot: &mut SlotData<'mcx>,
-) -> PgResult<Option<(bool, u64, u64)>> {
+    recheck: &mut bool,
+    lossy_pages: &mut u64,
+    exact_pages: &mut u64,
+) -> PgResult<bool> {
     let routine = am(&scan.rs_rd);
-    (routine.scan_bitmap_next_tuple)(mcx, scan, slot)
+    (routine.scan_bitmap_next_tuple)(mcx, scan, slot, recheck, lossy_pages, exact_pages)
 }
 
 /// `table_endscan(scan)` (tableam.h inline) — end a relation scan.

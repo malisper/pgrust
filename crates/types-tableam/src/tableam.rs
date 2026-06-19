@@ -522,15 +522,21 @@ pub struct TableAmRoutine {
     /// (`heapam_scan_bitmap_next_tuple`) advances over the current page's
     /// visible tuples, internally calling `BitmapHeapScanNextBlock` to pull the
     /// next block off the scan descriptor's `rs_tbmiterator` when the current
-    /// page is exhausted. Returns `Some((recheck, lossy_inc, exact_inc))` when a
-    /// tuple was stored (the C `true`), `None` at end of scan (the C `false`).
-    /// `recheck` is the AM's per-tuple recheck flag; `lossy_inc`/`exact_inc` are
-    /// the per-block bumps for the node's `lossy_pages`/`exact_pages` counters.
+    /// page is exhausted. Returns `Ok(true)` when a tuple was stored (the C
+    /// `true`), `Ok(false)` at end of scan (the C `false`). `recheck`,
+    /// `lossy_pages`, and `exact_pages` are caller-owned out-params (C:
+    /// `bool *`, `uint64 *`, `uint64 *`); the AM writes them only when it
+    /// advances to a new block, so the per-block recheck flag and the page
+    /// counters persist across the multiple per-tuple calls on a block. The AM
+    /// must not reset them.
     pub scan_bitmap_next_tuple: for<'mcx> fn(
         mcx: Mcx<'mcx>,
         scan: &mut TableScanDescData<'mcx>,
         slot: &mut SlotData<'mcx>,
-    ) -> PgResult<Option<(bool, u64, u64)>>,
+        recheck: &mut bool,
+        lossy_pages: &mut u64,
+        exact_pages: &mut u64,
+    ) -> PgResult<bool>,
 
     /// `index_delete_tuples(rel, delstate)` (`access/tableam.h`) — the
     /// index-AM-facing entry point an index AM calls (via

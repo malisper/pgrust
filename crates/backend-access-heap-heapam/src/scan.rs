@@ -1556,21 +1556,25 @@ fn BitmapHeapScanNextBlock<'mcx>(
 /// &exact_pages)` (heapam_handler.c) — store the next visible tuple of a bitmap
 /// heap scan into `slot`. Advances over the current page's `rs_vistuples[]`,
 /// calling [`BitmapHeapScanNextBlock`] when the page is exhausted. Returns
-/// `Some((recheck, lossy_inc, exact_inc))` when a tuple was stored, `None` at
-/// end of scan.
+/// `Ok(true)` when a tuple was stored, `Ok(false)` at end of scan.
+///
+/// `recheck`/`lossy_pages`/`exact_pages` are caller-owned out-params; they are
+/// written ONLY by [`BitmapHeapScanNextBlock`] (when a new block is loaded), so
+/// the per-block `recheck` flag persists across the multiple per-tuple calls on
+/// the same block. This routine must NOT reset them (faithful to C, where they
+/// are `bool *`/`uint64 *` out-params the AM never re-initializes).
 pub fn heapam_scan_bitmap_next_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     sscan: &mut TableScanDescData<'mcx>,
     slot: &mut types_nodes::tuptable::SlotData<'mcx>,
-) -> PgResult<Option<(bool, u64, u64)>> {
-    let mut recheck = false;
-    let mut lossy_pages: u64 = 0;
-    let mut exact_pages: u64 = 0;
-
+    recheck: &mut bool,
+    lossy_pages: &mut u64,
+    exact_pages: &mut u64,
+) -> PgResult<bool> {
     // Out of range? If so, advance to the next block (or exhaust the bitmap).
     while heap_scan(sscan).rs_cindex >= heap_scan(sscan).rs_ntuples {
-        if !BitmapHeapScanNextBlock(mcx, sscan, &mut recheck, &mut lossy_pages, &mut exact_pages)? {
-            return Ok(None);
+        if !BitmapHeapScanNextBlock(mcx, sscan, recheck, lossy_pages, exact_pages)? {
+            return Ok(false);
         }
     }
 
@@ -1612,7 +1616,7 @@ pub fn heapam_scan_bitmap_next_tuple<'mcx>(
     let recheck = heap_scan(sscan).rs_recheck;
     heap_scan(sscan).rs_cindex += 1;
 
-    Ok(Some((recheck, lossy_pages, exact_pages)))
+    Ok(true)
 }
 
 // ===========================================================================

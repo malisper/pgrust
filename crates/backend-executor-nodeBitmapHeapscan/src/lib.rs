@@ -183,18 +183,25 @@ fn BitmapHeapNext<'mcx>(
     //        &node->recheck, &node->stats.lossy_pages, &node->stats.exact_pages))
     loop {
         let scan = node.ss_currentScanDesc.as_mut().expect("ss_currentScanDesc");
-        let next = {
+        // &node->recheck, &node->stats.lossy_pages, &node->stats.exact_pages are
+        // caller-owned out-params: the AM writes them only on a new block, so the
+        // per-block recheck flag persists across the per-tuple calls on a lossy
+        // page (otherwise tuples 2..N would skip the qual recheck).
+        let stored = {
             let mcx = estate.es_query_cxt;
             let slot_ref = estate.slot_data_mut(slot);
-            tableam_bm::table_scan_bitmap_next_tuple::call(mcx, scan, slot_ref)?
+            tableam_bm::table_scan_bitmap_next_tuple::call(
+                mcx,
+                scan,
+                slot_ref,
+                &mut node.recheck,
+                &mut node.stats.lossy_pages,
+                &mut node.stats.exact_pages,
+            )?
         };
-        let (recheck, lossy_inc, exact_inc) = match next {
-            Some(t) => t,
-            None => break,
-        };
-        node.recheck = recheck;
-        node.stats.lossy_pages += lossy_inc;
-        node.stats.exact_pages += exact_inc;
+        if !stored {
+            break;
+        }
 
         // Continuing in previously obtained page.
         // CHECK_FOR_INTERRUPTS();
