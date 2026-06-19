@@ -1178,6 +1178,13 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `SearchSysCache1(RELOID, ObjectIdGetDatum(relid))` projected to
+    /// `Form_pg_class.relhastriggers`. `Ok(None)` on a cache miss
+    /// (`!HeapTupleIsValid`); the installer owns the `ReleaseSysCache`.
+    pub fn rel_relhastriggers(relid: Oid) -> PgResult<Option<bool>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(RELOID, ObjectIdGetDatum(relid))` projected to
     /// `Form_pg_class.relispartition` (`get_rel_relispartition`). `Ok(None)`
     /// on a cache miss (`!HeapTupleIsValid`); the installer owns the
     /// `ReleaseSysCache`.

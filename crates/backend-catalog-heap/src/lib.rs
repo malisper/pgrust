@@ -76,9 +76,14 @@
 //! `pg_partitioned_table` INSERT carrier and a `pg_class.relpartbound` UPDATE
 //! carrier. `heap_truncate` / `heap_truncate_one_rel` / `RelationTruncateIndexes`
 //! need `table_relation_nontransactional_truncate` (no tableam seam) +
-//! `BuildDummyIndexInfo` (only `BuildIndexInfo` exists).
-//! `heap_truncate_check_FKs` / `heap_truncate_find_FKs` need a `pg_constraint`
-//! seqscan deform helper. Each remains unported (no stub).
+//! `BuildDummyIndexInfo` (only `BuildIndexInfo` exists). These remain unported
+//! (no stub).
+//!
+//! `heap_truncate_find_FKs` / `heap_truncate_check_FKs` (the TRUNCATE FK-check
+//! tail) ARE ported in `truncate.rs` and their `backend-commands-tablecmds-seams`
+//! seams installed: the `pg_constraint` full seqscan+deform is genam-owned
+//! (`scan_pg_constraint_truncate_fks`), the relids-only seam reads
+//! `relhastriggers`/`relkind` via lsyscache.
 
 extern crate alloc;
 
@@ -851,6 +856,9 @@ mod delete;
 mod drop;
 mod partition;
 mod statistics;
+mod truncate;
+
+pub use truncate::{heap_truncate_check_FKs, heap_truncate_find_FKs};
 
 pub use create::{
     heap_create_with_catalog, AddNewAttributeTuples, AddNewRelationTuple, AddNewRelationType,

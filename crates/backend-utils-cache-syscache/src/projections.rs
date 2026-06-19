@@ -1612,6 +1612,21 @@ pub(crate) fn rel_relkind(relid: Oid) -> PgResult<Option<u8>> {
     Ok(Some(relkind))
 }
 
+/// `SearchSysCache1(RELOID, relid)` -> `Form_pg_class.relhastriggers`. Used by
+/// `heap_truncate_check_FKs`'s trigger fast-path, where the open relation is not
+/// available (the seam passes only relids).
+pub(crate) fn rel_relhastriggers(relid: Oid) -> PgResult<Option<bool>> {
+    let scratch = MemoryContext::new("syscache relhastriggers projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, RELOID, SysCacheKey::Value(KeyDatum::from_oid(relid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let relhastriggers = getattr_bool(mcx, RELOID, &tup, Anum_pg_class_relhastriggers)?;
+    ReleaseSysCache(tup);
+    Ok(Some(relhastriggers))
+}
+
 /// `GetSysCacheHashValue1(CONSTROID, ObjectIdGetDatum(oid))` — the catcache
 /// hash value for a `pg_constraint` row.
 pub(crate) fn get_syscache_hash_value_constroid(oid: Oid) -> PgResult<u32> {

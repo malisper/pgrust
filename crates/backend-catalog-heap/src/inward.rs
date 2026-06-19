@@ -130,6 +130,19 @@ pub fn init_seams() {
     backend_catalog_heap_seams::DeleteRelationTuple::set(delete_relation_tuple_seam);
     backend_catalog_heap_seams::DeleteAttributeTuples::set(delete_attribute_tuples_seam);
     backend_catalog_heap_seams::RemoveStatistics::set(remove_statistics_seam);
+
+    // TRUNCATE FK-check tail (tablecmds.c's `ExecuteTruncateGuts`). `find_fks`
+    // carries `mcx` and matches the owner signature; `check_fks` does not, so its
+    // shim allocates a scratch context.
+    backend_commands_tablecmds_seams::heap_truncate_find_fks::set(crate::heap_truncate_find_FKs);
+    backend_commands_tablecmds_seams::heap_truncate_check_fks::set(heap_truncate_check_fks_seam);
+}
+
+/// Seam body for `heap_truncate_check_FKs(relids, tempTables)` (catalog/heap.c).
+/// The owner seam carries no `mcx`; allocate a scratch context for the scans.
+fn heap_truncate_check_fks_seam(relids: &[types_core::Oid], temp_tables: bool) -> PgResult<()> {
+    let ctx = MemoryContext::new("heap_truncate_check_FKs");
+    crate::heap_truncate_check_FKs(ctx.mcx(), relids, temp_tables)
 }
 
 /// Seam body for `DeleteRelationTuple(relid)` (catalog/heap.c). The inward seam

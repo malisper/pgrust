@@ -976,6 +976,9 @@ pub fn init_seams() {
         projections::search_syscache_exists_reloid,
     );
     backend_utils_cache_syscache_seams::rel_relkind::set(projections::rel_relkind);
+    backend_utils_cache_syscache_seams::rel_relhastriggers::set(
+        projections::rel_relhastriggers,
+    );
     backend_utils_cache_syscache_seams::pg_proc_form::set(projections::pg_proc_form);
     backend_utils_cache_syscache_seams::pg_type_form::set(projections::pg_type_form);
     backend_utils_cache_syscache_seams::type_form::set(projections::type_form);

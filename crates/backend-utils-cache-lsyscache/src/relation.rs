@@ -75,6 +75,17 @@ pub fn get_rel_relkind(relid: Oid) -> PgResult<u8> {
     }
 }
 
+/// `Form_pg_class.relhastriggers` for `relid`, or `false` on a cache miss. Not a
+/// distinct C lsyscache entry point (C reads `rel->rd_rel->relhastriggers` off
+/// the open relation); exposed here for `heap_truncate_check_FKs`, whose owned
+/// seam carries only relids.
+pub fn get_rel_relhastriggers(relid: Oid) -> PgResult<bool> {
+    match syscache::rel_relhastriggers::call(relid)? {
+        Some(relhastriggers) => Ok(relhastriggers),
+        None => Ok(false),
+    }
+}
+
 /// `get_rel_relispartition(relid)` (lsyscache.c).
 ///
 /// ```c

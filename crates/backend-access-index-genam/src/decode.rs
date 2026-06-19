@@ -80,7 +80,8 @@ use types_catalog::pg_constraint::{
     Anum_pg_constraint_conenforced, Anum_pg_constraint_conexclop,
     Anum_pg_constraint_confkey, Anum_pg_constraint_confrelid,
     Anum_pg_constraint_conindid, Anum_pg_constraint_conkey, Anum_pg_constraint_conname,
-    Anum_pg_constraint_connoinherit, Anum_pg_constraint_conpfeqop, Anum_pg_constraint_conrelid,
+    Anum_pg_constraint_connoinherit, Anum_pg_constraint_conparentid,
+    Anum_pg_constraint_conpfeqop, Anum_pg_constraint_conrelid,
     Anum_pg_constraint_contype, Anum_pg_constraint_convalidated,
     Anum_pg_constraint_oid, CONSTRAINT_CHECK, CONSTRAINT_EXCLUSION,
     CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL,
@@ -1037,6 +1038,45 @@ fn relcache_scan_pg_constraint_fkeys(relid: Oid) -> PgResult<Vec<seam::ScannedFk
 }
 
 // ===========================================================================
+// scan_pg_constraint_truncate_fks — heap_truncate_find_FKs's pg_constraint scan
+// ===========================================================================
+
+/// `heap_truncate_find_FKs`'s `pg_constraint` scan (heap.c): a full seqscan
+/// (`systable_beginscan(fkeyRel, InvalidOid, false, NULL, 0, NULL)`) — there is
+/// no index on `confrelid`, so the relids filter is done by the caller. Each row
+/// is deformed to its scalar `oid`/`contype`/`conrelid`/`confrelid`/`conparentid`
+/// columns; every row is returned (the caller resolves parent constraints by OID
+/// in-memory rather than issuing the C `ConstraintOidIndexId` follow-up lookup).
+fn scan_pg_constraint_truncate_fks() -> PgResult<Vec<seam::ScannedConstraintFk>> {
+    let scratch = MemoryContext::new("heap_truncate_find_FKs scan");
+    let smcx = scratch.mcx();
+
+    // fkeyRel = table_open(ConstraintRelationId, AccessShareLock);
+    let relation = table_open(smcx, CONSTRAINT_RELATION_ID, AccessShareLock)?;
+
+    // systable_beginscan(fkeyRel, InvalidOid, false, NULL, 0, NULL);
+    let mut scandesc =
+        systable_beginscan(&relation, types_core::InvalidOid, false, None, &[])?;
+
+    let mut out = Vec::new();
+    while let Some(ntp) = systable_getnext(smcx, scandesc.desc_mut())? {
+        let row = heap_deform_tuple(smcx, &ntp.tuple, &relation.rd_att, &ntp.data)?;
+        out.push(seam::ScannedConstraintFk {
+            oid: col(&row, Anum_pg_constraint_oid, "pg_constraint.oid")?.as_oid(),
+            contype: col(&row, Anum_pg_constraint_contype, "contype")?.as_char(),
+            conrelid: col(&row, Anum_pg_constraint_conrelid, "conrelid")?.as_oid(),
+            confrelid: col(&row, Anum_pg_constraint_confrelid, "confrelid")?.as_oid(),
+            conparentid: col(&row, Anum_pg_constraint_conparentid, "conparentid")?.as_oid(),
+        });
+    }
+
+    scandesc.end()?;
+    table_close(relation, AccessShareLock)?;
+    drop(scratch);
+    Ok(out)
+}
+
+// ===========================================================================
 // relcache_exclusion_info — RelationGetExclusionInfo
 // ===========================================================================
 
@@ -1357,6 +1397,7 @@ pub fn init_decode_seams() {
     seam::relcache_scan_pg_trigger::set(relcache_scan_pg_trigger);
     seam::relcache_scan_pg_policy::set(relcache_scan_pg_policy);
     seam::relcache_scan_pg_constraint_fkeys::set(relcache_scan_pg_constraint_fkeys);
+    seam::scan_pg_constraint_truncate_fks::set(scan_pg_constraint_truncate_fks);
     seam::relcache_exclusion_info::set(relcache_exclusion_info);
     seam::scan_pg_attrdef::set(scan_pg_attrdef);
     seam::scan_pg_constraint_nncheck::set(scan_pg_constraint_nncheck);

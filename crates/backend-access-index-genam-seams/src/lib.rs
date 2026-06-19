@@ -198,6 +198,27 @@ pub struct ScannedFkInfo {
     pub conpfeqop: Vec<Oid>,
 }
 
+/// One `pg_constraint` row decoded to the scalar columns
+/// `heap_truncate_find_FKs` (heap.c) reads: the constraint OID, its `contype`,
+/// the referencing/referenced relation OIDs, and the parent-constraint OID.
+/// Returned for *every* row of a full `pg_constraint` seqscan so the caller can
+/// both filter FKs and resolve parent constraints by OID in-memory (C does a
+/// second `ConstraintOidIndexId` lookup; the full row set makes that a local
+/// search).
+#[derive(Clone, Copy, Debug)]
+pub struct ScannedConstraintFk {
+    /// `((Form_pg_constraint) GETSTRUCT(tuple))->oid`.
+    pub oid: Oid,
+    /// `con->contype`.
+    pub contype: i8,
+    /// `con->conrelid` — the table the constraint is on (the referencer).
+    pub conrelid: Oid,
+    /// `con->confrelid` — the referenced table (FK target).
+    pub confrelid: Oid,
+    /// `con->conparentid`.
+    pub conparentid: Oid,
+}
+
 /// One decoded `pg_rewrite` row as `RelationBuildRuleLock` consumes it: the
 /// `Form_pg_rewrite` scalar fields plus the two node-string `text` columns
 /// (`ev_qual`/`ev_action`), returned as their raw `nodeToString` text so the
@@ -438,6 +459,17 @@ seam_core::seam!(
     /// `ForeignKeyCacheInfo`. Returns the assembled rows. Can
     /// `ereport(ERROR)`, carried on `Err`.
     pub fn relcache_scan_pg_constraint_fkeys(relid: Oid) -> PgResult<Vec<ScannedFkInfo>>
+);
+
+seam_core::seam!(
+    /// `heap_truncate_find_FKs`'s scan (heap.c): a *full seqscan* of
+    /// `pg_constraint` (`systable_beginscan(fkeyRel, InvalidOid, false, ...)`,
+    /// no index — there is no index on `confrelid`), deforming each row to its
+    /// `oid`/`contype`/`conrelid`/`confrelid`/`conparentid` columns. Returns
+    /// every row so the caller can resolve parent constraints by OID without a
+    /// second scan. Can `ereport(ERROR)` (catalog read failure), carried on
+    /// `Err`.
+    pub fn scan_pg_constraint_truncate_fks() -> PgResult<Vec<ScannedConstraintFk>>
 );
 
 seam_core::seam!(
