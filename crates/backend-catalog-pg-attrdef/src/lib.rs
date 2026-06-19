@@ -412,10 +412,24 @@ pub fn GetAttrDefaultColumnAddress(mcx: Mcx<'_>, attrdefoid: Oid) -> PgResult<Ob
  * Inward seam installation
  * ========================================================================= */
 
+/// Inward adapter for the `attr_default_column` syscache seam: a scratch-`Mcx`
+/// wrapper over [`GetAttrDefaultColumnAddress`] projected to the owning column's
+/// `(adrelid, adnum)`. `Ok(None)` mirrors the C `InvalidObjectAddress` return.
+fn attr_default_column(attrdefoid: Oid) -> PgResult<Option<(Oid, i16)>> {
+    let scratch = MemoryContext::new("syscache attr default column");
+    let addr = GetAttrDefaultColumnAddress(scratch.mcx(), attrdefoid)?;
+    if addr.classId == InvalidOid {
+        Ok(None)
+    } else {
+        Ok(Some((addr.objectId, addr.objectSubId as i16)))
+    }
+}
+
 pub fn init_seams() {
     use backend_catalog_pg_attrdef_seams as seams;
 
     seams::RemoveAttrDefaultById::set(RemoveAttrDefaultById);
+    syscache_seams::attr_default_column::set(attr_default_column);
 }
 
 #[cfg(test)]

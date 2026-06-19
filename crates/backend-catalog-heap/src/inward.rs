@@ -141,6 +141,14 @@ fn set_attribute_has_default_seam(
     crate::SetAttributeHasDefault(ctx.mcx(), relid, attnum)
 }
 
+fn clear_attribute_has_default_seam(
+    relid: types_core::Oid,
+    attnum: types_core::AttrNumber,
+) -> PgResult<bool> {
+    let ctx = MemoryContext::new("ClearAttributeHasDefault");
+    crate::ClearAttributeHasDefault(ctx.mcx(), relid, attnum)
+}
+
 /// `SystemAttributeDefinition(attno)` for `plancat.c`'s negative-index-key path:
 /// returns `(atttypid, atttypmod, attcollation)` of the system column.
 fn system_attribute_definition_seam(
@@ -184,6 +192,9 @@ pub fn init_seams() {
     backend_catalog_heap_seams::relation_clear_missing::set(relation_clear_missing_seam);
     backend_utils_cache_syscache_seams::set_attribute_has_default::set(
         set_attribute_has_default_seam,
+    );
+    backend_utils_cache_syscache_seams::clear_attribute_has_default::set(
+        clear_attribute_has_default_seam,
     );
 
     // Constraint-cooker outward seams the tablecmds CREATE-TABLE path consumes

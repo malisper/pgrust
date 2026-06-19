@@ -332,7 +332,13 @@ pub fn DefineSequence<'mcx>(
         process_owned_by(mcx, &rel, &owned_by, seq.for_identity)?;
     }
 
-    backend_access_sequence_seams::sequence_close::call(seqoid, NoLock)?;
+    // sequence_close(rel, NoLock): close the handle opened above. Closing the
+    // RAII handle directly (rather than a second by-OID `sequence_close`) is
+    // what keeps this balanced — the by-OID close would decrement the relcache
+    // refcount once AND then `rel`'s Drop would decrement it again, leaving the
+    // entry's `rd_refcnt` underflowed so a later DROP's `CheckTableNotInUse`
+    // reports the sequence as "used by active queries in this session".
+    rel.close(NoLock)?;
 
     /* fill in pg_sequence */
     seqform.seqrelid = seqoid;
@@ -391,7 +397,10 @@ pub fn ResetSequence<'mcx>(mcx: Mcx<'mcx>, seq_relid: Oid) -> PgResult<()> {
     /* Note that we do not change the currval() state */
     seqtable_with(seq_relid, |elm| elm.cached = elm.last);
 
-    backend_access_sequence_seams::sequence_close::call(seq_relid, NoLock)?;
+    // sequence_close(seq_rel, NoLock): close the open RAII handle directly. A
+    // by-OID `sequence_close` here would decrement the relcache refcount AND
+    // then `seq_rel`'s Drop would decrement it again (double free of the pin).
+    seq_rel.close(NoLock)?;
     Ok(())
 }
 
@@ -700,7 +709,9 @@ pub fn AlterSequence<'mcx>(
 
     let address = object_address_set(RelationRelationId, relid);
 
-    backend_access_sequence_seams::sequence_close::call(relid, NoLock)?;
+    // sequence_close(seqrel, NoLock): close the open RAII handle directly (a
+    // by-OID close plus the handle's Drop would double-decrement the pin).
+    seqrel.close(NoLock)?;
 
     Ok(address)
 }
@@ -735,7 +746,9 @@ pub fn SequenceChangePersistence<'mcx>(
     fill_seq_with_data(mcx, &seqrel, &seqdatatuple)?;
     backend_storage_buffer_bufmgr_seams::unlock_release_buffer::call(buf);
 
-    backend_access_sequence_seams::sequence_close::call(relid, NoLock)?;
+    // sequence_close(seqrel, NoLock): close the RAII handle directly (a by-OID
+    // close plus the handle's Drop would double-decrement the pin).
+    seqrel.close(NoLock)?;
     Ok(())
 }
 
@@ -822,7 +835,9 @@ pub fn nextval_internal<'mcx>(mcx: Mcx<'mcx>, relid: Oid, check_permissions: boo
         debug_assert!(cur_incr != 0);
         let new_last = cur_last + cur_incr;
         seqtable_with(relid, |e| e.last = new_last);
-        backend_access_sequence_seams::sequence_close::call(relid, NoLock)?;
+        // sequence_close(seqrel, NoLock): close the RAII handle directly (a
+        // by-OID close plus the handle's Drop would double-decrement the pin).
+        seqrel.close(NoLock)?;
         LAST_USED_SEQ.with(|s| *s.borrow_mut() = Some(relid));
         return Ok(new_last);
     }
@@ -987,7 +1002,9 @@ pub fn nextval_internal<'mcx>(mcx: Mcx<'mcx>, relid: Oid, check_permissions: boo
 
     // END_CRIT_SECTION();
     backend_storage_buffer_bufmgr_seams::unlock_release_buffer::call(buf);
-    backend_access_sequence_seams::sequence_close::call(relid, NoLock)?;
+    // sequence_close(seqrel, NoLock): close the RAII handle directly (a by-OID
+    // close plus the handle's Drop would double-decrement the pin).
+    seqrel.close(NoLock)?;
 
     Ok(result)
 }
@@ -1066,7 +1083,9 @@ pub fn currval_internal<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<i64> {
 
     result = seqtable_get(relid, |e| e.last);
 
-    backend_access_sequence_seams::sequence_close::call(relid, NoLock)?;
+    // sequence_close(seqrel, NoLock): close the RAII handle directly (a by-OID
+    // close plus the handle's Drop would double-decrement the pin).
+    seqrel.close(NoLock)?;
 
     Ok(result)
 }
@@ -1125,7 +1144,9 @@ pub fn lastval_internal<'mcx>(mcx: Mcx<'mcx>) -> PgResult<i64> {
     }
 
     result = seqtable_get(last_relid, |e| e.last);
-    backend_access_sequence_seams::sequence_close::call(last_relid, NoLock)?;
+    // sequence_close(seqrel, NoLock): close the RAII handle directly (a by-OID
+    // close plus the handle's Drop would double-decrement the pin).
+    seqrel.close(NoLock)?;
 
     Ok(result)
 }
@@ -1222,7 +1243,9 @@ fn do_setval<'mcx>(mcx: Mcx<'mcx>, relid: Oid, next: i64, iscalled: bool) -> PgR
 
     // END_CRIT_SECTION();
     backend_storage_buffer_bufmgr_seams::unlock_release_buffer::call(buf);
-    backend_access_sequence_seams::sequence_close::call(relid, NoLock)?;
+    // sequence_close(seqrel, NoLock): close the RAII handle directly (a by-OID
+    // close plus the handle's Drop would double-decrement the pin).
+    seqrel.close(NoLock)?;
     Ok(())
 }
 
@@ -1961,8 +1984,14 @@ fn process_owned_by<'mcx>(
     }
 
     /* Done, but hold lock until commit */
-    if tablerel.is_some() {
-        backend_access_table_table_seams::relation_close::call(tablerel_oid, NoLock)?;
+    // relation_close(tablerel, NoLock): close the handle opened above. Closing
+    // the RAII handle directly (rather than a second by-OID `relation_close`)
+    // keeps the relcache refcount balanced — the by-OID close plus `tablerel`'s
+    // Drop would decrement `rd_refcnt` twice, underflowing the owning table's
+    // pin so a later DROP's `CheckTableNotInUse` reports it as still in use.
+    let _ = tablerel_oid;
+    if let Some(trel) = tablerel {
+        trel.close(NoLock)?;
     }
 
     Ok(())
@@ -2175,7 +2204,9 @@ pub fn pg_sequence_last_value<'mcx>(
         result = seq.last_value;
         backend_storage_buffer_bufmgr_seams::unlock_release_buffer::call(buf);
     }
-    backend_access_sequence_seams::sequence_close::call(relid, NoLock)?;
+    // sequence_close(seqrel, NoLock): close the RAII handle directly (a by-OID
+    // close plus the handle's Drop would double-decrement the pin).
+    seqrel.close(NoLock)?;
 
     if is_called {
         Ok(ValueDatum::from_i64(result))

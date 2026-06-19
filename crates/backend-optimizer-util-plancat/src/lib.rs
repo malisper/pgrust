@@ -936,7 +936,9 @@ pub fn get_relation_data_width(relid: Oid, attr_widths: &[i32]) -> PgResult<i32>
     let mut widths = attr_widths.to_vec();
     let min_attr = (FirstLowInvalidHeapAttributeNumber + 1) as AttrNumber;
     let result = get_rel_data_width_impl(&relation, Some(&mut widths), min_attr)?;
-    backend_utils_cache_relcache_seams::relation_close::call(relid)?;
+    // relation_close(relation, NoLock): close the RAII handle directly. A by-OID
+    // close here plus the handle's Drop would double-decrement the pin.
+    relation.close(NoLock)?;
     Ok(result)
 }
 
@@ -1669,7 +1671,9 @@ fn seam_get_rel_data_width(rel: Oid, attr_widths: Option<&mut [i32]>) -> PgResul
     let relation = backend_access_table_table::table_open(relcx.mcx(), rel, NoLock)?;
     let min_attr = (FirstLowInvalidHeapAttributeNumber + 1) as AttrNumber;
     let result = get_rel_data_width_impl(&relation, attr_widths, min_attr)?;
-    backend_utils_cache_relcache_seams::relation_close::call(rel)?;
+    // relation_close(relation, NoLock): close the RAII handle directly. A by-OID
+    // close here plus the handle's Drop would double-decrement the pin.
+    relation.close(NoLock)?;
     Ok(result)
 }
 

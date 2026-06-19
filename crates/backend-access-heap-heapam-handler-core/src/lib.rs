@@ -766,13 +766,23 @@ fn table_relation_estimate_size(
     // stats/size projection mirroring the borrowed `Relation` the C callback gets).
     let rel = Relation::open(data, None);
 
-    table_block_relation_estimate_size(
+    let result = table_block_relation_estimate_size(
         &rel,
         relid,
         attr_widths,
         HEAP_OVERHEAD_BYTES_PER_TUPLE,
         HEAP_USABLE_BYTES_PER_PAGE,
-    )
+    );
+
+    // `relation_id_get_relation` above took a fresh `RelationIncrementReferenceCount`
+    // pin but handed back a value-slice copy wrapped in a closer-less handle, so the
+    // pin must be released explicitly (the C callback borrows the caller's already-open
+    // `Relation` and never re-opens; here we re-opened by OID). Without this the pin
+    // leaks once per planning of any query over the table, so a later same-session
+    // DROP/TRUNCATE fails `CheckTableNotInUse` ("used by active queries in this session").
+    backend_utils_cache_relcache_seams::relation_close::call(relid)?;
+
+    result
 }
 
 /// `table_block_relation_estimate_size(rel, attr_widths, &pages, &tuples,

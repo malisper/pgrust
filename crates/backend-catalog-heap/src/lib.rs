@@ -873,6 +873,7 @@ pub use partition::RemovePartitionKeyByRelId;
 pub use statistics::{CopyStatistics, RemoveStatistics};
 
 pub use constraints::{
-    AddRelationNewConstraints, AddRelationNotNullConstraints, RelationClearMissing,
-    RemoveAttributeById, SetAttributeHasDefault, StoreAttrMissingVal, StoreConstraints,
+    AddRelationNewConstraints, AddRelationNotNullConstraints, ClearAttributeHasDefault,
+    RelationClearMissing, RemoveAttributeById, SetAttributeHasDefault, StoreAttrMissingVal,
+    StoreConstraints,
 };

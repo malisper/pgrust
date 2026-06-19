@@ -1687,6 +1687,120 @@ pub fn SetAttributeHasDefault<'mcx>(
     Ok(result)
 }
 
+/// `RemoveAttrDefaultById`'s `pg_attribute` reset (pg_attrdef.c): clear the
+/// owning column's `atthasdef = false`.
+///
+/// ```c
+/// attr_rel = table_open(AttributeRelationId, RowExclusiveLock);
+/// tuple = SearchSysCacheCopy2(ATTNUM, ObjectIdGetDatum(myrelid),
+///                             Int16GetDatum(myattnum));
+/// if (!HeapTupleIsValid(tuple))  /* shouldn't happen */
+///     elog(ERROR, "cache lookup failed for attribute %d of relation %u", ...);
+/// ((Form_pg_attribute) GETSTRUCT(tuple))->atthasdef = false;
+/// CatalogTupleUpdate(attr_rel, &tuple->t_self, tuple);
+/// table_close(attr_rel, RowExclusiveLock);
+/// ```
+///
+/// Returns `false` on the cache miss (the C "shouldn't happen" `elog(ERROR)`,
+/// left to the caller). Mirrors [`SetAttributeHasDefault`]'s genam scan idiom
+/// (key on the `attrelid` leading index column, filter to `attnum`).
+pub fn ClearAttributeHasDefault<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    attnum: AttrNumber,
+) -> PgResult<bool> {
+    use backend_access_common_scankey::ScanKeyInit;
+    use types_catalog::pg_attribute::{
+        Anum_pg_attribute_attnum, Anum_pg_attribute_atthasdef, Anum_pg_attribute_attrelid,
+    };
+    use types_core::fmgr::F_OIDEQ;
+    use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+    use types_tuple::backend_access_common_heaptuple::Datum;
+
+    const AttributeRelationId: Oid = 1249;
+    const AttributeRelidNumIndexId: Oid = 2659;
+
+    // attr_rel = table_open(AttributeRelationId, RowExclusiveLock);
+    let attr_rel = backend_access_table_table::table_open(
+        mcx,
+        AttributeRelationId,
+        types_storage::lock::RowExclusiveLock,
+    )?;
+
+    // SearchSysCacheCopy2(ATTNUM, relid, attnum): scan on attrelid (the index's
+    // leading key) and filter to the target attnum in the loop.
+    let mut key = [ScanKeyData::empty()];
+    ScanKeyInit(
+        &mut key[0],
+        Anum_pg_attribute_attrelid,
+        BTEqualStrategyNumber,
+        F_OIDEQ,
+        Datum::from_oid(relid),
+    )?;
+
+    let mut scan = backend_access_index_genam_seams::systable_beginscan::call(
+        &attr_rel,
+        AttributeRelidNumIndexId,
+        true,
+        None,
+        &key[..1],
+    )?;
+
+    let mut found = false;
+    loop {
+        let Some(tuple) =
+            backend_access_index_genam_seams::systable_getnext::call(mcx, scan.desc_mut())?
+        else {
+            break;
+        };
+
+        // Filter to the requested attnum.
+        let (this_attnum, _) = backend_access_common_heaptuple::heap_getattr(
+            mcx,
+            &tuple,
+            Anum_pg_attribute_attnum as i32,
+            &attr_rel.rd_att,
+        )?;
+        if this_attnum.as_i16() != attnum {
+            continue;
+        }
+
+        // ((Form_pg_attribute) GETSTRUCT(tuple))->atthasdef = false;
+        let natts = attr_rel.rd_att.natts as usize;
+        let mut repl_val = alloc::vec![Datum::null(); natts];
+        let repl_null = alloc::vec![false; natts];
+        let mut repl_repl = alloc::vec![false; natts];
+
+        repl_val[(Anum_pg_attribute_atthasdef - 1) as usize] = Datum::from_bool(false);
+        repl_repl[(Anum_pg_attribute_atthasdef - 1) as usize] = true;
+
+        let mut newtuple = backend_access_common_heaptuple::heap_modify_tuple(
+            mcx,
+            &tuple,
+            &attr_rel.rd_att,
+            &repl_val,
+            &repl_null,
+            &repl_repl,
+        )?;
+
+        // CatalogTupleUpdate(attr_rel, &tuple->t_self, tuple);
+        backend_catalog_indexing::keystone::CatalogTupleUpdate(
+            mcx,
+            &attr_rel,
+            tuple.tuple.t_self,
+            &mut newtuple,
+        )?;
+
+        found = true;
+        break;
+    }
+
+    scan.end()?;
+    attr_rel.close(types_storage::lock::RowExclusiveLock)?;
+
+    Ok(found)
+}
+
 /// `StoreAttrMissingVal` (heap.c) — set the missing value of a single
 /// attribute. Needs `construct_array`-of-missingval + a writable full-row
 /// `ATTNUM` syscache copy + a `pg_attribute` `CatalogTupleUpdate` carrier;
