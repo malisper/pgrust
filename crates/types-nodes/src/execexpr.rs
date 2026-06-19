@@ -1025,6 +1025,12 @@ pub enum ExprEvalStepData<'mcx> {
     RowCompareStep {
         finfo: Option<PgBox<'mcx, FmgrInfo>>,
         fcinfo_data: Option<PgBox<'mcx, FunctionCallInfoBaseData<'mcx>>>,
+        /// Per-argument result cells (always two): the `&fcinfo->args[0/1].value`
+        /// / `&fcinfo->args[0/1].isnull` aliasing targets the left/right column
+        /// sub-expressions evaluate into. In C the recursion writes directly
+        /// through `&fcinfo->args[i]`; in the owned model the interpreter gathers
+        /// these arena cells into the fcinfo args immediately before the call.
+        arg_cells: Option<PgVec<'mcx, ResultCellId>>,
         fn_addr: Option<PGFunction>,
         /// target for comparison resulting in NULL
         jumpnull: i32,

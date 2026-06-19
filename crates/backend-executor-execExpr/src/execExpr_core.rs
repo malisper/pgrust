@@ -49,6 +49,10 @@ const OUTER_VAR: i32 = -2;
 #[allow(dead_code)]
 const INDEX_VAR: i32 = -3;
 
+/// `#define BTORDER_PROC 1` (access/nbtree.h) — the btree comparison support
+/// proc; the row-compare per-column comparison uses it.
+const BTORDER_PROC: i16 = 1;
+
 // ===========================================================================
 // makeNode(ExprState) + result-cell arena helpers + ExprEvalPushStep +
 // ExecReadyExpr (spine primitives)
@@ -705,20 +709,32 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
         etag::T_CaseExpr => {
             let caseexpr = node.expect_caseexpr();
             // If there's a test expression, C evaluates it into a caseval/
-            // casenull workspace cell and (only if get_typlen(exprType(arg)) ==
-            // -1, i.e. a varlena that could be an expanded datum) emits an
-            // EEOP_MAKE_READONLY over it. The varlena decision needs
-            // exprType (nodeFuncs) + get_typlen (lsyscache owner) — and no
-            // get_typlen seam is exported yet, so a simple CASE (with arg) would
-            // require guessing the R/O step. Per "mirror PG and panic", route
-            // the simple-CASE form loudly; searched CASE (no arg, the common
-            // form) is ported in full below.
-            let case_cell = if caseexpr.arg.is_some() {
-                panic!(
-                    "execExpr-core: simple CASE (CaseExpr with a test arg) needs \
-                     get_typlen(exprType(arg)) to decide the EEOP_MAKE_READONLY R/O step \
-                     (lsyscache owner seam not exported); searched CASE is ported"
-                );
+            // casenull workspace cell where CaseTestExpr placeholders find it,
+            // and (only if get_typlen(exprType(arg)) == -1, i.e. a varlena that
+            // could be an expanded datum) emits an EEOP_MAKE_READONLY over it.
+            // (execExpr.c:1782-1808).
+            let case_cell = if let Some(arg) = caseexpr.arg.as_deref() {
+                // Evaluate testexpr into caseval/casenull workspace (one cell
+                // carries both Datum and isnull in the owned model — the
+                // owned-model replacement for palloc(sizeof(Datum)) +
+                // palloc(sizeof(bool))).
+                let caseval = new_result_cell(mcx, state)?;
+                exec_init_expr_rec(mcx, arg, state, caseval)?;
+
+                // Since value might be read multiple times, force to R/O — but
+                // only if it could be an expanded datum (get_typlen == -1).
+                let argtype = backend_nodes_nodeFuncs_seams::expr_type_info::call(arg)?.typid;
+                if backend_utils_cache_lsyscache_seams::get_typlen::call(argtype)? == -1 {
+                    // change caseval in-place (resvalue == d.make_readonly.value).
+                    let scratch = ExprEvalStep {
+                        opcode: ExprEvalOp::EEOP_MAKE_READONLY,
+                        resvalue: caseval,
+                        resnull: caseval,
+                        d: ExprEvalStepData::MakeReadOnly { value: caseval },
+                    };
+                    expr_eval_push_step(mcx, state, scratch)?;
+                }
+                Some(caseval)
             } else {
                 None
             };
@@ -1206,16 +1222,150 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             expr_eval_push_step(mcx, state, scratch)?;
             Ok(())
         }
-        etag::T_RowCompareExpr => panic!(
-            "execExpr-core: RowCompareExpr recurses left/right args into &fcinfo->args[0/1].value \
-             (execExpr.c:2127-2130), but the ExprEvalStepData::RowCompareStep variant carries \
-             finfo/fcinfo_data/fn_addr/jumpnull/jumpdone with no per-arg ResultCellId cells (the \
-             gap-2 arg-cells the keystone added to Func/HashDatum/ScalarArrayOp were not extended \
-             to RowCompareStep), so the two argument sub-expressions have no arena cell to write \
-             into. Genuine model gap: the RowCompareStep payload needs arg-cell fields landed in \
-             lockstep with the interpreter (joint keystone). The opfamily/proc lsyscache lookups \
-             and fmgr_info seams are landed."
-        ),
+        // ----- T_RowCompareExpr ----- (execExpr.c:2059-2177)
+        etag::T_RowCompareExpr => {
+            let rcexpr = node.expect_rowcompareexpr();
+            let nopers = rcexpr.opnos.len();
+
+            // Iterate over each field, prepare comparisons. To handle NULL
+            // results, prepare jumps to after the expression. If a comparison
+            // yields a != 0 result, jump to the final step.
+            debug_assert_eq!(rcexpr.largs.len(), nopers);
+            debug_assert_eq!(rcexpr.rargs.len(), nopers);
+            debug_assert_eq!(rcexpr.opfamilies.len(), nopers);
+            debug_assert_eq!(rcexpr.inputcollids.len(), nopers);
+
+            let mut adjust_jumps: PgVec<'mcx, usize> =
+                mcx::vec_with_capacity_in(mcx, nopers)?;
+
+            // forfive(l_left_expr, largs, l_right_expr, rargs, l_opno, opnos,
+            //         l_opfamily, opfamilies, l_inputcollid, inputcollids)
+            for i in 0..nopers {
+                let left_expr = &rcexpr.largs[i];
+                let right_expr = &rcexpr.rargs[i];
+                let opno = rcexpr.opnos[i];
+                let opfamily = rcexpr.opfamilies[i];
+                let inputcollid = rcexpr.inputcollids[i];
+
+                // get_op_opfamily_properties(opno, opfamily, false,
+                //                            &strategy, &lefttype, &righttype);
+                let (_strategy, lefttype, righttype) =
+                    backend_utils_cache_lsyscache_seams::get_op_opfamily_properties::call(
+                        opno, opfamily, false,
+                    )?
+                    .expect("get_op_opfamily_properties(missing_ok=false) returns Some");
+                // proc = get_opfamily_proc(opfamily, lefttype, righttype, BTORDER_PROC);
+                let proc = backend_utils_cache_lsyscache_seams::get_opfamily_proc::call(
+                    opfamily,
+                    lefttype,
+                    righttype,
+                    BTORDER_PROC,
+                )?;
+                if proc == types_core::InvalidOid {
+                    return Err(types_error::PgError::error(format!(
+                        "missing support function {}({},{}) in opfamily {}",
+                        BTORDER_PROC, lefttype, righttype, opfamily
+                    )));
+                }
+
+                // Set up the primary fmgr lookup information.
+                //   finfo = palloc0(sizeof(FmgrInfo));
+                //   fcinfo = palloc0(SizeForFunctionCallInfo(2));
+                //   fmgr_info(proc, finfo); fmgr_info_set_expr((Node *) node, finfo);
+                //   InitFunctionCallInfoData(*fcinfo, finfo, 2, inputcollid, NULL, NULL);
+                let finfo = backend_utils_fmgr_fmgr_seams::fmgr_info::call(mcx, proc)?;
+                let fcinfo_data = mcx::alloc_in(
+                    mcx,
+                    types_nodes::fmgr::FunctionCallInfoBaseData {
+                        flinfo: Some(finfo.clone()),
+                        context: None,
+                        resultinfo: None,
+                        fncollation: inputcollid,
+                        isnull: false,
+                        nargs: 2,
+                        args: Vec::new(),
+                        ..Default::default()
+                    },
+                )?;
+
+                // Evaluate left and right args directly into fcinfo. The C
+                // recursion writes through &fcinfo->args[0/1]; the owned model
+                // gives each argument its own result cell and records it in
+                // arg_cells, which the interpreter gathers into the call frame
+                // immediately before the comparison.
+                let mut arg_cells: PgVec<'mcx, types_nodes::execexpr::ResultCellId> =
+                    mcx::vec_with_capacity_in(mcx, 2)?;
+                let lcell = new_result_cell(mcx, state)?;
+                exec_init_expr_rec(mcx, left_expr, state, lcell)?;
+                arg_cells.push(lcell);
+                let rcell = new_result_cell(mcx, state)?;
+                exec_init_expr_rec(mcx, right_expr, state, rcell)?;
+                arg_cells.push(rcell);
+
+                let scratch = ExprEvalStep {
+                    opcode: ExprEvalOp::EEOP_ROWCOMPARE_STEP,
+                    resvalue: resv,
+                    resnull: resv,
+                    d: ExprEvalStepData::RowCompareStep {
+                        finfo: Some(mcx::alloc_in(mcx, finfo)?),
+                        fcinfo_data: Some(fcinfo_data),
+                        arg_cells: Some(arg_cells),
+                        // fn_addr stays None — the interpreter re-resolves by
+                        // finfo.fn_oid (the by-OID fmgr dispatch).
+                        fn_addr: None,
+                        // jump targets filled below.
+                        jumpnull: -1,
+                        jumpdone: -1,
+                    },
+                };
+                expr_eval_push_step(mcx, state, scratch)?;
+                adjust_jumps.push((state.steps_len - 1) as usize);
+            }
+
+            // We could have a zero-column rowtype, in which case the rows
+            // necessarily compare equal.
+            if nopers == 0 {
+                let scratch = ExprEvalStep {
+                    opcode: ExprEvalOp::EEOP_CONST,
+                    resvalue: resv,
+                    resnull: resv,
+                    d: ExprEvalStepData::ConstVal {
+                        value: DatumV::from_i32(0),
+                        isnull: false,
+                    },
+                };
+                expr_eval_push_step(mcx, state, scratch)?;
+            }
+
+            // Finally, examine the last comparison result.
+            let scratch = ExprEvalStep {
+                opcode: ExprEvalOp::EEOP_ROWCOMPARE_FINAL,
+                resvalue: resv,
+                resnull: resv,
+                d: ExprEvalStepData::RowCompareFinal {
+                    cmptype: rcexpr.cmptype,
+                },
+            };
+            expr_eval_push_step(mcx, state, scratch)?;
+
+            // adjust jump targets.
+            let steps_len = state.steps_len;
+            let steps = state.steps.as_mut().unwrap();
+            for &j in adjust_jumps.iter() {
+                if let ExprEvalStepData::RowCompareStep {
+                    jumpdone, jumpnull, ..
+                } = &mut steps[j].d
+                {
+                    debug_assert_eq!(*jumpdone, -1);
+                    debug_assert_eq!(*jumpnull, -1);
+                    // jump to comparison evaluation (the ROWCOMPARE_FINAL step).
+                    *jumpdone = steps_len - 1;
+                    // jump to the following expression.
+                    *jumpnull = steps_len;
+                }
+            }
+            Ok(())
+        }
         etag::T_SubscriptingRef => {
             let sbsref = node.expect_subscriptingref();
             let mut scratch = scratch_for(resv);

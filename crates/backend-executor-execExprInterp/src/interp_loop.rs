@@ -723,7 +723,7 @@ pub fn ExecInterpExpr<'mcx>(
                     }
                     _ => unreachable!("EEOP_ROWCOMPARE_STEP: payload is not RowCompareStep"),
                 };
-                op = eval_scalar::exec_rowcompare_step(state, op, jumpnull, jumpdone)?;
+                op = eval_scalar::exec_rowcompare_step(state, op, jumpnull, jumpdone, estate)?;
             }
 
             EEOP_ROWCOMPARE_FINAL => {

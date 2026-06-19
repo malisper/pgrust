@@ -31,7 +31,7 @@
 //! step-payload reads and control flow that the owned model can already express
 //! are written out faithfully.
 
-use backend_utils_fmgr_fmgr_seams::{function_call_invoke, function_call_invoke_datum};
+use backend_utils_fmgr_fmgr_seams::function_call_invoke_datum;
 // The bare-word newtype: the scalar form the fmgr/arrayfuncs seams and the
 // step-payload eval helpers operate on.
 use types_datum::Datum;
@@ -49,7 +49,7 @@ use types_error::{
     PgError, PgResult, ERRCODE_CHECK_VIOLATION, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_NOT_NULL_VIOLATION,
 };
-use types_nodes::execexpr::{ExprEvalStepData, ExprState, ResultCell};
+use types_nodes::execexpr::{ExprEvalStepData, ExprState};
 use types_nodes::execnodes::EcxtId;
 use types_nodes::EStateData;
 
@@ -352,13 +352,15 @@ fn rowcompare_step_inputs<'mcx>(
 ) -> (
     types_core::primitive::Oid,
     types_core::primitive::Oid,
-    Vec<types_datum::NullableDatum>,
+    Vec<DatumV<'mcx>>,
+    Vec<bool>,
     bool,
 ) {
     match step_data(state, op) {
         ExprEvalStepData::RowCompareStep {
             finfo,
             fcinfo_data,
+            arg_cells,
             ..
         } => {
             let finfo = finfo
@@ -367,12 +369,24 @@ fn rowcompare_step_inputs<'mcx>(
             let fcinfo = fcinfo_data
                 .as_ref()
                 .expect("EEOP_ROWCOMPARE_STEP: op->d.rowcompare_step.fcinfo_data missing");
-            // The two compared column values were gathered into fcinfo->args by
-            // the preceding sub-expression steps (the compiler aliases their
-            // resvalue/resnull onto &fcinfo->args[0/1]); the owned model carries
-            // them on the step's fcinfo_data.args frame.
-            let args = fcinfo.args.clone();
-            (finfo.fn_oid, fcinfo.fncollation, args, finfo.fn_strict)
+            let cells = arg_cells
+                .as_ref()
+                .expect("EEOP_ROWCOMPARE_STEP: op->d.rowcompare_step.arg_cells missing");
+            // The two compared column values were evaluated into their own arena
+            // cells by the preceding sub-expression steps (the compiler aliases
+            // their resvalue/resnull onto &fcinfo->args[0/1]); gather them into
+            // the call frame immediately before the call. Carry the full canonical
+            // Datum image (the by-reference-capable lane) so a by-ref text/name
+            // column survives the gather — the BTORDER_PROC compare functions for
+            // such types (e.g. bttextcmp) read their arguments by reference.
+            let mut args: Vec<DatumV<'mcx>> = Vec::with_capacity(cells.len());
+            let mut nulls: Vec<bool> = Vec::with_capacity(cells.len());
+            for &cell in cells.iter() {
+                let c = state.result_cells.get(cell);
+                args.push(c.value.clone());
+                nulls.push(c.isnull);
+            }
+            (finfo.fn_oid, fcinfo.fncollation, args, nulls, finfo.fn_strict)
         }
         other => unreachable!("EEOP_ROWCOMPARE_STEP carries the wrong payload: {other:?}"),
     }
@@ -387,36 +401,42 @@ pub fn exec_rowcompare_step<'mcx>(
     op: usize,
     jumpnull: i32,
     jumpdone: i32,
+    estate: &EStateData<'mcx>,
 ) -> PgResult<usize> {
-    let (fn_oid, collation, args, fn_strict) = rowcompare_step_inputs(state, op);
+    let (fn_oid, collation, args, nulls, fn_strict) = rowcompare_step_inputs(state, op);
     let (resvalue_id, _resnull_id) = res_cells(state, op);
 
+    // All writes go through `write_cell`, which routes `STATE_RESULT_CELL`
+    // (== id 0) to the `ExprState`'s own `resvalue`/`resnull` rather than the
+    // auxiliary `result_cells[0]`; the EEOP_ROWCOMPARE_FINAL reader reads the
+    // same cell via `read_cell`, so a row comparison whose result slot is the
+    // ExprState's own cell (e.g. a top-level qual) must agree.
+
     // force NULL result if strict fn and NULL input
-    if fn_strict && (args[0].isnull || args[1].isnull) {
-        let cur = state.result_cells.get(resvalue_id).value;
-        state
-            .result_cells
-            .set(resvalue_id, ResultCell { value: cur, isnull: true });
+    if fn_strict && (nulls[0] || nulls[1]) {
+        let cur = crate::interp_loop::read_cell(state, resvalue_id).0;
+        crate::interp_loop::write_cell(state, resvalue_id, cur, true);
         return Ok(jumpnull as usize);
     }
 
     // fcinfo->isnull = false; d = op->d.rowcompare_step.fn_addr(fcinfo);
-    let (word, isnull) = function_call_invoke::call(fn_oid, collation, &args)?;
-    let value = DatumV::from_usize(word.as_usize());
+    // The canonical (by-reference-capable) call-frame lane so a by-ref text/name
+    // column survives the gather; the BTORDER_PROC compare functions are not the
+    // I/O-coerce strict shim, so no fn_expr node is threaded.
+    let mcx = estate.es_query_cxt;
+    let (value, isnull) =
+        function_call_invoke_datum::call(mcx, fn_oid, collation, &args, None)?;
 
     // force NULL result if NULL function result
     if isnull {
-        state
-            .result_cells
-            .set(resvalue_id, ResultCell { value, isnull: true });
+        crate::interp_loop::write_cell(state, resvalue_id, value, true);
         return Ok(jumpnull as usize);
     }
 
-    // *op->resvalue = d; *op->resnull = false;
-    let cmp = Datum::from_usize(word.as_usize()).as_i32();
-    state
-        .result_cells
-        .set(resvalue_id, ResultCell { value, isnull: false });
+    // *op->resvalue = d; *op->resnull = false; (the comparison yields a by-value
+    // int32 cmpresult).
+    let cmp = word_of(&value).as_i32();
+    crate::interp_loop::write_cell(state, resvalue_id, value, false);
 
     // If unequal, no need to compare remaining columns.
     if cmp != 0 {
