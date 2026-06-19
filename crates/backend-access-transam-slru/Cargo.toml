@@ -24,4 +24,5 @@ backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-sea
 backend-access-transam-xlogrecovery-seams = { path = "../backend-access-transam-xlogrecovery-seams" }
 backend-utils-activity-waitevent-seams = { path = "../backend-utils-activity-waitevent-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" }
 libc = "0.2"

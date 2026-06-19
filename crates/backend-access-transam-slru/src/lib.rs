@@ -35,6 +35,7 @@ use backend_access_transam_transam::{TransactionIdFollowsOrEquals, TransactionId
 use backend_access_transam_xlog_seams as xlog_seams;
 use backend_access_transam_xlogrecovery_seams as xlogrecovery_seams;
 use backend_storage_file_seams as file_seams;
+use backend_storage_ipc_shmem_seams as ipc_shmem;
 use backend_storage_lmgr_lwlock::{
     LWLockAcquire, LWLockConditionalAcquire, LWLockHeldByMe, LWLockHeldByMeInMode,
     LWLockInitialize, LWLockRelease,
@@ -44,7 +45,7 @@ use backend_utils_activity_small::pgstat_checkpointer::with_pending_checkpointer
 use backend_utils_activity_stat_seams as stat_seams;
 use backend_utils_activity_waitevent_seams as waitevent_seams;
 use backend_utils_error::errno::current_errno;
-use backend_utils_error::{config, ereport, PgError, PgResult};
+use backend_utils_error::{config, ereport, PgResult};
 use backend_utils_init_small_seams as globals;
 use types_core::{
     InvalidTransactionId, InvalidXLogRecPtr, Size, TransactionId, XLogRecPtr, BLCKSZ,
@@ -125,6 +126,90 @@ pub use SlruPageStatus::*;
 pub type SlruPagePrecedes = fn(i64, i64) -> bool;
 
 // ---------------------------------------------------------------------------
+// ShmemSlice — a fixed-length array carved out of the MAP_SHARED segment.
+//
+// In C, every SlruSharedData array (page_buffer[], page_status[], …) is a
+// pointer into one `ShmemInitStruct` block; the block lives in the shared
+// segment that every forked backend inherits (same address, MAP_SHARED), so a
+// page a backend writes is immediately visible to a sibling backend's status
+// lookup. The owned-`Vec` model placed those arrays on the *process-private*
+// heap, so cross-backend commit visibility silently broke under fork.
+//
+// `ShmemSlice<T>` restores the C contract: a bare `*mut T` + `len` into the
+// shared block, dereferencing to `&[T]`/`&mut [T]` so all the existing index /
+// slice / fill / iterate call sites keep working unchanged. It is `Default`
+// (null, empty) so the unit-test path can build an unbacked `SlruSharedData`.
+// ---------------------------------------------------------------------------
+
+/// A fixed-length slice into the shared-memory segment (the owned stand-in for
+/// a C `T *` pointing into a `ShmemInitStruct` block). Synchronization is the
+/// caller's responsibility, exactly as in slru.c (bank/buffer LWLocks).
+#[derive(Debug)]
+pub struct ShmemSlice<T> {
+    ptr: *mut T,
+    len: usize,
+}
+
+impl<T> Default for ShmemSlice<T> {
+    fn default() -> Self {
+        ShmemSlice {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+        }
+    }
+}
+
+impl<T> ShmemSlice<T> {
+    /// Wrap a region of `len` `T`s starting at `ptr` (which must point into the
+    /// live shared segment and stay valid for the cluster's lifetime — the C
+    /// invariant for an SLRU shmem array).
+    ///
+    /// # Safety
+    /// `ptr` must be non-null, well-aligned for `T`, and own `len` initialized
+    /// `T`s in the MAP_SHARED segment.
+    unsafe fn from_raw(ptr: *mut T, len: usize) -> Self {
+        ShmemSlice { ptr, len }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl<T> core::ops::Deref for ShmemSlice<T> {
+    type Target = [T];
+    fn deref(&self) -> &[T] {
+        if self.len == 0 {
+            return &[];
+        }
+        // SAFETY: `from_raw`'s invariant — `ptr` owns `len` initialized `T`s in
+        // the shared segment, valid for the cluster lifetime.
+        unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl<T> core::ops::DerefMut for ShmemSlice<T> {
+    fn deref_mut(&mut self) -> &mut [T] {
+        if self.len == 0 {
+            return &mut [];
+        }
+        // SAFETY: as `deref`; the bank/buffer LWLocks serialize cross-backend
+        // mutation exactly as slru.c requires.
+        unsafe { core::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+}
+
+// SAFETY: `ShmemSlice` is a bare pointer into the process-shared segment; it is
+// no less `Send`/`Sync` than the raw arrays C threads through SLRU shared
+// state, whose access discipline is the SLRU bank/buffer LWLocks.
+unsafe impl<T: Send> Send for ShmemSlice<T> {}
+unsafe impl<T: Sync> Sync for ShmemSlice<T> {}
+
+// ---------------------------------------------------------------------------
 // Shared-memory state (slru.h SlruSharedData)
 // ---------------------------------------------------------------------------
 
@@ -139,27 +224,31 @@ pub struct SlruSharedData {
     /// `page_buffer[slotno]` — flattened: slot `i` occupies bytes
     /// `i * BLCKSZ .. (i + 1) * BLCKSZ`. Access via
     /// [`SlruSharedData::page_buffer`] / [`SlruSharedData::page_buffer_mut`].
-    page_buffer_bytes: Vec<u8>,
+    /// Lives in the MAP_SHARED segment so a page one backend dirties is visible
+    /// to a sibling's status lookup (the cross-connection commit-visibility
+    /// invariant).
+    page_buffer_bytes: ShmemSlice<u8>,
     /// Page number is undefined when status is EMPTY, as is `page_lru_count`.
-    pub page_status: Vec<SlruPageStatus>,
-    pub page_dirty: Vec<bool>,
-    pub page_number: Vec<i64>,
-    pub page_lru_count: Vec<i32>,
+    pub page_status: ShmemSlice<SlruPageStatus>,
+    pub page_dirty: ShmemSlice<bool>,
+    pub page_number: ShmemSlice<i64>,
+    pub page_lru_count: ShmemSlice<i32>,
 
-    /// The buffer_locks protect the I/O on each buffer slot.
-    pub buffer_locks: Vec<LWLockPadded>,
+    /// The buffer_locks protect the I/O on each buffer slot. In shmem so the
+    /// LWLocks actually serialize across forked backends.
+    pub buffer_locks: ShmemSlice<LWLockPadded>,
     /// Locks to protect the in-memory buffer-slot access, one per bank.
-    pub bank_locks: Vec<LWLockPadded>,
+    pub bank_locks: ShmemSlice<LWLockPadded>,
 
     /// A bank-wise LRU counter: a page is marked "most recently used" by
     /// `page_lru_count[slotno] = ++bank_cur_lru_count[bankno]`; the oldest
     /// page in a bank has the highest `bank_cur_lru_count - page_lru_count`.
     /// Wraps, which is fine while no page's age exceeds INT_MAX counts.
-    pub bank_cur_lru_count: Vec<i32>,
+    pub bank_cur_lru_count: ShmemSlice<i32>,
 
     /// Optional WAL flush LSNs (`lsn_groups_per_page` entries per slot); if
     /// non-empty we must flush WAL before writing pages (pg_xact only).
-    pub group_lsn: Vec<XLogRecPtr>,
+    pub group_lsn: ShmemSlice<XLogRecPtr>,
     pub lsn_groups_per_page: i32,
 
     /// Page number of the current end of the log; used only to avoid
@@ -258,6 +347,15 @@ fn bufferalign(len: usize) -> usize {
     (len + 31) & !31
 }
 
+/// Align up to `LWLOCK_PADDED_SIZE` (128). `LWLockPadded` is `#[repr(align(128))]`,
+/// so its in-block offset must be 128-aligned: unlike C (which casts a possibly
+/// unaligned pointer, tolerated as UB), Rust's slice construction strictly
+/// rejects a misaligned base. The block start is already cacheline-aligned by
+/// `ShmemAllocRaw`, so aligning the offset suffices.
+fn lwlockalign(len: usize) -> usize {
+    (len + (LWLOCK_PADDED_SIZE - 1)) & !(LWLOCK_PADDED_SIZE - 1)
+}
+
 /// `SimpleLruShmemSize(nslots, nlsns)` — the shared-memory footprint of one
 /// SLRU, mirroring the C accumulation per array.
 pub fn SimpleLruShmemSize(nslots: i32, nlsns: i32) -> Size {
@@ -273,7 +371,9 @@ pub fn SimpleLruShmemSize(nslots: i32, nlsns: i32) -> Size {
     sz += maxalign(nslots * core::mem::size_of::<bool>()); /* page_dirty[] */
     sz += maxalign(nslots * core::mem::size_of::<i64>()); /* page_number[] */
     sz += maxalign(nslots * core::mem::size_of::<i32>()); /* page_lru_count[] */
+    sz = lwlockalign(sz); /* align buffer_locks[] to 128 (LWLockPadded) */
     sz += maxalign(nslots * LWLOCK_PADDED_SIZE); /* buffer_locks[] */
+    sz = lwlockalign(sz); /* align bank_locks[] to 128 (LWLockPadded) */
     sz += maxalign(nbanks * LWLOCK_PADDED_SIZE); /* bank_locks[] */
     sz += maxalign(nbanks * core::mem::size_of::<i32>()); /* bank_cur_lru_count[] */
 
@@ -292,21 +392,14 @@ pub fn SimpleLruAutotuneBuffers(divisor: i32, max: i32) -> i32 {
         .min(SLRU_BANK_SIZE.max(nbuffers / divisor - (nbuffers / divisor) % SLRU_BANK_SIZE))
 }
 
-/// Build a fallibly-reserved `Vec` of `len` copies of `value` (the owned
-/// stand-in for the C `ShmemInitStruct` carve-out).
-fn shmem_filled<T: Clone>(len: usize, value: T) -> PgResult<Vec<T>> {
-    let mut v: Vec<T> = Vec::new();
-    v.try_reserve_exact(len)
-        .map_err(|_| PgError::error("out of memory allocating SLRU shared data"))?;
-    v.resize(len, value);
-    Ok(v)
-}
-
 /// `SimpleLruInit(ctl, name, nslots, nlsns, subdir, buffer_tranche_id,
 /// bank_tranche_id, sync_handler, long_segment_names)` — initialize a simple
-/// LRU cache. In C this attaches to (or, in the postmaster, initializes) a
-/// shmem block; the owned-tree model always allocates and initializes, and
-/// returns the control struct. The caller sets `PagePrecedes`.
+/// LRU cache. Like C, this creates (in the postmaster) or attaches to (in a
+/// forked backend) one `ShmemInitStruct` block holding every shared array, so
+/// pages, page status, the LRU state and the bank/buffer LWLocks live in the
+/// MAP_SHARED segment and a commit written by one backend is visible to a
+/// sibling's status lookup. The per-process control struct holds slice views
+/// into that block (the C `*` pointers). The caller sets `PagePrecedes`.
 pub fn SimpleLruInit(
     name: &str,
     nslots: i32,
@@ -321,51 +414,110 @@ pub fn SimpleLruInit(
 
     debug_assert!(nslots <= SLRU_MAX_ALLOWED_BUFFERS);
 
-    // Validate the C shmem-reservation math (ShmemInitStruct size argument).
-    let _shmem_size = SimpleLruShmemSize(nslots, nlsns);
+    let nslots_u = nslots as usize;
+    let nbanks_u = nbanks as usize;
+    let nlsns_u = nlsns.max(0) as usize;
+
+    // Create-or-attach the shared block (C: ShmemInitStruct(name, …, &found)).
+    // The size must match SimpleLruShmemSize so the shmem-index entry-size
+    // check passes for every backend that attaches.
+    let shmem_size = SimpleLruShmemSize(nslots, nlsns);
+    let (base, found) = ipc_shmem::shmem_init_struct::call(name, shmem_size)?;
+
+    // Carve each array out of the block at the same MAXALIGNed offsets that
+    // SimpleLruShmemSize accumulates (header first, then each array, then the
+    // BUFFERALIGNed page buffer). `found` ⇒ a sibling already initialized the
+    // bytes; we only re-derive the slice views.
+    let mut off = maxalign(SLRU_SHARED_DATA_SIZE);
+
+    // C lays page_buffer[] (an array of `nslots` pointers) here and the actual
+    // page bytes at the BUFFERALIGNed tail. We index the tail directly via
+    // page_buffer_bytes, so this region is reserved padding kept only to hold
+    // the layout offsets identical to C / SimpleLruShmemSize.
+    off += maxalign(nslots_u * core::mem::size_of::<*const u8>()); // page_buffer[] ptr array
+    let page_status_off = off;
+    off += maxalign(nslots_u * core::mem::size_of::<SlruPageStatus>());
+    let page_dirty_off = off;
+    off += maxalign(nslots_u * core::mem::size_of::<bool>());
+    let page_number_off = off;
+    off += maxalign(nslots_u * core::mem::size_of::<i64>());
+    let page_lru_count_off = off;
+    off += maxalign(nslots_u * core::mem::size_of::<i32>());
+    off = lwlockalign(off); // buffer_locks[] base must be 128-aligned
+    let buffer_locks_off = off;
+    off += maxalign(nslots_u * LWLOCK_PADDED_SIZE);
+    off = lwlockalign(off); // bank_locks[] base must be 128-aligned
+    let bank_locks_off = off;
+    off += maxalign(nbanks_u * LWLOCK_PADDED_SIZE);
+    let bank_cur_lru_count_off = off;
+    off += maxalign(nbanks_u * core::mem::size_of::<i32>());
+    let group_lsn_off = off;
+    if nlsns_u > 0 {
+        off += maxalign(nslots_u * nlsns_u * core::mem::size_of::<XLogRecPtr>());
+    }
+    // Page bytes live at the BUFFERALIGNed tail.
+    let page_buffer_off = bufferalign(off);
+
+    // SAFETY: every offset is within `shmem_size` bytes of `base`, which
+    // `shmem_init_struct` returned as a live region of exactly that size in the
+    // shared segment, and each region is sized/aligned for its element type
+    // (MAXALIGN ≥ align_of for all these scalars and 8-byte-aligned padded
+    // LWLocks). `from_raw`'s remaining obligation (initialized contents) is met
+    // either by the `!found` zero-init below or by the sibling that created it.
+    let (page_status, page_dirty, page_number, page_lru_count, buffer_locks, bank_locks,
+         bank_cur_lru_count, group_lsn, page_buffer_bytes) = unsafe {
+        (
+            ShmemSlice::from_raw(base.add(page_status_off).cast::<SlruPageStatus>(), nslots_u),
+            ShmemSlice::from_raw(base.add(page_dirty_off).cast::<bool>(), nslots_u),
+            ShmemSlice::from_raw(base.add(page_number_off).cast::<i64>(), nslots_u),
+            ShmemSlice::from_raw(base.add(page_lru_count_off).cast::<i32>(), nslots_u),
+            ShmemSlice::from_raw(base.add(buffer_locks_off).cast::<LWLockPadded>(), nslots_u),
+            ShmemSlice::from_raw(base.add(bank_locks_off).cast::<LWLockPadded>(), nbanks_u),
+            ShmemSlice::from_raw(base.add(bank_cur_lru_count_off).cast::<i32>(), nbanks_u),
+            ShmemSlice::from_raw(
+                base.add(group_lsn_off).cast::<XLogRecPtr>(),
+                if nlsns_u > 0 { nslots_u * nlsns_u } else { 0 },
+            ),
+            ShmemSlice::from_raw(base.add(page_buffer_off).cast::<u8>(), nslots_u * BLCKSZ),
+        )
+    };
 
     let mut shared = SlruSharedData {
         num_slots: nslots,
         lsn_groups_per_page: nlsns,
         latest_page_number: pg_atomic_uint64::new(0),
         slru_stats_idx: stat_seams::pgstat_get_slru_index::call(name),
-        page_buffer_bytes: shmem_filled(nslots as usize * BLCKSZ, 0u8)?,
-        page_status: shmem_filled(nslots as usize, SLRU_PAGE_EMPTY)?,
-        page_dirty: shmem_filled(nslots as usize, false)?,
-        page_number: shmem_filled(nslots as usize, 0i64)?,
-        page_lru_count: shmem_filled(nslots as usize, 0i32)?,
-        buffer_locks: Vec::new(),
-        bank_locks: Vec::new(),
-        bank_cur_lru_count: shmem_filled(nbanks as usize, 0i32)?,
-        group_lsn: if nlsns > 0 {
-            shmem_filled(nslots as usize * nlsns as usize, InvalidXLogRecPtr)?
-        } else {
-            Vec::new()
-        },
+        page_buffer_bytes,
+        page_status,
+        page_dirty,
+        page_number,
+        page_lru_count,
+        buffer_locks,
+        bank_locks,
+        bank_cur_lru_count,
+        group_lsn,
     };
 
-    // Initialize LWLocks.
-    shared
-        .buffer_locks
-        .try_reserve_exact(nslots as usize)
-        .map_err(|_| PgError::error("out of memory allocating SLRU shared data"))?;
-    shared
-        .buffer_locks
-        .resize_with(nslots as usize, LWLockPadded::default);
-    for slotno in 0..nslots as usize {
-        LWLockInitialize(&mut shared.buffer_locks[slotno].lock, buffer_tranche_id);
-    }
+    // Only the creator initializes the shared bytes; attachers inherit the
+    // already-initialized block (C: the `!found` branch in SimpleLruInit).
+    if !found {
+        shared.page_buffer_bytes.fill(0u8);
+        shared.page_status.fill(SLRU_PAGE_EMPTY);
+        shared.page_dirty.fill(false);
+        shared.page_number.fill(0i64);
+        shared.page_lru_count.fill(0i32);
+        shared.bank_cur_lru_count.fill(0i32);
+        if nlsns_u > 0 {
+            shared.group_lsn.fill(InvalidXLogRecPtr);
+        }
 
-    // Initialize the slot banks.
-    shared
-        .bank_locks
-        .try_reserve_exact(nbanks as usize)
-        .map_err(|_| PgError::error("out of memory allocating SLRU shared data"))?;
-    shared
-        .bank_locks
-        .resize_with(nbanks as usize, LWLockPadded::default);
-    for bankno in 0..nbanks as usize {
-        LWLockInitialize(&mut shared.bank_locks[bankno].lock, bank_tranche_id);
+        // Initialize LWLocks (buffer locks per slot, bank locks per bank).
+        for slotno in 0..nslots_u {
+            LWLockInitialize(&mut shared.buffer_locks[slotno].lock, buffer_tranche_id);
+        }
+        for bankno in 0..nbanks_u {
+            LWLockInitialize(&mut shared.bank_locks[bankno].lock, bank_tranche_id);
+        }
     }
 
     // Initialize the unshared control struct, including directory path. We
@@ -1788,15 +1940,80 @@ mod tests {
     #[test]
     fn shmem_size_accumulation() {
         // 64 slots, 0 lsns: header 104 -> maxalign 104; +64*8 (ptrs) + 64*4
-        // (status) + 64*1 (dirty, maxaligned to 64) + 64*8 + 64*4 + 64*128
+        // (status) + 64*1 (dirty, maxaligned to 64) + 64*8 + 64*4; then the
+        // running size is lwlockaligned to 128 before each lock array (so the
+        // 128-aligned LWLockPadded slices construct without panicking); + 64*128
         // (buffer locks) + 4*128 (bank locks) + 4*4 (bank lru, maxaligned to
         // 16); bufferalign; + 64*BLCKSZ.
         let sz = SimpleLruShmemSize(64, 0);
         let header = 104;
-        let expected = (header + 512 + 256 + 64 + 512 + 256 + 8192 + 512 + 16 + 31) / 32 * 32
-            + 64 * BLCKSZ;
+        // running size up to page_lru_count == 1704, lwlockalign -> 1792 (+88);
+        // after buffer_locks == 9984 which is already 128-aligned (+0).
+        let pre_locks = header + 512 + 256 + 64 + 512 + 256; // 1704
+        let after_buffer_locks = lwlockalign(pre_locks) + 8192; // 1792 + 8192 = 9984
+        let total = lwlockalign(after_buffer_locks) + 512 + 16; // + bank_locks + bank_lru
+        let expected = bufferalign(total) + 64 * BLCKSZ;
         assert_eq!(sz, expected);
         // adding lsn groups grows it by maxalign(nslots*nlsns*8)
         assert_eq!(SimpleLruShmemSize(64, 2) - sz, 64 * 2 * 8);
+    }
+
+    /// Cross-process commit visibility, at the SLRU storage substrate: a
+    /// `ShmemSlice` over a MAP_SHARED|MAP_ANONYMOUS region — exactly the
+    /// segment a forked backend inherits — carries a value written by the
+    /// parent into the child. This is the property the owned-`Vec` model lost:
+    /// a CLOG status one backend writes is visible to a sibling's
+    /// `TransactionIdGetStatus`. (Unix only; the production path is fork-based.)
+    #[test]
+    #[cfg(unix)]
+    fn shmem_slice_is_visible_across_fork() {
+        const N: usize = 8;
+        let bytes = N * core::mem::size_of::<i64>();
+        // The same MAP_SHARED|MAP_ANONYMOUS mapping ShmemCreate uses; fork
+        // inherits it at the same address.
+        let base = unsafe {
+            libc::mmap(
+                core::ptr::null_mut(),
+                bytes,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(base, libc::MAP_FAILED, "mmap failed");
+
+        // SAFETY: `base` owns `N` zeroed `i64`s in the shared mapping.
+        let mut slice = unsafe { ShmemSlice::<i64>::from_raw(base.cast::<i64>(), N) };
+        slice.fill(0);
+
+        // Parent writes a "committed" marker (mirrors a CLOG status write).
+        const MARKER: i64 = 0x5141_4c47; // "QALG"
+        slice[3] = MARKER;
+
+        // SAFETY: classic fork in a leaf test; the child only reads shmem and
+        // _exits without running at-exit handlers.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed");
+        if pid == 0 {
+            // Child: re-derive the slice over the inherited mapping and check
+            // it sees the parent's write.
+            let child_view = unsafe { ShmemSlice::<i64>::from_raw(base.cast::<i64>(), N) };
+            let ok = child_view[3] == MARKER;
+            unsafe { libc::_exit(if ok { 0 } else { 1 }) };
+        }
+
+        // Parent: reap the child and assert it observed the write.
+        let mut status: libc::c_int = 0;
+        let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
+        assert_eq!(waited, pid, "waitpid failed");
+        let exited_ok = libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
+        unsafe {
+            libc::munmap(base, bytes);
+        }
+        assert!(
+            exited_ok,
+            "child did not observe the parent's shmem write (cross-process visibility broken)"
+        );
     }
 }

@@ -3233,6 +3233,7 @@ dependencies = [
  "backend-access-transam-xlog-seams",
  "backend-access-transam-xlogrecovery-seams",
  "backend-storage-file-seams",
+ "backend-storage-ipc-shmem-seams",
  "backend-storage-lmgr-lwlock",
  "backend-storage-sync-seams",
  "backend-utils-activity-small",
