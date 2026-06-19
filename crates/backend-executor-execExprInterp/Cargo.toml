@@ -21,6 +21,9 @@ backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" 
 # lookup_rowtype_tupdesc for the EEOP_FIELDSELECT rowtype descriptor (the typcache
 # TupleDesc model); a leaf seam-declaration crate, so no dependency cycle.
 backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
+# nextval_internal seam: ExecEvalNextValueExpr advances the sequence behind a
+# column's implicit NextValueExpr default (SERIAL / GENERATED AS IDENTITY).
+backend-commands-sequence-seams = { path = "../backend-commands-sequence-seams" }
 
 # Own seam crate: the interpreter installs the dispatch entry points
 # (ExecReadyInterpretedExpr / ExecEvalExprSwitchContext) that execExpr + the

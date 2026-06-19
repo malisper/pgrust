@@ -34,3 +34,17 @@ seam_core::seam!(
     /// `ereport(ERROR)`, carried on `Err`.
     pub fn DeleteSequenceTuple(seqid: types_core::primitive::Oid) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `nextval_internal(relid, check_permissions)` (commands/sequence.c): advance
+    /// the sequence `relid` and return its next value. `ExecEvalNextValueExpr`
+    /// (execExprInterp.c) calls this with `check_permissions == false` to evaluate
+    /// a column's implicit `NextValueExpr` default (SERIAL / GENERATED ... AS
+    /// IDENTITY). Owned by `backend-commands-sequence`; can `ereport(ERROR)`,
+    /// carried on `Err`.
+    pub fn nextval_internal<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        relid: types_core::primitive::Oid,
+        check_permissions: bool,
+    ) -> types_error::PgResult<i64>
+);

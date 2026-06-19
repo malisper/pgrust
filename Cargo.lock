@@ -7812,6 +7812,7 @@ dependencies = [
 name = "backend-commands-sequence-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -8999,6 +9000,7 @@ name = "backend-executor-execExprInterp"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
+ "backend-commands-sequence-seams",
  "backend-executor-execExpr-seams",
  "backend-executor-execExprInterp-seams",
  "backend-executor-execTuples-seams",

@@ -1166,17 +1166,38 @@ pub fn ExecEvalNextValueExpr<'mcx>(
     // }
     // *op->resnull = false;
     //
-    // The step payload (d.nextvalueexpr.seqid / seqtypid) is modeled, but the
-    // core work — nextval_internal(seqid, false) — advances the sequence, which
-    // is owned by the (unported) backend-commands-sequence unit. The integer
-    // narrowing + result-cell write are trivial once the sequence value is in
-    // hand; the blocker is the sequence advance.
-    let _ = (state, op, estate);
-    panic!(
-        "ExecEvalNextValueExpr: nextval_internal(op.d.nextvalueexpr.seqid, false) \
-         advances the sequence, owned by the unported backend-commands-sequence \
-         unit; blocked until it lands"
-    )
+    use types_core::catalog::{INT2OID, INT4OID, INT8OID};
+
+    let (seqid, seqtypid) = match step_data(state, op) {
+        ExprEvalStepData::NextValueExpr { seqid, seqtypid } => (*seqid, *seqtypid),
+        other => panic!("ExecEvalNextValueExpr: wrong step payload {other:?}"),
+    };
+    let (resvalue_id, _resnull_id) = res_cells(state, op);
+    let mcx = estate.es_query_cxt;
+
+    // int64 newval = nextval_internal(op->d.nextvalueexpr.seqid, false);
+    let newval = backend_commands_sequence_seams::nextval_internal::call(mcx, seqid, false)?;
+
+    // switch (op->d.nextvalueexpr.seqtypid) {
+    //   case INT2OID: *op->resvalue = Int16GetDatum((int16) newval); break;
+    //   case INT4OID: *op->resvalue = Int32GetDatum((int32) newval); break;
+    //   case INT8OID: *op->resvalue = Int64GetDatum((int64) newval); break;
+    //   default: elog(ERROR, "unsupported sequence type %u", seqtypid);
+    // }
+    let value: DatumV<'mcx> = match seqtypid {
+        INT2OID => DatumV::from_i16(newval as i16),
+        INT4OID => DatumV::from_i32(newval as i32),
+        INT8OID => DatumV::from_i64(newval),
+        other => {
+            return Err(PgError::error(format!(
+                "unsupported sequence type {other}"
+            )))
+        }
+    };
+
+    // *op->resnull = false;
+    crate::interp_loop::write_cell(state, resvalue_id, value, false);
+    Ok(())
 }
 
 /// `ExecEvalConstraintNotNull(ExprState *state, ExprEvalStep *op)` — domain
