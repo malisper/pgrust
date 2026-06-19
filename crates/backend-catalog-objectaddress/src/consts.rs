@@ -259,6 +259,7 @@ pub const Anum_pg_tablespace_spcacl: i16 = 4;
 pub const Anum_pg_transform_oid: i16 = 1;
 // pg_trigger
 pub const Anum_pg_trigger_oid: i16 = 1;
+pub const Anum_pg_trigger_tgrelid: i16 = 2;
 pub const Anum_pg_trigger_tgname: i16 = 4;
 // pg_policy
 pub const Anum_pg_policy_oid: i16 = 1;

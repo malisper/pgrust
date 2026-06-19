@@ -38,6 +38,7 @@ pub mod fmgr_builtins;
 pub mod fmgr_sql;
 pub mod identity;
 pub mod rewrite_lookup;
+pub mod trigger_lookup;
 pub mod type_description;
 
 /// Install this unit's inward seams. Wired into `seams-init::init_all`.
@@ -69,6 +70,16 @@ pub fn init_seams() {
     );
     backend_utils_cache_syscache_seams::rewrite_name_evclass::set(
         rewrite_lookup::rewrite_name_evclass,
+    );
+
+    // pg_trigger by-oid projection (no TRIGGEROID syscache exists): the
+    // `getObjectDescription` OCLASS_TRIGGER leg fetches `(tgrelid, tgname)` by
+    // trigger oid through this.
+    backend_utils_cache_syscache_seams::trigger_relid_name::set(
+        trigger_lookup::trigger_relid_name,
+    );
+    backend_utils_cache_syscache_seams::trigger_name_relid::set(
+        trigger_lookup::trigger_name_relid,
     );
 
     // Register this crate's SQL-callable fmgr builtins (C: their
