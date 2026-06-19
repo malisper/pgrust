@@ -31,6 +31,7 @@ use alloc::vec::Vec;
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
 use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_stringinfo::StringInfo;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -62,6 +63,35 @@ fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
 /// A scratch context for cores that allocate their result through `Mcx`.
 fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("pseudotypes fmgr scratch")
+}
+
+/// A by-ref wire arg's verbatim image, built into a `StringInfo` for `_recv`
+/// cores (there is no varlena header to skip — the bytes are the raw message).
+/// The image bytes are first copied into `image`, so the returned `StringInfo`
+/// no longer borrows `fcinfo` and the caller may set a result afterward.
+#[inline]
+fn arg_image(fcinfo: &FunctionCallInfoBaseData) -> Vec<u8> {
+    fcinfo
+        .ref_arg(0)
+        .and_then(|p| p.as_varlena())
+        .unwrap_or(&[])
+        .to_vec()
+}
+#[inline]
+fn buf_from<'a>(image: &[u8], m: &'a mcx::MemoryContext) -> StringInfo<'a> {
+    let mut data = mcx::PgVec::new_in(m.mcx());
+    if data.try_reserve(image.len()).is_err() {
+        raise(types_error::PgError::error("out of memory"));
+    }
+    data.extend_from_slice(image);
+    StringInfo::from_vec(data)
+}
+
+/// `PG_GETARG_DATUM(0)`: the by-value word for an `_out`/`_send` dummy (unread
+/// by the always-throwing core, but read off the frame for faithfulness).
+#[inline]
+fn arg_datum(fcinfo: &FunctionCallInfoBaseData) -> Datum {
+    fcinfo.arg(0).map(|a| a.value).unwrap_or_else(Datum::null)
 }
 
 /// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
@@ -161,6 +191,137 @@ fn fc_shell_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 
 // ---------------------------------------------------------------------------
+// Dummy I/O adapters (PSEUDOTYPE_DUMMY_* — always-throwing).
+//
+// Each `_in` reads a `cstring` arg and forwards to the throwing core; each
+// `_out`/`_send` reads the unread by-value word; each `_recv` builds a
+// `StringInfo` over the raw message. All raise the core's `ereport(ERROR)`.
+// ---------------------------------------------------------------------------
+
+/// A throwing-or-Datum core: `_in`/`_recv` cores return `PgResult<Datum>`.
+macro_rules! fc_in {
+    ($adapter:ident, $core:path) => {
+        fn $adapter(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+            match $core(arg_cstring(fcinfo, 0)) {
+                Ok(d) => d,
+                Err(e) => raise(e),
+            }
+        }
+    };
+}
+
+/// `_out` dummy: reads the by-value word, forwards to the throwing core (which
+/// returns `PgResult<PgString>`), and on success writes the cstring result.
+macro_rules! fc_out {
+    ($adapter:ident, $core:path) => {
+        fn $adapter(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+            let value = arg_datum(fcinfo);
+            match $core(value) {
+                Ok(out) => ret_cstring(fcinfo, out.as_str().to_string()),
+                Err(e) => raise(e),
+            }
+        }
+    };
+}
+
+/// `_recv` dummy: builds a `StringInfo` over the raw message, forwards to the
+/// throwing core (`PgResult<Datum>`).
+macro_rules! fc_recv {
+    ($adapter:ident, $core:path) => {
+        fn $adapter(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+            let m = scratch_mcx();
+            let image = arg_image(fcinfo);
+            let mut buf = buf_from(&image, &m);
+            match $core(&mut buf) {
+                Ok(d) => d,
+                Err(e) => raise(e),
+            }
+        }
+    };
+}
+
+// --- the PSEUDOTYPE_DUMMY_IO_FUNCS family (in: cstring, out: by-value) ---
+fc_in!(fc_any_in, crate::any_in);
+fc_out!(fc_any_out, crate::any_out);
+fc_in!(fc_trigger_in, crate::trigger_in);
+fc_out!(fc_trigger_out, crate::trigger_out);
+fc_in!(fc_event_trigger_in, crate::event_trigger_in);
+fc_out!(fc_event_trigger_out, crate::event_trigger_out);
+fc_in!(fc_language_handler_in, crate::language_handler_in);
+fc_out!(fc_language_handler_out, crate::language_handler_out);
+fc_in!(fc_fdw_handler_in, crate::fdw_handler_in);
+fc_out!(fc_fdw_handler_out, crate::fdw_handler_out);
+fc_in!(fc_table_am_handler_in, crate::table_am_handler_in);
+fc_out!(fc_table_am_handler_out, crate::table_am_handler_out);
+fc_in!(fc_index_am_handler_in, crate::index_am_handler_in);
+fc_out!(fc_index_am_handler_out, crate::index_am_handler_out);
+fc_in!(fc_tsm_handler_in, crate::tsm_handler_in);
+fc_out!(fc_tsm_handler_out, crate::tsm_handler_out);
+fc_in!(fc_internal_in, crate::internal_in);
+fc_out!(fc_internal_out, crate::internal_out);
+fc_in!(fc_anyelement_in, crate::anyelement_in);
+fc_out!(fc_anyelement_out, crate::anyelement_out);
+fc_in!(fc_anynonarray_in, crate::anynonarray_in);
+fc_out!(fc_anynonarray_out, crate::anynonarray_out);
+fc_in!(fc_anycompatible_in, crate::anycompatible_in);
+fc_out!(fc_anycompatible_out, crate::anycompatible_out);
+fc_in!(fc_anycompatiblenonarray_in, crate::anycompatiblenonarray_in);
+fc_out!(fc_anycompatiblenonarray_out, crate::anycompatiblenonarray_out);
+
+// --- dummy INPUT funcs whose OUTPUT is real (out not registered here) ---
+fc_in!(fc_anyarray_in, crate::anyarray_in);
+fc_recv!(fc_anyarray_recv, crate::anyarray_recv);
+fc_in!(fc_anycompatiblearray_in, crate::anycompatiblearray_in);
+fc_recv!(fc_anycompatiblearray_recv, crate::anycompatiblearray_recv);
+fc_in!(fc_anyenum_in, crate::anyenum_in);
+fc_in!(fc_anyrange_in, crate::anyrange_in);
+fc_in!(fc_anycompatiblerange_in, crate::anycompatiblerange_in);
+fc_in!(fc_anymultirange_in, crate::anymultirange_in);
+fc_in!(fc_anycompatiblemultirange_in, crate::anycompatiblemultirange_in);
+
+// --- pg_node_tree (in/recv throw; out/send are real, not registered here) ---
+fc_in!(fc_pg_node_tree_in, crate::pg_node_tree_in);
+fc_recv!(fc_pg_node_tree_recv, crate::pg_node_tree_recv);
+
+// --- pg_ddl_command: all four throw ---
+fc_in!(fc_pg_ddl_command_in, crate::pg_ddl_command_in);
+fc_out!(fc_pg_ddl_command_out, crate::pg_ddl_command_out);
+fc_recv!(fc_pg_ddl_command_recv, crate::pg_ddl_command_recv);
+/// `pg_ddl_command_send` (pseudotypes.c:359): reads the by-value word, forwards
+/// to the throwing core (`PgResult<Bytea>`).
+fn fc_pg_ddl_command_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let value = arg_datum(fcinfo);
+    match crate::pg_ddl_command_send(value) {
+        Ok(bytea) => ret_varlena(fcinfo, bytea.as_bytes().to_vec()),
+        Err(e) => raise(e),
+    }
+}
+
+// --- working recv funcs (return a real value, not throwers) ---
+/// `void_recv` (pseudotypes.c:275): `PG_RETURN_VOID()`.
+fn fc_void_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let image = arg_image(fcinfo);
+    let mut buf = buf_from(&image, &m);
+    match crate::void_recv(&mut buf) {
+        Ok(d) => d,
+        Err(e) => raise(e),
+    }
+}
+/// `cstring_recv` (pseudotypes.c:119): read the remaining message text, return a
+/// `cstring` on the by-ref lane.
+fn fc_cstring_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let image = arg_image(fcinfo);
+    let mut buf = buf_from(&image, &m);
+    let s = match crate::cstring_recv(m.mcx(), &mut buf) {
+        Ok(bytes) => String::from_utf8_lossy(bytes.as_slice()).into_owned(),
+        Err(e) => raise(e),
+    };
+    ret_cstring(fcinfo, s)
+}
+
+// ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
 
@@ -197,5 +358,53 @@ pub fn register_pseudotypes_builtins() {
         // ---- shell type dummies ----
         builtin(2398, "shell_in", 1, false, false, fc_shell_in),
         builtin(2399, "shell_out", 1, true, false, fc_shell_out),
+        // ---- working recv funcs (return real values) ----
+        builtin(2500, "cstring_recv", 1, true, false, fc_cstring_recv),
+        builtin(3120, "void_recv", 1, true, false, fc_void_recv),
+        // ---- PSEUDOTYPE_DUMMY_IO_FUNCS (in: cstring thrower, out: by-value thrower) ----
+        builtin(2294, "any_in", 1, true, false, fc_any_in),
+        builtin(2295, "any_out", 1, true, false, fc_any_out),
+        builtin(2300, "trigger_in", 1, false, false, fc_trigger_in),
+        builtin(2301, "trigger_out", 1, true, false, fc_trigger_out),
+        builtin(3594, "event_trigger_in", 1, false, false, fc_event_trigger_in),
+        builtin(3595, "event_trigger_out", 1, true, false, fc_event_trigger_out),
+        builtin(2302, "language_handler_in", 1, false, false, fc_language_handler_in),
+        builtin(2303, "language_handler_out", 1, true, false, fc_language_handler_out),
+        builtin(3116, "fdw_handler_in", 1, false, false, fc_fdw_handler_in),
+        builtin(3117, "fdw_handler_out", 1, true, false, fc_fdw_handler_out),
+        builtin(267, "table_am_handler_in", 1, false, false, fc_table_am_handler_in),
+        builtin(268, "table_am_handler_out", 1, true, false, fc_table_am_handler_out),
+        builtin(326, "index_am_handler_in", 1, false, false, fc_index_am_handler_in),
+        builtin(327, "index_am_handler_out", 1, true, false, fc_index_am_handler_out),
+        builtin(3311, "tsm_handler_in", 1, false, false, fc_tsm_handler_in),
+        builtin(3312, "tsm_handler_out", 1, true, false, fc_tsm_handler_out),
+        builtin(2304, "internal_in", 1, false, false, fc_internal_in),
+        builtin(2305, "internal_out", 1, true, false, fc_internal_out),
+        builtin(2312, "anyelement_in", 1, true, false, fc_anyelement_in),
+        builtin(2313, "anyelement_out", 1, true, false, fc_anyelement_out),
+        builtin(2777, "anynonarray_in", 1, true, false, fc_anynonarray_in),
+        builtin(2778, "anynonarray_out", 1, true, false, fc_anynonarray_out),
+        builtin(5086, "anycompatible_in", 1, true, false, fc_anycompatible_in),
+        builtin(5087, "anycompatible_out", 1, true, false, fc_anycompatible_out),
+        builtin(5092, "anycompatiblenonarray_in", 1, true, false, fc_anycompatiblenonarray_in),
+        builtin(5093, "anycompatiblenonarray_out", 1, true, false, fc_anycompatiblenonarray_out),
+        // ---- dummy INPUT (output is real, registered by its real owner) ----
+        builtin(2296, "anyarray_in", 1, true, false, fc_anyarray_in),
+        builtin(2502, "anyarray_recv", 1, true, false, fc_anyarray_recv),
+        builtin(5088, "anycompatiblearray_in", 1, true, false, fc_anycompatiblearray_in),
+        builtin(5090, "anycompatiblearray_recv", 1, true, false, fc_anycompatiblearray_recv),
+        builtin(3504, "anyenum_in", 1, true, false, fc_anyenum_in),
+        builtin(3832, "anyrange_in", 3, true, false, fc_anyrange_in),
+        builtin(5094, "anycompatiblerange_in", 3, true, false, fc_anycompatiblerange_in),
+        builtin(4229, "anymultirange_in", 3, true, false, fc_anymultirange_in),
+        builtin(4226, "anycompatiblemultirange_in", 3, true, false, fc_anycompatiblemultirange_in),
+        // ---- pg_node_tree (in/recv throw) ----
+        builtin(195, "pg_node_tree_in", 1, true, false, fc_pg_node_tree_in),
+        builtin(197, "pg_node_tree_recv", 1, true, false, fc_pg_node_tree_recv),
+        // ---- pg_ddl_command (all four throw) ----
+        builtin(86, "pg_ddl_command_in", 1, true, false, fc_pg_ddl_command_in),
+        builtin(87, "pg_ddl_command_out", 1, true, false, fc_pg_ddl_command_out),
+        builtin(88, "pg_ddl_command_recv", 1, true, false, fc_pg_ddl_command_recv),
+        builtin(90, "pg_ddl_command_send", 1, true, false, fc_pg_ddl_command_send),
     ]);
 }
