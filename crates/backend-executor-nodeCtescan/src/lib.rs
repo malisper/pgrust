@@ -232,10 +232,7 @@ pub fn ExecInitCteScan<'mcx>(
 
     // CteScan *node — the enclosing plan-tree node (the C `CteScan *` is the
     // same pointer, via struct embedding). Panics if it is not a `CteScan`.
-    let plan: &'mcx CteScan<'mcx> = match node {
-        types_nodes::nodes::Node::CteScan(c) => c,
-        other => panic!("castNode(CteScan, node) failed: {other:?}"),
-    };
+    let plan: &'mcx CteScan<'mcx> = node.expect_ctescan();
 
     // check for unsupported flags
     //   Assert(!(eflags & EXEC_FLAG_MARK));
