@@ -113,10 +113,7 @@ pub fn ExecInitGather<'mcx>(
 ) -> PgResult<PgBox<'mcx, GatherStateData<'mcx>>> {
     let mcx = estate.es_query_cxt;
 
-    let node: &'mcx Gather<'mcx> = match plan_node {
-        types_nodes::nodes::Node::Gather(g) => g,
-        other => panic!("castNode(Gather, node) failed: {other:?}"),
-    };
+    let node: &'mcx Gather<'mcx> = plan_node.expect_gather();
 
     // Gather node doesn't have innerPlan node.
     //   Assert(innerPlan(node) == NULL);
@@ -755,10 +752,7 @@ pub fn ExecReScanGather<'mcx>(
 
 /// `castNode(Gather, node->ps.plan)` — the node's concrete plan.
 fn gather_plan<'a, 'mcx>(node: &'a GatherStateData<'mcx>) -> &'a Gather<'mcx> {
-    match node.ps.plan.as_deref().expect("GatherState has no plan") {
-        types_nodes::nodes::Node::Gather(g) => g,
-        other => panic!("castNode(Gather, node->ps.plan) failed: {other:?}"),
-    }
+    node.ps.plan.as_deref().expect("GatherState has no plan").expect_gather()
 }
 
 /// `TupIsNull(slot)` for a freshly-produced child slot id.
