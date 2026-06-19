@@ -447,6 +447,7 @@ pub(crate) fn pg_operator_form<'mcx>(
     let oprname = getattr_name(mcx, OPEROID, &tup, Anum_pg_operator_oprname)?;
     let form = PgOperatorForm {
         oprname: oprname.as_str().to_owned(),
+        oprnamespace: getattr_oid(mcx, OPEROID, &tup, Anum_pg_operator_oprnamespace)?,
         oprkind: getattr_char(mcx, OPEROID, &tup, Anum_pg_operator_oprkind)?,
         oprcanmerge: getattr_bool(mcx, OPEROID, &tup, Anum_pg_operator_oprcanmerge)?,
         oprcanhash: getattr_bool(mcx, OPEROID, &tup, Anum_pg_operator_oprcanhash)?,

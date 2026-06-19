@@ -1468,6 +1468,8 @@ pub struct ProcCostRows {
 pub struct PgOperatorForm {
     /// `oprname` — the operator's name.
     pub oprname: String,
+    /// `oprnamespace` — the schema the operator lives in.
+    pub oprnamespace: Oid,
     /// `oprkind` — `b` (binary/infix), `l` (prefix); the raw C `char`.
     pub oprkind: i8,
     /// `oprcanmerge` — `pg_operator.oprcanmerge`.

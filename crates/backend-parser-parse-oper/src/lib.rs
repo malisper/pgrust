@@ -1258,10 +1258,85 @@ fn seam_lookup_oper_name(opername: &[String], oprleft: Oid, oprright: Oid) -> Pg
 }
 
 /// Install the seams this crate owns. Wired into `seams_init::init_all()`.
+/// `generate_operator_name(operid, arg1, arg2)` (ruleutils.c, static) — the
+/// possibly-schema-qualified operator name to use in deparsed output. Installs
+/// ruleutils' `generate_operator_name` seam from this crate (which owns the
+/// `oper`/`left_oper` candidate-resolution the body needs).
+///
+/// Schema-qualifies only if the parser would *fail* to resolve the same operator
+/// from the unqualified name with the given argtypes.
+fn generate_operator_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    operid: Oid,
+    arg1: Oid,
+    arg2: Oid,
+) -> PgResult<mcx::PgString<'mcx>> {
+    // opertup = SearchSysCache1(OPEROID, operid); elog(ERROR) on miss.
+    let optup = backend_utils_cache_syscache_seams::oper_row_by_oid::call(mcx, operid)?
+        .ok_or_else(|| {
+            ereport(ERROR)
+                .errcode(ERRCODE_INTERNAL_ERROR)
+                .errmsg_internal(format!("cache lookup failed for operator {operid}"))
+                .into_error()
+        })?;
+    let oprname: String = optup.oprname.as_str().into();
+
+    // Resolve the unqualified name with the argtypes; qualify iff it does not
+    // re-resolve to the same operator.
+    let opname_list = vec![oprname.clone()];
+    let p_result: Option<ResolvedOper> = match optup.oprkind {
+        b'b' => oper(None, &opname_list, arg1, arg2, true, -1)?,
+        b'l' => left_oper(None, &opname_list, arg2, true, -1)?,
+        other => {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_INTERNAL_ERROR)
+                .errmsg_internal(format!("unrecognized oprkind: {other}"))
+                .into_error());
+        }
+    };
+
+    let need_qual = match &p_result {
+        Some(p) => oprid(p) != operid,
+        None => true,
+    };
+
+    let mut buf = String::new();
+    if need_qual {
+        // nspname = get_namespace_name_or_temp(operform->oprnamespace);
+        let nspname = backend_utils_cache_lsyscache_seams::get_namespace_name_or_temp::call(
+            mcx,
+            optup.oprnamespace,
+        )?
+        .ok_or_else(|| {
+            ereport(ERROR)
+                .errcode(ERRCODE_INTERNAL_ERROR)
+                .errmsg_internal(format!(
+                    "cache lookup failed for namespace {}",
+                    optup.oprnamespace
+                ))
+                .into_error()
+        })?;
+        let qnsp =
+            backend_utils_adt_ruleutils_seams::quote_identifier::call(mcx, nspname.as_str())?;
+        buf.push_str("OPERATOR(");
+        buf.push_str(qnsp.as_str());
+        buf.push('.');
+    }
+    buf.push_str(&oprname);
+    if need_qual {
+        buf.push(')');
+    }
+    mcx::PgString::from_str_in(&buf, mcx)
+}
+
 pub fn init_seams() {
     backend_parser_parse_oper_seams::lookup_oper_with_args::set(seam_lookup_oper_with_args);
     backend_parser_parse_oper_seams::lookup_oper_with_args_node::set(
         seam_lookup_oper_with_args_node,
     );
     backend_parser_parse_oper_seams::lookup_oper_name::set(seam_lookup_oper_name);
+
+    // ruleutils' `generate_operator_name` (the deparser's operator-name
+    // generator) — owned here because its body needs `oper`/`left_oper`.
+    backend_utils_adt_ruleutils_seams::generate_operator_name::set(generate_operator_name);
 }

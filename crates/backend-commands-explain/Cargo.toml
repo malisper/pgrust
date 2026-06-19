@@ -21,6 +21,9 @@ types-tuple = { path = "../types-tuple" }
 # Sibling EXPLAIN crates (emitters + option parsing).
 backend-commands-explain-format = { path = "../backend-commands-explain-format" }
 
+# make_ands_explicit for the qual `Filter:` line (show_scan_qual).
+backend-nodes-core = { path = "../backend-nodes-core" }
+
 # Catalog name lookups + identifier quoting for the scan/modify target relation
 # names (ExplainTargetRel / explain_get_index_name). No expression deparse, no
 # cycle (neither crate depends on explain).

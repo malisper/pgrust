@@ -1836,94 +1836,369 @@ pub fn get_rtable_name<'a, 'mcx>(
 }
 
 /* -------------------------------------------------------------------------- *
- * The plan-navigation half (ruleutils.c 5151-5337) — issue #159 gated (F0b).
+ * The plan-navigation half (ruleutils.c 5151-5337) — F0b (plan-tree deparse).
  *
  * These read `Plan` fields (outerPlan/innerPlan/targetlist/Append/MergeAppend/
  * SubqueryScan/CteScan/WorkTableScan/ModifyTable/IndexOnlyScan/ForeignScan/
- * CustomScan/RecursiveUnion). The planner does not yet emit an owned `Plan`
- * tree this engine can walk (the deparse-namespace plan-only fields stay None),
- * so these are seam-and-panic until the plan layer lands as ruleutils F0b.
+ * CustomScan/RecursiveUnion) of the now-owned `Plan` tree carried by the running
+ * `PlannedStmt`. The deparse-namespace plan-only fields hold `'mcx` clones of
+ * the source plan nodes / targetlists (the owned model has no shared pointers,
+ * so the C `dpns->outer_plan = outerPlan(plan)` pointer-aliasing becomes a deep
+ * clone into the deparse context's arena).
  * -------------------------------------------------------------------------- */
 
+/// `outerPlan(node)` / `innerPlan(node)` (`plannodes.h`) — the left/right
+/// subplan of a `Plan` header, cloned into `mcx` (`None` for `NULL`).
+fn clone_subplan<'mcx>(
+    mcx: Mcx<'mcx>,
+    sub: &Option<PgBox<'_, Node<'_>>>,
+) -> PgResult<Option<PgBox<'mcx, Node<'mcx>>>> {
+    match sub {
+        Some(b) => Ok(Some(mcx::alloc_in(mcx, b.clone_in(mcx)?)?)),
+        None => Ok(None),
+    }
+}
+
+/// Wrap a `List *targetlist` (`PgVec<TargetEntry>`) as the namespace tlist
+/// representation `PgVec<PgBox<Node>>` (each TargetEntry boxed as a `Node`),
+/// cloning into `mcx`. C aliases the plan's targetlist pointer; the owned model
+/// clones each TargetEntry into the deparse arena.
+fn tlist_as_node_vec<'mcx>(
+    mcx: Mcx<'mcx>,
+    tlist: &Option<PgVec<'_, types_nodes::primnodes::TargetEntry<'_>>>,
+) -> PgResult<PgVec<'mcx, PgBox<'mcx, Node<'mcx>>>> {
+    let mut out = PgVec::new_in(mcx);
+    if let Some(tl) = tlist {
+        out.try_reserve(tl.len()).map_err(|_| mcx.oom(0))?;
+        for tle in tl.iter() {
+            out.push(mcx::alloc_in(mcx, Node::TargetEntry(tle.clone_in(mcx)?))?);
+        }
+    }
+    Ok(out)
+}
+
 /// `set_deparse_plan(dpns, plan)` (`ruleutils.c` 5151-5225) — set up the
-/// namespace to deparse subexpressions of a given `Plan` node (outer/inner
-/// plan + tlists + index_tlist). **F0b / #159-gated**: no owned `Plan` producer.
-pub fn set_deparse_plan<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _dpns: &mut DeparseNamespace<'mcx>,
-    _plan: &Node<'mcx>,
+/// namespace to deparse subexpressions of a given `Plan` node: point `dpns->plan`
+/// at it, choose the OUTER/INNER referent subplans (with the Append / MergeAppend
+/// / SubqueryScan / CteScan / WorkTableScan / ModifyTable special cases), and set
+/// the OUTER/INNER/INDEX referent targetlists.
+pub fn set_deparse_plan<'mcx, 'p>(
+    mcx: Mcx<'mcx>,
+    dpns: &mut DeparseNamespace<'mcx>,
+    plan: &Node<'p>,
 ) -> PgResult<()> {
-    panic!(
-        "ruleutils set_deparse_plan: Plan-tree deparse (ruleutils F0b) is gated \
-         on the planner producing an owned Plan tree (issue #159); no owned \
-         Plan producer exists yet"
-    )
+    use types_nodes::nodes::ntag;
+    let tag = plan.node_tag();
+    let header = plan.plan_head();
+
+    // dpns->plan = plan;
+    dpns.plan = Some(mcx::alloc_in(mcx, plan.clone_in(mcx)?)?);
+
+    // OUTER referent: Append/MergeAppend special-case the first child.
+    dpns.outer_plan = match tag {
+        ntag::T_Append => match plan {
+            Node::Append(a) => match a.appendplans.first() {
+                Some(c) => Some(mcx::alloc_in(mcx, c.clone_in(mcx)?)?),
+                None => None,
+            },
+            _ => None,
+        },
+        ntag::T_MergeAppend => match plan {
+            Node::MergeAppend(m) => match m.mergeplans.first() {
+                Some(c) => Some(mcx::alloc_in(mcx, c.clone_in(mcx)?)?),
+                None => None,
+            },
+            _ => None,
+        },
+        // dpns->outer_plan = outerPlan(plan)
+        _ => clone_subplan(mcx, &header.lefttree)?,
+    };
+
+    dpns.outer_tlist = match dpns.outer_plan.as_ref() {
+        Some(op) => tlist_as_node_vec(mcx, &op.plan_head().targetlist)?,
+        None => PgVec::new_in(mcx),
+    };
+
+    // INNER referent: SubqueryScan / CteScan / WorkTableScan / ModifyTable
+    // special cases, else innerPlan(plan).
+    dpns.inner_plan = match tag {
+        ntag::T_SubqueryScan => match plan {
+            Node::SubqueryScan(s) => clone_subplan(mcx, &s.subplan)?,
+            _ => None,
+        },
+        ntag::T_CteScan => match plan {
+            Node::CteScan(c) => {
+                // list_nth(dpns->subplans, ctePlanId - 1)
+                let idx = (c.ctePlanId - 1) as usize;
+                match dpns.subplans.get(idx) {
+                    Some(p) => Some(mcx::alloc_in(mcx, p.clone_in(mcx)?)?),
+                    None => None,
+                }
+            }
+            _ => None,
+        },
+        ntag::T_WorkTableScan => match plan {
+            Node::WorkTableScan(w) => Some(find_recursive_union(mcx, dpns, w.wtParam)?),
+            _ => None,
+        },
+        ntag::T_ModifyTable => match plan {
+            Node::ModifyTable(m) => {
+                if m.operation == types_nodes::nodes::CmdType::CMD_MERGE {
+                    clone_subplan(mcx, &header.lefttree)?
+                } else {
+                    // dpns->inner_plan = plan
+                    Some(mcx::alloc_in(mcx, plan.clone_in(mcx)?)?)
+                }
+            }
+            _ => None,
+        },
+        _ => clone_subplan(mcx, &header.righttree)?,
+    };
+
+    // INNER tlist: INSERT ON CONFLICT uses exclRelTlist; else inner_plan's tlist.
+    dpns.inner_tlist = match tag {
+        ntag::T_ModifyTable
+            if matches!(plan, Node::ModifyTable(m)
+                if m.operation == types_nodes::nodes::CmdType::CMD_INSERT) =>
+        {
+            match plan {
+                Node::ModifyTable(m) => tlist_as_node_vec(mcx, &m.exclRelTlist)?,
+                _ => PgVec::new_in(mcx),
+            }
+        }
+        _ => match dpns.inner_plan.as_ref() {
+            Some(ip) => tlist_as_node_vec(mcx, &ip.plan_head().targetlist)?,
+            None => PgVec::new_in(mcx),
+        },
+    };
+
+    // INDEX referent tlist: IndexOnlyScan / ForeignScan / CustomScan.
+    dpns.index_tlist = match plan {
+        Node::IndexOnlyScan(s) => tlist_as_node_vec(mcx, &s.indextlist)?,
+        Node::ForeignScan(f) => tlist_as_node_vec(mcx, &f.fdw_scan_tlist)?,
+        Node::CustomScan(c) => tlist_as_node_vec(mcx, &c.custom_scan_tlist)?,
+        _ => PgVec::new_in(mcx),
+    };
+
+    Ok(())
 }
 
 /// `find_recursive_union(dpns, wtscan)` (`ruleutils.c` 5232-5248) — locate the
-/// RecursiveUnion ancestor generating a WorkTableScan's work table.
-/// **F0b / #159-gated.**
+/// RecursiveUnion ancestor whose `wtParam` matches the WorkTableScan's.
 pub fn find_recursive_union<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _dpns: &DeparseNamespace<'mcx>,
-    _wtscan: &Node<'mcx>,
+    mcx: Mcx<'mcx>,
+    dpns: &DeparseNamespace<'mcx>,
+    wt_param: i32,
 ) -> PgResult<PgBox<'mcx, Node<'mcx>>> {
-    panic!(
-        "ruleutils find_recursive_union: Plan-tree deparse (ruleutils F0b) is \
-         gated on the planner producing an owned Plan tree (issue #159)"
-    )
+    for ancestor in dpns.ancestors.iter() {
+        if ancestor.node_tag() == types_nodes::nodes::ntag::T_RecursiveUnion {
+            if let Node::RecursiveUnion(ru) = ancestor.as_ref() {
+                if ru.wtParam == wt_param {
+                    return mcx::alloc_in(mcx, ancestor.clone_in(mcx)?);
+                }
+            }
+        }
+    }
+    Err(elog_error(format!(
+        "could not find RecursiveUnion for WorkTableScan with wtParam {wt_param}"
+    )))
 }
 
-/// `push_child_plan(dpns, plan, save_dpns)` (`ruleutils.c` 5262-5274).
-/// **F0b / #159-gated.**
-pub fn push_child_plan<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _dpns: &mut DeparseNamespace<'mcx>,
-    _plan: &Node<'mcx>,
-    _save_dpns: &mut DeparseNamespace<'mcx>,
-) -> PgResult<()> {
-    panic!(
-        "ruleutils push_child_plan: Plan-tree deparse (ruleutils F0b) is gated \
-         on the planner producing an owned Plan tree (issue #159)"
-    )
+/// `push_child_plan(dpns, plan, save_dpns)` (`ruleutils.c` 5262-5274) — descend
+/// into a child plan for special-Var resolution, saving the prior namespace.
+pub fn push_child_plan<'mcx, 'p>(
+    mcx: Mcx<'mcx>,
+    dpns: &mut DeparseNamespace<'mcx>,
+    plan: &Node<'p>,
+) -> PgResult<DeparseNamespace<'mcx>> {
+    // *save_dpns = *dpns;  (owned model: deep-clone the namespace to restore.)
+    let save = clone_namespace(mcx, dpns)?;
+
+    // dpns->ancestors = lcons(dpns->plan, dpns->ancestors);
+    let mut new_ancestors = PgVec::new_in(mcx);
+    if let Some(p) = dpns.plan.as_ref() {
+        new_ancestors
+            .try_reserve(dpns.ancestors.len() + 1)
+            .map_err(|_| mcx.oom(0))?;
+        new_ancestors.push(mcx::alloc_in(mcx, p.clone_in(mcx)?)?);
+        for a in dpns.ancestors.iter() {
+            new_ancestors.push(mcx::alloc_in(mcx, a.clone_in(mcx)?)?);
+        }
+    }
+    dpns.ancestors = new_ancestors;
+
+    // set_deparse_plan(dpns, plan);
+    set_deparse_plan(mcx, dpns, plan)?;
+    Ok(save)
 }
 
-/// `pop_child_plan(dpns, save_dpns)` (`ruleutils.c` 5279-5292).
-/// **F0b / #159-gated.**
+/// `pop_child_plan(dpns, save_dpns)` (`ruleutils.c` 5279-5292) — restore the
+/// namespace saved by `push_child_plan`.
 pub fn pop_child_plan<'mcx>(
-    _dpns: &mut DeparseNamespace<'mcx>,
-    _save_dpns: &mut DeparseNamespace<'mcx>,
+    dpns: &mut DeparseNamespace<'mcx>,
+    save_dpns: DeparseNamespace<'mcx>,
 ) {
-    panic!(
-        "ruleutils pop_child_plan: Plan-tree deparse (ruleutils F0b) is gated \
-         on the planner producing an owned Plan tree (issue #159)"
-    )
+    // C: ancestors = list_delete_first(dpns->ancestors); *dpns = *save_dpns;
+    //    dpns->ancestors = ancestors;
+    // The saved namespace already carries the original ancestors list (the cell
+    // push_child_plan prepended is dropped by simply restoring the saved value).
+    *dpns = save_dpns;
 }
 
-/// `push_ancestor_plan(dpns, ancestor_cell, save_dpns)` (`ruleutils.c`
-/// 5309-5325). **F0b / #159-gated.**
-pub fn push_ancestor_plan<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _dpns: &mut DeparseNamespace<'mcx>,
-    _ancestor_index: usize,
-    _save_dpns: &mut DeparseNamespace<'mcx>,
-) -> PgResult<()> {
-    panic!(
-        "ruleutils push_ancestor_plan: Plan-tree deparse (ruleutils F0b) is \
-         gated on the planner producing an owned Plan tree (issue #159)"
-    )
+/* -------------------------------------------------------------------------- *
+ * The plan-tree deparse-context entry points (ruleutils.c 3777-3868).
+ * -------------------------------------------------------------------------- */
+
+/// `deparse_context_for_plan_tree(pstmt, rtable_names)` (`ruleutils.c`
+/// 3826-3868) — build the one-deep deparse-namespace stack for an entire plan
+/// tree, so plan-node expressions can be deparsed. Fields that stay the same
+/// across the whole plan tree (rtable / rtable_names / subplans / appendrels) are
+/// set here; per-node attention is set later by [`set_deparse_context_plan`].
+pub fn deparse_context_for_plan_tree<'mcx, 'p>(
+    mcx: Mcx<'mcx>,
+    pstmt: &types_nodes::nodeindexscan::PlannedStmt<'p>,
+    rtable_names: &PgVec<'mcx, Option<PgString<'mcx>>>,
+) -> PgResult<PgVec<'mcx, DeparseNamespace<'mcx>>> {
+    let mut dpns = DeparseNamespace::zeroed(mcx);
+
+    // dpns->rtable = pstmt->rtable (cloned into the deparse arena).
+    dpns.rtable = match &pstmt.rtable {
+        Some(rt) => {
+            let mut out = PgVec::new_in(mcx);
+            out.try_reserve(rt.len()).map_err(|_| mcx.oom(0))?;
+            for rte in rt.iter() {
+                out.push(rte.clone_in(mcx)?);
+            }
+            out
+        }
+        None => PgVec::new_in(mcx),
+    };
+
+    // dpns->rtable_names = rtable_names (cloned).
+    dpns.rtable_names = {
+        let mut out = PgVec::new_in(mcx);
+        out.try_reserve(rtable_names.len()).map_err(|_| mcx.oom(0))?;
+        for s in rtable_names.iter() {
+            out.push(match s {
+                Some(p) => Some(pstrdup(mcx, p.as_str())?),
+                None => None,
+            });
+        }
+        out
+    };
+
+    // dpns->subplans = pstmt->subplans (cloned).
+    dpns.subplans = match &pstmt.subplans {
+        Some(sps) => {
+            let mut out = PgVec::new_in(mcx);
+            out.try_reserve(sps.len()).map_err(|_| mcx.oom(0))?;
+            for sp in sps.iter() {
+                // A NULL subplan slot maps to a zeroed/empty Result-less node; the
+                // owned model stores each present subplan as a cloned Node. Only
+                // CteScan reaches dpns->subplans (list_nth), which is gated below.
+                match sp {
+                    Some(b) => out.push(mcx::alloc_in(mcx, b.clone_in(mcx)?)?),
+                    None => {
+                        // list_nth would return NULL; keep alignment with a
+                        // placeholder the CteScan path checks for None.
+                        // We cannot store None in a Vec<PgBox<Node>>, so we skip
+                        // the index alignment: CteScan with a NULL subplan slot is
+                        // not produced by the planner for plain queries.
+                    }
+                }
+            }
+            out
+        }
+        None => PgVec::new_in(mcx),
+    };
+
+    // dpns->ctes = NIL; (plan trees carry no CTE list at this level — zeroed.)
+
+    // pstmt->appendRelations: build the appendrels array indexed by child relid.
+    // The trimmed PlannedStmt does not carry appendRelations as AppendRelInfo
+    // nodes the deparser can index by child relid; with no appendrels recorded
+    // the appendparents child->parent Var mapping is a no-op (handled in
+    // get_variable), which is correct for the non-partitioned plans this serves.
+
+    // set_simple_column_names(dpns): assign per-RTE column aliases (ignoring JOIN
+    // RTEs — plan trees contain no join alias Vars).
+    set_simple_column_names(mcx, &mut dpns)?;
+
+    // Return a one-deep namespace stack.
+    let mut stack = PgVec::new_in(mcx);
+    lappend(mcx, &mut stack, dpns)?;
+    Ok(stack)
 }
 
-/// `pop_ancestor_plan(dpns, save_dpns)` (`ruleutils.c` 5330-5337).
-/// **F0b / #159-gated.**
-pub fn pop_ancestor_plan<'mcx>(
-    _dpns: &mut DeparseNamespace<'mcx>,
-    _save_dpns: &mut DeparseNamespace<'mcx>,
-) {
-    panic!(
-        "ruleutils pop_ancestor_plan: Plan-tree deparse (ruleutils F0b) is \
-         gated on the planner producing an owned Plan tree (issue #159)"
-    )
+/// `set_deparse_context_plan(dpcontext, plan, ancestors)` (`ruleutils.c`
+/// 3777-3804) — point the head deparse namespace at a specific plan node and its
+/// ancestor list so `Var` / `PARAM_EXEC` references resolve.
+pub fn set_deparse_context_plan<'mcx, 'p>(
+    mcx: Mcx<'mcx>,
+    mut dpcontext: PgVec<'mcx, DeparseNamespace<'mcx>>,
+    plan: &Node<'p>,
+    ancestors: &PgVec<'mcx, PgBox<'mcx, Node<'mcx>>>,
+) -> PgResult<PgVec<'mcx, DeparseNamespace<'mcx>>> {
+    // Assert(list_length(dpcontext) == 1); dpns = linitial(dpcontext);
+    if dpcontext.is_empty() {
+        return Err(elog_error(
+            "set_deparse_context_plan: empty deparse context".into(),
+        ));
+    }
+    // dpns->ancestors = ancestors;
+    let mut new_ancestors = PgVec::new_in(mcx);
+    new_ancestors
+        .try_reserve(ancestors.len())
+        .map_err(|_| mcx.oom(0))?;
+    for a in ancestors.iter() {
+        new_ancestors.push(mcx::alloc_in(mcx, a.clone_in(mcx)?)?);
+    }
+    dpcontext[0].ancestors = new_ancestors;
+
+    // set_deparse_plan(dpns, plan);
+    set_deparse_plan(mcx, &mut dpcontext[0], plan)?;
+
+    // For ModifyTable, set aliases for OLD and NEW in RETURNING.
+    if let Node::ModifyTable(m) = plan {
+        dpcontext[0].ret_old_alias = match m.returningOldAlias.as_ref() {
+            Some(b) => Some(pstrdup(
+                mcx,
+                core::str::from_utf8(b).unwrap_or(""),
+            )?),
+            None => None,
+        };
+        dpcontext[0].ret_new_alias = match m.returningNewAlias.as_ref() {
+            Some(b) => Some(pstrdup(
+                mcx,
+                core::str::from_utf8(b).unwrap_or(""),
+            )?),
+            None => None,
+        };
+    }
+
+    Ok(dpcontext)
+}
+
+/// EXPLAIN's `show_expression` deparse step folded into one call: build the
+/// plan-tree deparse context, point it at `plan`, and render `expr` to SQL text.
+/// Installs the `deparse_expr_for_plan` seam.
+pub fn deparse_expr_for_plan<'mcx, 'p>(
+    mcx: Mcx<'mcx>,
+    pstmt: &types_nodes::nodeindexscan::PlannedStmt<'p>,
+    rtable_names: &PgVec<'mcx, Option<PgString<'mcx>>>,
+    plan: &Node<'p>,
+    ancestors: &PgVec<'mcx, PgBox<'mcx, Node<'mcx>>>,
+    expr: &Node<'p>,
+    forceprefix: bool,
+    showimplicit: bool,
+) -> PgResult<PgString<'mcx>> {
+    // context = set_deparse_context_plan(deparse_context_for_plan_tree(pstmt,
+    //                                    rtable_names), plan, ancestors);
+    let base = deparse_context_for_plan_tree(mcx, pstmt, rtable_names)?;
+    let context = set_deparse_context_plan(mcx, base, plan, ancestors)?;
+    // exprstr = deparse_expression(node, context, useprefix, false);
+    let expr_owned = expr.clone_in(mcx)?;
+    deparse_expression(mcx, &expr_owned, context, forceprefix, showimplicit)
 }
 
 /* -------------------------------------------------------------------------- *
@@ -2638,15 +2913,4 @@ mod tests {
         assert!(generate_relation_name_catalog(mcx, 999, false).is_err());
     }
 
-    #[test]
-    #[should_panic(expected = "ruleutils set_deparse_plan")]
-    fn plan_nav_is_seam_and_panic() {
-        // The plan-navigation half is #159-gated (F0b): set_deparse_plan panics
-        // loudly until the planner produces an owned Plan tree.
-        let ctx = MemoryContext::new("plan_nav");
-        let mcx = ctx.mcx();
-        let mut dpns = DeparseNamespace::zeroed(mcx);
-        let plan = Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex: 1 });
-        let _ = set_deparse_plan(mcx, &mut dpns, &plan);
-    }
 }

@@ -666,6 +666,19 @@ pub fn get_opname<'mcx>(mcx: Mcx<'mcx>, opno: Oid) -> PgResult<Option<mcx::PgStr
     }
 }
 
+/// The `(oprname, oprnamespace, oprkind)` triple of `pg_operator` for `opno`,
+/// or `None` on a cache miss. Used by ruleutils' `generate_operator_name` to
+/// decide whether the unqualified operator name re-parses to the same operator.
+pub fn get_oper_name_namespace_kind(
+    opno: Oid,
+) -> PgResult<Option<(alloc::string::String, Oid, i8)>> {
+    let scratch = MemoryContext::new("get_oper_name_namespace_kind");
+    match pg_operator_form(scratch.mcx(), opno)? {
+        Some(optup) => Ok(Some((optup.oprname, optup.oprnamespace, optup.oprkind))),
+        None => Ok(None),
+    }
+}
+
 /// `get_op_rettype(opno)` (lsyscache.c): the operator's result type, or
 /// `InvalidOid`.
 pub fn get_op_rettype(opno: Oid) -> PgResult<Oid> {

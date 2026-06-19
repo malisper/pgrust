@@ -144,6 +144,36 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// EXPLAIN's `show_expression` deparse step, folded into one owner-private
+    /// call (ruleutils.c `set_deparse_context_plan` + `deparse_expression`).
+    ///
+    /// C's `show_expression` does:
+    /// ```text
+    /// context = set_deparse_context_plan(es->deparse_cxt, planstate->plan, ancestors);
+    /// exprstr = deparse_expression(node, context, useprefix, false);
+    /// ```
+    /// where `es->deparse_cxt` is itself `deparse_context_for_plan_tree(pstmt,
+    /// rtable_names)`. The `deparse_namespace`/`deparse_context` it threads are
+    /// ruleutils-private (never exposed to explain.c in C either), so this seam
+    /// carries the *substrate* explain owns — the `PlannedStmt`, the per-RTE
+    /// display names, the current `Plan` node, the ancestor `Plan` list, and the
+    /// expression to deparse — and ruleutils builds the namespace, points it at
+    /// the node, and renders the SQL text internally. Reads the catalog (column
+    /// names, operator/function names), so it can `ereport(ERROR)`; allocated in
+    /// `mcx`.
+    pub fn deparse_expr_for_plan<'mcx, 'p>(
+        mcx: Mcx<'mcx>,
+        pstmt: &PlannedStmt<'p>,
+        rtable_names: &PgVec<'mcx, Option<PgString<'mcx>>>,
+        plan: &Node<'p>,
+        ancestors: &PgVec<'mcx, PgBox<'mcx, Node<'mcx>>>,
+        expr: &Node<'p>,
+        forceprefix: bool,
+        showimplicit: bool,
+    ) -> PgResult<PgString<'mcx>>
+);
+
+seam_core::seam!(
     /// `get_rule_expr(expr, context, showimplicit)` (ruleutils.c): the
     /// lower-level expression deparser `deparse_expression` wraps, appending the
     /// SQL text for `expr` to the context's output buffer. Carried here because

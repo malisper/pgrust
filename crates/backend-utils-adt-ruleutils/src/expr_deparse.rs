@@ -1981,6 +1981,163 @@ fn recurse_subquery<'mcx>(
  * get_variable — C 7606-7878 (Query-side; plan-side panics) + helpers.
  * -------------------------------------------------------------------------- */
 
+/// `OUTER_VAR` / `INNER_VAR` / `INDEX_VAR` (`primnodes.h`) — the special varnos
+/// that reference a plan node's outer/inner/index targetlist rather than the
+/// range table.
+const OUTER_VAR: i32 = 65000;
+const INNER_VAR: i32 = 65001;
+const INDEX_VAR: i32 = 65002;
+
+/// `get_tle_by_resno(tlist, resno)` (tlist.c) — find the `TargetEntry` with the
+/// given `resno` in a namespace tlist (`PgVec<PgBox<Node>>` wrapping
+/// `TargetEntry`). Returns the wrapped `Expr` of the matching entry, cloned into
+/// `mcx`.
+fn get_tle_expr_by_resno<'mcx>(
+    mcx: Mcx<'mcx>,
+    tlist: &PgVec<'mcx, mcx::PgBox<'mcx, Node<'mcx>>>,
+    resno: i16,
+) -> PgResult<Option<Node<'mcx>>> {
+    for n in tlist.iter() {
+        if let Some(tle) = n.as_targetentry() {
+            if tle.resno == resno {
+                return match tle.expr.as_ref() {
+                    Some(e) => Ok(Some(Node::Expr((**e).clone_in(mcx)?))),
+                    None => Ok(None),
+                };
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// `get_special_variable(node, context, callback_arg)` (`ruleutils.c` 7888-7905)
+/// — the `resolve_special_varno` callback used by `get_variable`: render the
+/// resolved referent, forcing parentheses around a non-Var.
+fn get_special_variable<'mcx>(node: &Node<'mcx>, context: &mut DeparseContext<'mcx>) -> PgResult<()> {
+    let is_var = node.is_var();
+    if !is_var {
+        ch_(context, b'(')?;
+    }
+    get_rule_expr(node, context, true)?;
+    if !is_var {
+        ch_(context, b')')?;
+    }
+    Ok(())
+}
+
+/// `resolve_special_varno(node, context, callback, callback_arg)` (`ruleutils.c`
+/// 7920-8000) — chase a special-varno `Var` (OUTER_VAR / INNER_VAR / INDEX_VAR)
+/// down through the plan tree's referent targetlists to the real expression, then
+/// invoke the rendering callback. Recursive (the resolved expr may itself be a
+/// special Var). The only callback used by `get_variable` is
+/// [`get_special_variable`], so it is invoked directly.
+fn resolve_special_varno<'mcx>(
+    node: &Node<'mcx>,
+    context: &mut DeparseContext<'mcx>,
+) -> PgResult<()> {
+    // If it's not a Var, invoke the callback.
+    let var = match node.as_var() {
+        Some(v) => v.clone(),
+        None => return get_special_variable(node, context),
+    };
+
+    let mcx = context.buf.allocator();
+    let dpns_idx = var.varlevelsup as usize;
+    if dpns_idx >= context.namespaces.len() {
+        return Err(elog_error(format!("bogus varlevelsup: {}", var.varlevelsup)));
+    }
+
+    if var.varno == OUTER_VAR && !context.namespaces[dpns_idx].outer_tlist.is_empty() {
+        let tle_expr = {
+            let dpns = &context.namespaces[dpns_idx];
+            get_tle_expr_by_resno(mcx, &dpns.outer_tlist, var.varattno)?
+        };
+        let tle_expr = tle_expr.ok_or_else(|| {
+            elog_error(format!("bogus varattno for OUTER_VAR var: {}", var.varattno))
+        })?;
+
+        // If descending to the first child of an Append/MergeAppend, update
+        // appendparents (affects deparsing of all Vars in the subexpression).
+        let save_appendparents = match context.appendparents.as_ref() {
+            Some(bms) => Some(bms.clone_in(mcx)?),
+            None => None,
+        };
+        {
+            let dpns_plan_tag = context.namespaces[dpns_idx]
+                .plan
+                .as_ref()
+                .map(|p| p.node_tag());
+            if dpns_plan_tag == Some(types_nodes::nodes::ntag::T_Append)
+                || dpns_plan_tag == Some(types_nodes::nodes::ntag::T_MergeAppend)
+            {
+                // bms_union with the Append/MergeAppend apprelids. The trimmed
+                // plan nodes do not carry apprelids; with no parent rels recorded
+                // the union is a no-op (appendparents stays as-is), which is sound
+                // for the non-partitioned scan/join cases this path serves.
+            }
+        }
+
+        let outer_plan = context.namespaces[dpns_idx]
+            .outer_plan
+            .as_ref()
+            .map(|p| (**p).clone_in(mcx))
+            .transpose()?;
+        let save = {
+            let dpns = &mut context.namespaces[dpns_idx];
+            match outer_plan {
+                Some(op) => Some(crate::push_child_plan(mcx, dpns, &op)?),
+                None => None,
+            }
+        };
+        resolve_special_varno(&tle_expr, context)?;
+        if let Some(save) = save {
+            crate::pop_child_plan(&mut context.namespaces[dpns_idx], save);
+        }
+        context.appendparents = save_appendparents;
+        return Ok(());
+    } else if var.varno == INNER_VAR && !context.namespaces[dpns_idx].inner_tlist.is_empty() {
+        let tle_expr = {
+            let dpns = &context.namespaces[dpns_idx];
+            get_tle_expr_by_resno(mcx, &dpns.inner_tlist, var.varattno)?
+        };
+        let tle_expr = tle_expr.ok_or_else(|| {
+            elog_error(format!("bogus varattno for INNER_VAR var: {}", var.varattno))
+        })?;
+        let inner_plan = context.namespaces[dpns_idx]
+            .inner_plan
+            .as_ref()
+            .map(|p| (**p).clone_in(mcx))
+            .transpose()?;
+        let save = {
+            let dpns = &mut context.namespaces[dpns_idx];
+            match inner_plan {
+                Some(ip) => Some(crate::push_child_plan(mcx, dpns, &ip)?),
+                None => None,
+            }
+        };
+        resolve_special_varno(&tle_expr, context)?;
+        if let Some(save) = save {
+            crate::pop_child_plan(&mut context.namespaces[dpns_idx], save);
+        }
+        return Ok(());
+    } else if var.varno == INDEX_VAR && !context.namespaces[dpns_idx].index_tlist.is_empty() {
+        let tle_expr = {
+            let dpns = &context.namespaces[dpns_idx];
+            get_tle_expr_by_resno(mcx, &dpns.index_tlist, var.varattno)?
+        };
+        let tle_expr = tle_expr.ok_or_else(|| {
+            elog_error(format!("bogus varattno for INDEX_VAR var: {}", var.varattno))
+        })?;
+        resolve_special_varno(&tle_expr, context)?;
+        return Ok(());
+    } else if var.varno < 1 || var.varno > context.namespaces[dpns_idx].rtable.len() as i32 {
+        return Err(elog_error(format!("bogus varno: {}", var.varno)));
+    }
+
+    // Not special. Just invoke the callback.
+    get_special_variable(node, context)
+}
+
 /// `static char *get_variable(Var *var, int levelsup, bool istoplevel,
 /// deparse_context *context)` — C 7606-7878.
 ///
@@ -2023,11 +2180,13 @@ pub fn get_variable<'mcx>(
     };
 
     if !in_range {
-        // resolve_special_varno((Node *) var, context, get_special_variable, NULL)
-        // — OUTER_VAR/INNER_VAR/INDEX_VAR resolution walks the plan tlists (#159).
-        return Err(deferred(
-            "get_variable special varno (resolve_special_varno OUTER/INNER/INDEX_VAR; #159 plan-tree)",
-        ));
+        // resolve_special_varno((Node *) var, context, get_special_variable, NULL);
+        // return NULL;
+        // OUTER_VAR/INNER_VAR/INDEX_VAR resolution walks the plan tlists, rendering
+        // the resolved referent into context->buf (no refname returned).
+        let node = Node::Expr(Expr::Var(var.clone()));
+        resolve_special_varno(&node, context)?;
+        return Ok(None);
     }
 
     // We might have been asked to map child Vars to some parent relation.

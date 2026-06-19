@@ -29,6 +29,9 @@ backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache
 backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-commands-functioncmds-seams = { path = "../backend-commands-functioncmds-seams" }
+# ruleutils' generate_operator_name seam (installed from here — this crate owns
+# the oper/left_oper candidate resolution its body needs) + quote_identifier.
+backend-utils-adt-ruleutils-seams = { path = "../backend-utils-adt-ruleutils-seams" }
 backend-utils-adt-format-type = { path = "../backend-utils-adt-format-type" }
 backend-parser-coerce-seams = { path = "../backend-parser-coerce-seams" }
 backend-parser-parse-func-seams = { path = "../backend-parser-parse-func-seams" }

@@ -62,30 +62,18 @@ pub fn ExplainPrintPlan<'es, 'p>(
     // es->rtable_names = select_rtable_names_for_explain(es->rtable, rels_used);
     // es->deparse_cxt = deparse_context_for_plan_tree(pstmt, es->rtable_names);
     //
-    // Both ruleutils functions are unported. The non-verbose structural output
-    // never reads rtable_names/deparse_cxt, so leave them empty on that path;
-    // a VERBOSE plan needs the real names + deparse context and goes through the
-    // K2 deparse seams (which panic until ruleutils.c lands).
-    if es.verbose {
-        // ExplainPreScanNode would populate `rels_used`; the unported scan-pre
-        // walk hands an empty set to the (panicking) name selector. The deparse
-        // seams take values at the formatting lifetime, so operate on the `'es`
-        // copies just stored into `es` (`es.pstmt`/`es.rtable`).
-        let rels_used = types_nodes::bitmapset::Bitmapset {
-            words: PgVec::new_in(mcx),
-        };
-        let rtable = es
-            .rtable
-            .as_ref()
-            .expect("VERBOSE EXPLAIN: rtable must be set before name selection");
+    // The deparse context itself is built on demand inside ruleutils' folded
+    // `deparse_expr_for_plan` seam (from es->pstmt + es->rtable_names), so we keep
+    // only the per-RTE display names here. We pass an empty `rels_used`: the
+    // unported `ExplainPreScanNode` scan-pre walk would mark the referenced RTEs,
+    // but `select_rtable_names_for_explain` falls back to each RTE's eref alias
+    // for un-marked RTEs, which yields correct unqualified column output.
+    let rels_used = types_nodes::bitmapset::Bitmapset {
+        words: PgVec::new_in(mcx),
+    };
+    if let Some(rtable) = es.rtable.as_ref() {
         let names = ruleutils_s::select_rtable_names_for_explain::call(mcx, rtable, &rels_used)?;
-        let es_pstmt = es
-            .pstmt
-            .as_deref()
-            .expect("VERBOSE EXPLAIN: es->pstmt must be set before deparse context");
-        let cxt = ruleutils_s::deparse_context_for_plan_tree::call(mcx, es_pstmt, &names)?;
         es.rtable_names = names;
-        es.deparse_cxt = Some(cxt);
     }
     // es->printed_subplans = NULL; (already None)
     es.printed_subplans = None;
@@ -492,31 +480,43 @@ pub fn ExplainNode<'es, 'p>(
     }
 
     // The per-node detail switch (show_plan_tlist / show_*_qual / show_sort_keys
-    // / instrumentation counts) deparses expressions through ruleutils and reads
-    // ANALYZE instrumentation. None of it is reached for a no-qual,
-    // non-verbose, non-analyze plan: show_scan_qual(plan->qual, ...) is a no-op
-    // when plan->qual is NIL, and the verbose-only tlist/keys are gated. Guard
-    // loudly if a qual is actually present.
+    // / instrumentation counts). `show_scan_qual(plan->qual, "Filter", ...)`:
+    // deparse the (AND of the) qual conditions and emit them as a `Filter:` line.
+    // The verbose-only tlist (`Output:`) / sort-key / instrumentation parts stay
+    // gated. C: `show_scan_qual` uses `useprefix = IsA(plan, SubqueryScan) ||
+    // es->verbose`.
     if let Some(qual) = plan.qual.as_ref().filter(|q| !q.is_empty()) {
-        // show_scan_qual(qual, "Filter", planstate, ancestors, es):
-        //   context = set_deparse_context_plan(es->deparse_cxt, plan, ancestors);
-        //   exprstr = deparse_expression(node, context, useprefix, false);
-        // ruleutils is unported, so both seams panic; calling them here keeps the
-        // EXPLAIN deparse contract live and surfaces the exact boundary.
-        // The deparse context is es->deparse_cxt; set_deparse_context_plan
-        // panics (ruleutils unported) before consuming it, so an empty context
-        // at the formatting lifetime suffices for the call.
-        let dpcontext: PgVec<'es, PgBox<'es, Node<'es>>> = PgVec::new_in(mcx);
-        let context =
-            ruleutils_s::set_deparse_context_plan::call(mcx, &dpcontext, planstate, ancestors)?;
-        // make_ands_explicit(qual): the qual list deparses as an AND of its
-        // members; the structural slice never reaches this, so wrap the first
-        // member as the representative node for the (panicking) deparse call.
-        let node = mcx::alloc_in(mcx, Node::mk_expr(mcx, qual[0].clone()))?;
-        let _ = ruleutils_s::deparse_expression::call(mcx, &node, &context, false, false)?;
-        // Unreachable on a structural plan (the seam panicked); mirror C by not
-        // emitting anything further here.
-        unreachable!("deparse_expression returns only via panic until ruleutils lands");
+        // node = (Node *) make_ands_explicit(qual);
+        let exprs: alloc::vec::Vec<types_nodes::primnodes::Expr> = qual.iter().cloned().collect();
+        let anded = backend_nodes_core::makefuncs::make_ands_explicit(exprs);
+        let node = Node::Expr(anded);
+
+        let useprefix = matches!(plan_node.node_tag(), ntag::T_SubqueryScan) || es.verbose;
+
+        // context = set_deparse_context_plan(es->deparse_cxt, planstate->plan,
+        //                                    ancestors);
+        // exprstr = deparse_expression(node, context, useprefix, false);
+        // Folded into one ruleutils seam (the deparse_namespace is owner-private).
+        // The folded seam takes pstmt/plan/expr at one lifetime; clone the
+        // running `'p` plan node into the formatting arena so it matches
+        // `es->pstmt` (the `'es` plan-tree copy stored above).
+        let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
+        let es_pstmt = es
+            .pstmt
+            .as_deref()
+            .expect("EXPLAIN: es->pstmt must be set before deparse");
+        let exprstr = ruleutils_s::deparse_expr_for_plan::call(
+            mcx,
+            es_pstmt,
+            &es.rtable_names,
+            &plan_owned,
+            ancestors,
+            &node,
+            useprefix,
+            false,
+        )?;
+        // ExplainPropertyText("Filter", exprstr, es);
+        fmt::ExplainPropertyText("Filter", exprstr.as_str(), es)?;
     }
 
     // Children. haschildren over initPlan / outer / inner / member nodes /

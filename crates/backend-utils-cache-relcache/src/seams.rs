@@ -232,6 +232,35 @@ pub fn init_seams() {
     tcx::relation_get_refcount::set(tc_relation_get_refcount);
     tcx::relation_get_create_subid::set(tc_relation_get_create_subid);
     tcx::relation_get_new_relfilelocator_subid::set(tc_relation_get_new_relfilelocator_subid);
+
+    // ruleutils' `set_relation_column_names` relation branch: the live `attname`
+    // for each *physical* column (`None` for a dropped column). The relcache owns
+    // the relation's `TupleDesc`, so it provides this name-resolution step.
+    backend_utils_adt_ruleutils_seams::ruleutils_relation_real_colnames::set(
+        ruleutils_relation_real_colnames,
+    );
+}
+
+/// `set_relation_column_names`' relation branch (ruleutils.c 4390-4412): open the
+/// relation, read its current `TupleDesc`, and return one entry per *physical*
+/// column — the live `attname` for a live column, `None` for a dropped column.
+fn ruleutils_relation_real_colnames<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+) -> PgResult<PgVec<'mcx, Option<mcx::PgString<'mcx>>>> {
+    crate::core_entry_store::with_relation(relid, |rd| {
+        let mut out = PgVec::new_in(mcx);
+        out.try_reserve(rd.rd_att.attrs.len())
+            .map_err(|_| mcx.oom(0))?;
+        for att in rd.rd_att.attrs.iter() {
+            if att.attisdropped {
+                out.push(None);
+            } else {
+                out.push(Some(mcx::PgString::from_str_in(&att.attname, mcx)?));
+            }
+        }
+        Ok(out)
+    })?
 }
 
 /// `rel->rd_isnailed` (rel.h) — read off the live owned relcache entry.

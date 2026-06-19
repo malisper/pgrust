@@ -54,6 +54,14 @@ pub fn init_seams() {
         crate::quote_qualified_identifier,
     );
 
+    // EXPLAIN's plan-tree expression deparse (`show_expression`): build the
+    // deparse context for the plan tree, point it at the node, and render the
+    // expression. Folds `set_deparse_context_plan` + `deparse_expression` (both
+    // ruleutils-private) so the `deparse_namespace` never leaves this crate.
+    backend_utils_adt_ruleutils_seams::deparse_expr_for_plan::set(
+        crate::deparse_expr_for_plan,
+    );
+
     // The catalog half of `generate_relation_name` (the CTE-conflict scan is
     // done in-crate by the deparser). Reads relname/relnamespace + visibility,
     // qualifies, and quotes — all owners (lsyscache/namespace) are installed.
