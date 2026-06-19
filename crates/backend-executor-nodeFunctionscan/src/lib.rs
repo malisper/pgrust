@@ -376,8 +376,8 @@ pub fn ExecInitFunctionScan<'mcx>(
 ) -> PgResult<mcx::PgBox<'mcx, FunctionScanState<'mcx>>> {
     let mcx = estate.es_query_cxt;
 
-    let plan: &'mcx FunctionScan<'mcx> = match node {
-        Node::FunctionScan(f) => f,
+    let plan: &'mcx FunctionScan<'mcx> = match node.node_tag() {
+        types_nodes::nodes::ntag::T_FunctionScan => node.expect_functionscan(),
         other => panic!("castNode(FunctionScan, node) failed: {other:?}"),
     };
 
@@ -480,8 +480,8 @@ pub fn ExecInitFunctionScan<'mcx>(
             let mut names: PgVec<'mcx, mcx::PgString<'mcx>> =
                 vec_with_capacity_in(mcx, rtfunc.funccolnames.len())?;
             for n in rtfunc.funccolnames.iter() {
-                let s = match &**n {
-                    Node::String(sn) => sn.sval.clone_in(mcx)?,
+                let s = match n.node_tag() {
+                    types_nodes::nodes::ntag::T_String => n.expect_string().sval.clone_in(mcx)?,
                     other => panic!("FunctionScan funccolnames entry is not a String: {other:?}"),
                 };
                 names.push(s);
@@ -727,7 +727,7 @@ pub fn ExecReScanFunctionScan<'mcx>(
         // recompute. The plan is read through the node's owned plan back-link.
         let chg = node.ss.ps.chgParam.as_deref();
         let overlaps: alloc::vec::Vec<bool> = match node.ss.ps.plan {
-            Some(Node::FunctionScan(scan)) => match &scan.functions {
+            Some(plan) if plan.is_functionscan() => match &plan.expect_functionscan().functions {
                 Some(list) => list
                     .iter()
                     .map(|rtfunc| {
