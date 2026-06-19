@@ -332,7 +332,18 @@ pub fn ATExecAddConstraint<'mcx>(
             lockmode,
         ),
         ConstrType::CONSTR_FOREIGN => {
-            unported("ADD FOREIGN KEY (ATAddForeignKeyConstraint)")
+            // ATAddForeignKeyConstraint creates the pg_constraint 'f' row
+            // (CreateConstraintEntry — ported) AND the RI trigger pair via
+            // createForeignKey{Action,Check}Triggers -> CreateTrigger. CreateTrigger
+            // (the catalog-write DDL leg of trigger.c) plus RelationBuildTriggers
+            // (relcache trigger load) are an explicitly-deferred family that has not
+            // landed, so the RI check triggers cannot be installed and the FK could
+            // not be enforced on INSERT/UPDATE. Faithfully seam-and-panic on the
+            // whole subcommand rather than write a half-built FK (a pg_constraint row
+            // with no enforcing triggers).
+            unported(
+                "ADD FOREIGN KEY (ATAddForeignKeyConstraint): blocked on the CreateTrigger / RelationBuildTriggers keystone (trigger.c catalog-write DDL leg unported)",
+            )
         }
         other => Err(backend_utils_error::ereport(ERROR)
             .errmsg_internal(format!("unrecognized constraint type: {}", other as i32))

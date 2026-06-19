@@ -2439,9 +2439,10 @@ fn scan_domain_check_constraints(type_id: Oid) -> PgResult<Vec<DomainCheckConstr
 
 /// `copy_con->convalidated = true; CatalogTupleUpdate` for the constraint OID
 /// (the catalog-write half of `AlterDomainValidateConstraint`,
-/// typecmds.c:3106). Reads the existing row by OID and re-stores it with
-/// `convalidated` flipped on.
-fn set_constraint_validated(_mcx: Mcx<'_>, con_oid: Oid) -> PgResult<()> {
+/// typecmds.c:3106, and the `Queue{FK,Check,NN}ConstraintValidation` tails in
+/// tablecmds.c). Reads the existing row by OID and re-stores it with
+/// `convalidated` flipped on, then fires `InvokeObjectPostAlterHook`.
+pub fn set_constraint_validated(_mcx: Mcx<'_>, con_oid: Oid) -> PgResult<()> {
     let con_ctx = MemoryContext::new("pg_constraint");
     let conrel = table::table_open(con_ctx.mcx(), CONSTRAINT_RELATION_ID, RowExclusiveLock)?;
 
@@ -2465,6 +2466,9 @@ fn set_constraint_validated(_mcx: Mcx<'_>, con_oid: Oid) -> PgResult<()> {
         convalidated: true,
     };
     indexing_seams::catalog_tuple_update_pg_constraint::call(&conrel, con.tid, &fields)?;
+
+    /* InvokeObjectPostAlterHook(ConstraintRelationId, con->oid, 0); */
+    objectaccess_seams::invoke_object_post_alter_hook::call(CONSTRAINT_RELATION_ID, con_oid, 0)?;
 
     conrel.close(RowExclusiveLock)?;
 

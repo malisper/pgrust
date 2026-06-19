@@ -254,6 +254,34 @@ pub(crate) fn CheckAlterTableIsSafe(rel: &Relation<'_>) -> PgResult<()> {
 }
 
 // ===========================================================================
+// ATCheckPartitionsNotInUse (tablecmds.c:6532)
+// ===========================================================================
+
+/// `ATCheckPartitionsNotInUse(rel, lockmode)` (tablecmds.c:6532) — for a
+/// partitioned table, ensure none of its partitions are in use (a partition's
+/// rows are addressed via the parent's FK triggers, etc.). For a plain table
+/// this is a no-op.
+pub(crate) fn ATCheckPartitionsNotInUse<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    lockmode: LOCKMODE,
+) -> PgResult<()> {
+    if rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
+        // inh = find_all_inheritors(RelationGetRelid(rel), lockmode, NULL);
+        let (inh, _) =
+            backend_catalog_pg_inherits::find_all_inheritors(mcx, rel.rd_id, lockmode, false)?;
+        // First element is the parent rel; must ignore it.
+        for &childoid in inh.iter().skip(1) {
+            // find_all_inheritors already got lock.
+            let childrel = relation_open(mcx, childoid, NoLock)?;
+            CheckAlterTableIsSafe(&childrel)?;
+            childrel.close(NoLock)?;
+        }
+    }
+    Ok(())
+}
+
+// ===========================================================================
 // AlterTable / AlterTableInternal (tablecmds.c:4534 / 4563)
 // ===========================================================================
 
@@ -850,7 +878,13 @@ pub(crate) fn ATPrepCmd<'mcx>(
                 rel,
                 ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_FOREIGN_TABLE,
             )?;
-            unported("DROP CONSTRAINT (ATCheckPartitionsNotInUse)");
+            ATCheckPartitionsNotInUse(mcx, rel, lockmode)?;
+            // Other recursion occurs during execution phase.
+            // No command-specific prep needed except saving recurse flag.
+            if recurse {
+                cmd.recurse = true;
+            }
+            pass = AT_PASS_DROP;
         }
         AT_AlterColumnType => {
             ATSimplePermissions(
@@ -944,7 +978,12 @@ pub(crate) fn ATPrepCmd<'mcx>(
                 rel,
                 ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_FOREIGN_TABLE,
             )?;
-            unported("VALIDATE CONSTRAINT");
+            // Recursion occurs during execution phase.
+            // No command-specific prep needed except saving recurse flag.
+            if recurse {
+                cmd.recurse = true;
+            }
+            pass = AT_PASS_MISC;
         }
         AT_ReplicaIdentity => {
             ATSimplePermissions(
@@ -1384,8 +1423,52 @@ fn ATExecCmd<'mcx>(
             _address = res?;
         }
         AT_AlterConstraint => unported("ALTER CONSTRAINT (ATExecAlterConstraint)"),
-        AT_ValidateConstraint => unported("VALIDATE CONSTRAINT (ATExecValidateConstraint)"),
-        AT_DropConstraint => unported("DROP CONSTRAINT (ATExecDropConstraint)"),
+        AT_ValidateConstraint => {
+            // ATExecValidateConstraint(wqueue, rel, cmd->name, cmd->recurse, false, lockmode).
+            let owned_rel = wqueue[ti].rel.take().expect("ATExecCmd: tab->rel is open");
+            let constr_name = cmd
+                .name
+                .as_ref()
+                .map(|s| s.as_str())
+                .expect("VALIDATE CONSTRAINT requires a constraint name");
+            let res = crate::at_dropvalidate::ATExecValidateConstraint(
+                mcx,
+                wqueue,
+                &owned_rel,
+                constr_name,
+                cmd.recurse,
+                false,
+                lockmode,
+            );
+            wqueue[ti].rel = Some(owned_rel);
+            _address = res?;
+        }
+        AT_DropConstraint => {
+            // ATExecDropConstraint(rel, cmd->name, cmd->behavior, cmd->recurse,
+            //     cmd->missing_ok, lockmode).
+            let owned_rel = wqueue[ti].rel.take().expect("ATExecCmd: tab->rel is open");
+            let constr_name = cmd
+                .name
+                .as_ref()
+                .map(|s| s.as_str())
+                .expect("DROP CONSTRAINT requires a constraint name");
+            let res = crate::at_dropvalidate::ATExecDropConstraint(
+                mcx,
+                &owned_rel,
+                constr_name,
+                cmd.behavior,
+                cmd.recurse,
+                cmd.missing_ok,
+                lockmode,
+            );
+            wqueue[ti].rel = Some(owned_rel);
+            res?;
+            _address = ObjectAddress {
+                classId: InvalidOid,
+                objectId: InvalidOid,
+                objectSubId: 0,
+            };
+        }
         AT_AlterColumnType => unported("ALTER COLUMN TYPE (ATExecAlterColumnType + ATRewriteTable)"),
         AT_AlterColumnGenericOptions => {
             unported("ALTER COLUMN OPTIONS (ATExecAlterColumnGenericOptions)")
