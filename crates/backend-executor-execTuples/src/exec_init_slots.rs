@@ -598,6 +598,22 @@ fn seam_exec_store_first_datum<'mcx>(
     // ExecClearTuple(slot);
     crate::slot_store_fetch::ExecClearTuple(slot_data)?;
     // slot->tts_values[0] = val; slot->tts_isnull[0] = isnull;
+    //
+    // `val` is the value `tuplesort_getdatum` returned. For a by-reference type
+    // its bytes were cloned into the *tuplesort's* memory context, which
+    // `tuplesort_end` (run by `ExecEndSort`) frees BEFORE this virtual-tuple
+    // slot is finally dropped at `FreeQueryDesc`. C stores the bare pointer here
+    // (`copy=false`) and never owns it — the slot just goes empty at executor
+    // end. The owned slot, by contrast, *owns* its by-reference `tts_values`
+    // bytes (it deallocates them on drop), so they must live in the slot's own
+    // context, not the soon-freed sort context; otherwise the slot drops a
+    // `Vec<u8, Mcx>` whose context is already gone (use-after-free in the
+    // allocator accounting — the `ORDER BY <uuid/inet/text/name>` datum-sort
+    // crash). Re-home the value into the slot's context (recovered from the
+    // `tts_values` allocator, the owned `MemoryContextSwitchTo(slot->tts_mcxt)`),
+    // co-terminal with the slot. A by-value `Datum` clones trivially.
+    let slot_mcx = *slot_data.base().tts_values.allocator();
+    let val = val.clone_in(slot_mcx)?;
     let base = slot_data.base_mut();
     base.tts_values[0] = val;
     base.tts_isnull[0] = is_null;
