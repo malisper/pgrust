@@ -365,8 +365,8 @@ pub fn transformGroupingFunc<'mcx>(
     // NOTE: left on the enum — the generated `into_groupingfunc` accessor is
     // shadowed by the Node-direct *raw* `rawexprnodes::GroupingFunc` variant, so
     // it does not reach the analyzed `primnodes::GroupingFunc` payload here.
-    let p: GroupingFunc = match p_node {
-        Node::Expr(Expr::GroupingFunc(g)) => g,
+    let p: GroupingFunc = match p_node.into_expr() {
+        Some(Expr::GroupingFunc(g)) => g,
         _ => {
             return Err(PgError::error(
                 "transformGroupingFunc: input is not a GroupingFunc node",
@@ -875,8 +875,8 @@ fn check_agg_arguments_walker(node: &Node, context: &mut CheckAggArgumentsContex
     // `as_groupingfunc` accessor is shadowed by the Node-direct *raw*
     // `rawexprnodes::GroupingFunc` variant (same T_GroupingFunc tag), so the
     // accessor does not fit; keeping the whole match on the enum preserves it.
-    match node {
-        Node::Expr(Expr::Var(var)) => {
+    match node.as_expr() {
+        Some(Expr::Var(var)) => {
             let mut varlevelsup = var.varlevelsup as i32;
             // convert levelsup to frame of reference of original query
             varlevelsup -= context.sublevels_up;
@@ -888,7 +888,7 @@ fn check_agg_arguments_walker(node: &Node, context: &mut CheckAggArgumentsContex
             }
             return false;
         }
-        Node::Expr(Expr::Aggref(agg)) => {
+        Some(Expr::Aggref(agg)) => {
             let mut agglevelsup = agg.agglevelsup as i32;
             agglevelsup -= context.sublevels_up;
             if agglevelsup >= 0
@@ -898,7 +898,7 @@ fn check_agg_arguments_walker(node: &Node, context: &mut CheckAggArgumentsContex
             }
             // Continue and descend into subtree.
         }
-        Node::Expr(Expr::GroupingFunc(grp)) => {
+        Some(Expr::GroupingFunc(grp)) => {
             let mut agglevelsup = grp.agglevelsup as i32;
             agglevelsup -= context.sublevels_up;
             if agglevelsup >= 0
@@ -1677,8 +1677,8 @@ fn substitute_grouped_columns_mutator(node: &mut Node, context: &mut SubstituteC
     // `primnodes::GroupingFunc`, but the generated `as_groupingfunc` accessor is
     // shadowed by the Node-direct *raw* `rawexprnodes::GroupingFunc` (same tag)
     // and would mis-resolve; keeping the match on the enum preserves it.
-    match node {
-        Node::Expr(Expr::Aggref(agg)) => {
+    match node.as_expr_mut() {
+        Some(Expr::Aggref(agg)) => {
             let agglevelsup = agg.agglevelsup as i32;
             if agglevelsup == context.sublevels_up {
                 // Aggregate of the original level: don't recurse into normal
@@ -1706,7 +1706,7 @@ fn substitute_grouped_columns_mutator(node: &mut Node, context: &mut SubstituteC
             mutate_generic(node, context);
             return;
         }
-        Node::Expr(Expr::GroupingFunc(grp)) => {
+        Some(Expr::GroupingFunc(grp)) => {
             // handled GroupingFunc separately, no need to recheck at this level
             if grp.agglevelsup as i32 >= context.sublevels_up {
                 return;
@@ -2050,8 +2050,10 @@ fn finalize_grouping_exprs_walker(node: &mut Node, context: &mut FinalizeContext
     // `primnodes::GroupingFunc` (read+write `refs`), but the generated
     // `as_groupingfunc` accessor is shadowed by the Node-direct *raw*
     // `rawexprnodes::GroupingFunc` (same tag); keep the match on the enum.
-    match node {
-        Node::Expr(Expr::Aggref(agg)) => {
+    // Peel the `Node::Expr` wrapper mutably first (dual-homed tag rule), then
+    // dispatch the inner analyzed `Expr` payload.
+    match node.as_expr_mut() {
+        Some(Expr::Aggref(agg)) => {
             let agglevelsup = agg.agglevelsup as i32;
             if agglevelsup == context.sublevels_up {
                 // Aggregate of the original level: don't recurse into normal
@@ -2074,7 +2076,7 @@ fn finalize_grouping_exprs_walker(node: &mut Node, context: &mut FinalizeContext
             finalize_generic(node, context);
             return;
         }
-        Node::Expr(Expr::GroupingFunc(grp)) => {
+        Some(Expr::GroupingFunc(grp)) => {
             // Only check GroupingFunc nodes at the exact level.
             if grp.agglevelsup as i32 == context.sublevels_up {
                 match compute_grouping_refs(grp, context) {
@@ -2094,21 +2096,22 @@ fn finalize_grouping_exprs_walker(node: &mut Node, context: &mut FinalizeContext
             finalize_generic(node, context);
             return;
         }
-        Node::Query(query) => {
-            // Recurse into subselects.
-            context.sublevels_up += 1;
-            query_tree_mutator(
-                query,
-                &mut |n: &mut Node| {
-                    finalize_grouping_exprs_walker(n, context);
-                    context.error.is_some()
-                },
-                0,
-            );
-            context.sublevels_up -= 1;
-            return;
-        }
         _ => {}
+    }
+    if node.node_tag() == ntag::T_Query {
+        // Recurse into subselects.
+        let query = node.expect_query_mut();
+        context.sublevels_up += 1;
+        query_tree_mutator(
+            query,
+            &mut |n: &mut Node| {
+                finalize_grouping_exprs_walker(n, context);
+                context.error.is_some()
+            },
+            0,
+        );
+        context.sublevels_up -= 1;
+        return;
     }
 
     finalize_generic(node, context);
