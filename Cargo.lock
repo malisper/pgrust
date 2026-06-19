@@ -13921,6 +13921,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-pl-plpgsql-exec"
+version = "0.0.0"
+dependencies = [
+ "backend-pl-plpgsql-exec-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-plpgsql",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-pl-plpgsql-exec-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-plpgsql",
+]
+
+[[package]]
 name = "backend-pl-plpgsql-funcs"
 version = "0.0.0"
 dependencies = [
@@ -23577,6 +23601,7 @@ dependencies = [
  "backend-parser-relation",
  "backend-parser-small1",
  "backend-pl-plpgsql-comp",
+ "backend-pl-plpgsql-exec",
  "backend-port-atomics",
  "backend-port-sysv-sema",
  "backend-port-sysv-shmem",

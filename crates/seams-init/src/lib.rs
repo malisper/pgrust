@@ -616,6 +616,7 @@ pub fn init_all() {
     probe_adt_scalar_bool::init_seams();
     backend_utils_adt_jsonpath_exec::init_seams();
     backend_pl_plpgsql_comp::init_seams();
+    backend_pl_plpgsql_exec::init_seams();
 }
 
 #[cfg(test)]
