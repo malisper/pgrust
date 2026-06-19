@@ -1122,7 +1122,12 @@ fn HeapDetermineColumnsInfo<'mcx>(
     // analog; system columns are read via heap_getsysattr below). C uses
     // heap_getattr per-column, but the C comment notes deforming once is more
     // efficient and equivalent for the user columns.
-    let old_cols = heap_deform_tuple(mcx, &oldtup.tuple, tupdesc, &oldtup.data)?;
+    // `oldtup` is the on-page read (`read_on_page_tuple`), whose `data` spans
+    // the null bitmap + maxalign pad before the user-data area; reach the
+    // column area with `tuple_user_data`. `newtup` is a formed tuple whose
+    // `data` is already the column area (bitmap carried in `t_bits`), so it is
+    // deformed directly.
+    let old_cols = heap_deform_tuple(mcx, &oldtup.tuple, tupdesc, tuple_user_data(oldtup))?;
     let new_cols = heap_deform_tuple(mcx, &newtup.tuple, tupdesc, &newtup.data)?;
 
     let mut attidx: i32 = -1;
