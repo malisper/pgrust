@@ -1007,20 +1007,6 @@ mod recurrence_guard {
         // calls itself; the guard's outward-seam exclusion covers it, so no
         // allowlist entry is needed (its real owner is the unported SQL-function
         // parse/rewrite path). DESIGN_DEBT TD-SRF-INLINE-QUERY.
-        // DESIGN_DEBT (TD-INITSPLAN-REBUILD-JOINCLAUSE): analyzejoins.c's
-        // `remove_leftjoinrel_from_query` (left-join removal) calls
-        // `rebuild_joinclause_attr_needed` (initsplan.c:3559) to re-add the
-        // attr_needed bits contributed by join clauses after a join removal. The
-        // owner is initsplan.c (`backend-optimizer-plan-init-subselect`), where
-        // this function is NOT yet ported (the sibling `rebuild_lateral_attr_needed`
-        // IS ported and installed). The seam is declared in
-        // `backend-optimizer-plan-small-seams` and loud-panics until initsplan
-        // lands the body. DELETE this entry when initsplan ports
-        // `rebuild_joinclause_attr_needed`.
-        (
-            "backend_optimizer_plan_small",
-            "rebuild_joinclause_attr_needed",
-        ),
         // DESIGN_DEBT (TD-INDEX-OPCLASS-OPTIONS): `index_build_local_reloptions`
         // is the `local_relopts` tail of indexam.c's `index_opclass_options`:
         // `init_local_reloptions(&relopts, 0)` +

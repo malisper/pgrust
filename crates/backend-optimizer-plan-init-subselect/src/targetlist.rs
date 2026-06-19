@@ -138,6 +138,72 @@ pub fn add_vars_to_targetlist(
     Ok(())
 }
 
+/// `rebuild_joinclause_attr_needed` (initsplan.c:3559) — rebuild the
+/// `attr_needed` bits coming from join clauses, after a relation removal
+/// (outer-join or self-join elimination) invalidated them.
+///
+/// Scans every baserel's `joininfo` list, deduplicating by `rinfo_serial`
+/// (except for `is_clone` clauses, whose serials are not unique), and for each
+/// multi-relation join clause re-derives the Vars and marks them needed at the
+/// clause's relids (intersected with `all_baserels` for clone clauses).
+pub fn rebuild_joinclause_attr_needed(
+    root: &mut PlannerInfo,
+    _run: &PlannerRun<'_>,
+) -> PgResult<()> {
+    // seen_serials — rinfo_serials of join clauses already processed.
+    let mut seen_serials: Relids = None;
+
+    for rti in 1..root.simple_rel_array_size {
+        let brel = match root.simple_rel_array[rti as usize] {
+            Some(r) => r,
+            None => continue,
+        };
+        if root.rel(brel).reloptkind != types_pathnodes::RELOPT_BASEREL {
+            continue;
+        }
+
+        let joininfo = root.rel(brel).joininfo.clone();
+        for rinfo_id in joininfo {
+            let (is_clone, rinfo_serial, required_relids, clause_id) = {
+                let rinfo = root.rinfo(rinfo_id);
+                (
+                    rinfo.is_clone,
+                    rinfo.rinfo_serial,
+                    bms::relids_copy::call(&rinfo.required_relids),
+                    rinfo.clause,
+                )
+            };
+
+            if !is_clone {
+                // else serial number is not unique
+                if bms::relids_is_member::call(rinfo_serial, &seen_serials) {
+                    continue; // saw it already
+                }
+                seen_serials = bms::relids_add_member::call(seen_serials, rinfo_serial);
+            }
+
+            if bms::relids_membership::call(&required_relids) == 2
+            /* BMS_MULTIPLE */
+            {
+                let clause = root.node(clause_id).clone();
+                let vars = eqext::pull_var_clause::call(
+                    &clause,
+                    PVC_RECURSE_AGGREGATES | PVC_RECURSE_WINDOWFUNCS | PVC_INCLUDE_PLACEHOLDERS,
+                );
+
+                let where_needed = if is_clone {
+                    bms::relids_intersect::call(&required_relids, &root.all_baserels)
+                } else {
+                    required_relids
+                };
+                add_vars_to_attr_needed(root, vars, where_needed)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// `add_vars_to_attr_needed` (initsplan.c:353).
 ///
 /// A subset of `add_vars_to_targetlist`: just update `attr_needed` for Vars and

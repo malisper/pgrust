@@ -37,19 +37,21 @@
 //!   `remove_rel_from_joinlist`. The left-join path never walks `root->parse`, so
 //!   it is fully portable over the arena handle model.
 //!
-//! Still seam-and-panic (genuine carrier gap):
-//! * `remove_useless_self_joins` and its self-join surgery
-//!   (`remove_self_join_rel` etc.) — these run
-//!   `ChangeVarNodesExtended((Node *) root->parse, …)` plus the `subst > 0`
-//!   relid-substitution path, which needs a `Query`-tree relid walker the planner
-//!   model does not yet carry (the [`change_relids`] walker only handles arena
-//!   `Expr` / `RestrictInfo` / `EquivalenceMember` handles). Left at its
-//!   panicking default in `backend-optimizer-plan-init-subselect-seams`.
-//! * `rebuild_joinclause_attr_needed` (initsplan.c:3559) — owned by
-//!   `backend-optimizer-plan-init-subselect`, not yet ported there. Declared as a
-//!   `backend-optimizer-plan-small-seams` seam and called from
-//!   `remove_leftjoinrel_from_query`; panics via its default until initsplan lands
-//!   it. (`rebuild_lateral_attr_needed` *is* ported and installed.)
+//! * `remove_useless_self_joins` (self-join elimination, [`remove_joins`]) and
+//!   its surgery: `remove_self_joins_recurse`, `remove_self_joins_one_group`,
+//!   `remove_self_join_rel`, `split_selfjoin_quals`, `match_unique_clauses`,
+//!   `add_non_redundant_clauses`, `restrict_infos_logically_equal`, and
+//!   `update_eclasses`. The `ChangeVarNodesExtended((Node *) root->parse, …)`
+//!   substitution is reachable because `root->parse` resolves off its `QueryId`
+//!   to a real owned `Query` `Node` (via the `PlannerRun` store), walked by
+//!   [`change_relids::change_relids_in_query`]; the arena `RestrictInfo` / `EM`
+//!   relid walk is [`change_relids`]. The seam is re-signed to take
+//!   `&mut PlannerRun` so the parse-tree and row-mark mutations are expressible.
+//!
+//! `rebuild_joinclause_attr_needed` (initsplan.c:3559) is owned by
+//! `backend-optimizer-plan-init-subselect` and now ported+installed there
+//! (`targetlist::rebuild_joinclause_attr_needed`); the self-join and left-join
+//! surgery both call it via the `backend-optimizer-plan-small-seams` seam.
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -748,8 +750,8 @@ pub fn init_seams() {
         },
     );
 
-    // remove_useless_self_joins: the early-exit (single-relation / GUC-off) is
-    // ported; the deep self-join surgery remains a keystone panic (see the fn).
+    // remove_useless_self_joins: full self-join elimination including the
+    // `root->parse` relid substitution. The seam carries `&mut PlannerRun`.
     backend_optimizer_plan_init_subselect_seams::remove_useless_self_joins::set(
         |root, run, joinlist| remove_joins::remove_useless_self_joins(root, run, joinlist),
     );

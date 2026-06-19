@@ -201,7 +201,7 @@ fn try_selfjoin_nulltest_rewrite(root: &mut PlannerInfo, id: RinfoId) {
     };
 
     // equal(leftOp, rightOp) — the nodeFuncs equality predicate.
-    if backend_nodes_nodeFuncs_seams::equal::call(&leftop, &rightop) {
+    if backend_optimizer_path_equivclass_ext_seams::equal::call(&leftop, &rightop) {
         // Build `leftOp IS NOT NULL`.
         let ntest = Expr::NullTest(types_nodes::primnodes::NullTest {
             arg: Some(alloc::boxed::Box::new(leftop)),
@@ -224,4 +224,81 @@ fn try_selfjoin_nulltest_rewrite(root: &mut PlannerInfo, id: RinfoId) {
 pub fn change_relids_in_em(root: &mut PlannerInfo, id: EmId, ctx: ReplaceRelidContext) {
     let expr_id = root.em(id).em_expr;
     change_relids_in_node(root, expr_id, ctx);
+}
+
+/// `ChangeVarNodesExtended((Node *) root->parse, from, to, 0,
+/// replace_relid_callback)` (analyzejoins.c:1961, self-join elimination) — walk
+/// the whole `Query` parse tree for the relid substitution.
+///
+/// Unlike the planner `RestrictInfo`/`EquivalenceMember` arena handles, the
+/// `root->parse` `Query` is a real owned value (resolved off the [`QueryId`]
+/// through the [`PlannerRun`] store) and a `Node` variant, so the standard
+/// `Query`-aware walker in `backend_rewrite_core` applies directly. The
+/// `replace_relid_callback`'s only relevant branch for a *parse* tree is its
+/// RangeTblRef skip (the parse tree carries no planner RestrictInfo nodes); SJE
+/// must skip RangeTblRefs so the later `remove_rel_from_joinlist` can still find
+/// them by their original relid.
+pub fn change_relids_in_query(
+    run: &mut types_pathnodes::planner_run::PlannerRun<'_>,
+    parse: types_pathnodes::QueryId,
+    ctx: ReplaceRelidContext,
+) {
+    use backend_rewrite_core::change::{
+        ChangeVarNodesContext, ChangeVarNodesExtended,
+    };
+    use types_nodes::nodes::ntag;
+
+    // Move the Query out into a Node::Query, walk it standalone (the walker
+    // mutates in place, mirroring C's cast-to-Node + in-place mutation), and
+    // write it back. The SJE callback skips RangeTblRef nodes. The placeholder
+    // swapped in is immediately overwritten and never observed.
+    let mcx = run.mcx();
+    let query = core::mem::replace(
+        run.resolve_mut(parse),
+        types_nodes::copy_query::Query::new(mcx),
+    );
+    let mut node = Node::Query(query);
+
+    let mut skip_rtr = |n: &mut Node, _c: &mut ChangeVarNodesContext| -> bool {
+        matches!(n.node_tag(), t if t == ntag::T_RangeTblRef)
+    };
+    ChangeVarNodesExtended(
+        &mut node,
+        ctx.rt_index,
+        ctx.new_index,
+        0,
+        Some(&mut skip_rtr),
+    );
+
+    let walked = match node {
+        Node::Query(q) => q,
+        _ => unreachable!("ChangeVarNodes returned a non-Query for a Query input"),
+    };
+    *run.resolve_mut(parse) = walked;
+}
+
+/// `ChangeVarNodesExtended((Node *) node, from, to, 0, replace_relid_callback)`
+/// over a list of arena `Node` handles (`root->processed_tlist`,
+/// `root->processed_groupClause`, `reltarget->exprs`). Dispatches on the arena
+/// node kind: bare `Expr` handles (reltarget) are walked directly; `TargetEntry`
+/// handles (processed_tlist) recurse into the entry's `expr` child handle (C's
+/// expression walker descends through the TargetEntry); `SortGroupClause` handles
+/// (processed_groupClause) carry no Vars, so they are no-ops.
+pub fn change_relids_in_node_list(
+    root: &mut PlannerInfo,
+    ids: &[types_pathnodes::NodeId],
+    ctx: ReplaceRelidContext,
+) {
+    use types_pathnodes::ArenaNode;
+    for &id in ids {
+        match &root.node_arena[id.index()] {
+            ArenaNode::Expr(_) => change_relids_in_node(root, id, ctx),
+            ArenaNode::TargetEntry(te) => {
+                let expr_id = te.expr;
+                change_relids_in_node(root, expr_id, ctx);
+            }
+            // SortGroupClause / other non-expression arena nodes hold no Vars.
+            _ => {}
+        }
+    }
 }

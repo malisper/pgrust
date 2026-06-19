@@ -49,7 +49,7 @@ seam_core::seam!(
     /// self joins on a unique column, returning the (possibly trimmed) joinlist.
     pub fn remove_useless_self_joins<'mcx>(
         root: &mut PlannerInfo,
-        run: &PlannerRun<'mcx>,
+        run: &mut PlannerRun<'mcx>,
         joinlist: alloc::vec::Vec<JoinlistNode>,
     ) -> alloc::vec::Vec<JoinlistNode>
 );

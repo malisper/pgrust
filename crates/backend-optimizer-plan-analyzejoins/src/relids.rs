@@ -79,6 +79,12 @@ pub fn membership_is_multiple(a: &Relids) -> bool {
     num_members(a) > 1
 }
 
+/// `bms_membership(a) == BMS_SINGLETON`.
+#[inline]
+pub fn membership_is_singleton(a: &Relids) -> bool {
+    num_members(a) == 1
+}
+
 /// `bms_get_singleton_member(a, &out)` — `Some(member)` iff the set has exactly
 /// one member.
 pub fn get_singleton_member(a: &Relids) -> Option<i32> {

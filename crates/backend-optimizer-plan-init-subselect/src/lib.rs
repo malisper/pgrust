@@ -223,11 +223,15 @@ pub fn init_seams() {
     psmall::add_other_rels_to_query::set(|root, run| {
         baserels::add_other_rels_to_query(root, run).expect("add_other_rels_to_query")
     });
-    // rebuild_lateral_attr_needed is ported (lateral.rs); analyzejoins calls it
-    // via this seam after a join removal. rebuild_joinclause_attr_needed is NOT
-    // yet ported, so it is left to panic via its default seam body.
+    // rebuild_lateral_attr_needed / rebuild_joinclause_attr_needed are ported
+    // here (lateral.rs / targetlist.rs); analyzejoins calls them via these seams
+    // after a join removal (outer-join or self-join elimination).
     psmall::rebuild_lateral_attr_needed::set(|root, run| {
         lateral::rebuild_lateral_attr_needed(root, run)
+    });
+    psmall::rebuild_joinclause_attr_needed::set(|root, run| {
+        targetlist::rebuild_joinclause_attr_needed(root, run)
+            .expect("rebuild_joinclause_attr_needed")
     });
 
     /* ---- initsplan.c-owned fns called by equivclass (equivclass-ext-seams) */
