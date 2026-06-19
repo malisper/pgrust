@@ -922,10 +922,9 @@ fn change_expr_relids_standalone(expr: &mut Expr, from: i32, to: i32) {
     let owned = core::mem::replace(expr, dummy_expr());
     let mut node = types_nodes::nodes::Node::Expr(owned);
     backend_rewrite_core::change::ChangeVarNodes(&mut node, from, to, 0);
-    *expr = match node {
-        types_nodes::nodes::Node::Expr(e) => e,
-        _ => unreachable!("ChangeVarNodes returned a non-Expr for an Expr input"),
-    };
+    *expr = node
+        .into_expr()
+        .unwrap_or_else(|| unreachable!("ChangeVarNodes returned a non-Expr for an Expr input"));
 }
 
 /// A throwaway [`Expr`] used as the `mem::replace` placeholder; immediately
