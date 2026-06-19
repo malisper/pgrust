@@ -320,7 +320,7 @@ fn standard_planner<'mcx>(
             .map(|g| g.subplans.clone())
             .unwrap_or_default();
         for pid in subplan_ids.iter().copied() {
-            let mut subplan_node = run.take_subplan(pid);
+            let mut subplan_node = run.take_subplan(pid)?;
             backend_optimizer_plan_init_subselect::finalize::SS_finalize_plan(
                 mcx,
                 run.resolve_subroot(pid),
@@ -363,7 +363,7 @@ fn standard_planner<'mcx>(
             let mut subroot = run.take_subroot(pid);
             subroot.glob = root.glob.take();
             // Move the subplan node out, run setrefs, store the result back.
-            let subplan_node = run.take_subplan(pid);
+            let subplan_node = run.take_subplan(pid)?;
             let new_node = backend_optimizer_plan_setrefs::set_plan_references(
                 mcx,
                 &mut run,

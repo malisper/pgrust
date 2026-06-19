@@ -418,9 +418,9 @@ impl<'mcx> PlannerRun<'mcx> {
     /// `&PlannerRun` in `SS_finalize_plan` / `set_plan_references`, which can't
     /// coexist with `&mut self.subplans[..]`). Pair with [`put_subplan`].
     #[inline]
-    pub fn take_subplan(&mut self, id: PlanId) -> Node<'mcx> {
+    pub fn take_subplan(&mut self, id: PlanId) -> types_error::PgResult<Node<'mcx>> {
         let placeholder = Node::mk_range_tbl_ref(self.mcx(), types_nodes::rawnodes::RangeTblRef { rtindex: 0 });
-        core::mem::replace(&mut self.subplans[id.0 as usize], placeholder)
+        Ok(core::mem::replace(&mut self.subplans[id.0 as usize], placeholder))
     }
 
     /// Restore a subplan's owned `Plan` tree taken via [`take_subplan`].

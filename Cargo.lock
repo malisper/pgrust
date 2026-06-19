@@ -24779,6 +24779,7 @@ dependencies = [
  "mcx",
  "types-core",
  "types-datum",
+ "types-error",
  "types-hash",
  "types-nodes",
 ]
