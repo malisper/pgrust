@@ -68,6 +68,27 @@ const REGDICTIONARYOID: Oid = 3769;
 const REGNAMESPACEOID: Oid = 4089;
 const REGROLEOID: Oid = 4096;
 
+/// True for the OID-alias (`reg*`) constant datatypes whose `constvalue` is a
+/// pass-by-value object OID (`DatumGetObjectId`). Every other constant type
+/// (e.g. `text`/`bytea`/`numeric`) carries a by-reference value that must not be
+/// read as a scalar OID.
+fn is_regclass_like_type(consttype: Oid) -> bool {
+    matches!(
+        consttype,
+        REGPROCOID
+            | REGPROCEDUREOID
+            | REGOPEROID
+            | REGOPERATOROID
+            | REGCLASSOID
+            | REGTYPEOID
+            | REGCOLLATIONOID
+            | REGCONFIGOID
+            | REGDICTIONARYOID
+            | REGNAMESPACEOID
+            | REGROLEOID
+    )
+}
+
 /// `RELKIND_RELATION` (`pg_class.h`).
 const RELKIND_RELATION: i8 = b'r' as i8;
 /// `AccessShareLock` (`lockdefs.h`).
@@ -325,7 +346,17 @@ fn find_expr_references_expr(
              * regclass and regconfig cases have any likely use, but we may as
              * well handle all the OID-alias datatypes consistently.)
              */
-            if !con.constisnull {
+            /*
+             * Only the OID-alias (reg*) datatypes carry an object reference in
+             * the constant value. C reads `DatumGetObjectId(con->constvalue)`
+             * unconditionally — harmless there because Datum is a bare machine
+             * word — but here the canonical by-reference Datum (e.g. a `text`
+             * default like 'text') cannot be read as a scalar OID and would
+             * panic. Decode the OID only for the reg* types that actually use
+             * it; for every other type the value is never inspected (matching
+             * C's behaviour, since none of the switch arms below fire).
+             */
+            if !con.constisnull && is_regclass_like_type(con.consttype) {
                 let objoid = con.constvalue.as_oid(); /* DatumGetObjectId */
                 if con.consttype == REGPROCOID || con.consttype == REGPROCEDUREOID {
                     if syscache_seams::procoid_exists::call(objoid)? {

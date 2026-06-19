@@ -84,7 +84,7 @@ use types_scan::scankey::{
     SK_ISNULL, SK_ROW_HEADER, SK_ROW_MEMBER, SK_SEARCHARRAY, SK_SEARCHNOTNULL, SK_SEARCHNULL,
 };
 
-use backend_utils_fmgr_fmgr_seams::function_call2_coll;
+use backend_utils_fmgr_fmgr_seams::function_call2_coll_datum;
 // `deconstruct_array` lives in the arrayfuncs seams crate; `get_typlenbyvalalign`
 // and the opfamily lookups live in the lsyscache seams crate.
 use backend_utils_adt_arrayfuncs_seams::deconstruct_array_values_bytes;
@@ -146,18 +146,6 @@ fn reg_procedure_is_valid(p: Oid) -> bool {
     p != InvalidOid
 }
 
-/// `DatumGetBool(d)` — low bit of the `Datum` word.
-#[inline]
-fn datum_get_bool(d: types_datum::Datum) -> bool {
-    (d.as_usize() & 1) != 0
-}
-
-/// `DatumGetInt32(d)` — a btree comparison support function returns an `int32`
-/// in the low 32 bits of its `Datum` result.
-#[inline]
-fn datum_get_int32(d: types_datum::Datum) -> i32 {
-    d.as_i32()
-}
 
 /// `INVERT_COMPARE_RESULT(var)` (c.h): `var = (var < 0) ? 1 : -(var)`.
 #[inline]
@@ -187,24 +175,21 @@ fn elog_error(msg: String) -> PgError {
     PgError::error(msg)
 }
 
-/// Convert a canonical `Datum<'mcx>` argument into the bare-word
-/// `types_datum::Datum` the fmgr seam dispatches on (by-value path; by-ref args
-/// carry their word, the same convention the repo uses everywhere fmgr dispatch
-/// crosses a seam).
-#[inline]
-fn to_word(d: &Datum) -> types_datum::Datum {
-    types_datum::Datum::from_usize(d.as_usize())
-}
-
 /// `FunctionCall2Coll(flinfo, collation, arg1, arg2)` by the cached proc's OID.
+///
+/// Dispatches on the canonical per-attribute `Datum` lane so by-reference
+/// argument types (`name`/`text`/`varlena`) carry their payloads to the
+/// comparison support proc — the bare-word lane cannot carry a by-reference
+/// value and would panic reading it as a scalar word.
 #[inline]
-fn function_call2_coll_oid(
+fn function_call2_coll_oid<'mcx>(
+    mcx: Mcx<'mcx>,
     proc_oid: Oid,
     collation: Oid,
-    arg1: &Datum,
-    arg2: &Datum,
-) -> PgResult<types_datum::Datum> {
-    function_call2_coll::call(proc_oid, collation, to_word(arg1), to_word(arg2))
+    arg1: &Datum<'mcx>,
+    arg2: &Datum<'mcx>,
+) -> PgResult<Datum<'mcx>> {
+    function_call2_coll_datum::call(mcx, proc_oid, collation, arg1.clone(), arg2.clone())
 }
 
 // ---------------------------------------------------------------------------
@@ -333,7 +318,10 @@ fn handle_fn_oid(handle: u64) -> Oid {
 
 /// `BTSortArrayContext` — the qsort_arg comparison context used while sorting
 /// and merging array elements. `sortproc` is the same-type ORDER proc handle.
-struct BtSortArrayContext {
+struct BtSortArrayContext<'mcx> {
+    /// Allocator for the canonical-`Datum` fmgr comparison lane (so by-reference
+    /// array element types reach the sort support proc).
+    mcx: Mcx<'mcx>,
     sortproc: u64,
     collation: Oid,
     reverse: bool,
@@ -1028,12 +1016,14 @@ fn _bt_compare_scankey_args<'mcx>(
     // If leftarg and rightarg match the types expected for the "op" scankey, we
     // can use its already-looked-up comparison function.
     if lefttype == opcintype && righttype == optype {
-        let result = datum_get_bool(function_call2_coll_oid(
+        let result = function_call2_coll_oid(
+            *rel.rd_opcintype.allocator(),
             inkeys[op].sk_func.fn_oid,
             inkeys[op].sk_collation,
             &inkeys[leftarg].sk_argument,
             &inkeys[rightarg].sk_argument,
-        )?);
+        )?
+        .as_bool();
         return Ok(Some(result));
     }
 
@@ -1053,12 +1043,14 @@ fn _bt_compare_scankey_args<'mcx>(
     if oid_is_valid(cmp_op) {
         let cmp_proc = get_opcode::call(cmp_op)?;
         if reg_procedure_is_valid(cmp_proc) {
-            let result = datum_get_bool(function_call2_coll_oid(
+            let result = function_call2_coll_oid(
+                *rel.rd_opcintype.allocator(),
                 cmp_proc,
                 inkeys[op].sk_collation,
                 &inkeys[leftarg].sk_argument,
                 &inkeys[rightarg].sk_argument,
-            )?);
+            )?
+            .as_bool();
             return Ok(Some(result));
         }
     }
@@ -1853,8 +1845,13 @@ pub fn _bt_preprocess_array_keys<'mcx>(
             (rd_indoption(rel, arrayKeyData[numArrayKeyDataPos as usize].sk_attno) & INDOPTION_DESC)
                 != 0;
         let cur_copy = arrayKeyData[numArrayKeyDataPos as usize].clone();
-        let num_elems =
-            _bt_sort_array_elements(&cur_copy, sortproc_val, reverse, elem_values.as_mut_slice())?;
+        let num_elems = _bt_sort_array_elements(
+            *rel.rd_opcintype.allocator(),
+            &cur_copy,
+            sortproc_val,
+            reverse,
+            elem_values.as_mut_slice(),
+        )?;
         elem_values.truncate(num_elems as usize);
 
         if origarrayatt == arrayKeyData[numArrayKeyDataPos as usize].sk_attno {
@@ -2221,12 +2218,15 @@ fn _bt_find_extreme_element<'mcx>(
     debug_assert!(nelems > 0);
     let mut result = elems[0].clone();
     for i in 1..nelems as usize {
-        if datum_get_bool(function_call2_coll_oid(
+        if function_call2_coll_oid(
+            *rel.rd_opcintype.allocator(),
             cmp_proc,
             skey.sk_collation,
             &elems[i],
             &result,
-        )?) {
+        )?
+        .as_bool()
+        {
             result = elems[i].clone();
         }
     }
@@ -2310,6 +2310,7 @@ fn _bt_setup_array_cmp<'mcx>(
 /// `_bt_sort_array_elements()` — sort and de-dup array elements in place;
 /// returns the new element count.
 fn _bt_sort_array_elements<'mcx>(
+    mcx: Mcx<'mcx>,
     skey: &ScanKeyData<'mcx>,
     sortproc: u64,
     reverse: bool,
@@ -2321,6 +2322,7 @@ fn _bt_sort_array_elements<'mcx>(
     }
 
     let cxt = BtSortArrayContext {
+        mcx,
         sortproc,
         collation: skey.sk_collation,
         reverse,
@@ -2405,6 +2407,7 @@ fn _bt_merge_arrays<'mcx>(
     }
 
     let cxt = BtSortArrayContext {
+        mcx: *rel.rd_opcintype.allocator(),
         sortproc: mergeproc,
         collation: skey.sk_collation,
         reverse,
@@ -2442,14 +2445,16 @@ fn _bt_merge_arrays<'mcx>(
 fn _bt_compare_array_elements<'mcx>(
     da: &Datum<'mcx>,
     db: &Datum<'mcx>,
-    cxt: &BtSortArrayContext,
+    cxt: &BtSortArrayContext<'mcx>,
 ) -> PgResult<i32> {
-    let mut compare = datum_get_int32(function_call2_coll_oid(
+    let mut compare = function_call2_coll_oid(
+        cxt.mcx,
         cxt.sortproc as u32, // sortproc handle's low 32 bits carry the proc OID
         cxt.collation,
         da,
         db,
-    )?);
+    )?
+    .as_i32();
     if cxt.reverse {
         compare = invert_compare_result(compare);
     }

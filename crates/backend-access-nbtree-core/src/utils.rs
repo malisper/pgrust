@@ -219,18 +219,6 @@ fn datum_get_bool(d: types_datum::Datum) -> bool {
     (d.as_usize() & 1) != 0
 }
 
-/// `DatumGetInt32(d)` — a btree ORDER support proc returns an int32.
-#[inline]
-fn datum_get_int32(d: types_datum::Datum) -> i32 {
-    d.as_i32()
-}
-
-/// Convert a canonical `Datum<'mcx>` into the bare-word `types_datum::Datum`
-/// the fmgr seams dispatch on (mirrors `nbtpreprocesskeys::to_word`).
-#[inline]
-fn to_word(d: &Datum) -> types_datum::Datum {
-    types_datum::Datum::from_usize(d.as_usize())
-}
 
 /// The `fn_oid` carried by an ORDER-proc fmgr handle (low 32 bits). The
 /// `so->orderProcs[]` slots are `u64` handles whose low word is the proc OID
@@ -727,12 +715,13 @@ pub fn bt_freestack(stack: BTStack) {
 /// `_bt_compare_array_skey()` — apply array comparison function. Compares
 /// caller's tuple attribute value to a scan key/array element. Returns `<0`,
 /// `0`, `>0`.
-fn bt_compare_array_skey(
+fn bt_compare_array_skey<'mcx>(
+    mcx: Mcx<'mcx>,
     orderproc_handle: u64,
-    tupdatum: &Datum,
+    tupdatum: &Datum<'mcx>,
     tupnull: bool,
-    arrdatum: &Datum,
-    cur: &ScanKeyData,
+    arrdatum: &Datum<'mcx>,
+    cur: &ScanKeyData<'mcx>,
 ) -> PgResult<i32> {
     debug_assert!(cur.sk_strategy == BTEqualStrategyNumber);
     debug_assert!((cur.sk_flags & (SK_BT_MINVAL | SK_BT_MAXVAL)) == 0);
@@ -757,12 +746,16 @@ fn bt_compare_array_skey(
         }
     } else {
         // Like _bt_compare, the left value must come from the index tuple.
-        result = datum_get_int32(fmgr::function_call2_coll::call(
+        // Canonical `Datum` lane so by-reference array element types reach the
+        // ordering proc (bare-word dispatch panics on a by-reference value).
+        result = fmgr::function_call2_coll_datum::call(
+            mcx,
             handle_fn_oid(orderproc_handle),
             cur.sk_collation,
-            to_word(tupdatum),
-            to_word(arrdatum),
-        )?);
+            tupdatum.clone(),
+            arrdatum.clone(),
+        )?
+        .as_i32();
 
         // Flip the sign whenever the column is a DESC column.
         if (cur.sk_flags & SK_BT_DESC) != 0 {
@@ -780,14 +773,15 @@ fn bt_compare_array_skey(
 /// `_bt_binsrch_array_skey()` — Binary search for next matching array key.
 /// Returns an index to the first array element >= caller's tupdatum, and sets
 /// `*set_elem_result` to the comparison of that element against tupdatum.
-fn bt_binsrch_array_skey(
+fn bt_binsrch_array_skey<'mcx>(
+    mcx: Mcx<'mcx>,
     orderproc_handle: u64,
     cur_elem_trig: bool,
     dir: ScanDirection,
-    tupdatum: &Datum,
+    tupdatum: &Datum<'mcx>,
     tupnull: bool,
-    array: &BTArrayKeyInfo,
-    cur: &ScanKeyData,
+    array: &BTArrayKeyInfo<'mcx>,
+    cur: &ScanKeyData<'mcx>,
 ) -> PgResult<(i32, i32)> {
     let mut low_elem: i32 = 0;
     let mut mid_elem: i32 = -1;
@@ -809,6 +803,7 @@ fn bt_binsrch_array_skey(
             // Compare prospective new cur_elem (also the new lower bound).
             if high_elem >= low_elem {
                 result = bt_compare_array_skey(
+                    mcx,
                     orderproc_handle,
                     tupdatum,
                     tupnull,
@@ -834,6 +829,7 @@ fn bt_binsrch_array_skey(
             // Compare prospective new cur_elem (also the new upper bound).
             if high_elem >= low_elem {
                 result = bt_compare_array_skey(
+                    mcx,
                     orderproc_handle,
                     tupdatum,
                     tupnull,
@@ -859,6 +855,7 @@ fn bt_binsrch_array_skey(
     while high_elem > low_elem {
         mid_elem = low_elem + ((high_elem - low_elem) / 2);
         result = bt_compare_array_skey(
+            mcx,
             orderproc_handle,
             tupdatum,
             tupnull,
@@ -883,6 +880,7 @@ fn bt_binsrch_array_skey(
     // datum: always set *set_elem_result with that comparison specifically.
     if low_elem != mid_elem {
         result = bt_compare_array_skey(
+            mcx,
             orderproc_handle,
             tupdatum,
             tupnull,
@@ -900,13 +898,14 @@ fn bt_binsrch_array_skey(
 
 /// `_bt_binsrch_skiparray_skey()` — "Binary search" within a skip array. Sets
 /// `*set_elem_result` (0 = within range, -1 = below, 1 = above).
-fn bt_binsrch_skiparray_skey(
+fn bt_binsrch_skiparray_skey<'mcx>(
+    mcx: Mcx<'mcx>,
     cur_elem_trig: bool,
     dir: ScanDirection,
-    tupdatum: &Datum,
+    tupdatum: &Datum<'mcx>,
     tupnull: bool,
-    array: &BTArrayKeyInfo,
-    cur: &ScanKeyData,
+    array: &BTArrayKeyInfo<'mcx>,
+    cur: &ScanKeyData<'mcx>,
 ) -> PgResult<i32> {
     debug_assert!((cur.sk_flags & SK_BT_SKIP) != 0);
     debug_assert!((cur.sk_flags & SK_SEARCHARRAY) != 0);
@@ -933,22 +932,22 @@ fn bt_binsrch_skiparray_skey(
     if ScanDirectionIsForward(dir) {
         if !cur_elem_trig
             && array.low_compare.is_some()
-            && !skipcmp(array.low_compare.as_ref().unwrap(), tupdatum)?
+            && !skipcmp(mcx, array.low_compare.as_ref().unwrap(), tupdatum)?
         {
             set_elem_result = -1;
         } else if array.high_compare.is_some()
-            && !skipcmp(array.high_compare.as_ref().unwrap(), tupdatum)?
+            && !skipcmp(mcx, array.high_compare.as_ref().unwrap(), tupdatum)?
         {
             set_elem_result = 1;
         }
     } else {
         if !cur_elem_trig
             && array.high_compare.is_some()
-            && !skipcmp(array.high_compare.as_ref().unwrap(), tupdatum)?
+            && !skipcmp(mcx, array.high_compare.as_ref().unwrap(), tupdatum)?
         {
             set_elem_result = 1;
         } else if array.low_compare.is_some()
-            && !skipcmp(array.low_compare.as_ref().unwrap(), tupdatum)?
+            && !skipcmp(mcx, array.low_compare.as_ref().unwrap(), tupdatum)?
         {
             set_elem_result = -1;
         }
@@ -959,13 +958,15 @@ fn bt_binsrch_skiparray_skey(
 
 /// `DatumGetBool(FunctionCall2Coll(&cmp->sk_func, cmp->sk_collation, tupdatum,
 /// cmp->sk_argument))` — evaluate a skip array's low/high boundary comparison.
-fn skipcmp(cmp: &ScanKeyData, tupdatum: &Datum) -> PgResult<bool> {
-    Ok(datum_get_bool(fmgr::function_call2_coll::call(
+fn skipcmp<'mcx>(mcx: Mcx<'mcx>, cmp: &ScanKeyData<'mcx>, tupdatum: &Datum<'mcx>) -> PgResult<bool> {
+    Ok(fmgr::function_call2_coll_datum::call(
+        mcx,
         cmp.sk_func.fn_oid,
         cmp.sk_collation,
-        to_word(tupdatum),
-        to_word(&cmp.sk_argument),
-    )?))
+        tupdatum.clone(),
+        cmp.sk_argument.clone(),
+    )?
+    .as_bool())
 }
 
 // ===========================================================================
@@ -1218,7 +1219,7 @@ fn bt_array_decrement<'mcx>(
 
     // Make sure the decremented value is still within the array's range.
     if let Some(low_compare) = &array.low_compare {
-        if !skipcmp_arg(low_compare, &dec_sk_argument)? {
+        if !skipcmp_arg(*rel.rd_opcintype.allocator(), low_compare, &dec_sk_argument)? {
             // Keep existing sk_argument after all.
             // (by-ref dec_sk_argument would be pfree'd here; unmodelled.)
             return Ok(false);
@@ -1306,7 +1307,7 @@ fn bt_array_increment<'mcx>(
 
     // Make sure the incremented value is still within the array's range.
     if let Some(high_compare) = &array.high_compare {
-        if !skipcmp_arg(high_compare, &inc_sk_argument)? {
+        if !skipcmp_arg(*rel.rd_opcintype.allocator(), high_compare, &inc_sk_argument)? {
             return Ok(false);
         }
     }
@@ -1319,13 +1320,15 @@ fn bt_array_increment<'mcx>(
 
 /// `DatumGetBool(FunctionCall2Coll(&cmp->sk_func, cmp->sk_collation, value,
 /// cmp->sk_argument))` for the array increment/decrement range checks.
-fn skipcmp_arg(cmp: &ScanKeyData, value: &Datum) -> PgResult<bool> {
-    Ok(datum_get_bool(fmgr::function_call2_coll::call(
+fn skipcmp_arg<'mcx>(mcx: Mcx<'mcx>, cmp: &ScanKeyData<'mcx>, value: &Datum<'mcx>) -> PgResult<bool> {
+    Ok(fmgr::function_call2_coll_datum::call(
+        mcx,
         cmp.sk_func.fn_oid,
         cmp.sk_collation,
-        to_word(value),
-        to_word(&cmp.sk_argument),
-    )?))
+        value.clone(),
+        cmp.sk_argument.clone(),
+    )?
+    .as_bool())
 }
 
 /// Project a `'static` (by-value) datum produced by the skip-support callbacks
@@ -1457,6 +1460,7 @@ fn bt_tuple_before_array_skeys<'mcx>(
             let orderproc = so.orderProcs[ikey as usize];
             let arg = so.keyData[ikey as usize].sk_argument.clone();
             let mut r = bt_compare_array_skey(
+                *rel.rd_opcintype.allocator(),
                 orderproc,
                 &tupdatum,
                 tupnull,
@@ -1491,6 +1495,7 @@ fn bt_tuple_before_array_skeys<'mcx>(
                 }
             }
             result = bt_binsrch_skiparray_skey(
+                *rel.rd_opcintype.allocator(),
                 false,
                 dir,
                 &tupdatum,
@@ -1719,6 +1724,7 @@ fn bt_advance_array_keys<'mcx>(
             if so.arrayKeys[this_array_idx as usize].num_elems == -1 {
                 // Skip array binary search.
                 result = bt_binsrch_skiparray_skey(
+                    *rel.rd_opcintype.allocator(),
                     cur_elem_trig,
                     dir,
                     &tupdatum,
@@ -1730,6 +1736,7 @@ fn bt_advance_array_keys<'mcx>(
                 // SAOP array binary search.
                 let orderproc = so.orderProcs[ikey as usize];
                 let (se, r) = bt_binsrch_array_skey(
+                    *rel.rd_opcintype.allocator(),
                     orderproc,
                     cur_elem_trig,
                     dir,
@@ -1747,6 +1754,7 @@ fn bt_advance_array_keys<'mcx>(
             let orderproc = so.orderProcs[ikey as usize];
             let arg = so.keyData[ikey as usize].sk_argument.clone();
             result = bt_compare_array_skey(
+                *rel.rd_opcintype.allocator(),
                 orderproc,
                 &tupdatum,
                 tupnull,
@@ -2316,6 +2324,7 @@ pub fn bt_set_startikey<'mcx>(
                 index_getattr(firsttup, key_attno as AttrNumber, rel)?;
             let orderproc = so.orderProcs[startikey as usize];
             let (_se, result) = bt_binsrch_array_skey(
+                *rel.rd_opcintype.allocator(),
                 orderproc,
                 false,
                 ScanDirection::NoMovementScanDirection,
@@ -2348,6 +2357,7 @@ pub fn bt_set_startikey<'mcx>(
         let (lastdatum, lastnull) = index_getattr(lasttup, key_attno as AttrNumber, rel)?;
 
         let r1 = bt_binsrch_skiparray_skey(
+            *rel.rd_opcintype.allocator(),
             false,
             ScanDirection::ForwardScanDirection,
             &firstdatum,
@@ -2359,6 +2369,7 @@ pub fn bt_set_startikey<'mcx>(
             break; // unsafe
         }
         let r2 = bt_binsrch_skiparray_skey(
+            *rel.rd_opcintype.allocator(),
             false,
             ScanDirection::ForwardScanDirection,
             &lastdatum,
@@ -2629,13 +2640,17 @@ fn bt_check_rowcompare<'mcx>(
             return Ok(false);
         }
 
-        // Three-way comparison, not bool operator.
-        cmpresult = datum_get_int32(fmgr::function_call2_coll::call(
+        // Three-way comparison, not bool operator. Canonical `Datum` lane so
+        // by-reference column types reach the support proc (bare-word dispatch
+        // cannot carry a by-reference value and would panic).
+        cmpresult = fmgr::function_call2_coll_datum::call(
+            *rel.rd_opcintype.allocator(),
             subkey.sk_func.fn_oid,
             subkey.sk_collation,
-            to_word(&datum),
-            to_word(&subkey.sk_argument),
-        )?);
+            datum.clone(),
+            subkey.sk_argument.clone(),
+        )?
+        .as_i32();
 
         if (subkey.sk_flags & SK_BT_DESC) != 0 {
             cmpresult = invert_compare_result(cmpresult);
@@ -3452,13 +3467,20 @@ fn bt_keep_natts<'mcx>(
             break;
         }
 
+        // Use the canonical per-attribute `Datum` lane so by-reference index
+        // column types (`name`/`text`/`varlena`) pass their payloads to the
+        // ordering support proc — a bare-word dispatch cannot carry them (it
+        // would read a by-reference value as a scalar word and panic).
         if !is_null1
-            && datum_get_int32(fmgr::function_call2_coll::call(
+            && fmgr::function_call2_coll_datum::call(
+                *rel.rd_opcintype.allocator(),
                 scankey.sk_func.fn_oid,
                 scankey.sk_collation,
-                to_word(&datum1),
-                to_word(&datum2),
-            )?) != 0
+                datum1.clone(),
+                datum2.clone(),
+            )?
+            .as_i32()
+                != 0
         {
             break;
         }
