@@ -16070,9 +16070,12 @@ version = "0.0.0"
 dependencies = [
  "backend-statistics-core-seams",
  "backend-utils-adt-varlena",
+ "backend-utils-fmgr-core",
  "mcx",
  "types-core",
+ "types-datum",
  "types-error",
+ "types-fmgr",
  "types-statistics",
 ]
 
@@ -16119,9 +16122,12 @@ version = "0.0.0"
 dependencies = [
  "backend-statistics-core-seams",
  "backend-utils-adt-varlena",
+ "backend-utils-fmgr-core",
  "mcx",
  "types-core",
+ "types-datum",
  "types-error",
+ "types-fmgr",
  "types-statistics",
 ]
 
@@ -23880,7 +23886,9 @@ dependencies = [
  "backend-rewrite-rewritehandler",
  "backend-rmgrdesc-next",
  "backend-snowball-dict-snowball",
+ "backend-statistics-dependencies",
  "backend-statistics-extended-stats",
+ "backend-statistics-mvdistinct",
  "backend-storage-aio-methods",
  "backend-storage-aio-read-stream",
  "backend-storage-buffer-bufmgr",

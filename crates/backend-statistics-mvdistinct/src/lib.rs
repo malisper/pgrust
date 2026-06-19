@@ -780,12 +780,15 @@ fn write_attnum(buf: &mut [u8], tmp: &mut usize, v: AttrNumber) {
     *tmp += SIZE_ATTRNUMBER;
 }
 
-/// This crate installs NO inward seams — its public functions are called only by
-/// the (unported) `backend-statistics-core` dispatcher and the fmgr catalog,
-/// neither of which is in-repo yet. Present so the aggregator can invoke it
-/// uniformly; the recurrence guard only requires wiring for crates that actually
-/// install a seam.
-pub fn init_seams() {}
+pub mod fmgr_builtins;
+
+/// Registers the `pg_ndistinct` I/O builtins into the fmgr-core builtin table
+/// (C: `fmgr_builtins[]`), so by-OID dispatch resolves them. The rest of this
+/// crate's functions are called by the (unported) `backend-statistics-core`
+/// dispatcher.
+pub fn init_seams() {
+    fmgr_builtins::register_mvdistinct_builtins();
+}
 
 #[cfg(test)]
 mod tests;

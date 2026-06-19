@@ -14,4 +14,7 @@ types-error = { path = "../types-error" }
 types-statistics = { path = "../types-statistics" }
 mcx = { path = "../mcx" }
 backend-utils-adt-varlena = { path = "../backend-utils-adt-varlena" }
+types-datum = { path = "../types-datum" }
+types-fmgr = { path = "../types-fmgr" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 backend-statistics-core-seams = { path = "../backend-statistics-core-seams" }

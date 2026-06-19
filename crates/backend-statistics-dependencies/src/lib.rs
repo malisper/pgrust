@@ -746,7 +746,15 @@ pub fn pg_dependencies_send<'mcx>(
 /// neither of which is in-repo yet. Present so the aggregator can invoke it
 /// uniformly if it ever needs to; the recurrence guard only requires wiring for
 /// crates that actually install a seam.
-pub fn init_seams() {}
+pub mod fmgr_builtins;
+
+/// Registers the `pg_dependencies` I/O builtins into the fmgr-core builtin table
+/// (C: `fmgr_builtins[]`), so by-OID dispatch resolves them. The rest of this
+/// crate's functions are called by the (unported) `backend-statistics-core`
+/// dispatcher.
+pub fn init_seams() {
+    fmgr_builtins::register_dependencies_builtins();
+}
 
 #[cfg(test)]
 mod tests;
