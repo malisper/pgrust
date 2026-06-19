@@ -22,11 +22,11 @@ use types_opclass::{
 /// `strVal(node)` — the text of a `String` value node, mirroring C's
 /// `castNode(String, node)->sval`. A non-`String` node is an internal error.
 fn string_node(node: &Node<'_>, ctx: &str) -> PgResult<StringNode> {
-    match node {
-        Node::String(s) => Ok(StringNode {
+    match node.as_string() {
+        Some(s) => Ok(StringNode {
             sval: Some(s.sval.as_str().to_string()),
         }),
-        _ => Err(ereport(ERROR).errmsg_internal(ctx.to_string()).into_error()),
+        None => Err(ereport(ERROR).errmsg_internal(ctx.to_string()).into_error()),
     }
 }
 
@@ -43,9 +43,9 @@ fn type_name(tn: &PTypeName<'_>) -> PgResult<TypeName> {
     let names: Vec<String> = tn
         .names
         .iter()
-        .map(|n| match &**n {
-            Node::String(s) => Ok(s.sval.as_str().to_string()),
-            _ => Err(ereport(ERROR)
+        .map(|n| match (**n).as_string() {
+            Some(s) => Ok(s.sval.as_str().to_string()),
+            None => Err(ereport(ERROR)
                 .errmsg_internal("opclasscmds: TypeName.names element is not a String")
                 .into_error()),
         })
@@ -62,9 +62,9 @@ fn type_name(tn: &PTypeName<'_>) -> PgResult<TypeName> {
 
 /// Resolve a `Node *` that must be a `TypeName`.
 fn node_type_name(node: &Node<'_>, ctx: &str) -> PgResult<TypeName> {
-    match node {
-        Node::TypeName(tn) => type_name(tn),
-        _ => Err(ereport(ERROR).errmsg_internal(ctx.to_string()).into_error()),
+    match node.as_typename() {
+        Some(tn) => type_name(tn),
+        None => Err(ereport(ERROR).errmsg_internal(ctx.to_string()).into_error()),
     }
 }
 
@@ -90,9 +90,9 @@ fn object_with_args(owa: &pnode::ObjectWithArgs<'_>) -> PgResult<ObjectWithArgs>
 
 /// Resolve a `Node *` that must be an `ObjectWithArgs`.
 fn node_object_with_args(node: &Node<'_>) -> PgResult<ObjectWithArgs> {
-    match node {
-        Node::ObjectWithArgs(owa) => object_with_args(owa),
-        _ => Err(ereport(ERROR)
+    match node.as_objectwithargs() {
+        Some(owa) => object_with_args(owa),
+        None => Err(ereport(ERROR)
             .errmsg_internal("opclasscmds: item->name is not an ObjectWithArgs")
             .into_error()),
     }
@@ -100,9 +100,9 @@ fn node_object_with_args(node: &Node<'_>) -> PgResult<ObjectWithArgs> {
 
 /// Flatten a parse-node `CreateOpClassItem`.
 fn opclass_item(node: &Node<'_>) -> PgResult<CreateOpClassItem> {
-    let item = match node {
-        Node::CreateOpClassItem(it) => it,
-        _ => {
+    let item = match node.as_createopclassitem() {
+        Some(it) => it,
+        None => {
             return Err(ereport(ERROR)
                 .errmsg_internal("opclasscmds: items list element is not a CreateOpClassItem")
                 .into_error());
