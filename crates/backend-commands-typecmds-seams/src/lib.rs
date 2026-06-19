@@ -11,25 +11,6 @@ use types_core::Oid;
 use types_error::PgResult;
 use types_parsenodes::Node;
 
-/// Owned projection of the `RangeVar *typevar` that `DefineCompositeType`
-/// passes to `DefineRelation` (the composite relation's name + persistence).
-/// Carried by value so the seam does not bind an arena lifetime; the owner
-/// reconstructs the `CreateStmt->relation` from it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TypeCmdsRangeVar {
-    /// `catalogname` — None if unqualified.
-    pub catalogname: Option<String>,
-    /// `schemaname` — None if unqualified.
-    pub schemaname: Option<String>,
-    /// `relname`.
-    pub relname: Option<String>,
-    /// `bool inh`.
-    pub inh: bool,
-    /// `char relpersistence`.
-    pub relpersistence: i8,
-    /// `ParseLoc location`.
-    pub location: i32,
-}
 
 seam_core::seam!(
     /// `AlterTypeOwner_oid(typeOid, newOwnerId, hasDependEntry)` (typecmds.c):
@@ -93,19 +74,6 @@ seam_core::seam!(
         range_oid: Oid,
         range_array_oid: Oid,
     ) -> PgResult<Oid>
-);
-
-seam_core::seam!(
-    /// `DefineRelation(createStmt, RELKIND_COMPOSITE_TYPE, InvalidOid, &address,
-    /// NULL)` (tablecmds.c) as called by `DefineCompositeType` (typecmds.c:2600).
-    /// The composite `CreateStmt` is built from `typevar` + `coldeflist` inside
-    /// the owner; it returns the created relation's `ObjectAddress`.
-    ///
-    /// PANICS until `DefineRelation` (commands/tablecmds.c) is ported.
-    pub fn define_relation_composite(
-        typevar: TypeCmdsRangeVar,
-        coldeflist: Vec<Node>,
-    ) -> PgResult<ObjectAddress>
 );
 
 // ---------------------------------------------------------------------------
