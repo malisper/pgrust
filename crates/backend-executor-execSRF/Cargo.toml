@@ -36,6 +36,11 @@ backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 backend-utils-fmgr-funcapi = { path = "../backend-utils-fmgr-funcapi" }
 backend-utils-adt-int = { path = "../backend-utils-adt-int" }
 backend-utils-adt-int8 = { path = "../backend-utils-adt-int8" }
+# generate_series(timestamp/timestamptz) value cores: interval sign / finite
+# test, timestamp comparison, and the timestamp/timestamptz + interval
+# arithmetic (incl. the named-zone variant).
+backend-utils-adt-datetime = { path = "../backend-utils-adt-datetime" }
+types-datetime = { path = "../types-datetime" }
 
 # pg_input_error_info(text, text) RETURNS record (OID 6211): its soft-error
 # value core (misc), the text<->cstring varlena marshalling, and heap tuple

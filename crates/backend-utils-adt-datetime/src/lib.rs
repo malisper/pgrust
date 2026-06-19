@@ -167,8 +167,9 @@ pub use decode::{
 
 // TIMESTAMP / TIMESTAMPTZ cores.
 pub use timestamp::{
-    AdjustTimestampForTypmod, DtResult, GetCurrentTimestamp, SetEpochTimestamp, IS_VALID_TIMESTAMP,
-    TIMESTAMP_IS_NOBEGIN, TIMESTAMP_IS_NOEND, TIMESTAMP_NOT_FINITE,
+    timestamp_cmp_internal, timestamp_pl_interval, AdjustTimestampForTypmod, DtResult,
+    GetCurrentTimestamp, SetEpochTimestamp, IS_VALID_TIMESTAMP, TIMESTAMP_IS_NOBEGIN,
+    TIMESTAMP_IS_NOEND, TIMESTAMP_NOT_FINITE,
 };
 pub use timestamp::{tm2timestamp, timestamp2tm};
 pub use timestamp::{

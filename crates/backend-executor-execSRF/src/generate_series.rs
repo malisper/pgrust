@@ -27,8 +27,11 @@ use backend_utils_fmgr_funcapi::srf_support::{
 };
 use mcx::{Mcx, PgBox};
 use types_core::Oid;
+use types_datetime::Interval;
+use types_error::error::ERRCODE_INVALID_PARAMETER_VALUE;
+use types_error::PgError;
 use types_nodes::execexpr::ExprDoneCond;
-use types_nodes::fmgr::FunctionCallInfoBaseData;
+use types_nodes::fmgr::{FmgrArgRef, FunctionCallInfoBaseData};
 use types_tuple::backend_access_common_heaptuple::Datum;
 
 use crate::register_srf;
@@ -40,13 +43,27 @@ const GENERATE_SERIES_INT4: Oid = 1067;
 /// `generate_series_step_int8` (OID 1068) and `generate_series_int8` (OID 1069).
 const GENERATE_SERIES_INT8_STEP: Oid = 1068;
 const GENERATE_SERIES_INT8: Oid = 1069;
+/// `generate_series_timestamp(timestamp, timestamp, interval)` (OID 938).
+const GENERATE_SERIES_TIMESTAMP: Oid = 938;
+/// `generate_series_timestamptz(timestamptz, timestamptz, interval)` (OID 939).
+const GENERATE_SERIES_TIMESTAMPTZ: Oid = 939;
+/// `generate_series_timestamptz_at_zone(timestamptz, timestamptz, interval,
+/// text)` (OID 6274) — the 4-arg form doing arithmetic in a named zone.
+const GENERATE_SERIES_TIMESTAMPTZ_AT_ZONE: Oid = 6274;
 
-/// Register the int4/int8 `generate_series` SRFs in the executor-frame table.
+/// Register the int4/int8/timestamp `generate_series` SRFs in the executor-frame
+/// table.
 pub(crate) fn register_generate_series() {
     register_srf(GENERATE_SERIES_INT4_STEP, generate_series_step_int4);
     register_srf(GENERATE_SERIES_INT4, generate_series_step_int4);
     register_srf(GENERATE_SERIES_INT8_STEP, generate_series_step_int8);
     register_srf(GENERATE_SERIES_INT8, generate_series_step_int8);
+    register_srf(GENERATE_SERIES_TIMESTAMP, generate_series_timestamp);
+    register_srf(GENERATE_SERIES_TIMESTAMPTZ, generate_series_timestamptz);
+    register_srf(
+        GENERATE_SERIES_TIMESTAMPTZ_AT_ZONE,
+        generate_series_timestamptz,
+    );
 }
 
 /// Erase a `'static` cross-call state value into the
@@ -204,4 +221,176 @@ fn set_isdone(fcinfo: &mut FunctionCallInfoBaseData<'_>, cond: ExprDoneCond) {
         .as_mut()
         .expect("resultinfo present for an SRF call")
         .isDone = cond;
+}
+
+// ---------------------------------------------------------------------------
+// generate_series(timestamp/timestamptz) — timestamp.c
+// ---------------------------------------------------------------------------
+
+/// Decode the by-reference `interval` argument `index` (C: `PG_GETARG_INTERVAL_P`).
+/// The boundary carries the 16-byte `Interval` POD image
+/// (`time:i64, day:i32, month:i32`, little-endian, no alignment padding) on the
+/// by-ref side channel, exactly as the fmgr-builtin adapters marshal it.
+fn arg_interval(fcinfo: &FunctionCallInfoBaseData<'_>, index: usize) -> Interval {
+    let image = match fcinfo.ref_arg(index) {
+        Some(FmgrArgRef::Varlena(b)) => b.as_slice(),
+        _ => panic!("generate_series_timestamp: interval arg {index} missing from by-ref lane"),
+    };
+    Interval {
+        time: i64::from_le_bytes(image[0..8].try_into().expect("interval image >= 16 bytes")),
+        day: i32::from_le_bytes(image[8..12].try_into().expect("interval image >= 16 bytes")),
+        month: i32::from_le_bytes(image[12..16].try_into().expect("interval image >= 16 bytes")),
+    }
+}
+
+/// Decode the by-reference `text` argument `index` into an owned `String`
+/// (C: `PG_GETARG_TEXT_PP` + `text_to_cstring`). The boundary carries the
+/// header-ful varlena image; skip the 4-byte length word to reach `VARDATA_ANY`.
+fn arg_text(fcinfo: &FunctionCallInfoBaseData<'_>, index: usize) -> String {
+    let image = match fcinfo.ref_arg(index) {
+        Some(FmgrArgRef::Varlena(b)) => b.as_slice(),
+        _ => panic!("generate_series_timestamp: text arg {index} missing from by-ref lane"),
+    };
+    let payload = if image.len() >= 4 { &image[4..] } else { image };
+    core::str::from_utf8(payload)
+        .expect("generate_series_timestamp: invalid UTF-8 text arg")
+        .to_owned()
+}
+
+/// Validate a `generate_series` step interval (C: the `interval_sign(&step) == 0`
+/// and `INTERVAL_NOT_FINITE(&step)` guards in `generate_series_timestamp`),
+/// raising the structured `PgError` through the dispatch boundary's
+/// `catch_unwind` (as the int4/int8 cores do for their zero-step error).
+fn check_series_step(step: &Interval) -> i32 {
+    let sign = backend_utils_adt_datetime::interval_sign(step);
+    if sign == 0 {
+        std::panic::panic_any(
+            PgError::error("step size cannot equal zero")
+                .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
+        );
+    }
+    if backend_utils_adt_datetime::INTERVAL_NOT_FINITE(step) {
+        std::panic::panic_any(
+            PgError::error("step size cannot be infinite")
+                .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
+        );
+    }
+    sign
+}
+
+/// Cross-call state for `generate_series_timestamp` /
+/// `generate_series_timestamptz_internal` (C: `generate_series_timestamp_fctx`).
+/// `attimezone` carries the optional named zone for the at-zone variant; `None`
+/// is the session zone (`PG_NARGS() != 4`, where C stores `session_timezone`).
+#[derive(Debug)]
+struct GenerateSeriesTimestamp {
+    current: i64,
+    finish: i64,
+    step: Interval,
+    step_sign: i32,
+    attimezone: Option<String>,
+}
+
+/// `generate_series_timestamp(PG_FUNCTION_ARGS)` (timestamp.c:6668) over the
+/// executor frame. `current`/`finish` are `Timestamp` (local time); the step is
+/// added with `timestamp_pl_interval`.
+fn generate_series_timestamp<'mcx>(
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+) -> Datum<'mcx> {
+    series_timestamp(fcinfo, false)
+}
+
+/// `generate_series_timestamptz_internal(fcinfo)` (timestamp.c:6752) over the
+/// executor frame. Shared by `generate_series_timestamptz` (OID 939) and
+/// `generate_series_timestamptz_at_zone` (OID 6274); the 4-arg form decodes a
+/// named zone, the 3-arg form uses the session zone. Arithmetic uses
+/// `timestamptz_pl_interval{,_at_zone}` (TZ-aware addition).
+fn generate_series_timestamptz<'mcx>(
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+) -> Datum<'mcx> {
+    series_timestamp(fcinfo, true)
+}
+
+/// Shared driver for the timestamp / timestamptz `generate_series`. `tz` selects
+/// the TZ-aware (`timestamptz`) arithmetic; otherwise local `timestamp`
+/// arithmetic.
+fn series_timestamp<'mcx>(
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+    tz: bool,
+) -> Datum<'mcx> {
+    let mcx = fcinfo
+        .fn_mcxt
+        .expect("generate_series_timestamp: fn_mcxt set by the SRF caller");
+
+    // C: if (SRF_IS_FIRSTCALL()) { ... }
+    if fcinfo.fn_extra.is_none() {
+        let start = fcinfo.args[0].value.as_i64();
+        let finish = fcinfo.args[1].value.as_i64();
+        let step = arg_interval(fcinfo, 2);
+        // C: zone = (PG_NARGS() == 4) ? PG_GETARG_TEXT_PP(3) : NULL;
+        let attimezone = if fcinfo.nargs == 4 {
+            Some(arg_text(fcinfo, 3))
+        } else {
+            None
+        };
+        let step_sign = check_series_step(&step);
+
+        init_MultiFuncCall(fcinfo).expect("init_MultiFuncCall");
+        let fctx = erase_user_fctx(
+            mcx,
+            GenerateSeriesTimestamp {
+                current: start,
+                finish,
+                step,
+                step_sign,
+                attimezone,
+            },
+        );
+        let funcctx = per_MultiFuncCall(fcinfo).expect("per_MultiFuncCall");
+        funcctx.user_fctx = Some(fctx);
+    }
+
+    let funcctx = per_MultiFuncCall(fcinfo).expect("per_MultiFuncCall");
+    let state: &mut GenerateSeriesTimestamp = funcctx
+        .user_fctx
+        .as_mut()
+        .expect("user_fctx present")
+        .downcast_mut::<GenerateSeriesTimestamp>()
+        .expect("user_fctx is GenerateSeriesTimestamp");
+
+    let result = state.current;
+    let cmp = backend_utils_adt_datetime::timestamp_cmp_internal(result, state.finish);
+    let in_range = if state.step_sign > 0 { cmp <= 0 } else { cmp >= 0 };
+
+    if in_range {
+        // C: fctx->current = ... timestamp(tz)_pl_interval(current, &step) ...
+        let next = if tz {
+            match &state.attimezone {
+                Some(zone) => backend_utils_adt_datetime::timestamptz_pl_interval_at_zone(
+                    state.current,
+                    &state.step,
+                    zone,
+                ),
+                None => backend_utils_adt_datetime::timestamptz_pl_interval(
+                    state.current,
+                    &state.step,
+                ),
+            }
+        } else {
+            backend_utils_adt_datetime::timestamp_pl_interval(state.current, &state.step)
+        };
+        match next {
+            Ok(n) => state.current = n,
+            Err(e) => std::panic::panic_any(e),
+        }
+        funcctx.call_cntr += 1;
+        set_isdone(fcinfo, ExprDoneCond::ExprMultipleResult);
+        fcinfo.isnull = false;
+        Datum::from_i64(result)
+    } else {
+        end_MultiFuncCall(fcinfo).expect("end_MultiFuncCall");
+        set_isdone(fcinfo, ExprDoneCond::ExprEndResult);
+        fcinfo.isnull = true;
+        Datum::from_i64(0)
+    }
 }
