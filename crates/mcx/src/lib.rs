@@ -580,6 +580,53 @@ pub fn leak_in<'mcx, T>(b: PgBox<'mcx, T>) -> &'mcx mut T {
     PgBox::leak(b)
 }
 
+/// Coerce a sized `PgBox<'mcx, P>` to an unsized `PgBox<'mcx, U>` (a trait
+/// object `dyn Trait`), preserving the context allocator.
+///
+/// `PgBox` is `allocator_api2::boxed::Box<T, Mcx>` on stable Rust. Stable lacks
+/// the `CoerceUnsized` impl for `Box<T, A>` (it is nightly-only), so the usual
+/// implicit `Box<P>` -> `Box<dyn U>` coercion is unavailable here. We perform
+/// the unsizing **manually**: take the box apart into its raw `*mut P` plus the
+/// allocator, let the compiler perform the legal *unsizing pointer cast*
+/// `*mut P -> *mut U` (this thin->fat cast IS stable — only the `Box` impl that
+/// hides it is not), then reassemble the box from the fat pointer + allocator.
+///
+/// The caller supplies the cast closure `coerce: |*mut P| -> *mut U` so this
+/// helper stays agnostic to which `dyn` trait `U` is (mcx does not depend on
+/// `types-nodes`). Typical call site:
+/// ```ignore
+/// let fat: PgBox<'mcx, dyn NodePayload<'mcx> + 'mcx> =
+///     mcx::box_unsize_dyn(sized, |p| p as *mut (dyn NodePayload + 'mcx));
+/// ```
+///
+/// # Safety of the two `unsafe` operations
+/// 1. `into_raw_with_allocator` yields ownership of a live, properly-aligned,
+///    non-null `*mut P` allocated by `alloc`; it is `unsafe`-free (a `Box`
+///    inverse of `new`). The closure performs `*mut P -> *mut U`, an *unsizing*
+///    coercion the compiler validates (`P: Unsize<U>`); the data address is
+///    unchanged, only a vtable is attached. No provenance or lifetime is
+///    fabricated.
+/// 2. `from_raw_in(raw, alloc)` reconstructs ownership of *exactly* the pointer
+///    and allocator just taken apart — same allocation, same allocator, no
+///    aliasing, the box has not been used in between — so it satisfies
+///    `from_raw_in`'s contract (pointer came from `Box::into_raw_with_allocator`
+///    with this allocator). The `Drop`/dealloc path is therefore identical to
+///    the original sized box (the vtable's drop glue frees `P`).
+pub fn box_unsize_dyn<'mcx, P, U>(
+    sized: PgBox<'mcx, P>,
+    coerce: impl FnOnce(*mut P) -> *mut U,
+) -> PgBox<'mcx, U>
+where
+    P: 'mcx,
+    U: ?Sized + 'mcx,
+{
+    // (1) Decompose the sized box; perform the thin->fat unsizing cast.
+    let (raw, alloc) = allocator_api2::boxed::Box::into_raw_with_allocator(sized);
+    let fat: *mut U = coerce(raw);
+    // (2) Reassemble ownership from the fat pointer + the same allocator.
+    unsafe { allocator_api2::boxed::Box::from_raw_in(fat, alloc) }
+}
+
 /// Fallible `Vec` construction with the context's OOM error. Enforces
 /// `palloc`'s `MaxAllocSize` gate on the byte size of the request.
 pub fn vec_with_capacity_in<'mcx, T>(mcx: Mcx<'mcx>, cap: usize) -> PgResult<PgVec<'mcx, T>> {

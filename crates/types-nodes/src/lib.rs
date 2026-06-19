@@ -60,6 +60,10 @@ pub mod noderesult;
 pub mod nodenestloop;
 pub mod nodesetop;
 pub mod nodes;
+/// P3 node-opaque substrate (additive, unused for now): the `NodePayload` trait,
+/// `PgNodeBox`, and `OpaqueNode` newtype that the later flip wires in. Coexists
+/// with the live `nodes::Node` enum, which is UNTOUCHED.
+pub mod opaque_node;
 /// Central generated leaf-node tree (`Node<'mcx>` + `node_tag`/`copy_node_in`/
 /// `equal_node`), built by `build.rs` from `nodetags.h` + `nodes.list`.
 pub mod node_tree;
