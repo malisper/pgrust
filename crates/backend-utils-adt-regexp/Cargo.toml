@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 backend-regex-core-seams = { path = "../backend-regex-core-seams" }
+backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
 backend-utils-adt-regexp-seams = { path = "../backend-utils-adt-regexp-seams" }
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
 backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }

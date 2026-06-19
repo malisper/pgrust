@@ -118,6 +118,51 @@ fn fc_pg_xact_status(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     }
 }
 
+/// `PG_GETARG_CSTRING(i)`: the input cstring on the by-ref lane.
+#[inline]
+fn arg_cstring<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
+    fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_cstring())
+        .expect("xid8funcs fn: cstring arg missing from by-ref lane")
+}
+
+/// Set a `cstring` (`*out`) result on the by-ref lane.
+#[inline]
+fn ret_cstring(fcinfo: &mut FunctionCallInfoBaseData, s: String) -> Datum {
+    fcinfo.set_ref_result(RefPayload::Cstring(s));
+    Datum::from_usize(0)
+}
+
+/// `pg_snapshot_in(cstring) -> pg_snapshot` (xid8funcs.c:407). The core parses
+/// (hard error context — no soft `ErrorSaveContext` on the frame) and sorts;
+/// the resulting `pg_snapshot` crosses as its header-ful varlena image.
+fn fc_pg_snapshot_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let s = arg_cstring(fcinfo, 0);
+    match crate::pg_snapshot_in(s, None) {
+        Ok(Some(snap)) => {
+            fcinfo.set_ref_result(RefPayload::Varlena(snap.to_varlena_bytes()));
+            Datum::from_usize(0)
+        }
+        Ok(None) => raise(types_error::PgError::error("pg_snapshot_in returned NULL")),
+        Err(e) => raise(e),
+    }
+}
+
+/// `pg_snapshot_out(pg_snapshot) -> cstring` (xid8funcs.c:435). The arg arrives
+/// as the header-ful `pg_snapshot` varlena image on the by-ref lane; reconstruct
+/// it and format `xmin:xmax:xip,...`.
+fn fc_pg_snapshot_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let image = fcinfo
+        .ref_arg(0)
+        .and_then(|p| p.as_varlena())
+        .expect("pg_snapshot_out: by-ref pg_snapshot arg missing from by-ref lane");
+    let snap = crate::PgSnapshot::from_varlena_bytes(image)
+        .unwrap_or_else(|| raise(types_error::PgError::error("invalid pg_snapshot image")));
+    let s = crate::pg_snapshot_out(&snap);
+    ret_cstring(fcinfo, s)
+}
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -169,5 +214,10 @@ pub fn register_xid8funcs_builtins() {
         // ---- transaction status (1 arg) ----
         builtin(3360, "pg_xact_status", 1, true, false, fc_pg_xact_status),
         builtin(5066, "pg_xact_status", 1, true, false, fc_pg_xact_status),
+        // ---- pg_snapshot I/O (txid_snapshot aliases share the OIDs) ----
+        builtin(2939, "pg_snapshot_in", 1, true, false, fc_pg_snapshot_in),
+        builtin(2940, "pg_snapshot_out", 1, true, false, fc_pg_snapshot_out),
+        builtin(5055, "pg_snapshot_in", 1, true, false, fc_pg_snapshot_in),
+        builtin(5056, "pg_snapshot_out", 1, true, false, fc_pg_snapshot_out),
     ]);
 }

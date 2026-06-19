@@ -36,6 +36,7 @@
 #![allow(clippy::too_many_arguments)]
 
 pub mod access;
+pub mod fmgr_builtins;
 pub mod io;
 pub mod op;
 pub mod parser;
@@ -43,7 +44,8 @@ pub mod parser;
 /// Install this crate's seams. The owner installs the four
 /// `tsvector_parser.c` engine seams plus `tsCompareString`,
 /// `tsquery_requires_match`, `TS_execute` and `TS_execute_ternary`, which the
-/// landed `tsquery` core and the GIN/GiST/rank support functions consume.
+/// landed `tsquery` core and the GIN/GiST/rank support functions consume, and
+/// registers the `tsvector` fmgr builtins.
 pub fn init_seams() {
     use backend_utils_adt_tsvector_core_seams as s;
     s::init_tsvector_parser::set(parser::init_tsvector_parser_seam);
@@ -54,4 +56,5 @@ pub fn init_seams() {
     s::tsquery_requires_match::set(op::tsquery_requires_match);
     s::ts_execute::set(op::ts_execute_seam);
     s::ts_execute_ternary::set(op::ts_execute_ternary_seam);
+    fmgr_builtins::register_tsvector_builtins();
 }

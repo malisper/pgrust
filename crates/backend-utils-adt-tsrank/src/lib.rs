@@ -20,10 +20,19 @@
 #![allow(clippy::needless_range_loop)]
 #![allow(clippy::too_many_arguments)]
 
+pub mod fmgr_builtins;
+
 use backend_tcop_postgres_seams as tcop;
 use backend_utils_adt_array_more_seams as array_seams;
 use backend_utils_adt_tsvector_core_seams as tsop;
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
+
+/// Register the `ts_rank` / `ts_rank_cd` fmgr builtins. This unit declares no
+/// inward seam crate (nothing calls back across a cycle), so the only install
+/// work is the builtin registration.
+pub fn init_seams() {
+    fmgr_builtins::register_tsrank_builtins();
+}
 use types_error::{
     PgError, PgResult, ERRCODE_ARRAY_SUBSCRIPT_ERROR, ERRCODE_INVALID_PARAMETER_VALUE,
 };

@@ -16,3 +16,6 @@ types-tsearch = { path = "../types-tsearch" }
 backend-utils-adt-tsvector-core-seams = { path = "../backend-utils-adt-tsvector-core-seams" }
 backend-utils-adt-array-more-seams = { path = "../backend-utils-adt-array-more-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+types-datum = { path = "../types-datum" }
+types-fmgr = { path = "../types-fmgr" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }

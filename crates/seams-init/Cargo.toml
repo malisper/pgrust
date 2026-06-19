@@ -514,6 +514,8 @@ backend-utils-adt-regexp = { path = "../backend-utils-adt-regexp" }
 backend-utils-adt-scalar-datum-core = { path = "../backend-utils-adt-scalar-datum-core" }
 backend-utils-adt-skipsupport = { path = "../backend-utils-adt-skipsupport" }
 backend-utils-adt-tsvector-core = { path = "../backend-utils-adt-tsvector-core" }
+backend-utils-adt-tsquery-core = { path = "../backend-utils-adt-tsquery-core" }
+backend-utils-adt-tsrank = { path = "../backend-utils-adt-tsrank" }
 backend-utils-adt-varchar = { path = "../backend-utils-adt-varchar" }
 backend-utils-adt-varlena = { path = "../backend-utils-adt-varlena" }
 backend-utils-adt-ri-triggers = { path = "../backend-utils-adt-ri-triggers" }

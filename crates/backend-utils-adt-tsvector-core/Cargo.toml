@@ -23,6 +23,9 @@ backend-utils-adt-array-more-seams = { path = "../backend-utils-adt-array-more-s
 backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 types-tuple = { path = "../types-tuple" }
+types-datum = { path = "../types-datum" }
+types-fmgr = { path = "../types-fmgr" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 types-ri-triggers = { path = "../types-ri-triggers" }
 backend-executor-spi = { path = "../backend-executor-spi" }
 backend-parser-coerce = { path = "../backend-parser-coerce" }

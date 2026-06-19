@@ -40,15 +40,18 @@
 #![allow(clippy::collapsible_else_if)]
 #![allow(clippy::too_many_arguments)]
 
+pub mod fmgr_builtins;
 pub mod gist;
 pub mod op;
 pub mod tsquery;
 
 /// Install this crate's seams. This unit declares no inward seam crate (no
 /// other crate calls back into the `tsquery` core across a cycle — the
-/// `QTNode` toolkit it shares lives in `backend-utils-adt-ts-small`), so
-/// `init_seams()` is a no-op, present for the uniform `seams-init` call shape.
-pub fn init_seams() {}
+/// `QTNode` toolkit it shares lives in `backend-utils-adt-ts-small`), so the
+/// only install work is registering the `tsquery` fmgr builtins.
+pub fn init_seams() {
+    fmgr_builtins::register_tsquery_builtins();
+}
 
 #[cfg(test)]
 mod tests;

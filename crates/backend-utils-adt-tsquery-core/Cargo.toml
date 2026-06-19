@@ -23,3 +23,6 @@ backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
 backend-tsearch-ts-locale-seams = { path = "../backend-tsearch-ts-locale-seams" }
 backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
 port-pgstrcasecmp = { path = "../port-pgstrcasecmp" }
+types-datum = { path = "../types-datum" }
+types-fmgr = { path = "../types-fmgr" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }

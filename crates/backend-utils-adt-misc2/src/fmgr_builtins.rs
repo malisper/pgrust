@@ -878,6 +878,156 @@ fn fc_record_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     }
 }
 
+// ===========================================================================
+// tid.c — the `tid` ItemPointer type's SQL-callable I/O, comparison, hashing
+// and min/max helpers.
+// ===========================================================================
+
+/// A `tid` arg as a `Datum<'mcx>` for the value cores: the ItemPointer's 6-byte
+/// fixed-length image (`BlockIdData{bi_hi,bi_lo}` + `uint16` offset, no varlena
+/// header) crosses on the by-ref lane verbatim. Materialize it as a `ByRef`
+/// `Datum` in `mcx`, exactly the carrier `getarg_itempointer` deref's.
+fn arg_tid<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    fcinfo: &FunctionCallInfoBaseData,
+    i: usize,
+) -> types_tuple::Datum<'mcx> {
+    let image = fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("tid fn: by-ref ItemPointer arg missing from by-ref lane");
+    types_tuple::Datum::ByRef(
+        mcx::slice_in(mcx, image).expect("tid fn: out of memory copying ItemPointer image"),
+    )
+}
+
+fn fc_tidin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let s = arg_cstring(fcinfo, 0);
+    let m = scratch_mcx();
+    let r = crate::scalars::tidin(m.mcx(), Some(s));
+    match r {
+        Ok(d) => ret_value_datum(fcinfo, d),
+        Err(e) => raise(e),
+    }
+}
+
+fn fc_tidout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let arg = arg_tid(m.mcx(), fcinfo, 0);
+    let r = crate::scalars::tidout(m.mcx(), arg);
+    match r {
+        Ok(d) => ret_value_datum(fcinfo, d),
+        Err(e) => raise(e),
+    }
+}
+
+fn fc_tidrecv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let src = fcinfo
+        .ref_arg(0)
+        .and_then(|p| p.as_varlena())
+        .expect("tidrecv: by-ref StringInfo arg missing from by-ref lane");
+    let m = scratch_mcx();
+    let r = crate::scalars::tidrecv(m.mcx(), src);
+    match r {
+        Ok(d) => ret_value_datum(fcinfo, d),
+        Err(e) => raise(e),
+    }
+}
+
+fn fc_tidsend(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let arg = arg_tid(m.mcx(), fcinfo, 0);
+    let r = crate::scalars::tidsend(m.mcx(), arg);
+    match r {
+        Ok(d) => ret_value_datum(fcinfo, d),
+        Err(e) => raise(e),
+    }
+}
+
+/// Shared `(tid, tid) -> bool` operator adapter.
+fn fc_tid_cmp_bool(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    f: fn(types_tuple::Datum<'_>, types_tuple::Datum<'_>) -> types_error::PgResult<bool>,
+) -> Datum {
+    let m = scratch_mcx();
+    let a1 = arg_tid(m.mcx(), fcinfo, 0);
+    let a2 = arg_tid(m.mcx(), fcinfo, 1);
+    match f(a1, a2) {
+        Ok(b) => ret_bool(b),
+        Err(e) => raise(e),
+    }
+}
+
+fn fc_tideq(f: &mut FunctionCallInfoBaseData) -> Datum {
+    fc_tid_cmp_bool(f, crate::scalars::tideq)
+}
+fn fc_tidne(f: &mut FunctionCallInfoBaseData) -> Datum {
+    fc_tid_cmp_bool(f, crate::scalars::tidne)
+}
+fn fc_tidlt(f: &mut FunctionCallInfoBaseData) -> Datum {
+    fc_tid_cmp_bool(f, crate::scalars::tidlt)
+}
+fn fc_tidle(f: &mut FunctionCallInfoBaseData) -> Datum {
+    fc_tid_cmp_bool(f, crate::scalars::tidle)
+}
+fn fc_tidgt(f: &mut FunctionCallInfoBaseData) -> Datum {
+    fc_tid_cmp_bool(f, crate::scalars::tidgt)
+}
+fn fc_tidge(f: &mut FunctionCallInfoBaseData) -> Datum {
+    fc_tid_cmp_bool(f, crate::scalars::tidge)
+}
+
+fn fc_bttidcmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let a1 = arg_tid(m.mcx(), fcinfo, 0);
+    let a2 = arg_tid(m.mcx(), fcinfo, 1);
+    match crate::scalars::bttidcmp(a1, a2) {
+        Ok(v) => Datum::from_i32(v),
+        Err(e) => raise(e),
+    }
+}
+
+fn fc_tidlarger(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let a1 = arg_tid(m.mcx(), fcinfo, 0);
+    let a2 = arg_tid(m.mcx(), fcinfo, 1);
+    let r = crate::scalars::tidlarger(a1, a2);
+    match r {
+        Ok(d) => ret_value_datum(fcinfo, d),
+        Err(e) => raise(e),
+    }
+}
+
+fn fc_tidsmaller(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let a1 = arg_tid(m.mcx(), fcinfo, 0);
+    let a2 = arg_tid(m.mcx(), fcinfo, 1);
+    let r = crate::scalars::tidsmaller(a1, a2);
+    match r {
+        Ok(d) => ret_value_datum(fcinfo, d),
+        Err(e) => raise(e),
+    }
+}
+
+fn fc_hashtid(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let key = arg_tid(m.mcx(), fcinfo, 0);
+    match crate::scalars::hashtid(key) {
+        Ok(v) => Datum::from_u32(v),
+        Err(e) => raise(e),
+    }
+}
+
+fn fc_hashtidextended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let key = arg_tid(m.mcx(), fcinfo, 0);
+    let seed = arg_i64(fcinfo, 1) as u64;
+    match crate::scalars::hashtidextended(key, seed) {
+        Ok(v) => Datum::from_u64(v),
+        Err(e) => raise(e),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -1041,6 +1191,22 @@ pub fn register_misc2_builtins() {
         // ---- rowtypes.c: record min/max aggregate transition helpers ----
         builtin(6375, "record_larger", 2, true, false, fc_record_larger),
         builtin(6376, "record_smaller", 2, true, false, fc_record_smaller),
+        // ---- tid.c: ItemPointer type I/O, comparison, hashing, min/max ----
+        builtin(48, "tidin", 1, true, false, fc_tidin),
+        builtin(49, "tidout", 1, true, false, fc_tidout),
+        builtin(2438, "tidrecv", 1, true, false, fc_tidrecv),
+        builtin(2439, "tidsend", 1, true, false, fc_tidsend),
+        builtin(1292, "tideq", 2, true, false, fc_tideq),
+        builtin(1265, "tidne", 2, true, false, fc_tidne),
+        builtin(2791, "tidlt", 2, true, false, fc_tidlt),
+        builtin(2793, "tidle", 2, true, false, fc_tidle),
+        builtin(2790, "tidgt", 2, true, false, fc_tidgt),
+        builtin(2792, "tidge", 2, true, false, fc_tidge),
+        builtin(2794, "bttidcmp", 2, true, false, fc_bttidcmp),
+        builtin(2795, "tidlarger", 2, true, false, fc_tidlarger),
+        builtin(2796, "tidsmaller", 2, true, false, fc_tidsmaller),
+        builtin(2233, "hashtid", 1, true, false, fc_hashtid),
+        builtin(2234, "hashtidextended", 2, true, false, fc_hashtidextended),
     ]);
 }
 
@@ -1222,5 +1388,69 @@ mod tests {
         assert_eq!(rebuilt.data.as_slice(), tuple.data.as_slice());
         // And the re-serialized image is identical (full round-trip).
         assert_eq!(rebuilt.to_datum_image(), image);
+    }
+
+    /// Dispatch `tidin('(b,o)')` (OID 48) through the registry, returning the
+    /// 6-byte ItemPointer image off the result by-ref lane.
+    fn call_tidin(s: &str) -> Vec<u8> {
+        setup();
+        let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
+        fcinfo.args = vec![types_datum::NullableDatum::value(Datum::null())];
+        fcinfo.ref_args = vec![Some(RefPayload::Cstring(s.to_string()))];
+        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(48).expect("tidin registered");
+        (entry.func.unwrap())(&mut fcinfo);
+        match fcinfo.take_ref_result().expect("tidin set a by-ref result") {
+            RefPayload::Varlena(b) => b,
+            other => panic!("tidin returned unexpected lane: {other:?}"),
+        }
+    }
+
+    /// Dispatch `tidout(tid)` (OID 49) given the ItemPointer image, returning the
+    /// rendered cstring.
+    fn call_tidout(image: &[u8]) -> String {
+        setup();
+        let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
+        fcinfo.args = vec![types_datum::NullableDatum::value(Datum::null())];
+        fcinfo.ref_args = vec![Some(RefPayload::Varlena(image.to_vec()))];
+        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(49).expect("tidout registered");
+        (entry.func.unwrap())(&mut fcinfo);
+        match fcinfo.take_ref_result().expect("tidout set a by-ref result") {
+            RefPayload::Cstring(s) => s,
+            other => panic!("tidout returned unexpected lane: {other:?}"),
+        }
+    }
+
+    /// `'(0,1)'::tid` and `'(42,7)'::tid` dispatch through the fmgr registry and
+    /// round-trip: tidin -> 6-byte image -> tidout reproduces the literal.
+    #[test]
+    fn tid_io_round_trips_through_registry() {
+        for lit in ["(0,1)", "(42,7)", "(4294967295,65535)"] {
+            let image = call_tidin(lit);
+            assert_eq!(image.len(), 6, "ItemPointer image is 6 bytes");
+            assert_eq!(call_tidout(&image), lit);
+        }
+    }
+
+    /// `tideq`/`tidne` (OID 1292/1265) dispatch through the registry over two
+    /// ItemPointer images.
+    #[test]
+    fn tid_eq_through_registry() {
+        let a = call_tidin("(0,1)");
+        let b = call_tidin("(0,2)");
+        let call2 = |oid: u32, x: &[u8], y: &[u8]| -> bool {
+            setup();
+            let mut fcinfo = FunctionCallInfoBaseData::new(None, 2, 0, None, None);
+            fcinfo.args = vec![
+                types_datum::NullableDatum::value(Datum::null()),
+                types_datum::NullableDatum::value(Datum::null()),
+            ];
+            fcinfo.ref_args =
+                vec![Some(RefPayload::Varlena(x.to_vec())), Some(RefPayload::Varlena(y.to_vec()))];
+            let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid).expect("registered");
+            (entry.func.unwrap())(&mut fcinfo).as_bool()
+        };
+        assert!(call2(1292, &a, &a)); // tideq: (0,1) == (0,1)
+        assert!(!call2(1292, &a, &b)); // tideq: (0,1) != (0,2)
+        assert!(call2(1265, &a, &b)); // tidne
     }
 }

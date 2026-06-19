@@ -589,6 +589,56 @@ fn fc_regexp_substr(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 
 // ---------------------------------------------------------------------------
+// fc_ adapters — regexp_match (non-set-returning; returns text[]).
+// ---------------------------------------------------------------------------
+
+/// Set a `text[]` result on the by-ref `Varlena` lane: build the `ArrayType`
+/// varlena image (header-ful, per-element NULLs preserved) from the value core's
+/// `Vec<Option<payload>>`, then cross it verbatim. `None` for the whole result
+/// (no match) is `PG_RETURN_NULL()`.
+fn ret_text_array(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    m: &mcx::MemoryContext,
+    result: Option<PgVec<'_, Option<PgVec<'_, u8>>>>,
+) -> Datum {
+    match result {
+        None => ret_null(fcinfo),
+        Some(elems) => {
+            // Borrow each element's payload bytes (None => SQL NULL element).
+            let views: Vec<Option<&[u8]>> =
+                elems.iter().map(|e| e.as_ref().map(|p| p.as_slice())).collect();
+            let image = ok(backend_utils_adt_arrayfuncs::construct::build_text_array_nullable(
+                m.mcx(),
+                &views,
+            ));
+            fcinfo.set_ref_result(RefPayload::Varlena(image.as_slice().to_vec()));
+            Datum::from_usize(0)
+        }
+    }
+}
+
+/// `regexp_match(text, text, text) -> text[]` (OID 3397).
+fn fc_regexp_match(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    let s = arg_text(fcinfo, 0);
+    let p = arg_text(fcinfo, 1);
+    let flags = arg_text(fcinfo, 2);
+    let r = ok(crate::regexp_match(m.mcx(), s, p, Some(flags), c));
+    ret_text_array(fcinfo, &m, r)
+}
+
+/// `regexp_match(text, text) -> text[]` (OID 3396, `regexp_match_no_flags`).
+fn fc_regexp_match_no_flags(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let c = collation(fcinfo);
+    let s = arg_text(fcinfo, 0);
+    let p = arg_text(fcinfo, 1);
+    let r = ok(crate::regexp_match_no_flags(m.mcx(), s, p, c));
+    ret_text_array(fcinfo, &m, r)
+}
+
+// ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
 
@@ -660,5 +710,8 @@ pub fn register_regexp_builtins() {
         builtin(6267, "regexp_substr_no_flags", 4, true, fc_regexp_substr_no_flags),
         builtin(6268, "regexp_substr_no_subexpr", 5, true, fc_regexp_substr_no_subexpr),
         builtin(6269, "regexp_substr", 6, true, fc_regexp_substr),
+        // ---- regexp_match (non-set-returning -> text[]) ----
+        builtin(3396, "regexp_match_no_flags", 2, true, fc_regexp_match_no_flags),
+        builtin(3397, "regexp_match", 3, true, fc_regexp_match),
     ]);
 }
