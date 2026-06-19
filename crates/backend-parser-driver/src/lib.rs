@@ -441,13 +441,7 @@ fn raw_parse_type_name(
     let first = list
         .first()
         .expect("raw_parse_type_name: empty parse-tree list");
-    let tn = match &*first.stmt {
-        types_nodes::nodes::Node::TypeName(tn) => tn,
-        other => panic!(
-            "raw_parse_type_name: expected TypeName node, got tag {}",
-            other.node_tag().0
-        ),
-    };
+    let tn = (*first.stmt).expect_typename();
 
     raw_typename_to_parse(tn)
 }
@@ -462,19 +456,19 @@ fn raw_typename_to_parse(
     tn: &types_nodes::rawnodes::TypeName<'_>,
 ) -> PgResult<types_parsenodes::TypeName> {
     use alloc::string::ToString;
-    use types_nodes::nodes::Node as RawNode;
+    use types_nodes::nodes::{ntag, Node as RawNode};
 
     let mut names: alloc::vec::Vec<types_parsenodes::Node> =
         alloc::vec::Vec::with_capacity(tn.names.len());
     for n in tn.names.iter() {
-        match &**n {
-            RawNode::String(s) => names.push(types_parsenodes::Node::String(
+        match (**n).as_string() {
+            Some(s) => names.push(types_parsenodes::Node::String(
                 types_parsenodes::StringNode { sval: Some(s.sval.as_str().to_string()) },
             )),
-            other => {
+            None => {
                 return Err(types_error::PgError::error(alloc::format!(
                     "raw_parse_type_name: TypeName.names element is not a String node (tag {})",
-                    other.node_tag().0
+                    (**n).node_tag().0
                 )));
             }
         }
@@ -483,39 +477,51 @@ fn raw_typename_to_parse(
     let mut typmods: alloc::vec::Vec<types_parsenodes::Node> =
         alloc::vec::Vec::with_capacity(tn.typmods.len());
     for tm in tn.typmods.iter() {
-        let bridged: types_parsenodes::Node = match &**tm {
-            RawNode::A_Const(ac) => match ac.val.as_deref() {
-                Some(RawNode::Integer(i)) => {
+        let tm_node = &**tm;
+        let bridged: types_parsenodes::Node = if let Some(ac) = tm_node.as_a_const() {
+            match ac.val.as_deref().map(|v| (v.node_tag(), v)) {
+                Some((ntag::T_Integer, v)) => {
+                    let i = v.expect_integer();
                     types_parsenodes::Node::Integer(types_parsenodes::Integer { ival: i.ival })
                 }
-                Some(RawNode::Float(f)) => types_parsenodes::Node::Float(types_parsenodes::Float {
-                    fval: Some(f.fval.as_str().to_string()),
-                }),
-                Some(RawNode::String(s)) => types_parsenodes::Node::String(
-                    types_parsenodes::StringNode { sval: Some(s.sval.as_str().to_string()) },
-                ),
-                Some(RawNode::Boolean(b)) => {
+                Some((ntag::T_Float, v)) => {
+                    let fl = v.expect_float();
+                    types_parsenodes::Node::Float(types_parsenodes::Float {
+                        fval: Some(fl.fval.as_str().to_string()),
+                    })
+                }
+                Some((ntag::T_String, v)) => {
+                    let s = v.expect_string();
+                    types_parsenodes::Node::String(types_parsenodes::StringNode {
+                        sval: Some(s.sval.as_str().to_string()),
+                    })
+                }
+                Some((ntag::T_Boolean, v)) => {
+                    let b = v.expect_boolean();
                     types_parsenodes::Node::Boolean(types_parsenodes::Boolean { boolval: b.boolval })
                 }
-                Some(RawNode::BitString(b)) => types_parsenodes::Node::BitString(
-                    types_parsenodes::BitString { bsval: Some(b.bsval.as_str().to_string()) },
-                ),
+                Some((ntag::T_BitString, v)) => {
+                    let b = v.expect_bitstring();
+                    types_parsenodes::Node::BitString(types_parsenodes::BitString {
+                        bsval: Some(b.bsval.as_str().to_string()),
+                    })
+                }
                 _ => types_parsenodes::Node::A_Star,
-            },
-            RawNode::ColumnRef(cr) => {
-                if cr.fields.len() == 1 {
-                    if let RawNode::String(s) = &*cr.fields[0] {
-                        types_parsenodes::Node::String(types_parsenodes::StringNode {
-                            sval: Some(s.sval.as_str().to_string()),
-                        })
-                    } else {
-                        types_parsenodes::Node::A_Star
-                    }
+            }
+        } else if let Some(cr) = tm_node.as_columnref() {
+            if cr.fields.len() == 1 {
+                if let Some(s) = (*cr.fields[0]).as_string() {
+                    types_parsenodes::Node::String(types_parsenodes::StringNode {
+                        sval: Some(s.sval.as_str().to_string()),
+                    })
                 } else {
                     types_parsenodes::Node::A_Star
                 }
+            } else {
+                types_parsenodes::Node::A_Star
             }
-            _ => types_parsenodes::Node::A_Star,
+        } else {
+            types_parsenodes::Node::A_Star
         };
         typmods.push(bridged);
     }
@@ -523,10 +529,10 @@ fn raw_typename_to_parse(
     let mut array_bounds: alloc::vec::Vec<types_parsenodes::Node> =
         alloc::vec::Vec::with_capacity(tn.arrayBounds.len());
     for n in tn.arrayBounds.iter() {
-        match &**n {
-            RawNode::Integer(i) => array_bounds
+        match (**n).as_integer() {
+            Some(i) => array_bounds
                 .push(types_parsenodes::Node::Integer(types_parsenodes::Integer { ival: i.ival })),
-            _ => array_bounds
+            None => array_bounds
                 .push(types_parsenodes::Node::Integer(types_parsenodes::Integer { ival: -1 })),
         }
     }
