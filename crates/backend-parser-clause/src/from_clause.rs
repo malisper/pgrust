@@ -622,7 +622,7 @@ fn transformRangeFunction<'mcx>(
                         ParseExprKind::EXPR_KIND_FROM_FUNCTION,
                     )?
                     .ok_or_else(|| elog_error("transformRangeFunction: transformExpr returned NULL"))?;
-                    let newfexpr_node = Node::Expr(newfexpr);
+                    let newfexpr_node = Node::mk_expr(mcx, newfexpr);
 
                     /* nodeFunctionscan.c requires SRFs to be at top level */
                     check_srf_top_level(pstate, last_srf.as_ref(), &newfexpr_node)?;
@@ -651,7 +651,7 @@ fn transformRangeFunction<'mcx>(
             ParseExprKind::EXPR_KIND_FROM_FUNCTION,
         )?
         .ok_or_else(|| elog_error("transformRangeFunction: transformExpr returned NULL"))?;
-        let newfexpr_node = Node::Expr(newfexpr);
+        let newfexpr_node = Node::mk_expr(mcx, newfexpr);
 
         /* nodeFunctionscan.c requires SRFs to be at top level */
         check_srf_top_level(pstate, last_srf.as_ref(), &newfexpr_node)?;

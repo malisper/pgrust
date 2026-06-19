@@ -207,14 +207,14 @@ pub fn find_cols<'mcx>(
     if let Some(tlist) = agg.plan.targetlist.as_ref() {
         for te in tlist.iter() {
             if let Some(expr) = te.expr.as_deref() {
-                let node = Node::Expr(expr.clone_in(swx)?);
+                let node = Node::mk_expr(swx, expr.clone_in(swx)?);
                 find_cols_walker(Some(&node), &mut context, mcx)?;
             }
         }
     }
     if let Some(qual) = agg.plan.qual.as_ref() {
         for expr in qual.iter() {
-            let node = Node::Expr(expr.clone_in(swx)?);
+            let node = Node::mk_expr(swx, expr.clone_in(swx)?);
             find_cols_walker(Some(&node), &mut context, mcx)?;
         }
     }
