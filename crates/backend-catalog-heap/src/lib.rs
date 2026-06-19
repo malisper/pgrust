@@ -874,5 +874,5 @@ pub use statistics::{CopyStatistics, RemoveStatistics};
 
 pub use constraints::{
     AddRelationNewConstraints, AddRelationNotNullConstraints, RelationClearMissing,
-    RemoveAttributeById, StoreAttrMissingVal, StoreConstraints,
+    RemoveAttributeById, SetAttributeHasDefault, StoreAttrMissingVal, StoreConstraints,
 };

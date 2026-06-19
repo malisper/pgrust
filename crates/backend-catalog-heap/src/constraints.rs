@@ -1563,6 +1563,130 @@ pub fn RelationClearMissing<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgRes
     attr_rel.close(types_storage::lock::RowExclusiveLock)
 }
 
+/// `StoreAttrDefault`'s pg_attribute update (pg_attrdef.c): after inserting the
+/// pg_attrdef row, mark the column's `atthasdef = true` and recover its
+/// pre-existing `attgenerated` (so the caller picks the dependency type).
+///
+/// The C does `SearchSysCacheCopy2(ATTNUM, relid, attnum)` for a single writable
+/// tuple; the equivalent here is a keyed `systable_beginscan` on
+/// `AttributeRelidNumIndexId` over `attrelid = relid AND attnum = N` (the same
+/// idiom as `RelationClearMissing`), then `heap_modify_tuple` setting
+/// `atthasdef = true` + `CatalogTupleUpdate`. Returns the pre-existing
+/// `attgenerated`; `Ok(None)` on the cache miss (the C
+/// `cache lookup failed for attribute %d of relation %u`).
+pub fn SetAttributeHasDefault<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    attnum: AttrNumber,
+) -> PgResult<Option<i8>> {
+    use backend_access_common_scankey::ScanKeyInit;
+    use types_catalog::pg_attribute::{
+        Anum_pg_attribute_attgenerated, Anum_pg_attribute_atthasdef, Anum_pg_attribute_attnum,
+        Anum_pg_attribute_attrelid,
+    };
+    use types_core::fmgr::F_OIDEQ;
+    use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+    use types_tuple::backend_access_common_heaptuple::Datum;
+
+    const AttributeRelationId: Oid = 1249;
+    const AttributeRelidNumIndexId: Oid = 2659;
+
+    // attrrel = table_open(AttributeRelationId, RowExclusiveLock);
+    let attr_rel = backend_access_table_table::table_open(
+        mcx,
+        AttributeRelationId,
+        types_storage::lock::RowExclusiveLock,
+    )?;
+
+    // SearchSysCacheCopy2(ATTNUM, relid, attnum): scan on attrelid (the index's
+    // leading key) and filter to the target attnum in the loop — the same idiom
+    // as `RelationClearMissing` (the genam scan keys only on the index's leading
+    // column).
+    let mut key = [ScanKeyData::empty()];
+    ScanKeyInit(
+        &mut key[0],
+        Anum_pg_attribute_attrelid,
+        BTEqualStrategyNumber,
+        F_OIDEQ,
+        Datum::from_oid(relid),
+    )?;
+
+    let mut scan = backend_access_index_genam_seams::systable_beginscan::call(
+        &attr_rel,
+        AttributeRelidNumIndexId,
+        true,
+        None,
+        &key[..1],
+    )?;
+
+    let mut result = None;
+    loop {
+        let Some(tuple) =
+            backend_access_index_genam_seams::systable_getnext::call(mcx, scan.desc_mut())?
+        else {
+            break;
+        };
+
+        // Filter to the requested attnum.
+        let (this_attnum, _) = backend_access_common_heaptuple::heap_getattr(
+            mcx,
+            &tuple,
+            Anum_pg_attribute_attnum as i32,
+            &attr_rel.rd_att,
+        )?;
+        if this_attnum.as_i16() != attnum {
+            continue;
+        }
+
+        {
+            {
+                // attgenerated = attStruct->attgenerated;
+                let (attgenerated, _) = backend_access_common_heaptuple::heap_getattr(
+                    mcx,
+                    &tuple,
+                    Anum_pg_attribute_attgenerated as i32,
+                    &attr_rel.rd_att,
+                )?;
+                let attgenerated = attgenerated.as_char();
+
+                // valuesAtt[atthasdef-1] = true; replacesAtt[atthasdef-1] = true;
+                let natts = attr_rel.rd_att.natts as usize;
+                let mut repl_val = alloc::vec![Datum::null(); natts];
+                let repl_null = alloc::vec![false; natts];
+                let mut repl_repl = alloc::vec![false; natts];
+
+                repl_val[(Anum_pg_attribute_atthasdef - 1) as usize] = Datum::from_bool(true);
+                repl_repl[(Anum_pg_attribute_atthasdef - 1) as usize] = true;
+
+                let mut newtuple = backend_access_common_heaptuple::heap_modify_tuple(
+                    mcx,
+                    &tuple,
+                    &attr_rel.rd_att,
+                    &repl_val,
+                    &repl_null,
+                    &repl_repl,
+                )?;
+
+                // CatalogTupleUpdate(attrrel, &atttup->t_self, atttup);
+                backend_catalog_indexing::keystone::CatalogTupleUpdate(
+                    mcx,
+                    &attr_rel,
+                    tuple.tuple.t_self,
+                    &mut newtuple,
+                )?;
+
+                result = Some(attgenerated as i8);
+                break;
+            }
+        }
+    }
+
+    scan.end()?;
+    attr_rel.close(types_storage::lock::RowExclusiveLock)?;
+
+    Ok(result)
+}
+
 /// `StoreAttrMissingVal` (heap.c) — set the missing value of a single
 /// attribute. Needs `construct_array`-of-missingval + a writable full-row
 /// `ATTNUM` syscache copy + a `pg_attribute` `CatalogTupleUpdate` carrier;
