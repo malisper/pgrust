@@ -1310,6 +1310,155 @@ fn exec_rename_stmt_slow_arm<'mcx>(
     ExecRenameStmt(mcx, &pn)
 }
 
+// ---------------------------------------------------------------------------
+// Live (`types_nodes`) → owned (`types_parsenodes`) converters for the
+// remaining ALTER slow-path arms (SET SCHEMA / DEPENDS ON / OWNER TO). Same
+// precedent as `renamestmt_to_parsenodes`: the opaque `RangeVar *relation` /
+// `Node *object` / `RoleSpec *newowner` subtrees are lowered with the shared
+// `rich_node_to_parse` helper (and the policy/lockcmds RangeVar projection).
+// ---------------------------------------------------------------------------
+
+/// Lower a live `RangeVar *relation` (`Option<NodePtr>` at a `T_RangeVar`).
+fn lower_alter_relation(
+    relation: &Option<types_nodes::nodes::NodePtr<'_>>,
+) -> Option<types_tuple::access::RangeVar> {
+    relation
+        .as_ref()
+        .and_then(|n| n.as_rangevar())
+        .map(|rv| types_tuple::access::RangeVar {
+            catalogname: rv.catalogname.as_deref().map(|s| s.into()),
+            schemaname: rv.schemaname.as_deref().map(|s| s.into()),
+            relname: rv.relname.as_deref().unwrap_or("").into(),
+            inh: rv.inh,
+            relpersistence: rv.relpersistence as u8,
+            location: rv.location,
+        })
+}
+
+/// Lower an opaque live `Node *object` to the owned `types_parsenodes::Node`.
+fn lower_alter_object(
+    object: &Option<types_nodes::nodes::NodePtr<'_>>,
+) -> PgResult<Option<Box<Node>>> {
+    match object.as_ref() {
+        Some(n) => Ok(Some(Box::new(
+            backend_parser_parse_type::rich_node_to_parse(n)?,
+        ))),
+        None => Ok(None),
+    }
+}
+
+/// Lower a live `RoleSpec *newowner` to the owned
+/// `types_parsenodes::Node::RoleSpec` (`role_spec_oid` reads `roletype` /
+/// `rolename`).
+fn lower_alter_rolespec(
+    newowner: &Option<types_nodes::nodes::NodePtr<'_>>,
+) -> PgResult<Option<Box<Node>>> {
+    use types_nodes::parsenodes::RoleSpecType as NRT;
+    use types_parsenodes::RoleSpecType as PRT;
+    match newowner.as_ref() {
+        None => Ok(None),
+        Some(n) => {
+            let rs = n.as_rolespec().ok_or_else(|| {
+                PgError::error("ALTER OWNER: stmt->newowner is not a RoleSpec")
+            })?;
+            let roletype = match rs.roletype {
+                NRT::Cstring => PRT::ROLESPEC_CSTRING,
+                NRT::CurrentRole => PRT::ROLESPEC_CURRENT_ROLE,
+                NRT::CurrentUser => PRT::ROLESPEC_CURRENT_USER,
+                NRT::SessionUser => PRT::ROLESPEC_SESSION_USER,
+                NRT::Public => PRT::ROLESPEC_PUBLIC,
+            };
+            Ok(Some(Box::new(Node::RoleSpec(types_parsenodes::RoleSpec {
+                roletype,
+                rolename: rs.rolename.as_ref().map(|s| s.as_str().to_string()),
+                location: -1,
+            }))))
+        }
+    }
+}
+
+fn alter_object_schema_stmt_to_parsenodes(
+    stmt: &types_nodes::ddlnodes::AlterObjectSchemaStmt<'_>,
+) -> PgResult<AlterObjectSchemaStmt> {
+    Ok(AlterObjectSchemaStmt {
+        objectType: stmt.objectType,
+        relation: lower_alter_relation(&stmt.relation),
+        object: lower_alter_object(&stmt.object)?,
+        newschema: stmt.newschema.as_ref().map(|s| s.as_str().to_string()),
+        missing_ok: stmt.missing_ok,
+    })
+}
+
+fn alter_object_depends_stmt_to_parsenodes(
+    stmt: &types_nodes::ddlnodes::AlterObjectDependsStmt<'_>,
+) -> PgResult<AlterObjectDependsStmt> {
+    Ok(AlterObjectDependsStmt {
+        objectType: stmt.objectType,
+        relation: lower_alter_relation(&stmt.relation),
+        object: lower_alter_object(&stmt.object)?,
+        extname: lower_alter_object(&stmt.extname)?,
+        remove: stmt.remove,
+    })
+}
+
+fn alter_owner_stmt_to_parsenodes(
+    stmt: &types_nodes::ddlnodes::AlterOwnerStmt<'_>,
+) -> PgResult<AlterOwnerStmt> {
+    Ok(AlterOwnerStmt {
+        objectType: stmt.objectType,
+        relation: lower_alter_relation(&stmt.relation),
+        object: lower_alter_object(&stmt.object)?,
+        newowner: lower_alter_rolespec(&stmt.newowner)?,
+    })
+}
+
+/// `case T_AlterObjectSchemaStmt:` in `ProcessUtilitySlow` (utility.c) — ALTER …
+/// SET SCHEMA. The secondary `ObjectAddress` (old-schema, for event-trigger
+/// bookkeeping) is `None`: the slow-path caller leaves `secondaryObject`
+/// invalid and event_trigger.c is unported.
+fn exec_alter_object_schema_stmt_slow_arm<'mcx>(
+    mcx: Mcx<'mcx>,
+    parsetree: &types_nodes::nodes::Node<'mcx>,
+) -> PgResult<ObjectAddress> {
+    let Some(stmt) = parsetree.as_alterobjectschemastmt() else {
+        return Err(PgError::error(
+            "exec_alter_object_schema_stmt_slow: parse tree is not an AlterObjectSchemaStmt",
+        ));
+    };
+    let pn = alter_object_schema_stmt_to_parsenodes(stmt)?;
+    ExecAlterObjectSchemaStmt(mcx, &pn, None)
+}
+
+/// `case T_AlterObjectDependsStmt:` in `ProcessUtilitySlow` (utility.c) — ALTER
+/// … [NO] DEPENDS ON EXTENSION.
+fn exec_alter_object_depends_stmt_slow_arm<'mcx>(
+    mcx: Mcx<'mcx>,
+    parsetree: &types_nodes::nodes::Node<'mcx>,
+) -> PgResult<ObjectAddress> {
+    let Some(stmt) = parsetree.as_alterobjectdependsstmt() else {
+        return Err(PgError::error(
+            "exec_alter_object_depends_stmt_slow: parse tree is not an AlterObjectDependsStmt",
+        ));
+    };
+    let pn = alter_object_depends_stmt_to_parsenodes(stmt)?;
+    ExecAlterObjectDependsStmt(mcx, &pn, None)
+}
+
+/// `case T_AlterOwnerStmt:` in `ProcessUtilitySlow` (utility.c) — ALTER … OWNER
+/// TO.
+fn exec_alter_owner_stmt_slow_arm<'mcx>(
+    mcx: Mcx<'mcx>,
+    parsetree: &types_nodes::nodes::Node<'mcx>,
+) -> PgResult<ObjectAddress> {
+    let Some(stmt) = parsetree.as_alterownerstmt() else {
+        return Err(PgError::error(
+            "exec_alter_owner_stmt_slow: parse tree is not an AlterOwnerStmt",
+        ));
+    };
+    let pn = alter_owner_stmt_to_parsenodes(stmt)?;
+    ExecAlterOwnerStmt(mcx, &pn)
+}
+
 /// Install this crate's seams.
 ///
 /// Inward seam ([`backend_commands_alter_seams`]):
@@ -1332,6 +1481,18 @@ pub fn init_seams() {
 
     backend_tcop_utility_out_seams::exec_rename_stmt::set(exec_rename_stmt_arm);
     backend_tcop_utility_out_seams::exec_rename_stmt_slow::set(exec_rename_stmt_slow_arm);
+
+    // ALTER … SET SCHEMA / [NO] DEPENDS ON EXTENSION / OWNER TO — the remaining
+    // ProcessUtilitySlow legs whose owner (alter.c) lives here.
+    backend_tcop_utility_out_seams::exec_alter_object_schema_stmt_slow::set(
+        exec_alter_object_schema_stmt_slow_arm,
+    );
+    backend_tcop_utility_out_seams::exec_alter_object_depends_stmt_slow::set(
+        exec_alter_object_depends_stmt_slow_arm,
+    );
+    backend_tcop_utility_out_seams::exec_alter_owner_stmt_slow::set(
+        exec_alter_owner_stmt_slow_arm,
+    );
 }
 
 #[cfg(test)]

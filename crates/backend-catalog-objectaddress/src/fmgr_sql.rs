@@ -630,7 +630,7 @@ pub fn pg_identify_object<'mcx>(
 /// carries the fetched value. Mirrors the macro's null short-circuit followed by
 /// `nocachegetattr` (`fastgetattr`'s cached-offset fast path collapses into
 /// `nocachegetattr`, which honours any existing `attcacheoff`).
-fn heap_getattr<'mcx>(
+pub(crate) fn heap_getattr<'mcx>(
     mcx: Mcx<'mcx>,
     formed: &types_tuple::backend_access_common_heaptuple::FormedTuple<'_>,
     attnum: i32,
@@ -652,7 +652,7 @@ fn heap_getattr<'mcx>(
 /// `NameStr(*DatumGetName(datum))` (objectaddress.c 4310): a name-typed
 /// (`NAMEOID`, fixed 64-byte by-reference) column lands as the `ByRef` Datum arm
 /// holding the `NameData` bytes; the name is the run up to the first NUL.
-fn datum_get_name(datum: &types_tuple::backend_access_common_heaptuple::Datum<'_>) -> String {
+pub(crate) fn datum_get_name(datum: &types_tuple::backend_access_common_heaptuple::Datum<'_>) -> String {
     let bytes = datum.as_ref_bytes();
     let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     String::from_utf8_lossy(&bytes[..len]).into_owned()

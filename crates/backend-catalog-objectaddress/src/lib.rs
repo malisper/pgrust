@@ -37,6 +37,7 @@ pub mod description;
 pub mod fmgr_builtins;
 pub mod fmgr_sql;
 pub mod identity;
+pub mod rewrite_lookup;
 pub mod type_description;
 
 /// Install this unit's inward seams. Wired into `seams-init::init_all`.
@@ -59,6 +60,16 @@ pub fn init_seams() {
     seams::get_object_attnum_oid::set(properties::get_object_attnum_oid);
     seams::get_object_oid_index::set(properties::get_object_oid_index);
     seams::get_object_class_descr::set(properties::get_object_class_descr);
+
+    // pg_rewrite by-oid projections (no RULEOID syscache exists): the
+    // `getObjectDescription` / `getObjectIdentityParts` / `RemoveRewriteRuleById`
+    // OCLASS_REWRITE legs fetch `(ev_class, rulename)` by rule oid through these.
+    backend_utils_cache_syscache_seams::rewrite_class_name::set(
+        rewrite_lookup::rewrite_class_name,
+    );
+    backend_utils_cache_syscache_seams::rewrite_name_evclass::set(
+        rewrite_lookup::rewrite_name_evclass,
+    );
 
     // Register this crate's SQL-callable fmgr builtins (C: their
     // `fmgr_builtins[]` rows) into the fmgr-core builtin table.
