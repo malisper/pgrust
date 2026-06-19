@@ -188,6 +188,11 @@ fc_binary_numeric!(fc_numeric_add, crate::ops_sql::numeric_add);
 fc_binary_numeric!(fc_numeric_sub, crate::ops_sql::numeric_sub);
 fc_binary_numeric!(fc_numeric_mul, crate::ops_sql::numeric_mul);
 fc_binary_numeric!(fc_numeric_div, crate::ops_sql::numeric_div);
+// numeric_smaller (oid 1766) / numeric_larger (oid 1767): the C
+// `numeric_smaller`/`numeric_larger` bodies are named `numeric_min`/`numeric_max`
+// in this crate (each returns the smaller/larger of two numerics per cmp_numerics).
+fc_binary_numeric!(fc_numeric_smaller, crate::ops_sql::numeric_min);
+fc_binary_numeric!(fc_numeric_larger, crate::ops_sql::numeric_max);
 
 /// Body of a binary `(numeric, numeric) -> bool` comparison builtin around a
 /// `fn(&[u8], &[u8]) -> bool` (pure) core.
@@ -672,6 +677,8 @@ pub fn register_numeric_builtins() {
         builtin(1915, "numeric_uplus", 1, true, false, fc_numeric_uplus),
         // Binary numeric arithmetic -> numeric.
         builtin(1724, "numeric_add", 2, true, false, fc_numeric_add),
+        builtin(1766, "numeric_smaller", 2, true, false, fc_numeric_smaller),
+        builtin(1767, "numeric_larger", 2, true, false, fc_numeric_larger),
         builtin(1725, "numeric_sub", 2, true, false, fc_numeric_sub),
         builtin(1726, "numeric_mul", 2, true, false, fc_numeric_mul),
         builtin(1727, "numeric_div", 2, true, false, fc_numeric_div),

@@ -268,7 +268,7 @@ fn hashint8extended(val: i64, seed: u64) -> u64 {
 /// * +-Inf -> `ERRCODE_FEATURE_NOT_SUPPORTED`, `cannot convert infinity to pg_lsn`.
 /// * otherwise `numericvar_to_uint64` (round-to-nearest); failure (negative or
 ///   `> 2^64 - 1`) -> `ERRCODE_INVALID_PARAMETER_VALUE`, `pg_lsn out of range`.
-fn numeric_pg_lsn(mcx: Mcx<'_>, num: &[u8]) -> PgResult<XLogRecPtr> {
+pub fn numeric_pg_lsn(mcx: Mcx<'_>, num: &[u8]) -> PgResult<XLogRecPtr> {
     let x = set_var_from_num(mcx, num)?;
 
     if x.is_special() {

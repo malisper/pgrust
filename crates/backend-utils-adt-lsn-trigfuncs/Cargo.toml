@@ -11,10 +11,15 @@ path = "src/lib.rs"
 [dependencies]
 mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
+types-fmgr = { path = "../types-fmgr" }
 types-numeric = { path = "../types-numeric" }
 types-tuple = { path = "../types-tuple" }
 types-ri-triggers = { path = "../types-ri-triggers" }
+
+# fmgr builtin registry (register_builtins / BuiltinFunction / fmgr boundary).
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 
 # pg_lsn arithmetic bridges into the ported numeric crate (numeric_in /
 # numeric_add / numeric_sub / set_var_from_num / numericvar_to_uint64).

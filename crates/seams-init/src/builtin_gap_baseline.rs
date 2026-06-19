@@ -25,8 +25,8 @@
 //! test that runs `crate::init_all()` then formats `missing_builtins()` (sorted
 //! by `foid`) as the `(oid, "prosrc", BuiltinGapKind::...)` rows below.
 //!
-//! Current gap: 1278 of 3102 canonical built-ins (1278 not registered,
-//! 0 registered with diverging metadata).
+//! The baseline is the maximum gap still accepted; the live gap is smaller and
+//! ratchets toward empty as more `adt/*` builtin crates are registered.
 
 use backend_utils_fmgr_core::BuiltinGapKind;
 use types_core::Oid;
@@ -100,8 +100,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (404, "btoidvectorcmp", BuiltinGapKind::NotRegistered),
     (438, "pg_num_nulls", BuiltinGapKind::NotRegistered),
     (440, "pg_num_nonnulls", BuiltinGapKind::NotRegistered),
-    (515, "array_larger", BuiltinGapKind::NotRegistered),
-    (516, "array_smaller", BuiltinGapKind::NotRegistered),
     (619, "oidvectorne", BuiltinGapKind::NotRegistered),
     (626, "hash_array", BuiltinGapKind::NotRegistered),
     (677, "oidvectorlt", BuiltinGapKind::NotRegistered),
@@ -218,8 +216,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (1689, "aclexplode", BuiltinGapKind::NotRegistered),
     (1703, "numeric", BuiltinGapKind::NotRegistered),
     (1765, "setval3_oid", BuiltinGapKind::NotRegistered),
-    (1766, "numeric_smaller", BuiltinGapKind::NotRegistered),
-    (1767, "numeric_larger", BuiltinGapKind::NotRegistered),
     (1772, "numeric_to_char", BuiltinGapKind::NotRegistered),
     (1777, "numeric_to_number", BuiltinGapKind::NotRegistered),
     (1814, "iclikesel", BuiltinGapKind::NotRegistered),
@@ -590,19 +586,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (3209, "jsonb_populate_record", BuiltinGapKind::NotRegistered),
     (3218, "width_bucket_array", BuiltinGapKind::NotRegistered),
     (3219, "jsonb_array_elements", BuiltinGapKind::NotRegistered),
-    (3229, "pg_lsn_in", BuiltinGapKind::NotRegistered),
-    (3230, "pg_lsn_out", BuiltinGapKind::NotRegistered),
-    (3231, "pg_lsn_lt", BuiltinGapKind::NotRegistered),
-    (3232, "pg_lsn_le", BuiltinGapKind::NotRegistered),
-    (3233, "pg_lsn_eq", BuiltinGapKind::NotRegistered),
-    (3234, "pg_lsn_ge", BuiltinGapKind::NotRegistered),
-    (3235, "pg_lsn_gt", BuiltinGapKind::NotRegistered),
-    (3236, "pg_lsn_ne", BuiltinGapKind::NotRegistered),
-    (3237, "pg_lsn_mi", BuiltinGapKind::NotRegistered),
-    (3238, "pg_lsn_recv", BuiltinGapKind::NotRegistered),
-    (3239, "pg_lsn_send", BuiltinGapKind::NotRegistered),
-    (3251, "pg_lsn_cmp", BuiltinGapKind::NotRegistered),
-    (3252, "pg_lsn_hash", BuiltinGapKind::NotRegistered),
     (3255, "bttextsortsupport", BuiltinGapKind::NotRegistered),
     (3259, "generate_series_step_numeric", BuiltinGapKind::NotRegistered),
     (3260, "generate_series_numeric", BuiltinGapKind::NotRegistered),
@@ -686,7 +669,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (3406, "pg_dependencies_recv", BuiltinGapKind::NotRegistered),
     (3407, "pg_dependencies_send", BuiltinGapKind::NotRegistered),
     (3408, "pg_get_partition_constraintdef", BuiltinGapKind::NotRegistered),
-    (3413, "pg_lsn_hash_extended", BuiltinGapKind::NotRegistered),
     (3415, "pg_get_statisticsobjdef", BuiltinGapKind::NotRegistered),
     (3423, "pg_partition_tree", BuiltinGapKind::NotRegistered),
     (3425, "pg_partition_ancestors", BuiltinGapKind::NotRegistered),
@@ -987,8 +969,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (4106, "brin_inclusion_add_value", BuiltinGapKind::NotRegistered),
     (4107, "brin_inclusion_consistent", BuiltinGapKind::NotRegistered),
     (4108, "brin_inclusion_union", BuiltinGapKind::NotRegistered),
-    (4187, "pg_lsn_larger", BuiltinGapKind::NotRegistered),
-    (4188, "pg_lsn_smaller", BuiltinGapKind::NotRegistered),
     (4201, "ts_headline_jsonb_byid_opt", BuiltinGapKind::NotRegistered),
     (4202, "ts_headline_jsonb_byid", BuiltinGapKind::NotRegistered),
     (4203, "ts_headline_jsonb_opt", BuiltinGapKind::NotRegistered),
@@ -1113,8 +1093,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (5019, "pg_mcv_list_out", BuiltinGapKind::NotRegistered),
     (5020, "pg_mcv_list_recv", BuiltinGapKind::NotRegistered),
     (5021, "pg_mcv_list_send", BuiltinGapKind::NotRegistered),
-    (5022, "pg_lsn_pli", BuiltinGapKind::NotRegistered),
-    (5024, "pg_lsn_mii", BuiltinGapKind::NotRegistered),
     (5028, "satisfies_hash_partition", BuiltinGapKind::NotRegistered),
     (5029, "pg_ls_tmpdir_noargs", BuiltinGapKind::NotRegistered),
     (5030, "pg_ls_tmpdir_1arg", BuiltinGapKind::NotRegistered),
@@ -1164,7 +1142,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (6013, "pg_replication_origin_progress", BuiltinGapKind::NotRegistered),
     (6014, "pg_show_replication_origin_status", BuiltinGapKind::NotRegistered),
     (6098, "jsonb_subscript_handler", BuiltinGapKind::NotRegistered),
-    (6103, "numeric_pg_lsn", BuiltinGapKind::NotRegistered),
     (6107, "pg_stat_get_backend_subxact", BuiltinGapKind::NotRegistered),
     (6118, "pg_stat_get_subscription", BuiltinGapKind::NotRegistered),
     (6119, "pg_get_publication_tables", BuiltinGapKind::NotRegistered),

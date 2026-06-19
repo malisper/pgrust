@@ -497,6 +497,7 @@ backend-utils-adt-pseudotypes = { path = "../backend-utils-adt-pseudotypes" }
 backend-utils-adt-enum = { path = "../backend-utils-adt-enum" }
 backend-utils-adt-float = { path = "../backend-utils-adt-float" }
 backend-utils-adt-cash = { path = "../backend-utils-adt-cash" }
+backend-utils-adt-lsn-trigfuncs = { path = "../backend-utils-adt-lsn-trigfuncs" }
 backend-utils-adt-float-libm-ffi = { path = "../backend-utils-adt-float-libm-ffi" }
 backend-utils-adt-quote = { path = "../backend-utils-adt-quote" }
 backend-utils-adt-range-selfuncs = { path = "../backend-utils-adt-range-selfuncs" }

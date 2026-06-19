@@ -333,6 +333,24 @@ fn fc_array_cardinality(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     ret_i32(crate::element_slice::array_cardinality(&a))
 }
 
+// --- array_larger / array_smaller (strict, anyarray anyarray -> anyarray) ---
+
+fn fc_array_larger(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let a = arg_varlena(fcinfo, 0).to_vec();
+    let b = arg_varlena(fcinfo, 1).to_vec();
+    let m = scratch_mcx();
+    let r = ok(crate::sql::array_larger(m.mcx(), &a, &b, collation(fcinfo)));
+    ret_varlena(fcinfo, r.as_slice().to_vec())
+}
+
+fn fc_array_smaller(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let a = arg_varlena(fcinfo, 0).to_vec();
+    let b = arg_varlena(fcinfo, 1).to_vec();
+    let m = scratch_mcx();
+    let r = ok(crate::sql::array_smaller(m.mcx(), &a, &b, collation(fcinfo)));
+    ret_varlena(fcinfo, r.as_slice().to_vec())
+}
+
 // --- array_cat / append / prepend (non-strict, anyarray -> anyarray) --------
 
 fn fc_array_cat(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
@@ -587,6 +605,8 @@ pub fn register_arrayfuncs_sql_builtins() {
         sbuiltin(392, "array_gt", 2, fc_array_gt),
         sbuiltin(393, "array_le", 2, fc_array_le),
         sbuiltin(396, "array_ge", 2, fc_array_ge),
+        sbuiltin(515, "array_larger", 2, fc_array_larger),
+        sbuiltin(516, "array_smaller", 2, fc_array_smaller),
         sbuiltin(2748, "arraycontains", 2, fc_arraycontains),
         sbuiltin(2749, "arraycontained", 2, fc_arraycontained),
         sbuiltin(2747, "arrayoverlap", 2, fc_arrayoverlap),

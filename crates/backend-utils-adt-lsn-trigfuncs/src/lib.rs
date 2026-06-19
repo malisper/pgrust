@@ -34,5 +34,12 @@
 // (== `Result<_, PgError>`); the project-wide error contract these ports match.
 #![allow(clippy::result_large_err)]
 
+pub mod fmgr_builtins;
 pub mod pg_lsn;
 pub mod trigfuncs;
+
+/// Register this crate's fmgr builtins (the `pg_lsn.c` SQL-callable functions)
+/// so by-OID dispatch resolves them. Called from `seams-init::init_all`.
+pub fn init_seams() {
+    fmgr_builtins::register_pg_lsn_builtins();
+}
