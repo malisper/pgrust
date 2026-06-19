@@ -68,3 +68,26 @@ seam_core::seam!(
         tuple_fraction: f64,
     ) -> PgResult<PlannerInfo>
 );
+
+seam_core::seam!(
+    /// `subquery_planner(glob, subquery, parent_root, false, tuple_fraction,
+    /// NULL)` (planner.c:683) as invoked by `allpaths.c`'s
+    /// `set_subquery_pathlist` for a plain `RTE_SUBQUERY` in the FROM clause.
+    ///
+    /// Same glob-threading contract as [`subquery_planner_for_setop`]: the
+    /// caller (allpaths) hands the shared [`PlannerGlobal`] in (moved out of the
+    /// outer `root`) and receives the FROM-subquery's [`PlannerInfo`] (`subroot`)
+    /// back, with the mutated glob carried inside `subroot.glob` so the caller
+    /// can move it back onto the outer root. `parent_query_level` is the outer
+    /// `root.query_level` (the subroot's level becomes `parent + 1`, and any
+    /// `plan_params` upper references land on the parent). `subquery_id` is the
+    /// interned (already copyObject'd) subquery Query.
+    pub fn subquery_planner_for_fromsubquery<'mcx>(
+        mcx: Mcx<'mcx>,
+        run: &mut PlannerRun<'mcx>,
+        glob: PlannerGlobal,
+        subquery_id: QueryId,
+        parent_query_level: u32,
+        tuple_fraction: f64,
+    ) -> PgResult<PlannerInfo>
+);

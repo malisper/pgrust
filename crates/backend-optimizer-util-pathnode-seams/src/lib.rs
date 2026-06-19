@@ -213,6 +213,21 @@ seam_core::seam!(
     ) -> PgResult<PathId>
 );
 seam_core::seam!(
+    /// `import_path_from_subroot(root, subroot, sub_path_id)` — deep-copy a
+    /// subroot path and its whole subtree into `root`'s arenas, remapping every
+    /// `PathId`/`RelId`/`RinfoId`/`NodeId` handle, returning a `root`-arena
+    /// `PathId`. The cross-root path-tree import primitive set-op planning and
+    /// `set_subquery_pathlist` use to feed a subroot's final-rel paths into
+    /// `create_subqueryscan_path(ROOT, …)`. Lives in the concrete pathnode unit;
+    /// crossed as a seam so consumers (allpaths) need not take a concrete dep.
+    pub fn import_path_from_subroot<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        root: &mut PlannerInfo,
+        subroot: &PlannerInfo,
+        sub_path_id: PathId,
+    ) -> PathId
+);
+seam_core::seam!(
     /// `create_subqueryscan_path(...)` (pathnode.c:2223).
     pub fn create_subqueryscan_path<'mcx>(
         root: &mut PlannerInfo,

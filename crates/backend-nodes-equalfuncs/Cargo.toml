@@ -20,3 +20,4 @@ backend-nodes-node-support = { path = "../backend-nodes-node-support" }
 # declared by every optimizer/parser consumer's central equal seam).
 backend-nodes-equalfuncs-seams = { path = "../backend-nodes-equalfuncs-seams" }
 backend-optimizer-path-equivclass-ext-seams = { path = "../backend-optimizer-path-equivclass-ext-seams" }
+backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }

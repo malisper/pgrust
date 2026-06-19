@@ -1514,6 +1514,12 @@ pub fn init_seams() {
     // `get_eclass_for_sort_expr` member matching). Same impl as the
     // `equal_expr` seam.
     backend_optimizer_path_equivclass_ext_seams::equal::set(equal_expr);
+
+    // `equal(a, b)` over two owned `&Expr` (nodeFuncs.h `equal()`) — the
+    // pathkeys.c partition-pruning / `targetIsInAllPartitionLists` and
+    // subquery-pathkey-conversion leaves reach it. Same `equal_expr` impl;
+    // declared in nodeFuncs-seams, owned by equalfuncs.c.
+    backend_nodes_nodeFuncs_seams::equal::set(equal_expr);
 }
 
 #[cfg(test)]

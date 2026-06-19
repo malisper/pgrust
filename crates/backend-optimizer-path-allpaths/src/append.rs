@@ -33,7 +33,7 @@ const RELKIND_PARTITIONED_TABLE: i8 = b'p' as i8;
 /// tuples/rows/width by accumulating over the live children.
 pub fn set_append_rel_size<'mcx>(
     mcx: Mcx<'mcx>,
-    run: &PlannerRun<'mcx>,
+    run: &mut PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     rel: RelId,
     rti: Index,

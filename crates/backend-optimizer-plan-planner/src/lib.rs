@@ -617,6 +617,38 @@ fn subquery_planner_for_setop_impl<'mcx>(
     )
 }
 
+/// Seam wrapper installed as
+/// `backend_optimizer_plan_planner_seams::subquery_planner_for_fromsubquery`,
+/// letting `allpaths.c`'s `set_subquery_pathlist` plan a plain `RTE_SUBQUERY`
+/// in the FROM clause into its own subroot (C:683). Mirrors the
+/// `subquery_planner_for_setop` glob-threading contract: the shared
+/// [`PlannerGlobal`] is moved in (the caller took it off the outer root) and
+/// carried back out inside `subroot.glob`. `parent_query_level` is the outer
+/// root's level, so the subroot's level is `parent + 1` (and `plan_params`
+/// upper references land on the parent, which the caller reads off
+/// `subroot.plan_params`). `has_recursion` is `false` and `setops` is `None`
+/// for a plain FROM-subquery.
+fn subquery_planner_for_fromsubquery_impl<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &mut PlannerRun<'mcx>,
+    glob: PlannerGlobal,
+    subquery_id: types_pathnodes::QueryId,
+    parent_query_level: u32,
+    tuple_fraction: f64,
+) -> PgResult<PlannerInfo> {
+    subquery_planner_carried(
+        mcx,
+        run,
+        glob,
+        subquery_id,
+        Some(parent_query_level),
+        None,
+        false,
+        tuple_fraction,
+        None,
+    )
+}
+
 /// `subquery_planner(glob, parse, parent_root, hasRecursion, tuple_fraction, setops)`
 /// (planner.c:650). Returns the owned `PlannerInfo` ("root") with its glob
 /// attached and `final_rel`'s cheapest path set.
@@ -7588,6 +7620,9 @@ pub fn init_seams() {
     backend_optimizer_path_costsize_seams::windowclause_cost_info::set(windowclause_cost_info_impl);
     backend_optimizer_plan_planner_seams::subquery_planner_for_setop::set(
         subquery_planner_for_setop_impl,
+    );
+    backend_optimizer_plan_planner_seams::subquery_planner_for_fromsubquery::set(
+        subquery_planner_for_fromsubquery_impl,
     );
     backend_optimizer_plan_planner_pc_seams::expression_planner_with_deps_value::set(
         expression_planner_with_deps,

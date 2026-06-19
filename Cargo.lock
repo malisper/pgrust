@@ -11686,6 +11686,7 @@ version = "0.0.0"
 dependencies = [
  "backend-nodes-equalfuncs-seams",
  "backend-nodes-node-support",
+ "backend-nodes-nodeFuncs-seams",
  "backend-optimizer-path-equivclass-ext-seams",
  "seam-core",
  "types-nodes",
@@ -11862,6 +11863,7 @@ dependencies = [
  "backend-commands-vacuum-seams",
  "backend-geqo-all",
  "backend-geqo-all-seams",
+ "backend-nodes-core",
  "backend-optimizer-path-costsize",
  "backend-optimizer-path-costsize-seams",
  "backend-optimizer-path-equivclass",
@@ -11872,12 +11874,18 @@ dependencies = [
  "backend-optimizer-path-pathkeys",
  "backend-optimizer-path-pathkeys-seams",
  "backend-optimizer-path-small",
+ "backend-optimizer-plan-planner-seams",
  "backend-optimizer-plan-setrefs-seams",
  "backend-optimizer-rte-seams",
  "backend-optimizer-util-appendinfo-seams",
+ "backend-optimizer-util-clauses",
  "backend-optimizer-util-pathnode-seams",
  "backend-optimizer-util-relnode-seams",
+ "backend-optimizer-util-vars",
+ "backend-parser-clause",
+ "backend-rewrite-core",
  "backend-tcop-postgres-seams",
+ "backend-utils-cache-lsyscache-seams",
  "backend-utils-misc-guc-tables",
  "mcx",
  "seam-core",
@@ -12906,6 +12914,7 @@ dependencies = [
 name = "backend-optimizer-util-pathnode-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",

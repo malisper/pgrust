@@ -39,3 +39,15 @@ backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 # it through this accessor seam, which allpaths installs in `init_seams`.
 backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }
 backend-optimizer-plan-setrefs-seams = { path = "../backend-optimizer-plan-setrefs-seams" }
+# `set_subquery_pathlist` plans a FROM-subquery into a subroot via the
+# planner-owned `subquery_planner_for_fromsubquery` seam.
+backend-optimizer-plan-planner-seams = { path = "../backend-optimizer-plan-planner-seams" }
+
+# Subquery pushdown-safety cluster (pushdown.rs): expression/var/clause helpers,
+# the rewrite var-replacer, and the lsyscache support-function lookups.
+backend-nodes-core = { path = "../backend-nodes-core" }
+backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
+backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
+backend-rewrite-core = { path = "../backend-rewrite-core" }
+backend-parser-clause = { path = "../backend-parser-clause" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }

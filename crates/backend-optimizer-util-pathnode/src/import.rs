@@ -60,7 +60,8 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use types_pathnodes::{
-    ArenaNode, NodeId, PathId, PathNode, PlannerInfo, RelId, RelOptInfo, RestrictInfo, RinfoId,
+    ArenaNode, EcId, EmId, EquivalenceClass, EquivalenceMember, NodeId, PathId, PathNode,
+    PlannerInfo, RelId, RelOptInfo, RestrictInfo, RinfoId,
 };
 
 /// Recursive deep-copy + handle-remap state for one import operation.
@@ -68,23 +69,106 @@ use types_pathnodes::{
 /// Each `BTreeMap` memoizes "subroot handle → freshly-allocated root handle" so
 /// a node reachable by more than one path (the C shared `Path *`/`RelOptInfo *`)
 /// is imported once and its destination identity is preserved.
-struct PathImporter<'a> {
+struct PathImporter<'a, 'mcx> {
+    mcx: mcx::Mcx<'mcx>,
     sub: &'a PlannerInfo,
     path_map: BTreeMap<u32, PathId>,
     rel_map: BTreeMap<u32, RelId>,
     rinfo_map: BTreeMap<u32, RinfoId>,
     node_map: BTreeMap<u32, NodeId>,
+    ec_map: BTreeMap<u32, EcId>,
+    em_map: BTreeMap<u32, EmId>,
 }
 
-impl<'a> PathImporter<'a> {
-    fn new(sub: &'a PlannerInfo) -> Self {
+impl<'a, 'mcx> PathImporter<'a, 'mcx> {
+    fn new(mcx: mcx::Mcx<'mcx>, sub: &'a PlannerInfo) -> Self {
         PathImporter {
+            mcx,
             sub,
             path_map: BTreeMap::new(),
             rel_map: BTreeMap::new(),
             rinfo_map: BTreeMap::new(),
             node_map: BTreeMap::new(),
+            ec_map: BTreeMap::new(),
+            em_map: BTreeMap::new(),
         }
+    }
+
+    /// Import an [`EquivalenceClass`] (and its [`EquivalenceMember`]s + source
+    /// expression / RestrictInfo handles) from the subroot into `root`,
+    /// returning the fresh `root` [`EcId`]. Memoized. Pathkeys on imported paths
+    /// reference subroot ECs; this makes them resolve in `root`.
+    fn import_ec(&mut self, root: &mut PlannerInfo, sub_id: EcId) -> EcId {
+        if let Some(&new_id) = self.ec_map.get(&sub_id.0) {
+            return new_id;
+        }
+        // Allocate a placeholder first so a self/cyclic reference (ec_merged,
+        // or an EM whose parent loops back) resolves to a stable id.
+        let placeholder = root.alloc_ec(EquivalenceClass::default());
+        self.ec_map.insert(sub_id.0, placeholder);
+
+        let src: EquivalenceClass = self.sub.eq_classes[sub_id.index()].clone();
+        let members: Vec<EmId> = src
+            .ec_members
+            .iter()
+            .map(|&m| self.import_em(root, m))
+            .collect();
+        let childmembers: Vec<Vec<EmId>> = src
+            .ec_childmembers
+            .iter()
+            .map(|v| v.iter().map(|&m| self.import_em(root, m)).collect())
+            .collect();
+        let sources: Vec<RinfoId> =
+            src.ec_sources.iter().map(|&r| self.import_rinfo(root, r)).collect();
+        let derives: Vec<RinfoId> =
+            src.ec_derives_list.iter().map(|&r| self.import_rinfo(root, r)).collect();
+        let merged = src.ec_merged.map(|m| self.import_ec(root, m));
+
+        let dst = EquivalenceClass {
+            ec_opfamilies: src.ec_opfamilies,
+            ec_collation: src.ec_collation,
+            ec_childmembers_size: src.ec_childmembers_size,
+            ec_members: members,
+            ec_childmembers: childmembers,
+            ec_sources: sources,
+            ec_derives_list: derives,
+            // Opaque rebuildable cache; drop it (do not carry a subroot handle).
+            ec_derives_hash: None,
+            ec_relids: src.ec_relids,
+            ec_has_const: src.ec_has_const,
+            ec_has_volatile: src.ec_has_volatile,
+            ec_broken: src.ec_broken,
+            ec_sortref: src.ec_sortref,
+            ec_min_security: src.ec_min_security,
+            ec_max_security: src.ec_max_security,
+            ec_merged: merged,
+        };
+        *root.ec_mut(placeholder) = dst;
+        placeholder
+    }
+
+    /// Import an [`EquivalenceMember`] from the subroot into `root`. Memoized.
+    fn import_em(&mut self, root: &mut PlannerInfo, sub_id: EmId) -> EmId {
+        if let Some(&new_id) = self.em_map.get(&sub_id.0) {
+            return new_id;
+        }
+        let placeholder = root.alloc_em(EquivalenceMember::default());
+        self.em_map.insert(sub_id.0, placeholder);
+
+        let src: EquivalenceMember = self.sub.em_arena[sub_id.index()].clone();
+        let expr = self.import_node(root, src.em_expr);
+        let parent = src.em_parent.map(|p| self.import_em(root, p));
+        let dst = EquivalenceMember {
+            em_expr: expr,
+            em_relids: src.em_relids,
+            em_is_const: src.em_is_const,
+            em_is_child: src.em_is_child,
+            em_datatype: src.em_datatype,
+            em_jdomain: src.em_jdomain,
+            em_parent: parent,
+        };
+        *root.em_mut(placeholder) = dst;
+        placeholder
     }
 
     /// Import one expression-arena node ([`NodeId`]) from the subroot into
@@ -101,7 +185,16 @@ impl<'a> PathImporter<'a> {
             return new_id;
         }
         let new_id = match &self.sub.node_arena[sub_id.index()] {
-            ArenaNode::Expr(e) => root.alloc_node(e.clone()),
+            // Deep-clone via `clone_in` (NOT the derived `.clone()`): an
+            // `Expr::Aggref`/`SubPlan` carries context-allocated child lists whose
+            // derived `Clone` is an intentional guard-panic — `clone_in`
+            // dispatches them correctly (the #280 Aggref-clone convention).
+            ArenaNode::Expr(e) => {
+                let cloned = e
+                    .clone_in(self.mcx)
+                    .expect("import_path_from_subroot: Expr::clone_in failed");
+                root.alloc_node(cloned)
+            }
             ArenaNode::TargetEntry(te) => {
                 // A TargetEntry's child `expr` is itself a NodeId into the same
                 // arena; import it so the copy's handle resolves in `root`.
@@ -234,6 +327,22 @@ impl<'a> PathImporter<'a> {
             node.base_mut().param_info.as_deref_mut().unwrap().ppi_clauses = clauses;
         }
 
+        // Remap the path's `pathkeys` — each carries a `pk_eclass` EcId into the
+        // SUBROOT's equivalence-class arena, meaningless in `root`. Import the
+        // referenced EC (and its members / source exprs) into `root` and rewrite
+        // the EcId so a sorted subroot path (e.g. a subquery with an inner ORDER
+        // BY) presents valid pathkeys to `convert_subquery_pathkeys`. Without
+        // this, `root.ec(sub_eclass)` indexes out of bounds.
+        {
+            let mut new_pathkeys = node.base().pathkeys.clone();
+            for pk in new_pathkeys.iter_mut() {
+                if let Some(sub_ec) = pk.pk_eclass {
+                    pk.pk_eclass = Some(self.import_ec(root, sub_ec));
+                }
+            }
+            node.base_mut().pathkeys = new_pathkeys;
+        }
+
         // Remap every subpath handle the variant carries.
         self.remap_subpaths(root, &mut node);
 
@@ -350,11 +459,12 @@ impl<'a> PathImporter<'a> {
 /// `create_subqueryscan_path(root, imported_id, …)`: the imported id resolves in
 /// the outer root's arena, which a raw subroot id never could.
 pub fn import_path_from_subroot(
+    mcx: mcx::Mcx<'_>,
     root: &mut PlannerInfo,
     subroot: &PlannerInfo,
     sub_path_id: PathId,
 ) -> PathId {
-    let mut importer = PathImporter::new(subroot);
+    let mut importer = PathImporter::new(mcx, subroot);
     importer.import_path(root, sub_path_id)
 }
 
@@ -493,7 +603,8 @@ mod tests {
         let filler_rel = root.alloc_rel(RelOptInfo::default());
         root.alloc_path(PathNode::Path(base_path(filler_rel)));
 
-        let imported = import_path_from_subroot(&mut root, &sub, sqs_path);
+        let ctx = mcx::MemoryContext::new("import-test");
+        let imported = import_path_from_subroot(ctx.mcx(), &mut root, &sub, sqs_path);
 
         // The returned id resolves in ROOT.
         let pn = root.path(imported);

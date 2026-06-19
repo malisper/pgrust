@@ -20,15 +20,19 @@
 //!
 //! The **subquery pushdown vertical** (`set_subquery_pathlist` +
 //! `subquery_is_pushdown_safe` and the whole `qual_is_pushdown_safe` /
-//! `remove_unused_subquery_outputs` / window-runcondition cluster) operates on
-//! `Query` *subtrees* (`targetList`, `setOperations`, `windowClause`,
-//! `distinctClause`, …). `types_pathnodes` carries no `Query` value — only the
-//! opaque [`types_pathnodes::QueryId`] handle and the scalar RTE projections —
-//! because the real `Query<'mcx>` is owned by the (unported) planner-entry crate
-//! that runs `subquery_planner`. So that whole vertical, plus `set_cte_pathlist`
-//! / `set_worktable_pathlist` (which resolve a CTE by name out of
-//! `parse->cteList`), routes through seam-and-panic until the planner lands. See
-//! [`subquery`].
+//! `remove_unused_subquery_outputs` / window-runcondition cluster, in
+//! [`pushdown`]) operates on the owned `Query<'mcx>` *subtrees* (`targetList`,
+//! `setOperations`, `windowClause`, `distinctClause`, …). The subquery is
+//! resolved off its RTE (interned in the [`types_pathnodes::planner_run`]
+//! store), copied, optionally has the rel's restriction clauses pushed into it,
+//! then planned into its own subroot via the planner-owned
+//! `subquery_planner_for_fromsubquery` seam (the planner unit owns
+//! `subquery_planner`). Each subroot final-rel path is imported into the outer
+//! root's arena (`import_path_from_subroot`, which now also imports the
+//! pathkeys' EquivalenceClasses) and wrapped in a SubqueryScanPath. So the
+//! vertical is LANDED here — together with `set_cte_pathlist` /
+//! `set_worktable_pathlist` (which resolve a CTE by name out of `parse->cteList`)
+//! and the simple per-RTE-kind setters in [`rte_simple`]. See [`subquery`].
 //!
 //! # Owner seams installed here
 //!
@@ -72,6 +76,7 @@ use backend_optimizer_path_costsize_seams as costsize;
 use backend_optimizer_rte_seams as rte;
 
 pub mod subquery;
+pub(crate) mod pushdown;
 
 /* ==========================================================================
  * Well-known catalog OID constant (pg_proc/pg_operator).
@@ -152,7 +157,7 @@ fn path_req_outer(root: &PlannerInfo, path: PathId) -> Relids {
 /// [`RelId`].
 pub fn make_one_rel<'mcx>(
     mcx: Mcx<'mcx>,
-    run: &PlannerRun<'mcx>,
+    run: &mut PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     joinlist: &[JoinlistNode],
 ) -> PgResult<RelId> {
@@ -231,7 +236,7 @@ pub fn set_base_rel_consider_startup(root: &mut PlannerInfo) {
 /// `consider_parallel` flag for each base-relation entry.
 pub fn set_base_rel_sizes<'mcx>(
     mcx: Mcx<'mcx>,
-    run: &PlannerRun<'mcx>,
+    run: &mut PlannerRun<'mcx>,
     root: &mut PlannerInfo,
 ) -> PgResult<()> {
     let mut rti: usize = 1;
@@ -303,7 +308,7 @@ pub fn set_base_rel_pathlists<'mcx>(
 /// (the RTE-kind dispatcher).
 pub fn set_rel_size<'mcx>(
     mcx: Mcx<'mcx>,
-    run: &PlannerRun<'mcx>,
+    run: &mut PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     rel: RelId,
     rti: Index,
@@ -334,7 +339,7 @@ pub fn set_rel_size<'mcx>(
             }
             RTE_SUBQUERY => {
                 // Subqueries build their paths immediately (no param choice).
-                subquery::set_subquery_pathlist(root, rel, rti)?;
+                subquery::set_subquery_pathlist(mcx, run, root, rel, rti)?;
             }
             RTE_FUNCTION => backend_optimizer_path_costsize::sizeest::set_function_size_estimates(run, root, rel),
             RTE_TABLEFUNC => {

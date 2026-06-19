@@ -1693,6 +1693,16 @@ pub fn init_seams() {
     seams::exprCollation::set(|expr| expr_collation(Some(expr)).expect("exprCollation"));
     seams::exprLocation::set(|expr| expr_location(Some(expr)).expect("exprLocation"));
 
+    // `copyObject(expr)` (nodes/copyfuncs) over the in-arena `Expr` value model.
+    // The mcx-less `&Expr -> Expr` shape (used by pathkeys.c's
+    // `find_var_for_subquery_tle`, which copies a `Var` for safety) is a
+    // structural deep-copy: the derived `Expr::clone` is a faithful copy for
+    // every node kind whose children are not context-allocated (Var/Const/
+    // OpExpr/…). For an `Aggref`/`SubPlan` (context-allocated arg lists) the
+    // derived clone is the intentional guard-panic — those never reach this
+    // seam's call sites (the pathkeys leaf only ever copies a `Var`).
+    seams::copyObject::set(|expr| expr.clone());
+
     // `is_notclause(clause)` / `get_notclausearg(notclause)` (nodeFuncs.h static
     // inlines) — `IsA(clause, BoolExpr) && boolop == NOT_EXPR`, and the sole
     // argument of such a NOT clause. The SubLink-processing path

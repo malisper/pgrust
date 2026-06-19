@@ -714,6 +714,7 @@ pub fn init_seams() {
     ps::create_tidscan_path::set(create::create_tidscan_path);
     ps::create_tidrangescan_path::set(create::create_tidrangescan_path);
     ps::create_subqueryscan_path::set(create::create_subqueryscan_path);
+    ps::import_path_from_subroot::set(import::import_path_from_subroot);
     ps::create_functionscan_path::set(create::create_functionscan_path);
     ps::create_tablefuncscan_path::set(create::create_tablefuncscan_path);
     ps::create_valuesscan_path::set(create::create_valuesscan_path);

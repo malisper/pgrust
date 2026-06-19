@@ -939,7 +939,7 @@ fn build_setop_child_paths<'mcx>(
         let imported = {
             let subroot = root.rel_mut(rel).subroot.0.take().expect("subroot vanished");
             let sub_pathkeys = subroot.path(sub_id).base().pathkeys.clone();
-            let id = import_path_from_subroot(root, &subroot, sub_id);
+            let id = import_path_from_subroot(mcx, root, &subroot, sub_id);
             root.rel_mut(rel).subroot.0 = Some(subroot);
             (id, sub_pathkeys)
         };
@@ -973,7 +973,7 @@ fn build_setop_child_paths<'mcx>(
     if let Some(partial_sub_id) = partial_sub {
         let imported = {
             let subroot = root.rel_mut(rel).subroot.0.take().expect("subroot vanished");
-            let id = import_path_from_subroot(root, &subroot, partial_sub_id);
+            let id = import_path_from_subroot(mcx, root, &subroot, partial_sub_id);
             root.rel_mut(rel).subroot.0 = Some(subroot);
             id
         };
