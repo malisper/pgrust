@@ -29,6 +29,11 @@ backend-executor-spi = { path = "../backend-executor-spi" }
 # C-language pg_proc row (prosrc = "plpgsql_call_handler" / ...) resolves here.
 backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 
+# The in-process ported-library loader registry: register `$libdir/plpgsql` so
+# fmgr resolves the LANGUAGE C call handler / inline handler / validator without
+# the OS dynamic loader (the Rust backend exposes no C ABI).
+backend-utils-fmgr-dfmgr-seams = { path = "../backend-utils-fmgr-dfmgr-seams" }
+
 # The DO-block dispatch seam this crate installs (execute_inline_handler) +
 # the InlineCodeBlock carrier.
 backend-commands-functioncmds-seams = { path = "../backend-commands-functioncmds-seams" }
@@ -36,3 +41,14 @@ backend-commands-functioncmds-seams = { path = "../backend-commands-functioncmds
 # SplitIdentifierString for the extra_warnings/extra_errors GUC check hook
 # (utils/adt/varlena.c) — direct.
 backend-utils-adt-varlena = { path = "../backend-utils-adt-varlena" }
+
+# plpgsql_validator substrate: CheckFunctionValidatorAccess (pg_proc access
+# gate), the pg_proc row read, get_typtype (pseudotype reject), format_type_be
+# (error text), and the check_function_bodies GUC.
+backend-catalog-pg-proc-seams = { path = "../backend-catalog-pg-proc-seams" }
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+types-tuple = { path = "../types-tuple" }
+types-catalog = { path = "../types-catalog" }

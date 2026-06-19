@@ -419,6 +419,29 @@ fn plpgsql_validator_pg(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     }
 }
 
+/// The simple (suffix-free, directory-free) name of the plpgsql loadable module
+/// — `$libdir/plpgsql` reduces to this for the in-process loader registry.
+const LIBRARY: &str = "plpgsql";
+
+/// Resolve a symbol of the `plpgsql` module to its ported `PGFunction`, exactly
+/// as the OS loader would resolve it in `plpgsql.so`. The three
+/// `PG_FUNCTION_INFO_V1` entry points (`plpgsql_call_handler` /
+/// `plpgsql_inline_handler` / `plpgsql_validator`) named by the
+/// `pg_proc.probin = '$libdir/plpgsql'` rows the extension creates resolve here
+/// (api_version 1). Returns `None` for an unknown symbol.
+fn lookup(function: &str) -> Option<types_fmgr::LoadedExternalFunc> {
+    let user_fn: types_fmgr::fmgr::PGFunction = match function {
+        "plpgsql_call_handler" => Some(plpgsql_call_handler_pg),
+        "plpgsql_inline_handler" => Some(plpgsql_inline_handler_pg),
+        "plpgsql_validator" => Some(plpgsql_validator_pg),
+        _ => return None,
+    };
+    Some(types_fmgr::LoadedExternalFunc {
+        user_fn,
+        api_version: 1,
+    })
+}
+
 /// Register the three handler `PGFunction`s in the fmgr built-in registry by
 /// name, so a C-language `pg_proc` row whose `prosrc` is one of these resolves
 /// to the Rust function. plpgsql is an extension (`CREATE EXTENSION plpgsql`),
@@ -468,6 +491,17 @@ pub fn init_seams() {
     });
 
     register_handler_builtins();
+
+    // Register `$libdir/plpgsql` with the in-process ported-library loader
+    // registry, so fmgr's LANGUAGE C resolution of the call handler / inline
+    // handler / validator (pg_proc.probin = '$libdir/plpgsql') finds the ported
+    // PGFunctions instead of trying to dlopen a nonexistent plpgsql.so.
+    backend_utils_fmgr_dfmgr_seams::register_builtin_library(
+        backend_utils_fmgr_dfmgr_seams::BuiltinLibraryEntry {
+            name: LIBRARY,
+            lookup,
+        },
+    );
 }
 
 #[cfg(test)]

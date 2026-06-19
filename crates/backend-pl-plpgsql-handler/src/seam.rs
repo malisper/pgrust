@@ -207,25 +207,150 @@ pub fn flinfo_fn_oid(fcinfo: &FunctionCallInfoBaseData) -> Oid {
         .unwrap_or(types_core::InvalidOid)
 }
 
-/// `CheckFunctionValidatorAccess(fcinfo->flinfo->fn_oid, funcoid)`
-/// (catalog/pg_proc.c) — permission gate before body validation.
-pub fn check_function_validator_access(_validator_oid: Oid, _funcoid: Oid) -> PgResult<bool> {
-    panic!(
-        "seam not wired: CheckFunctionValidatorAccess (pl_handler.c) — pg_proc access-check \
-         substrate (catalog/pg_proc.c) not yet ported"
-    );
+/// `CheckFunctionValidatorAccess(fcinfo->flinfo->fn_oid, funcoid)` (fmgr.c) —
+/// permission gate before body validation. Delegates to the ported body
+/// (fmgr-core, behind the pg_proc-seams seam): reads the function's pg_proc +
+/// pg_language entries, verifies this validator is the language's `lanvalidator`,
+/// and ACL-checks USAGE on the language + EXECUTE on the function.
+pub fn check_function_validator_access(validator_oid: Oid, funcoid: Oid) -> PgResult<bool> {
+    backend_catalog_pg_proc_seams::check_function_validator_access::call(validator_oid, funcoid)
 }
 
-/// The validator body: read the `pg_proc` tuple, reject disallowed pseudotype
-/// result/argument types, and (if `check_function_bodies`) test-compile via
-/// `plpgsql_compile(forValidator=true)`. The syscache `pg_proc` read +
-/// `get_typtype` + `get_func_arg_info` + the `check_function_bodies` GUC are the
-/// catalog/syscache/GUC substrate.
-pub fn validate_function_body(_funcoid: Oid) -> PgResult<()> {
+/// `TYPTYPE_PSEUDO` (`pg_type.h`).
+const TYPTYPE_PSEUDO: u8 = types_catalog::pg_type::TYPTYPE_PSEUDO as u8;
+/// `TRIGGEROID` / `EVENT_TRIGGEROID` / `RECORDOID` / `VOIDOID` (pg_type.h).
+const TRIGGEROID: Oid = 2279;
+const EVENT_TRIGGEROID: Oid = 3838;
+const RECORDOID: Oid = 2249;
+const VOIDOID: Oid = 2278;
+
+/// `IsPolymorphicType(typid)` (pg_type.h) — a pure OID comparison.
+fn is_polymorphic_type(typid: Oid) -> bool {
+    use types_tuple::heaptuple::{
+        ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLENONARRAYOID,
+        ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID,
+        ANYNONARRAYOID, ANYRANGEOID,
+    };
+    typid == ANYELEMENTOID
+        || typid == ANYARRAYOID
+        || typid == ANYNONARRAYOID
+        || typid == ANYENUMOID
+        || typid == ANYRANGEOID
+        || typid == ANYMULTIRANGEOID
+        || typid == ANYCOMPATIBLEOID
+        || typid == ANYCOMPATIBLEARRAYOID
+        || typid == ANYCOMPATIBLENONARRAYOID
+        || typid == ANYCOMPATIBLERANGEOID
+        || typid == ANYCOMPATIBLEMULTIRANGEOID
+}
+
+/// `format_type_be(type_oid)` (format_type.c) for the pseudotype-rejection error.
+fn format_type_be(type_oid: Oid) -> String {
+    backend_utils_adt_format_type_seams::format_type_be_owned::call(type_oid)
+        .unwrap_or_else(|_| type_oid.to_string())
+}
+
+/// `check_function_bodies` GUC (guc_tables.c) — whether to test-compile the body.
+fn check_function_bodies() -> bool {
+    (backend_utils_misc_guc_tables::vars::check_function_bodies.get().get)()
+}
+
+/// The `plpgsql_validator` body (pl_handler.c) past the access gate: read the
+/// `pg_proc` row, reject disallowed pseudotype result/argument types (all but
+/// TRIGGER / EVTTRIGGER / RECORD / VOID / polymorphic), and — if
+/// `check_function_bodies` — test-compile the body via
+/// `plpgsql_compile(fake_fcinfo, forValidator=true)`.
+pub fn validate_function_body(funcoid: Oid) -> PgResult<()> {
+    let scratch = mcx::MemoryContext::new("plpgsql_validator");
+    let mcx = scratch.mcx();
+
+    // tuple = SearchSysCache1(PROCOID, funcoid); proc = GETSTRUCT(tuple).
+    let proc = backend_utils_cache_syscache_seams::proc_row_by_oid::call(mcx, funcoid)?
+        .ok_or_else(|| {
+            types_error::PgError::error(format!("cache lookup failed for function {funcoid}"))
+        })?;
+
+    let mut is_dml_trigger = false;
+    let mut is_event_trigger = false;
+
+    // functyptype = get_typtype(proc->prorettype);
+    // Disallow pseudotype result except TRIGGER/EVTTRIGGER/RECORD/VOID/polymorphic.
+    let functyptype = backend_utils_cache_lsyscache_seams::get_typtype::call(proc.prorettype)?;
+    if functyptype == TYPTYPE_PSEUDO {
+        if proc.prorettype == TRIGGEROID {
+            is_dml_trigger = true;
+        } else if proc.prorettype == EVENT_TRIGGEROID {
+            is_event_trigger = true;
+        } else if proc.prorettype != RECORDOID
+            && proc.prorettype != VOIDOID
+            && !is_polymorphic_type(proc.prorettype)
+        {
+            return Err(types_error::PgError::error(format!(
+                "PL/pgSQL functions cannot return type {}",
+                format_type_be(proc.prorettype)
+            ))
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+        }
+    }
+
+    // Disallow pseudotypes in arguments (IN or OUT) except RECORD and polymorphic.
+    // get_func_arg_info returns all argument types; `proallargtypes` (when
+    // present) carries OUT args too, else `proargtypes` is the IN-arg list.
+    let argtypes: Vec<Oid> = match &proc.proallargtypes {
+        Some(all) => all.values.iter().copied().collect(),
+        None => proc.proargtypes.iter().copied().collect(),
+    };
+    for &argtype in &argtypes {
+        if backend_utils_cache_lsyscache_seams::get_typtype::call(argtype)? == TYPTYPE_PSEUDO
+            && argtype != RECORDOID
+            && !is_polymorphic_type(argtype)
+        {
+            return Err(types_error::PgError::error(format!(
+                "PL/pgSQL functions cannot accept type {}",
+                format_type_be(argtype)
+            ))
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+        }
+    }
+
+    // Postpone body checks if !check_function_bodies.
+    if check_function_bodies() {
+        // SPI_connect() — test-compile bracket.
+        let _ = backend_executor_spi::SPI_connect_ext(0);
+
+        // plpgsql_compile(fake_fcinfo, true): the validator test-compile. The
+        // fake-fcinfo construction (fn_oid + dml/event-trigger context flag) plus
+        // the funccache/fcinfo-model bridge is the compile keystone; route through
+        // the comp owner's owned-inputs compile via the call-handler bridge seam.
+        validate_test_compile(funcoid, is_dml_trigger, is_event_trigger)?;
+
+        match backend_executor_spi::SPI_finish() {
+            Ok(rc) if rc == backend_executor_spi::SPI_OK_FINISH => {}
+            Ok(rc) => elog_spi_finish_failed(rc),
+            Err(e) => return Err(e),
+        }
+    }
+
+    Ok(())
+}
+
+/// `plpgsql_compile(fake_fcinfo, true)` — the validator's test-compile. The
+/// owned-inputs compile entry (`plpgsql_compile_from_source`) needs the full
+/// `ProcCompileFacts` projected from the `pg_proc` row; assembling those facts +
+/// the polymorphic-return resolution from the (absent, validator-time) call
+/// expression is the compile substrate. Loud until the compile bridge lands; the
+/// pseudotype checks above are real and CREATE FUNCTION succeeds with
+/// `check_function_bodies = off`.
+fn validate_test_compile(
+    funcoid: Oid,
+    _is_dml_trigger: bool,
+    _is_event_trigger: bool,
+) -> PgResult<()> {
     panic!(
-        "seam not wired: plpgsql_validator body (pl_handler.c) — SearchSysCache1(PROCOID) + \
-         get_typtype + get_func_arg_info + check_function_bodies GUC + plpgsql_compile(forValidator) \
-         (syscache/catalog/GUC substrate)"
+        "seam not wired: plpgsql_compile(fake_fcinfo, forValidator=true) (pl_handler.c) for \
+         function {funcoid} — the validator test-compile needs ProcCompileFacts projected from \
+         pg_proc + the funccache/fcinfo-model compile bridge (compile keystone); set \
+         check_function_bodies = off to skip body validation"
     );
 }
 

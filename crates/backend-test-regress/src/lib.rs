@@ -88,12 +88,10 @@ fn lookup(function: &str) -> Option<LoadedExternalFunc> {
 /// Install this unit's inward seams: register the `regress` module with the
 /// dynamic-loader unit's ported-library registry.
 pub fn init_seams() {
-    backend_utils_fmgr_dfmgr_seams::builtin_library_present::set(|library| library == LIBRARY);
-    backend_utils_fmgr_dfmgr_seams::resolve_builtin_library_function::set(|library, function| {
-        if library == LIBRARY {
-            Ok(lookup(function))
-        } else {
-            Ok(None)
-        }
-    });
+    backend_utils_fmgr_dfmgr_seams::register_builtin_library(
+        backend_utils_fmgr_dfmgr_seams::BuiltinLibraryEntry {
+            name: LIBRARY,
+            lookup,
+        },
+    );
 }

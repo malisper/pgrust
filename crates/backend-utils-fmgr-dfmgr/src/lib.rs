@@ -901,6 +901,19 @@ fn install_load_file(filename: &str, restricted: bool) -> PgResult<()> {
 pub fn init_seams() {
     backend_utils_fmgr_dfmgr_seams::load_file::set(install_load_file);
     backend_utils_fmgr_dfmgr_seams::load_external_function::set(install_load_external_function);
+
+    // Install the two ported-library consult-seams to delegate to the shared
+    // registry the seams crate owns. Each ported library (regress, plpgsql, ...)
+    // registers itself there from its own init_seams via `register_builtin_library`;
+    // a single owner can install these OnceLock seams, which the rest of dfmgr
+    // (`install_load_external_function` / `install_load_file`) already calls.
+    backend_utils_fmgr_dfmgr_seams::builtin_library_present::set(
+        backend_utils_fmgr_dfmgr_seams::registry_library_present,
+    );
+    backend_utils_fmgr_dfmgr_seams::resolve_builtin_library_function::set(|library, function| {
+        Ok(backend_utils_fmgr_dfmgr_seams::registry_resolve(library, function))
+    });
+
     backend_utils_fmgr_dfmgr_seams::load_output_plugin::set(install_load_output_plugin);
     backend_utils_fmgr_dfmgr_seams::invoke_output_plugin_callback::set(
         install_invoke_output_plugin_callback,

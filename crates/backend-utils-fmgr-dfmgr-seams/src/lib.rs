@@ -96,3 +96,67 @@ seam_core::seam!(
     /// bare library load of such a module succeeds without touching the OS loader.
     pub fn builtin_library_present(library: &str) -> bool
 );
+
+// ===========================================================================
+// Shared in-process ported-library registry.
+//
+// The mock dynamic-loader replaces `dlopen` for shared libraries whose C bodies
+// have been ported into the Rust backend (which exposes no C ABI). More than one
+// such module exists (`src/test/regress/regress.c`, `$libdir/plpgsql`, ...), and
+// each lives in its own crate, so the two consult-seams above cannot be
+// `::set` by any single owner. Instead this crate owns a shared registry that
+// every ported module registers into from its own `init_seams()`; the dfmgr
+// unit installs the two consult-seams once to read this table. (The seams stay
+// declared above so the dfmgr consumer keeps calling them; their installed
+// bodies — see `dfmgr::init_seams` — delegate here.)
+// ===========================================================================
+
+/// A ported shared library's symbol-resolution entry: its simple (suffix-free,
+/// directory-free) name and the lookup that maps a symbol name to its ported
+/// `(user_fn, api_version)` pair (the `PG_FUNCTION_INFO_V1`-exposed pair the OS
+/// loader would otherwise hand fmgr). `None` from `lookup` means "no such symbol
+/// in this library" (the C "could not find function in file" error).
+#[derive(Clone)]
+pub struct BuiltinLibraryEntry {
+    /// The simple library name (`$libdir/regress` → `regress`).
+    pub name: &'static str,
+    /// Resolve a symbol of this library to its ported function pair.
+    pub lookup: fn(&str) -> Option<LoadedExternalFunc>,
+}
+
+static BUILTIN_LIBRARIES: std::sync::Mutex<Vec<BuiltinLibraryEntry>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Register a ported shared library with the in-process loader registry. Called
+/// from each ported library crate's `init_seams()` (e.g. `backend-test-regress`,
+/// `backend-pl-plpgsql-handler`). Idempotent per name: re-registering the same
+/// library name replaces its entry (so a double `init_seams()` is harmless).
+pub fn register_builtin_library(entry: BuiltinLibraryEntry) {
+    let mut libs = BUILTIN_LIBRARIES.lock().unwrap();
+    if let Some(existing) = libs.iter_mut().find(|e| e.name == entry.name) {
+        *existing = entry;
+    } else {
+        libs.push(entry);
+    }
+}
+
+/// Whether `library` is a registered ported library. Backs the installed body of
+/// [`builtin_library_present`].
+pub fn registry_library_present(library: &str) -> bool {
+    BUILTIN_LIBRARIES
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|e| e.name == library)
+}
+
+/// Resolve `(library, function)` against the registry. `Ok(None)` when the
+/// library is not registered (the dfmgr caller then falls through to the OS
+/// loader) or when the registered library has no such symbol (the dfmgr caller
+/// turns that into the "could not find function in file" error). Backs the
+/// installed body of [`resolve_builtin_library_function`].
+pub fn registry_resolve(library: &str, function: &str) -> Option<LoadedExternalFunc> {
+    let libs = BUILTIN_LIBRARIES.lock().unwrap();
+    let entry = libs.iter().find(|e| e.name == library)?;
+    (entry.lookup)(function)
+}
