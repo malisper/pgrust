@@ -73,8 +73,40 @@ fn rel_fields(oid: Oid) -> PgResult<RelFields> {
 // ---------------------------------------------------------------------------
 
 /// Install every seam this unit owns. Wired from `crates/seams-init`.
+/// `check_serial_buffers` GUC check_hook (predicate.c). Validates the
+/// `serial_buffers` SLRU buffer count (must be a power of two, in range), the
+/// same `check_slru_buffers` shape clog/multixact/async use.
+pub fn check_serial_buffers(newval: i32) -> (bool, Option<String>) {
+    backend_access_transam_slru::check_slru_buffers("serial_buffers", newval)
+}
+
 pub fn init_seams() {
     use backend_storage_lmgr_predicate_seams as seams;
+
+    // GUC check_hook for `serial_buffers` (predicate.c check_serial_buffers).
+    // Fired during GUC option initialization at boot; the owning unit
+    // (predicate) must install it, or initialize_one_guc_option_hooks panics on
+    // the uninstalled slot. Mirrors clog/subtrans/commit-ts/multixact/async
+    // installing their `check_*_buffers` hooks.
+    {
+        fn check_serial_buffers_hook(
+            newval: &mut i32,
+            _extra: &mut Option<backend_utils_misc_guc_tables::GucHookExtra>,
+            _source: types_guc::guc::GucSource,
+        ) -> types_error::PgResult<bool> {
+            let (ok, detail) = check_serial_buffers(*newval);
+            if ok {
+                Ok(true)
+            } else {
+                match detail {
+                    Some(d) => Err(types_error::PgError::error(d)),
+                    None => Ok(false),
+                }
+            }
+        }
+        backend_utils_misc_guc_tables::hooks::check_serial_buffers
+            .install(check_serial_buffers_hook);
+    }
 
     seams::predicate_lock_page::set(|relation, blkno, snapshot| {
         // The page-lock seam carries a real Relation; read its fields directly.

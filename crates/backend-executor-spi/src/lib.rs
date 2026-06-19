@@ -70,6 +70,7 @@ mod backbone;
 mod cursor;
 mod dest_spi;
 mod exec;
+mod prepare;
 mod result_code;
 mod select;
 
@@ -105,13 +106,15 @@ pub fn init_seams() {
     backend_utils_adt_xml_libxml_seams::spi_cursor_fetch::set(cursor::spi_cursor_fetch);
     backend_utils_adt_xml_libxml_seams::spi_cursor_tupdesc::set(cursor::spi_cursor_tupdesc);
 
-    // --- seam-and-panic execution/prepare/cursor legs (honest decomp-stubs) ---
-    seams::spi_prepare::set(exec::spi_prepare_seam);
-    seams::spi_keepplan::set(exec::spi_keepplan_seam);
-    seams::spi_freeplan::set(exec::spi_freeplan_seam);
-    seams::spi_plan_is_valid::set(exec::spi_plan_is_valid_seam);
-    seams::spi_execute_snapshot::set(exec::spi_execute_snapshot_seam);
-    seams::spi_first_row_columns::set(exec::spi_first_row_columns_seam);
+    // --- prepared-plan execution legs (real bodies: the RI / plpgsql path) ---
+    seams::spi_prepare::set(prepare::spi_prepare);
+    seams::spi_keepplan::set(prepare::spi_keepplan);
+    seams::spi_freeplan::set(prepare::spi_freeplan);
+    seams::spi_plan_is_valid::set(prepare::spi_plan_is_valid);
+    seams::spi_execute_snapshot::set(prepare::spi_execute_snapshot);
+    seams::spi_first_row_columns::set(prepare::spi_first_row_columns);
+
+    // --- seam-and-panic cursor leg (ts_rewrite SPI cursor; honest decomp-stub) ---
     seams::tsquery_rewrite_run::set(exec::tsquery_rewrite_run_seam);
 
     // matview.c's refresh_by_match_merge drives SPI through its own outward

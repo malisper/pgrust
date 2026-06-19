@@ -531,6 +531,16 @@ fn call_bool_check_hook(
     let Some(slot) = conf.check_hook else {
         return Ok(None);
     };
+    // An uninstalled check-hook slot means the owning unit has not been ported
+    // yet (the GUC table names the C `check_*` symbol, but no Rust body is
+    // wired). C always has the check hook linked in; here a missing body must
+    // behave like the C `check_hook == NULL` case — no extra validation. The
+    // compile-time PG boot defaults are valid by construction, so skipping the
+    // unported hook is sound (and mirrors the assign-hook `installed()` guard in
+    // initialize_one_guc_option_hooks).
+    if !slot.installed() {
+        return Ok(None);
+    }
     crate::reset_guc_check_error();
     let mut extra: Option<GucHookExtra> = None;
     if (slot.get())(newval, &mut extra, source)? {
@@ -552,6 +562,16 @@ fn call_int_check_hook(
     let Some(slot) = conf.check_hook else {
         return Ok(None);
     };
+    // An uninstalled check-hook slot means the owning unit has not been ported
+    // yet (the GUC table names the C `check_*` symbol, but no Rust body is
+    // wired). C always has the check hook linked in; here a missing body must
+    // behave like the C `check_hook == NULL` case — no extra validation. The
+    // compile-time PG boot defaults are valid by construction, so skipping the
+    // unported hook is sound (and mirrors the assign-hook `installed()` guard in
+    // initialize_one_guc_option_hooks).
+    if !slot.installed() {
+        return Ok(None);
+    }
     crate::reset_guc_check_error();
     let mut extra: Option<GucHookExtra> = None;
     if (slot.get())(newval, &mut extra, source)? {
@@ -573,6 +593,16 @@ fn call_real_check_hook(
     let Some(slot) = conf.check_hook else {
         return Ok(None);
     };
+    // An uninstalled check-hook slot means the owning unit has not been ported
+    // yet (the GUC table names the C `check_*` symbol, but no Rust body is
+    // wired). C always has the check hook linked in; here a missing body must
+    // behave like the C `check_hook == NULL` case — no extra validation. The
+    // compile-time PG boot defaults are valid by construction, so skipping the
+    // unported hook is sound (and mirrors the assign-hook `installed()` guard in
+    // initialize_one_guc_option_hooks).
+    if !slot.installed() {
+        return Ok(None);
+    }
     crate::reset_guc_check_error();
     let mut extra: Option<GucHookExtra> = None;
     if (slot.get())(newval, &mut extra, source)? {
@@ -594,6 +624,16 @@ fn call_string_check_hook(
     let Some(slot) = conf.check_hook else {
         return Ok(None);
     };
+    // An uninstalled check-hook slot means the owning unit has not been ported
+    // yet (the GUC table names the C `check_*` symbol, but no Rust body is
+    // wired). C always has the check hook linked in; here a missing body must
+    // behave like the C `check_hook == NULL` case — no extra validation. The
+    // compile-time PG boot defaults are valid by construction, so skipping the
+    // unported hook is sound (and mirrors the assign-hook `installed()` guard in
+    // initialize_one_guc_option_hooks).
+    if !slot.installed() {
+        return Ok(None);
+    }
     crate::reset_guc_check_error();
     let mut extra: Option<GucHookExtra> = None;
     if (slot.get())(newval, &mut extra, source)? {
@@ -617,6 +657,16 @@ fn call_enum_check_hook(
     let Some(slot) = conf.check_hook else {
         return Ok(None);
     };
+    // An uninstalled check-hook slot means the owning unit has not been ported
+    // yet (the GUC table names the C `check_*` symbol, but no Rust body is
+    // wired). C always has the check hook linked in; here a missing body must
+    // behave like the C `check_hook == NULL` case — no extra validation. The
+    // compile-time PG boot defaults are valid by construction, so skipping the
+    // unported hook is sound (and mirrors the assign-hook `installed()` guard in
+    // initialize_one_guc_option_hooks).
+    if !slot.installed() {
+        return Ok(None);
+    }
     crate::reset_guc_check_error();
     let mut extra: Option<GucHookExtra> = None;
     if (slot.get())(newval, &mut extra, source)? {

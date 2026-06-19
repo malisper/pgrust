@@ -2750,6 +2750,44 @@ pub fn init_seams() {
     mx_seams::read_next_multixact_id::set(ReadNextMultiXactId);
     mx_seams::multixact_member_freeze_threshold::set(MultiXactMemberFreezeThreshold);
     mx_seams::truncate_multixact::set(TruncateMultiXact);
+
+    // GUC check_hooks for `multixact_offset_buffers` / `multixact_member_buffers`
+    // (multixact.c check_multixact_*_buffers). Fired during GUC option
+    // initialization at boot; the owning unit (multixact) must install them, or
+    // initialize_one_guc_option_hooks panics on the uninstalled slot. Mirrors
+    // clog/subtrans/commit-ts installing their `check_*_buffers` hooks.
+    fn check_offset_hook(
+        newval: &mut i32,
+        _extra: &mut Option<backend_utils_misc_guc_tables::GucHookExtra>,
+        _source: types_guc::guc::GucSource,
+    ) -> PgResult<bool> {
+        let (ok, detail) = check_multixact_offset_buffers(*newval);
+        if ok {
+            Ok(true)
+        } else {
+            match detail {
+                Some(d) => Err(types_error::PgError::error(d)),
+                None => Ok(false),
+            }
+        }
+    }
+    fn check_member_hook(
+        newval: &mut i32,
+        _extra: &mut Option<backend_utils_misc_guc_tables::GucHookExtra>,
+        _source: types_guc::guc::GucSource,
+    ) -> PgResult<bool> {
+        let (ok, detail) = check_multixact_member_buffers(*newval);
+        if ok {
+            Ok(true)
+        } else {
+            match detail {
+                Some(d) => Err(types_error::PgError::error(d)),
+                None => Ok(false),
+            }
+        }
+    }
+    backend_utils_misc_guc_tables::hooks::check_multixact_offset_buffers.install(check_offset_hook);
+    backend_utils_misc_guc_tables::hooks::check_multixact_member_buffers.install(check_member_hook);
 }
 
 /// `get_multi_xact_id_members` seam: the inward contract returns a `PgVec` in

@@ -36,6 +36,7 @@ backend-tcop-utility-seams = { path = "../backend-tcop-utility-seams" }
 backend-parser-driver = { path = "../backend-parser-driver" }
 backend-parser-analyze = { path = "../backend-parser-analyze" }
 backend-executor-execMain = { path = "../backend-executor-execMain" }
+backend-rewrite-rewritehandler = { path = "../backend-rewrite-rewritehandler" }
 backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
 backend-utils-cache-plancache = { path = "../backend-utils-cache-plancache" }
 backend-utils-cache-plancache-seams = { path = "../backend-utils-cache-plancache-seams" }

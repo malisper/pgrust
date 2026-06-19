@@ -2047,6 +2047,23 @@ pub fn init_seams() {
         });
     }
 
+    // GUC check_hook for `notify_buffers` (async.c check_notify_buffers). Fired
+    // during GUC option initialization at boot; the owning unit (async) must
+    // install it, or initialize_one_guc_option_hooks panics on the uninstalled
+    // slot. Mirrors clog/subtrans/commit-ts/multixact installing their
+    // `check_*_buffers` hooks.
+    {
+        fn check_notify_buffers_hook(
+            newval: &mut i32,
+            _extra: &mut Option<backend_utils_misc_guc_tables::GucHookExtra>,
+            _source: types_guc::guc::GucSource,
+        ) -> types_error::PgResult<bool> {
+            Ok(check_notify_buffers(newval))
+        }
+        backend_utils_misc_guc_tables::hooks::check_notify_buffers
+            .install(check_notify_buffers_hook);
+    }
+
     // Parallel-worker message handling forwards a NotificationResponse from a
     // worker back to the leader's frontend (parallel.c HandleParallelMessage
     // `NotifyMyFrontEnd(channel, payload, pid)`). The body is async.c's
