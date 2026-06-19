@@ -16,7 +16,7 @@ use std::sync::Once;
 
 use mcx::MemoryContext;
 use types_nodes::nodes::Node;
-use types_nodes::primnodes::{Expr, Var};
+use types_nodes::primnodes::Var;
 use types_nodes::rawnodes::RangeTblFunction;
 use types_nodes::nodefunctionscan::FunctionScan;
 use types_nodes::value::StringNode;
@@ -93,16 +93,19 @@ fn setup() {
 fn simple_function_scan<'mcx>(mcx: mcx::Mcx<'mcx>) -> Node<'mcx> {
     // funcexpr: a trivial Expr node (the mocked ExecInitTableFunctionResult
     // never inspects it beyond `as_expr`).
-    let funcexpr = mcx::alloc_in(mcx, Node::Expr(Expr::Var(Var::default()))).unwrap();
+    let funcexpr = mcx::alloc_in(mcx, Node::mk_var(mcx, Var::default())).unwrap();
 
     // funccolnames = list_make1(makeString("c")).
     let mut funccolnames: PgVec<'mcx, types_nodes::nodes::NodePtr<'mcx>> = PgVec::new_in(mcx);
     funccolnames.push(
         mcx::alloc_in(
             mcx,
-            Node::String(StringNode {
-                sval: mcx::PgString::from_str_in("c", mcx).unwrap(),
-            }),
+            Node::mk_string(
+                mcx,
+                StringNode {
+                    sval: mcx::PgString::from_str_in("c", mcx).unwrap(),
+                },
+            ),
         )
         .unwrap(),
     );
@@ -127,11 +130,14 @@ fn simple_function_scan<'mcx>(mcx: mcx::Mcx<'mcx>) -> Node<'mcx> {
     let mut functions: PgVec<'mcx, RangeTblFunction<'mcx>> = PgVec::new_in(mcx);
     functions.push(rtfunc);
 
-    Node::FunctionScan(FunctionScan {
-        scan: Default::default(),
-        functions: Some(functions),
-        funcordinality: false,
-    })
+    Node::mk_function_scan(
+        mcx,
+        FunctionScan {
+            scan: Default::default(),
+            functions: Some(functions),
+            funcordinality: false,
+        },
+    )
 }
 
 #[test]

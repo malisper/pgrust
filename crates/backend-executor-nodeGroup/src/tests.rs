@@ -317,7 +317,7 @@ fn make_group_plan<'mcx>(mcx: Mcx<'mcx>, with_having: bool) -> PgResult<Node<'mc
         ));
         g.plan.qual = Some(list);
     }
-    Ok(Node::Group(g))
+    Ok(Node::mk_group(mcx, g))
 }
 
 // --- tests ----------------------------------------------------------------

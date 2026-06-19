@@ -307,7 +307,7 @@ fn init_leader_path_creates_shared_store_and_runs_setup() {
     let ctx = MemoryContext::new("per-query");
     let node_plan = mcx::alloc_in(
         ctx.mcx(),
-        types_nodes::nodes::Node::CteScan(CteScan {
+        types_nodes::nodes::Node::mk_cte_scan(ctx.mcx(), CteScan {
             ctePlanId: 1,
             cteParam: 0,
             ..Default::default()
@@ -337,7 +337,7 @@ fn init_follower_path_allocs_own_read_pointer() {
     let ctx = MemoryContext::new("per-query");
     let node_plan = mcx::alloc_in(
         ctx.mcx(),
-        types_nodes::nodes::Node::CteScan(CteScan {
+        types_nodes::nodes::Node::mk_cte_scan(ctx.mcx(), CteScan {
             ctePlanId: 1,
             cteParam: 0,
             ..Default::default()

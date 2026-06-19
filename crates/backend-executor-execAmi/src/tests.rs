@@ -120,8 +120,8 @@ fn exec_re_scan_walks_params_and_dispatches() {
     // non-NULL to drive UpdateChangedParamSet.
     let mut splan_plan = Material::default();
     splan_plan.plan.extParam = Some(empty_bms(mcx).unwrap());
-    let splan_plan = types_nodes::nodes::Node::Material(splan_plan);
-    let child_plan = types_nodes::nodes::Node::Material(Material::default());
+    let splan_plan = types_nodes::nodes::Node::mk_material(mcx, splan_plan);
+    let child_plan = types_nodes::nodes::Node::mk_material(mcx, Material::default());
 
     let mut estate = EStateData::new_in(mcx);
     let slot = estate.make_slot(TupleTableSlot::new_in(estate.es_query_cxt)).unwrap();
@@ -336,13 +336,13 @@ fn supports_backward_scan() {
     assert!(!exec_supports_backward_scan(None).unwrap());
 
     // Material: in the "don't evaluate tlist" group.
-    let mat = types_nodes::nodes::Node::Material(Material::default());
+    let mat = types_nodes::nodes::Node::mk_material(mcx, Material::default());
     assert!(exec_supports_backward_scan(Some(&mat)).unwrap());
 
     // Parallel-aware nodes can't back up.
     let mut parallel = Material::default();
     parallel.plan.parallel_aware = true;
-    let parallel = types_nodes::nodes::Node::Material(parallel);
+    let parallel = types_nodes::nodes::Node::mk_material(mcx, parallel);
     assert!(!exec_supports_backward_scan(Some(&parallel)).unwrap());
 
     let _ = mcx;

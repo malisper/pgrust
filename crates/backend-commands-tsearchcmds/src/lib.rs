@@ -1333,24 +1333,24 @@ fn buildDefItem<'mcx>(
     if !was_quoted && !val.is_empty() {
         /* Try to parse as an integer (full consumption) */
         if let Some(v) = parse_full_int(val) {
-            return make_def_elem(mcx, name, Node::Integer(Integer { ival: v }));
+            return make_def_elem(mcx, name, Node::mk_integer(mcx, Integer { ival: v }));
         }
         /* Nope, how about as a float? (full consumption) */
         if parse_full_float(val) {
             let fval = PgString::from_str_in(val, mcx)?;
-            return make_def_elem(mcx, name, Node::Float(Float { fval }));
+            return make_def_elem(mcx, name, Node::mk_float(mcx, Float { fval }));
         }
 
         if val == "true" {
-            return make_def_elem(mcx, name, Node::Boolean(Boolean { boolval: true }));
+            return make_def_elem(mcx, name, Node::mk_boolean(mcx, Boolean { boolval: true }));
         }
         if val == "false" {
-            return make_def_elem(mcx, name, Node::Boolean(Boolean { boolval: false }));
+            return make_def_elem(mcx, name, Node::mk_boolean(mcx, Boolean { boolval: false }));
         }
     }
     /* Just make it a string */
     let sval = PgString::from_str_in(val, mcx)?;
-    make_def_elem(mcx, name, Node::String(StringNode { sval }))
+    make_def_elem(mcx, name, Node::mk_string(mcx, StringNode { sval }))
 }
 
 /* =========================================================================
