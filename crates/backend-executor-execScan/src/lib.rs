@@ -46,7 +46,7 @@ use types_error::PgResult;
 use types_nodes::execnodes::ScanStateData;
 use types_nodes::nodectescan::CteScanState;
 use types_nodes::nodenamedtuplestorescan::NamedTuplestoreScanState;
-use types_nodes::nodes::Node;
+use types_nodes::nodes::ntag;
 use types_nodes::{
     EStateData, FunctionScanState, IndexOnlyScanState, SlotId, SubqueryScanState,
     TableFuncScanState,
@@ -244,20 +244,29 @@ fn epq_relsubs_rowmark_present(estate: &EStateData<'_>, idx: u32) -> bool {
 /// CustomScan join) report `0`, as the C `scanrelid == 0`.
 #[inline]
 fn scan_scanrelid(ss: &ScanStateData<'_>) -> u32 {
-    match ss.ps.plan {
-        Some(Node::SeqScan(s)) => s.scan.scanrelid,
-        Some(Node::TidRangeScan(s)) => s.scan.scanrelid,
-        Some(Node::IndexScan(s)) => s.scan.scanrelid,
-        Some(Node::IndexOnlyScan(s)) => s.scan.scanrelid,
-        Some(Node::FunctionScan(s)) => s.scan.scanrelid,
-        Some(Node::TableFuncScan(s)) => s.scan.scanrelid,
-        Some(Node::ValuesScan(s)) => s.scan.scanrelid,
-        Some(Node::ForeignScan(s)) => s.scan.scanrelid,
-        Some(Node::SubqueryScan(s)) => s.scan.scanrelid,
-        Some(Node::CteScan(s)) => s.scan.scanrelid,
-        Some(Node::NamedTuplestoreScan(s)) => s.scan.scanrelid,
-        Some(other) => panic!("scan_scanrelid: plan is not a Scan node: {other:?}"),
+    // Node-opaque migration P2: tag-keyed dispatch over the generated `ntag`
+    // consts + `as_*` accessors, replacing the giant `Node::Variant(..)` match.
+    // Every arm reads the shared `Scan` base's `scanrelid`; the accessors recover
+    // the concrete leaf, so deleting the `Node` enum will not touch this site.
+    let plan = match ss.ps.plan {
+        Some(p) => p,
         None => panic!("scan_scanrelid: ScanStateData has no plan"),
+    };
+    match plan.node_tag() {
+        ntag::T_SeqScan => plan.as_seqscan().unwrap().scan.scanrelid,
+        ntag::T_TidRangeScan => plan.as_tidrangescan().unwrap().scan.scanrelid,
+        ntag::T_IndexScan => plan.as_indexscan().unwrap().scan.scanrelid,
+        ntag::T_IndexOnlyScan => plan.as_indexonlyscan().unwrap().scan.scanrelid,
+        ntag::T_FunctionScan => plan.as_functionscan().unwrap().scan.scanrelid,
+        ntag::T_TableFuncScan => plan.as_tablefuncscan().unwrap().scan.scanrelid,
+        ntag::T_ValuesScan => plan.as_valuesscan().unwrap().scan.scanrelid,
+        ntag::T_ForeignScan => plan.as_foreignscan().unwrap().scan.scanrelid,
+        ntag::T_SubqueryScan => plan.as_subqueryscan().unwrap().scan.scanrelid,
+        ntag::T_CteScan => plan.as_ctescan().unwrap().scan.scanrelid,
+        ntag::T_NamedTuplestoreScan => {
+            plan.as_namedtuplestorescan().unwrap().scan.scanrelid
+        }
+        _ => panic!("scan_scanrelid: plan is not a Scan node: {plan:?}"),
     }
 }
 
@@ -572,8 +581,9 @@ fn exec_scan_rescan_ss<'mcx>(
             // (the join-pushdown EPQ path), so mirror PG and panic here rather
             // than approximate. Lands with the FDW/CustomScan join-pushdown
             // relid model.
+            // Node-opaque migration P2: tag-keyed dispatch.
             match node.ps.plan {
-                Some(Node::ForeignScan(_)) => panic!(
+                Some(p) if p.node_tag() == ntag::T_ForeignScan => panic!(
                     "ExecScanReScan: ForeignScan join-pushdown EPQ rescan \
                      (fs_base_relids loop) not yet modeled in types-nodes"
                 ),
