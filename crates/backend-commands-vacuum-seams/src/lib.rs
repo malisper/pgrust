@@ -202,6 +202,17 @@ seam_core::seam!(pub fn relation_get_relation_name(rel: Oid) -> PgResult<String>
 seam_core::seam!(pub fn rel_relkind(rel: Oid) -> PgResult<u8>);
 seam_core::seam!(pub fn relation_is_other_temp(rel: Oid) -> PgResult<bool>);
 
+// `vacuum_is_permitted_for_relation(relid, reltuple, options)` (vacuum.c) — the
+// ownership / MAINTAIN-privilege gate vacuum.c owns. analyze.c shares it; it only
+// reads `relisshared` and `relname` off the Form_pg_class, passed by value so the
+// borrow doesn't cross the seam.
+seam_core::seam!(pub fn vacuum_is_permitted_for_relation(
+    relid: Oid,
+    relisshared: bool,
+    relname: String,
+    options: bits32,
+) -> PgResult<bool>);
+
 // ---- catalog inplace-update workers -----------------------------------
 seam_core::seam!(pub fn vac_update_relstats_apply(
     relation: Oid,

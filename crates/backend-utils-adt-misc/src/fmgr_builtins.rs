@@ -354,6 +354,22 @@ fn builtin(
     }
 }
 
+/// `any_value_transfn(state, value)` (misc.c:1120) — `PG_RETURN_DATUM(
+/// PG_GETARG_DATUM(0))`: keep the running state unchanged. The aggregate is
+/// `proisstrict => 't'` so a NULL is never the running state once any non-NULL
+/// has been seen. Pass arg 0 through verbatim: the value word, and — for a
+/// by-ref type (anyelement may be `text`, an array, ...) — its `RefPayload`.
+fn fc_any_value_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let value = fcinfo
+        .arg(0)
+        .expect("any_value_transfn: missing state arg")
+        .value;
+    if let Some(payload) = fcinfo.take_ref_arg(0) {
+        fcinfo.set_ref_result(payload);
+    }
+    value
+}
+
 /// Register every `misc.c` builtin this lane covers (C: their `fmgr_builtins[]`
 /// rows). Called from this crate's `init_seams()`. OIDs / nargs / strict /
 /// retset are transcribed exactly from `pg_proc.dat` (none are `retset`).
@@ -361,6 +377,8 @@ pub fn register_misc_builtins() {
     backend_utils_fmgr_core::register_builtins([
         // 861  current_database()              -> name   (strict default 't', 0 args)
         builtin(861, "current_database", 0, true, false, fc_current_database),
+        // 6292 any_value_transfn(anyelement, anyelement) -> anyelement
+        builtin(6292, "any_value_transfn", 2, true, false, fc_any_value_transfn),
         // 2626 pg_sleep(float8)                -> void
         builtin(2626, "pg_sleep", 1, true, false, fc_pg_sleep),
         // 3778 pg_tablespace_location(oid)     -> text

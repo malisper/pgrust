@@ -975,28 +975,37 @@ pub fn vacuum_is_permitted_for_relation(
     reltuple: &types_rel::FormData_pg_class<'_>,
     options: bits32,
 ) -> PgResult<bool> {
+    vacuum_is_permitted_for_relation_scalar(
+        relid,
+        reltuple.relisshared,
+        reltuple.relname.as_str().to_string(),
+        options,
+    )
+}
+
+/// Seam adapter: `vacuum_is_permitted_for_relation` reading only the two
+/// Form_pg_class fields the body uses (`relisshared`, `relname`), passed by
+/// value so analyze.c can share this gate without crossing a borrow over the
+/// seam. The privilege logic is identical to the Form-taking entry above.
+pub fn vacuum_is_permitted_for_relation_scalar(
+    relid: Oid,
+    relisshared: bool,
+    relname: String,
+    options: bits32,
+) -> PgResult<bool> {
     debug_assert!((options & (VACOPT_VACUUM | VACOPT_ANALYZE)) != 0);
 
-    /*----------
-     * A role has privileges to vacuum or analyze the relation if any of the
-     * following are true:
-     *   - the role owns the current database and the relation is not shared
-     *   - the role has the MAINTAIN privilege on the relation
-     *----------
-     */
     let userid = miscinit_seam::get_user_id::call();
     if (aclchk_seam::object_ownercheck::call(
         types_core::catalog::DATABASE_RELATION_ID,
         init_small_seam::my_database_id::call(),
         userid,
-    )? && !reltuple.relisshared)
+    )? && !relisshared)
         || aclchk_seam::pg_class_aclcheck::call(relid, userid, types_acl::acl::ACL_MAINTAIN)?
             == types_acl::acl::AclResult::AclcheckOk
     {
         return Ok(true);
     }
-
-    let relname = reltuple.relname.as_str().to_string();
 
     if (options & VACOPT_VACUUM) != 0 {
         ereport(WARNING)
@@ -1005,12 +1014,6 @@ pub fn vacuum_is_permitted_for_relation(
                 relname
             ))
             .finish(here("vacuum_is_permitted_for_relation"))?;
-
-        /*
-         * For VACUUM ANALYZE, both logs could show up, but just generate
-         * information for VACUUM as that would be the first one to be
-         * processed.
-         */
         return Ok(false);
     }
 

@@ -28,6 +28,13 @@ pub fn init_seams() {
     vacuum::vacuum_tid_is_dead::set(crate::vacuum_tid_is_dead_impl);
     vacuum::vacuum_delay_point::set(crate::vacuum_delay_point_noarg);
 
+    // vacuum_is_permitted_for_relation — the ownership/MAINTAIN gate analyze.c
+    // shares (it lives in vacuum.c). The scalar adapter takes the two Form fields
+    // by value.
+    vacuum::vacuum_is_permitted_for_relation::set(
+        crate::vacuum_is_permitted_for_relation_scalar,
+    );
+
     // vacuum.c cost-state globals (owned here as thread-locals).
     vacuum::vacuum_failsafe_active::set(crate::vacuum_failsafe_active_impl);
     vacuum::set_vacuum_failsafe_active::set(crate::set_vacuum_failsafe_active_impl);

@@ -2540,17 +2540,21 @@ fn vacuum_open_relation<'mcx>(
     Ok(None)
 }
 
-/// `vacuum_is_permitted_for_relation` ported inline (vacuum.c). The ownership /
-/// MAINTAIN-privilege checks live in the vacuum owner and are reached through its
-/// Oid-keyed seams which are NOT exposed to analyze; mirror-and-panic.
+/// `vacuum_is_permitted_for_relation` (vacuum.c) — the ownership / MAINTAIN
+/// privilege gate vacuum.c owns and analyze.c shares. Reached through the vacuum
+/// owner's seam; the body reads only `relisshared` and `relname` off the
+/// Form_pg_class, so pass them by value to avoid crossing the borrow.
 fn vacuum_is_permitted_for_relation(
-    _relid: Oid,
-    _reltuple: &types_rel::FormData_pg_class<'_>,
-    _options: types_core::primitive::bits32,
+    relid: Oid,
+    reltuple: &types_rel::FormData_pg_class<'_>,
+    options: types_core::primitive::bits32,
 ) -> PgResult<bool> {
-    Err(PgError::error(
-        "analyze: vacuum_is_permitted_for_relation (object_ownercheck/pg_class_aclcheck MAINTAIN) is owned by vacuum.c and not exposed to analyze",
-    ))
+    backend_commands_vacuum_seams::vacuum_is_permitted_for_relation::call(
+        relid,
+        reltuple.relisshared,
+        reltuple.relname.as_str().to_string(),
+        options,
+    )
 }
 
 /// `RELATION_IS_OTHER_TEMP(rel)` (utils/rel.h): a temp relation of another

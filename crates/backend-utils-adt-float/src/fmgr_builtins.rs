@@ -130,6 +130,29 @@ fn unwrap_or_raise<T>(r: types_error::PgResult<T>) -> T {
     }
 }
 
+/// Set a `float8[]` transition-state result on the by-ref lane. The aggregate
+/// transition/combine cores return a COMPLETE `ArrayType` varlena image (built by
+/// `construct_array`, 4-byte header + ARR_* body), so the `RefPayload::Varlena`
+/// lane carries it verbatim — no extra header framing (unlike [`ret_varlena`]).
+#[inline]
+fn ret_array_raw(fcinfo: &mut FunctionCallInfoBaseData, image: Vec<u8>) -> Datum {
+    fcinfo.set_ref_result(RefPayload::Varlena(image));
+    Datum::from_usize(0)
+}
+
+/// Write the `Option<f64>` result of a simple aggregate final function: `None`
+/// is SQL NULL, `Some(v)` is the `float8` word.
+#[inline]
+fn ret_opt_f64(fcinfo: &mut FunctionCallInfoBaseData, v: Option<f64>) -> Datum {
+    match v {
+        Some(x) => ret_f64(x),
+        None => {
+            fcinfo.set_result_null(true);
+            Datum::from_usize(0)
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // fc_ adapters.
 // ---------------------------------------------------------------------------
@@ -599,6 +622,78 @@ fn fc_width_bucket_float8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     )))
 }
 
+// ---- aggregate transition / combine / final functions (float.c) ----
+//
+// The running state is a 3-element (variance) or 6-element (regression) float8[]
+// ArrayType passed/returned on the by-ref lane. `arg_varlena(0)` reads the full
+// image; the core deconstructs it and `construct_array` rebuilds a fresh image
+// each call, written back raw via `ret_array_raw`. All are `proisstrict => 't'`,
+// so the fmgr dispatcher already shortcuts a NULL input before reaching here.
+
+fn fc_float8_accum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = mcx::MemoryContext::new("float8_accum");
+    let transarray = arg_varlena(fcinfo, 0);
+    let newval = arg_f64(fcinfo, 1);
+    let out = unwrap_or_raise(crate::float8_accum(m.mcx(), transarray, newval));
+    ret_array_raw(fcinfo, out.as_slice().to_vec())
+}
+fn fc_float4_accum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = mcx::MemoryContext::new("float4_accum");
+    let transarray = arg_varlena(fcinfo, 0);
+    let newval = arg_f32(fcinfo, 1);
+    let out = unwrap_or_raise(crate::float4_accum(m.mcx(), transarray, newval));
+    ret_array_raw(fcinfo, out.as_slice().to_vec())
+}
+fn fc_float8_combine(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = mcx::MemoryContext::new("float8_combine");
+    let a = arg_varlena(fcinfo, 0);
+    let b = arg_varlena(fcinfo, 1);
+    let out = unwrap_or_raise(crate::float8_combine(m.mcx(), a, b));
+    ret_array_raw(fcinfo, out.as_slice().to_vec())
+}
+fn fc_float8_regr_accum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = mcx::MemoryContext::new("float8_regr_accum");
+    let transarray = arg_varlena(fcinfo, 0);
+    let newval_y = arg_f64(fcinfo, 1);
+    let newval_x = arg_f64(fcinfo, 2);
+    let out =
+        unwrap_or_raise(crate::float8_regr_accum(m.mcx(), transarray, newval_y, newval_x));
+    ret_array_raw(fcinfo, out.as_slice().to_vec())
+}
+fn fc_float8_regr_combine(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = mcx::MemoryContext::new("float8_regr_combine");
+    let a = arg_varlena(fcinfo, 0);
+    let b = arg_varlena(fcinfo, 1);
+    let out = unwrap_or_raise(crate::float8_regr_combine(m.mcx(), a, b));
+    ret_array_raw(fcinfo, out.as_slice().to_vec())
+}
+
+macro_rules! fc_final {
+    ($fc:ident, $core:ident) => {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+            let transarray = arg_varlena(fcinfo, 0);
+            let v = unwrap_or_raise(crate::$core(transarray));
+            ret_opt_f64(fcinfo, v)
+        }
+    };
+}
+fc_final!(fc_float8_avg, float8_avg);
+fc_final!(fc_float8_var_pop, float8_var_pop);
+fc_final!(fc_float8_var_samp, float8_var_samp);
+fc_final!(fc_float8_stddev_pop, float8_stddev_pop);
+fc_final!(fc_float8_stddev_samp, float8_stddev_samp);
+fc_final!(fc_float8_regr_sxx, float8_regr_sxx);
+fc_final!(fc_float8_regr_syy, float8_regr_syy);
+fc_final!(fc_float8_regr_sxy, float8_regr_sxy);
+fc_final!(fc_float8_regr_avgx, float8_regr_avgx);
+fc_final!(fc_float8_regr_avgy, float8_regr_avgy);
+fc_final!(fc_float8_regr_r2, float8_regr_r2);
+fc_final!(fc_float8_regr_slope, float8_regr_slope);
+fc_final!(fc_float8_regr_intercept, float8_regr_intercept);
+fc_final!(fc_float8_covar_pop, float8_covar_pop);
+fc_final!(fc_float8_covar_samp, float8_covar_samp);
+fc_final!(fc_float8_corr, float8_corr);
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -772,5 +867,27 @@ pub fn register_float_builtins() {
         builtin(4139, "in_range_float8_float8", 5, true, false, fc_in_range_float8_float8),
         builtin(4140, "in_range_float4_float8", 5, true, false, fc_in_range_float4_float8),
         builtin(320, "width_bucket_float8", 4, true, false, fc_width_bucket_float8),
+        // ---- aggregate transition / combine / final functions ----
+        builtin(208, "float4_accum", 2, true, false, fc_float4_accum),
+        builtin(222, "float8_accum", 2, true, false, fc_float8_accum),
+        builtin(276, "float8_combine", 2, true, false, fc_float8_combine),
+        builtin(1830, "float8_avg", 1, true, false, fc_float8_avg),
+        builtin(1831, "float8_var_samp", 1, true, false, fc_float8_var_samp),
+        builtin(1832, "float8_stddev_samp", 1, true, false, fc_float8_stddev_samp),
+        builtin(2512, "float8_var_pop", 1, true, false, fc_float8_var_pop),
+        builtin(2513, "float8_stddev_pop", 1, true, false, fc_float8_stddev_pop),
+        builtin(2806, "float8_regr_accum", 3, true, false, fc_float8_regr_accum),
+        builtin(2807, "float8_regr_sxx", 1, true, false, fc_float8_regr_sxx),
+        builtin(2808, "float8_regr_syy", 1, true, false, fc_float8_regr_syy),
+        builtin(2809, "float8_regr_sxy", 1, true, false, fc_float8_regr_sxy),
+        builtin(2810, "float8_regr_avgx", 1, true, false, fc_float8_regr_avgx),
+        builtin(2811, "float8_regr_avgy", 1, true, false, fc_float8_regr_avgy),
+        builtin(2812, "float8_regr_r2", 1, true, false, fc_float8_regr_r2),
+        builtin(2813, "float8_regr_slope", 1, true, false, fc_float8_regr_slope),
+        builtin(2814, "float8_regr_intercept", 1, true, false, fc_float8_regr_intercept),
+        builtin(2815, "float8_covar_pop", 1, true, false, fc_float8_covar_pop),
+        builtin(2816, "float8_covar_samp", 1, true, false, fc_float8_covar_samp),
+        builtin(2817, "float8_corr", 1, true, false, fc_float8_corr),
+        builtin(3342, "float8_regr_combine", 2, true, false, fc_float8_regr_combine),
     ]);
 }

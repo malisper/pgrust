@@ -136,6 +136,15 @@ impl BufferManager {
     /// unpinned victim buffer, flushing it first if dirty, then pin it. On return
     /// the buffer is pinned (refcount 1), not in the lookup hash, and tag-cleared.
     pub(crate) fn get_victim_buffer(&self, has_strategy: bool) -> PgResult<usize> {
+        // Ensure, while holding a spinlock, that there's room to remember the
+        // pin we are about to take (bufmgr.c:2357-2358). The victim pin in
+        // PinBuffer_Locked below remembers a buffer in CurrentResourceOwner, and
+        // must not enlarge there (spinlock held). BufferAlloc's own enlarge only
+        // reserves room for the final pin of a resident block; the victim pin is
+        // a separate remember that needs its own reservation.
+        self.private_refcount().ReservePrivateRefCountEntry();
+        sb::resowner_enlarge::call()?;
+
         let (buf_id, buf_state) = self.strategy_get_buffer(has_strategy)?;
         debug_assert_eq!(buf_state_get_refcount(buf_state), 0);
 
