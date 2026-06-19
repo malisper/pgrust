@@ -43,6 +43,8 @@ backend-access-heap-visibilitymap = { path = "../backend-access-heap-visibilitym
 backend-access-transam-xact = { path = "../backend-access-transam-xact" }
 backend-catalog-indexing = { path = "../backend-catalog-indexing" }
 backend-catalog-index-seams = { path = "../backend-catalog-index-seams" }
+# index_open(indexoid, lockmode) — indexam.c; analyze's vac_open_indexes.
+backend-access-index-indexam-seams = { path = "../backend-access-index-indexam-seams" }
 backend-catalog-namespace = { path = "../backend-catalog-namespace" }
 backend-catalog-pg-inherits = { path = "../backend-catalog-pg-inherits" }
 backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }

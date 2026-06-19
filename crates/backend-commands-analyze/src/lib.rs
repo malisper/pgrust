@@ -2578,17 +2578,36 @@ fn RelationGetIndexList(rel: &Relation<'_>) -> PgResult<Vec<Oid>> {
     backend_commands_vacuum_seams::relation_get_index_list::call(rel.rd_id)
 }
 
-/// `vac_open_indexes(rel, lockmode)` — open the relation's indexes (vacuum.c).
-/// The vacuum owner's Oid-keyed form returns OIDs, not real `Relation`s analyze
-/// needs; mirror-and-panic (no bridge from OID-handle to opened `Relation`).
+/// `vac_open_indexes(relation, lockmode, &nindexes, &Irel)` (vacuum.c:1290) —
+/// open every "ready" index of `relation` (skipping not-yet-ready ones) under
+/// `lockmode`, returning the opened index `Relation`s. The index OID list comes
+/// from the vacuum-owned `RelationGetIndexList`; each index is opened via
+/// `index_open` (indexam.c), which returns a real `Relation` value.
 fn vac_open_indexes<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _rel: &Relation<'mcx>,
-    _lockmode: LOCKMODE,
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    lockmode: LOCKMODE,
 ) -> PgResult<Vec<Relation<'mcx>>> {
-    Err(PgError::error(
-        "analyze: vac_open_indexes returns opened index Relations; vacuum.c's reachable form is Oid-keyed (no bridge to opened Relation values)",
-    ))
+    debug_assert!(lockmode != NoLock);
+
+    let indexoidlist = RelationGetIndexList(rel)?;
+    let mut irel: Vec<Relation<'mcx>> = Vec::with_capacity(indexoidlist.len());
+
+    for indexoid in indexoidlist {
+        let indrel = backend_access_index_indexam_seams::index_open::call(mcx, indexoid, lockmode)?;
+        let indisready = indrel
+            .rd_index
+            .as_ref()
+            .map(|i| i.indisready)
+            .unwrap_or(false);
+        if indisready {
+            irel.push(indrel);
+        } else {
+            indrel.close(lockmode)?;
+        }
+    }
+
+    Ok(irel)
 }
 
 /// `vac_close_indexes(nindexes, Irel, lockmode)` (vacuum.c).
