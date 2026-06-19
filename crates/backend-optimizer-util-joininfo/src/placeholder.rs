@@ -219,10 +219,12 @@ fn find_placeholders_recurse<'mcx>(
     root: &mut PlannerInfo,
     jtnode: &types_nodes::nodes::Node<'mcx>,
 ) -> PgResult<()> {
-    match jtnode {
+    use types_nodes::nodes::ntag;
+    match jtnode.node_tag() {
         // No quals to deal with here.
-        types_nodes::nodes::Node::RangeTblRef(_) => {}
-        types_nodes::nodes::Node::FromExpr(f) => {
+        ntag::T_RangeTblRef => {}
+        ntag::T_FromExpr => {
+            let f = jtnode.expect_fromexpr();
             // First, recurse to handle child joins.
             for item in f.fromlist.iter() {
                 find_placeholders_recurse(root, item)?;
@@ -232,7 +234,8 @@ fn find_placeholders_recurse<'mcx>(
                 find_placeholders_in_expr(root, quals)?;
             }
         }
-        types_nodes::nodes::Node::JoinExpr(j) => {
+        ntag::T_JoinExpr => {
+            let j = jtnode.expect_joinexpr();
             // First, recurse to handle child joins.
             if let Some(larg) = j.larg.as_deref() {
                 find_placeholders_recurse(root, larg)?;
@@ -248,7 +251,7 @@ fn find_placeholders_recurse<'mcx>(
         other => {
             panic!(
                 "find_placeholders_recurse: unrecognized node type: {:?}",
-                core::mem::discriminant(other)
+                other
             );
         }
     }
