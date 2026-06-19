@@ -303,8 +303,8 @@ pub fn ExecNestLoop<'mcx>(
 /// state node aliases via its `ps.plan` back-link.
 fn nestloop_plan<'a, 'mcx>(node: &'a NestLoopStateData<'mcx>) -> &'a NestLoop<'mcx> {
     match node.js.ps.plan {
-        Some(types_nodes::nodes::Node::NestLoop(nl)) => nl,
-        other => panic!("castNode(NestLoop, node->js.ps.plan) failed: {other:?}"),
+        Some(p) => p.expect_nestloop(),
+        None => panic!("castNode(NestLoop, node->js.ps.plan) failed: node->js.ps.plan is NULL"),
     }
 }
 
@@ -400,10 +400,7 @@ pub fn ExecInitNestLoop<'mcx>(
 
     let mcx = estate.es_query_cxt;
 
-    let node: &'mcx NestLoop<'mcx> = match plan_node {
-        types_nodes::nodes::Node::NestLoop(n) => n,
-        other => panic!("castNode(NestLoop, node) failed: {other:?}"),
-    };
+    let node: &'mcx NestLoop<'mcx> = plan_node.expect_nestloop();
 
     // create state structure: makeNode(NestLoopState)
     //   nlstate->js.ps.plan = (Plan *) node;
