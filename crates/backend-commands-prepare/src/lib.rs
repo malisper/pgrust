@@ -196,9 +196,7 @@ pub fn PrepareQuery<'mcx>(
             // a `Node::TypeName(rawnodes::TypeName)`; the seam mirrors
             // PostgreSQL's own typenameTypeId(NULL, typeName) entry point (it
             // reads only the TypeName, so pstate is not threaded across).
-            let Node::TypeName(raw_tn) = &**tn else {
-                panic!("PrepareQuery: argtype element is not a TypeName node");
-            };
+            let raw_tn = (**tn).expect_typename();
             let toid = parsetype_seam::typename_type_id_raw::call(raw_tn)?;
             argtypes.push(toid);
         }
@@ -1034,9 +1032,7 @@ fn prepare_query_arm<'mcx>(
     stmt_location: i32,
     stmt_len: i32,
 ) -> PgResult<()> {
-    let DispatchNode::PrepareStmt(s) = stmt else {
-        panic!("prepare_query: parse tree is not a PrepareStmt");
-    };
+    let s = stmt.expect_preparestmt();
     PrepareQuery(mcx, pstate, s, stmt_location, stmt_len)
 }
 
@@ -1054,9 +1050,7 @@ fn execute_query_arm<'mcx>(
     dest: DestReceiverHandle,
     qc: Option<&mut QueryCompletion>,
 ) -> PgResult<()> {
-    let DispatchNode::ExecuteStmt(s) = stmt else {
-        panic!("execute_query: parse tree is not an ExecuteStmt");
-    };
+    let s = stmt.expect_executestmt();
     ExecuteQuery(mcx, pstate, s, None, params, dest, qc)
 }
 
@@ -1064,9 +1058,7 @@ fn execute_query_arm<'mcx>(
 /// predicate is infallible (it only reads prepared-statement state); an `Err`
 /// here is an internal-invariant violation, surfaced as a panic.
 fn execute_stmt_has_result_arm<'mcx>(stmt: &DispatchNode<'mcx>) -> bool {
-    let DispatchNode::ExecuteStmt(s) = stmt else {
-        panic!("execute_stmt_has_result: parse tree is not an ExecuteStmt");
-    };
+    let s = stmt.expect_executestmt();
     ExecuteStmtHasResult(s).expect("ExecuteStmtHasResult reads only prepared-statement state")
 }
 
@@ -1078,17 +1070,13 @@ fn execute_stmt_result_desc_arm<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &DispatchNode<'mcx>,
 ) -> types_tuple::heaptuple::TupleDesc<'mcx> {
-    let DispatchNode::ExecuteStmt(s) = stmt else {
-        panic!("execute_stmt_result_desc: parse tree is not an ExecuteStmt");
-    };
+    let s = stmt.expect_executestmt();
     ExecuteStmtResultDesc(mcx, s).expect("ExecuteStmtResultDesc failed")
 }
 
 /// `case T_DeallocateStmt: DeallocateQuery(stmt)` (utility.c).
 fn deallocate_query_arm<'mcx>(stmt: &DispatchNode<'mcx>) -> PgResult<()> {
-    let DispatchNode::DeallocateStmt(s) = stmt else {
-        panic!("deallocate_query: parse tree is not a DeallocateStmt");
-    };
+    let s = stmt.expect_deallocatestmt();
     DeallocateQuery(s)
 }
 
