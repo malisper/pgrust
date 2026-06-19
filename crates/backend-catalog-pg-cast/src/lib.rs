@@ -18,7 +18,7 @@
 use mcx::{Mcx, MemoryContext};
 
 use types_catalog::catalog::{PROCEDURE_RELATION_ID, TYPE_RELATION_ID};
-use types_catalog::catalog_dependency::{DependencyType, ObjectAddress};
+use types_catalog::catalog_dependency::{DependencyType, ObjectAddress, DEPENDENCY_NORMAL};
 use types_catalog::pg_cast::{
     Anum_pg_cast_castsource, Anum_pg_cast_casttarget, CastRelationId, CastSourceTargetIndexId,
     PgCastInsertRow,
@@ -210,7 +210,25 @@ pub fn CastCreate(
     Ok(myself)
 }
 
-/// `pg_cast.c` owns no inward seam — `CastCreate` is invoked directly by the
-/// (unported) DDL command code, not across a cycle. The empty body keeps the
-/// crate uniform with its siblings.
-pub fn init_seams() {}
+/// `pg_cast.c` — install the `cast_create` outward seam that functioncmds.c's
+/// `CreateCast` reaches across the command→catalog cycle. The seam carries the
+/// seven `CastCreate` arguments; the `DEPENDENCY_NORMAL` behavior CreateCast
+/// always passes is supplied here, and the owner runs behind a scratch context.
+pub fn init_seams() {
+    backend_commands_functioncmds_seams::cast_create::set(
+        |source_type, target_type, func_id, in_cast_id, out_cast_id, cast_context, cast_method| {
+            let ctx = MemoryContext::new("functioncmds cast_create");
+            CastCreate(
+                ctx.mcx(),
+                source_type,
+                target_type,
+                func_id,
+                in_cast_id,
+                out_cast_id,
+                cast_context,
+                cast_method,
+                DEPENDENCY_NORMAL,
+            )
+        },
+    );
+}

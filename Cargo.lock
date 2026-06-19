@@ -4369,6 +4369,7 @@ dependencies = [
  "backend-catalog-pg-shdepend-seams",
  "backend-commands-collationcmds-seams",
  "backend-commands-extension-seams",
+ "backend-commands-functioncmds-seams",
  "backend-commands-user-seams",
  "backend-tcop-utility-out-seams",
  "backend-utils-adt-acl",
@@ -5073,6 +5074,7 @@ dependencies = [
  "backend-catalog-indexing-seams",
  "backend-catalog-objectaccess-seams",
  "backend-catalog-pg-depend-seams",
+ "backend-commands-functioncmds-seams",
  "backend-utils-adt-format-type-seams",
  "mcx",
  "types-catalog",
@@ -6733,6 +6735,7 @@ version = "0.0.0"
 dependencies = [
  "backend-catalog-namespace",
  "backend-commands-define-seams",
+ "backend-commands-functioncmds-seams",
  "backend-nodes-makefuncs-seams",
  "backend-parser-parse-type-seams",
  "backend-parser-small1-seams",
@@ -6783,7 +6786,9 @@ dependencies = [
  "backend-catalog-namespace-seams",
  "backend-catalog-objectaddress-seams",
  "backend-commands-dropcmds-seams",
+ "backend-parser-parse-type",
  "backend-parser-parse-type-seams",
+ "backend-tcop-utility-out-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-error",
  "backend-utils-init-miscinit-seams",
@@ -7068,6 +7073,7 @@ dependencies = [
  "backend-commands-proclang-seams",
  "backend-executor-execMain-seams",
  "backend-nodes-core-seams",
+ "backend-parser-parse-type",
  "backend-tcop-utility-out-seams",
  "backend-utils-adt-format-type-seams",
  "backend-utils-cache-lsyscache-seams",
@@ -13467,6 +13473,7 @@ version = "0.0.0"
 dependencies = [
  "backend-catalog-namespace",
  "backend-catalog-namespace-seams",
+ "backend-commands-functioncmds-seams",
  "backend-commands-tablecmds-seams",
  "backend-parser-driver-seams",
  "backend-parser-parse-type-seams",
@@ -13654,6 +13661,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-table-table",
  "backend-commands-collationcmds-seams",
+ "backend-commands-functioncmds-seams",
  "backend-nodes-core",
  "backend-parser-analyze-seams",
  "backend-parser-scansup-seams",
@@ -20754,8 +20762,10 @@ version = "0.0.0"
 dependencies = [
  "backend-access-common-detoast-seams",
  "backend-access-common-heaptuple",
+ "backend-catalog-pg-proc-seams",
  "backend-commands-collationcmds-seams",
  "backend-commands-dbcommands-seams",
+ "backend-commands-functioncmds-seams",
  "backend-commands-vacuum-seams",
  "backend-nodes-read-seams",
  "backend-optimizer-prep-prepagg-seams",
@@ -20764,6 +20774,7 @@ dependencies = [
  "backend-storage-lmgr-lock-seams",
  "backend-utils-adt-amutils-seams",
  "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-adt-oid",
  "backend-utils-adt-pg-locale-catalog-seams",
  "backend-utils-adt-varlena-seams",
  "backend-utils-cache-catcache-seams",
@@ -20972,6 +20983,7 @@ name = "backend-utils-fmgr-core"
 version = "0.0.0"
 dependencies = [
  "backend-catalog-aclchk-seams",
+ "backend-catalog-pg-proc-seams",
  "backend-executor-functions-seams",
  "backend-nodes-nodeFuncs-seams",
  "backend-optimizer-util-clauses-seams",
@@ -21144,6 +21156,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-transam-parallel",
  "backend-access-transam-parallel-rt-seams",
+ "backend-commands-functioncmds-seams",
  "backend-commands-matview-deps-seams",
  "backend-commands-tablespace-globals-seams",
  "backend-common-exec-seams",
@@ -21437,6 +21450,7 @@ dependencies = [
  "backend-access-transam-parallel-rt-seams",
  "backend-access-transam-xact-seams",
  "backend-catalog-aclchk-seams",
+ "backend-catalog-pg-proc-seams",
  "backend-commands-matview-deps-seams",
  "backend-commands-tablespace-globals-seams",
  "backend-libpq-pqcomm-seams",
@@ -21444,6 +21458,7 @@ dependencies = [
  "backend-utils-adt-scalar-seams",
  "backend-utils-adt-timestamp-seams",
  "backend-utils-error",
+ "backend-utils-fmgr-fmgr-seams",
  "backend-utils-init-miscinit-seams",
  "backend-utils-init-small-seams",
  "backend-utils-misc-guc-file",
@@ -21458,6 +21473,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-guc",
+ "types-tuple",
 ]
 
 [[package]]

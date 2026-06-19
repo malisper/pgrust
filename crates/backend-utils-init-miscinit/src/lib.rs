@@ -975,6 +975,17 @@ pub fn init_seams() {
         superuser(scratch.mcx()).expect("superuser() catalog lookup failed")
     });
 
+    // functioncmds.c (CreateFunction / CreateCast) reaches `GetUserId()` and
+    // `superuser()` through its own outward seam crate. Their real owner is
+    // miscinit.c/superuser.c; install them here. `get_user_id` is infallible in
+    // C (`Oid GetUserId(void)`); `superuser`'s catalog read runs in
+    // superuser_arg's owner behind a scratch context.
+    backend_commands_functioncmds_seams::get_user_id::set(|| Ok(GetUserId()));
+    backend_commands_functioncmds_seams::superuser::set(|| {
+        let scratch = MemoryContext::new("functioncmds superuser seam");
+        superuser(scratch.mcx())
+    });
+
     // DatabasePath direct set/clear (the recovery "quick hack" path in
     // ProcessCommittedInvalidationMessages) — bypasses SetDatabasePath's
     // one-shot Assert; both write the globals.c-owned DatabasePath.

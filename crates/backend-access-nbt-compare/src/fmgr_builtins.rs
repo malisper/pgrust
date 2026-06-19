@@ -101,6 +101,52 @@ fn fc_btboolcmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     ret_i32(crate::btboolcmp(arg_bool(fcinfo, 0), arg_bool(fcinfo, 1)))
 }
 
+/// Decode an `oidvector` on-disk image to its `Oid` element list. An
+/// `oidvector` is a PLAIN-storage flat `ArrayType` (no TOAST): a fixed header
+/// `int32 ndim; int32 dataoffset; Oid elemtype; int32 dim1; int32 lbound1;`
+/// (20 bytes, no null bitmap because `oidvectorin` never produces NULLs)
+/// followed by `dim1` native-endian `Oid` words. A 0-dimension vector
+/// (`ndim == 0`) has no elements. This mirrors `oidvector_to_oids_bytes`
+/// inline, so the fmgr adapter needs no allocating context.
+fn decode_oidvector(image: &[u8]) -> Vec<types_core::Oid> {
+    if image.len() < 20 {
+        return Vec::new();
+    }
+    let ndim = i32::from_ne_bytes([image[0], image[1], image[2], image[3]]);
+    if ndim < 1 {
+        return Vec::new();
+    }
+    // dim1 == ARR_DIMS(vec)[0] (the 4th int32 in the header).
+    let dim1 = i32::from_ne_bytes([image[12], image[13], image[14], image[15]]);
+    let n = dim1.max(0) as usize;
+    // ARR_DATA_PTR: header (5 int32 = 20 bytes), no null bitmap for oidvector.
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let off = 20 + i * 4;
+        match image.get(off..off + 4) {
+            Some(b) => out.push(types_core::Oid::from(u32::from_ne_bytes([
+                b[0], b[1], b[2], b[3],
+            ]))),
+            None => break,
+        }
+    }
+    out
+}
+
+fn fc_btoidvectorcmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let a_img = fcinfo
+        .ref_arg(0)
+        .and_then(|p| p.as_varlena())
+        .expect("btoidvectorcmp: oidvector arg 0 missing from by-ref lane");
+    let a = decode_oidvector(a_img);
+    let b_img = fcinfo
+        .ref_arg(1)
+        .and_then(|p| p.as_varlena())
+        .expect("btoidvectorcmp: oidvector arg 1 missing from by-ref lane");
+    let b = decode_oidvector(b_img);
+    ret_i32(crate::btoidvectorcmp(&a, &b))
+}
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -140,5 +186,6 @@ pub fn register_nbtcompare_builtins() {
         builtin(356, "btoidcmp", 2, fc_btoidcmp),
         builtin(358, "btcharcmp", 2, fc_btcharcmp),
         builtin(1693, "btboolcmp", 2, fc_btboolcmp),
+        builtin(404, "btoidvectorcmp", 2, fc_btoidvectorcmp),
     ]);
 }

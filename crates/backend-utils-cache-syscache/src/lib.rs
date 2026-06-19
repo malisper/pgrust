@@ -890,6 +890,16 @@ fn set_locktag_tuple(tag: &mut LOCKTAG, dboid: Oid, reloid: Oid, blocknum: u32, 
 /// Install this unit's inward seams (the caller-shaped projected-row lookups
 /// in `backend-utils-cache-syscache-seams`).
 pub fn init_seams() {
+    // functioncmds.c (CreateFunction) looks up a language by name via the
+    // LANGNAME syscache; syscache.c is its real owner.
+    backend_commands_functioncmds_seams::lookup_language_by_name::set(|langname| {
+        projections::lookup_language_by_name(&langname)
+    });
+    // pg_proc.c (ProcedureCreate) probes for a pre-existing definition via the
+    // PROCNAMEARGSNSP syscache; syscache.c is its real owner.
+    backend_catalog_pg_proc_seams::search_proc_name_args_nsp::set(
+        projections::search_proc_name_args_nsp,
+    );
     backend_utils_cache_syscache_seams::lookup_enum_by_oid::set(projections::lookup_enum_by_oid);
     backend_utils_cache_syscache_seams::lookup_enum_by_typoid_name::set(
         projections::lookup_enum_by_typoid_name,

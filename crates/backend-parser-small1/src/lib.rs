@@ -1023,6 +1023,16 @@ pub fn init_seams() {
             location
         }
     });
+    // functioncmds.c (CreateFunction) likewise re-declares `parser_errposition`
+    // (parse_node.c) without its `ParseState`; with no source text reachable the
+    // C reduces to `location < 0 ? 0 : location`.
+    backend_commands_functioncmds_seams::parser_errposition::set(|location| {
+        if location < 0 {
+            0
+        } else {
+            location
+        }
+    });
     backend_parser_scansup_seams::truncate_identifier::set(truncate_identifier);
     backend_parser_scansup_seams::downcase_truncate_identifier::set(downcase_truncate_identifier);
     backend_parser_analyze_seams::make_parsestate::set(make_parsestate);

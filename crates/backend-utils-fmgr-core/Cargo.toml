@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 mcx = { path = "../mcx" }
+backend-catalog-pg-proc-seams = { path = "../backend-catalog-pg-proc-seams" }
 backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
 types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }

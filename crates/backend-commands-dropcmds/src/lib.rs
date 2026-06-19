@@ -100,6 +100,35 @@ fn elog_error(message: String) -> PgError {
 /// Install this crate's inward seams.
 pub fn init_seams() {
     backend_commands_dropcmds_seams::remove_objects::set(remove_objects);
+    // ProcessUtilitySlow / ExecDropStmt dispatch target (utility.c) for the
+    // general object-removal (`RemoveObjects`) leg — decode the rich `DropStmt`
+    // node and run the ported `remove_objects` body.
+    backend_tcop_utility_out_seams::remove_objects::set(remove_objects_seam);
+}
+
+/// Outward-seam adapter for `RemoveObjects(stmt)` (utility.c `ExecDropStmt`
+/// default leg): decode the rich [`types_nodes::nodes::Node`] `DropStmt` into the
+/// flat [`types_parsenodes::DropStmt`] the ported body consumes, then run it.
+/// `mcx` is threaded for parity but `remove_objects` runs in its own context.
+fn remove_objects_seam(_mcx: Mcx<'_>, stmt: &types_nodes::nodes::Node<'_>) -> PgResult<()> {
+    let ds = match stmt.as_dropstmt() {
+        Some(d) => d,
+        None => return Err(PgError::error("remove_objects_seam: statement is not a DropStmt")),
+    };
+
+    let mut objects: Vec<Node> = Vec::with_capacity(ds.objects.len());
+    for obj in ds.objects.iter() {
+        objects.push(backend_parser_parse_type::rich_node_to_parse(obj)?);
+    }
+
+    let pn = DropStmt {
+        objects,
+        removeType: ds.removeType,
+        behavior: ds.behavior,
+        missing_ok: ds.missing_ok,
+        concurrent: ds.concurrent,
+    };
+    remove_objects(&pn)
 }
 
 /// Drop one or more objects. dropcmds.c:52-126.

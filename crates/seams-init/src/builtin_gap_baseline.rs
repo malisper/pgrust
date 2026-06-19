@@ -97,7 +97,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (393, "array_le", BuiltinGapKind::NotRegistered),
     (396, "array_ge", BuiltinGapKind::NotRegistered),
     (398, "scalargejoinsel", BuiltinGapKind::NotRegistered),
-    (404, "btoidvectorcmp", BuiltinGapKind::NotRegistered),
     (438, "pg_num_nulls", BuiltinGapKind::NotRegistered),
     (440, "pg_num_nonnulls", BuiltinGapKind::NotRegistered),
     (619, "oidvectorne", BuiltinGapKind::NotRegistered),

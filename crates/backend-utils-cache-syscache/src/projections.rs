@@ -225,6 +225,74 @@ fn getattr_name<'mcx>(
     PgString::from_str_in(&String::from_utf8_lossy(&bytes[..len]), mcx)
 }
 
+/// `oldtup = SearchSysCache3(PROCNAMEARGSNSP, name, parameterTypes, nsp)`
+/// (pg_proc.c `ProcedureCreate` replace-path probe). The `parameter_types`
+/// input-argument list is framed as the `oidvector` syscache key. `Ok(None)` on
+/// `!HeapTupleIsValid` (no pre-existing definition — the common CREATE case);
+/// on a hit, the held tuple (in the caller's `mcx`, for the owner's
+/// `heap_modify_tuple`) plus the projected [`OldProcFacts`].
+pub(crate) fn search_proc_name_args_nsp<'mcx>(
+    mcx: Mcx<'mcx>,
+    procedure_name: &str,
+    parameter_types: &[Oid],
+    proc_namespace: Oid,
+) -> PgResult<
+    Option<(
+        backend_catalog_pg_proc_seams::OldProcFacts,
+        FormedTuple<'mcx>,
+    )>,
+> {
+    // The PROCNAMEARGSNSP cache keys on (proname, proargtypes oidvector, nsp).
+    let oidvec = backend_utils_adt_oid::buildoidvector(mcx, parameter_types)?;
+    let tuple = SearchSysCache3(
+        mcx,
+        PROCNAMEARGSNSP,
+        SysCacheKey::Str(procedure_name),
+        SysCacheKey::Bytes(&oidvec[..]),
+        SysCacheKey::Value(KeyDatum::from_oid(proc_namespace)),
+    )?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+
+    // proargnames (text[], nullable) -> Vec<Option<String>>.
+    let proargnames = match getattr_text_array(mcx, PROCNAMEARGSNSP, &tup, Anum_pg_proc_proargnames)?
+    {
+        Some(arr) => {
+            let mut names = Vec::with_capacity(arr.values.len());
+            for s in arr.values.iter() {
+                names.push(Some(s.as_str().to_string()));
+            }
+            Some(names)
+        }
+        None => None,
+    };
+    // proargmodes (char[], nullable) -> Vec<i8>.
+    let proargmodes = getattr_char_array(mcx, PROCNAMEARGSNSP, &tup, Anum_pg_proc_proargmodes)?
+        .map(|arr| arr.values.iter().map(|&c| c as i8).collect::<Vec<i8>>());
+    // proargdefaults (pg_node_tree text, nullable) -> TextDatumGetCString.
+    let (defaults_val, defaults_null) =
+        SysCacheGetAttr(mcx, PROCNAMEARGSNSP, &tup, Anum_pg_proc_proargdefaults)?;
+    let proargdefaults = if defaults_null {
+        None
+    } else {
+        Some(varlena_seams::text_to_cstring_v::call(mcx, &defaults_val)?.as_str().to_string())
+    };
+
+    let facts = backend_catalog_pg_proc_seams::OldProcFacts {
+        oid: getattr_oid(mcx, PROCNAMEARGSNSP, &tup, Anum_pg_proc_oid)?,
+        prokind: getattr_char(mcx, PROCNAMEARGSNSP, &tup, Anum_pg_proc_prokind)?,
+        prorettype: getattr_oid(mcx, PROCNAMEARGSNSP, &tup, Anum_pg_proc_prorettype)?,
+        proretset: getattr_bool(mcx, PROCNAMEARGSNSP, &tup, Anum_pg_proc_proretset)?,
+        pronargdefaults: getattr_i16(mcx, PROCNAMEARGSNSP, &tup, Anum_pg_proc_pronargdefaults)?,
+        proargnames,
+        proargmodes,
+        proargdefaults,
+    };
+
+    Ok(Some((facts, tup)))
+}
+
 /// `SearchSysCache1(RELOID, ObjectIdGetDatum(relid))` projected to the
 /// `Form_pg_class.relam` field. `Ok(None)` on a cache miss
 /// (`!HeapTupleIsValid`). The projection is by-value, so the tuple copy
@@ -2886,6 +2954,32 @@ pub(crate) fn language_oid_by_name(langname: &str) -> PgResult<Oid> {
 /// `SearchSysCache1(LANGNAME, PointerGetDatum(languageName))` (proclang.c
 /// pre-existing-definition check): the writable `pg_language` tuple by name
 /// plus its `oid`/`lanowner`, or `None` if no such language exists.
+/// `SearchSysCache1(LANGNAME, PointerGetDatum(language))` + `GETSTRUCT` —
+/// functioncmds.c `CreateFunction`'s language lookup. Returns the pg_language
+/// fields it reads (`oid`/`lanpltrusted`/`lanvalidator`/`laninline`/`lanname`),
+/// or `None` on a cache miss (the C `!HeapTupleIsValid` "language does not
+/// exist" path).
+pub(crate) fn lookup_language_by_name(
+    langname: &str,
+) -> PgResult<Option<backend_commands_functioncmds_seams::LanguageForm>> {
+    let scratch = MemoryContext::new("syscache lookup_language_by_name");
+    let mcx = scratch.mcx();
+    let Some(tup) = SearchSysCache1(mcx, crate::LANGNAME, SysCacheKey::Str(langname))? else {
+        return Ok(None);
+    };
+    // Anum_pg_language: oid=1, lanname=2, lanpltrusted=5, laninline=7,
+    // lanvalidator=8 (catalog/pg_language.h).
+    let form = backend_commands_functioncmds_seams::LanguageForm {
+        oid: getattr_oid(mcx, crate::LANGNAME, &tup, 1)?,
+        lanpltrusted: byval(SysCacheGetAttrNotNull(mcx, crate::LANGNAME, &tup, 5)?)?.as_bool(),
+        lanvalidator: getattr_oid(mcx, crate::LANGNAME, &tup, 8)?,
+        laninline: getattr_oid(mcx, crate::LANGNAME, &tup, 7)?,
+        lanname: getattr_name(mcx, crate::LANGNAME, &tup, 2)?.as_str().to_string(),
+    };
+    ReleaseSysCache(tup);
+    Ok(Some(form))
+}
+
 pub(crate) fn language_tuple_by_name<'mcx>(
     mcx: Mcx<'mcx>,
     langname: &str,

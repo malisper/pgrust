@@ -1402,6 +1402,24 @@ pub fn init_seams() {
         },
     );
 
+    // Cross-crate install: `LookupFuncName(funcname, nargs, argtypes,
+    // missing_ok)` (parse_func.c, body here) is reached by functioncmds.c
+    // (CreateCast / SUPPORT lookup) and by typecmds.c's I/O-function resolution
+    // through the functioncmds-seams channel. The decl carries owned
+    // `Vec<String>` name components; the body wants `&[PgString]`, materialised
+    // in a scratch context.
+    backend_commands_functioncmds_seams::lookup_func_name::set(
+        |funcname, nargs, argtypes, missing_ok| {
+            let scratch = mcx::MemoryContext::new("functioncmds lookup_func_name");
+            let mcx = scratch.mcx();
+            let names: Vec<PgString<'_>> = funcname
+                .iter()
+                .map(|s| PgString::from_str_in(s, mcx))
+                .collect::<PgResult<_>>()?;
+            LookupFuncName(mcx, &names, nargs, &argtypes, missing_ok)
+        },
+    );
+
     // Cross-crate install: `recheck_cast_function_args` (clauses.c:4382, the
     // const-fold simplify path) re-runs the parser's type resolution over the
     // (reordered / default-expanded) argument list. The decl lives on

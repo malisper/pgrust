@@ -4274,6 +4274,56 @@ pub fn init_seams() {
     // ProcessUtilitySlow dispatch target (utility.c) for CREATE DOMAIN — decode
     // the `CreateDomainStmt` and run the ported `DefineDomain` body.
     backend_tcop_utility_out_seams::define_domain::set(define_domain_seam);
+
+    // ProcessUtilitySlow `T_DefineStmt` dispatch target (utility.c) — the `kind`
+    // switch; the OBJECT_TYPE (base type) leg runs the ported `DefineType` body.
+    backend_tcop_utility_out_seams::define_stmt::set(define_stmt_seam);
+}
+
+/// Outward-seam adapter for the `DefineStmt` `kind` switch (utility.c:1395-1450).
+/// Only the `OBJECT_TYPE` (base-type) leg is ported here; the other kinds
+/// (AGGREGATE / OPERATOR / TS* / COLLATION) live in unported owners and raise
+/// loudly. `pstate` is threaded for parity (the C `DefineType` consumes it for
+/// `parser_errposition`, which `DefineType`'s port does not yet need).
+fn define_stmt_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    _pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
+    stmt: &RichNode<'mcx>,
+) -> PgResult<ObjectAddress> {
+    use types_nodes::parsenodes::OBJECT_TYPE;
+
+    let ds = match stmt.as_definestmt() {
+        Some(d) => d,
+        None => return Err(PgError::error("define_stmt_seam: statement is not a DefineStmt")),
+    };
+
+    if ds.kind == OBJECT_TYPE {
+        // defnames: List of String -> Vec<String>.
+        let mut names: Vec<String> = Vec::with_capacity(ds.defnames.len());
+        for n in ds.defnames.iter() {
+            match n.as_string() {
+                Some(s) => names.push(s.sval.as_str().to_string()),
+                None => {
+                    return Err(PgError::error(
+                        "CREATE TYPE: type name element is not a String",
+                    ))
+                }
+            }
+        }
+
+        // definition: List of DefElem -> Vec<parsenodes::Node::DefElem>.
+        let mut parameters: Vec<Node> = Vec::with_capacity(ds.definition.len());
+        for n in ds.definition.iter() {
+            parameters.push(backend_parser_parse_type::rich_node_to_parse(n)?);
+        }
+
+        DefineType(mcx, &names, &parameters)
+    } else {
+        Err(PgError::error(format!(
+            "define_stmt: DefineStmt kind {:?} not yet ported",
+            ds.kind
+        )))
+    }
 }
 
 /// Outward-seam adapter for `DefineDomain(pstate, (CreateDomainStmt *) stmt)`

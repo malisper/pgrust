@@ -1404,6 +1404,31 @@ pub fn init_seams() {
     });
     seam::error_conflicting_def_elem::set(errorConflictingDefElem);
 
+    // functioncmds.c (CreateFunction / CreateCast) reaches the namespace/type
+    // ACL + ownership checks through its own outward seam crate. Their real
+    // owner is aclchk.c; install them here, mirroring the C call shapes
+    // (`object_aclcheck(NamespaceRelationId/TypeRelationId, ...)`,
+    // `object_ownercheck(TypeRelationId, ...)`,
+    // `aclcheck_error(aclresult, OBJECT_SCHEMA, ...)`).
+    {
+        use backend_commands_functioncmds_seams as fc;
+        fc::namespace_aclcheck::set(|namespace_id, role_id, mode| {
+            let ctx = MemoryContext::new("functioncmds namespace_aclcheck");
+            object_aclcheck(ctx.mcx(), NamespaceRelationId, namespace_id, role_id, mode)
+        });
+        fc::type_aclcheck::set(|type_id, role_id, mode| {
+            let ctx = MemoryContext::new("functioncmds type_aclcheck");
+            object_aclcheck(ctx.mcx(), TypeRelationId, type_id, role_id, mode)
+        });
+        fc::type_ownercheck::set(|type_id, role_id| {
+            let ctx = MemoryContext::new("functioncmds type_ownercheck");
+            object_ownercheck(ctx.mcx(), TypeRelationId, type_id, role_id)
+        });
+        fc::aclcheck_error_schema::set(|aclresult, objname| {
+            aclcheck_error(aclresult, ObjectType::Schema, objname)
+        });
+    }
+
     // ExecuteGrantStmt (F2): the GRANT/REVOKE executor, bounded to the
     // OBJECT_SCHEMA path. Installed onto the utility slow-path out-seam.
     backend_tcop_utility_out_seams::execute_grant_stmt_slow::set(|mcx, stmt| {

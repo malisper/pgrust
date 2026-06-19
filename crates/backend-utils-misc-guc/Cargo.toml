@@ -34,6 +34,9 @@ backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-sea
 # Outward seam crates (call out, do not install):
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-catalog-pg-proc-seams = { path = "../backend-catalog-pg-proc-seams" }
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+types-tuple = { path = "../types-tuple" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
 backend-utils-misc-superuser-seams = { path = "../backend-utils-misc-superuser-seams" }

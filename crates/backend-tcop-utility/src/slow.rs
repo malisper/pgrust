@@ -358,6 +358,10 @@ fn process_utility_slow_body<'mcx>(
             address = rt::create_function::call(mcx, pstate, parsetree)?;
         }
 
+        t if t == ntag::T_CreateCastStmt => {
+            address = rt::create_cast::call(mcx, parsetree)?;
+        }
+
         t if t == ntag::T_AlterFunctionStmt => {
             address = rt::alter_function::call(mcx, pstate, parsetree)?;
         }

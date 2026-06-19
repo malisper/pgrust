@@ -865,6 +865,29 @@ pub fn init_seams() {
     use backend_commands_tablecmds_seams as tc;
     tc::typename_type_id_and_mod::set(seam_tc_typename_type_id_and_mod);
     tc::get_column_def_collation::set(seam_tc_get_column_def_collation);
+
+    // functioncmds.c (CreateFunction / CreateCast) resolves type names through
+    // its own outward seam crate; the real owner is parse_type.c. The seams pass
+    // owned `types_parsenodes::TypeName` and carry no caller `mcx`/pstate, so the
+    // adapters resolve them behind a scratch context with `pstate = None`.
+    use backend_commands_functioncmds_seams as fc;
+    fc::typename_type_id::set(|type_name| {
+        let scratch = mcx::MemoryContext::new("functioncmds typename_type_id");
+        typenameTypeId(scratch.mcx(), None, &type_name)
+    });
+    fc::type_name_to_string::set(|type_name| TypeNameToString(&type_name));
+    fc::lookup_type_name::set(|type_name| {
+        let scratch = mcx::MemoryContext::new("functioncmds lookup_type_name");
+        match LookupTypeName(scratch.mcx(), None, &type_name, /* missing_ok */ true)? {
+            Some((typ, _typmod)) => Ok(Some(
+                backend_commands_functioncmds_seams::LookupTypeResult {
+                    type_oid: typ.oid,
+                    typisdefined: typ.typisdefined,
+                },
+            )),
+            None => Ok(None),
+        }
+    });
 }
 
 /// `typenameTypeIdAndMod(NULL, typeName, &typid, &typmod)` — tablecmds seam.
@@ -1032,6 +1055,155 @@ pub fn raw_typename_to_parse(
         typemod: tn.typemod,
         arrayBounds: array_bounds,
         location: tn.location,
+    })
+}
+
+/// Convert one rich owned [`types_nodes::nodes::Node`] into the flat
+/// [`types_parsenodes::Node`] the command bodies (`DefineType`,
+/// `CreateFunction`, `CreateCast`, `RemoveObjects`) consume. Handles the leaf /
+/// value / DDL-vocabulary node kinds that appear inside DEFINE / CREATE
+/// FUNCTION / CREATE CAST / DROP statements: the value literals, `TypeName`
+/// (through [`raw_typename_to_parse`]), `DefElem`, `ObjectWithArgs`,
+/// `FunctionParameter`, and `List`. Recurses through nested args. Arbitrary
+/// expression nodes (e.g. a parameter `DEFAULT` expression, or a non-value
+/// `DefElem.arg`) are NOT yet expressible as a flat `parsenodes::Node`; those
+/// raise loudly — they do not occur in the base-type / C-language DDL paths.
+pub fn rich_node_to_parse(
+    n: &types_nodes::nodes::Node<'_>,
+) -> PgResult<types_parsenodes::Node> {
+    use types_nodes::nodes::ntag;
+
+    let out = match n.node_tag() {
+        ntag::T_Integer => {
+            let i = n.expect_integer();
+            types_parsenodes::Node::Integer(types_parsenodes::Integer { ival: i.ival })
+        }
+        ntag::T_Float => {
+            let f = n.expect_float();
+            types_parsenodes::Node::Float(types_parsenodes::Float {
+                fval: Some(f.fval.as_str().to_string()),
+            })
+        }
+        ntag::T_Boolean => {
+            let b = n.expect_boolean();
+            types_parsenodes::Node::Boolean(types_parsenodes::Boolean {
+                boolval: b.boolval,
+            })
+        }
+        ntag::T_String => {
+            let s = n.expect_string();
+            types_parsenodes::Node::String(types_parsenodes::StringNode {
+                sval: Some(s.sval.as_str().to_string()),
+            })
+        }
+        ntag::T_BitString => {
+            let b = n.expect_bitstring();
+            types_parsenodes::Node::BitString(types_parsenodes::BitString {
+                bsval: Some(b.bsval.as_str().to_string()),
+            })
+        }
+        ntag::T_TypeName => {
+            let tn = n.expect_typename();
+            types_parsenodes::Node::TypeName(raw_typename_to_parse(tn)?)
+        }
+        ntag::T_DefElem => {
+            let de = n.expect_defelem();
+            types_parsenodes::Node::DefElem(rich_defelem_to_parse(de)?)
+        }
+        ntag::T_ObjectWithArgs => {
+            let owa = n.expect_objectwithargs();
+            types_parsenodes::Node::ObjectWithArgs(rich_objectwithargs_to_parse(owa)?)
+        }
+        ntag::T_FunctionParameter => {
+            let fp = n.expect_functionparameter();
+            types_parsenodes::Node::FunctionParameter(rich_functionparameter_to_parse(fp)?)
+        }
+        ntag::T_List => {
+            let l = n.expect_list();
+            let mut out = Vec::with_capacity(l.len());
+            for e in l.iter() {
+                out.push(rich_node_to_parse(e)?);
+            }
+            types_parsenodes::Node::List(out)
+        }
+        other => {
+            return Err(PgError::error(format!(
+                "rich_node_to_parse: node tag {} not convertible to parsenodes",
+                other.0
+            )))
+        }
+    };
+    Ok(out)
+}
+
+/// `DefElem` (rich → flat). `arg` (when present) is recursively converted.
+pub fn rich_defelem_to_parse(
+    de: &types_nodes::ddlnodes::DefElem<'_>,
+) -> PgResult<types_parsenodes::DefElem> {
+    let arg = match de.arg.as_deref() {
+        Some(a) => Some(Box::new(rich_node_to_parse(a)?)),
+        None => None,
+    };
+    Ok(types_parsenodes::DefElem {
+        defnamespace: de.defnamespace.as_ref().map(|s| s.as_str().to_string()),
+        defname: de.defname.as_ref().map(|s| s.as_str().to_string()),
+        arg,
+        defaction: de.defaction,
+        location: de.location,
+    })
+}
+
+/// `ObjectWithArgs` (rich → flat). `objname` is a `List` of `String`s flattened
+/// to `Vec<String>`; `objargs` / `objfuncargs` are node lists.
+pub fn rich_objectwithargs_to_parse(
+    owa: &types_nodes::ddlnodes::ObjectWithArgs<'_>,
+) -> PgResult<types_parsenodes::ObjectWithArgs> {
+    let mut objname: Vec<String> = Vec::with_capacity(owa.objname.len());
+    for n in owa.objname.iter() {
+        match n.as_string() {
+            Some(s) => objname.push(s.sval.as_str().to_string()),
+            None => {
+                return Err(PgError::error(
+                    "rich_objectwithargs_to_parse: objname element is not a String",
+                ))
+            }
+        }
+    }
+    let mut objargs: Vec<types_parsenodes::Node> = Vec::with_capacity(owa.objargs.len());
+    for n in owa.objargs.iter() {
+        objargs.push(rich_node_to_parse(n)?);
+    }
+    let mut objfuncargs: Vec<types_parsenodes::Node> = Vec::with_capacity(owa.objfuncargs.len());
+    for n in owa.objfuncargs.iter() {
+        objfuncargs.push(rich_node_to_parse(n)?);
+    }
+    Ok(types_parsenodes::ObjectWithArgs {
+        objname,
+        objargs,
+        objfuncargs,
+        args_unspecified: owa.args_unspecified,
+    })
+}
+
+/// `FunctionParameter` (rich → flat). `argType` is a `TypeName`; `defexpr` (a
+/// `DEFAULT` expression) is not yet expressible as a flat node and raises.
+pub fn rich_functionparameter_to_parse(
+    fp: &types_nodes::ddlnodes::FunctionParameter<'_>,
+) -> PgResult<types_parsenodes::FunctionParameter> {
+    let argType = match fp.argType.as_deref() {
+        Some(a) => Some(Box::new(rich_node_to_parse(a)?)),
+        None => None,
+    };
+    let defexpr = match fp.defexpr.as_deref() {
+        Some(a) => Some(Box::new(rich_node_to_parse(a)?)),
+        None => None,
+    };
+    Ok(types_parsenodes::FunctionParameter {
+        name: fp.name.as_ref().map(|s| s.as_str().to_string()),
+        argType,
+        mode: fp.mode as i8,
+        defexpr,
+        location: fp.location,
     })
 }
 

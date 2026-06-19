@@ -10,6 +10,9 @@ path = "src/lib.rs"
 
 [dependencies]
 pgrust-trace = { path = "../pgrust-trace" }
+backend-commands-functioncmds-seams = { path = "../backend-commands-functioncmds-seams" }
+backend-catalog-pg-proc-seams = { path = "../backend-catalog-pg-proc-seams" }
+backend-utils-adt-oid = { path = "../backend-utils-adt-oid" }
 mcx = { path = "../mcx" }
 types-cache = { path = "../types-cache" }
 types-namespace = { path = "../types-namespace" }

@@ -436,6 +436,18 @@ fn systable_getnext<'mcx>(
     mcx: Mcx<'mcx>,
     sysscan: &mut SysScanDescData,
 ) -> PgResult<Option<FormedTuple<'mcx>>> {
+    // The result slot (`live.slot`) was allocated in the scan's own context
+    // (`scan_cx`) at begin time and is freed by `ExecDropSingleTupleTableSlot`
+    // at `systable_endscan`. The AM `*getnextslot` providers STORE the fetched
+    // heap tuple into that slot, so the store must allocate in `scan_cx` too —
+    // not in the caller-supplied `mcx`, which is typically a per-iteration
+    // scratch context that drops before the scan ends (e.g. pg_depend's
+    // `systable_scan_foreach`). Storing the slot tuple in a context that
+    // outlives a single getnext is also what C does: the returned reference is
+    // valid until the next getnext / endscan. We therefore drive the slot store
+    // with the scan context and only `clone_in` the returned tuple into the
+    // caller's `mcx`.
+    let scan_mcx: Mcx<'mcx> = sysscan.scan_cx_mcx();
     let live = live_of(sysscan);
 
     let htup: Option<FormedTuple<'mcx>> = if live.irel.is_some() {
@@ -446,7 +458,7 @@ fn systable_getnext<'mcx>(
         // index_getnext_slot dispatches the heap fetch to the unported heap AM
         // provider (mirror-and-panic) — the systable dispatch itself is real.
         if indexam::index_getnext_slot(
-            mcx,
+            scan_mcx,
             iscan,
             ForwardScanDirection,
             &mut live.slot,
@@ -466,7 +478,7 @@ fn systable_getnext<'mcx>(
     } else {
         let scan = live.scan.as_deref_mut().expect("heap path with no scan");
         if tableam::table_scan_getnextslot(
-            mcx,
+            scan_mcx,
             scan,
             ForwardScanDirection,
             &mut live.slot,
@@ -878,6 +890,9 @@ fn systable_getnext_ordered<'mcx>(
     sysscan: &mut SysScanDescData,
     direction: ScanDirection,
 ) -> PgResult<Option<FormedTuple<'mcx>>> {
+    // The slot store must allocate in the scan context, not the caller's
+    // (possibly transient) `mcx`; see the note in `systable_getnext`.
+    let scan_mcx: Mcx<'mcx> = sysscan.scan_cx_mcx();
     let live = live_of(sysscan);
     // Assert(sysscan->irel).
     let iscan = live
@@ -886,7 +901,7 @@ fn systable_getnext_ordered<'mcx>(
         .expect("systable_getnext_ordered on a non-index scan");
 
     let htup: Option<FormedTuple<'mcx>> =
-        if indexam::index_getnext_slot(mcx, iscan, direction, &mut live.slot)? {
+        if indexam::index_getnext_slot(scan_mcx, iscan, direction, &mut live.slot)? {
             let tup = fetch_slot_heap_tuple(mcx, &live.slot)?;
             // See notes in systable_getnext.
             if iscan.xs_recheck {

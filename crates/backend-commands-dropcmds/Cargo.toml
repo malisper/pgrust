@@ -30,3 +30,5 @@ backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-catalog-namespace = { path = "../backend-catalog-namespace" }
+backend-parser-parse-type = { path = "../backend-parser-parse-type" }
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }

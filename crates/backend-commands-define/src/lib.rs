@@ -335,6 +335,39 @@ fn arg_get_string(defname: &str, arg: Option<&DefElemArg>) -> PgResult<String> {
 pub fn init_seams() {
     backend_commands_define_seams::def_get_string::set(seam_def_get_string);
     backend_commands_define_seams::def_get_boolean::set(seam_def_get_boolean);
+
+    // functioncmds.c (CreateFunction / AlterFunction) reads DefElem options
+    // (`defGetNumeric`, `defGetQualifiedName`, and the AS-clause list) through
+    // its own outward seam crate; the real owner is define.c. The seams pass an
+    // owned `DefElem` by value.
+    use backend_commands_functioncmds_seams as fc;
+    fc::def_get_numeric::set(|defel| defGetNumeric(&defel));
+    fc::def_get_qualified_name::set(|defel| {
+        // `defGetQualifiedName` returns the name list as `String` Nodes; the
+        // functioncmds seam wants the bare `String`s (strVal of each).
+        let nodes = defGetQualifiedName(&defel)?;
+        let mut out = Vec::with_capacity(nodes.len());
+        for n in &nodes {
+            match n {
+                Node::String(s) => out.push(s.sval.clone().unwrap_or_default()),
+                _ => return Err(syntax_error("name list element is not a String node".to_string())),
+            }
+        }
+        Ok(out)
+    });
+    fc::def_get_as_clause::set(|defel| def_get_as_clause(&defel));
+}
+
+/// The AS clause of a CREATE FUNCTION option list: `(List *) def->arg`
+/// (`compute_function_attributes` reads `defel->arg` directly in C). The grammar
+/// hands a `List` of `String` nodes; a bare `String` is accepted as a singleton.
+fn def_get_as_clause(def: &types_parsenodes::DefElem) -> PgResult<Vec<Node>> {
+    let arg = require_arg(def, "requires a parameter")?;
+    match arg {
+        Node::List(cells) => Ok(cells.to_vec()),
+        Node::String(s) => Ok(list_make1_string(s)),
+        _ => Err(syntax_error(format!("argument of {} must be a list of strings", defname(def)))),
+    }
 }
 
 // ---------------------------------------------------------------------------

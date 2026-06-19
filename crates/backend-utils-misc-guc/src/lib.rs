@@ -725,6 +725,57 @@ pub fn init_seams() {
             Ok(())
         });
     }
+
+    // pg_proc.c (ProcedureCreate) runs the language validator wrapped in the
+    // per-function GUC nesting level (`pg_proc.c:700-726`). The fmgr dispatch
+    // (`OidFunctionCall1(languageValidator, ObjectIdGetDatum(retval))`) crosses
+    // through the fmgr seam and the GUC nest is owned here, so guc.c installs
+    // the combined seam. `set_items` (proconfig) only opens a nest when
+    // `check_function_bodies` is on.
+    // pg_proc.c reads `check_function_bodies` (guc.c) to gate the validator
+    // body parse + per-function GUC nest; guc.c is its owner.
+    backend_catalog_pg_proc_seams::check_function_bodies::set(|| {
+        Ok(get_bool("check_function_bodies").unwrap_or(true))
+    });
+    backend_catalog_pg_proc_seams::run_language_validator::set(
+        |language_validator, retval, proconfig| {
+            let mut save_nestlevel: Option<i32> = None;
+            if get_bool("check_function_bodies").unwrap_or(true) {
+                if let Some(set_items) = proconfig {
+                    if !set_items.is_empty() {
+                        let nest = NewGUCNestLevel();
+                        save_nestlevel = Some(nest);
+                        let scratch = mcx::MemoryContext::new("run_language_validator superuser");
+                        let context = if backend_utils_init_miscinit_seams::superuser::call(
+                            scratch.mcx(),
+                        )? {
+                            types_guc::PGC_SUSET
+                        } else {
+                            types_guc::PGC_USERSET
+                        };
+                        guc_array::ProcessGUCArray(set_items, context, types_guc::PGC_S_SESSION)?;
+                    }
+                }
+            }
+
+            // OidFunctionCall1(languageValidator, ObjectIdGetDatum(retval)).
+            let call_ctx = mcx::MemoryContext::new("run_language_validator call");
+            let mcx = call_ctx.mcx();
+            let result = backend_utils_fmgr_fmgr_seams::function_call_invoke_datum::call(
+                mcx,
+                language_validator,
+                types_core::primitive::InvalidOid,
+                &[types_tuple::backend_access_common_heaptuple::Datum::from_oid(retval)],
+                None,
+            )
+            .map(|_| ());
+
+            if let Some(nest) = save_nestlevel {
+                at_eoxact_guc(true, nest);
+            }
+            result
+        },
+    );
 }
 
 /// Install the parallel-worker GUC-state transfer seams declared in

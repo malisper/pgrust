@@ -3984,4 +3984,39 @@ pub fn init_seams() {
         array_receive_function_call_seam,
     );
     backend_utils_fmgr_fmgr_seams::array_send_function_call::set(array_send_function_call_seam);
+
+    // pg_proc.c (ProcedureCreate) gates the language validator on
+    // `CheckFunctionValidatorAccess(validatorOid, funcOid)` (fmgr.c, ported
+    // here); the seam carries no caller `mcx`, so it runs behind a scratch
+    // context.
+    backend_catalog_pg_proc_seams::check_function_validator_access::set(
+        |validator_fn_oid, func_oid| {
+            let scratch = MemoryContext::new("check_function_validator_access");
+            check_function_validator_access(scratch.mcx(), validator_fn_oid, func_oid)
+        },
+    );
+
+    // `fmgr_internal_validator` (pg_proc.c:761-774): read the function's `prosrc`
+    // and verify it names a built-in (`fmgr_internal_function(prosrc) !=
+    // InvalidOid`); the fmgr-builtin lookup is this crate's. The seam carries no
+    // caller `mcx`, so it runs behind a scratch context.
+    backend_catalog_pg_proc_seams::validate_internal_function::set(|funcoid| {
+        let scratch = MemoryContext::new("validate_internal_function");
+        let mcx = scratch.mcx();
+        // C: SearchSysCache1(PROCOID, funcoid); if (!valid) elog(ERROR,
+        // "cache lookup failed for function %u").
+        let proc = backend_utils_cache_syscache_seams::lookup_proc::call(mcx, funcoid)?
+            .ok_or_else(|| PgError::error(format!("cache lookup failed for function {funcoid}")))?;
+        let prosrc = proc.prosrc.as_ref().map(|s| s.as_str()).unwrap_or("");
+        // C: if (fmgr_internal_function(prosrc) == InvalidOid)
+        //        ereport(ERROR, ERRCODE_UNDEFINED_FUNCTION,
+        //                "there is no built-in function named \"%s\"").
+        if !types_core::primitive::OidIsValid(fmgr_internal_function(prosrc)) {
+            return Err(PgError::error(format!(
+                "there is no built-in function named \"{prosrc}\""
+            ))
+            .with_sqlstate(ERRCODE_UNDEFINED_FUNCTION));
+        }
+        Ok(())
+    });
 }

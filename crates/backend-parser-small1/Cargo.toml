@@ -31,6 +31,7 @@ backend-utils-adt-numutils = { path = "../backend-utils-adt-numutils" }
 # Owner of the inward seams this crate installs.
 backend-parser-small1-seams = { path = "../backend-parser-small1-seams" }
 backend-commands-collationcmds-seams = { path = "../backend-commands-collationcmds-seams" }
+backend-commands-functioncmds-seams = { path = "../backend-commands-functioncmds-seams" }
 backend-parser-scansup-seams = { path = "../backend-parser-scansup-seams" }
 backend-parser-analyze-seams = { path = "../backend-parser-analyze-seams" }
 

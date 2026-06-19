@@ -893,6 +893,10 @@ seam!(
     pub fn create_function<'mcx>(mcx: Mcx<'mcx>, pstate: &mut ParseState<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
 );
 seam!(
+    /// `CreateCast(stmt)` (functioncmds.c) — CREATE CAST.
+    pub fn create_cast<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
     /// `AlterFunction(pstate, stmt)` (functioncmds.c) — ALTER FUNCTION.
     pub fn alter_function<'mcx>(mcx: Mcx<'mcx>, pstate: &mut ParseState<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
 );

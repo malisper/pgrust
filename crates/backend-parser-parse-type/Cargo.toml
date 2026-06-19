@@ -33,3 +33,7 @@ backend-parser-parse-type-seams = { path = "../backend-parser-parse-type-seams" 
 # typmod) via parse_type.c's typenameTypeIdAndMod / GetColumnDefCollation; this
 # crate is their real owner. Seam crate -> no cycle.
 backend-commands-tablecmds-seams = { path = "../backend-commands-tablecmds-seams" }
+# functioncmds.c (CreateFunction / CreateCast) resolves type names via
+# parse_type.c (typenameTypeId / TypeNameToString / LookupTypeName); this crate
+# is their real owner. Seam crate -> no cycle.
+backend-commands-functioncmds-seams = { path = "../backend-commands-functioncmds-seams" }

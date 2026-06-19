@@ -23,6 +23,7 @@ types-storage = { path = "../types-storage" }
 types-tuple = { path = "../types-tuple" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
+backend-commands-functioncmds-seams = { path = "../backend-commands-functioncmds-seams" }
 backend-commands-collationcmds-seams = { path = "../backend-commands-collationcmds-seams" }
 backend-utils-adt-acl = { path = "../backend-utils-adt-acl" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
