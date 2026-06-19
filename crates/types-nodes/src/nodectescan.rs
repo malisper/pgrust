@@ -10,14 +10,12 @@
 //! the leader-only fields (`cte_table`, `eof_cte`) are valid only in the leader,
 //! exactly as the C documents.
 
-use mcx::{Mcx, PgBox};
+use mcx::Mcx;
 use types_error::PgResult;
 
 use crate::execnodes::ScanStateData;
-use crate::funcapi::Tuplestorestate;
 use crate::nodeindexscan::Scan;
 use crate::nodes::NodeTag;
-use crate::planstate::PlanStateNode;
 
 // ===========================================================================
 // NodeTags (nodes/nodetags.h, PostgreSQL 18.3 generated order).
@@ -89,14 +87,28 @@ pub struct CteScanState<'mcx> {
     pub eflags: i32,
     /// `int readptr` — index of my tuplestore read pointer.
     pub readptr: i32,
-    /// `PlanState *cteplanstate` — `PlanState` for the CTE query itself, found
-    /// in `EState.es_subplanstates`. `None` until linked at init.
-    pub cteplanstate: Option<PgBox<'mcx, PlanStateNode<'mcx>>>,
-    /// `Tuplestorestate *cte_table` — rows already read from the CTE query.
-    /// Only valid in the leader (`None` in a follower / before init).
-    pub cte_table: Option<PgBox<'mcx, Tuplestorestate<'mcx>>>,
-    /// `bool eof_cte` — reached end of CTE query? Only valid in the leader.
-    pub eof_cte: bool,
+    /// `PlanState *cteplanstate` — the `PlanState` for the CTE query itself.
+    ///
+    /// In C this is a borrowed pointer `= list_nth(es_subplanstates,
+    /// ctePlanId - 1)`. The owned model cannot hold a live alias into the
+    /// `es_subplanstates`-owned plan-state (multiple followers share it and the
+    /// end-of-plan teardown loop owns it), so — like
+    /// [`SubPlanState`](crate::execnodes) reaching its child by `plan_id` index —
+    /// this records the subplan's 1-based `ctePlanId` identity; the CTE's
+    /// plan-state is reached at access time via
+    /// `es_subplanstates[cte_plan_id - 1]`. `None` until linked at init.
+    pub cte_plan_id: Option<i32>,
+    /// `int cteParam` — index of this CTE's shared
+    /// [`CteSharedState`](crate::execnodes::CteSharedState) in
+    /// `EState.es_cte_shared` (the C `CteScan.cteParam`, which also keys
+    /// `es_param_exec_vals`). The owned-model replacement for the aliasing
+    /// `leader` back-pointer: leader and followers reach the shared
+    /// `cte_table` / `eof_cte` by this index. `None` until resolved at init.
+    pub cte_param: Option<i32>,
+    /// Whether this node is the leader of its CTE (the C `node->leader == node`).
+    /// The leader created the shared store and is responsible for freeing it in
+    /// `ExecEndCteScan`. Set by `cte_resolve_leader`.
+    pub is_leader: bool,
 }
 
 impl<'mcx> CteScanState<'mcx> {
@@ -107,9 +119,9 @@ impl<'mcx> CteScanState<'mcx> {
             ss: ScanStateData::default(),
             eflags: 0,
             readptr: 0,
-            cteplanstate: None,
-            cte_table: None,
-            eof_cte: false,
+            cte_plan_id: None,
+            cte_param: None,
+            is_leader: false,
         }
     }
 

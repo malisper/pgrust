@@ -664,6 +664,7 @@ seam_core::seam!(
     /// tuplestore_set_eflags(scanstate->cte_table, scanstate->eflags)`.
     pub fn cte_tuplestore_begin_heap_leader<'mcx>(
         scanstate: &mut CteScanState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<()>
 );
 
@@ -675,13 +676,16 @@ seam_core::seam!(
     /// `scanstate->readptr` to the freshly allocated pointer index.
     pub fn cte_tuplestore_alloc_read_pointer_follower<'mcx>(
         scanstate: &mut CteScanState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
-    /// `node->leader->eof_cte` (read): the leader's end-of-CTE flag.
+    /// `node->leader->eof_cte` (read): the leader's end-of-CTE flag, held in
+    /// `EState.es_cte_shared[node.cteParam].eof_cte`.
     pub fn cte_leader_eof_cte<'mcx>(
         node: &CteScanState<'mcx>,
+        estate: &types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<bool>
 );
 
@@ -690,6 +694,7 @@ seam_core::seam!(
     pub fn cte_set_leader_eof_cte<'mcx>(
         node: &mut CteScanState<'mcx>,
         value: bool,
+        estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<()>
 );
 
@@ -698,6 +703,7 @@ seam_core::seam!(
     /// make this node's read pointer active on the shared store.
     pub fn cte_tuplestore_select_read_pointer<'mcx>(
         node: &mut CteScanState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<()>
 );
 
@@ -705,6 +711,7 @@ seam_core::seam!(
     /// `tuplestore_ateof(node->leader->cte_table)`.
     pub fn cte_tuplestore_ateof<'mcx>(
         node: &CteScanState<'mcx>,
+        estate: &types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<bool>
 );
 
@@ -714,6 +721,7 @@ seam_core::seam!(
     pub fn cte_tuplestore_advance<'mcx>(
         node: &mut CteScanState<'mcx>,
         forward: bool,
+        estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<bool>
 );
 
@@ -741,6 +749,7 @@ seam_core::seam!(
     /// `tuplestore_rescan(node->leader->cte_table)`.
     pub fn cte_tuplestore_rescan<'mcx>(
         node: &mut CteScanState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<()>
 );
 
@@ -748,6 +757,7 @@ seam_core::seam!(
     /// `tuplestore_clear(node->leader->cte_table)`.
     pub fn cte_tuplestore_clear<'mcx>(
         node: &mut CteScanState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<()>
 );
 
@@ -762,9 +772,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `tuplestore_end(node->cte_table)` (leader only, `ExecEndCteScan`).
+    /// `tuplestore_end(node->cte_table)` (leader only, `ExecEndCteScan`): free
+    /// the shared store held in `EState.es_cte_shared[node.cteParam]` and clear
+    /// that side-entry.
     pub fn cte_tuplestore_end<'mcx>(
         node: &mut CteScanState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<()>
 );
 
@@ -791,8 +804,10 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `node->leader->cteplanstate->chgParam != NULL` (`ExecReScanCteScan`):
-    /// whether the underlying CTE needs a fresh scan.
+    /// whether the underlying CTE needs a fresh scan. Reaches the CTE subplan's
+    /// plan-state by `ctePlanId` index into `es_subplanstates`.
     pub fn cte_leader_cteplanstate_chgparam_set<'mcx>(
         node: &CteScanState<'mcx>,
+        estate: &types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<bool>
 );

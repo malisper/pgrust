@@ -367,13 +367,14 @@ pub fn exec_end_node<'mcx>(
         // case T_CteScanState: ExecEndCteScan((CteScanState *) node);
         //
         // `ExecEndCteScan` frees the shared tuplestore only when this node is its
-        // own leader (`node->leader == node`); the leader link is an aliased
-        // self-/cross-reference resolved through the CteScan owner's seams, so the
-        // identity test is supplied via the `cte_leader_is_self` seam.
+        // own leader (`node->leader == node`); in the owned model the leader
+        // identity was recorded on the node by `cte_resolve_leader`, surfaced
+        // through the `cte_leader_is_self` seam. Freeing clears the shared store
+        // held in `EState.es_cte_shared[cteParam]`, hence the `&mut estate`.
         PlanStateNode::CteScan(state) => {
             let is_leader =
                 backend_executor_execMain_seams::cte_leader_is_self::call(state)?;
-            backend_executor_nodeCtescan::ExecEndCteScan(state, is_leader)
+            backend_executor_nodeCtescan::ExecEndCteScan(state, is_leader, estate)
         }
         // case T_CustomScanState: ExecEndCustomScan((CustomScanState *) node);
         PlanStateNode::CustomScan(state) => {

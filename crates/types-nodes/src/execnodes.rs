@@ -266,6 +266,40 @@ pub struct ExecPlanLink {
     pub plan_id: i32,
 }
 
+/// Owned-model rendering of the C CteScan **leader**'s shared, per-CTE state.
+///
+/// In C (`nodeCtescan.c`), several `CteScan` nodes can read one CTE. The first to
+/// initialize becomes the "leader" and owns the shared `Tuplestorestate
+/// *cte_table` and the `bool eof_cte` end-of-CTE flag; it publishes a pointer to
+/// itself in `es_param_exec_vals[cteParam].value`
+/// (`prmdata->value = PointerGetDatum(scanstate)`), and every other CteScan
+/// (`scanstate->leader = DatumGetPointer(prmdata->value)`) reaches the shared
+/// store through that aliasing back-pointer. The owned model cannot store a live
+/// `&mut CteScanState` alias in a `Datum`, nor hold one as a node field.
+///
+/// So — exactly as `execPlan`'s C `void *` became the index-identity
+/// [`ExecPlanLink`] — the leader's *shared-per-CTE* state is hoisted out of the
+/// leader node into this side-entry, keyed by `cteParam` in
+/// [`EStateData::es_cte_shared`] (same length / allocation as
+/// `es_param_exec_vals`). The "leader" is simply whoever first creates the entry
+/// (`cte_table` becomes `Some`); leader and followers alike reach the store by
+/// `cteParam` index rather than by aliasing a node. This carries only the C
+/// leader's shared fields, not a node identity — it is not a registry of nodes.
+#[derive(Debug, Default)]
+pub struct CteSharedState<'mcx> {
+    /// `Tuplestorestate *cte_table` — rows already read from the CTE query,
+    /// shared by all CteScans for this CTE. `None` until the leader creates it
+    /// (and after `ExecEndCteScan` frees it).
+    pub cte_table: Option<PgBox<'mcx, crate::funcapi::Tuplestorestate<'mcx>>>,
+    /// `bool eof_cte` — reached end of the CTE query? (the leader's flag).
+    pub eof_cte: bool,
+    /// The CTE subplan's just-returned output slot, stashed between the
+    /// owned-model decomposition's `cte_exec_proc_node` →
+    /// `cte_tuplestore_puttupleslot` → `cte_copy_tuple_to_scan_slot` seam calls
+    /// (the C local `cteslot`). Cleared after the copy.
+    pub last_cte_slot: Option<SlotId>,
+}
+
 impl Default for ParamExecData<'_> {
     fn default() -> Self {
         // C `palloc0` zero-init: NULL execPlan, NULL value, isnull cleared.
@@ -913,6 +947,15 @@ pub struct EStateData<'mcx> {
     /// (`ExecSetParamPlan`). Populated by `ExecInitNode`'s initPlan loop. `None`
     /// is an absent slot (a non-initplan plan_id, or a slot not yet filled).
     pub es_initplan: PgVec<'mcx, Option<SubPlanState<'mcx>>>,
+    /// Owned-model side-table holding each CTE's shared "leader" state
+    /// ([`CteSharedState`]), keyed by `CteScan.cteParam` (the same index into
+    /// `es_param_exec_vals` the C uses to publish the leader pointer). In C the
+    /// shared `Tuplestorestate`/`eof_cte` live in the leader `CteScanState` and
+    /// every follower reaches them through an aliasing `leader` back-pointer;
+    /// the owned model cannot alias a live node, so this hoists the shared
+    /// fields out of the node (see [`CteSharedState`]). Grown on demand by
+    /// `cte_resolve_leader`; `None` is an unclaimed slot. Empty = no CTEs.
+    pub es_cte_shared: PgVec<'mcx, Option<CteSharedState<'mcx>>>,
     /// `List *es_auxmodifytables` — not-canSetTag ModifyTableStates.
     pub es_auxmodifytables: PgVec<'mcx, Opaque>,
     /// `ExprContext *es_per_tuple_exprcontext` — for per-output-tuple work.
@@ -1010,6 +1053,7 @@ impl<'mcx> EStateData<'mcx> {
             es_exprcontexts: PgVec::new_in(mcx),
             es_subplanstates: PgVec::new_in(mcx),
             es_initplan: PgVec::new_in(mcx),
+            es_cte_shared: PgVec::new_in(mcx),
             // es_auxmodifytables = NIL;
             es_auxmodifytables: PgVec::new_in(mcx),
             // es_per_tuple_exprcontext = NULL;

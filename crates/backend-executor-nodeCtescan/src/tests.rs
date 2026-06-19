@@ -56,21 +56,21 @@ fn log_eq(expected: &[&str]) {
 
 fn install() {
     use execMain::*;
-    cte_tuplestore_select_read_pointer::set(|_| {
+    cte_tuplestore_select_read_pointer::set(|_, _| {
         push("select_read_pointer");
         Ok(())
     });
-    cte_tuplestore_ateof::set(|_| {
+    cte_tuplestore_ateof::set(|_, _| {
         push("ateof");
         Ok(ATEOF.with(|q| q.borrow_mut().pop_front().unwrap()))
     });
-    cte_leader_eof_cte::set(|_| Ok(EOF_CTE.with(|c| c.get())));
-    cte_set_leader_eof_cte::set(|_, v| {
+    cte_leader_eof_cte::set(|_, _| Ok(EOF_CTE.with(|c| c.get())));
+    cte_set_leader_eof_cte::set(|_, v, _| {
         EOF_CTE.with(|c| c.set(v));
         push("set_leader_eof_cte");
         Ok(())
     });
-    cte_tuplestore_advance::set(|_, _| {
+    cte_tuplestore_advance::set(|_, _, _| {
         push("advance");
         Ok(ADVANCE.with(|q| q.borrow_mut().pop_front().unwrap()))
     });
@@ -90,46 +90,54 @@ fn install() {
         push("ExecProcNode");
         Ok(PROCNODE.with(|q| q.borrow_mut().pop_front().unwrap()))
     });
-    cte_tuplestore_rescan::set(|_| {
+    cte_tuplestore_rescan::set(|_, _| {
         push("rescan");
         Ok(())
     });
-    cte_tuplestore_clear::set(|_| {
+    cte_tuplestore_clear::set(|_, _| {
         push("clear");
         Ok(())
     });
-    cte_tuplestore_end::set(|_| {
+    cte_tuplestore_end::set(|_, _| {
         push("end");
         Ok(())
     });
-    cte_tuplestore_begin_heap_leader::set(|_| {
+    cte_tuplestore_begin_heap_leader::set(|_, _| {
         push("begin_heap_leader");
         Ok(())
     });
-    cte_tuplestore_alloc_read_pointer_follower::set(|_| {
+    cte_tuplestore_alloc_read_pointer_follower::set(|_, _| {
         push("alloc_read_pointer_follower");
         Ok(())
     });
-    cte_link_plan_state::set(|scanstate, _, estate| {
+    cte_link_plan_state::set(|scanstate, plan, estate| {
         push("link_cte_plan_state");
-        // The real seam links scanstate->cteplanstate from es_subplanstates;
-        // the mock stands in a minimal Result subplan so the in-crate
+        // The real seam records scanstate->cte_plan_id and reads the subplan
+        // from es_subplanstates by index. The mock seeds a minimal Result
+        // subplan at es_subplanstates[ctePlanId-1] so the in-crate
         // ExecGetResultType read in init_scan_tuple_slot_from_cte has a node.
+        let idx = (plan.ctePlanId - 1) as usize;
+        while estate.es_subplanstates.len() <= idx {
+            estate.es_subplanstates.push(None);
+        }
         let sub = mcx::alloc_in(
             estate.es_query_cxt,
             types_nodes::noderesult::ResultState::default(),
         )?;
-        scanstate.cteplanstate = Some(mcx::alloc_in(
+        estate.es_subplanstates[idx] = Some(mcx::alloc_in(
             estate.es_query_cxt,
             types_nodes::PlanStateNode::Result(sub),
         )?);
+        scanstate.cte_plan_id = Some(plan.ctePlanId);
         Ok(())
     });
-    cte_resolve_leader::set(|_, _, _| {
+    cte_resolve_leader::set(|scanstate, _, _| {
         push("resolve_cte_leader");
-        Ok(IS_LEADER.with(|c| c.get()))
+        let is_leader = IS_LEADER.with(|c| c.get());
+        scanstate.is_leader = is_leader;
+        Ok(is_leader)
     });
-    cte_leader_cteplanstate_chgparam_set::set(|_| Ok(CHGPARAM.with(|c| c.get())));
+    cte_leader_cteplanstate_chgparam_set::set(|_, _| Ok(CHGPARAM.with(|c| c.get())));
 
     // execScan / execTuples / execUtils / execExpr leaf seams.
     execScan::exec_scan_cte::set(|_, _, _, _| {
@@ -364,18 +372,19 @@ fn init_follower_path_allocs_own_read_pointer() {
 fn end_frees_tuplestore_only_for_leader() {
     setup();
     let ctx = MemoryContext::new("per-query");
+    let mut estate = estate(ctx.mcx());
     let mut node = node_in(ctx.mcx());
-    ExecEndCteScan(&mut node, true).unwrap();
+    ExecEndCteScan(&mut node, true, &mut estate).unwrap();
     log_eq(&["end"]);
-    assert!(node.cte_table.is_none());
 }
 
 #[test]
 fn end_is_noop_for_follower() {
     setup();
     let ctx = MemoryContext::new("per-query");
+    let mut estate = estate(ctx.mcx());
     let mut node = node_in(ctx.mcx());
-    ExecEndCteScan(&mut node, false).unwrap();
+    ExecEndCteScan(&mut node, false, &mut estate).unwrap();
     log_eq(&[]);
 }
 

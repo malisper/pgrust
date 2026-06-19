@@ -43,6 +43,7 @@
 
 pub mod execProcnode_init;
 pub mod execProcnode_run_end;
+mod cte_seams;
 
 /// Install every seam this unit owns that corresponds to an `execProcnode.c`
 /// function.
@@ -71,4 +72,10 @@ pub fn init_seams() {
     seams::exec_shutdown_node::set(execProcnode_run_end::exec_shutdown_node);
     seams::multi_exec_proc_node::set(execProcnode_run_end::multi_exec_proc_node);
     seams::exec_set_tuple_bound::set(execProcnode_run_end::exec_set_tuple_bound);
+
+    // The CteScan leader-aliased `cte_*` family (declared in execMain-seams):
+    // this dispatch crate owns the `ExecInitCteScan` call site and runs the CTE
+    // subplan via `exec_proc_node`, so it installs the owned-model bodies here
+    // (the shared per-CTE store lives in `EState.es_cte_shared`).
+    cte_seams::init_seams();
 }

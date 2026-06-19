@@ -77,3 +77,12 @@ backend-executor-instrument-seams = { path = "../backend-executor-instrument-sea
 # cte_leader_is_self / ExecShutdown* / planstate_tree_walker seams routed by the
 # ExecEndCteScan leader test and ExecShutdownNode walker (loud panic until owner).
 backend-executor-execMain-seams = { path = "../backend-executor-execMain-seams" }
+# The CteScan leader-aliased `cte_*` seam family (execMain-seams) is installed
+# here (cte_seams.rs): this is the node-init orchestrator that already owns the
+# `ExecInitCteScan` call site and can run the CTE subplan via exec_proc_node. The
+# shared CTE store is a real `Tuplestorestate` driven through sort-storage; the
+# subplan output slot is copied via execTuples; work_mem sizes the store. All
+# acyclic (none of these depend on this dispatch crate).
+backend-utils-sort-storage = { path = "../backend-utils-sort-storage" }
+backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }

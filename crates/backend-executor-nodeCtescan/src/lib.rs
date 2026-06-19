@@ -84,19 +84,19 @@ pub fn CteScanNext<'mcx>(
     //   tuplestore_select_read_pointer(tuplestorestate, node->readptr);
     //   slot = node->ss.ss_ScanTupleSlot;
     let forward = ScanDirectionIsForward(estate.es_direction);
-    execMain::cte_tuplestore_select_read_pointer::call(node)?;
+    execMain::cte_tuplestore_select_read_pointer::call(node, estate)?;
 
     // If we are not at the end of the tuplestore, or are going backwards, try to
     // fetch a tuple from tuplestore.
     //   eof_tuplestore = tuplestore_ateof(tuplestorestate);
-    let mut eof_tuplestore = execMain::cte_tuplestore_ateof::call(node)?;
+    let mut eof_tuplestore = execMain::cte_tuplestore_ateof::call(node, estate)?;
 
     if !forward && eof_tuplestore {
-        if !execMain::cte_leader_eof_cte::call(node)? {
+        if !execMain::cte_leader_eof_cte::call(node, estate)? {
             // When reversing direction at tuplestore EOF, the first gettupleslot
             // call will fetch the last-added tuple; but we want to return the one
             // before that, if possible. So do an extra fetch.
-            if !execMain::cte_tuplestore_advance::call(node, forward)? {
+            if !execMain::cte_tuplestore_advance::call(node, forward, estate)? {
                 // the tuplestore must be empty
                 return Ok(false);
             }
@@ -124,20 +124,20 @@ pub fn CteScanNext<'mcx>(
     // the CTE plan.  It's not optional, unfortunately, because some plan node
     // types are not robust about being called again when they've already returned
     // NULL.
-    if eof_tuplestore && !execMain::cte_leader_eof_cte::call(node)? {
+    if eof_tuplestore && !execMain::cte_leader_eof_cte::call(node, estate)? {
         // We can only get here with forward==true, so no need to worry about which
         // direction the subplan will go.
         //   cteslot = ExecProcNode(node->cteplanstate);
         //   if (TupIsNull(cteslot)) { node->leader->eof_cte = true; return NULL; }
         if !execMain::cte_exec_proc_node::call(node, estate)? {
-            execMain::cte_set_leader_eof_cte::call(node, true)?;
+            execMain::cte_set_leader_eof_cte::call(node, true, estate)?;
             return Ok(false);
         }
 
         // There are corner cases where the subplan could change which tuplestore
         // read pointer is active, so be sure to reselect ours before storing the
         // tuple we got.
-        execMain::cte_tuplestore_select_read_pointer::call(node)?;
+        execMain::cte_tuplestore_select_read_pointer::call(node, estate)?;
 
         // Append a copy of the returned tuple to tuplestore.  NOTE: because our
         // read pointer is certainly in EOF state, its read position will move
@@ -257,12 +257,16 @@ pub fn ExecInitCteScan<'mcx>(
     //   scanstate->eflags = eflags;
     //   scanstate->cte_table = NULL;
     //   scanstate->eof_cte = false;
+    //
+    // The C leader-only `cte_table` / `eof_cte` are not node fields in the owned
+    // model — they live in the per-CTE `EState.es_cte_shared[cteParam]` entry
+    // (see `CteSharedState`), created/cleared by the leader-resolution and
+    // tuplestore seams. The node only records its `cteParam` identity.
     let mut scanstate = mcx::alloc_in(mcx, CteScanState::new_in(mcx))?;
     scanstate.ss.ps.plan = Some(node);
     scanstate.ss.ps.ExecProcNode = Some(exec_cte_scan_node);
     scanstate.eflags = eflags;
-    scanstate.cte_table = None;
-    scanstate.eof_cte = false;
+    scanstate.cte_param = Some(plan.cteParam);
 
     // Find the already-initialized plan for the CTE query.
     //   scanstate->cteplanstate =
@@ -284,7 +288,7 @@ pub fn ExecInitCteScan<'mcx>(
         //   scanstate->cte_table = tuplestore_begin_heap(true, false, work_mem);
         //   tuplestore_set_eflags(scanstate->cte_table, scanstate->eflags);
         //   scanstate->readptr = 0;
-        execMain::cte_tuplestore_begin_heap_leader::call(&mut scanstate)?;
+        execMain::cte_tuplestore_begin_heap_leader::call(&mut scanstate, estate)?;
         scanstate.readptr = 0;
     } else {
         // Not the leader
@@ -295,7 +299,7 @@ pub fn ExecInitCteScan<'mcx>(
         //   tuplestore_select_read_pointer(scanstate->leader->cte_table,
         //                                  scanstate->readptr);
         //   tuplestore_rescan(scanstate->leader->cte_table);
-        execMain::cte_tuplestore_alloc_read_pointer_follower::call(&mut scanstate)?;
+        execMain::cte_tuplestore_alloc_read_pointer_follower::call(&mut scanstate, estate)?;
     }
 
     // Miscellaneous initialization: create expression context for node.
@@ -335,11 +339,19 @@ fn init_scan_tuple_slot_from_cte<'mcx>(
 ) -> PgResult<()> {
     let mcx = estate.es_query_cxt;
 
-    // ExecGetResultType(scanstate->cteplanstate)
-    let cteplanstate = scanstate
-        .cteplanstate
-        .as_deref()
+    // ExecGetResultType(scanstate->cteplanstate), where the C `cteplanstate` is
+    // `list_nth(es_subplanstates, ctePlanId - 1)`. The owned model reaches the
+    // CTE subplan's plan-state by its recorded `cte_plan_id` identity rather
+    // than an aliasing field (the subplan-state is owned by `es_subplanstates`).
+    let idx = scanstate
+        .cte_plan_id
+        .and_then(|id| usize::try_from(id - 1).ok())
         .expect("ExecInitCteScan: cteplanstate linked before slot init");
+    let cteplanstate = estate
+        .es_subplanstates
+        .get(idx)
+        .and_then(|b| b.as_deref())
+        .expect("ExecInitCteScan: es_subplanstates[ctePlanId-1] present");
     let tupdesc: types_tuple::heaptuple::TupleDesc<'mcx> =
         match execTuples::exec_get_result_type::call(cteplanstate.ps_head()) {
             Some(d) => Some(mcx::alloc_in(mcx, d.clone_in(mcx)?)?),
@@ -365,17 +377,19 @@ fn init_scan_tuple_slot_from_cte<'mcx>(
 /// }
 /// ```
 ///
-/// `is_leader` answers `node->leader == node` (the leader identity is held in
-/// the executor-owned Param slot; the driver that established it reports it
-/// here, exactly as the C compares the two pointers).
+/// `is_leader` answers `node->leader == node`. In the owned model the leader
+/// identity was recorded on the node (`node.is_leader`) by `cte_resolve_leader`;
+/// the dispatch site passes it here, exactly as the C compares the two pointers.
+/// The shared `cte_table` lives in `EState.es_cte_shared[cteParam]`, so freeing
+/// it (`tuplestore_end`) clears that side-entry, not a node field.
 pub fn ExecEndCteScan<'mcx>(
     node: &mut CteScanState<'mcx>,
     is_leader: bool,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     // If I am the leader, free the tuplestore.
     if is_leader {
-        execMain::cte_tuplestore_end::call(node)?;
-        node.cte_table = None;
+        execMain::cte_tuplestore_end::call(node, estate)?;
     }
     Ok(())
 }
@@ -422,17 +436,17 @@ pub fn ExecReScanCteScan<'mcx>(
     // read something from the underlying CTE (thereby causing its chgParam to be
     // cleared).
     //   if (node->leader->cteplanstate->chgParam != NULL)
-    if execMain::cte_leader_cteplanstate_chgparam_set::call(node)? {
-        execMain::cte_tuplestore_clear::call(node)?;
-        execMain::cte_set_leader_eof_cte::call(node, false)?;
+    if execMain::cte_leader_cteplanstate_chgparam_set::call(node, estate)? {
+        execMain::cte_tuplestore_clear::call(node, estate)?;
+        execMain::cte_set_leader_eof_cte::call(node, false, estate)?;
     } else {
         // Else, just rewind my own pointer.  Either the underlying CTE doesn't
         // need a rescan (and we can re-read what's in the tuplestore now), or
         // somebody else already took care of it.
         //   tuplestore_select_read_pointer(tuplestorestate, node->readptr);
         //   tuplestore_rescan(tuplestorestate);
-        execMain::cte_tuplestore_select_read_pointer::call(node)?;
-        execMain::cte_tuplestore_rescan::call(node)?;
+        execMain::cte_tuplestore_select_read_pointer::call(node, estate)?;
+        execMain::cte_tuplestore_rescan::call(node, estate)?;
     }
 
     Ok(())
