@@ -1142,14 +1142,14 @@ pub fn addTargetToSortList<'mcx>(
 
     match sortby.sortby_dir {
         SortByDir::SORTBY_DEFAULT | SortByDir::SORTBY_ASC => {
-            let ops = get_sort_group_operators(restype, true, true, false, false)?;
+            let ops = get_sort_group_operators(restype, true, true, false, true)?;
             sortop = ops.lt_opr;
             eqop = ops.eq_opr;
             hashable = ops.is_hashable;
             reverse = false;
         }
         SortByDir::SORTBY_DESC => {
-            let ops = get_sort_group_operators(restype, false, true, true, false)?;
+            let ops = get_sort_group_operators(restype, false, true, true, true)?;
             sortop = ops.gt_opr;
             eqop = ops.eq_opr;
             hashable = ops.is_hashable;
@@ -1249,7 +1249,7 @@ fn addTargetToGroupList<'mcx>(
     /* avoid making duplicate grouplist entries */
     if !targetIsInSortList(&targetlist[tle_idx], InvalidOid, grouplist) {
         /* determine the eqop and optional sortop */
-        let ops = get_sort_group_operators(restype, false, true, false, false)?;
+        let ops = get_sort_group_operators(restype, false, true, false, true)?;
 
         let tle_sort_group_ref = assignSortGroupRef(tle_idx, targetlist);
         let grpcl = SortGroupClause {
