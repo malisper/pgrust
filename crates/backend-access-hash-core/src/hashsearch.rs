@@ -238,13 +238,20 @@ pub fn _hash_first<'mcx>(scan: &mut HashScan<'mcx>, dir: ScanDirection) -> PgRes
         return Ok(false);
     }
 
-    // Compute the hash key (before acquiring locks).
+    // Compute the hash key (before acquiring locks). The scan key argument may
+    // be a by-reference value (e.g. a `uuid`/`macaddr` equality bound), which
+    // must cross the fmgr boundary on the by-reference lane; a scratch context
+    // backs that marshalling (the hash result is a by-value `int4`, read out
+    // before the scratch is dropped).
     let opcintype = backend_utils_cache_relcache_seams::rd_opcintype::call(&rel, 1)?;
+    let hashkey_cxt = mcx::MemoryContext::new("_hash_first hashkey");
+    let hk_mcx = hashkey_cxt.mcx();
     let hashkey = if cur.sk_subtype == opcintype || cur.sk_subtype == types_core::InvalidOid {
-        _hash_datum2hashkey(&rel, &cur.sk_argument)?
+        _hash_datum2hashkey(hk_mcx, &rel, &cur.sk_argument)?
     } else {
-        _hash_datum2hashkey_type(&rel, &cur.sk_argument, cur.sk_subtype)?
+        _hash_datum2hashkey_type(hk_mcx, &rel, &cur.sk_argument, cur.sk_subtype)?
     };
+    drop(hashkey_cxt);
 
     scan.opaque.hashso_sk_hash = hashkey;
 

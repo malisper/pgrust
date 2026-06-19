@@ -614,7 +614,7 @@ fn hashbuildCallback<'mcx>(
     let mut index_isnull: [bool; 1] = [false];
 
     // convert data to a hash key; on failure, do not insert anything
-    if !core::_hash_convert_tuple(index, values, isnull, &mut index_values, &mut index_isnull)? {
+    if !core::_hash_convert_tuple(mcx, index, values, isnull, &mut index_values, &mut index_isnull)? {
         return Ok(());
     }
 
@@ -650,7 +650,7 @@ pub fn hashinsert<'mcx>(
     let mut index_isnull: [bool; 1] = [false];
 
     // convert data to a hash key; on failure, do not insert anything
-    if !core::_hash_convert_tuple(rel, values, isnull, &mut index_values, &mut index_isnull)? {
+    if !core::_hash_convert_tuple(mcx, rel, values, isnull, &mut index_values, &mut index_isnull)? {
         return Ok(false);
     }
 

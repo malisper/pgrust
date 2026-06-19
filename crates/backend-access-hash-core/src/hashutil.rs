@@ -75,14 +75,27 @@ pub(crate) fn _hash_checkqual(_scan: &HashScan, _itup: &[u8]) -> bool {
 
 /// `_hash_datum2hashkey(rel, key)` — given a Datum, call the index's primary
 /// hash function and return the 32-bit hash key.
-pub fn _hash_datum2hashkey<'mcx>(rel: &Relation<'mcx>, key: &Datum<'mcx>) -> PgResult<u32> {
+pub fn _hash_datum2hashkey<'m, 'r>(
+    mcx: mcx::Mcx<'m>,
+    rel: &Relation<'r>,
+    key: &Datum<'r>,
+) -> PgResult<u32> {
     // XXX assumes index has only one attribute
     let procinfo = indexam::index_getprocinfo::call(rel, 1, HASHSTANDARD_PROC)?;
     let collation = relcache::rd_indcollation::call(rel, 1)?;
 
-    // DatumGetUInt32(FunctionCall1Coll(procinfo, collation, key))
-    let arg = types_datum::Datum::from_usize(key.as_usize());
-    let res = fmgr::function_call1_coll::call(procinfo.fn_oid, collation, arg)?;
+    // DatumGetUInt32(FunctionCall1Coll(procinfo, collation, key)).
+    //
+    // `key` may be a by-reference value (a fixed-but-by-ref type such as
+    // `uuid`/`macaddr`, or a varlena); it must cross the fmgr boundary on the
+    // by-reference lane, not be flattened into a scalar word. The `_datum`
+    // variant of the seam marshals both by-value and by-reference args.
+    let res = fmgr::function_call1_coll_datum::call(
+        mcx,
+        procinfo.fn_oid,
+        collation,
+        key.clone_in(mcx)?,
+    )?;
     Ok(res.as_u32())
 }
 
@@ -92,9 +105,10 @@ pub fn _hash_datum2hashkey<'mcx>(rel: &Relation<'mcx>, key: &Datum<'mcx>) -> PgR
 
 /// `_hash_datum2hashkey_type(rel, key, keytype)` — hash a Datum of a specified
 /// type compatibly with this index (cross-type case).
-pub fn _hash_datum2hashkey_type<'mcx>(
-    rel: &Relation<'mcx>,
-    key: &Datum<'mcx>,
+pub fn _hash_datum2hashkey_type<'m, 'r>(
+    mcx: mcx::Mcx<'m>,
+    rel: &Relation<'r>,
+    key: &Datum<'r>,
     keytype: Oid,
 ) -> PgResult<u32> {
     // XXX assumes index has only one attribute
@@ -108,9 +122,15 @@ pub fn _hash_datum2hashkey_type<'mcx>(
     }
     let collation = relcache::rd_indcollation::call(rel, 1)?;
 
-    // DatumGetUInt32(OidFunctionCall1Coll(hash_proc, collation, key))
-    let arg = types_datum::Datum::from_usize(key.as_usize());
-    let res = fmgr::function_call1_coll::call(hash_proc, collation, arg)?;
+    // DatumGetUInt32(OidFunctionCall1Coll(hash_proc, collation, key)).
+    // `key` may be by-reference — cross it on the by-reference lane (see
+    // `_hash_datum2hashkey`).
+    let res = fmgr::function_call1_coll_datum::call(
+        mcx,
+        hash_proc,
+        collation,
+        key.clone_in(mcx)?,
+    )?;
     Ok(res.as_u32())
 }
 
@@ -306,6 +326,7 @@ pub fn _hash_get_indextuple_hashkey(itup: &[u8]) -> u32 {
 /// success, false if the (single) user value is null. Fills `index_values[0]`
 /// with `UInt32GetDatum(hashkey)` and `index_isnull[0]` with false.
 pub fn _hash_convert_tuple<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
     index: &Relation<'mcx>,
     user_values: &[Datum<'mcx>],
     user_isnull: &[bool],
@@ -317,7 +338,7 @@ pub fn _hash_convert_tuple<'mcx>(
         return Ok(false);
     }
 
-    let hashkey = _hash_datum2hashkey(index, &user_values[0])?;
+    let hashkey = _hash_datum2hashkey(mcx, index, &user_values[0])?;
     // UInt32GetDatum(hashkey)
     index_values[0] = Datum::ByVal(hashkey as usize);
     index_isnull[0] = false;
