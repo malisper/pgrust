@@ -1288,7 +1288,22 @@ fn fix_upper_expr_mutator<'mcx>(
                     let mut new_args = alloc::vec::Vec::with_capacity(old_args.len());
                     for mut te in old_args {
                         if let Some(b) = te.expr.take() {
-                            let fixed = fix_upper_expr_mutator(mcx, root, (*b).clone(), ctx)?;
+                            // Consume the original box (move the Expr out, one
+                            // balanced uncharge) instead of `(*b).clone()`: cloning
+                            // an `Expr` that holds `Box<Expr, Mcx>` children allocates
+                            // fresh inner boxes charged against the (lifetime-laundered
+                            // `'static`) Mcx, then drops `b` — and when the plan arena
+                            // is finally torn down those clone-charged inner boxes
+                            // deallocate against an already-reset context, underflowing
+                            // its accounting (`uncharging N with only 0 charged`). The
+                            // top-level tlist path uses `PgBox::into_inner` for exactly
+                            // this reason; mirror it here.
+                            let fixed = fix_upper_expr_mutator(
+                                mcx,
+                                root,
+                                mcx::PgBox::into_inner(b),
+                                ctx,
+                            )?;
                             // Re-box into the plan arena and re-tag as 'static (the
                             // backing alloc lives in `mcx`); same lifetime-only
                             // transmute the combining-aggref split path uses.
