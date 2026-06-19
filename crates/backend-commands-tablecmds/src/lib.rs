@@ -118,6 +118,15 @@ pub fn init_seams() {
         partbound::transform_partition_bound_seam,
     );
 
+    // The post-partbound clone block (DefineRelation, tablecmds.c:1258-1328):
+    // clone the parent's indexes/triggers/FKs onto the new partition. No-op when
+    // the parent has none; a precise error when it does (the cloners are
+    // unported). Installed so CREATE TABLE PARTITION OF a bare parent runs
+    // end-to-end.
+    seam::define_relation_clone_partition_objects::set(
+        partbound::define_relation_clone_partition_objects,
+    );
+
     // --- ProcessUtility dispatch arms (utility.c TRUNCATE + DROP relations) ---
     backend_tcop_utility_out_seams::execute_truncate::set(execute_truncate_arm);
     backend_tcop_utility_out_seams::remove_relations::set(remove_relations_arm);

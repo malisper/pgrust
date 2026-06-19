@@ -493,3 +493,175 @@ pub fn transform_partition_bound_seam<'mcx>(
 ) -> PgResult<PgBox<'mcx, Node<'mcx>>> {
     transformPartitionBound(mcx, pstate, parent_relid, spec)
 }
+
+/// The `if (stmt->partbound)` block of `DefineRelation` (tablecmds.c:1114-1201):
+/// open the parent, validate it is partitioned, lock a pre-existing default
+/// partition, build a `ParseState`, `transformPartitionBound`,
+/// `check_new_partition_bound`, `check_default_partition_contents` (default
+/// path), then `StorePartitionBound`.
+///
+/// `rel` is the freshly-created child (open, locked); `parent_oid` is
+/// `linitial_oid(inheritOids)`.
+pub fn define_relation_partbound<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+    parent_oid: Oid,
+    relname: &str,
+    spec_node: &Node<'mcx>,
+    query_string: Option<&str>,
+) -> PgResult<()> {
+    use types_storage::lock::{AccessExclusiveLock, AccessShareLock, NoLock};
+
+    // parent = table_open(parentId, NoLock); /* already have strong lock */
+    let parent = backend_access_common_relation::relation_open(mcx, parent_oid, NoLock)?;
+
+    // The parent must be partitioned.
+    if parent.rd_rel.relkind != types_tuple::access::RELKIND_PARTITIONED_TABLE {
+        let pname = parent.rd_rel.relname.as_str().to_string();
+        parent.close(NoLock)?;
+        return ereport(ERROR)
+            .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
+            .errmsg(format!("\"{pname}\" is not partitioned"))
+            .finish(here("define_relation_partbound"))
+            .map(|()| unreachable!());
+    }
+
+    // defaultPartOid = get_default_oid_from_partdesc(RelationGetPartitionDesc(parent, true));
+    let parent_partdesc =
+        backend_partitioning_partdesc::RelationGetPartitionDesc(mcx, &parent, true)?;
+    let default_part_oid =
+        backend_partitioning_partdesc::get_default_oid_from_partdesc(Some(&parent_partdesc));
+    let default_rel = if types_core::primitive::OidIsValid(default_part_oid) {
+        Some(backend_access_common_relation::relation_open(
+            mcx,
+            default_part_oid,
+            AccessExclusiveLock,
+        )?)
+    } else {
+        None
+    };
+
+    // pstate = make_parsestate(NULL); pstate->p_sourcetext = queryString;
+    let mut pstate = backend_parser_small1::make_parsestate(mcx, None)?;
+    if let Some(qs) = query_string {
+        pstate.p_sourcetext = Some(mcx::PgString::from_str_in(qs, mcx)?);
+    }
+
+    // Add an nsitem for `rel` so transformExpr can report errors with context.
+    let nsitem = backend_parser_relation::addRangeTableEntryForRelation(
+        mcx,
+        &mut pstate,
+        rel,
+        AccessShareLock,
+        None,
+        false,
+        false,
+    )?;
+    backend_parser_relation::addNSItemToQuery(mcx, &mut pstate, nsitem, false, true, true)?;
+
+    // bound = transformPartitionBound(pstate, parent, stmt->partbound);
+    let bound_node = transformPartitionBound(
+        mcx,
+        &mut pstate,
+        parent_oid,
+        alloc_in(mcx, spec_node.clone_in(mcx)?)?,
+    )?;
+    let bound = (*bound_node).as_partitionboundspec().ok_or_else(|| {
+        ereport(ERROR)
+            .errmsg_internal("define_relation_partbound: transform did not yield a PartitionBoundSpec")
+            .into_error()
+    })?;
+
+    // check_new_partition_bound(relname, parent, bound, pstate);
+    let key = backend_utils_cache_partcache_seams::relation_get_partition_key::call(mcx, parent.alias())?
+        .ok_or_else(|| {
+            ereport(ERROR)
+                .errmsg_internal("define_relation_partbound: parent has no partition key")
+                .into_error()
+        })?;
+    backend_partitioning_partbounds_seams::check_new_partition_bound::call(
+        mcx,
+        relname,
+        &key,
+        &parent_partdesc,
+        bound,
+    )?;
+
+    // If the default partition exists, its constraint tightens; check its rows.
+    if let Some(default_rel) = default_rel.as_ref() {
+        backend_partitioning_partbounds_seams::check_default_partition_contents::call(
+            mcx, &parent, default_rel, bound,
+        )?;
+        default_rel.alias().close(NoLock)?;
+    }
+
+    // StorePartitionBound(rel, parent, bound);
+    backend_catalog_heap::StorePartitionBound(mcx, rel, &parent, bound)?;
+
+    parent.close(NoLock)?;
+    Ok(())
+}
+
+/// The post-partbound clone block of `DefineRelation` (tablecmds.c:1258-1328):
+/// clone the parent's indexes, row triggers and foreign keys onto the new
+/// partition. `parentId = linitial_oid(inheritOids)`.
+///
+/// For a parent with no indexes, no row triggers and no foreign keys (the common
+/// `CREATE TABLE child PARTITION OF parent` case where the parent is a bare
+/// partitioned table) this is a no-op. When the parent DOES carry such objects
+/// the cloners `generateClonedIndexStmt` / `CloneRowTriggersToPartition` /
+/// `CloneForeignKeyConstraints` are needed — those are unported, so this raises a
+/// precise error rather than silently skipping the clone.
+pub fn define_relation_clone_partition_objects<'mcx>(
+    mcx: Mcx<'mcx>,
+    _relation_id: Oid,
+    inherit_oids: &[Oid],
+) -> PgResult<()> {
+    use types_storage::lock::NoLock;
+
+    let parent_oid = inherit_oids[0];
+    let parent = backend_access_common_relation::relation_open(mcx, parent_oid, NoLock)?;
+
+    // idxlist = RelationGetIndexList(parent);
+    let idxlist = backend_utils_cache_relcache::derived::RelationGetIndexList(parent_oid)?;
+    // CloneForeignKeyConstraints(NULL, parent, rel): scans the parent's FKs.
+    let has_fkeys =
+        backend_utils_cache_relcache::derived::relation_has_foreign_keys(parent_oid)?;
+    // parent->trigdesc != NULL  ⇒  CloneRowTriggersToPartition(parent, rel).
+    // (the trimmed PgClassForm omits relhastriggers; read it from pg_class.)
+    let has_triggers =
+        backend_utils_cache_syscache_seams::rel_relhastriggers::call(parent_oid)?.unwrap_or(false);
+
+    parent.close(NoLock)?;
+
+    if !idxlist.is_empty() {
+        return ereport(ERROR)
+            .errmsg_internal(
+                "cloning parent indexes onto a new partition is not yet supported \
+                 (generateClonedIndexStmt/DefineIndex clone path unported)",
+            )
+            .finish(here("define_relation_clone_partition_objects"))
+            .map(|()| unreachable!());
+    }
+    if has_triggers {
+        return ereport(ERROR)
+            .errmsg_internal(
+                "cloning parent row triggers onto a new partition is not yet supported \
+                 (CloneRowTriggersToPartition unported)",
+            )
+            .finish(here("define_relation_clone_partition_objects"))
+            .map(|()| unreachable!());
+    }
+    if has_fkeys {
+        return ereport(ERROR)
+            .errmsg_internal(
+                "cloning parent foreign keys onto a new partition is not yet supported \
+                 (CloneForeignKeyConstraints unported)",
+            )
+            .finish(here("define_relation_clone_partition_objects"))
+            .map(|()| unreachable!());
+    }
+
+    // Nothing to clone — the no-op path is complete.
+    Ok(())
+}

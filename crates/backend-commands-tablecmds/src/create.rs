@@ -692,13 +692,22 @@ pub fn define_relation<'mcx>(
     CommandCounterIncrement()?;
 
     /* Process and store partition bound, if any. */
-    if stmt.partbound.is_some() {
+    if let Some(partbound) = stmt.partbound.as_deref() {
         /*
-         * The partition-bound block (transformPartitionBound /
-         * check_new_partition_bound / StorePartitionBound) crosses the
-         * partition-machinery seam (F5); the owner installs it when ported.
+         * The partition-bound block (DefineRelation, tablecmds.c:1114-1201):
+         * open + validate the parent, transformPartitionBound,
+         * check_new_partition_bound, check_default_partition_contents, and
+         * StorePartitionBound. `parentId = linitial_oid(inheritOids)`.
          */
-        seam::define_relation_partbound::call(mcx, relation_id, &inherit_oids, &relname, query_string)?;
+        let parent_oid = inherit_oids[0];
+        crate::partbound::define_relation_partbound(
+            mcx,
+            &rel,
+            parent_oid,
+            &relname,
+            partbound,
+            query_string,
+        )?;
     }
 
     /* Store inheritance information for new rel. */

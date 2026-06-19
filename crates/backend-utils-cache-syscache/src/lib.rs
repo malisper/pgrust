@@ -936,6 +936,7 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::proc_isstrict::set(projections::proc_isstrict);
     backend_utils_cache_syscache_seams::proc_cost_rows::set(projections::proc_cost_rows);
     backend_utils_cache_syscache_seams::proc_argdefaults::set(projections::proc_argdefaults);
+    backend_utils_cache_syscache_seams::open_partrel_tuple::set(projections::open_partrel_tuple);
     backend_utils_cache_syscache_seams::agg_row_by_oid::set(projections::agg_row_by_oid);
     backend_utils_cache_syscache_seams::agg_form_by_oid::set(projections::agg_form_by_oid);
     // prepagg.c `preprocess_aggref`'s bundled pg_aggregate read + transtype

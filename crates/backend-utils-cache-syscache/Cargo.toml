@@ -48,6 +48,7 @@ backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-nodes-read-seams = { path = "../backend-nodes-read-seams" }
 types-catalog = { path = "../types-catalog" }
+types-partition = { path = "../types-partition" }
 types-cluster = { path = "../types-cluster" }
 types-nodes = { path = "../types-nodes" }
 types-fmgr = { path = "../types-fmgr" }

@@ -1195,6 +1195,13 @@ fn scan_pg_constraint_fkeys_seam(relid: Oid) -> PgResult<Vec<ForeignKeyCacheInfo
         .collect())
 }
 
+/// `RelationGetFKeyList(relid) != NIL` — does the relation have any foreign-key
+/// constraints? A thin bool wrapper so callers can test FK presence without
+/// naming the crate-private [`ForeignKeyCacheInfo`] element type.
+pub fn relation_has_foreign_keys(relation: Oid) -> PgResult<bool> {
+    Ok(!RelationGetFKeyList(relation)?.is_empty())
+}
+
 /// `ForeignKeyCacheInfo` (nodes/parsenodes.h) — the FK cache-info the planner
 /// (`get_relation_foreign_keys`, plancat.c) reads from `rd_fkeylist`.
 #[derive(Clone)]

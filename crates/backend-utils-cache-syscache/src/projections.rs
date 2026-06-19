@@ -828,6 +828,100 @@ pub(crate) fn oper_catlist1<'mcx>(
     Ok((rows, false))
 }
 
+/// `RelationBuildPartitionKey`'s pg_partitioned_table read (partcache.c:94-166):
+/// `SearchSysCache1(PARTRELID, relid)`, then project the `Form_pg_partitioned_table`
+/// columns plus the decoded `partattrs` (`int2vector`), `partclass`/`partcollation`
+/// (`oidvector`), and the de-stringized `partexprs` (`pg_node_tree`). Returns
+/// `Ok(None)` on a cache miss so the caller raises the exact `elog(ERROR, "cache
+/// lookup failed for partition key of relation %u")`.
+///
+/// The stored `partexprs` was written by `StorePartitionKey` AFTER
+/// `eval_const_expressions`/`fix_opfuncids`, so the on-disk form is already
+/// processed; `stringToNode` recovers the final `Expr`s (the re-simplification
+/// steps would be idempotent here and their seams are not reachable from this
+/// crate).
+pub(crate) fn open_partrel_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+) -> PgResult<Option<types_partition::PartrelTupleData<'mcx>>> {
+    /* pg_partitioned_table attribute numbers (catalog/pg_partitioned_table.h). */
+    const ANUM_PARTSTRAT: i32 = 2;
+    const ANUM_PARTNATTS: i32 = 3;
+    const ANUM_PARTATTRS: i32 = 5;
+    const ANUM_PARTCLASS: i32 = 6;
+    const ANUM_PARTCOLLATION: i32 = 7;
+    const ANUM_PARTEXPRS: i32 = 8;
+
+    let tuple = SearchSysCache1(mcx, PARTRELID, SysCacheKey::Value(KeyDatum::from_oid(relid)))?;
+    let Some(tup) = tuple else { return Ok(None) };
+
+    // form->partstrat / form->partnatts.
+    let strategy = getattr_char(mcx, PARTRELID, &tup, ANUM_PARTSTRAT)?;
+    let partnatts = getattr_i16(mcx, PARTRELID, &tup, ANUM_PARTNATTS)?;
+
+    // partattrs is an int2vector (BKI_FORCE_NOT_NULL).
+    let partattrs_datum = SysCacheGetAttrNotNull(mcx, PARTRELID, &tup, ANUM_PARTATTRS)?;
+    let partattrs = match &partattrs_datum {
+        Datum::ByRef(b) => arrayfuncs_seams::int2vector_to_i16s_bytes::call(mcx, &b[..])?,
+        _ => {
+            return Err(PgError::error(
+                "open_partrel_tuple: partattrs attribute is by-value",
+            ))
+        }
+    };
+
+    // partclass / partcollation are oidvectors (BKI_FORCE_NOT_NULL).
+    let partclass_datum = SysCacheGetAttrNotNull(mcx, PARTRELID, &tup, ANUM_PARTCLASS)?;
+    let partclass = match &partclass_datum {
+        Datum::ByRef(b) => arrayfuncs_seams::oidvector_to_oids_bytes::call(mcx, &b[..])?,
+        _ => {
+            return Err(PgError::error(
+                "open_partrel_tuple: partclass attribute is by-value",
+            ))
+        }
+    };
+    let partcollation_datum = SysCacheGetAttrNotNull(mcx, PARTRELID, &tup, ANUM_PARTCOLLATION)?;
+    let partcollation = match &partcollation_datum {
+        Datum::ByRef(b) => arrayfuncs_seams::oidvector_to_oids_bytes::call(mcx, &b[..])?,
+        _ => {
+            return Err(PgError::error(
+                "open_partrel_tuple: partcollation attribute is by-value",
+            ))
+        }
+    };
+
+    // partexprs is a nullable pg_node_tree; NIL ⇒ empty (the column-only case).
+    let (partexprs_val, partexprs_isnull) =
+        SysCacheGetAttr(mcx, PARTRELID, &tup, ANUM_PARTEXPRS)?;
+    let mut partexprs: PgVec<'mcx, types_nodes::primnodes::Expr> = vec_with_capacity_in(mcx, 0)?;
+    if !partexprs_isnull {
+        // expr = stringToNode(TextDatumGetCString(partexprs)); castNode(List, ...).
+        let s = varlena_seams::text_to_cstring_v::call(mcx, &partexprs_val)?;
+        let node = nodes_read_seams::string_to_node::call(mcx, s.as_str())?;
+        let elems = mcx::PgBox::into_inner(node).into_list().ok_or_else(|| {
+            PgError::error("open_partrel_tuple: partexprs stringToNode did not yield a List")
+        })?;
+        partexprs = vec_with_capacity_in(mcx, elems.len())?;
+        for el in elems.into_iter() {
+            let expr = mcx::PgBox::into_inner(el).into_expr().ok_or_else(|| {
+                PgError::error("open_partrel_tuple: partexprs element is not an Expr")
+            })?;
+            partexprs.push(expr);
+        }
+    }
+
+    ReleaseSysCache(tup);
+
+    Ok(Some(types_partition::PartrelTupleData {
+        strategy,
+        partnatts,
+        partattrs,
+        partclass,
+        partcollation,
+        partexprs,
+    }))
+}
+
 /// `func_get_detail`'s default-argument extraction (`parse_func.c`):
 ///
 /// ```c

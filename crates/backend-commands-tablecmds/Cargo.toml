@@ -112,7 +112,10 @@ backend-parser-relation = { path = "../backend-parser-relation" }
 backend-parser-parse-expr = { path = "../backend-parser-parse-expr" }
 backend-parser-parse-collate = { path = "../backend-parser-parse-collate" }
 backend-utils-cache-partcache = { path = "../backend-utils-cache-partcache" }
+backend-utils-cache-partcache-seams = { path = "../backend-utils-cache-partcache-seams" }
 backend-parser-parse-utilcmd-outward-seams = { path = "../backend-parser-parse-utilcmd-outward-seams" }
+backend-partitioning-partdesc = { path = "../backend-partitioning-partdesc" }
+backend-partitioning-partbounds-seams = { path = "../backend-partitioning-partbounds-seams" }
 types-partition = { path = "../types-partition" }
 backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
 backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
