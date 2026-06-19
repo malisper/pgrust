@@ -900,6 +900,8 @@ pub fn init_seams() {
     backend_catalog_pg_proc_seams::search_proc_name_args_nsp::set(
         projections::search_proc_name_args_nsp,
     );
+    // fmgr_sql_validator's PROCOID read (pg_proc.c:851); syscache.c is its owner.
+    backend_catalog_pg_proc_seams::search_proc_oid_sql::set(projections::search_proc_oid_sql);
     backend_utils_cache_syscache_seams::lookup_enum_by_oid::set(projections::lookup_enum_by_oid);
     backend_utils_cache_syscache_seams::lookup_enum_by_typoid_name::set(
         projections::lookup_enum_by_typoid_name,

@@ -19,9 +19,10 @@
 //! / `oidvector_to_oids_bytes`, and is registered here. The binary
 //! `oidvectorrecv`/`oidvectorsend` still need the `array_recv`/`array_send`
 //! fcinfo-sharing path (they reuse the caller's `flinfo->fn_extra` cache) and so
-//! remain unregistered, as do the `oidvectoreq/ne/lt/le/ge/gt` operators (which
-//! delegate to `btoidvectorcmp`); they will land with that array machinery
-//! rather than be faked. [`check_valid_oidvector`] validates an already-decoded
+//! remain unregistered; they will land with that array machinery rather than be
+//! faked. The `oidvectoreq/ne/lt/le/ge/gt` operators (which delegate to
+//! `btoidvectorcmp`) ARE registered: each decodes its two `oidvector` images and
+//! calls the element-wise comparison core. [`check_valid_oidvector`] validates an already-decoded
 //! array header (its seam takes the header fields, not the carrier), as
 //! `hashoidvector` and `oidvectorout` consume it.
 //!
@@ -217,6 +218,61 @@ pub fn oidge(arg1: Oid, arg2: Oid) -> bool {
 /// `oidgt` (oid.c:346): `PG_RETURN_BOOL(arg1 > arg2)`.
 pub fn oidgt(arg1: Oid, arg2: Oid) -> bool {
     arg1 > arg2
+}
+
+/// `btoidvectorcmp` (nbtcompare.c:522): the B-tree comparison support function
+/// for `oidvector`. Each vector's header is validated (`check_valid_oidvector`)
+/// before comparison; the caller decodes the header fields and element values.
+/// We sort first by vector length (`a->dim1 - b->dim1`), then element-wise.
+pub fn btoidvectorcmp(
+    a_ndim: i32,
+    a_dataoffset: i32,
+    a_elemtype: Oid,
+    a: &[Oid],
+    b_ndim: i32,
+    b_dataoffset: i32,
+    b_elemtype: Oid,
+    b: &[Oid],
+) -> PgResult<i32> {
+    check_valid_oidvector(a_ndim, a_dataoffset, a_elemtype)?;
+    check_valid_oidvector(b_ndim, b_dataoffset, b_elemtype)?;
+
+    // We arbitrarily choose to sort first by vector length.
+    if a.len() != b.len() {
+        return Ok(a.len() as i32 - b.len() as i32);
+    }
+    for i in 0..a.len() {
+        if a[i] != b[i] {
+            // A_GREATER_THAN_B = 1, A_LESS_THAN_B = -1.
+            return Ok(if a[i] > b[i] { 1 } else { -1 });
+        }
+    }
+    Ok(0)
+}
+
+/// `oidvectoreq` (oid.c:373): `btoidvectorcmp(...) == 0`.
+pub fn oidvectoreq(cmp: i32) -> bool {
+    cmp == 0
+}
+/// `oidvectorne` (oid.c:381): `cmp != 0`.
+pub fn oidvectorne(cmp: i32) -> bool {
+    cmp != 0
+}
+/// `oidvectorlt` (oid.c:389): `cmp < 0`.
+pub fn oidvectorlt(cmp: i32) -> bool {
+    cmp < 0
+}
+/// `oidvectorle` (oid.c:397): `cmp <= 0`.
+pub fn oidvectorle(cmp: i32) -> bool {
+    cmp <= 0
+}
+/// `oidvectorge` (oid.c:405): `cmp >= 0`.
+pub fn oidvectorge(cmp: i32) -> bool {
+    cmp >= 0
+}
+/// `oidvectorgt` (oid.c:413): `cmp > 0`.
+pub fn oidvectorgt(cmp: i32) -> bool {
+    cmp > 0
 }
 
 /// `oidlarger` (oid.c:355): `PG_RETURN_OID((arg1 > arg2) ? arg1 : arg2)`.

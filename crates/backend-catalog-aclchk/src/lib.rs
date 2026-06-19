@@ -1420,6 +1420,10 @@ pub fn init_seams() {
             let ctx = MemoryContext::new("functioncmds type_aclcheck");
             object_aclcheck(ctx.mcx(), TypeRelationId, type_id, role_id, mode)
         });
+        fc::language_aclcheck::set(|lang_oid, role_id, mode| {
+            let ctx = MemoryContext::new("functioncmds language_aclcheck");
+            object_aclcheck(ctx.mcx(), LanguageRelationId, lang_oid, role_id, mode)
+        });
         fc::type_ownercheck::set(|type_id, role_id| {
             let ctx = MemoryContext::new("functioncmds type_ownercheck");
             object_ownercheck(ctx.mcx(), TypeRelationId, type_id, role_id)

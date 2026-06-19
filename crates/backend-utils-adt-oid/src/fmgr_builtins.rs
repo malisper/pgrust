@@ -10,8 +10,11 @@
 //! them. OIDs / nargs / strict / retset are transcribed exactly from
 //! `pg_proc.dat`.
 //!
-//! The `oidvector` family is NOT registered here (see the crate docs): it needs
-//! the array `oidvector` carrier and `array_recv`/`array_send`.
+//! The `oidvector` comparison family (`oidvectoreq` … `oidvectorgt`) IS
+//! registered: each decodes its two `oidvector` array images and delegates to
+//! the `btoidvectorcmp` element-wise comparison core. Only the binary
+//! `oidvectorrecv`/`oidvectorsend` remain unregistered (they need the
+//! `array_recv`/`array_send` fcinfo-sharing path).
 
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
@@ -165,6 +168,56 @@ fn fc_oidvectorout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     }
 }
 
+/// Decode an `oidvector` argument (a 1-D `ArrayType` varlena image) off the
+/// by-ref lane into its header fields and `Oid` values, the form
+/// `btoidvectorcmp` consumes.
+fn arg_oidvector(
+    fcinfo: &FunctionCallInfoBaseData,
+    i: usize,
+) -> (i32, i32, Oid, Vec<Oid>) {
+    use backend_utils_adt_arrayfuncs::foundation;
+    let m = scratch_mcx();
+    let bytes = arg_varlena(fcinfo, i).to_vec();
+    let ndim = foundation::arr_ndim(&bytes);
+    let dataoffset = foundation::arr_dataoffset_field(&bytes);
+    let elemtype = foundation::arr_elemtype(&bytes);
+    let values: Vec<Oid> =
+        match backend_utils_adt_arrayfuncs::construct::oidvector_to_oids_bytes(m.mcx(), &bytes) {
+            Ok(v) => v.iter().copied().collect(),
+            Err(e) => raise(e),
+        };
+    (ndim, dataoffset, elemtype, values)
+}
+
+/// `btoidvectorcmp` over the two by-ref `oidvector` arguments.
+fn oidvector_cmp(fcinfo: &FunctionCallInfoBaseData) -> i32 {
+    let (a_ndim, a_doff, a_et, a) = arg_oidvector(fcinfo, 0);
+    let (b_ndim, b_doff, b_et, b) = arg_oidvector(fcinfo, 1);
+    match crate::btoidvectorcmp(a_ndim, a_doff, a_et, &a, b_ndim, b_doff, b_et, &b) {
+        Ok(c) => c,
+        Err(e) => raise(e),
+    }
+}
+
+fn fc_oidvectoreq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_bool(crate::oidvectoreq(oidvector_cmp(fcinfo)))
+}
+fn fc_oidvectorne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_bool(crate::oidvectorne(oidvector_cmp(fcinfo)))
+}
+fn fc_oidvectorlt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_bool(crate::oidvectorlt(oidvector_cmp(fcinfo)))
+}
+fn fc_oidvectorle(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_bool(crate::oidvectorle(oidvector_cmp(fcinfo)))
+}
+fn fc_oidvectorge(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_bool(crate::oidvectorge(oidvector_cmp(fcinfo)))
+}
+fn fc_oidvectorgt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    ret_bool(crate::oidvectorgt(oidvector_cmp(fcinfo)))
+}
+
 fn fc_oideq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     ret_bool(crate::oideq(arg_oid(fcinfo, 0), arg_oid(fcinfo, 1)))
 }
@@ -225,6 +278,13 @@ pub fn register_oid_builtins() {
         // ---- oidvector I/O ----
         builtin(54, "oidvectorin", 1, true, false, fc_oidvectorin),
         builtin(55, "oidvectorout", 1, true, false, fc_oidvectorout),
+        // ---- oidvector comparison operators (delegate to btoidvectorcmp) ----
+        builtin(679, "oidvectoreq", 2, true, false, fc_oidvectoreq),
+        builtin(619, "oidvectorne", 2, true, false, fc_oidvectorne),
+        builtin(677, "oidvectorlt", 2, true, false, fc_oidvectorlt),
+        builtin(678, "oidvectorle", 2, true, false, fc_oidvectorle),
+        builtin(680, "oidvectorge", 2, true, false, fc_oidvectorge),
+        builtin(681, "oidvectorgt", 2, true, false, fc_oidvectorgt),
         // ---- comparison operators ----
         builtin(184, "oideq", 2, true, false, fc_oideq),
         builtin(185, "oidne", 2, true, false, fc_oidne),

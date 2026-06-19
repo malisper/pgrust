@@ -726,6 +726,46 @@ pub(crate) fn proc_cost_rows(
     Ok(row)
 }
 
+/// `SearchSysCache1(PROCOID, funcoid)` + `GETSTRUCT->(prorettype, pronargs,
+/// proargtypes)` (pg_proc.c:851-882, `fmgr_sql_validator`). `Ok(None)` on a
+/// cache miss — the caller raises `cache lookup failed for function %u`.
+pub(crate) fn search_proc_oid_sql(
+    funcoid: Oid,
+) -> PgResult<Option<backend_catalog_pg_proc_seams::SqlValidatorProcFacts>> {
+    let scratch = MemoryContext::new("syscache search_proc_oid_sql projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, PROCOID, SysCacheKey::Value(KeyDatum::from_oid(funcoid)))?;
+    let Some(tup) = tuple else { return Ok(None) };
+
+    let prorettype = getattr_oid(mcx, PROCOID, &tup, Anum_pg_proc_prorettype)?;
+    let pronargs = getattr_i16(mcx, PROCOID, &tup, Anum_pg_proc_pronargs)?;
+
+    // proargtypes is an oidvector (BKI_FORCE_NOT_NULL); read element OIDs off the
+    // on-disk image (== C's proc->proargtypes.values[..pronargs]).
+    let proargtypes_datum = SysCacheGetAttrNotNull(mcx, PROCOID, &tup, Anum_pg_proc_proargtypes)?;
+    let bytes = match &proargtypes_datum {
+        Datum::ByRef(b) => &b[..],
+        Datum::ByVal(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => {
+            return Err(PgError::error(
+                "syscache search_proc_oid_sql: proargtypes attribute is by-value",
+            ))
+        }
+    };
+    let proargtypes_vec = arrayfuncs_seams::oidvector_to_oids_bytes::call(mcx, bytes)?;
+    let proargtypes: std::vec::Vec<Oid> = proargtypes_vec.iter().copied().collect();
+
+    ReleaseSysCache(tup);
+    Ok(Some(backend_catalog_pg_proc_seams::SqlValidatorProcFacts {
+        prorettype,
+        pronargs,
+        proargtypes,
+    }))
+}
+
 /// `SearchSysCache1(PROCOID, funcid)` + `GETSTRUCT->proisstrict` (`func_strict`,
 /// lsyscache.c). `Ok(None)` on a cache miss.
 pub(crate) fn proc_isstrict(funcid: Oid) -> PgResult<Option<bool>> {
