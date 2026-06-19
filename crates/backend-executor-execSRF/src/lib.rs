@@ -62,6 +62,7 @@ use backend_executor_execSRF_seams as seams;
 mod generate_series;
 mod generate_subscripts;
 mod json_each;
+mod json_record;
 mod json_srf;
 mod jsonb_srf;
 mod recordset_srf;
@@ -120,10 +121,14 @@ pub fn init_seams() {
     // materialize-mode json/jsonb array-of-objects -> setof record SRFs (their
     // `populate_recordset_worker` body fills the materialize tuplestore via
     // InitMaterializedSRF; core is `backend-utils-adt-jsonfuncs::recordset`).
-    // The `json[b]_populate_recordset` siblings are NOT registered: they read
-    // an optional composite `record` argument through the uninstalled funcapi
-    // `srf_arg_record` seam (see recordset_srf.rs).
     recordset_srf::register_recordset_srfs();
+    // The REST of the composite-record family that `recordset_srf` does not own:
+    // `json[b]_to_record` (one composite row, OIDs 3204/3490) and the
+    // `json[b]_populate_record[set]` (+ `jsonb_populate_record_valid`) seed-record
+    // family (OIDs 3960/3209/6338/3961/3475), which read an optional composite
+    // `record` argument through the now-installed funcapi `srf_arg_record` seam.
+    // Their bodies are `backend-utils-adt-jsonfuncs::{populate,recordset}`.
+    json_record::register_json_record_srfs();
 }
 
 // ===========================================================================
@@ -454,24 +459,37 @@ fn ExecMakeTableFunctionResult<'mcx>(
 
                     // C: store current resultset item.
                     if returns_tuple {
-                        // Composite return: C stores the returned HeapTupleHeader
-                        // Datum directly (`tuplestore_puttuple(tupstore, tuple)`).
-                        // The owned model carries it as `Datum::Composite(FormedTuple)`;
-                        // we deform it against the expected row descriptor and store
-                        // the per-column `(value, isnull)` series with
-                        // `tuplestore_putvalues` (the same descriptor the printtup
-                        // output lane reads it back with, so a text column's
-                        // by-reference varlena round-trips header-for-header).
+                        // Composite return: C does `tuple = DatumGetHeapTupleHeader(result)`
+                        // then `tuplestore_puttuple(tupstore, tuple)`. The owned model
+                        // accepts EITHER carrier shape a composite-returning PGFunction
+                        // produces: a live `Datum::Composite(FormedTuple)` (e.g.
+                        // `pg_input_error_info`), or a `Datum::ByRef(image)` composite
+                        // disk image (e.g. `json_to_record`'s `HeapTupleGetDatum`, which
+                        // hands back the self-contained header+data byte image) — both are
+                        // valid `HeapTupleHeader` Datums. `DatumGetHeapTupleHeader` is the
+                        // C `DatumGetHeapTupleHeader(result)` that normalizes either into a
+                        // `FormedTuple`. We then deform it against the expected row
+                        // descriptor and store the per-column `(value, isnull)` series with
+                        // `tuplestore_putvalues` (the same descriptor the printtup output
+                        // lane reads it back with, so a text column's by-reference varlena
+                        // round-trips header-for-header).
                         if !result_isnull {
-                            let formed = result.as_composite().ok_or_else(|| {
-                                ereport(ERROR)
-                                    .errcode(ERRCODE_INTERNAL_ERROR)
-                                    .errmsg(
-                                        "table function returning a composite type did not \
-                                         return a composite Datum",
-                                    )
-                                    .into_error()
-                            })?;
+                            let formed = match &result {
+                                Datum::Composite(_) | Datum::ByRef(_) => {
+                                    backend_access_common_heaptuple::DatumGetHeapTupleHeader(
+                                        per_query, &result,
+                                    )?
+                                }
+                                _ => {
+                                    return Err(ereport(ERROR)
+                                        .errcode(ERRCODE_INTERNAL_ERROR)
+                                        .errmsg(
+                                            "table function returning a composite type did not \
+                                             return a composite Datum",
+                                        )
+                                        .into_error())
+                                }
+                            };
                             let cols = backend_access_common_heaptuple::heap_deform_tuple(
                                 per_query,
                                 &formed.tuple,

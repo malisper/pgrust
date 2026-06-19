@@ -80,6 +80,11 @@ pub fn init_seams() {
     backend_utils_fmgr_funcapi_seams::srf_arg_varlena_bytes::set(
         srf_support::srf_arg_varlena_bytes,
     );
+    // The header-ful composite-record-argument reader the json/jsonb record SRFs
+    // (`json[b]_populate_record[set]`) use to obtain the optional seed record off
+    // the by-reference call-frame lane (the composite Datum's HeapTupleHeader
+    // varlena image, decoded back into a `FormedTuple`).
+    backend_utils_fmgr_funcapi_seams::srf_arg_record::set(srf_support::srf_arg_record);
     backend_utils_fmgr_funcapi_seams::cstring_get_text_datum::set(
         srf_support::cstring_get_text_datum,
     );

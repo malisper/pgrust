@@ -485,6 +485,60 @@ pub fn cstring_get_text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<DatumV<
     backend_utils_adt_varlena_seams::cstring_to_text_v::call(mcx, s)
 }
 
+/// `PG_GETARG_HEAPTUPLEHEADER(n)` (fmgr.h / postgres.h) — read a composite
+/// (row-type) argument at position `n` as a [`FormedTuple`].
+///
+/// C:
+/// ```c
+/// #define PG_GETARG_HEAPTUPLEHEADER(n) DatumGetHeapTupleHeader(PG_GETARG_DATUM(n))
+/// #define DatumGetHeapTupleHeader(d) ((HeapTupleHeader) PG_DETOAST_DATUM(d))
+/// ```
+/// i.e. the by-reference composite Datum is (possibly) detoasted to a flat
+/// `HeapTupleHeaderData`-prefixed varlena image (the `DatumTupleFields` choice
+/// carrying `datum_len_`/`datum_typmod`/`datum_typeid`, then the on-disk header
+/// fields and the user-data area). The executor call frame already carries that
+/// header-ful image on the by-reference side channel: `ExecEvalFuncArgs`
+/// (execSRF.c) serializes a `Composite` Datum via `FormedTuple::to_datum_image()`
+/// into `ref_args[n] = FmgrArgRef::Varlena(image)` — the same convention
+/// `srf_arg_varlena_bytes` reads for a `text`/`json` argument (the trimmed frame's
+/// `FmgrArgRef` has no `Composite` arm; a composite is varlena-shaped, so it
+/// collapses into `Varlena`). So the detoast boundary here is reading that image
+/// and decoding it back into the owned [`FormedTuple`] via `from_datum_image`,
+/// the exact inverse of `to_datum_image`.
+///
+/// The caller must have checked `PG_ARGISNULL(n)` is false first (C reads the
+/// header only for a non-null arg); a NULL or non-varlena slot is a contract
+/// violation and panics.
+pub fn srf_arg_record<'mcx>(
+    mcx: Mcx<'mcx>,
+    fcinfo: &FunctionCallInfoBaseData<'mcx>,
+    n: usize,
+) -> PgResult<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>> {
+    use types_nodes::fmgr::FmgrArgRef;
+    use types_tuple::backend_access_common_heaptuple::FormedTuple;
+
+    // C: rec = PG_GETARG_HEAPTUPLEHEADER(n) — detoast the by-reference composite
+    // argument. The owned lane carries the detoasted, header-ful composite-Datum
+    // image in `ref_args[n]` (a `Varlena` arm — a composite Datum is
+    // varlena-shaped, a pointer to a `HeapTupleHeaderData` whose first word is the
+    // varlena length header).
+    let image: &[u8] = match fcinfo.ref_arg(n) {
+        Some(FmgrArgRef::Varlena(bytes)) => bytes.as_slice(),
+        _ => panic!(
+            "srf_arg_record: argument {n} is absent from the by-reference lane or \
+             is not a composite varlena image (the SRF caller must check \
+             PG_ARGISNULL before reading a record argument)"
+        ),
+    };
+
+    // Decode the `HeapTupleHeader` varlena image back into the owned
+    // `FormedTuple` (header — incl. the `DatumTupleFields` typeid/typmod the
+    // callers read via `HeapTupleHeaderGetTypeId`/`HeapTupleHeaderGetTypMod` — plus
+    // the user-data area). C aliases the detoasted pointer in place; the owned
+    // model materializes an `mcx`-allocated tuple.
+    FormedTuple::from_datum_image(mcx, image)
+}
+
 /// LEGACY stub for value-per-call SRF call sites not yet rewired onto the now-
 /// ported multi-call protocol (#349).
 ///
