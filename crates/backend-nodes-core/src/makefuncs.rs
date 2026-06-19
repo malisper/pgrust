@@ -209,8 +209,28 @@ thread_local! {
 
 /// `Mcx<'static>` for the backend-lifetime [`CONST_VALUE_CONTEXT`] — where a
 /// by-reference `Const.constvalue` image is copied so it can carry `'static`.
-fn const_value_mcx() -> Mcx<'static> {
+pub fn const_value_mcx() -> Mcx<'static> {
     CONST_VALUE_CONTEXT.with(|c| c.mcx())
+}
+
+/// Copy a (per-read-context) by-reference / composite `Const.constvalue` image
+/// into the backend-lifetime const-value context so it can be stored as the
+/// `Datum<'static>` a `Const` node carries. The mirror of `make_const`'s
+/// `'static`-erase, for `_readConst` (`readDatum`): `readfuncs` reconstructs the
+/// flat varlena bytes in its transient read `mcx`, and this re-homes them into
+/// the leaked never-reset [`CONST_VALUE_CONTEXT`] (exactly as `make_const`
+/// `datumCopy`'s an input function's palloc'd varlena). By-value words borrow
+/// nothing and pass straight through; `cstring` carries its text in an owned
+/// `String`. `Expanded`/`Internal` cannot appear in a serialized `Const`.
+pub fn intern_const_value(value: &Datum<'_>) -> PgResult<Datum<'static>> {
+    Ok(match value {
+        Datum::ByVal(word) => Datum::ByVal(*word),
+        Datum::Cstring(s) => Datum::Cstring(s.clone()),
+        other @ (Datum::ByRef(_) | Datum::Composite(_)) => other.clone_in(const_value_mcx())?,
+        Datum::Expanded(_) | Datum::Internal(_) => panic!(
+            "intern_const_value: Expanded/Internal cannot appear in a serialized Const"
+        ),
+    })
 }
 
 /// `makeConst(consttype, consttypmod, constcollid, constlen, constvalue,

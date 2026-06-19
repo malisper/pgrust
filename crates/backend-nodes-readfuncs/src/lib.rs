@@ -45,9 +45,7 @@
 //! The bare value-node / `(...)`-list forms are read by `read.c`'s `nodeRead`
 //! directly (not by `parseNodeString`), so the value/list leaf families
 //! round-trip through `string_to_node` -> `node_read` without ever reaching
-//! here. A LABEL this reader does not yet handle (e.g. `CONST`, deliberately
-//! unported because the repo's `Const` trims the `constlen`/`constbyval`
-//! `outDatum` needs) falls through to the faithful C
+//! here. A LABEL this reader does not handle falls through to the faithful C
 //! `elog(ERROR, "badly formatted node string \"%.32s\"...")` tail
 //! (`mirror-pg-and-panic`, surfaced as the exact error).
 
@@ -601,22 +599,15 @@ fn read_const<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Const> {
         let _ = next_token()?;
         Datum::null()
     } else {
-        // The repo's `Const.constvalue` is `Datum<'static>`; `make_const` only
-        // ever stores the by-value word arm, and `_outConst` only emits a
-        // by-value word for a non-null Const, so a reparsed Const is the
-        // by-value word. A by-reference image would require a lifetime-carrying
-        // Const carrier (the execTuples canonical-carrier follow-on, #113),
-        // matching `make_const`'s own restriction.
-        match read_datum(mcx, constbyval)? {
-            Datum::ByVal(w) => Datum::ByVal(w),
-            other => {
-                return Err(elog_error(alloc::format!(
-                    "readConst: by-reference Const value requires a lifetime-carrying \
-                     Const carrier (execTuples canonical-carrier follow-on, #113); got {:?}",
-                    core::mem::discriminant(&other)
-                )))
-            }
-        }
+        // `readDatum` rebuilds the value in the transient read `mcx`: a by-value
+        // word (`Datum::ByVal`) or, for `constbyval == false`, the flat varlena
+        // image (`Datum::ByRef`). `Const.constvalue` is `Datum<'static>`, so
+        // re-home a by-reference image into the backend-lifetime const-value
+        // context — the symmetric mirror of `make_const`'s `'static`-erase
+        // (`datumCopy` of the input function's palloc'd varlena). A by-value
+        // word borrows nothing and passes straight through.
+        let v = read_datum(mcx, constbyval)?;
+        backend_nodes_core::makefuncs::intern_const_value(&v)?
     };
 
     Ok(Const {
@@ -1093,6 +1084,57 @@ mod tests {
             assert!(!c.constisnull);
             assert!(c.constbyval);
             assert_eq!(c.constlen, 4);
+        } else {
+            panic!("expected Const, got {:?}", parsed.node_tag());
+        }
+    }
+
+    #[test]
+    fn const_byref_round_trips() {
+        // A by-reference Const (text/varlena): its flat image is serialized by
+        // outDatum and reconstructed by readDatum, then re-homed into the
+        // const-value context. Assert byte-stable re-serialization and that the
+        // reparsed value is the same by-reference image.
+        ensure_seams();
+        let ctx = MemoryContext::new("const");
+        let mcx = ctx.mcx();
+        // A 4-byte-header varlena image for the text "hi": VARSIZE = 6.
+        let image: alloc::vec::Vec<u8> = {
+            let payload = b"hi";
+            let total = 4 + payload.len();
+            let mut v = alloc::vec::Vec::new();
+            v.extend_from_slice(&(total as u32).to_ne_bytes());
+            v.extend_from_slice(payload);
+            v
+        };
+        let mut bytes = mcx::PgVec::new_in(mcx);
+        for &b in &image {
+            bytes.push(b);
+        }
+        let constvalue =
+            backend_nodes_core::makefuncs::intern_const_value(&Datum::ByRef(bytes)).unwrap();
+        let konst = Const {
+            consttype: 25, // TEXTOID
+            consttypmod: -1,
+            constcollid: 100, // DEFAULT_COLLATION_OID
+            constlen: -1,
+            constvalue,
+            constisnull: false,
+            constbyval: false,
+            location: -1,
+        };
+        let node = Node::Expr(Expr::Const(konst));
+        let text = nodeToString(mcx, &node).unwrap();
+        assert!(text.starts_with("{CONST :consttype 25"), "{text}");
+        assert!(text.contains(":constbyval false"), "{text}");
+        assert!(text.contains(&alloc::format!(":constvalue {} [ ", image.len())), "{text}");
+        let parsed = string_to_node(mcx, text.as_str()).unwrap();
+        let text2 = nodeToString(mcx, &parsed).unwrap();
+        assert_eq!(text.as_str(), text2.as_str());
+        if let Some(c) = parsed.as_const() {
+            assert!(!c.constisnull);
+            assert!(!c.constbyval);
+            assert_eq!(c.constvalue.as_ref_bytes(), image.as_slice());
         } else {
             panic!("expected Const, got {:?}", parsed.node_tag());
         }
