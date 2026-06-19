@@ -683,10 +683,21 @@ fn arg_record<'mcx>(
     fcinfo: &FunctionCallInfoBaseData,
     i: usize,
 ) -> FormedTuple<'mcx> {
-    let image = fcinfo
+    // A composite Datum is, in C, a pointer to a varlena-tagged HeapTupleHeader
+    // block: physically the same image whether the value reached us tagged as
+    // `RefPayload::Composite` (minted by ExecEvalRow / record_in via
+    // `to_datum_image`) or carried verbatim on the generic varlena lane (a
+    // composite column read out of a heap tuple deforms to a by-reference
+    // `Datum::ByRef` and crosses as `RefPayload::Varlena` — the C `ByRef`/`Varlena`
+    // split has no analogue, both are the same self-describing image). Accept
+    // either lane; `from_datum_image` decodes the HeapTupleHeader either way.
+    let arg = fcinfo
         .ref_arg(i)
-        .and_then(|p| p.as_composite())
         .expect("rowtypes fn: composite arg missing from by-ref lane");
+    let image = arg
+        .as_composite()
+        .or_else(|| arg.as_varlena())
+        .expect("rowtypes fn: composite arg is neither a Composite nor a Varlena by-ref payload");
     match FormedTuple::from_datum_image(mcx, image) {
         Ok(t) => t,
         Err(e) => raise(e),

@@ -8968,6 +8968,7 @@ dependencies = [
  "backend-utils-adt-varlena-seams",
  "backend-utils-adt-xml",
  "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-typcache-seams",
  "backend-utils-fmgr-fmgr-seams",
  "backend-utils-misc-stack-depth-seams",
  "backend-utils-sort-tuplesort-seams",

@@ -426,8 +426,17 @@ pub fn heap_compute_data_size(
         // header-ful form C's `VARSIZE*` macros require before reading lengths.
         // Other attlens (by-value, cstring, fixed by-ref) carry no varlena
         // header, so they are read straight from the value below.
+        // A composite-typed column (`attlen == -1`) arrives as `Datum::Composite`;
+        // materialize it to its flat HeapTupleHeader varlena image (C: a composite
+        // Datum already IS a varlena pointer). `as_varlena_bytes` borrows a plain
+        // `ByRef` image in place.
+        let composite_image = if atti.attlen == -1 {
+            Some(val.as_varlena_bytes())
+        } else {
+            None
+        };
         let varlena_image: Option<alloc::borrow::Cow<'_, [u8]>> = if atti.attlen == -1 {
-            Some(ensure_headerful_varlena(val.as_ref_bytes()))
+            Some(ensure_headerful_varlena(composite_image.as_deref().unwrap()))
         } else {
             None
         };
@@ -598,8 +607,11 @@ fn fill_val(
         data_length = att.attlen as usize;
     } else if att.attlen == -1 {
         // varlena — normalize a possibly header-less `ByRef` image (parser/
-        // executor `Const`) to the header-ful form C's `VARSIZE*` macros read.
-        let val_image = ensure_headerful_varlena(datum.as_ref_bytes());
+        // executor `Const`) to the header-ful form C's `VARSIZE*` macros read; a
+        // composite-typed column arrives as `Datum::Composite` and is materialized
+        // to its flat HeapTupleHeader varlena image.
+        let datum_image = datum.as_varlena_bytes();
+        let val_image = ensure_headerful_varlena(datum_image.as_ref());
         let val: &[u8] = val_image.as_ref();
         *infomask |= HEAP_HASVARWIDTH;
         if varatt_is_external(val) {

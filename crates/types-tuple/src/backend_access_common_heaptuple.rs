@@ -83,6 +83,22 @@ impl Datum<'_> {
         matches!(self, Datum::Internal(_))
     }
 
+    /// `DatumGetPointer(datum)` analogue for a varlena attribute that may be a
+    /// composite value: yields the flat varlena byte image, materializing a
+    /// [`Datum::Composite`] into its `HeapTupleHeader` Datum image (C: a composite
+    /// value already IS a `struct varlena *`-tagged pointer, so the two are the
+    /// same self-describing block). A `ByRef`/`Cstring` value borrows in place
+    /// (`Cow::Borrowed`); a `Composite` is serialized (`Cow::Owned`). Used by the
+    /// form path (`heap_compute_data_size` / `fill_val`) where a composite-typed
+    /// column (`attlen == -1`) reaches the by-reference branch.
+    #[inline]
+    pub fn as_varlena_bytes(&self) -> alloc::borrow::Cow<'_, [u8]> {
+        match self {
+            Datum::Composite(t) => alloc::borrow::Cow::Owned(t.to_datum_image()),
+            _ => alloc::borrow::Cow::Borrowed(self.as_ref_bytes()),
+        }
+    }
+
     /// `DatumGetPointer(datum)` analogue: borrow the by-reference bytes. Panics
     /// if this is a by-value scalar (a caller bug — C would have a type/length
     /// mismatch here too).
@@ -562,7 +578,20 @@ impl<'mcx> FormedTuple<'mcx> {
                 (f.t_xmin, f.t_xmax, raw)
             }
         };
-        image[0..4].copy_from_slice(&w0.to_ne_bytes());
+        // The first word is the varlena length header. A composite Datum IS a
+        // `struct varlena *`-tagged block (`HeapTupleHeaderSetDatumLength` ==
+        // `SET_VARSIZE`), so emit the TAGGED 4-byte-header form (`total << 2`,
+        // low two bits 00 = uncompressed 4B). This makes the produced image a
+        // self-describing varlena, so when a composite value is stored into a
+        // table column the generic varlena form path (`ensure_headerful_varlena`,
+        // `VARSIZE`) reads its length correctly and copies it verbatim rather than
+        // re-framing it and shifting the inner header. `from_datum_image` decodes
+        // this tagged word back into the raw `datum_len_`. (The on-machine
+        // `datum_len_` field stays the raw byte length, matching `heap_form_tuple`;
+        // only the serialized image is tagged.)
+        let _ = w0;
+        let tagged_len = (total as u32) << 2; // VARTAG 4B_U: low bits 00
+        image[0..4].copy_from_slice(&tagged_len.to_ne_bytes());
         image[4..8].copy_from_slice(&w4.to_ne_bytes());
         image[8..12].copy_from_slice(&w8.to_ne_bytes());
         image[12..14].copy_from_slice(&td.t_ctid.ip_blkid.bi_hi.to_ne_bytes());
@@ -604,7 +633,19 @@ impl<'mcx> FormedTuple<'mcx> {
         let u32_at = |o: usize| u32::from_ne_bytes([image[o], image[o + 1], image[o + 2], image[o + 3]]);
         let u16_at = |o: usize| u16::from_ne_bytes([image[o], image[o + 1]]);
 
-        let datum_len_ = u32_at(0) as i32;
+        // The first word is the TAGGED varlena length header (`to_datum_image`
+        // writes `total << 2`). Decode it back to the raw byte length the
+        // on-machine `datum_len_` field carries: `VARSIZE_4B == va_header >> 2`.
+        // (Tolerate a stray raw-length image — a value minted before the tagged
+        // convention — by falling back to the raw word if the tagged decode
+        // disagrees with the image length.)
+        let raw_word = u32_at(0);
+        let tagged_len = (raw_word >> 2) as usize;
+        let datum_len_ = if tagged_len == image.len() {
+            tagged_len as i32
+        } else {
+            raw_word as i32
+        };
         let datum_typmod = u32_at(4) as i32;
         let datum_typeid = u32_at(8);
         let bi_hi = u16_at(12);

@@ -1012,6 +1012,14 @@ pub enum ExprEvalStepData<'mcx> {
         elemvalues: Option<PgVec<'mcx, Datum<'mcx>>>,
         /// `bool *elemnulls`.
         elemnulls: Option<PgVec<'mcx, bool>>,
+        /// Per-element result cells (the owned replacement for C's per-field
+        /// `&scratch.d.row.elemvalues[i]` / `&...elemnulls[i]` write targets; the
+        /// gap-2 arg-cell pattern shared with ArrayExpr / Func / MinMax). One
+        /// [`ResultCellId`] per field; the interpreter gathers these into
+        /// `elemvalues`/`elemnulls` immediately before forming the tuple. A
+        /// dropped column has no sub-expression and is recorded as the sentinel
+        /// `STATE_RESULT_CELL` (its `elemnulls[i]` is forced true).
+        elem_cells: Option<PgVec<'mcx, ResultCellId>>,
     },
     /// `rowcompare_step` — for EEOP_ROWCOMPARE_STEP.
     RowCompareStep {

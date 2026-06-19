@@ -15,8 +15,12 @@ types-datum = { path = "../types-datum" }
 types-tuple = { path = "../types-tuple" }
 types-nodes = { path = "../types-nodes" }
 mcx = { path = "../mcx" }
-# item_pointer_bytes: build the ctid Datum for EEOP_*_SYSVAR ctid fetch.
+# item_pointer_bytes: build the ctid Datum for EEOP_*_SYSVAR ctid fetch;
+# heap_getattr for the EEOP_FIELDSELECT field extraction over a composite Datum.
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+# lookup_rowtype_tupdesc for the EEOP_FIELDSELECT rowtype descriptor (the typcache
+# TupleDesc model); a leaf seam-declaration crate, so no dependency cycle.
+backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
 
 # Own seam crate: the interpreter installs the dispatch entry points
 # (ExecReadyInterpretedExpr / ExecEvalExprSwitchContext) that execExpr + the

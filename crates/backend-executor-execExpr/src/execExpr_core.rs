@@ -1110,15 +1110,102 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             expr_eval_push_step(mcx, state, scratch)?;
             Ok(())
         }
-        etag::T_RowExpr => panic!(
-            "execExpr-core: RowExpr recurses each field into &scratch.d.row.elemvalues[i] / \
-             elemnulls[i] (execExpr.c:2048-2050), but the ExprEvalStepData::Row variant models \
-             elemvalues/elemnulls as plain Datum/bool workspace vecs with no per-element \
-             ResultCellId, so the per-field recursion has no arena cell to target. Genuine model \
-             gap (gap-2 not extended to Row); additionally the RECORDOID generic-record branch \
-             needs ExecTypeFromExprList + BlessTupleDesc (execTuples owner, no seam). \
-             lookup_rowtype_tupdesc_copy (named-type branch) and exprType are landed seams."
-        ),
+        // ----- T_RowExpr -----
+        etag::T_RowExpr => {
+            const RECORDOID: types_core::Oid = 2249;
+            let rowexpr = node.expect_rowexpr();
+            let nargs = rowexpr.args.len();
+
+            // Build tupdesc to describe result tuples. (`TupleDesc` is
+            // `Option<PgBox<TupleDescData>>`; both arms produce a present box.)
+            let tupdesc: PgBox<'mcx, types_tuple::heaptuple::TupleDescData<'mcx>> =
+                if rowexpr.row_typeid == RECORDOID {
+                    // generic record, use types of given expressions
+                    let mut td = backend_executor_execTuples_seams::exec_type_from_expr_list::call(
+                        mcx,
+                        &rowexpr.args,
+                    )?
+                    .expect("ExecTypeFromExprList returned no tupdesc");
+                    // ... but adopt RowExpr's column aliases (ExecTypeSetColNames).
+                    // Only OK to rename on a not-yet-blessed RECORD type.
+                    if !rowexpr.colnames.is_empty() {
+                        for (colno, cname) in rowexpr.colnames.iter().enumerate() {
+                            if colno >= td.natts as usize {
+                                break;
+                            }
+                            let attr = td.attr_mut(colno);
+                            // Do nothing for empty aliases or dropped columns.
+                            if cname.is_empty() || attr.attisdropped {
+                                continue;
+                            }
+                            attr.attname.namestrcpy(cname);
+                        }
+                    }
+                    // Bless the tupdesc so it can be looked up later.
+                    backend_executor_execTuples_seams::bless_tuple_desc::call(mcx, Some(td))?
+                        .expect("BlessTupleDesc returned no tupdesc")
+                } else {
+                    // it's been cast to a named type, use that.
+                    backend_utils_cache_typcache_seams::lookup_rowtype_tupdesc_copy::call(
+                        mcx,
+                        rowexpr.row_typeid,
+                        -1,
+                    )?
+                };
+
+            // In the named-type case the tupdesc could have more columns than
+            // the args list (columns added since the ROW() was parsed); those
+            // extra columns go to nulls. nelems = Max(nargs, tupdesc->natts).
+            debug_assert!(nargs <= tupdesc.natts as usize);
+            let nelems = core::cmp::max(nargs, tupdesc.natts as usize);
+
+            // Per-field result cells (the owned replacement for C's
+            // &scratch.d.row.elemvalues[i] / elemnulls[i] write targets). Extra
+            // columns beyond the args list (and dropped columns) carry the
+            // STATE_RESULT_CELL sentinel and read as NULL (the interpreter forces
+            // elemnulls[i] = true for them).
+            let mut elem_cells: PgVec<ResultCellId> = mcx::vec_with_capacity_in(mcx, nelems)?;
+
+            // Set up evaluation, skipping any deleted columns.
+            for i in 0..nelems {
+                let att = tupdesc.attr(i);
+                if i < nargs && !att.attisdropped {
+                    // Guard against ALTER COLUMN TYPE since the RowExpr was made.
+                    let e = &rowexpr.args[i];
+                    let etype = backend_nodes_nodeFuncs_seams::expr_type_info::call(e)?.typid;
+                    if etype != att.atttypid {
+                        return Err(types_error::PgError::error("ROW() column has wrong type")
+                            .with_detail(format!(
+                                "ROW() column has type {} instead of type {}",
+                                etype, att.atttypid
+                            )));
+                    }
+                    // Evaluate column expr into its workspace cell.
+                    let cell = new_result_cell(mcx, state)?;
+                    exec_init_expr_rec(mcx, e, state, cell)?;
+                    elem_cells.push(cell);
+                } else {
+                    // Dropped column, or an extra named-type column past the args
+                    // list: insert a NULL (C makeNullConst(INT4OID) then evaluates
+                    // it; the owned model records the sentinel and reads NULL).
+                    elem_cells.push(STATE_RESULT_CELL);
+                }
+            }
+
+            let scratch = ExprEvalStep {
+                opcode: ExprEvalOp::EEOP_ROW,
+                resvalue: resv,
+                resnull: resv,
+                d: ExprEvalStepData::Row {
+                    tupdesc: Some(tupdesc),
+                    elemvalues: None,
+                    elemnulls: None,
+                    elem_cells: Some(elem_cells),
+                },
+            };
+            expr_eval_push_step(mcx, state, scratch)?;
+            Ok(())
+        }
         etag::T_RowCompareExpr => panic!(
             "execExpr-core: RowCompareExpr recurses left/right args into &fcinfo->args[0/1].value \
              (execExpr.c:2127-2130), but the ExprEvalStepData::RowCompareStep variant carries \

@@ -193,23 +193,61 @@ pub fn ExecEvalRowNullInt<'mcx>(
 pub fn ExecEvalRow<'mcx>(
     state: &mut ExprState<'mcx>,
     op: usize,
-    _estate: &mut EStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     // tuple = heap_form_tuple(op->d.row.tupdesc,
     //                         op->d.row.elemvalues, op->d.row.elemnulls);
     // *op->resvalue = HeapTupleGetDatum(tuple);
     // *op->resnull = false;
+    //
+    // The individual columns were evaluated into per-field result cells
+    // (op->d.row.elem_cells, the owned stand-in for C's
+    // op->d.row.elemvalues[]/elemnulls[] workspace arrays); gather them into the
+    // values/nulls the forming function expects. A field whose cell is the
+    // STATE_RESULT_CELL sentinel (a dropped or extra named-type column) reads as
+    // NULL (C memset elemnulls = true for those slots).
+    let mcx = estate.es_query_cxt;
     let steps = state.steps.as_ref().expect("eval_composite: steps not ready");
-    match &steps[op].d {
-        ExprEvalStepData::Row { .. } => {}
+    let (tupdesc, elem_cells) = match &steps[op].d {
+        ExprEvalStepData::Row {
+            tupdesc,
+            elem_cells,
+            ..
+        } => {
+            let tupdesc = tupdesc
+                .as_ref()
+                .expect("ExecEvalRow: op->d.row.tupdesc not built");
+            let elem_cells = elem_cells
+                .as_ref()
+                .expect("ExecEvalRow: op->d.row.elem_cells missing");
+            (tupdesc.clone_in(mcx)?, elem_cells.clone())
+        }
         other => unreachable!("ExecEvalRow: step.d is not Row: {other:?}"),
+    };
+
+    let natts = tupdesc.natts as usize;
+    let mut values: Vec<Datum<'mcx>> = Vec::with_capacity(natts);
+    let mut nulls: Vec<bool> = Vec::with_capacity(natts);
+    for i in 0..natts {
+        let cell = elem_cells[i];
+        if cell == STATE_RESULT_CELL {
+            // Dropped / extra column: always NULL.
+            values.push(Datum::null());
+            nulls.push(true);
+        } else {
+            let c = state.result_cells.get(cell);
+            values.push(c.value.clone());
+            nulls.push(c.isnull);
+        }
     }
-    // heap_form_tuple + HeapTupleGetDatum cross the heap-tuple / composite-Datum
-    // boundary.
-    composite_datum_owner_unported(
-        "ExecEvalRow: heap_form_tuple(op->d.row.tupdesc, elemvalues, elemnulls) \
-         then HeapTupleGetDatum",
-    )
+
+    // tuple = heap_form_tuple(tupdesc, values, nulls);
+    let tuple = backend_access_common_heaptuple::heap_form_tuple(mcx, &tupdesc, &values, &nulls)
+        .map_err(|e| types_error::PgError::error(format!("ExecEvalRow: {e:?}")))?;
+
+    // *op->resvalue = HeapTupleGetDatum(tuple);  *op->resnull = false;
+    store_result(state, op, Datum::Composite(tuple), false);
+    Ok(())
 }
 
 /// `ExecEvalMinMax(ExprState *state, ExprEvalStep *op)` — GREATEST / LEAST (note
@@ -345,39 +383,122 @@ pub fn ExecEvalFieldSelect<'mcx>(
     state: &mut ExprState<'mcx>,
     op: usize,
     _econtext: EcxtId,
-    _estate: &mut EStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    // AttrNumber fieldnum = op->d.fieldselect.fieldnum;
+    // AttrNumber fieldnum    = op->d.fieldselect.fieldnum;
+    // Oid        resulttype  = op->d.fieldselect.resulttype;
     let steps = state.steps.as_ref().expect("eval_composite: steps not ready");
-    let _fieldnum = match &steps[op].d {
-        ExprEvalStepData::FieldSelect { fieldnum, .. } => *fieldnum,
+    let (fieldnum, resulttype) = match &steps[op].d {
+        ExprEvalStepData::FieldSelect {
+            fieldnum,
+            resulttype,
+            ..
+        } => (*fieldnum, *resulttype),
         other => unreachable!("ExecEvalFieldSelect: step.d is not FieldSelect: {other:?}"),
     };
 
     // /* NULL record -> NULL result */
     // if (*op->resnull) return;
-    let (_tup_datum, isnull) = load_result(state, op);
+    let (tup_datum, isnull) = load_result(state, op);
     if isnull {
         return Ok(());
     }
 
     // tupDatum = *op->resvalue;
-    // if (VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(tupDatum))) {
-    //     ... expanded_record_get_tupdesc / expanded_record_get_field ...
-    // } else {
-    //     tuple = DatumGetHeapTupleHeader(tupDatum);
-    //     tupType/tupTypmod = HeapTupleHeaderGetTypeId/TypMod(tuple);
-    //     tupDesc = get_cached_rowtype(tupType, tupTypmod, &op->d.fieldselect.rowcache, NULL);
-    //     /* fieldnum bounds + attisdropped + resulttype mismatch checks */
-    //     *op->resvalue = heap_getattr(&tmptup, fieldnum, tupDesc, op->resnull);
-    // }
     //
-    // Both the expanded-record fast path and DatumGetHeapTupleHeader + heap_getattr
-    // cross the composite-Datum / heap-tuple boundary.
-    composite_datum_owner_unported(
-        "ExecEvalFieldSelect: decoding the record Datum (expanded-record fast path \
-         or DatumGetHeapTupleHeader) and heap_getattr extraction",
-    )
+    // The expanded-record fast path (VARATT_IS_EXTERNAL_EXPANDED) is not produced
+    // yet (the Expanded Datum arm is wave 2); the flat path decodes the composite
+    // Datum to its HeapTupleHeader:
+    //
+    //   tuple = DatumGetHeapTupleHeader(tupDatum);
+    //   tupType   = HeapTupleHeaderGetTypeId(tuple);
+    //   tupTypmod = HeapTupleHeaderGetTypMod(tuple);
+    //   tupDesc   = get_cached_rowtype(tupType, tupTypmod, &op->d.fieldselect.rowcache, NULL);
+    //
+    // A composite value reaches this step either as `Datum::Composite` (minted by
+    // ExecEvalRow / record_in) or — for a composite column deformed out of a heap
+    // tuple — as a flat `Datum::ByRef` HeapTupleHeader image; decode either into a
+    // FormedTuple.
+    let mcx = estate.es_query_cxt;
+    let tuple: types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx> = match &tup_datum {
+        Datum::Composite(t) => t.clone_in(mcx)?,
+        Datum::ByRef(image) => {
+            types_tuple::backend_access_common_heaptuple::FormedTuple::from_datum_image(
+                mcx,
+                image.as_slice(),
+            )?
+        }
+        other => unreachable!(
+            "ExecEvalFieldSelect: composite input Datum is neither Composite nor ByRef: {other:?}"
+        ),
+    };
+
+    let header = tuple
+        .tuple
+        .t_data
+        .as_ref()
+        .expect("ExecEvalFieldSelect: composite Datum has no header");
+    let tup_type = types_tuple::heaptuple::HeapTupleHeaderGetTypeId(header);
+    let tup_typmod = types_tuple::heaptuple::HeapTupleHeaderGetTypMod(header);
+
+    // tupDesc = get_cached_rowtype(tupType, tupTypmod, &op->d.fieldselect.rowcache, NULL);
+    //
+    // The owned rowcache caching contract (ExprEvalRowtypeCache::cacheptr) cannot
+    // round-trip the C void* TypeCacheEntry*/TupleDesc* pointer; the faithful
+    // substitute is the typcache lookup itself, which is internally cached
+    // (lookup_rowtype_tupdesc → lookup_type_cache(TYPECACHE_TUPDESC)).
+    let tup_desc = backend_utils_cache_typcache_seams::lookup_rowtype_tupdesc::call(
+        mcx, tup_type, tup_typmod,
+    )?;
+
+    // /*
+    //  * Find field's attr record.  Note we don't support system columns here: a
+    //  * datum tuple doesn't have valid values for most of the interesting
+    //  * system columns anyway.
+    //  */
+    // if (fieldnum <= 0)  elog(ERROR, "unsupported reference to system column %d ...");
+    // if (fieldnum > tupDesc->natts)  elog(ERROR, "attribute number %d exceeds number of columns %d");
+    if fieldnum <= 0 {
+        return Err(types_error::PgError::error(format!(
+            "unsupported reference to system column {fieldnum} in FieldSelect"
+        )));
+    }
+    if fieldnum as i32 > tup_desc.natts {
+        return Err(types_error::PgError::error(format!(
+            "attribute number {fieldnum} exceeds number of columns {}",
+            tup_desc.natts
+        )));
+    }
+    let attr = tup_desc.attr((fieldnum - 1) as usize);
+
+    // /* Check for dropped column, and force a NULL result if so */
+    // if (attr->attisdropped) { *op->resnull = true; return; }
+    if attr.attisdropped {
+        store_result(state, op, Datum::null(), true);
+        return Ok(());
+    }
+
+    // /* Check for type mismatch --- possible after ALTER COLUMN TYPE? */
+    // if (op->d.fieldselect.resulttype != attr->atttypid)
+    //     ereport(ERROR, "attribute %d has wrong type", ...);
+    if resulttype != attr.atttypid {
+        return Err(types_error::PgError::error(format!(
+            "attribute {fieldnum} has wrong type"
+        ))
+        .with_detail(format!(
+            "Table has type {}, but query expects type {}.",
+            attr.atttypid, resulttype
+        )));
+    }
+
+    // /* heap_getattr needs a HeapTuple not a bare HeapTupleHeader */
+    // tmptup.t_len = HeapTupleHeaderGetDatumLength(tuple);
+    // tmptup.t_data = tuple;
+    // *op->resvalue = heap_getattr(&tmptup, fieldnum, tupDesc, op->resnull);
+    let (value, fieldisnull) =
+        backend_access_common_heaptuple::heap_getattr(mcx, &tuple, fieldnum as i32, &tup_desc)?;
+    store_result(state, op, value, fieldisnull);
+    Ok(())
 }
 
 /// `ExecEvalFieldStoreDeForm(ExprState *state, ExprEvalStep *op,

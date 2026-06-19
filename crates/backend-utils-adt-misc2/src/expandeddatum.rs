@@ -246,11 +246,16 @@ pub fn make_expanded_object_read_only_internal_v<'mcx>(
         // A by-value datum is never an expanded-object pointer; return it
         // unchanged (matching the internal helper's "not RW → return d").
         Datum::ByVal(v) => return Ok(Datum::ByVal(*v)),
-        // A live `Datum::Expanded` would short-circuit here as already-RW, and
-        // the other arms are never expanded varlenas — none has a producer that
-        // reaches this seam yet.
-        Datum::Cstring(_) | Datum::Composite(_) | Datum::Expanded(_) | Datum::Internal(_) => {
-            panic!("make_expanded_object_read_only_internal_v: non-varlena Datum arm (Cstring/Composite/Expanded/Internal) not yet produced — wave 2")
+        // A flat composite/cstring value is never a read-write *expanded*
+        // object pointer (`VARATT_IS_EXTERNAL_EXPANDED_RW`); the C macro's
+        // internal helper would `return d` for it, so pass it through verbatim.
+        // (A projected RowExpr / composite column value reaches the
+        // EEOP_ASSIGN_TMP_MAKE_RO opcode as `Datum::Composite`.)
+        Datum::Composite(_) | Datum::Cstring(_) => return Ok(d.clone_in(mcx)?),
+        // A live `Datum::Expanded` would short-circuit here as already-RW; the
+        // `internal` pseudo-type never reaches this seam.
+        Datum::Expanded(_) | Datum::Internal(_) => {
+            panic!("make_expanded_object_read_only_internal_v: Expanded/Internal Datum arm not yet produced — wave 2")
         }
     };
     match make_expanded_object_read_only_internal(mcx, bytes)? {
