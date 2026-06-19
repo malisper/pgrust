@@ -686,6 +686,14 @@ impl<'e, 's> Parser<'e, 's> {
     //    predicate form is reached via accessor_expr or this primary) ---------
 
     fn parse_expr_primary(&mut self) -> POut<Item> {
+        // EXISTS_P '(' expr ')' — a delimited_predicate. In the bison grammar
+        // `predicate` reduces directly from `delimited_predicate`, so a bare
+        // `exists(...)` is a valid primary anywhere an expr/predicate is
+        // expected (top level, after AND/OR, etc.).
+        if self.peek_tok() == Some(Token::EXISTS_P) {
+            return self.parse_delimited_predicate();
+        }
+
         // '(' expr ')' — but a parenthesised group may be either an arithmetic
         // expr (`expr: '(' expr ')'`) or the head of an `accessor_expr`
         // (`'(' expr ')' accessor_op ...`) or a predicate group. We parse the
@@ -1382,6 +1390,19 @@ mod tests {
             }
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn top_level_exists_predicate() {
+        // `exists($)` and `exists($.a)` are valid top-level predicates
+        // (predicate -> delimited_predicate -> EXISTS_P '(' expr ')').
+        let r = parse("exists($)").unwrap();
+        assert_eq!(r.expr.as_ref().unwrap().typ, JsonPathItemType::jpiExists);
+        let r = parse("exists($.public)").unwrap();
+        assert_eq!(r.expr.as_ref().unwrap().typ, JsonPathItemType::jpiExists);
+        // and combined with boolean connectives.
+        let r = parse("exists($.a) && exists($.b)").unwrap();
+        assert_eq!(r.expr.as_ref().unwrap().typ, JsonPathItemType::jpiAnd);
     }
 
     #[test]

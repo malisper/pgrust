@@ -95,7 +95,7 @@ use types_nodes::parsestmt::{ParseExprKind, ParseState};
 use types_nodes::primnodes::{
     ArrayExpr, BoolTestType, BooleanTest, CaseExpr, CaseTestExpr, CaseWhen, CoalesceExpr,
     CoercionForm, CollateExpr, CurrentOfExpr, Expr, MergeSupportFunc, MinMaxExpr, MinMaxOp,
-    NullTest, NullTestType, OpExpr, RowCompareExpr, RowExpr, SQLValueFunction, SQLValueFunctionOp,
+    NamedArgExpr, NullTest, NullTestType, OpExpr, RowCompareExpr, RowExpr, SQLValueFunction, SQLValueFunctionOp,
     SubscriptingRef, AND_EXPR, NOT_EXPR, OR_EXPR,
     XmlExpr as CookedXmlExpr, XmlExprOp,
 };
@@ -327,6 +327,11 @@ pub fn transformExprRecurse<'mcx>(
             };
             transformSQLValueFunction(pstate, svf)?
         }
+
+        // T_NamedArgExpr → na->arg = transformExprRecurse(...); result = na.
+        // The raw grammar emits `name => value` named function arguments as a
+        // top-level `Node::NamedArgExpr` carrying an untransformed arg.
+        ntag::T_NamedArgExpr => transformNamedArgExprRaw(pstate, expr.into_namedargexpr().unwrap())?,
 
         // Expr-carried nodes that reach the dispatcher untransformed-or-recursed.
         // DEFAULT must have been processed by the caller (handled in the
@@ -1293,6 +1298,22 @@ fn transformNullTestRaw<'mcx>(
         nulltesttype: n.nulltesttype,
         argisrow,
         location: n.location,
+    }))
+}
+
+/// C: `case T_NamedArgExpr` (parse_expr.c:244). Transform the inner argument
+/// and return the (now cooked) NamedArgExpr unchanged otherwise.
+fn transformNamedArgExprRaw<'mcx>(
+    pstate: &mut ParseState<'mcx>,
+    na: types_nodes::rawexprnodes::NamedArgExpr<'mcx>,
+) -> PgResult<Expr> {
+    // na->arg = (Expr *) transformExprRecurse(pstate, (Node *) na->arg);
+    let arg = transformExprRecurse(pstate, boxed_node(na.arg))?;
+    Ok(Expr::NamedArgExpr(NamedArgExpr {
+        arg: arg.map(Box::new),
+        name: na.name.as_ref().map(|s| String::from(s.as_str())),
+        argnumber: na.argnumber,
+        location: na.location,
     }))
 }
 
