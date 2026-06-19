@@ -1327,14 +1327,15 @@ mod tests {
     fn nulltest_reads() {
         // `_outNullTest` field order: arg, nulltesttype, argisrow, location.
         let node = parse("{NULLTEST :arg <> :nulltesttype 1 :argisrow false :location 9}");
-        match node {
-            Node::Expr(Expr::NullTest(n)) => {
+        let tag = node.node_tag();
+        match node.into_expr() {
+            Some(Expr::NullTest(n)) => {
                 assert!(n.arg.is_none());
                 assert_eq!(n.nulltesttype, NullTestType::IS_NOT_NULL);
                 assert!(!n.argisrow);
                 assert_eq!(n.location, -1); // READ_LOCATION_FIELD → -1
             }
-            other => panic!("expected NullTest, got {:?}", other.node_tag()),
+            _ => panic!("expected NullTest, got {tag:?}"),
         }
     }
 
@@ -1345,8 +1346,10 @@ mod tests {
                  :varcollid 0 :varnullingrels (b) :varlevelsup 0 :varreturningtype 0 \
                  :varnosyn 1 :varattnosyn 2 :location -1} :nulltesttype 0 :argisrow true \
                  :location -1}";
-        match parse(s) {
-            Node::Expr(Expr::NullTest(n)) => {
+        let node = parse(s);
+        let tag = node.node_tag();
+        match node.into_expr() {
+            Some(Expr::NullTest(n)) => {
                 assert!(n.argisrow);
                 assert_eq!(n.nulltesttype, NullTestType::IS_NULL);
                 match n.arg.as_deref() {
@@ -1354,7 +1357,7 @@ mod tests {
                     other => panic!("expected Var arg, got {other:?}"),
                 }
             }
-            other => panic!("expected NullTest, got {:?}", other.node_tag()),
+            _ => panic!("expected NullTest, got {tag:?}"),
         }
     }
 
@@ -1364,14 +1367,16 @@ mod tests {
         // inputcollid, args, location.
         let s = "{SCALARARRAYOPEXPR :opno 96 :opfuncid 65 :hashfuncid 0 :negfuncid 0 \
                  :useOr true :inputcollid 0 :args () :location -1}";
-        match parse(s) {
-            Node::Expr(Expr::ScalarArrayOpExpr(n)) => {
+        let node = parse(s);
+        let tag = node.node_tag();
+        match node.into_expr() {
+            Some(Expr::ScalarArrayOpExpr(n)) => {
                 assert_eq!(n.opno, 96);
                 assert_eq!(n.opfuncid, 65);
                 assert!(n.useOr);
                 assert!(n.args.is_empty());
             }
-            other => panic!("expected ScalarArrayOpExpr, got {:?}", other.node_tag()),
+            _ => panic!("expected ScalarArrayOpExpr, got {tag:?}"),
         }
     }
 
@@ -1403,22 +1408,26 @@ mod tests {
         let text2 = backend_nodes_outfuncs::nodeToString(mcx, &parsed).expect("re-out");
         assert_eq!(text.as_str(), text2.as_str(), "SubLink round-trip not stable");
 
-        match PgBox::into_inner(parsed) {
-            Node::Expr(Expr::SubLink(s)) => {
+        let parsed = PgBox::into_inner(parsed);
+        let tag = parsed.node_tag();
+        match parsed.into_expr() {
+            Some(Expr::SubLink(s)) => {
                 assert_eq!(s.subLinkId, 3);
                 assert!(s.subselect.is_some(), "subselect lost in round-trip");
             }
-            other => panic!("expected SubLink, got {:?}", other.node_tag()),
+            _ => panic!("expected SubLink, got {tag:?}"),
         }
     }
 
     #[test]
     fn booleantest_reads() {
-        match parse("{BOOLEANTEST :arg <> :booltesttype 2 :location -1}") {
-            Node::Expr(Expr::BooleanTest(n)) => {
+        let node = parse("{BOOLEANTEST :arg <> :booltesttype 2 :location -1}");
+        let tag = node.node_tag();
+        match node.into_expr() {
+            Some(Expr::BooleanTest(n)) => {
                 assert_eq!(n.booltesttype, BoolTestType::IS_FALSE);
             }
-            other => panic!("expected BooleanTest, got {:?}", other.node_tag()),
+            _ => panic!("expected BooleanTest, got {tag:?}"),
         }
     }
 
@@ -1426,13 +1435,15 @@ mod tests {
     fn relabeltype_reads() {
         let s = "{RELABELTYPE :arg <> :resulttype 25 :resulttypmod -1 :resultcollid 100 \
                  :relabelformat 1 :location -1}";
-        match parse(s) {
-            Node::Expr(Expr::RelabelType(n)) => {
+        let node = parse(s);
+        let tag = node.node_tag();
+        match node.into_expr() {
+            Some(Expr::RelabelType(n)) => {
                 assert_eq!(n.resulttype, 25);
                 assert_eq!(n.resultcollid, 100);
                 assert_eq!(n.relabelformat, CoercionForm::COERCE_EXPLICIT_CAST);
             }
-            other => panic!("expected RelabelType, got {:?}", other.node_tag()),
+            _ => panic!("expected RelabelType, got {tag:?}"),
         }
     }
 
