@@ -17,6 +17,8 @@ use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
 use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
 
+use backend_access_common_detoast_seams as detoast_seam;
+
 fn scratch_mcx() -> MemoryContext {
     MemoryContext::new("arrayfuncs fmgr scratch")
 }
@@ -47,6 +49,23 @@ fn arg_varlena<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("array fn: by-ref varlena arg missing from by-ref lane")
+}
+
+/// `PG_GETARG_*ARRAYTYPE_P(i)` (array.h): the array argument **detoasted**
+/// (`DatumGetArrayTypeP` == `pg_detoast_datum`). A stored `anyarray` column
+/// (e.g. pg_statistic `stavalues`) can be inline-compressed (`VARATT_IS_4B_C`)
+/// or stored external when it exceeds the toast threshold; the raw by-ref bytes
+/// then carry a compressed/external header, not a plain `ArrayType`. Reading
+/// `ARR_NDIM`/`ARR_DIMS` off that header yields garbage (and `array_length`
+/// reads back NULL). Every C array built-in resolves its array arg through
+/// `PG_GETARG_*ARRAYTYPE_P`, which detoasts first; mirror that here. Detoast is
+/// a verbatim copy for an already-plain value, so this is faithful for all
+/// callers (`pg_detoast_datum` is a no-op on a non-extended datum).
+fn arg_array_detoast(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Vec<u8> {
+    let raw = arg_varlena(fcinfo, i);
+    let m = scratch_mcx();
+    let detoasted = ok(detoast_seam::detoast_attr::call(m.mcx(), raw));
+    detoasted.as_slice().to_vec()
 }
 
 fn arg_oid(fcinfo: &FunctionCallInfoBaseData, i: usize) -> types_core::Oid {
@@ -80,7 +99,7 @@ fn fc_array_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 
 /// `array_out(anyarray) -> cstring` (oid 751).
 fn fc_array_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let array = arg_varlena(fcinfo, 0).to_vec();
+    let array = arg_array_detoast(fcinfo, 0);
     let m = scratch_mcx();
     let bytes = ok(crate::io::array_out(m.mcx(), &array));
     // PG_RETURN_CSTRING produces a NUL-terminated cstring; strip the terminator
@@ -93,6 +112,8 @@ fn fc_array_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 /// `array_recv(internal, oid, int4) -> anyarray` (oid 2400). arg0 is the binary
 /// message buffer (StringInfo), arg1 the element type, arg2 the typmod.
 fn fc_array_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    // arg0 is the binary message StringInfo (C: PG_GETARG_POINTER), not a
+    // toastable varlena — read it verbatim, do NOT detoast.
     let buf = arg_varlena(fcinfo, 0).to_vec();
     let spec_element_type = arg_oid(fcinfo, 1);
     let typmod = arg_int32(fcinfo, 2);
@@ -103,7 +124,7 @@ fn fc_array_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 
 /// `array_send(anyarray) -> bytea` (oid 2401).
 fn fc_array_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let array = arg_varlena(fcinfo, 0).to_vec();
+    let array = arg_array_detoast(fcinfo, 0);
     let m = scratch_mcx();
     let bytes = ok(crate::io::array_send(m.mcx(), &array));
     ret_varlena(fcinfo, bytes.as_slice().to_vec())
@@ -157,6 +178,17 @@ fn opt_arg_varlena<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> Option
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .or(Some(&[]))
+}
+
+/// `PG_GETARG_ANY_ARRAY_P(i)` when the arg may be NULL, **detoasted**
+/// (`DatumGetArrayTypeP`). Mirrors [`arg_array_detoast`] for the nullable lane:
+/// a stored array column can be inline-compressed/external, so the raw by-ref
+/// bytes must be detoasted before any `ARR_*` header read. `None` for SQL-NULL.
+fn opt_arg_array_detoast(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Option<Vec<u8>> {
+    let raw = opt_arg_varlena(fcinfo, i)?;
+    let m = scratch_mcx();
+    let detoasted = ok(detoast_seam::detoast_attr::call(m.mcx(), raw));
+    Some(detoasted.as_slice().to_vec())
 }
 
 /// `PG_ARGISNULL(i)`.
@@ -239,68 +271,68 @@ fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, payload: &[u8]) -> Datum {
 // --- comparison / containment (strict, anyarray anyarray -> bool) -----------
 
 fn fc_array_eq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let a = arg_varlena(fcinfo, 0).to_vec();
-    let b = arg_varlena(fcinfo, 1).to_vec();
+    let a = arg_array_detoast(fcinfo, 0);
+    let b = arg_array_detoast(fcinfo, 1);
     ret_bool(ok(crate::ops::array_eq(&a, &b, collation(fcinfo))))
 }
 
 fn fc_array_ne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let a = arg_varlena(fcinfo, 0).to_vec();
-    let b = arg_varlena(fcinfo, 1).to_vec();
+    let a = arg_array_detoast(fcinfo, 0);
+    let b = arg_array_detoast(fcinfo, 1);
     ret_bool(ok(crate::ops::array_ne(&a, &b, collation(fcinfo))))
 }
 
 fn fc_array_lt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let a = arg_varlena(fcinfo, 0).to_vec();
-    let b = arg_varlena(fcinfo, 1).to_vec();
+    let a = arg_array_detoast(fcinfo, 0);
+    let b = arg_array_detoast(fcinfo, 1);
     ret_bool(ok(crate::ops::array_lt(&a, &b, collation(fcinfo))))
 }
 
 fn fc_array_gt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let a = arg_varlena(fcinfo, 0).to_vec();
-    let b = arg_varlena(fcinfo, 1).to_vec();
+    let a = arg_array_detoast(fcinfo, 0);
+    let b = arg_array_detoast(fcinfo, 1);
     ret_bool(ok(crate::ops::array_gt(&a, &b, collation(fcinfo))))
 }
 
 fn fc_array_le(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let a = arg_varlena(fcinfo, 0).to_vec();
-    let b = arg_varlena(fcinfo, 1).to_vec();
+    let a = arg_array_detoast(fcinfo, 0);
+    let b = arg_array_detoast(fcinfo, 1);
     ret_bool(ok(crate::ops::array_le(&a, &b, collation(fcinfo))))
 }
 
 fn fc_array_ge(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let a = arg_varlena(fcinfo, 0).to_vec();
-    let b = arg_varlena(fcinfo, 1).to_vec();
+    let a = arg_array_detoast(fcinfo, 0);
+    let b = arg_array_detoast(fcinfo, 1);
     ret_bool(ok(crate::ops::array_ge(&a, &b, collation(fcinfo))))
 }
 
 fn fc_arraycontains(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let a = arg_varlena(fcinfo, 0).to_vec();
-    let b = arg_varlena(fcinfo, 1).to_vec();
+    let a = arg_array_detoast(fcinfo, 0);
+    let b = arg_array_detoast(fcinfo, 1);
     ret_bool(ok(crate::ops::arraycontains(&a, &b, collation(fcinfo))))
 }
 
 fn fc_arraycontained(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let a = arg_varlena(fcinfo, 0).to_vec();
-    let b = arg_varlena(fcinfo, 1).to_vec();
+    let a = arg_array_detoast(fcinfo, 0);
+    let b = arg_array_detoast(fcinfo, 1);
     ret_bool(ok(crate::ops::arraycontained(&a, &b, collation(fcinfo))))
 }
 
 fn fc_arrayoverlap(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let a = arg_varlena(fcinfo, 0).to_vec();
-    let b = arg_varlena(fcinfo, 1).to_vec();
+    let a = arg_array_detoast(fcinfo, 0);
+    let b = arg_array_detoast(fcinfo, 1);
     ret_bool(ok(crate::ops::arrayoverlap(&a, &b, collation(fcinfo))))
 }
 
 // --- dims / bounds (strict, anyarray [int4] -> int4 / text) -----------------
 
 fn fc_array_ndims(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let a = arg_varlena(fcinfo, 0).to_vec();
+    let a = arg_array_detoast(fcinfo, 0);
     ret_opt_i32(fcinfo, crate::element_slice::array_ndims(&a))
 }
 
 fn fc_array_dims(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let a = arg_varlena(fcinfo, 0).to_vec();
+    let a = arg_array_detoast(fcinfo, 0);
     let m = scratch_mcx();
     let payload: Option<Vec<u8>> =
         ok(crate::element_slice::array_dims(m.mcx(), &a)).map(|v| v.as_slice().to_vec());
@@ -311,41 +343,41 @@ fn fc_array_dims(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 
 fn fc_array_lower(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let a = arg_varlena(fcinfo, 0).to_vec();
+    let a = arg_array_detoast(fcinfo, 0);
     let reqdim = arg_int32(fcinfo, 1);
     ret_opt_i32(fcinfo, crate::element_slice::array_lower(&a, reqdim))
 }
 
 fn fc_array_upper(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let a = arg_varlena(fcinfo, 0).to_vec();
+    let a = arg_array_detoast(fcinfo, 0);
     let reqdim = arg_int32(fcinfo, 1);
     ret_opt_i32(fcinfo, crate::element_slice::array_upper(&a, reqdim))
 }
 
 fn fc_array_length(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let a = arg_varlena(fcinfo, 0).to_vec();
+    let a = arg_array_detoast(fcinfo, 0);
     let reqdim = arg_int32(fcinfo, 1);
     ret_opt_i32(fcinfo, crate::element_slice::array_length(&a, reqdim))
 }
 
 fn fc_array_cardinality(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let a = arg_varlena(fcinfo, 0).to_vec();
+    let a = arg_array_detoast(fcinfo, 0);
     ret_i32(crate::element_slice::array_cardinality(&a))
 }
 
 // --- array_larger / array_smaller (strict, anyarray anyarray -> anyarray) ---
 
 fn fc_array_larger(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let a = arg_varlena(fcinfo, 0).to_vec();
-    let b = arg_varlena(fcinfo, 1).to_vec();
+    let a = arg_array_detoast(fcinfo, 0);
+    let b = arg_array_detoast(fcinfo, 1);
     let m = scratch_mcx();
     let r = ok(crate::sql::array_larger(m.mcx(), &a, &b, collation(fcinfo)));
     ret_varlena(fcinfo, r.as_slice().to_vec())
 }
 
 fn fc_array_smaller(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let a = arg_varlena(fcinfo, 0).to_vec();
-    let b = arg_varlena(fcinfo, 1).to_vec();
+    let a = arg_array_detoast(fcinfo, 0);
+    let b = arg_array_detoast(fcinfo, 1);
     let m = scratch_mcx();
     let r = ok(crate::sql::array_smaller(m.mcx(), &a, &b, collation(fcinfo)));
     ret_varlena(fcinfo, r.as_slice().to_vec())
@@ -354,8 +386,8 @@ fn fc_array_smaller(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // --- array_cat / append / prepend (non-strict, anyarray -> anyarray) --------
 
 fn fc_array_cat(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let v1 = opt_arg_varlena(fcinfo, 0).map(|s| s.to_vec());
-    let v2 = opt_arg_varlena(fcinfo, 1).map(|s| s.to_vec());
+    let v1 = opt_arg_array_detoast(fcinfo, 0);
+    let v2 = opt_arg_array_detoast(fcinfo, 1);
     let m = scratch_mcx();
     let r = ok(crate::array_userfuncs::array_cat(
         m.mcx(),
@@ -424,7 +456,7 @@ fn resolve_push_element(
 
 /// `array_append(anyarray, anyelement) -> anyarray` (oid 378). Non-strict.
 fn fc_array_append(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let array_vec = opt_arg_varlena(fcinfo, 0).map(|s| s.to_vec());
+    let array_vec = opt_arg_array_detoast(fcinfo, 0);
     let m = scratch_mcx();
     let (element_type, elmlen, elmbyval, elmalign, data_value, isnull, _held) =
         resolve_push_element(fcinfo, 0, 1, array_vec.as_deref());
@@ -469,7 +501,7 @@ fn fc_array_append(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 
 /// `array_prepend(anyelement, anyarray) -> anyarray` (oid 379). Non-strict.
 fn fc_array_prepend(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let array_vec = opt_arg_varlena(fcinfo, 1).map(|s| s.to_vec());
+    let array_vec = opt_arg_array_detoast(fcinfo, 1);
     let m = scratch_mcx();
     let (element_type, elmlen, elmbyval, elmalign, data_value, isnull, _held) =
         resolve_push_element(fcinfo, 1, 0, array_vec.as_deref());
@@ -527,7 +559,7 @@ fn empty_or_one_dim_err() -> types_error::PgError {
 // --- array_position / array_positions (non-strict) --------------------------
 
 fn fc_array_position(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let array = opt_arg_varlena(fcinfo, 0).map(|s| s.to_vec());
+    let array = opt_arg_array_detoast(fcinfo, 0);
     let m = scratch_mcx();
     let searched = match (&array, arg_isnull(fcinfo, 1)) {
         (Some(a), false) => Some(arg_element(fcinfo, 1, crate::foundation::arr_elemtype(a))),
@@ -543,7 +575,7 @@ fn fc_array_position(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 
 fn fc_array_position_start(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let array = opt_arg_varlena(fcinfo, 0).map(|s| s.to_vec());
+    let array = opt_arg_array_detoast(fcinfo, 0);
     let m = scratch_mcx();
     let searched = match (&array, arg_isnull(fcinfo, 1)) {
         (Some(a), false) => Some(arg_element(fcinfo, 1, crate::foundation::arr_elemtype(a))),
@@ -565,7 +597,7 @@ fn fc_array_position_start(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 
 fn fc_array_positions(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let array = opt_arg_varlena(fcinfo, 0).map(|s| s.to_vec());
+    let array = opt_arg_array_detoast(fcinfo, 0);
     let m = scratch_mcx();
     let searched = match (&array, arg_isnull(fcinfo, 1)) {
         (Some(a), false) => Some(arg_element(fcinfo, 1, crate::foundation::arr_elemtype(a))),
@@ -639,7 +671,7 @@ fn fc_array_replace(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // --- trim_array / width_bucket_array (strict, anyarray ... -> ...) ----------
 
 fn fc_trim_array(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let array = arg_varlena(fcinfo, 0).to_vec();
+    let array = arg_array_detoast(fcinfo, 0);
     let n = arg_int32(fcinfo, 1);
     let m = scratch_mcx();
     let img = ok(crate::sql::trim_array(m.mcx(), &array, n)).as_slice().to_vec();
@@ -648,7 +680,7 @@ fn fc_trim_array(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 
 fn fc_width_bucket_array(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let thresholds = arg_varlena(fcinfo, 1).to_vec();
+    let thresholds = arg_array_detoast(fcinfo, 1);
     let element_type = crate::foundation::arr_elemtype(&thresholds);
     let operand = arg_element(fcinfo, 0, element_type);
     ret_i32(ok(crate::sql::width_bucket_array(
@@ -661,7 +693,7 @@ fn fc_width_bucket_array(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // --- array_shuffle / array_sample / array_reverse (strict) ------------------
 
 fn fc_array_shuffle(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let array = arg_varlena(fcinfo, 0).to_vec();
+    let array = arg_array_detoast(fcinfo, 0);
     let m = scratch_mcx();
     let img = ok(crate::array_userfuncs::array_shuffle(m.mcx(), &array)).as_slice().to_vec();
     fcinfo.set_ref_result(RefPayload::Varlena(img));
@@ -669,7 +701,7 @@ fn fc_array_shuffle(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 
 fn fc_array_sample(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let array = arg_varlena(fcinfo, 0).to_vec();
+    let array = arg_array_detoast(fcinfo, 0);
     let n = arg_int32(fcinfo, 1);
     let m = scratch_mcx();
     let img = ok(crate::array_userfuncs::array_sample(m.mcx(), &array, n)).as_slice().to_vec();
@@ -678,7 +710,7 @@ fn fc_array_sample(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 
 fn fc_array_reverse(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let array = arg_varlena(fcinfo, 0).to_vec();
+    let array = arg_array_detoast(fcinfo, 0);
     let m = scratch_mcx();
     let img = ok(crate::array_userfuncs::array_reverse(m.mcx(), &array)).as_slice().to_vec();
     fcinfo.set_ref_result(RefPayload::Varlena(img));
@@ -688,7 +720,7 @@ fn fc_array_reverse(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // --- array_sort family (strict, anyarray [bool [bool]] -> anyarray) ---------
 
 fn fc_array_sort(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let array = arg_varlena(fcinfo, 0).to_vec();
+    let array = arg_array_detoast(fcinfo, 0);
     let m = scratch_mcx();
     let arr = ok(mcx::slice_in(m.mcx(), &array));
     let img = ok(crate::array_userfuncs::array_sort(m.mcx(), &arr, collation(fcinfo)))
@@ -699,7 +731,7 @@ fn fc_array_sort(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 
 fn fc_array_sort_order(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let array = arg_varlena(fcinfo, 0).to_vec();
+    let array = arg_array_detoast(fcinfo, 0);
     let descending = fcinfo.arg(1).map(|d| d.value.as_bool()).unwrap_or(false);
     let m = scratch_mcx();
     let arr = ok(mcx::slice_in(m.mcx(), &array));
@@ -716,7 +748,7 @@ fn fc_array_sort_order(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 
 fn fc_array_sort_order_nulls_first(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let array = arg_varlena(fcinfo, 0).to_vec();
+    let array = arg_array_detoast(fcinfo, 0);
     let descending = fcinfo.arg(1).map(|d| d.value.as_bool()).unwrap_or(false);
     let nulls_first = fcinfo.arg(2).map(|d| d.value.as_bool()).unwrap_or(false);
     let m = scratch_mcx();

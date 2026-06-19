@@ -1413,13 +1413,13 @@ fn log_heap_update<'mcx>(
 // ===========================================================================
 
 /// The tuple's user-data area (`(char *) t_data + t_hoff`) for the cache-key
-/// deform in `CacheInvalidateHeapTuple`. `read_on_page_tuple` captures `tp.data`
-/// as `item[SizeofHeapTupleHeader..]`, which still spans any null bitmap before
-/// `t_hoff`; skip those bytes to reach the user-data area the deform expects.
+/// deform in `CacheInvalidateHeapTuple` / `HeapDetermineColumnsInfo`.
+/// `read_on_page_tuple` now captures `tp.data` as `item[t_hoff..]` (the
+/// documented [`FormedTuple::data`] convention — the user-data area, with any
+/// null bitmap already in `t_bits`), so this is simply `tp.data` (no bitmap-skip
+/// compensation needed).
 fn tuple_user_data<'a, 'mcx>(tp: &'a FormedTuple<'mcx>) -> &'a [u8] {
-    let t_hoff = data_ref(tp).t_hoff as usize;
-    let skip = t_hoff.saturating_sub(SizeofHeapTupleHeader);
-    &tp.data[skip.min(tp.data.len())..]
+    &tp.data
 }
 
 /// Materialize the on-page tuple at `(buffer, tid)` into `mcx` (header + user
@@ -1438,8 +1438,19 @@ fn read_on_page_tuple<'mcx>(
         debug_assert!(item_id.has_storage());
         let item = PageGetItem(&page, &item_id)?;
         let hdr = HeapTupleHeaderData::read_on_page(mcx, item)?;
+        // `FormedTuple::data` is the user-data area (`item[t_hoff..t_len]`), i.e.
+        // the bytes *after* the fixed header AND the null bitmap. When the tuple
+        // has NULLs, `t_hoff > SizeofHeapTupleHeader` (it includes the
+        // `BITMAPLEN(natts)` null bitmap, which `read_on_page` already captured
+        // into `t_bits`). Slicing from `SizeofHeapTupleHeader` would prepend the
+        // null-bitmap bytes to the data area, shifting every attribute offset by
+        // the bitmap length and corrupting `heap_deform_tuple` (e.g. the toast
+        // path's old-tuple deform reads a varlena attribute as garbage / empty).
+        // Slice from `t_hoff`, matching `FormedTuple::read_on_page_full`.
+        let t_hoff = hdr.t_hoff as usize;
+        let data_start = core::cmp::min(t_hoff, item.len());
         let mut data = mcx::PgVec::new_in(mcx);
-        for &b in &item[SizeofHeapTupleHeader..] {
+        for &b in &item[data_start..] {
             data.push(b);
         }
         out = Some((hdr, data, item.len() as u32));
