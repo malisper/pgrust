@@ -42,14 +42,31 @@
 //! # Storage model
 //!
 //! GUC state is process-local (not shared memory), exactly as `guc.c`'s file
-//! statics are. The backend reaches `initialize_guc_options` single-threaded at
-//! startup. The store is held in a process-global [`Mutex`] (the safe analog of
-//! the C file-static `guc_hashtab`): one store per process, written once at boot
-//! and thereafter mutated only by the `SET` path, but read/written safely even
-//! when the broad test harness drives it from several threads.
+//! statics are. pgrust targets the C `fork()` model: one single-threaded backend
+//! process per session, so the store is held in a `thread_local!` [`RefCell`] —
+//! the faithful analog of the C file-static `guc_hashtab`. In the
+//! process-per-backend, single-threaded world a `thread_local` is precisely
+//! per-process state (and survives `fork()`: the child inherits the parent
+//! thread's value via copy-on-write), and a [`RefCell`] gives the lock-free
+//! single-threaded interior mutability C's plain process memory has — no `Mutex`,
+//! no `Sync` requirement, no lock poison cascade, and re-entrant *reads* of the
+//! store mid-`SET` (a hook reading another GUC) are free, exactly as in C.
+//!
+//! Re-entrant *writes* (taking `borrow_mut` while a `borrow_mut` is live) would
+//! `panic!` rather than deadlock — fail-fast. The store never does this: every
+//! `assign_hook`, which is the one place that can recursively re-enter the store,
+//! is captured as a [`crate::registry::DeferredAssignHook`] and fired by the
+//! caller *after* the borrow is released (see [`set_config_option_global`],
+//! [`crate::at_eoxact_guc`], [`crate::restore_guc_state`]). `check_hook`s run
+//! inline under the write borrow but operate only on the candidate value and
+//! their own `extra` payload — they do not re-enter the GUC store (under the
+//! prior non-reentrant `Mutex` doing so would already self-deadlock, so the
+//! invariant predates this change); `show_hook`s likewise render only the
+//! variable handed to them. With `RefCell`, any latent re-entrant write surfaces
+//! as a loud `already borrowed` panic instead of a silent hang.
 
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Mutex;
 
 use backend_utils_misc_guc_tables::{all_settings, GucDefaultValue, GucSetting};
 use types_core::{Oid, TimestampTz};
@@ -59,11 +76,14 @@ use types_guc::{config_type, GucContext, GucSource};
 use crate::model::{config_bool, config_enum, config_generic, config_int, config_real, config_string};
 use crate::registry::{GucRegistry, GucVariable};
 
-/// The process-global GUC store: the idiomatic `guc_hashtab`. A `Mutex<Option>`
-/// — `None` until boot's `initialize_guc_options` builds it — gives the safe
-/// process-global single store the C file static is, with interior mutability
-/// for the `SET` write path.
-static GUC_STORE: Mutex<Option<GucRegistry>> = Mutex::new(None);
+thread_local! {
+    // The per-backend GUC store: the idiomatic `guc_hashtab`. A
+    // `RefCell<Option>` — `None` until boot's `initialize_guc_options` builds
+    // it — gives the single-threaded interior mutability C's plain process
+    // memory has, with no lock and no poison. In the `fork()` process-per-
+    // backend model this `thread_local` *is* the process-global store.
+    static GUC_STORE: RefCell<Option<GucRegistry>> = const { RefCell::new(None) };
+}
 
 /// `TimestampTz PgReloadTime` (guc.c file static): the time of the most recent
 /// successful config-file load, surfaced by `pg_conf_load_time()`.
@@ -238,27 +258,36 @@ pub fn try_initialize_guc_options() -> PgResult<()> {
             reg.define(var)?;
         }
     }
-    *GUC_STORE.lock().unwrap() = Some(reg);
+    GUC_STORE.with(|c| *c.borrow_mut() = Some(reg));
     Ok(())
 }
 
 /// True once [`initialize_guc_options`] has built the store.
 pub fn is_initialized() -> bool {
-    GUC_STORE.lock().unwrap().is_some()
+    GUC_STORE.with(|c| c.borrow().is_some())
 }
 
 /// Borrow the global GUC store, if initialized.
 pub fn with_store<R>(f: impl FnOnce(&GucRegistry) -> R) -> Option<R> {
-    let guard = GUC_STORE.lock().unwrap();
-    let store = guard.as_ref()?;
-    Some(f(store))
+    GUC_STORE.with(|c| {
+        let guard = c.borrow();
+        let store = guard.as_ref()?;
+        Some(f(store))
+    })
 }
 
 /// Mutably borrow the global GUC store (the SET write path), if initialized.
+///
+/// The borrow is held only for the duration of `f`; `f` must not re-enter the
+/// store with a write borrow (that would `panic!` on the live `RefCell` borrow,
+/// fail-fast). All `assign_hook`s — the one re-entrant write path — are deferred
+/// past the borrow by the callers (see the module docs).
 pub fn with_store_mut<R>(f: impl FnOnce(&mut GucRegistry) -> R) -> Option<R> {
-    let mut guard = GUC_STORE.lock().unwrap();
-    let store = guard.as_mut()?;
-    Some(f(store))
+    GUC_STORE.with(|c| {
+        let mut guard = c.borrow_mut();
+        let store = guard.as_mut()?;
+        Some(f(store))
+    })
 }
 
 /// `ResetAllOptions()` over the process-global GUC store. Panics (loud) if the
