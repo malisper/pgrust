@@ -41,6 +41,7 @@ use types_tableam::amapi::IndexUniqueCheck;
 use types_tableam::tableam::TU_UpdateIndexes;
 use types_tuple::backend_access_common_heaptuple::FormedTuple;
 use types_tuple::heaptuple::ItemPointerData;
+use types_tuple::heaptuple::HEAP_ONLY_TUPLE;
 
 use backend_executor_execTuples::exec_init_slots::{
     ExecDropSingleTupleTableSlot, MakeSingleTupleTableSlot,
@@ -170,12 +171,36 @@ fn CatalogIndexInsert<'mcx>(
     // bool onlySummarized = (updateIndexes == TU_Summarizing);
     let only_summarized = update_indexes == TU_UpdateIndexes::TU_Summarizing;
 
-    // HOT update does not require index inserts. (In a non-assert build the C
-    // returns here for a heap-only tuple unless onlySummarized.) Catalog tuples
-    // built by CatalogTuple* are never heap-only, so the predicate is false and
-    // the C falls through; we keep the structure explicit. The on-page header
-    // bit cannot be set on a just-formed tuple, so reading it is unnecessary
-    // here and the predicate is statically false for these callers.
+    // HOT update does not require index inserts (indexing.c:93-95):
+    //
+    //   #ifndef USE_ASSERT_CHECKING
+    //       if (HeapTupleIsHeapOnly(heapTuple) && !onlySummarized)
+    //           return;
+    //   #endif
+    //
+    // This guard is load-bearing, not vestigial: a catalog tuple CAN be
+    // heap-only here. heapam_index_fetch_tuple stores the resolved HOT-chain
+    // member's TID *and* header into the slot/syscache (the live member of a
+    // HOT chain carries HEAP_ONLY_TUPLE), and heap_modify_tuple copies that
+    // header forward, so the FormedTuple passed to a CatalogTupleUpdate of a
+    // HOT-updated catalog row is heap-only. A plain (non-summarizing) HOT
+    // update emits no index entries, so indexing a heap-only TID here would
+    // record an index entry pointing directly at a heap-only tuple — exactly
+    // the "heap tid from index tuple ... points to heap-only tuple" corruption
+    // that index_delete_check_htid later raises. Match C and return early.
+    let is_heap_only = (heap_tuple
+        .tuple
+        .t_data
+        .as_ref()
+        .map(|h| h.t_infomask2)
+        .unwrap_or(0)
+        & HEAP_ONLY_TUPLE)
+        != 0;
+    if is_heap_only && !only_summarized {
+        return Ok(());
+    }
+    // When only updating summarized indexes, the tuple has to be HOT.
+    debug_assert!(!only_summarized || is_heap_only);
 
     // numIndexes = indstate->ri_NumIndices; if (numIndexes == 0) return;
     let num_indexes = indstate.index_descs.len();
