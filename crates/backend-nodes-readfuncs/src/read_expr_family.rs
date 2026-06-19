@@ -1451,13 +1451,15 @@ mod tests {
     /// family chain) and assert the exact token stream matches `_outNullTest`.
     #[test]
     fn raw_nulltest_out_text() {
+        let ctx = MemoryContext::new("raw-nulltest");
+        let mcx = ctx.mcx();
         let n = types_nodes::rawexprnodes::NullTest {
             arg: None,
             nulltesttype: NullTestType::IS_NOT_NULL,
             argisrow: false,
             location: 5,
         };
-        let node = Node::NullTest(n);
+        let node = Node::mk_null_test(mcx, n);
         let mut buf = String::new();
         out_node(&mut buf, &node);
         // location renders -1 (non-debug WRITE_LOCATION_FIELD via out_node).
@@ -1477,7 +1479,7 @@ mod tests {
             cursor_name: Some(PgString::from_str_in("c1", mcx).unwrap()),
             cursor_param: 0,
         };
-        let node = Node::CurrentOfExpr(n);
+        let node = Node::mk_current_of_expr(mcx, n);
         let mut buf = String::new();
         out_node(&mut buf, &node);
         assert_eq!(

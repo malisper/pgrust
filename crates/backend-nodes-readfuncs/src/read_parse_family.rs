@@ -1841,60 +1841,60 @@ pub(crate) fn read_table_func<'mcx>(
 /// Dispatch the read_parse_family LABELs this module owns.
 pub(crate) fn try_read<'mcx>(mcx: Mcx<'mcx>, label: &[u8]) -> Option<PgResult<Node<'mcx>>> {
     let r: PgResult<Node<'mcx>> = match label {
-        b"QUERY" => read_query(mcx).map(Node::Query),
-        b"RANGETBLENTRY" => read_range_tbl_entry(mcx).map(Node::RangeTblEntry),
-        b"RTEPERMISSIONINFO" => read_rte_perm_info(mcx).map(Node::RTEPermissionInfo),
-        b"RANGETBLFUNCTION" => read_range_tbl_function(mcx).map(Node::RangeTblFunction),
-        b"TABLESAMPLECLAUSE" => read_table_sample_clause(mcx).map(Node::TableSampleClause),
-        b"SORTGROUPCLAUSE" => read_sort_group_clause().map(Node::SortGroupClause),
-        b"GROUPINGSET" => read_grouping_set(mcx).map(Node::GroupingSet),
-        b"WINDOWCLAUSE" => read_window_clause(mcx).map(Node::WindowClause),
-        b"ROWMARKCLAUSE" => read_row_mark_clause().map(Node::RowMarkClause),
-        b"WITHCHECKOPTION" => read_with_check_option(mcx).map(Node::WithCheckOption),
-        b"CTECYCLECLAUSE" => read_cte_cycle_clause(mcx).map(Node::CTECycleClause),
-        b"SETOPERATIONSTMT" => read_set_operation_stmt(mcx).map(Node::SetOperationStmt),
-        b"ALIAS" => read_alias(mcx).map(Node::Alias),
-        b"RANGEVAR" => read_range_var(mcx).map(Node::RangeVar),
-        b"TYPENAME" => read_type_name(mcx).map(Node::TypeName),
-        b"COLUMNDEF" => read_column_def(mcx).map(Node::ColumnDef),
-        b"RANGETBLREF" => read_range_tbl_ref().map(Node::RangeTblRef),
-        b"JOINEXPR" => read_join_expr(mcx).map(Node::JoinExpr),
-        b"FROMEXPR" => read_from_expr(mcx).map(Node::FromExpr),
-        b"ONCONFLICTEXPR" => read_on_conflict_expr(mcx).map(Node::OnConflictExpr),
-        b"MERGEACTION" => read_merge_action(mcx).map(Node::MergeAction),
-        b"LOCKINGCLAUSE" => read_locking_clause(mcx).map(Node::LockingClause),
-        b"COLUMNREF" => read_column_ref(mcx).map(Node::ColumnRef),
-        b"PARAMREF" => read_param_ref().map(Node::ParamRef),
-        b"A_EXPR" => read_a_expr(mcx).map(Node::A_Expr),
-        b"FUNCCALL" => read_func_call(mcx).map(Node::FuncCall),
-        b"A_STAR" => read_a_star().map(Node::A_Star),
-        b"A_INDICES" => read_a_indices(mcx).map(Node::A_Indices),
-        b"A_INDIRECTION" => read_a_indirection(mcx).map(Node::A_Indirection),
-        b"A_ARRAYEXPR" => read_a_array_expr(mcx).map(Node::A_ArrayExpr),
-        b"RESTARGET" => read_res_target(mcx).map(Node::ResTarget),
-        b"MULTIASSIGNREF" => read_multi_assign_ref(mcx).map(Node::MultiAssignRef),
-        b"TYPECAST" => read_type_cast(mcx).map(Node::TypeCast),
-        b"COLLATECLAUSE" => read_collate_clause(mcx).map(Node::CollateClause),
-        b"SORTBY" => read_sort_by(mcx).map(Node::SortBy),
-        b"WINDOWDEF" => read_window_def(mcx).map(Node::WindowDef),
-        b"RANGESUBSELECT" => read_range_subselect(mcx).map(Node::RangeSubselect),
-        b"RANGEFUNCTION" => read_range_function(mcx).map(Node::RangeFunction),
-        b"RANGETABLESAMPLE" => read_range_table_sample(mcx).map(Node::RangeTableSample),
-        b"WITHCLAUSE" => read_with_clause(mcx).map(Node::WithClause),
-        b"INFERCLAUSE" => read_infer_clause(mcx).map(Node::InferClause),
-        b"ONCONFLICTCLAUSE" => read_on_conflict_clause(mcx).map(Node::OnConflictClause),
-        b"MERGEWHENCLAUSE" => read_merge_when_clause(mcx).map(Node::MergeWhenClause),
-        b"RETURNINGCLAUSE" => read_returning_clause(mcx).map(Node::ReturningClause),
-        b"INSERTSTMT" => read_insert_stmt(mcx).map(Node::InsertStmt),
-        b"DELETESTMT" => read_delete_stmt(mcx).map(Node::DeleteStmt),
-        b"UPDATESTMT" => read_update_stmt(mcx).map(Node::UpdateStmt),
-        b"MERGESTMT" => read_merge_stmt(mcx).map(Node::MergeStmt),
-        b"SELECTSTMT" => read_select_stmt(mcx).map(Node::SelectStmt),
-        b"A_CONST" => read_a_const(mcx).map(Node::A_Const),
+        b"QUERY" => read_query(mcx).map(|p| Node::mk_query(mcx, p)),
+        b"RANGETBLENTRY" => read_range_tbl_entry(mcx).map(|p| Node::mk_range_tbl_entry(mcx, p)),
+        b"RTEPERMISSIONINFO" => read_rte_perm_info(mcx).map(|p| Node::mk_rte_permission_info(mcx, p)),
+        b"RANGETBLFUNCTION" => read_range_tbl_function(mcx).map(|p| Node::mk_range_tbl_function(mcx, p)),
+        b"TABLESAMPLECLAUSE" => read_table_sample_clause(mcx).map(|p| Node::mk_table_sample_clause(mcx, p)),
+        b"SORTGROUPCLAUSE" => read_sort_group_clause().map(|p| Node::mk_sort_group_clause(mcx, p)),
+        b"GROUPINGSET" => read_grouping_set(mcx).map(|p| Node::mk_grouping_set(mcx, p)),
+        b"WINDOWCLAUSE" => read_window_clause(mcx).map(|p| Node::mk_window_clause(mcx, p)),
+        b"ROWMARKCLAUSE" => read_row_mark_clause().map(|p| Node::mk_row_mark_clause(mcx, p)),
+        b"WITHCHECKOPTION" => read_with_check_option(mcx).map(|p| Node::mk_with_check_option(mcx, p)),
+        b"CTECYCLECLAUSE" => read_cte_cycle_clause(mcx).map(|p| Node::mk_cte_cycle_clause(mcx, p)),
+        b"SETOPERATIONSTMT" => read_set_operation_stmt(mcx).map(|p| Node::mk_set_operation_stmt(mcx, p)),
+        b"ALIAS" => read_alias(mcx).map(|p| Node::mk_alias(mcx, p)),
+        b"RANGEVAR" => read_range_var(mcx).map(|p| Node::mk_range_var(mcx, p)),
+        b"TYPENAME" => read_type_name(mcx).map(|p| Node::mk_type_name(mcx, p)),
+        b"COLUMNDEF" => read_column_def(mcx).map(|p| Node::mk_column_def(mcx, p)),
+        b"RANGETBLREF" => read_range_tbl_ref().map(|p| Node::mk_range_tbl_ref(mcx, p)),
+        b"JOINEXPR" => read_join_expr(mcx).map(|p| Node::mk_join_expr(mcx, p)),
+        b"FROMEXPR" => read_from_expr(mcx).map(|p| Node::mk_from_expr(mcx, p)),
+        b"ONCONFLICTEXPR" => read_on_conflict_expr(mcx).map(|p| Node::mk_on_conflict_expr(mcx, p)),
+        b"MERGEACTION" => read_merge_action(mcx).map(|p| Node::mk_merge_action(mcx, p)),
+        b"LOCKINGCLAUSE" => read_locking_clause(mcx).map(|p| Node::mk_locking_clause(mcx, p)),
+        b"COLUMNREF" => read_column_ref(mcx).map(|p| Node::mk_column_ref(mcx, p)),
+        b"PARAMREF" => read_param_ref().map(|p| Node::mk_param_ref(mcx, p)),
+        b"A_EXPR" => read_a_expr(mcx).map(|p| Node::mk_a_expr(mcx, p)),
+        b"FUNCCALL" => read_func_call(mcx).map(|p| Node::mk_func_call(mcx, p)),
+        b"A_STAR" => read_a_star().map(|p| Node::mk_a_star(mcx, p)),
+        b"A_INDICES" => read_a_indices(mcx).map(|p| Node::mk_a_indices(mcx, p)),
+        b"A_INDIRECTION" => read_a_indirection(mcx).map(|p| Node::mk_a_indirection(mcx, p)),
+        b"A_ARRAYEXPR" => read_a_array_expr(mcx).map(|p| Node::mk_a_array_expr(mcx, p)),
+        b"RESTARGET" => read_res_target(mcx).map(|p| Node::mk_res_target(mcx, p)),
+        b"MULTIASSIGNREF" => read_multi_assign_ref(mcx).map(|p| Node::mk_multi_assign_ref(mcx, p)),
+        b"TYPECAST" => read_type_cast(mcx).map(|p| Node::mk_type_cast(mcx, p)),
+        b"COLLATECLAUSE" => read_collate_clause(mcx).map(|p| Node::mk_collate_clause(mcx, p)),
+        b"SORTBY" => read_sort_by(mcx).map(|p| Node::mk_sort_by(mcx, p)),
+        b"WINDOWDEF" => read_window_def(mcx).map(|p| Node::mk_window_def(mcx, p)),
+        b"RANGESUBSELECT" => read_range_subselect(mcx).map(|p| Node::mk_range_subselect(mcx, p)),
+        b"RANGEFUNCTION" => read_range_function(mcx).map(|p| Node::mk_range_function(mcx, p)),
+        b"RANGETABLESAMPLE" => read_range_table_sample(mcx).map(|p| Node::mk_range_table_sample(mcx, p)),
+        b"WITHCLAUSE" => read_with_clause(mcx).map(|p| Node::mk_with_clause(mcx, p)),
+        b"INFERCLAUSE" => read_infer_clause(mcx).map(|p| Node::mk_infer_clause(mcx, p)),
+        b"ONCONFLICTCLAUSE" => read_on_conflict_clause(mcx).map(|p| Node::mk_on_conflict_clause(mcx, p)),
+        b"MERGEWHENCLAUSE" => read_merge_when_clause(mcx).map(|p| Node::mk_merge_when_clause(mcx, p)),
+        b"RETURNINGCLAUSE" => read_returning_clause(mcx).map(|p| Node::mk_returning_clause(mcx, p)),
+        b"INSERTSTMT" => read_insert_stmt(mcx).map(|p| Node::mk_insert_stmt(mcx, p)),
+        b"DELETESTMT" => read_delete_stmt(mcx).map(|p| Node::mk_delete_stmt(mcx, p)),
+        b"UPDATESTMT" => read_update_stmt(mcx).map(|p| Node::mk_update_stmt(mcx, p)),
+        b"MERGESTMT" => read_merge_stmt(mcx).map(|p| Node::mk_merge_stmt(mcx, p)),
+        b"SELECTSTMT" => read_select_stmt(mcx).map(|p| Node::mk_select_stmt(mcx, p)),
+        b"A_CONST" => read_a_const(mcx).map(|p| Node::mk_a_const(mcx, p)),
 
-        b"TABLEFUNC" => read_table_func(mcx).map(Node::TableFunc),
+        b"TABLEFUNC" => read_table_func(mcx).map(|p| Node::mk_table_func(mcx, p)),
 
-        b"COMMONTABLEEXPR" => read_common_table_expr(mcx).map(Node::CommonTableExpr),
+        b"COMMONTABLEEXPR" => read_common_table_expr(mcx).map(|p| Node::mk_common_table_expr(mcx, p)),
 
         _ => return None,
     };
@@ -1935,7 +1935,7 @@ mod tests {
             alias: None,
             location: 5,
         };
-        let text = assert_framed_round_trip(&Node::RangeVar(rv));
+        let text = assert_framed_round_trip(&Node::mk_range_var(mcx, rv));
         assert!(text.starts_with("{RANGEVAR :catalogname <>"), "{text}");
         assert!(text.contains(":relname t"), "{text}");
         assert!(text.contains(":relpersistence p"), "{text}");
@@ -1950,12 +1950,14 @@ mod tests {
             aliasname: Some(PgString::from_str_in("a", mcx).unwrap()),
             colnames: PgVec::new_in(mcx),
         };
-        let text = assert_framed_round_trip(&Node::Alias(a));
+        let text = assert_framed_round_trip(&Node::mk_alias(mcx, a));
         assert!(text.starts_with("{ALIAS :aliasname a :colnames <>"), "{text}");
     }
 
     #[test]
     fn sort_group_clause_round_trips() {
+        let ctx = MemoryContext::new("sgc");
+        let mcx = ctx.mcx();
         let s = SortGroupClause {
             tleSortGroupRef: 3,
             eqop: 96,
@@ -1964,7 +1966,7 @@ mod tests {
             nulls_first: false,
             hashable: true,
         };
-        let text = assert_framed_round_trip(&Node::SortGroupClause(s));
+        let text = assert_framed_round_trip(&Node::mk_sort_group_clause(mcx, s));
         assert!(text.starts_with("{SORTGROUPCLAUSE :tleSortGroupRef 3 :eqop 96"), "{text}");
         assert!(text.contains(":reverse_sort true"), "{text}");
         assert!(text.ends_with(":hashable true}"), "{text}");
@@ -1984,7 +1986,7 @@ mod tests {
         r.perminfoindex = 1;
         r.lateral = false;
         r.inFromCl = true;
-        let text = assert_framed_round_trip(&Node::RangeTblEntry(r));
+        let text = assert_framed_round_trip(&Node::mk_range_tbl_entry(mcx, r));
         assert!(text.starts_with("{RANGETBLENTRY :alias <> :eref <> :rtekind 0"), "{text}");
         assert!(text.contains(":relid 16384"), "{text}");
         assert!(text.contains(":relkind r"), "{text}");
@@ -2029,7 +2031,7 @@ mod tests {
             ctecoltypmods: coltypmods,
             ctecolcollations: colcollations,
         };
-        let text = assert_framed_round_trip(&Node::CommonTableExpr(cte));
+        let text = assert_framed_round_trip(&Node::mk_common_table_expr(mcx, cte));
         assert!(text.starts_with("{COMMONTABLEEXPR :ctename w"), "{text}");
         assert!(
             text.contains(":search_clause {CTESEARCHCLAUSE :search_col_list <> :search_breadth_first true :search_seq_column seq"),

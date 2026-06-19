@@ -1509,43 +1509,43 @@ fn into_pgvec_opt<'mcx, T>(mcx: Mcx<'mcx>, v: Vec<T>) -> PgResult<Option<PgVec<'
 /// Dispatch the read_plan_family LABELs this module owns.
 pub(crate) fn try_read<'mcx>(mcx: Mcx<'mcx>, label: &[u8]) -> Option<PgResult<Node<'mcx>>> {
     let r: PgResult<Node<'mcx>> = match label {
-        b"SEQSCAN" => read_seqscan(mcx).map(Node::SeqScan),
-        b"MATERIAL" => read_material(mcx).map(Node::Material),
-        b"PROJECTSET" => read_projectset(mcx).map(Node::ProjectSet),
-        b"RESULT" => read_result(mcx).map(Node::Result),
-        b"APPEND" => read_append(mcx).map(Node::Append),
-        b"BITMAPAND" => read_bitmapand(mcx).map(Node::BitmapAnd),
-        b"GATHER" => read_gather(mcx).map(Node::Gather),
-        b"GATHERMERGE" => read_gathermerge(mcx).map(Node::GatherMerge),
-        b"MERGEAPPEND" => read_mergeappend(mcx).map(Node::MergeAppend),
-        b"RECURSIVEUNION" => read_recursiveunion(mcx).map(Node::RecursiveUnion),
-        b"GROUP" => read_group(mcx).map(Node::Group),
-        b"SETOP" => read_setop(mcx).map(Node::SetOp),
-        b"UNIQUE" => read_unique(mcx).map(Node::Unique),
-        b"SORT" => read_sort(mcx).map(Node::Sort),
-        b"INCREMENTALSORT" => read_incrementalsort(mcx).map(Node::IncrementalSort),
-        b"LIMIT" => read_limit(mcx).map(Node::Limit),
-        b"AGG" => read_agg(mcx).map(Node::Agg),
-        b"NESTLOOP" => read_nestloop(mcx).map(Node::NestLoop),
-        b"MERGEJOIN" => read_mergejoin(mcx).map(Node::MergeJoin),
-        b"HASHJOIN" => read_hashjoin(mcx).map(Node::HashJoin),
-        b"HASH" => read_hash(mcx).map(Node::Hash),
-        b"MEMOIZE" => read_memoize(mcx).map(Node::Memoize),
-        b"INDEXSCAN" => read_indexscan(mcx).map(Node::IndexScan),
-        b"INDEXONLYSCAN" => read_indexonlyscan(mcx).map(Node::IndexOnlyScan),
-        b"BITMAPINDEXSCAN" => read_bitmapindexscan(mcx).map(Node::BitmapIndexScan),
-        b"TIDSCAN" => read_tidscan(mcx).map(Node::TidScan),
-        b"TIDRANGESCAN" => read_tidrangescan(mcx).map(Node::TidRangeScan),
-        b"SUBQUERYSCAN" => read_subqueryscan(mcx).map(Node::SubqueryScan),
-        b"WORKTABLESCAN" => read_worktablescan(mcx).map(Node::WorkTableScan),
-        b"CTESCAN" => read_ctescan(mcx).map(Node::CteScan),
-        b"NAMEDTUPLESTORESCAN" => read_namedtuplestorescan(mcx).map(Node::NamedTuplestoreScan),
-        b"VALUESSCAN" => read_valuesscan(mcx).map(Node::ValuesScan),
-        b"FOREIGNSCAN" => read_foreignscan(mcx).map(Node::ForeignScan),
-        b"FUNCTIONSCAN" => read_functionscan(mcx).map(Node::FunctionScan),
-        b"SAMPLESCAN" => read_samplescan(mcx).map(Node::SampleScan),
-        b"WINDOWAGG" => read_windowagg(mcx).map(Node::WindowAgg),
-        b"TABLEFUNCSCAN" => read_tablefuncscan(mcx).map(Node::TableFuncScan),
+        b"SEQSCAN" => read_seqscan(mcx).map(|p| Node::mk_seq_scan(mcx, p)),
+        b"MATERIAL" => read_material(mcx).map(|p| Node::mk_material(mcx, p)),
+        b"PROJECTSET" => read_projectset(mcx).map(|p| Node::mk_project_set(mcx, p)),
+        b"RESULT" => read_result(mcx).map(|p| Node::mk_result(mcx, p)),
+        b"APPEND" => read_append(mcx).map(|p| Node::mk_append(mcx, p)),
+        b"BITMAPAND" => read_bitmapand(mcx).map(|p| Node::mk_bitmap_and(mcx, p)),
+        b"GATHER" => read_gather(mcx).map(|p| Node::mk_gather(mcx, p)),
+        b"GATHERMERGE" => read_gathermerge(mcx).map(|p| Node::mk_gather_merge(mcx, p)),
+        b"MERGEAPPEND" => read_mergeappend(mcx).map(|p| Node::mk_merge_append(mcx, p)),
+        b"RECURSIVEUNION" => read_recursiveunion(mcx).map(|p| Node::mk_recursive_union(mcx, p)),
+        b"GROUP" => read_group(mcx).map(|p| Node::mk_group(mcx, p)),
+        b"SETOP" => read_setop(mcx).map(|p| Node::mk_set_op(mcx, p)),
+        b"UNIQUE" => read_unique(mcx).map(|p| Node::mk_unique(mcx, p)),
+        b"SORT" => read_sort(mcx).map(|p| Node::mk_sort(mcx, p)),
+        b"INCREMENTALSORT" => read_incrementalsort(mcx).map(|p| Node::mk_incremental_sort(mcx, p)),
+        b"LIMIT" => read_limit(mcx).map(|p| Node::mk_limit(mcx, p)),
+        b"AGG" => read_agg(mcx).map(|p| Node::mk_agg(mcx, p)),
+        b"NESTLOOP" => read_nestloop(mcx).map(|p| Node::mk_nest_loop(mcx, p)),
+        b"MERGEJOIN" => read_mergejoin(mcx).map(|p| Node::mk_merge_join(mcx, p)),
+        b"HASHJOIN" => read_hashjoin(mcx).map(|p| Node::mk_hash_join(mcx, p)),
+        b"HASH" => read_hash(mcx).map(|p| Node::mk_hash(mcx, p)),
+        b"MEMOIZE" => read_memoize(mcx).map(|p| Node::mk_memoize(mcx, p)),
+        b"INDEXSCAN" => read_indexscan(mcx).map(|p| Node::mk_index_scan(mcx, p)),
+        b"INDEXONLYSCAN" => read_indexonlyscan(mcx).map(|p| Node::mk_index_only_scan(mcx, p)),
+        b"BITMAPINDEXSCAN" => read_bitmapindexscan(mcx).map(|p| Node::mk_bitmap_index_scan(mcx, p)),
+        b"TIDSCAN" => read_tidscan(mcx).map(|p| Node::mk_tid_scan(mcx, p)),
+        b"TIDRANGESCAN" => read_tidrangescan(mcx).map(|p| Node::mk_tid_range_scan(mcx, p)),
+        b"SUBQUERYSCAN" => read_subqueryscan(mcx).map(|p| Node::mk_subquery_scan(mcx, p)),
+        b"WORKTABLESCAN" => read_worktablescan(mcx).map(|p| Node::mk_work_table_scan(mcx, p)),
+        b"CTESCAN" => read_ctescan(mcx).map(|p| Node::mk_cte_scan(mcx, p)),
+        b"NAMEDTUPLESTORESCAN" => read_namedtuplestorescan(mcx).map(|p| Node::mk_named_tuplestore_scan(mcx, p)),
+        b"VALUESSCAN" => read_valuesscan(mcx).map(|p| Node::mk_values_scan(mcx, p)),
+        b"FOREIGNSCAN" => read_foreignscan(mcx).map(|p| Node::mk_foreign_scan(mcx, p)),
+        b"FUNCTIONSCAN" => read_functionscan(mcx).map(|p| Node::mk_function_scan(mcx, p)),
+        b"SAMPLESCAN" => read_samplescan(mcx).map(|p| Node::mk_sample_scan(mcx, p)),
+        b"WINDOWAGG" => read_windowagg(mcx).map(|p| Node::mk_window_agg(mcx, p)),
+        b"TABLEFUNCSCAN" => read_tablefuncscan(mcx).map(|p| Node::mk_table_func_scan(mcx, p)),
         _ => return None,
     };
     Some(r)
@@ -1577,12 +1577,14 @@ mod tests {
 
     #[test]
     fn seqscan_round_trips() {
+        let ctx = MemoryContext::new("seqscan");
+        let mcx = ctx.mcx();
         // An empty-child SeqScan: all Plan fields default, scanrelid set.
         let mut s = types_nodes::nodeseqscan::SeqScan {
             scan: types_nodes::nodeindexscan::Scan::default(),
         };
         s.scan.scanrelid = 3;
-        let text = assert_framed_round_trip(&Node::SeqScan(s));
+        let text = assert_framed_round_trip(&Node::mk_seq_scan(mcx, s));
         assert!(text.starts_with("{SEQSCAN :scan.plan.disabled_nodes 0"), "{text}");
         assert!(text.contains(":scan.plan.targetlist <>"), "{text}");
         assert!(text.ends_with(":scan.scanrelid 3}"), "{text}");
@@ -1608,7 +1610,7 @@ mod tests {
         pco.push(0u32);
         w.partCollations = Some(pco);
         w.topWindow = true;
-        let text = assert_framed_round_trip(&Node::WindowAgg(w));
+        let text = assert_framed_round_trip(&Node::mk_window_agg(mcx, w));
         assert!(text.starts_with("{WINDOWAGG :plan.disabled_nodes 0"), "{text}");
         assert!(text.contains(":winname w "), "{text}");
         assert!(text.ends_with(":topWindow true}"), "{text}");
@@ -1636,7 +1638,7 @@ mod tests {
             tablefunc: alloc_in(mcx, tf).unwrap(),
         };
         s.scan.scanrelid = 4;
-        let text = assert_framed_round_trip(&Node::TableFuncScan(s));
+        let text = assert_framed_round_trip(&Node::mk_table_func_scan(mcx, s));
         assert!(text.starts_with("{TABLEFUNCSCAN :scan.plan.disabled_nodes 0"), "{text}");
         assert!(text.contains(":tablefunc {TABLEFUNC :functype 0"), "{text}");
         assert!(text.contains(":colnames (\"c1\")"), "{text}");
@@ -1677,7 +1679,7 @@ mod tests {
         };
         s.scan.plan.initPlan = Some(init);
         s.scan.scanrelid = 1;
-        let text = assert_framed_round_trip(&Node::SeqScan(s));
+        let text = assert_framed_round_trip(&Node::mk_seq_scan(mcx, s));
         assert!(text.contains("initPlan ({SUBPLAN :subLinkType"), "{text}");
         assert!(text.contains(":plan_id 7"), "{text}");
 
@@ -1722,7 +1724,7 @@ mod tests {
             funcordinality: true,
         };
         fs.scan.scanrelid = 5;
-        let text = assert_framed_round_trip(&Node::FunctionScan(fs));
+        let text = assert_framed_round_trip(&Node::mk_function_scan(mcx, fs));
         assert!(text.starts_with("{FUNCTIONSCAN :scan.plan.disabled_nodes 0"), "{text}");
         assert!(text.contains(":functions ({RANGETBLFUNCTION"), "{text}");
         assert!(text.ends_with(":funcordinality true}"), "{text}");
@@ -1733,14 +1735,14 @@ mod tests {
         // A Plan-only node (no extra fields) with a child SeqScan in lefttree.
         let ctx = MemoryContext::new("mat");
         let mcx = ctx.mcx();
-        let child = Node::SeqScan(types_nodes::nodeseqscan::SeqScan {
+        let child = Node::mk_seq_scan(mcx, types_nodes::nodeseqscan::SeqScan {
             scan: types_nodes::nodeindexscan::Scan::default(),
         });
         let mut m = types_nodes::nodeforeigncustom::Material {
             plan: types_nodes::nodeindexscan::Plan::default(),
         };
         m.plan.lefttree = Some(mcx::alloc_in(mcx, child).unwrap());
-        let text = assert_framed_round_trip(&Node::Material(m));
+        let text = assert_framed_round_trip(&Node::mk_material(mcx, m));
         assert!(text.starts_with("{MATERIAL :plan.disabled_nodes 0"), "{text}");
         assert!(text.contains(":plan.lefttree {SEQSCAN"), "{text}");
     }
@@ -1779,7 +1781,7 @@ mod tests {
             collations: mk_u32(&[0, 100]),
             nullsFirst: mk_bool(&[false, true]),
         };
-        let text = assert_framed_round_trip(&Node::Sort(s));
+        let text = assert_framed_round_trip(&Node::mk_sort(mcx, s));
         assert!(text.contains(":numCols 2"), "{text}");
         assert!(text.contains(":sortColIdx ( 1 2)"), "{text}");
         assert!(text.contains(":sortOperators ( 97 521)"), "{text}");
@@ -1788,10 +1790,12 @@ mod tests {
 
     #[test]
     fn nestloop_empty_nestparams_round_trips() {
+        let ctx = MemoryContext::new("nestloop");
+        let mcx = ctx.mcx();
         // NIL nestParams → `<>`.
         let mut nl = types_nodes::nodenestloop::NestLoop::default();
         nl.join.jointype = JoinType::JOIN_INNER;
-        let text = assert_framed_round_trip(&Node::NestLoop(nl));
+        let text = assert_framed_round_trip(&Node::mk_nest_loop(mcx, nl));
         assert!(text.starts_with("{NESTLOOP :join.plan.disabled_nodes 0"), "{text}");
         assert!(text.ends_with(":nestParams <>}"), "{text}");
     }
@@ -1823,7 +1827,7 @@ mod tests {
                 paramval: v2,
             },
         ];
-        let text = assert_framed_round_trip(&Node::NestLoop(nl));
+        let text = assert_framed_round_trip(&Node::mk_nest_loop(mcx, nl));
         assert!(
             text.contains(":nestParams ({NESTLOOPPARAM :paramno 0 :paramval {VAR :varno 1"),
             "{text}"

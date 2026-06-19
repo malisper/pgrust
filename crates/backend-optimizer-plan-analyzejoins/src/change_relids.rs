@@ -256,7 +256,7 @@ pub fn change_relids_in_query(
         run.resolve_mut(parse),
         types_nodes::copy_query::Query::new(mcx),
     );
-    let mut node = Node::Query(query);
+    let mut node = Node::mk_query(mcx, query);
 
     let mut skip_rtr = |n: &mut Node, _c: &mut ChangeVarNodesContext| -> bool {
         matches!(n.node_tag(), t if t == ntag::T_RangeTblRef)

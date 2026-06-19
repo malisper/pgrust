@@ -1508,31 +1508,31 @@ mod tests {
         use types_nodes::value::{BitString, Boolean, Float, Integer, StringNode};
         let ctx = mcx::MemoryContext::new("t");
         let mcx = ctx.mcx();
-        assert_eq!(Node::Integer(Integer { ival: 7 }).tag(), T_Integer);
-        assert_eq!(Node::Boolean(Boolean { boolval: true }).tag(), T_Boolean);
+        assert_eq!(Node::mk_integer(mcx, Integer { ival: 7 }).tag(), T_Integer);
+        assert_eq!(Node::mk_boolean(mcx, Boolean { boolval: true }).tag(), T_Boolean);
         assert_eq!(
-            Node::Float(Float {
+            Node::mk_float(mcx, Float {
                 fval: mcx::PgString::from_str_in("1.5", mcx).unwrap()
             })
             .tag(),
             T_Float
         );
         assert_eq!(
-            Node::String(StringNode {
+            Node::mk_string(mcx, StringNode {
                 sval: mcx::PgString::from_str_in("x", mcx).unwrap()
             })
             .tag(),
             T_String
         );
         assert_eq!(
-            Node::BitString(BitString {
+            Node::mk_bit_string(mcx, BitString {
                 bsval: mcx::PgString::from_str_in("b101", mcx).unwrap()
             })
             .tag(),
             T_BitString
         );
         // value nodes are leaves: no children walked
-        let node = Node::Integer(Integer { ival: 7 });
+        let node = Node::mk_integer(mcx, Integer { ival: 7 });
         assert!(!expression_tree_walker(&node, &mut |_c| panic!("leaf has no children")));
     }
 
@@ -1542,7 +1542,7 @@ mod tests {
         let ctx = mcx::MemoryContext::new("t");
         let mcx = ctx.mcx();
 
-        let join = Node::JoinExpr(JoinExpr {
+        let join = Node::mk_join_expr(mcx, JoinExpr {
             jointype: JoinType::JOIN_INNER,
             isNatural: false,
             larg: None,
@@ -1560,7 +1560,7 @@ mod tests {
             fromlist,
             quals: Some(mcx::alloc_in(mcx, Node::Expr(Expr::Var(Var::default()))).unwrap()),
         };
-        let node = Node::FromExpr(from);
+        let node = Node::mk_from_expr(mcx, from);
 
         // Top-level children: the JoinExpr and the quals Var.
         let mut tags = Vec::new();

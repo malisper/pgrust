@@ -226,7 +226,7 @@ fn make_result_plan<'mcx>(mcx: Mcx<'mcx>, with_constqual: bool) -> PgResult<Node
         ));
         plan.resconstantqual = Some(list);
     }
-    Ok(Node::Result(plan))
+    Ok(Node::mk_result(mcx, plan))
 }
 
 /// Splice a leaf child into an initialized ResultState so the

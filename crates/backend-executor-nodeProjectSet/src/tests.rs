@@ -285,7 +285,7 @@ fn make_projectset_plan<'mcx>(mcx: Mcx<'mcx>, exprs: &[Expr]) -> PgResult<Node<'
         tl.push(te);
     }
     plan.plan.targetlist = Some(tl);
-    Ok(Node::ProjectSet(plan))
+    Ok(Node::mk_project_set(mcx, plan))
 }
 
 /// Initialize a `ProjectSetState` with the given tlist column expressions and

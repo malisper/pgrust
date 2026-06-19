@@ -304,7 +304,7 @@ fn init_with_leaf_child<'mcx>(
 fn init_material_accounting_is_exact() {
     install_mocks();
     let ctx = MemoryContext::new("per-query");
-    let plan = Node::Material(Material::default());
+    let plan = Node::mk_material(ctx.mcx(), Material::default());
     let mut estate = EStateData::new_in(ctx.mcx());
 
     let matstate = ExecInitMaterial(&plan, &mut estate, EXEC_FLAG_REWIND).unwrap();
@@ -328,7 +328,7 @@ fn init_material_accounting_is_exact() {
 fn backward_eflag_adds_rewind_and_shields_child() {
     install_mocks();
     let ctx = MemoryContext::new("per-query");
-    let plan = Node::Material(Material::default());
+    let plan = Node::mk_material(ctx.mcx(), Material::default());
     let mut estate = EStateData::new_in(ctx.mcx());
     let matstate = ExecInitMaterial(&plan, &mut estate, EXEC_FLAG_BACKWARD).unwrap();
     assert_eq!(matstate.eflags, EXEC_FLAG_BACKWARD | EXEC_FLAG_REWIND);
@@ -338,7 +338,7 @@ fn backward_eflag_adds_rewind_and_shields_child() {
 fn eflags_zero_passes_rows_through_without_tuplestore() {
     install_mocks();
     let ctx = MemoryContext::new("per-query");
-    let plan = Node::Material(Material::default());
+    let plan = Node::mk_material(ctx.mcx(), Material::default());
     let mut estate = EStateData::new_in(ctx.mcx());
     let mut node = init_with_leaf_child(&plan, &mut estate, 0);
     SUPPLY.with(|c| c.set(1));
@@ -361,7 +361,7 @@ fn eflags_zero_passes_rows_through_without_tuplestore() {
 fn rewind_materializes_then_replays_without_rereading_subplan() {
     install_mocks();
     let ctx = MemoryContext::new("per-query");
-    let plan = Node::Material(Material::default());
+    let plan = Node::mk_material(ctx.mcx(), Material::default());
     let mut estate = EStateData::new_in(ctx.mcx());
     let mut node = init_with_leaf_child(&plan, &mut estate, EXEC_FLAG_REWIND);
     SUPPLY.with(|c| c.set(2));
@@ -393,7 +393,7 @@ fn rewind_materializes_then_replays_without_rereading_subplan() {
 fn backward_scan_reads_back_from_store() {
     install_mocks();
     let ctx = MemoryContext::new("per-query");
-    let plan = Node::Material(Material::default());
+    let plan = Node::mk_material(ctx.mcx(), Material::default());
     let mut estate = EStateData::new_in(ctx.mcx());
     let mut node = init_with_leaf_child(&plan, &mut estate, EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD);
     SUPPLY.with(|c| c.set(2));
@@ -412,7 +412,7 @@ fn backward_scan_reads_back_from_store() {
 fn mark_and_restore_copy_read_pointers() {
     install_mocks();
     let ctx = MemoryContext::new("per-query");
-    let plan = Node::Material(Material::default());
+    let plan = Node::mk_material(ctx.mcx(), Material::default());
     let mut estate = EStateData::new_in(ctx.mcx());
     let mut node = init_with_leaf_child(&plan, &mut estate, EXEC_FLAG_REWIND | EXEC_FLAG_MARK);
     SUPPLY.with(|c| c.set(2));
@@ -438,7 +438,7 @@ fn mark_and_restore_copy_read_pointers() {
 fn rescan_with_changed_params_drops_store_and_rescans_child() {
     install_mocks();
     let ctx = MemoryContext::new("per-query");
-    let plan = Node::Material(Material::default());
+    let plan = Node::mk_material(ctx.mcx(), Material::default());
     let mut estate = EStateData::new_in(ctx.mcx());
     let mut node = init_with_leaf_child(&plan, &mut estate, EXEC_FLAG_REWIND);
     SUPPLY.with(|c| c.set(1));
@@ -482,7 +482,7 @@ fn all_bytes_return_on_drop() {
     let ctx = MemoryContext::new("per-query");
     let live_before = LIVE_STORES.with(|c| c.get());
     {
-        let plan = Node::Material(Material::default());
+        let plan = Node::mk_material(ctx.mcx(), Material::default());
         let mut estate = EStateData::new_in(ctx.mcx());
         let mut node = init_with_leaf_child(&plan, &mut estate, EXEC_FLAG_REWIND);
         SUPPLY.with(|c| c.set(2));

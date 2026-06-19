@@ -840,16 +840,18 @@ mod tests {
     #[test]
     fn integer_round_trips() {
         let ctx = MemoryContext::new("int");
-        let _mcx = ctx.mcx();
-        assert_round_trip(&Node::Integer(Integer { ival: 42 }), "42");
-        assert_round_trip(&Node::Integer(Integer { ival: -7 }), "-7");
-        assert_round_trip(&Node::Integer(Integer { ival: 0 }), "0");
+        let mcx = ctx.mcx();
+        assert_round_trip(&Node::mk_integer(mcx, Integer { ival: 42 }), "42");
+        assert_round_trip(&Node::mk_integer(mcx, Integer { ival: -7 }), "-7");
+        assert_round_trip(&Node::mk_integer(mcx, Integer { ival: 0 }), "0");
     }
 
     #[test]
     fn boolean_round_trips() {
-        assert_round_trip(&Node::Boolean(Boolean { boolval: true }), "true");
-        assert_round_trip(&Node::Boolean(Boolean { boolval: false }), "false");
+        let ctx = MemoryContext::new("bool");
+        let mcx = ctx.mcx();
+        assert_round_trip(&Node::mk_boolean(mcx, Boolean { boolval: true }), "true");
+        assert_round_trip(&Node::mk_boolean(mcx, Boolean { boolval: false }), "false");
     }
 
     #[test]
@@ -857,10 +859,10 @@ mod tests {
         let ctx = MemoryContext::new("flt");
         let mcx = ctx.mcx();
         let fval = mcx::PgString::from_str_in("3.14", mcx).unwrap();
-        assert_round_trip(&Node::Float(Float { fval }), "3.14");
+        assert_round_trip(&Node::mk_float(mcx, Float { fval }), "3.14");
         // A value too large for i32 lexes as Float and is kept verbatim.
         let big = mcx::PgString::from_str_in("99999999999999999999", mcx).unwrap();
-        assert_round_trip(&Node::Float(Float { fval: big }), "99999999999999999999");
+        assert_round_trip(&Node::mk_float(mcx, Float { fval: big }), "99999999999999999999");
     }
 
     #[test]
@@ -869,13 +871,13 @@ mod tests {
         let mcx = ctx.mcx();
         // _outString wraps in quotes; the inner content is outToken-escaped.
         let sval = mcx::PgString::from_str_in("hello", mcx).unwrap();
-        assert_round_trip(&Node::String(StringNode { sval }), "\"hello\"");
+        assert_round_trip(&Node::mk_string(mcx, StringNode { sval }), "\"hello\"");
         // A string with a space gets the space backslash-escaped inside quotes.
         let spaced = mcx::PgString::from_str_in("a b", mcx).unwrap();
-        assert_round_trip(&Node::String(StringNode { sval: spaced }), "\"a\\ b\"");
+        assert_round_trip(&Node::mk_string(mcx, StringNode { sval: spaced }), "\"a\\ b\"");
         // The empty string is just `""` (no outToken `""` doubling).
         let empty = mcx::PgString::from_str_in("", mcx).unwrap();
-        assert_round_trip(&Node::String(StringNode { sval: empty }), "\"\"");
+        assert_round_trip(&Node::mk_string(mcx, StringNode { sval: empty }), "\"\"");
     }
 
     #[test]
@@ -883,9 +885,9 @@ mod tests {
         let ctx = MemoryContext::new("bits");
         let mcx = ctx.mcx();
         let bsval = mcx::PgString::from_str_in("b101", mcx).unwrap();
-        assert_round_trip(&Node::BitString(BitString { bsval }), "b101");
+        assert_round_trip(&Node::mk_bit_string(mcx, BitString { bsval }), "b101");
         let hex = mcx::PgString::from_str_in("xFF", mcx).unwrap();
-        assert_round_trip(&Node::BitString(BitString { bsval: hex }), "xFF");
+        assert_round_trip(&Node::mk_bit_string(mcx, BitString { bsval: hex }), "xFF");
     }
 
     #[test]
@@ -896,9 +898,9 @@ mod tests {
         // `(` + space-separated children + `)`.
         let mut elements: mcx::PgVec<'_, PgBox<'_, Node<'_>>> =
             mcx::vec_with_capacity_in(mcx, 2).unwrap();
-        elements.push(mcx::alloc_in(mcx, Node::Integer(Integer { ival: 10 })).unwrap());
-        elements.push(mcx::alloc_in(mcx, Node::Boolean(Boolean { boolval: true })).unwrap());
-        assert_round_trip(&Node::List(elements), "(10 true)");
+        elements.push(mcx::alloc_in(mcx, Node::mk_integer(mcx, Integer { ival: 10 })).unwrap());
+        elements.push(mcx::alloc_in(mcx, Node::mk_boolean(mcx, Boolean { boolval: true })).unwrap());
+        assert_round_trip(&Node::mk_list(mcx, elements), "(10 true)");
     }
 
     #[test]
@@ -908,7 +910,7 @@ mod tests {
         let elements: mcx::PgVec<'_, PgBox<'_, Node<'_>>> =
             mcx::vec_with_capacity_in(mcx, 0).unwrap();
         // An empty list serializes as `()`.
-        let node = Node::List(elements);
+        let node = Node::mk_list(mcx, elements);
         let text = nodeToString(mcx, &node).unwrap();
         assert_eq!(text.as_str(), "()");
     }
@@ -1050,7 +1052,7 @@ mod tests {
             resorigcol: 0,
             resjunk: false,
         };
-        let node = Node::TargetEntry(te);
+        let node = Node::mk_target_entry(mcx, te);
         let text = nodeToString(mcx, &node).unwrap();
         assert!(text.starts_with("{TARGETENTRY :expr {VAR"), "{text}");
         assert!(text.contains(":resname col"), "{text}");
