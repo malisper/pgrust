@@ -203,7 +203,12 @@ pub fn exec_move_row_from_datum(
 /// `ereport(ERROR, ERRCODE_S_R_E_FUNCTION_EXECUTED_NO_RETURN_STATEMENT)`
 /// (pl_exec.c) — the toplevel block fell through without RETURN.
 pub fn ereport_no_return_statement() -> ! {
-    panic!("control reached end of function without RETURN (ERRCODE_S_R_E_FUNCTION_EXECUTED_NO_RETURN_STATEMENT)");
+    std::panic::panic_any(
+        types_error::PgError::error(
+            "control reached end of function without RETURN".to_string(),
+        )
+        .with_sqlstate(types_error::ERRCODE_S_R_E_FUNCTION_EXECUTED_NO_RETURN_STATEMENT),
+    );
 }
 
 /// The set-returning-function result handoff of `plpgsql_exec_function`
@@ -273,31 +278,49 @@ pub fn type_is_rowtype(_typeid: Oid) -> bool {
 /// `ereport(ERROR, ERRCODE_CASE_NOT_FOUND)` — CASE with no matching WHEN and no
 /// ELSE (`exec_stmt_case`).
 pub fn ereport_case_not_found() -> ! {
-    panic!("case not found (ERRCODE_CASE_NOT_FOUND): CASE statement is missing ELSE part");
+    std::panic::panic_any(
+        types_error::PgError::error("case not found".to_string())
+            .with_detail("CASE statement is missing ELSE part.".to_string())
+            .with_sqlstate(types_error::ERRCODE_CASE_NOT_FOUND),
+    );
 }
 
 /// `ereport(ERROR, ERRCODE_NULL_VALUE_NOT_ALLOWED)` — a FOR(i) loop bound /
 /// step evaluated to NULL (`exec_stmt_fori`).
 pub fn ereport_for_bound_null(which: &str) -> ! {
-    panic!("{which} of FOR loop cannot be null (ERRCODE_NULL_VALUE_NOT_ALLOWED)");
+    std::panic::panic_any(
+        types_error::PgError::error(format!("{which} of FOR loop cannot be null"))
+            .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED),
+    );
 }
 
 /// `ereport(ERROR, ERRCODE_INVALID_PARAMETER_VALUE)` — FOR(i) BY step <= 0.
 pub fn ereport_for_step_nonpositive() -> ! {
-    panic!("BY value of FOR loop must be greater than zero (ERRCODE_INVALID_PARAMETER_VALUE)");
+    std::panic::panic_any(
+        types_error::PgError::error(
+            "BY value of FOR loop must be greater than zero".to_string(),
+        )
+        .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE),
+    );
 }
 
 /// `ereport(ERROR, ERRCODE_NULL_VALUE_NOT_ALLOWED)` — FOREACH over a NULL array
 /// (`exec_stmt_foreach_a`).
 pub fn ereport_foreach_null() -> ! {
-    panic!("FOREACH expression must not be null (ERRCODE_NULL_VALUE_NOT_ALLOWED)");
+    std::panic::panic_any(
+        types_error::PgError::error("FOREACH expression must not be null".to_string())
+            .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED),
+    );
 }
 
 /// `ereport(ERROR, ERRCODE_DATATYPE_MISMATCH)` — RETURN of a non-composite from
 /// a function returning a tuple (`exec_stmt_return`).
 pub fn ereport_return_noncomposite() -> ! {
-    panic!(
-        "cannot return non-composite value from function returning composite type \
-         (ERRCODE_DATATYPE_MISMATCH)"
+    std::panic::panic_any(
+        types_error::PgError::error(
+            "cannot return non-composite value from function returning composite type"
+                .to_string(),
+        )
+        .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH),
     );
 }
