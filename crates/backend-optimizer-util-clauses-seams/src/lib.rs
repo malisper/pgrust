@@ -61,6 +61,14 @@ pub struct PgProcSimple {
     /// the function has no named arguments. Used by `prepare_sql_fn_parse_info`
     /// (`get_func_input_arg_names`) to resolve a body bareword to a `$n` Param.
     pub proargnames: Option<alloc::vec::Vec<Option<alloc::string::String>>>,
+    /// `proallargtypes` (oid[], nullable) — all argument types INCLUDING OUT/INOUT
+    /// args, `None` when it equals `proargtypes` (no OUT args). Used by
+    /// `expand_function_arguments(include_out_arguments=true)` for CALL.
+    pub proallargtypes: Option<alloc::vec::Vec<Oid>>,
+    /// `proargmodes` (char[], nullable) — per-argument mode bytes
+    /// (`PROARGMODE_{IN,OUT,INOUT,VARIADIC,TABLE}`), `None` when all args are IN.
+    /// Read by `transformCallStmt` to split input/output arguments.
+    pub proargmodes: Option<alloc::vec::Vec<i8>>,
 }
 
 extern crate alloc;

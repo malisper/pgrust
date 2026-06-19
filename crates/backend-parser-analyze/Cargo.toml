@@ -14,6 +14,7 @@ seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
+types-catalog = { path = "../types-catalog" }
 types-acl = { path = "../types-acl" }
 types-rel = { path = "../types-rel" }
 types-tuple = { path = "../types-tuple" }
@@ -38,6 +39,7 @@ backend-parser-parse-target = { path = "../backend-parser-parse-target" }
 backend-parser-relation = { path = "../backend-parser-relation" }
 backend-parser-cte = { path = "../backend-parser-cte" }
 backend-parser-parse-expr = { path = "../backend-parser-parse-expr" }
+backend-parser-func = { path = "../backend-parser-func" }
 backend-parser-coerce = { path = "../backend-parser-coerce" }
 backend-parser-parse-oper = { path = "../backend-parser-parse-oper" }
 backend-parser-parse-collate = { path = "../backend-parser-parse-collate" }

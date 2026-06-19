@@ -71,7 +71,10 @@ mod tests;
 pub use deferred::{
     contain_mutable_functions_after_planning, contain_volatile_functions_after_planning,
 };
-pub use fold::{estimate_expression_value, eval_const_expressions, evaluate_expr, make_SAOP_expr};
+pub use fold::{
+    estimate_expression_value, eval_const_expressions, evaluate_expr, expand_function_arguments,
+    make_SAOP_expr,
+};
 pub use grounded::{
     contain_agg_clause, contain_context_dependent_node, contain_exec_param, contain_leaked_vars,
     contain_mutable_functions, contain_nonstrict_functions, contain_subplans,

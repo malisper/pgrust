@@ -2258,7 +2258,10 @@ pub fn ParseExprKindName(expr_kind: ParseExprKind) -> &'static str {
 
 /// View `pstate->p_last_srf` as an `&Expr` for passing to `make_op`'s
 /// `last_srf` argument (a `Node *` in C).
-fn last_srf_expr(pstate: &ParseState<'_>) -> Option<Expr> {
+/// Clone the inner `Expr` of `pstate->p_last_srf` (the most recent
+/// set-returning function/operator). Public so `analyze.c`'s `transformCallStmt`
+/// can pass it to `ParseFuncOrColumn` (C reads `pstate->p_last_srf` directly).
+pub fn last_srf_expr(pstate: &ParseState<'_>) -> Option<Expr> {
     pstate
         .p_last_srf
         .as_ref()
@@ -3016,8 +3019,9 @@ fn transformFuncCall<'mcx>(
 }
 
 /// Convert a raw `List *funcname` (`String` value nodes) into the
-/// `&[PgString]` form `ParseFuncOrColumn` consumes.
-fn clone_namelist_pgstrings<'mcx>(
+/// `&[PgString]` form `ParseFuncOrColumn` consumes. Public so `analyze.c`'s
+/// `transformCallStmt` can build the procedure name list.
+pub fn clone_namelist_pgstrings<'mcx>(
     name: &mcx::PgVec<'_, nodes::NodePtr<'_>>,
     mcx: mcx::Mcx<'mcx>,
 ) -> PgResult<Vec<mcx::PgString<'mcx>>> {

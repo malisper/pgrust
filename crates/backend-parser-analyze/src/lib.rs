@@ -32,6 +32,7 @@ mod insert;
 mod locking;
 mod select;
 mod setop;
+mod special;
 mod update_delete;
 
 pub use locking::{applyLockingClause, transformLockingClause, CheckSelectLocking, LCS_asString};
@@ -700,17 +701,20 @@ pub fn transformStmt<'mcx>(
         ntag::T_ReturnStmt => {
             select::transformReturnStmt(mcx, pstate, parse_tree.expect_returnstmt())?
         }
-        ntag::T_MergeStmt
-        | ntag::T_PLAssignStmt
-        | ntag::T_DeclareCursorStmt
-        | ntag::T_CallStmt => {
-            // The remaining DML / special-statement transforms are a follow-on
-            // family; they are not reachable on the SELECT/INSERT-milestone path.
-            // Mirror the C dispatch and panic loudly until the family lands.
+        ntag::T_DeclareCursorStmt => {
+            special::transformDeclareCursorStmt(mcx, pstate, parse_tree.expect_declarecursorstmt())?
+        }
+        ntag::T_CallStmt => {
+            special::transformCallStmt(mcx, pstate, parse_tree.expect_callstmt())?
+        }
+        ntag::T_MergeStmt | ntag::T_PLAssignStmt => {
+            // MERGE and PL/pgSQL assignment transforms are a follow-on family;
+            // MERGE needs the planner-side MergeAction substrate and PLAssign is
+            // produced only in the RAW_PARSE_PLPGSQL_ASSIGN raw-parse modes.
+            // Mirror the C dispatch and panic loudly until they land.
             panic!(
                 "transformStmt: DML/special statement (tag {:?}) is in the \
-                 follow-on family (transformUpdate/Delete/Merge/\
-                 PLAssign/DeclareCursor/Call) — not yet \
+                 follow-on family (transformMerge/PLAssign) — not yet \
                  ported (analyze.c:312)",
                 parse_tree.tag()
             );

@@ -2352,7 +2352,13 @@ pub(crate) fn get_func_form(funcid: Oid) -> PgResult<clauses_seams::PgProcSimple
         });
     let proargmodes_raw = getattr_char_array(mcx, PROCOID, &tup, Anum_pg_proc_proargmodes)?
         .map(|arr| arr.values.iter().map(|&c| c as i8).collect::<std::vec::Vec<i8>>());
-    let proargnames = get_func_input_arg_names(proargnames_raw, proargmodes_raw);
+    let proargnames = get_func_input_arg_names(proargnames_raw, proargmodes_raw.clone());
+
+    // proallargtypes (oid[], nullable) — all arg types including OUT/INOUT; only
+    // present when the procedure has OUT args. Needed by expand_function_arguments
+    // with include_out_arguments=true (CALL).
+    let proallargtypes = getattr_oid_array(mcx, PROCOID, &tup, Anum_pg_proc_proallargtypes)?
+        .map(|arr| arr.values.iter().copied().collect::<std::vec::Vec<Oid>>());
 
     ReleaseSysCache(tup);
     Ok(clauses_seams::PgProcSimple {
@@ -2370,6 +2376,8 @@ pub(crate) fn get_func_form(funcid: Oid) -> PgResult<clauses_seams::PgProcSimple
         prokind,
         proname,
         proargnames,
+        proallargtypes,
+        proargmodes: proargmodes_raw,
     })
 }
 

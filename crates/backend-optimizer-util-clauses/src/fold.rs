@@ -341,6 +341,7 @@ fn arm_windowfunc(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
     let form = clauses_seam::get_func_form::call(wf.winfnoid)?;
     let args = expand_function_arguments(
         core::mem::take(&mut wf.args),
+        false,
         wf.wintype,
         wf.winfnoid,
         &form,
@@ -1158,7 +1159,7 @@ fn simplify_function(
     let form = clauses_seam::get_func_form::call(funcid)?;
 
     if process_args {
-        args = expand_function_arguments(args, result_type, funcid, &form)?;
+        args = expand_function_arguments(args, false, result_type, funcid, &form)?;
         args = mutate_list(args, ctx)?;
     }
 
@@ -1202,23 +1203,59 @@ fn simplify_function(
     Ok((newexpr, args))
 }
 
-/// `expand_function_arguments` (clauses.c:4177) with
-/// `include_out_arguments = false`.
-fn expand_function_arguments(
-    mut args: Vec<Expr>,
+/// `expand_function_arguments(args, include_out_arguments, result_type,
+/// func_tuple)` (clauses.c:4177) — convert named-notation args to positional
+/// args and insert defaults as needed.
+///
+/// Public so `analyze.c`'s `transformCallStmt` can call it with
+/// `include_out_arguments = true`. For a CALL we must match against OUT
+/// arguments too, so when `proallargtypes` is present we use it (and its length)
+/// in place of `proargtypes`/`pronargs`, exactly as the C does.
+pub fn expand_function_arguments(
+    args: Vec<Expr>,
+    include_out_arguments: bool,
     result_type: Oid,
     funcid: Oid,
     form: &PgProcSimple,
 ) -> PgResult<Vec<Expr>> {
-    let pronargs = form.pronargs as i32;
+    expand_function_arguments_inner(args, include_out_arguments, result_type, funcid, form)
+}
+
+fn expand_function_arguments_inner(
+    mut args: Vec<Expr>,
+    include_out_arguments: bool,
+    result_type: Oid,
+    funcid: Oid,
+    form: &PgProcSimple,
+) -> PgResult<Vec<Expr>> {
+    // If we are asked to match to OUT arguments, use proallargtypes (which
+    // includes those); otherwise use proargtypes. If proallargtypes is null we
+    // always use proargtypes.
+    let adjusted;
+    let eff_form: &PgProcSimple = if include_out_arguments {
+        match form.proallargtypes.as_ref() {
+            Some(allargtypes) => {
+                let mut f = form.clone();
+                f.pronargs = allargtypes.len() as i16;
+                f.proargtypes = allargtypes.clone();
+                adjusted = f;
+                &adjusted
+            }
+            None => form,
+        }
+    } else {
+        form
+    };
+
+    let pronargs = eff_form.pronargs as i32;
     let has_named_args = args.iter().any(|a| a.is_namedargexpr());
 
     if has_named_args {
-        args = reorder_function_arguments(args, pronargs, funcid, form)?;
-        args = recheck_cast_function_args(args, result_type, form)?;
+        args = reorder_function_arguments(args, pronargs, funcid, eff_form)?;
+        args = recheck_cast_function_args(args, result_type, eff_form)?;
     } else if (args.len() as i32) < pronargs {
-        args = add_function_defaults(args, pronargs, funcid, form)?;
-        args = recheck_cast_function_args(args, result_type, form)?;
+        args = add_function_defaults(args, pronargs, funcid, eff_form)?;
+        args = recheck_cast_function_args(args, result_type, eff_form)?;
     }
     Ok(args)
 }
