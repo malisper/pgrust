@@ -1443,7 +1443,7 @@ fn chooseScalarFunctionAlias<'mcx>(
     // C: if (funcexpr && IsA(funcexpr, FuncExpr)) {
     //        pname = get_func_result_name(((FuncExpr *) funcexpr)->funcid);
     //        if (pname) return pname; }
-    if let Some(Node::Expr(types_nodes::primnodes::Expr::FuncExpr(fe))) = funcexpr {
+    if let Some(types_nodes::primnodes::Expr::FuncExpr(fe)) = funcexpr.and_then(|n| n.as_expr()) {
         if let Some(pname) =
             backend_utils_fmgr_funcapi::proc_info::get_func_result_name(mcx, fe.funcid)?
         {
@@ -3289,7 +3289,7 @@ pub fn get_parse_rowmark<'a, 'mcx>(
     rtindex: Index,
 ) -> Option<&'a RowMarkClause> {
     for rc_node in qry.rowMarks.iter() {
-        if let Node::RowMarkClause(rc) = rc_node.as_ref() {
+        if let Some(rc) = rc_node.as_ref().as_rowmarkclause() {
             if rc.rti == rtindex {
                 return Some(rc);
             }
