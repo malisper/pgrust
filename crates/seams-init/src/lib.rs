@@ -532,6 +532,7 @@ pub fn init_all() {
     backend_utils_adt_enum::init_seams();
     backend_utils_adt_scalar_datum_core::init_seams();
     backend_utils_adt_skipsupport::init_seams();
+    backend_utils_adt_ts_small::init_seams();
     backend_utils_adt_tsvector_core::init_seams();
     backend_utils_adt_tsquery_core::init_seams();
     backend_utils_adt_tsrank::init_seams();

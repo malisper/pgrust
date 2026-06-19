@@ -19,6 +19,7 @@
 //!   `windowapi` context stubs.
 
 use std::string::{String, ToString};
+use std::vec::Vec;
 
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
@@ -1058,6 +1059,128 @@ fn fc_hashtidextended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     }
 }
 
+// ===========================================================================
+// pg_upgrade_support.c — non-strict binary_upgrade_* setters whose argument
+// types reach beyond the scalar lane (text / text[] / oid[] / "char" / pg_lsn).
+// These are `proisstrict => 'f'`: a NULL argument must NOT short-circuit the
+// call, so each adapter reads the per-arg SQL-NULL flag off the frame (C:
+// `PG_ARGISNULL(i)`) and threads `Option`s into the value core.
+// ===========================================================================
+
+/// Whether fmgr arg `i` is SQL NULL on the frame (C: `PG_ARGISNULL(i)`).
+#[inline]
+fn arg_is_null(fcinfo: &FunctionCallInfoBaseData, i: usize) -> bool {
+    fcinfo.arg(i).map(|d| d.isnull).unwrap_or(true)
+}
+
+/// A nullable `text` arg as `Option<&str>` (its detoasted `VARDATA_ANY` payload,
+/// `None` when SQL NULL).
+#[inline]
+fn opt_arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> Option<&'a str> {
+    if arg_is_null(fcinfo, i) {
+        return None;
+    }
+    Some(arg_text(fcinfo, i))
+}
+
+/// A nullable by-reference array (`text[]`/`oid[]`) arg as its FULL header-ful
+/// flat-array varlena image on the by-ref lane (C: `PG_GETARG_DATUM(i)` passed
+/// verbatim into `InsertExtensionTuple` as the stored `extConfig`/`extCondition`
+/// Datum). `None` when SQL NULL (C: `PointerGetDatum(NULL)`).
+#[inline]
+fn opt_arg_array_image<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> Option<&'a [u8]> {
+    if arg_is_null(fcinfo, i) {
+        return None;
+    }
+    fcinfo.ref_arg(i).and_then(|p| p.as_varlena())
+}
+
+/// `PG_GETARG_CHAR(i)` — the single-byte `"char"` type, by value.
+#[inline]
+fn arg_char(fcinfo: &FunctionCallInfoBaseData, i: usize) -> i8 {
+    fcinfo.arg(i).expect("misc2 fn: missing arg").value.as_i8()
+}
+
+/// A nullable `pg_lsn` (`XLogRecPtr`) arg, by value (C: `PG_GETARG_LSN(i)`).
+/// `None` when SQL NULL.
+#[inline]
+fn opt_arg_lsn(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Option<u64> {
+    if arg_is_null(fcinfo, i) {
+        return None;
+    }
+    Some(fcinfo.arg(i).expect("misc2 fn: missing arg").value.as_u64())
+}
+
+/// `binary_upgrade_create_empty_extension(name, schema, relocatable, version,
+/// config, condition, requires)` (OID 3591) — non-strict. The four leading
+/// args are required (the core raises the C `elog` on a NULL); `config`/
+/// `condition` are optional array varlena images carried verbatim; `requires`
+/// is an optional `text[]` deconstructed into its element extension names.
+fn fc_binary_upgrade_create_empty_extension(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let ext_name = opt_arg_text(fcinfo, 0);
+    let schema_name = opt_arg_text(fcinfo, 1);
+    let relocatable = if arg_is_null(fcinfo, 2) { None } else { Some(arg_bool(fcinfo, 2)) };
+    let ext_version = opt_arg_text(fcinfo, 3);
+    let ext_config = opt_arg_array_image(fcinfo, 4);
+    let ext_condition = opt_arg_array_image(fcinfo, 5);
+
+    // requires (arg6, text[]): NIL when NULL, else the element names. C:
+    // deconstruct_array_builtin(textArray, TEXTOID, ...).
+    let required_strings: Vec<mcx::PgString<'_>> = if arg_is_null(fcinfo, 6) {
+        Vec::new()
+    } else {
+        let arr = fcinfo
+            .ref_arg(6)
+            .and_then(|p| p.as_varlena())
+            .expect("binary_upgrade_create_empty_extension: requires text[] missing from by-ref lane");
+        match backend_utils_adt_arrayfuncs_seams::deconstruct_text_array::call(m.mcx(), arr) {
+            Ok(v) => v.into_iter().collect(),
+            Err(e) => raise(e),
+        }
+    };
+    let required_refs: Vec<&str> = required_strings.iter().map(|s| s.as_str()).collect();
+
+    match crate::admin::binary_upgrade_create_empty_extension(
+        ext_name,
+        schema_name,
+        relocatable,
+        ext_version,
+        ext_config,
+        ext_condition,
+        &required_refs,
+    ) {
+        Ok(()) => ret_void(),
+        Err(e) => raise(e),
+    }
+}
+
+/// `binary_upgrade_add_sub_rel_state(subname, relid, relstate, sublsn)`
+/// (OID 6319) — non-strict. The first three args are required (the core raises
+/// on NULL); `sublsn` is `None` for a NULL `pg_lsn`.
+fn fc_binary_upgrade_add_sub_rel_state(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let subname = opt_arg_text(fcinfo, 0);
+    let relid = if arg_is_null(fcinfo, 1) { None } else { Some(arg_oid(fcinfo, 1)) };
+    let relstate = if arg_is_null(fcinfo, 2) { None } else { Some(arg_char(fcinfo, 2)) };
+    let sublsn = opt_arg_lsn(fcinfo, 3);
+    match crate::admin::binary_upgrade_add_sub_rel_state(subname, relid, relstate, sublsn) {
+        Ok(()) => ret_void(),
+        Err(e) => raise(e),
+    }
+}
+
+/// `binary_upgrade_replorigin_advance(subname, remote_commit)` (OID 6320) —
+/// non-strict. `subname` is required (the core raises on NULL); `remote_commit`
+/// is `None` for a NULL `pg_lsn`.
+fn fc_binary_upgrade_replorigin_advance(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let subname = opt_arg_text(fcinfo, 0);
+    let remote_commit = opt_arg_lsn(fcinfo, 1);
+    match crate::admin::binary_upgrade_replorigin_advance(subname, remote_commit) {
+        Ok(()) => ret_void(),
+        Err(e) => raise(e),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -1195,6 +1318,10 @@ pub fn register_misc2_builtins() {
         builtin(4083, "binary_upgrade_set_record_init_privs", 1, true, false, fc_binary_upgrade_set_record_init_privs),
         builtin(4101, "binary_upgrade_set_missing_value", 3, true, false, fc_binary_upgrade_set_missing_value),
         builtin(6312, "binary_upgrade_logical_slot_has_caught_up", 1, true, false, fc_binary_upgrade_logical_slot_has_caught_up),
+        // non-strict (proisstrict => 'f'): the adapter handles per-arg NULLs.
+        builtin(3591, "binary_upgrade_create_empty_extension", 7, false, false, fc_binary_upgrade_create_empty_extension),
+        builtin(6319, "binary_upgrade_add_sub_rel_state", 4, false, false, fc_binary_upgrade_add_sub_rel_state),
+        builtin(6320, "binary_upgrade_replorigin_advance", 2, false, false, fc_binary_upgrade_replorigin_advance),
         // ---- rowtypes.c: record I/O (record_recv deferred — `internal`
         //      StringInfo arg0 is not on the fmgr frame) ----
         builtin(2290, "record_in", 3, true, false, fc_record_in),

@@ -19,15 +19,18 @@
 //! * 6007 `pg_replication_origin_session_reset` (→ void)
 //! * 6008 `pg_replication_origin_session_is_setup` (→ bool)
 //! * 6011 `pg_replication_origin_xact_reset` (→ void)
+//! * 6009 `pg_replication_origin_session_progress` (bool → pg_lsn, NULL-able)
+//! * 6010 `pg_replication_origin_xact_setup` (pg_lsn, timestamptz → void)
+//! * 6012 `pg_replication_origin_advance` (text, pg_lsn → void)
+//! * 6013 `pg_replication_origin_progress` (text, bool → pg_lsn, NULL-able)
 //!
-//! The `pg_lsn`/`timestamptz`-bearing siblings (6009 session_progress,
-//! 6010 xact_setup, 6012 advance, 6013 progress, 6014 show_status) are NOT in
-//! this task's list and are left to their own registration.
+//! The set-returning sibling 6014 `pg_show_replication_origin_status` is an SRF
+//! and is left to its own (materialized-SRF) registration.
 
 use types_datum::Datum;
 use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
 
-use types_core::Oid;
+use types_core::{Oid, TimestampTz, XLogRecPtr};
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -45,6 +48,42 @@ fn arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
     // `VARDATA_ANY`: skip the 4-byte header on the header-ful image.
     let bytes = if image.len() >= 4 { &image[4..] } else { &[][..] };
     core::str::from_utf8(bytes).expect("origin fn: text arg not valid UTF-8")
+}
+
+/// `PG_GETARG_LSN(i)`: the `pg_lsn`/`XLogRecPtr` word.
+#[inline]
+fn arg_lsn(fcinfo: &FunctionCallInfoBaseData, i: usize) -> XLogRecPtr {
+    fcinfo.arg(i).expect("origin fn: missing pg_lsn arg").value.as_u64()
+}
+
+/// `PG_GETARG_TIMESTAMPTZ(i)`: an 8-byte microsecond `TimestampTz` word.
+#[inline]
+fn arg_timestamptz(fcinfo: &FunctionCallInfoBaseData, i: usize) -> TimestampTz {
+    fcinfo.arg(i).expect("origin fn: missing timestamptz arg").value.as_i64()
+}
+
+/// `PG_GETARG_BOOL(i)`.
+#[inline]
+fn arg_bool(fcinfo: &FunctionCallInfoBaseData, i: usize) -> bool {
+    fcinfo.arg(i).expect("origin fn: missing bool arg").value.as_bool()
+}
+
+/// `PG_RETURN_LSN(v)`: a `pg_lsn`/`XLogRecPtr` result word.
+#[inline]
+fn ret_lsn(v: XLogRecPtr) -> Datum {
+    Datum::from_u64(v)
+}
+
+/// Set a NULL-able `pg_lsn` result; `None` is the C `PG_RETURN_NULL()`.
+#[inline]
+fn ret_lsn_opt(fcinfo: &mut FunctionCallInfoBaseData, v: Option<XLogRecPtr>) -> Datum {
+    match v {
+        Some(l) => ret_lsn(l),
+        None => {
+            fcinfo.set_result_null(true);
+            ret_void()
+        }
+    }
 }
 
 /// `PG_RETURN_OID(v)`: the assigned origin oid in the low 32 bits of the word.
@@ -133,6 +172,33 @@ fn fc_pg_replication_origin_xact_reset(_fcinfo: &mut FunctionCallInfoBaseData) -
     ret_void()
 }
 
+fn fc_pg_replication_origin_session_progress(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let flush = arg_bool(fcinfo, 0);
+    let res = ok(crate::pg_replication_origin_session_progress(flush));
+    ret_lsn_opt(fcinfo, res)
+}
+
+fn fc_pg_replication_origin_xact_setup(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let location = arg_lsn(fcinfo, 0);
+    let timestamp = arg_timestamptz(fcinfo, 1);
+    ok(crate::pg_replication_origin_xact_setup(location, timestamp));
+    ret_void()
+}
+
+fn fc_pg_replication_origin_advance(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let name = arg_text(fcinfo, 0);
+    let remote_commit = arg_lsn(fcinfo, 1);
+    ok(crate::pg_replication_origin_advance(name, remote_commit));
+    ret_void()
+}
+
+fn fc_pg_replication_origin_progress(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let name = arg_text(fcinfo, 0);
+    let flush = arg_bool(fcinfo, 1);
+    let res = ok(crate::pg_replication_origin_progress(name, flush));
+    ret_lsn_opt(fcinfo, res)
+}
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -168,5 +234,9 @@ pub fn register_backend_replication_logical_origin_builtins() {
         builtin(6007, "pg_replication_origin_session_reset", 0, true, false, fc_pg_replication_origin_session_reset),
         builtin(6008, "pg_replication_origin_session_is_setup", 0, true, false, fc_pg_replication_origin_session_is_setup),
         builtin(6011, "pg_replication_origin_xact_reset", 0, true, false, fc_pg_replication_origin_xact_reset),
+        builtin(6009, "pg_replication_origin_session_progress", 1, true, false, fc_pg_replication_origin_session_progress),
+        builtin(6010, "pg_replication_origin_xact_setup", 2, true, false, fc_pg_replication_origin_xact_setup),
+        builtin(6012, "pg_replication_origin_advance", 2, true, false, fc_pg_replication_origin_advance),
+        builtin(6013, "pg_replication_origin_progress", 2, true, false, fc_pg_replication_origin_progress),
     ]);
 }

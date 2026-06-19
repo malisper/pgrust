@@ -1168,6 +1168,70 @@ fn fc_text_format_nv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 
 // ---------------------------------------------------------------------------
+// fc_ adapters — pg_column_* introspection of "any" datum (split_format.rs).
+//
+// Both take a single `any` argument; their answer depends on the argument's
+// type `typlen`, resolved at the fmgr/Datum boundary (C: `get_typlen(
+// get_fn_expr_argtype(fcinfo->flinfo, 0))`, cached in `fn_extra` — here looked
+// up per call). The argument value itself is only dereferenced on the varlena
+// (`typlen == -1`) path (`toast_datum_size` / `toast_chunk_id`, which read the
+// header-ful `ByRef` image off the by-ref lane); the cstring (`-2`) and
+// fixed-width (`>= 0`) paths never touch the value, so a varlena `any` rides the
+// by-ref lane and a by-value `any` is wrapped as a bare `ByVal` word.
+// ---------------------------------------------------------------------------
+
+/// `(typlen, value)` for a `pg_column_*` `any` arg: resolve the argument type's
+/// `typlen` (C: `get_typlen(get_fn_expr_argtype(flinfo, 0))`, `elog(ERROR)` on a
+/// 0 / cache-miss), and build the canonical `Datum` the cores consume — the
+/// header-ful varlena image for a by-reference type (`typlen == -1`), or the
+/// bare machine word for a by-value type.
+fn pg_column_arg<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    fcinfo: &FunctionCallInfoBaseData,
+) -> (i32, CanonDatum<'mcx>) {
+    let argtypeid = backend_utils_fmgr_core::get_fn_expr_argtype(fcinfo.flinfo.as_deref(), 0);
+    let typlen = ok(backend_utils_cache_lsyscache_seams::get_typlen::call(argtypeid));
+    if typlen == 0 {
+        // C: elog(ERROR, "cache lookup failed for type %u", argtypeid).
+        raise(
+            types_error::PgError::error(format!(
+                "cache lookup failed for type {}",
+                argtypeid
+            ))
+            .with_sqlstate(types_error::ERRCODE_INTERNAL_ERROR),
+        );
+    }
+    let value = match fcinfo.ref_arg(0) {
+        // By-reference arg (varlena / cstring): the header-ful image crosses
+        // verbatim onto the canonical `Datum`.
+        Some(RefPayload::Varlena(b)) => CanonDatum::ByRef(ok(mcx::slice_in(mcx, b))),
+        Some(RefPayload::Cstring(s)) => CanonDatum::Cstring(s.clone()),
+        Some(p) => CanonDatum::ByRef(ok(mcx::slice_in(mcx, p.as_varlena().unwrap_or(&[])))),
+        // By-value arg: the bare machine word.
+        None => CanonDatum::ByVal(fcinfo.arg(0).map(|d| d.value.as_usize()).unwrap_or(0)),
+    };
+    (typlen as i32, value)
+}
+
+fn fc_pg_column_size(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let (typlen, value) = pg_column_arg(m.mcx(), fcinfo);
+    ret_i32(ok(crate::split_format::pg_column_size(m.mcx(), &value, typlen)))
+}
+
+fn fc_pg_column_toast_chunk_id(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let (typlen, value) = pg_column_arg(m.mcx(), fcinfo);
+    match ok(crate::split_format::pg_column_toast_chunk_id(&value, typlen)) {
+        Some(oid) => Datum::from_oid(oid),
+        None => {
+            fcinfo.set_result_null(true);
+            Datum::from_usize(0)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
 
@@ -1386,6 +1450,17 @@ pub fn register_varlena_array_string_builtins() {
         builtin_ns(376, "text_to_array_null", 3, fc_text_to_array_null),
         builtin(395, "array_to_text", 2, fc_array_to_text),
         builtin_ns(384, "array_to_text_null", 3, fc_array_to_text_null),
+    ]);
+}
+
+/// Register the `pg_column_size` / `pg_column_toast_chunk_id` `any`-arg
+/// introspection builtins (varlena.c). Both are `proisstrict => 't'`, not
+/// retset; OIDs / nargs transcribed from `pg_proc.dat`. The builtin `name` is
+/// the `prosrc` C symbol.
+pub fn register_varlena_pg_column_builtins() {
+    backend_utils_fmgr_core::register_builtins([
+        builtin(1269, "pg_column_size", 1, fc_pg_column_size),
+        builtin(6316, "pg_column_toast_chunk_id", 1, fc_pg_column_toast_chunk_id),
     ]);
 }
 

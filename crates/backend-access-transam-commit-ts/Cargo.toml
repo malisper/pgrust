@@ -15,6 +15,9 @@ types-error = { path = "../types-error" }
 types-storage = { path = "../types-storage" }
 types-wal = { path = "../types-wal" }
 types-guc = { path = "../types-guc" }
+types-datum = { path = "../types-datum" }
+types-fmgr = { path = "../types-fmgr" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-access-transam-slru = { path = "../backend-access-transam-slru" }
 backend-access-transam-transam = { path = "../backend-access-transam-transam" }

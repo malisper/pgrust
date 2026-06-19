@@ -126,6 +126,20 @@ fn ret_text_opt(fcinfo: &mut FunctionCallInfoBaseData, v: Option<String>) -> Dat
     }
 }
 
+/// A `numeric` arg's full varlena byte image on the by-ref lane (C:
+/// `PG_GETARG_NUMERIC(i)` / `DatumGetNumeric`). Unlike `text` (read via
+/// `arg_text_bytes`, which strips `VARHDRSZ`), a `numeric` crosses VERBATIM —
+/// the numeric value cores (`numeric_abs`/`numeric_div_trunc`/...) read the
+/// on-disk `Numeric` image INCLUDING its `VARHDRSZ` header, matching the
+/// numeric crate's own `arg_numeric` (no strip / re-stamp).
+#[inline]
+fn arg_numeric<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("dbsize fn: numeric arg missing from by-ref lane")
+}
+
 /// A scratch context for the cores that allocate their numeric round-trips
 /// through `Mcx`.
 fn scratch_mcx() -> mcx::MemoryContext {
@@ -183,6 +197,14 @@ fn fc_pg_tablespace_size_name(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 fn fc_pg_size_pretty(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let size = arg_int64(fcinfo, 0);
     let text = crate::pg_size_pretty(size);
+    ret_text(fcinfo, text)
+}
+
+/// `pg_size_pretty_numeric(numeric)` (OID 3166).
+fn fc_pg_size_pretty_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let size = arg_numeric(fcinfo, 0);
+    let text = ok(crate::pg_size_pretty_numeric(m.mcx(), size));
     ret_text(fcinfo, text)
 }
 
@@ -287,6 +309,8 @@ pub fn register_dbsize_builtins() {
         builtin(2323, "pg_tablespace_size_name", 1, true, false, fc_pg_tablespace_size_name),
         // pg_size_pretty(int8) -> text
         builtin(2288, "pg_size_pretty", 1, true, false, fc_pg_size_pretty),
+        // pg_size_pretty(numeric) -> text
+        builtin(3166, "pg_size_pretty_numeric", 1, true, false, fc_pg_size_pretty_numeric),
         // pg_size_bytes(text) -> int8
         builtin(3334, "pg_size_bytes", 1, true, false, fc_pg_size_bytes),
         // pg_relation_size(regclass, text) -> int8

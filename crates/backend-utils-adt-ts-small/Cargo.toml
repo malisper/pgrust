@@ -17,3 +17,6 @@ types-tuple = { path = "../types-tuple" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 backend-executor-spi-seams = { path = "../backend-executor-spi-seams" }
+types-datum = { path = "../types-datum" }
+types-fmgr = { path = "../types-fmgr" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }

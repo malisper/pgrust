@@ -56,6 +56,8 @@ use types_guc::guc::{PGC_POSTMASTER, PGC_S_DYNAMIC_DEFAULT, PGC_S_OVERRIDE};
 #[cfg(test)]
 mod tests;
 
+pub mod fmgr_builtins;
+
 // ===========================================================================
 // commit_ts.h constants
 // ===========================================================================
@@ -1029,4 +1031,7 @@ pub fn init_seams() {
         with_commit_ts_state(|state| TruncateCommitTs(state, oldest))
     });
     seams::advance_oldest_commit_ts_xid::set(AdvanceOldestCommitTsXid);
+
+    // Register the SQL-callable commit-timestamp fmgr builtins.
+    fmgr_builtins::register_backend_access_transam_commit_ts_builtins();
 }

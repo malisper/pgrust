@@ -33,20 +33,26 @@
 #![allow(clippy::collapsible_else_if)]
 
 extern crate alloc;
+// The `fmgr_builtins` registration layer (`Datum fn(PG_FUNCTION_ARGS)`) reads /
+// writes the fmgr call frame through the `std`-typed `types_fmgr` boundary
+// (`String`/`Vec`/`panic_any`), so this crate links `std` even though its
+// value-core families are `no_std`/`alloc`.
+extern crate std;
 
 pub mod cleanup;
+pub mod fmgr_builtins;
 pub mod rewrite;
 pub mod util;
 
-/// Install this crate's seams. This unit owns no seam crate of its own (it
-/// declares no functions that other crates call back into), so `init_seams()`
-/// is a no-op, present for the uniform `seams-init` call shape. The one outward
-/// seam it consumes — `ts_rewrite(query, text)` SPI execution — is declared in
-/// the SPI owner's `backend-executor-spi-seams` and installed by that owner.
-pub fn init_seams() {}
-
-#[cfg(test)]
-extern crate std;
+/// Install this crate's seams. It owns no outward seam crate of its own (it
+/// declares no functions that other crates call back into); its sole
+/// boot-time action is registering its `ts_rewrite` fmgr builtins into the
+/// fmgr-core builtin table (C: `fmgr_builtins[]`). The one outward seam it
+/// consumes — `ts_rewrite(query, text)` SPI execution — is declared in the SPI
+/// owner's `backend-executor-spi-seams` and installed by that owner.
+pub fn init_seams() {
+    fmgr_builtins::register_ts_small_builtins();
+}
 
 #[cfg(test)]
 mod tests;

@@ -17,15 +17,22 @@
 //! `bytea` wire image (already stamped by `pq_endtypsend`). `tsvector_setweight`
 //! takes the `"char"` weight by value.
 //!
+//! The array-typed manipulators (`tsvector_filter`,
+//! `tsvector_setweight_by_filter`, `tsvector_delete_str`/`_arr`,
+//! `tsvector_to_array`, `array_to_tsvector`) ARE registered: their `text[]` /
+//! `_char` arg crosses on the by-ref lane as its full header-ful array varlena
+//! image and the `*_datum` value cores `detoast_attr` + `deconstruct_array` it
+//! themselves; the array results are header-ful images (verbatim). The `@@`
+//! match operators `ts_match_vq` / `ts_match_qv` ARE registered (both args are
+//! header-ful `tsvector`/`tsquery` images; they dispatch through the
+//! `TS_execute` engine in-process).
+//!
 //! NOT registered here (not expressible at this boundary, skipped per the
 //! discipline rather than hollow-stubbed):
-//!  * the array-typed manipulators (`tsvector_setweight_by_filter`,
-//!    `tsvector_delete_arr`, `tsvector_filter`, `tsvector_to_array`,
-//!    `array_to_tsvector`) — their `text[]`/`anyarray` arg or result crosses the
-//!    deconstructed-array boundary the value cores take pre-split (`*_datum`);
-//!  * the set-returning `tsvector_unnest` / `ts_stat*` and the `@@` match
-//!    operators (which dispatch through the `TS_execute` engine) and
-//!    `tsvector_update_trigger` (which needs the trigger-manager frame).
+//!  * the set-returning `tsvector_unnest` / `ts_stat*` (SRFs needing the
+//!    SRF/`ReturnSetInfo` frame);
+//!  * the GiST/text-conversion match variants and `tsvector_update_trigger`
+//!    (which needs the trigger-manager frame).
 
 use std::string::{String, ToString};
 
@@ -47,6 +54,22 @@ fn arg_tsvector<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] 
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("tsvector fn: by-ref tsvector arg missing from by-ref lane")
+}
+
+/// `VARHDRSZ` — the uncompressed varlena length-word size, in bytes.
+const VARHDRSZ: usize = 4;
+
+/// `VARDATA_ANY` of a header-ful `text` arg: the payload bytes after the
+/// (4-byte uncompressed) length header. Used by `tsvector_delete_str` whose
+/// second arg is a plain `text` lexeme.
+#[inline]
+fn arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    let image = arg_tsvector(fcinfo, i);
+    if image.len() >= VARHDRSZ {
+        &image[VARHDRSZ..]
+    } else {
+        &[]
+    }
 }
 
 /// `PG_GETARG_CSTRING(i)`: the input cstring on the by-ref lane.
@@ -203,6 +226,75 @@ fn fc_tsvector_length(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 
 // ---------------------------------------------------------------------------
+// fc_ adapters — array-typed manipulators.
+//
+// The `text[]` / `_char` / `anyarray` arg crosses on the by-ref lane as its
+// full header-ful array varlena image (read via `arg_tsvector` — same
+// `as_varlena()` accessor). The `*_datum` value cores `detoast_attr` that image
+// and `deconstruct_array` it themselves. The array RESULT of `tsvector_to_array`
+// is the header-ful `text[]` image produced by `construct_text_array`; the
+// `tsvector` result of `array_to_tsvector` is its header-ful image — both cross
+// VERBATIM via `ret_varlena_image`.
+// ---------------------------------------------------------------------------
+
+fn fc_tsvector_filter(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let tsin = arg_tsvector(fcinfo, 0);
+    let weights = arg_tsvector(fcinfo, 1);
+    let image = ok(crate::op::tsvector_filter_datum(tsin, weights));
+    ret_varlena_image(fcinfo, image)
+}
+
+fn fc_tsvector_setweight_by_filter(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let cw = arg_char(fcinfo, 1);
+    let tsin = arg_tsvector(fcinfo, 0);
+    let lexemes = arg_tsvector(fcinfo, 2);
+    let image = ok(crate::op::tsvector_setweight_by_filter_datum(tsin, cw, lexemes));
+    ret_varlena_image(fcinfo, image)
+}
+
+fn fc_tsvector_delete_str(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    // `tsvector text` — the `text` lexeme crosses header-ful; the core reads its
+    // payload after the 4-byte VARHDRSZ length word.
+    let tsin = arg_tsvector(fcinfo, 0);
+    let lexeme = arg_text(fcinfo, 1);
+    let image = ok(crate::op::tsvector_delete_str(tsin, lexeme));
+    ret_varlena_image(fcinfo, image)
+}
+
+fn fc_tsvector_delete_arr(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let tsin = arg_tsvector(fcinfo, 0);
+    let lexemes = arg_tsvector(fcinfo, 1);
+    let image = ok(crate::op::tsvector_delete_arr_datum(tsin, lexemes));
+    ret_varlena_image(fcinfo, image)
+}
+
+fn fc_tsvector_to_array(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let image = ok(crate::op::tsvector_to_array(arg_tsvector(fcinfo, 0)));
+    ret_varlena_image(fcinfo, image)
+}
+
+fn fc_array_to_tsvector(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let image = ok(crate::op::array_to_tsvector_datum(arg_tsvector(fcinfo, 0)));
+    ret_varlena_image(fcinfo, image)
+}
+
+// ---------------------------------------------------------------------------
+// fc_ adapters — @@ match operators (tsvector @@ tsquery).
+// ---------------------------------------------------------------------------
+
+fn fc_ts_match_vq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let vec = arg_tsvector(fcinfo, 0);
+    let query = arg_tsvector(fcinfo, 1);
+    ret_bool(ok(crate::op::ts_match_vq(vec, query)))
+}
+
+fn fc_ts_match_qv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let query = arg_tsvector(fcinfo, 0);
+    let vec = arg_tsvector(fcinfo, 1);
+    ret_bool(ok(crate::op::ts_match_qv(query, vec)))
+}
+
+// ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
 
@@ -247,5 +339,15 @@ pub fn register_tsvector_builtins() {
         builtin(3624, "tsvector_setweight", 2, fc_tsvector_setweight),
         builtin(3625, "tsvector_concat", 2, fc_tsvector_concat),
         builtin(3711, "tsvector_length", 1, fc_tsvector_length),
+        // ---- array-typed manipulators ----
+        builtin(3319, "tsvector_filter", 2, fc_tsvector_filter),
+        builtin(3320, "tsvector_setweight_by_filter", 3, fc_tsvector_setweight_by_filter),
+        builtin(3321, "tsvector_delete_str", 2, fc_tsvector_delete_str),
+        builtin(3323, "tsvector_delete_arr", 2, fc_tsvector_delete_arr),
+        builtin(3326, "tsvector_to_array", 1, fc_tsvector_to_array),
+        builtin(3327, "array_to_tsvector", 1, fc_array_to_tsvector),
+        // ---- @@ match operators ----
+        builtin(3634, "ts_match_vq", 2, fc_ts_match_vq),
+        builtin(3635, "ts_match_qv", 2, fc_ts_match_qv),
     ]);
 }

@@ -12,9 +12,12 @@
 //! (its payload is re-framed header-ful here); `tsquerysend` returns the
 //! header-ful `bytea` wire image; `tsqueryrecv` takes the wire `StringInfo`.
 //!
-//! NOT registered here: the set-containment operators (`tsq_mcontains` /
-//! `tsq_mcontained`, registered with the GIN opclass) and the GiST support
-//! functions (`gtsquery_*`), which dispatch through the index AM, not by-OID
+//! The set-containment operators (`tsq_mcontains` / `tsq_mcontained`, the GIN
+//! opclass `@>` / `<@`) ARE registered: both args are header-ful `tsquery`
+//! images and the cores run in-process over transient `QTNode` trees.
+//!
+//! NOT registered here: the GiST support functions (`gtsquery_*`), whose args
+//! are `internal` GiST state, which dispatch through the index AM, not by-OID
 //! fmgr.
 
 use std::string::{String, ToString};
@@ -228,6 +231,22 @@ fn fc_tsquery_numnode(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 
 // ---------------------------------------------------------------------------
+// fc_ adapters — set-containment (`@>` / `<@`).
+//
+// Both args are header-ful `tsquery` images on the by-ref lane (verbatim). The
+// cores take an `Mcx` for the transient `QTNode` working trees.
+// ---------------------------------------------------------------------------
+
+fn fc_tsq_mcontains(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    ret_bool(ok(crate::op::tsq_mcontains(m.mcx(), arg_tsquery(fcinfo, 0), arg_tsquery(fcinfo, 1))))
+}
+fn fc_tsq_mcontained(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    ret_bool(ok(crate::op::tsq_mcontained(m.mcx(), arg_tsquery(fcinfo, 0), arg_tsquery(fcinfo, 1))))
+}
+
+// ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
 
@@ -273,5 +292,8 @@ pub fn register_tsquery_builtins() {
         builtin(3672, "tsquery_numnode", 1, fc_tsquery_numnode),
         builtin(5003, "tsquery_phrase", 2, fc_tsquery_phrase),
         builtin(5004, "tsquery_phrase_distance", 3, fc_tsquery_phrase_distance),
+        // ---- set-containment (GIN-opclass `@>` / `<@`) ----
+        builtin(3691, "tsq_mcontains", 2, fc_tsq_mcontains),
+        builtin(3692, "tsq_mcontained", 2, fc_tsq_mcontained),
     ]);
 }

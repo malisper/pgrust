@@ -520,6 +520,7 @@ backend-utils-adt-rangetypes-typanalyze = { path = "../backend-utils-adt-rangety
 backend-utils-adt-regexp = { path = "../backend-utils-adt-regexp" }
 backend-utils-adt-scalar-datum-core = { path = "../backend-utils-adt-scalar-datum-core" }
 backend-utils-adt-skipsupport = { path = "../backend-utils-adt-skipsupport" }
+backend-utils-adt-ts-small = { path = "../backend-utils-adt-ts-small" }
 backend-utils-adt-tsvector-core = { path = "../backend-utils-adt-tsvector-core" }
 backend-utils-adt-tsquery-core = { path = "../backend-utils-adt-tsquery-core" }
 backend-utils-adt-tsrank = { path = "../backend-utils-adt-tsrank" }
