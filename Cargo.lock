@@ -24183,6 +24183,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "types-plpgsql"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-datum",
+ "types-parsenodes",
+]
+
+[[package]]
 name = "types-portal"
 version = "0.0.0"
 dependencies = [
