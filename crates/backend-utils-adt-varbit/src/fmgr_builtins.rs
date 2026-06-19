@@ -210,6 +210,28 @@ fn fc_varbit_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     ret_bytea(fcinfo, bytes)
 }
 
+/// The full `cstring[]` `ArrayType` varlena image of arg `i` off the by-ref
+/// lane (the typmodin seam puts the array there as `RefPayload::Varlena`).
+#[inline]
+fn arg_array_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("varbit fn: cstring[] arg missing from by-ref lane")
+}
+
+fn fc_bittypmodin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let image = arg_array_bytes(fcinfo, 0).to_vec();
+    let m = scratch_mcx();
+    Datum::from_i32(ok(crate::bittypmodin(m.mcx(), &image)))
+}
+
+fn fc_varbittypmodin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let image = arg_array_bytes(fcinfo, 0).to_vec();
+    let m = scratch_mcx();
+    Datum::from_i32(ok(crate::varbittypmodin(m.mcx(), &image)))
+}
+
 fn fc_bittypmodout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let typmod = arg_int32(fcinfo, 0);
     let m = scratch_mcx();
@@ -512,8 +534,9 @@ fn builtin(
 /// `bit_recv`/`varbit_recv` read their `internal` `StringInfo *` argument off
 /// the by-ref Varlena lane (the wire bytes), mirroring `fc_charrecv`.
 ///
-/// `bittypmodin`/`varbittypmodin` are NOT registered: their argument is a
-/// `cstring[]` `ArrayType`, which has no clean by-ref-lane carrier here.
+/// `bittypmodin`/`varbittypmodin` take a `cstring[]` `ArrayType`, which the
+/// typmodin seam delivers as a full array varlena image on the by-ref Varlena
+/// lane (`arg_array_bytes`).
 pub fn register_varbit_builtins() {
     backend_utils_fmgr_core::register_builtins([
         // I/O
@@ -523,6 +546,8 @@ pub fn register_varbit_builtins() {
         builtin(1580, "varbit_out", 1, true, false, fc_varbit_out),
         builtin(2457, "bit_send", 1, true, false, fc_bit_send),
         builtin(2459, "varbit_send", 1, true, false, fc_varbit_send),
+        builtin(2919, "bittypmodin", 1, true, false, fc_bittypmodin),
+        builtin(2902, "varbittypmodin", 1, true, false, fc_varbittypmodin),
         builtin(2920, "bittypmodout", 1, true, false, fc_bittypmodout),
         builtin(2921, "varbittypmodout", 1, true, false, fc_varbittypmodout),
         // comparison (bit,bit)

@@ -829,17 +829,16 @@ fn heapgettup<'mcx>(
 
             if let Some(mut tuple) = produced {
                 let mut snap = snapshot.clone();
-                let visible = {
-                    let s = snap
-                        .as_mut()
-                        .expect("heap scan: visibility test requires a snapshot");
-                    HeapTupleSatisfiesVisibility(&mut tuple.tuple, s, cbuf)?
+                // A `None` snapshot is SnapshotAny: every tuple satisfies it
+                // (HeapTupleSatisfiesAny) and SerializationNeededForRead is
+                // false for a non-MVCC snapshot, so the serializable
+                // conflict-out check is a no-op.
+                let visible = match snap.as_mut() {
+                    Some(s) => HeapTupleSatisfiesVisibility(&mut tuple.tuple, s, cbuf)?,
+                    None => true,
                 };
 
-                {
-                    let s = snap
-                        .as_mut()
-                        .expect("heap scan: serializable conflict-out check requires a snapshot");
+                if let Some(s) = snap.as_mut() {
                     predicate_seam::heap_check_for_serializable_conflict_out::call(
                         visible, relid, &tuple.tuple, cbuf, s,
                     )?;
