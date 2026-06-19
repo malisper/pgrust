@@ -136,8 +136,23 @@ pub fn init_seams() {
     // GucVarAccessors over our own backing store, then install the vacuum-seams
     // getters that read the slot via `vars::<name>.read()`.
     {
-        use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+        use backend_utils_misc_guc_tables::{hooks, vars, GucVarAccessors};
         use crate::guc_globals as g;
+
+        // vacuum.c's `vacuum_buffer_usage_limit` GUC carries a check_hook
+        // (guc_tables.c registers `check_vacuum_buffer_usage_limit`). The GUC
+        // machinery fires it when the boot value (2048) is applied during
+        // InitializeGUCOptions, so the slot must be installed by vacuum's owner
+        // here. The body lives in `crate::check_vacuum_buffer_usage_limit`; on
+        // rejection it reports the detail through the GUC check-error channel
+        // (C's `GUC_check_errdetail`) and returns `false`.
+        hooks::check_vacuum_buffer_usage_limit.install(|newval, _extra, _source| {
+            let (ok, detail) = crate::check_vacuum_buffer_usage_limit(*newval);
+            if let Some(detail) = detail {
+                backend_utils_misc_guc_seams::guc_check_errdetail::call(detail);
+            }
+            Ok(ok)
+        });
 
         vars::vacuum_freeze_min_age.install(GucVarAccessors {
             get: g::vacuum_freeze_min_age,
