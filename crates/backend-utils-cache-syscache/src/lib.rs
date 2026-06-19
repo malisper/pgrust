@@ -1109,6 +1109,9 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::search_syscache_copy_pg_class::set(
         projections::search_syscache_copy_pg_class,
     );
+    backend_utils_cache_syscache_seams::search_syscache_copy_pg_index::set(
+        projections::search_syscache_copy_pg_index,
+    );
     backend_utils_cache_syscache_seams::lookup_proc::set(projections::lookup_proc);
     backend_utils_cache_syscache_seams::lookup_proc_result_info::set(
         projections::lookup_proc_result_info,

@@ -145,9 +145,8 @@ pub fn ExplainNode<'es, 'p>(
     let pname: alloc::string::String;
     let sname: &str;
     let mut strategy: Option<&str> = None;
-    // partialmode is set only by the Agg name case, which is not reachable until
-    // the `Agg` plan-node variant is modelled; kept for faithful emission order.
-    let partialmode: Option<&str> = None;
+    // partialmode is set by the Agg name case (DO_AGGSPLIT_* of agg->aggsplit).
+    let mut partialmode: Option<&str> = None;
     let mut operation: Option<&str> = None;
     let custom_name: Option<&str> = None;
 
@@ -306,10 +305,40 @@ pub fn ExplainNode<'es, 'p>(
             sname = "Group";
             pname = sname.into();
         }
-        // NOTE: the `Agg` / `WindowAgg` plan nodes carry extra explain detail
-        // (Aggregate strategy/partialmode; WindowAgg) that is not yet wired, so
-        // their name cases land when that detail does. Anything not matched
-        // below falls through to the C default "???".
+        ntag::T_Agg => {
+            // C explain.c T_Agg: name/strategy from agg->aggstrategy, and the
+            // "Partial"/"Finalize" prefix from DO_AGGSPLIT_* of agg->aggsplit.
+            // The verbose per-node Agg detail (show_agg_keys / show_hashagg_info)
+            // is emitted later in the detail pass; here we only set the name.
+            use types_nodes::nodeagg::{
+                do_aggsplit_combine, do_aggsplit_skipfinal, AGG_HASHED, AGG_MIXED, AGG_PLAIN,
+                AGG_SORTED,
+            };
+            let agg = plan_node.expect_agg();
+            sname = "Aggregate";
+            let (pn, st): (&str, &str) = match agg.aggstrategy {
+                AGG_PLAIN => ("Aggregate", "Plain"),
+                AGG_SORTED => ("GroupAggregate", "Sorted"),
+                AGG_HASHED => ("HashAggregate", "Hashed"),
+                AGG_MIXED => ("MixedAggregate", "Mixed"),
+                _ => ("Aggregate ???", "???"),
+            };
+            strategy = Some(st);
+            if do_aggsplit_skipfinal(agg.aggsplit) {
+                partialmode = Some("Partial");
+                pname = alloc::format!("Partial {pn}");
+            } else if do_aggsplit_combine(agg.aggsplit) {
+                partialmode = Some("Finalize");
+                pname = alloc::format!("Finalize {pn}");
+            } else {
+                partialmode = Some("Simple");
+                pname = pn.into();
+            }
+        }
+        ntag::T_WindowAgg => {
+            sname = "WindowAgg";
+            pname = sname.into();
+        }
         ntag::T_Unique => {
             sname = "Unique";
             pname = sname.into();

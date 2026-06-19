@@ -3417,6 +3417,22 @@ fn reindex_index<'mcx>(
     /* Create a new physical relation for the index */
     relcache::relation_set_new_relfilenumber::call(i_rel.rd_id, persistence)?;
 
+    /*
+     * `relation_set_new_relfilenumber` updates pg_class + `CommandCounterIncrement`,
+     * which (as in C) rebuilds the index's relcache entry with the new, empty
+     * `rd_locator`.  In the owned model `i_rel` is a projection snapshot taken
+     * *before* the change, so it still carries the OLD relfilenode (and its old,
+     * non-empty storage); `index_build`'s `RelationGetNumberOfBlocks == 0` empty
+     * check would read the stale file and abort with "index already contains
+     * data".  Drop the stale projection (keeping the lock) and re-open to obtain
+     * a fresh handle reflecting the rebuilt entry's new empty storage.  The
+     * re-open re-pins the entry; the matching `i_rel.close(NO_LOCK)` at the end
+     * of the function balances it.  The AccessExclusiveLock is already held, so
+     * the re-open is lock-idempotent.
+     */
+    i_rel.close(NO_LOCK)?;
+    let i_rel = indexam::index_open::call(mcx, index_id, ACCESS_EXCLUSIVE_LOCK)?;
+
     /* Initialize the index and rebuild */
     /* Note: we do not need to re-establish pkey setting */
     index_build(mcx, &heap_relation, &i_rel, &mut index_info)?;

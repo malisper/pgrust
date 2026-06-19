@@ -4103,6 +4103,45 @@ pub(crate) fn search_syscache_copy_pg_class<'mcx>(
     Ok(Some((tid, form)))
 }
 
+/// `SearchSysCacheCopy1(INDEXRELID, indexOid)` + `GETSTRUCT` (syscache.c): the
+/// writable `Form_pg_index` boolean state flags and the tuple's `t_self`, used
+/// by `reindex_index` / `index_set_state_flags` / cluster.c to flip
+/// `indisvalid` / `indisready` / `indislive` / `indcheckxmin` etc. `None` on a
+/// cache miss (the C `!HeapTupleIsValid` → `elog(ERROR, "cache lookup failed")`,
+/// reported by the caller).
+pub(crate) fn search_syscache_copy_pg_index<'mcx>(
+    mcx: Mcx<'mcx>,
+    index_oid: Oid,
+) -> PgResult<Option<(types_tuple::heaptuple::ItemPointerData, types_cluster::PgIndexForm)>> {
+    // `catalog/pg_index.h` attribute numbers (1-based), matching the field
+    // order consumed by `catalog_tuple_update_pg_index`.
+    const Anum_pg_index_indisprimary: i32 = 7;
+    const Anum_pg_index_indimmediate: i32 = 9;
+    const Anum_pg_index_indisclustered: i32 = 10;
+    const Anum_pg_index_indisvalid: i32 = 11;
+    const Anum_pg_index_indcheckxmin: i32 = 12;
+    const Anum_pg_index_indisready: i32 = 13;
+    const Anum_pg_index_indislive: i32 = 14;
+    const Anum_pg_index_indisreplident: i32 = 15;
+    let tuple = SearchSysCache1(mcx, INDEXRELID, SysCacheKey::Value(KeyDatum::from_oid(index_oid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let form = types_cluster::PgIndexForm {
+        indisprimary: getattr_bool(mcx, INDEXRELID, &tup, Anum_pg_index_indisprimary)?,
+        indimmediate: getattr_bool(mcx, INDEXRELID, &tup, Anum_pg_index_indimmediate)?,
+        indisclustered: getattr_bool(mcx, INDEXRELID, &tup, Anum_pg_index_indisclustered)?,
+        indisvalid: getattr_bool(mcx, INDEXRELID, &tup, Anum_pg_index_indisvalid)?,
+        indcheckxmin: getattr_bool(mcx, INDEXRELID, &tup, Anum_pg_index_indcheckxmin)?,
+        indisready: getattr_bool(mcx, INDEXRELID, &tup, Anum_pg_index_indisready)?,
+        indislive: getattr_bool(mcx, INDEXRELID, &tup, Anum_pg_index_indislive)?,
+        indisreplident: getattr_bool(mcx, INDEXRELID, &tup, Anum_pg_index_indisreplident)?,
+    };
+    let tid = tup.tuple.t_self;
+    ReleaseSysCache(tup);
+    Ok(Some((tid, form)))
+}
+
 /* ===========================================================================
  * ACL / owner catalog-row projections (the aclmask/aclcheck family in
  * catalog/aclchk.c — the F0 keystone). Each reads the object's owner OID and

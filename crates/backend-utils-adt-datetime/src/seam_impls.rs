@@ -486,6 +486,17 @@ fn seam_isoweek2j(year: i32, week: i32) -> i32 {
     crate::isoweek::isoweek2j(year, week)
 }
 
+/// `timestamptz_pl_interval(timestamp, span)` — the `timestamptz + interval`
+/// operator (timestamp.c). uuid.c reaches it via `DirectFunctionCall2` from
+/// `uuidv7(interval)`. The seam passes `span` by value; the core takes it by
+/// reference.
+fn seam_timestamptz_pl_interval(
+    timestamp: TimestampTz,
+    span: types_datetime::Interval,
+) -> types_error::PgResult<TimestampTz> {
+    crate::timestamp::timestamptz_pl_interval(timestamp, &span)
+}
+
 // ---------------------------------------------------------------------------
 // Install every inward seam this unit owns.
 // ---------------------------------------------------------------------------
@@ -494,6 +505,7 @@ pub fn init_seams() {
     use backend_utils_adt_timestamp_seams as ts;
     ts::get_current_timestamp::set(crate::timestamp::GetCurrentTimestamp);
     ts::timestamptz_to_time_t::set(crate::convert::timestamptz_to_time_t);
+    ts::timestamptz_pl_interval::set(seam_timestamptz_pl_interval);
     ts::parse_recovery_target_time::set(parse_recovery_target_time);
     ts::timestamp_difference::set(timestamp_difference);
     ts::timestamp_difference_exceeds::set(timestamp_difference_exceeds);

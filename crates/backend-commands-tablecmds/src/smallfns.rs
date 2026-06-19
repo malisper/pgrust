@@ -221,3 +221,29 @@ pub fn get_pg_class_drop_info(
 pub fn is_system_class_relid(relid: Oid, _relkind: u8, relnamespace: Oid) -> PgResult<bool> {
     Ok(backend_catalog_catalog::IsSystemClassByNamespace(relid, relnamespace))
 }
+
+/// The inline `pg_index` lookup in `RangeVarCallbackForDropRelation`
+/// (tablecmds.c): for a system index that might have been invalidated by a
+/// failed concurrent process, fetch its `indisvalid` flag.
+///
+/// ```c
+/// locTuple = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(relOid));
+/// if (!HeapTupleIsValid(locTuple))
+/// {
+///     /* Index relation is gone (concurrent drop), so we can just return. */
+///     ReleaseSysCache(tuple);
+///     return;
+/// }
+/// indexform = (Form_pg_index) GETSTRUCT(locTuple);
+/// /* Mark object as being an invalid index of system catalogs */
+/// if (!indexform->indisvalid)
+///     state->invalid_system_index = true;
+/// ReleaseSysCache(locTuple);
+/// ```
+///
+/// Returns `Ok(None)` when the `pg_index` row is gone (the C early `return`,
+/// signalling the caller to bypass the drop), or `Ok(Some(indisvalid))`.
+pub fn get_index_isvalid(relid: Oid) -> PgResult<Option<bool>> {
+    use backend_utils_cache_syscache_seams as sc;
+    Ok(sc::pg_index_flags::call(relid)?.map(|flags| flags.indisvalid))
+}

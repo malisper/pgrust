@@ -84,6 +84,7 @@ pub fn init_seams() {
 
     seam::get_pg_class_drop_info::set(smallfns::get_pg_class_drop_info);
     seam::is_system_class_relid::set(smallfns::is_system_class_relid);
+    seam::get_index_isvalid::set(smallfns::get_index_isvalid);
     seam::check_table_not_in_use::set(smallfns::check_table_not_in_use);
     seam::relation_is_other_temp::set(smallfns::relation_is_other_temp);
     seam::relation_is_logically_logged::set(smallfns::relation_is_logically_logged);
