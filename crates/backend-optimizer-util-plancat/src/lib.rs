@@ -1190,7 +1190,7 @@ pub fn build_physical_tlist<'mcx>(
             Ok(tlist)
         }
         crate::RTE_SUBQUERY => {
-            let cols = ext::subquery_physical_tlist::call(root, varno)?;
+            let cols = ext::subquery_physical_tlist::call(run, root, varno)?;
             let mut tlist: Vec<NodeId> = Vec::new();
             for (vid, resno, resjunk) in cols.into_iter() {
                 let te = make_target_entry(vid, resno, None, resjunk);
@@ -1199,7 +1199,7 @@ pub fn build_physical_tlist<'mcx>(
             Ok(tlist)
         }
         RTE_FUNCTION | RTE_TABLEFUNC | RTE_VALUES | RTE_CTE | RTE_NAMEDTUPLESTORE | RTE_RESULT => {
-            let colvars = ext::expand_rte_physical_tlist::call(root, varno)?;
+            let colvars = ext::expand_rte_physical_tlist::call(run, root, varno)?;
             match colvars {
                 None => Ok(Vec::new()), // a non-Var (dropped col) ⇒ punt
                 Some(vars) => {

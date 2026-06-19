@@ -407,7 +407,8 @@ seam_core::seam!(
     /// per-column Var nodes as arena handles, OR `None` if a non-Var (dropped
     /// column) is encountered and the caller must punt. Mirrors the
     /// build_physical_tlist loop over `colvars`.
-    pub fn expand_rte_physical_tlist(
+    pub fn expand_rte_physical_tlist<'mcx>(
+        run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         rti: Index,
     ) -> PgResult<Option<Vec<NodeId>>>
@@ -416,7 +417,8 @@ seam_core::seam!(
     /// The subquery RTE's targetlist for build_physical_tlist: each entry is
     /// `(makeVarFromTargetEntry(varno, tle), tle->resno, tle->resjunk)`. Returns
     /// the constructed Var handle + resno + resjunk per output column.
-    pub fn subquery_physical_tlist(
+    pub fn subquery_physical_tlist<'mcx>(
+        run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         rti: Index,
     ) -> PgResult<Vec<(NodeId, AttrNumber, bool)>>

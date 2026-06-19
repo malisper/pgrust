@@ -1531,6 +1531,17 @@ where
         };
     }
     match node {
+        Expr::Aggref(a) => {
+            // C `expression_tree_walker` T_Aggref: aggdirectargs (plain exprs),
+            // args (TargetEntry list — recurse into each te.expr), aggfilter.
+            on_vec!(a.aggdirectargs);
+            for te in a.args.iter_mut() {
+                if let Some(b) = te.expr.as_deref_mut() {
+                    f(b);
+                }
+            }
+            on_box!(a.aggfilter);
+        }
         Expr::WindowFunc(w) => {
             on_vec!(w.args);
             on_box!(w.aggfilter);

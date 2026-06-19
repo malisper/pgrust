@@ -239,6 +239,53 @@ pub fn init_seams() {
     // RTE field projections — `planner_rt_fetch(run, root, rti)->field`.
     rte_rtekind::set(|run, root, rti| planner_rt_fetch(run, root, rti).rtekind as RTEKind);
 
+    // plancat.c `build_physical_tlist` for the non-relation RTE kinds
+    // (FUNCTION / TABLEFUNC / VALUES / CTE / NAMEDTUPLESTORE / RESULT):
+    // `expandRTE(rte, varno, 0, VAR_RETURNING_DEFAULT, -1, true, NULL, &colvars)`
+    // (parse_relation.c). For these kinds expandRTE builds one Var per output
+    // column from the RTE's coltypes/coltypmods/colcollations; a dropped column
+    // (InvalidOid coltype) yields a non-Var (NULL Const), which build_physical_tlist
+    // treats as a signal to punt (return None here so the caller emits an empty
+    // physical tlist). RESULT/GROUP expose no columns, so coltypes is empty and the
+    // result is an empty Var list.
+    backend_optimizer_util_plancat_ext_seams::expand_rte_physical_tlist::set(|run, root, rti| {
+        // Snapshot the per-column type metadata while borrowing the RTE, then
+        // drop that borrow before allocating Var nodes into root's arena.
+        let (coltypes, coltypmods, colcollations) = {
+            let rte = planner_rt_fetch(run, root, rti);
+            (
+                rte.coltypes.iter().copied().collect::<alloc::vec::Vec<_>>(),
+                rte.coltypmods.iter().copied().collect::<alloc::vec::Vec<_>>(),
+                rte.colcollations.iter().copied().collect::<alloc::vec::Vec<_>>(),
+            )
+        };
+
+        let mut vars: alloc::vec::Vec<types_pathnodes::NodeId> = alloc::vec::Vec::new();
+        let mut varattno: i32 = 0;
+        for i in 0..coltypes.len() {
+            let coltype = coltypes[i];
+            varattno += 1;
+            // OidIsValid(coltype): an invalid type is a dropped column, which
+            // expandRTE emits as a NULL Const (a non-Var) → build_physical_tlist
+            // punts on the whole rel.
+            if coltype == types_core::primitive::Oid::default() {
+                return Ok(None);
+            }
+            let var = types_nodes::primnodes::Var {
+                varno: rti as i32,
+                varattno: varattno as types_core::primitive::AttrNumber,
+                vartype: coltype,
+                vartypmod: coltypmods[i],
+                varcollid: colcollations[i],
+                varlevelsup: 0,
+                location: -1,
+                ..Default::default()
+            };
+            vars.push(root.alloc_node(types_pathnodes::Expr::Var(var)));
+        }
+        Ok(Some(vars))
+    });
+
     // `add_base_clause_to_rel` / `add_other_rels_to_query` /
     // `remove_useless_groupby_columns` read `(rtekind, inh, relkind)` from one
     // RTE in a single projection. Declared in the init-subselect-ext consumer
