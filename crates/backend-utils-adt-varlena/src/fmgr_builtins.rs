@@ -1422,6 +1422,10 @@ pub fn register_varlena_text_bytea_byref_builtins() {
         builtin(722, "byteaSetByte", 3, fc_byteaSetByte),
         builtin(724, "byteaSetBit", 3, fc_byteaSetBit),
         // ---- text substring (position_ops.rs) ----
+        // 877/883 and 936/937 are duplicate pg_proc OIDs for the same prosrc
+        // (text_substr / text_substr_no_len); both pairs share one adapter.
+        builtin(877, "text_substr", 3, fc_text_substr),
+        builtin(883, "text_substr_no_len", 2, fc_text_substr_no_len),
         builtin(936, "text_substr", 3, fc_text_substr),
         builtin(937, "text_substr_no_len", 2, fc_text_substr_no_len),
         // ---- text overlay (position_ops.rs) ----

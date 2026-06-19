@@ -288,9 +288,51 @@ fc_in!(fc_anycompatiblerange_in, crate::anycompatiblerange_in);
 fc_in!(fc_anymultirange_in, crate::anymultirange_in);
 fc_in!(fc_anycompatiblemultirange_in, crate::anycompatiblemultirange_in);
 
-// --- pg_node_tree (in/recv throw; out/send are real, not registered here) ---
+// --- pg_node_tree (in/recv throw; out/send are real) ---
 fc_in!(fc_pg_node_tree_in, crate::pg_node_tree_in);
 fc_recv!(fc_pg_node_tree_recv, crate::pg_node_tree_recv);
+
+/// Read a `text` argument's payload off the by-ref lane: the full varlena image
+/// with its (1- or 4-byte) header stripped by `VARDATA_ANY`. The `pg_node_tree`
+/// value is stored as a `text`; `pg_node_tree_out`/`_send` are `return
+/// textout/textsend(fcinfo)`, which consume that payload.
+#[inline]
+fn arg_text_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    let image = fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("pseudotypes fn: text arg missing from by-ref lane");
+    backend_utils_adt_varlena::vardata_any_slice(image)
+}
+
+/// `pg_node_tree_out` (pseudotypes.c:338): `return textout(fcinfo)` — emit the
+/// node-tree `text` payload as a `cstring` on the by-ref lane.
+fn fc_pg_node_tree_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let out = match crate::pg_node_tree_out(m.mcx(), arg_text_bytes(fcinfo, 0)) {
+        Ok(v) => v,
+        Err(e) => raise(e),
+    };
+    // `text_to_cstring` returns a NUL-terminated cstring (`pstrdup`); the by-ref
+    // cstring lane carries the logical string, so drop one trailing NUL.
+    let bytes = out.as_slice();
+    let body = match bytes.last() {
+        Some(0) => &bytes[..bytes.len() - 1],
+        _ => bytes,
+    };
+    ret_cstring(fcinfo, String::from_utf8_lossy(body).into_owned())
+}
+
+/// `pg_node_tree_send` (pseudotypes.c:344): `return textsend(fcinfo)` — emit the
+/// node-tree `text` payload as a header-ful `bytea` on the by-ref lane.
+fn fc_pg_node_tree_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let bytea = match crate::pg_node_tree_send(m.mcx(), arg_text_bytes(fcinfo, 0)) {
+        Ok(b) => b,
+        Err(e) => raise(e),
+    };
+    ret_varlena(fcinfo, bytea.as_bytes().to_vec())
+}
 
 // --- pg_ddl_command: all four throw ---
 fc_in!(fc_pg_ddl_command_in, crate::pg_ddl_command_in);
@@ -407,9 +449,11 @@ pub fn register_pseudotypes_builtins() {
         builtin(5094, "anycompatiblerange_in", 3, true, false, fc_anycompatiblerange_in),
         builtin(4229, "anymultirange_in", 3, true, false, fc_anymultirange_in),
         builtin(4226, "anycompatiblemultirange_in", 3, true, false, fc_anycompatiblemultirange_in),
-        // ---- pg_node_tree (in/recv throw) ----
+        // ---- pg_node_tree (in/recv throw; out/send delegate to text I/O) ----
         builtin(195, "pg_node_tree_in", 1, true, false, fc_pg_node_tree_in),
+        builtin(196, "pg_node_tree_out", 1, true, false, fc_pg_node_tree_out),
         builtin(197, "pg_node_tree_recv", 1, true, false, fc_pg_node_tree_recv),
+        builtin(198, "pg_node_tree_send", 1, true, false, fc_pg_node_tree_send),
         // ---- pg_ddl_command (all four throw) ----
         builtin(86, "pg_ddl_command_in", 1, true, false, fc_pg_ddl_command_in),
         builtin(87, "pg_ddl_command_out", 1, true, false, fc_pg_ddl_command_out),
