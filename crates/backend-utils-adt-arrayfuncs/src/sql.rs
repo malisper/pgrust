@@ -497,23 +497,35 @@ fn array_replace_internal<'mcx>(
                 }
             }
         } else {
-            // Fetch this element's value (and its byte window for the probe).
+            // Fetch this element's byte window (the probe arg AND the survivor).
             let off = dataptr;
-            let elt_datum = foundation::fetch_att(array, off, typbyval, typlen);
             let after = foundation::att_addlength_pointer(off, typlen, array, off);
             dataptr = foundation::att_align_nominal(after, typalign);
 
+            // The element as it crosses the comparison seam AND feeds the result
+            // rebuild. For a by-value element this is the bare word; for a
+            // by-reference element it is the on-disk byte window. Crucially the
+            // survivor `Datum` handed to `construct_md_array` / `ArrayCastAndSet`
+            // must be a LIVE POINTER into the element bytes — NOT the in-buffer
+            // offset that `fetch_att` returns for the by-ref case — because the
+            // construct layer dereferences the pointer word (`datum_byref_image`
+            // / `PG_DETOAST_DATUM`). `elem_as_datum` yields exactly that pointer
+            // word for a by-reference element (`bytes.as_ptr()`), matching how a
+            // freshly-supplied replacement element is carried. Using the raw
+            // `fetch_att` offset here faulted (`EXC_BAD_ACCESS` at the small
+            // offset address) for by-reference element types (e.g. text[]).
+            let arg0: ArrayElementDatum<'_> = if typbyval {
+                ArrayElementDatum::ByValue(foundation::fetch_att(array, off, typbyval, typlen))
+            } else {
+                ArrayElementDatum::ByRef(&array[off..after])
+            };
+
             push_null = false;
-            push_val = elt_datum;
+            push_val = elem_as_datum(&arg0);
 
             if search_isnull {
                 // Non-null element vs. NULL search: never matches; keep as-is.
             } else {
-                let arg0: ArrayElementDatum<'_> = if typbyval {
-                    ArrayElementDatum::ByValue(elt_datum)
-                } else {
-                    ArrayElementDatum::ByRef(&array[off..after])
-                };
                 let oprresult = fmgr::element_eq::call(eq_opr, collation, arg0, search)?;
                 if oprresult {
                     changed = true;
