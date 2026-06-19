@@ -588,9 +588,18 @@ pub fn agg_fill_hash_table<'mcx>(
     // for (;;) { outerslot = fetch_input_tuple(aggstate); if (TupIsNull) break; ... }
     loop {
         let outerslot = crate::node_lifecycle::fetch_input_tuple(aggstate, estate)?;
+        // C: `if (TupIsNull(outerslot)) break;` — TupIsNull is true for both a
+        // NULL slot *and* a non-NULL but TTS_EMPTY slot. `fetch_input_tuple`
+        // faithfully returns the child's slot as-is (like C), so at end-of-scan a
+        // projecting child (e.g. a SeqScan with a computed-expr target) hands back
+        // a non-NULL but *empty* virtual result slot. Breaking only on `None`
+        // would then fall through to `lookup_hash_entries`/`prepare_hash_slot`,
+        // whose `slot_getsomeattr` deform of the empty virtual slot raises
+        // "getsomeattrs is not required to be called on a virtual tuple table
+        // slot". Mirror C by treating an empty slot as end-of-input too.
         let outerslot = match outerslot {
-            Some(s) => s,
-            None => break,
+            Some(s) if !estate.slot(s).is_empty() => s,
+            _ => break,
         };
 
         // tmpcontext->ecxt_outertuple = outerslot;
