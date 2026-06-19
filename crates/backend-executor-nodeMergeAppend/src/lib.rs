@@ -111,10 +111,7 @@ pub fn ExecInitMergeAppend<'mcx>(
 
     let mcx = estate.es_query_cxt;
 
-    let node: &'mcx MergeAppend<'mcx> = match plan_node {
-        types_nodes::nodes::Node::MergeAppend(m) => m,
-        other => panic!("castNode(MergeAppend, node) failed: {other:?}"),
-    };
+    let node: &'mcx MergeAppend<'mcx> = plan_node.expect_mergeappend();
 
     // create new MergeAppendState for our node
     //   MergeAppendState *mergestate = makeNode(MergeAppendState);
