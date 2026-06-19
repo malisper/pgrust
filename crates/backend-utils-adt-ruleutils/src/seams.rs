@@ -49,6 +49,13 @@ pub fn init_seams() {
     // The identifier-quoting helpers are now ported in this crate (lib.rs):
     // `quote.c`'s `quote_ident` and `format_type`'s qualified-name builder reach
     // them through these ruleutils-owned seams.
+    // get_range_partbound_string (ruleutils.c 13676): render one range
+    // partition bound to a SQL string. Consumed by partbounds'
+    // check_new_partition_bound for the empty-range errdetail.
+    backend_partitioning_partbounds_seams::get_range_partbound_string::set(
+        crate::expr_deparse::get_range_partbound_string,
+    );
+
     backend_utils_adt_ruleutils_seams::quote_identifier::set(crate::quote_identifier);
     backend_utils_adt_ruleutils_seams::quote_qualified_identifier::set(
         crate::quote_qualified_identifier,

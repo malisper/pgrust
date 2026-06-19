@@ -28,6 +28,7 @@ backend-nodes-read-seams = { path = "../backend-nodes-read-seams" }
 backend-optimizer-util-var-seams = { path = "../backend-optimizer-util-var-seams" }
 backend-access-common-relation-seams = { path = "../backend-access-common-relation-seams" }
 backend-utils-adt-ruleutils-seams = { path = "../backend-utils-adt-ruleutils-seams" }
+backend-partitioning-partbounds-seams = { path = "../backend-partitioning-partbounds-seams" }
 backend-utils-misc-guc-funcs-seams = { path = "../backend-utils-misc-guc-funcs-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }

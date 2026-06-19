@@ -18,3 +18,4 @@ backend-partitioning-partbounds-seams = { path = "../backend-partitioning-partbo
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
 backend-utils-adt-scalar-seams = { path = "../backend-utils-adt-scalar-seams" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }

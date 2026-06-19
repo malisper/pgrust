@@ -29,8 +29,8 @@ use types_error::{PgError, PgResult};
 use types_nodes::ddlnodes::PartitionBoundSpec;
 use types_nodes::nodes::Node;
 use types_nodes::partition::{
-    PartitionBoundInfo, PartitionBoundInfoData, PartitionKeyData, PartitionRangeDatumKind,
-    PartitionStrategy,
+    PartitionBoundInfo, PartitionBoundInfoData, PartitionDescData, PartitionKeyData,
+    PartitionRangeDatumKind, PartitionStrategy,
 };
 use types_tuple::backend_access_common_heaptuple::Datum;
 
@@ -524,7 +524,7 @@ fn make_one_partition_rbound(
 /// magnitude is the 1-based key number of the first mismatching column.
 fn partition_rbound_cmp(
     key: &PartitionKeyData<'_>,
-    datums1: &[Datum<'static>],
+    datums1: &[Datum<'_>],
     kind1: &[PartitionRangeDatumKind],
     lower1: bool,
     b2: &PartitionRangeBound,
@@ -1012,6 +1012,322 @@ pub fn compute_partition_hash_value(
 }
 
 /* ===========================================================================
+ * partition_range_bsearch / partition_hash_bsearch
+ * ========================================================================= */
+
+/// `partition_range_bsearch(partnatts, partsupfunc, partcollation, boundinfo,
+/// probe, *cmpval)` (partbounds.c) — index of the greatest range bound `<=` the
+/// probe bound, or -1 if all are greater. `*cmpval` is set to 0 on exact match,
+/// else a signed 1-based first-mismatching-column number.
+fn partition_range_bsearch(
+    key: &PartitionKeyData<'_>,
+    boundinfo: &PartitionBoundInfoData<'_>,
+    probe: &PartitionRangeBound,
+) -> PgResult<(i32, i32)> {
+    let kind_outer = boundinfo
+        .kind
+        .as_ref()
+        .expect("range boundinfo has no kind array");
+
+    let mut lo: i32 = -1;
+    let mut hi: i32 = boundinfo.ndatums - 1;
+    let mut cmpval: i32 = 0;
+
+    while lo < hi {
+        let mid = (lo + hi + 1) / 2;
+        cmpval = partition_rbound_cmp(
+            key,
+            &boundinfo.datums[mid as usize],
+            &kind_outer[mid as usize],
+            boundinfo.indexes[mid as usize] == -1,
+            probe,
+        )?;
+        if cmpval <= 0 {
+            lo = mid;
+            if cmpval == 0 {
+                break;
+            }
+        } else {
+            hi = mid - 1;
+        }
+    }
+
+    Ok((lo, cmpval))
+}
+
+/// `partition_hash_bsearch(boundinfo, modulus, remainder)` (partbounds.c) —
+/// index of the greatest `(modulus, remainder)` pair `<=` the probe, or -1 if
+/// all are greater.
+fn partition_hash_bsearch(
+    boundinfo: &PartitionBoundInfoData<'_>,
+    modulus: i32,
+    remainder: i32,
+) -> i32 {
+    let mut lo: i32 = -1;
+    let mut hi: i32 = boundinfo.ndatums - 1;
+
+    while lo < hi {
+        let mid = (lo + hi + 1) / 2;
+        let bound_modulus = boundinfo.datums[mid as usize][0].as_i32();
+        let bound_remainder = boundinfo.datums[mid as usize][1].as_i32();
+        let cmpval = partition_hbound_cmp(bound_modulus, bound_remainder, modulus, remainder);
+        if cmpval <= 0 {
+            lo = mid;
+            if cmpval == 0 {
+                break;
+            }
+        } else {
+            hi = mid - 1;
+        }
+    }
+
+    lo
+}
+
+/* ===========================================================================
+ * check_new_partition_bound
+ * ========================================================================= */
+
+/// `get_rel_name(oid)` for an overlap/conflict error message, via the lsyscache
+/// seam. A `None` (dropped catalog row) falls back to the OID text so the error
+/// still names something concrete.
+fn get_rel_name<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<String> {
+    match backend_utils_cache_lsyscache_seams::get_rel_name::call(mcx, relid)? {
+        Some(s) => Ok(s.as_str().to_string()),
+        None => Ok(format!("{relid}")),
+    }
+}
+
+/// `ERRCODE_INVALID_OBJECT_DEFINITION` (`42P17`) for the conflict/overlap
+/// errors, matching C.
+fn invalid_object_def(msg: String) -> PgError {
+    PgError::new(types_error::ERROR, msg)
+        .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
+}
+
+/// An `ERRCODE_INVALID_OBJECT_DEFINITION` error carrying both a primary message
+/// and `errdetail`.
+fn invalid_object_def_detail(msg: String, detail: String) -> PgError {
+    invalid_object_def(msg).with_detail(detail)
+}
+
+/// `check_new_partition_bound(relname, parent, spec, pstate)` (partbounds.c) —
+/// verify the new partition bound is valid and does not overlap any existing
+/// partition. Faithful 1:1 port; the parent's `PartitionKey`/`PartitionDesc` are
+/// passed in by the caller.
+pub fn check_new_partition_bound<'mcx>(
+    mcx: Mcx<'mcx>,
+    relname: &str,
+    key: &PartitionKeyData<'mcx>,
+    partdesc: &PartitionDescData<'mcx>,
+    spec: &PartitionBoundSpec<'mcx>,
+) -> PgResult<()> {
+    let boundinfo = partdesc.boundinfo.as_deref();
+    let mut with: i32 = -1;
+    let mut overlap = false;
+
+    if spec.is_default {
+        // The default partition never conflicts with any other partition's
+        // bounds; the only possible problem is that one already exists.
+        match boundinfo {
+            None => return Ok(()),
+            Some(bi) if !partition_bound_has_default(bi) => return Ok(()),
+            Some(bi) => {
+                // Default partition already exists, error out.
+                let other = get_rel_name(mcx, partdesc.oids[bi.default_index as usize])?;
+                return Err(invalid_object_def(format!(
+                    "partition \"{relname}\" conflicts with existing default partition \"{other}\""
+                )));
+            }
+        }
+    }
+
+    match key.strategy {
+        PartitionStrategy::Hash => {
+            debug_assert!(spec.strategy == PartitionStrategy::Hash as i8);
+            debug_assert!(spec.remainder >= 0 && spec.remainder < spec.modulus);
+
+            if partdesc.nparts > 0 {
+                let bi = boundinfo.expect("hash partdesc with nparts>0 has boundinfo");
+
+                // Every modulus must be a factor of the next larger modulus.
+                let offset = partition_hash_bsearch(bi, spec.modulus, spec.remainder);
+                if offset < 0 {
+                    // All existing moduli are >= the new one, so the new one
+                    // must be a factor of the smallest (first) one.
+                    let next_modulus = bi.datums[0][0].as_i32();
+                    if next_modulus % spec.modulus != 0 {
+                        let other = get_rel_name(mcx, partdesc.oids[0])?;
+                        return Err(invalid_object_def_detail(
+                            "every hash partition modulus must be a factor of the next larger modulus".to_string(),
+                            format!(
+                                "The new modulus {} is not a factor of {}, the modulus of existing partition \"{}\".",
+                                spec.modulus, next_modulus, other
+                            ),
+                        ));
+                    }
+                } else {
+                    let prev_modulus = bi.datums[offset as usize][0].as_i32();
+                    if spec.modulus % prev_modulus != 0 {
+                        let other = get_rel_name(mcx, partdesc.oids[offset as usize])?;
+                        return Err(invalid_object_def_detail(
+                            "every hash partition modulus must be a factor of the next larger modulus".to_string(),
+                            format!(
+                                "The new modulus {} is not divisible by {}, the modulus of existing partition \"{}\".",
+                                spec.modulus, prev_modulus, other
+                            ),
+                        ));
+                    }
+
+                    if (offset + 1) < bi.ndatums {
+                        let next_modulus = bi.datums[(offset + 1) as usize][0].as_i32();
+                        if next_modulus % spec.modulus != 0 {
+                            let other = get_rel_name(mcx, partdesc.oids[(offset + 1) as usize])?;
+                            return Err(invalid_object_def_detail(
+                            "every hash partition modulus must be a factor of the next larger modulus".to_string(),
+                            format!(
+                                    "The new modulus {} is not a factor of {}, the modulus of existing partition \"{}\".",
+                                    spec.modulus, next_modulus, other
+                                ),
+                        ));
+                        }
+                    }
+                }
+
+                let greatest_modulus = bi.nindexes;
+                let mut remainder = spec.remainder;
+                if remainder >= greatest_modulus {
+                    remainder %= greatest_modulus;
+                }
+
+                // Check every potentially-conflicting remainder.
+                loop {
+                    if bi.indexes[remainder as usize] != -1 {
+                        overlap = true;
+                        with = bi.indexes[remainder as usize];
+                        break;
+                    }
+                    remainder += spec.modulus;
+                    if remainder >= greatest_modulus {
+                        break;
+                    }
+                }
+            }
+        }
+        PartitionStrategy::List => {
+            debug_assert!(spec.strategy == PartitionStrategy::List as i8);
+
+            if partdesc.nparts > 0 {
+                let bi = boundinfo.expect("list partdesc with nparts>0 has boundinfo");
+                debug_assert!(
+                    bi.strategy == PartitionStrategy::List
+                        && (bi.ndatums > 0
+                            || partition_bound_accepts_nulls(bi)
+                            || partition_bound_has_default(bi))
+                );
+
+                for cell in spec.listdatums.iter() {
+                    let val = const_from_node(cell)?;
+                    if !val.constisnull {
+                        let (offset, is_equal) =
+                            partition_list_bsearch(key, bi, val.constvalue.clone())?;
+                        if offset >= 0 && is_equal {
+                            overlap = true;
+                            with = bi.indexes[offset as usize];
+                            break;
+                        }
+                    } else if partition_bound_accepts_nulls(bi) {
+                        overlap = true;
+                        with = bi.null_index;
+                        break;
+                    }
+                }
+            }
+        }
+        PartitionStrategy::Range => {
+            debug_assert!(spec.strategy == PartitionStrategy::Range as i8);
+            let lower = make_one_partition_rbound(key, -1, &spec.lowerdatums, true)?;
+            let upper = make_one_partition_rbound(key, -1, &spec.upperdatums, false)?;
+
+            // First check if the resulting range would be empty.
+            // partition_rbound_cmp cannot return zero here (the lower-bound
+            // flags differ).
+            let cmpval =
+                partition_rbound_cmp(key, &lower.datums, &lower.kind, true, &upper)?;
+            debug_assert!(cmpval != 0);
+            if cmpval > 0 {
+                let lower_str =
+                    backend_partitioning_partbounds_seams::get_range_partbound_string::call(
+                        mcx,
+                        &spec.lowerdatums,
+                    )?;
+                let upper_str =
+                    backend_partitioning_partbounds_seams::get_range_partbound_string::call(
+                        mcx,
+                        &spec.upperdatums,
+                    )?;
+                return Err(invalid_object_def_detail(
+                            format!("empty range bound specified for partition \"{relname}\""),
+                            format!(
+                        "Specified lower bound {lower_str} is greater than or equal to upper bound {upper_str}."
+                    ),
+                        ));
+            }
+
+            if partdesc.nparts > 0 {
+                let bi = boundinfo.expect("range partdesc with nparts>0 has boundinfo");
+                debug_assert!(
+                    bi.strategy == PartitionStrategy::Range
+                        && (bi.ndatums > 0 || partition_bound_has_default(bi))
+                );
+
+                // Test whether the new lower bound (inclusive) lies inside an
+                // existing partition, or in a gap.
+                let (offset, _bs_cmpval) = partition_range_bsearch(key, bi, &lower)?;
+
+                if bi.indexes[(offset + 1) as usize] < 0 {
+                    // Check that the new partition fits in the gap: the new upper
+                    // bound must be <= the lower bound of the next partition.
+                    if (offset + 1) < bi.ndatums {
+                        let datums = &bi.datums[(offset + 1) as usize];
+                        let kind_outer = bi
+                            .kind
+                            .as_ref()
+                            .expect("range boundinfo has no kind array");
+                        let kind = &kind_outer[(offset + 1) as usize];
+                        let is_lower = bi.indexes[(offset + 1) as usize] == -1;
+
+                        let cmpval =
+                            partition_rbound_cmp(key, datums, kind, is_lower, &upper)?;
+                        if cmpval < 0 {
+                            // The new partition overlaps the existing partition
+                            // between offset + 1 and offset + 2.
+                            overlap = true;
+                            with = bi.indexes[(offset + 2) as usize];
+                        }
+                    }
+                } else {
+                    // The new partition overlaps the existing partition between
+                    // offset and offset + 1.
+                    overlap = true;
+                    with = bi.indexes[(offset + 1) as usize];
+                }
+            }
+        }
+    }
+
+    if overlap {
+        debug_assert!(with >= 0);
+        let other = get_rel_name(mcx, partdesc.oids[with as usize])?;
+        return Err(invalid_object_def(format!(
+            "partition \"{relname}\" would overlap partition \"{other}\""
+        )));
+    }
+
+    Ok(())
+}
+
+/* ===========================================================================
  * seam installation
  * ========================================================================= */
 
@@ -1026,6 +1342,7 @@ pub fn init_seams() {
     seams::partition_list_datum_cmp::set(partition_list_datum_cmp);
     seams::partition_range_datum_bsearch::set(partition_range_datum_bsearch);
     seams::partition_rbound_datum_cmp::set(partition_rbound_datum_cmp);
+    seams::check_new_partition_bound::set(check_new_partition_bound);
 }
 
 /* ===========================================================================

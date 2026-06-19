@@ -1665,6 +1665,59 @@ fn get_coercion_expr_e(
  * get_const_expr (+ get_const_collation, simple_quote_literal) — C 11464-11613.
  * -------------------------------------------------------------------------- */
 
+/// `get_range_partbound_string(bound_datums)` (ruleutils.c 13676) — a C-string
+/// representation of one range partition bound, e.g. `(0)`, `(MINVALUE, 5)`.
+/// Each element is a `PartitionRangeDatum` node: the MINVALUE/MAXVALUE sentinels
+/// render as keywords, a VALUE renders its `Const` via `get_const_expr`.
+pub fn get_range_partbound_string<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    bound_datums: &[types_nodes::nodes::NodePtr<'_>],
+) -> PgResult<alloc::string::String> {
+    use types_nodes::partition::PartitionRangeDatumKind;
+
+    // memset(&context, 0, sizeof(deparse_context)); context.buf = makeStringInfo();
+    let mut context = DeparseContext {
+        buf: types_stringinfo::StringInfo::new_in(mcx),
+        namespaces: mcx::PgVec::new_in(mcx),
+        resultDesc: None,
+        targetList: mcx::PgVec::new_in(mcx),
+        windowClause: mcx::PgVec::new_in(mcx),
+        prettyFlags: 0,
+        wrapColumn: -1,
+        indentLevel: 0,
+        varprefix: false,
+        colNamesVisible: false,
+        inGroupBy: false,
+        varInOrderBy: false,
+        appendparents: None,
+    };
+
+    ch_(&mut context, b'(')?;
+    let mut sep = "";
+    for cell in bound_datums.iter() {
+        let datum = cell.as_partitionrangedatum().ok_or_else(|| {
+            elog_error("get_range_partbound_string: not a PartitionRangeDatum".to_string())
+        })?;
+
+        str_(&mut context, sep)?;
+        match datum.kind {
+            PartitionRangeDatumKind::MinValue => str_(&mut context, "MINVALUE")?,
+            PartitionRangeDatumKind::MaxValue => str_(&mut context, "MAXVALUE")?,
+            PartitionRangeDatumKind::Value => {
+                let val = datum.value.as_deref().ok_or_else(|| {
+                    elog_error("get_range_partbound_string: VALUE datum has no Const".to_string())
+                })?;
+                get_const_expr(val, &mut context, -1)?;
+            }
+        }
+        sep = ", ";
+    }
+    ch_(&mut context, b')')?;
+
+    alloc::string::String::from_utf8(context.buf.data.as_slice().to_vec())
+        .map_err(|_| elog_error("get_range_partbound_string: invalid UTF-8".to_string()))
+}
+
 /// `static void get_const_expr(Const *constval, deparse_context *context,
 /// int showtype)` — C 11464-11593.
 pub fn get_const_expr(

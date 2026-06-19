@@ -18,8 +18,10 @@ use types_core::primitive::Oid;
 use types_error::PgResult;
 use types_nodes::ddlnodes::PartitionBoundSpec;
 use types_nodes::nodes::Node;
+use types_nodes::nodes::NodePtr;
 use types_nodes::partition::{
-    PartitionBoundInfo, PartitionBoundInfoData, PartitionKeyData, PartitionRangeDatumKind,
+    PartitionBoundInfo, PartitionBoundInfoData, PartitionDescData, PartitionKeyData,
+    PartitionRangeDatumKind,
 };
 use types_rel::RelationData;
 // Canonical value type (`Datum` unification). The partition-routing seams carry
@@ -129,6 +131,57 @@ seam_core::seam!(
         nparts: usize,
         key: &PartitionKeyData<'_>,
     ) -> PgResult<(PartitionBoundInfo<'mcx>, PgVec<'mcx, i32>)>
+);
+
+seam_core::seam!(
+    /// `check_new_partition_bound(relname, parent, spec, pstate)` (partbounds.c):
+    /// check that the new partition's bound `spec` is valid and does not overlap
+    /// any existing partition of the parent. The parent's `PartitionKey` and
+    /// `PartitionDesc` (whose `boundinfo`/`oids` the overlap search walks) are
+    /// passed in by the caller (which holds the parent open). On a conflict or an
+    /// empty/invalid range the body `ereport(ERROR)`s, carried on `Err`. All
+    /// three strategies (HASH/LIST/RANGE) are covered.
+    pub fn check_new_partition_bound<'mcx>(
+        mcx: Mcx<'mcx>,
+        relname: &str,
+        key: &PartitionKeyData<'_>,
+        partdesc: &PartitionDescData<'_>,
+        spec: &PartitionBoundSpec<'_>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `check_default_partition_contents(parent, default_rel, new_spec)`
+    /// (partbounds.c): when a DEFAULT partition already exists, verify it holds
+    /// no row that would now belong to the partition being added (the default's
+    /// constraint tightens). Reached ONLY on the `OidIsValid(defaultPartOid)`
+    /// leg of `DefineRelation`'s partition block — i.e. when attaching under a
+    /// parent that has a default partition.
+    ///
+    /// UNINSTALLED keystone: the body needs the partition-qual generators
+    /// `get_qual_for_list` / `get_qual_for_range` (partbounds.c, unported),
+    /// `PartConstraintImpliedByRelConstraint` (tablecmds.c, unported), and the
+    /// executor's `ExecPrepareExpr` / `ExecCheck` over a full table scan (also
+    /// unported). Until those land this seam stays a loud declared panic; the
+    /// common CREATE TABLE PARTITION OF path (no pre-existing default partition)
+    /// never reaches it.
+    pub fn check_default_partition_contents<'mcx>(
+        mcx: Mcx<'mcx>,
+        parent: &RelationData<'_>,
+        default_rel: &RelationData<'_>,
+        new_spec: &PartitionBoundSpec<'_>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `get_range_partbound_string(bound_datums)` (ruleutils.c): a C-string
+    /// rendering of one range partition bound, e.g. `(0)` / `(MINVALUE, 5)`.
+    /// Deparses each `PartitionRangeDatum` (MINVALUE/MAXVALUE sentinels or a
+    /// `get_const_expr`-deparsed `Const`). Installed by the ruleutils owner.
+    pub fn get_range_partbound_string<'mcx>(
+        mcx: Mcx<'mcx>,
+        bound_datums: &[NodePtr<'_>],
+    ) -> PgResult<::std::string::String>
 );
 
 seam_core::seam!(
