@@ -493,16 +493,34 @@ pub fn transformContainerSubscripts<'mcx>(
 /// The integer / float-fits-int / boolean / NULL arms are pure. The string,
 /// bitstring and numeric (oversize-float) arms call `DirectFunctionCall` of
 /// `numeric_in` / `bit_in` / `CStringGetDatum` which produce a by-reference
-/// `Datum` — that by-reference Datum bridge is unported workspace-wide (no
-/// pointer lane on the canonical `Datum`), so those arms mirror-PG-and-panic.
+/// `Datum`; the bitstring and numeric input-function calls reach their owners
+/// through outward seams, with the literal's source location attached to any
+/// error so a bad literal reports the same `LINE`/caret as C.
 ///
 /// Takes `mcx` explicitly: C's `make_const` allocates the `Const` in the
 /// caller's current context; the owned `ParseState` carries no arena field.
 pub fn make_const<'mcx>(
     mcx: Mcx<'mcx>,
-    _pstate: &ParseState<'_>,
+    pstate: &ParseState<'_>,
     aconst: &A_Const<'_>,
 ) -> PgResult<Const> {
+    // `setup_parser_errposition_callback(&pcbstate, pstate, aconst->location)`
+    // arranges to report the literal's source location if the type's input
+    // function (`numeric_in` / `bit_in`) raises an error. The ambient
+    // error-context callback chain is retired here (docs/query-lifecycle-raii.md);
+    // the location is instead attached at the point the fallible input-function
+    // seam returns, exactly as `pcb_error_callback` does: tag the error with
+    // `parser_errposition(pstate, aconst->location)` as the cursor position, but
+    // only when the error has none of its own (C: `if (edata->cursorpos == 0)`).
+    let attach_errpos = |mut e: PgError| -> PgError {
+        if e.cursor_position().is_none() {
+            let pos = parser_errposition(pstate, aconst.location);
+            if pos > 0 {
+                e = e.with_cursor_position(pos);
+            }
+        }
+        e
+    };
     if aconst.isnull {
         // return a null const: makeConst(UNKNOWNOID, -1, InvalidOid, -2,
         //   (Datum) 0, true, false); con->location = aconst->location;
@@ -546,7 +564,8 @@ pub fn make_const<'mcx>(
                     let bytes = backend_parser_small1_seams::numeric_in::call(
                         mcx,
                         f.fval.as_str(),
-                    )?;
+                    )
+                    .map_err(attach_errpos)?;
                     (Datum::ByRef(bytes), NUMERICOID, -1, false)
                 }
             }
@@ -577,7 +596,8 @@ pub fn make_const<'mcx>(
             let bytes = backend_parser_small1_seams::bit_in::call(
                 mcx,
                 b.bsval.as_str().as_bytes(),
-            )?;
+            )
+            .map_err(attach_errpos)?;
             (Datum::ByRef(bytes), BITOID, -1, false)
         }
         _ => {
