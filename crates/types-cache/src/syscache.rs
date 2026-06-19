@@ -97,6 +97,13 @@ pub struct AuthIdRow<'mcx> {
     pub rolname: mcx::PgString<'mcx>,
     /// `rolsuper` — has superuser privilege.
     pub rolsuper: bool,
+    /// `rolinherit` — inherits privileges of roles it is a member of.
+    pub rolinherit: bool,
+    /// `rolcreaterole` — role can create more roles (`has_createrole_privilege`,
+    /// aclchk.c).
+    pub rolcreaterole: bool,
+    /// `rolcreatedb` — role can create databases.
+    pub rolcreatedb: bool,
     /// `rolcanlogin` — role can log in.
     pub rolcanlogin: bool,
     /// `rolreplication` — role has explicit REPLICATION privilege.
@@ -106,6 +113,10 @@ pub struct AuthIdRow<'mcx> {
     pub rolbypassrls: bool,
     /// `rolconnlimit` — per-role connection limit (`-1` means no limit).
     pub rolconnlimit: i32,
+    /// `rolpassword` — `Some(text)` or `None` when SQL NULL.
+    pub rolpassword: Option<mcx::PgString<'mcx>>,
+    /// `rolvaliduntil` — `Some(ts)` or `None` when SQL NULL.
+    pub rolvaliduntil: Option<types_core::primitive::TimestampTz>,
 }
 
 /// Result of the `get_role_password` `SearchSysCache1(AUTHNAME)` lookup
@@ -144,6 +155,27 @@ pub struct AuthMembersRow {
     /// `inherit_option` — the grant is inherited (`WITH INHERIT TRUE`).
     pub inherit_option: bool,
     /// `set_option` — the grant permits `SET ROLE` (`WITH SET TRUE`).
+    pub set_option: bool,
+}
+
+/// Full projection of one `pg_auth_members` row (all `Form_pg_auth_members`
+/// columns) as `commands/user.c` reads it off `SearchSysCache3(AUTHMEMROLEMEM)`
+/// / `SearchSysCacheList1(AUTHMEMROLEMEM)`.
+#[derive(Clone, Copy, Debug)]
+pub struct AuthMembersFullRow {
+    /// `oid` — the grant's OID.
+    pub oid: types_core::Oid,
+    /// `roleid` — the role the grant is on.
+    pub roleid: types_core::Oid,
+    /// `member` — the member role.
+    pub member: types_core::Oid,
+    /// `grantor` — who granted the membership.
+    pub grantor: types_core::Oid,
+    /// `admin_option` — granted WITH ADMIN OPTION.
+    pub admin_option: bool,
+    /// `inherit_option` — exercise privileges without SET ROLE.
+    pub inherit_option: bool,
+    /// `set_option` — may SET ROLE to the target.
     pub set_option: bool,
 }
 

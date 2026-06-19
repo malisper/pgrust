@@ -3,10 +3,11 @@
 //! `PasswordType` enum (`libpq/crypt.h`).
 //!
 //! Trimmed to the columns user.c reads/writes: the `*Form` views are the
-//! `GETSTRUCT` projections, `New*Record` the freshly-assembled tuples, and the
-//! `*Update` structs the per-attribute `heap_modify_tuple` deltas. The opaque
-//! `TupleHandle`/`CatCListHandle` tokens stand in for `HeapTuple`/`CatCList *`
-//! handles owned by the not-yet-ported syscache.
+//! `GETSTRUCT` projections (read by the syscache value seams and returned to
+//! user.c by value — no opaque tuple handle, mirroring
+//! `SearchSysCache`/`GETSTRUCT`/`ReleaseSysCache` collapsed into one
+//! projection), `New*Record` the freshly-assembled tuples, and the `*Update`
+//! structs the per-attribute `heap_modify_tuple` deltas.
 
 #![allow(non_camel_case_types)]
 
@@ -28,41 +29,10 @@ pub enum PasswordType {
 /// `STATUS_OK` (`c.h`): the success return of `plain_crypt_verify`.
 pub const STATUS_OK: i32 = 0;
 
-/// Opaque handle for a located/cached `HeapTuple`.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct TupleHandle {
-    token: u64,
-}
-
-impl TupleHandle {
-    /// Wrap a backend-assigned tuple token.
-    pub fn new(token: u64) -> Self {
-        Self { token }
-    }
-    /// The backend token this handle refers to.
-    pub fn token(&self) -> u64 {
-        self.token
-    }
-}
-
-/// Opaque handle for a `CatCList *` returned by `SearchSysCacheList1`.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct CatCListHandle {
-    token: u64,
-}
-
-impl CatCListHandle {
-    /// Wrap a backend-assigned cache-list token.
-    pub fn new(token: u64) -> Self {
-        Self { token }
-    }
-    /// The backend token this handle refers to.
-    pub fn token(&self) -> u64 {
-        self.token
-    }
-}
-
-/// The fields of a `pg_authid` row user.c reads via `GETSTRUCT(tuple)`.
+/// The fields of a `pg_authid` row user.c reads off the looked-up tuple
+/// (`GETSTRUCT(tuple)` for the fixed columns, `heap_getattr` for the nullable
+/// `rolpassword`/`rolvaliduntil`). The value seams project all of these in one
+/// pass so user.c never holds a tuple handle.
 #[derive(Clone, Debug, Default)]
 pub struct AuthIdForm {
     /// `oid`.
@@ -73,6 +43,12 @@ pub struct AuthIdForm {
     pub rolsuper: bool,
     /// `rolinherit`.
     pub rolinherit: bool,
+    /// `rolpassword` — `Some(text)` or `None` when the column is SQL NULL
+    /// (read by `RenameRole` to decide whether to clear an MD5 hash).
+    pub rolpassword: Option<String>,
+    /// `rolvaliduntil` — `Some(ts)` or `None` when SQL NULL (read by
+    /// `AlterRole` to preserve the existing expiry when re-encrypting).
+    pub rolvaliduntil: Option<TimestampTz>,
 }
 
 /// The columns user.c assembles for a brand-new `pg_authid` tuple.

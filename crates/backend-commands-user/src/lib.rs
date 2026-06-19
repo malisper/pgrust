@@ -621,7 +621,7 @@ pub fn CreateRole<'mcx>(
         let thisrole_oidlist = vec![roleid];
 
         for oldrole in &addroleto {
-            let (oldroletup, oldroleform) = seam::get_rolespec_tuple::call(oldrole.clone())?;
+            let oldroleform = seam::get_rolespec_tuple::call(mcx, oldrole.clone())?;
             let oldroleid = oldroleform.oid;
             let oldrolename = oldroleform.rolname.clone();
 
@@ -637,8 +637,6 @@ pub fn CreateRole<'mcx>(
                 InvalidOid,
                 &popt,
             )?;
-
-            seam::release_sys_cache::call(oldroletup)?;
         }
     }
 
@@ -881,7 +879,7 @@ pub fn AlterRole<'mcx>(
      */
     let pg_authid_rel = seam::table_open::call(AuthIdRelationId, RowExclusiveLock)?;
 
-    let (tuple, authform) = seam::get_rolespec_tuple::call(stmt_role)?;
+    let authform = seam::get_rolespec_tuple::call(mcx, stmt_role)?;
     let rolename = authform.rolname.clone();
     let roleid = authform.oid;
 
@@ -1000,7 +998,7 @@ pub fn AlterRole<'mcx>(
         Some(seam::timestamptz_in::call(validUntil.clone().unwrap_or_default())?)
     } else {
         /* fetch existing setting in case hook needs it */
-        seam::authid_validuntil::call(tuple)?
+        authform.rolvaliduntil
     };
 
     /*
@@ -1097,8 +1095,6 @@ pub fn AlterRole<'mcx>(
 
     seam::invoke_object_post_alter_hook_authid::call(roleid)?;
 
-    seam::release_sys_cache::call(tuple)?;
-
     let popt = InitGrantRoleOptions();
 
     /*
@@ -1162,7 +1158,7 @@ fn finish_alter_err(msg: &str, detail: String, fname: &'static str) -> PgResult<
  * ========================================================================= */
 
 /// `AlterRoleSet(stmt)` — ALTER ROLE … SET.
-pub fn AlterRoleSet(stmt: &AlterRoleSetStmt) -> PgResult<Oid> {
+pub fn AlterRoleSet<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterRoleSetStmt) -> PgResult<Oid> {
     let mut databaseid: Oid = InvalidOid;
     let mut roleid: Oid = InvalidOid;
 
@@ -1171,7 +1167,7 @@ pub fn AlterRoleSet(stmt: &AlterRoleSetStmt) -> PgResult<Oid> {
     if let Some(role_spec) = &stmt_role {
         seam::check_rolespec_name::call(role_spec.clone(), "Cannot alter reserved roles.".to_string())?;
 
-        let (roletuple, roleform) = seam::get_rolespec_tuple::call(role_spec.clone())?;
+        let roleform = seam::get_rolespec_tuple::call(mcx, role_spec.clone())?;
         roleid = roleform.oid;
 
         /*
@@ -1211,8 +1207,6 @@ pub fn AlterRoleSet(stmt: &AlterRoleSetStmt) -> PgResult<Oid> {
                 .finish(here("AlterRoleSet"))
                 .map(|()| InvalidOid);
         }
-
-        seam::release_sys_cache::call(roletuple)?;
     }
 
     /* look up and lock the database, if specified */
@@ -1257,7 +1251,7 @@ pub fn AlterRoleSet(stmt: &AlterRoleSetStmt) -> PgResult<Oid> {
  * ========================================================================= */
 
 /// `DropRole(stmt)` — DROP ROLE.
-pub fn DropRole(stmt: &DropRoleStmt) -> PgResult<()> {
+pub fn DropRole<'mcx>(mcx: Mcx<'mcx>, stmt: &DropRoleStmt) -> PgResult<()> {
     let mut role_oids: Vec<Oid> = Vec::new();
 
     if !have_createrole_privilege()? {
@@ -1287,7 +1281,7 @@ pub fn DropRole(stmt: &DropRoleStmt) -> PgResult<()> {
         }
         let role = rolspec.rolename.clone().unwrap_or_default();
 
-        let tuple = match seam::authid_by_name::call(role.clone())? {
+        let roleform = match seam::authid_by_name::call(mcx, role.clone())? {
             Some(t) => t,
             None => {
                 if !stmt.missing_ok {
@@ -1304,7 +1298,6 @@ pub fn DropRole(stmt: &DropRoleStmt) -> PgResult<()> {
             }
         };
 
-        let roleform = seam::authid_form::call(tuple)?;
         let roleid = roleform.oid;
 
         if roleid == seam::get_user_id::call()? {
@@ -1354,9 +1347,6 @@ pub fn DropRole(stmt: &DropRoleStmt) -> PgResult<()> {
         /* DROP hook for the role being removed */
         seam::invoke_object_drop_hook_authid::call(roleid)?;
 
-        /* Don't leak the syscache tuple */
-        seam::release_sys_cache::call(tuple)?;
-
         /*
          * Lock the role, so nobody can add dependencies to her while we drop
          * her.  We keep the lock until the end of transaction.
@@ -1398,7 +1388,7 @@ pub fn DropRole(stmt: &DropRoleStmt) -> PgResult<()> {
         /*
          * Re-find the pg_authid tuple.
          */
-        let tuple = match seam::authid_by_oid::call(roleid)? {
+        let roleform = match seam::authid_by_oid::call(mcx, roleid)? {
             Some(t) => t,
             None => {
                 return ereport(ERROR)
@@ -1406,7 +1396,6 @@ pub fn DropRole(stmt: &DropRoleStmt) -> PgResult<()> {
                     .finish(here("DropRole"))
             }
         };
-        let roleform = seam::authid_form::call(tuple)?;
 
         /*
          * Check for pg_shdepend entries depending on this role.
@@ -1427,8 +1416,6 @@ pub fn DropRole(stmt: &DropRoleStmt) -> PgResult<()> {
          * Remove the role from the pg_authid table
          */
         seam::delete_authid::call(pg_authid_rel, roleid)?;
-
-        seam::release_sys_cache::call(tuple)?;
 
         /*
          * Remove any comments or security labels on this role.
@@ -1456,10 +1443,14 @@ pub fn DropRole(stmt: &DropRoleStmt) -> PgResult<()> {
  * ========================================================================= */
 
 /// `RenameRole(oldname, newname)` — rename a role.
-pub fn RenameRole(oldname: &str, newname: &str) -> PgResult<ObjectAddress> {
+pub fn RenameRole<'mcx>(
+    mcx: Mcx<'mcx>,
+    oldname: &str,
+    newname: &str,
+) -> PgResult<ObjectAddress> {
     let rel = seam::table_open::call(AuthIdRelationId, RowExclusiveLock)?;
 
-    let oldtuple = match seam::authid_by_name::call(oldname.to_string())? {
+    let authform = match seam::authid_by_name::call(mcx, oldname.to_string())? {
         Some(t) => t,
         None => {
             return ereport(ERROR)
@@ -1470,7 +1461,6 @@ pub fn RenameRole(oldname: &str, newname: &str) -> PgResult<ObjectAddress> {
         }
     };
 
-    let authform = seam::authid_form::call(oldtuple)?;
     let roleid = authform.oid;
 
     if roleid == seam::get_session_user_id::call()? {
@@ -1550,8 +1540,7 @@ pub fn RenameRole(oldname: &str, newname: &str) -> PgResult<ObjectAddress> {
     }
 
     /* OK, construct the modified tuple */
-    let datum = seam::authid_password::call(oldtuple)?;
-    let clear_md5 = match &datum {
+    let clear_md5 = match &authform.rolpassword {
         Some(pw) => seam::get_password_type::call(pw.clone())? == PasswordType::Md5,
         None => false,
     };
@@ -1568,8 +1557,6 @@ pub fn RenameRole(oldname: &str, newname: &str) -> PgResult<ObjectAddress> {
     seam::invoke_object_post_alter_hook_authid::call(roleid)?;
 
     let address = ObjectAddressSet(AuthIdRelationId, roleid);
-
-    seam::release_sys_cache::call(oldtuple)?;
 
     /*
      * Close pg_authid, but keep lock till commit.
@@ -1860,7 +1847,7 @@ fn AddRoleMems<'mcx>(
      */
     if popt.admin && grantorId != BOOTSTRAP_SUPERUSERID {
         /* Get the list of members for this role. */
-        let (memlist, members) = seam::authmem_list_by_role::call(roleid)?;
+        let members = seam::authmem_list_by_role::call(mcx, roleid)?;
 
         /*
          * Figure out what would happen if we removed all existing grants to
@@ -1870,7 +1857,6 @@ fn AddRoleMems<'mcx>(
         for iditem in memberIds.iter() {
             let memberid = *iditem;
             if memberid == BOOTSTRAP_SUPERUSERID {
-                seam::release_sys_cache_list::call(memlist)?;
                 return ereport(ERROR)
                     .errcode(ERRCODE_INVALID_GRANT_OPERATION)
                     .errmsg(format!(
@@ -1897,7 +1883,6 @@ fn AddRoleMems<'mcx>(
             i += 1;
         }
         if i >= members.len() {
-            seam::release_sys_cache_list::call(memlist)?;
             return ereport(ERROR)
                 .errcode(ERRCODE_INVALID_GRANT_OPERATION)
                 .errmsg(format!(
@@ -1906,8 +1891,6 @@ fn AddRoleMems<'mcx>(
                 ))
                 .finish(here("AddRoleMems"));
         }
-
-        seam::release_sys_cache_list::call(memlist)?;
     }
 
     /* Now perform the catalog updates. */
@@ -1915,15 +1898,14 @@ fn AddRoleMems<'mcx>(
         let memberid = *iditem;
 
         /* Find any existing tuple */
-        let authmem_tuple = seam::authmem_by_keys::call(roleid, memberid, grantorId)?;
+        let authmem_tuple = seam::authmem_by_keys::call(mcx, roleid, memberid, grantorId)?;
 
         /*
          * If we found a tuple, update it with new option values, unless there
          * are no changes, in which case issue a WARNING.  If we didn't find a
          * tuple, just insert one.
          */
-        if let Some(authmem_tuple) = authmem_tuple {
-            let authmem_form = seam::authmem_form::call(authmem_tuple)?;
+        if let Some(authmem_form) = authmem_tuple {
             let mut update = AuthMemUpdate::default();
             let mut at_least_one_change = false;
 
@@ -1958,13 +1940,10 @@ fn AddRoleMems<'mcx>(
                         seam::get_user_name_from_id::call(mcx, grantorId, false)?
                     ))
                     .finish(here("AddRoleMems"))?;
-                seam::release_sys_cache::call(authmem_tuple)?;
                 continue;
             }
 
             seam::update_authmem_by_oid::call(pg_authmem_rel, authmem_form.oid, update)?;
-
-            seam::release_sys_cache::call(authmem_tuple)?;
         } else {
             /*
              * The values for admin/set can be taken directly from 'popt'.
@@ -1980,7 +1959,7 @@ fn AddRoleMems<'mcx>(
             let inherit_option = if (popt.specified & GRANT_ROLE_SPECIFIED_INHERIT) != 0 {
                 popt.inherit
             } else {
-                let mrtup = match seam::authid_by_oid::call(memberid)? {
+                let mrform = match seam::authid_by_oid::call(mcx, memberid)? {
                     Some(t) => t,
                     None => {
                         return ereport(ERROR)
@@ -1988,10 +1967,7 @@ fn AddRoleMems<'mcx>(
                             .finish(here("AddRoleMems"))
                     }
                 };
-                let mrform = seam::authid_form::call(mrtup)?;
-                let v = mrform.rolinherit;
-                seam::release_sys_cache::call(mrtup)?;
-                v
+                mrform.rolinherit
             };
 
             /* get an OID for the new row and insert it */
@@ -2053,7 +2029,7 @@ fn DelRoleMems<'mcx>(
      */
     seam::lock_shared_object_authid::call(roleid, ShareUpdateExclusiveLock)?;
 
-    let (memlist, members) = seam::authmem_list_by_role::call(roleid)?;
+    let members = seam::authmem_list_by_role::call(mcx, roleid)?;
     let mut actions = initialize_revoke_actions(&members);
 
     /*
@@ -2104,7 +2080,6 @@ fn DelRoleMems<'mcx>(
             } else if actions[i] == RRG_REMOVE_SET_OPTION {
                 update.set_option = Some(false);
             } else {
-                seam::release_sys_cache_list::call(memlist)?;
                 return ereport(ERROR)
                     .errmsg_internal("unknown role revoke action")
                     .finish(here("DelRoleMems"));
@@ -2113,8 +2088,6 @@ fn DelRoleMems<'mcx>(
             seam::update_authmem_by_oid::call(pg_authmem_rel, members[i].oid, update)?;
         }
     }
-
-    seam::release_sys_cache_list::call(memlist)?;
 
     /*
      * Close pg_authmem, but keep lock till commit.
@@ -2904,15 +2877,15 @@ fn alter_role_arm<'mcx>(
     Ok(())
 }
 
-fn alter_role_set_arm<'mcx>(_mcx: Mcx<'mcx>, stmt: &ANode<'mcx>) -> PgResult<()> {
+fn alter_role_set_arm<'mcx>(mcx: Mcx<'mcx>, stmt: &ANode<'mcx>) -> PgResult<()> {
     let owned = convert::alter_role_set_stmt_to_owned(stmt.expect_alterrolesetstmt())?;
-    AlterRoleSet(&owned)?;
+    AlterRoleSet(mcx, &owned)?;
     Ok(())
 }
 
-fn drop_role_arm<'mcx>(stmt: &ANode<'mcx>) -> PgResult<()> {
+fn drop_role_arm<'mcx>(mcx: Mcx<'mcx>, stmt: &ANode<'mcx>) -> PgResult<()> {
     let owned = convert::drop_role_stmt_to_owned(stmt.expect_droprolestmt())?;
-    DropRole(&owned)
+    DropRole(mcx, &owned)
 }
 
 fn reassign_owned_objects_arm<'mcx>(mcx: Mcx<'mcx>, stmt: &ANode<'mcx>) -> PgResult<()> {

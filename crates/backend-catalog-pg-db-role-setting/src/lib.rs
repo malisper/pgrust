@@ -484,6 +484,13 @@ pub fn init_seams() {
     use backend_catalog_pg_db_role_setting_seams as seam;
     seam::apply_db_role_settings::set(process_db_role_settings);
     seam::alter_database_setting::set(alter_database_setting);
+
+    // user.c DROP ROLE: `DropSetting(InvalidOid, roleid)` removes the role's
+    // per-database GUC settings.
+    backend_commands_user_seams::drop_setting::set(|databaseid, roleid| {
+        let ctx = mcx::MemoryContext::new("DropSetting");
+        DropSetting(ctx.mcx(), databaseid, roleid)
+    });
 }
 
 #[cfg(test)]

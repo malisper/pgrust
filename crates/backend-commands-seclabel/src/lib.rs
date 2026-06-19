@@ -728,6 +728,12 @@ fn object_node(stmt: &SecLabelStmt) -> &Node {
 /// for every dropped object to clean up its `pg_seclabel`/`pg_shseclabel` rows.
 pub fn init_seams() {
     backend_commands_seclabel_seams::DeleteSecurityLabel::set(DeleteSecurityLabel);
+
+    // user.c DROP ROLE: `DeleteSharedSecurityLabel(roleid, AuthIdRelationId)`.
+    backend_commands_user_seams::delete_shared_security_label::set(|roleid| {
+        let ctx = mcx::MemoryContext::new("DeleteSharedSecurityLabel");
+        DeleteSharedSecurityLabel(ctx.mcx(), roleid, types_core::AUTH_ID_RELATION_ID)
+    });
 }
 
 #[cfg(test)]

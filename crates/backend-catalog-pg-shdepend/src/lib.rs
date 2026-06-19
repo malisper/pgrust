@@ -1756,6 +1756,30 @@ pub fn init_seams() {
     seams::shdepLockAndCheckObject::set(shdepLockAndCheckObject);
     seams::shdepDropOwned::set(shdepDropOwned);
     seams::shdepReassignOwned::set(shdepReassignOwned);
+
+    // user.c DROP/REASSIGN ROLE shared-dependency seams (all on
+    // AuthIdRelationId). check_shared_dependencies returns Some((detail,
+    // detail_log)) when the role still has dependents, else None.
+    backend_commands_user_seams::shdep_lock_and_check_object::set(shdepLockAndCheckObject);
+    backend_commands_user_seams::check_shared_dependencies::set(|roleid| {
+        let ctx = mcx::MemoryContext::new("checkSharedDependencies");
+        let (has_deps, detail, detail_log) =
+            checkSharedDependencies(ctx.mcx(), types_core::AUTH_ID_RELATION_ID, roleid)?;
+        if has_deps {
+            Ok(Some((
+                detail.map(|s| s.to_string()).unwrap_or_default(),
+                detail_log.map(|s| s.to_string()).unwrap_or_default(),
+            )))
+        } else {
+            Ok(None)
+        }
+    });
+    backend_commands_user_seams::shdep_drop_owned::set(|role_ids, behavior| {
+        shdepDropOwned(&role_ids, behavior)
+    });
+    backend_commands_user_seams::shdep_reassign_owned::set(|role_ids, newrole| {
+        shdepReassignOwned(&role_ids, newrole)
+    });
 }
 
 #[cfg(test)]

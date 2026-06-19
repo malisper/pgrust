@@ -567,6 +567,11 @@ fn reduce_empty(comment: Option<&str>) -> Option<&str> {
 pub fn init_seams() {
     backend_commands_comment_seams::DeleteComments::set(DeleteComments);
 
+    // user.c DROP ROLE: `DeleteSharedComments(roleid, AuthIdRelationId)`.
+    backend_commands_user_seams::delete_shared_comments::set(|roleid| {
+        DeleteSharedComments(roleid, types_core::AUTH_ID_RELATION_ID)
+    });
+
     // collationcmds.c attaches an ICU display-name comment to the collation it
     // imports: `CreateComments(collid, CollationRelationId, 0, comment)`.
     backend_commands_collationcmds_seams::create_comment::set(|collid, comment| {

@@ -507,7 +507,7 @@ fn dispatch_switch<'mcx>(
         }
 
         t if t == ntag::T_DropRoleStmt => {
-            rt::drop_role::call(parsetree)?;
+            rt::drop_role::call(mcx, parsetree)?;
         }
 
         t if t == ntag::T_ReassignOwnedStmt => {

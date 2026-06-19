@@ -1011,6 +1011,12 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::lookup_authid_by_name::set(
         projections::lookup_authid_by_name,
     );
+    backend_utils_cache_syscache_seams::lookup_authmem_by_keys::set(
+        projections::lookup_authmem_by_keys,
+    );
+    backend_utils_cache_syscache_seams::lookup_authmem_list_by_role::set(
+        projections::lookup_authmem_list_by_role,
+    );
     backend_utils_cache_syscache_seams::lookup_language::set(projections::lookup_language);
     backend_utils_cache_syscache_seams::pg_index_has_predicate::set(
         projections::pg_index_has_predicate,

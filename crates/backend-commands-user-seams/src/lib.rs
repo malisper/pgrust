@@ -17,8 +17,8 @@
 use mcx::{Mcx, PgString};
 use seam_core::seam;
 use types_authid::{
-    AuthIdForm, AuthIdUpdate, AuthMemForm, AuthMemUpdate, CatCListHandle, NewAuthMemRecord,
-    NewAuthRecord, PasswordType, TupleHandle,
+    AuthIdForm, AuthIdUpdate, AuthMemForm, AuthMemUpdate, NewAuthMemRecord, NewAuthRecord,
+    PasswordType,
 };
 use types_core::primitive::{Oid, TimestampTz};
 use types_error::PgResult;
@@ -149,33 +149,27 @@ seam!(
     pub fn get_new_oid_with_index(rel: Oid, index_id: Oid) -> PgResult<Oid>
 );
 seam!(
-    /// `SearchSysCache1(AUTHNAME, name)` — `Some(handle)` if found.
-    pub fn authid_by_name(rolename: String) -> PgResult<Option<TupleHandle>>
+    /// `SearchSysCache1(AUTHNAME, name)` + `GETSTRUCT`/`heap_getattr` projected
+    /// into `mcx`; `None` on a cache miss. (`SearchSysCache`/`GETSTRUCT`/
+    /// `ReleaseSysCache` collapse into one value projection.)
+    pub fn authid_by_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        rolename: String,
+    ) -> PgResult<Option<AuthIdForm>>
 );
 seam!(
-    /// `SearchSysCache1(AUTHOID, oid)` — `Some(handle)` if found.
-    pub fn authid_by_oid(roleid: Oid) -> PgResult<Option<TupleHandle>>
+    /// `SearchSysCache1(AUTHOID, oid)` projected into `mcx`; `None` on a cache
+    /// miss.
+    pub fn authid_by_oid<'mcx>(mcx: Mcx<'mcx>, roleid: Oid) -> PgResult<Option<AuthIdForm>>
 );
 seam!(
-    /// `GETSTRUCT(tuple)` for a cached `pg_authid` tuple.
-    pub fn authid_form(tuple: TupleHandle) -> PgResult<AuthIdForm>
-);
-seam!(
-    /// The stored password text, or `None` if NULL.
-    pub fn authid_password(tuple: TupleHandle) -> PgResult<Option<String>>
-);
-seam!(
-    /// The stored valid-until value, or `None` if NULL.
-    pub fn authid_validuntil(tuple: TupleHandle) -> PgResult<Option<TimestampTz>>
-);
-seam!(
-    /// `ReleaseSysCache(tuple)`.
-    pub fn release_sys_cache(tuple: TupleHandle) -> PgResult<()>
-);
-seam!(
-    /// `get_rolespec_tuple(role)` — locate the role and return its
-    /// `Form_pg_authid` view.
-    pub fn get_rolespec_tuple(role: RoleSpec) -> PgResult<(TupleHandle, AuthIdForm)>
+    /// `get_rolespec_tuple(role)` — locate the role and return its projected
+    /// `Form_pg_authid` view (raises `role "%s" does not exist` if not found,
+    /// like the C).
+    pub fn get_rolespec_tuple<'mcx>(
+        mcx: Mcx<'mcx>,
+        role: RoleSpec,
+    ) -> PgResult<AuthIdForm>
 );
 seam!(
     /// `heap_form_tuple` + `CatalogTupleInsert` of a fresh `pg_authid` row.
@@ -205,27 +199,23 @@ seam!(
     ) -> PgResult<()>
 );
 seam!(
-    /// `SearchSysCache3(AUTHMEMROLEMEM, roleid, member, grantor)`.
-    pub fn authmem_by_keys(
+    /// `SearchSysCache3(AUTHMEMROLEMEM, roleid, member, grantor)` + `GETSTRUCT`
+    /// projected; `None` on a cache miss.
+    pub fn authmem_by_keys<'mcx>(
+        mcx: Mcx<'mcx>,
         roleid: Oid,
         member: Oid,
         grantor: Oid,
-    ) -> PgResult<Option<TupleHandle>>
+    ) -> PgResult<Option<AuthMemForm>>
 );
 seam!(
-    /// `GETSTRUCT(tuple)` for a cached/scanned `pg_auth_members` tuple.
-    pub fn authmem_form(tuple: TupleHandle) -> PgResult<AuthMemForm>
-);
-seam!(
-    /// `SearchSysCacheList1(AUTHMEMROLEMEM, roleid)` — the list handle and the
-    /// `Form_pg_auth_members` view of every member entry, in order.
-    pub fn authmem_list_by_role(
+    /// `SearchSysCacheList1(AUTHMEMROLEMEM, roleid)` — the `Form_pg_auth_members`
+    /// view of every member entry, in catlist order (the list is released inside
+    /// the seam; the projected rows are returned by value).
+    pub fn authmem_list_by_role<'mcx>(
+        mcx: Mcx<'mcx>,
         roleid: Oid,
-    ) -> PgResult<(CatCListHandle, Vec<AuthMemForm>)>
-);
-seam!(
-    /// `ReleaseSysCacheList(list)`.
-    pub fn release_sys_cache_list(list: CatCListHandle) -> PgResult<()>
+    ) -> PgResult<Vec<AuthMemForm>>
 );
 seam!(
     /// `heap_form_tuple` + `CatalogTupleInsert` of a fresh `pg_auth_members` row

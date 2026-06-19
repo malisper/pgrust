@@ -1345,8 +1345,29 @@ pub fn aclcheck_error_type(mcx: Mcx<'_>, aclerr: AclResult, type_oid: Oid) -> Pg
 /// seams (`remove_role_from_object_acl`, `remove_role_from_init_priv`,
 /// `replace_role_in_init_priv`) stay mirror-and-panic (F2/F3) — the CATALOG row
 /// is held at `scaffold` so the seam-install guard exempts them.
+/// `has_createrole_privilege(roleid)` (aclchk.c:4169-4185) — true if `roleid`
+/// is a superuser or has `rolcreaterole`. Used where an ownership-like test is
+/// needed for role creation/alteration.
+pub fn has_createrole_privilege(roleid: Oid) -> PgResult<bool> {
+    /* Superusers bypass all permission checking. */
+    if superuser_arg::call(roleid)? {
+        return Ok(true);
+    }
+    let ctx = MemoryContext::new("has_createrole_privilege");
+    let result = match backend_utils_cache_syscache_seams::lookup_authid_by_oid::call(
+        ctx.mcx(),
+        roleid,
+    )? {
+        Some(row) => row.rolcreaterole,
+        None => false,
+    };
+    Ok(result)
+}
+
 pub fn init_seams() {
     use backend_catalog_aclchk_seams as seam;
+
+    backend_commands_user_seams::has_createrole_privilege::set(has_createrole_privilege);
 
     seam::object_aclcheck::set(|classid, objectid, roleid, mode| {
         let ctx = MemoryContext::new("object_aclcheck");

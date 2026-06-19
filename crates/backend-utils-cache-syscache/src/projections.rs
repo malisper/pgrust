@@ -19,7 +19,7 @@ use crate::{
     SearchSysCacheAttName,
     SearchSysCacheExists, SearchSysCacheList, SearchSysCacheList1, SysCacheGetAttr,
     SysCacheGetAttrNotNull, AGGFNOID, AMNAME, AMOID, AMOPOPID, AMOPSTRATEGY, AMPROCNUM, ATTNAME, ATTNUM,
-    AUTHMEMMEMROLE, AUTHNAME, AUTHOID,
+    AUTHMEMMEMROLE, AUTHMEMROLEMEM, AUTHNAME, AUTHOID,
     CASTSOURCETARGET, CLAAMNAMENSP, CLAOID, COLLNAMEENCNSP, COLLOID, CONNAMENSP, CONSTROID, CONVOID,
     DATABASEOID, ENUMOID, ENUMTYPOIDNAME, EVENTTRIGGEROID,
     FOREIGNDATAWRAPPERNAME,
@@ -1519,10 +1519,15 @@ const SQL_LANGUAGE_ID: u32 = 14;
 const Anum_pg_authid_oid: i32 = 1;
 const Anum_pg_authid_rolname: i32 = 2;
 const Anum_pg_authid_rolsuper: i32 = 3;
+const Anum_pg_authid_rolinherit: i32 = 4;
+const Anum_pg_authid_rolcreaterole: i32 = 5;
+const Anum_pg_authid_rolcreatedb_p: i32 = 6;
 const Anum_pg_authid_rolcanlogin: i32 = 7;
 const Anum_pg_authid_rolreplication: i32 = 8;
 const Anum_pg_authid_rolbypassrls: i32 = 9;
 const Anum_pg_authid_rolconnlimit: i32 = 10;
+const Anum_pg_authid_rolpassword: i32 = 11;
+const Anum_pg_authid_rolvaliduntil: i32 = 12;
 
 // `catalog/pg_language.h` attribute numbers.
 const Anum_pg_language_lanname: i32 = 2;
@@ -2893,14 +2898,30 @@ pub(crate) fn lookup_authid_by_name<'mcx>(
 }
 
 fn project_authid<'mcx>(mcx: Mcx<'mcx>, tup: &FormedTuple<'_>) -> PgResult<AuthIdRow<'mcx>> {
+    // rolpassword (nullable text): heap_getattr + TextDatumGetCString.
+    let (pw_val, pw_null) = SysCacheGetAttr(mcx, AUTHOID, tup, Anum_pg_authid_rolpassword)?;
+    let rolpassword = if pw_null {
+        None
+    } else {
+        Some(varlena_seams::text_to_cstring_v::call(mcx, &pw_val)?)
+    };
+    // rolvaliduntil (nullable timestamptz, by-value int64).
+    let (vu_val, vu_null) = SysCacheGetAttr(mcx, AUTHOID, tup, Anum_pg_authid_rolvaliduntil)?;
+    let rolvaliduntil = if vu_null { None } else { Some(byval(vu_val)?.as_i64()) };
+
     Ok(AuthIdRow {
         oid: getattr_oid(mcx, AUTHOID, tup, Anum_pg_authid_oid)?,
         rolname: getattr_name(mcx, AUTHOID, tup, Anum_pg_authid_rolname)?,
         rolsuper: getattr_bool(mcx, AUTHOID, tup, Anum_pg_authid_rolsuper)?,
+        rolinherit: getattr_bool(mcx, AUTHOID, tup, Anum_pg_authid_rolinherit)?,
+        rolcreaterole: getattr_bool(mcx, AUTHOID, tup, Anum_pg_authid_rolcreaterole)?,
+        rolcreatedb: getattr_bool(mcx, AUTHOID, tup, Anum_pg_authid_rolcreatedb_p)?,
         rolcanlogin: getattr_bool(mcx, AUTHOID, tup, Anum_pg_authid_rolcanlogin)?,
         rolreplication: getattr_bool(mcx, AUTHOID, tup, Anum_pg_authid_rolreplication)?,
         rolbypassrls: getattr_bool(mcx, AUTHOID, tup, Anum_pg_authid_rolbypassrls)?,
         rolconnlimit: getattr_i32(mcx, AUTHOID, tup, Anum_pg_authid_rolconnlimit)?,
+        rolpassword,
+        rolvaliduntil,
     })
 }
 
@@ -5718,6 +5739,68 @@ pub(crate) fn auth_members_of_member(
             inherit_option: getattr_bool(mcx, AUTHMEMMEMROLE, tup, Anum_pg_auth_members_inherit_option_b2)?,
             set_option: getattr_bool(mcx, AUTHMEMMEMROLE, tup, Anum_pg_auth_members_set_option_b2)?,
         });
+    }
+    Ok(rows)
+}
+
+// pg_auth_members attnos (pg_auth_members.h): oid=1, roleid=2, member=3,
+// grantor=4, admin_option=5, inherit_option=6, set_option=7.
+const Anum_pg_auth_members_oid: i32 = 1;
+const Anum_pg_auth_members_roleid: i32 = 2;
+const Anum_pg_auth_members_member: i32 = 3;
+const Anum_pg_auth_members_grantor: i32 = 4;
+const Anum_pg_auth_members_admin_option: i32 = 5;
+const Anum_pg_auth_members_inherit_option: i32 = 6;
+const Anum_pg_auth_members_set_option: i32 = 7;
+
+fn project_authmem_full<'mcx>(
+    mcx: Mcx<'mcx>,
+    tup: &FormedTuple<'_>,
+) -> PgResult<types_cache::AuthMembersFullRow> {
+    Ok(types_cache::AuthMembersFullRow {
+        oid: getattr_oid(mcx, AUTHMEMROLEMEM, tup, Anum_pg_auth_members_oid)?,
+        roleid: getattr_oid(mcx, AUTHMEMROLEMEM, tup, Anum_pg_auth_members_roleid)?,
+        member: getattr_oid(mcx, AUTHMEMROLEMEM, tup, Anum_pg_auth_members_member)?,
+        grantor: getattr_oid(mcx, AUTHMEMROLEMEM, tup, Anum_pg_auth_members_grantor)?,
+        admin_option: getattr_bool(mcx, AUTHMEMROLEMEM, tup, Anum_pg_auth_members_admin_option)?,
+        inherit_option: getattr_bool(mcx, AUTHMEMROLEMEM, tup, Anum_pg_auth_members_inherit_option)?,
+        set_option: getattr_bool(mcx, AUTHMEMROLEMEM, tup, Anum_pg_auth_members_set_option)?,
+    })
+}
+
+/// `SearchSysCache3(AUTHMEMROLEMEM, roleid, member, grantor)` projected to the
+/// full `pg_auth_members` row; `None` on a cache miss (user.c `AddRoleMems`).
+pub(crate) fn lookup_authmem_by_keys<'mcx>(
+    mcx: Mcx<'mcx>,
+    roleid: Oid,
+    member: Oid,
+    grantor: Oid,
+) -> PgResult<Option<types_cache::AuthMembersFullRow>> {
+    let tuple = SearchSysCache3(
+        mcx,
+        AUTHMEMROLEMEM,
+        SysCacheKey::Value(KeyDatum::from_oid(roleid)),
+        SysCacheKey::Value(KeyDatum::from_oid(member)),
+        SysCacheKey::Value(KeyDatum::from_oid(grantor)),
+    )?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let row = project_authmem_full(mcx, &tup)?;
+    ReleaseSysCache(tup);
+    Ok(Some(row))
+}
+
+/// `SearchSysCacheList1(AUTHMEMROLEMEM, roleid)` member rows projected in
+/// catlist order (user.c `AddRoleMems`/`DelRoleMems` circularity planning).
+pub(crate) fn lookup_authmem_list_by_role<'mcx>(
+    mcx: Mcx<'mcx>,
+    roleid: Oid,
+) -> PgResult<Vec<types_cache::AuthMembersFullRow>> {
+    let list = SearchSysCacheList1(mcx, AUTHMEMROLEMEM, SysCacheKey::Value(KeyDatum::from_oid(roleid)))?;
+    let mut rows = Vec::with_capacity(list.len());
+    for tup in list.iter() {
+        rows.push(project_authmem_full(mcx, tup)?);
     }
     Ok(rows)
 }

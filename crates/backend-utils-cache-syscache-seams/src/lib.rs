@@ -72,6 +72,26 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCache3(AUTHMEMROLEMEM, roleid, member, grantor)` projected to
+    /// the full `pg_auth_members` row (user.c `AddRoleMems`); `None` on a miss.
+    pub fn lookup_authmem_by_keys<'mcx>(
+        mcx: Mcx<'mcx>,
+        roleid: Oid,
+        member: Oid,
+        grantor: Oid,
+    ) -> PgResult<Option<types_cache::AuthMembersFullRow>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCacheList1(AUTHMEMROLEMEM, roleid)` member rows projected in
+    /// catlist order (user.c `AddRoleMems`/`DelRoleMems`).
+    pub fn lookup_authmem_list_by_role<'mcx>(
+        mcx: Mcx<'mcx>,
+        roleid: Oid,
+    ) -> PgResult<Vec<types_cache::AuthMembersFullRow>>
+);
+
+seam_core::seam!(
     /// `SearchSysCache1(AUTHNAME, PointerGetDatum(role))` for
     /// `get_role_password` (`libpq/crypt.c`): projects `rolpassword`
     /// (`TextDatumGetCString`) and `rolvaliduntil` (`DatumGetTimestampTz`),

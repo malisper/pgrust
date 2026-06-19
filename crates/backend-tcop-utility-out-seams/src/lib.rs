@@ -550,7 +550,7 @@ seam!(
 );
 seam!(
     /// `DropRole(stmt)` (user.c) — DROP ROLE.
-    pub fn drop_role<'mcx>(stmt: &Node<'mcx>) -> PgResult<()>
+    pub fn drop_role<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<()>
 );
 seam!(
     /// `ReassignOwnedObjects(stmt)` (user.c) — REASSIGN OWNED. Allocates the

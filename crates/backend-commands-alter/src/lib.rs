@@ -604,6 +604,7 @@ pub fn ExecRenameStmt(mcx: Mcx<'_>, stmt: &RenameStmt) -> PgResult<ObjectAddress
         ),
 
         OBJECT_ROLE => backend_commands_user::RenameRole(
+            mcx,
             stmt.subname.as_deref().unwrap_or(""),
             stmt.newname.as_deref().unwrap_or(""),
         ),
