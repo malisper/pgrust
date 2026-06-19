@@ -3138,9 +3138,7 @@ fn transformMultiAssignRef<'mcx>(
             let tle = make_target_entry(mcx, Expr::SubLink(sublink), 0, None, true)?;
             pstate.p_multiassign_exprs.push(tle);
         } else if is_rowexpr {
-            let Node::RowExpr(rexpr) = src else {
-                unreachable!()
-            };
+            let rexpr = src.into_rowexpr().unwrap_or_else(|| unreachable!("is_rowexpr guard"));
             // Transform the RowExpr, allowing SetToDefault items.
             let rexpr = transformRowExpr(pstate, rexpr, true)?;
             let nargs = match &rexpr {
@@ -3605,7 +3603,7 @@ fn transformXmlExpr<'mcx>(
     // break the names out as a separate list.
     for r_node in named_args.into_iter() {
         let r_node = mcx::PgBox::into_inner(r_node);
-        let Node::ResTarget(r) = r_node else {
+        let Some(r) = r_node.into_restarget() else {
             return Err(PgError::error(
                 "transformXmlExpr: named_args element is not a ResTarget",
             ));
