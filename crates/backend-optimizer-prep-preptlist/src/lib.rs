@@ -256,7 +256,7 @@ pub fn preprocess_targetlist<'mcx>(
         let mut vars: alloc::vec::Vec<types_nodes::primnodes::Expr> = alloc::vec::Vec::new();
         for tle in parse.returningList.iter() {
             if let Some(expr) = tle.expr.as_deref() {
-                let node = types_nodes::nodes::Node::Expr(expr.clone_in(mcx)?);
+                let node = types_nodes::nodes::Node::mk_expr(mcx, expr.clone_in(mcx)?);
                 for v in backend_optimizer_util_vars::pull_var_clause(&node, flags) {
                     vars.push(v);
                 }

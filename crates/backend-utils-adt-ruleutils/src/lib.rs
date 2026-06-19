@@ -1954,7 +1954,7 @@ fn tlist_as_node_vec<'mcx>(
     if let Some(tl) = tlist {
         out.try_reserve(tl.len()).map_err(|_| mcx.oom(0))?;
         for tle in tl.iter() {
-            out.push(mcx::alloc_in(mcx, Node::TargetEntry(tle.clone_in(mcx)?))?);
+            out.push(mcx::alloc_in(mcx, Node::mk_target_entry(mcx, tle.clone_in(mcx)?))?);
         }
     }
     Ok(out)

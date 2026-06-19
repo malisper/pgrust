@@ -519,7 +519,7 @@ pub fn ExplainNode<'es, 'p>(
         // node = (Node *) make_ands_explicit(qual);
         let exprs: alloc::vec::Vec<types_nodes::primnodes::Expr> = qual.iter().cloned().collect();
         let anded = backend_nodes_core::makefuncs::make_ands_explicit(exprs);
-        let node = Node::Expr(anded);
+        let node = Node::mk_expr(mcx, anded);
 
         let useprefix = matches!(plan_node.node_tag(), ntag::T_SubqueryScan) || es.verbose;
 
