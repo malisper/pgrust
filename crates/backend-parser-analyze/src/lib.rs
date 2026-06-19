@@ -27,6 +27,7 @@ use types_nodes::nodes::{ntag, CmdType, Node, NodePtr};
 use types_nodes::parsestmt::{ParseState, RawStmt};
 use types_nodes::rawnodes::SelectStmt;
 
+mod inline_sql;
 mod insert;
 mod locking;
 mod select;
@@ -594,6 +595,15 @@ pub fn init_seams() {
     // queryId jumbling is unported (queryId stays 0, jstate NULL) and the hook is
     // NULL by default, so this is the same no-op as run_post_parse_analyze_hook.
     backend_commands_createas_seams::jumble_and_post_analyze::set(jumble_and_post_analyze_impl);
+
+    // The SQL-function inliner body (clauses.c inline_function): clauses.c runs
+    // the catalog gates + active_fns guard + re-simplification in-crate, and
+    // rides this seam for the parser-dependent parse/gate/coerce/substitute
+    // middle. Installed here — the lowest crate owning both the parser and the
+    // fold crate's contain_* walkers without a cycle.
+    backend_optimizer_util_clauses_seams::inline_sql_function::set(
+        inline_sql::inline_sql_function,
+    );
 }
 
 /// Seam impl for the CTAS jumble + post-parse-analyze preamble (createas.c

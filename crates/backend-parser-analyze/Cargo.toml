@@ -38,6 +38,14 @@ backend-parser-agg = { path = "../backend-parser-agg" }
 backend-parser-small1 = { path = "../backend-parser-small1" }
 backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
 
+# The SQL-function inliner body (clauses.c inline_function) installed by this
+# crate: the parser driver + the fold crate's contain_*/coercion deps. All are
+# cycle-free (none depends on this impl crate).
+types-parsenodes = { path = "../types-parsenodes" }
+backend-parser-driver = { path = "../backend-parser-driver" }
+backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
+backend-optimizer-util-clauses-seams = { path = "../backend-optimizer-util-clauses-seams" }
+
 # Outward dependency seams (callees whose owners are not yet ported).
 backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-depth-seams" }
 # Inward seam this crate installs: the CTAS query-jumble + post-parse-analyze
@@ -46,8 +54,6 @@ backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-dep
 backend-commands-createas-seams = { path = "../backend-commands-createas-seams" }
 
 [dev-dependencies]
-backend-parser-driver = { path = "../backend-parser-driver" }
-types-parsenodes = { path = "../types-parsenodes" }
 # Focused seam owners installed by the milestone test (see tests.rs).
 backend-utils-adt-format-type = { path = "../backend-utils-adt-format-type" }
 backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }

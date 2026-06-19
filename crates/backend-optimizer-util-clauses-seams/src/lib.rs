@@ -49,6 +49,10 @@ pub struct PgProcSimple {
     pub prolang_is_sql: bool,
     /// True iff `proconfig` is NULL (no per-function GUC settings).
     pub proconfig_isnull: bool,
+    /// `prokind` — `PROKIND_{FUNCTION,AGGREGATE,WINDOW,PROCEDURE}` byte. Read by
+    /// `inline_function`'s paranoia gate (clauses.c:4585) and passed to
+    /// `check_sql_fn_retval`.
+    pub prokind: u8,
 }
 
 extern crate alloc;
@@ -114,13 +118,26 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `inline_function(...)` SQL-language body (clauses.c:4553 onward) — the
-    /// prosrc parse + analyze + rewrite + substitute machinery that inlines a
-    /// simple SQL-language function call. `Ok(None)` = "do not inline" (C's
-    /// many decline paths); `Ok(Some(expr))` = the inlined expression. Reached
-    /// only after the cheap in-crate catalog gates pass. `Err` carries the
-    /// parse/analyze `ereport(ERROR)`. Owner: clauses.c SQL-inliner leg
-    /// (functions.c / parser).
-    pub fn inline_sql_function(
+    /// prosqlbody-or-prosrc parse/analyze + "simple SELECT expression" gate +
+    /// `check_sql_fn_retval` type check + `substitute_actual_parameters` +
+    /// per-parameter usecount machinery that inlines a simple SQL-language
+    /// function call. `Ok(None)` = "do not inline" (C's many decline paths);
+    /// `Ok(Some(expr))` = the SUBSTITUTED inlined expression — NOT yet
+    /// recursively re-simplified (clauses.c:4890 `eval_const_expressions_mutator`
+    /// re-run, and its `active_fns` recursion guard, are run in-crate by the
+    /// `inline_function` caller, which owns the fold `EceContext`). `Err`
+    /// carries the parse/analyze `ereport(ERROR)`. Reached only after the cheap
+    /// in-crate catalog gates pass. The caller passes the already-read pg_proc
+    /// `form`, the function `prosrc`, and the cooked `prosqlbody` (`None` when
+    /// the catalog attribute is NULL). Owner: the SQL-function parse/rewrite leg
+    /// (functions.c / parser); installed from `backend-parser-analyze`, the
+    /// lowest crate that owns both the parser and the fold-crate `contain_*`
+    /// walkers without a dependency cycle.
+    pub fn inline_sql_function<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        form: &PgProcSimple,
+        prosrc: &str,
+        prosqlbody: Option<&str>,
         funcid: Oid,
         result_type: Oid,
         result_collid: Oid,
@@ -129,6 +146,19 @@ seam_core::seam!(
         funcvariadic: bool,
         estimate: bool,
     ) -> PgResult<Option<Expr>>
+);
+
+seam_core::seam!(
+    /// `inline_function`'s pg_proc body read (clauses.c:4628 `prosrc` via
+    /// `SysCacheGetAttrNotNull(PROCOID, .., Anum_pg_proc_prosrc)` + clauses.c:4646
+    /// `prosqlbody` via `SysCacheGetAttr(PROCOID, .., Anum_pg_proc_prosqlbody)`).
+    /// Returns `(prosrc, prosqlbody)` where `prosqlbody` is the cooked
+    /// node-string (the catalog stores `nodeToString(prosqlbody)`), or `None`
+    /// when the attribute is NULL. Owner: syscache (the pg_proc projection leg).
+    pub fn get_func_sql_body<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        funcid: Oid,
+    ) -> PgResult<(mcx::PgString<'mcx>, Option<mcx::PgString<'mcx>>)>
 );
 
 seam_core::seam!(

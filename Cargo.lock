@@ -13118,6 +13118,8 @@ version = "0.0.0"
 dependencies = [
  "backend-commands-createas-seams",
  "backend-nodes-core",
+ "backend-optimizer-util-clauses",
+ "backend-optimizer-util-clauses-seams",
  "backend-optimizer-util-vars",
  "backend-parser-agg",
  "backend-parser-analyze-seams",

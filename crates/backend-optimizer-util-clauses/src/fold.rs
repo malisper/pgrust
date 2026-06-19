@@ -92,8 +92,9 @@ fn datum_get_bool(d: &types_tuple::backend_access_common_heaptuple::Datum<'_>) -
 // Context + public entry points
 // ---------------------------------------------------------------------------
 
-/// `eval_const_expressions_context` (clauses.c:61). `boundParams` / `root` /
-/// `active_fns` are absent in this model (see module docs).
+/// `eval_const_expressions_context` (clauses.c:61). `boundParams` / `root` are
+/// absent in this model (see module docs); `active_fns` is present, threaded
+/// through the SQL-function inliner's recursion guard.
 struct EceContext<'mcx> {
     mcx: Mcx<'mcx>,
     /// Constant test value for the CASE construct currently being examined.
@@ -102,6 +103,9 @@ struct EceContext<'mcx> {
     estimate: bool,
     /// Recursion depth (C: `check_stack_depth()`).
     depth: u32,
+    /// `active_fns` (clauses.c:64) — funcids currently being inlined, the
+    /// recursion guard for directly/indirectly recursive SQL functions.
+    active_fns: Vec<Oid>,
 }
 
 /// C: `Node *eval_const_expressions(PlannerInfo *root, Node *node)`
@@ -112,6 +116,7 @@ pub fn eval_const_expressions(mcx: Mcx<'_>, node: Expr) -> PgResult<Expr> {
         case_val: None,
         estimate: false,
         depth: 0,
+        active_fns: Vec::new(),
     };
     mutate(node, &mut ctx)
 }
@@ -125,6 +130,7 @@ pub fn estimate_expression_value(mcx: Mcx<'_>, node: Expr) -> PgResult<Expr> {
         case_val: None,
         estimate: true,
         depth: 0,
+        active_fns: Vec::new(),
     };
     mutate(node, &mut ctx)
 }
@@ -1390,7 +1396,12 @@ fn evaluate_function(
     )?))
 }
 
-/// `inline_function` (clauses.c:4553) — cheap gates in-crate, body via the seam.
+/// `inline_function` (clauses.c:4553). The cheap catalog gates + the
+/// `active_fns` recursion guard + the recursive re-simplification
+/// (clauses.c:4890) run in-crate; the prosqlbody/prosrc parse + "simple SELECT
+/// expression" gate + `check_sql_fn_retval` + `substitute_actual_parameters` +
+/// usecount machinery rides the `inline_sql_function` seam (it cannot live in
+/// this crate, which must not depend on the parser).
 fn inline_function(
     funcid: Oid,
     result_type: Oid,
@@ -1399,9 +1410,12 @@ fn inline_function(
     args: &[Expr],
     funcvariadic: bool,
     form: &PgProcSimple,
-    ctx: &EceContext,
+    ctx: &mut EceContext,
 ) -> PgResult<Option<Expr>> {
+    // Forget it if the function is not SQL-language or has other showstopper
+    // properties. (prokind / proretset / pronargs are paranoia, as in C.)
     if !form.prolang_is_sql
+        || form.prokind != PROKIND_FUNCTION
         || form.prosecdef
         || form.proretset
         || form.prorettype == RECORDOID
@@ -1410,7 +1424,30 @@ fn inline_function(
     {
         return Ok(None);
     }
-    clauses_seam::inline_sql_function::call(
+
+    // Check for recursive function, and give up trying to expand if so
+    // (clauses.c:4594, `list_member_oid(context->active_fns, funcid)`).
+    if ctx.active_fns.contains(&funcid) {
+        return Ok(None);
+    }
+
+    // object_aclcheck(ProcedureRelationId, funcid, GetUserId(), ACL_EXECUTE)
+    // and FmgrHookIsNeeded(funcid) (clauses.c:4598/4602): the single-user
+    // `postgres` boot-superuser model passes ACL unconditionally and installs
+    // no fmgr hooks, matching every other consumer's external treatment.
+
+    // Fetch the function body (clauses.c:4628/4646): prosrc + the cooked
+    // prosqlbody (NULL for the classic `AS 'SELECT ...'` form).
+    let (prosrc, prosqlbody) = clauses_seam::get_func_sql_body::call(ctx.mcx, funcid)?;
+    let prosqlbody_ref = prosqlbody.as_ref().map(|s| s.as_str());
+
+    // Parse/analyze + gate + substitute (the parser-dependent body) via the
+    // seam. Returns the SUBSTITUTED expression, NOT yet re-simplified.
+    let substituted = clauses_seam::inline_sql_function::call(
+        ctx.mcx,
+        form,
+        prosrc.as_str(),
+        prosqlbody_ref,
         funcid,
         result_type,
         result_collid,
@@ -1418,8 +1455,23 @@ fn inline_function(
         args,
         funcvariadic,
         ctx.estimate,
-    )
+    )?;
+    let newexpr = match substituted {
+        Some(e) => e,
+        None => return Ok(None),
+    };
+
+    // Recursively try to simplify the modified expression (clauses.c:4890).
+    // Here we must add the current function to the context list of active
+    // functions, and remove it on the way out (the recursion guard above).
+    ctx.active_fns.push(funcid);
+    let result = mutate(newexpr, ctx);
+    ctx.active_fns.pop();
+    result.map(Some)
 }
+
+/// `PROKIND_FUNCTION` (`pg_proc.h`).
+const PROKIND_FUNCTION: u8 = b'f';
 
 // ---------------------------------------------------------------------------
 // evaluate_expr (clauses.c:4798) — the in-crate evaluator

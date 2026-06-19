@@ -1507,6 +1507,7 @@ const Anum_pg_proc_oid: i32 = 1;
 const Anum_pg_proc_proallargtypes: i32 = 21;
 const Anum_pg_proc_prosrc: i32 = 26;
 const Anum_pg_proc_probin: i32 = 27;
+const Anum_pg_proc_prosqlbody: i32 = 28;
 const Anum_pg_proc_proconfig: i32 = 29;
 
 // Language OIDs the `prolang` switch matches (`catalog/pg_language_d.h`).
@@ -2300,6 +2301,7 @@ pub(crate) fn get_func_form(funcid: Oid) -> PgResult<clauses_seams::PgProcSimple
     let prosecdef = getattr_bool(mcx, PROCOID, &tup, Anum_pg_proc_prosecdef)?;
     let prosupport = getattr_oid(mcx, PROCOID, &tup, Anum_pg_proc_prosupport)?;
     let prolang = getattr_oid(mcx, PROCOID, &tup, Anum_pg_proc_prolang)?;
+    let prokind = getattr_char(mcx, PROCOID, &tup, Anum_pg_proc_prokind)? as u8;
 
     // proargtypes is an oidvector (BKI_FORCE_NOT_NULL); read element OIDs off the
     // on-disk image (== C's vec->values).
@@ -2339,7 +2341,44 @@ pub(crate) fn get_func_form(funcid: Oid) -> PgResult<clauses_seams::PgProcSimple
         proargtypes,
         prolang_is_sql: prolang == SQL_LANGUAGE_ID,
         proconfig_isnull,
+        prokind,
     })
+}
+
+/// `get_func_sql_body(funcid)` — `inline_function`'s pg_proc body read
+/// (clauses.c:4628/4646): `prosrc` (BKI_FORCE_NOT_NULL) and the cooked
+/// `prosqlbody` node-string (`None` when NULL). The `CREATE FUNCTION ... RETURN`
+/// / `BEGIN ATOMIC` forms store the body in `prosqlbody` (as
+/// `nodeToString(querytree_list)`) and a placeholder in `prosrc`; the classic
+/// `AS 'SELECT ...'` form leaves `prosqlbody` NULL.
+pub(crate) fn get_func_sql_body<'mcx>(
+    mcx: Mcx<'mcx>,
+    funcid: Oid,
+) -> PgResult<(PgString<'mcx>, Option<PgString<'mcx>>)> {
+    let tuple = SearchSysCache1(mcx, PROCOID, SysCacheKey::Value(KeyDatum::from_oid(funcid)))?;
+    let Some(tup) = tuple else {
+        return Err(PgError::error(format!(
+            "cache lookup failed for function {}",
+            funcid
+        )));
+    };
+
+    // prosrc = TextDatumGetCString(SysCacheGetAttrNotNull(.., Anum_pg_proc_prosrc)).
+    let prosrc_datum = SysCacheGetAttrNotNull(mcx, PROCOID, &tup, Anum_pg_proc_prosrc)?;
+    let prosrc = varlena_seams::text_to_cstring_v::call(mcx, &prosrc_datum)?;
+
+    // prosqlbody = SysCacheGetAttr(.., Anum_pg_proc_prosqlbody, &isnull); the
+    // stored image is the pg_node_tree text (nodeToString of the querytree list).
+    let (sqlbody_datum, sqlbody_isnull) =
+        SysCacheGetAttr(mcx, PROCOID, &tup, Anum_pg_proc_prosqlbody)?;
+    let prosqlbody = if sqlbody_isnull {
+        None
+    } else {
+        Some(varlena_seams::text_to_cstring_v::call(mcx, &sqlbody_datum)?)
+    };
+
+    ReleaseSysCache(tup);
+    Ok((prosrc, prosqlbody))
 }
 
 /// `fetch_function_defaults(func_tuple)` (clauses.c:4353): read the
