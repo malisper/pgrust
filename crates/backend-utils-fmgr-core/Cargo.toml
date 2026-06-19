@@ -36,3 +36,4 @@ backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
 backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
 backend-executor-functions-seams = { path = "../backend-executor-functions-seams" }
 backend-optimizer-util-clauses-seams = { path = "../backend-optimizer-util-clauses-seams" }
+backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }

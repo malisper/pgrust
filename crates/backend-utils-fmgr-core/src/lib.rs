@@ -3371,11 +3371,15 @@ fn pg_getarg_text_pp_seam<'mcx>(
             "PG_GETARG_TEXT_PP: arg {n} is a cstring, not a varlena (a wiring bug)"
         ),
     };
-    // The referent is the full 4-byte-header uncompressed varlena image (its
-    // `image.len()` already equals the stored varsize), so `from_image` simply
-    // re-stamps the identical length word.
+    // C's `PG_GETARG_TEXT_PP` == `pg_detoast_datum_packed`: a compressed-in-line
+    // or out-of-line-external varlena is fetched back / decompressed into a flat
+    // in-line image; a plain (uncompressed) value is returned verbatim. Skipping
+    // this step would read a compressed value's pglz payload as raw text.
+    let detoasted =
+        backend_access_common_detoast_seams::pg_detoast_datum_packed::call(mcx, bytes)?;
     Ok(types_datum::varlena::Bytea::from_image(mcx::slice_in(
-        mcx, bytes,
+        mcx,
+        detoasted.as_slice(),
     )?))
 }
 

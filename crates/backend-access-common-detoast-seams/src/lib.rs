@@ -29,6 +29,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pg_detoast_datum_packed(datum)` (fmgr.c): detoast only compressed /
+    /// out-of-line-external values, returning a fully in-line varlena image in
+    /// `mcx`; a plain (short- or 4-byte-header, uncompressed) value is returned
+    /// verbatim. This is the `PG_DETOAST_DATUM_PACKED` step the by-reference
+    /// `PG_GETARG_*_PP` argument readers apply before an adt core reads the
+    /// payload. `attr` is the verbatim varlena datum bytes (header included).
+    /// `Err` carries the toast-fetch / decompression `ereport(ERROR)`s and OOM.
+    pub fn pg_detoast_datum_packed<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        attr: &[u8],
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
     /// `toast_datum_size(value)` (access/common/detoast.c): the physical on-disk
     /// /compressed storage size of a varlena attribute (the `pg_column_size`
     /// varlena path, varlena.c:5300-5301). For an on-disk-external value this is

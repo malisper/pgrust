@@ -143,6 +143,15 @@ fn varatt_is_4b_u(b: &[u8]) -> bool {
     (b[0] & 0x03) == 0x00
 }
 
+/// `VARATT_IS_4B_C(PTR)` == `VARATT_IS_COMPRESSED(PTR)` (varatt.h, little-endian):
+/// compressed 4-byte header (low two bits == 10). Like a 4-byte-uncompressed
+/// header, its total length lives in `va_header >> 2` (`VARSIZE_4B`); the
+/// compression method + raw size live in the following `va_tcinfo` word.
+#[inline]
+fn varatt_is_4b_c(b: &[u8]) -> bool {
+    (b[0] & 0x03) == 0x02
+}
+
 /// `VARATT_IS_EXTERNAL(PTR)` == `VARATT_IS_1B_E(PTR)`.
 #[inline]
 fn varatt_is_external(b: &[u8]) -> bool {
@@ -303,8 +312,17 @@ fn ensure_headerful_varlena<'a>(bytes: &'a [u8]) -> alloc::borrow::Cow<'a, [u8]>
     if !bytes.is_empty() && varatt_is_1b_e(bytes) {
         return Cow::Borrowed(bytes);
     }
-    // Already a self-consistent 4-byte-header varlena (`VARSIZE_4B == len`).
-    if bytes.len() >= VARHDRSZ && varatt_is_4b_u(bytes) && varsize_4b(bytes) == bytes.len() {
+    // Already a self-consistent 4-byte-header varlena (`VARSIZE_4B == len`),
+    // either uncompressed (4B-U) OR compressed-in-line (4B-C). A compressed
+    // value (`toast_compress_datum`) is a real header-ful varlena whose total
+    // length is in `va_header >> 2` and whose compression method/raw size are in
+    // the next word; it must pass VERBATIM so detoast recognizes the `0b10` tag.
+    // Framing it as a fresh header-less payload prepends a spurious uncompressed
+    // length word, hiding the compressed header and reading back as garbage.
+    if bytes.len() >= VARHDRSZ
+        && (varatt_is_4b_u(bytes) || varatt_is_4b_c(bytes))
+        && varsize_4b(bytes) == bytes.len()
+    {
         return Cow::Borrowed(bytes);
     }
     // Already a self-consistent 1-byte ("short") header varlena

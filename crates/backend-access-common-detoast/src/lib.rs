@@ -831,6 +831,7 @@ fn corrupt_pglz() -> PgError {
 pub fn init_seams() {
     backend_access_common_detoast_seams::detoast_external_attr::set(detoast_external_attr);
     backend_access_common_detoast_seams::detoast_attr::set(detoast_attr);
+    backend_access_common_detoast_seams::pg_detoast_datum_packed::set(pg_detoast_datum_packed);
     backend_access_common_detoast_seams::toast_datum_size::set(toast_datum_size_seam);
     backend_access_common_detoast_seams::toast_raw_datum_size::set(toast_raw_datum_size_seam);
     backend_access_common_detoast_seams::toast_chunk_id::set(toast_chunk_id);

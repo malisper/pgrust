@@ -21314,6 +21314,7 @@ dependencies = [
 name = "backend-utils-fmgr-core"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-detoast-seams",
  "backend-catalog-aclchk-seams",
  "backend-catalog-pg-proc-seams",
  "backend-executor-functions-seams",
