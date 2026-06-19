@@ -13836,6 +13836,7 @@ dependencies = [
 name = "backend-postmaster-autovacuum"
 version = "0.0.0"
 dependencies = [
+ "backend-commands-vacuum-seams",
  "backend-postmaster-autovacuum-ext-seams",
  "backend-postmaster-autovacuum-seams",
  "backend-postmaster-postmaster-seams",

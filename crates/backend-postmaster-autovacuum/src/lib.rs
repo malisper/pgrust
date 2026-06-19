@@ -88,6 +88,9 @@ pub fn am_autovacuum_worker_process() -> bool {
 
 /// Install this crate's implementations into its seam crate.
 pub fn init_seams() {
+    // `VacuumUpdateCosts()` (autovacuum.c) — the cost-delay parameter refresh
+    // both autovacuum workers and foreground VACUUM/ANALYZE call during setup.
+    backend_commands_vacuum_seams::vacuum_update_costs::set(cost_balance::VacuumUpdateCosts);
     backend_postmaster_autovacuum_seams::auto_vac_launcher_main::set(auto_vac_launcher_main_entry);
     backend_postmaster_autovacuum_seams::auto_vac_worker_main::set(auto_vac_worker_main_entry);
     backend_postmaster_autovacuum_seams::am_autovacuum_launcher_process::set(

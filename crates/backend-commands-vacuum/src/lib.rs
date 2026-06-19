@@ -2774,6 +2774,13 @@ fn set_vacuum_active_nworkers_enable_impl(
     Ok(())
 }
 
+/// `VacuumSharedCostBalance = NULL; VacuumActiveNWorkers = NULL;` (vacuum.c) —
+/// clear the shared parallel-cost-state handle when not running parallel vacuum.
+fn clear_parallel_cost_pointers_impl() -> PgResult<()> {
+    VACUUM_SHARED_COST_STATE.with(|s| *s.borrow_mut() = None);
+    Ok(())
+}
+
 /// `VacuumSharedCostBalance != NULL`.
 fn vacuum_shared_cost_balance_is_set_impl() -> PgResult<bool> {
     Ok(VACUUM_SHARED_COST_STATE.with(|s| s.borrow().is_some()))

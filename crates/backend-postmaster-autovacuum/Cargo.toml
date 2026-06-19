@@ -19,6 +19,7 @@ backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-postmaster-autovacuum-seams = { path = "../backend-postmaster-autovacuum-seams" }
+backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }
 backend-postmaster-postmaster-seams = { path = "../backend-postmaster-postmaster-seams" }
 backend-postmaster-autovacuum-ext-seams = { path = "../backend-postmaster-autovacuum-ext-seams" }
 backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }

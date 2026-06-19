@@ -48,6 +48,7 @@ pub fn init_seams() {
         crate::set_vacuum_shared_cost_balance_enable_impl,
     );
     vacuum::set_vacuum_active_nworkers_enable::set(crate::set_vacuum_active_nworkers_enable_impl);
+    vacuum::clear_parallel_cost_pointers::set(crate::clear_parallel_cost_pointers_impl);
     vacuum::vacuum_shared_cost_balance_is_set::set(crate::vacuum_shared_cost_balance_is_set_impl);
     vacuum::vacuum_active_nworkers_is_set::set(crate::vacuum_active_nworkers_is_set_impl);
     vacuum::vacuum_active_nworkers_add::set(crate::vacuum_active_nworkers_add_impl);
