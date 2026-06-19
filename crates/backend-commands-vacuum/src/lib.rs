@@ -2509,7 +2509,10 @@ pub fn vac_bulkdel_one_index(
 ) -> PgResult<IndexBulkDeleteResult> {
     let ivinfo_index = ivinfo.index;
     let ivinfo_message_level = ivinfo.message_level;
-    /* Do bulk deletion (the callback is vac_tid_reaped). */
+    /* Do bulk deletion (the callback is vac_tid_reaped). The AM consults the
+     * dead-items store through the `vacuum_tid_is_dead` callback keyed by the
+     * store's id; register it here so that lookup resolves while the AM scans. */
+    register_tid_callback_state(dead_items);
     let istat = rt::index_bulk_delete::call(ivinfo, istat, dead_items)?;
 
     let relname = rt::relation_get_relation_name::call(ivinfo_index)?;

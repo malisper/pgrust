@@ -2029,6 +2029,7 @@ dependencies = [
  "backend-access-index-indexam-seams",
  "backend-access-table-tableam",
  "backend-catalog-index-seams",
+ "backend-commands-vacuum-seams",
  "backend-storage-lmgr-predicate-seams",
  "backend-utils-activity-pgstat-seams",
  "backend-utils-cache-relcache-seams",
@@ -2044,6 +2045,7 @@ dependencies = [
  "types-tableam",
  "types-tidbitmap",
  "types-tuple",
+ "types-vacuum",
 ]
 
 [[package]]

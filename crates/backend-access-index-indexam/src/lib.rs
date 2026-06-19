@@ -86,6 +86,74 @@ pub fn init_seams() {
     seams::index_parallelscan_initialize::set(seam_index_parallelscan_initialize);
     seams::index_parallelrescan::set(seam_index_parallelrescan);
     seams::index_scan_resolve_shared_info::set(seam_index_scan_resolve_shared_info);
+
+    // AM-vacuum dispatch consumed by vacuum.c (`vac_bulkdel_one_index` /
+    // `vac_cleanup_one_index`). These seams are declared by the vacuum owner
+    // (`backend-commands-vacuum-seams`) but their bodies are indexam's
+    // `index_bulk_delete` / `index_vacuum_cleanup` — so indexam installs them,
+    // adapting the Oid-shaped `vacuumparallel::IndexVacuumInfo` (which crosses
+    // the seam) to the Relation-shaped `genam::IndexVacuumInfo` the AM wants.
+    {
+        use backend_commands_vacuum_seams as vac;
+        vac::index_bulk_delete::set(seam_vac_index_bulk_delete);
+        vac::index_vacuum_cleanup::set(seam_vac_index_vacuum_cleanup);
+    }
+}
+
+/// Build the Relation-shaped `genam::IndexVacuumInfo<'mcx>` the AM dispatch
+/// expects from the Oid-shaped `vacuumparallel::IndexVacuumInfo` that crosses
+/// the vacuum seam. The index and heap relations are already open and locked by
+/// `vac_open_indexes` (RowExclusiveLock held for the duration of the vacuum), so
+/// re-opening with `NoLock` just fetches the live relcache entries.
+fn build_genam_ivinfo<'mcx>(
+    mcx: Mcx<'mcx>,
+    ivinfo: &types_vacuum::vacuumparallel::IndexVacuumInfo,
+) -> PgResult<IndexVacuumInfo<'mcx>> {
+    let index = index_open(mcx, ivinfo.index, NoLock)?;
+    let heaprel =
+        backend_access_common_relation_seams::relation_open::call(mcx, ivinfo.heaprel, NoLock)?;
+    Ok(IndexVacuumInfo {
+        index,
+        heaprel,
+        analyze_only: ivinfo.analyze_only,
+        report_progress: ivinfo.report_progress,
+        estimated_count: ivinfo.estimated_count,
+        message_level: ivinfo.message_level,
+        num_heap_tuples: ivinfo.num_heap_tuples,
+        // The access strategy lives in the vacuum substrate (carried by handle);
+        // the AM-vacuum bodies don't consult it through this struct.
+        strategy: None,
+    })
+}
+
+/// `index_bulk_delete` seam body (vacuum owner's decl). The seam is mcx-free
+/// (like vacuum's own `index_open` body), so a short-lived context is created to
+/// hold the re-opened relations for the duration of the AM call. The vacuum side
+/// passes the dead-items `TidStore` as the callback state; the AM consults
+/// membership through the `vacuum_tid_is_dead` callback keyed by the store's
+/// `id`, so the `callback_state` handle here is exactly that `id`.
+fn seam_vac_index_bulk_delete(
+    ivinfo: types_vacuum::vacuumparallel::IndexVacuumInfo,
+    istat: Option<IndexBulkDeleteResult>,
+    dead_items: types_vacuum::vacuumlazy::TidStore,
+) -> PgResult<IndexBulkDeleteResult> {
+    let cx = mcx::MemoryContext::new("index_bulk_delete");
+    let mcx = cx.mcx();
+    let info = build_genam_ivinfo(mcx, &ivinfo)?;
+    let res = index_bulk_delete(mcx, &info, istat, Some(dead_items.id))?;
+    // The AM (btbulkdelete) always returns stats; mirror C's non-NULL result.
+    Ok(res.unwrap_or_default())
+}
+
+/// `index_vacuum_cleanup` seam body (vacuum owner's decl).
+fn seam_vac_index_vacuum_cleanup(
+    ivinfo: types_vacuum::vacuumparallel::IndexVacuumInfo,
+    istat: Option<IndexBulkDeleteResult>,
+) -> PgResult<Option<IndexBulkDeleteResult>> {
+    let cx = mcx::MemoryContext::new("index_vacuum_cleanup");
+    let mcx = cx.mcx();
+    let info = build_genam_ivinfo(mcx, &ivinfo)?;
+    index_vacuum_cleanup(mcx, &info, istat)
 }
 
 // ===========================================================================
