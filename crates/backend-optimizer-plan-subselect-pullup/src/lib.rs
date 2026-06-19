@@ -160,12 +160,12 @@ fn convert_VALUES_to_ANY<'mcx>(
 
     for row in rte.values_lists.iter() {
         // List *elem = lfirst(lc); Node *value = linitial(elem);
-        let value0 = match row.as_ref() {
-            Node::List(elems) => elems
+        let value0 = match row.as_ref().as_list() {
+            Some(elems) => elems
                 .first()
                 .expect("VALUES row has no columns")
                 .as_ref(),
-            _ => return Ok(None),
+            None => return Ok(None),
         };
 
         // Prepare an evaluation of the right side of the operator with
@@ -179,10 +179,10 @@ fn convert_VALUES_to_ANY<'mcx>(
         let converted = convert_testexpr(&rightop_node, &subst);
 
         // Try to evaluate constant expressions.  We could get a Const result.
-        let converted_expr = match converted {
-            Node::Expr(e) => e,
-            // convert_testexpr always returns a Node::Expr.
-            _ => return Ok(None),
+        // convert_testexpr always returns a Node::Expr.
+        let converted_expr = match converted.into_expr() {
+            Some(e) => e,
+            None => return Ok(None),
         };
         let folded =
             backend_optimizer_util_clauses::fold::eval_const_expressions(mcx, converted_expr)?;
