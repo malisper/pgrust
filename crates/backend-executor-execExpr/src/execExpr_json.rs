@@ -545,3 +545,181 @@ pub(crate) fn exec_init_xml_expr<'mcx>(
     };
     expr_eval_push_step(mcx, state, scratch)
 }
+
+/// `ExecInitExprRec` `T_JsonValueExpr` arm (execExpr.c) — a bare `JsonValueExpr`
+/// at exec-init time recurses into its `raw_expr` then its `formatted_expr` (the
+/// later result overwrites the earlier; the cooked form always has both set, the
+/// formatted one being the value that survives). We mirror that: recurse into
+/// `raw_expr` if present, then into `formatted_expr` if present (so its value is
+/// the one left in `resv`).
+pub(crate) fn exec_init_json_value_expr<'mcx>(
+    mcx: Mcx<'mcx>,
+    jve: &types_nodes::primnodes::JsonValueExpr,
+    state: &mut ExprState<'mcx>,
+    resv: ResultCellId,
+) -> PgResult<()> {
+    if let Some(raw) = jve.raw_expr.as_deref() {
+        exec_init_expr_rec(mcx, raw, state, resv)?;
+    }
+    if let Some(formatted) = jve.formatted_expr.as_deref() {
+        exec_init_expr_rec(mcx, formatted, state, resv)?;
+    }
+    Ok(())
+}
+
+/// `ExecInitExprRec` `T_JsonConstructorExpr` arm (execExpr.c) — push the steps
+/// for a SQL/JSON constructor (`JSON_OBJECT`/`JSON_ARRAY`/`JSON_SCALAR`/...).
+///
+/// Mirrors the C: if `ctor->func` is set the whole thing is a plain function
+/// call (recurse into it); the PARSE-non-unique / SERIALIZE shortcuts use the
+/// first argument's value directly; otherwise build a
+/// [`JsonConstructorExprState`] carrier (per-arg `arg_types`, `Const` args
+/// pre-filled and non-`Const` args compiled into result cells), push the
+/// `EEOP_JSON_CONSTRUCTOR` step, then handle the RETURNING-type `coercion` (with
+/// innermost caseval pointed at `resv`).
+pub(crate) fn exec_init_json_constructor<'mcx>(
+    mcx: Mcx<'mcx>,
+    ctor: &types_nodes::primnodes::JsonConstructorExpr,
+    state: &mut ExprState<'mcx>,
+    resv: ResultCellId,
+) -> PgResult<()> {
+    use types_nodes::execexpr::{JsonArgTypeCache, JsonConstructorExprState};
+    use types_nodes::primnodes::{JsonConstructorType, JsonFormatType};
+
+    if let Some(func) = ctor.func.as_deref() {
+        // The whole constructor is a plain function call (e.g. an aggregate's
+        // finalfn wrapper). Recurse into it.
+        return exec_init_expr_rec(mcx, func, state, resv);
+    }
+
+    if (ctor.r#type == JsonConstructorType::JSCTOR_JSON_PARSE && !ctor.unique)
+        || ctor.r#type == JsonConstructorType::JSCTOR_JSON_SERIALIZE
+    {
+        // Use the value of the first argument as result.
+        let first = ctor
+            .args
+            .first()
+            .expect("JSCTOR_JSON_PARSE/SERIALIZE must have at least one arg");
+        exec_init_expr_rec(mcx, first, state, resv)?;
+    } else {
+        let nargs = ctor.args.len();
+
+        let is_jsonb = ctor
+            .returning
+            .as_ref()
+            .and_then(|r| r.format.as_ref())
+            .map(|f| f.format_type == JsonFormatType::JS_FORMAT_JSONB)
+            .unwrap_or(false);
+
+        let mut arg_values: mcx::PgVec<'mcx, DatumV<'mcx>> =
+            mcx::vec_with_capacity_in(mcx, nargs)?;
+        let mut arg_nulls: mcx::PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, nargs)?;
+        let mut arg_types: mcx::PgVec<'mcx, types_core::primitive::Oid> =
+            mcx::vec_with_capacity_in(mcx, nargs)?;
+        let mut arg_cells: mcx::PgVec<'mcx, Option<ResultCellId>> =
+            mcx::vec_with_capacity_in(mcx, nargs)?;
+
+        for arg in &ctor.args {
+            let typid = backend_nodes_nodeFuncs_seams::expr_type_info::call(arg)?.typid;
+            arg_types.push(typid);
+
+            if arg.expr_tag() == etag::T_Const {
+                // Don't evaluate const arguments every round.
+                let con = arg.expect_const();
+                arg_values.push(con.constvalue.clone_in(mcx)?);
+                arg_nulls.push(con.constisnull);
+                arg_cells.push(None);
+            } else {
+                // Each non-const arg evaluates into its own result cell; the
+                // interpreter gathers it into arg_values/arg_nulls per row.
+                let cell = new_result_cell(mcx, state)?;
+                arg_values.push(DatumV::null());
+                arg_nulls.push(false);
+                exec_init_expr_rec(mcx, arg, state, cell)?;
+                arg_cells.push(Some(cell));
+            }
+        }
+
+        // Prepare type cache for datum_to_json[b]() (JSCTOR_JSON_SCALAR only).
+        let arg_type_cache = if ctor.r#type == JsonConstructorType::JSCTOR_JSON_SCALAR {
+            // json_categorize_type has no executor-facing seam yet, so the
+            // scalar constructor's per-arg category/outfuncid cache cannot be
+            // built. The eval path raises FEATURE_NOT_SUPPORTED for SCALAR; we
+            // leave the cache empty here (the eval never reads it).
+            let mut cache: mcx::PgVec<'mcx, JsonArgTypeCache> =
+                mcx::vec_with_capacity_in(mcx, nargs)?;
+            for _ in 0..nargs {
+                cache.push(JsonArgTypeCache::default());
+            }
+            Some(cache)
+        } else {
+            None
+        };
+
+        let jcstate = JsonConstructorExprState {
+            arg_values: Some(arg_values),
+            arg_nulls: Some(arg_nulls),
+            arg_types: Some(arg_types),
+            arg_type_cache,
+            nargs: nargs as i32,
+            arg_cells: Some(arg_cells),
+            ctor_type: ctor.r#type,
+            is_jsonb,
+            absent_on_null: ctor.absent_on_null,
+            unique: ctor.unique,
+        };
+
+        let scratch = ExprEvalStep {
+            opcode: ExprEvalOp::EEOP_JSON_CONSTRUCTOR,
+            resvalue: resv,
+            resnull: resv,
+            d: ExprEvalStepData::JsonConstructor {
+                jcstate: Some(mcx::alloc_in(mcx, jcstate)?),
+            },
+        };
+        expr_eval_push_step(mcx, state, scratch)?;
+    }
+
+    // RETURNING-type coercion: recurse with innermost caseval pointed at resv
+    // (the owned model carries value+null in the single resv cell).
+    if let Some(coercion) = ctor.coercion.as_deref() {
+        let save = state.innermost_caseval;
+        state.innermost_caseval = Some(resv);
+        exec_init_expr_rec(mcx, coercion, state, resv)?;
+        state.innermost_caseval = save;
+    }
+
+    Ok(())
+}
+
+/// `ExecInitExprRec` `T_JsonIsPredicate` arm (execExpr.c) — recurse into the
+/// subject expression (writing `resv`), then push the `EEOP_IS_JSON` step. The
+/// step carries the projected `item_type`/`unique_keys` and the subject's type
+/// OID (the C reads `pred->item_type`, `pred->unique_keys`, and
+/// `exprType(pred->expr)`).
+pub(crate) fn exec_init_json_is_predicate<'mcx>(
+    mcx: Mcx<'mcx>,
+    pred: &types_nodes::primnodes::JsonIsPredicate,
+    state: &mut ExprState<'mcx>,
+    resv: ResultCellId,
+) -> PgResult<()> {
+    let expr = pred
+        .expr
+        .as_deref()
+        .expect("JsonIsPredicate.expr must be present");
+    exec_init_expr_rec(mcx, expr, state, resv)?;
+
+    let arg_type = backend_nodes_nodeFuncs_seams::expr_type_info::call(expr)?.typid;
+
+    let scratch = ExprEvalStep {
+        opcode: ExprEvalOp::EEOP_IS_JSON,
+        resvalue: resv,
+        resnull: resv,
+        d: ExprEvalStepData::IsJson {
+            item_type: pred.item_type,
+            unique_keys: pred.unique_keys,
+            arg_type,
+        },
+    };
+    expr_eval_push_step(mcx, state, scratch)
+}

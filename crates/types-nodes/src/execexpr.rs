@@ -641,6 +641,22 @@ pub struct JsonConstructorExprState<'mcx> {
     pub arg_type_cache: Option<PgVec<'mcx, JsonArgTypeCache>>,
     /// `int nargs`.
     pub nargs: i32,
+    /// Result cells each non-`Const` argument sub-step writes; `None` for the
+    /// `Const` args (whose value/null are pre-filled into `arg_values`/
+    /// `arg_nulls`). Gathered into `arg_values`/`arg_nulls` by the eval. (The C
+    /// recursion aliases `&jcstate->arg_values[i]`; the owned model uses the
+    /// arg-cell arena, mirroring the `Func`/`XmlExpr` steps.)
+    pub arg_cells: Option<PgVec<'mcx, Option<ResultCellId>>>,
+    // --- scalar projection of the `JsonConstructorExpr` node (the C eval reads
+    //     these off the `constructor` back-pointer, which is not modeled). ---
+    /// `ctor->type`.
+    pub ctor_type: crate::primnodes::JsonConstructorType,
+    /// `ctor->returning->format->format_type == JS_FORMAT_JSONB`.
+    pub is_jsonb: bool,
+    /// `ctor->absent_on_null`.
+    pub absent_on_null: bool,
+    /// `ctor->unique`.
+    pub unique: bool,
 }
 
 /// Anonymous per-arg cache struct inside `JsonConstructorExprState`
@@ -1324,9 +1340,19 @@ pub enum ExprEvalStepData<'mcx> {
         arg_cells: PgVec<'mcx, ResultCellId>,
     },
     /// `is_json` — for EEOP_IS_JSON.
+    ///
+    /// C parks a `JsonIsPredicate *pred` and at run time reads `pred->item_type`,
+    /// `pred->unique_keys`, and `exprType(pred->expr)` (the subject's type, to
+    /// pick the text/json vs jsonb validation path). The owned model projects
+    /// those three scalars off the cooked node at compile time.
     IsJson {
-        /// `JsonIsPredicate *pred` — original node; parked (opaque address).
-        pred: usize,
+        /// `pred->item_type` — JS_TYPE_ANY/OBJECT/ARRAY/SCALAR.
+        item_type: crate::primnodes::JsonValueType,
+        /// `pred->unique_keys` — WITH UNIQUE KEYS.
+        unique_keys: bool,
+        /// `exprType(pred->expr)` — the subject expression's type OID; selects
+        /// the text/json (lexer) vs jsonb (container header) validation path.
+        arg_type: Oid,
     },
     /// `jsonexpr` — for EEOP_JSONEXPR_PATH / EEOP_JSONEXPR_COERCION_FINISH.
     JsonExpr {

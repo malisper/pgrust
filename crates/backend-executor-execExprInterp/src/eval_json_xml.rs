@@ -10,14 +10,17 @@
 //! have no executor-facing seam yet.
 
 use mcx::{Mcx, PgString};
-use types_error::{PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_NO_SQL_JSON_ITEM};
+use types_error::{
+    PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_FEATURE_NOT_SUPPORTED,
+    ERRCODE_NO_SQL_JSON_ITEM,
+};
 use types_nodes::execexpr::{
     ExprEvalStepData, ExprState, JsonCoercionCacheId, JsonExprStateId, ResultCellId,
 };
 use types_nodes::execnodes::EcxtId;
 use types_nodes::EStateData;
 use types_tuple::backend_access_common_heaptuple::Datum;
-use types_tuple::heaptuple::{JSONBOID, JSONOID};
+use types_tuple::heaptuple::{JSONBOID, JSONOID, TEXTOID};
 
 use backend_utils_adt_jsonpath_exec::{
     JsonPathExists, JsonPathQuery, JsonPathValue, JsonPathVariable, JsonPathVars,
@@ -298,37 +301,279 @@ fn xml_standalone_from_i32(v: i32) -> backend_utils_adt_xml::XmlStandaloneType {
     }
 }
 
-/// `ExecEvalJsonConstructor` — JSON / JSONB object/array constructor. Still
-/// parked (the `JsonConstructorExpr` back-pointer and the json.c/jsonb.c
-/// constructor workers are unported).
+/// `ExecEvalJsonConstructor(state, op, econtext)` (execExprInterp.c:4657) —
+/// JSON / JSONB object/array constructor. The argument sub-expressions were
+/// compiled into result cells by `exec_init_json_constructor`; this gathers them
+/// into the carrier's `arg_values`/`arg_nulls`, then dispatches to the json.c /
+/// jsonb.c build-object / build-array workers and wraps the serialized bytes
+/// into a by-reference Datum.
 pub fn ExecEvalJsonConstructor<'mcx>(
     state: &mut ExprState<'mcx>,
     op: usize,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    let _ = (state, op, econtext, estate);
-    panic!(
-        "execExprInterp: EEOP_JSON_CONSTRUCTOR — the JsonConstructorExpr node \
-         (jcstate->constructor) is parked off JsonConstructorExprState, and the \
-         json.c/jsonb.c constructor workers have no executor-facing seam — not \
-         yet ported"
-    )
+    use types_nodes::primnodes::JsonConstructorType as Ct;
+    let _ = econtext;
+    let mcx = estate.es_query_cxt;
+
+    // Snapshot the carrier scalars + arg cells (so per-arg read_cell() doesn't
+    // alias the &mut state borrow held below).
+    let (ctor_type, is_jsonb, absent_on_null, unique, nargs, arg_cells, mut arg_values, mut arg_nulls, arg_types) =
+        match &state.steps.as_ref().unwrap()[op].d {
+            ExprEvalStepData::JsonConstructor { jcstate } => {
+                let jc = jcstate
+                    .as_ref()
+                    .expect("EEOP_JSON_CONSTRUCTOR: jcstate present");
+                (
+                    jc.ctor_type,
+                    jc.is_jsonb,
+                    jc.absent_on_null,
+                    jc.unique,
+                    jc.nargs as usize,
+                    jc.arg_cells
+                        .as_ref()
+                        .map(|v| v.iter().copied().collect::<Vec<_>>())
+                        .unwrap_or_default(),
+                    jc.arg_values
+                        .as_ref()
+                        .map(|v| v.iter().cloned().collect::<Vec<_>>())
+                        .unwrap_or_default(),
+                    jc.arg_nulls
+                        .as_ref()
+                        .map(|v| v.iter().copied().collect::<Vec<_>>())
+                        .unwrap_or_default(),
+                    jc.arg_types
+                        .as_ref()
+                        .map(|v| v.iter().copied().collect::<Vec<_>>())
+                        .unwrap_or_default(),
+                )
+            }
+            _ => unreachable!("EEOP_JSON_CONSTRUCTOR: payload is not JsonConstructor"),
+        };
+    let resv = state.steps.as_ref().unwrap()[op].resvalue;
+    let resnull = state.steps.as_ref().unwrap()[op].resnull;
+
+    // Gather the non-const args (the C `ExecInitExprRec`'d the live values into
+    // jcstate->arg_values[i]; the owned model reads them back out of cells).
+    for i in 0..nargs {
+        if let Some(cell) = arg_cells.get(i).copied().flatten() {
+            let (v, isnull) = read_cell(state, cell);
+            arg_values[i] = v;
+            arg_nulls[i] = isnull;
+        }
+    }
+
+    let bytes: Vec<u8> = match ctor_type {
+        Ct::JSCTOR_JSON_ARRAY => {
+            if is_jsonb {
+                backend_utils_adt_jsonb::jsonb_build_array_worker(
+                    mcx, &arg_values, &arg_nulls, &arg_types, absent_on_null,
+                )?
+            } else {
+                backend_utils_adt_json::json_build_array_worker(
+                    mcx, &arg_values, &arg_nulls, &arg_types, absent_on_null,
+                )?
+            }
+            .as_slice()
+            .to_vec()
+        }
+        Ct::JSCTOR_JSON_OBJECT => {
+            if is_jsonb {
+                backend_utils_adt_jsonb::jsonb_build_object_worker(
+                    mcx, &arg_values, &arg_nulls, &arg_types, absent_on_null, unique,
+                )?
+            } else {
+                backend_utils_adt_json::json_build_object_worker(
+                    mcx, &arg_values, &arg_nulls, &arg_types, absent_on_null, unique,
+                )?
+            }
+            .as_slice()
+            .to_vec()
+        }
+        Ct::JSCTOR_JSON_SCALAR => {
+            // datum_to_json[b](value, category, outfuncid) needs the per-arg
+            // json_categorize_type cache, which has no executor-facing seam.
+            return Err(PgError::error(
+                "JSON_SCALAR constructor (JSCTOR_JSON_SCALAR) is not yet supported: \
+                 datum_to_json/datum_to_jsonb and json_categorize_type have no \
+                 executor-facing seam",
+            )
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
+        }
+        Ct::JSCTOR_JSON_PARSE => {
+            // JSON(text) / jsonb_from_text — only reachable here for the JSONB
+            // `unique` case (text non-unique is shortcut at init). jsonb_from_text
+            // has no executor-facing seam.
+            return Err(PgError::error(
+                "JSON PARSE constructor (JSCTOR_JSON_PARSE) is not yet supported: \
+                 jsonb_from_text has no executor-facing seam",
+            )
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
+        }
+        other => {
+            return Err(PgError::error(format!(
+                "invalid JsonConstructorExpr type {:?}",
+                other
+            )));
+        }
+    };
+
+    // Wrap the serialized bytes into a by-reference Datum. The `json`/`jsonb`
+    // by-ref convention in this port carries the FULL varlena image (the leading
+    // VARHDRSZ length word + payload), matching the fmgr boundary
+    // (`backend-utils-adt-json::fmgr_builtins` strips VARHDRSZ on the way in).
+    //   * `jsonb_*_worker` returns `JsonbValueToJsonb`, already a full varlena.
+    //   * `json_*_worker` returns the header-less json text payload, so frame it
+    //     into a text varlena (C: the json output function's `cstring_to_text`).
+    let image: mcx::PgVec<'mcx, u8> = if is_jsonb {
+        // `jsonb_*_worker` returns `JsonbValueToJsonb`, already a full varlena.
+        mcx::slice_in(mcx, &bytes)?
+    } else {
+        // `json_*_worker` returns the header-less json text payload; build the
+        // text varlena image (4-byte length word + payload), mirroring C's
+        // `cstring_to_text` (which is what the json output function returns).
+        const VARHDRSZ: usize = 4;
+        let total = bytes.len() + VARHDRSZ;
+        let mut out = mcx::vec_with_capacity_in(mcx, total)?;
+        out.extend_from_slice(&types_datum::varlena::set_varsize_4b(total));
+        out.extend_from_slice(&bytes);
+        out
+    };
+    let payload = mcx::slice_in(mcx, image.as_slice())?;
+    write_cell(state, resv, Datum::ByRef(payload), false);
+    if resnull != resv {
+        write_cell(state, resnull, Datum::from_bool(false), false);
+    }
+    Ok(())
 }
 
-/// `ExecEvalJsonIsPredicate` — `IS JSON [VALUE|OBJECT|ARRAY|SCALAR]` predicate.
-/// Still parked (the `JsonIsPredicate` node is unported).
+/// `ExecEvalJsonIsPredicate(state, op)` (execExprInterp.c:4733) —
+/// `IS JSON [VALUE|OBJECT|ARRAY|SCALAR]` predicate. The subject value is already
+/// in the result cell (compiled by `exec_init_json_is_predicate`); this reads it
+/// and validates per the subject type (text/json via the json lexer, jsonb via
+/// the root container header).
 pub fn ExecEvalJsonIsPredicate<'mcx>(
     state: &mut ExprState<'mcx>,
     op: usize,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    let _ = (state, op, estate);
-    panic!(
-        "execExprInterp: EEOP_IS_JSON — the JsonIsPredicate node \
-         (op->d.is_json.pred, parked as ExprEvalStepData::IsJson {{ pred: usize }}) \
-         and the json.c/jsonb.c probes have no executor-facing seam — not yet ported"
-    )
+    use types_jsonb::jsonb::{
+        json_container_is_array, json_container_is_object, json_container_is_scalar,
+    };
+    use types_nodes::primnodes::JsonValueType as Jt;
+    let _ = estate;
+
+    let (item_type, unique_keys, arg_type) = match &state.steps.as_ref().unwrap()[op].d {
+        ExprEvalStepData::IsJson {
+            item_type,
+            unique_keys,
+            arg_type,
+        } => (*item_type, *unique_keys, *arg_type),
+        _ => unreachable!("EEOP_IS_JSON: payload is not IsJson"),
+    };
+    let resv = state.steps.as_ref().unwrap()[op].resvalue;
+    let resnull = state.steps.as_ref().unwrap()[op].resnull;
+
+    let (js, js_null) = read_cell(state, resv);
+    if js_null {
+        write_cell(state, resv, Datum::from_bool(false), false);
+        if resnull != resv {
+            write_cell(state, resnull, Datum::from_bool(false), false);
+        }
+        return Ok(());
+    }
+
+    let res: bool = if arg_type == TEXTOID || arg_type == JSONOID {
+        // json text payload (text/json ByRef carries the header-less payload).
+        let json = js.as_ref_bytes();
+        let mut res = if item_type == Jt::JS_TYPE_ANY {
+            true
+        } else {
+            // Mirror json_get_first_token: the first non-whitespace token
+            // discriminates object `{` / array `[` / scalar.
+            match first_json_token_kind(json) {
+                FirstTok::ObjectStart => item_type == Jt::JS_TYPE_OBJECT,
+                FirstTok::ArrayStart => item_type == Jt::JS_TYPE_ARRAY,
+                FirstTok::Scalar => item_type == Jt::JS_TYPE_SCALAR,
+                FirstTok::Invalid => false,
+            }
+        };
+        // Full parse only for uniqueness check or text validation.
+        if res && (unique_keys || arg_type == TEXTOID) {
+            res = backend_utils_adt_json::json_validate(json, unique_keys, false)?;
+        }
+        res
+    } else if arg_type == JSONBOID {
+        if item_type == Jt::JS_TYPE_ANY {
+            true
+        } else {
+            // The jsonb ByRef image is the full varlena (incl. VARHDRSZ); the
+            // root container header u32 follows it (native order).
+            let img = js.as_ref_bytes();
+            let header = jsonb_root_header(img);
+            match item_type {
+                Jt::JS_TYPE_OBJECT => json_container_is_object(header),
+                Jt::JS_TYPE_ARRAY => {
+                    json_container_is_array(header) && !json_container_is_scalar(header)
+                }
+                Jt::JS_TYPE_SCALAR => {
+                    json_container_is_array(header) && json_container_is_scalar(header)
+                }
+                Jt::JS_TYPE_ANY => true,
+            }
+        }
+    } else {
+        false
+    };
+
+    write_cell(state, resv, Datum::from_bool(res), false);
+    if resnull != resv {
+        write_cell(state, resnull, Datum::from_bool(false), false);
+    }
+    Ok(())
+}
+
+/// `JB_ROOT_*` header word of a jsonb varlena image: the `u32` immediately after
+/// the 4-byte varlena length header (`&jb->root.header`, native byte order).
+fn jsonb_root_header(image: &[u8]) -> u32 {
+    const VARHDRSZ: usize = 4;
+    if image.len() < VARHDRSZ + 4 {
+        return 0;
+    }
+    let b = &image[VARHDRSZ..VARHDRSZ + 4];
+    u32::from_ne_bytes([b[0], b[1], b[2], b[3]])
+}
+
+/// Result of the cheap first-token probe (the discriminating subset of
+/// `json_get_first_token`).
+enum FirstTok {
+    ObjectStart,
+    ArrayStart,
+    Scalar,
+    Invalid,
+}
+
+/// First non-whitespace JSON token kind, sufficient to discriminate
+/// object/array/scalar for `IS JSON [OBJECT|ARRAY|SCALAR]` (full validity is
+/// confirmed separately by `json_validate`). Mirrors `json_get_first_token`'s
+/// classification: `{` -> object, `[` -> array, a valid scalar lead char ->
+/// scalar, empty/garbage -> invalid.
+fn first_json_token_kind(bytes: &[u8]) -> FirstTok {
+    let s = bytes;
+    let mut i = 0;
+    while i < s.len() && (s[i] == b' ' || s[i] == b'\t' || s[i] == b'\n' || s[i] == b'\r') {
+        i += 1;
+    }
+    if i >= s.len() {
+        return FirstTok::Invalid;
+    }
+    match s[i] {
+        b'{' => FirstTok::ObjectStart,
+        b'[' => FirstTok::ArrayStart,
+        b'"' | b'-' | b'0'..=b'9' | b't' | b'f' | b'n' => FirstTok::Scalar,
+        _ => FirstTok::Invalid,
+    }
 }
 
 /// Map the primnodes `JsonWrapper` to the jsonpath-exec worker's `JsonWrapper`.

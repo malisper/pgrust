@@ -69,7 +69,8 @@ use types_error::PgResult;
 use types_nodes::nodes::Node;
 use types_nodes::primnodes::{
     BoolExpr, BoolExprType, CoercionForm, Const, Expr, FuncExpr, JsonBehavior, JsonBehaviorType,
-    JsonFormat, JsonFormatType, JsonEncoding, JsonIsPredicate, JsonValueExpr, JsonValueType,
+    JsonConstructorExpr, JsonConstructorType, JsonFormat, JsonFormatType, JsonEncoding,
+    JsonIsPredicate, JsonReturning, JsonValueExpr, JsonValueType,
     NullTest, NullTestType, OpExpr, RelabelType, TargetEntry, Var, AND_EXPR, NOT_EXPR, OR_EXPR,
 };
 use types_nodes::execnodes::IndexInfo;
@@ -606,6 +607,34 @@ pub fn make_json_is_predicate(
         unique_keys,
         location,
     })
+}
+
+/// `makeJsonConstructorExpr(type, args, fexpr, returning, unique,
+/// absent_on_null, location)` (parse_expr.c) — the *bare* `JsonConstructorExpr`
+/// constructor (without the RETURNING coercion, which the parser fills in via
+/// `coerceJsonFuncExpr` because it needs the `ParseState`). `coercion` starts
+/// `None`; the caller sets it.
+#[allow(clippy::too_many_arguments)]
+pub fn make_json_constructor_expr(
+    r#type: JsonConstructorType,
+    args: Vec<Expr>,
+    func: Option<Expr>,
+    coercion: Option<Expr>,
+    returning: Option<JsonReturning>,
+    unique: bool,
+    absent_on_null: bool,
+    location: i32,
+) -> JsonConstructorExpr {
+    JsonConstructorExpr {
+        r#type,
+        args,
+        func: func.map(Box::new),
+        coercion: coercion.map(Box::new),
+        returning,
+        absent_on_null,
+        unique,
+        location,
+    }
 }
 
 // ===========================================================================

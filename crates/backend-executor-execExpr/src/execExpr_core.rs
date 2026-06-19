@@ -1802,11 +1802,21 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             let xexpr = node.expect_xmlexpr();
             crate::execExpr_json::exec_init_xml_expr(mcx, xexpr, state, resv)
         }
-        etag::T_JsonValueExpr | etag::T_JsonConstructorExpr
-        | etag::T_JsonIsPredicate => panic!(
-            "execExpr-core: JSON-constructor expression compilation is owned by execExpr_json \
-             (ExecInitJsonConstructor)"
-        ),
+        // ----- T_JsonValueExpr (bare `expr [FORMAT ...]`) -----
+        etag::T_JsonValueExpr => {
+            let jve = node.expect_jsonvalueexpr();
+            crate::execExpr_json::exec_init_json_value_expr(mcx, jve, state, resv)
+        }
+        // ----- T_JsonConstructorExpr (JSON_OBJECT / JSON_ARRAY / ...) -----
+        etag::T_JsonConstructorExpr => {
+            let ctor = node.expect_jsonconstructorexpr();
+            crate::execExpr_json::exec_init_json_constructor(mcx, ctor, state, resv)
+        }
+        // ----- T_JsonIsPredicate (IS JSON [VALUE|OBJECT|ARRAY|SCALAR]) -----
+        etag::T_JsonIsPredicate => {
+            let pred = node.expect_jsonispredicate();
+            crate::execExpr_json::exec_init_json_is_predicate(mcx, pred, state, resv)
+        }
         etag::T_SetToDefault => panic!(
             "execExpr-core: SetToDefault must have been replaced before execution (planner); \
              reaching ExecInitExprRec with one is a planner error"

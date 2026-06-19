@@ -9073,6 +9073,7 @@ dependencies = [
  "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-adt-datetime",
  "backend-utils-adt-datum-seams",
+ "backend-utils-adt-json",
  "backend-utils-adt-jsonb",
  "backend-utils-adt-jsonb-util",
  "backend-utils-adt-jsonbsubs-seams",

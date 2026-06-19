@@ -572,6 +572,45 @@ pub enum Node<'mcx> {
     XmlExpr(crate::rawexprnodes::XmlExpr<'mcx>),
     /// `T_XmlSerialize` (raw).
     XmlSerialize(crate::rawexprnodes::XmlSerialize<'mcx>),
+    // --- SQL/JSON raw-grammar nodes (nodes/parsenodes.h, pre-analysis) ---
+    /// `T_JsonValueExpr` (raw).
+    JsonValueExpr(crate::rawexprnodes::JsonValueExpr<'mcx>),
+    /// `T_JsonBehavior` (raw).
+    JsonBehavior(crate::rawexprnodes::JsonBehavior<'mcx>),
+    /// `T_JsonIsPredicate` (raw).
+    JsonIsPredicate(crate::rawexprnodes::JsonIsPredicate<'mcx>),
+    /// `T_JsonOutput` (raw).
+    JsonOutput(crate::rawexprnodes::JsonOutput<'mcx>),
+    /// `T_JsonKeyValue` (raw).
+    JsonKeyValue(crate::rawexprnodes::JsonKeyValue<'mcx>),
+    /// `T_JsonObjectConstructor` (raw).
+    JsonObjectConstructor(crate::rawexprnodes::JsonObjectConstructor<'mcx>),
+    /// `T_JsonArrayConstructor` (raw).
+    JsonArrayConstructor(crate::rawexprnodes::JsonArrayConstructor<'mcx>),
+    /// `T_JsonArrayQueryConstructor` (raw).
+    JsonArrayQueryConstructor(crate::rawexprnodes::JsonArrayQueryConstructor<'mcx>),
+    /// `T_JsonAggConstructor` (raw).
+    JsonAggConstructor(crate::rawexprnodes::JsonAggConstructor<'mcx>),
+    /// `T_JsonObjectAgg` (raw).
+    JsonObjectAgg(crate::rawexprnodes::JsonObjectAgg<'mcx>),
+    /// `T_JsonArrayAgg` (raw).
+    JsonArrayAgg(crate::rawexprnodes::JsonArrayAgg<'mcx>),
+    /// `T_JsonParseExpr` (raw).
+    JsonParseExpr(crate::rawexprnodes::JsonParseExpr<'mcx>),
+    /// `T_JsonScalarExpr` (raw).
+    JsonScalarExpr(crate::rawexprnodes::JsonScalarExpr<'mcx>),
+    /// `T_JsonSerializeExpr` (raw).
+    JsonSerializeExpr(crate::rawexprnodes::JsonSerializeExpr<'mcx>),
+    /// `T_JsonArgument` (raw).
+    JsonArgument(crate::rawexprnodes::JsonArgument<'mcx>),
+    /// `T_JsonFuncExpr` (raw).
+    JsonFuncExpr(crate::rawexprnodes::JsonFuncExpr<'mcx>),
+    /// `T_JsonTablePathSpec` (raw).
+    JsonTablePathSpec(crate::rawexprnodes::JsonTablePathSpec<'mcx>),
+    /// `T_JsonTable` (raw).
+    JsonTable(crate::rawexprnodes::JsonTable<'mcx>),
+    /// `T_JsonTableColumn` (raw).
+    JsonTableColumn(crate::rawexprnodes::JsonTableColumn<'mcx>),
     // --- value nodes (nodes/value.h) — leaf literals ---
     // The lexer/grammar emits these `Value`-family leaves (`A_Const.val`,
     // operator-name `list_make1(makeString(name))`, etc.) as `Node *`, so they
@@ -1059,6 +1098,26 @@ impl<'mcx> Node<'mcx> {
             Node::SQLValueFunction(_) => T_SQLValueFunction,
             Node::XmlExpr(_) => T_XmlExpr,
             Node::XmlSerialize(_) => T_XmlSerialize,
+            // SQL/JSON raw-grammar parse nodes.
+            Node::JsonValueExpr(_) => T_JsonValueExpr,
+            Node::JsonBehavior(_) => T_JsonBehavior,
+            Node::JsonIsPredicate(_) => T_JsonIsPredicate,
+            Node::JsonOutput(_) => T_JsonOutput,
+            Node::JsonKeyValue(_) => T_JsonKeyValue,
+            Node::JsonObjectConstructor(_) => T_JsonObjectConstructor,
+            Node::JsonArrayConstructor(_) => T_JsonArrayConstructor,
+            Node::JsonArrayQueryConstructor(_) => T_JsonArrayQueryConstructor,
+            Node::JsonAggConstructor(_) => T_JsonAggConstructor,
+            Node::JsonObjectAgg(_) => T_JsonObjectAgg,
+            Node::JsonArrayAgg(_) => T_JsonArrayAgg,
+            Node::JsonParseExpr(_) => T_JsonParseExpr,
+            Node::JsonScalarExpr(_) => T_JsonScalarExpr,
+            Node::JsonSerializeExpr(_) => T_JsonSerializeExpr,
+            Node::JsonArgument(_) => T_JsonArgument,
+            Node::JsonFuncExpr(_) => T_JsonFuncExpr,
+            Node::JsonTablePathSpec(_) => T_JsonTablePathSpec,
+            Node::JsonTable(_) => T_JsonTable,
+            Node::JsonTableColumn(_) => T_JsonTableColumn,
             Node::Integer(_) => T_Integer,
             Node::Float(_) => T_Float,
             Node::Boolean(_) => T_Boolean,
@@ -1442,6 +1501,28 @@ impl<'mcx> Node<'mcx> {
             Node::SQLValueFunction(s) => Ok(Node::SQLValueFunction(s.clone_in(mcx)?)),
             Node::XmlExpr(x) => Ok(Node::XmlExpr(x.clone_in(mcx)?)),
             Node::XmlSerialize(x) => Ok(Node::XmlSerialize(x.clone_in(mcx)?)),
+            // SQL/JSON raw-grammar parse nodes.
+            Node::JsonValueExpr(j) => Ok(Node::JsonValueExpr(j.clone_in(mcx)?)),
+            Node::JsonBehavior(j) => Ok(Node::JsonBehavior(j.clone_in(mcx)?)),
+            Node::JsonIsPredicate(j) => Ok(Node::JsonIsPredicate(j.clone_in(mcx)?)),
+            Node::JsonOutput(j) => Ok(Node::JsonOutput(j.clone_in(mcx)?)),
+            Node::JsonKeyValue(j) => Ok(Node::JsonKeyValue(j.clone_in(mcx)?)),
+            Node::JsonObjectConstructor(j) => Ok(Node::JsonObjectConstructor(j.clone_in(mcx)?)),
+            Node::JsonArrayConstructor(j) => Ok(Node::JsonArrayConstructor(j.clone_in(mcx)?)),
+            Node::JsonArrayQueryConstructor(j) => {
+                Ok(Node::JsonArrayQueryConstructor(j.clone_in(mcx)?))
+            }
+            Node::JsonAggConstructor(j) => Ok(Node::JsonAggConstructor(j.clone_in(mcx)?)),
+            Node::JsonObjectAgg(j) => Ok(Node::JsonObjectAgg(j.clone_in(mcx)?)),
+            Node::JsonArrayAgg(j) => Ok(Node::JsonArrayAgg(j.clone_in(mcx)?)),
+            Node::JsonParseExpr(j) => Ok(Node::JsonParseExpr(j.clone_in(mcx)?)),
+            Node::JsonScalarExpr(j) => Ok(Node::JsonScalarExpr(j.clone_in(mcx)?)),
+            Node::JsonSerializeExpr(j) => Ok(Node::JsonSerializeExpr(j.clone_in(mcx)?)),
+            Node::JsonArgument(j) => Ok(Node::JsonArgument(j.clone_in(mcx)?)),
+            Node::JsonFuncExpr(j) => Ok(Node::JsonFuncExpr(j.clone_in(mcx)?)),
+            Node::JsonTablePathSpec(j) => Ok(Node::JsonTablePathSpec(j.clone_in(mcx)?)),
+            Node::JsonTable(j) => Ok(Node::JsonTable(j.clone_in(mcx)?)),
+            Node::JsonTableColumn(j) => Ok(Node::JsonTableColumn(j.clone_in(mcx)?)),
             // Value nodes (nodes/value.h) — real per-struct `copyObject`.
             Node::Integer(i) => Ok(Node::Integer(i.clone_in(mcx)?)),
             Node::Float(f) => Ok(Node::Float(f.clone_in(mcx)?)),
@@ -1676,6 +1757,24 @@ const T_JsonValueExpr: NodeTag = NodeTag(44);
 const T_JsonConstructorExpr: NodeTag = NodeTag(45);
 const T_JsonIsPredicate: NodeTag = NodeTag(46);
 const T_JsonExpr: NodeTag = NodeTag(48);
+const T_JsonBehavior: NodeTag = NodeTag(47);
+// SQL/JSON raw-grammar parse nodes (nodes/nodetags.h, parsenodes.h range).
+const T_JsonOutput: NodeTag = NodeTag(120);
+const T_JsonArgument: NodeTag = NodeTag(121);
+const T_JsonFuncExpr: NodeTag = NodeTag(122);
+const T_JsonTablePathSpec: NodeTag = NodeTag(123);
+const T_JsonTable: NodeTag = NodeTag(124);
+const T_JsonTableColumn: NodeTag = NodeTag(125);
+const T_JsonKeyValue: NodeTag = NodeTag(126);
+const T_JsonParseExpr: NodeTag = NodeTag(127);
+const T_JsonScalarExpr: NodeTag = NodeTag(128);
+const T_JsonSerializeExpr: NodeTag = NodeTag(129);
+const T_JsonObjectConstructor: NodeTag = NodeTag(130);
+const T_JsonArrayConstructor: NodeTag = NodeTag(131);
+const T_JsonArrayQueryConstructor: NodeTag = NodeTag(132);
+const T_JsonAggConstructor: NodeTag = NodeTag(133);
+const T_JsonObjectAgg: NodeTag = NodeTag(134);
+const T_JsonArrayAgg: NodeTag = NodeTag(135);
 const T_NullTest: NodeTag = NodeTag(52);
 const T_BooleanTest: NodeTag = NodeTag(53);
 const T_CoerceToDomain: NodeTag = NodeTag(55);

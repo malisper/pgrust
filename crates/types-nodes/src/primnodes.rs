@@ -673,9 +673,10 @@ pub enum XmlOptionType {
 }
 
 /// `JsonConstructorType` (nodes/primnodes.h) — kind of SQL/JSON constructor.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[repr(u32)]
 pub enum JsonConstructorType {
+    #[default]
     JSCTOR_JSON_OBJECT = 1,
     JSCTOR_JSON_ARRAY = 2,
     JSCTOR_JSON_OBJECTAGG = 3,
@@ -713,6 +714,28 @@ pub enum JsonWrapper {
     JSW_NONE = 1,
     JSW_CONDITIONAL = 2,
     JSW_UNCONDITIONAL = 3,
+}
+
+/// `JsonQuotes` (nodes/parsenodes.h) — representation of [KEEP|OMIT] QUOTES
+/// clause for `JSON_QUERY()`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum JsonQuotes {
+    JS_QUOTES_UNSPEC = 0,
+    JS_QUOTES_KEEP = 1,
+    JS_QUOTES_OMIT = 2,
+}
+
+/// `JsonTableColumnType` (nodes/parsenodes.h) — enumeration of `JSON_TABLE`
+/// column types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum JsonTableColumnType {
+    JTC_FOR_ORDINALITY = 0,
+    JTC_REGULAR = 1,
+    JTC_EXISTS = 2,
+    JTC_FORMATTED = 3,
+    JTC_NESTED = 4,
 }
 
 /// `NullTestType` (nodes/primnodes.h) — IS NULL vs IS NOT NULL.

@@ -366,6 +366,67 @@ pub fn convert_node<'mcx>(mcx: Mcx<'mcx>, n: *mut RawNode) -> PgResult<Node<'mcx
         tags::T_XmlExpr => Ok(Node::mk_xml_expr(mcx, conv_xmlexpr(mcx, n.cast())?)),
         tags::T_XmlSerialize => Ok(Node::mk_xml_serialize(mcx, conv_xmlserialize(mcx, n.cast())?)),
 
+        // --- SQL/JSON raw-grammar nodes (rawexprnodes) ---
+        tags::T_JsonValueExpr => {
+            Ok(Node::mk_json_value_expr(mcx, conv_json_value_expr(mcx, n.cast())?))
+        }
+        tags::T_JsonBehavior => {
+            Ok(Node::mk_json_behavior(mcx, conv_json_behavior(mcx, n.cast())?))
+        }
+        tags::T_JsonIsPredicate => {
+            Ok(Node::mk_json_is_predicate(mcx, conv_json_is_predicate(mcx, n.cast())?))
+        }
+        tags::T_JsonOutput => Ok(Node::mk_json_output(mcx, conv_json_output(mcx, n.cast())?)),
+        tags::T_JsonKeyValue => {
+            Ok(Node::mk_json_key_value(mcx, conv_json_key_value(mcx, n.cast())?))
+        }
+        tags::T_JsonArgument => {
+            Ok(Node::mk_json_argument(mcx, conv_json_argument(mcx, n.cast())?))
+        }
+        tags::T_JsonObjectConstructor => Ok(Node::mk_json_object_constructor(
+            mcx,
+            conv_json_object_constructor(mcx, n.cast())?,
+        )),
+        tags::T_JsonArrayConstructor => Ok(Node::mk_json_array_constructor(
+            mcx,
+            conv_json_array_constructor(mcx, n.cast())?,
+        )),
+        tags::T_JsonArrayQueryConstructor => Ok(Node::mk_json_array_query_constructor(
+            mcx,
+            conv_json_array_query_constructor(mcx, n.cast())?,
+        )),
+        tags::T_JsonAggConstructor => Ok(Node::mk_json_agg_constructor(
+            mcx,
+            conv_json_agg_constructor(mcx, n.cast())?,
+        )),
+        tags::T_JsonObjectAgg => {
+            Ok(Node::mk_json_object_agg(mcx, conv_json_object_agg(mcx, n.cast())?))
+        }
+        tags::T_JsonArrayAgg => {
+            Ok(Node::mk_json_array_agg(mcx, conv_json_array_agg(mcx, n.cast())?))
+        }
+        tags::T_JsonParseExpr => {
+            Ok(Node::mk_json_parse_expr(mcx, conv_json_parse_expr(mcx, n.cast())?))
+        }
+        tags::T_JsonScalarExpr => {
+            Ok(Node::mk_json_scalar_expr(mcx, conv_json_scalar_expr(mcx, n.cast())?))
+        }
+        tags::T_JsonSerializeExpr => Ok(Node::mk_json_serialize_expr(
+            mcx,
+            conv_json_serialize_expr(mcx, n.cast())?,
+        )),
+        tags::T_JsonFuncExpr => {
+            Ok(Node::mk_json_func_expr(mcx, conv_json_func_expr(mcx, n.cast())?))
+        }
+        tags::T_JsonTablePathSpec => Ok(Node::mk_json_table_path_spec(
+            mcx,
+            conv_json_table_path_spec(mcx, n.cast())?,
+        )),
+        tags::T_JsonTable => Ok(Node::mk_json_table(mcx, conv_json_table(mcx, n.cast())?)),
+        tags::T_JsonTableColumn => {
+            Ok(Node::mk_json_table_column(mcx, conv_json_table_column(mcx, n.cast())?))
+        }
+
         // --- DDL "CREATE" family (F2): supporting / helper nodes ---
         tags::T_RoleSpec => Ok(Node::mk_role_spec(mcx, conv_rolespec(mcx, n.cast())?)),
         tags::T_DefElem => Ok(Node::mk_def_elem(mcx, conv_defelem(mcx, n.cast())?)),
@@ -660,3 +721,4 @@ include!("convert_stmts.rs");
 include!("convert_exprs.rs");
 include!("convert_misc.rs");
 include!("convert_ddl.rs");
+include!("convert_json.rs");
