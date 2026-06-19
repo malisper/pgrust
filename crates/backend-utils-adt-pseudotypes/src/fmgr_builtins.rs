@@ -198,11 +198,20 @@ fn fc_shell_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // `StringInfo` over the raw message. All raise the core's `ereport(ERROR)`.
 // ---------------------------------------------------------------------------
 
+/// `PG_GETARG_CSTRING(0)` for an always-throwing dummy `_in`: the core never
+/// reads the text (it raises unconditionally), and the constant may not ride the
+/// by-ref lane as a cstring, so an absent/non-cstring arg degrades to `""`
+/// rather than panicking ahead of the core's faithful `ereport(ERROR)`.
+#[inline]
+fn arg_cstring_opt<'a>(fcinfo: &'a FunctionCallInfoBaseData) -> &'a str {
+    fcinfo.ref_arg(0).and_then(|p| p.as_cstring()).unwrap_or("")
+}
+
 /// A throwing-or-Datum core: `_in`/`_recv` cores return `PgResult<Datum>`.
 macro_rules! fc_in {
     ($adapter:ident, $core:path) => {
         fn $adapter(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-            match $core(arg_cstring(fcinfo, 0)) {
+            match $core(arg_cstring_opt(fcinfo)) {
                 Ok(d) => d,
                 Err(e) => raise(e),
             }
