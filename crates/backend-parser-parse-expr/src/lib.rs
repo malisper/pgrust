@@ -803,7 +803,7 @@ fn make_simple_a_expr<'mcx>(
     location: i32,
 ) -> PgResult<Node<'mcx>> {
     let mut name: mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = mcx::PgVec::new_in(mcx);
-    let str_node = Node::String(types_nodes::value::StringNode {
+    let str_node = Node::mk_string(mcx, types_nodes::value::StringNode {
         sval: mcx::PgString::from_str_in(op, mcx)?,
     });
     name.push(mcx::alloc_in(mcx, str_node)?);
@@ -2646,7 +2646,7 @@ fn transformWholeRowRef<'mcx>(
         backend_parser_relation::markNullableIfNeeded(pstate, &mut var)?;
         // Mark relation as requiring whole-row SELECT access.
         backend_parser_relation::markVarForSelectPriv(mcx, pstate, &var)?;
-        Ok(Node::Expr(Expr::Var(var)))
+        Ok(Node::mk_var(mcx, var))
     } else {
         // JOIN USING alias: expand into a RowExpr of the common columns.
         let mut colvars: mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = mcx::PgVec::new_in(mcx);
@@ -3482,7 +3482,7 @@ fn transformSubLink<'mcx>(
         // If the source was "x IN (select)", convert to "x = ANY (select)".
         let oper_name = if oper_name.is_empty() {
             let mut v: mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = mcx::PgVec::new_in(mcx);
-            let str_node = Node::String(types_nodes::value::StringNode {
+            let str_node = Node::mk_string(mcx, types_nodes::value::StringNode {
                 sval: mcx::PgString::from_str_in("=", mcx)?,
             });
             v.push(mcx::alloc_in(mcx, str_node)?);

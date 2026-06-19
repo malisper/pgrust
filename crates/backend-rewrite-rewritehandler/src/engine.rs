@@ -670,7 +670,7 @@ pub fn rewriteValuesRTE<'mcx>(
                 // unused column -> NULL const
                 if bms_is_member(i as i32, unused_cols) {
                     let nc = make_null_const(mcx, def.typeId, def.typeMod, def.collation)?;
-                    new_list.push(alloc_in(mcx, Node::Expr(Expr::Const(nc)))?);
+                    new_list.push(alloc_in(mcx, Node::mk_const(mcx, nc))?);
                     continue;
                 }
                 if attrno == 0 {
@@ -707,7 +707,7 @@ pub fn rewriteValuesRTE<'mcx>(
                 new_list.push(alloc_in(mcx, col.clone_in(mcx)?)?);
             }
         }
-        new_values.push(alloc_in(mcx, Node::List(new_list))?);
+        new_values.push(alloc_in(mcx, Node::mk_list(mcx, new_list))?);
     }
 
     parsetree.rtable[(rti - 1) as usize].values_lists = new_values;
@@ -732,12 +732,12 @@ pub fn rewriteValuesRTEToNulls<'mcx>(
         for col in sublist.iter() {
             if let Some(Expr::SetToDefault(def)) = (**col).as_expr() {
                 let nc = make_null_const(mcx, def.typeId, def.typeMod, def.collation)?;
-                new_list.push(alloc_in(mcx, Node::Expr(Expr::Const(nc)))?);
+                new_list.push(alloc_in(mcx, Node::mk_const(mcx, nc))?);
             } else {
                 new_list.push(alloc_in(mcx, col.clone_in(mcx)?)?);
             }
         }
-        new_values.push(alloc_in(mcx, Node::List(new_list))?);
+        new_values.push(alloc_in(mcx, Node::mk_list(mcx, new_list))?);
     }
     parsetree.rtable[(rti - 1) as usize].values_lists = new_values;
     Ok(())
@@ -907,7 +907,7 @@ pub fn AcquireRewriteLocks<'mcx>(
                         newaliasvars.push(aliasitem);
                     } else {
                         let nc = make_null_const(mcx, var_type, var_typmod, var_coll)?;
-                        newaliasvars.push(alloc_in(mcx, Node::Expr(Expr::Const(nc)))?);
+                        newaliasvars.push(alloc_in(mcx, Node::mk_const(mcx, nc))?);
                     }
                 }
                 parsetree.rtable[rt_index - 1].joinaliasvars = newaliasvars;
@@ -1005,7 +1005,7 @@ pub fn rewriteRuleAction<'mcx>(
         };
 
         // OffsetVarNodes(sub_action, rt_length, 0); OffsetVarNodes(rule_qual, ...)
-        let mut sub_node = Node::Query(core_clone(sub_action, mcx)?);
+        let mut sub_node = Node::mk_query(mcx, core_clone(sub_action, mcx)?);
         OffsetVarNodes(&mut sub_node, rt_length, 0);
         // references to OLD should point at original rt_index
         ChangeVarNodes(&mut sub_node, PRS2_OLD_VARNO + rt_length, rt_index, 0);
@@ -1029,7 +1029,7 @@ pub fn rewriteRuleAction<'mcx>(
     for rte in sub_action.rtable.iter_mut() {
         if rte.rtekind == RTEKind::RTE_SUBQUERY && !rte.lateral {
             if let Some(subq) = rte.subquery.as_deref() {
-                let sn = Node::Query(core_clone(subq, mcx)?);
+                let sn = Node::mk_query(mcx, core_clone(subq, mcx)?);
                 if contain_vars_of_level(&sn, 1) {
                     rte.lateral = true;
                 }
@@ -1238,7 +1238,7 @@ pub fn rewriteRuleAction<'mcx>(
         } else {
             ReplaceVarsNoMatchOption::SubstituteNull
         };
-        let mut sub_node = Node::Query(core_clone(sub_action, mcx)?);
+        let mut sub_node = Node::mk_query(mcx, core_clone(sub_action, mcx)?);
         let mut outer = None;
         ReplaceVarsFromTargetList(
             &mut sub_node,
@@ -1283,7 +1283,7 @@ pub fn rewriteRuleAction<'mcx>(
             PgVec::new_in(mcx);
         let mut had_sublink = rule_action.hasSubLinks;
         for tle in parsetree.returningList.iter() {
-            let mut node = Node::TargetEntry(tle.clone_in(mcx)?);
+            let mut node = Node::mk_target_entry(mcx, tle.clone_in(mcx)?);
             let mut outer = Some(had_sublink);
             ReplaceVarsFromTargetList(
                 &mut node,
@@ -1569,7 +1569,7 @@ fn ApplyRetrieveRule<'mcx>(
     if let Some(eref) = rte.eref.as_deref_mut() {
         while (eref.colnames.len() as i32) < num_cols {
             eref.colnames
-                .push(alloc_in(mcx, Node::String(make_string(mcx, "?column?")?))?);
+                .push(alloc_in(mcx, Node::mk_string(mcx, make_string(mcx, "?column?")?))?);
         }
     }
 
@@ -2316,7 +2316,7 @@ fn set_cte_query<'mcx>(
     q: Query<'mcx>,
 ) -> PgResult<()> {
     if let Some(cte) = cte_mut(node) {
-        cte.ctequery = Some(alloc_in(mcx, Node::Query(q))?);
+        cte.ctequery = Some(alloc_in(mcx, Node::mk_query(mcx, q))?);
     }
     Ok(())
 }

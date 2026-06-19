@@ -109,7 +109,7 @@ const MaxAttrNumber: i32 = 32767;
 
 /// `makeString(pstrdup(s))` as a central `Node::String` boxed for a colname list.
 fn make_string_node<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<NodePtr<'mcx>> {
-    let node = Node::String(StringNode {
+    let node = Node::mk_string(mcx, StringNode {
         sval: PgString::from_str_in(s, mcx)?,
     });
     mcx::alloc_in(mcx, node)
@@ -2067,7 +2067,7 @@ pub fn addRangeTableEntryForFunction<'mcx>(
         rtfunc.funccolcount = final_tupdesc.natts;
         // C: rte->functions = lappend(rte->functions, rtfunc);
         rte.functions
-            .push(mcx::alloc_in(mcx, Node::RangeTblFunction(rtfunc))?);
+            .push(mcx::alloc_in(mcx, Node::mk_range_tbl_function(mcx, rtfunc))?);
 
         // C: functupdescs[funcno] = tupdesc; totalatts += tupdesc->natts;
         totalatts += final_tupdesc.natts;
@@ -2720,7 +2720,7 @@ pub fn addNSItemToQuery<'mcx>(
     add_to_var_namespace: bool,
 ) -> PgResult<()> {
     if add_to_join_list {
-        let rtr = Node::RangeTblRef(RangeTblRef {
+        let rtr = Node::mk_range_tbl_ref(mcx, RangeTblRef {
             rtindex: nsitem.p_rtindex,
         });
         pstate.p_joinlist.push(mcx::alloc_in(mcx, rtr)?);
@@ -2897,7 +2897,7 @@ pub fn expandRTE<'mcx>(
                         cv.push(mcx::alloc_in(mcx, var_node(varnode))?);
                     } else if include_dropped {
                         let nc = make_null_const(mcx, INT4OID, -1, InvalidOid)?;
-                        cv.push(mcx::alloc_in(mcx, Node::Expr(types_nodes::primnodes::Expr::Const(nc)))?);
+                        cv.push(mcx::alloc_in(mcx, Node::mk_const(mcx, nc))?);
                     }
                 }
             }
@@ -2980,7 +2980,7 @@ fn expandTupleDesc<'mcx>(
                 }
                 if let Some(cv) = colvars.as_deref_mut() {
                     let nc = make_null_const(mcx, INT4OID, -1, InvalidOid)?;
-                    cv.push(mcx::alloc_in(mcx, Node::Expr(types_nodes::primnodes::Expr::Const(nc)))?);
+                    cv.push(mcx::alloc_in(mcx, Node::mk_const(mcx, nc))?);
                 }
             }
             if let Some(ai) = aliasidx {

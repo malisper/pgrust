@@ -27,7 +27,7 @@ pub type NodePtr<'mcx> = PgBox<'mcx, Node<'mcx>>;
 pub fn make_string<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<NodePtr<'mcx>> {
     mcx::alloc_in(
         mcx,
-        Node::String(StringNode {
+        Node::mk_string(mcx, StringNode {
             sval: PgString::from_str_in(s, mcx)?,
         }),
     )

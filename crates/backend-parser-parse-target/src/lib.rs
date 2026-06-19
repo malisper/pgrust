@@ -624,7 +624,7 @@ pub fn transformAssignedExpr<'mcx>(
         let col_var: Node<'mcx> = if pstate.p_is_insert {
             // INSERT INTO table (col.something): no real source value, insert a
             // NULL constant.
-            Node::Expr(Expr::Const(make_null_const(
+            Node::mk_const(mcx, (make_null_const(
                 mcx,
                 attrtype,
                 attrtypmod,
@@ -646,7 +646,7 @@ pub fn transformAssignedExpr<'mcx>(
                 0,
             );
             var.location = location;
-            Node::Expr(Expr::Var(var))
+            Node::mk_var(mcx, var)
         };
 
         let rhs = expr_to_node(expr.expect("transformAssignedExpr: NULL expr for indirection"));
@@ -770,7 +770,7 @@ pub fn transformAssignmentIndirection<'mcx>(
         Some(b) => Some(b),
         None => {
             if indirection_cell < indirection.len() {
-                Some(Node::Expr(Expr::CaseTestExpr(CaseTestExpr {
+                Some(Node::mk_case_test_expr(mcx, (CaseTestExpr {
                     typeId: target_type_id,
                     typeMod: target_typmod,
                     collation: target_collation,
@@ -914,7 +914,7 @@ pub fn transformAssignmentIndirection<'mcx>(
                 )?));
             }
 
-            return Ok(Node::Expr(Expr::FieldStore(fstore)));
+            return Ok(Node::mk_field_store(mcx, fstore));
         }
 
         i += 1;
@@ -1298,7 +1298,7 @@ fn ExpandColumnRefStar<'mcx>(
                     .p_rte
                     .as_deref()
                     .expect("p_rte set");
-                Some(alloc_in(mcx, Node::RangeTblEntry(rte.clone_in(mcx)?))?)
+                Some(alloc_in(mcx, Node::mk_range_tbl_entry(mcx, rte.clone_in(mcx)?))?)
             }
             None => None,
         };
@@ -1806,7 +1806,7 @@ pub fn expandRecordVariable<'mcx>(
     // We now have an expression we can't expand any more.
     let expr_node = match drilled {
         Some(n) => n,
-        None => Node::Expr(Expr::Var(var.clone())),
+        None => Node::mk_var(mcx, var.clone()),
     };
     Ok(unwrap_tupdesc(get_expr_result_tupdesc_node(mcx, &expr_node)?))
 }

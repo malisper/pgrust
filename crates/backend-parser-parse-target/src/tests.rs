@@ -10,7 +10,7 @@ use types_nodes::value::StringNode;
 fn string_node<'mcx>(mcx: Mcx<'mcx>, s: &str) -> NodePtr<'mcx> {
     alloc_in(
         mcx,
-        Node::String(StringNode {
+        Node::mk_string(mcx, StringNode {
             sval: PgString::from_str_in(s, mcx).unwrap(),
         }),
     )
@@ -24,7 +24,7 @@ fn figure_colname_columnref_last_field() {
     let mut fields: PgVec<NodePtr> = PgVec::new_in(mcx);
     fields.push(string_node(mcx, "rel"));
     fields.push(string_node(mcx, "mycol"));
-    let cref = Node::ColumnRef(ColumnRef {
+    let cref = Node::mk_column_ref(mcx, ColumnRef {
         fields,
         location: -1,
     });
@@ -63,7 +63,7 @@ fn figure_colname_nullif() {
 fn figure_colname_grouping() {
     let root = MemoryContext::new("t");
     let mcx = root.mcx();
-    let gf = Node::GroupingFunc(types_nodes::rawexprnodes::GroupingFunc {
+    let gf = Node::mk_grouping_func(mcx, types_nodes::rawexprnodes::GroupingFunc {
         args: PgVec::new_in(mcx),
         refs: PgVec::new_in(mcx),
         cols: PgVec::new_in(mcx),

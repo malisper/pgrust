@@ -250,7 +250,7 @@ fn adjust_join_tree_list_removes_matching_rtr() {
     let mut q = Query::new(mcx);
     let mut fromlist: PgVec<NodePtr> = PgVec::new_in(mcx);
     for idx in [1i32, 2, 3] {
-        fromlist.push(PgBox::try_new_in(Node::RangeTblRef(RangeTblRef { rtindex: idx }), mcx).unwrap());
+        fromlist.push(PgBox::try_new_in(Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex: idx }), mcx).unwrap());
     }
     q.jointree = Some(
         PgBox::try_new_in(

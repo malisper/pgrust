@@ -235,7 +235,7 @@ fn transformIndexConstraint<'mcx>(
         if_not_exists: false,
         reset_default_tblspc,
     };
-    let index = mcx::alloc_in(mcx, Node::IndexStmt(index))?;
+    let index = mcx::alloc_in(mcx, Node::mk_index_stmt(mcx, index))?;
 
     // The remaining work — USING INDEX validity checks, breaking apart the
     // EXCLUDE pairs, resolving UNIQUE/PRIMARY key column names against
@@ -286,7 +286,7 @@ fn str_val<'a>(n: &'a NodePtr<'_>) -> &'a str {
 fn make_index_elem<'mcx>(mcx: Mcx<'mcx>, key: &str) -> PgResult<NodePtr<'mcx>> {
     mcx::alloc_in(
         mcx,
-        Node::IndexElem(IndexElem {
+        Node::mk_index_elem(mcx, IndexElem {
             name: Some(PgString::from_str_in(key, mcx)?),
             expr: None,
             indexcolname: None,
@@ -411,7 +411,7 @@ pub fn transform_index_constraint_catalog<'mcx>(
                             col.is_not_null = true;
                         }
                         let nn = make_not_null_constraint(mcx, key)?;
-                        extra_nn.push(mcx::alloc_in(mcx, Node::Constraint(nn))?);
+                        extra_nn.push(mcx::alloc_in(mcx, Node::mk_constraint(mcx, nn))?);
                     }
                 }
                 // (contype == PRIMARY && isalter) — Assert(column->is_not_null),

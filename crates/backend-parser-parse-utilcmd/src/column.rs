@@ -104,7 +104,7 @@ pub fn transformColumnDefinition<'mcx>(
     // Do necessary work on the column type declaration (catalog-bound: verify
     // the type + any COLLATE via the seam).
     if column.typeName.is_some() {
-        let column_node = mcx::alloc_in(mcx, Node::ColumnDef(column.clone_in(mcx)?))?;
+        let column_node = mcx::alloc_in(mcx, Node::mk_column_def(mcx, column.clone_in(mcx)?))?;
         crate::coltype::transformColumnType(mcx, &cxt.pstate, column_node.as_ref())?;
     }
 
@@ -113,7 +113,7 @@ pub fn transformColumnDefinition<'mcx>(
         let seq_type_id = column.typeName.as_deref().map_or(0 as Oid, |tn| tn.typeOid);
         let relation = clone_relation(cxt)?;
 
-        let column_node = mcx::alloc_in(mcx, Node::ColumnDef(column.clone_in(mcx)?))?;
+        let column_node = mcx::alloc_in(mcx, Node::mk_column_def(mcx, column.clone_in(mcx)?))?;
         let (column_out, snamespace, sname, before_stmts, after_stmts) =
             sx::generateSerialExtraStmts::call(
                 mcx,
@@ -151,18 +151,18 @@ pub fn transformColumnDefinition<'mcx>(
             // snamenode->val.node.type = T_String; snamenode->val.sval.sval = qstring;
             val: Some(mcx::alloc_in(
                 mcx,
-                Node::String(types_nodes::value::StringNode { sval: qstring }),
+                Node::mk_string(mcx, types_nodes::value::StringNode { sval: qstring }),
             )?),
             isnull: false,
             location: -1,
         };
         let castnode = TypeCast {
-            arg: Some(mcx::alloc_in(mcx, Node::A_Const(snamenode))?),
+            arg: Some(mcx::alloc_in(mcx, Node::mk_a_const(mcx, snamenode))?),
             typeName: Some(mcx::alloc_in(mcx, system_type_name(mcx, "regclass")?)?),
             location: -1,
         };
         let mut funccall_args: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
-        funccall_args.push(mcx::alloc_in(mcx, Node::TypeCast(castnode))?);
+        funccall_args.push(mcx::alloc_in(mcx, Node::mk_type_cast(mcx, castnode))?);
         let funccallnode = FuncCall {
             funcname: system_func_name(mcx, "nextval")?,
             args: funccall_args,
@@ -179,13 +179,13 @@ pub fn transformColumnDefinition<'mcx>(
         let constraint = Constraint {
             contype: CONSTR_DEFAULT,
             location: -1,
-            raw_expr: Some(mcx::alloc_in(mcx, Node::FuncCall(funccallnode))?),
+            raw_expr: Some(mcx::alloc_in(mcx, Node::mk_func_call(mcx, funccallnode))?),
             cooked_expr: None,
             ..default_constraint(mcx)
         };
         column
             .constraints
-            .push(mcx::alloc_in(mcx, Node::Constraint(constraint))?);
+            .push(mcx::alloc_in(mcx, Node::mk_constraint(mcx, constraint))?);
 
         // have a not-null constraint added later
         need_notnull = true;
@@ -363,7 +363,7 @@ pub fn transformColumnDefinition<'mcx>(
                 }
 
                 // ctype = typenameType(...); typeOid = ctype->oid (catalog seam).
-                let column_node = mcx::alloc_in(mcx, Node::ColumnDef(column.clone_in(mcx)?))?;
+                let column_node = mcx::alloc_in(mcx, Node::mk_column_def(mcx, column.clone_in(mcx)?))?;
                 let type_oid =
                     crate::coltype::transformColumnType(mcx, &cxt.pstate, column_node.as_ref())?;
 
@@ -384,7 +384,7 @@ pub fn transformColumnDefinition<'mcx>(
                 };
 
                 let relation = clone_relation(cxt)?;
-                let column_node = mcx::alloc_in(mcx, Node::ColumnDef(column.clone_in(mcx)?))?;
+                let column_node = mcx::alloc_in(mcx, Node::mk_column_def(mcx, column.clone_in(mcx)?))?;
                 let (_column_out, _snamespace, _sname, before_stmts, after_stmts) =
                     sx::generateSerialExtraStmts::call(
                         mcx,
@@ -564,7 +564,7 @@ pub fn transformColumnDefinition<'mcx>(
     if need_notnull && !(saw_nullable && column.is_not_null) {
         column.is_not_null = true;
         let nn = make_not_null_constraint(mcx, &colname)?;
-        cxt.nnconstraints.push(mcx::alloc_in(mcx, Node::Constraint(nn))?);
+        cxt.nnconstraints.push(mcx::alloc_in(mcx, Node::mk_constraint(mcx, nn))?);
     }
 
     // If needed, generate ALTER FOREIGN TABLE ... per-column FDW options.
@@ -589,7 +589,7 @@ pub fn transformColumnDefinition<'mcx>(
         };
         let relation = clone_relation_opt(cxt)?;
         let mut cmds: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
-        cmds.push(mcx::alloc_in(mcx, Node::AlterTableCmd(altercmd))?);
+        cmds.push(mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, altercmd))?);
         let stmt = AlterTableStmt {
             relation,
             cmds,
@@ -597,12 +597,12 @@ pub fn transformColumnDefinition<'mcx>(
             missing_ok: false,
         };
         cxt.alist
-            .push(mcx::alloc_in(mcx, Node::AlterTableStmt(stmt))?);
+            .push(mcx::alloc_in(mcx, Node::mk_alter_table_stmt(mcx, stmt))?);
     }
 
     // Finally, the (mutated) column itself goes into cxt.columns.
     cxt.columns
-        .push(mcx::alloc_in(mcx, Node::ColumnDef(column))?);
+        .push(mcx::alloc_in(mcx, Node::mk_column_def(mcx, column))?);
 
     Ok(())
 }

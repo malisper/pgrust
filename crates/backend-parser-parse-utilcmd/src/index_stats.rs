@@ -48,7 +48,7 @@ pub fn transformIndexStmt<'mcx>(
 
     // Nothing to do if statement already transformed.
     if stmt.transformed {
-        return mcx::alloc_in(mcx, Node::IndexStmt(stmt));
+        return mcx::alloc_in(mcx, Node::mk_index_stmt(mcx, stmt));
     }
 
     // Set up pstate.
@@ -107,7 +107,7 @@ pub fn transformIndexStmt<'mcx>(
     // Mark statement as successfully transformed.
     stmt.transformed = true;
 
-    mcx::alloc_in(mcx, Node::IndexStmt(stmt))
+    mcx::alloc_in(mcx, Node::mk_index_stmt(mcx, stmt))
 }
 
 /// The per-`IndexElem` expression transform from `transformIndexStmt`.
@@ -161,7 +161,7 @@ pub fn transformStatsStmt<'mcx>(
 
     // Nothing to do if statement already transformed.
     if stmt.transformed {
-        return mcx::alloc_in(mcx, Node::CreateStatsStmt(stmt));
+        return mcx::alloc_in(mcx, Node::mk_create_stats_stmt(mcx, stmt));
     }
 
     // Set up pstate.
@@ -201,7 +201,7 @@ pub fn transformStatsStmt<'mcx>(
     // Mark statement as successfully transformed.
     stmt.transformed = true;
 
-    mcx::alloc_in(mcx, Node::CreateStatsStmt(stmt))
+    mcx::alloc_in(mcx, Node::mk_create_stats_stmt(mcx, stmt))
 }
 
 /// The per-`StatsElem` expression transform from `transformStatsStmt`.

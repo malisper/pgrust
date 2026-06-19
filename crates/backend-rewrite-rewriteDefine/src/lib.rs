@@ -243,9 +243,9 @@ fn action_as_list_node<'mcx>(mcx: Mcx<'mcx>, action: &[Query<'mcx>]) -> PgResult
     let mut items: PgVec<'mcx, types_nodes::nodes::NodePtr<'mcx>> =
         mcx::vec_with_capacity_in(mcx, action.len())?;
     for q in action.iter() {
-        items.push(mcx::alloc_in(mcx, Node::Query(q.clone_in(mcx)?))?);
+        items.push(mcx::alloc_in(mcx, Node::mk_query(mcx, q.clone_in(mcx)?))?);
     }
-    Ok(Node::List(items))
+    Ok(Node::mk_list(mcx, items))
 }
 
 fn get_rel_name_or_empty<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<String> {

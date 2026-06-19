@@ -213,7 +213,7 @@ pub fn transformCreateStmt<'mcx>(
     stmt.nnconstraints = core::mem::replace(&mut cxt.nnconstraints, PgVec::new_in(mcx));
 
     let mut result = core::mem::replace(&mut cxt.blist, PgVec::new_in(mcx));
-    result.push(mcx::alloc_in(mcx, Node::CreateStmt(stmt))?);
+    result.push(mcx::alloc_in(mcx, Node::mk_create_stmt(mcx, stmt))?);
     let alist = core::mem::replace(&mut cxt.alist, PgVec::new_in(mcx));
     result.extend(alist);
     result.extend(save_alist);
