@@ -89,6 +89,7 @@ const ANUM_PG_CLASS_RELHASRULES: i16 = 21;
 const ANUM_PG_CLASS_RELHASSUBCLASS: i16 = 23;
 const ANUM_PG_CLASS_RELROWSECURITY: i16 = 24;
 const ANUM_PG_CLASS_RELFORCEROWSECURITY: i16 = 25;
+const ANUM_PG_CLASS_RELISPOPULATED: i16 = 26;
 
 // pg_sequence (CATALOG(pg_sequence,2224)): 8 fixed columns.
 const ANUM_PG_SEQUENCE_SEQRELID: i16 = 1;
@@ -1046,6 +1047,37 @@ fn set_pg_class_row_security(
     if let Some(force) = relforcerowsecurity {
         set_col(&mut values, &mut nulls, &mut replaces, ANUM_PG_CLASS_RELFORCEROWSECURITY, Datum::from_bool(force));
     }
+    modify_and_update(mcx, &pg_class, &oldtup, &values, &nulls, &replaces)?;
+    pg_class.close(RowExclusiveLock)?;
+    Ok(true)
+}
+
+/// `SetMatViewPopulatedState`'s pg_class write (matview.c:78-110): `pg_class =
+/// table_open(RelationRelationId, RowExclusiveLock)` → `tuple =
+/// SearchSysCacheCopy1(RELOID, relid)` → `((Form_pg_class)
+/// GETSTRUCT(tuple))->relispopulated = newstate` → `CatalogTupleUpdate(pg_class,
+/// &tuple->t_self, tuple)` → `heap_freetuple` → `table_close`. Returns `false`
+/// when the syscache lookup failed (`!HeapTupleIsValid`), so the matview caller
+/// raises `cache lookup failed for relation %u`. Installed as the
+/// `update_pg_class_populated` matview seam: matview.c's body crosses into the
+/// pg_class-write owner exactly as the row-security setters above do.
+fn set_pg_class_relispopulated(relid: Oid, newstate: bool) -> PgResult<bool> {
+    let ctx = MemoryContext::new("set_pg_class_relispopulated");
+    let mcx = ctx.mcx();
+    let pg_class = table_open(mcx, cat::catalog::RELATION_RELATION_ID, RowExclusiveLock)?;
+    let Some(oldtup) = fetch_by_oid(mcx, &pg_class, ANUM_PG_CLASS_OID, relid)? else {
+        pg_class.close(RowExclusiveLock)?;
+        return Ok(false);
+    };
+    let (mut values, mut nulls) = deform(mcx, &pg_class, &oldtup)?;
+    let mut replaces = vec![false; values.len()];
+    set_col(
+        &mut values,
+        &mut nulls,
+        &mut replaces,
+        ANUM_PG_CLASS_RELISPOPULATED,
+        Datum::from_bool(newstate),
+    );
     modify_and_update(mcx, &pg_class, &oldtup, &values, &nulls, &replaces)?;
     pg_class.close(RowExclusiveLock)?;
     Ok(true)
@@ -2568,6 +2600,12 @@ pub fn install() {
     s::set_pg_class_reltoastrelid_inplace::set(set_pg_class_reltoastrelid_inplace);
     s::set_relation_rule_status::set(set_relation_rule_status);
     s::set_pg_class_row_security::set(set_pg_class_row_security);
+
+    // matview.c's SetMatViewPopulatedState pg_class write (cross-crate install:
+    // the matview-deps seam's body is this pg_class single-field writer).
+    backend_commands_matview_deps_seams::update_pg_class_populated::set(
+        set_pg_class_relispopulated,
+    );
 
     // pg_sequence.
     s::catalog_insert_pg_sequence::set(catalog_insert_pg_sequence);

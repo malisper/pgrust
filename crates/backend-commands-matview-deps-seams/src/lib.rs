@@ -31,12 +31,12 @@
 
 #![allow(non_snake_case)]
 
+use mcx::Mcx;
 use types_core::primitive::Oid;
 use types_error::PgResult;
-use types_matview::{
-    IndexUsabilityInfo, MatViewRuleInfo, MatchMergeQual, PlannedStmtHandle, QueryDescHandle,
-    QueryHandle,
-};
+use types_matview::{IndexUsabilityInfo, MatViewRuleInfo, MatchMergeQual};
+use types_nodes::copy_query::Query;
+use types_nodes::parsestmt::DestReceiverHandle;
 use types_rel::Relation;
 
 // --- matview rewrite-rule shape (RuleLock-carrier keystone) --------------------
@@ -50,8 +50,12 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `linitial_node(Query, rule->actions)` — the matview's stored `dataQuery`,
-    /// reached off `rd_rules` (the same RuleLock keystone).
-    pub fn matview_data_query(rel: Oid) -> PgResult<QueryHandle>
+    /// reached off `rd_rules` (the same RuleLock keystone). The relcache owner
+    /// deep-copies the single rewrite-rule action `Query` (which lives in the
+    /// process-lifetime cache arena, the C `copyObject` is implicit) into the
+    /// caller's per-command `mcx`, so the matview driver receives the owned,
+    /// value-typed query that the rewrite/plan/execute leg consumes.
+    pub fn matview_data_query<'mcx>(mcx: Mcx<'mcx>, rel: Oid) -> PgResult<Query<'mcx>>
 );
 seam_core::seam!(
     /// Read the `pg_index` fields `is_usable_unique_index` inspects that are NOT
@@ -142,49 +146,41 @@ seam_core::seam!(
 // --- refresh_matview_datafill: rewrite / plan / executor / snapshot ------------
 
 seam_core::seam!(
-    /// `copyObject(query)` -> `AcquireRewriteLocks(copied, true, false)` ->
-    /// `QueryRewrite(copied)`; returns the rewritten list's length and, when 1,
-    /// the single rewritten Query.
-    pub fn rewrite_data_query(query: QueryHandle) -> PgResult<(i32, QueryHandle)>
-);
-seam_core::seam!(
     /// `CHECK_FOR_INTERRUPTS()`.
     pub fn check_for_interrupts() -> PgResult<()>
 );
+
 seam_core::seam!(
-    /// `pg_plan_query(query, queryString, CURSOR_OPT_PARALLEL_OK, NULL)`.
-    pub fn pg_plan_query(query: QueryHandle, query_string: String) -> PgResult<PlannedStmtHandle>
+    /// `refresh_matview_datafill` (matview.c 401-460): execute the matview's
+    /// stored `dataQuery`, redirecting result rows into `dest` (the
+    /// `DR_transientrel` receiver that inserts them into the regenerated heap):
+    ///
+    /// `copyObject(dataQuery)` → `AcquireRewriteLocks(copied, true, false)` →
+    /// `QueryRewrite(copied)` → single-`SELECT` check → `pg_plan_query(query,
+    /// queryString, CURSOR_OPT_PARALLEL_OK, NULL)` →
+    /// `PushCopiedSnapshot(GetActiveSnapshot()) + UpdateActiveSnapshotCommandId`
+    /// → `CreateQueryDesc(plan, …, GetActiveSnapshot(), InvalidSnapshot, dest, …)`
+    /// → `ExecutorStart(qd, 0)` → `ExecutorRun(qd, Forward, 0)` →
+    /// `queryDesc->estate->es_processed` → `ExecutorFinish/End + FreeQueryDesc +
+    /// PopActiveSnapshot`. Returns the row count inserted.
+    ///
+    /// Bundled into one seam (mirroring `createas.c`'s `run_ctas_executor`)
+    /// because the whole rewrite→plan→run pipeline shares the active snapshot and
+    /// the `DR_transientrel` receiver and has no matview-observable intermediate
+    /// state. INSTALLED by `backend-tcop-pquery` (the executor-driving layer that
+    /// owns `CreateQueryDesc` / `ExecutorStart`..`End` and reaches the
+    /// rewriter/planner/active-snapshot machinery). `query` is the owned,
+    /// value-typed `dataQuery` the rule reader returned.
+    pub fn run_matview_datafill<'mcx>(
+        mcx: Mcx<'mcx>,
+        query: Query<'mcx>,
+        query_string: &str,
+        dest: DestReceiverHandle,
+    ) -> PgResult<u64>
 );
-// NOTE: `push_copied_snapshot_and_bump` was re-homed to
-// `backend-utils-time-snapmgr-seams` (its true C owner is
-// `utils/time/snapmgr.c`); matview now calls it through that crate.
-seam_core::seam!(
-    /// `CreateQueryDesc(plan, queryString, GetActiveSnapshot(), InvalidSnapshot,
-    /// dest, NULL, NULL, 0)`.
-    pub fn create_query_desc(
-        plan: PlannedStmtHandle,
-        query_string: String,
-        dest: types_nodes::parsestmt::DestReceiverHandle,
-    ) -> PgResult<QueryDescHandle>
-);
-seam_core::seam!(
-    /// `ExecutorStart(queryDesc, 0)`.
-    pub fn executor_start(query_desc: QueryDescHandle) -> PgResult<()>
-);
-seam_core::seam!(
-    /// `ExecutorRun(queryDesc, ForwardScanDirection, 0)`.
-    pub fn executor_run(query_desc: QueryDescHandle) -> PgResult<()>
-);
-seam_core::seam!(
-    /// `queryDesc->estate->es_processed`.
-    pub fn query_desc_es_processed(query_desc: QueryDescHandle) -> PgResult<u64>
-);
-seam_core::seam!(
-    /// `ExecutorFinish(queryDesc); ExecutorEnd(queryDesc); FreeQueryDesc(queryDesc);`
-    pub fn executor_finish_end_free(query_desc: QueryDescHandle) -> PgResult<()>
-);
-// NOTE: `pop_active_snapshot` is owned by snapmgr.c and already declared in
-// `backend-utils-time-snapmgr-seams`; matview calls it through that crate.
+// NOTE: `push_copied_snapshot_and_bump` / `pop_active_snapshot` are owned by
+// snapmgr.c (`backend-utils-time-snapmgr-seams`) and reached inside the bundled
+// `run_matview_datafill` seam, not from the matview driver.
 
 // --- transientrel_* DestReceiver: the table-AM bulk-insert flush ---------------
 //

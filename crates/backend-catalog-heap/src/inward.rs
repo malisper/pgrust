@@ -54,6 +54,64 @@ fn heap_create_with_catalog_seam(args: HeapCreateWithCatalogArgs<'_>) -> PgResul
     )
 }
 
+/// Seam body for `heap_create_with_catalog_transient` — the inner
+/// `heap_create_with_catalog(...)` call of `cluster.c`'s `make_new_heap`
+/// (cluster.c:687-707). The transient NewHeap clones the OldHeap's tuple
+/// descriptor, owner, AM, persistence, mapped-ness and reloptions, is created as
+/// a plain `RELKIND_RELATION` with no defaults/constraints (NIL cooked
+/// constraints), `shared_relation = false`, `oncommit = ONCOMMIT_NOOP`,
+/// `use_user_acl = false`, `allow_system_table_mods = true`, `is_internal =
+/// true`, and `relid`/`reltypeid`/`reloftypeid = InvalidOid`, with the OldHeap
+/// OID passed as `relrewrite` for the rebuild bookkeeping.
+#[allow(clippy::too_many_arguments)]
+fn heap_create_with_catalog_transient_seam<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    new_heap_name: &str,
+    namespaceid: types_core::Oid,
+    new_tablespace: types_core::Oid,
+    owner: types_core::Oid,
+    new_access_method: types_core::Oid,
+    old_heap: &types_rel::Relation<'_>,
+    relpersistence: u8,
+    mapped: bool,
+    reloptions: types_cluster::RelOptionsToken,
+    old_heap_oid: types_core::Oid,
+) -> PgResult<types_core::Oid> {
+    use types_core::InvalidOid;
+    use types_nodes::primnodes::OnCommitAction;
+    use types_tuple::access::RELKIND_RELATION;
+
+    let reloptions: Option<alloc::vec::Vec<u8>> = if reloptions.is_null {
+        None
+    } else {
+        Some(reloptions.bytes)
+    };
+
+    // OldHeapDesc = RelationGetDescr(OldHeap)
+    heap_create_with_catalog(
+        mcx,
+        new_heap_name,
+        namespaceid,
+        new_tablespace,
+        InvalidOid, /* relid */
+        InvalidOid, /* reltypeid */
+        InvalidOid, /* reloftypeid */
+        owner,
+        new_access_method,
+        &old_heap.rd_att,
+        RELKIND_RELATION,
+        relpersistence,
+        false, /* shared_relation: a transient heap is never shared */
+        mapped,
+        OnCommitAction::ONCOMMIT_NOOP,
+        reloptions,
+        false, /* use_user_acl */
+        true,  /* allow_system_table_mods */
+        true,  /* is_internal */
+        old_heap_oid, /* relrewrite */
+    )
+}
+
 /// Seam body for `heap_drop_with_catalog(relid)` (dependency.c's `doDeletion`
 /// `OCLASS_CLASS` relation arm). The inward seam carries no `mcx`, so allocate
 /// a scratch context for the catalog scans / deletes.
@@ -108,6 +166,9 @@ pub fn init_seams() {
         system_attribute_by_name_seam,
     );
     backend_catalog_heap_seams::heap_create_with_catalog::set(heap_create_with_catalog_seam);
+    backend_catalog_heap_seams::heap_create_with_catalog_transient::set(
+        heap_create_with_catalog_transient_seam,
+    );
     backend_catalog_heap_seams::heap_drop_with_catalog::set(heap_drop_with_catalog_seam);
     backend_catalog_heap_seams::check_attribute_names_types::set(check_attribute_names_types_seam);
     // Low-level relation-create seams `index_create` (catalog/index.c) calls

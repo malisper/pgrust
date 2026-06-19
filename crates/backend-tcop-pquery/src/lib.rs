@@ -335,6 +335,106 @@ fn run_ctas_executor<'mcx>(
 }
 
 // ===========================================================================
+// `run_matview_datafill` — the matview.c data-fill leg (matview.c 401-460)
+// ===========================================================================
+
+/// `refresh_matview_datafill` (matview.c 401-460): lock and rewrite a copy of the
+/// matview's stored `dataQuery`, plan it, and execute it with output redirected
+/// into the `DR_transientrel` receiver named by `dest` (which inserts the
+/// regenerated rows into the new heap). Returns `queryDesc->estate->es_processed`.
+///
+/// This is the `run_matview_datafill` seam, owned-decl by
+/// `backend-commands-matview` (it carries the `DR_transientrel` receiver) but
+/// installed here: this is the executor-driving layer (`pquery.c`) that owns
+/// `CreateQueryDesc` / `ExecutorStart`..`End` and reaches the rewriter
+/// (`AcquireRewriteLocks`/`QueryRewrite`), planner (`pg_plan_query`) and
+/// active-snapshot management — the same substrate `run_ctas_executor` uses. The
+/// whole rewrite→plan→run pipeline shares the active snapshot and the receiver
+/// and has no matview-observable intermediate state, so it is one seam.
+fn run_matview_datafill<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    query: Query<'mcx>,
+    query_string: &str,
+    dest: DestReceiverHandle,
+) -> PgResult<u64> {
+    /*
+     * Lock and rewrite, using a copy to preserve the original query.
+     *
+     *   copied_query = copyObject(query);
+     *   AcquireRewriteLocks(copied_query, true, false);
+     *   rewritten = QueryRewrite(copied_query);
+     *
+     * The seam takes `query` by value (the relcache reader already deep-copied
+     * the cached rule action into `mcx`), so the explicit `copyObject` is the
+     * by-value move; `AcquireRewriteLocks(.., forExecute=true, .. =false)` then
+     * re-locks the relations the planner/executor will touch.
+     */
+    let locked =
+        backend_rewrite_rewritehandler_seams::acquire_rewrite_locks::call(mcx, query, true, false)?;
+    let mut rewritten =
+        backend_rewrite_rewritehandler_seams::query_rewrite_canonical::call(mcx, locked)?;
+
+    /* SELECT should never rewrite to more or less than one SELECT query */
+    if rewritten.len() != 1 {
+        return Err(elog_error(
+            "unexpected rewrite result for REFRESH MATERIALIZED VIEW",
+        ));
+    }
+    let query = rewritten.remove(0);
+
+    /*
+     * Plan the query which will generate data for the refresh.
+     *
+     *   plan = pg_plan_query(query, queryString, CURSOR_OPT_PARALLEL_OK, NULL);
+     */
+    let plan = backend_optimizer_plan_planner_seams::pg_plan_query::call(
+        mcx,
+        &query,
+        query_string,
+        types_nodes::copy_query::CURSOR_OPT_PARALLEL_OK,
+    )?;
+
+    /*
+     * Use a snapshot with an updated command ID to ensure this query sees
+     * results of any previously executed queries.
+     *
+     *   PushCopiedSnapshot(GetActiveSnapshot());
+     *   UpdateActiveSnapshotCommandId();
+     */
+    snapmgr_seam::push_copied_snapshot_and_bump::call()?;
+
+    /* Create a QueryDesc, redirecting output to our tuple receiver */
+    let mut query_desc = create_query_desc(
+        mcx.context(),
+        &plan,
+        query_string,
+        get_active_snapshot()?,
+        None, /* InvalidSnapshot */
+        dest,
+        None, /* no bound params */
+        0,
+    )?;
+
+    /* call ExecutorStart to prepare the plan for execution */
+    execMain::ExecutorStart(&mut query_desc, 0)?;
+
+    /* run the plan */
+    execMain::ExecutorRun(&mut query_desc, ForwardScanDirection, 0)?;
+
+    let processed = query_desc.es_processed();
+
+    /* and clean up */
+    execMain::ExecutorFinish(&mut query_desc)?;
+    execMain::ExecutorEnd(&mut query_desc)?;
+
+    free_query_desc(query_desc);
+
+    snapmgr_seam::pop_active_snapshot::call()?;
+
+    Ok(processed)
+}
+
+// ===========================================================================
 // `ChoosePortalStrategy`
 // ===========================================================================
 
@@ -1895,4 +1995,11 @@ pub fn init_seams() {
     // here because this is the executor-driving layer with the
     // QueryRewrite/pg_plan_query/CreateQueryDesc/ExecutorStart..End substrate.
     backend_commands_createas_seams::run_ctas_executor::set(run_ctas_executor);
+
+    // The matview data-fill leg (matview.c 401-460). Owned-decl by
+    // backend-commands-matview (it carries the DR_transientrel receiver);
+    // installed here for the same reason as run_ctas_executor: this is the
+    // executor-driving layer with the AcquireRewriteLocks/QueryRewrite/
+    // pg_plan_query/CreateQueryDesc/ExecutorStart..End substrate.
+    backend_commands_matview_deps_seams::run_matview_datafill::set(run_matview_datafill);
 }

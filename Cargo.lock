@@ -4629,6 +4629,7 @@ dependencies = [
  "mcx",
  "types-array",
  "types-catalog",
+ "types-cluster",
  "types-core",
  "types-error",
  "types-nodes",
@@ -4746,6 +4747,7 @@ dependencies = [
  "backend-catalog-indexing-seams",
  "backend-catalog-objectaccess-seams",
  "backend-commands-functioncmds-seams",
+ "backend-commands-matview-deps-seams",
  "backend-commands-tablecmds-seams",
  "backend-executor-execTuples",
  "backend-postmaster-autovacuum-seams",
@@ -7306,6 +7308,7 @@ dependencies = [
 name = "backend-commands-matview-deps-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -17667,6 +17670,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-transam-xact-seams",
  "backend-commands-createas-seams",
+ "backend-commands-matview-deps-seams",
  "backend-executor-execMain",
  "backend-executor-execTuples-seams",
  "backend-executor-tstorereceiver-seams",
@@ -21001,6 +21005,7 @@ dependencies = [
  "backend-catalog-catalog-seams",
  "backend-catalog-namespace-seams",
  "backend-catalog-storage-seams",
+ "backend-commands-matview-deps-seams",
  "backend-commands-tablecmds-seams",
  "backend-nodes-core-seams",
  "backend-nodes-read-seams",
@@ -21033,6 +21038,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-hash",
+ "types-matview",
  "types-nodes",
  "types-partition",
  "types-pathnodes",

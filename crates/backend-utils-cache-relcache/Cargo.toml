@@ -32,6 +32,13 @@ backend-storage-freespace-seams = { path = "../backend-storage-freespace-seams" 
 # entry by OID).
 backend-commands-tablecmds-seams = { path = "../backend-commands-tablecmds-seams" }
 
+# matview.c's RefreshMatViewByOid reads the matview's rd_rules rewrite-rule
+# shape (matview_rule_info) and its stored dataQuery (matview_data_query) off
+# the open matview handle; RelationData models rd_rules (the RuleLock carrier),
+# so the relcache is their real owner.
+backend-commands-matview-deps-seams = { path = "../backend-commands-matview-deps-seams" }
+types-matview = { path = "../types-matview" }
+
 # bufmgr / visibilitymap &Relation-keyed seams: relcache projects a transient
 # read handle off the owned entry to bridge the OID-keyed hio.c seams (the heap
 # insertion read/extend buffer path) to their real owners.

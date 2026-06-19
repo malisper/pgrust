@@ -32,6 +32,7 @@ backend-utils-mmgr-portalmem = { path = "../backend-utils-mmgr-portalmem" }
 
 # outward seam crates (cyclic owners)
 backend-commands-createas-seams = { path = "../backend-commands-createas-seams" }
+backend-commands-matview-deps-seams = { path = "../backend-commands-matview-deps-seams" }
 backend-rewrite-rewritehandler-seams = { path = "../backend-rewrite-rewritehandler-seams" }
 backend-optimizer-plan-planner-seams = { path = "../backend-optimizer-plan-planner-seams" }
 backend-utils-mmgr-portalmem-seams = { path = "../backend-utils-mmgr-portalmem-seams" }

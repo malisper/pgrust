@@ -14,6 +14,7 @@ types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-tuple = { path = "../types-tuple" }
 types-rel = { path = "../types-rel" }
+types-cluster = { path = "../types-cluster" }
 types-storage = { path = "../types-storage" }
 types-catalog = { path = "../types-catalog" }
 types-array = { path = "../types-array" }

@@ -30,7 +30,6 @@ use backend_utils_error::ereport;
 use mcx::{Mcx, PgBox, PgString, PgVec};
 
 use backend_commands_matview_deps_seams as seam;
-use backend_utils_time_snapmgr_seams as snapmgr_seam;
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_core::primitive::Oid;
 use types_core::xact::CommandId;
@@ -39,9 +38,8 @@ use types_error::{
     PgResult, ERRCODE_CARDINALITY_VIOLATION, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_SYNTAX_ERROR, ERROR,
 };
-use types_matview::{
-    CommandTag, IndexUsabilityInfo, QueryCompletion, QueryHandle, RefreshMatViewStmt,
-};
+use types_matview::{CommandTag, IndexUsabilityInfo, QueryCompletion, RefreshMatViewStmt};
+use types_nodes::copy_query::Query;
 use types_nodes::nodes::CmdType;
 use types_nodes::parsestmt::DestReceiverHandle;
 use types_nodes::tuptable::SlotData;
@@ -344,7 +342,7 @@ pub fn RefreshMatViewByOid(
      * dataQuery = linitial_node(Query, rule->actions); the matview's stored
      * `Query` lives behind the RuleLock keystone, so it crosses the seam.
      */
-    let dataQuery = seam::matview_data_query::call(matviewRel.rd_id)?;
+    let dataQuery = seam::matview_data_query::call(mcx, matviewRel.rd_id)?;
 
     /*
      * Check for active uses of the relation in the current transaction, such as
@@ -478,50 +476,12 @@ pub fn RefreshMatViewByOid(
 fn refresh_matview_datafill(
     mcx: Mcx<'_>,
     dest: DestReceiverHandle,
-    query: QueryHandle,
+    query: Query<'_>,
     query_string: &str,
-    is_create: bool,
+    _is_create: bool,
 ) -> PgResult<u64> {
-    /*
-     * Lock and rewrite, using a copy to preserve the original query.
-     * copied_query = copyObject(query); AcquireRewriteLocks(...);
-     * rewritten = QueryRewrite(copied_query);  `query` is rebound to the single
-     * rewritten Query.
-     */
-    let (rewritten_len, query) = seam::rewrite_data_query::call(query)?;
-
-    /* SELECT should never rewrite to more or less than one SELECT query */
-    if rewritten_len != 1 {
-        return Err(ereport(ERROR)
-            .errmsg_internal(fmt(
-                mcx,
-                format_args!(
-                    "unexpected rewrite result for {}",
-                    if is_create {
-                        "CREATE MATERIALIZED VIEW "
-                    } else {
-                        "REFRESH MATERIALIZED VIEW"
-                    }
-                ),
-            )?)
-            .into_error());
-    }
-
     /* Check for user-requested abort. */
     seam::check_for_interrupts::call()?;
-
-    /* Plan the query which will generate data for the refresh. */
-    let plan = seam::pg_plan_query::call(query, query_string.to_string())?;
-
-    /*
-     * Use a snapshot with an updated command ID to ensure this query sees results
-     * of any previously executed queries.
-     * PushCopiedSnapshot(GetActiveSnapshot()); UpdateActiveSnapshotCommandId();
-     */
-    snapmgr_seam::push_copied_snapshot_and_bump::call()?;
-
-    /* Create a QueryDesc, redirecting output to our tuple receiver */
-    let queryDesc = seam::create_query_desc::call(plan, query_string.to_string(), dest)?;
 
     /*
      * Bind the run-scoped DR_transientrel state for the executor run. C's
@@ -531,23 +491,27 @@ fn refresh_matview_datafill(
      * state here (carrying the receiver's `transientoid`) and binds it to the
      * receiver token for the duration of the run. `transientrel_startup` then
      * opens the relation and fills the rest, exactly as C does.
+     *
+     * The dest router names the receiver by a global `DestReceiverHandle`; the
+     * matview registry token (the one the `transientrel_*` callbacks see as
+     * `state`) is the owner token the receiver was registered with. Recover it so
+     * the run-binding keys the same slot the callbacks read (mirroring
+     * createas.c's `dest_receiver_state_token`).
      */
-    receiver_setup_run(dest.0, mcx)?;
+    let token = backend_tcop_dest::dest_receiver_state_token(dest);
+    receiver_setup_run(token, mcx)?;
 
-    /* call ExecutorStart to prepare the plan for execution */
-    seam::executor_start::call(queryDesc)?;
-
-    /* run the plan */
-    seam::executor_run::call(queryDesc)?;
-
-    let processed = seam::query_desc_es_processed::call(queryDesc)?;
-
-    /* and clean up: ExecutorFinish; ExecutorEnd; FreeQueryDesc */
-    seam::executor_finish_end_free::call(queryDesc)?;
-
-    snapmgr_seam::pop_active_snapshot::call()?;
-
-    Ok(processed)
+    /*
+     * Lock and rewrite (using a copy to preserve the original query), plan, then
+     * execute the data-fill query with output redirected to our `DR_transientrel`
+     * receiver (matview.c 401-460). The whole rewrite→plan→run pipeline shares the
+     * active snapshot and the receiver and has no matview-observable intermediate
+     * state, so it crosses one seam (mirroring createas.c's `run_ctas_executor`);
+     * the rewriter/planner/active-snapshot machinery lives in the
+     * executor-driving layer (pquery.c) that installs it. The single-`SELECT`
+     * rewrite-result check is performed there.
+     */
+    seam::run_matview_datafill::call(mcx, query, query_string, dest)
 }
 
 // ===========================================================================

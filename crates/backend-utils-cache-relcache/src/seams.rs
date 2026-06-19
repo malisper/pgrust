@@ -158,6 +158,11 @@ pub fn init_seams() {
     // --- rewriteHandler.c per-query rule reader (rd_rules re-projection) ---
     sx::relation_rules::set(relation_rules);
 
+    // --- matview.c RefreshMatViewByOid rd_rules reads (the RuleLock carrier the
+    //     relcache owns): the rewrite-rule shape + the stored dataQuery ---
+    backend_commands_matview_deps_seams::matview_rule_info::set(matview_rule_info);
+    backend_commands_matview_deps_seams::matview_data_query::set(matview_data_query);
+
     // --- WAL-startup: StartupXLOG (xlog.c:5657) drops stale init files ---
     sx::relation_cache_init_file_remove::set(crate::initfile::RelationCacheInitFileRemove);
 
@@ -576,6 +581,85 @@ fn relation_rules(
             });
         }
         Ok(Some(sx::RuleLockImage { rules }))
+    })?
+}
+
+/// `matview_rule_info(rel)` — the `matviewRel->rd_rel->relhasrules` /
+/// `matviewRel->rd_rules->...` shape `RefreshMatViewByOid` branches on (matview.c
+/// 216-243), read off the live matview relcache entry. `RelationData` owns
+/// `rd_rules` (the RuleLock carrier), so the relcache reports this. Mirrors the C
+/// reads: `relhasrules`, `numLocks` (`< 0` when `rd_rules == NULL`), and for the
+/// first rule `event == CMD_SELECT`, `isInstead`, and `list_length(actions)`.
+fn matview_rule_info(rel: Oid) -> PgResult<types_matview::MatViewRuleInfo> {
+    use types_nodes::nodes::CmdType;
+    crate::core_entry_store::with_relation(rel, |rd| {
+        let relhasrules = rd.rd_rel.relhasrules;
+        match &rd.rd_rules {
+            // C `rd_rules == NULL`: `numLocks` is read as `< 1` so the caller
+            // raises "missing rewrite information". Report `num_rules < 0` and
+            // leave the first-rule fields at their never-inspected defaults.
+            None => Ok(types_matview::MatViewRuleInfo {
+                relhasrules,
+                num_rules: -1,
+                rule_is_select: false,
+                rule_is_instead: false,
+                rule_actions_length: 0,
+            }),
+            Some(rl) => {
+                let num_rules = rl.rules.len() as i32;
+                // The caller checks `num_rules < 1` / `> 1` before inspecting the
+                // first rule; mirror C by reading `rules[0]` only when present.
+                let (rule_is_select, rule_is_instead, rule_actions_length) =
+                    match rl.rules.first() {
+                        Some(r) => (
+                            r.event == CmdType::CMD_SELECT,
+                            r.isInstead,
+                            r.actions.len() as i32,
+                        ),
+                        None => (false, false, 0),
+                    };
+                Ok(types_matview::MatViewRuleInfo {
+                    relhasrules,
+                    num_rules,
+                    rule_is_select,
+                    rule_is_instead,
+                    rule_actions_length,
+                })
+            }
+        }
+    })?
+}
+
+/// `matview_data_query(mcx, rel)` — `dataQuery = linitial_node(Query,
+/// rule->actions)` (matview.c 374): the matview's stored data query, read off the
+/// first (only) rewrite rule's first action. The cached `Query` lives in the
+/// process-lifetime cache arena, so it is deep-copied into the caller's
+/// per-command `mcx` (`Query::clone_in`, the C `copyObject` is implicit when the
+/// rewriter later copies it). The caller has already validated the rule shape
+/// (`matview_rule_info`), so a missing rule/action is an internal error.
+fn matview_data_query<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: Oid,
+) -> PgResult<types_nodes::copy_query::Query<'mcx>> {
+    crate::core_entry_store::with_relation(rel, |rd| {
+        let internal = |msg: &str| {
+            backend_utils_error::ereport(types_error::ERROR)
+                .errmsg_internal(msg.to_string())
+                .into_error()
+        };
+        let rl = rd
+            .rd_rules
+            .as_ref()
+            .ok_or_else(|| internal("materialized view is missing rewrite information"))?;
+        let rule = rl
+            .rules
+            .first()
+            .ok_or_else(|| internal("materialized view is missing rewrite information"))?;
+        let action = rule
+            .actions
+            .first()
+            .ok_or_else(|| internal("the rule for materialized view is not a single action"))?;
+        action.clone_in(mcx)
     })?
 }
 
