@@ -2630,6 +2630,13 @@ thread_local! {
     static VACUUM_COST_ACTIVE: Cell<bool> = const { Cell::new(false) };
     static VACUUM_COST_BALANCE: Cell<i32> = const { Cell::new(0) };
     static VACUUM_COST_BALANCE_LOCAL: Cell<i32> = const { Cell::new(0) };
+    /// `double vacuum_cost_delay = 0;` and `int vacuum_cost_limit = 200;`
+    /// (vacuum.c:91-92) — the live working cost parameters. Distinct from the
+    /// `VacuumCostDelay` / `VacuumCostLimit` GUC globals (globals.c): these are
+    /// recomputed by `VacuumUpdateCosts()` from the GUC source + per-table
+    /// storage params, then read by `vacuum_delay_point` / `compute_parallel_delay`.
+    static VACUUM_COST_DELAY_WORKING: Cell<f64> = const { Cell::new(0.0) };
+    static VACUUM_COST_LIMIT_WORKING: Cell<i32> = const { Cell::new(200) };
     /// `pg_atomic_uint32 *VacuumSharedCostBalance;` and
     /// `pg_atomic_uint32 *VacuumActiveNWorkers;` (vacuum.c globals). Both point
     /// into the same parallel-vacuum DSM shared cost-state cell, so one shared
@@ -2730,6 +2737,19 @@ fn set_vacuum_cost_active_impl(v: bool) -> PgResult<()> {
 }
 fn vacuum_cost_balance_impl() -> PgResult<i32> {
     Ok(VACUUM_COST_BALANCE.with(|c| c.get()))
+}
+// vacuum.c working cost parameters (`vacuum_cost_delay` / `vacuum_cost_limit`).
+fn vacuum_cost_delay_impl() -> PgResult<f64> {
+    Ok(VACUUM_COST_DELAY_WORKING.with(|c| c.get()))
+}
+fn set_vacuum_cost_delay_impl(v: f64) {
+    VACUUM_COST_DELAY_WORKING.with(|c| c.set(v));
+}
+fn vacuum_cost_limit_impl() -> PgResult<i32> {
+    Ok(VACUUM_COST_LIMIT_WORKING.with(|c| c.get()))
+}
+fn set_vacuum_cost_limit_impl(v: i32) {
+    VACUUM_COST_LIMIT_WORKING.with(|c| c.set(v));
 }
 fn set_vacuum_cost_balance_impl(v: i32) -> PgResult<()> {
     VACUUM_COST_BALANCE.with(|c| c.set(v));

@@ -28,10 +28,25 @@ backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 
 # own seam crate (inward)
 backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }
+# autovacuum.c's VacuumUpdateCosts() reads/writes the vacuum.c cost working vars
+# + the globals.c cost-source GUCs through this ext-seam set; vacuum.c owns the
+# backing globals, so it installs these accessors here.
+backend-postmaster-autovacuum-ext-seams = { path = "../backend-postmaster-autovacuum-ext-seams" }
 backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
 
 # ProcessUtility dispatch arm (installs the VacuumStmt forwarding seam).
 backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
+
+# vacuum_delay_point / vacuum_rel interrupt + config-reload checks: route the
+# vacuum-seams copies to their real owners (CHECK_FOR_INTERRUPTS in postgres.c,
+# the InterruptPending / ConfigReloadPending globals).
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+backend-postmaster-interrupt = { path = "../backend-postmaster-interrupt" }
+# vacuum_rel's `rel->rd_rel->relkind` vacuumable-kind check (by OID).
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+# RelationGetIndexList(rel) by OID — vacuum.c's vac_open_indexes index inventory
+# (the vacuum-seams `relation_get_index_list` this crate both calls and owns).
+backend-utils-cache-relcache = { path = "../backend-utils-cache-relcache" }
 
 # owner seam crates (outward / inward-install targets)
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }

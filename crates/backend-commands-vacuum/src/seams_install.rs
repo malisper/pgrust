@@ -35,6 +35,78 @@ pub fn init_seams() {
     vacuum::set_vacuum_cost_active::set(crate::set_vacuum_cost_active_impl);
     vacuum::vacuum_cost_balance::set(crate::vacuum_cost_balance_impl);
     vacuum::set_vacuum_cost_balance::set(crate::set_vacuum_cost_balance_impl);
+    // vacuum.c working cost params (`vacuum_cost_delay` / `vacuum_cost_limit`) —
+    // read by vacuum_delay_point / compute_parallel_delay.
+    vacuum::vacuum_cost_delay::set(crate::vacuum_cost_delay_impl);
+    vacuum::vacuum_cost_limit::set(crate::vacuum_cost_limit_impl);
+
+    install_autovacuum_ext_cost_seams();
+
+    // vacuum_delay_point / vacuum_rel interrupt + config-reload checks. These
+    // vacuum-seams copies are the cross-cutting CHECK_FOR_INTERRUPTS (postgres.c)
+    // and the InterruptPending / ConfigReloadPending globals; route them to the
+    // real owners. (The cost-active-only delay internals — vacuum_sleep,
+    // process_config_file_sighup, etc. — are reached only when VacuumCostActive
+    // is true and stay panicking until their owners install them.)
+    vacuum::check_for_interrupts::set(|| {
+        backend_tcop_postgres_seams::check_for_interrupts::call()
+    });
+    vacuum::interrupt_pending::set(|| {
+        Ok(backend_utils_init_small_seams::interrupt_pending::call())
+    });
+    vacuum::config_reload_pending::set(|| {
+        Ok(backend_postmaster_interrupt::ConfigReloadPending())
+    });
+    // vacuum_rel: `rel->rd_rel->relkind` vacuumable-kind check, by OID.
+    vacuum::rel_relkind::set(|relid| {
+        backend_utils_cache_lsyscache_seams::get_rel_relkind::call(relid)
+    });
+    // vacuum_rel: `RELATION_IS_OTHER_TEMP(rel)` (rel.h) — `relpersistence ==
+    // RELPERSISTENCE_TEMP && !rd_islocaltemp`. The vacuum model carries the
+    // opened relation as a bare OID; re-open it with NoLock (the lock is already
+    // held) to read the relcache fields the macro needs, then drop the handle.
+    vacuum::relation_is_other_temp::set(|relid| {
+        use backend_utils_cache_relcache_seams as relcache;
+        let cx = mcx::MemoryContext::new("vacuum_relation_is_other_temp");
+        let rel = table_seam::table_open::call(cx.mcx(), relid, NoLock)?;
+        let other_temp = relcache::rd_rel_relpersistence::call(&rel)?
+            == types_tuple::access::RELPERSISTENCE_TEMP as i8
+            && !relcache::rd_islocaltemp::call(&rel)?;
+        rel.close(NoLock)?;
+        Ok(other_temp)
+    });
+    // `INJECTION_POINT(name)` (injection_point.h) — a no-op in a build without
+    // `--enable-injection-points` (`#define INJECTION_POINT(name, arg) ((void)
+    // name)`). vacuum.c's index-cleanup / truncate decision points reach it here.
+    vacuum::injection_point::set(|_name| Ok(()));
+    // vacuum_rel: `SetUserIdAndSecContext(...)` (miscinit.c) — switch to the
+    // relation owner's privileges for the vacuum, then restore. (The matching
+    // `get_user_id_and_sec_context` is already called through the miscinit seam.)
+    vacuum::set_user_id_and_sec_context::set(|userid, sec_context| {
+        backend_utils_init_miscinit_seams::set_user_id_and_sec_context::call(userid, sec_context);
+        Ok(())
+    });
+    // vacuum_rel: per-table GUC nesting for the SET-clause / owner-privilege
+    // window (`NewGUCNestLevel` + `AtEOXact_GUC`, guc.c). Both are owned by the
+    // GUC engine and reached through its seam crate.
+    vacuum::new_guc_nest_level::set(|| {
+        Ok(backend_utils_misc_guc_seams::new_guc_nest_level::call())
+    });
+    vacuum::at_eoxact_guc::set(|is_commit, nestlevel| {
+        backend_utils_misc_guc_seams::at_eoxact_guc::call(is_commit, nestlevel)
+    });
+    // vac_open_indexes: `RelationGetIndexList(rel)` by OID (relcache.c).
+    vacuum::relation_get_index_list::set(|relid| {
+        backend_utils_cache_relcache::derived::RelationGetIndexList(relid)
+    });
+    // vacuum_get_cutoffs: the autovacuum freeze-max-age GUCs (autovacuum.c owns
+    // the `conf->variable` backing + installs the GucVarAccessors; read the slot).
+    vacuum::autovacuum_freeze_max_age::set(|| {
+        Ok(backend_utils_misc_guc_tables::vars::autovacuum_freeze_max_age.read())
+    });
+    vacuum::autovacuum_multixact_freeze_max_age::set(|| {
+        Ok(backend_utils_misc_guc_tables::vars::autovacuum_multixact_freeze_max_age.read())
+    });
     vacuum::set_vacuum_cost_balance_local::set(crate::set_vacuum_cost_balance_local_impl);
     vacuum::add_vacuum_cost_balance_local::set(crate::add_vacuum_cost_balance_local_impl);
 
@@ -231,6 +303,49 @@ pub fn init_seams() {
             Ok(())
         });
     }
+}
+
+/// Install the `backend-postmaster-autovacuum-ext-seams` cost-parameter
+/// accessors that `VacuumUpdateCosts()` (autovacuum.c) drives. vacuum.c owns the
+/// backing state, so the install lives here (autovacuum-ext has no owner crate).
+///
+///  * `vacuum_cost_delay_guc` / `vacuum_cost_limit_guc` read the
+///    `VacuumCostDelay` / `VacuumCostLimit` GUC source globals (globals.c, bound
+///    to the GUC slot).
+///  * `set_vacuum_cost_delay` / `set_vacuum_cost_limit` and the matching readers
+///    write/read the vacuum.c live working params (`vacuum_cost_delay` /
+///    `vacuum_cost_limit`).
+///  * `vacuum_cost_active` / `set_vacuum_cost_active` / `set_vacuum_cost_balance`
+///    / `vacuum_failsafe_active` back onto vacuum.c's cost-state globals (the
+///    same thread-locals `vacuum_delay_point` reads).
+fn install_autovacuum_ext_cost_seams() {
+    use backend_postmaster_autovacuum_ext_seams as avext;
+    use backend_utils_misc_guc_tables::vars;
+
+    avext::vacuum_cost_delay_guc::set(|| vars::VacuumCostDelay.read());
+    avext::vacuum_cost_limit_guc::set(|| vars::VacuumCostLimit.read());
+
+    avext::set_vacuum_cost_delay::set(crate::set_vacuum_cost_delay_impl);
+    avext::set_vacuum_cost_limit::set(crate::set_vacuum_cost_limit_impl);
+    avext::vacuum_cost_delay::set(|| {
+        crate::vacuum_cost_delay_impl().expect("vacuum_cost_delay is infallible")
+    });
+    avext::vacuum_cost_limit::set(|| {
+        crate::vacuum_cost_limit_impl().expect("vacuum_cost_limit is infallible")
+    });
+
+    avext::vacuum_cost_active::set(|| {
+        crate::vacuum_cost_active_impl().expect("vacuum_cost_active is infallible")
+    });
+    avext::set_vacuum_cost_active::set(|v| {
+        let _ = crate::set_vacuum_cost_active_impl(v);
+    });
+    avext::set_vacuum_cost_balance::set(|v| {
+        let _ = crate::set_vacuum_cost_balance_impl(v);
+    });
+    avext::vacuum_failsafe_active::set(|| {
+        crate::vacuum_failsafe_active_impl().expect("vacuum_failsafe_active is infallible")
+    });
 }
 
 use mcx::Mcx;
