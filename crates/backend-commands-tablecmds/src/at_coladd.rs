@@ -538,7 +538,7 @@ pub fn ATExecAddColumn<'mcx>(
 
 /// `check_for_column_name_collision(rel, colname, if_not_exists)`
 /// (tablecmds.c:7645).
-fn check_for_column_name_collision<'mcx>(
+pub(crate) fn check_for_column_name_collision<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     colname: &str,

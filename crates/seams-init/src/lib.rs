@@ -1757,8 +1757,12 @@ mod recurrence_guard {
         // install them — they loud-panic (mirror-pg-and-panic) on a real call path
         // until the owning family lands. DELETE each entry as its family ports the
         // function and installs the seam in `init_seams()`.
-        ("backend_commands_tablecmds", "RenameRelation"),
-        ("backend_commands_tablecmds", "renameatt"),
+        // RenameRelation / renameatt / rename_relation_internal RETIRED: the
+        // RENAME drivers (rename.rs) are ported and installed in init_seams(),
+        // so the guard now sees the `::set(...)` install. (RenameConstraint
+        // remains below — its rename_constraint_internal reads pg_constraint
+        // contype/conindid/coninhcount/connoinherit off the constraint tuple,
+        // and no pg_constraint form-reader seam exposes those yet.)
         ("backend_commands_tablecmds", "RenameConstraint"),
         ("backend_commands_tablecmds", "AlterTableNamespace"),
         ("backend_commands_tablecmds", "AlterTableNamespaceInternal"),
@@ -1769,7 +1773,7 @@ mod recurrence_guard {
         // tablecmds (real owner = the still-unported ATExecChangeOwner body),
         // not an uninstalled inward contract. It loud-panics until that body
         // lands and installs it.
-        ("backend_commands_tablecmds", "rename_relation_internal"),
+        // (rename_relation_internal retired — ported + installed in rename.rs.)
         ("backend_commands_tablecmds", "reset_rel_rewrite"),
         // DESIGN_DEBT (TD-INDEXCREATE-BOOTSTRAP-LEGS): catalog/index.c's
         // `index_create` reaches three legs ONLY in bootstrap mode (or via the

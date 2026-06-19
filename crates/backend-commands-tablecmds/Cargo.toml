@@ -15,6 +15,7 @@ types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-rel = { path = "../types-rel" }
 types-nodes = { path = "../types-nodes" }
+types-parsenodes = { path = "../types-parsenodes" }
 types-pathnodes = { path = "../types-pathnodes" }
 types-catalog = { path = "../types-catalog" }
 types-tuple = { path = "../types-tuple" }
@@ -44,6 +45,7 @@ backend-utils-misc-stack-depth = { path = "../backend-utils-misc-stack-depth" }
 backend-catalog-dependency-seams = { path = "../backend-catalog-dependency-seams" }
 backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
 backend-catalog-objectaddress-seams = { path = "../backend-catalog-objectaddress-seams" }
+backend-catalog-pg-type-seams = { path = "../backend-catalog-pg-type-seams" }
 backend-catalog-pg-inherits-seams = { path = "../backend-catalog-pg-inherits-seams" }
 backend-catalog-partition-seams = { path = "../backend-catalog-partition-seams" }
 backend-catalog-index-seams = { path = "../backend-catalog-index-seams" }

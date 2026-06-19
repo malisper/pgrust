@@ -1,6 +1,4 @@
-//! `backend/commands/tablecmds.c` — FAMILY F1 (RENAME / namespace / owner),
-//! the subset that is buildable without the trimmed-`PgClassForm` carrier
-//! keystone (see the crate doc / the F1 STOP note for the blocked remainder).
+//! `backend/commands/tablecmds.c` — FAMILY F1 (RENAME / namespace / owner).
 //!
 //! Ported here:
 //! - `RangeVarCallbackOwnsRelation` (tablecmds.c:19554) — the
@@ -9,13 +7,16 @@
 //!   that `commands/sequence.c` crosses as `define_sequence_relation`
 //!   (sequence.c:131).
 //!
-//! The RENAME-relation / RENAME-column / RENAME-constraint / CHANGE-OWNER /
-//! SET-SCHEMA functions are NOT ported here: they require obtaining a *writable*
-//! `Form_pg_class` (`reltype` / `relowner` / `relacl` / `relrewrite`) and a
-//! writable `Form_pg_attribute` (`attname` / `attacl`), none of which the
-//! repo's trimmed `types_cluster::PgClassForm` projection nor the (absent)
-//! `pg_attribute` field-update path can carry. Those stay as their declared
-//! `backend-commands-tablecmds-seams` panics until that carrier keystone lands.
+//! The RENAME-relation / RENAME-column drivers (`RenameRelation` /
+//! `RenameRelationInternal` / `renameatt` / `renameatt_internal`) now live in
+//! [`crate::rename`]: the writable `pg_class` / `pg_attribute` write carriers
+//! (`types_cluster::PgClassForm.relname` via `catalog_tuple_update_pg_class`,
+//! and `PgAttributeUpdateRow.attname` via `catalog_tuple_update_pg_attribute`)
+//! make those fully expressible — the older "trimmed-`PgClassForm` carrier
+//! keystone" stop no longer applies. `RenameConstraint` / CHANGE-OWNER /
+//! SET-SCHEMA remain their declared `backend-commands-tablecmds-seams` panics
+//! (`RenameConstraint` needs a `pg_constraint` contype/conindid/coninhcount/
+//! connoinherit form-reader seam that does not exist yet).
 
 #![allow(non_snake_case)]
 

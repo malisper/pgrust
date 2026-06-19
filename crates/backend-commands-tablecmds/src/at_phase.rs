@@ -381,7 +381,7 @@ pub fn AlterTableLookupRelation<'mcx>(
 /// statement's `objtype`. (The RenameStmt namespace-`ACL_CREATE` recheck and the
 /// `RenameStmt`-relaxed ALTER INDEX rule live in the rename/schema utility arms,
 /// which carry their own callback; here `objtype` is the ALTER TABLE objtype.)
-fn RangeVarCallbackForAlterRelation<'mcx>(
+pub(crate) fn RangeVarCallbackForAlterRelation<'mcx>(
     _mcx: Mcx<'mcx>,
     rv: &AccessRangeVar,
     relid: Oid,

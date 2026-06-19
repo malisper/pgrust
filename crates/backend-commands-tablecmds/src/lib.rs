@@ -42,6 +42,7 @@ mod mergeattr;
 mod oncommit;
 mod partbound;
 mod partition;
+mod rename;
 mod smallfns;
 mod truncate;
 
@@ -89,10 +90,17 @@ pub fn init_seams() {
     seam::check_relation_tablespace_move::set(smallfns::check_relation_tablespace_move);
     seam::set_relation_tablespace::set(smallfns::set_relation_tablespace);
 
-    // F1 (RENAME / namespace / owner) — the subset buildable without the
-    // trimmed-`PgClassForm` carrier keystone (see `f1_rename`).
+    // F1 (RENAME / namespace / owner).
     seam::range_var_callback_owns_relation::set(f1_rename::range_var_callback_owns_relation);
     seam::define_sequence_relation::set(f1_rename::define_sequence_relation);
+
+    // RENAME drivers (rename.rs): ALTER ... RENAME COLUMN / RENAME TO. The
+    // writable pg_class / pg_attribute write carriers (PgClassForm.relname /
+    // PgAttributeUpdateRow.attname) make these fully expressible; the stale
+    // "carrier keystone" stop in f1_rename's doc no longer applies.
+    seam::renameatt::set(rename::renameatt);
+    seam::RenameRelation::set(rename::RenameRelation);
+    seam::rename_relation_internal::set(rename::RenameRelationInternal);
 
     seam::register_on_commit_action::set(oncommit::register_on_commit_action);
     seam::remove_on_commit_action::set(oncommit::remove_on_commit_action);
