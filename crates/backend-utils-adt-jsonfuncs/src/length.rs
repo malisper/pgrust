@@ -150,7 +150,7 @@ pub fn json_array_length(json: &[u8]) -> PgResult<i32> {
     let result = common_jsonapi_seams::pg_parse_json::call(json, encoding, false, &mut sem)?;
     if result != JsonParseErrorType::JSON_SUCCESS {
         // pg_parse_json_or_ereport: a parse failure raises through json_errsave_error.
-        common_jsonapi_seams::errsave_error::call(result, json)?;
+        common_jsonapi_seams::errsave_error::call(result, json, false)?;
     }
 
     // PG_RETURN_INT32(state->count)

@@ -639,7 +639,7 @@ fn populate_array_json<'mcx, 'io, 'es>(
         }
         Ok(result) => {
             // pg_parse_json_or_errsave reports the parse failure into escontext.
-            common_jsonapi_seams::errsave_error::call(result, json)
+            common_jsonapi_seams::errsave_error::call(result, json, true)
                 .or_else(|e| errsave(&mut state.ctx.escontext, e))?;
         }
         Err(e) => {
@@ -1563,7 +1563,7 @@ pub(crate) fn get_json_object_as_hash(
         Ok(JsonParseErrorType::JSON_SUCCESS) => Ok(Some(state.hash)),
         Ok(result) => {
             // parse failure reported into escontext (or raised if none).
-            common_jsonapi_seams::errsave_error::call(result, json)
+            common_jsonapi_seams::errsave_error::call(result, json, true)
                 .or_else(|e| errsave(escontext, e))?;
             Ok(None)
         }

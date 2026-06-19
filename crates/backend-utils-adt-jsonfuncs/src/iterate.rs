@@ -201,7 +201,7 @@ pub fn iterate_json_values<'mcx>(
     let result = common_jsonapi_seams::pg_parse_json::call(json, encoding, true, &mut sem)?;
     if result != JsonParseErrorType::JSON_SUCCESS {
         // pg_parse_json_or_ereport: a parse failure raises through json_errsave_error.
-        common_jsonapi_seams::errsave_error::call(result, json)?;
+        common_jsonapi_seams::errsave_error::call(result, json, true)?;
         unreachable!("errsave_error with no escontext raises");
     }
 
@@ -459,7 +459,7 @@ pub fn transform_json_string_values<'mcx>(
     let encoding = common_jsonapi_seams::get_database_encoding::call();
     let result = common_jsonapi_seams::pg_parse_json::call(json, encoding, true, &mut sem)?;
     if result != JsonParseErrorType::JSON_SUCCESS {
-        common_jsonapi_seams::errsave_error::call(result, json)?;
+        common_jsonapi_seams::errsave_error::call(result, json, true)?;
         unreachable!("errsave_error with no escontext raises");
     }
 

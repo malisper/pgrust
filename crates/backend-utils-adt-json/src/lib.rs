@@ -141,7 +141,7 @@ where
 pub fn json_in<'mcx>(mcx: Mcx<'mcx>, json: &[u8]) -> PgResult<Option<PgVec<'mcx, u8>>> {
     let result = jsonapi::parse_validate::call(json)?;
     if result != JsonParseErrorType::JSON_SUCCESS {
-        jsonapi::errsave_error::call(result, json)?;
+        jsonapi::errsave_error::call(result, json, false)?;
         return Ok(None);
     }
     Ok(Some(mcx::slice_in(mcx, json)?))
@@ -165,7 +165,7 @@ pub fn json_send<'mcx>(mcx: Mcx<'mcx>, json: &[u8]) -> PgResult<PgVec<'mcx, u8>>
 pub fn json_recv<'mcx>(mcx: Mcx<'mcx>, str: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
     let result = jsonapi::parse_validate::call(str)?;
     if result != JsonParseErrorType::JSON_SUCCESS {
-        jsonapi::errsave_error::call(result, str)?;
+        jsonapi::errsave_error::call(result, str, false)?;
         // pg_parse_json_or_ereport never returns on failure.
         return Err(unreached_soft_error());
     }
@@ -1533,7 +1533,7 @@ pub fn json_validate(json: &[u8], check_unique_keys: bool, throw_error: bool) ->
 
     if result != JsonParseErrorType::JSON_SUCCESS {
         if throw_error {
-            jsonapi::errsave_error::call(result, json)?;
+            jsonapi::errsave_error::call(result, json, check_unique_keys)?;
         }
         return Ok(false); // invalid json
     }
@@ -1556,7 +1556,7 @@ pub fn json_typeof(json: &[u8]) -> PgResult<&'static str> {
 
     let (result, token_type) = jsonapi::lex_first_token::call(json);
     if result != JsonParseErrorType::JSON_SUCCESS {
-        jsonapi::errsave_error::call(result, json)?;
+        jsonapi::errsave_error::call(result, json, false)?;
         // json_errsave_error(..., NULL) does not return on a hard error.
         return Err(unreached_soft_error());
     }

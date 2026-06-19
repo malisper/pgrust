@@ -1671,9 +1671,14 @@ fn run_lex_first_token(json: &[u8]) -> (TjErr, TjTok) {
 /// `errsave_error(error, json)` — re-lex `json` to reconstruct the lexer state
 /// at the failure point, then raise the user-facing parse error (no escontext:
 /// hard error).
-fn run_errsave_error(error: TjErr, json: &[u8]) -> PgResult<()> {
+fn run_errsave_error(error: TjErr, json: &[u8], need_escapes: bool) -> PgResult<()> {
     let encoding = backend_utils_mb_mbutils::GetDatabaseEncoding();
-    let mut lex = make_json_lex_context_cstring_len(json, encoding, false);
+    // Re-lex with the SAME need_escapes the failing parse used so the lexer
+    // stops at the exact token_terminator the original failure landed on
+    // (need_escapes governs whether json_lex_string detects unicode-escape /
+    // surrogate errors at all; using the wrong value would reposition the
+    // CONTEXT excerpt at a different spot, losing C's "...":-truncation).
+    let mut lex = make_json_lex_context_cstring_len(json, encoding, need_escapes);
     // Drive a validation parse to reposition the lexer at the error spot; the
     // resulting position is what json_errsave_error renders the CONTEXT from.
     let mut sink = NullSink;
@@ -1703,11 +1708,12 @@ fn run_json_count_array_elements(json: &[u8], encoding: i32) -> PgResult<i32> {
     // before calling json_count_array_elements from its array_start action.
     let r = json_lex(&mut lex);
     if r != JsonParseErrorType::Success {
-        return run_errsave_error(tj_err(r), json).map(|_| 0);
+        // json_array_length lexes with need_escapes=false.
+        return run_errsave_error(tj_err(r), json, false).map(|_| 0);
     }
     match json_count_array_elements(&lex) {
         Ok(n) => Ok(n),
-        Err(e) => run_errsave_error(tj_err(e), json).map(|_| 0),
+        Err(e) => run_errsave_error(tj_err(e), json, false).map(|_| 0),
     }
 }
 

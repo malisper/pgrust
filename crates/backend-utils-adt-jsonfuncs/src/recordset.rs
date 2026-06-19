@@ -404,7 +404,7 @@ fn populate_recordset_worker<'mcx>(
             Ok(JsonParseErrorType::JSON_SUCCESS) => {}
             Ok(res) => {
                 // pg_parse_json_or_ereport: a parse failure raises.
-                common_jsonapi_seams::errsave_error::call(res, json)?;
+                common_jsonapi_seams::errsave_error::call(res, json, true)?;
                 unreachable!("errsave_error with no escontext raises");
             }
             Err(e) => return Err(e),

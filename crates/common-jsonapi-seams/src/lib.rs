@@ -53,7 +53,11 @@ seam_core::seam!(
     /// (for context/position rendering). On a soft-error context the provider
     /// swallows the error and returns `Ok(())`; otherwise it raises the hard
     /// error as `Err`.
-    pub fn errsave_error(error: JsonParseErrorType, json: &[u8]) -> PgResult<()>
+    pub fn errsave_error(
+        error: JsonParseErrorType,
+        json: &[u8],
+        need_escapes: bool,
+    ) -> PgResult<()>
 );
 
 seam_core::seam!(
