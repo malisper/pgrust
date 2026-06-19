@@ -92,12 +92,18 @@ fn ret_i32(v: i32) -> Datum {
     Datum::from_i32(v)
 }
 
-/// Set a `name` result: the full `NAMEDATALEN`-byte buffer, framed as a
-/// header-ful varlena on the by-ref lane (4-byte length word + buffer),
-/// symmetric with how `arg_name` reads it back.
+/// Set a `name` result: the raw `NAMEDATALEN`-byte buffer on the by-ref lane.
+///
+/// A `name` is fixed-length-by-reference (`typlen = NAMEDATALEN`), NOT a
+/// varlena: it crosses the boundary as its NUL-padded buffer with no length
+/// word, exactly as `arg_name` reads it back and as `nameout` consumes it.
+/// Framing it as a header-ful varlena prepended the 4-byte length word, which
+/// `nameout` then rendered as leading garbage (e.g. `getdatabaseencoding()`
+/// printed the header bytes `\x10\x01` instead of `UTF8`). This matches the
+/// canonical `name`-crate / misc-crate `ret_name` (raw buffer, no header).
 #[inline]
 fn ret_name(fcinfo: &mut FunctionCallInfoBaseData, nd: &NameData) -> Datum {
-    fcinfo.set_ref_result(RefPayload::Varlena(varlena_image(&nd.data)));
+    fcinfo.set_ref_result(RefPayload::Varlena(nd.data.to_vec()));
     Datum::from_usize(0)
 }
 
