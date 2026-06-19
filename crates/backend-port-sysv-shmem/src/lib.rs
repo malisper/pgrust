@@ -510,7 +510,38 @@ fn MAP_FAILED() -> *mut libc::c_void {
 
 /// `AnonymousShmemDetach(status, arg)` — detach from an anonymous mmap'd block
 /// (an `on_shmem_exit` callback).
+///
+/// DIVERGENCE FROM C, tied to this tree's shared-memory model: in C the
+/// `MAP_SHARED|MAP_ANONYMOUS` block is a kernel object that every backend
+/// `fork()`s a view onto, and crash reinit (`shmem_exit(1)` →
+/// `CreateSharedMemoryAndSemaphores()` in postmaster.c) detaches the old block
+/// and `mmap()`s a *fresh* one. This tree's postmaster instead retains a single
+/// segment for the cluster's lifetime: the per-subsystem `*ShmemInit` functions
+/// publish `&'static` views of it into write-once cells, so it can never be
+/// re-created, and crash reinit (statemachine.rs) deliberately skips
+/// `CreateSharedMemoryAndSemaphores()` and keeps the postmaster's mapping as the
+/// master copy every re-forked child inherits.
+///
+/// But crash reinit still runs `shmem_exit(1)` in the postmaster (faithful to
+/// C, to drop this process' LWLocks / callbacks), and that fires THIS callback.
+/// If we `munmap()`ed here, the postmaster would unmap its master segment with
+/// nothing to re-map it — the very next re-forked startup child would inherit an
+/// address space where the shared `ProcStructLock` / PGPROC array / latches all
+/// point into an unmapped hole and SIGSEGV on first touch (in
+/// `InitAuxiliaryProcess`). So in the postmaster process we keep the mapping:
+/// the segment must outlive every reinit, and at genuine postmaster exit the OS
+/// reclaims it anyway. A real child detaching its own private fork view on its
+/// own exit is unaffected (separate page tables; the shared object persists).
 fn anonymous_shmem_detach(_status: i32, _arg: types_tuple::Datum<'static>) -> PgResult<()> {
+    // The postmaster owns the persistent master mapping that every re-forked
+    // child inherits across crash reinit; it must never be unmapped while the
+    // postmaster lives (see the divergence note above).
+    if backend_utils_init_small_seams::is_postmaster_environment::call()
+        && !backend_utils_init_small_seams::is_under_postmaster::call()
+    {
+        return Ok(());
+    }
+
     let mut state = SHMEM_STATE.lock().unwrap();
     if !state.anonymous_shmem.is_null() {
         // SAFETY: munmap of the anonymous block we mapped.

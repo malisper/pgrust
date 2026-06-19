@@ -377,7 +377,35 @@ pub fn PGReserveSemaphores(max_semas: i32) -> PgResult<()> {
 
 /// `ReleaseSemaphores(status, arg)` — release semaphores at shutdown or shmem
 /// reinitialization (an `on_shmem_exit` callback).
+///
+/// DIVERGENCE FROM C, tied to this tree's shared-memory model (mirrors the same
+/// reasoning as sysv_shmem.c's `anonymous_shmem_detach`): in C, crash reinit
+/// runs `shmem_exit(1)` — which fires this callback and `semctl(IPC_RMID)`s every
+/// SysV semaphore set — and then immediately re-runs
+/// `CreateSharedMemoryAndSemaphores()` → `PGReserveSemaphores()`, which creates a
+/// fresh batch of sets. This tree reuses a single segment / semaphore batch for
+/// the cluster's lifetime: `PGReserveSemaphores` eagerly stashes the
+/// `PGSemaphoreData` mirror in process-static state that the re-forked children
+/// inherit, and crash reinit deliberately skips the re-create. If we killed the
+/// sets here in the postmaster, the very next re-forked auxiliary process'
+/// `PGSemaphoreReset` (`semctl(..., SETVAL, 0)`) would hit a removed set and fail
+/// `EINVAL`, aborting startup. So in the postmaster process we keep the sets:
+/// they must outlive every reinit, and at genuine postmaster exit the kernel
+/// reclaims the SysV sets on the postmaster's death anyway. A real child running
+/// this on its own exit only affects the shared sets it would have removed; but
+/// children never created the sets (`PGReserveSemaphores` runs only in the
+/// postmaster), so their inherited callback finding `num_sema_sets == 0` for the
+/// keys they didn't create is already a no-op over `my_sema_sets`.
 fn release_semaphores(_status: i32, _arg: types_tuple::Datum<'static>) -> PgResult<()> {
+    // The postmaster owns the persistent semaphore sets that every re-forked
+    // child inherits across crash reinit; they must never be removed while the
+    // postmaster lives (see the divergence note above).
+    if backend_utils_init_small_seams::is_postmaster_environment::call()
+        && !backend_utils_init_small_seams::is_under_postmaster::call()
+    {
+        return Ok(());
+    }
+
     let mut state = SEMA_STATE.lock().unwrap();
     for i in 0..state.num_sema_sets as usize {
         let id = state.my_sema_sets[i];
