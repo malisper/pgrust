@@ -864,10 +864,9 @@ fn build_joinrel_tlist(
                 let out_id;
                 if can_null {
                     let mut phv = node.clone();
-                    let phv_inner = match &mut phv {
-                        Expr::PlaceHolderVar(p) => p,
-                        _ => unreachable!(),
-                    };
+                    let phv_inner = phv
+                        .as_placeholdervar_mut()
+                        .expect("node.is_placeholdervar() checked above");
                     let phrels = exprrelids_to_relids(&phv_inner.phrels);
                     let mut phnullingrels = exprrelids_to_relids(&phv_inner.phnullingrels);
 
@@ -945,10 +944,9 @@ fn build_joinrel_tlist(
         let out_id;
         if can_null && var.varno != ROWID_VAR {
             let mut newvar = node.clone();
-            let v = match &mut newvar {
-                Expr::Var(v) => v,
-                _ => unreachable!(),
-            };
+            let v = newvar
+                .as_var_mut()
+                .expect("node verified to be a Var above");
             let mut varnullingrels = exprrelids_to_relids(&v.varnullingrels);
 
             /* See comments in C to understand this logic. */
@@ -1889,13 +1887,9 @@ fn match_expr_to_partition_keys(
 
     /* Remove any relabel decorations. */
     let mut cur = expr.clone();
-    loop {
-        match &cur {
-            Expr::RelabelType(rt) => {
-                cur = (*rt.arg.as_ref().expect("RelabelType.arg")).as_ref().clone();
-            }
-            _ => break,
-        }
+    while let Some(rt) = cur.as_relabeltype() {
+        let arg = (*rt.arg.as_ref().expect("RelabelType.arg")).as_ref().clone();
+        cur = arg;
     }
 
     let partnatts = root.rel(rel).part_scheme.as_ref().unwrap().partnatts as usize;
