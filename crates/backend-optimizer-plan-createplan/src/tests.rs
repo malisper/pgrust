@@ -111,7 +111,6 @@ fn get_gating_quals_empty_without_pseudoconstants() {
 // ---------------------------------------------------------------------------
 
 use mcx::MemoryContext;
-use types_nodes::nodes::Node;
 use types_nodes::parsenodes::RTEKind;
 use types_pathnodes::planner_run::PlannerRun;
 
@@ -177,15 +176,10 @@ fn create_seqscan_plan_builds_seqscan_node() {
         alloc::vec::Vec::new(),
     )
     .expect("create_seqscan_plan");
-    match plan {
-        Node::SeqScan(s) => {
-            assert_eq!(s.scan.scanrelid, 1);
+    { let __pn = plan; let s = __pn.as_seqscan().unwrap_or_else(|| panic!("expected SeqScan, got {:?}", __pn.tag())); assert_eq!(s.scan.scanrelid, 1);
             // No clauses, no tlist: NIL qual / tlist.
             assert!(s.scan.plan.qual.is_none());
-            assert!(s.scan.plan.targetlist.is_none());
-        }
-        other => panic!("expected SeqScan, got {:?}", other.tag()),
-    }
+            assert!(s.scan.plan.targetlist.is_none()); }
 }
 
 #[test]
@@ -203,14 +197,9 @@ fn create_resultscan_plan_builds_result_node() {
         alloc::vec::Vec::new(),
     )
     .expect("create_resultscan_plan");
-    match plan {
-        Node::Result(r) => {
-            // No clauses: resconstantqual is NIL.
+    { let __pn = plan; let r = __pn.as_result().unwrap_or_else(|| panic!("expected Result, got {:?}", __pn.tag())); // No clauses: resconstantqual is NIL.
             assert!(r.resconstantqual.is_none());
-            assert!(r.plan.lefttree.is_none());
-        }
-        other => panic!("expected Result, got {:?}", other.tag()),
-    }
+            assert!(r.plan.lefttree.is_none()); }
 }
 
 #[test]
@@ -228,15 +217,10 @@ fn create_functionscan_plan_builds_functionscan_node() {
         alloc::vec::Vec::new(),
     )
     .expect("create_functionscan_plan");
-    match plan {
-        Node::FunctionScan(f) => {
-            assert_eq!(f.scan.scanrelid, 1);
+    { let __pn = plan; let f = __pn.as_functionscan().unwrap_or_else(|| panic!("expected FunctionScan, got {:?}", __pn.tag())); assert_eq!(f.scan.scanrelid, 1);
             // Empty RTE functions -> NIL.
             assert!(f.functions.is_none());
-            assert!(!f.funcordinality);
-        }
-        other => panic!("expected FunctionScan, got {:?}", other.tag()),
-    }
+            assert!(!f.funcordinality); }
 }
 
 #[test]
@@ -254,13 +238,8 @@ fn create_namedtuplestorescan_plan_builds_node() {
         alloc::vec::Vec::new(),
     )
     .expect("create_namedtuplestorescan_plan");
-    match plan {
-        Node::NamedTuplestoreScan(n) => {
-            assert_eq!(n.scan.scanrelid, 1);
-            assert!(n.enrname.is_none());
-        }
-        other => panic!("expected NamedTuplestoreScan, got {:?}", other.tag()),
-    }
+    { let __pn = plan; let n = __pn.as_namedtuplestorescan().unwrap_or_else(|| panic!("expected NamedTuplestoreScan, got {:?}", __pn.tag())); assert_eq!(n.scan.scanrelid, 1);
+            assert!(n.enrname.is_none()); }
 }
 
 #[test]
@@ -299,13 +278,8 @@ fn create_tidscan_plan_builds_tidscan_node() {
         alloc::vec::Vec::new(),
     )
     .expect("create_tidscan_plan");
-    match plan {
-        Node::TidScan(t) => {
-            assert_eq!(t.scan.scanrelid, 1);
-            assert!(t.tidquals.is_none());
-        }
-        other => panic!("expected TidScan, got {:?}", other.tag()),
-    }
+    { let __pn = plan; let t = __pn.as_tidscan().unwrap_or_else(|| panic!("expected TidScan, got {:?}", __pn.tag())); assert_eq!(t.scan.scanrelid, 1);
+            assert!(t.tidquals.is_none()); }
 }
 
 #[test]
@@ -323,14 +297,9 @@ fn create_valuesscan_plan_builds_valuesscan_node() {
         alloc::vec::Vec::new(),
     )
     .expect("create_valuesscan_plan");
-    match plan {
-        Node::ValuesScan(v) => {
-            assert_eq!(v.scan.scanrelid, 1);
+    { let __pn = plan; let v = __pn.as_valuesscan().unwrap_or_else(|| panic!("expected ValuesScan, got {:?}", __pn.tag())); assert_eq!(v.scan.scanrelid, 1);
             // Empty RTE values_lists -> empty carrier.
-            assert!(v.values_lists.is_empty());
-        }
-        other => panic!("expected ValuesScan, got {:?}", other.tag()),
-    }
+            assert!(v.values_lists.is_empty()); }
 }
 
 // ---------------------------------------------------------------------------
