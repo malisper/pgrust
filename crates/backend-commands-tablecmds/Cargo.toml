@@ -92,3 +92,13 @@ backend-access-common-next = { path = "../backend-access-common-next" }
 backend-rewrite-rewritemanip-seams = { path = "../backend-rewrite-rewritemanip-seams" }
 backend-nodes-equalfuncs-seams = { path = "../backend-nodes-equalfuncs-seams" }
 backend-utils-adt-format-type = { path = "../backend-utils-adt-format-type" }
+# ATExecAddIndex: DefineIndex (indexcmds.c) inward seam (decls only; owner installs).
+backend-commands-indexcmds-seams = { path = "../backend-commands-indexcmds-seams" }
+# ATAddCheckNNConstraint: ObjectAddressSet(ConstraintRelationId, ...).
+backend-catalog-objectaddress = { path = "../backend-catalog-objectaddress" }
+# Phase-3 NOT NULL verification scan (the NOT-NULL-only path of ATRewriteTable):
+# full table scan + slot deform.
+backend-executor-execTuples = { path = "../backend-executor-execTuples" }
+backend-access-table-tableam = { path = "../backend-access-table-tableam" }
+backend-access-table-tableam-seams = { path = "../backend-access-table-tableam-seams" }
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }

@@ -77,7 +77,7 @@ pub fn ATParseTransformCmd<'mcx>(
     _lockmode: LOCKMODE,
     cur_pass: AlterTablePass,
     context: &AlterTableUtilityContext<'_>,
-) -> PgResult<AlterTableCmd<'mcx>> {
+) -> PgResult<Option<AlterTableCmd<'mcx>>> {
     // Gin up an AlterTableStmt with just this subcommand and this table.
     // atstmt->relation = makeRangeVar(get_namespace_name(RelationGetNamespace(rel)),
     //                                 pstrdup(RelationGetRelationName(rel)), -1);
@@ -208,7 +208,10 @@ pub fn ATParseTransformCmd<'mcx>(
         wqueue[ti].afterStmts.push(n);
     }
 
-    Ok(newcmd.expect("ATParseTransformCmd: transformed subcommand for current pass not found"))
+    // C returns NULL when there is no transformed subcommand for the current
+    // pass (e.g. a PRIMARY KEY's AT_AddConstraint becomes an AT_AddIndex that is
+    // queued for a later pass); the caller checks `if (cmd != NULL)`.
+    Ok(newcmd)
 }
 
 /// `ATPrepAddColumn(wqueue, rel, recurse, recursing, is_view, cmd, lockmode,
@@ -324,7 +327,8 @@ pub fn ATExecAddColumn<'mcx>(
         let context = context.unwrap();
         cmd = ATParseTransformCmd(
             mcx, wqueue, ti, rel, cmd, recurse, lockmode, cur_pass, context,
-        )?;
+        )?
+        .expect("ATExecAddColumn: ADD COLUMN always transforms to a same-pass subcommand");
         col_def = clone_columndef(mcx, &cmd)?;
     }
 

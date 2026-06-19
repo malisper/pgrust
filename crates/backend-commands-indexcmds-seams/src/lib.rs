@@ -49,6 +49,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `DefineIndex(tableId, stmt, ...)` (indexcmds.c) — the lifetime-generic
+    /// form used by ALTER TABLE's `ATExecAddIndex` (which runs on the caller's
+    /// `'mcx`, not the backend-`'static` arena the BKI grammar uses). Same
+    /// behaviour as [`define_index`]; the owning unit installs both.
+    pub fn define_index_full<'mcx>(
+        mcx: Mcx<'mcx>,
+        args: DefineIndexArgs<'mcx>,
+    ) -> PgResult<ObjectAddress>
+);
+
+seam_core::seam!(
     /// `makeObjectName(name1, name2, label)` (indexcmds.c): build an object name
     /// of the form `name1_name2_label`, truncating the components as needed to
     /// fit `NAMEDATALEN`. Returns a freshly-allocated name string. Used by

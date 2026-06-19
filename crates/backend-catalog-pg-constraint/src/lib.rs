@@ -759,6 +759,74 @@ pub fn findNotNullConstraintAttnum<'mcx>(
 }
 
 /* ===========================================================================
+ * verifyNotNullPKCompatible (tablecmds.c:9576)
+ * ========================================================================= */
+
+/// `verifyNotNullPKCompatible(tuple, colname)` (tablecmds.c:9576) — verify
+/// whether the given not-null constraint tuple is compatible with a primary
+/// key.  If not, an error is thrown.  Lives here (rather than in tablecmds)
+/// because the `Form_pg_constraint` deform substrate is owned by this crate.
+pub fn verifyNotNullPKCompatible(
+    mcx: Mcx<'_>,
+    tuple: &FormedTuple<'_>,
+    colname: &str,
+) -> PgResult<()> {
+    /* conForm = (Form_pg_constraint) GETSTRUCT(tuple); */
+    let con_form = syscache_seams::read_constraint_form::call(tuple)?;
+
+    if con_form.contype != CONSTRAINT_NOTNULL {
+        /* elog(ERROR, "constraint %u is not a not-null constraint", conForm->oid) */
+        return Err(PgError::new(
+            ERROR,
+            format!(
+                "constraint {} is not a not-null constraint",
+                con_form.oid
+            ),
+        ));
+    }
+
+    /* a NO INHERIT constraint is no good */
+    if con_form.connoinherit {
+        return Err(PgError::new(
+            ERROR,
+            format!("cannot create primary key on column \"{colname}\""),
+        )
+        .with_sqlstate(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+        .with_detail(format!(
+            "The constraint \"{}\" on column \"{}\" of table \"{}\", marked {}, is incompatible with a primary key.",
+            name_str(&con_form.conname),
+            colname,
+            rel_name_for_msg(mcx, con_form.conrelid)?,
+            "NO INHERIT"
+        ))
+        .with_hint(
+            "You might need to make the existing constraint inheritable using ALTER TABLE ... ALTER CONSTRAINT ... INHERIT.",
+        ));
+    }
+
+    /* an unvalidated constraint is no good */
+    if !con_form.convalidated {
+        return Err(PgError::new(
+            ERROR,
+            format!("cannot create primary key on column \"{colname}\""),
+        )
+        .with_sqlstate(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+        .with_detail(format!(
+            "The constraint \"{}\" on column \"{}\" of table \"{}\", marked {}, is incompatible with a primary key.",
+            name_str(&con_form.conname),
+            colname,
+            rel_name_for_msg(mcx, con_form.conrelid)?,
+            "NOT VALID"
+        ))
+        .with_hint(
+            "You might need to validate it using ALTER TABLE ... VALIDATE CONSTRAINT.",
+        ));
+    }
+
+    Ok(())
+}
+
+/* ===========================================================================
  * findNotNullConstraint (pg_constraint.c:641-651)
  * ========================================================================= */
 

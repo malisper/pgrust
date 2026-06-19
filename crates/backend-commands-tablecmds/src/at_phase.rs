@@ -142,23 +142,21 @@ pub const ATT_MATVIEW: i32 = 1 << 8;
 
 pub type AlterTablePass = i32;
 
-pub const AT_PASS_UNSET: AlterTablePass = -1; /* nothing yet */
+pub const AT_PASS_UNSET: AlterTablePass = -1; /* UNSET will cause ERROR */
 pub const AT_PASS_DROP: AlterTablePass = 0; /* DROP (all flavors) */
 pub const AT_PASS_ALTER_TYPE: AlterTablePass = 1; /* ALTER COLUMN TYPE */
 pub const AT_PASS_ADD_COL: AlterTablePass = 2; /* ADD COLUMN */
-pub const AT_PASS_SET_EXPRESSION: AlterTablePass = 3; /* SET EXPRESSION */
-pub const AT_PASS_OLD_COL_ATTRS: AlterTablePass = 4; /* re-install attnotnull */
-pub const AT_PASS_OLD_INDEX: AlterTablePass = 5; /* re-add existing indexes */
-pub const AT_PASS_OLD_CONSTR: AlterTablePass = 6; /* re-add existing constraints */
+pub const AT_PASS_SET_EXPRESSION: AlterTablePass = 3; /* ALTER SET EXPRESSION */
+pub const AT_PASS_OLD_INDEX: AlterTablePass = 4; /* re-add existing indexes */
+pub const AT_PASS_OLD_CONSTR: AlterTablePass = 5; /* re-add existing constraints */
 /* We could support a RENAME COLUMN pass here, but not currently used */
-pub const AT_PASS_ADD_COL_NOT_NULL: AlterTablePass = 7; /* set not-null after add */
-pub const AT_PASS_ADD_INDEX: AlterTablePass = 8; /* ADD indexes */
-pub const AT_PASS_ADD_CONSTR: AlterTablePass = 9; /* ADD constraints, defaults */
-pub const AT_PASS_COL_ATTRS: AlterTablePass = 10; /* set column attributes, eg NOT NULL */
-pub const AT_PASS_ADD_INDEXCONSTR: AlterTablePass = 11; /* ADD index-based constraints */
-pub const AT_PASS_ADD_OTHERCONSTR: AlterTablePass = 12; /* ADD other constraints, defaults */
-pub const AT_PASS_MISC: AlterTablePass = 13; /* other stuff */
-pub const AT_NUM_PASSES: usize = 14;
+pub const AT_PASS_ADD_CONSTR: AlterTablePass = 6; /* ADD constraints (initial examination) */
+pub const AT_PASS_COL_ATTRS: AlterTablePass = 7; /* set column attributes, eg NOT NULL */
+pub const AT_PASS_ADD_INDEXCONSTR: AlterTablePass = 8; /* ADD index-based constraints */
+pub const AT_PASS_ADD_INDEX: AlterTablePass = 9; /* ADD indexes */
+pub const AT_PASS_ADD_OTHERCONSTR: AlterTablePass = 10; /* ADD other constraints, defaults */
+pub const AT_PASS_MISC: AlterTablePass = 11; /* other stuff */
+pub const AT_NUM_PASSES: usize = 12;
 
 // ===========================================================================
 // Work-queue carriers (tablecmds.c). The trimmed phase-3 substructures
@@ -632,7 +630,7 @@ fn ATController<'mcx>(
 
 /// `ATPrepCmd(...)` (tablecmds.c:4904) — phase-1 traffic cop: permission/relkind
 /// checks, simple recursion, and pass assignment for each subcommand.
-fn ATPrepCmd<'mcx>(
+pub(crate) fn ATPrepCmd<'mcx>(
     mcx: Mcx<'mcx>,
     wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
     rel: &Relation<'mcx>,
@@ -822,7 +820,8 @@ fn ATPrepCmd<'mcx>(
         }
         AT_AddIndex => {
             ATSimplePermissions(cmd.subtype, rel, ATT_TABLE | ATT_PARTITIONED_TABLE)?;
-            unported("ADD INDEX (from ADD CONSTRAINT)");
+            // This command never recurses; no command-specific prep needed.
+            pass = AT_PASS_ADD_INDEX;
         }
         AT_AddConstraint => {
             ATSimplePermissions(
@@ -830,11 +829,20 @@ fn ATPrepCmd<'mcx>(
                 rel,
                 ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_FOREIGN_TABLE,
             )?;
-            unported("ADD CONSTRAINT (ATPrepAddPrimaryKey)");
+            crate::at_constraint::ATPrepAddPrimaryKey(
+                mcx, wqueue, rel, &cmd, recurse, lockmode, context,
+            )?;
+            if recurse {
+                // recurses at exec time; lock descendants and set flag.
+                inherits_seam::find_all_inheritors::call(mcx, rel.rd_id, lockmode)?;
+                cmd.recurse = true;
+            }
+            pass = AT_PASS_ADD_CONSTR;
         }
         AT_AddIndexConstraint => {
             ATSimplePermissions(cmd.subtype, rel, ATT_TABLE | ATT_PARTITIONED_TABLE)?;
-            unported("ADD CONSTRAINT USING INDEX");
+            // This command never recurses; no command-specific prep needed.
+            pass = AT_PASS_ADD_INDEXCONSTR;
         }
         AT_DropConstraint => {
             ATSimplePermissions(
@@ -1275,12 +1283,106 @@ fn ATExecCmd<'mcx>(
                 cmd.missing_ok,
             )?;
         }
-        AT_AddIndex | AT_ReAddIndex => unported("ADD INDEX (ATExecAddIndex)"),
+        AT_AddIndex | AT_ReAddIndex => {
+            // ATExecAddIndex(tab, rel, (IndexStmt *) cmd->def, is_rebuild, lockmode).
+            // C uses the single already-open `tab->rel`; take it out of the queue
+            // entry so we can pass `&mut wqueue[ti]` alongside `&rel` without a
+            // second relation_open (which would bump rd_refcnt and trip
+            // CheckTableNotInUse).
+            let is_rebuild = cmd.subtype == AT_ReAddIndex;
+            let owned_rel = wqueue[ti].rel.take().expect("ATExecCmd: tab->rel is open");
+            let stmt = cmd
+                .def
+                .as_deref()
+                .expect("AT_AddIndex: cmd.def is NULL")
+                .as_indexstmt()
+                .expect("AT_AddIndex: cmd.def is not an IndexStmt");
+            let res = crate::at_constraint::ATExecAddIndex(
+                mcx,
+                &mut wqueue[ti],
+                &owned_rel,
+                stmt,
+                is_rebuild,
+                lockmode,
+            );
+            wqueue[ti].rel = Some(owned_rel);
+            _address = res?;
+        }
         AT_ReAddStatistics => unported("ReAdd STATISTICS (ATExecAddStatistics)"),
-        AT_AddConstraint | AT_ReAddConstraint => unported("ADD CONSTRAINT (ATExecAddConstraint)"),
+        AT_AddConstraint | AT_ReAddConstraint => {
+            // Transform the command only during initial examination
+            // (AT_PASS_ADD_CONSTR). Take the single open `tab->rel` out of the
+            // queue entry (see AT_AddIndex above) so we can pass `&mut wqueue`.
+            let owned_rel = wqueue[ti].rel.take().expect("ATExecCmd: tab->rel is open");
+            let is_readd = cmd.subtype == AT_ReAddConstraint;
+
+            let exec = (|| -> PgResult<ObjectAddress> {
+                let cmd_for_exec: Option<AlterTableCmd<'mcx>> =
+                    if !is_readd && cur_pass == AT_PASS_ADD_CONSTR {
+                        crate::at_coladd::ATParseTransformCmd(
+                            mcx,
+                            wqueue,
+                            ti,
+                            &owned_rel,
+                            cmd.clone_in(mcx)?,
+                            cmd.recurse,
+                            lockmode,
+                            cur_pass,
+                            context,
+                        )?
+                    } else {
+                        Some(cmd.clone_in(mcx)?)
+                    };
+
+                // Depending on constraint type, there might be no more work now.
+                if let Some(c) = cmd_for_exec {
+                    let newcon = c
+                        .def
+                        .as_deref()
+                        .expect("AT_AddConstraint: cmd.def is NULL")
+                        .expect_constraint();
+                    crate::at_constraint::ATExecAddConstraint(
+                        mcx,
+                        wqueue,
+                        ti,
+                        &owned_rel,
+                        newcon,
+                        c.recurse,
+                        is_readd,
+                        lockmode,
+                    )
+                } else {
+                    Ok(ObjectAddress {
+                        classId: InvalidOid,
+                        objectId: InvalidOid,
+                        objectSubId: 0,
+                    })
+                }
+            })();
+            wqueue[ti].rel = Some(owned_rel);
+            _address = exec?;
+        }
         AT_ReAddDomainConstraint => unported("ReAdd DOMAIN CONSTRAINT (AlterDomainAddConstraint)"),
         AT_ReAddComment => unported("ReAdd COMMENT (CommentObject)"),
-        AT_AddIndexConstraint => unported("ADD CONSTRAINT USING INDEX (ATExecAddIndexConstraint)"),
+        AT_AddIndexConstraint => {
+            // ATExecAddIndexConstraint(tab, rel, (IndexStmt *) cmd->def, lockmode).
+            let owned_rel = wqueue[ti].rel.take().expect("ATExecCmd: tab->rel is open");
+            let stmt = cmd
+                .def
+                .as_deref()
+                .expect("AT_AddIndexConstraint: cmd.def is NULL")
+                .as_indexstmt()
+                .expect("AT_AddIndexConstraint: cmd.def is not an IndexStmt");
+            let res = crate::at_constraint::ATExecAddIndexConstraint(
+                mcx,
+                &mut wqueue[ti],
+                &owned_rel,
+                stmt,
+                lockmode,
+            );
+            wqueue[ti].rel = Some(owned_rel);
+            _address = res?;
+        }
         AT_AlterConstraint => unported("ALTER CONSTRAINT (ATExecAlterConstraint)"),
         AT_ValidateConstraint => unported("VALIDATE CONSTRAINT (ATExecValidateConstraint)"),
         AT_DropConstraint => unported("DROP CONSTRAINT (ATExecDropConstraint)"),
@@ -1369,8 +1471,19 @@ fn ATRewriteTables<'mcx>(
 ) -> PgResult<()> {
     // foreach: if (tab->rewrite > 0 || tab->verify_new_notnull) -> phase-3 scan
     for ti in 0..wqueue.len() {
-        if wqueue[ti].rewrite > 0 || wqueue[ti].verify_new_notnull {
-            unported("ATRewriteTable (phase-3 heap scan / NOT NULL revalidation)");
+        // tab->rewrite > 0 (heap rewrite) and tab->constraints (CHECK
+        // revalidation) require the full ATRewriteTable rewrite/eval path, which
+        // is not yet ported. The NOT-NULL-only verify path (verify_new_notnull,
+        // no rewrite, no CHECK) is.
+        if wqueue[ti].rewrite > 0 {
+            unported("ATRewriteTable (phase-3 heap rewrite)");
+        }
+        if !wqueue[ti].constraints.is_empty() {
+            unported("ATRewriteTable (phase-3 CHECK constraint revalidation)");
+        }
+        if wqueue[ti].verify_new_notnull {
+            let relid = wqueue[ti].relid;
+            crate::at_constraint::at_verify_not_null(mcx, relid)?;
         }
         // Also: ATTACH PARTITION constraint validation lives here.
         if wqueue[ti].partition_constraint.is_some() {

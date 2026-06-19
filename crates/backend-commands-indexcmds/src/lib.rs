@@ -977,6 +977,24 @@ pub fn init_seams() {
         )
     });
 
+    // DefineIndex — lifetime-generic form for ALTER TABLE ATExecAddIndex.
+    backend_commands_indexcmds_seams::define_index_full::set(|mcx, args| {
+        DefineIndex(
+            mcx,
+            args.table_id,
+            &args.stmt,
+            args.index_relation_id,
+            args.parent_index_id,
+            args.parent_constraint_id,
+            args.total_parts,
+            args.is_alter_table,
+            args.check_rights,
+            args.check_not_in_use,
+            args.skip_build,
+            args.quiet,
+        )
+    });
+
     // --- ProcessUtilitySlow CREATE INDEX arm (utility.c:1455-1560) ---
     // The three CREATE-INDEX dispatch seams the command owner installs.
     backend_tcop_utility_out_seams::range_var_get_relid_owns_relation::set(
