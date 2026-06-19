@@ -172,11 +172,11 @@ fn preprocess_aggrefs_walker<'mcx>(
     root: &mut PlannerInfo,
     node: &mut Expr,
 ) -> PgResult<bool> {
-    if let Expr::Aggref(_) = node {
+    if node.is_aggref() {
         let nums = preprocess_aggref(mcx, root, node)?;
         // aggref->aggno = aggno; aggref->aggtransno = aggtransno;
         // aggref->aggtranstype = aggtranstype; (the live-node mutation C does).
-        if let Expr::Aggref(a) = node {
+        if let Some(a) = node.as_aggref_mut() {
             a.aggno = nums.aggno;
             a.aggtransno = nums.aggtransno;
             a.aggtranstype = nums.aggtranstype;
@@ -190,7 +190,7 @@ fn preprocess_aggrefs_walker<'mcx>(
         return Ok(false);
     }
     // Assert(!IsA(node, SubLink));
-    debug_assert!(!matches!(node, Expr::SubLink(_)));
+    debug_assert!(!node.is_sublink());
 
     // Recurse into the node's immediate Expr children in place. (C uses
     // expression_tree_walker; here we mutate each child so the write-back lands
@@ -208,7 +208,7 @@ fn preprocess_aggrefs_walker<'mcx>(
 /// mark the live processed-tlist / HAVING-qual `Aggref`s the executor reads,
 /// mirroring C's in-place mutation of the shared `Aggref` pointers.
 pub fn mark_aggrefs_presorted(node: &mut Expr, aggnos: &[i32]) {
-    if let Expr::Aggref(a) = node {
+    if let Some(a) = node.as_aggref_mut() {
         if aggnos.contains(&a.aggno) {
             a.aggpresorted = true;
         }
@@ -278,7 +278,7 @@ fn preprocess_aggref<'mcx>(
     root: &mut PlannerInfo,
     aggref_node: &Expr,
 ) -> PgResult<AggrefNumbers> {
-    debug_assert!(matches!(aggref_node, Expr::Aggref(_)));
+    debug_assert!(aggref_node.is_aggref());
 
     // Working copy of the node (the C mutates the live `Aggref` in place; here the
     // arena copy this becomes is the canonical shared node — see the crate docs).
@@ -287,7 +287,7 @@ fn preprocess_aggref<'mcx>(
     // #280). Keep it as an `Expr` so it can be re-wrapped for the
     // `contain_volatile_functions` walk and interned by value at the end.
     let mut working: Expr = aggref_node.clone_in(mcx)?;
-    debug_assert!(matches!(working, Expr::Aggref(_)));
+    debug_assert!(working.is_aggref());
 
     // Assert(aggref->agglevelsup == 0);
     debug_assert!(as_aggref(&working).agglevelsup == 0);
@@ -606,10 +606,7 @@ fn find_compatible_agg(
 
         let agginfo = root.agg_info(agginfo_id);
         // existingRef = linitial(agginfo->aggrefs);
-        let existing_ref = match root.node(agginfo.aggrefs[0]) {
-            Expr::Aggref(a) => a,
-            _ => unreachable!("AggInfo.aggrefs handle resolves to Expr::Aggref"),
-        };
+        let existing_ref = root.node(agginfo.aggrefs[0]).expect_aggref();
 
         /* all of the following must be the same or it's no match */
         if newagg.inputcollid != existing_ref.inputcollid
@@ -862,10 +859,7 @@ pub fn get_agg_clause_costs(
         let agginfo = root.agg_info(agginfo_id);
         let finalfn_oid = agginfo.finalfn_oid;
         // aggref = linitial(agginfo->aggrefs);
-        let aggref = match root.node(agginfo.aggrefs[0]) {
-            Expr::Aggref(a) => a,
-            _ => unreachable!("AggInfo.aggrefs handle resolves to Expr::Aggref"),
-        };
+        let aggref = root.node(agginfo.aggrefs[0]).expect_aggref();
 
         /*
          * Add the appropriate component function execution costs to appropriate
@@ -966,19 +960,14 @@ fn equal_opt_expr(a: Option<&Expr>, b: Option<&Expr>) -> bool {
 /// `Aggref` — built by `clone_in` of an `Expr::Aggref`).
 #[inline]
 fn as_aggref(node: &Expr) -> &Aggref {
-    match node {
-        Expr::Aggref(a) => a,
-        _ => unreachable!("prepagg working node is always Expr::Aggref"),
-    }
+    node.expect_aggref()
 }
 
 /// View an `Expr::Aggref` node as `&mut Aggref`.
 #[inline]
 fn as_aggref_mut(node: &mut Expr) -> &mut Aggref {
-    match node {
-        Expr::Aggref(a) => a,
-        _ => unreachable!("prepagg working node is always Expr::Aggref"),
-    }
+    node.as_aggref_mut()
+        .expect("prepagg working node is always Expr::Aggref")
 }
 
 /// Deep-clone a `TargetEntry` into the arena, returning its `NodeId` handle (the
