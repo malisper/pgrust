@@ -288,6 +288,63 @@ fn fc_int4_accum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     poly_accum_common(fcinfo, 4)
 }
 
+/// `int8_accum`(1836): SUM/AVG over int8 with sumX2. The X² of an int8 can
+/// overflow int128, so int8 uses the wider `NumericAggState` (not the poly
+/// int128 path) — C: `state = makeNumericAggState(fcinfo, true)`;
+/// `do_numeric_accum(state, int64_to_numeric(PG_GETARG_INT64(1)))`.
+fn fc_int8_accum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let mut carrier = take_numeric_state(fcinfo).unwrap_or_else(|| NumericAggInternal::new(true));
+    if !arg_isnull(fcinfo, 1) {
+        let v = fcinfo.arg(1).expect("int8_accum: missing arg 1").value.as_i64();
+        let ctx_mcx = carrier.ctx.mcx();
+        let num = ok(crate::convert::int64_to_numeric(ctx_mcx, v));
+        ok(aggregate::do_numeric_accum(ctx_mcx, &mut carrier.state, &num));
+    }
+    ret_internal(fcinfo, carrier)
+}
+
+/// `int8_accum_inv`(3568): inverse transition for moving-window SUM/AVG(int8).
+/// C: errors on NULL state; `do_numeric_discard(state, int64_to_numeric(...))`
+/// which never fails (all int inputs have dscale 0).
+fn fc_int8_accum_inv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let mut carrier = take_numeric_state(fcinfo)
+        .unwrap_or_else(|| raise(types_error::PgError::error("int8_accum_inv called with NULL state")));
+    if !arg_isnull(fcinfo, 1) {
+        let v = fcinfo.arg(1).expect("int8_accum_inv: missing arg 1").value.as_i64();
+        let ctx_mcx = carrier.ctx.mcx();
+        let num = ok(crate::convert::int64_to_numeric(ctx_mcx, v));
+        if !ok(aggregate::do_numeric_discard(ctx_mcx, &mut carrier.state, &num)) {
+            raise(types_error::PgError::error("do_numeric_discard failed unexpectedly"));
+        }
+    }
+    ret_internal(fcinfo, carrier)
+}
+
+/// `int8_avg_accum`(2746): AVG(int8) transition (no sumX2). The int128 sumX can
+/// hold the running sum of int8 inputs, so it uses the poly path with
+/// `calc_sum_x2 = false` — C: `state = makePolyNumAggState(fcinfo, false)`;
+/// `do_int128_accum(state, (int128) PG_GETARG_INT64(1))`.
+fn fc_int8_avg_accum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let mut state = take_poly_state(fcinfo)
+        .unwrap_or_else(|| Box::new(aggregate::make_int128_agg_state(false)));
+    if !arg_isnull(fcinfo, 1) {
+        let v = fcinfo.arg(1).expect("int8_avg_accum: missing arg 1").value.as_i64();
+        aggregate::do_int128_accum(&mut state, i128::from(v));
+    }
+    ret_internal(fcinfo, state)
+}
+
+/// `int8_avg_accum_inv`(3387): inverse transition for moving-window AVG(int8).
+fn fc_int8_avg_accum_inv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let mut state = take_poly_state(fcinfo)
+        .unwrap_or_else(|| raise(types_error::PgError::error("int8_avg_accum_inv called with NULL state")));
+    if !arg_isnull(fcinfo, 1) {
+        let v = fcinfo.arg(1).expect("int8_avg_accum_inv: missing arg 1").value.as_i64();
+        aggregate::do_int128_discard(&mut state, i128::from(v));
+    }
+    ret_internal(fcinfo, state)
+}
+
 fn fc_numeric_poly_sum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     match take_poly_state(fcinfo) {
         None => ret_null(fcinfo),
@@ -359,6 +416,12 @@ pub fn register_numeric_agg_builtins() {
         // Int128AggState (poly) transitions.
         builtin(1834, "int2_accum", 2, false, false, fc_int2_accum),
         builtin(1835, "int4_accum", 2, false, false, fc_int4_accum),
+        // int8 SUM/AVG transitions: int8_accum uses the wider NumericAggState
+        // (int8 X² overflows int128); int8_avg_accum uses the poly int128 path.
+        builtin(1836, "int8_accum", 2, false, false, fc_int8_accum),
+        builtin(3569, "int8_accum_inv", 2, false, false, fc_int8_accum_inv),
+        builtin(2746, "int8_avg_accum", 2, false, false, fc_int8_avg_accum),
+        builtin(3387, "int8_avg_accum_inv", 2, false, false, fc_int8_avg_accum_inv),
         // Int128AggState (poly) finals.
         builtin(3388, "numeric_poly_sum", 1, false, false, fc_numeric_poly_sum),
         builtin(3389, "numeric_poly_avg", 1, false, false, fc_numeric_poly_avg),
