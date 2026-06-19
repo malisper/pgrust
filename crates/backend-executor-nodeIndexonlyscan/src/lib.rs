@@ -114,8 +114,8 @@ fn IndexOnlyNext<'mcx>(
     // estate = node->ss.ps.state;
     // direction = ScanDirectionCombine(estate->es_direction, indexorderdir);
     let plan_dir = match node.ss.ps.plan {
-        Some(types_nodes::nodes::Node::IndexOnlyScan(ios)) => ios.indexorderdir,
         // The node's plan is always an IndexOnlyScan.
+        Some(p) if p.node_tag() == types_nodes::nodes::ntag::T_IndexOnlyScan => p.expect_indexonlyscan().indexorderdir,
         _ => return Err(elog("IndexOnlyScan node has wrong plan type")),
     };
     let direction = scan_direction_combine(estate.es_direction, plan_dir);
@@ -578,10 +578,7 @@ pub fn ExecInitIndexOnlyScan<'mcx>(
     // IndexOnlyScan *node — the enclosing plan-tree node (the C `IndexOnlyScan
     // *` is the same pointer via struct embedding). Panics if it is not an
     // `IndexOnlyScan` (the C `castNode`).
-    let ios: &'mcx IndexOnlyScan<'mcx> = match node {
-        types_nodes::nodes::Node::IndexOnlyScan(n) => n,
-        other => panic!("castNode(IndexOnlyScan, node) failed: {other:?}"),
-    };
+    let ios: &'mcx IndexOnlyScan<'mcx> = node.expect_indexonlyscan();
 
     // create state structure (makeNode(IndexOnlyScanState))
     let mut indexstate = IndexOnlyScanState::make_boxed_in(mcx)?;
@@ -1009,7 +1006,7 @@ fn instr_count_filtered2(node: &mut IndexOnlyScanState<'_>, delta: u64) {
 /// `((Scan *) node->ss.ps.plan)->scanrelid`.
 fn scan_scanrelid(node: &IndexOnlyScanState<'_>) -> PgResult<u32> {
     match node.ss.ps.plan {
-        Some(types_nodes::nodes::Node::IndexOnlyScan(ios)) => Ok(ios.scan.scanrelid),
+        Some(p) if p.node_tag() == types_nodes::nodes::ntag::T_IndexOnlyScan => Ok(p.expect_indexonlyscan().scan.scanrelid),
         _ => Err(elog("IndexOnlyScan node has wrong plan type")),
     }
 }
