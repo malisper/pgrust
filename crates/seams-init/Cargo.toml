@@ -540,6 +540,7 @@ backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-error-small = { path = "../backend-utils-error-small" }
 backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 backend-utils-fmgr-dfmgr = { path = "../backend-utils-fmgr-dfmgr" }
+port-dynloader = { path = "../port-dynloader" }
 backend-utils-fmgr-funcapi = { path = "../backend-utils-fmgr-funcapi" }
 backend-utils-hash-dynahash = { path = "../backend-utils-hash-dynahash" }
 backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }

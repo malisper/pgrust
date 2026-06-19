@@ -23104,6 +23104,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "port-dynloader"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "libc",
+ "port-dynloader-seams",
+ "types-dfmgr",
+ "types-error",
+ "types-fmgr",
+ "types-logical",
+]
+
+[[package]]
 name = "port-dynloader-seams"
 version = "0.0.0"
 dependencies = [
@@ -23854,6 +23867,7 @@ dependencies = [
  "mcx",
  "pg-prng",
  "port-crc32c",
+ "port-dynloader",
  "port-noblock",
  "port-pg-strong-random",
  "port-pgsleep",
