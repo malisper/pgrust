@@ -1728,6 +1728,7 @@ pub fn init_seams() {
             .install(GucVarAccessors { get: DefaultXactDeferrable, set: SetDefaultXactDeferrable });
     }
 
+    seams::get_stable_latest_transaction_id::set(GetStableLatestTransactionId);
     seams::command_counter_increment::set(CommandCounterIncrement);
     seams::prevent_command_if_read_only::set(PreventCommandIfReadOnly);
     seams::prevent_command_if_parallel_mode::set(PreventCommandIfParallelMode);

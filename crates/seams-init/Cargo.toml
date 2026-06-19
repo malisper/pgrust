@@ -457,6 +457,7 @@ backend-utils-adt-arrayutils = { path = "../backend-utils-adt-arrayutils" }
 backend-utils-adt-dbsize = { path = "../backend-utils-adt-dbsize" }
 backend-utils-adt-char = { path = "../backend-utils-adt-char" }
 backend-utils-adt-oid = { path = "../backend-utils-adt-oid" }
+backend-utils-adt-xid = { path = "../backend-utils-adt-xid" }
 backend-utils-adt-int = { path = "../backend-utils-adt-int" }
 backend-utils-adt-int8 = { path = "../backend-utils-adt-int8" }
 backend-utils-adt-ascii = { path = "../backend-utils-adt-ascii" }

@@ -462,6 +462,7 @@ pub fn init_all() {
     backend_utils_adt_dbsize::init_seams();
     backend_utils_adt_char::init_seams();
     backend_utils_adt_oid::init_seams();
+    backend_utils_adt_xid::init_seams();
     backend_utils_adt_int::init_seams();
     backend_utils_adt_int8::init_seams();
     backend_utils_adt_ascii::init_seams();

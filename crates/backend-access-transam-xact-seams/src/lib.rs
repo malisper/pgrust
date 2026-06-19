@@ -7,6 +7,15 @@
 use types_error::PgResult;
 
 seam_core::seam!(
+    /// `GetStableLatestTransactionId()` (xact.c:607): the transaction's XID if
+    /// it has one, else the next-to-be-assigned XID, latched for the rest of
+    /// the transaction. The reference point `age(xid)` (`xid_age`) measures
+    /// against. Reads backend-local + shared transaction state; can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn get_stable_latest_transaction_id() -> PgResult<types_core::TransactionId>
+);
+
+seam_core::seam!(
     /// `GetCurrentStatementStartTimestamp()` (xact.c): the timestamp the
     /// current statement (transaction command) started. Pure read of
     /// backend-local transaction state.

@@ -20417,6 +20417,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-xid"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-multixact-seams",
+ "backend-access-transam-xact-seams",
+ "backend-libpq-pqformat",
+ "backend-utils-adt-numutils",
+ "backend-utils-fmgr-core",
+ "common-hashfn",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-fmgr",
+ "types-stringinfo",
+]
+
+[[package]]
 name = "backend-utils-adt-xid8funcs"
 version = "0.0.0"
 dependencies = [
@@ -23699,6 +23717,7 @@ dependencies = [
  "backend-utils-adt-varchar",
  "backend-utils-adt-varlena",
  "backend-utils-adt-version",
+ "backend-utils-adt-xid",
  "backend-utils-adt-xid8funcs",
  "backend-utils-adt-xml",
  "backend-utils-adt-xml-libxml-ffi",
