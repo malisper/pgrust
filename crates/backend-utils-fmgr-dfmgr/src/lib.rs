@@ -37,13 +37,25 @@ use port_dynloader_seams as loader;
 
 /// Platform shared-library suffix (`DLSUFFIX`): the C build sets this per
 /// platform — `.dylib` on macOS/Darwin, `.so` elsewhere (Makefile.global's
-/// `DLSUFFIX`). Matching it is what lets the in-process ported-library registry
-/// recognize a fully-qualified `.../regress.dylib` probin as the bare `regress`
-/// library on macOS.
+/// `DLSUFFIX`). Used only on the real OS-loader path
+/// ([`expand_dynamic_library_name`]), where the appended suffix must match the
+/// platform's actual library files. The in-process ported-library registry does
+/// NOT use it: a registry key is a bare library name, so a suffixed probin is
+/// reduced to its key by stripping any known suffix uniformly (see
+/// [`KNOWN_DLSUFFIXES`] / [`simple_library_name`]).
 #[cfg(target_os = "macos")]
 const DLSUFFIX: &str = ".dylib";
 #[cfg(not(target_os = "macos"))]
 const DLSUFFIX: &str = ".so";
+
+/// Shared-library suffixes that a `probin` may carry on any platform. The
+/// in-process ported-library registry treats a `probin` purely as a key, so a
+/// fully-qualified `.../regress.dylib` (macOS), `.../regress.so` (ELF) or
+/// `.../regress.dll` (Windows) all reduce to the bare `regress` key regardless
+/// of the platform this backend is built for. This deliberately does NOT depend
+/// on the build platform's `DLSUFFIX`: the file is never opened, the name is
+/// just looked up, so there is no platform divergence to honor here.
+const KNOWN_DLSUFFIXES: [&str; 3] = [".so", ".dylib", ".dll"];
 
 /* =========================================================================
  * Process(backend)-global loader state — dfmgr.c's file-scope statics.
@@ -789,17 +801,23 @@ pub fn fmgr_abi_extra() -> String {
 /// in-process ported-library registry (see
 /// [`backend_utils_fmgr_dfmgr_seams::resolve_builtin_library_function`]). Strips
 /// any directory prefix (`$libdir/regress` → `regress`, `/path/to/regress.so` →
-/// `regress`) and a trailing `DLSUFFIX`. Returns `None` for a name that still
-/// has interior structure that the registry never carries (it only registers
-/// bare library names).
+/// `regress`) and any known shared-library suffix (`.so`/`.dylib`/`.dll`),
+/// platform-independently — the registry key is just a name, never a file, so
+/// `regress`, `regress.so` and `regress.dylib` are the same key on every
+/// platform. Returns `None` for a name that still has interior structure that
+/// the registry never carries (it only registers bare library names).
 fn simple_library_name(name: &str) -> Option<&str> {
     // Drop everything up to and including the last directory separator.
     let base = match first_dir_separator(name) {
         Some(_) => name.rsplit('/').next().unwrap_or(name),
         None => name,
     };
-    // Drop a trailing DLSUFFIX if present.
-    let base = base.strip_suffix(DLSUFFIX).unwrap_or(base);
+    // Drop a trailing known shared-library suffix, whatever the platform: the
+    // name is a registry key, not a file to open, so no platform divergence.
+    let base = KNOWN_DLSUFFIXES
+        .iter()
+        .find_map(|sfx| base.strip_suffix(sfx))
+        .unwrap_or(base);
     if base.is_empty() {
         None
     } else {
