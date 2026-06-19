@@ -423,7 +423,11 @@ fn transform_expr_node<'mcx>(
 
         Expr::NamedArgExpr(mut na) => {
             // na->arg = transformExprRecurse(pstate, na->arg); result = expr.
-            let arg = na.arg.take().map(|b| expr_to_node(aexpr_clone_ctx(pstate), *b));
+            let arg = na
+                .arg
+                .take()
+                .map(|b| expr_to_node(aexpr_clone_ctx(pstate), *b))
+                .transpose()?;
             let new_arg = transformExprRecurse(pstate, arg)?;
             na.arg = new_arg.map(Box::new);
             Ok(Expr::NamedArgExpr(na))
@@ -466,7 +470,11 @@ fn transform_expr_node<'mcx>(
 
         Expr::NullTest(mut n) => {
             // n->arg = transformExprRecurse(...); argisrow from arg's type.
-            let arg = n.arg.take().map(|b| expr_to_node(aexpr_clone_ctx(pstate), *b));
+            let arg = n
+                .arg
+                .take()
+                .map(|b| expr_to_node(aexpr_clone_ctx(pstate), *b))
+                .transpose()?;
             let new_arg = transformExprRecurse(pstate, arg)?;
             n.argisrow = lsyscache::type_is_rowtype::call(expr_type(new_arg.as_ref())?)?;
             n.arg = new_arg.map(Box::new);
@@ -507,8 +515,8 @@ fn transform_expr_node<'mcx>(
 /// via `Node::mk_expr`) so this construction site is ready for the node-opaque
 /// flip (§6 `value_no_mcx` sub-sweep); today `mk_expr` ignores `mcx` so this is
 /// behavior-preserving.
-fn expr_to_node<'mcx>(mcx: mcx::Mcx<'mcx>, e: Expr) -> Node<'mcx> {
-    Node::mk_expr(mcx, e)
+fn expr_to_node<'mcx>(mcx: mcx::Mcx<'mcx>, e: Expr) -> PgResult<Node<'mcx>> {
+    Ok(Node::mk_expr(mcx, e))
 }
 
 // ===========================================================================
@@ -1295,7 +1303,11 @@ fn transformBooleanTest<'mcx>(
         BoolTestType::IS_NOT_UNKNOWN => "IS NOT UNKNOWN",
     };
 
-    let arg = b.arg.take().map(|x| expr_to_node(aexpr_clone_ctx(pstate), *x));
+    let arg = b
+        .arg
+        .take()
+        .map(|x| expr_to_node(aexpr_clone_ctx(pstate), *x))
+        .transpose()?;
     let arg = transformExprRecurse(pstate, arg)?
         .ok_or_else(|| PgError::error("transformBooleanTest: BooleanTest argument is NULL"))?;
     let arg = coerce::coerce_to_boolean::call(pstate, arg, clausename)?;

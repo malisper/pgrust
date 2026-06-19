@@ -5655,8 +5655,8 @@ fn create_hashjoin_plan<'mcx>(
             .args
             .get(1)
             .ok_or_else(|| PgError::error("create_hashjoin_plan: hashclause OpExpr has one arg"))?;
-        outer_hashkeys.push(expr_to_node(mcx, outer_arg.clone()));
-        inner_hashkeys.push(expr_to_node(mcx, inner_arg.clone()));
+        outer_hashkeys.push(expr_to_node(mcx, outer_arg.clone())?);
+        inner_hashkeys.push(expr_to_node(mcx, inner_arg.clone())?);
     }
 
     // Build the Hash node over the inner plan.
@@ -7760,8 +7760,8 @@ fn oid_vec_opt<'mcx>(mcx: Mcx<'mcx>, v: Vec<Oid>) -> PgResult<Option<PgVec<'mcx,
 
 /// Wrap an owned `Expr` into the `Node<'mcx>` carrier the HashJoin hashkey /
 /// hashclause lists hold (`PgVec<Node>`).
-fn expr_to_node<'mcx>(mcx: Mcx<'mcx>, e: Expr) -> Node<'mcx> {
-    Node::mk_expr(mcx, e)
+fn expr_to_node<'mcx>(mcx: Mcx<'mcx>, e: Expr) -> PgResult<Node<'mcx>> {
+    Ok(Node::mk_expr(mcx, e))
 }
 
 /// Move an owned `Vec<Expr>` into a `PgVec<Node>` (the HashJoin `hashclauses`

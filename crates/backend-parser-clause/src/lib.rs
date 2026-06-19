@@ -131,13 +131,13 @@ pub(crate) fn errpos(pstate: &ParseState<'_>, location: i32) -> i32 {
 /// `Node *` at the var/agg/windowfunc walk sites. In the split model that is an
 /// owned [`Expr`] wrapped as [`Node::Expr`]. An absent expr is an internal error
 /// (the C code always has a non-NULL `tle->expr` at these call sites).
-fn tle_expr_node<'mcx>(mcx: mcx::Mcx<'mcx>, tle: &TargetEntry<'mcx>) -> Node<'mcx> {
+fn tle_expr_node<'mcx>(mcx: mcx::Mcx<'mcx>, tle: &TargetEntry<'mcx>) -> PgResult<Node<'mcx>> {
     let expr = tle
         .expr
         .as_deref()
         .cloned()
         .expect("TargetEntry.expr must be present");
-    Node::mk_expr(mcx, expr)
+    Ok(Node::mk_expr(mcx, expr))
 }
 
 /// `tle->expr` as a borrowed [`Expr`] for `exprType`/`equal`/`strip_*`.
@@ -260,7 +260,7 @@ fn checkTargetlistEntrySQL92<'mcx>(
     exprKind: ParseExprKind,
 ) -> PgResult<()> {
     if exprKind == EXPR_KIND_GROUP_BY {
-        let tle_expr = tle_expr_node(*pstate.p_rtable.allocator(), tle);
+        let tle_expr = tle_expr_node(*pstate.p_rtable.allocator(), tle)?;
         /* reject aggregates and window functions */
         if pstate.p_hasAggs && rewritemanip::contain_aggs_of_level::call(&tle_expr, 0) {
             return Err(ereport(ERROR)
