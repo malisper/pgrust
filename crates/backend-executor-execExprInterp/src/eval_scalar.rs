@@ -870,12 +870,22 @@ pub fn ExecEvalParamSet<'mcx>(
         _ => unreachable!("ExecEvalParamSet: step is not an EEOP_PARAM_SET"),
     };
 
+    // C: prm->value = *op->resvalue; prm->isnull = *op->resnull;
+    // `op->resvalue`/`op->resnull` is the step's result cell. When that cell is
+    // STATE_RESULT_CELL (id 0), the value/isnull live in the ExprState's own
+    // resvalue/resnull, NOT in result_cells[0] (which is then unused). The
+    // preceding arg-eval (e.g. an EEOP_*VAR) honors that sentinel via
+    // write_cell, so the read here must too — read_cell does, a bare
+    // result_cells.get(0) does not. (This is the case for a top-level SubPlan
+    // expression, where the correlation arg evaluates into the state's own
+    // resvalue; reading result_cells[0] instead returned a stale 0, which made
+    // every correlated PARAM_EXEC come back NULL.)
     let (resvalue_id, _resnull_id) = res_cells(state, op);
-    let res = state.result_cells.get(resvalue_id);
+    let (value, isnull) = crate::interp_loop::read_cell(state, resvalue_id);
 
     let prm = &mut estate.es_param_exec_vals[paramid as usize];
-    prm.value = res.value;
-    prm.isnull = res.isnull;
+    prm.value = value;
+    prm.isnull = isnull;
     Ok(())
 }
 
