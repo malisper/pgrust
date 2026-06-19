@@ -40,6 +40,12 @@ fn attr(
         atttypmod,
         attbyval,
         attalign,
+        // For a nailed bootstrap catalog, `genbki` stamps each column's
+        // attstorage from its type's typstorage: a fixed-length / cstring
+        // column is PLAIN, a varlena column (`attlen == -1`) is EXTENDED. None
+        // of these catalogs declares a non-default per-column compression.
+        attstorage: if attlen == -1 { b'x' as i8 } else { b'p' as i8 },
+        attcompression: b'\0' as i8,
         attnotnull,
         // Nailed bootstrap catalogs have no column defaults.
         atthasdef: false,

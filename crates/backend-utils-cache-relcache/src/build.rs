@@ -762,6 +762,8 @@ pub fn RelationBuildTupleDesc(relation: &mut RelationData) -> PgResult<()> {
             atttypmod: attp.atttypmod,
             attbyval: attp.attbyval,
             attalign: attp.attalign,
+            attstorage: attp.attstorage,
+            attcompression: attp.attcompression,
             attnotnull: attp.attnotnull,
             atthasdef: attp.atthasdef,
             attidentity: attp.attidentity,

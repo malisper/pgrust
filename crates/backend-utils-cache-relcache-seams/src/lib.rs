@@ -1075,6 +1075,16 @@ seam_core::seam!(
     ) -> types_error::PgResult<types_core::primitive::Oid>
 );
 seam_core::seam!(
+    /// `relation->rd_toastoid` — the CLUSTER/rewrite transient toast-OID hack
+    /// (`InvalidOid` when off), read by `toast_save_datum`
+    /// (`access/common/toast_internals.c`) to decide whether to substitute the
+    /// permanent toast table's OID into the result pointer and to preserve the
+    /// old toast value OID during a table rewrite.
+    pub fn rel_rd_toastoid(
+        rel: types_core::primitive::Oid,
+    ) -> types_error::PgResult<types_core::primitive::Oid>
+);
+seam_core::seam!(
     /// `(StdRdOptions *) onerel->rd_options` viewed for `vacuum_rel`
     /// (`commands/vacuum.c`): the `index_cleanup` / `max_eager_freeze_failure_rate`
     /// / `truncate` reloptions it consults when the corresponding GUC-derived

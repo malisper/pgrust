@@ -166,6 +166,7 @@ pub fn init_seams() {
     sx::rel_pages_tuples::set(rel_pages_tuples);
     sx::rel_relowner::set(rel_relowner);
     sx::rel_reltoastrelid::set(rel_reltoastrelid);
+    sx::rel_rd_toastoid::set(rel_rd_toastoid);
     sx::rel_std_rd_options::set(rel_std_rd_options);
     sx::rel_lock_relid::set(rel_lock_relid);
 
@@ -1390,6 +1391,9 @@ fn rel_relowner(rel: Oid) -> PgResult<Oid> {
 }
 fn rel_reltoastrelid(rel: Oid) -> PgResult<Oid> {
     with_entry(rel, |rd| rd.rd_rel.reltoastrelid)
+}
+fn rel_rd_toastoid(rel: Oid) -> PgResult<Oid> {
+    with_entry(rel, |rd| rd.rd_toastoid)
 }
 fn rel_std_rd_options(rel: Oid) -> PgResult<sx::StdRdOptionsView> {
     with_entry(rel, |rd| match &rd.rd_options {

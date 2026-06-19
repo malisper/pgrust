@@ -335,6 +335,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `heap_abort_speculative(relation, tid)` (heapam.c) — kill a
+    /// speculatively-inserted tuple (and its TOAST chunks) when the speculative
+    /// insertion lost the `INSERT ... ON CONFLICT` race. Reached from
+    /// `toast_delete_datum`'s `is_speculative` leg. **Installed by
+    /// `backend-access-heap-heapam`.**
+    pub fn heap_abort_speculative<'mcx>(
+        mcx: Mcx<'mcx>,
+        relation: &Relation<'mcx>,
+        tid: ItemPointerData,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `heap_acquire_tuplock(relation, tid, mode, wait_policy, have_tuple_lock)`
     /// (heapam.c) — acquire the lmgr tuple lock that establishes our priority on
     /// the tuple before sleeping on a concurrent locker. Returns the updated

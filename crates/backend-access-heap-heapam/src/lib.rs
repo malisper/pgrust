@@ -605,6 +605,9 @@ pub fn init_seams() {
     heapam_seam::simple_heap_delete::set(|mcx, rel, tid| {
         delete::simple_heap_delete(mcx, rel, tid)
     });
+    heapam_seam::heap_abort_speculative::set(|mcx, rel, tid| {
+        inplace::heap_abort_speculative(mcx, rel, tid)
+    });
 
     // F3 UPDATE — the cross-family heap-update entry points.
     heapam_seam::heap_update::set(|mcx, rel, otid, newtup, cid, crosscheck, wait, tmfd| {

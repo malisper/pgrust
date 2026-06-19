@@ -214,6 +214,8 @@ impl OwnedTupleDesc {
                 atttypmod: a.atttypmod,
                 attbyval: a.attbyval,
                 attalign: a.attalign,
+                attstorage: a.attstorage,
+                attcompression: a.attcompression,
                 attnotnull: a.attnotnull,
                 atthasdef: a.atthasdef,
                 attidentity: a.attidentity,
@@ -391,6 +393,15 @@ pub struct OwnedAttr {
     pub atttypmod: i32,
     pub attbyval: bool,
     pub attalign: i8,
+    /// `char attstorage` — one of the `TYPSTORAGE_*` constants (`'p'`/`'e'`/
+    /// `'m'`/`'x'`). Read by the TOAST machinery (`toast_tuple_init` /
+    /// `toast_tuple_find_biggest_attribute`) to decide whether a varlena column
+    /// may be compressed/externalized.
+    pub attstorage: i8,
+    /// `char attcompression` — the per-column compression method
+    /// (`InvalidCompressionMethod` `'\0'`, `'p'` pglz, `'l'` lz4). Read by
+    /// `toast_tuple_init` to seed `tai_compression`.
+    pub attcompression: i8,
     pub attnotnull: bool,
     /// `bool atthasdef` — this column has a default expression in
     /// `pg_attrdef` (and thus an entry in `rd_att->constr->defval`). Read by
