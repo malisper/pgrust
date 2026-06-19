@@ -28,6 +28,26 @@ pub fn relation_is_other_temp(rel: &Relation<'_>) -> PgResult<bool> {
         && !backend_utils_cache_relcache_seams::rd_islocaltemp::call(rel)?)
 }
 
+/// `RelationIsLogicallyLogged(relation)` (rel.h:712):
+/// ```c
+/// (XLogLogicalInfoActive() &&
+///  RelationNeedsWAL(relation) &&
+///  (relation)->rd_rel->relkind != RELKIND_FOREIGN_TABLE &&
+///  !IsCatalogRelation(relation))
+/// ```
+/// `XLogLogicalInfoActive()` is `wal_level >= WAL_LEVEL_LOGICAL`; `RelationNeedsWAL`
+/// reads `rd_createSubid`/`rd_firstRelfilelocatorSubid` (not on the trimmed
+/// `RelationData`) plus the `wal_level` GUC, so it is the relcache owner's seam;
+/// `IsCatalogRelation` is the catalog owner's. All three short-circuit, so the
+/// in-hand `Relation` carries everything the predicate needs.
+pub fn relation_is_logically_logged(rel: &Relation<'_>) -> PgResult<bool> {
+    const RELKIND_FOREIGN_TABLE: u8 = b'f';
+    Ok(backend_access_transam_xlog_seams::xlog_logical_info_active::call()
+        && backend_utils_cache_relcache_seams::relation_needs_wal::call(rel)
+        && rel.rd_rel.relkind != RELKIND_FOREIGN_TABLE
+        && !backend_catalog_catalog_seams::is_catalog_relation::call(rel))
+}
+
 pub fn check_table_not_in_use(rel: &Relation<'_>, stmt: &str) -> PgResult<()> {
     let expected_refcnt = if seam::relation_is_nailed::call(rel)? { 2 } else { 1 };
     if seam::relation_get_refcount::call(rel)? != expected_refcnt {

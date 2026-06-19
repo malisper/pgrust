@@ -73,6 +73,7 @@ pub fn init_seams() {
     seam::is_system_class_relid::set(smallfns::is_system_class_relid);
     seam::check_table_not_in_use::set(smallfns::check_table_not_in_use);
     seam::relation_is_other_temp::set(smallfns::relation_is_other_temp);
+    seam::relation_is_logically_logged::set(smallfns::relation_is_logically_logged);
     seam::set_relation_has_subclass::set(smallfns::set_relation_has_subclass);
     seam::check_relation_tablespace_move::set(smallfns::check_relation_tablespace_move);
     seam::set_relation_tablespace::set(smallfns::set_relation_tablespace);

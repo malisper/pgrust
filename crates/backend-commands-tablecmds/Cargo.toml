@@ -42,6 +42,8 @@ backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-utils-cache-inval-seams = { path = "../backend-utils-cache-inval-seams" }
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
+backend-catalog-catalog-seams = { path = "../backend-catalog-catalog-seams" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
 backend-commands-tablespace-seams = { path = "../backend-commands-tablespace-seams" }
 backend-commands-tablespace-globals-seams = { path = "../backend-commands-tablespace-globals-seams" }
