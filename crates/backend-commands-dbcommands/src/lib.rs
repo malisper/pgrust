@@ -538,6 +538,15 @@ pub fn init_seams() {
     inward::RenameDatabase::set(rename_database_seam);
     inward::AlterDatabaseOwner::set(alter_database_owner_seam);
 
+    // ScanSourceDatabasePgClass (dbcommands.c) is the cross-database raw
+    // buffered pg_class scan of the createdb WAL_LOG strategy. The seam is
+    // declared on the storage owner (storage.c's buffer/smgr/snapshot domain)
+    // but its body lives here in dbcommands.c (its true C home). Cross-crate
+    // install from the consumer that owns the function.
+    backend_catalog_storage_seams::scan_source_database_pg_class::set(
+        heavy::scan_source_database_pg_class,
+    );
+
     // --- ProcessUtility dispatch arms (utility.c database globals) -----------
     backend_tcop_utility_out_seams::createdb::set(createdb_arm);
     backend_tcop_utility_out_seams::alter_database::set(alter_database_arm);

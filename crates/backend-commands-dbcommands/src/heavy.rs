@@ -235,6 +235,255 @@ fn collprovider_name(c: i8) -> &'static str {
 }
 
 // ===========================================================================
+// ScanSourceDatabasePgClass — C 250-470 (dbcommands.c)
+// ===========================================================================
+
+/// `RELKIND_HAS_STORAGE(relkind)` (pg_class.h) — relkinds that have physical
+/// storage (table / index / sequence / TOAST value / materialized view).
+fn relkind_has_storage(relkind: u8) -> bool {
+    use types_tuple::access::{
+        RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_RELATION, RELKIND_SEQUENCE, RELKIND_TOASTVALUE,
+    };
+    relkind == RELKIND_RELATION
+        || relkind == RELKIND_INDEX
+        || relkind == RELKIND_SEQUENCE
+        || relkind == RELKIND_TOASTVALUE
+        || relkind == RELKIND_MATVIEW
+}
+
+/// `ScanSourceDatabasePgClassTuple(tuple, tbid, dbid, srcpath)` (dbcommands.c):
+/// decide whether a `pg_class` tuple represents something that needs copying
+/// and, if so, build a [`CreateDBRelInfo`]. Visibility was already checked by
+/// the caller. `userdata` is the tuple's user-data area (the GETSTRUCT view of
+/// `FormData_pg_class`).
+///
+/// The fixed columns this reads are all in the non-null fixed-width prefix of
+/// pg_class, so the C `GETSTRUCT` struct overlay is exact: `oid` @0,
+/// `relfilenode` @88, `reltablespace` @92, `relkind` @119, `relpersistence`
+/// @118 (every preceding column is a 4-byte Oid/int32/float4 or the 64-byte
+/// NameData `relname`, none nullable).
+fn scan_source_database_pg_class_tuple(
+    userdata: &[u8],
+    tbid: Oid,
+    dbid: Oid,
+    srcpath: &str,
+) -> PgResult<Option<storage::CreateDBRelInfo>> {
+    use types_tuple::access::{RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP};
+    // GETSTRUCT field readers over the fixed FormData_pg_class prefix.
+    let oid_at = |o: usize| -> PgResult<Oid> {
+        userdata
+            .get(o..o + 4)
+            .map(|b| Oid::from_ne_bytes([b[0], b[1], b[2], b[3]]))
+            .ok_or_else(|| {
+                types_error::PgError::error("pg_class tuple shorter than FormData_pg_class prefix")
+            })
+    };
+    let char_at = |o: usize| -> PgResult<u8> {
+        userdata.get(o).copied().ok_or_else(|| {
+            types_error::PgError::error("pg_class tuple shorter than FormData_pg_class prefix")
+        })
+    };
+
+    let class_oid = oid_at(0)?;
+    let relfilenode = oid_at(88)?;
+    let reltablespace = oid_at(92)?;
+    let relpersistence = char_at(118)?;
+    let relkind = char_at(119)?;
+
+    // Return None if this object does not need to be copied: shared objects
+    // (GLOBALTABLESPACE_OID), objects without storage, and temporary relations.
+    if reltablespace == GLOBALTABLESPACE_OID
+        || !relkind_has_storage(relkind)
+        || relpersistence == RELPERSISTENCE_TEMP
+    {
+        return Ok(None);
+    }
+
+    // If relfilenumber is valid then directly use it. Otherwise consult the
+    // relmap (mapped catalogs have relfilenode == 0).
+    let relfilenumber = if OidIsValid(relfilenode) {
+        relfilenode
+    } else {
+        backend_utils_cache_relmapper::RelationMapOidToFilenumberForDatabase(srcpath, class_oid)?
+    };
+
+    // We must have a valid relfilenumber.
+    if !OidIsValid(relfilenumber) {
+        return Err(types_error::PgError::error(format!(
+            "relation with OID {class_oid} does not have a valid relfilenumber"
+        )));
+    }
+
+    // Prepare a rel info element.
+    let spc_oid = if OidIsValid(reltablespace) {
+        reltablespace
+    } else {
+        tbid
+    };
+    Ok(Some(storage::CreateDBRelInfo {
+        rlocator: RelFileLocator {
+            spcOid: spc_oid,
+            dbOid: dbid,
+            relNumber: relfilenumber,
+        },
+        reloid: class_oid,
+        // Temporary relations were rejected above.
+        permanent: relpersistence == RELPERSISTENCE_PERMANENT,
+    }))
+}
+
+/// `ScanSourceDatabasePgClass(tbid, dbid, srcpath)` (dbcommands.c): the
+/// cross-database raw buffered scan of the source database's `pg_class`
+/// relation. We can't rely on the relcache (it only knows the connected
+/// database) or the heap-scan infrastructure (it might do HOT pruning, unsafe
+/// in a database we're not connected to), so this reads `pg_class` block by
+/// block through the buffer manager and walks each page's line pointers,
+/// gating on `HeapTupleSatisfiesVisibility`.
+pub(crate) fn scan_source_database_pg_class<'mcx>(
+    mcx: Mcx<'mcx>,
+    tbid: Oid,
+    dbid: Oid,
+    srcpath: &str,
+) -> PgResult<mcx::PgVec<'mcx, storage::CreateDBRelInfo>> {
+    use backend_storage_buffer_bufmgr_seams as bufmgr;
+    use backend_storage_page::{
+        ItemIdGetLength, ItemIdIsDead, ItemIdIsRedirected, ItemIdIsUsed, PageGetItem, PageGetItemId,
+        PageGetMaxOffsetNumber, PageIsEmpty, PageIsNew, PageRef,
+    };
+    use types_storage::buf::BUFFER_LOCK_SHARE;
+    use types_tuple::backend_access_common_heaptuple::FormedTuple;
+    use types_tuple::heaptuple::FIRST_OFFSET_NUMBER;
+
+    let pg_class_oid = types_core::catalog::RELATION_RELATION_ID;
+
+    // Get pg_class relfilenumber.
+    let relfilenumber =
+        backend_utils_cache_relmapper::RelationMapOidToFilenumberForDatabase(srcpath, pg_class_oid)?;
+
+    // Don't read data into shared_buffers without holding a relation lock.
+    let relid = LockRelId {
+        relId: pg_class_oid,
+        dbId: dbid,
+    };
+    backend_storage_lmgr_lmgr::LockRelationId(&relid, AccessShareLock)?;
+
+    // Prepare a RelFileLocator for the pg_class relation.
+    let rlocator = RelFileLocator {
+        spcOid: tbid,
+        dbOid: dbid,
+        relNumber: relfilenumber,
+    };
+
+    // smgr = smgropen(rlocator, INVALID_PROC_NUMBER); nblocks = smgrnblocks(smgr,
+    // MAIN_FORKNUM); smgrclose(smgr). pg_class is a permanent catalog.
+    let nblocks = backend_storage_smgr_seams::smgrnblocks::call(
+        rlocator,
+        types_core::primitive::INVALID_PROC_NUMBER,
+        types_core::primitive::ForkNumber::MAIN_FORKNUM,
+    )?;
+
+    // We need a snapshot that will see all committed transactions as committed;
+    // GetLatestSnapshot() works fine.
+    let snapshot = backend_utils_time_snapmgr::RegisterSnapshot(Some(
+        &backend_utils_time_snapmgr::GetLatestSnapshot()?,
+    ));
+
+    let mut rlocatorlist: mcx::PgVec<'mcx, storage::CreateDBRelInfo> = mcx::PgVec::new_in(mcx);
+
+    // Process the relation block by block.
+    for blkno in 0..nblocks {
+        backend_tcop_postgres_seams::check_for_interrupts::call()?;
+
+        // buf = ReadBufferWithoutRelcache(rlocator, MAIN_FORKNUM, blkno,
+        //   RBM_NORMAL, bstrategy, permanent=true).
+        let buf = bufmgr::read_buffer_without_relcache::call(
+            rlocator,
+            types_core::primitive::ForkNumber::MAIN_FORKNUM,
+            blkno,
+            types_storage::storage::ReadBufferMode::Normal,
+            true,
+            true,
+        )?;
+
+        bufmgr::lock_buffer::call(buf, BUFFER_LOCK_SHARE)?;
+
+        // Walk the page's line pointers under the share lock, collecting the
+        // visible pg_class tuples that need copying.
+        let mut page_relinfos: Vec<storage::CreateDBRelInfo> = Vec::new();
+        bufmgr::with_buffer_page::call(buf, &mut |page_bytes| {
+            let page = PageRef::new(page_bytes)?;
+            if PageIsNew(&page) || PageIsEmpty(&page) {
+                return Ok(());
+            }
+
+            let maxoff = PageGetMaxOffsetNumber(&page);
+            let mut offnum = FIRST_OFFSET_NUMBER;
+            while offnum <= maxoff {
+                let itemid = PageGetItemId(&page, offnum)?;
+
+                // Nothing to do if the slot is empty or already dead.
+                if !ItemIdIsUsed(&itemid) || ItemIdIsDead(&itemid) || ItemIdIsRedirected(&itemid) {
+                    offnum += 1;
+                    continue;
+                }
+
+                // Materialize the on-page tuple (header + user-data area).
+                let item = PageGetItem(&page, &itemid)?;
+                let len = ItemIdGetLength(&itemid) as usize;
+                let formed = FormedTuple::read_on_page_full(
+                    mcx,
+                    &item[..len],
+                    blkno,
+                    offnum,
+                    pg_class_oid,
+                )?;
+
+                // Skip tuples that are not visible to this snapshot.
+                let visible = match &snapshot {
+                    Some(snap) => {
+                        let mut tuple = formed.tuple.clone_in(mcx)?;
+                        backend_access_heap_heapam_visibility::HeapTupleSatisfiesVisibility(
+                            &mut tuple,
+                            &mut snap.borrow_mut(),
+                            buf,
+                        )?
+                    }
+                    None => false,
+                };
+
+                if visible {
+                    if let Some(relinfo) = scan_source_database_pg_class_tuple(
+                        formed.data.as_slice(),
+                        tbid,
+                        dbid,
+                        srcpath,
+                    )? {
+                        page_relinfos.push(relinfo);
+                    }
+                }
+
+                offnum += 1;
+            }
+            Ok(())
+        })?;
+
+        for relinfo in page_relinfos {
+            rlocatorlist.push(relinfo);
+        }
+
+        // UnlockReleaseBuffer(buf).
+        bufmgr::unlock_release_buffer::call(buf);
+    }
+
+    backend_utils_time_snapmgr::UnregisterSnapshot(snapshot.as_ref())?;
+
+    // Release relation lock.
+    backend_storage_lmgr_lmgr::UnlockRelationId(&relid, AccessShareLock)?;
+
+    Ok(rlocatorlist)
+}
+
+// ===========================================================================
 // CreateDatabaseUsingWalLog — C 147-226
 // ===========================================================================
 

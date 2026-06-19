@@ -1244,6 +1244,113 @@ impl BufferManager {
         }
         Ok(did_start_io)
     }
+
+    /// `RelationCopyStorageUsingBuffer(srclocator, dstlocator, forkNum,
+    /// permanent)` (bufmgr.c:5126) — copy one fork's data using the buffer
+    /// manager. Same as `RelationCopyStorage` but uses the bufmgr read/extend
+    /// APIs instead of raw `smgrread`/`smgrextend`.
+    ///
+    /// The C uses a `ReadStream` over the source for prefetch; this model has
+    /// no read-stream, so the source blocks are read directly with
+    /// `ReadBufferWithoutRelcache` in the per-block loop (behaviour-identical:
+    /// the read stream only affects prefetch scheduling, not the bytes copied),
+    /// exactly as `src-idiomatic`'s proven port collapses it.
+    pub fn RelationCopyStorageUsingBuffer(
+        &self,
+        srclocator: RelFileLocator,
+        dstlocator: RelFileLocator,
+        fork_num: ForkNumber,
+        permanent: bool,
+    ) -> PgResult<()> {
+        use types_storage::buf::BUFFER_LOCK_SHARE;
+
+        // In general, we want to write WAL whenever wal_level > 'minimal', but
+        // we can skip it when copying any fork of an unlogged relation other
+        // than the init fork.
+        let use_wal = backend_access_transam_xlog_seams::wal_level::call()
+            >= types_wal::xlog_consts::WAL_LEVEL_REPLICA
+            && (permanent || fork_num == ForkNumber::INIT_FORKNUM);
+
+        // Get number of blocks in the source relation.
+        let src_key = RelFileLocatorBackend {
+            locator: srclocator,
+            backend: INVALID_PROC_NUMBER,
+        };
+        let nblocks = smgr::smgrnblocks(src_key, fork_num)?;
+
+        // Nothing to copy; just return.
+        if nblocks == 0 {
+            return Ok(());
+        }
+
+        // Bulk extend the destination relation to the same size as the source
+        // relation before starting to copy block by block. memset(buf.data, 0,
+        // BLCKSZ); smgrextend(smgropen(dstlocator), forkNum, nblocks - 1, buf,
+        // true).
+        let dst_key = RelFileLocatorBackend {
+            locator: dstlocator,
+            backend: INVALID_PROC_NUMBER,
+        };
+        let zero_page = [0u8; BLCKSZ as usize];
+        smgr::smgrextend(dst_key, fork_num, nblocks - 1, &zero_page, true)?;
+
+        // This is a bulk operation, so use buffer access strategies. In this
+        // model the strategy ring is collapsed to a `has_strategy` bool, so both
+        // the bulk-read (source) and bulk-write (destination) sides pass `true`.
+        // Iterate over each block of the source relation file.
+        for blkno in 0..nblocks {
+            // CHECK_FOR_INTERRUPTS().
+            backend_tcop_postgres_seams::check_for_interrupts::call()?;
+
+            // Read block from source relation (C: read_stream_next_buffer).
+            let src_buf = self.ReadBufferWithoutRelcache(
+                srclocator,
+                permanent,
+                fork_num,
+                blkno,
+                ReadBufferMode::Normal,
+                true,
+            )?;
+            self.LockBuffer(src_buf, BUFFER_LOCK_SHARE)?;
+
+            // dstBuf = ReadBufferWithoutRelcache(dstlocator, forkNum, blkno,
+            //   RBM_ZERO_AND_LOCK, bstrategy_dst, permanent).
+            let dst_buf = self.ReadBufferWithoutRelcache(
+                dstlocator,
+                permanent,
+                fork_num,
+                blkno,
+                ReadBufferMode::ZeroAndLock,
+                true,
+            )?;
+
+            // START_CRIT_SECTION().
+            // Copy page data from the source to the destination
+            // (memcpy(dstPage, srcPage, BLCKSZ)) and mark the destination dirty.
+            let mut page_image = [0u8; BLCKSZ as usize];
+            self.with_page_bytes(src_buf, |src| {
+                page_image.copy_from_slice(&src[..BLCKSZ as usize]);
+            })?;
+            self.with_page_bytes_mut(dst_buf, &mut |dst| {
+                dst[..BLCKSZ as usize].copy_from_slice(&page_image);
+                Ok(())
+            })?;
+            self.MarkBufferDirty(dst_buf)?;
+
+            // WAL-log the copied page.
+            if use_wal {
+                backend_access_transam_xloginsert_seams::log_newpage_buffer::call(
+                    dst_buf, true,
+                )?;
+            }
+            // END_CRIT_SECTION().
+
+            self.UnlockReleaseBuffer(dst_buf)?;
+            self.UnlockReleaseBuffer(src_buf)?;
+        }
+
+        Ok(())
+    }
 }
 
 /// An opaque, owned handle to an in-flight read operation, returned by

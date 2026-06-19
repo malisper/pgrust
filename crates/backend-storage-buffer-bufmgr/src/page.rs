@@ -27,7 +27,7 @@ impl BufferManager {
     /// `Copy`-ish value `R` — for the local arm we take an owned snapshot of the
     /// page (no shared state to alias) and run `f` over it. The caller holds the
     /// pin / content lock exactly as C's `BufferGetPage(buffer)` requires.
-    fn with_page_bytes<R>(
+    pub(crate) fn with_page_bytes<R>(
         &self,
         buffer: Buffer,
         f: impl FnOnce(&[u8]) -> R,
@@ -56,7 +56,7 @@ impl BufferManager {
     /// the buffer's live `BLCKSZ` page bytes for mutation, routing a local
     /// buffer to its backend-local page. The caller holds the exclusive content
     /// lock (a no-op for local buffers). `f`'s `Err` propagates.
-    fn with_page_bytes_mut(
+    pub(crate) fn with_page_bytes_mut(
         &self,
         buffer: Buffer,
         f: &mut dyn FnMut(&mut [u8]) -> PgResult<()>,

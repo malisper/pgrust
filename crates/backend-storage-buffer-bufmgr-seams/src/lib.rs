@@ -210,6 +210,42 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ReadBufferWithoutRelcache(rlocator, forkNum, blockNum, mode, strategy,
+    /// permanent)` (bufmgr.c:842) — read/pin a block for a relation identified
+    /// only by its `RelFileLocator` (no relcache entry). Used by the
+    /// cross-database `pg_class` scan of `createdb` (dbcommands.c), which can't
+    /// rely on the relcache (it only knows the connected database). The buffer
+    /// access strategy is collapsed to the `has_strategy` bool the buffer
+    /// manager already models. `Err` carries the smgr read `ereport(ERROR)`s.
+    pub fn read_buffer_without_relcache(
+        rlocator: types_storage::RelFileLocator,
+        forknum: types_core::primitive::ForkNumber,
+        blocknum: types_core::primitive::BlockNumber,
+        mode: types_storage::storage::ReadBufferMode,
+        has_strategy: bool,
+        permanent: bool,
+    ) -> types_error::PgResult<types_storage::storage::Buffer>
+);
+
+seam_core::seam!(
+    /// `RelationCopyStorageUsingBuffer(srclocator, dstlocator, forkNum,
+    /// permanent)` (bufmgr.c:5126) — copy one fork's data, block by block,
+    /// from the source relation file to the destination using the buffer
+    /// manager (rather than raw smgrread/smgrextend), WAL-logging each copied
+    /// page when `XLogIsNeeded() && (permanent || forkNum == INIT_FORKNUM)`.
+    /// The whole buffered bulk-copy engine (smgr extend + per-block
+    /// `ReadBufferWithoutRelcache` / `log_newpage_buffer`) is the buffer
+    /// manager's, so it lives behind this seam. `Err` carries the storage / WAL
+    /// `ereport(ERROR)`s.
+    pub fn relation_copy_storage_using_buffer(
+        srclocator: types_storage::RelFileLocator,
+        dstlocator: types_storage::RelFileLocator,
+        forknum: types_core::primitive::ForkNumber,
+        permanent: bool,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `PageIsNew(BufferGetPage(buffer))` (bufpage.h) — whether the buffer's
     /// page is all-zeroes (`pd_upper == 0`).
     pub fn page_is_new(buffer: types_storage::Buffer) -> types_error::PgResult<bool>

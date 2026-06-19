@@ -1720,20 +1720,16 @@ mod recurrence_guard {
         // Loud-panics until the pg_database owner wires the aclitem[] varlena
         // decode/encode around `aclnewowner`. DELETE this entry then.
         ("backend_catalog_pg_database", "aclnewowner_datacl"),
-        // DESIGN_DEBT (TD-STORAGE-DBCOPY-ENGINE): `create_and_copy_relation_data`
-        // and `scan_source_database_pg_class` (declared in
-        // `backend-catalog-storage-seams`) are the createdb WAL_LOG copy engine.
-        // `create_and_copy_relation_data` is storage.c's
-        // `RelationCreateStorage` + per-fork `RelationCopyStorageUsingBuffer` +
-        // `smgrimmedsync`; `RelationCopyStorageUsingBuffer` is NOT ported anywhere
-        // in this model. `scan_source_database_pg_class` is dbcommands.c's
-        // cross-database raw buffered `pg_class` scan (smgr/`GetAccessStrategy`/
-        // `RegisterSnapshot`/`ReadBufferWithoutRelcache`/page-item walk gated by
-        // `HeapTupleSatisfiesVisibility`), whose buffered-bulk-read engine the
-        // storage owner does not yet reach. Both loud-panic until the buffered
-        // storage-copy + cross-DB raw-scan engine lands. DELETE these entries then.
-        ("backend_catalog_storage", "create_and_copy_relation_data"),
-        ("backend_catalog_storage", "scan_source_database_pg_class"),
+        // (TD-STORAGE-DBCOPY-ENGINE RETIRED: the createdb WAL_LOG copy engine is
+        // now ported. `create_and_copy_relation_data` (CreateAndCopyRelationData,
+        // bufmgr.c) is installed by its `backend-catalog-storage` owner over
+        // RelationCreateStorage/log_smgrcreate + the new buffer-manager seam
+        // `relation_copy_storage_using_buffer` (RelationCopyStorageUsingBuffer,
+        // bufmgr.c). `scan_source_database_pg_class` (ScanSourceDatabasePgClass,
+        // dbcommands.c) is installed cross-crate from `backend-commands-dbcommands`
+        // — its true C home — over the new bufmgr `read_buffer_without_relcache`
+        // seam + the page-item walk gated by `HeapTupleSatisfiesVisibility`. Both
+        // reach real bodies.)
         // DESIGN_DEBT (TD-JSONFUNCS-FMGR-ARG-DETOAST): jsonfuncs.c's SQL entry
         // points (`json[b]_object_keys`/`_each`/`_array_elements`/`populate_*`/
         // `to_record(set)`) read a `json`/`jsonb` varlena argument and (for

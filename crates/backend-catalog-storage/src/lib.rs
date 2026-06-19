@@ -328,6 +328,87 @@ pub fn log_smgrcreate(rlocator: RelFileLocator, fork_num: ForkNumber) -> PgResul
 }
 
 /* ---------------------------------------------------------------------------
+ * CreateAndCopyRelationData (bufmgr.c:5240)
+ * ------------------------------------------------------------------------- */
+
+/// `CreateAndCopyRelationData(src_rlocator, dst_rlocator, permanent)`
+/// (bufmgr.c:5240) — create destination relation storage and copy all forks
+/// from the source relation to the destination. Pass `permanent` true for
+/// permanent relations and false for unlogged relations (temporary relations
+/// are not supported here). Reached by the createdb WAL_LOG strategy
+/// (`CreateDatabaseUsingWalLog`, dbcommands.c) through the
+/// `create_and_copy_relation_data` seam this crate installs.
+///
+/// `RelationCreateStorage` and `log_smgrcreate` are this crate's; the per-fork
+/// block-by-block buffered copy (`RelationCopyStorageUsingBuffer`) is the
+/// buffer manager's, reached through its `relation_copy_storage_using_buffer`
+/// seam.
+pub fn create_and_copy_relation_data(
+    src_rlocator: RelFileLocator,
+    dst_rlocator: RelFileLocator,
+    permanent: bool,
+) -> PgResult<()> {
+    // relpersistence = permanent ? RELPERSISTENCE_PERMANENT :
+    //   RELPERSISTENCE_UNLOGGED;
+    let relpersistence = if permanent {
+        RELPERSISTENCE_PERMANENT
+    } else {
+        RELPERSISTENCE_UNLOGGED
+    };
+
+    // src_rel = smgropen(src_rlocator, INVALID_PROC_NUMBER);
+    // dst_rel = smgropen(dst_rlocator, INVALID_PROC_NUMBER);
+    let src_key = RelFileLocatorBackend {
+        locator: src_rlocator,
+        backend: INVALID_PROC_NUMBER,
+    };
+    let dst_key = RelFileLocatorBackend {
+        locator: dst_rlocator,
+        backend: INVALID_PROC_NUMBER,
+    };
+    smgr::smgropen(src_rlocator, INVALID_PROC_NUMBER)?;
+    smgr::smgropen(dst_rlocator, INVALID_PROC_NUMBER)?;
+
+    // Create and copy all forks of the relation. During create database we
+    // have a separate cleanup mechanism which deletes the complete database
+    // directory; therefore each individual relation doesn't need to be
+    // registered for cleanup (register_delete = false).
+    RelationCreateStorage(dst_rlocator, relpersistence, false)?;
+
+    // copy main fork.
+    backend_storage_buffer_bufmgr_seams::relation_copy_storage_using_buffer::call(
+        src_rlocator,
+        dst_rlocator,
+        MAIN_FORKNUM,
+        permanent,
+    )?;
+
+    // copy those extra forks that exist
+    // (for forkNum = MAIN_FORKNUM + 1; forkNum <= MAX_FORKNUM; forkNum++).
+    for fork_num in [FSM_FORKNUM, VISIBILITYMAP_FORKNUM, INIT_FORKNUM] {
+        if smgr::smgrexists(src_key, fork_num)? {
+            smgr::smgrcreate(dst_key, fork_num, false)?;
+
+            // WAL log creation if the relation is persistent, or this is the
+            // init fork of an unlogged relation.
+            if permanent || fork_num == INIT_FORKNUM {
+                log_smgrcreate(dst_rlocator, fork_num)?;
+            }
+
+            // Copy a fork's data, block by block.
+            backend_storage_buffer_bufmgr_seams::relation_copy_storage_using_buffer::call(
+                src_rlocator,
+                dst_rlocator,
+                fork_num,
+                permanent,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+/* ---------------------------------------------------------------------------
  * RelationDropStorage (storage.c:207)
  * ------------------------------------------------------------------------- */
 
@@ -1257,6 +1338,7 @@ pub fn update_pg_class_relfilenumber(
 /// Install every seam this unit owns.
 pub fn init_seams() {
     storage_seam::smgr_redo::set(smgr_redo);
+    storage_seam::create_and_copy_relation_data::set(create_and_copy_relation_data);
     storage_seam::rel_file_locator_skipping_wal::set(rel_file_locator_skipping_wal);
     storage_seam::smgr_do_pending_syncs::set(smgr_do_pending_syncs);
     storage_seam::smgr_do_pending_deletes::set(smgr_do_pending_deletes);

@@ -383,6 +383,38 @@ fn read_buffer_extended<'mcx>(
     )
 }
 
+/// `ReadBufferWithoutRelcache(rlocator, forkNum, blockNum, mode, strategy,
+/// permanent)` installed seam (bufmgr.c) — read a block for a relation
+/// identified only by its `RelFileLocator`. The createdb cross-database scan
+/// reaches this.
+fn read_buffer_without_relcache(
+    rlocator: types_storage::RelFileLocator,
+    forknum: types_core::primitive::ForkNumber,
+    blocknum: types_core::primitive::BlockNumber,
+    mode: types_storage::storage::ReadBufferMode,
+    has_strategy: bool,
+    permanent: bool,
+) -> types_error::PgResult<Buffer> {
+    let _ = has_strategy;
+    BufferManager::global_expect().ReadBufferWithoutRelcache(
+        rlocator, permanent, forknum, blocknum, mode, has_strategy,
+    )
+}
+
+/// `RelationCopyStorageUsingBuffer(srclocator, dstlocator, forkNum, permanent)`
+/// installed seam (bufmgr.c) — the buffered per-fork copy engine of
+/// `CreateAndCopyRelationData` (createdb WAL_LOG strategy).
+fn relation_copy_storage_using_buffer(
+    srclocator: types_storage::RelFileLocator,
+    dstlocator: types_storage::RelFileLocator,
+    forknum: types_core::primitive::ForkNumber,
+    permanent: bool,
+) -> types_error::PgResult<()> {
+    BufferManager::global_expect().RelationCopyStorageUsingBuffer(
+        srclocator, dstlocator, forknum, permanent,
+    )
+}
+
 /// `ReadBufferExtended(rel, MAIN_FORKNUM, blkno, mode, strategy)` (bufmgr.c) —
 /// the runtime-mode form for hio.c's `ReadBufferBI`.
 fn read_buffer_extended_mode<'mcx>(
@@ -739,6 +771,12 @@ pub fn init_seams() {
     backend_storage_buffer_bufmgr_seams::read_buffer_extended_vm::set(read_buffer_extended_vm);
     backend_storage_buffer_bufmgr_seams::prefetch_shared_buffer::set(prefetch_shared_buffer);
     backend_storage_buffer_bufmgr_seams::xlog_read_buffer_extended::set(xlog_read_buffer_extended);
+    backend_storage_buffer_bufmgr_seams::read_buffer_without_relcache::set(
+        read_buffer_without_relcache,
+    );
+    backend_storage_buffer_bufmgr_seams::relation_copy_storage_using_buffer::set(
+        relation_copy_storage_using_buffer,
+    );
     // F5: flush / drop entry points (the in-crate write core + relation/db drop
     // + flush sweeps; the disk write rides the landed smgr).
     backend_storage_buffer_bufmgr_seams::flush_one_buffer::set(flush_one_buffer);

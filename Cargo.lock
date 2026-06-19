@@ -5906,6 +5906,7 @@ dependencies = [
  "backend-catalog-indexing-seams",
  "backend-catalog-storage-seams",
  "backend-common-relpath",
+ "backend-storage-buffer-bufmgr-seams",
  "backend-storage-freespace",
  "backend-storage-lmgr-proc-seams",
  "backend-storage-page",
@@ -6700,6 +6701,7 @@ dependencies = [
 name = "backend-commands-dbcommands"
 version = "0.0.0"
 dependencies = [
+ "backend-access-heap-heapam-visibility",
  "backend-access-heap-vacuumlazy-seams",
  "backend-access-table-table",
  "backend-access-transam-xact",
@@ -6737,7 +6739,10 @@ dependencies = [
  "backend-storage-ipc-standby-seams",
  "backend-storage-lmgr-lmgr",
  "backend-storage-lmgr-lmgr-seams",
+ "backend-storage-page",
  "backend-storage-smgr-md",
+ "backend-storage-smgr-seams",
+ "backend-tcop-postgres-seams",
  "backend-tcop-utility-out-seams",
  "backend-utils-activity-pgstat-seams",
  "backend-utils-adt-acl",
@@ -16150,6 +16155,7 @@ dependencies = [
  "types-storage",
  "types-tuple",
  "types-vacuum",
+ "types-wal",
 ]
 
 [[package]]

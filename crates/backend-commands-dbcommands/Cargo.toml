@@ -68,6 +68,14 @@ backend-utils-adt-acl = { path = "../backend-utils-adt-acl" }
 backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
 backend-access-transam-xact = { path = "../backend-access-transam-xact" }
 backend-utils-time-snapmgr = { path = "../backend-utils-time-snapmgr" }
+# ScanSourceDatabasePgClass's cross-database raw buffered pg_class scan: the
+# smgr block count (smgr-seams), the per-block buffer read/lock/page-walk
+# (bufmgr-seams + storage-page), and the tuple-visibility gate (heapam-visibility).
+backend-storage-smgr-seams = { path = "../backend-storage-smgr-seams" }
+backend-storage-page = { path = "../backend-storage-page" }
+backend-access-heap-heapam-visibility = { path = "../backend-access-heap-heapam-visibility" }
+# CHECK_FOR_INTERRUPTS() inside the per-block source-pg_class scan loop.
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 backend-access-transam-xloginsert = { path = "../backend-access-transam-xloginsert" }
 backend-access-transam-xlog = { path = "../backend-access-transam-xlog" }
 backend-postmaster-checkpointer = { path = "../backend-postmaster-checkpointer" }

@@ -27,6 +27,9 @@ backend-catalog-storage-seams = { path = "../backend-catalog-storage-seams" }
 
 # Cycle-safe direct deps (real fns).
 backend-storage-smgr-smgr = { path = "../backend-storage-smgr-smgr" }
+# CreateAndCopyRelationData's per-fork buffered copy
+# (RelationCopyStorageUsingBuffer) is the buffer manager's; reached via its seam.
+backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
 backend-access-transam-xloginsert = { path = "../backend-access-transam-xloginsert" }
 backend-access-transam-xlogutils = { path = "../backend-access-transam-xlogutils" }
 backend-storage-freespace = { path = "../backend-storage-freespace" }
