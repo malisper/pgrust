@@ -276,6 +276,19 @@ pub struct TableAmRoutine {
         bistate: Option<&mut BulkInsertStateData>,
     ) -> PgResult<()>,
 
+    /// `multi_insert(rel, slots, nslots, cid, options, bistate)`. The owned
+    /// model takes the already-fetched per-slot heap tuples as the batch
+    /// (`heap_multi_insert` does its own toasting/header stamping); on return the
+    /// caller copies each `t_self` back into the originating slot's `tts_tid`.
+    pub multi_insert: for<'mcx> fn(
+        mcx: Mcx<'mcx>,
+        rel: &Relation<'mcx>,
+        slots: &mut [&mut SlotData<'mcx>],
+        cid: CommandId,
+        options: i32,
+        bistate: Option<&mut BulkInsertStateData>,
+    ) -> PgResult<()>,
+
     /// `tuple_delete(mcx, rel, tid, cid, snapshot, crosscheck, wait, tmfd,
     /// changingPart)`. The leading `mcx` (convention A) is the arena the AM
     /// works in (`heap_delete`).

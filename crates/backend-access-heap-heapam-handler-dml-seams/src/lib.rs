@@ -61,6 +61,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `heapam_multi_insert(rel, slots, nslots, cid, options, bistate)`
+    /// (heapam_handler.c): fetch each slot's heap tuple
+    /// (`ExecFetchSlotHeapTuple`), stamp `tts_tableOid`/`t_tableOid`,
+    /// `heap_multi_insert(...)`, copy each `t_self` back into the originating
+    /// slot's `tts_tid`. Owned by `backend-access-heap-heapam-handler-dml`.
+    pub fn heapam_multi_insert<'mcx>(
+        mcx: Mcx<'mcx>,
+        rel: &Relation<'mcx>,
+        slots: &mut [&mut SlotData<'mcx>],
+        cid: CommandId,
+        options: i32,
+        bistate: Option<&mut BulkInsertStateData>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `heapam_tuple_delete(rel, tid, cid, snapshot, crosscheck, wait, tmfd,
     /// changingPart)` (heapam_handler.c): forwards to `heap_delete`. Owned by
     /// `backend-access-heap-heapam-handler-dml`.

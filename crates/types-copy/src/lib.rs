@@ -24,7 +24,7 @@
 
 use mcx::{PgBox, PgString, PgVec};
 use types_core::primitive::{AttrNumber, Oid};
-use types_datum::datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum as TupleDatum;
 use types_error::SoftErrorContext;
 use types_fmgr::FmgrInfo;
 use types_nodes::execexpr::ExprState;
@@ -446,10 +446,16 @@ pub struct AttrInfo {
 /// A single physical-attribute value produced by the per-row callback: the
 /// `Datum` and its null flag, the idiomatic pair for the C `values[m]` /
 /// `nulls[m]` cells.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AttrValue {
+///
+/// The datum is the canonical rich [`types_tuple` `Datum`](TupleDatum) so a
+/// pass-by-reference value (a `text`/varlena input result) is carried verbatim
+/// across the parser→driver boundary (its `ByRef`/`Cstring` arm), matching the
+/// `tts_values` element the driver stores it into. `Clone`/`PartialEq` but not
+/// `Copy`/`Eq` (the rich `Datum` has by-ref/expanded arms that own bytes).
+#[derive(Clone, Debug, PartialEq)]
+pub struct AttrValue<'mcx> {
     /// `values[m]`.
-    pub datum: Datum,
+    pub datum: TupleDatum<'mcx>,
     /// `nulls[m]`.
     pub isnull: bool,
 }

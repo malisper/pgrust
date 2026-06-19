@@ -1,0 +1,163 @@
+//! Seam installation for `backend-commands-copyfrom` (the COPY FROM driver).
+//!
+//! This crate owns `copyfrom.c`; the parser (`copyfromparse.c`,
+//! `backend-commands-copyfromparse`) reaches the cross-subsystem boundary
+//! points (data-source reads, the fmgr value layer, encoding verify/convert,
+//! pgstat progress, the libpq frontend) through the seams declared in
+//! `backend-commands-copyfrom-seams`. The driver — which holds the per-query
+//! `Mcx`, the resolved `FmgrInfo`s, the `EState` and the open data source —
+//! installs every one of them here.
+//!
+//! Seams that reach genuinely-unwired machinery (binary receive, encoding
+//! transcoding, the frontend `CopyInResponse`, default-expression evaluation)
+//! install a body that raises a clear `ereport(ERROR)` rather than the latent
+//! panic; the no-transcoding text path the driver exercises end-to-end never
+//! reaches them.
+
+use mcx::Mcx;
+use types_copy::{
+    AttrInfo, AttrValue, CopyGetDataResult, CopyParseState, EncodingConversionResult,
+};
+use types_core::primitive::Oid;
+use types_tuple::backend_access_common_heaptuple::Datum as RichDatum;
+use types_error::{PgError, PgResult};
+use types_rel::Relation;
+
+use backend_commands_copyfrom_seams as s;
+
+fn unsupported(msg: &str) -> PgError {
+    PgError::error(msg.to_string())
+        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+}
+
+/// `pg_encoding_max_length(encoding)` — the longest valid multibyte sequence
+/// for `encoding` (mb/wchar.c `pg_wchar_table[encoding].maxmblen`). Inlined for
+/// the encodings COPY FROM supports on the no-transcoding path; an unknown
+/// encoding falls back to the conservative `MAX_CONVERSION_INPUT_LENGTH` (4).
+fn pg_encoding_max_length(encoding: i32) -> i32 {
+    const PG_SQL_ASCII: i32 = 0;
+    const PG_UTF8: i32 = 6;
+    match encoding {
+        PG_SQL_ASCII => 1,
+        PG_UTF8 => 4,
+        // LATIN1..LATIN10 (8..17) and the other single-byte server encodings are
+        // 1; anything else we don't transcode, so the conservative max is fine.
+        8..=17 => 1,
+        _ => 4,
+    }
+}
+
+/// Install every `backend-commands-copyfrom-seams` seam.
+pub fn init_seams() {
+    // -- data source reads --
+    s::copy_get_data_file::set(|cstate: &CopyParseState<'_>, maxread: i32| {
+        crate::copy_get_data_file_impl(cstate, maxread)
+    });
+    s::copy_get_data_frontend::set(
+        |cstate: &CopyParseState<'_>, _minread: i32, maxread: i32| -> PgResult<CopyGetDataResult> {
+            crate::copy_get_data_frontend_impl(cstate, maxread)
+        },
+    );
+    s::copy_get_data_callback::set(
+        |_cstate: &CopyParseState<'_>, _minread: i32, _maxread: i32| -> PgResult<CopyGetDataResult> {
+            Err(unsupported(
+                "COPY FROM callback (COPY_CALLBACK data_source_cb) is not yet wired",
+            ))
+        },
+    );
+
+    // -- encoding verify / convert (no-transcoding path consults verifymbstr) --
+    s::pg_encoding_verifymbstr::set(|encoding: i32, mbstr: &[u8]| -> i32 {
+        // pg_encoding_verifymbstr returns the number of leading bytes that form
+        // valid characters in `encoding`. We delegate to pg_verifymbstr (whole-
+        // buffer verify) for the supported encodings: a fully-valid buffer
+        // returns its length; otherwise 0 (conservative — the codec then waits
+        // for more bytes / raises).
+        match backend_utils_mb_mbutils_seams::pg_verifymbstr::call(mbstr, true) {
+            Ok(true) => mbstr.len() as i32,
+            _ => 0,
+        }
+    });
+    s::pg_encoding_max_length::set(pg_encoding_max_length);
+    s::pg_do_encoding_conversion_buf::set(
+        |_proc: Oid, _se: i32, _de: i32, _src: &[u8], _cap: i32| -> PgResult<EncodingConversionResult> {
+            Err(unsupported(
+                "COPY FROM encoding conversion (pg_do_encoding_conversion_buf) is not yet wired",
+            ))
+        },
+    );
+    s::report_invalid_encoding::set(|encoding: i32, _mbstr: &[u8]| -> PgResult<()> {
+        Err(PgError::error(format!(
+            "invalid byte sequence for encoding \"{encoding}\""
+        )))
+    });
+    s::pg_verifymbstr::set(|mbstr: &[u8]| -> PgResult<()> {
+        backend_utils_mb_mbutils_seams::pg_verifymbstr::call(mbstr, false).map(|_| ())
+    });
+    s::conversion_error_raise::set(
+        |_proc: Oid, _se: i32, _de: i32, _src: &[u8], _cap: i32| -> PgResult<()> {
+            Err(unsupported(
+                "COPY FROM conversion error reporting is not yet wired",
+            ))
+        },
+    );
+
+    // -- pgstat progress (advisory; no-op) --
+    s::pgstat_progress_update_bytes_processed::set(|_value: i64| -> PgResult<()> { Ok(()) });
+
+    // -- tuple-descriptor / relcache accessors --
+    s::relation_natts::set(|rel: &Relation<'_>| -> PgResult<i32> { Ok(rel.rd_att.natts) });
+    s::attr_info::set(|rel: &Relation<'_>, m: i32| -> PgResult<AttrInfo> {
+        let att = &rel.rd_att.attrs[m as usize];
+        Ok(AttrInfo {
+            attname: String::from_utf8_lossy(att.attname.name_str()).into_owned(),
+            atttypmod: att.atttypmod,
+        })
+    });
+    s::namestrcmp_attr::set(|rel: &Relation<'_>, m: i32, col_name: &str| -> PgResult<i32> {
+        let att = &rel.rd_att.attrs[m as usize];
+        let name = String::from_utf8_lossy(att.attname.name_str());
+        Ok(match name.as_ref().cmp(col_name) {
+            core::cmp::Ordering::Less => -1,
+            core::cmp::Ordering::Equal => 0,
+            core::cmp::Ordering::Greater => 1,
+        })
+    });
+
+    // -- fmgr / Datum value layer --
+    s::input_function_call_safe::set(
+        |cstate: &mut CopyParseState<'_>, m: i32, string: Option<&str>, typmod: i32| -> PgResult<Option<RichDatum<'_>>> {
+            // Resolve the per-query Mcx from the cstate's own allocator (the
+            // attnumlist PgVec lives in the query context).
+            let mcx: Mcx<'_> = *cstate.attnumlist.allocator();
+            crate::input_function_call_safe_impl(mcx, cstate, m, string, typmod)
+        },
+    );
+    s::receive_function_call::set(
+        |_cstate: &mut CopyParseState<'_>, _m: i32, _buf: Option<&[u8]>, _typmod: i32| -> PgResult<RichDatum<'_>> {
+            Err(unsupported(
+                "COPY FROM binary receive function (ReceiveFunctionCall) is not yet wired",
+            ))
+        },
+    );
+    s::exec_eval_expr::set(
+        |_cstate: &mut CopyParseState<'_>, _m: i32| -> PgResult<AttrValue> {
+            Err(unsupported(
+                "COPY FROM default-expression evaluation (ExecEvalExpr / build_column_default) \
+                 is the plan-layer keystone and is not yet wired",
+            ))
+        },
+    );
+    s::notice_skipping_row::set(
+        |_lineno: u64, _attname: &str, _attval: Option<&str>| -> PgResult<()> { Ok(()) },
+    );
+
+    // -- libpq frontend --
+    s::receive_copy_begin::set(
+        |_cstate: &mut CopyParseState<'_>, _natts: i32, _binary: bool| -> PgResult<()> {
+            Err(unsupported(
+                "COPY FROM frontend ReceiveCopyBegin (CopyInResponse) is not yet wired",
+            ))
+        },
+    );
+}

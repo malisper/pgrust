@@ -97,6 +97,45 @@ fn heapam_tuple_insert<'mcx>(
     Ok(())
 }
 
+/// `heapam_multi_insert(relation, slots, ntuples, cid, options, bistate)`
+/// (heapam_handler.c): `ExecFetchSlotHeapTuple` each slot, stamp the table OID,
+/// `heap_multi_insert`, then copy each stored `t_self` back into the matching
+/// slot's `tts_tid`.
+fn heapam_multi_insert<'mcx>(
+    mcx: Mcx<'mcx>,
+    relation: &Relation<'mcx>,
+    slots: &mut [&mut SlotData<'mcx>],
+    cid: CommandId,
+    options: i32,
+    bistate: Option<&mut BulkInsertStateData>,
+) -> PgResult<()> {
+    // heaptuples = palloc(ntuples * sizeof(HeapTuple));
+    // for (i = 0; i < ntuples; i++) {
+    //     tuple = ExecFetchSlotHeapTuple(slots[i], true, NULL);
+    //     slots[i]->tts_tableOid = RelationGetRelid(relation);
+    //     tuple->t_tableOid = slots[i]->tts_tableOid;
+    // }
+    let mut tuples: mcx::PgVec<'mcx, FormedTuple<'mcx>> =
+        mcx::vec_with_capacity_in(mcx, slots.len())?;
+    for slot in slots.iter_mut() {
+        let (mut tuple, _should_free) =
+            slot_seam::exec_fetch_slot_heap_tuple::call(mcx, slot, true)?;
+        slot.base_mut().tts_tableOid = relation.rd_id;
+        tuple.tuple.t_tableOid = relation.rd_id;
+        tuples.push(tuple);
+    }
+
+    let mut heap_bistate = bistate.map(translate_bistate);
+    let stored =
+        heapam::insert::heap_multi_insert(mcx, relation, tuples, cid, options, heap_bistate.as_mut())?;
+
+    // for (i = 0; i < ntuples; i++) slots[i]->tts_tid = heaptuples[i]->t_self;
+    for (slot, tuple) in slots.iter_mut().zip(stored.iter()) {
+        slot.base_mut().tts_tid = tuple.tuple.t_self;
+    }
+    Ok(())
+}
+
 // ===========================================================================
 // tuple_delete
 // ===========================================================================
@@ -226,6 +265,7 @@ fn heapam_relation_set_new_filelocator(
 pub fn init_seams() {
     use backend_access_heap_heapam_handler_dml_seams as sx;
     sx::heapam_tuple_insert::set(heapam_tuple_insert);
+    sx::heapam_multi_insert::set(heapam_multi_insert);
     sx::heapam_tuple_delete::set(heapam_tuple_delete);
     sx::heapam_tuple_update::set(heapam_tuple_update);
     sx::heapam_relation_set_new_filelocator::set(heapam_relation_set_new_filelocator);

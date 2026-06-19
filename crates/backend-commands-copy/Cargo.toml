@@ -39,6 +39,7 @@ backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
 backend-utils-adt-numutils = { path = "../backend-utils-adt-numutils" }
 common-extra-encnames-fgram = { path = "../common-extra-encnames-fgram" }
 backend-commands-copyto = { path = "../backend-commands-copyto" }
+backend-commands-copyfrom = { path = "../backend-commands-copyfrom" }
 
 # Inward seam crates we own + install.
 backend-commands-copy-seams = { path = "../backend-commands-copy-seams" }

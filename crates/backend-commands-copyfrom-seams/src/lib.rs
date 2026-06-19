@@ -31,7 +31,7 @@ use types_copy::{
     AttrInfo, AttrValue, CopyGetDataResult, CopyParseState, EncodingConversionResult,
 };
 use types_core::primitive::Oid;
-use types_datum::datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::PgResult;
 use types_rel::Relation;
 
@@ -150,19 +150,19 @@ seam_core::seam!(
     /// `InputFunctionCallSafe(&cstate->in_functions[m], string,
     /// cstate->typioparams[m], typmod, cstate->escontext, &result)` — returns
     /// `None` when a soft error was trapped (`Ok(false)` in the C).
-    pub fn input_function_call_safe<'mcx>(cstate: &mut CopyParseState<'mcx>, m: i32, string: Option<&str>, typmod: i32) -> PgResult<Option<Datum>>
+    pub fn input_function_call_safe<'mcx>(cstate: &mut CopyParseState<'mcx>, m: i32, string: Option<&str>, typmod: i32) -> PgResult<Option<Datum<'mcx>>>
 );
 
 seam_core::seam!(
     /// `ReceiveFunctionCall(&cstate->in_functions[m], buf,
     /// cstate->typioparams[m], typmod)`.
-    pub fn receive_function_call<'mcx>(cstate: &mut CopyParseState<'mcx>, m: i32, buf: Option<&[u8]>, typmod: i32) -> PgResult<Datum>
+    pub fn receive_function_call<'mcx>(cstate: &mut CopyParseState<'mcx>, m: i32, buf: Option<&[u8]>, typmod: i32) -> PgResult<Datum<'mcx>>
 );
 
 seam_core::seam!(
     /// `ExecEvalExpr(cstate->defexprs[m], cstate->econtext, &isnull)` — evaluate
     /// the default expression for physical attr `m` in the per-tuple context.
-    pub fn exec_eval_expr<'mcx>(cstate: &mut CopyParseState<'mcx>, m: i32) -> PgResult<AttrValue>
+    pub fn exec_eval_expr<'mcx>(cstate: &mut CopyParseState<'mcx>, m: i32) -> PgResult<AttrValue<'mcx>>
 );
 
 seam_core::seam!(

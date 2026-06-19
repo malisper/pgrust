@@ -36,7 +36,7 @@ use types_copy::{
 };
 #[allow(unused_imports)]
 use types_core::primitive::Oid;
-use types_datum::datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::{
     ErrorLocation, PgResult, ERRCODE_BAD_COPY_FILE_FORMAT, ERRCODE_INVALID_BINARY_REPRESENTATION,
     ERROR,
@@ -573,15 +573,17 @@ fn NextCopyFromRawFieldsInternal(cstate: &mut CopyParseState, is_csv: bool) -> P
 /// `NextCopyFrom(cstate, econtext, values, nulls)` (copyfromparse.c:870) — read
 /// the next tuple from the source. Returns the per-physical-attribute
 /// `(Datum, isnull)` pairs on a successful read, or `None` if no more tuples.
-pub fn NextCopyFrom(cstate: &mut CopyParseState) -> PgResult<Option<Vec<AttrValue>>> {
+pub fn NextCopyFrom<'mcx>(
+    cstate: &mut CopyParseState<'mcx>,
+) -> PgResult<Option<Vec<AttrValue<'mcx>>>> {
     // tupDesc = RelationGetDescr(cstate->rel); num_phys_attrs = tupDesc->natts;
     let num_phys_attrs = s::relation_natts::call(&cstate.rel)?;
     let num_defaults = cstate.num_defaults;
 
     /* Initialize all values for row to NULL */
-    let mut values: Vec<AttrValue> = vec![
+    let mut values: Vec<AttrValue<'mcx>> = vec![
         AttrValue {
-            datum: Datum::null(),
+            datum: Datum::ByVal(0),
             isnull: true,
         };
         num_phys_attrs as usize
@@ -609,7 +611,10 @@ pub fn NextCopyFrom(cstate: &mut CopyParseState) -> PgResult<Option<Vec<AttrValu
 }
 
 /// Dispatch `cstate->routine->CopyFromOneRow` to the in-crate format workhorse.
-fn copy_from_one_row(cstate: &mut CopyParseState, values: &mut [AttrValue]) -> PgResult<bool> {
+fn copy_from_one_row<'mcx>(
+    cstate: &mut CopyParseState<'mcx>,
+    values: &mut [AttrValue<'mcx>],
+) -> PgResult<bool> {
     if cstate.opts.binary {
         CopyFromBinaryOneRow(cstate, values)
     } else {
@@ -618,12 +623,18 @@ fn copy_from_one_row(cstate: &mut CopyParseState, values: &mut [AttrValue]) -> P
 }
 
 /// `CopyFromTextOneRow(cstate, econtext, values, nulls)` (copyfromparse.c:915).
-pub fn CopyFromTextOneRow(cstate: &mut CopyParseState, values: &mut [AttrValue]) -> PgResult<bool> {
+pub fn CopyFromTextOneRow<'mcx>(
+    cstate: &mut CopyParseState<'mcx>,
+    values: &mut [AttrValue<'mcx>],
+) -> PgResult<bool> {
     CopyFromTextLikeOneRow(cstate, values, false)
 }
 
 /// `CopyFromCSVOneRow(cstate, econtext, values, nulls)` (copyfromparse.c:923).
-pub fn CopyFromCSVOneRow(cstate: &mut CopyParseState, values: &mut [AttrValue]) -> PgResult<bool> {
+pub fn CopyFromCSVOneRow<'mcx>(
+    cstate: &mut CopyParseState<'mcx>,
+    values: &mut [AttrValue<'mcx>],
+) -> PgResult<bool> {
     CopyFromTextLikeOneRow(cstate, values, true)
 }
 
@@ -631,9 +642,9 @@ pub fn CopyFromCSVOneRow(cstate: &mut CopyParseState, values: &mut [AttrValue]) 
 /// (copyfromparse.c:936) — the workhorse for text and CSV per-row reads. The C
 /// `econtext` argument is read from `cstate.econtext` by the `exec_eval_expr`
 /// seam.
-fn CopyFromTextLikeOneRow(
-    cstate: &mut CopyParseState,
-    values: &mut [AttrValue],
+fn CopyFromTextLikeOneRow<'mcx>(
+    cstate: &mut CopyParseState<'mcx>,
+    values: &mut [AttrValue<'mcx>],
     is_csv: bool,
 ) -> PgResult<bool> {
     let attr_count = cstate.attnumlist.len() as i32;
@@ -747,7 +758,10 @@ fn CopyFromTextLikeOneRow(
 }
 
 /// `CopyFromBinaryOneRow(cstate, econtext, values, nulls)` (copyfromparse.c:1085).
-pub fn CopyFromBinaryOneRow(cstate: &mut CopyParseState, values: &mut [AttrValue]) -> PgResult<bool> {
+pub fn CopyFromBinaryOneRow<'mcx>(
+    cstate: &mut CopyParseState<'mcx>,
+    values: &mut [AttrValue<'mcx>],
+) -> PgResult<bool> {
     let attr_count = cstate.attnumlist.len() as i32;
 
     cstate.cur_lineno += 1;
@@ -1541,18 +1555,18 @@ fn handle_default_marker(
 
 /// `CopyReadBinaryAttribute(cstate, flinfo, typioparam, typmod, isnull)`
 /// (copyfromparse.c:2012) — read a binary attribute. Returns `(datum, isnull)`.
-fn CopyReadBinaryAttribute(
-    cstate: &mut CopyParseState,
+fn CopyReadBinaryAttribute<'mcx>(
+    cstate: &mut CopyParseState<'mcx>,
     m: i32,
     typmod: i32,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     let mut fld_size = 0i32;
     if !CopyGetInt32(cstate, &mut fld_size)? {
         return ereport(ERROR)
             .errcode(ERRCODE_BAD_COPY_FILE_FORMAT)
             .errmsg("unexpected EOF in COPY data")
             .finish(here("CopyReadBinaryAttribute"))
-            .map(|()| (Datum::null(), true));
+            .map(|()| (Datum::ByVal(0), true));
     }
     // if (fld_size == -1) { *isnull = true; return ReceiveFunctionCall(flinfo, NULL, ...); }
     if fld_size == -1 {
@@ -1564,7 +1578,7 @@ fn CopyReadBinaryAttribute(
             .errcode(ERRCODE_BAD_COPY_FILE_FORMAT)
             .errmsg("invalid field size")
             .finish(here("CopyReadBinaryAttribute"))
-            .map(|()| (Datum::null(), true));
+            .map(|()| (Datum::ByVal(0), true));
     }
 
     /* reset attribute_buf to empty, and load raw data in it */
@@ -1576,7 +1590,7 @@ fn CopyReadBinaryAttribute(
             .errcode(ERRCODE_BAD_COPY_FILE_FORMAT)
             .errmsg("unexpected EOF in COPY data")
             .finish(here("CopyReadBinaryAttribute"))
-            .map(|()| (Datum::null(), true));
+            .map(|()| (Datum::ByVal(0), true));
     }
     cstate.attribute_buf.copy_from_slice(&buf);
     // attribute_buf.len = fld_size; attribute_buf.data[fld_size] = '\0';
@@ -1592,7 +1606,7 @@ fn CopyReadBinaryAttribute(
             .errcode(ERRCODE_INVALID_BINARY_REPRESENTATION)
             .errmsg("incorrect binary data format")
             .finish(here("CopyReadBinaryAttribute"))
-            .map(|()| (Datum::null(), true));
+            .map(|()| (Datum::ByVal(0), true));
     }
 
     Ok((datum, false))

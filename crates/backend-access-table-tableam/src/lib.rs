@@ -793,6 +793,19 @@ pub fn table_tuple_insert<'mcx>(
     (am(rel).tuple_insert)(mcx, rel, slot, cid, options, bistate)
 }
 
+/// `table_multi_insert(rel, slots, nslots, cid, options, bistate)` (tableam.h
+/// inline) — insert a batch of tuples in one AM call.
+pub fn table_multi_insert<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    slots: &mut [&mut SlotData<'mcx>],
+    cid: types_core::xact::CommandId,
+    options: i32,
+    bistate: Option<&mut BulkInsertStateData>,
+) -> PgResult<()> {
+    (am(rel).multi_insert)(mcx, rel, slots, cid, options, bistate)
+}
+
 /// `table_finish_bulk_insert(rel, options)` (tableam.h inline) — complete
 /// insertions made via `tuple_insert`/`multi_insert` with a `BulkInsertState`.
 ///

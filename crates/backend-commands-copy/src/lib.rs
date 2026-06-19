@@ -1044,16 +1044,77 @@ fn analyze_copy_where<'mcx>(
         .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED))
 }
 
-/// The COPY FROM driver leg (copyfrom.c) — not yet ported (Leg C).
+/// The COPY FROM driver leg (copyfrom.c): `BeginCopyFrom` / `CopyFrom` /
+/// `EndCopyFrom` (commands/copyfrom.c, owned by `backend-commands-copyfrom`).
 fn copy_from_driver<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _pstate: &mut ParseState<'mcx>,
-    _rel: &types_rel::Relation<'mcx>,
-    _where_clause: Option<Expr>,
-    _stmt: &CopyStmt<'mcx>,
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+    where_clause: Option<Expr>,
+    stmt: &CopyStmt<'mcx>,
 ) -> PgResult<u64> {
-    Err(PgError::error("COPY FROM is not yet supported (copyfrom.c not ported)")
-        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED))
+    // ProcessCopyOptions(pstate, &opts, true /* is_from */, options).
+    let fmt = ProcessCopyOptions(
+        mcx,
+        Some(pstate),
+        /* is_from = */ true,
+        options_slice(stmt),
+    )?;
+
+    // Project the parse-relevant subset of CopyFormatOptions onto the parser's
+    // CopyParseOptions.
+    let opts = types_copy::CopyParseOptions {
+        binary: fmt.binary,
+        csv_mode: fmt.csv_mode,
+        header_line: fmt.header_line,
+        null_print: fmt.null_print.as_str().to_string(),
+        null_print_len: fmt.null_print_len,
+        default_print: fmt.default_print.as_ref().map(|s| s.as_str().to_string()),
+        default_print_len: fmt.default_print_len,
+        delim: fmt.delim,
+        quote: fmt.quote,
+        escape: fmt.escape,
+        on_error: fmt.on_error,
+        log_verbosity: fmt.log_verbosity,
+    };
+
+    // attnumlist = CopyGetAttnums(tupDesc, rel, attlist).
+    let tup_desc: TupleDesc<'mcx> = Some(rel.rd_att_clone_in(mcx)?);
+    let attlist: Option<&[NodePtr<'mcx>]> =
+        if stmt.attlist.is_empty() { None } else { Some(&stmt.attlist[..]) };
+    let attnumlist = CopyGetAttnums(mcx, &tup_desc, Some(rel), attlist)?;
+
+    // range_table / rteperminfos: a fresh owned copy of pstate's (the driver's
+    // EState takes ownership via ExecInitRangeTable).
+    let mut range_table: PgVec<'mcx, types_nodes::RangeTblEntry<'mcx>> =
+        PgVec::new_in(mcx);
+    for rte in pstate.p_rtable.iter() {
+        range_table.push(rte.clone_in(mcx)?);
+    }
+    let mut rteperminfos: PgVec<'mcx, types_nodes::RTEPermissionInfo<'mcx>> =
+        PgVec::new_in(mcx);
+    for pi in pstate.p_rteperminfos.iter() {
+        rteperminfos.push(pi.clone_in(mcx)?);
+    }
+
+    let file_encoding = fmt.file_encoding;
+    let has_where = where_clause.is_some();
+
+    let mut state = backend_commands_copyfrom::BeginCopyFrom(
+        mcx,
+        rel.alias(),
+        opts,
+        file_encoding,
+        attnumlist,
+        range_table,
+        rteperminfos,
+        stmt.filename.as_deref(),
+        stmt.is_program,
+        has_where,
+    )?;
+    let processed = backend_commands_copyfrom::CopyFrom(mcx, &mut state)?;
+    backend_commands_copyfrom::EndCopyFrom(state)?;
+    Ok(processed)
 }
 
 /// Build the `SELECT ... FROM ONLY rel` raw query the RLS path runs as a

@@ -414,6 +414,17 @@ fn heapam_tuple_insert<'mcx>(
     dml_seam::heapam_tuple_insert::call(mcx, rel, slot, cid, options, bistate)
 }
 
+fn heapam_multi_insert<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    slots: &mut [&mut SlotData<'mcx>],
+    cid: types_core::xact::CommandId,
+    options: i32,
+    bistate: Option<&mut BulkInsertStateData>,
+) -> PgResult<()> {
+    dml_seam::heapam_multi_insert::call(mcx, rel, slots, cid, options, bistate)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn heapam_tuple_delete<'mcx>(
     mcx: Mcx<'mcx>,
@@ -621,6 +632,7 @@ pub fn get_heapam_table_am_routine() -> TableAmRoutine {
         tuple_get_latest_tid: heapam_tuple_get_latest_tid,
 
         tuple_insert: heapam_tuple_insert,
+        multi_insert: heapam_multi_insert,
         tuple_delete: heapam_tuple_delete,
         tuple_update: heapam_tuple_update,
         tuple_lock: heapam_tuple_lock,
