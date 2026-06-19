@@ -21,6 +21,9 @@ backend-optimizer-util-var-seams = { path = "../backend-optimizer-util-var-seams
 # equivclass-ext consumer crate declares for initsplan.c/equivclass.c.
 backend-optimizer-path-equivclass-ext-seams = { path = "../backend-optimizer-path-equivclass-ext-seams" }
 backend-optimizer-util-joininfo-ext-seams = { path = "../backend-optimizer-util-joininfo-ext-seams" }
+# extract_lateral_references' pull_vars_of_level((Node *) ...) — declared in the
+# init-subselect-ext stub crate (it cannot name a whole parse Node); var.c owns it.
+backend-optimizer-plan-init-subselect-ext-seams = { path = "../backend-optimizer-plan-init-subselect-ext-seams" }
 # clauses.c's root-aware NumRelids(root, clause) — declared in path-small-seams,
 # owned here (the pull_varnos + outer_join_rels pair is var.c/planner-threaded).
 backend-optimizer-path-small-seams = { path = "../backend-optimizer-path-small-seams" }

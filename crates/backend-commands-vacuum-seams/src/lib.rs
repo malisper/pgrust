@@ -365,6 +365,20 @@ seam_core::seam!(
     pub fn table_close_lock<'mcx>(rel: Relation<'mcx>, lockmode: i32) -> PgResult<()>
 );
 seam_core::seam!(
+    /// `index_open(indexoid, lockmode)` — recover an already-locked index
+    /// `Relation` from the relcache (the leader/worker passes `NoLock`). The
+    /// parallel-vacuum paths read the index AM's `amparallelvacuumoptions` off
+    /// the live value type; in C they hold an open `Relation *indrels[]`, so in
+    /// the owned model the index carried as an OID is recovered through the
+    /// index-AM `index_open` (which validates the index relkind), never the
+    /// table-AM `table_open` (which rejects index relations).
+    pub fn index_open_lock<'mcx>(
+        mcx: Mcx<'mcx>,
+        indexoid: Oid,
+        lockmode: i32,
+    ) -> PgResult<Relation<'mcx>>
+);
+seam_core::seam!(
     /// `indrel->rd_indam->amparallelvacuumoptions`.
     pub fn am_parallel_vacuum_options<'mcx>(indrel: &Relation<'mcx>) -> PgResult<u8>
 );

@@ -3860,11 +3860,16 @@ fn prepare_sort_from_pathkeys<'mcx>(
                 .as_deref()
                 .unwrap_or(&[]);
             if let Some(tle) = tlist.iter().find(|t| t.resno == req_resno) {
-                let tle_expr = tle.expr.as_deref().cloned().unwrap_or(Expr::Var(Default::default()));
-                if let Some(em) = find_ec_member_matching_expr(root, ec_id, &tle_expr, relids) {
-                    // found expr at right place in tlist
-                    pk_datatype = em.em_datatype;
-                    matched_resno = Some(tle.resno);
+                // C reads `tle->expr` by pointer (prepare_sort_from_pathkeys);
+                // borrow it directly. A `.clone()` here would panic on owned
+                // sub-tree Exprs (Aggref/SubLink) that only deep-copy via
+                // clone_in; the matcher only reads the expr, so a borrow suffices.
+                if let Some(tle_expr) = tle.expr.as_deref() {
+                    if let Some(em) = find_ec_member_matching_expr(root, ec_id, tle_expr, relids) {
+                        // found expr at right place in tlist
+                        pk_datatype = em.em_datatype;
+                        matched_resno = Some(tle.resno);
+                    }
                 }
             }
         } else {
@@ -3876,8 +3881,13 @@ fn prepare_sort_from_pathkeys<'mcx>(
                 .as_deref()
                 .unwrap_or(&[]);
             for tle in tlist.iter() {
-                let tle_expr = tle.expr.as_deref().cloned().unwrap_or(Expr::Var(Default::default()));
-                if let Some(em) = find_ec_member_matching_expr(root, ec_id, &tle_expr, relids) {
+                // Borrow `tle->expr` directly (C uses the pointer); cloning here
+                // would panic on owned-subtree Exprs (Aggref/SubLink). The
+                // matcher only reads the expr.
+                let Some(tle_expr) = tle.expr.as_deref() else {
+                    continue;
+                };
+                if let Some(em) = find_ec_member_matching_expr(root, ec_id, tle_expr, relids) {
                     // found expr already in tlist
                     pk_datatype = em.em_datatype;
                     matched_resno = Some(tle.resno);

@@ -59,6 +59,15 @@ const INVALID_OID: Oid = 0;
 /// `PVC_RECURSE_AGGREGATES | PVC_RECURSE_WINDOWFUNCS | PVC_INCLUDE_PLACEHOLDERS`.
 const PVC_JOINCLAUSE_FLAGS: i32 = 0x0002 | 0x0008 | 0x0010;
 
+/// Deep-copy a qual `Expr` value into the planner arena (C: `copyObject` /
+/// pointer reuse). The derived `Expr::clone()` panics on owned-subtree variants
+/// (SubLink/SubPlan/Aggref) whose children only deep-copy via `clone_in`; route
+/// every qual copy through `Expr::clone_in`.
+fn copy_clause_in(run: &PlannerRun<'_>, expr: &Expr) -> Expr {
+    expr.clone_in(run.mcx())
+        .unwrap_or_else(|e| panic!("copy_clause_in: clone_in: {e:?}"))
+}
+
 /// `distribute_qual_to_rels` (initsplan.c:2545).
 ///
 /// Add clause information to the baserestrictinfo/joininfo lists of the rels
@@ -99,7 +108,7 @@ pub fn distribute_qual_to_rels<'mcx>(
         let mut pitem = item_list[jti].jti_parent;
         while let Some(p) = pitem {
             if bms::relids_is_subset::call(&relids, &item_list[p].qualscope) {
-                item_list[p].lateral_clauses.push(clause.clone());
+                item_list[p].lateral_clauses.push(copy_clause_in(run, clause));
                 return;
             }
             // We should not be postponing any quals past an outer join.
@@ -153,7 +162,7 @@ pub fn distribute_qual_to_rels<'mcx>(
         // on the nonnullable side, so it's not degenerate. If the caller wants
         // to postpone handling such clauses, add it to the postponed list.
         if let Some(target) = postponed_to {
-            item_list[target].oj_joinclauses.push(clause.clone());
+            item_list[target].oj_joinclauses.push(copy_clause_in(run, clause));
             return;
         }
         is_pushed_down = false;
@@ -182,7 +191,7 @@ pub fn distribute_qual_to_rels<'mcx>(
     // Build the RestrictInfo node itself.
     let mut restrictinfo = eqext::make_restrictinfo::call(
         root,
-        clause.clone(),
+        copy_clause_in(run, clause),
         is_pushed_down,
         has_clone,
         is_clone,
@@ -702,8 +711,8 @@ pub fn process_implied_equality<'mcx>(
         opno,
         BOOLOID,     // opresulttype
         false,       // opretset
-        item1.clone(), // copyObject(item1)
-        Some(item2.clone()), // copyObject(item2)
+        copy_clause_in(run, item1), // copyObject(item1)
+        Some(copy_clause_in(run, item2)), // copyObject(item2)
         INVALID_OID, // opcollid
         collation,   // inputcollid
     );
@@ -736,7 +745,7 @@ pub fn process_implied_equality<'mcx>(
     // Build the RestrictInfo node itself.
     let restrictinfo = eqext::make_restrictinfo::call(
         root,
-        clause.clone(),
+        copy_clause_in(run, &clause),
         true,  // is_pushed_down
         false, // !has_clone
         false, // !is_clone
@@ -779,14 +788,13 @@ pub fn build_implied_join_equality<'mcx>(
     qualscope: &Relids,
     security_level: Index,
 ) -> PgResult<RinfoId> {
-    let _ = run;
     // Build the new clause. Copy to ensure no shared substructure.
     let clause = make_opclause(
         opno,
         BOOLOID, // opresulttype
         false,   // opretset
-        item1.clone(),
-        Some(item2.clone()),
+        copy_clause_in(run, item1),
+        Some(copy_clause_in(run, item2)),
         INVALID_OID, // opcollid
         collation,   // inputcollid
     );

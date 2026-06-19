@@ -80,7 +80,17 @@ use crate::{from_collapse_limit, join_collapse_limit, JoinTreeItem, JtId, JtNode
 /// `make_ands_implicit(NULL) -> NIL`, an `AND` BoolExpr -> its args, a constant
 /// TRUE -> NIL, anything else -> a one-element list — exactly the C semantics.
 fn quals_implicit_and(quals: Option<&Node>) -> Vec<Expr> {
-    let clause: Option<Expr> = quals.and_then(|n| n.as_expr().cloned());
+    // C views `(List *) f->quals` by pointer; the owned model stores the qual
+    // conjuncts as owned `Expr` values, so deep-copy out. The derived
+    // `Expr::clone()` panics on owned-subtree variants (SubLink/SubPlan/Aggref)
+    // whose children only deep-copy via `clone_in` (`copyObject` shape); route
+    // the copy through `Expr::clone_in`. The returned `Expr` is fully owned (no
+    // borrow of the transient context), so it moves into the JoinTreeItem list.
+    let clause: Option<Expr> = quals.and_then(|n| n.as_expr()).map(|e| {
+        let cx = mcx::MemoryContext::new("jointree quals_implicit_and clone");
+        e.clone_in(cx.mcx())
+            .unwrap_or_else(|err| panic!("quals_implicit_and: clone_in: {err:?}"))
+    });
     make_ands_implicit(clause)
 }
 
@@ -606,7 +616,11 @@ fn deconstruct_distribute(
     item_list: &mut Vec<JoinTreeItem>,
     jti: JtId,
 ) -> types_error::PgResult<()> {
-    let kind = item_list[jti].kind.clone();
+    // Move the node kind out of the item (C reads `j->quals`/`f->quals` by
+    // pointer; deconstruct_distribute is the last reader of `kind`, so a `take`
+    // is sound and — unlike a `.clone()` — never deep-copies the qual `Vec<Expr>`
+    // through the panicking `Expr::clone` for owned-subtree quals (SubPlan/etc).
+    let kind = core::mem::take(&mut item_list[jti].kind);
     match kind {
         JtNodeKind::RangeTblRef { rtindex } => {
             // Deal with any securityQuals attached to the RTE.
@@ -954,8 +968,18 @@ fn del_member(a: Relids, x: i32) -> Relids {
 fn remove_nulling_relids_exprs(quals: &[Expr], removable: &Relids, except: &Relids) -> Vec<Expr> {
     quals
         .iter()
-        .map(|q| eqext::remove_nulling_relids::call(q.clone(), bms::relids_copy::call(removable), bms::relids_copy::call(except)))
+        .map(|q| eqext::remove_nulling_relids::call(clone_qual_expr(q), bms::relids_copy::call(removable), bms::relids_copy::call(except)))
         .collect()
+}
+
+/// Deep-copy a qual `Expr` value (C: pointer reuse). The derived `Expr::clone()`
+/// panics on owned-subtree variants (SubLink/SubPlan/Aggref) whose children only
+/// deep-copy via `clone_in`; route every qual copy through `Expr::clone_in`. The
+/// returned `Expr` is fully owned (no borrow of the transient context).
+fn clone_qual_expr(expr: &Expr) -> Expr {
+    let cx = mcx::MemoryContext::new("jointree qual clone");
+    expr.clone_in(cx.mcx())
+        .unwrap_or_else(|e| panic!("clone_qual_expr: clone_in: {e:?}"))
 }
 
 /// `add_nulling_relids((Node *) quals, target, added)` over an implicit-AND
@@ -968,7 +992,7 @@ fn add_nulling_relids_exprs(quals: &[Expr], target: &Relids, added: &Relids) -> 
         .iter()
         .map(|q| {
             initext::add_nulling_relids_expr::call(
-                q.clone(),
+                clone_qual_expr(q),
                 bms::relids_copy::call(target),
                 bms::relids_copy::call(added),
             )

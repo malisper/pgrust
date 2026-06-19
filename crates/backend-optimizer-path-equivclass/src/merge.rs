@@ -518,7 +518,10 @@ pub fn get_eclass_for_sort_expr(
                 continue;
             }
             if opcintype == root.em(cur_em).em_datatype
-                && ec_seam::equal::call(&expr, &root.node(root.em(cur_em).em_expr).clone())
+                // `equal` only reads both exprs; borrow the stored EC-member
+                // expr directly (a `.clone()` would panic on owned-subtree Exprs
+                // like Aggref/SubLink that only deep-copy via clone_in).
+                && ec_seam::equal::call(&expr, root.node(root.em(cur_em).em_expr))
             {
                 return Ok(Some(cur_ec)); /* match! */
             }
@@ -555,10 +558,16 @@ pub fn get_eclass_for_sort_expr(
 
     /* precise relids of the expression */
     let expr_relids = ec_seam::pull_varnos::call(root, &expr);
+    // Compute the const-recheck predicates that read `&expr` BEFORE moving the
+    // owned `expr` value into `add_eq_member` (C reuses the `Expr *` pointer;
+    // here a `.clone()` would panic on owned-subtree Exprs like Aggref).
+    let expr_returns_set_or_agg_or_window = ec_seam::expression_returns_set::call(&expr)
+        || ec_seam::contain_agg_clause::call(&expr)
+        || ec_seam::contain_window_function::call(&expr);
     let newem = add_eq_member(
         root,
         newec,
-        expr.clone(),
+        expr,
         expr_relids,
         jdomain,
         opcintype,
@@ -566,10 +575,7 @@ pub fn get_eclass_for_sort_expr(
 
     /* re-check the const marking, which add_eq_member doesn't do for SRFs etc. */
     if root.ec(newec).ec_has_const
-        && (root.ec(newec).ec_has_volatile
-            || ec_seam::expression_returns_set::call(&expr)
-            || ec_seam::contain_agg_clause::call(&expr)
-            || ec_seam::contain_window_function::call(&expr))
+        && (root.ec(newec).ec_has_volatile || expr_returns_set_or_agg_or_window)
     {
         root.ec_mut(newec).ec_has_const = false;
         root.em_mut(newem).em_is_const = false;

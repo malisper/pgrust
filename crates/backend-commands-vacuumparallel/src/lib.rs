@@ -86,6 +86,7 @@ use backend_access_transam_parallel_rt_seams as prt;
 
 use backend_access_table_table_seams as table_seam;
 use backend_access_index_amapi_seams as amapi;
+use backend_access_index_indexam_seams as indexam;
 use backend_utils_cache_relcache_seams as relcache_sx;
 
 use backend_access_common_tidstore as tidstore;
@@ -571,7 +572,7 @@ fn parallel_vacuum_init(args: ParallelVacuumInitArgs) -> PgResult<ParallelVacuum
         /* Recover the leader's already-open index Relation from the relcache
          * (NoLock: the index is held under RowExclusiveLock by the leader) to
          * read its index-AM options off the real value type. */
-        let indrel = vac::table_open_lock::call(mcx, pvs.indrels[i], NoLock)?;
+        let indrel = vac::index_open_lock::call(mcx, pvs.indrels[i], NoLock)?;
         let vacoptions = vac::am_parallel_vacuum_options::call(&indrel)?;
 
         /*
@@ -869,7 +870,7 @@ fn parallel_vacuum_compute_workers<'mcx>(
      * Compute the number of indexes that can participate in parallel vacuum.
      */
     for i in 0..nindexes {
-        let indrel = vac::table_open_lock::call(mcx, indrels[i], NoLock)?;
+        let indrel = vac::index_open_lock::call(mcx, indrels[i], NoLock)?;
         let vacoptions = vac::am_parallel_vacuum_options::call(&indrel)?;
 
         /* Skip index that is not a suitable target for parallel index vacuum */
@@ -1279,7 +1280,7 @@ fn parallel_vacuum_index_is_parallel_safe<'mcx>(
     num_index_scans: i32,
     vacuum: bool,
 ) -> PgResult<bool> {
-    let indrel = vac::table_open_lock::call(mcx, indrel, NoLock)?;
+    let indrel = vac::index_open_lock::call(mcx, indrel, NoLock)?;
     let vacoptions = vac::am_parallel_vacuum_options::call(&indrel)?;
 
     /* In parallel vacuum case, check if it supports parallel bulk-deletion */
@@ -1631,6 +1632,15 @@ fn install_pv_outward_seams() {
     // `table_close(rel, lockmode)` — drop the relcache reference; the lock is
     // held until commit, so `Relation::close` releases the entry.
     vac::table_close_lock::set(|rel, lockmode| rel.close(lockmode));
+
+    // `index_open(indexoid, lockmode)` — recover an already-locked index
+    // `Relation` from the relcache (NoLock; the leader holds RowExclusiveLock).
+    // The C code keeps the open `Relation *indrels[]`; here the index is carried
+    // as an OID and recovered through the index-AM `index_open`, which validates
+    // the index relkind (the table-AM `table_open` would reject it).
+    vac::index_open_lock::set(|mcx, indexoid, lockmode| {
+        indexam::index_open::call(mcx, indexoid, lockmode)
+    });
 
     // `indrel->rd_indam->amparallelvacuumoptions` / `->amusemaintenanceworkmem`
     // — resolve the index AM routine from the index's `rd_rel->relam` and read

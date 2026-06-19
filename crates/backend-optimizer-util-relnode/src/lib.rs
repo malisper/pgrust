@@ -2576,6 +2576,10 @@ pub fn init_seams() {
     // joinpath.c reaches `bms_difference(a, b)` over the owned-`Relids` model
     // through joinpath-seams; same body as the relnode-seams `relids_difference`.
     joinpath::bms_difference::set(bms_difference);
+    // joinpath.c's `match_unsorted_outer` tests `bms_membership(innerrelids) ==
+    // BMS_MULTIPLE` over the owned-`Relids` model through joinpath-seams; same
+    // `bms_membership` body as the relnode-seams `relids_membership`.
+    joinpath::bms_membership_is_multiple::set(|a| bms_membership(a) == 2);
     bms::relids_add_range::set(bms_add_range);
     bms::relids_copy::set(bms_copy);
     bms::relids_equal::set(bms_equal);

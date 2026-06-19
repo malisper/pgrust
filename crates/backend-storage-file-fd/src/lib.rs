@@ -86,6 +86,15 @@ pub fn init_seams() {
         vfd_core::set_data_directory_create_perm,
     );
 
+    // `io_direct_data()` (bufmgr.c: `io_direct_flags & IO_DIRECT_DATA`). fd.c
+    // owns the `io_direct_flags` GUC, so the bufmgr seam that reads it is
+    // installed here (live read at call time — the GUC may change after boot).
+    backend_storage_buffer_bufmgr_seams::io_direct_data::set(|| {
+        (vfd_core::io_direct_flags()
+            & types_storage::IO_DIRECT_DATA)
+            != 0
+    });
+
     // GUC / init / errno glue.
     fd_seams::make_pg_directory::set(vfd_core::seam_make_pg_directory);
     fd_seams::init_file_access::set(vfd_core::seam_init_file_access);

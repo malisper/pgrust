@@ -36,6 +36,10 @@ backend-postmaster-postmaster-seams = { path = "../backend-postmaster-postmaster
 # LOAD's closeAllVfds (utility.c) — fd.c owns closeAllVfds (sanctioned install).
 backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 backend-storage-file-fileperm-seams = { path = "../backend-storage-file-fileperm-seams" }
+# `io_direct_data()` (bufmgr's read of fd.c's `io_direct_flags & IO_DIRECT_DATA`)
+# — fd.c owns the `io_direct_flags` GUC, so the bufmgr seam reading it is
+# installed here as a sanctioned cross-crate install (live read per call).
+backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
 # Seam crates for UNPORTED neighbors (calls panic loudly until the owner lands).
 backend-storage-aio-seams = { path = "../backend-storage-aio-seams" }
 backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }

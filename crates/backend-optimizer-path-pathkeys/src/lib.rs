@@ -653,7 +653,7 @@ pub fn make_pathkey_from_sortinfo(
     // get_eclass_for_sort_expr's call to canonicalize_ec_expression.)
     let eclass = ec::get_eclass_for_sort_expr::call(
         root,
-        expr.clone(),
+        clone_sortkey_expr(expr),
         opfamilies,
         opcintype,
         collation,
@@ -1248,7 +1248,7 @@ pub fn make_pathkeys_for_sortclauses_extended(
             continue;
         }
 
-        let mut sortkey = root.node(sortkey_id).clone();
+        let mut sortkey = clone_sortkey_expr(root.node(sortkey_id));
         if remove_group_rtindex {
             debug_assert!(root.group_rtindex > 0);
             // remove_nulling_relids(sortkey, bms_make_singleton(group_rtindex), NULL).
@@ -1892,4 +1892,16 @@ fn mcx_collect(
     let cx = mcx::MemoryContext::new("pathkeys get_mergejoin_opfamilies transient");
     let v = f(cx.mcx(), opno).unwrap_or_else(|e| panic!("get_mergejoin_opfamilies: {e:?}"));
     v.iter().copied().collect::<Vec<Oid>>()
+}
+
+/// Deep-copy a sort-key `Expr` value (C: pointer reuse; here a value clone). The
+/// derived `Expr::clone()` panics for the owned-subtree variants
+/// (`Aggref`/`SubLink`/`SubPlan`) whose children only deep-copy via `clone_in`
+/// (`copyObject` shape), so route every sort-key copy through `Expr::clone_in`.
+/// The returned `Expr` is fully owned (no borrow of the transient context), so
+/// it can be moved into the planner's `node_arena` / EquivalenceClass.
+fn clone_sortkey_expr(expr: &types_nodes::primnodes::Expr) -> types_nodes::primnodes::Expr {
+    let cx = mcx::MemoryContext::new("pathkeys sortkey clone");
+    expr.clone_in(cx.mcx())
+        .unwrap_or_else(|e| panic!("clone_sortkey_expr: {e:?}"))
 }

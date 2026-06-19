@@ -50,8 +50,10 @@ pub fn find_ec_member_matching_expr(
         if em.em_is_child && !bms::relids_is_subset::call(&em.em_relids, relids) {
             continue;
         }
-        let emexpr_owned = em_expr(root, em_id);
-        let emexpr = strip_relabeltypes(&emexpr_owned);
+        // Borrow the stored EC-member expr directly (C reuses the `Expr *`);
+        // `equal`/`strip_relabeltypes` only read it. A `.clone()` here (via the
+        // old `em_expr`) would panic on owned-subtree Exprs like Aggref.
+        let emexpr = strip_relabeltypes(root.node(em.em_expr));
         if ec_seam::equal::call(emexpr, expr) {
             return Some(em.clone());
         }

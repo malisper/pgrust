@@ -68,6 +68,25 @@ pub fn init_seams() {
     vacuum::rel_relkind::set(|relid| {
         backend_utils_cache_lsyscache_seams::get_rel_relkind::call(relid)
     });
+    // `RelationGetRelationName(rel)` (rel.h) — the relation's `relname`. The
+    // parallel-vacuum index model carries the index as a bare OID, so the name
+    // is resolved through the relcache (`get_rel_name`, lsyscache.c). A live,
+    // open relation always has a name; a missing pg_class row is the C cache
+    // lookup failure.
+    vacuum::relation_get_relation_name::set(|relid| {
+        let cx = mcx::MemoryContext::new("vacuum_relation_get_relation_name");
+        let name: alloc::string::String = {
+            match backend_utils_cache_lsyscache_seams::get_rel_name::call(cx.mcx(), relid)? {
+                Some(name) => name.to_string(),
+                None => {
+                    return Err(types_error::PgError::error(alloc::format!(
+                        "cache lookup failed for relation {relid}"
+                    )))
+                }
+            }
+        };
+        Ok(name)
+    });
     // vacuum_rel: `RELATION_IS_OTHER_TEMP(rel)` (rel.h) — `relpersistence ==
     // RELPERSISTENCE_TEMP && !rd_islocaltemp`. The vacuum model carries the
     // opened relation as a bare OID; re-open it with NoLock (the lock is already

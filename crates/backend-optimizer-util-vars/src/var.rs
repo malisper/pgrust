@@ -976,6 +976,14 @@ pub fn init_seams() {
     // (costsize.c). var.c owns pull_varnos.
     use backend_optimizer_path_costsize_seams as cz;
     cz::pull_varnos_contains_zero::set(seam_pull_varnos_contains_zero);
+
+    // `pull_vars_of_level((Node *) node, levelsup)` (var.c:338) over a borrowed
+    // parse `Node` — `extract_lateral_references` (initsplan.c) gathers the
+    // level-`levelsup` Vars of a LATERAL RTE's parse subtrees. The
+    // init-subselect-ext stub crate declares it (it cannot name a whole parse
+    // `Node`); var.c is the real owner and installs it here.
+    use backend_optimizer_plan_init_subselect_ext_seams as isub;
+    isub::pull_vars_of_level_node::set(|node, levelsup| pull_vars_of_level(node, levelsup));
 }
 
 /// `pull_var_clause((Node *) node, flags)` (var.c) — the equivclass-ext seam
