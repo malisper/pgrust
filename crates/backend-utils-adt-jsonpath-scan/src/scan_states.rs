@@ -212,13 +212,22 @@ impl<'a> JsonPathLexer<'a> {
                 Ok(Some(Step::Continue))
             }
             Which::UnicodeFail => {
+                // C: the flex rule matched `yytext` = s[p..p+best]; jsonpath_yyerror
+                // (NULL location) formats "at or near \"%s\"" from that matched
+                // lexeme, not the input remaining after it. Pass the matched span
+                // explicitly (yyerror's pos-based yytext would point past it).
+                self.yyerror_yytext(escontext, p, p + best, "invalid Unicode escape sequence")?;
                 self.pos += best;
-                self.yyerror(escontext, "invalid Unicode escape sequence")?;
                 Ok(Some(Step::Terminate))
             }
             Which::HexFail => {
+                self.yyerror_yytext(
+                    escontext,
+                    p,
+                    p + best,
+                    "invalid hexadecimal character sequence",
+                )?;
                 self.pos += best;
-                self.yyerror(escontext, "invalid hexadecimal character sequence")?;
                 Ok(Some(Step::Terminate))
             }
             Which::UnicodePlusBackslash => {
