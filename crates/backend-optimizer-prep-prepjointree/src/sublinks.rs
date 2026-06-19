@@ -44,7 +44,7 @@ use mcx::{alloc_in, Mcx, PgBox, PgVec};
 use types_error::PgResult;
 use types_nodes::copy_query::Query;
 use types_nodes::jointype::JoinType;
-use types_nodes::nodes::{Node, NodePtr};
+use types_nodes::nodes::{ntag, Node, NodePtr};
 use types_nodes::primnodes::{Expr, SubLinkType};
 use types_nodes::rawnodes::FromExpr;
 use types_pathnodes::{Bitmapset, PlannerInfo, Relids};
@@ -138,12 +138,13 @@ pub fn pull_up_sublinks<'mcx>(
     // root->parse->jointree must always be a FromExpr, so insert a dummy one if
     // we got a bare RangeTblRef or JoinExpr out of the recursion.
     match jtnode {
-        Some(n) => match PgBox::into_inner(n) {
-            Node::FromExpr(f) => {
+        Some(n) => {
+            if n.node_tag() == ntag::T_FromExpr {
+                let f = PgBox::into_inner(n).into_fromexpr().expect("FromExpr");
                 parse.jointree = Some(alloc_in(mcx, f)?);
-            }
-            other => {
+            } else {
                 // makeFromExpr(list_make1(jtnode), NULL)
+                let other = PgBox::into_inner(n);
                 let mut fromlist: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
                 fromlist.push(alloc_in(mcx, other)?);
                 parse.jointree = Some(alloc_in(
@@ -154,7 +155,7 @@ pub fn pull_up_sublinks<'mcx>(
                     },
                 )?);
             }
-        },
+        }
         None => {
             // jtnode was NULL: makeFromExpr(list_make1(NULL), NULL) is not what
             // C does (it would never see a NULL top jointree), but a NULL top is
@@ -197,14 +198,17 @@ fn pull_up_sublinks_jointree_recurse<'mcx>(
         Some(n) => n,
     };
 
-    match PgBox::into_inner(jtnode) {
-        Node::RangeTblRef(r) => {
+    let jtnode_tag = jtnode.node_tag();
+    match jtnode_tag {
+        ntag::T_RangeTblRef => {
+            let r = PgBox::into_inner(jtnode).into_rangetblref().expect("RangeTblRef");
             let varno = r.rtindex;
             *relids = relids_make_singleton(varno);
             // jtnode is returned unmodified.
             Ok(Some(alloc_in(mcx, Node::RangeTblRef(r))?))
         }
-        Node::FromExpr(f) => {
+        ntag::T_FromExpr => {
+            let f = PgBox::into_inner(jtnode).into_fromexpr().expect("FromExpr");
             let mut newfromlist: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
             let mut frelids: Relids = None;
 
@@ -252,7 +256,8 @@ fn pull_up_sublinks_jointree_recurse<'mcx>(
             *relids = frelids;
             Ok(jtlink)
         }
-        Node::JoinExpr(mut j) => {
+        ntag::T_JoinExpr => {
+            let mut j = PgBox::into_inner(jtnode).into_joinexpr().expect("JoinExpr");
             // (C makes a modifiable copy of the join node, but doesn't copy its
             // subnodes yet; here we already own `j`.)
             let mut leftrelids: Relids = None;
