@@ -8122,6 +8122,7 @@ dependencies = [
  "backend-catalog-pg-constraint-seams",
  "backend-catalog-pg-depend-seams",
  "backend-catalog-pg-enum",
+ "backend-catalog-pg-proc",
  "backend-catalog-pg-range",
  "backend-catalog-pg-shdepend-seams",
  "backend-catalog-pg-type",

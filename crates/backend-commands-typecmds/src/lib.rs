@@ -77,9 +77,21 @@ use types_parsenodes::{
     PROVOLATILE_IMMUTABLE, PROVOLATILE_VOLATILE,
 };
 use types_tuple::heaptuple::{
-    CSTRINGOID, DEFAULT_COLLATION_OID, FLOAT8OID, TYPALIGN_CHAR, TYPALIGN_DOUBLE, TYPALIGN_INT,
-    TYPALIGN_SHORT, TYPSTORAGE_EXTENDED, TYPSTORAGE_EXTERNAL, TYPSTORAGE_MAIN, TYPSTORAGE_PLAIN,
+    CSTRINGOID, DEFAULT_COLLATION_OID, FLOAT8OID, TEXTOID, TYPALIGN_CHAR, TYPALIGN_DOUBLE,
+    TYPALIGN_INT, TYPALIGN_SHORT, TYPSTORAGE_EXTENDED, TYPSTORAGE_EXTERNAL, TYPSTORAGE_MAIN,
+    TYPSTORAGE_PLAIN,
 };
+use types_core::catalog::BOOTSTRAP_SUPERUSERID;
+use types_parsenodes::{FUNC_PARAM_VARIADIC, PROKIND_FUNCTION, PROPARALLEL_SAFE};
+
+/// `INTERNALlanguageId` (`catalog/pg_language_d.h`) — the OID of the `internal`
+/// language, used for the range/multirange constructor functions.
+const INTERNALlanguageId: Oid = 12;
+
+/// `F_FMGR_INTERNAL_VALIDATOR` — the OID of `fmgr_internal_validator` (pg_proc
+/// builtin OID 2246), passed to `ProcedureCreate` as the language validator for
+/// the internal-language range/multirange constructor functions.
+const F_FMGR_INTERNAL_VALIDATOR: Oid = 2246;
 
 use backend_commands_typecmds_seams as me;
 use backend_commands_typecmds_seams::TypeCmdsRangeVar;
@@ -1485,6 +1497,216 @@ pub fn DefineRange<'mcx>(
     )?;
 
     Ok(address)
+}
+
+// ===========================================================================
+// makeRangeConstructors / makeMultirangeConstructors   (typecmds.c:1769-1972)
+// ===========================================================================
+
+/// `makeRangeConstructors(name, namespace, rangeOid, subtype)` (typecmds.c:1769).
+///
+/// Because there may exist several range types over the same subtype, the range
+/// type can't be uniquely determined from the subtype.  So it's impossible to
+/// define a polymorphic constructor; we generate new constructor functions
+/// explicitly for each range type.  We define 2 functions, with 2 and 3
+/// arguments, named `range_constructor2`/`range_constructor3`.
+fn makeRangeConstructors(name: &str, namespace: Oid, rangeOid: Oid, subtype: Oid) -> PgResult<()> {
+    const PROSRC: [&str; 2] = ["range_constructor2", "range_constructor3"];
+    const PRONARGS: [usize; 2] = [2, 3];
+
+    let constructorArgTypes: [Oid; 3] = [subtype, subtype, TEXTOID];
+
+    let referenced = ObjectAddress {
+        classId: TypeRelationId,
+        objectId: rangeOid,
+        objectSubId: 0,
+    };
+
+    for i in 0..PROSRC.len() {
+        let myself = backend_catalog_pg_proc::ProcedureCreate(
+            name,                          /* name: same as range type */
+            namespace,                     /* namespace */
+            false,                         /* replace */
+            false,                         /* returns set */
+            rangeOid,                      /* return type */
+            BOOTSTRAP_SUPERUSERID,         /* proowner */
+            INTERNALlanguageId,            /* language */
+            F_FMGR_INTERNAL_VALIDATOR,     /* language validator */
+            PROSRC[i],                     /* prosrc */
+            None,                          /* probin */
+            None,                          /* prosqlbody */
+            PROKIND_FUNCTION,
+            false,                         /* security_definer */
+            false,                         /* leakproof */
+            false,                         /* isStrict */
+            PROVOLATILE_IMMUTABLE,         /* volatility */
+            PROPARALLEL_SAFE,              /* parallel safety */
+            &constructorArgTypes[..PRONARGS[i]], /* parameterTypes */
+            None,                          /* allParameterTypes */
+            None,                          /* parameterModes */
+            None,                          /* parameterNames */
+            Vec::new(),                    /* parameterDefaults */
+            None,                          /* trftypes */
+            Vec::new(),                    /* trfoids */
+            None,                          /* proconfig */
+            InvalidOid,                    /* prosupport */
+            1.0,                           /* procost */
+            0.0,                           /* prorows */
+        )?;
+
+        /*
+         * Make the constructors internally-dependent on the range type so that
+         * they go away silently when the type is dropped.  Note that pg_dump
+         * depends on this choice to avoid dumping the constructors.
+         */
+        backend_catalog_dependency_seams::record_dependency_on::call(
+            myself,
+            referenced,
+            DEPENDENCY_INTERNAL,
+        )?;
+    }
+
+    Ok(())
+}
+
+/// `makeMultirangeConstructors(name, namespace, multirangeOid, rangeOid,
+/// rangeArrayOid, *castFuncOid)` (typecmds.c:1845).
+///
+/// We make a separate multirange constructor for each range type so its name
+/// can include the base type, like range constructors do.  Returns the OID of
+/// the 1-arg constructor usable to cast from a range to a multirange (the C
+/// `*castFuncOid` out-parameter).
+fn makeMultirangeConstructors(
+    name: &str,
+    namespace: Oid,
+    multirangeOid: Oid,
+    rangeOid: Oid,
+    rangeArrayOid: Oid,
+) -> PgResult<Oid> {
+    let referenced = ObjectAddress {
+        classId: TypeRelationId,
+        objectId: multirangeOid,
+        objectSubId: 0,
+    };
+
+    /* 0-arg constructor - for empty multiranges */
+    let myself = backend_catalog_pg_proc::ProcedureCreate(
+        name,
+        namespace,
+        false,
+        false,
+        multirangeOid,
+        BOOTSTRAP_SUPERUSERID,
+        INTERNALlanguageId,
+        F_FMGR_INTERNAL_VALIDATOR,
+        "multirange_constructor0",
+        None,
+        None,
+        PROKIND_FUNCTION,
+        false,
+        false,
+        true, /* isStrict */
+        PROVOLATILE_IMMUTABLE,
+        PROPARALLEL_SAFE,
+        &[], /* parameterTypes */
+        None,
+        None,
+        None,
+        Vec::new(),
+        None,
+        Vec::new(),
+        None,
+        InvalidOid,
+        1.0,
+        0.0,
+    )?;
+    backend_catalog_dependency_seams::record_dependency_on::call(
+        myself,
+        referenced,
+        DEPENDENCY_INTERNAL,
+    )?;
+
+    /*
+     * 1-arg constructor - for casts
+     *
+     * In theory we shouldn't need both this and the vararg (n-arg) constructor,
+     * but having a separate 1-arg function lets us define casts against it.
+     */
+    let myself = backend_catalog_pg_proc::ProcedureCreate(
+        name,
+        namespace,
+        false,
+        false,
+        multirangeOid,
+        BOOTSTRAP_SUPERUSERID,
+        INTERNALlanguageId,
+        F_FMGR_INTERNAL_VALIDATOR,
+        "multirange_constructor1",
+        None,
+        None,
+        PROKIND_FUNCTION,
+        false,
+        false,
+        true,
+        PROVOLATILE_IMMUTABLE,
+        PROPARALLEL_SAFE,
+        &[rangeOid], /* parameterTypes */
+        None,
+        None,
+        None,
+        Vec::new(),
+        None,
+        Vec::new(),
+        None,
+        InvalidOid,
+        1.0,
+        0.0,
+    )?;
+    backend_catalog_dependency_seams::record_dependency_on::call(
+        myself,
+        referenced,
+        DEPENDENCY_INTERNAL,
+    )?;
+    let castFuncOid = myself.objectId;
+
+    /* n-arg constructor - vararg */
+    let myself = backend_catalog_pg_proc::ProcedureCreate(
+        name,
+        namespace,
+        false,
+        false,
+        multirangeOid,
+        BOOTSTRAP_SUPERUSERID,
+        INTERNALlanguageId,
+        F_FMGR_INTERNAL_VALIDATOR,
+        "multirange_constructor2",
+        None,
+        None,
+        PROKIND_FUNCTION,
+        false,
+        false,
+        true,
+        PROVOLATILE_IMMUTABLE,
+        PROPARALLEL_SAFE,
+        &[rangeArrayOid],            /* parameterTypes */
+        Some(vec![rangeArrayOid]),  /* allParameterTypes */
+        Some(vec![FUNC_PARAM_VARIADIC]), /* parameterModes */
+        None,
+        Vec::new(),
+        None,
+        Vec::new(),
+        None,
+        InvalidOid,
+        1.0,
+        0.0,
+    )?;
+    backend_catalog_dependency_seams::record_dependency_on::call(
+        myself,
+        referenced,
+        DEPENDENCY_INTERNAL,
+    )?;
+
+    Ok(castFuncOid)
 }
 
 // ===========================================================================
@@ -4278,6 +4500,124 @@ pub fn init_seams() {
     // ProcessUtilitySlow `T_DefineStmt` dispatch target (utility.c) — the `kind`
     // switch; the OBJECT_TYPE (base type) leg runs the ported `DefineType` body.
     backend_tcop_utility_out_seams::define_stmt::set(define_stmt_seam);
+
+    // ProcessUtilitySlow `T_CreateEnumStmt` / `T_CreateRangeStmt` dispatch
+    // targets (utility.c) — decode the parse node and run the ported
+    // `DefineEnum` / `DefineRange` bodies.
+    backend_tcop_utility_out_seams::define_enum::set(define_enum_seam);
+    backend_tcop_utility_out_seams::define_range::set(define_range_seam);
+
+    // typecmds.c statics `makeRangeConstructors` / `makeMultirangeConstructors`,
+    // reached from `DefineRange`. Modeled as this unit's own outward seams
+    // (declared in `-seams`, called from `DefineRange`) so they could panic
+    // loudly while `ProcedureCreate` was unported; now ported here and installed.
+    me::make_range_constructors::set(make_range_constructors_seam);
+    me::make_multirange_constructors::set(make_multirange_constructors_seam);
+}
+
+/// Outward-seam adapter for `DefineEnum((CreateEnumStmt *) stmt)`
+/// (utility.c `ProcessUtilitySlow`): decode the `CreateEnumStmt`'s qualified
+/// type name and the ordered list of label `String` values, then run the
+/// ported [`DefineEnum`] body.
+fn define_enum_seam<'mcx>(mcx: Mcx<'mcx>, stmt: &RichNode<'mcx>) -> PgResult<ObjectAddress> {
+    let ces = match stmt.as_createenumstmt() {
+        Some(s) => s,
+        None => {
+            return Err(PgError::error(
+                "define_enum_seam: statement is not a CreateEnumStmt",
+            ))
+        }
+    };
+
+    // typeName: List of String nodes -> Vec<String>.
+    let mut type_name: Vec<String> = Vec::with_capacity(ces.typeName.len());
+    for n in ces.typeName.iter() {
+        match n.as_string() {
+            Some(s) => type_name.push(s.sval.as_str().to_string()),
+            None => {
+                return Err(PgError::error(
+                    "CREATE TYPE AS ENUM: type name element is not a String",
+                ))
+            }
+        }
+    }
+
+    // vals: List of String nodes (the labels) -> Vec<String>.
+    let mut vals: Vec<String> = Vec::with_capacity(ces.vals.len());
+    for n in ces.vals.iter() {
+        match n.as_string() {
+            Some(s) => vals.push(s.sval.as_str().to_string()),
+            None => {
+                return Err(PgError::error(
+                    "CREATE TYPE AS ENUM: enum label is not a String",
+                ))
+            }
+        }
+    }
+
+    DefineEnum(mcx, &type_name, &vals)
+}
+
+/// Outward-seam adapter for `DefineRange(pstate, (CreateRangeStmt *) stmt)`
+/// (utility.c `ProcessUtilitySlow`): decode the `CreateRangeStmt`'s qualified
+/// type name and the `DefElem` parameter list, then run the ported
+/// [`DefineRange`] body. `pstate` is threaded for parity with C but
+/// `DefineRange`'s port does not consult it.
+fn define_range_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    _pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
+    stmt: &RichNode<'mcx>,
+) -> PgResult<ObjectAddress> {
+    let crs = match stmt.as_createrangestmt() {
+        Some(s) => s,
+        None => {
+            return Err(PgError::error(
+                "define_range_seam: statement is not a CreateRangeStmt",
+            ))
+        }
+    };
+
+    // typeName: List of String nodes -> Vec<String>.
+    let mut type_name: Vec<String> = Vec::with_capacity(crs.typeName.len());
+    for n in crs.typeName.iter() {
+        match n.as_string() {
+            Some(s) => type_name.push(s.sval.as_str().to_string()),
+            None => {
+                return Err(PgError::error(
+                    "CREATE TYPE AS RANGE: type name element is not a String",
+                ))
+            }
+        }
+    }
+
+    // params: List of DefElem nodes -> Vec<parsenodes::Node::DefElem>.
+    let mut params: Vec<Node> = Vec::with_capacity(crs.params.len());
+    for n in crs.params.iter() {
+        params.push(backend_parser_parse_type::rich_node_to_parse(n)?);
+    }
+
+    DefineRange(mcx, &type_name, &params)
+}
+
+/// Inward-seam adapter for `makeRangeConstructors` (typecmds.c static).
+fn make_range_constructors_seam(
+    name: String,
+    namespace: Oid,
+    range_oid: Oid,
+    subtype: Oid,
+) -> PgResult<()> {
+    makeRangeConstructors(&name, namespace, range_oid, subtype)
+}
+
+/// Inward-seam adapter for `makeMultirangeConstructors` (typecmds.c static).
+fn make_multirange_constructors_seam(
+    name: String,
+    namespace: Oid,
+    multirange_oid: Oid,
+    range_oid: Oid,
+    range_array_oid: Oid,
+) -> PgResult<Oid> {
+    makeMultirangeConstructors(&name, namespace, multirange_oid, range_oid, range_array_oid)
 }
 
 /// Outward-seam adapter for the `DefineStmt` `kind` switch (utility.c:1395-1450).

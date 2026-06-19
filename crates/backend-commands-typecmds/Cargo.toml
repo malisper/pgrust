@@ -18,6 +18,7 @@ backend-catalog-pg-type = { path = "../backend-catalog-pg-type" }
 backend-catalog-pg-cast = { path = "../backend-catalog-pg-cast" }
 backend-catalog-pg-enum = { path = "../backend-catalog-pg-enum" }
 backend-catalog-pg-range = { path = "../backend-catalog-pg-range" }
+backend-catalog-pg-proc = { path = "../backend-catalog-pg-proc" }
 backend-catalog-pg-constraint = { path = "../backend-catalog-pg-constraint" }
 backend-parser-func = { path = "../backend-parser-func" }
 backend-parser-small1 = { path = "../backend-parser-small1" }
