@@ -6583,11 +6583,9 @@ fn create_gating_plan<'mcx>(
 
     // We might have a trivial Result plan already. Stacking one Result atop
     // another is silly, so discard the input plan in that case.
-    let is_trivial_result = matches!(
-        &plan,
-        Node::Result(rplan)
-            if rplan.plan.lefttree.is_none() && rplan.resconstantqual.is_none()
-    );
+    let is_trivial_result = plan
+        .as_result()
+        .is_some_and(|rplan| rplan.plan.lefttree.is_none() && rplan.resconstantqual.is_none());
     let splan: Option<Node<'mcx>> = if is_trivial_result { None } else { Some(plan) };
 
     // Always return the path's requested tlist; that's never a wrong choice.
