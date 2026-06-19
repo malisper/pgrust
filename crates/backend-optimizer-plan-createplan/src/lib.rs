@@ -2041,9 +2041,9 @@ fn create_bitmap_subplan<'mcx>(
             // produced IndexScan into a BitmapIndexScan.
             let iscan_node =
                 create_indexscan_plan(mcx, root, run, bitmapqual, Vec::new(), Vec::new(), false)?;
-            let iscan = match iscan_node {
-                Node::IndexScan(s) => s,
-                _ => {
+            let iscan = match iscan_node.into_indexscan() {
+                Some(s) => s,
+                None => {
                     return Err(PgError::error(
                         "create_bitmap_subplan: create_indexscan_plan did not return an IndexScan",
                     ))
@@ -2118,15 +2118,17 @@ fn create_bitmap_subplan<'mcx>(
 /// bitmap heap scan). Recurses to the leftmost leaf of an AND, sets `isshared`
 /// on OR / BitmapIndexScan nodes.
 fn bitmap_subplan_mark_shared(plan: &mut Node<'_>) -> PgResult<()> {
-    match plan {
-        Node::BitmapAnd(a) => {
+    match plan.node_tag() {
+        ntag::T_BitmapAnd => {
+            let a = plan.expect_bitmapand_mut();
             let first = a
                 .bitmapplans
                 .first_mut()
                 .expect("bitmap_subplan_mark_shared: empty BitmapAnd");
             bitmap_subplan_mark_shared(first)
         }
-        Node::BitmapOr(o) => {
+        ntag::T_BitmapOr => {
+            let o = plan.expect_bitmapor_mut();
             o.isshared = true;
             let first = o
                 .bitmapplans
@@ -2134,8 +2136,8 @@ fn bitmap_subplan_mark_shared(plan: &mut Node<'_>) -> PgResult<()> {
                 .expect("bitmap_subplan_mark_shared: empty BitmapOr");
             bitmap_subplan_mark_shared(first)
         }
-        Node::BitmapIndexScan(b) => {
-            b.isshared = true;
+        ntag::T_BitmapIndexScan => {
+            plan.expect_bitmapindexscan_mut().isshared = true;
             Ok(())
         }
         _ => Err(PgError::error(
