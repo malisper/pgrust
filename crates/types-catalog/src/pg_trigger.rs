@@ -123,3 +123,46 @@ pub const TRIGGER_FIRES_ALWAYS: i8 = b'A' as i8;
 pub const TRIGGER_FIRES_ON_REPLICA: i8 = b'R' as i8;
 /// `TRIGGER_DISABLED` — `'D'`.
 pub const TRIGGER_DISABLED: i8 = b'D' as i8;
+
+/* ==========================================================================
+ * pg_trigger INSERT row (the typed carrier for `CreateTrigger`'s
+ * `heap_form_tuple` + `CatalogTupleInsert`, mirroring policy.c's
+ * `PgPolicyInsertRow`).
+ * ======================================================================== */
+
+/// The values `CreateTrigger`/`CreateTriggerFiringOn` (commands/trigger.c)
+/// writes into a `pg_trigger` row. Carried across the typed
+/// `catalog_tuple_insert_pg_trigger` seam; the owner forms the heap tuple
+/// against the live `pg_trigger` descriptor and `CatalogTupleInsert`s it.
+///
+/// `tgargs` is the *raw* bytea payload C builds: each argument's bytes
+/// followed by a single NUL (`arg1\0arg2\0...`), exactly what
+/// `RelationBuildTriggers`' `split_tgargs` reads back. `tgattr` is the
+/// `int2vector` element list (empty for a non-column-specific trigger, which
+/// stores a zero-length `int2vector`). `tgqual`/`tgoldtable`/`tgnewtable` are
+/// `None` for the SQL NULL.
+#[derive(Clone, Debug)]
+pub struct PgTriggerInsertRow {
+    /// When `Some`, the trigger already exists (OR REPLACE / internal update):
+    /// the `oid` and the `t_self` TID of the row to `CatalogTupleUpdate`.
+    /// `None` means a fresh INSERT (the owner allocates the OID).
+    pub existing: Option<(Oid, types_tuple::heaptuple::ItemPointerData)>,
+    pub tgrelid: Oid,
+    pub tgparentid: Oid,
+    pub tgname: String,
+    pub tgfoid: Oid,
+    pub tgtype: i16,
+    pub tgenabled: i8,
+    pub tgisinternal: bool,
+    pub tgconstrrelid: Oid,
+    pub tgconstrindid: Oid,
+    pub tgconstraint: Oid,
+    pub tgdeferrable: bool,
+    pub tginitdeferred: bool,
+    pub tgnargs: i16,
+    pub tgattr: Vec<i16>,
+    pub tgargs: Vec<u8>,
+    pub tgqual: Option<String>,
+    pub tgoldtable: Option<String>,
+    pub tgnewtable: Option<String>,
+}

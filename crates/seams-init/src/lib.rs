@@ -1792,14 +1792,9 @@ mod recurrence_guard {
         //    on it. The body only re-reads OTHER catalogs; the one self-resolve
         //    (rd_opcoptions priming) was already deferred to
         //    `force_index_att_options`, so no re-entrant borrow. )
-        //  * `create_unique_key_recheck_trigger` (the `CreateTrigger` call in
-        //    index_constraint_create's deferrable leg): the trigger manager owner
-        //    has not ported `CreateTrigger` yet. Loud-panics until trigger.c's
-        //    CreateTrigger lands; only reached for a DEFERRABLE PK/UNIQUE.
         //
         // Delete each entry when its owner installs the seam.
         ("backend_bootstrap_bootstrap", "index_register"),
-        ("backend_commands_trigger", "create_unique_key_recheck_trigger"),
 
         // ============================================================
         // `ported`-status owner deferrals (surfaced when is_complete_status

@@ -86,6 +86,7 @@ const ANUM_PG_CLASS_RELALLFROZEN: i16 = 13;
 const ANUM_PG_CLASS_RELTOASTRELID: i16 = 14;
 const ANUM_PG_CLASS_RELHASINDEX: i16 = 15;
 const ANUM_PG_CLASS_RELHASRULES: i16 = 21;
+const ANUM_PG_CLASS_RELHASTRIGGERS: i16 = 22;
 const ANUM_PG_CLASS_RELHASSUBCLASS: i16 = 23;
 const ANUM_PG_CLASS_RELROWSECURITY: i16 = 24;
 const ANUM_PG_CLASS_RELFORCEROWSECURITY: i16 = 25;
@@ -1009,6 +1010,48 @@ fn set_relation_has_subclass_catalog(relid: Oid, relhassubclass: bool) -> PgResu
             Datum::from_bool(relhassubclass),
         );
         modify_and_update(mcx, &pg_class, &oldtup, &values, &nulls, &replaces)?;
+    } else {
+        // CacheInvalidateRelcacheByTuple(tuple): relisshared is column 16.
+        let relisshared = values[(16 - 1) as usize].as_bool();
+        let form = pg_class_form_for_inval(relid, relisshared);
+        backend_utils_cache_inval_seams::cache_invalidate_relcache_by_pg_class::call(relid, &form)?;
+    }
+    pg_class.close(RowExclusiveLock)?;
+    Ok(true)
+}
+
+/// `CreateTrigger`'s pg_class `relhastriggers` poke (commands/trigger.c:1016):
+/// open pg_class RowExclusiveLock, `SearchSysCacheCopy1(RELOID, relid)`; if
+/// `relhastriggers` is not already set, set it, `CatalogTupleUpdate`, and
+/// `CommandCounterIncrement`; otherwise `CacheInvalidateRelcacheByTuple` to
+/// force a relcache rebuild anyway. Returns `HeapTupleIsValid(tuple)`. Same
+/// update-or-invalidate shape as `set_relation_has_subclass_catalog`, but the
+/// changed branch also bumps the command counter (C does so under the `if
+/// (!relhastriggers)` block).
+fn set_pg_class_relhastriggers(relid: Oid) -> PgResult<bool> {
+    let ctx = MemoryContext::new("set_pg_class_relhastriggers");
+    let mcx = ctx.mcx();
+    let pg_class = table_open(mcx, cat::catalog::RELATION_RELATION_ID, RowExclusiveLock)?;
+    let Some(oldtup) = fetch_by_oid(mcx, &pg_class, ANUM_PG_CLASS_OID, relid)? else {
+        pg_class.close(RowExclusiveLock)?;
+        return Ok(false);
+    };
+    let (values, nulls) = deform(mcx, &pg_class, &oldtup)?;
+    let cur = values[(ANUM_PG_CLASS_RELHASTRIGGERS - 1) as usize].as_bool();
+    if !cur {
+        let mut values = values;
+        let mut nulls = nulls;
+        let mut replaces = vec![false; values.len()];
+        set_col(
+            &mut values,
+            &mut nulls,
+            &mut replaces,
+            ANUM_PG_CLASS_RELHASTRIGGERS,
+            Datum::from_bool(true),
+        );
+        modify_and_update(mcx, &pg_class, &oldtup, &values, &nulls, &replaces)?;
+        // CommandCounterIncrement();
+        backend_access_transam_xact_seams::command_counter_increment::call()?;
     } else {
         // CacheInvalidateRelcacheByTuple(tuple): relisshared is column 16.
         let relisshared = values[(16 - 1) as usize].as_bool();
@@ -2600,6 +2643,7 @@ pub fn install() {
     s::set_pg_class_reltoastrelid_inplace::set(set_pg_class_reltoastrelid_inplace);
     s::set_relation_rule_status::set(set_relation_rule_status);
     s::set_pg_class_row_security::set(set_pg_class_row_security);
+    s::set_pg_class_relhastriggers::set(set_pg_class_relhastriggers);
 
     // matview.c's SetMatViewPopulatedState pg_class write (cross-crate install:
     // the matview-deps seam's body is this pg_class single-field writer).

@@ -758,6 +758,92 @@ fn catalog_tuple_insert_pg_policy<'mcx>(
     Ok(policy_id)
 }
 
+/// `CStringGetByteaDatum` over a raw payload: a `bytea` varlena image (4-byte
+/// header `SET_VARSIZE(len + VARHDRSZ)` then the verbatim bytes). C builds the
+/// `tgargs` bytea as `arg1\0arg2\0...`; this wraps that payload unchanged.
+fn bytea_datum<'mcx>(mcx: Mcx<'mcx>, payload: &[u8]) -> PgResult<Datum<'mcx>> {
+    let total = 4 + payload.len();
+    let word = (total as u32) << 2;
+    let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    buf.resize(total, 0u8);
+    buf[0..4].copy_from_slice(&word.to_ne_bytes());
+    buf[4..].copy_from_slice(payload);
+    Ok(Datum::ByRef(buf))
+}
+
+/// `CreateTrigger`'s pg_trigger INSERT/UPDATE (commands/trigger.c): allocate the
+/// OID (fresh INSERT) or reuse the existing one (OR REPLACE / internal update),
+/// form the 19-column row, and `CatalogTupleInsert` / `CatalogTupleUpdate`.
+fn catalog_tuple_insert_pg_trigger<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    row: &cat::pg_trigger::PgTriggerInsertRow,
+) -> PgResult<types_core::Oid> {
+    use cat::pg_trigger as pt;
+
+    // trigoid = GetNewOidWithIndex(tgrel, TriggerOidIndexId, Anum_pg_trigger_oid)
+    // for a fresh trigger; reuse the existing OID for OR REPLACE.
+    let trigoid = match &row.existing {
+        Some((oid, _)) => *oid,
+        None => GetNewOidWithIndex(rel, pt::TriggerOidIndexId, pt::Anum_pg_trigger_oid)?,
+    };
+
+    let mut values: mcx::PgVec<'mcx, Datum<'mcx>> =
+        mcx::vec_with_capacity_in(mcx, pt::Natts_pg_trigger)?;
+    let mut isnull: mcx::PgVec<'mcx, bool> =
+        mcx::vec_with_capacity_in(mcx, pt::Natts_pg_trigger)?;
+    for _ in 0..pt::Natts_pg_trigger {
+        values.push(Datum::null());
+        isnull.push(false);
+    }
+
+    values[pt::Anum_pg_trigger_oid as usize - 1] = Datum::from_oid(trigoid);
+    values[pt::Anum_pg_trigger_tgrelid as usize - 1] = Datum::from_oid(row.tgrelid);
+    values[pt::Anum_pg_trigger_tgparentid as usize - 1] = Datum::from_oid(row.tgparentid);
+    values[pt::Anum_pg_trigger_tgname as usize - 1] = namein_datum(mcx, &row.tgname)?;
+    values[pt::Anum_pg_trigger_tgfoid as usize - 1] = Datum::from_oid(row.tgfoid);
+    values[pt::Anum_pg_trigger_tgtype as usize - 1] = Datum::from_i16(row.tgtype);
+    values[pt::Anum_pg_trigger_tgenabled as usize - 1] = Datum::from_char(row.tgenabled);
+    values[pt::Anum_pg_trigger_tgisinternal as usize - 1] = Datum::from_bool(row.tgisinternal);
+    values[pt::Anum_pg_trigger_tgconstrrelid as usize - 1] = Datum::from_oid(row.tgconstrrelid);
+    values[pt::Anum_pg_trigger_tgconstrindid as usize - 1] = Datum::from_oid(row.tgconstrindid);
+    values[pt::Anum_pg_trigger_tgconstraint as usize - 1] = Datum::from_oid(row.tgconstraint);
+    values[pt::Anum_pg_trigger_tgdeferrable as usize - 1] = Datum::from_bool(row.tgdeferrable);
+    values[pt::Anum_pg_trigger_tginitdeferred as usize - 1] = Datum::from_bool(row.tginitdeferred);
+    values[pt::Anum_pg_trigger_tgnargs as usize - 1] = Datum::from_i16(row.tgnargs);
+    values[pt::Anum_pg_trigger_tgattr as usize - 1] = buildint2vector(mcx, &row.tgattr)?;
+    values[pt::Anum_pg_trigger_tgargs as usize - 1] = bytea_datum(mcx, &row.tgargs)?;
+
+    match &row.tgqual {
+        Some(s) => values[pt::Anum_pg_trigger_tgqual as usize - 1] = cstring_to_text_datum(mcx, s)?,
+        None => isnull[pt::Anum_pg_trigger_tgqual as usize - 1] = true,
+    }
+    match &row.tgoldtable {
+        Some(s) => {
+            values[pt::Anum_pg_trigger_tgoldtable as usize - 1] = namein_datum(mcx, s)?;
+        }
+        None => isnull[pt::Anum_pg_trigger_tgoldtable as usize - 1] = true,
+    }
+    match &row.tgnewtable {
+        Some(s) => {
+            values[pt::Anum_pg_trigger_tgnewtable as usize - 1] = namein_datum(mcx, s)?;
+        }
+        None => isnull[pt::Anum_pg_trigger_tgnewtable as usize - 1] = true,
+    }
+
+    let tupdesc = rel.rd_att_clone_in(mcx)?;
+    let mut tup = heap_form_tuple(mcx, &tupdesc, &values, &isnull)?;
+
+    match &row.existing {
+        // CatalogTupleUpdate(tgrel, &tuple->t_self, newtup);
+        Some((_, tid)) => crate::keystone::CatalogTupleUpdate(mcx, rel, *tid, &mut tup)?,
+        // CatalogTupleInsert(tgrel, tuple);
+        None => CatalogTupleInsert(mcx, rel, &mut tup)?,
+    }
+
+    Ok(trigoid)
+}
+
 /// `AlterPolicy` / `RemoveRoleFromObjectPolicy`'s pg_policy UPDATE
 /// (commands/policy.c): `heap_modify_tuple` over the selectively-replaced
 /// columns, then `CatalogTupleUpdate`.
@@ -855,6 +941,9 @@ fn rename_policy_tuple<'mcx>(
 pub fn install() {
     backend_catalog_indexing_seams::catalog_tuple_insert_pg_policy::set(
         catalog_tuple_insert_pg_policy,
+    );
+    backend_catalog_indexing_seams::catalog_tuple_insert_pg_trigger::set(
+        catalog_tuple_insert_pg_trigger,
     );
     backend_catalog_indexing_seams::catalog_tuple_update_pg_policy::set(
         catalog_tuple_update_pg_policy,

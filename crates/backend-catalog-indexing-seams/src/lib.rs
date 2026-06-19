@@ -1305,6 +1305,40 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `CreateTrigger`'s pg_trigger INSERT/UPDATE (commands/trigger.c): allocate
+    /// the trigger OID (when `row.existing` is `None`) via
+    /// `GetNewOidWithIndex(tgrel, TriggerOidIndexId, Anum_pg_trigger_oid)`, build
+    /// the 19-column row (`oid`, `tgrelid`, `tgparentid`, `tgname` via `namein`,
+    /// `tgfoid`, `tgtype`, `tgenabled`, `tgisinternal`, `tgconstrrelid`,
+    /// `tgconstrindid`, `tgconstraint`, `tgdeferrable`, `tginitdeferred`,
+    /// `tgnargs`, the `tgattr` `int2vector`, the `tgargs` bytea, and the
+    /// text-or-NULL `tgqual`/`tgoldtable`/`tgnewtable`), then
+    /// `heap_form_tuple(RelationGetDescr(tgrel), values, nulls)` +
+    /// `CatalogTupleInsert(tgrel, tuple)` (fresh) or
+    /// `CatalogTupleUpdate(tgrel, &otid, newtup)` (when `row.existing` carries
+    /// the OID and `t_self` of the row being replaced). Returns the trigger OID.
+    /// `rel` is the open pg_trigger relation. `Err` carries the heap/index
+    /// mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_trigger<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        row: &types_catalog::pg_trigger::PgTriggerInsertRow,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `CreateTrigger`'s pg_class `relhastriggers` poke (commands/trigger.c):
+    /// `pgrel = table_open(RelationRelationId, RowExclusiveLock)`;
+    /// `tuple = SearchSysCacheCopy1(RELOID, relid)`; if `relhastriggers` is not
+    /// already set, set it and `CatalogTupleUpdate` + `CommandCounterIncrement`,
+    /// else `CacheInvalidateRelcacheByTuple(tuple)`; `table_close`. Returns
+    /// `HeapTupleIsValid(tuple)` — the caller raises `cache lookup failed for
+    /// relation %u` when `false`. `Err` carries the heap/index-mutation
+    /// `ereport(ERROR)`s.
+    pub fn set_pg_class_relhastriggers(relid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `AlterPolicy` / `RemoveRoleFromObjectPolicy`'s pg_policy UPDATE
     /// (commands/policy.c): `heap_modify_tuple(policy_tuple,
     /// RelationGetDescr(pg_policy_rel), values, isnull, replaces)` +

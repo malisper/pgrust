@@ -12,9 +12,14 @@
 //!   * The AFTER-trigger event queue + lifecycle ([`queue`]) and the firing
 //!     runtime ([`firing`]: `AfterTriggerExecute`, mark/invoke, end-query).
 //!
-//! Deferred (the catalog-write DDL leg — a separate family): `CreateTrigger`,
-//! `RemoveTriggerById`, `renametrig`, `EnableDisableTrigger`,
-//! `RelationBuildTriggers`, `AfterTriggerSetState` (the `SET CONSTRAINTS`
+//! The catalog-write DDL leg ([`create`]): `CreateTrigger` /
+//! `CreateTriggerFiringOn` — validate the def, insert the `pg_trigger` row, set
+//! `relhastriggers`, record dependencies, run the post-create hook. Drives the
+//! `create_trigger` (user CREATE TRIGGER) and `create_unique_key_recheck_trigger`
+//! (deferrable PK/UNIQUE + FK enforcement) seams.
+//!
+//! Still deferred (separate family): `RemoveTriggerById`, `renametrig`,
+//! `EnableDisableTrigger`, `AfterTriggerSetState` (the `SET CONSTRAINTS`
 //! command).  Each stays a loud 1:1-named seam-and-panic until its family lands.
 
 #![allow(non_snake_case)]
@@ -22,6 +27,7 @@
 #![allow(clippy::result_large_err)]
 #![allow(clippy::too_many_arguments)]
 
+pub mod create;
 pub mod firing;
 pub mod fmgr_builtins;
 pub mod queue;
@@ -38,6 +44,7 @@ std::thread_local! {
 pub fn init_seams() {
     firing::init_seams();
     ri_accessors::init_seams();
+    create::init_seams();
     fmgr_builtins::register_trigger_builtins();
 
     // trigger.c owns the `SessionReplicationRole` GUC global (read by
