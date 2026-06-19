@@ -127,7 +127,7 @@ pub fn get_expr_result_type<'mcx>(
 
     // C: else if (expr && IsA(expr, RowExpr) && ((RowExpr *) expr)->row_typeid == RECORDOID)
     //        /* We can resolve the record type by generating the tupdesc directly */
-    if let Some(Node::Expr(Expr::RowExpr(rexpr))) = expr {
+    if let Some(Expr::RowExpr(rexpr)) = expr.and_then(|n| n.as_expr()) {
         if rexpr.row_typeid == RECORDOID {
             let mut out = ResolvedResultType::default();
             // tupdesc = CreateTemplateTupleDesc(list_length(rexpr->args));
