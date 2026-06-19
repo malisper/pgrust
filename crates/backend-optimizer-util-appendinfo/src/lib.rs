@@ -36,6 +36,7 @@ use mcx::Mcx;
 use types_core::primitive::{AttrNumber, Index, Oid};
 use types_error::{PgError, PgResult};
 use types_nodes::nodes::CmdType;
+use types_nodes::primnodes::etag;
 use types_nodes::primnodes::{
     CoercionForm, Const, ConvertRowtypeExpr, Expr, Var, VarReturningType,
 };
@@ -294,8 +295,9 @@ fn adjust_appendrel_attrs_mutator(
 ) -> Expr {
     let appinfos = context.appinfos;
 
-    match node {
-        Expr::Var(mut var) => {
+    match node.expr_tag() {
+        etag::T_Var => {
+            let mut var = node.expect_into_var();
             if var.varlevelsup != 0 {
                 return Expr::Var(var); // no changes needed
             }
@@ -428,7 +430,8 @@ fn adjust_appendrel_attrs_mutator(
                 Expr::Var(var)
             }
         }
-        Expr::CurrentOfExpr(mut cexpr) => {
+        etag::T_CurrentOfExpr => {
+            let mut cexpr = node.expect_into_currentofexpr();
             for ai in appinfos {
                 if cexpr.cvarno == ai.parent_relid {
                     cexpr.cvarno = ai.child_relid;
@@ -437,7 +440,8 @@ fn adjust_appendrel_attrs_mutator(
             }
             Expr::CurrentOfExpr(cexpr)
         }
-        Expr::PlaceHolderVar(mut phv) => {
+        etag::T_PlaceHolderVar => {
+            let mut phv = node.expect_into_placeholdervar();
             // Copy the PlaceHolderVar node with correct mutation of subnodes.
             if let Some(inner) = phv.phexpr.take() {
                 let mutated = adjust_appendrel_attrs_mutator(*inner, context, pending);
@@ -451,9 +455,9 @@ fn adjust_appendrel_attrs_mutator(
             Expr::PlaceHolderVar(phv)
         }
         // Generic recursion for all other expression node types.
-        other => {
+        _ => {
             let mut local_err: Option<PgError> = None;
-            let result = nodefuncs::expression_tree_mutator(other, &mut |child: Expr| {
+            let result = nodefuncs::expression_tree_mutator(node, &mut |child: Expr| {
                 if local_err.is_some() || context.err.is_some() {
                     return child;
                 }
