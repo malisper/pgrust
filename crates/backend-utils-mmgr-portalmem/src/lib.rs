@@ -961,24 +961,31 @@ pub fn PortalDrop(portal: &Portal, isTopCommit: bool) -> PgResult<()> {
     // delete tuplestore storage, if any (drop the owned holdContext arena)
     portal.borrow_mut().holdContext = None;
 
-    // release subsidiary storage (drop the owned portalContext arena)
-    if portal.borrow().portalContext.is_none() {
-        return Err(ereport(ERROR)
-            .errmsg_internal(
-                "PortalDrop: portal has no portalContext (CreatePortal always assigns one)",
-            )
-            .into_error());
+    // release subsidiary storage (drop the owned portalContext arena).
+    //
+    // C: `MemoryContextDelete(portal->portalContext)` is unconditional, and the
+    // PortalData struct it frees is removed from the hash table at the top of
+    // this function, so it is never reached twice. Here a portal handle can be
+    // walked into PortalDrop more than once during error/abort cleanup (the
+    // owned-handle table is reachable through several cleanup paths), at which
+    // point `portalContext` has already been taken. Treating an already-cleared
+    // context as a completed delete (a no-op) matches C's idempotent
+    // `MemoryContextDelete` semantics. Raising an ERROR here instead would fire
+    // *during* transaction abort, producing "AbortTransaction while in ABORT
+    // state" and terminating the backend — a fatal cascade on top of an
+    // otherwise recoverable statement error.
+    if portal.borrow().portalContext.is_some() {
+        // The interned plan list and copied parameter list live in
+        // portalContext; drop them before the context so they are freed through
+        // a live arena (C: MemoryContextDelete(portalContext) frees them and
+        // nothing reads them again).
+        {
+            let mut p = portal.borrow_mut();
+            p.stmts = None;
+            p.portalParams = None;
+        }
+        portal.borrow_mut().portalContext = None;
     }
-    // The interned plan list and copied parameter list live in portalContext;
-    // drop them before the context so they are freed through a live arena (C:
-    // MemoryContextDelete(portalContext) frees them and nothing reads them
-    // again).
-    {
-        let mut p = portal.borrow_mut();
-        p.stmts = None;
-        p.portalParams = None;
-    }
-    portal.borrow_mut().portalContext = None;
 
     // release portal struct (it's in TopPortalContext): the table no longer
     // holds it, so dropping the last handle frees the record.
