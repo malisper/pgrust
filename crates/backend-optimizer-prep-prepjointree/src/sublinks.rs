@@ -586,7 +586,7 @@ fn pull_up_sublinks_qual_recurse<'mcx>(
         };
         let mut newclauses: alloc::vec::Vec<Expr> = alloc::vec::Vec::new();
         for oldclause in args.into_iter() {
-            let old_node = alloc_in(mcx, Node::Expr(oldclause))?;
+            let old_node = alloc_in(mcx, Node::mk_expr(mcx, oldclause))?;
             let newclause = pull_up_sublinks_qual_recurse(
                 mcx,
                 root,

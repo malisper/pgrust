@@ -770,7 +770,7 @@ fn pull_up_simple_subquery<'mcx>(
         let query_node = Node::mk_query(mcx, subquery.clone_in(mcx)?);
         for i in 0..n {
             if let Some(expr) = subquery.targetList[i].expr.take() {
-                let node = Node::Expr(PgBox::into_inner(expr));
+                let node = Node::mk_expr(mcx, PgBox::into_inner(expr));
                 let flat = rewritemanip::flatten_join_alias_vars::call(mcx, &query_node, node)?;
                 if let Some(e) = flat.into_expr() {
                     subquery.targetList[i].expr = Some(alloc_in(mcx, e)?);
@@ -2478,7 +2478,7 @@ fn pullup_replace_vars_targetlist<'mcx>(
     let n = tlist.len();
     for i in 0..n {
         if let Some(expr) = tlist[i].expr.take() {
-            let node = Node::Expr(PgBox::into_inner(expr));
+            let node = Node::mk_expr(mcx, PgBox::into_inner(expr));
             let newnode = pullup_replace_vars(mcx, root, node, rvcontext, outer_has_sublinks)?;
             if let Some(e) = newnode.into_expr() {
                 tlist[i].expr = Some(alloc_in(mcx, e)?);

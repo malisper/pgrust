@@ -1384,7 +1384,7 @@ fn subquery_planner_carried<'mcx>(
                     }
                 };
                 if let Some(e) = expr_opt {
-                    let node = Node::Expr(e);
+                    let node = Node::mk_expr(mcx, e);
                     let flattened = backend_optimizer_util_vars::flatten::flatten_group_exprs(
                         mcx, &mut root, &ctx_query, node,
                     )?;
@@ -1401,7 +1401,7 @@ fn subquery_planner_carried<'mcx>(
                 None => None,
             };
             if let Some(e) = having_opt {
-                let node = Node::Expr(e);
+                let node = Node::mk_expr(mcx, e);
                 let flattened = backend_optimizer_util_vars::flatten::flatten_group_exprs(
                     mcx, &mut root, &ctx_query, node,
                 )?;
@@ -1525,7 +1525,7 @@ fn subquery_planner_carried<'mcx>(
                     && has_grouping_sets
                     && {
                         // bms_is_member(root->group_rtindex, pull_varnos(root, havingclause))
-                        let node = Node::Expr(havingclause.clone_in(mcx)?);
+                        let node = Node::mk_expr(mcx, havingclause.clone_in(mcx)?);
                         let varnos =
                             backend_optimizer_util_vars::var::pull_varnos(Some(&root), &node);
                         bms_is_member_relids(group_rtindex, &varnos)
@@ -6029,7 +6029,7 @@ fn make_sort_input_target<'mcx>(
     // pulled Var/Aggref/WindowFunc/PHV into the arena to obtain its handle.
     let mut postponable_vars: Vec<types_pathnodes::NodeId> = Vec::new();
     for &col in &postponable_cols {
-        let node = Node::Expr(root.node(col).clone());
+        let node = Node::mk_expr(run.mcx(), root.node(col).clone());
         for v in backend_optimizer_util_vars::pull_var_clause(&node, pvc_flags) {
             postponable_vars.push(root.alloc_node(v));
         }
