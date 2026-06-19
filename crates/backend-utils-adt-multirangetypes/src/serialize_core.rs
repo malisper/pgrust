@@ -242,6 +242,36 @@ fn palloc0<'mcx>(mcx: Mcx<'mcx>, size: usize) -> PgResult<*mut u8> {
     Ok(p.as_ptr() as *mut u8)
 }
 
+/// `(&[u8]) view of VARSIZE_ANY(DatumGetPointer(src))` for a varlena pointer
+/// `Datum`: read the leading header to learn the total size, then return the
+/// full image. Used to obtain the `anyrange[]` array image for the value-lane
+/// `deconstruct_array_values_bytes` walk.
+///
+/// # Safety
+/// `src` is a by-reference array `Datum` whose pointer word targets a live
+/// `mcx`-owned varlena (the fmgr boundary copies the arg image into `mcx`).
+unsafe fn datum_varlena_image<'a>(src: Datum) -> &'a [u8] {
+    let p = src.as_usize() as *const u8;
+    let total = varsize_any(p);
+    core::slice::from_raw_parts(p, total)
+}
+
+/// Copy a by-reference element's verbatim varlena bytes (carried on the
+/// value-lane `Datum::ByRef`) into a fresh MAXALIGN'd `mcx` image, returning the
+/// pointer-word `Datum` a `DatumGet*P` kernel can dereference. This is the
+/// value-lane bridge that lets `datum_get_range_type_p` operate on a real
+/// pointer instead of a bare in-buffer offset.
+fn byref_bytes_to_arg_word<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<Datum> {
+    let base = palloc0(mcx, image.len().max(1))?;
+    // SAFETY: `base` heads a freshly allocated, zero-filled, image.len()-byte
+    // MAXALIGN'd region; copying the verbatim varlena bytes in yields a valid
+    // plain varlena living for `'mcx`.
+    unsafe {
+        core::ptr::copy_nonoverlapping(image.as_ptr(), base, image.len());
+    }
+    Ok(Datum::from_usize(base as usize))
+}
+
 /// The detoasted element type's metadata, dereferenced from
 /// `rangetyp->rngelemtype` (C unconditionally derefs this for a range type).
 struct ElemType {
@@ -479,9 +509,17 @@ pub fn multirange_constructor2<'mcx>(
     let ranges: Vec<RangeTypeP<'mcx>> = if dims == 0 {
         Vec::new()
     } else {
-        let elements = array_seams::deconstruct_array::call(
+        // `range` is a pass-by-reference (varlena) element type. The bare-word
+        // `deconstruct_array` stores only the in-buffer *offset* in each element
+        // Datum, which `datum_get_range_type_p` would then dereference as a real
+        // pointer — SIGSEGV on a real `anyrange[]`. Use the value-lane element
+        // walk, which materializes each member range's verbatim varlena bytes as
+        // a `Datum::ByRef`; copy those bytes into a live `mcx` image whose pointer
+        // word `datum_get_range_type_p` can safely (de)toast.
+        let image = unsafe { datum_varlena_image(range_array) };
+        let elements = array_seams::deconstruct_array_values_bytes::call(
             mcx,
-            range_array,
+            image,
             rngtypid,
             rangetyp.typlen,
             rangetyp.typbyval,
@@ -489,15 +527,18 @@ pub fn multirange_constructor2<'mcx>(
         )?;
 
         let mut ranges = Vec::with_capacity(elements.len());
-        for (elem, isnull) in elements.iter().copied() {
-            if isnull {
+        for (elem, isnull) in elements.iter() {
+            if *isnull {
                 return Err(PgError::error(
                     "multirange values cannot contain null members".to_string(),
                 )
                 .with_sqlstate(types_error::error::ERRCODE_NULL_VALUE_NOT_ALLOWED));
             }
-            // make_multirange will do its own copy.
-            ranges.push(range_seams::datum_get_range_type_p::call(mcx, elem)?);
+            // Copy the element's verbatim varlena bytes into a live `mcx` image
+            // and hand its real pointer word to `datum_get_range_type_p`, which
+            // detoasts a short/compressed element. make_multirange copies again.
+            let elem_word = byref_bytes_to_arg_word(mcx, elem.as_ref_bytes())?;
+            ranges.push(range_seams::datum_get_range_type_p::call(mcx, elem_word)?);
         }
         ranges
     };

@@ -2559,7 +2559,13 @@ pub fn deconstruct_tid_array<'mcx>(
     // DatumGetArrayTypeP(arraydatum) — detoast the array varlena.
     let arr = detoast_seam::detoast_attr::call(mcx, datum_as_byte_window(arraydatum))?;
     let (elmlen, elmbyval, elmalign) = deconstruct_builtin_meta(foundation::TIDOID)?;
-    let pairs = deconstruct_array(mcx, &arr, foundation::TIDOID, elmlen, elmbyval, elmalign)?;
+    // `tid` is a 6-byte pass-by-reference element type. The bare-word
+    // `deconstruct_array` would store only the in-buffer *offset* in each
+    // element Datum, which `datum_payload_bytes` (via `datum_to_item_pointer`)
+    // would then dereference as a real pointer — SIGSEGV on a real `tid[]`.
+    // Use the value-lane element walk, which materializes each element's
+    // verbatim 6 stored bytes as a `Datum::ByRef`.
+    let pairs = deconstruct_array_values(mcx, &arr, foundation::TIDOID, elmlen, elmbyval, elmalign)?;
 
     let mut out = mcx::vec_with_capacity_in::<(ItemPointerData, bool)>(mcx, pairs.len())?;
     for (d, isnull) in pairs.iter() {
@@ -2567,7 +2573,7 @@ pub fn deconstruct_tid_array<'mcx>(
         let ip = if *isnull {
             ItemPointerData::default()
         } else {
-            datum_to_item_pointer(mcx, *d)?
+            item_pointer_from_value(mcx, d)?
         };
         out.push((ip, *isnull));
     }
@@ -3364,8 +3370,44 @@ fn text_to_pgstring<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> PgResult<PgString<'mc
     Ok(s)
 }
 
+/// Reinterpret a value-lane `tid` element (the 6 verbatim stored bytes carried
+/// as a `Datum::ByRef`, produced by `deconstruct_array_values`) as an
+/// `ItemPointerData`. This reads the captured bytes by value — it never
+/// dereferences a bare-word offset as a pointer (the SIGSEGV the owned model
+/// avoids for pass-by-reference elements).
+fn item_pointer_from_value<'mcx>(
+    _mcx: Mcx<'mcx>,
+    d: &types_tuple::Datum<'mcx>,
+) -> PgResult<ItemPointerData> {
+    use types_tuple::backend_access_common_heaptuple::Datum as TDatum;
+    let bytes: &[u8] = match d {
+        TDatum::ByRef(b) => b,
+        other => {
+            return Err(PgError::error(format!(
+                "tid array element is not a by-reference value: {other:?}"
+            ))
+            .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR));
+        }
+    };
+    // ItemPointerData = { BlockIdData { bi_hi: u16, bi_lo: u16 }, ip_posid: u16 }
+    if bytes.len() < 6 {
+        return Err(PgError::error("malformed tid array element")
+            .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR));
+    }
+    // Little-endian on-disk layout of ItemPointerData (bi_hi, bi_lo, ip_posid),
+    // each a u16, exactly as the catalog stores a `tid`.
+    Ok(ItemPointerData {
+        ip_blkid: types_tuple::heaptuple::BlockIdData {
+            bi_hi: u16::from_le_bytes([bytes[0], bytes[1]]),
+            bi_lo: u16::from_le_bytes([bytes[2], bytes[3]]),
+        },
+        ip_posid: u16::from_le_bytes([bytes[4], bytes[5]]),
+    })
+}
+
 /// Reinterpret a `tid` element Datum (pointer word into a 6-byte
 /// `ItemPointerData`) as the value, reading its bytes through the byref owner.
+#[allow(dead_code)]
 fn datum_to_item_pointer<'mcx>(mcx: Mcx<'mcx>, d: Datum) -> PgResult<ItemPointerData> {
     let bytes = datum_payload_bytes(mcx, foundation::SIZEOF_ITEM_POINTER_DATA, d)?;
     // ItemPointerData = { BlockIdData { bi_hi: u16, bi_lo: u16 }, ip_posid: u16 }
