@@ -1559,7 +1559,8 @@ fn eval_const_expressions_in_rtfunc<'mcx>(
         if let Some(fe) = rtf.funcexpr.take() {
             // funcexpr is a Node holding an Expr; fold the Expr.
             let node = PgBox::into_inner(fe);
-            if let Node::Expr(e) = node {
+            if node.is_expr() {
+                let e = node.into_expr().expect("is_expr implies into_expr");
                 let folded = backend_optimizer_util_clauses::fold::eval_const_expressions(mcx, e)?;
                 rtf.funcexpr = Some(alloc_in(mcx, Node::Expr(folded))?);
             } else {

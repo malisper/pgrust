@@ -385,7 +385,9 @@ fn attach_quals_to_joinexpr_base<'mcx>(
     // `*jtlink` is either the original inner JoinExpr (no splice) or a stack of
     // spliced JoinExprs whose `larg` chain bottoms out at it; descend `larg` to
     // the bottom-most JoinExpr and store the quals there.
-    if let Some(Node::JoinExpr(j)) = find_bottom_joinexpr(jtlink.as_deref_mut()) {
+    if let Some(j) =
+        find_bottom_joinexpr(jtlink.as_deref_mut()).and_then(|n| n.as_joinexpr_mut())
+    {
         j.quals = newquals;
     }
 }
