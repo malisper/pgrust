@@ -289,10 +289,10 @@ pub fn interpret_sql_body<'mcx>(
             transformed.push(mcx::alloc_in(mcx, Node::mk_query(mcx, q))?);
         }
         // *sql_body_out = (Node *) list_make1(transformed_stmts);
-        let inner = Node::List(transformed);
+        let inner = Node::mk_list(mcx, transformed);
         let mut outer_vec = mcx::PgVec::new_in(mcx);
         outer_vec.push(mcx::alloc_in(mcx, inner)?);
-        Node::List(outer_vec)
+        Node::mk_list(mcx, outer_vec)
     } else {
         // q = transformStmt(pstate, sql_body_in); *sql_body_out = (Node *) q;
         let q = transform_one_body_stmt(mcx, &pinfo, qstr, sql_body_in)?;

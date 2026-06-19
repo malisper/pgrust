@@ -131,13 +131,13 @@ pub(crate) fn errpos(pstate: &ParseState<'_>, location: i32) -> i32 {
 /// `Node *` at the var/agg/windowfunc walk sites. In the split model that is an
 /// owned [`Expr`] wrapped as [`Node::Expr`]. An absent expr is an internal error
 /// (the C code always has a non-NULL `tle->expr` at these call sites).
-fn tle_expr_node<'mcx>(tle: &TargetEntry<'mcx>) -> Node<'mcx> {
+fn tle_expr_node<'mcx>(mcx: mcx::Mcx<'mcx>, tle: &TargetEntry<'mcx>) -> Node<'mcx> {
     let expr = tle
         .expr
         .as_deref()
         .cloned()
         .expect("TargetEntry.expr must be present");
-    Node::Expr(expr)
+    Node::mk_expr(mcx, expr)
 }
 
 /// `tle->expr` as a borrowed [`Expr`] for `exprType`/`equal`/`strip_*`.
@@ -228,12 +228,13 @@ pub fn transformLimitClause<'mcx>(
 // ===========================================================================
 
 /// Check that given expr has no Vars of the current query level.
-pub(crate) fn checkExprIsVarFree(
-    pstate: &mut ParseState<'_>,
+pub(crate) fn checkExprIsVarFree<'mcx>(
+    pstate: &mut ParseState<'mcx>,
     n: &Expr,
     constructName: &str,
 ) -> PgResult<()> {
-    let node = Node::Expr(n.clone());
+    let mcx: Mcx<'mcx> = *pstate.p_rtable.allocator();
+    let node = Node::mk_expr(mcx, n.clone());
     if contain_vars_of_level(&node, 0) {
         let location = locate_var_of_level(&node, 0);
         return Err(ereport(ERROR)
@@ -253,13 +254,13 @@ pub(crate) fn checkExprIsVarFree(
 // ===========================================================================
 
 /// Validate a targetlist entry found by findTargetlistEntrySQL92.
-fn checkTargetlistEntrySQL92(
-    pstate: &mut ParseState<'_>,
-    tle: &TargetEntry<'_>,
+fn checkTargetlistEntrySQL92<'mcx>(
+    pstate: &mut ParseState<'mcx>,
+    tle: &TargetEntry<'mcx>,
     exprKind: ParseExprKind,
 ) -> PgResult<()> {
     if exprKind == EXPR_KIND_GROUP_BY {
-        let tle_expr = tle_expr_node(tle);
+        let tle_expr = tle_expr_node(*pstate.p_rtable.allocator(), tle);
         /* reject aggregates and window functions */
         if pstate.p_hasAggs && rewritemanip::contain_aggs_of_level::call(&tle_expr, 0) {
             return Err(ereport(ERROR)

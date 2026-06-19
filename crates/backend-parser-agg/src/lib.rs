@@ -992,8 +992,8 @@ pub fn transformWindowFuncCall<'mcx>(
 ) -> PgResult<types_nodes::primnodes::WindowFunc> {
     let mut wfunc = wfunc;
     // A window function call can't contain another one (but aggs are OK).
-    if pstate.p_hasWindowFuncs && contain_windowfuncs_exprs(&wfunc.args) {
-        let loc = locate_windowfunc_exprs(&wfunc.args);
+    if pstate.p_hasWindowFuncs && contain_windowfuncs_exprs(pstate_mcx(pstate), &wfunc.args) {
+        let loc = locate_windowfunc_exprs(pstate_mcx(pstate), &wfunc.args);
         return Err(ereport(ERROR)
             .errcode(ERRCODE_WINDOWING_ERROR)
             .errmsg("window function calls cannot be nested")
@@ -1178,11 +1178,11 @@ pub fn transformWindowFuncCall<'mcx>(
 }
 
 /// `contain_windowfuncs((Node *) list)` over an `Expr` list.
-fn contain_windowfuncs_exprs(args: &[Expr]) -> bool {
+fn contain_windowfuncs_exprs<'mcx>(mcx: Mcx<'mcx>, args: &[Expr]) -> bool {
     for e in args {
         // C wraps the whole list in one Node and walks; an Expr list visits each
         // element. We test each element's subtree via the rewriteManip seam.
-        let n = wrap_expr_ref(e);
+        let n = wrap_expr_ref(mcx, e);
         if backend_rewrite_rewritemanip_seams::contain_windowfuncs::call(&n) {
             return true;
         }
@@ -1191,9 +1191,9 @@ fn contain_windowfuncs_exprs(args: &[Expr]) -> bool {
 }
 
 /// `locate_windowfunc((Node *) list)` over an `Expr` list.
-fn locate_windowfunc_exprs(args: &[Expr]) -> i32 {
+fn locate_windowfunc_exprs<'mcx>(mcx: Mcx<'mcx>, args: &[Expr]) -> i32 {
     for e in args {
-        let n = wrap_expr_ref(e);
+        let n = wrap_expr_ref(mcx, e);
         let loc = backend_rewrite_rewritemanip_seams::locate_windowfunc::call(&n);
         if loc >= 0 {
             return loc;
@@ -1208,7 +1208,7 @@ fn locate_windowfunc_exprs(args: &[Expr]) -> i32 {
 /// for the common scalar/Var/funcexpr argument lists). Aggref cannot be cloned,
 /// but window-func argument lists never contain top-level Aggrefs requiring a
 /// clone at this position (the contain/locate walkers descend, not clone).
-fn wrap_expr_ref(e: &Expr) -> Node<'static> {
+fn wrap_expr_ref<'mcx>(mcx: Mcx<'mcx>, e: &Expr) -> Node<'mcx> {
     // The contain/locate seams take a borrowed Node and never retain it. We
     // build a borrowed view by re-creating a Node referencing a cloned Expr;
     // for Aggref (non-Clone) we cannot, so fall back to a structural clone via
@@ -1225,7 +1225,7 @@ fn wrap_expr_ref(e: &Expr) -> Node<'static> {
             // transformAggregateCall already rejected).
             panic!("transformWindowFuncCall: unexpected Aggref at top of window-func argument list")
         }
-        other => Node::Expr(clone_expr_static(other)),
+        other => Node::mk_expr(mcx, clone_expr_static(other)),
     }
 }
 

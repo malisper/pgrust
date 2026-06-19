@@ -321,10 +321,13 @@ fn extractRemainingColumns<'mcx>(
             /* Yes, so emit it as next output column */
             src_colnos.push(attnum);
             res_colnames.push(colname.clone());
-            res_colvars.push(Node::Expr(Expr::Var(buildVarFromNSColumn(
-                pstate,
-                &src_nscolumns[(attnum - 1) as usize],
-            )?)));
+            res_colvars.push(Node::mk_expr(
+                *pstate.p_rtable.allocator(),
+                Expr::Var(buildVarFromNSColumn(
+                    pstate,
+                    &src_nscolumns[(attnum - 1) as usize],
+                )?),
+            ));
             /* Copy the input relation's nscolumn data for this column */
             res_nscolumns.push(src_nscolumns[(attnum - 1) as usize]);
             colcount += 1;
