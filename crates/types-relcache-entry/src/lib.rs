@@ -167,6 +167,18 @@ impl OwnedTupleDesc {
     ) -> PgResult<mcx::PgBox<'mcx, types_tuple::heaptuple::TupleDescData<'mcx>>> {
         let attrs = self.build_form_attrs(relid);
         let mut td = backend_access_common_tupdesc::CreateTupleDesc(mcx, &attrs)?;
+        // `CreateTupleDesc` re-derives each `CompactAttribute.attnullability`
+        // from `attnotnull` alone (`populate_compact_attribute`), which yields
+        // `ATTNULLABLE_UNKNOWN` for a NOT-NULL column on a non-catalog relation.
+        // The relcache build (`RelationBuildTupleDesc` / `CheckNNConstraintFetch`)
+        // has already resolved that to its final value on the owned `OwnedAttr`
+        // rows (UNKNOWN -> VALID for any not-null constraint not marked invalid).
+        // Carry that resolved nullability into the projected descriptor so the
+        // planner (`get_relation_info`) sees the same per-attr nullability the C
+        // relcache stamps onto `rd_att`'s CompactAttribute array.
+        for (i, a) in self.attrs.iter().enumerate() {
+            td.compact_attrs[i].attnullability = a.attnullability;
+        }
         td.tdtypeid = self.tdtypeid;
         td.tdtypmod = self.tdtypmod;
         td.tdrefcount = 1;
