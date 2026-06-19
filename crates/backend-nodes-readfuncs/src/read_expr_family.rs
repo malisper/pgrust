@@ -1182,26 +1182,144 @@ fn read_sublink<'mcx>(mcx: Mcx<'mcx>) -> PgResult<types_nodes::primnodes::SubLin
     })
 }
 
+/// Read a framed `( {TARGETENTRY ...} ... )` list field into the
+/// `Vec<TargetEntry<'static>>` carrier of [`pn::Aggref::args`]. Each element is a
+/// framed `TargetEntry` reconstructed via `node_read`; its mcx-allocated children
+/// are fully owned in `mcx`, so the `'mcx` → `'static` erase is a
+/// lifetime-parameter-only transmute (the exact idiom `clone_aggref` /
+/// `tlist_into_static` use). `<>`/`()` → empty.
+fn read_aggref_args_field<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Vec<pn::TargetEntry<'static>>> {
+    let _label = next_token()?;
+    let elements = match read::node_read(mcx, None)? {
+        None => return Ok(Vec::new()),
+        Some(n) => {
+            let __n = PgBox::into_inner(n);
+            let __tag = __n.node_tag();
+            match __n.into_list() {
+                Some(elems) => elems,
+                None => {
+                    return Err(elog_error(alloc::format!(
+                        "expected List for Aggref.args, got {:?}",
+                        __tag
+                    )))
+                }
+            }
+        }
+    };
+    let mut out: Vec<pn::TargetEntry<'static>> = Vec::with_capacity(elements.len());
+    for cell in elements {
+        let __n = PgBox::into_inner(cell);
+        let __tag = __n.node_tag();
+        match __n.into_targetentry() {
+            Some(te) => {
+                // The TargetEntry's children (expr/resname) are fully owned in
+                // `mcx`; erase `'mcx` → the Expr tree's `'static` notional
+                // lifetime via the unsafe-permitting types-nodes helper (this
+                // crate is `#![forbid(unsafe_code)]`). Same idiom as
+                // `clone_aggref`.
+                out.push(pn::targetentry_into_static(te));
+            }
+            None => {
+                return Err(elog_error(alloc::format!(
+                    "expected TargetEntry in Aggref.args, got {:?}",
+                    __tag
+                )))
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Read a framed `( {SORTGROUPCLAUSE ...} ... )` list field (Aggref's
+/// `aggorder`/`aggdistinct`) into `Vec<SortGroupClause>`. Each element is a
+/// framed `SortGroupClause` reconstructed via `node_read`. `<>`/`()` → empty.
+fn read_sortgroupclause_list_field<'mcx>(
+    mcx: Mcx<'mcx>,
+) -> PgResult<Vec<types_nodes::rawnodes::SortGroupClause>> {
+    let _label = next_token()?;
+    let elements = match read::node_read(mcx, None)? {
+        None => return Ok(Vec::new()),
+        Some(n) => {
+            let __n = PgBox::into_inner(n);
+            let __tag = __n.node_tag();
+            match __n.into_list() {
+                Some(elems) => elems,
+                None => {
+                    return Err(elog_error(alloc::format!(
+                        "expected List for SortGroupClause field, got {:?}",
+                        __tag
+                    )))
+                }
+            }
+        }
+    };
+    let mut out = Vec::with_capacity(elements.len());
+    for cell in elements {
+        let __n = PgBox::into_inner(cell);
+        match __n {
+            Node::SortGroupClause(s) => out.push(s),
+            other => {
+                return Err(elog_error(alloc::format!(
+                    "expected SortGroupClause in list, got {:?}",
+                    other.node_tag()
+                )))
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// `_readAggref` (readfuncs.funcs.c). Reads every field in the exact order
+/// [`crate::out_expr_family::out_aggref`] (i.e. `_outAggref`) wrote them. The
+/// `aggno`/`aggtransno`/`aggpresorted` fields carry `read_write_ignore` in C and
+/// are NOT serialized — they default (0/0/false) as `makeNode` would zero them.
+fn read_aggref<'mcx>(mcx: Mcx<'mcx>) -> PgResult<pn::Aggref> {
+    let aggfnoid = read_oid_field()?;
+    let aggtype = read_oid_field()?;
+    let aggcollid = read_oid_field()?;
+    let inputcollid = read_oid_field()?;
+    let aggtranstype = read_oid_field()?;
+    let aggargtypes = read_oid_list_field()?;
+    let aggdirectargs = read_expr_list_field(mcx)?;
+    let args = read_aggref_args_field(mcx)?;
+    let aggorder = read_sortgroupclause_list_field(mcx)?;
+    let aggdistinct = read_sortgroupclause_list_field(mcx)?;
+    let aggfilter = read_opt_box_expr(mcx)?;
+    let aggstar = read_bool_field()?;
+    let aggvariadic = read_bool_field()?;
+    let aggkind = crate::read_char_field()? as i8;
+    let agglevelsup = read_uint_field()?;
+    let aggsplit = read_enum_field()?;
+    let location = read_location_field()?;
+    Ok(pn::Aggref {
+        aggfnoid,
+        aggtype,
+        aggcollid,
+        inputcollid,
+        aggtranstype,
+        aggargtypes,
+        aggdirectargs,
+        args,
+        aggorder,
+        aggdistinct,
+        aggfilter,
+        aggstar,
+        aggvariadic,
+        aggkind,
+        aggpresorted: false,
+        agglevelsup,
+        aggsplit,
+        aggno: 0,
+        aggtransno: 0,
+        location,
+    })
+}
+
 /// Dispatch the read_expr_family LABELs this module owns. Reconstructs the
 /// post-analysis `Node::Expr(Expr::X)` form for each shared LABEL.
 pub(crate) fn try_read<'mcx>(mcx: Mcx<'mcx>, label: &[u8]) -> Option<PgResult<Node<'mcx>>> {
     let res: PgResult<Node<'mcx>> = match label {
-        b"AGGREF" => {
-            // NOTE: the OUT side (`_outAggref`) serializes faithfully through the
-            // expr family's framed TARGETENTRY/SORTGROUPCLAUSE list writers, but
-            // `_readAggref` is carrier-blocked: `Aggref.args` is
-            // `Vec<TargetEntry<'static>>`, so a reader cannot store the
-            // mcx-allocated `TargetEntry` children it reads off the cursor into the
-            // `'static` Vec (the same `'static`-carrier blocker as SUBPLAN /
-            // ALTERNATIVESUBPLAN). Reconstructing Aggref needs a `'mcx`-carrying
-            // `args` field (an Expr-model follow-on) — mirror-pg-and-panic on READ
-            // (the OUT side stays available for plan-tree serialization / debug).
-            return Some(Err(elog_error(
-                "_readAggref: Aggref.args is Vec<TargetEntry<'static>>; cannot store \
-                 mcx-allocated TargetEntry children — needs a lifetime-carrying \
-                 args carrier (same `'static`-carrier blocker as SUBPLAN)",
-            )));
-        }
+        b"AGGREF" => read_aggref(mcx).map(|n| Node::Expr(Expr::Aggref(n))),
         b"GROUPINGFUNC" => read_grouping_func(mcx).map(|n| Node::Expr(Expr::GroupingFunc(n))),
         b"WINDOWFUNC" => read_window_func(mcx).map(|n| Node::Expr(Expr::WindowFunc(n))),
         b"MERGESUPPORTFUNC" => {
@@ -1321,6 +1439,80 @@ mod tests {
         let mcx = ctx.mcx();
         let n = string_to_node(mcx, s).expect("string_to_node");
         PgBox::into_inner(n)
+    }
+
+    /// `_outAggref`/`_readAggref`: an Aggref carrying an aggregated `args`
+    /// TargetEntry (whose expr is a Var), one `aggdistinct` SortGroupClause, and
+    /// the scalar fields round-trips through the framed TARGETENTRY /
+    /// SORTGROUPCLAUSE list writers and the `'static`-erase READ bridge. Before
+    /// this fix `_readAggref` was a seam-panic.
+    #[test]
+    fn aggref_with_args_round_trips() {
+        ensure_seams();
+        let ctx =
+            std::boxed::Box::leak(std::boxed::Box::new(MemoryContext::new("read-aggref-test")));
+        let mcx = ctx.mcx();
+
+        let te = types_nodes::primnodes::TargetEntry {
+            expr: Some(mcx::alloc_in(mcx, Expr::Var(mk_var())).expect("alloc")),
+            resno: 1,
+            resname: None,
+            ressortgroupref: 1,
+            resorigtbl: 0,
+            resorigcol: 0,
+            resjunk: false,
+        };
+        let sgc = types_nodes::rawnodes::SortGroupClause {
+            tleSortGroupRef: 1,
+            eqop: 96,
+            sortop: 97,
+            reverse_sort: false,
+            nulls_first: false,
+            hashable: true,
+        };
+        let aggref = types_nodes::primnodes::Aggref {
+            aggfnoid: 2147,
+            aggtype: 20,
+            aggcollid: 0,
+            inputcollid: 0,
+            aggtranstype: 20,
+            aggargtypes: std::vec![23],
+            aggdirectargs: std::vec::Vec::new(),
+            args: std::vec![types_nodes::primnodes::targetentry_into_static(te)],
+            aggorder: std::vec::Vec::new(),
+            aggdistinct: std::vec![sgc],
+            aggfilter: None,
+            aggstar: false,
+            aggvariadic: false,
+            aggkind: b'n' as i8,
+            aggpresorted: false,
+            agglevelsup: 0,
+            aggsplit: 0,
+            aggno: -1,
+            aggtransno: -1,
+            location: -1,
+        };
+        let node = Node::Expr(Expr::Aggref(aggref));
+
+        let text = backend_nodes_outfuncs::nodeToString(mcx, &node).expect("out");
+        let parsed = string_to_node(mcx, text.as_str()).expect("read");
+        let text2 = backend_nodes_outfuncs::nodeToString(mcx, &parsed).expect("re-out");
+        assert_eq!(text.as_str(), text2.as_str(), "Aggref round-trip not stable");
+
+        let parsed = PgBox::into_inner(parsed);
+        let tag = parsed.node_tag();
+        match parsed.into_expr() {
+            Some(Expr::Aggref(a)) => {
+                assert_eq!(a.aggfnoid, 2147);
+                assert_eq!(a.aggargtypes, std::vec![23]);
+                assert_eq!(a.args.len(), 1, "args TargetEntry lost in round-trip");
+                assert_eq!(a.args[0].resno, 1);
+                assert!(a.args[0].expr.is_some(), "args[0].expr lost");
+                assert_eq!(a.aggdistinct.len(), 1, "aggdistinct lost in round-trip");
+                assert_eq!(a.aggdistinct[0].eqop, 96);
+            }
+            _ => panic!("expected Aggref, got {tag:?}"),
+        }
     }
 
     #[test]

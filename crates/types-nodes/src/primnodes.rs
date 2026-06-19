@@ -2344,6 +2344,20 @@ fn clone_aggref<'b>(a: &Aggref, mcx: Mcx<'b>) -> PgResult<Aggref> {
 /// idiom [`clone_sublink`] performs inline (cf. `query_into_static` in the
 /// parser). Lives here, in the unsafe-permitting `types-nodes` crate, so
 /// `#![forbid(unsafe_code)]` callers (e.g. readfuncs) can reconstruct the slot.
+/// Erase a fully-mcx-owned [`TargetEntry`]'s lifetime to the Expr tree's
+/// `'static` notional lifetime, the slot [`Aggref::args`] uses. The data
+/// (`expr`/`resname` children) is fully owned in `mcx`; this is a
+/// lifetime-parameter-only transmute (the exact idiom [`clone_aggref`] and
+/// `tlist_into_static` perform inline). Lives here, in the unsafe-permitting
+/// `types-nodes` crate, so `#![forbid(unsafe_code)]` callers (e.g. readfuncs)
+/// can reconstruct `Aggref.args` after reading the framed `TargetEntry`
+/// children off the node-string cursor.
+pub fn targetentry_into_static(te: TargetEntry<'_>) -> TargetEntry<'static> {
+    // SAFETY: `te`'s children are fully owned in mcx; lifetime-parameter-only
+    // erase to the Expr tree's 'static notional lifetime (cf. clone_aggref).
+    unsafe { core::mem::transmute(te) }
+}
+
 pub fn query_box_into_static<'b>(
     q: crate::copy_query::Query<'b>,
     mcx: Mcx<'b>,

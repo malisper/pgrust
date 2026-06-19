@@ -145,11 +145,9 @@ fn write_sortgroupclause_list_field(
 /// through the framed list writers above (`lib.rs`'s `_outTargetEntry` and the
 /// parse family's `_outSortGroupClause`).
 ///
-/// READ asymmetry: `_readAggref` is carrier-blocked — `Aggref.args` is
-/// `Vec<TargetEntry<'static>>`, so a reader cannot store the mcx-allocated
-/// children it reads off the cursor (same `'static`-carrier blocker as SUBPLAN).
-/// OUT therefore serializes faithfully (for plan-tree dump / debug) while READ
-/// stays a precise seam-panic until the carrier carries `'mcx`.
+/// READ side: `read_expr_family::read_aggref` reconstructs every field in this
+/// order; `Aggref.args` reads framed `TargetEntry` children into `mcx` and erases
+/// `'mcx` → `'static` (the same lifetime-only transmute `clone_aggref` uses).
 fn out_aggref(buf: &mut String, n: &types_nodes::primnodes::Aggref, wl: bool) {
     buf.push_str("AGGREF");
     write_oid_field(buf, "aggfnoid", n.aggfnoid);
