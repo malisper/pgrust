@@ -264,6 +264,16 @@ pub fn assign_datestyle(_newval: Option<&str>, extra: Option<&GucHookExtra>) {
     own::assign_date_style::call(myextra.date_style, myextra.date_order);
 }
 
+/// `IntervalStyle` GUC assign hook. In C the enum's `conf->variable` is the
+/// `int IntervalStyle` global itself, so it has no assign hook; here the
+/// canonical per-backend store is `backend_utils_adt_datetime::settings`
+/// (the global it reads on the interval-output path), so the applied SET must
+/// push the new value there. The `guc_tables` enum variable slot still records
+/// the value for `SHOW`/`pg_settings`.
+pub fn assign_intervalstyle(newval: i32, _extra: Option<&GucHookExtra>) {
+    backend_utils_adt_datetime::settings::set_interval_style(newval);
+}
+
 /* =========================================================================
  * TIMEZONE
  *
@@ -1141,6 +1151,7 @@ pub fn init_seams() {
 
     hooks::check_datestyle.install(check_datestyle);
     hooks::assign_datestyle.install(assign_datestyle);
+    hooks::assign_intervalstyle.install(assign_intervalstyle);
     hooks::check_timezone.install(check_timezone);
     hooks::assign_timezone.install(assign_timezone);
     hooks::show_timezone.install(show_timezone);

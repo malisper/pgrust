@@ -107,6 +107,7 @@ pub fn date_in(str: &str) -> PgResult<DateADT> {
     let mut fsec: fsec_t = 0;
     let mut dtype: i32 = 0;
     let mut tzp: i32 = 0;
+    let mut extra = types_datetime::DateTimeErrorExtra::default();
 
     // C date_in: workbuf[MAXDATELEN + 1] (date.c:128).
     let mut dterr = ParseDateTime(
@@ -126,10 +127,11 @@ pub fn date_in(str: &str) -> PgResult<DateADT> {
             &mut tt,
             &mut fsec,
             Some(&mut tzp),
+            &mut extra,
         );
     }
     if dterr != 0 {
-        return Err(date_parse_error(dterr, str));
+        return Err(date_parse_error(dterr, str, &extra));
     }
 
     match dtype {
@@ -144,7 +146,7 @@ pub fn date_in(str: &str) -> PgResult<DateADT> {
         }
         d if d == DTK_LATE => return Ok(DATEVAL_NOEND),
         d if d == DTK_EARLY => return Ok(DATEVAL_NOBEGIN),
-        _ => return Err(date_parse_error(DTERR_BAD_FORMAT, str)),
+        _ => return Err(date_parse_error(DTERR_BAD_FORMAT, str, &extra)),
     }
 
     // Prevent overflow in Julian-day routines.
@@ -508,21 +510,27 @@ fn unit_not_recognized(lowunits: &str) -> PgError {
 // ---------------------------------------------------------------------------
 
 /// Map a `DTERR_*` code to a [`PgError`] for the date type.
-fn date_parse_error(dterr: i32, str: &str) -> PgError {
-    datetime_parse_error_for(dterr, str, "date")
+fn date_parse_error(dterr: i32, str: &str, extra: &types_datetime::DateTimeErrorExtra) -> PgError {
+    datetime_parse_error_for(dterr, str, "date", extra)
 }
 
 /// Shared `DateTimeParseError` mapping used by both the date and the
 /// timestamp/timestamptz/interval cores (`datatype` selects the bad-format
 /// message label).  Mirrors datetime.c:4214 case-by-case.
-pub(crate) fn datetime_parse_error_for(dterr: i32, str: &str, datatype: &str) -> PgError {
+pub(crate) fn datetime_parse_error_for(
+    dterr: i32,
+    str: &str,
+    datatype: &str,
+    extra: &types_datetime::DateTimeErrorExtra,
+) -> PgError {
     use types_datetime::{
-        DTERR_FIELD_OVERFLOW, DTERR_INTERVAL_OVERFLOW, DTERR_MD_FIELD_OVERFLOW,
-        DTERR_TZDISP_OVERFLOW,
+        DTERR_BAD_TIMEZONE, DTERR_BAD_ZONE_ABBREV, DTERR_FIELD_OVERFLOW, DTERR_INTERVAL_OVERFLOW,
+        DTERR_MD_FIELD_OVERFLOW, DTERR_TZDISP_OVERFLOW,
     };
     use types_error::{
-        ERRCODE_DATETIME_FIELD_OVERFLOW, ERRCODE_INTERVAL_FIELD_OVERFLOW,
-        ERRCODE_INVALID_DATETIME_FORMAT, ERRCODE_INVALID_TIME_ZONE_DISPLACEMENT_VALUE,
+        ERRCODE_CONFIG_FILE_ERROR, ERRCODE_DATETIME_FIELD_OVERFLOW, ERRCODE_INTERVAL_FIELD_OVERFLOW,
+        ERRCODE_INVALID_DATETIME_FORMAT, ERRCODE_INVALID_PARAMETER_VALUE,
+        ERRCODE_INVALID_TIME_ZONE_DISPLACEMENT_VALUE,
     };
 
     // ERRCODE_DATETIME_FIELD_OVERFLOW shares SQLSTATE 22008 with
@@ -544,6 +552,23 @@ pub(crate) fn datetime_parse_error_for(dterr: i32, str: &str, datatype: &str) ->
     if dterr == DTERR_TZDISP_OVERFLOW {
         return PgError::error(format!("time zone displacement out of range: \"{str}\""))
             .with_sqlstate(ERRCODE_INVALID_TIME_ZONE_DISPLACEMENT_VALUE);
+    }
+    if dterr == DTERR_BAD_TIMEZONE {
+        // datetime.c:4246: names the offending zone (extra->dtee_timezone).
+        let tzname = extra.dtee_timezone.as_deref().unwrap_or(str);
+        return PgError::error(format!("time zone \"{tzname}\" not recognized"))
+            .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE);
+    }
+    if dterr == DTERR_BAD_ZONE_ABBREV {
+        // datetime.c:4252: names the underlying zone, with a detail about the
+        // abbreviation that referenced it.
+        let tzname = extra.dtee_timezone.as_deref().unwrap_or(str);
+        let abbrev = extra.dtee_abbrev.as_deref().unwrap_or("");
+        return PgError::error(format!("time zone \"{tzname}\" not recognized"))
+            .with_sqlstate(ERRCODE_CONFIG_FILE_ERROR)
+            .with_detail(format!(
+                "This time zone name appears in the configuration file for time zone abbreviation \"{abbrev}\"."
+            ));
     }
     // DTERR_BAD_FORMAT and default.
     PgError::error(format!(

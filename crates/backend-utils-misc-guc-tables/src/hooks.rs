@@ -15,6 +15,7 @@ pub static assign_createrole_self_grant: GucStringAssignHook = GucSlot::new("ass
 pub static assign_datestyle: GucStringAssignHook = GucSlot::new("assign_datestyle");
 pub static assign_debug_io_direct: GucStringAssignHook = GucSlot::new("assign_debug_io_direct");
 pub static assign_default_text_search_config: GucStringAssignHook = GucSlot::new("assign_default_text_search_config");
+pub static assign_intervalstyle: GucEnumAssignHook = GucSlot::new("assign_intervalstyle");
 pub static assign_io_combine_limit: GucIntAssignHook = GucSlot::new("assign_io_combine_limit");
 pub static assign_io_max_combine_limit: GucIntAssignHook = GucSlot::new("assign_io_max_combine_limit");
 pub static assign_io_method: GucEnumAssignHook = GucSlot::new("assign_io_method");

@@ -84,6 +84,7 @@ pub fn timetz_in(str: &str, typmod: i32) -> PgResult<TimeTzADT> {
     let mut fsec: fsec_t = 0;
     let mut dtype: i32 = 0;
     let mut tz: i32 = 0;
+    let mut extra = types_datetime::DateTimeErrorExtra::default();
 
     // C timetz_in: workbuf[MAXDATELEN + 1] (date.c:2353).
     let mut dterr = ParseDateTime(
@@ -103,6 +104,7 @@ pub fn timetz_in(str: &str, typmod: i32) -> PgResult<TimeTzADT> {
             &mut tt,
             &mut fsec,
             Some(&mut tz),
+            &mut extra,
         );
     }
     if dterr != 0 {
@@ -112,6 +114,7 @@ pub fn timetz_in(str: &str, typmod: i32) -> PgResult<TimeTzADT> {
             dterr,
             str,
             "time with time zone",
+            &extra,
         ));
     }
 

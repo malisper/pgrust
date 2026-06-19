@@ -1901,6 +1901,7 @@ pub fn DecodeDateTime(
     tm: &mut pg_tm,
     fsec: &mut fsec_t,
     tzp: Option<&mut i32>,
+    extra: &mut DateTimeErrorExtra,
 ) -> i32 {
     let mut fmask = 0;
     let mut tmask;
@@ -2004,7 +2005,10 @@ pub fn DecodeDateTime(
                                 namedTz = Some(tz);
                                 tmask = DTK_M(TZ);
                             }
-                            _ => return DTERR_BAD_TIMEZONE,
+                            _ => {
+                                extra.dtee_timezone = Some(field[i].clone());
+                                return DTERR_BAD_TIMEZONE;
+                            }
                         }
                     }
                 } else {
@@ -2171,6 +2175,10 @@ pub fn DecodeDateTime(
                     &mut dyntz_zone,
                 );
                 if dterr != 0 {
+                    if dterr == DTERR_BAD_ZONE_ABBREV {
+                        extra.dtee_timezone = dyntz_zone;
+                        extra.dtee_abbrev = Some(field[i].clone());
+                    }
                     return dterr;
                 }
                 type_ = typ;
@@ -2401,6 +2409,7 @@ pub fn DecodeTimeOnly(
     tm: &mut pg_tm,
     fsec: &mut fsec_t,
     tzp: Option<&mut i32>,
+    extra: &mut DateTimeErrorExtra,
 ) -> i32 {
     let mut fmask = 0;
     let mut tmask;
@@ -2476,7 +2485,10 @@ pub fn DecodeTimeOnly(
                             ftype[i] = DTK_TZ;
                             tmask = DTK_M(TZ);
                         }
-                        _ => return DTERR_BAD_TIMEZONE,
+                        _ => {
+                            extra.dtee_timezone = Some(field[i].clone());
+                            return DTERR_BAD_TIMEZONE;
+                        }
                     }
                 }
             }
@@ -2654,6 +2666,10 @@ pub fn DecodeTimeOnly(
                     &mut dyntz_zone,
                 );
                 if dterr != 0 {
+                    if dterr == DTERR_BAD_ZONE_ABBREV {
+                        extra.dtee_timezone = dyntz_zone;
+                        extra.dtee_abbrev = Some(field[i].clone());
+                    }
                     return dterr;
                 }
                 type_ = typ;
@@ -3590,6 +3606,7 @@ mod tests {
             &mut tm,
             &mut fsec,
             Some(&mut tz),
+            &mut types_datetime::DateTimeErrorExtra::default(),
         );
         assert_eq!(r, 0, "DecodeDateTime should succeed");
         assert_eq!((tm.tm_year, tm.tm_mon, tm.tm_mday), (2024, 1, 15));
@@ -3612,6 +3629,7 @@ mod tests {
             &mut tm,
             &mut fsec,
             Some(&mut tz),
+            &mut types_datetime::DateTimeErrorExtra::default(),
         );
         assert_eq!(r, 0);
         assert_eq!((tm.tm_year, tm.tm_mon, tm.tm_mday), (2024, 1, 15));
@@ -3635,6 +3653,7 @@ mod tests {
             &mut tm,
             &mut fsec,
             Some(&mut tz),
+            &mut types_datetime::DateTimeErrorExtra::default(),
         );
         assert_eq!(r, 0);
         assert_eq!((tm.tm_year, tm.tm_mon, tm.tm_mday), (2024, 1, 15));
@@ -3659,6 +3678,7 @@ mod tests {
             &mut tm,
             &mut fsec,
             Some(&mut tz),
+            &mut types_datetime::DateTimeErrorExtra::default(),
         );
         set_date_order(saved);
         assert_eq!(r, 0, "DMY slash date should decode");
@@ -3685,6 +3705,7 @@ mod tests {
             &mut tm,
             &mut fsec,
             Some(&mut tz),
+            &mut types_datetime::DateTimeErrorExtra::default(),
         );
         assert_eq!(r, DTERR_FIELD_OVERFLOW);
     }
@@ -3708,6 +3729,7 @@ mod tests {
             &mut tm,
             &mut fsec,
             Some(&mut tz),
+            &mut types_datetime::DateTimeErrorExtra::default(),
         );
         assert_eq!(r, DTERR_BAD_FORMAT);
     }

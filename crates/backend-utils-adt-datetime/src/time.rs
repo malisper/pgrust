@@ -191,6 +191,7 @@ pub fn time_in(str: &str, typmod: i32) -> PgResult<TimeADT> {
     let mut fsec: fsec_t = 0;
     let mut dtype: i32 = 0;
     let mut tz: i32 = 0;
+    let mut extra = types_datetime::DateTimeErrorExtra::default();
 
     // C time_in: workbuf[MAXDATELEN + 1] (date.c:1454).
     let mut dterr = ParseDateTime(
@@ -210,12 +211,13 @@ pub fn time_in(str: &str, typmod: i32) -> PgResult<TimeADT> {
             &mut tt,
             &mut fsec,
             Some(&mut tz),
+            &mut extra,
         );
     }
     if dterr != 0 {
         // C: DateTimeParseError(dterr, &extra, str, "time", ...) maps each dterr
         // code to its own SQLSTATE rather than a blanket 22007.
-        return Err(crate::date::datetime_parse_error_for(dterr, str, "time"));
+        return Err(crate::date::datetime_parse_error_for(dterr, str, "time", &extra));
     }
 
     let mut result = tm2time(&tt, fsec);

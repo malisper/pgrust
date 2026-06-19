@@ -237,7 +237,10 @@ pub fn interval_in(str: &str, typmod: i32) -> DtResult<Interval> {
             dterr = DTERR_INTERVAL_OVERFLOW;
         }
         return Err(crate::timestamp::datetime_parse_error(
-            dterr, str, "interval",
+            dterr,
+            str,
+            "interval",
+            &types_datetime::DateTimeErrorExtra::default(),
         ));
     }
 

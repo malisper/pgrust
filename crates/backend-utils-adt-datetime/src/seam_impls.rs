@@ -135,6 +135,7 @@ pub fn parse_recovery_target_time(newval: String) -> bool {
     let mut fsec: fsec_t = 0;
     let mut tz: i32 = 0;
     let mut dtype: i32 = 0;
+    let mut extra = types_datetime::DateTimeErrorExtra::default();
 
     // C workbuf is MAXDATELEN + MAXDATEFIELDS here (not MAXDATELEN + 1).
     let mut dterr = ParseDateTime(
@@ -154,6 +155,7 @@ pub fn parse_recovery_target_time(newval: String) -> bool {
             &mut tm,
             &mut fsec,
             Some(&mut tz),
+            &mut extra,
         );
     }
     if dterr != 0 {

@@ -101,8 +101,13 @@ pub fn internal_error(message: impl Into<String>) -> PgError {
 /// mapping in [`crate::date::datetime_parse_error_for`] so the SQLSTATE / message
 /// / hint per code stays identical to the date type's.  Shared by the timestamp,
 /// timestamptz and interval cores.
-pub(crate) fn datetime_parse_error(dterr: i32, str: &str, datatype: &str) -> PgError {
-    crate::date::datetime_parse_error_for(dterr, str, datatype)
+pub(crate) fn datetime_parse_error(
+    dterr: i32,
+    str: &str,
+    datatype: &str,
+    extra: &types_datetime::DateTimeErrorExtra,
+) -> PgError {
+    crate::date::datetime_parse_error_for(dterr, str, datatype, extra)
 }
 
 // ---------------------------------------------------------------------------
@@ -385,6 +390,7 @@ pub fn timestamp_in(str: &str, typmod: i32) -> DtResult<Timestamp> {
     let mut nf: usize = 0;
     let mut field: Vec<String> = Vec::new();
     let mut ftype: Vec<i32> = Vec::new();
+    let mut extra = types_datetime::DateTimeErrorExtra::default();
 
     // C timestamp_in: workbuf[MAXDATELEN + MAXDATEFIELDS] (timestamp.c:184).
     let mut dterr = crate::decode::ParseDateTime(
@@ -404,10 +410,11 @@ pub fn timestamp_in(str: &str, typmod: i32) -> DtResult<Timestamp> {
             &mut tm,
             &mut fsec,
             Some(&mut tz),
+            &mut extra,
         );
     }
     if dterr != 0 {
-        return Err(datetime_parse_error(dterr, str, "timestamp"));
+        return Err(datetime_parse_error(dterr, str, "timestamp", &extra));
     }
 
     let mut result: Timestamp = match dtype {
@@ -476,6 +483,7 @@ pub fn timestamptz_in(str: &str, typmod: i32) -> DtResult<TimestampTz> {
     let mut nf: usize = 0;
     let mut field: Vec<String> = Vec::new();
     let mut ftype: Vec<i32> = Vec::new();
+    let mut extra = types_datetime::DateTimeErrorExtra::default();
 
     // C timestamptz_in: workbuf[MAXDATELEN + MAXDATEFIELDS] (timestamp.c:436).
     let mut dterr = crate::decode::ParseDateTime(
@@ -495,10 +503,11 @@ pub fn timestamptz_in(str: &str, typmod: i32) -> DtResult<TimestampTz> {
             &mut tm,
             &mut fsec,
             Some(&mut tz),
+            &mut extra,
         );
     }
     if dterr != 0 {
-        return Err(datetime_parse_error(dterr, str, "timestamp with time zone"));
+        return Err(datetime_parse_error(dterr, str, "timestamp with time zone", &extra));
     }
 
     let mut result: TimestampTz = match dtype {
@@ -2718,12 +2727,12 @@ mod tests {
             ERRCODE_INVALID_TIME_ZONE_DISPLACEMENT_VALUE,
         };
 
-        let e = datetime_parse_error(DTERR_FIELD_OVERFLOW, "x", "timestamp");
+        let e = datetime_parse_error(DTERR_FIELD_OVERFLOW, "x", "timestamp", &types_datetime::DateTimeErrorExtra::default());
         assert_eq!(e.sqlstate(), ERRCODE_DATETIME_VALUE_OUT_OF_RANGE);
         assert_eq!(e.message(), "date/time field value out of range: \"x\"");
         assert_eq!(e.hint(), None);
 
-        let e = datetime_parse_error(DTERR_MD_FIELD_OVERFLOW, "x", "timestamp");
+        let e = datetime_parse_error(DTERR_MD_FIELD_OVERFLOW, "x", "timestamp", &types_datetime::DateTimeErrorExtra::default());
         assert_eq!(e.sqlstate(), ERRCODE_DATETIME_VALUE_OUT_OF_RANGE);
         assert_eq!(e.message(), "date/time field value out of range: \"x\"");
         assert_eq!(
@@ -2731,15 +2740,15 @@ mod tests {
             Some("Perhaps you need a different \"DateStyle\" setting.")
         );
 
-        let e = datetime_parse_error(DTERR_INTERVAL_OVERFLOW, "x", "interval");
+        let e = datetime_parse_error(DTERR_INTERVAL_OVERFLOW, "x", "interval", &types_datetime::DateTimeErrorExtra::default());
         assert_eq!(e.sqlstate(), ERRCODE_INTERVAL_FIELD_OVERFLOW);
         assert_eq!(e.message(), "interval field value out of range: \"x\"");
 
-        let e = datetime_parse_error(DTERR_TZDISP_OVERFLOW, "x", "timestamp with time zone");
+        let e = datetime_parse_error(DTERR_TZDISP_OVERFLOW, "x", "timestamp with time zone", &types_datetime::DateTimeErrorExtra::default());
         assert_eq!(e.sqlstate(), ERRCODE_INVALID_TIME_ZONE_DISPLACEMENT_VALUE);
         assert_eq!(e.message(), "time zone displacement out of range: \"x\"");
 
-        let e = datetime_parse_error(DTERR_BAD_FORMAT, "x", "timestamp");
+        let e = datetime_parse_error(DTERR_BAD_FORMAT, "x", "timestamp", &types_datetime::DateTimeErrorExtra::default());
         assert_eq!(e.sqlstate(), ERRCODE_INVALID_DATETIME_FORMAT);
         assert_eq!(
             e.message(),
