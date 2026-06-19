@@ -120,6 +120,13 @@ pub struct TuplestorestateState<'mcx> {
     truncated: bool,
     usedDisk: bool,
     maxSpace: i64,
+    /// `state->allowedMem`: the in-memory byte budget (`work_mem`/`maxKBytes`
+    /// * 1024). The store's `context` is itself **unlimited**; spilling to a
+    /// temp file is driven by comparing the context's recursive allocated
+    /// bytes (`MemoryContextMemAllocated(context, true)`) against this budget
+    /// in [`over_limit`], exactly as C's `LACKMEM()` does. A budget of 0 means
+    /// "spill immediately" (matches a non-positive `maxKBytes`).
+    allowed_mem: usize,
     tuples: i64,
     myfile: Option<PgBox<'mcx, BufFile>>,
     #[allow(dead_code)]
@@ -224,13 +231,19 @@ fn with_store_ref<R>(
 /// so it is shared by both the `'mcx`-bound [`tuplestore_begin_heap`] and the
 /// `'static` held-cursor [`tuplestore_begin_heap_hold`].
 fn build_owned_store(eflags: i32, interXact: bool, maxKBytes: i32) -> PgResult<OwnedStore> {
-    let limit = if maxKBytes > 0 {
+    // `state->allowedMem = maxKBytes * 1024` (a non-positive maxKBytes spills
+    // at once). The store's own context is created WITHOUT an allocator hard
+    // cap: C's `state->context` never refuses an allocation — the `work_mem`
+    // budget is a *soft* limit enforced by `LACKMEM()`/`over_limit`, which
+    // triggers an orderly spill to a temp file. Capping the allocator instead
+    // would abort the backend on the very growth that should have spilled.
+    let allowed_mem = if maxKBytes > 0 {
         maxKBytes as usize * 1024
     } else {
         0
     };
 
-    OwnedStore::try_new(MemoryContext::new("tuplestore").with_limit(limit), |sx| {
+    OwnedStore::try_new(MemoryContext::new("tuplestore"), |sx| {
         let memtupsize = core::cmp::max(
             16384 / POINTER_SIZE,
             ALLOCSET_SEPARATE_THRESHOLD / POINTER_SIZE + 1,
@@ -261,6 +274,7 @@ fn build_owned_store(eflags: i32, interXact: bool, maxKBytes: i32) -> PgResult<O
             truncated: false,
             usedDisk: false,
             maxSpace: 0,
+            allowed_mem,
             tuples: 0,
             myfile: None,
             methods: TupleMethods::Heap,
@@ -537,7 +551,7 @@ fn puttuple_common_inner(
             state.memtuples.push(Some(blob));
             state.memtupcount += 1;
 
-            if !over_limit(ctx) {
+            if !over_limit(state.allowed_mem, ctx) {
                 return Ok(());
             }
 
@@ -1019,7 +1033,7 @@ pub fn tuplestore_trim(carrier: &mut types_nodes::Tuplestorestate<'_>) -> PgResu
 /// `tuplestore_updatemax(state)`.
 fn tuplestore_updatemax(state: &mut TuplestorestateState<'_>, ctx: &MemoryContext) -> PgResult<()> {
     if state.status == TSS_INMEM {
-        state.maxSpace = core::cmp::max(state.maxSpace, ctx.used() as i64);
+        state.maxSpace = core::cmp::max(state.maxSpace, ctx.subtree_used() as i64);
     } else {
         let size = buffile::buf_file_size::call(state.file()?)?;
         state.maxSpace = core::cmp::max(state.maxSpace, size);
@@ -1128,9 +1142,15 @@ fn seek_ok(file: &mut BufFile, fileno: i32, offset: i64, whence: i32) -> PgResul
 
 /// Is the store's working-memory budget exceeded? (`LACKMEM()`: limit 0 means
 /// unlimited.)
-fn over_limit(ctx: &MemoryContext) -> bool {
-    let limit = ctx.limit();
-    limit != 0 && ctx.used() > limit
+/// `LACKMEM(state)`: has the in-memory store outgrown its `work_mem` budget?
+///
+/// C compares `state->availMem < 0`, i.e. `MemoryContextMemAllocated(state->
+/// context, true) > state->allowedMem`. We mirror that with the context's
+/// recursive allocated-byte count (`subtree_used`) — not just `used()`, which
+/// would miss the per-tuple blobs charged to descendant contexts — against the
+/// soft `allowed_mem` budget. A zero budget means "spill immediately".
+fn over_limit(allowed_mem: usize, ctx: &MemoryContext) -> bool {
+    ctx.subtree_used() > allowed_mem
 }
 
 fn elog_err(msg: &'static str) -> PgError {

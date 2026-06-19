@@ -212,10 +212,13 @@ pub fn FileClose(file: File) -> PgResult<()> {
 
     if fdstate & FD_TEMP_FILE_LIMIT != 0 {
         // Subtract its size from current usage (do first in case of error).
+        // The size update is folded into this single `with_fd` borrow: calling
+        // the `fd_sub_temp_size` helper here would re-enter `with_fd` while the
+        // outer borrow is live and panic ("RefCell already borrowed").
         vfd_core::with_fd(|fd| {
-            let vfd_p = &mut fd.vfd_cache[file as usize];
-            fd_sub_temp_size(vfd_p.file_size);
-            vfd_p.file_size = 0;
+            let sz = fd.vfd_cache[file as usize].file_size;
+            fd.temporary_files_size = fd.temporary_files_size.wrapping_sub(sz as u64);
+            fd.vfd_cache[file as usize].file_size = 0;
         });
     }
 
@@ -283,12 +286,6 @@ fn path_cstring(path: &str) -> std::ffi::CString {
     std::ffi::CString::new(path.as_bytes()).expect("path contains interior NUL")
 }
 
-/// Subtract `n` bytes from this backend's `temporary_files_size` accumulator.
-fn fd_sub_temp_size(n: i64) {
-    vfd_core::with_fd(|fd| {
-        fd.temporary_files_size = fd.temporary_files_size.wrapping_sub(n as u64);
-    });
-}
 
 // ---------------------------------------------------------------------------
 // FilePrefetch / FileWriteback (fd.c:2082-2162).
