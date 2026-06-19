@@ -75,7 +75,7 @@ pub fn ParseFuncOrColumn<'mcx>(
             let argtype = exprType(Some(&fargs[i]))?;
 
             if argtype == VOIDOID
-                && matches!(fargs[i], Expr::Param(_))
+                && fargs[i].is_param()
                 && !is_column
                 && !agg_within_group
             {
@@ -94,7 +94,7 @@ pub fn ParseFuncOrColumn<'mcx>(
     // is allowed but only with all named parameters after all the unnamed ones.
     let mut argnames: Vec<PgString<'mcx>> = Vec::new();
     for arg in &fargs {
-        if let Expr::NamedArgExpr(na) = arg {
+        if let Some(na) = arg.as_namedargexpr() {
             let name = na.name.clone().unwrap_or_default();
             // Reject duplicate arg names.
             if argnames.iter().any(|n| n.as_str() == name) {
@@ -899,7 +899,7 @@ fn apply_named_arg_positions(fargs: &mut [Expr], argnumbers: &Option<Vec<i32>>) 
         return;
     };
     for (i, arg) in fargs.iter_mut().enumerate() {
-        if let Expr::NamedArgExpr(na) = arg {
+        if let Some(na) = arg.as_namedargexpr_mut() {
             if let Some(&n) = numbers.get(i) {
                 na.argnumber = n;
             }
@@ -1022,7 +1022,7 @@ fn func_get_detail<'mcx>(
                 let arg1 = &fargs[0];
                 let iscoercion: bool;
 
-                if source_type == UNKNOWNOID && matches!(arg1, Expr::Const(_)) {
+                if source_type == UNKNOWNOID && arg1.is_const() {
                     // always treat typename('literal') as coercion
                     iscoercion = true;
                 } else {

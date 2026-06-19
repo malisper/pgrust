@@ -522,7 +522,7 @@ pub fn make_fn_arguments<'mcx>(
         if actual_arg_types[i] != declared_arg_types[i] {
             // If arg is a NamedArgExpr, coerce its input expr instead --- we
             // want the NamedArgExpr to stay at the top level of the list.
-            if let Expr::NamedArgExpr(na) = &fargs[i] {
+            if let Some(na) = fargs[i].as_namedargexpr() {
                 let inner = na
                     .arg
                     .as_deref()
@@ -538,7 +538,7 @@ pub fn make_fn_arguments<'mcx>(
                     COERCE_IMPLICIT_CAST,
                     -1,
                 )?;
-                if let Expr::NamedArgExpr(na) = &mut fargs[i] {
+                if let Some(na) = fargs[i].as_namedargexpr_mut() {
                     na.arg = Some(Box::new(coerced));
                 }
             } else {
