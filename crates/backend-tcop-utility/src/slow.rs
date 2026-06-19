@@ -139,7 +139,7 @@ fn process_utility_slow_body<'mcx>(
 
                 match (&*stmt).node_tag() {
                     t if t == ntag::T_CreateStmt => {
-                        let Node::CreateStmt(cstmt) = &*stmt else { unreachable!() };
+                        let cstmt = stmt.expect_createstmt();
                         // Remember transformed RangeVar for LIKE.
                         table_rv = match &cstmt.relation {
                             Some(rv) => Some(mcx::alloc_in(mcx, rv.clone_in(mcx)?)?),
@@ -171,7 +171,7 @@ fn process_utility_slow_body<'mcx>(
                         rt::create_toast_for_relation::call(mcx, address.objectId, &cstmt.options)?;
                     }
                     t if t == ntag::T_CreateForeignTableStmt => {
-                        let Node::CreateForeignTableStmt(cstmt) = &*stmt else { unreachable!() };
+                        let cstmt = stmt.expect_createforeigntablestmt();
                         // Remember transformed RangeVar for LIKE.
                         table_rv = match &cstmt.base.relation {
                             Some(rv) => Some(mcx::alloc_in(mcx, rv.clone_in(mcx)?)?),
@@ -266,7 +266,7 @@ fn process_utility_slow_body<'mcx>(
         }
 
         t if t == ntag::T_IndexStmt => {
-            let Node::IndexStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_indexstmt();
             // CREATE INDEX.
             if stmt.concurrent {
                 rt::prevent_in_transaction_block::call(is_top_level, "CREATE INDEX CONCURRENTLY")?;
@@ -459,13 +459,13 @@ fn process_utility_slow_body<'mcx>(
         }
 
         t if t == ntag::T_CreateStatsStmt => {
-            let Node::CreateStatsStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_createstatsstmt();
             // CREATE STATISTICS supports only relation names in FROM.
             let rel_src = stmt
                 .relations
                 .first()
                 .expect("CREATE STATISTICS: empty relations list");
-            if !matches!(&**rel_src, Node::RangeVar(_)) {
+            if !rel_src.is_rangevar() {
                 return Err(backend_utils_error::ereport(types_error::ERROR)
                     .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
                     .errmsg(

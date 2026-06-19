@@ -177,7 +177,7 @@ pub fn ClassifyUtilityCommandAsReadOnly(parsetree: &Node) -> PgResult<i32> {
         }
 
         t if t == ntag::T_CopyStmt => {
-            let Node::CopyStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_copystmt();
             // COPY FROM into a temp table doesn't change pg_dump output; DoCopy
             // calls PreventCommandIfReadOnly itself for non-temp targets.
             if stmt.is_from {
@@ -197,7 +197,7 @@ pub fn ClassifyUtilityCommandAsReadOnly(parsetree: &Node) -> PgResult<i32> {
         t if t == ntag::T_ListenStmt || t == ntag::T_NotifyStmt => COMMAND_OK_IN_READ_ONLY_TXN,
 
         t if t == ntag::T_LockStmt => {
-            let Node::LockStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_lockstmt();
             // Only weaker locker modes are allowed during recovery (must match
             // LockAcquireExtended()).
             if stmt.mode > ROW_EXCLUSIVE_LOCK {
@@ -208,7 +208,7 @@ pub fn ClassifyUtilityCommandAsReadOnly(parsetree: &Node) -> PgResult<i32> {
         }
 
         t if t == ntag::T_TransactionStmt => {
-            let Node::TransactionStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_transactionstmt();
             match stmt.kind {
                 TRANS_STMT_BEGIN | TRANS_STMT_START | TRANS_STMT_COMMIT | TRANS_STMT_ROLLBACK
                 | TRANS_STMT_SAVEPOINT | TRANS_STMT_RELEASE | TRANS_STMT_ROLLBACK_TO => {

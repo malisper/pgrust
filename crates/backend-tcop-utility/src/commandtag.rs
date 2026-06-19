@@ -79,7 +79,7 @@ fn first_rowmark_strength(rowmarks: &[NodePtr<'_>]) -> LockClauseStrength {
     match rowmarks.first() {
         Some(n) => match (&**n).node_tag() {
             t if t == ntag::T_RowMarkClause => {
-                let Node::RowMarkClause(r) = &**n else { unreachable!() };
+                let r = n.expect_rowmarkclause();
                 r.strength
             }
             _ => LockClauseStrength::LCS_NONE,
@@ -105,7 +105,7 @@ pub fn CreateCommandTag(parsetree: &Node) -> PgResult<CommandTag> {
         t if t == ntag::T_PLAssignStmt => CMDTAG_SELECT,
 
         // utility statements --- same whether raw or cooked
-        t if t == ntag::T_TransactionStmt => { let Node::TransactionStmt(stmt) = parsetree else { unreachable!() }; match stmt.kind {
+        t if t == ntag::T_TransactionStmt => { let stmt = parsetree.expect_transactionstmt(); match stmt.kind {
             TRANS_STMT_BEGIN => CMDTAG_BEGIN,
             TRANS_STMT_START => CMDTAG_START_TRANSACTION,
             TRANS_STMT_COMMIT => CMDTAG_COMMIT,
@@ -120,7 +120,7 @@ pub fn CreateCommandTag(parsetree: &Node) -> PgResult<CommandTag> {
 
         t if t == ntag::T_DeclareCursorStmt => CMDTAG_DECLARE_CURSOR,
         t if t == ntag::T_ClosePortalStmt => {
-            let Node::ClosePortalStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_closeportalstmt();
             if stmt.portalname.is_none() {
                 CMDTAG_CLOSE_CURSOR_ALL
             } else {
@@ -128,7 +128,7 @@ pub fn CreateCommandTag(parsetree: &Node) -> PgResult<CommandTag> {
             }
         }
         t if t == ntag::T_FetchStmt => {
-            let Node::FetchStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_fetchstmt();
             if stmt.ismove {
                 CMDTAG_MOVE
             } else {
@@ -153,7 +153,7 @@ pub fn CreateCommandTag(parsetree: &Node) -> PgResult<CommandTag> {
         t if t == ntag::T_DropUserMappingStmt => CMDTAG_DROP_USER_MAPPING,
         t if t == ntag::T_CreateForeignTableStmt => CMDTAG_CREATE_FOREIGN_TABLE,
         t if t == ntag::T_ImportForeignSchemaStmt => CMDTAG_IMPORT_FOREIGN_SCHEMA,
-        t if t == ntag::T_DropStmt => { let Node::DropStmt(stmt) = parsetree else { unreachable!() }; match stmt.removeType {
+        t if t == ntag::T_DropStmt => { let stmt = parsetree.expect_dropstmt(); match stmt.removeType {
             OBJECT_TABLE => CMDTAG_DROP_TABLE,
             OBJECT_SEQUENCE => CMDTAG_DROP_SEQUENCE,
             OBJECT_VIEW => CMDTAG_DROP_VIEW,
@@ -196,7 +196,7 @@ pub fn CreateCommandTag(parsetree: &Node) -> PgResult<CommandTag> {
         t if t == ntag::T_SecLabelStmt => CMDTAG_SECURITY_LABEL,
         t if t == ntag::T_CopyStmt => CMDTAG_COPY,
         t if t == ntag::T_RenameStmt => {
-            let Node::RenameStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_renamestmt();
             // When a column is renamed, the command tag is created from its
             // relation type.
             let objtype = if stmt.renameType == OBJECT_COLUMN {
@@ -206,14 +206,14 @@ pub fn CreateCommandTag(parsetree: &Node) -> PgResult<CommandTag> {
             };
             AlterObjectTypeCommandTag(objtype)
         }
-        t if t == ntag::T_AlterObjectDependsStmt => { let Node::AlterObjectDependsStmt(stmt) = parsetree else { unreachable!() }; AlterObjectTypeCommandTag(stmt.objectType) },
-        t if t == ntag::T_AlterObjectSchemaStmt => { let Node::AlterObjectSchemaStmt(stmt) = parsetree else { unreachable!() }; AlterObjectTypeCommandTag(stmt.objectType) },
-        t if t == ntag::T_AlterOwnerStmt => { let Node::AlterOwnerStmt(stmt) = parsetree else { unreachable!() }; AlterObjectTypeCommandTag(stmt.objectType) },
-        t if t == ntag::T_AlterTableMoveAllStmt => { let Node::AlterTableMoveAllStmt(stmt) = parsetree else { unreachable!() }; AlterObjectTypeCommandTag(stmt.objtype) },
-        t if t == ntag::T_AlterTableStmt => { let Node::AlterTableStmt(stmt) = parsetree else { unreachable!() }; AlterObjectTypeCommandTag(stmt.objtype) },
+        t if t == ntag::T_AlterObjectDependsStmt => { let stmt = parsetree.expect_alterobjectdependsstmt(); AlterObjectTypeCommandTag(stmt.objectType) },
+        t if t == ntag::T_AlterObjectSchemaStmt => { let stmt = parsetree.expect_alterobjectschemastmt(); AlterObjectTypeCommandTag(stmt.objectType) },
+        t if t == ntag::T_AlterOwnerStmt => { let stmt = parsetree.expect_alterownerstmt(); AlterObjectTypeCommandTag(stmt.objectType) },
+        t if t == ntag::T_AlterTableMoveAllStmt => { let stmt = parsetree.expect_altertablemoveallstmt(); AlterObjectTypeCommandTag(stmt.objtype) },
+        t if t == ntag::T_AlterTableStmt => { let stmt = parsetree.expect_altertablestmt(); AlterObjectTypeCommandTag(stmt.objtype) },
         t if t == ntag::T_AlterDomainStmt => CMDTAG_ALTER_DOMAIN,
         t if t == ntag::T_AlterFunctionStmt => {
-            let Node::AlterFunctionStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_alterfunctionstmt();
             match stmt.objtype {
             OBJECT_FUNCTION => CMDTAG_ALTER_FUNCTION,
             OBJECT_PROCEDURE => CMDTAG_ALTER_PROCEDURE,
@@ -222,7 +222,7 @@ pub fn CreateCommandTag(parsetree: &Node) -> PgResult<CommandTag> {
         }
         }
         t if t == ntag::T_GrantStmt => {
-            let Node::GrantStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_grantstmt();
             if stmt.is_grant {
                 CMDTAG_GRANT
             } else {
@@ -230,7 +230,7 @@ pub fn CreateCommandTag(parsetree: &Node) -> PgResult<CommandTag> {
             }
         }
         t if t == ntag::T_GrantRoleStmt => {
-            let Node::GrantRoleStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_grantrolestmt();
             if stmt.is_grant {
                 CMDTAG_GRANT_ROLE
             } else {
@@ -239,7 +239,7 @@ pub fn CreateCommandTag(parsetree: &Node) -> PgResult<CommandTag> {
         }
         t if t == ntag::T_AlterDefaultPrivilegesStmt => CMDTAG_ALTER_DEFAULT_PRIVILEGES,
         t if t == ntag::T_DefineStmt => {
-            let Node::DefineStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_definestmt();
             match stmt.kind {
             OBJECT_AGGREGATE => CMDTAG_CREATE_AGGREGATE,
             OBJECT_OPERATOR => CMDTAG_CREATE_OPERATOR,
@@ -259,7 +259,7 @@ pub fn CreateCommandTag(parsetree: &Node) -> PgResult<CommandTag> {
         t if t == ntag::T_AlterEnumStmt => CMDTAG_ALTER_TYPE,
         t if t == ntag::T_ViewStmt => CMDTAG_CREATE_VIEW,
         t if t == ntag::T_CreateFunctionStmt => {
-            let Node::CreateFunctionStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_createfunctionstmt();
             if stmt.is_procedure {
                 CMDTAG_CREATE_PROCEDURE
             } else {
@@ -281,7 +281,7 @@ pub fn CreateCommandTag(parsetree: &Node) -> PgResult<CommandTag> {
         t if t == ntag::T_CallStmt => CMDTAG_CALL,
         t if t == ntag::T_ClusterStmt => CMDTAG_CLUSTER,
         t if t == ntag::T_VacuumStmt => {
-            let Node::VacuumStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_vacuumstmt();
             if stmt.is_vacuumcmd {
                 CMDTAG_VACUUM
             } else {
@@ -290,7 +290,7 @@ pub fn CreateCommandTag(parsetree: &Node) -> PgResult<CommandTag> {
         }
         t if t == ntag::T_ExplainStmt => CMDTAG_EXPLAIN,
         t if t == ntag::T_CreateTableAsStmt => {
-            let Node::CreateTableAsStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_createtableasstmt();
             match stmt.objtype {
             OBJECT_TABLE => {
                 if stmt.is_select_into {
@@ -306,7 +306,7 @@ pub fn CreateCommandTag(parsetree: &Node) -> PgResult<CommandTag> {
         t if t == ntag::T_RefreshMatViewStmt => CMDTAG_REFRESH_MATERIALIZED_VIEW,
         t if t == ntag::T_AlterSystemStmt => CMDTAG_ALTER_SYSTEM,
         t if t == ntag::T_VariableSetStmt => {
-            let Node::VariableSetStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_variablesetstmt();
             match stmt.kind {
             VAR_SET_VALUE | VAR_SET_CURRENT | VAR_SET_DEFAULT | VAR_SET_MULTI => CMDTAG_SET,
             VAR_RESET | VAR_RESET_ALL => CMDTAG_RESET,
@@ -314,7 +314,7 @@ pub fn CreateCommandTag(parsetree: &Node) -> PgResult<CommandTag> {
         }
         t if t == ntag::T_VariableShowStmt => CMDTAG_SHOW,
         t if t == ntag::T_DiscardStmt => {
-            let Node::DiscardStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_discardstmt();
             match stmt.target {
             DISCARD_ALL => CMDTAG_DISCARD_ALL,
             DISCARD_PLANS => CMDTAG_DISCARD_PLANS,
@@ -360,7 +360,7 @@ pub fn CreateCommandTag(parsetree: &Node) -> PgResult<CommandTag> {
         t if t == ntag::T_CreateStatsStmt => CMDTAG_CREATE_STATISTICS,
         t if t == ntag::T_AlterStatsStmt => CMDTAG_ALTER_STATISTICS,
         t if t == ntag::T_DeallocateStmt => {
-            let Node::DeallocateStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_deallocatestmt();
             if stmt.name.is_none() {
                 CMDTAG_DEALLOCATE_ALL
             } else {
@@ -377,7 +377,7 @@ pub fn CreateCommandTag(parsetree: &Node) -> PgResult<CommandTag> {
 
         // parsed-and-rewritten-but-not-planned queries
         t if t == ntag::T_Query => {
-            let Node::Query(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_query();
             match stmt.commandType {
             CMD_SELECT => {
                 // We take a little extra care here so that the result will be

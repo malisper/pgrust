@@ -34,7 +34,7 @@ pub fn GetCommandLogLevel(parsetree: &Node) -> PgResult<LogStmtLevel> {
         }
 
         t if t == ntag::T_SelectStmt => {
-            let Node::SelectStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_selectstmt();
             if stmt.intoClause.is_some() {
                 LOGSTMT_DDL // SELECT INTO
             } else {
@@ -80,7 +80,7 @@ pub fn GetCommandLogLevel(parsetree: &Node) -> PgResult<LogStmtLevel> {
         t if t == ntag::T_SecLabelStmt => LOGSTMT_DDL,
 
         t if t == ntag::T_CopyStmt => {
-            let Node::CopyStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_copystmt();
             if stmt.is_from {
                 LOGSTMT_MOD
             } else {
@@ -90,7 +90,7 @@ pub fn GetCommandLogLevel(parsetree: &Node) -> PgResult<LogStmtLevel> {
 
         // Look through a PREPARE to the contained stmt.
         t if t == ntag::T_PrepareStmt => {
-            let Node::PrepareStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_preparestmt();
             match &stmt.query {
                 Some(inner) => GetCommandLogLevel(inner)?,
                 None => LOGSTMT_ALL,
@@ -151,7 +151,7 @@ pub fn GetCommandLogLevel(parsetree: &Node) -> PgResult<LogStmtLevel> {
         t if t == ntag::T_VacuumStmt => LOGSTMT_ALL,
 
         t if t == ntag::T_ExplainStmt => {
-            let Node::ExplainStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_explainstmt();
             let mut analyze = false;
             // Look through an EXPLAIN ANALYZE to the contained stmt.
             for opt in &stmt.options {
@@ -224,7 +224,7 @@ pub fn GetCommandLogLevel(parsetree: &Node) -> PgResult<LogStmtLevel> {
 
         // parsed-and-rewritten-but-not-planned queries
         t if t == ntag::T_Query => {
-            let Node::Query(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_query();
             match stmt.commandType {
                 CMD_SELECT => LOGSTMT_ALL,
                 CMD_UPDATE | CMD_INSERT | CMD_DELETE | CMD_MERGE => LOGSTMT_MOD,

@@ -237,7 +237,7 @@ fn dispatch_switch<'mcx>(
     match parsetree.node_tag() {
         // ******************** transactions ********************
         t if t == ntag::T_TransactionStmt => {
-            let Node::TransactionStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_transactionstmt();
             match stmt.kind {
                 // START TRANSACTION (SQL99) is identical to BEGIN.
                 TransactionStmtKind::TRANS_STMT_BEGIN | TransactionStmtKind::TRANS_STMT_START => {
@@ -245,7 +245,7 @@ fn dispatch_switch<'mcx>(
                     for cell in stmt.options.iter() {
                         let item = match (&**cell).node_tag() {
                             t if t == ntag::T_DefElem => {
-                                let Node::DefElem(d) = &**cell else { unreachable!() };
+                                let d = cell.expect_defelem();
                                 d
                             }
                             _ => continue,
@@ -317,7 +317,7 @@ fn dispatch_switch<'mcx>(
         }
 
         t if t == ntag::T_ClosePortalStmt => {
-            let Node::ClosePortalStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_closeportalstmt();
             CheckRestrictedOperation("CLOSE")?;
             rt::perform_portal_close::call(stmt.portalname.as_deref())?;
         }
@@ -404,12 +404,12 @@ fn dispatch_switch<'mcx>(
 
         // Query-level asynchronous notification
         t if t == ntag::T_NotifyStmt => {
-            let Node::NotifyStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_notifystmt();
             rt::async_notify::call(stmt.conditionname.as_deref(), stmt.payload.as_deref())?;
         }
 
         t if t == ntag::T_ListenStmt => {
-            let Node::ListenStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_listenstmt();
             CheckRestrictedOperation("LISTEN")?;
 
             // LISTEN is not allowed in background processes.
@@ -432,7 +432,7 @@ fn dispatch_switch<'mcx>(
         }
 
         t if t == ntag::T_UnlistenStmt => {
-            let Node::UnlistenStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_unlistenstmt();
             CheckRestrictedOperation("UNLISTEN")?;
             match stmt.conditionname.as_deref() {
                 Some(name) => rt::async_unlisten::call(name)?,
@@ -441,7 +441,7 @@ fn dispatch_switch<'mcx>(
         }
 
         t if t == ntag::T_LoadStmt => {
-            let Node::LoadStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_loadstmt();
             rt::close_all_vfds::call(); // probably not necessary...
                                         // Allowed names are restricted if you're not superuser
             rt::load_file::call(stmt.filename.as_deref(), !rt::superuser::call())?;
@@ -473,7 +473,7 @@ fn dispatch_switch<'mcx>(
         }
 
         t if t == ntag::T_VariableShowStmt => {
-            let Node::VariableShowStmt(n) = parsetree else { unreachable!() };
+            let n = parsetree.expect_variableshowstmt();
             rt::get_pg_variable::call(mcx, n.name.as_deref(), dest)?;
         }
 
@@ -555,7 +555,7 @@ fn dispatch_switch<'mcx>(
         // The following statements have event-trigger support only in some
         // cases, so we "fast path" them in the other cases.
         t if t == ntag::T_GrantStmt => {
-            let Node::GrantStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_grantstmt();
             if rt::event_trigger_supports_object_type::call(stmt.objtype) {
                 rt::process_utility_slow::call(
                     mcx, pstate, pstmt, query_string, context, params, dest, is_top_level,
@@ -567,7 +567,7 @@ fn dispatch_switch<'mcx>(
         }
 
         t if t == ntag::T_DropStmt => {
-            let Node::DropStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_dropstmt();
             if rt::event_trigger_supports_object_type::call(stmt.removeType) {
                 rt::process_utility_slow::call(
                     mcx, pstate, pstmt, query_string, context, params, dest, is_top_level,
@@ -579,7 +579,7 @@ fn dispatch_switch<'mcx>(
         }
 
         t if t == ntag::T_RenameStmt => {
-            let Node::RenameStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_renamestmt();
             if rt::event_trigger_supports_object_type::call(stmt.renameType) {
                 rt::process_utility_slow::call(
                     mcx, pstate, pstmt, query_string, context, params, dest, is_top_level,
@@ -591,7 +591,7 @@ fn dispatch_switch<'mcx>(
         }
 
         t if t == ntag::T_AlterObjectDependsStmt => {
-            let Node::AlterObjectDependsStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_alterobjectdependsstmt();
             if rt::event_trigger_supports_object_type::call(stmt.objectType) {
                 rt::process_utility_slow::call(
                     mcx, pstate, pstmt, query_string, context, params, dest, is_top_level,
@@ -603,7 +603,7 @@ fn dispatch_switch<'mcx>(
         }
 
         t if t == ntag::T_AlterObjectSchemaStmt => {
-            let Node::AlterObjectSchemaStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_alterobjectschemastmt();
             if rt::event_trigger_supports_object_type::call(stmt.objectType) {
                 rt::process_utility_slow::call(
                     mcx, pstate, pstmt, query_string, context, params, dest, is_top_level,
@@ -615,7 +615,7 @@ fn dispatch_switch<'mcx>(
         }
 
         t if t == ntag::T_AlterOwnerStmt => {
-            let Node::AlterOwnerStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_alterownerstmt();
             if rt::event_trigger_supports_object_type::call(stmt.objectType) {
                 rt::process_utility_slow::call(
                     mcx, pstate, pstmt, query_string, context, params, dest, is_top_level,
@@ -627,7 +627,7 @@ fn dispatch_switch<'mcx>(
         }
 
         t if t == ntag::T_CommentStmt => {
-            let Node::CommentStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_commentstmt();
             if rt::event_trigger_supports_object_type::call(stmt.objtype) {
                 rt::process_utility_slow::call(
                     mcx, pstate, pstmt, query_string, context, params, dest, is_top_level,
@@ -639,7 +639,7 @@ fn dispatch_switch<'mcx>(
         }
 
         t if t == ntag::T_SecLabelStmt => {
-            let Node::SecLabelStmt(stmt) = parsetree else { unreachable!() };
+            let stmt = parsetree.expect_seclabelstmt();
             if rt::event_trigger_supports_object_type::call(stmt.objtype) {
                 rt::process_utility_slow::call(
                     mcx, pstate, pstmt, query_string, context, params, dest, is_top_level,
