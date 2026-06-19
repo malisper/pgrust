@@ -1039,9 +1039,16 @@ fn encode_pg_index(idx: &crate::core_entry_store::entry::FormPgIndex) -> Vec<u8>
     v.extend_from_slice(&idx.indnatts.to_ne_bytes());
     v.extend_from_slice(&idx.indnkeyatts.to_ne_bytes());
     v.push(idx.indisunique as u8);
+    v.push(idx.indnullsnotdistinct as u8);
     v.push(idx.indisprimary as u8);
+    v.push(idx.indisexclusion as u8);
+    v.push(idx.indimmediate as u8);
+    v.push(idx.indisclustered as u8);
     v.push(idx.indisvalid as u8);
+    v.push(idx.indcheckxmin as u8);
     v.push(idx.indisready as u8);
+    v.push(idx.indislive as u8);
+    v.push(idx.indisreplident as u8);
     v.extend_from_slice(&(idx.indkey.len() as u32).to_ne_bytes());
     for k in &idx.indkey {
         v.extend_from_slice(&k.to_ne_bytes());
@@ -1393,9 +1400,16 @@ fn decode_pg_index(b: &[u8]) -> Option<crate::core_entry_store::entry::FormPgInd
     idx.indnatts = c.read_i16()?;
     idx.indnkeyatts = c.read_i16()?;
     idx.indisunique = c.read_u8()? != 0;
+    idx.indnullsnotdistinct = c.read_u8()? != 0;
     idx.indisprimary = c.read_u8()? != 0;
+    idx.indisexclusion = c.read_u8()? != 0;
+    idx.indimmediate = c.read_u8()? != 0;
+    idx.indisclustered = c.read_u8()? != 0;
     idx.indisvalid = c.read_u8()? != 0;
+    idx.indcheckxmin = c.read_u8()? != 0;
     idx.indisready = c.read_u8()? != 0;
+    idx.indislive = c.read_u8()? != 0;
+    idx.indisreplident = c.read_u8()? != 0;
     let n = c.read_u32()? as usize;
     for _ in 0..n {
         idx.indkey.push(c.read_i16()?);
