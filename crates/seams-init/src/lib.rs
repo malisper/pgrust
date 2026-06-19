@@ -421,6 +421,7 @@ pub fn init_all() {
     backend_tcop_fastpath::init_seams();
     backend_tcop_postgres::init_seams();
     backend_tcop_pquery::init_seams();
+    backend_executor_functions::init_seams();
     backend_tcop_utility::init_seams();
     backend_timezone_localtime::init_seams();
     backend_timezone_pgtz::init_seams();

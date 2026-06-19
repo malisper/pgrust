@@ -9487,6 +9487,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-functions"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-executor-execMain",
+ "backend-executor-execTuples",
+ "backend-executor-functions-seams",
+ "backend-nodes-core",
+ "backend-optimizer-plan-planner-seams",
+ "backend-optimizer-util-clauses-seams",
+ "backend-parser-analyze",
+ "backend-parser-driver",
+ "backend-rewrite-rewritehandler-seams",
+ "backend-tcop-dest",
+ "backend-utils-time-snapmgr-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-dest",
+ "types-error",
+ "types-fmgr",
+ "types-nodes",
+ "types-parsenodes",
+ "types-scan",
+ "types-slot",
+ "types-snapshot",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-functions-seams"
 version = "0.0.0"
 dependencies = [
@@ -23236,6 +23267,7 @@ dependencies = [
  "backend-executor-execScan",
  "backend-executor-execTuples",
  "backend-executor-execUtils",
+ "backend-executor-functions",
  "backend-executor-instrument",
  "backend-executor-nodeAgg",
  "backend-executor-nodeAppend",
