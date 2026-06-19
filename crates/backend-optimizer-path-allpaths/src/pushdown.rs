@@ -573,7 +573,7 @@ pub(crate) fn subquery_push_qual<'mcx>(
                 .ok_or_else(|| PgError::error("subquery_push_qual: subquery has no jointree"))?;
             let existing = jt.quals.as_ref().and_then(|n| node_as_expr(n).cloned());
             jt.quals = make_and_qual(existing, new_qual)
-                .map(|e| mcx::alloc_in(mcx, Node::Expr(e)))
+                .map(|e| mcx::alloc_in(mcx, Node::mk_expr(mcx, e)))
                 .transpose()?;
         }
         Ok(())
@@ -899,7 +899,7 @@ pub(crate) fn remove_unused_subquery_outputs<'mcx>(
         rt.exprs.iter().map(|nid| root.node(*nid).clone()).collect()
     };
     for e in reltarget_exprs.iter() {
-        let n = Node::Expr(e.clone());
+        let n = Node::mk_expr(mcx, e.clone());
         attrs_used = pull_varattnos_relids(mcx, &n, relid, attrs_used)?;
     }
 
@@ -911,7 +911,7 @@ pub(crate) fn remove_unused_subquery_outputs<'mcx>(
         .map(|rid| root.node(root.rinfo(*rid).clause).clone())
         .collect();
     for c in base_rinfo_clauses.iter() {
-        let n = Node::Expr(c.clone());
+        let n = Node::mk_expr(mcx, c.clone());
         attrs_used = pull_varattnos_relids(mcx, &n, relid, attrs_used)?;
     }
 
