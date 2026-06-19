@@ -42,7 +42,6 @@ use types_tuple::backend_access_common_heaptuple::FormedTuple;
 use types_tuple::heaptuple::{HeapTupleHeaderData, ItemPointerData};
 
 use backend_access_heap_heapam as heapam;
-use backend_access_heap_heapam::BulkInsertState as HeapBulkInsertState;
 use backend_access_heap_heapam_seams::HeapUpdateResult;
 use backend_executor_execTuples_seams as slot_seam;
 
@@ -55,20 +54,6 @@ fn header<'a, 'mcx>(td: &'a FormedTuple<'mcx>) -> &'a HeapTupleHeaderData<'mcx> 
 /// `HEAP_ONLY_TUPLE` (htup_details.h) — `t_infomask2` bit marking a heap-only
 /// tuple.
 const HEAP_ONLY_TUPLE: u16 = types_tuple::heaptuple::HEAP_ONLY_TUPLE;
-
-/// Bridge the tableam-vocabulary `BulkInsertStateData` to heapam's own
-/// `BulkInsertState` (both are the same `access/hio.h` struct; C never copies it
-/// by value, it threads a pointer). The DML vtable callers all pass `None`; the
-/// bulk path proper goes through `heap_multi_insert`, not these wrappers.
-fn translate_bistate(b: &mut BulkInsertStateData) -> HeapBulkInsertState {
-    HeapBulkInsertState {
-        strategy: b.strategy.clone(),
-        current_buf: b.current_buf,
-        next_free: b.next_free,
-        last_free: b.last_free,
-        already_extended_by: b.already_extended_by,
-    }
-}
 
 // ===========================================================================
 // tuple_insert
@@ -90,8 +75,7 @@ fn heapam_tuple_insert<'mcx>(
     slot.base_mut().tts_tableOid = relation.rd_id;
     tuple.tuple.t_tableOid = relation.rd_id;
 
-    let mut heap_bistate = bistate.map(translate_bistate);
-    heapam::insert::heap_insert(mcx, relation, &mut tuple, cid, options, heap_bistate.as_mut())?;
+    heapam::insert::heap_insert(mcx, relation, &mut tuple, cid, options, bistate)?;
 
     slot.base_mut().tts_tid = tuple.tuple.t_self;
     Ok(())
@@ -125,9 +109,8 @@ fn heapam_multi_insert<'mcx>(
         tuples.push(tuple);
     }
 
-    let mut heap_bistate = bistate.map(translate_bistate);
     let stored =
-        heapam::insert::heap_multi_insert(mcx, relation, tuples, cid, options, heap_bistate.as_mut())?;
+        heapam::insert::heap_multi_insert(mcx, relation, tuples, cid, options, bistate)?;
 
     // for (i = 0; i < ntuples; i++) slots[i]->tts_tid = heaptuples[i]->t_self;
     for (slot, tuple) in slots.iter_mut().zip(stored.iter()) {
