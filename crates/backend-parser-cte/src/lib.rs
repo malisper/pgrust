@@ -386,14 +386,15 @@ fn nonrecursive_term_targetlist<'mcx>(
             // Descend to the leftmost leaf RangeTblRef of the set-op tree.
             let mut node: &Node = setop_node;
             let leftmost_rti = loop {
-                match node {
-                    Node::SetOperationStmt(s) => {
-                        node = s
+                match node.node_tag() {
+                    ntag::T_SetOperationStmt => {
+                        node = node
+                            .expect_setoperationstmt()
                             .larg
                             .as_deref()
                             .ok_or_else(|| elog_error("set-op tree has no left child"))?;
                     }
-                    Node::RangeTblRef(r) => break r.rtindex,
+                    ntag::T_RangeTblRef => break node.expect_rangetblref().rtindex,
                     _ => return Err(elog_error("set-op leftmost is not a RangeTblRef")),
                 }
             };
