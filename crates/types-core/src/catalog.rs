@@ -74,6 +74,8 @@ pub const BOOL_HASH_FAM_OID: Oid = 2222;
 pub const INT8OID: Oid = 20;
 /// `INT4OID` (`catalog/pg_type_d.h`) — the OID of the `int4` (integer) type.
 pub const INT4OID: Oid = 23;
+/// `INT2OID` (`catalog/pg_type_d.h`) — the OID of the `int2` (smallint) type.
+pub const INT2OID: Oid = 21;
 /// `VOIDOID` (`catalog/pg_type_d.h`) — the OID of the `void` pseudo-type.
 pub const VOIDOID: Oid = 2278;
 /// `INTERNALOID` (`catalog/pg_type_d.h`) — the OID of the `internal`

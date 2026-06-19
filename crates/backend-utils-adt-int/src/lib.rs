@@ -23,11 +23,18 @@
 //! argument nodes is the optimizer/`nodes` layer's job, fed in as resolved
 //! `f64`s.
 //!
-//! NOT ported here: the `int2vector` family (`buildint2vector`,
-//! `check_valid_int2vector`, `int2vectorin/out/recv/send`).  Those need an
-//! `Int2Vector` array carrier and `array_recv`/`array_send` that have no home in
-//! this tree yet (the array subsystem owns that carrier); they will land with
-//! that carrier rather than be faked here.
+//! The `int2vector` I/O (`buildint2vector`, `int2vectorin`, `int2vectorout`)
+//! builds and reads the on-disk `int2vector` image -- a 1-D `ArrayType` of
+//! `INT2OID` (2-byte pass-by-value, short-aligned), lower bound 0, no NULLs --
+//! through the array subsystem's `construct_md_array` /
+//! `int2vector_to_i16s_bytes`, and is registered here.  The binary
+//! `int2vectorrecv`/`int2vectorsend` still need the `array_recv`/`array_send`
+//! fcinfo-sharing path (they reuse the caller's `flinfo->fn_extra` cache) and so
+//! remain unregistered; they will land with that array machinery rather than be
+//! faked.  [`check_valid_int2vector`] validates an already-decoded array header
+//! (its seam takes the header fields, not the carrier), as `int2vectorout`
+//! consumes it.  `int2vector` has no btree/hash opclass in PostgreSQL, so there
+//! are no `int2vector` comparison operators to register (unlike `oidvector`).
 //!
 //! No `extern "C"`, no `*mut`/`*const`, no `libc`; soft errors flow through
 //! `backend-utils-error`.
@@ -152,6 +159,207 @@ pub fn int2send<'mcx>(mcx: Mcx<'mcx>, arg1: i16) -> PgResult<Bytea<'mcx>> {
     let mut buf = pq_begintypsend(mcx)?;
     pq_sendint16(&mut buf, arg1 as u16)?;
     Ok(pq_endtypsend(buf))
+}
+
+// ===========================================================================
+// int2vector I/O ROUTINES
+// ===========================================================================
+
+/// `buildint2vector(int2s, n)` (int.c:107): build the `int2vector` on-disk image
+/// -- a 1-D `ArrayType` of `INT2OID` (2-byte pass-by-value, short-aligned, no
+/// NULLs) whose index lower bound is 0 (not 1), matching the historical
+/// int2vector layout. An empty input yields a zero-dimension array. If `int2s`
+/// is `None` the caller fills the values afterward (C leaves them zeroed); we
+/// build directly from the provided slice instead.
+pub fn buildint2vector<'mcx>(
+    mcx: Mcx<'mcx>,
+    int2s: &[i16],
+) -> PgResult<mcx::PgVec<'mcx, u8>> {
+    // construct_md_array(elems, NULL, 1, &dim1, &lbound0, INT2OID, sizeof(int16),
+    //                    true /* byval */, TYPALIGN_SHORT)
+    let datums: Vec<types_datum::Datum> =
+        int2s.iter().map(|&v| types_datum::Datum::from_i16(v)).collect();
+    let n = int2s.len() as i32;
+    backend_utils_adt_arrayfuncs::construct::construct_md_array(
+        mcx,
+        &datums,
+        None,
+        1,
+        &[n],
+        &[0], // lbound 0, per int2vector convention
+        types_core::INT2OID,
+        core::mem::size_of::<i16>() as i32,
+        true,
+        b's', // TYPALIGN_SHORT
+    )
+}
+
+/// `check_valid_int2vector` (int.c:144): validate that an array object meets the
+/// `int2vector` restrictions -- `ndim == 1`, `dataoffset == 0` (no nulls), and
+/// `elemtype == INT2OID`. A violation is
+/// `ereport(ERROR, ERRCODE_DATATYPE_MISMATCH, "array is not a valid int2vector")`.
+///
+/// The array header is already decoded by the caller (the carrier lives in the
+/// array subsystem), so this takes the three checked header fields.
+pub fn check_valid_int2vector(ndim: i32, dataoffset: i32, elemtype: types_core::Oid) -> PgResult<()> {
+    if ndim != 1 || dataoffset != 0 || elemtype != types_core::INT2OID {
+        return Err(PgError::error("array is not a valid int2vector")
+            .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH));
+    }
+    Ok(())
+}
+
+/// `int2vectorin` (int.c:166): parse a whitespace-separated list of smallints
+/// into an `int2vector` image. The C uses `strtol` directly with `"smallint"`
+/// range checks (`SHRT_MIN..SHRT_MAX`). A soft parse error (bad token /
+/// out-of-range) records into `escontext` and returns `None` (C's
+/// `ereturn(escontext, (Datum) 0, ...)`); a hard error propagates as `Err`.
+pub fn int2vectorin<'mcx>(
+    mcx: Mcx<'mcx>,
+    input: &str,
+    escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<Option<mcx::PgVec<'mcx, u8>>> {
+    let mut ints: Vec<i16> = Vec::new();
+    let mut rest = input;
+    loop {
+        // while (*intString && isspace((unsigned char) *intString)) intString++;
+        rest = rest.trim_start_matches(|c: char| c.is_ascii_whitespace());
+        // if (*intString == '\0') break;
+        if rest.is_empty() {
+            break;
+        }
+        // l = strtol(intString, &endp, 10);
+        let (l, consumed) = strtol_base10(rest);
+        // if (intString == endp) -> invalid input syntax
+        if consumed == 0 {
+            return soft_error_or_err(
+                escontext,
+                PgError::error(format!(
+                    "invalid input syntax for type {}: \"{}\"",
+                    "smallint", rest
+                ))
+                .with_sqlstate(types_error::ERRCODE_INVALID_TEXT_REPRESENTATION),
+            );
+        }
+        // if (errno == ERANGE || l < SHRT_MIN || l > SHRT_MAX) -> out of range
+        if l < i16::MIN as i64 || l > i16::MAX as i64 {
+            return soft_error_or_err(
+                escontext,
+                PgError::error(format!(
+                    "value \"{}\" is out of range for type {}",
+                    rest, "smallint"
+                ))
+                .with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+            );
+        }
+        // if (*endp && *endp != ' ') -> invalid input syntax
+        let endp = &rest[consumed..];
+        let next = endp.chars().next();
+        if let Some(c) = next {
+            if c != ' ' {
+                return soft_error_or_err(
+                    escontext,
+                    PgError::error(format!(
+                        "invalid input syntax for type {}: \"{}\"",
+                        "smallint", rest
+                    ))
+                    .with_sqlstate(types_error::ERRCODE_INVALID_TEXT_REPRESENTATION),
+                );
+            }
+        }
+        ints.push(l as i16);
+        rest = endp;
+    }
+    Ok(Some(buildint2vector(mcx, &ints)?))
+}
+
+/// Either records the error into the soft `escontext` and returns `Ok(None)`
+/// (C's `ereturn(escontext, (Datum) 0, ...)`), or propagates it as a hard error
+/// (`escontext == NULL`).
+fn soft_error_or_err<'mcx>(
+    escontext: Option<&mut SoftErrorContext>,
+    err: PgError,
+) -> PgResult<Option<mcx::PgVec<'mcx, u8>>> {
+    match escontext {
+        Some(ctx) => {
+            ctx.save(err);
+            Ok(None)
+        }
+        None => Err(err),
+    }
+}
+
+/// `strtol(s, &endp, 10)` for the int2vectorin parser: parse an optional
+/// `+`/`-` sign followed by decimal digits, returning the parsed value (as `i64`
+/// to allow ERANGE-style overflow detection at the smallint check) and the
+/// number of input bytes consumed (0 if no digits, i.e. `intString == endp`).
+/// Saturates at `i64` bounds on overflow, which the smallint range check then
+/// rejects (mirroring `errno == ERANGE`).
+fn strtol_base10(s: &str) -> (i64, usize) {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let neg = match bytes.first() {
+        Some(b'+') => {
+            i = 1;
+            false
+        }
+        Some(b'-') => {
+            i = 1;
+            true
+        }
+        _ => false,
+    };
+    let digit_start = i;
+    let mut acc: i64 = 0;
+    let mut overflow = false;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        let d = (bytes[i] - b'0') as i64;
+        acc = acc
+            .checked_mul(10)
+            .and_then(|v| v.checked_add(d))
+            .unwrap_or_else(|| {
+                overflow = true;
+                i64::MAX
+            });
+        i += 1;
+    }
+    // No digits consumed -> strtol leaves endp at the start (intString == endp).
+    if i == digit_start {
+        return (0, 0);
+    }
+    let val = if overflow {
+        if neg {
+            i64::MIN
+        } else {
+            i64::MAX
+        }
+    } else if neg {
+        -acc
+    } else {
+        acc
+    };
+    (val, i)
+}
+
+/// `int2vectorout` (int.c:224): render an `int2vector` image as a
+/// space-separated decimal smallint list. The header is validated first
+/// (`check_valid_int2vector`). The caller decodes the header fields and element
+/// values off the array image.
+pub fn int2vectorout(
+    ndim: i32,
+    dataoffset: i32,
+    elemtype: types_core::Oid,
+    values: &[i16],
+) -> PgResult<String> {
+    check_valid_int2vector(ndim, dataoffset, elemtype)?;
+    let mut out = String::new();
+    for (i, v) in values.iter().enumerate() {
+        if i != 0 {
+            out.push(' ');
+        }
+        out.push_str(&itoa_string(*v));
+    }
+    Ok(out)
 }
 
 // ===========================================================================

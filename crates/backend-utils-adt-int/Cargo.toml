@@ -11,8 +11,10 @@ path = "src/lib.rs"
 [dependencies]
 backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-adt-numutils = { path = "../backend-utils-adt-numutils" }
+backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
 backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
 mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
 types-fmgr = { path = "../types-fmgr" }

@@ -135,6 +135,46 @@ fn fc_int2send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
         .to_vec();
     ret_varlena(fcinfo, bytes)
 }
+fn fc_int2vectorin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let s = arg_cstring(fcinfo, 0).to_string();
+    let m = scratch_mcx();
+    // C passes fcinfo->context (the soft ErrorSaveContext) to the parser; the
+    // soft context is not carried on the fmgr frame here, so a bad token raises
+    // a hard error. The soft-error caller (InputFunctionCallSafe in fmgr-core)
+    // catches it and records into the real escontext, so pg_input_is_valid /
+    // pg_input_error_info still observe a soft failure.
+    let image_bytes: Vec<u8> = match crate::int2vectorin(m.mcx(), &s, None) {
+        Ok(Some(image)) => image.as_slice().to_vec(),
+        // None only when a soft escontext was supplied (not on this path).
+        Ok(None) => raise(types_error::PgError::error(
+            "invalid input syntax for type smallint",
+        )),
+        Err(e) => raise(e),
+    };
+    ret_varlena(fcinfo, image_bytes)
+}
+
+fn fc_int2vectorout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    use backend_utils_adt_arrayfuncs::foundation;
+    let m = scratch_mcx();
+    let bytes = arg_varlena(fcinfo, 0).to_vec();
+    // check_valid_int2vector reads ndim / dataoffset (== ARR_HASNULL marker) /
+    // elemtype off the array header; the values come from the short-aligned data
+    // region.
+    let ndim = foundation::arr_ndim(&bytes);
+    let dataoffset = foundation::arr_dataoffset_field(&bytes);
+    let elemtype = foundation::arr_elemtype(&bytes);
+    let values: Vec<i16> =
+        match backend_utils_adt_arrayfuncs::construct::int2vector_to_i16s_bytes(m.mcx(), &bytes) {
+            Ok(v) => v.iter().copied().collect(),
+            Err(e) => raise(e),
+        };
+    match crate::int2vectorout(ndim, dataoffset, elemtype, &values) {
+        Ok(s) => ret_cstring(fcinfo, s),
+        Err(e) => raise(e),
+    }
+}
+
 fn fc_int4in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     ret_i32(ok_or_raise!(crate::int4in(arg_cstring(fcinfo, 0), None)))
 }
@@ -462,6 +502,9 @@ pub fn register_int_builtins() {
         builtin(39, "int2out", 1, fc_int2out),
         builtin(2404, "int2recv", 1, fc_int2recv),
         builtin(2405, "int2send", 1, fc_int2send),
+        // ---- int2vector I/O (recv/send deferred with array_recv/array_send) ----
+        builtin(40, "int2vectorin", 1, fc_int2vectorin),
+        builtin(41, "int2vectorout", 1, fc_int2vectorout),
         builtin(42, "int4in", 1, fc_int4in),
         builtin(43, "int4out", 1, fc_int4out),
         builtin(2406, "int4recv", 1, fc_int4recv),

@@ -39,8 +39,6 @@ pub type BaselineGap = (Oid, &'static str, BuiltinGapKind);
 /// accepted, tracked gap; anything else is a regression.
 pub const KNOWN_GAP: &[BaselineGap] = &[
     (3, "heap_tableam_handler", BuiltinGapKind::NotRegistered),
-    (40, "int2vectorin", BuiltinGapKind::NotRegistered),
-    (41, "int2vectorout", BuiltinGapKind::NotRegistered),
     (48, "tidin", BuiltinGapKind::NotRegistered),
     (49, "tidout", BuiltinGapKind::NotRegistered),
     (50, "xidin", BuiltinGapKind::NotRegistered),
