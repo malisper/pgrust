@@ -409,8 +409,10 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `list_nth(castNode(OpExpr, rinfo->clause)->args, n)` — the n-th argument
-    /// expression of a 2-arg `OpExpr` clause, as a node handle.
-    pub fn opexpr_arg(root: &PlannerInfo, rinfo: RinfoId, n: i32) -> NodeId
+    /// expression of a 2-arg `OpExpr` clause, interned into the node arena and
+    /// returned as a node handle (the owned-arena `OpExpr` stores its args as
+    /// inline `Expr` values, so producing a handle requires `&mut` to intern).
+    pub fn opexpr_arg(root: &mut PlannerInfo, rinfo: RinfoId, n: i32) -> NodeId
 );
 
 /* ======================================================================

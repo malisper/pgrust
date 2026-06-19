@@ -499,6 +499,7 @@ pub fn apply_relabel_type(
     rtypmod: i32,
     rcollid: Oid,
     rformat: CoercionForm,
+    rlocation: i32,
     _overwrite_ok: bool,
 ) -> PgResult<Expr> {
     // Discard stacked RelabelTypes (eg foo::int::oid).
@@ -536,7 +537,7 @@ pub fn apply_relabel_type(
         resulttypmod: rtypmod,
         resultcollid: rcollid,
         relabelformat: rformat,
-        location: -1,
+        location: rlocation,
     }))
 }
 
@@ -551,6 +552,7 @@ pub fn relabel_to_typmod(expr: Expr, typmod: i32) -> PgResult<Expr> {
         typmod,
         rcollid,
         CoercionForm::COERCE_EXPLICIT_CAST,
+        -1,
         false,
     )
 }
@@ -1749,6 +1751,9 @@ pub fn init_seams() {
         // `add_child_eq_member` (equivclass.c) calls `expression_returns_set`
         // (nodeFuncs.c) over the new member's expression; nodeFuncs.c owns it.
         eqext::expression_returns_set::set(|expr| expression_returns_set(Some(expr)));
+        // `canonicalize_ec_expression` (equivclass.c) wraps the member expr in a
+        // RelabelType via `applyRelabelType` (nodeFuncs.c), which this unit owns.
+        eqext::apply_relabel_type::set(apply_relabel_type);
         // `process_equivalence` (equivclass.c) builds a `makeBoolConst` and an
         // `IS NOT NULL` `NullTest` over equivalence members; these are makefuncs.c
         // node builders, which this unit owns.

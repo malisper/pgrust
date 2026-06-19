@@ -19,6 +19,8 @@ types-storage = { path = "../types-storage" }
 backend-nodes-core = { path = "../backend-nodes-core" }
 # remove_nulling_relids nodeFuncs seam (owner = this crate's nulling.rs).
 backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
+# equivclass.c reaches the same remove_nulling_relids (var.c) by value.
+backend-optimizer-path-equivclass-ext-seams = { path = "../backend-optimizer-path-equivclass-ext-seams" }
 backend-parser-relation = { path = "../backend-parser-relation" }
 backend-parser-coerce = { path = "../backend-parser-coerce" }
 backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }

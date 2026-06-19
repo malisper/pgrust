@@ -66,6 +66,11 @@ pub fn init_seams() {
     small_seam::join_clause_is_movable_to::set(|root, rinfo, rel| {
         join_clause_is_movable_to(root, rinfo, rel)
     });
+    // indxpath.c (`check_index_predicates`) reaches the same joininfo.c body
+    // through the restrictinfo-seams declaration; joininfo owns it.
+    rinfo_seam::join_clause_is_movable_to::set(|root, rinfo, rel| {
+        join_clause_is_movable_to(root, rinfo, rel)
+    });
 
     // restrictinfo.h — joinpath-seams (the `clause_sides_match_join` static
     // inline, consumed by joinpath.c and analyzejoins.c). restrictinfo is the

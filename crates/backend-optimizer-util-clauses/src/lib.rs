@@ -158,6 +158,38 @@ pub fn init_seams() {
             .expect("contain_volatile_functions")
     });
 
+    // path-small.c / nodeWindowAgg.c reach `contain_volatile_functions((Node *)
+    // expr)` over a rootless `&Expr`; clauses.c owns the predicate.
+    backend_optimizer_path_small_seams::contain_volatile_functions_expr::set(|expr| {
+        grounded::contain_volatile_functions(Some(expr)).expect("contain_volatile_functions")
+    });
+
+    // joinpath.c reaches `contain_volatile_functions` over planner-arena
+    // handles: a single Expr node, a rel's `reltarget->exprs` list, or a
+    // RestrictInfo's `clause`. clauses.c owns the predicate; resolve off `root`.
+    backend_optimizer_path_joinpath_seams::contain_volatile_functions_node::set(|root, node| {
+        grounded::contain_volatile_functions(Some(root.node(node)))
+            .expect("contain_volatile_functions")
+    });
+    backend_optimizer_path_joinpath_seams::contain_volatile_functions_reltarget::set(
+        |root, rel| {
+            let reltarget = root
+                .rel(rel)
+                .reltarget
+                .as_ref()
+                .expect("contain_volatile_functions: RelOptInfo.reltarget is NULL");
+            reltarget.exprs.iter().any(|&e| {
+                grounded::contain_volatile_functions(Some(root.node(e)))
+                    .expect("contain_volatile_functions")
+            })
+        },
+    );
+    backend_optimizer_path_joinpath_seams::contain_volatile_functions_rinfo::set(|root, rinfo| {
+        let clause = root.rinfo(rinfo).clause;
+        grounded::contain_volatile_functions(Some(root.node(clause)))
+            .expect("contain_volatile_functions")
+    });
+
     // get_eclass_for_sort_expr (equivclass.c) rejects an EC sort expression that
     // contains an aggregate or window function; clauses.c owns both predicates.
     // The grounded impls are fallible only on a catalog miss; a propagated error

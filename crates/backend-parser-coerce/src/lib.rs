@@ -828,8 +828,7 @@ fn coerce_type_typmod<'mcx>(
         )?;
     } else {
         let collation = exprCollation(Some(&node))?;
-        let _ = location;
-        node = apply_relabel_type(node, targetTypeId, targetTypMod, collation, cformat, false)?;
+        node = apply_relabel_type(node, targetTypeId, targetTypMod, collation, cformat, location, false)?;
     }
 
     Ok(node)

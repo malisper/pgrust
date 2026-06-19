@@ -253,6 +253,7 @@ fn mutate_inner(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
                 r.resulttypmod,
                 r.resultcollid,
                 r.relabelformat,
+                r.location,
                 true,
             )
         }
@@ -270,6 +271,7 @@ fn mutate_inner(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
                 tm,
                 c.collOid,
                 CoercionForm::COERCE_IMPLICIT_CAST,
+                c.location,
                 true,
             )
         }
@@ -1083,6 +1085,7 @@ fn arm_coercetodomain(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
             cdomain.resulttypmod,
             cdomain.resultcollid,
             cdomain.coercionformat,
+            cdomain.location,
             true,
         );
     }

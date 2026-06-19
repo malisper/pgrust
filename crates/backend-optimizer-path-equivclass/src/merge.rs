@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 
 use types_core::primitive::{Index, Oid};
 use types_error::PgResult;
-use types_nodes::primnodes::Expr;
+use types_nodes::primnodes::{CoercionForm, Expr};
 use types_pathnodes::{
     EcId, EmId, EquivalenceClass, EquivalenceMember, JoinDomain, PlannerInfo, Relids, RinfoId,
     RELOPT_BASEREL,
@@ -22,8 +22,6 @@ use crate::relevance::{live_ec_ids, new_iterator};
 
 /// `RECORDOID` (pg_type_d.h).
 const RECORDOID: Oid = 2249;
-/// `COERCE_IMPLICIT_CAST` (primnodes.h CoercionForm).
-const COERCE_IMPLICIT_CAST: i32 = 2;
 /// `UINT_MAX` for `ec_min_security` initialisation.
 const UINT_MAX_INDEX: Index = Index::MAX;
 
@@ -63,7 +61,11 @@ fn is_polymorphic_type(typid: Oid) -> bool {
 
 /// `canonicalize_ec_expression(expr, req_type, req_collation)` — ensure `expr`
 /// exposes the EC's expected type/collation, adding a `RelabelType` if needed.
-pub fn canonicalize_ec_expression(expr: Expr, req_type: Oid, req_collation: Oid) -> Expr {
+pub fn canonicalize_ec_expression(
+    expr: Expr,
+    req_type: Oid,
+    req_collation: Oid,
+) -> PgResult<Expr> {
     let expr_type = ec_seam::expr_type::call(&expr);
 
     /* polymorphic / RECORD opclasses keep the same exposed type */
@@ -84,12 +86,12 @@ pub fn canonicalize_ec_expression(expr: Expr, req_type: Oid, req_collation: Oid)
             req_type,
             req_typmod,
             req_collation,
-            COERCE_IMPLICIT_CAST,
+            CoercionForm::COERCE_IMPLICIT_CAST,
             -1,
             false,
         )
     } else {
-        expr
+        Ok(expr)
     }
 }
 
@@ -236,9 +238,9 @@ pub fn process_equivalence(
 
     /* ensure both inputs expose the desired collation */
     let item1_type0 = ec_seam::expr_type::call(&item1_raw);
-    let item1 = canonicalize_ec_expression(item1_raw, item1_type0, collation);
+    let item1 = canonicalize_ec_expression(item1_raw, item1_type0, collation)?;
     let item2_type0 = ec_seam::expr_type::call(&item2_raw);
-    let item2 = canonicalize_ec_expression(item2_raw, item2_type0, collation);
+    let item2 = canonicalize_ec_expression(item2_raw, item2_type0, collation)?;
 
     /* X = X cannot become an EC */
     if ec_seam::equal::call(&item1, &item2) {
@@ -479,7 +481,7 @@ pub fn get_eclass_for_sort_expr(
     create_it: bool,
 ) -> PgResult<Option<EcId>> {
     /* ensure the expression exposes the correct type and collation */
-    let expr = canonicalize_ec_expression(expr, opcintype, collation);
+    let expr = canonicalize_ec_expression(expr, opcintype, collation)?;
 
     /* SortGroupClause expressions belong to the top JoinDomain */
     let jdomain = root

@@ -427,15 +427,11 @@ fn paraminfo_get_equal_hashops<'mcx>(
             let (expr, hasheqoperator) = {
                 let ri = root.rinfo(rinfo);
                 if ri.outer_is_left {
-                    (
-                        jp::opexpr_arg::call(root, rinfo, 0),
-                        root.rinfo(rinfo).left_hasheqoperator,
-                    )
+                    let hasheq = ri.left_hasheqoperator;
+                    (jp::opexpr_arg::call(root, rinfo, 0), hasheq)
                 } else {
-                    (
-                        jp::opexpr_arg::call(root, rinfo, 1),
-                        root.rinfo(rinfo).right_hasheqoperator,
-                    )
+                    let hasheq = ri.right_hasheqoperator;
+                    (jp::opexpr_arg::call(root, rinfo, 1), hasheq)
                 }
             };
 
@@ -2352,14 +2348,19 @@ fn clause_is_opexpr_with_two_args(root: &PlannerInfo, rinfo: RinfoId) -> bool {
     }
 }
 
-// NOTE: `opexpr_arg` (joinpath-seams) is intentionally NOT installed here. Its
-// seam signature is `(&PlannerInfo, RinfoId, i32) -> NodeId`, but in this arena
-// model an `OpExpr`'s args are inline `Expr` values, so returning a node handle
-// requires interning the arg into the node arena — which needs `&mut PlannerInfo`
-// the seam does not provide. It is reached only on the Memoize path
-// (`paraminfo_get_equal_hashops`); until the seam is re-signed to thread `&mut`,
-// that path correctly panics with "seam not installed" rather than fabricating a
-// handle.
+// `list_nth(castNode(OpExpr, rinfo->clause)->args, n)` — the n-th arg of a 2-arg
+// OpExpr join clause. The owned-arena `OpExpr` stores its args as inline `Expr`
+// values, so producing a node handle interns a clone into the node arena (hence
+// the `&mut PlannerInfo`). Reached on the Memoize path
+// (`paraminfo_get_equal_hashops`).
+fn opexpr_arg(root: &mut PlannerInfo, rinfo: RinfoId, n: i32) -> NodeId {
+    let clause = root.rinfo(rinfo).clause;
+    let arg = match root.node(clause) {
+        types_nodes::primnodes::Expr::OpExpr(o) => o.args[n as usize].clone(),
+        _ => unreachable!("opexpr_arg: rinfo->clause is not an OpExpr"),
+    };
+    root.alloc_node(arg)
+}
 
 pub fn init_seams() {
     jp::fdw_get_foreign_join_paths::set(fdw_get_foreign_join_paths);
@@ -2369,6 +2370,7 @@ pub fn init_seams() {
     jp::clause_is_const::set(clause_is_const);
     jp::clause_opexpr_opno::set(clause_opexpr_opno);
     jp::clause_is_opexpr_with_two_args::set(clause_is_opexpr_with_two_args);
+    jp::opexpr_arg::set(opexpr_arg);
 }
 
 #[cfg(test)]

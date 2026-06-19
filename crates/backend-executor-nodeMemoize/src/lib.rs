@@ -1963,7 +1963,11 @@ fn out_of_memory(what: &str) -> PgError {
 /// /`deform_key_params`/`copy_probe_slot_minimal_tuple`) living in this crate as
 /// plain functions over the owned `MemoizeScanState`.
 pub fn init_seams() {
-    // This node declares no inward seams: its parallel-executor methods are
-    // dispatched directly by `backend-executor-execParallel` over the
-    // value-typed `PlanStateNode::Memoize` enum arm.
+    // This node's parallel-executor methods are dispatched directly by
+    // `backend-executor-execParallel` over the value-typed
+    // `PlanStateNode::Memoize` enum arm. The one inward seam is the planner's
+    // memoize cost estimate (cost_memoize_rescan, costsize.c).
+    backend_optimizer_path_costsize_seams::exec_estimate_cache_entry_overhead_bytes::set(
+        ExecEstimateCacheEntryOverheadBytes,
+    );
 }

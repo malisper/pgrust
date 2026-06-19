@@ -229,4 +229,24 @@ pub fn init_seams() {
             }
         },
     );
+
+    // `remove_nulling_relids((Node *) expr, removable, except)` (var.c) reached
+    // by-value from equivclass.c and other planner sites through the
+    // equivclass-ext consumer seam. Same wrap/unwrap; the `Relids` (Bitmapset)
+    // sets convert to `ExprRelids` by their word storage.
+    backend_optimizer_path_equivclass_ext_seams::remove_nulling_relids::set(
+        |expr, removable, except| {
+            let to_er = |r: &types_pathnodes::Relids| types_nodes::primnodes::ExprRelids {
+                words: r.as_ref().map(|b| b.words.clone()).unwrap_or_default(),
+            };
+            let removable_er = to_er(&removable);
+            let except_er = to_er(&except);
+            let mut node = types_nodes::nodes::Node::Expr(expr);
+            nulling::remove_nulling_relids(&mut node, &removable_er, &except_er);
+            match node.into_expr() {
+                Some(e) => e,
+                None => unreachable!("remove_nulling_relids returned a non-Expr for an Expr input"),
+            }
+        },
+    );
 }

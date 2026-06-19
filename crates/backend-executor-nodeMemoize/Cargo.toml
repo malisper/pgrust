@@ -28,3 +28,6 @@ backend-executor-execProcnode-seams = { path = "../backend-executor-execProcnode
 backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
 backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
 backend-executor-execAmi-seams = { path = "../backend-executor-execAmi-seams" }
+# ExecEstimateCacheEntryOverheadBytes (nodeMemoize.c) — the planner's memoize
+# cost estimate reaches it through costsize-seams; this unit owns it.
+backend-optimizer-path-costsize-seams = { path = "../backend-optimizer-path-costsize-seams" }

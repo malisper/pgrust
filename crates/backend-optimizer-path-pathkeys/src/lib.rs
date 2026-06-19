@@ -1067,7 +1067,10 @@ pub fn convert_subquery_pathkeys(
                         tle_expr_raw,
                         sub_expr_type,
                         sub_expr_coll,
-                    );
+                    )
+                    .unwrap_or_else(|e| {
+                        panic!("convert_subquery_pathkeys: canonicalize_ec_expression: {e:?}")
+                    });
                     if !nf::equal::call(&tle_expr, &sub_expr) {
                         continue;
                     }

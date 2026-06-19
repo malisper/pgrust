@@ -29,6 +29,9 @@ backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-s
 # clauses.c's is_pseudo_constant_clause{,_relids} predicates — declared in
 # path-small-seams (path-small.c's clause-classification consumers), owned here.
 backend-optimizer-path-small-seams = { path = "../backend-optimizer-path-small-seams" }
+# joinpath.c's contain_volatile_functions(node/reltarget/rinfo) legs — declared
+# in joinpath-seams; clauses.c owns the predicate.
+backend-optimizer-path-joinpath-seams = { path = "../backend-optimizer-path-joinpath-seams" }
 # clauses.c's is_parallel_safe(root, node) — declared in pathnode-seams (the
 # pathnode create_*_path/gather parallel-safety checks ride it), owned here.
 backend-optimizer-util-pathnode-seams = { path = "../backend-optimizer-util-pathnode-seams" }

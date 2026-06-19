@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 
 use types_core::primitive::{Index, Oid};
 use types_error::PgResult;
-use types_nodes::primnodes::Expr;
+use types_nodes::primnodes::{CoercionForm, Expr};
 use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{NodeId, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo};
 
@@ -56,10 +56,10 @@ seam_core::seam!(
         rtype: Oid,
         rtypmod: i32,
         rcollid: Oid,
-        rformat: i32,
+        rformat: CoercionForm,
         rlocation: i32,
         overwrite_ok: bool,
-    ) -> Expr
+    ) -> PgResult<Expr>
 );
 
 /* ---- clauses.c / var.c expression analysis ------------------------ */

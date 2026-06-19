@@ -1228,7 +1228,7 @@ fn build_setop_tlist_from_exprs<'mcx>(
         if expr_collation(Some(&expr))? != col_coll {
             let rtype = expr_type(Some(&expr))?;
             let rtypmod = expr_typmod(Some(&expr))?;
-            expr = apply_relabel_type(expr, rtype, rtypmod, col_coll, COERCE_IMPLICIT_CAST, false)?;
+            expr = apply_relabel_type(expr, rtype, rtypmod, col_coll, COERCE_IMPLICIT_CAST, -1, false)?;
             *trivial_tlist = false;
         }
 
