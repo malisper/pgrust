@@ -2054,7 +2054,7 @@ fn get_tle_expr_by_resno<'mcx>(
         if let Some(tle) = n.as_targetentry() {
             if tle.resno == resno {
                 return match tle.expr.as_ref() {
-                    Some(e) => Ok(Some(Node::Expr((**e).clone_in(mcx)?))),
+                    Some(e) => Ok(Some(Node::mk_expr(mcx, (**e).clone_in(mcx)?))),
                     None => Ok(None),
                 };
             }

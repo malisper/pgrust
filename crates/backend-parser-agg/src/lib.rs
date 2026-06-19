@@ -1474,7 +1474,7 @@ pub fn parseCheckAggregates<'mcx>(
         // `havingQual` is the concretely-typed `Option<PgBox<Expr>>` view; the
         // grouping-expr helpers below operate on `Node`, so wrap the owned `Expr`
         // into `Node::Expr` here and unwrap back to `Expr` on store-back.
-        let mut clause: Node = Node::Expr((*having).clone_in(mcx)?);
+        let mut clause: Node = Node::mk_expr(mcx, (*having).clone_in(mcx)?);
         clause = finalize_grouping_exprs(
             mcx,
             clause,
