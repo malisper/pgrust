@@ -802,10 +802,23 @@ pub fn ExecEvalParamExtern<'mcx>(
                     ))
                     .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH));
                 }
+                // *op->resvalue = prm->value; *op->resnull = prm->isnull. Write
+                // through `write_cell`, which routes the ExprState's own result
+                // cell (id 0 / STATE_RESULT_CELL) to `state.resvalue`/
+                // `state.resnull` rather than the dead `result_cells[0]`. A
+                // top-level PARAM_EXTERN whose result slot IS the ExprState cell
+                // (e.g. a SQL-function body `SELECT $1`, where `$1` is the whole
+                // projection target) otherwise wrote to the wrong location, so
+                // the EEOP_ASSIGN_TMP reader saw the stale `state.resvalue`
+                // (zero) — dropping a by-reference value's image entirely (the
+                // "name arg missing from by-ref lane" symptom). Mirrors the
+                // `ExecEvalParamExec` fix.
                 let (resvalue_id, _resnull_id) = res_cells(state, op);
-                state.result_cells.set(
+                crate::interp_loop::write_cell(
+                    state,
                     resvalue_id,
-                    ResultCell { value: prm.value.clone(), isnull: prm.isnull },
+                    prm.value.clone(),
+                    prm.isnull,
                 );
                 return Ok(());
             }
