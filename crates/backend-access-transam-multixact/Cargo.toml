@@ -24,6 +24,7 @@ backend-utils-init-small = { path = "../backend-utils-init-small" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-access-transam-slru = { path = "../backend-access-transam-slru" }
 backend-storage-lmgr-lwlock = { path = "../backend-storage-lmgr-lwlock" }
+backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" }
 
 backend-access-transam-multixact-seams = { path = "../backend-access-transam-multixact-seams" }
 backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }

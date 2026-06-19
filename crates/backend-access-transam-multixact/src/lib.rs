@@ -35,8 +35,10 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::result_large_err)]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
+
+use backend_storage_ipc_shmem_seams as shmem;
 
 use backend_utils_error::errno::current_errno;
 use backend_utils_error::{elog, ereport, PgError, PgResult};
@@ -253,9 +255,21 @@ fn mxstatus_to_string(status: MultiXactStatus) -> &'static str {
 // ===========================================================================
 
 /// The fixed (scalar) head of multixact.c's `MultiXactStateData` struct,
-/// protected by `MultiXactGenLock`. The two per-backend `OldestMemberMXactId[]`
-/// / `OldestVisibleMXactId[]` arrays are owned alongside it.
+/// protected by `MultiXactGenLock`. This is the `repr(C)` header that precedes
+/// the `perBackendXactIds[FLEXIBLE_ARRAY_MEMBER]` flexible array in the shared
+/// segment (multixact.c lines 242-326); the two per-backend
+/// `OldestMemberMXactId[]` / `OldestVisibleMXactId[]` arrays live in that
+/// trailing flexible array (reached via the [`OLDEST_MEMBER_MXACT_ID`] /
+/// [`OLDEST_VISIBLE_MXACT_ID`] per-process pointers, exactly as C's two
+/// file-static `MultiXactId *` pointers do).
+///
+/// The whole struct (header + array) is carved from `MAP_SHARED` shmem by
+/// [`MultiXactShmemInit`] via `ShmemInitStruct("Shared MultiXact State", ...)`,
+/// so the same physical bytes back every forked backend: the startup process's
+/// `TrimMultiXact` write of `finishedStartup = true` (and the counter advances)
+/// is seen by forked backends, serialized by `MultiXactGenLock` exactly as in C.
 #[derive(Debug)]
+#[repr(C)]
 struct MultiXactStateData {
     /// next-to-be-assigned MultiXactId
     nextMXact: MultiXactId,
@@ -276,31 +290,10 @@ struct MultiXactStateData {
     multiWrapLimit: MultiXactId,
     /* anti-wraparound measures (members) */
     offsetStopLimit: MultiXactOffset,
-    /// `OldestMemberMXactId` — `perBackendXactIds[0 .. MaxOldestSlot]`.
-    oldest_member: Vec<MultiXactId>,
-    /// `OldestVisibleMXactId` — `perBackendXactIds[MaxOldestSlot .. 2*MaxOldestSlot]`.
-    oldest_visible: Vec<MultiXactId>,
-}
-
-impl MultiXactStateData {
-    fn new(max_oldest_slot: usize) -> Self {
-        MultiXactStateData {
-            nextMXact: 0,
-            nextOffset: 0,
-            finishedStartup: false,
-            oldestMultiXactId: 0,
-            oldestMultiXactDB: 0,
-            oldestOffset: 0,
-            oldestOffsetKnown: false,
-            multiVacLimit: 0,
-            multiWarnLimit: 0,
-            multiStopLimit: 0,
-            multiWrapLimit: 0,
-            offsetStopLimit: 0,
-            oldest_member: vec![InvalidMultiXactId; max_oldest_slot],
-            oldest_visible: vec![InvalidMultiXactId; max_oldest_slot],
-        }
-    }
+    // The C struct ends with `MultiXactId perBackendXactIds[FLEXIBLE_ARRAY_MEMBER]`,
+    // which is NOT a struct field in Rust: the `2 * MaxOldestSlot` trailing
+    // entries are carved past `size_of::<MultiXactStateData>()` in shmem and
+    // reached through `OLDEST_MEMBER_MXACT_ID` / `OLDEST_VISIBLE_MXACT_ID`.
 }
 
 /// Backend-local MultiXactId cache entry (`mXactCacheEnt`). Members kept sorted
@@ -317,13 +310,53 @@ const MAX_CACHE_ENTRIES: usize = 256;
 // Thread-local backend/shared state (the multixact.c file-statics)
 // ===========================================================================
 
+/// Per-process pointer at the shared `MultiXactStateData` singleton (the
+/// realization of multixact.c:334 `static MultiXactStateData *MultiXactState`).
+/// The struct it addresses lives in the main `MAP_SHARED` segment (carved by
+/// [`MultiXactShmemInit`]), so the one physical struct backs every backend; the
+/// pointer itself is per-process (correctly forked). `Deref`/`DerefMut` give
+/// field access on the shared header struct, so the existing
+/// `MultiXactState->nextMXact` / `finishedStartup` call sites read and write the
+/// one physical struct.
+#[derive(Clone, Copy)]
+struct MultiXactPtr(*mut MultiXactStateData);
+
+// SAFETY: the pointer addresses the cluster-wide shmem `MultiXactStateData`,
+// valid for the process lifetime; all field access is serialized by
+// `MultiXactGenLock`, exactly as in C. The `Cell` that holds it is per-backend.
+unsafe impl Send for MultiXactPtr {}
+
+impl core::ops::Deref for MultiXactPtr {
+    type Target = MultiXactStateData;
+    #[inline]
+    fn deref(&self) -> &MultiXactStateData {
+        // SAFETY: `self.0` points at the shared singleton in shmem.
+        unsafe { &*self.0 }
+    }
+}
+
+impl core::ops::DerefMut for MultiXactPtr {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut MultiXactStateData {
+        // SAFETY: as above; callers hold `MultiXactGenLock` for the write.
+        unsafe { &mut *self.0 }
+    }
+}
+
 thread_local! {
     /// `static SlruCtlData MultiXactOffsetCtlData;` / `#define MultiXactOffsetCtl`.
     static MXACT_OFFSET_CTL: RefCell<Option<SlruCtlData>> = const { RefCell::new(None) };
     /// `static SlruCtlData MultiXactMemberCtlData;` / `#define MultiXactMemberCtl`.
     static MXACT_MEMBER_CTL: RefCell<Option<SlruCtlData>> = const { RefCell::new(None) };
-    /// `MultiXactState` (shared `MultiXactStateData` + per-backend arrays).
-    static MXACT_STATE: RefCell<Option<MultiXactStateData>> = const { RefCell::new(None) };
+    /// `MultiXactState` (multixact.c:334) — the per-process pointer at the
+    /// shared `MultiXactStateData` header in `MAP_SHARED` shmem.
+    static MXACT_STATE: Cell<Option<MultiXactPtr>> = const { Cell::new(None) };
+    /// `OldestMemberMXactId` (multixact.c:335) — per-process pointer at
+    /// `perBackendXactIds[0]` in the shared flexible array.
+    static OLDEST_MEMBER_MXACT_ID: Cell<*mut MultiXactId> = const { Cell::new(core::ptr::null_mut()) };
+    /// `OldestVisibleMXactId` (multixact.c:336) — per-process pointer at
+    /// `perBackendXactIds[MaxOldestSlot]` in the shared flexible array.
+    static OLDEST_VISIBLE_MXACT_ID: Cell<*mut MultiXactId> = const { Cell::new(core::ptr::null_mut()) };
     /// Backend-local cache (`MXactCache`), a dclist; head is most-recent.
     static MXACT_CACHE: RefCell<VecDeque<MXactCacheEnt>> = const { RefCell::new(VecDeque::new()) };
     /// The memory context the cache + arrays are charged to (`MultiXactMemoryContext`).
@@ -354,14 +387,65 @@ fn with_member_ctl<R>(f: impl FnOnce(&mut SlruCtlData) -> R) -> R {
     })
 }
 
-/// Run `f` with mutable access to the shared `MultiXactState`.
+/// Run `f` with mutable access to the shared `MultiXactState` header (the
+/// scalar fields). The per-backend `OldestMemberMXactId[]` /
+/// `OldestVisibleMXactId[]` arrays are reached via [`oldest_member`] /
+/// [`oldest_visible`] / [`set_oldest_member`] / [`set_oldest_visible`], which
+/// address the trailing flexible array, not these header fields.
 fn with_state<R>(f: impl FnOnce(&mut MultiXactStateData) -> R) -> R {
     MXACT_STATE.with(|s| {
-        let mut slot = s.borrow_mut();
-        let st = slot
-            .as_mut()
+        let mut ptr = s
+            .get()
             .expect("MultiXactState used before MultiXactShmemInit");
-        f(st)
+        f(&mut ptr)
+    })
+}
+
+/// `OldestMemberMXactId[i]` — read entry `i` of the shared per-backend
+/// "oldest member" flexible array. Callers hold `MultiXactGenLock` as in C
+/// (or rely on the atomic single-`MultiXactId` access C documents).
+#[inline]
+fn oldest_member(i: usize) -> MultiXactId {
+    OLDEST_MEMBER_MXACT_ID.with(|p| {
+        let base = p.get();
+        debug_assert!(!base.is_null(), "OldestMemberMXactId used before MultiXactShmemInit");
+        // SAFETY: `base` points at `perBackendXactIds[0]` in the shared array,
+        // which holds `MaxOldestSlot` entries; `i < MaxOldestSlot` by contract.
+        unsafe { *base.add(i) }
+    })
+}
+
+/// `OldestMemberMXactId[i] = v` — write entry `i` of the shared array.
+#[inline]
+fn set_oldest_member(i: usize, v: MultiXactId) {
+    OLDEST_MEMBER_MXACT_ID.with(|p| {
+        let base = p.get();
+        debug_assert!(!base.is_null(), "OldestMemberMXactId used before MultiXactShmemInit");
+        // SAFETY: see `oldest_member`.
+        unsafe { *base.add(i) = v };
+    })
+}
+
+/// `OldestVisibleMXactId[i]` — read entry `i` of the shared per-backend
+/// "oldest visible" flexible array.
+#[inline]
+fn oldest_visible(i: usize) -> MultiXactId {
+    OLDEST_VISIBLE_MXACT_ID.with(|p| {
+        let base = p.get();
+        debug_assert!(!base.is_null(), "OldestVisibleMXactId used before MultiXactShmemInit");
+        // SAFETY: `base` points at `perBackendXactIds[MaxOldestSlot]`; bounded as above.
+        unsafe { *base.add(i) }
+    })
+}
+
+/// `OldestVisibleMXactId[i] = v` — write entry `i` of the shared array.
+#[inline]
+fn set_oldest_visible(i: usize, v: MultiXactId) {
+    OLDEST_VISIBLE_MXACT_ID.with(|p| {
+        let base = p.get();
+        debug_assert!(!base.is_null(), "OldestVisibleMXactId used before MultiXactShmemInit");
+        // SAFETY: see `oldest_visible`.
+        unsafe { *base.add(i) = v };
     })
 }
 
@@ -568,7 +652,7 @@ pub fn MultiXactIdIsRunning(multi: MultiXactId, is_lock_only: bool) -> PgResult<
 /// could be a member of.
 pub fn MultiXactIdSetOldestMember() -> PgResult<()> {
     let me = globals::MyProcNumber() as usize;
-    let already = with_state(|st| MultiXactIdIsValid(st.oldest_member[me]));
+    let already = MultiXactIdIsValid(oldest_member(me));
     if !already {
         let guard = gen_lock_acquire(false)?;
 
@@ -580,7 +664,7 @@ pub fn MultiXactIdSetOldestMember() -> PgResult<()> {
             if next_mxact < FirstMultiXactId {
                 next_mxact = FirstMultiXactId;
             }
-            st.oldest_member[me] = next_mxact;
+            set_oldest_member(me, next_mxact);
         });
 
         guard.release()?;
@@ -592,7 +676,7 @@ pub fn MultiXactIdSetOldestMember() -> PgResult<()> {
 /// considers possibly live.
 fn MultiXactIdSetOldestVisible() -> PgResult<()> {
     let me = globals::MyProcNumber() as usize;
-    let already = with_state(|st| MultiXactIdIsValid(st.oldest_visible[me]));
+    let already = MultiXactIdIsValid(oldest_visible(me));
     if !already {
         let nslots = max_oldest_slot();
         let guard = gen_lock_acquire(true)?;
@@ -604,13 +688,13 @@ fn MultiXactIdSetOldestVisible() -> PgResult<()> {
             }
 
             for i in 0..nslots {
-                let thisoldest = st.oldest_member[i];
+                let thisoldest = oldest_member(i);
                 if MultiXactIdIsValid(thisoldest) && MultiXactIdPrecedes(thisoldest, oldest_mxact) {
                     oldest_mxact = thisoldest;
                 }
             }
 
-            st.oldest_visible[me] = oldest_mxact;
+            set_oldest_visible(me, oldest_mxact);
         });
 
         guard.release()?;
@@ -1062,7 +1146,7 @@ pub fn GetMultiXactIdMembers(
     // If we know the multi is used only for locking and not for updates, then
     // we can skip checking if the value is older than our oldest visible multi.
     let me = globals::MyProcNumber() as usize;
-    let oldest_visible_me = with_state(|st| st.oldest_visible[me]);
+    let oldest_visible_me = oldest_visible(me);
     if is_lock_only && MultiXactIdPrecedes(multi, oldest_visible_me) {
         return Ok(None);
     }
@@ -1330,10 +1414,8 @@ pub fn AtEOXact_MultiXact() {
     // The dummy assignments are not strictly necessary, but they help to keep
     // the state machine clean; the OldestMemberMXactId[]/OldestVisibleMXactId[]
     // entries are reset without locking (this backend owns them).
-    with_state(|st| {
-        st.oldest_member[me] = InvalidMultiXactId;
-        st.oldest_visible[me] = InvalidMultiXactId;
-    });
+    set_oldest_member(me, InvalidMultiXactId);
+    set_oldest_visible(me, InvalidMultiXactId);
 
     // Discard the local MultiXactId cache.
     cache_clear();
@@ -1342,7 +1424,7 @@ pub fn AtEOXact_MultiXact() {
 /// `AtPrepare_MultiXact` — save multixact state at 2PC prepare.
 pub fn AtPrepare_MultiXact() -> PgResult<()> {
     let me = globals::MyProcNumber() as usize;
-    let my_oldest_member = with_state(|st| st.oldest_member[me]);
+    let my_oldest_member = oldest_member(me);
 
     if MultiXactIdIsValid(my_oldest_member) {
         twophase_seams::register_two_phase_record::call(
@@ -1357,7 +1439,7 @@ pub fn AtPrepare_MultiXact() -> PgResult<()> {
 /// `PostPrepare_MultiXact` — clean up after successful PREPARE TRANSACTION.
 pub fn PostPrepare_MultiXact(xid: TransactionId) -> PgResult<()> {
     let me = globals::MyProcNumber() as usize;
-    let my_oldest_member = with_state(|st| st.oldest_member[me]);
+    let my_oldest_member = oldest_member(me);
     if MultiXactIdIsValid(my_oldest_member) {
         let dummy = twophase_seams::two_phase_get_dummy_proc_number::call(xid, false)? as usize;
 
@@ -1365,10 +1447,8 @@ pub fn PostPrepare_MultiXact(xid: TransactionId) -> PgResult<()> {
         // others see both changes, not just the reset of the slot of the
         // current backend.
         let guard = gen_lock_acquire(true)?;
-        with_state(|st| {
-            st.oldest_member[dummy] = my_oldest_member;
-            st.oldest_member[me] = InvalidMultiXactId;
-        });
+        set_oldest_member(dummy, my_oldest_member);
+        set_oldest_member(me, InvalidMultiXactId);
         guard.release()?;
     }
 
@@ -1392,10 +1472,10 @@ pub fn multixact_twophase_recover(
     // Get the oldest member XID from the state file record, and set it in the
     // OldestMemberMXactId slot reserved for this prepared transaction.
     debug_assert_eq!(recdata.len(), core::mem::size_of::<MultiXactId>());
-    let oldest_member =
+    let oldest_member_val =
         MultiXactId::from_ne_bytes(recdata[..4].try_into().expect("4-byte MultiXactId"));
 
-    with_state(|st| st.oldest_member[dummy] = oldest_member);
+    set_oldest_member(dummy, oldest_member_val);
     Ok(())
 }
 
@@ -1407,7 +1487,7 @@ pub fn multixact_twophase_postcommit(
 ) -> PgResult<()> {
     let dummy = twophase_seams::two_phase_get_dummy_proc_number::call(xid, true)? as usize;
     debug_assert_eq!(recdata.len(), core::mem::size_of::<MultiXactId>());
-    with_state(|st| st.oldest_member[dummy] = InvalidMultiXactId);
+    set_oldest_member(dummy, InvalidMultiXactId);
     Ok(())
 }
 
@@ -1434,14 +1514,24 @@ fn MultiXactMemberBuffers() -> i32 {
 
 /// `MultiXactShmemSize` — shared-memory size for both SLRUs + control.
 pub fn MultiXactShmemSize() -> Size {
-    let nslots = max_oldest_slot();
-    // SHARED_MULTIXACT_STATE_SIZE: header + perBackendXactIds[2*nslots]. The
-    // header offset is 48 bytes on a 64-bit target (12 scalar fields padded to
-    // the array's 4-byte alignment).
-    let mut size: Size = 48 + core::mem::size_of::<MultiXactId>() * 2 * nslots;
+    let mut size: Size = shared_multixact_state_size();
     size += SimpleLruShmemSize(MultiXactOffsetBuffers(), 0);
     size += SimpleLruShmemSize(MultiXactMemberBuffers(), 0);
     size
+}
+
+/// `SHARED_MULTIXACT_STATE_SIZE` (multixact.c 2015-2017):
+/// `offsetof(MultiXactStateData, perBackendXactIds) + sizeof(MultiXactId)*2*MaxOldestSlot`.
+/// `perBackendXactIds` is the flexible array immediately after the header, so its
+/// offset is `size_of::<MultiXactStateData>()` rounded up to `MultiXactId`'s
+/// alignment (the array element type). `repr(C)` already pads the struct to its
+/// own alignment, which is `>= align_of::<MultiXactId>()`, so `size_of` is the
+/// flexible-array offset.
+fn shared_multixact_state_size() -> Size {
+    let nslots = max_oldest_slot();
+    let header = core::mem::size_of::<MultiXactStateData>();
+    debug_assert_eq!(header % core::mem::align_of::<MultiXactId>(), 0);
+    header + core::mem::size_of::<MultiXactId>() * 2 * nslots
 }
 
 /// `MultiXactShmemInit` — initialize MultiXact shared state and SLRUs.
@@ -1478,7 +1568,47 @@ pub fn MultiXactShmemInit() -> PgResult<()> {
 
     MXACT_OFFSET_CTL.with(|c| *c.borrow_mut() = Some(offset_ctl));
     MXACT_MEMBER_CTL.with(|c| *c.borrow_mut() = Some(member_ctl));
-    MXACT_STATE.with(|s| *s.borrow_mut() = Some(MultiXactStateData::new(nslots)));
+
+    // Initialize our shared state struct. Faithful to multixact.c 2051-2069:
+    //
+    //   MultiXactState = ShmemInitStruct("Shared MultiXact State",
+    //                                    SHARED_MULTIXACT_STATE_SIZE, &found);
+    //   if (!IsUnderPostmaster) { Assert(!found); MemSet(MultiXactState, 0, ...); }
+    //   else Assert(found);
+    //   OldestMemberMXactId = MultiXactState->perBackendXactIds;
+    //   OldestVisibleMXactId = OldestMemberMXactId + MaxOldestSlot;
+    //
+    // The struct (scalar header + the 2*MaxOldestSlot perBackendXactIds[]
+    // flexible array) is carved from the main MAP_SHARED segment, so the one
+    // physical struct backs every forked backend.
+    let state_size = shared_multixact_state_size();
+    let (addr, found) =
+        shmem::shmem_init_struct::call("Shared MultiXact State", state_size)?;
+    let state = addr as *mut MultiXactStateData;
+
+    if !globals::IsUnderPostmaster() {
+        debug_assert!(!found, "Shared MultiXact State already present in stand-alone backend");
+        // Make sure we zero out the per-backend state (the whole carved region,
+        // header + flexible array), matching C's MemSet over SHARED_MULTIXACT_STATE_SIZE.
+        // SAFETY: `addr` addresses `state_size` writable shmem bytes just carved
+        // by `ShmemInitStruct`.
+        unsafe {
+            core::ptr::write_bytes(addr, 0, state_size);
+        }
+    } else {
+        debug_assert!(found, "Shared MultiXact State missing for attaching backend");
+    }
+
+    // Set up the per-process array pointers at the flexible array that follows
+    // the header (`MultiXactState->perBackendXactIds`).
+    // SAFETY: `state` addresses a `MultiXactStateData` header immediately
+    // followed by `2*nslots` `MultiXactId` entries in the same carved region.
+    let oldest_member_base = unsafe { state.add(1) as *mut MultiXactId };
+    let oldest_visible_base = unsafe { oldest_member_base.add(nslots) };
+
+    MXACT_STATE.with(|s| s.set(Some(MultiXactPtr(state))));
+    OLDEST_MEMBER_MXACT_ID.with(|p| p.set(oldest_member_base));
+    OLDEST_VISIBLE_MXACT_ID.with(|p| p.set(oldest_visible_base));
     PRE_INITIALIZED_OFFSETS_PAGE.with(|p| *p.borrow_mut() = -1);
     Ok(())
 }
@@ -1875,11 +2005,11 @@ pub fn GetOldestMultiXactId() -> PgResult<MultiXactId> {
 
         let mut oldest_mxact = next_mxact;
         for i in 0..nslots {
-            let thisoldest = st.oldest_member[i];
+            let thisoldest = oldest_member(i);
             if MultiXactIdIsValid(thisoldest) && MultiXactIdPrecedes(thisoldest, oldest_mxact) {
                 oldest_mxact = thisoldest;
             }
-            let thisoldest = st.oldest_visible[i];
+            let thisoldest = oldest_visible(i);
             if MultiXactIdIsValid(thisoldest) && MultiXactIdPrecedes(thisoldest, oldest_mxact) {
                 oldest_mxact = thisoldest;
             }

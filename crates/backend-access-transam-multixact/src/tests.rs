@@ -143,3 +143,61 @@ fn warning_message_plurals() {
     assert!(members_limit_detail(1, 3).contains("only enough for 1 member."));
     assert!(members_limit_detail(2, 3).contains("only enough for 2 members."));
 }
+
+/// Cross-backend visibility: in `MAP_SHARED` shmem the `MultiXactStateData`
+/// singleton is one physical struct that every forked backend's per-process
+/// `MultiXactPtr` addresses. Mirror that here with two `MultiXactPtr`s over one
+/// backing struct and confirm a write through `ptr1` (e.g. the startup
+/// process's `TrimMultiXact` setting `finishedStartup = true`, plus a counter
+/// advance) is observed through `ptr2` (a forked backend's VACUUM read).
+#[test]
+fn cross_backend_finished_startup_and_counters_visible() {
+    // One backing struct, as `ShmemInitStruct` would carve in the shared segment.
+    let mut backing = MultiXactStateData {
+        nextMXact: 0,
+        nextOffset: 0,
+        finishedStartup: false,
+        oldestMultiXactId: 0,
+        oldestMultiXactDB: 0,
+        oldestOffset: 0,
+        oldestOffsetKnown: false,
+        multiVacLimit: 0,
+        multiWarnLimit: 0,
+        multiStopLimit: 0,
+        multiWrapLimit: 0,
+        offsetStopLimit: 0,
+    };
+
+    let raw: *mut MultiXactStateData = &mut backing;
+    // Two per-process pointers at the same physical struct.
+    let mut ptr1 = MultiXactPtr(raw);
+    let ptr2 = MultiXactPtr(raw);
+
+    // Startup process: TrimMultiXact marks startup finished + advances counters.
+    assert!(!ptr2.finishedStartup);
+    ptr1.finishedStartup = true;
+    ptr1.nextMXact = FirstMultiXactId + 7;
+    ptr1.oldestMultiXactId = FirstMultiXactId;
+
+    // Forked backend (VACUUM's SetMultiXactIdLimit / find_multixact_start) sees it.
+    assert!(ptr2.finishedStartup);
+    assert_eq!(ptr2.nextMXact, FirstMultiXactId + 7);
+    assert_eq!(ptr2.oldestMultiXactId, FirstMultiXactId);
+}
+
+/// The flexible-array offset used by `MultiXactShmemInit` (`state.add(1)`) and
+/// `shared_multixact_state_size` (`size_of::<MultiXactStateData>()`) must agree
+/// and be `MultiXactId`-aligned, so `OldestMemberMXactId` /
+/// `OldestVisibleMXactId` land exactly where C's `perBackendXactIds` does.
+#[test]
+fn flexible_array_offset_is_header_size_and_aligned() {
+    let header = core::mem::size_of::<MultiXactStateData>();
+    assert_eq!(header % core::mem::align_of::<MultiXactId>(), 0);
+
+    let mut backing = [0u8; 4096];
+    let base = backing.as_mut_ptr() as *mut MultiXactStateData;
+    // `state.add(1)` (one whole header past) equals `base + size_of::<header>()`.
+    let via_add1 = unsafe { base.add(1) } as usize;
+    let via_size = backing.as_ptr() as usize + header;
+    assert_eq!(via_add1, via_size);
+}

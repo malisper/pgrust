@@ -3079,6 +3079,7 @@ dependencies = [
  "backend-commands-dbcommands-seams",
  "backend-storage-ipc-pmsignal-seams",
  "backend-storage-ipc-procarray-seams",
+ "backend-storage-ipc-shmem-seams",
  "backend-storage-lmgr-lwlock",
  "backend-storage-lmgr-proc-seams",
  "backend-utils-error",
