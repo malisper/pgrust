@@ -1235,13 +1235,93 @@ fn read_attr_oid<'mcx>(
     Ok(read_attr(mcx, rel, tup, anum)?.as_oid())
 }
 
-/// Install this crate's inward seam ([`backend_commands_alter_seams`]).
+/// Convert the owned-tree `types_nodes::ddlnodes::RenameStmt` (the form carried
+/// by the `tcop/utility.c` `Node` dispatch tree) into the heap-owned
+/// `types_parsenodes::RenameStmt` that [`ExecRenameStmt`] and its per-object
+/// drivers (`RenameRelation` / `renameatt` / `RenameConstraint` / …) consume.
 ///
+/// `renameType` / `relationType` / `behavior` / `missing_ok` are the shared
+/// `types_nodes::parsenodes` scalar types (re-exported by `types_parsenodes`), so
+/// they copy directly. `relation` is the `RangeVar` the column/rule/trigger lives
+/// in (precedent: policy / lockcmds `to_access_range_var`); `object` is the
+/// generic name node converted via `rich_node_to_parse`.
+fn renamestmt_to_parsenodes(
+    stmt: &types_nodes::ddlnodes::RenameStmt<'_>,
+) -> PgResult<RenameStmt> {
+    let relation = match stmt.relation.as_ref().and_then(|n| n.as_rangevar()) {
+        Some(rv) => Some(types_tuple::access::RangeVar {
+            catalogname: rv.catalogname.as_deref().map(|s| s.into()),
+            schemaname: rv.schemaname.as_deref().map(|s| s.into()),
+            relname: rv.relname.as_deref().unwrap_or("").into(),
+            inh: rv.inh,
+            relpersistence: rv.relpersistence as u8,
+            location: rv.location,
+        }),
+        None => None,
+    };
+
+    let object = match stmt.object.as_ref() {
+        Some(n) => Some(Box::new(backend_parser_parse_type::rich_node_to_parse(n)?)),
+        None => None,
+    };
+
+    Ok(RenameStmt {
+        renameType: stmt.renameType,
+        relationType: stmt.relationType,
+        relation,
+        object,
+        subname: stmt.subname.as_ref().map(|s| s.as_str().to_string()),
+        newname: stmt.newname.as_ref().map(|s| s.as_str().to_string()),
+        behavior: stmt.behavior,
+        missing_ok: stmt.missing_ok,
+    })
+}
+
+/// `case T_RenameStmt:` in `ProcessUtility` / `standard_ProcessUtility`
+/// (utility.c) — the non-event-trigger ("fast") RENAME leg. The dispatch carries
+/// the parse tree as `&Node`; extract the `RenameStmt` variant, convert it to the
+/// parsenodes form, and forward to [`ExecRenameStmt`]. C discards the returned
+/// `ObjectAddress` here (it is only captured on the `ProcessUtilitySlow` leg, for
+/// the post-command event-trigger fire), so this arm drops it.
+fn exec_rename_stmt_arm<'mcx>(
+    mcx: Mcx<'mcx>,
+    parsetree: &types_nodes::nodes::Node<'mcx>,
+) -> PgResult<()> {
+    let Some(stmt) = parsetree.as_renamestmt() else {
+        panic!("exec_rename_stmt: parse tree is not a RenameStmt");
+    };
+    let pn = renamestmt_to_parsenodes(stmt)?;
+    ExecRenameStmt(mcx, &pn)?;
+    Ok(())
+}
+
+/// `case T_RenameStmt:` in `ProcessUtilitySlow` (utility.c) — the
+/// event-trigger-fenced ("slow") RENAME leg. Identical body to the fast arm but
+/// returns the `ObjectAddress` so the caller can record it for the post-command
+/// event-trigger fire (`EventTriggerCollectSimpleCommand`).
+fn exec_rename_stmt_slow_arm<'mcx>(
+    mcx: Mcx<'mcx>,
+    parsetree: &types_nodes::nodes::Node<'mcx>,
+) -> PgResult<ObjectAddress> {
+    let Some(stmt) = parsetree.as_renamestmt() else {
+        panic!("exec_rename_stmt_slow: parse tree is not a RenameStmt");
+    };
+    let pn = renamestmt_to_parsenodes(stmt)?;
+    ExecRenameStmt(mcx, &pn)
+}
+
+/// Install this crate's seams.
+///
+/// Inward seam ([`backend_commands_alter_seams`]):
 /// `alter_object_owner_internal` is the generic ALTER OWNER path that
 /// `shdepReassignOwned` (pg_shdepend.c) reaches for object classes without a
-/// bespoke owner-change routine. The other ALTER drivers (`ExecRenameStmt` /
-/// `ExecAlterObjectSchemaStmt` / `ExecAlterOwnerStmt` / …) are called only from
-/// the still-unported utility.c, so they need no inward seam yet.
+/// bespoke owner-change routine.
+///
+/// Outward ProcessUtility/ProcessUtilitySlow arms
+/// ([`backend_tcop_utility_out_seams`]): the RENAME dispatch arms in
+/// `tcop/utility.c` forward through these seams to [`ExecRenameStmt`] — both the
+/// non-event-trigger fast leg (`exec_rename_stmt`) and the event-trigger-fenced
+/// slow leg (`exec_rename_stmt_slow`).
 pub fn init_seams() {
     backend_commands_alter_seams::alter_object_owner_internal::set(
         |class_id, object_id, new_owner_id| {
@@ -1249,6 +1329,9 @@ pub fn init_seams() {
             AlterObjectOwner_internal(ctx.mcx(), class_id, object_id, new_owner_id)
         },
     );
+
+    backend_tcop_utility_out_seams::exec_rename_stmt::set(exec_rename_stmt_arm);
+    backend_tcop_utility_out_seams::exec_rename_stmt_slow::set(exec_rename_stmt_slow_arm);
 }
 
 #[cfg(test)]
