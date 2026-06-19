@@ -3235,11 +3235,11 @@ pub fn get_rte_attribute_is_dropped(
             // owned model that maps to a null Const placeholder. expandRTE is not
             // called on JOIN RTEs during parsing; for stored rules, a dropped
             // column shows up as a null Const, which we detect here.
-            result = matches!(
-                rte.joinaliasvars[(attnum - 1) as usize].as_ref(),
-                Node::Expr(types_nodes::primnodes::Expr::Const(_))
-                    if is_null_const(rte.joinaliasvars[(attnum - 1) as usize].as_ref())
-            );
+            result = rte.joinaliasvars[(attnum - 1) as usize]
+                .as_ref()
+                .as_expr()
+                .is_some_and(|e| matches!(e, types_nodes::primnodes::Expr::Const(_)))
+                && is_null_const(rte.joinaliasvars[(attnum - 1) as usize].as_ref());
         }
         RTE_FUNCTION => {
             // RTE_FUNCTION composite arm needs get_expr_result_tupdesc — unported.
@@ -3269,10 +3269,8 @@ pub fn get_rte_attribute_is_dropped(
 
 /// Is this aliasvar an all-NULL Const (dropped join column placeholder)?
 fn is_null_const(node: &Node<'_>) -> bool {
-    matches!(
-        node,
-        Node::Expr(types_nodes::primnodes::Expr::Const(c)) if c.constisnull
-    )
+    node.as_expr()
+        .is_some_and(|e| matches!(e, types_nodes::primnodes::Expr::Const(c) if c.constisnull))
 }
 
 /// `get_tle_by_resno` — find the TargetEntry with the given resno (search).
