@@ -18,7 +18,7 @@ use crate::{
 /// Downcast a `List *` of raw `Node`s (`stmt->sortClause`) to the
 /// `Vec<SortBy>` the clause owner's `transformSortClause` consumes. The grammar
 /// guarantees every element is a `SortBy`.
-fn sortby_list<'mcx>(
+pub(crate) fn sortby_list<'mcx>(
     mcx: Mcx<'mcx>,
     list: &[NodePtr<'mcx>],
 ) -> PgResult<Vec<SortBy<'mcx>>> {
@@ -595,7 +595,7 @@ pub fn transformValuesClause<'mcx>(
 /// cell; the raw->owned converter encodes a NULL list cell as an empty
 /// `Node::List`. A real DISTINCT ON list never starts with a NULL/empty marker
 /// (its elements are column expressions).
-fn distinct_all_marker(distinct: &[NodePtr<'_>]) -> bool {
+pub(crate) fn distinct_all_marker(distinct: &[NodePtr<'_>]) -> bool {
     distinct.len() == 1 && distinct[0].as_ref().as_list().is_some_and(|l| l.is_empty())
 }
 

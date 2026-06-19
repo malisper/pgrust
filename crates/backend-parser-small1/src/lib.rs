@@ -61,7 +61,7 @@ use types_nodes::params::ParamRef;
 use types_nodes::parsestmt::{ParseExprKind, ParseRefHookState, ParseState, VarParamState};
 use types_nodes::primnodes::{Const, Expr, Param, SubscriptingRef, PARAM_EXTERN};
 use types_nodes::rawnodes::{A_Const, A_Indices};
-use types_nodes::queryenvironment::EphemeralNamedRelationMetadataData;
+use types_nodes::queryenvironment::{EphemeralNamedRelationMetadataData, QueryEnvironment};
 use types_nodes::copy_query::Query;
 
 use types_tuple::heaptuple::{
@@ -281,22 +281,35 @@ pub fn make_parsestate<'mcx>(
         pstate.p_post_columnref_hook = parent.p_post_columnref_hook;
         pstate.p_paramref_hook = parent.p_paramref_hook;
         pstate.p_coerce_param_hook = parent.p_coerce_param_hook;
+
         // pstate->p_ref_hook_state = parentParseState->p_ref_hook_state;
+        //
+        // C aliases the bare `void *` ref-hook state into the child so the
+        // inherited column-ref / paramref hooks resolve against the same state
+        // when they fire on embedded sub-statement analysis (e.g. PL/pgSQL's
+        // `plpgsql_pre_column_ref` resolving a bareword against the function's
+        // variable namespace while parse-analyzing an SPI-prepared statement
+        // from `exec_stmt_execsql`). Every `ParseRefHookState` arm is built on
+        // `Rc`-shared carriers (`VarParamState`'s `Rc<RefCell<Vec<Oid>>>`,
+        // `PlpgsqlExprParseState`'s `Rc<RefCell<Vec<i32>>>` paramnos, the
+        // `Rc<…>` type/name snapshots), so `clone()` reproduces C's pointer
+        // aliasing exactly: the child shares the parent's mutable back-write
+        // cells (the recorded paramnos / resolved types the installer reads back
+        // after analysis) rather than forking a private copy.
+        pstate.p_ref_hook_state = parent.p_ref_hook_state.clone();
+
         // pstate->p_queryEnv = parentParseState->p_queryEnv;
         //
-        // C aliases these two pointers into the child state. The owned model
-        // (unique PgBox ownership) cannot share a pointer, and no in-repo caller
-        // builds a sub-statement ParseState yet (every parent-passing caller
-        // lives in unported analyze.c). The aliasing follow-on (a shared
-        // env/ref-hook carrier) is the prerequisite — mirror-PG-and-panic until
-        // it lands rather than silently dropping or deep-copying these.
-        if parent.p_ref_hook_state.is_some() || parent.p_queryEnv.is_some() {
-            panic!(
-                "make_parsestate(parent) with an inherited query-environment / \
-                 ref-hook-state needs the owned-model shared-carrier follow-on \
-                 (no sub-statement ParseState caller has landed)"
-            );
-        }
+        // The query environment "stays in context for the whole parse analysis"
+        // (parse_node.c). The owned model holds it by value, so deep-copy it
+        // into the child's arena. ENRs are read-only during analysis (looked up
+        // by name in `parse_enr`), so a per-child copy is observationally
+        // identical to C's shared pointer.
+        pstate.p_queryEnv = match parent.p_queryEnv.as_deref() {
+            Some(env) => Some(PgBox::try_new_in(env.clone_for_child(mcx)?, mcx)
+                .map_err(|_| mcx.oom(core::mem::size_of::<QueryEnvironment>()))?),
+            None => None,
+        };
 
         // C aliases `parentParseState` as a live back-pointer; the owned model
         // holds it by value, so deep-copy the parent's read-only spine (range

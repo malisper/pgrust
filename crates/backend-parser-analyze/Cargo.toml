@@ -50,6 +50,12 @@ backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
 # cycle-free (pg-class has no parser dep).
 backend-catalog-pg-class = { path = "../backend-catalog-pg-class" }
 
+# transformPLAssignStmt: the ISCOMPLEX composite-type test (get_typtype) and the
+# datatype-mismatch error's type-name formatting (format_type_be). Reached via
+# the callee seams (cycle-free; their owners do not depend on this impl crate).
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
+
 # The SQL-function inliner body (clauses.c inline_function) installed by this
 # crate: the parser driver + the fold crate's contain_*/coercion deps. All are
 # cycle-free (none depends on this impl crate).

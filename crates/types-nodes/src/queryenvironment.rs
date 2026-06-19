@@ -100,4 +100,30 @@ impl<'mcx> QueryEnvironment<'mcx> {
             namedRelList: PgVec::new_in(mcx),
         }
     }
+
+    /// Deep-copy the environment's ENR list into `mcx` for use by a child
+    /// `ParseState` (C aliases the parent's `QueryEnvironment *`; the owned model
+    /// holds it by value, so a `make_parsestate(parent)` child copies it).
+    ///
+    /// Only the per-ENR **metadata** (`name` / `reliddesc` / `tupdesc` / type /
+    /// tuple estimate) is copied: that is the entirety of what parse analysis
+    /// reads (ENRs are looked up by name in `parse_enr`, and the RTE is built
+    /// from the metadata's reliddesc/tupdesc). The `reldata` (a live
+    /// `Tuplestorestate`) is an *execution*-time resource — never touched during
+    /// parse analysis — so the child carries `reldata: None`, observationally
+    /// identical for analysis. A child `ParseState` drops at the end of analysis,
+    /// well before any executor would read `reldata`.
+    pub fn clone_for_child<'b>(&self, mcx: Mcx<'b>) -> PgResult<QueryEnvironment<'b>> {
+        let mut namedRelList = PgVec::new_in(mcx);
+        namedRelList
+            .try_reserve(self.namedRelList.len())
+            .map_err(|_| mcx.oom(self.namedRelList.len()))?;
+        for enr in self.namedRelList.iter() {
+            namedRelList.push(EphemeralNamedRelationData {
+                md: enr.md.clone_in(mcx)?,
+                reldata: None,
+            });
+        }
+        Ok(QueryEnvironment { namedRelList })
+    }
 }

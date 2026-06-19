@@ -31,6 +31,7 @@ mod inline_sql;
 mod insert;
 mod locking;
 mod merge;
+mod plassign;
 mod select;
 mod setop;
 mod special;
@@ -740,15 +741,7 @@ pub fn transformStmt<'mcx>(
             merge::transformMergeStmt(mcx, pstate, parse_tree.expect_mergestmt())?
         }
         ntag::T_PLAssignStmt => {
-            // The PL/pgSQL assignment transform is the remaining follow-on-family
-            // member; PLAssign is produced only in the RAW_PARSE_PLPGSQL_ASSIGN
-            // raw-parse modes. Mirror the C dispatch and panic loudly until it
-            // lands.
-            panic!(
-                "transformStmt: PLAssignStmt (tag {:?}) is in the follow-on \
-                 family (transformPLAssignStmt) — not yet ported (analyze.c:312)",
-                parse_tree.tag()
-            );
+            plassign::transformPLAssignStmt(mcx, pstate, parse_tree.expect_plassignstmt())?
         }
         _ => {
             // Other statements don't require transformation: wrap a CMD_UTILITY
