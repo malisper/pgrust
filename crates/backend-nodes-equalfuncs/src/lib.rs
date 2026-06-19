@@ -28,6 +28,7 @@
 #![allow(non_snake_case)]
 
 use backend_nodes_node_support::PgNodeEqual;
+use types_nodes::nodes::ntag;
 use types_nodes::nodes::Node;
 use types_nodes::primnodes::{
     Aggref, AlternativeSubPlan, ArrayCoerceExpr, ArrayExpr, BoolExpr, BooleanTest, CaseExpr,
@@ -1352,65 +1353,137 @@ fn equal_window_def(
 /// are always non-null); the `nodeTag(a) != nodeTag(b)` rule is the
 /// different-variant `_ => false` arms.
 pub fn equal_node(a: &Node<'_>, b: &Node<'_>) -> bool {
-    match (a, b) {
-        (Node::Expr(x), Node::Expr(y)) => equal_expr(x, y),
-        (Node::TargetEntry(x), Node::TargetEntry(y)) => equal_target_entry(x, y),
-        (Node::TableFunc(x), Node::TableFunc(y)) => equal_table_func(x, y),
-        (Node::CTECycleClause(x), Node::CTECycleClause(y)) => equal_cte_cycle_clause(x, y),
-        (Node::SortGroupClause(x), Node::SortGroupClause(y)) => equal_sort_group_clause(x, y),
+    // Expr-family nodes are dual-homed: a post-analysis `Node::Expr` shares its
+    // NodeTag with a raw-grammar twin, so pure tag dispatch can't tell them
+    // apart. Peel `Node::Expr` on both sides first (structural), then dispatch
+    // the remaining single-tag arms through `node_tag()` + `expect_*`.
+    if let (Some(x), Some(y)) = (a.as_expr(), b.as_expr()) {
+        return equal_expr(x, y);
+    }
+    // If exactly one side is an `Expr` and the other a same-tagged raw twin, the
+    // tags match but the variants differ — fall through so the tag-mismatch /
+    // variant-specific arms below decide (raw `expect_*` will fire on the raw
+    // side; a one-sided Expr is the not-yet-ported panic).
+    match (a.node_tag(), b.node_tag()) {
+        (ntag::T_TargetEntry, ntag::T_TargetEntry) => {
+            equal_target_entry(a.expect_targetentry(), b.expect_targetentry())
+        }
+        (ntag::T_TableFunc, ntag::T_TableFunc) => {
+            equal_table_func(a.expect_tablefunc(), b.expect_tablefunc())
+        }
+        (ntag::T_CTECycleClause, ntag::T_CTECycleClause) => {
+            equal_cte_cycle_clause(a.expect_ctecycleclause(), b.expect_ctecycleclause())
+        }
+        (ntag::T_SortGroupClause, ntag::T_SortGroupClause) => {
+            equal_sort_group_clause(a.expect_sortgroupclause(), b.expect_sortgroupclause())
+        }
         // The Value leaf nodes (`_equalInteger`/`_equalFloat`/`_equalBoolean`/
         // `_equalString`/`_equalBitString`) compare by their single value field;
         // the `#[derive(PgNode)]`-generated `PgNodeEqual::equal_node` IS that
         // faithful per-struct comparator.
-        (Node::Integer(x), Node::Integer(y)) => x.equal_node(y),
-        (Node::Float(x), Node::Float(y)) => x.equal_node(y),
-        (Node::Boolean(x), Node::Boolean(y)) => x.equal_node(y),
-        (Node::String(x), Node::String(y)) => x.equal_node(y),
-        (Node::BitString(x), Node::BitString(y)) => x.equal_node(y),
+        (ntag::T_Integer, ntag::T_Integer) => a.expect_integer().equal_node(b.expect_integer()),
+        (ntag::T_Float, ntag::T_Float) => a.expect_float().equal_node(b.expect_float()),
+        (ntag::T_Boolean, ntag::T_Boolean) => a.expect_boolean().equal_node(b.expect_boolean()),
+        (ntag::T_String, ntag::T_String) => a.expect_string().equal_node(b.expect_string()),
+        (ntag::T_BitString, ntag::T_BitString) => {
+            a.expect_bitstring().equal_node(b.expect_bitstring())
+        }
         // `_equalList` (T_List): equal length then element-wise `equal()`.
-        (Node::List(x), Node::List(y)) => {
+        (ntag::T_List, ntag::T_List) => {
+            let x = a.expect_list();
+            let y = b.expect_list();
             x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| equal_node(p, q))
         }
         // Parse/analyze/rewrite query-tree node family (`_equalQuery` and the
         // sub-node comparators reachable through `Query`'s `Node`-list fields).
-        (Node::Query(x), Node::Query(y)) => equal_query(x, y),
-        (Node::RangeTblEntry(x), Node::RangeTblEntry(y)) => equal_range_tbl_entry(x, y),
-        (Node::RTEPermissionInfo(x), Node::RTEPermissionInfo(y)) => {
-            equal_rte_permission_info(x, y)
+        (ntag::T_Query, ntag::T_Query) => equal_query(a.expect_query(), b.expect_query()),
+        (ntag::T_RangeTblEntry, ntag::T_RangeTblEntry) => {
+            equal_range_tbl_entry(a.expect_rangetblentry(), b.expect_rangetblentry())
         }
-        (Node::RangeTblFunction(x), Node::RangeTblFunction(y)) => equal_range_tbl_function(x, y),
-        (Node::RangeTblRef(x), Node::RangeTblRef(y)) => equal_range_tbl_ref(x, y),
-        (Node::FromExpr(x), Node::FromExpr(y)) => equal_from_expr(x, y),
-        (Node::JoinExpr(x), Node::JoinExpr(y)) => equal_join_expr(x, y),
-        (Node::OnConflictExpr(x), Node::OnConflictExpr(y)) => equal_on_conflict_expr(x, y),
-        (Node::MergeAction(x), Node::MergeAction(y)) => equal_merge_action(x, y),
-        (Node::GroupingSet(x), Node::GroupingSet(y)) => equal_grouping_set(x, y),
-        (Node::WindowClause(x), Node::WindowClause(y)) => equal_window_clause(x, y),
-        (Node::RowMarkClause(x), Node::RowMarkClause(y)) => equal_row_mark_clause(x, y),
-        (Node::WithCheckOption(x), Node::WithCheckOption(y)) => equal_with_check_option(x, y),
-        (Node::CommonTableExpr(x), Node::CommonTableExpr(y)) => equal_common_table_expr(x, y),
-        (Node::SetOperationStmt(x), Node::SetOperationStmt(y)) => equal_set_operation_stmt(x, y),
-        (Node::Alias(x), Node::Alias(y)) => equal_alias(x, y),
+        (ntag::T_RTEPermissionInfo, ntag::T_RTEPermissionInfo) => {
+            equal_rte_permission_info(a.expect_rtepermissioninfo(), b.expect_rtepermissioninfo())
+        }
+        (ntag::T_RangeTblFunction, ntag::T_RangeTblFunction) => {
+            equal_range_tbl_function(a.expect_rangetblfunction(), b.expect_rangetblfunction())
+        }
+        (ntag::T_RangeTblRef, ntag::T_RangeTblRef) => {
+            equal_range_tbl_ref(a.expect_rangetblref(), b.expect_rangetblref())
+        }
+        (ntag::T_FromExpr, ntag::T_FromExpr) => {
+            equal_from_expr(a.expect_fromexpr(), b.expect_fromexpr())
+        }
+        (ntag::T_JoinExpr, ntag::T_JoinExpr) => {
+            equal_join_expr(a.expect_joinexpr(), b.expect_joinexpr())
+        }
+        (ntag::T_OnConflictExpr, ntag::T_OnConflictExpr) => {
+            equal_on_conflict_expr(a.expect_onconflictexpr(), b.expect_onconflictexpr())
+        }
+        (ntag::T_MergeAction, ntag::T_MergeAction) => {
+            equal_merge_action(a.expect_mergeaction(), b.expect_mergeaction())
+        }
+        (ntag::T_GroupingSet, ntag::T_GroupingSet) => {
+            equal_grouping_set(a.expect_groupingset(), b.expect_groupingset())
+        }
+        (ntag::T_WindowClause, ntag::T_WindowClause) => {
+            equal_window_clause(a.expect_windowclause(), b.expect_windowclause())
+        }
+        (ntag::T_RowMarkClause, ntag::T_RowMarkClause) => {
+            equal_row_mark_clause(a.expect_rowmarkclause(), b.expect_rowmarkclause())
+        }
+        (ntag::T_WithCheckOption, ntag::T_WithCheckOption) => {
+            equal_with_check_option(a.expect_withcheckoption(), b.expect_withcheckoption())
+        }
+        (ntag::T_CommonTableExpr, ntag::T_CommonTableExpr) => {
+            equal_common_table_expr(a.expect_commontableexpr(), b.expect_commontableexpr())
+        }
+        (ntag::T_SetOperationStmt, ntag::T_SetOperationStmt) => {
+            equal_set_operation_stmt(a.expect_setoperationstmt(), b.expect_setoperationstmt())
+        }
+        (ntag::T_Alias, ntag::T_Alias) => equal_alias(a.expect_alias(), b.expect_alias()),
         // Raw-grammar parse nodes (equalfuncs.funcs.c). Reached by `equal()` over
         // an untransformed parse tree (e.g. transformWindowFuncCall window dedup).
-        (Node::ColumnRef(x), Node::ColumnRef(y)) => equal_column_ref(x, y),
-        (Node::ParamRef(x), Node::ParamRef(y)) => equal_param_ref(x, y),
-        (Node::A_Expr(x), Node::A_Expr(y)) => equal_a_expr(x, y),
-        (Node::A_Const(x), Node::A_Const(y)) => equal_a_const(x, y),
-        (Node::FuncCall(x), Node::FuncCall(y)) => equal_func_call(x, y),
-        (Node::A_Star(x), Node::A_Star(y)) => equal_a_star(x, y),
-        (Node::A_Indices(x), Node::A_Indices(y)) => equal_a_indices(x, y),
-        (Node::A_Indirection(x), Node::A_Indirection(y)) => equal_a_indirection(x, y),
-        (Node::A_ArrayExpr(x), Node::A_ArrayExpr(y)) => equal_a_array_expr(x, y),
-        (Node::TypeName(x), Node::TypeName(y)) => equal_type_name(x, y),
-        (Node::TypeCast(x), Node::TypeCast(y)) => equal_type_cast(x, y),
-        (Node::CollateClause(x), Node::CollateClause(y)) => equal_collate_clause(x, y),
-        (Node::ResTarget(x), Node::ResTarget(y)) => equal_res_target(x, y),
-        (Node::MultiAssignRef(x), Node::MultiAssignRef(y)) => equal_multi_assign_ref(x, y),
-        (Node::SortBy(x), Node::SortBy(y)) => equal_sort_by(x, y),
-        (Node::WindowDef(x), Node::WindowDef(y)) => equal_window_def(x, y),
+        (ntag::T_ColumnRef, ntag::T_ColumnRef) => {
+            equal_column_ref(a.expect_columnref(), b.expect_columnref())
+        }
+        (ntag::T_ParamRef, ntag::T_ParamRef) => {
+            equal_param_ref(a.expect_paramref(), b.expect_paramref())
+        }
+        (ntag::T_A_Expr, ntag::T_A_Expr) => equal_a_expr(a.expect_a_expr(), b.expect_a_expr()),
+        (ntag::T_A_Const, ntag::T_A_Const) => equal_a_const(a.expect_a_const(), b.expect_a_const()),
+        (ntag::T_FuncCall, ntag::T_FuncCall) => {
+            equal_func_call(a.expect_funccall(), b.expect_funccall())
+        }
+        (ntag::T_A_Star, ntag::T_A_Star) => equal_a_star(a.expect_a_star(), b.expect_a_star()),
+        (ntag::T_A_Indices, ntag::T_A_Indices) => {
+            equal_a_indices(a.expect_a_indices(), b.expect_a_indices())
+        }
+        (ntag::T_A_Indirection, ntag::T_A_Indirection) => {
+            equal_a_indirection(a.expect_a_indirection(), b.expect_a_indirection())
+        }
+        (ntag::T_A_ArrayExpr, ntag::T_A_ArrayExpr) => {
+            equal_a_array_expr(a.expect_a_arrayexpr(), b.expect_a_arrayexpr())
+        }
+        (ntag::T_TypeName, ntag::T_TypeName) => {
+            equal_type_name(a.expect_typename(), b.expect_typename())
+        }
+        (ntag::T_TypeCast, ntag::T_TypeCast) => {
+            equal_type_cast(a.expect_typecast(), b.expect_typecast())
+        }
+        (ntag::T_CollateClause, ntag::T_CollateClause) => {
+            equal_collate_clause(a.expect_collateclause(), b.expect_collateclause())
+        }
+        (ntag::T_ResTarget, ntag::T_ResTarget) => {
+            equal_res_target(a.expect_restarget(), b.expect_restarget())
+        }
+        (ntag::T_MultiAssignRef, ntag::T_MultiAssignRef) => {
+            equal_multi_assign_ref(a.expect_multiassignref(), b.expect_multiassignref())
+        }
+        (ntag::T_SortBy, ntag::T_SortBy) => equal_sort_by(a.expect_sortby(), b.expect_sortby()),
+        (ntag::T_WindowDef, ntag::T_WindowDef) => {
+            equal_window_def(a.expect_windowdef(), b.expect_windowdef())
+        }
         // Different tags are never equal.
-        (a, b) if a.node_tag() != b.node_tag() => false,
+        (ta, tb) if ta != tb => false,
         // Same-tag node family not yet reachable through equal() in the ported
         // (prep/parse) layer. Mirrors equalfuncs.c's behaviour of having a
         // comparator per node type: when a consumer first feeds one of these,
