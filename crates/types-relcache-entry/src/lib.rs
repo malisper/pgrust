@@ -219,8 +219,6 @@ impl OwnedTupleDesc {
                 attnotnull: a.attnotnull,
                 atthasdef: a.atthasdef,
                 attndims: a.attndims,
-                attstorage: a.attstorage,
-                attcompression: a.attcompression,
                 attidentity: a.attidentity,
                 attgenerated: a.attgenerated,
                 attisdropped: a.attisdropped,
@@ -412,14 +410,6 @@ pub struct OwnedAttr {
     pub atthasdef: bool,
     /// `int16 attndims` — number of array dimensions declared for the column.
     pub attndims: i16,
-    /// `char attstorage` — one of the `TYPSTORAGE_*` constants
-    /// (`'p'`/`'x'`/`'e'`/`'m'`). Drives the TOAST pass (`heap_toast_insert_or_update`
-    /// reads it via the tuple descriptor); a default `'\0'` makes every column
-    /// look non-toastable and produces spurious "row is too big" errors.
-    pub attstorage: i8,
-    /// `char attcompression` — preferred compression method
-    /// (`'\0'` = default, `'p'` = pglz, `'l'` = lz4). Read by `toast_tuple_init`.
-    pub attcompression: i8,
     /// `char attidentity` — one of the `ATTRIBUTE_IDENTITY_*` constants, or
     /// `'\0'`. Copied from the source descriptor by `RelationBuildLocalRelation`.
     pub attidentity: i8,

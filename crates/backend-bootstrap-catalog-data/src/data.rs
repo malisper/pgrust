@@ -50,12 +50,6 @@ fn attr(
         // Nailed bootstrap catalogs have no column defaults.
         atthasdef: false,
         attndims: 0,
-        // `formrdesc` reads attstorage from the hardcoded schemapg.h
-        // `FormData_pg_attribute` rows: a fixed-length column is PLAIN, a
-        // varlena column ('attlen == -1') is EXTENDED for every nailed catalog.
-        attstorage: if attlen == -1 { b'x' as i8 } else { b'p' as i8 },
-        // Default compression for all nailed-catalog varlena columns.
-        attcompression: b'\0' as i8,
         attidentity,
         attgenerated,
         attisdropped,

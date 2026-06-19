@@ -527,8 +527,6 @@ pub fn RelationBuildLocalRelation<'mcx>(
             attnotnull: satt.attnotnull,
             atthasdef: satt.atthasdef,
             attndims: satt.attndims,
-            attstorage: satt.attstorage,
-            attcompression: satt.attcompression,
             attidentity: satt.attidentity,
             attgenerated: satt.attgenerated,
             attisdropped: satt.attisdropped,
