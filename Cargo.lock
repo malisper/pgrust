@@ -6399,6 +6399,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-copy"
+version = "0.0.0"
+dependencies = [
+ "backend-access-table-table",
+ "backend-access-transam-xact-seams",
+ "backend-catalog-aclchk-seams",
+ "backend-commands-copy-seams",
+ "backend-commands-copyto",
+ "backend-commands-define-seams",
+ "backend-executor-execMain",
+ "backend-nodes-core",
+ "backend-optimizer-prep-prepqual",
+ "backend-optimizer-util-clauses",
+ "backend-optimizer-util-vars",
+ "backend-parser-coerce",
+ "backend-parser-parse-collate",
+ "backend-parser-parse-expr-seams",
+ "backend-parser-relation",
+ "backend-parser-small1-seams",
+ "backend-storage-lmgr-proc-seams",
+ "backend-tcop-utility-out-seams",
+ "backend-utils-adt-acl",
+ "backend-utils-adt-numutils",
+ "backend-utils-cache-lsyscache",
+ "backend-utils-error",
+ "backend-utils-init-miscinit",
+ "backend-utils-misc-more",
+ "common-extra-encnames-fgram",
+ "mcx",
+ "seam-core",
+ "types-acl",
+ "types-catalog",
+ "types-copy",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-commands-copy-seams"
 version = "0.0.0"
 dependencies = [
@@ -22912,6 +22953,7 @@ dependencies = [
  "backend-commands-collationcmds",
  "backend-commands-comment",
  "backend-commands-conversioncmds",
+ "backend-commands-copy",
  "backend-commands-copyto",
  "backend-commands-createas",
  "backend-commands-dbcommands",

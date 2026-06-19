@@ -631,8 +631,8 @@ pub fn BeginCopyTo<'mcx>(
     filename: Option<&str>,
     is_program: bool,
     data_dest_cb: Option<CopyDataDestCb>,
-    attnamelist: Option<&[PgString<'mcx>]>,
-    options: Option<&types_nodes::execnodes::Opaque>,
+    attnamelist: Option<&[types_nodes::nodes::NodePtr<'mcx>]>,
+    options: Option<&[types_nodes::nodes::NodePtr<'mcx>]>,
 ) -> PgResult<CopyToStateData<'mcx>> {
     let pipe = filename.is_none() && data_dest_cb.is_none();
 
@@ -853,7 +853,7 @@ pub fn BeginCopyTo<'mcx>(
         // attnums = CopyGetAttnums(tupDesc, cstate->rel, cstate->opts.force_quote);
         let fq = cstate.opts.force_quote.as_ref().unwrap();
         let attnums =
-            copy_s::copy_get_attnums::call(mcx, &tup_desc, cstate.rel.as_ref(), Some(fq))?;
+            copy_s::copy_get_attnums::call(mcx, &tup_desc, cstate.rel.as_ref(), Some(&fq[..]))?;
         for attnum in attnums.iter().copied() {
             if !cstate.attnumlist.iter().any(|&a| a == attnum) {
                 let attname: alloc::vec::Vec<u8> = td(&tup_desc)

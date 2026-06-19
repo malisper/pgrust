@@ -29,6 +29,7 @@ use types_error::SoftErrorContext;
 use types_fmgr::FmgrInfo;
 use types_nodes::execexpr::ExprState;
 use types_nodes::execnodes::{EStateLink, EcxtId};
+use types_nodes::nodes::NodePtr;
 use types_rel::Relation;
 
 /* ===========================================================================
@@ -90,37 +91,77 @@ pub enum EolType {
  * CopyFormatOptions (commands/copy.h) — consumed by the COPY TO drivers.
  * =========================================================================== */
 
-/// `CopyFormatOptions` (`commands/copy.h`), trimmed to the members the COPY TO
-/// drivers read. The C struct's `char *` members carry NUL-terminated server-
-/// or file-encoding strings; the owned model keeps them as context-allocated
-/// [`PgString`]s (`null_print_len` collapses into the string length). The
-/// per-column `bool *force_quote_flags` is a context-allocated [`PgVec`].
+/// `CopyFormatOptions` (`commands/copy.h`), the full PG struct. The C struct's
+/// `char *` members carry NUL-terminated server- or file-encoding strings; the
+/// owned model keeps the marker strings as context-allocated [`PgString`]s
+/// (`null_print_len` / `default_print_len` mirror the C byte lengths) and the
+/// single-byte `delim`/`quote`/`escape` as `u8` (0 ⇒ unset, matching the C
+/// NULL `char *`). The per-column `bool *force_*_flags` are context-allocated
+/// [`PgVec`]s. `ProcessCopyOptions` (commands/copy.c, owner
+/// `backend-commands-copy`) fills this; both COPY drivers read it.
+///
+/// The column-name lists (`force_quote` / `force_notnull` / `force_null` /
+/// `convert_select`) are the parser's `List *` of `String` nodes; the owned
+/// model carries them as the verbatim `String`-node `Node` lists so the COPY
+/// driver can resolve the names to per-column flags against the real parse
+/// tree (as the C does in `BeginCopy*`). `None` ⇒ NIL.
 pub struct CopyFormatOptions<'mcx> {
     /// `int file_encoding` — file/remote side's encoding, -1 if unspecified.
     pub file_encoding: i32,
     /// `bool binary` — binary format?
     pub binary: bool,
+    /// `bool freeze` — freeze rows on loading?
+    pub freeze: bool,
     /// `bool csv_mode` — CSV format?
     pub csv_mode: bool,
     /// `CopyHeaderChoice header_line` — emit a header line?
     pub header_line: CopyHeaderChoice,
     /// `char *null_print` — NULL marker string (server encoding).
     pub null_print: PgString<'mcx>,
+    /// `int null_print_len` — byte length of `null_print`.
+    pub null_print_len: i32,
     /// `char *null_print_client` — `null_print` converted to file encoding.
     pub null_print_client: PgString<'mcx>,
-    /// `char *delim` — column delimiter (1 byte).
+    /// `char *default_print` — DEFAULT marker string (`None` ⇒ unset).
+    pub default_print: Option<PgString<'mcx>>,
+    /// `int default_print_len` — byte length of `default_print`.
+    pub default_print_len: i32,
+    /// `char *delim` — column delimiter (1 byte; 0 ⇒ unset).
     pub delim: u8,
-    /// `char *quote` — CSV quote char (1 byte).
+    /// `char *quote` — CSV quote char (1 byte; 0 ⇒ unset).
     pub quote: u8,
-    /// `char *escape` — CSV escape char (1 byte).
+    /// `char *escape` — CSV escape char (1 byte; 0 ⇒ unset).
     pub escape: u8,
     /// `List *force_quote` — column names for FORCE_QUOTE (`None` ⇒ NIL).
-    pub force_quote: Option<PgVec<'mcx, PgString<'mcx>>>,
+    pub force_quote: Option<PgVec<'mcx, NodePtr<'mcx>>>,
     /// `bool force_quote_all` — FORCE_QUOTE *?
     pub force_quote_all: bool,
     /// `bool *force_quote_flags` — per-physical-column FORCE_QUOTE flags.
     /// Empty until `BeginCopyTo` allocates it (`num_phys_attrs` entries).
     pub force_quote_flags: PgVec<'mcx, bool>,
+    /// `List *force_notnull` — column names for FORCE_NOT_NULL (`None` ⇒ NIL).
+    pub force_notnull: Option<PgVec<'mcx, NodePtr<'mcx>>>,
+    /// `bool force_notnull_all` — FORCE_NOT_NULL *?
+    pub force_notnull_all: bool,
+    /// `bool *force_notnull_flags` — per-physical-column FORCE_NOT_NULL flags.
+    pub force_notnull_flags: PgVec<'mcx, bool>,
+    /// `List *force_null` — column names for FORCE_NULL (`None` ⇒ NIL).
+    pub force_null: Option<PgVec<'mcx, NodePtr<'mcx>>>,
+    /// `bool force_null_all` — FORCE_NULL *?
+    pub force_null_all: bool,
+    /// `bool *force_null_flags` — per-physical-column FORCE_NULL flags.
+    pub force_null_flags: PgVec<'mcx, bool>,
+    /// `bool convert_selectively` — do selective binary conversion?
+    pub convert_selectively: bool,
+    /// `CopyOnErrorChoice on_error` — what to do on a row error.
+    pub on_error: CopyOnErrorChoice,
+    /// `CopyLogVerbosityChoice log_verbosity` — verbosity of logged messages.
+    pub log_verbosity: CopyLogVerbosityChoice,
+    /// `int64 reject_limit` — maximum tolerable number of errors.
+    pub reject_limit: i64,
+    /// `List *convert_select` — column names for selective conversion
+    /// (`None` ⇒ NIL).
+    pub convert_select: Option<PgVec<'mcx, NodePtr<'mcx>>>,
 }
 
 /* ===========================================================================

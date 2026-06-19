@@ -171,6 +171,7 @@ backend-commands-collationcmds = { path = "../backend-commands-collationcmds" }
 backend-commands-conversioncmds = { path = "../backend-commands-conversioncmds" }
 backend-commands-statscmds = { path = "../backend-commands-statscmds" }
 backend-commands-copyto = { path = "../backend-commands-copyto" }
+backend-commands-copy = { path = "../backend-commands-copy" }
 backend-commands-createas = { path = "../backend-commands-createas" }
 backend-commands-view = { path = "../backend-commands-view" }
 backend-commands-define = { path = "../backend-commands-define" }

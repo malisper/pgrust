@@ -28,8 +28,12 @@ pub const TEMPLATE1_DB_OID: Oid = 1;
 pub const DEFAULTTABLESPACE_OID: Oid = 1663;
 /// `ROLE_PG_USE_RESERVED_CONNECTIONS` (`pg_authid_d.h`).
 pub const ROLE_PG_USE_RESERVED_CONNECTIONS: Oid = 4550;
+/// `ROLE_PG_READ_SERVER_FILES` (`pg_authid_d.h`).
+pub const ROLE_PG_READ_SERVER_FILES: Oid = 4569;
 /// `ROLE_PG_WRITE_SERVER_FILES` (`pg_authid_d.h`).
 pub const ROLE_PG_WRITE_SERVER_FILES: Oid = 4570;
+/// `ROLE_PG_EXECUTE_SERVER_PROGRAM` (`pg_authid_d.h`).
+pub const ROLE_PG_EXECUTE_SERVER_PROGRAM: Oid = 4571;
 
 /// `AccessMethodRelationId` — `pg_am` (`pg_am_d.h`).
 pub const ACCESS_METHOD_RELATION_ID: Oid = 2601;
