@@ -26,6 +26,11 @@ backend-pl-plpgsql-funcs = { path = "../backend-pl-plpgsql-funcs" }
 # SPI_connect_ext / SPI_finish bracketing (spi.c) — direct (top layer, no cycle).
 backend-executor-spi = { path = "../backend-executor-spi" }
 
+# BeginInternalSubTransaction / ReleaseCurrentSubTransaction /
+# RollbackAndReleaseCurrentSubTransaction (xact.c) for the exec_stmt_block
+# EXCEPTION leg — direct (top layer, no cycle).
+backend-access-transam-xact = { path = "../backend-access-transam-xact" }
+
 # The fmgr built-in registry: register the three handler PGFunctions so a
 # C-language pg_proc row (prosrc = "plpgsql_call_handler" / ...) resolves here.
 backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }

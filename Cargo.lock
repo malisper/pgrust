@@ -14200,6 +14200,7 @@ dependencies = [
 name = "backend-pl-plpgsql-handler"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-xact",
  "backend-catalog-pg-proc-seams",
  "backend-commands-functioncmds-seams",
  "backend-executor-spi",
@@ -24822,6 +24823,7 @@ version = "0.0.0"
 dependencies = [
  "types-core",
  "types-datum",
+ "types-error",
  "types-parsenodes",
 ]
 

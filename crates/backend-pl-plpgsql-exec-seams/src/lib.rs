@@ -244,3 +244,50 @@ seam_core::seam!(
         maxtuples: i64,
     ) -> PgResult<EvalExprResult>
 );
+
+// ---------------------------------------------------------------------------
+// `exec_stmt_block` EXCEPTION-leg substrate (keystone #215).
+//
+// The catchable-error channel of a `BEGIN ... EXCEPTION ... END` block runs the
+// body inside an internal subtransaction. The xact entry points
+// (`BeginInternalSubTransaction` / `ReleaseCurrentSubTransaction` /
+// `RollbackAndReleaseCurrentSubTransaction`) live in
+// `backend-access-transam-xact`; the executor (`pl_exec.c`, this unit) is
+// layered below it, so the handler installs these from its `init_seams()`. They
+// are thin delegations to the now-ported owners — no behavior is added here.
+// (Modern PG dropped the explicit `SPI_restore_connection` after the abort:
+// xact's `AbortSubTransaction` drives `AtEOSubXact_SPI` through its own seam.)
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `BeginInternalSubTransaction(NULL)` (`xact.c`): start the internal
+    /// subtransaction the EXCEPTION block body runs inside.
+    pub fn begin_internal_subtransaction() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ReleaseCurrentSubTransaction()` (`xact.c`): commit (RELEASE) the
+    /// EXCEPTION block's internal subtransaction on the no-error path.
+    pub fn release_current_subtransaction() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `RollbackAndReleaseCurrentSubTransaction()` (`xact.c`): roll back the
+    /// EXCEPTION block's internal subtransaction when the body raised an error,
+    /// popping back to the parent transaction state.
+    pub fn rollback_and_release_current_subtransaction() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `CStringGetTextDatum(s)` (`builtins.h` / `varlena.c cstring_to_text`):
+    /// build a `text` Datum from an owned Rust `String`, returned as the
+    /// bare-word datum (`DatumGetPointer` view). Used by the EXCEPTION handler to
+    /// bind the SQLSTATE and SQLERRM special variables (`assign_error_vars`) and
+    /// by `exec_stmt_getdiag`. The result word points at a header-ful `text`
+    /// varlena allocated in a backend-lifetime context (mirroring how
+    /// `CStringGetTextDatum` palloc's in `CurrentMemoryContext`), so the bytes
+    /// outlive the call and the caller stores the word straight into the target
+    /// `text` variable. The executor is layered below the varlena substrate, so
+    /// the handler installs it.
+    pub fn cstring_to_text_datum(s: std::string::String) -> PgResult<usize>
+);

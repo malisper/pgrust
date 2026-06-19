@@ -1037,6 +1037,48 @@ pub fn portal_run(
 // `PortalRunSelect`
 // ===========================================================================
 
+/// Run `f` with `&mut QueryDesc` taken out of `portal->queryDesc`, **without**
+/// holding the portal's `RefCell` borrow across the call.
+///
+/// C drives the executor through `portal->queryDesc` (a raw pointer), so the
+/// portal struct is mutable but never borrow-locked while `ExecutorRun` runs.
+/// In the owned model the portal is `Rc<RefCell<PortalData>>`, and the executor
+/// can re-enter the portal subsystem on this thread — e.g. a SELECT that calls a
+/// PL/pgSQL function whose body raises inside a `BEGIN ... EXCEPTION` block
+/// drives `AbortSubTransaction -> AtSubAbort_Portals`, which `borrow()`s every
+/// portal (including this one). Holding a `borrow_mut()` across the executor
+/// would make that a double-borrow panic (a panic during unwind -> backend
+/// kill). So move `queryDesc` out for the duration of the call and restore it
+/// afterwards; a Drop guard restores it even if `f` unwinds (the moved field
+/// must always be put back, exactly as C's raw pointer is always valid).
+fn with_portal_query_desc<R>(
+    portal: &Portal,
+    f: impl FnOnce(&mut QueryDesc) -> R,
+) -> R {
+    struct Restore<'p> {
+        portal: &'p Portal,
+        qd: Option<QueryDesc>,
+    }
+    impl Drop for Restore<'_> {
+        fn drop(&mut self) {
+            if let Some(qd) = self.qd.take() {
+                self.portal.borrow_mut().queryDesc = Some(qd);
+            }
+        }
+    }
+
+    let taken = portal
+        .borrow_mut()
+        .queryDesc
+        .take()
+        .expect("with_portal_query_desc: queryDesc is NULL while executor is active");
+    let mut guard = Restore {
+        portal,
+        qd: Some(taken),
+    };
+    f(guard.qd.as_mut().unwrap())
+}
+
 /// `PortalRunSelect` (pquery.c:864-985, static) — run a SELECT-type portal's
 /// query, returning the number of tuples processed.
 fn portal_run_select(
@@ -1091,12 +1133,14 @@ fn portal_run_select(
                 .and_then(|qd| qd.snapshot.clone())
                 .expect("portal_run_select: queryDesc->snapshot is NULL while executor is active");
             snapmgr_seam::push_active_snapshot::call(snap)?;
-            {
-                let mut p = portal.borrow_mut();
-                let qd = p.queryDesc.as_mut().unwrap();
+            // Run the executor without holding the portal borrow (see
+            // `with_portal_query_desc`): ExecutorRun can re-enter the portal
+            // subsystem (subxact abort -> AtSubAbort_Portals) on the PL/pgSQL
+            // EXCEPTION path.
+            nprocessed = with_portal_query_desc(portal, |qd| -> PgResult<u64> {
                 execMain::ExecutorRun(qd, direction, count as u64)?;
-            }
-            nprocessed = portal.borrow().queryDesc.as_ref().unwrap().es_processed();
+                Ok(qd.es_processed())
+            })?;
             snapmgr_seam::pop_active_snapshot::call()?;
         }
 
@@ -1139,12 +1183,14 @@ fn portal_run_select(
                 .and_then(|qd| qd.snapshot.clone())
                 .expect("portal_run_select: queryDesc->snapshot is NULL while executor is active");
             snapmgr_seam::push_active_snapshot::call(snap)?;
-            {
-                let mut p = portal.borrow_mut();
-                let qd = p.queryDesc.as_mut().unwrap();
+            // Run the executor without holding the portal borrow (see
+            // `with_portal_query_desc`): ExecutorRun can re-enter the portal
+            // subsystem (subxact abort -> AtSubAbort_Portals) on the PL/pgSQL
+            // EXCEPTION path.
+            nprocessed = with_portal_query_desc(portal, |qd| -> PgResult<u64> {
                 execMain::ExecutorRun(qd, direction, count as u64)?;
-            }
-            nprocessed = portal.borrow().queryDesc.as_ref().unwrap().es_processed();
+                Ok(qd.es_processed())
+            })?;
             snapmgr_seam::pop_active_snapshot::call()?;
         }
 

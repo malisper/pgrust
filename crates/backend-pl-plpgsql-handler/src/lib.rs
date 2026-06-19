@@ -58,9 +58,16 @@ use backend_pl_plpgsql_exec::{FunctionCallArg, FunctionResult};
 // `_pg_init` / fmgr-side reads. Both stay in sync via the assign hooks.
 // ---------------------------------------------------------------------------
 
-use core::cell::Cell;
+use core::cell::{Cell, OnceCell};
+use types_datum::VARHDRSZ;
 
 thread_local! {
+    /// Backend-lifetime context for the EXCEPTION handler's SQLSTATE/SQLERRM
+    /// (and GET DIAGNOSTICS) `text` values: `CStringGetTextDatum` allocations
+    /// that outlive the producing call because they are stored into a PL/pgSQL
+    /// variable. Leaked once (never dropped), mirroring C's palloc lifetime.
+    static PLPGSQL_ERRVAR_CONTEXT: OnceCell<&'static mcx::MemoryContext> =
+        const { OnceCell::new() };
     /// `int plpgsql_variable_conflict = PLPGSQL_RESOLVE_ERROR;`
     static PLPGSQL_VARIABLE_CONFLICT: Cell<PLpgSQL_resolve_option> =
         const { Cell::new(PLpgSQL_resolve_option::PLPGSQL_RESOLVE_ERROR) };
@@ -695,6 +702,60 @@ pub fn init_seams() {
             })
         },
     );
+
+    // Install the `exec_stmt_block` EXCEPTION-leg subtransaction entry points
+    // (pl_exec.c keystone #215). The executor unit is layered below xact; the
+    // handler (top layer) bridges to the now-ported xact subxact engine. These
+    // are thin delegations — no behavior is added.
+    backend_pl_plpgsql_exec_seams::begin_internal_subtransaction::set(|| {
+        // BeginInternalSubTransaction(NULL).
+        backend_access_transam_xact::BeginInternalSubTransaction(None)
+    });
+    backend_pl_plpgsql_exec_seams::release_current_subtransaction::set(|| {
+        backend_access_transam_xact::ReleaseCurrentSubTransaction()
+    });
+    backend_pl_plpgsql_exec_seams::rollback_and_release_current_subtransaction::set(|| {
+        // xact's AbortSubTransaction drives AtEOSubXact_SPI(false, mySubid)
+        // through the installed seam, restoring the SPI connection (modern PG
+        // dropped the explicit SPI_restore_connection call here).
+        backend_access_transam_xact::RollbackAndReleaseCurrentSubTransaction()
+    });
+
+    // Install `CStringGetTextDatum` for the EXCEPTION handler's SQLSTATE/SQLERRM
+    // special-var binding (assign_error_vars) and `exec_stmt_getdiag`. C does
+    // `CStringGetTextDatum(s)` = `cstring_to_text(s)` palloc'd in
+    // `CurrentMemoryContext`, then `exec_assign_value(..., TEXTOID, -1)` stores
+    // it into the target variable (assign_simple_var copies it into the
+    // function's datum context with datumCopy). The PL/pgSQL executor here
+    // carries scalar values as bare machine words (`types_datum::Datum`), so a
+    // by-reference `text` must cross as a pointer word at a header-ful varlena
+    // whose bytes outlive the call. Build that header-ful varlena in a
+    // backend-lifetime context (mirroring the palloc) and return the pointer
+    // word; the target var keeps it (these short error strings are bounded).
+    backend_pl_plpgsql_exec_seams::cstring_to_text_datum::set(|s: String| {
+        // A leaked, backend-lifetime context: the produced `text` outlives this
+        // call (it is stored into a PL/pgSQL variable), exactly as C's
+        // CStringGetTextDatum palloc lives in the function's execution context.
+        let ctx: &'static mcx::MemoryContext = PLPGSQL_ERRVAR_CONTEXT.with(|c| {
+            *c.get_or_init(|| {
+                Box::leak(Box::new(mcx::MemoryContext::new("PL/pgSQL error-var text")))
+            })
+        });
+        let bytes = s.as_bytes();
+        // C: palloc(len + VARHDRSZ); SET_VARSIZE; memcpy(VARDATA, s, len).
+        let mut image = mcx::vec_with_capacity_in::<u8>(ctx.mcx(), bytes.len() + VARHDRSZ)?;
+        image.extend_from_slice(&[0u8; VARHDRSZ]);
+        image.extend_from_slice(bytes);
+        let varlena = types_datum::Varlena::from_image(image);
+        // DatumGetPointer view: the address of the header-ful varlena image. The
+        // image lives in the leaked backend-lifetime context; forget the owning
+        // wrapper so its Drop never deallocates (the bytes must persist for the
+        // lifetime of the variable that now holds the pointer, like C's palloc).
+        let image = varlena.into_image();
+        let ptr = image.as_ptr() as usize;
+        core::mem::forget(image);
+        Ok(ptr)
+    });
 
     register_handler_builtins();
 

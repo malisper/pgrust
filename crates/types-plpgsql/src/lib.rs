@@ -1090,7 +1090,11 @@ pub struct PLpgSQL_execstate {
 
     /// the "target" label of the current EXIT/CONTINUE stmt, if any.
     pub exitlabel: Option<String>,
-    pub cur_error: Option<ErrorData>, // current exception handler's error
+    // `estate->cur_error` — the live error being handled by the current
+    // EXCEPTION handler (read by GET STACKED DIAGNOSTICS and RAISE-without-
+    // parameters). C carries an `ErrorData *`; the owned model carries the
+    // captured `PgError` value directly.
+    pub cur_error: Option<types_error::PgError>,
 
     pub tuple_store: Option<Tuplestorestate>, // SRFs accumulate results here
     pub tuple_store_desc: Option<TupleDesc>,  // descriptor for tuples

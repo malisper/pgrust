@@ -391,36 +391,88 @@ fn exception_matches_conditions(
 
 // --- subtransaction + handler-var legs (xact + value substrate, loud) -------
 
+/// `BeginInternalSubTransaction(NULL)` (pl_exec.c exec_stmt_block) — start the
+/// internal subtransaction the EXCEPTION block body runs inside. The C code also
+/// snapshots `CurrentMemoryContext` / `CurrentResourceOwner` / `eval_econtext`
+/// here; in the owned model the memory context and resource owner are RAII (the
+/// xact subxact engine owns `CurTransactionContext` + resource lifetimes), and
+/// the eval econtext is reset per-statement via `exec_eval_cleanup`, so no
+/// explicit save is needed — the subxact begin is the whole leg.
 fn begin_internal_subtransaction(_estate: &mut PLpgSQL_execstate) {
-    panic!(
-        "seam not wired: BeginInternalSubTransaction (pl_exec.c exec_stmt_block EXCEPTION) — \
-         internal subtransaction start (xact + SPI #215)"
-    );
+    if let Err(e) = exec_seams::begin_internal_subtransaction::call() {
+        std::panic::panic_any(e);
+    }
 }
 
+/// `ReleaseCurrentSubTransaction()` (pl_exec.c exec_stmt_block) — commit the
+/// EXCEPTION block's internal subtransaction on the no-error path, then (C)
+/// restore the saved context/owner/econtext (RAII here, see above).
 fn release_current_subtransaction(_estate: &mut PLpgSQL_execstate) {
-    panic!(
-        "seam not wired: ReleaseCurrentSubTransaction (pl_exec.c exec_stmt_block) — \
-         commit internal subtransaction (xact + SPI #215)"
-    );
+    if let Err(e) = exec_seams::release_current_subtransaction::call() {
+        std::panic::panic_any(e);
+    }
 }
 
+/// `RollbackAndReleaseCurrentSubTransaction()` (pl_exec.c exec_stmt_block
+/// PG_CATCH) — abort the internal subtransaction, popping back to the parent
+/// state. The SPI connection is restored automatically: xact's
+/// `AbortSubTransaction` drives `AtEOSubXact_SPI(false, mySubid)` through the
+/// installed seam (modern PG dropped the explicit `SPI_restore_connection`
+/// call). The context/owner restore is RAII (the subxact engine owns them).
 fn rollback_and_release_current_subtransaction(_estate: &mut PLpgSQL_execstate) {
-    panic!(
-        "seam not wired: RollbackAndReleaseCurrentSubTransaction (pl_exec.c) — \
-         abort internal subtransaction + SPI_restore_connection (xact + SPI #215)"
-    );
+    if let Err(e) = exec_seams::rollback_and_release_current_subtransaction::call() {
+        std::panic::panic_any(e);
+    }
 }
 
+/// Bind the SQLSTATE / SQLERRM special variables of the matching handler, and
+/// record the live error for GET STACKED DIAGNOSTICS (`assign_error_vars` in
+/// pl_exec.c). C does:
+/// ```c
+/// exec_assign_value(estate, datum[sqlstate_varno],
+///                   CStringGetTextDatum(unpack_sql_state(edata->sqlerrcode)),
+///                   false, TEXTOID, -1);
+/// exec_assign_value(estate, datum[sqlerrm_varno],
+///                   CStringGetTextDatum(edata->message),
+///                   false, TEXTOID, -1);
+/// estate->cur_error = edata;
+/// ```
 fn assign_error_vars(
-    _estate: &mut PLpgSQL_execstate,
-    _block: &types_plpgsql::PLpgSQL_exception_block,
-    _edata: &types_error::PgError,
+    estate: &mut PLpgSQL_execstate,
+    block: &types_plpgsql::PLpgSQL_exception_block,
+    edata: &types_error::PgError,
 ) {
-    panic!(
-        "seam not wired: EXCEPTION handler SQLSTATE/SQLERRM binding (pl_exec.c) — \
-         assign_text_var of the special vars (value substrate)"
-    );
+    // C's assign_error_vars binds the implicit SQLSTATE / SQLERRM special vars
+    // via assign_text_var(estate, var, str) ==
+    // assign_simple_var(estate, var, CStringGetTextDatum(str), false, true).
+    // We mirror assign_text_var directly (NOT exec_assign_value): the value is a
+    // bare-word pointer at a header-ful `text` varlena allocated in a backend-
+    // lifetime context (the cstring_to_text_datum seam), so it needs no cast and
+    // no datumCopy / expanded-object transfer (the unported exec_assign_value
+    // by-ref leg); `freeable=false` because the buffer is never individually
+    // freed (it lives with the backend, like C's palloc in the handler context).
+    assign_text_var(estate, block.sqlstate_varno, unpack_sql_state(edata.sqlstate.0));
+    assign_text_var(estate, block.sqlerrm_varno, edata.message.clone());
+
+    // estate->cur_error = edata: record the live error so GET STACKED
+    // DIAGNOSTICS / RAISE-without-parameters in this handler can read it. The
+    // owned model carries `cur_error` as the full PgError value (the live
+    // edata), not the opaque-handle placeholder.
+    estate.cur_error = Some(edata.clone());
+}
+
+/// `assign_text_var(estate, var, str)` (pl_exec.c 8847) — build a `text` Datum
+/// from `str` and store it into the scalar VAR `dno` via `assign_simple_var`.
+/// The text bytes live in a backend-lifetime context (the `cstring_to_text_datum`
+/// seam), so the stored bare-word pointer stays valid and `freeable` is false.
+fn assign_text_var(estate: &mut PLpgSQL_execstate, dno: int32, s: String) {
+    let datum = match exec_seams::cstring_to_text_datum::call(s) {
+        Ok(d) => Datum::from_usize(d),
+        Err(e) => std::panic::panic_any(e),
+    };
+    let mut var = take_var(estate, dno);
+    assign_simple_var(estate, &mut var, datum, false, false);
+    put_var(estate, dno, var);
 }
 
 // ===========================================================================
@@ -448,7 +500,7 @@ fn exec_stmts(estate: &mut PLpgSQL_execstate, stmts: &[PLpgSQL_stmt]) -> PLpgSQL
             PLpgSQL_stmt::Assign(s) => exec_stmt_assign(estate, s),
             PLpgSQL_stmt::Perform(s) => exec_stmt_perform(estate, s),
             PLpgSQL_stmt::Call(_) => exec_stmt_call(estate),
-            PLpgSQL_stmt::Getdiag(_) => exec_stmt_getdiag(estate),
+            PLpgSQL_stmt::Getdiag(s) => exec_stmt_getdiag(estate, s),
             PLpgSQL_stmt::If(s) => exec_stmt_if(estate, s),
             PLpgSQL_stmt::Case(s) => exec_stmt_case(estate, s),
             PLpgSQL_stmt::Loop(s) => exec_stmt_loop(estate, s),
@@ -1133,11 +1185,122 @@ fn exec_stmt_call(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
     );
 }
 
-fn exec_stmt_getdiag(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
-    panic!(
-        "seam not wired: exec_stmt_getdiag (pl_exec.c) — eval_processed / cur_error \
-         field reads + exec_assign_c_string (ErrorData codec + value substrate)"
-    );
+/// `exec_stmt_getdiag(estate, stmt)` (pl_exec.c 2436) — GET [CURRENT|STACKED]
+/// DIAGNOSTICS. CURRENT reads the most-recent-statement area (`eval_processed`,
+/// the routine OID, the call/error context); STACKED reads `estate->cur_error`
+/// (only valid inside an EXCEPTION handler). Each item is assigned into its
+/// target variable.
+fn exec_stmt_getdiag(
+    estate: &mut PLpgSQL_execstate,
+    stmt: &types_plpgsql::PLpgSQL_stmt_getdiag,
+) -> PLpgSQL_rc {
+    use types_plpgsql::PLpgSQL_getdiag_kind as K;
+
+    // STACKED DIAGNOSTICS requires an active exception handler; the grammar and
+    // pl_comp.c already reject the standalone case, but if cur_error is None
+    // here the read is undefined — mirror C and guard.
+    if stmt.is_stacked && estate.cur_error.is_none() {
+        std::panic::panic_any(types_error::PgError::error(
+            "GET STACKED DIAGNOSTICS cannot be used outside an exception handler"
+                .to_string(),
+        ));
+    }
+
+    for di in &stmt.diag_items {
+        match di.kind {
+            K::PLPGSQL_GETDIAG_ROW_COUNT => {
+                // exec_assign_value(target, Int64GetDatum(estate->eval_processed),
+                //                   false, INT8OID, -1).
+                const INT8OID: Oid = 20;
+                exec_assign_value_impl(
+                    estate,
+                    di.target,
+                    Datum::from_i64(estate.eval_processed as i64),
+                    false,
+                    INT8OID,
+                    -1,
+                );
+            }
+            K::PLPGSQL_GETDIAG_ROUTINE_OID => {
+                // estate->func->fn_oid — the func back-reference is opaque in the
+                // owned model; this is rarely used and not reachable from the
+                // current execstate carrier. Mirror C-and-panic loudly.
+                std::panic::panic_any(types_error::PgError::error(
+                    "GET DIAGNOSTICS ... PG_ROUTINE_OID not yet supported \
+                     (opaque func back-reference)"
+                        .to_string(),
+                ));
+            }
+            // CURRENT-area context strings: the error/call-context stack is not
+            // modeled in the owned execstate yet; STACKED context comes from
+            // cur_error below. The remaining string items read from cur_error
+            // when STACKED, or are the current message/context otherwise.
+            other => {
+                let s: String = if stmt.is_stacked {
+                    let edata = estate
+                        .cur_error
+                        .as_ref()
+                        .expect("STACKED diagnostics guarded above");
+                    match other {
+                        K::PLPGSQL_GETDIAG_RETURNED_SQLSTATE => {
+                            unpack_sql_state(edata.sqlstate.0)
+                        }
+                        K::PLPGSQL_GETDIAG_MESSAGE_TEXT => edata.message.clone(),
+                        K::PLPGSQL_GETDIAG_ERROR_DETAIL => {
+                            edata.detail.clone().unwrap_or_default()
+                        }
+                        K::PLPGSQL_GETDIAG_ERROR_HINT => {
+                            edata.hint.clone().unwrap_or_default()
+                        }
+                        K::PLPGSQL_GETDIAG_COLUMN_NAME => {
+                            edata.column_name.clone().unwrap_or_default()
+                        }
+                        K::PLPGSQL_GETDIAG_CONSTRAINT_NAME => {
+                            edata.constraint_name.clone().unwrap_or_default()
+                        }
+                        K::PLPGSQL_GETDIAG_DATATYPE_NAME => {
+                            edata.datatype_name.clone().unwrap_or_default()
+                        }
+                        K::PLPGSQL_GETDIAG_TABLE_NAME => {
+                            edata.table_name.clone().unwrap_or_default()
+                        }
+                        K::PLPGSQL_GETDIAG_SCHEMA_NAME => {
+                            edata.schema_name.clone().unwrap_or_default()
+                        }
+                        K::PLPGSQL_GETDIAG_CONTEXT
+                        | K::PLPGSQL_GETDIAG_ERROR_CONTEXT => {
+                            edata.context.clone().unwrap_or_default()
+                        }
+                        K::PLPGSQL_GETDIAG_ROW_COUNT
+                        | K::PLPGSQL_GETDIAG_ROUTINE_OID => unreachable!(),
+                    }
+                } else {
+                    // CURRENT diagnostics: only PG_CONTEXT is defined for the
+                    // current area; the per-statement error-context stack is not
+                    // modeled in the owned execstate yet.
+                    match other {
+                        K::PLPGSQL_GETDIAG_CONTEXT => String::new(),
+                        _ => std::panic::panic_any(types_error::PgError::error(format!(
+                            "GET CURRENT DIAGNOSTICS item {:?} not available outside \
+                             an exception handler",
+                            other
+                        ))),
+                    }
+                };
+
+                // exec_assign_c_string(estate, target, s) (pl_exec.c 8866):
+                // build a text Datum and assign it into the target variable. In
+                // C this routes through exec_assign_value (TEXTOID source, cast
+                // to the target type); the GET DIAGNOSTICS targets are virtually
+                // always text/varchar variables, so the assign_text_var path
+                // (direct assign_simple_var, no by-ref cast/transfer leg) is the
+                // faithful store for them.
+                assign_text_var(estate, di.target, s);
+            }
+        }
+    }
+
+    PLpgSQL_rc::PLPGSQL_RC_OK
 }
 
 fn exec_stmt_fors(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
@@ -1192,15 +1355,11 @@ fn exec_stmt_raise(
 
     // RAISE with no parameters: re-throw the current exception.
     if stmt.condname.is_none() && stmt.message.is_none() && stmt.options.is_empty() {
-        if estate.cur_error.is_some() {
-            // ReThrowError(estate->cur_error). The exception substrate does not
-            // yet populate cur_error (it is an opaque handle); when it lands the
-            // re-throw routes here. Until then this branch is structurally
-            // unreached (cur_error is always None).
-            panic!(
-                "seam not wired: RAISE re-throw (pl_exec.c ReThrowError) — \
-                 saved ErrorData re-raise (exception-substrate ErrorData codec)"
-            );
+        if let Some(edata) = estate.cur_error.clone() {
+            // ReThrowError(estate->cur_error): re-raise the error currently
+            // being handled. The owned model carries cur_error as the live
+            // PgError, so re-raise is the same panic_any channel as PG_RE_THROW.
+            std::panic::panic_any(edata);
         }
         // oops, we're not inside a handler.
         std::panic::panic_any(
