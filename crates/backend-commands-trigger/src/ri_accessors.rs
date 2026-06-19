@@ -253,4 +253,18 @@ pub fn init_seams() {
     s::trigger_constrrelid::set(trigger_constrrelid_impl);
     s::trigger_constrindid::set(trigger_constrindid_impl);
     s::trigger_name::set(trigger_name_impl);
+
+    // The slot-value + live-relation accessors are now satisfied by the
+    // AFTER-trigger firing path (`after_trigger_execute` materializes the OLD/NEW
+    // slot payloads onto the per-call side-channel), so they resolve to the
+    // owner-side deform of the re-fetched tuple rather than loud-panic.
+    s::slot_getattr::set(crate::firing::slot_getattr_impl);
+    s::slot_attisnull::set(crate::firing::slot_attisnull_impl);
+    s::slot_tid::set(crate::firing::slot_tid_impl);
+    s::slot_is_current_xact_tuple::set(crate::firing::slot_is_current_xact_tuple_impl);
+    s::pk_datum_image_eq::set(crate::firing::pk_datum_image_eq_impl);
+    s::tg_relation::set(crate::firing::tg_relation_impl);
+    s::tg_relation_tuple_satisfies_snapshot_self::set(
+        crate::firing::tg_relation_tuple_satisfies_snapshot_self_impl,
+    );
 }

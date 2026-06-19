@@ -1615,30 +1615,25 @@ mod recurrence_guard {
         // (crates/backend-commands-trigger/src/ri_accessors.rs) — the owned
         // analogue of dereferencing fcinfo->context.
         //
-        // What remains uninstalled below needs the per-row AFTER-trigger firing
-        // substrate (EState-owned slot materialization + heap-scan family) or the
-        // trigger-DDL family, both separate campaigns:
-        //   * tg_trigtuple / tg_newtuple — the OLD/NEW HeapTuple copies the
-        //     firing path leaves NULL (per-row fetch substrate).
-        //   * tg_relation_tuple_satisfies_snapshot_self, tg_relation (the live
-        //     heap Relation), slot_tid / slot_attisnull / slot_is_current_xact_tuple
-        //     / slot_getattr / pk_datum_image_eq — drive the table-AM / slot value
-        //     deform against the OLD/NEW TupleTableSlots, which AfterTriggerExecute
-        //     does not yet materialize (tg_trigslot/tg_newslot left NULL, per-row
-        //     fetch loud-panics).
+        // The AFTER-row firing substrate now lands: AfterTriggerExecute
+        // materializes the OLD/NEW slot payloads onto the per-call side-channel
+        // (re-fetched on-page FormedTuple + the trigger relation's descriptor),
+        // so tg_relation, the slot value accessors (slot_tid / slot_attisnull /
+        // slot_is_current_xact_tuple / slot_getattr / pk_datum_image_eq), and the
+        // SnapshotSelf liveness test (tg_relation_tuple_satisfies_snapshot_self)
+        // are now INSTALLED + DELETED from this allowlist.
+        //
+        // What remains uninstalled below:
+        //   * tg_trigtuple / tg_newtuple — the bare HeapTuple accessors
+        //     unique_key_recheck (constraint.c) reads; the firing path carries
+        //     them on the TriggerData but these owner-homed seams have no consumer
+        //     wired through them yet.
         //   * RemoveTriggerById / renametrig — the unported catalog-write DDL leg
         //     (CreateTrigger family: systable scans over pg_trigger, renametrig
         //     partition recursion, RangeVarGetRelidExtended callbacks).
         // Install + DELETE each as that substrate / DDL family lands.
-        ("backend_commands_trigger", "tg_relation_tuple_satisfies_snapshot_self"),
         ("backend_commands_trigger", "tg_trigtuple"),
         ("backend_commands_trigger", "tg_newtuple"),
-        ("backend_commands_trigger", "tg_relation"),
-        ("backend_commands_trigger", "slot_tid"),
-        ("backend_commands_trigger", "slot_attisnull"),
-        ("backend_commands_trigger", "slot_is_current_xact_tuple"),
-        ("backend_commands_trigger", "slot_getattr"),
-        ("backend_commands_trigger", "pk_datum_image_eq"),
         ("backend_commands_trigger", "RemoveTriggerById"),
         ("backend_commands_trigger", "renametrig"),
         //

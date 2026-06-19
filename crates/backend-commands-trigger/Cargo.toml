@@ -41,6 +41,8 @@ types-acl = { path = "../types-acl" }
 types-catalog = { path = "../types-catalog" }
 types-scan = { path = "../types-scan" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-access-heap-heapam-visibility = { path = "../backend-access-heap-heapam-visibility" }
+backend-utils-adt-datum-seams = { path = "../backend-utils-adt-datum-seams" }
 backend-access-common-scankey = { path = "../backend-access-common-scankey" }
 backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }
 backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }

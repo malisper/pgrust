@@ -69,6 +69,13 @@ pub fn init_seams() {
         crate::generate_relation_name_catalog,
     );
 
+    // generate_operator_clause(buf, leftop, leftoptype, opoid, rightop,
+    // rightoptype) — the schema-qualified casted operator fragment ri_triggers.c
+    // appends when building the FK enforcement query.
+    backend_utils_adt_ruleutils_seams::generate_operator_clause::set(
+        crate::generate_operator_clause_catalog,
+    );
+
     // guc_funcs.c's GUC_LIST_QUOTE flatten branch (flatten_set_variable_args)
     // reaches `quote_identifier` through its own outward seam crate. C:
     // `char *quote_identifier(const char *)`; the owner is Mcx-bound (the result

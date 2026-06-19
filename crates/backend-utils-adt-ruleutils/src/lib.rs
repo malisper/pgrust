@@ -196,6 +196,89 @@ pub fn generate_relation_name_catalog<'mcx>(
     quote_qualified_identifier(mcx, nspname.as_deref(), relname.as_str())
 }
 
+/// `generate_operator_clause(buf, leftop, leftoptype, opoid, rightop,
+/// rightoptype)` (ruleutils.c:13439) — append the schema-qualified, optionally
+/// casted `leftop OPERATOR(nsp.opr) rightop` fragment to a fresh buffer and
+/// return its raw bytes.  `ri_GenerateQual` (ri_triggers.c) is the sole caller.
+pub fn generate_operator_clause_catalog<'mcx>(
+    mcx: Mcx<'mcx>,
+    leftop: &[u8],
+    leftoptype: Oid,
+    opoid: Oid,
+    rightop: &[u8],
+    rightoptype: Oid,
+) -> PgResult<mcx::PgVec<'mcx, u8>> {
+    // opertup = SearchSysCache1(OPEROID, opoid); elog(ERROR) on miss.
+    let operform = match backend_utils_cache_syscache_seams::oper_row_by_oid::call(mcx, opoid)? {
+        Some(o) => o,
+        None => {
+            return Err(elog_error(alloc::format!(
+                "cache lookup failed for operator {}",
+                opoid
+            )))
+        }
+    };
+    // Assert(operform->oprkind == 'b');
+    debug_assert_eq!(operform.oprkind, b'b');
+
+    // nspname = get_namespace_name(operform->oprnamespace);
+    let nspname =
+        backend_utils_cache_lsyscache_seams::get_namespace_name::call(mcx, operform.oprnamespace)?
+            .ok_or_else(|| {
+                elog_error(alloc::format!(
+                    "cache lookup failed for namespace {}",
+                    operform.oprnamespace
+                ))
+            })?;
+
+    let mut buf: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+
+    // appendStringInfoString(buf, leftop);
+    buf.extend_from_slice(leftop);
+    // if (leftoptype != operform->oprleft) add_cast_to(buf, operform->oprleft);
+    if leftoptype != operform.oprleft {
+        add_cast_to(mcx, &mut buf, operform.oprleft)?;
+    }
+    // appendStringInfo(buf, " OPERATOR(%s.", quote_identifier(nspname));
+    buf.extend_from_slice(b" OPERATOR(");
+    let qnsp = quote_identifier(mcx, nspname.as_str())?;
+    buf.extend_from_slice(qnsp.as_bytes());
+    buf.extend_from_slice(b".");
+    // appendStringInfoString(buf, oprname);
+    buf.extend_from_slice(operform.oprname.as_bytes());
+    // appendStringInfo(buf, ") %s", rightop);
+    buf.extend_from_slice(b") ");
+    buf.extend_from_slice(rightop);
+    // if (rightoptype != operform->oprright) add_cast_to(buf, operform->oprright);
+    if rightoptype != operform.oprright {
+        add_cast_to(mcx, &mut buf, operform.oprright)?;
+    }
+
+    mcx::slice_in(mcx, &buf)
+}
+
+/// `add_cast_to(buf, typid)` (ruleutils.c:13478) — append `::nsp.typ` for the
+/// type (always schema-qualified, default typmod), spelled out the hard way
+/// (not `format_type_be`) to avoid CHARACTER/BIT truncation corner cases.
+fn add_cast_to<'mcx>(mcx: Mcx<'mcx>, buf: &mut alloc::vec::Vec<u8>, typid: Oid) -> PgResult<()> {
+    // typetup = SearchSysCache1(TYPEOID, typid); elog(ERROR) on miss.
+    let nm = backend_utils_cache_syscache_seams::type_namespace_and_name::call(mcx, typid)?
+        .ok_or_else(|| elog_error(alloc::format!("cache lookup failed for type {}", typid)))?;
+    // nspname = get_namespace_name_or_temp(typform->typnamespace);
+    let nspname = backend_utils_cache_lsyscache_seams::get_namespace_name_or_temp::call(
+        mcx, nm.namespace,
+    )?;
+    // appendStringInfo(buf, "::%s.%s", quote_identifier(nspname),
+    //                  quote_identifier(typname));
+    buf.extend_from_slice(b"::");
+    let qnsp = quote_identifier(mcx, nspname.as_deref().unwrap_or(""))?;
+    buf.extend_from_slice(qnsp.as_bytes());
+    buf.extend_from_slice(b".");
+    let qtyp = quote_identifier(mcx, nm.name.as_str())?;
+    buf.extend_from_slice(qtyp.as_bytes());
+    Ok(())
+}
+
 mod seams;
 pub use seams::init_seams;
 
