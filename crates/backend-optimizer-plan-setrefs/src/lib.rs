@@ -300,24 +300,32 @@ fn add_rtes_to_flat_rtable<'mcx>(
         };
         if is_sub && !inh && (rti as i32) < root.simple_rel_array_size {
             let rel = root.simple_rel_array.get(rti).copied().flatten();
-            if let Some(_rel_id) = rel {
-                // The C inspects rel->subroot: if NULL → flatten_unplanned_rtes;
-                // else if recursing or the subroot's final upper rel is dummy →
-                // recurse into the subroot. Both the subroot navigation and the
-                // dummy-rel test live with the relnode/path owner (RelOptInfo's
-                // subroot is a RelId handle into root.rel_arena, whose subroot is
-                // an unported per-subquery PlannerInfo). Route the dummy test
-                // through the seam; recursion into a subroot requires the owner.
+            if let Some(rel_id) = rel {
+                // C: Assert(rel->relid == rti).
                 //
-                // For the common case (no dead subqueries), neither branch
-                // fires. When it does, the unplanned/dummy pull-up is owned by
-                // the subquery-planner cohort and reached through the seam below.
-                if ext::subroot_final_rel_is_dummy::call(root, rti)? {
-                    // recurse into subroot — owned by subquery_planner cohort.
-                    return Err(PgError::error(
-                        "add_rtes_to_flat_rtable: recursion into a dummy subroot \
-                         (subquery_planner-owned subroot navigation) is not ported",
-                    ));
+                // The subquery might never have been planned at all (excluded on
+                // self-contradictory constraints) → rel->subroot == NULL →
+                // flatten_unplanned_rtes. If it was planned but the result rel is
+                // dummy (or we're recursing), it has been omitted from our plan
+                // tree → recurse to pull up its RTEs. Otherwise it's represented
+                // by a SubqueryScan and gets pulled up when we process that node.
+                let subroot_is_null = root.rel(rel_id).subroot.0.is_none();
+                if subroot_is_null {
+                    flatten_unplanned_rtes(mcx, run, root, parse, idx)?;
+                } else if recursing || ext::subroot_final_rel_is_dummy::call(root, rti)? {
+                    // Recurse into the subroot. Take its PlannerInfo out, lend it
+                    // the (single) glob for the duration, recurse, restore both.
+                    let mut subroot = root
+                        .rel_mut(rel_id)
+                        .subroot
+                        .0
+                        .take()
+                        .expect("add_rtes_to_flat_rtable: subroot vanished");
+                    subroot.glob = root.glob.take();
+                    let res = add_rtes_to_flat_rtable(mcx, run, &mut subroot, true);
+                    root.glob = subroot.glob.take();
+                    root.rel_mut(rel_id).subroot.0 = Some(subroot);
+                    res?;
                 }
             }
         }
@@ -335,9 +343,31 @@ fn add_rte_to_flat_rtable<'mcx>(
     q: types_pathnodes::QueryId,
     src_idx: usize,
 ) -> PgResult<()> {
+    // Clone the source RTE and, if any, the source query's matching
+    // RTEPermissionInfo out of the run, then add to the flat rtable.
+    let newrte = run.rtable(q)[src_idx].clone_in(mcx)?;
+    let perminfoindex = newrte.perminfoindex;
+    let src_perminfo = if perminfoindex > 0 {
+        Some(run.resolve(q).rteperminfos[(perminfoindex - 1) as usize].clone_in(mcx)?)
+    } else {
+        None
+    };
+    add_rte_to_flat_rtable_core(mcx, run, root, newrte, src_perminfo)
+}
+
+/// `add_rte_to_flat_rtable(glob, rteperminfos, rte)` core, over an already-cloned
+/// owned RTE and its (already-cloned) source `RTEPermissionInfo`. Shared by the
+/// run-interned path and by `flatten_unplanned_rtes` (which walks a raw subquery
+/// parse tree whose RTEs were never interned).
+fn add_rte_to_flat_rtable_core<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &mut types_pathnodes::planner_run::PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    mut newrte: types_nodes::parsenodes::RangeTblEntry<'mcx>,
+    src_perminfo: Option<types_nodes::parsenodes::RTEPermissionInfo<'mcx>>,
+) -> PgResult<()> {
     // flat copy to duplicate all the scalar fields, then zap unneeded
     // sub-structure that the executor doesn't need.
-    let mut newrte = run.rtable(q)[src_idx].clone_in(mcx)?;
     newrte.tablesample = None;
     newrte.subquery = None;
     newrte.joinaliasvars = PgVec::new_in(mcx);
@@ -374,16 +404,94 @@ fn add_rte_to_flat_rtable<'mcx>(
     // Copy the RTEPermissionInfo, if any (setrefs.c:579 `addRTEPermissionInfo`).
     // C deep-copies the source query's perminfo (`copyObject`) into
     // `glob->finalrteperminfos` and resets `newrte->perminfoindex` to the new
-    // 1-based list length. The source query `q` owns its `rteperminfos` list
-    // value-typed in the planner run; clone `rteperminfos[perminfoindex - 1]`
-    // into the run's perminfo store and record the handle.
+    // 1-based list length. The (already-cloned) source perminfo was supplied by
+    // the caller; intern it into the run's perminfo store and record the handle.
     if perminfoindex > 0 {
-        let src = run.resolve(q).rteperminfos[(perminfoindex - 1) as usize].clone_in(mcx)?;
+        let src = src_perminfo
+            .expect("add_rte_to_flat_rtable: perminfoindex > 0 but no source perminfo");
         let perm_id = run.intern_rte_perminfo(src);
         glob_mut(root)?.finalrteperminfos.push(perm_id);
         let new_perm_index = glob_ref(root)?.finalrteperminfos.len();
         // newrte->perminfoindex = list_length(glob->finalrteperminfos)
         run.resolve_rte_mut(new_id).perminfoindex = new_perm_index as Index;
+    }
+    Ok(())
+}
+
+/// `flatten_unplanned_rtes(glob, rte)` (setrefs.c:486) — extract RangeTblEntries
+/// from a subquery that was never planned at all. The subquery lives embedded in
+/// `rte.subquery` of the source query's `src_idx`-th RTE. We mirror the C
+/// `query_tree_walker(..., QTW_EXAMINE_RTES_BEFORE)`: visit every RTE in the
+/// subquery's parse tree (recursing into nested subqueries — both RTE_SUBQUERY
+/// RTEs and sublink subselects), and add each relation / former-relation RTE to
+/// the flat rangetable along with the owning query's matching RTEPermissionInfo.
+fn flatten_unplanned_rtes<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &mut types_pathnodes::planner_run::PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    parse: types_pathnodes::QueryId,
+    src_idx: usize,
+) -> PgResult<()> {
+    // Clone the embedded subquery out of the run-interned source RTE so we can
+    // walk it without holding a borrow on `run` across the mutating adds.
+    let subquery = match run.rtable(parse)[src_idx].subquery.as_deref() {
+        Some(q) => q.clone_in(mcx)?,
+        None => return Ok(()),
+    };
+    flatten_rtes_in_query(mcx, run, root, &subquery)
+}
+
+/// `flatten_rtes_walker` (setrefs.c:496) RTE-collection semantics over one
+/// `Query`: add this query's relation / former-relation RTEs (with their
+/// rteperminfos), then recurse into every nested `Query` (RTE_SUBQUERY RTEs and
+/// sublink subselects reachable through expressions).
+fn flatten_rtes_in_query<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &mut types_pathnodes::planner_run::PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    query: &types_nodes::copy_query::Query<'mcx>,
+) -> PgResult<()> {
+    use types_nodes::parsenodes::RTEKind;
+
+    // Add this query's relation / former-relation RTEs.
+    for rte in query.rtable.iter() {
+        if rte.rtekind == RTEKind::RTE_RELATION
+            || (rte.rtekind == RTEKind::RTE_SUBQUERY && rte.relid != 0)
+        {
+            let newrte = rte.clone_in(mcx)?;
+            let perminfoindex = newrte.perminfoindex;
+            let src_perminfo = if perminfoindex > 0 {
+                Some(query.rteperminfos[(perminfoindex - 1) as usize].clone_in(mcx)?)
+            } else {
+                None
+            };
+            add_rte_to_flat_rtable_core(mcx, run, root, newrte, src_perminfo)?;
+        }
+    }
+
+    // Recurse into nested subquery Queries, keeping the rteperminfos
+    // correspondence aligned with each query's rtable. The C
+    // `flatten_rtes_walker` reaches nested Queries both through RTE_SUBQUERY RTEs
+    // and through sublink subselects embedded in expression trees. RTE_SUBQUERY
+    // children are recursed here directly; the sublink-subselect leg is not
+    // reachable with the current node-walker substrate, which delivers only
+    // `Expr` children to its expression walkers and never the `Query` carried by
+    // a `SubLink.subselect`. In practice a never-planned subquery's
+    // permission-bearing relation RTEs live in its own/child RTE_SUBQUERY range
+    // tables (handled here); the only unhandled case is a relation referenced
+    // *solely* inside a sublink contained in a query level that was itself
+    // excluded as dead — a narrow, well-bounded gap (not a stub of the main
+    // path).
+    let mut nested: Vec<types_nodes::copy_query::Query<'mcx>> = Vec::new();
+    for rte in query.rtable.iter() {
+        if rte.rtekind == RTEKind::RTE_SUBQUERY {
+            if let Some(sub) = rte.subquery.as_deref() {
+                nested.push(sub.clone_in(mcx)?);
+            }
+        }
+    }
+    for sub in &nested {
+        flatten_rtes_in_query(mcx, run, root, sub)?;
     }
     Ok(())
 }

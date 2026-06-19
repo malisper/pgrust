@@ -139,6 +139,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `coerce_to_common_type(NULL, node, targetTypeId, context)` (parse_coerce.c)
+    /// with a `NULL` `ParseState` — the form used by `generate_setop_tlist`
+    /// (prepunion.c), where the set-op branch columns are coerced to the
+    /// already-selected common type with no parse state for error location.
+    /// Behaves exactly like `coerce_to_common_type` with `pstate == NULL`.
+    pub fn coerce_to_common_type_no_pstate<'mcx>(
+        node: Expr,
+        target_type_id: Oid,
+        context: &str,
+    ) -> PgResult<Expr>
+);
+
+seam_core::seam!(
     /// `select_common_type(pstate, exprs, context, which_expr)` (parse_coerce.c):
     /// determine the common supertype of a list of already-transformed
     /// expressions. The C `Node **which_expr` out-parameter is dropped (the

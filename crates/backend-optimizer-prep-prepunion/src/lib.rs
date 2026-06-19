@@ -1228,11 +1228,17 @@ fn build_setop_tlist_from_exprs<'mcx>(
         };
 
         if expr_type(Some(&expr))? != col_type {
-            // coerce_to_common_type with pstate=NULL — a mismatched-type set-op.
-            return Err(PgError::error(String::from(
-                "generate_setop_tlist: cross-type set-op column coercion \
-                 (coerce_to_common_type) is not yet ported",
-            )));
+            // Note: it's not really cool to be applying coerce_to_common_type
+            // here; one notable point is that assign_expr_collations never gets
+            // run on any generated nodes.  For the moment that's not a problem
+            // because we force the correct exposed collation below.  (C:1413)
+            // pstate == NULL — no UNKNOWNs here.
+            expr = backend_parser_coerce_seams::coerce_to_common_type_no_pstate::call(
+                expr,
+                col_type,
+                "UNION/INTERSECT/EXCEPT",
+            )?;
+            *trivial_tlist = false; // the coercion makes it not trivial
         }
 
         if expr_collation(Some(&expr))? != col_coll {

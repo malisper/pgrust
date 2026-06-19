@@ -2735,6 +2735,7 @@ pub fn init_seams() {
     s::coerce_to_boolean::set(seam_coerce_to_boolean);
     s::coerce_to_specific_type::set(seam_coerce_to_specific_type);
     s::coerce_to_common_type::set(seam_coerce_to_common_type);
+    s::coerce_to_common_type_no_pstate::set(seam_coerce_to_common_type_no_pstate);
     s::select_common_type::set(seam_select_common_type);
     s::verify_common_type::set(verify_common_type);
     s::coerce_to_target_type::set(seam_coerce_to_target_type);
@@ -2847,6 +2848,14 @@ fn seam_coerce_to_common_type<'mcx>(
     context: &str,
 ) -> PgResult<Expr> {
     coerce_to_common_type(coerce_node_mcx(), Some(pstate), node, target_type_id, context)
+}
+
+fn seam_coerce_to_common_type_no_pstate<'mcx>(
+    node: Expr,
+    target_type_id: Oid,
+    context: &str,
+) -> PgResult<Expr> {
+    coerce_to_common_type(coerce_node_mcx(), None, node, target_type_id, context)
 }
 
 fn seam_select_common_type<'mcx>(
