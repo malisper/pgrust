@@ -365,6 +365,165 @@ fn fc_array_cat(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     ret_opt_array(fcinfo, r.map(|v| v.as_slice().to_vec()))
 }
 
+/// Resolve the element type, length/byval/align triple, and a bare-word `Datum`
+/// for the new element of an `array_append`/`array_prepend` call. The new
+/// element is `fcinfo` arg `elem_argno`; the array (arg `array_argno`) supplies
+/// the element type via its header when non-NULL, else via the function's
+/// resolved argument type (`get_fn_expr_argtype`). For a by-reference element
+/// the returned `Datum` word is a pointer into the element bytes, which are kept
+/// alive by the returned `held` buffer (mirroring C's bare `Datum` pointing into
+/// stored bytes). Returns `(element_type, elmlen, elmbyval, elmalign,
+/// data_value, isnull, held)`.
+#[allow(clippy::type_complexity)]
+fn resolve_push_element(
+    fcinfo: &FunctionCallInfoBaseData,
+    array_argno: usize,
+    elem_argno: usize,
+    array: Option<&[u8]>,
+) -> (Oid, i32, bool, u8, Datum, bool, Option<Vec<u8>>) {
+    // Element type: from the (non-NULL) array header, else the function's
+    // resolved array argument type's element type.
+    let element_type = match array {
+        Some(a) => crate::foundation::arr_elemtype(a),
+        None => {
+            let arr_type =
+                backend_utils_fmgr_core::get_fn_expr_argtype(fcinfo.flinfo.as_deref(), array_argno as i32);
+            ok(backend_utils_cache_lsyscache_seams::get_element_type::call(arr_type))
+                .expect("array_push: function array argument is not an array type")
+        }
+    };
+    let s = ok(backend_utils_cache_lsyscache_seams::get_typlenbyvalalign::call(element_type));
+    let isnull = arg_isnull(fcinfo, elem_argno);
+    if isnull {
+        return (element_type, s.typlen as i32, s.typbyval, s.typalign as u8, Datum::from_usize(0), true, None);
+    }
+    if s.typbyval {
+        let word = fcinfo.arg(elem_argno).map(|d| d.value).unwrap_or(Datum::from_usize(0));
+        (element_type, s.typlen as i32, s.typbyval, s.typalign as u8, word, false, None)
+    } else {
+        // By-reference element: copy its bytes into a held buffer and pass a
+        // pointer to them as the data_value word (C: PG_GETARG_DATUM is a
+        // pointer into the stored element).
+        let bytes = fcinfo
+            .ref_arg(elem_argno)
+            .and_then(|p| p.as_varlena().or_else(|| p.as_cstring().map(|c| c.as_bytes())))
+            .expect("array_push: by-ref element missing from by-ref lane")
+            .to_vec();
+        let ptr = bytes.as_ptr() as usize;
+        (
+            element_type,
+            s.typlen as i32,
+            s.typbyval,
+            s.typalign as u8,
+            Datum::from_usize(ptr),
+            false,
+            Some(bytes),
+        )
+    }
+}
+
+/// `array_append(anyarray, anyelement) -> anyarray` (oid 378). Non-strict.
+fn fc_array_append(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let array_vec = opt_arg_varlena(fcinfo, 0).map(|s| s.to_vec());
+    let m = scratch_mcx();
+    let (element_type, elmlen, elmbyval, elmalign, data_value, isnull, _held) =
+        resolve_push_element(fcinfo, 0, 1, array_vec.as_deref());
+
+    // fetch_array_arg_replace_nulls: a NULL array becomes an empty array.
+    let array: Vec<u8> = match &array_vec {
+        Some(a) => a.clone(),
+        None => ok(crate::construct::construct_empty_array(m.mcx(), element_type))
+            .as_slice()
+            .to_vec(),
+    };
+
+    let ndims = crate::foundation::arr_ndim(&array);
+    // index of added elem is at lb[0] + (dimv[0] - 1) + 1 == lb[0] + dimv[0].
+    let indx: i32 = if ndims == 1 {
+        let lb0 = crate::foundation::arr_lbound(&array, 0);
+        let dim0 = crate::foundation::arr_dim(&array, 0);
+        match lb0.checked_add(dim0) {
+            Some(v) => v,
+            None => raise(integer_out_of_range()),
+        }
+    } else if ndims == 0 {
+        1
+    } else {
+        raise(empty_or_one_dim_err());
+    };
+
+    let result = ok(crate::element_slice::array_set_element(
+        m.mcx(),
+        &array,
+        1,
+        &[indx],
+        data_value,
+        isnull,
+        -1,
+        elmlen,
+        elmbyval,
+        elmalign,
+    ));
+    ret_varlena(fcinfo, result.as_slice().to_vec())
+}
+
+/// `array_prepend(anyelement, anyarray) -> anyarray` (oid 379). Non-strict.
+fn fc_array_prepend(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let array_vec = opt_arg_varlena(fcinfo, 1).map(|s| s.to_vec());
+    let m = scratch_mcx();
+    let (element_type, elmlen, elmbyval, elmalign, data_value, isnull, _held) =
+        resolve_push_element(fcinfo, 1, 0, array_vec.as_deref());
+
+    let array: Vec<u8> = match &array_vec {
+        Some(a) => a.clone(),
+        None => ok(crate::construct::construct_empty_array(m.mcx(), element_type))
+            .as_slice()
+            .to_vec(),
+    };
+
+    let ndims = crate::foundation::arr_ndim(&array);
+    let (indx, lb0): (i32, i32) = if ndims == 1 {
+        let lb = crate::foundation::arr_lbound(&array, 0);
+        match lb.checked_sub(1) {
+            Some(v) => (v, lb),
+            None => raise(integer_out_of_range()),
+        }
+    } else if ndims == 0 {
+        (1, 1)
+    } else {
+        raise(empty_or_one_dim_err());
+    };
+
+    let mut result = ok(crate::element_slice::array_set_element(
+        m.mcx(),
+        &array,
+        1,
+        &[indx],
+        data_value,
+        isnull,
+        -1,
+        elmlen,
+        elmbyval,
+        elmalign,
+    ));
+    // Readjust result's lower bound to match the input's, as expected for
+    // prepend (C: eah->lbound[0] = lb0).
+    if crate::foundation::arr_ndim(&result) == 1 {
+        crate::foundation::write_lbounds(&mut result, 1, &[lb0]);
+    }
+    ret_varlena(fcinfo, result.as_slice().to_vec())
+}
+
+fn integer_out_of_range() -> types_error::PgError {
+    types_error::PgError::error("integer out of range")
+        .with_sqlstate(types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
+}
+
+fn empty_or_one_dim_err() -> types_error::PgError {
+    types_error::PgError::error("argument must be empty or one-dimensional array")
+        .with_sqlstate(types_error::ERRCODE_DATA_EXCEPTION)
+}
+
 // --- array_position / array_positions (non-strict) --------------------------
 
 fn fc_array_position(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
@@ -626,7 +785,9 @@ pub fn register_arrayfuncs_sql_builtins() {
         sbuiltin(6388, "array_sort", 1, fc_array_sort),
         sbuiltin(6389, "array_sort_order", 2, fc_array_sort_order),
         sbuiltin(6390, "array_sort_order_nulls_first", 3, fc_array_sort_order_nulls_first),
-        // cat / position / positions / remove / replace
+        // append / prepend / cat / position / positions / remove / replace
+        nbuiltin(378, "array_append", 2, fc_array_append),
+        nbuiltin(379, "array_prepend", 2, fc_array_prepend),
         nbuiltin(383, "array_cat", 2, fc_array_cat),
         nbuiltin(3277, "array_position", 2, fc_array_position),
         nbuiltin(3278, "array_position_start", 3, fc_array_position_start),

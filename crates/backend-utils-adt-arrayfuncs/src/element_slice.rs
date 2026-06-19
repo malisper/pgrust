@@ -713,14 +713,21 @@ pub fn array_get_slice<'mcx>(
     let arraynullsptr = arr_nullbitmap_off(array);
 
     // Mutable working copies of the subscript bounds (C scribbles on these).
+    // C uses fixed MAXDIM-sized `lowerIndx`/`upperIndx` workspaces; the owned
+    // caller passes only the provided subscripts, so pad to MAXDIM with zeros
+    // (the loops below overwrite every position actually read, `[0..ndim)`).
     let mut lower: PgVec<'mcx, i32> = {
         let mut v = PgVec::new_in(mcx);
-        v.extend_from_slice(&lower_indx[..MAXDIM as usize]);
+        v.resize(MAXDIM as usize, 0);
+        let n = lower_indx.len().min(MAXDIM as usize);
+        v[..n].copy_from_slice(&lower_indx[..n]);
         v
     };
     let mut upper: PgVec<'mcx, i32> = {
         let mut v = PgVec::new_in(mcx);
-        v.extend_from_slice(&upper_indx[..MAXDIM as usize]);
+        v.resize(MAXDIM as usize, 0);
+        let n = upper_indx.len().min(MAXDIM as usize);
+        v[..n].copy_from_slice(&upper_indx[..n]);
         v
     };
 
@@ -845,15 +852,21 @@ pub fn array_set_slice<'mcx>(
     // toasted elements)
     let ndim = arr_ndim(array);
 
-    // Mutable working copies of the subscript bounds.
+    // Mutable working copies of the subscript bounds. C uses fixed MAXDIM-sized
+    // workspaces; the owned caller passes only the provided subscripts, so pad
+    // to MAXDIM with zeros (positions actually read are overwritten below).
     let mut lower: PgVec<'mcx, i32> = {
         let mut v = PgVec::new_in(mcx);
-        v.extend_from_slice(&lower_indx[..MAXDIM as usize]);
+        v.resize(MAXDIM as usize, 0);
+        let n = lower_indx.len().min(MAXDIM as usize);
+        v[..n].copy_from_slice(&lower_indx[..n]);
         v
     };
     let mut upper: PgVec<'mcx, i32> = {
         let mut v = PgVec::new_in(mcx);
-        v.extend_from_slice(&upper_indx[..MAXDIM as usize]);
+        v.resize(MAXDIM as usize, 0);
+        let n = upper_indx.len().min(MAXDIM as usize);
+        v[..n].copy_from_slice(&upper_indx[..n]);
         v
     };
 
