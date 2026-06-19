@@ -163,6 +163,76 @@ fn fc_pg_snapshot_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     ret_cstring(fcinfo, s)
 }
 
+/// Read a by-ref `pg_snapshot` arg as a reconstructed [`crate::PgSnapshot`].
+#[inline]
+fn arg_snapshot(fcinfo: &FunctionCallInfoBaseData, i: usize) -> crate::PgSnapshot {
+    let image = fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("xid8funcs fn: by-ref pg_snapshot arg missing from by-ref lane");
+    crate::PgSnapshot::from_varlena_bytes(image)
+        .unwrap_or_else(|| raise(types_error::PgError::error("invalid pg_snapshot image")))
+}
+
+/// Set a `pg_snapshot` (varlena) result on the by-ref lane.
+#[inline]
+fn ret_snapshot(fcinfo: &mut FunctionCallInfoBaseData, snap: &crate::PgSnapshot) -> Datum {
+    fcinfo.set_ref_result(RefPayload::Varlena(snap.to_varlena_bytes()));
+    Datum::from_usize(0)
+}
+
+/// `pg_current_snapshot() -> pg_snapshot` (xid8funcs.c:480). No args; takes the
+/// current snapshot and returns its header-ful varlena image.
+fn fc_pg_current_snapshot(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    match crate::pg_current_snapshot() {
+        Ok(snap) => ret_snapshot(fcinfo, &snap),
+        Err(e) => raise(e),
+    }
+}
+
+/// `pg_snapshot_recv(internal) -> pg_snapshot` (xid8funcs.c:451). The wire
+/// message arrives verbatim on the by-ref lane; a `Pq8Cursor` walks it.
+fn fc_pg_snapshot_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let image: Vec<u8> = fcinfo
+        .ref_arg(0)
+        .and_then(|p| p.as_varlena())
+        .unwrap_or(&[])
+        .to_vec();
+    let mut cur = crate::Pq8Cursor::new(&image);
+    match crate::pg_snapshot_recv(&mut cur) {
+        Ok(snap) => ret_snapshot(fcinfo, &snap),
+        Err(e) => raise(e),
+    }
+}
+
+/// `pg_snapshot_send(pg_snapshot) -> bytea` (xid8funcs.c:495). The core emits
+/// the raw wire bytes; `pq_endtypsend` wraps them into a header-ful `bytea`.
+fn fc_pg_snapshot_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let snap = arg_snapshot(fcinfo, 0);
+    let wire = crate::pg_snapshot_send(&snap);
+    fcinfo.set_ref_result(RefPayload::Varlena(varlena_image(&wire)));
+    Datum::from_usize(0)
+}
+
+/// `pg_visible_in_snapshot(xid8, pg_snapshot) -> bool` (xid8funcs.c:554).
+fn fc_pg_visible_in_snapshot(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let value = arg_fxid(fcinfo, 0);
+    let snap = arg_snapshot(fcinfo, 1);
+    Datum::from_bool(crate::pg_visible_in_snapshot(value, &snap))
+}
+
+/// `pg_snapshot_xmin(pg_snapshot) -> xid8` (xid8funcs.c:568).
+fn fc_pg_snapshot_xmin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let snap = arg_snapshot(fcinfo, 0);
+    ret_fxid(crate::pg_snapshot_xmin(&snap))
+}
+
+/// `pg_snapshot_xmax(pg_snapshot) -> xid8` (xid8funcs.c:582).
+fn fc_pg_snapshot_xmax(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let snap = arg_snapshot(fcinfo, 0);
+    ret_fxid(crate::pg_snapshot_xmax(&snap))
+}
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -219,5 +289,21 @@ pub fn register_xid8funcs_builtins() {
         builtin(2940, "pg_snapshot_out", 1, true, false, fc_pg_snapshot_out),
         builtin(5055, "pg_snapshot_in", 1, true, false, fc_pg_snapshot_in),
         builtin(5056, "pg_snapshot_out", 1, true, false, fc_pg_snapshot_out),
+        // ---- pg_snapshot binary I/O (txid_snapshot aliases share OIDs) ----
+        builtin(2941, "pg_snapshot_recv", 1, true, false, fc_pg_snapshot_recv),
+        builtin(2942, "pg_snapshot_send", 1, true, false, fc_pg_snapshot_send),
+        builtin(5057, "pg_snapshot_recv", 1, true, false, fc_pg_snapshot_recv),
+        builtin(5058, "pg_snapshot_send", 1, true, false, fc_pg_snapshot_send),
+        // ---- pg_snapshot accessors (scalar) ----
+        builtin(2944, "pg_current_snapshot", 0, true, false, fc_pg_current_snapshot),
+        builtin(5061, "pg_current_snapshot", 0, true, false, fc_pg_current_snapshot),
+        builtin(2945, "pg_snapshot_xmin", 1, true, false, fc_pg_snapshot_xmin),
+        builtin(5062, "pg_snapshot_xmin", 1, true, false, fc_pg_snapshot_xmin),
+        builtin(2946, "pg_snapshot_xmax", 1, true, false, fc_pg_snapshot_xmax),
+        builtin(5063, "pg_snapshot_xmax", 1, true, false, fc_pg_snapshot_xmax),
+        builtin(2948, "pg_visible_in_snapshot", 2, true, false, fc_pg_visible_in_snapshot),
+        builtin(5065, "pg_visible_in_snapshot", 2, true, false, fc_pg_visible_in_snapshot),
+        // pg_snapshot_xip (2947/5064) is set-returning — needs the
+        // FuncCallContext SRF glue; left in the baseline.
     ]);
 }
