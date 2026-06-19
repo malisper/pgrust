@@ -60,11 +60,10 @@ pub(crate) fn change_relids_in_node(root: &mut PlannerInfo, id: NodeId, ctx: Rep
     // lifetime-free, so `Node::Expr` is valid for any `'mcx`.
     let mut node = Node::Expr(root.node(id).clone());
     ChangeVarNodes(&mut node, ctx.rt_index, ctx.new_index, 0);
-    let walked = match node {
-        Node::Expr(e) => e,
-        // ChangeVarNodes never changes the top-level node kind for an Expr input.
-        _ => unreachable!("ChangeVarNodes returned a non-Expr for an Expr input"),
-    };
+    // ChangeVarNodes never changes the top-level node kind for an Expr input.
+    let walked = node
+        .into_expr()
+        .unwrap_or_else(|| unreachable!("ChangeVarNodes returned a non-Expr for an Expr input"));
     *root.node_mut(id) = walked;
 }
 
