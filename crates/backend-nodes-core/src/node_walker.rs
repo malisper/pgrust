@@ -1682,13 +1682,15 @@ mod tests {
     #[test]
     fn mut_walker_writes_child_back() {
         // Mutate each Var child's varno via the in-place Node walker.
+        let ctx = mcx::MemoryContext::new("t");
+        let mcx = ctx.mcx();
         let mut node = Node::Expr(op_with_two_vars());
         let aborted = expression_tree_walker_mut(&mut node, &mut |c: &mut Node| {
             if let Some(v) = c.as_var_mut() {
                 v.varno = 42;
             }
             false
-        });
+        }, mcx);
         assert!(!aborted);
         if let Some(o) = node.as_opexpr() {
             for a in &o.args {
