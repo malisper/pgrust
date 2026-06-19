@@ -328,6 +328,40 @@ fn text_payload_from_bytes<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<PgVec
     }
 }
 
+/// C: `VARDATA_ANY(image) .. VARSIZE_ANY_EXHDR(image)` — borrow the payload of an
+/// inline varlena image, handling BOTH the 4-byte-header (`VARATT_IS_4B_U`) and
+/// the short 1-byte-header (`VARATT_IS_1B`) forms. This is the borrowing twin of
+/// [`text_payload_from_bytes`] for callers (the fmgr by-ref-arg adapters) that
+/// only ever receive already-detoasted INLINE images and must hand the cores a
+/// zero-copy `&[u8]` payload.
+///
+/// A short-header value (how the heap stores small varlenas, and what
+/// `heap_deform_tuple` hands back) must skip ONE header byte, not four —
+/// stripping a fixed `VARHDRSZ` off a short image drops three payload bytes from
+/// the front. External (`VARATT_IS_1B_E`) and 4-byte-compressed images cannot be
+/// sliced in place (they need a detoast that allocates); callers reaching this
+/// with such an image are a wiring bug (the boundary detoasts before this), so
+/// we fall back to the 4-byte-header strip to preserve the prior behaviour for
+/// the framed-`name` buffer rather than over-read.
+pub fn vardata_any_slice(image: &[u8]) -> &[u8] {
+    if image.is_empty() {
+        return &[];
+    }
+    let header = image[0];
+    if header != 0x01 && header & 0x01 == 0x01 {
+        // VARATT_IS_1B (and not 1B-E external): short 1-byte-header inline datum.
+        let total = ((header >> 1) & 0x7F) as usize;
+        let total = total.min(image.len());
+        &image[1..total.max(1)]
+    } else if image.len() >= VARHDRSZ {
+        // VARATT_IS_4B_U (uncompressed) or the framed-`name` buffer: skip the
+        // 4-byte header. (Compressed/external images never reach this adapter.)
+        &image[VARHDRSZ..]
+    } else {
+        &[]
+    }
+}
+
 /// C: `text_to_cstring` post-detoast tail — copy the detoasted payload out as a
 /// NUL-free `PgString` in `mcx`. The seam's contract is a NUL-free `PgString`,
 /// so the keystone's trailing C NUL is dropped.

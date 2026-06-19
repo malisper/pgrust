@@ -897,8 +897,18 @@ fn index_update_stats(rel: &Relation<'_>, hasindex: bool, reltuples: f64) -> PgR
 /// Re-open `rel` for the `RelationGetNumberOfBlocks` smgr probe. The C reads the
 /// block count off the same passed `rel`; the owned model re-acquires the
 /// cache-carrying `Relation` (idempotent relcache lookup, lock already held).
+///
+/// `index_update_stats` runs for both heap relations AND indexes (C's
+/// `RelationGetNumberOfBlocks(rel)` is relkind-agnostic), so the re-open must go
+/// through `relation_open` — NOT `table_open`, which rejects an index relkind
+/// with "cannot open relation ... not supported for indexes". The toast-index
+/// `index_build` -> `index_update_stats` path is exactly such an index caller.
 fn reopen_self<'mcx>(mcx: Mcx<'mcx>, rel: &RelationData<'_>) -> PgResult<Relation<'mcx>> {
-    table_open(mcx, rel.rd_id, types_storage::lock::NoLock)
+    backend_access_common_relation_seams::relation_open::call(
+        mcx,
+        rel.rd_id,
+        types_storage::lock::NoLock,
+    )
 }
 
 /// The fixed byte offset, within a heap tuple's user-data area, of the 1-based

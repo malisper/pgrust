@@ -80,14 +80,22 @@ pub(crate) fn num_messages_in_subgroup_slice<'a, 'mcx>(
     &arrays[subgroup].msgs[group.firstmsg[subgroup]..group.nextmsg[subgroup]]
 }
 
-/// `AddInvalidationMessage` — add a message to the end of a (sub)group's
-/// subgroup, appending to the dense array.
+/// `AddInvalidationMessage` — add a message at the (sub)group's `nextmsg`
+/// cursor in the dense array.
 ///
-/// The group must be the last active one, since we assume we can add to the
-/// end of the relevant InvalMessageArray. With the [`PgVec`]-backed dense array
-/// the C `maxmsgs`/`repalloc` growth bookkeeping is the `Vec`'s own capacity
-/// management, and the C `Assert(nextindex == 0)` first-alloc invariant is
-/// implied by the `nextindex == msgs.len()` push.
+/// C writes `ima->msgs[nextindex] = *msg` and grows the array only when
+/// `nextindex >= maxmsgs` — i.e. it WRITES AT THE CURSOR, which is not
+/// necessarily the physical end of the backing storage. A
+/// `PrepareInplaceInvalidationState` stashes its messages *past* the
+/// transactional end (`SetGroupToFollow`), physically growing the dense array,
+/// and `ForgetInplace_Inval` rolls the transactional cursor back to reclaim
+/// those slots; the dense array still physically holds the stale inplace
+/// entries. The next transactional `AddInvalidationMessage` must therefore
+/// OVERWRITE the slot at `nextindex` when it falls within the array (reclaiming
+/// a stashed-inplace slot), exactly like C's indexed store, and only `push`
+/// when the cursor is at the physical end. A blind `push` (assuming
+/// `nextindex == len`) is wrong whenever inplace messages were stashed and
+/// forgotten between transactional adds.
 pub(crate) fn add_invalidation_message<'mcx>(
     _mcx: Mcx<'mcx>,
     arrays: &mut [InvalMessageArray<'mcx>; 2],
@@ -97,9 +105,14 @@ pub(crate) fn add_invalidation_message<'mcx>(
 ) -> PgResult<()> {
     let ima = &mut arrays[subgroup];
     let nextindex = group.nextmsg[subgroup];
-    debug_assert_eq!(nextindex, ima.msgs.len());
-    // Okay, add message to current group
-    ima.msgs.push(msg);
+    debug_assert!(nextindex <= ima.msgs.len());
+    // C: `ima->msgs[nextindex] = *msg` (grow only when nextindex >= maxmsgs).
+    // Overwrite a reclaimed slot in place; push when at the physical end.
+    if nextindex < ima.msgs.len() {
+        ima.msgs[nextindex] = msg;
+    } else {
+        ima.msgs.push(msg);
+    }
     group.nextmsg[subgroup] += 1;
     Ok(())
 }

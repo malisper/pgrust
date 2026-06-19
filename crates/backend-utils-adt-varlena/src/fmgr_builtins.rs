@@ -37,20 +37,21 @@ const VARHDRSZ: usize = 4;
 
 /// A `text`/`bytea`/`name` arg's `VARDATA_ANY` payload bytes. Under the
 /// header-ful-everywhere convention the by-ref lane carries the full varlena
-/// image (4-byte length word + payload); this reads the payload by skipping the
-/// header. For `name` (typlen 64, framed as a varlena-headered NAMEDATALEN
-/// buffer) this yields the 64-byte buffer, which the cores NUL-trim.
+/// image; this reads the payload by skipping the header. The image may be EITHER
+/// a 4-byte-header varlena (a freshly built Const / detoasted value) OR a short
+/// 1-byte-header varlena (how the heap stores small values, what
+/// `heap_deform_tuple` hands back); `VARDATA_ANY` skips the correct header size
+/// for each. A naive fixed `VARHDRSZ` strip over a short image silently drops
+/// three payload bytes from the front. For `name` (typlen 64, framed as a
+/// varlena-headered NAMEDATALEN buffer) this yields the 64-byte buffer, which the
+/// cores NUL-trim.
 #[inline]
 fn arg_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
     let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("varlena cmp fn: by-ref arg missing from by-ref lane");
-    if image.len() >= VARHDRSZ {
-        &image[VARHDRSZ..]
-    } else {
-        &[]
-    }
+    crate::vardata_any_slice(image)
 }
 
 /// `PG_GET_COLLATION()`: the collation the operator was invoked under.
