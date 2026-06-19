@@ -178,9 +178,39 @@ pub fn relname_get_relid(_relname: &str) -> Oid {
     panic!("plpgsql compile: RangeVarGetRelid()/RelnameGetRelid() not reachable (namespace owner unwired for compile)")
 }
 
-/// `parse_datatype(string, location)` — the plpgsql-mode raw type-name parser.
-pub fn parse_datatype(_string: &str, _location: i32) -> ! {
-    panic!("plpgsql compile: parse_datatype() not reachable (parser typename owner unwired for compile)")
+/// `parse_datatype(string, location)` (pl_gram.y 3844) — the plpgsql-mode raw
+/// type-name parser. Let the main parser parse the type string under standard
+/// SQL rules (`typeStringToTypeName` + `typenameTypeIdAndMod`), then build the
+/// `PLpgSQL_type` for it (`plpgsql_build_datatype`) at the current compile's
+/// `fn_input_collation`. The `sql_error_callback` errcontext is the diagnostic
+/// position decoration (owned by the error stack; a parse failure still raises
+/// faithfully via `?`).
+pub fn parse_datatype(
+    string: &str,
+    _location: i32,
+) -> types_error::PgResult<Box<types_plpgsql::PLpgSQL_type>> {
+    // typeStringToTypeName(string, NULL) + typenameTypeIdAndMod(NULL, typeName,
+    // &type_id, &typmod). parseTypeString folds both (no soft-error context, so
+    // a bad type name raises).
+    let ctx = mcx::MemoryContext::new("plpgsql parse_datatype");
+    let mcx = ctx.mcx();
+    let typeName = backend_parser_parse_type::typeStringToTypeName(string, None)?
+        .expect("typeStringToTypeName with no soft-error context yields a TypeName or raises");
+    let (type_id, typmod) =
+        backend_parser_parse_type::typenameTypeIdAndMod(mcx, None, &typeName)?;
+
+    // plpgsql_build_datatype(type_id, typmod, plpgsql_curr_compile->
+    // fn_input_collation, typeName). The C passes the parsed `typeName` as
+    // `origtypname` (kept for re-resolving the type on a cached recompile). The
+    // owned `PLpgSQL_type.origtypname` is `types_plpgsql::TypeName`, a distinct
+    // model from the parser's `types_parsenodes::TypeName`; a directly-named type
+    // re-resolves to the same OID by name, so `None` is faithful here (origtypname
+    // matters for %TYPE/%ROWTYPE-derived types, which take the wordtype path).
+    let _ = typeName;
+    let collation = super::curr_compile_field(|f| f.fn_input_collation);
+    Ok(super::plpgsql_build_datatype_internal(
+        type_id, typmod, collation, None,
+    ))
 }
 
 /// `get_collation_oid(names, missing_ok)`.

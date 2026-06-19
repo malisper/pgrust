@@ -14073,6 +14073,7 @@ name = "backend-pl-plpgsql-comp"
 version = "0.0.0"
 dependencies = [
  "backend-parser-driver-seams",
+ "backend-parser-parse-type",
  "backend-pl-plpgsql-comp-seams",
  "backend-pl-plpgsql-funcs",
  "backend-pl-plpgsql-gram",
@@ -14174,8 +14175,10 @@ dependencies = [
  "backend-utils-adt-varlena",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
  "backend-utils-fmgr-core",
  "backend-utils-fmgr-dfmgr-seams",
+ "backend-utils-fmgr-fmgr-seams",
  "backend-utils-misc-guc-tables",
  "mcx",
  "types-catalog",

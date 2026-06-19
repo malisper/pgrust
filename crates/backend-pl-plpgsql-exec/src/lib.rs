@@ -64,6 +64,10 @@ const BOOLOID: Oid = 16;
 #[allow(dead_code)]
 const RECORDOID: Oid = 2249;
 
+/// `ERROR` elog level (`elog.h` `ERROR` == 21) — the `elog_level` threshold at
+/// which `exec_stmt_raise` defaults the SQLSTATE to `ERRCODE_RAISE_EXCEPTION`.
+const ERROR_LEVEL: int32 = 21;
+
 // ===========================================================================
 // Return-code propagation table (LOOP_RC_PROCESSING)
 // ===========================================================================
@@ -457,9 +461,9 @@ fn exec_stmts(estate: &mut PLpgSQL_execstate, stmts: &[PLpgSQL_stmt]) -> PLpgSQL
             PLpgSQL_stmt::Return(s) => exec_stmt_return(estate, s),
             PLpgSQL_stmt::ReturnNext(_) => exec_stmt_return_next(estate),
             PLpgSQL_stmt::ReturnQuery(_) => exec_stmt_return_query(estate),
-            PLpgSQL_stmt::Raise(_) => exec_stmt_raise(estate),
+            PLpgSQL_stmt::Raise(s) => exec_stmt_raise(estate, s),
             PLpgSQL_stmt::Assert(_) => exec_stmt_assert(estate),
-            PLpgSQL_stmt::Execsql(_) => exec_stmt_execsql(estate),
+            PLpgSQL_stmt::Execsql(s) => exec_stmt_execsql(estate, s),
             PLpgSQL_stmt::Dynexecute(_) => exec_stmt_dynexecute(estate),
             PLpgSQL_stmt::Dynfors(_) => exec_stmt_dynfors(estate),
             PLpgSQL_stmt::Open(_) => exec_stmt_open(estate),
@@ -943,6 +947,180 @@ fn exec_eval_expr_impl(
 }
 
 // ===========================================================================
+// exec_assign_expr / exec_assign_value / exec_cast_value — the scalar
+// assignment path (pl_exec.c). The eval + cast cross the SPI/fmgr substrate
+// through the installed seams; the VAR store is real in-crate.
+// ===========================================================================
+
+/// `exec_assign_expr(estate, target, expr)` (pl_exec.c 5003) — evaluate `expr`
+/// and assign into the datum `target_dno`.
+fn exec_assign_expr_impl(
+    estate: &mut PLpgSQL_execstate,
+    target_dno: int32,
+    expr: &types_plpgsql::PLpgSQL_expr,
+) {
+    // exec_prepare_plan is folded into exec_eval_expr's slow path here (the
+    // owned model re-prepares per call; the plan-caching optimization is the
+    // simple-expr fast path, not yet wired). exec_eval_expr returns the value +
+    // its runtime (type, typmod).
+    let (value, isnull, valtype, valtypmod) = exec_eval_expr_impl(estate, expr);
+    exec_assign_value_impl(estate, target_dno, value, isnull, valtype, valtypmod);
+    exec_eval_cleanup(estate);
+}
+
+/// `exec_assign_value(estate, target, value, isNull, valtype, valtypmod)`
+/// (pl_exec.c 5061) — the generic datum-assignment dispatch. The VAR/PROMISE arm
+/// (the scalar variable store) is real; ROW/REC/RECFIELD targets are the
+/// composite/record substrate (loud, out of scope).
+fn exec_assign_value_impl(
+    estate: &mut PLpgSQL_execstate,
+    target_dno: int32,
+    value: Datum,
+    isnull: bool,
+    valtype: Oid,
+    valtypmod: int32,
+) {
+    match datum_dtype(&estate.datums[target_dno as usize]) {
+        PLpgSQL_datum_type::PLPGSQL_DTYPE_VAR | PLpgSQL_datum_type::PLPGSQL_DTYPE_PROMISE => {
+            let mut var = take_var(estate, target_dno);
+
+            let (reqtype, reqtypmod, notnull, typbyval, refname) = {
+                let t = var
+                    .datatype
+                    .as_ref()
+                    .expect("a scalar VAR has a datatype");
+                (t.typoid, t.atttypmod, var.notnull, t.typbyval, var.refname.clone())
+            };
+
+            // exec_cast_value(value, &isNull, valtype, valtypmod, var->typoid,
+            // var->atttypmod).
+            let (newvalue, isnull) =
+                exec_cast_value_impl(estate, value, isnull, valtype, valtypmod, reqtype, reqtypmod);
+
+            if isnull && notnull {
+                put_var(estate, target_dno, var);
+                std::panic::panic_any(
+                    types_error::PgError::error(format!(
+                        "null value cannot be assigned to variable \"{refname}\" declared NOT NULL"
+                    ))
+                    .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED),
+                );
+            }
+
+            // The by-reference copy-into-procedure-context + expand_array /
+            // datumTransfer leg (pl_exec.c 5106) is the by-ref-Datum / expanded-
+            // object value substrate. For a by-value type (the scalar int/bool/
+            // numeric-by-value path) no copy is needed; a by-ref non-null value
+            // would need that transfer (loud).
+            if !typbyval && !isnull {
+                put_var(estate, target_dno, var);
+                seam::arg_store_expanded_object(newvalue);
+                return;
+            }
+
+            // assign_simple_var(estate, var, newvalue, isNull, freeable). For a
+            // by-value type freeable is false (pl_exec.c: !typbyval && !isNull).
+            assign_simple_var(estate, &mut var, newvalue, isnull, false);
+            put_var(estate, target_dno, var);
+        }
+        PLpgSQL_datum_type::PLPGSQL_DTYPE_ROW | PLpgSQL_datum_type::PLPGSQL_DTYPE_REC => {
+            // The ROW/REC assignment is the composite-deconstruction substrate
+            // (exec_move_row / exec_move_row_from_datum), out of scope.
+            if isnull {
+                seam::exec_move_row_null(estate, target_dno);
+            } else {
+                if !seam::type_is_rowtype(valtype) {
+                    seam::ereport_return_noncomposite();
+                }
+                seam::exec_move_row_from_datum(estate, target_dno, value);
+            }
+        }
+        PLpgSQL_datum_type::PLPGSQL_DTYPE_RECFIELD => {
+            // RECFIELD assignment (expanded-record field set) — composite
+            // substrate, out of scope.
+            panic!(
+                "seam not wired: exec_assign_value RECFIELD (pl_exec.c) — \
+                 expanded_record_set_field (expanded-record value substrate)"
+            );
+        }
+    }
+}
+
+/// `exec_cast_value(estate, value, &isnull, valtype, valtypmod, reqtype,
+/// reqtypmod)` (pl_exec.c 7874) — coerce `value` to the required type. The
+/// no-op relabel case (same type, unconstrained typmod) returns the input
+/// unchanged; the real coercion routes through the installed cast seam.
+fn exec_cast_value_impl(
+    estate: &mut PLpgSQL_execstate,
+    value: Datum,
+    isnull: bool,
+    valtype: Oid,
+    valtypmod: int32,
+    reqtype: Oid,
+    reqtypmod: int32,
+) -> (Datum, bool) {
+    let _ = estate;
+    // pl_exec.c 7882: convert only if the type differs or a constrained typmod
+    // differs. Otherwise the value passes through unchanged (the no-op relabel).
+    if valtype != reqtype || (valtypmod != reqtypmod && reqtypmod != -1) {
+        let (v, n) = match exec_seams::exec_cast_value_via_spi::call(
+            value.as_usize(),
+            isnull,
+            valtype,
+            valtypmod,
+            reqtype,
+            reqtypmod,
+        ) {
+            Ok(r) => r,
+            Err(e) => std::panic::panic_any(e),
+        };
+        return (Datum::from_usize(v), n);
+    }
+    (value, isnull)
+}
+
+/// `exec_run_select(estate, expr, maxtuples, portalP)` (pl_exec.c 5753) — run a
+/// SELECT, stashing the result. Used by PERFORM (discard result, set FOUND from
+/// the rowcount). The portal (FOR-loop cursor) leg is out of scope.
+fn exec_run_select_impl(
+    estate: &mut PLpgSQL_execstate,
+    expr: &types_plpgsql::PLpgSQL_expr,
+    maxtuples: i64,
+    set_portal: bool,
+) -> int32 {
+    if set_portal {
+        panic!(
+            "seam not wired: exec_run_select portal leg (pl_exec.c) — \
+             SPI_cursor_open_with_paramlist (SPI cursor surface, FOR-loop)"
+        );
+    }
+
+    let input_collation = INVALID_OID;
+    let parse_state = build_plpgsql_parse_state(estate, expr, input_collation);
+    let snapshot = build_datum_snapshot(estate);
+
+    // SPI_execute_plan_with_paramlist(plan, paramLI, readonly, maxtuples), with
+    // no INTO (run the SELECT to the requested row cap). exec_run_select rejects
+    // a non-SELECT; the execsql bridge classifies the command and a PERFORM is a
+    // plain query (we don't read the rows here, only the rowcount).
+    let result = match exec_seams::exec_execsql_via_spi::call(
+        expr.query.clone(),
+        expr.parseMode,
+        parse_state,
+        snapshot,
+        estate.readonly_func,
+        false, // into
+        maxtuples,
+    ) {
+        Ok(r) => r,
+        Err(e) => std::panic::panic_any(e),
+    };
+
+    estate.eval_processed = result.processed;
+    result.code
+}
+
+// ===========================================================================
 // Value-substrate statement arms — dispatch targets with LOUD bodies. Each is a
 // whole-statement SQL/value leg (SPI / executor / fmgr), not control flow.
 // ===========================================================================
@@ -990,11 +1168,235 @@ fn exec_stmt_return_query(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
     );
 }
 
-fn exec_stmt_raise(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
-    panic!(
-        "seam not wired: exec_stmt_raise (pl_exec.c) — exec_eval_expr for message/option \
-         exprs + ereport with assembled errcode/detail/hint (value substrate + elog.c)"
+/// `exec_stmt_raise(estate, stmt)` (pl_exec.c 3725) — build a message and throw
+/// it with `ereport(stmt->elog_level, ...)`. Handles the `%` message format with
+/// parameter substitution, the USING options (ERRCODE / MESSAGE / DETAIL / HINT
+/// / COLUMN / CONSTRAINT / DATATYPE / TABLE / SCHEMA), the condition-name →
+/// SQLSTATE mapping, and the re-RAISE (no-parameters) form.
+fn exec_stmt_raise(
+    estate: &mut PLpgSQL_execstate,
+    stmt: &types_plpgsql::PLpgSQL_stmt_raise,
+) -> PLpgSQL_rc {
+    use types_plpgsql::PLpgSQL_raise_option_type as Opt;
+
+    let mut err_code: int32 = 0;
+    let mut condname: Option<String> = None;
+    let mut err_message: Option<String> = None;
+    let mut err_detail: Option<String> = None;
+    let mut err_hint: Option<String> = None;
+    let mut err_column: Option<String> = None;
+    let mut err_constraint: Option<String> = None;
+    let mut err_datatype: Option<String> = None;
+    let mut err_table: Option<String> = None;
+    let mut err_schema: Option<String> = None;
+
+    // RAISE with no parameters: re-throw the current exception.
+    if stmt.condname.is_none() && stmt.message.is_none() && stmt.options.is_empty() {
+        if estate.cur_error.is_some() {
+            // ReThrowError(estate->cur_error). The exception substrate does not
+            // yet populate cur_error (it is an opaque handle); when it lands the
+            // re-throw routes here. Until then this branch is structurally
+            // unreached (cur_error is always None).
+            panic!(
+                "seam not wired: RAISE re-throw (pl_exec.c ReThrowError) — \
+                 saved ErrorData re-raise (exception-substrate ErrorData codec)"
+            );
+        }
+        // oops, we're not inside a handler.
+        std::panic::panic_any(
+            types_error::PgError::error(
+                "RAISE without parameters cannot be used outside an exception handler"
+                    .to_string(),
+            )
+            .with_sqlstate(types_error::ERRCODE_STACKED_DIAGNOSTICS_ACCESSED_WITHOUT_ACTIVE_HANDLER),
+        );
+    }
+
+    if let Some(cn) = stmt.condname.as_deref() {
+        err_code = recognize_err_condition(cn, true);
+        condname = Some(cn.to_string());
+    }
+
+    if let Some(message) = stmt.message.as_deref() {
+        // Build the message, substituting `%` with the next parameter's external
+        // representation; `%%` collapses to a single `%`.
+        let mut ds = String::new();
+        let mut params = stmt.params.iter();
+        let bytes = message.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'%' {
+                    ds.push('%');
+                    i += 2;
+                    continue;
+                }
+                // should have been checked at compile time.
+                let param = params
+                    .next()
+                    .unwrap_or_else(|| panic!("unexpected RAISE parameter list length"));
+                let (paramvalue, paramisnull, paramtypeid, _paramtypmod) =
+                    seam::exec_eval_expr(estate, param);
+                let extval = if paramisnull {
+                    "<NULL>".to_string()
+                } else {
+                    convert_value_to_string(paramvalue, paramtypeid)
+                };
+                ds.push_str(&extval);
+                exec_eval_cleanup(estate);
+                i += 1;
+            } else {
+                // Append this UTF-8 character (C appends the raw byte; the message
+                // is valid UTF-8, so we push the whole char).
+                let ch_len = utf8_char_len(bytes[i]);
+                if let Ok(s) = std::str::from_utf8(&bytes[i..i + ch_len]) {
+                    ds.push_str(s);
+                }
+                i += ch_len;
+            }
+        }
+        // should have been checked at compile time.
+        if params.next().is_some() {
+            panic!("unexpected RAISE parameter list length");
+        }
+        err_message = Some(ds);
+    }
+
+    for opt in &stmt.options {
+        let expr = opt.expr.as_deref().expect("RAISE option carries an expr");
+        let (optionvalue, optionisnull, optiontypeid, _optiontypmod) =
+            seam::exec_eval_expr(estate, expr);
+        if optionisnull {
+            std::panic::panic_any(
+                types_error::PgError::error("RAISE statement option cannot be null".to_string())
+                    .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED),
+            );
+        }
+        let extval = convert_value_to_string(optionvalue, optiontypeid);
+
+        match opt.opt_type {
+            Opt::PLPGSQL_RAISEOPTION_ERRCODE => {
+                if err_code != 0 {
+                    raise_option_already_specified("ERRCODE");
+                }
+                err_code = recognize_err_condition(&extval, true);
+                condname = Some(extval);
+            }
+            Opt::PLPGSQL_RAISEOPTION_MESSAGE => set_raise_option_text(&mut err_message, extval, "MESSAGE"),
+            Opt::PLPGSQL_RAISEOPTION_DETAIL => set_raise_option_text(&mut err_detail, extval, "DETAIL"),
+            Opt::PLPGSQL_RAISEOPTION_HINT => set_raise_option_text(&mut err_hint, extval, "HINT"),
+            Opt::PLPGSQL_RAISEOPTION_COLUMN => set_raise_option_text(&mut err_column, extval, "COLUMN"),
+            Opt::PLPGSQL_RAISEOPTION_CONSTRAINT => {
+                set_raise_option_text(&mut err_constraint, extval, "CONSTRAINT")
+            }
+            Opt::PLPGSQL_RAISEOPTION_DATATYPE => {
+                set_raise_option_text(&mut err_datatype, extval, "DATATYPE")
+            }
+            Opt::PLPGSQL_RAISEOPTION_TABLE => set_raise_option_text(&mut err_table, extval, "TABLE"),
+            Opt::PLPGSQL_RAISEOPTION_SCHEMA => set_raise_option_text(&mut err_schema, extval, "SCHEMA"),
+        }
+
+        exec_eval_cleanup(estate);
+    }
+
+    // Default code if nothing specified.
+    if err_code == 0 && stmt.elog_level >= ERROR_LEVEL {
+        err_code = types_error::ERRCODE_RAISE_EXCEPTION.0;
+    }
+
+    // Default error message if nothing specified.
+    if err_message.is_none() {
+        if let Some(cn) = condname.take() {
+            err_message = Some(cn);
+        } else {
+            err_message = Some(unpack_sql_state(err_code));
+        }
+    }
+
+    // Throw the error (may or may not come back).
+    let report = exec_seams::RaiseEreport {
+        elog_level: stmt.elog_level,
+        err_code,
+        message: err_message.unwrap_or_default(),
+        detail: err_detail,
+        hint: err_hint,
+        column: err_column,
+        constraint: err_constraint,
+        datatype: err_datatype,
+        table: err_table,
+        schema: err_schema,
+    };
+    if let Err(e) = exec_seams::raise_ereport::call(report) {
+        // For an ERROR-level RAISE the report cycle raises; propagate it.
+        std::panic::panic_any(e);
+    }
+
+    PLpgSQL_rc::PLPGSQL_RC_OK
+}
+
+/// `SET_RAISE_OPTION_TEXT(opt, name)` (pl_exec.c macro): error if `opt` already
+/// set, else store `extval`.
+fn set_raise_option_text(opt: &mut Option<String>, extval: String, name: &str) {
+    if opt.is_some() {
+        raise_option_already_specified(name);
+    }
+    *opt = Some(extval);
+}
+
+/// `ereport(ERROR, ERRCODE_SYNTAX_ERROR, "RAISE option already specified: %s")`.
+fn raise_option_already_specified(name: &str) -> ! {
+    std::panic::panic_any(
+        types_error::PgError::error(format!("RAISE option already specified: {name}"))
+            .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR),
     );
+}
+
+/// The UTF-8 length of the character whose first byte is `b` (1..=4).
+fn utf8_char_len(b: u8) -> usize {
+    if b < 0x80 {
+        1
+    } else if b >> 5 == 0b110 {
+        2
+    } else if b >> 4 == 0b1110 {
+        3
+    } else if b >> 3 == 0b11110 {
+        4
+    } else {
+        1
+    }
+}
+
+/// `plpgsql_recognize_err_condition(condname, allow_sqlstate)` (pl_comp.c) via
+/// the installed seam — panics with the unrecognized-condition ereport on Err.
+fn recognize_err_condition(condname: &str, allow_sqlstate: bool) -> int32 {
+    match exec_seams::recognize_err_condition::call(condname.to_string(), allow_sqlstate) {
+        Ok(c) => c,
+        Err(e) => std::panic::panic_any(e),
+    }
+}
+
+/// `convert_value_to_string(estate, value, valtype)` (pl_exec.c) via the
+/// installed seam (getTypeOutputInfo + OidOutputFunctionCall).
+fn convert_value_to_string(value: Datum, valtype: Oid) -> String {
+    match exec_seams::convert_value_to_string::call(value.as_usize(), valtype) {
+        Ok(s) => s,
+        Err(e) => std::panic::panic_any(e),
+    }
+}
+
+/// `unpack_sql_state(sql_state)` (elog.c): the inverse of `MAKE_SQLSTATE` — the
+/// 5-character text of a packed SQLSTATE. Pure bit ops.
+fn unpack_sql_state(sql_state: int32) -> String {
+    let mut out = String::with_capacity(5);
+    let mut v = sql_state;
+    for _ in 0..5 {
+        let code = (v & 0x3F) as u8;
+        // PGUNSIXBIT: '0'..'9' then 'A'..; C: val + '0' but with the 6-bit pack
+        // the inverse is `(val & 0x3F) + '0'` mapping through the same table.
+        out.push((code + b'0') as char);
+        v >>= 6;
+    }
+    out
 }
 
 fn exec_stmt_assert(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
@@ -1004,11 +1406,183 @@ fn exec_stmt_assert(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
     );
 }
 
-fn exec_stmt_execsql(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
-    panic!(
-        "seam not wired: exec_stmt_execsql (pl_exec.c) — exec_prepare_plan / \
-         setup_param_list / SPI_execute_plan_extended / exec_move_row INTO (SPI plan surface)"
+/// `exec_stmt_execsql(estate, stmt)` (pl_exec.c 4208) — execute an embedded SQL
+/// statement (INSERT / UPDATE / DELETE / plain SELECT), optionally with INTO. The
+/// statement-type classification, FOUND setting, INTO no-rows / too-many-rows /
+/// STRICT checks, and the "no destination for result data" guard are ported 1:1;
+/// the SQL run crosses the SPI substrate through the installed seam.
+fn exec_stmt_execsql(
+    estate: &mut PLpgSQL_execstate,
+    stmt: &types_plpgsql::PLpgSQL_stmt_execsql,
+) -> PLpgSQL_rc {
+    let expr = stmt.sqlstmt.as_deref().expect("EXECSQL carries a sqlstmt");
+
+    // plpgsql_extra_errors / plpgsql_extra_warnings & PLPGSQL_XCHECK_TOOMANYROWS:
+    // the optional too-many-rows check. The extra-check GUCs default off and are
+    // owned in the handler layer (not reachable here); the default-disabled state
+    // is level 0 (no extra check).
+    let too_many_rows_level: int32 = 0;
+
+    // setup_param_list + SPI_execute_plan_with_paramlist. The mod_stmt detection
+    // (INSERT/UPDATE/DELETE/MERGE) that C computes from SPI_plan_get_plan_sources
+    // is derived here from the SPI result code the bridge returns (the planned
+    // command type), which is equivalent (and avoids caching plan sources we
+    // don't keep). INTO needs at most one row (two when STRICT/mod/too-many, to
+    // detect the >1 case); without INTO run to completion (tcount = 0).
+    let tcount: i64 = if stmt.into {
+        if stmt.strict || too_many_rows_level != 0 {
+            2
+        } else {
+            1
+        }
+    } else {
+        0
+    };
+
+    let input_collation = INVALID_OID;
+    let parse_state = build_plpgsql_parse_state(estate, expr, input_collation);
+    let snapshot = build_datum_snapshot(estate);
+
+    let result = match exec_seams::exec_execsql_via_spi::call(
+        expr.query.clone(),
+        expr.parseMode,
+        parse_state,
+        snapshot,
+        estate.readonly_func,
+        stmt.into,
+        tcount,
+    ) {
+        Ok(r) => r,
+        Err(e) => std::panic::panic_any(e),
+    };
+
+    let code = result.code;
+    let processed = result.processed;
+
+    // Check for error, and set FOUND if appropriate (for historical reasons we
+    // set FOUND only for certain query types).
+    let mod_stmt = matches!(
+        code,
+        exec_seams::SPI_OK_INSERT
+            | exec_seams::SPI_OK_UPDATE
+            | exec_seams::SPI_OK_DELETE
+            | exec_seams::SPI_OK_INSERT_RETURNING
+            | exec_seams::SPI_OK_UPDATE_RETURNING
+            | exec_seams::SPI_OK_DELETE_RETURNING
     );
+    match code {
+        exec_seams::SPI_OK_SELECT => exec_set_found(estate, processed != 0),
+        exec_seams::SPI_OK_INSERT
+        | exec_seams::SPI_OK_UPDATE
+        | exec_seams::SPI_OK_DELETE
+        | exec_seams::SPI_OK_INSERT_RETURNING
+        | exec_seams::SPI_OK_UPDATE_RETURNING
+        | exec_seams::SPI_OK_DELETE_RETURNING => exec_set_found(estate, processed != 0),
+        exec_seams::SPI_OK_SELINTO | exec_seams::SPI_OK_UTILITY => {}
+        exec_seams::SPI_OK_REWRITTEN => exec_set_found(estate, false),
+        exec_seams::SPI_ERROR_COPY => std::panic::panic_any(
+            types_error::PgError::error("cannot COPY to/from client in PL/pgSQL".to_string())
+                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ),
+        _ => std::panic::panic_any(types_error::PgError::error(format!(
+            "SPI_execute_plan_with_paramlist failed executing query \"{}\": code {code}",
+            expr.query
+        ))),
+    }
+
+    // All variants should save result info for GET DIAGNOSTICS.
+    estate.eval_processed = processed;
+
+    // Process INTO if present.
+    if stmt.into {
+        if !result.returned_tuptable {
+            std::panic::panic_any(
+                types_error::PgError::error(
+                    "INTO used with a command that cannot return data".to_string(),
+                )
+                .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR),
+            );
+        }
+
+        let target = stmt.target.as_deref().expect("INTO carries a target");
+        let n = processed;
+
+        if n == 0 {
+            if stmt.strict {
+                std::panic::panic_any(
+                    types_error::PgError::error("query returned no rows".to_string())
+                        .with_sqlstate(types_error::ERRCODE_NO_DATA_FOUND),
+                );
+            }
+            // Set the target to NULL(s).
+            exec_move_row_into_target(estate, target, &[]);
+        } else {
+            if n > 1 && (stmt.strict || mod_stmt || too_many_rows_level != 0) {
+                std::panic::panic_any(
+                    types_error::PgError::error("query returned more than one row".to_string())
+                        .with_detail("Make sure the query returns a single row, or use LIMIT 1.".to_string())
+                        .with_sqlstate(types_error::ERRCODE_TOO_MANY_ROWS),
+                );
+            }
+            // Put the first result row into the target.
+            exec_move_row_into_target(estate, target, &result.first_row);
+        }
+
+        exec_eval_cleanup(estate);
+    } else {
+        // If the statement returned a tuple table, complain (no destination).
+        if result.returned_tuptable && code == exec_seams::SPI_OK_SELECT {
+            std::panic::panic_any(
+                types_error::PgError::error("query has no destination for result data".to_string())
+                    .with_detail(
+                        "If you want to discard the results of a SELECT, use PERFORM instead."
+                            .to_string(),
+                    )
+                    .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR),
+            );
+        }
+    }
+
+    PLpgSQL_rc::PLPGSQL_RC_OK
+}
+
+/// `exec_move_row(estate, target, tuple, tupdesc)` (pl_exec.c) specialized to
+/// the execsql SELECT-INTO store. A single-column result into a scalar VAR/
+/// PROMISE target is real (the common `SELECT col INTO var` case); a multi-field
+/// ROW / REC target is the composite-deconstruction substrate (loud, out of
+/// scope). `columns` empty == the NULL-row store.
+fn exec_move_row_into_target(
+    estate: &mut PLpgSQL_execstate,
+    target: &types_plpgsql::PLpgSQL_variable,
+    columns: &[exec_seams::ExecsqlColumn],
+) {
+    let dno = target.dno;
+    match datum_dtype(&estate.datums[dno as usize]) {
+        PLpgSQL_datum_type::PLPGSQL_DTYPE_VAR | PLpgSQL_datum_type::PLPGSQL_DTYPE_PROMISE => {
+            // A scalar INTO target takes the first column (C's exec_move_row maps
+            // the row's first attribute to the single variable). No row => NULL.
+            match columns.first() {
+                Some(c) => exec_assign_value_impl(
+                    estate,
+                    dno,
+                    Datum::from_usize(c.value),
+                    c.isnull,
+                    c.typeid,
+                    c.typmod,
+                ),
+                None => exec_assign_value_impl(estate, dno, Datum::null(), true, INVALID_OID, -1),
+            }
+        }
+        PLpgSQL_datum_type::PLPGSQL_DTYPE_ROW
+        | PLpgSQL_datum_type::PLPGSQL_DTYPE_REC
+        | PLpgSQL_datum_type::PLPGSQL_DTYPE_RECFIELD => {
+            // Multi-field ROW / record deconstruction — composite value substrate.
+            panic!(
+                "seam not wired: exec_move_row INTO row/record target (pl_exec.c) — \
+                 tuple deconstruction into a multi-field ROW/REC (composite value substrate)"
+            );
+        }
+    }
 }
 
 fn exec_stmt_dynexecute(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {

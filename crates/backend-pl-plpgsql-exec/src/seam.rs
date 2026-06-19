@@ -73,29 +73,23 @@ pub fn assign_simple_var_free_old(_oldvalue: Datum, _oldisnull: bool, _typlen: i
 }
 
 /// `exec_assign_expr(estate, target, expr)` (pl_exec.c 5003): evaluate `expr`
-/// and assign into `target`. Needs the executor simple-expr / SPI eval path.
-pub fn exec_assign_expr(_estate: &mut PLpgSQL_execstate, _target_dno: int32, _expr: &PLpgSQL_expr) {
-    panic!(
-        "seam not wired: exec_assign_expr (pl_exec.c) — exec_eval_expr + \
-         exec_assign_value (executor ExprState #165/#324 + value substrate)"
-    );
+/// and assign into `target`.
+pub fn exec_assign_expr(estate: &mut PLpgSQL_execstate, target_dno: int32, expr: &PLpgSQL_expr) {
+    super::exec_assign_expr_impl(estate, target_dno, expr);
 }
 
 /// `exec_assign_value(estate, target, value, isNull, valtype, valtypmod)`
 /// (pl_exec.c 5061): the generic datum-assignment dispatch (VAR/ROW/REC/
 /// RECFIELD), with cast + array-element / record-field update legs.
 pub fn exec_assign_value(
-    _estate: &mut PLpgSQL_execstate,
-    _target_dno: int32,
-    _value: Datum,
-    _isnull: bool,
-    _valtype: Oid,
-    _valtypmod: int32,
+    estate: &mut PLpgSQL_execstate,
+    target_dno: int32,
+    value: Datum,
+    isnull: bool,
+    valtype: Oid,
+    valtypmod: int32,
 ) {
-    panic!(
-        "seam not wired: exec_assign_value (pl_exec.c) — exec_cast_value + \
-         array_set_element / expanded-record field set (fmgr + value substrate)"
-    );
+    super::exec_assign_value_impl(estate, target_dno, value, isnull, valtype, valtypmod);
 }
 
 /// `exec_eval_expr(estate, expr, &isNull, &rettype, &rettypmod)` (pl_exec.c
@@ -147,33 +141,27 @@ pub fn exec_eval_datum(
 /// reqtypmod)` (pl_exec.c): cast a value to the required type via a cached cast
 /// expression. Returns `(value, isnull)`.
 pub fn exec_cast_value(
-    _estate: &mut PLpgSQL_execstate,
-    _value: Datum,
-    _isnull: bool,
-    _valtype: Oid,
-    _valtypmod: int32,
-    _reqtype: Oid,
-    _reqtypmod: int32,
+    estate: &mut PLpgSQL_execstate,
+    value: Datum,
+    isnull: bool,
+    valtype: Oid,
+    valtypmod: int32,
+    reqtype: Oid,
+    reqtypmod: int32,
 ) -> (Datum, bool) {
-    panic!(
-        "seam not wired: exec_cast_value (pl_exec.c) — get_cast_hashentry + \
-         ExecEvalExpr over the cast expression (executor + fmgr substrate)"
-    );
+    super::exec_cast_value_impl(estate, value, isnull, valtype, valtypmod, reqtype, reqtypmod)
 }
 
 /// `exec_run_select(estate, expr, maxtuples, portalP)` (pl_exec.c 5753): run a
 /// SELECT and stash the result in `estate->eval_tuptable`. Returns the SPI
 /// result code.
 pub fn exec_run_select(
-    _estate: &mut PLpgSQL_execstate,
-    _expr: &PLpgSQL_expr,
-    _maxtuples: i64,
-    _set_portal: bool,
+    estate: &mut PLpgSQL_execstate,
+    expr: &PLpgSQL_expr,
+    maxtuples: i64,
+    set_portal: bool,
 ) -> int32 {
-    panic!(
-        "seam not wired: exec_run_select (pl_exec.c) — exec_prepare_plan + \
-         SPI_execute_plan_extended (SPI plan surface not installed)"
-    );
+    super::exec_run_select_impl(estate, expr, maxtuples, set_portal)
 }
 
 /// `plpgsql_fulfill_promise(estate, var)` (pl_exec.c): compute and assign a

@@ -531,6 +531,171 @@ pub fn init_seams() {
         },
     );
 
+    // Install the final RAISE `ereport(stmt->elog_level, ...)` (pl_exec.c): drive
+    // the elog report cycle with the assembled fields. A non-ERROR level reports
+    // a message to the client and returns Ok; an ERROR throws (Err).
+    backend_pl_plpgsql_exec_seams::raise_ereport::set(
+        |report: backend_pl_plpgsql_exec_seams::RaiseEreport| {
+            use backend_utils_error::ereport;
+            use types_error::{ErrorLocation, ErrorLevel, SqlState};
+
+            let mut b = ereport(ErrorLevel(report.elog_level));
+            if report.err_code != 0 {
+                b = b.errcode(SqlState(report.err_code));
+            }
+            // errmsg_internal("%s", err_message) — the message is already the
+            // final text (no further %-substitution).
+            b = b.errmsg_internal(report.message);
+            if let Some(d) = report.detail {
+                b = b.errdetail_internal(d);
+            }
+            if let Some(h) = report.hint {
+                b = b.errhint_internal(h);
+            }
+            // err_generic_string(PG_DIAG_*, value) for the diagnostics fields.
+            if let Some(v) = report.column {
+                b = b.err_generic_string(types_error::PG_DIAG_COLUMN_NAME, v)?;
+            }
+            if let Some(v) = report.constraint {
+                b = b.err_generic_string(types_error::PG_DIAG_CONSTRAINT_NAME, v)?;
+            }
+            if let Some(v) = report.datatype {
+                b = b.err_generic_string(types_error::PG_DIAG_DATATYPE_NAME, v)?;
+            }
+            if let Some(v) = report.table {
+                b = b.err_generic_string(types_error::PG_DIAG_TABLE_NAME, v)?;
+            }
+            if let Some(v) = report.schema {
+                b = b.err_generic_string(types_error::PG_DIAG_SCHEMA_NAME, v)?;
+            }
+            b.finish(ErrorLocation {
+                filename: None,
+                lineno: 0,
+                funcname: None,
+            })
+        },
+    );
+
+    // Install `convert_value_to_string` (pl_exec.c): getTypeOutputInfo +
+    // OidOutputFunctionCall. The executor uses it for RAISE `%` substitution and
+    // USING option text. The plpgsql value crosses as a bare word; for a
+    // by-value type that is the value itself (a by-ref result is the separate
+    // by-ref-Datum keystone, which the output function would dereference).
+    backend_pl_plpgsql_exec_seams::convert_value_to_string::set(|value: usize, valtype| {
+        let cxt = mcx::MemoryContext::new("PL/pgSQL convert_value_to_string");
+        let mcx = cxt.mcx();
+        let (typoutput, _typisvarlena) =
+            backend_utils_cache_lsyscache_seams::get_type_output_info::call(valtype)?;
+        let datum = types_tuple::backend_access_common_heaptuple::Datum::from_usize(value);
+        let bytes =
+            backend_utils_fmgr_fmgr_seams::oid_output_function_call::call(mcx, typoutput, &datum)?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    });
+
+    // Install `plpgsql_recognize_err_condition` (pl_comp.c) — bridge to the
+    // compiler's real body (the exception-label table + SQLSTATE parse).
+    backend_pl_plpgsql_exec_seams::recognize_err_condition::set(
+        |condname: String, allow_sqlstate| {
+            backend_pl_plpgsql_comp::plpgsql_recognize_err_condition(&condname, allow_sqlstate)
+        },
+    );
+
+    // Install `exec_cast_value` slow path (pl_exec.c do_cast_value): the
+    // CaseTestExpr coercion-expression + ExecEvalExpr machinery is executor
+    // substrate; plpgsql's documented fallback for any coercion not available as
+    // a plan-level cast is an I/O coercion (CoerceViaIO), which is faithful and
+    // correct for scalar casts. We implement the slow path as that I/O coercion:
+    // render the source value to text (source typoutput) and read it back at the
+    // target type (target typinput, with the target typmod). The no-op relabel
+    // case (valtype == reqtype, unconstrained typmod) is handled in-crate and
+    // never reaches here.
+    backend_pl_plpgsql_exec_seams::exec_cast_value_via_spi::set(
+        |value: usize, isnull, valtype, _valtypmod, reqtype, reqtypmod| {
+            if isnull {
+                // A NULL stays NULL across any cast (the cast expression is
+                // strict for I/O coercion; exec_cast_value returns the input).
+                return Ok((value, true));
+            }
+            let cxt = mcx::MemoryContext::new("PL/pgSQL exec_cast_value");
+            let mcx = cxt.mcx();
+
+            // Render the source value to its text representation.
+            let (typoutput, _typisvarlena) =
+                backend_utils_cache_lsyscache_seams::get_type_output_info::call(valtype)?;
+            let src_datum =
+                types_tuple::backend_access_common_heaptuple::Datum::from_usize(value);
+            let text = backend_utils_fmgr_fmgr_seams::oid_output_function_call::call(
+                mcx, typoutput, &src_datum,
+            )?;
+            let s = String::from_utf8_lossy(&text).into_owned();
+
+            // Read it back at the target type with the target typmod.
+            let (typinput, typioparam) =
+                backend_utils_cache_lsyscache_seams::get_type_input_info::call(reqtype)?;
+            let result = backend_utils_fmgr_fmgr_seams::input_function_call::call(
+                mcx,
+                typinput,
+                Some(s.as_str()),
+                typioparam,
+                reqtypmod,
+            )?;
+            // The result crosses back as a bare word (by-value, or a by-ref
+            // pointer into mcx — the by-ref-Datum keystone). A by-value scalar is
+            // exactly what plpgsql's scalar assignment casts produce.
+            Ok((result.as_usize(), false))
+        },
+    );
+
+    // Install `exec_stmt_execsql` core (pl_exec.c): the SPI plan surface for an
+    // embedded DML / SELECT statement (the bridge types map 1:1 to the SPI
+    // spi_execsql value types, like exec_eval_expr_via_spi).
+    backend_pl_plpgsql_exec_seams::exec_execsql_via_spi::set(
+        |query: String,
+         parse_mode,
+         parse_state,
+         datum_snapshot: Vec<Option<backend_pl_plpgsql_exec_seams::EvalParamValue>>,
+         read_only,
+         into,
+         tcount| {
+            let mut resolve = |dno: i32| -> PgResult<backend_executor_spi::EvalParamValue> {
+                match datum_snapshot.get(dno as usize).and_then(|o| o.as_ref()) {
+                    Some(v) => Ok(backend_executor_spi::EvalParamValue {
+                        value: v.value,
+                        isnull: v.isnull,
+                        typeid: v.typeid,
+                    }),
+                    None => Err(types_error::PgError::error(format!(
+                        "PL/pgSQL embedded SQL references datum {dno} that is not a scalar variable"
+                    ))),
+                }
+            };
+            let r = backend_executor_spi::spi_execsql(
+                &query,
+                parse_mode,
+                parse_state,
+                read_only,
+                into,
+                tcount,
+                &mut resolve,
+            )?;
+            Ok(backend_pl_plpgsql_exec_seams::ExecsqlResult {
+                code: r.code,
+                processed: r.processed,
+                returned_tuptable: r.returned_tuptable,
+                first_row: r
+                    .first_row
+                    .into_iter()
+                    .map(|c| backend_pl_plpgsql_exec_seams::ExecsqlColumn {
+                        value: c.value,
+                        isnull: c.isnull,
+                        typeid: c.typeid,
+                        typmod: -1,
+                    })
+                    .collect(),
+            })
+        },
+    );
+
     register_handler_builtins();
 
     // Register `$libdir/plpgsql` with the in-process ported-library loader

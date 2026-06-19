@@ -49,6 +49,15 @@ backend-utils-adt-varlena = { path = "../backend-utils-adt-varlena" }
 backend-catalog-pg-proc-seams = { path = "../backend-catalog-pg-proc-seams" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+
+# convert_value_to_string (getTypeOutputInfo + OidOutputFunctionCall) for RAISE
+# % substitution / USING text, and the I/O-coercion exec_cast_value fallback
+# (output via source typoutput + input via target typinput).
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+
+# The elog report cycle (ereport / ThrowErrorData) for the RAISE statement: a
+# NOTICE/WARNING/INFO/LOG is reported to the client; an ERROR is thrown.
+backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 types-tuple = { path = "../types-tuple" }
