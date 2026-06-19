@@ -124,8 +124,8 @@ fn str_val<'a>(node: &'a Node<'_>) -> &'a str {
 }
 
 /// `(Node *) makeVar(...)` — wrap a `Var` as the central `Node`.
-fn var_node<'mcx>(mcx: Mcx<'mcx>, var: Var) -> Node<'mcx> {
-    Node::mk_var(mcx, var)
+fn var_node<'mcx>(mcx: Mcx<'mcx>, var: Var) -> PgResult<Node<'mcx>> {
+    Ok(Node::mk_var(mcx, var))
 }
 
 /// `NameStr(attr->attname)` (a `NameData` carries NUL-terminated bytes).
@@ -932,7 +932,7 @@ pub fn scanNSItemForColumn<'mcx>(
     // Require read access to the column.
     markVarForSelectPriv(mcx, pstate, &var)?;
 
-    Ok(Some(var_node(mcx, var)))
+    Ok(Some(var_node(mcx, var)?))
 }
 
 /// `colNameToVar` — search for an unqualified column name across the namespace.
@@ -1138,7 +1138,7 @@ pub fn scan_nsitem_for_column_at_depth<'mcx>(
     markNullableIfNeeded(pstate, &mut var)?;
     markVarForSelectPriv(mcx, pstate, &var)?;
 
-    Ok(Some(var_node(mcx, var)))
+    Ok(Some(var_node(mcx, var)?))
 }
 
 /// `searchRangeTableForCol` — heuristic search over the entire rangetable(s) for
@@ -2802,7 +2802,7 @@ pub fn expandRTE<'mcx>(
                     );
                     varnode.varreturningtype = returning_type;
                     varnode.location = location;
-                    cv.push(mcx::alloc_in(mcx, var_node(mcx, varnode))?);
+                    cv.push(mcx::alloc_in(mcx, var_node(mcx, varnode)?)?);
                 }
                 aliasp_idx += 1;
             }
@@ -2842,7 +2842,7 @@ pub fn expandRTE<'mcx>(
                         nv.varlevelsup = sublevels_up as Index;
                         nv.varreturningtype = returning_type;
                         nv.location = location;
-                        var_node(mcx, nv)
+                        var_node(mcx, nv)?
                     } else {
                         let oe = avar.as_expr();
                         let mut nv = make_var(
@@ -2855,7 +2855,7 @@ pub fn expandRTE<'mcx>(
                         );
                         nv.varreturningtype = returning_type;
                         nv.location = location;
-                        var_node(mcx, nv)
+                        var_node(mcx, nv)?
                     };
                     cv.push(mcx::alloc_in(mcx, varnode)?);
                 }
@@ -2894,7 +2894,7 @@ pub fn expandRTE<'mcx>(
                         );
                         varnode.varreturningtype = returning_type;
                         varnode.location = location;
-                        cv.push(mcx::alloc_in(mcx, var_node(mcx, varnode))?);
+                        cv.push(mcx::alloc_in(mcx, var_node(mcx, varnode)?)?);
                     } else if include_dropped {
                         let nc = make_null_const(mcx, INT4OID, -1, InvalidOid)?;
                         cv.push(mcx::alloc_in(mcx, Node::mk_const(mcx, nc))?);
@@ -3020,7 +3020,7 @@ fn expandTupleDesc<'mcx>(
             );
             varnode.varreturningtype = returning_type;
             varnode.location = location;
-            cv.push(mcx::alloc_in(mcx, var_node(mcx, varnode))?);
+            cv.push(mcx::alloc_in(mcx, var_node(mcx, varnode)?)?);
         }
     }
     Ok(())
@@ -3066,7 +3066,7 @@ pub fn expandNSItemVars<'mcx>(
 
             markNullableIfNeeded(pstate, &mut var)?;
 
-            result.push(mcx::alloc_in(mcx, var_node(mcx, var))?);
+            result.push(mcx::alloc_in(mcx, var_node(mcx, var)?)?);
             if let Some(cn) = colnames.as_deref_mut() {
                 cn.push(make_string_node(mcx, colname)?);
             }
