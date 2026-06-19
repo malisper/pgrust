@@ -3052,6 +3052,51 @@ fn function_call_invoke_seam(
     Ok((d, fcinfo.isnull))
 }
 
+/// Detoast a by-reference [`RefPayload::Varlena`] argument to a flat, in-line,
+/// uncompressed varlena image when (and only when) it is actually TOAST-encoded.
+///
+/// This is the single boundary that enforces the `RefPayload::Varlena` carrier's
+/// documented contract (the "already-detoasted `struct varlena *`" image). A
+/// varlena attribute read off a heap tuple (`heap_deform_tuple`/`fetchatt`)
+/// crosses VERBATIM through `datum_to_ref_arg` as its raw on-disk bytes — which
+/// may be an INLINE-COMPRESSED (`VARATT_IS_4B_C`, low-two-bits `0b10`) or
+/// OUT-OF-LINE-EXTERNAL (`VARATT_IS_1B_E`, `va_header == 0x01`) datum. The adt
+/// cores that read `&image[VARHDRSZ..]` / `VARDATA_ANY` directly (md5, LIKE, and
+/// the ~18 string/hash crates that do not route through `PG_GETARG_*_PP`) would
+/// then read the pglz-compressed payload or the 18-byte toast pointer as if it
+/// were the plain text — silently corrupting every result on a toasted column.
+/// C avoids this because every `PG_GETARG_*_PP` macro calls
+/// `pg_detoast_datum_packed`; here we apply the same step ONCE at the dispatch
+/// chokepoint so both the macro-routed and the raw-byte readers see flat bytes.
+///
+/// The gate (`is external` OR `is compressed`) is essential: a fixed-length
+/// by-reference value carried on the `Varlena` arm — notably a `name`
+/// (`NAMEDATALEN`-byte buffer, no varlena header) — is NOT a varlena and must
+/// pass through untouched. `pg_detoast_datum_packed` is itself a verbatim no-op
+/// on a plain (4B-U / short) value, so the explicit gate only additionally guards
+/// the non-varlena `Varlena`-arm carriers from a spurious tag misread.
+#[inline]
+fn detoast_ref_arg_if_toasted<'mcx>(
+    mcx: Mcx<'mcx>,
+    refp: Option<RefPayload>,
+) -> PgResult<Option<RefPayload>> {
+    match refp {
+        Some(RefPayload::Varlena(bytes)) => {
+            let toasted = !bytes.is_empty()
+                && (bytes[0] == 0x01 /* VARATT_IS_EXTERNAL / 1B-E */
+                    || (bytes[0] & 0x03) == 0x02 /* VARATT_IS_4B_C compressed */);
+            if toasted {
+                let flat =
+                    backend_access_common_detoast_seams::pg_detoast_datum_packed::call(mcx, &bytes)?;
+                Ok(Some(RefPayload::Varlena(flat.as_slice().to_vec())))
+            } else {
+                Ok(Some(RefPayload::Varlena(bytes)))
+            }
+        }
+        other => Ok(other),
+    }
+}
+
 /// `FunctionCallInvoke(fcinfo)` (fmgr.h) over the canonical per-attribute
 /// [`Datum`] lane — the by-reference-arg form of [`function_call_invoke_seam`]
 /// (the WALL-1aq by-ref execExpr arg-gather). Each canonical arg crosses the fmgr
@@ -3095,7 +3140,16 @@ fn function_call_invoke_datum_core<'mcx>(
     // C: fcache->flinfo.fn_expr = fcinfo->flinfo->fn_expr (fmgr.c:658).
     let fn_expr = resolved.finfo.fn_expr.clone();
     let mut fcinfo = init_fcinfo(Some(resolved.finfo), collation, nargs);
-    fcinfo.ref_args = ref_args;
+    // Enforce the `RefPayload::Varlena` carrier's "already-detoasted" contract at
+    // the single fmgr dispatch chokepoint: a varlena arg read off a heap tuple
+    // may be inline-compressed (4B-C) or out-of-line-external, and the raw-byte
+    // adt readers (md5/LIKE/etc.) would corrupt it. Detoast each toasted varlena
+    // arg here so EVERY builtin sees a flat image (C: `PG_DETOAST_DATUM_PACKED`).
+    let mut flat_ref_args: Vec<Option<RefPayload>> = Vec::with_capacity(ref_args.len());
+    for refp in ref_args {
+        flat_ref_args.push(detoast_ref_arg_if_toasted(mcx, refp)?);
+    }
+    fcinfo.ref_args = flat_ref_args;
     fcinfo.debug_assert_ref_null_consistency();
     // C: fcinfo->isnull = false; d = op->d.func.fn_addr(fcinfo). Dispatch directly
     // (NOT through `invoke_flinfo`/`null_check`): a function may legitimately
