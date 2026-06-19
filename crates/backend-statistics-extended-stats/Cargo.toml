@@ -1,0 +1,28 @@
+[package]
+name = "backend-statistics-extended-stats"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_statistics_extended_stats"
+path = "src/lib.rs"
+
+[dependencies]
+seam-core = { path = "../seam-core" }
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-rel = { path = "../types-rel" }
+types-scan = { path = "../types-scan" }
+types-tuple = { path = "../types-tuple" }
+types-statistics = { path = "../types-statistics" }
+types-catalog = { path = "../types-catalog" }
+types-storage = { path = "../types-storage" }
+backend-utils-error = { path = "../backend-utils-error" }
+backend-access-table-table = { path = "../backend-access-table-table" }
+backend-access-common-scankey = { path = "../backend-access-common-scankey" }
+backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+backend-commands-analyze-rt-seams = { path = "../backend-commands-analyze-rt-seams" }
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }

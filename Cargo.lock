@@ -15819,6 +15819,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-statistics-extended-stats"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-scankey",
+ "backend-access-index-genam-seams",
+ "backend-access-table-table",
+ "backend-commands-analyze-rt-seams",
+ "backend-utils-error",
+ "backend-utils-misc-guc-tables",
+ "mcx",
+ "seam-core",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-scan",
+ "types-statistics",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-statistics-mcv"
 version = "0.0.0"
 dependencies = [
@@ -23519,6 +23542,7 @@ dependencies = [
  "backend-rewrite-rewritehandler",
  "backend-rmgrdesc-next",
  "backend-snowball-dict-snowball",
+ "backend-statistics-extended-stats",
  "backend-storage-aio-methods",
  "backend-storage-aio-read-stream",
  "backend-storage-buffer-bufmgr",
