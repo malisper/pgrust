@@ -71,10 +71,6 @@ extern crate alloc;
 use mcx::{Mcx, PgVec};
 use types_core::primitive::{InvalidOid, Selectivity};
 use types_core::Oid;
-// The query `Const.constvalue` rides the bare-word lane only at the
-// `mcv_selectivity` fmgr edge below; the inet varlena detoast + the MCV/histogram
-// element comparisons ride the canonical unified `Datum`.
-use types_datum::datum::Datum;
 // Canonical unified value (the Datum-unification keystone): the inet/cidr varlena
 // image (`Datum::ByRef`, header included) the detoast edge and the element
 // comparisons operate on.
@@ -326,11 +322,10 @@ pub fn networksel<'mcx>(
         return Ok(0.0);
     }
     /* The Const's value is the canonical Datum (a by-reference inet varlena
-     * image): carry it directly into the inet-detoast histogram lane. The MCV
-     * lane (`mcv_selectivity`) is still the bare-word fmgr edge of the unported
-     * `selfuncs.c` examine/estimate family, so it takes the bare word. */
+     * image): carry it directly into both the inet-detoast histogram lane and
+     * the MCV lane, which now crosses the operator's fmgr boundary through the
+     * by-reference-capable `*_datum` form. */
     let constvalue_v: &DatumV = &other.constvalue;
-    let constvalue_word = Datum::from_usize(other.constvalue.as_usize());
 
     /* Otherwise, we need stats in order to produce a non-default estimate. */
     let stats_tuple = match vardata.data().stats_tuple {
@@ -352,7 +347,7 @@ pub fn networksel<'mcx>(
         vardata.data(),
         opcode,
         InvalidOid,
-        constvalue_word,
+        constvalue_v,
         varonleft,
     )?;
 

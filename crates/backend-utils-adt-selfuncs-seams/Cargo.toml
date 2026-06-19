@@ -17,3 +17,4 @@ types-datum = { path = "../types-datum" }
 types-nodes = { path = "../types-nodes" }
 types-pathnodes = { path = "../types-pathnodes" }
 types-selfuncs = { path = "../types-selfuncs" }
+types-tuple = { path = "../types-tuple" }

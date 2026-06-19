@@ -17,7 +17,6 @@
 
 use mcx::Mcx;
 use types_core::primitive::{Oid, OidIsValid};
-use types_datum::datum::Datum;
 use types_error::PgResult;
 use types_nodes::primnodes::Expr;
 use types_pathnodes::planner_run::PlannerRun;
@@ -151,21 +150,14 @@ pub fn scalarineqsel_wrapper<'mcx>(
         return Ok(0.0);
     }
     // `scalarineqsel` compares the constant against the column's histogram / MCV
-    // slot values, which cross the bare-word fmgr lane (the slot values are bare
-    // pointer words from the C-shaped `pg_statistic` tuple). A by-reference
-    // constant (text/name/bytea/numeric) cannot cross that lane until the
-    // selfuncs by-reference value carrier is threaded through `get_attstatsslot`
-    // (WALL 1ai, shared with `var_eq_const` / `patternsel`). Until then a
-    // by-reference inequality takes C's "no usable scalar conversion" outcome,
-    // `DEFAULT_INEQ_SEL` (the same default `convert_to_scalar` failure yields),
-    // rather than reading a by-reference image as a scalar word.
-    let constval = match &c.constvalue {
-        types_tuple::backend_access_common_heaptuple::Datum::ByVal(w) => Datum::from_usize(*w),
-        _ => {
-            crate::examine::release_variable_stats(vardata);
-            return Ok(DEFAULT_INEQ_SEL);
-        }
-    };
+    // slot values through the operator's comparison proc. The constant crosses
+    // that fmgr boundary as its canonical image (a by-value word OR a
+    // by-reference referent) via the by-reference-capable `*_datum` lane, so a
+    // by-reference inequality const (`text`/`name`/`bytea`/`timetz`) reaches the
+    // estimator intact rather than being collapsed to a bare word. On a
+    // stats-free relation the MCV/histogram loops never run and `scalarineqsel`
+    // returns `DEFAULT_INEQ_SEL` without needing the const at all.
+    let constval = &c.constvalue;
     let consttype = c.consttype;
 
     // Force the var to be on the left to simplify logic in scalarineqsel.

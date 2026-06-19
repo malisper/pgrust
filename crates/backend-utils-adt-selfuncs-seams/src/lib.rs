@@ -21,6 +21,7 @@ use mcx::Mcx;
 use types_core::primitive::Oid;
 use types_datum::datum::Datum;
 use types_error::PgResult;
+use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 use types_nodes::primnodes::Expr;
 use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{NodeId, PlannerInfo, SpecialJoinInfo};
@@ -162,14 +163,16 @@ seam_core::seam!(
     /// (C: the `false` from `get_attstatsslot`). The C `FmgrInfo *opproc`
     /// crosses as the operator's underlying function OID (`get_opcode` result),
     /// which the owner re-resolves; `collation` is the input collation. The MCV
-    /// values are matched against the bare-word [`Datum`] `constval`. `Err`
-    /// carries the syscache / fmgr `ereport(ERROR)`s and OOM.
+    /// values are matched against the canonical [`DatumV`] `constval` through the
+    /// by-reference-capable fmgr lane, so a by-reference constant
+    /// (`text`/`name`/`bytea`/`numeric`) is compared correctly. `Err` carries the
+    /// syscache / fmgr `ereport(ERROR)`s and OOM.
     pub fn mcv_selectivity<'mcx>(
         mcx: Mcx<'mcx>,
         vardata: &VariableStatData,
         opproc_oid: Oid,
         collation: Oid,
-        constval: Datum,
+        constval: &DatumV<'mcx>,
         var_on_left: bool,
     ) -> PgResult<(f64, f64)>
 );

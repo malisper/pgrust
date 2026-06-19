@@ -13,8 +13,8 @@
 use mcx::Mcx;
 use types_core::primitive::{InvalidOid, Oid};
 use types_datum::datum::Datum;
-use types_datum::NullableDatum;
 use types_error::PgResult;
+use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 use types_pathnodes::PlannerInfo;
 use types_selfuncs::{VariableStatData, ATTSTATSSLOT_NUMBERS, ATTSTATSSLOT_VALUES};
 
@@ -27,6 +27,42 @@ use crate::{
     STATISTIC_KIND_MCV,
 };
 use types_selfuncs::DEFAULT_INEQ_SEL;
+
+/// The canonical (value-carrying) image of one statistics-slot value, for the
+/// operator-comparison fmgr boundary. The shared `AttStatsSlot.values` carries a
+/// by-reference element (`name`/`text`/`bytea`/`numeric`) only as a
+/// non-dereferenceable in-buffer offset, so a by-reference column type's slot
+/// values are re-decoded by value via `get_attstatsslot_value_datums`
+/// (`canon[i]`, aligned 1:1 with the bare slot). A pass-by-value element is the
+/// bare word wrapped as `ByVal` (no separate canonical array is fetched).
+fn slot_value_canon<'mcx>(
+    bare: &[Datum],
+    canon: Option<&mcx::PgVec<'mcx, DatumV<'mcx>>>,
+    i: usize,
+    mcx: Mcx<'mcx>,
+) -> PgResult<DatumV<'mcx>> {
+    match canon {
+        Some(c) => c[i].clone_in(mcx),
+        None => Ok(DatumV::ByVal(bare[i].as_usize())),
+    }
+}
+
+/// Fetch the canonical value-carrying images of a statistics slot's `stavalues`
+/// array when the element type is pass-by-reference (so the bare-word
+/// `AttStatsSlot.values` offsets cannot be dereferenced at the fmgr boundary).
+/// Returns `None` for a pass-by-value element type — the bare word is the value.
+fn slot_canon_values<'mcx>(
+    mcx: Mcx<'mcx>,
+    stats_tuple: types_selfuncs::StatsTuple,
+    reqkind: i32,
+    reqop: Oid,
+    valuetype: Oid,
+) -> PgResult<Option<mcx::PgVec<'mcx, DatumV<'mcx>>>> {
+    if lsc::get_typbyval::call(valuetype)? {
+        return Ok(None);
+    }
+    lsc::get_attstatsslot_value_datums::call(mcx, stats_tuple, reqkind, reqop)
+}
 
 /* ---------------------------------------------------------------------------
  * mcv_selectivity (selfuncs.c:739) — INSTALLED seam.
@@ -42,7 +78,7 @@ pub(crate) fn mcv_selectivity<'mcx>(
     vardata: &VariableStatData,
     opproc_oid: Oid,
     collation: Oid,
-    constval: Datum,
+    constval: &DatumV<'mcx>,
     var_on_left: bool,
 ) -> PgResult<(f64, f64)> {
     let mut mcv_selec = 0.0f64;
@@ -57,17 +93,33 @@ pub(crate) fn mcv_selectivity<'mcx>(
                 InvalidOid,
                 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS,
             )? {
+                let canon = slot_canon_values(
+                    mcx,
+                    stats_tuple,
+                    STATISTIC_KIND_MCV,
+                    InvalidOid,
+                    sslot.valuetype,
+                )?;
                 for i in 0..sslot.values.len() {
-                    // be careful to apply operator right way 'round
+                    // be careful to apply operator right way 'round. Both the MCV
+                    // slot value and the constant cross the operator's fmgr
+                    // boundary as their canonical images (by-value word OR
+                    // by-reference referent) via the by-reference-capable
+                    // `function_call_invoke_datum` lane, so a
+                    // `name`/`text`/`bytea`/`numeric` MCV value and constant are
+                    // compared correctly.
+                    let mcv = slot_value_canon(&sslot.values, canon.as_ref(), i, mcx)?;
                     let (arg0, arg1) = if var_on_left {
-                        (sslot.values[i], constval)
+                        (mcv, constval.clone_in(mcx)?)
                     } else {
-                        (constval, sslot.values[i])
+                        (constval.clone_in(mcx)?, mcv)
                     };
-                    let (fresult, isnull) = fmgr::function_call_invoke::call(
+                    let (fresult, isnull) = fmgr::function_call_invoke_datum::call(
+                        mcx,
                         opproc_oid,
                         collation,
-                        &[NullableDatum::value(arg0), NullableDatum::value(arg1)],
+                        &[arg0, arg1],
+                        None,
                     )?;
                     if !isnull && fresult.as_bool() {
                         mcv_selec += sslot.numbers[i] as f64;
@@ -87,7 +139,7 @@ pub fn seam_mcv_selectivity<'mcx>(
     vardata: &VariableStatData,
     opproc_oid: Oid,
     collation: Oid,
-    constval: Datum,
+    constval: &DatumV<'mcx>,
     var_on_left: bool,
 ) -> PgResult<(f64, f64)> {
     mcv_selectivity(mcx, vardata, opproc_oid, collation, constval, var_on_left)
@@ -107,7 +159,7 @@ pub(crate) fn histogram_selectivity<'mcx>(
     vardata: &VariableStatData,
     opproc_oid: Oid,
     collation: Oid,
-    constval: Datum,
+    constval: &DatumV<'mcx>,
     varonleft: bool,
     min_hist_size: i32,
     n_skip: i32,
@@ -130,18 +182,28 @@ pub(crate) fn histogram_selectivity<'mcx>(
                 let nvalues = sslot.values.len() as i32;
                 hist_size = nvalues;
                 if nvalues >= min_hist_size {
+                    let canon = slot_canon_values(
+                        mcx,
+                        stats_tuple,
+                        STATISTIC_KIND_HISTOGRAM,
+                        InvalidOid,
+                        sslot.valuetype,
+                    )?;
                     let mut nmatch = 0i32;
                     let mut i = n_skip;
                     while i < nvalues - n_skip {
+                        let hval = slot_value_canon(&sslot.values, canon.as_ref(), i as usize, mcx)?;
                         let (arg0, arg1) = if varonleft {
-                            (sslot.values[i as usize], constval)
+                            (hval, constval.clone_in(mcx)?)
                         } else {
-                            (constval, sslot.values[i as usize])
+                            (constval.clone_in(mcx)?, hval)
                         };
-                        let (fresult, isnull) = fmgr::function_call_invoke::call(
+                        let (fresult, isnull) = fmgr::function_call_invoke_datum::call(
+                            mcx,
                             opproc_oid,
                             collation,
-                            &[NullableDatum::value(arg0), NullableDatum::value(arg1)],
+                            &[arg0, arg1],
+                            None,
                         )?;
                         if !isnull && fresult.as_bool() {
                             nmatch += 1;
@@ -256,7 +318,7 @@ pub(crate) fn ineq_histogram_selectivity<'mcx>(
     isgt: bool,
     iseq: bool,
     collation: Oid,
-    constval: Datum,
+    constval: &DatumV<'mcx>,
     consttype: Oid,
 ) -> PgResult<f64> {
     let mut hist_selec = -1.0f64;
@@ -273,6 +335,16 @@ pub(crate) fn ineq_histogram_selectivity<'mcx>(
                 let nvalues = sslot.values.len() as i32;
                 let staop = sslot.staop;
                 let stacoll = sslot.stacoll;
+                // Canonical value-carrying images of the histogram bin values
+                // (by-reference element types cannot cross the operator fmgr
+                // boundary as the bare offset words).
+                let canon = slot_canon_values(
+                    mcx,
+                    stats_tuple,
+                    STATISTIC_KIND_HISTOGRAM,
+                    InvalidOid,
+                    sslot.valuetype,
+                )?;
 
                 if nvalues > 1
                     && stacoll == collation
@@ -329,11 +401,16 @@ pub(crate) fn ineq_histogram_selectivity<'mcx>(
                             sslot.values[probe as usize] = max;
                         }
 
-                        let res = fmgr::function_call2_coll::call(
+                        // Both the histogram bin value and the constant cross
+                        // the by-reference-capable lane, so a
+                        // by-ref `text`/`name`/`bytea` comparison is correct.
+                        let bin = slot_value_canon(&sslot.values, canon.as_ref(), probe as usize, mcx)?;
+                        let res = fmgr::function_call2_coll_datum::call(
+                            mcx,
                             opproc_oid,
                             collation,
-                            sslot.values[probe as usize],
-                            constval,
+                            bin,
+                            constval.clone_in(mcx)?,
                         )?;
                         let mut ltcmp = res.as_bool();
                         if isgt {
@@ -380,32 +457,54 @@ pub(crate) fn ineq_histogram_selectivity<'mcx>(
                         }
 
                         // Convert the constant and the two nearest bin
-                        // boundaries to a uniform scale and interpolate.
-                        let (ok, val, low, high) = convert_to_scalar(
-                            constval,
-                            consttype,
-                            collation,
-                            sslot.values[(i - 1) as usize],
-                            sslot.values[i as usize],
-                            vardata.vartype,
-                        );
-                        if ok {
-                            if high <= low {
-                                binfrac = 0.5;
-                            } else if val <= low {
-                                binfrac = 0.0;
-                            } else if val >= high {
-                                binfrac = 1.0;
-                            } else {
-                                let bf = (val - low) / (high - low);
-                                if bf.is_nan() || bf < 0.0 || bf > 1.0 {
-                                    binfrac = 0.5;
-                                } else {
-                                    binfrac = bf;
-                                }
-                            }
-                        } else {
+                        // boundaries to a uniform scale and interpolate. The
+                        // bare-word `convert_to_scalar` reads the constant and
+                        // the bin boundary values as machine words: a
+                        // pass-by-value type scales precisely. For a
+                        // pass-by-reference element type (`canon.is_some()`) the
+                        // bin boundaries are non-dereferenceable in-buffer
+                        // `deconstruct_array` offsets (the `convert.rs` string /
+                        // bytea / numeric conversion keystone), so the scalar
+                        // conversion cannot run; that is exactly C's
+                        // `convert_to_scalar` "don't know how to convert"
+                        // (`ok == false`) outcome, which yields the bin midpoint
+                        // `binfrac = 0.5`. The bin itself was located by the real
+                        // by-reference comparisons in the binary search above, so
+                        // only the intra-bin interpolation degrades to the
+                        // midpoint.
+                        if canon.is_some() {
                             binfrac = 0.5;
+                        } else {
+                            let const_word = match constval {
+                                DatumV::ByVal(w) => Datum::from_usize(*w),
+                                _ => Datum::from_usize(0),
+                            };
+                            let (ok, val, low, high) = convert_to_scalar(
+                                const_word,
+                                consttype,
+                                collation,
+                                sslot.values[(i - 1) as usize],
+                                sslot.values[i as usize],
+                                vardata.vartype,
+                            );
+                            if ok {
+                                if high <= low {
+                                    binfrac = 0.5;
+                                } else if val <= low {
+                                    binfrac = 0.0;
+                                } else if val >= high {
+                                    binfrac = 1.0;
+                                } else {
+                                    let bf = (val - low) / (high - low);
+                                    if bf.is_nan() || bf < 0.0 || bf > 1.0 {
+                                        binfrac = 0.5;
+                                    } else {
+                                        binfrac = bf;
+                                    }
+                                }
+                            } else {
+                                binfrac = 0.5;
+                            }
                         }
 
                         let mut hf = (i - 1) as f64 + binfrac;
@@ -441,13 +540,13 @@ pub(crate) fn ineq_histogram_selectivity<'mcx>(
                     // brute-force count.
                     let mut nmatch = 0i32;
                     for i in 0..nvalues {
-                        let res = fmgr::function_call_invoke::call(
+                        let bin = slot_value_canon(&sslot.values, canon.as_ref(), i as usize, mcx)?;
+                        let res = fmgr::function_call_invoke_datum::call(
+                            mcx,
                             opproc_oid,
                             collation,
-                            &[
-                                NullableDatum::value(sslot.values[i as usize]),
-                                NullableDatum::value(constval),
-                            ],
+                            &[bin, constval.clone_in(mcx)?],
+                            None,
                         )?;
                         if !res.1 && res.0.as_bool() {
                             nmatch += 1;
@@ -484,7 +583,7 @@ pub(crate) fn scalarineqsel<'mcx>(
     iseq: bool,
     collation: Oid,
     vardata: &VariableStatData,
-    constval: Datum,
+    constval: &DatumV<'mcx>,
     consttype: Oid,
 ) -> PgResult<f64> {
     let stats_tuple = match vardata.stats_tuple {

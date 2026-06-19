@@ -582,7 +582,7 @@ fn prefix_selectivity<'mcx>(
         true,
         true,
         collation,
-        const_word(&prefixcon.constvalue),
+        &prefixcon.constvalue,
         prefixcon.consttype,
     )?;
 
@@ -604,7 +604,7 @@ fn prefix_selectivity<'mcx>(
             false,
             false,
             collation,
-            const_word(&greaterstr.constvalue),
+            &greaterstr.constvalue,
             greaterstr.consttype,
         )?;
         // ineq_histogram_selectivity worked before, it shouldn't fail now.
@@ -766,21 +766,6 @@ fn charinc(lastchar: &mut [u8]) -> bool {
  * patternsel_common + entry points (like_support.c).
  * ------------------------------------------------------------------------- */
 
-/// Extract the bare ABI word of a const value for the histogram/MCV comparison
-/// boundary. A by-value scalar IS its word; a by-reference text/bytea value
-/// compared against ACTUAL histogram/MCV slot values is the selfuncs
-/// by-reference value-carrier follow-on (WALL 1ai, shared with `var_eq_const`):
-/// the slot values are bare pointer words from the C-shaped `pg_statistic`
-/// tuple, so a `ByRef` const can only cross once that carrier is threaded. The
-/// extraction is deferred to actual use; on a relation without ANALYZE stats the
-/// histogram/MCV slots are empty, so the word is never dereferenced.
-fn const_word(v: &Datum<'_>) -> WordDatum {
-    match v {
-        Datum::ByVal(w) => WordDatum::from_usize(*w),
-        _ => WordDatum::from_usize(0),
-    }
-}
-
 /// The bare ABI word of a by-value const, or `None` for a by-reference value
 /// (which cannot cross the bare-word histogram/MCV fmgr lane — WALL 1ai). The
 /// caller takes C's histogram/MCV-free path when this is `None`.
@@ -933,9 +918,15 @@ fn patternsel_common<'mcx>(
         // `var_eq_const`'s MCV loop documents). Until it lands, a by-reference
         // const can only take the histogram/MCV-free heuristic path, which is
         // exactly C's `selec < 0` (no usable histogram) + empty-MCV outcome.
-        let constval = match const_word_opt(&patt.constvalue) {
-            Some(w) => w,
-            None => {
+        // The pattern operator (LIKE/regex) compares the pattern const against
+        // the column's histogram/MCV slot values. The slot values are bare
+        // pointer words (deconstruct_array offsets) from the C-shaped
+        // `pg_statistic` tuple, which the pattern proc cannot dereference; so a
+        // by-reference pattern const still takes C's histogram/MCV-free
+        // heuristic path. (The const itself now crosses by reference, but the
+        // bin side cannot — WALL 1ai.)
+        if const_word_opt(&patt.constvalue).is_none() {
+            {
                 // By-reference const: no histogram/MCV comparison possible, so
                 // estimate from the fixed prefix and pattern remainder alone
                 // (C's `hist_size < 100`, `selec < 0` => `selec = heursel`
@@ -962,14 +953,14 @@ fn patternsel_common<'mcx>(
                 crate::examine::release_variable_stats(vardata);
                 return Ok(result);
             }
-        };
+        }
 
         // Try to use the histogram entries to get selectivity.
         if !OidIsValid(opfuncid) {
             opfuncid = lsc::get_opcode::call(oprid)?;
         }
         let (mut selec, hist_size) =
-            histogram_selectivity(mcx, &vardata, opfuncid, collation, constval, true, 10, 1)?;
+            histogram_selectivity(mcx, &vardata, opfuncid, collation, &patt.constvalue, true, 10, 1)?;
 
         // If not at least 100 entries, use the heuristic method.
         if hist_size < 100 {
@@ -1002,7 +993,7 @@ fn patternsel_common<'mcx>(
         // Add up the MCV fractions satisfying MCV OP PATTERN (and the total MCV
         // fraction).
         let (mcv_selec, sumcommon) =
-            mcv_selectivity(mcx, &vardata, opfuncid, collation, constval, true)?;
+            mcv_selectivity(mcx, &vardata, opfuncid, collation, &patt.constvalue, true)?;
 
         // Merge MCV and histogram results: the histogram covers only the
         // non-null values not listed in MCV.

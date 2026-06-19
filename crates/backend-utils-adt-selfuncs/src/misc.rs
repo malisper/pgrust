@@ -698,8 +698,11 @@ pub fn generic_restriction_selectivity<'mcx>(
 
     let mut selec;
     if let Some(c) = other.as_const() {
-        // Variable is being compared to a known non-null constant.
-        let constval = types_datum::datum::Datum::from_usize(c.constvalue.as_usize());
+        // Variable is being compared to a known non-null constant. The constant
+        // crosses the MCV/histogram comparison fmgr boundary as its canonical
+        // image (by-value word OR by-reference referent) via the
+        // by-reference-capable `*_datum` lane.
+        let constval = &c.constvalue;
         let opproc_oid = lsc::get_opcode::call(oproid)?;
 
         // Selectivity for the column's most common values.
