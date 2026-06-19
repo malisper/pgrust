@@ -78,7 +78,14 @@ fn generate_series_step_int4<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) 
             1
         };
         // C: GenerateSeriesInt4::new validates step != 0 (ereport on zero).
-        let state = GenerateSeriesInt4::new(start, finish, step).expect("generate_series step");
+        // Raise the hard ereport through the PGFunction dispatch boundary
+        // (`invoke_pgfunction` catch_unwind) so the structured `PgError` —
+        // sqlstate + "step size cannot equal zero" — reaches the client, rather
+        // than `.expect()` panicking with a Debug-formatted string.
+        let state = match GenerateSeriesInt4::new(start, finish, step) {
+            Ok(state) => state,
+            Err(e) => std::panic::panic_any(e),
+        };
         init_MultiFuncCall(fcinfo).expect("init_MultiFuncCall");
         let fctx = erase_user_fctx(mcx, state);
         let funcctx = per_MultiFuncCall(fcinfo).expect("per_MultiFuncCall");
@@ -134,8 +141,17 @@ fn generate_series_step_int8<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) 
         } else {
             1
         };
-        backend_utils_adt_int8::generate_series_int8_check_step(step)
-            .expect("generate_series int8 step");
+        // C: if (step == 0) ereport(ERROR, "step size cannot equal zero").
+        // This is a hard ereport from a bare-Datum PGFunction frame; raise it
+        // through the one dispatch point every PGFunction crosses
+        // (`invoke_pgfunction`'s `catch_unwind`), which downcasts the structured
+        // `PgError` back into a proper ereport — exactly as `pg_input_error_info`
+        // and the fmgr-builtin adapters do. Using `.expect()` here would instead
+        // panic with a Debug-formatted string, losing the sqlstate/message and
+        // surfacing the raw `PgError { .. }` dump to the client.
+        if let Err(e) = backend_utils_adt_int8::generate_series_int8_check_step(step) {
+            std::panic::panic_any(e);
+        }
         init_MultiFuncCall(fcinfo).expect("init_MultiFuncCall");
         let fctx = erase_user_fctx(
             mcx,
