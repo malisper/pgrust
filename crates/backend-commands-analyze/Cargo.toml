@@ -53,7 +53,6 @@ backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams
 backend-parser-parse-oper = { path = "../backend-parser-parse-oper" }
 backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
 backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
-backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }
 backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
 backend-utils-adt-scalar-datum-core = { path = "../backend-utils-adt-scalar-datum-core" }
 backend-utils-cache-attoptcache = { path = "../backend-utils-cache-attoptcache" }

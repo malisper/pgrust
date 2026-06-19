@@ -6093,7 +6093,6 @@ dependencies = [
  "backend-access-heap-hio-seams",
  "backend-access-heap-vacuumlazy-seams",
  "backend-access-heap-visibilitymap",
- "backend-access-index-genam-seams",
  "backend-access-index-indexam-seams",
  "backend-access-table-table",
  "backend-access-table-tableam",

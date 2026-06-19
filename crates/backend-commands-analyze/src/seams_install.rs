@@ -14,13 +14,9 @@
 //!     `CatalogTupleInsertWithInfo` / `CatalogTupleUpdateWithInfo`
 //!     (catalog/indexing.c, ported);
 //!   * `compute_ext_statistics_rows` / `build_relation_ext_statistics` → the
-//!     extended-statistics framework (statistics/extended_stats.c) is unported.
-//!     A relation with NO `pg_statistic_ext` objects needs neither (the C scan
-//!     yields an empty list → `ComputeExtStatisticsRows` returns 0 and
-//!     `BuildRelationExtStatistics` is a no-op). We detect that case faithfully
-//!     with `RelationGetStatExtList`'s `pg_statistic_ext` scan and short-circuit;
-//!     a relation that actually has extended-statistics objects panics loudly
-//!     until extended_stats.c is ported.
+//!     extended_stats.c entry points, installed by their real owner crate
+//!     `backend-statistics-extended-stats` (real `pg_statistic_ext` scan with
+//!     the empty-case early return), NOT here.
 //!
 //! The remaining outward seams (`pgstat_report_analyze` — owner
 //! pgstat_relation.c; the FDW analyze hook; ANALYZE-only `index_vacuum_cleanup`;
@@ -50,40 +46,8 @@ pub fn init_seams() {
         },
     );
 
-    // ComputeExtStatisticsRows(onerel, natts, vacattrstats): 0 when there are no
-    // extended-statistics objects on the relation. `ComputeExtStatisticsRows`
-    // returns 0 immediately when natts == 0; otherwise it scans pg_statistic_ext
-    // and (with an empty list) computes `300 * 0 == 0`.
-    rt::compute_ext_statistics_rows::set(|onerel, natts, _vacattrstats| {
-        if natts == 0 {
-            return Ok(0);
-        }
-        let statexts = backend_access_index_genam_seams::relcache_scan_pg_statistic_ext::call(
-            onerel.rd_id,
-        )?;
-        if statexts.is_empty() {
-            return Ok(0);
-        }
-        Err(types_error::PgError::error(
-            "extended statistics are not yet supported (statistics/extended_stats.c unported)",
-        ))
-    });
-
-    // BuildRelationExtStatistics(onerel, ...): a no-op when the relation has no
-    // extended-statistics objects (the C `foreach` over an empty statslist does
-    // nothing).
-    rt::build_relation_ext_statistics::set(
-        |onerel, _inh, _totalrows, _numrows, _rows, _natts, _vacattrstats| {
-            let statexts =
-                backend_access_index_genam_seams::relcache_scan_pg_statistic_ext::call(
-                    onerel.rd_id,
-                )?;
-            if statexts.is_empty() {
-                return Ok(());
-            }
-            Err(types_error::PgError::error(
-                "extended statistics are not yet supported (statistics/extended_stats.c unported)",
-            ))
-        },
-    );
+    // ComputeExtStatisticsRows / BuildRelationExtStatistics are installed by
+    // their real owner crate `backend-statistics-extended-stats` (the
+    // extended_stats.c entry-point port: real pg_statistic_ext scan + empty-case
+    // early return), not here.
 }
