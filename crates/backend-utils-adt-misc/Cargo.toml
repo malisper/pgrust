@@ -44,6 +44,8 @@ backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" 
 backend-rewrite-rewritehandler-seams = { path = "../backend-rewrite-rewritehandler-seams" }
 # `SearchSysCache1(TYPEOID)` projection pg_basetype's domain-walk step reads.
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+# parse_ident's text[] result assembly (build_text_array_nullable).
+backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
 
 # This unit's own SRF data-production seams (fd.c walk / system_fk_info table).
 backend-utils-adt-misc-seams = { path = "../backend-utils-adt-misc-seams" }

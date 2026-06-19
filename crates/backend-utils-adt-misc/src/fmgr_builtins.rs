@@ -29,8 +29,10 @@
 //!
 //! The set-returning / variadic `misc.c` rows (`pg_num_nulls`/`pg_num_nonnulls`
 //! variadic shapes, `pg_get_keywords`, `pg_get_catalog_foreign_keys`,
-//! `parse_ident`, `pg_tablespace_databases`, `pg_collation_for`/`pg_typeof`/
-//! `any_value_transfn`) are not part of this lane's row list.
+//! `pg_tablespace_databases`, `pg_collation_for`/`pg_typeof`/
+//! `any_value_transfn`) are not part of this lane's row list. `parse_ident`
+//! (OID 1268) IS registered: its `text[]` result is assembled from the
+//! identifier parts via the arrayfuncs `build_text_array_nullable` seam.
 
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
@@ -299,6 +301,37 @@ fn fc_pg_basetype(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     }
 }
 
+/// `parse_ident(text, bool)` (misc.c:860) -> `text[]` (OID 1268).
+///
+/// Reads the qualified-name `text` arg and the `strict` `bool` arg off the
+/// frame, runs the [`crate::parse_ident`] scanner to split it into identifier
+/// parts, and assembles the parts into a `text[]` `ArrayType` image via the
+/// arrayfuncs `build_text_array_nullable` seam (C: the deferred
+/// `accumArrayResult`/`makeArrayResult` assembly over `CStringGetTextDatum`
+/// element Datums). The flat array varlena rides back on the by-ref `Varlena`
+/// lane (C `PG_RETURN_ARRAYTYPE_P`). Both args are strict (`proisstrict`
+/// default `'t'`), so the frame always carries non-NULL words.
+fn fc_parse_ident(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let qualname = arg_text_bytes(fcinfo, 0).to_vec();
+    let strict = arg_bool(fcinfo, 1);
+    let m = scratch_mcx();
+    let parts = match crate::parse_ident(m.mcx(), &qualname, strict) {
+        Ok(parts) => parts,
+        Err(e) => raise(e),
+    };
+    // Each parsed part is a non-null `text` element (C `CStringGetTextDatum`).
+    let elems: Vec<Option<&[u8]>> = parts.iter().map(|p| Some(p.as_slice())).collect();
+    let image = match backend_utils_adt_arrayfuncs_seams::build_text_array_nullable::call(
+        m.mcx(),
+        &elems,
+    ) {
+        Ok(img) => img.as_slice().to_vec(),
+        Err(e) => raise(e),
+    };
+    fcinfo.set_ref_result(RefPayload::Varlena(image));
+    Datum::from_usize(0)
+}
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -389,5 +422,7 @@ pub fn register_misc_builtins() {
         builtin(6210, "pg_input_is_valid", 2, true, false, fc_pg_input_is_valid),
         // 6315 pg_basetype(regtype)            -> regtype
         builtin(6315, "pg_basetype", 1, true, false, fc_pg_basetype),
+        // 1268 parse_ident(text, bool)         -> text[]
+        builtin(1268, "parse_ident", 2, true, false, fc_parse_ident),
     ]);
 }

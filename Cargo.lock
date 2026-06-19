@@ -19078,6 +19078,7 @@ dependencies = [
  "backend-parser-small1",
  "backend-rewrite-rewritehandler-seams",
  "backend-storage-ipc-latch-seams",
+ "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-adt-format-type-seams",
  "backend-utils-adt-misc-seams",
  "backend-utils-adt-ruleutils-seams",
