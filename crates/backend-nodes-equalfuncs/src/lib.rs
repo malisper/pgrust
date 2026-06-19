@@ -1502,9 +1502,246 @@ pub fn equal_node(a: &Node<'_>, b: &Node<'_>) -> bool {
 
 /// Install the central `equal()` seams owned by this unit. Called once at
 /// single-threaded startup from `seams-init`.
+/// Node-opaque flip seam (`types_nodes::opaque_node::node_equal_seam`): the
+/// installable per-payload equality comparator that the *gated* generated
+/// `NodePayload::equal_dyn` bodies route through (node-opaque P3 codegen, behind
+/// the off-by-default `node_payload_codegen` feature). The generated `equal_dyn`
+/// has already tag-checked both sides equal and handed us the shared
+/// [`NodeTag`] plus the two `repr(transparent)` payload data pointers
+/// (`__payload_ptr()`) — exactly the witnesses C's `equal()` dispatch uses.
+///
+/// This adapter reconstructs the typed payload refs from those pointers and
+/// calls the *same* per-payload comparators `equal_node` already uses. For the
+/// whole `Expr` family the payload is the nested [`Expr`] enum (the `Expr`
+/// adapter wraps `Expr`, with `node_tag() == Expr::expr_tag()`), so any
+/// Expr-leaf tag routes through `equal_expr`. The non-Expr raw/parse arms each
+/// transmute to their typed payload struct and call their `_equalXxx` port.
+///
+/// SAFETY: the gated caller guarantees both pointers address a live payload of
+/// the variant named by `tag` (the tag<->adapter bijection, codegen §1.3), and
+/// `repr(transparent)` puts the payload at the adapter's address. The lifetime
+/// is erased to `'_` here (the gated trait fixes a single shared `'mcx`), which
+/// is sound because every comparator only *reads* through the refs.
+///
+/// In the normal (un-gated) build NOTHING calls `node_equal_seam`, so this is
+/// dead but harmless: installing it is a verified no-op for the live `Node`
+/// enum. It NEVER fabricates an answer — an un-ported same-tag family panics
+/// exactly as `equal_node`'s tail arm does.
+fn node_equal_seam_adapter(
+    tag: types_nodes::nodes::NodeTag,
+    a: *const (),
+    b: *const (),
+) -> bool {
+    use types_nodes::rawnodes;
+    // Helper: reborrow a payload pointer as `&T` (single shared erased lifetime).
+    // SAFETY (per call site): the gated caller passes a `__payload_ptr()` to a
+    // live `T`-shaped payload selected by `tag`.
+    macro_rules! p {
+        ($ptr:expr, $T:ty) => {
+            unsafe { &*($ptr as *const $T) }
+        };
+    }
+    match tag {
+        // The entire `Expr *` discriminated union: payload is the `Expr` enum.
+        // Any Expr-leaf tag (T_Var, T_OpExpr, ...) lands here.
+        ntag::T_Var
+        | ntag::T_Const
+        | ntag::T_Param
+        | ntag::T_Aggref
+        | ntag::T_GroupingFunc
+        | ntag::T_WindowFunc
+        | ntag::T_SubscriptingRef
+        | ntag::T_FuncExpr
+        | ntag::T_NamedArgExpr
+        | ntag::T_OpExpr
+        | ntag::T_DistinctExpr
+        | ntag::T_NullIfExpr
+        | ntag::T_ScalarArrayOpExpr
+        | ntag::T_BoolExpr
+        | ntag::T_SubLink
+        | ntag::T_SubPlan
+        | ntag::T_AlternativeSubPlan
+        | ntag::T_FieldSelect
+        | ntag::T_FieldStore
+        | ntag::T_RelabelType
+        | ntag::T_CoerceViaIO
+        | ntag::T_ArrayCoerceExpr
+        | ntag::T_ConvertRowtypeExpr
+        | ntag::T_CollateExpr
+        | ntag::T_CaseExpr
+        | ntag::T_CaseWhen
+        | ntag::T_CaseTestExpr
+        | ntag::T_ArrayExpr
+        | ntag::T_RowExpr
+        | ntag::T_RowCompareExpr
+        | ntag::T_CoalesceExpr
+        | ntag::T_MinMaxExpr
+        | ntag::T_SQLValueFunction
+        | ntag::T_XmlExpr
+        | ntag::T_JsonValueExpr
+        | ntag::T_JsonConstructorExpr
+        | ntag::T_JsonIsPredicate
+        | ntag::T_JsonExpr
+        | ntag::T_NullTest
+        | ntag::T_BooleanTest
+        | ntag::T_MergeSupportFunc
+        | ntag::T_CoerceToDomain
+        | ntag::T_CoerceToDomainValue
+        | ntag::T_SetToDefault
+        | ntag::T_CurrentOfExpr
+        | ntag::T_NextValueExpr
+        | ntag::T_InferenceElem
+        | ntag::T_PlaceHolderVar
+        | ntag::T_ReturningExpr => equal_expr(p!(a, Expr), p!(b, Expr)),
+
+        // Value leaves (`#[derive(PgNode)]` per-struct comparator).
+        ntag::T_Integer => p!(a, types_nodes::value::Integer)
+            .equal_node(p!(b, types_nodes::value::Integer)),
+        ntag::T_Float => {
+            p!(a, types_nodes::value::Float).equal_node(p!(b, types_nodes::value::Float))
+        }
+        ntag::T_Boolean => p!(a, types_nodes::value::Boolean)
+            .equal_node(p!(b, types_nodes::value::Boolean)),
+        ntag::T_String => p!(a, types_nodes::value::StringNode)
+            .equal_node(p!(b, types_nodes::value::StringNode)),
+        ntag::T_BitString => p!(a, types_nodes::value::BitString)
+            .equal_node(p!(b, types_nodes::value::BitString)),
+
+        // Query-tree / parse / rewrite node family — the exact comparators
+        // `equal_node`'s switch calls, reached here by typed payload ref.
+        ntag::T_TargetEntry => {
+            equal_target_entry(p!(a, TargetEntry), p!(b, TargetEntry))
+        }
+        ntag::T_TableFunc => equal_table_func(
+            p!(a, types_nodes::primnodes::TableFunc),
+            p!(b, types_nodes::primnodes::TableFunc),
+        ),
+        ntag::T_CTECycleClause => equal_cte_cycle_clause(
+            p!(a, rawnodes::CTECycleClause),
+            p!(b, rawnodes::CTECycleClause),
+        ),
+        ntag::T_SortGroupClause => {
+            equal_sort_group_clause(p!(a, SortGroupClause), p!(b, SortGroupClause))
+        }
+        ntag::T_Query => equal_query(
+            p!(a, types_nodes::copy_query::Query),
+            p!(b, types_nodes::copy_query::Query),
+        ),
+        ntag::T_RangeTblEntry => equal_range_tbl_entry(
+            p!(a, types_nodes::parsenodes::RangeTblEntry),
+            p!(b, types_nodes::parsenodes::RangeTblEntry),
+        ),
+        ntag::T_RTEPermissionInfo => equal_rte_permission_info(
+            p!(a, types_nodes::parsenodes::RTEPermissionInfo),
+            p!(b, types_nodes::parsenodes::RTEPermissionInfo),
+        ),
+        ntag::T_RangeTblFunction => equal_range_tbl_function(
+            p!(a, rawnodes::RangeTblFunction),
+            p!(b, rawnodes::RangeTblFunction),
+        ),
+        ntag::T_RangeTblRef => {
+            equal_range_tbl_ref(p!(a, rawnodes::RangeTblRef), p!(b, rawnodes::RangeTblRef))
+        }
+        ntag::T_FromExpr => {
+            equal_from_expr(p!(a, rawnodes::FromExpr), p!(b, rawnodes::FromExpr))
+        }
+        ntag::T_JoinExpr => {
+            equal_join_expr(p!(a, rawnodes::JoinExpr), p!(b, rawnodes::JoinExpr))
+        }
+        ntag::T_OnConflictExpr => equal_on_conflict_expr(
+            p!(a, rawnodes::OnConflictExpr),
+            p!(b, rawnodes::OnConflictExpr),
+        ),
+        ntag::T_MergeAction => {
+            equal_merge_action(p!(a, rawnodes::MergeAction), p!(b, rawnodes::MergeAction))
+        }
+        ntag::T_GroupingSet => {
+            equal_grouping_set(p!(a, rawnodes::GroupingSet), p!(b, rawnodes::GroupingSet))
+        }
+        ntag::T_WindowClause => {
+            equal_window_clause(p!(a, rawnodes::WindowClause), p!(b, rawnodes::WindowClause))
+        }
+        ntag::T_RowMarkClause => equal_row_mark_clause(
+            p!(a, rawnodes::RowMarkClause),
+            p!(b, rawnodes::RowMarkClause),
+        ),
+        ntag::T_WithCheckOption => equal_with_check_option(
+            p!(a, rawnodes::WithCheckOption),
+            p!(b, rawnodes::WithCheckOption),
+        ),
+        ntag::T_CommonTableExpr => equal_common_table_expr(
+            p!(a, rawnodes::CommonTableExpr),
+            p!(b, rawnodes::CommonTableExpr),
+        ),
+        ntag::T_SetOperationStmt => equal_set_operation_stmt(
+            p!(a, rawnodes::SetOperationStmt),
+            p!(b, rawnodes::SetOperationStmt),
+        ),
+        ntag::T_Alias => equal_alias(p!(a, rawnodes::Alias), p!(b, rawnodes::Alias)),
+        ntag::T_ColumnRef => {
+            equal_column_ref(p!(a, rawnodes::ColumnRef), p!(b, rawnodes::ColumnRef))
+        }
+        ntag::T_ParamRef => {
+            equal_param_ref(p!(a, rawnodes::ParamRef), p!(b, rawnodes::ParamRef))
+        }
+        ntag::T_A_Expr => equal_a_expr(p!(a, rawnodes::A_Expr), p!(b, rawnodes::A_Expr)),
+        ntag::T_A_Const => {
+            equal_a_const(p!(a, rawnodes::A_Const), p!(b, rawnodes::A_Const))
+        }
+        ntag::T_FuncCall => {
+            equal_func_call(p!(a, rawnodes::FuncCall), p!(b, rawnodes::FuncCall))
+        }
+        ntag::T_A_Star => equal_a_star(p!(a, rawnodes::A_Star), p!(b, rawnodes::A_Star)),
+        ntag::T_A_Indices => {
+            equal_a_indices(p!(a, rawnodes::A_Indices), p!(b, rawnodes::A_Indices))
+        }
+        ntag::T_A_Indirection => equal_a_indirection(
+            p!(a, rawnodes::A_Indirection),
+            p!(b, rawnodes::A_Indirection),
+        ),
+        ntag::T_A_ArrayExpr => {
+            equal_a_array_expr(p!(a, rawnodes::A_ArrayExpr), p!(b, rawnodes::A_ArrayExpr))
+        }
+        ntag::T_TypeName => {
+            equal_type_name(p!(a, rawnodes::TypeName), p!(b, rawnodes::TypeName))
+        }
+        ntag::T_TypeCast => {
+            equal_type_cast(p!(a, rawnodes::TypeCast), p!(b, rawnodes::TypeCast))
+        }
+        ntag::T_CollateClause => equal_collate_clause(
+            p!(a, rawnodes::CollateClause),
+            p!(b, rawnodes::CollateClause),
+        ),
+        ntag::T_ResTarget => {
+            equal_res_target(p!(a, rawnodes::ResTarget), p!(b, rawnodes::ResTarget))
+        }
+        ntag::T_MultiAssignRef => equal_multi_assign_ref(
+            p!(a, rawnodes::MultiAssignRef),
+            p!(b, rawnodes::MultiAssignRef),
+        ),
+        ntag::T_SortBy => equal_sort_by(p!(a, rawnodes::SortBy), p!(b, rawnodes::SortBy)),
+        ntag::T_WindowDef => {
+            equal_window_def(p!(a, rawnodes::WindowDef), p!(b, rawnodes::WindowDef))
+        }
+        // Same-tag node family not yet reachable through equal() in the ported
+        // layer — mirror `equal_node`'s tail: seam-and-panic, never a silent
+        // wrong answer.
+        _ => panic!(
+            "equalfuncs: node_equal_seam not yet ported for node type {:?}",
+            tag
+        ),
+    }
+}
+
 pub fn init_seams() {
     backend_nodes_equalfuncs_seams::equal_expr::set(equal_expr);
     backend_nodes_equalfuncs_seams::equal_node::set(equal_node);
+
+    // Node-opaque flip seam: the gated `NodePayload::equal_dyn` comparator entry
+    // (consumed only under the off-by-default `node_payload_codegen` feature).
+    // Installing it now is an additive, verified no-op for the live `Node` enum
+    // (nothing in the normal build calls `node_equal_seam`).
+    types_nodes::opaque_node::install_node_equal_seam(node_equal_seam_adapter);
     backend_nodes_equalfuncs_seams::equal_expr_list::set(equal_expr_list_impl);
     backend_nodes_equalfuncs_seams::equal_targetentry_list::set(equal_targetentry_list_impl);
     backend_nodes_equalfuncs_seams::equal_sortgroupclause_list::set(equal_sortgroupclause_list_impl);
