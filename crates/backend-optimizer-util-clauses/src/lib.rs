@@ -92,6 +92,18 @@ pub use srf_inline::inline_set_returning_function;
 pub fn init_seams() {
     backend_optimizer_util_clauses_seams::contain_subplans::set(grounded::contain_subplans_slice);
 
+    // `expression_returns_set_rows(root, (Node *) clause)` (clauses.c:287) —
+    // owned here. The costsize-seams declaration carries the clause as a
+    // `NodeId` into the PlannerInfo arena; resolve it and delegate to the
+    // owner body. The pathnode-seams adapter (installed by costsize) forwards
+    // to this one, so the ProjectSet / SRF cost path reaches the real logic.
+    backend_optimizer_path_costsize_seams::expression_returns_set_rows::set(|root, node| {
+        grounded::expression_returns_set_rows(Some(root.node(node)))
+            .unwrap_or_else(|e| {
+                panic!("expression_returns_set_rows: {}", e.message())
+            })
+    });
+
     // The init-subselect cycle-break seam `find_forced_null_var_expr`
     // (`find_forced_null_var((Node *) clause)`, clauses.c) — owned here (the
     // impl is `grounded::find_forced_null_var`), installed for

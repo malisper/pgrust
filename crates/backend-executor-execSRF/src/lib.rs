@@ -664,29 +664,156 @@ fn ExecInitFunctionResultSet<'mcx>(
 /// `ExecMakeFunctionResultSet(fcache, econtext, argContext, &isNull, &isDone)`
 /// (execSRF.c:496) — evaluate a targetlist SRF and return one result row's
 /// `(Datum, isNull, isDone)`. nodeProjectSet.c.
+///
+/// The ValuePerCall protocol (one `(Datum, isnull, isDone)` per call, the
+/// function reporting `ExprMultipleResult` until exhaustion) is ported in full;
+/// it is the path `generate_series`/`unnest` take. The Materialize-mode leg
+/// (`SFRM_Materialize`: the function returns a whole tuplestore which we then
+/// drain row-by-row through `funcResultStore`/`funcResultSlot`) requires
+/// `ExecPrepareTuplestoreResult` + a `MakeSingleTupleTableSlot` slot fed by
+/// `tuplestore_gettupleslot`; that slot-drain crosses the owned-EState slot
+/// pool model (the C `funcResultSlot` is a raw `TupleTableSlot *`) and panics
+/// precisely until that leg lands.
 fn ExecMakeFunctionResultSet<'mcx>(
-    _fcache: &mut SetExprState<'mcx>,
-    _econtext: EcxtId,
-    _arg_context: &MemoryContext,
-    _estate: &mut EStateData<'mcx>,
+    fcache: &mut SetExprState<'mcx>,
+    econtext: EcxtId,
+    arg_context: &MemoryContext,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<(Datum<'mcx>, bool, ExprDoneCond)> {
-    // The ProjectSet (targetlist-SRF) value-per-call + tuplestore-drain loop
-    // shares the same executor-frame SRF dispatch as the table-function path.
-    // It additionally needs `funcResultSlot` (a TupleTableSlot) drained from the
-    // funcResultStore via `tuplestore_gettupleslot` + `slot_getattr` /
-    // `ExecFetchSlotHeapTupleDatum`, plus `RegisterExprContextCallback` for the
-    // mid-series shutdown. The slot-drain leg crosses the execTuples slot owner;
-    // it is wired by nodeProjectSet's own tests today. The table-function path
-    // (`ExecMakeTableFunctionResult`) is the K2 milestone and is fully wired
-    // above; the ProjectSet entry is left as the documented loud boundary so it
-    // is not a silent fake.
-    Err(ereport(ERROR)
-        .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-        .errmsg(
-            "ExecMakeFunctionResultSet (targetlist-SRF drain) not yet wired \
-             (table-function path ExecMakeTableFunctionResult is the K2 milestone)",
-        )
-        .into_error())
+    let _ = arg_context;
+
+    // C `restart:` — re-entered after a Materialize-mode call sets up the
+    // tuplestore. In this port the Materialize leg panics, so the loop body
+    // runs at most once after the (unreachable here) tuplestore setup.
+    loop {
+        // Guard against stack overflow due to overly complex expressions.
+        backend_tcop_postgres_seams::check_stack_depth::call()?;
+
+        // If a previous call returned a set result as a tuplestore, continue
+        // reading rows from it until empty (execSRF.c:519).
+        if fcache.funcResultStore.is_some() {
+            // The funcResultSlot drain (tuplestore_gettupleslot + slot_getattr /
+            // ExecFetchSlotHeapTupleDatum over a MakeSingleTupleTableSlot slot)
+            // crosses the owned-EState slot-pool boundary; left as the precise
+            // loud boundary (only reachable via the Materialize leg below).
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg(
+                    "ExecMakeFunctionResultSet: SFRM_Materialize tuplestore drain \
+                     (funcResultStore/funcResultSlot) is not yet wired",
+                )
+                .into_error());
+        }
+
+        // Collect the current argument values into fcinfo, unless we already
+        // did so on a previous call of this set-valued function.
+        if !fcache.setArgsValid {
+            // ExecEvalFuncArgs(fcinfo, fcache->args, econtext) — evaluated in
+            // argContext so ValuePerCall SRFs don't reference freed memory.
+            exec_eval_func_args(fcache, econtext, estate)?;
+        } else {
+            // Reset flag (we may set it again below).
+            fcache.setArgsValid = false;
+        }
+
+        // If function is strict and any argument is NULL, skip calling it; a
+        // strict SRF's result for NULL is an empty set (execSRF.c:625).
+        let mut callit = true;
+        if fcache.func.fn_strict {
+            let fcinfo = fcache
+                .fcinfo
+                .as_ref()
+                .expect("ExecMakeFunctionResultSet: fcinfo not initialized");
+            if fcinfo.args.iter().any(|a| a.isnull) {
+                callit = false;
+            }
+        }
+
+        let (result, result_isnull, mut this_isdone, return_mode);
+        if callit {
+            // Thread a live ReturnSetInfo onto the call frame, dispatch, recover.
+            let mut rsinfo = ReturnSetInfo {
+                econtext: Some(econtext),
+                expectedDesc: fcache
+                    .funcResultDesc
+                    .as_deref()
+                    .map(|d| mcx::alloc_in(estate.es_query_cxt, d.clone_in(estate.es_query_cxt)?))
+                    .transpose()?,
+                allowedModes: SFRM_ValuePerCall | SFRM_Materialize,
+                returnMode: SetFunctionReturnMode::ValuePerCall,
+                isDone: ExprDoneCond::ExprSingleResult,
+                setResult: Tuplestorestate::default(),
+                setDesc: None,
+            };
+            let foid = fcache.func.fn_oid;
+            let fcinfo = fcache
+                .fcinfo
+                .as_mut()
+                .expect("ExecMakeFunctionResultSet: fcinfo not initialized");
+            fcinfo.isnull = false;
+            fcinfo.fn_mcxt = Some(estate.es_query_cxt);
+            fcinfo.resultinfo = Some(core::mem::take(&mut rsinfo));
+            let res = srf_invoke_by_oid(foid, fcinfo)?;
+            let isnull = fcinfo.isnull;
+            rsinfo = fcinfo
+                .resultinfo
+                .take()
+                .expect("ExecMakeFunctionResultSet: resultinfo round-trip");
+            result = res;
+            result_isnull = isnull;
+            this_isdone = rsinfo.isDone;
+            return_mode = rsinfo.returnMode;
+            // The Materialize leg would call ExecPrepareTuplestoreResult here;
+            // route it to the loud boundary below.
+            if matches!(return_mode, SetFunctionReturnMode::Materialize) {
+                // Protocol cross-check: materialize mode must report
+                // ExprSingleResult (execSRF.c:660).
+                if this_isdone != ExprDoneCond::ExprSingleResult {
+                    return Err(ereport(ERROR)
+                        .errcode(ERRCODE_E_R_I_E_SRF_PROTOCOL_VIOLATED)
+                        .errmsg("table-function protocol for materialize mode was not followed")
+                        .into_error());
+                }
+                if rsinfo.setResult.payload().is_some() {
+                    return Err(ereport(ERROR)
+                        .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                        .errmsg(
+                            "ExecMakeFunctionResultSet: SFRM_Materialize result preparation \
+                             (ExecPrepareTuplestoreResult) is not yet wired",
+                        )
+                        .into_error());
+                }
+                // setResult left null ⇒ empty set.
+                return Ok((Datum::default(), true, ExprDoneCond::ExprEndResult));
+            }
+        } else {
+            // Strict SRF with a NULL argument ⇒ empty set.
+            result = Datum::default();
+            result_isnull = true;
+            this_isdone = ExprDoneCond::ExprEndResult;
+            return_mode = SetFunctionReturnMode::ValuePerCall;
+        }
+
+        // ValuePerCall protocol bookkeeping (execSRF.c:638).
+        debug_assert!(matches!(return_mode, SetFunctionReturnMode::ValuePerCall));
+        if this_isdone != ExprDoneCond::ExprEndResult {
+            // Save the current argument values to re-use on the next call when
+            // the function reported it has more rows to come.
+            if this_isdone == ExprDoneCond::ExprMultipleResult {
+                fcache.setArgsValid = true;
+                // C registers a ShutdownSetExpr cleanup callback here. In the
+                // owned model the ValuePerCall series holds no tuplestore to
+                // free (funcResultStore stays NULL), so the shutdown is a no-op;
+                // we record that "registration" without a raw-pointer callback.
+                fcache.shutdown_reg = true;
+            }
+        } else {
+            // Reflect the ExprEndResult in the caller's isdone (already set).
+            this_isdone = ExprDoneCond::ExprEndResult;
+        }
+
+        return Ok((result, result_isnull, this_isdone));
+    }
 }
 
 // ===========================================================================

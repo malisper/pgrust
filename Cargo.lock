@@ -9289,6 +9289,7 @@ dependencies = [
  "backend-executor-execExpr-seams",
  "backend-executor-execSRF-seams",
  "backend-nodes-core",
+ "backend-tcop-postgres-seams",
  "backend-utils-adt-int",
  "backend-utils-adt-int8",
  "backend-utils-adt-misc",
@@ -12985,6 +12986,7 @@ version = "0.0.0"
 dependencies = [
  "backend-nodes-core",
  "backend-nodes-equalfuncs-seams",
+ "backend-optimizer-path-costsize",
  "backend-optimizer-path-costsize-seams",
  "backend-optimizer-path-equivclass-ext-seams",
  "backend-optimizer-path-indxpath",

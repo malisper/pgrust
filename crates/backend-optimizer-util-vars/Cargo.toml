@@ -27,6 +27,9 @@ backend-optimizer-path-small-seams = { path = "../backend-optimizer-path-small-s
 # cost_incremental_sort's `bms_is_member(0, pull_varnos(root, em_expr))` —
 # declared in costsize-seams, owned here (var.c's pull_varnos).
 backend-optimizer-path-costsize-seams = { path = "../backend-optimizer-path-costsize-seams" }
+# split_pathtarget_at_srfs' set_pathtarget_cost_width on intermediate targets
+# (tlist.c:1122); costsize.c does not depend back on var.c, so no cycle.
+backend-optimizer-path-costsize = { path = "../backend-optimizer-path-costsize" }
 backend-nodes-equalfuncs-seams = { path = "../backend-nodes-equalfuncs-seams" }
 # fix_indexqual_operand reaches indxpath.c's strip_phvs_in_index_operand by a
 # direct edge (indxpath depends only on var-SEAMS, not this owner, so no cycle).

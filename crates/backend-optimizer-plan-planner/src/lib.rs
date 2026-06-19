@@ -1996,6 +1996,8 @@ fn grouping_planner<'mcx>(
         let has_sort = !root.sort_pathkeys.is_empty();
 
         // Fall through to the shared final-paths tail (C:1849-2169).
+        // The setop result tlist can't contain SRFs (asserted above), so no
+        // final_target SRF fix-up is possible here.
         return build_final_paths(
             mcx,
             run,
@@ -2004,6 +2006,9 @@ fn grouping_planner<'mcx>(
             &final_target,
             final_target_parallel_safe,
             has_sort,
+            false,
+            &[],
+            &[],
             false,
             limit_tuples,
             offset_est,
@@ -2264,7 +2269,7 @@ fn grouping_planner<'mcx>(
     // adjusted target for the preceding steps; otherwise sort_input_target =
     // final_target.
     let mut have_postponed_srfs = false;
-    let (sort_input_target, sort_input_target_parallel_safe) = if has_sort {
+    let (mut sort_input_target, sort_input_target_parallel_safe) = if has_sort {
         let sit = make_sort_input_target(run, root, &final_target, &mut have_postponed_srfs)?;
         let safe = is_target_exprs_parallel_safe(root, &sit.exprs);
         (sit, safe)
@@ -2275,7 +2280,7 @@ fn grouping_planner<'mcx>(
     // grouping_target: if there are active windows it's the make_window_input_target
     // (C:1697-1705); otherwise sort_input_target.
     let _ = has_window;
-    let (grouping_target, grouping_target_parallel_safe) = if !active_windows.is_empty() {
+    let (mut grouping_target, grouping_target_parallel_safe) = if !active_windows.is_empty() {
         let gt = make_window_input_target(root, &final_target, &active_windows)?;
         let safe = is_target_exprs_parallel_safe(root, &gt.exprs);
         (gt, safe)
@@ -2295,7 +2300,7 @@ fn grouping_planner<'mcx>(
     // through to create_grouping_paths too, but its sorted-Group / numGroups
     // estimation paths are exercised below; the plain-aggregate (hasAggs, no
     // GROUP BY) path — `SELECT count(*) FROM t` — is the fully-ported one.
-    let (scanjoin_target, scanjoin_target_parallel_safe) = if have_grouping {
+    let (mut scanjoin_target, scanjoin_target_parallel_safe) = if have_grouping {
         let sj = make_group_input_target(mcx, run, root, &final_target)?;
         let safe = is_target_exprs_parallel_safe(root, &sj.exprs);
         (sj, safe)
@@ -2304,22 +2309,81 @@ fn grouping_planner<'mcx>(
         (grouping_target.clone(), grouping_target_parallel_safe)
     };
 
-    // Targetlist SRFs (C:1733-1768). split_pathtarget_at_srfs is not ported.
+    // Targetlist SRFs (C:1733-1768). If there are any SRFs in the targetlist,
+    // separate each named PathTarget into SRF-computing and SRF-free targets:
+    // replace each named target with its SRF-free version, and remember the
+    // list of additional projection steps to add afterwards
+    // (split_pathtarget_at_srfs / adjust_paths_for_srfs).
+    let gflags = {
+        let parse = run.resolve(root.parse);
+        backend_optimizer_util_vars::tlist::SplitGroupingFlags {
+            has_group_rte: parse.hasGroupRTE,
+            has_grouping_sets: !parse.groupingSets.is_empty(),
+            group_rtindex: root.group_rtindex,
+        }
+    };
+    // Lists of split levels (each a list of PathTargets) per named target, used
+    // by adjust_paths_for_srfs after each upper-rel phase. For the no-SRF case
+    // only scanjoin_targets is populated (list_make1(scanjoin_target)).
+    let mut final_targets: Vec<PathTarget> = Vec::new();
+    let mut final_targets_contain_srfs: Vec<bool> = Vec::new();
+    let mut sort_input_targets: Vec<PathTarget> = Vec::new();
+    let mut sort_input_targets_contain_srfs: Vec<bool> = Vec::new();
+    let mut grouping_targets: Vec<PathTarget> = Vec::new();
+    let mut grouping_targets_contain_srfs: Vec<bool> = Vec::new();
+    let scanjoin_targets: Vec<PathTarget>;
+    let scanjoin_targets_contain_srfs: Vec<bool>;
+
     if has_target_srfs {
-        panic!(
-            "grouping_planner: targetlist set-returning functions need \
-             split_pathtarget_at_srfs (planner.c:1733) — not ported"
+        use backend_optimizer_util_vars::tlist::{
+            split_pathtarget_at_srfs, split_pathtarget_at_srfs_grouping,
+        };
+        // final_target doesn't recompute any SRFs in sort_input_target.
+        let (ft, ftc) =
+            split_pathtarget_at_srfs(root, &final_target, Some(&sort_input_target), gflags);
+        final_target = ft[0].clone();
+        debug_assert!(!ftc[0]);
+        final_targets = ft;
+        final_targets_contain_srfs = ftc;
+        // likewise for sort_input_target vs. grouping_target.
+        let (sit, sitc) = split_pathtarget_at_srfs(
+            root,
+            &sort_input_target,
+            Some(&grouping_target),
+            gflags,
         );
+        sort_input_target = sit[0].clone();
+        debug_assert!(!sitc[0]);
+        sort_input_targets = sit;
+        sort_input_targets_contain_srfs = sitc;
+        // likewise for grouping_target vs. scanjoin_target (crosses grouping).
+        let (gt, gtc) = split_pathtarget_at_srfs_grouping(
+            root,
+            &grouping_target,
+            Some(&scanjoin_target),
+            gflags,
+        );
+        grouping_target = gt[0].clone();
+        debug_assert!(!gtc[0]);
+        grouping_targets = gt;
+        grouping_targets_contain_srfs = gtc;
+        // scanjoin_target has no SRFs precomputed for it (input_target = NULL).
+        let (st, stc) = split_pathtarget_at_srfs(root, &scanjoin_target, None, gflags);
+        scanjoin_target = st[0].clone();
+        debug_assert!(!stc[0]);
+        scanjoin_targets = st;
+        scanjoin_targets_contain_srfs = stc;
+    } else {
+        scanjoin_targets = alloc::vec![scanjoin_target.clone()];
+        scanjoin_targets_contain_srfs = Vec::new();
     }
 
     // DISTINCT is handled below, after grouping/window, in its C order
     // (planner.c:1834-1841) — see the create_distinct_paths call.
 
-    // No SRFs: scanjoin_targets = list_make1(scanjoin_target) (C:1764-1767).
-
     // scanjoin_target_same_exprs = list_length(scanjoin_targets) == 1
     //   && equal(scanjoin_target->exprs, current_rel->reltarget->exprs) (C:1771).
-    let scanjoin_target_same_exprs = {
+    let scanjoin_target_same_exprs = scanjoin_targets.len() == 1 && {
         let cur_exprs: &[types_pathnodes::NodeId] = root
             .rel(current_rel)
             .reltarget
@@ -2329,13 +2393,17 @@ fn grouping_planner<'mcx>(
         equal_expr_handle_lists(root, &scanjoin_target.exprs, cur_exprs)
     };
 
-    // apply_scanjoin_target_to_paths(root, current_rel, [scanjoin_target], NIL,
-    //   scanjoin_target_parallel_safe, scanjoin_target_same_exprs) (C:1773).
+    // apply_scanjoin_target_to_paths(root, current_rel, scanjoin_targets,
+    //   scanjoin_targets_contain_srfs, scanjoin_target_parallel_safe,
+    //   scanjoin_target_same_exprs) (C:1773). This applies the SRF-free target,
+    // stacks ProjectSet/Result via adjust_paths_for_srfs, and sets the rel's
+    // reltarget to the full (last) scanjoin target.
     apply_scanjoin_target_to_paths(
         run,
         root,
         current_rel,
-        &scanjoin_target,
+        &scanjoin_targets,
+        &scanjoin_targets_contain_srfs,
         scanjoin_target_parallel_safe,
         scanjoin_target_same_exprs,
     )?;
@@ -2364,9 +2432,15 @@ fn grouping_planner<'mcx>(
             grouping_target_parallel_safe,
             gset_data.as_mut(),
         )?;
-        // adjust_paths_for_srfs when grouping_target contains SRFs (C:1804-1808)
-        // is gated out: hasTargetSRFs loud-panics above before this point.
-        debug_assert!(!has_target_srfs);
+        // Fix things up if grouping_target contains SRFs (C:1804-1808).
+        if has_target_srfs {
+            adjust_paths_for_srfs(
+                root,
+                current_rel,
+                &grouping_targets,
+                &grouping_targets_contain_srfs,
+            )?;
+        }
     }
 
     // If we have window functions, consider ways to implement those; we build a
@@ -2385,9 +2459,15 @@ fn grouping_planner<'mcx>(
             wfa,
             &active_windows,
         )?;
-        // adjust_paths_for_srfs when sort_input_target contains SRFs (C:1825-1827)
-        // is gated out: hasTargetSRFs loud-panics above before this point.
-        debug_assert!(!has_target_srfs);
+        // Fix things up if sort_input_target contains SRFs (C:1825-1827).
+        if has_target_srfs {
+            adjust_paths_for_srfs(
+                root,
+                current_rel,
+                &sort_input_targets,
+                &sort_input_targets_contain_srfs,
+            )?;
+        }
     }
 
     // If there is a DISTINCT clause, consider ways to implement that; we build a
@@ -2402,9 +2482,9 @@ fn grouping_planner<'mcx>(
         )?;
     }
 
-    // adjust_paths_for_srfs when final_target contains SRFs (C:1860-1862) is
-    // gated out: hasTargetSRFs loud-panics above before this point.
-    debug_assert!(!has_target_srfs);
+    // The final_target SRF fix-up (C:1860-1862) happens inside build_final_paths,
+    // within the ORDER BY ordered-paths step (it is only reached when there is a
+    // sortClause). The split lists are threaded through.
 
     // Shared tail (ORDER BY ordered-paths + final-rel build): used by both the
     // regular and set-operation branches (planner.c:1849-2169).
@@ -2416,6 +2496,9 @@ fn grouping_planner<'mcx>(
         &final_target,
         final_target_parallel_safe,
         has_sort,
+        has_target_srfs,
+        &final_targets,
+        &final_targets_contain_srfs,
         have_postponed_srfs,
         limit_tuples,
         offset_est,
@@ -2435,6 +2518,9 @@ fn build_final_paths<'mcx>(
     final_target: &types_pathnodes::PathTarget,
     final_target_parallel_safe: bool,
     has_sort: bool,
+    has_target_srfs: bool,
+    final_targets: &[PathTarget],
+    final_targets_contain_srfs: &[bool],
     have_postponed_srfs: bool,
     limit_tuples: f64,
     offset_est: i64,
@@ -2456,6 +2542,15 @@ fn build_final_paths<'mcx>(
         )?;
         // current_rel becomes the ordered upperrel for the final-output build.
         current_rel = ordered_rel;
+        // Fix things up if final_target contains SRFs (C:1860-1862).
+        if has_target_srfs {
+            adjust_paths_for_srfs(
+                root,
+                current_rel,
+                final_targets,
+                final_targets_contain_srfs,
+            )?;
+        }
     }
 
     // Now build the final-output upperrel (C:1868).
@@ -5033,22 +5128,25 @@ fn equal_expr_handle_lists(
 }
 
 /// `apply_scanjoin_target_to_paths(root, rel, scanjoin_targets, ...)`
-/// (planner.c:7669). Ported for the non-partitioned single-target case reached
-/// by a simple SELECT: apply the SRF-free scan/join target to every existing
-/// path of `rel`, then set `rel->reltarget` to it.
+/// (planner.c:7669). Ported for the non-partitioned case reached by a simple
+/// SELECT: apply the SRF-free (first) scan/join target to every existing path
+/// of `rel`, stack SRF-evaluation nodes via `adjust_paths_for_srfs` when the
+/// target contained SRFs, then set `rel->reltarget` to the full (last) target.
 ///
-/// Partitioned rels (`IS_PARTITIONED_REL`), targetlist SRFs
-/// (`root->parse->hasTargetSRFs` ⇒ `adjust_paths_for_srfs`), and the recursive
-/// per-partition / `add_paths_to_append_rel` machinery are not reached here and
-/// panic precisely.
+/// Partitioned rels (`IS_PARTITIONED_REL`) and the recursive per-partition /
+/// `add_paths_to_append_rel` machinery are not reached here and panic precisely.
 fn apply_scanjoin_target_to_paths<'mcx>(
     run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     rel: RelId,
-    scanjoin_target: &PathTarget,
+    scanjoin_targets: &[PathTarget],
+    scanjoin_targets_contain_srfs: &[bool],
     scanjoin_target_parallel_safe: bool,
     tlist_same_exprs: bool,
 ) -> PgResult<()> {
+    // scanjoin_target = linitial_node(PathTarget, scanjoin_targets) (C:7892):
+    // the SRF-free target the scan/join paths must emit.
+    let scanjoin_target = &scanjoin_targets[0];
     // This function recurses for partitioned rels; we don't support that yet.
     // IS_PARTITIONED_REL(rel): a base/join (or other-member) rel that has a
     // partitioning scheme and partition children.
@@ -5120,12 +5218,23 @@ fn apply_scanjoin_target_to_paths<'mcx>(
         }
     }
 
-    // SRF insertion (C:7777-7780) is gated on hasTargetSRFs, rejected above.
+    // Now, if the final scan/join target contains SRFs, insert ProjectSetPath(s)
+    // atop each existing path (C:7944-7953).
+    if run.resolve(root.parse).hasTargetSRFs {
+        adjust_paths_for_srfs(
+            root,
+            rel,
+            scanjoin_targets,
+            scanjoin_targets_contain_srfs,
+        )?;
+    }
 
-    // Update the rel's target to be the final scan/join target (C:7792). This
-    // matches the actual output of all paths and is required so create_plan /
-    // create_append_path see the right pathtarget.
-    root.rel_mut(rel).reltarget = Some(Box::new(scanjoin_target.clone()));
+    // Update the rel's target to be the final (with SRFs) scan/join target —
+    // llast(scanjoin_targets) (C:7966). This matches the actual output of all
+    // paths and is required so create_plan / create_append_path see the right
+    // pathtarget.
+    let last_target = scanjoin_targets[scanjoin_targets.len() - 1].clone();
+    root.rel_mut(rel).reltarget = Some(Box::new(last_target));
 
     // We may have added paths (replacing existing ones with projection paths),
     // so recompute the rel's cheapest-path info (C:8043). Without this, the
@@ -5133,6 +5242,93 @@ fn apply_scanjoin_target_to_paths<'mcx>(
     // pathlist, breaking later steps (create_ordered_paths / create_distinct_paths)
     // that key off cheapest_total_path.
     backend_optimizer_util_pathnode::set_cheapest(root, rel)?;
+
+    Ok(())
+}
+
+/// `adjust_paths_for_srfs(root, rel, targets, targets_contain_srfs)`
+/// (planner.c:6663). Fix up the Paths of `rel` to evaluate tSRFs properly:
+/// stack SRF-evaluation (ProjectSet) and regular projection nodes atop each
+/// path, following the level chain produced by `split_pathtarget_at_srfs`.
+/// The existing Paths are assumed to emit the first target in `targets`.
+fn adjust_paths_for_srfs(
+    root: &mut PlannerInfo,
+    rel: RelId,
+    targets: &[PathTarget],
+    targets_contain_srfs: &[bool],
+) -> PgResult<()> {
+    debug_assert_eq!(targets.len(), targets_contain_srfs.len());
+    debug_assert!(targets_contain_srfs.first().map(|b| !*b).unwrap_or(true));
+
+    // If no SRFs appear at this plan level, nothing to do.
+    if targets.len() == 1 {
+        return Ok(());
+    }
+
+    let cheapest_startup = root.rel(rel).cheapest_startup_path;
+    let cheapest_total = root.rel(rel).cheapest_total_path;
+
+    // Stack SRF-evaluation nodes atop each path for the rel.
+    let pathlist: Vec<PathId> = root.rel(rel).pathlist.clone();
+    for (li, &subpath) in pathlist.iter().enumerate() {
+        debug_assert!(root.path(subpath).base().param_info.is_none());
+        let mut newpath = subpath;
+        // The first target is what the existing path already emits; the
+        // remaining levels are stacked. C iterates forboth(targets,
+        // targets_contain_srfs), starting from the level the path emits and
+        // re-projecting up the chain (the first level's projection is a no-op
+        // onto the same exprs).
+        for (thistarget, &contains_srfs) in targets.iter().zip(targets_contain_srfs.iter()) {
+            if contains_srfs {
+                newpath = backend_optimizer_util_pathnode::create::create_set_projection_path(
+                    root,
+                    rel,
+                    newpath,
+                    Box::new(thistarget.clone()),
+                )?;
+            } else {
+                newpath = backend_optimizer_util_pathnode::create::apply_projection_to_path(
+                    root,
+                    rel,
+                    newpath,
+                    Box::new(thistarget.clone()),
+                )?;
+            }
+        }
+        root.rel_mut(rel).pathlist[li] = newpath;
+        if Some(subpath) == cheapest_startup {
+            root.rel_mut(rel).cheapest_startup_path = Some(newpath);
+        }
+        if Some(subpath) == cheapest_total {
+            root.rel_mut(rel).cheapest_total_path = Some(newpath);
+        }
+    }
+
+    // Likewise for partial paths, if any. These avoid apply_projection_to_path
+    // (in case of multiple refs) and use create_projection_path directly.
+    let partial: Vec<PathId> = root.rel(rel).partial_pathlist.clone();
+    for (li, &subpath) in partial.iter().enumerate() {
+        debug_assert!(root.path(subpath).base().param_info.is_none());
+        let mut newpath = subpath;
+        for (thistarget, &contains_srfs) in targets.iter().zip(targets_contain_srfs.iter()) {
+            if contains_srfs {
+                newpath = backend_optimizer_util_pathnode::create::create_set_projection_path(
+                    root,
+                    rel,
+                    newpath,
+                    Box::new(thistarget.clone()),
+                )?;
+            } else {
+                newpath = backend_optimizer_util_pathnode::create::create_projection_path(
+                    root,
+                    rel,
+                    newpath,
+                    Box::new(thistarget.clone()),
+                )?;
+            }
+        }
+        root.rel_mut(rel).partial_pathlist[li] = newpath;
+    }
 
     Ok(())
 }

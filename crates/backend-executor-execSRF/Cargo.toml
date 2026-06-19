@@ -24,6 +24,8 @@ backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache
 backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
 backend-utils-sort-storage-seams = { path = "../backend-utils-sort-storage-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+# check_stack_depth (postgres.c) guarding the targetlist-SRF recursion.
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 
 # The generate_series(int4/int8) SRFs registered in the executor-frame table:
 # their value cores + the value-per-call funcapi machinery.
