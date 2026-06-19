@@ -227,6 +227,24 @@ fn emit_constructors(
     let mut emitted: std::collections::BTreeSet<String> = existing.clone();
     let mut seen_ctor: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
+    // The `Node::Expr` routing arm: a whole-`Expr`-value constructor. Unlike the
+    // per-leaf `mk_<exprvariant>` builders below, this takes an already-built
+    // `Expr` and wraps it. At the opaque flip ONLY this body changes (it boxes a
+    // single `NodePayload_Expr` adapter over `Expr`), not the call sites.
+    {
+        let name = "mk_expr".to_string();
+        if seen_ctor.insert(name.clone()) {
+            emitted.insert(name);
+            s.push_str(
+                "    /// Wrap an already-built `Expr` value as a `Node::Expr`. `mcx` is\n    \
+                 /// unused for now; at the opaque flip this body allocates the opaque rep.\n    \
+                 #[inline]\n    \
+                 pub fn mk_expr(_mcx: mcx::Mcx<'mcx>, payload: crate::primnodes::Expr) -> crate::nodes::Node<'mcx> {\n        \
+                 crate::nodes::Node::Expr(payload)\n    }\n",
+            );
+        }
+    }
+
     // Node-direct variants first (they win collisions with Expr-routed names).
     for v in node {
         if v.ident == "Expr" {
