@@ -919,6 +919,73 @@ pub fn init_seams() {
             write::XLogShutdownWalRcv().expect("XLogShutdownWalRcv failed")
         });
     }
+
+    // ----------------------------------------------------------------------
+    // Checkpointer-consumed seams (graceful degradation — see below).
+    //
+    // The faithful checkpoint engine ([`checkpoint::CreateCheckPoint`] /
+    // [`checkpoint::CreateRestartPoint`]) is ported in full, but it bottoms out
+    // on the still-deferred XLogCtl shmem / WAL-insert driver: it must read the
+    // shmem insert/write pointers, acquire the WAL-insert locks, and write the
+    // checkpoint record through `XLogInsert` (the `xlog-checkpoint-deps` /
+    // `xlog-driver` debt, the #157 WAL-redo keystone). None of that is ported
+    // yet, so a real on-the-fly checkpoint cannot be performed.
+    //
+    // The checkpointer process runs these seams on its timer (and on an
+    // explicit `CHECKPOINT;`). If they stay UNINSTALLED, `::call` raises a Rust
+    // panic — which the checkpointer's sigsetjmp-style recovery loop does NOT
+    // catch — so the process exits 101 and the postmaster tears down every
+    // backend, cascading the whole regression suite to "server closed the
+    // connection unexpectedly".
+    //
+    // Until the WAL driver lands we install honest graceful-degradation bodies:
+    // they do NOT pretend a checkpoint happened. `create_checkpoint` /
+    // `create_restartpoint` log a LOG notice and return `Ok(false)` — the
+    // genuine "no checkpoint was performed" return value (the checkpointer
+    // already handles `false` as a clean skip: it advances last_checkpoint_time
+    // so it won't busy-spin, and does NOT bump the NumPerformed counter).
+    // `shutdown_xlog` returns `Ok(())` after logging, skipping the unported
+    // shutdown-checkpoint record write. The cluster stays alive; durability of
+    // the WAL checkpoint record is the only thing skipped, and it is skipped
+    // loudly, not faked. Replace these with `create_checkpoint::set(...)` over
+    // the owned `CheckpointState` once the XLogCtl shmem driver is ported.
+    s::create_checkpoint::set(|flags| {
+        let _ = flags;
+        backend_utils_error::ereport(types_error::LOG)
+            .errmsg(
+                "skipping checkpoint: the WAL checkpoint-record driver (XLogCtl shmem) \
+                 is not yet ported; no checkpoint was performed",
+            )
+            .finish(types_error::ErrorLocation::new(
+                "xlog.c",
+                0,
+                "CreateCheckPoint",
+            ))?;
+        Ok(false)
+    });
+    s::create_restartpoint::set(|flags| {
+        let _ = flags;
+        backend_utils_error::ereport(types_error::LOG)
+            .errmsg(
+                "skipping restartpoint: the WAL checkpoint-record driver (XLogCtl shmem) \
+                 is not yet ported; no restartpoint was established",
+            )
+            .finish(types_error::ErrorLocation::new(
+                "xlog.c",
+                0,
+                "CreateRestartPoint",
+            ))?;
+        Ok(false)
+    });
+    s::shutdown_xlog::set(|| {
+        backend_utils_error::ereport(types_error::LOG)
+            .errmsg(
+                "skipping shutdown checkpoint: the WAL checkpoint-record driver \
+                 (XLogCtl shmem) is not yet ported",
+            )
+            .finish(types_error::ErrorLocation::new("xlog.c", 0, "ShutdownXLOG"))?;
+        Ok(())
+    });
 }
 
 #[cfg(test)]
