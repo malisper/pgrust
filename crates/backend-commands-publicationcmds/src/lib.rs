@@ -1157,9 +1157,9 @@ fn CheckPubRelationColumnList<'mcx>(
 fn pubtable_rangevar<'a, 'mcx>(
     t: &'a PublicationTable<'mcx>,
 ) -> PgResult<&'a types_nodes::rawnodes::RangeVar<'mcx>> {
-    match t.relation.as_deref() {
-        Some(Node::RangeVar(rv)) => Ok(rv),
-        _ => Err(PgError::error(
+    match t.relation.as_deref().and_then(|n| n.as_rangevar()) {
+        Some(rv) => Ok(rv),
+        None => Err(PgError::error(
             "PublicationTable.relation is not a RangeVar",
         )),
     }
