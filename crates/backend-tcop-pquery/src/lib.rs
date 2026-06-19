@@ -1561,18 +1561,60 @@ fn portal_run_multi(
             // the move; relocating the `MemoryContext` value would dangle them and
             // fault at the next deallocation (e.g. an UPDATE plan's
             // `resultRelations` PgVec in `uncharge`).
+            // The moved-out `portalContext`/`stmts` are restored by a Drop
+            // guard rather than inline after the call. C never moves these
+            // fields at all (the executor reads stable `portal->portalContext`
+            // / `->stmts` pointers), so the portal must look well-formed again
+            // no matter how `process_query` returns — including an
+            // unported-path **panic** that unwinds past here. The outer
+            // `sigsetjmp`-equivalent (`catch_unwind` in tcop/postgres
+            // main_loop) recovers from that panic and runs
+            // AbortCurrentTransaction → AtCleanup_Portals → PortalDrop on this
+            // very portal; if the fields were left taken-out, PortalDrop would
+            // trip its "portal has no portalContext" guard (a misleading
+            // secondary failure masking the real upstream panic). Restoring on
+            // Drop closes that window for both the `?` error path and the
+            // unwind path.
+            struct PortalFieldsGuard<'p> {
+                portal: &'p Portal,
+                portal_context: Option<alloc::boxed::Box<mcx::MemoryContext>>,
+                stmts: Option<
+                    alloc::vec::Vec<types_nodes::nodeindexscan::PlannedStmt<'static>>,
+                >,
+            }
+            impl<'p> Drop for PortalFieldsGuard<'p> {
+                fn drop(&mut self) {
+                    if let Some(ctx) = self.portal_context.take() {
+                        self.portal.borrow_mut().portalContext = Some(ctx);
+                    }
+                    if let Some(stmts) = self.stmts.take() {
+                        self.portal.borrow_mut().stmts = Some(stmts);
+                    }
+                }
+            }
+
             let portal_context = portal
                 .borrow_mut()
                 .portalContext
                 .take()
                 .expect("portal has no portalContext");
             let stmts = portal.borrow_mut().stmts.take().unwrap_or_default();
+            let guard = PortalFieldsGuard {
+                portal,
+                portal_context: Some(portal_context),
+                stmts: Some(stmts),
+            };
 
-            let run_result = (|| {
+            // Borrow the moved-out values back out of the guard for the run.
+            // `idx` indexes into the guard's owned `stmts`; the guard restores
+            // them to the portal on scope exit / unwind.
+            let run_result = {
+                let portal_context = guard.portal_context.as_deref().unwrap();
+                let stmts = guard.stmts.as_deref().unwrap();
                 if can_set_tag {
                     /* statement can set tag string */
                     process_query(
-                        &portal_context,
+                        portal_context,
                         &stmts[idx],
                         &source_text,
                         params.clone(),
@@ -1582,7 +1624,7 @@ fn portal_run_multi(
                 } else {
                     /* stmt added by rewrite cannot set tag */
                     process_query(
-                        &portal_context,
+                        portal_context,
                         &stmts[idx],
                         &source_text,
                         params.clone(),
@@ -1590,12 +1632,13 @@ fn portal_run_multi(
                         None,
                     )
                 }
-            })();
+            };
 
             // Restore the moved-out fields before propagating any error so the
-            // portal stays well-formed for cleanup/MarkPortalFailed.
-            portal.borrow_mut().portalContext = Some(portal_context);
-            portal.borrow_mut().stmts = Some(stmts);
+            // portal stays well-formed for cleanup/MarkPortalFailed. (The guard
+            // would also do this on unwind; running it here keeps the explicit
+            // ordering for the normal/`?` paths.)
+            drop(guard);
             run_result?;
 
             if postgres_seam::log_executor_stats::call() {
