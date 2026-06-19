@@ -39,6 +39,7 @@ mod f1_rename;
 mod helpers;
 mod mergeattr;
 mod oncommit;
+mod partition;
 mod smallfns;
 mod truncate;
 

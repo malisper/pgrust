@@ -69,13 +69,21 @@
 //!     seam is INSTALLED and runs the real `RemoveStatistics` half in-crate.
 //!     `SetAttrMissing` (binary-upgrade only, no in-tree caller) is deferred.
 //!
-//! ## STOP — partition-store / truncate families are carrier-blocked
+//! ## partition-store (key) landed; bound / truncate families carrier-blocked
 //!
-//! `StorePartitionKey` / `StorePartitionBound` need `buildint2vector` /
-//! `buildoidvector` (private to `backend-catalog-indexing`) plus a
-//! `pg_partitioned_table` INSERT carrier and a `pg_class.relpartbound` UPDATE
-//! carrier. `heap_truncate` / `heap_truncate_one_rel` / `RelationTruncateIndexes`
-//! need `table_relation_nontransactional_truncate` (no tableam seam) +
+//! `StorePartitionKey` IS ported (see `partition.rs`): it builds the
+//! `int2vector`/`oidvector`/`pg_node_tree` images inline (the same byte layout
+//! `backend-catalog-indexing` uses), forms + inserts the `pg_partitioned_table`
+//! row, records the opclass/collation/column dependencies, and invalidates the
+//! relcache.
+//!
+//! `StorePartitionBound` remains unported: it rewrites `pg_class.relpartbound`
+//! from a transformed `PartitionBoundSpec`, depending on the partition-bound
+//! transform/validation machinery (`transformPartitionBound` /
+//! `check_new_partition_bound` in `partitioning/partbounds.c`) and the partition
+//! descriptor (`partitioning/partdesc.c`), neither of which is ported yet.
+//! `heap_truncate` / `heap_truncate_one_rel` / `RelationTruncateIndexes` need
+//! `table_relation_nontransactional_truncate` (no tableam seam) +
 //! `BuildDummyIndexInfo` (only `BuildIndexInfo` exists). These remain unported
 //! (no stub).
 //!
@@ -869,7 +877,7 @@ pub use delete::{
     RelationRemoveInheritance,
 };
 pub use drop::heap_drop_with_catalog;
-pub use partition::RemovePartitionKeyByRelId;
+pub use partition::{RemovePartitionKeyByRelId, StorePartitionKey};
 pub use statistics::{CopyStatistics, RemoveStatistics};
 
 pub use constraints::{

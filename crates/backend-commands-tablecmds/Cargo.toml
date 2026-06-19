@@ -102,3 +102,13 @@ backend-executor-execTuples = { path = "../backend-executor-execTuples" }
 backend-access-table-tableam = { path = "../backend-access-table-tableam" }
 backend-access-table-tableam-seams = { path = "../backend-access-table-tableam-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+# DefineRelation partition-key (partspec) branch (tablecmds.c:1210-1249):
+# transformPartitionSpec / ComputePartitionAttrs / StorePartitionKey.
+backend-commands-indexcmds = { path = "../backend-commands-indexcmds" }
+backend-parser-small1 = { path = "../backend-parser-small1" }
+backend-parser-relation = { path = "../backend-parser-relation" }
+backend-parser-parse-expr = { path = "../backend-parser-parse-expr" }
+backend-parser-parse-collate = { path = "../backend-parser-parse-collate" }
+backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
+backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
+backend-optimizer-plan-planner = { path = "../backend-optimizer-plan-planner" }

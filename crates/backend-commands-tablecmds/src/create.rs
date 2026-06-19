@@ -709,7 +709,15 @@ pub fn define_relation<'mcx>(
      * key information into the catalog.
      */
     if partitioned {
-        seam::define_relation_partspec::call(mcx, relation_id, query_string)?;
+        let partspec_node = stmt
+            .partspec
+            .as_deref()
+            .expect("partitioned implies CreateStmt.partspec is set");
+        let partspec = match partspec_node {
+            Node::PartitionSpec(ps) => ps,
+            other => unreachable!("CreateStmt.partspec is not a PartitionSpec: {}", other.node_tag()),
+        };
+        crate::partition::define_relation_partspec(mcx, &rel, partspec, query_string)?;
 
         /* make it all visible */
         CommandCounterIncrement()?;
