@@ -331,10 +331,7 @@ pub fn ExecInitProjectSet<'mcx>(
 ) -> PgResult<PgBox<'mcx, ProjectSetState<'mcx>>> {
     let mcx = estate.es_query_cxt;
 
-    let psplan: &'mcx ProjectSetPlan<'mcx> = match node {
-        types_nodes::nodes::Node::ProjectSet(p) => p,
-        other => panic!("castNode(ProjectSet, node) failed: {other:?}"),
-    };
+    let psplan: &'mcx ProjectSetPlan<'mcx> = node.expect_projectset();
 
     // check for unsupported flags
     //   Assert(!(eflags & (EXEC_FLAG_MARK | EXEC_FLAG_BACKWARD)));
