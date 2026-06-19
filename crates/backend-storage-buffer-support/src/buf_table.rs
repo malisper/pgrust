@@ -2,18 +2,23 @@
 //!
 //! In PostgreSQL `SharedBufHash` is a partitioned dynahash in the shared-memory
 //! segment, protected by the `BufferMappingLock` partition LWLocks. It is
-//! modeled here as a fixed-capacity open-addressing table of [`LocalEnt`] slots
+//! modeled here as a fixed-capacity open-addressing table of [`Slot`]s
 //! (capacity = `2 * (NBuffers + NUM_BUFFER_PARTITIONS)`, headroom over the
 //! dynahash `max_size` so probe chains stay short). The hashing
 //! (`BufTableHashCode`) and the lookup/insert/delete semantics are the verbatim
-//! algorithm; the substrate — *where* the table lives — is signaled through the
-//! `ShmemInitStruct` seam.
+//! algorithm.
+//!
+//! The slot array AND the live-entry counter live in the `MAP_SHARED`
+//! shared-memory segment, carved through the `ShmemInitStruct` seam: the
+//! returned base address is the same in every forked backend, so the
+//! `BufferTag -> buf_id` mapping one backend installs is visible to all others
+//! — the real `SharedBufHash` posture. Without this, a backend that caches a
+//! catalog page would record the mapping only in its own process heap and the
+//! page would be invisible to every other connection.
 //!
 //! The routines do NO locking of their own: the caller must hold the
 //! appropriate `BufferMappingLock` partition lock, exactly as `buf_table.c`
 //! requires.
-
-use std::cell::{Cell, RefCell};
 
 use types_core::Size;
 use types_error::{PgError, PgResult};
@@ -40,52 +45,152 @@ pub fn buf_table_hash_partition(hashcode: u32) -> u32 {
     hashcode % (NUM_BUFFER_PARTITIONS as u32)
 }
 
-/// One occupied slot of the lookup table. Mirrors dynahash's
-/// `BufferLookupEnt { BufferTag key; int id; }`.
+/// `EMPTY_SLOT` — sentinel `id` marking an unoccupied slot. Valid buffer ids
+/// are `>= 0`; `-1` is reserved by `BufTableInsert`/`Lookup` for "not in table",
+/// so `-2` is free as the empty marker.
+const EMPTY_SLOT: i32 = -2;
+
+/// One slot of the lookup table — shmem-resident, `repr(C)`. Mirrors dynahash's
+/// `BufferLookupEnt { BufferTag key; int id; }`, with `id == EMPTY_SLOT`
+/// denoting an empty slot (so the array can be zero-checked / scanned without an
+/// out-of-band `Option` discriminant that would not be coherent cross-process).
 #[derive(Clone, Copy, Debug)]
-struct LocalEnt {
+#[repr(C)]
+struct Slot {
     key: buftag,
     id: i32,
 }
 
+impl Slot {
+    fn empty() -> Self {
+        Self {
+            key: buftag::default(),
+            id: EMPTY_SLOT,
+        }
+    }
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.id == EMPTY_SLOT
+    }
+}
+
+/// The shmem-resident header for the lookup table — the live-entry count,
+/// reached under the partition `BufferMappingLock`s exactly as the slot array
+/// is. (`repr(C)`; placed immediately before the slot array in C's dynahash,
+/// here in its own field of the carved region.)
+#[repr(C)]
+struct BufTableHeader {
+    nentries: usize,
+}
+
 /// `SharedBufHash` — the buffer-mapping lookup hash, modeled as an
-/// open-addressing table. The underlying shared-memory allocation is signaled
-/// through the `ShmemInitStruct` seam (which returns whether the table already
-/// existed, so `InitBufTable` runs the "zero on first creation" path exactly
-/// once).
+/// open-addressing table whose slot array AND live-entry counter live in the
+/// `MAP_SHARED` segment (carved through the `ShmemInitStruct` seam). The struct
+/// itself is a process-local *view*: it holds raw base pointers into the shared
+/// region, identical in every forked backend, so the mapping is shared.
 pub struct BufTable {
-    /// Fixed-capacity open-addressing slots; `None` = empty.
-    slots: RefCell<alloc::vec::Vec<Option<LocalEnt>>>,
-    /// Live entry count.
-    nentries: Cell<usize>,
+    /// Base pointer to the shmem-resident `BufTableHeader` (the entry counter).
+    header: *mut BufTableHeader,
+    /// Base pointer to the shmem-resident slot array (`capacity` `Slot`s).
+    slots: *mut Slot,
     capacity: usize,
 }
+
+// SAFETY: the slot array + header live in the shared segment for the server's
+// life; cross-backend access is serialized by the caller-held BufferMappingLock
+// partition locks (the buf_table.c contract). The view is published `'static`.
+unsafe impl Send for BufTable {}
+unsafe impl Sync for BufTable {}
 
 impl BufTable {
     /// `InitBufTable(size)` — place the lookup table in shared memory. `size` is
     /// the dynahash `max_size` (`NBuffers + NUM_BUFFER_PARTITIONS`). Honors the
-    /// `found` flag like C: on first creation build/zero the table; on attach
-    /// the shared table already exists (modeled here by building the empty
-    /// table, since the in-crate handle does not alias another backend's
-    /// segment in this substrate).
+    /// `found` flag like C: on first creation zero the slot array + counter; on
+    /// attach reuse the already-initialized shared bytes.
     pub fn InitBufTable(size: i32) -> PgResult<Self> {
         let capacity = Self::table_capacity(size);
-        let bytes = Self::shmem_bytes(capacity);
+        let header_bytes = core::mem::size_of::<BufTableHeader>();
+        let slots_bytes = capacity
+            .checked_mul(core::mem::size_of::<Slot>())
+            .ok_or_else(|| PgError::error("buffer lookup table size overflow"))?;
+        let bytes = header_bytes + slots_bytes;
         // ShmemInitStruct("Shared Buffer Lookup Table", bytes, &found).
-        let (_addr, _found) =
-            backend_storage_ipc_shmem_seams::shmem_init_struct::call("Shared Buffer Lookup Table", bytes)?;
-        // Zero/empty the table on creation (the dynahash "zero on first
-        // creation" path).
-        let mut slots = alloc::vec::Vec::new();
-        slots
-            .try_reserve(capacity)
-            .map_err(|_| PgError::error("out of shared memory (buffer lookup table)"))?;
-        slots.resize(capacity, None);
-        Ok(Self {
-            slots: RefCell::new(slots),
-            nentries: Cell::new(0),
+        let (addr, found) = backend_storage_ipc_shmem_seams::shmem_init_struct::call(
+            "Shared Buffer Lookup Table",
+            bytes,
+        )?;
+
+        let (header, slots) = if !addr.is_null() {
+            // header at the region start, the slot array right after it
+            // (MAXALIGNed: BufTableHeader is a single `usize`, so a `Slot` array
+            // immediately following is already aligned).
+            let header = addr.cast::<BufTableHeader>();
+            // SAFETY: the region holds header_bytes + slots_bytes; advancing by
+            // size_of::<BufTableHeader>() lands at the slot array, which is
+            // aligned for `Slot` (its alignment is 4, <= header's 8).
+            let slots = unsafe { addr.add(header_bytes) }.cast::<Slot>();
+            (header, slots)
+        } else {
+            // No real segment (test / standalone): leak a zeroed heap region,
+            // matching the bufmgr fallback. The `!found` init path below fills
+            // it in place.
+            let h_layout = core::alloc::Layout::new::<BufTableHeader>();
+            // SAFETY: non-zero layout.
+            let header = unsafe { std::alloc::alloc_zeroed(h_layout) }.cast::<BufTableHeader>();
+            let s_layout = core::alloc::Layout::array::<Slot>(capacity.max(1))
+                .map_err(|_| PgError::error("buffer lookup table layout"))?;
+            // SAFETY: non-zero layout.
+            let slots = unsafe { std::alloc::alloc_zeroed(s_layout) }.cast::<Slot>();
+            assert!(
+                !header.is_null() && !slots.is_null(),
+                "out of memory (buffer lookup table fallback)"
+            );
+            (header, slots)
+        };
+
+        let table = Self {
+            header,
+            slots,
             capacity,
-        })
+        };
+        if !found {
+            // Zero/empty the table on first creation (dynahash "zero on first
+            // creation"): every slot empty, zero live entries.
+            for i in 0..capacity {
+                // SAFETY: i < capacity; the region holds `capacity` Slots.
+                unsafe { *table.slots.add(i) = Slot::empty() };
+            }
+            // SAFETY: header points at the live region.
+            unsafe { (*table.header).nentries = 0 };
+        }
+        Ok(table)
+    }
+
+    #[inline]
+    fn slot(&self, idx: usize) -> &Slot {
+        debug_assert!(idx < self.capacity);
+        // SAFETY: idx < capacity; caller holds the partition lock.
+        unsafe { &*self.slots.add(idx) }
+    }
+
+    #[inline]
+    #[allow(clippy::mut_from_ref)]
+    fn slot_mut(&self, idx: usize) -> &mut Slot {
+        debug_assert!(idx < self.capacity);
+        // SAFETY: idx < capacity; caller holds the exclusive partition lock.
+        unsafe { &mut *self.slots.add(idx) }
+    }
+
+    #[inline]
+    fn nentries(&self) -> usize {
+        // SAFETY: header is live; caller holds the partition lock.
+        unsafe { (*self.header).nentries }
+    }
+
+    #[inline]
+    fn set_nentries(&self, v: usize) {
+        // SAFETY: header is live; caller holds the exclusive partition lock.
+        unsafe { (*self.header).nentries = v };
     }
 
     fn table_capacity(size: i32) -> usize {
@@ -96,11 +201,9 @@ impl BufTable {
     }
 
     fn shmem_bytes(capacity: usize) -> Size {
-        // size_of(header) + capacity * size_of(BufferLookupEnt); the entry is a
-        // BufferTag (20 bytes) + an int id, padded to 24 — mirror dynahash's
-        // footprint estimate (the exact value only matters for the seam's
-        // parity).
-        16 + capacity * 24
+        // size_of(BufTableHeader) + capacity * size_of(Slot) — the actual bytes
+        // carved from the shared segment.
+        core::mem::size_of::<BufTableHeader>() + capacity * core::mem::size_of::<Slot>()
     }
 
     /// `BufTableHashCode`.
@@ -115,14 +218,15 @@ impl BufTable {
     /// `BufTableLookup` — return the buffer id, or -1 if not present. Caller must
     /// hold at least share lock on the tag's `BufferMappingLock`.
     pub fn lookup(&self, tag: &buftag, hashcode: u32) -> i32 {
-        let slots = self.slots.borrow();
         let start = self.probe_start(hashcode);
         for step in 0..self.capacity {
             let idx = (start + step) % self.capacity;
-            match &slots[idx] {
-                None => return -1,
-                Some(ent) if &ent.key == tag => return ent.id,
-                Some(_) => {}
+            let slot = self.slot(idx);
+            if slot.is_empty() {
+                return -1;
+            }
+            if &slot.key == tag {
+                return slot.id;
             }
         }
         -1
@@ -134,24 +238,23 @@ impl BufTable {
     /// exclusive lock on the tag's `BufferMappingLock`.
     pub fn insert(&self, tag: buftag, hashcode: u32, buf_id: i32) -> PgResult<i32> {
         debug_assert!(buf_id >= 0); // -1 is reserved for not-in-table
-        let mut slots = self.slots.borrow_mut();
         let start = self.probe_start(hashcode);
         let mut free_slot: Option<usize> = None;
         for step in 0..self.capacity {
             let idx = (start + step) % self.capacity;
-            match &slots[idx] {
-                None => {
-                    free_slot = Some(idx);
-                    break;
-                }
-                Some(ent) if ent.key == tag => return Ok(ent.id),
-                Some(_) => {}
+            let slot = self.slot(idx);
+            if slot.is_empty() {
+                free_slot = Some(idx);
+                break;
+            }
+            if slot.key == tag {
+                return Ok(slot.id);
             }
         }
         let idx = free_slot
             .ok_or_else(|| PgError::error("out of shared memory (buffer lookup table is full)"))?;
-        slots[idx] = Some(LocalEnt { key: tag, id: buf_id });
-        self.nentries.set(self.nentries.get() + 1);
+        *self.slot_mut(idx) = Slot { key: tag, id: buf_id };
+        self.set_nentries(self.nentries() + 1);
         Ok(-1)
     }
 
@@ -161,40 +264,35 @@ impl BufTable {
     /// `BufferMappingLock`.
     pub fn delete(&self, tag: &buftag, hashcode: u32) -> PgResult<()> {
         let start = self.probe_start(hashcode);
-        let removed;
-        {
-            let mut slots = self.slots.borrow_mut();
-            let mut found_idx = None;
-            for step in 0..self.capacity {
-                let idx = (start + step) % self.capacity;
-                match &slots[idx] {
-                    None => break,
-                    Some(ent) if &ent.key == tag => {
-                        found_idx = Some(idx);
-                        break;
-                    }
-                    Some(_) => {}
-                }
+        let mut found_idx = None;
+        for step in 0..self.capacity {
+            let idx = (start + step) % self.capacity;
+            let slot = self.slot(idx);
+            if slot.is_empty() {
+                break;
             }
-            let Some(idx) = found_idx else {
-                return Err(PgError::error("shared buffer hash table corrupted"));
-            };
-            slots[idx] = None;
-            self.nentries.set(self.nentries.get() - 1);
-            // Standard open-addressing tombstone repair: collect the rest of the
-            // probe chain so no live entry is left unreachable, then re-insert.
-            let mut chain: alloc::vec::Vec<LocalEnt> = alloc::vec::Vec::new();
-            let mut next = (idx + 1) % self.capacity;
-            while let Some(ent) = slots[next] {
-                chain.push(ent);
-                slots[next] = None;
-                self.nentries.set(self.nentries.get() - 1);
-                next = (next + 1) % self.capacity;
+            if &slot.key == tag {
+                found_idx = Some(idx);
+                break;
             }
-            removed = chain;
+        }
+        let Some(idx) = found_idx else {
+            return Err(PgError::error("shared buffer hash table corrupted"));
+        };
+        *self.slot_mut(idx) = Slot::empty();
+        self.set_nentries(self.nentries() - 1);
+        // Standard open-addressing tombstone repair: collect the rest of the
+        // probe chain so no live entry is left unreachable, then re-insert.
+        let mut chain: alloc::vec::Vec<Slot> = alloc::vec::Vec::new();
+        let mut next = (idx + 1) % self.capacity;
+        while !self.slot(next).is_empty() {
+            chain.push(*self.slot(next));
+            *self.slot_mut(next) = Slot::empty();
+            self.set_nentries(self.nentries() - 1);
+            next = (next + 1) % self.capacity;
         }
         // Re-insert every entry pulled off the chain.
-        for ent in removed {
+        for ent in chain {
             let code = buf_table_hash_code(&ent.key);
             self.insert(ent.key, code, ent.id)?;
         }
@@ -203,12 +301,12 @@ impl BufTable {
 
     /// Live entry count.
     pub fn len(&self) -> usize {
-        self.nentries.get()
+        self.nentries()
     }
 
     /// Whether the table holds no live entries.
     pub fn is_empty(&self) -> bool {
-        self.nentries.get() == 0
+        self.nentries() == 0
     }
 
     /// The `BufferMappingLock` partition tranche name, for callers that need

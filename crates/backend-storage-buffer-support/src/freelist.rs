@@ -11,12 +11,17 @@
 //!  * `firstFreeBuffer` / `lastFreeBuffer` / `completePasses` / `bgwprocno` are
 //!    the spinlock-protected integer fields.
 //!
-//! The control block is placed via the `ShmemInitStruct` seam (which returns
-//! the `found` flag so `StrategyInitialize` runs its "initialize once" path).
-//! The per-buffer header (`LockBufHdr` / `UnlockBufHdr` / `freeNext`) lives in
-//! the bufmgr-owned shmem descriptor array and is reached through the
-//! `lock_buf_hdr` / `unlock_buf_hdr` / `buf_free_next` bufmgr seams. The clock
-//! sweep + free-list-first algorithm is unchanged.
+//! The control block lives IN the `MAP_SHARED` shared-memory segment, carved
+//! through the `ShmemInitStruct` seam (which returns the `found` flag so
+//! `StrategyInitialize` runs its "initialize once" path). The
+//! `BufferStrategyControl` value below is a process-local *view* holding a raw
+//! pointer to that single shared control block, so the freelist head, clock
+//! hand, and allocation counters are shared across every forked backend — the
+//! real freelist.c posture. The per-buffer header (`LockBufHdr` /
+//! `UnlockBufHdr` / `freeNext`) lives in the bufmgr-owned shmem descriptor
+//! array and is reached through the `lock_buf_hdr` / `unlock_buf_hdr` /
+//! `buf_free_next` bufmgr seams. The clock sweep + free-list-first algorithm is
+//! unchanged.
 
 use std::cell::Cell;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -34,11 +39,13 @@ use crate::{buf_state_get_refcount, buf_state_get_usagecount};
 
 use backend_storage_buffer_bufmgr_seams as bufmgr_seam;
 
-/// `BufferStrategyControl` (freelist.c) — the shared freelist control
-/// information, modeled field-for-field with the real spinlock + atomic
-/// semantics. The shared-memory allocation is signaled through the
-/// `ShmemInitStruct` seam.
-pub struct BufferStrategyControl {
+/// `BufferStrategyControl` (freelist.c) — the shared freelist control block,
+/// modeled field-for-field with the real spinlock + atomic semantics. This is
+/// the shmem-resident PAYLOAD (`repr(C)`); every forked backend reaches the
+/// single shared instance through the [`BufferStrategyControl`] view's raw
+/// pointer, so the freelist/clock-sweep state is genuinely shared.
+#[repr(C)]
+struct StrategyControlBody {
     /// `slock_t buffer_strategy_lock` — the spinlock word. Protects
     /// `first_free_buffer`, `last_free_buffer`, `complete_passes`, `bgwprocno`,
     /// and the per-buffer `freeNext` links.
@@ -57,60 +64,93 @@ pub struct BufferStrategyControl {
     num_buffer_allocs: AtomicU32,
     /// `int bgwprocno` — bgworker proc to notify upon activity, or -1.
     bgwprocno: Cell<i32>,
-    /// `NBuffers` — the size of the shared buffer pool (not part of the C
-    /// struct; it is the `NBuffers` global the routines consult).
+}
+
+/// Process-local *view* of the shmem-resident [`StrategyControlBody`]. Holds a
+/// raw pointer to the single shared control block (identical address in every
+/// forked backend) plus `NBuffers` (the GUC global the routines consult, not
+/// part of the C struct). Access to the `Cell` fields is serialized by the
+/// in-segment `buffer_strategy_lock` spinlock, exactly as in C.
+pub struct BufferStrategyControl {
+    body: *mut StrategyControlBody,
     nbuffers: u32,
 }
+
+// SAFETY: the body lives in the shared segment for the server's life; the
+// `Cell`/atomic fields are serialized by the in-segment spinlock (C's
+// `buffer_strategy_lock` discipline). Each backend is single-threaded, so the
+// `Cell` access through the shared pointer is sound under the lock. The view is
+// published `'static` (owned by the `'static` BufferManager).
+unsafe impl Send for BufferStrategyControl {}
+unsafe impl Sync for BufferStrategyControl {}
 
 impl BufferStrategyControl {
     /// `StrategyInitialize` — get-or-create the shared strategy control block.
     /// Honors the `found` flag like C: on first creation (postmaster) initialize
     /// the spinlock, the free-list head/tail, and clear the statistics; on
-    /// attach reuse the existing contents.
+    /// attach reuse the already-initialized shared contents.
     ///
     /// The per-buffer `freeNext` links are set up by the caller (through the
     /// header seam) during `BufferManagerShmemInit`, matching C where
     /// `StrategyInitialize` "grabs the whole linked list of free buffers ...
     /// previously set up by BufferManagerShmemInit".
     pub fn StrategyInitialize(nbuffers: u32) -> PgResult<Self> {
-        let size = core::mem::size_of::<Self>();
-        let (_addr, found) =
+        let size = core::mem::size_of::<StrategyControlBody>();
+        let (addr, found) =
             backend_storage_ipc_shmem_seams::shmem_init_struct::call("Buffer Strategy Status", size)?;
         let n = nbuffers as i32;
-        // The control block is allocated zeroed; field initialization happens
-        // only on first creation, mirroring C's `if (!found) { ... }`. In this
-        // single-owner substrate the postmaster is the sole creator (`found` is
-        // always false here); the owned Rust handle cannot alias a peer
-        // backend's live segment.
-        let control = Self {
-            buffer_strategy_lock: Spinlock::new(),
-            next_victim_buffer: AtomicU32::new(0),
-            first_free_buffer: Cell::new(0),
-            last_free_buffer: Cell::new(0),
-            complete_passes: Cell::new(0),
-            num_buffer_allocs: AtomicU32::new(0),
-            bgwprocno: Cell::new(0),
-            nbuffers,
+
+        let body: *mut StrategyControlBody = if !addr.is_null() {
+            debug_assert_eq!(
+                addr as usize % core::mem::align_of::<StrategyControlBody>(),
+                0,
+                "Buffer Strategy Status shmem region misaligned"
+            );
+            addr.cast::<StrategyControlBody>()
+        } else {
+            // No real segment (test / standalone): leak a zeroed heap block,
+            // matching the bufmgr / buf_table fallback.
+            let layout = core::alloc::Layout::new::<StrategyControlBody>();
+            // SAFETY: non-zero layout; the `!found` init below fills it in place
+            // (StrategyControlBody is plain data + atomics + Cells).
+            let p = unsafe { std::alloc::alloc_zeroed(layout) }.cast::<StrategyControlBody>();
+            assert!(!p.is_null(), "out of memory (strategy control fallback)");
+            p
         };
+
         if !found {
-            // Only done once, usually in postmaster.
-            // SpinLockInit(&buffer_strategy_lock): Spinlock::new() above is the
-            // S_INIT_LOCK; nothing more to do.
-            // Grab the whole linked list of free buffers for our strategy. We
-            // assume it was previously set up by BufferManagerShmemInit().
-            // (firstFreeBuffer = 0; lastFreeBuffer = NBuffers - 1: when
-            // NBuffers == 0 this leaves lastFreeBuffer = -1, the C value.)
-            control.first_free_buffer.set(0);
-            control.last_free_buffer.set(n - 1);
-            // Initialize the clock sweep pointer: pg_atomic_init_u32(.., 0).
-            control.next_victim_buffer.store(0, Ordering::Relaxed);
-            // Clear statistics.
-            control.complete_passes.set(0);
-            control.num_buffer_allocs.store(0, Ordering::Relaxed);
-            // No pending notification.
-            control.bgwprocno.set(-1);
+            // Only done once, usually in postmaster. Initialize the shared bytes
+            // in place (mirrors C's `if (!found) { ... }`).
+            // SAFETY: `body` points at the live (zeroed) region; first creator.
+            unsafe {
+                core::ptr::write(
+                    body,
+                    StrategyControlBody {
+                        // SpinLockInit(&buffer_strategy_lock).
+                        buffer_strategy_lock: Spinlock::new(),
+                        // Initialize the clock sweep pointer: pg_atomic_init_u32(.., 0).
+                        next_victim_buffer: AtomicU32::new(0),
+                        // Grab the whole linked list of free buffers (firstFreeBuffer
+                        // = 0; lastFreeBuffer = NBuffers - 1; -1 when NBuffers == 0).
+                        first_free_buffer: Cell::new(0),
+                        last_free_buffer: Cell::new(n - 1),
+                        complete_passes: Cell::new(0),
+                        num_buffer_allocs: AtomicU32::new(0),
+                        // No pending notification.
+                        bgwprocno: Cell::new(-1),
+                    },
+                );
+            }
         }
-        Ok(control)
+        Ok(Self { body, nbuffers })
+    }
+
+    /// The shmem-resident control block.
+    #[inline]
+    fn body(&self) -> &StrategyControlBody {
+        // SAFETY: `body` points at the live shared region for the server's life;
+        // the view is `'static`. Field access is serialized by the spinlock.
+        unsafe { &*self.body }
     }
 
     pub fn nbuffers(&self) -> u32 {
@@ -120,7 +160,7 @@ impl BufferStrategyControl {
     /// `SpinLockAcquire(&buffer_strategy_lock)` returning an RAII guard.
     fn acquire_lock(&self) -> SpinGuard<'_> {
         s_lock_macro(
-            &self.buffer_strategy_lock,
+            &self.body().buffer_strategy_lock,
             Some(file!()),
             line!() as i32,
             Some("StrategyControl::acquire_lock"),
@@ -130,7 +170,7 @@ impl BufferStrategyControl {
 
     /// `have_free_buffer` — a lockless check (`firstFreeBuffer >= 0`).
     pub fn have_free_buffer(&self) -> bool {
-        self.first_free_buffer.get() >= 0
+        self.body().first_free_buffer.get() >= 0
     }
 
     /// `StrategyFreeBuffer` — put a buffer back on the free-list head. Matches
@@ -141,12 +181,12 @@ impl BufferStrategyControl {
     pub fn free_buffer(&self, buf_id: i32) -> PgResult<()> {
         let _guard = self.acquire_lock();
         if bufmgr_seam::buf_free_next::call(buf_id) == FREENEXT_NOT_IN_LIST {
-            let head = self.first_free_buffer.get();
+            let head = self.body().first_free_buffer.get();
             bufmgr_seam::set_buf_free_next::call(buf_id, head);
             if head < 0 {
-                self.last_free_buffer.set(buf_id);
+                self.body().last_free_buffer.set(buf_id);
             }
-            self.first_free_buffer.set(buf_id);
+            self.body().first_free_buffer.set(buf_id);
         }
         Ok(())
     }
@@ -156,7 +196,7 @@ impl BufferStrategyControl {
     /// to make the store appear atomic to `StrategyGetBuffer`, as in C.
     pub fn notify_bgwriter(&self, bgwprocno: i32) -> PgResult<()> {
         let _guard = self.acquire_lock();
-        self.bgwprocno.set(bgwprocno);
+        self.body().bgwprocno.set(bgwprocno);
         Ok(())
     }
 
@@ -167,31 +207,31 @@ impl BufferStrategyControl {
     pub fn sync_start(&self) -> PgResult<(i32, u32, u32)> {
         let _guard = self.acquire_lock();
         // pg_atomic_read_u32 — No barrier semantics (atomics.h), so Relaxed.
-        let next = self.next_victim_buffer.load(Ordering::Relaxed);
+        let next = self.body().next_victim_buffer.load(Ordering::Relaxed);
         if self.nbuffers == 0 {
             return Ok((
                 0,
-                self.complete_passes.get(),
+                self.body().complete_passes.get(),
                 // pg_atomic_exchange_u32 — Full barrier semantics.
-                self.num_buffer_allocs.swap(0, Ordering::SeqCst),
+                self.body().num_buffer_allocs.swap(0, Ordering::SeqCst),
             ));
         }
         let result = (next % self.nbuffers) as i32;
-        let complete_passes = self.complete_passes.get() + next / self.nbuffers;
+        let complete_passes = self.body().complete_passes.get() + next / self.nbuffers;
         // pg_atomic_exchange_u32 — Full barrier semantics.
-        let num_buf_alloc = self.num_buffer_allocs.swap(0, Ordering::SeqCst);
+        let num_buf_alloc = self.body().num_buffer_allocs.swap(0, Ordering::SeqCst);
         Ok((result, complete_passes, num_buf_alloc))
     }
 
     /// Snapshot of `completePasses` (without the in-flight adjustment).
     pub fn complete_passes(&self) -> u32 {
-        self.complete_passes.get()
+        self.body().complete_passes.get()
     }
 
     /// `numBufferAllocs` accumulator read+reset.
     pub fn take_num_buffer_allocs(&self) -> u32 {
         // pg_atomic_exchange_u32 — Full barrier semantics.
-        self.num_buffer_allocs.swap(0, Ordering::SeqCst)
+        self.body().num_buffer_allocs.swap(0, Ordering::SeqCst)
     }
 }
 
@@ -202,7 +242,7 @@ struct SpinGuard<'a> {
 
 impl Drop for SpinGuard<'_> {
     fn drop(&mut self) {
-        s_unlock(&self.control.buffer_strategy_lock);
+        s_unlock(&self.control.body().buffer_strategy_lock);
     }
 }
 
@@ -211,7 +251,7 @@ impl Drop for SpinGuard<'_> {
 /// + MAXALIGN(sizeof(BufferStrategyControl))`.
 pub fn StrategyShmemSize(nbuffers: i32) -> Size {
     let hash = crate::buf_table::BufTableShmemSize(nbuffers.saturating_add(NUM_BUFFER_PARTITIONS));
-    let control = core::mem::size_of::<BufferStrategyControl>().next_multiple_of(8);
+    let control = core::mem::size_of::<StrategyControlBody>().next_multiple_of(8);
     hash + control
 }
 
@@ -238,7 +278,7 @@ impl<'a> ClockSweep<'a> {
             return Ok(0);
         }
         // pg_atomic_fetch_add_u32 — Full barrier semantics (atomics.h).
-        let victim = self.control.next_victim_buffer.fetch_add(1, Ordering::SeqCst);
+        let victim = self.control.body().next_victim_buffer.fetch_add(1, Ordering::SeqCst);
         if victim >= nbuffers {
             let original_victim = victim;
             let victim = victim % nbuffers;
@@ -249,16 +289,15 @@ impl<'a> ClockSweep<'a> {
                     let wrapped = expected % nbuffers;
                     // pg_atomic_compare_exchange_u32 — Full barrier semantics
                     // (both success and failure orderings).
-                    match self.control.next_victim_buffer.compare_exchange(
+                    match self.control.body().next_victim_buffer.compare_exchange(
                         expected,
                         wrapped,
                         Ordering::SeqCst,
                         Ordering::SeqCst,
                     ) {
                         Ok(_) => {
-                            self.control
-                                .complete_passes
-                                .set(self.control.complete_passes.get().wrapping_add(1));
+                            self.control.body().complete_passes
+                                .set(self.control.body().complete_passes.get().wrapping_add(1));
                             break;
                         }
                         Err(actual) => expected = actual,
@@ -296,29 +335,30 @@ impl<'a> ClockSweep<'a> {
         }
 
         // Waken the bgwriter if asked (read-once + reset, then SetLatch).
-        let bgwprocno = control.bgwprocno.get();
+        let bgwprocno = control.body().bgwprocno.get();
         if bgwprocno != -1 {
-            control.bgwprocno.set(-1);
+            control.body().bgwprocno.set(-1);
             backend_storage_ipc_latch_seams::set_latch_for_procno::call(bgwprocno);
         }
 
         // Count buffer allocation requests for the bgwriter's rate estimate.
         // (Ring recycles returned above, before this point.)
         // pg_atomic_fetch_add_u32 — Full barrier semantics (atomics.h).
-        control.num_buffer_allocs.fetch_add(1, Ordering::SeqCst);
+        control.body().num_buffer_allocs.fetch_add(1, Ordering::SeqCst);
 
         // First: try the free list (lockless check, then under the spinlock pop).
-        if control.first_free_buffer.get() >= 0 {
+        if control.body().first_free_buffer.get() >= 0 {
             loop {
                 let buf = {
                     let _guard = control.acquire_lock();
-                    if control.first_free_buffer.get() < 0 {
+                    if control.body().first_free_buffer.get() < 0 {
                         break;
                     }
-                    let buf = control.first_free_buffer.get();
+                    let buf = control.body().first_free_buffer.get();
                     debug_assert_ne!(bufmgr_seam::buf_free_next::call(buf), FREENEXT_NOT_IN_LIST);
                     // Unconditionally remove from freelist.
                     control
+                        .body()
                         .first_free_buffer
                         .set(bufmgr_seam::buf_free_next::call(buf));
                     bufmgr_seam::set_buf_free_next::call(buf, FREENEXT_NOT_IN_LIST);

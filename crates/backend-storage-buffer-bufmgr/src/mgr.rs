@@ -6,13 +6,20 @@
 //! accessors from bufmgr.c / buf_internals.h.
 //!
 //! Ambient per-backend handle: in C the pool is reached through the process
-//! globals `BufferDescriptors`/`BufferBlocks`; a backend is a thread here, so
-//! the ambient handle is a thread-local `&'static BufferManager` published by
-//! [`BufferManager::register_global`] (the C "one pool view per process"
-//! posture, keeping the backend-local `RefCell`/`Cell` state correct without
-//! forcing `Sync`).
+//! globals `BufferDescriptors`/`BufferBlocks`; here each backend caches a
+//! `&'static BufferManager` "view" in a thread-local, published by
+//! [`BufferManager::register_global`]. The view is process-local — exactly like
+//! C's per-process pointer globals — but the POOL CONTENTS it points at (the
+//! descriptor `state` atomics, the spinlock-protected descriptor fields, the
+//! page bytes, the per-buffer content locks and I/O condvars) live in the
+//! `MAP_SHARED` shared-memory segment carved by `ShmemInitStruct`. Because the
+//! anonymous `MAP_SHARED` mapping is inherited at the same virtual address by
+//! every forked backend, those raw pointers resolve to the same shared bytes in
+//! every process, so a page one backend dirties is visible to all others — the
+//! real bufmgr.c / buf_init.c posture. Only the per-backend cursor state (the
+//! private pin counts, the pin-count-waiter record) stays process-local.
 
-use std::cell::{Cell, RefCell, UnsafeCell};
+use std::cell::Cell;
 use std::sync::atomic::Ordering;
 
 use backend_storage_buffer_support::{BufTable, BufferStrategyControl, StrategyShmemSize};
@@ -29,6 +36,117 @@ use crate::refcount::PrivateRefCount;
 
 /// `InvalidBuffer` (buf.h).
 const INVALID_BUFFER: Buffer = 0;
+
+/// A fixed-length array resident in the `MAP_SHARED` shared-memory segment,
+/// reached through a raw base pointer (the address returned by
+/// `ShmemInitStruct`, identical in every forked backend). This is the Rust
+/// stand-in for C's bare in-shmem array pointers (`BufferDescriptors`,
+/// `BufferBlocks`, the content-lock and I/O-condvar arrays): all backends share
+/// the same bytes, and cross-backend exclusion is the buffer manager's lock
+/// discipline (the header spinlock / content lock / partition lock), not a Rust
+/// borrow.
+///
+/// The `BufferManager` holding these is itself process-local and `'static`
+/// (leaked in `register_global`), so the raw pointers it carries never dangle.
+struct ShmemArray<T> {
+    base: *mut T,
+    len: usize,
+}
+
+// SAFETY: the pointed-to bytes live in the shared segment for the life of the
+// server; cross-backend access is serialized by the buffer manager's locks
+// (exactly as the C bare-pointer arrays are). The `BufferManager` is published
+// `'static` per backend, so the pointer is valid for the whole process.
+unsafe impl<T> Send for ShmemArray<T> {}
+unsafe impl<T> Sync for ShmemArray<T> {}
+
+impl<T> ShmemArray<T> {
+    /// Wrap a base pointer + element count. The region must hold at least `len`
+    /// properly-aligned, initialized `T`s.
+    fn new(base: *mut T, len: usize) -> Self {
+        Self { base, len }
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    /// `&array[i]` — a shared reference to element `i`. The caller provides the
+    /// real serialization (the relevant lock), exactly as the C readers do.
+    #[inline]
+    fn get(&self, i: usize) -> &T {
+        debug_assert!(i < self.len, "ShmemArray index {i} out of bounds {}", self.len);
+        // SAFETY: `i < len`, the region holds `len` initialized `T`s, and
+        // cross-backend access is serialized by the caller-held buffer-manager
+        // lock (the same discipline C relies on for these bare-pointer arrays).
+        unsafe { &*self.base.add(i) }
+    }
+
+    /// `&mut array[i]` — an exclusive reference to element `i`. The caller must
+    /// hold the lock that makes the access exclusive (header spinlock for the
+    /// descriptor fields, content lock for the page bytes), exactly as in C.
+    #[inline]
+    #[allow(clippy::mut_from_ref)]
+    fn get_mut(&self, i: usize) -> &mut T {
+        debug_assert!(i < self.len, "ShmemArray index {i} out of bounds {}", self.len);
+        // SAFETY: as `get`, plus the caller holds the exclusive lock for `i`.
+        unsafe { &mut *self.base.add(i) }
+    }
+
+    /// Raw slice `[start, start+count)` of the backing region for in-place
+    /// byte access (the page bytes), under the caller-held content lock.
+    #[inline]
+    fn slice(&self, start: usize, count: usize) -> &[T] {
+        debug_assert!(start + count <= self.len);
+        // SAFETY: bounded by `len`; the caller holds the content lock for these
+        // pages, so the shared read is sound (C's `char *BufferBlocks` read).
+        unsafe { core::slice::from_raw_parts(self.base.add(start), count) }
+    }
+
+    #[inline]
+    #[allow(clippy::mut_from_ref)]
+    fn slice_mut(&self, start: usize, count: usize) -> &mut [T] {
+        debug_assert!(start + count <= self.len);
+        // SAFETY: as `slice`, plus the caller holds the exclusive content lock.
+        unsafe { core::slice::from_raw_parts_mut(self.base.add(start), count) }
+    }
+}
+
+/// Carve a `count`-element `T` array out of the `MAP_SHARED` shared-memory
+/// segment via the `ShmemInitStruct` seam (the C `ShmemInitStruct(name,
+/// count*sizeof(T), &found)`), returning the base pointer and the `found` flag
+/// (true == another backend already created+initialized it).
+///
+/// In production the seam returns a real pointer into the shared segment, the
+/// same address in every forked backend. In the crate's unit tests (and any
+/// caller that has not stood up a real segment) the seam returns a NULL
+/// pointer; there `carve_shmem` falls back to a leaked, zeroed process-heap
+/// allocation so the owned `BufferManager` is still usable as a single-process
+/// pool. The leak is bounded (one pool per test process) and matches the
+/// `register_global` leak posture.
+fn carve_shmem<T>(name: &str, count: usize) -> (*mut T, bool) {
+    let bytes = count.saturating_mul(core::mem::size_of::<T>());
+    let (raw, found) = backend_storage_ipc_shmem_seams::shmem_init_struct::call(name, bytes)
+        .expect("ShmemInitStruct failed in BufferManagerShmemInit");
+    if !raw.is_null() {
+        debug_assert_eq!(
+            raw as usize % core::mem::align_of::<T>(),
+            0,
+            "shmem region {name} is misaligned for its element type"
+        );
+        return (raw.cast::<T>(), found);
+    }
+    // No real segment (test / standalone harness): leak a zeroed heap region.
+    let layout = core::alloc::Layout::array::<T>(count.max(1)).expect("layout");
+    // SAFETY: non-zero layout; the zeroed bytes are a valid bit pattern for the
+    // plain-data / atomic element types placed here (they are re-initialized in
+    // place by the `!found` init loop, which always runs because we report
+    // `found == false`).
+    let ptr = unsafe { std::alloc::alloc_zeroed(layout) }.cast::<T>();
+    assert!(!ptr.is_null(), "out of memory carving {name} fallback");
+    (ptr, false)
+}
 
 thread_local! {
     /// THIS backend's ambient buffer-manager handle (the `BufferDescriptors`
@@ -72,14 +190,17 @@ impl Default for DescFields {
     }
 }
 
-/// The buffer manager — the shared descriptor array, the page bytes, the
-/// per-buffer content-lock and I/O-condvar arrays, plus the per-backend private
-/// pin counts and this backend's pin-count-waiter record.
+/// The buffer manager — a process-local *view* onto the shared descriptor
+/// array, the page bytes, and the per-buffer content-lock and I/O-condvar
+/// arrays (all resident in the `MAP_SHARED` shmem segment), plus the
+/// per-backend private pin counts and this backend's pin-count-waiter record
+/// (genuinely process-local).
 ///
-/// In a real multi-backend server these arrays live in the `MAP_SHARED`
-/// segment; here a backend is a thread and the per-backend state is modelled
-/// with `RefCell`/`Cell`, so the manager owns the arrays directly (the shmem
-/// carve is a later concern). Exclusion is the real C lock discipline:
+/// The five shared arrays are reached through raw base pointers into the shmem
+/// regions carved by `ShmemInitStruct`; the same anonymous `MAP_SHARED` mapping
+/// (and thus the same addresses) is inherited by every forked backend, so the
+/// pointers resolve to the same shared bytes process-wide. Exclusion is the
+/// real C lock discipline:
 ///   * `states[i]` — the per-buffer header spinlock (`BM_LOCKED` CAS) + the
 ///     lock-free pin CAS, exactly as bufmgr.c `LockBufHdr`/`UnlockBufHdr`.
 ///   * `fields[i]` — protected by the header spinlock (`tag`/`io_wref`/
@@ -89,31 +210,31 @@ impl Default for DescFields {
 ///   * `io_cvs[i]` — the `BufferIOCVArray` condition variable for waiting on
 ///     I/O completion on buffer `i`.
 pub struct BufferManager {
-    /// `GetBufferDescriptor(i)->state` — the packed atomic word per buffer. The
-    /// substrate for the header spinlock + the lock-free pin CAS.
-    states: Vec<pg_atomic_uint32>,
-    /// The remaining (spinlock/strategy-protected) descriptor fields. Reached
-    /// only under the header spinlock / strategy spinlock.
-    fields: RefCell<Vec<DescFields>>,
-    /// `BufferBlocks` — `nbuffers * BLCKSZ` page bytes.
-    ///
-    /// Modelled as an `UnsafeCell` rather than a `RefCell` to match C's bare
-    /// `char *BufferBlocks` shared array: in C, reading one page's header (e.g.
-    /// `BufferGetLSNAtomic`) while another page is being written, or reading the
-    /// LSN of the very page a hint-bit write is updating, is legal because
-    /// synchronisation is provided by the per-buffer content lock and the header
-    /// spinlock — not by an interpreter-level borrow. A single `RefCell` over the
-    /// whole pool would spuriously conflict on these legal disjoint/same-page
-    /// re-entrant accesses (e.g. `with_buffer_page` holding the page while the
-    /// per-tuple visibility check calls `SetHintBits`→`MarkBufferDirtyHint`→
-    /// `BufferGetLSNAtomic`). The content lock is the real serialiser.
-    blocks: UnsafeCell<Vec<u8>>,
-    /// The per-buffer content `LWLock` array
-    /// (`BufferDescriptorGetContentLock`). One real lock per buffer.
-    content_locks: Vec<LWLock>,
+    /// `BufferDescriptors[i].state` — the packed atomic word per buffer, the
+    /// substrate for the header spinlock + the lock-free pin CAS. Base pointer
+    /// into the "Buffer Descriptors" shmem region.
+    states: ShmemArray<pg_atomic_uint32>,
+    /// The remaining (spinlock/strategy-protected) descriptor fields, reached
+    /// only under the header spinlock / strategy spinlock. Base pointer into
+    /// the "Buffer Descriptors" shmem region (alongside `states`). C's bare
+    /// `char *`-style pointer access matches the per-buffer-lock discipline; no
+    /// `RefCell` (which would impose an interpreter borrow flag that is not the
+    /// real serialiser and would not be coherent cross-process).
+    fields: ShmemArray<DescFields>,
+    /// `BufferBlocks` — `nbuffers * BLCKSZ` page bytes, base pointer into the
+    /// "Buffer Blocks" shmem region. Bare-pointer access matches C's
+    /// `char *BufferBlocks`; reads of disjoint pages, or a re-entrant read of
+    /// this page's header LSN (`SetHintBits`→`MarkBufferDirtyHint`→
+    /// `BufferGetLSNAtomic`), are governed by the per-buffer content lock and
+    /// header spinlock, exactly as in C.
+    blocks: ShmemArray<u8>,
+    /// `BufferDescriptorGetContentLock(buf)` — the per-buffer content `LWLock`
+    /// array. Base pointer into the "Buffer Content Locks" shmem region.
+    content_locks: ShmemArray<LWLock>,
     /// `BufferIOCVArray` — the per-buffer I/O `ConditionVariable` array
-    /// (`BufferDescriptorGetIOCV`).
-    io_cvs: Vec<ConditionVariable>,
+    /// (`BufferDescriptorGetIOCV`). Base pointer into the "Buffer IO Condition
+    /// Variables" shmem region.
+    io_cvs: ShmemArray<ConditionVariable>,
     /// The per-backend private pin counts (NOT shmem).
     private_refcount: PrivateRefCount,
     /// `SharedBufHash` (buf_table.c) — the buffer-mapping hash table
@@ -134,54 +255,78 @@ pub struct BufferManager {
 impl BufferManager {
     // -- construction (buf_init.c) -----------------------------------------
 
-    /// `BufferManagerShmemInit(NBuffers)` (buf_init.c) — place + initialise the
-    /// descriptor array, the data pages, the per-buffer content locks, and the
-    /// I/O-condvar array. Faithful to the per-descriptor init loop: `buf_id = i`,
-    /// `state = 0`, `wait_backend_pgprocno = INVALID_PROC_NUMBER`, freelist
-    /// `freeNext = i+1`, last `FREENEXT_END_OF_LIST`,
+    /// `BufferManagerShmemInit(NBuffers)` (buf_init.c) — place the descriptor
+    /// array, the data pages, the per-buffer content locks, and the I/O-condvar
+    /// array IN THE `MAP_SHARED` SHARED-MEMORY SEGMENT (via `ShmemInitStruct`),
+    /// then — only on first creation (`found == false`, the postmaster) — run
+    /// the per-descriptor init loop in place: `buf_id = i`, `state = 0`,
+    /// `wait_backend_pgprocno = INVALID_PROC_NUMBER`, freelist `freeNext = i+1`,
+    /// last `FREENEXT_END_OF_LIST`,
     /// `LWLockInitialize(content_lock, LWTRANCHE_BUFFER_CONTENT)`,
-    /// `ConditionVariableInit(BufferDescriptorGetIOCV(buf))`.
+    /// `ConditionVariableInit(BufferDescriptorGetIOCV(buf))`. A forked child
+    /// re-publishes the same view onto the already-initialized shared bytes.
     pub fn BufferManagerShmemInit(nbuffers: u32) -> Self {
         let n = nbuffers as usize;
 
-        // states[i] — zeroed (state == 0).
-        let mut states = Vec::with_capacity(n);
-        for _ in 0..n {
-            states.push(pg_atomic_uint32::new(0));
+        // Carve each genuinely-shared array from the MAP_SHARED segment. The
+        // returned base pointer is the same address in every forked backend.
+        let (states, found_s) =
+            carve_shmem::<pg_atomic_uint32>("Buffer Descriptors", n);
+        // The spinlock-protected descriptor fields share the descriptor region
+        // conceptually but are a distinct C field set; give them their own
+        // named region for a clean layout (still all in the shared segment).
+        let (fields, found_f) = carve_shmem::<DescFields>("Buffer Desc Fields", n);
+        let (blocks, found_b) = carve_shmem::<u8>("Buffer Blocks", n.saturating_mul(BLCKSZ));
+        let (content_locks, found_c) = carve_shmem::<LWLock>("Buffer Content Locks", n);
+        let (io_cvs, found_i) = carve_shmem::<ConditionVariable>("Buffer IO Condition Variables", n);
+
+        let states = ShmemArray::new(states, n);
+        let fields = ShmemArray::new(fields, n);
+        let blocks = ShmemArray::new(blocks, n.saturating_mul(BLCKSZ));
+        let content_locks = ShmemArray::new(content_locks, n);
+        let io_cvs = ShmemArray::new(io_cvs, n);
+
+        // First creator initializes the shared bytes in place; attachers reuse
+        // them (mirrors C's `if (!foundDescs) { for (i...) ... }`).
+        if !found_s {
+            for i in 0..n {
+                // state == 0: pg_atomic_init_u32(&state, 0).
+                states.get_mut(i).value.store(0, Ordering::Relaxed);
+            }
         }
-
-        // fields[i] — the buf_init.c per-descriptor init loop.
-        let mut fields = Vec::with_capacity(n);
-        for i in 0..n {
-            fields.push(DescFields {
-                tag: buftag::default(),
-                free_next: if i + 1 < n {
-                    (i + 1) as i32
-                } else {
-                    FREENEXT_END_OF_LIST
-                },
-                wait_backend_pgprocno: INVALID_PROC_NUMBER,
-                io_wref: PgAioWaitRef::default(),
-            });
+        if !found_f {
+            for i in 0..n {
+                *fields.get_mut(i) = DescFields {
+                    tag: buftag::default(),
+                    free_next: if i + 1 < n {
+                        (i + 1) as i32
+                    } else {
+                        FREENEXT_END_OF_LIST
+                    },
+                    wait_backend_pgprocno: INVALID_PROC_NUMBER,
+                    io_wref: PgAioWaitRef::default(),
+                };
+            }
         }
-
-        // BufferBlocks — n * BLCKSZ zeroed page bytes.
-        let blocks = vec![0u8; n.saturating_mul(BLCKSZ)];
-
-        // content_locks[i] — LWLockInitialize(.., LWTRANCHE_BUFFER_CONTENT).
-        let mut content_locks = Vec::with_capacity(n);
-        for _ in 0..n {
-            let mut lock = LWLock::default();
-            backend_storage_lmgr_lwlock::LWLockInitialize(&mut lock, LWTRANCHE_BUFFER_CONTENT);
-            content_locks.push(lock);
+        if !found_b {
+            // MemSet(BufferBlocks, 0, NBuffers * BLCKSZ).
+            blocks.slice_mut(0, blocks.len()).fill(0);
         }
-
-        // io_cvs[i] — ConditionVariableInit(BufferDescriptorGetIOCV(buf)).
-        let mut io_cvs = Vec::with_capacity(n);
-        for _ in 0..n {
-            let cv = ConditionVariable::new();
-            backend_storage_lmgr_condition_variable::ConditionVariableInit(&cv);
-            io_cvs.push(cv);
+        if !found_c {
+            for i in 0..n {
+                // LWLockInitialize(content_lock, LWTRANCHE_BUFFER_CONTENT).
+                backend_storage_lmgr_lwlock::LWLockInitialize(
+                    content_locks.get_mut(i),
+                    LWTRANCHE_BUFFER_CONTENT,
+                );
+            }
+        }
+        if !found_i {
+            for i in 0..n {
+                // ConditionVariableInit(BufferDescriptorGetIOCV(buf)).
+                *io_cvs.get_mut(i) = ConditionVariable::new();
+                backend_storage_lmgr_condition_variable::ConditionVariableInit(io_cvs.get(i));
+            }
         }
 
         // SharedBufHash — InitBufTable(NBuffers + NUM_BUFFER_PARTITIONS) so a
@@ -198,8 +343,8 @@ impl BufferManager {
 
         Self {
             states,
-            fields: RefCell::new(fields),
-            blocks: UnsafeCell::new(blocks),
+            fields,
+            blocks,
             content_locks,
             io_cvs,
             private_refcount: PrivateRefCount::default(),
@@ -262,14 +407,14 @@ impl BufferManager {
     /// `buf_id` (used by `LockBuffer` in F1c, direct lwlock dep).
     #[allow(dead_code)]
     pub(crate) fn content_lock(&self, buf_id: usize) -> &LWLock {
-        &self.content_locks[buf_id]
+        self.content_locks.get(buf_id)
     }
 
     /// `BufferDescriptorGetIOCV(buf)` — the I/O condition variable for buffer
     /// `buf_id` (used by the I/O wait family).
     #[allow(dead_code)]
     pub(crate) fn io_cv(&self, buf_id: usize) -> &ConditionVariable {
-        &self.io_cvs[buf_id]
+        self.io_cvs.get(buf_id)
     }
 
     /// `PinCountWaitBuf` accessor (F1c `LockBufferForCleanup`).
@@ -284,7 +429,7 @@ impl BufferManager {
     /// `BM_LOCKED` via a `pg_atomic_fetch_or_u32` spin, returning the state with
     /// `BM_LOCKED` set. IN-CRATE (the spin loop is the algorithm).
     pub fn lock_buf_hdr(&self, buf_id: usize) -> u32 {
-        let state = &self.states[buf_id].value;
+        let state = &self.states.get(buf_id).value;
         loop {
             // C `pg_atomic_fetch_or_u32` has FULL barrier semantics
             // (atomics.h). `SeqCst` is the Rust ordering that matches a full
@@ -300,7 +445,7 @@ impl BufferManager {
     /// `UnlockBufHdr(buf, buf_state)` — clear `BM_LOCKED`, writing back the
     /// (possibly modified) state.
     pub fn unlock_buf_hdr(&self, buf_id: usize, buf_state: u32) {
-        self.states[buf_id]
+        self.states.get(buf_id)
             .value
             .store(buf_state & !BM_LOCKED, Ordering::Release);
     }
@@ -309,7 +454,7 @@ impl BufferManager {
     /// observed state.
     #[allow(dead_code)]
     pub(crate) fn wait_buf_hdr_unlocked(&self, buf_id: usize) -> u32 {
-        let state = &self.states[buf_id].value;
+        let state = &self.states.get(buf_id).value;
         let mut buf_state = state.load(Ordering::Acquire);
         while buf_state & BM_LOCKED != 0 {
             std::hint::spin_loop();
@@ -321,7 +466,7 @@ impl BufferManager {
     /// Read a descriptor's `state` atom without the header lock.
     #[allow(dead_code)]
     pub(crate) fn read_state(&self, buf_id: usize) -> u32 {
-        self.states[buf_id].value.load(Ordering::Acquire)
+        self.states.get(buf_id).value.load(Ordering::Acquire)
     }
 
     /// `&GetBufferDescriptor(buf_id)->state` — the raw atomic word, for the
@@ -329,7 +474,7 @@ impl BufferManager {
     /// `compare_exchange_weak`.
     #[allow(dead_code)]
     pub(crate) fn states_atomic(&self, buf_id: usize) -> &std::sync::atomic::AtomicU32 {
-        &self.states[buf_id].value
+        &self.states.get(buf_id).value
     }
 
     /// `pg_atomic_compare_exchange_u32(&buf->state, &expected, new)` — the
@@ -345,7 +490,7 @@ impl BufferManager {
         expected: u32,
         new: u32,
     ) -> Result<u32, u32> {
-        self.states[buf_id].value.compare_exchange_weak(
+        self.states.get(buf_id).value.compare_exchange_weak(
             expected,
             new,
             Ordering::SeqCst,
@@ -358,7 +503,7 @@ impl BufferManager {
     /// (`WakePinCountWaiter`).
     #[allow(dead_code)]
     pub(crate) fn wait_backend_pgprocno(&self, buf_id: usize) -> i32 {
-        self.fields.borrow()[buf_id].wait_backend_pgprocno
+        self.fields.get(buf_id).wait_backend_pgprocno
     }
 
     /// `GetBufferDescriptor(buf_id)->wait_backend_pgprocno = procno` — record the
@@ -366,7 +511,7 @@ impl BufferManager {
     /// spinlock by `LockBufferForCleanup`.
     #[allow(dead_code)]
     pub(crate) fn set_wait_backend_pgprocno(&self, buf_id: usize, procno: i32) {
-        self.fields.borrow_mut()[buf_id].wait_backend_pgprocno = procno;
+        self.fields.get_mut(buf_id).wait_backend_pgprocno = procno;
     }
 
     // -- buffer-id <-> Buffer helpers --------------------------------------
@@ -400,20 +545,20 @@ impl BufferManager {
     /// the caller holds the strategy spinlock where it matters, exactly as the
     /// C freelist.c readers do.
     pub fn free_next(&self, buf_id: i32) -> i32 {
-        self.fields.borrow()[buf_id as usize].free_next
+        self.fields.get(buf_id as usize).free_next
     }
 
     /// `GetBufferDescriptor(buf_id)->freeNext = value`. Raw write under the
     /// caller-held strategy spinlock (the C freelist.c writers' contract).
     pub fn set_free_next(&self, buf_id: i32, value: i32) {
-        self.fields.borrow_mut()[buf_id as usize].free_next = value;
+        self.fields.get_mut(buf_id as usize).free_next = value;
     }
 
     /// `GetBufferDescriptor(buf_id)->tag` — header-spinlock-protected `Copy`
     /// read (callers hold the header lock or partition lock where it matters).
     #[allow(dead_code)]
     pub(crate) fn desc_tag(&self, buf_id: usize) -> buftag {
-        self.fields.borrow()[buf_id].tag
+        self.fields.get(buf_id).tag
     }
 
     /// Raw view of buffer `buf_id`'s page bytes for in-place read/write under a
@@ -428,8 +573,7 @@ impl BufferManager {
         // mutate. Reads of *other* pages, or a re-entrant read of *this* page's
         // header LSN (the `MarkBufferDirtyHint`/`BufferGetLSNAtomic` hint-bit
         // path), are governed by the same locks as in C, not by Rust borrows.
-        let blocks = unsafe { &mut *self.blocks.get() };
-        f(&mut blocks[start..start + BLCKSZ])
+        f(self.blocks.slice_mut(start, BLCKSZ))
     }
 
     /// `MemSet(BufHdrGetBlock(buf), 0, BLCKSZ)` (bufmgr.c
@@ -441,8 +585,7 @@ impl BufferManager {
         let start = buf_id * BLCKSZ;
         // SAFETY: see `with_block_mut`. The freshly-acquired victim buffer is
         // pinned exclusively by this backend; the page is not yet valid.
-        let blocks = unsafe { &mut *self.blocks.get() };
-        blocks[start..start + BLCKSZ].fill(0);
+        self.blocks.slice_mut(start, BLCKSZ).fill(0);
     }
 
     /// Read-only view of buffer `buf_id`'s page bytes under a caller-held content
@@ -452,8 +595,7 @@ impl BufferManager {
         let start = buf_id * BLCKSZ;
         // SAFETY: see `with_block_mut`. A shared read under the caller-held
         // content lock / header spinlock, faithful to C's bare-pointer read.
-        let blocks = unsafe { &*self.blocks.get() };
-        f(&blocks[start..start + BLCKSZ])
+        f(self.blocks.slice(start, BLCKSZ))
     }
 
     // -- F2a: buffer-mapping table + strategy control + mapping locks ------
@@ -483,7 +625,7 @@ impl BufferManager {
     /// the caller-held header spinlock (`BufferAlloc` / `InvalidateVictimBuffer`).
     #[allow(dead_code)]
     pub(crate) fn set_desc_tag(&self, buf_id: usize, tag: buftag) {
-        self.fields.borrow_mut()[buf_id].tag = tag;
+        self.fields.get_mut(buf_id).tag = tag;
     }
 
     /// `GetBufferDescriptor(buf_id)->io_wref = io_wref` — stamp / clear the
@@ -492,7 +634,7 @@ impl BufferManager {
     /// spinlock-protected field like `tag`).
     #[allow(dead_code)]
     pub(crate) fn set_io_wref(&self, buf_id: usize, io_wref: PgAioWaitRef) {
-        self.fields.borrow_mut()[buf_id].io_wref = io_wref;
+        self.fields.get_mut(buf_id).io_wref = io_wref;
     }
 
     /// `LWLockAcquire(BufMappingPartitionLock(partition), mode)` — take the
@@ -550,8 +692,26 @@ pub fn BufferManagerShmemSize() -> types_error::PgResult<Size> {
 
     let mut size: Size = 0;
 
-    // size of buffer descriptors + cacheline alignment slack.
+    // size of buffer descriptors (state atoms) + cacheline alignment slack.
     size = shmem::add_size::call(size, shmem::mul_size::call(nbuffers, SIZEOF_BUFFER_DESC_PADDED)?)?;
+    size = shmem::add_size::call(size, PG_CACHE_LINE_SIZE)?;
+
+    // size of the spinlock-protected descriptor fields region (carved
+    // separately from the state atoms here) + cacheline slack.
+    size = shmem::add_size::call(
+        size,
+        shmem::mul_size::call(nbuffers, core::mem::size_of::<DescFields>() as Size)?,
+    )?;
+    size = shmem::add_size::call(size, PG_CACHE_LINE_SIZE)?;
+
+    // size of the per-buffer content-lock array (LWLockPadded-sized) + slack.
+    size = shmem::add_size::call(
+        size,
+        shmem::mul_size::call(
+            nbuffers,
+            types_storage::storage::LWLOCK_PADDED_SIZE as Size,
+        )?,
+    )?;
     size = shmem::add_size::call(size, PG_CACHE_LINE_SIZE)?;
 
     // size of data pages, plus I/O alignment padding.
@@ -575,63 +735,40 @@ pub fn BufferManagerShmemSize() -> types_error::PgResult<Size> {
 }
 
 /// `BufferManagerShmemInit(void)` (buf_init.c) — allocate-or-attach the buffer
-/// pool's shared structures and stand up the process-local manager view.
+/// pool's shared structures and stand up this backend's manager view.
 ///
-/// The C carves four named regions (`Buffer Descriptors`, `Buffer Blocks`,
-/// `Buffer IO Condition Variables`, `Checkpoint BufferIds`) from the shared
-/// segment via `ShmemInitStruct`, then initialises the descriptor headers in
-/// the first-creator backend. This engine models the genuinely-shared payload
-/// (descriptors, page bytes, content locks, I/O condvars, buf table, strategy
-/// control) as the owned [`BufferManager`] published process-locally through
-/// [`BufferManager::register_global`] — the same posture procarray uses for the
-/// ProcArray header. We still call `ShmemInitStruct` for each named region so
-/// the cross-backend allocate-or-attach + `found` bookkeeping (the shmem index
-/// entries surfaced by `pg_get_shmem_allocations`) is honoured exactly as C
-/// does, and so the `found`/not-found "first creator initialises" decision is
-/// driven by the real shmem index.
+/// The genuinely-shared payload (descriptors, page bytes, content locks, I/O
+/// condvars, buf table, strategy control) is carved from the `MAP_SHARED`
+/// segment via `ShmemInitStruct` inside [`BufferManager::BufferManagerShmemInit`]
+/// (the named regions `Buffer Descriptors`, `Buffer Desc Fields`,
+/// `Buffer Blocks`, `Buffer Content Locks`, `Buffer IO Condition Variables`,
+/// plus `Shared Buffer Lookup Table` and `Buffer Strategy Status` from the
+/// buffer-support crate). The first creator initialises the bytes in place; a
+/// forked child attaches and re-publishes the same shared pointers as its
+/// process-local `&'static` view. The descriptor headers are NOT process-heap
+/// copies — they are the shared bytes, so a page one backend dirties is visible
+/// to every other backend. The `Checkpoint BufferIds` sort array (used only by
+/// `BufferSync`) is carved here for shmem-index parity.
 pub fn BufferManagerShmemInit() -> types_error::PgResult<()> {
     use backend_storage_ipc_shmem_seams as shmem;
 
     let nbuffers = backend_utils_misc_guc_tables::vars::NBuffers.read() as u32;
     let n = nbuffers as Size;
 
-    // Align descriptors to a cacheline boundary.
-    let (_descs, found_descs) = shmem::shmem_init_struct::call(
-        "Buffer Descriptors",
-        shmem::mul_size::call(n, SIZEOF_BUFFER_DESC_PADDED)?,
-    )?;
-
-    // Align buffer pool on the I/O page-size boundary.
-    let (_blocks, found_bufs) = shmem::shmem_init_struct::call(
-        "Buffer Blocks",
-        shmem::add_size::call(shmem::mul_size::call(n, BLCKSZ as Size)?, PG_IO_ALIGN_SIZE)?,
-    )?;
-
-    // Align condition variables to a cacheline boundary.
-    let (_iocv, found_iocv) = shmem::shmem_init_struct::call(
-        "Buffer IO Condition Variables",
-        shmem::mul_size::call(n, SIZEOF_CV_MINIMALLY_PADDED)?,
-    )?;
+    // Stand up (or re-publish) this backend's view of the pool. The descriptor
+    // states/fields, page bytes, content locks, and I/O condvars are carved from
+    // the shared segment and (on first creation) initialised in place inside the
+    // constructor exactly as the C first-creator init loop does
+    // (`StrategyInitialize` / `InitBufTable` are invoked there too).
+    BufferManager::BufferManagerShmemInit(nbuffers).register_global();
 
     // Checkpoint sort array (allocated in shmem to avoid runtime allocation
-    // during a checkpoint).
-    let (_ckpt, found_ckpt) = shmem::shmem_init_struct::call(
+    // during a checkpoint). Carved for shmem-index parity; the checkpoint code
+    // that consumes it is reached separately.
+    let (_ckpt, _found_ckpt) = shmem::shmem_init_struct::call(
         "Checkpoint BufferIds",
         shmem::mul_size::call(n, SIZEOF_CKPT_SORT_ITEM)?,
     )?;
-
-    if found_descs || found_bufs || found_iocv || found_ckpt {
-        // Should find all of these, or none of them (EXEC_BACKEND only). When
-        // attaching, the genuinely-shared payload is already initialised by the
-        // first creator; this backend just re-publishes its process-local view.
-        debug_assert!(found_descs && found_bufs && found_iocv && found_ckpt);
-    }
-
-    // Stand up (or re-publish) this backend's view of the pool. The descriptor
-    // headers, freelist links, content locks, and I/O condvars are initialised
-    // inside `BufferManagerShmemInit(nbuffers)` exactly as the C first-creator
-    // init loop does (`StrategyInitialize` is invoked there too).
-    BufferManager::BufferManagerShmemInit(nbuffers).register_global();
 
     Ok(())
 }
