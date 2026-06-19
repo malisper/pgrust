@@ -823,7 +823,7 @@ fn UpdateIndexRelation<'mcx>(
             for e in exprs.iter() {
                 cells.push(mcx::alloc_in(mcx, Node::Expr(e.clone_in(mcx)?))?);
             }
-            let list = Node::List(cells);
+            let list = Node::mk_list(mcx, cells);
             let s = nodes_seam::node_to_string_with_locations::call(mcx, &list)?;
             Some(s.as_str().into())
         }
@@ -1594,7 +1594,7 @@ fn exprs_to_list_node<'mcx>(
     for e in exprs.iter() {
         cells.push(mcx::alloc_in(mcx, Node::Expr(e.clone_in(mcx)?))?);
     }
-    Ok(Node::List(cells))
+    Ok(Node::mk_list(mcx, cells))
 }
 
 /* ===========================================================================

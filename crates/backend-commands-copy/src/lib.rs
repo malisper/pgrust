@@ -1132,12 +1132,12 @@ fn build_rls_select_query<'mcx>(
         let cr = ColumnRef {
             fields: {
                 let mut v = PgVec::new_in(mcx);
-                v.push(mcx::alloc_in(mcx, Node::A_Star(types_nodes::rawnodes::A_Star))?);
+                v.push(mcx::alloc_in(mcx, Node::mk_a_star(mcx, types_nodes::rawnodes::A_Star))?);
                 v
             },
             location: -1,
         };
-        target_list.push(make_res_target(mcx, Node::ColumnRef(cr))?);
+        target_list.push(make_res_target(mcx, Node::mk_column_ref(mcx, cr))?);
     } else {
         for col in stmt.attlist.iter() {
             let cr = ColumnRef {
@@ -1148,7 +1148,7 @@ fn build_rls_select_query<'mcx>(
                 },
                 location: -1,
             };
-            target_list.push(make_res_target(mcx, Node::ColumnRef(cr))?);
+            target_list.push(make_res_target(mcx, Node::mk_column_ref(mcx, cr))?);
         }
     }
 
@@ -1171,12 +1171,12 @@ fn build_rls_select_query<'mcx>(
     };
 
     let mut from_clause: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
-    from_clause.push(mcx::alloc_in(mcx, Node::RangeVar(from))?);
+    from_clause.push(mcx::alloc_in(mcx, Node::mk_range_var(mcx, from))?);
 
     let select = empty_select_stmt(mcx, target_list, from_clause)?;
 
     Ok(RawStmt {
-        stmt: mcx::alloc_in(mcx, Node::SelectStmt(select))?,
+        stmt: mcx::alloc_in(mcx, Node::mk_select_stmt(mcx, select))?,
         stmt_location,
         stmt_len,
     })
@@ -1190,7 +1190,7 @@ fn make_res_target<'mcx>(mcx: Mcx<'mcx>, val: Node<'mcx>) -> PgResult<NodePtr<'m
         val: Some(mcx::alloc_in(mcx, val)?),
         location: -1,
     };
-    mcx::alloc_in(mcx, Node::ResTarget(rt))
+    mcx::alloc_in(mcx, Node::mk_res_target(mcx, rt))
 }
 
 /// A leaf `SELECT targetList FROM fromClause` (all other fields NIL/default).

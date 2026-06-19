@@ -789,7 +789,7 @@ fn make_cooked_node<'mcx>(
         old_pktable_oid: InvalidOid,
         location: attnum as i32,
     };
-    alloc_in(mcx, Node::Constraint(c))
+    alloc_in(mcx, Node::mk_constraint(mcx, c))
 }
 
 /// `AddRelationNewConstraints` (heap.c) — add new column default / generation

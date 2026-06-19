@@ -1048,7 +1048,7 @@ pub fn RelationGetNotNullConstraints(
             let mut keys: PgVec<'_, NodePtr<'_>> = PgVec::new_in(mcx);
             keys.push(alloc_in(
                 mcx,
-                Node::String(types_nodes::value::StringNode { sval: attname }),
+                Node::mk_string(mcx, types_nodes::value::StringNode { sval: attname }),
             )?);
 
             let constr = Constraint {
