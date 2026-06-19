@@ -326,10 +326,7 @@ pub fn ExecInitSort<'mcx>(
 ) -> PgResult<PgBox<'mcx, SortStateData<'mcx>>> {
     let mcx = estate.es_query_cxt;
 
-    let sort: &'mcx Sort<'mcx> = match node {
-        types_nodes::nodes::Node::Sort(s) => s,
-        other => panic!("castNode(Sort, node) failed: {other:?}"),
-    };
+    let sort: &'mcx Sort<'mcx> = node.expect_sort();
 
     // create state structure
     //   sortstate = makeNode(SortState);
@@ -748,8 +745,7 @@ fn exec_sort_retrieve_instrumentation_shim(node: PlanStateHandle) -> PgResult<()
 /// `(Sort *) node->ss.ps.plan` — the Sort plan node the state aliases.
 fn sort_plan<'a, 'mcx>(node: &'a SortStateData<'mcx>) -> PgResult<&'a Sort<'mcx>> {
     match node.ss.ps.plan {
-        Some(types_nodes::nodes::Node::Sort(s)) => Ok(s),
-        Some(other) => panic!("Sort node's plan back-link is not a Sort: {other:?}"),
+        Some(p) => Ok(p.expect_sort()),
         None => Err(missing_plan()),
     }
 }
