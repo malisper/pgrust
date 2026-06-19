@@ -2801,6 +2801,48 @@ fn errloc(funcname: &'static str) -> types_error::ErrorLocation {
 /// Install this unit's six inward seams. The seam contracts are `Mcx`-free; each
 /// wrapper spins a fresh `MemoryContext` to obtain an `Mcx` for the ported body
 /// (the established bridging idiom, cf. `backend-commands-foreigncmds`).
+/// Outward-seam adapter for `CreatePublication` (utility.c:1845,
+/// `T_CreatePublicationStmt`): downcast the arena
+/// [`types_nodes::nodes::Node`] and run the ported body.
+fn create_publication_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'mcx>,
+    stmt: &types_nodes::nodes::Node<'mcx>,
+) -> PgResult<ObjectAddress> {
+    let cps = match stmt.as_createpublicationstmt() {
+        Some(s) => s,
+        None => {
+            return Err(PgError::error(
+                "create_publication_seam: statement is not a CreatePublicationStmt",
+            ))
+        }
+    };
+    CreatePublication(mcx, pstate, cps)
+}
+
+/// Outward-seam adapter for `AlterPublication` (utility.c:1849,
+/// `T_AlterPublicationStmt`).
+fn alter_publication_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'mcx>,
+    stmt: &types_nodes::nodes::Node<'mcx>,
+) -> PgResult<()> {
+    let aps = match stmt.as_alterpublicationstmt() {
+        Some(s) => s,
+        None => {
+            return Err(PgError::error(
+                "alter_publication_seam: statement is not an AlterPublicationStmt",
+            ))
+        }
+    };
+    AlterPublication(mcx, pstate, aps)
+}
+
 pub fn init_seams() {
-    inward::init_seams()
+    inward::init_seams();
+
+    // utility.c `ProcessUtilitySlow` dispatches CREATE/ALTER PUBLICATION through
+    // tcop-utility-out-seams.
+    backend_tcop_utility_out_seams::create_publication::set(create_publication_seam);
+    backend_tcop_utility_out_seams::alter_publication::set(alter_publication_seam);
 }

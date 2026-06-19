@@ -18,6 +18,7 @@ backend-commands-tablecmds-seams = { path = "../backend-commands-tablecmds-seams
 
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 types-catalog = { path = "../types-catalog" }
 types-nodes = { path = "../types-nodes" }
 types-storage = { path = "../types-storage" }

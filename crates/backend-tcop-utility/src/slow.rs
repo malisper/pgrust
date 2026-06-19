@@ -511,11 +511,28 @@ fn process_utility_slow_body<'mcx>(
             };
         }
 
-        // The extension / FDW / AM / publication / subscription / transform /
-        // cast / conversion / language / user-mapping / import-foreign-schema
-        // DDL arms (utility.c:1395-1581). Their owners are not yet ported; route
-        // them to one documented seam-panic so the unported set is a single loud
-        // panic rather than ~30 panicking arms.
+        t if t == ntag::T_CreateAmStmt => {
+            // address = CreateAccessMethod((CreateAmStmt *) parsetree);
+            address = rt::create_access_method::call(mcx, parsetree)?;
+        }
+
+        t if t == ntag::T_CreatePublicationStmt => {
+            // address = CreatePublication(pstate, (CreatePublicationStmt *) parsetree);
+            address = rt::create_publication::call(mcx, pstate, parsetree)?;
+        }
+
+        t if t == ntag::T_AlterPublicationStmt => {
+            // AlterPublication(pstate, (AlterPublicationStmt *) parsetree);
+            rt::alter_publication::call(mcx, pstate, parsetree)?;
+            // AlterPublication calls EventTriggerCollectSimpleCommand directly.
+            command_collected = true;
+        }
+
+        // The extension / FDW / subscription / transform / cast / conversion /
+        // language / user-mapping / import-foreign-schema DDL arms
+        // (utility.c:1395-1581). Their owners are not yet ported; route them to
+        // one documented seam-panic so the unported set is a single loud panic
+        // rather than ~30 panicking arms.
         _ => {
             address = rt::process_utility_slow_unported::call(mcx, pstate, parsetree, is_top_level)?;
         }

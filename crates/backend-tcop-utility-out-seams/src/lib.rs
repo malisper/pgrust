@@ -902,6 +902,23 @@ seam!(
     pub fn alter_function<'mcx>(mcx: Mcx<'mcx>, pstate: &mut ParseState<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
 );
 seam!(
+    /// `CreateAccessMethod(stmt)` (amcmds.c) — CREATE ACCESS METHOD
+    /// (utility.c:1841). Returns the new access method's `ObjectAddress`.
+    pub fn create_access_method<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `CreatePublication(pstate, stmt)` (publicationcmds.c) — CREATE PUBLICATION
+    /// (utility.c:1845). Returns the new publication's `ObjectAddress`.
+    pub fn create_publication<'mcx>(mcx: Mcx<'mcx>, pstate: &mut ParseState<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `AlterPublication(pstate, stmt)` (publicationcmds.c) — ALTER PUBLICATION
+    /// (utility.c:1849). `AlterPublication` calls
+    /// `EventTriggerCollectSimpleCommand` directly, so the dispatcher sets
+    /// `commandCollected = true` for this arm.
+    pub fn alter_publication<'mcx>(mcx: Mcx<'mcx>, pstate: &mut ParseState<'mcx>, stmt: &Node<'mcx>) -> PgResult<()>
+);
+seam!(
     /// `DefineRule(stmt, queryString)` (rewriteDefine.c) — CREATE RULE.
     pub fn define_rule<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>, query_string: &str) -> PgResult<ObjectAddress>
 );

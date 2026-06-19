@@ -296,10 +296,52 @@ fn lookup_am_handler_func(mcx: Mcx<'_>, handler_name: &[String], amtype: u8) -> 
     Ok(handlerOid)
 }
 
+/// Outward-seam adapter for `CreateAccessMethod` (utility.c:1841,
+/// `T_CreateAmStmt`): decode the arena [`types_nodes::nodes::Node`]
+/// `CreateAmStmt` into the flat [`CreateAmStmt`] the ported body consumes, then
+/// run it.
+fn create_access_method_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &types_nodes::nodes::Node<'mcx>,
+) -> PgResult<ObjectAddress> {
+    let cas = match stmt.as_createamstmt() {
+        Some(s) => s,
+        None => {
+            return Err(types_error::PgError::error(
+                "create_access_method_seam: statement is not a CreateAmStmt",
+            ))
+        }
+    };
+
+    // handler_name: List of String nodes -> Vec<String>.
+    let mut handler_name: Vec<String> = Vec::with_capacity(cas.handler_name.len());
+    for n in cas.handler_name.iter() {
+        match n.as_string() {
+            Some(s) => handler_name.push(s.sval.as_str().to_string()),
+            None => {
+                return Err(types_error::PgError::error(
+                    "CREATE ACCESS METHOD: handler name element is not a String",
+                ))
+            }
+        }
+    }
+
+    let owned = CreateAmStmt {
+        amname: cas.amname.as_ref().map(|s| s.as_str().to_string()),
+        handler_name,
+        amtype: cas.amtype as u8,
+    };
+    CreateAccessMethod(mcx, &owned)
+}
+
 /// Install every seam this crate owns. amcmds owns the inward seam
 /// `get_index_am_oid` (declared in `backend-commands-amcmds-seams`, called by
 /// the unported `opclasscmds`/`indexcmds`/`tablecmds` callers across a cycle).
 pub fn init_seams() {
+    // utility.c `ProcessUtilitySlow` dispatches CREATE ACCESS METHOD through
+    // tcop-utility-out-seams.
+    backend_tcop_utility_out_seams::create_access_method::set(create_access_method_seam);
+
     backend_commands_amcmds_seams::get_index_am_oid::set(|amname, missing_ok| {
         // The inward seam returns the (Copy) `Oid`; `get_index_am_oid` only
         // needs an `Mcx` for the wrong-type error message's transient name

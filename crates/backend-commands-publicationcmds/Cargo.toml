@@ -13,6 +13,7 @@ crate-type = ["rlib"]
 mcx = { path = "../mcx" }
 seam-core = { path = "../seam-core" }
 backend-utils-error = { path = "../backend-utils-error" }
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-acl = { path = "../types-acl" }

@@ -51,7 +51,8 @@ use types_catalog::catalog::{
 use types_core::fmgr::{F_INT4EQ, F_OIDEQ};
 use types_core::{Oid, OidIsValid};
 use types_error::{
-    ErrorLocation, PgResult, ERRCODE_UNDEFINED_DATABASE, ERRCODE_WRONG_OBJECT_TYPE, ERROR, WARNING,
+    ErrorLocation, PgError, PgResult, ERRCODE_UNDEFINED_DATABASE, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
+    WARNING,
 };
 use types_nodes::parsenodes::{OBJECT_COLUMN, OBJECT_DATABASE, OBJECT_ROLE, OBJECT_TABLESPACE};
 use types_parsenodes::CommentStmt;
@@ -557,15 +558,80 @@ fn reduce_empty(comment: Option<&str>) -> Option<&str> {
     }
 }
 
+/// Decode an arena [`types_nodes::nodes::Node`] `CommentStmt` into the flat
+/// [`types_parsenodes::CommentStmt`] that [`CommentObject`] consumes, then run
+/// it. This is the bridge from the utility dispatcher's arena parse tree to the
+/// old-model command body, mirroring the `RemoveObjects`/`DefineDomain` seam
+/// adapters. The arena `object` node is lowered through
+/// `rich_node_to_parse` (the project-wide arena→parsenodes lowering).
+fn arena_commentstmt_to_owned(
+    stmt: &types_nodes::ddlnodes::CommentStmt<'_>,
+) -> PgResult<CommentStmt> {
+    let object = match stmt.object.as_deref() {
+        Some(n) => Some(Box::new(backend_parser_parse_type::rich_node_to_parse(n)?)),
+        None => None,
+    };
+    Ok(CommentStmt {
+        objtype: stmt.objtype,
+        object,
+        comment: stmt.comment.as_ref().map(|s| s.as_str().to_string()),
+    })
+}
+
+/// Outward-seam adapter for the COMMENT fast path (`comment_object`): used by
+/// the utility dispatcher when the object type does NOT support event triggers
+/// (utility.c `T_CommentStmt` non-event-trigger leg). Returns `()` (the
+/// resolved address is discarded by the dispatcher).
+fn comment_object_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &types_nodes::nodes::Node<'mcx>,
+) -> PgResult<()> {
+    let cs = match stmt.as_commentstmt() {
+        Some(c) => c,
+        None => return Err(PgError::error("comment_object_seam: statement is not a CommentStmt")),
+    };
+    let owned = arena_commentstmt_to_owned(cs)?;
+    CommentObject(mcx, &owned)?;
+    Ok(())
+}
+
+/// Outward-seam adapter for the COMMENT slow path (`comment_object_slow`):
+/// used by `ProcessUtilitySlow` for object types that support event triggers.
+/// Returns the resolved [`ObjectAddress`] so `ddl_command_end` event triggers
+/// can reach the commented object.
+fn comment_object_slow_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &types_nodes::nodes::Node<'mcx>,
+) -> PgResult<types_catalog::catalog_dependency::ObjectAddress> {
+    let cs = match stmt.as_commentstmt() {
+        Some(c) => c,
+        None => {
+            return Err(PgError::error(
+                "comment_object_slow_seam: statement is not a CommentStmt",
+            ))
+        }
+    };
+    let owned = arena_commentstmt_to_owned(cs)?;
+    CommentObject(mcx, &owned)
+}
+
 /// Install this crate's seams.
 ///
 /// The catalog read/write control flow runs entirely in-crate over real
 /// relations, so the only outward seams are the project-wide varlena/`Datum`
 /// conversions (installed by their owners). Here we install the inward
-/// [`DeleteComments`] boundary (dependency.c calls it on object drop) and the
-/// collationcmds `create_comment` adapter.
+/// [`DeleteComments`] boundary (dependency.c calls it on object drop), the
+/// collationcmds `create_comment` adapter, and the COMMENT dispatch seams
+/// (`comment_object` / `comment_object_slow`).
 pub fn init_seams() {
     backend_commands_comment_seams::DeleteComments::set(DeleteComments);
+
+    // utility.c dispatches COMMENT through tcop-utility-out-seams: the fast
+    // path (no event-trigger support) calls `comment_object`; the slow path
+    // (`ProcessUtilitySlow`) calls `comment_object_slow`. Both decode the arena
+    // CommentStmt and run the ported `CommentObject` body.
+    backend_tcop_utility_out_seams::comment_object::set(comment_object_seam);
+    backend_tcop_utility_out_seams::comment_object_slow::set(comment_object_slow_seam);
 
     // user.c DROP ROLE: `DeleteSharedComments(roleid, AuthIdRelationId)`.
     backend_commands_user_seams::delete_shared_comments::set(|roleid| {
