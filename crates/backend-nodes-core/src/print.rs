@@ -335,9 +335,9 @@ pub fn print_expr(
     };
     // print_expr only inspects Expr-derived nodes (IsA(expr, Var/Const/...));
     // anything else falls through to "unknown expr".
-    match node {
-        Node::Expr(e) => print_expr_inner(mcx, Some(e), rtable)?,
-        _ => print!("unknown expr"),
+    match node.as_expr() {
+        Some(e) => print_expr_inner(mcx, Some(e), rtable)?,
+        None => print!("unknown expr"),
     }
     use std::io::Write;
     let _ = std::io::stdout().flush();

@@ -970,13 +970,13 @@ pub fn make_and_boolexpr_seam<'mcx>(
     // to the underlying `Expr` to populate the BoolExpr's `Vec<Expr>` args.
     let mut exprs: Vec<Expr> = Vec::with_capacity(args.len());
     for n in args.into_iter() {
-        match n {
-            Node::Expr(e) => exprs.push(e),
+        let tag = n.tag();
+        match n.into_expr() {
+            Some(e) => exprs.push(e),
             // A non-expression `Node` in a boolean-AND arg list is a
             // model-impossible state (the C args are all `Expr *`).
-            other => panic!(
-                "make_and_boolexpr: AND argument is a non-expression node (tag {})",
-                other.tag()
+            None => panic!(
+                "make_and_boolexpr: AND argument is a non-expression node (tag {tag})"
             ),
         }
     }
