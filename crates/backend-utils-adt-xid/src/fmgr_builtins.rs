@@ -145,11 +145,14 @@ fn recv_buf<'mcx>(mcx: mcx::Mcx<'mcx>, src: &[u8]) -> StringInfo<'mcx> {
 // ---------------------------------------------------------------------------
 
 fn fc_xidin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    // C: uint32in_subr(s, NULL, "xid", fcinfo->context). A soft context is not
-    // modeled on the fmgr frame; a hard parse is used (matching every other adt
-    // _in). InputFunctionCallSafe catches the hard error and records it into the
-    // real escontext, so pg_input_is_valid still observes a soft failure.
-    match crate::xidin(arg_cstring(fcinfo, 0), None) {
+    // C: uint32in_subr(s, NULL, "xid", fcinfo->context). Forward the soft
+    // ErrorSaveContext installed on the frame by InputFunctionCallSafe so a
+    // recoverable parse failure `ereturn`s into the sink (returning a 0
+    // placeholder) instead of throwing past `invoke?`. Copy the cstring first
+    // because `arg_cstring` borrows `fcinfo` immutably while `escontext_mut`
+    // needs it mutably.
+    let s = arg_cstring(fcinfo, 0).to_owned();
+    match crate::xidin(&s, fcinfo.escontext_mut()) {
         Ok(v) => ret_xid(v),
         Err(e) => raise(e),
     }
@@ -211,7 +214,9 @@ fn fc_mxid_age(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // ---------------------------------------------------------------------------
 
 fn fc_xid8in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    match crate::xid8in(arg_cstring(fcinfo, 0), None) {
+    // Forward the soft ErrorSaveContext (see fc_xidin).
+    let s = arg_cstring(fcinfo, 0).to_owned();
+    match crate::xid8in(&s, fcinfo.escontext_mut()) {
         Ok(v) => ret_fxid(v),
         Err(e) => raise(e),
     }
@@ -284,7 +289,9 @@ fn fc_hashxid8extended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // ---------------------------------------------------------------------------
 
 fn fc_cidin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    match crate::cidin(arg_cstring(fcinfo, 0), None) {
+    // Forward the soft ErrorSaveContext (see fc_xidin).
+    let s = arg_cstring(fcinfo, 0).to_owned();
+    match crate::cidin(&s, fcinfo.escontext_mut()) {
         Ok(v) => ret_cid(v),
         Err(e) => raise(e),
     }

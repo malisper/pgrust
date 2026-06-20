@@ -196,12 +196,29 @@ fn rangetyp_for_mltrng(mltrngtypid: Oid) -> TypeCacheEntry {
 
 /// `multirange_in(cstring, oid, int4) -> anymultirange` (oid 4231).
 fn fc_multirange_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let s = arg_cstring(fcinfo, 0);
+    // Copy the cstring to owned so its borrow does not alias `escontext_mut()`.
+    let s = arg_cstring(fcinfo, 0).to_string();
     let mltrngtypoid = arg_oid(fcinfo, 1);
     let typmod = arg_int32(fcinfo, 2);
     let m = scratch_mcx();
-    let mr = ok(crate::typcache_io::multirange_in(m.mcx(), s, mltrngtypoid, typmod));
-    ret_multirange(fcinfo, mr)
+    // C: Node *escontext = fcinfo->context; forward the soft-error sink so a
+    // recoverable parse / member-range error soft-fails (PG_RETURN_NULL) for a
+    // caller such as `pg_input_is_valid`.
+    let escontext = fcinfo.escontext_mut();
+    match ok(crate::typcache_io::multirange_in(
+        m.mcx(),
+        &s,
+        mltrngtypoid,
+        typmod,
+        escontext,
+    )) {
+        Some(mr) => ret_multirange(fcinfo, mr),
+        // C: PG_RETURN_NULL() after a soft error.
+        None => {
+            fcinfo.set_result_null(true);
+            Datum::null()
+        }
+    }
 }
 
 /// `multirange_out(anymultirange) -> cstring` (oid 4232).

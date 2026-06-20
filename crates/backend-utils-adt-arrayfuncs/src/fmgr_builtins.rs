@@ -93,8 +93,26 @@ fn fc_array_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let element_type = arg_oid(fcinfo, 1);
     let typmod = arg_int32(fcinfo, 2);
     let m = scratch_mcx();
-    let image = ok(crate::io::array_in(m.mcx(), &string, element_type, typmod));
-    ret_varlena(fcinfo, image.as_slice().to_vec())
+    // Forward the soft ErrorSaveContext installed on the frame by
+    // InputFunctionCallSafe so a malformed literal or bad element value
+    // `ereturn`s into the sink (returning `Ok(None)`) instead of throwing past
+    // `invoke?`.
+    let parsed = ok(crate::io::array_in(
+        m.mcx(),
+        &string,
+        element_type,
+        typmod,
+        fcinfo.escontext_mut(),
+    ));
+    match parsed {
+        Some(image) => ret_varlena(fcinfo, image.as_slice().to_vec()),
+        // Soft-error path: escontext recorded the failure; return a SQL NULL
+        // placeholder the caller discards after `soft_error_occurred()`.
+        None => {
+            fcinfo.set_result_null(true);
+            Datum::from_usize(0)
+        }
+    }
 }
 
 /// `array_out(anyarray) -> cstring` (oid 751).

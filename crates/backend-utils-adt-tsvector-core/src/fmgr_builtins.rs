@@ -138,10 +138,16 @@ fn ok<T>(r: types_error::PgResult<T>) -> T {
 // ---------------------------------------------------------------------------
 
 fn fc_tsvectorin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    // C: `escontext = (Node *) fcinfo->context`. Copy the input first since
+    // `arg_cstring` borrows `fcinfo` immutably while `escontext_mut` needs
+    // `&mut`. A lexer/syntax error returns NULL through a soft sink (else
+    // throws); with no sink installed escontext is None and the error throws.
     let s = arg_cstring(fcinfo, 0).as_bytes().to_vec();
     let m = scratch_mcx();
-    let image = ok(crate::io::tsvectorin(m.mcx(), &s));
-    ret_varlena_image(fcinfo, image)
+    match ok(crate::io::tsvectorin(m.mcx(), &s, fcinfo.escontext_mut())) {
+        Some(image) => ret_varlena_image(fcinfo, image),
+        None => Datum::null(),
+    }
 }
 
 fn fc_tsvectorout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {

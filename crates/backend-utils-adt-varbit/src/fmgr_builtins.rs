@@ -163,19 +163,30 @@ fn fc_bit_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let s = arg_cstring(fcinfo, 0).as_bytes().to_vec();
     let typmod = arg_int32(fcinfo, 2);
     let m = scratch_mcx();
-    // No escontext (hard-error path): `bit_in` returns Some(..) or raises.
-    let v = ok(crate::bit_in(m.mcx(), &s, typmod, None))
-        .expect("bit_in: hard-error path returned None");
-    ret_varbit(fcinfo, &v)
+    // Forward the soft ErrorSaveContext installed on the frame by
+    // InputFunctionCallSafe so a recoverable parse failure `ereturn`s into the
+    // sink (returning `Ok(None)`) instead of throwing past `invoke?`.
+    let escontext = fcinfo.escontext_mut();
+    let parsed = ok(crate::bit_in(m.mcx(), &s, typmod, escontext));
+    match parsed {
+        Some(v) => ret_varbit(fcinfo, &v),
+        // Soft-error path: escontext recorded the failure; the caller discards
+        // this placeholder after `soft_error_occurred()`.
+        None => Datum::null(),
+    }
 }
 
 fn fc_varbit_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let s = arg_cstring(fcinfo, 0).as_bytes().to_vec();
     let typmod = arg_int32(fcinfo, 2);
     let m = scratch_mcx();
-    let v = ok(crate::varbit_in(m.mcx(), &s, typmod, None))
-        .expect("varbit_in: hard-error path returned None");
-    ret_varbit(fcinfo, &v)
+    // Forward the soft ErrorSaveContext (see fc_bit_in).
+    let escontext = fcinfo.escontext_mut();
+    let parsed = ok(crate::varbit_in(m.mcx(), &s, typmod, escontext));
+    match parsed {
+        Some(v) => ret_varbit(fcinfo, &v),
+        None => Datum::null(),
+    }
 }
 
 fn fc_bit_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {

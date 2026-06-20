@@ -716,12 +716,20 @@ seam_core::seam!(
     /// owner allocates into the caller-supplied `mcx` (C's
     /// `CurrentMemoryContext`, here `array_in`'s build arena) so the pointer
     /// stays valid until `CopyArrayEls` copies the on-disk bytes out.
+    ///
+    /// `escontext` is C's `escontext` argument to `InputFunctionCallSafe`: the
+    /// caller's `ErrorSaveContext`. A soft conversion error is recorded directly
+    /// into it (and `Ok(None)` returned), exactly as `array_in` passes its own
+    /// `escontext` straight through so a bad element value soft-fails into the
+    /// same sink. `None` is C's `NULL escontext` — a conversion error then
+    /// escalates to a hard `Err` (C `ereport(ERROR)`).
     pub fn input_function_call_safe<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         function_id: Oid,
         str_: &str,
         typioparam: Oid,
         typmod: i32,
+        escontext: Option<&mut types_error::SoftErrorContext>,
     ) -> PgResult<Option<DatumWord>>
 );
 

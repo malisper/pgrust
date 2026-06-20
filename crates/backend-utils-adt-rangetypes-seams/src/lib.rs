@@ -285,17 +285,20 @@ seam_core::seam!(
 // ---------------------------------------------------------------------------
 
 seam_core::seam!(
-    /// `range_in(cstring, rngtypoid, typmod)` (rangetypes.c) invoked via
-    /// `InputFunctionCallSafe`: parse one range literal into a serialized
+    /// `range_in(cstring, rngtypoid, typmod, escontext)` (rangetypes.c) invoked
+    /// via `InputFunctionCallSafe`: parse one range literal into a serialized
     /// `RangeType`, allocated in `mcx`. A soft (`escontext`) error yields
-    /// `Ok(None)` (the C `InputFunctionCallSafe` returning `false`); a hard
-    /// `ereport(ERROR)` is carried on `Err`. `rngtypoid` is the cached
-    /// `typioparam` (the range type OID).
+    /// `Ok(None)` (the C `InputFunctionCallSafe` returning `false`, with the
+    /// error saved into `escontext`); a hard `ereport(ERROR)` is carried on
+    /// `Err`. `rngtypoid` is the cached `typioparam` (the range type OID).
+    /// `escontext` is C's `fcinfo->context`: `Some` makes recoverable parse /
+    /// element-input errors soft (returning `Ok(None)`), `None` makes them hard.
     pub fn range_in<'mcx>(
         mcx: Mcx<'mcx>,
         input: &str,
         rngtypoid: Oid,
         typmod: i32,
+        escontext: Option<&mut types_error::SoftErrorContext>,
     ) -> PgResult<Option<RangeTypeP<'mcx>>>
 );
 

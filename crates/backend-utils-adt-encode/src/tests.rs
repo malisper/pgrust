@@ -247,6 +247,8 @@ fn seam_bodies_match_codec_cores() {
     let ctx = MemoryContext::new("encode-test");
     let hex = seam_hex_encode(ctx.mcx(), b"\x00\x01\xab\xff").unwrap();
     assert_eq!(&hex[..], b"0001abff");
-    let raw = seam_hex_decode_safe(ctx.mcx(), b"0001abff").unwrap();
+    let raw = seam_hex_decode_safe(ctx.mcx(), b"0001abff", false)
+        .unwrap()
+        .unwrap();
     assert_eq!(&raw[..], b"\x00\x01\xab\xff");
 }

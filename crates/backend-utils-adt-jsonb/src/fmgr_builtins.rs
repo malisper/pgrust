@@ -249,10 +249,23 @@ fn ok<T>(r: types_error::PgResult<T>) -> T {
 
 /// `jsonb_in(cstring) -> jsonb` (oid 3806).
 fn fc_jsonb_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let s = arg_cstring(fcinfo, 0);
+    // C: `jsonb_in` forwards `fcinfo->context` (the soft `ErrorSaveContext`) to
+    // `json_errsave_error`. Copy the cstring to an owned buffer first so the
+    // immutable `fcinfo` borrow is released before taking the `&mut` escontext
+    // borrow.
+    let s = arg_cstring(fcinfo, 0).as_bytes().to_vec();
     let m = scratch_mcx();
-    let image = ok(crate::jsonb_in(m.mcx(), s.as_bytes()));
-    ret_jsonb(fcinfo, image.as_slice().to_vec())
+    let escontext = fcinfo.escontext_mut();
+    // Copy out of the scratch arena before it drops (the result borrows `m`).
+    let image = ok(crate::jsonb_in(m.mcx(), &s, escontext)).map(|img| img.as_slice().to_vec());
+    match image {
+        Some(b) => ret_jsonb(fcinfo, b),
+        // Soft parse failure (`ereturn(escontext, (Datum) 0, ...)`): SQL NULL.
+        None => {
+            fcinfo.set_result_null(true);
+            Datum::from_usize(0)
+        }
+    }
 }
 
 /// `jsonb_recv(internal) -> jsonb` (oid 3805): a 1-byte version then JSON text.

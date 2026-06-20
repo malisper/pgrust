@@ -109,8 +109,13 @@ fn ret_bytea(fcinfo: &mut FunctionCallInfoBaseData, payload: &[u8]) -> Datum {
 // --- adapters ---------------------------------------------------------------
 
 fn fc_pg_lsn_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    // Forward the soft ErrorSaveContext installed on the frame by
+    // InputFunctionCallSafe so a recoverable parse failure `ereturn`s into the
+    // sink (returning the `InvalidXLogRecPtr` placeholder) instead of throwing
+    // past `invoke?`.
     let s = arg_cstring(fcinfo, 0).to_string();
-    ret_lsn(ok(pg_lsn::pg_lsn_in(&s, None)))
+    let v = ok(pg_lsn::pg_lsn_in(&s, fcinfo.escontext_mut()));
+    ret_lsn(v)
 }
 fn fc_pg_lsn_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     ret_cstring(fcinfo, pg_lsn::pg_lsn_out(arg_lsn(fcinfo, 0)))

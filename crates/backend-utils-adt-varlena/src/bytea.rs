@@ -30,9 +30,9 @@
 
 use mcx::{Mcx, PgVec};
 use types_error::{
-    PgError, PgResult, ERRCODE_ARRAY_SUBSCRIPT_ERROR, ERRCODE_INVALID_PARAMETER_VALUE,
-    ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
-    ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_SUBSTRING_ERROR,
+    ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_ARRAY_SUBSCRIPT_ERROR,
+    ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_INVALID_TEXT_REPRESENTATION,
+    ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_SUBSTRING_ERROR,
 };
 
 use backend_utils_adt_encode_seams as encode;
@@ -48,16 +48,28 @@ const MAX_ALLOC_SIZE: u64 = 0x3fff_ffff;
 /// input into a `bytea` payload. `input` is the NUL-terminated C string's
 /// bytes (without the trailing NUL).
 ///
-/// C raises `ERRCODE_INVALID_TEXT_REPRESENTATION` for a malformed escape; here
-/// that is an `Err` (the Datum boundary maps it onto the soft-error
-/// `escontext` path when one is set).
-pub fn byteain<'mcx>(mcx: Mcx<'mcx>, input: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+/// C raises `ERRCODE_INVALID_TEXT_REPRESENTATION` for a malformed escape (the
+/// hex path's bad-digit/odd-length cases are `ERRCODE_INVALID_PARAMETER_VALUE`).
+/// Both go through `escontext` (C's `fcinfo->context`): with a soft-error sink
+/// the error is saved and `Ok(None)` is returned (C `ereturn(escontext, 0,
+/// ...)` → SQL NULL); with `None` it is a hard `Err`.
+pub fn byteain<'mcx>(
+    mcx: Mcx<'mcx>,
+    input: &[u8],
+    mut escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<Option<PgVec<'mcx, u8>>> {
     // C: if (inputText[0] == '\\' && inputText[1] == 'x') — recognize hex.
     // The cstring contract guarantees a terminating NUL, so reading index 1
     // when index 0 is '\\' is in-bounds (worst case it is the NUL, != 'x').
     if input.first() == Some(&b'\\') && input.get(1) == Some(&b'x') {
         // C: hex_decode_safe(inputText + 2, len - 2, VARDATA(result), escontext).
-        return encode::hex_decode_safe::call(mcx, &input[2..]);
+        // The seam carries `escontext != NULL` as `soft`; a recoverable hex
+        // error comes back as the inner `Err`, which we route through this
+        // frame's escontext exactly as the escape branch does.
+        return match encode::hex_decode_safe::call(mcx, &input[2..], escontext.is_some())? {
+            Ok(result) => Ok(Some(result)),
+            Err(hexerr) => ereturn(escontext.as_deref_mut(), None, hexerr),
+        };
     }
 
     // Else, the traditional escaped style. First pass: count the result bytes
@@ -78,8 +90,9 @@ pub fn byteain<'mcx>(mcx: Mcx<'mcx>, input: &[u8]) -> PgResult<PgVec<'mcx, u8>> 
         } else if tp.len() >= 2 && tp[0] == b'\\' && tp[1] == b'\\' {
             i += 2;
         } else {
-            // C: one backslash, not followed by another or valid octal.
-            return Err(invalid_bytea_input());
+            // C: one backslash, not followed by another or valid octal —
+            // `ereturn(escontext, (Datum) 0, ...)`.
+            return ereturn(escontext.as_deref_mut(), None, invalid_bytea_input());
         }
         bc += 1;
     }
@@ -117,7 +130,7 @@ pub fn byteain<'mcx>(mcx: Mcx<'mcx>, input: &[u8]) -> PgResult<PgVec<'mcx, u8>> 
         }
     }
 
-    Ok(result)
+    Ok(Some(result))
 }
 
 /// C: `byteaout(PG_FUNCTION_ARGS)` — render a `bytea` payload as the `\x` hex

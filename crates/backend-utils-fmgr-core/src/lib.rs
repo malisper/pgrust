@@ -2954,11 +2954,14 @@ fn input_function_call_safe_seam<'mcx>(
     str_: &str,
     typioparam: Oid,
     typmod: i32,
+    escontext: Option<&mut types_error::SoftErrorContext>,
 ) -> PgResult<Option<Datum>> {
     let resolved = fmgr_info(mcx, function_id)?;
-    // C drives the element input function with a soft-error context so a bad
-    // element is caught rather than aborting; the caller only needs Some/None.
-    let mut escontext = types_error::SoftErrorContext::new(false);
+    // C: `InputFunctionCallSafe(&my_extra->proc, ..., escontext, &result)` —
+    // `array_in` passes its own `escontext` straight through, so a bad element
+    // value lands in the caller's sink (this returns `Ok(None)`). With a `None`
+    // escontext (a hard-error caller) a conversion error escalates to a hard
+    // `Err`, exactly as C's NULL-escontext path does.
     let out = input_function_call_safe_typed(
         mcx,
         &resolved.resolution,
@@ -2966,7 +2969,7 @@ fn input_function_call_safe_seam<'mcx>(
         Some(str_),
         typioparam,
         typmod,
-        Some(&mut escontext),
+        escontext,
     )?;
     // C's `InputFunctionCallSafe` yields a bare `Datum`: a by-value scalar is
     // the machine word; a by-reference element (text/name/numeric/…) is a

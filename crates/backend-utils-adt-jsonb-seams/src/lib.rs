@@ -38,7 +38,7 @@
 
 use mcx::{Mcx, PgVec};
 use types_core::Oid;
-use types_error::PgResult;
+use types_error::{PgResult, SoftErrorContext};
 use types_tuple::Datum;
 
 seam_core::seam!(
@@ -47,13 +47,17 @@ seam_core::seam!(
     /// `jsonb_in_*` semantic actions, and return the assembled on-disk `jsonb`
     /// varlena bytes (length header + root container), allocated in `mcx`. The
     /// lexer/parser is the jsonapi subsystem (json's cycle partner), so the
-    /// parse loop is owned by the provider. `Err` carries the parse
-    /// `ereport(ERROR, "invalid input syntax for type json")`.
-    pub fn parse_to_jsonb<'mcx>(
+    /// parse loop is owned by the provider. C forwards `escontext`
+    /// (`fcinfo->context`) to `json_errsave_error`: with a live soft sink a
+    /// parse failure yields `Ok(None)` (`ereturn(escontext, (Datum) 0, ...)`),
+    /// otherwise it raises `Err` (the parse
+    /// `ereport(ERROR, "invalid input syntax for type json")`).
+    pub fn parse_to_jsonb<'mcx, 'e>(
         mcx: Mcx<'mcx>,
         json: &[u8],
         unique_keys: bool,
-    ) -> PgResult<PgVec<'mcx, u8>>
+        escontext: Option<&'e mut SoftErrorContext>,
+    ) -> PgResult<Option<PgVec<'mcx, u8>>>
 );
 
 seam_core::seam!(

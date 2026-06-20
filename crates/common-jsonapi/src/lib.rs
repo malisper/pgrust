@@ -1539,7 +1539,8 @@ fn run_parse_to_jsonb<'mcx>(
     mcx: Mcx<'mcx>,
     json: &[u8],
     unique_keys: bool,
-) -> PgResult<PgVec<'mcx, u8>> {
+    escontext: Option<&mut types_error::SoftErrorContext>,
+) -> PgResult<Option<PgVec<'mcx, u8>>> {
     let encoding = backend_utils_mb_mbutils::GetDatabaseEncoding();
     let mut lex = make_json_lex_context_cstring_len(json, encoding, true);
 
@@ -1565,9 +1566,16 @@ fn run_parse_to_jsonb<'mcx>(
     };
 
     if result != JsonParseErrorType::Success {
-        // pg_parse_json_or_errsave with no escontext raises.
+        // C: json_errsave_error(result, lex, escontext) -> ereturn(escontext,
+        // (Datum) 0, ...). With a live soft sink this routes the error and
+        // returns Ok; jsonb_from_cstring then yields a NULL result. With no
+        // sink it raises.
+        let had_escontext = escontext.is_some();
         let snap = snapshot(&lex);
-        backend_utils_adt_jsonfuncs::lex::json_errsave_error(tj_err(result), &snap, None)?;
+        backend_utils_adt_jsonfuncs::lex::json_errsave_error(tj_err(result), &snap, escontext)?;
+        if had_escontext {
+            return Ok(None);
+        }
         // json_errsave_error with no escontext never returns Ok on error.
         return Err(PgError::error("invalid input syntax for type json"));
     }
@@ -1575,7 +1583,7 @@ fn run_parse_to_jsonb<'mcx>(
     let res = state
         .res
         .ok_or_else(|| PgError::error("jsonb parse produced no value"))?;
-    backend_utils_adt_jsonb_util::JsonbValueToJsonb(mcx, &res)
+    Ok(Some(backend_utils_adt_jsonb_util::JsonbValueToJsonb(mcx, &res)?))
 }
 
 // ===========================================================================
@@ -1671,7 +1679,12 @@ fn run_lex_first_token(json: &[u8]) -> (TjErr, TjTok) {
 /// `errsave_error(error, json)` — re-lex `json` to reconstruct the lexer state
 /// at the failure point, then raise the user-facing parse error (no escontext:
 /// hard error).
-fn run_errsave_error(error: TjErr, json: &[u8], need_escapes: bool) -> PgResult<()> {
+fn run_errsave_error(
+    error: TjErr,
+    json: &[u8],
+    need_escapes: bool,
+    escontext: Option<&mut types_error::SoftErrorContext>,
+) -> PgResult<()> {
     let encoding = backend_utils_mb_mbutils::GetDatabaseEncoding();
     // Re-lex with the SAME need_escapes the failing parse used so the lexer
     // stops at the exact token_terminator the original failure landed on
@@ -1684,7 +1697,7 @@ fn run_errsave_error(error: TjErr, json: &[u8], need_escapes: bool) -> PgResult<
     let mut sink = NullSink;
     let _ = pg_parse_json(&mut lex, &mut sink);
     let snap = snapshot(&lex);
-    backend_utils_adt_jsonfuncs::lex::json_errsave_error(error, &snap, None)
+    backend_utils_adt_jsonfuncs::lex::json_errsave_error(error, &snap, escontext)
 }
 
 /// `json_lex_first(json, encoding)` — lex the first token, returning the result
@@ -1708,12 +1721,13 @@ fn run_json_count_array_elements(json: &[u8], encoding: i32) -> PgResult<i32> {
     // before calling json_count_array_elements from its array_start action.
     let r = json_lex(&mut lex);
     if r != JsonParseErrorType::Success {
-        // json_array_length lexes with need_escapes=false.
-        return run_errsave_error(tj_err(r), json, false).map(|_| 0);
+        // json_array_length lexes with need_escapes=false. No soft escontext at
+        // this internal boundary (C json_array_length throws hard).
+        return run_errsave_error(tj_err(r), json, false, None).map(|_| 0);
     }
     match json_count_array_elements(&lex) {
         Ok(n) => Ok(n),
-        Err(e) => run_errsave_error(tj_err(e), json, false).map(|_| 0),
+        Err(e) => run_errsave_error(tj_err(e), json, false, None).map(|_| 0),
     }
 }
 

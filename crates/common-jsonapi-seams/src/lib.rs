@@ -8,7 +8,7 @@
 //! `init_seams()` when it lands; until then a call panics loudly.
 
 use types_json::{JsonLexContext, JsonParseErrorType, JsonSemAction, JsonTokenType};
-use types_error::PgResult;
+use types_error::{PgResult, SoftErrorContext};
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -50,13 +50,14 @@ seam_core::seam!(
     /// `json_errsave_error(error, lex, escontext)` — convert a non-success
     /// `JsonParseErrorType` into the user-facing `ereport`/`errsave` error with
     /// the backend's message text and SQLSTATE. `json` is the original input
-    /// (for context/position rendering). On a soft-error context the provider
-    /// swallows the error and returns `Ok(())`; otherwise it raises the hard
-    /// error as `Err`.
-    pub fn errsave_error(
+    /// (for context/position rendering). When `escontext` is `Some` (a live
+    /// soft-error sink), the provider routes the error into it and returns
+    /// `Ok(())`; with `None` it raises the hard error as `Err`.
+    pub fn errsave_error<'a>(
         error: JsonParseErrorType,
         json: &[u8],
         need_escapes: bool,
+        escontext: Option<&'a mut SoftErrorContext>,
     ) -> PgResult<()>
 );
 

@@ -29,9 +29,9 @@ use types_array::{ArrayElementDatum, ArrayElementIoData, ArrayIoFuncSelector};
 use types_core::Oid;
 use types_datum::datum::Datum;
 use types_error::{
-    PgError, PgResult, ERRCODE_ARRAY_SUBSCRIPT_ERROR, ERRCODE_DATATYPE_MISMATCH,
-    ERRCODE_INVALID_BINARY_REPRESENTATION, ERRCODE_INVALID_TEXT_REPRESENTATION,
-    ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_UNDEFINED_FUNCTION,
+    ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_ARRAY_SUBSCRIPT_ERROR,
+    ERRCODE_DATATYPE_MISMATCH, ERRCODE_INVALID_BINARY_REPRESENTATION,
+    ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_UNDEFINED_FUNCTION,
 };
 
 use crate::foundation::{
@@ -283,7 +283,8 @@ pub fn array_in<'mcx>(
     string: &str,
     element_type: Oid,
     typmod: i32,
-) -> PgResult<PgVec<'mcx, u8>> {
+    mut escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<Option<PgVec<'mcx, u8>>> {
     // Get info about element type, including its input conversion proc. (C
     // caches this in fcinfo->flinfo->fn_extra; we resolve it per call.)
     let meta = lsyscache::get_array_element_io_data::call(element_type, ArrayIoFuncSelector::Input)?;
@@ -295,26 +296,38 @@ pub fn array_in<'mcx>(
     // dimension info (ReadArrayDimensions overwrites them if there is).
     let mut p: &[u8] = string.as_bytes();
 
-    let (mut ndim, mut dim, l_bound) = read_array_dimensions(&mut p, string)?;
+    let (mut ndim, mut dim, l_bound) =
+        match read_array_dimensions(&mut p, string, escontext.as_deref_mut())? {
+            Some(d) => d,
+            None => return Ok(None),
+        };
 
     if ndim == 0 {
         // No array dimensions, so next character should be a left brace.
         if cur(p) != b'{' {
-            return Err(malformed(
-                string,
-                "Array value must start with \"{\" or dimension information.",
-            ));
+            return ereturn(
+                escontext.as_deref_mut(),
+                None,
+                malformed(
+                    string,
+                    "Array value must start with \"{\" or dimension information.",
+                ),
+            );
         }
     } else {
         // If array dimensions are given, expect '=' operator.
         if !p.starts_with(ASSGN) {
-            return Err(malformed(
-                string,
-                &format!(
-                    "Missing \"{}\" after array dimensions.",
-                    core::str::from_utf8(ASSGN).unwrap()
+            return ereturn(
+                escontext.as_deref_mut(),
+                None,
+                malformed(
+                    string,
+                    &format!(
+                        "Missing \"{}\" after array dimensions.",
+                        core::str::from_utf8(ASSGN).unwrap()
+                    ),
                 ),
-            ));
+            );
         }
         for _ in 0..ASSGN.len() {
             bump(&mut p);
@@ -324,16 +337,31 @@ pub fn array_in<'mcx>(
             bump(&mut p);
         }
         if cur(p) != b'{' {
-            return Err(malformed(string, "Array contents must start with \"{\"."));
+            return ereturn(
+                escontext.as_deref_mut(),
+                None,
+                malformed(string, "Array contents must start with \"{\"."),
+            );
         }
     }
 
-    // Parse the value part, in the curly braces: { ... }
-    let (values, nulls) =
-        match read_array_str(mcx, &mut p, &meta, typmod, string, &mut ndim, &mut dim)? {
-            Some(v) => v,
-            None => return Ok(PgVec::new_in(mcx)),
-        };
+    // Parse the value part, in the curly braces: { ... }. Forward escontext so a
+    // recoverable parse / element-input error records into the soft sink and
+    // returns `Ok(None)` rather than throwing (matching C's `ReadArrayStr(...,
+    // escontext)` and the element `InputFunctionCallSafe`).
+    let (values, nulls) = match read_array_str(
+        mcx,
+        &mut p,
+        &meta,
+        typmod,
+        string,
+        &mut ndim,
+        &mut dim,
+        escontext.as_deref_mut(),
+    )? {
+        Some(v) => v,
+        None => return Ok(None),
+    };
     let nitems = values.len() as i32;
 
     // Only whitespace is allowed after the closing brace.
@@ -341,13 +369,20 @@ pub fn array_in<'mcx>(
         let c = cur(p);
         bump(&mut p);
         if !scanner_isspace(c) {
-            return Err(malformed(string, "Junk after closing right brace."));
+            return ereturn(
+                escontext.as_deref_mut(),
+                None,
+                malformed(string, "Junk after closing right brace."),
+            );
         }
     }
 
     // Empty array?
     if nitems == 0 {
-        return crate::construct::construct_empty_array(mcx, element_type);
+        return Ok(Some(crate::construct::construct_empty_array(
+            mcx,
+            element_type,
+        )?));
     }
 
     // Check for nulls, compute total data space needed.
@@ -405,7 +440,7 @@ pub fn array_in<'mcx>(
         true,
     )?;
 
-    Ok(retval)
+    Ok(Some(retval))
 }
 
 /// `ReadArrayDimensions(&srcptr, &ndim, dim, lBound, origStr, escontext)`
@@ -416,7 +451,8 @@ pub fn array_in<'mcx>(
 fn read_array_dimensions(
     cur_ptr: &mut &[u8],
     orig_str: &str,
-) -> PgResult<(i32, [i32; MAX_DIM as usize], [i32; MAX_DIM as usize])> {
+    mut escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<Option<(i32, [i32; MAX_DIM as usize], [i32; MAX_DIM as usize])>> {
     let mut p: &[u8] = cur_ptr;
     let mut ndim = 0i32;
     let mut dim = [-1i32; MAX_DIM as usize];
@@ -433,21 +469,33 @@ fn read_array_dimensions(
         }
         bump(&mut p);
         if ndim >= MAX_DIM {
-            return Err(PgError::error(format!(
-                "number of array dimensions exceeds the maximum allowed ({})",
-                MAX_DIM
-            ))
-            .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED));
+            // C ereturns this through escontext.
+            return ereturn(
+                escontext.as_deref_mut(),
+                None,
+                PgError::error(format!(
+                    "number of array dimensions exceeds the maximum allowed ({})",
+                    MAX_DIM
+                ))
+                .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+            );
         }
 
         let qlen = p.len();
-        let i = read_dimension_int(&mut p)?;
+        let i = match read_dimension_int(&mut p, escontext.as_deref_mut())? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
         if p.len() == qlen {
             // no digits?
-            return Err(malformed(
-                orig_str,
-                "\"[\" must introduce explicitly-specified array dimensions.",
-            ));
+            return ereturn(
+                escontext.as_deref_mut(),
+                None,
+                malformed(
+                    orig_str,
+                    "\"[\" must introduce explicitly-specified array dimensions.",
+                ),
+            );
         }
 
         let ub;
@@ -456,10 +504,17 @@ fn read_array_dimensions(
             l_bound[ndim as usize] = i;
             bump(&mut p);
             let qlen2 = p.len();
-            let v = read_dimension_int(&mut p)?;
+            let v = match read_dimension_int(&mut p, escontext.as_deref_mut())? {
+                Some(v) => v,
+                None => return Ok(None),
+            };
             if p.len() == qlen2 {
                 // no digits?
-                return Err(malformed(orig_str, "Missing array dimension value."));
+                return ereturn(
+                    escontext.as_deref_mut(),
+                    None,
+                    malformed(orig_str, "Missing array dimension value."),
+                );
             }
             ub = v;
         } else {
@@ -468,20 +523,30 @@ fn read_array_dimensions(
             ub = i;
         }
         if cur(p) != b']' {
-            return Err(malformed(orig_str, "Missing \"]\" after array dimensions."));
+            return ereturn(
+                escontext.as_deref_mut(),
+                None,
+                malformed(orig_str, "Missing \"]\" after array dimensions."),
+            );
         }
         bump(&mut p);
 
         // ub < lb is rejected (a zero-length dimension would yield an empty
         // array we keep no dimension data for).
         if ub < l_bound[ndim as usize] {
-            return Err(PgError::error("upper bound cannot be less than lower bound")
-                .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR));
+            return ereturn(
+                escontext.as_deref_mut(),
+                None,
+                PgError::error("upper bound cannot be less than lower bound")
+                    .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR),
+            );
         }
 
         // Upper bound of INT_MAX must be disallowed, cf ArrayCheckBounds().
         if ub == i32::MAX {
-            return Err(
+            return ereturn(
+                escontext.as_deref_mut(),
+                None,
                 PgError::error(format!("array upper bound is too large: {}", ub))
                     .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
             );
@@ -493,6 +558,7 @@ fn read_array_dimensions(
             .and_then(|x| x.checked_add(1));
         let span = match span {
             Some(s) => s,
+            // size_exceeds_array_error is a hard ereport in C.
             None => return Err(size_exceeds_array_error()),
         };
 
@@ -501,19 +567,22 @@ fn read_array_dimensions(
     }
 
     *cur_ptr = p;
-    Ok((ndim, dim, l_bound))
+    Ok(Some((ndim, dim, l_bound)))
 }
 
 /// `ReadDimensionInt(&srcptr, &result, origStr, escontext)` (arrayfuncs.c) —
 /// parse one signed dimension integer. Returns the parsed value (with `*srcptr`
 /// advanced past the digits) or, when there are no digits, `0` with `*srcptr`
 /// unchanged.
-fn read_dimension_int(cur_ptr: &mut &[u8]) -> PgResult<i32> {
+fn read_dimension_int(
+    cur_ptr: &mut &[u8],
+    escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<Option<i32>> {
     let p: &[u8] = cur_ptr;
     let c = cur(p);
     // Don't accept leading whitespace.
     if !c.is_ascii_digit() && c != b'-' && c != b'+' {
-        return Ok(0);
+        return Ok(Some(0));
     }
 
     // strtol(p, srcptr, 10): optional sign + decimal digits.
@@ -531,10 +600,15 @@ fn read_dimension_int(cur_ptr: &mut &[u8]) -> PgResult<i32> {
     match s.parse::<i64>() {
         Ok(l) if l >= i32::MIN as i64 && l <= i32::MAX as i64 => {
             *cur_ptr = sp;
-            Ok(l as i32)
+            Ok(Some(l as i32))
         }
-        _ => Err(PgError::error("array bound is out of integer range")
-            .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)),
+        // C ereturns the overflow through escontext.
+        _ => ereturn(
+            escontext,
+            None,
+            PgError::error("array bound is out of integer range")
+                .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+        ),
     }
 }
 
@@ -542,7 +616,7 @@ fn read_dimension_int(cur_ptr: &mut &[u8]) -> PgResult<i32> {
 /// producing element values/nulls and the inferred/validated dimensions.
 /// `*ndim_p` / `dim[]` are in/out. Returns `None` on a saved soft error (the C
 /// `false` return).
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn read_array_str<'mcx>(
     mcx: Mcx<'mcx>,
     cur_ptr: &mut &[u8],
@@ -551,6 +625,7 @@ fn read_array_str<'mcx>(
     orig_str: &str,
     ndim_p: &mut i32,
     dim: &mut [i32; MAX_DIM as usize],
+    mut escontext: Option<&mut SoftErrorContext>,
 ) -> PgResult<Option<(PgVec<'mcx, Datum>, PgVec<'mcx, bool>)>> {
     let typdelim = meta.typdelim;
 
@@ -572,7 +647,13 @@ fn read_array_str<'mcx>(
     let mut nelems = [0i32; MAX_DIM as usize];
 
     loop {
-        let tok = match read_array_token(&mut p, &mut elembuf, typdelim, orig_str)? {
+        let tok = match read_array_token(
+            &mut p,
+            &mut elembuf,
+            typdelim,
+            orig_str,
+            escontext.as_deref_mut(),
+        )? {
             Some(t) => t,
             None => return Ok(None), // ATOK_ERROR: soft error already saved
         };
@@ -581,22 +662,30 @@ fn read_array_str<'mcx>(
             ArrayTok::LevelStart => {
                 // Can't write left brace where a delim is expected.
                 if expect_delim {
-                    return Err(malformed(orig_str, "Unexpected \"{\" character."));
+                    return ereturn(
+                        escontext,
+                        None,
+                        malformed(orig_str, "Unexpected \"{\" character."),
+                    );
                 }
                 // Initialize element counting in the new level.
                 if nest_level >= MAX_DIM {
-                    return Err(PgError::error(format!(
-                        "number of array dimensions exceeds the maximum allowed ({})",
-                        MAX_DIM
-                    ))
-                    .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED));
+                    return ereturn(
+                        escontext,
+                        None,
+                        PgError::error(format!(
+                            "number of array dimensions exceeds the maximum allowed ({})",
+                            MAX_DIM
+                        ))
+                        .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                    );
                 }
                 nelems[nest_level as usize] = 0;
                 nest_level += 1;
                 if nest_level > ndim {
                     // Can't increase ndim once it's frozen.
                     if ndim_frozen {
-                        return dimension_error(dimensions_specified, orig_str);
+                        return dimension_error(dimensions_specified, orig_str, escontext, None);
                     }
                     ndim = nest_level;
                 }
@@ -607,7 +696,11 @@ fn read_array_str<'mcx>(
                 // Allow a right brace to terminate an empty sub-array; otherwise
                 // it must occur where we expect a delimiter.
                 if nelems[(nest_level - 1) as usize] > 0 && !expect_delim {
-                    return Err(malformed(orig_str, "Unexpected \"}\" character."));
+                    return ereturn(
+                        escontext,
+                        None,
+                        malformed(orig_str, "Unexpected \"}\" character."),
+                    );
                 }
                 nest_level -= 1;
                 // Nested sub-arrays count as elements of the outer level.
@@ -618,17 +711,21 @@ fn read_array_str<'mcx>(
                 if dim[nest_level as usize] < 0 {
                     dim[nest_level as usize] = nelems[nest_level as usize];
                 } else if nelems[nest_level as usize] != dim[nest_level as usize] {
-                    return dimension_error(dimensions_specified, orig_str);
+                    return dimension_error(dimensions_specified, orig_str, escontext, None);
                 }
                 // Must have a delim or another right brace following.
                 expect_delim = true;
             }
             ArrayTok::Delim => {
                 if !expect_delim {
-                    return Err(malformed(
-                        orig_str,
-                        &format!("Unexpected \"{}\" character.", typdelim as char),
-                    ));
+                    return ereturn(
+                        escontext,
+                        None,
+                        malformed(
+                            orig_str,
+                            &format!("Unexpected \"{}\" character.", typdelim as char),
+                        ),
+                    );
                 }
                 expect_delim = false;
             }
@@ -637,7 +734,11 @@ fn read_array_str<'mcx>(
                 debug_assert!(nest_level > 0);
                 // Disallow consecutive ELEM tokens.
                 if expect_delim {
-                    return Err(malformed(orig_str, "Unexpected array element."));
+                    return ereturn(
+                        escontext,
+                        None,
+                        malformed(orig_str, "Unexpected array element."),
+                    );
                 }
 
                 // Enlarge the values/nulls arrays if needed (C grows by doubling
@@ -675,7 +776,13 @@ fn read_array_str<'mcx>(
                         PgError::error("invalid byte sequence for encoding")
                             .with_sqlstate(ERRCODE_INVALID_TEXT_REPRESENTATION)
                     })?;
-                    match input_function_call_safe(mcx, meta, Some(s), typmod)? {
+                    match input_function_call_safe(
+                        mcx,
+                        meta,
+                        Some(s),
+                        typmod,
+                        escontext.as_deref_mut(),
+                    )? {
                         Some(v) => v,
                         None => return Ok(None), // soft error reported by input proc
                     }
@@ -691,7 +798,12 @@ fn read_array_str<'mcx>(
                 // subsequent elements must be at the same nesting depth.
                 ndim_frozen = true;
                 if nest_level != ndim {
-                    return dimension_error(dimensions_specified, orig_str);
+                    return dimension_error(
+                        dimensions_specified,
+                        orig_str,
+                        escontext.as_deref_mut(),
+                        None,
+                    );
                 }
                 // Count the new element.
                 nelems[(nest_level - 1) as usize] += 1;
@@ -710,13 +822,18 @@ fn read_array_str<'mcx>(
     Ok(Some((values, nulls)))
 }
 
-fn dimension_error<T>(dimensions_specified: bool, orig_str: &str) -> PgResult<T> {
+fn dimension_error<T>(
+    dimensions_specified: bool,
+    orig_str: &str,
+    escontext: Option<&mut SoftErrorContext>,
+    errorval: T,
+) -> PgResult<T> {
     let detail = if dimensions_specified {
         "Specified array dimensions do not match array contents."
     } else {
         "Multidimensional arrays must have sub-arrays with matching dimensions."
     };
-    Err(malformed(orig_str, detail))
+    ereturn(escontext, errorval, malformed(orig_str, detail))
 }
 
 /// `ArrayToken` (arrayfuncs.c): the `ReadArrayToken` return type.
@@ -738,6 +855,7 @@ fn read_array_token(
     elembuf: &mut Vec<u8>,
     typdelim: u8,
     orig_str: &str,
+    mut escontext: Option<&mut SoftErrorContext>,
 ) -> PgResult<Option<ArrayTok>> {
     let mut p: &[u8] = cur_ptr;
     elembuf.clear();
@@ -745,7 +863,7 @@ fn read_array_token(
     // Identify token type. Loop advances over leading whitespace.
     loop {
         match cur(p) {
-            0 => return ending_error(orig_str),
+            0 => return ending_error(orig_str, escontext.as_deref_mut()),
             b'{' => {
                 bump(&mut p);
                 *cur_ptr = p;
@@ -758,7 +876,14 @@ fn read_array_token(
             }
             b'"' => {
                 bump(&mut p);
-                return read_quoted_element(cur_ptr, &mut p, elembuf, typdelim, orig_str);
+                return read_quoted_element(
+                    cur_ptr,
+                    &mut p,
+                    elembuf,
+                    typdelim,
+                    orig_str,
+                    escontext.as_deref_mut(),
+                );
             }
             c => {
                 if c == typdelim {
@@ -770,7 +895,14 @@ fn read_array_token(
                     bump(&mut p);
                     continue;
                 }
-                return read_unquoted_element(cur_ptr, &mut p, elembuf, typdelim, orig_str);
+                return read_unquoted_element(
+                    cur_ptr,
+                    &mut p,
+                    elembuf,
+                    typdelim,
+                    orig_str,
+                    escontext.as_deref_mut(),
+                );
             }
         }
     }
@@ -782,15 +914,16 @@ fn read_quoted_element<'a>(
     elembuf: &mut Vec<u8>,
     typdelim: u8,
     orig_str: &str,
+    mut escontext: Option<&mut SoftErrorContext>,
 ) -> PgResult<Option<ArrayTok>> {
     loop {
         match cur(p) {
-            0 => return ending_error(orig_str),
+            0 => return ending_error(orig_str, escontext.as_deref_mut()),
             b'\\' => {
                 // Skip backslash, copy next character as-is.
                 bump(p);
                 if cur(p) == 0 {
-                    return ending_error(orig_str);
+                    return ending_error(orig_str, escontext.as_deref_mut());
                 }
                 elembuf.push(cur(p));
                 bump(p);
@@ -810,10 +943,14 @@ fn read_quoted_element<'a>(
                         return Ok(Some(ArrayTok::Elem));
                     }
                     if !scanner_isspace(c) {
-                        return Err(malformed(orig_str, "Incorrectly quoted array element."));
+                        return ereturn(
+                            escontext,
+                            None,
+                            malformed(orig_str, "Incorrectly quoted array element."),
+                        );
                     }
                 }
-                return ending_error(orig_str);
+                return ending_error(orig_str, escontext.as_deref_mut());
             }
             c => {
                 elembuf.push(c);
@@ -829,6 +966,7 @@ fn read_unquoted_element<'a>(
     elembuf: &mut Vec<u8>,
     typdelim: u8,
     orig_str: &str,
+    mut escontext: Option<&mut SoftErrorContext>,
 ) -> PgResult<Option<ArrayTok>> {
     // We don't include trailing whitespace in the result. dstlen tracks how much
     // of the output is known to not be trailing whitespace.
@@ -836,19 +974,27 @@ fn read_unquoted_element<'a>(
     let mut has_escapes = false;
     loop {
         match cur(p) {
-            0 => return ending_error(orig_str),
+            0 => return ending_error(orig_str, escontext.as_deref_mut()),
             b'{' => {
-                return Err(malformed(orig_str, "Unexpected \"{\" character."));
+                return ereturn(
+                    escontext,
+                    None,
+                    malformed(orig_str, "Unexpected \"{\" character."),
+                );
             }
             b'"' => {
                 // Must double-quote all or none of an element.
-                return Err(malformed(orig_str, "Incorrectly quoted array element."));
+                return ereturn(
+                    escontext,
+                    None,
+                    malformed(orig_str, "Incorrectly quoted array element."),
+                );
             }
             b'\\' => {
                 // Skip backslash, copy next character as-is.
                 bump(p);
                 if cur(p) == 0 {
-                    return ending_error(orig_str);
+                    return ending_error(orig_str, escontext.as_deref_mut());
                 }
                 elembuf.push(cur(p));
                 bump(p);
@@ -881,8 +1027,11 @@ fn read_unquoted_element<'a>(
     }
 }
 
-fn ending_error(orig_str: &str) -> PgResult<Option<ArrayTok>> {
-    Err(malformed(orig_str, "Unexpected end of input."))
+fn ending_error(
+    orig_str: &str,
+    escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<Option<ArrayTok>> {
+    ereturn(escontext, None, malformed(orig_str, "Unexpected end of input."))
 }
 
 /// `InputFunctionCallSafe(&inputproc, str, typioparam, typmod, escontext,
@@ -894,6 +1043,7 @@ fn input_function_call_safe<'mcx>(
     meta: &ArrayElementIoData,
     value: Option<&str>,
     typmod: i32,
+    escontext: Option<&mut SoftErrorContext>,
 ) -> PgResult<Option<Datum>> {
     // C calls `InputFunctionCallSafe(proc, NULL, ...)` for a NULL element; the
     // fmgr seam takes `&str`, and a NULL element's returned value is discarded
@@ -903,7 +1053,14 @@ fn input_function_call_safe<'mcx>(
     // materialized there so the returned `Datum` pointer stays valid until
     // `CopyArrayEls` copies them into the array image.
     let s = value.unwrap_or("");
-    fmgr::input_function_call_safe::call(mcx, meta.typiofunc, s, meta.typioparam, typmod)
+    fmgr::input_function_call_safe::call(
+        mcx,
+        meta.typiofunc,
+        s,
+        meta.typioparam,
+        typmod,
+        escontext,
+    )
 }
 
 // ---------------------------------------------------------------------------
