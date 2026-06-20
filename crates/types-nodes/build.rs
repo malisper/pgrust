@@ -113,14 +113,23 @@ fn main() {
     // establishes the stable accessor API that Phase 2 migrates onto.
     let nodes_rs = manifest_dir.join("src/nodes.rs");
     let primnodes_rs = manifest_dir.join("src/primnodes.rs");
+    // The flip-target variant table: after the node-opaque flip the `Node` enum no
+    // longer exists in `src/nodes.rs` (it became the opaque newtype), so the
+    // authoritative variant list lives in `node_variants.in.rs` (the verbatim
+    // former enum body — `pub enum Node<'mcx> { ... }`). This is the single source
+    // of truth for the generated adapters/accessors/constructors.
+    let node_variants_in = manifest_dir.join("node_variants.in.rs");
     println!("cargo:rerun-if-changed={}", nodes_rs.display());
     println!("cargo:rerun-if-changed={}", primnodes_rs.display());
+    println!("cargo:rerun-if-changed={}", node_variants_in.display());
     let nodes_src = fs::read_to_string(&nodes_rs)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", nodes_rs.display()));
+    let node_variants_src = fs::read_to_string(&node_variants_in)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", node_variants_in.display()));
     let primnodes_src = fs::read_to_string(&primnodes_rs)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", primnodes_rs.display()));
 
-    let node_enum = parse_node_enum(&nodes_src);
+    let node_enum = parse_node_enum(&node_variants_src);
     assert!(!node_enum.is_empty(), "parsed zero Node enum variants");
     let expr_enum = parse_expr_enum(&primnodes_src);
     assert!(!expr_enum.is_empty(), "parsed zero Expr enum variants");
@@ -502,11 +511,11 @@ fn emit_constructors(
         if seen_ctor.insert(name.clone()) {
             emitted.insert(name);
             s.push_str(
-                "    /// Wrap an already-built `Expr` value as a `Node::Expr`. `mcx` is\n    \
-                 /// unused for now; at the opaque flip this body allocates the opaque rep.\n    \
+                "    /// Wrap an already-built `Expr` value as a `Node`. Allocates the\n    \
+                 /// opaque representation in `mcx` (fallible).\n    \
                  #[inline]\n    \
-                 pub fn mk_expr(_mcx: mcx::Mcx<'mcx>, payload: crate::primnodes::Expr) -> types_error::PgResult<crate::nodes::Node<'mcx>> {\n        \
-                 Ok(crate::nodes::Node::Expr(payload))\n    }\n",
+                 pub fn mk_expr(mcx: mcx::Mcx<'mcx>, payload: crate::primnodes::Expr) -> types_error::PgResult<crate::nodes::Node<'mcx>> {\n        \
+                 crate::nodes::Node::new(mcx, crate::node_payload_gen::NodePayload_Expr(payload, core::marker::PhantomData))\n    }\n",
             );
         }
     }
@@ -521,12 +530,22 @@ fn emit_constructors(
             continue;
         }
         let payload_ty = &v.payload;
+        // The adapter wraps the payload; lifetime-free payloads need a trailing
+        // `PhantomData` second field (matching the generated `NodePayload_<V>`).
+        let adapter_ctor = if v.payload.contains("<'mcx>") {
+            format!("crate::node_payload_gen::NodePayload_{ident}(payload)", ident = v.ident)
+        } else {
+            format!(
+                "crate::node_payload_gen::NodePayload_{ident}(payload, core::marker::PhantomData)",
+                ident = v.ident
+            )
+        };
         s.push_str(&format!(
-            "    /// `makeNode({ident})` — build a `{ident}` node. `mcx` is unused\n    \
-             /// for now; at the opaque flip this body allocates the opaque rep.\n    \
+            "    /// `makeNode({ident})` — build a `{ident}` node, allocating the\n    \
+             /// opaque representation in `mcx` (fallible).\n    \
              #[inline]\n    \
-             pub fn mk_{snake}(_mcx: mcx::Mcx<'mcx>, payload: {payload_ty}) -> types_error::PgResult<crate::nodes::Node<'mcx>> {{\n        \
-             Ok(crate::nodes::Node::{ident}(payload))\n    }}\n",
+             pub fn mk_{snake}(mcx: mcx::Mcx<'mcx>, payload: {payload_ty}) -> types_error::PgResult<crate::nodes::Node<'mcx>> {{\n        \
+             crate::nodes::Node::new(mcx, {adapter_ctor})\n    }}\n",
             ident = v.ident,
             snake = to_snake_case(&v.ident),
         ));
@@ -541,11 +560,10 @@ fn emit_constructors(
         let payload_ty = format!("crate::primnodes::{}", v.payload);
         s.push_str(&format!(
             "    /// `makeNode({ident})` — build a `{ident}` expression node, routed\n    \
-             /// through `Node::Expr`. `mcx` is unused for now; at the opaque flip\n    \
-             /// this body allocates the opaque rep.\n    \
+             /// through the opaque `Expr` payload, allocating in `mcx` (fallible).\n    \
              #[inline]\n    \
-             pub fn mk_{snake}(_mcx: mcx::Mcx<'mcx>, payload: {payload_ty}) -> types_error::PgResult<crate::nodes::Node<'mcx>> {{\n        \
-             Ok(crate::nodes::Node::Expr(crate::primnodes::Expr::{ident}(payload))\n)    }}\n",
+             pub fn mk_{snake}(mcx: mcx::Mcx<'mcx>, payload: {payload_ty}) -> types_error::PgResult<crate::nodes::Node<'mcx>> {{\n        \
+             crate::nodes::Node::new(mcx, crate::node_payload_gen::NodePayload_Expr(crate::primnodes::Expr::{ident}(payload), core::marker::PhantomData))\n    }}\n",
             ident = v.ident,
             snake = to_snake_case(&v.ident),
         ));
@@ -736,32 +754,32 @@ fn emit_node_accessors(
             continue; // the routing arm; its own as_expr is hand-written.
         }
         let lc = v.ident.to_ascii_lowercase();
-        let pat = format!("Node::{}(x)", v.ident);
         let ty = ret_ty(&v.payload);
         method_count += emit_accessor_block(
             &mut s,
             &lc,
-            &pat,
+            &v.ident,
             &ty,
             &v.payload,
-            &v.ident,
+            v.payload.contains("<'mcx>"),
+            /* expr_routed */ false,
             &mut emitted_names,
         );
     }
 
-    // Expr-family variants, routed through `Node::Expr(Expr::<V>(..))`.
+    // Expr-family variants, routed through the opaque `Expr` payload.
     for v in expr {
         let lc = v.ident.to_ascii_lowercase();
-        let pat = format!("Node::Expr(crate::primnodes::Expr::{}(x))", v.ident);
         // Expr payloads are lifetime-free; qualify under crate::primnodes.
         let ty = format!("crate::primnodes::{}", v.payload);
         method_count += emit_accessor_block(
             &mut s,
             &lc,
-            &pat,
-            &ty,
-            &format!("crate::primnodes::{}", v.payload),
             &v.ident,
+            &ty,
+            &ty,
+            /* has_lifetime */ false,
+            /* expr_routed */ true,
             &mut emitted_names,
         );
     }
@@ -830,7 +848,35 @@ fn emit_node_accessors(
             ident = v.ident,
         ));
     }
-    s.push_str("        }\n    }\n}\n");
+    s.push_str("        }\n    }\n");
+    // `tag_is_expr(tag)` — does this NodeTag belong to an `Expr`-family leaf? The
+    // node-opaque flip's `Node::is_expr`/`as_expr` use it to gate the routing-arm
+    // downcast (the `Expr` payload has no single tag; it shares each leaf's tag).
+    s.push_str(
+        "    /// Is `tag` an `Expr`-family leaf tag? Used by `Node::is_expr`/\n    \
+         /// `as_expr` to gate the opaque routing-arm downcast. Generated.\n    \
+         #[inline]\n    \
+         pub fn tag_is_expr(tag: crate::nodes::NodeTag) -> bool {\n        \
+         matches!(tag,\n",
+    );
+    {
+        let mut seen: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+        let mut first = true;
+        for v in expr {
+            let key = format!("T_{}", v.ident);
+            let val = *tag_values.get(&key).unwrap();
+            if !seen.insert(val) {
+                continue;
+            }
+            if first {
+                s.push_str(&format!("            crate::nodes::NodeTag({val})"));
+                first = false;
+            } else {
+                s.push_str(&format!("\n            | crate::nodes::NodeTag({val})"));
+            }
+        }
+    }
+    s.push_str("\n        )\n    }\n}\n");
     let expr_tag_code = s;
 
     (ntag_code, acc_code, expr_tag_code)
@@ -843,53 +889,94 @@ fn ret_ty(payload: &str) -> String {
     payload.to_string()
 }
 
-/// Emit the five accessors for one variant, skipping any whose name already
-/// exists. Returns the number of methods actually emitted.
+/// Emit the five accessors for one variant in OPAQUE (tag-keyed downcast) form,
+/// skipping any whose name already exists. Returns the number of methods emitted.
+///
+/// `expr_routed=false`: a Node-direct variant. The body downcasts the opaque box
+/// to the variant's `#[repr(transparent)]` `NodePayload_<V>` adapter (keyed on
+/// `ntag::T_<V>`) and projects `&a.0` (the payload). `has_lifetime` controls the
+/// adapter's lifetime header (`NodePayload_V<'mcx>` either way — all adapters
+/// carry `'mcx`).
+///
+/// `expr_routed=true`: an `Expr`-family leaf, stored inside the single
+/// `NodePayload_Expr` adapter over the `Expr` enum. The body downcasts to
+/// `NodePayload_Expr<'mcx>` keyed on `ntag::T_<V>` (the inner leaf's tag, which
+/// `NodePayload_Expr::node_tag` forwards to), then matches `Expr::<V>(x)` — the
+/// tag<->variant bijection guarantees the match always succeeds when the
+/// downcast does.
 fn emit_accessor_block(
     s: &mut String,
     lc: &str,
-    pat: &str,
+    ident: &str,
     ret: &str,
     owned: &str,
-    ident: &str,
+    _has_lifetime: bool,
+    expr_routed: bool,
     emitted: &mut std::collections::BTreeSet<String>,
 ) -> usize {
-    // The bound name in the pattern is `x`; the `is_` test wants a wildcard so
-    // it never binds (avoids unused-binding lints).
-    let pat_mut = pat.to_string();
-    let pat_wild = pat.replacen("(x)", "(_)", 1);
+    let tag = format!("crate::nodes::ntag::T_{ident}");
+    // The bodies differ between a Node-direct adapter and an Expr-routed leaf.
+    let (body_as, body_as_mut, body_expect, body_expect_mut, body_into) = if expr_routed {
+        let ad = "crate::node_payload_gen::NodePayload_Expr::<'mcx>";
+        (
+            format!(
+                "self.0.downcast_ref::<{ad}>({tag}).and_then(|a| match &a.0 {{ crate::primnodes::Expr::{ident}(x) => Some(x), _ => None }})"
+            ),
+            format!(
+                "self.0.downcast_mut::<{ad}>({tag}).and_then(|a| match &mut a.0 {{ crate::primnodes::Expr::{ident}(x) => Some(x), _ => None }})"
+            ),
+            format!(
+                "self.as_{lc}().unwrap_or_else(|| ::core::panic!(\"expect_{lc}: not a {ident} node\"))"
+            ),
+            format!(
+                "self.as_{lc}_mut().unwrap_or_else(|| ::core::panic!(\"expect_{lc}_mut: not a {ident} node\"))"
+            ),
+            format!(
+                "self.0.into_payload::<{ad}>({tag}).ok().and_then(|a| match a.0 {{ crate::primnodes::Expr::{ident}(x) => Some(x), _ => None }})"
+            ),
+        )
+    } else {
+        let ad = format!("crate::node_payload_gen::NodePayload_{ident}::<'mcx>");
+        (
+            format!("self.0.downcast_ref::<{ad}>({tag}).map(|a| &a.0)"),
+            format!("self.0.downcast_mut::<{ad}>({tag}).map(|a| &mut a.0)"),
+            format!(
+                "self.0.downcast_ref::<{ad}>({tag}).map(|a| &a.0).unwrap_or_else(|| ::core::panic!(\"expect_{lc}: not a {ident} node\"))"
+            ),
+            format!(
+                "self.0.downcast_mut::<{ad}>({tag}).map(|a| &mut a.0).unwrap_or_else(|| ::core::panic!(\"expect_{lc}_mut: not a {ident} node\"))"
+            ),
+            format!("self.0.into_payload::<{ad}>({tag}).ok().map(|a| a.0)"),
+        )
+    };
     let mut n = 0;
     let methods: [(String, String); 6] = [
         (
             format!("as_{lc}"),
             format!(
                 "    /// `castNode({ident}, node)` (borrow) — `Some` iff this node is `{ident}`.\n    \
-                 pub fn as_{lc}(&self) -> Option<&{ret}> {{\n        \
-                 match self {{ {pat} => Some(x), _ => None }}\n    }}\n",
+                 pub fn as_{lc}(&self) -> Option<&{ret}> {{\n        {body_as}\n    }}\n",
             ),
         ),
         (
             format!("as_{lc}_mut"),
             format!(
                 "    /// `castNode({ident}, node)` (mutable borrow).\n    \
-                 pub fn as_{lc}_mut(&mut self) -> Option<&mut {ret}> {{\n        \
-                 match self {{ {pat_mut} => Some(x), _ => None }}\n    }}\n",
+                 pub fn as_{lc}_mut(&mut self) -> Option<&mut {ret}> {{\n        {body_as_mut}\n    }}\n",
             ),
         ),
         (
             format!("expect_{lc}"),
             format!(
                 "    /// `castNode({ident}, node)` (borrow, asserting) — panics if not `{ident}`.\n    \
-                 pub fn expect_{lc}(&self) -> &{ret} {{\n        \
-                 match self {{ {pat} => x, _ => ::core::panic!(\"expect_{lc}: not a {ident} node\") }}\n    }}\n",
+                 pub fn expect_{lc}(&self) -> &{ret} {{\n        {body_expect}\n    }}\n",
             ),
         ),
         (
             format!("expect_{lc}_mut"),
             format!(
                 "    /// `castNode({ident}, node)` (mutable borrow, asserting) — panics if not `{ident}`.\n    \
-                 pub fn expect_{lc}_mut(&mut self) -> &mut {ret} {{\n        \
-                 match self {{ {pat_mut} => x, _ => ::core::panic!(\"expect_{lc}_mut: not a {ident} node\") }}\n    }}\n",
+                 pub fn expect_{lc}_mut(&mut self) -> &mut {ret} {{\n        {body_expect_mut}\n    }}\n",
             ),
         ),
         (
@@ -897,15 +984,14 @@ fn emit_accessor_block(
             format!(
                 "    /// `IsA(node, {ident})`.\n    \
                  pub fn is_{lc}(&self) -> bool {{\n        \
-                 matches!(self, {pat_wild})\n    }}\n",
+                 self.0.node_tag() == {tag}\n    }}\n",
             ),
         ),
         (
             format!("into_{lc}"),
             format!(
                 "    /// Consume into the `{ident}` payload, or `None` if not `{ident}`.\n    \
-                 pub fn into_{lc}(self) -> Option<{owned}> {{\n        \
-                 match self {{ {pat} => Some(x), _ => None }}\n    }}\n",
+                 pub fn into_{lc}(self) -> Option<{owned}> {{\n        {body_into}\n    }}\n",
             ),
         ),
     ];

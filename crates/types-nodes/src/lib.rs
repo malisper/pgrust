@@ -73,7 +73,6 @@ pub mod opaque_node;
 /// byte-untouched in the normal build. At the atomic flip the gate is removed and
 /// this module becomes the live representation. See
 /// docs/proposals/node-opaque-migration.md §6.5 step 1.
-#[cfg(feature = "node_payload_codegen")]
 #[allow(non_camel_case_types, dead_code, unused_imports)]
 pub mod node_payload_gen {
     include!(concat!(env!("OUT_DIR"), "/node_payload_impls.rs"));
