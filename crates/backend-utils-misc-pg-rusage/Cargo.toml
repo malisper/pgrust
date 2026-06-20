@@ -10,5 +10,8 @@ path = "src/lib.rs"
 
 [dependencies]
 libc = "0.2"
+mcx = { path = "../mcx" }
 types-rusage = { path = "../types-rusage" }
+types-error = { path = "../types-error" }
 pg-rusage-seams = { path = "../pg-rusage-seams" }
+backend-utils-misc-clean-seams = { path = "../backend-utils-misc-clean-seams" }

@@ -27,6 +27,7 @@ types-rusage = { path = "../types-rusage" }
 
 backend-utils-error = { path = "../backend-utils-error" }
 backend-commands-define-seams = { path = "../backend-commands-define-seams" }
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 
 # own seam crate (inward)
 backend-commands-cluster-seams = { path = "../backend-commands-cluster-seams" }

@@ -2236,11 +2236,21 @@ fn vacuum_rel<'mcx>(
                 cluster_params.options |= CLUOPT_VERBOSE;
             }
             /*
-             * The relation is already open with AccessExclusiveLock held; a
-             * NoLock table_open recovers the Relation value from the relcache
-             * without re-locking. cluster_rel closes it but keeps the lock.
+             * C (vacuum.c:2311) hands the *already-open* `rel` (a single
+             * relcache reference from vacuum_open_relation) straight to
+             * cluster_rel, then sets `rel = NULL` so the bottom relation_close
+             * is skipped — cluster_rel owns closing it but keeps the lock.
+             *
+             * The owned-Relation model carries `rel_handle` as a handle, so we
+             * recover the owned value with a NoLock table_open (no re-lock).
+             * That recovery bumps the relcache refcount, so we must release the
+             * original `rel_handle` reference (NoLock keeps the
+             * AccessExclusiveLock) to match C's single reference — otherwise
+             * cluster_rel's CheckTableNotInUse sees refcnt==2 and errors with
+             * "being used by active queries in this session".
              */
             let old_heap = table_seam::table_open::call(mcx, rel_handle, NoLock)?;
+            table_seam::relation_close::call(rel_handle, NoLock)?;
             cluster_seam::cluster_rel::call(mcx, old_heap, InvalidOid, cluster_params)?;
 
             rel = None;

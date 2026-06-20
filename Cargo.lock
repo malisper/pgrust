@@ -6384,6 +6384,7 @@ dependencies = [
  "backend-storage-lmgr-lmgr-seams",
  "backend-storage-lmgr-predicate-seams",
  "backend-tcop-postgres-seams",
+ "backend-tcop-utility-out-seams",
  "backend-utils-activity-small-seams",
  "backend-utils-adt-catalog-perm-seams",
  "backend-utils-cache-inval-seams",
@@ -22799,8 +22800,11 @@ dependencies = [
 name = "backend-utils-misc-pg-rusage"
 version = "0.0.0"
 dependencies = [
+ "backend-utils-misc-clean-seams",
  "libc",
+ "mcx",
  "pg-rusage-seams",
+ "types-error",
  "types-rusage",
 ]
 

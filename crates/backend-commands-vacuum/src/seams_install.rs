@@ -212,6 +212,20 @@ pub fn init_seams() {
     vacuum::vac_bulkdel_one_index::set(crate::vac_bulkdel_one_index);
     vacuum::vac_cleanup_one_index::set(crate::vac_cleanup_one_index);
 
+    // cluster.c reaches `vacuum_get_cutoffs` through this seam crate for the
+    // CLUSTER / VACUUM FULL heap rebuild: `memset(&params, 0,
+    // sizeof(VacuumParams)); vacuum_get_cutoffs(OldHeap, &params, &cutoffs)`.
+    // The zeroed VacuumParams matches the C memset; the owner returns the
+    // bool (whether an aggressive freeze is needed), which the CLUSTER caller
+    // discards, so we hand back just the populated cutoffs struct.
+    vacuum::vacuum_get_cutoffs::set(|old_heap| {
+        use types_vacuum::vacuum::{VacuumCutoffs, VacuumParams};
+        let params = VacuumParams::default();
+        let mut cutoffs = VacuumCutoffs::default();
+        crate::vacuum_get_cutoffs(old_heap.rd_id, params, &mut cutoffs)?;
+        Ok(cutoffs)
+    });
+
     // --- backend-access-heap-vacuumlazy-seams (lazy-vacuum command layer) ---
     vacuumlazy::vacuum_get_cutoffs::set(|rel, params, cutoffs| {
         crate::vacuum_get_cutoffs(rel.rd_id, params, cutoffs)

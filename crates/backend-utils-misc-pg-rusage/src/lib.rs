@@ -157,6 +157,17 @@ fn elapsed_pair(start: Timeval, mut end: Timeval) -> (i32, i32) {
 pub fn init_seams() {
     pg_rusage_seams::pg_rusage_init::set(pg_rusage_new);
     pg_rusage_seams::pg_rusage_show::set(|ru0| pg_rusage_show(&ru0));
+
+    // The `utils/misc/pg_rusage.c` unit is canonically named
+    // `backend-utils-misc-clean`; CLUSTER / VACUUM FULL reach `pg_rusage_init`
+    // / `pg_rusage_show` through that seam crate. Install them here (this is the
+    // owner of the bodies). `pg_rusage_show` there returns an mcx `PgString`
+    // (the verbose-message sink pallocs); marshal the owned `String` into the
+    // current context.
+    backend_utils_misc_clean_seams::pg_rusage_init::set(pg_rusage_new);
+    backend_utils_misc_clean_seams::pg_rusage_show::set(|mcx, ru0| {
+        mcx::PgString::from_str_in(&pg_rusage_show(&ru0), mcx)
+    });
 }
 
 #[cfg(test)]
