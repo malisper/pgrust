@@ -55,3 +55,7 @@ backend-catalog-catalog = { path = "../backend-catalog-catalog" }
 backend-catalog-dependency-seams = { path = "../backend-catalog-dependency-seams" }
 backend-catalog-pg-depend-seams = { path = "../backend-catalog-pg-depend-seams" }
 backend-catalog-objectaccess-seams = { path = "../backend-catalog-objectaccess-seams" }
+backend-catalog-objectaddress-seams = { path = "../backend-catalog-objectaddress-seams" }
+backend-nodes-makefuncs-seams = { path = "../backend-nodes-makefuncs-seams" }
+backend-parser-parse-type = { path = "../backend-parser-parse-type" }
+types-parsenodes = { path = "../types-parsenodes" }

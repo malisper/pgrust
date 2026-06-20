@@ -34,6 +34,10 @@ use types_catalog::pg_class::{
     Anum_pg_class_relacl, Anum_pg_class_relkind, Anum_pg_class_relname, Anum_pg_class_relnatts,
     Anum_pg_class_relowner, RelationRelationId,
 };
+use types_catalog::pg_type::{
+    Anum_pg_type_typelem, Anum_pg_type_typsubscript, Anum_pg_type_typtype, TypeRelationId,
+};
+use types_catalog::pg_proc::ProcedureRelationId;
 use types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber;
 use types_core::primitive::{InvalidOid, Oid};
 use types_error::{
@@ -208,6 +212,10 @@ fn restrict_and_check_grant(
         ObjectType::Table => ACL_ALL_RIGHTS_RELATION,
         ObjectType::Sequence => ACL_ALL_RIGHTS_SEQUENCE,
         ObjectType::Schema => ACL_ALL_RIGHTS_SCHEMA,
+        ObjectType::Type | ObjectType::Domain => ACL_ALL_RIGHTS_TYPE,
+        ObjectType::Function | ObjectType::Procedure | ObjectType::Routine => {
+            ACL_ALL_RIGHTS_FUNCTION
+        }
         other => {
             return Err(PgError::error(format!(
                 "restrict_and_check_grant: unsupported object type {other:?} in grant slice"
@@ -385,6 +393,7 @@ fn exec_grant_common(
     istmt: &mut InternalGrant<'_>,
     classid: Oid,
     default_privs: AclMode,
+    object_check: Option<fn(Mcx<'_>, i32, &FormedTuple<'_>) -> PgResult<()>>,
 ) -> PgResult<()> {
     if istmt.all_privs && istmt.privileges == ACL_NO_RIGHTS {
         istmt.privileges = default_privs;
@@ -411,6 +420,11 @@ fn exec_grant_common(
                 get_object_class_descr(classid)?
             )));
         };
+
+        // Call the type-specific check function, if any.
+        if let Some(check) = object_check {
+            check(mcx, cacheid, &tuple)?;
+        }
 
         // ownerId = DatumGetObjectId(SysCacheGetAttrNotNull(owner)).
         let owner_id = SysCacheGetAttrNotNull(mcx, cacheid, &tuple, owner_attnum)?.as_oid();
@@ -522,6 +536,42 @@ fn exec_grant_common(
     }
 
     table_close(relation, RowExclusiveLock)?;
+    Ok(())
+}
+
+/// `ExecGrant_Type_check(istmt, tuple)` (aclchk.c) — the per-object check
+/// `ExecGrant_common` runs for `OBJECT_TYPE`/`OBJECT_DOMAIN`: GRANT/REVOKE is
+/// rejected on a "true" array type (set privileges of the element type instead)
+/// and on a multirange type (set privileges of the range type instead).
+fn exec_grant_type_check(mcx: Mcx<'_>, cacheid: i32, tuple: &FormedTuple<'_>) -> PgResult<()> {
+    // F_ARRAY_SUBSCRIPT_HANDLER (catalog/pg_proc_d.h) — OID of the standard
+    // array subscripting handler; an array type's typsubscript points here.
+    const F_ARRAY_SUBSCRIPT_HANDLER: Oid = 6179;
+    // TYPTYPE_MULTIRANGE (catalog/pg_type.h).
+    const TYPTYPE_MULTIRANGE: i8 = b'm' as i8;
+
+    let typelem =
+        SysCacheGetAttrNotNull(mcx, cacheid, tuple, Anum_pg_type_typelem as i32)?.as_oid();
+    let typsubscript =
+        SysCacheGetAttrNotNull(mcx, cacheid, tuple, Anum_pg_type_typsubscript as i32)?.as_oid();
+    let typtype =
+        SysCacheGetAttrNotNull(mcx, cacheid, tuple, Anum_pg_type_typtype as i32)?.as_i8();
+
+    // IsTrueArrayType(typeForm): OidIsValid(typelem) && typsubscript == F_ARRAY_SUBSCRIPT_HANDLER.
+    if typelem != InvalidOid && typsubscript == F_ARRAY_SUBSCRIPT_HANDLER {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_INVALID_GRANT_OPERATION)
+            .errmsg("cannot set privileges of array types".to_string())
+            .errhint("Set the privileges of the element type instead.".to_string())
+            .into_error());
+    }
+    if typtype == TYPTYPE_MULTIRANGE {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_INVALID_GRANT_OPERATION)
+            .errmsg("cannot set privileges of multirange types".to_string())
+            .errhint("Set the privileges of the range type instead.".to_string())
+            .into_error());
+    }
     Ok(())
 }
 
@@ -1133,7 +1183,19 @@ fn read_name(mcx: Mcx<'_>, cacheid: i32, tuple: &FormedTuple<'_>, attnum: i32) -
 fn exec_grant_stmt_oids(mcx: Mcx<'_>, istmt: &mut InternalGrant<'_>) -> PgResult<()> {
     match istmt.objtype {
         ObjectType::Table | ObjectType::Sequence => exec_grant_relation(mcx, istmt),
-        OBJECT_SCHEMA => exec_grant_common(mcx, istmt, NamespaceRelationId, ACL_ALL_RIGHTS_SCHEMA),
+        OBJECT_SCHEMA => {
+            exec_grant_common(mcx, istmt, NamespaceRelationId, ACL_ALL_RIGHTS_SCHEMA, None)
+        }
+        ObjectType::Domain | ObjectType::Type => exec_grant_common(
+            mcx,
+            istmt,
+            TypeRelationId,
+            ACL_ALL_RIGHTS_TYPE,
+            Some(exec_grant_type_check),
+        ),
+        ObjectType::Function | ObjectType::Procedure | ObjectType::Routine => {
+            exec_grant_common(mcx, istmt, ProcedureRelationId, ACL_ALL_RIGHTS_FUNCTION, None)
+        }
         other => Err(PgError::error(format!(
             "GRANT/REVOKE executor not ported for object type {other:?} \
              (schema/relation slice; remaining aclchk F2/F3 keystone)"
@@ -1852,9 +1914,54 @@ fn object_names_to_oids<'mcx>(
             }
             Ok(objects)
         }
-        other => Err(PgError::error(format!(
-            "objectNamesToOids not ported for object type {other:?} (schema-grant slice)"
-        ))),
+        ObjectType::Domain | ObjectType::Type => {
+            // The parse representation of types and domains in privilege targets
+            // is a name list (List of String), different from the TypeName that
+            // get_object_address() expects, so convert here.
+            let mut objects: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, objnames.len())?;
+            for name in objnames.iter() {
+                // typname = (List *) lfirst(cell);
+                // tn = makeTypeNameFromNameList(typname);
+                let lowered = backend_parser_parse_type::rich_node_to_parse(name)?;
+                let types_parsenodes::Node::List(names) = lowered else {
+                    return Err(PgError::error(
+                        "objectNamesToOids(OBJECT_TYPE): object name is not a List node",
+                    ));
+                };
+                let tn = backend_nodes_makefuncs_seams::make_type_name_from_name_list::call(names)?;
+                let tn_node = types_parsenodes::Node::TypeName(tn);
+
+                // address = get_object_address(objtype, (Node *) tn, &relation,
+                //                              lockmode, false);
+                // Assert(relation == NULL);
+                let resolved = backend_catalog_objectaddress_seams::get_object_address::call(
+                    mcx,
+                    objtype,
+                    &tn_node,
+                    AccessShareLock,
+                    false,
+                )?;
+                objects.push(resolved.address.objectId);
+            }
+            Ok(objects)
+        }
+        _ => {
+            // For most object types, we use get_object_address() directly on the
+            // parser representation (e.g. ObjectWithArgs for functions).
+            let mut objects: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, objnames.len())?;
+            for name in objnames.iter() {
+                let lowered = backend_parser_parse_type::rich_node_to_parse(name)?;
+                let resolved = backend_catalog_objectaddress_seams::get_object_address::call(
+                    mcx,
+                    objtype,
+                    &lowered,
+                    AccessShareLock,
+                    false,
+                )?;
+                objects.push(resolved.address.objectId);
+            }
+            Ok(objects)
+        }
     }
 }
 
@@ -1871,6 +1978,15 @@ fn objtype_all_privileges(objtype: ObjectType) -> PgResult<(AclMode, &'static st
         )),
         ObjectType::Sequence => Ok((ACL_ALL_RIGHTS_SEQUENCE, "invalid privilege type %s for sequence")),
         OBJECT_SCHEMA => Ok((ACL_ALL_RIGHTS_SCHEMA, "invalid privilege type %s for schema")),
+        ObjectType::Domain => Ok((ACL_ALL_RIGHTS_TYPE, "invalid privilege type %s for domain")),
+        ObjectType::Type => Ok((ACL_ALL_RIGHTS_TYPE, "invalid privilege type %s for type")),
+        ObjectType::Function => Ok((ACL_ALL_RIGHTS_FUNCTION, "invalid privilege type %s for function")),
+        ObjectType::Procedure => {
+            Ok((ACL_ALL_RIGHTS_FUNCTION, "invalid privilege type %s for procedure"))
+        }
+        ObjectType::Routine => {
+            Ok((ACL_ALL_RIGHTS_FUNCTION, "invalid privilege type %s for routine"))
+        }
         other => Err(PgError::error(format!(
             "GRANT objtype {other:?} not ported (schema/relation slice)"
         ))),
