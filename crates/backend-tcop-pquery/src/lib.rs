@@ -2091,4 +2091,23 @@ pub fn init_seams() {
     // executor-driving layer with the AcquireRewriteLocks/QueryRewrite/
     // pg_plan_query/CreateQueryDesc/ExecutorStart..End substrate.
     backend_commands_matview_deps_seams::run_matview_datafill::set(run_matview_datafill);
+
+    // `(ActivePortal && ActivePortal->status == PORTAL_ACTIVE) ?
+    // ActivePortal->sourceText : NULL` (pquery.c). Used by
+    // `function_parse_error_transpose` (pg_proc.c) to relocate a PL syntax
+    // error from the function body's internal position to a cursor position in
+    // the original CREATE FUNCTION / DO command text. The body is fully ported
+    // in backend-catalog-pg-proc; only this reader was unwired.
+    backend_catalog_pg_proc_seams::active_portal_source_text::set(|| {
+        Ok(portalmem::with_active_portal(|portal| {
+            portal.and_then(|p| {
+                let b = p.borrow();
+                if b.status == types_portal::PORTAL_ACTIVE {
+                    b.sourceText.clone()
+                } else {
+                    None
+                }
+            })
+        }))
+    });
 }

@@ -36,6 +36,7 @@ backend-commands-matview-deps-seams = { path = "../backend-commands-matview-deps
 backend-rewrite-rewritehandler-seams = { path = "../backend-rewrite-rewritehandler-seams" }
 backend-optimizer-plan-planner-seams = { path = "../backend-optimizer-plan-planner-seams" }
 backend-utils-mmgr-portalmem-seams = { path = "../backend-utils-mmgr-portalmem-seams" }
+backend-catalog-pg-proc-seams = { path = "../backend-catalog-pg-proc-seams" }
 backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
 backend-tcop-dest-seams = { path = "../backend-tcop-dest-seams" }
 backend-executor-tstorereceiver-seams = { path = "../backend-executor-tstorereceiver-seams" }

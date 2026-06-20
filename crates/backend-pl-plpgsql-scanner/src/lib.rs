@@ -875,6 +875,15 @@ impl<'mcx> PlpgsqlScanner<'mcx> {
     /// Build the `ERRCODE_SYNTAX_ERROR` `PgError` with the scanner's error
     /// position (`internalerrposition`) and the function body
     /// (`internalerrquery`), as `plpgsql_scanner_errposition` does in C.
+    ///
+    /// This is the `ereport(ERROR, errcode(ERRCODE_SYNTAX_ERROR), errmsg(msg),
+    /// parser_errposition(location))` form — the message is used verbatim, with
+    /// no "at or near <token>" suffix (that suffix is added only by the bison
+    /// `plpgsql_yyerror` callback).
+    pub fn syntax_error_at(&self, msg: &str, location: i32) -> PgError {
+        self.syntax_error(msg, location)
+    }
+
     fn syntax_error(&self, msg: &str, location: i32) -> PgError {
         let mut err = PgError::error(msg.to_string()).with_sqlstate(ERRCODE_SYNTAX_ERROR);
         if location >= 0 {

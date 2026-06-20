@@ -25,7 +25,7 @@
 //! exclusive) out-parameters are expressed by construction rather than by a
 //! `bool` plus two maybe-initialized slots.
 
-use types_error::PgResult;
+use types_error::{PgError, PgResult};
 use types_plpgsql::{
     IdentifierLookup, Oid, PLcword, PLpgSQL_condition, PLpgSQL_datum_type, PLpgSQL_expr,
     PLpgSQL_resolve_option, PLpgSQL_type, PLpgSQL_var, PLpgSQL_variable, PLwdatum, PLword,
@@ -415,4 +415,15 @@ seam_core::seam!(
     /// `quote_identifier(ident)` — SQL-quote an identifier if needed (used to
     /// build the positional cursor-argument list text).
     pub fn quote_identifier(ident: &str) -> String
+);
+
+seam_core::seam!(
+    /// `function_parse_error_transpose(prosrc)` (pg_proc.c): relocate a PL/pgSQL
+    /// compile (syntax) error from the function body's internal cursor position
+    /// to a cursor position in the original CREATE FUNCTION / DO command text,
+    /// matching C's `plpgsql_compile_error_callback`.  Value-form: takes and
+    /// returns the in-flight `PgError` (the SDK's `PgResult` error model).
+    /// Installed by `backend-catalog-pg-proc` (which owns the body and the
+    /// active-portal-text reader).
+    pub fn function_parse_error_transpose(prosrc: &str, err: PgError) -> PgResult<PgError>
 );

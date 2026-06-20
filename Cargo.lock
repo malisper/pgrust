@@ -5685,6 +5685,7 @@ dependencies = [
  "backend-catalog-pg-shdepend",
  "backend-commands-functioncmds-seams",
  "backend-parser-coerce",
+ "backend-pl-plpgsql-comp-seams",
  "backend-utils-adt-arrayfuncs",
  "backend-utils-adt-format-type-seams",
  "backend-utils-adt-regproc-seams",
@@ -18325,6 +18326,7 @@ name = "backend-tcop-pquery"
 version = "0.0.0"
 dependencies = [
  "backend-access-transam-xact-seams",
+ "backend-catalog-pg-proc-seams",
  "backend-commands-createas-seams",
  "backend-commands-matview-deps-seams",
  "backend-executor-execMain",

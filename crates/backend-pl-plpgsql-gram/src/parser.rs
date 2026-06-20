@@ -144,9 +144,12 @@ impl<'mcx> Parser<'mcx> {
     }
 
     /// `ereport(ERROR, errcode(ERRCODE_SYNTAX_ERROR), errmsg(...),
-    /// parser_errposition(loc))` — a positioned syntax error.
+    /// parser_errposition(loc))` — a positioned syntax error.  Unlike the bison
+    /// `plpgsql_yyerror` callback, this uses the message verbatim (no "at or
+    /// near <token>" suffix), matching the direct `ereport` sites in the C
+    /// grammar (e.g. the cursor-argument errors in `read_cursor_args`).
     fn syntax_at(&self, message: &str, loc: i32) -> PgError {
-        self.scanner.plpgsql_yyerror(loc, message)
+        self.scanner.syntax_error_at(message, loc)
     }
 
     /// `ereport(ERROR, errcode(ERRCODE_DATATYPE_MISMATCH), ...,

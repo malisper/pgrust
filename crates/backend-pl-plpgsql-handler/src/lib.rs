@@ -391,7 +391,7 @@ pub fn plpgsql_inline_handler(codeblock: InlineCodeBlock) -> PgResult<()> {
 
     // Compile the anonymous code block.
     let source = codeblock.source_text.clone().unwrap_or_default();
-    let mut func = backend_pl_plpgsql_comp::plpgsql_compile_inline(source);
+    let mut func = backend_pl_plpgsql_comp::plpgsql_compile_inline(source)?;
 
     // Mark the function as busy, just pro forma (funccache use_count; substrate).
 

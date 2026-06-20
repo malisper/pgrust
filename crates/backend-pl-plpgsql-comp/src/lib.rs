@@ -1623,7 +1623,7 @@ pub struct ProcCompileFacts {
 
 /// `plpgsql_compile_inline` — make an execution tree for an anonymous code
 /// block (`DO`).  Generally parallel to the non-trigger compile.
-pub fn plpgsql_compile_inline(proc_source: String) -> PLpgSQL_function {
+pub fn plpgsql_compile_inline(proc_source: String) -> PgResult<PLpgSQL_function> {
     let func_name = "inline_code_block";
 
     PLPGSQL_ERROR_FUNCNAME.with(|f| *f.borrow_mut() = Some(mem::sdup(func_name)));
@@ -1666,7 +1666,7 @@ pub fn plpgsql_compile_inline(proc_source: String) -> PLpgSQL_function {
     let var = plpgsql_build_variable("found", 0, found_dt, true);
     set_curr_compile_field(|f| f.found_varno = var.dno);
 
-    let action = parse_function_body(&proc_source);
+    let action = parse_function_body(&proc_source)?;
     set_curr_compile_field(|f| f.action = Some(action));
 
     if curr_compile_field(|f| f.fn_rettype) == VOIDOID {
@@ -1690,7 +1690,7 @@ pub fn plpgsql_compile_inline(proc_source: String) -> PLpgSQL_function {
     PLPGSQL_ERROR_FUNCNAME.with(|f| *f.borrow_mut() = None);
     set_check_syntax(false);
 
-    take_curr_compile()
+    Ok(take_curr_compile())
 }
 
 /// `plpgsql_compile` cold path, owned-inputs form (`plpgsql_compile_callback`'s
@@ -1756,7 +1756,7 @@ pub fn plpgsql_compile_from_source(facts: &ProcCompileFacts) -> PgResult<PLpgSQL
     let var = plpgsql_build_variable("found", 0, found_dt, true);
     set_curr_compile_field(|f| f.found_varno = var.dno);
 
-    let action = parse_function_body(&facts.prosrc);
+    let action = parse_function_body(&facts.prosrc)?;
     set_curr_compile_field(|f| f.action = Some(action));
 
     if num_out_args > 0
@@ -2028,17 +2028,24 @@ fn with_curr_compile_mut(f: impl FnOnce(&mut PLpgSQL_function)) {
 /// `plpgsql_scanner_init` -> `plpgsql_yyparse` -> `plpgsql_scanner_finish`
 /// sequence of `plpgsql_compile_callback`).  Runs inside the seams the grammar
 /// fires, which are installed by the time a compile runs.
-fn parse_function_body(src: &str) -> Box<PLpgSQL_stmt_block> {
+fn parse_function_body(src: &str) -> PgResult<Box<PLpgSQL_stmt_block>> {
     set_plpgsql_identifier_lookup(IdentifierLookup::IDENTIFIER_LOOKUP_NORMAL);
     let scanbuf = scanbuf_bytes(src);
     // The scanner allocates per-token strings in this arena; the owned AST it
     // returns is on the builtin allocator, so the arena may drop at parse end.
     let ctx = mcx::MemoryContext::new("PL/pgSQL function parse");
     let scanner = backend_pl_plpgsql_scanner::plpgsql_scanner_init(ctx.mcx(), &scanbuf, src);
-    match backend_pl_plpgsql_gram::plpgsql_yyparse(scanner) {
-        Ok(block) => block,
-        Err(e) => panic!("PL/pgSQL syntax error: {e:?}"),
-    }
+    // In C the grammar errors via `ereport(ERROR)`, which longjmps out of the
+    // compile through `plpgsql_compile_error_callback`.  That callback runs
+    // `function_parse_error_transpose` to relocate the body-relative cursor
+    // position to a position in the original CREATE FUNCTION / DO text (and to
+    // drop the "internal query" framing on success).  `plpgsql_yyparse` returns
+    // the same `PgError` it would have raised; run the transpose on it before
+    // propagating, mirroring the C error-context callback.
+    backend_pl_plpgsql_gram::plpgsql_yyparse(scanner).map_err(|e| {
+        comp_seams::function_parse_error_transpose::call(src, e)
+            .unwrap_or_else(|fallback| fallback)
+    })
 }
 
 /// The NUL-terminated scan buffer the core lexer scans (the bytes of `src`).

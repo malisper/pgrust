@@ -1029,6 +1029,59 @@ pub fn function_parse_error_transpose(prosrc: &str) -> PgResult<bool> {
     Ok(true)
 }
 
+/// Value-form of [`function_parse_error_transpose`] for the PL/pgSQL compile
+/// path, where the syntax error is carried as a `PgError` value (the SDK's
+/// `PgResult` error model) rather than being live on the ereport stack.
+///
+/// Mirrors `function_parse_error_transpose` exactly, but reads/writes the
+/// error's cursor/internal position and internal query directly on the value.
+/// Returns the (possibly adjusted) error; when there is no cursor/internal
+/// position the error is returned unchanged (the `return false` C path leaves
+/// the error untouched).
+pub fn function_parse_error_transpose_value(prosrc: &str, mut err: PgError) -> PgResult<PgError> {
+    /*
+     * Nothing to do unless we are dealing with a syntax error that has a cursor
+     * position. Some PLs may prefer to report the error position as an internal
+     * error to begin with, so check that too.
+     */
+    let mut origerrposition = err.cursor_position.unwrap_or(0);
+    if origerrposition <= 0 {
+        origerrposition = err.internal_position.unwrap_or(0);
+        if origerrposition <= 0 {
+            return Ok(err);
+        }
+    }
+
+    /* We can get the original query text from the active portal (hack...) */
+    let newerrposition = if let Some(queryText) = seam::active_portal_source_text::call()? {
+        match_prosrc_to_query(prosrc, &queryText, origerrposition)?
+    } else {
+        /*
+         * Quietly give up if no ActivePortal. This is an unusual situation but
+         * it can happen in, e.g., logical replication workers.
+         */
+        -1
+    };
+
+    if newerrposition > 0 {
+        /* Successful, so fix error position to reference original query */
+        err.cursor_position = Some(newerrposition);
+        /* Get rid of any report of the error as an "internal query" */
+        err.internal_position = None;
+        err.internal_query = None;
+    } else {
+        /*
+         * If unsuccessful, convert the position to an internal position marker
+         * and give the function text as the internal query.
+         */
+        err.cursor_position = None;
+        err.internal_position = Some(origerrposition);
+        err.internal_query = Some(prosrc.to_string());
+    }
+
+    Ok(err)
+}
+
 /* ===========================================================================
  * match_prosrc_to_query (pg_proc.c:1083-1137)
  * ========================================================================= */
@@ -1037,7 +1090,7 @@ pub fn function_parse_error_transpose(prosrc: &str) -> PgResult<bool> {
 /// text of the CREATE FUNCTION or DO command. If successful, return the
 /// character (not byte) index within the command corresponding to the given
 /// character index within the literal. If not successful, return 0.
-fn match_prosrc_to_query(prosrc: &str, queryText: &str, cursorpos: i32) -> PgResult<i32> {
+pub fn match_prosrc_to_query(prosrc: &str, queryText: &str, cursorpos: i32) -> PgResult<i32> {
     /*
      * Rather than fully parsing the original command, we just scan the command
      * looking for $prosrc$ or 'prosrc'. This could be fooled, so fail if we
@@ -1256,6 +1309,13 @@ fn pg_mblen(s: &[u8]) -> PgResult<i32> {
 pub fn init_seams() {
     backend_commands_functioncmds_seams::procedure_create::set(procedure_create_from_args);
     fmgr_builtins::register_pg_proc_builtins();
+
+    // Value-form `function_parse_error_transpose` for the PL/pgSQL compile path
+    // (pl_comp.c `plpgsql_compile_error_callback`). The body + active-portal
+    // text reader live here; the comp crate calls it through this comp-seam.
+    backend_pl_plpgsql_comp_seams::function_parse_error_transpose::set(|prosrc, err| {
+        function_parse_error_transpose_value(prosrc, err)
+    });
 }
 
 /// Adapt the `functioncmds.c` `ProcedureCreateArgs` bundle to the positional
