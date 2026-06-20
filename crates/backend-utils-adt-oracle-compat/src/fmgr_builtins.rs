@@ -18,8 +18,9 @@
 
 use types_core::Oid;
 use types_datum::Datum;
+use types_error::PgResult;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -73,171 +74,156 @@ fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("oracle_compat fmgr scratch")
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
-/// Unwrap a `PgResult`, re-raising its error through `raise`.
-#[inline]
-fn ok<T>(r: types_error::PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // fc_ adapters — case folding (text, collation-aware).
 // ---------------------------------------------------------------------------
 
-fn fc_lower(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_lower(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
     let collid = collation(fcinfo);
-    let out = ok(crate::lower(m.mcx(), arg_bytes(fcinfo, 0), collid)).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = crate::lower(m.mcx(), arg_bytes(fcinfo, 0), collid)?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
 
-fn fc_upper(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_upper(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
     let collid = collation(fcinfo);
-    let out = ok(crate::upper(m.mcx(), arg_bytes(fcinfo, 0), collid)).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = crate::upper(m.mcx(), arg_bytes(fcinfo, 0), collid)?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
 
-fn fc_initcap(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_initcap(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
     let collid = collation(fcinfo);
-    let out = ok(crate::initcap(m.mcx(), arg_bytes(fcinfo, 0), collid)).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = crate::initcap(m.mcx(), arg_bytes(fcinfo, 0), collid)?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
 
-fn fc_casefold(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_casefold(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
     let collid = collation(fcinfo);
-    let out = ok(crate::casefold(m.mcx(), arg_bytes(fcinfo, 0), collid)).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = crate::casefold(m.mcx(), arg_bytes(fcinfo, 0), collid)?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
 
 // ---------------------------------------------------------------------------
 // fc_ adapters — padding (text, int4, text).
 // ---------------------------------------------------------------------------
 
-fn fc_lpad(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_lpad(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
     let len = arg_i32(fcinfo, 1);
-    let out = ok(crate::lpad(m.mcx(), arg_bytes(fcinfo, 0), len, arg_bytes(fcinfo, 2))).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = crate::lpad(m.mcx(), arg_bytes(fcinfo, 0), len, arg_bytes(fcinfo, 2))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
 
-fn fc_rpad(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_rpad(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
     let len = arg_i32(fcinfo, 1);
-    let out = ok(crate::rpad(m.mcx(), arg_bytes(fcinfo, 0), len, arg_bytes(fcinfo, 2))).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = crate::rpad(m.mcx(), arg_bytes(fcinfo, 0), len, arg_bytes(fcinfo, 2))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
 
 // ---------------------------------------------------------------------------
 // fc_ adapters — trimming (text/bytea).
 // ---------------------------------------------------------------------------
 
-fn fc_ltrim(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_ltrim(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let out = ok(crate::ltrim(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1))).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = crate::ltrim(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
 
-fn fc_rtrim(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_rtrim(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let out = ok(crate::rtrim(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1))).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = crate::rtrim(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
 
-fn fc_btrim(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_btrim(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let out = ok(crate::btrim(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1))).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = crate::btrim(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
 
-fn fc_ltrim1(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_ltrim1(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let out = ok(crate::ltrim1(m.mcx(), arg_bytes(fcinfo, 0))).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = crate::ltrim1(m.mcx(), arg_bytes(fcinfo, 0))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
 
-fn fc_rtrim1(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_rtrim1(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let out = ok(crate::rtrim1(m.mcx(), arg_bytes(fcinfo, 0))).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = crate::rtrim1(m.mcx(), arg_bytes(fcinfo, 0))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
 
-fn fc_btrim1(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_btrim1(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let out = ok(crate::btrim1(m.mcx(), arg_bytes(fcinfo, 0))).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = crate::btrim1(m.mcx(), arg_bytes(fcinfo, 0))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
 
 /// C: `text(bpchar)` — SQL `text(character)`, OID 401, `prosrc => rtrim1`. The
 /// `bpchar` argument arrives as its detoasted `VARDATA_ANY` payload on the
 /// by-ref lane (same content-bytes carrier as `text`); the value core is the
 /// shared `rtrim1` (strip trailing spaces).
-fn fc_text_bpchar(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_text_bpchar(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let out = ok(crate::rtrim1(m.mcx(), arg_bytes(fcinfo, 0))).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = crate::rtrim1(m.mcx(), arg_bytes(fcinfo, 0))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
 
-fn fc_byteatrim(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_byteatrim(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let out = ok(crate::byteatrim(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1))).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = crate::byteatrim(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
 
-fn fc_bytealtrim(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bytealtrim(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let out = ok(crate::bytealtrim(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1))).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = crate::bytealtrim(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
 
-fn fc_byteartrim(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_byteartrim(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let out = ok(crate::byteartrim(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1))).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = crate::byteartrim(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
 
 // ---------------------------------------------------------------------------
 // fc_ adapters — translate / ascii / chr / repeat.
 // ---------------------------------------------------------------------------
 
-fn fc_translate(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_translate(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let out = ok(crate::translate(
+    let out = crate::translate(
         m.mcx(),
         arg_bytes(fcinfo, 0),
         arg_bytes(fcinfo, 1),
         arg_bytes(fcinfo, 2),
-    ))
+    )?
     .to_vec();
-    ret_varlena(fcinfo, out)
+    Ok(ret_varlena(fcinfo, out))
 }
 
-fn fc_ascii(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(ok(crate::ascii(arg_bytes(fcinfo, 0))))
+fn fc_ascii(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_i32(crate::ascii(arg_bytes(fcinfo, 0))?))
 }
 
-fn fc_chr(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_chr(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
     let arg = arg_i32(fcinfo, 0);
-    let out = ok(crate::chr(m.mcx(), arg)).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = crate::chr(m.mcx(), arg)?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
 
-fn fc_repeat(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_repeat(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
     let count = arg_i32(fcinfo, 1);
-    let out = ok(crate::repeat(m.mcx(), arg_bytes(fcinfo, 0), count)).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = crate::repeat(m.mcx(), arg_bytes(fcinfo, 0), count)?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
 
 // ---------------------------------------------------------------------------
@@ -248,23 +234,26 @@ fn builtin(
     foid: u32,
     name: &str,
     nargs: i16,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict: true,
-        retset: false,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict: true,
+            retset: false,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every `oracle_compat.c` builtin (C: their `fmgr_builtins[]` rows).
 /// Called from this crate's `init_seams()`. OIDs/nargs from `pg_proc.dat`; all
 /// are `proisstrict => 't'` and not retset.
 pub fn register_oracle_compat_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // ---- case folding ----
         builtin(870, "lower", 1, fc_lower),
         builtin(871, "upper", 1, fc_upper),
