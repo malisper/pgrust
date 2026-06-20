@@ -113,7 +113,7 @@ fn unexpected_encoding<T>(encoding: pg_enc) -> PgResult<T> {
 pub fn init_seams() {
     // Register the two ported conversion procedures as fmgr builtins
     // (utf8_and_iso8859, pg_proc.dat OIDs) so they resolve in-process.
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         make_conversion_builtin(4372, "utf8_to_iso8859", utf8_to_iso8859),
         make_conversion_builtin(4373, "iso8859_to_utf8", iso8859_to_utf8),
     ]);

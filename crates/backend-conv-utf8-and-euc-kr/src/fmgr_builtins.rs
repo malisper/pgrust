@@ -26,14 +26,9 @@
 
 use types_core::Oid;
 use types_datum::Datum;
+use types_error::PgResult;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
-
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// `pg_proc.dat`: `euc_kr_to_utf8` OID.
 const F_EUC_KR_TO_UTF8: Oid = 4364;
@@ -80,53 +75,48 @@ fn write_dest(fcinfo: &mut FunctionCallInfoBaseData, i: usize, bytes: Vec<u8>) {
 }
 
 /// fmgr adapter for `euc_kr_to_utf8`.
-fn fc_euc_kr_to_utf8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_euc_kr_to_utf8(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let src_encoding = arg_i32(fcinfo, 0);
     let dest_encoding = arg_i32(fcinfo, 1);
     let no_error = arg_bool(fcinfo, 5);
     let src = src_bytes(fcinfo, 2).to_vec();
-    match crate::euc_kr_to_utf8(src_encoding, dest_encoding, &src, no_error) {
-        Ok(res) => {
-            let converted = res.converted;
-            write_dest(fcinfo, 3, res.bytes);
-            Datum::from_i32(converted)
-        }
-        Err(e) => raise(e),
-    }
+    let res = crate::euc_kr_to_utf8(src_encoding, dest_encoding, &src, no_error)?;
+    let converted = res.converted;
+    write_dest(fcinfo, 3, res.bytes);
+    Ok(Datum::from_i32(converted))
 }
 
 /// fmgr adapter for `utf8_to_euc_kr`.
-fn fc_utf8_to_euc_kr(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_utf8_to_euc_kr(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let src_encoding = arg_i32(fcinfo, 0);
     let dest_encoding = arg_i32(fcinfo, 1);
     let no_error = arg_bool(fcinfo, 5);
     let src = src_bytes(fcinfo, 2).to_vec();
-    match crate::utf8_to_euc_kr(src_encoding, dest_encoding, &src, no_error) {
-        Ok(res) => {
-            let converted = res.converted;
-            write_dest(fcinfo, 3, res.bytes);
-            Datum::from_i32(converted)
-        }
-        Err(e) => raise(e),
-    }
+    let res = crate::utf8_to_euc_kr(src_encoding, dest_encoding, &src, no_error)?;
+    let converted = res.converted;
+    write_dest(fcinfo, 3, res.bytes);
+    Ok(Datum::from_i32(converted))
 }
 
-fn builtin(foid: Oid, name: &str, func: fn(&mut FunctionCallInfoBaseData) -> Datum) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        // (int4, int4, cstring, internal, int4, bool) -> int4
-        nargs: 6,
-        strict: true,
-        retset: false,
-        func: Some(func),
-    }
+fn builtin(foid: Oid, name: &str, func: PgFnNative) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            // (int4, int4, cstring, internal, int4, bool) -> int4
+            nargs: 6,
+            strict: true,
+            retset: false,
+            func: None,
+        },
+        func,
+    )
 }
 
 /// Register the `utf8_and_euc_kr` conversion procedures in the fmgr builtin
 /// registry (the mocked equivalent of loading `$libdir/utf8_and_euc_kr`).
 pub fn register_utf8_and_euc_kr_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin(F_EUC_KR_TO_UTF8, "euc_kr_to_utf8", fc_euc_kr_to_utf8),
         builtin(F_UTF8_TO_EUC_KR, "utf8_to_euc_kr", fc_utf8_to_euc_kr),
     ]);

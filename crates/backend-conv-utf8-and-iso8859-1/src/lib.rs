@@ -148,7 +148,7 @@ pub fn init_seams() {
     // Register the two ported conversion procedures as fmgr builtins so their
     // pg_proc OIDs (utf8_and_iso8859_1, pg_proc.dat) resolve in-process instead
     // of dlopen'ing `$libdir/utf8_and_iso8859_1`.
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         make_conversion_builtin(4374, "iso8859_1_to_utf8", iso8859_1_to_utf8),
         make_conversion_builtin(4375, "utf8_to_iso8859_1", utf8_to_iso8859_1),
     ]);

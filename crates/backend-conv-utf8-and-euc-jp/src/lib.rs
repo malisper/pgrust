@@ -68,7 +68,7 @@ pub fn utf8_to_euc_jp(
 pub fn init_seams() {
     // Register the two ported conversion procedures as fmgr builtins
     // (utf8_and_euc_jp, pg_proc.dat OIDs) so they resolve in-process.
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         make_conversion_builtin(4362, "euc_jp_to_utf8", euc_jp_to_utf8),
         make_conversion_builtin(4363, "utf8_to_euc_jp", utf8_to_euc_jp),
     ]);

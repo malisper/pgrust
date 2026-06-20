@@ -783,20 +783,23 @@ pub fn make_conversion_builtin(
     foid: u32,
     name: &str,
     conv: ConversionFn,
-) -> types_fmgr::BuiltinFunction {
+) -> (types_fmgr::BuiltinFunction, types_fmgr::PgFnNative) {
     // The conversion fn is stored in the closure via a generated dispatcher.
     // Since `PGFunction` is a plain `fn` pointer (no captured environment), the
     // conversion body must be threaded through a per-OID wrapper. We instead key
     // the dispatch on a thread-local registry the wrapper consults by fn_oid.
     register_conversion_body(foid, conv);
-    types_fmgr::BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs: 6,
-        strict: true,
-        retset: false,
-        func: Some(conversion_dispatch),
-    }
+    (
+        types_fmgr::BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs: 6,
+            strict: true,
+            retset: false,
+            func: None,
+        },
+        conversion_dispatch as types_fmgr::PgFnNative,
+    )
 }
 
 thread_local! {
@@ -833,13 +836,15 @@ fn register_conversion_body(foid: u32, conv: ConversionFn) {
 /// resolved `fn_oid` and run it over the fmgr boundary.
 fn conversion_dispatch(
     fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
-) -> types_datum::Datum {
+) -> PgResult<types_datum::Datum> {
     let foid = fcinfo.flinfo.as_ref().map(|f| f.fn_oid).unwrap_or(0);
     let conv = match CONVERSION_BODIES.with(|m| m.borrow().get(foid)) {
         Some(c) => c,
-        None => std::panic::panic_any(PgError::error(format!(
-            "encoding conversion procedure {foid} is not registered"
-        ))),
+        None => {
+            return Err(PgError::error(format!(
+                "encoding conversion procedure {foid} is not registered"
+            )))
+        }
     };
 
     // PG_GETARG_INT32(0) / PG_GETARG_INT32(1).
@@ -869,15 +874,12 @@ fn conversion_dispatch(
         .map(|a| a.value.as_bool())
         .unwrap_or(false);
 
-    let result = match conv(
+    let result = conv(
         src_encoding as pg_enc,
         dest_encoding as pg_enc,
         &src,
         no_error,
-    ) {
-        Ok(r) => r,
-        Err(e) => std::panic::panic_any(e),
-    };
+    )?;
 
     // Write the converted raw output bytes back into the ref_args[3] destination
     // referent on the same raw byte lane the seam recovers them from. The result
@@ -888,7 +890,7 @@ fn conversion_dispatch(
     }
 
     // PG_RETURN_INT32(converted).
-    types_datum::Datum::from_i32(result.converted)
+    Ok(types_datum::Datum::from_i32(result.converted))
 }
 
 #[cfg(test)]
