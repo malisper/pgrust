@@ -31,7 +31,7 @@ use types_error::{
     ERRCODE_INVALID_PARAMETER_VALUE,
 };
 use types_datetime::{fsec_t, TimeADT};
-use types_error::{PgError, PgResult};
+use types_error::{ereturn, PgError, PgResult, SoftErrorContext};
 
 use types_pgtime::pg_tm;
 
@@ -183,6 +183,15 @@ pub fn anytime_typmodout(istz: bool, typmod: i32) -> String {
 
 /// `time_in()` CORE -- parse a TIME text string at the given typmod.
 pub fn time_in(str: &str, typmod: i32) -> PgResult<TimeADT> {
+    time_in_safe(str, typmod, None)
+}
+
+/// `time_in()` CORE with a soft-error sink (see `date_in_safe`).
+pub fn time_in_safe(
+    str: &str,
+    typmod: i32,
+    escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<TimeADT> {
     let mut field: Vec<String> = Vec::new();
     let mut ftype: Vec<i32> = Vec::new();
     let mut nf = 0usize;
@@ -215,9 +224,14 @@ pub fn time_in(str: &str, typmod: i32) -> PgResult<TimeADT> {
         );
     }
     if dterr != 0 {
-        // C: DateTimeParseError(dterr, &extra, str, "time", ...) maps each dterr
-        // code to its own SQLSTATE rather than a blanket 22007.
-        return Err(crate::date::datetime_parse_error_for(dterr, str, "time", &extra));
+        // C: DateTimeParseError(dterr, &extra, str, "time", escontext) maps each
+        // dterr code to its own SQLSTATE and ereturns: with a soft sink the error
+        // is saved and a discarded value returned Ok; without one it throws.
+        return ereturn(
+            escontext,
+            TimeADT::default(),
+            crate::date::datetime_parse_error_for(dterr, str, "time", &extra),
+        );
     }
 
     let mut result = tm2time(&tt, fsec);

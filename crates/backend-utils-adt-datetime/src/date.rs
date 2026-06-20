@@ -34,7 +34,7 @@ use types_error::{
     ERRCODE_INVALID_PARAMETER_VALUE,
 };
 use types_datetime::{fsec_t, DateADT, TimeADT, Timestamp, TimestampTz};
-use types_error::{PgError, PgResult};
+use types_error::{ereturn, PgError, PgResult, SoftErrorContext};
 
 use crate::calendar::{date2j, j2date, j2day};
 use crate::consts::DTK_DATE_M;
@@ -99,6 +99,16 @@ fn date_out_of_range() -> PgError {
 ///
 /// `DTK_EPOCH` maps to 1970-01-01 (the Unix epoch as a DateADT).
 pub fn date_in(str: &str) -> PgResult<DateADT> {
+    date_in_safe(str, None)
+}
+
+/// `date_in()` CORE with a soft-error sink. With `escontext` set, parse errors
+/// are saved (and a discarded `0` returned `Ok`) so `pg_input_is_valid` /
+/// `pg_input_error_info` can report rather than throw; with `None` they throw.
+pub fn date_in_safe(
+    str: &str,
+    mut escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<DateADT> {
     let mut field: Vec<String> = Vec::new();
     let mut ftype: Vec<i32> = Vec::new();
     let mut nf = 0usize;
@@ -131,7 +141,11 @@ pub fn date_in(str: &str) -> PgResult<DateADT> {
         );
     }
     if dterr != 0 {
-        return Err(date_parse_error(dterr, str, &extra));
+        return ereturn(
+            escontext.as_deref_mut(),
+            0,
+            date_parse_error(dterr, str, &extra),
+        );
     }
 
     match dtype {
@@ -146,21 +160,35 @@ pub fn date_in(str: &str) -> PgResult<DateADT> {
         }
         d if d == DTK_LATE => return Ok(DATEVAL_NOEND),
         d if d == DTK_EARLY => return Ok(DATEVAL_NOBEGIN),
-        _ => return Err(date_parse_error(DTERR_BAD_FORMAT, str, &extra)),
+        _ => {
+            return ereturn(
+                escontext.as_deref_mut(),
+                0,
+                date_parse_error(DTERR_BAD_FORMAT, str, &extra),
+            );
+        }
     }
 
     // Prevent overflow in Julian-day routines.
     if !IS_VALID_JULIAN(tt.tm_year, tt.tm_mon, tt.tm_mday) {
-        return Err(PgError::error(format!("date out of range: \"{str}\""))
-            .with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE));
+        return ereturn(
+            escontext.as_deref_mut(),
+            0,
+            PgError::error(format!("date out of range: \"{str}\""))
+                .with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+        );
     }
 
     let date = date2j(tt.tm_year, tt.tm_mon, tt.tm_mday) - POSTGRES_EPOCH_JDATE;
 
     // Now check for just-out-of-range dates.
     if !IS_VALID_DATE(date) {
-        return Err(PgError::error(format!("date out of range: \"{str}\""))
-            .with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE));
+        return ereturn(
+            escontext.as_deref_mut(),
+            0,
+            PgError::error(format!("date out of range: \"{str}\""))
+                .with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+        );
     }
 
     Ok(date)

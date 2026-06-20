@@ -233,8 +233,8 @@ fn ret_extract(
 // ===========================================================================
 
 fn fc_date_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let s = arg_cstring(fcinfo, 0);
-    match crate::date::date_in(s) {
+    let s = arg_cstring(fcinfo, 0).to_string();
+    match crate::date::date_in_safe(&s, fcinfo.escontext_mut()) {
         Ok(d) => ret_i32(d),
         Err(e) => raise(e),
     }
@@ -466,9 +466,9 @@ fn fc_timestamptz_date(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // --- TIME (date.c) ---------------------------------------------------------
 
 fn fc_time_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let s = arg_cstring(fcinfo, 0);
+    let s = arg_cstring(fcinfo, 0).to_string();
     let typmod = arg_i32(fcinfo, 2);
-    match crate::time::time_in(s, typmod) {
+    match crate::time::time_in_safe(&s, typmod, fcinfo.escontext_mut()) {
         Ok(t) => ret_i64(t),
         Err(e) => raise(e),
     }
@@ -950,9 +950,9 @@ fn fc_timetz_at_local(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // ===========================================================================
 
 fn fc_timestamp_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let s = arg_cstring(fcinfo, 0);
+    let s = arg_cstring(fcinfo, 0).to_string();
     let typmod = arg_i32(fcinfo, 2);
-    match crate::timestamp::timestamp_in(s, typmod) {
+    match crate::timestamp::timestamp_in_safe(&s, typmod, fcinfo.escontext_mut()) {
         Ok(t) => ret_i64(t),
         Err(e) => raise(e),
     }
@@ -1065,9 +1065,9 @@ fn fc_timestamptz_scale(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     }
 }
 fn fc_interval_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let s = arg_cstring(fcinfo, 0);
+    let s = arg_cstring(fcinfo, 0).to_string();
     let typmod = arg_i32(fcinfo, 2);
-    match crate::interval::interval_in(s, typmod) {
+    match crate::interval::interval_in_safe(&s, typmod, fcinfo.escontext_mut()) {
         Ok(iv) => ret_interval(fcinfo, &iv),
         Err(e) => raise(e),
     }

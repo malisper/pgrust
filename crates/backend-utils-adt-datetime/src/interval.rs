@@ -21,7 +21,7 @@ use types_datetime::{
     USECS_PER_MINUTE, USECS_PER_SEC,
 };
 use types_datetime::{DAY, HOUR, MINUTE, MONTH, SECOND, YEAR};
-use types_error::PgError;
+use types_error::{ereturn, PgError, SoftErrorContext};
 
 use crate::timestamp::{pg_add_s32_overflow, pg_add_s64_overflow, pg_sub_s64_overflow, DtResult};
 
@@ -182,6 +182,15 @@ fn pg_mul_s64_overflow(a: i64, b: i64, res: &mut i64) -> bool {
 ///
 /// (`utils/adt/timestamp.c`)
 pub fn interval_in(str: &str, typmod: i32) -> DtResult<Interval> {
+    interval_in_safe(str, typmod, None)
+}
+
+/// `interval_in()` core with a soft-error sink (see `date_in_safe`).
+pub fn interval_in_safe(
+    str: &str,
+    typmod: i32,
+    mut escontext: Option<&mut SoftErrorContext>,
+) -> DtResult<Interval> {
     use types_datetime::{
         DTERR_BAD_FORMAT, DTERR_FIELD_OVERFLOW, DTERR_INTERVAL_OVERFLOW, DTK_DELTA, DTK_EARLY,
         DTK_LATE, INTERVAL_RANGE, MAXDATEFIELDS,
@@ -236,12 +245,16 @@ pub fn interval_in(str: &str, typmod: i32) -> DtResult<Interval> {
         if dterr == DTERR_FIELD_OVERFLOW {
             dterr = DTERR_INTERVAL_OVERFLOW;
         }
-        return Err(crate::timestamp::datetime_parse_error(
-            dterr,
-            str,
-            "interval",
-            &types_datetime::DateTimeErrorExtra::default(),
-        ));
+        return ereturn(
+            escontext.as_deref_mut(),
+            Interval { time: 0, day: 0, month: 0 },
+            crate::timestamp::datetime_parse_error(
+                dterr,
+                str,
+                "interval",
+                &types_datetime::DateTimeErrorExtra::default(),
+            ),
+        );
     }
 
     let mut result = Interval {
@@ -253,7 +266,11 @@ pub fn interval_in(str: &str, typmod: i32) -> DtResult<Interval> {
     match dtype {
         DTK_DELTA => {
             if itmin2interval(&itm_in, &mut result).is_err() {
-                return Err(crate::timestamp::interval_out_of_range());
+                return ereturn(
+                    escontext.as_deref_mut(),
+                    Interval { time: 0, day: 0, month: 0 },
+                    crate::timestamp::interval_out_of_range(),
+                );
             }
         }
         DTK_LATE => set_noend(&mut result),

@@ -46,7 +46,7 @@ use types_error::{
     ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
 };
 use types_datetime::{fsec_t, Timestamp, TimestampTz};
-use types_error::{PgError, PgResult};
+use types_error::{ereturn, PgError, PgResult, SoftErrorContext};
 
 use crate::calendar::{date2j, isleap, j2date};
 
@@ -381,6 +381,15 @@ pub fn tm2timestamp(
 ///
 /// (`utils/adt/timestamp.c`)
 pub fn timestamp_in(str: &str, typmod: i32) -> DtResult<Timestamp> {
+    timestamp_in_safe(str, typmod, None)
+}
+
+/// `timestamp_in()` core with a soft-error sink (see `date_in_safe`).
+pub fn timestamp_in_safe(
+    str: &str,
+    typmod: i32,
+    mut escontext: Option<&mut SoftErrorContext>,
+) -> DtResult<Timestamp> {
     use types_datetime::{DTK_DATE, DTK_EARLY, DTK_EPOCH, DTK_LATE, MAXDATEFIELDS, MAXDATELEN};
 
     let mut fsec: fsec_t = 0;
@@ -414,15 +423,23 @@ pub fn timestamp_in(str: &str, typmod: i32) -> DtResult<Timestamp> {
         );
     }
     if dterr != 0 {
-        return Err(datetime_parse_error(dterr, str, "timestamp", &extra));
+        return ereturn(
+            escontext.as_deref_mut(),
+            0,
+            datetime_parse_error(dterr, str, "timestamp", &extra),
+        );
     }
 
     let mut result: Timestamp = match dtype {
         DTK_DATE => {
             let mut r = 0;
             if tm2timestamp(&tm, fsec, None, &mut r).is_err() {
-                return Err(PgError::error(format!("timestamp out of range: \"{str}\""))
-                    .with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE));
+                return ereturn(
+                    escontext.as_deref_mut(),
+                    0,
+                    PgError::error(format!("timestamp out of range: \"{str}\""))
+                        .with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+                );
             }
             r
         }
